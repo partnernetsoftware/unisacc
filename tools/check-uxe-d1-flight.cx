@@ -884,7 +884,7 @@ typedef struct {
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 typedef struct { int x,z,speed,tick; } LiveWater;
-enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN };
+enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -1031,6 +1031,85 @@ static double water_sine(double x) {
     if(x< -1.570796326795) x= -3.14159265359-x;
     square=x*x;
     return x*(1-square*(1.0/6-square*(1.0/120-square*(1.0/5040-square/362880))));
+}
+
+typedef struct { int land,largest,components,span,bands; } CoastStats;
+
+static int coast_stats(const char *text,int w,int h,int role,CoastStats *stats) {
+    enum { MAX=128*128 };
+    unsigned char land[MAX];
+    int queue[MAX],i,n=w*h;
+    if(n>MAX || strlen(text)<(size_t)n) return 0;
+    for(i=0;i<n;i++) {
+        if(text[i]<'0' || text[i]>'2') return 0;
+        land[i]=(unsigned char)(role?text[i]=='0'+role:text[i]!='0');
+        stats->land+=land[i];
+    }
+    for(i=0;i<n;i++) {
+        int xlo=i%w,xhi=xlo,ylo=i/w,yhi=ylo,tail=1,k;
+        if(!land[i]) continue;
+        land[i]=0;
+        queue[0]=i;
+        for(k=0;k<tail;k++) {
+            int p=queue[k],x=p%w,y=p/w,j;
+            int neighbors[]={x>0?p-1:-1,x+1<w?p+1:-1,p-w,p+w};
+            if(x<xlo) xlo=x;
+            if(x>xhi) xhi=x;
+            if(y<ylo) ylo=y;
+            if(y>yhi) yhi=y;
+            for(j=0;j<4;j++) {
+                int a=neighbors[j];
+                if(a<0 || a>=n || !land[a]) continue;
+                land[a]=0;
+                queue[tail++]=a;
+            }
+        }
+        if(tail>=12) stats->components++;
+        if(tail>=4 && yhi-ylo<12 && ylo<h/2) stats->bands|=1<<(ylo/5);
+        if(tail>stats->largest) stats->largest=tail;
+        if(xhi-xlo+1>stats->span) stats->span=xhi-xlo+1;
+    }
+    return 1;
+}
+
+static int check_audit_coast(const char *mutation) {
+    char cwd[1024],url[4096],profile[128],option[160],*out=0;
+    char *av[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
+        "--virtual-time-budget=5500","--dump-dom",option,url,0};
+    const char *p;
+    int i,rc,failed=0;
+    size_t bytes=0;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-coast-audit.html?coast-audit&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-coast-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,16,&out,&bytes);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output>"):0;
+    if(rc || !p) { free(out); return 2; }
+    p+=strlen("<output>");
+    for(i=0;i<4;i++) {
+        CoastStats stats={0};
+        int w=i?142:128,h=i?44:128,term=i==3?'<':'|',bad;
+        if(!coast_stats(p,w,h,0,&stats) || p[w*h]!=term) { free(out); return 2; }
+        if(i) {
+            CoastStats same_shore={0},islands={0};
+            int bands=0,j;
+            if(!coast_stats(p,w,h,2,&same_shore) || !coast_stats(p,w,h,1,&islands)) { free(out); return 2; }
+            for(j=0;j<8;j++) bands+=!!(islands.bands&(1<<j));
+            bad=same_shore.span*100<25*w || bands<2 || stats.land*100>66*w*h;
+            printf("AUDIT_D1 heading=%d shore_span=%d/%d distant_layers=%d land=%d/%d failed=%d\n",
+                (i-2)*18,same_shore.span,w,bands,stats.land,w*h,bad);
+        } else {
+            bad=stats.components<5 || stats.largest*100<45*stats.land || stats.land*100>58*w*h;
+            printf("AUDIT_D1 map land=%d largest=%d islands=%d failed=%d\n",
+                stats.land,stats.largest,stats.components,bad);
+        }
+        failed+=bad;
+        p+=w*h+1;
+    }
+    free(out);
+    return failed?1:0;
 }
 
 static int check_audit_banks(const char *mutation) {
@@ -1313,10 +1392,12 @@ static int check_pages_keyboard(const char *mutation,int battle) {
     int rc,n;
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
     n=tx_snprintf(url,sizeof url,"file://%s/%s?%s&%s",cwd,
+        battle==LIVE_COAST?"ujs/practice/uxe/test/d1-coast-audit.html":
         battle==LIVE_BRIDGE?"docs/uxe/ink-walk/index.html":battle==LIVE_TOWN?"docs/uxe/oneshot/index.html":
         battle>=LIVE_WATER?"docs/uxe/water-keeps/index.html":
         battle==LIVE_MUTE?"ujs/practice/uxe/test/d1-pixel-a.html":"docs/uxe/fly-next/index.html",
-        battle>=LIVE_WATER_AUTO?"auto=1":battle==LIVE_BATTLE?"input-test=1&hold-course":"input-test=1",mutation);
+        battle==LIVE_COAST || battle==LIVE_BATTLE?"input-test=1&hold-course":
+        battle>=LIVE_WATER_AUTO?"auto=1":"input-test=1",mutation);
     if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -1330,7 +1411,7 @@ static int check_pages_keyboard(const char *mutation,int battle) {
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
     else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
     else if(battle==LIVE_BRIDGE || battle==LIVE_TOWN) rc=exercise_walk(&c,battle==LIVE_TOWN);
-    else rc=exercise_keyboard(&c,battle);
+    else rc=exercise_keyboard(&c,battle==LIVE_COAST?LIVE_BATTLE:battle);
     sy_close(c.child.in_fd);
     sy_close(c.child.out_fd);
     sy_proc_kill(&c.child,9);
@@ -1341,6 +1422,8 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if(argc==2 && !strcmp(argv[1],"coast-battle")) return check_pages_keyboard("",LIVE_COAST);
+    if((argc==2 || argc==3) && !strcmp(argv[1],"audit-coast")) return check_audit_coast(argc==3?argv[2]:"");
     if((argc==2 || argc==3) && !strcmp(argv[1],"audit-banks")) return check_audit_banks(argc==3?argv[2]:"");
     if((argc==2 || argc==3) && !strcmp(argv[1],"bridge-pages-input"))
         return check_pages_keyboard(argc==3?argv[2]:"",LIVE_BRIDGE);
