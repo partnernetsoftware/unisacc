@@ -1,3 +1,4 @@
+#pragma unisa use cxlib.uxeimage
 #pragma unisa use chrome_dom
 /* tools/gen-s0-lotus.cx -- 概念稿莲灯双圈 168x56.
  * [[416,356],[480,348],[360,370]] r=16/5 gold.
@@ -8,33 +9,8 @@
 #define OX 344
 #define OY 332
 static unsigned char cpix[CH][CW][4];
-static unsigned crc_tab[256];
 static const int lx[3] = {416, 480, 360};
 static const int ly[3] = {356, 348, 370};
-static void crc_init(void) {
-    unsigned i, j, c;
-    for (i = 0; i < 256; i++) {
-        c = i;
-        for (j = 0; j < 8; j++) c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
-        crc_tab[i] = c;
-    }
-}
-static unsigned crc32(const unsigned char *p, int n) {
-    unsigned c = 0xffffffffu;
-    int i;
-    for (i = 0; i < n; i++) c = crc_tab[(c ^ p[i]) & 255] ^ (c >> 8);
-    return c ^ 0xffffffffu;
-}
-static unsigned adler(const unsigned char *p, int n) {
-    unsigned a = 1, b = 0;
-    int i;
-    for (i = 0; i < n; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
-    return (b << 16) | a;
-}
-static void be32(unsigned char *o, unsigned v) {
-    o[0] = (unsigned char)(v >> 24); o[1] = (unsigned char)(v >> 16);
-    o[2] = (unsigned char)(v >> 8); o[3] = (unsigned char)v;
-}
 static void fill_lotus(void) {
     int y, x, i, dx, dy, d2, k;
     double ang, px, py, c, s;
@@ -61,95 +37,19 @@ static void fill_lotus(void) {
         cpix[y][x][3] = (unsigned char)a;
     }
 }
-static unsigned char raw[CH * (1 + CW * 4)];
-static unsigned char zbuf[16 + CH * (1 + CW * 4) + 64];
-static unsigned char outb[64 + CH * (1 + CW * 4) + 128];
-static int emit_png(unsigned char *dst) {
-    unsigned char ihdr[25];
-    int k = 0, y, x, oi = 0, i, zlen, off, rem, n, last;
-    unsigned c, ad;
-    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
-    for (y = 0; y < CH; y++) {
-        raw[k++] = 0;
-        for (x = 0; x < CW; x++) {
-            raw[k++] = cpix[y][x][0];
-            raw[k++] = cpix[y][x][1];
-            raw[k++] = cpix[y][x][2];
-            raw[k++] = cpix[y][x][3];
-        }
-    }
-    zbuf[0] = 0x78; zbuf[1] = 0x01;
-    zlen = 2;
-    off = 0; rem = k;
-    while (rem > 0) {
-        n = rem > 65535 ? 65535 : rem;
-        last = (n == rem);
-        zbuf[zlen++] = last ? 1 : 0;
-        zbuf[zlen++] = (unsigned char)(n & 255);
-        zbuf[zlen++] = (unsigned char)(n >> 8);
-        zbuf[zlen++] = (unsigned char)((~n) & 255);
-        zbuf[zlen++] = (unsigned char)((~n >> 8) & 255);
-        for (i = 0; i < n; i++) zbuf[zlen++] = raw[off + i];
-        off += n; rem -= n;
-    }
-    ad = adler(raw, k);
-    be32(zbuf + zlen, ad);
-    zlen += 4;
-    for (i = 0; i < 8; i++) dst[oi++] = sig[i];
-    be32(ihdr, 13);
-    ihdr[4] = 'I'; ihdr[5] = 'H'; ihdr[6] = 'D'; ihdr[7] = 'R';
-    be32(ihdr + 8, CW); be32(ihdr + 12, CH);
-    ihdr[16] = 8; ihdr[17] = 6; ihdr[18] = 0; ihdr[19] = 0; ihdr[20] = 0;
-    c = crc32(ihdr + 4, 17);
-    be32(ihdr + 21, c);
-    for (i = 0; i < 25; i++) dst[oi++] = ihdr[i];
-    be32(ihdr, (unsigned)zlen);
-    dst[oi++] = ihdr[0]; dst[oi++] = ihdr[1]; dst[oi++] = ihdr[2]; dst[oi++] = ihdr[3];
-    dst[oi++] = 'I'; dst[oi++] = 'D'; dst[oi++] = 'A'; dst[oi++] = 'T';
-    for (i = 0; i < zlen; i++) dst[oi++] = zbuf[i];
-    {
-        unsigned char crcbuf[4];
-        unsigned char *start = dst + oi - zlen - 4;
-        c = crc32(start, 4 + zlen);
-        be32(crcbuf, c);
-        dst[oi++] = crcbuf[0]; dst[oi++] = crcbuf[1]; dst[oi++] = crcbuf[2]; dst[oi++] = crcbuf[3];
-    }
-    be32(ihdr, 0);
-    ihdr[4] = 'I'; ihdr[5] = 'E'; ihdr[6] = 'N'; ihdr[7] = 'D';
-    c = crc32(ihdr + 4, 4);
-    be32(ihdr + 8, c);
-    for (i = 0; i < 12; i++) dst[oi++] = ihdr[i];
-    return oi;
-}
-static int check_png(const char *path, unsigned char *b, int oi) {
-    FILE *f = fopen(path, "rb");
-    unsigned char disk[64];
-    int n, i;
-    long sz;
-    if (!f) return 1;
-    fseek(f, 0, 2); sz = ftell(f); fseek(f, 0, 0);
-    if (sz != oi) { fclose(f); return 1; }
-    for (i = 0; i < oi; ) {
-        int want = oi - i; if (want > 64) want = 64;
-        n = (int)fread(disk, 1, want, f);
-        if (n != want) { fclose(f); return 1; }
-        { int j; for (j = 0; j < n; j++) if (disk[j] != b[i + j]) { fclose(f); return 1; } }
-        i += n;
-    }
-    fclose(f);
-    return 0;
-}
+static unsigned char outb[CH * (1 + CW * 4) + (CH * (1 + CW * 4) / 65535 + 1) * 5 + 63];
 int main(int argc, char **argv) {
     int write = 0, check = 0, i, oi, failed = 0;
     FILE *f;
-    crc_init();
+    uxe_crc_init();
     for (i = 1; i < argc; i++) {
         if (argv[i][0] == '-' && argv[i][2] == 'w') write = 1;
         if (argv[i][0] == '-' && argv[i][2] == 'c') check = 1;
     }
     if (!write && !check) { printf("GEN_S0_LOTUS\tdry\n"); return 0; }
     fill_lotus();
-    oi = emit_png(outb);
+    oi = uxe_encode_rgba_png(outb,sizeof outb,&cpix[0][0][0],CW,CH);
+    if(oi<=0) return 2;
     if (write) {
         f = fopen("ujs/plans/demo-v2/look-dev/lotus-bloom.png", "wb");
         if (!f) return 1;
@@ -158,7 +58,7 @@ int main(int argc, char **argv) {
         printf("WROTE\tlotus-bloom.png\t%d\n", oi);
     }
     if (check) {
-        if (check_png("ujs/plans/demo-v2/look-dev/lotus-bloom.png", outb, oi)) {
+        if (uxe_check_png("ujs/plans/demo-v2/look-dev/lotus-bloom.png", outb, oi)) {
             printf("DIFF\tlotus-bloom.png\n"); failed = 1;
         } else printf("MATCH\tlotus-bloom.png\n");
     }
