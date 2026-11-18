@@ -184,6 +184,80 @@ static int check_u1(const char *mutation) {
     return failed!=0;
 }
 
+static int check_u2(const char *mutation) {
+    char cwd[1024],url[5000],profile[128],option[160],*out=0,*spec;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=5000","--dump-dom",option,url,0};
+    const char *p;
+    int houses=0,gears=1,pipes=0,scene,failed=0;
+    size_t size=0;
+    spec=cx_read("ujs/practice/uxe/test/d4-dense-town.tsv",&size);
+    p=spec?strchr(spec,'\n'):0;
+    while(p && p[1]) {
+        p++;
+        houses+=!strncmp(p,"house-",6);
+        gears+=!strncmp(p,"gear\t",5);
+        pipes+=!strncmp(p,"pipe\t",5);
+        p=strchr(p,'\n');
+    }
+    free(spec);
+    if(houses<40 || gears<6 || pipes<10 || !getcwd(cwd,sizeof cwd)) return 2;
+    for(scene=3;scene<=4;scene++) {
+        int x0=scene==3?704:642,y0=scene==3?192:231;
+        int n=0,at,x,y,i,counts[7]={0},sum=0,sum2=0,edge=0,last=0,variance;
+        at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/%s.html?dense-u2=1&u2-probe=1&%s&pixels=",
+            cwd,scene==3?"d3-bridge":"d4-skeleton",mutation);
+        for(y=y0;y<y0+64;y+=4) for(x=x0;x<x0+64;x+=4) {
+            int w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",x,y);
+            if(w<0 || w>=(int)sizeof url-at) return 2;
+            at+=w; n++;
+        }
+        tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-u2-%d-%d",(int)getpid(),scene);
+        tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+        out=0;
+        at=cx_runv_timeout(av,14,&out,&size);
+        chd_wipe(profile);
+        p=out?strstr(out,"<output id=\"pixels\">"):0;
+        if(at || !p) { free(out); return 2; }
+        p+=strlen("<output id=\"pixels\">");
+        for(i=0;i<(scene==3?2:7);i++) {
+            int used=0,term=i+1<(scene==3?2:7)?',':'|';
+            if(sscanf(p,"%d%n",counts+i,&used)!=1 || used==0 || p[used]!=term) {
+                free(out); return 2;
+            }
+            p+=used+1;
+        }
+        for(i=0;i<n;i++) {
+            int r,g,b,used=0,luma;
+            if(sscanf(p,"%d,%d,%d%n",&r,&g,&b,&used)!=3 || used==0 ||
+                r<0 || r>255 || g<0 || g>255 || b<0 || b>255) { free(out); return 2; }
+            p+=used;
+            if(i+1<n && *p++!=';') { free(out); return 2; }
+            luma=(30*r+59*g+11*b+50)/100;
+            sum+=luma; sum2+=luma*luma;
+            if(i%16) edge+=(luma-last)*(luma-last);
+            last=luma;
+        }
+        at=strncmp(p,"</output>",9)!=0;
+        free(out);
+        if(at) return 2;
+        variance=(int)(((long)sum2*n-(long)sum*sum)/(n*n));
+        if(scene==3) {
+            failed+=counts[0]<1200 || counts[1]<1600 || edge/240<750 || variance<500;
+            printf("UXE_U2_D3 tree_patches=%d grass=%d stone_variance=%d stroke_variance=%d\n",
+                counts[0],counts[1],variance,edge/240);
+        } else {
+            failed+=counts[0]!=houses || counts[1]<170 || counts[2]!=houses || counts[3]<25 ||
+                counts[4]<12 || counts[5]!=gears || counts[6]!=pipes || variance<5500;
+            printf("UXE_U2_D4 houses=%d windows=%d eaves=%d chimneys=%d arcades=%d gears=%d pipes=%d facade_variance=%d\n",
+                counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],variance);
+        }
+    }
+    printf("CHECK_UXE_U2 failed=%d\n",failed);
+    return failed!=0;
+}
+
 static int check_bridge_walk(const char *mutation) {
     static const int ticks[]={0,60,146,310,340};
     char cwd[1024],url[1700],profile[128],option[160],*out=0,*facts;
@@ -251,6 +325,9 @@ static int check_bridge_walk(const char *mutation) {
 }
 
 int main(int argc,char **argv) {
+    if(argc==2 && !strcmp(argv[1],"dense-u2")) return check_u2("");
+    if(argc==2 && (!strcmp(argv[1],"thin-u2-town") || !strcmp(argv[1],"plain-u2-bricks") ||
+        !strcmp(argv[1],"thin-u2-plant") || !strcmp(argv[1],"no-u2-fittings"))) return check_u2(argv[1]);
     if(argc==2 && !strcmp(argv[1],"render-u1")) return check_u1("");
     if(argc==2 && (!strcmp(argv[1],"no-u1-shadow") || !strcmp(argv[1],"no-u1-grade") ||
         !strcmp(argv[1],"no-u1-fog"))) return check_u1(argv[1]);
@@ -542,6 +619,9 @@ int main(int argc,char **argv) {
     if(strncmp(p,"</output>",9)) return 2;
     free(out);
     printf("CHECK_UXE_D3_GEOMETRY\tn=%d failed=%d mode=%s\n",n,failed,mode);
-    if(!failed && argc==1) return check_u1("");
+    if(!failed && argc==1) {
+        int rc=check_u1("");
+        return rc?rc:check_u2("");
+    }
     return failed?1:0;
 }
