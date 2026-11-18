@@ -22,8 +22,13 @@
  * --product CC each fixture is compiled with `sh CC -c` from the repo root: accept needs rc 0, rejectN rc 1
  * and output containing the exact message of prd_cx.md 11.7.  A product without owns support must fail
  * there (unknown unisa pragma owns): that is the negative control of the product side.
+ * Staging (plans/v0.0.77.md P1): the product recognises owns and gives messages 2 and 3 from 0.0.77 P1; message
+ * 1 (fixture b, an escape analysis) comes with 0.0.78 P2.  Until then fixture b is PENDING on the product side:
+ * never counted as passed, and it must still compile with rc 0 (a product that refuses it in any other way,
+ * e.g. "unknown unisa pragma owns", fails).  When the product gives the exact message 1 it counts as passed.
+ * The product side is PASS only as PRODUCT_SIDE=passed=7/7 with pending=0.
  *
- * Last line  CHECK_OWN_ESCAPE<TAB>oracle_passed=N<TAB>failed=M<TAB>PRODUCT_SIDE=PENDING|passed=P/7
+ * Last line  CHECK_OWN_ESCAPE<TAB>oracle_passed=N<TAB>failed=M<TAB>PRODUCT_SIDE=PENDING|passed=P/7<TAB>pending=Q
  * rc 1 when M > 0, rc 2 on a usage or I/O error. */
 #pragma unisa use sys.env
 #pragma unisa use sys.proc
@@ -31,15 +36,15 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
-typedef struct { const char *file, *expect, *msg; } Fx;
+typedef struct { const char *file, *expect, *msg; int pend; } Fx;
 static const Fx fx[] = {
-    {"a-owns-declared.cx", "accept", 0},
-    {"b-undeclared-in-owns-unit.cx", "reject1", "function mk2 returns an owned block; declare it with #pragma unisa owns mk2"},
-    {"c-owns-static-name.cx", "reject2", "unisa owns hid: no non-static function hid in this unit"},
-    {"d-static-return.cx", "accept", 0},
-    {"e-borrow-return.cx", "accept", 0},
-    {"f-no-owns-unit.cx", "accept", 0},
-    {"g-owns-no-name.cx", "reject3", "unisa owns takes a function name"},
+    {"a-owns-declared.cx", "accept", 0, 0},
+    {"b-undeclared-in-owns-unit.cx", "reject1", "function mk2 returns an owned block; declare it with #pragma unisa owns mk2", 1},
+    {"c-owns-static-name.cx", "reject2", "unisa owns hid: no non-static function hid in this unit", 0},
+    {"d-static-return.cx", "accept", 0, 0},
+    {"e-borrow-return.cx", "accept", 0, 0},
+    {"f-no-owns-unit.cx", "accept", 0, 0},
+    {"g-owns-no-name.cx", "reject3", "unisa owns takes a function name", 0},
 };
 #define NFX 7
 
@@ -183,7 +188,7 @@ static int has_summary(void) {
 int main(int argc, char **argv) {
     const char *dir = "tests/cases/own-escape", *cc = 0;
     char cmd[8192], path[4500];
-    int a = 1, i, nfound = 0, product_passed = 0;
+    int a = 1, i, nfound = 0, product_passed = 0, product_pending = 0;
     long cl;
     while (a < argc) {
         if (tx_eqz(argv[a], "--dir") && a + 1 < argc) { dir = argv[a + 1]; a += 2; }
@@ -225,9 +230,10 @@ int main(int argc, char **argv) {
         long fl = 0;
         while (out && fl < (long)on && fl < 160 && out[fl] != '\n') fl++;
         if (ok) { product_passed++; printf("PRODUCT\t%s\trc=%d\tPASS\n", fx[i].file, rc); }
+        else if (fx[i].pend && rc == 0) { product_pending++; printf("PRODUCT\t%s\trc=%d\tPENDING\tmessage 1 is 0.0.78 P2\n", fx[i].file, rc); }
         else { failed++; printf("FAIL\tPRODUCT\t%s\trc=%d\twant_rc=%d\tfirst=%.*s\n", fx[i].file, rc, want_rc, (int)fl, out ? out : ""); }
         sy_unlink(obj);
     }
-    printf("CHECK_OWN_ESCAPE\toracle_passed=%d\tfailed=%d\tPRODUCT_SIDE=passed=%d/%d\n", oracle_passed, failed, product_passed, NFX);
+    printf("CHECK_OWN_ESCAPE\toracle_passed=%d\tfailed=%d\tPRODUCT_SIDE=passed=%d/%d\tpending=%d\n", oracle_passed, failed, product_passed, NFX, product_pending);
     return failed ? 1 : 0;
 }
