@@ -10,6 +10,15 @@
  * release day): after that date the baseline file counts as a new writer too.
  * Fixtures (fake repo trees under sy_tmpdir(), removed at the end) prove: a tree with a writer FAILs, the
  * csih-ape exemption holds, legal tmpdir spellings pass, and an expired exemption FAILs.
+ * Second rule (format root): a non-comment line whose string literal starts "%s/out" or "%s/out/..." and
+ * whose first argument after that literal is a checkout-root variable (root, repo, repo_dir, nc_root,
+ * safe_root, scan_root, gm_root, cwd, ROOT) names the repository out/ whatever it does next (mkdir,
+ * default work dir, child argv, read of a historical product), so it is a hit too.  RUN/out, SNAP/out,
+ * jd/out pass because their argument is not a root variable.  A line that must keep such a path (guards
+ * that refuse ROOT/out, their test fixtures, the session-root predicate) carries an out-ok comment with
+ * a reason, on the line itself or on the line just above it; files that may not be edited here (the release-chain tools, batch 3 of the
+ * out/ migration) are listed in ow_allow[] with a reason.  Each format-root hit of the real tree is
+ * printed as HIT<TAB>file:line.
  * Prints PASS/FAIL per case and CHECK_OUT_WRITERS<TAB>failed=N; exit 0 only when 0. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -21,7 +30,7 @@
 #pragma unisa use mem.bytes
 
 #define OW_EXPIRY_S 1798675200L /* 2026-12-31T00:00:00Z */
-static int failed;
+static int failed, ow_verbose;
 
 static void ck(int ok, const char *name) {
     if (!ok) failed++;
@@ -47,21 +56,78 @@ static int ow_line_hits(const char *line) {
     return 0;
 }
 
-/* Counts hit lines in FILE (0 when unreadable). */
-static int ow_file_hits(const char *path) {
+static int ow_idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* 1 when LINE formats "%s/out" or "%s/out/..." with a checkout-root variable as the first argument and
+   carries no inline out-ok comment; comment lines never hit. */
+static int ow_fmt_hits(const char *line) {
+    static const char *rv[] = { "root", "repo", "repo_dir", "nc_root", "safe_root", "scan_root", "gm_root", "cwd", "ROOT", 0 };
+    const char *s = line, *q;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '*' || (s[0] == '/' && (s[1] == '*' || s[1] == '/'))) return 0;
+    if (ow_find(line, "out-ok:")) return 0;
+    for (q = ow_find(line, "\"%s/out"); q; q = ow_find(q + 1, "\"%s/out")) {
+        const char *e;
+        char id[64];
+        int n = 0, i;
+        if (q[7] != '"' && q[7] != '/') continue;
+        for (e = q + 1; *e && !(*e == '"' && e[-1] != '\\'); e++) {}
+        if (*e != '"') continue;
+        e++;
+        while (*e == ' ' || *e == '\t') e++;
+        if (*e != ',') continue;
+        e++;
+        while (*e == ' ' || *e == '\t') e++;
+        if (*e == '(' && !strncmp(e, "(char *)", 8)) e += 8;
+        while (ow_idch(*e) && n < 63) id[n++] = *e++;
+        id[n] = 0;
+        if (ow_idch(*e)) continue;
+        for (i = 0; rv[i]; i++) if (!strcmp(id, rv[i])) return 1;
+    }
+    return 0;
+}
+
+/* files that keep format-root hits for a named reason (not editable in this lane) */
+static const char *ow_allow[][2] = {
+    { "tools/release-build.cx", "release snapshot ROOT/out/release-snap-<rev>; release chain, batch 3 after the 0.0.72 release" },
+    { "tools/release-run.cx", "reads ROOT/out/epoch-context-01/identity-helper; release chain, batch 3" },
+    { "tools/cxpack-candidate-check.cx", "reads ROOT/out/epoch-context-01/identity-helper; batch 3" },
+    { "tools/driverdiag-candidate-check.cx", "reads ROOT/out/epoch-context-01/identity-helper; batch 3" },
+    { "tools/chain-run.cx", "safe_parent guard of the release chain; chain lane owns the file, batch 3" },
+    { "tools/chain-step.cx", "release chain step runner; chain lane owns the file, batch 3" },
+    { "tools/candidate-chain.cx", "release chain; chain lane owns the file, batch 3" },
+    { "tools/s9-root.cx", "frozen root layout TARGET/out; batch 3" },
+    { "tools/s9-daily-flow.cx", "frozen root layout RT/out; batch 3" },
+    { "tools/check-chain-batchkeys.cx", "asserts the checkout has no out/ (read only); chain lane is editing the file, batch 3" },
+    { 0, 0 }
+};
+static const char *ow_allowed(const char *rel) {
+    int i;
+    for (i = 0; ow_allow[i][0]; i++) if (!strcmp(rel, ow_allow[i][0])) return ow_allow[i][1];
+    return 0;
+}
+
+/* Counts hit lines in FILE (0 when unreadable); with ow_verbose each format-root hit prints HIT file:line. */
+static int ow_file_hits(const char *path, const char *rel) {
     size_t n = 0, i = 0;
     char *b = cx_read(path, &n);
-    int hits = 0;
+    int hits = 0, ln = 0, prev_ok = 0;
     char line[8192];
     if (!b) return 0;
     while (i < n) {
         size_t s = i, k;
         while (i < n && b[i] != '\n') i++;
         k = i - s;
+        ln++;
         if (k < sizeof line) {
             if (mm_copy(line, sizeof line, b + s, (long)k)) break;
             line[k] = 0;
-            hits += ow_line_hits(line);
+            if (ow_line_hits(line)) hits++;
+            else if (!prev_ok && ow_fmt_hits(line)) {
+                hits++;
+                if (ow_verbose) sy_printf("HIT\t%s:%d\n", rel, ln);
+            }
+            prev_ok = ow_find(line, "out-ok:") != 0;
         }
         i++;
     }
@@ -91,10 +157,16 @@ static int ow_scan_dir(const char *root, const char *dir, long now_s) {
     sy_dir_close(&dd);
     for (i = 0; i < n; i++) {
         int h;
+        char rel[256];
+        const char *why;
         if (!strcmp(dir, "tools") && !strcmp(names[i], "check-out-writers.cx")) continue;
-        if (cx_fmt(p, sizeof p, "%s/%s", d, names[i])) continue;
-        h = ow_file_hits(p);
+        if (cx_fmt(p, sizeof p, "%s/%s", d, names[i]) || cx_fmt(rel, sizeof rel, "%s/%s", dir, names[i])) continue;
+        h = ow_file_hits(p, rel);
         if (!h) continue;
+        if ((why = ow_allowed(rel)) != 0) {
+            sy_printf("ALLOWED\t%s\thits=%d\t%s\n", rel, h, why);
+            continue;
+        }
         if (!strcmp(dir, "tools") && !strcmp(names[i], "csih-ape.cx") && now_s < OW_EXPIRY_S) {
             sy_printf("EXEMPT\t%s/%s\thits=%d\texpires=2026-12-31\n", dir, names[i], h);
             continue;
@@ -132,6 +204,14 @@ int main(int argc, char **argv) {
     ck(!ow_line_hits("cx_fmt(p, n, \"%s/out\", rr) || sy_mkdir(p, 0700)"), "line-private-fixture-root-passes");
     ck(!ow_line_hits("sy_mkdir(\"%s/outer\", 0755)") && !ow_line_hits("sy_mkdir(\"%s/work/out\", 0755)"), "line-lookalikes-pass");
     ck(!ow_line_hits("sy_mkdir(sy_tmpdir(), 0755); /* \"out\" */") && !ow_line_hits("cx_fmt(p, n, \"%s/out\", root);"), "line-legal-spellings-pass");
+    /* format-root rule */
+    ck(ow_fmt_hits("    else if (cx_fmt(work, sizeof work, \"%s/out\", nc_root)) return 2;"), "fmt-root-out-default");
+    ck(ow_fmt_hits("if(cx_fmt(kdir,sizeof kdir,\"%s/out/booter-ape-kernel-%d\",root,(int)getpid()))return 2;"), "fmt-root-out-subdir");
+    ck(ow_fmt_hits("cx_fmt(p, n, \"%s/out/x\", (char *)repo)"), "fmt-root-cast");
+    ck(!ow_fmt_hits("cx_fmt(p, n, \"%s/out\", run)") && !ow_fmt_hits("cx_fmt(p, n, \"%s/out/chain\", snap)") && !ow_fmt_hits("cx_fmt(p, n, \"%s/out\", rooted)"), "fmt-nonroot-args-pass");
+    ck(!ow_fmt_hits("cx_fmt(p, n, \"%s/outer\", root)") && !ow_fmt_hits("cx_fmt(p, n, \"%s/work/out\", root)"), "fmt-lookalikes-pass");
+    ck(!ow_fmt_hits("cx_fmt(p, n, \"%s/out\", root); /* out-ok: guard refuses this path */"), "fmt-out-ok-exempts");
+    ck(!ow_fmt_hits(" * cx_fmt(p, n, \"%s/out\", root)") && !ow_fmt_hits("// cx_fmt(p, n, \"%s/out\", root)"), "fmt-comment-lines-pass");
     /* fake repo: only legal writers -> clean */
     if (cx_fmt(t, sizeof t, "%s/ok", fx) || sy_mkdir(t, 0700)) return 2;
     {   char b1[4600], b2[4600];
@@ -149,6 +229,17 @@ int main(int argc, char **argv) {
     ck(ow_scan(t, now_s) == 1, "fixture-tools-writer-fails");
     ow_put(t, "tests/w2.cx", "static void f(char *root){ char p[64]; if (cx_fmt(p, 64, \"%s/out\", root) || sy_mkdir(p, 0755)) return; }\n");
     ck(ow_scan(t, now_s) == 2, "fixture-tests-writer-counted");
+    ow_put(t, "tests/w3.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); }\n");
+    ck(ow_scan(t, now_s) == 3, "fixture-fmt-root-writer-counted");
+    ow_put(t, "tests/w3.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); /* out-ok: fixture */ }\n");
+    ck(ow_scan(t, now_s) == 2, "fixture-fmt-root-out-ok-passes");
+    ow_put(t, "tests/w3.cx", "/* out-ok: fixture */\nstatic void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); }\n");
+    ck(ow_scan(t, now_s) == 2, "fixture-fmt-root-out-ok-line-above-passes");
+    ow_put(t, "tests/w3.cx", "/* out-ok: fixture */\n\nstatic void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); }\n");
+    ck(ow_scan(t, now_s) == 3, "fixture-fmt-root-out-ok-two-lines-up-fails");
+    ow_put(t, "tests/w3.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out/fx\", root); /* out-ok: fixture */ }\n");
+    ow_put(t, "tools/s9-root.cx", "static void f(char *root){ char p[64]; cx_fmt(p, 64, \"%s/out\", root); }\n");
+    ck(ow_scan(t, now_s) == 2, "fixture-allow-list-holds");
     /* csih-ape exemption */
     if (cx_fmt(t, sizeof t, "%s/csih", fx) || sy_mkdir(t, 0700)) return 2;
     {   char b1[4600], b2[4600];
@@ -161,6 +252,7 @@ int main(int argc, char **argv) {
     ck(ow_scan(t, now_s) == 1, "fixture-csih-ape-exemption-is-per-file");
     (void)cx_rmtree(fx);
     /* the real tree */
+    ow_verbose = 1;
     k = ow_scan(root, now_s);
     ck(k == 0, "tree-no-new-writers");
     sy_printf("CHECK_OUT_WRITERS\tfailed=%d\n", failed);
