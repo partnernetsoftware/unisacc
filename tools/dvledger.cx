@@ -32,8 +32,8 @@
 #define MAXR 40000
 #define MAXB 4096
 
-typedef struct { char cand[65], batch[96], def[65], status[12], load[16], raw[65], state[12], note[200]; long ms, msmax, budget, t; } Row;
-typedef struct { char id[96], domain[48], def[65]; long budget; int indomain; } Def;
+typedef struct { char cand[65], batch[96], def[65], status[12], load[16], raw[65], state[12], note[200]; long ms, msmax, budget, t; int native; } Row;
+typedef struct { char id[96], domain[48], def[65], sh[65], native[65]; long budget; int indomain; } Def;
 static Row *rows; static int nr, nskip;
 static Def defs[MAXB]; static int nd;
 static char root[4096], ledger[4300], sha[65], domain[64] = "product-qualification";
@@ -64,7 +64,11 @@ static int load_defs(void) {
             if (k > 3 && strchr(f[3], '/')) file_sha(f[3], s1);
             if (k > 8 && strchr(f[8], '/')) file_sha(f[8], s2);
             cx_fmt(acc, sizeof acc, "%s\n%s:%s\n%s:%s\ntests/run-batch.cx:%s\ntools/affected.cx:%s\n", s, k > 3 ? f[3] : "-", s1, k > 8 ? f[8] : "-", s2, run_sha, aff_sha);
-            sy_sha256_hex(acc, (long)strlen(acc), d->def); nd++;
+            sy_sha256_hex(acc, (long)strlen(acc), d->sh);
+            /* Untagged historical rows used the shell runner. Preserve its key. */
+            char binding[96];cx_fmt(binding,sizeof binding,"%s\nrunner=native\n",d->sh);
+            sy_sha256_hex(binding,strlen(binding),d->native);
+            cpy(d->def,sizeof d->def,!strcmp(sy_env_or("DVQUALIFY_NATIVE_RUN_BATCH","0"),"1")?d->native:d->sh);nd++;
         }
         s = e + 1;
     }
@@ -130,6 +134,9 @@ static int ingest(const char *ev, int *unknown) {
             char id[96], cand[72], st[16]; kv(s + 3, "id", id, sizeof id); kv(s + 3, "candidate", cand, sizeof cand); kv(s + 3, "status", st, sizeof st);
             for (int i = k - 1; i >= 0; i--) if (!strcmp(nw[i].batch, id)) {
                 sy_sha256_hex(s + 4, (long)strlen(s + 4), nw[i].raw);
+                char runner[20];kv(s+3,"runner",runner,sizeof runner);
+                nw[i].native=!strcmp(runner,"native");
+                if(*runner && !nw[i].native && strcmp(runner,"sh")){cpy(nw[i].status,12,"INVALID");cpy(nw[i].note,200,"raw-runner-unknown");}
                 if (strcmp(cand, sha)) { cpy(nw[i].status, 12, "INVALID"); cpy(nw[i].note, 200, "raw-candidate-mismatch"); }
                 else if (strcmp(st, nw[i].status) && (!strcmp(nw[i].status, "PASS") || !strcmp(nw[i].status, "FAIL"))) { cpy(nw[i].status, 12, "INVALID"); cpy(nw[i].note, 200, "raw-status-mismatch"); }
                 break;
@@ -143,7 +150,7 @@ static int ingest(const char *ev, int *unknown) {
                 if (r) { cpy(r->status, 12, f[2]); if (strcmp(r->status, "PASS") && strcmp(r->status, "FAIL") && strcmp(r->status, "INVALID")) cpy(r->status, 12, "UNKNOWN");
                          r->ms = ms; if (ms > r->msmax) r->msmax = ms; cpy(r->load, 16, f[6]);
                          char nt[200]; cx_fmt(nt, sizeof nt, "%s%sattempt:%s:%ld", r->note, r->note[0] ? ";" : "", f[2], ms); cpy(r->note, 200, nt);
-                         cpy(r->raw, 65, "-"); }
+                         r->native=!strcmp(sy_env_or("DVQUALIFY_NATIVE_RUN_BATCH","0"),"1");cpy(r->raw, 65, "-"); }
             }
         }
         s = e + 1;
@@ -152,7 +159,7 @@ static int ingest(const char *ev, int *unknown) {
     for (int i = 0; i < k; i++) {
         Row *r = &nw[i]; Def *d = def_of(r->batch);
         cpy(r->cand, 65, sha); cpy(r->state, 12, "cur"); r->t = now; r->budget = d ? d->budget : 0;
-        cpy(r->def, 65, d ? d->def : "0000000000000000000000000000000000000000000000000000000000000000");
+        cpy(r->def, 65, d ? (r->native?d->native:d->sh) : "0000000000000000000000000000000000000000000000000000000000000000");
         if (!d) { cpy(r->status, 12, "INVALID"); cpy(r->note, 200, "batch-not-in-batches.tsv"); }
         if ((!strcmp(r->status, "PASS") || !strcmp(r->status, "FAIL")) && !strcmp(r->raw, "-")) { cpy(r->status, 12, "UNKNOWN"); cpy(r->note, 200, "no-raw-BATCH_RUN"); }
         if ((!strcmp(r->status, "PASS") || !strcmp(r->status, "FAIL")) && r->ms > 55000) { char nt[200]; cx_fmt(nt, sizeof nt, "over-55s-outer was=%s;%s", r->status, r->note); cpy(r->note, 200, nt); cpy(r->status, 12, "UNKNOWN"); }
