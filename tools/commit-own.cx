@@ -360,6 +360,8 @@ out:
    BASE, then one compare-and-swap of HEAD (git update-ref HEAD NEW BASE).  No hook runs here and nothing is locked
    by us; a HEAD that moved meanwhile fails the swap with git's "cannot lock ref 'HEAD'" and the caller replays the
    whole pass (gates included) on the new HEAD or reports the conflict.  1 with the reason in OUT on failure. */
+static long co_ref_ms;
+static int co_ref_rc;
 static int co_land(const char *msg, const char *basec, char *newfull, char *out, long cap) {
     char tree[64], btree[64], spec[64];
     char *wv[] = {"git", "write-tree", 0}, *bv[] = {"git", "rev-parse", spec, 0};
@@ -371,7 +373,10 @@ static int co_land(const char *msg, const char *basec, char *newfull, char *out,
         if (run(cv, out, cap) != 0 || tx_len(out, cap) != 40) return 1;
         tx_copy(newfull, 64, out, 40); newfull[40] = 0; }
     {   char *uv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "update-ref", "-m", "commit (commit-own)", "HEAD", newfull, (char *)basec, 0};
-        return run(uv, out, cap) != 0; }
+        long begin=sy_now_ms();
+        co_ref_rc=run(uv,out,cap);
+        co_ref_ms=sy_now_ms()-begin;
+        return co_ref_rc != 0; }
 }
 /* HEAD moved and PATH differs there from the base this commit was built on: name the path and the commit */
 static void co_conflict(const char *path, const char *basec) {
@@ -837,7 +842,12 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 rc = run(gv, out, sizeof out);
             } else {
                 rc = run(gv, out, sizeof out);
+                long gate_ms = sy_now_ms() - tc0;
+                int gate_rc = rc;
+                co_ref_ms=0;co_ref_rc=-1;
                 if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
+                sy_printf("COMMIT_TIMING\tgates_ms=%ld\tgates_rc=%d\tcas_ms=%ld\tcas_rc=%d\n",
+                    gate_ms, gate_rc, co_ref_ms, co_ref_rc);
             }
             t_commit += sy_now_ms() - tc0;
             co_phase("gates", 0);

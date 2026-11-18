@@ -1,0 +1,114 @@
+/* devsvc timing: summarize exclusive phase events in both retained generations.
+ * DIR [--since SEQ|@UNIX_SECONDS] [--kind git.commit|flow|x] [--top N] [--job ID]
+ * Sequence cursors are exclusive, timestamps inclusive. Percentiles use nearest rank.
+ * Only total records count requests. Incomplete requests can still have phase evidence.
+ * Check: tools/check-dvtiming.cx. */
+#pragma unisa use text.conv
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+
+#define DT_TOP 256
+typedef struct { long *values, sum; int count, cap; } Series;
+typedef struct { long ms; char body[512]; } Rank;
+static Series series[3];
+static const char *kinds[]={"git.commit","flow","x"};
+static Rank top[DT_TOP];
+static int top_n=10, used, filter=-1, by_time;
+static long since;
+static const char *job;
+
+static int kind_id(const char *s) {
+    for(int k=0;k<3;k++)if(!strcmp(kinds[k],s))return k;
+    return -1;
+}
+static long natural(const char *s) {
+    int64_t v;
+    if(*s<'0'||*s>'9'||tx_to_i64(s,strlen(s),10,&v))return -1;
+    return v;
+}
+static int by_ms(const void *a,const void *b) {
+    long x=*(const long*)a,y=*(const long*)b;
+    return (x>y)-(x<y);
+}
+static int record_total(Series *s,long ms) {
+    if(s->count==s->cap){
+        int next=s->cap?s->cap*2:64;
+        if(next>1048576)return 1;
+        long *p=realloc(s->values,(size_t)next*sizeof(long));
+        if(!p)return 1;
+        s->cap=next;s->values=p;
+    }
+    if(ms>LONG_MAX-s->sum)return 1;
+    s->values[s->count++]=ms;s->sum+=ms;
+    return 0;
+}
+static void rank_phase(long ms,const char *body) {
+    if(!top_n || (used==top_n && top[used-1].ms>=ms))return;
+    int i=used<top_n?used++:used-1;
+    while(i>0 && top[i-1].ms<ms){top[i]=top[i-1];i--;}
+    top[i].ms=ms;cx_fmt(top[i].body,sizeof top[i].body,"%s",body);
+}
+static int parse_event(char *line) {
+    char *cols[64],*p=line;int n=0;
+    while(p && n<64){
+        cols[n++]=p;char *next=strchr(p,'\t');if(next)*next++=0;p=next;
+    }
+    if(n<4 || strcmp(cols[0],"EV") || strcmp(cols[3],"phase"))return 0;
+    long seq=natural(cols[1]),epoch=natural(cols[2]);
+    if(seq<0||epoch<0)return 1;
+    if(by_time?epoch<since:seq<=since)return 0;
+    const char *keys[]={"cmd=","phase=","ms=","input=","rc=","load1=","job="};
+    const char *val[7]={0};
+    for(int i=4;i<n;i++)for(int k=0;k<7;k++){
+        size_t len=strlen(keys[k]);
+        if(!strncmp(cols[i],keys[k],len)){if(val[k])return 1;val[k]=cols[i]+len;break;}
+    }
+    for(int k=0;k<7;k++)if(!val[k]||!*val[k])return 1;
+    int k=kind_id(val[0]);long ms=natural(val[2]);
+    if(ms<0)return 1;
+    if(k<0 || (filter>=0 && k!=filter) || (job && strcmp(val[6],job)))return 0;
+    char body[512];
+    if(cx_fmt(body,sizeof body,"cmd=%s\tphase=%s\tms=%ld\tinput=%s\trc=%s\tload1=%s\tjob=%s",
+       val[0],val[1],ms,val[3],val[4],val[5],val[6]))return 1;
+    if(job)printf("JOB\t%s\tseq=%ld\tepoch=%ld\n",body,seq,epoch);
+    if(!strcmp(val[1],"total"))return record_total(&series[k],ms);
+    rank_phase(ms,body);return 0;
+}
+static int scan_log(const char *dir,const char *name) {
+    char path[4096],line[1024];if(cx_fmt(path,sizeof path,"%s/%s",dir,name))return 1;
+    FILE *f=fopen(path,"rb");
+    if(!f){if(errno==ENOENT)return 0;perror(path);return 1;}
+    int failed=0;
+    while(fgets(line,sizeof line,f)){
+        char *end=strchr(line,'\n');
+        if(!end){failed=!feof(f);break;}
+        *end=0;if(parse_event(line)){failed=1;break;}
+    }
+    if(ferror(f))failed=1;
+    fclose(f);if(failed)fprintf(stderr,"TIMING_READ_FAILED\t%s\n",path);
+    return failed;
+}
+int main(int argc,char **argv) {
+    if(argc<2)return 2;
+    int seen=0;
+    for(int i=2;i<argc;i+=2){
+        if(i+1>=argc)return 2;
+        char *v=argv[i+1];int bit=0;
+        if(!strcmp(argv[i],"--kind")||!strcmp(argv[i],"--op")){bit=1;filter=kind_id(v);if(filter<0)return 2;}
+        else if(!strcmp(argv[i],"--since")){bit=2;by_time=*v=='@';since=natural(v+by_time);if(since<0)return 2;}
+        else if(!strcmp(argv[i],"--top")){bit=4;long limit=natural(v);if(limit<0||limit>DT_TOP)return 2;top_n=(int)limit;}
+        else if(!strcmp(argv[i],"--job")){bit=8;if(!*v)return 2;job=v;}
+        else return 2;
+        if(seen&bit)return 2;seen|=bit;
+    }
+    if(scan_log(argv[1],"events.tsv.1")||scan_log(argv[1],"events.tsv"))return 1;
+    for(int k=0;k<3;k++){
+        Series *s=&series[k];int n=s->count;if(!n)continue;
+        qsort(s->values,n,sizeof(long),by_ms);
+        printf("SUMMARY\tcmd=%s\tn=%d\tp50=%ld\tp90=%ld\tsum=%ld\n",kinds[k],n,
+            s->values[(n-1)/2],s->values[(9*n-1)/10],s->sum);
+        free(s->values);
+    }
+    for(int i=0;i<used;i++)printf("TOP\t%s\n",top[i].body);
+    return 0;
+}

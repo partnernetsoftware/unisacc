@@ -1,0 +1,48 @@
+/* Checks devsvc timing against rotated events, including a failed push.
+ * Run sh ./unisacc.com tools/check-dvtiming.cx from the repository root. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.toolprep
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+static char fixture[1024],image[1200],output[8192];
+static int query(char *a,char *b,char *c,char *d){
+    char *v[]={image,fixture,a,b,c,d,0};
+    return ck_run(v,output,sizeof output);
+}
+static long hit(const char *s){return tx_find(output,strlen(output),s,strlen(s));}
+int main(void){
+    char older[1200],current[1200],root[4096],why[320];
+    if(cx_fmt(fixture,sizeof fixture,"%s/dvtiming-%d",sy_tmpdir(),sy_pid()) ||
+       cx_fmt(older,sizeof older,"%s/events.tsv.1",fixture) ||
+       cx_fmt(current,sizeof current,"%s/events.tsv",fixture) || sy_mkdir(fixture,0700) ||
+       cx_fmt(image,sizeof image,"%s/query",fixture) || sy_cwd(root,sizeof root)<0 ||
+       tq_native(root,"tools/dvtiming.cx",image,why,sizeof why))return 1;
+    const char *first=
+        "EV\t1\t100\tphase\tcmd=git.commit\tphase=gates\tms=3\tinput=A\trc=0\tload1=1\tjob=A\n"
+        "EV\t2\t101\tphase\tcmd=git.commit\tphase=total\tms=10\tinput=A\trc=0\tload1=1\tjob=A\n"
+        "EV\t3\t102\tphase\tcmd=flow\tphase=execute\tms=12\tinput=F\trc=0\tload1=1\tjob=F\n";
+    const char *second=
+        "EV\t4\t103\tphase\tcmd=git.commit\tphase=push\tms=20\tinput=B\trc=7\tload1=1\tjob=B\textra=v2\n"
+        "EV\t5\t104\tphase\tcmd=git.commit\tphase=total\tms=30\tinput=B\trc=7\tload1=1\tjob=B\n"
+        "EV\t6\t105\tphase\tcmd=flow\tphase=total\tms=21\tinput=F\trc=0\tload1=1\tjob=F\n"
+        "EV\t7\t106\tgit.commit\tms=1234567\trc=0\n";
+    if(sy_write_atomic(older,first,strlen(first),0600)||sy_write_atomic(current,second,strlen(second),0600))return 1;
+    ck(query("--top","2",0,0)==0,"timing.query");
+    ck(hit("SUMMARY\tcmd=git.commit\tn=2\tp50=10\tp90=30\tsum=40\n")>=0,"timing.rotation-and-quantiles");
+    ck(hit("SUMMARY\tcmd=flow\tn=1\tp50=21\tp90=21\tsum=21\n")>=0,"timing.command-count");
+    long push=hit("TOP\tcmd=git.commit\tphase=push\tms=20"), flow=hit("TOP\tcmd=flow\tphase=execute\tms=12");
+    ck(push>=0 && flow>push && hit("phase=gates")<0 && hit("phase=total")<0,"timing.rank-exclusive-components");
+    ck(query("--since","4","--kind","git.commit")==0 && hit("n=1\tp50=30")>=0 && hit("TOP\t")<0,"timing.seq-exclusive");
+    ck(query("--since","@103","--kind","git.commit")==0 && hit("phase=push")>=0 && hit("cmd=flow")<0,"timing.time-inclusive");
+    ck(query("--op","x",0,0)==0 && !*output,"timing.alias-empty-range");
+    ck(query("--job","B","--top","0")==0 && hit("JOB\tcmd=git.commit\tphase=push\tms=20\tinput=B\trc=7")>=0 &&
+       hit("phase=total")>=0 && hit("job=A")<0 && hit("TOP\t")<0,"timing.failed-job-details");
+    ck(query("--since","@",0,0)==2 && query("--since","7x",0,0)==2,"timing.bad-cursor");
+    ck(query("--kind","bad",0,0)==2 && query("--top","-1",0,0)==2,"timing.bad-kind-or-top");
+    sy_unlink(image);sy_unlink(current);sy_unlink(older);sy_rmdir(fixture);
+    printf("CHECK_DVTIMING\tfailed=%d\tpassed=%d\n",ck_failures(),ck_assertions()-ck_failures());
+    return ck_failures()!=0;
+}
