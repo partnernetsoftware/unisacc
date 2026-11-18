@@ -1,0 +1,150 @@
+/* Checks tools/affected.cx product-input declarations (tests/batch-product-inputs.tsv) on an independent fixture.
+ *   sh ./unisacc.com tools/check-affected-product-inputs.cx -- [--case fixture|real] [--affected DRAFT.cx]
+ * fixture: a tiny registry beside the real exec/ tree. Batch a holds {candidate} and declares exec/pp/; d holds
+ *   {candidate} and declares exec/; b names model tokenpp only three literal hops away (deep); c names tokenpp
+ *   itself but declares a wrong prefix (exec/parse2/). Cases: no table and a header-only table give the old bytes;
+ *   with the table a and d are selected via=declared, b is narrowed away, c stays selected via=table (the near
+ *   closure is unioned with the declaration); a .cx change deep in b's chain still selects b; dropping d's row
+ *   refuses BATCH_PRODUCT_INPUT_UNDECLARED (negative control); an unknown id refuses BATCH_PRODUCT_INPUT_UNKNOWN.
+ * real: the repository table against an exec/pp change: rc 0, every IMPLEMENTED pp-* batch selected, fewer
+ *   batches than --no-product-inputs, and --no-product-inputs keeps the unchanged selection.
+ * Prints CHECK lines and CHECK_AFFECTED_PRODUCT_INPUTS ok|FAIL; rc 0 only when every case passed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+static char repo[4096], root[5000], product[5000], affected[5000];
+static np_result result; static int failed, passed;
+static const char *rh = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+static const char *ch = "id\tlayer\timplementation\texpected_or_gap\tsource\n";
+static const char *TABLE = "tests/batch-product-inputs.tsv";
+static const char *PP = "exec/pp/directive-body-result.tsv";
+static void ck(int yes, const char *name) {
+    printf("CHECK\t%s\t%s\n", name, yes ? "PASS" : "FAIL");
+    if (yes) passed++;
+    else { failed++; fprintf(stderr, "CASE_DIAG %s rc=%d stdout=%.1500s stderr=%.1500s\n", name, result.rc, result.out ? result.out : "", result.err ? result.err : ""); }
+}
+static int put(const char *rel, const char *text) {
+    char path[6000]; if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
+    return sy_write_atomic(path, text, strlen(text), 0600) ? 2 : 0;
+}
+static int link_repo(const char *rel) {
+    char from[6000], to[6000];
+    if (cx_fmt(from, sizeof from, "%s/%s", repo, rel) || cx_fmt(to, sizeof to, "%s/%s", root, rel)) return 2;
+    return sy_symlink(from, to) ? 2 : 0;
+}
+static int run_in(const char *dir, const char *a, const char *b, const char *c, const char *d, const char *e) {
+    char *v[12] = {"sh", product, affected, "--", 0}; const char *o[] = {a, b, c, d, e}; int n = 4, i; char why[400];
+    for (i = 0; i < 5 && o[i]; i++) v[n++] = (char *)o[i];
+    v[n] = 0; np_free(&result);
+    if (np_run(v, dir, 0, 50, &result, why, sizeof why)) { fprintf(stderr, "TRANSPORT %s\n", why); result.rc = -1; return -1; }
+    return result.rc;
+}
+static int has(const char *s) { return result.out && strstr(result.out, s) != 0; }
+static int has_err(const char *s) { return result.err && strstr(result.err, s) != 0; }
+static char *dup_out(void) { size_t n = result.out ? strlen(result.out) : 0; char *p = mm_alloc(n + 1); if (p) { if (n && mm_copy(p, n + 1, result.out, n)) { mm_free(p); return 0; } p[n] = 0; } return p; }
+static int fixture(void) {
+    char p[6000], *base;
+    if (cx_fmt(p, sizeof p, "%s/tests", root) || sy_mkdir_all(p, 0700)) return 2;
+    if (link_repo("tools") || link_repo("cx") || link_repo("ext") || link_repo("exec") || link_repo("cxroot.tsv") || link_repo("unisacc.com")) return 2;
+    if (put("tests/run-batch.cx", "/* list-only fixture: never run */\nint main(void){return 2;}\n") || put("tests/a.cx","/* candidate preprocessor fixture */\nint main(void){return 0;}\n")
+        || put("tests/d.cx", "/* candidate whole-product fixture */\nint main(void){return 0;}\n")
+        || put("tests/b.cx", "/* deep chain root */\nstatic const char *t = \"tests/b1.cx\";\nint main(void){return t[0] == 0;}\n")
+        || put("tests/b1.cx", "static const char *t = \"tests/b2.cx\";\n")
+        || put("tests/b2.cx", "static const char *t = \"tests/b3.cx\";\n")
+        || put("tests/b3.cx", "static const char *m = \"tokenpp\";\n")
+        || put("tests/c.cx", "/* names the model itself */\nstatic const char *m = \"tokenpp\";\nint main(void){return m[0] == 0;}\n")) return 2;
+    { char reg[4000], cov[2000];
+      if (cx_fmt(reg, sizeof reg, "%s%s%s%s%s", rh,
+            "a\tIMPLEMENTED\tcontract\ttests/a.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/a.cx\t{root};{candidate};{out}\tfixture.a\trc0:A\tproduct\tdaily\n",
+            "b\tIMPLEMENTED\tinterfaces\ttests/b.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/b.cx\t-\tfixture.b\trc0:B\tproduct\tdaily\n",
+            "c\tIMPLEMENTED\tinterfaces\ttests/c.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/c.cx\t{root};{out}\tfixture.c\trc0:C\tproduct\tdaily\n",
+            "d\tIMPLEMENTED\tcontract\ttests/d.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/d.cx\t{root};{candidate};{out}\tfixture.d\trc0:D\tproduct\tdaily\n")
+          || cx_fmt(cov, sizeof cov, "%s%s%s%s%s", ch,
+            "fixture.a\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture a\ttests/a.cx\n",
+            "fixture.b\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture b\ttests/b.cx\n",
+            "fixture.c\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture c\ttests/c.cx\n",
+            "fixture.d\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture d\ttests/d.cx\n")
+          || put("tests/batches.tsv", reg) || put("tests/coverage.tsv", cov)) return 2; }
+    const char *head = "kind\tkey\tinputs\tbasis\n";
+    const char *req = "require\t{candidate}\t-\tfixture product consumer\nnear\t{root},{out}\t-\tfixture near rule\n";
+    const char *ra = "id\ta\texec/pp/\tfixture pp consumer\n", *rd = "id\td\texec/\tfixture whole product\n", *rc = "id\tc\texec/parse2/\tfixture wrong prefix\n";
+    char full[2000], nod[2000], unk[2000];
+    if (cx_fmt(full, sizeof full, "%s%s%s%s%s", head, req, ra, rd, rc) || cx_fmt(nod, sizeof nod, "%s%s%s%s", head, req, ra, rc)
+        || cx_fmt(unk, sizeof unk, "%s%s%s%s%s%s", head, req, ra, rd, rc, "id\tghost\texec/\tno such batch\n")) return 2;
+    /* (1) no table: the unchanged selection */
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 0 && has("AFFECTED\tb\t") && has("AFFECTED\tc\t") && !has("AFFECTED\ta\t") && !has("PRODUCT_INPUTS_SUMMARY"), "no-table-unchanged");
+    base = dup_out(); if (!base) return 2;
+    /* (2) header-only table: byte-identical */
+    if (put(TABLE, head)) return 2;
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 0 && result.out && !strcmp(result.out, base), "empty-table-byte-identical");
+    /* (3) declarations: declared hits, deep narrowing, wrong prefix kept by the near-closure union */
+    if (put(TABLE, full)) return 2;
+    /* exec/ is a symlink in the fixture, so why= is the resolved absolute name: match the stable parts */
+    ck(run_in(root, "--files", PP, "--plan", 0, 0) == 0 && has("AFFECTED\ta\t") && has("directive-body-result.tsv\tvia=declared\treason=declared:exec/pp/\n")
+        && has("directive-body-result.tsv\tvia=declared\treason=declared:exec/\n") && !has("AFFECTED\tb\t") && has("NARROWED\tb\t")
+        && has("directive-body-result.tsv\tvia=table\treason=model:tokenpp<-tests/c.cx\n")
+        && has("PRODUCT_INPUTS_SUMMARY\tdeclared=3\tnear=1\tnarrowed=1\tdeclared_hits=2"), "declared-narrowed-union");
+    ck(run_in(root, "--files", PP, "--no-product-inputs", 0, 0) == 0 && result.out && !strcmp(result.out, base), "opt-out-byte-identical");
+    /* (4) non-table edges keep full depth: a change three hops down b's chain still selects b */
+    ck(run_in(root, "--files", "tests/b3.cx", 0, 0, 0) == 0 && has("AFFECTED\tb\twhy=tests/b3.cx\tvia=literal-use"), "deep-source-edge-kept");
+    /* (5) negative control: d holds {candidate} but its row is gone */
+    if (put(TABLE, nod)) return 2;
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNDECLARED\tid=d\tplaceholder={candidate}") && !has("AFFECTED"), "undeclared-refused");
+    if (put(TABLE, unk)) return 2;
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNKNOWN\tid=ghost"), "unknown-id-refused");
+    mm_free(base);
+    return 0;
+}
+static int real(void) {
+    char *base; int ok, nb = 0, nn = 0; const char *s;
+    ck(run_in(repo, "--files", PP, "--no-product-inputs", 0, 0) == 0 && has("AFFECTED_SUMMARY") && !has("PRODUCT_INPUTS_SUMMARY"), "real-opt-out");
+    base = dup_out(); if (!base) return 2;
+    for (s = base; (s = strstr(s, "\nAFFECTED\t")); s++) nb++;
+    ok = run_in(repo, "--files", PP, "--plan", 0, 0) == 0 && has("PRODUCT_INPUTS_SUMMARY");
+    if (result.out) for (s = result.out; (s = strstr(s, "\nAFFECTED\t")); s++) nn++;
+    ck(ok && nn > 0 && nn < nb, "real-fewer-than-unchanged");
+    { /* every IMPLEMENTED pp-* row that receives a built product must be selected; pp-targets-lines and
+         pp-gold-material take no product placeholder and read other files (exec/pp/predefines.tsv,
+         weights/gold/pp.tsv) through their own literal edges */
+      size_t n; char *r = cx_read("tests/batches.tsv", &n), *line; int miss = 0, seen = 0;
+      if (!r) return 2;
+      for (line = r; line && *line; ) {
+          char *e = strchr(line, '\n'); if (e) *e = 0;
+          if (!strncmp(line, "pp-", 3) && strstr(line, "\tIMPLEMENTED\t") && (strstr(line, "{candidate}") || strstr(line, "{pp-gold}") || strstr(line, "{hostcc}"))) {
+              char want[200]; char *t = strchr(line, '\t'); if (t) *t = 0;
+              seen++;
+              if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", line) || !has(want)) { miss++; fprintf(stderr, "PP_MISSING %s\n", line); }
+          }
+          line = e ? e + 1 : 0;
+      }
+      free(r);
+      ck(ok && seen > 0 && !miss, "real-pp-batches-selected");
+    }
+    printf("REAL_COUNTS\tunchanged=%d\tdeclared=%d\n", nb, nn);
+    mm_free(base);
+    return 0;
+}
+int main(int argc, char **argv) {
+    const char *phase = "fixture", *draft = 0; int a, rc;
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--case") && a + 1 < argc) phase = argv[++a];
+        else if (!strcmp(argv[a], "--affected") && a + 1 < argc) draft = argv[++a];
+        else return 2;
+    }
+    if (strcmp(phase, "fixture") && strcmp(phase, "real")) return 2;
+    const char *launcher = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product This fixture runs the same root candidate; the harness can override UNISACC. */
+    if (sy_realpath(".", repo, sizeof repo) < 0 || sy_realpath(launcher, product, sizeof product) < 0
+        || cx_fmt(root, sizeof root, "/tmp/unisacc-affected-pi-%d", sy_pid())
+        || (draft ? cx_fmt(affected, sizeof affected, "%s", draft) : cx_fmt(affected, sizeof affected, "%s/tools/affected.cx", repo))) return 2;
+    rc = !strcmp(phase, "fixture") ? fixture() : real();
+    if (!strcmp(phase, "fixture")) { char *v[] = {"rm", "-rf", root, 0}; np_result r = {0}; char why[200]; (void)np_run(v, repo, 0, 10, &r, why, sizeof why); np_free(&r); }
+    np_free(&result);
+    if (rc) { printf("CHECK_AFFECTED_PRODUCT_INPUTS\tFAIL\tsetup=%d\n", rc); return 2; }
+    printf("CHECK_AFFECTED_PRODUCT_INPUTS\t%s\tpassed=%d\tfailed=%d\n", failed ? "FAIL" : "ok", passed, failed);
+    return failed ? 1 : 0;
+}
