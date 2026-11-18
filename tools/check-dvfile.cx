@@ -11,7 +11,7 @@
 
 static char tmp[4096], bin[4200], root[4096], out[8192];
 static int passed, failed;
-static void verdict(const char *name, int good) { printf("%s\t%s\n", good ? "PASS" : "FAIL", name); if (good) passed++; else failed++; }
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvfile\n", yes ? "PASS" : "FAIL", label); }
 static int dv(char **args, int *rc) {
     char *v[16]; int n = 0; v[n++] = bin; v[n++] = tmp; v[n++] = "append";
     for (int i = 0; args[i] && n < 15; i++) v[n++] = args[i];
@@ -38,24 +38,24 @@ int main(int argc, char **argv) {
     /* A1 missing final newline is added first; permission bits kept */
     if (sy_write_file(f, "a\nb", 3, 0640) || sy_chmod(f, 0640)) return 2;
     { char *a[] = {f, "--line", "c", 0}; sy_stat_t st;
-      verdict("append-fixes-missing-eol", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\n") && strstr(out, "eol_fixed=1"));
-      verdict("append-keeps-mode", !sy_stat(f, &st) && (st.mode & 07777) == 0640); }
+      check("append-fixes-missing-eol", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\n") && strstr(out, "eol_fixed=1"));
+      check("append-keeps-mode", !sy_stat(f, &st) && (st.mode & 07777) == 0640); }
     /* A2 --from appends bytes as they are */
     if (sy_write_file(src, "d\ne\n", 4, 0600)) return 2;
-    { char *a[] = {f, "--from", src, 0}; verdict("append-from-file", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\nd\ne\n") && strstr(out, "added=2")); }
+    { char *a[] = {f, "--from", src, 0}; check("append-from-file", dv(a, &rc) && rc == 0 && equals(f, "a\nb\nc\nd\ne\n") && strstr(out, "added=2")); }
     /* A3 --expect-sha mismatch: named refusal, file unchanged (negative control) */
     { char *a[] = {f, "--line", "x", "--expect-sha", "0000", 0};
-      verdict("append-expect-sha-mismatch-refused", dv(a, &rc) && rc == 1 && strstr(out, "ESHA: expect 0000") && equals(f, "a\nb\nc\nd\ne\n")); }
+      check("append-expect-sha-mismatch-refused", dv(a, &rc) && rc == 1 && strstr(out, "ESHA: expect 0000") && equals(f, "a\nb\nc\nd\ne\n")); }
     /* A4 --expect-sha match */
     { char *b = cx_read(f, 0); if (!b || sy_sha256_hex(b, strlen(b), sha)) return 2; free(b);
-      char *a[] = {f, "--line", "g", "--expect-sha", sha, 0}; verdict("append-expect-sha-match", dv(a, &rc) && rc == 0 && has_line(f, "g")); }
+      char *a[] = {f, "--line", "g", "--expect-sha", sha, 0}; check("append-expect-sha-match", dv(a, &rc) && rc == 0 && has_line(f, "g")); }
     /* A5 argument errors rc 2; missing target rc 1 ENOENT */
-    { char *a[] = {f, 0}; verdict("append-needs-line-or-from", dv(a, &rc) && rc == 2 && strstr(out, "EARG")); }
+    { char *a[] = {f, 0}; check("append-needs-line-or-from", dv(a, &rc) && rc == 2 && strstr(out, "EARG")); }
     { char nf[4300]; cx_fmt(nf, sizeof nf, "%s/none.tsv", tmp); char *a[] = {nf, "--line", "x", 0};
-      verdict("append-missing-target-enoent", dv(a, &rc) && rc == 1 && strstr(out, "ENOENT") && sy_exists(nf) == 0); }
+      check("append-missing-target-enoent", dv(a, &rc) && rc == 1 && strstr(out, "ENOENT") && sy_exists(nf) == 0); }
     /* A5b a target outside the write root is refused like f write (EOUTSIDE), file unchanged */
     {   char od[4096], of[4200]; if (sy_mkdtemp("/tmp", "dvfile-outside", od, sizeof od) || cx_fmt(of, sizeof of, "%s/o.tsv", od) || sy_write_file(of, "o\n", 2, 0600)) return 2;
-        char *a[] = {of, "--line", "x", 0}; verdict("append-outside-root-refused", dv(a, &rc) && rc == 1 && strstr(out, "EOUTSIDE") && equals(of, "o\n"));
+        char *a[] = {of, "--line", "x", 0}; check("append-outside-root-refused", dv(a, &rc) && rc == 1 && strstr(out, "EOUTSIDE") && equals(of, "o\n"));
         sy_unlink(of); sy_rmdir(od); }
     /* A6 concurrency: 12 appends at once lose no line (negative control: each line must be present exactly once) */
     {   enum { N = 12 }; sy_child_t c[N]; char lines[N][16]; char *av[N][7]; int base = count_lines(f), ok = 1;
@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
         }
         for (int i = 0; i < N; i++) if (c[i].pid > 0) { sy_exit_t st; if (sy_proc_wait(&c[i], &st) || sy_exit_code(&st) != 0) ok = 0; }
         for (int i = 0; i < N; i++) if (!has_line(f, lines[i])) ok = 0;
-        verdict("append-concurrent-no-lost-line", ok && count_lines(f) == base + N);
+        check("append-concurrent-no-lost-line", ok && count_lines(f) == base + N);
     }
     printf("CHECK_DVFILE\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;

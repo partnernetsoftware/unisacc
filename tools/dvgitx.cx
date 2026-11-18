@@ -36,7 +36,8 @@ static int run(char **v, const char *cwd, char **env, char *out, int cap) {
     if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
     np_free(&r); return rc;
 }
-static void strip_eol(char *line) { long n = strlen(line); while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0; }
+/* object ids from git end in one newline: cut the line end in place */
+static void chomp(char *s) { char *e = s + strlen(s); while (e > s && (e[-1] == '\n' || e[-1] == '\r')) *--e = 0; }
 static int safe_rel(const char *p) {
     if (!p[0] || p[0] == '/' || p[0] == '-') return 0;
     for (const char *q = p; *q; q++) { if (*q == '\n' || *q == '\t') return 0; if (q[0] == '.' && q[1] == '.' && (q == p || q[-1] == '/') && (!q[2] || q[2] == '/')) return 0; }
@@ -114,7 +115,7 @@ static int untrack(int argc, char **argv) {
         char *hv[] = {"git", "hash-object", "-w", "--", tf, 0};
         rc = run(hv, root, 0, gblob, sizeof gblob); sy_unlink(tf);
         if (rc) return 3;
-        strip_eol(gblob);
+        chomp(gblob);
     }
     if (cx_fmt(idx, sizeof idx, "/tmp/dvgitx-idx-%d-%ld", sy_pid(), sy_now_ms()) || cx_fmt(ev, sizeof ev, "GIT_INDEX_FILE=%s", idx)) return 3;
     char *env[] = {ev, 0};
@@ -122,7 +123,7 @@ static int untrack(int argc, char **argv) {
     for (tries = 0; tries < 4; tries++) {
         char *hv[] = {"git", "rev-parse", "HEAD", 0};
         if (run(hv, root, 0, old, sizeof old)) return 3;
-        strip_eol(old);
+        chomp(old);
         char *rv[] = {"git", "read-tree", old, 0};
         if (run(rv, root, env, 0, 0)) { sy_unlink(idx); return 3; }
         {   char *v[80]; int n = 0; v[n++] = "git"; v[n++] = "rm"; v[n++] = "--cached"; v[n++] = "-r"; v[n++] = "-q"; v[n++] = "--ignore-unmatch"; v[n++] = "--";
@@ -132,10 +133,10 @@ static int untrack(int argc, char **argv) {
             char *uv[] = {"git", "update-index", "--add", "--cacheinfo", ci, 0}; if (run(uv, root, env, 0, 0)) { sy_unlink(idx); return 3; } }
         char *wv[] = {"git", "write-tree", 0};
         if (run(wv, root, env, tree, sizeof tree)) { sy_unlink(idx); return 3; }
-        strip_eol(tree);
+        chomp(tree);
         char *cv[] = {"git", "commit-tree", tree, "-p", old, "-m", (char *)msg, 0};
         if (run(cv, root, 0, nw, sizeof nw)) { sy_unlink(idx); return 3; }
-        strip_eol(nw);
+        chomp(nw);
         char *uv[] = {"git", "update-ref", "-m", "devsvc git commit --untrack", "HEAD", nw, old, 0};
         rc = run(uv, root, 0, 0, 0); sy_unlink(idx);
         if (!rc) break;

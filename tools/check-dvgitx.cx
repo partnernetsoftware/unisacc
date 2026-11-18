@@ -11,7 +11,7 @@
 
 static char tmp[4096], bin[4200], root[4096], repo[4200], out[16384];
 static int passed, failed;
-static void expect(const char *what, int ok) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (ok) passed++; else failed++; }
+static void check(const char *label, int yes) { if (yes) passed++; else failed++; printf("%s\t%s\tdvgitx\n", yes ? "PASS" : "FAIL", label); }
 static int git(char **v, const char *cwd, char *o, int cap) {
     np_result r = {0}; char why[300]; int ok = !np_run(v, cwd, 0, 30, &r, why, sizeof why) && r.rc == 0;
     if (o && cap > 0) { long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (k > 0) mm_copy(o, cap, r.out, k); o[k > 0 ? k : 0] = 0; }
@@ -62,36 +62,36 @@ int main(int argc, char **argv) {
         char *ls[] = {"git", "ls-files", "--", "gen.tsv", 0}; ok = ok && git(ls, repo, o, sizeof o) && !o[0];
         char *lt[] = {"git", "ls-tree", "-r", "--name-only", "HEAD", 0}; ok = ok && git(lt, repo, o, sizeof o) && !strstr(o, "gen.tsv") && strstr(o, "keep.tsv");
         char *lg[] = {"git", "log", "-1", "--format=%s", 0}; ok = ok && git(lg, repo, o, sizeof o) && !strcmp(o, "stop tracking gen.tsv\n");
-        expect("untrack-drops-index-entry", ok);
-        expect("untrack-working-copy-bytes-and-mode-same", fileid(p, s2, &m2) && !strcmp(s1, s2) && m1 == m2 && m1 == 0640);
+        check("untrack-drops-index-entry", ok);
+        check("untrack-working-copy-bytes-and-mode-same", fileid(p, s2, &m2) && !strcmp(s1, s2) && m1 == m2 && m1 == 0640);
         char gi[4400]; cx_fmt(gi, sizeof gi, "%s/.gitignore", repo);
         char *st[] = {"git", "status", "--porcelain", 0};
-        expect("untrack-ignore-appended-and-clean", count_line(gi, "/gen.tsv") == 1 && git(st, repo, o, sizeof o) && !o[0]); }
+        check("untrack-ignore-appended-and-clean", count_line(gi, "/gen.tsv") == 1 && git(st, repo, o, sizeof o) && !o[0]); }
     /* U2 untracked path is named, not an error; --ignore is idempotent */
     {   char *a[] = {"untrack", "-m", "again", "--untrack", "gen.tsv", "--ignore", "/gen.tsv", 0};
         char gi[4400]; cx_fmt(gi, sizeof gi, "%s/.gitignore", repo);
-        expect("untrack-not-tracked-named-rc0", dv(a, &rc) && rc == 0 && strstr(out, "UNTRACK\tpath=gen.tsv\tstate=not-tracked") && strstr(out, "reason=nothing-to-commit"));
-        expect("untrack-ignore-idempotent", strstr(out, "IGNORE\tpath=/gen.tsv\tstate=present") && count_line(gi, "/gen.tsv") == 1); }
+        check("untrack-not-tracked-named-rc0", dv(a, &rc) && rc == 0 && strstr(out, "UNTRACK\tpath=gen.tsv\tstate=not-tracked") && strstr(out, "reason=nothing-to-commit"));
+        check("untrack-ignore-idempotent", strstr(out, "IGNORE\tpath=/gen.tsv\tstate=present") && count_line(gi, "/gen.tsv") == 1); }
     /* U3 argument refusals name the reason */
-    {   char *a[] = {"untrack", "--untrack", "keep.tsv", 0}; expect("untrack-needs-message", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE untrack-args")); }
+    {   char *a[] = {"untrack", "--untrack", "keep.tsv", 0}; check("untrack-needs-message", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE untrack-args")); }
     /* W1 worktree path form refused (negative controls) */
-    {   char *a[] = {"worktree", "add", "wt/v0.0.99", "v0.0.99", 0}; expect("worktree-add-bad-path-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
-    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.99", "feature", 0}; expect("worktree-add-bad-branch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
-    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.98", "v0.0.99", 0}; expect("worktree-add-mismatch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    {   char *a[] = {"worktree", "add", "wt/v0.0.99", "v0.0.99", 0}; check("worktree-add-bad-path-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.99", "feature", 0}; check("worktree-add-bad-branch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.98", "v0.0.99", 0}; check("worktree-add-mismatch-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
     /* W2 add: branch created, symlink placed and ignored */
     char wt[4400], ln[4500], tg[4500]; cx_fmt(wt, sizeof wt, "%s/.claude/worktrees/v0.0.99", repo); cx_fmt(ln, sizeof ln, "%s/unisacc.com", wt);
     {   char *a[] = {"worktree", "add", ".claude/worktrees/v0.0.99", "v0.0.99", 0}; sy_stat_t st; long n;
         int ok = dv(a, &rc) && rc == 0 && strstr(out, "branch_new=1") && strstr(out, "ignored=yes");
         n = sy_readlink(ln, tg, sizeof tg - 1); if (n > 0) tg[n] = 0;
-        expect("worktree-add-links-product", ok && !sy_lstat(ln, &st) && st.kind == 'l' && n > 0 && strstr(tg, "/repo/unisacc.com")); }
-    {   char *a[] = {"worktree", "list", 0}; expect("worktree-list", dv(a, &rc) && rc == 0 && strstr(out, "v0.0.99")); }
+        check("worktree-add-links-product", ok && !sy_lstat(ln, &st) && st.kind == 'l' && n > 0 && strstr(tg, "/repo/unisacc.com")); }
+    {   char *a[] = {"worktree", "list", 0}; check("worktree-list", dv(a, &rc) && rc == 0 && strstr(out, "v0.0.99")); }
     /* W3 remove refuses a dirty tree and lists files (negative control), tree stays */
     {   char f[4500]; cx_fmt(f, sizeof f, "%s/new.txt", wt); if (sy_write_file(f, "x\n", 2, 0644)) return 2;
         char *a[] = {"worktree", "remove", ".claude/worktrees/v0.0.99", 0};
-        expect("worktree-remove-dirty-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-dirty") && strstr(out, "DIRTY\t?? new.txt") && sy_exists(wt) == 1);
+        check("worktree-remove-dirty-refused", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-dirty") && strstr(out, "DIRTY\t?? new.txt") && sy_exists(wt) == 1);
         sy_unlink(f); }
     /* W4 clean remove */
-    {   char *a[] = {"worktree", "remove", ".claude/worktrees/v0.0.99", 0}; expect("worktree-remove-clean", dv(a, &rc) && rc == 0 && sy_exists(wt) == 0); }
+    {   char *a[] = {"worktree", "remove", ".claude/worktrees/v0.0.99", 0}; check("worktree-remove-clean", dv(a, &rc) && rc == 0 && sy_exists(wt) == 0); }
     printf("CHECK_DVGITX\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
 }

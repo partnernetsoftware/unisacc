@@ -1,0 +1,62 @@
+/* Tool self-check: devsvc routes git commit --untrack, git worktree and f append to tools/dvgitx.cx and
+ * tools/dvfile.cx, and usage refusals name their reason on the first line before the usage text.
+ * Every case is side-effect free (named refusal, nothing-to-commit, or a path outside the write root).
+ * Runs the devsvc the launcher selects (HEAD-pinned; DEVSVC_DEV=1 for the working copy).
+ * Check: CHECK_DEVSVC_ROUTE. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+static char out[1 << 16];
+static int passed, failed;
+static void check(const char *label, int yes) {
+    printf("%s\t%s\n", yes ? "PASS" : "FAIL", label);
+    if (yes) passed++; else { failed++; printf("NOTE\t%.300s\n", out); }
+}
+static int dv(char **args, int *rc) {
+    char *v[24]; int n = 0; v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devsvc.cx"; v[n++] = "--";
+    for (int i = 0; args[i] && n < 23; i++) v[n++] = args[i];
+    v[n] = 0; np_result r = {0}; char why[300]; char *env[] = {"DEVSVC_GIT_PARSE_ONLY=1", 0};
+    if (np_run(v, 0, env, 50, &r, why, sizeof why)) return 0;
+    *rc = r.rc; long k = (long)r.errn < (long)sizeof out - 1 ? (long)r.errn : (long)sizeof out - 1;
+    if (k > 0) mm_copy(out, sizeof out, r.err, k); out[k > 0 ? k : 0] = 0;
+    long o = (long)r.outn < (long)sizeof out - 1 - k ? (long)r.outn : (long)sizeof out - 1 - k;
+    if (o > 0) { mm_copy(out + k, sizeof out - k, r.out, o); out[k + o] = 0; }
+    np_free(&r); return 1;
+}
+/* first stderr line that is not a DEVSVC_RUN/dv: launcher note starts with WANT */
+static int first_is(const char *want) {
+    for (char *s = out; *s; ) {
+        char *e = strchr(s, '\n'); long n = e ? e - s : (long)strlen(s);
+        if (strncmp(s, "DEVSVC_RUN", 10) && strncmp(s, "dv:", 3)) return n >= (long)strlen(want) && !strncmp(s, want, strlen(want));
+        if (!e) break;
+        s = e + 1;
+    }
+    return 0;
+}
+int main(void) {
+    int rc; char od[4096], of[4200];
+    {   char *a[] = {"git", "commit", "-m", "x", "--", "a.tsv", 0};
+        check("commit-dashdash-reason-first", dv(a, &rc) && rc == 2 && first_is("devsvc: REFUSE paths-need-whole-or-keyed:") && strstr(out, "usage: devsvc")); }
+    {   char *a[] = {"lock", "acquire", 0};
+        check("lock-args-reason-first", dv(a, &rc) && rc == 2 && first_is("devsvc: REFUSE lock-args:")); }
+    {   char *a[] = {"lock", "frob", "n", "--owner", "o", 0};
+        check("lock-action-reason-first", dv(a, &rc) && rc == 2 && first_is("devsvc: REFUSE lock-args: unknown lock action frob")); }
+    {   char *a[] = {"events", "emit", 0};
+        check("events-emit-reason-first", dv(a, &rc) && rc == 2 && first_is("devsvc: REFUSE events-args:")); }
+    {   char *a[] = {"no-such-command", 0};
+        check("unknown-command-reason-first", dv(a, &rc) && rc == 2 && first_is("devsvc: REFUSE unknown-command: no-such-command")); }
+    {   char *a[] = {"git", "commit", "-m", "probe", "--untrack", "no/such/path.tsv", 0};
+        check("route-commit-untrack", dv(a, &rc) && rc == 0 && strstr(out, "UNTRACK\tpath=no/such/path.tsv\tstate=not-tracked") && strstr(out, "reason=nothing-to-commit")); }
+    {   char *a[] = {"git", "worktree", "add", "wt/v0.0.1", "v0.0.1", 0};
+        check("route-worktree-path-form", dv(a, &rc) && rc == 2 && strstr(out, "REFUSE worktree-path-form")); }
+    if (sy_mkdtemp("/tmp", "dvroute", od, sizeof od) || cx_fmt(of, sizeof of, "%s/o.tsv", od) || sy_write_file(of, "o\n", 2, 0600)) return 2;
+    {   char *a[] = {"f", "append", of, "--line", "x", 0};
+        char *b = 0; int ok = dv(a, &rc) && rc == 1 && strstr(out, "F\tappend\tfail\tEOUTSIDE"); b = cx_read(of, 0);
+        check("route-f-append", ok && b && !strcmp(b, "o\n")); free(b); }
+    sy_unlink(of); sy_rmdir(od);
+    printf("CHECK_DEVSVC_ROUTE\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
