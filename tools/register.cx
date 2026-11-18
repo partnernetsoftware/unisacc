@@ -457,16 +457,6 @@ static int rg_tool_mode(int argc, char **argv) {
     rg_unlock(lk);
     for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "ADDED" : "TRACKED");
     printf("REGISTER_TOOL\tsources_added=%ld\tinventory=%ld\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\tpins_added=%ld\tpins_needed=%ld\n", added_src, rows, shards, added_sh, removed_sh, added_pin, need_pin);
-    /* new or removed shard batches make the generated build/batch-packages.tsv stale (real tables only) */
-    if ((added_sh || removed_sh) && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) && sy_exists("tools/batch-packages-gen.cx") == 1) {
-        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--write", 0};
-        rc = run(v, buf, sizeof buf);
-        if (rc != 0) {
-            fprintf(stderr, "register: tool registered but build/batch-packages.tsv NOT regenerated (rc=%d); run tools/batch-packages-gen.cx -- --write\n", rc);
-            printf("REGISTER_TOOL\tbatch_packages=STALE\n"); return 4;
-        }
-        printf("REGISTER_TOOL\tbatch_packages=REGENERATED\n");
-    }
     printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p || did ? "REGISTERED" : "UNCHANGED");
     return 0;
 }
@@ -546,8 +536,7 @@ int main(int argc, char **argv) {
             char *v[] = {"./tools/bound", "58", batchbin, root, parent, (char *)id, 0};
             int bofd = -1, bpid = run_start(v, &bofd);
             /* while the trial run executes: prepare the batch-packages-gen native image (preparation only;
-               --write itself still runs after PASS, below).  A prepare failure is not a verdict: the
-               regeneration then falls back to sh ./unisacc.com. */
+               the row query runs after PASS). Source execution remains available on a cold build. */
             if (bpid >= 0 && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")))
                 bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
             rc = run_collect(bpid, bofd, buf, sizeof buf);
@@ -577,22 +566,19 @@ int main(int argc, char **argv) {
     if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
     rg_timing_warn(id);
-    /* build/batch-packages.tsv is generated from the registry: a new batch makes the committed copy stale
-       (check-batch-packages table-fresh).  Regenerate it here, only for the real tables (a fixture run with
-       UNISACC_TABLES set must not rewrite the checked-in build table). */
+    /* For a real registration obtain its canonical manifest row from the current registry. */
     if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
-        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--write", 0};
-        char *vn[] = {"./tools/bound", "58", bpbin, "--write", 0};
+        char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--query","--row",(char*)id,0};
+        char *vn[] = {"./tools/bound", "58", bpbin, "--query","--row",(char*)id,0};
         rc = run(bpok ? vn : v, buf, sizeof buf);
         if (rc != 0) {
-            fprintf(stderr, "register: batch registered but build/batch-packages.tsv NOT regenerated (rc=%d); run tools/batch-packages-gen.cx -- --write\n", rc);
-            printf("REGISTER\tid=%s\tbatch_packages=STALE\n", id);
+            fprintf(stderr, "register: batch registered but package row query failed (rc=%d)\n", rc);
             return 4;
         }
-        printf("REGISTER\tid=%s\tbatch_packages=REGENERATED\n", id);
+        printf("REGISTER\tid=%s\tbatch_packages=QUERIED\n", id);
         /* DSG-REG1: also leave the per-batch manifest tests/manifests/ID.tsv (checked by tools/reg-manifest.cx,
            so a later commit that carries one of the three rows without the others is caught). */
-        {   size_t pn = 0; char *pb = (char *)cx_read("build/batch-packages.tsv", &pn), key[600], mp[700], *m;
+        {   size_t pn = strlen(buf); char *pb = buf, key[600], mp[700], *m;
             size_t i = 0, kl, bl = strlen(brow), cl = strlen(crow), ml;
             if (!pb || cx_fmt(key, sizeof key, "batch\t%s\t", id) || cx_fmt(mp, sizeof mp, "tests/manifests/%s.tsv", id)) { printf("REGISTER\tid=%s\tmanifest=SKIPPED\n", id); return 0; }
             kl = strlen(key);

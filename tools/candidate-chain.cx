@@ -137,6 +137,23 @@ static void phase_yield(const char *why, long last_ms, long need_ms) {
     sy_printf("CANDIDATE_YIELD\t%s\t%ld\t%s\n", token, (long)n, hash);
     exit(75);
 }
+/* Whole-target span steps (osx/win: units, e3, prune; Mac B: b-units-e3, b2; then the slice's
+   fixedpoint --from-image) are each committed (ck_complete / mark) before the next starts. chain4
+   (5cdbd305b1) ran five such phases into the 90 s attempt bound (rc 124 at 88 s): the in-flight
+   step was lost and each kill cost one unit of width (KILL parallel=3) until WIDEN. Same rule as
+   fp_commit: before a step, if this attempt already committed a step and the next one is not
+   expected to fit before the attempt ends, yield. Estimate: twice the last step of this attempt,
+   at least 15 and at most 55 s. No step committed in this attempt means no yield. No bound,
+   assertion or refusal changes; each step still runs under the same cc_front bound. */
+static int span_committed; static long span_last_ms, span_t0;
+static void span_admit(const char *tag) {
+    if (attempt_end && span_committed) {
+        long need = span_last_ms * 2; if (need < 15000) need = 15000; if (need > 55000) need = 55000;
+        if (sy_now_ms() + need > attempt_end) phase_yield(tag, span_last_ms, need);
+    }
+    span_t0 = sy_now_ms();
+}
+static void span_done(void) { span_last_ms = sy_now_ms() - span_t0; span_committed++; }
 static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
     segment_admit(secs);
     pr_result r;
@@ -837,8 +854,10 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     v[n++] = (char *)first; v[n++] = (char *)last;
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
+    span_admit(tag);
     if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
+    span_done();
     return 0;
 }
 static int span_one_fwd(const char *root, const char *outdir, const char *helper,
@@ -898,8 +917,10 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
+    span_admit(tag);
     if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
     mark(outdir, tag, 0);
+    span_done();
     return 0;
 }
 
@@ -1043,6 +1064,7 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
     a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = (char *)snap; a[3] = (char *)pkg; a[4] = (char *)gen1; a[5] = (char *)fp;
     a[6] = (char *)"--phase"; a[7] = phs; a[8] = (char *)"--target"; a[9] = (char *)g_mt_target[ti];
     a[10] = (char *)"--from-image"; a[11] = img; a[12] = (char *)"--identity-helper"; a[13] = (char *)helper; a[14] = 0;
+    span_admit(ptag);
     if (step(root, a)) die(ptag, fp);
     mark(outdir, ptag, sy_now_ms() - t0);
 }
@@ -2808,6 +2830,13 @@ int main(int argc, char **argv) {
         if (tx_copy(chain_work, sizeof chain_work, argv[4], strlen(argv[4]))) die("fixture path", argv[4]);
         until_phase = tx_eqz(argv[5], "-") ? 0 : argv[5];
         return wf_fronts(argv[2], argv[3], "fixture-helper", 1, "osx/x86_64", "osx-x86_64", 1);
+    }
+    if (argc == 5 && tx_eqz(argv[1], "--win-span-fixture")) {
+        /* ROOT OUT WORK: gen1 win/x86_64 span steps alone against a fake ROOT/unisacc.com;
+           OUT/checkpoint.tsv receives the step receipts, WORK/wf-span-prep/roots.txt the roots. */
+        if (tx_copy(chain_work, sizeof chain_work, argv[4], strlen(argv[4]))) die("fixture path", argv[4]);
+        jobs_segment_out = argv[3];
+        return wf_win_span(argv[2], argv[3], "fixture-helper", 1, "win/x86_64", "win-x86_64");
     }
     if (argc == 5 && tx_eqz(argv[1], "--residue-fixture")) {
         /* PHASES OUT PHASE: only the table-driven residue rule that precedes a phase. */

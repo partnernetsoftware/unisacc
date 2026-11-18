@@ -781,6 +781,41 @@ int main(int argc, char **argv) {
             ck(yrc == 0 && has(out, "status=UNTIL") && !has(out, "CANDIDATE_YIELD"), "yielded-phase-continues-from-committed-keys");
             if (sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS") || sy_unsetenv("UNISACC_CHAIN_SEGMENT_TOKEN")) return 2;
         }
+        /* chain-speedup 2026-11-18: whole-target span steps yield like fixedpoint batches. Told
+           that its attempt ends in 5 s, the win span commits its first step (about 1 s) and then
+           yields (rc 75, PHASE_YIELD naming the next step, CANDIDATE_YIELD with the checkpoint
+           bytes) instead of starting a step the 90 s attempt bound would kill (chain4: five rc 124
+           kills at 88 s, each also costing one unit of width). Called again with time, it reuses the
+           committed step and finishes. The old candidate has no yield and runs all three steps. */
+        {
+            char sroot[4600], sout[4600], swork[4600], sprep[4700], spath[4800], strace[4600], scp[4700], scmd[14000], swant[300], shex[65], sendms[40], script[1200];
+            if (cx_fmt(sroot, sizeof sroot, "%s/ws-root", td) || cx_fmt(sout, sizeof sout, "%s/ws-out", td) || cx_fmt(swork, sizeof swork, "%s/ws-work", td) ||
+                cx_fmt(sprep, sizeof sprep, "%s/wf-span-prep", swork) || cx_fmt(strace, sizeof strace, "%s/ws-trace", td) || cx_fmt(scp, sizeof scp, "%s/checkpoint.tsv", sout) ||
+                sy_mkdir(sroot, 0755) || sy_mkdir(sout, 0755) || sy_mkdir(swork, 0755) || sy_mkdir(sprep, 0755) || cx_write(scp, "DONE\tsnap\twall_ms=1\tsha=-\n", 26)) return 2;
+            {
+                char roots[8192]; long rn = 0;
+                for (int i = 0; i < cf_root_count(); i++) { int w = snprintf(roots + rn, sizeof roots - rn, "root%d\n", i); if (w <= 0 || rn + w >= (long)sizeof roots) return 2; rn += w; }
+                if (cx_fmt(spath, sizeof spath, "%s/roots.txt", sprep) || cx_write(spath, roots, (size_t)rn)) return 2;
+            }
+            if (cx_fmt(script, sizeof script, "#!/bin/sh\nmkdir -p \"$7\" || exit 3\nsleep 1\nprintf 'x\\n' > \"$7/body.bin\"\nprintf '%%s\\n' \"$8\" >> '%s'\n", strace) ||
+                cx_fmt(spath, sizeof spath, "%s/unisacc.com", sroot) || cx_write(spath, script, strlen(script))) return 2;
+            if (sy_setenv("UNISACC_CHAIN_SEGMENT_TOKEN", "9:win-span-fixture", 1) || cx_fmt(sendms, sizeof sendms, "%ld", sy_now_ms() + 5000) || sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS", sendms, 1)) return 2;
+            if (cx_fmt(scmd, sizeof scmd, "'%s' --win-span-fixture '%s' '%s' '%s' 2>&1", candidate, sroot, sout, swork)) return 2;
+            int src = sh(scmd, out, sizeof out);
+            size_t scn = 0; char *scb = cx_read(scp, &scn);
+            if (!scb || sy_sha256_hex(scb, (long)scn, shex)) return 2;
+            free(scb);
+            if (cx_fmt(swant, sizeof swant, "CANDIDATE_YIELD\t9:win-span-fixture\t%ld\t%s\n", (long)scn, shex)) return 2;
+            size_t stn = 0; char *st = cx_read(strace, &stn);
+            ck(src == 75 && has(out, "PHASE_YIELD\tgen1-win-x86_64-e3") && has(out, swant) && st && stn == 6 && !memcmp(st, "units\n", 6), "span-steps-yield-before-the-attempt-ends");
+            free(st);
+            if (cx_fmt(sendms, sizeof sendms, "%ld", sy_now_ms() + 600000) || sy_setenv("UNISACC_CHAIN_ATTEMPT_END_MS", sendms, 1)) return 2;
+            src = sh(scmd, out, sizeof out);
+            st = cx_read(strace, &stn);
+            ck(src == 0 && has(out, "RESUME\tgen1-win-x86_64-units") && !has(out, "CANDIDATE_YIELD") && st && stn == 15 && !memcmp(st, "units\ne3\nprune\n", 15), "yielded-span-continues-from-committed-steps");
+            free(st);
+            if (sy_unsetenv("UNISACC_CHAIN_ATTEMPT_END_MS") || sy_unsetenv("UNISACC_CHAIN_SEGMENT_TOKEN")) return 2;
+        }
         printf("LANE_SPLIT\tfailed=%d\tfixture=%s\n", failed, td);
         return failed ? 1 : 0;
     }

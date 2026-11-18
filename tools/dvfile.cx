@@ -1,0 +1,93 @@
+/* dvfile: devsvc file operations beyond read/write/edit/edits.
+ *   dvfile ROOT append PATH (--from FILE | --line TEXT) [--expect-sha X]
+ *       (devsvc f append routes here) Append to the end of an existing file. A missing final
+ *       newline is added first; --line TEXT appends TEXT plus a newline, --from FILE appends the
+ *       file's bytes as they are. --expect-sha X refuses (ESHA, rc 1) unless the current sha256
+ *       is X, the same contract as f edit. Concurrent appends to one file are serialized by a
+ *       per-file lock outside the repo (bounded wait 20 s, stale after 30 s) and every write is
+ *       atomic (temp file + rename, permission bits kept), so no appended line is lost.
+ *       Bounds: target at most 64 MiB, appended text at most 1 MiB.
+ *       Relative PATH resolves against UNISACC_FLOW_ROOT, else ROOT (as f edits).
+ *       Output: F<TAB>append<TAB>ok<TAB>sha=..<TAB>lines=..<TAB>added=..<TAB>eol_fixed=0|1
+ * Check: tools/check-dvfile.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+
+#define TARGET_MAX (64L << 20)
+#define ADD_MAX (1L << 20)
+
+static int fail(const char *code, const char *msg, const char *arg) {
+    fprintf(stderr, "F\tappend\tfail\t%s: %s%s\n", code, msg, arg ? arg : "");
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], path[4400], lock[600], sha[65], hex[65];
+    const char *from = 0, *line = 0, *xs = 0; int i;
+    if (argc < 4 || strcmp(argv[2], "append") || sy_realpath(argv[1], root, sizeof root) < 0) {
+        fprintf(stderr, "usage: devsvc f append PATH (--from FILE | --line TEXT) [--expect-sha X]\n"); return 2; }
+    for (i = 4; i < argc; i++) {
+        if (!strcmp(argv[i], "--from") && i + 1 < argc) from = argv[++i];
+        else if (!strcmp(argv[i], "--line") && i + 1 < argc) line = argv[++i];
+        else if (!strcmp(argv[i], "--expect-sha") && i + 1 < argc) xs = argv[++i];
+        else { fprintf(stderr, "F\tappend\tfail\tEARG: unknown argument %s (usage: f append PATH (--from FILE | --line TEXT) [--expect-sha X])\n", argv[i]); return 2; }
+    }
+    if ((from != 0) == (line != 0)) { fprintf(stderr, "F\tappend\tfail\tEARG: need exactly one of --from FILE or --line TEXT\n"); return 2; }
+    {   const char *p = argv[3], *fr = getenv("UNISACC_FLOW_ROOT");
+        if (cx_fmt(path, sizeof path, p[0] == '/' ? "%s%s" : "%s/%s", p[0] == '/' ? "" : (fr && *fr ? fr : root), p)) return fail("EARG", "path too long", 0); }
+    {   /* same write root as f write/edits: the target must resolve under it (EOUTSIDE otherwise) */
+        const char *fr = getenv("UNISACC_FLOW_ROOT"); char base[4096], rp[4400]; long bl;
+        if (sy_realpath(fr && *fr ? fr : root, base, sizeof base) < 0 || sy_realpath(path, rp, sizeof rp) < 0) return fail("ENOENT", "no regular file ", path);
+        bl = strlen(base);
+        if (strncmp(rp, base, bl) || rp[bl] != '/') return fail("EOUTSIDE", "path is outside the root ", path);
+    }
+    /* text to append */
+    unsigned char *add = 0; int64_t an = 0;
+    if (from) {
+        if (sy_read_file(from, &add, &an, ADD_MAX + 1) || !add) return fail("EARG", "cannot read --from ", from);
+        if (an > ADD_MAX) { free(add); return fail("EBIG", "appended text over 1 MiB: ", from); }
+    } else {
+        long L = strlen(line); if (L > ADD_MAX) return fail("EBIG", "appended text over 1 MiB", 0);
+        add = malloc(L + 2); if (!add) return 3;
+        if (mm_copy(add, L + 2, line, L)) { free(add); return 3; }
+        an = L; if (!L || line[L - 1] != '\n') add[an++] = '\n';
+    }
+    /* per-file lock: /tmp/dvfile-lock-<sha256(path)[:24]> */
+    if (sy_sha256_hex(path, strlen(path), hex) || cx_fmt(lock, sizeof lock, "/tmp/dvfile-lock-%.24s", hex)) return 3;
+    long t0 = sy_now_ms(); int fd = -1;
+    for (;;) {
+        fd = sy_open(lock, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) break;
+        sy_stat_t ls; if (!sy_stat(lock, &ls) && ls.mtime > 0 && sy_now_ms() / 1000 - ls.mtime > 30) { sy_unlink(lock); continue; }
+        if (sy_now_ms() - t0 > 20000) { free(add); return fail("ELOCK", "another append holds the lock over 20 s: ", lock); }
+        sy_sleep_ms(5 + (sy_pid() % 7));
+    }
+    sy_close(fd);
+    int rc = 0; unsigned char *cur = 0, *nb = 0; int64_t cn = 0; sy_stat_t st;
+    if (sy_stat(path, &st) || st.kind != 'f') { rc = fail("ENOENT", "no regular file ", path); goto out; }
+    if (st.size > TARGET_MAX) { rc = fail("EBIG", "target over 64 MiB: ", path); goto out; }
+    if (sy_read_file(path, &cur, &cn, TARGET_MAX) ) { rc = fail("EIO", "cannot read ", path); goto out; }
+    if (sy_sha256_hex(cur ? (char *)cur : "", cn, sha)) { rc = 3; goto out; }
+    if (xs && strcmp(xs, sha)) { fprintf(stderr, "F\tappend\tfail\tESHA: expect %s have %s\n", xs, sha); rc = 1; goto out; }
+    {   int fix = cn > 0 && cur[cn - 1] != '\n'; int64_t nn = cn + fix + an; long lines = 0, k;
+        nb = malloc(nn + 1); if (!nb) { rc = 3; goto out; }
+        if ((cn && mm_copy(nb, nn + 1, cur, cn)) || mm_copy(nb + cn + fix, nn + 1 - cn - fix, add, an)) { rc = 3; goto out; }
+        if (fix) nb[cn] = '\n';
+        if (sy_write_atomic(path, nb, nn, st.mode & 07777) || sy_chmod(path, st.mode & 07777)) { rc = fail("EIO", "cannot write ", path); goto out; }
+        for (k = 0; k < nn; k++) if (nb[k] == '\n') lines++;
+        long addl = 0; for (k = 0; k < an; k++) if (add[k] == '\n') addl++;
+        if (sy_sha256_hex((char *)nb, nn, sha)) { rc = 3; goto out; }
+        printf("F\tappend\tok\tsha=%s\tlines=%ld\tadded=%ld\teol_fixed=%d\n", sha, lines, addl, fix);
+    }
+out:
+    sy_unlink(lock);
+    if (cur) free(cur);
+    if (nb) free(nb);
+    free(add);
+    return rc;
+}

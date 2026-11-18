@@ -59,6 +59,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.limits
+#pragma unisa use sysx.reaper
 
 #define BG_PATH 4400
 #define BG_MAXC 256
@@ -70,6 +71,7 @@ static long bg_lim(const char *id, int max) {
     return (long)v;
 }
 static long bg_slack_s;
+static int reactor_owned;
 
 typedef struct {
     char rev[41], dir[BG_PATH];
@@ -316,6 +318,7 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
     long hard_s = deadline_s + bg_slack_s, end, i, turns;
     const char *why = "exited";
     (void)sy_setsid();
+    if (reactor_owned && rp_subreaper()) _exit(2);
     join(p, dir, "bg.log");
     log = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
     null = sy_open("/dev/null", O_RDONLY, 0);
@@ -346,12 +349,24 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
     close(gate[1]);
     end = sy_now_ms() + hard_s * 1000;
     turns = hard_s * 4 + 16;
+    int cancelled = 0, residue = 0;
+    char cancel_path[BG_PATH];
+    join(cancel_path, base, "react.cancel");
     for (i = 0; i < turns; i++) {
         w = sy_wait_status(pid, 1, &exited, &code, &sig);
         if (w == pid || w < 0 || sy_now_ms() >= end) break;
+        if (reactor_owned && sy_exists(cancel_path) == 1) {
+            /* Only the owning guard signals its still-unreaped child. */
+            char report_text[512];
+            cancelled = 1;
+            residue = rp_kill_tree(pid, 2000, 0, 0, report_text, sizeof report_text);
+            break;
+        }
         (void)sy_sleep_ms(500);
     }
-    if (w == pid) {
+    if (cancelled) {
+        rc = 125; why = residue ? "cancel-residue" : "react-cancelled";
+    } else if (w == pid) {
         rc = exited ? code : 128 + sig;
         if (!exited) why = "signal";
     } else if (w < 0) {
@@ -361,7 +376,7 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
         (void)sy_wait_status(pid, 0, 0, 0, 0);
         rc = 124; why = "deadline-killed";
     }
-    if (kill(-pid, 0) == 0) { /* the chain left members of its group behind: not a clean end */
+    if (!cancelled && kill(-pid, 0) == 0) { /* the chain left members of its group behind: not a clean end */
         kill(-pid, SIGKILL);
         if (rc == 0) { rc = 123; why = "residue-killed"; }
     }
@@ -636,6 +651,7 @@ int main(int argc, char **argv) {
         const char *a = argv[i], *b = i + 1 < argc ? argv[i + 1] : 0;
         if (!strcmp(a, "--")) { extra = argv + i + 1; nextra = argc - i - 1; break; }
         if (!strcmp(a, "--check")) { check = 1; continue; }
+        if (!strcmp(a, "--react-owned") && !strcmp(cmd, "start")) { reactor_owned = 1; continue; }
         if (!strcmp(a, "--dry-run")) { dry = 1; continue; }
         if (a[0] != '-' && !only) { only = a; continue; }
         if (!b) return usage();

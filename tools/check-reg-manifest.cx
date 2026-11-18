@@ -57,12 +57,13 @@ static const char *MAN = "batch\tfx\tIMPLEMENTED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.c
 
 static void tables(const char *root, int b, int c, int p, const char *crow) {
     char t[1200];
-    if (cx_fmt(t, sizeof t, "id\n%s\n", BROW)) fatal("b");
+    if (cx_fmt(t, sizeof t, "id\n%s\n", p ? BROW : "fx\tPLANNED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.cx\t-\tl.fx\trc0:FX\tproduct\tcommit")) fatal("b");
     put(root, "tests/batches.tsv", b ? t : "id\n");
     if (cx_fmt(t, sizeof t, "id\n%s\n", crow)) fatal("c");
     put(root, "tests/coverage.tsv", c ? t : "id\n");
     if (cx_fmt(t, sizeof t, "# h\n%s\n", PROW)) fatal("p");
-    put(root, "build/batch-packages.tsv", p ? t : "# h\n");
+    /* Deliberately contradict the registry: a stale optional export has no authority. */
+    put(root, "build/batch-packages.tsv", p ? "# h\n" : t);
 }
 
 /* precommit manifest gate (DSG-REG1 step 2): temp git repo; tables other than the staged ones are already committed,
@@ -81,7 +82,7 @@ static void pc_cases(void) {
     put(td, "tests/batches.tsv", "id\n" "fx\tIMPLEMENTED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.cx\t-\tl.fx\trc0:FX\tproduct\tcommit\n");
     put(td, "tests/coverage.tsv", "id\n");   /* coverage row absent on purpose */
     put(td, "build/batch-packages.tsv", "# h\n" "batch\tfx\tall\t-\t-\t-\t-\t-\t-\n");
-    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv tests/coverage.tsv build/batch-packages.tsv && git commit -q --no-verify -m base", td) || shq(cmd)) fatal("pc base");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv tests/coverage.tsv && git commit -q --no-verify -m base", td) || shq(cmd)) fatal("pc base");
     put(td, "tests/manifests/fx.tsv", MAN);
     put(td, "other.txt", "x\n");
     if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add other.txt && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
@@ -89,11 +90,11 @@ static void pc_cases(void) {
     if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/manifests/fx.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
     rc = shq(cmd); ck(rc == 1 && has("BLOCKED registration manifest") && has("MISSING\ttests/coverage.tsv\tfx"), "precommit-missing-coverage-refused-naming-table");
     put(td, "tests/coverage.tsv", "id\n" "l.fx\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n");
-    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/coverage.tsv && git commit -q --no-verify -m cov && git reset -q && git add tests/manifests/fx.tsv build/batch-packages.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/coverage.tsv && git commit -q --no-verify -m cov && git reset -q && git add tests/manifests/fx.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
     rc = shq(cmd); ck(rc == 0 && !has("BLOCKED registration manifest"), "precommit-all-three-present-passes");
-    /* the index, not the work tree, is what counts: restage the packages table without the row */
-    put(td, "build/batch-packages.tsv", "# h\n");
-    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add build/batch-packages.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
+    /* Drop the staged source row, then restore only the working copy before checking. */
+    put(td, "tests/batches.tsv", "id\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv && git show HEAD:tests/batches.tsv > tests/batches.tsv && sh ./unisacc.com tools/precommit.cx 2>&1", td)) fatal("c");
     rc = shq(cmd); ck(rc == 1 && has("MISSING\tbuild/batch-packages.tsv\tfx"), "precommit-row-dropped-from-staged-table-refused");
     if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td) || shq(cmd)) fatal("cleanup");
 }
