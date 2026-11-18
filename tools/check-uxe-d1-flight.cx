@@ -410,6 +410,95 @@ static int check_pages_auto(int live) {
     return rc;
 }
 
+static unsigned field_hash(int x,int y,int seed) {
+    unsigned n=(unsigned)(x+17)*374761393u ^ (unsigned)(y+29)*668265263u ^ (unsigned)seed*1442695041u;
+    n=(n^(n>>13))*1274126177u;
+    return (n^(n>>16))&255;
+}
+
+static int field_noise(int x,int y,int spacing,int seed) {
+    int u=x/spacing,v=y/spacing,a=x%spacing,b=y%spacing,mask=256/spacing-1;
+    int q0=field_hash(u,v,seed),q1=field_hash((u+1)&mask,v,seed);
+    int q2=field_hash(u,(v+1)&mask,seed),q3=field_hash((u+1)&mask,(v+1)&mask,seed);
+    return (q0*(spacing-a)*(spacing-b)+q1*a*(spacing-b)+q2*(spacing-a)*b+q3*a*b)/(spacing*spacing);
+}
+
+static int down_ratio(int numerator,int denominator) {
+    return (numerator<0?numerator-denominator+1:numerator)/denominator;
+}
+
+static int terrain_band(int x,int y,int seed) {
+    static const int islands[][4]={{162,82,44,62},{68,103,32,42},{227,65,32,26},{92,29,40,30},{188,15,58,37}};
+    static const int stops[]={-25,-8,0,8,28,55,101};
+    int i,peak=-49,elevation;
+    for(i=0;i<5;i++) {
+        const int *a=islands[i];
+        int dx=abs(a[0]-x),dy=abs(a[1]-y),ground;
+        if(dx>128) dx=256-dx;
+        if(dy>128) dy=256-dy;
+        ground=93-96*dx*dx/(a[2]*a[2])-96*dy*dy/(a[3]*a[3]);
+        if(ground>peak) peak=ground;
+    }
+    elevation=peak+down_ratio(35*(field_noise(x,y,32,seed)-128),100)
+        +down_ratio(field_noise(x,y,8,seed+3)-128,5)
+        +down_ratio(7*(field_noise(x,y,2,seed+5)-128),100);
+    for(i=0;i<7 && elevation>=stops[i];i++) {}
+    return i;
+}
+
+static int take_channel(const char **p,int end) {
+    int value=number(p);
+    if(value<0 || value>255 || (end && **p!=end)) return -1;
+    if(end) *p=*p+1;
+    return value;
+}
+
+static int check_terrain(const char *mutation) {
+    static const int palette[][3]={{29,74,112},{43,108,143},{68,148,164},{216,190,133},
+        {94,148,77},{66,123,67},{52,95,62},{111,111,114}};
+    char cwd[1024],url[2300],*out=0;
+    const char *p;
+    int x,y,at,n=0,i,j,failed=0,green=0,land=0,sea=0,foam=0,counts[8]={0},want[32];
+    if(!getcwd(cwd,sizeof cwd)) return input_error("terrain-cwd",0);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-pixel-a.html?%s&terrain=",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return input_error("terrain-url",0);
+    for(y=1;y<256;y+=3) for(x=1;x<256;x+=3) {
+        int kind=terrain_band(x,y,7),size;
+        if(counts[kind]>=4 || terrain_band(x,y,31)==kind) continue;
+        size=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",n?";":"",x,y);
+        if(size<0 || size>=(int)sizeof url-at) return input_error("terrain-url",0);
+        at+=size;
+        counts[kind]++;
+        want[n++]=kind;
+    }
+    for(i=0;i<8;i++) if(counts[i]<3) return input_error("terrain-probe-coverage",0);
+    p=browser(url,&out,3);
+    if(!p) return input_error("terrain-browser",out);
+    for(i=0;i<n;i++) {
+        int wrong=0;
+        for(j=0;j<3;j++) {
+            int next=i==n-1 && j==2?'|':',';
+            int value=take_channel(&p,next);
+            if(value<0) return input_error("terrain-swatch",out);
+            wrong+=value!=palette[want[i]][j];
+        }
+        failed+=wrong>0;
+    }
+    for(i=0;i<30*107;i++) {
+        int r=take_channel(&p,','),g=take_channel(&p,','),b=take_channel(&p,i+1<30*107?',':0);
+        if(r<0 || g<0 || b<0) return input_error("terrain-frame",out);
+        if(g>r+15 && g>b+8) { green++; land++; }
+        else if((r>=g+14 && g>=b+23) || (r>=75 && r<155 && abs(r-g)<=11 && abs(g-b)<=12)) land++;
+        if(b>r+20 && b>g) sea++;
+        if(g>=175 && r>=110 && b>=g-15 && b<=g+30) foam++;
+    }
+    if(strncmp(p,"</output>",9)) return input_error("terrain-trailer",out);
+    free(out);
+    printf("D1_TERRAIN swatches=%d band_errors=%d land=%d/3210 green=%d water=%d foam=%d\n",
+        n,failed,land,green,sea,foam);
+    return failed || land<550 || green<350 || sea<320 || foam<20;
+}
+
 int main(int argc,char **argv) {
     int rc;
     if(argc==1) {
@@ -419,6 +508,8 @@ int main(int argc,char **argv) {
     if(argc==2 && !strcmp(argv[1],"pages")) return check_world("",1);
     if(argc==2 && !strcmp(argv[1],"pages-auto")) return check_pages_auto(0);
     if(argc==2 && !strcmp(argv[1],"pages-live")) return check_pages_auto(1);
+    if(argc==2 && !strcmp(argv[1],"terrain")) return check_terrain("");
+    if(argc==2 && (!strcmp(argv[1],"wrong-seed") || !strcmp(argv[1],"wrong-bands"))) return check_terrain(argv[1]);
     if(argc==2 && !strcmp(argv[1],"world")) return check_world("",0);
     if(argc==2 && (!strcmp(argv[1],"frozen-position") || !strcmp(argv[1],"frozen-hud")))
         return check_world(argv[1],0);

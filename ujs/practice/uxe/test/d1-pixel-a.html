@@ -12,6 +12,7 @@
 <script src="../demo/host1-runtime.js"></script>
 <script type="module">
 import { drawAircraft } from "./d1-pixel-aircraft.js";
+import { pixelWorld } from "./d1-pixel-world.js";
 
 const low=document.createElement("canvas");
 low.width=426;
@@ -21,8 +22,7 @@ const display=document.querySelector("canvas").getContext("2d");
 display.imageSmoothingEnabled=false;
 const result=document.querySelector("output");
 const query=new URLSearchParams(location.search);
-const sky=["#497998","#6393ad","#81a8b9","#9dbbc5","#b8ccd1","#c9d8d5"];
-const sea=["#789dad","#59859b","#426f88","#32637f","#2b5977","#204d68"];
+const world=pixelWorld(buffer,query);
 
 const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
 if(!wasm.ok) throw new Error("D1 飞行核读取失败");
@@ -34,8 +34,9 @@ window.onHostGpuSubmit=bytes=>{
   const view=new DataView(bytes);
   if(view.byteLength!==11 || view.getUint8(0)!==3) throw new Error("D1 飞行提交格式错误");
   flight={
-    heading:view.getUint16(1,true), bank:view.getUint8(3)-24, z:view.getUint16(6,true),
-    pitch:view.getUint8(10)-18, speed:view.getUint8(9)
+    heading:view.getUint16(1,true), bank:view.getUint8(3)-24,
+    x:(view.getUint16(4,true)-2048)/8,z:(view.getUint16(6,true)-2048)/8,
+    altitude:view.getUint8(8),pitch:view.getUint8(10)-18,speed:view.getUint8(9)
   };
 };
 function frame(axis,climb,boost) {
@@ -45,26 +46,28 @@ function frame(axis,climb,boost) {
   core.run_step();
   if(!flight) throw new Error("D1 飞行核没有提交本帧");
   tick++;
-  const horizon=120+Math.round(flight.pitch*.45);
-  for(let i=0;i<6;i++) {
-    buffer.fillStyle=sky[i];
-    buffer.fillRect(0,Math.floor(i*horizon/6),426,Math.ceil(horizon/6)+1);
-    buffer.fillStyle=sea[i];
-    buffer.fillRect(0,horizon+Math.floor(i*(240-horizon)/6),426,Math.ceil((240-horizon)/6)+1);
-  }
-  for(let i=0;i<85;i++) {
-    const band=1+((i*59+(4096-flight.z))%119);
-    const y=horizon+Math.floor(band*band*(240-horizon)/14161);
-    const x=(i*137-flight.heading+426)%426;
-    buffer.fillStyle=i%4===0?"#9abcc4":"#517e95";
-    buffer.fillRect(x,y,band>75?2:1,1);
-  }
+  world.paint(flight,tick);
   drawAircraft(buffer,213,158,flight.pitch,flight.bank,flight.speed,tick);
   display.drawImage(low,0,0,1278,720);
 }
 frame(0,0,0);
 if(query.get("still")==="boost") for(let i=0;i<9;i++) frame(0,0,1);
-if(query.has("still")) {
+if(query.has("terrain")) {
+  const dots=query.get("terrain").split(";").map(pair=>pair.split(",").map(Number));
+  const grid=buffer.getImageData(0,0,426,240).data, raw=[];
+  for(let y=123;y<240;y+=4) for(let x=1;x<426;x+=4) {
+    const at=4*(y*426+x);
+    raw.push(grid[at],grid[at+1],grid[at+2]);
+  }
+  const swatch=document.createElement("canvas");
+  swatch.width=dots.length; swatch.height=1;
+  const ink=swatch.getContext("2d");
+  world.swatches(ink,dots);
+  const colors=ink.getImageData(0,0,dots.length,1).data, sampled=[];
+  for(let i=0;i<dots.length;i++) sampled.push(colors[4*i],colors[4*i+1],colors[4*i+2]);
+  result.id="pixels";
+  result.textContent=sampled.join(",")+"|"+raw.join(",");
+} else if(query.has("still")) {
   result.textContent=String(flight.heading);
 } else {
   const keys=new Set();
