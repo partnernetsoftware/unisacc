@@ -1,0 +1,147 @@
+/* tests/run-batch-identity.cx -- tests/run-batch.cx takes a linked material and a dev-product candidate only with
+ * a checked identity, and refuses every weaker form by name.
+ *
+ *   sh ./unisacc.com tests/run-batch-identity.cx -- WORK [RUN_BATCH_CX]
+ *
+ * A private root (a copy of the installed product, a three-row tests/batches.tsv, fixture programs) is run through
+ * the real tests/run-batch.cx (or RUN_BATCH_CX, used to show the controls fail on the runner before the change):
+ *   link-to-file      material given as a link to a regular file         -> PASS, target sha recorded
+ *   plain-file        material given as a regular file (old contract)    -> PASS
+ *   dangling          link to nothing                                    -> rc 2 REFUSE material link dangling
+ *   link-to-dir       link to a directory                                -> rc 2 REFUSE material link target kind
+ *   link-to-fifo      link to a special file                             -> rc 2 REFUSE material link target kind
+ *   loop              a -> b -> a                                        -> rc 2 REFUSE material link loop
+ *   fifo-plain        special file given directly (old contract)         -> rc 2 REFUSE material path kind
+ *   tamper            the batch rewrites the link target                 -> rc 2 REFUSE material identity changed
+ *   dev-ok            --candidate DIR, receipt matches the disk          -> PASS, candidate= the expected identity
+ *   dev-pkg-changed / dev-member-absent / dev-member-link / dev-launcher / dev-receipt-digest
+ *                     one member differs                                 -> rc 2 REFUSE candidate members NAME=..
+ * Prints PASS/FAIL per case and RUN_BATCH_IDENTITY<TAB>assertions=N<TAB>failed=M; exit 0 only when nothing failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char root[4096], work[4400], rr[4600], com[4400], bound[4400], runb[4400], dev[4800], tbase[4400];
+static int assertions, failures;
+
+static void die(const char *s) { sy_eprintf("run-batch-identity: REFUSE %s\n", s); sy_exit(2); }
+static void ck(int ok, const char *name) { assertions++; if (ok) sy_printf("PASS\trun-batch-identity.%s\n", name); else { failures++; sy_printf("FAIL\trun-batch-identity.%s\n", name); } }
+static void at(char *out, size_t cap, const char *rel) { if (cx_fmt(out, cap, "%s/%s", rr, rel)) die(rel); }
+static void put(const char *p, const char *s) { if (cx_write(p, s, (size_t)tx_len(s, 65536))) die(p); }
+static void put_rel(const char *rel, const char *s) { char p[4800]; at(p, sizeof p, rel); put(p, s); }
+static int has(const char *s, size_t n, const char *w) { return s && tx_find(s, (long)n, w, tx_len(w, 512)) >= 0; }
+static void file_sha(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) die(p); cx_sha256_hex(s, n, h); free(s); }
+
+/* run-batch [--candidate DEV] ROOT PARENT ID [MATERIAL]; parent is a fresh dir per call */
+static int calls;
+static np_result batch(int with_dev, const char *id, const char *material) {
+    char *v[20], pp[4800], why[1024]; int n = 0; np_result r;
+    if (cx_fmt(pp, sizeof pp, "%s/p%d", tbase, calls++) || mkdir(pp, 0700)) die("parent");
+    v[n++] = bound; v[n++] = "30"; v[n++] = "sh"; v[n++] = com; v[n++] = runb; v[n++] = "--";
+    if (with_dev) { v[n++] = "--candidate"; v[n++] = dev; }
+    v[n++] = rr; v[n++] = pp; v[n++] = (char *)id; if (material) v[n++] = (char *)material; v[n] = 0;
+    if (np_run(v, root, 0, 40, &r, why, sizeof why)) die(why);
+    return r;
+}
+static void refused(np_result r, const char *text, const char *name) {
+    ck(r.rc == 2 && has(r.err, r.errn, text) && !has(r.out, r.outn, "status=PASS"), name);
+    if (r.rc != 2 || !has(r.err, r.errn, text)) sy_printf("NOTE\t%s\trc=%d\terr=%.*s\n", name, r.rc, (int)(r.errn > 300 ? 300 : r.errn), r.err ? r.err : "");
+    np_free(&r);
+}
+static void passed(np_result r, const char *name) {
+    ck(r.rc == 0 && has(r.out, r.outn, "status=PASS"), name);
+    if (r.rc) sy_printf("NOTE\t%s\trc=%d\terr=%.*s\n", name, r.rc, (int)(r.errn > 300 ? 300 : r.errn), r.err ? r.err : "");
+    np_free(&r);
+}
+static char es[65], ps[65], ns[65];
+static void receipt(const char *product_digest_override) {
+    char e[4900], p[4900], q[4900], l[4900], f[4900], fin[65], buf[16000];
+    if (cx_fmt(e, sizeof e, "%s/entry/candidate", dev) || cx_fmt(p, sizeof p, "%s/pkg-hdr.bin", dev) || cx_fmt(q, sizeof q, "%s/cxdev/pkg.bin", dev) || cx_fmt(l, sizeof l, "%s/unisacc.com", dev)) die("dev paths");
+    file_sha(e, es); file_sha(p, ps); file_sha(q, ns);
+    if (cx_fmt(buf, sizeof buf, "%s\n%s\n", es, ps)) die("fin"); cx_sha256_hex(buf, strlen(buf), fin);
+    if (cx_fmt(buf, sizeof buf, "NOT_RELEASE\tdev-product-v1\ntree\t%s\ntree_fp\t-\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\tLOCAL\n", rr, e, es, p, ps, q, ns, l, product_digest_override ? product_digest_override : fin)) die("receipt");
+    if (cx_fmt(f, sizeof f, "%s/receipt.tsv", dev)) die("receipt path"); put(f, buf);
+}
+static void launcher(const char *extra) {
+    char buf[16000], l[4900];
+    if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=LOCAL (tools/dev-product.cx); lnx/x86_64 only\nexec env UNISA_CONTAINER='%s/pkg-hdr.bin' UNISACC_LOCAL=1 UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\" '%s/entry/candidate' \"$@\"\n%s", dev, dev, dev, extra) || cx_fmt(l, sizeof l, "%s/unisacc.com", dev)) die("launcher");
+    put(l, buf); if (chmod(l, 0755)) die("chmod launcher");
+}
+
+int main(int argc, char **argv) {
+    char p[4800], q[4800], m[4900]; np_result r;
+    if (sy_cwd(root, sizeof root) < 0) die("cwd");
+    if (argc < 2 || argv[1][0] != '/') die("usage: run-batch-identity.cx ABS_WORK [RUN_BATCH_CX]");
+    if (cx_fmt(work, sizeof work, "%s", argv[1]) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) die("paths");
+    if (cx_fmt(runb, sizeof runb, "%s", argc > 2 ? argv[2] : "")) die("runner");
+    if (!runb[0] && cx_fmt(runb, sizeof runb, "%s/tests/run-batch.cx", root)) die("runner");
+    if (sy_exists(work) == 1 && cx_rmtree(work)) die("old work");
+    if (sy_mkdir(work, 0700) || cx_fmt(rr, sizeof rr, "%s/root", work) || sy_mkdir(rr, 0700)) die("work");
+    at(p, sizeof p, "tests"); if (mkdir(p, 0700)) die("tests");
+    /* run-batch takes an output parent below ROOT/out or TMPDIR/unisacc-affected-; the second keeps this
+       private root free of an output directory */
+    {   char tc[4096]; if (!sy_tmpdir() || !realpath(sy_tmpdir(), tc) || cx_fmt(tbase, sizeof tbase, "%s/unisacc-affected-rbi-%d", tc, (int)getpid())) die("tmpdir");
+        if (sy_exists(tbase) == 1 && cx_rmtree(tbase)) die("old tbase"); if (mkdir(tbase, 0700)) die("tbase"); }
+    at(p, sizeof p, "fx"); if (mkdir(p, 0700)) die("fx");
+    if (pp_copy_product(root, rr)) die("copy product");
+    put_rel("tests/coverage.tsv", "id\tlayer\timplementation\texpected_or_gap\tsource\nfx.cov\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture\ttests/readm.cx\n");
+    put_rel("tests/batches.tsv", "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n"
+        "readm\tIMPLEMENTED\tcontract\ttests/readm.cx\tSOURCE\tlnx/x86_64\t20\tm\ttests/readm.cx\t{m}\tfx.cov\trc0:FX\tproduct\n"
+        "tamper\tIMPLEMENTED\tcontract\ttests/tamper.cx\tSOURCE\tlnx/x86_64\t20\tm\ttests/tamper.cx\t{m}\tfx.cov\trc0:FX\tproduct\n"
+        "plain\tIMPLEMENTED\tcontract\ttests/readm.cx\tSOURCE\tlnx/x86_64\t20\t-\ttests/readm.cx\t-\tfx.cov\trc0:FX\tproduct\n");
+    put_rel("tests/readm.cx", "#include <stdio.h>\nint main(void){ puts(\"FX\"); return 0; }\n");
+    put_rel("tests/tamper.cx", "#include <stdio.h>\nint main(int c,char**v){ FILE*f=fopen(v[1],\"a\"); if(!f) return 1; fputs(\"x\",f); fclose(f); puts(\"FX\"); return 0; }\n");
+
+    /* links and the old non-link contract */
+    at(p, sizeof p, "fx/target"); put(p, "target\n");
+    at(q, sizeof q, "fx/link"); if (symlink(p, q)) die("link");
+    if (cx_fmt(m, sizeof m, "m=%s", q)) die("m"); r = batch(0, "readm", m);
+    ck(has(r.err, r.errn, "run-batch: material m link="), "link-to-file-target-sha-recorded"); passed(r, "link-to-file-passes");
+    if (cx_fmt(m, sizeof m, "m=%s", p)) die("m"); passed(batch(0, "readm", m), "plain-file-passes");
+    at(q, sizeof q, "fx/dangling"); if (symlink("/nonexistent-run-batch-identity", q)) die("dangling");
+    if (cx_fmt(m, sizeof m, "m=%s", q)) die("m"); refused(batch(0, "readm", m), "REFUSE material link dangling", "dangling-link-refused");
+    at(p, sizeof p, "fx/dir"); if (mkdir(p, 0700)) die("dir"); at(q, sizeof q, "fx/linkdir"); if (symlink(p, q)) die("linkdir");
+    if (cx_fmt(m, sizeof m, "m=%s", q)) die("m"); refused(batch(0, "readm", m), "REFUSE material link target kind", "link-to-directory-refused");
+    at(p, sizeof p, "fx/fifo"); if (sy_mkfifo(p, 0600)) die("fifo"); at(q, sizeof q, "fx/linkfifo"); if (symlink(p, q)) die("linkfifo");
+    if (cx_fmt(m, sizeof m, "m=%s", q)) die("m"); refused(batch(0, "readm", m), "REFUSE material link target kind", "link-to-special-file-refused");
+    if (cx_fmt(m, sizeof m, "m=%s", p)) die("m"); refused(batch(0, "readm", m), "REFUSE material path kind", "special-file-plain-still-refused");
+    {   char a[4800], b[4800]; at(a, sizeof a, "fx/loop-a"); at(b, sizeof b, "fx/loop-b"); if (symlink(b, a) || symlink(a, b)) die("loop");
+        if (cx_fmt(m, sizeof m, "m=%s", a)) die("m"); refused(batch(0, "readm", m), "REFUSE material link loop", "two-hop-loop-refused"); }
+    at(p, sizeof p, "fx/victim"); put(p, "victim\n"); at(q, sizeof q, "fx/linkvictim"); if (symlink(p, q)) die("linkvictim");
+    if (cx_fmt(m, sizeof m, "m=%s", q)) die("m"); refused(batch(0, "tamper", m), "REFUSE material identity changed", "link-target-tampered-refused");
+
+    /* dev-product candidate */
+    if (cx_fmt(dev, sizeof dev, "%s/dev", work) || mkdir(dev, 0700)) die("dev");
+    if (cx_fmt(p, sizeof p, "%s/entry", dev) || mkdir(p, 0700) || cx_fmt(p, sizeof p, "%s/cxdev", dev) || mkdir(p, 0700)) die("dev dirs");
+    if (cx_fmt(p, sizeof p, "%s/entry/candidate", dev)) die("e"); put(p, "#!/bin/sh\necho FX\n"); if (chmod(p, 0755)) die("chmod entry");
+    if (cx_fmt(p, sizeof p, "%s/pkg-hdr.bin", dev)) die("p"); put(p, "pkg-hdr\n");
+    if (cx_fmt(p, sizeof p, "%s/cxdev/pkg.bin", dev)) die("q"); put(p, "nets\n");
+    launcher(""); receipt(0);
+    {   char lp[4900], lg[65], text[600], want[65], line[200];
+        if (cx_fmt(lp, sizeof lp, "%s/unisacc.com", dev)) die("lp"); file_sha(lp, lg);
+        if (cx_fmt(text, sizeof text, "dev-product-v1\nlauncher\t%s\nentry\t%s\npkg\t%s\nnets_pkg\t%s\n", lg, es, ps, ns)) die("id"); cx_sha256_hex(text, strlen(text), want);
+        if (cx_fmt(line, sizeof line, "candidate=%s\t", want)) die("line");
+        r = batch(1, "plain", 0); ck(has(r.out, r.outn, line), "dev-candidate-identity-in-batch-run"); passed(r, "dev-candidate-passes"); }
+    if (cx_fmt(p, sizeof p, "%s/pkg-hdr.bin", dev)) die("p"); put(p, "pkg-hdr changed\n");
+    refused(batch(1, "plain", 0), "pkg=", "dev-member-content-changed-refused-named");
+    put(p, "pkg-hdr\n"); passed(batch(1, "plain", 0), "dev-candidate-restored-passes");
+    if (cx_fmt(q, sizeof q, "%s/cxdev/pkg.bin", dev) || unlink(q)) die("unlink member");
+    refused(batch(1, "plain", 0), "nets_pkg=", "dev-member-absent-refused-named");
+    put(q, "nets\n");
+    {   char real[4900]; if (cx_fmt(real, sizeof real, "%s/nets.real", dev)) die("real"); put(real, "nets\n"); if (unlink(q) || symlink(real, q)) die("member link");
+        refused(batch(1, "plain", 0), "nets_pkg=", "dev-member-as-link-refused-named"); if (unlink(q)) die("unlink"); put(q, "nets\n"); }
+    launcher("echo extra\n"); refused(batch(1, "plain", 0), "launcher=", "dev-launcher-text-changed-refused-named");
+    launcher(""); receipt("0000000000000000000000000000000000000000000000000000000000000000");
+    refused(batch(1, "plain", 0), ":receipt-digest-mismatch", "dev-receipt-digest-mismatch-refused");
+    receipt(0); passed(batch(1, "plain", 0), "dev-candidate-final-control-passes");
+
+    if (cx_rmtree(tbase)) die("tbase cleanup");
+    sy_printf("RUN_BATCH_IDENTITY\tassertions=%d\tfailed=%d\n", assertions, failures);
+    return failures ? 1 : 0;
+}
