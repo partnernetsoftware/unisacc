@@ -56,7 +56,16 @@
    Table inputs: exec/pipeline/table-deps.tsv is net-deps' static conservative manifest closure.
    Only exec/ paths ending in .tsv are table dependencies; other input kinds are refused, not relabelled.
    Exact recipe/job/artifact literals in the source/use closure and args select those inputs;
-   this is not a proof of computed runtime model selection or current generated-byte equivalence. */
+   this is not a proof of computed runtime model selection or current generated-byte equivalence.
+  Product inputs: tests/batch-product-inputs.tsv (header there) declares what each batch tests. A batch
+  holding a `require` placeholder ({candidate}, {hostcc}, ...) must have an id row (else rc 2
+  BATCH_PRODUCT_INPUT_UNDECLARED); a change under its declared prefixes selects it via=declared. A batch
+  with an id row, or inferred by the `near` row (materials -, only {root}/{out}), takes via=table edges
+  only from the commit-tier closure; when the full closure matched only through a deeper literal chain
+  it is dropped (NARROWED under --plan). Every other via keeps full depth; other batches are unchanged.
+  --no-product-inputs, a missing table or a header-only table give the old output bytes.
+  --plan: list only; each AFFECTED row gains reason= (declared prefixes, model<-naming node, or via:file).
+  Checked by tools/check-affected-product-inputs.cx. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -161,8 +170,8 @@ static void put(Buf *b, const char *s, long n) {
 static void puts_(Buf *b, const char *s) { put(b, s, tx_len(s, CAP)); }
 
 /* ---------- files: one node per realpath ---------- */
-enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE, V_GUARD, V_TABLE };
-static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard", "table"};
+enum { V_NONE = 0, V_SOURCE, V_USE, V_LIT, V_LITUSE, V_ARG, V_ARGUSE, V_GUARD, V_TABLE, V_DECL };
+static const char *via_name[] = {"-", "source", "use", "literal", "literal-use", "arg", "arg-use", "guard", "table", "declared"};
 typedef struct {
     char *key;      /* realpath, or the absolute spelling when it does not resolve */
     char *given;    /* the repo-relative spelling it was first reached by: uses resolve beside it */
@@ -573,8 +582,11 @@ static void load_registry(void) {
     if (tp_visit(root, r, rn, c, cn, &ob, &sum, why, sizeof why)) { fprintf(stderr, "affected: REFUSE metadata %s\n", why); exit(2); }
     if(domain_on)domain_load();
 }
+/* --plan reason: per model, the first closure node (or -1 = an args token) that named it; -2 unset */
+static int model_src[64]; static unsigned long cur_models;
 static void mark_batch(Batch *B) {
     unsigned long models = 0; int ni;
+    for (ni = 0; ni < 64; ni++) model_src[ni] = -2;
     ndirs = 0; epoch++;
     mark_root(B->source);
     if (tx_chr(B->entry, tx_len(B->entry, 4096), '{') < 0 && !tx_eqz(B->entry, B->source)) mark_root(B->entry);
@@ -584,12 +596,16 @@ static void mark_batch(Batch *B) {
         while (*at) {
             long n = 0; char tok[2048];
             while (at[n] && at[n] != ';') n++;
-            models |= model_token(at, n);
+            { unsigned long tb = model_token(at, n); int m; for (m = 0; m < model_count; m++) if ((tb & (1UL << m)) && model_src[m] == -2) model_src[m] = -1; models |= tb; }
             if (n > 0 && at[0] != '{' && n < (long)sizeof tok && tx_chr(at, n, '/') >= 0 && !tx_copy(tok, sizeof tok, at, n)) named(tok, V_ARG);
             at += n; if (*at) at++;
         }
     }
-    for (ni = 0; ni < nnode; ni++) if (node[ni].mark == epoch) models |= node[ni].models;
+    for (ni = 0; ni < nnode; ni++) if (node[ni].mark == epoch && node[ni].models) {
+        int m; for (m = 0; m < model_count; m++) if ((node[ni].models & (1UL << m)) && model_src[m] == -2) model_src[m] = ni;
+        models |= node[ni].models;
+    }
+    cur_models = models;
     for (ni = 0; ni < input_count; ni++) if (models & (1UL << input_model[ni])) mark(input_node[ni], V_TABLE);
 }
 /* the strongest match of the changed files against the current marks: its via, *WHY the file */
@@ -609,7 +625,15 @@ static int match(const int *changed, int nch, int *why) {
 /* 批级记忆:(source,entry,args) 与 changed[] 不变时 mark_batch+match 的结论也不变,而批 id 只影响
    mark_guards(只对 3 个 cross-targets 批生效)。1034 个 IMPLEMENTED SOURCE 批只有 560 个 distinct
    源。命中时直接复用 (v, why),不重算闭包;guard 批仍走完整路径以免漏掉目录守卫。 */
-static char *bkey[4096]; static int bv[4096], bwhy[4096];
+static char *bkey[4096]; static int bv[4096], bwhy[4096], bsrc[4096], bmod[4096];
+/* --plan: for a via=table match on node WHY, the model that pulled the table in (*MOD) and the closure
+   node that named that model (return; -1 = an args token, -2 = none found). Changes no decision. */
+static int table_reason(int why, int *mod) {
+    int k; *mod = -1;
+    for (k = 0; k < input_count; k++)
+        if (input_node[k] == why && (cur_models & (1UL << input_model[k]))) { *mod = input_model[k]; return model_src[input_model[k]]; }
+    return -2;
+}
 static int bslot(const char *k, int create) {
     unsigned long h = hash(k) & 4095; int i;
     for (i = 0; i < 4096; i++) {
@@ -1524,6 +1548,86 @@ static int sym_load(const char *syms) {
 }
 
 static int closure_dump;
+static int plan_on;   /* --plan: list only, each AFFECTED row gains reason= (which model/closure node or via) */
+/* ---------- product-input declarations (tests/batch-product-inputs.tsv, see its header) ----------
+   pi_kind[b]: 0 unchanged full-depth selection, 1 inferred near (exec table edges from the commit-tier
+   closure only), 2 declared (near closure plus a change under one of pi_inputs[b] selects via=declared).
+   A table with no data rows (or --no-product-inputs) leaves every batch at 0: output is the old bytes. */
+static const char *pi_path = "tests/batch-product-inputs.tsv";
+static int pi_off, pi_rows, pi_kind[MAXBATCH]; static char *pi_inputs[MAXBATCH];
+static int pi_ndecl, pi_nnear, pi_narrowed, pi_dhits;
+static int pi_list_has(const char *list, const char *s, long n) {   /* comma list LIST holds exactly S[0..n) */
+    const char *p = list;
+    while (*p) { long m = 0; while (p[m] && p[m] != ',') m++; if (m == n && tx_prefix(p, m, s, n)) return 1; p += m; if (*p) p++; }
+    return 0;
+}
+static void pi_load(void) {
+    size_t n; char *s; long at = 0; int b, bad = 0; char *req[64]; int nreq = 0; char *nearl = 0;
+    char *idk[MAXBATCH], *idv[MAXBATCH]; int nid = 0;
+    if (pi_off) return;
+    s = cx_read(pi_path, &n);
+    if (!s) { if (errno == ENOENT) return; fprintf(stderr, "affected: REFUSE product-inputs read %s errno=%d\n", pi_path, errno); exit(2); }
+    while (at < (long)n) {
+        long end = at; char *f[4]; int nf = 1;
+        while (end < (long)n && s[end] != '\n') end++;
+        if (end == (long)n) { fprintf(stderr, "affected: REFUSE product-inputs requires LF rows\n"); exit(2); }
+        s[end] = 0;
+        if (s[at] && s[at] != '#' && strcmp(s + at, "kind\tkey\tinputs\tbasis")) {
+            char *q; f[0] = s + at;
+            for (q = s + at; *q; q++) if (*q == '\t') { *q = 0; if (nf == 4) break; f[nf++] = q + 1; }
+            if (nf != 4 || !f[1][0] || !f[2][0] || !f[3][0]) { fprintf(stderr, "affected: REFUSE product-inputs row shape near '%s'\n", f[0]); exit(2); }
+            if (tx_eqz(f[0], "require")) { if (nreq == 64) die("product-inputs: too many require rows"); req[nreq++] = f[1]; }
+            else if (tx_eqz(f[0], "near")) { if (nearl) die("product-inputs: one near row"); nearl = f[1]; }
+            else if (tx_eqz(f[0], "id")) {
+                int k; for (k = 0; k < nid; k++) if (tx_eqz(idk[k], f[1])) { fprintf(stderr, "BATCH_PRODUCT_INPUT_DUPLICATE\tid=%s\n", f[1]); exit(2); }
+                if (tx_eqz(f[2], "-")) { fprintf(stderr, "affected: REFUSE product-inputs id row needs inputs\tid=%s\n", f[1]); exit(2); }
+                idk[nid] = f[1]; idv[nid++] = f[2];
+            } else { fprintf(stderr, "affected: REFUSE product-inputs kind '%s'\n", f[0]); exit(2); }
+            pi_rows++;
+        }
+        at = end + 1;
+    }
+    if (!pi_rows) return;
+    { int k; for (k = 0; k < nid; k++) { for (b = 0; b < nbatch && !tx_eqz(batch[b].id, idk[k]); b++) {}
+        if (b == nbatch) { fprintf(stderr, "BATCH_PRODUCT_INPUT_UNKNOWN\tid=%s\n", idk[k]); bad = 1; } } }
+    for (b = 0; b < nbatch; b++) {
+        const char *a = batch[b].args; int k, need = -1, other = 0;
+        for (k = 0; k < nid; k++) if (tx_eqz(idk[k], batch[b].id)) break;
+        if (k < nid) { pi_kind[b] = 2; pi_inputs[b] = idv[k]; pi_ndecl++; continue; }
+        if (!tx_eqz(a, "-")) while (*a) {
+            long m = 0; int r; while (a[m] && a[m] != ';') m++;
+            if (m > 1 && a[0] == '{' && a[m - 1] == '}') {
+                for (r = 0; r < nreq; r++) if (tx_len(req[r], 256) == m && tx_prefix(a, m, req[r], m)) need = r;
+                if (!nearl || !pi_list_has(nearl, a, m)) other = 1;
+            }
+            a += m; if (*a) a++;
+        }
+        if (need >= 0) { fprintf(stderr, "BATCH_PRODUCT_INPUT_UNDECLARED\tid=%s\tplaceholder=%s\taction=add an id row to %s\n", batch[b].id, req[need], pi_path); bad = 1; continue; }
+        if (nearl && !other && tx_eqz(batch[b].materials, "-")) { pi_kind[b] = 1; pi_nnear++; }
+    }
+    if (bad) exit(2);
+}
+static int pi_declared_hit(int b, const int *changed, int nch, int *why) {   /* first changed file under a declared prefix */
+    int k;
+    if (pi_kind[b] != 2) return 0;
+    for (k = 0; k < nch; k++) {
+        int pass, known = sy_exists(node[changed[k]].key) == 1, q;
+        /* a deleted product input still counts while the static table closure names it; a path that neither
+           exists nor is a known table input is not a product input (check-affected unrelated-table-no-model-edge) */
+        for (q = 0; !known && q < input_count; q++) if (input_node[q] == changed[k]) known = 1;
+        if (!known) continue;   /* the resolved repo-relative name, then the spelling given (a symlinked tree resolves outside root) */
+        for (pass = 0; pass < 2; pass++) {
+            const char *d = pass ? node[changed[k]].given : display(changed[k]), *p = pi_inputs[b]; long dn;
+            if (!d) continue;
+            while (d[0] == '.' && d[1] == '/') d += 2;
+            dn = tx_len(d, 8192);
+            while (*p) { long m = 0; while (p[m] && p[m] != ',') m++;
+                if (m > 0 && dn >= m && tx_prefix(d, dn, p, m) && (p[m - 1] == '/' || dn == m || d[m] == '/')) { *why = changed[k]; return 1; }
+                p += m; if (*p) p++; }
+        }
+    }
+    return 0;
+}
 static int materials_dump;  /* --materials-dump: report each declared material's resolved source and stop */
 /* --family-index emits every single-family query in one process. The same indexed lookup serves
    --family NAME; default and repeated-family union dumps retain registry row order byte for byte. */
@@ -1599,6 +1703,9 @@ int main(int argc, char **argv) {
         else if(tx_eqz(argv[a],"--domain")&&a+1<argc){int k=bdom_kind(argv[a+1]);if(k<0){fprintf(stderr,"DOMAIN_REFUSE\treason=unknown-domain\tname=%s\n",argv[a+1]);return 2;}domain_on=domain_filter=1;domain_wanted[k]=1;a+=2;}
         else if (tx_eqz(argv[a], "--tier") && a + 1 < argc) { selected_tier = argv[a+1]; if (strcmp(selected_tier,"commit") && strcmp(selected_tier,"daily") && strcmp(selected_tier,"release")) usage(); lit_unlimited = strcmp(selected_tier, "commit") != 0; a += 2; }
         else if (tx_eqz(argv[a], "--closure-dump")) { closure_dump = 1; a++; }
+        else if (tx_eqz(argv[a], "--plan")) { plan_on = 1; mode_run = 0; a++; }
+        else if (tx_eqz(argv[a], "--no-product-inputs")) { pi_off = 1; a++; }
+        else if (tx_eqz(argv[a], "--product-inputs") && a + 1 < argc) { pi_path = argv[a + 1]; a += 2; }
         else if (tx_eqz(argv[a], "--materials-dump")) { materials_dump = 1; a++; }
         else if (tx_eqz(argv[a], "--family-index")) { family_index = 1; a++; }
         else if (tx_eqz(argv[a], "--family") && a + 1 < argc) {
@@ -1801,24 +1908,40 @@ int main(int argc, char **argv) {
             printf("SYMBOL_NARROW\tstate=%s\treason=%s\tsymbols=%s\n", sym_on ? "on" : "off", sreason, sym_list);
         }
     }
+    pi_load();
     int ndefer = 0, nsymdefer = 0;
     {   long t_reg = sy_now_ms(), t_mark = 0, t_sweep = 0, t_match = 0, t0b, t1b; t_parse = 0; t_walk = 0;
         /* 分段耗时只写 stderr,给人与 tools/list-profile 用,不参与任何判定。 */
         for (b = 0; b < nbatch; b++) {
             if(!domain_accept(b))continue;
             if(selected_tier && !tp_tier_includes(selected_tier,batch[b].tier))continue;
-            int why = -1, v;
+            int why = -1, v, tsrc = -2, tmod = -1;
             char key[8400]; int slot = -1;
             if (cx_fmt(key, sizeof key, "%s\t%s\t%s", batch[b].source, batch[b].entry, batch[b].args)) die("key bound");
             t0b = sy_now_ms();
             if (!batch_has_guard(batch[b].id)) slot = bslot(key, 0);
-            if (slot >= 0) { v = bv[slot]; why = bwhy[slot]; t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b; }
+            if (slot >= 0) { v = bv[slot]; why = bwhy[slot]; tsrc = bsrc[slot]; tmod = bmod[slot]; t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b; }
             else {
                 mark_batch(&batch[b]);
                 t1b = sy_now_ms(); t_mark += t1b - t0b; t0b = t1b;
                 v = match(changed, nch, &why);
                 t_match += sy_now_ms() - t0b;
-                if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; }
+                if (v == V_TABLE) tsrc = table_reason(why, &tmod);
+                if (!batch_has_guard(batch[b].id) && (slot = bslot(key, 1)) >= 0) { bv[slot] = v; bwhy[slot] = why; bsrc[slot] = tsrc; bmod[slot] = tmod; }
+            }
+            if (pi_kind[b]) {   /* product-input narrowing: only table edges change; every other via keeps full depth */
+                int deep = 0, deep_why = why, deep_src = tsrc, deep_mod = tmod;
+                if (v == V_TABLE && lit_unlimited) {
+                    int w2 = -1, v2; lit_unlimited = 0; mark_batch(&batch[b]); v2 = match(changed, nch, &w2); lit_unlimited = 1;
+                    if (v2 == V_NONE) deep = 1; else { v = v2; why = w2; if (v == V_TABLE) tsrc = table_reason(why, &tmod); }
+                }
+                if ((v == V_NONE || deep) && pi_declared_hit(b, changed, nch, &why)) { v = V_DECL; deep = 0; pi_dhits++; }
+                if (deep) {
+                    pi_narrowed++;
+                    if (plan_on) printf("NARROWED\t%s\twhy=%s\tvia=table\treason=deep-model:%s<-%s\n", batch[b].id, display(deep_why),
+                        deep_mod >= 0 ? model_id[deep_mod] : "?", deep_src >= 0 ? display(deep_src) : deep_src == -1 ? "args" : "?");
+                    continue;
+                }
             }
             if (v == V_NONE) continue;
             /* 平台过滤在推迟之前:一台机器跑不了的批既不能被算进 selected,也不能被算进 DEFERRED/full=,否则
@@ -1835,7 +1958,12 @@ int main(int argc, char **argv) {
                 nsymdefer++; continue;
             }
             /* 平台过滤已在上方做完(先过滤后推迟):这里不再重复,否则 nna 会双计。 */
-            printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
+            if (plan_on) {
+                printf("AFFECTED\t%s\twhy=%s\tvia=%s\treason=", batch[b].id, display(why), via_name[v]);
+                if (v == V_TABLE) printf("model:%s<-%s\n", tmod >= 0 ? model_id[tmod] : "?", tsrc >= 0 ? display(tsrc) : tsrc == -1 ? "args" : "?");
+                else if (v == V_DECL) printf("declared:%s\n", pi_inputs[b]);
+                else printf("%s:%s\n", via_name[v], display(why));
+            } else printf("AFFECTED\t%s\twhy=%s\tvia=%s\n", batch[b].id, display(why), via_name[v]);
             sel[nsel++] = b;
         }
         t_sweep = sy_now_ms() - t_reg - t_mark - t_match;
@@ -1846,6 +1974,7 @@ int main(int argc, char **argv) {
     if (iface_narrow) printf("DEFERRED_BY_IFACE_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", ndefer, nsel + nsymdefer, ndefer + nsel + nsymdefer);
     if (sym_on) printf("DEFERRED_BY_SYMBOL_SUMMARY\tdeferred=%d\tselected=%d\tfull=%d\trerun=--full\n", nsymdefer, nsel, ndefer + nsymdefer + nsel);
     printf("AFFECTED_SUMMARY\tchanged=%d\tbatches=%d\tscanned=%d\tnot_applicable=%d\n", nch, nsel, nbatch, nna);
+    if (pi_rows) printf("PRODUCT_INPUTS_SUMMARY\tdeclared=%d\tnear=%d\tnarrowed=%d\tdeclared_hits=%d\ttable=%s\n", pi_ndecl, pi_nnear, pi_narrowed, pi_dhits, pi_path);
     domain_emit(sel,nsel);
     return mode_run ? run(sel, nsel, jobs) : 0;
 }
