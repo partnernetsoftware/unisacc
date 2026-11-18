@@ -478,15 +478,51 @@ static int co_is_path(const char *p, long l, const char *exact) {
     return l == el && tx_same(p, l, exact, el);
 }
 
+static int co_is_dirpref_n(const char *p, long pl, const char *dir, long dl) {
+    if (pl == dl && tx_same(p, pl, dir, dl)) return 1;
+    return pl > dl && p[dl] == '/' && tx_prefix(p, pl, dir, dl);
+}
+
 static int co_is_dirpref(const char *p, long l, const char *dir) {
-    long dl = tx_len(dir, 4096);
-    if (l == dl && tx_same(p, l, dir, dl)) return 1;
-    return l > dl && p[dl] == '/' && tx_prefix(p, l, dir, dl);
+    return co_is_dirpref_n(p, l, dir, tx_len(dir, 4096));
 }
 
 static int co_has_path(const char *p, long l, const char **arr, int n) {
     int i;
     for (i = 0; i < n; i++) if (co_is_path(p, l, arr[i])) return 1;
+    return 0;
+}
+
+static int co_spec_hit(const char *p, long pl, const char *s, long sl) {
+    long star = -1, i;
+    if (sl <= 0 || pl <= 0) return 0;
+    for (i = 0; i < sl; i++) {
+        if (s[i] == '[' || s[i] == '?' || s[i] == ':') return 1;
+        if (s[i] == '*' && star < 0) star = i;
+    }
+    if (star < 0) return sl < 4096 ? co_is_dirpref_n(p, pl, s, sl) : 1;
+    for (i = star + 1; i < sl; i++) if (s[i] == '*' || s[i] == '/') return 1;
+    if (star == 0) {
+        long extl = sl - 1;
+        return extl == 0 || (pl >= extl && tx_suffix(p, pl, s + 1, extl));
+    }
+    if (star >= 2 && s[star - 1] == '/') {
+        long extl = sl - star - 1;
+        return co_is_dirpref_n(p, pl, s, star - 1) && (extl == 0 || (pl >= extl && tx_suffix(p, pl, s + star + 1, extl)));
+    }
+    return 1;
+}
+
+static int co_specs_hit(const char *p, long pl, const char *specs, long slen) {
+    long i = 0;
+    while (i < slen) {
+        long st;
+        while (i < slen && specs[i] == ' ') i++;
+        if (i >= slen) break;
+        st = i;
+        while (i < slen && specs[i] != ' ') i++;
+        if (co_spec_hit(p, pl, specs + st, i - st)) return 1;
+    }
     return 0;
 }
 
@@ -507,9 +543,15 @@ static int co_cas_rebase_on(void) {
     return e && tx_eqz(e, "1");
 }
 
-/* 1 iff all triggered precommit gates have read sets disjoint from basec..new_head and all path[0..np) stayed untouched */
+/* 1 iff tests/precommit-gates.tsv is valid (all known gates present, no unknown gates), all triggered gates'
+   runtime read sets (table pathspecs + generators + cx/ext/tools/cxlib + ratchets scope) are disjoint from
+   basec..new_head, and all path[0..np) stayed untouched */
 static int co_gates_disjoint(const char *basec, const char *new_head, const char **path, int np, const char *del, int nreg, char old[][48]) {
-    int k, g_man = 0, g_tab = 0, g_treg = 0, g_run = 0, g_fac = 0, g_led = 0, g_cx = 0;
+    static const char * const GNAMES[7] = {"manifest", "tables", "toolsreg", "runlist", "facts", "ledger", "cx"};
+    size_t gtn = 0; char *gt = 0; long gat = 0;
+    long sp_off[7] = {0}, sp_len[7] = {0}; int seen[7] = {0};
+    unsigned trig = 0;
+    int k, i;
     char *dbuf = 0; long dlen = 0, at = 0;
     if (!co_std_precommit_hook()) return 0;
     for (k = 0; k < np; k++) {
@@ -517,47 +559,75 @@ static int co_gates_disjoint(const char *basec, const char *new_head, const char
         entry(new_head, path[k], nb, nm);
         if (!tx_eqz(nb, old[k])) return 0;
     }
+    gt = (char *)cx_read("tests/precommit-gates.tsv", &gtn);
+    if (!gt || gtn == 0 || gtn > (1 << 20)) { if (gt) mm_free(gt); return 0; }
+    while (gat < (long)gtn) {
+        long e = tx_chr(gt + gat, (long)gtn - gat, '\n'), l = e < 0 ? (long)gtn - gat : e;
+        if (l > 0 && gt[gat] != '#') {
+            long go = 0, gl = 0, fo = 0, fl = 0, so = 0, sl = 0; int gi = -1;
+            if (tx_field(gt + gat, l, '\t', 0, &go, &gl) || tx_field(gt + gat, l, '\t', 1, &fo, &fl) ||
+                tx_field(gt + gat, l, '\t', 2, &so, &sl) || gl <= 0 || fl <= 0 || sl <= 0) {
+                mm_free(gt); return 0;
+            }
+            for (i = 0; i < 7; i++) if (co_is_path(gt + gat + go, gl, GNAMES[i])) { gi = i; break; }
+            if (gi < 0 || seen[gi]) { mm_free(gt); return 0; }   /* unknown or duplicate gate: fail closed */
+            seen[gi] = 1; sp_off[gi] = gat + so; sp_len[gi] = sl;
+        }
+        gat += l + (e >= 0);
+    }
+    for (i = 0; i < 7; i++) if (!seen[i]) { mm_free(gt); return 0; }
     for (k = 0; k < np; k++) {
         const char *p = path[k]; long pl = tx_len(p, 4096);
-        if (co_is_dirpref(p, pl, "tests/manifests") || co_is_path(p, pl, "tests/batches.tsv") || co_is_path(p, pl, "tests/coverage.tsv")) {
-            g_man = 1; g_tab = 1;
+        for (i = 0; i < 7; i++) {
+            if (i == 2 && !(del[k] || !old[k][0])) continue;   /* toolsreg gates A/D/R/T on tools/*.cx */
+            if (co_specs_hit(p, pl, gt + sp_off[i], sp_len[i])) trig |= (1u << i);
         }
-        if (co_is_path(p, pl, "tools/batch-packages-gen.cx")) g_man = 1;
-        if (co_is_path(p, pl, "tests/tools-compile-sources.tsv")) g_tab = 1;
-        if (co_is_path(p, pl, "tests/batches.tsv") || co_is_path(p, pl, "tests/coverage.tsv")) g_run = 1;
-        if (co_is_dirpref(p, pl, "include") || co_is_dirpref(p, pl, "exec/facts")) g_fac = 1;
-        if (co_is_path(p, pl, "archive/agentwork-retire-2026-11/ledger.tsv")) g_led = 1;
-        if (pl >= 3 && tx_suffix(p, pl, ".cx", 3)) g_cx = 1;
-        if (co_is_dirpref(p, pl, "tools") && pl >= 3 && tx_suffix(p, pl, ".cx", 3) && (del[k] || !old[k][0])) g_treg = 1;
     }
-    if (g_tab) g_treg = 1;
-    if (nreg > 0) { g_man = 1; g_tab = 1; g_treg = 1; g_run = 1; }
-    if (co_diff_z(basec, new_head, 0, &dbuf, &dlen) != 0) return 0;
+    if (trig & (1u << 1)) trig |= (1u << 2);   /* precommit.cx: tables hit also runs toolsreg */
+    if (nreg > 0) trig |= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3);
+    if (co_diff_z(basec, new_head, 0, &dbuf, &dlen) != 0) { mm_free(gt); return 0; }
     while (at < dlen) {
         const char *d = dbuf + at; long dl = tx_len(d, dlen - at);
         if (dl <= 0) break;
         at += dl + 1;
-        if (co_has_path(d, dl, path, np)) { mm_free(dbuf); return 0; }
-        /* global gate infra and runtime helpers */
+        if (co_has_path(d, dl, path, np)) { mm_free(dbuf); mm_free(gt); return 0; }
+        /* global gate infra and runtime libraries read by every .cx gate/generator */
         if (co_is_path(d, dl, "tools/precommit.cx") || co_is_path(d, dl, "tools/precommit-flow.cx") ||
             co_is_path(d, dl, "tests/precommit-gates.tsv") || co_is_path(d, dl, "tools/check-precommit-gates.cx") ||
             co_is_path(d, dl, "unisacc.com") || co_is_path(d, dl, "cxroot.tsv") ||
-            co_is_path(d, dl, "build/freeze.tsv") || co_is_dirpref(d, dl, "tools/cxlib")) { mm_free(dbuf); return 0; }
-        if (g_man && (co_is_dirpref(d, dl, "tests/manifests") || co_is_path(d, dl, "tests/batches.tsv") ||
-            co_is_path(d, dl, "tests/coverage.tsv") || co_is_path(d, dl, "tools/reg-manifest.cx") ||
+            co_is_path(d, dl, "build/freeze.tsv") || co_is_path(d, dl, "build/tlib-packages.tsv") ||
+            co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") || co_is_dirpref(d, dl, "tools/cxlib")) {
+            mm_free(dbuf); mm_free(gt); return 0;
+        }
+        for (i = 0; i < 7; i++) {
+            if (!(trig & (1u << i))) continue;
+            if (co_specs_hit(d, dl, gt + sp_off[i], sp_len[i])) { mm_free(dbuf); mm_free(gt); return 0; }
+        }
+        if ((trig & (1u << 0)) && (co_is_path(d, dl, "tools/reg-manifest.cx") ||
             co_is_path(d, dl, "tools/batch-packages-gen.cx") || co_is_dirpref(d, dl, "build/layer-api") ||
-            co_is_path(d, dl, "build/tlib-packages.tsv") || co_is_path(d, dl, "build/batch-packages.tsv"))) { mm_free(dbuf); return 0; }
-        if (g_tab && (co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "tools/tables-gen.cx"))) { mm_free(dbuf); return 0; }
-        if (g_treg && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests"))) { mm_free(dbuf); return 0; }
-        if (g_run && (co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "tools"))) { mm_free(dbuf); return 0; }
-        if (g_fac && (co_is_dirpref(d, dl, "include") || co_is_dirpref(d, dl, "exec/facts") || co_is_path(d, dl, "tools/facts-gen.cx"))) { mm_free(dbuf); return 0; }
-        if (g_led && (co_is_path(d, dl, "archive/agentwork-retire-2026-11/ledger.tsv") || co_is_path(d, dl, "tools/ledger-add.cx"))) { mm_free(dbuf); return 0; }
-        if (g_cx && ((dl >= 3 && tx_suffix(d, dl, ".cx", 3)) ||
-            co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") || co_is_dirpref(d, dl, "include") ||
-            co_is_dirpref(d, dl, "exec") || co_is_dirpref(d, dl, "src") || co_is_dirpref(d, dl, "build") ||
-            co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "tools"))) { mm_free(dbuf); return 0; }
+            co_is_path(d, dl, "build/batch-packages.tsv"))) { mm_free(dbuf); mm_free(gt); return 0; }
+        if ((trig & (1u << 1)) && (co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "tools/tables-gen.cx") ||
+            co_is_path(d, dl, "build/batch-packages.tsv"))) { mm_free(dbuf); mm_free(gt); return 0; }
+        if ((trig & (1u << 2)) && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests"))) {
+            mm_free(dbuf); mm_free(gt); return 0;
+        }
+        if ((trig & (1u << 3)) && (co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "tools") ||
+            co_is_path(d, dl, "build/batch-packages.tsv"))) { mm_free(dbuf); mm_free(gt); return 0; }
+        if ((trig & (1u << 4)) && (co_is_dirpref(d, dl, "include") || co_is_dirpref(d, dl, "exec") ||
+            co_is_dirpref(d, dl, "src") || co_is_path(d, dl, "tools/facts-gen.cx") ||
+            co_is_path(d, dl, "tools/pp-autoinc-gen.cx"))) { mm_free(dbuf); mm_free(gt); return 0; }
+        if ((trig & (1u << 5)) && (co_is_path(d, dl, "archive/agentwork-retire-2026-11/ledger.tsv") ||
+            co_is_path(d, dl, "tools/ledger-add.cx"))) { mm_free(dbuf); mm_free(gt); return 0; }
+        if ((trig & (1u << 6)) && ((dl >= 3 && tx_suffix(d, dl, ".cx", 3)) ||
+            (dl >= 2 && tx_suffix(d, dl, ".c", 2)) || (dl >= 2 && tx_suffix(d, dl, ".h", 2)) ||
+            (dl >= 4 && tx_suffix(d, dl, ".tsv", 4)) ||
+            co_is_dirpref(d, dl, "include") || co_is_dirpref(d, dl, "exec") || co_is_dirpref(d, dl, "src") ||
+            co_is_dirpref(d, dl, "build") || co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "tools") ||
+            co_is_dirpref(d, dl, "kernel") || co_is_dirpref(d, dl, "weights") ||
+            co_is_dirpref(d, dl, "apps") || co_is_dirpref(d, dl, "ujs"))) { mm_free(dbuf); mm_free(gt); return 0; }
     }
     mm_free(dbuf);
+    mm_free(gt);
     return 1;
 }
 
@@ -605,8 +675,7 @@ static int co_derive_disjoint(const char *rb, const char *basec, const char *dou
         if (co_is_path(d, dl, "cxroot.tsv") || co_is_path(d, dl, "tools/derive.cx") ||
             co_is_path(d, dl, "tools/cxlib/globspan.cx") || co_is_path(d, dl, "tools/derive-inputs.tsv") ||
             co_is_path(d, dl, "exec/facts/derive.tsv") || co_is_path(d, dl, "unisacc.com")) { mm_free(dbuf); return 0; }
-        if (mask && (co_is_dirpref(d, dl, "cx/sys") || co_is_dirpref(d, dl, "cx/text") ||
-            co_is_dirpref(d, dl, "cx/mem") || co_is_dirpref(d, dl, "tools/cxlib"))) { mm_free(dbuf); return 0; }
+        if (mask && (co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") || co_is_dirpref(d, dl, "tools/cxlib"))) { mm_free(dbuf); return 0; }
         if ((mask & (1u << 0)) && (co_is_dirpref(d, dl, "tools") || co_is_dirpref(d, dl, "tests") || co_is_dirpref(d, dl, "cx"))) { mm_free(dbuf); return 0; }
         if ((mask & (1u << 1)) && (co_is_dirpref(d, dl, "tests") || co_is_path(d, dl, "tools/tables-gen.cx"))) { mm_free(dbuf); return 0; }
         if ((mask & (1u << 2)) && (co_is_dirpref(d, dl, "cx") || co_is_dirpref(d, dl, "ext") ||
@@ -966,13 +1035,14 @@ int main(int argc, char **argv) {
     }
     t_pend = sy_now_ms() - t0 - t_sel;
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
-    {   char old[CO_MAX][48], newc[64], basec[64], newfull[64] = "", groot[420]; int rc;
+    {   char old[CO_MAX][48], newc[64], basec[64], orig_basec[64], newfull[64] = "", groot[420]; int rc, cas_skipped = 0;
         static char dout[32768];
         if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
         np0 = np;
 again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
-        np = np0; nder = 0; dout[0] = 0;
+        np = np0; nder = 0; dout[0] = 0; cas_skipped = 0;
         {   char *v[] = {"git", "rev-parse", "HEAD", 0}; if (run(v, basec, sizeof basec) != 0 || tx_len(basec, sizeof basec) != 40) co_die("git rev-parse HEAD failed", 0); }
+        tx_copy(orig_basec, sizeof orig_basec, basec, 40); orig_basec[40] = 0;
         for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
         {   const char *ew = 0, *ep = 0;
             if (co_build_idx(idx, basec, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
@@ -1181,25 +1251,30 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                         char nb[48], nm[8]; entry(new_head, path[k], nb, nm);
                         if (!tx_eqz(nb, old[k])) { all_same = 0; break; }
                     }
-                    if (all_same && co_cas_rebase_on() && co_gates_disjoint(basec, new_head, path, np, del, nreg, old) &&
-                        (!derive || co_derive_disjoint(basec, new_head, dout, path, np0, dpath, nder))) {
-                        const char *ew = 0, *ep = 0; char oldb[64];
+                    if (all_same && co_cas_rebase_on() && co_gates_disjoint(orig_basec, new_head, path, np, del, nreg, old) &&
+                        (!derive || co_derive_disjoint(orig_basec, new_head, dout, path, np0, dpath, nder))) {
+                        const char *ew = 0, *ep = 0; char try_old[CO_MAX][48];
                         att++;
-                        tx_copy(oldb, sizeof oldb, basec, 40); oldb[40] = 0;
-                        tx_copy(basec, sizeof basec, new_head, 40); basec[40] = 0;
-                        for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
-                        if (co_build_idx(idx, basec, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
+                        for (k = 0; k < np; k++) { char m[8]; entry(new_head, path[k], try_old[k], m); }
+                        if (co_build_idx(idx, new_head, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
                             sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_die(ew, ep);
                         }
-                        rc = co_land(msg, basec, newfull, out, sizeof out);
+                        rc = co_land(msg, new_head, newfull, out, sizeof out);
                         if (rc == 0) {
-                            sy_printf("COMMIT_CAS_REBASE\told=%s\tnew=%s\tattempt=%d\n", oldb, basec, att);
-                            sy_printf("NOTE\tHEAD moved (%s -> %s) and gate read sets are disjoint; CAS rebased on new HEAD without rerunning gates\n", oldb, basec);
+                            cas_skipped = 1;
+                            tx_copy(basec, sizeof basec, new_head, 40); basec[40] = 0;
+                            for (k = 0; k < np; k++) { tx_copy(old[k], sizeof old[k], try_old[k], 40); old[k][40] = 0; }
+                            sy_printf("COMMIT_CAS_REBASE\told=%s\tnew=%s\tattempt=%d\n", orig_basec, basec, att);
+                            sy_printf("NOTE\tHEAD moved (%s -> %s) and gate read sets are disjoint; CAS rebased on new HEAD without rerunning gates\n", orig_basec, basec);
                         }
                     } else break;
                 }
-                sy_printf("COMMIT_TIMING\tgates_ms=%ld\tgates_rc=%d\tcas_ms=%ld\tcas_rc=%d\n",
-                    gate_ms, gate_rc, co_ref_ms, co_ref_rc);
+                if (cas_skipped)
+                    sy_printf("COMMIT_TIMING\tgates_ms=%ld\tgates=skipped-by-disjoint-readset\tbase=%s\tcas_ms=%ld\tcas_rc=%d\n",
+                        gate_ms, orig_basec, co_ref_ms, co_ref_rc);
+                else
+                    sy_printf("COMMIT_TIMING\tgates_ms=%ld\tgates_rc=%d\tcas_ms=%ld\tcas_rc=%d\n",
+                        gate_ms, gate_rc, co_ref_ms, co_ref_rc);
             }
             t_commit += sy_now_ms() - tc0;
             co_phase("gates", 0);
@@ -1306,7 +1381,8 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         }
         co_pending_collect();
         printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
-        printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
+        if (cas_skipped) printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tgates=skipped-by-disjoint-readset\tbase=%s\n", newc, np, kept, lost, orig_basec);
+        else printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
         if (lost) {   /* committed, but the shared index does not show the committed state for these paths: loud, with the remedy */
             fprintf(stderr, "COMMIT_OWN_FAIL\tclass=index-unsynced\n");
             fprintf(stderr, "commit-own: commit %s LANDED, but %d shared index entr%s could not be synced (COMMIT_OWN_INDEX_UNSYNCED lines above name each path); "
