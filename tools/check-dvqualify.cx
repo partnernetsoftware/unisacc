@@ -80,13 +80,43 @@ static int gate_fixture(void) {
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
     return !!failed;
 }
+static int kit_fixture(void) {
+    char p[4400],want[65],src[4096]; int rc;
+    const char *table="fixture package table\n";
+    if(cx_fmt(p,sizeof p,"%s/build",repo)||sy_mkdir(p,0700)||
+       cx_fmt(p,sizeof p,"%s/tools",repo)||sy_mkdir(p,0700)||
+       put(repo,"build/tlib-packages.tsv",table,0600)||put(repo,"tools/tlib.cx","/* fixture */\n",0600)||
+       put(repo,"tools/bound","#!/bin/sh\nshift\nexec \"$@\"\n",0755)||
+       !git("add","build","tools",0,0))return 2;
+    char *commit[]={"git","-C",repo,"-c","user.name=f","-c","user.email=f@localhost","commit","-qm","kit",0};
+    if(!runv(commit,repo,15,&rc)||rc||sy_sha256_hex(table,strlen(table),want))return 2;
+    if(cx_fmt(src,sizeof src,"#!/bin/sh\nif [ \"$2\" = -o ]; then cp \"$0\" \"$3\" && chmod 700 \"$3\"; exit $?; fi\n"
+       "if [ \"$1\" = kit ]; then\n test \"$2:$3\" = --jobs:4 || exit 2\n"
+       " if [ -n \"$KIT_TEST_CORRUPT\" ]; then printf 'tlib: TAMPERED\\tfixture\\n' >&2; fi\n"
+       " printf X >> .git/kit-calls\n printf 'PREPARED\\ttlib-kit\\tno-test-result\\n'; exit 0\nfi\n"
+       "if [ \"$1\" = tools/affected.cx ]; then test \"$(cat .git/kit-calls)\" = X || exit 124; fi\n%s",ape_text)||
+       sy_write_file(apep,src,strlen(src),0755))return 2;
+    char *pos[]={"env","QG_CASE=boundary",bin,repo,"--candidate",apep,"--ids","alpha,beta","--out",ev,0};
+    check("kit-before-first-wave",runv(pos,root,15,&rc)&&rc==0&&has(out,"QUALIFY_KIT")&&has(out,want)&&
+          has(out,"alpha\tPASS")&&has(out,"beta\tPASS"));
+    char *neg[]={"env","KIT_TEST_CORRUPT=1",bin,repo,"--candidate",apep,"--ids","alpha",0};
+    check("kit-tampered-refused",runv(neg,root,15,&rc)&&rc!=0&&has(out,"kit-tampered")&&!has(out,"QUALIFY_BATCH"));
+    printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
+    return !!failed;
+}
 int main(int argc, char **argv) {
     char why[512]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
     int gate=argc==2 && !strcmp(argv[1],"--gate");
-    if (gate) { /* The deterministic gate probe is built after the fixture repository. */ }
-    else if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
-    else { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    int kit=argc==2 && !strcmp(argv[1],"--kit");
+    if (!gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else if(kit) {
+        const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
+        if(cx_fmt(bin,sizeof bin,"%s/dvqualify",tmp))return 2;
+        char *v[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",bin,0};
+        if(!runv(v,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
+    }
+    else if(!gate) { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
     if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || cx_fmt(apep, sizeof apep, "%s/ape.com", tmp) || cx_fmt(ev, sizeof ev, "%s/ev.tsv", tmp) ||
         cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp)) return 2;
     /* fixture repository with a domain index and one committed file */
@@ -98,6 +128,7 @@ int main(int argc, char **argv) {
     { char *v[] = {"git", "-C", repo, "-c", "user.name=f", "-c", "user.email=f@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture", 0};
       if (!runv(v, 0, 30, &rc) || rc) { fprintf(stderr, "fixture commit failed: %s\n", out); return 2; } }
     { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(apep, &b, &n, 1 << 20) || sy_sha256_hex(b, (long)n, sha)) return 2; free(b); }
+    if(kit){int r=kit_fixture();char *del[]={"rm","-rf",tmp,0};runv(del,0,20,&rc);return r;}
     if(gate){
         char script[4096];
         if(cx_fmt(script,sizeof script,"#!/bin/sh\nif [ \"$1\" != --version ]; then printf X >> \"$QG_STARTS\"; [ \"$4\" != no-receipt ] || exit 1; fi\n%s",ape_text) ||

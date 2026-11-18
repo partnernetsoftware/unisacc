@@ -324,6 +324,51 @@ static int build_layout(void) {
     return 0;
 }
 
+/* Run the layout's producer once, before any batch window starts. It verifies
+ * the shared kit and publishes complete material under tp_kit_key. */
+static int prepare_kit(void) {
+    char table[4400],source[4400],key[65],why[512]="";
+    sy_stat_t st;
+    if(cx_fmt(table,sizeof table,"%s/build/tlib-packages.tsv",lay) ||
+       cx_fmt(source,sizeof source,"%s/tools/tlib.cx",lay))return die("kit path",0);
+    int ts=sy_stat(table,&st),ss=sy_stat(source,&st);
+    if(ts==-ENOENT && ss==-ENOENT)return 0; /* standalone registry without tlib */
+    unsigned char *bytes=0;int64_t length=0;
+    if(ts||ss||sy_read_file(table,&bytes,&length,16L<<20))return die("kit inputs ",table);
+    int failed=sy_sha256_hex(bytes,length,key);
+    free(bytes);
+    if(failed)return die("kit package hash ",table);
+    char lock[4400];
+    if(cx_fmt(lock,sizeof lock,"%s/.git/qualify-kit.lock",lay))return die("kit lock path",0);
+    int fd=open(lock,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
+    if(fd<0)return die("kit lock ",lock);
+    long limit=sy_now_ms()+55000;
+    for(;;){
+        int lk=sy_flock(fd,6);
+        if(!lk)break;
+        if(lk!=-EAGAIN || sy_now_ms()>=limit){sy_close(fd);return die("kit lock unavailable ",lock);}
+        sy_sleep_ms(100);
+    }
+    char producer[4400];
+    if(cx_fmt(producer,sizeof producer,"%s/kit-producer",outlog) ||
+       tq_native(lay,source,producer,why,sizeof why)){
+        sy_close(fd);return die("kit producer preparation ",why);
+    }
+    char *v[]={producer,"kit","--jobs","4",0};
+    np_result r={0};long start=sy_now_ms();
+    int transport=np_run(v,lay,0,60,&r,why,sizeof why);
+    sy_close(fd);
+    int tampered=r.err && strstr(r.err,"tlib: TAMPERED\t");
+    int prepared=!transport && !r.rc && !tampered && r.out && strstr(r.out,"PREPARED\ttlib-kit\t");
+    fprintf(stderr,"QUALIFY_KIT\t%s\tcandidate=%s\tpackages=%s\trc=%d\tms=%ld\n",
+            prepared?"PREPARED":"REFUSED",sha,key,transport?-1:r.rc,sy_now_ms()-start);
+    if(!prepared && r.errn)fwrite(r.err,1,r.errn,stderr);
+    np_free(&r);
+    if(tampered)return die("kit-tampered ",table);
+    if(!prepared)return die("kit-preparation ",why);
+    return 0;
+}
+
 static int load_receipts(const char *path) {
     FILE *file = fopen(path, "r");
     if (!file) return 1;
@@ -439,6 +484,7 @@ int main(int argc, char **argv) {
     static int pending[MAXB], retry[MAXB];
     int count = 0, completed = 0, number = 0;
     for (int i = 0; i < nb; i++) if (!resumed[i]) pending[count++] = i;
+    if(count && prepare_kit()){if(outp)fclose(f);return 2;}
     prepare_first(pending,count,jobs);
     long stop = t0 + 1720000L;
     while (completed < count && sy_now_ms() < stop) {
