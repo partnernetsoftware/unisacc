@@ -36,6 +36,10 @@
  * rc 0 rows printed, 1 no rows, 2 usage or I/O error.  No repository path is fixed here.  Check: tools/check-rel.cx. */
 #pragma unisa use cxlib.cxroot
 #pragma unisa use cxlib.platformscope
+#pragma unisa use net.unix
+#pragma unisa use net.tcp
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.time
@@ -385,6 +389,69 @@ static void ensure_default(char *out, size_t cap, const char *name, const char *
     free(o);
 }
 
+static int svc_sock(char *sock, size_t cap) {
+    const char *env = getenv("UNISACC_DEVSVC_DIR"), *home = getenv("HOME"), *nosvc = getenv("UNISACC_REL_NOSVC");
+    char gp[8192], real[8192], cmd[8400], hex[65]; char *o = 0; size_t on = 0;
+    if (nosvc && !strcmp(nosvc, "1")) return -1;
+    if (env && *env) return cx_fmt(sock, cap, "%s/sock", env) ? -1 : (sy_exists(sock) == 1 ? 0 : -1);
+    if (!home || !*home) return -1;
+    if (cx_fmt(gp, sizeof gp, "%s/.git", root)) return -1;
+    if (sy_exists(gp) != 1) return -1;
+    {   sy_stat_t st;
+        if (sy_stat(gp, &st) == 0 && st.kind == 'd' && sy_realpath(gp, real, (int)sizeof real) >= 0) {
+            if (sy_sha256_hex(real, (long)strlen(real), hex)) return -1;
+            hex[16] = 0;
+            if (cx_fmt(sock, cap, "%s/.cache/unisacc/devsvc/%s/sock", home, hex)) return -1;
+            return sy_exists(sock) == 1 ? 0 : -1;
+        }
+    }
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --path-format=absolute --git-common-dir 2>/dev/null", root)) return -1;
+    if (cx_run_timeout(cmd, 5, &o, &on) != 0 || !o || on == 0) { free(o); return -1; }
+    while (on > 0 && (o[on - 1] == '\n' || o[on - 1] == '\r')) o[--on] = 0;
+    if (on == 0 || sy_sha256_hex(o, (long)on, hex)) { free(o); return -1; }
+    free(o);
+    hex[16] = 0;
+    if (cx_fmt(sock, cap, "%s/.cache/unisacc/devsvc/%s/sock", home, hex)) return -1;
+    return sy_exists(sock) == 1 ? 0 : -1;
+}
+
+static long svc_hdr_num(const char *hdr, long hl, const char *key) {
+    long kl = (long)strlen(key), p = tx_find(hdr, hl, key, kl);
+    return p >= 0 ? atol(hdr + p + kl) : -1;
+}
+
+/* Query resident devsvc relation graph; returns 0/1 when answered by service, -1 to fall back locally. */
+static int try_svc(const char *req) {
+    char sock[8192], chunk[16384]; int fd; sy_deadline_t d;
+    char *buf = 0; size_t cap = 0, n = 0; long r;
+    if (svc_sock(sock, sizeof sock) != 0) return -1;
+    fd = sy_unix_connect(sock, sy_deadline_in(300));
+    if (fd < 0) return -1;
+    d = sy_deadline_in(30000);
+    if (sy_send_all_until(fd, req, (long)strlen(req), d) || sy_send_all_until(fd, "\n", 1, d)) { sy_close(fd); return -1; }
+    while ((r = sy_recv_until(fd, chunk, sizeof chunk, d)) > 0) {
+        if (n + (size_t)r + 1 > cap) {
+            size_t nc = cap ? cap * 2 : 32768; char *nb;
+            while (nc < n + (size_t)r + 1) nc *= 2;
+            nb = realloc(buf, nc);
+            if (!nb) { free(buf); sy_close(fd); return -1; }
+            buf = nb; cap = nc;
+        }
+        if (mm_copy(buf + n, (long)(cap - n), chunk, r)) { free(buf); sy_close(fd); return -1; }
+        n += (size_t)r; buf[n] = 0;
+    }
+    sy_close(fd);
+    if (!buf || n < 7 || memcmp(buf, "OK\trel\t", 7)) { free(buf); return -1; }
+    {   long nl = tx_chr(buf, (long)n, '\n'), hl = nl >= 0 ? nl : (long)n;
+        long rc = svc_hdr_num(buf, hl, "\trc="), rms = svc_hdr_num(buf, hl, "\tread_ms="), sms = svc_hdr_num(buf, hl, "\tscan_ms=");
+        if (rc != 0 && rc != 1) { free(buf); return -1; }
+        if (nl >= 0 && (size_t)(nl + 1) < n) { size_t wn = fwrite(buf + nl + 1, 1, n - (size_t)(nl + 1), stdout); (void)wn; }
+        if (timing) fprintf(stderr, "REL_TIMING\tread_ms=%ld\tscan_ms=%ld\n", rms, sms);
+        free(buf);
+        return (int)rc;
+    }
+}
+
 int main(int argc, char **argv) {
     const char *rootarg = ".", *tracked = 0, *closure = 0, *table = 0, *cache = 0, *tiers = 0; char *files[MAXCH], def[8192], def2[8192], cmd[256], nm[64]; int nf = 0, a, tier = 0;
     if (argc < 3) usage();
@@ -405,8 +472,16 @@ int main(int argc, char **argv) {
     if (sy_realpath(rootarg, root, sizeof root) < 0) die("no root", rootarg);
     rootn = (long)strlen(root);
     if (!strcmp(argv[1], "who-uses")) {
+        int def_tr = !tracked;
         if (nf != 1 || closure || table || tier) usage();
         if (!tracked) { ensure_default(def, sizeof def, "tracked.txt", "git ls-files -s -- '*.cx'"); tracked = def; }
+        if (def_tr) {
+            char req[16384];
+            if (!cx_fmt(req, sizeof req, "rel-who-uses\t%s\t%s\t%s\t%d", root, tracked, files[0], timing)) {
+                int sr = try_svc(req);
+                if (sr >= 0) return sr;
+            }
+        }
         return who_uses(files[0], tracked);
     }
     if (!strcmp(argv[1], "path")) {
@@ -420,6 +495,7 @@ int main(int argc, char **argv) {
         return who_calls(files[0], tracked, cache);
     }
     if (!strcmp(argv[1], "impact")) {
+        int def_im = !closure && !table && !links_arg;
         if (tracked) usage();
         if (!closure) {   /* the commit tier's dump has its own (one literal hop) closure, so its own file */
             if (cx_fmt(nm, sizeof nm, tier ? "closure-%s.tsv" : "closure.tsv", tiers) || cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/affected.cx -- --closure-dump%s%s", tier ? " --tier " : "", tier ? tiers : "")) die("path too long", 0);
@@ -427,6 +503,19 @@ int main(int argc, char **argv) {
         }
         if (!table) { if (cx_fmt(def2, sizeof def2, "%s/tests/batches.tsv", root)) die("path too long", 0); table = def2; }
         if (cx_fmt(links_def, sizeof links_def, "%s/build/links.tsv", root)) die("path too long", 0);
+        if (def_im) {
+            char req[16384]; long rk = 0; int okr = 1;
+            if (cx_fmt(req, sizeof req, "rel-impact\t%s\t%d\t%s\t%s\t%s\t0\t%d", root, tier, closure, table, links_def, timing)) okr = 0;
+            else rk = (long)strlen(req);
+            for (a = 0; okr && a < nf; a++) {
+                if (cx_fmt(req + rk, sizeof req - (size_t)rk, "\t%s", files[a])) okr = 0;
+                else rk += (long)strlen(req + rk);
+            }
+            if (okr) {
+                int sr = try_svc(req);
+                if (sr >= 0) return sr;
+            }
+        }
         return impact(files, nf, closure, table, tier);
     }
     usage();

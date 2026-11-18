@@ -67,6 +67,7 @@
 #pragma unisa use net.sock
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.fd
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -77,6 +78,9 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.flowexec
 #pragma unisa use dv.timing
+#pragma unisa use dv.nativestat
+#pragma unisa use dv.relmem
+#pragma unisa use dv.procid
 #pragma unisa use cxlib.flowfile
 #pragma unisa use cxlib.flowdoc
 #pragma unisa use sys.sigwatch
@@ -158,7 +162,7 @@ static int cfg_load(const char *root) {
     return (bad || seen != 127 || nlib != 3) ? -2 : 0;
 }
 
-typedef struct { char name[64]; char owner[64]; long exp; } Lock;
+typedef struct { char name[64]; char owner[64]; long exp; int pid; unsigned long long ticks; } Lock;
 static Lock locks[MAXLOCK]; static int nlock;
 static char ring[RING][EVW]; static long ring_wall[RING]; static long seq;
 static long ring_floor;
@@ -297,8 +301,8 @@ static void ev_add(const char *kind, const char *text) {
 
 /* ---- 锁 ---- */
 static void locks_save(void) {
-    static char b[MAXLOCK * 160]; long n = 0; int i; char p[PW];
-    for (i = 0; i < nlock && n < (long)sizeof b - 160; i++) n += snprintf(b + n, sizeof b - n, "%s\t%s\t%ld\n", locks[i].name, locks[i].owner, locks[i].exp);
+    static char b[MAXLOCK * 256]; long n = 0; int i; char p[PW];
+    for (i = 0; i < nlock && n < (long)sizeof b - 256; i++) n += snprintf(b + n, sizeof b - n, "%s\t%s\t%ld\t%d\t%llu\n", locks[i].name, locks[i].owner, locks[i].exp, locks[i].pid, locks[i].ticks);
     F(p, sizeof p, "%s/locks.tsv", dir);
     if (sy_write_atomic(p, b, n, 0600)) fprintf(stderr, "devsvc: cannot save %s\n", p);
 }
@@ -308,11 +312,14 @@ static void locks_load(void) {
     if (sy_exists(p) != 1 || sy_read_file(p, &b, &n, 1 << 16) || !b) return;
     s = (char *)b;
     while (s < (char *)b + n && nlock < MAXLOCK) {
-        char nm[64], ow[64]; long ex = 0;
+        char nm[64], ow[64]; long ex = 0; int pd = 0, got; unsigned long long tk = 0;
         e = memchr(s, '\n', (char *)b + n - s); if (!e) break;
         *e = 0;
-        if (sscanf(s, "%63[^\t]\t%63[^\t]\t%ld", nm, ow, &ex) == 3) {
-            F(locks[nlock].name, 64, "%s", nm); F(locks[nlock].owner, 64, "%s", ow); locks[nlock].exp = ex; nlock++;
+        got = sscanf(s, "%63[^\t]\t%63[^\t]\t%ld\t%d\t%llu", nm, ow, &ex, &pd, &tk);
+        if (got == 3 || got == 5) {
+            F(locks[nlock].name, 64, "%s", nm); F(locks[nlock].owner, 64, "%s", ow); locks[nlock].exp = ex;
+            locks[nlock].pid = got == 5 ? pd : 0; locks[nlock].ticks = got == 5 ? tk : 0ULL;
+            nlock++;
         }
         s = e + 1;
     }
@@ -326,10 +333,13 @@ static int expd_find(const char *name, const char *owner) {
     return -1;
 }
 static void locks_expire(void) {
-    long now = sy_wall_s(); int i, ch = 0; char t[200];
+    long now = sy_wall_s(); int i, ch = 0; char t[224];
     for (i = 0; i < nlock; ) {
-        if (locks[i].exp <= now) {
-            F(t, sizeof t, "%s\towner=%s", locks[i].name, locks[i].owner); ev_add("lock.expire", t);
+        int dead = locks[i].pid > 0 && !pi_alive(locks[i].pid, locks[i].ticks);
+        if (locks[i].exp <= now || dead) {
+            if (dead) F(t, sizeof t, "%s\towner=%s\tdead_pid=%d", locks[i].name, locks[i].owner, locks[i].pid);
+            else F(t, sizeof t, "%s\towner=%s", locks[i].name, locks[i].owner);
+            ev_add("lock.expire", t);
             expd[nexpd % NEXPD] = locks[i]; nexpd++;
             locks[i] = locks[--nlock]; ch = 1;
         } else i++;
@@ -359,25 +369,43 @@ static long build_tail(char *dst, long cap) {
     free(b);
     return k;
 }
+static void native_dirs(int bypass, const char *hex, char *kd, int kcap, char *mdir, int mcap) {
+    const char *nd = getenv("DEVSVC_NATIVE_DIR"), *ie = getenv(cfg.inst_env); char home[PW], base[PW];
+    base[0] = 0;
+    if (nd && *nd) F(base, sizeof base, "%s", nd);
+    else if ((ie && *ie) || sy_homedir(home, sizeof home) < 0) F(base, sizeof base, "%s/native", dir);
+    else F(base, sizeof base, "%s/%s/native", home, cfg.cache_sub);
+    if (mdir && cx_fmt(mdir, (size_t)mcap, "%s/memo", base)) ovf++;
+    if (kd) {
+        if (bypass) { if (cx_fmt(kd, (size_t)kcap, "%s/native/bypass", dir)) ovf++; }
+        else { if (cx_fmt(kd, (size_t)kcap, "%s/%s", base, hex)) ovf++; }
+    }
+}
+static int native_try_fast(const char *root, const char *tool, char *bin, int cap, long *ms) {
+    char prod[PW], real[PW], mdir[PW]; long t0 = sy_now_ms();
+    if (!root || !tool || !tool[0] || strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -1;
+    F(prod, sizeof prod, "%s/%s", root, cfg.product);
+    if (ovf || sy_realpath(prod, real, sizeof real) < 0) return -1;
+    native_dirs(0, "-", 0, 0, mdir, sizeof mdir);
+    if (ovf || ns_try_hit(mdir, root, tool, real, bin, cap) != 0) return -1;
+    *ms = sy_now_ms() - t0;
+    return 0;
+}
 static int native_get(const char *root, const char *tool, char *bin, int cap, const char **cache, long *ms) {
-    static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], tmp[PW];
-    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc; const char *base; char *dot;
+    static char keysrc[8192]; char src[PW], prod[PW], real[PW], hex[65], dhex[65], trees[400], st[4096], leaf[128], kd[PW], mdir[PW], tmp[PW];
+    unsigned char *b = 0; int64_t n = 0; long t0 = sy_now_ms(); int bypass = 0, rc, lfd = -1; const char *base; char *dot;
     sy_spawn_t o; sy_exit_t ex;
     *ms = 0; *cache = "miss"; nlog[0] = 0;
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
-    /* 键 = 产品字节 sha + 被运行工具 use 传递闭包(产品 -cx-plan 解析)每个文件的工作区内容 sha;
-       闭包外的脏文件或未跟踪文件不影响命中;解析或读失败才 bypass */
     static char cl[1 << 16]; long cn = 0;
     char phex[65]; long rl = (long)strlen(root); int fileref = 0;
-    /* 内容键(v3):键里不含实例根;闭包文件按仓内相对路径记。闭包里出现 __FILE__ 的工具会把源绝对路径编进执行体,
-       这类工具键里保留根,只在同一根复用。缓存目录:DEVSVC_NATIVE_DIR,否则测试实例(inst_env 已设)用实例目录,
-       否则 $HOME 下各实例共用的 native 目录,使不同克隆或工作树共享同内容构造 */
     F(src, sizeof src, "%s/%s", root, tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
     if (sy_exists(src) != 1) return -ENOENT;
     if (sy_realpath(prod, real, sizeof real) < 0) return -ENOENT;
-    if (sy_read_file(real, &b, &n, 1 << 28) || !b) return -ENOENT;
-    if (sy_sha256_hex(b, n, phex)) { free(b); return -EIO; }
-    free(b); b = 0;
+    native_dirs(0, "-", 0, 0, mdir, sizeof mdir);
+    if (ns_try_hit(mdir, root, tool, real, bin, cap) == 0) { *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
+    if (ns_prod_sha(real, mdir, phex)) return -EIO;
+    big[0] = 0;
     {   char *v[] = {"sh", prod, "-cx-plan", src, 0};
         if (runcap(v, big, sizeof big) != 0) bypass = 1; }
     if (!bypass) {
@@ -410,20 +438,18 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     hex[20] = 0;
     base = strrchr(tool, '/'); base = base ? base + 1 : tool;
     F(leaf, sizeof leaf, "%s", base); dot = strrchr(leaf, '.'); if (dot) *dot = 0;
-    {   const char *nd = getenv("DEVSVC_NATIVE_DIR"), *ie = getenv(cfg.inst_env); char home[PW];
-        if (bypass) F(kd, sizeof kd, "%s/native/bypass", dir);   /* bypass 不共享 */
-        else if (nd && *nd) F(kd, sizeof kd, "%s/%s", nd, hex);
-        else if ((ie && *ie) || sy_homedir(home, sizeof home) < 0) F(kd, sizeof kd, "%s/native/%s", dir, hex);
-        else F(kd, sizeof kd, "%s/%s/native/%s", home, cfg.cache_sub, hex); }
+    native_dirs(bypass, hex, kd, sizeof kd, mdir, sizeof mdir);
     if (sy_mkdir_all(kd, 0700) || snprintf(bin, cap, "%s/%s", kd, leaf) >= cap) return -EIO;
-    if (!bypass && sy_exists(bin) == 1) {   /* 命中:每次重算执行体字节 sha 与构造时记下的比对,不符即重建 */
-        char sp[PW + 8], want[80] = "", got[65]; unsigned char *sb = 0; int64_t sn = 0;
-        F(sp, sizeof sp, "%s.sha", bin);
-        if (!sy_read_file(sp, &sb, &sn, 128) && sb && sn >= 64) { mm_copy(want, sizeof want, sb, 64); want[64] = 0; }
-        free(sb); sb = 0;
-        if (want[0] && !sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got) && !strcmp(got, want)) {
-            free(sb); *cache = "hit"; *ms = sy_now_ms() - t0; return 0; }
-        free(sb); sy_unlink(bin);
+    if (!bypass && ns_bin_ok(bin)) {
+        ns_save(mdir, root, tool, real, big, bin);
+        *cache = "hit"; *ms = sy_now_ms() - t0; return 0;
+    }
+    if (!bypass && ns_lock_begin(bin, &lfd) == 0) {
+        if (ns_bin_ok(bin)) {
+            ns_lock_end(lfd);
+            ns_save(mdir, root, tool, real, big, bin);
+            *cache = "hit"; *ms = sy_now_ms() - t0; return 0;
+        }
     }
     if (bypass) *cache = "bypass";
     F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
@@ -435,16 +461,19 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
         if (lf >= 0) sy_close(lf); else nlog[0] = 0; }
     *ms = sy_now_ms() - t0;
     /* 失败时日志留在原处(下次构造同名工具时覆盖),路径与末段由调用方回传 */
-    if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
+    if (rc || sy_exit_code(&ex) != 0 || sy_exists(tmp) != 1) { sy_unlink(tmp); ns_lock_end(lfd); return rc ? rc : -(1000 + sy_exit_code(&ex)); }
     if (nlog[0]) sy_unlink(nlog);
     nlog[0] = 0;
-    if (sy_rename(tmp, bin)) { sy_unlink(tmp); return -EIO; }
+    if (sy_rename(tmp, bin)) { sy_unlink(tmp); ns_lock_end(lfd); return -EIO; }
     if (!bypass) {   /* 记下执行体字节 sha,供命中时校验 */
         unsigned char *sb = 0; int64_t sn = 0; char got[65], sp[PW + 8];
         F(sp, sizeof sp, "%s.sha", bin);
         if (!sy_read_file(bin, &sb, &sn, 1 << 28) && sb && !sy_sha256_hex(sb, sn, got)) (void)sy_write_atomic(sp, got, 64, 0600);
         free(sb);
+        (void)ns_bin_ok(bin);
+        ns_save(mdir, root, tool, real, big, bin);
     }
+    ns_lock_end(lfd);
     return 0;
 }
 
@@ -457,18 +486,22 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     if (!strcmp(f[0], "ping")) { radd("OK\tpong\tpid=%d\tseq=%ld\tlocks=%d\n", sy_pid(), seq, nlock); return 0; }
     if (!strcmp(f[0], "stop")) { radd("OK\tstopping\tpid=%d\n", sy_pid()); return 1; }
     if (!strcmp(f[0], "lock-acquire")) {
-        long ttl = atol(f[3]); char t[200];
+        long ttl = atol(f[3]); char t[224]; int rpid = 0; unsigned long long rtk = 0;
         if (!okname(f[1]) || !okname(f[2]) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+        if (f[4][0] && pi_parse_tag(f[4], &rpid, &rtk) != 0) { rpid = 0; rtk = 0; }
         i = lock_find(f[1]);
         if (i >= 0 && strcmp(locks[i].owner, f[2])) { radd("ERR\theld\t%s\towner=%s\texpires_in_s=%ld\n", f[1], locks[i].owner, locks[i].exp - now); return 0; }
         if (i < 0) {
             if (nlock >= MAXLOCK) { radd("ERR\tfull\tmax=%d\n", MAXLOCK); return 0; }
             i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", f[2]);
             radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
-            F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl); ev_add("lock.acquire", t);
-            locks[i].exp = now + ttl;
-        } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短 */
+            if (rpid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], f[2], ttl, rpid);
+            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl);
+            ev_add("lock.acquire", t);
+            locks[i].exp = now + ttl; locks[i].pid = rpid; locks[i].ticks = rtk;
+        } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短; 且仅同 PID 或原持有者已确认死亡才改绑(P1) */
             if (locks[i].exp < now + ttl) locks[i].exp = now + ttl;
+            if (rpid > 0 && locks[i].pid > 0 && (rpid == locks[i].pid || !pi_alive(locks[i].pid, locks[i].ticks))) { locks[i].pid = rpid; locks[i].ticks = rtk; }
             radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], locks[i].exp - now);
         }
         locks_save(); return 0;
@@ -483,7 +516,10 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     }
     if (!strcmp(f[0], "lock-list")) {
         radd("OK\tlocks\tn=%d\n", nlock);
-        for (i = 0; i < nlock; i++) radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\n", locks[i].name, locks[i].owner, locks[i].exp - now);
+        for (i = 0; i < nlock; i++) {
+            if (locks[i].pid > 0) radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\tpid=%d:%llu\n", locks[i].name, locks[i].owner, locks[i].exp - now, locks[i].pid, locks[i].ticks);
+            else radd("LOCK\t%s\towner=%s\texpires_in_s=%ld\n", locks[i].name, locks[i].owner, locks[i].exp - now);
+        }
         return 0;
     }
     if (!strcmp(f[0], "native")) {
@@ -515,10 +551,25 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
 
 static int try_connect(long ms) { return sy_unix_connect(sockp, sy_deadline_in(ms)); }
 
+#define MAX_NAT_WORKERS 16
+typedef struct { int ls, c; char line[2048]; } NatWork;
+static int nat_pids[MAX_NAT_WORKERS], n_nat;
+static int native_worker(void *ud) {
+    NatWork *w = (NatWork *)ud;
+    int dn = sy_open("/dev/null", O_RDWR, 0);
+    sy_close(w->ls);
+    if (dn >= 0) { if (dn != 1) sy_dup2(dn, 1); if (dn != 2) sy_dup2(dn, 2); if (dn > 2) sy_close(dn); }
+    rn = 0; resp[0] = 0; ovf = 0;
+    (void)handle(w->line);
+    if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; }
+    (void)sy_send_all_until(w->c, resp, rn, sy_deadline_in(58000));
+    sy_close(w->c);
+    return 0;
+}
 static int jobs_gc(void);
 static int flowdir_gc(void);
 static int serve(long ttl, long idle) {
-    int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0, gc_at = 0; char p[PW], line[2048], info[PW + 96];
+    int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0, gc_at = 0; char p[PW], info[PW + 96]; static char line[8192];
     if (ttl <= 0 || ttl > TTL_MAX || idle <= 0) { fprintf(stderr, "devsvc: ttl 1..%d, idle >= 1\n", TTL_MAX); return 2; }
     ls = sy_unix_listen(sockp, 16);
     if (ls == -EADDRINUSE) {
@@ -537,6 +588,11 @@ static int serve(long ttl, long idle) {
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
+        for (int wi = 0; wi < n_nat; ) {
+            int wex = 0, wcd = 0, wsg = 0;
+            if (sy_wait_status(nat_pids[wi], 1, &wex, &wcd, &wsg) != 0) nat_pids[wi] = nat_pids[--n_nat];
+            else wi++;
+        }
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
         if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
         c = sy_tcp_accept(ls, 200);
@@ -552,6 +608,42 @@ static int serve(long ttl, long idle) {
             line[k] = 0; chomp(line); if (strchr(line, '\n')) *strchr(line, '\n') = 0;
             rn = 0; resp[0] = 0;
             ovf = 0;
+            if (k > 0 && !strncmp(line, "rel-", 4)) {
+                char *rb = 0; long rbl = 0;
+                if (rm_handle(line, dir, &rb, &rbl) == 0 && rb) {
+                    (void)sy_send_all_until(c, rb, rbl, sy_deadline_in(5000));
+                    mm_free(rb); sy_close(c); last = sy_now_ms(); continue;
+                }
+                if (rb) mm_free(rb);
+            }
+            if (k > 0 && !strncmp(line, "native\t", 7)) {
+                char *sp1 = strchr(line + 7, '\t');
+                if (sp1 && !strchr(sp1 + 1, '\t')) {
+                    char bin[PW], rbuf[PW]; long nms = 0;
+                    long rl1 = sp1 - (line + 7);
+                    if (rl1 > 0 && rl1 < (long)sizeof rbuf) {
+                        mm_copy(rbuf, sizeof rbuf, line + 7, (size_t)rl1); rbuf[rl1] = 0;
+                        if (native_try_fast(rbuf, sp1 + 1, bin, sizeof bin, &nms) == 0) {
+                            radd("OK\tnative\t%s\tcache=hit\tms=%ld\n", bin, nms);
+                            if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; }
+                            sy_send_all_until(c, resp, rn, sy_deadline_in(2000));
+                            sy_close(c); last = sy_now_ms(); continue;
+                        }
+                    }
+                    if (n_nat < MAX_NAT_WORKERS) {
+                        static NatWork nw; int fds[2], wp;
+                        nw.ls = ls; nw.c = c;
+                        if (!cx_fmt(nw.line, sizeof nw.line, "%s", line)) {
+                            wp = sy_fork_session(native_worker, &nw, fds);
+                            if (wp > 0) {
+                                sy_close(fds[0]); sy_close(fds[1]);
+                                nat_pids[n_nat++] = wp;
+                                sy_close(c); last = sy_now_ms(); continue;
+                            }
+                        }
+                    }
+                }
+            }
             if (k > 0) stop = handle(line); else radd("ERR\tempty-request\n");
             if (ovf) { rn = 0; radd("ERR\toverflow\tfield too long\n"); ovf = 0; stop = 0; }
             sy_send_all_until(c, resp, rn, sy_deadline_in(2000));
@@ -694,6 +786,32 @@ static int cmd_onchange(const char *root, int argc, char **argv) {
     return 0;
 }
 
+static int cmd_rel(const char *root, int argc, char **argv) {
+    char *req = 0, *reply = 0, chunk[16384]; long rlen = 0, rcap = 0, reql = 0, rr; int timing = 0, c, rc; sy_deadline_t d;
+    if (rm_cli_prepare(root, cfg.product, argc, argv, &req, &reql, &timing) != 0) return 2;
+    c = try_connect(1500);
+    if (c < 0) { if (c == -ECONNREFUSED) sy_unlink(sockp); c = spawn_server(root, "1800", "300"); }
+    if (c < 0) { mm_free(req); fprintf(stderr, "devsvc: no instance at %s\n", sockp); return 3; }
+    d = sy_deadline_in(58000);
+    if (sy_send_all_until(c, req, reql, d) || sy_send_all_until(c, "\n", 1, d)) { mm_free(req); sy_close(c); return 3; }
+    mm_free(req);
+    while ((rr = sy_recv_until(c, chunk, sizeof chunk, d)) > 0) {
+        if (rlen + rr + 1 > rcap) {
+            long ncap = rcap ? rcap * 2 : 32768; char *nb;
+            while (ncap < rlen + rr + 1) ncap *= 2;
+            nb = reply ? (char *)mm_grow(reply, ncap) : (char *)mm_alloc(ncap);
+            if (!nb) { mm_free(reply); sy_close(c); return 3; }
+            reply = nb; rcap = ncap;
+        }
+        mm_copy(reply + rlen, rcap - rlen, chunk, rr); rlen += rr; reply[rlen] = 0;
+    }
+    sy_close(c);
+    if (!reply) return 3;
+    rc = rm_cli_finish(reply, rlen, timing);
+    mm_free(reply);
+    return rc;
+}
+
 static int cmd_status(const char *root, int paths) {
     static char wt[1 << 14], st[1 << 18], ps[1 << 16]; char *s, *e, cur[PW], br[128]; int nwt = 0, dirty = 0, nproc = 0, up, nl = 0;
     char *v[] = {"git", "-C", (char *)root, "worktree", "list", "--porcelain", 0};
@@ -785,7 +903,7 @@ static int lk_take(const char *root, const char *name, long ttl, long wait_ms) {
     for (i = 0; i < nheld; i++) if (!strcmp(held[i], name)) return 0;
     if (nheld >= MAXLOCK) { rn = snprintf(resp, sizeof resp, "ERR\tfull\tmax=%d\n", MAXLOCK); return 1; }
     if (ttl > LOCK_TTL_MAX) ttl = LOCK_TTL_MAX;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t%ld", name, fl_owner, ttl);
+    {   char pt[48]; pi_self_tag(0, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%ld\t%s", name, fl_owner, ttl, pt); }
     for (;;) {
         rc = request(root, req, 0);
         if (rc == 0) { F(held[nheld], 64, "%s", name); held_mine[nheld] = !strncmp(resp, "OK\tacquired", 11); nheld++; return 0; }
@@ -1435,8 +1553,9 @@ static const char *lock_for(const char *p) {   /* 路径 -> 锁名;无匹配返�
     return 0;
 }
 static int auto_lock(const char *root, const char *name, const char *ow) {
-    char req[256]; long end = sy_now_ms() + 50000; int rc;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t120", name, ow);
+    char req[256], pt[48]; long end = sy_now_ms() + 50000; int rc;
+    pi_self_tag(0, pt, sizeof pt);
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t120\t%s", name, ow, pt);
     for (;;) {
         rc = request(root, req, 1);
         if (rc == 0) return 0;
@@ -1832,9 +1951,10 @@ static void mg_teardown(void) { char buf[64]; char *v[] = {"rm", "-rf", mg_tmp, 
 #define MG_LOCK_WAIT_MS 3000
 static int mg_locked;
 static int mg_lock(const char *root) {
-    char req[256]; long end = sy_now_ms() + MG_LOCK_WAIT_MS; int rc; const char *ow = auto_owner();
+    char req[256], pt[48]; long end = sy_now_ms() + MG_LOCK_WAIT_MS; int rc; const char *ow = auto_owner();
     mg_locked = 0;
-    F(req, sizeof req, "lock-acquire\t%s\t%s\t60", MG_LOCK, ow); if (ovf) return 1;
+    pi_self_tag(0, pt, sizeof pt);
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t60\t%s", MG_LOCK, ow, pt); if (ovf) return 1;
     for (;;) {
         rc = request(root, req, 1);
         if (rc == 0) { mg_locked = !strncmp(resp, "OK\tacquired", 11); return 0; }
@@ -2547,6 +2667,7 @@ static int main2(int argc, char **argv) {
     }
     if (!strcmp(cmd, "ping") || !strcmp(cmd, "stop")) return say(request(root, cmd, 0));
     if (!strcmp(cmd, "status")) return cmd_status(root, argc > 0 && !strcmp(argv[0], "--paths"));
+    if (!strcmp(cmd, "rel")) return cmd_rel(root, argc, argv);
     if (!strcmp(cmd, "run")) { for(int k=0;k<argc && argv[k][0]!='\0';k++){
         if(argv[k][0]=='-')continue;
         if(report_tool(argv[k])){report_kind="run";report_window=run_deadline_ms;}break;
@@ -2618,7 +2739,12 @@ static int main2(int argc, char **argv) {
         const char *ow = opt(argc, argv, "--owner", "");
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
         if (argc < 2 || !okname(argv[1]) || !okname(ow)) { fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME --owner O (NAME and O non-empty, under 64 bytes, no spaces)\n"); return usage(); }
-        if (!strcmp(argv[0], "acquire")) F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
+        if (!strcmp(argv[0], "acquire")) {
+            const char *lp = opt(argc, argv, "--pid", getenv("DEVSVC_LOCK_PID"));
+            int bp = (lp && lp[0]) ? atoi(lp) : 0;
+            if (bp > 0) { char pt[48]; pi_self_tag(bp, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"), pt); }
+            else F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
+        }
         else if (!strcmp(argv[0], "release")) F(req, sizeof req, "lock-release\t%s\t%s", argv[1], ow);
         else { fprintf(stderr, "devsvc: REFUSE lock-args: unknown lock action %s (acquire|release|list)\n", argv[0]); return usage(); }
         return say(request(root, req, 1));

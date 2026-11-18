@@ -27,6 +27,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.loadavg
 
 #define MAXR 40000
 #define MAXB 4096
@@ -38,11 +39,6 @@ static Def defs[MAXB]; static int nd;
 static char root[4096], ledger[4300], sha[65], domain[64] = "product-qualification";
 
 static int die(const char *a, const char *b) { fprintf(stderr, "DVLEDGER_FAIL\t%s%s\n", a, b ? b : ""); return 2; }
-static double load1(void) {
-    unsigned char *b = 0; int64_t n = 0; double v = 99;
-    if (!sy_read_file("/proc/loadavg", &b, &n, 4096) && b) { char t[64]; long k = n < 63 ? n : 63; mm_copy(t, sizeof t, b, k); t[k] = 0; v = atof(t); }
-    free(b); return v;
-}
 static int is_hex64(const char *s) { if (strlen(s) != 64) return 0; for (int i = 0; i < 64; i++) if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) return 0; return 1; }
 static int split(char *s, char **f, int max) { int n = 0; f[n++] = s; while (*s && n < max) { if (*s == '\t') { *s = 0; f[n++] = s + 1; } s++; } return n; }
 static void cpy(char *d, int cap, const char *s) { cx_fmt(d, cap, "%s", s ? s : ""); }
@@ -225,8 +221,8 @@ static int cmd_run(const char *ape, long budget, int jobs) {
     int pos = 0, per = jobs * 3;
     while (pos < no) {
         long rem = (deadline - sy_now_ms()) / 1000; if (rem < 90) break;
-        while (load1() >= 3 && sy_now_ms() < deadline - 90000) sy_sleep_ms(3000);   /* idle gate, bounded by budget */
-        if (load1() >= 3) { printf("DVLEDGER_IDLE_WAIT_EXPIRED\tload1=%.2f\n", load1()); break; }
+        while (tool_load1() >= 3 && sy_now_ms() < deadline - 90000) sy_sleep_ms(3000);   /* idle gate, bounded by budget */
+        if (tool_load1() >= 3) { printf("DVLEDGER_IDLE_WAIT_EXPIRED\tload1=%.2f\n", tool_load1()); break; }
         rem = (deadline - sy_now_ms()) / 1000;
         char ids[16384] = "", ev[4400], js[16], dq[4400], com[4400]; int k = 0;
         for (; k < per && pos < no; k++, pos++) { long l = strlen(ids); cx_fmt(ids + l, sizeof ids - l, "%s%s", l ? "," : "", defs[order[pos][1]].id); }
@@ -236,7 +232,7 @@ static int cmd_run(const char *ape, long budget, int jobs) {
         char *v[] = {"sh", com, dq, "--", root, "--candidate", (char *)ape, "--ids", ids, "--out", ev, "--jobs", js, 0};
         long outer = rem < 300 ? rem : 300; np_result r = {0}; char why[300]; long rt = sy_now_ms();
         int ex = np_run(v, root, 0, (int)outer, &r, why, sizeof why);
-        printf("DVLEDGER_ROUND\t%d\tbatches=%d\trc=%d\tms=%ld\tload1=%.2f\t%s\n", rounds, k, ex ? -1 : r.rc, sy_now_ms() - rt, load1(), ex ? why : "-");
+        printf("DVLEDGER_ROUND\t%d\tbatches=%d\trc=%d\tms=%ld\tload1=%.2f\t%s\n", rounds, k, ex ? -1 : r.rc, sy_now_ms() - rt, tool_load1(), ex ? why : "-");
         fflush(stdout); np_free(&r); rounds++; ran += k;
         int u = 0; if (!ingest(ev, &u)) unk_total += u;
         fflush(stdout); sy_unlink(ev);
