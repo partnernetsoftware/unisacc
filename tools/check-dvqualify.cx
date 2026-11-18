@@ -41,6 +41,7 @@ static const char *ape_text =
     "git rev-parse --verify HEAD >/dev/null 2>&1 || { echo 'no git inventory'; exit 3; }\n"
     "[ -L ./unisacc.com ] && { echo 'unisacc.com is a link'; exit 4; }\n"
     "s=$(sha256sum ./unisacc.com | cut -c1-64)\n"
+    "if [ \"$4\" = reject ]; then printf 'BATCH_RUN\\tid=reject\\tstatus=FAIL\\trc=1\\tcandidate=%s\\n' \"$s\"; exit 1; fi\n"
     "[ \"$4\" = bad ] && s=0000000000000000000000000000000000000000000000000000000000000000\n"
     "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
 
@@ -90,6 +91,41 @@ int main(int argc, char **argv) {
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
       char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
       check("valid-run-rc0", ok && rc == 0 && has(e, "\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\t")); free(e); }
+    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
+                   "--segment-batches", "2", 0};
+      int ok = runv(v, 0, 40, &rc); char *e = cx_read(ev, 0);
+      check("automatic-segments", ok && rc == 1 && has(e, "# segment=1 batches=2") &&
+            has(e, "# segment=2 batches=2") && has(e, "# segment=3 batches=1")); free(e); }
+    {
+      char *actual=cx_read(ev,0);
+      char *first=actual?strstr(actual,"\nRAW\tBATCH_RUN\tid=alpha\t"):0;
+      char *end=first?strchr(first+1,'\n'):0;
+      if (!end || sy_write_file(ev,actual,end-actual+1,0644)) return 2;
+      free(actual);
+      char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--resume", ev, 0};
+      check("resume-only-unfinished", runv(v, 0, 40, &rc) && rc == 0 &&
+            !has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t"));
+      char row[256];
+      if (cx_fmt(row, sizeof row, "beta\tproduct-qualification\tUNKNOWN\t124\t%s\t60000\t1\t0\tno-BATCH_RUN\n", sha) ||
+          sy_append_file(ev, row, strlen(row), 0644)) return 2;
+      check("resume-latest-unknown-retries", runv(v, 0, 40, &rc) && rc == 0 &&
+            !has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t"));
+      char changed[4096]; if (cx_fmt(changed, sizeof changed, "%s\n# different candidate\n", ape_text) ||
+          sy_write_file(apep, changed, strlen(changed), 0755)) return 2;
+      check("resume-different-ape-runs-both", runv(v, 0, 40, &rc) && rc == 0 &&
+            has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t")); }
+    {
+      char *first[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--out", ev, 0};
+      char *again[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--resume", ev, 0};
+      int ok = runv(first, 0, 40, &rc) && rc == 1 && has(out, "QUALIFY_BATCH\treject\tFAIL");
+      check("resume-keeps-real-fail-retries-invalid", ok && runv(again, 0, 40, &rc) && rc == 1 &&
+            !has(out, "QUALIFY_BATCH\treject\t") && has(out, "QUALIFY_BATCH\tbad\tINVALID"));
+    }
+    { char timing[4400];
+      if(cx_fmt(timing,sizeof timing,"%s/timing",tmp) || tq_native(root,"tools/dvtiming.cx",timing,why,sizeof why))return 2;
+      if(put(tmp,"events.tsv","EV\t1\t100\tphase\tcmd=qualify\tphase=total\tms=123\tinput=fixture\trc=0\tload1=1\tjob=fixture\n",0600))return 2;
+      char *v[]={timing,tmp,"--kind","qualify","--top","0",0};
+      check("timing-includes-qualify",runv(v,root,10,&rc) && rc==0 && has(out,"SUMMARY\tcmd=qualify\tn=1\tp50=123\tp90=123\tsum=123")); }
     /* Q4 the devsvc entry (working copy) routes qualify to this tool (red before the core hook existed) */
     { char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
       check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }

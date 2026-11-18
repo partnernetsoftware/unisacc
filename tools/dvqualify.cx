@@ -1,6 +1,6 @@
 /* dvqualify: strict evidence for one candidate APE in one command (devsvc qualify routes here).
  *   dvqualify ROOT --candidate APE [--set sample|product-qualification] [--ids A,B,..]
- *             [--out FILE] [--jobs N] [--seed N] [--list]
+ *             [--out FILE | --resume FILE] [--jobs N] [--seed N] [--segment-batches N] [--list]
  * (1) Precheck: APE is a regular file, its sha256, and `sh APE --version` actually run.
  * (2) Independent local layout root $TMPDIR/unisacc-qualify-<sha8> (default /tmp), rebuilt
  *     fresh every call: `git -C ROOT archive HEAD` unpacked, ROOT/unisacc.com there is a real
@@ -17,9 +17,13 @@
  *     120 s) while load1 > 6. The BATCH_RUN line is kept verbatim. candidate= must equal the APE
  *     sha256, else the batch is INVALID (evidence validity, not a product rejection). A batch
  *     without a BATCH_RUN line (timeout, crash) is UNKNOWN and is rerun once after load1 < 3
- *     (bounded wait 60 s). Nothing is cached and no earlier evidence is reused.
+ *     (bounded wait 60 s) when the segment has retry budget. Each segment stops launching
+ *     after 240 s and drains its active 60 s windows. Unresolved rows can be retried with
+ *     --resume. Only a terminal row and its matching raw BATCH_RUN for this APE authorize
+ *     skipping that batch. Use the same --seed to resume the same random sample.
  * (5) Evidence TSV to --out (default stdout): batch, domain, status, rc, candidate, ms, load1,
- *     retries, note; then RAW rows with each BATCH_RUN line and one SUMMARY row. With
+ *     retries, note; RAW rows follow their batch. Segment boundaries flush the file.
+ *     A complete run writes SUMMARY. A time-limited partial run writes CHECKPOINT. With
  *     DEVSVC_SOCK set, each batch and the total emit a devsvc timing phase event (cmd=qualify).
  * Exit 0 when every batch has a valid PASS/FAIL result, 1 when any is UNKNOWN or INVALID,
  * 2 for usage or setup errors.
@@ -42,6 +46,7 @@ typedef struct {
 } Batch;
 static Batch bs[MAXB];
 static int nb;
+static int resumed[MAXB];
 static char root[4096], lay[4096], ape[4096], sha[65], version[256], head[64], outlog[4200];
 static const char *sockp, *job_id;
 static char jobbuf[64];
@@ -158,15 +163,19 @@ static int launch(Slot *s, int idx, int attempt) {
     return 0;
 }
 /* Run the given indices, at most jobs at once. */
-static void run_set(int *idx, int count, int jobs, int attempt) {
+static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
     Slot slot[16]; int busy[16] = {0}, next = 0, live = 0;
     if (jobs > 16) jobs = 16;
-    while (next < count || live) {
-        for (int k = 0; k < jobs && next < count; k++) if (!busy[k]) {
-            char ln[64] = ""; wait_load(6.0, 120, ln, sizeof ln);
+    long admitting_since = 0;
+    while ((next < count && sy_now_ms() < deadline) || live) {
+        long now = sy_now_ms();
+        if (next < count && now < deadline && !admitting_since) admitting_since = now;
+        int admit = now < deadline && (load1() <= 6.0 || now - admitting_since >= 120000L);
+        for (int k = 0; admit && k < jobs && next < count; k++) if (!busy[k]) {
             int i = idx[next++];
             if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN"); cx_fmt(bs[i].note, sizeof bs[i].note, "spawn-failed"); continue; }
-            if (ln[0]) cx_fmt(bs[i].note, sizeof bs[i].note, "%s", ln);
+            if (now - admitting_since >= 2000L) cx_fmt(bs[i].note, sizeof bs[i].note, "load_wait>6");
+            if (next == count || live + 1 == jobs) admitting_since = 0;
             busy[k] = 1; live++;
         }
         for (int k = 0; k < jobs; k++) if (busy[k]) {
@@ -186,6 +195,7 @@ static void run_set(int *idx, int count, int jobs, int attempt) {
         }
         sy_sleep_ms(50);
     }
+    return next;
 }
 
 static int build_layout(void) {
@@ -209,14 +219,64 @@ static int build_layout(void) {
     return 0;
 }
 
+static int load_receipts(const char *path) {
+    FILE *file = fopen(path, "r");
+    if (!file) return 1;
+    char line[2048], id[96], domain[48], status[16], candidate[72];
+    static int eligible[MAXB];
+    while (fgets(line, sizeof line, file)) {
+        int rc;
+        if (!strncmp(line, "RAW\tBATCH_RUN\t", 14) && strchr(line, '\n')) {
+            char raw_rc[24], expected_rc[24];
+            field(line, "id", id, sizeof id);
+            field(line, "status", status, sizeof status);
+            field(line, "candidate", candidate, sizeof candidate);
+            field(line, "rc", raw_rc, sizeof raw_rc);
+            for (int i = 0; i < nb; i++) {
+                if (!eligible[i] || strcmp(id, bs[i].id)) continue;
+                cx_fmt(expected_rc, sizeof expected_rc, "%d", bs[i].rc);
+                resumed[i] = !strcmp(candidate, sha) && !strcmp(status, bs[i].status) && !strcmp(raw_rc, expected_rc);
+                break;
+            }
+            continue;
+        }
+        if (!strchr(line, '\n') ||
+            sscanf(line, "%95[^\t]\t%47[^\t]\t%15[^\t]\t%d\t%71[^\t]", id, domain, status, &rc, candidate) != 5) continue;
+        for (int i = 0; i < nb; i++) if (!strcmp(id, bs[i].id)) {
+            resumed[i] = 0;
+            eligible[i] = !strcmp(candidate, sha) && (!strcmp(status, "PASS") || !strcmp(status, "FAIL"));
+            bs[i].rc=rc;
+            if (eligible[i]) cx_fmt(bs[i].status, sizeof bs[i].status, "%s", status);
+            break;
+        }
+    }
+    for (int i=0;i<nb;i++) if (!resumed[i]) bs[i].status[0]=0;
+    int error = ferror(file);
+    fclose(file);
+    return error;
+}
+
+static void write_batch(FILE *f, const Batch *b) {
+    fprintf(f, "%s\t%s\t%s\t%d\t%s\t%ld\t%s\t%d\t%s\n", b->id, b->domain, b->status, b->rc,
+            b->cand[0] ? b->cand : "-", b->ms, b->load[0] ? b->load : "-", b->retries, b->note[0] ? b->note : "-");
+    if (b->raw[0]) fprintf(f, "RAW\t%s\n", b->raw);
+}
+
 int main(int argc, char **argv) {
-    const char *set = "sample", *ids = 0, *outp = 0; int jobs = 2, list = 0; long seed = -1;
-    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0) return die("usage: devsvc qualify --candidate APE [--set sample|product-qualification] [--ids A,B] [--out FILE] [--jobs N] [--seed N] [--list]", 0);
+    const char *set = "sample", *ids = 0, *outp = 0, *resume = 0;
+    int jobs = 2, list = 0, segment = 0;
+    long seed = -1;
+    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0) return die("usage: devsvc qualify --candidate APE [--set sample|product-qualification] [--ids A,B] [--out FILE|--resume FILE] [--jobs N] [--segment-batches N] [--seed N] [--list]", 0);
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--candidate") && i + 1 < argc) { if (sy_realpath(argv[++i], ape, sizeof ape) < 0) return die("candidate not found: ", argv[i]); }
         else if (!strcmp(argv[i], "--set") && i + 1 < argc) set = argv[++i];
         else if (!strcmp(argv[i], "--ids") && i + 1 < argc) ids = argv[++i];
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--resume") && i + 1 < argc) resume = argv[++i];
+        else if (!strcmp(argv[i], "--segment-batches") && i + 1 < argc) {
+            segment = atoi(argv[++i]);
+            if (segment < 1 || segment > MAXB) return die("invalid --segment-batches", 0);
+        }
         else if (!strcmp(argv[i], "--jobs") && i + 1 < argc) { jobs = atoi(argv[++i]); if (jobs < 1 || jobs > 16) return die("--jobs must be 1..16", 0); }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = atol(argv[++i]);
         else if (!strcmp(argv[i], "--list")) list = 1;
@@ -246,11 +306,14 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!ape[0]) return die("--candidate APE is required", 0);
+    if (resume && outp && strcmp(resume, outp)) return die("--resume appends to its evidence file", 0);
+    if (resume) outp = resume;
     /* (1) precheck */
     long t0 = sy_now_ms();
     sockp = sy_env("DEVSVC_SOCK"); cx_fmt(jobbuf, sizeof jobbuf, "qualify-%ld-%d", t0, sy_pid()); job_id = jobbuf;
     { sy_stat_t st; if (sy_stat(ape, &st) || st.kind != 'f') return die("candidate is not a regular file: ", ape); }
     { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(ape, &b, &n, 256L << 20) || !b || sy_sha256_hex(b, (long)n, sha)) return die("cannot hash ", ape); free(b); }
+    if (resume && load_receipts(resume)) return die("cannot read evidence ", resume);
     { char *v[] = {"sh", ape, "--version", 0}; char o[256]; if (run(v, 0, 30, o, sizeof o)) return die("candidate --version failed: ", ape);
       long k = 0; while (o[k] && o[k] != '\n' && k < (long)sizeof version - 1) { version[k] = o[k]; k++; } version[k] = 0; if (!k) return die("candidate --version printed nothing", 0); }
     { char *v[] = {"git", "-C", root, "rev-parse", "HEAD", 0}; char o[64]; if (run(v, 0, 10, o, sizeof o)) return die("git rev-parse HEAD", 0); cx_fmt(head, sizeof head, "%.40s", o); }
@@ -261,32 +324,54 @@ int main(int argc, char **argv) {
     long layout_ms = sy_now_ms() - tl;
     emit("layout", layout_ms, 0, "-");
     fprintf(stderr, "QUALIFY_LAYOUT\t%s\tms=%ld\n", lay, layout_ms);
-    /* (4) run, then one low-load rerun of UNKNOWN */
-    static int idx[MAXB]; for (int i = 0; i < nb; i++) idx[i] = i;
-    run_set(idx, nb, jobs, 0);
-    int nu = 0; for (int i = 0; i < nb; i++) if (!strcmp(bs[i].status, "UNKNOWN")) idx[nu++] = i;
-    if (nu) {
-        char ln[64] = ""; wait_load(3.0, 60, ln, sizeof ln);
-        for (int i = 0; i < nu; i++) bs[idx[i]].retries = 1;
-        run_set(idx, nu, 1, 1);
-        for (int i = 0; i < nu; i++) { Batch *b = &bs[idx[i]]; long n = strlen(b->note); cx_fmt(b->note + n, sizeof b->note - n, "%sretried", n ? ";" : ""); }
+    FILE *f = outp ? fopen(outp, resume ? "a" : "w") : stdout;
+    if (!f) return die("cannot write evidence ", outp);
+    if (resume) fputc('\n', f);
+    else fprintf(f, "# devsvc qualify: strict evidence bound to candidate APE bytes.\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n");
+    fprintf(f, "# source=%s layout=%s set=%s seed=%ld jobs=%d window_s=55 outer_s=60 ape_sha256=%s\n",head,lay,ids?"ids":set,seed,jobs,sha);
+    if (!segment) segment = 5 * jobs;
+    static int pending[MAXB], retry[MAXB];
+    int count = 0, completed = 0, number = 0;
+    for (int i = 0; i < nb; i++) if (!resumed[i]) pending[count++] = i;
+    long stop = t0 + 1720000L;
+    while (completed < count && sy_now_ms() < stop) {
+        long began = sy_now_ms();
+        int size = count - completed;
+        if (size > segment) size = segment;
+        int *idx = pending + completed;
+        long segment_stop = began + 240000L;
+        size = run_set(idx, size, jobs, 0, segment_stop < stop ? segment_stop : stop);
+        if (!size) break;
+        int nu = 0;
+        for (int i = 0; i < size; i++) {
+            Batch *b = &bs[idx[i]];
+            write_batch(f, b);
+            if (!strcmp(b->status, "UNKNOWN")) retry[nu++] = idx[i];
+        }
+        fprintf(f, "# segment=%d batches=%d\n", ++number, size);
+        if (fflush(f)) return die("cannot flush evidence ", outp);
+        long retry_stop = segment_stop < stop ? segment_stop : stop;
+        if (nu && sy_now_ms() + 60000L < retry_stop) {
+            wait_load(3.0, 60, 0, 0);
+            for (int i = 0; i < nu && sy_now_ms() < retry_stop; i++) {
+                bs[retry[i]].retries = 1;
+                if (!run_set(retry + i, 1, 1, 1, retry_stop)) break;
+                write_batch(f, &bs[retry[i]]);
+                if (fflush(f)) return die("cannot flush evidence ", outp);
+            }
+        }
+        emit("segment", sy_now_ms() - began, 0, "-");
+        completed += size;
     }
+    if (completed < count) fprintf(stderr, "QUALIFY_CHECKPOINT\tremaining=%d\tresume=%s\n", count-completed, outp ? outp : "-");
     /* (5) evidence */
     long total = sy_now_ms() - t0;
-    int cp = 0, cf = 0, cu = 0, ci = 0;
-    for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
-    FILE *f = outp ? fopen(outp, "w") : stdout;
-    if (!f) return die("cannot write ", outp);
-    fprintf(f, "# devsvc qualify: strict evidence, every batch actually run in an independent local layout root, nothing cached or reused.\n");
-    fprintf(f, "# source=%s layout=%s set=%s seed=%ld jobs=%d window_s=55 outer_s=60\n", head, lay, ids ? "ids" : set, seed, jobs);
-    fprintf(f, "# per batch: sh ./unisacc.com tools/affected.cx -- --ids ID --prepare-materials --run -j 1 (cwd=layout, layout/unisacc.com = candidate APE copy)\n");
-    fprintf(f, "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n");
-    for (int i = 0; i < nb; i++) { Batch *b = &bs[i];
-        fprintf(f, "%s\t%s\t%s\t%d\t%s\t%ld\t%s\t%d\t%s\n", b->id, b->domain, b->status, b->rc, b->cand[0] ? b->cand : "-", b->ms, b->load[0] ? b->load : "-", b->retries, b->note[0] ? b->note : "-"); }
-    for (int i = 0; i < nb; i++) if (bs[i].raw[0]) fprintf(f, "RAW\t%s\n", bs[i].raw);
-    fprintf(f, "SUMMARY\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld\tape_sha256=%s\tversion=%s\n", nb, cp, cf, cu, ci, total, layout_ms, sha, version);
-    if (outp) fclose(f);
-    emit("total", total, (cu || ci) ? 1 : 0, "-");
+    int cp = 0, cf = 0, cu = 0, ci = 0, remaining = count - completed;
+    for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!s[0]) continue; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
+    if (remaining) fprintf(f, "# PLANNED=%d\n", remaining);
+    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, sha, version);
+    if (fflush(f) || (outp && fclose(f))) return die("cannot finish evidence ", outp);
+    emit("total", total, (remaining || cu || ci) ? 1 : 0, "-");
     fprintf(stderr, "QUALIFY_DONE\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tout=%s\n", nb, cp, cf, cu, ci, total, outp ? outp : "-");
-    return (cu || ci) ? 1 : 0;
+    return (remaining || cu || ci) ? 1 : 0;
 }

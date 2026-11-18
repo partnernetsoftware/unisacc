@@ -38,8 +38,10 @@ static const char *sp_tgt_override;
 static const char *sp_target(void) { return sp_tgt_override ? sp_tgt_override : sp_tgt; }
 static char *sp_env[] = {"UNISA_JOBS=1", 0};
 
+static int sp_count;   /* assertions made in this run; checked against the part's expected count */
 static void sp_ck(int ok, const char *label) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+    sp_count++;
     if (!ok) sp_failed++;
 }
 static void sp_die(const char *s) { fprintf(stderr, "check-stream-pipe: %s errno=%d\n", s, errno); exit(2); }
@@ -212,6 +214,13 @@ int main(int argc, char **argv) {
         sp_cat(list65, names[i]); sp_cat(list65, " ");
     }
     /* A: the product has the subcommand (usage is rc 2, not "cannot open stream"). */
+    /* SP_PART splits the run so each part keeps its own 55 s limit (CI osx/x86_64 ran the whole
+       check into 55 s twice for 0.0.74): main = A I B C D H F G (11), e = E G (2); unset = all (12). */
+    const char *part = getenv("SP_PART");
+    int pm = !part || !part[0] || !strcmp(part, "main"), pe = !part || !part[0] || !strcmp(part, "e");
+    int want = pm && pe ? 12 : pm ? 11 : 2;
+    if (part && part[0] && strcmp(part, "main") && strcmp(part, "e")) sp_die("SP_PART must be main or e");
+    if (pm) {
     sp_ck(sp_stage("", "", "/dev/null", "/dev/null", 0, 0) == 2, "A stream-subcommand");
     sp_attr_table();
     /* B, C: single source -o.  Every reference below passes -O0 explicitly: the pipes are built
@@ -227,11 +236,15 @@ int main(int argc, char **argv) {
     rc2 = sp_units(two, 2, "ab.frame");
     if (rc2 == 0) rc2 = sp_multi_image("ab.frame", "a.c", "ab.pipe", "m");
     sp_ck(rc == 0 && rc2 == 0 && sp_same("ab.ref", "ab.pipe"), "D two-source-image-pipe-cmp");
+    }
+    if (pe) {
     /* E: 65 sources -S. */
     rc = sp_ref("-O0 -S -o", "s65.ref", list65, 0, 0);
     rc2 = sp_units(s65, SP_N65, "s65.frame");
     if (rc2 == 0) rc2 = sp_multi_tape("s65.frame", "m0.c", "s65.pipe", "t");
     sp_ck(rc == 0 && rc2 == 0 && sp_same("s65.ref", "s65.pipe"), "E 65-source-tape-pipe-cmp");
+    }
+    if (pm) {
     /* H: negative control -- the compare must be live.  Force a route target that is NOT this
        slice's own, rebuild the same pipe, and require the byte compare to FAIL.  On a host whose
        own target is the only row the pipe cannot be built at all, which is also a non-equal result
@@ -253,12 +266,14 @@ int main(int argc, char **argv) {
     rc2 = sp_stage("sidecar", "", "/dev/null", "/dev/null", &e_pipe, &n_pipe);
     sp_ck(rc2 == 1 && n_pipe > 0 && !memcmp(e_pipe, "unisacc: stream: sidecar: no input\n", n_pipe), "F empty-pipe-next-stage");
     free(e_ref); free(e_pipe);
+    }
     /* G: no residue. */
     {   char cmd[4600];
         if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", sp_dir)) sp_die("cmd");
         rc = sp_sh(cmd, 0, 0);
         sp_ck(rc == 0 && access(sp_dir, F_OK) != 0, "G scratch-removed");
     }
+    if (sp_count != want) { printf("FAIL\tassertion-count expected=%d got=%d part=%s\n", want, sp_count, part && part[0] ? part : "all"); sp_failed++; }
     printf("CHECK_STREAM_PIPE\tfailed=%d\n", sp_failed);
     if (sp_failed) return 1;
     puts("STREAM_PIPE");

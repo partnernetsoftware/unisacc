@@ -64,9 +64,12 @@ static void onename(int n) { head(); for (int i = 0; i < n; i++) put("struct T%d
     put("  printf(\"sum %%ld\\n\", sum);\n  return 0;\n}\n"); }
 
 static void first(const char *s, size_t n, char *o, size_t cap) { size_t k = 0; while (k < n && s[k] != '\n' && k + 1 < cap && k < 160) { o[k] = s[k] == '\t' ? ' ' : s[k]; k++; } o[k] = 0; }
+static int entry_mask = 7; /* bit 1 default-run (with the host oracle), 2 -c -funit, 4 -S */
+static void accept_cs(const char *name, const char *c, const char *o, const char *s);
 static void accept(const char *name) {
     char c[96], bin[96], o[96], s[96]; FMT(c,"%s.c", name); FMT(bin,"%s.host", name); FMT(o,"%s.o", name); FMT(s,"%s.s", name);
     char p[4400]; path(p, sizeof p, outdir, c); saved(p, sb, sn);
+    if (!(entry_mask & 1)) { accept_cs(name, c, o, s); return; }
     np_result g, h, u; char *gv[] = { hostcc, "-std=c99", "-w", "-o", bin, c, 0 };
     if (runin(gv, &g)) { check(0, name, "oracle-build", "transport"); return; } if (g.rc) { check(0, name, "oracle-build", "host cc failed"); np_free(&g); return; } np_free(&g);
     char bp[4400]; path(bp, sizeof bp, outdir, bin); char *hv[] = { bp, 0 }; if (runin(hv, &h)) { check(0, name, "oracle-run", "transport"); return; } if (h.rc) { check(0, name, "oracle-run", "host binary failed"); np_free(&h); return; }
@@ -77,10 +80,18 @@ static void accept(const char *name) {
     check(u.rc == 0 && u.outn == h.outn && !memcmp(u.out, h.out, h.outn), name, "default-run-equals-host", d);
     { char f[170]; first(h.out, h.outn, f, sizeof f); fprintf(res, "INFO\tstruct.capacity.%s.host-first-line\t%s\n", name, f); }
     np_free(&u); np_free(&h);
-    char *cv[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-funit", "-o", o, c, 0 }; if (runin(cv, &u)) { check(0, name, "c-funit", "transport"); return; }
+    accept_cs(name, c, o, s);
+}
+static void accept_cs(const char *name, const char *c, const char *o, const char *s) {
+    np_result u; char e[170], d[600];
+    if (entry_mask & 2) {
+    char *cv[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-funit", "-o", (char *)o, (char *)c, 0 }; if (runin(cv, &u)) { check(0, name, "c-funit", "transport"); return; }
     first(u.err, u.errn, e, sizeof e); FMT(d,"rc=%d object-present=%d stderr1=%s", u.rc, !absent(o), e[0] ? e : "-"); check(u.rc == 0 && !absent(o), name, "c-funit", d); np_free(&u);
-    char *sv[] = { "sh", product, "-S", "-o", s, c, 0 }; if (runin(sv, &u)) { check(0, name, "S", "transport"); return; }
+    }
+    if (entry_mask & 4) {
+    char *sv[] = { "sh", product, "-S", "-o", (char *)s, (char *)c, 0 }; if (runin(sv, &u)) { check(0, name, "S", "transport"); return; }
     first(u.err, u.errn, e, sizeof e); FMT(d,"rc=%d asm-present=%d stderr1=%s", u.rc, !absent(s), e[0] ? e : "-"); check(u.rc == 0 && !absent(s), name, "S", d); np_free(&u);
+    }
 }
 /* known gap: default-run only; GAP row records whether the product still differs from the host (not counted) */
 static void gap(const char *name, const char *id) {
@@ -106,19 +117,53 @@ static void reject(const char *name, const char *needle) { size_t nl = strlen(ne
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc)) { fputs("usage: ROOT ABS_OUT HOST_CC\n", stderr); return 2; }
+    /* optional SET (one batch each, so every batch stays inside the 55 s limit on a cold product cache):
+         accept-a  m64 m65 m256 m512 anon500p12            15 assertions
+         accept-b  nest512 structs255 structs257            9
+         accept-c  structs300 structs2040one                6
+         reject    m513 anon501p12 structs2100one refused   9
+         s2040-run structs2040 default-run equals host      1
+         s2040-c   structs2040 -c -funit                    1
+         s2040-asm   structs2040 -S                           1
+       no SET runs all 42.  The assertion count of the set is checked, a missing fixture fails the run. */
+    static const char *sets[] = { "accept-a", "accept-b", "accept-c", "reject", "s2040-run", "s2040-c", "s2040-asm" };
+    static const int setn[] = { 15, 9, 6, 9, 1, 1, 1 };
+    int si = -1;
+    if (argc == 5) for (int i = 0; i < 7; i++) if (!strcmp(argv[4], sets[i])) si = i;
+    if ((argc != 4 && argc != 5) || !realpath(argv[1], root) || argv[2][0] != '/' || !realpath(argv[3], hostcc) || (argc == 5 && si < 0)) {
+        fputs("usage: ROOT ABS_OUT HOST_CC [accept-a|accept-b|accept-c|reject|s2040-run|s2040-c|s2040-asm]\n", stderr); return 2; }
+    const char *set = si >= 0 ? sets[si] : 0; int want_n = si < 0 ? 42 : setn[si];
+#define IN(k) (si < 0 || si == (k))
     FMT(outdir, "%s", argv[2]); if (mkdir(outdir, 0700)) die("new out dir must be absent"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; path(rp, sizeof rp, outdir, "results.tsv"); res = fopen(rp, "wbx"); if (!res) die("results");
     { size_t n; char *b = cx_read(product, &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\tcandidate=%s\nORACLE\thost_cc=%s\n", h, hostcc); }
     const char *only = getenv("SMC_ONLY");
-#define WANT(x) (!only || strstr(only, x))
+    /* SMC_DROP=name[,name] skips fixtures but keeps the assertion-count check (negative control of the count);
+       SMC_ONLY is local probing and turns the count check off */
+    const char *drop = getenv("SMC_DROP");
+#define WANT(x) ((!only || strstr(only, x)) && !(drop && strstr(drop, x)))
+    if (IN(0)) {
     if (WANT("m64,") || (only && !strcmp(only, "m64"))) { one(64); accept("m64"); }
     if (WANT("m65")) { one(65); accept("m65"); } if (WANT("m256")) { one(256); accept("m256"); } if (WANT("m512")) { one(512); accept("m512"); }
-    if (WANT("anon500p12")) { anon(500); accept("anon500p12"); } if (WANT("nest512")) { nest(); accept("nest512"); }
-    if (WANT("structs255")) { many(255); accept("structs255"); } if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
-    if (WANT("structs257")) { many(257); accept("structs257"); } if (WANT("structs300")) { many(300); accept("structs300"); }
-    if (WANT("structs2040,") || (only && !strcmp(only, "structs2040"))) { many(2040); accept("structs2040"); }
+    if (WANT("anon500p12")) { anon(500); accept("anon500p12"); }
+    }
+    if (IN(1)) {
+    if (WANT("nest512")) { nest(); accept("nest512"); }
+    if (WANT("structs255")) { many(255); accept("structs255"); } if (WANT("structs257")) { many(257); accept("structs257"); }
+    }
+    if (IN(2)) {
+    if (WANT("structs300")) { many(300); accept("structs300"); } if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
+    }
+    if (IN(3)) {
     if (WANT("m513")) { one(513); reject("m513", "structure member capacity"); } if (WANT("anon501p12")) { anon(501); reject("anon501p12", "structure member capacity"); }
     if (WANT("structs2100one")) { onename(2100); reject("structs2100one", "structure id capacity"); }
+    }
+    /* structs2040: one entry per batch (cold -c -funit alone is about 30 s); entry_mask bit 1 default-run, 2 -c -funit, 4 -S */
+    if (IN(4) || IN(5) || IN(6)) {
+    entry_mask = si < 0 ? 7 : si == 4 ? 1 : si == 5 ? 2 : 4;
+    if (WANT("structs2040,") || (only && !strcmp(only, "structs2040"))) { many(2040); accept("structs2040"); }
+    entry_mask = 7;
+    }
+    if (!only && npass + nfail != want_n) { fprintf(res, "FAIL\tstruct.capacity.assertion-count\texpected=%d got=%d set=%s\n", want_n, npass + nfail, set ? set : "all"); nfail++; }
     fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("STRUCT_MEMBER_CAPACITY\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
 }
