@@ -56,3 +56,9 @@
 (1) D3 进场路线。线上输入后主景构图变化最大，先让桥拱、桥面与桥头屋在路线各段都可辨。
 
 (2) D4 跟拍取景。线上持续裁掉足部，影响对整座城镇和机械步态的理解。前进后的远景优先交代落脚和环境尺度。
+
+## 候选验证
+
+石桥候选为 `d3-bridge-audit.html`，新轨道开场远看五座桥拱，靠近后从桥头一侧登桥。运行 `tools/check-uxe-d3-geometry.cx -- audit-walk` 比对五个时点的眼位、风动与画布变化。追加 `frozen-path` 时路线断言失败。左线上右候选为 `/tmp/audit-d3-improved-comparison.png`。
+
+城镇候选为 `d4-skeleton-audit.html`，随行程逐步拉远并下移取景目标。在第 170 帧四脚投影完整入画，最小边距 111 像素。运行 `tools/check-uxe-d3-geometry.cx -- audit-town`，追加 `fixed-audit-camera` 时镜头与脚部边距断言失败。左线上右候选为 `/tmp/audit-d4-improved-comparison.png`。

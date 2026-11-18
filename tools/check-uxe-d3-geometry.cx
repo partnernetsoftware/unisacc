@@ -398,6 +398,51 @@ static int check_v2(const char *mutation,int published) {
         pixels[1]<18 || pixels[2]<25 || pixels[4]<7 || pixels[3]<18 || pixels[5]<8;
 }
 
+static int check_audit_town(const char *mutation) {
+    const int ticks[]={0,60,170};
+    char cwd[1024],url[4096],profile[128],option[160],*doc=0;
+    char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
+        "--allow-file-access-from-files","--disable-background-networking","--window-size=1280,807",
+        "--virtual-time-budget=6500","--dump-dom",option,url,0};
+    int i,j,rc,failed=0,previous=-10000;
+    size_t bytes=0;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/d4-skeleton-audit.html?audit-check&%s",cwd,mutation);
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-dom-audit-town-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(av,18,&doc,&bytes);
+    chd_wipe(profile);
+    p=doc?strstr(doc,"<output id=\"pixels\">"):0;
+    if(rc || !p) { free(doc); return 2; }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<3;i++) {
+        int got[12],tick=ticks[i],travel=tick*24,bad;
+        double distance=travel>=4000?1.0:travel/4000.0;
+        double blend=3*distance*distance-2*distance*distance*distance;
+        int camera[]={rounded_mm(14000+travel+3000*blend),rounded_mm(11800+800*blend),
+            rounded_mm(22000+15000*blend),rounded_mm(9400-2250*blend)};
+        for(j=0;j<12;j++) {
+            int n=0,term=j<11?',':i<2?';':'<';
+            if(sscanf(p,"%d%n",got+j,&n)!=1 || !n || p[n]!=term) { free(doc); return 2; }
+            p+=n+1;
+        }
+        bad=got[0]!=tick || got[5]<180 || got[5]>1100 || got[6]<180 || got[6]>550 || got[7]<=previous;
+        for(j=0;j<4;j++) bad|=abs(got[j+1]-camera[j])>1;
+        if(i==2) {
+            bad|=got[7]<30;
+            for(j=8;j<12;j++) bad|=got[j]<360 || got[j]>690;
+        }
+        previous=got[7];
+        printf("AUDIT_D4 tick=%d eye=%d,%d,%d deck=%d,%d margin=%d feet_y=%d,%d,%d,%d failed=%d\n",
+            got[0],got[1],got[2],got[3],got[5],got[6],got[7],got[8],got[9],got[10],got[11],bad);
+        failed+=bad;
+    }
+    free(doc);
+    return failed?1:0;
+}
+
 static int check_d4_play(const char *mutation) {
     char cwd[1024],url[4096],profile[128],option[160],*doc=0;
     char *av[]={"google-chrome","--headless=new","--use-angle=swiftshader","--enable-unsafe-swiftshader",
@@ -697,6 +742,7 @@ static int compare_paper(char **paths) {
 }
 
 int main(int argc,char **argv) {
+    if((argc==2 || argc==3) && !strcmp(argv[1],"audit-town")) return check_audit_town(argc==3?argv[2]:"");
     if(argc>=2 && argc<=3 && (!strcmp(argv[1],"v2") || !strcmp(argv[1],"published-v2")))
         return check_v2(argc==3?argv[2]:"",argv[1][0]=='p');
     if(argc>=2 && argc<=3 && (!strcmp(argv[1],"v1") || !strcmp(argv[1],"published-v1")))
