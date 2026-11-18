@@ -1,0 +1,114 @@
+/* tools/release-packcheck.cx -- Q-07: "the APE a pre-run used is byte-identical to the APE that is published"
+ * as two machine-judged gates.
+ *
+ *   sh ./unisacc.com tools/release-packcheck.cx -- slot ROOT [--version V] [--branch NAME]
+ *     Version slot gate before a chain (tools/chain-ready.cx item 11-version-slot).  ROOT/release/candidate.tsv
+ *     must hold exactly one data row with one valid version (cxlib.releaseversion rv_load), and that version must
+ *     equal the target: --version V, else the branch name vX.Y.Z of ROOT (git rev-parse --abbrev-ref HEAD, or
+ *     --branch NAME for fixtures).  On main there is no target in the branch name, so --version is required.
+ *     The packer stamps exactly this version into every slice (tools/ape-pack.cx stamp_version, from the same
+ *     file), so a chain started on a matching slot self-reports "unisacc V" and pack reproduces its bytes.
+ *     PASS: VERSION_SLOT OK version=V target=V source=arg|branch expect_self_report=unisacc V   rc 0
+ *     else: REFUSE CHAIN_READY_VERSION_SLOT <why> ...                                            rc 2
+ *   sh ./unisacc.com tools/release-packcheck.cx -- ape CHAIN_APE PACKED_APE [--allow-repack REASON]
+ *     After release-run --pack: the packed layout/unisacc.com must have the sha256 of the chain's
+ *     ape-final/unisacc-next.com.  Different bytes: REFUSE PACK_APE_CHANGED (rc 2), unless --allow-repack
+ *     with a non-empty REASON, which prints PACK_APE REPACK_ALLOWED with both digests and the reason (rc 0).
+ *     PASS: PACK_APE SAME sha256=H   rc 0
+ * Reads only; no network, no repo writes. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.releaseversion
+
+static int refuse(const char *gate, const char *why, const char *a, const char *b) {
+    printf("REFUSE\t%s\t%s\t%s\t%s\n", gate, why, a ? a : "-", b ? b : "-");
+    return 2;
+}
+static int sha_file(const char *p, char h[65]) {
+    size_t n; char *b = cx_read(p, &n); int rc;
+    if (!b) return -1;
+    rc = sy_sha256_hex(b, (long)n, h);
+    free(b);
+    return rc ? -1 : 0;
+}
+/* current branch of ROOT into o; -1 when git fails */
+static int branch_of(const char *root, char *o, int cap) {
+    char *v[] = {"./tools/bound", "20", "git", "-C", (char *)root, "rev-parse", "--abbrev-ref", "HEAD", 0};
+    int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    o[0] = 0;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid <= 0) return -1;
+    while (n < cap - 1 && (r = sy_read(fd, o + n, cap - 1 - n)) > 0) n += r;
+    o[n] = 0; sy_close(fd);
+    while (n > 0 && (o[n - 1] == '\n' || o[n - 1] == '\r')) o[--n] = 0;
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex && code == 0 && n > 0 ? 0 : -1;
+}
+static int do_slot(int argc, char **argv) {
+    const char *root = argv[2], *ver = 0, *br = 0, *source = "arg";
+    char tsv[4400], have[24], bname[200], target[24];
+    for (int i = 3; i < argc; i += 2) {
+        if (i + 1 >= argc) return refuse("CHAIN_READY_VERSION_SLOT", "usage", argv[i], 0);
+        if (tx_eqz(argv[i], "--version")) ver = argv[i + 1];
+        else if (tx_eqz(argv[i], "--branch")) br = argv[i + 1];
+        else return refuse("CHAIN_READY_VERSION_SLOT", "usage", argv[i], 0);
+    }
+    if (cx_fmt(tsv, sizeof tsv, "%s/release/candidate.tsv", root)) return refuse("CHAIN_READY_VERSION_SLOT", "path", root, 0);
+    if (rv_load(tsv, have)) return refuse("CHAIN_READY_VERSION_SLOT", "slot-missing-or-not-one-valid-row", tsv, 0);
+    if (ver) {
+        if (!rv_valid(ver) || cx_fmt(target, sizeof target, "%s", ver)) return refuse("CHAIN_READY_VERSION_SLOT", "bad-target-version", ver, 0);
+    } else {
+        if (br) { if (cx_fmt(bname, sizeof bname, "%s", br)) return refuse("CHAIN_READY_VERSION_SLOT", "branch", br, 0); }
+        else if (branch_of(root, bname, sizeof bname)) return refuse("CHAIN_READY_VERSION_SLOT", "branch-unresolved", root, 0);
+        if (bname[0] != 'v' || !rv_valid(bname + 1))
+            return refuse("CHAIN_READY_VERSION_SLOT", "target-unknown-pass---version", bname, have);
+        if (cx_fmt(target, sizeof target, "%s", bname + 1)) return refuse("CHAIN_READY_VERSION_SLOT", "branch", bname, 0);
+        source = "branch";
+    }
+    if (!tx_eqz(have, target)) return refuse("CHAIN_READY_VERSION_SLOT", "slot-version-differs-from-target", have, target);
+    printf("VERSION_SLOT\tOK\tversion=%s\ttarget=%s\tsource=%s\texpect_self_report=unisacc %s\n", have, target, source, have);
+    return 0;
+}
+static int do_ape(int argc, char **argv) {
+    const char *reason = 0; char a[65], b[65];
+    if (argc == 6 && tx_eqz(argv[4], "--allow-repack")) reason = argv[5];
+    else if (argc != 4) return refuse("PACK_APE_CHANGED", "usage", 0, 0);
+    if (reason && !reason[0]) return refuse("PACK_APE_CHANGED", "allow-repack-needs-reason", 0, 0);
+    if (sha_file(argv[2], a)) return refuse("PACK_APE_CHANGED", "chain-ape-unreadable", argv[2], 0);
+    if (sha_file(argv[3], b)) return refuse("PACK_APE_CHANGED", "packed-ape-unreadable", argv[3], 0);
+    if (tx_eqz(a, b)) { printf("PACK_APE\tSAME\tsha256=%s\n", a); return 0; }
+    if (!reason) return refuse("PACK_APE_CHANGED", "sha256-differs", a, b);
+    printf("PACK_APE\tREPACK_ALLOWED\tchain=%s\tpacked=%s\treason=%s\n", a, b, reason);
+    return 0;
+}
+static int dispatch(int argc, char **argv) {
+    if (argc >= 3 && tx_eqz(argv[1], "slot")) return do_slot(argc, argv);
+    if (argc >= 4 && tx_eqz(argv[1], "ape")) return do_ape(argc, argv);
+    fprintf(stderr, "usage: release-packcheck.cx -- slot ROOT [--version V] [--branch NAME] | ape CHAIN_APE PACKED_APE [--allow-repack REASON] | batch FILE\n");
+    return 2;
+}
+/* batch FILE: one case per line, arguments TAB-separated (an empty field is an empty argument); each case
+ * prints CASE<TAB>i, its own output, then END<TAB>i<TAB>rc=N.  One process for a fixture table. */
+static int do_batch(const char *path) {
+    size_t n; char *t = cx_read(path, &n), *p, *e; int i = 0;
+    if (!t) { fprintf(stderr, "release-packcheck: cannot read %s\n", path); return 2; }
+    for (p = t; p < t + n && *p; p = e + 1) {
+        char *v[16]; int c = 0;
+        e = strchr(p, '\n'); if (!e) e = t + n; *e = 0;
+        if (!*p) continue;
+        v[c++] = "release-packcheck";
+        for (char *q = p; c < 15; ) { char *s = strchr(q, '\t'); v[c++] = q; if (!s) break; *s = 0; q = s + 1; }
+        v[c] = 0;
+        printf("CASE\t%d\n", ++i); fflush(stdout);
+        { int rc = dispatch(c, v); printf("END\t%d\trc=%d\n", i, rc); fflush(stdout); }
+    }
+    free(t);
+    return 0;
+}
+int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "batch")) return do_batch(argv[2]);
+    return dispatch(argc, argv);
+}

@@ -1,6 +1,6 @@
 /* tools/chain-ready.cx -- the nine pre-chain conditions of prd_mempalace.md "0.0.62 候选整链就绪判断" in one command.
  *
- *   sh ./unisacc.com tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only NAME]]
+ *   sh ./unisacc.com tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only NAME] [--version V]]
  *   sh ./unisacc.com tools/chain-ready.cx -- --judge KIND FILE RC     (the pure judge on a saved output; fixtures)
  *
  * One TSV row per item: ITEM  PASS|FAIL|UNMEASURED|SKIPPED  evidence  ms.  Last row:
@@ -24,6 +24,10 @@
  *                  UNISACC_CACHE_DIR forces the build the chain reads, and an UNISACC_BOUND_DEADLINE_MONO that is
  *                  past or not a number is the residue of an earlier bounded command.  Either is a FAIL naming
  *                  the variable; a usable future instant is a normal chain inside a bound window and passes.
+ *  11-version-slot tools/release-packcheck.cx -- slot REPO [--version V]: release/candidate.tsv has exactly one
+ *                  data row whose version equals the target (--version V, else branch vX.Y.Z; on main --version
+ *                  is required), so the chain APE self-reports that version and release-run --pack reproduces its
+ *                  bytes.  Otherwise FAIL with REFUSE CHAIN_READY_VERSION_SLOT <why>.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -139,6 +143,13 @@ static int j_inflight(const char *o, long n, char *ev, int cap) {
     if (hits) { cx_fmt(ev, (size_t)cap, "%ld chain process(es) running, first: %s", hits, first); return 0; }
     put_ev(ev, cap, "no candidate-chain process"); return 1;
 }
+static int j_slot(const char *o, long n, int rc, char *ev, int cap) {
+    char l[200];
+    line_with(o, n, "VERSION_SLOT\tOK", l, sizeof l);
+    if (rc == 0 && l[0]) { put_ev(ev, cap, l); return 1; }
+    line_with(o, n, "CHAIN_READY_VERSION_SLOT", l, sizeof l);
+    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "REFUSE CHAIN_READY_VERSION_SLOT no verdict line"); return 0;
+}
 /* one P1 child output: 1 when the file was planned or rejected with an old message, 0 on a new rejection */
 static int j_p1file(const char *o, long n) {
     int i;
@@ -156,6 +167,7 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "chain")) return j_chain(o, n, rc, ev, cap);
     if (tx_eqz(kind, "affected")) return j_affected(o, n, rc, ev, cap);
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
+    if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
     if (tx_eqz(kind, "p1file")) { put_ev(ev, cap, "p1file"); return j_p1file(o, n); }
     put_ev(ev, cap, "unknown judge kind"); return -1;
 }
@@ -292,7 +304,7 @@ static void run_p1(long *ms_out, char *ev, int cap) {
 }
 
 int main(int argc, char **argv) {
-    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0;
+    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0;
     long T0 = sy_now_ms();
     if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
         size_t n; char *b = cx_read(argv[3], &n); char ev[512]; int ok;
@@ -308,7 +320,8 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
         else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
         else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] | --judge KIND FILE RC]\n"); return 2; }
+        else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] | --judge KIND FILE RC]\n"); return 2; }
     }
     static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
@@ -327,12 +340,14 @@ int main(int argc, char **argv) {
     static char *g_ext[] = {"./tools/bound", "55", "sh", UC, "tools/cx0-extract.cx", "--", "--check", 0};
     static char *g_chain[] = {"./tools/bound", "80", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, 0};
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
-    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg};
-    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight"};
-    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight"};
+    static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
+    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot};
+    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot"};
+    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight", "slot"};
     g_status[4] = (char *)repo; g_branch[4] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain[6] = outd; g_chain[7] = cached;
-    for (k = 0; k < 8; k++) {
+    g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
+    for (k = 0; k < 9; k++) {
         int c, i;
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev"))) continue;
         if (k == 6 && !have_tmp) continue;
