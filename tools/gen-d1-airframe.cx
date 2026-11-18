@@ -1,0 +1,59 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+
+static int publish(const char *path, const char *bytes, size_t n, int check) {
+    if(check) {
+        size_t size=0;
+        char *old=cx_read(path,&size);
+        int mismatch=!old || size!=n || memcmp(old,bytes,n);
+        free(old);
+        if(mismatch) printf("GEN_D1_AIRFRAME mismatch=%s\n",path);
+        return mismatch;
+    }
+    FILE *file=fopen(path,"wb");
+    if(!file) return 2;
+    size_t written=fwrite(bytes,1,n,file);
+    return fclose(file) || written!=n ? 2 : 0;
+}
+
+int main(int argc, char **argv) {
+    char output[4096], wasm[128], *facts, *line, *compiled, *log=0;
+    size_t size=0, n=0;
+    int rows=0, layers=0, last=-1, at=0, rc, check;
+    char *args[]={"sh","./ujs/ujs.com","ujs/tests/d1-flight.ujs","-o",wasm,0};
+    if(argc!=2 || (strcmp(argv[1],"--check") && strcmp(argv[1],"--write"))) return 2;
+    check=!strcmp(argv[1],"--check");
+    facts=cx_read("ujs/practice/uxe/test/d1-airframe.tsv",&size);
+    if(!facts || !size) return 2;
+    at=tx_snprintf(output,sizeof output,"// Generated from d1-airframe.tsv.\nexport const profile=[\n");
+    for(line=strtok(facts,"\n");line;line=strtok(0,"\n")) {
+        int a,b,c,d,e,f,used=0;
+        if(line[0]=='#') continue;
+        if(!layers && sscanf(line,"shape %d %d %d %d%n",&a,&b,&c,&d,&used)==4 &&
+           !line[used] && a==last+1 && b>=a && b<46 && c>0 && c<=17 &&
+           d>=-17 && d<=17 && c+(b-a)*d>0 && c+(b-a)*d<=17) {
+            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d,%d],\n",a,b,c,d);
+            rows++; last=b;
+        } else if(last==45 && sscanf(line,"layer %d %d %d %d %d %d%n",&a,&b,&c,&d,&e,&f,&used)==6 &&
+           !line[used] && a==layers && a<13 && abs(b)<=8 && abs(c)<=8 &&
+           d>=1 && d<=255 && e>=1 && e<=255 && f>=1 && f<=255) {
+            if(!layers) at+=tx_snprintf(output+at,sizeof output-at,"];\nexport const layers=[\n");
+            at+=tx_snprintf(output+at,sizeof output-at,"  [%d,%d,%d,%d,%d],\n",b,c,d,e,f);
+            layers++;
+        } else { free(facts); return 2; }
+    }
+    free(facts);
+    if(!rows || layers!=13) return 2;
+    at+=tx_snprintf(output+at,sizeof output-at,"];\n");
+    tx_snprintf(wasm,sizeof wasm,"/tmp/d1-flight-%d.wasm",(int)getpid());
+    rc=cx_runv_timeout(args,30,&log,&n);
+    if(log) { if(rc) fwrite(log,1,n,stderr); free(log); }
+    compiled=rc?0:cx_read(wasm,&n);
+    remove(wasm);
+    if(!compiled || !n) return 2;
+    rc=publish("ujs/practice/uxe/test/d1-airframe-data.js",output,(size_t)at,check);
+    if(!rc) rc=publish("ujs/practice/uxe/test/d1-flight.wasm",compiled,n,check);
+    free(compiled);
+    printf("GEN_D1_AIRFRAME failed=%d\n",rc);
+    return rc;
+}

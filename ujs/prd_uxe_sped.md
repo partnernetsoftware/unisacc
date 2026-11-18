@@ -10,6 +10,8 @@
 
 ## 0. 从 prd 切出的 UXE 缺口
 
+D1 最小切片工具见 [设计与入口](plans/demo-v2/d1-s1.md)。`tools/gen-d1-airframe.cx -- --check` 逐字节校验层数据和飞行核，批次 `gen-d1-airframe`。`tools/check-uxe-d1-flight.cx` 验像素和内核重放，批次 `uxe-d1-flight`。
+
 | 号 | 事实 | 计划 | 验收 |
 |---|---|---|---|
 | U1 | gpu-tri 真 GPU(单三角 212B,headless chrome 138 SwiftShader) | G1-submit.md | 批次 `ujs-gpu-tri` title+FNV+Lambert 容差 24+反例;本任务未重跑,历史记账 PASS |

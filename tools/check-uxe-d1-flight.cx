@@ -1,0 +1,175 @@
+#pragma unisa use chrome_dom
+#pragma unisa use text.fmt
+
+typedef struct { int dx,dz,r,g,b; } Layer;
+typedef struct { int x,y,want; } Probe;
+static Layer layers[13];
+static int widths[46], groups[4];
+static Probe probes[48];
+
+static int load_facts(void) {
+    size_t size=0;
+    char *data=cx_read("ujs/practice/uxe/test/d1-airframe.tsv",&size), *line;
+    int rows=0, count=0, ok=1;
+    if(!data) return 0;
+    for(line=strtok(data,"\n");line && ok;line=strtok(0,"\n")) {
+        int a,b,c,d,e,f;
+        if(line[0]=='#') continue;
+        if(sscanf(line,"shape %d %d %d %d",&a,&b,&c,&d)==4 && a==rows && b>=a && b<46) {
+            for(;rows<=b;rows++) {
+                widths[rows]=c+(rows-a)*d;
+                if(widths[rows]<1 || widths[rows]>17) ok=0;
+            }
+        } else if(sscanf(line,"layer %d %d %d %d %d %d",&a,&b,&c,&d,&e,&f)==6 && a==count && count<13) {
+            layers[count++]=(Layer){b,c,d,e,f};
+        } else ok=0;
+    }
+    free(data);
+    return ok && rows==46 && count==13;
+}
+
+static int slab(double origin,double direction,double low,double high,double *enter,double *leave) {
+    double a,b;
+    if(direction==0) return origin>=low && origin<=high;
+    a=(low-origin)/direction;
+    b=(high-origin)/direction;
+    if(a>b) { double t=a; a=b; b=t; }
+    if(a>*enter) *enter=a;
+    if(b<*leave) *leave=b;
+    return *enter<=*leave;
+}
+
+/* Intersect the pixel ray with each contiguous row of unit cubes. */
+static int nearest(double px,double py,int mode,int *hits) {
+    double right=(px-213)/240, down=(py-120)/240;
+    double vy=-.6-.8*down,vz=-.8+.6*down,best=300;
+    int result=-1,h,row;
+    *hits=0;
+    for(h=0;h<13;h++) {
+        Layer layer=layers[h];
+        int y=(mode==1?12-h:h)-6, x=layer.dx+(mode==2 && h>=7?3:0);
+        int crossed=0;
+        for(row=h;row<46-h;row++) {
+            double enter=.1, leave=300;
+            int span=widths[row]-h;
+            if(span<1) span=1;
+            if(!slab(48,vy,y-.5,y+.5,&enter,&leave) ||
+               !slab(64,vz,row-23+layer.dz,row-22+layer.dz,&enter,&leave) ||
+               !slab(0,right,x-span,x+span,&enter,&leave)) continue;
+            crossed=1;
+            if(enter<best) { best=enter; result=h; }
+        }
+        *hits+=crossed;
+    }
+    return result;
+}
+
+static int stable(int x,int y,int want) {
+    int dx,dy,hits;
+    for(dx=-1;dx<=1;dx+=2) for(dy=-1;dy<=1;dy+=2)
+        if(nearest(x+.5+dx*.06,y+.5+dy*.06,0,&hits)!=want) return 0;
+    return 1;
+}
+
+static int choose_probes(void) {
+    int x,y,n=0;
+    for(y=58;y<204;y+=4) for(x=143;x<284;x+=4) {
+        int hit,unused,want=nearest(x+.5,y+.5,0,&hit), group;
+        if(want<0) group=0;
+        else if(nearest(x+.5,y+.5,2,&unused)!=want) group=1;
+        else if(hit>=2 && nearest(x+.5,y+.5,1,&unused)!=want) group=2;
+        else group=3;
+        if(groups[group]>=12 || !stable(x,y,want)) continue;
+        groups[group]++;
+        probes[n++]=(Probe){x,y,want};
+    }
+    return n;
+}
+
+static int number(const char **p) {
+    int n=0,negative=**p=='-';
+    if(negative) (*p)++;
+    if(**p<'0' || **p>'9') return -1000;
+    while(**p>='0' && **p<='9') {
+        n=n*10+**p-'0';
+        *p=*p+1;
+        if(n>999) return -1000;
+    }
+    return negative?-n:n;
+}
+
+static int flight(const char **p,int *settled) {
+    int replay,i,heading,bank,fail=0;
+    for(replay=0;replay<2;replay++) {
+        if(**p!='|') return -1;
+        *p=*p+1;
+        heading=0; bank=0; *settled=0;
+        for(i=0;i<23;i++) {
+            int axis=i<7?1:i>=14 && i<17?-1:0, desired=axis*24;
+            int got_heading=number(p),got_bank;
+            if(got_heading<0 || **p!=',') return -1;
+            *p=*p+1;
+            got_bank=number(p);
+            if(got_bank<-24 || got_bank>24) return -1;
+            if(i<22) {
+                if(**p!=';') return -1;
+                *p=*p+1;
+            }
+            heading=(heading+axis*3+360)%360;
+            if(bank<desired) bank+=4;
+            else if(bank>desired) bank-=4;
+            fail+=heading!=got_heading || bank!=got_bank;
+            if(i>=7 && i<14 && !got_bank && !*settled) *settled=i-6;
+        }
+        fail+=!*settled || *settled>6;
+    }
+    return fail;
+}
+
+int main(int argc,char **argv) {
+    char cwd[1024],url[2200],profile[128],option[160],*out=0;
+    const char *p,*mutation=argc==2?argv[1]:"";
+    char *args[]={"google-chrome","--headless=new","--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader","--disable-background-networking","--allow-file-access-from-files",
+        "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
+    size_t size=0;
+    int n,i,j,k,rc,at,pixel_fail=0,scale_fail=0,flight_fail,settled;
+    if(argc>2 || (*mutation && strcmp(mutation,"reverse") && strcmp(mutation,"offset"))) return 2;
+    if(!load_facts() || !getcwd(cwd,sizeof cwd)) return 2;
+    n=choose_probes();
+    if(n<8 || groups[0]<2 || groups[1]<2 || groups[2]<2) return 2;
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-flight.html?%s&probe=",cwd,mutation);
+    for(i=0;i<n;i++) {
+        int w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",i?";":"",probes[i].x,probes[i].y);
+        if(w<0 || w>=(int)sizeof url-at) return 2;
+        at+=w;
+    }
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-flight-%d",(int)getpid());
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(args,30,&out,&size);
+    chd_wipe(profile);
+    p=out?strstr(out,"<output id=\"pixels\">"):0;
+    if(rc || !p || p[strlen("<output id=\"pixels\">")]=='<') {
+        free(out);
+        printf("FAIL D1_FLIGHT_BROWSER rc=%d\n",rc);
+        return 2;
+    }
+    p+=strlen("<output id=\"pixels\">");
+    for(i=0;i<n;i++) {
+        Layer color=probes[i].want<0?(Layer){0,0,17,28,48}:layers[probes[i].want];
+        int expected[]={color.r,color.g,color.b,255}, first[4];
+        for(j=0;j<9;j++) for(k=0;k<4;k++) {
+            int got=number(&p);
+            if(got<0 || got>255 || ((j!=8 || k!=3) && *p++!=',')) return 2;
+            if(!j) { first[k]=got; pixel_fail+=got!=expected[k]; }
+            else scale_fail+=got!=first[k];
+        }
+        if(i<n-1 && *p++!=';') return 2;
+    }
+    flight_fail=flight(&p,&settled);
+    if(flight_fail<0 || strncmp(p,"</output>",9)) return 2;
+    free(out);
+    printf("CHECK_UXE_D1_FLIGHT\tprobes=%d background=%d offset=%d occlusion=%d pixel_fail=%d scale_fail=%d replay_frames=46 flight_fail=%d release_frames=%d\n",
+        n,groups[0],groups[1],groups[2],pixel_fail,scale_fail,flight_fail,settled);
+    return pixel_fail || scale_fail || flight_fail;
+}

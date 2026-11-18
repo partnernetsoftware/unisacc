@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>D1 追尾飞行</title>
+<style>
+  html,body { margin:0; background:#111c30 }
+  canvas { display:block; width:min(100vw,1280px); height:auto; image-rendering:pixelated }
+  output { display:none }
+</style>
+<canvas width="1280" height="720" aria-label="方向键或 A、D 转向"></canvas>
+<output id="pixels"></output>
+<script src="../demo/host1-runtime.js"></script>
+<script type="module">
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { MESH_BOX } from "../meshes.js";
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { profile, layers } from "./d1-airframe-data.js";
+
+const query=new URLSearchParams(location.search);
+const probe=query.has("probe");
+const reverse=probe && query.has("reverse");
+const offset=probe && query.has("offset");
+const low=document.createElement("canvas");
+low.width=426; low.height=240;
+const renderer=createWebGLRenderer(low,{antialias:false});
+const canvas=document.querySelector("canvas");
+const output=canvas.getContext("2d",{willReadFrequently:probe});
+output.imageSmoothingEnabled=false;
+const scene=new Scene();
+scene.clearColor=[17/255,28/255,48/255,1];
+scene.fog.density=0;
+scene.ambient={color:[1,1,1],intensity:1};
+scene.lights=[];
+const camera=new PerspectiveCamera(2*Math.atan(.5),.1,300);
+
+const slices=layers.map(([dx,dz],h)=>{
+  const cells=[];
+  for(const [first,last,span,increment] of profile) {
+    for(let row=Math.max(first,h);row<=Math.min(last,45-h);row++) {
+      const width=Math.max(1,span+(row-first)*increment-h);
+      for(let col=17-width;col<17+width;col++) {
+        cells.push([col-16.5+dx+(offset && h>=7?3:0),(reverse?12-h:h)-6,row-22.5+dz]);
+      }
+    }
+  }
+  return cells;
+});
+const occupied=new Set(slices.flat().map(cell=>cell.join(",")));
+const neighbors=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+const airframe=slices.map((slice,h)=>{
+  const cells=slice.filter(cell=>neighbors.some(delta=>
+    !occupied.has(cell.map((value,axis)=>value+delta[axis]).join(","))));
+  const [,,r,g,b]=layers[h];
+  const cloud=scene.instances("skin-"+h,cells.length,[r/255,g/255,b/255]);
+  cloud.meshId=MESH_BOX;
+  cloud.metalness=0;
+  return {cells,cloud};
+});
+function draw(heading,bank) {
+  const yaw=-heading*Math.PI/180, roll=bank*Math.PI/180;
+  const c=Math.cos(yaw), s=Math.sin(yaw), cr=Math.cos(roll), sr=Math.sin(roll);
+  const meshYaw=Math.atan2(s*cr,c);
+  const meshPitch=Math.asin(s*sr);
+  const meshRoll=Math.atan2(c*sr,cr);
+  for(const {cells,cloud} of airframe) cells.forEach(([x,y,z],i)=>{
+    const xx=x*cr-y*sr, yy=x*sr+y*cr;
+    cloud.set(i,xx*c+z*s,yy,-xx*s+z*c,1,meshYaw,meshPitch,meshRoll);
+  });
+  camera.setEye(64*s,48,64*c);
+  camera.setTarget(0,0,0);
+  renderer.render(scene,camera);
+  output.drawImage(low,1,0,1278,720);
+}
+
+const image=await fetch(new URL("d1-flight.wasm",import.meta.url));
+if(!image.ok) throw new Error("飞行核读取失败");
+const kernel=await window.host1Boot(await image.arrayBuffer());
+const ex=kernel.exports;
+const input=kernel.meta.globals.indexOf("input_turn");
+if(input<0) throw new Error("缺少方向输入槽");
+let submitted;
+window.onHostGpuSubmit=bytes=>{
+  const packet=new DataView(bytes);
+  if(packet.byteLength!==4 || packet.getUint8(0)!==1 || submitted)
+    throw new Error("飞行提交格式错误");
+  submitted=[packet.getUint16(1,true),packet.getUint8(3)-24];
+};
+function step(axis) {
+  submitted=null;
+  ex.host_reset();
+  ex.host_set_global(input,ex.host_mk_i64(BigInt(axis)));
+  ex.run_step();
+  if(!submitted) throw new Error("飞行核缺少本帧提交");
+  return submitted;
+}
+if(probe) {
+  draw(...step(0));
+  const pixels=(query.get("probe")||"").split(";").filter(Boolean).map(pair=>{
+    const [x,y]=pair.split(",").map(Number);
+    const rgba=output.getImageData(1+3*x,3*y,3,3).data;
+    return Array.from(rgba).join(",");
+  });
+  const sequence=[1,1,1,1,1,1,1,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,0,0];
+  const replay=()=>{
+    ex.host_reset_globals();
+    return sequence.map(axis=>step(axis).join(",")).join(";");
+  };
+  document.querySelector("output").textContent=[pixels.join(";"),replay(),replay()].join("|");
+} else {
+  const keys=new Set();
+  addEventListener("keydown",event=>{
+    if(["ArrowLeft","ArrowRight","KeyA","KeyD"].includes(event.code)) {
+      event.preventDefault();
+      keys.add(event.code);
+    }
+  });
+  addEventListener("keyup",event=>keys.delete(event.code));
+  addEventListener("blur",()=>keys.clear());
+  let last=performance.now();
+  draw(...step(0));
+  function frame(now) {
+    const axis=Number(keys.has("ArrowRight")||keys.has("KeyD"))-
+      Number(keys.has("ArrowLeft")||keys.has("KeyA"));
+    if(now-last>=1000/30) {
+      last=now-(now-last)%(1000/30);
+      draw(...step(axis));
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</html>
