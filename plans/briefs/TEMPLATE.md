@@ -31,6 +31,7 @@
 - [ ] core-path-review:核心路径(devsvc 核心、提交门、锁、选批)提交须独立复核
 - [ ] e2e-latency:提速声明按用户实际调用的命令行端到端时延验收
 - [ ] thaw-on-fail:冻结后出 FAIL 或 UNKNOWN 即解冻退回候选点
+- [ ] shared-registry-serial:同一时间只允许一个子代理改共享登记表(tests/batches.tsv、coverage.tsv、tools-compile-sources.tsv、batch-product-inputs.tsv);其余写自己的补丁行并由指定提交者串行合并;不要跑 register.cx(回滚会整表覆盖他人新增行,缺口 REGISTER-ROLLBACK-CLOBBERS-CONCURRENT),用 devsvc f append 单行追加并用 run-batch 验证;提交前 `git diff HEAD --stat` 核三张表只有自己的行
 
 ## 截止
 
