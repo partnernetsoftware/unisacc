@@ -21,10 +21,11 @@ flowchart LR
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
     V71["0.0.71 正规构造499/499,APE ca84同字节复现<br/>/tmp/unisacc-session-v71-rc2"]
-    V72["0.0.72 netraw"]
-    ECO["0.0.73 至 0.0.76 生态门路线(建议)<br/>G0 推算 0.0.76<br/>prd_cx.md 0.9"]
-    PERF["0.0.77 执行器吞吐、0.0.78 链接单元二期<br/>prd.md 候选池 性能新方向"]
-    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> ECO --> PERF
+    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>release/notes-0.0.72.md"]
+    V73["0.0.73 前端诊断一期,分支 v0.0.73<br/>plans/v0.0.73.md、build/version-seq.tsv"]
+    ECO["0.0.74 至 0.0.80 生态门路线(建议,自 0.0.73 起顺延)<br/>G0 推算 0.0.80<br/>prd_cx.md 0.9"]
+    PERF["0.0.81 执行器吞吐、0.0.82 链接单元二期<br/>prd.md 候选池 性能新方向"]
+    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> ECO --> PERF
   end
   subgraph 发布
     REL["发布 12 步与回滚<br/>release/rollback.txt、archive 起链配方节"]
