@@ -160,6 +160,7 @@ static int cfg_load(const char *root) {
 typedef struct { char name[64]; char owner[64]; long exp; } Lock;
 static Lock locks[MAXLOCK]; static int nlock;
 static char ring[RING][EVW]; static long ring_wall[RING]; static long seq;
+static long ring_floor;
 static char dir[PW], sockp[PW];
 static char resp[1 << 17]; static long rn;
 static char big[1 << 22];
@@ -210,7 +211,66 @@ static int inst_dir(void) {
 /* ---- 事件环 ---- */
 static long ev_rotate_bytes(void) { const char *e = getenv("DEVSVC_EV_ROTATE"); long v = e ? atol(e) : 0; return v > 0 ? v : 4L << 20; }   /* 缺省 4 MB;检查用环境变量调小 */
 #define EV_ROTATE ev_rotate_bytes()
+/* Restore both retained generations, including logs from older services which
+ * reused sequence numbers. Only a contiguous suffix can be offered to --since. */
+static int ev_replay(const char *path, int current) {
+    /* Read a bounded tail even when an instance uses a large rotation size. */
+    int fd = sy_open_read(path), damaged = 0; long n, start;
+    char *s, *end, *nl, *p, *body; sy_stat_t st;
+    if (fd < 0) return fd;
+    if (sy_fstat(fd, &st) || st.kind != 'f' || st.size <= 0) { sy_close(fd); return -EINVAL; }
+    n = st.size >= (long)sizeof big ? sizeof big - 1 : st.size;
+    start = st.size - n;
+    if (sy_lseek(fd, start, SEEK_SET) < 0 || sy_read_full(fd, big, n)) { sy_close(fd); return -EIO; }
+    sy_close(fd);
+    s = big; end = s + n;
+    if (start) { nl = memchr(s, '\n', n); if (!nl) return -EINVAL; s = nl + 1; }
+    for (; s < end; s = nl + 1) {
+        long id, wall;
+        nl = memchr(s, '\n', end - s);
+        if (!nl) { if (current) sy_append_file(path, "\n", 1, 0600); damaged = 1; break; }
+        *nl = 0;
+        if (strncmp(s, "EV\t", 3)) { damaged = 1; continue; }
+        errno = 0; id = strtol(s + 3, &p, 10);
+        if (errno || id <= 0 || *p != '\t') { damaged = 1; continue; }
+        wall = strtol(p + 1, &body, 10);
+        if (errno || wall <= 0 || *body != '\t' || nl - body <= 1 || nl - body > EVW ||
+            strlen(body + 1) != (size_t)(nl - body - 1)) { damaged = 1; continue; }
+        if (id <= seq) continue;
+        if (id - 1 != seq) ring_floor = id - 1;
+        seq = id;
+        if (mm_copy(ring[(seq - 1) % RING], EVW, body + 1, nl - body)) return -EINVAL;
+        ring_wall[(seq - 1) % RING] = wall;
+    }
+    return damaged ? -EINVAL : 0;
+}
+static void ev_resume(char *notice, int cap) {
+    char cur[PW + 24], prev[PW + 24], high[PW + 24], *end; unsigned char *b = 0; int64_t n = 0;
+    if (cx_fmt(cur, sizeof cur, "%s/events.tsv", dir) || cx_fmt(prev, sizeof prev, "%s/events.tsv.1", dir) ||
+        cx_fmt(high, sizeof high, "%s/events.seq", dir)) { fprintf(stderr, "EVENT_SEQ_PATH_TOO_LONG\n"); return; }
+    int backup = ev_replay(prev, 0), current = ev_replay(cur, 1);
+    long watermark = 0;
+    int saved = sy_read_file(high, &b, &n, 32);
+    if (!saved) {
+        errno = 0; watermark = strtol((char *)b, &end, 10);
+        if (errno || watermark < 0 || end != (char *)b + n || !n) { watermark = 0; saved = -EINVAL; }
+        free(b);
+    }
+    if (current || (backup && backup != -ENOENT) || (saved && saved != -ENOENT) || watermark > seq) {
+        long floor = watermark;
+        if (!floor && current != -ENOENT && current) floor = sy_wall_s() * 1000000L;
+        if (seq < floor) { seq = floor; ring_floor = seq; }
+        if (cx_fmt(notice, cap, "EVENT_SEQ_RECOVERY current_rc=%d rotated_rc=%d watermark_rc=%d resume=%ld", current, backup, saved, seq)) return;
+        fprintf(stderr, "%s\n", notice);
+    }
+}
 static void ev_add(const char *kind, const char *text) {
+    if (seq == LONG_MAX) { fprintf(stderr, "EVENT_SEQ_EXHAUSTED\n"); return; }
+    {
+        char p[PW + 24], b[32];
+        if (cx_fmt(b, sizeof b, "%ld", seq + 1) || cx_fmt(p, sizeof p, "%s/events.seq", dir) ||
+            sy_write_atomic(p, b, strlen(b), 0600)) fprintf(stderr, "EVENT_SEQ_WATERMARK_UNWRITABLE\n");
+    }
     char *e = ring[seq % RING];
     int w = snprintf(e, EVW, "%s\t%s", kind, text);   /* 事件正文超出 EVW 即截断并标记,这是环的定长合同 */
     if (w >= EVW) { e[EVW - 2] = '~'; e[EVW - 1] = 0; }
@@ -432,6 +492,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     }
     if (!strcmp(f[0], "events")) {
         long since = atol(f[1]), lo = seq > RING ? seq - RING : 0, k;
+        if (lo < ring_floor) lo = ring_floor;
         if (since < lo) since = lo;
         if (since > seq) since = seq;
         radd("OK\tevents\tseq=%ld\tn=%ld\tdropped_before=%ld\n", seq, seq - since, lo);
@@ -459,8 +520,11 @@ static int serve(long ttl, long idle) {
     F(p, sizeof p, "%s/pid", dir);
     F(info, sizeof info, "%d\t%ld\tttl=%ld\tidle=%ld\n", sy_pid(), sy_wall_s(), ttl, idle);
     sy_write_atomic(p, info, strlen(info), 0600);
+    char recovery[160] = "";
+    ev_resume(recovery, sizeof recovery);
     locks_load();
     chomp(info); ev_add("svc.start", info);
+    if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     while (!stop) {
         long now = sy_now_ms(), k = 0, r;
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;

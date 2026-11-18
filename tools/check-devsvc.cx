@@ -383,12 +383,21 @@ int main(int argc, char **argv) {
     if (unsetenv("DEVSVC_DEV")) return 2;
     ck(dv1("status", 0, 0, 0, 0, 0) == 0 && has("\nDEVSVC_STATUS\tworktrees=") && has("svc=up") && has("WT\t") && has("LOCK\trace"), "status");
     /* stop;锁落盘跨重启(锁 registry owner=B 由本组前面的锁用例留下) */
+    char cursor[32] = ""; long previous = -1;
+    if (!dv1("events", "emit", "before.restart", "cursor", 0, 0)) {
+        char *p = strstr(out, "seq=");
+        if (p) { previous = atol(p + 4); F(cursor, sizeof cursor, "%ld", previous); }
+    }
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
     sy_sleep_ms(600);
     ck(sy_exists(sock) == 0 && dv1("ping", 0, 0, 0, 0, 0) == 3, "stop-removes-socket");
 
     /* ttl 到点自退 */
     ck(dv1("start", "--ttl", "2", "--idle", "100", 0) == 0 && has("OK\tstarted"), "restart-ttl2");
+    {   int rc = dv1("events", "--since", cursor, 0, 0, 0); char *p = strstr(out, "seq=");
+        ck(!rc && previous > 0 && p && atol(p + 4) > previous && has("\tsvc.start\t") &&
+           !has("\tbefore.restart\t"), "events-since-across-restart");
+    }
     ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("LOCK\tregistry\towner=B"), "locks-persist-across-restart");
     t0 = sy_now_ms(); sy_sleep_ms(2800);
     ck(dv1("ping", 0, 0, 0, 0, 0) == 3 && sy_exists(sock) == 0, "ttl-self-exit");
