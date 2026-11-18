@@ -30,16 +30,17 @@ static int replace_head(const char *path,int byte,int *previous) {
     return ok;
 }
 
-static void tamper(const char *page,const char *asset) {
-    char path[190],diff[205],*out=0;
+static void tamper(const char *page,const char *asset,int expected) {
+    char path[190],diff[205],summary[60],*out=0;
     char *av[]={"sh","./unisacc.com","tools/gen-uxe-pages.cx","--","--check","--only",(char *)page,0};
     size_t bytes=0;
     int previous,rc,matched,restored;
     tx_snprintf(path,sizeof path,"docs/uxe/%s/%s",page,asset);
     tx_snprintf(diff,sizeof diff,"DIFF\t%s\n",path);
+    tx_snprintf(summary,sizeof summary,"failed=%d\n",expected);
     if(!replace_head(path,-1,&previous)) { ck(0,path); return; }
     rc=cx_runv_timeout(av,12,&out,&bytes);
-    matched=out && strstr(out,diff) && strstr(out,"failed=1\n");
+    matched=out && strstr(out,diff) && strstr(out,summary);
     free(out);
     restored=replace_head(path,previous,0);
     ck(rc==1 && matched && restored,path);
@@ -62,12 +63,13 @@ static int fixture(const char *cwd,const char *root) {
 
 int main(void) {
     const char *pages[]={"fly","ink-walk","oneshot"};
-    const char *assets[]={"index.html","renderer-webgl.js","scene.js","meshes.js","math.js","host1-runtime.js"};
-    const char *boot_assets[]={"fly-b64.js","ink-b64.js","oneshot-b64.js"};
+    const char *assets[]={"index.html","renderer-webgl.js","scene.js","meshes.js","math.js"};
+    const char *specific[][2]={{"host1-runtime.js","fly-b64.js"},{"d3-walk.tsv","d3-detail.rgba"},
+        {"d4-gait.js","d4-dense-town.tsv"}};
     const char *examples[][5]={{"fly","fly-host1","FLY_OK","FLY_ERR","FLY_GL_OK"},
-        {"ink-walk","ink-walk-host1","INK_OK","INK_ERR","INK_FAIL"},
-        {"oneshot","oneshot-host1","ONESHOT_OK","ONESHOT_ERR","ONESHOT_FAIL"},
         {"water-keeps","water-keeps-host1","WATER_OK","WATER_ERR","WATER_FAIL"}};
+    char *bridge[]={"sh","./unisacc.com","tools/check-uxe-d1-flight.cx","--","bridge-pages-input",0};
+    char *town[]={"sh","./unisacc.com","tools/check-uxe-d1-flight.cx","--","town-pages-input",0};
     char *check[]={"sh","./unisacc.com","tools/gen-uxe-pages.cx","--","--check",0};
     char *write_frozen[]={"sh","./unisacc.com","tools/gen-uxe-pages.cx","--","--write","--only","fly",0};
     char cwd[512],root[100],url[800];
@@ -81,19 +83,21 @@ int main(void) {
     }
     ck(runv(write_frozen,20)==0,"write-frozen-keeps-published-bytes");
     for(i=0;i<3;i++) {
-        for(j=0;j<6;j++) tamper(pages[i],assets[j]);
-        tamper(pages[i],boot_assets[i]);
+        for(j=0;j<5;j++) tamper(pages[i],assets[j],i?2:1);
+        for(j=0;j<2;j++) tamper(pages[i],specific[i][j],i?2:1);
     }
     ck(runv(check,20)==0,"tamper-restored-full-check");
     if(sy_chdir(cwd)) return 2;
     chd_wipe(root);
-    for(i=0;i<4;i++) {
+    for(i=0;i<2;i++) {
         const char **entry=examples[i];
         int retries=0,rc;
         tx_snprintf(url,sizeof url,"file://%s/docs/uxe/%s/index.html?auto=1",cwd,entry[0]);
         rc=chd_dump_expect("/usr/bin/google-chrome",url,entry[2],entry+2,3,entry[1],3,25,&retries);
         ck(rc==0,entry[2]);
     }
+    ck(runv(bridge,16)==0,"D3_OK CDP");
+    ck(runv(town,18)==0,"D4_OK CDP");
     printf("CHECK_GEN_UXE_PAGES\tasserts=%d\tfailed=%d\n", asserts, failed);
     return failed ? 1 : 0;
 }

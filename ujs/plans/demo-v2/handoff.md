@@ -192,3 +192,9 @@ U2c 用 `?finish-u2c` 预览。D3 调整雾和阴影范围，恢复桥头房的�
 经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- finish-u2c`。检查从画布像素独立计算房屋暖色亮度分箱与方差，以及城镇上方的烟团颜色面积。分别追加 `bare-u2c-house` 和 `thin-u2c-smoke` 可验证两个反例各退出 1。
 
 D4 开发预览为 `test/d4-skeleton.html?play`。长按 W、S、上下方向键或屏幕按钮控制城镇前后行走，镜头跟随甲板，烟团停步后仍上升。经 devsvc 运行 `sh ./unisacc.com tools/check-uxe-d3-geometry.cx -- d4-play`。Chrome 的合成键盘事件走页面监听器，检查读回五个时点的甲板、镜头和烟团终值。前进 0.960、停步保持、后退归零。分别追加 `fixed-u2c-gait`、`fixed-u2c-camera`、`still-u2c-smoke` 验证各反例。起点与跟拍并排图在 `/tmp/cdx2-d4-play-comparison.png`。
+
+### P4 发布候选
+
+墨桥漫游和行走城镇的开发预览从测试页分别导出到 `docs/uxe/ink-walk` 和 `docs/uxe/oneshot`。这两条发布事实为带 SHA-256 全量固定清单的 `live`。`gen-uxe-pages --check` 同时比较源生成物和发布清单。更新候选时按页面先运行 `--write --only ID`，再用 `--pins --only ID` 生成待复核哈希，更新事实表后运行全量检查。
+
+复跑 `tools/check-uxe-d1-flight.cx -- bridge-pages-input` 和 `-- town-pages-input`。Chrome CDP 向实际导出页发送按键按下和松开事件，AUTO 在两者之间推进固定逻辑帧。D3 标题 `D3_OK`，前进 2160 毫米，坐标为 10543、1708、14920 毫米。D4 标题 `D4_OK`，甲板前进 960 毫米并后退归零，镜头同步移动，静止烟团上升 110 毫米。D3 冻结轨道、D4 冻结步态或烟团、两页错误 AUTO 标题分别退出 1。cc 合入后做线上读回。

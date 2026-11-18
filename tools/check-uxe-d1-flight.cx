@@ -884,7 +884,7 @@ typedef struct {
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 typedef struct { int x,z,speed,tick; } LiveWater;
-enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO };
+enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -1165,6 +1165,79 @@ static int exercise_keyboard(ChromeInput *c,int battle) {
     return failed?failed:exercise_battle(c);
 }
 
+typedef struct { int a,b,c,d; } LiveWalk;
+
+static int read_walk(ChromeInput *c,LiveWalk *s,int town) {
+    char value[160];
+    const char *d3="{\"expression\":\"document.title==='D3_OK'?document.querySelector('output').textContent:''\"}";
+    const char *d4="{\"expression\":\"document.title==='D4_OK'?document.querySelector('output').textContent:''\"}";
+    return cdp_call(c,"Runtime.evaluate",town?d4:d3) && cdp_string(c,"\"value\":\"",value,sizeof value) &&
+        sscanf(value,"%d,%d,%d,%d",&s->a,&s->b,&s->c,&s->d)==4;
+}
+
+static int walk_step(ChromeInput *c,LiveWalk *s,int frames) {
+    char args[100],value[160];
+    tx_snprintf(args,sizeof args,"{\"expression\":\"advancePreview(%d)\"}",frames);
+    return cdp_call(c,"Runtime.evaluate",args) && cdp_string(c,"\"value\":\"",value,sizeof value) &&
+        sscanf(value,"%d,%d,%d,%d",&s->a,&s->b,&s->c,&s->d)==4;
+}
+
+static int walk_key(ChromeInput *c,LiveWalk *s,int back,int frames) {
+    int ok;
+    const char *key=back?"s":"w",*code=back?"KeyS":"KeyW";
+    int vk=back?83:87;
+    if(!keyboard(c,key,code,vk,1)) return 0;
+    ok=walk_step(c,s,frames);
+    return keyboard(c,key,code,vk,0) && ok;
+}
+
+static int bridge_route(const LiveWalk *s) {
+    int x=9000+(s->a*5000+3500)/7000;
+    int y=150+(s->a*5050+3500)/7000;
+    int z=16000-(s->a*3500+3500)/7000;
+    return s->a>=0 && s->a<=7000 && s->a%180==0 &&
+        abs(s->b-x)<=1 && abs(s->c-y)<=1 && abs(s->d-z)<=1;
+}
+
+static int town_smoke(const LiveWalk *s) {
+    int lift=4570+(s->a%120*1650+60)/120;
+    return abs(s->d-lift)<=1;
+}
+
+static int exercise_walk(ChromeInput *c,int town) {
+    LiveWalk start={0},held={0},forward={0},back={0};
+    long end=sy_now_ms()+4200;
+    int i,ready=0;
+    for(i=0;i<80 && sy_now_ms()<end;i++) {
+        if(read_walk(c,&start,town)) { ready=1; break; }
+        sy_sleep_ms(35);
+    }
+    if(!ready) {
+        char title[120]="";
+        if(cdp_call(c,"Runtime.evaluate","{\"expression\":\"document.title\"}")) cdp_string(c,"\"value\":\"",title,sizeof title);
+        printf("P4_AUTO expected=%s title=%s\n",town?"D4_OK":"D3_OK",title);
+        return 1;
+    }
+    if(!town) {
+        int moved=walk_key(c,&forward,0,12);
+        printf("D3_OK distance=%d->%d start=%d,%d,%d xyz=%d,%d,%d moved=%d\n",
+            start.a,forward.a,start.b,start.c,start.d,forward.b,forward.c,forward.d,moved);
+        return start.a!=0 || !bridge_route(&start) || !moved || forward.a!=12*180 || !bridge_route(&forward);
+    }
+    if(start.b || start.c!=14000 || !town_smoke(&start)) {
+        printf("D4 initial tick=%d deck=%d eye=%d smoke=%d\n",start.a,start.b,start.c,start.d);
+        return 1;
+    }
+    if(!walk_step(c,&held,8) || !walk_key(c,&forward,0,40) || !walk_key(c,&back,1,40))
+        return input_error("cdp-walk-step",0);
+    printf("D4_OK eye=%d->%d->%d smoke=%d->%d deck=%d->%d\n",
+        start.c,forward.c,back.c,start.d,held.d,forward.b,back.b);
+    return start.a!=0 || held.a!=8 || forward.a!=48 || back.a!=88 ||
+        held.b || held.c!=14000 || held.d<=start.d || !town_smoke(&held) ||
+        !town_smoke(&forward) || !town_smoke(&back) ||
+        forward.b!=960 || forward.c!=14960 || back.b || back.c!=14000;
+}
+
 static int check_pages_keyboard(const char *mutation,int battle) {
     ChromeInput c={0};
     sy_spawn_t launch;
@@ -1172,13 +1245,15 @@ static int check_pages_keyboard(const char *mutation,int battle) {
     char cwd[1024],url[1260],profile[128],option[160];
     char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","chrome-pipe",
         "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
+        "--use-angle=swiftshader","--enable-unsafe-swiftshader",
         "--remote-debugging-pipe","--window-size=1280,807",option,"about:blank",0};
     int rc,n;
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
     n=tx_snprintf(url,sizeof url,"file://%s/%s?%s&%s",cwd,
+        battle==LIVE_BRIDGE?"docs/uxe/ink-walk/index.html":battle==LIVE_TOWN?"docs/uxe/oneshot/index.html":
         battle>=LIVE_WATER?"docs/uxe/water-keeps/index.html":
         battle==LIVE_MUTE?"ujs/practice/uxe/test/d1-pixel-a.html":"docs/uxe/fly-next/index.html",
-        battle==LIVE_WATER_AUTO?"auto=1":battle==LIVE_BATTLE?"input-test=1&hold-course":"input-test=1",mutation);
+        battle>=LIVE_WATER_AUTO?"auto=1":battle==LIVE_BATTLE?"input-test=1&hold-course":"input-test=1",mutation);
     if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
@@ -1191,6 +1266,7 @@ static int check_pages_keyboard(const char *mutation,int battle) {
     if(!cdp_navigate(&c,url)) rc=input_error("cdp-navigate",0);
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
     else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
+    else if(battle==LIVE_BRIDGE || battle==LIVE_TOWN) rc=exercise_walk(&c,battle==LIVE_TOWN);
     else rc=exercise_keyboard(&c,battle);
     sy_close(c.child.in_fd);
     sy_close(c.child.out_fd);
@@ -1202,6 +1278,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if((argc==2 || argc==3) && !strcmp(argv[1],"bridge-pages-input"))
+        return check_pages_keyboard(argc==3?argv[2]:"",LIVE_BRIDGE);
+    if((argc==2 || argc==3) && !strcmp(argv[1],"town-pages-input"))
+        return check_pages_keyboard(argc==3?argv[2]:"",LIVE_TOWN);
     if(argc==1) {
         rc=check_airframe("");
         return rc?rc:check_world("");
