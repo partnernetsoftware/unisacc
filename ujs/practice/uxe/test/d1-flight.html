@@ -3,13 +3,27 @@
 <meta charset="utf-8">
 <title>D1 追尾飞行</title>
 <style>
-  html,body { margin:0; background:#111c30 }
-  canvas { display:block; width:min(100vw,1280px); height:auto; image-rendering:pixelated }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:#86b5be }
+  canvas { display:block; width:100%; height:100%; object-fit:cover; image-rendering:pixelated }
+  #hud { position:absolute; top:22px; left:24px; color:#f6fbfb; font:600 14px system-ui;
+    background:#132b3de6; border:1px solid #b5d9dc80; padding:14px 16px; }
+  #hud strong { font:700 25px ui-monospace,monospace; color:#d6f8f5; margin:0 4px 0 9px }
+  #hud p { margin:0 }
+  #hud p+p { margin-top:8px; color:#cce0e3; font-weight:400 }
   output { display:none }
 </style>
 <canvas width="1280" height="720" aria-label="方向键或 A、D 转向"></canvas>
+<section id="hud" aria-label="飞行仪表">
+  <p>速度<strong id="speed"></strong>节　高度<strong id="altitude"></strong>米</p>
+  <p>A D 转向　W S 升降　Shift 加速</p>
+</section>
 <output id="pixels"></output>
 <script src="../demo/host1-runtime.js"></script>
+<script>
+const flightError=message=>document.querySelector("output").textContent="ERROR: "+message;
+addEventListener("error",event=>flightError(event.message||"资源读取失败"));
+addEventListener("unhandledrejection",event=>flightError(String(event.reason)));
+</script>
 <script type="module">
 import { Scene, PerspectiveCamera } from "../scene.js";
 import { MESH_BOX, MESH_PLANE, allMeshes } from "../meshes.js";
@@ -19,13 +33,15 @@ import { parts, paints, layers } from "./d1-airframe-data.js";
 
 const query=new URLSearchParams(location.search);
 const probe=query.has("probe");
+const worldProbe=query.has("world");
 const reverse=probe && query.has("reverse");
 const offset=probe && query.has("offset");
 const shortWings=probe && query.has("short-wings");
 const noTails=probe && query.has("no-tails");
 const low=document.createElement("canvas");
 low.width=426; low.height=240;
-const renderer=createWebGLRenderer(low,{antialias:false,extraMeshes:probe?[]:[leafMesh(.55)]});
+const extraMeshes=probe?[]:[leafMesh(.55),...islandMeshes()];
+const renderer=createWebGLRenderer(low,{antialias:false,extraMeshes});
 const canvas=document.querySelector("canvas");
 const output=canvas.getContext("2d",{willReadFrequently:probe});
 output.imageSmoothingEnabled=false;
@@ -34,7 +50,7 @@ scene.clearColor=[17/255,28/255,48/255,1];
 scene.fog.density=0;
 scene.ambient={color:[1,1,1],intensity:1};
 scene.lights=[];
-const camera=new PerspectiveCamera(2*Math.atan(.5),.1,300);
+const camera=new PerspectiveCamera(2*Math.atan(.5),.1,probe?300:550);
 const composite=document.createElement("canvas");
 composite.width=426; composite.height=240;
 const backdrop=composite.getContext("2d");
@@ -72,6 +88,39 @@ const airframe=surface.slice(1).map((cells,i)=>{
   cloud.metalness=0;
   return {cells,cloud};
 });
+function islandMeshes() {
+  const top=[], cliff=[];
+  const topNormals=[], cliffNormals=[];
+  const heights=[.25,.1,-.24];
+  const radii=[.68,.88,1];
+  const rim=(i,band)=>{
+    const angle=2*Math.PI*i/14, roughness=.82+((31*(i%14)+7)%19)/75;
+    return [Math.cos(angle)*roughness*radii[band],heights[band],Math.sin(angle)*roughness*radii[band]];
+  };
+  for(let i=0;i<14;i++) {
+    top.push(0,.25,0,...rim(i+1,0),...rim(i,0));
+    topNormals.push(0,1,0,0,1,0,0,1,0);
+    for(const band of [0,1]) {
+      const a=rim(i,band), b=rim(i+1,band), c=rim(i,band+1), d=rim(i+1,band+1);
+      for(const [p,q,r] of [[a,b,c],[b,d,c]]) {
+        const [x,y,z]=q.map((value,axis)=>value-p[axis]),[u,v,w]=r.map((value,axis)=>value-p[axis]);
+        const normal=[y*w-z*v,z*u-x*w,x*v-y*u];
+        cliff.push(...p,...q,...r);
+        cliffNormals.push(...normal,...normal,...normal);
+      }
+    }
+  }
+  return [[top,topNormals],[cliff,cliffNormals]].map(([positions,normals])=>({
+    positions:new Float32Array(positions),normals:new Float32Array(normals),vCount:positions.length/3
+  }));
+}
+const scenery=[];
+const periodic=(value,origin)=>value+512*Math.round((origin-value)/512);
+function place(cloud,i,x,y,z,scale,yaw=0) {
+  scenery.push({cloud,i,x,y,z,scale,yaw});
+}
+const speedUI=document.querySelector("#speed"), altitudeUI=document.querySelector("#altitude");
+document.querySelector("#hud").hidden=probe;
 if(!probe) {
   scene.clearColor=[0,0,0,0];
   scene.ambient={color:[.88,.94,1],intensity:.83};
@@ -79,38 +128,59 @@ if(!probe) {
   scene.fog={density:.0032,color:[.62,.81,.85]};
   const sea=scene.instances("sea",1,[.09,.34,.48]);
   sea.meshId=MESH_PLANE; sea.metalness=0;
-  sea.set(0,0,-25,0,560);
-  const swell=scene.instances("swell",60,[.35,.65,.71]);
+  sea.set(0,0,-25,0,1200);
+  const swell=scene.instances("swell",230,[.35,.65,.71]);
   swell.meshId=MESH_PLANE; swell.metalness=0;
   for(let i=0;i<swell.count;i++) {
-    const x=((i*61)%223)-111, z=((i*137)%239)-156;
-    swell.set(i,x,-24.95,z,1+i%4,.1);
+    const x=((i*61)%509)-254, z=((i*137)%503)-251;
+    place(swell,i,x,-24.95,z,1+i%4,.1);
   }
   const puffs=scene.instances("clouds",30,[.96,.94,.86]);
   puffs.meshId=allMeshes().length; puffs.metalness=0;
   for(let i=0;i<puffs.count;i++) {
     const group=Math.floor(i/6), n=i%6;
     const [x,y,z]=[[-42,13,-105],[34,17,-141],[-104,18,-87],[83,23,-109],[3,21,-225]][group];
-    puffs.set(i,x+(n-2.5)*7,y+(n%3)*2,z+Math.sin(n*2)*4,8+(n%4)*2);
+    place(puffs,i,x+(n-2.5)*7,y+(n%3)*2,z+Math.sin(n*2)*4,8+(n%4)*2);
   }
+  const land=scene.instances("island-top",4,[.28,.49,.23]);
+  const cliffs=scene.instances("island-cliffs",4,[.58,.42,.29]);
+  const meadows=scene.instances("island-meadows",4,[.58,.89,.19]);
+  land.meshId=allMeshes().length+1;
+  cliffs.meshId=allMeshes().length+2;
+  meadows.meshId=MESH_PLANE;
+  for(const cloud of [land,cliffs,meadows]) cloud.metalness=0;
+  let seed=7;
+  const next=()=>seed=(seed*73+41)%251;
+  [[-60,-102,24],[61,-134,28],[-5,-192,31],[112,-224,32]].forEach(([baseX,baseZ,size],i)=>{
+    const x=baseX+next()%13-6,z=baseZ+next()%17-8,y=-24;
+    place(land,i,x,y,z,size,i*.71);
+    place(cliffs,i,x,y,z,size,i*.71);
+    place(meadows,i,x,y+.25*size+.08,z,4);
+  });
 }
-function draw(heading,bank) {
+function draw(heading,bank,x,z,altitude,speed) {
   const yaw=-heading*Math.PI/180, roll=bank*Math.PI/180;
   const c=Math.cos(yaw), s=Math.sin(yaw), cr=Math.cos(roll), sr=Math.sin(roll);
   const meshYaw=Math.atan2(s*cr,c);
   const meshPitch=Math.asin(s*sr);
   const meshRoll=Math.atan2(c*sr,cr);
-  for(const {cells,cloud} of airframe) cells.forEach(([x,y,z],i)=>{
-    const xx=x*cr-y*sr, yy=x*sr+y*cr;
-    cloud.set(i,xx*c+z*s,yy,-xx*s+z*c,1,meshYaw,meshPitch,meshRoll);
+  const sceneX=probe || query.has("frozen-position")?0:x;
+  const sceneY=probe?0:altitude-25, sceneZ=probe || query.has("frozen-position")?0:z;
+  for(const {cells,cloud} of airframe) cells.forEach(([vx,vy,vz],i)=>{
+    const xx=vx*cr-vy*sr, yy=vx*sr+vy*cr;
+    cloud.set(i,sceneX+xx*c+vz*s,sceneY+yy,sceneZ-xx*s+vz*c,1,meshYaw,meshPitch,meshRoll);
   });
   if(probe) {
     camera.setEye(64*s,48,64*c);
     camera.setTarget(0,0,0);
   } else {
     const chase=yaw-.56;
-    camera.setEye(70*Math.sin(chase),34,70*Math.cos(chase));
-    camera.setTarget(-13*s,2,-13*c);
+    camera.setEye(sceneX+70*Math.sin(chase),sceneY+34,sceneZ+70*Math.cos(chase));
+    camera.setTarget(sceneX-13*s,sceneY+2,sceneZ-13*c);
+    for(const item of scenery) item.cloud.set(item.i,periodic(item.x,sceneX),item.y,
+      periodic(item.z,sceneZ),item.scale,item.yaw);
+    speedUI.textContent=String((query.has("frozen-hud")?12:speed)*5);
+    altitudeUI.textContent=String(altitude*4);
   }
   renderer.render(scene,camera);
   if(probe) output.drawImage(low,1,0,1278,720);
@@ -126,19 +196,21 @@ const image=await fetch(new URL("d1-flight.wasm",import.meta.url));
 if(!image.ok) throw new Error("飞行核读取失败");
 const kernel=await window.host1Boot(await image.arrayBuffer());
 const ex=kernel.exports;
-const input=kernel.meta.globals.indexOf("input_turn");
-if(input<0) throw new Error("缺少方向输入槽");
+const inputs=["input_turn","input_climb","input_boost"].map(name=>kernel.meta.globals.indexOf(name));
+if(inputs.some(index=>index<0)) throw new Error("缺少飞行输入槽");
 let submitted;
 window.onHostGpuSubmit=bytes=>{
   const packet=new DataView(bytes);
-  if(packet.byteLength!==4 || packet.getUint8(0)!==1 || submitted)
+  if(packet.byteLength!==10 || packet.getUint8(0)!==2 || submitted)
     throw new Error("飞行提交格式错误");
-  submitted=[packet.getUint16(1,true),packet.getUint8(3)-24];
+  submitted=[packet.getUint16(1,true),packet.getUint8(3)-24,
+    (packet.getUint16(4,true)-2048)/8,(packet.getUint16(6,true)-2048)/8,
+    packet.getUint8(8),packet.getUint8(9)];
 };
-function step(axis) {
+function step(axis,climb=0,boost=0) {
   submitted=null;
   ex.host_reset();
-  ex.host_set_global(input,ex.host_mk_i64(BigInt(axis)));
+  [axis,climb,boost].forEach((value,i)=>ex.host_set_global(inputs[i],ex.host_mk_i64(BigInt(value))));
   ex.run_step();
   if(!submitted) throw new Error("飞行核缺少本帧提交");
   return submitted;
@@ -158,13 +230,33 @@ if(probe) {
   const sequence=[1,1,1,1,1,1,1,0,0,0,0,0,0,0,-1,-1,-1,0,0,0,0,0,0];
   const replay=()=>{
     ex.host_reset_globals();
-    return sequence.map(axis=>step(axis).join(",")).join(";");
+    return sequence.map(axis=>step(axis).slice(0,2).join(",")).join(";");
   };
   document.querySelector("output").textContent=[pixels.join(";"),silhouette.join(","),replay(),replay()].join("|");
+} else if(worldProbe) {
+  const regions=query.get("world").split("|");
+  function sample(region) {
+    const image=output.getImageData(0,0,1280,720).data;
+    const values=[speedUI.textContent,altitudeUI.textContent];
+    for(const pair of region.split(";")) {
+      const [cx,cy]=pair.split(",").map(Number);
+      for(let y=cy-4;y<=cy+4;y++) for(let x=cx-4;x<=cx+4;x++) {
+        const at=4*((3*y+1)*1280+3*x+2);
+        values.push(image[at],image[at+1],image[at+2]);
+      }
+    }
+    return values.join(",");
+  }
+  draw(...step(0));
+  const first=sample(regions[0]);
+  let state;
+  for(let i=0;i<27;i++) state=step(0,0,1);
+  draw(...state);
+  document.querySelector("output").textContent=first+"|"+sample(regions[1]);
 } else {
   const keys=new Set();
   addEventListener("keydown",event=>{
-    if(["ArrowLeft","ArrowRight","KeyA","KeyD"].includes(event.code)) {
+    if(["ArrowLeft","ArrowRight","KeyA","KeyD","ArrowUp","ArrowDown","KeyW","KeyS","ShiftLeft","ShiftRight"].includes(event.code)) {
       event.preventDefault();
       keys.add(event.code);
     }
@@ -176,9 +268,12 @@ if(probe) {
   function frame(now) {
     const axis=Number(keys.has("ArrowRight")||keys.has("KeyD"))-
       Number(keys.has("ArrowLeft")||keys.has("KeyA"));
+    const climb=Number(keys.has("ArrowUp")||keys.has("KeyW"))-
+      Number(keys.has("ArrowDown")||keys.has("KeyS"));
+    const boost=Number(keys.has("ShiftLeft")||keys.has("ShiftRight"));
     if(now-last>=1000/30) {
       last=now-(now-last)%(1000/30);
-      draw(...step(axis));
+      draw(...step(axis,climb,boost));
     }
     requestAnimationFrame(frame);
   }

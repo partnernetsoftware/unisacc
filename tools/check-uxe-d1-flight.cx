@@ -158,8 +158,9 @@ static int silhouette(const char **p) {
         want=want<0?0:want;
         for(got=0;got<=paint_count;got++)
             if(palette[got].r==r && palette[got].g==g && palette[got].b==b) break;
-        if(got>paint_count) return -1;
-        expected[want]++; actual[got]++;
+        expected[want]++;
+        if(got>paint_count) failed++;
+        else actual[got]++;
         if(want==4) { if(x<min_x[0]) min_x[0]=x; if(x>max_x[0]) max_x[0]=x; }
         if(got==4) { if(x<min_x[1]) min_x[1]=x; if(x>max_x[1]) max_x[1]=x; }
     }
@@ -172,53 +173,170 @@ static int silhouette(const char **p) {
     return failed;
 }
 
-int main(int argc,char **argv) {
-    char cwd[1024],url[2200],profile[128],option[160],*out=0;
-    const char *p,*mutation=argc==2?argv[1]:"";
+static int input_error(const char *stage,char *out) {
+    printf("D1_FLIGHT_ERROR stage=%s\n",stage);
+    free(out);
+    return 2;
+}
+
+static const char *browser(char *url,char **out,int stage) {
+    char profile[128],option[160];
+    const char *p, *tag="<output id=\"pixels\">";
     char *args[]={"google-chrome","--headless=new","--use-angle=swiftshader",
         "--enable-unsafe-swiftshader","--disable-background-networking","--allow-file-access-from-files",
         "--window-size=1280,807","--no-first-run","--virtual-time-budget=5000",option,"--dump-dom",url,0};
     size_t size=0;
-    int n,i,j,k,rc,at,pixel_fail=0,scale_fail=0,flight_fail,settled,shape_fail;
-    if(argc>2 || (*mutation && strcmp(mutation,"reverse") && strcmp(mutation,"offset") &&
-        strcmp(mutation,"short-wings") && strcmp(mutation,"no-tails"))) return 2;
-    if(!load_facts() || !getcwd(cwd,sizeof cwd)) return 2;
+    int rc;
+    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-flight-%d-%d",(int)getpid(),stage);
+    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
+    rc=cx_runv_timeout(args,20,out,&size);
+    chd_wipe(profile);
+    p=*out?strstr(*out,tag):0;
+    if(p) p+=strlen(tag);
+    if(rc || !p || *p=='<' || !strstr(p,"</output>") || !strncmp(p,"ERROR:",6)) {
+        printf("D1_FLIGHT_BROWSER stage=%d rc=%d bytes=%d payload=%.100s\n",stage,rc,(int)size,p?p:"missing");
+        return 0;
+    }
+    return p;
+}
+
+static int check_airframe(const char *mutation) {
+    char cwd[1024],url[2200],*out=0;
+    const char *p;
+    int n,i,j,k,at,pixel_fail=0,scale_fail=0,flight_fail,settled,shape_fail;
+    if(!load_facts() || !getcwd(cwd,sizeof cwd)) return input_error("airframe-facts",0);
     n=choose_probes();
-    if(n<8 || groups[0]<2 || groups[1]<2 || groups[2]<2) return 2;
+    if(n<8 || groups[0]<2 || groups[1]<2 || groups[2]<2) return input_error("airframe-probes",0);
     at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-flight.html?%s&probe=",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return input_error("airframe-url",0);
     for(i=0;i<n;i++) {
         int w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",i?";":"",probes[i].x,probes[i].y);
-        if(w<0 || w>=(int)sizeof url-at) return 2;
+        if(w<0 || w>=(int)sizeof url-at) return input_error("airframe-url",0);
         at+=w;
     }
-    tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-flight-%d",(int)getpid());
-    tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
-    rc=cx_runv_timeout(args,30,&out,&size);
-    chd_wipe(profile);
-    p=out?strstr(out,"<output id=\"pixels\">"):0;
-    if(rc || !p || p[strlen("<output id=\"pixels\">")]=='<') {
-        free(out);
-        printf("FAIL D1_FLIGHT_BROWSER rc=%d\n",rc);
-        return 2;
-    }
-    p+=strlen("<output id=\"pixels\">");
+    p=browser(url,&out,1);
+    if(!p) return input_error("airframe-browser",out);
     for(i=0;i<n;i++) {
         Color color=palette[probes[i].want<0?0:probes[i].want];
         int expected[]={color.r,color.g,color.b,255}, first[4];
         for(j=0;j<9;j++) for(k=0;k<4;k++) {
             int got=number(&p);
-            if(got<0 || got>255 || ((j!=8 || k!=3) && *p++!=',')) return 2;
+            if(got<0 || got>255 || ((j!=8 || k!=3) && *p++!=',')) return input_error("airframe-rgba",out);
             if(!j) { first[k]=got; pixel_fail+=got!=expected[k]; }
             else scale_fail+=got!=first[k];
         }
-        if(i<n-1 && *p++!=';') return 2;
+        if(i<n-1 && *p++!=';') return input_error("airframe-block",out);
     }
     shape_fail=silhouette(&p);
-    if(shape_fail<0) return 2;
+    if(shape_fail<0) return input_error("airframe-silhouette",out);
     flight_fail=flight(&p,&settled);
-    if(flight_fail<0 || strncmp(p,"</output>",9)) return 2;
+    if(flight_fail<0 || strncmp(p,"</output>",9)) return input_error("airframe-replay",out);
     free(out);
     printf("CHECK_UXE_D1_FLIGHT\tprobes=%d background=%d offset=%d occlusion=%d pixel_fail=%d scale_fail=%d replay_frames=46 flight_fail=%d release_frames=%d\n",
         n,groups[0],groups[1],groups[2],pixel_fail,scale_fail,flight_fail,settled);
     return pixel_fail || scale_fail || flight_fail || shape_fail;
+}
+
+static double root(double square) {
+    double estimate=square;
+    int i;
+    for(i=0;i<12;i++) estimate=(estimate+square/estimate)*.5;
+    return estimate;
+}
+
+static int center(double x,double y,double z,double travel,int *px,int *py) {
+    /* Unit right/up/forward from the chase eye to the point ahead of the jet. */
+    double ex=-37.1830338545, ez=59.3078577709;
+    double fx=-ex, fy=-32, fz=-13-ez;
+    double horizontal=root(fx*fx+fz*fz), length=root(horizontal*horizontal+fy*fy);
+    double rx=-fz/horizontal, rz=fx/horizontal, depth, up;
+    x-=ex; y-=34; z-=ez+travel;
+    depth=(fx*x+fy*y+fz*z)/length;
+    if(depth<=0) return 0;
+    up=(-rz*fy*x+horizontal*y+rx*fy*z)/length;
+    *px=(int)(213+240*(rx*x+rz*z)/depth);
+    *py=(int)(120-240*up/depth);
+    return *px>=4 && *px<422 && *py>=4 && *py<236;
+}
+
+static int csv(const char **p) {
+    int n=number(p);
+    if(n<0 || **p!=',') return -1;
+    *p=*p+1;
+    return n;
+}
+
+static int check_world(const char *mutation) {
+    const int islands[3][3]={{-60,-102,24},{61,-134,28},{-5,-192,31}};
+    int px[2][3],py[2][3],seed=7,travel=-12,speed=12,i,j,k;
+    int speeds[2]={60,0},world_fail=0,hud_fail=0,at;
+    char cwd[1024],url[2200],*out=0;
+    const char *p;
+    if(!getcwd(cwd,sizeof cwd)) return input_error("world-cwd",0);
+    at=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/d1-flight.html?%s&world=",cwd,mutation);
+    if(at<0 || at>=(int)sizeof url) return input_error("world-url",0);
+    for(j=0;j<2;j++) {
+        seed=7;
+        for(i=0;i<3;i++) {
+            int x,z,w;
+            seed=(seed*73+41)%251; x=islands[i][0]+seed%13-6;
+            seed=(seed*73+41)%251; z=islands[i][1]+seed%17-8;
+            if(!center(x,-23.92+.25*islands[i][2],z,travel/8.0,&px[j][i],&py[j][i]))
+                return input_error("world-projection",0);
+            w=tx_snprintf(url+at,sizeof url-at,"%s%d,%d",i?";":j?"%7C":"",px[j][i],py[j][i]);
+            if(w<0 || w>=(int)sizeof url-at) return input_error("world-url",0);
+            at+=w;
+        }
+        if(j==0) {
+            for(k=0;k<27;k++) {
+                if(speed<28) speed+=2;
+                travel-=speed;
+            }
+            speeds[1]=speed*5;
+        }
+    }
+    p=browser(url,&out,2);
+    if(!p) return input_error("world-browser",out);
+    for(j=0;j<2;j++) {
+        int hud_speed=csv(&p), hud_alt=csv(&p);
+        if(hud_speed<0 || hud_alt<0) return input_error("world-hud-payload",out);
+        hud_fail+=hud_speed!=speeds[j] || hud_alt!=100;
+        for(i=0;i<3;i++) {
+            int sumx=0,sumy=0,count=0;
+            for(k=0;k<81;k++) {
+                int r=csv(&p),g=csv(&p),b=number(&p);
+                if(r<0 || g<0 || b<0 || r>255 || g>255 || b>255)
+                    return input_error("world-rgb",out);
+                if(i<2 || k<80) {
+                    if(*p++!=',') return input_error("world-rgb-delimiter",out);
+                }
+                if(g>=164 && g>=r+22 && g>=b+45) {
+                    sumx+=k%9-4; sumy+=k/9-4; count++;
+                }
+            }
+            world_fail+=count<2 || abs(sumx)>2*count || abs(sumy)>2*count;
+            printf("D1_ISLAND frame=%d island=%d expected=%d,%d samples=%d error=%d,%d\n",
+                j?28:1,i,px[j][i],py[j][i],count,count?sumx/count:0,count?sumy/count:0);
+        }
+        if(j==0 && *p++!='|') return input_error("world-frame-delimiter",out);
+        printf("D1_HUD frame=%d speed=%d expected=%d altitude=%d\n",j?28:1,hud_speed,speeds[j],hud_alt);
+    }
+    if(strncmp(p,"</output>",9)) return input_error("world-trailer",out);
+    free(out);
+    printf("D1_WORLD\ttravel_eighths=%d island_fail=%d hud_fail=%d\n",travel,world_fail,hud_fail);
+    return world_fail || hud_fail;
+}
+
+int main(int argc,char **argv) {
+    int rc;
+    if(argc==1) {
+        rc=check_airframe("");
+        return rc?rc:check_world("");
+    }
+    if(argc==2 && (!strcmp(argv[1],"frozen-position") || !strcmp(argv[1],"frozen-hud") || !strcmp(argv[1],"world")))
+        return check_world(argv[1]);
+    if(argc==2 && (!strcmp(argv[1],"reverse") || !strcmp(argv[1],"offset") ||
+        !strcmp(argv[1],"short-wings") || !strcmp(argv[1],"no-tails")))
+        return check_airframe(argv[1]);
+    return input_error("arguments",0);
 }
