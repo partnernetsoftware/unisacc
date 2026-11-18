@@ -9,12 +9,14 @@
  *       structs255               255 distinct structs sharing member names x,y,z (struct ids below 256)
  *       structs2040one           2040 structs with the single member name x (member slot table sid*512+i up to
  *                                sid 2039 without any name-key overlap; STRUCT_LIMIT is 2049)
- *   known gap, recorded as GAP rows and not counted: structs300 shares member names across 300 structs.  The member
- *     name key is name*MEMBER_STRIDE(256)+struct id, so struct id 256+i aliases struct i with the next name id
- *     (FRONTEND-STRUCT-ID-OVER-255, present in the installed 0.0.73 product, independent of the member cap).
- *     The row says whether the output still differs from the host; when it starts to match, promote it.
- *   reject fixtures: every entry rc != 0, no output file, stderr names "structure member capacity".
- *       m513 anon501p12
+ *       structs257 structs300    257 / 300 structs sharing member names x,y,z: struct ids past 255.  The member name
+ *                                key is name*MEMBER_STRIDE+struct id; with stride 256 struct id 256+i aliased struct i
+ *                                with the next name id (FRONTEND-STRUCT-ID-OVER-255, silent miscompile in 0.0.73 and
+ *                                earlier); stride 4096 keeps every id below STRUCT_LIMIT 2049 apart
+ *       structs2040              2040 structs sharing member names x,y,z (ids up to the limit, names alias-free)
+ *   reject fixtures: every entry rc != 0, no output file, stderr names the capacity.
+ *       m513 anon501p12          "structure member capacity"
+ *       structs2100one           2100 structs: "structure id capacity" (STRUCT_LIMIT 2049)
  *   sh ./unisacc.com tools/struct-member-capacity.cx -- ROOT ABS_OUT HOST_CC
  * SMC_ONLY=name[,name] limits the run to the named fixtures (local probing only; the batch runs all).
  * Ends STRUCT_MEMBER_CAPACITY<TAB>pass=N<TAB>fail=N, rc 0 only when fail=0. */
@@ -92,13 +94,13 @@ static void gap(const char *name, const char *id) {
     fprintf(res, "GAP\t%s\tstruct.capacity.%s\trc=%d still-differs=%d\n", id, name, u.rc, !same); printf("GAP\t%s\t%s\trc=%d still-differs=%d\n", id, name, u.rc, !same);
     np_free(&u); np_free(&h);
 }
-static void reject(const char *name) {
+static void reject(const char *name, const char *needle) { size_t nl = strlen(needle);
     char c[96], o[96], s[96]; FMT(c,"%s.c", name); FMT(o,"%s.o", name); FMT(s,"%s.s", name);
     char p[4400]; path(p, sizeof p, outdir, c); saved(p, sb, sn);
     char *a0[] = { "sh", product, c, 0 }, *a1[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-funit", "-o", o, c, 0 }, *a2[] = { "sh", product, "-S", "-o", s, c, 0 };
     char **argvs[3] = { a0, a1, a2 }; const char *lab[3] = { "default-run", "c-funit", "S" }; const char *leaf[3] = { 0, o, s };
     for (int k = 0; k < 3; k++) { np_result u; if (runin(argvs[k], &u)) { check(0, name, lab[k], "transport"); continue; }
-        char e[170]; first(u.err, u.errn, e, sizeof e); int named = 0; for (size_t q = 0; q + 25 <= u.errn && !named; q++) named = !memcmp(u.err + q, "structure member capacity", 25); int noout = !leaf[k] || absent(leaf[k]);
+        char e[170]; first(u.err, u.errn, e, sizeof e); int named = 0; for (size_t q = 0; q + nl <= u.errn && !named; q++) named = !memcmp(u.err + q, needle, nl); int noout = !leaf[k] || absent(leaf[k]);
         char d[600]; FMT(d,"rc=%d named=%d output-absent=%d stdout_bytes=%zu stderr1=%s", u.rc, named, noout, u.outn, e[0] ? e : "-");
         char l[64]; FMT(l,"%s-refuses-named", lab[k]); check(u.rc != 0 && named && noout && u.outn == 0, name, l, d); np_free(&u); }
 }
@@ -114,7 +116,9 @@ int main(int argc, char **argv) {
     if (WANT("m65")) { one(65); accept("m65"); } if (WANT("m256")) { one(256); accept("m256"); } if (WANT("m512")) { one(512); accept("m512"); }
     if (WANT("anon500p12")) { anon(500); accept("anon500p12"); } if (WANT("nest512")) { nest(); accept("nest512"); }
     if (WANT("structs255")) { many(255); accept("structs255"); } if (WANT("structs2040one")) { onename(2040); accept("structs2040one"); }
-    if (WANT("structs300")) { many(300); gap("structs300", "FRONTEND-STRUCT-ID-OVER-255"); }
-    if (WANT("m513")) { one(513); reject("m513"); } if (WANT("anon501p12")) { anon(501); reject("anon501p12"); }
+    if (WANT("structs257")) { many(257); accept("structs257"); } if (WANT("structs300")) { many(300); accept("structs300"); }
+    if (WANT("structs2040,") || (only && !strcmp(only, "structs2040"))) { many(2040); accept("structs2040"); }
+    if (WANT("m513")) { one(513); reject("m513", "structure member capacity"); } if (WANT("anon501p12")) { anon(501); reject("anon501p12", "structure member capacity"); }
+    if (WANT("structs2100one")) { onename(2100); reject("structs2100one", "structure id capacity"); }
     fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("STRUCT_MEMBER_CAPACITY\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
 }
