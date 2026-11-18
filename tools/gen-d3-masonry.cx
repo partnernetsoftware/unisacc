@@ -3,6 +3,8 @@
 /* R: staggered masonry, G: clustered watercolor grain, B: reserved. */
 static const char path[]="ujs/practice/uxe/test/d3-masonry.rgba";
 static unsigned char tile[64*64*4];
+static unsigned char sky[160*90*4];
+static const char sky_path[]="ujs/practice/uxe/test/d3-sky.rgba";
 
 static unsigned int grain(unsigned int x,unsigned int y) {
     unsigned int n=x*374761393u+y*668265263u;
@@ -35,21 +37,58 @@ static void generate(void) {
     }
 }
 
-int main(int argc,char **argv) {
+static void generate_sky(void) {
+    /* Lobes overlap in three banks. Their upper shoulders catch more light. */
+    static int lobes[][4]={{-2,24,19,9},{12,23,18,10},{27,19,15,10},{42,26,20,8},
+        {52,27,14,6},{100,9,23,6},{111,5,12,7},{122,12,15,5},
+        {142,39,20,6},{154,36,12,9},{168,40,19,7}};
+    int x,y,i;
+    for(y=0;y<90;y++) for(x=0;x<160;x++) {
+        int k=(y*160+x)*4, alpha=0, light=0;
+        int clear[3]={66+y,126+y*3/4,184+y/2};
+        for(i=0;i<11;i++) {
+            int dx=x-lobes[i][0], dy=y-lobes[i][1], rx=lobes[i][2], ry=lobes[i][3];
+            int inside=256-256*dx*dx/(rx*rx)-256*dy*dy/(ry*ry);
+            int cover=inside*8;
+            int shade=245-dy*52/ry;
+            if(cover<0) cover=0;
+            if(cover>255) cover=255;
+            if(shade>251) shade=251;
+            if(cover>0 && shade>light) light=shade;
+            if(cover>alpha) alpha=cover;
+        }
+        for(i=0;i<3;i++) {
+            int cloud=light-(2-i)*8;
+            sky[k+i]=(clear[i]*(255-alpha)+cloud*alpha+127)/255;
+        }
+        sky[k+3]=255;
+    }
+}
+
+static int output(const char *file_path,const unsigned char *pixels,size_t length,int write) {
     int ok;
-    if(argc!=2) return 2;
-    generate();
-    if(!strcmp(argv[1],"--write")) {
-        FILE *file=fopen(path,"wb");
+    if(write) {
+        FILE *file=fopen(file_path,"wb");
         if(!file) return 2;
-        ok=fwrite(tile,1,sizeof tile,file)==sizeof tile;
+        ok=fwrite(pixels,1,length,file)==length;
         if(fclose(file)) ok=0;
-    } else if(!strcmp(argv[1],"--check")) {
+    } else {
         size_t size=0;
-        char *disk=cx_read(path,&size);
-        ok=disk && size==sizeof tile && !memcmp(disk,tile,sizeof tile);
+        char *disk=cx_read(file_path,&size);
+        ok=disk && size==length && !memcmp(disk,pixels,length);
         if(disk) free(disk);
-    } else return 2;
-    printf("GEN_D3_MASONRY\t%s\tbytes=%d\n",ok?"PASS":"FAIL",(int)sizeof tile);
-    return ok?0:1;
+    }
+    printf("GEN_D3_MASONRY\t%s\tbytes=%d\t%s\n",ok?"PASS":"FAIL",(int)length,file_path);
+    return !ok;
+}
+
+int main(int argc,char **argv) {
+    int write, masonry, clouds;
+    if(argc!=2 || (strcmp(argv[1],"--write") && strcmp(argv[1],"--check"))) return 2;
+    write=!strcmp(argv[1],"--write");
+    generate();
+    generate_sky();
+    masonry=output(path,tile,sizeof tile,write);
+    clouds=output(sky_path,sky,sizeof sky,write);
+    return masonry || clouds;
 }

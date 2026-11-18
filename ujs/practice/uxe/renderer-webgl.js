@@ -568,6 +568,10 @@ export function createWebGLRenderer(canvas, opts) {
         else opaque.push(cloud);
       }
       ss.sort((a, b) => (a.layer | 0) - (b.layer | 0));
+      if (scene.backdrop?.count > 0 && scene.backdrop.screenSpace) {
+        drawCloud(scene.backdrop, wave);
+        gl.enable(gl.DEPTH_TEST);
+      }
       for (const c of opaque) drawCloud(c, wave);
       if (Number.isInteger(scene.outlineWidth) && scene.outlineWidth > 0 && opaque.length) {
         outline ||= createOutline(gl, ext);
