@@ -83,6 +83,7 @@ int main(int argc, char **argv) {
         { "discards-const", "int a20(void){ const int c = 1; int *p = &c; return *p; }", "6.7.8p11 / 6.5.16.1p1 qualifiers" },
         { "void-parameter-named", "void b15(void x){ }", "6.7.5.3p10 void parameter must be unnamed and alone" },
         { "multiple-storage-classes", "static extern int b16;", "6.7.1p2 at most one storage-class specifier" },
+        { "duplicate-parameter-after-unnamed", "int pu0(int op, int x); int pu1(void *, int op, int op);", "6.7p3 duplicate still refused after an unnamed parameter" },
     };
     int nfx = (int)(sizeof fx / sizeof *fx);
     for (int i = 0; i < nfx; i++) { char c[64], o[64]; { if (cx_fmt(c, sizeof c, "%s.c", fx[i].name)) { fprintf(stderr, "c-negative: text too long for c\n"); exit(2); } } { if (cx_fmt(o, sizeof o, "%s.o", fx[i].name)) { fprintf(stderr, "c-negative: text too long for o\n"); exit(2); } } char src[400]; { if (cx_fmt(src, sizeof src, "%s\nint main(void){return 0;}\n", fx[i].line)) { fprintf(stderr, "c-negative: text too long for src\n"); exit(2); } } char p[4400]; path(p, sizeof p, outdir, c); saved(p, src, strlen(src));
@@ -93,5 +94,18 @@ int main(int argc, char **argv) {
         check(u.rc && u.errn && absent(o), fx[i].name, "product-refuses", d); fprintf(res, "INFO\tc.negative.%s.host\trc=%d\n", fx[i].name, g.rc);
         if (u.rc && u.errn) fprintf(res, "INFO\tc.negative.%s.diagnostic-has-file-line\t%d\n", fx[i].name, strstr(u.err, c) != 0);
         np_free(&u); np_free(&g); }
+    /* accept controls: valid C99 the product must compile (rc 0, object present) and the host accepts; guards the
+     * negative rows against false refusals (sqlite3.c: unnamed parameter left a stale PIDS slot from the previous list) */
+    struct { const char *name, *line, *clause; } ok[] = {
+        { "unnamed-then-named-parameter", "int pa0(int op, int x); int pa1(void *, int op);", "6.7.5.3 unnamed parameter in a prototype" },
+        { "unnamed-parameters-mixed", "int pb0(int a, int b, int c); int pb1(int, int a, int, int b); int pb2(int c, int b, int a) { return a + b + c; }", "6.7.5.3 mixed prototypes then definition" },
+    };
+    for (int i = 0; i < (int)(sizeof ok / sizeof *ok); i++) { char c[64], o[64]; if (cx_fmt(c, sizeof c, "%s.c", ok[i].name) || cx_fmt(o, sizeof o, "%s.o", ok[i].name)) die("fixture name");
+        char src[400]; if (cx_fmt(src, sizeof src, "%s\nint main(void){return 0;}\n", ok[i].line)) die("fixture text"); char fp[4400]; path(fp, sizeof fp, outdir, c); saved(fp, src, strlen(src));
+        np_result u, g; char *uv[] = { "sh", product, "-c", "-b", "lnx/x86_64", "-o", o, c, 0 }, *gv[] = { hostcc, "-c", "-std=c99", "-pedantic-errors", "-o", "/dev/null", c, 0 };
+        if (runin(uv, &u)) { check(0, ok[i].name, "product", "transport"); continue; } if (runin(gv, &g)) { check(0, ok[i].name, "host", "transport"); np_free(&u); continue; }
+        char ue[100]; if (cx_fmt(ue, sizeof ue, "%.*s", (int)(u.errn > 90 ? 90 : u.errn), u.err)) die("stderr text"); for (char *q = ue; *q; q++) if (*q == '\n') *q = ' ';
+        char d[320]; if (cx_fmt(d, sizeof d, "product rc=%d object-present=%d stderr=%s | host rc=%d | %s", u.rc, !absent(o), ue, g.rc, ok[i].clause)) die("detail text");
+        check(u.rc == 0 && !absent(o) && g.rc == 0, ok[i].name, "product-accepts", d); np_free(&u); np_free(&g); }
     fprintf(res, "SUMMARY\tpass=%d\tfail=%d\n", npass, nfail); fclose(res); printf("C_NEGATIVE\tpass=%d\tfail=%d\n", npass, nfail); return nfail ? 1 : 0;
 }
