@@ -1,6 +1,6 @@
 /* Checks tools/product-map-query.cx: invalidation and recovery.
  * Each case owns a private fixture and independently runs product-map --emit-tsv.
- * Usage: --case cx|ape|gold|recipe|tracked|history|corrupt|missing
+ * Usage: --case cx|ape|gold|recipe|tracked|history|corrupt|missing|candidate-key
  * Optional --query-source PATH runs the same assertions against a fault mutant.
  */
 #pragma unisa use sys.fs
@@ -85,6 +85,34 @@ static int key_context(void){
     printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=key-context\n",failed,passed);
     return failed?1:0;
 }
+/* --candidate-key: tool, cxlib and readset-declaration bytes never move the
+ * trigger key; one byte in any product candidate root always does. */
+static int candidate_query(char *image,char key[65]){
+    char*v[]={image,"--root",fx,"--candidate-key",0};
+    np_result r={0};int rc=run(v,root,&r);
+    int ok=!rc && r.outn==65 && r.out[64]=='\n' && strspn(r.out,"0123456789abcdef")==64;
+    if(ok){guard(mm_copy(key,65,r.out,64),"key-copy");key[64]=0;}
+    else if(r.err)fprintf(stderr,"%s\n",r.err);
+    np_free(&r);return ok;
+}
+static int candidate_key(void){
+    setup();
+    char initial[65],prior[65],next[65],temp[4400],image[4400];
+    if(sy_mkdtemp(sy_tmpdir(),"query-candidate-",temp,sizeof temp))die("candidate-tmp");
+    join(image,sizeof image,temp,"query");
+    if(tq_native(root,query_source,image,why,sizeof why)||!candidate_query(image,initial))die("initial-candidate-key");
+    ck(candidate_query(image,next)&&!strcmp(initial,next),"candidate-repeat-key-identical");
+    const char*stable[]={"tools/cxlib/netpack.cx","exec/facts/derive.tsv","tools/dvreact.cx","tools/product-map-inputs.tsv","exec/README.md","exec/DSL.md","seed/GEN-DESIGN.md"};
+    for(int i=0;i<7;i++){append(stable[i]);char label[200];PQ_FMT(label,sizeof label,"candidate-key-ignores-%s",stable[i]);ck(candidate_query(image,next)&&!strcmp(initial,next),label);}
+    guard(mm_copy(prior,65,initial,65),"copy-bound");
+    const char*moving[]={"src/drive.cx","cx/runtime/modelcache.cx","ext/sysx/process.cx","include/assert.h","weights/gold/abi.tsv","exec/facts/aggregate-return.tsv","seed/gen.c"};
+    for(int i=0;i<7;i++){append(moving[i]);char label[200];PQ_FMT(label,sizeof label,"candidate-key-tracks-%s",moving[i]);int ok=candidate_query(image,next)&&strcmp(prior,next);ck(ok,label);if(ok)guard(mm_copy(prior,65,next,65),"copy-bound");}
+    /* A git archive tree has no .git: the walked name set must give the same key. */
+    char git[4400],moved[4400];join(git,sizeof git,fx,".git");join(moved,sizeof moved,temp,"moved-git");if(sy_rename(git,moved))die("candidate-git-move");
+    ck(candidate_query(image,next)&&!strcmp(prior,next),"candidate-archive-tree-key-equals-checkout-key");
+    printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=candidate-key\n",failed,passed);
+    return failed?1:0;
+}
 static int no_strace(void){
     char base[4400],bin[4400],image[4400],env[4400],patharg[4500],cold[4400],link[4400],warm[4400];
     if(cx_fmt(base,sizeof base,"%s/product-map-no-strace-XXXXXX",sy_tmpdir())||!mkdtemp(base))die("no-strace-tmp");
@@ -105,6 +133,7 @@ int main(int argc,char**argv){
     if(sy_cwd(root,sizeof root)<0||sy_realpath("unisacc.com",product,sizeof product)<0)die("root");if(alternate){if(sy_realpath(alternate,query_source,sizeof query_source)<0)die("query-source");}else join(query_source,sizeof query_source,root,"tools/product-map-query.cx");
     if(!strcmp(which,"no-strace"))return no_strace();
     if(!strcmp(which,"key-context"))return key_context();
+    if(!strcmp(which,"candidate-key"))return candidate_key();
     if(!strcmp(which,"recovery")){grouped=1;const char*cases[]={"corrupt","missing","readset","sidecar"};for(int i=0;i<4;i++){char*v[]={argv[0],"--case",(char*)cases[i],0};if(main(3,v))return 1;}printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=recovery\n",failed,passed);return failed?1:0;}
     if(!fx[0])setup();np_result first={0},hot={0},changed={0};char before[65],after[65];int rc=query(&first);ck(rc==0&&key_of(&first,before),"initial-real-query");if(failed)return 1;
     rc=query(&hot);ck(rc==0&&hot.err&&strstr(hot.err,"\thit\t")&&first.outn==hot.outn&&!memcmp(first.out,hot.out,first.outn),"hit-verifies-current-manifest-and-body");np_free(&hot);if(failed)return 1;
