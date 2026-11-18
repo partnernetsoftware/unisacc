@@ -1,0 +1,85 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.perfev
+/* check-perf-hot.cx: fixture checks for tools/perf-hot.cx (no product timing).
+   The fixture tests/cases/perf-hot/baseline-sample.tsv holds real rows sampled from
+   release/evidence/perf-baseline-2026-11-18.tsv; derived inputs are cut from it, no
+   hand-written numbers.
+   (1) provenance: every fixture row occurs byte-for-byte in the evidence table;
+   (2) ranking on the fixture: phase rank 1 is rr.infer.elf 2171.523 ms, row rank 1 is
+       funitcold:asmtext rr.infer.elf with 41.9% of its wall, rc 0;
+   (3) negative control: a cut holding only start.cold rows prints the e1 phase as
+       UNMEASURED with no number and ranks rr.verify-layout first;
+   (4) negative control: header-only and zero-byte inputs are refused, rc 1;
+   (5) negative control: a real MEASURED row with its reps cut to 4 is refused REFUSE_REPS.
+   usage: sh ./unisacc.com tools/check-perf-hot.cx [-- TOOL]  (temp files under $TMPDIR;
+   product from $UNISACC, default ./unisacc.com). */
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "check-perf-hot: text too long\n"); exit(2); } } while (0)
+#define HDR "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"
+static const char *tool = "tools/perf-hot.cx";
+static const char *fixture = "tests/cases/perf-hot/baseline-sample.tsv";
+static const char *evidence = "release/evidence/perf-baseline-2026-11-18.tsv";
+static char dir[4200], OUT[1 << 16];
+/* runs the tool on IN (top 5); stdout+stderr land in OUT; returns its rc */
+static int run(const char *in) {
+    char *prod = (char *)sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product fixture runs the tool under the same-candidate launcher; UNISACC overrides it */
+    char *v[8] = { "sh", prod, (char *)tool, "--", (char *)in, "5", 0, 0 };
+    return ck_run(v, OUT, sizeof OUT);
+}
+#define has(needle) (strstr(OUT, (needle)) != 0)
+static void put(const char *name, const char *text, char *path) {
+    if (pe_put(dir, name, text, path, 4200)) { fprintf(stderr, "check-perf-hot: cannot write %s\n", name); exit(2); }
+}
+static int done(void) {
+    printf("CHECK_PERF_HOT\tpass=%d\tfail=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    if (argc > 1) tool = argv[1];
+    const char *td = getenv("TMPDIR"); if (!td || !*td) td = "/tmp";
+    FMT(dir, sizeof dir, "%s/check-perf-hot-%d", td, (int)getpid());
+    sy_mkdir(dir, 0700);
+    char *fx = pe_slurp(fixture), *ev = pe_slurp(evidence);
+    ck(fx && ev, "fixture-and-evidence-readable");
+    if (!fx || !ev) return done();
+    /* (1) provenance, and build the derived cuts while walking the fixture */
+    static char cold[1 << 16], reps4[1 << 16];
+    int rows = 0, found = 0, kc = 0, k4 = 0, line = 0;
+    for (char *p = fx; *p; line++) {
+        char *e = strchr(p, '\n'); size_t m = e ? (size_t)(e - p) : strlen(p);
+        char one[1024]; if (m + 2 > sizeof one) break;
+        mm_copy(one, sizeof one, p, m); one[m] = '\n'; one[m + 1] = 0;
+        if (line > 0) { rows++; if (strstr(ev, one)) found++; }
+        if (line == 0 || !strncmp(one, "start.cold\t", 11)) { FMT(cold + kc, sizeof cold - kc, "%s", one); kc += (int)strlen(cold + kc); }
+        if (line == 0) { FMT(reps4 + k4, sizeof reps4 - k4, "%s", one); k4 += (int)strlen(reps4 + k4); }
+        else if (!strncmp(one, "funitcold:asmtext\twall\tms\t5\t", 28)) {
+            FMT(reps4 + k4, sizeof reps4 - k4, "funitcold:asmtext\twall\tms\t4\t%s", one + 28); k4 += (int)strlen(reps4 + k4);
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    ck(rows >= 15 && found == rows, "fixture-rows-are-real-evidence-rows");
+    char in[4200];
+    /* (2) */
+    ck(run(fixture) == 0, "rank-fixture-rc0");
+    ck(has("PHASE\t1\trr.infer.elf\t2171.523\t1\t"), "phase-rank1-elf");
+    ck(has("ROW\t1\tfunitcold:asmtext\trr.infer.elf\t2171.523\t41.9\n"), "row-rank1-elf-share-of-wall");
+    ck(has("PERF_HOT\trows=20\t"), "summary-row-count");
+    /* (3) */
+    put("cold.tsv", cold, in);
+    ck(run(in) == 0, "cold-cut-rc0");
+    ck(has("PHASE\t-\trr.infer.e1\tUNMEASURED\t0\tUNMEASURED\n"), "unknown-phase-unmeasured-no-number");
+    ck(has("PHASE\t1\trr.verify-layout\t43.011\t1\t100.0\n"), "cold-cut-rank1-verify-layout");
+    /* (4) */
+    put("hdr.tsv", HDR, in);
+    ck(run(in) == 1 && has("REFUSE_EMPTY"), "header-only-refused-empty");
+    put("zero.tsv", "", in);
+    ck(run(in) == 1 && (has("REFUSE_EMPTY") || has("REFUSE_READ")), "zero-byte-refused-no-crash");
+    /* (5) */
+    put("reps4.tsv", reps4, in);
+    ck(k4 > 0 && run(in) == 1 && has("REFUSE_REPS"), "four-reps-refused");
+    free(fx); free(ev);
+    return done();
+}

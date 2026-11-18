@@ -1,0 +1,107 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.perfev
+/* check-perf-gate.cx: fixture checks for tools/perf-gate.cx (no product timing).
+   Inputs are real rows of tests/cases/perf-hot/baseline-sample.tsv (sampled from
+   release/evidence/perf-baseline-2026-11-18.tsv); derived inputs only scale a real row's
+   timing columns by a stated factor or set its load1 columns, no hand-written timings.
+   (1) fixture against itself: every ms row NOISY (real load1 > 2), sizes OK, rc 0;
+   (2) positive control: quiet elf row x1.20 -> WARN_SLOW 20.00 and rc 0 (warning only);
+       x1.05 -> OK;
+   (3) negative control: x1.20 with the real load1 -> NOISY not WARN_SLOW; quiet
+       real:kernel_route_shape wall (range 11..1881 ms) -> NOISY spread;
+   (4) size: unisacc.com x1.02 -> REFUSE_SIZE rc 1; listed in DECLARED -> DECLARED_SIZE
+       rc 0; x1.005 -> OK;
+   (5) negative control: empty NEW -> REFUSE_EMPTY rc 1, an UNMEASURED row -> UNMEASURED
+       with no number, reps cut to 4 -> REFUSE_REPS rc 1.
+   usage: sh ./unisacc.com tools/check-perf-gate.cx [-- TOOL]  (temp files under $TMPDIR;
+   product from $UNISACC, default ./unisacc.com). */
+#define FMT(d, cap, ...) do { if (cx_fmt((d), (cap), __VA_ARGS__)) { fprintf(stderr, "check-perf-gate: text too long\n"); exit(2); } } while (0)
+#define HDR "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"
+static const char *tool = "tools/perf-gate.cx";
+static const char *fixture = "tests/cases/perf-hot/baseline-sample.tsv";
+static char dir[4200], *fx, OUT[1 << 16];
+#define has(needle) (strstr(OUT, (needle)) != 0)
+static void put(const char *name, const char *text, char *path) {
+    if (pe_put(dir, name, text, path, 4200)) { fprintf(stderr, "check-perf-gate: cannot write %s\n", name); exit(2); }
+}
+/* runs the tool on OLD NEW [DECLARED]; stdout+stderr land in OUT; returns its rc */
+static int run(const char *a, const char *b, const char *c) {
+    char *prod = (char *)sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product fixture runs the tool under the same-candidate launcher; UNISACC overrides it */
+    char *v[9] = { "sh", prod, (char *)tool, "--", (char *)a, (char *)b, (char *)c, 0, 0 };
+    return ck_run(v, OUT, sizeof OUT);
+}
+static int done(void) {
+    printf("CHECK_PERF_GATE\tpass=%d\tfail=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}
+/* real fixture row whose first two fields are ITEM\tPHASE\t, rewritten: timing columns
+   (median min max p90) x SCALE, load1 columns set to LOAD when LOAD >= 0, reps to REPS
+   when REPS > 0.  The row is appended to DST (start DST with HDR). */
+static void row(const char *key, double scale, double load, int reps, char *dst0, size_t cap0) {
+    size_t used = strlen(dst0); char *dst = dst0 + used; size_t cap = cap0 - used;
+    char *p = strstr(fx, key);
+    if (!p) return;
+    char one[1024]; char *e = strchr(p, '\n'); size_t m = e ? (size_t)(e - p) : strlen(p);
+    if (m + 1 > sizeof one) return;
+    mm_copy(one, sizeof one, p, m); one[m] = 0;
+    char *f[13]; int k = 0; char *q = one; f[k++] = q;
+    while ((q = strchr(q, '\t')) && k < 13) { *q++ = 0; f[k++] = q; }
+    char t[4][32], l[32], r[16];
+    for (int i = 0; i < 4; i++) FMT(t[i], sizeof t[i], "%.3f", atof(f[4 + i]) * scale);
+    if (load >= 0) FMT(l, sizeof l, "%.2f", load); else FMT(l, sizeof l, "%s", f[8]);
+    if (reps > 0) FMT(r, sizeof r, "%d", reps); else FMT(r, sizeof r, "%s", f[3]);
+    if (strcmp(f[10], "MEASURED")) FMT(dst, cap, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12]);
+    else FMT(dst, cap, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        f[0], f[1], f[2], r, t[0], t[1], t[2], t[3], l, load >= 0 ? l : f[9], f[10], f[11], f[12]);
+}
+int main(int argc, char **argv) {
+    if (argc > 1) tool = argv[1];
+    const char *td = getenv("TMPDIR"); if (!td || !*td) td = "/tmp";
+    FMT(dir, sizeof dir, "%s/check-perf-gate-%d", td, (int)getpid());
+    sy_mkdir(dir, 0700);
+    fx = pe_slurp(fixture);
+    ck(fx != 0, "fixture-readable");
+    if (!fx) return done();
+    /* six tool runs in all (cold-cache batch budget): cases share one OLD/NEW pair by key */
+    char a[4200], b[4200], c[4200], t1[8192], t2[8192];
+    const char *ELF = "funitcold:asmtext\trr.infer.elf\t", *LOW = "funitcold:asmtext\trr.infer.lower\t";
+    const char *WALL = "funitcold:asmtext\twall\t", *KRS = "real:kernel_route_shape.cx\twall\t";
+    const char *SZ = "size.unisacc.com\tbytes\t", *OBJ = "size.obj:archname.o\tbytes\t";
+    /* (1) */
+    ck(run(fixture, fixture, 0) == 0, "self-rc0");
+    ck(has("PERF_GATE\tok=2\twarn=0\tnoisy=16\trefuse=0\tdeclared=0\tunmeasured=2\n"), "self-real-rows-noisy-sizes-ok");
+    ck(has("UNMEASURED\treal:kernel_route_shape.cx\trr.construction\tunmeasured-old\n"), "unmeasured-row-no-number");
+    ck(has("UNMEASURED\tfunitcold:asmtext\trr.lookup\told-median-zero\n"), "zero-base-unmeasured");
+    /* (2)(3) one ms pair: elf quiet x1.20, lower quiet x1.05, wall x1.20 at real load1, krs quiet x1.00 */
+    FMT(t1, sizeof t1, "%s", HDR); FMT(t2, sizeof t2, "%s", HDR);
+    row(ELF, 1.0, 0.5, 0, t1, sizeof t1); row(ELF, 1.2, 0.5, 0, t2, sizeof t2);
+    row(LOW, 1.0, 0.5, 0, t1, sizeof t1); row(LOW, 1.05, 0.5, 0, t2, sizeof t2);
+    row(WALL, 1.0, -1, 0, t1, sizeof t1); row(WALL, 1.2, -1, 0, t2, sizeof t2);
+    row(KRS, 1.0, 0.5, 0, t1, sizeof t1); row(KRS, 1.0, 0.5, 0, t2, sizeof t2);
+    put("ms-old.tsv", t1, a); put("ms-new.tsv", t2, b);
+    ck(run(a, b, 0) == 0, "ms-pair-rc0-warning-only");
+    ck(has("WARN_SLOW\tfunitcold:asmtext\trr.infer.elf\t2171.523\t2605.828\t20.00\n"), "slow-20pct-warns");
+    ck(has("OK\tfunitcold:asmtext\trr.infer.lower\t848.924\t891.370\t5.00\n"), "slow-5pct-ok");
+    ck(has("NOISY\tfunitcold:asmtext\twall\tload1>2"), "high-load-noisy-not-warn");
+    ck(has("NOISY\treal:kernel_route_shape.cx\twall\tspread>10%"), "wide-range-noisy");
+    ck(has("PERF_GATE\tok=1\twarn=1\tnoisy=2\trefuse=0\t"), "ms-pair-summary");
+    /* (4) one size pair: unisacc.com x1.02, archname.o x1.005 */
+    FMT(t1, sizeof t1, "%s", HDR); FMT(t2, sizeof t2, "%s", HDR);
+    row(SZ, 1.0, -1, 0, t1, sizeof t1); row(SZ, 1.02, -1, 0, t2, sizeof t2);
+    row(OBJ, 1.0, -1, 0, t1, sizeof t1); row(OBJ, 1.005, -1, 0, t2, sizeof t2);
+    put("sz-old.tsv", t1, a); put("sz-new.tsv", t2, b);
+    ck(run(a, b, 0) == 1 && has("REFUSE_SIZE\tsize.unisacc.com\tbytes\t7228055.000\t7372616.100\t2.00\n"), "size-2pct-undeclared-refused");
+    ck(has("OK\tsize.obj:archname.o\tbytes\t31000.000\t31155.000\t0.50\n"), "size-half-pct-ok");
+    put("declared.txt", "size.unisacc.com\n", c);
+    ck(run(a, b, c) == 0 && has("DECLARED_SIZE\tsize.unisacc.com\t"), "size-2pct-declared-passes");
+    /* (5) */
+    put("empty.tsv", HDR, b);    ck(run(fixture, b, 0) == 1 && has("REFUSE_EMPTY"), "empty-new-refused");
+    FMT(t2, sizeof t2, "%s", HDR); row(ELF, 1.0, 0.5, 4, t2, sizeof t2); put("reps4.tsv", t2, b);
+    ck(run(fixture, b, 0) == 1 && has("REFUSE_REPS"), "four-reps-refused");
+    free(fx);
+    return done();
+}

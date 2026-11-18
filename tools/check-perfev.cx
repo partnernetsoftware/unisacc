@@ -1,0 +1,32 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.perfev
+/* check-perfev.cx: in-process checks for tools/cxlib/perfev.cx (no child process).
+   (1) pe_load reads the real-row fixture tests/cases/perf-hot/baseline-sample.tsv: 20 rows,
+       the funitcold:asmtext rr.infer.elf median 2171.523 and load1_max 3.23 via pe_find;
+   (2) an UNMEASURED row keeps no number (median 0, measured 0);
+   (3) header-only input -> REFUSE_EMPTY rc 1; a 12-column header -> REFUSE_FORMAT rc 1;
+   (4) pe_put then pe_slurp round-trips the text.
+   usage: sh ./unisacc.com tools/check-perfev.cx  (temp files under $TMPDIR). */
+#define HDR "item\tphase\tunit\treps\tmedian\tmin\tmax\tp90\tload1_min\tload1_max\tstatus\tproduct_sha\tnote\n"
+static pe_row R[64];
+int main(void) {
+    char dir[4200], p[4200]; int n = 0;
+    const char *td = getenv("TMPDIR"); if (!td || !*td) td = "/tmp";
+    if (cx_fmt(dir, sizeof dir, "%s/check-perfev-%d", td, (int)getpid())) return 2;
+    sy_mkdir(dir, 0700);
+    ck(pe_load("tests/cases/perf-hot/baseline-sample.tsv", R, 64, &n) == 0 && n == 20, "fixture-loads-20-rows");
+    const pe_row *e = pe_find(R, n, "funitcold:asmtext", "rr.infer.elf");
+    ck(e && e->measured && e->reps == 5 && e->med > 2171.52 && e->med < 2171.53 && e->l1 > 3.22 && e->l1 < 3.24, "elf-row-values");
+    const pe_row *u = pe_find(R, n, "real:kernel_route_shape.cx", "rr.construction");
+    ck(u && !u->measured && u->med == 0, "unmeasured-row-no-number");
+    ck(pe_find(R, n, "no-such-item", "wall") == 0, "find-missing-is-null");
+    ck(pe_put(dir, "hdr.tsv", HDR, p, sizeof p) == 0 && pe_load(p, R, 64, &n) == 1 && n == 0, "header-only-refused-empty");
+    ck(pe_put(dir, "bad.tsv", "item\tphase\n", p, sizeof p) == 0 && pe_load(p, R, 64, &n) == 1, "bad-header-refused-format");
+    char *s = pe_put(dir, "rt.txt", "a\tb\n", p, sizeof p) == 0 ? pe_slurp(p) : 0;
+    ck(s && !strcmp(s, "a\tb\n"), "put-slurp-roundtrip");
+    free(s);
+    printf("CHECK_PERFEV\tpass=%d\tfail=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

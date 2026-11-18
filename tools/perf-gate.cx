@@ -1,0 +1,71 @@
+#pragma unisa use cxlib.perfev
+/* perf-gate.cx: regression gate between two perf-baseline evidence TSVs (reads only; never
+   runs the product).  OLD is the previous release's evidence, NEW the candidate's.
+   usage: sh ./unisacc.com tools/perf-gate.cx -- OLD NEW [DECLARED]
+     DECLARED: optional file, one item name per line, whose byte growth is declared.
+   per NEW row keyed by item+phase, one TSV line:
+     OK key old new delta_pct
+     WARN_SLOW key old new delta_pct      unit ms, NEW median > OLD median by more than 10%
+                                          (warning only; never fails the gate)
+     NOISY key reason                     unit ms, load1_max > 2 on either side, or relative
+                                          range (max-min)/median > 10% on either side; no
+                                          verdict.  The evidence keeps no stdev, so the
+                                          relative range stands in as an upper bound of the
+                                          coefficient of variation.
+     REFUSE_SIZE key old new delta_pct    unit bytes, growth > 1% and item not declared
+     DECLARED_SIZE key old new delta_pct  same growth, item listed in DECLARED
+     UNMEASURED key reason                missing on one side, UNMEASURED, or OLD median 0
+   last line: PERF_GATE ok=N warn=N noisy=N refuse=N declared=N unmeasured=N
+   rc 0 unless a REFUSE_SIZE row or a refused input; rc 1 with one REFUSE line
+   (cxlib.perfev pe_load): unreadable, REFUSE_FORMAT, REFUSE_EMPTY, REFUSE_REPS. */
+
+#define MAXR 20000
+#define SLOW 0.10
+#define SIZE 0.01
+#define LOADMAX 2.0
+#define SPREAD 0.10
+static pe_row RO[MAXR], RN[MAXR];
+static char *decl; /* DECLARED file text, '\n'-separated names */
+
+static int declared(const char *item) {
+    size_t n = strlen(item);
+    for (char *p = decl; p && *p; ) {
+        char *e = strchr(p, '\n'); size_t m = e ? (size_t)(e - p) : strlen(p);
+        if (m == n && !strncmp(p, item, n)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+static double spread(const pe_row *r) { return r->med > 0 ? (r->mx - r->mn) / r->med : 0; }
+static void verdict(const char *tag, const pe_row *o, const pe_row *w, double d) {
+    printf("%s\t%s\t%s\t%.3f\t%.3f\t%.2f\n", tag, w->item, w->phase, o->med, w->med, 100 * d);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 3) { fprintf(stderr, "usage: perf-gate OLD NEW [DECLARED]\n"); return 2; }
+    int no = 0, nn = 0;
+    if (pe_load(argv[1], RO, MAXR, &no) || pe_load(argv[2], RN, MAXR, &nn)) return 1;
+    if (argc > 3 && !(decl = pe_slurp(argv[3]))) { printf("REFUSE\tREFUSE_READ\t%s\t-\n", argv[3]); return 1; }
+    int ok = 0, warn = 0, noisy = 0, ref = 0, dec = 0, unm = 0;
+    for (int i = 0; i < nn; i++) {
+        const pe_row *w = &RN[i], *o = pe_find(RO, no, w->item, w->phase);
+        if (!o) { printf("UNMEASURED\t%s\t%s\tmissing-in-old\n", w->item, w->phase); unm++; continue; }
+        if (!o->measured || !w->measured) { printf("UNMEASURED\t%s\t%s\tunmeasured-%s\n", w->item, w->phase, !o->measured ? "old" : "new"); unm++; continue; }
+        if (o->med <= 0) { printf("UNMEASURED\t%s\t%s\told-median-zero\n", w->item, w->phase); unm++; continue; }
+        double d = (w->med - o->med) / o->med;
+        if (!strcmp(w->unit, "bytes")) {
+            if (d <= SIZE) { verdict("OK", o, w, d); ok++; }
+            else if (declared(w->item)) { verdict("DECLARED_SIZE", o, w, d); dec++; }
+            else { verdict("REFUSE_SIZE", o, w, d); ref++; }
+            continue;
+        }
+        if (o->l1 > LOADMAX || w->l1 > LOADMAX) { printf("NOISY\t%s\t%s\tload1>%.0f(old=%.2f,new=%.2f)\n", w->item, w->phase, LOADMAX, o->l1, w->l1); noisy++; continue; }
+        if (spread(o) > SPREAD || spread(w) > SPREAD) { printf("NOISY\t%s\t%s\tspread>10%%(old=%.1f%%,new=%.1f%%)\n", w->item, w->phase, 100 * spread(o), 100 * spread(w)); noisy++; continue; }
+        if (d > SLOW) { verdict("WARN_SLOW", o, w, d); warn++; }
+        else { verdict("OK", o, w, d); ok++; }
+    }
+    printf("PERF_GATE\tok=%d\twarn=%d\tnoisy=%d\trefuse=%d\tdeclared=%d\tunmeasured=%d\n", ok, warn, noisy, ref, dec, unm);
+    free(decl);
+    return ref ? 1 : 0;
+}

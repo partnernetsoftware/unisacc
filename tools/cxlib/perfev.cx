@@ -1,0 +1,76 @@
+#pragma unisa module perfev
+#pragma unisa use sys.fs
+/* perfev -- read a perf-baseline evidence TSV (13 columns, written by tools/perf-baseline.cx
+ * summarize) for tools/perf-hot.cx, tools/perf-gate.cx and their checks.
+ *
+ *   int pe_load(const char *path, pe_row *rows, int cap, int *n)
+ *     fills ROWS (caller owned, CAP entries) and *N; 0 ok, 1 refused after printing one
+ *     line "REFUSE\tCODE\t..." on stdout: REFUSE_READ unreadable, REFUSE_FORMAT bad header,
+ *     column count, field length or more than CAP rows, REFUSE_EMPTY no data rows,
+ *     REFUSE_REPS a MEASURED row with reps < 5.  Numbers are parsed only for MEASURED rows.
+ *   const pe_row *pe_find(const pe_row *rows, int n, const char *item, const char *phase)
+ *     the row with that item and phase, or 0.
+ *   char *pe_slurp(const char *path)
+ *     whole file as a NUL-ended heap string (caller frees), 0 when unreadable.
+ *   int pe_put(const char *dir, const char *name, const char *text, char *path, size_t cap)
+ *     writes TEXT to DIR/NAME and leaves that path in PATH; 0 ok, -1 path too long or write
+ *     failed.
+ */
+#define PE_NC 13
+typedef struct pe_row { char item[160]; char phase[48]; char unit[12]; int reps; double med, mn, mx, l1; int measured; } pe_row;
+
+static int pe_refuse(const char *code, const char *a, const char *b) {
+    printf("REFUSE\t%s\t%s\t%s\n", code, a, b);
+    return 1;
+}
+char *pe_slurp(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 1 << 26) || !b) return 0;
+    char *s = realloc(b, (size_t)n + 1); if (!s) { free(b); return 0; }
+    s[n] = 0; return s;
+}
+int pe_put(const char *dir, const char *name, const char *text, char *path, size_t cap) {
+    if (cx_fmt(path, cap, "%s/%s", dir, name)) return -1;
+    return sy_write_file(path, text, (int64_t)strlen(text), 0644) ? -1 : 0;
+}
+int pe_load(const char *path, pe_row *rows, int cap, int *n) {
+    *n = 0;
+    char *s = pe_slurp(path);
+    if (!s) return pe_refuse("REFUSE_READ", path, "-");
+    int line = 0, rc = 0; char *p = s;
+    while (*p && !rc) {
+        char *e = strchr(p, '\n'); if (e) *e = 0;
+        if (*p) {
+            char *f[PE_NC + 1]; int k = 0; char *q = p; f[k++] = q;
+            while ((q = strchr(q, '\t')) && k <= PE_NC) { *q++ = 0; f[k++] = q; }
+            if (k != PE_NC) rc = pe_refuse("REFUSE_FORMAT", path, "column-count");
+            else if (line == 0) { if (strcmp(f[0], "item") || strcmp(f[4], "median")) rc = pe_refuse("REFUSE_FORMAT", path, "header"); }
+            else if (*n >= cap) rc = pe_refuse("REFUSE_FORMAT", path, "too-many-rows");
+            else {
+                pe_row *r = &rows[*n];
+                if (cx_fmt(r->item, sizeof r->item, "%s", f[0]) || cx_fmt(r->phase, sizeof r->phase, "%s", f[1]) || cx_fmt(r->unit, sizeof r->unit, "%s", f[2]))
+                    rc = pe_refuse("REFUSE_FORMAT", path, "field-too-long");
+                else {
+                    r->reps = atoi(f[3]);
+                    r->measured = !strcmp(f[10], "MEASURED");
+                    r->med = r->mn = r->mx = r->l1 = 0;
+                    if (r->measured && r->reps < 5) { printf("REFUSE\tREFUSE_REPS\t%s\t%s\t%s\treps=%d\n", path, r->item, r->phase, r->reps); rc = 1; }
+                    else {
+                        if (r->measured) { r->med = atof(f[4]); r->mn = atof(f[5]); r->mx = atof(f[6]); r->l1 = atof(f[9]); }
+                        (*n)++;
+                    }
+                }
+            }
+            line++;
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    free(s);
+    if (!rc && *n == 0) rc = pe_refuse("REFUSE_EMPTY", path, "-");
+    return rc;
+}
+const pe_row *pe_find(const pe_row *rows, int n, const char *item, const char *phase) {
+    for (int i = 0; i < n; i++) if (!strcmp(rows[i].item, item) && !strcmp(rows[i].phase, phase)) return &rows[i];
+    return 0;
+}

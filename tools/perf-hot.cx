@@ -1,0 +1,60 @@
+#pragma unisa use cxlib.perfev
+/* perf-hot.cx: hot-spot ranking over a perf-baseline evidence TSV (reads only; never runs
+   the product).  Input is the 13-column table written by tools/perf-baseline.cx summarize.
+   usage: sh ./unisacc.com tools/perf-hot.cx -- EVIDENCE [TOP]   (TOP defaults to 5)
+   output (TSV):
+     PHASE rank phase sum_ms items share_rr_pct   one line per UNISACC_RR_TIME phase in the
+         fixed list (e1..e4, lower, elf, inflate = model unpack, verify-layout = check plus
+         layout, prune, tapecheck, construction, lookup): sum of per-item medians over items
+         that measured it, ranked by share of all measured RR time.  A listed phase with no
+         MEASURED row prints rank "-" and UNMEASURED; no number is made up.
+     ROW rank item phase median_ms share_wall_pct   the TOP item/phase rows by absolute
+         median (wall rows and PREFIX.total aggregates excluded); share against the same
+         item's wall median, UNMEASURED when that wall is not measured.
+     PERF_HOT rows=N measured=N unmeasured_phases=N
+   rc 1 with one REFUSE line (cxlib.perfev pe_load): unreadable, REFUSE_FORMAT,
+   REFUSE_EMPTY (no data rows), REFUSE_REPS (MEASURED with reps < 5). */
+
+#define MAXR 20000
+static pe_row R[MAXR];
+static char used[MAXR];
+static int nr;
+static const char *PH[] = { "rr.infer.e1", "rr.infer.e2", "rr.infer.e3", "rr.infer.e4", "rr.infer.lower",
+    "rr.infer.elf", "rr.inflate", "rr.verify-layout", "rr.infer.prune", "rr.infer.tapecheck",
+    "rr.construction", "rr.lookup" };
+#define NPH ((int)(sizeof PH / sizeof PH[0]))
+
+static int is_total(const char *item) { size_t n = strlen(item); return n > 6 && !strcmp(item + n - 6, ".total"); }
+static int timed(const pe_row *r) { return r->measured && !strcmp(r->unit, "ms") && !is_total(r->item); }
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: perf-hot EVIDENCE [TOP]\n"); return 2; }
+    int top = argc > 2 ? atoi(argv[2]) : 5; if (top < 1) top = 5;
+    if (pe_load(argv[1], R, MAXR, &nr)) return 1;
+    double sum[NPH], all = 0; int cnt[NPH], ord[NPH], measured = 0, unm = 0;
+    for (int j = 0; j < NPH; j++) { sum[j] = 0; cnt[j] = 0; ord[j] = j; }
+    for (int i = 0; i < nr; i++) {
+        if (R[i].measured) measured++;
+        if (!timed(&R[i])) continue;
+        for (int j = 0; j < NPH; j++) if (!strcmp(R[i].phase, PH[j])) { sum[j] += R[i].med; cnt[j]++; all += R[i].med; }
+    }
+    for (int a = 1; a < NPH; a++) for (int b = a; b > 0 && sum[ord[b]] > sum[ord[b - 1]]; b--) { int t = ord[b]; ord[b] = ord[b - 1]; ord[b - 1] = t; }
+    int rank = 0;
+    for (int a = 0; a < NPH; a++) {
+        int j = ord[a];
+        if (cnt[j]) printf("PHASE\t%d\t%s\t%.3f\t%d\t%.1f\n", ++rank, PH[j], sum[j], cnt[j], all > 0 ? 100.0 * sum[j] / all : 0.0);
+    }
+    for (int j = 0; j < NPH; j++) if (!cnt[j]) { printf("PHASE\t-\t%s\tUNMEASURED\t0\tUNMEASURED\n", PH[j]); unm++; }
+    for (int k = 1; k <= top; k++) {
+        int best = -1;
+        for (int i = 0; i < nr; i++)
+            if (!used[i] && timed(&R[i]) && strcmp(R[i].phase, "wall") && (best < 0 || R[i].med > R[best].med)) best = i;
+        if (best < 0) break;
+        used[best] = 1;
+        const pe_row *w = pe_find(R, nr, R[best].item, "wall");
+        if (w && w->measured && w->med > 0) printf("ROW\t%d\t%s\t%s\t%.3f\t%.1f\n", k, R[best].item, R[best].phase, R[best].med, 100.0 * R[best].med / w->med);
+        else printf("ROW\t%d\t%s\t%s\t%.3f\tUNMEASURED\n", k, R[best].item, R[best].phase, R[best].med);
+    }
+    printf("PERF_HOT\trows=%d\tmeasured=%d\tunmeasured_phases=%d\n", nr, measured, unm);
+    return 0;
+}
