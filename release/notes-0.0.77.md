@@ -1,6 +1,6 @@
 # unisacc 0.0.77 发布说明
 
-状态:同候选原生 CI run <CI_RUN_ID>(待回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
+状态:同候选原生 CI run 44363578812(六目标 success,01:53 派发,02:06 通过)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -11,7 +11,7 @@
 | 发布 APE SHA256(unisacc.com) | ad6a096c98a7fac6e8976e007b0b9a18c5f62996039b391fb9894a832c0cb9ab(7327477 字节,比 0.0.76 的 7243365 多 84112 字节;--version 打印 unisacc 0.0.77;打包后与链产物同字节,PACK_APE SAME) |
 | 源快照 SID | d2308587453b7a0eaf1633cd8905cdbcb9e3f3edbb5b4d7c6d7e6b231fffb5c4(VERIFIED,T 的 git archive) |
 | pkg.bin | 72df86d11d1e015832ff228e040c30c21d988926b75a4da950b3d66c168092d2(与 0.0.76 同字节,即链产物 compiler.p4.pkg 未变) |
-| CI run | <CI_RUN_ID> |
+| CI run | 44363578812 |
 
 ## 产品改动(cxmod 内存安全乙期一段,全部 opt-in)
 
