@@ -33,6 +33,30 @@ export function grassMesh() {
   return {positions:new Float32Array(positions),normals,vCount:positions.length/3};
 }
 
+export function foliagePatchMesh() {
+  const points = [[-.61,-.15,0],[-.34,-.55,0],[.1,-.51,0],[.58,-.30,0],
+    [.63,.10,0],[.28,.43,0],[.03,.33,0],[-.27,.53,0],[-.54,.25,0]];
+  const positions = [], normals = [];
+  for (let i=0;i<points.length;i++) {
+    positions.push(0,0,.12,...points[i],...points[(i+1)%points.length]);
+    normals.push(0,.28,1,0,.28,1,0,.28,1);
+  }
+  return {positions:new Float32Array(positions),normals:new Float32Array(normals),vCount:positions.length/3};
+}
+
+export function canopyPatches(lobes, count, x, y, z, radius, emit) {
+  for(let i=0;i<count;i++) {
+    const lobe=lobes[i%lobes.length];
+    const height=2*((i*.61803398875)%1)-1;
+    const angle=2.3999632297*i+x;
+    const spread=.47*Math.sqrt(1-height*height);
+    const material=height<-.17?"leafDark":height>.40?"leafLight":"leaf";
+    emit(material,x+radius*(lobe.x+spread*Math.cos(angle)),
+      y+radius*(lobe.y+height*.55),z+radius*(lobe.z+spread*Math.sin(angle)),
+      radius*(.47+.22*lobe.r),angle,.39*Math.sin(i),.45*Math.cos(i*2));
+  }
+}
+
 export async function crownLobes() {
   const response = await fetch(new URL("d3-crowns.tsv", import.meta.url));
   if (!response.ok) throw new Error("树冠模板读取失败");
