@@ -44,6 +44,8 @@ Q2a 提交 271b47b。圆弧版用三行毫米规格定义三个 16 段半圆和�
 
 ## Q2 进度
 
+Q3g 在色板加入 `leaf.light` 暖黄绿，采样高光为 14/44，去掉高光则为 0/44 并报错。软云缘最大相邻红通道台阶为 12，硬云缘为 19，阈值 16。检查入口为 `check-uxe-d3-geometry.cx -- leaf-light` 与 `-- cloud-edge`，同生成器逐字节验证新云纹。下一步同步 main，再开 D4 骨架。
+
 Q3e `e2b4ae8` 已推。Q3f 为积云贴图增加两种尺度的水彩噪声和离散亮度带。`check-uxe-d3-geometry.cx -- cloud-volume` 的暗、中、亮样本为 19、32、149，全部通过。`flat-cloud` 的暗层为 0，返回 1。云层为固定背景贴图，呈现明暗体积感。生成物 `d3-cloud-volume.rgba` 逐字节验收，篡改已入 sweep，Q3f 提交可用 `git log -1 --format=%h -- ujs/practice/uxe/test/d3-cloud-volume.rgba` 查得。并排图 /tmp/d3-review-comparison.png 已更新，左侧为核过 SHA-256 的参考第 3 秒，右侧为当前场景。
 
 Q3e 为叶片加上原创缺刻 alpha 纹理及不规则下部明暗。`check-uxe-d3-geometry.cx -- leaf-shape` 检查 8736 个点，叶空交替 1212 次，6 个暗部连通块，暗部 2505/4844。旧多边形 `angular-leaf` 只有 867 次交替，低于 1100，返回 1。生成器逐字节校验 16384 字节，磁盘篡改已入 sweep。下一项 Q3f 云。

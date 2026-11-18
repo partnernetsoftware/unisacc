@@ -54,13 +54,14 @@ export function cutoutLeafMesh() {
   return {positions,normals,uvs,vCount:6};
 }
 
-export function canopyPatches(lobes, count, x, y, z, radius, emit) {
+export function canopyPatches(lobes, count, x, y, z, radius, warm, emit) {
   for(let i=0;i<count;i++) {
     const lobe=lobes[i%lobes.length];
     const height=2*((i*.61803398875)%1)-1;
     const angle=2.3999632297*i+x;
     const spread=.47*Math.sqrt(1-height*height);
-    const material=height<-.17?"leafDark":height>.40?"leafLight":"leaf";
+    const sunward=height>.48 && Math.cos(angle)<.08;
+    const material=height<-.17?"leafDark":warm && sunward?"leaf.light":height>.40?"leafLight":"leaf";
     emit(material,x+radius*(lobe.x+spread*Math.cos(angle)),
       y+radius*(lobe.y+height*.55),z+radius*(lobe.z+spread*Math.sin(angle)),
       radius*(.47+.22*lobe.r),angle,.39*Math.sin(i),.45*Math.cos(i*2));

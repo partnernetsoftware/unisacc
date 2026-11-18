@@ -13,7 +13,7 @@ export async function loadPalette() {
   const reply = await fetch(new URL("d3-palette.tsv", import.meta.url));
   if (!reply.ok) throw new Error("色板读取失败");
   const rows = (await reply.text()).trim().split("\n").slice(1);
-  const roles = ["skyTop","skyHorizon","leafLight","leafDark","stone","barrel"];
+  const roles = ["skyTop","skyHorizon","leafLight","leafDark","stone","barrel","leaf.light"];
   if (rows.length !== roles.length) throw new Error("色板行数错误");
   return Object.fromEntries(rows.map((row,i) => {
     const [role,...fields] = row.split("\t");
