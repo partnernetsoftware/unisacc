@@ -52,6 +52,8 @@ S1b 的机头、座舱、翼面和双垂尾改用各自的分段体素，追尾�
 
 S2 已接入 G4 世界位置、高度和速度，四座岛、固定云和海纹共享追尾相机。固定帧 /tmp/cdx2-d1-s2-frame.png。世界冻结与 HUD 冻结退出 1。异常退出 2 已有阶段诊断，历史偶发原因仍未知。下一件 S3 为松手回正和按俯仰偏移机体切片，再做 D4 拱廊与树林。
 
+Pages 预览清单为 `ujs/practice/uxe/pages.tsv` 的 `fly-next`。更新 D1 后跑 `tools/gen-d1-airframe.cx -- --write` 和 `tools/gen-uxe-pages.cx -- --write --only fly-next`，再直接验 `tools/check-uxe-d1-flight.cx -- pages`。发布源为 `main:/docs`，入口 `/unisacc/uxe/fly-next/`。
+
 ### D4 接手点与 D1 排程
 
 Q4f 已实现世界脚锚点、随行镜头与固定地标。验收用 `tools/check-uxe-d4-skeleton.cx`，提交号可从该路径的最近一次提交取得。97 帧跨两个接缝，净前进 960 毫米、最高离地 800 毫米、连续支撑最大滑移为 0，九次地标像素命中。滑脚负例有 320 次滑移超限，冻结机身负例两次前进检查失败，两者退出 1。固定帧在 /tmp/cdx2-q4f-phase-4.png，待人工签字。D1 第一切片从 G1 提交输入和 G4 持久飞行状态开始，随后接入默认追尾、岛云和 HUD。
