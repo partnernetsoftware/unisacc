@@ -1,6 +1,12 @@
 /* tools/check-modelcache-root.cx -- the run cache root never lands under the current directory.
  *
- *   sh ./unisacc.com tools/check-modelcache-root.cx -- [PRODUCT]      (default ./unisacc.com)
+ *   sh ./unisacc.com tools/check-modelcache-root.cx -- [--set=e3|dir] [PRODUCT]      (default ./unisacc.com)
+ *
+ * --set picks one batch by the variable under test; no --set runs all five:
+ *   e3   modelcache-root-e3   cases (1)(2)(3)   3 assertions (an unfixed product fails (1)(3))
+ *   dir  modelcache-root-dir  cases (4)(5)      2 assertions (an unfixed product fails (4))
+ * The assertion count of the set is checked: a case that did not reach its verdict fails the run as
+ * "assertion-count".  MCR_DROP=NAME[,NAME] skips those cases (local negative control only).
  *
  * Defect MODELCACHE-ENV-ZERO-WRITES-RELATIVE-DIR: mc_cache_dir took $UNISACC_CACHE_DIR or the compat
  * $UNISACC_E3CACHE verbatim as the root, so UNISACC_E3CACHE=0 (the old "off" convention) created ./0 in
@@ -23,6 +29,7 @@
 #pragma unisa use mem.bytes
 
 static int fails;
+static int nas; /* assertions that reached a verdict (PASS or FAIL) */
 static char base[4096];
 
 static int wr(const char *p, const char *s) {
@@ -68,6 +75,14 @@ static void one(const char *product, const char *name, const char *setting, int 
     char *out = 0; size_t on = 0;
     int rc, n, diag = 0;
     FILE *f;
+    {
+        const char *d = getenv("MCR_DROP"); size_t k = strlen(name);
+        while (d && *d) {
+            if (!strncmp(d, name, k) && (d[k] == ',' || !d[k])) return;
+            d = strchr(d, ','); if (d) d++;
+        }
+    }
+    nas++;
     cx_fmt(cwd, sizeof cwd, "%s/%s", base, name);
     cx_fmt(src, sizeof src, "%s/p.c", cwd);
     cx_fmt(errp, sizeof errp, "%s/%s.err", base, name);
@@ -99,23 +114,37 @@ static void one(const char *product, const char *name, const char *setting, int 
 }
 
 int main(int argc, char **argv) {
-    const char *product = argc > 1 ? argv[1] : "./unisacc.com";
-    const char *tmp = getenv("TMPDIR");
+    static const char *sets[] = {"e3", "dir"};
+    static const int setn[] = {3, 2};
+    const char *product, *tmp = getenv("TMPDIR");
     char absdir[4200], setting[4400], prod[4096];
-    if (argc > 2) { fprintf(stderr, "usage: check-modelcache-root.cx -- [PRODUCT]\n"); return 2; }
+    int si = -1, i, want;
+    if (argc > 1 && !strncmp(argv[1], "--set=", 6)) {
+        for (i = 0; i < 2; i++) if (!strcmp(argv[1] + 6, sets[i])) si = i;
+        if (si < 0) { fprintf(stderr, "check-modelcache-root: unknown set %s\n", argv[1] + 6); return 2; }
+        argv++; argc--;
+    }
+    product = argc > 1 ? argv[1] : "./unisacc.com";
+    want = si < 0 ? 5 : setn[si];
+    if (argc > 2) { fprintf(stderr, "usage: check-modelcache-root.cx -- [--set=e3|dir] [PRODUCT]\n"); return 2; }
     if (!realpath(product, prod)) { fprintf(stderr, "check-modelcache-root: no product %s\n", product); return 2; }
     cx_fmt(base, sizeof base, "%s/check-modelcache-root-%d", tmp && *tmp == '/' ? tmp : "/tmp", (int)getpid());
     if (mkdir(base, 0700)) { fprintf(stderr, "check-modelcache-root: cannot create %s\n", base); return 2; }
-    one(prod, "e3-zero", "UNISACC_E3CACHE=0", 0, 0);
-    one(prod, "e3-empty", "UNISACC_E3CACHE=", 0, 0);
-    one(prod, "e3-relative", "UNISACC_E3CACHE=relroot", 1, 0);
-    /* DEV_PRODUCT_CACHE carries the same value: a tools/dev-product.cx launcher sets UNISACC_CACHE_DIR
-       from it when UNISACC_E3CACHE is unset; an installed product ignores it. */
-    one(prod, "dir-zero", "UNISACC_CACHE_DIR=0 DEV_PRODUCT_CACHE=0", 0, 0);
-    cx_fmt(absdir, sizeof absdir, "%s/abs-cache", base);
-    cx_fmt(setting, sizeof setting, "UNISACC_CACHE_DIR='%s' DEV_PRODUCT_CACHE='%s'", absdir, absdir);
-    one(prod, "dir-absolute", setting, 0, absdir);
+    if (si < 0 || si == 0) {
+        one(prod, "e3-zero", "UNISACC_E3CACHE=0", 0, 0);
+        one(prod, "e3-empty", "UNISACC_E3CACHE=", 0, 0);
+        one(prod, "e3-relative", "UNISACC_E3CACHE=relroot", 1, 0);
+    }
+    if (si < 0 || si == 1) {
+        /* DEV_PRODUCT_CACHE carries the same value: a tools/dev-product.cx launcher sets UNISACC_CACHE_DIR
+           from it when UNISACC_E3CACHE is unset; an installed product ignores it. */
+        one(prod, "dir-zero", "UNISACC_CACHE_DIR=0 DEV_PRODUCT_CACHE=0", 0, 0);
+        cx_fmt(absdir, sizeof absdir, "%s/abs-cache", base);
+        cx_fmt(setting, sizeof setting, "UNISACC_CACHE_DIR='%s' DEV_PRODUCT_CACHE='%s'", absdir, absdir);
+        one(prod, "dir-absolute", setting, 0, absdir);
+    }
     rmtree(base);
-    printf("CHECK_MODELCACHE_ROOT\tfailed=%d\n", fails);
+    if (nas != want) { printf("FAIL\tassertion-count\texpected=%d got=%d set=%s\n", want, nas, si < 0 ? "all" : sets[si]); fails++; }
+    printf("CHECK_MODELCACHE_ROOT\tset=%s\tassertions=%d\tfailed=%d\n", si < 0 ? "all" : sets[si], nas, fails);
     return fails ? 1 : 0;
 }

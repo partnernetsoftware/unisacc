@@ -1,7 +1,14 @@
 /* tools/check-funit-procslot.cx -- -funit objects export the process slots as named COMMON symbols.
  *
- *   sh ./unisacc.com tools/check-funit-procslot.cx -- [PRODUCT [REF]]      (default ./unisacc.com; REF: the
- *                                                     product before the change, enables case (7))
+ *   sh ./unisacc.com tools/check-funit-procslot.cx -- [--set=main|corpus|arm64] [PRODUCT [REF]]
+ *                                                     (default ./unisacc.com; REF: the product before the
+ *                                                     change, enables case (7))
+ * --set picks one batch (each stays well inside the batch limit on a cold product cache); no --set runs all:
+ *   main    funit-procslot-main    (1)-(4)   6 assertions (2 symbols x 2 objects, merge-run, negctl)
+ *   corpus  funit-procslot-corpus  (5)       1
+ *   arm64   funit-procslot-arm64   (6)(7)    1 (2 with REF)
+ * The assertion count of the set is checked (8, 9 with REF, for all): a case that did not reach its verdict
+ * fails the run as "assertion-count".  FPS_DROP=NAME[,NAME] skips those cases (local negative control only).
  *
  * R2 W2a.  The argc and argv cells of the process region used to sit anonymously at the .bss tail of every
  * -funit object (.bss+off relocations), so two objects linked together got two private copies.  The object
@@ -29,6 +36,7 @@
 #pragma unisa use cxlib.lebytes
 
 static int fails;
+static int nas; /* assertions that reached a verdict (PASS or FAIL) */
 static char dir[4096];
 
 
@@ -78,9 +86,10 @@ static void common_case(const char *label, const char *leaf) {
     char o[4200]; size_t bn = 0; unsigned char *b; int i;
     path(o, sizeof o, leaf);
     b = (unsigned char *)cx_read(o, &bn);
-    if (!b) { printf("FAIL\t%s\tcannot read %s\n", label, o); fails++; return; }
+    if (!b) { printf("FAIL\t%s\tcannot read %s\n", label, o); fails++; nas += 2; return; }
     for (i = 0; i < 2; i++) {
         long shndx = 0, value = 0, size = 0; int got = sym_of(b, bn, syms[i], &shndx, &value, &size);
+        nas++;
         if (got != 1) printf("FAIL\t%s\t%s %s\n", label, syms[i], got < 0 ? "malformed object" : "absent (anonymous slot)");
         else if (shndx != 0xfff2 || value != 8 || size != 8)
             printf("FAIL\t%s\t%s shndx=0x%lx value=%ld size=%ld want COMMON 0xfff2 8 8\n", label, syms[i], shndx, value, size);
@@ -115,6 +124,7 @@ static int link_run(const char *unit, const char *exe, int *linkrc) {
 static void negctl(void) {
     static const char nm[] = "_unisa_proc_argc";
     char a[4200], ax[4200]; size_t bn = 0, j; unsigned char *b; int renamed = 0, lrc = 0, rc;
+    nas++;
     path(a, sizeof a, "a.o"); path(ax, sizeof ax, "ax.o");
     b = (unsigned char *)cx_read(a, &bn);
     if (!b) { printf("FAIL\tnegctl\tcannot read %s\n", a); fails++; return; }
@@ -200,6 +210,7 @@ static void par_compile(const char *product, int n, const char *const *src, cons
 static void corpus(const char *product) {
     const char *tg[17]; int fu[17], rcs[17]; char leaf[17][64];
     long named = 0; int i, built = 0, anon = 0, bad = 0;
+    nas++;
     for (i = 0; i < 17; i++) { tg[i] = "lnx/x86_64"; fu[i] = 1; cx_fmt(leaf[i], sizeof leaf[i], "corpus-%d.o", i); }
     par_compile(product, 17, apps, tg, fu, leaf, rcs);
     for (i = 0; i < 17; i++) {
@@ -248,6 +259,7 @@ static void arm_case(const char *product, const char *ref) {
     static const char *six[] = {"args", "bf", "calc", "life", "queens", "sieve"};
     const char *src[24], *tg[24]; int fu[24], rcs[24], i, n = ref ? 24 : 12, bad = 0, same = 0; char leaf[24][64];
     long sized = 0, proc = 0;
+    nas += ref ? 2 : 1;
     for (i = 0; i < n; i++) {
         src[i] = six[(i % 12) / 2]; tg[i] = "lnx/arm64"; fu[i] = i & 1;
         cx_fmt(leaf[i], sizeof leaf[i], "arm-%d.o", i);
@@ -279,28 +291,52 @@ static void arm_case(const char *product, const char *ref) {
     }
 }
 
+static int dropped(const char *name) {
+    const char *d = getenv("FPS_DROP"); size_t k = strlen(name);
+    while (d && *d) {
+        if (!strncmp(d, name, k) && (d[k] == ',' || !d[k])) return 1;
+        d = strchr(d, ','); if (d) d++;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    const char *product = argc > 1 ? argv[1] : "./unisacc.com";
+    static const char *sets[] = {"main", "corpus", "arm64"};
+    static const int setn[] = {6, 1, 1};
     const char *tmp = getenv("TMPDIR");
     static const char *leaves[] = {"m.c", "m.o", "a.c", "a.o", "ax.o", "ma", "max", "s.s", "s.o"};
-    int lrc = 0, rc, i;
-    const char *ref = argc > 2 ? argv[2] : 0;
-    if (argc > 3) { fprintf(stderr, "usage: check-funit-procslot.cx -- [PRODUCT [REF]]\n"); return 2; }
+    int lrc = 0, rc, i, si = -1, want;
+    const char *product, *ref;
+    if (argc > 1 && !strncmp(argv[1], "--set=", 6)) {
+        for (i = 0; i < 3; i++) if (!strcmp(argv[1] + 6, sets[i])) si = i;
+        if (si < 0) { fprintf(stderr, "check-funit-procslot: unknown set %s\n", argv[1] + 6); return 2; }
+        argv++; argc--;
+    }
+    product = argc > 1 ? argv[1] : "./unisacc.com";
+    ref = argc > 2 ? argv[2] : 0;
+    if (argc > 3) { fprintf(stderr, "usage: check-funit-procslot.cx -- [--set=main|corpus|arm64] [PRODUCT [REF]]\n"); return 2; }
+    want = si < 0 ? 8 : setn[si];
+    if (ref && (si < 0 || si == 2)) want++;
     cx_fmt(dir, sizeof dir, "%s/check-funit-procslot-%d", tmp && *tmp ? tmp : "/tmp", (int)getpid());
     if (mkdir(dir, 0700)) { fprintf(stderr, "check-funit-procslot: cannot create %s\n", dir); return 2; }
-    if (!compile(product, "m", "extern int ua(void);\nextern int uv(void);\nint main(void){return ua()*10+uv();}\n") &&
+    if ((si < 0 || si == 0) &&
+        !compile(product, "m", "extern int ua(void);\nextern int uv(void);\nint main(void){return ua()*10+uv();}\n") &&
         !compile(product, "a", "int ua(void){return __argc();}\nint uv(void){char *p=(char *)__argv(1);return p[0]=='z';}\n")) {
-        common_case("common-main", "m.o");
-        common_case("common-unit", "a.o");
-        rc = link_run("a.o", "ma", &lrc);
-        if (rc == 21) printf("PASS\tmerge-run\tld s.o a.o rc=21 (one argc/argv cell)\n");
-        else { printf("FAIL\tmerge-run\tlinkrc=%d runrc=%d want 21\n", lrc, rc); fails++; }
-        negctl();
+        if (!dropped("common-main")) common_case("common-main", "m.o");
+        if (!dropped("common-unit")) common_case("common-unit", "a.o");
+        if (!dropped("merge-run")) {
+            nas++;
+            rc = link_run("a.o", "ma", &lrc);
+            if (rc == 21) printf("PASS\tmerge-run\tld s.o a.o rc=21 (one argc/argv cell)\n");
+            else { printf("FAIL\tmerge-run\tlinkrc=%d runrc=%d want 21\n", lrc, rc); fails++; }
+        }
+        if (!dropped("negctl")) negctl();
     }
-    corpus(product);
-    arm_case(product, ref);
+    if ((si < 0 || si == 1) && !dropped("corpus-slot")) corpus(product);
+    if ((si < 0 || si == 2) && !dropped("arm64-shape")) arm_case(product, ref);
     for (i = 0; i < 9; i++) { char p[4200]; path(p, sizeof p, leaves[i]); unlink(p); }
     rmdir(dir);
-    printf("CHECK_FUNIT_PROCSLOT\tfailed=%d\n", fails);
+    if (nas != want) { printf("FAIL\tassertion-count\texpected=%d got=%d set=%s\n", want, nas, si < 0 ? "all" : sets[si]); fails++; }
+    printf("CHECK_FUNIT_PROCSLOT\tset=%s\tassertions=%d\tfailed=%d\n", si < 0 ? "all" : sets[si], nas, fails);
     return fails ? 1 : 0;
 }
