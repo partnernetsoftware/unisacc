@@ -53,6 +53,9 @@ typedef struct {
     long sym;
     int weak;
     long got;
+    long csize;      /* SHN_COMMON: largest size seen, 0 none */
+    long calign;     /* SHN_COMMON: largest alignment seen */
+    long cva;        /* SHN_COMMON: address at the end of .bss */
 } ol_glob;
 
 static char ol_msg[600];
@@ -337,6 +340,23 @@ static int ol_globals(ol_obj *ob, int n, const char **objs) {
             int type = s[4] & 15;
             int shn = (int)ol_get(s + 6, 2);
             if (type == 6 || type == 10) return ol_fail(2, "unsupported symbol type", nm, nl, objs[k], type, 1);
+            if (shn == 0xfff2) {
+                /* SHN_COMMON: same name merges to the largest size and alignment; a
+                   defined symbol of that name wins (ol_addr), else it lands after .bss. */
+                ol_glob *g;
+                long cs = (long)ol_get(s + 16, 8), ca = (long)ol_get(s + 8, 8);
+                if (bind != 1 || !nm || !nl || ol_eq(nm, nl, "__init_u") || ol_eq(nm, nl, "__init"))
+                    return ol_fail(2, "unsupported common symbol", nm, nl, objs[k], i, 1);
+                if (ca < 1 || (ca & (ca - 1)) || ca > OL_PAGE || cs < 0 || cs > (1L << 30))
+                    return ol_fail(2, "bad common symbol", nm, nl, objs[k], ca, 1);
+                g = ol_find(nm, nl, 1);
+                if (!g) return ol_fail(1, "symbol table full", 0, 0, 0, 0, 0);
+                if (cs > g->csize) g->csize = cs;
+                if (ca > g->calign) g->calign = ca;
+                if (!g->calign) g->calign = 1;
+                i = i + 1;
+                continue;
+            }
             if (shn != 0 && shn != 0xfff1 && (shn >= o->shnum || (!o->kind[shn] && bind != 0)))
                 return ol_fail(2, "symbol in unplaced section", nm, nl, objs[k], shn, 1);
             if ((bind == 1 || bind == 2) && shn != 0) {
@@ -379,7 +399,7 @@ static int ol_undef(ol_obj *ob, int n, const char **objs) {
             unsigned char *s = ol_sym(o, i, &nm, &nl);
             if ((s[4] >> 4) == 1 && ol_get(s + 6, 2) == 0 && nl > 0 && !ol_eq(nm, nl, "__init")) {
                 ol_glob *g = ol_find(nm, nl, 0);
-                if (!g || g->obj < 0) return ol_fail(5, "undefined symbol", nm, nl, objs[k], 0, 0);
+                if (!g || (g->obj < 0 && !g->calign)) return ol_fail(5, "undefined symbol", nm, nl, objs[k], 0, 0);
             }
             i = i + 1;
         }
@@ -415,6 +435,10 @@ static int ol_addr(ol_obj *ob, int k, long i, const char *path, long initva, lon
         ol_glob *g = ol_find(nm, nl, 0);
         if (g && g->obj >= 0) {
             *va = ol_defva(&ob[g->obj], g->sym);
+            return 0;
+        }
+        if (g && g->calign) {
+            *va = g->cva;
             return 0;
         }
         if ((s[4] >> 4) == 2) return 0;
@@ -645,6 +669,17 @@ int ol_link(int n, const char **objs, unsigned char **exe, long *exen) {
     dva = ol_align(tend, OL_PAGE);
     dend = ol_place(ob, n, 2, dva + ngot * 8);
     bend = ol_place(ob, n, 3, dend);
+    /* COMMON symbols without a definition, in table order (fixed by the input names). */
+    i = 0;
+    while (i < ol_tcap) {
+        ol_glob *g = &ol_tab[i];
+        if (g->name && g->obj < 0 && g->calign) {
+            bend = ol_align(bend, g->calign);
+            g->cva = bend;
+            bend = bend + g->csize;
+        }
+        i = i + 1;
+    }
     img = (unsigned char *)ol_zalloc(dend - OL_BASE);
     if (!img) return ol_out(ob, n, ol_fail(1, "out of memory", 0, 0, 0, 0, 0));
     ol_copy(ob, n, 1, img);
