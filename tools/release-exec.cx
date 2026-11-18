@@ -13,6 +13,13 @@
  *   G4 CI_SUCCESS/CI_VERDICT/Y1_PUSHED                          before publish
  *   G5 PUBLIC_SHA/READBACK                                      after publish
  *   G6 DECISION                                                 at Y2
+ *   MAIN_ANCESTOR (N3) before X, Y1 and Y2: git fetch origin, then origin/main must be an ancestor
+ *   of HEAD; else REFUSE RELEASE_EXEC_GATE_MAIN_ADVANCED origin/main=SHA HEAD=SHA with a NEXT line
+ *   (merge yourself, then --from-step N); never merges, never rolls back public state.
+ *   No origin/main or history: MAIN_UNKNOWN; fetch failure: MAIN_FETCH.
+ * --warm CANDIDATE_TSV --layout DIR [--out DIR] (N4): before the freeze, compile the tools the public
+ *   readback compiles with the checkout product (same cwd, same path forms) and prove a second call
+ *   hits the run cache; receipt OUT/warm-KEY.tsv (see warm_main). Step 6 prints WARM READY|COLD.
  * A failing gate stops with "release-exec: REFUSE RELEASE_EXEC_GATE_<NAME>" (rc 2).
  * After publish (steps 5..7) a gate failure runs the rollback of release/rollback.txt (1):
  * release back to draft, Latest back to the previous tag; tags/releases are never deleted.
@@ -45,6 +52,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
 #pragma unisa use mem.bytes
+#pragma unisa use sys.sha
 
 #define REPO cand.repo
 static char checkout_product[260];
@@ -206,6 +214,35 @@ static void sha_file(const char *path, char hex[65]) {
 static int pushed(const char *sha) {
     char *v[] = {"git", "merge-base", "--is-ancestor", (char *)sha, "origin/main", 0};
     return is_hex(sha, 40) && run(v, 15, 0, 0) == 0;
+}
+/* N3: a step that commits and pushes (X, Y1, Y2) first proves origin/main is an ancestor of HEAD.
+ * Main advanced is not a candidate defect: no automatic merge, no rollback of public state;
+ * the operator merges, re-checks and resumes with --from-step. Missing refs or history refuse. */
+static void refuse_main(const char *gate, const char *detail) {
+    sy_printf("GATE\t%d\t%s\tFAIL\t%s\n", cur_step, gate, detail);
+    sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_%s step=%d %s\n", gate, cur_step, detail);
+    sy_printf("NEXT\t%d\tmerge origin/main into this checkout yourself (release-exec never merges), re-run the checks, then resume: release-exec --execute %s --layout %s --from-step %d\n",
+              cur_step, table, layout, cur_step);
+    sy_printf("ROLLBACK\t%d\tNONE\tmain moved; candidate and public state untouched\n", cur_step);
+    emit_phase(2);
+    sy_exit(2);
+}
+static void gate_main(void) {
+    char om[64], head[64], d[300], o[512]; int rc;
+    char *fe[] = {"git", "fetch", "--quiet", "origin", 0};
+    char *rm[] = {"git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main", 0};
+    char *rh[] = {"git", "rev-parse", "--verify", "--quiet", "HEAD", 0};
+    char *an[] = {"git", "merge-base", "--is-ancestor", "origin/main", "HEAD", 0};
+    if (cur_step < from_step) return;
+    if (dry) show(fe, "DRY");
+    else { show(fe, "READ"); if (run(fe, 30, o, sizeof o)) refuse_main("MAIN_FETCH", "git fetch origin failed"); }
+    if (run(rm, 10, om, sizeof om) || !is_hex(om, 40)) refuse_main("MAIN_UNKNOWN", "no refs/remotes/origin/main");
+    if (run(rh, 10, head, sizeof head) || !is_hex(head, 40)) refuse_main("MAIN_UNKNOWN", "no HEAD commit");
+    rc = run(an, 15, 0, 0);
+    if (rc == 1) { cx_fmt(d, sizeof d, "origin/main=%s HEAD=%s", om, head); refuse_main("MAIN_ADVANCED", d); }
+    if (rc) { cx_fmt(d, sizeof d, "merge-base rc=%d origin/main=%s HEAD=%s (missing history)", rc, om, head); refuse_main("MAIN_UNKNOWN", d); }
+    cx_fmt(d, sizeof d, "origin/main=%s ancestor of HEAD=%s", om, head);
+    gate_pass("MAIN_ANCESTOR", d);
 }
 /* candidate tables equal ignoring row column 6 (ci_run_id), which Y1 fills */
 static int same_candidate_but_run(const char *a, const char *b) {
@@ -395,6 +432,7 @@ static void step_x(void) {
     char *v[] = {"sh", checkout_product, "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", "--push", 0};
     cx_fmt(msg, sizeof msg, "v%s X: candidate table", cand.version);
     gate_strict(); gate_ape(); gate_ratchets();
+    gate_main();
     if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", here)) die("path");
     { char rp[4096]; if (sy_realpath(p, rp, sizeof rp) < 0 || !tx_eqz(rp, table)) refuse("CANDIDATE_SHA", "CANDIDATE_TSV must be the checkout's release/candidate.tsv"); }
     {
@@ -706,6 +744,7 @@ static void step_y1(void) {
     v[k++] = notes; v[k++] = "release/evidence.tsv"; v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(notes, sizeof notes, "release/notes-%s.md", cand.version);
     cx_fmt(msg, sizeof msg, "v%s Y1", cand.version);
+    gate_main();
     if (index_ref("exec-4-Y1", "commit-Y1", y1sha, sizeof y1sha)) { show(dv, "DONE"); show(v, "DONE"); say("SKIP", "Y1 already recorded", y1sha); }
     else if (cur_step < from_step) refuse("RESUME", "no Y1 recorded for a verify-only step");
     else {
@@ -769,6 +808,7 @@ static void step_readback(void) {
       free(s);
       if (!seen) refuse("PUBLIC_SHA", "public SHA256SUMS does not list the candidate APE sha"); }
     gate_pass("PUBLIC_SHA", hex);
+    warm_note();
     cx_fmt(p, sizeof p, "%s/public-readback.txt", evdir);
     char *list[]={rb[0],rb[1],rb[2],"--","--list-steps",0};
     char plan[400],pointer[4600],parent[4400];
@@ -827,6 +867,7 @@ static void step_y2(void) {
     v[k++] = "--whole"; k = ev_expand(v, k, 120);
     v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
+    gate_main();
     cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
     show(dv, "LOCAL");
     if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
@@ -845,11 +886,156 @@ static void step_y2(void) {
     }
 }
 
+/* ---- N4: readback warm-up ------------------------------------------------------------------------ */
+/* The public readback (step 6) compiles these tools with the checkout product, cwd = this checkout,
+ * each path in the exact form the readback passes (the product run cache keys on the tool path form,
+ * the product path and the cwd). --warm compiles them once before the freeze and then proves a second
+ * invocation hits the run cache (RR_TIME lookup_hit nonzero). Only compiled products are cached (the
+ * product's own run cache); no verdict is cached: the readback still runs every step.
+ * Identity key = sha256 over root, each entry tool's bytes, every git-listed file of cxroot.tsv, cx,
+ * ext, tools/cxlib, unisa, the checkout product bytes and the candidate APE sha256. The receipt
+ * OUT/warm-KEY.tsv records it; a receipt whose bytes differ from the recomputed row is refused.
+ * Not warmed: compiles the candidate APE makes inside the readback (its download path is a fresh
+ * per-session directory, and the run cache keys on the product path). */
+static const char *warm_tool[5] = {"release/tools/c47-1-readback.cx", "tools/chain-step.cx", "tools/release-ape.cx", "tools/check-run-comm.cx", "tools/release-layout.cx"};
+static const int warm_abs[5] = {0, 1, 0, 1, 1};
+static const char *warm_arg[5] = {"--list-steps", "warm", "warm", "warm", "warm"};
+static char warm_key[65], warm_receipt[4600];
+static np_buf warm_row;
+static int warm_hash_file(np_buf *b, const char *path) {
+    char hex[65]; long n; char *t; sy_stat_t st;
+    if (!sy_lstat(path, &st) && st.kind == 'l') {   /* git-listed symlink: its target text is the identity */
+        char to[4096]; long k = sy_readlink(path, to, sizeof to - 1);
+        if (k < 0) return 1;
+        np_puts(b, path); np_put(b, "", 1); np_puts(b, "link:"); np_put(b, to, (size_t)k); np_puts(b, "\n");
+        return 0;
+    }
+    t = slurp(path, &n);
+    if (!t) return 1;
+    if (sy_sha256_any_hex(t, n, hex)) { free(t); return 1; }
+    free(t);
+    np_puts(b, path); np_put(b, "", 1); np_puts(b, hex); np_puts(b, "\n");
+    return 0;
+}
+/* 0 ok; else why holds the reason */
+static int warm_identity(char *why, long cap) {
+    static char list[1 << 19]; np_buf b = {0}; char prod[65], tp[4600]; long at = 0, ll, files = 0; const char *ls; int i;
+    char *ls_files[] = {"git", "ls-files", "--", "cxroot.tsv", "cx", "ext", "tools/cxlib", "unisa", 0};
+    np_puts(&b, here); np_put(&b, "", 1);
+    for (i = 0; i < 5; i++) if (warm_hash_file(&b, warm_tool[i])) { free(b.p); cx_fmt(why, cap, "warm input unreadable: %s", warm_tool[i]); return 1; }
+    if (run(ls_files, 20, list, sizeof list)) { free(b.p); cx_fmt(why, cap, "git ls-files failed (closure unknown)"); return 1; }
+    while (line_next(list, tlen(list), &at, &ls, &ll)) {
+        if (!ll || ll >= 4000) continue;
+        cx_fmt(tp, sizeof tp, "%.*s", (int)ll, ls);
+        if (warm_hash_file(&b, tp)) { free(b.p); cx_fmt(why, cap, "closure file unreadable: %s", tp); return 1; }
+        files++;
+    }
+    sha_file(checkout_product, prod);
+    if (tlen(prod) != 64) { free(b.p); cx_fmt(why, cap, "checkout product unreadable: %s", checkout_product); return 1; }
+    np_puts(&b, "product\t"); np_puts(&b, prod); np_puts(&b, "\ncandidate\t"); np_puts(&b, cand.sha[0]); np_puts(&b, "\n");
+    if (sy_sha256_any_hex(b.p, (long)b.n, warm_key)) { free(b.p); cx_fmt(why, cap, "identity hash"); return 1; }
+    free(b.p);
+    free(warm_row.p); warm_row.p = 0; warm_row.n = 0; warm_row.cap = 0;
+    { char line[1200];
+      cx_fmt(line, sizeof line, "WARM\tkey=%s\troot=%s\tproduct_sha256=%s\tcandidate_sha256=%s\tclosure_files=%ld\n", warm_key, here, prod, cand.sha[0], files);
+      np_puts(&warm_row, line);
+      for (i = 0; i < 5; i++) { cx_fmt(line, sizeof line, "TARGET\t%s\n", warm_tool[i]); np_puts(&warm_row, line); } }
+    if (cx_fmt(warm_receipt, sizeof warm_receipt, "%s/warm-%s.tsv", outdir, warm_key)) { cx_fmt(why, cap, "receipt path"); return 1; }
+    return 0;
+}
+/* 1 receipt present and equal, 0 absent, -1 present but different (tampered) */
+static int warm_receipt_state(void) {
+    long n; char *t; int same;
+    if (sy_exists(warm_receipt) != 1) return 0;
+    t = slurp(warm_receipt, &n);
+    same = t && n == (long)warm_row.n && !memcmp(t, warm_row.p, warm_row.n);
+    free(t);
+    return same ? 1 : -1;
+}
+static void warm_argv(int i, char **v, char *tp, long cap) {
+    if (warm_abs[i]) cx_fmt(tp, cap, "%s/%s", here, warm_tool[i]); else cx_fmt(tp, cap, "%s", warm_tool[i]);
+    v[0] = "sh"; v[1] = checkout_product; v[2] = tp; v[3] = "--"; v[4] = (char *)warm_arg[i]; v[5] = 0;
+}
+/* the run-cache answer of one invocation: 1 hit, 0 miss with a prepared program, -1 no prepared program */
+static int warm_probe(int i) {
+    char tp[4600]; char *v[6]; char *env[] = {"UNISACC_RR_TIME=1", 0}; np_result r = {0}; char why[256]; int hit = -1;
+    warm_argv(i, v, tp, sizeof tp);
+    show(v, "WARM");
+    if (np_run(v, here, env, 55, &r, why, sizeof why)) { np_free(&r); return -1; }
+    if (r.err && r.errn) {
+        long at = 0, ll; const char *ls;
+        while (line_next(r.err, (long)r.errn, &at, &ls, &ll)) {
+            if (ll > 19 && !memcmp(ls, "RR_TIME\tlookup_hit=", 19)) { if (ls[19] != '0') hit = 1; else if (hit < 0) hit = 0; }
+            if (ll >= 30 && !memcmp(ls, "RR_TIME\toutput\tkind=exec-prepare", 30) && hit < 0) hit = 0;
+        }
+    }
+    np_free(&r);
+    return hit;
+}
+/* cold compiles, each bounded; returns timeouts. The first runs alone (on a fresh cache root,
+ * parallel first stores were measured to be lost: 2 of 5 missed), the other four in parallel
+ * (read-only over this checkout). */
+static int warm_cold(void) {
+    sy_child_t ch[5]; int live[5], i, late = 0; char tp[5][4600]; char *v[5][6];
+    for (i = 0; i < 5; i++) {
+        sy_spawn_t o; sy_spawn_init(&o);
+        warm_argv(i, v[i], tp[i], sizeof tp[i]);
+        show(v[i], "WARM-COLD");
+        o.argv = v[i]; o.cwd = here; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL; o.pgroup = -1; o.deadline_ms = 55000;
+        live[i] = !sy_proc_spawn(&o, &ch[i]);
+        if (i == 0 && live[0]) { sy_exit_t ex = {0}; sy_proc_wait(&ch[0], &ex); sy_proc_close(&ch[0]); if (ex.timed_out) late++; live[0] = 0; }
+    }
+    for (i = 1; i < 5; i++) if (live[i]) { sy_exit_t ex = {0}; sy_proc_wait(&ch[i], &ex); sy_proc_close(&ch[i]); if (ex.timed_out) late++; }
+    return late;
+}
+/* probe every target; returns how many were not served from the run cache */
+static int warm_probes(const char *round) {
+    int i, miss = 0;
+    for (i = 0; i < 5; i++) {
+        int h = warm_probe(i);
+        sy_printf("WARM\tTARGET\t%s\t%s\t%s\n", warm_tool[i], h > 0 ? "HIT" : h == 0 ? "MISS" : "NOT_PREPARED", round);
+        if (h <= 0) miss++;
+    }
+    return miss;
+}
+static int warm_main(void) {
+    char why[600]; int st, i, miss;
+    cur_step = 6;
+    if (warm_identity(why, sizeof why)) { sy_printf("GATE\t6\tWARM\tFAIL\t%s\n", why); sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %s\n", why); return 2; }
+    st = warm_receipt_state();
+    if (st < 0) {
+        sy_printf("GATE\t6\tWARM_RECEIPT\tFAIL\treceipt bytes differ from the recomputed identity row\n");
+        sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM_RECEIPT receipt=%s differs from key=%s\n", warm_receipt, warm_key);
+        return 2;
+    }
+    sy_printf("WARM\tRECEIPT\t%s\tkey=%s\t%s\n", st ? "HIT" : "NEW", warm_key, warm_receipt);
+    /* a receipt only names the identity; the run cache is re-proven every time (it may be evicted) */
+    if (!st && (i = warm_cold())) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %d cold compile(s) exceeded 55 s\n", i); return 2; }
+    miss = warm_probes(st ? "receipt" : "after-cold");
+    if (miss && st) {
+        sy_printf("WARM\tREWARM\t%d target(s) not cached under a valid receipt\n", miss);
+        if ((i = warm_cold())) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %d cold compile(s) exceeded 55 s\n", i); return 2; }
+        miss = warm_probes("after-rewarm");
+    }
+    if (miss) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %d target(s) not served from the run cache after warm-up\n", miss); return 2; }
+    if (!st && sy_write_atomic(warm_receipt, warm_row.p, warm_row.n, 0644)) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM receipt write\n"); return 2; }
+    sy_printf("WARM\tRESULT\tREADY\tkey=%s\ttargets=5\n", warm_key);
+    return 0;
+}
+/* step 6 note (no gate: a refusal after publish would roll back): is this identity warmed? */
+static void warm_note(void) {
+    char why[600];
+    if (warm_identity(why, sizeof why)) { sy_printf("WARM\t6\tUNKNOWN\t%s\n", why); return; }
+    { int st = warm_receipt_state();
+      sy_printf("WARM\t6\t%s\tkey=%s\n", st > 0 ? "READY" : st < 0 ? "RECEIPT_DIFFERS" : "COLD (run release-exec --warm before the freeze)", warm_key); }
+}
+
 int main(int argc, char **argv) {
     char why[512], ver[64]; int i;
     const char *home = sy_env("HOME");
-    if (argc < 3 || !tx_eqz(argv[1], "--execute"))
-        die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE]");
+    int warm = argc >= 3 && tx_eqz(argv[1], "--warm");
+    if (argc < 3 || (!warm && !tx_eqz(argv[1], "--execute")))
+        die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE] | --warm CANDIDATE_TSV --layout DIR [--out DIR]");
     if (sy_cwd(here, sizeof here)) die("cwd");
     if (sy_realpath(argv[2], table, sizeof table) < 0) die("candidate table");
     cx_fmt(baseline, sizeof baseline, "%s/.unisacc-baselines/c46-2/unisacc-c46-2.com", home ? home : "");
@@ -883,6 +1069,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(outdir, sizeof outdir, "%s/release-exec-%s", j && j[0] ? j : "/tmp", cand.version)) die("out path");
     }
     if (sy_mkdir(outdir, 0755) && sy_exists(outdir) != 1) die("out dir");
+    if (warm) return warm_main();
     if (!dry && sy_mkdir(evdir, 0755) && sy_exists(evdir) != 1) die("evidence dir");
     if (cx_fmt(indexp, sizeof indexp, "%s/INDEX.tsv", dry ? outdir : evdir)) die("index path");
     if (dry && cx_write(indexp, "item\ttime\tverdict\tpath_or_ref\tnote\n", 36)) die("index write");
