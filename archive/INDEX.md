@@ -75,3 +75,7 @@
 | [archive/pre080/research/c38-open-rulings.md](pre080/research/c38-open-rulings.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
 | [archive/pre080/research/c39-r1-gate-infra-review.md](pre080/research/c39-r1-gate-infra-review.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
 | [archive/pre080/research/r20-c99-seed-a-audit.md](pre080/research/r20-c99-seed-a-audit.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
+| [archive/pre080/tests/corpus-ctestsuite/a12-development-curve.tsv](pre080/tests/corpus-ctestsuite/a12-development-curve.tsv) | 已归档 | 0.0.80 | tests/corpus-ctestsuite 0.0.46 到 0.0.48 首轮一次性结果 |
+| [archive/pre080/tests/corpus-ctestsuite/c46-3-first-errors.tsv](pre080/tests/corpus-ctestsuite/c46-3-first-errors.tsv) | 已归档 | 0.0.80 | tests/corpus-ctestsuite 0.0.46 到 0.0.48 首轮一次性结果 |
+| [archive/pre080/tests/corpus-ctestsuite/c46-3-first-run.tsv](pre080/tests/corpus-ctestsuite/c46-3-first-run.tsv) | 已归档 | 0.0.80 | tests/corpus-ctestsuite 0.0.46 到 0.0.48 首轮一次性结果 |
+| [archive/pre080/tests/corpus-ctestsuite/c46-3-minimal-rejections.tsv](pre080/tests/corpus-ctestsuite/c46-3-minimal-rejections.tsv) | 已归档 | 0.0.80 | tests/corpus-ctestsuite 0.0.46 到 0.0.48 首轮一次性结果 |
