@@ -39,8 +39,8 @@
  * when a reload detects it and makes the scope LOCAL-PARTIAL; no bypass.  CXDEV_VERBOSE=1 (or a stale bundle)
  * prints after the run:
  *   CXDEV_RUN<TAB>scope=..<TAB>manifest=..<TAB>base=..<TAB>pkg=..<TAB>local_members=N<TAB>rc=N<TAB>ms=N
- * Cached: constructors, nets, the recipe index.  Never cached: any run verdict.  Only lnx/x86_64 is executed;
- * recipes of other targets are NOT_CLAIMED, recipes without a distinct M in the shipped package NOT_DEPLOYED.
+ * The lnx/x86_64 loader builds Linux x86_64 and arm64 model data on the host. Foreign OS recipes remain
+ * NOT_CLAIMED. Recipes without a distinct M in the shipped package remain NOT_DEPLOYED.
  * Environment: CXDEV_HOME, CXDEV_ROOT and CXDEV_WT (at --build), CXDEV_WT (run time override), CXDEV_PAR (parallel
  * builds, default 2, at most 6), CXDEV_STEP_S (step bound, 1..55, default 55), CXDEV_ABSENT (NOT_DEPLOYED list).
  * Exit: the program's own; 2 with `cx-dev: REFUSE reason` when the bundle cannot be used.
@@ -121,13 +121,15 @@ typedef struct { char sha[65], commit[65], key[32], slice[PW], basesha[65], inst
 static ApeId A;
 typedef struct {
     char fp[40], scope[24], pkgsha[65], mansha[65], stale_first[PW];
-    int local, nstale, base_stale;
+    int local, nstale, base_stale, targets;
     char stale_id[MAXR][64], stale_why[MAXR][96];
 } State;
 static State S;
 static void state_save(void) {
     np_buf b = {0}; char t[PW + 300], p[PW]; int i;
     if (cx_fmt(t, sizeof t, "fp\t%s\nscope\t%s\nlocal\t%d\npkgsha\t%s\nmanifest\t%s\nbase_stale\t%d\t%s\n", S.fp, S.scope, S.local, S.pkgsha, S.mansha, S.base_stale, S.stale_first[0] ? S.stale_first : "-")) refuse("state", 0);
+    np_puts(&b, t);
+    if (cx_fmt(t, sizeof t, "targets\t%d\n", S.targets)) refuse("state", 0);
     np_puts(&b, t);
     for (i = 0; i < S.nstale; i++) { if (cx_fmt(t, sizeof t, "stale\t%s\t%s\n", S.stale_id[i], S.stale_why[i])) refuse("state", 0); np_puts(&b, t); }
     pj(p, sess, "state.tsv"); wr(p, b.p, b.n, 0600); free(b.p);
@@ -141,6 +143,7 @@ static int state_load(void) {
         if (!strncmp(q, "fp\t", 3)) { if (cx_fmt(S.fp, sizeof S.fp, "%s", q + 3)) refuse("text-too-long", 0); }
         else if (!strncmp(q, "scope\t", 6)) { if (cx_fmt(S.scope, sizeof S.scope, "%s", q + 6)) refuse("text-too-long", 0); }
         else if (!strncmp(q, "local\t", 6)) S.local = atoi(q + 6);
+        else if (!strncmp(q, "targets\t", 8)) S.targets = atoi(q + 8);
         else if (!strncmp(q, "pkgsha\t", 7)) { if (cx_fmt(S.pkgsha, sizeof S.pkgsha, "%s", q + 7)) refuse("text-too-long", 0); }
         else if (!strncmp(q, "manifest\t", 9)) { if (cx_fmt(S.mansha, sizeof S.mansha, "%s", q + 9)) refuse("text-too-long", 0); }
         else if (!strncmp(q, "base_stale\t", 11)) { char *t = strchr(q + 11, '\t'); S.base_stale = atoi(q + 11); if (t) { if (cx_fmt(S.stale_first, sizeof S.stale_first, "%s", t + 1)) refuse("text-too-long", 0); } }
@@ -184,6 +187,17 @@ static char *mrec(const char *net, size_t nn, size_t *on) {
 /* ---- recipes (single source: tools/cxlib/sourcepackage.cx recipes[]) ---- */
 typedef struct { char id[64], stage[64], flags[4][32]; int nf, native, absent, affected, idx; char *m; size_t mn; char why[96]; } Rec;
 static Rec recs[MAXR]; static int nrec;
+static int linux_target(const char *id) {
+    if (!strncmp(id, "lnx-x86_64-", 11) || !strcmp(id, "object-lower-x86_64") || !strcmp(id, "object-enc-x86_64")) return 1;
+    if (!strncmp(id, "lnx-arm64-", 10) || !strcmp(id, "object-lower-arm64") || !strcmp(id, "object-enc-arm64")) return 2;
+    return 0;
+}
+static int common_recipe(const char *id) {
+    static const char *const names[] = {"warnparse","errorparse","warnunits","warnlex","tokenlex","tokenpp","warnpp-shared","tapecheck","hostsymbols","librarycontract","librarypartition",0};
+    int i;
+    for (i = 0; names[i]; i++) if (!strcmp(id, names[i])) return 1;
+    return !strncmp(id, "shared-", 7);
+}
 static void load_recipes(void) {
     char p[PW], *s, *a; size_t n;
     pj(p, sess, "src/sourcepackage.cx");
@@ -207,7 +221,7 @@ static void load_recipes(void) {
         while (*a == ' ') a++;
         if (*a == '}') a++;
         if (k < 2) refuse("recipes-syntax", 0);
-        r->native = !(strstr(r->id, "arm64") || strstr(r->id, "osx") || strstr(r->id, "win-") || strstr(r->stage, "enc/arm") || strstr(r->stage, "unitcontainer"));
+        r->native = (linux_target(r->id) || common_recipe(r->id)) && !strstr(r->stage, "unitcontainer");
         nrec++;
     }
     free(s);
@@ -599,11 +613,12 @@ static void reload(const char *fp, int report) {
     pkg_parse(&inst, ib, ibn);
     e = getenv("CXDEV_PAR"); if (e && atoi(e) >= 1 && atoi(e) <= 6) par = atoi(e);
     if (naff) {
-        char *ix; size_t ixn;
         why[0] = 0;
         if (ensure_ctor(wt, wctor, wkey, why, sizeof why)) { for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) { { if (cx_fmt(recs[k].why, 96, "%s", why)) refuse("text-too-long", 0); } } naff = -1; }
         else if (!seedch) { cpy(bctor, PW, wctor, PW); cpy(bkey, 65, wkey, 65); }
         else if (ensure_ctor(base, bctor, bkey, why, sizeof why)) { for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) { if (cx_fmt(recs[k].why, 96, "baseline-%s", why)) refuse("text-too-long", 0); } naff = -1; }
+    }
+    {   char *ix; size_t ixn;
         if (cx_fmt(rel, PW, "idx-%.16s.tsv", A.sha)) refuse("path-too-long", 0);
         pj(idxp, cdir, rel);
         if ((ix = cx_read(idxp, &ixn))) { char *s = ix, *l; while ((l = strchr(s, '\n'))) { char id[64]; int v; *l = 0; if (sscanf(s, "%63[^\t]\t%d", id, &v) == 2) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) recs[k].idx = v; s = l + 1; } free(ix); }
@@ -699,6 +714,15 @@ static void reload(const char *fp, int report) {
         swap_ms = ms_now() - s0;
     }
     { if (cx_fmt(S.scope, sizeof S.scope, "%s", S.base_stale ? "LOCAL-PARTIAL" : S.local ? "LOCAL" : "LOCAL-BASELINE")) refuse("text-too-long", 0); }
+    /* Advertise a target only after all of its recipe members have been located in this APE. */
+    {   int missing = 0;
+        for (k = 0; k < nrec; k++) {
+            int target = linux_target(recs[k].id);
+            if (recs[k].native && recs[k].idx >= 0 && recs[k].idx < inst.nm && !recs[k].why[0]) S.targets |= target;
+            else missing |= target;
+        }
+        S.targets &= ~missing;
+    }
     state_save(); unlink(lock);
     if (S.base_stale) fprintf(stderr, "BASE_STALE\tpaths=%d\tfirst=%s\tscope=LOCAL-PARTIAL\n", S.base_stale, S.stale_first);
     if (report) fprintf(stderr, "CXDEV_RELOAD\tnets=%d\tbuilt=%d\tlocal_members=%d\tstale=%d\tgen_ms=%ld\tlint_ms=%ld\ttbl_ms=%ld\tnet_ms=%ld\tswap_ms=%ld\ttotal_ms=%ld\tscope=%s\t%s\n", naff < 0 ? 0 : naff, nbuilt, S.local, S.nstale, sum[0], sum[1], sum[2], sum[3], swap_ms, ms_now() - t0, S.scope, S.nstale ? "LOCAL_FAIL" : "LOCAL_OK");
@@ -926,7 +950,10 @@ int main(int argc, char **argv) {
     verify_manifest(slice, container);
     if (mode == 2 || mode == 1) {
         FILE *o = mode == 2 ? stdout : stderr;
-        if (mode == 2) fprintf(o, "NOT_RELEASE\tcx-dev-v1\nCXDEV_STATUS\tbundle=%s\tape=%s\tcommit=%s\tworktree=%s\ttargets=lnx/x86_64\tother_targets=NOT_CLAIMED\n", sess, A.sha, A.commit, wt);
+        if (mode == 2) {
+            static const char *const targets[] = {"none", "lnx/x86_64", "lnx/arm64", "lnx/x86_64,lnx/arm64"};
+            fprintf(o, "NOT_RELEASE\tcx-dev-v1\nCXDEV_STATUS\tbundle=%s\tape=%s\tcommit=%s\tworktree=%s\ttargets=%s\tother_targets=NOT_CLAIMED\n", sess, A.sha, A.commit, wt, targets[S.targets & 3]);
+        }
         fprintf(o, "CXDEV_SESSION\tscope=%s\tmanifest=%s\tbase=%s\tpkg=%s\tlocal_members=%d\tstale=%d\tbase_stale=%d\n", S.scope, S.mansha, A.basesha, S.pkgsha, S.local, S.nstale, S.base_stale);
         return mode == 1 && degraded ? 2 : 0;
     }
