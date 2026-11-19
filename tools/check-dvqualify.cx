@@ -4,6 +4,7 @@
  * candidate= is the sha256 of the layout copy of itself (id "bad" prints a wrong candidate).
  * It also refuses (rc 3/4) when the layout root has no git inventory or unisacc.com is a link.
  * Optional first argument selects a prebuilt dvqualify for red/green comparison.
+ * --evidence, --layout, --resume and --route partition the ordinary assertions.
  * Last case: the devsvc entry `devsvc qualify --list` of the real repository answers.
  * --gate mutation control: just before the timeout branch in run_set, set
  * admit=1 when admitting_since is set and the elapsed time reaches its limit.
@@ -260,14 +261,17 @@ int main(int argc, char **argv) {
     }
     int gate=argc==2 && !strcmp(argv[1],"--gate");
     int kit=argc==2 && !strcmp(argv[1],"--kit");
-    if (!gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    int part=0;
+    const char *parts[]={"--evidence","--layout","--resume","--route"};
+    if(argc==2)for(int i=0;i<4;i++)if(!strcmp(argv[1],parts[i]))part=i+1;
+    if (!part && !gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else if(kit) {
         const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
         if(cx_fmt(bin,sizeof bin,"%s/dvqualify",tmp))return 2;
         char *v[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",bin,0};
         if(!runv(v,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
     }
-    else if(!gate) { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    else if(!gate && part!=4) { char s[4200]; if ((!part && argc != 1) || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
     if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || cx_fmt(apep, sizeof apep, "%s/ape.com", tmp) || cx_fmt(ev, sizeof ev, "%s/ev.tsv", tmp) ||
         cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp)) return 2;
     /* fixture repository with a domain index and one committed file */
@@ -286,6 +290,7 @@ int main(int argc, char **argv) {
            sy_write_file(apep,script,strlen(script),0755))return 2;
         int r=gate_fixture();char *del[]={"rm","-rf",tmp,0};runv(del,0,20,&rc);return r;
     }
+    if(!part || part==1){
     /* Q1 list of the product-qualification set follows the domain index */
     { char *v[] = {bin, repo, "--set", "product-qualification", "--list", 0};
       check("list-domain-set", runv(v, 0, 30, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\tproduct-qualification\twindow=1") &&
@@ -355,6 +360,13 @@ int main(int argc, char **argv) {
         int resumed=runv(v,tmp,20,&rc) && rc==0 && !has(out,"QUALIFY_BATCH\talpha\t");
         check("resume-after-sigkill-relative-hardlink",busy && killed && reaped && resumed);
     }
+    }
+    if(!part || part==2){
+    /* The reuse assertion needs a previously published layout. */
+    if(part==2){
+        char *seed[]={bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
+        if(!runv(seed,0,40,&rc) || rc)return 2;
+    }
     /* Q3 valid-only run exits 0 */
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
       char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
@@ -369,6 +381,8 @@ int main(int argc, char **argv) {
       if(!runv(advance,0,20,&rc)||rc)return 2;
       check("same-ape-different-head-new-layout",runv(v,0,40,&rc) && rc==0 &&
             has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t") && has(out,"QUALIFY_BATCH\talpha\tPASS")); }
+    }
+    if(!part || part==3){
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
                    "--segment-batches", "2", 0};
       int ok = runv(v, 0, 40, &rc); char *e = cx_read(ev, 0);
@@ -400,6 +414,8 @@ int main(int argc, char **argv) {
       check("resume-keeps-real-fail-retries-invalid", ok && runv(again, 0, 40, &rc) && rc == 1 &&
             !has(out, "QUALIFY_BATCH\treject\t") && has(out, "QUALIFY_BATCH\tbad\tINVALID"));
     }
+    }
+    if(!part || part==4){
     { char timing[4400];
       if(cx_fmt(timing,sizeof timing,"%s/timing",tmp) || tq_native(root,"tools/dvtiming.cx",timing,why,sizeof why))return 2;
       if(put(tmp,"events.tsv","EV\t1\t100\tphase\tcmd=qualify\tphase=total\tms=123\tinput=fixture\trc=0\tload1=1\tjob=fixture\n",0600))return 2;
@@ -409,6 +425,7 @@ int main(int argc, char **argv) {
     { const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the real devsvc route check */
       char *v[] = {"sh", (char*)launcher, "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
       check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }
+    }
     { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 0, 30, &rc); }
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
