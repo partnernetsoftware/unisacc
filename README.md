@@ -91,7 +91,6 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | Agent working rules | [AGENTS.md](AGENTS.md#unisacc-工作规则) (`CLAUDE.md` is a symlink to it) |
 | Current version plan and release notes | [archive/plans/v0.0.59-unisacc.md](archive/plans/v0.0.59-unisacc.md)、[plans/](plans/) |
 | Prior-work survey | [research/prior-art.md](research/prior-art.md) |
-| UJS (parallel JS/WASM product, paper B) | [ujs/README.md](ujs/README.md)、[ujs/prd.md](ujs/prd.md) |
 | Detailed usage manual (Chinese) and known-limits reference: all options, headers, `-c`/`-S`/objects and archives | [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)、[七](docs/readme-detail.md#七已知限制) |
 | Frozen historical notes (Chinese): decision-net tables, old test-suite table, corpus observations, C99 coverage table | [docs/readme-detail.md](docs/readme-detail.md) |
 

@@ -2,6 +2,21 @@
 
 本索引覆盖原 `plans/` 下全部 86 个受跟踪文件:保留 28 个现行版本计划、路线图、架构规范与工具硬依赖文件,其余 58 个历史计划、草稿、一次性测量表与旧补丁已经 `git mv` 归档至 `archive/plans/`(保留完整 git 历史,无删除)。
 
+本文件是 `plans/` 的唯一入口(2026-11-19 梳理):`plans/` 下每个受跟踪文件在下方总表都有一行;已归档文件只记指针。
+
+## 分类速查
+
+| 类别 | 文件 |
+| --- | --- |
+| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、changes-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md |
+| 现行版本计划 | v0.0.82.md、v0.0.83.md、v0.0.81.md(上一版,前两版保留) |
+| 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、product-refactor-plan.md、q11-merge-rehearsal.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
+| 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
+| 审阅记录 | nn-table-review-2026-11-18.md |
+| 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md、v0.0.79.md、v0.0.80.md、roadmap-v0.0.80-v0.0.89.md(build/version-seq.tsv 引用,state-gen 读取) |
+| 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
+| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv) |
+
 说明:`release/notes-*.md` 与 `release/evidence/` 下的历史发布说明及证据正文保持原文不改,其中提及的旧 `plans/<file>` 路径对应下表中的 `archive/plans/<file>`。
 
 | 文件 | 状态 | 被哪版取代 | 一行职责 |
@@ -95,10 +110,11 @@
 | [archive/plans/v0.0.77-p1-registry-rows.txt](../archive/plans/v0.0.77-p1-registry-rows.txt) | 已归档 | v0.0.77+ | 0.0.77 P1 登记行草稿(0 引用) |
 | [archive/plans/v0.0.77-p5-registry-rows.txt](../archive/plans/v0.0.77-p5-registry-rows.txt) | 已归档 | v0.0.77+ | 0.0.77 P5 登记行草稿(0 引用) |
 | [archive/plans/v0.0.77.md](../archive/plans/v0.0.77.md) | 已归档 | v0.0.78 | 0.0.77 版本计划(内存安全乙期一段) |
-| [plans/v0.0.78.md](v0.0.78.md) | 现行 | - | 0.0.78 版本计划(前两版保留) |
-| [plans/v0.0.79.md](v0.0.79.md) | 现行 | - | 0.0.79 版本计划(前两版保留) |
-| [plans/v0.0.80-f1-design.md](v0.0.80-f1-design.md) | 现行 | - | 0.0.80 F1 对象产出合同设计单(cc 指定保留) |
-| [plans/v0.0.80.md](v0.0.80.md) | 现行 | - | 0.0.80 现行版本计划(cc 指定保留) |
+| [plans/v0.0.78.md](v0.0.78.md) | 历史,留原位 | 已公开 | 0.0.78 版本计划(build/version-seq.tsv 引用,不移动) |
+| [plans/v0.0.79.md](v0.0.79.md) | 历史,留原位 | 已公开 | 0.0.79 版本计划(build/version-seq.tsv 引用,不移动) |
+| [archive/plans-pre082/v0.0.80-f1-design.md](../archive/plans-pre082/v0.0.80-f1-design.md) | 已归档 | v0.0.80 已公开 | 0.0.80 F1 对象产出合同设计单 |
+| [plans/v0.0.81.md](v0.0.81.md) | 现行 | - | 0.0.81 版本计划(前两版保留,changes-rev3 与 roadmap-rev3 引用) |
+| [plans/v0.0.80.md](v0.0.80.md) | 历史,留原位 | 已公开 | 0.0.80 版本计划(build/version-seq.tsv 引用,不移动) |
 | [archive/plans/win-arm64-fixedpoint.md](../archive/plans/win-arm64-fixedpoint.md) | 已归档 | v0.0.48+ | win/arm64 逐片固定点 c46-3 实证历史 |
 
 ## 作废决定

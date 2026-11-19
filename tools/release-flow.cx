@@ -1,6 +1,9 @@
 /* release-flow stage-a|check --inputs FILE --out ABS [--decisions FILE] [--against STAGE_COMMIT]
  * Input TSV rows have key and value. Required: version, freeze (full commit), date, milestones.
  * Each segment row has three fields: segment, SHA256, absolute path, in original execution order.
+ * Forward inputs require strict-sha256, the independently recorded SHA256 of the entire strict file.
+ * Run prep --inputs FILE --out NEW_PREP [--decisions FILE] as one job. Then supply --prep NEW_PREP
+ * to stage-a and check as separate jobs. The dry gate always executes against the selected generation.
  * Replay uses pack (directory with candidate.tsv, cache-manager.tsv and layout), pack-log, warm,
  * dry-log and optional notes-form. Fresh packing takes slot, source-dir, snapshot, chain-out,
  * cm-x64 and cm-arm64 instead. Paths are absolute. Milestones supply event, timestamp, caption
@@ -8,11 +11,13 @@
  * Decisions start with identity, candidate SHA256, concatenated strict SHA256. Subsequent rows
  * are FAIL/id/count/reviewed reason including expiry, or UNKNOWN/id/reason/proof name/proof path.
  * Drafts without decisions list pending judgments in human-review.tsv. The returned statuses
- * are 0 ready, 1 review or coverage gaps, 2 invalid input or gate refusal. No external release actions.
+ * are 0 ready or phase complete, 1 human review, 2 invalid input, coverage gap or gate refusal.
+ * check --coverage alone uses 1 to report gaps. replay-machine only checks archived machine columns.
  * --against replays the recorded freeze and compares to the stage commit, excluding later INDEX rows.
  * Stage publication uses a fresh destination. Check reads that destination without editing it. */
 #pragma unisa use cxlib.releasecandidate
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
@@ -109,7 +114,8 @@ static int audit_split(const char *table,const char *registry){
     return gaps;
 }
 typedef struct {char *key,*value;} Input;
-static Input inputs[96];static int ni,checking,pending;
+static Input inputs[96];static int ni,checking,pending,prep_phase,archive_check;
+static const char *prep_dir;
 static np_buf strict_bytes;
 static RcCandidate cand;
 static char outdir[4096],ed[256],strictrel[256],layout[4096],cwd[4096],scratch[4096],driver[4096];
@@ -146,6 +152,10 @@ static void read_inputs(const char *path){
         inputs[ni].key=v[0];inputs[ni++].value=v[1];
     }
     if(!segments)fail("MISSING_INPUT","segment");
+    if(!baseline||opt("strict-sha256")){
+        char digest[65];cx_sha256_hex(strict_bytes.p,strict_bytes.n,digest);
+        if(strcmp(arg("strict-sha256"),digest))fail("STRICT_ORDER_IDENTITY",digest);
+    }
 }
 static char *capture(char **v,const char *dir){
     np_result r={0};char why[256]={0};
@@ -232,7 +242,7 @@ static void exceptions(void){
     }
     evidence("expected-fail.tsv",f.p);evidence("expected-unmeasured.tsv",u.p);
     char *reviewpath=relative(outdir,"human-review.tsv");
-    if(checking){if(strcmp(readtext(reviewpath),review.p))fail("REVIEW_DRIFT",reviewpath);}
+    if(checking){if(!archive_check&&strcmp(readtext(reviewpath),review.p))fail("REVIEW_DRIFT",reviewpath);}
     else if(cx_write(reviewpath,review.p,review.n))fail("WRITE",reviewpath);
 }
 static const char *tail_value(char *text,const char *prefix){
@@ -246,7 +256,7 @@ static char stats[96];
 static void packed(const char *pack,const char *log){
     char *table=relative(pack,"candidate.tsv"),why[512];
     if(rcand_load(table,&cand,why,sizeof why)||strcmp(cand.ci_run_id,"0")||strcmp(cand.version,arg("version"))||strcmp(cand.commit,arg("freeze")))fail("PACK_CANDIDATE",table);
-    if(cx_fmt(layout,sizeof layout,"%s/layout",pack)||rcand_verify(&cand,layout,7,why,sizeof why))fail("ASSET_IDENTITY",why);
+    if(cx_fmt(layout,sizeof layout,"%s/layout",pack)||(!archive_check&&rcand_verify(&cand,layout,7,why,sizeof why)))fail("ASSET_IDENTITY",why);
     char *p=readtext(log),*copy=strdup(p);
     sid=tail_value(copy,"RELEASE_RUN\tSOURCES_SID\tVERIFIED\t");
     if(!hexid(sid,64)||strcmp(tail_value(strdup(p),"PACK_APE\tSAME\tsha256="),cand.sha[0])||!strstr(p,"RELEASE_RUN\tRESULT\tPACK_OK\t"))fail("PACK_RECEIPT",log);
@@ -345,15 +355,17 @@ static void ratchet_counts(char *s){
     if(n==ms+12||strcmp(n,"\n"))fail("RATCHETS_SUMMARY","elapsed_ms");
     *ms=0;
 }
-static void prepare(const char *root){
-    char *dir=relative(scratch,"prep"),*tool=repo_tool("tools/release-prep.cx");
-    char *v[]={"sh",driver,tool,"--",cand.version,"--layout",layout,"--strict",relative(root,strictrel),"--commit",cand.commit,"--out",dir,0,0,0};
+static void prepare(const char *root,const char *dir){
+    char *tool=repo_tool("tools/release-prep.cx");
+    char *v[]={"sh",driver,tool,"--",cand.version,"--layout",layout,"--strict",relative(root,strictrel),"--commit",cand.commit,"--out",(char *)dir,0,0,0};
     if(opt("ratchets")){v[13]="--ratchets";v[14]=(char *)arg("ratchets");}
     np_result r={0};char why[256]={0};
-    if(np_run(v,root,0,55,&r,why,sizeof why)||r.residue||r.rc>1||!r.out||!strstr(r.out,"PREP\tSUMMARY\t")){
+    if(np_run(v,root,0,55,&r,why,sizeof why)||r.residue||r.timed_out||r.rc<0||r.rc>1||!r.out||!strstr(r.out,"PREP\tSUMMARY\t")){
         sy_eprintf("RELEASE_FLOW PREP rc=%d %s %s\n",r.rc,why,r.err?r.err:"");fail("PREP",dir);
     }
     sy_printf("RELEASE_FLOW PREP rc=%d receipts=%s\n",r.rc,dir);np_free(&r);
+}
+static void install_prepared(const char *root,const char *dir){
     char *rat=readtext(relative(dir,"ratchets.txt")),prefix[128];
     if(cx_fmt(prefix,sizeof prefix,"SOURCE\tfrozen-commit\tcommit=%s",cand.commit)||strncmp(rat,prefix,strlen(prefix)))fail("PREP_RATCHETS",dir);
     char *gate=relative(relative(root,ed),"ratchets.txt");
@@ -363,6 +375,22 @@ static void prepare(const char *root){
     else {char *prior=readtext(saved);ratchet_counts(prior);ratchet_counts(rat);if(strcmp(prior,rat))fail("DRIFT",saved);}
     evidence("rollback.txt",readtext(relative(dir,"rollback.txt")));
     evidence("evidence-rows.tsv",readtext(relative(dir,"evidence-rows.tsv")));
+}
+static void hash_row(np_buf *b,const char *key,const char *path){
+    size_t n=0;char *s=cx_read(path,&n),hash[65];if(!s)fail("PREP_INPUT",path);
+    cx_sha256_hex(s,n,hash);free(s);np_puts(b,key);np_puts(b,"\t");np_puts(b,hash);np_puts(b,"\n");
+}
+static void prep_identity(const char *dir){
+    np_buf b={0};np_puts(&b,"release-flow-prep-v1\n");np_puts(&b,cand.commit);np_puts(&b,"\n");
+    char *cmd[]={"git","rev-parse","HEAD",0};np_puts(&b,capture(cmd,cwd));
+    hash_row(&b,"release-prep",repo_tool("tools/release-prep.cx"));hash_row(&b,"product",driver);
+    for(int i=0;i<gate_count;i++)hash_row(&b,gate_inputs[i],relative(outdir,gate_inputs[i]));
+    if(opt("ratchets"))hash_row(&b,"ratchets-input",arg("ratchets"));
+    const char *names[]={"ratchets.txt","rollback.txt","evidence-rows.tsv"};
+    for(int i=0;i<3;i++)hash_row(&b,names[i],relative(dir,names[i]));
+    char *p=relative(dir,"release-flow-prepared.tsv");
+    if(prep_phase){if(cx_write(p,b.p,b.n))fail("WRITE",p);}
+    else if(strcmp(readtext(p),b.p))fail("PREP_IDENTITY",p);
 }
 static void speed(const char *strictfile,const char *root){
     char *file=relative(outdir,"speed.tsv");
@@ -397,11 +425,18 @@ static char *private_gate(const char *strictfile){
         if(cx_write(relative(gitdir,rel),bytes,strlen(bytes)))fail("GATE_INPUT",rel);free(bytes);
     }
     if(sy_copy(repo_tool("unisacc.com"),relative(gitdir,"unisacc.com"),0700))fail("GATE_PRODUCT",gitdir);
+    if(prep_phase){
+        char *dir=relative(outdir,"prep");prepare(gitdir,dir);prep_identity(dir);
+    }else{
+    if(!baseline){
+        if(!prep_dir)fail("MISSING_PREP_PHASE","run prep and supply --prep DIR");
+        char *dir=relative(prep_dir,"prep");prep_identity(dir);install_prepared(gitdir,dir);
+    }
     speed(strictfile,gitdir);
-    if(!baseline)prepare(gitdir);
     char *v[]={"sh",driver,repo_tool("tools/release-exec.cx"),"--","--execute","release/candidate.tsv","--layout",layout,"--strict",(char *)strictfile,"--out",relative(scratch,"dry"),"--dry",0};
     char *log=capture(v,gitdir);
     require_dry(log);if(cx_write(relative(scratch,"dry.log"),log,strlen(log)))fail("DRY_LOG",scratch);
+    }
     char why[512]={0};
     if(sy_unlink(relative(gitdir,".git"))||unisa_safedel(gitdir,SAFEDEL_PURGE|SAFEDEL_RECURSIVE,64000,why,sizeof why)||cx_rmtree(metadata))fail("PRIVATE_CLEANUP",why);
     return scratch;
@@ -420,18 +455,25 @@ static int flow(int argc,char **argv){
         else if(!strcmp(key,"--out")&&!out)out=v;
         else if(!strcmp(key,"--decisions")&&!decisions)decisions=v;
         else if(!strcmp(key,"--against")&&!baseline&&hexid(v,40))baseline=v;
+        else if(!strcmp(key,"--prep")&&!prep_dir&&v[0]=='/')prep_dir=v;
         else fail("ARG",key);
     }
     if(argc%2||!input||!out||out[0]!='/')fail("USAGE","stage-a|check --inputs FILE --out ABS [--decisions FILE] [--against COMMIT40]");
     read_inputs(input);const char *version=arg("version"),*date=arg("date");
     if(!safe_leaf(version)||!safe_leaf(date)||!hexid(arg("freeze"),40))fail("INPUT_IDENTITY",version);
     if(cx_fmt(ed,sizeof ed,"release/evidence/%s",version)||cx_fmt(strictrel,sizeof strictrel,"release/evidence/v%s-strict-%s.tsv",version,date))fail("PATH",version);
-    if(sy_mkdtemp("/tmp","release-flow",scratch,sizeof scratch))fail("PRIVATE_TMP","mkdtemp");
+    if((baseline&&prep_dir)||(prep_phase&&(baseline||prep_dir))||(archive_check&&(baseline||prep_dir||!decisions||!opt("pack")||!opt("warm")||!opt("notes-form"))))fail("ARG","conflicting or missing archive/prep options");
+    char session[4096];sy_stat_t ss;
+    if(sr_default("release-flow",session,sizeof session)|| (sy_mkdir(session,0700)&&
+       (sy_lstat(session,&ss)||ss.kind!='d'||ss.uid!=sy_uid()||ss.mode!=0700))||
+       sy_mkdtemp(session,"work",scratch,sizeof scratch))fail("PRIVATE_TMP","session");
+    if(cx_write(relative(scratch,"INCOMPLETE"),"release-flow\n",13))fail("PRIVATE_TMP",scratch);
     if(checking){if(sy_realpath(out,outdir,sizeof outdir)<0)fail("OUTPUT_MISSING",out);}
     else{
         sy_stat_t st;int exists=sy_lstat(out,&st);if(!exists||exists!=-ENOENT)fail("NEW_OUT",out);
         char *dir=strdup(out),*slash=strrchr(dir,'/');if(!slash||!slash[1])fail("OUT",out);
         *slash=0;if(sy_mkdtemp(*dir?dir:"/","release-flow-stage",outdir,sizeof outdir)||sy_mkdir_all(relative(outdir,ed),0700))fail("NEW_OUT",out);
+        if(cx_write(relative(outdir,"INCOMPLETE"),"release-flow\n",13))fail("WRITE",outdir);
     }
     const char *pack=opt("pack"),*packlog=opt("pack-log");
     if(!pack){
@@ -445,9 +487,18 @@ static int flow(int argc,char **argv){
     packed(pack,packlog);
     emit(strictrel,strict_bytes.p);parse_strict(strdup(strict_bytes.p),cand.sha[0]);summary();
     exceptions();notes();
+    /* Offline machine-column replay cannot publish or attest to asset execution. */
+    if(archive_check){
+        warm(arg("warm"));index_rows();
+        if(pending)fail("ARCHIVE_DECISIONS",version);
+        if(cx_rmtree(scratch))fail("PRIVATE_CLEANUP",scratch);
+        sy_printf("REPLAY_MACHINE\tversion=%s\tfiles=%d\tassets=UNMEASURED\n",version,gate_count);
+        return 0;
+    }
     char frozen_batches[128];if(cx_fmt(frozen_batches,sizeof frozen_batches,"%s:tests/batches.tsv",cand.commit))fail("FREEZE",cand.commit);
     char *registry_cmd[]={"git","show",frozen_batches,0};
-    int gaps=audit_split("tests/split-parents.tsv",baseline?capture(registry_cmd,cwd):0);
+    int gaps=audit_split("tests/split-parents.tsv",capture(registry_cmd,cwd));
+    if(gaps&&!baseline)fail("COVERAGE_GAPS",version);
     const char *warmfile=opt("warm");
     if(!warmfile){
         char *dst=relative(scratch,"warm");
@@ -462,11 +513,14 @@ static int flow(int argc,char **argv){
     if(!pending){
         if(opt("dry-log"))require_dry(readtext(arg("dry-log")));
         private_gate(relative(outdir,strictrel));
-        index_rows();
+        if(!prep_phase)index_rows();
         if(baseline)historical_inventory();
     }
-    if(!checking && sy_rename(outdir,out))fail("PUBLISH_DIRECTORY",out);
-    sy_printf("RELEASE_FLOW\t%s\tversion=%s\tpending=%d\tcoverage_gaps=%d\tgate_log=%s\n",pending?"NEEDS_REVIEW":gaps?"COVERAGE_GAPS":"READY",cand.version,pending,gaps,scratch);
+    if(gaps)fail("COVERAGE_GAPS",version);
+    if(prep_phase&&pending)fail("PREP_REVIEW_REQUIRED",version);
+    if(!checking && (sy_unlink(relative(outdir,"INCOMPLETE"))||sy_rename(outdir,out)))fail("PUBLISH_DIRECTORY",out);
+    if(cx_rmtree(scratch))fail("PRIVATE_CLEANUP",scratch);
+    sy_printf("RELEASE_FLOW\t%s\tversion=%s\tpending=%d\tcoverage_gaps=%d\n",pending?"NEEDS_REVIEW":prep_phase?"PREPARED":"READY",cand.version,pending,gaps);
     return pending||gaps?1:0;
 }
 int main(int argc,char **argv){
@@ -476,6 +530,8 @@ int main(int argc,char **argv){
         parse_strict(readtext(argv[4]),0);int gaps=audit_split(argv[3],0);
         sy_printf("COVERAGE\tgaps=%d\n",gaps);return gaps?1:0;
     }
-    if(argc<2||(strcmp(argv[1],"check")&&strcmp(argv[1],"stage-a")))fail("USAGE","stage-a|check");
-    checking=!strcmp(argv[1],"check");return flow(argc,argv);
+    if(argc<2||(strcmp(argv[1],"check")&&strcmp(argv[1],"stage-a")&&strcmp(argv[1],"prep")&&strcmp(argv[1],"replay-machine")))fail("USAGE","prep|stage-a|check|replay-machine");
+    archive_check=!strcmp(argv[1],"replay-machine");
+    prep_phase=!strcmp(argv[1],"prep");
+    checking=archive_check||!strcmp(argv[1],"check");return flow(argc,argv);
 }
