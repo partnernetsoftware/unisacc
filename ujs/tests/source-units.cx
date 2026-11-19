@@ -1,0 +1,58 @@
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int check(char **args, int expected_rc, const char *marker) {
+    char *out=0;
+    size_t length=0;
+    char *combined[12]={"sh","-c","exec \"$@\" 2>&1","sh"};
+    int i=0;
+    while(args[i] && i<7) { combined[i+4]=args[i]; i++; }
+    int rc=cx_runv_timeout(combined,10,&out,&length);
+    int ok=rc==expected_rc && out && tx_contains(out,length,marker,tx_len(marker,1024));
+    if(!ok) printf("SOURCE_UNITS rc=%d expected=%d output=%s\n",rc,expected_rc,out?out:"");
+    mm_free(out);
+    return ok;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256], math[300], product[300], duplicate[300], wasm[300], rejected[300];
+    if(sy_mkdtemp("/tmp","ujs-source-units-",dir,sizeof dir)) return 2;
+    tx_snprintf(math,sizeof math,"%s/math.ujs",dir);
+    tx_snprintf(product,sizeof product,"%s/product.ujs",dir);
+    tx_snprintf(duplicate,sizeof duplicate,"%s/duplicate.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/main.wasm",dir);
+    tx_snprintf(rejected,sizeof rejected,"%s/rejected.wasm",dir);
+    const char *first=mutate?
+        "native function twice(x:i64) i64 { return x*3; } // boundary":
+        "native function twice(x:i64) i64 { return x*2; } // boundary";
+    const char second[]="return twice(19)+4;";
+    const char repeated[]="function twice(x) { return x; }";
+    if(sy_write_file(math,first,tx_len(first,1024),0600) ||
+        sy_write_file(product,second,sizeof second-1,0600) ||
+        sy_write_file(duplicate,repeated,sizeof repeated-1,0600)) return 2;
+    char *compile[]={"./ujs/ujs2wasm.com",math,product,"-o",wasm,0};
+    char *run[]={"./ujs/ujs2wasm.com","--run",wasm,0};
+    char *dupe[]={"./ujs/ujs2wasm.com",math,duplicate,product,"-o",rejected,0};
+    char *hidden[]={"./ujs/ujs2wasm.com",product,"-o",rejected,0};
+    char *implicit[]={"./ujs/ujs2wasm.com",math,product,0};
+    sy_stat_t st;
+    int linked=check(compile,0,"\"bridge\":\"stage0-host\"") &&
+        check(run,0,"\"tag\":\"i64\",\"value\":42,");
+    int dup=check(dupe,1,"dup fn") && sy_lstat(rejected,&st)==-ENOENT;
+    int omitted=check(hidden,1,"ujs.com:") && sy_lstat(rejected,&st)==-ENOENT;
+    int explicit=check(implicit,2,"multiple sources need explicit -o");
+    sy_unlink(math);
+    sy_unlink(product);
+    sy_unlink(duplicate);
+    sy_unlink(wasm);
+    sy_unlink(rejected);
+    sy_rmdir(dir);
+    int failed=4-linked-dup-omitted-explicit;
+    printf("CHECK_UJS_SOURCE_UNITS linked=%d duplicate=%d omitted=%d explicit=%d failed=%d\n",
+        linked,dup,omitted,explicit,failed);
+    return failed!=0;
+}

@@ -4,6 +4,9 @@
  * Contract: FILE.ujs [-o OUT.wasm] -> \\0asm (default OUT = FILE.wasm).
  *           --verify FILE.wasm -> structure check (host1 验面).
  */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 uint32_t alloc(uint32_t n);
 int32_t compile(uint32_t src_ptr, uint32_t src_len);
 uint32_t out_ptr(void);
@@ -27,7 +30,8 @@ static void usage(FILE *f) {
   fprintf(f, "  ujs.com --run FILE.wasm\n");
   fprintf(f, "  ujs.com --ask-lex C PEEK\n");
   fprintf(f, "  ujs.com FILE.ujs [-o OUT.wasm]\n");
-  fprintf(f, "  ujs.com FILE.ujs --run [-o OUT.wasm]\n");
+  fprintf(f, "  ujs.com FILE.ujs [FILE.ujs ...] --run [-o OUT.wasm]\n");
+  fprintf(f, "  ujs.com FILE.ujs FILE.ujs [...] -o OUT.wasm\n");
   fprintf(f, "contract:\n");
   fprintf(f, "  compile closed UJS-1_ship subset to \\0asm (bridge=stage0-host)\n");
   fprintf(f, "  default -o: same path with .ujs replaced by .wasm\n");
@@ -272,8 +276,9 @@ static int cmd_verify_list(const char *manifest, const char *prefix) {
 }
 
 /* Copy a successful compile. Does not write a file and does not print. */
-static int compile_to_mem(const char *src_path, uint8_t **out, size_t *out_n) {
-  uint8_t *src = 0;
+static int compile_to_mem(const char **sources, int count, uint8_t **out, size_t *out_n) {
+  const size_t limit = 100000;
+  uint8_t *src;
   size_t src_n = 0;
   uint32_t ptr;
   int32_t st;
@@ -283,18 +288,40 @@ static int compile_to_mem(const char *src_path, uint8_t **out, size_t *out_n) {
 
   *out = 0;
   *out_n = 0;
-  if (!read_file(src_path, &src, &src_n)) {
-    fprintf(stderr, "ujs.com: cannot read %s\n", src_path);
+  src = mm_alloc(limit + 1);
+  if (!src) {
+    fprintf(stderr, "ujs.com: alloc failed\n");
     return 1;
   }
+  for (int i = 0; i < count; i++) {
+    uint8_t *part = 0;
+    int64_t n = 0;
+    size_t separator = i != 0;
+    if (sy_read_file(sources[i], &part, &n, limit)) {
+      fprintf(stderr, "ujs.com: cannot read %s\n", sources[i]);
+      mm_free(src);
+      return 1;
+    }
+    if (n + separator > limit - src_n ||
+        mm_copy(src + src_n + separator, limit - src_n - separator, part, n)) {
+      fprintf(stderr, "ujs.com: merged source exceeds 100000 bytes at %s\n", sources[i]);
+      mm_free(part);
+      mm_free(src);
+      return 1;
+    }
+    if (separator) src[src_n++] = '\n';
+    src_n += n;
+    mm_free(part);
+  }
+  src[src_n] = 0;
   ptr = alloc((uint32_t)src_n + 1u);
   if (!ptr) {
     fprintf(stderr, "ujs.com: alloc failed\n");
-    free(src);
+    mm_free(src);
     return 1;
   }
   ujs_host_write(ptr, src, (uint32_t)src_n + 1u);
-  free(src);
+  mm_free(src);
   st = compile(ptr, (uint32_t)src_n);
   mem = ujs_host_mem();
   if (st != 0) {
@@ -337,10 +364,10 @@ static int emit_run_json(const uint8_t *buf, size_t n) {
   return rc != 0 ? 1 : 0;
 }
 
-static int cmd_compile(const char *src_path, const char *out_path) {
+static int cmd_compile(const char **sources, int count, const char *out_path) {
   uint8_t *wasm = 0;
   size_t n = 0;
-  if (compile_to_mem(src_path, &wasm, &n) != 0) return 1;
+  if (compile_to_mem(sources, count, &wasm, &n) != 0) return 1;
   if (!write_file(out_path, wasm, n)) {
     fprintf(stderr, "ujs.com: cannot write %s\n", out_path);
     free(wasm);
@@ -353,11 +380,11 @@ static int cmd_compile(const char *src_path, const char *out_path) {
 }
 
 /* FILE.ujs --run. out_path NULL writes no file. stdout is host1 JSON only. */
-static int cmd_compile_run(const char *src_path, const char *out_path) {
+static int cmd_compile_run(const char **sources, int count, const char *out_path) {
   uint8_t *wasm = 0;
   size_t n = 0;
   int rc;
-  if (compile_to_mem(src_path, &wasm, &n) != 0) return 1;
+  if (compile_to_mem(sources, count, &wasm, &n) != 0) return 1;
   if (out_path && !write_file(out_path, wasm, n)) {
     fprintf(stderr, "ujs.com: cannot write %s\n", out_path);
     free(wasm);
@@ -443,7 +470,8 @@ static int cmd_ask_lex(const char *c, const char *peek) {
 
 
 int main(int argc, char **argv) {
-  const char *src = 0;
+  const char *sources[64];
+  int count = 0;
   const char *out_wasm = 0;
   const char *verify_path = 0;
   char def_out[4096];
@@ -529,30 +557,35 @@ int main(int argc, char **argv) {
       fprintf(stderr, "ujs.com: unknown flag %s\n", argv[i]);
       usage(stderr);
       return 2;
-    } else if (!src) {
-      src = argv[i];
     } else {
-      fprintf(stderr, "ujs.com: extra argument %s\n", argv[i]);
-      return 2;
+      if (!ends_with(argv[i], ".ujs")) {
+        fprintf(stderr, "ujs.com: input should be FILE.ujs: %s\n", argv[i]);
+        return 2;
+      }
+      if (count == 64) {
+        fprintf(stderr, "ujs.com: source file count exceeds 64\n");
+        return 2;
+      }
+      sources[count++] = argv[i];
     }
   }
 
-  if (!src) {
+  if (!count) {
     usage(stderr);
     return 2;
   }
-  if (!ends_with(src, ".ujs")) {
-    fprintf(stderr, "ujs.com: input should be FILE.ujs\n");
-    return 2;
-  }
-  if (do_run) return cmd_compile_run(src, out_wasm);
+  if (do_run) return cmd_compile_run(sources, count, out_wasm);
   if (!out_wasm) {
-    if (!default_out_path(src, def_out, sizeof def_out)) {
+    if (count != 1) {
+      fprintf(stderr, "ujs.com: multiple sources need explicit -o\n");
+      return 2;
+    }
+    if (!default_out_path(sources[0], def_out, sizeof def_out)) {
       fprintf(stderr, "ujs.com: cannot derive default -o\n");
       return 2;
     }
     out_wasm = def_out;
   }
-  return cmd_compile(src, out_wasm);
+  return cmd_compile(sources, count, out_wasm);
   }
 }
