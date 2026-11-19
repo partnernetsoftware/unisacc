@@ -91,7 +91,6 @@ sh ./unisacc.com tests/run.cx -- --smoke      # 测试入口;另有 --all、--li
 | agent 工作规则 | [AGENTS.md](AGENTS.md#unisacc-工作规则)(`CLAUDE.md` 是其软链) |
 | 当前版本计划与发布说明 | [archive/plans/v0.0.59-unisacc.md](archive/plans/v0.0.59-unisacc.md)、[plans/](plans/) |
 | 先验工作综述 | [research/prior-art.md](research/prior-art.md) |
-| UJS(平行 JS/WASM 产品,论文 B) | [ujs/README.md](ujs/README.md)、[ujs/prd.md](ujs/prd.md) |
 | 详细使用手册(中文)与已知限制:全部选项、头文件、`-c`/`-S`/对象与归档 | [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)、[七](docs/readme-detail.md#七已知限制) |
 | 冻结的历史说明(中文):决策网表、旧测试套件表、语料观测、C99 覆盖表 | [docs/readme-detail.md](docs/readme-detail.md) |
 

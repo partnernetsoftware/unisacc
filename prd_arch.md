@@ -14,7 +14,7 @@
 | 生成数据与归档参考 | `kernel/`（生成物）、`archive/reference-py/`、`archive/reference-c/` | `kernel/` 由 `tools/kernel-emit.cx` 等写出，禁止手改；Python 种子与经典 C 参考已归档，只供对照 |
 | 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
 | 开发工具与参考裁判 | `tools/`构造支持、`tests/`新原生合同、`iterate/`构造器；旧套件在`archive/testing-c43-legacy/` | 工具与测试分离；现有Python协调器的债务不因迁目录消失 |
-| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、[prd.md](prd.md)（唯一主入口；[§2当前计划](prd.md#current-plans)、[§3七流/十八网/进度](prd.md#flow-net-contracts)、§5路线、§6问题）与 `prd_spec.md`（条款全文，编号稳定）、`archive/plans/v0.0.43.md`（当前执行计划，唯一索引在 `prd.md` §2；路线/构想摘要合入 §5，旧稿归 `archive/plans/`）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
+| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 是演示页，不在本产品范围）、[prd.md](prd.md)（唯一主入口；[§2当前计划](prd.md#current-plans)、[§3七流/十八网/进度](prd.md#flow-net-contracts)、§5路线、§6问题）与 `prd_spec.md`（条款全文，编号稳定）、`archive/plans/v0.0.43.md`（当前执行计划，唯一索引在 `prd.md` §2；路线/构想摘要合入 §5，旧稿归 `archive/plans/`）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
 
 `.tapebin` 的格式见 [v1 契约](docs/tapebin-v1.md)：原种子编解码器
 （`archive/reference-py/unisa/tapebin.py`）与经典参考读器
@@ -169,6 +169,6 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 ## 5　布局上的取舍
 
-- **旧实现整体归档、相对路径不变**：Python 种子（含对照臂 `unisa/control/`）与经典 C 参考按原路径挪进 `archive/reference-py/`、`archive/reference-c/`，对照时按同一相对路径找；活路径不回调归档。**UJS 产品线**按同口径分了板块目录，见 [`ujs/ARCHITECTURE.md`](ujs/ARCHITECTURE.md)。
+- **旧实现整体归档、相对路径不变**：Python 种子（含对照臂 `unisa/control/`）与经典 C 参考按原路径挪进 `archive/reference-py/`、`archive/reference-c/`，对照时按同一相对路径找；活路径不回调归档。
 - **可复用层只放数据**：真值表与事实表都是 `.tsv`，任何语言都能读取和核对；原 Python 字面量已移入事实文件（如 `exec/facts/kernel-emit.tsv`、`exec/kernel/body.c`、`exec/kernel/gold-tuples.tsv`）。
 - **生成物提交进仓库**：`kernel/` 与 `include/cx-flat.h` 由第 3 节的工具写出并提交；`kernel/` 禁止手改（见 AGENTS.md）。

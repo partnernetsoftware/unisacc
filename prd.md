@@ -399,7 +399,7 @@ unisacc.com  6,529,460 B  sha256 1bffabba…（0.0.52）
 
 | 结构层 | 功能 | 组成（真源） | 实测字节 | 构造方式 | 测试入口 | 当前耗时 | 瓶颈与提速点 |
 |---|---|---|---|---|---|---|---|
-| **L0 loader** | 识别 OS/架构 -> 取对应片 -> 解到用户缓存 -> exec；Windows 由 PE 头直接执行 | APE 头 DOS stub 内 sh 启动器、osx cache-manager；`seed/ape.c`、`ujs/product/ape-pack.cx` | 启动器文本未单独计（未测）；头 2,760,192 B 其实是 win/x86_64 片 | 候选链 pack 相位（`release-run --pack`） | `check-install-ape`、`release-ape` smoke、`check-dev-product` | `--version` 6-7 ms（3 次）；pack 15 s（0.0.47 自报，未重测） | 头 42.2% 是未压缩的片、padding 7.1%；S1 评估 gzip 后头约 391,110 B（0.0.47 数据），未做 |
+| **L0 loader** | 识别 OS/架构 -> 取对应片 -> 解到用户缓存 -> exec；Windows 由 PE 头直接执行 | APE 头 DOS stub 内 sh 启动器、osx cache-manager；`seed/ape.c` | 启动器文本未单独计（未测）；头 2,760,192 B 其实是 win/x86_64 片 | 候选链 pack 相位（`release-run --pack`） | `check-install-ape`、`release-ape` smoke、`check-dev-product` | `--version` 6-7 ms（3 次）；pack 15 s（0.0.47 自报，未重测） | 头 42.2% 是未压缩的片、padding 7.1%；S1 评估 gzip 后头约 391,110 B（0.0.47 数据），未做 |
 | **L1 base（六片）** | 每目标一份原生机器码：执行器、包解码、sys 薄层、驱动 | 见 §3.2；源 = cx-L0 + cx-L1 + `src/` | 六片解压合计见 §3.2 | 候选链 gen1 -> g2 -> g3（85 对象 / 片） | 原生 CI 六宿主 42 格、`check-loader-isa`、`slice-freeze` | lnx 片 49-61 s/代；osx 片八子相合计 142.4 s/代；win 片 118.5 s/代（0.0.49，phase-times 55-57、95-118 行相加） | osx stub 相 39.5 s、win e3 相 35.7-38.1 s 贴 45 s 闸；三代 x 六片大多串行 |
 | **L2 program** | 平台无关的驱动与编译器模块（cxmod/route/frames/cache/cli） | `src/` 25 个 .cx、`cx/driver`、`cx/compiler`（cx-L2） | 203,081 + 100,918 + 397,580 B 源码（`git ls-files` + `stat`） | 现状：编进每一片（未单独分发；2026-11-07 决策不列主线） | 13 棘轮、`check-cx-layers`、`coreapi`、`srcshape` | 13 棘轮 27.8 s（`tools/ratchets.cx`）；9 单元工具冷编 6.7 s、热 0.8 s（com-tree.cx） | 每单元重复展开 cx.h 前导（9 次 e2 共 1.57 s）；单元前端缓存未落地 |
 | **L3 nets** | 全部表状决策与动作程序；七流按路由取模型执行 | P4 包；源 = `exec/`（1520 文件）、`weights/`、`seed/`；见 §3.3-§3.6 | 包 1,763,636 B；源 exec 6,516,118 / weights 502,143 / seed 963,731 B | 131 作业（5 tool + 42 gen + 42 tbl + 42 net）-> routes -> p3 | 42 网全键 `net-check`、`check-decide`、`check-loader-*`、`a12-cycle` | 131 作业波 276.9 s、routes 29.7 s、P4 58.8 s（0.0.49）；42 网全键并行 1.45 s / 串行 6.97 s（0.0.51） | 改一张共享 facts 波及 28-32 网；增量构造只有演练（§3.4），未接候选链 |
@@ -597,10 +597,9 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
-| `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
+| `research/` | 论文五线（A 流网换逻辑、B 实验子项目、C 管道、D cx 模块化、E 系统构表） |
 | `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、docs-2026-11/（2026-11 文档清理移入的 plans 与 research，索引 INDEX.md）、prd 历史 |
 | `apps/csih/` | csih 车道（归 csih 维护者） |
-| `ujs/` | 论文 B（归论文 B 维护者，unisacc 侧不碰） |
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
@@ -610,7 +609,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
 
 - 源 SID 规则：`seed/ident.c` 的 `list-current` 计入目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下少量支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 本身不在源 SID，`ext/memx`、`ext/textx` 经 `cx/mem`、`cx/text` 符号链接参与。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/`，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
-- 补充路径：`.github/`（CI 工作流 candidate-native、ci、candidate-raw-export、admission-capsule、defender-scan、macos-sign、windows-signing，集成者所有）；`scripts/`（信任包 / Authenticode 检查脚本）；`adapter/ujswasm`（少量被产品引用）；`skills/unisacc-cx`（技能）；`iterate/`（早期构造器，仅 typekw.tsv 进源 SID，移动会改产品面）；根文件 `cxroot.tsv`（cx 根登记）、`Makefile`（薄入口）、`ape-receipt.txt`（APE 回执）。
+- 补充路径：`.github/`（CI 工作流 candidate-native、ci、candidate-raw-export、admission-capsule、defender-scan、macos-sign、windows-signing，集成者所有）；`scripts/`（信任包 / Authenticode 检查脚本）；`skills/unisacc-cx`（技能）；`iterate/`（早期构造器，仅 typekw.tsv 进源 SID，移动会改产品面）；根文件 `cxroot.tsv`（cx 根登记）、`Makefile`（薄入口）、`ape-receipt.txt`（APE 回执）。
 - 被 git 忽略的本地残留：`out/`（产物、日志、候选；交接单写 `out/<窗口>-handoff-*.md`，不入库）、`unisacc.com`（已装产品）、`unisacc-dev`（安装回滚脚本）、`*.split-prev`、`tmp/`、`node_modules/`。
 
 | 想做 | 去 |
