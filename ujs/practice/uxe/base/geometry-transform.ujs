@@ -1,0 +1,110 @@
+// The geometry layer handles f32/f64 views shared by generated meshes.
+// mode 0 is position, 1 is normal, 2 is tangent with unchanged handedness.
+native function geometry_transform_view(view:i64,matrix:i64,mode:i64) i64 {
+  let kind=ux_u32(view+BufferAttribute.componentType);
+  let width=4;
+  if(kind==10) { width=8; }
+  let base=ux_u32(view+BufferAttribute.data);
+  let stride=ux_u32(view+BufferAttribute.stride);
+  let count=ux_u32(view+BufferAttribute.count);
+  if((kind!=9 && kind!=10) || ux_u32(view+BufferAttribute.itemSize)<3 || stride<3*width ||
+     base>6291456 || stride%width!=0 || base%width!=0 ||
+     count>(6291456-base)/stride) { return 0-1; }
+  let step=32;
+  if(mode==1) { step=24; }
+  let i=0;
+  while(i<count) {
+    let at=base+i*stride;
+    let x=BufferGeometry_coordinate(at,kind);
+    let y=BufferGeometry_coordinate(at+width,kind);
+    let z=BufferGeometry_coordinate(at+2*width,kind);
+    let ox=ux_f64(matrix)*x+ux_f64(matrix+step)*y+ux_f64(matrix+2*step)*z;
+    let oy=ux_f64(matrix+8)*x+ux_f64(matrix+step+8)*y+ux_f64(matrix+2*step+8)*z;
+    let oz=ux_f64(matrix+16)*x+ux_f64(matrix+step+16)*y+ux_f64(matrix+2*step+16)*z;
+    if(mode==0) {
+      let w=ux_f64(matrix+24)*x+ux_f64(matrix+56)*y+ux_f64(matrix+88)*z+ux_f64(matrix+120);
+      ox=(ox+ux_f64(matrix+96))/w;
+      oy=(oy+ux_f64(matrix+104))/w;
+      oz=(oz+ux_f64(matrix+112))/w;
+    } else {
+      let norm=f64_sqrt(ox*ox+oy*oy+oz*oz);
+      if(norm!=0.0) { ox=ox/norm; oy=oy/norm; oz=oz/norm; }
+    }
+    if(kind==9) {
+      let px=ux_f32_put(at,ox);
+      let py=ux_f32_put(at+width,oy);
+      let pz=ux_f32_put(at+2*width,oz);
+    } else {
+      let px=ux_f64_put(at,ox);
+      let py=ux_f64_put(at+width,oy);
+      let pz=ux_f64_put(at+2*width,oz);
+    }
+    i=i+1;
+  }
+  let version_at=view+BufferAttribute.version;
+  let version=ux_u32_put(version_at,ux_u32(version_at)+1);
+  return view;
+}
+
+// Module consumers assign these three conventional vertex attribute semantics.
+// The normal matrix uses caller-provided 72-byte scratch memory.
+native function BufferGeometry_applyMatrix4(mesh:i64,matrix:i64,normal_matrix:i64,
+                                          position_key:i64,normal_key:i64,tangent_key:i64) i64 {
+  if(matrix<0 || matrix>6291456-128 || matrix%8!=0 ||
+     normal_matrix<0 || normal_matrix>6291456-72 || normal_matrix%8!=0 ||
+     (matrix<normal_matrix+72 && normal_matrix<matrix+128)) { return 0-1; }
+  let position=BufferGeometry_getAttribute(mesh,position_key);
+  let normal=BufferGeometry_getAttribute(mesh,normal_key);
+  let tangent=BufferGeometry_getAttribute(mesh,tangent_key);
+  if(position>=0 && geometry_transform_view(position,matrix,0)<0) { return 0-1; }
+  if(normal>=0) {
+    let normal_transform=Matrix3_getNormalMatrix(normal_matrix,matrix);
+    if(geometry_transform_view(normal,normal_transform,1)<0) { return 0-1; }
+  }
+  if(tangent>=0 && geometry_transform_view(tangent,matrix,2)<0) { return 0-1; }
+  let box=ux_u32(mesh+BufferGeometry.boundingBox)-1;
+  let sphere=ux_u32(mesh+BufferGeometry.boundingSphere)-1;
+  if(position>=0 && (box>=0 || sphere>=0)) {
+    return BufferGeometry_bounds(mesh,position_key,box,sphere);
+  }
+  return mesh;
+}
+
+// Work is 200 bytes with Matrix4 at the start and Matrix3 at byte 128.
+function BufferGeometry_translate(mesh_translate,...translate_args) {
+  let work=f64_floor_i64(translate_args[3]);
+  let transform=Matrix4_makeTranslation(work,translate_args[0],translate_args[1],translate_args[2]);
+  return BufferGeometry_applyMatrix4(mesh_translate,transform,work+128,
+    f64_floor_i64(translate_args[4]),f64_floor_i64(translate_args[5]),f64_floor_i64(translate_args[6]));
+}
+
+function BufferGeometry_scale(mesh_scale,...scale_args) {
+  let work=f64_floor_i64(scale_args[3]);
+  let transform=Matrix4_makeScale(work,scale_args[0],scale_args[1],scale_args[2]);
+  return BufferGeometry_applyMatrix4(mesh_scale,transform,work+128,
+    f64_floor_i64(scale_args[4]),f64_floor_i64(scale_args[5]),f64_floor_i64(scale_args[6]));
+}
+
+native function geometry_rotate_axis(mesh:i64,angle:f64,axis:i64,work:i64,
+                                         position:i64,normal:i64,tangent:i64) i64 {
+  let transformation=0;
+  if(axis==0) { transformation=Matrix4_makeRotationX(work,angle); }
+  if(axis==1) { transformation=Matrix4_makeRotationY(work,angle); }
+  if(axis==2) { transformation=Matrix4_makeRotationZ(work,angle); }
+  return BufferGeometry_applyMatrix4(mesh,transformation,work+128,position,normal,tangent);
+}
+
+function BufferGeometry_rotateX(mesh_x,...x_args) {
+  return geometry_rotate_axis(mesh_x,x_args[0],0,f64_floor_i64(x_args[1]),
+    f64_floor_i64(x_args[2]),f64_floor_i64(x_args[3]),f64_floor_i64(x_args[4]));
+}
+
+function BufferGeometry_rotateY(mesh_y,...y_args) {
+  return geometry_rotate_axis(mesh_y,y_args[0],1,f64_floor_i64(y_args[1]),
+    f64_floor_i64(y_args[2]),f64_floor_i64(y_args[3]),f64_floor_i64(y_args[4]));
+}
+
+function BufferGeometry_rotateZ(mesh_z,...z_args) {
+  return geometry_rotate_axis(mesh_z,z_args[0],2,f64_floor_i64(z_args[1]),
+    f64_floor_i64(z_args[2]),f64_floor_i64(z_args[3]),f64_floor_i64(z_args[4]));
+}
