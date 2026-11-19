@@ -37,10 +37,79 @@ int main(int argc, char **argv) {
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
     int hang_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--hang"));
+    int pass_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--pass-gates"));
 
     if (!getcwd(cwd, sizeof cwd)) cgac_abort("getcwd");
     if (cx_fmt(work, sizeof work, "%s/check-gen-all-%d", base_td, (int)getpid())) cgac_abort("work");
     cgac_mk(work);
+
+    if (pass_mode) {
+        char rep[CGAC_PW];
+        int rc;
+        if (cx_fmt(rep, sizeof rep, "%s/pass-repo", work)) cgac_abort("prep");
+        cgac_mk(rep);
+        if (cx_fmt(cmd, sizeof cmd,
+            "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate tools cxroot.tsv | tar -x -C '%s' && "
+            "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' && "
+            "printf '# derive v1\\n' > '%s/exec/facts/derive.tsv' && "
+            "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+            "cd '%s' && git init -q && git config user.email test@local && git config user.name test && "
+            "git add -A && git commit -q -m init",
+            cwd, rep, cwd, cwd, rep, rep, rep, cwd, rep, rep)) cgac_abort("pprep");
+        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("pprep-run");
+
+        /* P1 (Scene 4): staging include/stdlib.h + all recomputed downstream tables -> precommit PASS (rc=0, blocked=0) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "unset UNISA_CONTAINER && cd '%s' && printf '\\n/* cgac-recomputed-ok */\\n' >> include/stdlib.h && "
+            "sh ./unisacc.com tools/facts-gen.cx -- --write . >/dev/null && "
+            "sh ./unisacc.com tools/cx-flatten.cx -- --write . >/dev/null && "
+            "sh ./unisacc.com tools/libc-decl-scan.cx -- --write >/dev/null && "
+            "git add include/stdlib.h include/cx-flat.h exec/facts/ build/libc-decls.tsv && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("p1");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"),
+           "precommit-recomputed-and-staged-passes: staging include/stdlib.h + recomputed tables passes with unisacc.com linked");
+
+        /* P2: unstaged cx/ edit by another session does NOT block staging comments in tools/axis-gen.cx + tools/arity-gen.cx */
+        if (cx_fmt(cmd, sizeof cmd,
+            "unset UNISA_CONTAINER && cd '%s' && git reset --hard -q HEAD && "
+            "printf '\\n/* other-session-unstaged */\\n' >> cx/check_memory.cx && "
+            "printf '\\n/* harmless-gen-comment */\\n' >> tools/axis-gen.cx && "
+            "printf '\\n/* arity-harmless-comment */\\n' >> tools/arity-gen.cx && "
+            "git add tools/axis-gen.cx tools/arity-gen.cx && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("p2");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"),
+           "precommit-unstaged-other-cx-not-blocked: unstaged cx/ edit does not block staging axis-gen+arity-gen comments");
+
+        /* P3: chain-ready 15-gen-all PASS on current tree and --judge genall FAIL on DIFF */
+        {
+            char df[CGAC_PW];
+            int rc_ok, rc_bad;
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 15-gen-all", cwd, cwd))
+                cgac_abort("p3a");
+            rc_ok = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+            int ok_pass = (rc_ok == 0 && ckk_has(out, CGAC_OUT, "15-gen-all\tPASS\t") && ckk_has(out, CGAC_OUT, "READY\tyes\t"));
+            if (cx_fmt(df, sizeof df, "%s/fake-diff.tsv", work)) cgac_abort("pdf");
+            {
+                const char *bad = "GEN_CHECK\tfacts-gen\tDIFF\t120\tDIFF k2-gen2; fix: sh ./unisacc.com tools/facts-gen.cx -- --write .\n"
+                                  "GEN_ALL_SUMMARY\ttotal=1\tpass=0\tdiff=1\terror=0\tuncovered=0\tms=120\n";
+                if (cx_write(df, bad, strlen(bad))) cgac_abort("pwdf");
+            }
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --judge genall '%s' 1", cwd, cwd, df))
+                cgac_abort("p3b");
+            rc_bad = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+            int ok_fail = (rc_bad == 0 && ckk_has(out, CGAC_OUT, "FAIL\t") && ckk_has(out, CGAC_OUT, "k2-gen2"));
+            ck(ok_pass && ok_fail, "chain-ready-15-gen-all: live 15-gen-all PASS and --judge genall refuses DIFF");
+        }
+
+        {
+            char *rmv[] = {"rm", "-rf", work, 0};
+            (void)ck_run(rmv, out, sizeof out);
+        }
+        printf("CHECK_GEN_ALL_PASS\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+        return ck_failures() ? 1 : 0;
+    }
 
     if (hang_mode) {
         char rep[CGAC_PW], gpath[CGAC_PW], hsrc[1024], tag[64], pout[256];
@@ -49,16 +118,38 @@ int main(int argc, char **argv) {
         if (cx_fmt(rep, sizeof rep, "%s/hang-repo", work)) cgac_abort("hrep");
         cgac_mk(rep);
         if (cx_fmt(cmd, sizeof cmd,
-            "git -C '%s' archive HEAD | tar -x -C '%s' && "
-            "cp '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' && "
+            "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate tools cxroot.tsv tests/batches.tsv tests/batch-domains.tsv tests/batch-domain-rules.tsv tests/batch-domain-index.tsv | tar -x -C '%s' && "
+            "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' && "
             "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
             "cd '%s' && git init -q && git config user.email test@local && git config user.name test && "
-            "git add -A && git commit -q -m init && "
-            "printf '# hang-test\\n' >> exec/facts/clock-targets.tsv && git add exec/facts/clock-targets.tsv",
-            cwd, rep, cwd, rep, rep, cwd, rep, rep)) cgac_abort("hprep");
+            "git add -A && git commit -q -m init",
+            cwd, rep, cwd, cwd, rep, rep, cwd, rep, rep)) cgac_abort("hprep");
         if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("hprep-run");
+
+        /* H1: single generator ERROR (not DIFF) -> prints GEN_ALL_GATE_UNAVAILABLE and allows commit (rc=0) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf '# err-test\\n' >> exec/facts/clock-targets.tsv && "
+            "git add exec/facts/clock-targets.tsv", rep)) cgac_abort("h3prep");
+        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("h3prep-run");
+        if (cx_fmt(gpath, sizeof gpath, "%s/tools/gen-all-check.cx", rep)) cgac_abort("h3gp");
+        {
+            const char *esrc =
+                "int main(void) {\n"
+                "  printf(\"GEN_CHECK\\tfake-gen\\tERROR\\t10\\trc=2 broken\\n\");\n"
+                "  printf(\"GEN_ALL_SUMMARY\\ttotal=1\\tpass=0\\tdiff=0\\terror=1\\tuncovered=0\\tms=10\\n\");\n"
+                "  return 2;\n"
+                "}\n";
+            if (cx_write(gpath, esrc, strlen(esrc))) cgac_abort("h3w");
+        }
+        if (cx_fmt(cmd, sizeof cmd,
+            "unset UNISA_CONTAINER && cd '%s' && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep))
+            cgac_abort("h3run");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_GATE_UNAVAILABLE") && ckk_has(out, CGAC_OUT, "blocked=0"),
+           "precommit-single-error-allows: generator ERROR without DIFF logs GEN_ALL_GATE_UNAVAILABLE and allows commit");
+
+        /* H4: hanging gen-all-check double times out <40s, logs GEN_ALL_GATE_UNAVAILABLE, allows commit, zero orphans */
         if (cx_fmt(tag, sizeof tag, "cgac_hang_probe_%d", (int)getpid())) cgac_abort("htag");
-        if (cx_fmt(gpath, sizeof gpath, "%s/tools/gen-all-check.cx", rep)) cgac_abort("hgp");
         if (cx_fmt(hsrc, sizeof hsrc,
             "#pragma unisa use sys.proc\n"
             "int main(void) {\n"
@@ -86,55 +177,42 @@ int main(int argc, char **argv) {
         return ck_failures() ? 1 : 0;
     }
 
-    /* 1. Current tree: all discovered product-table generators PASS */
+    /* 1a. Current tree: all 42 discovered product-table generators PASS (restored full-tree assertion) */
     {
         int rc;
         if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --jobs 12", cwd, cwd, cwd))
-            cgac_abort("c1");
+            cgac_abort("c1a");
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\t") &&
-           ckk_has(out, CGAC_OUT, "\tdiff=0\terror=0\t") &&
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\ttotal=42\tpass=42\tdiff=0\terror=0\t") &&
            ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tPASS\t") &&
            ckk_has(out, CGAC_OUT, "GEN_CHECK\twin-argv-gen\tPASS\t") &&
            ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tPASS\t") &&
            ckk_has(out, CGAC_OUT, "expires=0.0.85"),
-           "current-tree-all-same: --root . passes all product-table generators with dated uncovered entries");
+           "current-tree-all-same: --root . passes all 42 product-table generators (diff=0 error=0)");
     }
 
-    /* 2. Synthetic header edit without recompute: facts-gen and cx-flatten both report DIFF + --write fix */
+    /* 1b. --list discovers 42 generators with dated uncovered entries (additional assertion, not replacement) */
     {
-        char syn[CGAC_PW];
-        int rc_fg, rc_cf;
-        if (cx_fmt(syn, sizeof syn, "%s/syn", work)) cgac_abort("syn");
-        cgac_mk(syn);
-        if (cx_fmt(cmd, sizeof cmd,
-            "git -C '%s' archive HEAD | tar -x -C '%s' && printf '\\n/* cgac-synthetic-drift */\\n' >> '%s/include/stdlib.h'",
-            cwd, syn, syn)) cgac_abort("c2prep");
-        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("c2prep-run");
-
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --only facts-gen", cwd, cwd, syn))
-            cgac_abort("c2a");
-        rc_fg = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_fg = (rc_fg == 1 && ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tDIFF\t") &&
-                     ckk_has(out, CGAC_OUT, "k2-gen2") &&
-                     ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/facts-gen.cx -- --write ."));
-
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --only cx-flatten", cwd, cwd, syn))
-            cgac_abort("c2b");
-        rc_cf = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_cf = (rc_cf == 1 && ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tDIFF\t") &&
-                     ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/cx-flatten.cx -- --write ."));
-
-        ck(ok_fg && ok_cf, "synthetic-header-drift-refused: editing include/stdlib.h refused by facts-gen and cx-flatten with --write fix");
+        int rc;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --list", cwd, cwd, cwd))
+            cgac_abort("c1b");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_LIST_SUMMARY\ttotal=42\tuncovered=2") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\tfacts-gen\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\twin-argv-gen\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\tcx-flatten\t") &&
+           ckk_has(out, CGAC_OUT, "expires=0.0.85"),
+           "current-tree-list-42: --list discovers 42 generators with dated uncovered entries");
     }
 
-    /* 3. Real history replay: 0.0.82 d20a8f64af (win-argv-gen stale stamp) */
+    /* 2-4. History replays (0.0.82 d20a8f64af and 0.0.83 8d79aea9b9); synthetic header drift runs on shared rep below */
     {
         char h82[CGAC_PW];
         int rc;
         if (cx_fmt(h82, sizeof h82, "%s/hist-d20", work)) cgac_abort("h82");
         cgac_mk(h82);
-        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' archive d20a8f64af | tar -x -C '%s'", cwd, h82)) cgac_abort("c3prep");
+        if (cx_fmt(cmd, sizeof cmd,
+            "git -C '%s' archive d20a8f64af -- exec/facts cx tools/win-argv-gen.cx cxroot.tsv | tar -x -C '%s'", cwd, h82)) cgac_abort("c3prep");
         if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("c3prep-run");
         if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --only win-argv-gen", cwd, cwd, h82))
             cgac_abort("c3");
@@ -151,7 +229,9 @@ int main(int argc, char **argv) {
         int rc;
         if (cx_fmt(h83, sizeof h83, "%s/hist-8d7", work)) cgac_abort("h83");
         cgac_mk(h83);
-        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' archive 8d79aea9b9 | tar -x -C '%s'", cwd, h83)) cgac_abort("c4prep");
+        if (cx_fmt(cmd, sizeof cmd,
+            "git -C '%s' archive 8d79aea9b9 | tar -x -C '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com'",
+            cwd, h83, cwd, h83)) cgac_abort("c4prep");
         if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("c4prep-run");
         if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --only facts-gen", cwd, cwd, h83))
             cgac_abort("c4");
@@ -186,51 +266,36 @@ int main(int argc, char **argv) {
            "bg-and-poll-roundtrip: --bg starts and --poll retrieves completed summary");
     }
 
-    /* 6. chain-ready 15-gen-all PASS on current tree and --judge genall FAIL on DIFF */
-    {
-        char df[CGAC_PW];
-        int rc_ok, rc_bad;
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 15-gen-all", cwd, cwd))
-            cgac_abort("c6a");
-        rc_ok = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_pass = (rc_ok == 0 && ckk_has(out, CGAC_OUT, "15-gen-all\tPASS\t") && ckk_has(out, CGAC_OUT, "READY\tyes\t"));
-
-        if (cx_fmt(df, sizeof df, "%s/fake-diff.tsv", work)) cgac_abort("df");
-        {
-            const char *bad = "GEN_CHECK\tfacts-gen\tDIFF\t120\tDIFF k2-gen2; fix: sh ./unisacc.com tools/facts-gen.cx -- --write .\n"
-                              "GEN_ALL_SUMMARY\ttotal=1\tpass=0\tdiff=1\terror=0\tuncovered=0\tms=120\n";
-            if (cx_write(df, bad, strlen(bad))) cgac_abort("wdf");
-        }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --judge genall '%s' 1", cwd, cwd, df))
-            cgac_abort("c6b");
-        rc_bad = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_fail = (rc_bad == 0 && ckk_has(out, CGAC_OUT, "FAIL\t") && ckk_has(out, CGAC_OUT, "k2-gen2"));
-        ck(ok_pass && ok_fail, "chain-ready-15-gen-all: live 15-gen-all PASS and --judge genall refuses DIFF");
-    }
-
-    /* 7-10. Shared private git repo for precommit derive_gate contracts */
+    /* 7-9. Shared private git repo for precommit derive_gate blocking contracts (chain-ready 15-gen-all runs in --pass-gates) */
     {
         char rep[CGAC_PW];
         int rc;
         if (cx_fmt(rep, sizeof rep, "%s/precommit-repo", work)) cgac_abort("rep");
         cgac_mk(rep);
         if (cx_fmt(cmd, sizeof cmd,
-            "git -C '%s' archive HEAD | tar -x -C '%s' && "
+            "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate tools cxroot.tsv | tar -x -C '%s' && "
             "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && "
             "rm -f '%s/tools/ratchets.cx' && "
+            "printf '# derive v1\\n' > '%s/exec/facts/derive.tsv' && "
             "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
             "cd '%s' && git init -q && git config user.email test@local && git config user.name test && "
             "git add -A && git commit -q -m init",
-            cwd, rep, cwd, cwd, rep, rep, cwd, rep, rep)) cgac_abort("c7prep");
+            cwd, rep, cwd, cwd, rep, rep, rep, cwd, rep, rep)) cgac_abort("c7prep");
         if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("c7prep-run");
 
-        /* 7. Staging include/stdlib.h without recompute -> BLOCKED product-table-drift */
+        /* 2 & 7. Staging include/stdlib.h without recompute -> precommit blocks with real facts-gen + cx-flatten DIFF (no unisacc.com false DIFF) */
         if (cx_fmt(cmd, sizeof cmd,
             "unset UNISA_CONTAINER && cd '%s' && printf '\\n/* cgac-precommit-drift */\\n' >> include/stdlib.h && "
-            "git add include/stdlib.h && sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("c7");
+            "git add include/stdlib.h && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("c7");
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        ck(rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") && ckk_has(out, CGAC_OUT, "facts-gen"),
-           "precommit-derive-gate-blocks-drift: staging include/stdlib.h without recompute blocked by derive_gate");
+        ck(rc != 0 && ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tDIFF\t") &&
+           ckk_has(out, CGAC_OUT, "k2-gen2") &&
+           ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/facts-gen.cx -- --write .") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tDIFF\t") &&
+           ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/cx-flatten.cx -- --write ."),
+           "synthetic-header-drift-refused: editing include/stdlib.h refused by facts-gen and cx-flatten with --write fix");
+        ck(rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") && !ckk_has(out, CGAC_OUT, "cannot open"),
+           "precommit-derive-gate-blocks-drift: staging include/stdlib.h without recompute blocked by real DIFF without unisacc.com false DIFF");
 
         /* 9. Recompute in worktree without staging -> index tree still drifts -> BLOCKED product-table-drift */
         if (cx_fmt(cmd, sizeof cmd,
@@ -242,19 +307,6 @@ int main(int argc, char **argv) {
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
         ck(rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift"),
            "precommit-recomputed-unstaged-blocked: worktree recompute not staged still caught on index snapshot");
-
-        /* Reset repo cleanly before 8 and 10 */
-        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset --hard -q HEAD", rep)) cgac_abort("c8reset");
-        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("c8reset-run");
-
-        /* 8. Unstaged edit in cx/check_memory.cx by another session must NOT block staging a comment in tools/axis-gen.cx */
-        if (cx_fmt(cmd, sizeof cmd,
-            "unset UNISA_CONTAINER && cd '%s' && printf '\\n/* other-session-unstaged */\\n' >> cx/check_memory.cx && "
-            "printf '\\n/* harmless-gen-comment */\\n' >> tools/axis-gen.cx && git add tools/axis-gen.cx && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("c8");
-        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        ck(rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"),
-           "precommit-unstaged-other-cx-not-blocked: unstaged edit in cx/ does not block staging -gen.cx comment");
     }
 
     {
