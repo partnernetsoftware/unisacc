@@ -361,7 +361,9 @@ static int tool_check(void) {
         char cv[4500],decl[4500],idx[4500],c0[65],d0[65],i0[65];
         pjoin(cv,sizeof cv,hold,"tests/coverage.tsv");pjoin(decl,sizeof decl,hold,"tests/batch-product-inputs.tsv");
         pjoin(idx,sizeof idx,hold,".git/index");
-        put_file(hold,"tests/coverage.tsv","coverage\tuntouched\n");
+        pjoin(a,sizeof a,root,"tools/cxlib");pjoin(b,sizeof b,hold,"tools/cxlib");if(symlink(a,b))die("fixture library",b);
+        pjoin(a,sizeof a,root,"tools/batch-packages-gen.cx");pjoin(b,sizeof b,hold,"tools/batch-packages-gen.cx");if(copy_file(a,b))die("fixture query",b);
+        put_file(hold,"tests/coverage.tsv","coverage\tuntouched\ntools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture oracle\ttests/tools-compile.cx\n");
         put_file(hold,"tests/batch-product-inputs.tsv","id\tkeep\ttools/fx.cx\tfixture\n");
         sha_of(cv,c0);sha_of(decl,d0);sha_of(idx,i0);
         size_t n;char *saved=cx_read(bp,&n);if(!saved)die("read",bp);
@@ -370,7 +372,7 @@ static int tool_check(void) {
         rc=run_in(hold,dry,out,sizeof out);
         if(rc)fprintf(stderr,"sync dry rc=%d %s\n",rc,out);
         ok(rc==0 && strstr(out,"shard_rows_added=1"),"sync dry reports the missing registered shard");
-        ok(strstr(out,"REGISTER_SYNC_TABLE\ttests/coverage.tsv\tnot_checked\n") &&
+        ok(strstr(out,"REGISTER_SYNC_TABLE\ttests/coverage.tsv\tchanged_keys=0\n") &&
            strstr(out,"REGISTER_SYNC_TABLE\ttests/batch-product-inputs.tsv\tnot_checked\n"),
            "sync dry identifies tables without a proposed delta");
         sha_of(bp,h);ok(!strcmp(h,hb),"sync dry leaves shard rows byte-identical");
@@ -378,6 +380,7 @@ static int tool_check(void) {
         sha_of(cv,h);ok(!strcmp(h,c0),"sync dry leaves coverage byte-identical");
         sha_of(decl,h);ok(!strcmp(h,d0),"sync dry leaves product declarations byte-identical");
         sha_of(idx,h);ok(!strcmp(h,i0),"sync dry leaves git index byte-identical");
+        pjoin(a,sizeof a,hold,"tests/manifests");sy_stat_t mst;ok(sy_lstat(a,&mst)==-ENOENT,"sync dry leaves missing manifest directory absent");
         put_file(hold,"tests/batches.tsv","x-before\tx\n" TC_ROW("000","0") TC_ROW("01","1") "x-after\tx\nx-last\tx\n");
         rc=run_in(hold,dry,out,sizeof out);
         ok(rc==2 && strstr(out,"REFUSE batch contract or duplicate"),"sync dry refuses a malformed in-range shard id");
@@ -505,6 +508,7 @@ static void sync_fixture_root(char *dir,size_t cap,int slow){
     char *gi[]={"git","init","-q",0},*ga[]={"git","add","-Af","--",".",0};
     char *gc[]={"git","-c","user.name=register-fixture","-c","user.email=fixture@localhost","-c","commit.gpgsign=false","commit","-qm","sync fixture",0};
     sync_fixture_command(dir,gi);sync_fixture_command(dir,ga);sync_fixture_command(dir,gc);
+    pjoin(p,sizeof p,dir,"tools/batch-packages-gen.cx");if(sy_copy("tools/batch-packages-gen.cx",p,0644))die("fixture query",p);
     pjoin(q,sizeof q,dir,"unisacc.com");if(!realpath("unisacc.com",ape)||sy_copy(ape,q,0755))die("fixture ape",q);
 }
 static char *dir,*bin,err[16384],p[4400],*original[4];static size_t lens[4];
@@ -524,10 +528,32 @@ static int call(int recover){char *v[]={bin,"--tool","--sync",recover?"--recover
     int rc=r.rc;cx_fmt(err,sizeof err,"%s%s",r.out?r.out:"",r.err?r.err:"");printf("%s",err);pr_free(&r);return rc;}
 static int sync_prepare(const char *mode){
     char private_root[4400];sync_fixture_root(private_root,sizeof private_root,!strcmp(mode,"cold"));
+    if(!strcmp(mode,"manifest") || !strcmp(mode,"manifest-fault") || !strcmp(mode,"manifest-peer") || !strcmp(mode,"manifest-conflict")){
+        char path[4600], m[2048];
+        pjoin(path,sizeof path,private_root,"tests/manifests");
+        if(sy_mkdir(path,0700))die("fixture manifests",path);
+        pjoin(path,sizeof path,private_root,"tests/batches.tsv");
+        if(sy_append_file(path,TC_ROW("009","9"),strlen(TC_ROW("009","9")),0644))die("fixture authority",path);
+        const char *cov="tools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture oracle\ttests/tools-compile.cx\n";
+        if(cx_fmt(m,sizeof m,"batch\t%scoverage\t%spackages\tbatch\ttools-compile-009\tall\t-\t-\t-\t-\t-\t-\n",TC_ROW("009","9"),cov))die("fixture bound",path);
+        put_file(private_root,"tests/manifests/tools-compile-009.tsv",m);
+        pjoin(path,sizeof path,private_root,"tests/manifests/tools-compile-009.tsv");if(sy_chmod(path,0640))die("fixture donor mode",path);
+        put_file(private_root,"tests/coverage.tsv",!strcmp(mode,"manifest-conflict")?
+            "id\tlayer\timplementation\texpected_or_gap\tsource\ntools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tother oracle\ttests/tools-compile.cx\n":
+            "id\tlayer\timplementation\texpected_or_gap\tsource\n");
+        if(!strcmp(mode,"manifest-peer")){
+            const char *peer="peer-fixture\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t-\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            pjoin(path,sizeof path,private_root,"tests/batches.tsv");
+            if(sy_append_file(path,peer,strlen(peer),0644)||cx_fmt(m,sizeof m,"batch\t%spackages\tbatch\tpeer-fixture\tall\t-\t-\t-\t-\t-\t-\ncoverage\ttools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tpeer oracle\ttests/tools-compile.cx\n",peer))die("peer fixture",path);
+            put_file(private_root,"tests/manifests/peer-fixture.tsv",m);
+        }
+    }
     /* Prepare only the inventory tool in the outer fixture. The measured batch still runs
        under two disabled caches inside a different, newly archived private repository. */
     char *prepare[]={"sh","./unisacc.com","tests/tools-compile.cx","--","--register",".","inventory.fixture.tsv",0};
-    sync_fixture_command(private_root,prepare);put_file(private_root,"sync.fixture.mode",mode);
+    sync_fixture_command(private_root,prepare);
+    char *packages[]={prepare[0],prepare[1],"tools/batch-packages-gen.cx","--","--query",0};
+    sync_fixture_command(private_root,packages);put_file(private_root,"sync.fixture.mode",mode);
     printf("SYNC_FIXTURE_PREPARED\t%s\n",private_root);return 0;
 }
 static int sync_write_check(char **av){
@@ -539,7 +565,19 @@ static int sync_write_check(char **av){
     struct stat original_stat[4];for(int i=0;i<4;i++){path(i);original[i]=cx_read(p,&lens[i]);if(!original[i]||lstat(p,&original_stat[i]))return 2;}
     double initial_load=tool_load1();printf("REGISTER_CHECK_LOAD start=%.2f\n",initial_load);
     if(initial_load>4){puts("CX_REGISTER_SYNC UNKNOWN load-before");return 3;}
-    if(!strcmp(av[3],"write")){
+    if(!strcmp(av[3],"manifest") || !strcmp(av[3],"manifest-peer") || !strcmp(av[3],"manifest-conflict")){
+        int conflict=strcmp(av[3],"manifest")!=0,rc=call(0);
+        if(conflict){
+            ok(rc==2 && sync_line("register: coverage-key-conflict:"),"conflicting coverage sources refused by key");
+            for(int i=0;i<4;i++){size_t n;path(i);char *b=cx_read(p,&n);ok(b&&n==lens[i]&&!memcmp(b,original[i],n),"conflict leaves table unchanged");free(b);}
+        }else{
+            ok(rc==0 && sync_line("REGISTER_SYNC\tstatus=PUBLISHED"),"coverage and manifest published");
+            path(2);ok(count_lines(p,"tools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture oracle\t")==1,"coverage restored from authority");
+            pjoin(p,sizeof p,dir,"tests/manifests/tools-compile-000.tsv");
+            ok(registry_has(p,"batch\t" TC_ROW("000","0")) && registry_has(p,"packages\tbatch\ttools-compile-000\tall\t-\t-\t-\t-\t-\t-\n"),"new manifest contains batch and official package row");
+            ok(registry_has(p,"coverage\ttools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture oracle\ttests/tools-compile.cx\n"),"new manifest uses exact restored coverage");
+        }
+    }else if(!strcmp(av[3],"write")){
         int rc=call(0);double end_load=tool_load1();printf("REGISTER_CHECK_LOAD end=%.2f\n",end_load);
         if(rc==2 && end_load>4 && sync_line("REFUSE OVER_33000MS")){puts("CX_REGISTER_SYNC UNKNOWN load-at-cold-refusal");return 3;}
         ok(rc==0 && sync_line("REGISTER_SYNC\tstatus=PUBLISHED"),"write publishes");
@@ -551,24 +589,37 @@ static int sync_write_check(char **av){
         ok(rc==2 && sample && sscanf(sample,"REGISTER_COLD\tid=tools-compile-000\twall_ms=%ld\trun_ms=%ld\trc=%d",&wall,&run_ms,&batch_rc)==3 &&
            wall>33000 && run_ms>0 && batch_rc==0 && sync_line("REFUSE OVER_33000MS"),"completed real slow batch refused on measured wall time");
         for(int i=0;i<4;i++){size_t n;path(i);char *b=cx_read(p,&n);ok(b&&n==lens[i]&&!memcmp(b,original[i],n),leaf[i]);free(b);}
-    }else if(!strcmp(av[3],"fault")||!strcmp(av[3],"fault1")||!strcmp(av[3],"fault3")||!strcmp(av[3],"fault4")){
-        const char *point=av[3][5]?av[3]+5:"2";int third=*point=='3';
+    }else if(!strcmp(av[3],"manifest-fault")||!strcmp(av[3],"fault")||!strcmp(av[3],"fault1")||!strcmp(av[3],"fault3")||!strcmp(av[3],"fault4")||!strcmp(av[3],"legacy")){
+        int mf=!strcmp(av[3],"manifest-fault"),legacy=!strcmp(av[3],"legacy");
+        const char *point=mf?"manifest":legacy?"2":av[3][5]?av[3]+5:"2";int third=*point=='3';
+        char created[4600],removed[4600],donor[65];pjoin(created,sizeof created,dir,"tests/manifests/tools-compile-000.tsv");pjoin(removed,sizeof removed,dir,"tests/manifests/tools-compile-009.tsv");
+        if(mf)sha_of(removed,donor);
         int pid=fork();if(pid<0)return 2;
-        if(!pid){if(chdir(dir) || setenv("REGISTER_TXN_STOP",point,1))_exit(2);char *v[]={bin,"--tool","--sync",0};execv(bin,v);_exit(2);}
+        if(!pid){if(chdir(dir) || setenv("REGISTER_TXN_STOP",point,1))_exit(2);char *writer=legacy?getenv("REGISTER_V1_WRITER"):bin;if(!writer||writer[0]!='/')_exit(2);char *v[]={writer,"--tool","--sync",0};execv(writer,v);_exit(2);}
         int st=0,stopped=0,reaped=0;long end=sy_now_ms()+55000;
         while(sy_now_ms()<end){int w=waitpid(pid,&st,WNOHANG|WUNTRACED);if(w==pid){stopped=WIFSTOPPED(st);reaped=!stopped;break;}sy_sleep_ms(20);}
         if(!reaped){sy_signal(pid,9);int sig=0;ok(sy_wait_status(pid,0,0,0,&sig)==pid && sig==9,"SIGKILL writer");}
         printf("REGISTER_KILL stop=%s\n",point);ok(stopped,"writer reached requested transaction step");if(!stopped)return 1;
+        if(mf){path(2);ok(registry_has(p,"tools.compile-all\tcontract\t")&&registry_has(created,"batch\t" TC_ROW("000","0"))&&sy_exists(removed)==0,"real writer published coverage and manifest before SIGKILL");}
         for(int i=0;i<2;i++){size_t n;path(i);char *b=cx_read(p,&n);ok(b&&((n!=lens[i]||memcmp(b,original[i],n)!=0)==(i==1||*point>='2')),"published keys match stop point");free(b);}
         path(0);const char *peer="other-writer\tindependent\n";if(sy_append_file(p,peer,strlen(peer),0644))return 2;
         ok(call(0)==2 && sync_line("register: RECOVERY_REQUIRED:"),"pending transaction refuses registration");
         char record[4500];size_t rn; pjoin(record,sizeof record,dir,"tests/.register-txn/record.tsv");
         char *saved=cx_read(record,&rn);if(!saved||!rn)die("transaction fixture record",record);
+        if(legacy)ok(rn>=15&&!memcmp(saved,"REGISTER_TXN\t1\n",15),"old writer produced a v1 journal");
         char digest[4][65];for(int i=0;i<4;i++){path(i);sha_of(p,digest[i]);}
         if(sy_append_file(record,"x",1,0600))die("damage private manifest",record);
         ok(call(1)==2 && sync_line("register: transaction-digest-mismatch:"),"damaged manifest refuses recovery");
         for(int i=0;i<4;i++){char h[65];path(i);sha_of(p,h);ok(!strcmp(h,digest[i]),"damaged manifest leaves table intact");}
         if(sy_write_atomic(record,saved,rn,0600))die("restore private manifest",record);free(saved);
+        if(mf){
+            size_t len;char *ours=cx_read(created,&len);if(!ours)die("created fixture manifest",created);
+            const char *change="compile\tpeer-edit\n";
+            if(sy_append_file(created,change,strlen(change),0644))die("fixture manifest peer edit",created);
+            ok(call(1)==2 && sync_line("register: manifest-input-changed:") && registry_has(created,change),"recovery preserves a peer's edit to the same manifest");
+            for(int i=0;i<4;i++){char h[65];path(i);sha_of(p,h);ok(!strcmp(h,digest[i]),"manifest conflict refuses before table rollback");}
+            if(sy_write_atomic(created,ours,len,0644)||sy_chmod(created,0644))die("restore private test input",created);free(ours);
+        }
         if(third){
             int owner=fork();if(owner<0)die("recovery fork",dir);
             if(!owner){if(chdir(dir)||setenv("REGISTER_RECOVER_STOP","1",1))_exit(2);char *v[]={bin,"--tool","--sync","--recover",0};execv(bin,v);_exit(2);}
@@ -586,8 +637,9 @@ static int sync_write_check(char **av){
         }else ok(call(1)==0 && sync_line("REGISTER_SYNC\tRECOVERY_REQUIRED") && sync_line("REGISTER_SYNC\tRECOVERED"),"explicit rollback");
         for(int i=0;i<4;i++){size_t n;path(i);char *b=cx_read(p,&n);
             ok(b && n==lens[i]+(i==0?strlen(peer):0) && !memcmp(b,original[i],lens[i]) && (i||!memcmp(b+lens[i],peer,strlen(peer))),leaf[i]);free(b);}
-    }
-    if(strcmp(av[3],"fault")&&strcmp(av[3],"fault1")&&strcmp(av[3],"fault4")&&strcmp(av[3],"fault3")&&strcmp(av[3],"write")&&strcmp(av[3],"cold"))return 2;
+        if(mf){char h[65];sy_stat_t st;sha_of(removed,h);ok(!strcmp(h,donor)&&!sy_lstat(removed,&st)&&st.mode==0640&&sy_exists(created)==0,"rollback restores original manifest bytes and mode and removes this writer's new manifest");}
+        else if(!legacy){char parent[4600];sy_stat_t st;pjoin(parent,sizeof parent,dir,"tests/manifests");ok(sy_lstat(parent,&st)==-ENOENT,"recovery removes the transaction's empty manifest directory");}
+    }else return 2;
     printf("CX_REGISTER_SYNC\tchecks=%d\tfailed=%d\tretained=%s\n",checks,failed,dir);return failed?1:0;
 }
 int main(int argc,char **argv) {
