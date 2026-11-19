@@ -1,12 +1,36 @@
 /* --origin APE COMMIT STRICT_SHA STRICT [STRICT_SHA STRICT ...]
- * Files are pinned in execution order. ORIGIN identifies a witnessed attempt only.
- * A terminal row without a unique matching RAW cannot authorize a coverage suggestion. */
+ * --profile NEW_COMMIT APE FROZEN_LAYOUT RUNTIME MATERIALS ID
+ * --match-inputs NEW_COMMIT APE FROZEN_LAYOUT RUNTIME MATERIALS ID RUNNER EXPECTED_V1
+ * --advise NEW_COMMIT APE FROZEN_LAYOUT RUNTIME MATERIALS OLD_COMMIT OLD_APE STRICT_SHA STRICT [...]
+ * Frozen inputs are immutable for the duration of measurement. Use - for unavailable bundles.
+ * RUNTIME contains the actual runner and compiler, runner-kind, host.tsv, options.tsv,
+ * environment.tsv, readset.tsv, and all toolchain dependencies. MATERIALS/ID contains
+ * PREPARED.tsv and all actual members. The conservative projection includes the full Git tree
+ * (covering product and recipe inputs) and every member and mode in the measured layout.
+ * Special files and symlinks require another measurement. Unsealed inputs cannot be reused.
+ * v0.0.84 producer contract: emit runner and identity_v1 only after the real run and after
+ * verifying the same profile before/after, including all child reads, misses and enumeration.
+ * The producer must omit identity_v1 when it cannot attest read closure in the three roots.
+ * Old RAW lines lacking either binding remain readable and always get MUST_RERUN.
+ * ORIGIN identifies a witnessed attempt only. Advice never changes selection, timing or G1. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
-typedef struct {char *id,*status,*rc,*why,*runner,*file,*note,*ms;int line,rawline;char rawsha[65];} Attempt;
+typedef struct {char *id,*status,*rc,*why,*runner,*file,*note,*ms,*profile;int line,rawline,max_ms;char rawsha[65];} Attempt;
 static Attempt rows[8192];static int nrows;
 static char candidate[65];static const char *origin;
-static void refuse(const char *why){fprintf(stderr,"EVIDENCE_IDENTITY REFUSE %s\n",why);exit(2);}
+static const char *fallback_registry;
+static void refuse(const char *why){
+    if(fallback_registry){
+        const char *p=fallback_registry;int count=0;
+        while(*p){const char *end=strchr(p,'\n');if(!end)break;
+            const char *tab=memchr(p,'\t',end-p);
+            if(tab&&*p!='#'&&strncmp(p,"id\t",3)){printf("MUST_RERUN\t%.*s\t%s\n",(int)(tab-p),p,why);count++;}
+            p=end+1;
+        }
+        printf("EVIDENCE_ADVICE\tbatches=%d\tcovered=0\tmust_rerun=%d\n",count,count);
+    }
+    fprintf(stderr,"EVIDENCE_IDENTITY REFUSE %s\n",why);exit(2);
+}
 static void frame(np_buf *b,const char *s){char n[40];if(cx_fmt(n,sizeof n,"%zu:",strlen(s)))refuse("length");np_puts(b,n);np_puts(b,s);}
 static int hex(const char *s,int n){return strlen(s)==n&&strspn(s,"0123456789abcdef")==n;}
 static char *filebytes(const char *p,size_t *n,char sha[65]){
@@ -42,21 +66,26 @@ static void segment(const char *pin,const char *path){
             char hash[65];cx_sha256_hex(p,strlen(p),hash);char *v[40];int n=fields(p,v,40,'\t');
             if(last->rawline||n<3||strcmp(v[1],"BATCH_RUN")||strcmp(value(v,n,"id"),last->id)||
                strcmp(value(v,n,"status"),last->status)||strcmp(value(v,n,"rc"),last->rc)||
-               strcmp(value(v,n,"candidate"),candidate)||strcmp(value(v,n,"transport"),"0"))last->why="invalid-raw";
+               strcmp(value(v,n,"candidate"),candidate)||strcmp(value(v,n,"transport"),"0")||
+               strcmp(value(v,n,"scope"),"actual-one-batch-no-cached-result")||!*value(v,n,"marker"))last->why="invalid-raw";
             else if(!strcmp(last->why,"missing-raw")){
                 const char *runner=value(v,n,"runner");
                 if(strcmp(runner,"native")&&strcmp(runner,"sh"))last->why="runner-unknown";
-                else {last->runner=strdup(runner);last->why="";}
+                else {last->runner=strdup(runner);last->why="";last->profile=strdup(value(v,n,"identity_v1"));}
             }
             memcpy(last->rawsha,hash,sizeof hash);last->rawline=line;
         }else if(*p&&*p!='#'&&strncmp(p,"batch\tdomain\t",13)&&strncmp(p,"SUMMARY\t",8)&&strncmp(p,"CHECKPOINT\t",11)){
             char *v[10];if(!header||fields(p,v,10,'\t')!=9)refuse("batch-row");
             last=attempt(v[0]);last->status=v[2];last->rc=v[3];last->ms=v[5];last->note=v[8];
-            last->file=(char *)pin;last->line=line;last->rawline=0;last->rawsha[0]=0;last->runner="";
+            last->file=(char *)pin;last->line=line;last->rawline=0;last->rawsha[0]=0;last->runner="";last->profile="";
             last->why="missing-raw";
             if(strcmp(v[2],"PASS")&&strcmp(v[2],"FAIL"))last->why="unresolved";
             else if(strcmp(v[4],candidate)||!decimal(v[3])||(!strcmp(v[2],"PASS")!=(strcmp(v[3],"0")==0)))last->why="row-identity";
-            else if(!decimal(v[5])||atol(v[5])>55000)last->why="over-window";
+            else {
+                if(!decimal(v[5]))last->why="over-window";
+                else if(atol(v[5])>last->max_ms)last->max_ms=atol(v[5]);
+                if(last->max_ms>55000)last->why="over-window";
+            }
         }else last=0;
         p=next;
     }
@@ -69,8 +98,163 @@ static void show_origin(Attempt *a){
     for(int i=0;i<12;i++)frame(&b,v[i]);cx_sha256_hex(b.p,b.n,sha);
     printf("ORIGIN\t%s\t%s\trc=%s\trunner=%s\tv1=%s\tsegment=%s\tlines=%s\traw=%s\n",a->id,a->status,a->rc,a->runner,sha,a->file,lines,a->rawsha);
 }
+/* v1 uses the whole sealed layout as its conservative projection. No path-level exclusions.
+ * Runtime and material bundles are part of the measurement, including files opened by children.
+ * Only a trusted runner that audited closure may bind identity_v1 into its original RAW.
+ * Legacy or partial measurements stay MUST_RERUN. This tool never runs a qualification batch. */
+static char *path(const char *a,const char *b){
+    size_t cap=strlen(a)+strlen(b)+2;char *p=malloc(cap);
+    if(!p||cx_fmt(p,cap,"%s/%s",a,b))refuse("path");return p;
+}
+static int cmpname(const void *a,const void *b){return strcmp(*(const char *const *)a,*(const char *const *)b);}
+static int entries;
+static int walk(np_buf *b,const char *base,const char *rel,int depth){
+    char *p=*rel?path(base,rel):strdup(base);sy_stat_t st;
+    if(depth>64||++entries>100000||sy_lstat(p,&st))return 0;
+    char mode[64];if(cx_fmt(mode,sizeof mode,"%c/%o/%ld",st.kind,st.mode,st.uid))return 0;
+    frame(b,rel);frame(b,mode);
+    if(st.kind=='f'){
+        if(st.size>268435456)return 0;
+        size_t n=0;char *s=cx_read(p,&n),digest[65];if(!s||n!=st.size)return 0;
+        cx_sha256_hex(s,n,digest);free(s);frame(b,digest);
+    }else if(st.kind=='d'){
+        DIR *dir=opendir(p);if(!dir)return 0;char **names=0;int count=0,cap=0;struct dirent *e;
+        errno=0;while((e=readdir(dir))){
+            if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+            if(count==cap){cap=cap?cap*2:16;if(cap>131072){closedir(dir);return 0;}names=realloc(names,cap*sizeof *names);if(!names)refuse("memory");}
+            names[count++]=strdup(e->d_name);errno=0;
+        }
+        int err=errno;int closed=closedir(dir);if(err||closed)return 0;
+        if(count)qsort(names,count,sizeof *names,cmpname);
+        for(int i=0;i<count;i++){
+            char *child=*rel?path(rel,names[i]):strdup(names[i]);int ok=walk(b,base,child,depth+1);
+            free(child);free(names[i]);if(!ok)return 0;
+        }
+        free(names);
+    }else if(st.kind=='l'){
+        char root[4096],real[4096],link[4096];long len=sy_readlink(p,link,sizeof link);
+        if(len<=0||len>=sizeof link-1||sy_realpath(base,root,sizeof root)<0||sy_realpath(p,real,sizeof real)<0)return 0;
+        size_t prefix=strlen(root);if(strncmp(root,real,prefix)||real[prefix]!='/')return 0;
+        link[len]=0;frame(b,link);frame(b,real+prefix+1);
+        /* The target's bytes and mode are included at its real path in the same full traversal. */
+    }else return 0;
+    sy_stat_t now;int ok=!sy_lstat(p,&now)&&now.ino==st.ino&&now.dev==st.dev&&now.size==st.size&&now.mode==st.mode&&now.ctime==st.ctime&&now.mtime==st.mtime;
+    free(p);return ok;
+}
+static int snapshot(const char *dir,char digest[65]){
+    np_buf b={0};entries=0;frame(&b,"whole-directory-v1");
+    if(!walk(&b,dir,"",0)){free(b.p);return 0;}cx_sha256_hex(b.p,b.n,digest);free(b.p);return 1;
+}
+static char *command(char **args,int allow_one,int *rc){
+    np_result r={0};char why[256]={0};if(np_run(args,0,0,52,&r,why,sizeof why)||r.residue||r.timed_out||r.rc<0||r.rc>allow_one){fprintf(stderr,"EVIDENCE_CHILD\t%s\trc=%d\t%s\t%.300s\n",args[0],r.rc,why,r.err?r.err:"");np_free(&r);return 0;}
+    *rc=r.rc;char *s=r.out;r.out=0;np_free(&r);return s;
+}
+static char *gitval(const char *sub,const char *spec){char *cmd[]={"git",(char *)sub,(char *)spec,0};int rc=0;return command(cmd,0,&rc);}
+static int nonempty(const char *dir,const char *leaf){
+    if(!*leaf||leaf[0]=='/'||!strcmp(leaf,"..")||!strncmp(leaf,"../",3)||strstr(leaf,"/../"))return 0;
+    sy_stat_t st;char *p=path(dir,leaf);int ok=!sy_lstat(p,&st)&&st.kind=='f'&&st.size>0;free(p);return ok;
+}
+typedef struct {char tree[41],layout[65],runtime[65],ape[65];char *registry;const char *root,*material,*runner,*issue;} Layout;
+static void setup(Layout *l,char **v){
+    if(!hex(v[0],40)){l->issue="target-commit";return;}
+    char spec[128];if(cx_fmt(spec,sizeof spec,"%s^{tree}",v[0]))refuse("spec");
+    char *tree=gitval("rev-parse",spec);
+    if(!tree||strlen(tree)!=41||tree[40]!='\n'){l->issue="target-tree";return;}tree[40]=0;memcpy(l->tree,tree,41);
+    if(cx_fmt(spec,sizeof spec,"%s:tests/batches.tsv",v[0]))refuse("spec");
+    l->registry=gitval("show",spec);if(!l->registry){l->issue="target-registry";return;}
+    size_t n=0;char *data=cx_read(v[1],&n);if(!data||!n){l->issue="target-ape";return;}
+    cx_sha256_hex(data,n,l->ape);free(data);
+    l->root=v[2];l->material=v[4];if(!strcmp(v[2],"-")||!strcmp(v[3],"-")||!strcmp(v[4],"-")){l->issue="missing-measurement";return;}
+    data=cx_read(path(l->root,"tests/batches.tsv"),&n);
+    if(!data||n!=strlen(l->registry)||memcmp(data,l->registry,n)){l->issue="layout-registry-differs";return;}free(data);
+    const char *files[]={"runner","compiler","host.tsv","options.tsv","environment.tsv","readset.tsv","runner-kind"};
+    for(int i=0;i<7;i++)if(!nonempty(v[3],files[i])){l->issue="runtime-incomplete";return;}
+    data=cx_read(path(v[3],"runner-kind"),&n);
+    if(!data||(strcmp(data,"native\n")&&strcmp(data,"sh\n"))){l->issue="runner-unknown";return;}data[n-1]=0;l->runner=data;
+    data=cx_read(path(v[3],"readset.tsv"),&n);
+    if(!data||strcmp(data,"readset-v1\twhole-layout\twhole-runtime\twhole-materials\tclosed\n")){l->issue="readset-incomplete";return;}
+    if(!snapshot(v[2],l->layout))l->issue="layout-unmeasured";
+    else if(!snapshot(v[3],l->runtime))l->issue="runtime-unmeasured";
+}
+static const char *profile(Layout *l,const char *row,const char *id,char sha[65],int emit){
+    if(l->issue)return l->issue;
+    if(!*id||id[0]=='.'||strspn(id,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")!=strlen(id))return "batch-id";
+    char *copy=strdup(row),*vrow[32];int cols=fields(copy,vrow,32,'\t');
+    if(cols<11||strcmp(vrow[1],"IMPLEMENTED")||strcmp(vrow[4],"SOURCE"))return "batch-definition-incomplete";
+    if(!nonempty(l->root,vrow[3])||!nonempty(l->root,vrow[8]))return "source-or-entry-missing";
+    free(copy);
+    char *bundle=path(l->material,id),mat[65],def[65];if(!nonempty(bundle,"PREPARED.tsv")||!snapshot(bundle,mat))return "material-unmeasured";
+    cx_sha256_hex(row,strlen(row),def);np_buf b={0};
+    const char *v[]={"batch-input-v1",id,l->ape,l->tree,l->runner,l->runtime,def,l->layout,mat};
+    for(int i=0;i<9;i++)frame(&b,v[i]);cx_sha256_hex(b.p,b.n,sha);free(b.p);
+    if(emit)printf("IDENTITY\t%s\tidentity_v1=%s\tape=%s\ttree=%s\trunner=%s\truntime=%s\tdefinition=%s\tlayout=%s\tmaterial=%s\n",id,sha,l->ape,l->tree,l->runner,l->runtime,def,l->layout,mat);
+    return 0;
+}
+static const char *compare_inputs(const char *runner,const char *pin,Layout *l,const char *sha){
+    if(!hex(pin,64))return "unbound-profile";
+    if(strcmp(runner,l->runner))return "runner-changed";
+    return strcmp(pin,sha)?"inputs-changed":0;
+}
+static int coverage(const char *id,const char *sel){
+    if(!sel)return 0;size_t n=strlen(id);int found=0;
+    for(const char *p=sel;*p;){const char *end=strchr(p,'\n');if(!end)return 0;
+        if(end-p>8&&!strncmp(p,"COVERED\t",8)&&end-p==8+n&&!memcmp(p+8,id,n))found++;
+        if(end-p>11&&!strncmp(p,"MUST_RERUN\t",11)&&((p[11]=='*'&&p[12]=='\t')||((size_t)(end-p)>11+n&&!memcmp(p+11,id,n)&&p[11+n]=='\t')))return 0;
+        p=end+1;
+    }return found==1;
+}
+static int analyse(int argc,char **argv,int advice){
+    /* --profile NEW APE LAYOUT RUNTIME MATERIALS ID
+     * --advise NEW APE LAYOUT RUNTIME MATERIALS OLD OLD_APE PIN STRICT [PIN STRICT ...] */
+    int match=!strcmp(argv[1],"--match-inputs");
+    if((!advice&&argc!=(match?10:8))||(advice&&(argc<11||argc%2==0)))refuse("profile-or-advise-args");
+    Layout l={0};setup(&l,argv+2);if(!l.registry)refuse("target-registry");
+    char *sel=0;int rc=0;
+    if(advice){
+        fallback_registry=l.registry;
+        origin=argv[7];if(!hex(origin,40))refuse("origin");size_t n=0;free(filebytes(argv[8],&n,candidate));
+        for(int i=9;i<argc;i+=2)segment(argv[i],argv[i+1]);
+        fallback_registry=0;
+        int eligible=0;
+        if(!l.issue&&!strcmp(candidate,l.ape))for(int i=0;i<nrows;i++)if(!*rows[i].why&&hex(rows[i].profile,64))eligible++;
+        char driver[4096];if(eligible&&sy_realpath("./unisacc.com",driver,sizeof driver)>=0){
+            char *cmd[]={"sh",driver,"tools/evidence-cover.cx","--","--a",(char *)origin,"--b",argv[2],0};sel=command(cmd,1,&rc);
+            if(sel&&!strstr(sel,"\nEVIDENCE_COVER\tcovered="))sel=0;
+        }
+    }
+    int total=0,hits=0;char *line=l.registry;
+    while(*line){char *end=strchr(line,'\n');if(!end)refuse("registry-eol");*end=0;
+        if(*line&&*line!='#'&&strncmp(line,"id\t",3)){char *tab=strchr(line,'\t');if(!tab)refuse("registry-row");
+            *tab=0;char *id=strdup(line);*tab='\t';if(advice||!strcmp(id,argv[7])){
+                char sha[65];const char *why=0;Attempt *a=0;
+                if(advice){
+                    for(int i=0;i<nrows;i++)if(!strcmp(rows[i].id,id)){a=rows+i;break;}
+                    if(!a)why="missing-origin";else if(*a->why)why=a->why;
+                    else if(strcmp(candidate,l.ape))why="candidate-changed";
+                    else if(!hex(a->profile,64))why="unbound-profile";
+                    else if(!coverage(id,sel))why=sel?"selector-rerun":"selector-unavailable";
+                }
+                if(!why)why=profile(&l,line,id,sha,1);
+                if(advice&&!why)why=compare_inputs(a->runner,a->profile,&l,sha);
+                if(match&&!why)why=compare_inputs(argv[8],argv[9],&l,sha);
+                if(advice){
+                    char defsha[65];cx_sha256_hex(line,strlen(line),defsha);
+                    printf("RECORD\t%s\tv=1\tape=%s\ttree=%s\tdef=%s\truntime=%s\tlayout=%s\traw_sha=%s\torigin=%s:%d,%d\n",id,*l.ape?l.ape:"-",l.tree,defsha,*l.runtime?l.runtime:"-",*l.layout?l.layout:"-",a&&a->rawsha[0]?a->rawsha:"-",a?a->file:"-",a?a->line:0,a?a->rawline:0);
+                }
+                if(why)printf("MUST_RERUN\t%s\t%s\n",id,why);
+                else if(advice){printf("COVERED\t%s\torigin=%s:%d,%d\tstatus=%s\n",id,a->file,a->line,a->rawline,a->status);hits++;}
+                else if(match)printf("INPUTS_EQUAL\t%s\n",id);
+                total++;
+            }free(id);
+        }line=end+1;
+    }
+    if(!total)refuse("unknown-batch");
+    if(advice)printf("EVIDENCE_ADVICE\tbatches=%d\tcovered=%d\tmust_rerun=%d\n",total,hits,total-hits);
+    return 0;
+}
 int main(int argc,char **argv){
     if(argc==1){printf("EVIDENCE_IDENTITY\tmode=off\n");return 0;}
+    if(!strcmp(argv[1],"--profile")||!strcmp(argv[1],"--match-inputs")||!strcmp(argv[1],"--advise"))return analyse(argc,argv,!strcmp(argv[1],"--advise"));
     if(argc<6||argc%2||strcmp(argv[1],"--origin")||!hex(argv[3],40))refuse("usage: --origin APE COMMIT STRICT_SHA STRICT ...");
     origin=argv[3];size_t n;free(filebytes(argv[2],&n,candidate));if(!n)refuse("empty-ape");
     for(int i=4;i<argc;i+=2)segment(argv[i],argv[i+1]);
