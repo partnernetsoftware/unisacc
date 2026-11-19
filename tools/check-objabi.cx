@@ -9,7 +9,8 @@
  *   p03     int x=5; const int k=32; main returns getx()*10+(getk()==32): rc 51 (F1 .init_array).
  *   multi   two -funit units (p03 and q: int y=3) in one link: no multiple definition of __init_u;
  *           main returns getx()*10+(getk()==32)+gety()-3: rc 51.
- *   p02c    add_one(0) with add_one(v)=v+11: rc 11.  Known gap until F2 (SysV entry): EXPECT-FAIL.
+ *   p02c    add_one(0) with add_one(v)=v+11: rc 11 (F2 SysV entry).
+ *   p2arg   add2(30,12) with add2(a,b)=a+b: rc 42; p3arg mix3(1,2,3)-100 with a*100+b*10+c: rc 23 (F2).
  *   p07     weak weak_hook (returns 1) linked with a strong one (returns 7): rc 7.  Known gap until
  *           F3 (STB_WEAK): EXPECT-FAIL.
  * An EXPECT-FAIL case that passes is reported as XPASS and counted as failed, so the expectation
@@ -35,17 +36,35 @@ typedef struct oa_case {
     int expect_fail;
 } oa_case;
 
-static const oa_case oa_cases[4] = {
+static const oa_case oa_cases[11] = {
     {"p03", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n", 0, 0,
      "int getx(void);int getk(void);int main(void){return getx()*10+(getk()==32);}\n", 51, 0},
     {"multi", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n",
      "int y=3;\nint gety(void){return y;}\n", 0,
      "int getx(void);int getk(void);int gety(void);int main(void){return getx()*10+(getk()==32)+gety()-3;}\n", 51, 0},
     {"p02c", "int add_one(int v){return v+11;}\n", 0, 0,
-     "int add_one(int);int main(void){return add_one(0);}\n", 11, 1},
+     "int add_one(int);int main(void){return add_one(0);}\n", 11, 0},
+    {"p2arg", "int add2(int a,int b){return a+b;}\n", 0, 0,
+     "int add2(int,int);int main(void){return add2(30,12);}\n", 42, 0},
+    {"p3arg", "int mix3(int a,int b,int c){return a*100+b*10+c;}\n", 0, 0,
+     "int mix3(int,int,int);int main(void){return mix3(1,2,3)-100;}\n", 23, 0},
     {"p07", "__attribute__((weak)) int weak_hook(void){return 1;}\n", 0,
      "int weak_hook(void){return 7;}\n",
      "int weak_hook(void);int main(void){return weak_hook();}\n", 7, 1},
+    {"ext0sse", "int ext0(void);\nint call0(void){return ext0()+1;}\n", 0,
+     "typedef float v4 __attribute__((vector_size(16)));\nint ext0(void){volatile v4 x={1,2,3,4};return (int)x[3]+38;}\n",
+     "int call0(void);int main(void){return call0();}\n", 43, 0},
+    {"hsub3", "int hsub(int a,int b,int c);\nint call3(void){return hsub(50,7,2)+1;}\n", 0,
+     "int hsub(int a,int b,int c){return a*6+b*5+c;}\n",
+     "int call3(void);int main(void){return call3();}\n", 82, 0},
+    {"XL-args7", "int s7(int,int,int,int,int,int,int);\nint call7(void){return s7(1,2,3,4,5,6,7);}\n", 0,
+     "int s7(int a,int b,int c,int d,int e,int f,int g){return a+b+c+d+e+f+g;}\n",
+     "int call7(void);int main(void){return call7();}\n", 28, 1},
+    {"XL-float", "double fd(double);\nint callf(void){return (int)fd(1.5);}\n", 0,
+     "double fd(double x){return x*2;}\n",
+     "int callf(void);int main(void){return callf();}\n", 3, 1},
+    {"XL-qsortcb", "void qsort(void*,unsigned long,unsigned long,int(*)(const void*,const void*));\nint cmpi(const void*a,const void*b){return *(const int*)a-*(const int*)b;}\nint sortit(void){int v[3]={3,1,2};qsort(v,3,4,cmpi);return v[0]*100+v[1]*10+v[2];}\n", 0, 0,
+     "int sortit(void);int main(void){return sortit();}\n", 123, 1},
 };
 
 static char oa_dir[2048];
@@ -140,7 +159,7 @@ int main(int argc, char **argv) {
     }
     if (cx_fmt(id, sizeof id, "objabi-%d", (int)getpid()) || sr_default(id, oa_dir, sizeof oa_dir) ||
         sy_mkdir_all(oa_dir, 0755)) { fprintf(stderr, "check-objabi: cannot make session directory\n"); return 2; }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 11; i++) {
         const oa_case *c = &oa_cases[i];
         int got = -1000;
         int t = oa_case_run(abs, c, &got, stage, why);
