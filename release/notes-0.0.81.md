@@ -1,6 +1,6 @@
 # unisacc 0.0.81 发布说明
 
-状态:同候选原生 CI run 待填(release-exec 第 3 步派发后回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
+状态:同候选原生 CI run 44490199376(六目标 success,一次通过无重派,234 秒)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -13,7 +13,7 @@
 | pkg.bin | 3c1dd33d15a1ff293bc5b718ff2773f0ddd4305025b166542dc2b1454cab530e |
 | slice-win-arm64 | c8dc032ba78c482f839caa75c064e07b8ed142dec374e9dffadf4dc1779e3fdb |
 | SHA256SUMS | 355f3c8954e3c90ad3039402fb4cf0b49b35cddfe2d502ee2d1a85beb431c797 |
-| CI run | 待填 |
+| CI run | 44490199376 |
 
 ## 产品改动
 
