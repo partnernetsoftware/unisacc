@@ -124,6 +124,7 @@ export uxe_frame(now:i64) i64 version 1;
 | C10 | 多个 UJS 源文件编译成一个 Wasm 模块 | 跨文件调用、重名与缺源具名拒绝，连接边界和篡改对照 |
 | C11 | 混合整数与浮点表达式及局部槽类型校验 | 二元算术与比较用 wasm-validate 和金值复核，浮点取余与异型重声明具名拒绝 |
 | C12 | 内联局部绑定隔离 | 同型、异型、嵌套与循环验算，篡改转红，D1 至 D3 冻结 Wasm 重编字节相容 |
+| C13 | 单一基座内多个原生函数 | 标准网格 JSON 读写同编译模块。接受 128 个函数，拒绝 129 个。host1 与 Wasm 格式门读回，保留每函数 256 槽及调用深度上限 |
 
 修订(cdx2): 现有基础为 `f64_sqrt`、`f64_floor_i64`、有界 `ux_span`、u8/f32 连续视图、独立线性内存和声明式链接。不支持任意 JavaScript 或浏览器 `Float32Array` 语法。字典键最多 8 字节，ASCII 字符串字面量最多 255 字节，UTF-8 目前走有界字节而非通用字符串。闭包只证实了短例外层读取，无逃逸或可变捕获合同。WebGL 端大批顶点与纹理上传须先量测跨度搬运和桥接次数，避免逐顶点宿主调用。
 
@@ -136,6 +137,8 @@ export uxe_frame(now:i64) i64 version 1;
 修订(ccapi): 数学、场景、几何、材质各由独立 UJS 源文件维护，按顺序编译为单一 base.wasm，共用基座线性内存。产品 Wasm 仍为第二个模块，通过 0c 的版本化入口传递标量和句柄。C10 的命令为 `ujs/ujs2wasm.com abi.ujs math.ujs scene.ujs geometry.ujs material.ujs -o base.wasm`，ABI 声明放最前，符号按编译单元的声明顺序可见，重复函数与布局具名拒绝。该入口目前最多接受 64 个源文件，总源文件合计最多 100000 字节。D1 私有场景探针实测 base.wasm 为 23694 字节。探针超过 4 MiB 时输出 `D1_SCENE_BASE_BUDGET_EXCEEDED` 并失败。该体积是探针基线，后续基座增加功能须重测。
 
 修订(cdx2): C12 默认给内联局部绑定独立的活动作用域。用完的槽只在类型匹配时复用。查找仍支持已在活动父作用域的值，同一作用域的异型重声明仍具名拒绝。默认模式试编 D1 和 D3 的旧产品时槽索引发生变化，因此既有 D1 投影、D3 漫游包的构造明确指定 `--legacy-inline` 以重现冻结字节。新基座和新产品使用默认作用域规则。D2 继续使用默认模式，前后字节一致。
+
+修订(cdx2): M3b 的网格 JSON 读写分别能编译，合在一个基座时共声明 19 个原生函数，触发旧 16 个函数上限。C13 把阶段零的原生函数容量设为 128，把 host1 的定义函数与签名容量分别设为 192 与 160，并检验定义函数引用的签名索引。C9 每函数局部槽 256 与原生调用深度 8 保持。网格读写合编探针为 27742 字节。检查入口为 `sh ./unisacc.com ujs/tests/native-capacity.cx`，依赖本节构造的 `ujs/ujs.com` 和 `wasm-validate`。
 
 修订(cdx2): C1 的 `.ujs` 接口采用显式缓冲视图。对 Float32Array、Uint16Array、Uint32Array、Int32Array、Float64Array，先用 `ux_typed_index(base, count, index, width)` 得到字节偏移，再用 `ux_f32`、`ux_u16`、`ux_u32`、`ux_i32`、`ux_f64` 及其 `_put` 写入。DataView 切片通过 `ux_data_offset(base, bytes, offset, width)` 支持非对齐访问，目前接口使用小端字节序。负返回值为 `UX_VIEW_BOUNDS=-1` 或 `UX_VIEW_ALIGNMENT=-2`，调用者须先检查再读写。整数写入截为目标位宽，f32 写入舍入到单精度。入口仍由 `ujs2wasm.com` 编译，现有 u8、f32 与 span 指令序列保留。验收运行 `sh ./unisacc.com ujs/product/cli-host.cx -- --ux-views` 及 `--mutate-ux-views`。
 

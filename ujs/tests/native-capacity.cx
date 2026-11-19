@@ -1,0 +1,65 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int make_source(const char *path,int count,int mutate) {
+    char source[12000];
+    int used=0;
+    for(int i=0;i<count;i++) {
+        int amount=i+(mutate && i==127);
+        int n=tx_snprintf(source+used,sizeof source-used,
+            "native function unit%d(x:i64) i64 { return x+%d; }\n",i,amount);
+        if(n<0 || n>=(int)sizeof source-used) return 1;
+        used+=n;
+    }
+    const char main_line[]="return unit0(3)+unit61(7)+unit127(11);\n";
+    if(sizeof main_line>(size_t)(sizeof source-used)) return 1;
+    for(int i=0;i<(int)sizeof main_line-1;i++) source[used++]=main_line[i];
+    return sy_write_file(path,source,used,0600)!=0;
+}
+
+static int expect(char **command,int code,const char *marker) {
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(command,10,&out,&bytes);
+    int ok=rc==code && out && tx_contains(out,bytes,marker,tx_len(marker,120));
+    if(!ok) printf("NATIVE_CAPACITY rc=%d expected=%d output=%s\n",rc,code,out?out:"");
+    mm_free(out);
+    return ok;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],src[300],wasm[300],too_many[300],rejected[300];
+    if(sy_mkdtemp("/tmp","ujs-native-capacity-",dir,sizeof dir)) return 2;
+    tx_snprintf(src,sizeof src,"%s/valid.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/valid.wasm",dir);
+    tx_snprintf(too_many,sizeof too_many,"%s/excess.ujs",dir);
+    tx_snprintf(rejected,sizeof rejected,"%s/excess.wasm",dir);
+    if(make_source(src,128,mutate) || make_source(too_many,129,0)) return 2;
+    char *compile[]={"./ujs/ujs2wasm.com",src,"-o",wasm,0};
+    char *run[]={"./ujs/ujs2wasm.com","--run",wasm,0};
+    char *overflow[]={"sh","-c","exec \"$@\" 2>&1","sh","./ujs/ujs2wasm.com",too_many,"-o",rejected,0};
+    char *validate[]={"wasm-validate",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    sy_stat_t stat;
+    char gold[96];
+    tx_snprintf(gold,sizeof gold,"\"tag\":\"i64\",\"value\":%d,",3+61+7+127+11);
+    int compiled=expect(compile,0,"\"bridge\":\"stage0-host\"");
+    int valid=compiled && cx_runv_timeout(validate,10,&out,&bytes)==0;
+    mm_free(out);
+    int executed=compiled && expect(run,0,gold);
+    int refused=expect(overflow,1,"native function limit") && sy_lstat(rejected,&stat)==-ENOENT;
+    sy_unlink(src);
+    sy_unlink(wasm);
+    sy_unlink(too_many);
+    sy_unlink(rejected);
+    sy_rmdir(dir);
+    int failed=4-compiled-valid-executed-refused;
+    printf("CHECK_UJS_NATIVE_CAPACITY compiled128=%d valid=%d host1=%d refused129=%d failed=%d\n",
+        compiled,valid,executed,refused,failed);
+    return failed!=0;
+}
