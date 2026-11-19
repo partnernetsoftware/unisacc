@@ -1,0 +1,100 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int maximum(int a, int b) { return a > b ? a : b; }
+static int torus_distance(int a, int b) {
+    int d = a > b ? a - b : b - a;
+    return d > 128 ? 256 - d : d;
+}
+static int round_down(double x) {
+    int n = (int)x;
+    return n - (n > x);
+}
+static unsigned lattice(int x, int y, int seed) {
+    uint32_t n = (uint32_t)(x + 17) * 374761393u ^ (uint32_t)(y + 29) * 668265263u ^ (uint32_t)seed * 1442695041u;
+    n = (n ^ (n >> 13)) * 1274126177u;
+    return (n ^ (n >> 16)) & 255u;
+}
+static int octave(int x, int y, int step, int seed) {
+    int x0 = x / step, y0 = y / step, x1 = (x0 + 1) % (256 / step), y1 = (y0 + 1) % (256 / step);
+    int fx = x % step, fy = y % step;
+    int a = lattice(x0,y0,seed) * (step - fx) + lattice(x1,y0,seed) * fx;
+    int b = lattice(x0,y1,seed) * (step - fx) + lattice(x1,y1,seed) * fx;
+    return (a * (step - fy) + b * fy) / (step * step);
+}
+static int elevation(int x, int y, int seed) {
+    const int centers[8][5] = {
+        {100,106,34,28,113},{163,96,22,18,97},{130,67,12,13,84},{72,56,16,15,100},
+        {187,52,17,13,102},{104,25,16,14,98},{150,20,15,13,103},{215,19,19,13,104}
+    };
+    const int ridges[7][6] = {
+        {24,129,54,113,20,27},{54,113,79,104,22,42},{79,104,106,92,22,50},{106,92,114,73,14,28},
+        {35,124,37,98,15,27},{63,116,68,133,11,28},{89,103,103,129,13,30}
+    };
+    int peak = -49, shelf = -49;
+    for (int i = 0; i < 8; i++) {
+        const int *c = centers[i];
+        int dx = torus_distance(x, c[0]), dy = torus_distance(y, c[1]);
+        peak = maximum(peak, c[4] - 116 * dx * dx / (c[2] * c[2]) - 116 * dy * dy / (c[3] * c[3]));
+    }
+    for (int i = 0; i < 7; i++) {
+        const int *p = ridges[i];
+        double dx = p[2] - p[0], dy = p[3] - p[1];
+        double t = ((x - p[0]) * dx + (y - p[1]) * dy) / (dx * dx + dy * dy);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        double u = x - p[0] - t * dx, v = y - p[1] - t * dy;
+        shelf = maximum(shelf, p[5] - round_down((p[5] + 19) * (u * u + v * v) / (p[4] * p[4])));
+    }
+    double u = (x - 59) / 10.5, v = (y - 111) / 8.2;
+    double lagoon = u * u + v * v;
+    if (lagoon < 1) shelf -= round_down((1 - lagoon) * 65);
+    return maximum(peak, shelf) + round_down((octave(x,y,64,seed) - 128) * .45)
+        + round_down((octave(x,y,16,seed+3) - 128) * .25) + round_down((octave(x,y,2,seed+5) - 128) * .07);
+}
+int main(int argc, char **argv) {
+    unsigned char *lib = 0;
+    char dir[256], source[320], wasm[320], combined[12288], expected[128], *out = 0;
+    int64_t lib_n = 0;
+    size_t out_n = 0;
+    uint32_t fnv = 2166136261u;
+    int sum = 0, rc = 1, samples = 128;
+    int mutate = argc == 2 && tx_eq(argv[1], "--wrong-seed", sizeof "--wrong-seed");
+    if (argc > 2 || (argc == 2 && !mutate)) return 2;
+    if (sy_read_file("ujs/practice/uxe/products/d1/terrain.ujs", &lib, &lib_n, 11000)) return 2;
+    if (sy_mkdtemp("/tmp", "d1-field-", dir, sizeof dir)) { mm_free(lib); return 2; }
+    tx_snprintf(source, sizeof source, "%s/probe.ujs", dir);
+    tx_snprintf(wasm, sizeof wasm, "%s/probe.wasm", dir);
+    for (int i = 0; i < samples; i++) {
+        int x = (24 + 37 * i) % 256, y = (129 + 19 * i) % 256, seed = i % 2 ? 31 : 7;
+        unsigned int raw = (uint16_t)elevation(x, y, seed);
+        unsigned int lo = raw & 255u, hi = raw >> 8;
+        sum += lo + hi;
+        fnv = ((fnv ^ lo) * 16777619u ^ hi) * 16777619u;
+    }
+    int n = tx_snprintf(combined, sizeof combined,
+        "%s\nlet sample = 0; while (sample < 128) {"
+        "let testX = (24 + 37 * sample) %% 256; let testY = (129 + 19 * sample) %% 256;"
+        "let seed = 7 + 24 * (sample %% 2) + %d;"
+        "let signedHeight = d1_elevation(seed * 65536 + testY * 256 + testX);"
+        "let raw = (signedHeight + 65536) %% 65536;"
+        "let lo = ux_u8_put(2 * sample, raw %% 256); let hi = ux_u8_put(2 * sample + 1, raw / 256);"
+        "sample = sample + 1; } host_gpu_submit(ux_span(0, 256), 256); return sample;\n",
+        (char *)lib, mutate);
+    int gold_n = tx_snprintf(expected, sizeof expected, "\"gpu_len\":%d,\"gpu_sum\":%d,\"gpu_fnv\":%u,",
+        samples * 2, sum, fnv);
+    mm_free(lib);
+    if (n > 0 && n < (int)sizeof combined && !sy_write_file(source, combined, n, 0600)) {
+        char *args[] = {"./ujs/ujs2wasm.com", source, "-o", wasm, "--run", 0};
+        int run = cx_runv_timeout(args, 15, &out, &out_n);
+        rc = run || !out || !tx_contains(out, out_n, expected, gold_n);
+    }
+    printf("CHECK_D1_TERRAIN samples=%d expected_sum=%d expected_fnv=%u failed=%d\n%s",
+        samples, sum, fnv, rc, out ? out : "");
+    mm_free(out);
+    sy_unlink(source);
+    sy_unlink(wasm);
+    sy_rmdir(dir);
+    return rc;
+}
