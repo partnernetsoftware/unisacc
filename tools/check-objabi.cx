@@ -1,0 +1,161 @@
+/* tools/check-objabi.cx -- object ABI contract of `-c -funit` units linked by gcc (0.0.80 F1a).
+ *
+ *   sh ./unisacc.com tools/check-objabi.cx -- --product CANDIDATE.com
+ *
+ * Each case writes a unit and a gcc main into a private session directory (sr_default under
+ * sy_tmpdir), compiles the unit with `sh CANDIDATE -c -funit unit.c -o unit.o`, compiles the main with
+ * gcc -c, links with gcc -no-pie and runs the program; every child is bounded (compile and link 30 s,
+ * run 10 s).  Cases and expectations:
+ *   p03     int x=5; const int k=32; main returns getx()*10+(getk()==32): rc 51 (F1 .init_array).
+ *   multi   two -funit units (p03 and q: int y=3) in one link: no multiple definition of __init_u;
+ *           main returns getx()*10+(getk()==32)+gety()-3: rc 51.
+ *   p02c    add_one(0) with add_one(v)=v+11: rc 11.  Known gap until F2 (SysV entry): EXPECT-FAIL.
+ *   p07     weak weak_hook (returns 1) linked with a strong one (returns 7): rc 7.  Known gap until
+ *           F3 (STB_WEAK): EXPECT-FAIL.
+ * An EXPECT-FAIL case that passes is reported as XPASS and counted as failed, so the expectation
+ * list must be updated when F2 or F3 lands.  Prints one line per case
+ *   CASE name PASS|FAIL|EXPECT-FAIL|XPASS rc=got/want [stage=...]
+ * and the last line CHECK_OBJABI failed=N expect_fail=M; exit 0 only when failed=0.
+ * No gcc on PATH: prints CHECK_OBJABI UNMEASURED no-gcc and exits 3, so a batch never records PASS
+ * without running. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.sessionroot
+
+typedef struct oa_case {
+    const char *name;
+    const char *unit;
+    const char *unit2;
+    const char *strong;
+    const char *main;
+    int want;
+    int expect_fail;
+} oa_case;
+
+static const oa_case oa_cases[4] = {
+    {"p03", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n", 0, 0,
+     "int getx(void);int getk(void);int main(void){return getx()*10+(getk()==32);}\n", 51, 0},
+    {"multi", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n",
+     "int y=3;\nint gety(void){return y;}\n", 0,
+     "int getx(void);int getk(void);int gety(void);int main(void){return getx()*10+(getk()==32)+gety()-3;}\n", 51, 0},
+    {"p02c", "int add_one(int v){return v+11;}\n", 0, 0,
+     "int add_one(int);int main(void){return add_one(0);}\n", 11, 1},
+    {"p07", "__attribute__((weak)) int weak_hook(void){return 1;}\n", 0,
+     "int weak_hook(void){return 7;}\n",
+     "int weak_hook(void);int main(void){return weak_hook();}\n", 7, 1},
+};
+
+static char oa_dir[2048];
+
+static int oa_put(const char *name, const char *text) {
+    char path[2300];
+    if (cx_fmt(path, sizeof path, "%s/%s", oa_dir, name)) return -1;
+    return sy_write_file(path, text, (int64_t)strlen(text), 0644) ? -1 : 0;
+}
+
+static int oa_run(const char *label, char *const argv[], int secs, int *rc, char *why, int wcap) {
+    pr_result r;
+    int t = pr_run(label, argv, oa_dir[0] ? oa_dir : 0, 0, secs, &r);
+    if (t) { if (cx_fmt(why, wcap, "%s", r.why)) why[0] = 0; pr_free(&r); return -1; }
+    *rc = r.rc;
+    why[0] = 0;
+    if (r.rc && r.errn) { if (cx_fmt(why, wcap, "%.200s", r.err)) why[0] = 0; }
+    pr_free(&r);
+    {
+        int i;
+        for (i = 0; why[i]; i++) if (why[i] == '\n' || why[i] == '\t') why[i] = ' ';
+    }
+    return 0;
+}
+
+static int oa_stage(char *stage, const char *s) {
+    if (cx_fmt(stage, 64, "%s", s)) stage[0] = 0;
+    return -1;
+}
+
+static int oa_unit(const char *product, const char *src, const char *obj, char *stage, char *why) {
+    int rc = 0;
+    char *av[] = {"sh", (char *)product, "-c", "-funit", (char *)src, "-o", (char *)obj, 0};
+    if (oa_run("unisacc-c", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "unisacc-c");
+    return 0;
+}
+
+/* -1 when a stage failed (stage named), else 0 and the program exit code in *got. */
+static int oa_case_run(const char *product, const oa_case *c, int *got, char *stage, char *why) {
+    int rc = 0;
+    stage[0] = 0; why[0] = 0;
+    if (oa_put("unit.c", c->unit) || oa_put("main.c", c->main)) return oa_stage(stage, "write");
+    if (oa_unit(product, "unit.c", "unit.o", stage, why)) return -1;
+    if (c->unit2) {
+        if (oa_put("unit2.c", c->unit2)) return oa_stage(stage, "write");
+        if (oa_unit(product, "unit2.c", "unit2.o", stage, why)) return -1;
+    }
+    if (c->strong) {
+        char *av[] = {"gcc", "-c", "strong.c", "-o", "strong.o", 0};
+        if (oa_put("strong.c", c->strong)) return oa_stage(stage, "write");
+        if (oa_run("gcc-strong", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "gcc-strong");
+    }
+    {
+        char *av[] = {"gcc", "-c", "main.c", "-o", "main.o", 0};
+        if (oa_run("gcc-main", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "gcc-main");
+    }
+    {
+        char *av[8];
+        int n = 0;
+        av[n++] = "gcc"; av[n++] = "-no-pie"; av[n++] = "-o"; av[n++] = "prog"; av[n++] = "main.o"; av[n++] = "unit.o";
+        if (c->unit2) av[n++] = "unit2.o";
+        else if (c->strong) av[n++] = "strong.o";
+        av[n] = 0;
+        if (oa_run("gcc-link", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "link");
+    }
+    {
+        char *av[] = {"./prog", 0};
+        if (oa_run("run", av, 10, &rc, why, 512)) return oa_stage(stage, "run");
+        *got = rc;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *product = 0;
+    char abs[4096], id[64], why[600], stage[64];
+    int i, failed = 0, xfail = 0, rc = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--product") && i + 1 < argc) product = argv[++i];
+        else { fprintf(stderr, "check-objabi: usage: --product CANDIDATE.com\n"); return 2; }
+    }
+    if (!product) { fprintf(stderr, "check-objabi: usage: --product CANDIDATE.com\n"); return 2; }
+    if (sy_realpath(product, abs, sizeof abs) < 0) { fprintf(stderr, "check-objabi: no such product: %s\n", product); return 2; }
+    oa_dir[0] = 0;
+    {
+        char *av[] = {"gcc", "--version", 0};
+        char w[600];
+        if (oa_run("gcc-probe", av, 10, &rc, w, sizeof w) || rc) {
+            printf("CHECK_OBJABI UNMEASURED no-gcc\n");
+            return 3;
+        }
+    }
+    if (cx_fmt(id, sizeof id, "objabi-%d", (int)getpid()) || sr_default(id, oa_dir, sizeof oa_dir) ||
+        sy_mkdir_all(oa_dir, 0755)) { fprintf(stderr, "check-objabi: cannot make session directory\n"); return 2; }
+    for (i = 0; i < 4; i++) {
+        const oa_case *c = &oa_cases[i];
+        int got = -1000;
+        int t = oa_case_run(abs, c, &got, stage, why);
+        int pass = !t && got == c->want;
+        const char *verdict = pass ? (c->expect_fail ? "XPASS" : "PASS") : (c->expect_fail ? "EXPECT-FAIL" : "FAIL");
+        if (t) printf("CASE %s %s rc=-/%d stage=%s %s\n", c->name, verdict, c->want, stage, why);
+        else printf("CASE %s %s rc=%d/%d\n", c->name, verdict, got, c->want);
+        if (pass ? c->expect_fail : !c->expect_fail) failed++;
+        else if (!pass) xfail++;
+    }
+    {
+        char *av[] = {"rm", "-rf", oa_dir, 0};
+        pr_result r;
+        if (!pr_run("cleanup", av, 0, 0, 10, &r)) pr_free(&r);
+    }
+    printf("CHECK_OBJABI failed=%d expect_fail=%d\n", failed, xfail);
+    return failed ? 1 : 0;
+}

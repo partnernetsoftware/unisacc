@@ -255,6 +255,17 @@ static ol_glob *ol_find(const unsigned char *s, long n, int add) {
     return 0;
 }
 
+/* Index of the first SHT_INIT_ARRAY section (the LOCAL __init_u route), -1 none. */
+static int ol_initsec(ol_obj *o) {
+    int i;
+    i = 1;
+    while (i < o->shnum) {
+        if ((int)ol_get(ol_sh(o, i) + 4, 4) == 14) return i;
+        i = i + 1;
+    }
+    return -1;
+}
+
 static int ol_parse(ol_obj *o, const char *path) {
     unsigned char *h;
     int i, shstr;
@@ -295,6 +306,9 @@ static int ol_parse(ol_obj *o, const char *path) {
         if (ol_eq(name, nl, ".text")) o->kind[i] = 1;
         else if (ol_eq(name, nl, ".data")) o->kind[i] = 2;
         else if (ol_eq(name, nl, ".bss")) o->kind[i] = 3;
+        else if (ty == 14 && ol_eq(name, nl, ".init_array")) {
+            if (ol_initsec(o) != i) return ol_fail(2, "two init_array sections", 0, 0, path, i, 1);
+        }
         else if (ty == 2) {
             if (o->symsec >= 0) return ol_fail(2, "two symbol tables", 0, 0, path, 0, 0);
             o->symsec = i;
@@ -379,6 +393,33 @@ static int ol_globals(ol_obj *ob, int n, const char **objs) {
                 }
             }
             i = i + 1;
+        }
+        if (ol_initsec(o) >= 0) {
+            int isec = ol_initsec(o);
+            /* LOCAL __init_u: the one .init_array slot names it through its R_X86_64_64 relocation. */
+            int r, found = 0;
+            if (ol_get(ol_sh(o, isec) + 32, 8) != 8) return ol_fail(2, "init_array must hold one entry", 0, 0, objs[k], isec, 1);
+            r = 0;
+            while (r < o->shnum) {
+                unsigned char *s = ol_sh(o, r);
+                if (ol_get(s + 4, 4) == 4 && (int)ol_get(s + 44, 4) == isec) {
+                    long off = (long)ol_get(s + 24, 8);
+                    unsigned char *e;
+                    long sym;
+                    if (found || ol_get(s + 32, 8) != 24 || off < 0 || off + 24 > o->n || (int)ol_get(s + 40, 4) != o->symsec)
+                        return ol_fail(2, "bad init_array relocation", 0, 0, objs[k], r, 1);
+                    e = o->b + off;
+                    sym = (long)(ol_get(e + 8, 8) >> 32);
+                    if (ol_get(e, 8) != 0 || (ol_get(e + 8, 8) & 0xffffffffULL) != 1 || ol_get(e + 16, 8) != 0 || sym <= 0 || sym >= o->nsym)
+                        return ol_fail(2, "bad init_array relocation", 0, 0, objs[k], r, 1);
+                    if (o->hasinit) return ol_fail(4, "duplicate symbol", (const unsigned char *)"__init_u", 8, objs[k], 0, 0);
+                    o->hasinit = 1;
+                    o->initsym = sym;
+                    found = 1;
+                }
+                r = r + 1;
+            }
+            if (!found) return ol_fail(2, "init_array without relocation", 0, 0, objs[k], isec, 1);
         }
         k = k + 1;
     }
@@ -479,7 +520,7 @@ static int ol_relocs(ol_obj *ob, int n, const char **objs, int pass, long *ngot,
         while (i < o->shnum) {
             unsigned char *s = ol_sh(o, i);
             int tgt = (int)ol_get(s + 44, 4);
-            if (ol_get(s + 4, 4) == 4 && ol_get(s + 32, 8) > 0 && !(tgt > 0 && tgt < o->shnum && !o->kind[tgt] && !(ol_get(ol_sh(o, tgt) + 8, 8) & 2))) {
+            if (ol_get(s + 4, 4) == 4 && !(tgt > 0 && tgt == ol_initsec(o)) && ol_get(s + 32, 8) > 0 && !(tgt > 0 && tgt < o->shnum && !o->kind[tgt] && !(ol_get(ol_sh(o, tgt) + 8, 8) & 2))) {
                 int link = (int)ol_get(s + 40, 4);
                 long off = (long)ol_get(s + 24, 8);
                 long cnt = (long)ol_get(s + 32, 8) / 24;

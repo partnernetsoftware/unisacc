@@ -1,0 +1,262 @@
+/* tools/check-env-semantics.cx -- exec/facts/env-semantics.tsv against the product's UNISACC_* reads.
+ *
+ *   sh ./unisacc.com tools/check-env-semantics.cx -- [--product PRODUCT] [--root DIR]
+ *
+ * (1) Static (always): the (name, file) pairs read by cx/ and src/ (.cx .c .h; env("UNISACC_X" calls,
+ *     i.e. sy_env, getenv, setenv, and names held in a *_env[] table) equal the table's name x readers
+ *     pairs; a read point missing from the table, or a table pair with no read point, fails by name.
+ *     The cache root rows (unset token default-root) must equal mc_root_env[] in cx/runtime/modelcache.cx
+ *     in order, so the root decision is driven by the same names the table lists.
+ * (2) Matrix (--product): for each cache root variable the product compiles and runs p.c (rc 7, "mc-ok")
+ *     in a fresh private cwd with a private HOME, under unset, "", "0", relative, absolute unwritable and
+ *     absolute writable values; the expected effect comes from the row's tokens (off: no cache anywhere and
+ *     no entry named 0; default-root: HOME/.cache/unisacc/e3cache written; abs-used: the given root
+ *     written, unwritable root still rc 7 with no stray dir; rel-refused: one stderr line, no dir).
+ *     The repository root must not gain an entry named 0.
+ * A tools/dev-product.cx launcher pins UNISACC_CACHE_DIR to its own runcache, so --product must name a
+ * product that reads the environment as given (an installed or APE candidate, or a wrapper that only
+ * exports UNISA_CONTAINER and execs entry/candidate).
+ * Exit 0 all hold, 1 a pair or case fails (named), 2 usage or I/O.
+ */
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+
+#define MAXP 256
+static char pn[MAXP][64], pf[MAXP][128];
+static int npair;
+static char tn[MAXP][64], tf[MAXP][128];
+static int ntab;
+static char rootv[8][64], cell[8][4][512];
+static int nroot;
+static int fails, nas;
+static char base[4096];
+
+static void addp(char n[][64], char f[][128], int *k, const char *name, int nl, const char *file, int fl) {
+    int i;
+    if (nl >= 64 || fl >= 128) return;
+    for (i = 0; i < *k; i++)
+        if ((int)strlen(n[i]) == nl && !strncmp(n[i], name, nl) && (int)strlen(f[i]) == fl && !strncmp(f[i], file, fl)) return;
+    if (*k >= MAXP) return;
+    if (mm_copy(n[*k], 64, name, (size_t)nl) || mm_copy(f[*k], 128, file, (size_t)fl)) return;
+    n[*k][nl] = 0; f[*k][fl] = 0;
+    (*k)++;
+}
+
+static int has(char n[][64], char f[][128], int k, const char *name, const char *file) {
+    int i;
+    for (i = 0; i < k; i++) if (!strcmp(n[i], name) && !strcmp(f[i], file)) return 1;
+    return 0;
+}
+
+static int scan(const char *root) {
+    char cmd[8192];
+    char *out = 0, *p, *q; size_t on = 0;
+    int rc;
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && grep -rnoE 'env\\(\"UNISACC_[A-Z0-9_]+\"|_env\\[\\] = \\{.*' cx src --include=*.cx --include=*.c --include=*.h", root);
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        rc = cx_runv_timeout(v, 30, &out, &on);
+    }
+    if (rc != 0 || !out) { fprintf(stderr, "check-env-semantics: scan rc=%d\n", rc); free(out); return 1; }
+    for (p = out; *p; p = q) {
+        char *c1, *m;
+        q = strchr(p, '\n'); if (!q) q = p + strlen(p); else *q++ = 0;
+        c1 = strchr(p, ':'); if (!c1) continue;
+        m = strchr(c1 + 1, ':'); if (!m) continue;
+        while ((m = strstr(m, "\"UNISACC_"))) {
+            char *s = m + 1, *e = s;
+            while ((*e >= 'A' && *e <= 'Z') || (*e >= '0' && *e <= '9') || *e == '_') e++;
+            if (*e == '"') addp(pn, pf, &npair, s, (int)(e - s), p, (int)(c1 - p));
+            m = e;
+        }
+    }
+    free(out);
+    return 0;
+}
+
+static int table(const char *root) {
+    char path[4200], line[8192];
+    FILE *f;
+    cx_fmt(path, sizeof path, "%s/exec/facts/env-semantics.tsv", root);
+    f = fopen(path, "r");
+    if (!f) { nas++; printf("FAIL\ttable\tmissing exec/facts/env-semantics.tsv\n"); fails++; return 1; }
+    while (fgets(line, sizeof line, f)) {
+        char *col[8], *p = line, *r;
+        int n = 0, i;
+        size_t L = strlen(line);
+        if (line[0] == '#' || line[0] == '\n') continue;
+        if (L && line[L - 1] == '\n') line[L - 1] = 0;
+        while (n < 8) { col[n++] = p; p = strchr(p, '\t'); if (!p) break; *p++ = 0; }
+        if (n != 7) { printf("FAIL\ttable\tcolumns=%d want 7: %.60s\n", n, col[0]); fails++; continue; }
+        for (r = col[6]; *r; ) {
+            char *e = strchr(r, ',');
+            int k = e ? (int)(e - r) : (int)strlen(r);
+            addp(tn, tf, &ntab, col[0], (int)strlen(col[0]), r, k);
+            r += k; if (*r) r++;
+        }
+        if (!strncmp(col[2], "default-root:", 13) && nroot < 8) {
+            cx_fmt(rootv[nroot], 64, "%s", col[0]);
+            for (i = 0; i < 4; i++) cx_fmt(cell[nroot][i], 512, "%s", col[2 + i]);
+            nroot++;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+static void statics(const char *root) {
+    int i;
+    char path[4200], line[1024], *m;
+    FILE *f;
+    for (i = 0; i < npair; i++) {
+        nas++;
+        if (!has(tn, tf, ntab, pn[i], pf[i])) { printf("FAIL\tunregistered\t%s\t%s\n", pn[i], pf[i]); fails++; }
+    }
+    for (i = 0; i < ntab; i++) {
+        nas++;
+        if (!has(pn, pf, npair, tn[i], tf[i])) { printf("FAIL\tstale\t%s\t%s\n", tn[i], tf[i]); fails++; }
+    }
+    /* root rows equal mc_root_env[] in order */
+    nas++;
+    cx_fmt(path, sizeof path, "%s/cx/runtime/modelcache.cx", root);
+    f = fopen(path, "r");
+    m = 0;
+    while (f && fgets(line, sizeof line, f)) if (strstr(line, "mc_root_env[] = {")) { m = line; break; }
+    if (f) fclose(f);
+    if (!m || nroot < 1) { printf("FAIL\troot-table\tmc_root_env[] or default-root rows missing (rows=%d)\n", nroot); fails++; }
+    else {
+        char want[1024]; int at = 0;
+        want[0] = 0;
+        for (i = 0; i < nroot; i++) { cx_fmt(want + at, sizeof want - at, "%s\"%s\"", i ? ", " : "", rootv[i]); at = (int)strlen(want); }
+        if (!strstr(m, want)) { printf("FAIL\troot-table\tmc_root_env[] is not {%s}\n", want); fails++; }
+        else printf("PASS\troot-table\t{%s}\n", want);
+    }
+    printf("STATIC\tread_pairs=%d\ttable_pairs=%d\troot_vars=%d\n", npair, ntab, nroot);
+}
+
+static int es_fixture(const char *p, const char *s) {
+    FILE *f = fopen(p, "w");
+    if (!f) return 1;
+    fputs(s, f);
+    return fclose(f) != 0;
+}
+
+static int count(const char *d, char *list, size_t cap) {
+    DIR *h = opendir(d);
+    struct dirent *e;
+    int n = 0; size_t at = 0;
+    if (list) list[0] = 0;
+    if (!h) return -1;
+    while ((e = readdir(h))) {
+        size_t k;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        n++;
+        k = strlen(e->d_name);
+        if (list && at + k + 2 < cap) { if (at) list[at++] = ','; if (mm_copy(list + at, cap - at, e->d_name, k)) break; at += k; list[at] = 0; }
+    }
+    closedir(h);
+    return n;
+}
+
+static int exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
+
+static void es_rmtree(const char *d) {
+    char *v[] = {"rm", "-rf", (char *)d, 0};
+    char *o = 0; size_t on = 0;
+    cx_runv_timeout(v, 10, &o, &on);
+    free(o);
+}
+
+/* want: 0 off, 1 default-root, 2 abs-used (root written), 3 rel-refused, 4 abs-unwritable */
+static void run(const char *prod, const char *name, const char *setting, int want, const char *absdir) {
+    char cwd[4200], home[4300], src[4300], errp[4300], listing[1024], cmd[16384], hc[4400], z[4400];
+    char *out = 0; size_t on = 0;
+    int rc, n, diag = 0, hn;
+    FILE *f;
+    nas++;
+    cx_fmt(cwd, sizeof cwd, "%s/%s", base, name);
+    cx_fmt(home, sizeof home, "%s/%s.home", base, name);
+    cx_fmt(src, sizeof src, "%s/p.c", cwd);
+    cx_fmt(errp, sizeof errp, "%s/%s.err", base, name);
+    if (mkdir(cwd, 0700) || mkdir(home, 0700) || es_fixture(src, "#include <stdio.h>\nint main(void){printf(\"mc-ok\\n\");return 7;}\n")) {
+        printf("FAIL\t%s\tfixture\n", name); fails++; return;
+    }
+    cx_fmt(cmd, sizeof cmd,
+           "cd '%s' && exec env -u UNISACC_CACHE_DIR -u UNISACC_E3CACHE -u DEV_PRODUCT_CACHE -u XDG_CACHE_HOME "
+           "HOME='%s' UNISACC_RUN_CACHE=1 UNISACC_UNIT_CACHE=1 %s sh '%s' p.c 2>'%s'", cwd, home, setting, prod, errp);
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        rc = cx_runv_timeout(v, 50, &out, &on);
+    }
+    n = count(cwd, listing, sizeof listing);
+    f = fopen(errp, "r");
+    if (f) {
+        char line[1024];
+        while (fgets(line, sizeof line, f)) if (strstr(line, "modelcache: relative cache root ignored")) diag++;
+        fclose(f);
+    }
+    cx_fmt(hc, sizeof hc, "%s/.cache/unisacc/e3cache", home);
+    hn = count(hc, 0, 0);
+    cx_fmt(z, sizeof z, "%s/0", cwd);
+    if (n != 1) { printf("FAIL\t%s\tcwd entries=%d (%s), want only p.c\n", name, n, listing); fails++; }
+    else if (exists(z)) { printf("FAIL\t%s\tcwd has 0\n", name); fails++; }
+    else if (rc != 7 || !out || strcmp(out, "mc-ok\n")) { printf("FAIL\t%s\trc=%d stdout=%.40s want rc 7 mc-ok\n", name, rc, out ? out : ""); fails++; }
+    else if (want == 1 && hn < 1) { printf("FAIL\t%s\tdefault root %s not written\n", name, hc); fails++; }
+    else if (want != 1 && hn > 0) { printf("FAIL\t%s\tdefault root written though variable set\n", name); fails++; }
+    else if (want == 2 && count(absdir, 0, 0) < 1) { printf("FAIL\t%s\tabsolute root %s got no entry\n", name, absdir); fails++; }
+    else if (want == 3 && diag != 1) { printf("FAIL\t%s\tdiagnostic lines=%d want 1\n", name, diag); fails++; }
+    else if (want == 4 && exists(absdir)) { printf("FAIL\t%s\tunwritable root appeared\n", name); fails++; }
+    else printf("PASS\t%s\trc=7 cwd=p.c home_cache=%d%s\n", name, hn, want == 3 ? " diag=1" : "");
+    free(out);
+    es_rmtree(cwd); es_rmtree(home); unlink(errp);
+}
+
+static int tok(const char *c, const char *t) { size_t k = strlen(t); return !strncmp(c, t, k) && (c[k] == ':' || c[k] == ','); }
+
+int main(int argc, char **argv) {
+    const char *product = 0, *root = ".", *tmp = getenv("TMPDIR");
+    char prod[4096], rootabs[4096], s[4600], abs[4300], z[4200];
+    int i, rz;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--product") && i + 1 < argc) product = argv[++i];
+        else if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else { fprintf(stderr, "usage: check-env-semantics.cx -- [--product PRODUCT] [--root DIR]\n"); return 2; }
+    }
+    if (!realpath(root, rootabs)) { fprintf(stderr, "check-env-semantics: no root %s\n", root); return 2; }
+    if (scan(rootabs)) return 2;
+    table(rootabs);
+    statics(rootabs);
+    if (product) {
+        if (!realpath(product, prod)) { fprintf(stderr, "check-env-semantics: no product %s\n", product); return 2; }
+        cx_fmt(z, sizeof z, "%s/0", rootabs);
+        rz = exists(z);
+        cx_fmt(base, sizeof base, "%s/check-env-semantics-%d", tmp && *tmp == '/' ? tmp : "/tmp", (int)getpid());
+        if (mkdir(base, 0700)) { fprintf(stderr, "check-env-semantics: cannot create %s\n", base); return 2; }
+        run(prod, "unset", "", 1, 0);
+        for (i = 0; i < nroot; i++) {
+            const char *v = rootv[i];
+            char nm[128];
+            int w;
+            w = tok(cell[i][1], "off") ? 0 : -1;
+            cx_fmt(nm, sizeof nm, "%s-empty", v); cx_fmt(s, sizeof s, "%s=", v);
+            if (w < 0) { printf("FAIL\t%s\ttoken %.20s unchecked\n", nm, cell[i][1]); fails++; } else run(prod, nm, s, w, 0);
+            w = tok(cell[i][2], "off") ? 0 : -1;
+            cx_fmt(nm, sizeof nm, "%s-zero", v); cx_fmt(s, sizeof s, "%s=0", v);
+            if (w < 0) { printf("FAIL\t%s\ttoken %.20s unchecked\n", nm, cell[i][2]); fails++; } else run(prod, nm, s, w, 0);
+            if (!tok(cell[i][3], "abs-used") || !strstr(cell[i][3], "rel-refused")) { printf("FAIL\t%s\tother token %.30s unchecked\n", v, cell[i][3]); fails++; continue; }
+            cx_fmt(nm, sizeof nm, "%s-relative", v); cx_fmt(s, sizeof s, "%s=relroot", v);
+            run(prod, nm, s, 3, 0);
+            cx_fmt(nm, sizeof nm, "%s-abs-unwritable", v); cx_fmt(abs, sizeof abs, "/proc/self/no-such-%d/c", (int)getpid());
+            cx_fmt(s, sizeof s, "%s='%s'", v, abs);
+            run(prod, nm, s, 4, abs);
+            cx_fmt(nm, sizeof nm, "%s-abs-writable", v); cx_fmt(abs, sizeof abs, "%s/abs-%d", base, i);
+            cx_fmt(s, sizeof s, "%s='%s'", v, abs);
+            run(prod, nm, s, 2, abs);
+        }
+        nas++;
+        if (!rz && exists(z)) { printf("FAIL\trepo-root\tentry named 0 appeared in %s\n", rootabs); fails++; }
+        es_rmtree(base);
+    }
+    printf("CHECK_ENV_SEMANTICS\tassertions=%d\tfailed=%d\n", nas, fails);
+    return fails ? 1 : 0;
+}
