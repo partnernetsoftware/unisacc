@@ -1,0 +1,150 @@
+/* Tool selfcheck for tools/old-product.cx. The fixture owns its facts, release bytes,
+ * mirror, fake gh and caches. No scenario reaches the network: the download path runs
+ * a private gh stub that counts its invocations in a file the producer never sees. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char root[4096],scratch[4096],mirror[4096],exe[4096],asset[4096],table[4096];
+static char bindir[4096],ghsrc[4096],ghcount[4096],envpath[4200],envsrc[4200],envcount[4200];
+static const char *sample="#!/bin/sh\nprintf 'unisacc 0.0.80\\n'\n# pad\n";
+static const char *flipped="#!/bin/sh\nprintf 'unisacc 0.0.80\\n'\n# qad\n";
+static const char *s79="#!/bin/sh\nprintf 'unisacc 0.0.79\\n'\n# pad\n";
+static const char *changed="#!/bin/sh\nprintf 'unisacc 0.0.79\\n'\n# pad\n";
+static char sha[65],sha79[65];
+static int checks,failed;
+static void stop(const char *why) { fprintf(stderr,"check-old-product: %s\n",why); exit(2); }
+static void ck(int ok,const char *label) {
+    printf("%s\t%s\n",ok?"ok":"FAIL",label); checks++; if (!ok) failed++;
+}
+static void path(char *out,const char *dir,const char *name) {
+    if (cx_path_join(out,4096,dir,name)) stop("path-bound");
+}
+static void put(const char *name,const char *s) {
+    if (sy_write_file(name,s,strlen(s),0600)) stop("fixture-write");
+}
+static void facts(const char *h,long bytes) {
+    char s[1024];
+    if (cx_fmt(s,sizeof s,"version\trepo\ttag\tasset\tbytes\tsha256\n0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%s\n"
+        "0.0.79\tpartnernetsoftware/unisacc\tv0.0.79\tunisacc.com\t%ld\t%s\n",bytes,h,(long)strlen(s79),sha79)) stop("row-bound");
+    put(table,s);
+}
+static int call(char **av,char **env,np_result *r) {
+    char why[256]; int err=np_run(av,scratch,env,18,r,why,sizeof why);
+    if (err || r->residue) { fprintf(stderr,"child transport: %s\n",why); return -1; }
+    return r->rc;
+}
+static int judge(int rc,np_result *r,int want,const char *marker) {
+    int ok=rc==want && (want ? r->err && strstr(r->err,marker) : r->out && strstr(r->out,"\tPREPARED\t") && strstr(r->out,marker));
+    if (!ok) fprintf(stderr,"trial rc=%d expected=%d %s %s\n",rc,want,r->out?r->out:"",r->err?r->err:"");
+    np_free(r); return ok;
+}
+static int trial(char *version,char *cache,int want,const char *marker) {
+    char *av[]={exe,version,cache,"--mirror",mirror,0}; np_result r={0};
+    return judge(call(av,0,&r),&r,want,marker);
+}
+static int gh_trial(char *version,char *cache,int want,const char *marker) {
+    char *av[]={exe,version,cache,0},*env[]={envpath,envsrc,envcount,0}; np_result r={0};
+    return judge(call(av,env,&r),&r,want,marker);
+}
+static long downloads(void) {
+    unsigned char *d; int64_t n; long c=0;
+    if (sy_read_file(ghcount,&d,&n,4096)) return 0;
+    for (int64_t i=0;i<n;i++) c+=d[i]=='\n';
+    mm_free(d); return c;
+}
+static int table_refused(const char *bytes,long n,const char *marker) {
+    if (sy_write_file(table,bytes,n,0600)) stop("fixture-write");
+    char cache[4096]; path(cache,scratch,"tablecache");
+    return trial("0.0.80",cache,2,marker);
+}
+int main(void) {
+    char cache[4096],cold[4096],tools[4096],dest[4096],keydir[4096],other[65],ape[4096],source[4096],gh[4096],ghc[4096],dual[4096],k79[4096];
+    if (!getcwd(root,sizeof root) || sy_mkdtemp(sy_tmpdir(),"check-old-product",scratch,sizeof scratch)) stop("scratch");
+    path(tools,scratch,"tools"); path(mirror,scratch,"mirror"); path(bindir,scratch,"bin");
+    if (sy_mkdir(tools,0700) || sy_mkdir(mirror,0700) || sy_mkdir(bindir,0700)) stop("setup");
+    path(exe,scratch,"producer"); path(asset,mirror,"unisacc.com"); path(table,tools,"old-product-assets.tsv");
+    path(ghsrc,scratch,"ghsrc"); path(ghcount,scratch,"ghcount"); path(gh,bindir,"gh");
+    path(ape,root,"unisacc.com"); path(source,root,"tools/old-product.cx");
+    put(gh,"#!/bin/sh\nprintf 'call\\n' >> \"$GH_COUNT\"\n[ -f \"$GH_SRC\" ] || exit 1\nd=\nwhile [ $# -gt 0 ]; do [ \"$1\" = --dir ] && d=$2; shift; done\n"
+        "sleep 1\ncp \"$GH_SRC\" \"$d/unisacc.com\"\n");
+    if (sy_chmod(gh,0700)) stop("gh chmod");
+    const char *pv=getenv("PATH");
+    if (cx_fmt(envpath,sizeof envpath,"PATH=%s:%s",bindir,pv?pv:"/usr/bin:/bin") || cx_fmt(envsrc,sizeof envsrc,"GH_SRC=%s",ghsrc) ||
+        cx_fmt(envcount,sizeof envcount,"GH_COUNT=%s",ghcount)) stop("env-bound");
+    char *build[]={"sh",ape,source,"-o",exe,0}; char why[256]; np_result b={0};
+    if (np_run(build,root,0,25,&b,why,sizeof why) || b.rc) stop("compile producer");
+    np_free(&b);
+    long n=strlen(sample);
+    if (sy_sha256_any_hex(sample,n,sha) || sy_sha256_any_hex(changed,strlen(changed),other) ||
+        sy_sha256_any_hex(s79,strlen(s79),sha79)) stop("hash");
+    path(cache,scratch,"cache"); path(cold,scratch,"cold"); path(keydir,cache,sha); path(dest,keydir,"unisacc.com");
+    facts(sha,n);
+    ck(trial("0.0.81",cache,2,"unknown-version"),"unregistered version refused");
+    ck(trial("0.0.80",cache,3,"UNVERIFIED\treason=mirror-unavailable"),"offline cold cache via mirror");
+    ck(gh_trial("0.0.80",cache,3,"UNVERIFIED\treason=download-unavailable") && downloads()==1,"no network no cache rc3 via gh");
+    if (sy_unlink(ghcount)) stop("reset count");
+    put(ghsrc,sample);
+    char *trio[]={"sh","-c","\"$1\" 0.0.80 \"$2\" & a=$!; \"$1\" 0.0.80 \"$2\" & b=$!; \"$1\" 0.0.80 \"$2\" & c=$!; wait $a && wait $b && wait $c","check",exe,cache,0};
+    char *env[]={envpath,envsrc,envcount,0};
+    np_result r={0}; int rc=call(trio,env,&r);
+    const char *dl=r.out?strstr(r.out,"source=download\n"):0;
+    int hits=0; for (const char *q=r.out; q && (q=strstr(q,"source=cache\n")); q++) hits++;
+    ck(rc==0 && dl && !strstr(dl+1,"source=download\n") && hits==2,"three cold callers receipts one download two hits");
+    ck(downloads()==1,"independent gh counter records exactly one real download");
+    np_free(&r);
+    if (sy_unlink(ghsrc)) stop("disconnect gh");
+    ck(gh_trial("0.0.80",cache,0,"source=cache") && downloads()==1,"offline good cache hit without download");
+    ck(trial("0.0.80",cache,0,"source=cache"),"offline good cache via mirror arg");
+    put(asset,changed);
+    ck(trial("0.0.80",cold,2,"asset-sha256"),"download digest mismatch");
+    put(asset,flipped);
+    ck(strlen(flipped)==(size_t)n && trial("0.0.80",cold,2,"asset-sha256"),"one byte flipped download refused by digest");
+    put(asset,sample);
+    facts(sha,n+1);
+    ck(trial("0.0.80",cold,2,"asset-size"),"download size mismatch");
+    facts(other,strlen(changed)); put(asset,changed);
+    ck(trial("0.0.80",cold,2,"asset-version"),"valid digest wrong reported version");
+    facts(sha,n);
+    put(asset,flipped);
+    ck(trial("0.0.80",cache,0,"source=cache"),"failed downloads preserve good cache");
+    if (sy_chmod(dest,0600)) stop("tamper chmod");
+    put(dest,flipped); put(asset,sample);
+    ck(trial("0.0.80",cache,2,"asset-sha256"),"one byte flipped cache refused on hit");
+    put(dest,sample); if (sy_chmod(dest,0500)) stop("restore chmod");
+    ck(trial("0.0.80",cold,0,"source=download"),"failed downloads did not publish");
+    /* two identities share one cache root */
+    path(dual,scratch,"dual"); path(k79,dual,sha79);
+    ck(trial("0.0.80",dual,0,"source=download"),"dual root 0.0.80 published");
+    put(asset,s79);
+    ck(trial("0.0.79",dual,0,"source=download") ,"dual root 0.0.79 published");
+    ck(trial("0.0.80",dual,0,"source=cache") && trial("0.0.79",dual,0,"source=cache"),"dual root both identities hit separately");
+    put(asset,flipped);
+    char k80[4096],d80[4096]; path(k80,dual,sha); path(d80,k80,"unisacc.com");
+    if (sy_chmod(d80,0600) || sy_unlink(d80)) stop("drop 0.0.80");
+    ck(trial("0.0.80",dual,2,"asset-sha256") && trial("0.0.79",dual,0,"source=cache"),"bad 0.0.80 download leaves 0.0.79 cache valid");
+    if (sy_unlink(asset)) stop("disconnect mirror");
+    /* registry parser negatives */
+    static const char hdr[]="version\trepo\ttag\tasset\tbytes\tsha256\n";
+    char row[1024];
+    { if (cx_fmt(row,sizeof row,"%s0.0.80@x\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%s\n",hdr,n,sha)) stop("row-bound");
+      long k=strlen(row); char *at=strchr(row,'@'); if (!at) stop("nul-marker"); *at=0;
+      ck(table_refused(row,k,"registry-nul"),"embedded NUL in registry refused"); }
+#define BADROW(fmtrow,marker,label) do { if (cx_fmt(row,sizeof row,"%s" fmtrow,hdr,n,sha)) stop("row-bound"); ck(table_refused(row,strlen(row),marker),label); } while (0)
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\n%.0s","registry-row","five fields refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\t\tunisacc.com\t%ld\t%s\n","registry-row","empty field refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld1a\t%s\n","registry-size","nondigit size refused");
+    BADROW("0.0.80\tother/unisacc\tv0.0.80\tunisacc.com\t%ld\t%s\n","registry-identity","foreign repo refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.79\tunisacc.com\t%ld\t%s\n","registry-identity","tag version mismatch refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.zip\t%ld\t%s\n","registry-identity","unregistered asset name refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%.63s\n","registry-identity","short digest refused");
+    BADROW("0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%sX\n","registry-row","long digest refused (field bound)");
+    if (cx_fmt(row,sizeof row,"%s0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%s\n0.0.80\tpartnernetsoftware/unisacc\tv0.0.80\tunisacc.com\t%ld\t%s\n",hdr,n,sha,n,sha)) stop("row-bound");
+    ck(table_refused(row,strlen(row),"duplicate-version"),"duplicate version refused");
+    ck(table_refused("version\trepo\ttag\tasset\tbytes\n",29,"registry-header"),"bad header refused");
+    printf("CHECK_OLD_PRODUCT\tchecks=%d\tfailed=%d\n",checks,failed);
+    return failed?1:0;
+}

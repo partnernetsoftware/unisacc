@@ -1,0 +1,114 @@
+/* From the trusted checkout root: old-product VERSION ABS_CACHE [--mirror ABS_DIR].
+ * Only registered release assets. A mirror supplies bytes under the same identity checks.
+ * rc 0 PREPARED, 2 invalid facts, bytes or local storage, 3 unavailable material. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use tsvx.read
+#pragma unisa use text.iter
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+typedef struct { char version[32], repo[128], tag[40], asset[64], sha[65]; long bytes; } Asset;
+static int refused(const char *why) { fprintf(stderr,"OLD_PRODUCT\tREFUSE\treason=%s\n",why); return 2; }
+static int unavailable(const char *why) { fprintf(stderr,"OLD_PRODUCT\tUNVERIFIED\treason=%s\n",why); return 3; }
+static int field(tx_iter_t *it,int i,char *dest,long cap) {
+    long at,n;
+    return tv_field(it,i,&at,&n) || n<=0 || tx_copy(dest,cap,it->s+at,n);
+}
+static int select_asset(const char *version,Asset *selected) {
+    unsigned char *data; int64_t len; tx_iter_t it; int cols,found=0,rc;
+    if (sy_read_file("tools/old-product-assets.tsv",&data,&len,65536)) return refused("registry-read");
+    if (memchr(data,0,len)) return refused("registry-nul");
+    tx_iter_init(&it,(char *)data,len);
+    if (tv_row_next(&it,&cols)!=1 || !tx_same(it.s+it.off,it.len,"version\trepo\ttag\tasset\tbytes\tsha256",35)) return refused("registry-header");
+    while ((rc=tv_row_next(&it,&cols))==1) {
+        Asset a={0}; char bytes[12],tag[40]; int i;
+        if (cols!=6 || field(&it,0,a.version,sizeof a.version) || field(&it,1,a.repo,sizeof a.repo) ||
+            field(&it,2,a.tag,sizeof a.tag) || field(&it,3,a.asset,sizeof a.asset) ||
+            field(&it,4,bytes,sizeof bytes) || field(&it,5,a.sha,sizeof a.sha)) return refused("registry-row");
+        if (cx_fmt(tag,sizeof tag,"v%s",a.version) || !tx_eqz(tag,a.tag) ||
+            !tx_eqz(a.repo,"partnernetsoftware/unisacc") || !tx_eqz(a.asset,"unisacc.com") ||
+            strspn(a.version,"0123456789.")!=strlen(a.version) || strlen(a.sha)!=64 ||
+            strspn(a.sha,"0123456789abcdef")!=64) return refused("registry-identity");
+        for (i=0;bytes[i];i++) {
+            if (bytes[i]<'0' || bytes[i]>'9' || a.bytes>134217728/10) return refused("registry-size");
+            a.bytes=a.bytes*10+bytes[i]-'0';
+        }
+        if (!a.bytes || a.bytes>134217728) return refused("registry-size");
+        if (tx_eqz(version,a.version)) { if (found++) return refused("duplicate-version"); *selected=a; }
+    }
+    mm_free(data);
+    return rc<0 ? refused("registry-row") : found ? 0 : refused("unknown-version");
+}
+static int private_dir(const char *p) {
+    sy_stat_t st; int rc=sy_mkdir(p,0700);
+    return (rc && rc!=-EEXIST) || sy_lstat(p,&st) || st.kind!='d' || st.uid!=sy_uid() || (st.mode&0077);
+}
+static int verify(const Asset *a,char *p) {
+    sy_stat_t st; unsigned char *bytes; int64_t n; char sha[65],want[96],why[256]; np_result r={0};
+    if (sy_lstat(p,&st) || st.kind!='f') return refused("asset-type");
+    if (st.size!=a->bytes) return refused("asset-size");
+    if (sy_read_file(p,&bytes,&n,a->bytes)) return refused("asset-read");
+    int bad=n!=a->bytes || sy_sha256_any_hex(bytes,n,sha) || !tx_eqz(sha,a->sha);
+    mm_free(bytes);
+    if (bad) return refused("asset-sha256");
+    char *argv[]={"sh",p,"--version",0};
+    if (cx_fmt(want,sizeof want,"unisacc %s\n",a->version)) return refused("version-bound");
+    bad=np_run(argv,0,0,5,&r,why,sizeof why) || r.rc || r.residue || !tx_same(r.out,r.outn,want,strlen(want));
+    np_free(&r);
+    return bad ? refused("asset-version") : 0;
+}
+static int fetch(const Asset *a,const char *mirror,char *stage,char *tmp) {
+    if (mirror) {
+        char src[4096]; sy_stat_t st;
+        if (cx_path_join(src,sizeof src,mirror,a->asset)) return refused("mirror-path");
+        int rc=sy_lstat(src,&st);
+        if (rc==-ENOENT) return unavailable("mirror-unavailable");
+        if (rc || st.kind!='f') return refused("mirror-type");
+        if (st.size!=a->bytes) return refused("asset-size");
+        return sy_copy(src,tmp,0600) ? refused("mirror-copy") : 0;
+    }
+    char *argv[]={"gh","release","download",(char *)a->tag,"--repo",(char *)a->repo,"--pattern",(char *)a->asset,"--dir",stage,0};
+    char why[256]; np_result r={0};
+    int bad=np_run(argv,0,0,25,&r,why,sizeof why) || r.rc || r.residue;
+    np_free(&r);
+    return bad ? unavailable("download-unavailable") : 0;
+}
+int main(int argc,char **argv) {
+    Asset a={0}; char dir[4096],path[4096],lock[4096],stage[4096],tmp[4096]; sy_stat_t st;
+    if ((argc!=3 && argc!=5) || argv[2][0]!='/' ||
+        (argc==5 && (!tx_eqz(argv[3],"--mirror") || argv[4][0]!='/'))) return refused("usage");
+    int rc=select_asset(argv[1],&a);
+    if (rc) return rc;
+    if (cx_path_join(dir,sizeof dir,argv[2],a.sha) || cx_path_join(path,sizeof path,dir,a.asset) ||
+        cx_path_join(lock,sizeof lock,dir,"fetch.lock")) return refused("cache-path");
+    if (private_dir(argv[2]) || private_dir(dir)) return refused("cache-directory");
+    int fd=sy_open(lock,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+    if (fd<0 || sy_fstat(fd,&st) || st.kind!='f') return refused("cache-lock");
+    long deadline=sy_now_ms()+18000;
+    while ((rc=sy_flock(fd,2|4))!=0) { /* sy_flock: exclusive, nonblocking */
+        if (rc!=-EAGAIN && rc!=-EINTR) return refused("cache-lock");
+        if (sy_now_ms()>=deadline) return unavailable("cache-lock-timeout");
+        sy_sleep_ms(25);
+    }
+    const char *source="cache";
+    rc=sy_lstat(path,&st);
+    if (!rc) rc=verify(&a,path);
+    else if (rc!=-ENOENT) rc=refused("cache-stat");
+    else {
+        source="download";
+        if (sy_mkdtemp(dir,"incoming",stage,sizeof stage)) return refused("stage-directory");
+        if (cx_path_join(tmp,sizeof tmp,stage,a.asset)) return refused("stage-path");
+        rc=fetch(&a,argc==5?argv[4]:0,stage,tmp);
+        if (!rc) rc=verify(&a,tmp);
+        if (!rc && (sy_chmod(tmp,0500) || sy_rename(tmp,path))) rc=refused("cache-publish");
+        sy_unlink(tmp); sy_rmdir(stage);
+    }
+    sy_close(fd);
+    if (!rc) printf("OLD_PRODUCT\tPREPARED\tversion=%s\tsha256=%s\tbytes=%ld\tpath=%s\tsource=%s\n",a.version,a.sha,a.bytes,path,source);
+    return rc;
+}
