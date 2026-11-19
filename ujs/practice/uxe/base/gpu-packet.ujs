@@ -102,8 +102,10 @@ native function gpu_shader_copy(dst:i64,src:i64,size:i64,padded:i64) i64 {
   return dst+padded;
 }
 
-native function gpu_packet_draw(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64,texture:i64,faces:i64) i64 {
-  if(count<3 || count>2340 || count%3!=0 || vertices%4!=0 ||
+native function gpu_packet_draw(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64,
+                                texture:i64,faces:i64,topology:i64) i64 {
+  if(count<1 || count>2340 || (topology==0 && (count<3 || count%3!=0)) ||
+     (topology>=2 && count<2) || (topology==2 && count%2!=0) || vertices%4!=0 ||
      shader%4!=0 || !gpu_draw_range(shader,GpuShaderSource.size,packet,capacity) ||
      !gpu_draw_range(vertices,count*28,packet,capacity)) { return 0-1; }
   let vs=ux_u32(shader+GpuShaderSource.vertex);
@@ -118,6 +120,7 @@ native function gpu_packet_draw(packet:i64,capacity:i64,vertices:i64,count:i64,s
   let texels=0;
   let rgba=0;
   let op=4;
+  if(topology>0) { op=15; }
   if(texture>=0) {
     if(texture%4!=0 || !gpu_draw_range(texture,GpuTextureSource.size,packet,capacity)) { return 0-1; }
     let width=ux_u32(texture+GpuTextureSource.width);
@@ -139,7 +142,7 @@ native function gpu_packet_draw(packet:i64,capacity:i64,vertices:i64,count:i64,s
   let n=ux_u32_put(command+8,count);
   let v=ux_u32_put(command+12,vn);
   let f=ux_u32_put(command+16,fn);
-  let reserved=ux_u32_put(command+20,0);
+  let reserved=ux_u32_put(command+20,topology);
   let frag=gpu_shader_copy(command+24,vs,vn,vp);
   let data=gpu_shader_copy(frag,fs,fn,fp);
   let copied=uxe_copy_record(data,vertices,count*28);
@@ -152,17 +155,22 @@ native function gpu_packet_draw(packet:i64,capacity:i64,vertices:i64,count:i64,s
 }
 
 native function GpuPacket_draw(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64) i64 {
-  return gpu_packet_draw(packet,capacity,vertices,count,shader,0-1,0);
+  return gpu_packet_draw(packet,capacity,vertices,count,shader,0-1,0,0);
 }
 
 native function GpuPacket_drawTexture(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64,texture:i64) i64 {
   if(texture<0) { return 0-1; }
-  return gpu_packet_draw(packet,capacity,vertices,count,shader,texture,1);
+  return gpu_packet_draw(packet,capacity,vertices,count,shader,texture,1,0);
 }
 
 native function GpuPacket_drawCubeTexture(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64,texture:i64) i64 {
   if(texture<0) { return 0-1; }
-  return gpu_packet_draw(packet,capacity,vertices,count,shader,texture,6);
+  return gpu_packet_draw(packet,capacity,vertices,count,shader,texture,6,0);
+}
+
+native function GpuPacket_drawPrimitive(packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64,topology:i64) i64 {
+  if(topology<1 || topology>4) { return 0-1; }
+  return gpu_packet_draw(packet,capacity,vertices,count,shader,0-1,0,topology);
 }
 
 native function GpuPacket_clearDepth(packet:i64,capacity:i64,depth:f64) i64 {

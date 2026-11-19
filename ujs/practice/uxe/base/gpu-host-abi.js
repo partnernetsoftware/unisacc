@@ -5,7 +5,7 @@ const bufferSize = 6291456;
 const headerSize = 24;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-function readDraw(packet, at, span, faces, limit) {
+function readDraw(packet, at, span, faces, limit, primitive) {
   if (span < 24) return null;
   const word = field => packet.getUint32(at + field, true);
   const count = word(8);
@@ -15,7 +15,10 @@ function readDraw(packet, at, span, faces, limit) {
   const fragmentSpan = Math.ceil(fragmentBytes / 4) * 4;
   const data = 24 + vertexSpan + fragmentSpan;
   const end = data + count * 28;
-  if (count === 0 || count % 3 !== 0 || word(20) !== 0 ||
+  const topology = word(20);
+  if (!count || count > 2340 || (primitive ? topology < 1 || topology > 4 : topology !== 0) ||
+      (!topology && (count < 3 || count % 3 !== 0)) || (topology >= 2 && count < 2) ||
+      (topology === 2 && count % 2 !== 0) ||
       vertexBytes < 1 || vertexBytes > 4096 || fragmentBytes < 1 || fragmentBytes > 4096 ||
       (faces ? end + 20 > span : end !== span)) return null;
   let texture = null;
@@ -47,7 +50,7 @@ function readDraw(packet, at, span, faces, limit) {
     if (!Number.isFinite(value)) return null;
     vertices[i] = value;
   }
-  return { count, vertex, fragment, vertices, texture };
+  return { count, vertex, fragment, vertices, texture, topology };
 }
 
 function makeDraw(gl, draw) {
@@ -88,7 +91,7 @@ function runCommands(gl, commands, targets, packet) {
   const draws = new Map();
   try {
     for (const command of commands) {
-      if (command[0] !== 4 && command[0] !== 13 && command[0] !== 14) continue;
+      if (command[0] !== 4 && command[0] !== 13 && command[0] !== 14 && command[0] !== 15) continue;
       const setup = makeDraw(gl, command[1]);
       if (!setup) return gl.isContextLost() ? -6n : -7n;
       draws.set(command, setup);
@@ -114,7 +117,7 @@ function runCommands(gl, commands, targets, packet) {
         gl.blendEquation(gl.FUNC_ADD);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       }
-      if (opcode === 4 || opcode === 13 || opcode === 14) {
+      if (opcode === 4 || opcode === 13 || opcode === 14 || opcode === 15) {
         const { program, buffer, texture } = draws.get(command);
         gl.useProgram(program);
         let target, previousTexture;
@@ -144,7 +147,8 @@ function runCommands(gl, commands, targets, packet) {
         gl.enableVertexAttribArray(1);
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
         gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 28, 12);
-        gl.drawArrays(gl.TRIANGLES, 0, a.count);
+        const modes = [gl.TRIANGLES, gl.POINTS, gl.LINES, gl.LINE_STRIP, gl.LINE_LOOP];
+        gl.drawArrays(modes[a.topology], 0, a.count);
         if (texture) gl.bindTexture(target, previousTexture);
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
@@ -230,10 +234,10 @@ export function createGpuSubmit(gl, memory, generation, targets = null) {
         const state = [word(at + 8), word(at + 12), word(at + 16)];
         if (state.some(value => value > 1)) return -4n;
         commands.push([opcode, ...state]);
-      } else if (opcode === 4 || opcode === 13 || opcode === 14) {
-        const faces = opcode === 4 ? 0 : opcode === 13 ? 1 : 6;
+      } else if (opcode === 4 || opcode === 13 || opcode === 14 || opcode === 15) {
+        const faces = opcode === 13 ? 1 : opcode === 14 ? 6 : 0;
         const limit = faces ? gl.getParameter(faces === 6 ? gl.MAX_CUBE_MAP_TEXTURE_SIZE : gl.MAX_TEXTURE_SIZE) : 0;
-        const draw = readDraw(packet, at, span, faces, limit);
+        const draw = readDraw(packet, at, span, faces, limit, opcode === 15);
         if (!draw) return -4n;
         commands.push([opcode, draw]);
       } else if (opcode === 5) {
