@@ -1574,6 +1574,7 @@ static int pmul(Lex *L, Prog *P) {
       oi=OP_MOD; of=OP_MOD;
     } else break;
     next(L); int ty2 = ppostfix(L, P); if (!ty2) return 0;
+    if (oi == OP_MOD && ty2 == TY_F64) { P->err = "f64 mod"; return 0; }
     ty = bin_finish(P, ty, ty2, oi, of); if (!ty) return 0;
   }
   return ty;
@@ -1813,9 +1814,15 @@ static int pstmt(Lex *L, Prog *P) {
         L->pos = save_pos; L->tok = save_tok; L->num = save_num; L->fnum = save_fnum;
         L->tok_start = save_ts; strncpy(L->id, save_id, 64);
       }
+      int previous = loc(P, nm, 0);
+      int previous_type = previous < 0 ? TY_ERR : P->lty[previous];
       i = loc(P, nm, 1); if (i < 0) return 0;
       {
         int ty = pexpr(L, P); if (!ty) return 0;
+        // The emitter uses one Wasm local type per slot, including all earlier stores.
+        if (previous >= 0 && previous_type != ty) {
+          P->err = "local redeclaration changes type"; return 0;
+        }
         P->lty[i] = (uint8_t)ty;
         if (ty == TY_LIST) P->lety[i] = (uint8_t)P->list_elem_ty;
         if (!emit(P, OP_STORE, i)) return 0;
