@@ -211,7 +211,7 @@ export uxe_frame(now:i64) i64 version 1;
 | M11 | 后处理(EffectComposer、RenderPass、Bloom、Outline、FXAA 等 C 栏)、Helper 13 种、Audio 6 种 | 16 到 22 | G-pixel 与 PCM 门 |
 | M12 | 软件路径接入同一场景图;D1 到 D4 基于新基座重整;删除页面产品重复的光栅化;对标表最终判定与未达项原因表;99% 复核由独立 `.cx` 重算 | 8 到 12 | 所有者验收,D5 放行 |
 
-M5 Toon 缺口。两次 Chrome 对照中，UXE 侧颜色命中金值，r160 侧内部采样为全黑。第一次使用默认梯度，第二次使用 RedFormat 渐变图，两次各 6 个通道不匹配，分别为 `/tmp/devsvc-flow-21554702324-3649978/out/x.out` 和 `/tmp/devsvc-flow-21554765085-3661842/out/x.out`。后续先隔离 WebGL1 下的格式和着色器结果。单通道纹理支持只是待验证的假设。
+M5 Toon。对照使用色值 0x804008、白色方向灯强度 pi、法线与光线点积 0.25，纹理红通道为 179、179、179、255。r160 的 WebGL1 默认着色器报 GL_OES_standard_derivatives 未启用。默认、RedFormat、RGBA8 三组黑色，RedFormat 后读回 GL 错误 1282，详见 `/tmp/devsvc-flow-21556397298-3996671/out/x.out`。同参数的 r160 WebGL2 三组皆为 [108,53,6,255]，无着色器错误，详见 `/tmp/devsvc-flow-21556442652-4004264/out/x.out`。UXE 已对齐显式 RGBA8 梯度，点积改为 0.5 的反例转红。默认梯度在非零导数下的过渡仍待补。
 
 M12 上下文恢复缺口。M4 已测资源代数换代与丢失时的拒绝。M12 须用真时钟验证 WebGL 恢复事件、重建同一渲染目标、旧句柄拒绝及新目标像素读回。
 

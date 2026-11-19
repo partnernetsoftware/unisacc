@@ -1,6 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <pre id="gpu">pending</pre>
+<pre id="toon"></pre>
 <script type="module">
 import {
   BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
@@ -9,7 +10,9 @@ import {
   LinearToneMapping, ReinhardToneMapping,
   LinearFilter, LinearSRGBColorSpace, NearestFilter, NoToneMapping,
   LinearMipmapLinearFilter, MirroredRepeatWrapping, RepeatWrapping,
-  Mesh, MeshBasicMaterial, MeshLambertMaterial, MeshPhongMaterial, MeshStandardMaterial, OneFactor, OrthographicCamera,
+  RedFormat, SRGBColorSpace,
+  Mesh, MeshBasicMaterial, MeshLambertMaterial, MeshPhongMaterial, MeshStandardMaterial, MeshToonMaterial,
+  OneFactor, OrthographicCamera,
   OneMinusSrcAlphaFactor, RawShaderMaterial, ReplaceStencilOp, ReverseSubtractEquation, REVISION,
   Scene, SrcAlphaFactor, SubtractEquation, WebGLRenderer,
 } from "./three.module.js";
@@ -30,10 +33,10 @@ function clipValues(gl) {
   return [Number(gl.isEnabled(gl.SCISSOR_TEST)), ...gl.getParameter(gl.SCISSOR_BOX),
     gl.getParameter(gl.DEPTH_CLEAR_VALUE), gl.getParameter(gl.STENCIL_CLEAR_VALUE), ...pixels(gl)];
 }
-function context() {
+function context(api = "webgl") {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
-  const gl = canvas.getContext("webgl", options);
+  const gl = canvas.getContext(api, options);
   if (!gl) throw new Error("WebGL unavailable");
   return { canvas, gl };
 }
@@ -112,6 +115,8 @@ try {
   const actualLinear = pixels(gl);
   const reinhardStatus = Number(step(53n));
   const actualReinhard = pixels(gl);
+  const toonStatus = Number(step(location.search === "?toon-mutate" ? 56n : 55n));
+  const actualToon = pixels(gl);
   const sampledNearestStatus = Number(step(location.search === "?sampled-mutate" ? 62n : 60n));
   const actualSampledNearest = pixels(gl);
   const sampledLinearStatus = Number(step(61n));
@@ -315,6 +320,45 @@ try {
   });
   rawCube.dispose();
   cubeMap.dispose();
+  const toonHost = context("webgl2");
+  const toonRenderer = new WebGLRenderer({ canvas: toonHost.canvas, context: toonHost.gl, ...options });
+  toonRenderer.setSize(size, size, false);
+  toonRenderer.setClearColor(0, 1);
+  toonRenderer.outputColorSpace = SRGBColorSpace;
+  const shaderErrors = [];
+  toonRenderer.debug.onShaderError = (gl, program, vertex, fragment) => {
+    shaderErrors.push(gl.getProgramInfoLog(program), gl.getShaderInfoLog(vertex), gl.getShaderInfoLog(fragment));
+  };
+  const toonScene = new Scene();
+  const toonLight = new DirectionalLight(0xffffff, Math.PI);
+  toonLight.position.set(Math.sqrt(15), 0, 1);
+  const toon = new MeshToonMaterial({ color: 0x804008 });
+  toonScene.add(new Mesh(basicGeometry, toon), toonLight);
+  toonRenderer.render(toonScene, ortho);
+  const defaultToon = pixels(toonHost.gl).slice(0, 4);
+  const redGradient = new DataTexture(new Uint8Array([179, 179, 179, 255]), 4, 1, RedFormat);
+  redGradient.needsUpdate = true;
+  toon.gradientMap = redGradient;
+  toon.needsUpdate = true;
+  toonRenderer.render(toonScene, ortho);
+  const singleToon = pixels(toonHost.gl).slice(0, 4);
+  const singleError = toonHost.gl.getError();
+  redGradient.dispose();
+  const rgbaGradient = new DataTexture(new Uint8Array([
+    179, 0, 0, 255, 179, 0, 0, 255, 179, 0, 0, 255, 255, 0, 0, 255,
+  ]), 4, 1);
+  rgbaGradient.needsUpdate = true;
+  toon.gradientMap = rgbaGradient;
+  toon.needsUpdate = true;
+  toonRenderer.render(toonScene, ortho);
+  const referenceToon = pixels(toonHost.gl);
+  document.querySelector("#toon").textContent = JSON.stringify({
+    defaultToon, singleToon, singleError, rgbaToon: referenceToon.slice(0, 4),
+    context: toonHost.gl.getParameter(toonHost.gl.VERSION), shaderErrors,
+  });
+  rgbaGradient.dispose();
+  toon.dispose();
+  toonRenderer.dispose();
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
@@ -328,7 +372,7 @@ try {
     sampledRepeatStatus, ...actualSampledRepeat, ...referenceSampledRepeat,
     sampledMirrorStatus, ...actualSampledMirror, ...referenceSampledMirror,
     sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle,
-    ...cubeResults, sampledNearestStatus, ...referenceCanvas]);
+    ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon]);
 } catch (error) {
   result.textContent = String(error);
 }
