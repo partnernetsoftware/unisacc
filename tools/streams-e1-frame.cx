@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
     size_t cap = 1 << 16, k, i, tn = 0, pay = 0; unsigned count = 0; const unsigned char *tab = 0; ssize_t r;
     unsigned char *out; const char *side = getenv("UNISA_ATTRIBUTES");
     if (argc > 1 && !strcmp(argv[1], "--")) { argc--; argv++; }
-    if (argc != 2 || (strcmp(argv[1], "to1") && strcmp(argv[1], "check1") && strcmp(argv[1], "attrs"))) return bad("usage: -- to1|check1|attrs");
+    if (argc != 2 || (strcmp(argv[1], "to1") && strcmp(argv[1], "check1") && strcmp(argv[1], "attrs") && strcmp(argv[1], "side1"))) return bad("usage: -- to1|check1|attrs|side1");
     if (!strcmp(argv[1], "attrs")) {
         /* 旧合同: UNISA_ATTRIBUTES 外部侧车须为 LE32 count + count*9 记录, 否则 run: 拒绝 rc2; 文件不存在视为未给。 */
         int fd; unsigned char h[4]; off_t sz;
@@ -26,6 +26,21 @@ int main(int argc, char **argv) {
         if (r < 0) { if (errno == EINTR) continue; return bad("read"); }
         len += (size_t)r;
         if (len == cap) { cap *= 2; buf = realloc(buf, cap); if (!buf) return bad("alloc"); }
+    }
+    if (!strcmp(argv[1], "side1")) {
+        /* 旧合同: e3 成功消费 USLATTR1 (或裸 UNITOK1) 后, 将 LE32 count + count*9 侧车表写到 UNISA_ATTRIBUTES。 */
+        unsigned c = 0; unsigned char *rec; size_t rn; int fd;
+        if (!side || !*side) return 0;
+        if (len >= 16 && !memcmp(buf, "USLATTR1", 8)) {
+            c = le(buf + 8);
+            if (c > 1000000u || 16 + 5L * c > (long)len) return bad("side1");
+        }
+        rn = 4 + (size_t)c * 9; rec = malloc(rn); if (!rec) return bad("alloc");
+        put32(rec, c);
+        for (i = 0; i < c; i++) { put32(rec + 4 + i * 9, 0); cp(rec + 4 + i * 9 + 4, buf + 16 + i * 5, 5); }
+        fd = open(side, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0 || write(fd, rec, rn) != (ssize_t)rn || close(fd)) return bad("sidecar");
+        return 0;
     }
     if (!strcmp(argv[1], "check1")) {
         /* 旧合同: e3 输入以 USLATTR1 开头时, 头不足 16B 为 invalid attribute frame, count/记录/负载长不一致为 malformed USLATTR1 side-car, 均 rc2。 */

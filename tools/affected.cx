@@ -154,7 +154,8 @@ static int native_requested, native_ready;
 static char native_runner[4400], native_digest[65];
 static long root_n;
 static const char *root_product_relative = "./unisacc.com"; /* lint:allow R1-product Explicit current-root candidate launcher; preserve the existing relative argv contract. */
-static int root_candidate(char *dst,size_t cap){return cx_fmt(dst,cap,"%s/unisacc.com",root);}
+static int layout_candidate(char *dst,size_t cap,const char *layout){return cx_fmt(dst,cap,"%s/unisacc.com",layout);}
+static int root_candidate(char *dst,size_t cap){return layout_candidate(dst,cap,root);}
 static void die(const char *s) { fprintf(stderr, "affected: %s\n", s); exit(2); }
 static char *keep(const char *s, long n) { char *p = ar_dup(arena, s, n); if (!p) die("out of memory"); return p; }
 static char *zkeep(const char *s) { return keep(s, tx_len(s, CAP)); }
@@ -749,7 +750,7 @@ typedef struct { char name[128]; int kind, state; char id[17], path[4400], rcpt[
    oracle (/usr/bin/cc|ld|ar, identity = file sha + first --version line).  PK_MDIR: a directory from a material
    tool (net/pp-gold/object-material), artifact sha = material.tsv.  PK_SVAL/PK_SID: a sha256 value derived
    from an already PREPARED material (streams.json com_sha256 of one stage / identity-helper run on ROOT). */
-enum { PK_TOOL = 1, PK_STREAMS = 2, PK_IDENT = 3, PK_PROD = 4, PK_HOST = 5, PK_MDIR = 6, PK_SVAL = 7, PK_SID = 8, PK_HOSTC = 9 };   /* PK_IDENT: seed/ident.c compiled with cc (closure = ident.c + sha256.h) */   /* PK_STREAMS: a directory of seven shims from tools/streams-material.cx; its artifact sha is that of streams.json */
+enum { PK_TOOL = 1, PK_STREAMS = 2, PK_IDENT = 3, PK_PROD = 4, PK_HOST = 5, PK_MDIR = 6, PK_SVAL = 7, PK_SID = 8, PK_HOSTC = 9, PK_OLDP = 10 };   /* PK_OLDP: old-product/new-product/new-models from tools/old-product-material.cx (prepare, then gate) */   /* PK_IDENT: seed/ident.c compiled with cc (closure = ident.c + sha256.h) */   /* PK_STREAMS: a directory of seven shims from tools/streams-material.cx; its artifact sha is that of streams.json */
 enum { PS_TODO = 0, PS_READY, PS_FAILED };
 static int prep_on = 0;
 #define PREP_MAX 64   /* distinct preparable materials per run (slots, not a time bound) */
@@ -908,6 +909,7 @@ static int prep_verify(Prep *P) {
 /* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
    absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
    resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
+enum { PK_CLASSIC_REF = 11 };
 static int prep_kind_of(const char *name, int kind) {
     long nl = tx_len(name, 256);
     if (kind == 2) {
@@ -921,8 +923,10 @@ static int prep_kind_of(const char *name, int kind) {
     if (tx_eqz(name, "hostcc") || tx_eqz(name, "hostld") || tx_eqz(name, "hostar") || tx_eqz(name, "hosttcc")) return PK_HOST;
     if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects") || tx_eqz(name,"assembler") || tx_eqz(name,"kernels") || tx_eqz(name,"isolated-streams")) return PK_MDIR;
     if (tx_eqz(name, "libneed-native")) return PK_HOSTC;
+    if (tx_eqz(name, "ref")) return PK_CLASSIC_REF;
     if (tx_eqz(name, "streams")) return PK_STREAMS;
     if (tx_eqz(name, "identity-helper")) return PK_IDENT;
+    if (tx_eqz(name, "old-product") || tx_eqz(name, "new-product") || tx_eqz(name, "new-models")) return PK_OLDP;
     return PK_TOOL;
 }
 static int prep_source(const char *name, int kind, char *src, long cap, char *why, int whycap) {
@@ -933,6 +937,8 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_SID) { cx_fmt(src, cap, "identity-helper:ROOT"); return 0; }
     if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
     if (pk == PK_HOSTC) { cx_fmt(src, cap, "tools/libneed-native-material.cx"); return 0; }
+    if (pk == PK_OLDP) { cx_fmt(src, cap, "tools/old-product-material.cx"); return 0; }
+    if (pk == PK_CLASSIC_REF) return cx_fmt(src,cap,"tools/ref-material.cx");
     if (pk == PK_HOST && tx_eqz(name, "hosttcc")) {
         const char *want = getenv("TCC"), *at = getenv("PATH");
         if (!want || !*want) want = "tcc";
@@ -979,6 +985,64 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (cx_fmt(cand, sizeof cand, "%s/%s", root, src) || sy_exists(cand) != 1) { cx_fmt(why, whycap, "source-absent=%s", src); return -1; }
     return 0;
 }
+/* PK_OLDP: the netregen A/B lane.  tools/old-product-material.cx prepare (old = the newest registered release
+   below the candidate's --version, fetched once into CACHE/old-product-cache; UNISACC_OLD_PRODUCT_VERSION and
+   an absolute UNISACC_OLD_PRODUCT_MIRROR pass through), then gate --candidate: only gate's READY paths are
+   handed on.  The receipt directory is keyed by candidate sha + those options and re-gated (re-hashed) on
+   every run; it is material, never a test result.  Unavailable bytes stay a named no-producer reason. */
+static int oldp_state;
+static char oldp_path[3][4400], oldp_why[200];
+static void oldp_reason(const Buf *o, const char *fallback) {
+    long k = o->p ? tx_find(o->p, o->n, "UNKNOWN\t", 8) : -1, i, e;
+    if (k < 0) { cx_fmt(oldp_why, sizeof oldp_why, "%s", fallback); return; }
+    for (e = k + 8; e < o->n && o->p[e] != '\n'; e++) {}
+    if (cx_fmt(oldp_why, sizeof oldp_why, "%.*s", (int)(e - k - 8 < 190 ? e - k - 8 : 190), o->p + k + 8)) cx_fmt(oldp_why, sizeof oldp_why, "%s", fallback);
+    for (i = 0; oldp_why[i]; i++) if (oldp_why[i] == '\t') oldp_why[i] = ':';
+}
+static int oldp_prepare(void) {
+    const char *ver = sy_env("UNISACC_OLD_PRODUCT_VERSION"), *mir = sy_env("UNISACC_OLD_PRODUCT_MIRROR");
+    char product[4400], models[4400], launcher[4400], bound[4400], csha[65], idl[9200], id[65], ocache[4400], out[4400];
+    sy_stat_t st; Buf o = {0, 0, 0}; int rc, r, i;
+    if (oldp_state) return oldp_state > 0 ? 0 : -1;
+    oldp_state = -1;
+    if (layout_candidate(product, sizeof product, candidate_dir ? candidate_dir : root) || cx_fmt(models, sizeof models, "%s/pkg-hdr.bin", candidate_dir ? candidate_dir : root)
+        || root_candidate(launcher, sizeof launcher) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)
+        || cx_fmt(ocache, sizeof ocache, "%s/old-product-cache", cachedir)) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-path-bound"); return -1; }
+    if (file_sha(product, csha)) { cx_fmt(oldp_why, sizeof oldp_why, "no-producer=new-product:candidate-unreadable"); return -1; }
+    if (mir && mir[0] && mir[0] != '/') { cx_fmt(oldp_why, sizeof oldp_why, "old-product-mirror-not-absolute"); return -1; }
+    if (cx_fmt(idl, sizeof idl, "old-product-material-v1\n%s\nversion=%s\nmirror=%s\nmodels=%s\n", csha, ver && ver[0] ? ver : "-", mir && mir[0] ? mir : "-", candidate_dir ? models : "-")) return -1;
+    tp_sha(idl, (size_t)tx_len(idl, sizeof idl), id);
+    if (cx_fmt(out, sizeof out, "%s/old-product-material-%.16s.dir", cachedir, id)) return -1;
+    r = sy_mkdir(ocache, 0700);
+    if (r < 0 && r != -EEXIST) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-cache-directory"); return -1; }
+    if (sy_lstat(out, &st) == -ENOENT) {
+        char *v[20]; int n = 0;
+        v[n++] = bound; v[n++] = "50"; v[n++] = "sh"; v[n++] = launcher; v[n++] = "tools/old-product-material.cx"; v[n++] = "--";
+        v[n++] = "prepare"; v[n++] = root; v[n++] = product; v[n++] = ocache; v[n++] = out;
+        if (ver && ver[0]) { v[n++] = "--old-version"; v[n++] = (char *)ver; }
+        if (candidate_dir) { v[n++] = "--models"; v[n++] = models; }
+        if (mir && mir[0]) { v[n++] = "--mirror"; v[n++] = (char *)mir; }
+        v[n] = 0;
+        rc = read_all(v, &o);
+        if (rc == 3) { oldp_reason(&o, "no-producer=old-product:unverified"); return -1; }
+        if (rc) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-material-refused=prepare:rc=%d", rc); return -1; }
+        o.n = 0;
+    }
+    {   char *v[] = {bound, "15", "sh", launcher, "tools/old-product-material.cx", "--", "gate", out, "--candidate", product, 0};
+        static const char *key[3] = {"\told-product=", "\tnew-product=", "\tnew-models="};
+        rc = read_all(v, &o);
+        if (rc == 3) { oldp_reason(&o, "no-producer=old-product:gate"); return -1; }
+        if (rc || !o.p || tx_find(o.p, o.n, "OLD_PRODUCT_MATERIAL\tREADY\t", 27) < 0) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-material-refused=gate:rc=%d", rc); return -1; }
+        for (i = 0; i < 3; i++) {
+            long kl = tx_len(key[i], 32), k = tx_find(o.p, o.n, key[i], kl), e;
+            if (k < 0) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-material-refused=gate-row"); return -1; }
+            for (e = k + kl; e < o.n && o.p[e] != '\t' && o.p[e] != '\n'; e++) {}
+            if (tx_copy(oldp_path[i], sizeof oldp_path[i], o.p + k + kl, e - k - kl)) { cx_fmt(oldp_why, sizeof oldp_why, "old-product-path-bound"); return -1; }
+        }
+    }
+    oldp_state = 1;
+    return 0;
+}
 /* register NAME when it is preparable; returns its slot or -1 (with WHY set) */
 static int prep_plan(const char *name, int kind, char *why, int cap) {
     int k = prep_find(name); Prep *P; char h[65], buf[600];
@@ -989,6 +1053,19 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     cx_fmt(P->name, sizeof P->name, "%s", name);
     P->kind = prep_kind_of(name, kind);
     if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
+    if(P->kind==PK_CLASSIC_REF){
+        /* The producer checks its own pinned artifact and receipt on every invocation.
+         * A one-commit qualify layout may share an already prepared directory. */
+        const char *dir=getenv("UNISACC_REF_MATERIAL_DIR");
+        if(closure_sha(P->src,P->closure)
+           || (dir ? (dir[0]!='/' || cx_fmt(P->rcpt,sizeof P->rcpt,"%s",dir))
+                   : cx_fmt(P->rcpt,sizeof P->rcpt,"%s/classic-ref-%.16s",cachedir,P->closure))
+           ||cx_fmt(P->path,sizeof P->path,"%s/ua_ref",P->rcpt)){
+            cx_fmt(why,cap,"ref-material-path-or-source");return -1;
+        }
+        memcpy(P->id,P->closure,16);P->id[16]=0;
+        return nprep++;
+    }
     if (P->kind == PK_PROD) {   /* A split product has an executable launcher and a distinct model container. */
         const char *leaf = candidate_dir && tx_eqz(name,"e2model") ? "pkg-hdr.bin" : "unisacc.com";
         if (cx_fmt(P->path, sizeof P->path, "%s/%s", candidate_dir ? candidate_dir : root, leaf)) { cx_fmt(why, cap, "path-too-long=%s", name); return -1; }
@@ -996,6 +1073,14 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
             if(file_sha(P->path,P->sha)){cx_fmt(why,cap,"candidate-material-unreadable=%s",name);return -1;}
         } else if(mm_copy(P->sha,sizeof P->sha,prod_sha,65))die("material digest bound");
         if(mm_copy(P->closure,sizeof P->closure,P->sha,65) || mm_copy(P->id,sizeof P->id,P->sha,16))die("material identity bound");
+        P->id[16] = 0;
+        P->state = PS_READY; P->cached = 1; return nprep++;
+    }
+    if (P->kind == PK_OLDP) {   /* the gate re-hashed all three; the slot carries the path and its own sha */
+        int i = tx_eqz(name, "old-product") ? 0 : tx_eqz(name, "new-product") ? 1 : 2;
+        if (oldp_prepare()) { cx_fmt(why, cap, "%s", oldp_why); return -1; }
+        if (cx_fmt(P->path, sizeof P->path, "%s", oldp_path[i]) || file_sha(P->path, P->sha)) { cx_fmt(why, cap, "material-unreadable=%s", name); return -1; }
+        if (mm_copy(P->closure, sizeof P->closure, P->sha, 65) || mm_copy(P->id, sizeof P->id, P->sha, 16)) die("material identity bound");
         P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;
     }
@@ -1130,7 +1215,15 @@ static int prep_start(PJob *J, int k) {
         if (cx_fmt(s_all, sizeof s_all, "%d", J->secs) || cx_fmt(s_kit, sizeof s_kit, "%d", J->secs < 20 ? J->secs : 20)) return -1;
         static const char *pscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- prepare \"$5\" \"$4\" >/dev/null";   /* pp-gold/object-material prepare ROOT NEW_ABS_MATERIAL */
         int is_net = P->kind == PK_MDIR && (tx_eqz(P->name, "nets") || tx_eqz(P->name,"assembler") || tx_eqz(P->name,"isolated-streams"));   /* ROOT NEW_OUTDIR producers */
-        av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(tx_eqz(P->name,"isolated-streams")?cscript:P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR || P->kind == PK_HOSTC ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
+        if(P->kind==PK_CLASSIC_REF){
+            const char *repo=getenv("UNISACC_REF_SOURCE_REPO");
+            av[n++]=bound;av[n++]=s_all;av[n++]="sh";av[n++]=product;av[n++]=srcabs;av[n++]="--";
+            if(layout_candidate(J->tmp,sizeof J->tmp,candidate_dir?candidate_dir:root))return -1;
+            av[n++]="prepare";av[n++]=(char *)(repo&&*repo?repo:root);av[n++]=J->tmp;av[n++]=P->rcpt;
+            P->cached=sy_exists(P->path)==1;
+        } else {
+            av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(tx_eqz(P->name,"isolated-streams")?cscript:P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR || P->kind == PK_HOSTC ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
+        }
     }
     av[n] = 0;
     J->job = k; J->t0 = sy_now_ms(); J->out.p = 0; J->out.n = J->out.cap = 0; J->err = J->out;
@@ -1140,6 +1233,16 @@ static int prep_start(PJob *J, int k) {
 static void prep_done(PJob *J, int ok) {
     Prep *P = &prep[J->job]; char rc[800];
     P->ms = sy_now_ms() - J->t0;
+    if(P->kind==PK_CLASSIC_REF){
+        char tail[4700];
+        if(ok&&!file_sha(P->path,P->sha)&&!cx_fmt(tail,sizeof tail,"\tsha256=%s\tpath=%s\n",P->sha,P->path)){
+            long size=tx_len(tail,sizeof tail);
+            if(J->out.n>=size&&!memcmp(J->out.p+J->out.n-size,tail,size)){P->state=PS_READY;return;}
+        }
+        P->state=PS_FAILED;
+        if(!P->why[0])cx_fmt(P->why,sizeof P->why,"ref-material-unverified");
+        return;
+    }
     if (ok) {
         char expected[65];int assembler=P->kind==PK_MDIR&&tx_eqz(P->name,"assembler");
         if(assembler&&prep_asm_sha(J->tmp,expected))ok=0;

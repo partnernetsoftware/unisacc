@@ -1,0 +1,129 @@
+/* old-product-material: standard material entry for the netregen A/B batches.
+ *   prepare ROOT CANDIDATE_APE ABS_CACHE ABS_OUT [--old-version V] [--models PKG] [--mirror DIR]
+ *   gate ABS_OUT [--candidate CANDIDATE_APE]
+ * prepare: old-product = one fixed registered release (tools/old-product.cx, shared cache, one download
+ * for all 30 batches); default old version is the newest registered version below the candidate's own
+ * `--version`. new-product = the candidate itself. new-models = the candidate's package: the candidate
+ * file unless --models names a package in the candidate's own directory (split dev candidate).
+ * Refuses an old product that is the candidate (same path, same bytes, or same version): a copy of
+ * one download is never an independent A/B lane. Writes ABS_OUT/materials.tsv (new directory),
+ * status PREPARED-no-test-result; preparation is never PASS.
+ * gate: re-hashes all three materials; prints the run-batch material=PATH arguments only when all
+ * three are present and unchanged. Missing one -> UNKNOWN no-producer=NAME rc 3; changed or bound
+ * to another candidate -> REFUSE rc 2.
+ * Check: tools/check-old-product-material.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static const char *names[3]={"old-product","new-product","new-models"};
+static int refuse(const char *why){fprintf(stderr,"OLD_PRODUCT_MATERIAL\tREFUSE\treason=%s\n",why);return 2;}
+static int unknown(const char *why){printf("OLD_PRODUCT_MATERIAL\tUNKNOWN\t%s\n",why);return 3;}
+static int file_sha(const char *p,char h[65]){
+    sy_stat_t st;unsigned char *b;int64_t n;
+    if(sy_lstat(p,&st)||st.kind!='f'||st.size<=0||st.size>134217728)return -1;
+    if(sy_read_file(p,&b,&n,st.size))return -1;
+    int bad=n!=st.size||sy_sha256_any_hex(b,n,h);mm_free(b);return bad?-1:0;
+}
+static int version_of(const char *ape,char *v,long cap){
+    char *argv[]={"sh",(char *)ape,"--version",0};char why[256];np_result r={0};
+    int bad=np_run(argv,0,0,10,&r,why,sizeof why)||r.rc||r.residue||r.outn<10||r.outn>60||memcmp(r.out,"unisacc ",8)||r.out[r.outn-1]!='\n';
+    if(!bad)bad=tx_copy(v,cap,r.out+8,r.outn-9)!=0;
+    np_free(&r);return bad?-1:0;
+}
+static int vparse(const char *s,long p[3]){
+    p[0]=p[1]=p[2]=-1;
+    for(int i=0;i<3;i++){long x=0;int d=0;while(*s>='0'&&*s<='9'){x=x*10+*s++-'0';if(++d>6)return -1;}if(!d)return -1;p[i]=x;if(i<2&&*s++!='.')return -1;}
+    return *s?-1:0;
+}
+static int vless(const long a[3],const long b[3]){for(int i=0;i<3;i++)if(a[i]!=b[i])return a[i]<b[i];return 0;}
+/* newest registered version strictly below the candidate */
+static int predecessor(const char *root,const char *cand,char *out,long cap){
+    char p[4096];unsigned char *d;int64_t n;long c[3],best[3]={-1,-1,-1};
+    if(vparse(cand,c))return refuse("candidate-version-syntax");
+    if(cx_path_join(p,sizeof p,root,"tools/old-product-assets.tsv")||sy_read_file(p,&d,&n,65536))return refuse("registry-read");
+    if(memchr(d,0,n)){mm_free(d);return refuse("registry-nul");}
+    out[0]=0;
+    for(int64_t a=0;a<n;){int64_t e=a;while(e<n&&d[e]!='\n')e++;int64_t t=a;while(t<e&&d[t]!='\t')t++;
+        char v[32];long x[3];
+        if(t-a>0&&t-a<32&&!tx_copy(v,sizeof v,(char *)d+a,t-a)&&!vparse(v,x)&&vless(x,c)&&vless(best,x)){memcpy(best,x,sizeof best);tx_copy(out,cap,v,tx_len(v,32));}
+        a=e+1;}
+    mm_free(d);
+    return out[0]?0:unknown("no-producer=old-product\treason=no-registered-version-below-candidate");
+}
+static int prepare(int argc,char **argv){
+    char root[4096],cand[4096],models[4096],cver[64],over[64]={0},csha[65],osha[65],msha[65],out[4096],p[4096],why[256];
+    const char *mirror=0,*mpath=0;
+    if(argc<6||argv[4][0]!='/'||argv[5][0]!='/')return refuse("usage");
+    for(int i=6;i<argc;i+=2){if(i+1>=argc)return refuse("usage");
+        if(tx_eqz(argv[i],"--old-version")){if(tx_copy(over,sizeof over,argv[i+1],tx_len(argv[i+1],63)))return refuse("usage");}
+        else if(tx_eqz(argv[i],"--models"))mpath=argv[i+1];
+        else if(tx_eqz(argv[i],"--mirror"))mirror=argv[i+1];
+        else return refuse("usage");}
+    if(sy_realpath(argv[2],root,sizeof root)<0||sy_realpath(argv[3],cand,sizeof cand)<0)return refuse("explicit-root-and-candidate");
+    if(file_sha(cand,csha))return refuse("candidate-unreadable");
+    if(version_of(cand,cver,sizeof cver))return refuse("candidate-version");
+    if(!over[0]){int rc=predecessor(root,cver,over,sizeof over);if(rc)return rc;}
+    if(tx_eqz(over,cver))return refuse("old-version-equals-candidate-version");
+    /* models bind to the same candidate */
+    if(mpath){
+        char cd[4096],md[4096];
+        if(sy_realpath(mpath,models,sizeof models)<0||file_sha(models,msha))return refuse("models-unreadable");
+        if(tx_copy(cd,sizeof cd,cand,tx_len(cand,4096))||tx_copy(md,sizeof md,models,tx_len(models,4096)))return refuse("path-bound");
+        char *s1=strrchr(cd,'/'),*s2=strrchr(md,'/');if(!s1||!s2)return refuse("path-bound");*s1=0;*s2=0;
+        if(!tx_eqz(cd,md))return refuse("models-not-bound-to-candidate");
+    } else { if(tx_copy(models,sizeof models,cand,tx_len(cand,4096)))return refuse("path-bound");memcpy(msha,csha,65); }
+    /* the old product through the registered fetcher (one shared cache, locked inside) */
+    char launcher[4096];if(cx_path_join(launcher,sizeof launcher,root,"unisacc.com"))return refuse("path-bound"); /* lint:allow R1-product the trusted checkout launcher runs the registered fetcher tools/old-product.cx */
+    char *fv[]={"sh",launcher,"tools/old-product.cx","--",over,argv[4],mirror?"--mirror":0,(char *)mirror,0};
+    np_result r={0};
+    if(np_run(fv,root,0,50,&r,why,sizeof why)||r.residue){np_free(&r);return unknown("no-producer=old-product\treason=fetcher-transport");}
+    if(r.rc==3){np_free(&r);return unknown("no-producer=old-product\treason=old-product-unverified");}
+    char *at=0;
+    if(!r.rc&&r.out){long k=tx_find(r.out,(long)r.outn,"\tpath=",6);if(k>=0)at=r.out+k;}
+    if(!at){fprintf(stderr,"%.*s",(int)r.errn,r.err?r.err:"");np_free(&r);return refuse("old-product-fetch-refused");}
+    at+=6;char *e=at;while(e<r.out+r.outn&&*e!='\t'&&*e!='\n')e++;
+    char old[4096];int bad=tx_copy(old,sizeof old,at,e-at);np_free(&r);if(bad)return refuse("path-bound");
+    if(file_sha(old,osha))return refuse("old-product-unreadable");
+    if(tx_eqz(old,cand)||tx_eqz(osha,csha))return refuse("old-product-is-candidate-copy");
+    if(tx_eqz(old,models)||tx_eqz(osha,msha))return refuse("old-product-is-candidate-models");
+    if(sy_mkdir(argv[5],0700))return refuse("new-material-directory-required");
+    if(sy_realpath(argv[5],out,sizeof out)<0||cx_path_join(p,sizeof p,out,"materials.tsv"))return refuse("path-bound");
+    static char rec[20000];
+    if(cx_fmt(rec,sizeof rec,"old-product-material-v1\nstatus\tPREPARED-no-test-result\ncandidate-version\t%s\nold-version\t%s\n"
+        "old-product\t%s\t%s\nnew-product\t%s\t%s\nnew-models\t%s\t%s\n",cver,over,old,osha,cand,csha,models,msha))return refuse("receipt-bound");
+    if(sy_write_file(p,rec,tx_len(rec,20000),0400))return refuse("receipt-write");
+    printf("OLD_PRODUCT_MATERIAL\tPREPARED\tno-test-result\tcandidate=%s\told=%s\treceipt=%s\n",cver,over,p);
+    return 0;
+}
+static int gate(int argc,char **argv){
+    char p[4096],paths[3][4096],shas[3][65],h[65];int have[3]={0,0,0};unsigned char *d;int64_t n;
+    if((argc!=3&&argc!=5)||argv[2][0]!='/'||(argc==5&&!tx_eqz(argv[3],"--candidate")))return refuse("usage");
+    if(cx_path_join(p,sizeof p,argv[2],"materials.tsv"))return refuse("path-bound");
+    int rc=sy_read_file(p,&d,&n,65536);
+    if(rc==-ENOENT)return unknown("no-producer=old-product\treason=no-receipt");
+    if(rc)return refuse("receipt-read");
+    if(memchr(d,0,n)||n<24||memcmp(d,"old-product-material-v1\n",24)){mm_free(d);return refuse("receipt-syntax");}
+    for(int64_t a=0;a<n;){int64_t e=a;while(e<n&&d[e]!='\n')e++;
+        for(int k=0;k<3;k++){long l=tx_len(names[k],32);
+            if(e-a>l+66&&!memcmp(d+a,names[k],l)&&d[a+l]=='\t'){int64_t t=e-65;
+                if(d[t]!='\t'||have[k]||tx_copy(paths[k],4096,(char *)d+a+l+1,t-a-l-1)||tx_copy(shas[k],65,(char *)d+t+1,64)){mm_free(d);return refuse("receipt-row");}
+                have[k]=1;}}
+        a=e+1;}
+    mm_free(d);
+    for(int k=0;k<3;k++)if(!have[k]){char w[96];cx_fmt(w,sizeof w,"no-producer=%s",names[k]);return unknown(w);}
+    for(int k=0;k<3;k++){if(file_sha(paths[k],h)){char w[96];cx_fmt(w,sizeof w,"no-producer=%s\treason=material-absent",names[k]);return unknown(w);}
+        if(!tx_eqz(h,shas[k]))return refuse("material-identity-changed");}
+    if(tx_eqz(shas[0],shas[1])||tx_eqz(paths[0],paths[1]))return refuse("old-product-is-candidate-copy");
+    if(argc==5){if(file_sha(argv[4],h))return refuse("candidate-unreadable");if(!tx_eqz(h,shas[1]))return refuse("candidate-mismatch");}
+    printf("OLD_PRODUCT_MATERIAL\tREADY\told-product=%s\tnew-product=%s\tnew-models=%s\n",paths[0],paths[1],paths[2]);
+    return 0;
+}
+int main(int argc,char **argv){
+    if(argc>1&&tx_eqz(argv[1],"prepare"))return prepare(argc,argv);
+    if(argc>1&&tx_eqz(argv[1],"gate"))return gate(argc,argv);
+    return refuse("usage");
+}

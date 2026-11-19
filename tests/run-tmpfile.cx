@@ -6,7 +6,7 @@
    is not a tmpfile slice (run_launch of exec/facts/pp-targets.tsv is tmpfile for osx/* and win/*).
    There it must not execute anything: its spawn helper is the -ENOSYS branch, so a lnx memfd
    slice carries no process-spawn code and never runs the image.
-   A probe staged in OUT (inside ROOT, so cxroot.tsv resolves sys.*) calls it twice:
+   A probe staged in ROOT/.run-tmpfile.PID (so cxroot.tsv resolves sys.*) calls it twice:
    1. TMPDIR=OUT/ok writable: status 1, named "cannot execute from TMPDIR ... (errno 38)", OUT/ok empty.
    2. TMPDIR=OUT/ro mode 0500: status 1 with the named "cannot make a directory" error, nothing left.
    The executing path is checked on osx by the candidate-native run cell.
@@ -31,16 +31,19 @@ static const char probe[] =
     "    return ok != 2;\n}\n";
 
 int main(int argc, char **argv) {
-    char com[1100], p[1100];
-    char *av[] = {"/bin/sh", com, p, "--", 0, 0};
+    char com[1100], p[1100], sd[1100], bound[1100];
+    char *av[] = {bound, "50", "/bin/sh", com, p, "--", 0, 0};   /* tools/bound caps the probe at 50 s */
     int pid, rc;
     if (argc != 3) { sy_eprintf("usage: run-tmpfile.cx -- ROOT OUT\n"); return 2; }
-    if (cx_fmt(com, sizeof com, "%s/unisacc.com", argv[1]) || cx_fmt(p, sizeof p, "%s/probe.cx", argv[2])) return 2;
+    /* the probe source lives in a per-process dir under ROOT so cxroot.tsv resolves sys.*; OUT may be outside ROOT */
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", argv[1]) || cx_fmt(com, sizeof com, "%s/unisacc.com", argv[1]) || cx_fmt(sd, sizeof sd, "%s/.run-tmpfile.%d", argv[1], sy_pid()) ||
+        cx_fmt(p, sizeof p, "%s/probe.cx", sd)) return 2;
     sy_mkdir(argv[2], 0700);
-    av[4] = argv[2];
+    if (sy_mkdir(sd, 0700)) return 2;
+    av[6] = argv[2];
     rc = cx_write(p, probe, sizeof probe - 1) ? -EIO : 0;
     pid = rc ? rc : sy_spawn_inherit(av, -1);
     rc = pid < 0 ? pid : sy_wait(pid, 0);
-    sy_unlink(p);
+    sy_unlink(p); sy_rmdir(sd);
     return rc != 0;
 }

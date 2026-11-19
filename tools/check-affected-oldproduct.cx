@@ -1,0 +1,74 @@
+/* check-affected-oldproduct: tools/affected.cx --prepare-materials wires the netregen A/B materials
+ * (old-product, new-product, new-models) through tools/old-product-material.cx, offline.
+ * From the trusted checkout root: check-affected-oldproduct [--old ABS_OLD_APE]
+ * (1) an empty mirror and a fresh private cache -> REFUSED no-producer=old-product (unverified), and
+ *     --run reports the batch DEFERRED prepare-failed, never a BATCH PASS;
+ * (2) a private mirror holding the registered predecessor bytes -> three MATERIAL rows with paths:
+ *     old-product = the registered predecessor sha, new-product and new-models = the checkout product.
+ * Without the predecessor bytes (default: the shared prep cache copy) case (2) is UNMEASURED rc 3.
+ * Ends CHECK_AFFECTED_OLDPRODUCT. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int pass,fail;
+static char root[4096],dir[4096];
+static void ck(int ok,const char *what){if(!ok){fail++;printf("FAIL\toldproduct-wiring\t%s\n",what);}else pass++;}
+static void die(const char *s){printf("CHECK_AFFECTED_OLDPRODUCT\tREFUSE\t%s\n",s);exit(2);}
+static int sha(const char *p,char h[65]){unsigned char *b;int64_t n;if(sy_read_file(p,&b,&n,134217728))return -1;int bad=sy_sha256_any_hex(b,n,h);mm_free(b);return bad;}
+static int has(np_result *r,const char *s){long n=tx_len(s,512);return (r->out&&tx_find(r->out,(long)r->outn,s,n)>=0)||(r->err&&tx_find(r->err,(long)r->errn,s,n)>=0);}
+static int contains(const char *v,const char *s){return tx_find(v,tx_len(v,4400),s,tx_len(s,200))>=0;}
+static int affected(const char *cache,const char *mirror,int run,np_result *r){
+    char launcher[4096],why[256],e1[4200],e2[4200];
+    if(cx_path_join(launcher,sizeof launcher,root,"unisacc.com")||cx_fmt(e1,sizeof e1,"UNISACC_PREP_CACHE=%s",cache)||cx_fmt(e2,sizeof e2,"UNISACC_OLD_PRODUCT_MIRROR=%s",mirror))die("path");
+    char *env[]={e1,e2,0};
+    char *dump[]={"sh",launcher,"tools/affected.cx","--","--materials-dump","--ids","netregen-small-lnx-x86_64","--prepare-materials",0};
+    char *runv[]={"sh",launcher,"tools/affected.cx","--","--ids","netregen-small-lnx-x86_64","--prepare-materials","--run",0};
+    memset(r,0,sizeof *r);
+    if(np_run(run?runv:dump,root,env,55,r,why,sizeof why)||r->residue)die("affected transport");
+    return r->rc;
+}
+/* the value after "MATERIAL\tID\tNAME\t" up to the line end */
+static int row(np_result *r,const char *name,char *out,long cap){
+    char pat[200];if(cx_fmt(pat,sizeof pat,"MATERIAL\tnetregen-small-lnx-x86_64\t%s\t",name)||!r->out)return -1;
+    long k=tx_find(r->out,(long)r->outn,pat,tx_len(pat,200));if(k<0)return -1;
+    char *a=r->out+k+tx_len(pat,200),*e=a;while(e<r->out+r->outn&&*e!='\n')e++;
+    return tx_copy(out,cap,a,e-a);
+}
+int main(int argc,char **argv){
+    char old[4096]="",cache[4096],mirror[4096],p[4096],v[4400],h[65],want[65],prod[4096],ph[65];np_result r;
+    if(sy_realpath(".",root,sizeof root)<0)die("root");
+    const char *base=getenv("CLAUDE_JOB_DIR");char tmpl[4096];
+    if(cx_fmt(tmpl,sizeof tmpl,"%s/tmp",base&&*base?base:"/tmp")||sy_mkdtemp(tmpl,"check-aop",dir,sizeof dir))die("private dir");
+    if(argc==3&&tx_eqz(argv[1],"--old")){if(tx_copy(old,sizeof old,argv[2],tx_len(argv[2],4095)))die("usage");}
+    else if(argc!=1)die("usage");
+    {   unsigned char *d;int64_t n;if(sy_read_file("tools/old-product-assets.tsv",&d,&n,65536))die("registry");
+        long k=tx_find((char *)d,(long)n,"\n0.0.79\t",8);if(k<0)die("registry-row");
+        char *s=(char *)d+k+1,*e=s;while(e<(char *)d+n&&*e!='\n')e++;
+        if(e-s<65||tx_copy(want,65,e-64,64))die("registry-sha");mm_free(d); }
+    if(!old[0]&&cx_fmt(old,sizeof old,"%s/.cache/unisacc/prep-cache/old-product-cache/%s/unisacc.com",getenv("HOME")?getenv("HOME"):".",want))die("path");
+    if(cx_path_join(prod,sizeof prod,root,"unisacc.com")||sha(prod,ph))die("product");
+    /* (1) empty mirror, fresh cache */
+    if(cx_path_join(cache,sizeof cache,dir,"cache-empty")||cx_path_join(mirror,sizeof mirror,dir,"mirror-empty")||sy_mkdir(mirror,0700))die("fixture");
+    affected(cache,mirror,0,&r);
+    ck(row(&r,"old-product",v,sizeof v)==0&&contains(v,"REFUSED=")&&contains(v,"no-producer=old-product")&&contains(v,"unverified"),"empty-mirror-old-refused-no-producer");
+    ck(row(&r,"new-product",v,sizeof v)==0&&contains(v,"REFUSED="),"empty-mirror-new-not-handed-alone");
+    ck(!has(&r,"PASS"),"empty-mirror-no-pass");np_free(&r);
+    affected(cache,mirror,1,&r);
+    ck(has(&r,"DEFERRED\tnetregen-small-lnx-x86_64\tprepare-failed=")&&has(&r,"no-producer=old-product")&&!has(&r,"PASS\t"),"empty-mirror-run-deferred-no-pass");np_free(&r);
+    /* (2) mirror with the registered predecessor bytes */
+    if(sha(old,h)||!tx_eqz(h,want)){printf("CHECK_AFFECTED_OLDPRODUCT\tUNMEASURED\tno-predecessor-bytes=%s\tpass=%d\tfail=%d\n",old,pass,fail);return fail?1:3;}
+    if(cx_path_join(cache,sizeof cache,dir,"cache-mirror")||cx_path_join(mirror,sizeof mirror,dir,"mirror-ok")||sy_mkdir(mirror,0700)||cx_path_join(p,sizeof p,mirror,"unisacc.com")||sy_copy(old,p,0600))die("fixture");
+    affected(cache,mirror,0,&r);
+    ck(row(&r,"old-product",v,sizeof v)==0&&v[0]=='/'&&!sha(v,h)&&tx_eqz(h,want),"mirror-old-product-is-registered-predecessor");
+    ck(row(&r,"new-product",v,sizeof v)==0&&v[0]=='/'&&!sha(v,h)&&tx_eqz(h,ph),"mirror-new-product-is-checkout-product");
+    ck(row(&r,"new-models",v,sizeof v)==0&&v[0]=='/'&&!sha(v,h)&&tx_eqz(h,ph),"mirror-new-models-is-product-package");
+    ck(!has(&r,"PASS"),"mirror-dump-no-pass");np_free(&r);
+    affected(cache,mirror,0,&r);   /* the same receipt is re-gated, not re-fetched */
+    ck(row(&r,"old-product",v,sizeof v)==0&&!sha(v,h)&&tx_eqz(h,want),"mirror-regate-same");np_free(&r);
+    printf("CHECK_AFFECTED_OLDPRODUCT\tpass=%d\tfail=%d\n",pass,fail);
+    return fail?1:0;
+}

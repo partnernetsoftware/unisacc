@@ -168,6 +168,38 @@ static void group_b(void) {
     t0 = sy_now_ms(); for (i = 0; i < 10; i++) { char *c[] = {"m.c", "-o", y, 0}; prod(c, &p); } tp = sy_now_ms() - t0;
     printf("CXDEV_TIMING\thot_no_change_10_calls\tcx_dev_ms=%ld\tunisacc_com_ms=%ld\textra_per_call_ms=%ld\tload1=%.2f\n", tc, tp, (tc - tp) / 10, load1());
     install_refused("b.install-ape-refuses-bundle-package");
+    {   /* Both loads read x17 from [x7] at zero displacement.  Only the ARM encoding changes. */
+        char table[PW], ref[PW], obj[PW];
+        char *compile[] = {"--target=lnx/arm64", "-c", "-funit", "arm.c", "-o", obj, 0};
+        char *reload[] = {"--reload", 0};
+        pj(table, fx, "exec/enc/armbase-result.tsv"); pj(ref, work, "arm.ref"); pj(obj, work, "arm.o");
+        put("arm.c", "int f7(void){return 7;}\n");
+        compile[5] = ref; prod(compile, &p); compile[5] = obj;
+        cxd(compile, 0, &a);
+        ck(!p.rc && !a.rc && samefile(obj, ref), "b.arm-object-matches-installed");
+        edit(table, "4181721329", "4164944113");
+        cxd(reload, 0, &a);
+        ck(!a.rc && has(&a, 1, "object-enc-arm64\tbuilt") && has(&a, 1, "lnx-arm64-elf\tbuilt") &&
+           has(&a, 1, "osx-arm64-elf\tNOT_CLAIMED") && has(&a, 1, "win-arm64-elf\tNOT_CLAIMED"), "b.arm-linux-rebuilt");
+        cxd(compile, 0, &a);
+        ck(!a.rc && !samefile(obj, ref), "b.arm-encoding-changes-object");
+        edit(table, "4164944113", "4181721329");
+        cxd(compile, 0, &a);
+        ck(!a.rc && samefile(obj, ref), "b.arm-revert-restores-object");
+        /* A different baseline encoding has no matching installed M. Do not publish this fixture's nets. */
+        {   char base[PW], *close[] = {"--close", 0}, *status[] = {"--status", 0};
+            char *isolated[] = {"CXDEV_CACHE=-", 0};
+            pj(base, bundle, "base-tree/exec/enc/armbase-result.tsv");
+            cxd(close, 0, &a);
+            edit(base, "4181721329", "4164944113");
+            cxd(reload, isolated, &a);
+            ck(a.rc == 2 && has(&a, 1, "object-enc-arm64\trecipe-not-located"), "b.arm-baseline-member-missing");
+            cxd(status, isolated, &a);
+            ck(has(&a, 0, "CXDEV_STATUS\t") && !has(&a, 0, "lnx/arm64"), "b.missing-arm-member-excludes-target");
+            edit(base, "4164944113", "4181721329");
+            cxd(close, 0, &a);
+        }
+    }
     {   char b2[PW], cmd[4 * PW]; char *c[] = {"m.c", "-o", x, 0}; size_t bn; char *bb;
         pj(b2, bundle, "base.bin"); bb = cx_read(b2, &bn); if (!bb || bn < 100) die("base.bin"); bb[bn / 2] ^= 1;
         if (cx_fmt(cmd, sizeof cmd, "chmod u+w '%s'", b2)) die("path");
@@ -260,12 +292,22 @@ static void group_e(void) {
     /* a net whose delta the lint loader refuses on the installed tables too (exec/librarycontract names the
        terminal DONE; tools/cxlib/delta.cx synthesizes HALT only): the same refusal on both sides is reported by
        name and the net is swapped in; a refusal the installed tables do not have still stops the swap */
-    {   char lc[PW]; pj(lc, fx, "exec/librarycontract/librarycontract-byte.tsv");
+    {   char lc[PW], baseline[PW]; np_buf table = {0};
+        pj(lc, fx, "exec/librarycontract/librarycontract-byte.tsv");
+        pj(baseline, bundle, "base-tree/exec/librarycontract/librarycontract-byte.tsv");
+        /* Since b79622ee09 the installed table uses HALT. Recreate the byte-equivalent legacy
+           DONE edge on both private fixture trees and isolate their baseline net from the shared cache. */
+        if (np_readfile(baseline, &table)) die("read baseline fixture");
+        if (np_count(table.p, table.n, "main\tEMIT\t256\tHALT\t", strlen("main\tEMIT\t256\tHALT\t"))) {
+            edit(baseline, "\tHALT\t", "\tDONE\t");
+            edit(lc, "\tHALT\t", "\tDONE\t");
+        }
+        free(table.p);
         edit(lc, "library contract: malformed declaration stream", "library contract: malformed declaration stream (fixture)");
-        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", 0}; cxd(c, v, &a);
+        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, &a);
           ck(has(&a, 1, "CXDEV_LINT_NA\trecipe=librarycontract\tmodel=local\tsame-on-installed-tables\treason=delta: edge from EMIT to unknown state DONE\n") && has(&a, 1, "CXDEV_RECIPE\tlibrarycontract\tbuilt"), "e.lint-loader-refusal-same-as-installed-reported-and-built"); }
         edit(lc, "main\tEMIT\t256\tDONE\t", "main\tEMIT\t256\tDONEX\t");
-        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", 0}; cxd(c, v, &a);
+        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, &a);
           ck(a.rc == 2 && has(&a, 1, "CXDEV_RECIPE\tlibrarycontract\tlint-error:new-ERROR-not-in-installed-tables") && has(&a, 1, "CXDEV_LINT\tERROR\tlint-not-loadable\tdelta: edge from EMIT to unknown state DONEX") && !has(&a, 1, "CXDEV_LINT_NA\trecipe=librarycontract"), "e.lint-loader-refusal-new-against-installed-stops-swap"); }
     }
     np_free(&a);

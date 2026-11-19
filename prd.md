@@ -370,6 +370,7 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 完整入口清单（含每条的说明、既有依据与覆盖边界）见 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md) 的「已实现能力速查」；这里只列常用入口，具体输入结果与覆盖边界以实际核对为准。
 
 <a id="model-function-bytes"></a>
+经典参考备料用 `tools/ref-material.cx -- prepare SOURCE_REPO CANDIDATE ABS_DIR`。单提交布局可用 UNISACC_REF_SOURCE_REPO 指定含冻结提交的本地仓库，或用 UNISACC_REF_MATERIAL_DIR 指定已备目录。每次使用前核参考程序及收据；准备成功记 PREPARED。
 ## 3. 结构组成（unisacc.com 的内部）
 
 本节是全部结构点的**唯一权威定义**。取数口径：2026-11-11 在 HEAD `6a4fa1fa6f` 的私有克隆、用已装 0.0.52 APE（sha `1bffabba…`，6,529,460 B；P4 包与 0.0.53 同为 `56efea53`）实跑，每个数后括号写命令或出处；带版本号的耗时取自 `build/phase-times.tsv`（多为 0.0.49 候选 979b56e4 的实测，0.0.52/0.0.53 未重测处照写），「未测」即本次没有命令证据。当前源码字节数以 �vsvc product-map` 的内容身份查询为准；生成块 §9.6 是 `tools/product-map.cx` 显式导出的快照，其取数身份与当前查询分开。
