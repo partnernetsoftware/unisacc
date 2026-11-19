@@ -28,6 +28,14 @@
  *                  data row whose version equals the target (--version V, else branch vX.Y.Z; on main --version
  *                  is required), so the chain APE self-reports that version and release-run --pack reproduces its
  *                  bytes.  Otherwise FAIL with REFUSE CHAIN_READY_VERSION_SLOT <why>.
+ *  12-root-files   ROOT (--root DIR, else --repo) unisacc.com and unisacc.com.build.json are regular files (lstat,
+ *                  no symbolic link): else READY=no worktree-root-file-not-regular path=... fix: cp the real file.
+ *  13-snap-cache   if the chain snapshot of this rev (cxlib.chainroot cr_snap; --rev REV, else git rev-parse HEAD)
+ *                  exists, its unisacc.com and build.json are regular and sha256-equal to ROOT's, else
+ *                  READY=no snap-cache-file-not-regular|snap-cache-stale with a mv command (never removed here).
+ *  14-root-record  build.json product_digest and bytes match the APE (else root-record-digest-mismatch); the
+ *                  commit equals the release/candidate.tsv row of the APE's --version (else
+ *                  root-record-commit-mismatch); no row, or sources_sha256: WARN root-record-stale-fields, PASS.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -40,6 +48,8 @@
 #pragma unisa use sys.env
 #pragma unisa use cxlib.boundenv
 #pragma unisa use sys.poll
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.chainroot
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
 #define MAXJ 12
@@ -303,8 +313,139 @@ static void run_p1(long *ms_out, char *ev, int cap) {
     if (newrej || failed_start) { *ms_out = -*ms_out; }
 }
 
+/* ---- 12-14: the product files the chain starts from (0.0.81: four failed starts, 33 minutes) ---- */
+/* 1 regular file (lstat, no symbolic link), 0 otherwise; KIND gets a word */
+static int rf_regular(const char *p, const char **kind) {
+    sy_stat_t st;
+    if (sy_lstat(p, &st) != 0) { *kind = "missing"; return 0; }
+    if (st.kind == 'l') { *kind = "symlink"; return 0; }
+    if (st.kind != 'f') { *kind = "not-regular"; return 0; }
+    *kind = "regular"; return 1;
+}
+/* sha256 of file P into HEX[65]; 0, or -1 */
+static int rf_sha(const char *p, char *hex) {
+    size_t n; char *b = cx_read(p, &n); int r;
+    hex[0] = 0;
+    if (!b) return -1;
+    r = sy_sha256_hex(b, (long)n, hex); mm_free(b);
+    return r ? -1 : 0;
+}
+/* JSON string or number field KEY of J (flat record) into DST; 1 found */
+static int rf_field(const char *j, long n, const char *key, char *dst, int cap) {
+    char pat[80]; long at, i, k = 0;
+    dst[0] = 0;
+    cx_fmt(pat, sizeof pat, "\"%s\"", key);
+    at = tx_find(j, n, pat, (long)tx_len(pat, sizeof pat));
+    if (at < 0) return 0;
+    i = at + (long)tx_len(pat, sizeof pat);
+    while (i < n && (j[i] == ' ' || j[i] == ':' || j[i] == '\t')) i++;
+    if (i < n && j[i] == '"') i++;
+    while (i < n && j[i] != '"' && j[i] != ',' && j[i] != '\n' && j[i] != '}' && k < cap - 1) dst[k++] = j[i++];
+    while (k > 0 && dst[k - 1] == ' ') k--;
+    dst[k] = 0; return k > 0;
+}
+/* commit column of release/candidate.tsv row whose version column is VER; 1 found */
+static int rf_cand_commit(const char *repo, const char *ver, char *dst, int cap) {
+    char p[4400]; size_t n; char *b; long at = 0; int found = 0;
+    dst[0] = 0;
+    cx_fmt(p, sizeof p, "%s/release/candidate.tsv", repo);
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    while (at < (long)n && !found) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
+        char *f[5]; long fl[5]; int c = 0; long s = at, x;
+        for (x = at; x <= at + ln && c < 5; x++) if (x == at + ln || b[x] == '\t') { f[c] = b + s; fl[c] = x - s; c++; s = x + 1; }
+        if (c >= 4 && fl[3] == (long)tx_len(ver, 64) && !memcmp(f[3], ver, (size_t)fl[3]) && fl[2] > 0 && fl[2] < cap) {
+            mm_copy(dst, (size_t)cap, f[2], (size_t)fl[2]); dst[fl[2]] = 0; found = 1;
+        }
+        at += ln + 1;
+    }
+    mm_free(b); return found;
+}
+static void root_items(const char *repo, const char *root, const char *revarg, const char *only) {
+    static const char *names[2] = {"unisacc.com", "unisacc.com.build.json"};
+    char p[4400], ev[1200], rsha[2][65]; int i, ok; long t0 = sy_now_ms();
+    int rok[2]; const char *kind;
+    /* 12: ROOT files must be regular (source-package lstat REFUSE root-epoch-product-stat, epoch-canonical no record) */
+    ok = 1; ev[0] = 0;
+    for (i = 0; i < 2; i++) {
+        cx_fmt(p, sizeof p, "%s/%s", root, names[i]);
+        rok[i] = rf_regular(p, &kind); rsha[i][0] = 0;
+        if (rok[i]) rf_sha(p, rsha[i]);
+        else if (ok) { ok = 0; cx_fmt(ev, sizeof ev, "READY=no worktree-root-file-not-regular path=%s kind=%s fix: cp --remove-destination the real file (cp -L) into ROOT", p, kind); }
+    }
+    if (ok) cx_fmt(ev, sizeof ev, "unisacc.com and unisacc.com.build.json under %s are regular files", root);
+    if (!only || tx_prefix("12-root-files", 13, only, (long)tx_len(only, 64))) row_judged("12-root-files", ok, ev, sy_now_ms() - t0);
+    /* 13: a snapshot of the same revision is reused by chain-step snap without a file-type check */
+    if (!only || tx_prefix("13-snap-cache", 13, only, (long)tx_len(only, 64))) {
+        char rev[64], snap[4600]; t0 = sy_now_ms(); rev[0] = 0;
+        if (revarg) cx_fmt(rev, sizeof rev, "%s", revarg);
+        else {
+            Job g; char *gv[] = {"./tools/bound", "20", "git", "-C", (char *)root, "rev-parse", "HEAD", 0}; int x;
+            for (x = 0; gv[x]; x++) g.argv[x] = gv[x]; g.argv[x] = 0;
+            start(&g); finish(&g);
+            if (g.rc == 0 && g.out && g.n >= 40) { mm_copy(rev, sizeof rev, g.out, 40); rev[40] = 0; }
+            if (g.out) mm_free(g.out);
+        }
+        if (!rev[0] || cr_snap(root, rev, 0, snap, sizeof snap)) {
+            cx_fmt(ev, sizeof ev, "READY=no snap-cache-path-unknown root=%s rev=%.40s fix: run inside a git checkout or pass --rev", root, rev[0] ? rev : "(none)");
+            row_judged("13-snap-cache", 0, ev, sy_now_ms() - t0);
+        } else if (!sy_exists(snap)) {
+            cx_fmt(ev, sizeof ev, "no snapshot cache for rev %.10s at %s: the chain builds a fresh one", rev, snap);
+            row_judged("13-snap-cache", 1, ev, sy_now_ms() - t0);
+        } else {
+            ok = 1;
+            for (i = 0; i < 2 && ok; i++) {
+                char sh[65];
+                cx_fmt(p, sizeof p, "%s/%s", snap, names[i]);
+                if (!rf_regular(p, &kind)) { ok = 0; cx_fmt(ev, sizeof ev, "READY=no snap-cache-file-not-regular path=%s kind=%s fix: mv %s %s.stale-$(date +%%s) (not removed automatically)", p, kind, snap, snap); }
+                else if (rf_sha(p, sh) || !rsha[i][0] || !tx_eqz(sh, rsha[i])) { ok = 0; cx_fmt(ev, sizeof ev, "READY=no snap-cache-stale path=%s snap-sha=%.16s root-sha=%.16s fix: mv %s %s.stale-$(date +%%s) (not removed automatically)", p, sh, rsha[i][0] ? rsha[i] : "(none)", snap, snap); }
+            }
+            if (ok) cx_fmt(ev, sizeof ev, "snapshot %s holds regular unisacc.com and build.json equal to ROOT", snap);
+            row_judged("13-snap-cache", ok, ev, sy_now_ms() - t0);
+        }
+    }
+    /* 14: the build record describes the APE beside it; commit agrees with release/candidate.tsv for its version */
+    if (!only || tx_prefix("14-root-record", 14, only, (long)tx_len(only, 64))) {
+        char rp[4400], dig[80], bytes[40], commit[80], src[80], ver[64], cc[80]; size_t rn; char *rec;
+        t0 = sy_now_ms();
+        cx_fmt(rp, sizeof rp, "%s/unisacc.com.build.json", root);
+        rec = (rok[0] && rok[1]) ? cx_read(rp, &rn) : 0;
+        if (!rec) { row_judged("14-root-record", 0, "READY=no root-record-unreadable fix: repair 12-root-files first", sy_now_ms() - t0); return; }
+        rf_field(rec, (long)rn, "product_digest", dig, sizeof dig); rf_field(rec, (long)rn, "bytes", bytes, sizeof bytes);
+        rf_field(rec, (long)rn, "commit", commit, sizeof commit); rf_field(rec, (long)rn, "sources_sha256", src, sizeof src);
+        mm_free(rec);
+        {   sy_stat_t st; char want[40]; cx_fmt(p, sizeof p, "%s/unisacc.com", root); sy_lstat(p, &st); cx_fmt(want, sizeof want, "%ld", (long)st.size);
+            if (!tx_eqz(dig, rsha[0]) || !tx_eqz(bytes, want)) {
+                cx_fmt(ev, sizeof ev, "READY=no root-record-digest-mismatch product_digest=%.16s sha=%.16s bytes=%s size=%s fix: reinstall the Root (tools/install-ape) so the record matches the APE", dig, rsha[0], bytes, want);
+                row_judged("14-root-record", 0, ev, sy_now_ms() - t0); return;
+            }
+        }
+        ver[0] = 0;
+        {   Job g; char *gv[] = {"./tools/bound", "20", "sh", p, "--version", 0}; int x; long q;
+            for (x = 0; gv[x]; x++) g.argv[x] = gv[x]; g.argv[x] = 0;
+            start(&g); finish(&g);
+            if (g.rc == 0 && g.out) {   /* "unisacc 0.0.80" */
+                long sp = tx_chr(g.out, g.n, ' '); long k = 0;
+                for (q = sp + 1; sp >= 0 && q < g.n && g.out[q] != '\n' && g.out[q] != ' ' && k < 63; q++) ver[k++] = g.out[q];
+                ver[k] = 0;
+            }
+            if (g.out) mm_free(g.out);
+        }
+        if (ver[0] && rf_cand_commit(repo, ver, cc, sizeof cc)) {
+            if (!tx_eqz(commit, cc)) {
+                cx_fmt(ev, sizeof ev, "READY=no root-record-commit-mismatch version=%s record-commit=%.40s candidate-commit=%.40s fix: rewrite the record from release/candidate.tsv or reinstall the Root", ver, commit[0] ? commit : "(none)", cc);
+                row_judged("14-root-record", 0, ev, sy_now_ms() - t0); return;
+            }
+            cx_fmt(ev, sizeof ev, "product_digest and bytes match the APE; commit %.12s equals release/candidate.tsv %s; WARN root-record-stale-fields sources_sha256 not verifiable from the APE", commit, ver);
+        } else
+            cx_fmt(ev, sizeof ev, "product_digest and bytes match the APE; WARN root-record-stale-fields version=%s has no release/candidate.tsv row: commit and sources_sha256 not verified", ver[0] ? ver : "(unknown)");
+        row_judged("14-root-record", 1, ev, sy_now_ms() - t0);
+    }
+}
+
 int main(int argc, char **argv) {
-    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0;
+    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0;
     long T0 = sy_now_ms();
     if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
         size_t n; char *b = cx_read(argv[3], &n); char ev[512]; int ok;
@@ -321,7 +462,9 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
         else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
         else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] | --judge KIND FILE RC]\n"); return 2; }
+        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
+        else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] | --judge KIND FILE RC]\n"); return 2; }
     }
     static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
@@ -444,6 +587,7 @@ int main(int argc, char **argv) {
             row_judged("10-envhygiene", 1, "no inherited deadline and no forced cache variable in this environment", 0);
         }
     }
+    if (WANT("12-root-files") || WANT("13-snap-cache") || WANT("14-root-record")) root_items(repo, rootarg ? rootarg : repo, revarg, only);
     if (WANT("4-p1")) {
         if (fast) row("4-p1", "SKIPPED", "--fast: cx0_plan scan of every .cx with a use pragma not run", 0);
         else { char ev[640]; long ms; run_p1(&ms, ev, sizeof ev); row_judged("4-p1", ms >= 0, ev, ms < 0 ? -ms : ms); }
