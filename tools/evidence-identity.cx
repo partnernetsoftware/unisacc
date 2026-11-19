@@ -1,0 +1,79 @@
+/* --origin APE COMMIT STRICT_SHA STRICT [STRICT_SHA STRICT ...]
+ * Files are pinned in execution order. ORIGIN identifies a witnessed attempt only.
+ * A terminal row without a unique matching RAW cannot authorize a coverage suggestion. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+typedef struct {char *id,*status,*rc,*why,*runner,*file,*note,*ms;int line,rawline;char rawsha[65];} Attempt;
+static Attempt rows[8192];static int nrows;
+static char candidate[65];static const char *origin;
+static void refuse(const char *why){fprintf(stderr,"EVIDENCE_IDENTITY REFUSE %s\n",why);exit(2);}
+static void frame(np_buf *b,const char *s){char n[40];if(cx_fmt(n,sizeof n,"%zu:",strlen(s)))refuse("length");np_puts(b,n);np_puts(b,s);}
+static int hex(const char *s,int n){return strlen(s)==n&&strspn(s,"0123456789abcdef")==n;}
+static char *filebytes(const char *p,size_t *n,char sha[65]){
+    char *s=cx_read(p,n);if(!s)refuse("unreadable-input");cx_sha256_hex(s,*n,sha);return s;
+}
+static int fields(char *p,char **v,int max,char delim){
+    int n=0;while(p){if(n==max)return -1;v[n++]=p;char *q=strchr(p,delim);if(q)*q++=0;p=q;}return n;
+}
+static const char *value(char **v,int n,const char *key){
+    size_t k=strlen(key);const char *found=0;
+    for(int i=0;i<n;i++)if(!strncmp(v[i],key,k)&&v[i][k]=='='){if(found)return "";found=v[i]+k+1;}
+    return found?found:"";
+}
+static Attempt *attempt(const char *id){
+    for(int i=0;i<nrows;i++)if(!strcmp(rows[i].id,id))return rows+i;
+    if(!*id||nrows==8192)refuse("batch-id");rows[nrows].id=strdup(id);return rows+nrows++;
+}
+static int decimal(const char *s){return *s&&strspn(s,"0123456789")==strlen(s)&&strlen(s)<=9;}
+static void segment(const char *pin,const char *path){
+    size_t len;char digest[65];char *p=filebytes(path,&len,digest);
+    if(strcmp(pin,digest))refuse("strict-sha256");
+    if(!len||p[len-1]!='\n'||memchr(p,0,len)||memchr(p,'\r',len))refuse("strict-format");
+    Attempt *last=0;int header=0,line=0;
+    while(*p){
+        char *next=strchr(p,'\n');*next++=0;line++;
+        if(!strncmp(p,"# source=",9)){
+            char *v[32];int n=fields(p+2,v,32,' ');
+            if(strcmp(value(v,n,"source"),origin)||strcmp(value(v,n,"ape_sha256"),candidate)||
+               strcmp(value(v,n,"window_s"),"55")||!*value(v,n,"layout"))refuse("layout-header");
+            header=1;last=0;
+        }else if(!strncmp(p,"RAW\t",4)){
+            if(!header||!last)refuse("orphan-raw");
+            char hash[65];cx_sha256_hex(p,strlen(p),hash);char *v[40];int n=fields(p,v,40,'\t');
+            if(last->rawline||n<3||strcmp(v[1],"BATCH_RUN")||strcmp(value(v,n,"id"),last->id)||
+               strcmp(value(v,n,"status"),last->status)||strcmp(value(v,n,"rc"),last->rc)||
+               strcmp(value(v,n,"candidate"),candidate)||strcmp(value(v,n,"transport"),"0"))last->why="invalid-raw";
+            else if(!strcmp(last->why,"missing-raw")){
+                const char *runner=value(v,n,"runner");
+                if(strcmp(runner,"native")&&strcmp(runner,"sh"))last->why="runner-unknown";
+                else {last->runner=strdup(runner);last->why="";}
+            }
+            memcpy(last->rawsha,hash,sizeof hash);last->rawline=line;
+        }else if(*p&&*p!='#'&&strncmp(p,"batch\tdomain\t",13)&&strncmp(p,"SUMMARY\t",8)&&strncmp(p,"CHECKPOINT\t",11)){
+            char *v[10];if(!header||fields(p,v,10,'\t')!=9)refuse("batch-row");
+            last=attempt(v[0]);last->status=v[2];last->rc=v[3];last->ms=v[5];last->note=v[8];
+            last->file=(char *)pin;last->line=line;last->rawline=0;last->rawsha[0]=0;last->runner="";
+            last->why="missing-raw";
+            if(strcmp(v[2],"PASS")&&strcmp(v[2],"FAIL"))last->why="unresolved";
+            else if(strcmp(v[4],candidate)||!decimal(v[3])||(!strcmp(v[2],"PASS")!=(strcmp(v[3],"0")==0)))last->why="row-identity";
+            else if(!decimal(v[5])||atol(v[5])>55000)last->why="over-window";
+        }else last=0;
+        p=next;
+    }
+    if(!header)refuse("missing-layout-header");
+}
+static void show_origin(Attempt *a){
+    if(*a->why){printf("MUST_RERUN\t%s\t%s\t%s\t%s:%d\n",a->id,a->why,a->status,a->file,a->line);return;}
+    np_buf b={0};char lines[64],sha[65];if(cx_fmt(lines,sizeof lines,"%d,%d",a->line,a->rawline))refuse("lines");
+    const char *v[]={"execution-origin-v1",origin,candidate,a->id,a->status,a->rc,a->runner,a->ms,a->note,a->file,lines,a->rawsha};
+    for(int i=0;i<12;i++)frame(&b,v[i]);cx_sha256_hex(b.p,b.n,sha);
+    printf("ORIGIN\t%s\t%s\trc=%s\trunner=%s\tv1=%s\tsegment=%s\tlines=%s\traw=%s\n",a->id,a->status,a->rc,a->runner,sha,a->file,lines,a->rawsha);
+}
+int main(int argc,char **argv){
+    if(argc==1){printf("EVIDENCE_IDENTITY\tmode=off\n");return 0;}
+    if(argc<6||argc%2||strcmp(argv[1],"--origin")||!hex(argv[3],40))refuse("usage: --origin APE COMMIT STRICT_SHA STRICT ...");
+    origin=argv[3];size_t n;free(filebytes(argv[2],&n,candidate));if(!n)refuse("empty-ape");
+    for(int i=4;i<argc;i+=2)segment(argv[i],argv[i+1]);
+    for(int i=0;i<nrows;i++)show_origin(rows+i);
+    printf("EVIDENCE_IDENTITY\tmode=origin\tbatches=%d\tsource=%s\tcandidate=%s\n",nrows,origin,candidate);return 0;
+}

@@ -1,0 +1,30 @@
+/* Contract: checks tools/evidence-identity.cx against pinned execution receipts. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+static const char *source="0123456789abcdef0123456789abcdef01234567";
+static char ape[4096],strict[4096],exe[4096],candidate[65];
+static int passed,failed;
+static void fixture(const char *label,const char *state,const char *rc,const char *ms,const char *extra,const char *suffix,const char *want,int stale){
+    char content[4000],digest[65];
+    if(cx_fmt(content,sizeof content,"# source=%s layout=/fixture set=ids seed=1 jobs=1 window_s=55 outer_s=60 ape_sha256=%s\nx\td\t%s\t%s\t%s\t%s\t0\t0\t-\nRAW\tBATCH_RUN\tid=x\tstatus=%s\trc=%s\tcandidate=%s\ttransport=0%s\n%s",source,candidate,state,rc,candidate,ms,state,rc,candidate,extra,suffix)||cx_write(strict,content,strlen(content)))exit(2);
+    cx_sha256_hex(content,strlen(content),digest);if(stale)digest[0]=digest[0]=='0'?'1':'0';
+    char *cmd[]={exe,"--origin",ape,(char *)source,digest,strict,0};np_result r={0};char why[256];
+    if(np_run(cmd,0,0,10,&r,why,sizeof why))exit(2);
+    int ok=r.rc==(stale?2:0)&&strstr(stale?r.err:r.out,want);
+    printf("%s\t%s\n",ok?"PASS":"FAIL",label);if(ok)passed++;else failed++;np_free(&r);
+}
+int main(int argc,char **argv){
+    char dir[4096],driver[4096];if(sy_mkdtemp(sy_tmpdir(),"unisacc-identity-",dir,sizeof dir)||sy_realpath("./unisacc.com",driver,sizeof driver)<0||
+       cx_fmt(ape,sizeof ape,"%s/ape",dir)||cx_fmt(strict,sizeof strict,"%s/strict",dir)||cx_fmt(exe,sizeof exe,"%s/tool",dir)||cx_write(ape,"ape",3))return 2;
+    cx_sha256_hex("ape",3,candidate);
+    char *build[]={"sh",driver,"tools/evidence-identity.cx","-o",exe,0};np_result b={0};char why[256];if(np_run(build,0,0,40,&b,why,sizeof why)||b.rc){fprintf(stderr,"check-evidence-identity: build %s\n",b.err?b.err:why);return 2;}np_free(&b);
+    fixture("actual-pass","PASS","0","55","\trunner=sh","","ORIGIN\tx\tPASS",0);
+    fixture("actual-fail","FAIL","1","55","\trunner=native","","ORIGIN\tx\tFAIL",0);
+    fixture("missing-runner","PASS","0","55","","","runner-unknown",0);
+    fixture("duplicate-transport","PASS","0","55","\ttransport=0\trunner=sh","","invalid-raw",0);
+    fixture("exceeded-window","PASS","0","55001","\trunner=sh","","over-window",0);
+    fixture("last-unknown","PASS","0","55","\trunner=sh","x\td\tUNKNOWN\t2\t-\t0\t0\t1\touter-timeout\n","unresolved",0);
+    fixture("strict-byte-change","PASS","0","55","\trunner=sh","","strict-sha256",1);
+    if(cx_rmtree(dir))return 2;printf("CHECK_EVIDENCE_IDENTITY\tpassed=%d\tfailed=%d\n",passed,failed);return failed!=0;
+}
