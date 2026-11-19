@@ -1,0 +1,193 @@
+// Product memory: height field at 4096, per-column first uncovered row at 512.
+persist let fieldReady = 0;
+persist let viewBank = 0.0;
+if (fieldReady == 0) {
+  packetWrite = uxe_dispatch(1, 426, 240);
+  let mapCell = 0;
+  while (mapCell < 65536) {
+    let heightValue = d1_elevation(458752 + mapCell);
+    packetWrite = ux_f32_put(4096 + 4 * mapCell, heightValue * 1.0);
+    mapCell = mapCell + 1;
+  }
+  fieldReady = 1;
+}
+
+viewBank = (3.0 * viewBank + bank) / 4.0;
+let viewMagnitude = viewBank;
+if (viewMagnitude < 0.0) { viewMagnitude = 0.0 - viewMagnitude; }
+let viewSin = 0.0;
+let viewCos = 0.0;
+let viewAxis = 0;
+while (viewAxis < 2) {
+  let viewComponent = ux_sin(heading * 0.017453292519943296 + viewAxis * 1.5707963267948966);
+  if (viewAxis == 0) { viewSin = viewComponent; }
+  else { viewCos = viewComponent; }
+  viewAxis = viewAxis + 1;
+}
+let viewTilt = 0.0 - viewBank * 0.29;
+let viewSide = 0.0 - viewBank * 0.43;
+let viewCam = altitude + 20.0 + viewMagnitude * 0.34;
+let viewX = (x - 2048) / 8.0 + viewCos * viewSide;
+let viewZ = (z - 2048) / 8.0 + viewSin * viewSide;
+let viewHorizon = 100 + f64_floor_i64(pitch * 0.5 + 0.5);
+
+let skyRow = 0;
+while (skyRow < 240) {
+  let skyTone = skyRow / (viewHorizon * 1.0);
+  if (skyTone > 1.0) { skyTone = 1.0; }
+  let skyRed = f64_floor_i64(42.5 + 147.0 * skyTone);
+  let skyGreen = f64_floor_i64(126.5 + 103.0 * skyTone);
+  let skyBlue = f64_floor_i64(185.5 + 54.0 * skyTone);
+  packetWrite = uxe_dispatch(11, 4096 * skyRow + 16777216 * 425,
+    4278190080 + skyRed + 256 * skyGreen + 65536 * skyBlue);
+  skyRow = skyRow + 1;
+}
+
+let viewCol = 0;
+while (viewCol < 426) {
+  packetWrite = ux_u8_put(512 + viewCol, 240);
+  viewCol = viewCol + 1;
+}
+let viewDepth = 4.0;
+let wavePhase = combatTick / 3;
+while (viewDepth <= 400.0) {
+  let viewFade = f64_floor_i64((viewDepth - 52.0) / 13.0);
+  if (viewFade < 0) { viewFade = 0; }
+  if (viewFade > 16) { viewFade = 16; }
+  let viewFog = viewFade * 0.05375;
+  let viewRayX = viewX + viewDepth * viewSin + 256.0;
+  let viewRayZ = viewZ - viewDepth * viewCos + 256.0;
+  viewCol = 0;
+  while (viewCol < 426) {
+    let viewLimit = ux_u8(512 + viewCol);
+    let viewLateral = (viewCol - 212.5) * viewDepth / 151.0;
+    let fineX = u32_and(f64_floor_i64((viewRayX + viewLateral * viewCos) * 2.0), 1023);
+    let fineY = u32_and(f64_floor_i64((viewRayZ + viewLateral * viewSin) * 2.0), 1023);
+    let fieldX = fineX / 4;
+    let fieldY = fineY / 4;
+    let fieldNextX = (fieldX + 1) % 256;
+    let fieldNextY = (fieldY + 1) % 256;
+    let fieldMixX = (fineX % 4) / 4.0;
+    let fieldMixY = (fineY % 4) / 4.0;
+    let fieldFront = ux_f32(4096 + 4 * (fieldY * 256 + fieldX)) * (1.0 - fieldMixX)
+      + ux_f32(4096 + 4 * (fieldY * 256 + fieldNextX)) * fieldMixX;
+    let fieldBack = ux_f32(4096 + 4 * (fieldNextY * 256 + fieldX)) * (1.0 - fieldMixX)
+      + ux_f32(4096 + 4 * (fieldNextY * 256 + fieldNextX)) * fieldMixX;
+    let ground = f64_floor_i64(fieldFront * (1.0 - fieldMixY) + fieldBack * fieldMixY);
+    let rise = ground;
+    if (rise < 0) { rise = 0; }
+    let viewTop = f64_floor_i64(viewHorizon + viewTilt * (viewCol - 213) / 213.0
+      + (viewCam - rise * 0.22) * 151.0 / viewDepth);
+    if (viewTop < 0) { viewTop = 0; }
+    if (viewTop < viewLimit) {
+      let soil = 19 + 67 * 256 + 128 * 65536;
+      if (ground >= -25) { soil = 30 + 111 * 256 + 165 * 65536; }
+      if (ground >= -8) { soil = 45 + 158 * 256 + 190 * 65536; }
+      if (ground >= 0) { soil = 231 + 204 * 256 + 134 * 65536; }
+      if (ground >= 8) { soil = 133 + 183 * 256 + 71 * 65536; }
+      if (ground >= 28) { soil = 89 + 153 * 256 + 59 * 65536; }
+      if (ground >= 55) { soil = 60 + 115 * 256 + 61 * 65536; }
+      if (ground >= 101) { soil = 119 + 111 * 256 + 121 * 65536; }
+      // Water masks and land marks use the same world-space hash.
+      if (ground < 0 || ground >= 8) {
+        let wavePass = 0;
+        if (ground >= 8) { wavePass = 3; }
+        while (wavePass < 7) {
+          let waveX = (fineX + wavePhase) % 1024 / 4;
+          let waveY = fineY / 2;
+          let waveSalt = 9;
+          let waveCutoff = 250;
+          if (ground >= -25) { waveCutoff = 245; }
+          if (ground >= -8) { waveCutoff = 229; }
+          if (wavePass == 1) {
+            waveX = fineX / 32;
+            waveY = fineY / 64;
+            waveSalt = 70;
+            waveCutoff = 255;
+            if ((fineY + (fineX / 4) % 16 + wavePhase * 2) % 64 < 4 &&
+                fineX % 83 < 43) { waveCutoff = 94; }
+          }
+          if (wavePass == 2) {
+            waveX = fineX / 2;
+            waveSalt = 78;
+            waveCutoff = 255;
+            if (ground > 0 - 3) { waveCutoff = 165; }
+          }
+          if (wavePass == 3) {
+            waveX = fineX;
+            waveY = fineY;
+            waveSalt = 26;
+            waveCutoff = 234;
+            if (ground % 10 < 2) { waveCutoff = 0 - 1; }
+          }
+          if (wavePass == 4) {
+            waveX = fineX / 32;
+            waveY = fineY / 32;
+            waveSalt = 34;
+            waveCutoff = 255;
+            if (ground < 28 && (fineX + 2 * fineY) % 13 < 3) { waveCutoff = 83; }
+          }
+          if (wavePass == 5) {
+            waveX = fineX / 2;
+            waveY = fineY / 2;
+            waveSalt = 38;
+            waveCutoff = 255;
+            if (ground >= 28 && ground < 101) { waveCutoff = 224; }
+          }
+          if (wavePass == 6) {
+            waveX = fineX / 4;
+            waveY = fineY / 4;
+            waveSalt = 86;
+            waveCutoff = 255;
+            if (ground >= 81 && ground <= 120) { waveCutoff = 0 - 1; }
+          }
+          let waveNoise = 0;
+          if (waveCutoff < 255 && (waveCutoff >= 0 || wavePass == 6)) {
+            waveNoise = u32_xor(u32_xor(u32_mul(waveX + 17, 374761393),
+              u32_mul(waveY + 29, 668265263)), u32_mul(waveSalt, 1442695041));
+            waveNoise = u32_mul(u32_xor(waveNoise, u32_shr(waveNoise, 13)), 1274126177);
+            waveNoise = u32_and(u32_xor(waveNoise, u32_shr(waveNoise, 16)), 255);
+          }
+          if (waveNoise > waveCutoff) {
+            if (wavePass < 3) {
+              soil = 174 + 225 * 256 + 231 * 65536;
+              wavePass = 6;
+            }
+            if (wavePass == 3) {
+              soil = f64_floor_i64((soil % 256) * 0.87 + 0.5)
+                + 256 * f64_floor_i64((soil / 256 % 256) * 0.87 + 0.5)
+                + 65536 * f64_floor_i64((soil / 65536) * 0.87 + 0.5);
+            }
+            if (wavePass == 4) { soil = 121 + 155 * 256 + 65 * 65536; }
+            if (wavePass == 5) {
+              soil = 103 + 168 * 256 + 81 * 65536;
+              if ((fineX + fineY) % 3 == 0) { soil = 52 + 104 * 256 + 56 * 65536; }
+            }
+            if (wavePass == 6 && ground >= 81) {
+              waveCutoff = f64_floor_i64(0.5 + (ground - 84 + (waveNoise - 128) / 18.0) * 0.25);
+              if (waveCutoff < 0) { waveCutoff = 0; }
+              if (waveCutoff > 8) { waveCutoff = 8; }
+              soil = (60 + (59 * waveCutoff + 4) / 8)
+                + 256 * (115 - (4 * waveCutoff + 3) / 8)
+                + 65536 * (61 + (60 * waveCutoff + 4) / 8);
+            }
+          }
+          wavePass = wavePass + 1;
+          if (ground < 0 && wavePass == 3) { wavePass = 7; }
+        }
+      }
+      let soilR = soil % 256;
+      let soilG = (soil / 256) % 256;
+      let soilB = soil / 65536;
+      packetWrite = uxe_dispatch(10, viewCol + 4096 * viewTop + 16777216 * (viewLimit - 1),
+        4278190080 + f64_floor_i64(soilR + 0.5 + (173 - soilR) * viewFog)
+        + 256 * f64_floor_i64(soilG + 0.5 + (214 - soilG) * viewFog)
+        + 65536 * f64_floor_i64(soilB + 0.5 + (234 - soilB) * viewFog));
+      packetWrite = ux_u8_put(512 + viewCol, viewTop);
+    }
+    viewCol = viewCol + 1;
+  }
+  let nextDepth = viewDepth * 0.022;
+  if (nextDepth < 0.60) { nextDepth = 0.60; }
+  viewDepth = viewDepth + nextDepth;
+}

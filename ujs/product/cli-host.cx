@@ -1,4 +1,10 @@
 #!/usr/bin/env -S unisacc.com -run
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use ux_abi_check
 /* 0.0.7 daily chain: FILE.ujs --run, -o, help, four refuses.
    ./unisacc.com -run ujs/product/cli-host.cx
    Prints cli-host.cx: ok. No Python / Node.
@@ -103,6 +109,55 @@ static int refuse(const char *cmd, const char *wasm_path) {
     return 0;
 }
 
+static int compiler_entry(void) {
+    const char *gold_path = "ujs/practice/uxe/test/d1-flight.wasm";
+    char dir[256], first_path[300], second_path[300], rejected_path[300];
+    char gold[2048], *out = 0;
+    unsigned char *first = 0, *second = 0, *expected = 0;
+    int64_t first_n = 0, second_n = 0, expected_n = 0;
+    size_t out_n = 0;
+    sy_stat_t rejected_stat;
+    const char heading[] = "\"tag\":\"i64\",\"value\":0,";
+    const char packet[] = "\"gpu_len\":11,\"gpu_sum\":341,\"gpu_fnv\":3878376924,";
+    char *compile[] = {"./ujs/ujs2wasm.com", "ujs/tests/d1-flight.ujs", "-o", first_path, 0};
+    char *run[] = {"./ujs/ujs2wasm.com", "--run", first_path, 0};
+    int same = 0, compatible = 0, replay = 0, rejected = 0;
+    if (sy_mkdtemp("/tmp", "ujs2wasm-cli-", dir, sizeof dir)) return 1;
+    tx_snprintf(first_path, sizeof first_path, "%s/first.wasm", dir);
+    tx_snprintf(second_path, sizeof second_path, "%s/second.wasm", dir);
+    tx_snprintf(rejected_path, sizeof rejected_path, "%s/rejected.wasm", dir);
+    if (run_bin(compile, 4, &out, &out_n) == 0) {
+        sy_read_file(first_path, &first, &first_n, 65536);
+    }
+    mm_free(out);
+    compile[3] = second_path;
+    if (run_bin(compile, 4, &out, &out_n) == 0) {
+        sy_read_file(second_path, &second, &second_n, 65536);
+    }
+    mm_free(out);
+    sy_read_file(gold_path, &expected, &expected_n, 65536);
+    same = first && second && first_n && first_n == second_n && !mm_cmp(first, second, first_n);
+    compatible = first && expected && first_n && first_n == expected_n && !mm_cmp(first, expected, first_n);
+    replay = capture(run, 3, gold, sizeof gold, &out_n) == 0 &&
+        tx_contains(gold, out_n, heading, sizeof heading - 1) &&
+        tx_contains(gold, out_n, packet, sizeof packet - 1);
+    compile[1] = "ujs/tests/neg/bad_lex.ujs";
+    compile[3] = rejected_path;
+    rejected = run_bin(compile, 4, &out, &out_n) == 1 &&
+        sy_lstat(rejected_path, &rejected_stat) == -ENOENT;
+    mm_free(out);
+    mm_free(first);
+    mm_free(second);
+    mm_free(expected);
+    sy_unlink(first_path);
+    sy_unlink(second_path);
+    sy_unlink(rejected_path);
+    sy_rmdir(dir);
+    printf("UJS2WASM_CLI deterministic=%d compatible=%d d1_gold=%d rejects_invalid=%d\n",
+        same, compatible, replay, rejected);
+    return !(same && compatible && replay && rejected);
+}
+
 int main(int argc, char **argv) {
     char *av[8];
     char ver[64], help[2048], two[2048], one[2048], both[2048];
@@ -117,6 +172,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cli-host.cx: need repo root and ujs/ujs.com\n");
         return 2;
     }
+    if (argc == 2 && tx_eq(argv[1], "--mutate-ux-abi", sizeof "--mutate-ux-abi")) return check_ux_abi(1);
+    if (argc == 2 && tx_eq(argv[1], "--mutate-u32", sizeof "--mutate-u32")) return check_u32(1);
+    if (argc == 2 && tx_eq(argv[1], "--mutate-floor", sizeof "--mutate-floor")) return check_floor(1);
+    if (argc == 2 && tx_eq(argv[1], "--mutate-branch", sizeof "--mutate-branch")) return check_branch_depth(1);
+    if (argc == 2 && tx_eq(argv[1], "--mutate-locals", sizeof "--mutate-locals")) return check_locals(1);
 
     av[0] = "./ujs/ujs.com";
     av[1] = "--version";
@@ -202,6 +262,8 @@ int main(int argc, char **argv) {
                "/tmp/ujs06-neg.wasm"))
         return 1;
 
+    if (compiler_entry() || check_ux_abi(0) || check_u32(0) || check_floor(0) ||
+        check_branch_depth(0) || check_locals(0)) return 1;
     printf("cli-host.cx: ok\n");
     return 0;
 }

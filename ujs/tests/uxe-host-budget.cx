@@ -1,0 +1,206 @@
+#pragma unisa use crypto.sha256
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char bridge_hash[] = "f6fb066de99c4e0f10cd0802216ba306d7bd5778a755f6dc4515314a5bad8eed";
+static const char pointer_bridge_hash[] = "764e0f951092178c0c958d69e921b3ba08f57c247fd4f1071004ba71d205154c";
+enum { MAX_HOST_LINES = 300, MAX_HOST_COLUMNS = 120 };
+
+static int lower(int ch) { return ch >= 'A' && ch <= 'Z' ? ch + 32 : ch; }
+static int blank(int ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f'; }
+static int name_byte(int ch) {
+    ch = lower(ch);
+    return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-';
+}
+static int word(const unsigned char *s, long n, const char *value) {
+    long length = tx_len(value, 128);
+    if (length != n) return 0;
+    for (long i = 0; i < n; i++) if (lower(s[i]) != value[i]) return 0;
+    return 1;
+}
+
+static int static_tag(const unsigned char *s, long n) {
+    const char *tags[] = {"html","head","body","meta","title","style","main","canvas","aside","section",
+        "h1","h2","p","button","output","div","span","script"};
+    for (int i = 0; i < (int)(sizeof tags / sizeof tags[0]); i++) if (word(s, n, tags[i])) return 1;
+    return 0;
+}
+
+static int static_attribute(const unsigned char *s, long n) {
+    const char *attrs[] = {"charset","name","content","lang","class","id","width","height","role","type",
+        "hidden","disabled","tabindex","style","src","data-uxe-base","data-uxe-product","data-uxe-asset",
+        "data-uxe-keys","data-uxe-pointer","aria-label","aria-labelledby","aria-describedby"};
+    for (int i = 0; i < (int)(sizeof attrs / sizeof attrs[0]); i++) if (word(s, n, attrs[i])) return 1;
+    return 0;
+}
+
+static const char *html_gate(const unsigned char *html, long size) {
+    int scripts = 0;
+    for (long at = 0; at < size;) {
+        if (!html[at]) return "html-nul";
+        if (html[at++] != '<') continue;
+        if (at + 14 <= size && word(html + at, 13, "!doctype html") && html[at + 13] == '>') {
+            at += 14;
+            continue;
+        }
+        int close = at < size && html[at] == '/';
+        if (close) at++;
+        long begin = at;
+        while (at < size && name_byte(html[at])) at++;
+        if (!static_tag(html + begin, at - begin)) return "html-tag";
+        int script = word(html + begin, at - begin, "script");
+        int src = 0, module = 0;
+        while (at < size && html[at] != '>') {
+            if (!blank(html[at])) return "html-attribute-separator";
+            while (at < size && blank(html[at])) at++;
+            if (at < size && html[at] == '>') break;
+            begin = at;
+            while (at < size && name_byte(html[at])) at++;
+            long name_n = at - begin;
+            if (close || !static_attribute(html + begin, name_n)) return "html-attribute";
+            if ((word(html + begin, name_n, "hidden") || word(html + begin, name_n, "disabled")) &&
+                at < size && html[at] != '=') {
+                if (script) return "script-attribute";
+                continue;
+            }
+            while (at < size && blank(html[at])) at++;
+            if (at == size || html[at++] != '=') return "html-value";
+            while (at < size && blank(html[at])) at++;
+            if (at == size || (html[at] != '"' && html[at] != '\'')) return "html-quote";
+            int quote = html[at++];
+            long value = at;
+            while (at < size && html[at] != quote) {
+                if (html[at] == '<' || !html[at]) return "html-value";
+                at++;
+            }
+            if (at == size) return "html-value";
+            long value_n = at++ - value;
+            if (script) {
+                if (word(html + begin, name_n, "src") && !src &&
+                    tx_same((char *)html + value, value_n, "./host-abi.js", 13)) src = 1;
+                else if (word(html + begin, name_n, "type") && !module &&
+                    tx_same((char *)html + value, value_n, "module", 6)) module = 1;
+                else return "script-attribute";
+            } else if (word(html + begin, name_n, "src")) return "html-resource";
+            else if (word(html + begin, name_n, "charset") && !word(html + value, value_n, "utf-8")) return "html-charset";
+        }
+        if (at == size) return "html-tag-end";
+        at++;
+        if (script) {
+            if (close || !src || !module || ++scripts != 1) return "script-count-or-source";
+            while (at < size && blank(html[at])) at++;
+            if (at + 9 > size || !word(html + at, 9, "</script>")) return "script-inline";
+            at += 9;
+        }
+    }
+    return scripts == 1 ? 0 : "script-count-or-source";
+}
+
+static const char *bridge_gate(const unsigned char *js, long n, int *lines) {
+    int columns = 0, widest = 0;
+    char actual[65];
+    *lines = n > 0 && js[n - 1] != '\n';
+    for (long i = 0; i < n; i++) {
+        if (js[i] == '\n') { (*lines)++; columns = 0; }
+        else if (js[i] != '\r' && ++columns > widest) widest = columns;
+    }
+    if (*lines > MAX_HOST_LINES) return "line-budget";
+    if (widest > MAX_HOST_COLUMNS) return "line-width";
+    if (cs_sha256_hex(js, n, actual) ||
+        (!tx_eq(actual, bridge_hash, sizeof actual) && !tx_eq(actual, pointer_bridge_hash, sizeof actual))) return "host-whitelist";
+    return 0;
+}
+
+static int check(const unsigned char *html, long html_n, const unsigned char *js, long js_n) {
+    int lines = 0;
+    const char *reason = bridge_gate(js, js_n, &lines);
+    if (!reason) reason = html_gate(html, html_n);
+    printf("CHECK_UXE_HOST_BUDGET lines=%d max=%d cause=%s failed=%d\n",
+        lines, MAX_HOST_LINES, reason ? reason : "ok", reason != 0);
+    return reason != 0;
+}
+
+static int package_scripts(const char *directory, int depth) {
+    sy_dir_t scan;
+    int state, ok = 1;
+    if (depth > 16 || sy_dir_open(&scan, directory)) return 0;
+    while ((state = sy_dir_next(&scan)) == 1) {
+        long n = tx_len(scan.name, sizeof scan.name);
+        if (n < 0) { ok = 0; break; }
+        if (scan.kind == 'd') {
+            char nested[4096];
+            int size = tx_snprintf(nested, sizeof nested, "%s/%s", directory, scan.name);
+            if (size < 0 || size >= (int)sizeof nested || !package_scripts(nested, depth + 1)) {
+                ok = 0; break;
+            }
+        } else if (scan.kind != 'f' ||
+            ((n >= 3 && word((unsigned char *)scan.name + n - 3, 3, ".js")) ||
+             (n >= 4 && (word((unsigned char *)scan.name + n - 4, 4, ".mjs") ||
+                         word((unsigned char *)scan.name + n - 4, 4, ".cjs"))))) {
+            if (scan.kind != 'f' || depth || !tx_eq(scan.name, "host-abi.js", sizeof "host-abi.js")) {
+                ok = 0; break;
+            }
+        }
+    }
+    sy_dir_close(&scan);
+    return ok && state == 0;
+}
+
+static int fixture(const char *mode) {
+    const char shell[] = "<!doctype html><meta charset=\"utf-8\"><canvas data-uxe-base=\"./uxe.wasm\">"
+        "</canvas><script type=\"module\" src=\"./host-abi.js\"></script>";
+    const char inline_js[] = "<script type=\"module\" src=\"./host-abi.js\">void 0</script>";
+    const char other_js[] = "<script type=\"module\" src=\"./extra.js\"></script>";
+    const char handler[] = "<canvas onclick=\"void 0\"></canvas><script type=\"module\" src=\"./host-abi.js\"></script>";
+    unsigned char *js = 0, too_long[MAX_HOST_LINES + 1];
+    int64_t js_n = 0;
+    int rc;
+    if (sy_read_file("ujs/practice/uxe/base/host-abi.js", &js, &js_n, 65536)) return 2;
+    if (tx_eq(mode, "--over", 7)) {
+        for (int i = 0; i < (int)sizeof too_long; i++) too_long[i] = '\n';
+        rc = check((const unsigned char *)shell, sizeof shell - 1, too_long, sizeof too_long);
+    } else if (tx_eq(mode, "--inline", 9)) {
+        rc = check((const unsigned char *)inline_js, sizeof inline_js - 1, js, js_n);
+    } else if (tx_eq(mode, "--other", 8)) {
+        rc = check((const unsigned char *)other_js, sizeof other_js - 1, js, js_n);
+    } else if (tx_eq(mode, "--handler", 10)) {
+        rc = check((const unsigned char *)handler, sizeof handler - 1, js, js_n);
+    } else if (tx_eq(mode, "--bridge", 9) && js_n > 0) {
+        js[0] = 'x';
+        rc = check((const unsigned char *)shell, sizeof shell - 1, js, js_n);
+    } else {
+        rc = check((const unsigned char *)shell, sizeof shell - 1, js, js_n);
+    }
+    mm_free(js);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    unsigned char *html = 0, *js = 0;
+    int64_t html_n = 0, js_n = 0;
+    char bridge[4096], directory[4096];
+    int rc = 2;
+    if (argc != 2) return 2;
+    if (tx_eq(argv[1], "--fixture", 10) || tx_eq(argv[1], "--over", 7) ||
+        tx_eq(argv[1], "--inline", 9) || tx_eq(argv[1], "--other", 8) ||
+        tx_eq(argv[1], "--handler", 10) || tx_eq(argv[1], "--bridge", 9)) return fixture(argv[1]);
+    long path_n = tx_len(argv[1], 4000);
+    if (path_n < 0) return 2;
+    long slash = tx_rfind(argv[1], path_n, "/", 1);
+    tx_snprintf(bridge, sizeof bridge, "%.*shost-abi.js", (int)(slash + 1), argv[1]);
+    tx_snprintf(directory, sizeof directory, "%.*s", slash >= 0 ? (int)(slash + 1) : 1,
+        slash >= 0 ? argv[1] : ".");
+    if (!package_scripts(directory, 0)) {
+        printf("CHECK_UXE_HOST_BUDGET cause=package-script-files failed=1\n");
+        return 1;
+    }
+    if (!sy_read_file(argv[1], &html, &html_n, 65536) && !sy_read_file(bridge, &js, &js_n, 65536)) {
+        rc = check(html, html_n, js, js_n);
+    }
+    mm_free(html);
+    mm_free(js);
+    return rc;
+}

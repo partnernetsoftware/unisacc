@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D3 route probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function readBytes(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name, false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return Uint8Array.from(request.responseText, ch => ch.charCodeAt(0) & 255);
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const host = createBrowserHost(document.querySelector("canvas"),
+    ["KeyW", "KeyS", "KeyA", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"], readBytes("route.bin"));
+  const linked = linkUxe(new WebAssembly.Module(readBytes("base.wasm")),
+    new WebAssembly.Module(readBytes("product.wasm")), host);
+  host.attachMemory(linked.base.memory);
+  const frame = linked.product.uxe_frame;
+  const view = new Float32Array(linked.product.memory.buffer, 2097152, 8);
+  const key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+  const output = [];
+  for (let tick = 0; tick <= 420; tick++) {
+    if (tick === 1) key("keydown", "KeyW");
+    if (tick === 60) key("keydown", "KeyD");
+    if (tick === 100) key("keyup", "KeyD");
+    if (tick === 401) {
+      key("keyup", "KeyW");
+      key("keydown", "ArrowDown");
+      key("keydown", "ArrowLeft");
+    }
+    const elapsed = frame(BigInt(tick) * 32000n);
+    if ([0, 1, 60, 100, 170, 373, 400, 420].includes(tick)) {
+      output.push([elapsed, ...Array.from(view, Math.round)].join(","));
+    }
+  }
+  result.textContent = output.join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

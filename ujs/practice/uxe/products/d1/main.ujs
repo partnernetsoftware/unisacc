@@ -1,0 +1,396 @@
+import uxe_dispatch from "uxe_v1"(i64, i64, i64) i64;
+export uxe_frame(now:i64) i64 version 1;
+
+persist let heading = 0;
+persist let bank = 0;
+persist let x = 2048;
+persist let z = 2048;
+persist let altitude = 25;
+persist let speed = 12;
+persist let pitch = 0;
+persist let started = 0;
+persist let last = 0;
+persist let elapsed = 0;
+persist let priorTurn = 0;
+persist let priorClimb = 0;
+persist let priorBoost = 0;
+persist let priorGun = 0;
+persist let cannonAmmo = 96;
+persist let cannonCooldown = 0;
+persist let cannonIdle = 0;
+persist let cannonEvents = 0;
+persist let priorMissile = 0;
+persist let missileAmmo = 3;
+persist let missileCooldown = 0;
+persist let missileTarget = 0;
+persist let missileTravel = 0;
+persist let missileEvents = 0;
+persist let combatTick = 0;
+persist let combatKills = 0;
+persist let battleWave = 1;
+persist let battleSlots = 3;
+persist let battleDelay = 0;
+persist let formationX = 2048;
+persist let formationZ = 2048;
+persist let formationAltitude = 25;
+persist let formationSin = 0.0;
+persist let formationCos = 1.0;
+persist let priorLock = 0;
+persist let lockEvents = 0;
+persist let explosionEvents = 0;
+persist let playerHealth = 100;
+persist let hitFlash = 0;
+persist let trailCursor = 0;
+persist let trailCount = 0;
+let packetWrite = 0;
+
+// Enemy records start at byte 32. Each record holds hull and three
+// screen-space bytes: horizontal position, vertical position, and depth.
+if (started == 0) {
+  packetWrite = ux_u8_put(32, 4);
+  packetWrite = ux_u8_put(36, 2);
+  packetWrite = ux_u8_put(40, 8);
+}
+
+if (started == 0) {
+  last = now;
+  started = 1;
+}
+let delta = now - last;
+if (delta < 0) { return 0 - 1; }
+last = now;
+if (delta > 200000) { delta = 200000; }
+elapsed = elapsed + delta * 30;
+let steps = elapsed / 1000000;
+if (steps == 0) { return heading; }
+elapsed = elapsed % 1000000;
+
+let keys = uxe_dispatch(0, 0, 0);
+if (playerHealth == 0) {
+  if ((keys / 4096) % 2 == 0) { return heading; }
+  playerHealth = 100;
+  hitFlash = 0;
+  trailCursor = 0;
+  trailCount = 0;
+  heading = 0;
+  bank = 0;
+  pitch = 0;
+  x = 2048;
+  z = 2048;
+  altitude = 25;
+  speed = 12;
+  combatKills = 0;
+  battleWave = 1;
+  battleSlots = 3;
+  battleDelay = 0;
+  combatTick = 0;
+  formationX = 2048;
+  formationZ = 2048;
+  formationAltitude = 25;
+  formationSin = 0.0;
+  formationCos = 1.0;
+  cannonAmmo = 96;
+  cannonCooldown = 0;
+  cannonIdle = 0;
+  missileAmmo = 3;
+  missileCooldown = 0;
+  missileTarget = 0;
+  missileTravel = 0;
+  priorLock = 0;
+  packetWrite = ux_u8_put(32, 4);
+  packetWrite = ux_u8_put(36, 2);
+  packetWrite = ux_u8_put(40, 8);
+  let clearedShot = 80;
+  while (clearedShot < 114) {
+    packetWrite = ux_u8_put(clearedShot, 0);
+    clearedShot = clearedShot + 1;
+  }
+  steps = 1;
+}
+let keyLeft = keys % 2;
+let keyRight = (keys / 2) % 2;
+let keyUp = (keys / 4) % 2;
+let keyDown = (keys / 8) % 2;
+let keyBoost = (keys / 16) % 2;
+let keyGun = (keys / 1024) % 2;
+let keyMissile = (keys / 2048) % 2;
+if (((keys / 32) % 2) == 1) { keyBoost = 1; }
+if (((keys / 64) % 2) == 1) { keyLeft = 1; }
+if (((keys / 128) % 2) == 1) { keyRight = 1; }
+if (((keys / 256) % 2) == 1) { keyUp = 1; }
+if (((keys / 512) % 2) == 1) { keyDown = 1; }
+
+let tickTurn = priorTurn;
+let tickClimb = priorClimb;
+let tickBoost = priorBoost;
+let tickGun = priorGun;
+let tickMissile = priorMissile;
+while (steps > 0) {
+  if (steps == 1) {
+    tickTurn = keyRight - keyLeft;
+    tickClimb = keyUp - keyDown;
+    tickBoost = keyBoost;
+    tickGun = keyGun;
+    tickMissile = keyMissile;
+  }
+  let target = tickTurn * 24;
+  if (bank < target) { bank = bank + 4; }
+  else { if (bank > target) { bank = bank - 4; } }
+  packetWrite = ux_u8_put(120 + trailCursor, bank + 24);
+  trailCursor = (trailCursor + 1) % 30;
+  if (trailCount < 30) { trailCount = trailCount + 1; }
+  heading = (heading + tickTurn * 3 + 360) % 360;
+  let cruise = 12;
+  if (tickBoost > 0) { cruise = 28; }
+  if (speed < cruise) { speed = speed + 2; }
+  else { if (speed > cruise) { speed = speed - 2; } }
+  let pitchTarget = 0;
+  if (tickClimb > 0) {
+    pitchTarget = 18;
+    if (altitude < 106) { altitude = altitude + 1; }
+  } else {
+    if (tickClimb < 0) {
+      pitchTarget = 0 - 18;
+      if (altitude > 12) { altitude = altitude - 1; }
+    }
+  }
+  if (pitch < pitchTarget) { pitch = pitch + 3; }
+  else { if (pitch > pitchTarget) { pitch = pitch - 3; } }
+  let phase = heading % 180;
+  let dx = phase * (180 - phase) * speed / 8100;
+  if (heading >= 180) { dx = 0 - dx; }
+  let axis = (heading + 90) % 360;
+  phase = axis % 180;
+  let dz = phase * (180 - phase) * speed / 8100;
+  if (axis >= 180) { dz = 0 - dz; }
+  x = (x + dx + 4096) % 4096;
+  z = (z - dz + 4096) % 4096;
+  combatTick = (combatTick + 1) % 12288;
+  let yawPhase = heading % 180;
+  let battleSin = yawPhase * (180 - yawPhase) / 8100.0;
+  if (heading >= 180) { battleSin = 0.0 - battleSin; }
+  yawPhase = axis % 180;
+  let battleCos = yawPhase * (180 - yawPhase) / 8100.0;
+  if (axis >= 180) { battleCos = 0.0 - battleCos; }
+  if (battleDelay > 0) {
+    battleDelay = battleDelay - 1;
+    if (battleDelay == 0) {
+      battleWave = battleWave + 1;
+      if (battleSlots < 8) { battleSlots = battleSlots + 1; }
+      combatTick = 0;
+      formationX = x;
+      formationZ = z;
+      formationAltitude = altitude;
+      formationSin = battleSin;
+      formationCos = battleCos;
+      cannonAmmo = 96;
+      missileAmmo = 3;
+      missileTarget = 0;
+      missileTravel = 0;
+      let discarded = 80;
+      while (discarded < 112) {
+        packetWrite = ux_u8_put(discarded, 0);
+        discarded = discarded + 1;
+      }
+      let waveSlot = 0;
+      let hullBonus = battleWave - 1;
+      if (hullBonus > 4) { hullBonus = 4; }
+      while (waveSlot < battleSlots) {
+        let hull = 2;
+        if (waveSlot % 3 == 0) { hull = 4; }
+        if (waveSlot % 3 == 2) { hull = 8; }
+        packetWrite = ux_u8_put(32 + 4 * waveSlot, hull + hullBonus);
+        waveSlot = waveSlot + 1;
+      }
+    }
+  }
+  let enemySlot = 0;
+  let nearest = 0;
+  let nearestSquare = 900;
+  let battleAlive = 0;
+  while (enemySlot < battleSlots) {
+    let enemyRecord = 32 + 4 * enemySlot;
+    let enemyHull = ux_u8(enemyRecord);
+    if (enemyHull > 0) { battleAlive = battleAlive + 1; }
+    let enemyKind = enemySlot % 3;
+    let enemyGroup = enemySlot / 3;
+    let enemyX = 4;
+    let enemyZ = 0 - 91;
+    let enemyY = 45;
+    if (enemyKind == 0) {
+      enemyX = 0 - 49; enemyZ = 0 - 116; enemyY = 55;
+      if (battleWave == 1) { enemyX = 0 - 25; enemyZ = 0 - 53; enemyY = 53; }
+    }
+    if (enemyKind == 2) {
+      enemyX = 53; enemyZ = 0 - 135; enemyY = 50;
+      if (battleWave == 1) { enemyX = 94; enemyZ = 0 - 208; enemyY = 71; }
+    }
+    enemyX = enemyX + enemyGroup * 30;
+    enemyZ = enemyZ - enemyGroup * 41;
+    enemyY = enemyY + formationAltitude - 25 + enemyGroup * 3;
+    let spawnX = f64_floor_i64(8.0 * (enemyX * formationCos - enemyZ * formationSin));
+    let spawnZ = f64_floor_i64(8.0 * (enemyX * formationSin + enemyZ * formationCos));
+    let maneuverPhase = 0;
+    if (combatTick > 30) { maneuverPhase = (combatTick - 30) % 96; }
+    let sweep = maneuverPhase;
+    if (maneuverPhase >= 24) { sweep = 48 - maneuverPhase; }
+    if (maneuverPhase >= 72) { sweep = maneuverPhase - 96; }
+    let drift = 0 - 1.35 * sweep;
+    if (enemyKind == 0) { drift = (combatTick % 72) / 6 + 0.65 * sweep; }
+    if (enemyKind == 2) { drift = 0.28 * sweep - (combatTick % 72) / 6; }
+    let driftX = f64_floor_i64(drift * 8.0);
+    let offsetX = ((65536 + formationX + spawnX + driftX - x + 2048) % 4096 - 2048) / 8.0;
+    let offsetZ = ((65536 + formationZ + spawnZ - combatTick / 3 * 8 - z + 2048) % 4096 - 2048) / 8.0;
+    let depth = offsetX * battleSin - offsetZ * battleCos;
+    packetWrite = ux_u8_put(enemyRecord + 3, 0);
+    if (depth >= 9.0 && depth <= 345.0) {
+      let screenX = f64_floor_i64(213.5 + 151.0 * (offsetX * battleCos + offsetZ * battleSin) / depth);
+      let screenY = f64_floor_i64(113.5 + pitch * 0.5 + (altitude + 13 - enemyY + sweep * 0.18) * 151.0 / depth);
+      if (screenX >= 12 && screenX <= 413 && screenY >= 16 && screenY < 196) {
+        packetWrite = ux_u8_put(enemyRecord + 1, screenX / 2);
+        packetWrite = ux_u8_put(72 + enemySlot, screenX % 2);
+        packetWrite = ux_u8_put(enemyRecord + 2, screenY);
+        packetWrite = ux_u8_put(enemyRecord + 3, f64_floor_i64(depth / 2.0));
+        let aimX = screenX - 213;
+        let aimY = screenY - 101 - f64_floor_i64(pitch * 0.25 + 0.5);
+        let distanceSquare = aimX * aimX + aimY * aimY;
+        if (enemyHull > 0 && distanceSquare < nearestSquare) {
+          nearest = enemyRecord;
+          nearestSquare = distanceSquare;
+        }
+      }
+    }
+    enemySlot = enemySlot + 1;
+  }
+  if (cannonCooldown > 0) { cannonCooldown = cannonCooldown - 1; }
+  if (missileCooldown > 0) { missileCooldown = missileCooldown - 1; }
+  if (cannonIdle < 176) { cannonIdle = cannonIdle + 1; }
+  if (tickGun == 1 && cannonAmmo > 0 && cannonCooldown == 0) {
+    cannonAmmo = cannonAmmo - 1;
+    cannonCooldown = 5;
+    cannonIdle = 0;
+    cannonEvents = (cannonEvents + 1) % 65536;
+    if (nearest > 0) {
+      let remainingHull = ux_u8(nearest) - 1;
+      packetWrite = ux_u8_put(nearest, remainingHull);
+      if (remainingHull == 0) {
+        combatKills = (combatKills + 1) % 100;
+        explosionEvents = (explosionEvents + 1) % 65536;
+        battleAlive = battleAlive - 1;
+      }
+    }
+  }
+  if (missileTarget > 0) {
+    missileTravel = missileTravel - 1;
+    if (missileTravel == 0) {
+      let missileHull = ux_u8(missileTarget);
+      if (missileHull > 0 && ux_u8(missileTarget + 3) > 0) {
+        let afterImpact = missileHull - 4;
+        if (afterImpact <= 0) {
+          afterImpact = 0;
+          combatKills = (combatKills + 1) % 100;
+          explosionEvents = (explosionEvents + 1) % 65536;
+          battleAlive = battleAlive - 1;
+        }
+        packetWrite = ux_u8_put(missileTarget, afterImpact);
+      }
+      missileTarget = 0;
+    }
+  }
+  if (tickMissile == 1 && missileAmmo > 0 && missileCooldown == 0 && nearest > 0) {
+    missileAmmo = missileAmmo - 1;
+    missileTarget = nearest;
+    missileTravel = 13;
+    missileCooldown = 18;
+    cannonIdle = 0;
+    missileEvents = (missileEvents + 1) % 65536;
+  }
+  if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
+  if (cannonIdle == 176 && missileAmmo == 0) { missileAmmo = 3; }
+  if (battleAlive == 0 && battleDelay == 0) { battleDelay = 36; }
+  // 80..87 are enemy fire cooldowns. Six four-byte shots start at 88.
+  if (hitFlash > 0) { hitFlash = hitFlash - 1; }
+  let shotAt = 88;
+  while (shotAt < 112) {
+    let shotAge = ux_u8(shotAt);
+    if (shotAge > 0) {
+      shotAge = shotAge - 1;
+      packetWrite = ux_u8_put(shotAt, shotAge);
+      if (shotAge == 0 && playerHealth > 0) {
+        let shotYaw = ux_u8(shotAt + 1) + 256 * ux_u8(shotAt + 2);
+        let shotShift = (heading - shotYaw + 360) % 360;
+        if (shotShift > 180) { shotShift = 360 - shotShift; }
+        let shotPitchDelta = pitch + 18 - ux_u8(shotAt + 3);
+        if (shotPitchDelta < 0) { shotPitchDelta = 0 - shotPitchDelta; }
+        if (2 * shotShift + shotPitchDelta <= 18) {
+          playerHealth = playerHealth - 20;
+          hitFlash = 6;
+        }
+      }
+    }
+    shotAt = shotAt + 4;
+  }
+  let returnSlot = 0;
+  while (returnSlot < battleSlots && playerHealth > 0) {
+    let fireCooldown = ux_u8(80 + returnSlot);
+    if (fireCooldown > 0) {
+      fireCooldown = fireCooldown - 1;
+      packetWrite = ux_u8_put(80 + returnSlot, fireCooldown);
+    }
+    let fireHull = 32 + 4 * returnSlot;
+    if (returnSlot % 3 == 0 && combatTick >= 40 + (returnSlot / 3) * 9 &&
+        fireCooldown == 0 && ux_u8(fireHull) > 0 && ux_u8(fireHull + 3) > 0) {
+      shotAt = 88 + (returnSlot / 3) * 8;
+      if (ux_u8(shotAt) != 0) { shotAt = shotAt + 4; }
+      if (ux_u8(shotAt) == 0) {
+        packetWrite = ux_u8_put(shotAt, 22);
+        packetWrite = ux_u8_put(shotAt + 1, heading % 256);
+        packetWrite = ux_u8_put(shotAt + 2, heading / 256);
+        packetWrite = ux_u8_put(shotAt + 3, pitch + 18);
+        fireCooldown = 21 - battleWave;
+        if (fireCooldown < 14) { fireCooldown = 14; }
+        packetWrite = ux_u8_put(80 + returnSlot, fireCooldown);
+      }
+    }
+    returnSlot = returnSlot + 1;
+  }
+  packetWrite = ux_u8_put(18, playerHealth);
+  packetWrite = ux_u8_put(19, hitFlash);
+  packetWrite = ux_u8_put(14, nearest);
+  packetWrite = ux_u8_put(15, combatKills);
+  packetWrite = ux_u8_put(16, battleWave % 256);
+  packetWrite = ux_u8_put(17, battleAlive);
+  packetWrite = ux_u8_put(20, missileAmmo);
+  packetWrite = ux_u8_put(21, missileEvents % 256);
+  packetWrite = ux_u8_put(22, missileEvents / 256);
+  packetWrite = ux_u8_put(23, missileTarget);
+  packetWrite = ux_u8_put(24, missileTravel);
+  let lockNow = 0;
+  if (nearest > 0 && ux_u8(nearest) > 0) { lockNow = 1; }
+  if (lockNow == 1 && priorLock == 0) { lockEvents = (lockEvents + 1) % 65536; }
+  priorLock = lockNow;
+  // D1 audio tick
+  if (playerHealth == 0) { steps = 1; }
+  steps = steps - 1;
+}
+priorTurn = tickTurn;
+priorClimb = tickClimb;
+priorBoost = tickBoost;
+priorGun = tickGun;
+priorMissile = tickMissile;
+
+packetWrite = ux_u8_put(0, 3);
+packetWrite = ux_u8_put(1, heading % 256);
+packetWrite = ux_u8_put(2, heading / 256);
+packetWrite = ux_u8_put(3, bank + 24);
+packetWrite = ux_u8_put(4, x % 256);
+packetWrite = ux_u8_put(5, x / 256);
+packetWrite = ux_u8_put(6, z % 256);
+packetWrite = ux_u8_put(7, z / 256);
+packetWrite = ux_u8_put(8, altitude);
+packetWrite = ux_u8_put(9, speed);
+packetWrite = ux_u8_put(10, pitch + 18);
+packetWrite = ux_u8_put(11, cannonAmmo);
+packetWrite = ux_u8_put(12, cannonEvents % 256);
+packetWrite = ux_u8_put(13, cannonEvents / 256);
+return heading;

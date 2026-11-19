@@ -1,0 +1,115 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D1 flight probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function read(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name + ".wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, character => character.charCodeAt(0) & 255);
+  return new WebAssembly.Module(bytes);
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const canvas = document.querySelector("canvas");
+  const keys = ["KeyA", "KeyD", "KeyW", "KeyS", "ShiftLeft", "ShiftRight",
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space", "KeyM", "KeyR"];
+  const host = createBrowserHost(canvas, keys);
+  const [base, product] = ["base", "product"].map(read);
+  const linked = linkUxe(base, product, host);
+  host.attachMemory(linked.base.memory);
+  const run = linked.product.uxe_frame;
+  const packet = new Uint8Array(linked.product.memory.buffer, 2097152, 11);
+  const snapshot = () => packet.join(",");
+  const key = (type, ...codes) => {
+    for (const code of codes) dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+  };
+  const snapshots = [];
+  run(0n);
+  const early = run(33333n);
+  for (let i = 1; i <= 24; i++) {
+    if (i === 1) key("keydown", "KeyD", "KeyW", "ShiftLeft");
+    if (i === 7) key("keyup", "KeyD", "KeyW", "ShiftLeft");
+    if (i === 13) key("keydown", "ArrowLeft", "ArrowDown", "ShiftRight");
+    if (i === 19) dispatchEvent(new Event("blur"));
+    run(BigInt(i) * 33334n);
+    if (i % 6 === 0) snapshots.push(snapshot());
+  }
+  const backwards = run(800000n);
+  key("keydown", "KeyD");
+  run(27n * 33334n);
+  snapshots.push(snapshot());
+  const gunPacket = new DataView(linked.product.memory.buffer, 2097152 + 11, 3);
+  key("keyup", "KeyD");
+  key("keydown", "Space");
+  for (let tick = 28; tick <= 503; tick++) {
+    run(BigInt(tick) * 33334n);
+    if (tick === 28 || tick === 32 || tick === 33 || tick === 503) {
+      snapshots.push(gunPacket.getUint8(0) + "," + gunPacket.getUint16(1, true));
+    }
+  }
+  key("keyup", "Space");
+  for (let tick = 504; tick <= 679; tick++) {
+    run(BigInt(tick) * 33334n);
+    if (tick >= 678) snapshots.push(gunPacket.getUint8(0) + "," + gunPacket.getUint16(1, true));
+  }
+  const dogfight = linkUxe(base, product, host);
+  host.attachMemory(dogfight.base.memory);
+  const combat = new Uint8Array(dogfight.product.memory.buffer, 2097152, 48);
+  const hulls = () => [combat[14], combat[15], combat[32], combat[36], combat[40]].join(",");
+  dogfight.product.uxe_frame(0n);
+  key("keydown", "Space");
+  for (let tick = 1; tick <= 6; tick++) {
+    dogfight.product.uxe_frame(BigInt(tick) * 33334n);
+    if (tick === 1 || tick === 6) snapshots.push(hulls());
+  }
+  key("keyup", "Space");
+  dogfight.product.uxe_frame(7n * 33334n);
+  snapshots.push(hulls());
+  // Isolate wave timing by starting with the two off-axis foes already down.
+  combat[32] = 0;
+  combat[40] = 0;
+  for (let tick = 8; tick <= 44; tick++) {
+    dogfight.product.uxe_frame(BigInt(tick) * 33334n);
+    if (tick >= 43) snapshots.push([16, 17, 32, 36, 40, 44].map(at => combat[at]).join(","));
+  }
+  const missileRun = linkUxe(base, product, host);
+  host.attachMemory(missileRun.base.memory);
+  const missile = new Uint8Array(missileRun.product.memory.buffer, 2097152, 112);
+  missileRun.product.uxe_frame(0n);
+  key("keydown", "KeyM");
+  for (let tick = 1; tick <= 14; tick++) {
+    missileRun.product.uxe_frame(BigInt(tick) * 33334n);
+    if (tick === 1 || tick >= 13) snapshots.push([20, 21, 23, 24, 36, 15].map(at => missile[at]).join(","));
+  }
+  key("keyup", "KeyM");
+  // Place shots one tick from impact. The first has a mismatched heading.
+  missile.set([1, 20, 0, 18], 88);
+  missileRun.product.uxe_frame(15n * 33334n);
+  const battlePacket = () => [1, 11, 15, 16, 18, 19, 20].map(at => missile[at]).join(",");
+  snapshots.push(battlePacket());
+  for (let tick = 16; tick <= 20; tick++) {
+    missile.set([1, 0, 0, 18], 88);
+    missileRun.product.uxe_frame(BigInt(tick) * 33334n);
+    if (tick === 16 || tick === 20) snapshots.push(battlePacket());
+  }
+  key("keydown", "KeyD");
+  missileRun.product.uxe_frame(21n * 33334n);
+  snapshots.push(battlePacket());
+  key("keyup", "KeyD");
+  key("keydown", "KeyR");
+  missileRun.product.uxe_frame(22n * 33334n);
+  snapshots.push(battlePacket());
+  key("keyup", "KeyR");
+  result.textContent = [early, backwards, ...snapshots].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

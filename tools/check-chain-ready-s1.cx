@@ -1,0 +1,111 @@
+/* tools/check-chain-ready-s1.cx -- fixtures for chain-ready items 12-root-files, 13-snap-cache, 14-root-record
+ * (the 0.0.81 start failures: symlinked worktree product files, a snapshot that froze the symlinks, a stale
+ * build record).  Every fixture lives in a private temp dir with HOME pointed into it, so the snapshot cache
+ * path (cxlib.chainroot cr_snap) is a fixture too; the real cache is never read or written.
+ *   sh ./unisacc.com tools/check-chain-ready-s1.cx
+ * Ends with CHAIN_READY_S1 passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.chainroot
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/chain-ready.cx under the installed product */
+#define REV "1234567890abcdef1234567890abcdef12345678"
+#define COMMIT "a08294deab06a77874bbe73cc94412696459d9c8"
+static int passed, failed;
+static char tmpd[300], cwd[4400], out[8192];
+
+static void ck(int ok, const char *name, const char *out) {
+    if (ok) { passed++; printf("PASS\t%s\n", name); } else { failed++; printf("FAIL\t%s\t%.300s\n", name, out); }
+}
+static int has(const char *h, const char *w) { (void)h; return strstr(out, w) != 0; } /* every caller passes the shared out buffer */
+/* ARGV starts with ./tools/bound SECONDS; stdout and stderr merged into OUT; the exit code, or -1 */
+static int ready_argv(char **argv, char *out, int cap) {
+    int fd = -1, ex = 0, code = 0, sig = 0, pid; long got = 0, r = 1;
+    long deadline_ms = 0; (void)deadline_ms;   /* the deadline lives in the ./tools/bound argv prefix */
+    out[0] = 0;
+    if ((pid = sy_spawn_pipe(argv, 0, 0, &fd, 0)) <= 0) return -1;
+    for (; r > 0 && got < cap - 1; got += r) { r = sy_read(fd, out + got, cap - 1 - got); if (r <= 0) break; }
+    out[got] = 0; sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static void put(const char *dir, const char *name, const char *text) {
+    char p[4400]; cx_fmt(p, sizeof p, "%s/%s", dir, name);
+    cx_write(p, text, tx_len(text, 1 << 16));
+}
+static void sha_of(const char *dir, const char *name, char *hex, long *size) {
+    char p[4400]; size_t n; char *b; cx_fmt(p, sizeof p, "%s/%s", dir, name);
+    b = cx_read(p, &n); hex[0] = 0; *size = 0;
+    if (b) { sy_sha256_hex(b, (long)n, hex); *size = (long)n; mm_free(b); }
+}
+/* a ROOT: fake APE answering --version, build record (DIGEST override when given), candidate.tsv row */
+static void mkroot(const char *dir, const char *commit, int bad_digest) {
+    char hex[65], rec[600]; long sz;
+    sy_mkdir(dir, 0700);
+    { char rd[4400]; cx_fmt(rd, sizeof rd, "%s/release", dir); sy_mkdir(rd, 0700); }
+    put(dir, "unisacc.com", "#!/bin/sh\necho unisacc 0.0.80\n");
+    put(dir, "release/candidate.tsv", "repo\ttag\tcommit\tversion\nx/y\tv0.0.80\t" COMMIT "\t0.0.80\n");
+    sha_of(dir, "unisacc.com", hex, &sz);
+    if (bad_digest) hex[0] = hex[0] == '0' ? '1' : '0';
+    cx_fmt(rec, sizeof rec, "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"sources_sha256\": \"00\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n", sz, commit, hex);
+    put(dir, "unisacc.com.build.json", rec);
+}
+static int ready(const char *root, const char *item, char *out, int cap) {
+    char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", (char *)root, "--rev", REV, "--only", (char *)item, 0};
+    return ready_argv(v, out, cap);
+}
+static void snapdir(const char *root, char *snap, long cap) { cr_snap(root, REV, 1, snap, cap); sy_mkdir(snap, 0700); }
+
+int main(void) {
+    char home[400], g[400], w[400], s[400], r[400], d[400], snap[4600], p1[4400], p2[4400]; int rc;
+    if (sy_mkdtemp(sy_tmpdir(), "chain-ready-s1-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
+    sy_realpath(".", cwd, sizeof cwd);
+    cx_fmt(home, sizeof home, "%s/home", tmpd); sy_mkdir(home, 0700); sy_setenv("HOME", home, 1);
+    /* green: regular files, matching record, snapshot equal to ROOT */
+    cx_fmt(g, sizeof g, "%s/good", tmpd); mkroot(g, COMMIT, 0);
+    snapdir(g, snap, sizeof snap);
+    cx_fmt(p1, sizeof p1, "%s/unisacc.com", g); cx_fmt(p2, sizeof p2, "%s/unisacc.com", snap); { size_t n; char *b = cx_read(p1, &n); cx_write(p2, b, n); mm_free(b); }
+    cx_fmt(p1, sizeof p1, "%s/unisacc.com.build.json", g); cx_fmt(p2, sizeof p2, "%s/unisacc.com.build.json", snap); { size_t n; char *b = cx_read(p1, &n); cx_write(p2, b, n); mm_free(b); }
+    rc = ready(g, "12", out, sizeof out);
+    ck(rc == 0 && has(out, "12-root-files\tPASS") && has(out, "READY\tyes"), "green-12-root-files", out);
+    rc = ready(g, "13", out, sizeof out);
+    ck(rc == 0 && has(out, "13-snap-cache\tPASS") && has(out, "equal to ROOT") && has(out, "READY\tyes"), "green-13-snap-cache", out);
+    rc = ready(g, "14", out, sizeof out);
+    ck(rc == 0 && has(out, "14-root-record\tPASS") && has(out, "commit a08294deab06 equals") && has(out, "READY\tyes"), "green-14-root-record", out);
+    /* red 1: worktree with symlinked product files */
+    cx_fmt(w, sizeof w, "%s/wt", tmpd); mkroot(w, COMMIT, 0);
+    cx_fmt(p2, sizeof p2, "%s/unisacc.com", w); sy_unlink(p2); cx_fmt(p1, sizeof p1, "%s/unisacc.com", g); sy_symlink(p1, p2);
+    rc = ready(w, "12", out, sizeof out);
+    ck(rc != 0 && has(out, "12-root-files\tFAIL") && has(out, "worktree-root-file-not-regular") && has(out, "kind=symlink") && has(out, "fix: cp") && has(out, "READY\tno"), "red-symlink-worktree", out);
+    /* red 2: snapshot that froze a symlink (ROOT itself fixed) */
+    cx_fmt(s, sizeof s, "%s/snapfrozen", tmpd); mkroot(s, COMMIT, 0);
+    snapdir(s, snap, sizeof snap);
+    cx_fmt(p2, sizeof p2, "%s/unisacc.com", snap); cx_fmt(p1, sizeof p1, "%s/unisacc.com", s); sy_symlink(p1, p2);
+    cx_fmt(p2, sizeof p2, "%s/unisacc.com.build.json", snap); cx_fmt(p1, sizeof p1, "%s/unisacc.com.build.json", s); sy_symlink(p1, p2);
+    rc = ready(s, "13", out, sizeof out);
+    ck(rc != 0 && has(out, "13-snap-cache\tFAIL") && has(out, "snap-cache-file-not-regular") && has(out, "fix: mv ") && sy_exists(snap), "red-snapshot-froze-symlink-not-removed", out);
+    /* red 2b: snapshot with a regular but different launcher */
+    put(snap, "x", "");
+    cx_fmt(p2, sizeof p2, "%s/unisacc.com", snap); sy_unlink(p2); cx_write(p2, "old", 3);
+    rc = ready(s, "13", out, sizeof out);
+    ck(rc != 0 && has(out, "snap-cache-stale") && has(out, "fix: mv "), "red-snapshot-stale-sha", out);
+    /* red 3: build record commit disagrees with release/candidate.tsv */
+    cx_fmt(r, sizeof r, "%s/stale", tmpd); mkroot(r, "ffffffffffffffffffffffffffffffffffffffff", 0);
+    rc = ready(r, "14", out, sizeof out);
+    ck(rc != 0 && has(out, "14-root-record\tFAIL") && has(out, "root-record-commit-mismatch") && has(out, "candidate-commit=" COMMIT), "red-stale-record-commit", out);
+    /* red 3b: product_digest not the APE sha */
+    cx_fmt(d, sizeof d, "%s/digest", tmpd); mkroot(d, COMMIT, 1);
+    rc = ready(d, "14", out, sizeof out);
+    ck(rc != 0 && has(out, "root-record-digest-mismatch"), "red-record-digest", out);
+    /* WARN, not blocking: version without a candidate row */
+    put(g, "release/candidate.tsv", "repo\ttag\tcommit\tversion\n");
+    rc = ready(g, "14", out, sizeof out);
+    ck(rc == 0 && has(out, "14-root-record\tPASS") && has(out, "WARN root-record-stale-fields"), "warn-no-candidate-row-passes", out);
+    printf("CHAIN_READY_S1\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

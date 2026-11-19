@@ -1,0 +1,164 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D1 projection probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function bytes(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name, false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return Uint8Array.from(request.responseText, char => char.charCodeAt(0) & 255);
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const canvas = document.querySelector("canvas");
+  const host = createBrowserHost(canvas,
+    ["KeyA", "KeyD", "KeyW", "KeyS", "ShiftLeft", "ShiftRight", "ArrowLeft",
+      "ArrowRight", "ArrowUp", "ArrowDown", "Space", "KeyM", "KeyR"], bytes("d1-sprites.rgba"));
+  const audioMode = location.hash.startsWith("#projection-audio");
+  const pcm = [];
+  let frameAudio = "";
+  if (audioMode) host.host_audio_write = (pointer, count) => {
+    const samples = new Float32Array(linked.base.memory.buffer, Number(pointer), Number(count));
+    frameAudio = count + "," + Math.round(samples[100] * 32768);
+    return count;
+  };
+  const linked = linkUxe(new WebAssembly.Module(bytes("base.wasm")),
+    new WebAssembly.Module(bytes("product.wasm")), host);
+  host.attachMemory(linked.base.memory);
+  const run = linked.product.uxe_frame;
+  const capture = () => {
+    const image = canvas.getContext("2d").getImageData(0, 0, 426, 240);
+    const pixels = [];
+    for (const y of [0, 80, 109, 118, 134, 159, 191, 239]) {
+      for (const x of [0, 40, 80, 120, 160, 213, 265, 315, 385, 425]) {
+        const at = 4 * (y * 426 + x);
+        const [r, g, b, a] = image.data.subarray(at, at + 4);
+        pixels.push(r + 256 * (g + 256 * (b + 256 * a)));
+      }
+    }
+    return pixels;
+  };
+  run(0n);
+  if (audioMode) {
+    const key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+    for (let tick = 1; tick <= 16; tick++) {
+      if (tick === 2) key("keydown", "Space");
+      if (tick === 3) { key("keyup", "Space"); key("keydown", "KeyM"); }
+      if (tick === 4) key("keyup", "KeyM");
+      frameAudio = "none";
+      run(BigInt(tick) * 33334n);
+      if (tick <= 3 || tick === 16) pcm.push(frameAudio);
+    }
+    result.textContent = pcm.join(" ");
+  } else if (location.hash.startsWith("#projection-brush")) {
+    run(33334n);
+    const width = 426, height = 118;
+    const data = canvas.getContext("2d").getImageData(0, 122, width, height).data;
+    const family = new Map();
+    const colors = [[121, 155, 65], [103, 168, 81], [52, 104, 56]];
+    const haze = [173, 214, 234];
+    for (let kind = 0; kind < colors.length; kind++) {
+      for (let fade = 0; fade <= 12; fade++) {
+        const [r, g, b] = colors[kind].map((c, i) => Math.round(c + (haze[i] - c) * fade * 0.05375));
+        family.set(r + 256 * g + 65536 * b, kind + 1);
+      }
+    }
+    const detail = new Uint8Array(width * height);
+    const counts = [0, 0, 0, 0];
+    let edges = 0;
+    for (let i = 0; i < detail.length; i++) {
+      const [r, g, b] = data.subarray(4 * i, 4 * i + 3);
+      detail[i] = family.get(r + 256 * g + 65536 * b) || 0;
+      counts[detail[i]]++;
+      if (i >= width && detail[i] !== detail[i - width] && (detail[i] || detail[i - width])) edges++;
+    }
+    result.textContent = [...counts.slice(1), edges].join(" ");
+  } else if (location.hash.startsWith("#projection-trail")) {
+    const hits = (color, fromX, toX) => {
+      const data = canvas.getContext("2d").getImageData(fromX, 130, toX - fromX, 104).data;
+      let count = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i] === color[0] && data[i + 1] === color[1] && data[i + 2] === color[2]) count++;
+      }
+      return count;
+    };
+    run(33334n);
+    const first = hits([231, 241, 232], 120, 300);
+    for (let tick = 2; tick <= 30; tick++) {
+      if (tick === 27) dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD", cancelable: true }));
+      run(BigInt(tick) * 33334n);
+    }
+    const left = hits([149, 191, 200], 100, 213);
+    const right = hits([149, 191, 200], 213, 300);
+    result.textContent = [first, left + right, left, right].join(" ");
+  } else if (location.hash.startsWith("#projection-enemy")) {
+    const pixel = (x, y) => Array.from(canvas.getContext("2d").getImageData(x, y, 1, 1).data).join(",");
+    run(33334n);
+    result.textContent = [pixel(220, 101), pixel(220, 93), pixel(209, 92)].join(" ");
+  } else if (location.hash.startsWith("#projection-foam")) {
+    const foam = () => {
+      const data = canvas.getContext("2d").getImageData(0, 126, 426, 84).data;
+      const mask = [];
+      for (let i = 0; i < data.length; i += 4) {
+        mask.push(data[i] >= 173 && data[i] <= 174 && data[i + 1] >= 216 &&
+          data[i + 1] <= 225 && data[i + 2] >= 231 && data[i + 2] <= 234);
+      }
+      return mask;
+    };
+    run(33334n);
+    const before = foam();
+    for (let tick = 2; tick <= 7; tick++) run(BigInt(tick) * 33334n);
+    const after = foam();
+    result.textContent = [before.filter(Boolean).length, after.filter(Boolean).length,
+      after.filter((value, i) => value !== before[i]).length].join(" ");
+  } else if (location.hash.startsWith("#projection-cloud")) {
+    const pixel = (x, y) => Array.from(canvas.getContext("2d").getImageData(x, y, 1, 1).data).join(",");
+    run(33334n);
+    result.textContent = [pixel(114, 38), pixel(114, 26), pixel(114, 99)].join(" ");
+  } else if (location.hash.startsWith("#projection-hud")) {
+    const pixel = (x, y) => Array.from(canvas.getContext("2d").getImageData(x, y, 1, 1).data).join(",");
+    run(33334n);
+    const before = [pixel(8, 213), pixel(11, 216), pixel(35, 227)].join(" ");
+    dispatchEvent(new KeyboardEvent("keydown", { code: "Space", cancelable: true }));
+    run(66668n);
+    const fired = pixel(35, 227);
+    dispatchEvent(new KeyboardEvent("keyup", { code: "Space" }));
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyM", cancelable: true }));
+    run(100002n);
+    dispatchEvent(new KeyboardEvent("keyup", { code: "KeyM" }));
+    for (let tick = 4; tick <= 16; tick++) run(BigInt(tick) * 33334n);
+    const kill = pixel(408, 227);
+    const health = pixel(352, 227);
+    const packet = new Uint8Array(linked.product.memory.buffer, 2097152, 112);
+    for (let tick = 17; tick <= 21; tick++) {
+      packet.set([1, 0, 0, 18], 88);
+      run(BigInt(tick) * 33334n);
+    }
+    const empty = pixel(352, 227);
+    const prompt = pixel(193, 94);
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyR", cancelable: true }));
+    run(22n * 33334n);
+    result.textContent = [before, fired, kill, health, empty, prompt, pixel(408, 227), pixel(352, 227)].join(" ");
+  } else if (location.hash.startsWith("#projection-art")) {
+    run(33334n);
+    const pixel = (x, y) => Array.from(canvas.getContext("2d").getImageData(x, y, 1, 1).data).join(",");
+    result.textContent = [pixel(210, 143), pixel(213, 145), pixel(205, 162)].join(" ");
+  } else {
+    const straight = run(33334n);
+    const first = capture();
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD" }));
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW" }));
+    const banked = run(66668n);
+    result.textContent = [canvas.width, canvas.height, straight, banked, ...first, ...capture()].join(" ");
+  }
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

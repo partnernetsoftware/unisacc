@@ -1,0 +1,171 @@
+/* tools/check-speed-ledger.cx -- fixed-fixture regression checks for tools/speed-ledger.cx (S5).
+ *   sh ./unisacc.com tools/check-speed-ledger.cx
+ * Builds tools/speed-ledger.cx once (-o, into a private temp dir under $TMPDIR), constructs a small
+ * git repo with pinned commit timestamps, a synthetic chain-run.tsv, and a strict evidence TSV, and
+ * verifies 6 contracts:
+ *   1. full-row-exact           computed row matches hand-derived literal values byte-for-byte
+ *   2. missing-data-unmeasured  version without chain/prerun/public reports UNMEASURED (never guesses)
+ *   3. check-pass               --check against matching ledger -> rc 0 status=OK
+ *   4. check-drift-one-digit    1-digit mutation in ledger (2.50 -> 2.51) -> rc 1 DIFF status=DRIFT
+ *   5. check-missing-version    --check for version absent from ledger -> rc 1 expected=MISSING DRIFT
+ *   6. usage-missing-version    missing --version -> rc 2
+ * Last line: CHECK_SPEED_LEDGER<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CSL_PW 4400
+#define CSL_OUT 16384
+
+static void csl_abort(const char *why) {
+    fprintf(stderr, "check-speed-ledger: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void csl_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) csl_abort("mkdir");
+}
+
+static void csl_commit(const char *repo, const char *rel, const char *body, const char *epoch) {
+    char p[CSL_PW], out[CSL_OUT], date_env[64], cmd[8192];
+    if (cx_fmt(p, sizeof p, "%s/%s", repo, rel)) csl_abort("commit-path");
+    if (cx_write(p, body, strlen(body))) csl_abort("commit-write");
+    if (cx_fmt(date_env, sizeof date_env, "%s +0000", epoch)) csl_abort("date-fmt");
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' add '%s' && GIT_AUTHOR_DATE='%s' GIT_COMMITTER_DATE='%s' git -C '%s' -c user.name=t -c user.email=t@t commit -q -m 'add %s'",
+        repo, rel, date_env, date_env, repo, rel)) csl_abort("commit-cmd");
+    if (ckk_sh("check-speed-ledger", cmd, out, sizeof out) != 0) {
+        fprintf(stderr, "check-speed-ledger: git commit failed:\n%s\n", out);
+        csl_abort("git-commit");
+    }
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CSL_OUT];
+    char work[CSL_PW], bin[CSL_PW], repo[CSL_PW], chdir_p[CSL_PW], led_ok[CSL_PW], led_bad[CSL_PW], tmp[CSL_PW];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    const char *want_full = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.50\t2.50\t2/4\t50.0%";
+    const char *want_part = "9.9.8\t0.0\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED";
+
+    if (cx_fmt(work, sizeof work, "%s/check-speed-ledger-%d", base_td, (int)getpid())) csl_abort("work-path");
+    csl_mk(work);
+    if (cx_fmt(bin, sizeof bin, "%s/speed-ledger", work)) csl_abort("bin-path");
+    if (cx_fmt(repo, sizeof repo, "%s/repo", work)) csl_abort("repo-path");
+    if (cx_fmt(chdir_p, sizeof chdir_p, "%s/chain", work)) csl_abort("chain-path");
+    if (cx_fmt(led_ok, sizeof led_ok, "%s/ledger-ok.tsv", work)) csl_abort("led-ok");
+    if (cx_fmt(led_bad, sizeof led_bad, "%s/ledger-bad.tsv", work)) csl_abort("led-bad");
+
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/speed-ledger.cx", "-o", bin, 0}; /* lint:allow R1-product builds speed-ledger with this checkout's product; UNISACC overrides */
+        if (ck_run(av, out, sizeof out) != 0) {
+            fprintf(stderr, "check-speed-ledger: build failed:\n%s\n", out);
+            csl_abort("build-speed-ledger");
+        }
+    }
+
+    csl_mk(repo);
+    csl_mk(chdir_p);
+    if (cx_fmt(tmp, sizeof tmp, "%s/plans", repo)) csl_abort("p1"); csl_mk(tmp);
+    if (cx_fmt(tmp, sizeof tmp, "%s/tests", repo)) csl_abort("p2"); csl_mk(tmp);
+    if (cx_fmt(tmp, sizeof tmp, "%s/release", repo)) csl_abort("p3"); csl_mk(tmp);
+    if (cx_fmt(tmp, sizeof tmp, "%s/release/evidence", repo)) csl_abort("p4"); csl_mk(tmp);
+    if (cx_fmt(tmp, sizeof tmp, "%s/release/evidence/9.9.9", repo)) csl_abort("p5"); csl_mk(tmp);
+
+    {
+        char *av[] = {"git", "-C", repo, "init", "-q", 0};
+        if (ck_run(av, out, sizeof out) != 0) csl_abort("git-init");
+    }
+
+    /* Domain index with 4 product-qualification batches */
+    csl_commit(repo, "tests/batch-domain-index.tsv",
+        "b1\tproduct-qualification\t1\n"
+        "b2\tproduct-qualification\t1\n"
+        "b3\tproduct-qualification\t1\n"
+        "b4\tproduct-qualification\t1\n"
+        "b5\tother-domain\t1\n",
+        "1700000000");
+
+    /* Version 9.9.9: slot=0.0, chain=10.0..20.0 (par=2.50), prerun=30.0 (par=2.50, 2/4=50.0%), public=40.0 */
+    csl_commit(repo, "plans/v9.9.9.md", "# v9.9.9\n", "1700000000");
+    csl_commit(repo, "release/evidence/v9.9.9-strict-test.tsv",
+        "# strict fixture\n"
+        "b1\tproduct-qualification\tPASS\t0\t-\t10000\t1.00\t1\t-\n"
+        "b2\tproduct-qualification\tPASS\t0\t-\t15000\t1.00\t1\t-\n"
+        "SUMMARY\tbatches=2\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\ttotal_ms=10000\n",
+        "1700001800");
+    csl_commit(repo, "release/evidence/9.9.9/public-readback.txt", "PUBLIC\n", "1700002400");
+
+    /* Version 9.9.8: only plan file exists */
+    csl_commit(repo, "plans/v9.9.8.md", "# v9.9.8\n", "1700003000");
+
+    if (cx_fmt(tmp, sizeof tmp, "%s/chain-run.tsv", chdir_p)) csl_abort("cr-path");
+    if (cx_write(tmp,
+        "LIMITS\t1700000600\tn=1\n"
+        "ATTEMPT_TIME\tphase=p1\twall_ms=900000\n"
+        "ATTEMPT_TIME\tphase=p2\twall_ms=600000\n"
+        "SUPERVISE\t1700001200\titeration=1\trc=0\tresidue=0\n", 159)) csl_abort("write-cr");
+
+    /* 1. Full row exact match */
+    {
+        char *av[] = {bin, "--version", "9.9.9", "--repo", repo, "--chain-dir", chdir_p, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CSL_OUT, want_full),
+            "full-row-exact: computed row matches hand-derived literal values");
+    }
+
+    /* 2. Missing data -> UNMEASURED */
+    {
+        char *av[] = {bin, "--version", "9.9.8", "--repo", repo, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CSL_OUT, want_part),
+            "missing-data-unmeasured: absent chain/prerun/public reported as UNMEASURED");
+    }
+
+    /* 3. --check pass */
+    {
+        char body[512];
+        if (cx_fmt(body, sizeof body, "version\tslot_min\n%s\n", want_full)) csl_abort("led-fmt");
+        if (cx_write(led_ok, body, strlen(body))) csl_abort("write-led-ok");
+        char *av[] = {bin, "--check", led_ok, "--version", "9.9.9", "--repo", repo, "--chain-dir", chdir_p, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CSL_OUT, "SPEED_LEDGER\tmode=check\tversion=9.9.9\tstatus=OK"),
+            "check-pass: --check matches expected ledger -> rc=0 status=OK");
+    }
+
+    /* 4. --check drift on 1-digit mutation (2.50 -> 2.51) */
+    {
+        const char *bad_row = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.51\t2.50\t2/4\t50.0%\n";
+        if (cx_write(led_bad, bad_row, strlen(bad_row))) csl_abort("write-led-bad");
+        char *av[] = {bin, "--check", led_bad, "--version", "9.9.9", "--repo", repo, "--chain-dir", chdir_p, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CSL_OUT, "DIFF\tversion=9.9.9") && ckk_has(out, CSL_OUT, "status=DRIFT"),
+            "check-drift-one-digit: 2.50 -> 2.51 triggers rc=1 DIFF status=DRIFT");
+    }
+
+    /* 5. --check missing version */
+    {
+        char *av[] = {bin, "--check", led_ok, "--version", "9.9.8", "--repo", repo, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CSL_OUT, "expected=MISSING") && ckk_has(out, CSL_OUT, "status=DRIFT"),
+            "check-missing-version: absent version row -> rc=1 expected=MISSING DRIFT");
+    }
+
+    /* 6. Missing --version refused with rc=2 */
+    {
+        char *av[] = {bin, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 2, "usage-missing-version: missing --version refused with rc=2");
+    }
+
+    {
+        char *av[] = {"rm", "-rf", work, 0};
+        (void)ck_run(av, out, sizeof out);
+    }
+
+    printf("CHECK_SPEED_LEDGER\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

@@ -7,6 +7,7 @@ enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HOST_SCRATCH = 950000, STORE_WIN = 1015808, MEM_PAGES = 128, MAXSTRLIT = 255,
         PERSIST_BASE = 948976, PERSIST_STRIDE = 16 };
 enum { PERSIST_SPAN = 64 * PERSIST_STRIDE };
+enum { UX_BUFFER_BASE = 2097152, UX_BUFFER_SIZE = 6291456 };
 enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PERSIST_BASE > HEAP0 && PERSIST_BASE > GBASE && PERSIST_BASE + PERSIST_SPAN <= STORE_WIN) };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 
@@ -14,6 +15,8 @@ static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
 static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_len;
 static int g_need_gpu;
+static int g_need_ux;
+static int g_abi_imports;
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
@@ -138,7 +141,7 @@ static int sect(Buf *m, uint8_t id, Buf *body) {
   return braw(m, bd(body), body->n);
 }
 static int wcall(Buf *c, uint32_t n) {
-  return bu8(c, 0x10) && bleu(c, n + (uint32_t)g_need_gpu);
+  return bu8(c, 0x10) && bleu(c, n + (uint32_t)(g_need_gpu + g_abi_imports));
 }
 
 static int64_t d_bits(double d) {
@@ -472,9 +475,17 @@ enum {
   OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST, OP_STRADD,
   OP_I2F, OP_I2F_R, OP_F2I,
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
-  OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET
+  OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET,
+  OP_UX_ADDR, OP_UX_SPAN, OP_UX_LOAD, OP_UX_STORE, OP_UX_BYTE, OP_FSQRT,
+  OP_ABI_CALL, OP_ABI_RET, OP_U32, OP_FLOOR_I64
 };
-enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
+enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
+enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_TYPE_BASE = 14 };
+typedef struct {
+  char name[MAXN], module[MAXN];
+  uint8_t args[ABI_MAX_ARGS];
+  int count, result;
+} AbiFn;
 typedef struct { uint8_t op; int64_t a; } Ins;
 /* stage0 fn: call-site inline (no extra wasm funcs). kind 0=expr arrow, 1=block. */
 typedef struct {
@@ -494,12 +505,15 @@ typedef struct {
   int scratch; /* i32 temp for list/dict init, or -1 */
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
   int lscratch; /* i64 temp for && / || short-circuit, or -1 */
+  int uxaddr; /* i32 temporary for the bounded UX span */
   int list_elem_ty; /* TY_I64/TY_F64 of last list literal */
   const char *src; uint32_t srclen;
   FnDef fns[MAXFN]; int nfn;
   int in_fn; /* >0 while inlining a user fn body */
   int fn_ret; /* local holding return value when in_fn, or -1 */
   int fn_did_ret;
+  AbiFn imports[ABI_MAX_IMPORTS], api;
+  int import_count, abi_version;
   const char *err;
 } Prog;
 
@@ -565,6 +579,15 @@ static int ensure_lscratch(Prog *P) {
   P->lty[P->nl] = TY_I64;
   P->lety[P->nl] = TY_I64;
   P->lscratch = P->nl;
+  return P->nl++;
+}
+
+static int ensure_uxaddr(Prog *P) {
+  if (P->uxaddr >= 0) return P->uxaddr;
+  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  P->names[P->nl][0] = 0;
+  P->lty[P->nl] = TY_LIST;
+  P->uxaddr = P->nl;
   return P->nl++;
 }
 
@@ -636,37 +659,44 @@ static int register_fn(Prog *P, FnDef *tmp) {
   return P->nfn++;
 }
 
+static int invocation_slot(Prog *P, int type) {
+  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  P->names[P->nl][0] = 0;
+  P->lty[P->nl] = (uint8_t)type;
+  P->lety[P->nl] = TY_I64;
+  return P->nl++;
+}
+
 static int invoke_fn(Lex *L, Prog *P, int fi) {
   FnDef *F = &P->fns[fi];
   int narg = 0, i, ty = 0, ret_local, scratch;
-  int aty[16];
+  int arg_slot[16];
+  int outer_ret = P->fn_ret, outer_did_ret = P->fn_did_ret;
   /* L at `(` */
   if (!expect(L, T_LP, P, "call (")) return 0;
   if (L->tok != T_RP) {
     for (;;) {
       if (narg >= 16) { P->err = "too many args"; return 0; }
-      aty[narg] = pexpr(L, P); if (!aty[narg]) return 0;
-      /* stash each arg in a temp local — reverse order on stack, so store as we go */
-      {
-        char tn[MAXN];
-        int ti;
-        snprintf(tn, sizeof tn, "#arg%d", narg);
-        ti = loc(P, tn, 1); if (ti < 0) return 0;
-        P->lty[ti] = (uint8_t)aty[narg];
-        if (!emit(P, OP_STORE, ti)) return 0;
-      }
+      int arg_type = pexpr(L, P);
+      if (!arg_type) return 0;
+      int slot = invocation_slot(P, arg_type);
+      if (slot < 0 || !emit(P, OP_STORE, slot)) return 0;
+      arg_slot[narg] = slot;
       narg++;
       if (L->tok == T_COMMA) { next(L); continue; }
       break;
     }
   }
   if (!expect(L, T_RP, P, "call )")) return 0;
-  /* bind params from #arg* */
+  /* Bind parameters from each invocation's typed temporaries. */
   if (F->has_p0) {
     int pi, ai;
     if (narg < 1) { P->err = "missing arg"; return 0; }
-    pi = loc(P, F->p0, 1); if (pi < 0) return 0;
-    ai = loc(P, "#arg0", 0); if (ai < 0) return 0;
+    ai = arg_slot[0];
+    pi = loc(P, F->p0, 0);
+    if (pi >= 0 && P->lty[pi] != P->lty[ai]) { P->err = "fn parameter type changed"; return 0; }
+    if (pi < 0) pi = loc(P, F->p0, 1);
+    if (pi < 0) return 0;
     P->lty[pi] = P->lty[ai];
     if (!emit(P, OP_LOAD, ai)) return 0;
     if (!emit(P, OP_STORE, pi)) return 0;
@@ -676,14 +706,11 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
     int base = F->has_p0 ? 1 : 0;
     if (rest_n < 0) rest_n = 0;
     ri = loc(P, F->rest, 1); if (ri < 0) return 0;
-    scratch = ensure_scratch(P); if (scratch < 0) return 0;
+    scratch = invocation_slot(P, TY_LIST); if (scratch < 0) return 0;
     if (!emit(P, OP_MKLIST, rest_n)) return 0;
     if (!emit(P, OP_STORE, scratch)) return 0;
     for (i = 0; i < rest_n; i++) {
-      char tn[MAXN];
-      int ai;
-      snprintf(tn, sizeof tn, "#arg%d", base + i);
-      ai = loc(P, tn, 0); if (ai < 0) return 0;
+      int ai = arg_slot[base + i];
       if (!emit(P, OP_LOAD, scratch)) return 0;
       if (!emit(P, OP_LOAD, ai)) return 0;
       if (P->lty[ai] == TY_F64) { if (!emit(P, OP_BOXF, 0)) return 0; }
@@ -701,8 +728,7 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
   } else if (!F->has_p0 && !F->has_rest && narg != 0) {
     P->err = "arity"; return 0;
   }
-  ret_local = loc(P, "#fnret", 1); if (ret_local < 0) return 0;
-  P->lty[ret_local] = TY_I64;
+  ret_local = invocation_slot(P, TY_I64); if (ret_local < 0) return 0;
   P->fn_ret = ret_local;
   P->fn_did_ret = 0;
   P->in_fn++;
@@ -726,6 +752,8 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
     }
   }
   P->in_fn--;
+  P->fn_ret = outer_ret;
+  P->fn_did_ret = outer_did_ret;
   if (!emit(P, OP_LOAD, ret_local)) return 0;
   return ty ? ty : TY_I64;
 }
@@ -749,6 +777,122 @@ static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
   }
   if (!emit(P, of, 0)) return 0;
   return TY_F64;
+}
+
+static int intrinsic_name(const char *actual, const char *expected) {
+  while (*actual && *actual == *expected) { actual++; expected++; }
+  return *actual == *expected;
+}
+
+static int abi_name_copy(char *dst, const char *src) {
+  int n = 0;
+  if (!id0(src[0])) return 0;
+  while (src[n] && n < MAXN - 1) {
+    if (!idc(src[n])) return 0;
+    dst[n] = src[n];
+    n++;
+  }
+  dst[n] = 0;
+  return !src[n];
+}
+
+static int abi_type(Lex *L, Prog *P) {
+  int type = 0;
+  if (L->tok == T_ID) {
+    if (intrinsic_name(L->id, "i64")) type = TY_I64;
+    if (intrinsic_name(L->id, "f64")) type = TY_F64;
+  }
+  if (!type) { P->err = "abi requires i64 or f64"; return 0; }
+  next(L);
+  return type;
+}
+
+static int abi_import_module(const char *name) {
+  const char *prefix = "uxe_v";
+  if (intrinsic_name(name, "env")) return 1;
+  while (*prefix && *name == *prefix) { name++; prefix++; }
+  if (*prefix || *name < '1' || *name > '9') return 0;
+  while (dig(*name)) name++;
+  return !*name;
+}
+
+static int abi_decl(Lex *L, Prog *P, int exports) {
+  AbiFn *f;
+  if (!exports && P->abi_version) { P->err = "abi imports precede export"; return 0; }
+  if ((exports && P->abi_version) || (!exports && P->import_count == ABI_MAX_IMPORTS)) {
+    P->err = "abi declaration limit"; return 0;
+  }
+  f = exports ? &P->api : &P->imports[P->import_count];
+  next(L);
+  if (L->tok != T_ID || !abi_name_copy(f->name, L->id)) { P->err = "abi name"; return 0; }
+  if (exports && (f->name[0] != 'u' || f->name[1] != 'x' || f->name[2] != 'e' ||
+      f->name[3] != '_' || !f->name[4] || intrinsic_name(f->name, "uxe_abi_version"))) {
+    P->err = "abi export name"; return 0;
+  }
+  for (int i = 0; i < P->import_count; i++) {
+    if (intrinsic_name(P->imports[i].name, f->name)) { P->err = "abi duplicate name"; return 0; }
+  }
+  next(L);
+  if (!exports) {
+    if (L->tok != T_ID || !intrinsic_name(L->id, "from")) { P->err = "abi import from"; return 0; }
+    next(L);
+    if (L->tok != T_STR || !abi_import_module(L->str) || !abi_name_copy(f->module, L->str) ||
+        intrinsic_name(f->name, "host_gpu_submit")) { P->err = "abi import module or name"; return 0; }
+    next(L);
+  }
+  if (!expect(L, T_LP, P, "abi declaration (")) return 0;
+  if (L->tok != T_RP) for (;;) {
+    int param = -1, type;
+    if (f->count == ABI_MAX_ARGS) { P->err = "abi too many parameters"; return 0; }
+    if (exports) {
+      char name[MAXN];
+      if (L->tok != T_ID || !abi_name_copy(name, L->id) || loc(P, name, 0) >= 0) {
+        P->err = "abi parameter name"; return 0;
+      }
+      param = loc(P, name, 1);
+      if (param < 0) return 0;
+      next(L);
+      if (!expect(L, T_COLON, P, "abi parameter :")) return 0;
+    }
+    type = abi_type(L, P);
+    if (!type) return 0;
+    f->args[f->count++] = (uint8_t)type;
+    if (exports) P->lty[param] = (uint8_t)type;
+    if (L->tok != T_COMMA) break;
+    next(L);
+  }
+  if (!expect(L, T_RP, P, "abi declaration )")) return 0;
+  f->result = abi_type(L, P);
+  if (!f->result) return 0;
+  if (exports) {
+    if (L->tok != T_ID || !intrinsic_name(L->id, "version")) { P->err = "abi version"; return 0; }
+    next(L);
+    if (L->tok != T_NUM || L->num < 1 || L->num > 255) { P->err = "abi version range"; return 0; }
+    P->abi_version = (int)L->num;
+    next(L);
+  } else {
+    P->import_count++;
+  }
+  return expect(L, T_SEMI, P, "abi declaration ;");
+}
+
+static int abi_invoke(Lex *L, Prog *P, int which) {
+  AbiFn *f = &P->imports[which];
+  if (!expect(L, T_LP, P, "abi call (")) return 0;
+  for (int i = 0; i < f->count; i++) {
+    if (i && !expect(L, T_COMMA, P, "abi call ,")) return 0;
+    if (pexpr(L, P) != f->args[i]) { P->err = "abi argument type"; return 0; }
+  }
+  if (!expect(L, T_RP, P, "abi call )") || !emit(P, OP_ABI_CALL, which)) return 0;
+  return f->result;
+}
+
+static int u32_opcode(const char *name) {
+  if (intrinsic_name(name, "u32_mul")) return 0x6c;
+  if (intrinsic_name(name, "u32_and")) return 0x71;
+  if (intrinsic_name(name, "u32_xor")) return 0x73;
+  if (intrinsic_name(name, "u32_shr")) return 0x76;
+  return 0;
 }
 
 static int pprim(Lex *L, Prog *P) {
@@ -793,9 +937,12 @@ static int pprim(Lex *L, Prog *P) {
     int depth = 0;
     for (;;) {
       if (L->tok == T_EOF) { P->err = "list]"; return 0; }
-      if (L->tok == T_LS) depth++;
-      else if (L->tok == T_RS) {
-        if (depth == 0) break;
+      if (L->tok == T_LS || L->tok == T_LP || L->tok == T_LB) depth++;
+      else if (L->tok == T_RS || L->tok == T_RP || L->tok == T_RB) {
+        if (depth == 0) {
+          if (L->tok == T_RS) break;
+          P->err = "list delimiter"; return 0;
+        }
         depth--;
       } else if (L->tok == T_COMMA && depth == 0) n++;
       next(L);
@@ -878,6 +1025,17 @@ static int pprim(Lex *L, Prog *P) {
     return TY_DICT;
   }
   if (L->tok == T_ID && (!pact || !strcmp(pact, "ident"))) {
+    int bit_op = u32_opcode(L->id);
+    if (bit_op) {
+      next(L);
+      if (!expect(L, T_LP, P, "u32 intrinsic (")) return 0;
+      if (pexpr(L, P) != TY_I64) { P->err = "u32 intrinsic requires i64"; return 0; }
+      if (!emit(P, OP_IWRAP, 0) || !expect(L, T_COMMA, P, "u32 intrinsic ,")) return 0;
+      if (pexpr(L, P) != TY_I64) { P->err = "u32 intrinsic requires i64"; return 0; }
+      if (!emit(P, OP_IWRAP, 0) || !expect(L, T_RP, P, "u32 intrinsic )")) return 0;
+      if (!emit(P, OP_U32, bit_op)) return 0;
+      return TY_I64;
+    }
     if (!strcmp(L->id, "len")) {
       next(L);
       if (!expect(L, T_LP, P, "len (")) return 0;
@@ -900,6 +1058,52 @@ static int pprim(Lex *L, Prog *P) {
       if (!expect(L, T_RP, P, "len )")) return 0;
       if (!emit(P, OP_LEN, 0)) return 0;
       return TY_I64;
+    }
+    if (intrinsic_name(L->id, "f64_floor_i64")) {
+      next(L);
+      if (!expect(L, T_LP, P, "f64_floor_i64 (")) return 0;
+      if (pexpr(L, P) != TY_F64) { P->err = "f64_floor_i64 requires f64"; return 0; }
+      if (!expect(L, T_RP, P, "f64_floor_i64 )") || !emit(P, OP_FLOOR_I64, 0)) return 0;
+      return TY_I64;
+    }
+    if (intrinsic_name(L->id, "f64_sqrt")) {
+      next(L);
+      if (!expect(L, T_LP, P, "f64_sqrt (")) return 0;
+      if (pexpr(L, P) != TY_F64) { P->err = "f64_sqrt requires f64"; return 0; }
+      if (!expect(L, T_RP, P, "f64_sqrt )") || !emit(P, OP_FSQRT, 0)) return 0;
+      return TY_F64;
+    }
+    {
+      int get8 = intrinsic_name(L->id, "ux_u8");
+      int get32 = intrinsic_name(L->id, "ux_f32");
+      int put8 = intrinsic_name(L->id, "ux_u8_put");
+      int put32 = intrinsic_name(L->id, "ux_f32_put");
+      int span = intrinsic_name(L->id, "ux_span");
+      if (get8 || get32 || put8 || put32 || span) {
+        g_need_ux = 1;
+        int width = span ? 0 : (get32 || put32 ? 4 : 1);
+        int tmp = ensure_lscratch(P);
+        if (tmp < 0) return 0;
+        next(L);
+        if (!expect(L, T_LP, P, "ux buffer (")) return 0;
+        if (pexpr(L, P) != TY_I64) { P->err = "ux buffer offset requires i64"; return 0; }
+        if (!emit(P, OP_UX_ADDR, tmp * 256 + width)) return 0;
+        if (put8 || put32) {
+          if (!expect(L, T_COMMA, P, "ux buffer ,")) return 0;
+          if (pexpr(L, P) != (put32 ? TY_F64 : TY_I64)) {
+            P->err = "ux buffer value type"; return 0;
+          }
+          if (put8 && !emit(P, OP_UX_BYTE, tmp)) return 0;
+          if (!emit(P, OP_UX_STORE, width) || !emit(P, OP_CONST, 0)) return 0;
+        } else if (span) {
+          int addr = ensure_uxaddr(P);
+          if (addr < 0 || !expect(L, T_COMMA, P, "ux span ,")) return 0;
+          if (pexpr(L, P) != TY_I64) { P->err = "ux span count requires i64"; return 0; }
+          if (!emit(P, OP_UX_SPAN, tmp * 256 + addr)) return 0;
+        } else if (!emit(P, OP_UX_LOAD, width)) return 0;
+        if (!expect(L, T_RP, P, "ux buffer )")) return 0;
+        return get32 ? TY_F64 : TY_I64;
+      }
     }
     /* list(n) → zeroed list of length n (i64 elems); for inject buffers */
     if (!strcmp(L->id, "list")) {
@@ -957,6 +1161,10 @@ static int pprim(Lex *L, Prog *P) {
       strncpy(nbuf, L->id, MAXN - 1); nbuf[MAXN - 1] = 0;
       fi = find_fn(P, nbuf);
       next(L);
+      if (L->tok == T_LP) {
+        for (int j = 0; j < P->import_count; j++)
+          if (intrinsic_name(nbuf, P->imports[j].name)) return abi_invoke(L, P, j);
+      }
       if (L->tok == T_LP && fi >= 0) return invoke_fn(L, P, fi);
       i = loc(P, nbuf, 0);
       if (i >= 0) {
@@ -1419,9 +1627,15 @@ static int pstmt(Lex *L, Prog *P) {
     int ty = pexpr(L, P); if (!ty) return 0;
     if (P->in_fn > 0) {
       if (P->fn_ret < 0) { P->err = "fn ret"; return 0; }
+      if (P->fn_did_ret && P->lty[P->fn_ret] != ty) { P->err = "fn return type changed"; return 0; }
       P->lty[P->fn_ret] = (uint8_t)ty;
       if (!emit(P, OP_STORE, P->fn_ret)) return 0;
       P->fn_did_ret = 1;
+      return expect(L, T_SEMI, P, "expected ;");
+    }
+    if (P->abi_version) {
+      if (ty != P->api.result) { P->err = "abi return type"; return 0; }
+      if (!emit(P, OP_ABI_RET, 0)) return 0;
       return expect(L, T_SEMI, P, "expected ;");
     }
     {
@@ -1549,10 +1763,64 @@ static int emit_cmp(Buf *c, uint8_t op) {
   return bu8(c, 0xad); /* i64.extend_i32_u */
 }
 
+static int ux_trap_if(Buf *c) {
+  return bu8(c, 0x04) && bu8(c, 0x40) && bu8(c, 0x00) && bu8(c, 0x0b);
+}
+
+static int ux_check_limit(Buf *c, int64_t limit) {
+  return bu8(c, 0x42) && blei64(c, limit) && bu8(c, 0x56) && ux_trap_if(c);
+}
+
 static int emit_ops(Buf *c, Prog *P) {
   for (int i = 0; i < P->nc; i++) {
     Ins *ins = &P->code[i];
     switch (ins->op) {
+    case OP_FLOOR_I64:
+      if (!bu8(c, 0x9c) || !bu8(c, 0xb0)) return 0;
+      break;
+    case OP_U32:
+      if (!bu8(c, (uint8_t)ins->a) || !bu8(c, 0xad)) return 0;
+      break;
+    case OP_ABI_CALL:
+      if (!bu8(c, 0x10) || !bleu(c, (uint32_t)(g_need_gpu + ins->a))) return 0;
+      break;
+    case OP_ABI_RET:
+      if (!bu8(c, 0x0f)) return 0;
+      break;
+    case OP_FSQRT:
+      if (!bu8(c, 0x9f)) return 0;
+      break;
+    case OP_UX_ADDR: {
+      uint32_t offset = (uint32_t)ins->a >> 8;
+      int width = (int)(ins->a & 255);
+      if (!bu8(c, 0x22) || !bleu(c, offset) || !ux_check_limit(c, UX_BUFFER_SIZE - width)) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, offset) || !bu8(c, 0xa7)) return 0;
+      if (!bi32(c, UX_BUFFER_BASE) || !bu8(c, 0x6a)) return 0;
+      break;
+    }
+    case OP_UX_BYTE:
+      if (!bu8(c, 0x22) || !bleu(c, (uint32_t)ins->a) || !ux_check_limit(c, 255)) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, (uint32_t)ins->a) || !bu8(c, 0xa7)) return 0;
+      break;
+    case OP_UX_SPAN: {
+      uint32_t count = (uint32_t)ins->a >> 8;
+      uint32_t addr = (uint32_t)ins->a & 255;
+      if (!bu8(c, 0x21) || !bleu(c, count) || !bu8(c, 0x21) || !bleu(c, addr)) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, count)) return 0;
+      if (!bu8(c, 0x42) || !blei64(c, UX_BUFFER_BASE + UX_BUFFER_SIZE)) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, addr) || !bu8(c, 0xad) || !bu8(c, 0x7d)) return 0;
+      if (!bu8(c, 0x56) || !ux_trap_if(c)) return 0;
+      if (!bu8(c, 0x20) || !bleu(c, addr) || !bu8(c, 0xad)) return 0;
+      break;
+    }
+    case OP_UX_LOAD:
+      if (!bu8(c, ins->a == 4 ? 0x2a : 0x2d) || !bu8(c, 0) || !bleu(c, 0)) return 0;
+      if (!bu8(c, ins->a == 4 ? 0xbb : 0xad)) return 0;
+      break;
+    case OP_UX_STORE:
+      if (ins->a == 4 && !bu8(c, 0xb6)) return 0;
+      if (!bu8(c, ins->a == 4 ? 0x38 : 0x3a) || !bu8(c, 0) || !bleu(c, 0)) return 0;
+      break;
     case OP_CONST:
       if (!bu8(c, 0x42) || !blei64(c, ins->a)) return 0; break;
     case OP_FCONST:
@@ -1808,6 +2076,17 @@ static int emit_ops(Buf *c, Prog *P) {
   return 1;
 }
 
+/* Keep the legacy heap below the persist and ABI buffers in UX modules. */
+static int ux_guard_heap(Buf *c, int pointer, int count, int unit, int header) {
+  if (!g_need_ux) return 1;
+  if (!bu8(c, 0x20) || !bleu(c, pointer) || !bu8(c, 0xad)) return 0;
+  if (count >= 0) {
+    if (!bu8(c, 0x20) || !bleu(c, count) || !bu8(c, 0xad)) return 0;
+    if (!bu8(c, 0x42) || !blei64(c, unit) || !bu8(c, 0x7e) || !bu8(c, 0x7c)) return 0;
+  }
+  return bu8(c, 0x42) && blei64(c, header) && bu8(c, 0x7c) && ux_check_limit(c, PERSIST_BASE);
+}
+
 static int mk_num_body(Buf *c, int is_f64) {
   /* (param i64|f64)(result i32)(local i32) — param type already in type section */
   if (!bleu(c, 1) || !bleu(c, 1) || !bu8(c, 0x7f)) return 0;
@@ -1819,6 +2098,7 @@ static int mk_num_body(Buf *c, int is_f64) {
   if (!bi32(c, (int32_t)(HEAP0))) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 1)) return 0;
   if (!bu8(c, 0x0b)) return 0;
+  if (!ux_guard_heap(c, 1, -1, 0, 16)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
   if (!bi32(c, (int32_t)(is_f64 ? TAG_F64 : TAG_I64))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
@@ -1845,9 +2125,9 @@ static int mk_num_body(Buf *c, int is_f64) {
 }
 
 static int emit_locals(Buf *c, Prog *P) {
-  if (P->nl <= 0) return bleu(c, 0);
-  if (!bleu(c, (uint32_t)P->nl)) return 0;
-  for (int i = 0; i < P->nl; i++) {
+  int params = P->abi_version ? P->api.count : 0;
+  if (!bleu(c, (uint32_t)(P->nl - params))) return 0;
+  for (int i = params; i < P->nl; i++) {
     if (!bleu(c, 1)) return 0;
     uint8_t wt = 0x7e; /* i64 */
     if (P->lty[i] == TY_F64) wt = 0x7c;
@@ -1871,6 +2151,7 @@ static int mk_list_body(Buf *c) {
   if (!bi32(c, (int32_t)(HEAP0))) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 1)) return 0;
   if (!bu8(c, 0x0b)) return 0;
+  if (!ux_guard_heap(c, 1, 0, 4, 8)) return 0;
   /* store tag + len */
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
   if (!bi32(c, (int32_t)(TAG_LIST))) return 0;
@@ -1974,6 +2255,7 @@ static int mk_str_body(Buf *c) {
   if (!bi32(c, (int32_t)(HEAP0))) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 2)) return 0;
   if (!bu8(c, 0x0b)) return 0;
+  if (!ux_guard_heap(c, 2, 1, 1, 8)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 2)) return 0;
   if (!bi32(c, (int32_t)(TAG_STR))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
@@ -2038,6 +2320,7 @@ static int mk_dict_body(Buf *c) {
   if (!bi32(c, (int32_t)(HEAP0))) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 1)) return 0;
   if (!bu8(c, 0x0b)) return 0;
+  if (!ux_guard_heap(c, 1, 0, 8, 8)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
   if (!bi32(c, (int32_t)(TAG_DICT))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
@@ -2514,16 +2797,27 @@ static int store_bytes_body(Buf *c) {
   return bu8(c, 0x0b);
 }
 
+static int abi_wasm_type(Buf *types, AbiFn *f) {
+  if (!bu8(types, 0x60) || !bleu(types, f->count)) return 0;
+  for (int i = 0; i < f->count; i++)
+    if (!bu8(types, f->args[i] == TY_I64 ? 0x7e : 0x7c)) return 0;
+  return bleu(types, 1) && bu8(types, f->result == TY_I64 ? 0x7e : 0x7c);
+}
+
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[35];
+  Buf cs[37];
   int i, ng = P->ng > 0 ? P->ng : 1;
   enum { NCORE = 19, NHOST = 16, NFUNCS = NCORE + NHOST };
+  int api = P->abi_version != 0;
+  int nfuncs = NFUNCS + 2 * api;
+  int nimports = g_need_gpu + P->import_count;
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
-  for (i = 0; i < NFUNCS; i++) if (!binit(&cs[i], i==1 ? 8192 : 256)) return 0;
+  for (i = 0; i < nfuncs; i++)
+    if (!binit(&cs[i], i == 1 || i == NFUNCS ? 8192 : 256)) return 0;
 
-  if (!bleu(&types, 14)) return 0;
+  if (!bleu(&types, ABI_TYPE_BASE + P->import_count + api)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7e)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,0)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7f)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
@@ -2539,7 +2833,9 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!bu8(&types,0x60)||!bleu(&types,4)||!bu8(&types,0x7f)||!bu8(&types,0x7f)||!bu8(&types,0x7f)||!bu8(&types,0x7f)||!bleu(&types,0)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,2)||!bu8(&types,0x7f)||!bu8(&types,0x7f)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
 
-  if (!bleu(&funcs, NFUNCS)) return 0;
+  for (i = 0; i < P->import_count; i++) if (!abi_wasm_type(&types, &P->imports[i])) return 0;
+  if (api && !abi_wasm_type(&types, &P->api)) return 0;
+  if (!bleu(&funcs, nfuncs)) return 0;
   uint8_t fty[NFUNCS] = {
     0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
     1, 1, 1, 11, 2, 6, 6, 1, 1, 1, 2, 2,
@@ -2549,12 +2845,13 @@ static int build_mod(Prog *P, Buf *mod) {
     1
   };
   for (i = 0; i < NFUNCS; i++) if (!bu8(&funcs, fty[i])) return 0;
+  if (api && (!bu8(&funcs, ABI_TYPE_BASE + P->import_count) || !bu8(&funcs, 1))) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
   /* exports */
-  if (!bleu(&exps, 28)) return 0;
+  if (!bleu(&exps, 28 + 2 * api)) return 0;
   #define EXP(name, kind, idx) do { \
-    uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)g_need_gpu : (uint32_t)(idx); \
+    uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)nimports : (uint32_t)(idx); \
     if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, _i)) return 0; \
   } while (0)
   EXP("memory", 0x02, 0);
@@ -2585,10 +2882,18 @@ static int build_mod(Prog *P, Buf *mod) {
   EXP("str_len_export", 0x00, 30);
   EXP("host_mk_null", 0x00, 32);
   EXP("host_reset_globals", 0x00, 34);
+  if (api) {
+    EXP(P->api.name, 0x00, NFUNCS);
+    EXP("uxe_abi_version", 0x00, NFUNCS + 1);
+  }
 
   if (!mk_num_body(&cs[0], 0)) return 0;
-  if (!emit_locals(&cs[1], P)) return 0;
-  if (!emit_ops(&cs[1], P)) return 0;
+  if (api) {
+    if (!bleu(&cs[1], 0)) return 0; /* Typed entry modules refuse the legacy main_export. */
+    if (!emit_locals(&cs[NFUNCS], P) || !emit_ops(&cs[NFUNCS], P)) return 0;
+    if (!bu8(&cs[NFUNCS], 0x00) || !bu8(&cs[NFUNCS], 0x0b)) return 0;
+    if (!const_i32_ret_body(&cs[NFUNCS + 1], P->abi_version)) return 0;
+  } else if (!emit_locals(&cs[1], P) || !emit_ops(&cs[1], P)) return 0;
   if (!bu8(&cs[1], 0x00) || !bu8(&cs[1], 0x0b)) return 0;
   if (!bleu(&cs[2],0)) return 0;
   if (!bu8(&cs[2],0x20)||!bleu(&cs[2],0)) return 0;
@@ -2648,20 +2953,26 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!store_bytes_body(&cs[33])) return 0;
   if (!host_reset_globals_body(&cs[34])) return 0;
 
-  if (!bleu(&codes, NFUNCS)) return 0;
-  for (i = 0; i < NFUNCS; i++) {
+  if (!bleu(&codes, nfuncs)) return 0;
+  for (i = 0; i < nfuncs; i++) {
     if (!bleu(&codes, cs[i].n) || !braw(&codes, bd(&cs[i]), cs[i].n)) return 0;
   }
   if (!binit(mod, 32768)) return 0;
   static const uint8_t hdr[] = {0,0x61,0x73,0x6d,1,0,0,0};
   if (!braw(mod, hdr, 8)) return 0;
   if (!sect(mod,1,&types)) return 0;
-  if (g_need_gpu) {
+  if (nimports) {
     Buf imps;
-    if (!binit(&imps, 64)) return 0;
-    if (!bleu(&imps, 1)) return 0;
-    if (!bstr(&imps, "env") || !bstr(&imps, "host_gpu_submit")) return 0;
-    if (!bu8(&imps, 0) || !bleu(&imps, 11)) return 0;
+    if (!binit(&imps, 64) || !bleu(&imps, nimports)) return 0;
+    if (g_need_gpu) {
+      if (!bstr(&imps, "env") || !bstr(&imps, "host_gpu_submit")) return 0;
+      if (!bu8(&imps, 0) || !bleu(&imps, 11)) return 0;
+    }
+    for (i = 0; i < P->import_count; i++) {
+      AbiFn *f = &P->imports[i];
+      if (!bstr(&imps, f->module) || !bstr(&imps, f->name) ||
+          !bu8(&imps, 0) || !bleu(&imps, ABI_TYPE_BASE + i)) return 0;
+    }
     if (!sect(mod,2,&imps)) return 0;
   }
   if (!sect(mod,3,&funcs)) return 0;
@@ -2682,7 +2993,7 @@ static int build_mod(Prog *P, Buf *mod) {
 }
 
 static int write_meta(Prog *P) {
-  char buf[512];
+  char buf[(2 * MAXL + MAXG) * (MAXN + 2) + 64];
   uint32_t n = 0;
   int first;
   buf[n++] = '{';
@@ -2729,6 +3040,8 @@ __attribute__((export_name("compile")))
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_bump = 64;
   g_need_gpu = 0;
+  g_need_ux = 0;
+  g_abi_imports = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
   if (src_len > 100000) { g_need_gpu = 0; set_err("src too large"); return 1; }
 #ifdef UJS_HOST
@@ -2739,17 +3052,27 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
 #endif
 
   Prog P; memset(&P, 0, sizeof P); P.scratch = -1; P.fscratch = -1; P.lscratch = -1;
+  P.uxaddr = -1;
   P.src = src; P.srclen = src_len; P.fn_ret = -1;
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
+  while (L.tok == T_ID && (intrinsic_name(L.id, "import") || intrinsic_name(L.id, "export"))) {
+    if (!abi_decl(&L, &P, intrinsic_name(L.id, "export"))) {
+      set_err(P.err ? P.err : "abi declaration"); return 1;
+    }
+  }
 #ifdef UJS_HOST
   if (parse_net_top_is_bad(L.tok)) { g_need_gpu = 0; set_err("parse-net"); return 1; }
 #endif
   while (L.tok != T_EOF) {
     if (!pstmt(&L, &P)) { g_need_gpu = 0; set_err(P.err ? P.err : "parse"); return 1; }
   }
+  for (int i = 0; i < P.api.count; i++) {
+    if (P.lty[i] != P.api.args[i]) { set_err("abi parameter type changed"); return 1; }
+  }
   if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
+  g_abi_imports = P.import_count;
   if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err("emit"); return 1; }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
   g_need_gpu = 0;

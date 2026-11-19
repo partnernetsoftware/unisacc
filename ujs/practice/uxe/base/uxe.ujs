@@ -1,0 +1,424 @@
+import host_input_read from "env"() i64;
+import host_frame_present from "env"(i64, i64, i64) i64;
+import host_asset_read from "env"(i64, i64, i64) i64;
+import host_audio_write from "env"(i64, i64) i64;
+import host_time from "env"() f64;
+export uxe_dispatch(op:i64, a:i64, b:i64) i64 version 1;
+
+persist let width = 0;
+persist let height = 0;
+persist let assetReadBytes = 0;
+persist let sceneFocal = 0;
+persist let sceneNear = 0;
+persist let sceneLight = 255;
+persist let sceneFogStart = 0;
+persist let sceneFogEnd = 0;
+persist let sceneFogColor = 0;
+persist let worldEyeX = 0;
+persist let worldEyeY = 0;
+persist let worldEyeZ = 0;
+persist let worldBasisReady = 0;
+let pixels = width * height;
+
+if (op == 0) {
+  return host_input_read();
+}
+if (op == 1) {
+  if (a < 1 || b < 1 || a > 4096 || b > 4096) { return 0 - 1; }
+  if (a * b > 1048576) { return 0 - 1; }
+  width = a;
+  height = b;
+  sceneFocal = 0;
+  return width * height;
+}
+if (op == 2 || op == 9 || op == 10 || op == 11) {
+  if (b < 0 || b > 4294967295 || pixels == 0) { return 0 - 1; }
+  let start = 0;
+  let end = pixels;
+  let stride = 1;
+  if (op == 2) {
+    if (a < 0 || a >= pixels) { return 0 - 1; }
+    start = a;
+    end = a + 1;
+  }
+  if (op == 10 || op == 11) {
+    if (a < 0 || a >= 68719476736) { return 0 - 1; }
+    let column = a % 4096;
+    let row = (a / 4096) % 4096;
+    let lastPixel = a / 16777216;
+    if (column >= width || row >= height) { return 0 - 1; }
+    start = row * width + column;
+    if (op == 10) {
+      if (lastPixel < row || lastPixel >= height) { return 0 - 1; }
+      stride = width;
+      end = (lastPixel + 1) * width + column;
+    } else {
+      if (lastPixel < column || lastPixel >= width) { return 0 - 1; }
+      end = row * width + lastPixel + 1;
+    }
+  }
+  let red = b % 256;
+  let green = (b / 256) % 256;
+  let blue = (b / 65536) % 256;
+  let alpha = b / 16777216;
+  while (start < end) {
+    let at = start * 4;
+    let r = ux_u8_put(at, red);
+    let g = ux_u8_put(at + 1, green);
+    let u = ux_u8_put(at + 2, blue);
+    let t = ux_u8_put(at + 3, alpha);
+    start = start + stride;
+  }
+  return 0;
+}
+if (op == 3) {
+  if (pixels == 0) { return 0 - 1; }
+  return host_frame_present(ux_span(0, pixels * 4), width, height);
+}
+if (op == 4) {
+  if (a < 0 || b < 0 || b > 1048576) { return 0 - 1; }
+  assetReadBytes = host_asset_read(a, ux_span(4194304, b), b);
+  return assetReadBytes;
+}
+if (op == 5) {
+  if (a < 0 || a >= 48000 || b < 0 - 32768 || b > 32767) { return 0 - 1; }
+  let sample = ux_f32_put(5242880 + a * 4, b / 32768.0);
+  return 0;
+}
+if (op == 6) {
+  if (a < 1 || a > 48000) { return 0 - 1; }
+  return host_audio_write(ux_span(5242880, a * 4), a);
+}
+if (op == 7) {
+  let micros = 0;
+  micros = host_time() * 1000.0;
+  return micros;
+}
+if (op == 8) {
+  if (a < 0 || a >= 1048576) { return 0 - 1; }
+  return ux_u8(4194304 + a);
+}
+// Draw an RGBA asset from the resource buffer, rotated about its center.
+if (op == 12) {
+  if (a < 0 || a >= 281474976710656 || b < 0 - 1570 || b > 1570 || pixels == 0) { return 0 - 1; }
+  let centerX = a % 4096;
+  let centerY = (a / 4096) % 4096;
+  let assetWidth = (a / 16777216) % 4096;
+  let assetHeight = a / 68719476736;
+  if (assetWidth < 1 || assetHeight < 1 || assetWidth * assetHeight * 4 > assetReadBytes) { return 0 - 1; }
+  let rot = b / 1000.0;
+  let rot2 = rot * rot;
+  let sine = rot * (1.0 - rot2 / 6.0 + rot2 * rot2 / 120.0 - rot2 * rot2 * rot2 / 5040.0);
+  let cosine = 1.0 - rot2 / 2.0 + rot2 * rot2 / 24.0 - rot2 * rot2 * rot2 / 720.0;
+  let assetY = 0;
+  while (assetY < assetHeight) {
+    let assetX = 0;
+    while (assetX < assetWidth) {
+      let sourcePixel = 4194304 + 4 * (assetY * assetWidth + assetX);
+      if (ux_u8(sourcePixel + 3) == 255) {
+        let localX = assetX - assetWidth / 2;
+        let localY = assetY - assetHeight / 2;
+        let drawX = f64_floor_i64(centerX + 0.5 + localX * cosine - localY * sine);
+        let drawY = f64_floor_i64(centerY + 0.5 + localX * sine + localY * cosine);
+        if (drawX >= 0 && drawX < width && drawY >= 0 && drawY < height) {
+          let targetPixel = (drawY * width + drawX) * 4;
+          let wroteR = ux_u8_put(targetPixel, ux_u8(sourcePixel));
+          let wroteG = ux_u8_put(targetPixel + 1, ux_u8(sourcePixel + 1));
+          let wroteB = ux_u8_put(targetPixel + 2, ux_u8(sourcePixel + 2));
+          let wroteA = ux_u8_put(targetPixel + 3, 255);
+        }
+      }
+      assetX = assetX + 1;
+    }
+    assetY = assetY + 1;
+  }
+  return 0;
+}
+// A filled rectangle or a 3 x 5 bitmap glyph, including the decimal atlas.
+if (op == 13 || op == 14) {
+  if (a < 0 || a >= 281474976710656 || b < 0 || b > 4294967295 || pixels == 0) { return 0 - 1; }
+  let inkX = a % 4096;
+  let inkY = (a / 4096) % 4096;
+  let inkW = (a / 16777216) % 4096;
+  let inkH = a / 68719476736;
+  let inkMask = a / 16777216;
+  if (op == 14) {
+    if (inkMask > 32777) { return 0 - 1; }
+    if (inkMask == 32768) { inkMask = 31599; }
+    if (inkMask == 32769) { inkMask = 29850; }
+    if (inkMask == 32770) { inkMask = 29671; }
+    if (inkMask == 32771) { inkMask = 31207; }
+    if (inkMask == 32772) { inkMask = 18925; }
+    if (inkMask == 32773) { inkMask = 31183; }
+    if (inkMask == 32774) { inkMask = 31694; }
+    if (inkMask == 32775) { inkMask = 9383; }
+    if (inkMask == 32776) { inkMask = 31727; }
+    if (inkMask == 32777) { inkMask = 14831; }
+    inkW = 3;
+    inkH = 5;
+  }
+  if (inkW < 1 || inkH < 1 || inkX + inkW > width || inkY + inkH > height) { return 0 - 1; }
+  let inkR = b % 256;
+  let inkG = (b / 256) % 256;
+  let inkB = (b / 65536) % 256;
+  let inkA = b / 16777216;
+  let inkRow = 0;
+  while (inkRow < inkH) {
+    let inkCol = 0;
+    while (inkCol < inkW) {
+      if (op == 13 || inkMask % 2 == 1) {
+        let inkPixel = ((inkY + inkRow) * width + inkX + inkCol) * 4;
+        let inkOutR = ux_u8_put(inkPixel, inkR);
+        let inkOutG = ux_u8_put(inkPixel + 1, inkG);
+        let inkOutB = ux_u8_put(inkPixel + 2, inkB);
+        let inkOutA = ux_u8_put(inkPixel + 3, inkA);
+      }
+      inkMask = inkMask / 2;
+      inkCol = inkCol + 1;
+    }
+    inkRow = inkRow + 1;
+  }
+  return 0;
+}
+// Integer nearest-neighbor sprite, with signed origin and clipped edges.
+// a packs biased coordinates (13 bits each), width and height (6 each), scale (4).
+if (op == 15) {
+  if (a < 0 || a >= 4398046511104 || b < 0 || pixels == 0) { return 0 - 1; }
+  let spriteLeft = a % 8192 - 4096;
+  let spriteTop = (a / 8192) % 8192 - 4096;
+  let spriteWidth = (a / 67108864) % 64;
+  let spriteHeight = (a / 4294967296) % 64;
+  let spriteScale = a / 274877906944;
+  if (spriteWidth == 0 || spriteHeight == 0 || spriteScale == 0 ||
+      b > assetReadBytes - spriteWidth * spriteHeight * 4) { return 0 - 1; }
+  let spriteRow = 0;
+  while (spriteRow < spriteHeight * spriteScale) {
+    let spriteDestY = spriteTop + spriteRow;
+    if (spriteDestY >= 0 && spriteDestY < height) {
+      let spriteCol = 0;
+      while (spriteCol < spriteWidth * spriteScale) {
+        let spriteDestX = spriteLeft + spriteCol;
+        if (spriteDestX >= 0 && spriteDestX < width) {
+          let spriteSource = 4194304 + b + 4 * ((spriteRow / spriteScale) * spriteWidth + spriteCol / spriteScale);
+          if (ux_u8(spriteSource + 3) == 255) {
+            let spriteDest = 4 * (spriteDestY * width + spriteDestX);
+            let spriteWrite = ux_u8_put(spriteDest, ux_u8(spriteSource));
+            spriteWrite = ux_u8_put(spriteDest + 1, ux_u8(spriteSource + 1));
+            spriteWrite = ux_u8_put(spriteDest + 2, ux_u8(spriteSource + 2));
+            spriteWrite = ux_u8_put(spriteDest + 3, 255);
+          }
+        }
+        spriteCol = spriteCol + 1;
+      }
+    }
+    spriteRow = spriteRow + 1;
+  }
+  return 0;
+}
+// Straight-alpha source-over. Particle stamps add a clipped radial falloff.
+// Stamp a: biased x/y in 13 bits each, followed by radius (1 through 16).
+if (op == 16 || op == 17) {
+  if (a < 0 || b < 0 || b > 4294967295 || pixels == 0) { return 0 - 1; }
+  let blendX = 0;
+  let blendY = 0;
+  let blendRadius = 0;
+  if (op == 16) {
+    if (a >= pixels) { return 0 - 1; }
+    blendX = a % width;
+    blendY = a / width;
+  } else {
+    blendX = a % 8192 - 4096;
+    blendY = (a / 8192) % 8192 - 4096;
+    blendRadius = a / 67108864;
+    if (blendRadius < 1 || blendRadius > 16) { return 0 - 1; }
+  }
+  let blendEdge = blendRadius * blendRadius + 1;
+  let blendDy = 0 - blendRadius;
+  while (blendDy <= blendRadius) {
+    let blendDx = 0 - blendRadius;
+    while (blendDx <= blendRadius) {
+      let blendDistance = blendDx * blendDx + blendDy * blendDy;
+      if (blendDistance < blendEdge && blendX + blendDx >= 0 && blendX + blendDx < width &&
+          blendY + blendDy >= 0 && blendY + blendDy < height) {
+        let blendAlpha = (b / 16777216) * (blendEdge - blendDistance) / blendEdge;
+        if (blendAlpha > 0) {
+          let blendAt = ((blendY + blendDy) * width + blendX + blendDx) * 4;
+          let blendSource = blendAlpha * 255;
+          let blendDest = ux_u8(blendAt + 3) * (255 - blendAlpha);
+          let blendTotal = blendSource + blendDest;
+          let blendChannel = 0;
+          let blendBytes = b;
+          while (blendChannel < 3) {
+            let blendColor = ((blendBytes % 256) * blendSource + ux_u8(blendAt + blendChannel) * blendDest
+              + blendTotal / 2) / blendTotal;
+            let blendWrite = ux_u8_put(blendAt + blendChannel, blendColor);
+            blendBytes = blendBytes / 256;
+            blendChannel = blendChannel + 1;
+          }
+          let blendCoverage = ux_u8_put(blendAt + 3, (blendTotal + 127) / 255);
+        }
+      }
+      blendDx = blendDx + 1;
+    }
+    blendDy = blendDy + 1;
+  }
+  return 0;
+}
+// Camera-space triangles. Vertex records end before the reciprocal-depth image.
+// The RGB image stays in the existing device buffer, with the host only presenting it.
+if (op == 18) {
+  if (a < 1 || a > 2048 || b < 1 || b > 65535 || pixels == 0 || pixels > 197864) { return 0 - 1; }
+  sceneFocal = a;
+  sceneNear = b;
+  let sceneClear = 0;
+  let sceneReset = ux_u8_put(5499900, 0);
+  sceneReset = ux_u8_put(5499901, 0);
+  sceneReset = ux_u8_put(5499902, 0);
+  while (sceneClear < pixels) {
+    sceneReset = ux_f32_put(5500000 + 4 * sceneClear, 0.0);
+    sceneClear = sceneClear + 1;
+  }
+  return 0;
+}
+if (op == 19 || op == 25) {
+  if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b >= 281474976710656) { return 0 - 1; }
+  let cameraZ = (b / 4294967296) * 1.0;
+  let vertexState = ux_u8_put(5499900 + a, 0);
+  let cameraX = (b % 65536 - 32768) * 1.0;
+  let cameraY = (b / 65536 % 65536 - 32768) * 1.0;
+  if (op == 25) {
+    if (worldBasisReady == 0) { return 0 - 1; }
+    let relativeX = cameraX - worldEyeX;
+    let relativeY = cameraY - worldEyeY;
+    let relativeZ = cameraZ - 32768.0 - worldEyeZ;
+    cameraX = relativeX * ux_f32(5480000) + relativeZ * ux_f32(5480004);
+    cameraY = relativeX * ux_f32(5480008) + relativeY * ux_f32(5480012) + relativeZ * ux_f32(5480016);
+    cameraZ = relativeX * ux_f32(5480020) + relativeY * ux_f32(5480024) + relativeZ * ux_f32(5480028);
+  }
+  if (cameraZ < sceneNear) { return 0 - 1; }
+  let vertexAt = 5499912 + 12 * a;
+  vertexState = ux_f32_put(vertexAt, f64_floor_i64(width / 2.0 + sceneFocal * cameraX / (cameraZ * 1.0) + 0.5) * 1.0);
+  vertexState = ux_f32_put(vertexAt + 4, f64_floor_i64(height / 2.0 - sceneFocal * cameraY / (cameraZ * 1.0) + 0.5) * 1.0);
+  vertexState = ux_f32_put(vertexAt + 8, 1.0 / cameraZ);
+  vertexState = ux_u8_put(5499900 + a, 1);
+  return 0;
+}
+if (op == 20) {
+  if (sceneFocal == 0 || b < 0 || b > 16777215 ||
+      ux_u8(5499900) == 0 || ux_u8(5499901) == 0 || ux_u8(5499902) == 0) { return 0 - 1; }
+  let x0 = ux_f32(5499912);
+  let y0 = ux_f32(5499916);
+  let x1 = ux_f32(5499924);
+  let y1 = ux_f32(5499928);
+  let x2 = ux_f32(5499936);
+  let y2 = ux_f32(5499940);
+  let triangleArea = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+  if (triangleArea == 0.0) { return 0; }
+  let minX = x0;
+  let minY = y0;
+  let maxX = x0;
+  let maxY = y0;
+  if (x1 < minX) { minX = x1; }
+  if (x2 < minX) { minX = x2; }
+  if (y1 < minY) { minY = y1; }
+  if (y2 < minY) { minY = y2; }
+  if (x1 > maxX) { maxX = x1; }
+  if (x2 > maxX) { maxX = x2; }
+  if (y1 > maxY) { maxY = y1; }
+  if (y2 > maxY) { maxY = y2; }
+  if (minX < 0.0) { minX = 0.0; }
+  if (minY < 0.0) { minY = 0.0; }
+  if (maxX >= width) { maxX = width - 1.0; }
+  if (maxY >= height) { maxY = height - 1.0; }
+  let triangleY = f64_floor_i64(minY);
+  while (triangleY <= maxY) {
+    let triangleX = f64_floor_i64(minX);
+    while (triangleX <= maxX) {
+      let weight0 = ((x2 - x1) * (triangleY + 0.5 - y1) - (y2 - y1) * (triangleX + 0.5 - x1)) / triangleArea;
+      let weight1 = ((x0 - x2) * (triangleY + 0.5 - y2) - (y0 - y2) * (triangleX + 0.5 - x2)) / triangleArea;
+      let weight2 = 1.0 - weight0 - weight1;
+      if (weight0 >= 0.0 && weight1 >= 0.0 && weight2 >= 0.0) {
+        let triangleInvZ = weight0 * ux_f32(5499920) + weight1 * ux_f32(5499932) + weight2 * ux_f32(5499944);
+        let triangleIndex = triangleY * width + triangleX;
+        let triangleDepthAt = 5500000 + 4 * triangleIndex;
+        if (triangleInvZ > ux_f32(triangleDepthAt)) {
+          let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
+          triangleIndex = triangleIndex * 4;
+          let triangleFog = 0.0;
+          if (sceneFogEnd > sceneFogStart) {
+            triangleFog = (1.0 / triangleInvZ - sceneFogStart) / (sceneFogEnd - sceneFogStart);
+            if (triangleFog < 0.0) { triangleFog = 0.0; }
+            if (triangleFog > 1.0) { triangleFog = 1.0; }
+          }
+          let materialColor = b;
+          let hazeColor = sceneFogColor;
+          let triangleChannel = 0;
+          while (triangleChannel < 3) {
+            let lit = (materialColor % 256 * sceneLight + 127) / 255;
+            let haze = hazeColor % 256;
+            triangleInk = ux_u8_put(triangleIndex + triangleChannel,
+              f64_floor_i64(lit + 0.5 + (haze - lit) * triangleFog));
+            materialColor = materialColor / 256;
+            hazeColor = hazeColor / 256;
+            triangleChannel = triangleChannel + 1;
+          }
+          triangleInk = ux_u8_put(triangleIndex + 3, 255);
+        }
+      }
+      triangleX = triangleX + 1;
+    }
+    triangleY = triangleY + 1;
+  }
+  return 0;
+}
+// Fog range is packed as two unsigned 16-bit depths; zero disables fog.
+if (op == 21) {
+  if (a < 0 || a > 4294967295 || b < 0 || b > 16777215) { return 0 - 1; }
+  let fogStart = a % 65536;
+  let fogEnd = a / 65536;
+  if (a != 0 && fogEnd <= fogStart) { return 0 - 1; }
+  sceneFogStart = fogStart;
+  sceneFogEnd = fogEnd;
+  sceneFogColor = b;
+  return 0;
+}
+// Preserve explicit unshaded material support; toon materials use three bands.
+if (op == 22) {
+  if (a < 0 || a > 255 || b < 0 || b > 1) { return 0 - 1; }
+  sceneLight = a;
+  if (b == 1) {
+    sceneLight = 112;
+    if (a >= 80) { sceneLight = 192; }
+    if (a >= 176) { sceneLight = 255; }
+  }
+  return 0;
+}
+// World camera uses signed 16-bit coordinates and an arbitrary forward vector.
+if (op == 23 || op == 24) {
+  if (b < 0 || b >= 281474976710656) { return 0 - 1; }
+  let axisX = b % 65536 - 32768;
+  let axisY = b / 65536 % 65536 - 32768;
+  let axisZ = b / 4294967296 - 32768;
+  if (op == 23) {
+    worldEyeX = axisX;
+    worldEyeY = axisY;
+    worldEyeZ = axisZ;
+    return 0;
+  }
+  let horizontal = f64_sqrt((axisX * axisX + axisZ * axisZ) * 1.0);
+  if (horizontal == 0.0) { worldBasisReady = 0; return 0 - 1; }
+  let length = f64_sqrt(horizontal * horizontal + axisY * axisY);
+  let orthX = (0.0 - axisZ) / horizontal;
+  let orthZ = axisX / horizontal;
+  let basisWrite = ux_f32_put(5480000, orthX);
+  basisWrite = ux_f32_put(5480004, orthZ);
+  basisWrite = ux_f32_put(5480008, (0.0 - orthZ) * axisY / length);
+  basisWrite = ux_f32_put(5480012, horizontal / length);
+  basisWrite = ux_f32_put(5480016, orthX * axisY / length);
+  basisWrite = ux_f32_put(5480020, axisX / length);
+  basisWrite = ux_f32_put(5480024, axisY / length);
+  basisWrite = ux_f32_put(5480028, axisZ / length);
+  worldBasisReady = 1;
+  return 0;
+}
+return 0 - 1;

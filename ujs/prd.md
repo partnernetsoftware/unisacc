@@ -82,7 +82,7 @@
 
 ### 0.3 实践 demo（host1 + UXE,不挡 `ujs.com` 版号）
 
-demo-v2 卡片以 [`plans/demo-v2/requirements-original.md`](plans/demo-v2/requirements-original.md) 为准(所有者原话只增不改)。目录 `practice/uxe/demo/`。合同与四款现页相同:世界与步进在 `.ujs`/`wasm`,Host 只输入与光栅;`host1Boot.step` + `host_gpu_submit`(失败回退页内 renderer);无 `three.module`;`?auto=1` 只核表长/金,不核截图。细计划仍见 [`plans/demo-three-ports.md`](plans/demo-three-ports.md)。
+demo-v2 原始需求见 [`plans/demo-v2/requirements-original.md`](plans/demo-v2/requirements-original.md)。下表记录早期实践页验收点。当前四页的分层、出货和迁移以 0.3c 为准。
 
 
 | 编号 | 页 | 核要交什么 | 完成时玩家应看到 |
@@ -95,7 +95,7 @@ demo-v2 卡片以 [`plans/demo-v2/requirements-original.md`](plans/demo-v2/requi
 
 另: `host1-games/` 是 host1 金闸(`HOST1_GAMES_OK_GL`),不是叙事世界。
 
-**D5** 草稿页已开(`ghibli-world/`,`GHIBLI_OK` 表长>=8);观感合同未达。
+**D5** 保留草稿证据，暂停开发。D1-D4 暂停新增页面细节，先整改三层架构。
 
 ### 0.3b 已核实缺口(2026-11-17)
 
@@ -121,6 +121,169 @@ demo-v2 卡片以 [`plans/demo-v2/requirements-original.md`](plans/demo-v2/requi
 
 
 ---
+
+### 0.3c UXE 三层合同与迁移 S1
+
+S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译器，再逐页迁移，D1 优先。three.js 对标以功能验收为准，UXE 使用自己的版本化 API。下表现状以四页和相关实验为证据，标为部分的能力可能仍在 JS。已有的单项能力也须在基座 Wasm 中重新举证。
+
+#### 基座 Wasm
+
+拥有场景图、资源句柄、渲染和混音策略。负责所有权、句柄生命周期和内存边界。产品通过基座 API 建场景、提交状态、查询结果。
+
+| 能力 | three.js 对标 | 现状 | 基座验收门 |
+|---|---|---|---|
+| 场景图 | Scene、Object3D、Group | 部分，scene.js | 挂载和移除后父子变换、可见性正确 |
+| 相机 | PerspectiveCamera、OrthographicCamera | 部分，透视与路轨相机在 JS | 透视与正交的近远裁剪、屏幕投影金值 |
+| 几何与材质 | BufferGeometry、InstancedMesh、MeshToonMaterial、MeshStandardMaterial | 部分，网格、toon、描边在 JS，PBR 待补 | 索引和实例、toon 三阶和描边、标准材质的金属度和粗糙度有像素门 |
+| 光照与阴影 | DirectionalLight、PointLight、LightShadow | 部分，方向光与阴影贴图在 JS | 遮挡体移动时阴影跟随，点光衰减与多光源叠加可量测 |
+| 雾与色调 | Fog、FogExp2、WebGLRenderer 色调映射与输出色空间 | 部分，U1 空气透视和调色在 JS | 雾随距离变化，色调与线性到 sRGB 有像素金值 |
+| 纹理与精灵 | Texture、DataTexture、Sprite | 部分，UXEP v4 贴图有读回 | UV、过滤、透明遮罩、面向相机精灵各有像素样点 |
+| 粒子 | Points、PointsMaterial 及发射器调度 | 部分，点绘制已有门，烟和浪由页面步进 | 确定性发射、生命周期、混合、排序和回收 |
+| 动画与骨骼 | AnimationClip、AnimationMixer、SkinnedMesh、Skeleton | 部分，D3/D4 过程动画在 JS，缺骨骼 | 两骨蒙皮、插值、混合与暂停续播有顶点读回 |
+| 拾取 | Raycaster | 缺可复用接口证据 | 屏幕射线、多命中排序、近远裁剪与空命中 |
+| 音频 | Audio、AudioListener、PositionalAudio | 部分，D1 WebAudio 事件已有读回 | 解码或合成、混音与声像有 PCM 包络验收 |
+| 输入 | EventDispatcher、Controls 适配 | 部分，UXIN 与页面键鼠已有证据 | 事件顺序、失焦清键、触屏与录制回放 |
+| 装载 | LoadingManager、TextureLoader、GLTFLoader | 部分，宿主取字节和静态 GLB 实验已通 | 基座解析纹理和 GLB 网格、材质、贴图、蒙皮、动画，坏文件拒绝及释放 |
+
+能力对标据 [three.js 官方 API](https://threejs.org/docs/)。仓内证据见 [UXE 专项规格](prd_uxe_sped.md)、[Host ABI](practice/uxe/HOST_ABI.md) 和 [素材实验](plans/demo-v2/asset-sources.md)。
+
+#### 产品 Wasm
+
+每页一份产品 Wasm，提供初始化、步进、销毁。只导入版本化的 UXE API，负责玩法状态、交互语义、随机状态、场景资料及 HUD。通用几何、矩阵、软件像素缓冲、投影、光栅与合成归基座。
+
+| 页 | 产品逻辑 |
+|---|---|
+| D1 fly-next | 飞行与重开、追尾镜头、岛屿和海岸、敌机和波次、武器、命中、HP、KO、尾迹、HUD 及音效事件和音色数据 |
+| D2 water-keeps | 操舵、碰岸减速、水道和植被布局、水色及倒影参数、桥灯、标题和粒子触发 |
+| D3 ink-walk | 石桥、屋、山和植被布局、材质参数、漫游路线、风与视角交互 |
+| D4 oneshot | 机械城镇与腹部布局、四足步态、行走约束、镜头跟拍、烟囱发射参数 |
+
+#### 页面 JS 白名单和行数门
+
+每页只加载共享 `host-abi.js`。HTML 保留静态画布、样式和模块 URL 数据。S2 将下表目标符号和签名登记到版本化 ABI 表。
+
+| 函数 | 允许动作 |
+|---|---|
+| `boot` | 取 Wasm 字节、实例化、绑定两模块导入导出、按固定生命周期转发 |
+| `host_canvas_open`、`host_canvas_size`、`host_frame_present` | 获取画布和尺寸，上传像素或交换画面 |
+| `host_gpu_submit` | 校验基座定稿的命令与宿主对象句柄，转发 WebGL 创建、绑定、上传、编译、绘制和释放 |
+| `host_input_read` | 采集键鼠、触屏、按钮及失焦原始事件，编码为 UXIN |
+| `host_time`、`host_request_frame` | 读取单调时间，转发及取消帧回调 |
+| `host_audio_write` | 将基座给出的 PCM 交给浏览器，处理音频设备状态和浏览器解锁 |
+| `host_asset_request`、`host_asset_read` | 请求与完成状态、字节搬运、边界和错误转发 |
+| `host_log` | 宿主 ABI 诊断转发 |
+
+场景遍历、可见性、资源解码、着色器内容、键位解释、步进策略、音色和产品逻辑均由 Wasm 决定。桥内辅助函数只能服务于表内调用，按函数核对职责和宿主调用点。AUTO 从 Wasm 状态读回，测试探针置于测试目录。
+
+每个导出页内联 JS 与事件属性各 0 行，其他 JS 文件 0 个，共享桥的传递闭包至多 300 物理行，每行最多 120 字符。按唯一规范路径计一次，包含注释、空白和无末尾换行的末行。禁止压缩或生成形式规避检查，禁止动态代码生成、脚本注入、非静态依赖和路径逃逸。独立 `.cx` 门解析实际导出 HTML 与 JS，沿依赖核函数符号、签名、宿主调用点和行数，输出页、路径、行数与违规条款。隔离副本分别加入超预算一行、非白名单函数、内联脚本和传递依赖中的外加 JS，皆须返回非零。
+
+D1 的静态壳检查入口为 `sh ./unisacc.com ujs/tests/uxe-host-budget.cx -- <临时导出目录>/index.html`。HTML 使用受限的静态标签与属性，脚本只能向同目录的 `./host-abi.js` 发起一次模块加载。检查器独立计行宽与行数，并核对已审阅的独立宿主桥文件摘要，保证脚本闭包只有该文件。宿主桥新增能力时需核其宿主调用点并同步摘要。`--fixture` 为正例，`--over`、`--inline`、`--other`、`--handler`、`--bridge` 为反例。
+
+#### 编译器现状和前置缺口
+
+0a 新增 `./ujs/ujs2wasm.com FILE.ujs -o OUT.wasm`。薄启动脚本复用 `ujs/product/build-ape.cx` 已构建的 `ujs/ujs.com`，原样转发参数和退出码。`--run` 由 host1 迷你 VM 执行。现有生成器已通过该入口重编 D1。`ujs/product/run-host.cx` 实跑 28 例通过，`ujs/product/corpus-host.cx` 实跑 28 个正例、8 个源码拒绝例及坏 Wasm 拒绝通过。S1 全套 smoke 的日志已到 `build-ape.cx: ok`，外层 57 秒截止在末项 `check-ujs-ape.cx` 完成前触发。历史 `compile.mjs`、归档 Python 和旧语料不作为目标构建入口。
+
+| 特性 | 现入口的证据与限制 |
+|---|---|
+| 标量、控制流与 f64 | i64、f64 基础算术和比较、分支、循环、switch 和三元式有语料。`Math.sqrt(9.0)` 拒绝，退出 1，诊断 `dot non-dict`。所需数学内建及误差界待补 |
+| 数组与字典 | list 下标、更新、f64 元素，dict 字面量、点访问有语料。字典键上限 8 字节。`new Float32Array(4)` 拒绝，退出 1，诊断 `expected ;`。连续 f32 和批量字节搬运待补 |
+| 闭包 | 除无捕获语料外，实跑 `let offset = 3; let f = x => x + offset; return f(4);` 得 i64 7。此例覆盖外层读取，逃逸与可变捕获未测 |
+| 字符串 | ASCII 字面量和拼接有语料。单字面量至多 255 字节，拒绝 NUL、非 ASCII 与转义，UTF-8 需有界字节 ABI |
+| import 与链接 | 已有特设 `env.host_gpu_submit(i32 ptr,i32 len)`。`import { host_time } from "env"; return host_time();` 拒绝，退出 1，诊断 `expected =`。声明式宿主导入、跨模块链接与内存交接待补 |
+
+用 `wasm-objdump -x` 核对当前 D1 导出，只有上述一个 import。导出有 `memory`、`main_export`、`run_step`、`host_reset`、`host_set_global`、值构造和标签读取等，页面依元数据定位输入槽，收 11 字节 v3 飞行提交。`tools/gen-d1-airframe.cx` 调 `sh ./ujs/ujs2wasm.com ujs/tests/d1-flight.ujs -o <临时 Wasm>` 并发布测试夹具。现有 `d1-flight.wasm` 来自该 `.ujs`，生成工具承担调用与比对。D2/D3/D4 的现行导出目录无产品 Wasm。
+
+0b 为正式入口增加下列 ABI。上表的 `Math.sqrt` 和 `Float32Array` 仍是常规 JS 写法的拒绝例。
+
+| 能力 | 0b 合同 |
+|---|---|
+| f64 | `f64_sqrt(f64)` 编为 Wasm f64.sqrt。host1 运行金例使用数值误差门。基座 `math.ujs` 提供 `ux_sin(angle)`，弧度范围含 -2048 到 2048，范围外返回 NaN。余弦用相位偏移 pi/2 后调用同一函数，偏移后受同一范围限制。独立样点绝对误差上限 2e-9 |
+| 连续视图 | 每实例占用线性内存 [2097152, 8388608) 作为 ABI 缓冲区。偏移单位为字节。`ux_u8`、`ux_u8_put` 读取和写入 0 到 255。`ux_f32`、`ux_f32_put` 读写四字节小端 IEEE 754 binary32，UJS 标量读回类型为 f64，允许未对齐 |
+| 有界跨度 | `ux_span(offset,count)` 先检查 i64 范围再返回线性内存地址，可取末尾零长度段。负数、超长和窄化前越界会陷阱。使用 ABI 视图的模块在装箱分配前也检查堆边界。模块间的内存所有权与交接仍由 0c 定义 |
+| 文本 | 以偏移和明确字节数传递 UTF-8，NUL 可作为内容。`text.ujs` 的 `ux_utf8(offset,length)` 返回 1 或 0，拒绝截断、孤立续字节、过长编码、代理区与超出 U+10FFFF。越界跨度陷阱。字符串字面量原合同保持 |
+
+0b 测试将 `.ujs` 库和测试片段拼为单源后编译，跨模块链接在 0c。验收入口为 `ujs/product/cli-host.cx`，预期来自独立 `.cx` 数值、位模式和 UTF-8 用例。用 `--mutate-ux-abi` 改一项数学输入、一个边界偏移和一个 UTF-8 续字节，沿用原期望并要求非零。
+
+0c 的跨实例 ABI 在两个独立编译的 `.ujs` 入口之间启用。源文件开头先声明 import，再声明一个带参数名称和 ABI 版本的 export，随后写导出入口正文。参数和返回值支持原生 Wasm i64、f64，各声明至多八个参数，单模块至多八项声明式导入。
+
+```text
+import host_time from "env"() f64;
+export uxe_dispatch(op:i64, offset:i64, value:i64) i64 version 1;
+```
+
+基座通过 `env` 调用白名单宿主函数。产品通过 `uxe_v1` 直接绑定基座 Wasm 函数，由浏览器原生链接校验签名。两份模块均提供 `uxe_abi_version()`，版本在业务入口执行前核对。导出型模块通过浏览器 ABI 执行，旧 `main_export` 入口陷阱，host1 迷你 VM 仍用于旧单模块语料。新版不影响未声明 ABI 的源文件产物。
+
+每个实例拥有自己的线性内存。指针或偏移只在所属实例解释，写方逐次检查自身地址和长度。本轮探针由产品将自己的字节读成标量，经基座调用交接，基座将其写入自己的缓冲区。同一偏移独立读回 41 与 42，越界写由基座拒绝。这里验证标量交接，后续高吞吐缓冲协定由对应页面说明。
+
+`sh ./unisacc.com ujs/tests/run.cx -- --ux-link` 编译两份 `.ujs` 并在隔离浏览器中读回。独立 `.cx` 计算结果 42059，核两个缓冲区及各反例原因。直接运行 `ujs/tests/ux-link.cx` 时可传 `version`、`signature`、`bounds`、`missing`，将对应反例替换为主路径，均须退出 1。探针在临时目录导出，无线上页面改动。
+
+D1 基座切片由 `practice/uxe/base/uxe.ujs` 编译，`uxe_dispatch(op,a,b)` 提供键位位图、像素缓冲、资源字节、帧提交、单调时钟与 PCM。三个相对内存区间分别为 [0,4194304) 像素、[4194304,5242880) 资源、[5242880,6291456) PCM。像素为 RGBA8，色值以低位 R、高位 A 交给基座。单声道 PCM 固定 48000 Hz，产品写入有符号 16 位采样值，基座转为 f32。
+
+| 操作 | a | b | 返回 |
+|---|---|---|---|
+| 0 | 0 | 0 | 按 HTML 声明的物理键序给出 i64 位图 |
+| 1 | 宽 | 高 | 配置帧并返回像素数 |
+| 2 | 像素索引 | RGBA | 写入像素，返回 0 |
+| 3 | 0 | 0 | 提交帧并返回像素数 |
+| 4 | 资源字节偏移 | 待读字节数 | 向资源区起点读取并返回长度 |
+| 5 | 样本索引 | 采样值 | 写入 PCM 样本，返回 0 |
+| 6 | 样本数 | 0 | 输出 PCM，返回接受的样本数 |
+| 7 | 0 | 0 | 单调微秒 |
+| 8 | 资源区偏移 | 0 | 读回资源区字节 |
+| 9 | 0 | RGBA | 填满当前帧，返回 0 |
+| 10 | 列 + 行乘 4096 + 末行乘 16777216 | RGBA | 写垂直像素段，两端均包含 |
+| 11 | 列 + 行乘 4096 + 末列乘 16777216 | RGBA | 写水平像素段，两端均包含 |
+
+参数越界返回 -1。浏览器宿主校验基座内存跨度，转发 DOM 输入、画布呈现与音频设备输出。白名单桥提供静态画布入口、模块加载、可选资源预取、帧回调和销毁。基座探针用 `sh ./unisacc.com ujs/tests/ux-link.cx -- base` 实测浏览器帧、键盘、资源和音频缓冲。用 `base-color` 改产品测试源的角落颜色，原期望须失败。
+
+D1 产品的键盘飞行状态已迁入 `practice/uxe/products/d1/main.ujs`，由产品 Wasm 将原始键位解释为转向、升降和加速。用单调微秒积累 30 Hz 步进，补步沿用上次输入，最后一步使用本次按键。测试从产品自己的内存读回 11 字节兼容指标。`ujs/tests/ux-link.cx -- flight` 对照独立仿真核五个读点，包含按键释放和三步补步。将每步航向从 3 度篡改为 2 度的 `flight-heading` 须失败。此切片尚未接入场景渲染、指针、战斗、HUD、重开和游戏音色。
+
+D1 地形哈希依赖 32 位环绕乘法、按位与、异或和逻辑右移。编译器提供 `u32_mul`、`u32_and`、`u32_xor`、`u32_shr`，入参接收 i64 的低 32 位，运算按 Wasm i32 语义，结果零扩展为 i64。移位量取低 5 位。host1 的乘法环绕及逻辑右移与浏览器 Wasm 一致。独立 `.cx` 用地形坐标与种子计算哈希金值，`cli-host.cx -- --mutate-u32` 将一处逻辑右移量从 13 改为 12，验收须红。
+
+地形离散化使用 `f64_floor_i64(x)`，生成 Wasm 的向下取整与有符号整数转换。负小数向下取整，普通 f64 赋到 i64 仍向零截断。host1 也支持这两条不同操作，拒绝 NaN、无穷或超出 i64 范围的转换。`cli-host.cx -- --mutate-floor` 检查舍入方向反例。
+
+飞行、地形与三角函数合编需要超过 128 个局部槽，现有 host1 容量为 256，编译器与执行器都按 256 检查上界。每次内联调用有独立的有类型实参与返回槽，同一参数的类型在不同调用之间保持一致。浏览器双模块探针覆盖同一入口里的 i64 与 f64 内联调用，`cli-host.cx -- --mutate-locals` 验证超界拒绝。
+
+`practice/uxe/products/d1/terrain.ujs` 已复现 256 方格的岛屿、连续大陆架、潟湖与三层噪声。坐标和种子打包到 i64，返回有符号高度。`ujs/tests/d1-terrain.cx` 编译并读回 128 点的高度包，独立按旧规则计算期望，`--wrong-seed` 分支必须失败。
+
+`terrain-projection.ujs` 已把高度场、四点细分、按列遮挡、海岸颜色和远雾接到实际飞行步进。用 `ujs/tests/ux-link.cx -- --export-projection <新临时目录>` 编译独立预览，两份 Wasm 只经原宿主桥加载。浏览器验收采样开场及转向抬头后的两帧，`projection-short` 将射线范围缩短，陆地与海面样点须消失。当前预览不含旧地面细节、浪纹、云、机体叠层和战斗 HUD，仍属于投影切片。
+
+`practice/uxe/products/d1/effects-audio.ujs` 计算效果音的相位积分与攻击、释放包络。以 48000 Hz 采样，语音参数来自原音效事实表的定宽行。`ujs/tests/d1-effects.cx` 从表装入锁定提示音，在 Wasm 回算原 WebAudio 的六个采样点。篡改 `--wrong-attack` 必须失败。此切片验算正弦提示音，事件调度、其他波形、引擎音及混音尚待接入。
+
+#### 构建、顺序与验收
+
+基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。
+
+| 顺序 | 改动 | 机器门与观感验收 |
+|---|---|---|
+| 0a | 正式编译入口、固定输入身份 | 同源重编字节一致，兼容旧 D1 金值，坏源码拒绝且无产物 |
+| 0b | f64 数学、连续字节与 f32 视图、有界内存和文本 ABI | `.cx` 独立金值，坏编码、越界及运算篡改须红 |
+| 0c | import/export、模块链接与内存所有权 | 两份真实 `.ujs` 编译后在浏览器互调，坏版本、签名、越界、缺模块须红 |
+| 1 | 基座像素缓冲、输入、资源、帧及 PCM 最小切片，迁 D1 | 飞行、武器、HP、KO、波次、重开、音频，固定开场与三航向比图 |
+| 2 | 基座补混合和粒子，迁 D2 | 操舵、碰岸减速、桥宽 40%、倒影与标题，三航点比图 |
+| 3 | 基座补场景、材质、阴影、雾与投影，迁 D3 | 路径、桥拱、厚度、叶区像素，沿轨三位置比图 |
+| 4 | 基座补动画和实例，迁 D4 | 前后行走、跟拍、烟、齿轮圆度和面积，三位置比图 |
+| 5 | 补齐剩余对标能力 | 依基座表逐项提交样例、机器结果和反例 |
+
+每页沿用线上视口、时间和录制输入做同机位并排，保留已有区域阈值与反例。另跑路由相关既有门、JS 白名单和行数、Wasm 导入检查、CDP 实键终值、全量导出检查与十项 UXE 回归。关键行为移除须转红。
+
+#### 逐文件归属
+
+按现有导出清单定位源文件，随所属页迁移并验收对应 JS 退出。多页共用文件的其他副本随各页处理。
+
+| 页 | 当前文件 | 迁移归属 |
+|---|---|---|
+| D1 | d1-depth-combat.js、d1-depth-audit.js | 战斗、地形与敌机为产品，通用像素图元归基座 |
+| D1 | d1-pixel-aircraft.js、d1-solid-aircraft.js | 机体几何、配色与姿态为产品，光栅和投影归基座 |
+| D1 | d1-audio.js、d1-audio-data.js | 音色和事件为产品，合成和混音归基座，PCM 输出归宿主 |
+| D1 | index.html 内联、host1-runtime.js | 调度、追尾、HUD 和重开进产品，装载与宿主转发进共享桥 |
+| D2 | water-reflection-audit.js、index.html | 水道、操舵、倒影与灯舟配方进产品，图元与像素操作进基座，HTML 留静态壳 |
+| D3 | d3-composition.js、d3-painted.js、d3-bridge-brush.js、d3-worn-deck.js | 产品构图、桥面和叶丛配方 |
+| D3/D4 | d3-arch.js、d3-foliage.js | 产品侧共享的桥拱与植被配方，通用网格方法进基座 |
+| D3 | index.html 内联 | 造景、漫游和风步进进产品，装载进共享桥 |
+| D4 | d4-town.js、d4-gait.js、d4-framing.js、index.html 内联 | 城镇、步态、跟拍和烟进产品，粒子与相机原语进基座 |
+| D3/D4 | renderer-webgl.js、scene.js、meshes.js、math.js、font5x7.js | 渲染、场景、几何、数学和字库进基座，浏览器 WebGL 只作 ABI 转发 |
+| D3/D4 | uxe-u2b.js | 投影方法进基座、尺度参数进产品、测量断言进测试 |
 
 ## 目标(按杠杆)
 

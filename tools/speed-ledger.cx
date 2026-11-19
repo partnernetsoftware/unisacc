@@ -1,0 +1,437 @@
+/* tools/speed-ledger.cx -- offline per-version speed ledger (S5).
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N] [--header]
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --check FILE --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N]
+ * Derives one TSV row from existing read-only records (git log/tags, chain-run.tsv ATTEMPT_TIME/SUPERVISE,
+ * release/evidence/vVER-strict-*.tsv SUMMARY, tests/batch-domain-index.tsv). Missing data is reported
+ * honestly as UNMEASURED (never guessed).
+ * Columns (12):
+ *   version slot_min chain_start_min chain_exit_min prerun_done_min public_min
+ *   chains chain_eff chain_par prerun_par selected_batches domain_ratio */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define SL_PW 4400
+#define SL_OUT 65536
+
+static long long sl_atoll(const char *s) {
+    long long v = 0;
+    int neg = 0;
+    if (!s) return -1;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { neg = 1; s++; }
+    if (*s < '0' || *s > '9') return -1;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+
+static long long sl_num_after(const char *s, const char *key) {
+    const char *p = strstr(s, key);
+    if (!p) return -1;
+    return sl_atoll(p + strlen(key));
+}
+
+static long long sl_git_ts(const char *repo, int earliest, const char *rel_path) {
+    char out[SL_OUT];
+    char *av[10];
+    int k = 0;
+    av[k++] = "git";
+    av[k++] = "-C";
+    av[k++] = (char *)repo;
+    av[k++] = "log";
+    if (!earliest) av[k++] = "-1";
+    av[k++] = "--format=%ct";
+    av[k++] = "--";
+    av[k++] = (char *)rel_path;
+    av[k] = 0;
+    if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
+    if (!earliest) return sl_atoll(out);
+    /* earliest: last non-empty line */
+    {
+        char *p = out, *last = 0;
+        while (*p) {
+            if (*p >= '0' && *p <= '9') last = p;
+            char *nl = strchr(p, '\n');
+            if (!nl) break;
+            p = nl + 1;
+        }
+        return last ? sl_atoll(last) : -1;
+    }
+}
+
+static long long sl_git_tag_ts(const char *repo, const char *ver) {
+    char out[SL_OUT], tag[64];
+    if (cx_fmt(tag, sizeof tag, "v%s", ver)) return -1;
+    {
+        char *av[] = {"git", "-C", (char *)repo, "tag", "-l", tag, "--format=%(creatordate:unix)", 0};
+        if (ck_run(av, out, sizeof out) == 0 && out[0] >= '0' && out[0] <= '9') return sl_atoll(out);
+    }
+    return -1;
+}
+
+static void sl_fmt_min(long long ts, long long slot, char *dst, size_t cap) {
+    if (ts < 0 || slot < 0) {
+        (void)cx_fmt(dst, (int)cap, "UNMEASURED");
+        return;
+    }
+    long long d = ts - slot;
+    int neg = 0;
+    if (d < 0) { neg = 1; d = -d; }
+    long long t = (d * 10 + 30) / 60;
+    (void)cx_fmt(dst, (int)cap, "%s%lld.%lld", neg ? "-" : "", t / 10, t % 10);
+}
+
+static void sl_fmt_ratio2(long long num, long long den, char *dst, size_t cap) {
+    if (num <= 0 || den <= 0) {
+        (void)cx_fmt(dst, (int)cap, "UNMEASURED");
+        return;
+    }
+    long long h = (num * 100 + den / 2) / den;
+    (void)cx_fmt(dst, (int)cap, "%lld.%02lld", h / 100, h % 100);
+}
+
+static void sl_fmt_pct1(long long num, long long den, char *dst, size_t cap) {
+    if (num < 0 || den <= 0) {
+        (void)cx_fmt(dst, (int)cap, "UNMEASURED");
+        return;
+    }
+    long long t = (num * 1000 + den / 2) / den;
+    (void)cx_fmt(dst, (int)cap, "%lld.%lld%%", t / 10, t % 10);
+}
+
+typedef struct {
+    long long start_ts;
+    long long exit_ts;
+    long long sum_ms;
+    int ok;
+    int valid;
+} SlChainInfo;
+
+static void sl_parse_chain_tsv(const char *path, SlChainInfo *ci) {
+    size_t sz = 0, i = 0;
+    char *s = cx_read(path, &sz);
+    memset(ci, 0, sizeof *ci);
+    ci->start_ts = -1;
+    ci->exit_ts = -1;
+    if (!s) return;
+    ci->valid = 1;
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (len > 0 && s[a + len - 1] == '\r') len--;
+        if (i < sz && s[i] == '\n') i++;
+        if (len == 0) continue;
+
+        char line[1024];
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+        line[len] = 0;
+
+        if (tx_prefixz(line, "LIMITS\t", 7) || tx_prefixz(line, "SEGMENT\t", 8)) {
+            char *t1 = strchr(line, '\t');
+            long long ts = t1 ? sl_atoll(t1 + 1) : -1;
+            if (ts > 0 && (ci->start_ts < 0 || ts < ci->start_ts)) ci->start_ts = ts;
+        } else if (tx_prefixz(line, "ATTEMPT_TIME\t", 13)) {
+            long long w = sl_num_after(line, "wall_ms=");
+            if (w > 0) ci->sum_ms += w;
+        } else if (tx_prefixz(line, "SUPERVISE\t", 10)) {
+            char *t1 = strchr(line, '\t');
+            long long ts = t1 ? sl_atoll(t1 + 1) : -1;
+            long long rc = sl_num_after(line, "rc=");
+            if (ts > 0) ci->exit_ts = ts;
+            if (rc == 0) ci->ok = 1;
+        }
+    }
+    free(s);
+}
+
+static void sl_ver_short(const char *ver, char *out, size_t cap) {
+    /* "0.0.81" -> "081" */
+    const char *p = ver;
+    size_t o = 0;
+    if (tx_prefixz(p, "0.", 2)) p += 2;
+    for (; *p && o + 1 < cap; p++) {
+        if (*p != '.') out[o++] = *p;
+    }
+    out[o] = 0;
+}
+
+static void sl_discover_chains(const char *ver, const char *opt_chain_dir, SlChainInfo *best, int *chains_ok, int *chains_total) {
+    memset(best, 0, sizeof *best);
+    best->start_ts = -1;
+    best->exit_ts = -1;
+    *chains_ok = 0;
+    *chains_total = 0;
+
+    if (opt_chain_dir) {
+        char p[SL_PW];
+        if (!cx_fmt(p, sizeof p, "%s/chain-run.tsv", opt_chain_dir)) {
+            sl_parse_chain_tsv(p, best);
+            if (best->valid) {
+                *chains_total = 1;
+                *chains_ok = best->ok ? 1 : 0;
+            }
+        }
+        return;
+    }
+
+    char vshort[32], pref[64];
+    sl_ver_short(ver, vshort, sizeof vshort);
+    if (cx_fmt(pref, sizeof pref, "unisacc-session-v%s-chain", vshort)) return;
+    size_t plen = strlen(pref);
+
+    DIR *dp = opendir("/tmp");
+    if (!dp) return;
+    struct dirent *de;
+    while ((de = readdir(dp)) != 0) {
+        if (!tx_prefixz(de->d_name, pref, (long)plen)) continue;
+        char sdir[SL_PW];
+        if (cx_fmt(sdir, sizeof sdir, "/tmp/%s", de->d_name)) continue;
+        DIR *sub = opendir(sdir);
+        if (!sub) continue;
+        struct dirent *sde;
+        while ((sde = readdir(sub)) != 0) {
+            if (sde->d_name[0] == '.') continue;
+            char fpath[SL_PW];
+            SlChainInfo ci;
+            if (cx_fmt(fpath, sizeof fpath, "%s/%s/chain-run.tsv", sdir, sde->d_name)) continue;
+            sl_parse_chain_tsv(fpath, &ci);
+            if (!ci.valid) continue;
+            (*chains_total)++;
+            if (ci.ok) (*chains_ok)++;
+            if (!best->valid || (ci.ok && !best->ok) || (ci.ok == best->ok && ci.start_ts > best->start_ts)) {
+                *best = ci;
+            }
+        }
+        closedir(sub);
+    }
+    closedir(dp);
+}
+
+static int sl_find_strict(const char *repo, const char *ver, char *rel_out, size_t cap) {
+    char edir[SL_PW], pref[64];
+    DIR *dp;
+    struct dirent *de;
+    int found = 0;
+    rel_out[0] = 0;
+    if (cx_fmt(edir, sizeof edir, "%s/release/evidence", repo)) return 0;
+    if (cx_fmt(pref, sizeof pref, "v%s-strict-", ver)) return 0;
+    dp = opendir(edir);
+    if (!dp) return 0;
+    while ((de = readdir(dp)) != 0) {
+        size_t nl = strlen(de->d_name);
+        if (!tx_prefixz(de->d_name, pref, (long)strlen(pref))) continue;
+        if (nl < 4 || !tx_eqz(de->d_name + nl - 4, ".tsv")) continue;
+        char cand[SL_PW];
+        if (cx_fmt(cand, sizeof cand, "release/evidence/%s", de->d_name)) continue;
+        if (!found || strcmp(cand, rel_out) > 0) {
+            if (!cx_fmt(rel_out, (int)cap, "%s", cand)) found = 1;
+        }
+    }
+    closedir(dp);
+    return found;
+}
+
+static void sl_parse_prerun(const char *path, long long *sel_batches, long long *sum_ms, long long *wall_ms) {
+    size_t sz = 0, i = 0;
+    char *s = cx_read(path, &sz);
+    *sel_batches = -1;
+    *sum_ms = 0;
+    *wall_ms = 0;
+    if (!s) return;
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (len > 0 && s[a + len - 1] == '\r') len--;
+        if (i < sz && s[i] == '\n') i++;
+        if (len == 0 || s[a] == '#') continue;
+
+        char line[1024];
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+        line[len] = 0;
+
+        if (tx_prefixz(line, "SUMMARY\t", 8)) {
+            long long b = sl_num_after(line, "batches=");
+            long long tm = sl_num_after(line, "total_ms=");
+            if (b >= 0) *sel_batches = b;
+            if (tm > 0) *wall_ms += tm;
+        } else if (!tx_prefixz(line, "RAW\t", 4) && !tx_prefixz(line, "batch\t", 6)) {
+            /* dvqualify strict row: col 0..5 -> batch, domain, status, rc, tag, ms */
+            char *p = line;
+            int col = 0;
+            while (p && col < 5) {
+                p = strchr(p, '\t');
+                if (p) p++;
+                col++;
+            }
+            if (p && col == 5) {
+                long long ms = sl_atoll(p);
+                if (ms > 0) *sum_ms += ms;
+            }
+        }
+    }
+    free(s);
+}
+
+static long long sl_count_domain(const char *repo) {
+    char p[SL_PW];
+    size_t sz = 0, i = 0;
+    long long n = 0;
+    if (cx_fmt(p, sizeof p, "%s/tests/batch-domain-index.tsv", repo)) return -1;
+    char *s = cx_read(p, &sz);
+    if (!s) return -1;
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (i < sz && s[i] == '\n') i++;
+        if (len > 0 && tx_find(s + a, (long)len, "\tproduct-qualification\t", 23) >= 0) n++;
+    }
+    free(s);
+    return n > 0 ? n : -1;
+}
+
+int main(int argc, char **argv) {
+    const char *ver = 0;
+    const char *repo = ".";
+    const char *opt_chain = 0;
+    const char *opt_prerun = 0;
+    const char *opt_check = 0;
+    long long opt_dom = -1;
+    int show_hdr = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) opt_chain = argv[++i];
+        else if (tx_eqz(argv[i], "--prerun") && i + 1 < argc) opt_prerun = argv[++i];
+        else if (tx_eqz(argv[i], "--check") && i + 1 < argc) opt_check = argv[++i];
+        else if (tx_eqz(argv[i], "--domain-total") && i + 1 < argc) opt_dom = sl_atoll(argv[++i]);
+        else if (tx_eqz(argv[i], "--header")) show_hdr = 1;
+        else {
+            fprintf(stderr, "usage: speed-ledger --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N] [--header] [--check FILE]\n");
+            return 2;
+        }
+    }
+    if (!ver || !ver[0]) {
+        fprintf(stderr, "speed-ledger: REFUSE --version required\n");
+        return 2;
+    }
+
+    char plan_rel[128], pub_rel[128], strict_rel[SL_PW], prerun_full[SL_PW];
+    if (cx_fmt(plan_rel, sizeof plan_rel, "plans/v%s.md", ver)) return 2;
+    if (cx_fmt(pub_rel, sizeof pub_rel, "release/evidence/%s/public-readback.txt", ver)) return 2;
+
+    long long slot_ts = sl_git_ts(repo, 1, plan_rel);
+    long long pub_ts = sl_git_ts(repo, 0, pub_rel);
+    if (pub_ts < 0) pub_ts = sl_git_tag_ts(repo, ver);
+
+    SlChainInfo ci;
+    int c_ok = 0, c_tot = 0;
+    sl_discover_chains(ver, opt_chain, &ci, &c_ok, &c_tot);
+
+    long long prerun_ts = -1, sel_b = -1, pr_sum = 0, pr_wall = 0;
+    strict_rel[0] = 0;
+    if (opt_prerun) {
+        if (opt_prerun[0] == '/') {
+            if (cx_fmt(prerun_full, sizeof prerun_full, "%s", opt_prerun)) return 2;
+        } else {
+            if (cx_fmt(prerun_full, sizeof prerun_full, "%s/%s", repo, opt_prerun)) return 2;
+            prerun_ts = sl_git_ts(repo, 0, opt_prerun);
+        }
+        if (prerun_ts < 0) {
+            struct stat st;
+            if (stat(prerun_full, &st) == 0) prerun_ts = (long long)st.st_mtime;
+        }
+        sl_parse_prerun(prerun_full, &sel_b, &pr_sum, &pr_wall);
+    } else if (sl_find_strict(repo, ver, strict_rel, sizeof strict_rel)) {
+        if (cx_fmt(prerun_full, sizeof prerun_full, "%s/%s", repo, strict_rel)) return 2;
+        prerun_ts = sl_git_ts(repo, 0, strict_rel);
+        sl_parse_prerun(prerun_full, &sel_b, &pr_sum, &pr_wall);
+    }
+
+    long long dom_tot = opt_dom > 0 ? opt_dom : sl_count_domain(repo);
+
+    char f_slot[32], f_cs[32], f_ce[32], f_pr[32], f_pub[32];
+    char f_chains[32], f_ceff[32], f_cpar[32], f_ppar[32], f_sel[32], f_drat[32];
+    sl_fmt_min(slot_ts, slot_ts, f_slot, sizeof f_slot);
+    sl_fmt_min(ci.start_ts, slot_ts, f_cs, sizeof f_cs);
+    sl_fmt_min(ci.exit_ts, slot_ts, f_ce, sizeof f_ce);
+    sl_fmt_min(prerun_ts, slot_ts, f_pr, sizeof f_pr);
+    sl_fmt_min(pub_ts, slot_ts, f_pub, sizeof f_pub);
+
+    if (c_tot > 0) {
+        (void)cx_fmt(f_chains, sizeof f_chains, "%d/%d", c_ok, c_tot);
+        sl_fmt_pct1(c_ok, c_tot, f_ceff, sizeof f_ceff);
+    } else {
+        (void)cx_fmt(f_chains, sizeof f_chains, "UNMEASURED");
+        (void)cx_fmt(f_ceff, sizeof f_ceff, "UNMEASURED");
+    }
+
+    if (ci.valid && ci.start_ts > 0 && ci.exit_ts > ci.start_ts && ci.sum_ms > 0) {
+        sl_fmt_ratio2(ci.sum_ms, (ci.exit_ts - ci.start_ts) * 1000LL, f_cpar, sizeof f_cpar);
+    } else {
+        (void)cx_fmt(f_cpar, sizeof f_cpar, "UNMEASURED");
+    }
+
+    sl_fmt_ratio2(pr_sum, pr_wall, f_ppar, sizeof f_ppar);
+
+    if (sel_b >= 0) {
+        if (dom_tot > 0) {
+            (void)cx_fmt(f_sel, sizeof f_sel, "%lld/%lld", sel_b, dom_tot);
+            sl_fmt_pct1(sel_b, dom_tot, f_drat, sizeof f_drat);
+        } else {
+            (void)cx_fmt(f_sel, sizeof f_sel, "%lld", sel_b);
+            (void)cx_fmt(f_drat, sizeof f_drat, "UNMEASURED");
+        }
+    } else {
+        (void)cx_fmt(f_sel, sizeof f_sel, "UNMEASURED");
+        (void)cx_fmt(f_drat, sizeof f_drat, "UNMEASURED");
+    }
+
+    char row[1024];
+    if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+        ver, f_slot, f_cs, f_ce, f_pr, f_pub, f_chains, f_ceff, f_cpar, f_ppar, f_sel, f_drat)) return 2;
+
+    if (opt_check) {
+        size_t bsz = 0, i = 0;
+        char *bs = cx_read(opt_check, &bsz);
+        char key[80];
+        int matched = 0, found = 0;
+        if (!bs) {
+            fprintf(stderr, "speed-ledger: REFUSE cannot read %s\n", opt_check);
+            return 2;
+        }
+        if (cx_fmt(key, sizeof key, "%s\t", ver)) return 2;
+        while (i < bsz) {
+            size_t a = i;
+            while (i < bsz && bs[i] != '\n') i++;
+            size_t len = i - a;
+            if (len > 0 && bs[a + len - 1] == '\r') len--;
+            if (i < bsz && bs[i] == '\n') i++;
+            if (len >= strlen(key) && tx_same(bs + a, (long)strlen(key), key, (long)strlen(key))) {
+                found = 1;
+                if (len == strlen(row) && tx_same(bs + a, (long)len, row, (long)len)) {
+                    matched = 1;
+                } else {
+                    printf("DIFF\tversion=%s\texpected=%.*s\tactual=%s\n", ver, (int)len, bs + a, row);
+                }
+                break;
+            }
+        }
+        free(bs);
+        if (!found) printf("DIFF\tversion=%s\texpected=MISSING\tactual=%s\n", ver, row);
+        printf("SPEED_LEDGER\tmode=check\tversion=%s\tstatus=%s\n", ver, matched ? "OK" : "DRIFT");
+        return matched ? 0 : 1;
+    }
+
+    if (show_hdr) {
+        printf("version\tslot_min\tchain_start_min\tchain_exit_min\tprerun_done_min\tpublic_min\tchains\tchain_eff\tchain_par\tprerun_par\tselected_batches\tdomain_ratio\n");
+    }
+    printf("%s\n", row);
+    return 0;
+}

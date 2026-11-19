@@ -1,0 +1,81 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int read_lock(int *row) {
+    const char prefix[] = "\nlock\tsine\t";
+    unsigned char *data = 0;
+    int64_t n = 0;
+    if (sy_read_file("ujs/practice/uxe/test/d1-audio.tsv", &data, &n, 4096)) return 1;
+    long at = tx_find((char *)data, n, prefix, sizeof prefix - 1);
+    if (at < 0) { mm_free(data); return 1; }
+    char *p = (char *)data + at + sizeof prefix - 1;
+    int ok = 1;
+    for (int i = 0; i < 5; i++) {
+        char *end = 0;
+        long value = tx_strtol(p, &end, 10);
+        if (end == p || value < 1 || value > 4000 || (*end != (i == 4 ? '\n' : '\t') && *end)) {
+            ok = 0; break;
+        }
+        row[i] = (int)value;
+        p = end;
+    }
+    mm_free(data);
+    return !ok;
+}
+
+int main(int argc, char **argv) {
+    const int points[] = {2,42,82,202,402,802};
+    const int gold[] = {36,749,1113,927,617,0};
+    unsigned char *math = 0, *voice = 0;
+    char dir[256], source[320], wasm[320], combined[8192], expected[128], *out = 0;
+    int64_t math_n = 0, voice_n = 0;
+    size_t out_n = 0;
+    uint32_t fnv = 2166136261u;
+    int row[5], sum = 0, rc = 1;
+    int mutate = argc == 2 && tx_eq(argv[1], "--wrong-attack", sizeof "--wrong-attack");
+    if (argc > 2 || (argc == 2 && !mutate)) return 2;
+    if (read_lock(row)) {
+        fprintf(stderr, "CHECK_D1_EFFECT invalid lock row\n"); return 2;
+    }
+    if (sy_read_file("ujs/practice/uxe/base/math.ujs", &math, &math_n, 2048) ||
+        sy_read_file("ujs/practice/uxe/products/d1/effects-audio.ujs", &voice, &voice_n, 4096) ||
+        sy_mkdtemp("/tmp", "d1-effect-", dir, sizeof dir)) {
+        mm_free(math); mm_free(voice); return 2;
+    }
+    tx_snprintf(source, sizeof source, "%s/probe.ujs", dir);
+    tx_snprintf(wasm, sizeof wasm, "%s/probe.wasm", dir);
+    int n = tx_snprintf(combined, sizeof combined,
+        "%s\n%s\nlet starts = ux_f32_put(4700100, %d.0); let ends = ux_f32_put(4700104, %d.0);"
+        "let peaks = ux_f32_put(4700108, %d.0); let attacks = ux_f32_put(4700112, %d.0);"
+        "let durations = ux_f32_put(4700116, %d.0);"
+        "let indices = [%d,%d,%d,%d,%d,%d]; let ix = 0; while (ix < 6) {"
+        "let req = indices[ix] * 48 + 4; let phase = d1_effect_phase(req); let gain = d1_effect_level(req);"
+        "let pcm = f64_floor_i64(ux_sin(phase * 6.283185307179586) * gain * 10000.0 + 0.5);"
+        "let l = ux_u8_put(ix * 2, pcm %% 256); let h = ux_u8_put(ix * 2 + 1, pcm / 256);"
+        "ix = ix + 1; } host_gpu_submit(ux_span(0, 12), 12); return ix;",
+        (char *)math, (char *)voice, row[0], row[1], row[2], row[3] + mutate, row[4],
+        points[0],points[1],points[2],points[3],points[4],points[5]);
+    mm_free(math);
+    mm_free(voice);
+    for (int i = 0; i < 6; i++) {
+        int lo = gold[i] % 256, hi = gold[i] / 256;
+        sum += lo + hi;
+        fnv = ((fnv ^ lo) * 16777619u ^ hi) * 16777619u;
+    }
+    int gold_n = tx_snprintf(expected, sizeof expected, "\"gpu_len\":12,\"gpu_sum\":%d,\"gpu_fnv\":%u,", sum, fnv);
+    if (n > 0 && n < (int)sizeof combined && !sy_write_file(source, combined, n, 0600)) {
+        char *args[] = {"./ujs/ujs2wasm.com", source, "-o", wasm, "--run", 0};
+        int run = cx_runv_timeout(args, 15, &out, &out_n);
+        rc = run || !out || !tx_contains(out, out_n, expected, gold_n);
+    }
+    printf("CHECK_D1_EFFECT samples=6 expected_sum=%d expected_fnv=%u failed=%d\n%s",
+        sum, fnv, rc, out ? out : "");
+    mm_free(out);
+    sy_unlink(source);
+    sy_unlink(wasm);
+    sy_rmdir(dir);
+    return rc;
+}

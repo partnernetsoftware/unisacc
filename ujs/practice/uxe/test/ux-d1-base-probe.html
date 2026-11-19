@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D1 host probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function read(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name, false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return Uint8Array.from(request.responseText, character => character.charCodeAt(0) & 255);
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const canvas = document.querySelector("canvas");
+  const asset = read("asset.bin");
+  const audio = new OfflineAudioContext(1, 16, 48000);
+  let received;
+  const createBuffer = audio.createBuffer.bind(audio);
+  audio.createBuffer = (...args) => {
+    received = createBuffer(...args);
+    return received;
+  };
+  const host = createBrowserHost(canvas, ["KeyD", "Space"], asset, audio);
+  const [base, product] = ["base.wasm", "product.wasm"].map(name => new WebAssembly.Module(read(name)));
+  const linked = linkUxe(base, product, host);
+  host.attachMemory(linked.base.memory);
+  const run = linked.product.uxe_frame;
+  const drawn = run(0n);
+  const samples = canvas.getContext("2d");
+  const near = samples.getImageData(0, 0, 1, 1).data;
+  const far = samples.getImageData(425, 239, 1, 1).data;
+  const key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+  key("keydown", "KeyD");
+  key("keydown", "Space");
+  const both = run(1n);
+  key("keyup", "KeyD");
+  const one = run(1n);
+  dispatchEvent(new Event("blur"));
+  const none = run(1n);
+  const readback = run(2n);
+  const queued = run(3n);
+  const pcm = received.getChannelData(0);
+  const blended = run(8n);
+  const composite = samples.getImageData(0, 0, 3, 1).data;
+  const stamped = run(10n);
+  const particle = samples.getImageData(0, 10, 4, 1).data;
+  const nextScanline = samples.getImageData(425, 9, 1, 1).data.join(",");
+  const triangle = run(12n);
+  const triangleCenter = samples.getImageData(213, 120, 1, 1).data.join(",");
+  const triangleOutside = samples.getImageData(213, 90, 1, 1).data.join(",");
+  const nearReject = run(13n);
+  const emptyReject = run(14n);
+  const fog = run(15n);
+  const fogCenter = samples.getImageData(213, 120, 1, 1).data.join(",");
+  const world = run(18n);
+  result.textContent = [
+    drawn, canvas.width, canvas.height, near.join(","), far.join(","),
+    both, one, none, readback, queued, pcm[0], pcm[1], received.sampleRate,
+    run(4n), Number(run(5n) >= 0n), run(6n), run(7n), blended,
+    ...[0, 4, 8].map(at => composite.subarray(at, at + 4).join(",")), run(9n), stamped,
+    ...[0, 8, 12].map(at => particle.subarray(at, at + 4).join(",")),
+    nextScanline, run(11n), triangle, triangleCenter, triangleOutside, nearReject, emptyReject,
+    fog, fogCenter, run(16n), run(17n), world, samples.getImageData(213, 120, 1, 1).data.join(","), run(19n)
+  ].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

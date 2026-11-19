@@ -112,6 +112,29 @@ static void h1_pop_to(H1 *h, WV *o) {
   if (h->sp > 0) { h->sp--; *o = h->stk[h->sp]; }
 }
 
+static double h1_sqrt(double x) {
+  double scale = 1.0, root;
+  int i;
+  if (x < 0.0) {
+    union { uint64_t bits; double value; } nan;
+    nan.bits = 0x7ff8000000000000ull;
+    return nan.value;
+  }
+  if (x != x || x + x == x) return x;
+  while (x >= 4.0) { x *= 0.25; scale *= 2.0; }
+  while (x < 1.0) { x *= 4.0; scale *= 0.5; }
+  root = (x + 1.0) * 0.5;
+  for (i = 0; i < 7; i++) root = (root + x / root) * 0.5;
+  return root * scale;
+}
+
+static int h1_memory_width(uint8_t op) {
+  if (op == 0x2d || op == 0x3a) return 1;
+  if (op == 0x28 || op == 0x2a || op == 0x36 || op == 0x38) return 4;
+  if (op == 0x29 || op == 0x2b || op == 0x37 || op == 0x39) return 8;
+  return 0;
+}
+
 static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_else) {
   int depth = 1;
   while (*ip < bn && depth) {
@@ -120,7 +143,7 @@ static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_e
       if (*ip < bn) (*ip)++;
       depth++;
     } else if (o2 == 0x05 && depth == 1 && stop_else) {
-      return 1; /* at else */
+      return 2; /* at else */
     } else if (o2 == 0x0b) {
       depth--;
     } else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
@@ -132,12 +155,11 @@ static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_e
     } else if (o2 == 0x44) {
       if (*ip + 8 > bn) return 0;
       *ip += 8;
-    } else if (o2 == 0x28 || o2 == 0x29 || o2 == 0x2b || o2 == 0x2d ||
-               o2 == 0x36 || o2 == 0x37 || o2 == 0x39 || o2 == 0x3a) {
+    } else if (h1_memory_width(o2)) {
       uint32_t a, o; if (!h1_uleb(b, bn, ip, &a) || !h1_uleb(b, bn, ip, &o)) return 0;
     }
   }
-  return 1;
+  return depth == 0;
 }
 
 static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
@@ -262,7 +284,8 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     uint8_t ty;
     if (!h1_uleb(b, bn, &ip, &cnt) || ip >= bn) return h1_err(h, "ldecl");
     ty = b[ip++];
-    for (n = 0; n < cnt && nloc < 256; n++) {
+    if (nloc > 256 || cnt > 256u - nloc) return h1_err(h, "local limit");
+    for (n = 0; n < cnt; n++) {
       if (!keep) {
         locals[nloc].k = (ty == 0x7e) ? WK_I64 : (ty == 0x7c) ? WK_F64 : WK_I32;
         locals[nloc].i32 = 0; locals[nloc].i64 = 0; locals[nloc].f64 = 0;
@@ -298,9 +321,9 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
       if (op == 0x04) {
         h1_pop_to(h, &a);
         if (!((a.k == WK_I32) ? a.i32 : (int32_t)a.i64)) {
-          if (!h1_skip_block(b, bn, &ip, 1)) return h1_err(h, "skip if");
-          /* now either at else body or past end */
-          if (csp < H1_CTL) {
+          int skipped = h1_skip_block(b, bn, &ip, 1);
+          if (!skipped) return h1_err(h, "skip if");
+          if (skipped == 2 && csp < H1_CTL) {
             ctl[csp].kind = 0x04; ctl[csp].start_ip = ip; ctl[csp].end_ip = 0;
             csp++;
           }
@@ -339,28 +362,10 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
           ip = ctl[target].start_ip; /* loop continue */
           continue;
         }
-        /* block/if break: skip to matching end from current ip — rewalk from frame start */
-        {
-          uint32_t sip = ctl[target].start_ip;
-          int depth_blk = 1;
-          ip = sip;
-          while (ip < bn && depth_blk) {
-            uint8_t o2 = b[ip++];
-            if (o2 == 0x02 || o2 == 0x03 || o2 == 0x04) { if (ip < bn) ip++; depth_blk++; }
-            else if (o2 == 0x0b) depth_blk--;
-            else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
-              uint32_t x; h1_uleb(b, bn, &ip, &x);
-            } else if (o2 == 0x41) { int32_t x; h1_sleb32(b, bn, &ip, &x); }
-            else if (o2 == 0x42) { int64_t x; h1_sleb64(b, bn, &ip, &x); }
-            else if (o2 == 0x44) ip += 8;
-            else if (o2 == 0x28 || o2 == 0x29 || o2 == 0x2b || o2 == 0x2d ||
-                     o2 == 0x36 || o2 == 0x37 || o2 == 0x39 || o2 == 0x3a) {
-              uint32_t aa, oo; h1_uleb(b, bn, &ip, &aa); h1_uleb(b, bn, &ip, &oo);
-            } else if (o2 == 0x05) { /* else keeps same depth */ }
-          }
-          csp = target;
-          continue;
-        }
+        ip = ctl[target].start_ip;
+        if (!h1_skip_block(b, bn, &ip, 0)) return h1_err(h, "skip branch");
+        csp = target;
+        continue;
       }
     }
     if (op == 0x10) {
@@ -403,29 +408,28 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
       h1_push_f64(h, d);
       continue;
     }
-    if (op == 0x28 || op == 0x29 || op == 0x2b || op == 0x2d) {
-      uint32_t align, offset, addr;
-      if (!h1_uleb(b, bn, &ip, &align) || !h1_uleb(b, bn, &ip, &offset)) return h1_err(h, "load");
+    int width = h1_memory_width(op);
+    if (width) {
+      uint32_t align, offset;
+      uint64_t addr;
+      int store = op >= 0x36;
+      union { uint64_t bits; double f64; } value;
+      if (!h1_uleb(b, bn, &ip, &align) || !h1_uleb(b, bn, &ip, &offset)) return h1_err(h, "memory operand");
+      if (store) h1_pop_to(h, &v);
       h1_pop_to(h, &a);
-      addr = (uint32_t)((a.k == WK_I32 ? a.i32 : (int32_t)a.i64) + (int32_t)offset);
-      if (addr + 8 > h->mem_n) return h1_err(h, "load oob");
-      if (op == 0x28) { int32_t x; memcpy(&x, h->mem + addr, 4); h1_push_i32(h, x); }
-      else if (op == 0x29) { int64_t x; memcpy(&x, h->mem + addr, 8); h1_push_i64(h, x); }
-      else if (op == 0x2b) { double x; memcpy(&x, h->mem + addr, 8); h1_push_f64(h, x); }
-      else h1_push_i32(h, h->mem[addr]);
-      continue;
-    }
-    if (op == 0x36 || op == 0x37 || op == 0x39 || op == 0x3a) {
-      uint32_t align, offset, addr;
-      if (!h1_uleb(b, bn, &ip, &align) || !h1_uleb(b, bn, &ip, &offset)) return h1_err(h, "store");
-      h1_pop_to(h, &v);
-      h1_pop_to(h, &a);
-      addr = (uint32_t)((a.k == WK_I32 ? a.i32 : (int32_t)a.i64) + (int32_t)offset);
-      if (addr + 8 > h->mem_n) return h1_err(h, "store oob");
-      if (op == 0x36) { int32_t x = v.i32; memcpy(h->mem + addr, &x, 4); }
-      else if (op == 0x37) { int64_t x = v.i64; memcpy(h->mem + addr, &x, 8); }
-      else if (op == 0x39) { double x = v.f64; memcpy(h->mem + addr, &x, 8); }
-      else h->mem[addr] = (uint8_t)v.i32;
+      addr = (uint64_t)(uint32_t)a.i32 + offset;
+      if (addr + width > h->mem_n) return h1_err(h, "memory oob");
+      if (store) {
+        if (op == 0x39) value.f64 = v.f64;
+        else value.bits = op == 0x37 ? (uint64_t)v.i64 : (uint32_t)v.i32;
+        for (int k = 0; k < width; k++) h->mem[addr + k] = (uint8_t)(value.bits >> (8 * k));
+      } else {
+        value.bits = 0;
+        for (int k = 0; k < width; k++) value.bits |= (uint64_t)h->mem[addr + k] << (8 * k);
+        if (op == 0x2b) h1_push_f64(h, value.f64);
+        else if (op == 0x29) h1_push_i64(h, (int64_t)value.bits);
+        else h1_push_i32(h, (int32_t)value.bits);
+      }
       continue;
     }
     if (op == 0x45) { h1_pop_to(h, &a); h1_push_i32(h, a.i32 == 0); continue; }
@@ -441,7 +445,11 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0x4f) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint32_t)a.i32 >= (uint32_t)b2.i32); continue; }
     if (op == 0x6a) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 + b2.i32); continue; }
     if (op == 0x6b) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 - b2.i32); continue; }
-    if (op == 0x6c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 * b2.i32); continue; }
+    if (op == 0x6c) {
+      h1_pop_to(h, &b2); h1_pop_to(h, &a);
+      h1_push_i32(h, (int32_t)((uint32_t)a.i32 * (uint32_t)b2.i32));
+      continue;
+    }
     if (op == 0x6d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, b2.i32 ? a.i32 / b2.i32 : 0); continue; }
     if (op == 0x6f) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, b2.i32 ? (int32_t)((uint32_t)a.i32 / (uint32_t)b2.i32) : 0); continue; }
     if (op == 0x71) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 & b2.i32); continue; }
@@ -449,7 +457,11 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0x73) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 ^ b2.i32); continue; }
     if (op == 0x74) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 << (b2.i32 & 31)); continue; }
     if (op == 0x75) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (int32_t)((uint32_t)a.i32 >> (b2.i32 & 31))); continue; }
-    if (op == 0x76) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i32 >> (b2.i32 & 31)); continue; }
+    if (op == 0x76) {
+      h1_pop_to(h, &b2); h1_pop_to(h, &a);
+      h1_push_i32(h, (int32_t)((uint32_t)a.i32 >> (b2.i32 & 31)));
+      continue;
+    }
     if (op == 0x50) { h1_pop_to(h, &a); h1_push_i32(h, a.i64 == 0); continue; }
     if (op == 0x51) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 == b2.i64); continue; }
     if (op == 0x52) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 != b2.i64); continue; }
@@ -457,6 +469,7 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0x55) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 > b2.i64); continue; }
     if (op == 0x57) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 <= b2.i64); continue; }
     if (op == 0x59) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 >= b2.i64); continue; }
+    if (op == 0x56) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint64_t)a.i64 > (uint64_t)b2.i64); continue; }
     if (op == 0x7c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 + b2.i64); continue; }
     if (op == 0x7d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 - b2.i64); continue; }
     if (op == 0x7e) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 * b2.i64); continue; }
@@ -466,6 +479,28 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0xad) { h1_pop_to(h, &a); h1_push_i64(h, (uint32_t)a.i32); continue; }
     if (op == 0xa7) { h1_pop_to(h, &a); h1_push_i32(h, (int32_t)a.i64); continue; }
     if (op == 0xb9) { h1_pop_to(h, &a); h1_push_f64(h, (double)a.i64); continue; }
+    if (op == 0xb6 || op == 0xbb) {
+      union { uint32_t bits; float value; } single;
+      h1_pop_to(h, &a);
+      if (op == 0xb6) { single.value = (float)a.f64; h1_push_i32(h, (int32_t)single.bits); }
+      else { single.bits = (uint32_t)a.i32; h1_push_f64(h, (double)single.value); }
+      continue;
+    }
+    if (op == 0x9f) { h1_pop_to(h, &a); h1_push_f64(h, h1_sqrt(a.f64)); continue; }
+    if (op == 0x9c || op == 0xb0) {
+      int64_t whole;
+      h1_pop_to(h, &a);
+      if (!(a.f64 >= -9223372036854775808.0 && a.f64 < 9223372036854775808.0)) {
+        if (op == 0xb0) return h1_err(h, "f64 conversion out of range");
+        h1_push_f64(h, a.f64);
+        continue;
+      }
+      whole = (int64_t)a.f64;
+      if (op == 0xb0) h1_push_i64(h, whole);
+      else h1_push_f64(h, a.f64 == 0.0 ? a.f64 : (double)(whole - ((double)whole > a.f64)));
+      continue;
+    }
+    if (op == 0x9a) { h1_pop_to(h, &a); h1_push_f64(h, -a.f64); continue; }
     if (op == 0xa0) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 + b2.f64); continue; }
     if (op == 0xa1) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 - b2.f64); continue; }
     if (op == 0xa2) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_f64(h, a.f64 * b2.f64); continue; }
