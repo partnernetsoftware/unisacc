@@ -354,10 +354,59 @@ static int pilot_gold(char *gold, int cap) {
     return contacts ? used : -1;
 }
 
+static int water_font_asset(const char *dir) {
+    enum { GLYPHS=19, LARGE=1024, SMALL=256 };
+    const char digits[]="0123456789abcdef";
+    unsigned char atlas[GLYPHS*(LARGE+SMALL)]={0},*data=0;
+    int64_t count=0;
+    int rc=1;
+    if(sy_read_file("ujs/practice/uxe/products/d2/water-glyphs.tsv",&data,&count,4096)) return 1;
+    const char *at=(char *)data,*end=at+count;
+    for(int glyph=0;glyph<GLYPHS;glyph++) {
+        long name=tx_find(at,end-at,"\t",1);
+        if(name!=3) goto done;
+        at+=name+1;
+        while(at<end && *at!='\n') {
+            int xy[4];
+            if(end-at<5) goto done;
+            for(int i=0;i<4;i++) {
+                xy[i]=(int)tx_find(digits,16,at+i,1);
+                if(xy[i]<0) goto done;
+            }
+            at+=4;
+            int dx=xy[2]-xy[0],dy=xy[3]-xy[1];
+            int length=abs(dx)>abs(dy)?abs(dx):abs(dy);
+            if(!length) length=1;
+            for(int i=0;i<=length;i++) {
+                int x=(xy[0]*(length-i)+xy[2]*i+length/2)/length;
+                int y=(xy[1]*(length-i)+xy[3]*i+length/2)/length;
+                int addresses[]={glyph*LARGE+4*(16*y+x), GLYPHS*LARGE+glyph*SMALL+4*(8*(y/2)+x/2)};
+                for(int j=0;j<2;j++) {
+                    atlas[addresses[j]]=249;
+                    atlas[addresses[j]+1]=230;
+                    atlas[addresses[j]+2]=187;
+                    atlas[addresses[j]+3]=255;
+                }
+            }
+            if(*at==' ') at++;
+            else if(*at!='\n') goto done;
+        }
+        if(at>=end || *at!='\n') goto done;
+        at++;
+    }
+    if(at!=end) goto done;
+    char path[320];
+    tx_snprintf(path,sizeof path,"%s/d2-type.rgba",dir);
+    rc=sy_write_file(path,atlas,sizeof atlas,0600)!=0;
+done:
+    mm_free(data);
+    return rc;
+}
+
 static int pilot_product(const char *dir,int mutate,int draw) {
     const char *sources[]={"ujs/practice/uxe/products/d2/pilot.ujs","ujs/practice/uxe/base/math.ujs"};
-    const char *layers[]={"waterway.ujs","skyline.ujs","reed-banks.ujs","crossing.ujs","lilies.ujs","dock.ujs","foreground.ujs"};
-    const int omitted[]={0,6,7,0,9,8,5};
+    const char *layers[]={"waterway.ujs","skyline.ujs","reed-banks.ujs","crossing.ujs","lilies.ujs","dock.ujs","foreground.ujs","title.ujs"};
+    const int omitted[]={0,6,7,0,9,8,5,11};
     unsigned char *pilot=0,*math=0;
     int64_t pn=0,mn=0;
     int rc=1;
@@ -367,6 +416,7 @@ static int pilot_product(const char *dir,int mutate,int draw) {
     const char tail[]="\nreturn boatTick;";
     long body=tx_find((char *)pilot,pn,tail,sizeof tail-1);
     if (header < 0 || body <= header) goto done;
+    if(draw && water_font_asset(dir)) goto done;
     int n=tx_snprintf(program,sizeof program,"%.*s\n%s%.*s\n",
         (int)header,pilot,math,(int)(body-header),pilot+header);
     if (n<0 || n>=(int)sizeof program) goto done;
@@ -403,9 +453,9 @@ static int export_waterway(const char *dir) {
         pilot_product(dir,0,1) ||
         copy_fixture(dir,"index.html","ujs/practice/uxe/products/d2/water-preview.html") ||
         copy_fixture(dir,"host-abi.js","ujs/practice/uxe/base/host-abi.js");
-    const char *leaves[]={"pilot.ujs","base.wasm","product.wasm","index.html","host-abi.js"};
+    const char *leaves[]={"pilot.ujs","base.wasm","product.wasm","index.html","host-abi.js","d2-type.rgba"};
     char path[320];
-    for(int i=0;i<(rc?5:1);i++) {
+    for(int i=0;i<(rc?6:1);i++) {
         tx_snprintf(path,sizeof path,"%s/%s",dir,leaves[i]);
         sy_unlink(path);
     }
@@ -505,7 +555,10 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
         from += sizeof start - 1;
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
-            if (flight_check == 11) {
+            if (flight_check == 12) {
+                int title=0,subtitle=0;
+                pass=!rc && sscanf(out+from,"%d %d",&title,&subtitle)==2 && title>=80 && subtitle>=35;
+            } else if (flight_check == 11) {
                 int pixels=0,clusters=0;
                 pass=!rc && sscanf(out+from,"%d %d",&pixels,&clusters)==2 && pixels>=200 && clusters==3;
             } else if (flight_check == 10) {
@@ -553,7 +606,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
-                flight_check == 11 ? "CHECK_UXE_D2_RED_LANTERNS" :
+                flight_check == 12 ? "CHECK_UXE_D2_TITLE" : flight_check == 11 ? "CHECK_UXE_D2_RED_LANTERNS" :
                 flight_check == 10 ? "CHECK_UXE_D2_LILIES" : flight_check == 9 ? "CHECK_UXE_D2_DOCK" :
                 flight_check == 8 ? "CHECK_UXE_D2_REEDS" :
                 flight_check == 7 ? "CHECK_UXE_D2_SKYLINE" :
@@ -610,6 +663,8 @@ int main(int argc, char **argv) {
     if(tx_eq(mode,"water-lilies",sizeof "water-lilies") || lilies_mutate) flight_check=10;
     int red_mutate=tx_eq(mode,"water-red-off",sizeof "water-red-off");
     if(tx_eq(mode,"water-red",sizeof "water-red") || red_mutate) flight_check=11;
+    int title_mutate=tx_eq(mode,"water-title-off",sizeof "water-title-off");
+    if(tx_eq(mode,"water-title",sizeof "water-title") || title_mutate) flight_check=12;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -647,7 +702,7 @@ int main(int argc, char **argv) {
     } else if (flight_check >= 2) {
         rc = rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d2-pilot-probe.html") ||
             generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
-            pilot_product(dir,red_mutate?10:lilies_mutate?9:dock_mutate?8:reeds_mutate?7:skyline_mutate?6:prow_mutate?5:mirror_mutate?4:dark_mutate?3:dry_mutate?2:pilot_mutate,
+            pilot_product(dir,title_mutate?11:red_mutate?10:lilies_mutate?9:dock_mutate?8:reeds_mutate?7:skyline_mutate?6:prow_mutate?5:mirror_mutate?4:dark_mutate?3:dry_mutate?2:pilot_mutate,
                 flight_check>=3);
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
