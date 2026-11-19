@@ -1,0 +1,72 @@
+/* check-old-product-material: from the trusted checkout root, no network.
+ * gate: three materials present -> READY; missing old -> UNKNOWN no-producer rc 3; no receipt -> rc 3;
+ * old copy of the candidate -> REFUSE; --candidate other bytes -> REFUSE candidate-mismatch;
+ * changed material -> REFUSE. prepare: old version equal to the candidate version and models outside
+ * the candidate directory are refused before any download. Ends CHECK_OLD_PRODUCT_MATERIAL. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int pass,fail;
+static char root[4096],dir[4096];
+static void ck(int ok,const char *what){if(ok)pass++;else{fail++;printf("FAIL\t%s\n",what);}}
+static void die(const char *s){printf("CHECK_OLD_PRODUCT_MATERIAL\tREFUSE\t%s\n",s);exit(2);}
+static void put(const char *leaf,const char *s,char out[4096]){if(cx_path_join(out,4096,dir,leaf))die("path");sy_unlink(out);if(sy_write_file(out,s,tx_len(s,1<<20),0600))die("fixture write");}
+static void sha(const char *p,char h[65]){unsigned char *b;int64_t n;if(sy_read_file(p,&b,&n,1<<20)||sy_sha256_any_hex(b,n,h))die("fixture sha");mm_free(b);}
+static int run(char **args,np_result *r){
+    char launcher[4096],why[256],*v[16];int n=0;if(cx_path_join(launcher,sizeof launcher,root,"unisacc.com"))die("path");
+    v[n++]="sh";v[n++]=launcher;v[n++]="tools/old-product-material.cx";v[n++]="--";for(int i=0;args[i]&&n<15;i++)v[n++]=args[i];v[n]=0;
+    memset(r,0,sizeof *r);if(np_run(v,root,0,30,r,why,sizeof why)||r->residue)die("tool transport");return r->rc;
+}
+static int has(np_result *r,const char *s){long n=tx_len(s,256);return (r->out&&tx_find(r->out,(long)r->outn,s,n)>=0)||(r->err&&tx_find(r->err,(long)r->errn,s,n)>=0);}
+static void receipt(const char *sub,const char *body){char d[4096],p[4096];if(cx_path_join(d,sizeof d,dir,sub))die("path");sy_mkdir(d,0700);if(cx_path_join(p,sizeof p,d,"materials.tsv"))die("path");sy_unlink(p);if(sy_write_file(p,body,tx_len(body,1<<16),0600))die("receipt write");}
+int main(void){
+    char a[4096],b[4096],c[4096],ha[65],hb[65],hc[65],body[30000],sub[4096];np_result r;
+    if(sy_realpath(".",root,sizeof root)<0)die("root");
+    const char *base=getenv("CLAUDE_JOB_DIR");char tmpl[4096];
+    if(cx_fmt(tmpl,sizeof tmpl,"%s/tmp",base&&*base?base:"/tmp")||sy_mkdtemp(tmpl,"check-opm",dir,sizeof dir))die("private dir");
+    put("old.bin","old product bytes\n",a);put("new.bin","candidate bytes\n",b);put("other.bin","another candidate\n",c);
+    sha(a,ha);sha(b,hb);sha(c,hc);
+    /* (1) all three present */
+    cx_fmt(body,sizeof body,"old-product-material-v1\nstatus\tPREPARED-no-test-result\nold-product\t%s\t%s\nnew-product\t%s\t%s\nnew-models\t%s\t%s\n",a,ha,b,hb,b,hb);
+    receipt("ok",body);cx_path_join(sub,sizeof sub,dir,"ok");
+    char *g1[]={"gate",sub,0};int rc=run(g1,&r);
+    ck(rc==0&&has(&r,"OLD_PRODUCT_MATERIAL\tREADY\told-product=")&&has(&r,"\tnew-models="),"three-materials-ready");np_free(&r);
+    char *g2[]={"gate",sub,"--candidate",b,0};rc=run(g2,&r);ck(rc==0,"candidate-bound-ready");np_free(&r);
+    /* (2) bound to another candidate */
+    char *g3[]={"gate",sub,"--candidate",c,0};rc=run(g3,&r);ck(rc==2&&has(&r,"reason=candidate-mismatch"),"candidate-mismatch-refused");np_free(&r);
+    /* (3) missing old */
+    cx_fmt(body,sizeof body,"old-product-material-v1\nstatus\tPREPARED-no-test-result\nnew-product\t%s\t%s\nnew-models\t%s\t%s\n",b,hb,b,hb);
+    receipt("noold",body);cx_path_join(sub,sizeof sub,dir,"noold");
+    char *g4[]={"gate",sub,0};rc=run(g4,&r);ck(rc==3&&has(&r,"UNKNOWN\tno-producer=old-product")&&!has(&r,"READY"),"missing-old-unknown");np_free(&r);
+    /* (4) missing models */
+    cx_fmt(body,sizeof body,"old-product-material-v1\nstatus\tPREPARED-no-test-result\nold-product\t%s\t%s\nnew-product\t%s\t%s\n",a,ha,b,hb);
+    receipt("nomodels",body);cx_path_join(sub,sizeof sub,dir,"nomodels");
+    char *g5[]={"gate",sub,0};rc=run(g5,&r);ck(rc==3&&has(&r,"no-producer=new-models"),"missing-models-unknown");np_free(&r);
+    /* (5) no receipt at all */
+    cx_path_join(sub,sizeof sub,dir,"absent");
+    char *g6[]={"gate",sub,0};rc=run(g6,&r);ck(rc==3&&has(&r,"no-producer=old-product"),"no-receipt-unknown");np_free(&r);
+    /* (6) the old lane is a copy of the candidate (same bytes, other path) */
+    char cp[4096];put("copy.bin","candidate bytes\n",cp);
+    cx_fmt(body,sizeof body,"old-product-material-v1\nstatus\tPREPARED-no-test-result\nold-product\t%s\t%s\nnew-product\t%s\t%s\nnew-models\t%s\t%s\n",cp,hb,b,hb,b,hb);
+    receipt("copy",body);cx_path_join(sub,sizeof sub,dir,"copy");
+    char *g7[]={"gate",sub,0};rc=run(g7,&r);ck(rc==2&&has(&r,"reason=old-product-is-candidate-copy"),"candidate-copy-refused");np_free(&r);
+    /* (7) material changed after preparation */
+    cx_fmt(body,sizeof body,"old-product-material-v1\nstatus\tPREPARED-no-test-result\nold-product\t%s\t%s\nnew-product\t%s\t%s\nnew-models\t%s\t%s\n",a,hc,b,hb,b,hb);
+    receipt("changed",body);cx_path_join(sub,sizeof sub,dir,"changed");
+    char *g8[]={"gate",sub,0};rc=run(g8,&r);ck(rc==2&&has(&r,"reason=material-identity-changed"),"changed-material-refused");np_free(&r);
+    /* (8) prepare: old version equal to candidate version, refused before download */
+    char cand[4096],cache[4096],out[4096];if(cx_path_join(cand,sizeof cand,root,"unisacc.com")||cx_path_join(cache,sizeof cache,dir,"cache")||cx_path_join(out,sizeof out,dir,"mat"))die("path");
+    np_result v={0};char why[256];char *vv[]={"sh",cand,"--version",0};if(np_run(vv,0,0,10,&v,why,sizeof why)||v.rc||v.outn<10)die("candidate version");
+    char ver[64];if(tx_copy(ver,sizeof ver,v.out+8,v.outn-9))die("version bound");np_free(&v);
+    char *p1[]={"prepare",root,cand,cache,out,"--old-version",ver,0};rc=run(p1,&r);
+    ck(rc==2&&has(&r,"reason=old-version-equals-candidate-version")&&sy_exists(out)!=1,"same-version-refused");np_free(&r);
+    /* (9) prepare: models outside the candidate directory */
+    char *p2[]={"prepare",root,cand,cache,out,"--models",a,0};rc=run(p2,&r);
+    ck(rc==2&&has(&r,"reason=models-not-bound-to-candidate")&&sy_exists(out)!=1,"foreign-models-refused");np_free(&r);
+    printf("CHECK_OLD_PRODUCT_MATERIAL\tpass=%d\tfail=%d\n",pass,fail);
+    return fail?1:0;
+}
