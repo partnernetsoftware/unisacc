@@ -173,3 +173,36 @@ int check_branch_depth(int mutate) {
     printf("CHECK_UJS_BRANCH_DEPTH checks=2 passed=%d failed=%d\n", passed, 2 - passed);
     return passed != 2;
 }
+
+static int locals_source(char *body, int cap, int count) {
+    int at = 0;
+    for (int i = 0; i < count; i++) {
+        int length = tx_snprintf(body + at, cap - at, "let v%d=%d;", i, i);
+        if (length < 0 || length >= cap - at) return -1;
+        at += length;
+    }
+    int length = tx_snprintf(body + at, cap - at, "return v0+v%d;", count - 1);
+    return length < 0 || length >= cap - at ? -1 : at + length;
+}
+
+int check_locals(int mutate) {
+    UxProbe probe;
+    char body[4000], *out = 0;
+    size_t n = 0;
+    sy_stat_t stat;
+    if (prepare_probe(&probe)) return 1;
+    int count = 256 + mutate;
+    int accepted = locals_source(body, sizeof body, count) > 0 && ux_probe(&probe, "", body, 255, 0, 0);
+    int size = locals_source(body, sizeof body, 257);
+    int refused = 0;
+    sy_unlink(probe.wasm);
+    if (size > 0 && !sy_write_file(probe.source, body, size, 0600)) {
+        char *args[] = {"./ujs/ujs2wasm.com", probe.source, "-o", probe.wasm, 0};
+        int rc = cx_runv_timeout(args, 8, &out, &n);
+        refused = rc == 1 && sy_lstat(probe.wasm, &stat) == -ENOENT;
+    }
+    mm_free(out);
+    remove_probe(&probe);
+    printf("CHECK_UJS_LOCALS accepted256=%d refused257=%d failed=%d\n", accepted, refused, !(accepted && refused));
+    return !(accepted && refused);
+}

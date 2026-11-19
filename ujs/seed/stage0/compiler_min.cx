@@ -479,7 +479,7 @@ enum {
   OP_UX_ADDR, OP_UX_SPAN, OP_UX_LOAD, OP_UX_STORE, OP_UX_BYTE, OP_FSQRT,
   OP_ABI_CALL, OP_ABI_RET, OP_U32, OP_FLOOR_I64
 };
-enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
+enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 8 };
 enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_TYPE_BASE = 14 };
 typedef struct {
   char name[MAXN], module[MAXN];
@@ -659,37 +659,44 @@ static int register_fn(Prog *P, FnDef *tmp) {
   return P->nfn++;
 }
 
+static int invocation_slot(Prog *P, int type) {
+  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  P->names[P->nl][0] = 0;
+  P->lty[P->nl] = (uint8_t)type;
+  P->lety[P->nl] = TY_I64;
+  return P->nl++;
+}
+
 static int invoke_fn(Lex *L, Prog *P, int fi) {
   FnDef *F = &P->fns[fi];
   int narg = 0, i, ty = 0, ret_local, scratch;
-  int aty[16];
+  int arg_slot[16];
+  int outer_ret = P->fn_ret, outer_did_ret = P->fn_did_ret;
   /* L at `(` */
   if (!expect(L, T_LP, P, "call (")) return 0;
   if (L->tok != T_RP) {
     for (;;) {
       if (narg >= 16) { P->err = "too many args"; return 0; }
-      aty[narg] = pexpr(L, P); if (!aty[narg]) return 0;
-      /* stash each arg in a temp local — reverse order on stack, so store as we go */
-      {
-        char tn[MAXN];
-        int ti;
-        snprintf(tn, sizeof tn, "#arg%d", narg);
-        ti = loc(P, tn, 1); if (ti < 0) return 0;
-        P->lty[ti] = (uint8_t)aty[narg];
-        if (!emit(P, OP_STORE, ti)) return 0;
-      }
+      int arg_type = pexpr(L, P);
+      if (!arg_type) return 0;
+      int slot = invocation_slot(P, arg_type);
+      if (slot < 0 || !emit(P, OP_STORE, slot)) return 0;
+      arg_slot[narg] = slot;
       narg++;
       if (L->tok == T_COMMA) { next(L); continue; }
       break;
     }
   }
   if (!expect(L, T_RP, P, "call )")) return 0;
-  /* bind params from #arg* */
+  /* Bind parameters from each invocation's typed temporaries. */
   if (F->has_p0) {
     int pi, ai;
     if (narg < 1) { P->err = "missing arg"; return 0; }
-    pi = loc(P, F->p0, 1); if (pi < 0) return 0;
-    ai = loc(P, "#arg0", 0); if (ai < 0) return 0;
+    ai = arg_slot[0];
+    pi = loc(P, F->p0, 0);
+    if (pi >= 0 && P->lty[pi] != P->lty[ai]) { P->err = "fn parameter type changed"; return 0; }
+    if (pi < 0) pi = loc(P, F->p0, 1);
+    if (pi < 0) return 0;
     P->lty[pi] = P->lty[ai];
     if (!emit(P, OP_LOAD, ai)) return 0;
     if (!emit(P, OP_STORE, pi)) return 0;
@@ -699,14 +706,11 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
     int base = F->has_p0 ? 1 : 0;
     if (rest_n < 0) rest_n = 0;
     ri = loc(P, F->rest, 1); if (ri < 0) return 0;
-    scratch = ensure_scratch(P); if (scratch < 0) return 0;
+    scratch = invocation_slot(P, TY_LIST); if (scratch < 0) return 0;
     if (!emit(P, OP_MKLIST, rest_n)) return 0;
     if (!emit(P, OP_STORE, scratch)) return 0;
     for (i = 0; i < rest_n; i++) {
-      char tn[MAXN];
-      int ai;
-      snprintf(tn, sizeof tn, "#arg%d", base + i);
-      ai = loc(P, tn, 0); if (ai < 0) return 0;
+      int ai = arg_slot[base + i];
       if (!emit(P, OP_LOAD, scratch)) return 0;
       if (!emit(P, OP_LOAD, ai)) return 0;
       if (P->lty[ai] == TY_F64) { if (!emit(P, OP_BOXF, 0)) return 0; }
@@ -724,8 +728,7 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
   } else if (!F->has_p0 && !F->has_rest && narg != 0) {
     P->err = "arity"; return 0;
   }
-  ret_local = loc(P, "#fnret", 1); if (ret_local < 0) return 0;
-  P->lty[ret_local] = TY_I64;
+  ret_local = invocation_slot(P, TY_I64); if (ret_local < 0) return 0;
   P->fn_ret = ret_local;
   P->fn_did_ret = 0;
   P->in_fn++;
@@ -749,6 +752,8 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
     }
   }
   P->in_fn--;
+  P->fn_ret = outer_ret;
+  P->fn_did_ret = outer_did_ret;
   if (!emit(P, OP_LOAD, ret_local)) return 0;
   return ty ? ty : TY_I64;
 }
@@ -1622,6 +1627,7 @@ static int pstmt(Lex *L, Prog *P) {
     int ty = pexpr(L, P); if (!ty) return 0;
     if (P->in_fn > 0) {
       if (P->fn_ret < 0) { P->err = "fn ret"; return 0; }
+      if (P->fn_did_ret && P->lty[P->fn_ret] != ty) { P->err = "fn return type changed"; return 0; }
       P->lty[P->fn_ret] = (uint8_t)ty;
       if (!emit(P, OP_STORE, P->fn_ret)) return 0;
       P->fn_did_ret = 1;
