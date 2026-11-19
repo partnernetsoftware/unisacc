@@ -118,6 +118,21 @@ function runCommands(gl, commands) {
         gl.clear(gl.DEPTH_BUFFER_BIT);
       }
       if (opcode === 6) applyRenderState(gl, a);
+      if (opcode === 7) {
+        if (a) gl.enable(gl.SCISSOR_TEST);
+        else gl.disable(gl.SCISSOR_TEST);
+        gl.scissor(b, c, d, command[5]);
+      }
+      if (opcode === 8) {
+        let bits = 0;
+        if (a & 1) {
+          gl.clearColor((b & 255) / 255, (b >>> 8 & 255) / 255, (b >>> 16 & 255) / 255, (b >>> 24) / 255);
+          bits |= gl.COLOR_BUFFER_BIT;
+        }
+        if (a & 2) { gl.clearDepth(c); bits |= gl.DEPTH_BUFFER_BIT; }
+        if (a & 4) { gl.clearStencil(d); bits |= gl.STENCIL_BUFFER_BIT; }
+        gl.clear(bits);
+      }
     }
     return gl.isContextLost() ? -6n : 0n;
   } finally {
@@ -183,6 +198,16 @@ export function createGpuSubmit(gl, memory, generation) {
         const state = readRenderState(gl, packet, at, span);
         if (typeof state === "bigint") return state;
         commands.push([opcode, state]);
+      } else if (opcode === 7) {
+        if (span !== 28 || word(at + 8) > 1) return -4n;
+        const [x, y, width, height] = [12, 16, 20, 24].map(offset => word(at + offset));
+        if (x + width > Math.min(8192, gl.drawingBufferWidth) || y + height > Math.min(8192, gl.drawingBufferHeight)) return -4n;
+        commands.push([opcode, word(at + 8), x, y, width, height]);
+      } else if (opcode === 8) {
+        if (span !== 24) return -4n;
+        const mask = word(at + 8), depth = packet.getFloat32(at + 16, true), stencil = word(at + 20);
+        if (mask < 1 || mask > 7 || !Number.isFinite(depth) || depth < 0 || depth > 1 || stencil > 255) return -4n;
+        commands.push([opcode, mask, word(at + 12), depth, stencil]);
       } else {
         return -5n;
       }
