@@ -1,0 +1,69 @@
+/* tools/check-c99-warn.cx -- C99 warn-only diagnostics (0.0.82 c-negative step 1, group C local-redefinition).
+ *   sh ./unisacc.com tools/check-c99-warn.cx -- NEW_PRODUCT OLD_PRODUCT ABS_OUT
+ * NEW_PRODUCT is the candidate unisacc.com, OLD_PRODUCT the reference (0.0.81 public).  Both are run here, now, on the
+ * same fixtures; nothing is cached.  Contracts:
+ *   (1) negative: `void f(void){int x=1;int x=2;}` with -Wall -> rc 0, object present, stderr carries
+ *       `FILE:LINE:COL: warning:` and `[-Wc99-local-redefinition]` and `redefinition of local object 'x'`.
+ *   (2) default route (no -Wall): object bytes, stderr bytes and rc identical between NEW and OLD for every fixture.
+ *   (3) legal neighbours with -Wall: rc 0, object present, stderr has no `-Wc99-` (block shadowing, sibling blocks,
+ *       for-scope, struct tag vs object, distinct names).
+ *   (4) parameter and local of the same name: NEW and OLD agree on rc and stderr with -Wall (existing contract kept).
+ * Output: ABS_OUT/results.tsv and one line per check on stdout; exit 0 only when every check passes. */
+#pragma unisa use cxlib.netpack
+
+static char outdir[4096], newp[4096], oldp[4096]; static int npass, nfail; static FILE *res;
+static void die(const char *s) { fprintf(stderr, "check-c99-warn: REFUSE %s errno=%d\n", s, errno); exit(2); }
+#define FMT(b, ...) do { if (cx_fmt(b, sizeof b, __VA_ARGS__)) die("text too long: " #b); } while (0)
+static void saved(const char *p, const char *s, size_t n) { if (np_writefile(p, s, n)) die("write fixture"); }
+static void check(int ok, const char *fx, const char *label, const char *detail) { fprintf(res, "%s\tc99.warn.%s.%s\t%s\n", ok ? "PASS" : "FAIL", fx, label, detail); printf("%s\t%s.%s\n", ok ? "PASS" : "FAIL", fx, label); if (ok) npass++; else nfail++; }
+static int runin(char *const argv[], np_result *r) { char why[1024]; return np_run(argv, outdir, 0, 30, r, why, sizeof why); }
+static char *slurp(const char *leaf, size_t *n) { char p[4400]; FMT(p, "%s/%s", outdir, leaf); return cx_read(p, n); }
+static int compile(const char *prod, int wall, const char *c, const char *o, np_result *r) {
+    char *a[] = { "sh", (char *)prod, "-c", "-b", "lnx/x86_64", "-Wall", "-o", (char *)o, (char *)c, 0 };
+    char *b[] = { "sh", (char *)prod, "-c", "-b", "lnx/x86_64", "-o", (char *)o, (char *)c, 0 };
+    return runin(wall ? a : b, r); }
+static void first(const np_result *r, char *d, size_t cap) { size_t k = 0; while (k < r->errn && k + 1 < cap && k < 160) { d[k] = r->err[k] == '\n' || r->err[k] == '\t' ? ' ' : r->err[k]; k++; } d[k] = 0; }
+static int has(const np_result *r, const char *s) { size_t m = strlen(s); if (r->errn < m) return 0; for (size_t i = 0; i + m <= r->errn; i++) if (!memcmp(r->err + i, s, m)) return 1; return 0; }
+/* default route: NEW and OLD byte-identical object, stderr and rc */
+static void same_default(const char *name, const char *c) {
+    char on[96], oo[96]; FMT(on, "%s.new.o", name); FMT(oo, "%s.old.o", name);
+    np_result a, b; if (compile(newp, 0, c, on, &a) || compile(oldp, 0, c, oo, &b)) { check(0, name, "default-same", "transport"); return; }
+    size_t na = 0, nb = 0; char *x = slurp(on, &na), *y = slurp(oo, &nb);
+    int same = a.rc == b.rc && a.errn == b.errn && (!a.errn || !memcmp(a.err, b.err, a.errn)) && ((!x && !y) || (x && y && na == nb && !memcmp(x, y, na)));
+    char d[200]; FMT(d, "rc new=%d old=%d obj new=%zu old=%zu stderr new=%zu old=%zu", a.rc, b.rc, na, nb, a.errn, b.errn);
+    check(same, name, "default-same", d); free(x); free(y); np_free(&a); np_free(&b); }
+
+int main(int argc, char **argv) {
+    if (argc != 4 || !realpath(argv[1], newp) || !realpath(argv[2], oldp) || argv[3][0] != '/') { fputs("usage: NEW_PRODUCT OLD_PRODUCT ABS_OUT\n", stderr); return 2; }
+    if (cx_fmt(outdir, sizeof outdir, "%s", argv[3])) die("outdir"); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir create");
+    char rp[4400]; FMT(rp, "%s/results.tsv", outdir); res = fopen(rp, "wbx"); if (!res) die("results");
+    { const char *pp[2] = { newp, oldp }; for (int i = 0; i < 2; i++) { size_t n; char *b = cx_read(pp[i], &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\t%s\t%s\tsha256=%s\n", i ? "old" : "new", pp[i], h); } }
+    struct { const char *name, *line; int kind; } fx[] = {
+        { "local-redefinition", "void f(void){int x=1;int x=2;(void)x;}", 0 },
+        { "block-shadow", "void f(void){int x=1;{int x=2;(void)x;}(void)x;}", 1 },
+        { "sibling-blocks", "void f(void){{int x=1;(void)x;}{int x=2;(void)x;}}", 1 },
+        { "for-scope", "void f(void){int i=0;for(int i=0;i<1;i++){int j=i;(void)j;}(void)i;}", 1 },
+        { "for-body-shadow", "void f(void){for(int i=0;i<1;i++){int i=2;(void)i;}}", 1 },
+        { "tag-and-object", "void f(void){struct x{int a;} s; int x=0; s.a=x; (void)s;}", 1 },
+        { "distinct-names", "void f(void){int x=1;int y=2;(void)x;(void)y;}", 1 },
+        { "nested-redef-inner", "void f(void){{int x=1;int x=2;(void)x;}}", 0 },
+        { "parameter-and-local", "void f(int a){int a=1;(void)a;}", 2 },
+    };
+    for (size_t i = 0; i < sizeof fx / sizeof *fx; i++) {
+        char c[96], o[96], src[400]; FMT(c, "%s.c", fx[i].name); FMT(o, "%s.wall.o", fx[i].name);
+        if (cx_fmt(src, sizeof src, "%s\nint main(void){return 0;}\n", fx[i].line)) die("src"); char p[4400]; FMT(p, "%s/%s", outdir, c); saved(p, src, strlen(src));
+        same_default(fx[i].name, c);
+        np_result r; if (compile(newp, 1, c, o, &r)) { check(0, fx[i].name, "wall", "transport"); continue; }
+        size_t on = 0; char *ob = slurp(o, &on); char d[260], e[170]; first(&r, e, sizeof e); FMT(d, "rc=%d obj=%zu stderr=%s", r.rc, on, e);
+        if (fx[i].kind == 0) {
+            char loc[120]; FMT(loc, "%s:1:", c);
+            check(r.rc == 0 && ob && has(&r, "[-Wc99-local-redefinition]") && has(&r, "redefinition of local object 'x'") && has(&r, loc) && has(&r, ": warning: "), fx[i].name, "warns", d);
+        } else if (fx[i].kind == 1) {
+            check(r.rc == 0 && ob && !has(&r, "-Wc99-"), fx[i].name, "no-c99-warning", d);
+        } else {
+            char o2[96]; FMT(o2, "%s.wall.old.o", fx[i].name); np_result q;
+            if (compile(oldp, 1, c, o2, &q)) check(0, fx[i].name, "same-as-old", "transport");
+            else { check(q.rc == r.rc && q.errn == r.errn && (!r.errn || !memcmp(q.err, r.err, r.errn)), fx[i].name, "same-as-old", d); np_free(&q); }
+        }
+        free(ob); np_free(&r); }
+    fprintf(res, "SUMMARY\tok=%d\tfailed=%d\n", npass, nfail); fclose(res); printf("CHECK_C99_WARN\tok=%d\tfailed=%d\n", npass, nfail); return nfail ? 1 : 0; }
