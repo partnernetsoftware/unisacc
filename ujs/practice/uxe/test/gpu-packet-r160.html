@@ -1,0 +1,112 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  BoxGeometry, BufferAttribute, BufferGeometry, Camera, CustomBlending, DoubleSide,
+  LessDepth, Mesh, OneMinusSrcAlphaFactor, RawShaderMaterial, REVISION,
+  Scene, SrcAlphaFactor, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+const result = document.querySelector("#gpu");
+const samples = [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]];
+const size = 16;
+const options = { alpha: true, antialias: false, depth: true, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const gl = canvas.getContext("webgl", options);
+  if (!gl) throw new Error("WebGL unavailable");
+  return { canvas, gl };
+}
+function pixels(gl) {
+  const values = [];
+  for (const [x, y] of samples) {
+    const rgba = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    values.push(...rgba);
+  }
+  return values;
+}
+function triangle(z) {
+  return [-0.75, -0.75, z, 0.75, -0.75, z, 0, 0.75, z];
+}
+function cube() {
+  const box = new BoxGeometry(1, 1, 1);
+  const position = box.getAttribute("position");
+  const vertices = [];
+  for (const i of box.index.array) {
+    const x = position.getX(i), y = position.getY(i), z = position.getZ(i);
+    vertices.push(0.8*x + 0.35*z, 0.8*y - 0.25*z, 0.35*x + 0.2*y + 0.55*z);
+  }
+  box.dispose();
+  return vertices;
+}
+function referenceMesh(scene, vertices, color, depth, blend, order) {
+  const geometry = new BufferGeometry();
+  const position = new BufferAttribute(new Float32Array(vertices), 3);
+  geometry.setAttribute("position", position);
+  geometry.setAttribute("a_position", position);
+  const colors = new Float32Array(vertices.length / 3 * 4);
+  for (let i = 0; i < colors.length; i += 4) colors.set(color, i);
+  geometry.setAttribute("a_color", new BufferAttribute(colors, 4));
+  const material = new RawShaderMaterial({
+    vertexShader: "attribute vec3 a_position; attribute vec4 a_color; varying vec4 color; void main(){ color=a_color; gl_Position=vec4(a_position,1.0); }",
+    fragmentShader: "precision mediump float; varying vec4 color; void main(){ gl_FragColor=color; }",
+    side: DoubleSide, forceSinglePass: true, depthTest: depth, depthWrite: true, depthFunc: LessDepth,
+    transparent: blend, blending: CustomBlending, blendSrc: SrcAlphaFactor,
+    blendDst: OneMinusSrcAlphaFactor, blendSrcAlpha: SrcAlphaFactor, blendDstAlpha: OneMinusSrcAlphaFactor,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = order;
+  scene.add(mesh);
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const { gl } = context();
+  let base;
+  const submit = createGpuSubmit(gl, () => base.exports.memory, () => 1);
+  const request = new XMLHttpRequest();
+  request.open("GET", "probe.wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
+  base = new WebAssembly.Instance(new WebAssembly.Module(bytes), { uxe_gpu_v1: { host_gpu_submit: submit } });
+  const step = base.exports.uxe_gpu_probe;
+  const actual = [];
+  const status = [];
+  const mutate = new URLSearchParams(location.search).has("mutate");
+  for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
+    status.push(Number(step(mode)));
+    actual.push(...pixels(gl));
+  }
+  for (let mode = 10n; mode <= 18n; mode++) status.push(Number(step(mode)));
+  actual.push(...pixels(gl));
+  status.push(...gl.getParameter(gl.VIEWPORT), gl.getError());
+
+  const reference = [];
+  const three = context();
+  const renderer = new WebGLRenderer({ canvas: three.canvas, context: three.gl, ...options });
+  renderer.setSize(size, size, false);
+  const camera = new Camera();
+  for (let sceneIndex = 0; sceneIndex < 4; sceneIndex++) {
+    const scene = new Scene();
+    const depth = sceneIndex === 1 || sceneIndex === 2;
+    const blend = sceneIndex === 3;
+    renderer.setClearColor(blend ? 0x0000ff : 0x000000, 1);
+    if (sceneIndex === 1) referenceMesh(scene, cube(), [0, 1, 0, 1], true, false, 0);
+    else referenceMesh(scene, triangle(sceneIndex === 2 ? -0.5 : 0), [1, 0, 0, blend ? 0.5 : 1], depth, blend, 0);
+    if (sceneIndex === 2) referenceMesh(scene, triangle(0.5), [0, 1, 0, 1], true, false, 1);
+    renderer.render(scene, camera);
+    reference.push(...pixels(three.gl));
+    for (const mesh of scene.children) { mesh.geometry.dispose(); mesh.material.dispose(); }
+  }
+  renderer.dispose();
+  result.textContent = JSON.stringify([...status, ...actual, ...reference]);
+} catch (error) {
+  result.textContent = String(error);
+}
+</script>

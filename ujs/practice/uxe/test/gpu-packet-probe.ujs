@@ -1,0 +1,79 @@
+function probe_vertex(at,...attributes) {
+  let x=ux_f32_put(at,attributes[0]);
+  let y=ux_f32_put(at+4,attributes[1]);
+  let z=ux_f32_put(at+8,attributes[2]);
+  let r=ux_f32_put(at+12,attributes[3]);
+  let g=ux_f32_put(at+16,attributes[4]);
+  let b=ux_f32_put(at+20,attributes[5]);
+  let a=ux_f32_put(at+24,attributes[6]);
+  return at+28;
+}
+
+function probe_triangle(at,...options) {
+  let p0=probe_vertex(at,0.0-0.75,0.0-0.75,options[0],options[1],options[2],0.0,options[3]);
+  let p1=probe_vertex(p0,0.75,0.0-0.75,options[0],options[1],options[2],0.0,options[3]);
+  let p2=probe_vertex(p1,0.0,0.75,options[0],options[1],options[2],0.0,options[3]);
+  return 3;
+}
+
+native function probe_cube(at:i64) i64 {
+  let raw=GeometryBuffers_init(9600,10000,24,11000,36);
+  if(BoxGeometry_generate(raw,1.0,1.0,1.0,1,1,1)<0) { return 0-1; }
+  let i=0;
+  while(i<36) {
+    let p=10000+32*ux_u32(11000+4*i);
+    let x=ux_f32(p);
+    let y=ux_f32(p+4);
+    let z=ux_f32(p+8);
+    let projected=probe_vertex(at+28*i,0.8*x+0.35*z,0.8*y-0.25*z,0.35*x+0.2*y+0.55*z,
+      0.0,1.0,0.0,1.0);
+    i=i+1;
+  }
+  return 36;
+}
+
+let capacity=2048;
+if(mode==16) { capacity=24; }
+let stamp=1;
+if(mode==11) { stamp=2; }
+let packet=GpuPacket_begin(0,capacity,stamp);
+let viewport_x=0;
+let viewport_width=16;
+if(mode>=10) { viewport_x=1; viewport_width=14; }
+if(mode==17) { viewport_width=16; }
+let viewport=GpuPacket_viewport(packet,capacity,viewport_x,0,viewport_width,16);
+if(viewport<0) { return viewport; }
+let background=4278190080;
+if(mode==3) { background=4294901760; }
+let cleared=GpuPacket_clear(packet,capacity,background);
+let depth=0;
+if(mode==1 || mode==2) { depth=1; }
+let state=GpuPacket_state(packet,capacity,depth,1,mode==3);
+let initial_depth=GpuPacket_clearDepth(packet,capacity,1.0);
+let shader=probe_shader_sources(6400);
+let count=3;
+if(mode==1) { count=probe_cube(4000); }
+else {
+  let z=0.0;
+  let alpha=1.0;
+  let r=1.0;
+  let g=0.0;
+  if(mode==2) { z=0.0-0.5; }
+  if(mode==3) { alpha=0.5; }
+  if(mode==9) { r=0.0; g=1.0; }
+  count=probe_triangle(4000,z,r,g,alpha);
+}
+if(mode==15) { let invalid=ux_u8_put(ux_u32(shader+GpuShaderSource.vertex),63); }
+let first=GpuPacket_draw(packet,capacity,4000,count,shader);
+if(first<0) { return first; }
+if(mode==2) {
+  let second_count=probe_triangle(4000,0.5,0.0,1.0,1.0);
+  let second=GpuPacket_draw(packet,capacity,4000,second_count,shader);
+  if(second<0) { return second; }
+}
+if(mode==10) { let changed=ux_u32_put(packet+GpuPacket.version,4); }
+if(mode==12) { return host_gpu_submit(packet,ux_u32(packet+GpuPacket.bytes)-4); }
+if(mode==13) { let unknown=ux_u32_put(48,128); }
+if(mode==14) { let excessive=ux_u32_put(packet+GpuPacket.commands,257); }
+if(mode==18) { return host_gpu_submit(6291448,40); }
+return GpuPacket_submit(packet);
