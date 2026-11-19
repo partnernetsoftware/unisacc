@@ -5,6 +5,8 @@
  *     --run reports the batch DEFERRED prepare-failed, never a BATCH PASS;
  * (2) a private mirror holding the registered predecessor bytes -> three MATERIAL rows with paths:
  *     old-product = the registered predecessor sha, new-product and new-models = the checkout product.
+ * The predecessor is derived, not fixed: the newest row of tools/old-product-assets.tsv strictly below
+ * the checkout product's --version (the producer's own rule), so a 0.0.81 candidate expects 0.0.80 bytes.
  * Without the predecessor bytes (default: the shared prep cache copy) case (2) is UNMEASURED rc 3.
  * Ends CHECK_AFFECTED_OLDPRODUCT. */
 #pragma unisa use sys.fs
@@ -45,12 +47,26 @@ int main(int argc,char **argv){
     if(cx_fmt(tmpl,sizeof tmpl,"%s/tmp",base&&*base?base:"/tmp")||sy_mkdtemp(tmpl,"check-aop",dir,sizeof dir))die("private dir");
     if(argc==3&&tx_eqz(argv[1],"--old")){if(tx_copy(old,sizeof old,argv[2],tx_len(argv[2],4095)))die("usage");}
     else if(argc!=1)die("usage");
-    {   unsigned char *d;int64_t n;if(sy_read_file("tools/old-product-assets.tsv",&d,&n,65536))die("registry");
-        long k=tx_find((char *)d,(long)n,"\n0.0.79\t",8);if(k<0)die("registry-row");
-        char *s=(char *)d+k+1,*e=s;while(e<(char *)d+n&&*e!='\n')e++;
-        if(e-s<65||tx_copy(want,65,e-64,64))die("registry-sha");mm_free(d); }
-    if(!old[0]&&cx_fmt(old,sizeof old,"%s/.cache/unisacc/prep-cache/old-product-cache/%s/unisacc.com",getenv("HOME")?getenv("HOME"):".",want))die("path");
     if(cx_path_join(prod,sizeof prod,root,"unisacc.com")||sha(prod,ph))die("product");
+    /* the predecessor the producer will pick: newest registered version strictly below the product's --version */
+    {   char *vv[]={"sh",prod,"--version",0},why[256],cv[64];np_result q={0};long c[3],best[3]={-1,-1,-1};
+        if(np_run(vv,0,0,10,&q,why,sizeof why)||q.rc||q.outn<10||q.outn>60||memcmp(q.out,"unisacc ",8)||tx_copy(cv,sizeof cv,q.out+8,q.outn-9))die("product-version");
+        np_free(&q);
+        if(sscanf(cv,"%ld.%ld.%ld",&c[0],&c[1],&c[2])!=3)die("product-version-syntax");
+        unsigned char *d;int64_t n;if(sy_read_file("tools/old-product-assets.tsv",&d,&n,65536))die("registry");
+        want[0]=0;
+        for(int64_t a=0;a<n;){int64_t e=a;while(e<n&&d[e]!='\n')e++;
+            char ln[512];long x[3];
+            if(e-a>65&&e-a<500&&!tx_copy(ln,sizeof ln,(char *)d+a,e-a)&&sscanf(ln,"%ld.%ld.%ld\t",&x[0],&x[1],&x[2])==3){
+                int below=x[0]!=c[0]?x[0]<c[0]:x[1]!=c[1]?x[1]<c[1]:x[2]<c[2];
+                int newer=x[0]!=best[0]?x[0]>best[0]:x[1]!=best[1]?x[1]>best[1]:x[2]>best[2];
+                if(below&&newer){memcpy(best,x,sizeof best);if(tx_copy(want,65,ln+(e-a)-64,64))die("registry-sha");}}
+            a=e+1;}
+        mm_free(d);
+        if(!want[0])die("no-registered-predecessor");
+        printf("OLDPRODUCT_PREDECESSOR\tproduct=%s\tpredecessor=%ld.%ld.%ld\tsha256=%s\n",cv,best[0],best[1],best[2],want);
+    }
+    if(!old[0]&&cx_fmt(old,sizeof old,"%s/.cache/unisacc/prep-cache/old-product-cache/%s/unisacc.com",getenv("HOME")?getenv("HOME"):".",want))die("path");
     /* (1) empty mirror, fresh cache */
     if(cx_path_join(cache,sizeof cache,dir,"cache-empty")||cx_path_join(mirror,sizeof mirror,dir,"mirror-empty")||sy_mkdir(mirror,0700))die("fixture");
     affected(cache,mirror,0,&r);
