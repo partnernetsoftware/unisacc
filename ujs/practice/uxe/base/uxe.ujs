@@ -27,6 +27,7 @@ persist let textureWash = 0;
 persist let shadowCell = 0;
 persist let shadowDark = 0;
 persist let railRows = 0;
+persist let contourReady = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -281,6 +282,7 @@ if (op == 18) {
   if (a < 1 || a > 2048 || b < 1 || b > 65535 || pixels == 0 || pixels > 524288) { return 0 - 1; }
   sceneFocal = a;
   sceneNear = b;
+  contourReady = 0;
   let sceneClear = 0;
   let sceneReset = ux_u8_put(5499900, 0);
   sceneReset = ux_u8_put(5499901, 0);
@@ -430,6 +432,7 @@ if (op == 20 || op == 30) {
         }
         if (texelAlpha >= 128 && triangleInvZ > ux_f32(triangleDepthAt)) {
           let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
+          if (contourReady == 1) { triangleInk = ux_u8_put(5600000 + triangleIndex, a % 256); }
           triangleIndex = triangleIndex * 4;
           let triangleFog = 0.0;
           if (sceneFogEnd > sceneFogStart) {
@@ -642,5 +645,40 @@ if (op == 33) {
   let low = f64_floor_i64(ux_f32(start + b * 4));
   let high = f64_floor_i64(ux_f32(end + b * 4));
   return 1000 * (low * (span - delta) + high * delta) / span;
+}
+// Start a contour pass with a=0, then composite inward ink of radius 1 or 2.
+if (op == 34) {
+  if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b > 16777215) { return 0 - 1; }
+  if (a == 0) {
+    let sample = 0;
+    while (sample < pixels) {
+      let cleared = ux_u8_put(5600000 + sample, 0);
+      sample = sample + 1;
+    }
+    contourReady = 1;
+    return 0;
+  }
+  if (contourReady == 0) { return 0 - 1; }
+  let inkRed = b % 256;
+  let inkGreen = b / 256 % 256;
+  let inkBlue = b / 65536;
+  let contourY = a;
+  while (contourY < height - a) {
+    let contourX = a;
+    while (contourX < width - a) {
+      let idx = contourY * width + contourX;
+      let label = 5600000 + idx;
+      let kind = ux_u8(label);
+      if (kind > 0 && (kind > ux_u8(label - a) || kind > ux_u8(label + a) ||
+          kind > ux_u8(label - a * width) || kind > ux_u8(label + a * width))) {
+        let paint = ux_u8_put(idx * 4, inkRed);
+        paint = ux_u8_put(idx * 4 + 1, inkGreen);
+        paint = ux_u8_put(idx * 4 + 2, inkBlue);
+      }
+      contourX = contourX + 1;
+    }
+    contourY = contourY + 1;
+  }
+  return 0;
 }
 return 0 - 1;
