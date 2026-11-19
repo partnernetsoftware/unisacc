@@ -1,6 +1,6 @@
 # cx-dev:本机快速迭代车道(第一期)
 
-状态:第一期已落地(2026-11-16)。NOT_RELEASE:cx-dev 的一切结果只标 LOCAL,不是候选证据,不进任何资格。设计来源 [local-loader-2026-11-16.md](local-loader-2026-11-16.md),对外名字由 local 改为 cx-dev。
+状态:第一期已落地(2026-11-16)。NOT_RELEASE:cx-dev 的一切结果只标 LOCAL,不是候选证据,不进任何资格。设计来源 [archive/plans/local-loader-2026-11-16.md](../archive/plans/local-loader-2026-11-16.md),对外名字由 local 改为 cx-dev。
 
 ## 1 是什么
 

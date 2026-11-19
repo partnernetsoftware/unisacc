@@ -677,7 +677,7 @@ R2 结果(2026-11-14,表中 R2 即任务称的"R1";已装 0.0.62,`strace -f -ttt
 
 版本号已过期(2026-11-14):本节与第 8 节 B1 至 B3 里的 0.0.54 至 0.0.60 版本归属不再是现行计划,只作设计与步骤拆分的依据;55-1 的后续即 0.0.65 的 cxmod 三源归一,55-4 至 55-6 与 B3 各步在 prd.md 9.4 的候选池,版本序以 `build/version-seq.tsv` 为准。
 
-版本划分（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`；后经 `VER055-SPEED` 改判，2026-11-12 再按 0.0.58 计划重排）：0.0.54 只做梳理与提速；cx 流网的步骤按每版一项产品改动重排：55-1（规划器单源）= 0.0.58 的 P1，55-2（解析状态实例化）= 0.0.59 的 P59，55-4（CX0 事实表入库与第 8 流）= 0.0.60 的 P60，55-3（cx-tri 门）视矩阵结果随其后（见 [prd.md](prd.md) §9.7、[plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)）。下文凡写 0.0.55 处，55-1 按 0.0.58、55-2 按 0.0.59、55-4 及以后按 0.0.60 理解。范围、前置、验收与分步的唯一权威是下文「进化计划」B1（0.0.54 前置）与 B2（0.0.55 主线），B4 为贯穿各版的不变式。补充两条前置：`research/cx2-module-design.md` 没有进表或成网的设计（其 §7 把「现在就用完整 E3 解析器推导 CXIF」列为与约束冲突的做法），0.0.55 须先写 CX0 事实表划分与流格式（B1 54-6）；`check-cx-layers` 的 1 条向上边（`cx/runtime/holdframe.cx:5`）先处置。
+版本划分（集成者 2026-11-11 决定，账本 `VER054-055-SPLIT`；后经 `VER055-SPEED` 改判，2026-11-12 再按 0.0.58 计划重排）：0.0.54 只做梳理与提速；cx 流网的步骤按每版一项产品改动重排：55-1（规划器单源）= 0.0.58 的 P1，55-2（解析状态实例化）= 0.0.59 的 P59，55-4（CX0 事实表入库与第 8 流）= 0.0.60 的 P60，55-3（cx-tri 门）视矩阵结果随其后（见 [prd.md](prd.md) §9.7、[archive/plans/v0.0.59-unisacc.md](archive/plans/v0.0.59-unisacc.md)）。下文凡写 0.0.55 处，55-1 按 0.0.58、55-2 按 0.0.59、55-4 及以后按 0.0.60 理解。范围、前置、验收与分步的唯一权威是下文「进化计划」B1（0.0.54 前置）与 B2（0.0.55 主线），B4 为贯穿各版的不变式。补充两条前置：`research/cx2-module-design.md` 没有进表或成网的设计（其 §7 把「现在就用完整 E3 解析器推导 CXIF」列为与约束冲突的做法），0.0.55 须先写 CX0 事实表划分与流格式（B1 54-6）；`check-cx-layers` 的 1 条向上边（`cx/runtime/holdframe.cx:5`）先处置。
 
 以下两节（架构分析、进化计划）由独立分析写成，基线同上：HEAD `6a4fa1fa6f`，已装产品 sha256 前缀 `1bffabbaf45ee349`，gcc 11.4.0，clang 15.0.7，实测日 2026-11-11；探针与脚本不入库。
 
@@ -938,7 +938,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 ## 9. 并入:分层、模块与 use、dock、别名与再导出、L0 fmt 与 sig 合同(2026-11-14 并入,批 B3)
 
-来源:plans/cx-layers.md、plans/cx-modules.md、plans/cx-dock-pragma.md、plans/cx-use-alias-reexport.md、plans/cx-l0-fmt-2026-10-30.md、plans/cx-l0-sig-2026-10-30.md、cx/prd.md、docs/cx/prd.md(cx/prd.md 与 docs/cx/prd.md 原文已归档到 archive/plans-cx-2026-11/;六篇 plans/cx-*.md 仍被 cx/sys、cx/core、include/、ARCHITECTURE.md、prd_cx_spec.md 等写域外文件引用,check-archive-refs 会失败,故本批暂不归档,待引用改完再动;历史施工记录与 closure-once 设计过程留在原文,本节只收仍有效的规则)。原则:每条标已核对的源码路径;核不到的不并入。
+来源:plans/cx-layers.md、plans/cx-modules.md、plans/cx-dock-pragma.md、archive/plans/cx-use-alias-reexport.md、archive/plans/cx-l0-fmt-2026-10-30.md、archive/plans/cx-l0-sig-2026-10-30.md、cx/prd.md、docs/cx/prd.md(cx/prd.md 与 docs/cx/prd.md 原文已归档到 archive/plans-cx-2026-11/;六篇 plans/cx-*.md 仍被 cx/sys、cx/core、include/、ARCHITECTURE.md、prd_cx_spec.md 等写域外文件引用,check-archive-refs 会失败,故本批暂不归档,待引用改完再动;历史施工记录与 closure-once 设计过程留在原文,本节只收仍有效的规则)。原则:每条标已核对的源码路径;核不到的不并入。
 
 ### 9.1 分层与层向规则
 来源 plans/cx-layers.md「层」「只有底层能用 include」「三个检查表」。已核对:cx/sys、cx/mem(arena bytes grow heap map slice vec)、cx/text(build codec conv deflate edit fmt iter num text utf8) 目录存在;build/layer-api/cx.sys.tsv 等为包面登记。
@@ -963,21 +963,21 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 - 未并入:原文"落点/迁移"计划表(已执行或已演变),待办中的"白名单 TSV 废弃"未核到完成,仍视为未完成项。
 
 ### 9.4 use 别名、符号级导入与再导出
-来源 plans/cx-use-alias-reexport.md。已核对:cx/compiler/cxmod.cx 第 523 行解析 `as`、第 862 行输出 `sym as alias`;cx/spec.md 第 252 行 CX-W-3。
+来源 archive/plans/cx-use-alias-reexport.md。已核对:cx/compiler/cxmod.cx 第 523 行解析 `as`、第 862 行输出 `sym as alias`;cx/spec.md 第 252 行 CX-W-3。
 - 已落地:`#pragma unisa use NAME::sym [as alias]`(符号级导入与别名),`::` 只在 pragma 行内;同名函数经别名或符号级导入消解冲突;三源(plan.cx、src/cxmod.c、cxmod.cx)一致。
 - 未落地:`export`(重导出,CX-W-3)。cxmod.cx 无 `"export"` 识别,与 spec 一致。
 - 已知边界:多单元用不同别名 use 同一模块时只存一份改名源码(单版本假设);未导入函数体仍被编译,仅改成唯一名避免链接冲突;传递 use 的符号级过滤不追踪。
 - 未核:原文"产品 unisacc.com 尚未重编因而两个用例 FAIL"是 2026-10-31 状态,已过时,未并入。
 
 ### 9.5 L0 fmt、num、io 合同(2026-10-30 csih 车道需求)
-来源 plans/cx-l0-fmt-2026-10-30.md。已核对:cx/text/fmt.cx(tx_snprintf)、cx/text/num.cx(tx_atol、tx_strtol、tx_strtoul、tx_strtod 与 _r 版)、build/layer-api/cx.sys.tsv(sy_printf、sy_isatty、sy_fd_cloexec);tools/check-cx-fmt.cx 与批次 cx-l0-fmt 存在。
+来源 archive/plans/cx-l0-fmt-2026-10-30.md。已核对:cx/text/fmt.cx(tx_snprintf)、cx/text/num.cx(tx_atol、tx_strtol、tx_strtoul、tx_strtod 与 _r 版)、build/layer-api/cx.sys.tsv(sy_printf、sy_isatty、sy_fd_cloexec);tools/check-cx-fmt.cx 与批次 cx-l0-fmt 存在。
 - text.fmt:tx_snprintf、tx_vsnprintf 与 snprintf 逐字节等价(截断、NUL 结尾、返回完整长度、cap 为 0 时 dst 可空);cx_fmt 溢出会清空 dst,不能替代。
 - text.num:tx_atol、tx_strtol、tx_strtoul、tx_strtod 对齐 libc;errno 每单元一份、不跨模块,要判越界必须用 `_r` 版(0、-EINVAL、-ERANGE 经返回值)。迁移 `errno=0; strtol; errno==ERANGE` 写法须改 `_r`,不能只换函数名。
 - sys.io:sy_printf、sy_eprintf、sy_vprintf、sy_veprintf、sy_puts、sy_fd_nonblock、sy_fd_cloexec(0 或 -errno,Windows -ENOSYS)、sy_isatty(1 或 0)、sy_strerror;sys.env:sy_euid。标准流前导不缓冲,sy_* 与残留 printf 交错顺序一致。
 - 未并入:原文检查数字(38 条、candidate 哈希)为当日实测,不并入;现状以 `tools/check-cx-fmt.cx` 实跑为准(本批未实跑,标 UNMEASURED)。
 
 ### 9.6 L0 sig、atexit、symlink、setpgid 合同
-来源 plans/cx-l0-sig-2026-10-30.md。已核对:build/layer-api/cx.sys.tsv 含 sy_sig_handle、sy_sig_default、sy_raise、sy_atexit、sy_exit;cx/sys/sig.cx 头部说明、cx/sys/fs.cx(sy_symlink)、cx/sys/proc.cx(sy_setpgid);tools/check-cx-sys-sig.cx 存在。
+来源 archive/plans/cx-l0-sig-2026-10-30.md。已核对:build/layer-api/cx.sys.tsv 含 sy_sig_handle、sy_sig_default、sy_raise、sy_atexit、sy_exit;cx/sys/sig.cx 头部说明、cx/sys/fs.cx(sy_symlink)、cx/sys/proc.cx(sy_setpgid);tools/check-cx-sys-sig.cx 存在。
 - 前导 signal/sigaction 只填进程内表,不进内核;sy_sig_handle 经 rt_sigaction 真正注册(SA_RESTART),返回 0 或 -errno(越界、SIGKILL/SIGSTOP、空 fn 为 -EINVAL),macOS 与 Windows 为 -ENOSYS;sy_sig_default、sy_sig_ignore、sy_raise 同为 0 或 -errno。
 - 处理函数入口:tape ABI 与平台 C ABI 不同,不能直接把函数地址交内核;运行时映射一页 thunk 再转 syg_dispatch;arm64 用 sigaltstack(256 KiB)加 SA_ONSTACK。macOS 不提供处理函数。
 - sy_atexit/sy_exit:模块自带表,最多 32 项,后进先出;只在 main 返回(模块析构链)或 sy_exit 时运行;别的单元 exit、_exit、信号致死不运行;表满 -ENOMEM。

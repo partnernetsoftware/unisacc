@@ -12,7 +12,7 @@ macOS：镜像声明最低版本13.0；本次在26.5.1实测，13.0本身未实�
 - Windows stdio-crossunit and stream-pipe cover portable subsets; POSIX
   sub-checks were not run and are not counted as passed.
 - Full-batch qualification is separate from native CI; see
-  [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) and [plans/release-notes-0.0.58.md](../plans/release-notes-0.0.58.md) for the session state.
+  [GitHub Releases](https://github.com/partnernetsoftware/unisacc/releases) and [archive/plans/release-notes-0.0.58.md](../archive/plans/release-notes-0.0.58.md) for the session state.
 
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc

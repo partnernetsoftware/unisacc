@@ -185,7 +185,7 @@ Win/x86_64正常whole-o原44roots路线实际重放成功，bare2663424B SHA7624
 | 0.0.48底子执行（cc续派） | BASE-1..6与C0.2登记于items；父集成BASE-1/BASE-6，独立子任务C0.2摘要、BASE-2耗时、BASE-5函数矩阵；BASE-4复用I2原型 | 先落实依赖/摘要及单网实测，再做真实pp扰动增量验证；仅冻结输入运行，不改产品输入。逐项提交同步并在计划§14填实际数字，全部完成后接X2；超过5分钟先分解，已有60秒子步骤看门狗不放宽 |
 | 单网闭包内容摘要（C0.2） | `sh ./unisacc.com tools/net-digest.cx -- --root DIR [--closure TSV] --net NAME\|--all [--export-closure NEW]`；正式net-digest批15/0 | 三真实pp配方端到端；长度分帧绑定recipe参数、排序canonical路径/kind/内容与工具身份；闭包内变/外不变。缺输入、符号链接、权限、坏图、重复、逃逸、未知网均拒绝且不出摘要。旧tree_digest未找到定义，本次复用现SHA库实落地；显式闭包只适用于已冻结图，不证明运行读集完备或构造/全键验证通过 |
 | 逐网构造耗时（BASE-2） | `tools/net-build-profile.cx -- --root ROOT --gen GEN --tbl TBL --net NET --out NEW --start N --count K`；`--summary PROFILE...` | 官方42配方三阶段实际构造累计26559ms，p50=483/p90=807/p95=2466ms，最长warnparse3138ms；7批全rc0，原始命令/输入/产物SHA见research/c48-base-build-profile/。检查9/0含重复配方/混身份拒绝；现将阶段子时限钳入45秒剩余预算，实测仍按原调用保存。不含工具编译/输入哈希等未分相位开销，不冒称全键验证 |
-| 0.0.49共享依赖前置 | plans/dep-split.md及tools/dep-split-probe.cx；facts30/42=71.43%、generator42/42=100% | 首刀只在0794f90f5隔离archive迁AUT/AUD真实消费，新view touch3/42；shared-e3同flags JSON/TBL/NET完整memcmp0，独立check9/0，全图仍30。两高共享表按真实内部所有权拆分的条件预测max16/42，TK ABI独立性未证且公共生成器仍42，故未达全局门、不启用生产复用；冻结产品域无改动 |
+| 0.0.49共享依赖前置 | archive/plans/dep-split.md及tools/dep-split-probe.cx；facts30/42=71.43%、generator42/42=100% | 首刀只在0794f90f5隔离archive迁AUT/AUD真实消费，新view touch3/42；shared-e3同flags JSON/TBL/NET完整memcmp0，独立check9/0，全图仍30。两高共享表按真实内部所有权拆分的条件预测max16/42，TK ABI独立性未证且公共生成器仍42，故未达全局门、不启用生产复用；冻结产品域无改动 |
 | X3原生不动点与无Python预检 DONE | archive/research-2026-11d/research/c48-native-selfhost/；G1→G2→G3由Mach-O arm64实际直接执行；chain-precheck正式批74/0 | 同44根/固定外部包，G2/G3各3071458B/e5f80fac…且memcmp0，30.269952/30.419658s；不是NN/宿主工具/六片APE全链N22。PATH仅git的G1 include/entry/use三probe实际0（生成Linux交叉输出，不称Darwin运行ELF）。ctor/job严格核宿主格式/CPU；树快照改mem.heap同族配对后完整74通过。单次strdup/free未复现，相关疑点和host-C夹具/系统库/外部NN/Python历史构造残留均保留，不称依赖清零 |
 | X4分发实测与缓存核心DONE | 公开v0.0.47 carrier fde2db18…；本机26.5.1，载荷声明minos13.0 | gh真实下载0，curl/Safari直连GitHub504；同字节本地转存经Safari天然quarantine0083，首跑sh --version0/hello7且xattr原值保留。spctl载体/镜像均3拒绝，ad-hoc结构有效不等于Gatekeeper信任；13.0未实跑。默认正规入口真实六槽私有APE初版c959543e…，最终安全修正版a9c138ec…（管理器c3d1eaf2…），ARM/Rosetta x64实跑0；正式缓存批16/0。fresh lsof迁移136→4体，132删除及4完整SHA独立核对，释放91968648B，活跃项保护；最近4+live leases，未来旧launcher无标记仍需重新adopt。正常失败回退已核，异常信号边界未测；research/c48-macos-distribution/，未安装或动Release资产 |
 | M8行数门插队修正 | 79c09c401重新引入逐文件toolsloc，与4607c928d及项目所有者本次裁定冲突 | 保留提交档子集选择、选择器/估时、材料路径门禁和phase-budget；仅撤所有LOC拦截，历史表只存档。新增tool的check+批次门仍有效，重复/无调用者仅报告；主树24个受影响正式批全部真实终态0、PASS/rc0/transport0；652批注册表metadata_valid=1。历史表只加RETIRED头，其余字节不变；不复用原M8整档资格来冒充本次新树全绿 |
@@ -294,7 +294,7 @@ OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.
 
 ## 往期发布(自 plans/release-notes-0.0.48/57/58.md 并入,2026-11-14;原文见 archive/docs-2026-11c/)
 
-### 0.0.48(正式版,非预发布;全文仍在 plans/release-notes-0.0.48.md,因 tools/check-release-decide.cx 引用暂不归档)
+### 0.0.48(正式版,非预发布;全文仍在 archive/plans/release-notes-0.0.48.md,因 tools/check-release-decide.cx 引用暂不归档)
 - 身份:APE `unisacc.com` SHA256 `559705097427cf8f4e483bb6e5f702e0714623a81644991c087b17e3505d9032`,6426254 字节;源 SID `798321e8919815b8e4a6c5860be5210c8cd702a8cd7c8b280218acb539b011d4`;构造 131 作业退出码 0,42 个网全键验证 35,080,489 观察、135,914 状态一致;同候选六目标原生 CI 运行 42545543777,QUALIFIED 42/0。
 - 行为变化:(1) Linux 裸 `-c` 产出单元对象(可无 main,不能直接交宿主 ld,整程序对象用 `-c -S`);(2) tape 必须以单独一行 `.end` 结尾,无旧兼容;(3) 新增文件定位帧 `.unit N B:HEX`,预处理位置元数据升 `UNIPP2`;(4) osx/win 主机裸 `-S` 默认目标表驱动。
 - 已知缺口:s9 全批未达资格(提交档 81 项通过,daily 约 544 与 release 约 39 项未跑);Mac/Win/Linux ARM 切片只经交叉构造,原生证据仅 CI;TAPEBIN-ORIGIN-5 五个夹具与断言不符(未改断言);T1 棘轮(srcshape、drivetapebin、net-deps、八行 check-literal)限期豁免;p1-baseline、check-cx-entry 无批次;候选构造约 2 小时。
@@ -308,7 +308,7 @@ OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.
 ### 0.0.58(公开,Latest)
 - 身份:候选 APE sha256 `3744eacfa6b2472de8b18ef3d64ffad6f6a47f956d62e4a43760dee6e768632e`,6751268 字节;同候选 CI 运行 43247952428 QUALIFIED 42/0;s9 commit 档 selected=223 PASS NOT_FULL(osx 12 批不适用);release-decide QUALIFIED YES unknown=0 fail=0。
 - s9 经过:第一轮 selected=210 FAIL 1(S9-058-R3);修 cx-reaper 余量(awk 读 /proc 竞态致上限变 1000)与 s9-shards 重试切片 merge(S9-AGG-MERGE-RETRY),断言未改;第二轮首次 RUN 因克隆根 unisacc.com 无执行位作废。有 LIMIT-90-TEMP 时限临时放宽记录。
-- 已知缺口:s9 只跑 commit 档且在 main 较新提交上而非 X;release/daily 档未跑;win PE 行为只由同候选 CI 判定。现行全文仍在 plans/release-notes-0.0.58.md(账本与角色提示词引用,暂不归档)。
+- 已知缺口:s9 只跑 commit 档且在 main 较新提交上而非 X;release/daily 档未跑;win PE 行为只由同候选 CI 判定。现行全文仍在 archive/plans/release-notes-0.0.58.md(账本与角色提示词引用,暂不归档)。
 ## 2026-11-11 prd.md 重整时删去的段落（索引，非逐字；原文以 `git show 6a4fa1fa6f:prd.md` 为准）
 
 本次没有把旧段落逐字搬来，因为它们与各版发布说明重复或已被后续事实推翻。逐项列出原位置与去向：
