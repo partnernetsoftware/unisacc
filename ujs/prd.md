@@ -215,6 +215,23 @@ export uxe_dispatch(op:i64, offset:i64, value:i64) i64 version 1;
 
 `sh ./unisacc.com ujs/tests/run.cx -- --ux-link` 编译两份 `.ujs` 并在隔离浏览器中读回。独立 `.cx` 计算结果 42059，核两个缓冲区及各反例原因。直接运行 `ujs/tests/ux-link.cx` 时可传 `version`、`signature`、`bounds`、`missing`，将对应反例替换为主路径，均须退出 1。探针在临时目录导出，无线上页面改动。
 
+D1 基座切片由 `practice/uxe/base/uxe.ujs` 编译，`uxe_dispatch(op,a,b)` 提供键位位图、像素缓冲、资源字节、帧提交、单调时钟与 PCM。三个相对内存区间分别为 [0,4194304) 像素、[4194304,5242880) 资源、[5242880,6291456) PCM。像素为 RGBA8，色值以低位 R、高位 A 交给基座。单声道 PCM 固定 48000 Hz，产品写入有符号 16 位采样值，基座转为 f32。
+
+| 操作 | a | b | 返回 |
+|---|---|---|---|
+| 0 | 0 | 0 | 按 HTML 声明的物理键序给出 i64 位图 |
+| 1 | 宽 | 高 | 配置帧并返回像素数 |
+| 2 | 像素索引 | RGBA | 写入像素，返回 0 |
+| 3 | 0 | 0 | 提交帧并返回像素数 |
+| 4 | 资源字节偏移 | 待读字节数 | 向资源区起点读取并返回长度 |
+| 5 | 样本索引 | 采样值 | 写入 PCM 样本，返回 0 |
+| 6 | 样本数 | 0 | 输出 PCM，返回接受的样本数 |
+| 7 | 0 | 0 | 单调微秒 |
+| 8 | 资源区偏移 | 0 | 读回资源区字节 |
+| 9 | 0 | RGBA | 填满当前帧，返回 0 |
+
+参数越界返回 -1。浏览器宿主校验基座内存跨度，转发 DOM 输入、画布呈现与音频设备输出。白名单桥提供静态画布入口、模块加载、可选资源预取、帧回调和销毁。基座探针用 `sh ./unisacc.com ujs/tests/ux-link.cx -- base` 实测浏览器帧、键盘、资源和音频缓冲。用 `base-color` 改产品测试源的角落颜色，原期望须失败。
+
 #### 构建、顺序与验收
 
 基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。

@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D1 host probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+async function read(name) {
+  const response = await fetch(name + ".wasm");
+  if (!response.ok) throw new Error("fixture read");
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const canvas = document.querySelector("canvas");
+  const asset = new Uint8Array(await (await fetch("asset.bin")).arrayBuffer());
+  const audio = new OfflineAudioContext(1, 16, 48000);
+  let received;
+  const createBuffer = audio.createBuffer.bind(audio);
+  audio.createBuffer = (...args) => {
+    received = createBuffer(...args);
+    return received;
+  };
+  const host = createBrowserHost(canvas, ["KeyD", "Space"], asset, audio);
+  const [base, product] = await Promise.all(["base", "product"].map(read));
+  const linked = linkUxe(base, product, host);
+  host.attachMemory(linked.base.memory);
+  const run = linked.product.uxe_frame;
+  const drawn = run(0n);
+  const samples = canvas.getContext("2d");
+  const near = samples.getImageData(0, 0, 1, 1).data;
+  const far = samples.getImageData(425, 239, 1, 1).data;
+  const key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+  key("keydown", "KeyD");
+  key("keydown", "Space");
+  const both = run(1n);
+  key("keyup", "KeyD");
+  const one = run(1n);
+  dispatchEvent(new Event("blur"));
+  const none = run(1n);
+  const readback = run(2n);
+  const queued = run(3n);
+  const pcm = received.getChannelData(0);
+  result.textContent = [
+    drawn, canvas.width, canvas.height, near.join(","), far.join(","),
+    both, one, none, readback, queued, pcm[0], pcm[1], received.sampleRate,
+    run(4n), Number(run(5n) >= 0n), run(6n), run(7n)
+  ].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

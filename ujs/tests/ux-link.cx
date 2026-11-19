@@ -49,7 +49,7 @@ static int copy_fixture(const char *dir, const char *leaf, const char *source) {
     return rc != 0;
 }
 
-static int browser(const char *dir, const char *mode) {
+static int browser(const char *dir, const char *mode, int base_check) {
     char profile[350], url[380], gold[180], *out = 0;
     const char start[] = "<pre id=\"ux-link-result\">";
     const char end[] = "</pre>";
@@ -64,6 +64,11 @@ static int browser(const char *dir, const char *mode) {
     tx_snprintf(url, sizeof url, "file://%s/probe.html#%s", dir, mode);
     int gold_n = tx_snprintf(gold, sizeof gold, "%d %d %d 1 version signature trap missing",
         transfer * 1000 + transfer + clock, transfer, own);
+    if (base_check) {
+        gold_n = tx_snprintf(gold, sizeof gold,
+            "%d 426 240 10,20,30,255 200,150,100,255 3 2 0 %d 2 0.5 -0.25 48000 -1 1 -1 -1",
+            426 * 240, 3 * 10000 + 13 * 100 + 91);
+    }
     rc = cx_runv_timeout(cmd, 15, &out, &n);
     from = out ? tx_find(out, n, start, sizeof start - 1) : -1;
     if (from >= 0) {
@@ -71,7 +76,8 @@ static int browser(const char *dir, const char *mode) {
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
             pass = !rc && tx_same(out + from, to, gold, gold_n);
-            printf("CHECK_UXE_LINK mode=%s val=%.*s failed=%d\n", mode, (int)to, out + from, !pass);
+            printf("%s mode=%s val=%.*s failed=%d\n", base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
+                mode, (int)to, out + from, !pass);
         }
     }
     if (from < 0) fprintf(stderr, "UX_LINK browser rc=%d %s\n", rc, out ? out : "");
@@ -84,16 +90,29 @@ int main(int argc, char **argv) {
     char *clean[] = {"rm", "-rf", "--", dir, 0};
     size_t removed_n = 0;
     const char *mode = argc == 2 ? argv[1] : "";
+    int base_check = tx_eq(mode, "base", 5) || tx_eq(mode, "base-color", 11);
     if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
-        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8))) return 2;
+        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
-    int rc = copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-link-probe.html") ||
-        copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js") ||
-        generated(dir, "base", base_source, 0, 0) ||
-        generated(dir, "product", product_source, 0, 0) ||
-        generated(dir, "version", base_source, "version 1;", "version 2;") ||
-        generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)") ||
-        browser(dir, mode);
+    int rc = copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
+    if (base_check) {
+        int mutate = tx_eq(mode, "base-color", 11);
+        char path[320];
+        const unsigned char asset[] = {7, 13, 29, 91};
+        tx_snprintf(path, sizeof path, "%s/asset.bin", dir);
+        if (sy_write_file(path, asset, sizeof asset, 0600)) rc = 1;
+        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-base-probe.html") ||
+            generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
+            generated(dir, "product", "ujs/practice/uxe/test/ux-d1-base-product.ujs",
+                mutate ? "4284782280" : 0, "4284782281");
+    } else {
+        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-link-probe.html") ||
+            generated(dir, "base", base_source, 0, 0) ||
+            generated(dir, "product", product_source, 0, 0) ||
+            generated(dir, "version", base_source, "version 1;", "version 2;") ||
+            generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)");
+    }
+    rc = rc || browser(dir, mode, base_check);
     if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
     mm_free(removed);
     return rc;
