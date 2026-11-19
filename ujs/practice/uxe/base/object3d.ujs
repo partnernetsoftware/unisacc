@@ -2,7 +2,8 @@
 // Handles are generation:16 | (slot+1):16. Zero denotes no node; -1 rejects a stale handle.
 // Object3D, Group and Scene share the prefix. Slot byte 84 is the occupancy flag.
 native function Object3D_initArena(o_arena:i64,o_capacity:i64) i64 {
-  if(o_capacity<1 || o_capacity>14837) { return 0-1; }
+  if(o_arena<0 || o_arena>6291448 || o_arena%8!=0 || o_capacity<1 ||
+      o_capacity>(6291448-o_arena)/424) { return 0-1; }
   let o_arena_span=ux_span(o_arena,8+424*o_capacity);
   let o_write_capacity=ux_u32_put(o_arena,o_capacity);
   let o_init_index=0;
@@ -51,6 +52,12 @@ native function Object3D_create(o_new_arena:i64) i64 {
       let o_sx=ux_f64_put(o_new+400,1.0);
       let o_sy=ux_f64_put(o_new+408,1.0);
       let o_sz=ux_f64_put(o_new+416,1.0);
+      let o_diag=0;
+      while(o_diag<160) {
+        let o_local_identity=ux_f64_put(o_new+88+o_diag,1.0);
+        let o_world_identity=ux_f64_put(o_new+216+o_diag,1.0);
+        o_diag=o_diag+40;
+      }
       return o_gen*65536+o_new_index+1;
     }
     o_new_index=o_new_index+1;
@@ -249,6 +256,79 @@ function Object3D_getWorldPosition(o_point_dst,...o_point_args) {
   return o_point_result;
 }
 
+function Object3D_getWorldMatrix(o_world_arena,...o_world_args) {
+  let o_world_node=o_world_args[0];
+  let o_world_result=Object3D_updateWorldMatrix(o_world_arena,o_world_node,1,0);
+  if(o_world_result>=0) {
+    let o_world_at=Object3D_address(o_world_arena,o_world_node);
+    o_world_result=ux_u32(o_world_at+Object3D.worldMatrix);
+  }
+  return o_world_result;
+}
+
+function Object3D_getWorldQuaternion(o_qout,...o_q_args) {
+  let o_qworld=Object3D_getWorldMatrix(o_q_args[0],o_q_args[1]);
+  let o_qresult=o_qworld;
+  if(o_qworld>=0) {
+    let o_qscratch=o_q_args[2];
+    let o_qtrs=Matrix4_decompose(o_qworld,o_qscratch,o_qout,o_qscratch+24);
+    o_qresult=o_qout;
+  }
+  return o_qresult;
+}
+
+function Object3D_getWorldScale(o_sout,...o_s_args) {
+  let o_sworld=Object3D_getWorldMatrix(o_s_args[0],o_s_args[1]);
+  let o_sresult=o_sworld;
+  if(o_sworld>=0) {
+    let o_sscratch=o_s_args[2];
+    let o_strs=Matrix4_decompose(o_sworld,o_sscratch,o_sscratch+24,o_sout);
+    o_sresult=o_sout;
+  }
+  return o_sresult;
+}
+
+function Object3D_getWorldDirection(o_dout,...o_d_args) {
+  let o_dworld=Object3D_getWorldMatrix(o_d_args[0],o_d_args[1]);
+  let o_dresult=o_dworld;
+  if(o_dworld>=0) {
+    let o_dx=ux_f64(o_dworld+64); let o_dy=ux_f64(o_dworld+72); let o_dz=ux_f64(o_dworld+80);
+    let o_dlength=f64_sqrt(o_dx*o_dx+o_dy*o_dy+o_dz*o_dz);
+    if(o_dlength==0.0) { o_dlength=1.0; }
+    let o_dwrite_x=ux_f64_put(o_dout,o_dx/o_dlength);
+    let o_dwrite_y=ux_f64_put(o_dout+8,o_dy/o_dlength);
+    let o_dwrite_z=ux_f64_put(o_dout+16,o_dz/o_dlength);
+    o_dresult=o_dout;
+  }
+  return o_dresult;
+}
+
+function Object3D_setTRSPart(o_part_arena,...o_part_args) {
+  let o_part_at=Object3D_address(o_part_arena,o_part_args[0]);
+  if(o_part_at>=0) {
+    let o_part_dst=ux_u32(o_part_at+o_part_args[1]);
+    let o_part_src=o_part_args[2];
+    let o_part_bytes=o_part_args[3];
+    let o_part_offset=0;
+    while(o_part_offset<o_part_bytes) {
+      let o_part_copy=ux_f64_put(o_part_dst+o_part_offset,ux_f64(o_part_src+o_part_offset));
+      o_part_offset=o_part_offset+8;
+    }
+    let o_part_dirty=ux_u32_put(o_part_at+Object3D.dirty,3);
+  }
+  return o_part_at;
+}
+
+function Object3D_setPosition(o_position_arena,...o_position_args) {
+  return Object3D_setTRSPart(o_position_arena,o_position_args[0],Object3D.position,o_position_args[1],24);
+}
+function Object3D_setScale(o_scale_arena,...o_scale_args) {
+  return Object3D_setTRSPart(o_scale_arena,o_scale_args[0],Object3D.scale,o_scale_args[1],24);
+}
+function Object3D_setRotationFromQuaternion(o_rotation_arena,...o_rotation_args) {
+  return Object3D_setTRSPart(o_rotation_arena,o_rotation_args[0],Object3D.quaternion,o_rotation_args[1],32);
+}
+
 function Object3D_removeFromParent(o_detach_arena,...o_detach_args) {
   let o_detach_handle=o_detach_args[0];
   let o_detach_result=Object3D_address(o_detach_arena,o_detach_handle);
@@ -283,6 +363,35 @@ function Object3D_traverse(o_all,...o_all_args) {
 
 function Object3D_traverseVisible(o_visible_tree,...o_visible_args) {
   return Object3D_walk(o_visible_tree,o_visible_args[0],o_visible_args[1],o_visible_args[2],1);
+}
+
+function Object3D_traverseCallback(o_observe,...o_observe_args) {
+  let o_observe_output=o_observe_args[2];
+  let o_observe_count=Object3D_walk(o_observe_args[0],o_observe_args[1],o_observe_output,
+    o_observe_args[3],o_observe_args[4]);
+  let o_observe_index=0;
+  while(o_observe_index<o_observe_count) {
+    let o_observed=o_observe(ux_u32(o_observe_output+4*o_observe_index));
+    o_observe_index=o_observe_index+1;
+  }
+  return o_observe_count;
+}
+
+function Object3D_traverseAncestors(o_parent_observer,...o_parent_observer_args) {
+  let o_observer_tree=o_parent_observer_args[0];
+  let o_observer_at=Object3D_address(o_observer_tree,o_parent_observer_args[1]);
+  let o_observer_count=0-1;
+  if(o_observer_at>=0) {
+    o_observer_count=0;
+    let o_follow=ux_u32(o_observer_at+Object3D.parent);
+    while(o_follow!=0) {
+      let o_visit_parent=o_parent_observer(o_follow);
+      let o_visited_at=Object3D_address(o_observer_tree,o_follow);
+      o_follow=ux_u32(o_visited_at+Object3D.parent);
+      o_observer_count=o_observer_count+1;
+    }
+  }
+  return o_observer_count;
 }
 
 // Scratch receives the inverse parent matrix. Non-uniformly scaled parent chains
