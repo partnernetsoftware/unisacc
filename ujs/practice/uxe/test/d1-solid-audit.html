@@ -55,7 +55,10 @@ const auto=query.get("auto")==="1";
 const inputTest=query.get("input-test")==="1";
 const frameInterval=1000/30;
 const world=pixelWorld(buffer,query);
-let combat=combatModel(buffer,query,audio.trigger);
+function battleSound(name) {
+  if (name !== "explosion" || !query.has("no-explosion-sound")) audio.trigger(name);
+}
+let combat=combatModel(buffer,query,battleSound);
 
 const wasm=await fetch(new URL("d1-flight.wasm",import.meta.url));
 if(!wasm.ok) throw new Error("D1 飞行核读取失败");
@@ -144,7 +147,7 @@ async function restartFlight() {
   restartButton.disabled=true;
   try {
     core=(await window.host1Boot(flightProgram)).exports;
-    combat=combatModel(buffer,query,audio.trigger);
+    combat=combatModel(buffer,query,battleSound);
     cameraBank=0;
     tail.length=0;
     tick=displayed=firstFrame=previousFrame=0;
@@ -305,6 +308,9 @@ if(query.has("airframe-depth")) {
   const keys=new Set();
   const controls=["KeyA","KeyD","KeyW","KeyS","ArrowLeft","ArrowRight","ArrowUp","ArrowDown","ShiftLeft","ShiftRight","Space","KeyF","KeyM"];
   const canvas=document.querySelector("canvas");
+  let frameKeys=inputTest && query.has("frame-keys");
+  let frameBudget=1;
+  if(frameKeys) window.d1RunFrames=()=>{ frameKeys=false; };
   let pointer=null,buttons=0;
   addEventListener("keydown",event=>{
     if(event.code==="KeyN") {
@@ -324,6 +330,7 @@ if(query.has("airframe-depth")) {
     if(inputTest && query.has("wrong-key") && event.code==="KeyD") return;
     event.preventDefault();
     keys.add(event.code);
+    if(frameKeys && !event.repeat) frameBudget++;
   });
   addEventListener("keyup",event=>keys.delete(event.code));
   canvas.addEventListener("pointermove",event=>{
@@ -341,6 +348,11 @@ if(query.has("airframe-depth")) {
   function loop(now) {
     pending+=Math.min(200,now-previous);
     previous=now;
+    if(frameKeys && !frameBudget) {
+      pending=0;
+      requestAnimationFrame(loop);
+      return;
+    }
     if(now-last+.25>=frameInterval && pending+.25>=frameInterval) {
       last=now;
       const keyAxis=Number(keys.has("KeyD")||keys.has("ArrowRight"))-Number(keys.has("KeyA")||keys.has("ArrowLeft"));
@@ -349,8 +361,11 @@ if(query.has("airframe-depth")) {
       const climb=keyClimb||(pointer&&Math.abs(pointer.y)>.3?-Math.sign(pointer.y):0);
       const boost=Number(keys.has("ShiftLeft")||keys.has("ShiftRight"));
       const gun=(buttons&1)||keys.has("Space")||keys.has("KeyF"),missile=(buttons&2)||keys.has("KeyM");
-      const steps=Math.floor((pending+.25)/frameInterval);
-      pending-=steps*frameInterval;
+      const steps=frameKeys?1:Math.floor((pending+.25)/frameInterval);
+      if(frameKeys) {
+        frameBudget--;
+        pending=0;
+      } else pending-=steps*frameInterval;
       for(let i=1;i<steps;i++) frame(...prior,0,false,null,false);
       frame(axis,climb,boost,gun,missile,now);
       prior=[axis,climb,boost,gun,missile];
