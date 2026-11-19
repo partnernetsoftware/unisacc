@@ -82,6 +82,27 @@ int main(int argc, char **argv) {
         ck(rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"),
            "precommit-unstaged-other-cx-not-blocked: unstaged cx/ edit does not block staging axis-gen+arity-gen comments");
 
+        /* P3: chain-ready 15-gen-all PASS on current tree and --judge genall FAIL on DIFF */
+        {
+            char df[CGAC_PW];
+            int rc_ok, rc_bad;
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 15-gen-all", cwd, cwd))
+                cgac_abort("p3a");
+            rc_ok = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+            int ok_pass = (rc_ok == 0 && ckk_has(out, CGAC_OUT, "15-gen-all\tPASS\t") && ckk_has(out, CGAC_OUT, "READY\tyes\t"));
+            if (cx_fmt(df, sizeof df, "%s/fake-diff.tsv", work)) cgac_abort("pdf");
+            {
+                const char *bad = "GEN_CHECK\tfacts-gen\tDIFF\t120\tDIFF k2-gen2; fix: sh ./unisacc.com tools/facts-gen.cx -- --write .\n"
+                                  "GEN_ALL_SUMMARY\ttotal=1\tpass=0\tdiff=1\terror=0\tuncovered=0\tms=120\n";
+                if (cx_write(df, bad, strlen(bad))) cgac_abort("pwdf");
+            }
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --judge genall '%s' 1", cwd, cwd, df))
+                cgac_abort("p3b");
+            rc_bad = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+            int ok_fail = (rc_bad == 0 && ckk_has(out, CGAC_OUT, "FAIL\t") && ckk_has(out, CGAC_OUT, "k2-gen2"));
+            ck(ok_pass && ok_fail, "chain-ready-15-gen-all: live 15-gen-all PASS and --judge genall refuses DIFF");
+        }
+
         {
             char *rmv[] = {"rm", "-rf", work, 0};
             (void)ck_run(rmv, out, sizeof out);
@@ -156,18 +177,32 @@ int main(int argc, char **argv) {
         return ck_failures() ? 1 : 0;
     }
 
-    /* 1. Current tree: --list shows dated uncovered entries (42 generators) */
+    /* 1a. Current tree: all 42 discovered product-table generators PASS (restored full-tree assertion) */
+    {
+        int rc;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --jobs 12", cwd, cwd, cwd))
+            cgac_abort("c1a");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\ttotal=42\tpass=42\tdiff=0\terror=0\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tPASS\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\twin-argv-gen\tPASS\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tPASS\t") &&
+           ckk_has(out, CGAC_OUT, "expires=0.0.85"),
+           "current-tree-all-same: --root . passes all 42 product-table generators (diff=0 error=0)");
+    }
+
+    /* 1b. --list discovers 42 generators with dated uncovered entries (additional assertion, not replacement) */
     {
         int rc;
         if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --list", cwd, cwd, cwd))
-            cgac_abort("c1");
+            cgac_abort("c1b");
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
         ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_LIST_SUMMARY\ttotal=42\tuncovered=2") &&
            ckk_has(out, CGAC_OUT, "GEN_ITEM\tfacts-gen\t") &&
            ckk_has(out, CGAC_OUT, "GEN_ITEM\twin-argv-gen\t") &&
            ckk_has(out, CGAC_OUT, "GEN_ITEM\tcx-flatten\t") &&
            ckk_has(out, CGAC_OUT, "expires=0.0.85"),
-           "current-tree-all-same: --list discovers 42 generators with dated uncovered entries");
+           "current-tree-list-42: --list discovers 42 generators with dated uncovered entries");
     }
 
     /* 2-4. History replays (0.0.82 d20a8f64af and 0.0.83 8d79aea9b9); synthetic header drift runs on shared rep below */
@@ -231,29 +266,7 @@ int main(int argc, char **argv) {
            "bg-and-poll-roundtrip: --bg starts and --poll retrieves completed summary");
     }
 
-    /* 6. chain-ready 15-gen-all PASS on current tree and --judge genall FAIL on DIFF */
-    {
-        char df[CGAC_PW];
-        int rc_ok, rc_bad;
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 15-gen-all", cwd, cwd))
-            cgac_abort("c6a");
-        rc_ok = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_pass = (rc_ok == 0 && ckk_has(out, CGAC_OUT, "15-gen-all\tPASS\t") && ckk_has(out, CGAC_OUT, "READY\tyes\t"));
-
-        if (cx_fmt(df, sizeof df, "%s/fake-diff.tsv", work)) cgac_abort("df");
-        {
-            const char *bad = "GEN_CHECK\tfacts-gen\tDIFF\t120\tDIFF k2-gen2; fix: sh ./unisacc.com tools/facts-gen.cx -- --write .\n"
-                              "GEN_ALL_SUMMARY\ttotal=1\tpass=0\tdiff=1\terror=0\tuncovered=0\tms=120\n";
-            if (cx_write(df, bad, strlen(bad))) cgac_abort("wdf");
-        }
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --judge genall '%s' 1", cwd, cwd, df))
-            cgac_abort("c6b");
-        rc_bad = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        int ok_fail = (rc_bad == 0 && ckk_has(out, CGAC_OUT, "FAIL\t") && ckk_has(out, CGAC_OUT, "k2-gen2"));
-        ck(ok_pass && ok_fail, "chain-ready-15-gen-all: live 15-gen-all PASS and --judge genall refuses DIFF");
-    }
-
-    /* 7-10. Shared private git repo for precommit derive_gate contracts */
+    /* 7-9. Shared private git repo for precommit derive_gate blocking contracts (chain-ready 15-gen-all runs in --pass-gates) */
     {
         char rep[CGAC_PW];
         int rc;

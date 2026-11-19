@@ -866,8 +866,11 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln) {
     if (!hit) return 0;
     /* Check the staged index tree (git write-tree + git archive) rather than the dirty worktree,
        linking top-level unisacc.com into the temp tree so product-calling generators (arity-gen,
-       facts-gen) run cleanly. Bounded to 25s via ./tools/bound (kills process group, zero orphans).
-       Only DIFF blocks; generator ERROR (not DIFF) logs GEN_ALL_GATE_UNAVAILABLE and allows commit. */
+       facts-gen) run cleanly. Note: when tools/gen-all-check.cx itself is staged with edits, the
+       gate runs the worktree copy of tools/gen-all-check.cx against the staged index snapshot.
+       Bounded to 20s via ./tools/bound (kills process group, zero orphans).
+       Only DIFF blocks; generator ERROR (not DIFF) logs GEN_ALL_GATE_ERROR (stderr + session log)
+       and GEN_ALL_GATE_UNAVAILABLE and allows commit. */
     {
         const char *td = sy_tmpdir();
         const char *base_td = (td && td[0] == '/') ? td : "/tmp";
@@ -922,11 +925,17 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln) {
                     sy_eprintf("precommit: BLOCKED product-table-drift %s\n", line);
                     blocked++;
                 } else if (tx_find(gout + ga, l, "\tERROR\t", 7) >= 0) {
-                    char line[400];
+                    char line[400], lp[1200], lrec[460];
                     long cp = l < 399 ? l : 399;
+                    const char *td = sy_tmpdir();
+                    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
                     mm_copy(line, sizeof line, gout + ga, (size_t)cp);
                     line[cp] = 0;
                     sy_eprintf("precommit: GEN_ALL_GATE_ERROR %s\n", line);
+                    if (!cx_fmt(lp, sizeof lp, "%s/gen-all-gate-errors.log", base_td) &&
+                        !cx_fmt(lrec, sizeof lrec, "GEN_ALL_GATE_ERROR\t%s\n", line)) {
+                        (void)sy_append_file(lp, lrec, tx_len(lrec, sizeof lrec), 0600);
+                    }
                     err_cnt++;
                 }
             }
