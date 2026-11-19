@@ -161,6 +161,43 @@ static int good_priority(const char *s) {
 static int good_milestone(const char *s) {
     return one_of(s,"|M1|M2|M3|M4|M5|M6|M7|M8|M9|M10|M11|M12|");
 }
+static int math_evidence(const Row *r, const char *methods, const char *evidence) {
+    char stem[100], path[220], proof[145];
+    unsigned char *source_bytes=0,*gate=0,*reference=0;
+    int64_t bytes=0;
+    if(r->lane!='A' || !tx_eqz(r->milestone,"M1")) return 0;
+    tx_snprintf(proof,sizeof proof,"G-math %s",r->name);
+    if(!starts(evidence,proof)) return 0;
+    int i=0;
+    for(;r->name[i];i++) {
+        char c=r->name[i];
+        stem[i]=c>='A' && c<='Z' ? c+'a'-'A' : c;
+    }
+    stem[i]=0;
+    tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",stem);
+    int ok=!sy_read_file(path,&source_bytes,&bytes,100000);
+    tx_snprintf(path,sizeof path,"ujs/tests/%s-math.cx",stem);
+    ok=ok && !sy_read_file(path,&gate,&bytes,100000);
+    tx_snprintf(path,sizeof path,"ujs/practice/uxe/test/%s-r160.html",stem);
+    ok=ok && !sy_read_file(path,&reference,&bytes,100000);
+    if(ok) {
+        tx_snprintf(proof,sizeof proof,"G_MATH %s",r->name);
+        ok=contains((const char *)gate,proof) &&
+            contains((const char *)reference,"three.module.js");
+    }
+    const char *at=methods;
+    while(ok && *at) {
+        const char *end=at;
+        while(identifier(*end)) end++;
+        if(end==at || (*end && *end!=',')) { ok=0; break; }
+        tx_snprintf(proof,sizeof proof,"function %s_%.*s(",r->name,(int)(end-at),at);
+        ok=contains((const char *)source_bytes,proof);
+        at=*end?end+1:end;
+    }
+    mm_free(source_bytes); mm_free(gate); mm_free(reference);
+    return ok;
+}
+
 static int read_facts(const char *path,unsigned char **data,int addon) {
     int64_t n=0;
     const char *fields=addon?"name\tcategory\tmilestone\tpriority\tr160_module\n":
@@ -188,8 +225,8 @@ static int read_facts(const char *path,unsigned char **data,int addon) {
             if(!ends(f[4],".js") || !contains(f[4],"/")) return 1;
             r->evidence=f[4];
         } else {
-            // No item can claim credit until an evidence-verifying gate is added.
-            if(!one_of(f[1],"|缺|部分|不适用|")) return 1;
+            if(!one_of(f[1],"|缺|部分|不适用|已有|")) return 1;
+            if(tx_eqz(f[1],"已有") && !math_evidence(r,f[5],f[6])) return 1;
             if(tx_eqz(f[1],"不适用") &&
                !one_of(r->name,"|WebGL1Renderer|WebGPUCoordinateSystem|")) return 1;
             r->state=f[1];
@@ -222,7 +259,7 @@ static int render(void) {
     int n=tx_snprintf(result,sizeof result,"%s",header);
     for(int i=0;i<count;i++) {
         Row *r=rows+i;
-        char mapping[1024];
+        char mapping[4096];
         if(method_mapping(r,mapping,sizeof mapping)) return -1;
         int w=tx_snprintf(result+n,sizeof result-n,"%c\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
             r->lane,r->category,r->name,r->state,r->evidence,r->priority,r->milestone,r->methods,mapping);

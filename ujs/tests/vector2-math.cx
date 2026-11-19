@@ -1,0 +1,163 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int reference(double *values, int count, const char *dir) {
+    char profile[320], url[460], cwd[280], *out = 0;
+    char *args[] = {"google-chrome", "--headless=new", "--allow-file-access-from-files",
+        "--disable-background-networking", "--no-first-run", profile, "--virtual-time-budget=4000",
+        "--dump-dom", url, 0};
+    const char marker[] = "<pre id=\"r160\">[";
+    size_t size = 0;
+    if (sy_cwd(cwd, sizeof cwd)) return 1;
+    tx_snprintf(profile, sizeof profile, "--user-data-dir=%s/chrome", dir);
+    tx_snprintf(url, sizeof url, "file://%s/ujs/practice/uxe/test/vector2-r160.html", cwd);
+    int rc = cx_runv_timeout(args, 14, &out, &size);
+    long at = !rc && out ? tx_find(out, size, marker, sizeof marker - 1) : -1;
+    if (at >= 0) {
+        char *p = out + at + sizeof marker - 1, *end = 0;
+        for (int i = 0; i < count; i++) {
+            values[i] = tx_strtod(p, &end);
+            if (end == p || *end != (i + 1 == count ? ']' : ',')) { at = -1; break; }
+            p = end + 1;
+        }
+    }
+    mm_free(out);
+    return at < 0;
+}
+
+static int sample(const char *source, const char *wasm, const char *library,
+                  const char *statement, double *value) {
+    char text[34000], *out = 0, *end = 0;
+    const char marker[] = "\"value\":";
+    char *args[] = {"./ujs/ujs2wasm.com", (char *)source, "-o", (char *)wasm, "--run", 0};
+    int size = tx_snprintf(text, sizeof text,
+        "%s\nlet a=Vector2_set(0,3.0,0.0-4.0); let b=Vector2_set(16,0.0-2.0,5.0);\n%s\n",
+        library, statement);
+    if (size < 0 || size >= (int)sizeof text || sy_write_file(source, text, size, 0600)) return 1;
+    size_t n = 0;
+    int rc = cx_runv_timeout(args, 6, &out, &n);
+    long at = !rc && out ? tx_find(out, n, marker, sizeof marker - 1) : -1;
+    if (at >= 0) {
+        char *p = out + at + sizeof marker - 1;
+        *value = tx_strtod(p, &end);
+        if (end == p || *end != ',') at = -1;
+    }
+    mm_free(out);
+    return at < 0;
+}
+
+static int near(double a, double b) { return a - b <= 1e-9 && b - a <= 1e-9; }
+
+int main(int argc, char **argv) {
+    int mutate = argc == 2 && tx_eqz(argv[1], "--mutate");
+    if (argc != 1 && !mutate) return 2;
+    const char *matrix = "let v0=ux_f64_put(32,2.0);let v1=ux_f64_put(40,0.0-1.0);"
+        "let v2=ux_f64_put(56,3.0);let v3=ux_f64_put(64,4.0);"
+        "let v4=ux_f64_put(80,7.0);let v5=ux_f64_put(88,0.0-8.0);"
+        "let m=Vector2_applyMatrix3(a,32);";
+    const char *cases[] = {
+        "let r=Vector2_set(a,0.0-2.0,5.0);return ux_f64(r);",
+        "let r=Vector2_add(a,b);return ux_f64(r+8);",
+        "let r=Vector2_sub(a,b);return ux_f64(r);",
+        "let r=Vector2_multiply(a,b);return ux_f64(r+8);",
+        "let r=Vector2_divide(a,b);return ux_f64(r);",
+        "return Vector2_dot(a,b);", "return Vector2_cross(a,b);",
+        "return Vector2_lengthSq(a);", "return Vector2_length(a);",
+        "let r=Vector2_normalize(a);return ux_f64(r+8);",
+        "return Vector2_distanceToSquared(a,b);", "return Vector2_distanceTo(a,b);", "", "",
+        "let r=Vector2_copy(a,b);return ux_f64(r+8);",
+        "return Vector2_getComponent(a,1);",
+        "let r=Vector2_setComponent(a,0.0,7.5);return ux_f64(r);",
+        "let r=Vector2_setScalar(a,0.0-7.25);return ux_f64(r+8);",
+        "let r=Vector2_addScalar(a,2.5);return ux_f64(r);",
+        "let r=Vector2_multiplyScalar(a,0.0-2.0);return ux_f64(r+8);",
+        "let r=Vector2_setLength(a,10.0);return ux_f64(r);",
+        "let r=Vector2_lerp(a,0.0+b,0.25);return ux_f64(r+8);",
+        "let lo=Vector2_set(32,0.0-1.0,0.0-3.0);let hi=Vector2_set(48,2.0,2.0);"
+        "let r=Vector2_clamp(a,lo,hi);return ux_f64(r+8);",
+        "return Vector2_angle(a);",
+        "let c=Vector2_set(32,4.0,3.0);return Vector2_angleTo(a,c);",
+        "let r=Vector2_rotateAround(a,0.0+b,1.5707963267948966);return ux_f64(r);",
+        "return Vector2_manhattanLength(a);", "return Vector2_manhattanDistanceTo(a,b);",
+        "let c=Vector2_clone(32,a);return Vector2_equals(a,c);",
+        "let c=Vector2_set(32,1.5,0.0-2.25);let r=Vector2_floor(c);return ux_f64(r+8);",
+        "let c=Vector2_set(32,1.5,0.0-2.25);let r=Vector2_ceil(c);return ux_f64(r);",
+        "let c=Vector2_set(32,1.5,0.0-2.25);let r=Vector2_round(c);return ux_f64(r);",
+        "let c=Vector2_set(32,1.5,0.0-2.25);let r=Vector2_roundToZero(c);return ux_f64(r+8);",
+        "let c=Vector2_set(40,2.0,0.0-3.0);let r=Vector2_fromArray(a,32,1);return ux_f64(r+8);",
+        "let r=Vector2_toArray(a,32,1);return ux_f64(48);",
+        "let p=ux_f32_put(40,0.1);let q=ux_f32_put(44,0.2);"
+        "let r=Vector2_fromBufferAttribute(a,32,2,1,8);return ux_f64(r);",
+        "let r=Vector2_addVectors(32,a,b);return ux_f64(r);",
+        "let r=Vector2_subVectors(32,a,b);return ux_f64(r+8);",
+        "let r=Vector2_addScaledVector(a,0.0+b,0.5);return ux_f64(r+8);",
+        "let r=Vector2_subScalar(a,5.0);return ux_f64(r+8);",
+        "let r=Vector2_divideScalar(a,2.0);return ux_f64(r);",
+        "let r=Vector2_negate(a);return ux_f64(r);",
+        "let r=Vector2_lerpVectors(32,0.0+a,0.0+b,0.25);return ux_f64(r);",
+        "let r=Vector2_clampScalar(a,0.0-1.0,2.0);return ux_f64(r);",
+        "let r=Vector2_clampLength(a,0.0,2.5);return ux_f64(r+8);",
+        "let r=Vector2_setX(a,8.0);return ux_f64(r);",
+        "let r=Vector2_setY(a,0.0-9.0);return ux_f64(r+8);",
+        "let r=Vector2_min(a,b);return ux_f64(r);",
+        "let r=Vector2_max(a,b);return ux_f64(r+8);",
+        "let r=Vector2_random(a,0.125,0.625);return ux_f64(r+8);",
+        "return Vector2_getComponent(a,0)==ux_f64(a) && Vector2_getComponent(a,1)==ux_f64(a+8);",
+        "let c=Vector2_set(32,0.0-0.125,0.0);let r=Vector2_ceil(c);return 1.0/ux_f64(r)<0.0;",
+        "let c=Vector2_set(32,0.0,1.0);let d=Vector2_set(48,(0.0-1.0)*0.0,0.0-1.0);"
+        "let r=Vector2_min(c,d);return 1.0/ux_f64(r)<0.0;",
+        "let c=Vector2_set(32,0.0,0.0);let r=Vector2_normalize(c);return Vector2_length(r);",
+        "let c=Vector2_set(32,0.0,0.0);return Vector2_angleTo(c,a);"
+    };
+    enum { count = sizeof cases / sizeof cases[0] };
+    const double gold[count] = {-2,1,5,-20,-1.5,-26,7,25,5,-0.8,106,10.295630140987,1,-27,
+        5,-4,7.5,-7.25,5.5,8,6,-1.75,-3,5.355890089177974,1.5707963267948966,7,
+        7,14,1,-3,2,2,-2,-3,-4,(double)(float)0.1,1,-9,-1.5,-9,1.5,-3,1.75,2,-2,8,-9,-2,5,0.625,1,
+        1,1,0,1.5707963267948966};
+    double oracle[count];
+    unsigned char *vector = 0, *views = 0, *math = 0;
+    char library[31000];
+    int64_t n = 0;
+    char dir[256], source[320], wasm[320];
+    int rc = sy_read_file("ujs/practice/uxe/base/vector2.ujs", &vector, &n, 20000) ||
+        sy_read_file("ujs/practice/uxe/base/views.ujs", &views, &n, 3500) ||
+        sy_read_file("ujs/practice/uxe/base/f64-math.ujs", &math, &n, 8500);
+    int length = rc ? -1 : tx_snprintf(library, sizeof library, "%s\n%s\n%s", math, views, vector);
+    mm_free(vector); mm_free(views); mm_free(math);
+    if (length < 0 || length >= (int)sizeof library ||
+        sy_mkdtemp("/tmp", "ujs-vector2-", dir, sizeof dir)) return 2;
+    tx_snprintf(source, sizeof source, "%s/probe.ujs", dir);
+    tx_snprintf(wasm, sizeof wasm, "%s/probe.wasm", dir);
+    int failed = reference(oracle, count, dir);
+    for (int i = 0; !failed && i < count; i++) {
+        char statement[500];
+        const char *code = cases[i];
+        if (i == 12 || i == 13) {
+            tx_snprintf(statement, sizeof statement, "%s return ux_f64(m+%d);", matrix, (i - 12) * 8);
+            code = statement;
+        }
+        if (mutate && i == 1) code = "let r=Vector2_sub(a,b);return ux_f64(r+8);";
+        double actual = 0;
+        if (sample(source, wasm, library, code, &actual) ||
+            !near(actual, gold[i]) || !near(oracle[i], gold[i])) {
+            printf("VECTOR2 case=%d actual=%.17g r160=%.17g gold=%.17g\n", i, actual, oracle[i], gold[i]);
+            failed = 1;
+        }
+    }
+    if (!failed) {
+        double status = 0;
+        failed = sample(source, wasm, library,
+            "return Vector2_toArray(a,32,9223372036854775807);", &status) || status != -1;
+    }
+    char *clean[] = {"rm", "-rf", "--", dir, 0};
+    char *output = 0;
+    size_t size = 0;
+    if (cx_runv_timeout(clean, 5, &output, &size)) failed = 1;
+    mm_free(output);
+    printf("G_MATH Vector2 cases=%d failed=%d\n", count, failed);
+    return failed;
+}

@@ -141,6 +141,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): C8 用 `sh ./unisacc.com ujs/tests/f64-bench.cx -- baseline 20000` 与 `-- unroll 12000` 检查本机编译与 host1 执行。两个输入都内联同一个加法函数并执行 10000000 次 f64 加法，`.cx` 金值为 1250001。三次实测普通循环中位数 15387 ms，手工四路展开中位数 8306 ms，生成物分别为 2191 和 2282 字节。上限单位为毫秒，供同机回归。该基线包含 host1 启动开销，未测浏览器吞吐，也未引入自动展开优化。`-- mutate` 把循环变为一次，原金值不变。
 
+修订(cdx2): M1 Vector2 在基座缓冲区使用两个连续 f64，调用者为 clone 等操作提供目标偏移。三角函数沿用 C2 角度域，BufferAttribute 适配连续 f32 记录，随机数由调用者注入，宽高和遍历通过分量接口读取。用 `sh ./unisacc.com ujs/tests/vector2-math.cx` 复跑 55 项 r160 JSON 和独立金值对照，另检查越界数组索引。`--mutate` 用减法替换加法检验断言。此门和 M0 的编译器检查使用 `ujs/ujs2wasm.com`，须先用 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。清单生成和 `--check` 只读受跟踪的源码与证据入口。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
