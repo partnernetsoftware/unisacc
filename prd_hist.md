@@ -252,9 +252,9 @@ OSX-LAUNCH-SLOW宿主分账：Rosetta两批是在ARM宿主强制arch x86_64的�
 
 OSX-LAUNCH-SLOW完成审计补漏：01b16候选CI42551819720已全六目标成功，但热shell每次创建lease而仅cold清理，会在长期热调用后积累死lease触4096扫描预算，故不是最终交付。修tools/cache-retain新增轻量--touch全SHA模式，复用同inode但不digest MB载荷，严格marker/root/lock/parentPID并清本tool全部dead lease、保留active/EPERM、更新recency和新lease；full mode仍cold做完整摘要/四载荷清理。健康新缓存不积累；既有超预算目录不宣称自动恢复，保留隔离fallback。双manager将新构造，必须新候选SHA及新CI，不迁01b16绿。
 
-OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；本车道负责version事实/配套站点、热lease维护、固定四Mac成员与重包接口，cc独占.github/workflows/macos-sign.yml、tools/macos-signing.cx、plans/macos-signing.md，本车道不改。草稿附members.tsv五角色及四Mac独立资产，最终tag/candidateSHA/member清单SHA写release/candidate-osx-launch.tsv并交cc触真签。版本必须实际新源构造，不把0.0.48 wrapper候选冒称0.0.48.1；签后四成员显式替换重包保留字节，新签后身份重新资格，不沿用未签CI。旧01b16已六目标CI成功但lease缺口/版本不满足最终裁定，仍仅历史对照。
+OSX-LAUNCH-SLOW cc协同新裁定：最终目标改为0.0.48.1可发布候选；本车道负责version事实/配套站点、热lease维护、固定四Mac成员与重包接口，cc独占.github/workflows/macos-sign.yml、tools/macos-signing.cx、plans/macos-signing.md，本车道不改。草稿附members.tsv五角色及四Mac独立资产，最终tag/candidateSHA/member清单SHA写archive/pre080/release/candidate-osx-launch.tsv并交cc触真签。版本必须实际新源构造，不把0.0.48 wrapper候选冒称0.0.48.1；签后四成员显式替换重包保留字节，新签后身份重新资格，不沿用未签CI。旧01b16已六目标CI成功但lease缺口/版本不满足最终裁定，仍仅历史对照。
 
-OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到release/candidate-osx-launch-rc1.tsv，当前release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。
+OSX-LAUNCH-SLOW签名交接防误用：旧01b16/0.0.48六目标42/0候选表移到archive/pre080/release/candidate-osx-launch-rc1.tsv，当前archive/pre080/release/candidate-osx-launch.tsv仅在新0.0.48.1完整六片/四固定Mac成员/members.tsv实际就绪后重建并通知cc，避免把旧版本或lease缺口候选误绑首真签。暂缺当前表不是新候选身份，不写零SHA冒名。
 
 OSX-LAUNCH-SLOW新源Linux构造入口缺口：两目标首批尚未构造对象即被entry-build覆盖UNISA_CONTAINER拒绝；显式constructor仅认bare ELF，Mac裸片被错误unset包。正规entry接口已声明显式constructor直接执行，现补Mach-O64识别保留同显式P4，APE/薄头仍清外部包；不换产品源/NN/SID，不以shell包装掩盖构造器身份。失败OUT保留，新native工具与新冻结源根另开批次，最终完整44根/closure/link逐项核。
 
@@ -288,7 +288,7 @@ OSX签后重包命令交付已实证：research/c48-osx-sign-rosetta/repack-cmd.
 
 0.0.48.1 macOS发行附件裁定：cc确认run42561596269完成签->重包->DMG->公证Accepted->staple，本机Gatekeeper/ARM及Rosetta -run7与热0.22s验收通过。公开0.0.48.1时必须附该run的macos-stapled-dmg内最终DMG，并明确Intel实机/macOS13未测。本车道先取artifact核staple后完整SHA、验证签名/票据，将同字节DMG及独立SHA附件准备到现0.0.48.1草稿，发布说明写入待发布文案；不据本通知提前公开/改Latest，不改cc三签名路径。签后APE身份与原未签bdd42/0继续分账。
 
-0.0.48.1 macOS附件已就绪：从run42561596269/macos-stapled-dmg下载并核post-staple DMG6e25e7c9f9efec717c1a0cf33bc7a35ad8c2bfccc2a0b2ab9e807ff2b40f0cc0/5475910B，stapler validate0、Gatekeeper accepted(Notarized Developer ID)。以unisacc-0.0.48.1-macos.dmg及独立sha256资产附到现v0.0.48.1-osx-launch-rc1草稿，上传真实0且远端重新下载SHA核同。发布说明plans/release-notes-0.0.48.1.md与release/macos-0.0.48.1.tsv固定run/DMG/内嵌签后APE988a528d…身份，明确Intel实机/macOS13未测，原bdd未签42/0不迁用。公开仍待按原发布流程执行，不修改Latest/cc三路径。
+0.0.48.1 macOS附件已就绪：从run42561596269/macos-stapled-dmg下载并核post-staple DMG6e25e7c9f9efec717c1a0cf33bc7a35ad8c2bfccc2a0b2ab9e807ff2b40f0cc0/5475910B，stapler validate0、Gatekeeper accepted(Notarized Developer ID)。以unisacc-0.0.48.1-macos.dmg及独立sha256资产附到现v0.0.48.1-osx-launch-rc1草稿，上传真实0且远端重新下载SHA核同。发布说明plans/release-notes-0.0.48.1.md与archive/pre080/release/macos-0.0.48.1.tsv固定run/DMG/内嵌签后APE988a528d…身份，明确Intel实机/macOS13未测，原bdd未签42/0不迁用。公开仍待按原发布流程执行，不修改Latest/cc三路径。
 
 ---
 

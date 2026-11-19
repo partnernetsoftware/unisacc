@@ -59,3 +59,16 @@
 | [archive/pre080/docs/sweep/md-disposition/plans-research.tsv](pre080/docs/sweep/md-disposition/plans-research.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
 | [archive/pre080/docs/sweep/md-targets/core-docs.tsv](pre080/docs/sweep/md-targets/core-docs.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
 | [archive/pre080/docs/sweep/md-targets/plans-research.tsv](pre080/docs/sweep/md-targets/plans-research.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/release/candidate-osx-launch.tsv](pre080/release/candidate-osx-launch.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/candidate-osx-launch-rc1.tsv](pre080/release/candidate-osx-launch-rc1.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/candidate-osx-launch-members.tsv](pre080/release/candidate-osx-launch-members.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/macos-0.0.48.1.tsv](pre080/release/macos-0.0.48.1.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/rulings.tsv](pre080/release/rulings.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/ruling-requests.tsv](pre080/release/ruling-requests.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/preauth.tsv](pre080/release/preauth.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.72-chain4-strict-2026-11-18.tsv](pre080/release/evidence/v0.0.72-chain4-strict-2026-11-18.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.72-final-strict-2026-11-18.tsv](pre080/release/evidence/v0.0.72-final-strict-2026-11-18.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.72-strict-cache-2026-11-18.tsv](pre080/release/evidence/v0.0.72-strict-cache-2026-11-18.tsv) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.md](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.md) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch.sha256](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch.sha256) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
