@@ -4,6 +4,7 @@
  * verify the pinned executable and canonical receipt before returning it.
  * The candidate is only read for an anti-alias digest, never executed. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use sys.env
@@ -18,11 +19,16 @@ static const char *flat_sha="8cc702bd2d9ad907ef95de04a688131330f1af1fee49f7bdffe
 static const char *source_manifest_sha="1ab4757b5c1de7283aef9f409792d7b7e9a312d6f6005dcd24448b55b79306b0";
 static const char *wrapped_sha="e8f4765be03a5ed8e07aacef1c6d18dc7765ea259623864f1be7f9e7848f738e";
 static const char *elf_sha="0ed4619207624995b69cb04787ed36df50dfe5cc07edb4b2988ae554143a5aa3";
+static const char *exporter_sha="4edc486a0b65d19324baab59d1bff266e4f4caad7e3939058e6665c916e85bb5";
+static const char *archive_sha="678bc8451ea368cb911fe02bf8bc0eae887dcc06355105356174bb2d20349495";
 static const char *cc_sha="821af3c74506283c179ca413bb33e6b528805a4dd8a5c09df125e5ad560a9e89";
+#define REF_OPT "-O2"
 static char work[4096],publish_dir[4096],receipt[2048];
+static const char *checking_cache;
 static long started;
 
 static void stop(int rc,const char *reason){
+    if(checking_cache)fprintf(stderr,"REF_MATERIAL_CACHE_CORRUPT\treason=%s\tretained=%s\trecovery=preserve evidence, then remove this cache directory and run prepare again\n",reason,checking_cache);
     fprintf(stderr,"REF_MATERIAL\t%s\treason=%s\n",rc==3?"UNVERIFIED":"REFUSE",reason);
     exit(rc);
 }
@@ -60,14 +66,15 @@ static void command(char **args,const char *dir,int seconds,int rc,const char *r
     np_free(&r);if(failed)stop(rc,reason);
 }
 static void profile(void){
-    char compiler[4096],sha[65];
+    char compiler[4096],sha[65],recipe[65];
+    digest(__FILE__,recipe);
     if(!realpath("/usr/bin/cc",compiler))stop(3,"hostcc-unavailable");
     digest(compiler,sha);if(!tx_eqz(sha,cc_sha))stop(3,"unreviewed-host-toolchain");
     char *host[]={"/usr/bin/uname","-sm",0},*target[]={compiler,"-dumpmachine",0};
     command(host,0,3,3,"unsupported-host","Linux x86_64\n");
     command(target,0,3,3,"unsupported-compiler-target","x86_64-linux-gnu\n");
-    if(cx_fmt(receipt,sizeof receipt,"ref-material-v2\nstatus\tPREPARED\ncommit\t%s\ntree\t%s\nflat\t%s\nsource-manifest\t%s\nwrapped-C\t%s\nhost\tLinux x86_64\ncompiler\t%s\ncompiler-sha256\t%s\ntarget\tx86_64-linux-gnu\nflags\t-w -std=c99 -O2\nheaders-sha256\t%s\nartifact\t%s\n",
-        commit_id,tree_id,flat_sha,source_manifest_sha,wrapped_sha,compiler,sha,rw_header_sha(),elf_sha))stop(2,"receipt-bound");
+    if(cx_fmt(receipt,sizeof receipt,"ref-material-v3\nstatus\tPREPARED\ncommit\t%s\ntree\t%s\nflat\t%s\nsource-manifest\t%s\nwrapped-C\t%s\nhost\tLinux x86_64\ncompiler\t%s\ncompiler-sha256\t%s\ntarget\tx86_64-linux-gnu\nflags\t-w -std=c99 " REF_OPT "\nheaders-sha256\t%s\nartifact\t%s\nexporter\t%s\nrecipe-source-sha256\t%s\n",
+        commit_id,tree_id,flat_sha,source_manifest_sha,wrapped_sha,compiler,sha,rw_header_sha(),elf_sha,exporter_sha,recipe))stop(2,"receipt-bound");
 }
 static void verify(const char *dir){
     char p[4096];sy_stat_t st;unsigned char *s;int64_t n;
@@ -80,10 +87,14 @@ static void verify(const char *dir){
     if(bad)stop(2,"receipt-mismatch");
     if(!rw_verify(dir))stop(2,"frozen-include-sha-mismatch");
 }
-static void build(const char *repo,const char *out){
+static void build(const char *repo,const char *fallback,const char *out){
     char tree_spec[80],tree_line[64],parent[4096],archive_opt[4400],p[4096];
     if(cx_fmt(tree_spec,sizeof tree_spec,"%s^{tree}",commit_id)||cx_fmt(tree_line,sizeof tree_line,"%s\n",tree_id))stop(2,"tree-bound");
     char *rev[]={"/usr/bin/git","--no-replace-objects","-C",(char *)repo,"rev-parse","--verify",tree_spec,0};
+    char why[256];np_result probe={0};
+    char *probe_v[]={"/usr/bin/env","-i","GIT_NO_LAZY_FETCH=1","GIT_ALLOW_PROTOCOL=","/usr/bin/git","--no-replace-objects","-C",(char *)repo,"rev-parse","--verify",tree_spec,0};
+    if(np_run(probe_v,0,0,4,&probe,why,sizeof why)||probe.rc)repo=fallback;
+    np_free(&probe);rev[3]=(char *)repo;
     command(rev,0,4,3,"frozen-source-unavailable",tree_line);
     if(tx_copy(parent,sizeof parent,out,strlen(out)))stop(2,"path-bound");
     char *end=strrchr(parent,'/');if(!end||!end[1])stop(2,"output-path");*end=0;
@@ -93,8 +104,10 @@ static void build(const char *repo,const char *out){
     char *archive[]={"/usr/bin/git","--no-replace-objects","-C",(char *)repo,"archive","--format=tar",archive_opt,(char *)commit_id,
         "unisacc.c","kernel","src","include","tools/sourceflat.cx","tools/refshim.h","tools/reffoot.h",0};
     command(archive,0,8,3,"frozen-source-unavailable",0);
+    path(p,work,"source.tar");match(p,archive_sha,"archive-sha-mismatch");
     char *unpack[]={"/usr/bin/tar","-xf","source.tar",0};
     command(unpack,work,5,2,"archive-extract",0);
+    path(p,work,"tools/sourceflat.cx");match(p,exporter_sha,"exporter-sha-mismatch");
     char *exportcc[]={"/usr/bin/cc","-w","-std=c99","-include","include/cx.h","-x","c","tools/sourceflat.cx","-o","exporter",0};
     command(exportcc,work,8,2,"exporter-compile",0);
     char *exporter[]={"./exporter","flat.c",0};command(exporter,work,8,2,"source-export",0);
@@ -110,16 +123,55 @@ static void build(const char *repo,const char *out){
     path(p,work,"ua_ref.c");match(p,wrapped_sha,"wrapped-mismatch");
     if(sy_mkdtemp(parent[0]?parent:"/","ref-publish-",publish_dir,sizeof publish_dir))stop(2,"stage-create");
     path(p,publish_dir,"ua_ref");
-    char *cc[]={"/usr/bin/cc","-w","-std=c99","-O2","ua_ref.c","-o",p,0};
+    char *cc[]={"/usr/bin/cc","-w","-std=c99",REF_OPT,"ua_ref.c","-o",p,0};
     command(cc,work,40,2,"reference-compile",0);
     char *copy[]={"/bin/cp","-a","include",publish_dir,0};
     command(copy,work,4,2,"frozen-include-export",0);
     path(p,publish_dir,"material.tsv");if(sy_write_file(p,receipt,strlen(receipt),0600))stop(2,"receipt-write");
+    char tar[4096];path(tar,work,"source.tar");path(p,publish_dir,"source.tar");
+    if(sy_copy(tar,p,0600))stop(2,"archive-cache-copy");
     verify(publish_dir);
     int rc=sy_rename(publish_dir,out);
     if(!rc)publish_dir[0]=0;
     if(rc&&rc!=-EEXIST&&rc!=-ENOTEMPTY)stop(2,"publish");
     /* Another producer may already have published the same material. */
+}
+static void directory(const char *p){
+    sy_stat_t s;int rc=sy_mkdir(p,0700);
+    if((rc&&rc!=-EEXIST)||sy_lstat(p,&s)||s.kind!='d')stop(2,"cache-directory");
+}
+static void prepare(const char *repo,const char *out){
+    char base[4096],parent[4096],key[256],cache[4096],lock[4096],p[4096],shared[4096];
+    const char *home=getenv("HOME"),*custom=getenv("UNISACC_REF_CACHE_DIR"),*fallback=getenv("UNISACC_REF_SOURCE_REPO");
+    if(!home||home[0]!='/')stop(3,"cache-home-unavailable");
+    if(!fallback){path(shared,home,"repos/unisacc");fallback=shared;}
+    if(custom){if(custom[0]!='/'||tx_copy(base,sizeof base,custom,strlen(custom)))stop(2,"cache-path");}
+    else{path(parent,home,".cache");directory(parent);path(p,parent,"unisacc");directory(p);path(base,p,"ref-material");}
+    directory(base);
+    if(sy_sha256_any_hex(receipt,strlen(receipt),key))stop(2,"cache-key");
+    path(cache,base,key);if(cx_fmt(lock,sizeof lock,"%s.lock",cache))stop(2,"cache-lock-path");
+    int fd=sy_open(lock,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0)stop(2,"cache-lock-open");
+    int rc;while((rc=sy_flock(fd,2|4))!=0){
+        if(rc!=-EAGAIN&&rc!=-EWOULDBLOCK)stop(2,"cache-lock");
+        if(sy_now_ms()-started>=50000)stop(3,"cache-lock-window");
+        sy_sleep_ms(50);
+    }
+    sy_stat_t st;rc=sy_lstat(cache,&st);
+    if(rc==-ENOENT)build(repo,fallback,cache);else if(rc)stop(2,"cache-stat");
+    checking_cache=cache;
+    verify(cache);path(p,cache,"source.tar");match(p,archive_sha,"archive-sha-mismatch");
+    checking_cache=0;
+    if(tx_copy(parent,sizeof parent,out,strlen(out)))stop(2,"output-path");
+    char *end=strrchr(parent,'/');if(!end||!end[1])stop(2,"output-path");*end=0;
+    if(sy_mkdtemp(parent[0]?parent:"/","ref-layout-",publish_dir,sizeof publish_dir))stop(2,"layout-stage");
+    if(atexit(cleanup))stop(2,"cleanup-hook");
+    char *v[]={"/bin/cp","-a","ua_ref","material.tsv","include",publish_dir,0};
+    command(v,cache,5,2,"layout-export",0);verify(publish_dir);
+    rc=sy_rename(publish_dir,out);
+    if(!rc)publish_dir[0]=0;
+    else if(rc!=-EEXIST&&rc!=-ENOTEMPTY)stop(2,"layout-publish");
+    sy_close(fd);
 }
 int main(int argc,char **argv){
     started=sy_now_ms();
@@ -127,7 +179,7 @@ int main(int argc,char **argv){
     char cand[4096],sha[65];if(!realpath(argv[3],cand))stop(2,"candidate-unreadable");
     digest(cand,sha);if(tx_eqz(sha,elf_sha))stop(2,"candidate-is-reference");
     profile();sy_stat_t st;int rc=sy_lstat(argv[4],&st);
-    if(rc==-ENOENT&&tx_eqz(argv[1],"prepare"))build(argv[2],argv[4]);
+    if(rc==-ENOENT&&tx_eqz(argv[1],"prepare"))prepare(argv[2],argv[4]);
     else if(rc)stop(rc==-ENOENT?3:2,"material-unavailable");
     verify(argv[4]);
     printf("REF_MATERIAL\tPREPARED\tcommit=%s\texport=%s\theaders_sha256=%s\tsha256=%s\tpath=%s/ua_ref\n",commit_id,argv[4],rw_header_sha(),elf_sha,argv[4]);

@@ -5,6 +5,7 @@
  * Only this check's exclusive temporary directory is modified. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use refworkspace
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
@@ -58,9 +59,19 @@ int main(int argc,char **argv){
     char *init[]={"/usr/bin/git","init","--bare","-q",empty,0};
     char *compile[]={"sh",ape,source,"-o",driver,0};
     if(!call(init,4,0,0)||!call(compile,15,0,0))return 2;
-    check(probe("prepare",empty,ape,fresh,3,"frozen-source-unavailable")&&sy_exists(fresh)==0,"missing-frozen-tree-unverified-no-publication");
+    char cache[4096],fallback[4096],again[4096];
     const char *repo=getenv("UNISACC_REF_SOURCE_REPO"),*prepared=getenv("UNISACC_REF_MATERIAL_DIR");
-    if(!repo||!*repo)repo=root;
+    if(repo&&*repo){if(!realpath(repo,fallback))return 2;}
+    else path(fallback,getenv("HOME"),"repos/unisacc");
+    path(cache,temp,"cache");path(again,temp,"again");
+    if(setenv("UNISACC_REF_CACHE_DIR",cache,1)||setenv("UNISACC_REF_SOURCE_REPO",empty,1))return 2;
+    check(probe("prepare",empty,ape,fresh,3,"frozen-source-unavailable")&&sy_exists(fresh)==0,"missing-frozen-tree-unverified-no-publication");
+    if(setenv("UNISACC_REF_SOURCE_REPO",fallback,1))return 2;
+    int built=probe("prepare",empty,ape,fresh,0,"REF_MATERIAL\tPREPARED");
+    check(built,"layout-without-object-uses-frozen-shared-source");if(!built)return 1;
+    if(setenv("UNISACC_REF_SOURCE_REPO",empty,1))return 2;
+    check(probe("prepare",empty,ape,again,0,"REF_MATERIAL\tPREPARED"),"new-layout-without-any-source-uses-verified-cache");
+    repo=empty;
     if(!prepared||!*prepared)prepared=fresh;
     int ready=probe(tx_eqz(prepared,fresh)?"prepare":"verify",repo,ape,prepared,0,"REF_MATERIAL\tPREPARED");
     check(ready,"pinned-real-compiler-prepared");if(!ready)return 1;
@@ -80,5 +91,15 @@ int main(int argc,char **argv){
     const char *wrapper="#!/bin/sh\nexec ./unisacc.com \"$@\"\n";
     if(sy_write_file(bin,wrapper,strlen(wrapper),0700))return 2;
     check(probe("verify",empty,ape,copy,2,"artifact-sha-mismatch"),"forwarding-script-refused");
+    char keydir[4096],archive[4096],invalid[4096];
+    path(p,fresh,"material.tsv");size_t size;char key[65],*bytes=cx_read(p,&size);
+    if(!bytes||sy_sha256_any_hex(bytes,size,key))return 2;
+    free(bytes);path(keydir,cache,key);
+    path(archive,keydir,"source.tar");path(invalid,temp,"invalid");
+    path(p,keydir,"ua_ref");flip(p);
+    check(probe("prepare",empty,ape,invalid,2,"REF_MATERIAL_CACHE_CORRUPT\treason=artifact-sha-mismatch\tretained=")&&sy_exists(invalid)==0,"changed-persistent-elf-refused-before-copy");flip(p);
+    path(p,keydir,"include/stdio.h");flip(p);
+    check(probe("prepare",empty,ape,invalid,2,"REF_MATERIAL_CACHE_CORRUPT\treason=frozen-include-sha-mismatch\tretained=")&&sy_exists(invalid)==0,"changed-persistent-headers-refused-before-copy");flip(p);
+    flip(archive);check(probe("prepare",empty,ape,invalid,2,"archive-sha-mismatch")&&sy_exists(invalid)==0,"changed-persistent-archive-refused");
     printf("CHECK_REF_MATERIAL\tpassed=%d\tfailed=%d\n",passed,failed);return failed?1:0;
 }
