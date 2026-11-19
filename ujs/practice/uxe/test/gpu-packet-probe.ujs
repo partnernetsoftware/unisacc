@@ -145,9 +145,57 @@ native function probe_textured(packet:i64,capacity:i64,mode:i64) i64 {
   let texelA=ux_u32_put(8000,4278190335);
   let texelB=ux_u32_put(8004,4278255360);
   if(mode==62) { let changed=ux_u32_put(8004,4294901760); }
-  let textured=GpuPacket_drawTexture(packet,capacity,4000,3,ts,7900);
+  let table=GpuTextureTable_init(8500,2);
+  let handle=GpuTextureTable_create(table,7900);
+  if(handle<0) { return handle; }
+  let textured=GpuTextureTable_draw(table,handle,packet,capacity,4000,3,ts);
+  let disposed=GpuTextureTable_dispose(table,handle);
   if(textured<0) { return textured; }
   return GpuPacket_submit(packet);
+}
+
+native function probe_texture_lifecycle(mode:i64) i64 {
+  let before=ux_u32_put(8996,123456789);
+  let after=ux_u32_put(9076,987654321);
+  let table=GpuTextureTable_init(9000,2);
+  if(table<0 || GpuTextureTable.size+2*GpuTextureSlot.size!=76) { return 0-100; }
+  let width=ux_u32_put(7900,2);
+  let height=ux_u32_put(7904,1);
+  let filter=ux_u32_put(7908,0);
+  let ws=ux_u32_put(7912,0);
+  let wt=ux_u32_put(7916,0);
+  let address=ux_u32_put(7920,8000);
+  let one=GpuTextureTable_create(table,7900);
+  let two=GpuTextureTable_create(table,7900);
+  if(one!=65537 || two!=65538 || GpuTextureTable_create(table,7900)!=0-2) { return 0-101; }
+  let v1=GpuTextureTable_version(table,one);
+  let edit=ux_u32_put(7908,1);
+  let v2=GpuTextureTable_update(table,one,1,7900);
+  if(v1!=1 || v2!=2 || GpuTextureTable_update(table,one,1,7900)!=0-4) { return 0-102; }
+  let entry=gpu_texture_source(table,one);
+  if(ux_u32(entry+GpuTextureSource.filter)!=1) { return 0-103; }
+  let malformed=ux_u32_put(7900,0);
+  if(GpuTextureTable_update(table,one,2,7900)!=0-3 || GpuTextureTable_version(table,one)!=2) { return 0-104; }
+  let restore=ux_u32_put(7900,2);
+  let close=GpuTextureTable_dispose(table,one);
+  if(mode==101) { let corrupt=ux_u32_put(9000+GpuTextureTable.size+GpuTextureSlot.generation,1); }
+  if(close!=0 || gpu_texture_source(table,one)!=0-1 || GpuTextureTable_dispose(table,one)!=0-1) { return 0-105; }
+  let cycles=0;
+  while(cycles<1000) {
+    let reuse=GpuTextureTable_create(table,7900);
+    if(reuse!=(cycles+2)*65536+1 || gpu_texture_source(table,one)!=0-1 ||
+       GpuTextureTable_update(table,one,2,7900)!=0-1 || GpuTextureTable_version(table,reuse)!=1 ||
+       GpuTextureTable_dispose(table,reuse)!=0 || ux_u32(table+GpuTextureTable.live)!=1) { return 0-106; }
+    cycles=cycles+1;
+  }
+  let last=GpuTextureTable_dispose(table,two);
+  if(last!=0 || ux_u32(table+GpuTextureTable.capacity)!=2 || ux_u32(table+GpuTextureTable.live)!=0 ||
+     ux_u32(table+GpuTextureTable.peak)!=2 || ux_u32(8996)!=123456789 || ux_u32(9076)!=987654321) { return 0-107; }
+  if(mode==102) { return ux_u32(table+GpuTextureTable.capacity); }
+  if(mode==103) { return ux_u32(table+GpuTextureTable.peak); }
+  if(mode==104) { return ux_u32(table+GpuTextureTable.live); }
+  if(mode==105) { return ux_u32(table+GpuTextureTable.size+GpuTextureSlot.generation); }
+  return cycles;
 }
 
 let capacity=2048;
@@ -155,6 +203,7 @@ if(mode==16) { capacity=24; }
 let stamp=1;
 if(mode==11) { stamp=2; }
 let packet=GpuPacket_begin(0,capacity,stamp);
+if(mode>=100) { return probe_texture_lifecycle(mode); }
 if(mode>=60) { return probe_textured(packet,capacity,mode); }
 if(mode>=40) { return probe_basic(packet,capacity,mode); }
 if(mode>=20) {

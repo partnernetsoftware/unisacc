@@ -18,7 +18,7 @@
 
 ## 直接续作
 
-(1) M5 纹理生命周期。跟进 `gpu-packet.ujs` 的 `GpuTextureSource` 与 `gpu-host-abi.js` 操作 13。当前纹理随绘制创建释放，后续需按代数验证句柄复用、更新、释放，以及颜色空间、像素存储状态、尺寸与错误条件。Texture 的矩阵构造复用 `Matrix3_setUvTransform`。GPU 当前没有登记为正式导出页的完整启动桥，增加宿主能力时更新 `uxe-host-budget.cx` 中已审阅的闭包摘要。
+(1) M5 纹理生命周期。`gpu-texture-table.ujs` 已验证 Wasm 固定容量、句柄代数、更新版本、释放与千次回收，纹理描述与像素地址由调用者提供，绘制时复制进包。WebGL 纹理随绘制创建释放，下一步补持久 GPU 句柄、失效与回收，以及颜色空间和像素存储状态。CubeTexture、DataTexture、CanvasTexture 的专用输入合同仍需补齐。Texture 矩阵复用 `Matrix3_setUvTransform`。增加宿主能力时更新 `uxe-host-budget.cx` 中审阅后的闭包摘要。
 
 (2) M5 Phong 和 Standard。当前在 `gpu-material-phong.ujs` 与 `gpu-material-standard.ujs` 计算直接光切片。在同一正交相机下分别画球和立方体，顶点从现有几何生成器取得，使用插值法线算逐片元光照。r160 分别用 MeshPhongMaterial 与 MeshStandardMaterial，.cx 单独取内部高光、漫反射和阴影侧，边缘像素另计。为 Phong 和 Standard 分别造一个材料参数反例。PBR 像素差上限按规划 4%。
 
