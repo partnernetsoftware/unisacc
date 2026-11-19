@@ -17,7 +17,7 @@
 | **调用约定不是 SysV / AAPCS64**：参数经 tape 栈压入弹出（`TO_PUSH`/`TO_POP`、`@call.frame`），返回值在 r0；x86-64 与 Linux arm64 的 tape 栈就是进程栈（r7 = sp），Windows arm64 自带栈 | `exec/lower/` 栈帧规则与原 C 参考 | 与 cc 编译的函数**不能直接互调**；需要适配序（thunk），见 §3 矩阵 |
 | 入口是 `_start`：先 `__init`（全部单元的全局初始化），再把 argc/argv 写进自己的单元，再 `call main`；不依赖 crt | `exec/parse2/` 与原 C 参考入口序言 | `.o` 导出全局 `_start`，`ld` 不需要 crt1；被 crt 启动（`main` 由 C 运行时调用）要等调用约定适配 |
 | `extern int x;` 没有定义时被**当作定义**（静默分配）；未定义函数报错 `undefined function` | 2026-10-01 用参考编译器实测 | 跨目标文件引用数据符号需要把 extern 变成 `UND` 符号，这是前端改动，排 0.0.17 |
-| 后端早期三份实现必须逐字节一致：原 Python 构造源头、原 C 参考、产品模型路由（`exec/enc/` 生成 `elf.net`）；现由 `tests/objects.cx` 与 `tests/run.cx` 对拍 | [../ARCHITECTURE.md](../ARCHITECTURE.md) 后端行、`exec/pipeline/image-stages.tsv` | `.o` 写出先在参考侧落地，产品 `exec/enc/` 跟进并纳入批次对拍 |
+| 后端早期三份实现必须逐字节一致：原 Python 构造源头、原 C 参考、产品模型路由（`exec/enc/` 生成 `elf.net`）；现由 `tests/objects.cx` 与 `tests/run.cx` 对拍 | [../prd_arch.md](../prd_arch.md) 后端行、`exec/pipeline/image-stages.tsv` | `.o` 写出先在参考侧落地，产品 `exec/enc/` 跟进并纳入批次对拍 |
 | 随带 C 库以源码形式跟着编译器，按需裁剪进程序（`-ftrim-libc` 默认） | [docs/readme-detail.md](readme-detail.md)、R11-3 | `.o` 自带它用到的库体，**不链接系统 libc**；与 glibc 共存要等符号前缀与调用约定问题一并解决 |
 
 ## 2. 格式范围与三版递进
