@@ -78,3 +78,43 @@ int ri_equal(const char *product,const char *reference,int target){
     return ri_load(product,target,&a)&&ri_load(reference,target,&b)&&a.entry==b.entry&&
         a.entry_delta==b.entry_delta&&a.count==b.count&&!memcmp(a.protection,b.protection,a.count);
 }
+
+/* Interpret writable storage as the loader does. ELF and PE zero-fill the
+ * tail. Mach-O has a 32-byte dynamic-loader prefix before user data. */
+static int ri_data_bytes(const unsigned char *p,uint64_t n,uint64_t pos,uint64_t bytes,uint64_t mem,
+                         uint64_t addr,const unsigned char *want,uint64_t stored,uint64_t used){
+    if((addr&7)||stored>bytes||used>mem||!ri_range(pos,bytes,n))return 0;
+    for(uint64_t i=0;i<used&&i<bytes;i++)if(p[pos+i]!=(i<stored?want[i]:0))return 0;
+    return 1;
+}
+int ri_layout_data(const char *path,int target,const unsigned char *want,uint64_t stored,uint64_t used){
+    unsigned char *p;int64_t len;ri_image s={0};int hits=0;
+    if(target<0||target>=6||stored>used||sy_read_file(path,&p,&len,134217728))return 0;
+    uint64_t n=len;
+    if(target<2&&ri_elf(p,n,target%2,&s)){
+        for(uint64_t i=0;i<ri_word(p+56,2);i++){
+            const unsigned char *h=p+ri_word(p+32,8)+i*56;
+            if(ri_word(h,4)==1&&ri_word(h+4,4)==6&&ri_word(h+32,8)==stored&&ri_word(h+40,8)==used+168)
+                hits+=ri_data_bytes(p,n,ri_word(h+8,8),stored,used+168,ri_word(h+16,8),want,stored,used);
+        }
+    }else if(target>=4&&ri_pe(p,n,target%2,&s)){
+        const unsigned char *h=p+ri_word(p+60,4);uint64_t off=(h-p)+24+ri_word(h+20,2);
+        for(uint64_t i=0;i<ri_word(h+6,2);i++){
+            const unsigned char *q=p+off+i*40;
+            if(!memcmp(q,".data\0\0\0",8)&&(ri_word(q+36,4)>>29)==6)
+                hits+=ri_data_bytes(p,n,ri_word(q+20,4),ri_word(q+16,4),ri_word(q+8,4),ri_word(q+12,4),want,stored,used);
+        }
+    }else if(target>=2&&target<4&&ri_macho(p,n,target%2,&s)){
+        uint64_t off=32;
+        for(uint64_t i=0;i<ri_word(p+16,4);i++){
+            const unsigned char *h=p+off;off+=ri_word(h+4,4);
+            if(ri_word(h,4)!=0x19||memcmp(h+8,"__DATA\0",7)||ri_word(h+64,4)!=2)continue;
+            const unsigned char *d=h+72,*z=d+80;
+            uint64_t addr=ri_word(d+32,8),size=ri_word(d+40,8);
+            if(memcmp(d,"__data\0",7)||memcmp(z,"__bss\0",6)||size!=32+stored||
+               ri_word(z+32,8)!=addr+size||ri_word(z+40,8)!=used+168-stored||(ri_word(z+64,4)&255)!=1)continue;
+            hits+=ri_data_bytes(p,n,ri_word(d+48,4)+32,stored,used+168,addr+32,want,stored,used);
+        }
+    }
+    mm_free(p);return hits==1;
+}
