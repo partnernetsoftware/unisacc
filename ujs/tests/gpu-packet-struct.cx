@@ -7,11 +7,24 @@
 static int shader_bytes(char *source,int capacity,int n,const char *path,const char *name,int address) {
     unsigned char *input=0;
     int64_t bytes=0;
-    if(sy_read_file(path,&input,&bytes,255) || bytes<=0) { mm_free(input); return -1; }
-    n+=tx_snprintf(source+n,capacity-n,"let %s=[",name);
-    for(int i=0;i<bytes;i++) n+=tx_snprintf(source+n,capacity-n,"%s%d",i?",":"",input[i]);
-    n+=tx_snprintf(source+n,capacity-n,"];let i=0;while(i<%ld){let b=ux_u8_put(%d+i,%s[i]);i=i+1;}",
-        (long)bytes,address,name);
+    if(sy_read_file(path,&input,&bytes,4096) || bytes<=0 || n<0 ||
+       (long)capacity-n<bytes*5+512) { mm_free(input); return -1; }
+    int words=(bytes+3)/4;
+    for(int start=0;start<words;start+=128) {
+        int count=words-start<128?words-start:128;
+        n+=tx_snprintf(source+n,capacity-n,"let %s%d=[",name,start);
+        for(int i=0;i<count;i++) {
+            unsigned packed=0;
+            for(int j=0;j<4;j++) {
+                int byte=4*(start+i)+j;
+                if(byte<bytes) packed|=(unsigned)input[byte]<<(8*j);
+            }
+            n+=tx_snprintf(source+n,capacity-n,"%s%u",i?",":"",packed);
+        }
+        n+=tx_snprintf(source+n,capacity-n,
+            "];let i=0;while(i<%d){let b=ux_u32_put(%d+4*i,%s%d[i]);i=i+1;}",
+            count,address+4*start,name,start);
+    }
     n+=tx_snprintf(source+n,capacity-n,"let p=ux_u32_put(shader+GpuShaderSource.%s,%d);"
         "let s=ux_u32_put(shader+GpuShaderSource.%sBytes,%ld);",name,address,name,(long)bytes);
     mm_free(input);
@@ -19,7 +32,7 @@ static int shader_bytes(char *source,int capacity,int n,const char *path,const c
 }
 
 static int build_shaders(const char *path) {
-    char source[13000];
+    char source[29000];
     int n=tx_snprintf(source,sizeof source,"native function probe_shader_sources(shader:i64) i64 {");
     n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
     if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.frag","fragment",6800);
@@ -33,6 +46,11 @@ static int build_shaders(const char *path) {
         "return shader;}\nnative function probe_cube_sources(shader:i64) i64 {");
     n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-cubetexture.vert","vertex",12300);
     if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-cubetexture.frag","fragment",12600);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_lit_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-lit.vert","vertex",17100);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-lit.frag","fragment",17500);
     if(n<0) return 1;
     n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\n");
     return sy_write_file(path,source,n,0600)!=0;
@@ -74,7 +92,8 @@ static int gpu_check(char *start) {
     const double state[]={1,516,0,1,32778,32779,770,771,1,771,1,514,
         3,240,15,7680,7681,7682,1029,2304,1.5,-2,0,0,0,0,0};
     const double clip[]={1,4,4,8,8,0.5,3,255,0,0,255,0,0,0,255,255,0,0,255,255,0,0,255,255,0,0,255};
-    int failed=0,total=927;
+    int failed=0,total=1091;
+    double lit[20];
     for(int i=0;i<total;i++) {
         char *next=0;
         double value=tx_strtod(start,&next);
@@ -85,6 +104,26 @@ static int gpu_check(char *start) {
         double expected=0,tolerance=0;
         if(i<(int)(sizeof status/sizeof status[0])) expected=status[i];
         else if(i>=198 && i<204) expected=stateStatus[i-198];
+        else if(i>=927) {
+            int sample=(i-927)%41;
+            if(sample) {
+                int channel=(sample-1)%20;
+                if(sample<=20) lit[channel]=value;
+                if(channel%4==3) expected=255;
+                else if(channel>=4 && channel<8) expected=0;
+                else if(sample<=20) {
+                    expected=value;
+                    if(value<0 || value>255 || (channel==0 && value<30) || (channel==1 && value<10)) {
+                        printf("GPU_LIGHT cell=%d interior=%.0f\n",i,value);
+                        failed++;
+                    }
+                } else {
+                    expected=lit[channel];
+                    tolerance=value*0.04;
+                    if(tolerance<1) tolerance=1;
+                }
+            }
+        }
         else if(i>=886) {
             const int toon[]={108,53,6,255}, inside[]={1,0,1,0,0};
             int sample=i-886;
@@ -189,13 +228,16 @@ int main(int argc,char **argv) {
     int texture_life_mutate=argc==2 && tx_eqz(argv[1],"--texture-life-mutate");
     int cube_mutate=argc==2 && tx_eqz(argv[1],"--cube-mutate");
     int toon_mutate=argc==2 && tx_eqz(argv[1],"--toon-mutate");
+    int lighting_mutate=argc==2 && tx_eqz(argv[1],"--lighting-mutate");
+    int phong_light_mutate=argc==2 && tx_eqz(argv[1],"--phong-light-mutate");
     int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
     int clip_mutate=argc==2 && tx_eqz(argv[1],"--clip-mutate");
     int target_mutate=argc==2 && tx_eqz(argv[1],"--target-mutate");
     int targets=target_mutate || (argc==2 && tx_eqz(argv[1],"--targets"));
     if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
        !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
-       !cube_mutate && !toon_mutate && !state_mutate && !clip_mutate && !targets)
+       !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate &&
+       !state_mutate && !clip_mutate && !targets)
         return 2;
     char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
     if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
@@ -207,11 +249,12 @@ int main(int argc,char **argv) {
         target_mutate?"?target-mutate":basic_mutate?"?basic-mutate":lambert_mutate?"?lambert-mutate":
         phong_mutate?"?phong-mutate":standard_mutate?"?standard-mutate":texture_mutate?"?texture-mutate":
         tone_mutate?"?tone-mutate":sampled_mutate?"?sampled-mutate":wrap_mutate?"?wrap-mutate":
-        texture_life_mutate?"?texture-life-mutate":cube_mutate?"?cube-mutate":toon_mutate?"?toon-mutate":"");
+        texture_life_mutate?"?texture-life-mutate":cube_mutate?"?cube-mutate":toon_mutate?"?toon-mutate":
+        lighting_mutate?"?lighting-mutate":phong_light_mutate?"?phong-light-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
-    char *compile[24]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+    char *compile[26]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
         "ujs/practice/uxe/base/gpu-packet.ujs"};
     int args=4;
     if(targets) compile[args++]="ujs/practice/uxe/base/gpu-target.ujs";
@@ -231,8 +274,10 @@ int main(int argc,char **argv) {
         compile[args++]="ujs/practice/uxe/base/gpu-texture-uv.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-texture-table.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-material-toon.ujs";
+        compile[args++]="ujs/practice/uxe/base/spheregeometry.ujs";
     }
     compile[args++]=shaders;
+    if(!targets) compile[args++]="ujs/practice/uxe/test/gpu-lit-probe.ujs";
     compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
     compile[args++]="-o";
     compile[args++]=wasm;
@@ -288,6 +333,6 @@ int main(int argc,char **argv) {
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
     printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
-        targets?"GPU_TARGET":"GPU_PACKET",targets?5:24,targets?93:927,compiled.size,lines+target_lines,failed);
+        targets?"GPU_TARGET":"GPU_PACKET",targets?5:28,targets?93:1091,compiled.size,lines+target_lines,failed);
     return failed!=0;
 }

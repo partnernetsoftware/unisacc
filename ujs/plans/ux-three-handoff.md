@@ -20,7 +20,7 @@
 
 (1) M5 纹理生命周期。`gpu-texture-table.ujs` 已验证 Wasm 固定容量、句柄代数、更新版本、释放与千次回收，纹理描述与像素地址由调用者提供，绘制时复制进包。WebGL 纹理随绘制创建释放，下一步补持久 GPU 句柄、失效与回收，以及颜色空间和像素存储状态。CubeTexture 六面、DataTexture 和 CanvasTexture 的基础像素已有 r160 对照。面内方向、其他数据格式和 Canvas 字节取回仍待补。Texture 矩阵复用 `Matrix3_setUvTransform`。增加宿主能力时更新 `uxe-host-budget.cx` 中审阅后的闭包摘要。
 
-(2) M5 Phong 和 Standard。当前在 `gpu-material-phong.ujs` 与 `gpu-material-standard.ujs` 计算直接光切片。在同一正交相机下分别画球和立方体，顶点从现有几何生成器取得，使用插值法线算逐片元光照。r160 分别用 MeshPhongMaterial 与 MeshStandardMaterial，.cx 单独取内部高光、漫反射和阴影侧，边缘像素另计。为 Phong 和 Standard 分别造一个材料参数反例。PBR 像素差上限按规划 4%。
+(2) M5 Phong 和 Standard。已在同一正交相机对照球体双方向灯与立方体点灯，使用几何生成器的法线算逐片元光照。`gpu-lit.frag` 用固定的对照材料和光源，下一步把参数接入材质与场景句柄，覆盖金属、贴图、阴影及环境光。
 
 (3) 并行窗口建议从稳定尖端分开工作树。M8 可先做插值器和时间采样，沿现有向量与原生导出接口写 G-anim；M9 先做有界文件字节及 GLB 容器解析，沿现有资源 ABI 写 G-io；M10 可先做由 M1 的 Ray 与 M3 相机矩阵得到射线并排序的 G-ray；M11 可复用基座 PCM 做有界混音及空间衰减对照。场景树、GPU 命令包和清单生成表的写入在集成时串行。各窗口新增的事实行保持独立，重算生成表后一起核对。
 
@@ -41,4 +41,4 @@ sh ./unisacc.com tools/gen-uxe-pages.cx -- --check
 
 纹理采样反例预期非零。一次只跑一路 Chrome。向主线提合入前先合最新 origin/main，再跑 M1 至 M3 全部门、C9 至 C14、CLI、清单、UXE 回归十项、页面生成和 doc-links。集成路径只含 ujs 与重算后的 build/doc-links.tsv。
 
-交接时无待提交文件。回归入口加 `-- --wrap-mutate` 可复跑环绕反例。复杂几何材料门尚未开始，先从 Phong 球体的独立对照切入。
+交接时无待提交文件。回归入口加 `-- --wrap-mutate` 可复跑环绕反例，加 `-- --phong-light-mutate` 或 `-- --lighting-mutate` 分别复跑 Phong、Standard 的光源反例。

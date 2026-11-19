@@ -6,7 +6,7 @@
 import {
   BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
   CanvasTexture, CubeTexture, DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth,
-  IncrementStencilOp, KeepStencilOp, LessDepth, Vector3,
+  IncrementStencilOp, KeepStencilOp, LessDepth, PointLight, SphereGeometry, Vector3,
   LinearToneMapping, ReinhardToneMapping,
   LinearFilter, LinearSRGBColorSpace, NearestFilter, NoToneMapping,
   LinearMipmapLinearFilter, MirroredRepeatWrapping, RepeatWrapping,
@@ -134,6 +134,22 @@ try {
     const mode = i === 0 && location.search === "?cube-mutate" ? 116 : 110 + i;
     cubeSamples.push([Number(step(BigInt(mode))), ...pixels(gl).slice(0, 4)]);
   }
+  const litShaderErrors = [];
+  if (!gl.getExtension("OES_standard_derivatives")) throw new Error("lighting derivatives unavailable");
+  const compileShader = gl.compileShader;
+  gl.compileShader = shader => {
+    compileShader.call(gl, shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) litShaderErrors.push(gl.getShaderInfoLog(shader));
+  };
+  const litModes = [
+    location.search === "?phong-light-mutate" ? 125n : 120n, 121n, 122n,
+    location.search === "?lighting-mutate" ? 124n : 123n,
+  ];
+  const litSamples = litModes.map(mode => {
+    const status = Number(step(mode));
+    return [status, ...pixels(gl)];
+  });
+  gl.compileShader = compileShader;
   for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
     status.push(Number(step(mode)));
     actual.push(...pixels(gl));
@@ -354,11 +370,40 @@ try {
   const referenceToon = pixels(toonHost.gl);
   document.querySelector("#toon").textContent = JSON.stringify({
     defaultToon, singleToon, singleError, rgbaToon: referenceToon.slice(0, 4),
-    context: toonHost.gl.getParameter(toonHost.gl.VERSION), shaderErrors,
+    context: toonHost.gl.getParameter(toonHost.gl.VERSION), shaderErrors, litShaderErrors,
   });
   rgbaGradient.dispose();
   toon.dispose();
   toonRenderer.dispose();
+  renderer.outputColorSpace = SRGBColorSpace;
+  const litResults = litSamples.flatMap((sample, i) => {
+    const litScene = new Scene();
+    const isCube = i >= 2;
+    const geometry = isCube ? new BoxGeometry(0.96, 0.96, 0.96) : new SphereGeometry(0.7, 16, 12);
+    const color = 0x804008;
+    const material = i % 2
+      ? new MeshStandardMaterial({ color, metalness: 0, roughness: 0.5 })
+      : new MeshPhongMaterial({ color, shininess: 6, specular: new Color().setRGB(0.08, 0.08, 0.08) });
+    const mesh = new Mesh(geometry, material);
+    if (isCube) {
+      mesh.rotation.y = Math.PI / 6;
+      const point = new PointLight(0xffffff, 3.2, 0, 2);
+      point.position.set(0.4, -0.3, 1.6);
+      litScene.add(point);
+    } else {
+      const key = new DirectionalLight(0xffffff, 2);
+      key.position.set(1, 0, 2);
+      const fill = new DirectionalLight(0xffffff, 1);
+      fill.position.set(-1, 1, 1);
+      litScene.add(key, fill);
+    }
+    litScene.add(mesh);
+    renderer.render(litScene, ortho);
+    const reference = pixels(three.gl);
+    geometry.dispose();
+    material.dispose();
+    return [...sample, ...reference];
+  });
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
@@ -372,7 +417,8 @@ try {
     sampledRepeatStatus, ...actualSampledRepeat, ...referenceSampledRepeat,
     sampledMirrorStatus, ...actualSampledMirror, ...referenceSampledMirror,
     sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle,
-    ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon]);
+    ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon,
+    ...litResults]);
 } catch (error) {
   result.textContent = String(error);
 }
