@@ -41,6 +41,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use sys.net
+#pragma unisa use sys.netraw
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.loadavg
@@ -60,6 +61,39 @@ static int resumed[MAXB];
 static char root[4096], lay[4096], ape[4096], sha[65], version[256], head[64], outlog[4200];
 static const char *sockp, *job_id;
 static char jobbuf[64];
+static int shadow_on;
+
+/* The default native recipe erases these calls before compilation. The
+ * instrumented recipe is selected once by the qualify client. */
+#ifdef DVQUALIFY_S2_TAP
+static int s2_fd = -1;
+static unsigned s2_dropped;
+static long s2_seq;
+static sy_addr_t s2_to;
+static void s2_open(void) {
+    int saved=errno;
+    s2_to.family=SY_AF_UNIX;
+    shadow_on=!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1");
+    if(sockp && shadow_on &&
+       !cx_fmt(s2_to.path,sizeof s2_to.path,"%s.s2",sockp))
+        s2_fd=sy_sock_open(sy_sock_num(SY_SN_AF_UNIX),sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK);
+    errno=saved;
+}
+static void s2_emit(const char *kind,const Batch *b,int attempt,int pid,long now,double load) {
+    int saved=errno;
+    char wire[448];
+    s2_seq++;
+    if(s2_fd>=0 && !strpbrk(b->id,"\r\n\t") &&
+       !cx_fmt(wire,sizeof wire,"kind=%s\tjob=%s\tid=%s\tcandidate=%s\tattempt=%d\tpid=%d\tms=%ld\tload1=%.2f\tdropped=%u\tseq=%ld",
+               kind,job_id,b->id,sha,attempt,pid,now,load,s2_dropped,s2_seq)){
+        long n=strlen(wire);
+        /* sys.net sy_udp_send_to passes MSG_NOSIGNAL to sendto. */
+        if(sy_udp_send_to(s2_fd,wire,n,&s2_to)==n){s2_dropped=0;errno=saved;return;}
+    }
+    if(s2_dropped!=UINT_MAX)s2_dropped++;
+    errno=saved;
+}
+#endif
 
 static const char *sample_ids[] = {"c-negative","pp-negative","pp-differential","pp-cli-targets",
     "pp-cli-macros","pp-cli-includes","pp-header-locations","pp-targets-lines","c99-whitespace",
@@ -232,13 +266,25 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
     while ((next < count && sy_now_ms() < deadline) || live) {
         long now = sy_now_ms();
         int admit=0;
+#ifdef DVQUALIFY_S2_TAP
+        double observed_load=-1;
+#endif
         if (next<count && live<jobs && now<deadline) {
             double load=gate_load();
+#ifdef DVQUALIFY_S2_TAP
+            observed_load=load;
+#endif
             admit=attempt ? load<3.0 : load<=6.0;
+#ifdef DVQUALIFY_S2_TAP
+            if (!admit && !admitting_since) s2_emit("wait",&bs[idx[next]],attempt,0,now,load);
+#endif
             if (!admit && !admitting_since) admitting_since=gate_time(now);
             if (!admit && gate_time(now)-admitting_since >= (attempt?60000L:120000L)) {
                 while(next<count) {
                     Batch *b=&bs[idx[next++]];
+#ifdef DVQUALIFY_S2_TAP
+                    s2_emit("wait-timeout",b,attempt,0,now,load);
+#endif
                     cx_fmt(b->status,sizeof b->status,"UNKNOWN");
                     cx_fmt(b->note,sizeof b->note,"load-wait-timeout");
                     cx_fmt(b->load,sizeof b->load,"%.2f",load);
@@ -250,7 +296,14 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
         for (int k = 0; admit && k < jobs && next < count; k++) if (!busy[k]) {
             int i = idx[next++];
             if(attempt)bs[i].retries=1;
-            if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN");continue; }
+            if (launch(&slot[k], i, attempt)) { cx_fmt(bs[i].status, sizeof bs[i].status, "UNKNOWN");
+#ifdef DVQUALIFY_S2_TAP
+                s2_emit("launch-failed",&bs[i],attempt,0,now,observed_load);
+#endif
+                continue; }
+#ifdef DVQUALIFY_S2_TAP
+            s2_emit("launch",&bs[i],attempt,slot[k].c.pid,slot[k].t0,observed_load);
+#endif
             if (admitting_since && gate_time(now)-admitting_since>=2000L)
                 cx_fmt(bs[i].note,sizeof bs[i].note,"load_wait>%d",attempt?3:6);
             busy[k] = 1; live++;
@@ -266,6 +319,9 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
             b->ms = sy_now_ms() - s->t0;
             char path[4400]; cx_fmt(path, sizeof path, "%s/%s.%d.out", outlog, b->id, attempt);
             classify(b, path, timed || st.timed_out, r < 0 ? -1 : sy_exit_code(&st));
+#ifdef DVQUALIFY_S2_TAP
+            s2_emit("finish",b,attempt,s->c.pid,s->t0+b->ms,-1);
+#endif
             if (keep[0]) { long n = strlen(b->note); cx_fmt(b->note + n, sizeof b->note - n, "%s%s", n ? ";" : "", keep); }
             char ph[140]; cx_fmt(ph, sizeof ph, "batch:%s", b->id);
             emit(ph, b->ms, !strcmp(b->status, "PASS") ? 0 : 1, b->load);
@@ -550,6 +606,9 @@ int main(int argc, char **argv) {
         return kit_state;
     }
     prepare_first(pending,count,jobs);
+#ifdef DVQUALIFY_S2_TAP
+    s2_open();
+#endif
     long stop = t0 + 1720000L;
     while (completed < count && sy_now_ms() < stop) {
         long began = sy_now_ms();
@@ -584,7 +643,8 @@ int main(int argc, char **argv) {
     int cp = 0, cf = 0, cu = 0, ci = 0, remaining = count - completed;
     for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!s[0]) continue; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
     if (remaining) fprintf(f, "# PLANNED=%d\n", remaining);
-    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, sha, version);
+    const char *shadow_summary=remaining?"":(shadow_on?"\tshadow=on":"\tshadow=off");
+    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld%s\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, shadow_summary, sha, version);
     if (fflush(f) || (outp && fclose(f))) return die("cannot finish evidence ", outp);
     emit("total", total, (remaining || cu || ci) ? 1 : 0, "-");
     fprintf(stderr, "QUALIFY_DONE\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tout=%s\n", nb, cp, cf, cu, ci, total, outp ? outp : "-");
