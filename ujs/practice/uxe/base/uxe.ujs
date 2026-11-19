@@ -23,6 +23,7 @@ persist let sunAmbient = 0;
 persist let textureWidth = 0;
 persist let textureHeight = 0;
 persist let textureOffset = 0;
+persist let textureWash = 0;
 persist let shadowCell = 0;
 persist let shadowDark = 0;
 let pixels = width * height;
@@ -417,6 +418,13 @@ if (op == 20 || op == 30) {
           let texelAt = 4194304 + textureOffset + 4 * (texelY * textureWidth + texelX);
           texelAlpha = ux_u8(texelAt + 3);
           materialColor = ux_u8(texelAt) + 256 * ux_u8(texelAt + 1) + 65536 * ux_u8(texelAt + 2);
+          if (textureWash == 1) {
+            let wash = 128 + ux_u8(texelAt) / 2;
+            let washR = (b % 256 * wash + 127) / 255;
+            let washG = (b / 256 % 256 * wash + 127) / 255;
+            let washB = (b / 65536 * wash + 127) / 255;
+            materialColor = washR + washG * 256 + washB * 65536;
+          }
         }
         if (texelAlpha >= 128 && triangleInvZ > ux_f32(triangleDepthAt)) {
           let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
@@ -531,14 +539,15 @@ if (op == 26) {
 }
 // Bind an RGBA8 texture inside the last resource read. Zero dimensions unbind it.
 if (op == 27) {
-  if (a < 0 || a > 4194303 || b < 0) { return 0 - 1; }
+  if (a < 0 || a > 8388607 || b < 0) { return 0 - 1; }
   if (a == 0) { textureWidth = 0; return 0; }
   let columns = a % 2048;
-  let rows = a / 2048;
+  let rows = a / 2048 % 2048;
   if (columns < 1 || rows < 1 || b > assetReadBytes || 4 * columns * rows > assetReadBytes - b) { return 0 - 1; }
   textureWidth = columns;
   textureHeight = rows;
   textureOffset = b;
+  textureWash = a / 4194304;
   return 0;
 }
 // Per-vertex normalized UV, as two unsigned 16-bit values.
@@ -562,6 +571,30 @@ if (op == 29) {
   while (cell < 9216) {
     shadowSetup = ux_f32_put(5440000 + cell * 4, 0.0 - 65536.0);
     cell = cell + 1;
+  }
+  return 0;
+}
+// Stretch an RGBA backdrop over the framebuffer without writing scene depth.
+if (op == 31) {
+  if (a < 1 || a > 4194303 || b < 0 || pixels == 0) { return 0 - 1; }
+  let sourceWidth = a % 2048;
+  let sourceHeight = a / 2048;
+  if (sourceWidth == 0 || sourceHeight == 0 || b > assetReadBytes ||
+      4 * sourceWidth * sourceHeight > assetReadBytes - b) { return 0 - 1; }
+  let destY = 0;
+  while (destY < height) {
+    let sourceRow = 4194304 + b + 4 * (destY * sourceHeight / height) * sourceWidth;
+    let destX = 0;
+    while (destX < width) {
+      let texel = sourceRow + 4 * (destX * sourceWidth / width);
+      let dest = 4 * (destY * width + destX);
+      let rgba = ux_u8_put(dest, ux_u8(texel));
+      rgba = ux_u8_put(dest + 1, ux_u8(texel + 1));
+      rgba = ux_u8_put(dest + 2, ux_u8(texel + 2));
+      rgba = ux_u8_put(dest + 3, 255);
+      destX = destX + 1;
+    }
+    destY = destY + 1;
   }
   return 0;
 }
