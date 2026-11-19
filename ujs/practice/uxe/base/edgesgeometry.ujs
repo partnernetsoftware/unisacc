@@ -1,0 +1,101 @@
+native function edges_point_eq(a:i64,b:i64) i64 {
+  let axis=0;
+  while(axis<12) {
+    let x=f64_floor_i64(ux_f32(a+axis)*10000.0+0.5);
+    let y=f64_floor_i64(ux_f32(b+axis)*10000.0+0.5);
+    if(x!=y) { return 0; }
+    axis=axis+4;
+  }
+  return 1;
+}
+
+native function edges_segment(out:i64,a:i64,b:i64) i64 {
+  let end=GeometryBuffers_vertex(out,ux_f32(a),ux_f32(a+4),ux_f32(a+8),0.0,0.0,0.0,0.0,0.0);
+  return GeometryBuffers_vertex(end,ux_f32(b),ux_f32(b+4),ux_f32(b+8),0.0,0.0,0.0,0.0,0.0);
+}
+
+// Scratch has 40 bytes per triangle corner, with a 4095 corner work bound.
+native function EdgesGeometry_generate(edges:i64,source:i64,scratch:i64,scratch_bytes:i64,
+                                       angle:f64) i64 {
+  let vertex_count=ux_u32(source+GeometryBuffers.vertexCount);
+  let index_count=ux_u32(source+GeometryBuffers.indexCount);
+  let count=vertex_count;
+  if(index_count>0) { count=index_count; }
+  if(count%3!=0 || count>4095 || scratch<0 || scratch%8!=0 ||
+     scratch>6291456 || scratch_bytes<count*40 || count>(6291456-scratch)/40 ||
+     !GeometryBuffers_fits(edges,count*2,0)) { return 0-1; }
+  let input=ux_u32(source+GeometryBuffers.vertices);
+  let indices=ux_u32(source+GeometryBuffers.indices);
+  let result=ux_u32(edges+GeometryBuffers.vertices);
+  let output=result;
+  let threshold=ux_math_cos(angle*0.017453292519943296);
+  let i=0;
+  let rows=0;
+  while(i<count) {
+    let a=i;
+    let b=i+1;
+    let c=i+2;
+    if(index_count>0) {
+      a=ux_u32(indices+i*4);
+      b=ux_u32(indices+i*4+4);
+      c=ux_u32(indices+i*4+8);
+    }
+    if(a>=vertex_count || b>=vertex_count || c>=vertex_count) { return 0-1; }
+    a=input+32*a;
+    b=input+32*b;
+    c=input+32*c;
+    if(!edges_point_eq(a,b) && !edges_point_eq(b,c) && !edges_point_eq(c,a)) {
+      let abx=ux_f32(b)-ux_f32(a);
+      let aby=ux_f32(b+4)-ux_f32(a+4);
+      let abz=ux_f32(b+8)-ux_f32(a+8);
+      let acx=ux_f32(c)-ux_f32(a);
+      let acy=ux_f32(c+4)-ux_f32(a+4);
+      let acz=ux_f32(c+8)-ux_f32(a+8);
+      let nx=aby*acz-abz*acy;
+      let ny=abz*acx-abx*acz;
+      let nz=abx*acy-aby*acx;
+      let norm=f64_sqrt(nx*nx+ny*ny+nz*nz);
+      if(norm!=0.0) { nx=nx/norm; ny=ny/norm; nz=nz/norm; }
+      let edge=0;
+      while(edge<3) {
+        let a0=a;
+        let b0=b;
+        if(edge==1) { a0=b; b0=c; }
+        if(edge==2) { a0=c; b0=a; }
+        let row=scratch;
+        let matching=0-1;
+        let same=0;
+        while(row<scratch+40*rows) {
+          let stored_a=ux_u32(row);
+          let stored_b=ux_u32(row+4);
+          if(edges_point_eq(stored_a,a0) && edges_point_eq(stored_b,b0)) { same=1; }
+          if(ux_u32(row+8)!=0 && edges_point_eq(stored_a,b0) && edges_point_eq(stored_b,a0)) { matching=row; }
+          row=row+40;
+        }
+        if(matching>=0) {
+          let dot=nx*ux_f64(matching+16)+ny*ux_f64(matching+24)+nz*ux_f64(matching+32);
+          if(dot<=threshold) { output=edges_segment(output,a0,b0); }
+          let closed=ux_u32_put(matching+8,0);
+        } else if(!same) {
+          let row_a=ux_u32_put(row,a0);
+          let row_b=ux_u32_put(row+4,b0);
+          let open=ux_u32_put(row+8,1);
+          let saved_x=ux_f64_put(row+16,nx);
+          let saved_y=ux_f64_put(row+24,ny);
+          let saved_z=ux_f64_put(row+32,nz);
+          rows=rows+1;
+        }
+        edge=edge+1;
+      }
+    }
+    i=i+3;
+  }
+  let remaining=scratch;
+  while(remaining<scratch+40*rows) {
+    if(ux_u32(remaining+8)!=0) {
+      output=edges_segment(output,ux_u32(remaining),ux_u32(remaining+4));
+    }
+    remaining=remaining+40;
+  }
+  return GeometryBuffers_commit(edges,(output-result)/32,0);
+}
