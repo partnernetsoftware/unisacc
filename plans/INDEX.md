@@ -56,7 +56,14 @@
 | [archive/plans/release-notes-0.0.67.md](../archive/plans/release-notes-0.0.67.md) | 已归档 | release/notes-0.0.67.md | 0.0.67 发布说明草稿 |
 | [archive/plans/release-notes-0.0.68.md](../archive/plans/release-notes-0.0.68.md) | 已归档 | release/notes-0.0.68.md | 0.0.68 发布说明草稿 |
 | [archive/plans/release-speedup-plan.md](../archive/plans/release-speedup-plan.md) | 已归档 | plans/v0.0.73-speed-tracker.tsv | 0.0.68-0.0.69 发布提速计划 |
-| [plans/roadmap-v0.0.80-v0.0.89.md](roadmap-v0.0.80-v0.0.89.md) | 现行 | - | 0.0.80 到 0.0.89 路线图(cc 指定保留) |
+| [plans/roadmap-v0.0.80-v0.0.89.md](roadmap-v0.0.80-v0.0.89.md) | 被取代 | roadmap-rev3 | 0.0.80 到 0.0.89 路线图修订版 2(保留作历史对照,现行见 roadmap-rev3) |
+| [plans/roadmap-rev3.md](roadmap-rev3.md) | 现行 | - | 路线图修订版 3(2026-11-19,fable 加我裁定):0.0.81 实际交付、速度专项 S0 到 S7、发布节奏裁决 |
+| [plans/roadmap-0.0.83-0.0.99.md](roadmap-0.0.83-0.0.99.md) | 现行 | - | 0.0.83 到 0.0.99 容量模型与逐版编排,及 0.0.100 汇编级精修阶段入口准则(估计值,每 3 版重估) |
+| [plans/v0.0.82.md](v0.0.82.md) | 现行 | - | 0.0.82 详细计划(前端诊断二期、ref 判据替换、速度专项首批) |
+| [plans/v0.0.83.md](v0.0.83.md) | 现行 | - | 0.0.83 Q-P 首次尝试版计划与 CI 对账前置 |
+| [plans/changes-rev3.md](changes-rev3.md) | 现行 | - | 修订版 3 相对旧版的差异清单与三个最危险假设 |
+| [plans/nn-migration-rev3.md](nn-migration-rev3.md) | 现行 | - | 启动器与六片逻辑迁移 NN 的现状、分版本路线、决策门(与 slice-nn-migration.md 旧表互补) |
+| [plans/q-p-design.md](q-p-design.md) | 现行 | - | Q-P 产品资格口径草案:整域分母的五类资格状态与发布门 |
 | [plans/root-identity.md](root-identity.md) | 现行 | - | 本地根产品身份规范(11-17 维护,10 活引用) |
 | [archive/plans/runtime-speedup-lessons-2026-11-16.md](../archive/plans/runtime-speedup-lessons-2026-11-16.md) | 已归档 | roadmap-v0.0.80-v0.0.89 | 运行与启动加速外部经验与落地设计 |
 | [plans/slice-nn-migration.md](slice-nn-migration.md) | 现行 | - | M10a 切片 NN 化迁移清单(slice-migration-gen 硬编码产出) |

@@ -27,8 +27,8 @@ flowchart LR
     V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
     V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
     V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>archive/plans/v0.0.77.md"]
-    ECO["0.0.78 至 0.0.87 路线(内存安全二段、表网卫生、对象产出合同、netraw、库包、门面、锁文件、DNS 与 inflate、执行器吞吐、链接单元二期,见 build/version-seq.tsv)<br/>G0 推算 0.0.81<br/>prd_cx.md 0.9"]
-    PERF["0.0.82 执行器吞吐、0.0.83 链接单元二期<br/>prd.md 候选池 性能新方向"]
+    ECO["0.0.78 至 0.0.81 已公开(0.0.81 冻结 F 8b46bf21ee,对象产出二期,NOT_QUALIFIED)<br/>release/notes-0.0.81.md、release/evidence/0.0.81/"]
+    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、plans/v0.0.82.md、plans/v0.0.83.md、plans/nn-migration-rev3.md"]
     V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
   end
   subgraph 发布
@@ -68,6 +68,13 @@ flowchart LR
 ```
 
 ## 决定(别人必须遵守)
+
+- 版本编排(项目所有者 2026-11-19):每版内容要足量,四道并行(功能、速度、资格、用户),容量与逐版编排见 plans/roadmap-0.0.83-0.0.99.md(估计值,0.0.85 公开后用 S5 速度账实测替换);0.0.100 起汇编级精修的入口准则写在同一文件,0.0.99 封板必须满足。
+- 迭代速度主线 S0 事件触发预制(项目所有者提出,依据 plans/roadmap-rev3.md):内容寻址的输入身份做键,复用同候选同输入的真实实跑证据,冻结时只核身份;S1 起链预检与 S5 速度账已落库(0.0.81 公开后),S2 令牌调度是 S0 推测作业的前置。devsvc 工具线在 main 上独立开发,但不在冻结到公开期间落库(会触发 MAIN_ADVANCED)。
+- 起链前置:版本工作树的 unisacc.com 与 unisacc.com.build.json 必须是真实文件副本(不是符号链接);Root 升级后同步各工作树并把 ~/.cache/unisacc/chains/snap/<rev10>-<根哈希8> 旧快照移走;chain-ready 的 12 到 14 前置会拦截(缺口 WORKTREE-ROOT-FILES-MUST-BE-REGULAR、INSTALL-APE-RECORD-STALE-COMMIT)。
+- 0.0.81 登记 21 行 expected-fail(c-negative 53/9 加 20 个 ref 旧判据批,到期 0.0.82):ref 类判据替换已批准,"镜像字节等于冻结经典参考"口径过时(X3 起指令选择有意变化),替代判据与 netregen 优化档作跨版本字节防线;0.0.82 发布门要求清零,到期未清则发布门红。
+- arm64 -funit 对象已用 qemu 实跑验证(0.0.81 入口桥),已知缺口 OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL(x7 栈在 sp 之下,0.0.82 起修)。
+- 窗口协同:cdx 的 harness 自动压缩上下文,不因上下文占用高要求交接或改派;交接加重置只在话题大幅切换、旧会话压缩后无用信息偏多时才用。给常驻窗口派整块任务(做完整块再停),不派一次一个小样例。
 
 派生查询规则:工具索引与产品全景经 devsvc tool-index、devsvc product-map 取得当前内容身份结果;两个 build/ 导出不再跟踪,自动 --derive 不物化。快照仅显式导出,独立 --check 仍实际现算并逐字节对拍。回退为恢复 derive.tsv 的物化行、显式生成后重新跟踪。读集、外部核验依赖、失效负控与证据入口见 [plans/devsvc.md](plans/devsvc.md) 的 R1 节。
 
