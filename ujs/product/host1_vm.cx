@@ -1,3 +1,4 @@
+#pragma unisa use text.utf8
 /* host1 \\0asm mini VM for stage0 product modules. Linked into ujs.com.
  * No #include. No struct returns (unisacc limit). API: host1_wasm_run,
  * host1_wasm_run_frames (same H1, main persist).
@@ -470,7 +471,12 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
     if (op == 0x55) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 > b2.i64); continue; }
     if (op == 0x57) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 <= b2.i64); continue; }
     if (op == 0x59) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, a.i64 >= b2.i64); continue; }
-    if (op == 0x56) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i32(h, (uint64_t)a.i64 > (uint64_t)b2.i64); continue; }
+    if (op == 0x54 || op == 0x56) {
+      h1_pop_to(h, &b2); h1_pop_to(h, &a);
+      h1_push_i32(h, op == 0x54 ? (uint64_t)a.i64 < (uint64_t)b2.i64 :
+                                  (uint64_t)a.i64 > (uint64_t)b2.i64);
+      continue;
+    }
     if (op == 0x7c) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 + b2.i64); continue; }
     if (op == 0x7d) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 - b2.i64); continue; }
     if (op == 0x7e) { h1_pop_to(h, &b2); h1_pop_to(h, &a); h1_push_i64(h, a.i64 * b2.i64); continue; }
@@ -679,9 +685,18 @@ fail_none:
     w += sprintf(w, "{\"run\":\"ok\",\"tag\":\"str\",\"value\":\"");
     for (i = 0; i < len; i++) {
       unsigned char c = h.mem[ptr + i];
-      if (c == '"' || c == '\\') { *w++ = '\\'; *w++ = (char)c; }
-      else if (c >= 32 && c < 127) *w++ = (char)c;
-      else w += sprintf(w, "\\u%04x", c);
+      if (c == '"' || c == '\\') { *w++ = '\\'; *w++ = (char)c; continue; }
+      if (c >= 32 && c < 127) { *w++ = (char)c; continue; }
+      if (c >= 128) {
+        long end = i;
+        unsigned codepoint;
+        if (tx_utf8_next((const char *)h.mem + ptr, len, &end, &codepoint) == 1) {
+          for (; i < end; i++) *w++ = (char)h.mem[ptr + i];
+          i--;
+          continue;
+        }
+      }
+      w += sprintf(w, "\\u%04x", c);
     }
     sprintf(w, "\",\"bridge\":\"host1-vm\",\"tag_host1\":\"host1_package\"}");
     snprintf(out, out_cap, "%s", buf);

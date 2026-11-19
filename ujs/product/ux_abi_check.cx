@@ -265,6 +265,61 @@ int check_ux_closure(int mutate) {
     return passed != checks;
 }
 
+static int ux_expect_string(UxProbe *probe, const char *library, const char *body, const char *gold) {
+    char source[4096], expected[1400], *out = 0;
+    char *args[] = {"./ujs/ujs2wasm.com", probe->source, "-o", probe->wasm, "--run", 0};
+    size_t out_size = 0;
+    int size = tx_snprintf(source, sizeof source, "%s\n%s\n", library, body);
+    int want = tx_snprintf(expected, sizeof expected, "\"tag\":\"str\",\"value\":\"%s\",", gold);
+    if (size < 0 || size >= (int)sizeof source || want < 0 || want >= (int)sizeof expected ||
+        sy_write_file(probe->source, source, size, 0600)) return 0;
+    int rc = cx_runv_timeout(args, 8, &out, &out_size);
+    int pass = rc == 0 && out && tx_contains(out, out_size, expected, want);
+    if (!pass) fprintf(stderr, "UX_STRING rc=%d output=%s\n", rc, out ? out : "");
+    mm_free(out);
+    return pass;
+}
+
+int check_ux_strings(int mutate) {
+    UxProbe probe;
+    unsigned char *format = 0, *long_source = 0, *unicode = 0;
+    int64_t n = 0;
+    int checks = 0, passed = 0;
+    if (sy_read_file("ujs/practice/uxe/base/strings.ujs", &format, &n, 2048) ||
+        sy_read_file("ujs/tests/examples/str_lit256.ujs", &long_source, &n, 1024) ||
+        sy_read_file("ujs/tests/examples/str_nonascii.ujs", &unicode, &n, 128) ||
+        prepare_probe(&probe)) {
+        mm_free(format); mm_free(long_source); mm_free(unicode);
+        return 1;
+    }
+    char long_gold[257];
+    for (int i = 0; i < 256; i++) long_gold[i] = 'a';
+    long_gold[256] = 0;
+    passed += ux_expect_string(&probe, "", (char *)long_source, long_gold); checks++;
+    passed += ux_expect_string(&probe, "", (char *)unicode, "你好"); checks++;
+    passed += ux_expect_string(&probe, "", "return \"é\" + \"苇\" + \"🌊\";", "é苇🌊"); checks++;
+    passed += ux_expect_string(&probe, "", mutate ?
+        "return str_slice(\"xé苇🌊y\", 1, 3);" :
+        "return str_slice(\"xé苇🌊y\", 1, 10);", "é苇🌊"); checks++;
+    passed += ux_expect_string(&probe, "", "return str_slice(\"é\", 2, 2);", ""); checks++;
+    passed += ux_probe(&probe, "", "return len(\"é苇🌊\");", 9, 0, 0); checks++;
+    passed += ux_probe(&probe, "", "return str_slice(\"é\", 1, 2);", 0, 0, 1); checks++;
+    passed += ux_probe(&probe, "", "return str_slice(\"é\", 0, 3);", 0, 0, 1); checks++;
+    passed += ux_probe(&probe, "", "return str_slice(\"é\", 0 - 1, 0);", 0, 0, 1); checks++;
+    passed += ux_expect_string(&probe, (char *)format, "return ux_format_i64(0);", "0"); checks++;
+    passed += ux_expect_string(&probe, (char *)format,
+        "return ux_format_i64(9223372036854775807);", "9223372036854775807"); checks++;
+    passed += ux_expect_string(&probe, (char *)format, mutate ?
+        "return ux_format_i64(0 - 9223372036854775807);" :
+        "return ux_format_i64(0 - 9223372036854775807 - 1);", "-9223372036854775808"); checks++;
+    mm_free(format);
+    mm_free(long_source);
+    mm_free(unicode);
+    remove_probe(&probe);
+    printf("CHECK_UX_STRINGS checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
 static unsigned noise_hash(int x, int y, int seed) {
     uint32_t n = (((uint32_t)x + 17u) * 374761393u) ^
         (((uint32_t)y + 29u) * 668265263u) ^ ((uint32_t)seed * 1442695041u);
