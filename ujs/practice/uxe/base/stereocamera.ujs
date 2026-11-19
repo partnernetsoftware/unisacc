@@ -1,0 +1,53 @@
+struct StereoCamera {
+  aspect: f64;
+  eyeSep: f64;
+  leftProjection: u32;
+  rightProjection: u32;
+  leftWorld: u32;
+  rightWorld: u32;
+  leftMask: u32;
+  rightMask: u32;
+}
+
+function StereoCamera_init(stereo,...stereo_args) {
+  let aspect=ux_f64_put(stereo+StereoCamera.aspect,1.0);
+  let gap=ux_f64_put(stereo+StereoCamera.eyeSep,0.064);
+  let left_p=ux_u32_put(stereo+StereoCamera.leftProjection,stereo_args[0]);
+  let right_p=ux_u32_put(stereo+StereoCamera.rightProjection,stereo_args[1]);
+  let left_w=ux_u32_put(stereo+StereoCamera.leftWorld,stereo_args[2]);
+  let right_w=ux_u32_put(stereo+StereoCamera.rightWorld,stereo_args[3]);
+  let left_layer=ux_u32_put(stereo+StereoCamera.leftMask,3);
+  let right_layer=ux_u32_put(stereo+StereoCamera.rightMask,5);
+  return stereo;
+}
+
+native function stereo_eye(project:i64,world:i64,src_project:i64,src_world:i64,
+                           gap:f64,scale:f64,shift:f64) i64 {
+  let projection=Matrix4_copy(project,src_project);
+  let eye=Matrix4_copy(world,src_world);
+  let horizontal=ux_f64_put(projection,scale);
+  let center=ux_f64_put(projection+64,shift);
+  let axis=0;
+  while(axis<4) {
+    let offset=axis*8;
+    let attribute=ux_f64(eye+96+offset)+ux_f64(eye+offset)*gap;
+    let written=ux_f64_put(eye+96+offset,attribute);
+    axis=axis+1;
+  }
+  return eye;
+}
+
+native function StereoCamera_update(stereo:i64,projection:i64,world:i64,
+                                   fov:f64,zoom:f64,aspect:f64,focus:f64) i64 {
+  if(fov<=0.0 || fov>=180.0 || zoom<=0.0 || aspect<=0.0 || focus<=0.0) { return 0-1; }
+  let half_angle=fov*0.008726646259971648;
+  let half_width=ux_math_sin(half_angle)*aspect*ux_f64(stereo+StereoCamera.aspect)/(ux_math_cos(half_angle)*zoom);
+  if(half_width<=0.0) { return 0-1; }
+  let half_eye=ux_f64(stereo+StereoCamera.eyeSep)*0.5;
+  let center=half_eye/(focus*half_width);
+  let left=stereo_eye(ux_u32(stereo+StereoCamera.leftProjection),ux_u32(stereo+StereoCamera.leftWorld),
+    projection,world,0.0-half_eye,1.0/half_width,center);
+  let right=stereo_eye(ux_u32(stereo+StereoCamera.rightProjection),ux_u32(stereo+StereoCamera.rightWorld),
+    projection,world,half_eye,1.0/half_width,0.0-center);
+  return stereo;
+}
