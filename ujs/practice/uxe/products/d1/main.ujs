@@ -21,6 +21,14 @@ persist let cannonIdle = 0;
 persist let cannonEvents = 0;
 persist let combatTick = 0;
 persist let combatKills = 0;
+persist let battleWave = 1;
+persist let battleSlots = 3;
+persist let battleDelay = 0;
+persist let formationX = 2048;
+persist let formationZ = 2048;
+persist let formationAltitude = 25;
+persist let formationSin = 0.0;
+persist let formationCos = 1.0;
 
 // Enemy records start at byte 32. Each record holds hull and three
 // screen-space bytes: horizontal position, vertical position, and depth.
@@ -103,23 +111,72 @@ while (steps > 0) {
   yawPhase = axis % 180;
   let battleCos = yawPhase * (180 - yawPhase) / 8100.0;
   if (axis >= 180) { battleCos = 0.0 - battleCos; }
+  if (battleDelay > 0) {
+    battleDelay = battleDelay - 1;
+    if (battleDelay == 0) {
+      battleWave = battleWave + 1;
+      if (battleSlots < 8) { battleSlots = battleSlots + 1; }
+      combatTick = 0;
+      formationX = x;
+      formationZ = z;
+      formationAltitude = altitude;
+      formationSin = battleSin;
+      formationCos = battleCos;
+      cannonAmmo = 96;
+      let waveSlot = 0;
+      let hullBonus = battleWave - 1;
+      if (hullBonus > 4) { hullBonus = 4; }
+      while (waveSlot < battleSlots) {
+        let hull = 2;
+        if (waveSlot % 3 == 0) { hull = 4; }
+        if (waveSlot % 3 == 2) { hull = 8; }
+        let newHull = ux_u8_put(32 + 4 * waveSlot, hull + hullBonus);
+        waveSlot = waveSlot + 1;
+      }
+    }
+  }
   let enemySlot = 0;
   let nearest = 0;
   let nearestSquare = 900;
-  while (enemySlot < 3) {
+  let battleAlive = 0;
+  while (enemySlot < battleSlots) {
     let enemyRecord = 32 + 4 * enemySlot;
+    let enemyHull = ux_u8(enemyRecord);
+    if (enemyHull > 0) { battleAlive = battleAlive + 1; }
+    let enemyKind = enemySlot % 3;
+    let enemyGroup = enemySlot / 3;
     let enemyX = 4;
     let enemyZ = 0 - 91;
     let enemyY = 45;
-    if (enemySlot == 0) { enemyX = 0 - 25; enemyZ = 0 - 53; enemyY = 53; }
-    if (enemySlot == 2) { enemyX = 94; enemyZ = 0 - 208; enemyY = 71; }
-    let offsetX = ((4096 + 2048 + enemyX * 8 - x + 2048) % 4096 - 2048) / 8.0;
-    let offsetZ = ((16384 + enemyZ * 8 - combatTick / 3 * 8 - z) % 4096 - 2048) / 8.0;
+    if (enemyKind == 0) {
+      enemyX = 0 - 49; enemyZ = 0 - 116; enemyY = 55;
+      if (battleWave == 1) { enemyX = 0 - 25; enemyZ = 0 - 53; enemyY = 53; }
+    }
+    if (enemyKind == 2) {
+      enemyX = 53; enemyZ = 0 - 135; enemyY = 50;
+      if (battleWave == 1) { enemyX = 94; enemyZ = 0 - 208; enemyY = 71; }
+    }
+    enemyX = enemyX + enemyGroup * 30;
+    enemyZ = enemyZ - enemyGroup * 41;
+    enemyY = enemyY + formationAltitude - 25 + enemyGroup * 3;
+    let spawnX = f64_floor_i64(8.0 * (enemyX * formationCos - enemyZ * formationSin));
+    let spawnZ = f64_floor_i64(8.0 * (enemyX * formationSin + enemyZ * formationCos));
+    let maneuverPhase = 0;
+    if (combatTick > 30) { maneuverPhase = (combatTick - 30) % 96; }
+    let sweep = maneuverPhase;
+    if (maneuverPhase >= 24) { sweep = 48 - maneuverPhase; }
+    if (maneuverPhase >= 72) { sweep = maneuverPhase - 96; }
+    let drift = 0 - 1.35 * sweep;
+    if (enemyKind == 0) { drift = (combatTick % 72) / 6 + 0.65 * sweep; }
+    if (enemyKind == 2) { drift = 0.28 * sweep - (combatTick % 72) / 6; }
+    let driftX = f64_floor_i64(drift * 8.0);
+    let offsetX = ((65536 + formationX + spawnX + driftX - x + 2048) % 4096 - 2048) / 8.0;
+    let offsetZ = ((65536 + formationZ + spawnZ - combatTick / 3 * 8 - z + 2048) % 4096 - 2048) / 8.0;
     let depth = offsetX * battleSin - offsetZ * battleCos;
     let recordDepth = ux_u8_put(enemyRecord + 3, 0);
     if (depth >= 9.0 && depth <= 345.0) {
       let screenX = f64_floor_i64(213.5 + 151.0 * (offsetX * battleCos + offsetZ * battleSin) / depth);
-      let screenY = f64_floor_i64(113.5 + pitch * 0.5 + (altitude + 13 - enemyY) * 151.0 / depth);
+      let screenY = f64_floor_i64(113.5 + pitch * 0.5 + (altitude + 13 - enemyY + sweep * 0.18) * 151.0 / depth);
       if (screenX >= 12 && screenX <= 413 && screenY >= 16 && screenY < 196) {
         let recordX = ux_u8_put(enemyRecord + 1, screenX / 2);
         let recordY = ux_u8_put(enemyRecord + 2, screenY);
@@ -127,7 +184,7 @@ while (steps > 0) {
         let aimX = screenX - 213;
         let aimY = screenY - 101 - f64_floor_i64(pitch * 0.25 + 0.5);
         let distanceSquare = aimX * aimX + aimY * aimY;
-        if (ux_u8(enemyRecord) > 0 && distanceSquare < nearestSquare) {
+        if (enemyHull > 0 && distanceSquare < nearestSquare) {
           nearest = enemyRecord;
           nearestSquare = distanceSquare;
         }
@@ -145,12 +202,18 @@ while (steps > 0) {
     if (nearest > 0) {
       let remainingHull = ux_u8(nearest) - 1;
       let hullStored = ux_u8_put(nearest, remainingHull);
-      if (remainingHull == 0) { combatKills = (combatKills + 1) % 100; }
+      if (remainingHull == 0) {
+        combatKills = (combatKills + 1) % 100;
+        battleAlive = battleAlive - 1;
+      }
     }
   }
   if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
+  if (battleAlive == 0 && battleDelay == 0) { battleDelay = 36; }
   let lockRecord = ux_u8_put(14, nearest);
   let killRecord = ux_u8_put(15, combatKills);
+  let waveRecord = ux_u8_put(16, battleWave % 256);
+  let aliveRecord = ux_u8_put(17, battleAlive);
   steps = steps - 1;
 }
 priorTurn = tickTurn;
