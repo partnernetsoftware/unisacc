@@ -26,6 +26,7 @@ persist let textureOffset = 0;
 persist let textureWash = 0;
 persist let shadowCell = 0;
 persist let shadowDark = 0;
+persist let railRows = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -597,5 +598,48 @@ if (op == 31) {
     destY = destY + 1;
   }
   return 0;
+}
+// Load a rail of signed 32-bit little-endian records: distance, eye xyz, forward xyz.
+if (op == 32) {
+  if (a < 2 || a > 32 || b < 0 || b > assetReadBytes || a * 28 > assetReadBytes - b) { return 0 - 1; }
+  railRows = 0;
+  let railCell = 0;
+  let previousMark = 0 - 1;
+  while (railCell < 7 * a) {
+    let sourceAt = 4194304 + b + railCell * 4;
+    let entry = ux_u8(sourceAt) + 256 * ux_u8(sourceAt + 1)
+      + 65536 * ux_u8(sourceAt + 2) + 16777216 * ux_u8(sourceAt + 3);
+    if (entry >= 2147483648) { entry = entry - 4294967296; }
+    if (entry < 0 - 10000000 || entry > 10000000) { return 0 - 1; }
+    if (railCell % 7 == 0) {
+      if (entry <= previousMark) { return 0 - 1; }
+      previousMark = entry;
+    }
+    let railWrite = ux_f32_put(5480200 + railCell * 4, entry * 1.0);
+    railCell = railCell + 1;
+  }
+  railRows = a;
+  return 0;
+}
+// Evaluate one channel in thousandths of the track units, clamped to the endpoints.
+if (op == 33) {
+  if (railRows < 2 || b < 1 || b > 6) { return 0 - 1; }
+  let railDistance = a;
+  let first = f64_floor_i64(ux_f32(5480200));
+  let last = f64_floor_i64(ux_f32(5480200 + 28 * (railRows - 1)));
+  if (railDistance < first) { railDistance = first; }
+  if (railDistance > last) { railDistance = last; }
+  let edge = 1;
+  while (edge < railRows - 1 && ux_f32(5480200 + 28 * edge) <= railDistance) {
+    edge = edge + 1;
+  }
+  let end = 5480200 + edge * 28;
+  let start = end - 28;
+  let from = f64_floor_i64(ux_f32(start));
+  let span = f64_floor_i64(ux_f32(end)) - from;
+  let delta = railDistance - from;
+  let low = f64_floor_i64(ux_f32(start + b * 4));
+  let high = f64_floor_i64(ux_f32(end + b * 4));
+  return 1000 * (low * (span - delta) + high * delta) / span;
 }
 return 0 - 1;
