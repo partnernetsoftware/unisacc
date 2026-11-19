@@ -1,0 +1,289 @@
+/* tools/stages-regen.cx -- regenerate and check tests/stages/ expected stream fixtures using the installed product.
+ *   sh ./unisacc.com tools/stages-regen.cx -- [--check | --write] [--dir DIR] [--product PROD]
+ * Default mode is --check (read-only), default DIR is tests/stages, default PROD is ./unisacc.com.
+ * Chains recalculated when present in DIR:
+ *   (1) O0 image pipe: e2 -> e1 -> e3 -> sidecar -> prune -> lower -> elf (from e2/in)
+ *   (2) O1 image pipe: e4/b.c (via e2->e1->e3->sidecar on run/O1) -> e4 -> o1/prune -> o1/lower -> o1/elf
+ *   (3) standalone stages: tapecheck (from tapecheck/in), units (from units/in)
+ * Negative controls (bad* and trunc-at-eol) are never modified; --write hashes them before and after and
+ * refuses (rc 2) if any negative control byte changes.
+ * Last line: STAGES_REGEN<TAB>mode=check|write<TAB>checked=N<TAB>changed=M<TAB>neg_guarded=K<TAB>status=OK|DRIFT|WRITTEN */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define SR_PW 4400
+#define SR_MAXNEG 128
+
+typedef struct {
+    char path[SR_PW];
+    char sha[65];
+} SrNeg;
+
+static char sr_prod[SR_PW], sr_dir[SR_PW], sr_scratch[SR_PW];
+static char *sr_env[] = {"UNISA_JOBS=1", 0};
+static int sr_write_mode, sr_checked, sr_changed;
+static SrNeg sr_negs[SR_MAXNEG];
+static int sr_nneg;
+
+static void sr_die(const char *why) {
+    fprintf(stderr, "stages-regen: REFUSE %s (errno=%d)\n", why, errno);
+    exit(2);
+}
+
+static int sr_exists(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int sr_dir_exists(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void sr_read_args(const char *stage_dir, char *out, size_t cap) {
+    char p[SR_PW];
+    size_t n = 0;
+    char *s;
+    if (cx_fmt(p, sizeof p, "%s/args", stage_dir)) sr_die("args-path");
+    s = cx_read(p, &n);
+    if (!s) sr_die("read-args");
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) n--;
+    if (n >= cap) sr_die("args-too-long");
+    if (n && mm_copy(out, (long)cap, s, (long)n)) sr_die("args-copy");
+    out[n] = 0;
+    free(s);
+}
+
+static const char *sr_cmd_of(const char *stage) {
+    const char *sl = strrchr(stage, '/');
+    return sl ? sl + 1 : stage;
+}
+
+static char *sr_run_stream(const char *cwd, const char *stage_cmd, const char *args, const char *in_bytes, size_t in_n, size_t *out_n) {
+    char in_p[SR_PW], out_p[SR_PW], err_p[SR_PW], cmd[9000], why[512];
+    char *av[4];
+    np_result r = {0};
+    char *res;
+
+    if (cx_fmt(in_p, sizeof in_p, "%s/in.bytes", sr_scratch)) sr_die("in-path");
+    if (cx_fmt(out_p, sizeof out_p, "%s/out.bytes", sr_scratch)) sr_die("out-path");
+    if (cx_fmt(err_p, sizeof err_p, "%s/err.bytes", sr_scratch)) sr_die("err-path");
+    if (cx_write(in_p, in_bytes ? in_bytes : "", in_n)) sr_die("write-in");
+
+    if (cx_fmt(cmd, sizeof cmd, "exec sh %s stream %s %s < %s > %s 2> %s", sr_prod, stage_cmd, args, in_p, out_p, err_p)) sr_die("cmd-fmt");
+    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+    if (np_run(av, cwd, sr_env, 25, &r, why, sizeof why) != 0 || r.rc != 0) {
+        size_t en = 0;
+        char *eb = cx_read(err_p, &en);
+        fprintf(stderr, "stages-regen: REFUSE stream %s failed (rc=%d): %.*s\n", stage_cmd, r.rc, (int)(en > 200 ? 200 : en), eb ? eb : why);
+        if (eb) free(eb);
+        np_free(&r);
+        exit(2);
+    }
+    np_free(&r);
+    res = cx_read(out_p, out_n);
+    if (!res) sr_die("read-out");
+    return res;
+}
+
+static void sr_compare_or_write(const char *rel, const char *want, size_t wn) {
+    char full[SR_PW];
+    size_t on = 0;
+    char *old = 0;
+    int same = 0;
+
+    if (cx_fmt(full, sizeof full, "%s/%s", sr_dir, rel)) sr_die("rel-path");
+    sr_checked++;
+    if (sr_exists(full)) old = cx_read(full, &on);
+    if (old && on == wn && (wn == 0 || tx_same(old, (long)on, want, (long)wn))) same = 1;
+
+    if (!same) {
+        size_t first = 0;
+        if (old) {
+            while (first < on && first < wn && old[first] == want[first]) first++;
+        }
+        printf("DIFF\t%s\told=%ld\tnew=%ld\tfirst=%ld\n", rel, old ? (long)on : -1L, (long)wn, (long)first);
+        sr_changed++;
+        if (sr_write_mode) {
+            if (cx_write(full, want, wn)) sr_die("write-target");
+        }
+    }
+    if (old) free(old);
+}
+
+static void sr_snapshot_negs_dir(const char *sub) {
+    char dpath[SR_PW];
+    DIR *dp;
+    struct dirent *de;
+    if (cx_fmt(dpath, sizeof dpath, "%s/%s", sr_dir, sub)) sr_die("neg-dir");
+    dp = opendir(dpath);
+    if (!dp) return;
+    while ((de = readdir(dp)) != 0) {
+        const char *nm = de->d_name;
+        if (tx_prefixz(nm, "bad", 3) || tx_eqz(nm, "trunc-at-eol")) {
+            char fp[SR_PW];
+            size_t sz = 0;
+            char *b;
+            if (cx_fmt(fp, sizeof fp, "%s/%s", dpath, nm)) sr_die("neg-path");
+            if (!sr_exists(fp)) continue;
+            if (sr_nneg >= SR_MAXNEG) sr_die("too-many-neg");
+            b = cx_read(fp, &sz);
+            if (!b) sr_die("read-neg");
+            if (cx_fmt(sr_negs[sr_nneg].path, sizeof sr_negs[sr_nneg].path, "%s", fp)) sr_die("neg-copy");
+            cx_sha256_hex(b, sz, sr_negs[sr_nneg].sha);
+            free(b);
+            sr_nneg++;
+        }
+    }
+    closedir(dp);
+}
+
+static void sr_verify_negs(void) {
+    for (int i = 0; i < sr_nneg; i++) {
+        size_t sz = 0;
+        char *b = cx_read(sr_negs[i].path, &sz);
+        char now[65];
+        if (!b) sr_die("neg-missing-after-write");
+        cx_sha256_hex(b, sz, now);
+        free(b);
+        if (!tx_eqz(now, sr_negs[i].sha)) {
+            fprintf(stderr, "stages-regen: REFUSE negative control mutated: %s\n", sr_negs[i].path);
+            exit(2);
+        }
+    }
+}
+
+static void sr_run_chain(const char *const *stages, int n, char *cur, size_t cur_n, int write_first_in) {
+    for (int i = 0; i < n; i++) {
+        char sdir[SR_PW], args[2048], rel_in[256], rel_exp[256];
+        char *next = 0;
+        size_t next_n = 0;
+        if (cx_fmt(sdir, sizeof sdir, "%s/%s", sr_dir, stages[i])) sr_die("sdir");
+        if (!sr_dir_exists(sdir)) break;
+        if (i > 0 || write_first_in) {
+            if (cx_fmt(rel_in, sizeof rel_in, "%s/in", stages[i])) sr_die("rel-in");
+            sr_compare_or_write(rel_in, cur, cur_n);
+        }
+        sr_read_args(sdir, args, sizeof args);
+        next = sr_run_stream(sdir, sr_cmd_of(stages[i]), args, cur, cur_n, &next_n);
+        if (cx_fmt(rel_exp, sizeof rel_exp, "%s/expect", stages[i])) sr_die("rel-exp");
+        sr_compare_or_write(rel_exp, next, next_n);
+        free(cur);
+        cur = next;
+        cur_n = next_n;
+    }
+    if (cur) free(cur);
+}
+
+int main(int argc, char **argv) {
+    static const char *const ALL_DIRS[] = {"e2", "e1", "e3", "sidecar", "e4", "prune", "lower", "elf", "tapecheck", "units", "o1/prune", "o1/lower", "o1/elf", 0};
+    static const char *const CHAIN_O0[] = {"e2", "e1", "e3", "sidecar", "prune", "lower", "elf"};
+    static const char *const CHAIN_O1[] = {"e4", "o1/prune", "o1/lower", "o1/elf"};
+    static const char *const STANDALONE[] = {"tapecheck", "units", 0};
+    const char *opt_dir = "tests/stages";
+    const char *opt_prod = sy_env_or("UNISACC", "./unisacc.com");
+    const char *td = sy_tmpdir();
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) sr_write_mode = 0;
+        else if (tx_eqz(argv[i], "--write")) sr_write_mode = 1;
+        else if (tx_eqz(argv[i], "--dir") && i + 1 < argc) opt_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--product") && i + 1 < argc) opt_prod = argv[++i];
+        else {
+            fprintf(stderr, "usage: stages-regen [--check | --write] [--dir DIR] [--product PROD]\n");
+            return 2;
+        }
+    }
+
+    if (!realpath(opt_prod, sr_prod)) sr_die("product-realpath");
+    if (!realpath(opt_dir, sr_dir)) sr_die("dir-realpath");
+    if (cx_fmt(sr_scratch, sizeof sr_scratch, "%s/stages-regen-%d", (td && td[0] == '/') ? td : "/tmp", (int)getpid())) sr_die("scratch-path");
+    if (mkdir(sr_scratch, 0700) != 0 && errno != EEXIST) sr_die("mkdir-scratch");
+
+    for (int i = 0; ALL_DIRS[i]; i++) sr_snapshot_negs_dir(ALL_DIRS[i]);
+
+    /* 1. O0 image chain from e2/in */
+    {
+        char p[SR_PW];
+        size_t n = 0;
+        if (cx_fmt(p, sizeof p, "%s/e2/in", sr_dir)) sr_die("e2-in");
+        if (sr_exists(p)) {
+            char *b = cx_read(p, &n);
+            if (!b) sr_die("read-e2-in");
+            sr_run_chain(CHAIN_O0, 7, b, n, 0);
+        }
+    }
+
+    /* 2. O1 chain from e4/b.c (via e2 -> e1 -> e3 -> sidecar on run/O1) -> e4 -> o1/prune -> o1/lower -> o1/elf */
+    {
+        char e4dir[SR_PW], bc[SR_PW], e4in[SR_PW];
+        if (cx_fmt(e4dir, sizeof e4dir, "%s/e4", sr_dir)) sr_die("e4-dir");
+        if (cx_fmt(bc, sizeof bc, "%s/b.c", e4dir)) sr_die("bc-path");
+        if (cx_fmt(e4in, sizeof e4in, "%s/in", e4dir)) sr_die("e4in-path");
+        if (sr_exists(bc)) {
+            static const char *const PRE_CMD[4] = {"e2", "e1", "e3", "sidecar"};
+            static const char *const PRE_ARG[4] = {
+                "--route lnx/x86_64/run/O1 --res run-forward --source b.c",
+                "--route lnx/x86_64/run/O1 --res run-forward --source b.c",
+                "--route lnx/x86_64/run/O1 --res run-forward --source b.c",
+                ""
+            };
+            size_t cn = 0;
+            char *cur = cx_read(bc, &cn);
+            if (!cur) sr_die("read-bc");
+            for (int k = 0; k < 4; k++) {
+                size_t nn = 0;
+                char *nxt = sr_run_stream(e4dir, PRE_CMD[k], PRE_ARG[k], cur, cn, &nn);
+                free(cur);
+                cur = nxt;
+                cn = nn;
+            }
+            sr_run_chain(CHAIN_O1, 4, cur, cn, 1);
+        } else if (sr_exists(e4in)) {
+            size_t cn = 0;
+            char *cur = cx_read(e4in, &cn);
+            if (!cur) sr_die("read-e4-in");
+            sr_run_chain(CHAIN_O1, 4, cur, cn, 0);
+        }
+    }
+
+    /* 3. Standalone stages: tapecheck, units */
+    for (int i = 0; STANDALONE[i]; i++) {
+        char sdir[SR_PW], inp[SR_PW], args[2048], rel_exp[256];
+        size_t in_n = 0, out_n = 0;
+        if (cx_fmt(sdir, sizeof sdir, "%s/%s", sr_dir, STANDALONE[i])) sr_die("sa-dir");
+        if (cx_fmt(inp, sizeof inp, "%s/in", sdir)) sr_die("sa-in");
+        if (!sr_exists(inp)) continue;
+        {
+            char *ib = cx_read(inp, &in_n);
+            char *ob;
+            if (!ib) sr_die("read-sa-in");
+            sr_read_args(sdir, args, sizeof args);
+            ob = sr_run_stream(sdir, STANDALONE[i], args, ib, in_n, &out_n);
+            free(ib);
+            if (cx_fmt(rel_exp, sizeof rel_exp, "%s/expect", STANDALONE[i])) sr_die("sa-exp");
+            sr_compare_or_write(rel_exp, ob, out_n);
+            free(ob);
+        }
+    }
+
+    sr_verify_negs();
+
+    {
+        char p[SR_PW];
+        if (!cx_fmt(p, sizeof p, "%s/in.bytes", sr_scratch)) (void)sy_unlink(p);
+        if (!cx_fmt(p, sizeof p, "%s/out.bytes", sr_scratch)) (void)sy_unlink(p);
+        if (!cx_fmt(p, sizeof p, "%s/err.bytes", sr_scratch)) (void)sy_unlink(p);
+        (void)rmdir(sr_scratch);
+    }
+
+    printf("STAGES_REGEN\tmode=%s\tchecked=%d\tchanged=%d\tneg_guarded=%d\tstatus=%s\n",
+        sr_write_mode ? "write" : "check",
+        sr_checked, sr_changed, sr_nneg,
+        sr_write_mode ? "WRITTEN" : (sr_changed ? "DRIFT" : "OK"));
+    return (!sr_write_mode && sr_changed) ? 1 : 0;
+}

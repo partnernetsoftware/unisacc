@@ -1,0 +1,180 @@
+/* tools/check-stages-regen.cx -- fixed-fixture regression checks for tools/stages-regen.cx.
+ *   sh ./unisacc.com tools/check-stages-regen.cx
+ * Builds tools/stages-regen.cx once (-o, into a private temp dir under $TMPDIR), creates a 3-stage
+ * mini chain (e2 -> e1 -> e3) with negative control files (bad*, trunc-at-eol), and verifies 7 contracts:
+ *   1. initial-check-drift       missing expects/ins -> --check rc=1 status=DRIFT
+ *   2. write-populates-chain     --write -> rc=0 status=WRITTEN neg_guarded=4
+ *   3. check-after-write-ok      --check after --write -> rc=0 changed=0 status=OK
+ *   4. chain-bytes-match         e1/in == e2/expect and e3/in == e1/expect byte-for-byte
+ *   5. mutate-one-byte-red       flip 1 byte of e3/expect -> --check rc=1 DIFF e3/expect changed=1
+ *   6. repair-and-neg-unchanged  --write repairs e3/expect, --check rc=0, all 4 negative controls byte-identical
+ *   7. usage-bad-arg-rc2         unknown flag -> rc=2
+ * Last line: CHECK_STAGES_REGEN<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CSR_PW 4400
+#define CSR_OUT 16384
+
+static char csr_work[CSR_PW], csr_tree[CSR_PW], csr_bin[CSR_PW];
+
+static void csr_abort(const char *why) {
+    fprintf(stderr, "check-stages-regen: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void csr_mkdir(const char *rel) {
+    char p[CSR_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", csr_tree, rel)) csr_abort("mkdir-path");
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) csr_abort("mkdir");
+}
+
+static void csr_put(const char *rel, const char *s) {
+    char p[CSR_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", csr_tree, rel)) csr_abort("put-path");
+    if (cx_write(p, s, strlen(s))) csr_abort("write");
+}
+
+static int csr_same_files(const char *rel_a, const char *rel_b) {
+    char pa[CSR_PW], pb[CSR_PW];
+    size_t na = 0, nb = 0;
+    char *a, *b;
+    int eq;
+    if (cx_fmt(pa, sizeof pa, "%s/%s", csr_tree, rel_a) || cx_fmt(pb, sizeof pb, "%s/%s", csr_tree, rel_b)) csr_abort("same-path");
+    a = cx_read(pa, &na);
+    b = cx_read(pb, &nb);
+    eq = a && b && na == nb && (na == 0 || tx_same(a, (long)na, b, (long)nb));
+    if (a) free(a);
+    if (b) free(b);
+    return eq;
+}
+
+static int csr_file_eq_str(const char *rel, const char *want) {
+    char p[CSR_PW];
+    size_t n = 0, wn = strlen(want);
+    char *b;
+    int eq;
+    if (cx_fmt(p, sizeof p, "%s/%s", csr_tree, rel)) csr_abort("eq-path");
+    b = cx_read(p, &n);
+    eq = b && n == wn && tx_same(b, (long)n, want, (long)wn);
+    if (b) free(b);
+    return eq;
+}
+
+static int csr_run(const char *mode, char *out) {
+    char *av[] = {csr_bin, (char *)mode, "--dir", csr_tree, 0};
+    return ck_run(av, out, CSR_OUT);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CSR_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    const char *src_c = "int main(void){return 7;}\n";
+    const char *arg_o0 = "--route lnx/x86_64/run/O0 --res run-forward --source a.c\n";
+    const char *neg_e2_bad = "#if\n";
+    const char *neg_e2_err = "neg-err\n";
+    const char *neg_e1_bad = "bad-e1-input\n";
+    const char *neg_e3_eol = "_start:\n";
+
+    if (cx_fmt(csr_work, sizeof csr_work, "%s/check-stages-regen-%d", base_td, (int)getpid())) csr_abort("work-path");
+    if (mkdir(csr_work, 0700) != 0 && errno != EEXIST) csr_abort("mkdir-work");
+    if (cx_fmt(csr_tree, sizeof csr_tree, "%s/tree", csr_work)) csr_abort("tree-path");
+    if (mkdir(csr_tree, 0700) != 0 && errno != EEXIST) csr_abort("mkdir-tree");
+    if (cx_fmt(csr_bin, sizeof csr_bin, "%s/stages-regen", csr_work)) csr_abort("bin-path");
+
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/stages-regen.cx", "-o", csr_bin, 0}; /* lint:allow R1-product builds stages-regen with this checkout's product; UNISACC overrides */
+        if (ck_run(av, out, sizeof out) != 0) {
+            fprintf(stderr, "check-stages-regen: build failed:\n%s\n", out);
+            csr_abort("build-stages-regen");
+        }
+    }
+
+    csr_mkdir("e2");
+    csr_mkdir("e1");
+    csr_mkdir("e3");
+    csr_put("e2/a.c", src_c);
+    csr_put("e2/in", src_c);
+    csr_put("e2/args", arg_o0);
+    csr_put("e2/bad", neg_e2_bad);
+    csr_put("e2/bad.err", neg_e2_err);
+    csr_put("e1/args", arg_o0);
+    csr_put("e1/bad", neg_e1_bad);
+    csr_put("e3/args", arg_o0);
+    csr_put("e3/trunc-at-eol", neg_e3_eol);
+
+    /* 1. Initial --check detects all 5 missing generated outputs */
+    {
+        int rc = csr_run("--check", out);
+        ck(rc == 1 && ckk_has(out, CSR_OUT, "STAGES_REGEN\tmode=check\tchecked=5\tchanged=5\tneg_guarded=4\tstatus=DRIFT"),
+            "initial-check-drift: missing files -> rc=1 checked=5 changed=5 status=DRIFT");
+    }
+
+    /* 2. --write populates the mini chain */
+    {
+        int rc = csr_run("--write", out);
+        ck(rc == 0 && ckk_has(out, CSR_OUT, "STAGES_REGEN\tmode=write\tchecked=5\tchanged=5\tneg_guarded=4\tstatus=WRITTEN"),
+            "write-populates-chain: --write -> rc=0 changed=5 neg_guarded=4 status=WRITTEN");
+    }
+
+    /* 3. --check right after --write is clean */
+    {
+        int rc = csr_run("--check", out);
+        ck(rc == 0 && ckk_has(out, CSR_OUT, "STAGES_REGEN\tmode=check\tchecked=5\tchanged=0\tneg_guarded=4\tstatus=OK"),
+            "check-after-write-ok: --check -> rc=0 changed=0 status=OK");
+    }
+
+    /* 4. Chain invariant: next/in == prev/expect byte-for-byte */
+    ck(csr_same_files("e2/expect", "e1/in") && csr_same_files("e1/expect", "e3/in"),
+        "chain-bytes-match: e1/in==e2/expect and e3/in==e1/expect");
+
+    /* 5. Flip 1 byte in e3/expect -> --check fails and names DIFF e3/expect */
+    {
+        char p[CSR_PW];
+        size_t n = 0;
+        char *b;
+        if (cx_fmt(p, sizeof p, "%s/e3/expect", csr_tree)) csr_abort("mut-path");
+        b = cx_read(p, &n);
+        if (!b || n < 10) csr_abort("read-e3-exp");
+        b[0] = (char)(b[0] ^ 1);
+        if (cx_write(p, b, n)) csr_abort("write-mut");
+        free(b);
+
+        int rc = csr_run("--check", out);
+        ck(rc == 1 && ckk_has(out, CSR_OUT, "DIFF\te3/expect\t") && ckk_has(out, CSR_OUT, "changed=1\tneg_guarded=4\tstatus=DRIFT"),
+            "mutate-one-byte-red: 1-byte flip in e3/expect -> rc=1 DIFF e3/expect changed=1");
+    }
+
+    /* 6. --write repairs drift, --check returns OK, and all 4 negative controls remain byte-identical */
+    {
+        int wrc = csr_run("--write", out);
+        int crc = csr_run("--check", out);
+        int negs_ok = csr_file_eq_str("e2/bad", neg_e2_bad) &&
+                      csr_file_eq_str("e2/bad.err", neg_e2_err) &&
+                      csr_file_eq_str("e1/bad", neg_e1_bad) &&
+                      csr_file_eq_str("e3/trunc-at-eol", neg_e3_eol);
+        ck(wrc == 0 && crc == 0 && ckk_has(out, CSR_OUT, "changed=0\tneg_guarded=4\tstatus=OK") && negs_ok,
+            "repair-and-neg-unchanged: --write restores OK and all 4 negative controls byte-identical");
+    }
+
+    /* 7. Unknown option refused with rc=2 */
+    {
+        char *av[] = {csr_bin, "--bad-opt", 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 2, "usage-bad-arg-rc2: unknown option refused with rc=2");
+    }
+
+    {
+        char *av[] = {"rm", "-rf", csr_work, 0};
+        (void)ck_run(av, out, sizeof out);
+    }
+
+    printf("CHECK_STAGES_REGEN\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
