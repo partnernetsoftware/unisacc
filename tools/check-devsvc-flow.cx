@@ -77,6 +77,68 @@ static int is(const char *name, const char *text) {
     if (b) free(b);
     return r;
 }
+/* The writer takes a real evidence lock in another session. Its own lifetime is
+ * bounded even against the old launcher. Test the recorded PID and the actual
+ * inode independently; a timeout before the writer starts is not a success. */
+static void orphan_case(int outer) {
+    char pidfile[256], lockfile[256], log[256];
+    const char *id = outer ? "outer" : "node";
+    F(pidfile,sizeof pidfile,"%s/%s.pid",w,id);
+    F(lockfile,sizeof lockfile,"%s/%s.lock",w,id);
+    F(log,sizeof log,"%s/%s.log",w,id);
+    char *v[32]={"sh","-c","log=$1; shift; exec \"$@\" >\"$log\" 2>&1","probe",log};
+    int n=5;
+    if (outer) { v[n++]="timeout"; v[n++]="--foreground"; v[n++]="-s"; v[n++]="KILL"; v[n++]="2"; }
+    char *cmd[]={"sh",prod,"tools/devsvc.cx","--","--dev","x","--par","1","--timeout-ms",
+                 outer?"10000":"500","--","sh","-c",
+                 "setsid flock -F -n \"$2\" sh -c 'echo $$ > \"$1\"; exec sleep 8' writer \"$1\" & wait",
+                 "probe",pidfile,lockfile,0};
+    for (int i=0;cmd[i];i++) v[n++]=cmd[i];
+    v[n]=0;
+    int rc=cap2(v,out,sizeof out);
+    char *verify[]={"sh","-c","test -s \"$1\" || exit 3; i=0; while pgrep -F \"$1\" >/dev/null && test $i -lt 40; do sleep .05; i=$((i+1)); done; ! pgrep -F \"$1\" >/dev/null && flock -n \"$2\" true","verify",pidfile,lockfile,0};
+    int gone=cap2(verify,out,sizeof out);
+    if (gone || (rc!=124 && !(outer && rc==137))) printf("ORPHAN_PROBE\tpath=%s\trc=%d\tverify=%d\n",id,rc,gone);
+    ck((rc==124 || (outer && rc==137)) && gone==0,outer?"launcher-timeout-releases-writer":"node-timeout-releases-writer");
+}
+static void background_writer(void) {
+    char *start[]={"x","--bg","--par","1","--timeout-ms","500","--cwd",w,
+                   "--","sh","-c","setsid flock -F -n bg.lock sh -c 'echo $$ > bg.pid; exec sleep 8' & wait",0};
+    int rc=dvraw(start); char job[48]={0};
+    int received=rc==0 && sscanf(out,"JOB\t%47s",job)==1;
+    char *await[]={"wait",job,"--timeout-ms","6000",0};
+    int ended=received && dvraw(await)==124 && has("JOB_DONE\t");
+    char *probe[]={"sh","-c","cd \"$1\" && test -s bg.pid && ! pgrep -F bg.pid >/dev/null && flock -n bg.lock true","verify",w,0};
+    ck(ended && cap2(probe,out,sizeof out)==0,"bg-timeout-releases-writer-before-job-done");
+}
+static void ownership_cases(void) {
+    char instance[256],plan[256];
+    F(instance,sizeof instance,"%s/isolated",w);
+    F(plan,sizeof plan,"%s/ownership.flow",w);
+    if(setenv(c_env,instance,1)){ck(0,"isolated-instance");return;}
+    int fresh=dv1("ping",0,0,0,0,0)!=0;
+    orphan_case(0);
+    int pong=dv1("ping",0,0,0,0,0)==0;
+    long server=field("pid=");
+    ck(fresh && pong && server>1,"first-timeout-timing-server-up");
+    /* Two nodes share a flow. The first expires inside its own x while the
+     * sibling and a separate foreground request finish normally. */
+    char rows[4096];
+    F(rows,sizeof rows,"short\texec\t-\ta0=sh;a1=%s;a2=tools/devsvc.cx;a3=--;a4=--dev;a5=x;a6=--par;a7=1;a8=--timeout-ms;a9=1000;a10=--;a11=sleep;a12=5\n"
+                       "sibling\texec\t-\ta0=sh;a1=-c;a2=sh ./unisacc.com tools/devsvc-core.cx -- ping %%26%%26 sleep 2 %%26%%26 echo sibling-ok\n",prod);
+    int wrote=put("ownership.flow",rows)==0;
+    char *run[]={"sh","-c",
+        "sh \"$1\" tools/devsvc.cx -- --dev x --par 1 -- sh -c 'sleep 2; echo peer-ok; exit 7' >\"$3/peer.out\" 2>&1 & peer=$!; "
+        "sh \"$1\" tools/devsvc.cx -- --dev flow run \"$2\" --par 2 --cat; flow=$?; wait $peer; peer_rc=$?; cat \"$3/peer.out\"; echo FLOW_RC=$flow PEER_RC=$peer_rc",
+        "probe",prod,plan,w,0};
+    int parallel=wrote && cap2(run,out,sizeof out)==0 && has("sibling-ok\n") && has("peer-ok\n") &&
+        has("NODE\tshort\tfail\trc=124") && has("NODE\tsibling\tok\trc=0") && has("FLOW_RC=1 PEER_RC=7");
+    char live[80]; F(live,sizeof live,"pong\tpid=%ld\t",server);
+    ck(parallel && has("peak=2") && has(live),"timeout-preserves-sibling-and-peer");
+    ck(dv1("ping",0,0,0,0,0)==0 && field("pid=")==server,"timeout-preserves-server-pid");
+    (void)dv1("stop",0,0,0,0,0);
+    if(setenv(c_env,inst,1))ck(0,"restore-instance");
+}
 static void sha_of(char *dst) { const char *q = strstr(out, "sha="); dst[0] = 0; if (q && strlen(q + 4) >= 64) { memcpy(dst, q + 4, 64); dst[64] = 0; } }
 
 int main(int argc, char **argv) {
@@ -96,6 +158,11 @@ int main(int argc, char **argv) {
     F(prod, sizeof prod, "%s/%s", root, c_product); F(self, sizeof self, "%s/%s", root, c_self);
     F(inst, sizeof inst, "/tmp/devsvc-flowck-%d", sy_pid()); F(w, sizeof w, "/tmp/devsvc-flowck-%d-w", sy_pid());
     if (setenv(c_env, inst, 1) || setenv("UNISACC_FLOW_ROOT", w, 1) || sy_mkdir_all(w, 0755)) return 2;
+    if (argc == 3 && !strcmp(argv[2],"orphan")) {
+        ownership_cases(); orphan_case(1); background_writer();
+        (void)dv1("stop",0,0,0,0,0);
+        goto fin;
+    }
 
     if (!M) goto p7;
     /* --par 强制:x 与 flow 缺省即 rc 2 REFUSE missing --par;x --par 1 单节点可跑 */
@@ -244,6 +311,7 @@ mrest:
     {   char *v[] = {"x", "--cwd", w, "--", "cat", "a.txt", 0};
         ck(dv(v) == 0 && strstr(out, "second\nX\tok\trc=0\t") == out && has("via=service"), "x-ok-via-service"); }
 
+    ownership_cases(); orphan_case(1); background_writer();
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "stop");
 fin:
     {   char *rm[] = {"rm", "-rf", inst, w, 0}; ck(cap2(rm, out2, sizeof out2) == 0, "fixture-cleanup"); }
