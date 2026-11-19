@@ -67,6 +67,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 ## 1. unisacc.com 是什么
 
+**四项内置能力(0.0.82 公开件实测,APE 7391587 字节;与 README.md 内置能力一节同口径)**:(1) 内置 libc:C99 头与运行库随产品自带,不依赖宿主 libc 头,`-ftrim-libc` 默认开;缺 `regex.h`、`strings.h`。(2) 内置 POSIX 子集(Linux 与 macOS;Windows 具名拒绝):46 探针对 gcc 逐字节对拍,POSIX 面完全通过 17/29,2 项行为缺陷(sigprocmask 未屏蔽、environ 为 NULL),10 项拒绝或缺失;线程、同步、原子与 TLS 未实现;asm 面 4/17,基本 `__asm__` 与部分属性目前静默忽略,0.0.83 改具名拒绝(证据见 [plans/roadmap-0.0.83-0.0.99.md](plans/roadmap-0.0.83-0.0.99.md) 末节)。(3) cx:`#pragma unisa module/use` 与 `sy_*`/`mm_*`/`tx_*`,规范见 [prd_cx_spec.md](prd_cx_spec.md)。(4) 脚本式运行:默认即 `-run`,`.c` 与 `.cx` 内存中编译运行不落盘,`sh ./unisacc.com FILE.cx -- ARGS`;只有 `-o` 才写文件。
+
 **一句话**：unisacc.com 是 C99 编译器（带部分 POSIX 库子集），打包成单个类 APE 文件——核心需求是六个 ISA 切片（lnx/osx/win × x86_64/arm64，每个目标同候选原生证据；现状缺口见下），能为 {Linux, macOS, Windows} × {x86-64, arm64} 六目标直接写出可执行文件，并以默认 `-run` 直接运行 `.c` 和 `.cx`。cx 是参照 Rust 设计的模块化方言（`#pragma unisa module/use`），所有权与边界目前为**运行期**检查，不等于编译期借用检查；cx 是编译器无关的语言 / 模块层，定位与结构见 [prd_cx.md](prd_cx.md)。编译内部是 7 个字节流阶段，表状决策交给 18 张事实网（13 张为出货主脊，5 张为对照臂，见 §3.4），网络权重由真值表构造并穷举验证、不经训练。通用执行器执行构造出的选择器与动作程序；这是决策表示的改变，尚无语义决策覆盖率证明，不能由模型体积推出“以网换逻辑”。
 
 **一个文件** `unisacc.com`（APE，即 αcτµαlly pδrταblε εxεcµταblε），一个文件同时是「编译器」和「程序」，但「它能写出的目标」和「它自己运行在哪些原生宿主」是两回事：
@@ -594,7 +596,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
-| `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；spec.md 在根） |
+| `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
 | `research/` | 论文五线（A 流网换逻辑、B ujs、C 管道、D cx 模块化、E 系统构表） |
 | `archive/` | 归档：reference-c/reference-py（旧实现）、testing-c43-legacy（旧 1333 项套件）、plans/（历史计划）、docs-2026-11/（2026-11 文档清理移入的 plans 与 research，索引 INDEX.md）、prd 历史 |
 | `apps/csih/` | csih 车道（归 csih 维护者） |

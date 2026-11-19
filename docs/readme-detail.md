@@ -68,6 +68,8 @@ exactness of the model data is not a claim of complete C99 coverage.
 
 ## 二、使用手册(命令、选项、头文件、限制)
 
+**当前口径(0.0.82 实测,覆盖下方冻结文字中的旧数字)**:四项内置能力为内置 libc、内置 POSIX 子集(17/29 完全通过,2 项行为缺陷,10 项拒绝或缺失;线程与原子、TLS 未实现)、cx(`#pragma unisa module/use`)、默认 `-run` 脚本式运行;一览表与实跑输出见 [README.md](../README.md#builtin)、[prd.md 1](../prd.md#1-unisacccom-是什么)。下方 Windows 切片"尚不工作"一句为旧文,资格以发布说明为准;实测 `-b win/x86_64 -o` 写出 PE32+。基本 `__asm__` 目前静默忽略,0.0.83 改具名拒绝。
+
 `unisacc.com` is a single file; a Unix shell runs it as a script that picks the
 slice for the machine (Linux and macOS, x86-64 and arm64). Windows reads it as a
 PE, but that slice does not work yet (see the status above). The C headers it

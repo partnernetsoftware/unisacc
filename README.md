@@ -4,6 +4,7 @@ English | [中文](README_zh.md)
 maintenance: keep README.md and README_zh.md in lockstep: same section ids in the same order, same link targets, same table rows; edit both in the same commit.
 section correspondence (id -> English heading -> Chinese heading):
   what     -> unisacc            -> unisacc
+  builtin  -> Built-in capabilities -> 内置能力
   download -> Download and verify -> 下载与校验
   commands -> Common commands    -> 常用命令
   index    -> Index              -> 索引
@@ -14,6 +15,34 @@ section correspondence (id -> English heading -> Chinese heading):
 # unisacc
 
 A C99 compiler for six targets, {Linux, macOS, Windows} x {x86-64, arm64}: its own encoder writes ELF, Mach-O (ad-hoc signed) and PE directly, it is self-hosting, and the whole product is a single file, `unisacc.com`. The default product is model-driven: fact tables -> generators -> transition/action programs executed on a generic VM; nothing is trained. The current version, its qualification status and known gaps are not on this page; see the prd documents in the table below and the releases page.
+
+<a id="builtin"></a>
+## Built-in capabilities
+
+Measured on the 0.0.82 public build (`unisacc 0.0.82`, APE 7391587 bytes, Linux x86-64 host). Details: [prd.md 1](prd.md#1-unisacccom-是什么), [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制).
+
+| Capability | What it is | Measured state and limits |
+|---|---|---|
+| (1) Built-in libc | The C99 headers and library bodies travel inside `unisacc.com`; no host libc headers are needed. `-ftrim-libc` (default) keeps only the bodies a program reaches. | Missing: `regex.h`, `strings.h`. On Linux the library calls the kernel directly. |
+| (2) Built-in POSIX subset | On Linux and macOS: `unistd.h`, `sys/stat.h`, `fcntl.h`, `poll.h`, `termios.h`, `dirent.h`, processes and `sys/wait.h`, IPv4 sockets, `netdb.h` without DNS, time functions. Windows refuses these headers by name. | POSIX survey (46 probes byte-compared with gcc): 17/29 fully pass, 2 behavior defects (`sigprocmask(SIG_BLOCK)` does not block; `extern char **environ` is NULL), 10 refused or missing. Threads, sync, atomics and TLS are not implemented. Inline asm: 4/17; basic `__asm__` and some attributes are silently ignored today (rc=0) and become named refusals in 0.0.83. |
+| (3) cx | A C extension: `#pragma unisa module NAME` and `#pragma unisa use MOD[::sym [as alias]]` instead of `#include`; layered library `sy_*`, `mm_*`, `tx_*`; runtime (not compile-time) ownership and bounds checks. | Spec: [prd_cx_spec.md](prd_cx_spec.md), [prd_cx.md](prd_cx.md). The module name must equal the file stem. |
+| (4) Script mode | `-run` is the default: a `.c` or `.cx` file is compiled in memory and run, nothing is written to disk. Arguments for the program go after `--`. | `-o` writes a file only when asked. |
+
+Also: one APE file runs on Linux and macOS (x86-64, arm64); it writes ELF, Mach-O and PE for six targets; `-c` and `-S` give objects and assembly.
+
+Real runs (0.0.82):
+
+```text
+$ sh ./unisacc.com --version
+unisacc 0.0.82
+$ sh ./unisacc.com h.c a b          # h.c prints argc
+hello c argc=3
+$ sh ./unisacc.com hello.cx -- a b  # #pragma unisa use text.text::tx_len
+hello cx argc=3 len=5
+$ sh ./unisacc.com h.c -o h && ./h x
+hello c argc=2
+$ sh ./unisacc.com h.c -b win/x86_64 -o h.exe   # file: PE32+ executable (console) x86-64
+```
 
 <a id="download"></a>
 ## Download and verify
@@ -50,7 +79,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | Build and chain tools, capability quick reference | [prd.md 2 capability quick reference](prd.md#2-有什么功能已实现能力速查) |
 | Tests, ratchets (13), batches | [prd.md 2.2 tests](prd.md#22-测试棘轮门禁批次)、[prd.md 7 test suite design](prd.md#7-测试套件设计)、[tests/README.md](tests/README.md) |
 | Structure: five layers, six slices, seven streams, eighteen nets, executor | [prd.md 3 structure](prd.md#3-结构组成unisacccom-的内部) |
-| Architecture and how files relate | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Architecture and how files relate | [prd_arch.md](prd_arch.md) |
 | Repository layout and "I want to do X, where do I go" | [prd.md §8.1](prd.md#repo-map) |
 | The cx language and cx-side structure | [prd_cx.md 0 cx core PRD](prd_cx.md#0-cx-核心-prd定稿-2026-11-12)、[cx/spec.md](cx/spec.md)、[docs/cx/prd.md](docs/cx/prd.md) |
 | cx design documents | [design-core](docs/cx/design-core.md)、[stability](docs/cx/stability.md)、[ref-cpython](docs/cx/ref-cpython.md)、[ref-node](docs/cx/ref-node.md)、[ref-quickjs](docs/cx/ref-quickjs.md)、[ref-rust](docs/cx/ref-rust.md) |
