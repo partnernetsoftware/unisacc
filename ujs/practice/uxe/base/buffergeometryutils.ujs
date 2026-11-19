@@ -1,0 +1,58 @@
+// Merge fixed-layout GeometryBuffers with common index mode. Vertex channels
+// are copied byte for byte, with each source's indices rebased.
+native function merge_geometry_buffers(mesh:i64,sources:i64,count:i64) i64 {
+  if(sources<0 || sources>6291456 || sources%4!=0 || count<1 || count>(6291456-sources)/4) { return 0-1; }
+  let vertices=0;
+  let indices=0;
+  let mode=0-1;
+  let output_v=ux_u32(mesh+GeometryBuffers.vertices);
+  let output_i=ux_u32(mesh+GeometryBuffers.indices);
+  let i=0;
+  while(i<count) {
+    let source=ux_u32(sources+i*4);
+    if(source>6291456-GeometryBuffers.size || source%4!=0 || source==mesh) { return 0-1; }
+    let v=ux_u32(source+GeometryBuffers.vertexCount);
+    let n=ux_u32(source+GeometryBuffers.indexCount);
+    let indexed=n>0;
+    if(mode>=0 && mode!=indexed) { return 0-1; }
+    mode=indexed;
+    vertices=vertices+v;
+    indices=indices+n;
+    if(!GeometryBuffers_fits(mesh,vertices,indices)) { return 0-1; }
+    i=i+1;
+  }
+  let cursor=0;
+  let out_index=0;
+  i=0;
+  while(i<count) {
+    let src=ux_u32(sources+4*i);
+    let v=ux_u32(src+GeometryBuffers.vertexCount);
+    let n=ux_u32(src+GeometryBuffers.indexCount);
+    let src_v=ux_u32(src+GeometryBuffers.vertices);
+    let src_i=ux_u32(src+GeometryBuffers.indices);
+    if(src_v>6291456 || v>(6291456-src_v)/32 || src_i>6291456 || n>(6291456-src_i)/4 ||
+       (v>0 && output_v<src_v+v*32 && src_v<output_v+vertices*32) ||
+       (n>0 && output_i<src_i+n*4 && src_i<output_i+indices*4)) { return 0-1; }
+    let channel=0;
+    while(channel<v*8) {
+      let value=ux_u32(src_v+channel*4);
+      let write=ux_u32_put(output_v+32*cursor+channel*4,value);
+      channel=channel+1;
+    }
+    let index=0;
+    while(index<n) {
+      let value=ux_u32(src_i+index*4);
+      if(value>=v) { return 0-1; }
+      let written=ux_u32_put(output_i+4*out_index,value+cursor);
+      out_index=out_index+1;
+      index=index+1;
+    }
+    cursor=cursor+v;
+    i=i+1;
+  }
+  return GeometryBuffers_commit(mesh,vertices,indices);
+}
+
+function BufferGeometryUtils_mergeGeometries(mesh,...merge_args) {
+  return merge_geometry_buffers(mesh,merge_args[0],merge_args[1]);
+}

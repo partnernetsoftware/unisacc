@@ -47,7 +47,7 @@
 |---|---|---|---|
 | M1 数学 | Vector2、Vector3、Vector4、Matrix3、Matrix4、Quaternion、Euler、Color、ColorManagement、Box2、Box3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SphericalHarmonics3、MathUtils | 21 | 修订(cdx2):21 项已有且有 G-math 门。Interpolant 系按开发计划归 M8 |
 | M2 核心图 | EventDispatcher、Object3D、Group、Scene、Layers、Clock、Cache、Source、Uniform、UniformsGroup、BufferAttribute 全家(Int8 到 Float64、Uint8Clamped、Float16、Instanced、Interleaved、GLBufferAttribute 共 14)、BufferGeometry、InstancedBufferGeometry、DataUtils、ImageUtils | 约 32 | 部分。基座已有父子变换，产品接入和各类剩余方法以清单为准 |
-| M3 相机与几何 | Camera、PerspectiveCamera、OrthographicCamera、ArrayCamera、CubeCamera、StereoCamera;Geometry 23 个(Box、Capsule、Circle、Cone、Cylinder、Dodecahedron、Edges、Extrude、Icosahedron、Lathe、Octahedron、Plane、Polyhedron、Ring、Shape、Sphere、Tetrahedron、Torus、TorusKnot、Tube、Wireframe 等);Curve 11、Path、Shape、ShapePath、ShapeUtils | 6 加 23 加 约 15 | 部分:透视投影与相机空间变换已在 `uxe.ujs`;无通用几何生成 |
+| M3 相机与几何 | Camera、PerspectiveCamera、OrthographicCamera、ArrayCamera、CubeCamera、StereoCamera，21 个 r160 核心几何类及 ConvexGeometry、TextGeometry 两个扩展类，Curve 与 11 个派生曲线类，Path、Shape、ShapePath、ShapeUtils，另含扩展 BufferGeometryUtils | A 栏 43 项，C 栏 3 项 | 基础实现经独立金值及 r160 对照，具体缺口见下文和生成清单 |
 | M4 GPU 渲染基座 | WebGLRenderer 对应面:渲染循环、渲染列表(不透明/透明排序)、视锥剔除、清屏、视口、裁剪、状态机(混合、深度、模板、剔除面)、RenderTarget 5 种、WebGLUtils、ShaderChunk、ShaderLib、UniformsLib、UniformsUtils、GLSL1/GLSL3 | 约 12 | 缺:现为软件光栅化,无 GPU 命令包 |
 | M5 材质与纹理 | Material 18(Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Shadow、Points、Line*、Sprite、Shader、RawShader);Texture 12(Canvas、Compressed*、Cube、Data、Data3D、DataArray、Depth、Framebuffer、Video 等);颜色空间与色调映射 7;Mapping 13、Filter 10、Wrapping 3 | 约 40 | 部分:toon 三阶、描边、雾、阴影图在软件路径;无 PBR |
 | M6 灯光与阴影 | Light、AmbientLight、HemisphereLight、DirectionalLight、PointLight、SpotLight、RectAreaLight、LightProbe;ShadowMap 4 种(Basic、PCF、PCFSoft、VSM);Fog、FogExp2;PMREMGenerator | 约 17 | 部分:方向光、阴影图、深度雾 |
@@ -201,6 +201,12 @@ export uxe_frame(now:i64) i64 version 1;
 修订(cdx2): M2 基座布局由 gen-object-layouts.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录由消费模块持有，场景模块交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
 
 修订(ccapi): D1 出口使用 `d1-scene-probe.cx` 在私有页启动两个 Wasm 模块。产品建立 Scene 及 Object3D 父子树，同一基座完成世界矩阵更新和投影。独立 CX 按既有 D1 相机方程计算开场和三个转向代表状态，逐项读回三维相机空间坐标和二维像素坐标。正式 D1 场景图切换排在 M4 GPU 路径之后。
+
+修订(cdx2): M3 的基础口径是 A 栏 43 项和 C 栏 3 项都有真实入口与独立门。23 个几何类包括 21 个 r160 核心几何类，以及 ConvexGeometry 和 TextGeometry 两个扩展。BufferGeometryUtils 是另计的扩展工具。各构造器的顶点、法线、UV 和适用的索引由 CX 用独立金值对照浏览器读回数据。ConvexGeometry 的输出按坐标和法线规整顺序后比对。测试页在 `ujs/practice/uxe/test/`。
+
+修订(cdx2): 严格覆盖仍标为部分。CubeCamera 缺渲染目标更新，ArrayCamera 缺渲染器多视口接入，几何类还缺若干材质分组、序列化与更多输入场景。ShapeUtils 支持单个凹轮廓和一个内孔，多孔与通用归并待补。ExtrudeGeometry 支持无倒角简单轮廓，Path 支持线段和贝塞尔段。TextGeometry 消费已解析字形轮廓，字体加载属于 M9。ConvexGeometry 覆盖有界一般位置点云，共面多边形面待补。BufferGeometryUtils 覆盖同布局网格合并。
+
+修订(cdx2): 复跑 C 栏门时，用本地 three.js r160 的 `examples/jsm` 中四个文件，按原文件名平放在一个工作目录，将目录作为 `convexgeometry-struct.cx`、`textgeometry-struct.cx`、`buffergeometryutils-struct.cx` 的第一个参数。第二个参数 `--mutate` 启用反例。文件分别来自 `geometries/ConvexGeometry.js`、`math/ConvexHull.js`、`geometries/TextGeometry.js` 和 `utils/BufferGeometryUtils.js`。扩展源码只用于对照。 [three.js r160 扩展源码](https://github.com/mrdoob/three.js/tree/r160/examples/jsm)
 
 修订(cdx2): D4 从 M7 恢复时先接场景树与城镇实例批，再接四腿刚体层级和步态，随后接跟拍相机及烟发射生命周期。已有本地 `town-motion` 的行走与跟拍位姿金值，线上还未迁移。M7 先验两节刚体 FK/IK、实例变换和遮挡，M8 再验混合器。烟的发射、排序与回收是另一个门，M7 若只交像素印章，保留在部分。M9 的压缩编解码器和第三方格式逐项估算。未纳入当前清单的插件、扩展及设备能力不能用提交数估计当作已覆盖。
 
