@@ -1,0 +1,225 @@
+struct Ray { ox: f64; oy: f64; oz: f64; dx: f64; dy: f64; dz: f64; }
+
+native function Ray_set(r_dst:i64,r_origin:i64,r_direction:i64) i64 {
+  let r_span=ux_span(r_dst,Ray.size);
+  let r_o=[ux_f64(r_origin),ux_f64(r_origin+8),ux_f64(r_origin+16)];
+  let r_d=[ux_f64(r_direction),ux_f64(r_direction+8),ux_f64(r_direction+16)];
+  let r_set_o=Vector3_set(r_dst,r_o[0],r_o[1],r_o[2]);
+  let r_set_d=Vector3_set(r_dst+24,r_d[0],r_d[1],r_d[2]);
+  return r_dst;
+}
+
+function Ray_copy(r_copy,...r_copy_args) {
+  return Ray_set(r_copy,r_copy_args[0],r_copy_args[0]+24);
+}
+
+function Ray_clone(r_clone,...r_clone_args) {
+  return Ray_copy(r_clone,r_clone_args[0]);
+}
+
+native function Ray_at(r_at_dst:i64,r_at_ray:i64,r_at_t:f64) i64 {
+  return Vector3_set(r_at_dst,ux_f64(r_at_ray)+ux_f64(r_at_ray+24)*r_at_t,
+      ux_f64(r_at_ray+8)+ux_f64(r_at_ray+32)*r_at_t,ux_f64(r_at_ray+16)+ux_f64(r_at_ray+40)*r_at_t);
+}
+
+function Ray_lookAt(r_look,...r_look_args) {
+  let r_target=r_look_args[0];
+  let r_vector=Vector3_set(r_look+24,ux_f64(r_target)-ux_f64(r_look),
+      ux_f64(r_target+8)-ux_f64(r_look+8),ux_f64(r_target+16)-ux_f64(r_look+16));
+  let r_unit=Vector3_normalize(r_vector);
+  return r_look;
+}
+
+native function Ray_recast(r_recast:i64,r_recast_t:f64) i64 {
+  return Ray_at(r_recast,r_recast,r_recast_t);
+}
+
+native function Ray_projectParameter(r_projection:i64,r_p:i64) f64 {
+  let r_dx=ux_f64(r_p)-ux_f64(r_projection);
+  let r_dy=ux_f64(r_p+8)-ux_f64(r_projection+8);
+  let r_dz=ux_f64(r_p+16)-ux_f64(r_projection+16);
+  return r_dx*ux_f64(r_projection+24)+r_dy*ux_f64(r_projection+32)+r_dz*ux_f64(r_projection+40);
+}
+
+function Ray_closestPointToPoint(r_close_dst,...r_close_args) {
+  let r_close_ray=r_close_args[0];
+  let r_close_t=Ray_projectParameter(r_close_ray,r_close_args[1]);
+  if(r_close_t<0.0) { r_close_t=0.0; }
+  return Ray_at(r_close_dst,r_close_ray,r_close_t);
+}
+
+native function Ray_distanceSqToPoint(r_dist_ray:i64,r_dist_pt:i64) f64 {
+  let r_dist_t=Ray_projectParameter(r_dist_ray,r_dist_pt);
+  if(r_dist_t<0.0) { r_dist_t=0.0; }
+  let r_dist_x=ux_f64(r_dist_pt)-ux_f64(r_dist_ray)-r_dist_t*ux_f64(r_dist_ray+24);
+  let r_dist_y=ux_f64(r_dist_pt+8)-ux_f64(r_dist_ray+8)-r_dist_t*ux_f64(r_dist_ray+32);
+  let r_dist_z=ux_f64(r_dist_pt+16)-ux_f64(r_dist_ray+16)-r_dist_t*ux_f64(r_dist_ray+40);
+  return r_dist_x*r_dist_x+r_dist_y*r_dist_y+r_dist_z*r_dist_z;
+}
+
+function Ray_distanceToPoint(r_dist,...r_dist_args) {
+  return f64_sqrt(Ray_distanceSqToPoint(r_dist,r_dist_args[0]));
+}
+
+// Minimize the quadratic on the ray/segment rectangle and its three boundaries.
+native function Ray_distanceSqToSegment(r_seg:i64,r_v0:i64,r_v1:i64,r_out_ray:i64,r_out_segment:i64) f64 {
+  let r_sx=ux_f64(r_v1)-ux_f64(r_v0);
+  let r_sy=ux_f64(r_v1+8)-ux_f64(r_v0+8);
+  let r_sz=ux_f64(r_v1+16)-ux_f64(r_v0+16);
+  let r_wx=ux_f64(r_seg)-ux_f64(r_v0);
+  let r_wy=ux_f64(r_seg+8)-ux_f64(r_v0+8);
+  let r_wz=ux_f64(r_seg+16)-ux_f64(r_v0+16);
+  let r_ux=ux_f64(r_seg+24); let r_uy=ux_f64(r_seg+32); let r_uz=ux_f64(r_seg+40);
+  let r_aa=r_ux*r_ux+r_uy*r_uy+r_uz*r_uz;
+  let r_bb=r_ux*r_sx+r_uy*r_sy+r_uz*r_sz;
+  let r_cc=r_sx*r_sx+r_sy*r_sy+r_sz*r_sz;
+  let r_dd=r_ux*r_wx+r_uy*r_wy+r_uz*r_wz;
+  let r_ee=r_sx*r_wx+r_sy*r_wy+r_sz*r_wz;
+  let r_det=r_aa*r_cc-r_bb*r_bb;
+  let r_best=1.0/0.0;
+  let r_best_t=0.0; let r_best_f=0.0;
+  let r_candidate=0;
+  while(r_candidate<4) {
+    let r_try_t=0.0; let r_try_f=0.0; let r_valid=1;
+    if(r_candidate==0 && r_cc>0.0) { r_try_f=vector_limit(r_ee/r_cc,0.0,1.0); }
+    if(r_candidate==1 && r_aa>0.0) { r_try_t=vector_limit((0.0-r_dd)/r_aa,0.0,1.0/0.0); }
+    if(r_candidate==2) {
+      r_try_f=1.0;
+      if(r_aa>0.0) { r_try_t=vector_limit((r_bb-r_dd)/r_aa,0.0,1.0/0.0); }
+    }
+    if(r_candidate==3) {
+      r_valid=0;
+      if(r_det>0.0) {
+        r_try_t=(r_bb*r_ee-r_cc*r_dd)/r_det;
+        r_try_f=(r_aa*r_ee-r_bb*r_dd)/r_det;
+        r_valid=r_try_t>=0.0 && r_try_f>=0.0 && r_try_f<=1.0;
+      }
+    }
+    if(r_valid) {
+      let r_delta_x=r_wx+r_try_t*r_ux-r_try_f*r_sx;
+      let r_delta_y=r_wy+r_try_t*r_uy-r_try_f*r_sy;
+      let r_delta_z=r_wz+r_try_t*r_uz-r_try_f*r_sz;
+      let r_candidate_sq=r_delta_x*r_delta_x+r_delta_y*r_delta_y+r_delta_z*r_delta_z;
+      if(r_candidate_sq<r_best) { r_best=r_candidate_sq; r_best_t=r_try_t; r_best_f=r_try_f; }
+    }
+    r_candidate=r_candidate+1;
+  }
+  let r_seg_x=ux_f64(r_v0)+r_best_f*r_sx;
+  let r_seg_y=ux_f64(r_v0+8)+r_best_f*r_sy;
+  let r_seg_z=ux_f64(r_v0+16)+r_best_f*r_sz;
+  if(r_out_ray>=0) { let r_hit_ray=Ray_at(r_out_ray,r_seg,r_best_t); }
+  if(r_out_segment>=0) { let r_hit_segment=Vector3_set(r_out_segment,r_seg_x,r_seg_y,r_seg_z); }
+  return r_best;
+}
+
+native function Ray_intersectSphere(r_sphere_dst:i64,r_sphere_ray:i64,r_sphere:i64) i64 {
+  let r_st=Ray_projectParameter(r_sphere_ray,r_sphere);
+  let r_sx0=ux_f64(r_sphere)-ux_f64(r_sphere_ray);
+  let r_sy0=ux_f64(r_sphere+8)-ux_f64(r_sphere_ray+8);
+  let r_sz0=ux_f64(r_sphere+16)-ux_f64(r_sphere_ray+16);
+  let r_rr=ux_f64(r_sphere+24);
+  let r_discriminant=r_rr*r_rr-(r_sx0*r_sx0+r_sy0*r_sy0+r_sz0*r_sz0-r_st*r_st);
+  if(r_discriminant<0.0) { return 0-1; }
+  let r_half_chord=f64_sqrt(r_discriminant);
+  let r_near=r_st-r_half_chord; let r_far=r_st+r_half_chord;
+  if(r_far<0.0) { return 0-1; }
+  if(r_near<0.0) { r_near=r_far; }
+  return Ray_at(r_sphere_dst,r_sphere_ray,r_near);
+}
+
+function Ray_intersectsSphere(r_sphere_test,...r_sphere_args) {
+  let r_target_sphere=r_sphere_args[0];
+  let r_target_radius=ux_f64(r_target_sphere+24);
+  return Ray_distanceSqToPoint(r_sphere_test,r_target_sphere)<=r_target_radius*r_target_radius;
+}
+
+native function Ray_distanceToPlane(r_plane_ray:i64,r_plane:i64) f64 {
+  let r_denom=Vector3_dot(r_plane_ray+24,r_plane);
+  let r_numer=0.0-Vector3_dot(r_plane_ray,r_plane)-ux_f64(r_plane+24);
+  if(r_denom==0.0) {
+    if(r_numer==0.0) { return 0.0; }
+    return 0.0-1.0;
+  }
+  let r_plane_t=r_numer/r_denom;
+  if(r_plane_t<0.0) { return 0.0-1.0; }
+  return r_plane_t;
+}
+
+native function Ray_intersectPlane(r_plane_dst:i64,r_ip_ray:i64,r_ip_plane:i64) i64 {
+  let r_ip_t=Ray_distanceToPlane(r_ip_ray,r_ip_plane);
+  if(r_ip_t<0.0) { return 0-1; }
+  return Ray_at(r_plane_dst,r_ip_ray,r_ip_t);
+}
+
+function Ray_intersectsPlane(r_ptest,...r_ptest_args) {
+  return Ray_distanceToPlane(r_ptest,r_ptest_args[0])>=0.0;
+}
+
+native function Ray_boxParameter(r_box_ray:i64,r_box:i64) f64 {
+  let r_tmin=0.0-1.0/0.0; let r_tmax=1.0/0.0;
+  let r_box_axis=0;
+  while(r_box_axis<24) {
+    let r_min=ux_f64(r_box+r_box_axis);
+    let r_max=ux_f64(r_box+r_box_axis+24);
+    let r_box_pos=ux_f64(r_box_ray+r_box_axis);
+    let r_box_dir=ux_f64(r_box_ray+r_box_axis+24);
+    if(r_box_dir==0.0) {
+      if(r_box_pos<r_min || r_box_pos>r_max) { return 0.0-1.0; }
+    } else {
+      let r_slab0=(r_min-r_box_pos)/r_box_dir;
+      let r_slab1=(r_max-r_box_pos)/r_box_dir;
+      if(r_box_dir<0.0) {
+        let r_save=r_slab0; r_slab0=r_slab1; r_slab1=r_save;
+      }
+      if(r_slab0>r_tmin) { r_tmin=r_slab0; }
+      if(r_slab1<r_tmax) { r_tmax=r_slab1; }
+      if(r_tmin>r_tmax) { return 0.0-1.0; }
+    }
+    r_box_axis=r_box_axis+8;
+  }
+  if(r_tmax<0.0) { return 0.0-1.0; }
+  if(r_tmin>=0.0) { return r_tmin; }
+  return r_tmax;
+}
+
+native function Ray_intersectBox(r_box_dst:i64,r_ib_ray:i64,r_ib_box:i64) i64 {
+  let r_box_t=Ray_boxParameter(r_ib_ray,r_ib_box);
+  if(r_box_t<0.0) { return 0-1; }
+  return Ray_at(r_box_dst,r_ib_ray,r_box_t);
+}
+
+function Ray_intersectsBox(r_box_test,...r_box_args) {
+  return Ray_boxParameter(r_box_test,r_box_args[0])>=0.0;
+}
+
+native function Ray_intersectTriangle(r_tri_dst:i64,r_tri_ray:i64,r_a:i64,r_b:i64,r_c:i64,r_cull:i64) i64 {
+  let r_abx=ux_f64(r_b)-ux_f64(r_a); let r_aby=ux_f64(r_b+8)-ux_f64(r_a+8); let r_abz=ux_f64(r_b+16)-ux_f64(r_a+16);
+  let r_acx=ux_f64(r_c)-ux_f64(r_a); let r_acy=ux_f64(r_c+8)-ux_f64(r_a+8); let r_acz=ux_f64(r_c+16)-ux_f64(r_a+16);
+  let r_dirx=ux_f64(r_tri_ray+24); let r_diry=ux_f64(r_tri_ray+32); let r_dirz=ux_f64(r_tri_ray+40);
+  let r_cross_x=r_diry*r_acz-r_dirz*r_acy;
+  let r_cross_y=r_dirz*r_acx-r_dirx*r_acz;
+  let r_cross_z=r_dirx*r_acy-r_diry*r_acx;
+  let r_tri_det=r_abx*r_cross_x+r_aby*r_cross_y+r_abz*r_cross_z;
+  if(r_tri_det==0.0 || (r_cull!=0 && r_tri_det<0.0)) { return 0-1; }
+  let r_tx=ux_f64(r_tri_ray)-ux_f64(r_a); let r_ty=ux_f64(r_tri_ray+8)-ux_f64(r_a+8); let r_tz=ux_f64(r_tri_ray+16)-ux_f64(r_a+16);
+  let r_bar_u=(r_tx*r_cross_x+r_ty*r_cross_y+r_tz*r_cross_z)/r_tri_det;
+  if(r_bar_u<0.0 || r_bar_u>1.0) { return 0-1; }
+  let r_qx=r_ty*r_abz-r_tz*r_aby; let r_qy=r_tz*r_abx-r_tx*r_abz; let r_qz=r_tx*r_aby-r_ty*r_abx;
+  let r_bar_v=(r_dirx*r_qx+r_diry*r_qy+r_dirz*r_qz)/r_tri_det;
+  if(r_bar_v<0.0 || r_bar_u+r_bar_v>1.0) { return 0-1; }
+  let r_ray_t=(r_acx*r_qx+r_acy*r_qy+r_acz*r_qz)/r_tri_det;
+  if(r_ray_t<0.0) { return 0-1; }
+  return Ray_at(r_tri_dst,r_tri_ray,r_ray_t);
+}
+
+function Ray_applyMatrix4(r_transform,...r_transform_args) {
+  let r_m=r_transform_args[0];
+  let r_new_origin=Vector3_applyMatrix4(r_transform,r_m);
+  let r_new_direction=Vector3_transformDirection(r_transform+24,r_m);
+  return r_transform;
+}
+
+function Ray_equals(r_eq,...r_eq_args) {
+  let r_eq_other=r_eq_args[0];
+  return Vector3_equals(r_eq,r_eq_other) && Vector3_equals(r_eq+24,r_eq_other+24);
+}
