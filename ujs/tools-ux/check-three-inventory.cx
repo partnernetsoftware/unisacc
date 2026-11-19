@@ -1,0 +1,89 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char inventory[]="ujs/practice/uxe/three-inventory.tsv";
+static const char source[]="ujs/practice/web/game/three.module.js";
+static const char facts[]="ujs/practice/uxe/three-r160-annotations.tsv";
+static const char addon[]="ujs/practice/uxe/three-r160-addons.tsv";
+static int failed,asserts;
+static int includes(const char *out,size_t n,const char *word) {
+    return tx_contains(out,n,word,tx_len(word,256));
+}
+
+static void check(int ok,const char *name) {
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    asserts++;
+    if(!ok) failed++;
+}
+
+static int run_check(const char *unisacc,const char *generator,int expected,int baseline) {
+    char *cmd[]={"sh",(char *)unisacc,(char *)generator,"--","--check",0};
+    char *out=0;
+    size_t n=0;
+    int rc=cx_runv_timeout(cmd,12,&out,&n);
+    int ok=rc==expected && out && includes(out,n,expected?"failed=1":"rows=446 failed=0");
+    if(!expected && baseline) {
+        const char *a="lane=A total=215 eligible=214 ready=0 partial=12 excluded=1 percent=0.00";
+        const char *b="lane=B total=201 eligible=200 ready=0 partial=0 excluded=1 percent=0.00";
+        const char *c="lane=C total=30 eligible=30 ready=0";
+        ok=ok && includes(out,n,a) && includes(out,n,b) && includes(out,n,c);
+    }
+    mm_free(out);
+    return ok;
+}
+
+static int flip(const char *path) {
+    unsigned char *raw=0;
+    int64_t size=0;
+    if(sy_read_file(path,&raw,&size,4000000) || size<2) { mm_free(raw); return 1; }
+    raw[0]^=1;
+    int rc=sy_write_file(path,raw,size,0600)!=0;
+    mm_free(raw);
+    return rc;
+}
+
+static int install(const char *cwd,const char *root) {
+    const char *dirs[]={"ujs/practice/uxe","ujs/practice/web/game"};
+    const char *paths[]={inventory,source,facts,addon};
+    const char *links[]={"cx","ext","cxroot.tsv"};
+    char from[1024],to[1024];
+    for(int i=0;i<2;i++) {
+        tx_snprintf(to,sizeof to,"%s/%s",root,dirs[i]);
+        if(sy_mkdir_all(to,0700)) return 1;
+    }
+    for(int i=0;i<4;i++) {
+        tx_snprintf(to,sizeof to,"%s/%s",root,paths[i]);
+        if(sy_copy(paths[i],to,0600)) return 1;
+    }
+    for(int i=0;i<3;i++) {
+        tx_snprintf(from,sizeof from,"%s/%s",cwd,links[i]);
+        tx_snprintf(to,sizeof to,"%s/%s",root,links[i]);
+        if(sy_symlink(from,to)) return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    char root[256],cwd[512],unisacc[600],generator[600],original[1024];
+    if(!getcwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-r160-inventory-",root,sizeof root)) return 2;
+    tx_snprintf(unisacc,sizeof unisacc,"%s/unisacc.com",cwd);
+    tx_snprintf(generator,sizeof generator,"%s/ujs/tools-ux/gen-three-inventory.cx",cwd);
+    if(!install(cwd,root) && !sy_chdir(root)) {
+        check(run_check(unisacc,generator,0,1),"独立统计");
+        check(!flip(inventory) && run_check(unisacc,generator,1,0),"磁盘表篡改");
+        tx_snprintf(original,sizeof original,"%s/%s",cwd,inventory);
+        check(!sy_copy(original,inventory,0600) && run_check(unisacc,generator,0,1),"表恢复");
+        check(!flip(source) && run_check(unisacc,generator,1,0),"上游源篡改");
+    } else failed++;
+    if(sy_chdir(cwd)) return 2;
+    char *clean[]={"rm","-rf","--",root,0};
+    char *out=0;
+    size_t n=0;
+    if(cx_runv_timeout(clean,5,&out,&n)) failed++;
+    mm_free(out);
+    printf("CHECK_THREE_INVENTORY asserts=%d failed=%d\n",asserts,failed);
+    return failed || asserts!=4;
+}

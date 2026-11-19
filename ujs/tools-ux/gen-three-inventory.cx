@@ -1,0 +1,264 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char source[]="ujs/practice/web/game/three.module.js";
+static const char target[]="ujs/practice/uxe/three-inventory.tsv";
+static const char annotations[]="ujs/practice/uxe/three-r160-annotations.tsv";
+static const char addons[]="ujs/practice/uxe/three-r160-addons.tsv";
+static const char digest[]="76dea8151bc9352aef3528b4262e249b2604f62543828328db978d060d61a495";
+static const char header[]="lane\tcategory\tname\tstate\tevidence\tpriority\tmilestone\tmethods\tuxe_api\n";
+
+typedef struct {
+    char lane;
+    char name[100];
+    const char *category,*state,*evidence,*priority,*milestone,*methods;
+    int annotated;
+} Row;
+static Row rows[446];
+static int count;
+static char result[160000];
+
+static int starts(const char *s,const char *p) {
+    return tx_prefixz(s,p,tx_len(p,256));
+}
+static int ends(const char *s,const char *tail) {
+    long n=tx_len(s,16000),k=tx_len(tail,16000);
+    return n>=0 && k>=0 && n>=k && tx_eqz(s+n-k,tail);
+}
+static int contains(const char *s,const char *word) {
+    return tx_contains(s,tx_len(s,16000),word,tx_len(word,16000));
+}
+static int one_of(const char *s,const char *names) {
+    char key[110];
+    int n=tx_snprintf(key,sizeof key,"|%s|",s);
+    return n>0 && n<(int)sizeof key && contains(names,key);
+}
+static int identifier(int c) {
+    return (c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='_';
+}
+static Row *find_row(const char *name) {
+    for(int i=0;i<count;i++) if(tx_eqz(rows[i].name,name)) return rows+i;
+    return 0;
+}
+static Row *add(const char *name,char lane) {
+    if(count==(int)(sizeof rows/sizeof rows[0]) || find_row(name)) return 0;
+    Row *r=rows+count;
+    int n=tx_snprintf(r->name,sizeof r->name,"%s",name);
+    if(n<=0 || n>=(int)sizeof r->name) return 0;
+    count++;
+    r->lane=lane;
+    r->state="缺";
+    r->priority="P2";
+    r->evidence="未登记可复用接口与独立门";
+    r->methods=lane=='B'?"-":"待展开";
+    return r;
+}
+
+static void classify(Row *r) {
+    const char *n=r->name;
+    r->category=r->lane=='B'?"通用常量":"核心";
+    r->milestone="M2";
+    if(r->lane=='B') {
+        if(ends(n,"Usage") || ends(n,"Type")) return;
+        if(ends(n,"BlendMode") || starts(n,"Loop") || starts(n,"Interpolate") || ends(n,"Ending")) {
+            r->category="动画常量"; r->milestone="M8"; return;
+        }
+        if(ends(n,"BindMode")) { r->category="网格常量"; r->milestone="M7"; return; }
+        if(tx_eqz(n,"MOUSE") || tx_eqz(n,"TOUCH")) { r->category="输入常量"; r->milestone="M10"; return; }
+        if(ends(n,"ShadowMap")) { r->category="阴影常量"; r->milestone="M6"; return; }
+        if(ends(n,"Format") || ends(n,"Mapping") || ends(n,"Wrapping") || ends(n,"Filter") ||
+           ends(n,"ColorSpace") || ends(n,"Encoding") || ends(n,"Transfer") || ends(n,"Primaries") ||
+           ends(n,"NormalMap")) { r->category="材质纹理常量"; r->milestone="M5"; return; }
+        if(!tx_eqz(n,"REVISION")) { r->category="渲染常量"; r->milestone="M4"; }
+        return;
+    }
+    if(ends(n,"Loader") || ends(n,"LoadingManager") || tx_eqz(n,"LoaderUtils")) {
+        r->category="加载"; r->milestone="M9";
+    } else if(contains(n,"Camera")) {
+        r->category="相机"; r->milestone=ends(n,"Helper")?"M11":"M3";
+    } else if(ends(n,"Helper") || starts(n,"Audio") || tx_eqz(n,"PositionalAudio")) {
+        r->category=ends(n,"Helper")?"辅助":"音频"; r->milestone="M11";
+    } else if(ends(n,"Geometry") || contains(n,"Curve") || one_of(n,"|Path|Shape|ShapePath|ShapeUtils|")) {
+        if(!starts(n,"Buffer") && !starts(n,"Instanced")) { r->category="几何"; r->milestone="M3"; }
+    } else if(ends(n,"Material") || ends(n,"Texture") || one_of(n,"|ColorManagement|ImageUtils|")) {
+        r->category=ends(n,"Texture")?"纹理":"材质"; r->milestone="M5";
+    } else if(ends(n,"Light") || starts(n,"Fog") || one_of(n,"|LightProbe|PMREMGenerator|")) {
+        r->category="灯光"; r->milestone="M6";
+    } else if(starts(n,"Animation") || ends(n,"KeyframeTrack") || starts(n,"Property")) {
+        r->category="动画"; r->milestone="M8";
+    } else if(ends(n,"Mesh") || one_of(n,"|LOD|Bone|Skeleton|Sprite|Points|Line|LineSegments|LineLoop|")) {
+        r->category="网格"; r->milestone="M7";
+    } else if(tx_eqz(n,"Raycaster")) {
+        r->category="拾取"; r->milestone="M10";
+    } else if(starts(n,"WebGL") || starts(n,"Shader") || starts(n,"Uniforms") ||
+              one_of(n,"|RenderTarget|createCanvasElement|")) {
+        r->category="渲染"; r->milestone="M4";
+    } else if(starts(n,"Vector") || starts(n,"Matrix") || ends(n,"Interpolant") ||
+              one_of(n,"|Box2|Box3|Color|Cylindrical|Euler|Frustum|Line3|MathUtils|Plane|Quaternion|Ray|Sphere|Spherical|SphericalHarmonics3|Triangle|")) {
+        r->category="数学"; r->milestone="M1";
+    }
+}
+
+static void classify_declarations(const char *s,const char *limit) {
+    const char *line=s;
+    while(line<limit) {
+        const char *start=0;
+        if(starts(line,"class ")) start=line+6;
+        if(starts(line,"function ")) start=line+9;
+        if(start) {
+            const char *end=start;
+            char name[100];
+            while(identifier(*end)) end++;
+            if(end>start && end-start<(long)sizeof name) {
+                tx_snprintf(name,sizeof name,"%.*s",(int)(end-start),start);
+                Row *r=find_row(name);
+                if(r) { r->lane='A'; r->methods="待展开"; }
+            }
+        }
+        while(line<limit && *line!='\n') line++;
+        if(line<limit) line++;
+    }
+}
+
+static int core(void) {
+    unsigned char *raw=0;
+    int64_t size=0;
+    char hash[65];
+    int rc=1;
+    if(sy_read_file(source,&raw,&size,4000000)) return 1;
+    const char *s=(const char *)raw;
+    if(sy_sha256_any_hex(raw,size,hash) || !tx_eqz(hash,digest) ||
+       !tx_contains(s,size,"const REVISION = '160';",23)) goto done;
+    long offset=tx_find(s,size,"\nexport { ",10);
+    if(offset<0) goto done;
+    const char *at=s+offset+10;
+    for(;;) {
+        char name[100];
+        const char *start=at;
+        while(identifier(*at)) at++;
+        if(at==start || at-start>=(long)sizeof name) goto done;
+        tx_snprintf(name,sizeof name,"%.*s",(int)(at-start),start);
+        int namespace=one_of(name,"|AnimationUtils|Cache|ColorManagement|DataUtils|DefaultLoadingManager|MathUtils|ShaderChunk|ShaderLib|UniformsLib|UniformsUtils|");
+        if(!add(name,namespace?'A':'B')) goto done;
+        if(*at==' ' && at[1]=='}' && at[2]==';') break;
+        if(*at!=',' || at[1]!=' ') goto done;
+        at+=2;
+    }
+    classify_declarations(s,s+offset);
+    for(int i=0;i<count;i++) classify(rows+i);
+    rc=count!=416;
+done:
+    mm_free(raw);
+    return rc;
+}
+
+static int good_priority(const char *s) {
+    return s[0]=='P' && s[1]>='0' && s[1]<='2' && !s[2];
+}
+static int good_milestone(const char *s) {
+    return one_of(s,"|M1|M2|M3|M4|M5|M6|M7|M8|M9|M10|M11|M12|");
+}
+static int read_facts(const char *path,unsigned char **data,int addon) {
+    int64_t n=0;
+    const char *fields=addon?"name\tcategory\tmilestone\tpriority\tr160_module\n":
+        "name\tstate\tcategory\tmilestone\tpriority\tmethods\tevidence\n";
+    if(sy_read_file(path,data,&n,16000) || !starts((char *)*data,fields)) return 1;
+    char *at=(char *)*data+tx_len(fields,128);
+    while(*at) {
+        char *f[7];
+        int cols=addon?5:7;
+        for(int i=0;i<cols;i++) {
+            f[i]=at;
+            char sep=i==cols-1?'\n':'\t';
+            while(*at && *at!='\n' && *at!='\t' && *at!='\r') at++;
+            if(at==f[i] || *at!=sep) return 1;
+            *at++=0;
+        }
+        Row *r=addon?add(f[0],'C'):find_row(f[0]);
+        int offset=addon?0:1;
+        if(!r || r->annotated || !good_milestone(f[2+offset]) || !good_priority(f[3+offset])) return 1;
+        r->annotated=1;
+        r->category=f[1+offset];
+        r->milestone=f[2+offset];
+        r->priority=f[3+offset];
+        if(addon) {
+            if(!ends(f[4],".js") || !contains(f[4],"/")) return 1;
+            r->evidence=f[4];
+        } else {
+            // No item can claim credit until an evidence-verifying gate is added.
+            if(!one_of(f[1],"|缺|部分|不适用|")) return 1;
+            if(tx_eqz(f[1],"不适用") &&
+               !one_of(r->name,"|WebGL1Renderer|WebGPUCoordinateSystem|")) return 1;
+            r->state=f[1];
+            r->methods=f[5];
+            r->evidence=f[6];
+        }
+    }
+    return 0;
+}
+
+static int method_mapping(const Row *r,char *out,int cap) {
+    if(r->lane=='B' || tx_eqz(r->state,"不适用") || tx_eqz(r->methods,"待展开")) {
+        return tx_snprintf(out,cap,"-")!=1;
+    }
+    const char *at=r->methods;
+    int used=0;
+    for(;;) {
+        const char *end=at;
+        while(identifier(*end)) end++;
+        if(end==at || (*end && *end!=',')) return 1;
+        int n=tx_snprintf(out+used,cap-used,"%s%s_%.*s",used?",":"",r->name,(int)(end-at),at);
+        if(n<1 || n>=cap-used) return 1;
+        used+=n;
+        if(!*end) return 0;
+        at=end+1;
+    }
+}
+
+static int render(void) {
+    int n=tx_snprintf(result,sizeof result,"%s",header);
+    for(int i=0;i<count;i++) {
+        Row *r=rows+i;
+        char mapping[1024];
+        if(method_mapping(r,mapping,sizeof mapping)) return -1;
+        int w=tx_snprintf(result+n,sizeof result-n,"%c\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+            r->lane,r->category,r->name,r->state,r->evidence,r->priority,r->milestone,r->methods,mapping);
+        if(w<0 || w>=(int)sizeof result-n) return -1;
+        n+=w;
+    }
+    return n;
+}
+static int matches(const char *file,int n) {
+    unsigned char *raw=0;
+    int64_t size=0;
+    int ok=!sy_read_file(file,&raw,&size,sizeof result) && tx_same((const char *)raw,size,result,n);
+    mm_free(raw);
+    return ok;
+}
+
+int main(int argc,char **argv) {
+    if(argc!=2 || !one_of(argv[1],"|--write|--check|")) return 2;
+    unsigned char *a=0,*c=0;
+    int rc=core() || read_facts(annotations,&a,0) || read_facts(addons,&c,1) || count!=446;
+    int n=rc?-1:render();
+    if(n<0) rc=1;
+    if(!rc) rc=tx_eqz(argv[1],"--write")?sy_write_file(target,result,n,0644)!=0:!matches(target,n);
+    if(n>=0) for(char lane='A';lane<='C';lane++) {
+        int total=0,done=0,excluded=0,partial=0;
+        for(int j=0;j<count;j++) if(rows[j].lane==lane) {
+            total++;
+            done+=tx_eqz(rows[j].state,"已有");
+            excluded+=tx_eqz(rows[j].state,"不适用");
+            partial+=tx_eqz(rows[j].state,"部分");
+        }
+        printf("THREE_INVENTORY lane=%c total=%d eligible=%d ready=%d partial=%d excluded=%d percent=%.2f\n",
+            lane,total,total-excluded,done,partial,excluded,100.0*done/(total-excluded));
+    }
+    printf("THREE_INVENTORY rows=%d failed=%d\n",count,rc);
+    mm_free(a);
+    mm_free(c);
+    return rc;
+}
