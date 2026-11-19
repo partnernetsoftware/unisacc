@@ -1,0 +1,151 @@
+// Kind 0..5: line, quadratic and cubic, each in two or three dimensions.
+native function CurveControl_init(curve:i64,points:i64,kind:i64,divisions:i64) i64 {
+  if(curve<0 || curve>6291456-CurveControl.size || curve%4!=0 ||
+     kind<0 || kind>5 || divisions<1 || divisions>4294967295 ||
+     points<0 || points%8!=0) { return 0-1; }
+  let bytes=8*(2+kind%2)*(2+kind/2);
+  if(points>6291456-bytes || (curve<points+bytes && points<curve+CurveControl.size)) { return 0-1; }
+  let p=ux_u32_put(curve+CurveControl.points,points);
+  let k=ux_u32_put(curve+CurveControl.kind,kind);
+  let d=ux_u32_put(curve+CurveControl.arcLengthDivisions,divisions);
+  return curve;
+}
+
+native function CurveControl_copy(dst:i64,src:i64,dst_points:i64) i64 {
+  if(src<0 || src>6291456-CurveControl.size || src%4!=0) { return 0-1; }
+  let kind=ux_u32(src+CurveControl.kind);
+  let divisions=ux_u32(src+CurveControl.arcLengthDivisions);
+  let points=ux_u32(src+CurveControl.points);
+  if(kind>5 || points%8!=0) { return 0-1; }
+  let bytes=8*(2+kind%2)*(2+kind/2);
+  if(points>6291456-bytes ||
+     (dst<points+bytes && points<dst+CurveControl.size)) { return 0-1; }
+  let initialized=CurveControl_init(dst,dst_points,kind,divisions);
+  if(initialized<0) { return initialized; }
+  let copied=uxe_copy_record(dst_points,points,bytes);
+  return dst;
+}
+
+function CurveControl_clone(dst,...clone_args) {
+  return CurveControl_copy(dst,clone_args[0],clone_args[1]);
+}
+
+native function CurveControl_getPoint(curve:i64,out:i64,t:f64) i64 {
+  if(curve<0 || curve>6291456-CurveControl.size || curve%4!=0) { return 0-1; }
+  let kind=ux_u32(curve+CurveControl.kind);
+  let points=ux_u32(curve+CurveControl.points);
+  if(kind>5) { return 0-1; }
+  let dimension=2+kind%2;
+  if(points%8!=0 || points>6291456-8*dimension*(2+kind/2) ||
+     out<0 || out%8!=0 || out>6291456-8*dimension) { return 0-1; }
+  if(kind<2) { return curve_line_point(out,points,dimension,t); }
+  return curve_bezier(out,points,dimension,1+kind/2,t);
+}
+
+native function curve_json_type(kind:i64) i64 {
+  let types=[CurveJsonToken.line2,CurveJsonToken.line3,CurveJsonToken.quad2,
+    CurveJsonToken.quad3,CurveJsonToken.cubic2,CurveJsonToken.cubic3];
+  if(kind<0 || kind>5) { return 0-1; }
+  return ObjectJsonToken.size+ObjectJsonType.size+types[kind];
+}
+
+native function curve_json_point(index:i64,count:i64) i64 {
+  let fields=[CurveJsonToken.v0,CurveJsonToken.v1,CurveJsonToken.v2,CurveJsonToken.v3];
+  let n=index;
+  if(count==2) { n=n+1; }
+  return ObjectJsonToken.size+ObjectJsonType.size+fields[n];
+}
+
+native function CurveControl_toJSON(curve:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(curve<0 || curve>6291456-CurveControl.size || curve%4!=0) { return 0-1; }
+  let kind=ux_u32(curve+CurveControl.kind);
+  let points=ux_u32(curve+CurveControl.points);
+  let divisions=ux_u32(curve+CurveControl.arcLengthDivisions);
+  if(kind>5 || points%8!=0 || divisions==0) { return 0-1; }
+  let count=2+kind/2;
+  let dimension=2+kind%2;
+  if(points>6291456-8*count*dimension) { return 0-1; }
+  let header=ObjectJsonToken.size+ObjectJsonType.size+CurveJsonToken.header;
+  let p=json_write_token(dst,end,header);
+  p=json_write_f64(p,end,0.0+divisions,scratch);
+  p=json_write_token(p,end,ObjectJsonToken.typedField);
+  p=json_write_token(p,end,curve_json_type(kind));
+  let i=0;
+  while(p>=0 && i<count) {
+    p=json_write_token(p,end,curve_json_point(i,count));
+    let j=0;
+    while(p>=0 && j<dimension) {
+      if(j!=0) { p=json_byte(p,end,44); }
+      p=json_write_f64(p,end,ux_f64(points+8*(i*dimension+j)),scratch);
+      j=j+1;
+    }
+    p=json_byte(p,end,93);
+    i=i+1;
+  }
+  return json_byte(p,end,125);
+}
+
+native function curve_json_kind(at:i64,end:i64,scratch:i64) i64 {
+  let last=json_scan_string(at,end);
+  if(last<0) { return 0-1; }
+  let i=0;
+  while(i<6) {
+    let token=json_write_token(scratch,scratch+120,curve_json_type(i));
+    let match=token-scratch==last-at;
+    let j=0;
+    while(match && at+j<last) {
+      match=ux_u8(at+j)==ux_u8(scratch+j);
+      j=j+1;
+    }
+    if(match) { return i; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+// Scratch uses 120 bytes for schema keys plus 96 for staged coordinates.
+// Input, output records, point arrays and scratch must be disjoint.
+native function CurveControl_fromJSON(curve:i64,points:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(scratch<0 || scratch>6291456-216 || scratch%8!=0) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-1; }
+  let token=json_write_token(scratch,scratch+120,ObjectJsonToken.typedField);
+  let type=json_find_key(input,end,scratch+2,4);
+  let kind=curve_json_kind(type,end,scratch);
+  if(kind<0) { return 0-1; }
+  let header=ObjectJsonToken.size+ObjectJsonType.size+CurveJsonToken.header;
+  let written=json_write_token(scratch,scratch+120,header);
+  let field=json_find_key(input,end,written-20,18);
+  let division=json_read_number(field,end);
+  if(division!=division || division<1.0 || division>4294967295.0) { return 0-1; }
+  let divisions=f64_floor_i64(division);
+  if(division!=0.0+divisions) { return 0-1; }
+  let count=2+kind/2;
+  let dimension=2+kind%2;
+  let i=0;
+  while(i<count) {
+    let point_key=json_write_token(scratch,scratch+120,curve_json_point(i,count));
+    let array=json_find_key(input,end,scratch+2,2);
+    if(array<0 || ux_u8(array)!=91) { return 0-1; }
+    let p=json_space(array+1,end);
+    let j=0;
+    while(j<dimension) {
+      let value=json_read_number(p,end);
+      if(value!=value) { return 0-1; }
+      let stored=ux_f64_put(scratch+120+8*(i*dimension+j),value);
+      p=json_space(json_scalar_end(p,end),end);
+      if(p<0 || p>=end) { return 0-1; }
+      j=j+1;
+      if(j<dimension) {
+        if(ux_u8(p)!=44) { return 0-1; }
+        p=json_space(p+1,end);
+      }
+    }
+    if(ux_u8(p)!=93) { return 0-1; }
+    i=i+1;
+  }
+  let initialized=CurveControl_init(curve,points,kind,divisions);
+  if(initialized<0) { return initialized; }
+  let moved=uxe_copy_record(points,scratch+120,8*count*dimension);
+  return curve;
+}
