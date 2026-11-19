@@ -1,6 +1,6 @@
 # unisacc 0.0.83 发布说明
 
-状态:同候选原生 CI run 待填。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,外目标执行格 UNVERIFIED,严格证据只覆盖下列批次,不得称全批资格。
+状态:同候选原生 CI run 44589130353(非一次通过:首次运行 osx/x86_64 格 stream-pipe 部件 e 撞 55 秒单部件界限失败,osx/arm64 格随之被取消;本机对照 SP_PART=e 在 0.0.82 与本候选上各约 4.8 秒(三次重复,首次冷 15 秒),排除产品回归,判为慢 runner 计时余量不足;gh run rerun --failed 在同一 run 重跑失败格后六目标全部 success,release-exec 自步骤 3 起重做通过,CI_VERDICT PASS;run 创建到结束约 29 分钟,含失败与重跑及 GitHub 排队)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,外目标执行格 UNVERIFIED,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -14,7 +14,7 @@
 | pkg.bin | 9489eaab801e7a2d0d3fc9f709c48a2b0d106ec0b4f24c90afeafc41f8b87e23 |
 | slice-win-arm64 | 76354c15b2596bea93095fe8be0782dcc7cf1f47275ab53f28dd2250e6b71a4e |
 | SHA256SUMS | 8883133ce9bced1255311def8eeb28cf651acb01fea6a4ffc295a2009af84afe |
-| CI run | 待填 |
+| CI run | 44589130353(首次 osx/x86_64 stream-pipe 部件 e 超 55 秒界限失败,失败格重跑后六目标 success) |
 
 ## 产品改动
 
@@ -50,7 +50,7 @@
 
 第一次整链(输入 8d79aea9b9)23:44 到 00:10 约 26 分钟。之后发现 exec/facts/k2-gen2.tsv 与 k2-libraryenv.tsv 的来源戳随 include 头改动过期(与 0.0.82 的 win-argv 同类,无内容改动),这两张表的生成器不在 derive 门,改上游时无门强制重算;重算后第二次整链(输入 f24ba9737d)01:39 到 02:06 约 27 分钟,rc 0,APE 与第一次字节相同。生成器总闸 tools/gen-all-check.cx 待 0.0.84 起链前落库。链目录 /tmp/unisacc-session-v083-chain2/f24ba9737d54acad8088d3edb0d83b71ade4e8bd。
 
-速度账(tools/speed-ledger.cx --version 0.0.83 实跑):槽到起链 520.7 分钟;整链出口 546.5 分钟(整链 2/2 次);预跑完成 UNMEASURED(账本未取到,实际预跑 00:15 至 02:23 分段);公开 待填。
+速度账(tools/speed-ledger.cx --version 0.0.83 实跑):槽到起链 520.7 分钟;整链出口 546.5 分钟(整链 2/2 次);预跑完成 573.5 分钟;槽到公开 604.6 分钟(公开后实跑重取)。实际时钟:两次整链各约 26 与 27 分钟;预跑含补跑与收口约 2 小时(00:15 至 02:23 分段);阶段 A 到公开约 30 分钟(含 CI 首次失败与失败格重跑)。
 
 ## 已知缺口
 
@@ -58,6 +58,7 @@
 (2) kill(getpid(), sig) 不经屏蔽字;线程同步、原子与 TLS 未实现(0.0.87 起);裸 -I include 被静默忽略(INCLUDE-BARE-RELATIVE-I-IGNORED,补丁草案 0.0.84)。
 (3) c-negative 53/9 续期(expires=0.0.85);12 格 netregen 指纹预期差异(expires=0.0.84);F4、F5、equiv0 与 equiv3 定因未做。
 (4) rt-shared-gen 对 _unisa_lbin 的登记缺口(main 既有),生成器总闸与 R2 第二半与 S2 第二期未做;dvqualify --ids 缓冲 8192 字节(400 个 id 溢出)、devsvc 门内层 60 秒不随负载伸缩、bg 作业偶发 JOB_LOST。
+(5) CI 的 osx/x86_64 stream-pipe 余量薄:总耗时 0.0.81 为 61.7 秒、0.0.82 为 79.9 秒(parts=main,e),本版首次运行部件 e 撞 55 秒界限;0.0.84 拆分或加宽并对账 runner 变动(pkg-gaps STREAM-PIPE-OSX-X86_64-55S-BOUND-THIN-MARGIN)。
 (5) derive-flow 批次在 60 秒窗口内跑不完(check-derive-flow 并行跑 derive --check 与 derive-flow --check,窗口到点被杀,未出 FAIL 行),本版严格证据不含该批,记 UNMEASURED。
 (6) 全套 s9 本版未跑;产品资格域本版仍非整域,严格证据所列批次之外为 UNMEASURED,不得称全批资格;外目标执行格(osx、win、arm64 原生)仍 UNVERIFIED。
 

@@ -19,22 +19,22 @@ C99 编译器,六个目标 {Linux, macOS, Windows} x {x86-64, arm64}:自己的�
 <a id="builtin"></a>
 ## 内置能力
 
-以 0.0.82 公开件实测(`unisacc 0.0.82`,APE 7391587 字节,Linux x86-64 宿主)。详见 [prd.md 1](prd.md#1-unisacccom-是什么)、[docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)。
+以 0.0.83 公开件实测(`unisacc 0.0.83`,APE 7399573 字节,Linux x86-64 宿主;POSIX 与 asm 面数字为 0.0.82 实测,0.0.83 修复项见 [release/notes-0.0.83.md](release/notes-0.0.83.md))。详见 [prd.md 1](prd.md#1-unisacccom-是什么)、[docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)。
 
 | 能力 | 是什么 | 实测现状与限制 |
 |---|---|---|
 | (1) 内置 libc | C99 头文件与运行库随 `unisacc.com` 自带,不依赖宿主 libc 头;`-ftrim-libc`(默认开)只保留程序用到的库体。 | 缺 `regex.h`、`strings.h`。Linux 上库直接走内核调用。 |
-| (2) 内置 POSIX 子集 | Linux 与 macOS 上:`unistd.h`、`sys/stat.h`、`fcntl.h`、`poll.h`、`termios.h`、`dirent.h`、进程与 `sys/wait.h`、IPv4 套接字、无 DNS 的 `netdb.h`、时间函数。Windows 对这些头具名拒绝。 | POSIX 实测(46 探针对 gcc 逐字节对拍):完全通过 17/29,2 项行为缺陷(`sigprocmask(SIG_BLOCK)` 未屏蔽;`extern char **environ` 为 NULL),10 项拒绝或缺失。线程、同步、原子与 TLS 未实现。asm 面 4/17;基本 `__asm__` 与部分属性目前静默忽略(rc=0),0.0.83 改为具名拒绝。 |
+| (2) 内置 POSIX 子集 | Linux 与 macOS 上:`unistd.h`、`sys/stat.h`、`fcntl.h`、`poll.h`、`termios.h`、`dirent.h`、进程与 `sys/wait.h`、IPv4 套接字、无 DNS 的 `netdb.h`、时间函数。Windows 对这些头具名拒绝。 | POSIX 实测(46 探针对 gcc 逐字节对拍):完全通过 17/29,2 项行为缺陷(`sigprocmask(SIG_BLOCK)` 未屏蔽;`extern char **environ` 为 NULL),10 项拒绝或缺失。线程、同步、原子与 TLS 未实现。asm 面 4/17;以上为 0.0.82 实测。0.0.83 已修 sigprocmask 屏蔽、environ 与 wchar_t 守卫三项,基本 `__asm__` 与白名单外属性改为具名拒绝(原静默忽略);修后 POSIX 与 asm 面未整体重测。 |
 | (3) cx | C 语言扩展:用 `#pragma unisa module NAME` 与 `#pragma unisa use MOD[::sym [as alias]]` 代替 `#include`;分层库 `sy_*`、`mm_*`、`tx_*`;所有权与边界为运行期检查,不是编译期。 | 规范见 [prd_cx_spec.md](prd_cx_spec.md)、[prd_cx.md](prd_cx.md)。模块名必须等于文件名主干。 |
 | (4) 脚本式运行 | 默认即 `-run`:`.c` 或 `.cx` 在内存中编译并运行,不落盘;程序参数放在 `--` 之后。 | 只有显式 `-o` 才写文件。 |
 
 另:一个 APE 文件在 Linux 与 macOS(x86-64、arm64)上直接运行;为六目标写出 ELF、Mach-O、PE;`-c` 与 `-S` 输出目标文件与汇编。
 
-实跑(0.0.82):
+实跑(0.0.83):
 
 ```text
 $ sh ./unisacc.com --version
-unisacc 0.0.82
+unisacc 0.0.83
 $ sh ./unisacc.com h.c a b          # h.c 打印 argc
 hello c argc=3
 $ sh ./unisacc.com hello.cx -- a b  # #pragma unisa use text.text::tx_len

@@ -19,22 +19,22 @@ A C99 compiler for six targets, {Linux, macOS, Windows} x {x86-64, arm64}: its o
 <a id="builtin"></a>
 ## Built-in capabilities
 
-Measured on the 0.0.82 public build (`unisacc 0.0.82`, APE 7391587 bytes, Linux x86-64 host). Details: [prd.md 1](prd.md#1-unisacccom-是什么), [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制).
+Measured on the 0.0.83 public build (`unisacc 0.0.83`, APE 7399573 bytes, Linux x86-64 host; the POSIX and asm figures are 0.0.82 measurements, for the 0.0.83 fixes see [release/notes-0.0.83.md](release/notes-0.0.83.md)). Details: [prd.md 1](prd.md#1-unisacccom-是什么), [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制).
 
 | Capability | What it is | Measured state and limits |
 |---|---|---|
 | (1) Built-in libc | The C99 headers and library bodies travel inside `unisacc.com`; no host libc headers are needed. `-ftrim-libc` (default) keeps only the bodies a program reaches. | Missing: `regex.h`, `strings.h`. On Linux the library calls the kernel directly. |
-| (2) Built-in POSIX subset | On Linux and macOS: `unistd.h`, `sys/stat.h`, `fcntl.h`, `poll.h`, `termios.h`, `dirent.h`, processes and `sys/wait.h`, IPv4 sockets, `netdb.h` without DNS, time functions. Windows refuses these headers by name. | POSIX survey (46 probes byte-compared with gcc): 17/29 fully pass, 2 behavior defects (`sigprocmask(SIG_BLOCK)` does not block; `extern char **environ` is NULL), 10 refused or missing. Threads, sync, atomics and TLS are not implemented. Inline asm: 4/17; basic `__asm__` and some attributes are silently ignored today (rc=0) and become named refusals in 0.0.83. |
+| (2) Built-in POSIX subset | On Linux and macOS: `unistd.h`, `sys/stat.h`, `fcntl.h`, `poll.h`, `termios.h`, `dirent.h`, processes and `sys/wait.h`, IPv4 sockets, `netdb.h` without DNS, time functions. Windows refuses these headers by name. | POSIX survey (46 probes byte-compared with gcc): 17/29 fully pass, 2 behavior defects (`sigprocmask(SIG_BLOCK)` does not block; `extern char **environ` is NULL), 10 refused or missing. Threads, sync, atomics and TLS are not implemented. Inline asm: 4/17. These are 0.0.82 measurements; 0.0.83 fixed sigprocmask masking, environ and the wchar_t guard, and basic `__asm__` plus non-whitelisted attributes are now named refusals (previously silently ignored); the POSIX and asm surfaces were not fully re-measured after the fixes. |
 | (3) cx | A C extension: `#pragma unisa module NAME` and `#pragma unisa use MOD[::sym [as alias]]` instead of `#include`; layered library `sy_*`, `mm_*`, `tx_*`; runtime (not compile-time) ownership and bounds checks. | Spec: [prd_cx_spec.md](prd_cx_spec.md), [prd_cx.md](prd_cx.md). The module name must equal the file stem. |
 | (4) Script mode | `-run` is the default: a `.c` or `.cx` file is compiled in memory and run, nothing is written to disk. Arguments for the program go after `--`. | `-o` writes a file only when asked. |
 
 Also: one APE file runs on Linux and macOS (x86-64, arm64); it writes ELF, Mach-O and PE for six targets; `-c` and `-S` give objects and assembly.
 
-Real runs (0.0.82):
+Real runs (0.0.83):
 
 ```text
 $ sh ./unisacc.com --version
-unisacc 0.0.82
+unisacc 0.0.83
 $ sh ./unisacc.com h.c a b          # h.c prints argc
 hello c argc=3
 $ sh ./unisacc.com hello.cx -- a b  # #pragma unisa use text.text::tx_len
