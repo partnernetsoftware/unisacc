@@ -179,14 +179,14 @@ static int projection_product(const char *dir, int mutate) {
         "ujs/practice/uxe/products/d1/terrain.ujs", "ujs/practice/uxe/products/d1/terrain-projection.ujs",
         "ujs/practice/uxe/products/d1/effects-audio.ujs", "ujs/practice/uxe/products/d1/combat-audio.ujs",
         "ujs/practice/uxe/products/d1/hud-overlay.ujs", "ujs/practice/uxe/products/d1/cloud-overlay.ujs",
-        "ujs/practice/uxe/products/d1/enemy-overlay.ujs"};
-    unsigned char *bytes[9] = {0};
-    int64_t sizes[9] = {0};
+        "ujs/practice/uxe/products/d1/enemy-overlay.ujs", "ujs/practice/uxe/products/d1/trail-overlay.ujs"};
+    unsigned char *bytes[10] = {0};
+    int64_t sizes[10] = {0};
     char path[320], audio[2048];
     char *program = (char *)mm_alloc(65536);
     int rc = 1;
     if (!program) return 1;
-    for (int i = 0; i < 9; i++) if (sy_read_file(sources[i], &bytes[i], &sizes[i], 16384)) goto done;
+    for (int i = 0; i < 10; i++) if (sy_read_file(sources[i], &bytes[i], &sizes[i], 16384)) goto done;
     if (audio_rows(audio, sizeof audio) < 0 || sprite_asset(dir)) goto done;
     if (mutate == 1) {
         const char ray[] = "viewDepth <= 400.0";
@@ -218,15 +218,14 @@ static int projection_product(const char *dir, int mutate) {
     int n = tx_snprintf(program, 65536,
         "%.*s\n%s\n%s\n%s\n%.*s\npersist let audioTableReady = 0;\n"
         "if (audioTableReady == 0) { let audioTableWrite = 0;\n%s audioTableReady = 1; }\n"
-        "%.*s\n%s\n%.*s\n%s\n%s\n%s\n%s\n%s\nlet presented = uxe_dispatch(3, 0, 0);\nreturn heading;\n",
+        "%.*s\n%s\n%.*s\n%s\n%s\n%s\n%s\n%s\n%s\npacketWrite = uxe_dispatch(3, 0, 0);\nreturn heading;\n",
         (int)preamble, bytes[0], bytes[1], bytes[2], bytes[4], (int)voices, bytes[5], audio,
         (int)(tick - preamble), bytes[0] + preamble, bytes[5] + voices,
         (int)(body_end - tick), bytes[0] + tick, bytes[3], mutate == 5 ? "" : (char *)bytes[7],
-        mutate == 7 ? "" : (char *)bytes[8], mutate == 3 ? "" :
-        "let aircraftAsset = uxe_dispatch(4, 0, 19200);\n"
-        "let aircraftPose = 213 + 4096 * (158 - f64_floor_i64(pitch * 0.55 + 0.5))"
-        " + 16777216 * 96 + 68719476736 * 50;\n"
-        "let aircraftDrawn = uxe_dispatch(12, aircraftPose, f64_floor_i64(bank * 37.81546712654381 + 0.5));\n",
+        mutate == 7 ? "" : (char *)bytes[8], mutate == 8 ? "" : (char *)bytes[9], mutate == 3 ? "" :
+        "if (uxe_dispatch(4, 0, 19200) == 19200) {\n"
+        "  packetWrite = uxe_dispatch(12, 213 + 4096 * (158 - f64_floor_i64(pitch * 0.55 + 0.5))"
+        " + 16777216 * 96 + 68719476736 * 50, f64_floor_i64(bank * 37.81546712654381 + 0.5));\n}\n",
         mutate == 4 ? "" : (char *)bytes[6]);
     if (n < 0 || n >= 65536) goto done;
     tx_snprintf(path, sizeof path, "%s/projection.ujs", dir);
@@ -234,7 +233,7 @@ static int projection_product(const char *dir, int mutate) {
     rc = generated(dir, "product", path, 0, 0);
     sy_unlink(path);
 done:
-    for (int i = 0; i < 9; i++) mm_free(bytes[i]);
+    for (int i = 0; i < 10; i++) mm_free(bytes[i]);
     mm_free(program);
     return rc;
 }
@@ -394,6 +393,10 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
                 int first=0, later=0, changed=0;
                 pass = !rc && sscanf(out + from, "%d %d %d", &first, &later, &changed)==3 &&
                     first>=100 && later>=100 && changed>=100;
+            } else if (projection_check == 8) {
+                int first=0, long_trail=0, left=0, right=0;
+                pass = !rc && sscanf(out + from, "%d %d %d %d", &first, &long_trail, &left, &right)==4 &&
+                    first>=20 && long_trail>=12 && left>=4 && right>=4;
             } else pass = !rc && (projection_check == 1 ? !projected_pixels(out + from, to) :
                      tx_same(out + from, to, gold, gold_n));
             if (projection_check && to > 500) to = 0;
@@ -436,6 +439,8 @@ int main(int argc, char **argv) {
     if (tx_eq(mode, "projection-foam", sizeof "projection-foam") || wave_pixels_mutate) projection_check = 6;
     int enemy_mutate = tx_eq(mode, "projection-enemy-missing", sizeof "projection-enemy-missing");
     if (tx_eq(mode, "projection-enemy", sizeof "projection-enemy") || enemy_mutate) projection_check = 7;
+    int trail_mutate = tx_eq(mode, "projection-trail-missing", sizeof "projection-trail-missing");
+    if (tx_eq(mode, "projection-trail", sizeof "projection-trail") || trail_mutate) projection_check = 8;
     if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
         !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check && !projection_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
@@ -443,7 +448,8 @@ int main(int argc, char **argv) {
     if (projection_check) {
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-projection-probe.html") ||
             generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
-            projection_product(dir, enemy_mutate ? 7 : wave_pixels_mutate ? 6 : cloud_mutate ? 5 : hud_mutate ? 4 : art_mutate ? 3 :
+            projection_product(dir, trail_mutate ? 8 : enemy_mutate ? 7 : wave_pixels_mutate ? 6 :
+                cloud_mutate ? 5 : hud_mutate ? 4 : art_mutate ? 3 :
                 audio_mutate ? 2 : tx_eq(mode, "projection-short", 17));
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
