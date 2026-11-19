@@ -70,6 +70,13 @@ sh ./unisacc.com tests/run.cx -- --smoke      # test entry; also --all, --list
 <a id="index"></a>
 ## Index
 
+Reading order for newcomers (by role; every other file is on demand, not a front page):
+
+- Users: this page -> clauses and limits in [prd_spec.md](prd_spec.md), [prd_release.md](prd_release.md).
+- Contributors: this page -> [prd_arch.md](prd_arch.md) -> [prd.md 2 capability quick reference](prd.md#2-有什么功能已实现能力速查) -> for `.cx` read [prd_cx_spec.md](prd_cx_spec.md), structure questions in [prd_cx.md](prd_cx.md) -> terms in [docs/glossary.md](docs/glossary.md) -> current version in [plans/INDEX.md](plans/INDEX.md).
+- Agents: [AGENTS.md](AGENTS.md) -> [prd_mempalace.md](prd_mempalace.md) -> [prd_cx_spec.md](prd_cx_spec.md) -> [plans/devsvc.md](plans/devsvc.md); numbers in [prd_hist.md](prd_hist.md) and [docs/readme-detail.md](docs/readme-detail.md) are frozen, not current status.
+- Releasers: [prd_mempalace.md](prd_mempalace.md) -> [prd_release.md](prd_release.md) -> release tool rows in prd.md 2 -> current version plan in [plans/INDEX.md](plans/INDEX.md).
+
 One hop to each destination. Link targets are Chinese documents; the anchors are unchanged.
 
 | Topic | Where |
@@ -89,7 +96,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | Formats and interoperability | [docs/tapebin-v1.md](docs/tapebin-v1.md)、[docs/host-interop.md](docs/host-interop.md)、[docs/glossary.md](docs/glossary.md) |
 | Task board, ledger, workflow | [prd_mempalace.md](prd_mempalace.md) (the only coordination entry; `archive/agentwork-retire-2026-11/` is retired, history only) |
 | Agent working rules | [AGENTS.md](AGENTS.md#unisacc-工作规则) (`CLAUDE.md` is a symlink to it) |
-| Current version plan and release notes | [archive/plans/v0.0.59-unisacc.md](archive/plans/v0.0.59-unisacc.md)、[plans/](plans/) |
+| Current version plan and release notes | [plans/INDEX.md](plans/INDEX.md) (current version plan row)、[release/README.md](release/README.md) |
 | Prior-work survey | [research/prior-art.md](research/prior-art.md) |
 | Detailed usage manual (Chinese) and known-limits reference: all options, headers, `-c`/`-S`/objects and archives | [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)、[七](docs/readme-detail.md#七已知限制) |
 | Frozen historical notes (Chinese): decision-net tables, old test-suite table, corpus observations, C99 coverage table | [docs/readme-detail.md](docs/readme-detail.md) |
