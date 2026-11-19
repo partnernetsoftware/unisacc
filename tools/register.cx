@@ -2,6 +2,13 @@
  *
  *   sh ./unisacc.com tools/register.cx -- ID CHECK.cx MARKER "COVERAGE TEXT" "FILES" [LAYER] [HEADERS] [--runner ABS_DEV_DIR] [--args ARGS]
  *   sh ./unisacc.com tools/register.cx -- --tool --sync --dry
+ *   sh ./unisacc.com tools/register.cx -- --tool --sync
+ *   sh ./unisacc.com tools/register.cx -- --tool --sync --recover
+ * A new shard must pass a cold run in a fresh private Git layout within 33000 ms.
+ * Publication serializes registry writers. An interrupted writer leaves a versioned
+ * .register-txn directory in the table directory. Explicit recovery rolls back the
+ * owned keys after validating every snapshot and preserves unrelated edits. Readers
+ * that need a consistent four-table view must take the registry lock.
  * The inventory preview holds the registration lock. It may create
  * .register.lock in the table directory. Only the private layout receives
  * proposed table bytes. Coverage and product declarations are fingerprinted
@@ -88,9 +95,11 @@ static int rg_try_lock(long ms) {
         sy_sleep_ms(50); waited += 50;
     }
 }
+static void rg_pending(void);
 static int rg_lock(void) {
     long ms = rg_lock_ms(); int fd = rg_try_lock(ms);
     if (fd < 0) { fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", rg_lockpath(), ms); exit(2); }
+    rg_pending();
     return fd;
 }
 /* The rollback's wait is its own and longer, and it retries: a refusal must end either with the two rows
@@ -103,6 +112,7 @@ static long rg_rollback_ms(void) {
 static int rg_lock_rollback(void) {
     int fd = -1, attempt;
     for (attempt = 0; attempt < 3; attempt++) { fd = rg_try_lock(rg_rollback_ms()); if (fd >= 0) break; }
+    if(fd>=0)rg_pending();
     return fd;
 }
 
@@ -323,6 +333,84 @@ static int rg_find_row(RegRow *r,int n,const RegRow *row){
     for(int i=0;i<n;i++)if(r[i].key==row->key && !memcmp(r[i].p,row->p,row->key))return i;
     return -1;
 }
+/* A pending transaction records before/after bytes. Recovery modifies only
+   keys owned by that change. Product input declarations use (kind,key). */
+static RegRow *rg_transaction_rows(const char *bytes,size_t size,int declarations,int *count){
+    RegRow *rows=rg_rows(bytes,size,count);
+    if(declarations)for(int i=0;i<*count;i++){
+        RegRow *r=&rows[i];
+        if(r->n && r->p[0]!='#' && r->key<r->n && r->p[r->key]=='\t'){
+            r->key++;
+            while(r->key<r->n && r->p[r->key]!='\t' && r->p[r->key]!='\n')r->key++;
+        }
+    }
+    return rows;
+}
+static int rg_same_row(const RegRow *a,const RegRow *b){
+    return (!a || !b) ? a==b : a->n==b->n && !memcmp(a->p,b->p,a->n);
+}
+static int rg_unique_row(RegRow *rows,int n,const RegRow *key,const RegRow **value){
+    *value=0;
+    for(int i=0;i<n;i++)if(rows[i].key==key->key && !memcmp(rows[i].p,key->p,key->key)){
+        if(*value)return -1;
+        *value=&rows[i];
+    }
+    return 0;
+}
+/* Produce the result in memory for all four tables before any recovery
+   rename. Encountering a third value is a conflict, even for a removal. */
+static char *rg_recovery_image(const char *path,int declarations,
+        const char *before,size_t bn,const char *after,size_t an,
+        const char *current,size_t cn,size_t *outn){
+    int nb,na,nc;
+    RegRow *old=rg_transaction_rows(before,bn,declarations,&nb);
+    RegRow *published=rg_transaction_rows(after,an,declarations,&na);
+    RegRow *now=rg_transaction_rows(current,cn,declarations,&nc);
+    const RegRow **replace=calloc(nc+1,sizeof *replace);
+    int *remove=calloc(nc+1,sizeof *remove),*insert=malloc((nb+1)*sizeof *insert);
+    char *out=malloc(cn+bn+1);
+    if(!out || !replace || !remove || !insert)rg_die("recovery allocation",path);
+    const RegRow *key=0;
+    int anchor=nc;
+    for(int i=nb-1;i>=0;i--){
+        const RegRow *orig=&old[i],*post=0,*live=0;
+        int pos=rg_find_row(now,nc,orig);
+        insert[i]=-1;
+        if(pos>=0)anchor=pos;
+        int w=rg_find_row(published,na,orig);
+        if(w>=0 && rg_same_row(orig,&published[w]))continue;
+        key=orig;
+        if(rg_unique_row(published,na,orig,&post) || rg_unique_row(now,nc,orig,&live) ||
+           (!rg_same_row(live,orig) && !rg_same_row(live,post)))goto conflict;
+        if(!live)insert[i]=anchor;
+        else replace[pos]=orig;
+    }
+    for(int i=0;i<na;i++){
+        const RegRow *post=&published[i],*live=0;
+        if(rg_find_row(old,nb,post)>=0)continue;
+        key=post;
+        if(rg_unique_row(now,nc,post,&live) || (live && !rg_same_row(live,post)))goto conflict;
+        if(live)remove[live-now]=1;
+    }
+    *outn=0;
+    for(int i=0;i<=nc;i++){
+        for(int j=0;j<nb;j++)if(insert[j]==i){
+            if(mm_copy(out+*outn,cn+bn-*outn,old[j].p,old[j].n))rg_die("rollback copy bound",path);*outn+=old[j].n;
+        }
+        if(i<nc && !remove[i]){
+            const RegRow *keep=replace[i]?replace[i]:&now[i];
+            if(mm_copy(out+*outn,cn+bn-*outn,keep->p,keep->n))rg_die("rollback copy bound",path);*outn+=keep->n;
+        }
+    }
+    out[*outn]=0;
+    goto finish;
+conflict:
+    fprintf(stderr,"register: REFUSE recovery-key-conflict %s key=%.*s\n",path,(int)key->key,key->p);
+    free(out);out=0;
+finish:
+    free(insert);free(remove);free(replace);free(now);free(published);free(old);
+    return out;
+}
 static int rg_inverse_once(const char *path,const char *before,size_t bn,const char *written,size_t wn){
     size_t cn;char *cur=cx_read(path,&cn);
     if(!cur)return 1;
@@ -391,6 +479,171 @@ static int rg_plan_delta(const char *path,const char *before,size_t bn,const cha
     printf("REGISTER_SYNC_TABLE\t%s\tchanged_keys=%d\n",path,changes);
     return changes;
 }
+typedef struct {char path[4400],*before,*after,*cur,*undo;size_t bn,an,cn,un;} RgTable;
+static const char *rg_names[]={"tools-compile-sources.tsv","batches.tsv","coverage.tsv","batch-product-inputs.tsv"};
+static char journal[4400];
+static void rg_report_retired(void){
+    DIR *d=opendir(rg_tdir());if(!d)return;
+    struct dirent *entry;
+    while((entry=readdir(d)))if(!strncmp(entry->d_name,".register-clean-",16))
+        fprintf(stderr,"REGISTER_SYNC RETIRED_CLEANUP_PENDING %s/%s\n",rg_tdir(),entry->d_name);
+    closedir(d);
+}
+static void rg_pending(void){
+    rg_report_retired();
+    if(cx_fmt(journal,sizeof journal,"%s/.register-txn",rg_tdir()))rg_die("transaction path",0);
+    sy_stat_t st;int r=sy_lstat(journal,&st);
+    if(r!=-ENOENT)rg_die(r || st.kind!='d'?"transaction-path-invalid":"RECOVERY_REQUIRED",journal);
+}
+static void rg_file(char *p,size_t cap,const char *dir,const char *name){
+    if(cx_fmt(p,cap,"%s/%s",dir,name))rg_die("transaction path",dir);
+}
+static char *rg_read_regular(const char *p,size_t *n){
+    sy_stat_t st;if(sy_lstat(p,&st) || st.kind!='f')rg_die("transaction-file-invalid",p);
+    char *b=cx_read(p,n);if(!b)rg_die("transaction-read",p);return b;
+}
+/* All names in the journal are constants; it cannot supply a write path. */
+static void rg_record(RgTable *tables,const char *dir,int reading){
+    char record[4096]="REGISTER_TXN\t1\n",p[4500],name[128],digest[65],seal[128];size_t used=strlen(record),n;
+    for(int i=0;i<4;i++){
+        RgTable *t=tables+i;rg_file(t->path,sizeof t->path,rg_tdir(),rg_names[i]);
+        for(int j=0;j<2;j++){
+            char **bytes=j?&t->after:&t->before;size_t *length=j?&t->an:&t->bn;
+            if(cx_fmt(name,sizeof name,"%s.%s",rg_names[i],j?"after":"before"))rg_die("transaction name",0);
+            rg_file(p,sizeof p,dir,name);
+            if(reading)*bytes=rg_read_regular(p,length);
+            else if(sy_write_atomic(p,*bytes,*length,0600))rg_die("transaction-stage",p);
+            if(sy_sha256_hex(*bytes,*length,digest) || cx_fmt(record+used,sizeof record-used,"%s\t%s\n",name,digest))rg_die("transaction digest",p);
+            used=strlen(record);
+        }
+    }
+    if(sy_sha256_hex(record,used,digest) || cx_fmt(seal,sizeof seal,"id\t%s\n",digest) || used+strlen(seal)>=sizeof record)rg_die("transaction seal",dir);
+    if(mm_copy(record+used,sizeof record-used,seal,strlen(seal)+1))rg_die("record bound",dir);used+=strlen(seal);
+    rg_file(p,sizeof p,dir,"record.tsv");
+    if(!reading){if(sy_write_atomic(p,record,used,0600))rg_die("transaction-record-write",p);return;}
+    char *b=rg_read_regular(p,&n);
+    if(n!=used || memcmp(b,record,n))rg_die("transaction-digest-mismatch",p);
+    free(b);
+}
+static void rg_retire(void){
+    char trash[4400],dest[4500];
+    if(sy_mkdtemp(rg_tdir(),".register-clean-",trash,sizeof trash))rg_die("transaction-cleanup",journal);
+    rg_file(dest,sizeof dest,trash,"finished");
+    if(sy_rename(journal,dest))rg_die("transaction-finalize",journal);
+    char file[4700],leaf[128];
+    rg_file(file,sizeof file,dest,"table.tmp");
+    int tmp_rc=sy_unlink(file);if(tmp_rc && tmp_rc!=-ENOENT)rg_die("retired-table-cleanup",file);
+    for(int i=0;i<4;i++)for(int j=0;j<2;j++){
+        if(cx_fmt(leaf,sizeof leaf,"%s.%s",rg_names[i],j?"after":"before"))rg_die("transaction name",dest);
+        rg_file(file,sizeof file,dest,leaf);
+        if(sy_unlink(file))rg_die("retired-snapshot-cleanup",file);
+    }
+    rg_file(file,sizeof file,dest,"record.tsv");
+    if(sy_unlink(file)||sy_rmdir(dest)||sy_rmdir(trash))rg_die("retired-record-cleanup",dest);
+}
+/* Preserve the table's access mode even when the caller's umask is 077. */
+static int rg_replace_table(const char *path,const char *bytes,size_t size){
+    char tmp[4500];struct stat st;
+    if(lstat(path,&st)||!S_ISREG(st.st_mode))return 1;
+    rg_file(tmp,sizeof tmp,journal,"table.tmp");
+    return sy_write_atomic(tmp,bytes,size,0600)||sy_chmod(tmp,st.st_mode&0777)||sy_rename(tmp,path);
+}
+static void rg_recover(void){
+    RgTable t[4]={0};
+    fprintf(stderr,"REGISTER_SYNC\tRECOVERY_REQUIRED\t%s\n",journal);
+    rg_record(t,journal,1);
+#ifdef REGISTER_TXN_FAULT_TEST
+    if(tx_eqz(sy_env_or("REGISTER_RECOVER_STOP",""),"1"))sy_signal(sy_pid(),19);
+#endif
+    for(int i=0;i<4;i++){
+        t[i].cur=rg_read_regular(t[i].path,&t[i].cn);
+        t[i].undo=rg_recovery_image(t[i].path,i==3,t[i].before,t[i].bn,t[i].after,t[i].an,t[i].cur,t[i].cn,&t[i].un);
+        if(!t[i].undo)rg_die("recovery refused",t[i].path);
+    }
+    for(int i=0;i<4;i++){
+        char now[65],expect[65];
+        if(rg_snapshot(t[i].path,now)||sy_sha256_hex(t[i].cur,t[i].cn,expect)||!tx_eqz(now,expect))rg_die("recovery-input-changed",t[i].path);
+        if(t[i].cn!=t[i].un || memcmp(t[i].cur,t[i].undo,t[i].un))
+            if(rg_replace_table(t[i].path,t[i].undo,t[i].un))rg_die("recovery-write",t[i].path);
+    }
+    rg_retire();puts("REGISTER_SYNC\tRECOVERED\tpolicy=rollback");
+}
+static int rg_sync_publish(const char *sources,size_t sn,const char *batch,size_t bn,char versions[][65]){
+    RgTable t[4]={0};const int order[]={2,0,1,3};int changed=0;
+    char tmp[4400],hash[65];
+    for(int i=0;i<4;i++){
+        rg_file(t[i].path,sizeof t[i].path,rg_tdir(),rg_names[i]);t[i].before=rg_read_regular(t[i].path,&t[i].bn);
+        if(sy_sha256_hex(t[i].before,t[i].bn,hash)||!tx_eqz(hash,versions[order[i]]))return 4;
+        t[i].after=i==0?(char*)sources:i==1?(char*)batch:t[i].before;
+        t[i].an=i==0?sn:i==1?bn:t[i].bn;
+        if(t[i].an!=t[i].bn || memcmp(t[i].before,t[i].after,t[i].an))changed++;
+    }
+    if(!changed){puts("REGISTER_SYNC\tstatus=UNCHANGED");return 0;}
+    if(sy_mkdtemp(rg_tdir(),".register-stage-",tmp,sizeof tmp))rg_die("transaction-stage",rg_tdir());
+    rg_record(t,tmp,0);
+    if(sy_rename(tmp,journal)){cx_rmtree(tmp);rg_die("transaction-activate",journal);}
+    for(int i=0;i<4;i++){
+        if(rg_snapshot(t[i].path,hash) || !tx_eqz(hash,versions[order[i]]) ||
+           (i<2 && rg_replace_table(t[i].path,t[i].after,t[i].an))){rg_recover();return 4;}
+#ifdef REGISTER_TXN_FAULT_TEST
+        /* Linux fixture binary only. The parent observes WUNTRACED before it sends SIGKILL. */
+        const char *stop=sy_env_or("REGISTER_TXN_STOP","");
+        if(stop[0]=='1'+i && !stop[1])sy_signal(sy_pid(),19);
+#endif
+    }
+    rg_retire();printf("REGISTER_SYNC\tstatus=PUBLISHED\tchanged_tables=%d\n",changed);return 0;
+}
+/* A cold layout contains the complete tracked source tree and fresh compiler intermediates. */
+static int rg_clean_layout(const char *private_dir){
+    char why[600];int rc=unisa_safedel(private_dir,SAFEDEL_PURGE|SAFEDEL_RECURSIVE,100000,why,sizeof why);
+    if(rc)fprintf(stderr,"register: cold-layout-cleanup %s: %s\n",private_dir,why);
+    return rc;
+}
+/* Archive the exact index tree that supplied the proposed inventory, then run the real batch
+   in its own single-commit repository. Only the batch invocation counts against 33000 ms. */
+static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const char *batch,size_t bn,int shard){
+    char lay[4400],tar[4500],idx[4500],envindex[4600],out[4550],p[4600],buf[32768],tree[80],id[64],want[128],ape[4096];
+    sy_stat_t st;
+    if(sy_mkdtemp(stage,"layout-",lay,sizeof lay))return 2;
+    rg_file(tar,sizeof tar,lay,"snapshot.tar");rg_file(idx,sizeof idx,lay,"snapshot.index");
+    char *ip[]={"./tools/bound","5","git","rev-parse","--git-path","index",0};
+    if(run(ip,buf,sizeof buf)||!strchr(buf,'\n'))return 2;
+    *strchr(buf,'\n')=0;if(sy_copy(buf,idx,0600)||cx_fmt(envindex,sizeof envindex,"GIT_INDEX_FILE=%s",idx))return 2;
+    char *wt[]={"./tools/bound","15","env",envindex,"git","write-tree",0};
+    if(run(wt,tree,sizeof tree)||!strchr(tree,'\n'))return 2;*strchr(tree,'\n')=0;
+    char *ar[]={"./tools/bound","55","git","archive","-o",tar,tree,0};
+    char *extract[]={"./tools/bound","55","tar","-xf",tar,"-C",lay,0};
+    if(run(ar,buf,sizeof buf)||run(extract,buf,sizeof buf)||sy_unlink(tar)||sy_unlink(idx))return 2;
+    rg_file(p,sizeof p,lay,"tests");if(sy_lstat(p,&st)||st.kind!='d')return 2;
+    for(int i=0;i<4;i++){
+        char testdir[4500],live[4500];size_t n;rg_file(testdir,sizeof testdir,lay,"tests");
+        rg_file(p,sizeof p,testdir,rg_names[i]);rg_file(live,sizeof live,rg_tdir(),rg_names[i]);
+        char *extra=i>1?rg_read_regular(live,&n):0;
+        int rc=sy_write_atomic(p,i==0?sources:i==1?batch:extra,i==0?sn:i==1?bn:n,0644);free(extra);if(rc)return 2;
+    }
+    char db[4500],dbarg[4600],gitlink[4500];rg_file(db,sizeof db,stage,"cold-git-objects");
+    if(cx_fmt(dbarg,sizeof dbarg,"--separate-git-dir=%s",db))return 2;
+    char *init[]={"./tools/bound","15","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"init","-q",dbarg,0};
+    char *add[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"add","-Af","--",".",":(exclude)unisacc.com",0};
+    char *commit[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"-c","user.name=register","-c","user.email=register@localhost","-c","commit.gpgsign=false","commit","-qm","register cold layout",0};
+    rg_file(p,sizeof p,lay,"unisacc.com");if(!realpath("./unisacc.com",ape)||sy_lstat(p,&st)!=-ENOENT||sy_copy(ape,p,0755))return 2;
+    rg_file(p,sizeof p,lay,"out");if(sy_mkdir(p,0700))return 2;rg_file(out,sizeof out,p,"trial");if(sy_mkdir(out,0700))return 2;
+    if(cx_fmt(id,sizeof id,"tools-compile-%03d",shard)||cx_fmt(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\t",id))return 2;
+    char temp[4600],privtmp[4500];rg_file(privtmp,sizeof privtmp,lay,"out/cold-tmp");
+    if(sy_mkdir(privtmp,0700)||cx_fmt(temp,sizeof temp,"TMPDIR=%s",privtmp))return 2;
+    char *trial[]={"./tools/bound","55","env","-C",lay,"-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","UNISACC_TABLES",temp,"UNISACC_BATCH_TIMES=off","UNISACC_RUN_CACHE=0","UNISACC_UNIT_CACHE=0","sh","./unisacc.com","tests/run-batch.cx","--",lay,out,id,0};
+    rg_file(gitlink,sizeof gitlink,lay,".git");
+    if(run(init,buf,sizeof buf)||run(add,buf,sizeof buf)||run(commit,buf,sizeof buf)){sy_unlink(gitlink);return 2;}
+    long start=sy_now_ms();int rc=run(trial,buf,sizeof buf);long elapsed=sy_now_ms()-start;
+    if(sy_unlink(gitlink)||rg_clean_layout(db))return 2;
+    char timing[128];if(cx_fmt(timing,sizeof timing,"BATCH_TIMING\tid=%s\t",id))return 2;
+    char *row=strstr(buf,timing),*ms=row?strstr(row,"\trun_ms="):0,*end=row?strchr(row,'\n'):0;
+    char value[32]="UNMEASURED";if(ms && end && ms<end){ms+=8;int n=0;while(ms[n]>='0'&&ms[n]<='9'&&n<30)n++;if(n&&ms[n]=='\t'){if(mm_copy(value,sizeof value-1,ms,n))return 2;value[n]=0;}}
+    printf("REGISTER_COLD\tid=%s\twall_ms=%ld\trun_ms=%s\trc=%d\n",id,elapsed,value,rc);
+    if(elapsed>33000){fprintf(stderr,"REFUSE OVER_33000MS id=%s wall_ms=%ld run_ms=%s\n",id,elapsed,value);return 2;}
+    if(rc || !strstr(buf,want) || tx_eqz(value,"UNMEASURED")){fprintf(stderr,"REFUSE cold-batch-receipt id=%s %s\n",id,buf);return 2;}
+    return 0;
+}
 static int rg_tool_mode(int argc, char **argv) {
     static char buf[1 << 15];
     const char *tools[RG_TOOLS_MAX], *kinds[RG_TOOLS_MAX], *owner = 0; int staged[RG_TOOLS_MAX], have[RG_TOOLS_MAX], nt = 0, i, j, rc, lk;
@@ -398,8 +651,10 @@ static int rg_tool_mode(int argc, char **argv) {
     long at, rows = 0, shards, added_src = 0, added_sh = 0, removed_sh = 0, added_pin = 0, need_pin = 0, ins, *seen;
     int ch_s, ch_b, ch_p = 0, dirty = 0, did = 0;
     int sync_dry=argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--dry");
+    int publishing=argc==3 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync");
+    int sync=publishing || sync_dry;
     char stage[4400],stage_tests[4500],stage_sources[4600],stage_batches[4600];
-    for (i = 1; !sync_dry && i < argc; i++) {
+    for (i = 1; !sync && i < argc; i++) {
         if (tx_eqz(argv[i], "--tool") && i + 1 < argc) {
             const char *t = argv[++i]; size_t tl = strlen(t); struct stat st; int dup = 0;
             if (tl < 10 || tl > 240 || memcmp(t, "tools/", 6) || strcmp(t + tl - 3, ".cx") || !clean(t) || strstr(t, "..") || strstr(t, "//")) rg_die("--tool wants tools/NAME.cx", t);
@@ -413,7 +668,7 @@ static int rg_tool_mode(int argc, char **argv) {
             owner = argv[++i]; if (!*owner || !clean(owner)) rg_die("--pin-owner wants a plain name", owner);
         } else rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER]");
     }
-    if (!nt && !sync_dry) rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER] | --tool --sync --dry");
+    if (!nt && !sync) rg_die("usage", "--tool tools/NAME.cx [--tool ...] [--pin-owner OWNER] | --tool --sync [--dry|--recover]");
     for (i = 1; i < nt; i++) {   /* byte order, so one merge pass places them all */
         const char *t = tools[i], *k = kinds[i];
         for (j = i - 1; j >= 0 && rg_bcmp(tools[j], (long)strlen(tools[j]), t, (long)strlen(t)) > 0; j--) { tools[j + 1] = tools[j]; kinds[j + 1] = kinds[j]; }
@@ -423,11 +678,19 @@ static int rg_tool_mode(int argc, char **argv) {
     if (sy_exists("tools/bound") != 1) rg_die("--tool: no ./tools/bound in this root", 0);
     if (sy_exists("tests/tools-compile.cx") != 1) rg_die("--tool: no tests/tools-compile.cx in this root", 0);
     lk = rg_lock();
-    char decl[4400],versions[5][65];
+    char decl[4400],versions[5][65],index_path[4400],index_hash[65],product_path[4096],product_hash[65];
+    if(publishing){
+        char *index_cmd[]={"./tools/bound","5","git","rev-parse","--git-path","index",0};
+        if(run(index_cmd,index_path,sizeof index_path)||!strchr(index_path,'\n'))rg_die("sync-index-path",0);
+        *strchr(index_path,'\n')=0;
+        if(rg_snapshot(index_path,index_hash)||!index_hash[0]||!realpath("unisacc.com",product_path)||rg_snapshot(product_path,product_hash)||!product_hash[0])rg_die("sync-input-identity",0);
+    }
     if(cx_fmt(decl,sizeof decl,"%s/batch-product-inputs.tsv",rg_tdir()))rg_die("path bound","batch-product-inputs");
-    const char *tables[]={rg_bpath(),rg_cpath(),RG_SOURCES,decl,RG_PINS};
+    char syncsrc[4400];rg_file(syncsrc,sizeof syncsrc,rg_tdir(),rg_names[0]);
+    const char *sourcepath=sync?syncsrc:RG_SOURCES;
+    const char *tables[]={rg_bpath(),rg_cpath(),sourcepath,decl,RG_PINS};
     for(int t=0;t<5;t++)if(rg_snapshot(tables[t],versions[t]))rg_die("cannot fingerprint",tables[t]);
-    sb = cx_read(RG_SOURCES, &sn); bb = cx_read(rg_bpath(), &bn);
+    sb = cx_read(sourcepath, &sn); bb = cx_read(rg_bpath(), &bn);
     if (!sb) rg_die("cannot read", RG_SOURCES);
     if (!bb) rg_die("cannot read", rg_bpath());
     if ((sn && sb[sn - 1] != '\n') || (bn && bb[bn - 1] != '\n')) rg_die("--tool: table does not end in a newline", sn && sb[sn - 1] != '\n' ? RG_SOURCES : rg_bpath());
@@ -460,7 +723,7 @@ static int rg_tool_mode(int argc, char **argv) {
         at = e + 1;
     }
     for (; j < nt; j++) if (!have[j]) { nsn += (size_t)tx_snprintf(ns + nsn, 260, "%s\t%s\n", tools[j], kinds[j]); added_src++; rows++; }
-    if(sync_dry){
+    if(sync){
         if(sy_mkdtemp(sy_tmpdir(),"register-sync-",stage,sizeof stage) ||
            cx_fmt(stage_tests,sizeof stage_tests,"%s/tests",stage) || sy_mkdir(stage_tests,0700) ||
            cx_fmt(stage_sources,sizeof stage_sources,"%s/tools-compile-sources.tsv",stage_tests) ||
@@ -497,7 +760,7 @@ static int rg_tool_mode(int argc, char **argv) {
             at = e + 1;
         }
     }
-    if(sync_dry){
+    if(sync){
         char gitdir[4600],worktree[4600],want[64];
         char *gitpath[]={"./tools/bound","5","git","rev-parse","--absolute-git-dir",0};
         if(run(gitpath,buf,sizeof buf) || !strchr(buf,'\n')){cx_rmtree(stage);rg_die("sync git directory",buf);}
@@ -508,16 +771,28 @@ static int rg_tool_mode(int argc, char **argv) {
         }
         char *verify[]={"./tools/bound","30","env",gitdir,worktree,"sh","./unisacc.com","tests/tools-compile.cx","--","--shards",stage,0};
         rc=run(verify,buf,sizeof buf);
-        if(cx_rmtree(stage))rg_die("sync cleanup",stage);
         if(cx_fmt(want,sizeof want,"%ld\n",shards) || rc || !tx_eqz(buf,want))rg_die("sync shard verification",buf);
+        if(publishing && added_sh){
+            rg_unlock(lk);
+            for(j=0;j<shards;j++)if(!seen[j] && rg_cold_shard(stage,ns,nsn,nb,nbn,j)){
+                rg_clean_layout(stage);rg_die("cold-shard-preflight",0);
+            }
+            lk=rg_lock();
+        }
+        if(publishing?rg_clean_layout(stage):cx_rmtree(stage))rg_die("sync cleanup",stage);
         for(int t=0;t<4;t++){
             char current[65];if(rg_snapshot(tables[t],current))rg_die("sync snapshot",tables[t]);
             if(!tx_eqz(current,versions[t])){rg_unlock(lk);return 4;}
         }
-        rg_plan_delta(RG_SOURCES,sb,sn,ns,nsn);rg_plan_delta(rg_bpath(),bb,bn,nb,nbn);
+        if(publishing){
+            char now[65],ape[4096];
+            if(rg_snapshot(index_path,now)||!tx_eqz(now,index_hash)||!realpath("unisacc.com",ape)||rg_snapshot(ape,now)||!tx_eqz(now,product_hash)){rg_unlock(lk);return 4;}
+        }
+        rg_plan_delta(sourcepath,sb,sn,ns,nsn);rg_plan_delta(rg_bpath(),bb,bn,nb,nbn);
         printf("REGISTER_SYNC_TABLE\t%s\tnot_checked\nREGISTER_SYNC_TABLE\t%s\tnot_checked\n",rg_cpath(),decl);
-        printf("REGISTER_SYNC\tmode=dry\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\n",shards,added_sh,removed_sh);
-        rg_unlock(lk);free(sb);free(bb);free(ns);free(nb);free(seen);return 0;
+        printf("REGISTER_SYNC\tmode=%s\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\n",sync_dry?"dry":"write",shards,added_sh,removed_sh);
+        rc=publishing?rg_sync_publish(ns,nsn,nb,nbn,versions):0;
+        rg_unlock(lk);free(sb);free(bb);free(ns);free(nb);free(seen);return rc;
     }
     /* (c) 64-hex literals without a pins row */
     if (sy_exists(RG_PINS) == 1) { pb = cx_read(RG_PINS, &pn); if (!pb) rg_die("cannot read", RG_PINS); }
@@ -608,6 +883,16 @@ static int rg_tool_mode(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    if(argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--recover")){
+        int fd=rg_try_lock(rg_lock_ms());if(fd<0)rg_die("recovery-lock-timeout",rg_lockpath());
+        rg_report_retired();
+        rg_file(journal,sizeof journal,rg_tdir(),".register-txn");
+        sy_stat_t st;int ex=sy_lstat(journal,&st);
+        if(ex==-ENOENT)puts("REGISTER_SYNC\tstatus=NO_PENDING");
+        else if(ex || st.kind!='d')rg_die("transaction-path-invalid",journal);
+        else rg_recover();
+        rg_unlock(fd);return 0;
+    }
     if (argc >= 2 && (tx_eqz(argv[1], "--tool") || tx_eqz(argv[1], "--pin-owner"))) {
         for(int trial=0;trial<3;trial++){int rc=rg_tool_mode(argc,argv);if(rc!=4)return rc;}
         rg_die("REFUSE registry-changed-three-times",0);
