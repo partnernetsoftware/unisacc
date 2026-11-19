@@ -1,0 +1,146 @@
+/* tools/check-derive-mirror.cx -- fixed-fixture checks for .devsvc/ mirror handling in derive --check.
+ *   sh ./unisacc.com tools/check-derive-mirror.cx
+ * Builds tools/iface-hash.cx and tools/links-gen.cx once (-o, into a private temp dir), creates a minimal
+ * synthetic repo without .devsvc/, and verifies 6 contracts:
+ *   1. clean-no-devsvc-iface  no .devsvc/ and tracked build/iface-hash.tsv matches -> rc 0, no MIRROR_STALE
+ *   2. clean-no-devsvc-links  no .devsvc/ and tracked build/links.tsv matches -> rc 0, no MIRROR_STALE
+ *   3. stale-mirror-iface     stale .devsvc/iface-hash.tsv -> rc 0 with MIRROR_STALE hint
+ *   4. stale-mirror-links     stale .devsvc/links.tsv -> rc 0 with MIRROR_STALE hint
+ *   5. tracked-drift-iface    1-byte mutation in tracked build/iface-hash.tsv -> rc 1 DIFF (true drift kept)
+ *   6. tracked-drift-links    1-byte mutation in tracked build/links.tsv -> rc 1 DRIFT (true drift kept)
+ * Last line: CHECK_DERIVE_MIRROR<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CDM_PW 4400
+#define CDM_OUT 16384
+
+static void cdm_abort(const char *why) {
+    fprintf(stderr, "check-derive-mirror: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void cdm_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) cdm_abort("mkdir");
+}
+
+static int cdm_in_dir(const char *dir, const char *bin, const char *flag, char *out) {
+    char cmd[8192];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' %s", dir, bin, flag)) cdm_abort("cmd-fmt");
+    return ckk_sh("check-derive-mirror", cmd, out, CDM_OUT);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CDM_OUT];
+    char work[CDM_PW], repo[CDM_PW], ih_bin[CDM_PW], lg_bin[CDM_PW], p[CDM_PW];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (cx_fmt(work, sizeof work, "%s/check-derive-mirror-%d", base_td, (int)getpid())) cdm_abort("work");
+    cdm_mk(work);
+    if (cx_fmt(repo, sizeof repo, "%s/repo", work)) cdm_abort("repo");
+    if (cx_fmt(ih_bin, sizeof ih_bin, "%s/iface-hash", work)) cdm_abort("ih");
+    if (cx_fmt(lg_bin, sizeof lg_bin, "%s/links-gen", work)) cdm_abort("lg");
+
+    {
+        char *av1[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/iface-hash.cx", "-o", ih_bin, 0}; /* lint:allow R1-product builds iface-hash with checkout product; UNISACC overrides */
+        char *av2[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/links-gen.cx", "-o", lg_bin, 0}; /* lint:allow R1-product builds links-gen with checkout product; UNISACC overrides */
+        if (ck_run(av1, out, sizeof out) != 0) cdm_abort("build-iface-hash");
+        if (ck_run(av2, out, sizeof out) != 0) cdm_abort("build-links-gen");
+    }
+
+    cdm_mk(repo);
+    if (cx_fmt(p, sizeof p, "%s/build", repo)) cdm_abort("p1"); cdm_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/build/layer-api", repo)) cdm_abort("p2"); cdm_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec", repo)) cdm_abort("p3"); cdm_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec/facts", repo)) cdm_abort("p4"); cdm_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tests", repo)) cdm_abort("p5"); cdm_mk(p);
+
+    {
+        const char *api_s = "demo\tfunc\tfoo\tint foo(void)\n";
+        const char *der_s = "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\ndemo\ttools/demo.cx\tchk\twr\tbuild/demo.tsv\tsrc/*\t1\t30\n";
+        const char *bat_s = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\ndemo\tIMPLEMENTED\tcontract\ttools/demo.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/demo.cx\t-\tcontract.demo\trc0:DEMO\tproduct\tcommit\n";
+        if (cx_fmt(p, sizeof p, "%s/build/layer-api/demo.api", repo)) cdm_abort("api");
+        if (cx_write(p, api_s, strlen(api_s))) cdm_abort("w-api");
+        if (cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", repo)) cdm_abort("der");
+        if (cx_write(p, der_s, strlen(der_s))) cdm_abort("w-der");
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cdm_abort("bat");
+        if (cx_write(p, bat_s, strlen(bat_s))) cdm_abort("w-bat");
+    }
+
+    /* Generate canonical tracked tables, then delete .devsvc/ to simulate a clean git archive checkout */
+    if (cdm_in_dir(repo, ih_bin, "--write", out) != 0) cdm_abort("init-ih");
+    if (cdm_in_dir(repo, lg_bin, "--write", out) != 0) cdm_abort("init-lg");
+    {
+        char dm_dir[CDM_PW];
+        if (cx_fmt(dm_dir, sizeof dm_dir, "%s/.devsvc", repo)) cdm_abort("dm");
+        char *rmv[] = {"rm", "-rf", dm_dir, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    /* 1 & 2: Clean repo without .devsvc/ -> rc 0, no MIRROR_STALE */
+    {
+        int rc = cdm_in_dir(repo, ih_bin, "--check", out);
+        ck(rc == 0 && ckk_has(out, CDM_OUT, "IFACE_HASH\tok\t") && !ckk_has(out, CDM_OUT, "MIRROR_STALE"),
+            "clean-no-devsvc-iface: missing .devsvc/ -> rc=0 ok without MIRROR_STALE");
+    }
+    {
+        int rc = cdm_in_dir(repo, lg_bin, "--check", out);
+        ck(rc == 0 && ckk_has(out, CDM_OUT, "LINKS_GEN\tOK\t") && !ckk_has(out, CDM_OUT, "MIRROR_STALE"),
+            "clean-no-devsvc-links: missing .devsvc/ -> rc=0 OK without MIRROR_STALE");
+    }
+
+    /* 3 & 4: Stale .devsvc/ mirror -> rc 0 with named MIRROR_STALE line */
+    if (cx_fmt(p, sizeof p, "%s/.devsvc", repo)) cdm_abort("dm2"); cdm_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/.devsvc/iface-hash.tsv", repo)) cdm_abort("dm-ih");
+    if (cx_write(p, "stale-mirror\n", 13)) cdm_abort("w-dm-ih");
+    if (cx_fmt(p, sizeof p, "%s/.devsvc/links.tsv", repo)) cdm_abort("dm-lg");
+    if (cx_write(p, "stale-mirror\n", 13)) cdm_abort("w-dm-lg");
+    {
+        int rc = cdm_in_dir(repo, ih_bin, "--check", out);
+        ck(rc == 0 && ckk_has(out, CDM_OUT, "MIRROR_STALE\t") && ckk_has(out, CDM_OUT, "IFACE_HASH\tok\t"),
+            "stale-mirror-iface: stale .devsvc/iface-hash.tsv -> MIRROR_STALE and rc=0");
+    }
+    {
+        int rc = cdm_in_dir(repo, lg_bin, "--check", out);
+        ck(rc == 0 && ckk_has(out, CDM_OUT, "MIRROR_STALE\t") && ckk_has(out, CDM_OUT, "LINKS_GEN\tOK\t"),
+            "stale-mirror-links: stale .devsvc/links.tsv -> MIRROR_STALE and rc=0");
+    }
+
+    /* 5 & 6: True drift in tracked build/*.tsv -> rc 1 (must never be relaxed) */
+    if (cx_fmt(p, sizeof p, "%s/build/iface-hash.tsv", repo)) cdm_abort("t-ih");
+    {
+        size_t sz = 0; char *b = cx_read(p, &sz);
+        if (!b || sz < 4) cdm_abort("r-ih");
+        b[sz - 2] = (char)(b[sz - 2] ^ 1);
+        if (cx_write(p, b, sz)) cdm_abort("m-ih");
+        free(b);
+        int rc = cdm_in_dir(repo, ih_bin, "--check", out);
+        ck(rc == 1 && ckk_has(out, CDM_OUT, "DIFF\ttable-differs-from-source\t") && ckk_has(out, CDM_OUT, "IFACE_HASH\tFAIL\t"),
+            "tracked-drift-iface: 1-byte mutation in build/iface-hash.tsv -> rc=1 FAIL");
+    }
+    if (cx_fmt(p, sizeof p, "%s/build/links.tsv", repo)) cdm_abort("t-lg");
+    {
+        size_t sz = 0; char *b = cx_read(p, &sz);
+        if (!b || sz < 4) cdm_abort("r-lg");
+        b[sz - 2] = (char)(b[sz - 2] ^ 1);
+        if (cx_write(p, b, sz)) cdm_abort("m-lg");
+        free(b);
+        int rc = cdm_in_dir(repo, lg_bin, "--check", out);
+        ck(rc == 1 && ckk_has(out, CDM_OUT, "LINKS_GEN\tDRIFT\t"),
+            "tracked-drift-links: 1-byte mutation in build/links.tsv -> rc=1 DRIFT");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_DERIVE_MIRROR\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
