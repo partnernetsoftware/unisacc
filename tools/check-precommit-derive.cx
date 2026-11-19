@@ -1,0 +1,217 @@
+/* tools/check-precommit-derive.cx -- fixed-fixture & real-commit flow checks for the precommit derive_gate.
+ *   sh ./unisacc.com tools/check-precommit-derive.cx
+ * Builds a private mini git repo under $TMPDIR with exec/facts/derive.tsv (links row), tests/batches.tsv,
+ * build/links.tsv, notes.txt and a real .git/hooks/pre-commit wired to tools/precommit-flow.cx, and verifies 9 contracts:
+ *   1. unrelated-file-passes              staging notes.txt -> rc 0, derive gate not triggered
+ *   2. input-changed-no-recompute-blocked staging tests/batches.tsv without recomputing links -> rc 1 BLOCKED + fix cmd
+ *   3. recomputed-but-unstaged-blocked    recomputing build/links.tsv in worktree without staging it -> rc 1 BLOCKED
+ *   4. recomputed-and-staged-passes       staging recomputed build/links.tsv with batches.tsv -> rc 0 blocked=0
+ *   5. waiver-active-and-expired          future waiver allows rc 0; expired waiver blocks rc 1
+ *   6. flow-plan-and-from-run-blocked     precommit-flow.cx (--plan + flowexec + --from-run) runs derive node and blocks rc 1
+ *   7. real-commit-after-recompute-ok     real `git commit` via pre-commit hook blocked when stale, succeeds after recompute
+ *   8. real-commit-unrelated-zero-overhead real `git commit` on notes.txt succeeds with no derive node planned
+ *   9. fail-safe-unavailable-allows       broken tools/derive.cx prints DERIVE_GATE_UNAVAILABLE warning and allows commit (rc 0)
+ * Last line: CHECK_PRECOMMIT_DERIVE<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CPD_PW 4400
+#define CPD_OUT 16384
+
+static void cpd_abort(const char *why) {
+    fprintf(stderr, "check-precommit-derive: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void cpd_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) cpd_abort("mkdir");
+}
+
+static void cpd_sh(const char *cmd, char *out) {
+    if (ckk_sh("check-precommit-derive", cmd, out, CPD_OUT) != 0) {
+        fprintf(stderr, "check-precommit-derive: setup failed:\n%s\n", out);
+        cpd_abort("setup-sh");
+    }
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CPD_OUT], cwd[CPD_PW], work[CPD_PW], repo[CPD_PW], repo2[CPD_PW], cmd[8192], p[CPD_PW];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (!getcwd(cwd, sizeof cwd)) cpd_abort("cwd");
+    if (cx_fmt(work, sizeof work, "%s/check-precommit-derive-%d", base_td, (int)getpid())) cpd_abort("work");
+    cpd_mk(work);
+    if (cx_fmt(repo, sizeof repo, "%s/repo", work)) cpd_abort("repo");
+    cpd_mk(repo);
+
+    if (cx_fmt(p, sizeof p, "%s/exec", repo)) cpd_abort("p1"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec/facts", repo)) cpd_abort("p2"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tests", repo)) cpd_abort("p3"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/build", repo)) cpd_abort("p4"); cpd_mk(p);
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -s '%s/tools' '%s/tools' && ln -s '%s/cx' '%s/cx' && ln -s '%s/ext' '%s/ext' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv'",
+        cwd, repo, cwd, repo, cwd, repo, cwd, repo, cwd, repo)) cpd_abort("ln-cmd");
+    cpd_sh(cmd, out);
+
+    {
+        const char *der = "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+                          "links\ttools/links-gen.cx\tcmp -s tests/batches.tsv build/links.tsv\tcp tests/batches.tsv build/links.tsv\tbuild/links.tsv\texec/facts/derive.tsv tests/batches.tsv tools/links-gen.cx\t5\t20\n";
+        const char *bat = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                          "b1\tIMPLEMENTED\tcontract\ttools/b1.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b1.cx\t-\tcontract.b1\trc0:B1\tproduct\tcommit\n";
+        if (cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", repo)) cpd_abort("f1");
+        if (cx_write(p, der, strlen(der))) cpd_abort("w1");
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cpd_abort("f2");
+        if (cx_write(p, bat, strlen(bat))) cpd_abort("w2");
+        if (cx_fmt(p, sizeof p, "%s/notes.txt", repo)) cpd_abort("f3");
+        if (cx_write(p, "hello\n", 6)) cpd_abort("w3");
+    }
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only links && git init -q && "
+        "git add exec/facts/derive.tsv tests/batches.tsv build/links.tsv notes.txt && "
+        "git -c user.name=t -c user.email=t@t commit -q -m init", repo)) cpd_abort("init-cmd");
+    cpd_sh(cmd, out);
+
+    /* 1. Unrelated file staged -> rc 0, no derive block */
+    if (cx_fmt(p, sizeof p, "%s/notes.txt", repo)) cpd_abort("n1");
+    if (cx_write(p, "hello2\n", 7)) cpd_abort("wn1");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add notes.txt && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c1");
+    {
+        int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0") && !ckk_has(out, CPD_OUT, "BLOCKED derived-table"),
+            "unrelated-file-passes: notes.txt staged -> rc=0 blocked=0");
+    }
+
+    /* 2. Edit tests/batches.tsv without recomputing build/links.tsv -> rc 1 BLOCKED with fix hint */
+    {
+        const char *bat2 = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                           "b1\tIMPLEMENTED\tcontract\ttools/b1.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b1.cx\t-\tcontract.b1\trc0:B1\tproduct\tcommit\n"
+                           "b2\tIMPLEMENTED\tcontract\ttools/b2.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b2.cx\t-\tcontract.b2\trc0:B2\tproduct\tcommit\n";
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cpd_abort("b2p");
+        if (cx_write(p, bat2, strlen(bat2))) cpd_abort("wb2");
+    }
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c2");
+    {
+        int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links") && ckk_has(out, CPD_OUT, "tools/derive.cx -- --write --only links"),
+            "input-changed-no-recompute-blocked: batches.tsv changed without links -> rc=1 BLOCKED with fix cmd");
+    }
+
+    /* 3. Recompute build/links.tsv in worktree but forget to stage it -> rc 1 BLOCKED unstaged */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only links && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c3");
+    {
+        int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-unstaged name=links"),
+            "recomputed-but-unstaged-blocked: recomputed links not staged -> rc=1 BLOCKED unstaged");
+    }
+
+    /* 4. Stage recomputed build/links.tsv with tests/batches.tsv -> rc 0 */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add build/links.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c4");
+    {
+        int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"),
+            "recomputed-and-staged-passes: recomputed links staged with batches.tsv -> rc=0 blocked=0");
+    }
+
+    /* 5. Active waiver allows; expired waiver blocks */
+    {
+        const char *bat3 = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                           "b1\tIMPLEMENTED\tcontract\ttools/b1.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b1.cx\t-\tcontract.b1\trc0:B1\tproduct\tcommit\n"
+                           "b2\tIMPLEMENTED\tcontract\ttools/b2.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b2.cx\t-\tcontract.b2\trc0:B2\tproduct\tcommit\n"
+                           "b3\tIMPLEMENTED\tcontract\ttools/b3.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b3.cx\t-\tcontract.b3\trc0:B3\tproduct\tcommit\n";
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cpd_abort("b3p");
+        if (cx_write(p, bat3, strlen(bat3))) cpd_abort("wb3");
+        if (cx_fmt(p, sizeof p, "%s/tests/derive-gate-waivers.tsv", repo)) cpd_abort("wp");
+        if (cx_write(p, "links\t2099-12-31\ttemporary-test-waiver\n", 38)) cpd_abort("ww1");
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5a");
+        int rc_act = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+
+        if (cx_write(p, "links\t2020-01-01\texpired-test-waiver\n", 36)) cpd_abort("ww2");
+        int rc_exp = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        (void)sy_unlink(p);
+        ck(rc_act == 0 && rc_exp == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links"),
+            "waiver-active-and-expired: active waiver rc=0; expired waiver rc=1 BLOCKED");
+    }
+
+    /* 6, 7 & 8. Real git commit through .git/hooks/pre-commit (precommit-flow.cx: --plan + flowexec + --from-run) */
+    {
+        char hp[CPD_PW];
+        const char *hook = "#!/bin/sh\nexec sh ./unisacc.com tools/precommit-flow.cx\n";
+        if (cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", repo)) cpd_abort("hp");
+        if (cx_write(hp, hook, strlen(hook))) cpd_abort("whp");
+        (void)chmod(hp, 0755);
+
+        /* 6: precommit-flow executes derive node (no rc=-1) and blocks stale real commit */
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git -c user.name=t -c user.email=t@t commit -q -m should-fail", repo)) cpd_abort("c6");
+        int rc_blk = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int blk_ok = (rc_blk != 0 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links") &&
+                      !ckk_has(out, CPD_OUT, "from-run node derive rc=-1"));
+        ck(blk_ok, "flow-plan-and-from-run-blocked: precommit-flow executes derive node and blocks rc=1");
+
+        /* 7: real commit succeeds after recompute + stage */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only links && git add build/links.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m recomputed-ok", repo)) cpd_abort("c7");
+        int rc_ok = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(blk_ok && rc_ok == 0 && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"),
+            "real-commit-after-recompute-ok: real git commit blocked when stale, succeeds after recompute");
+
+        /* 8: unrelated file real commit succeeds with no derive node */
+        if (cx_fmt(p, sizeof p, "%s/notes.txt", repo)) cpd_abort("n8");
+        if (cx_write(p, "hello3\n", 7)) cpd_abort("wn8");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git add notes.txt && git -c user.name=t -c user.email=t@t commit -q -m unrelated-ok", repo)) cpd_abort("c8");
+        int rc_un = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc_un == 0 && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0") && !ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE"),
+            "real-commit-unrelated-zero-overhead: unrelated git commit succeeds cleanly");
+    }
+
+    /* 9. Fail-safe: broken tools/derive.cx prints DERIVE_GATE_UNAVAILABLE and allows commit (rc 0) */
+    if (cx_fmt(repo2, sizeof repo2, "%s/repo-broken", work)) cpd_abort("r2");
+    cpd_mk(repo2);
+    if (cx_fmt(p, sizeof p, "%s/exec", repo2)) cpd_abort("r2p1"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec/facts", repo2)) cpd_abort("r2p2"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tests", repo2)) cpd_abort("r2p3"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/build", repo2)) cpd_abort("r2p4"); cpd_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tools", repo2)) cpd_abort("r2p5"); cpd_mk(p);
+    if (cx_fmt(cmd, sizeof cmd,
+        "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -s '%s/cx' '%s/cx' && ln -s '%s/ext' '%s/ext' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+        "ln -s '%s/tools/precommit.cx' '%s/tools/precommit.cx' && ln -s '%s/tools/cxlib' '%s/tools/cxlib'",
+        cwd, repo2, cwd, repo2, cwd, repo2, cwd, repo2, cwd, repo2, cwd, repo2)) cpd_abort("r2ln");
+    cpd_sh(cmd, out);
+    {
+        const char *der = "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+                          "links\ttools/links-gen.cx\tchk\twr\tbuild/links.tsv\ttests/batches.tsv\t5\t20\n";
+        if (cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", repo2)) cpd_abort("r2f1");
+        if (cx_write(p, der, strlen(der))) cpd_abort("r2w1");
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo2)) cpd_abort("r2f2");
+        if (cx_write(p, "b1\n", 3)) cpd_abort("r2w2");
+        if (cx_fmt(p, sizeof p, "%s/tools/derive.cx", repo2)) cpd_abort("r2f3");
+        if (cx_write(p, "int main(void){return 99;}\n", 27)) cpd_abort("r2w3");
+    }
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git init -q && git add exec/facts/derive.tsv tests/batches.tsv && "
+        "git -c user.name=t -c user.email=t@t commit -q -m init && "
+        "printf 'b2\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+        "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo2)) cpd_abort("c9");
+    {
+        int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE") && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"),
+            "fail-safe-unavailable-allows: broken derive.cx warns DERIVE_GATE_UNAVAILABLE and allows rc=0");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_PRECOMMIT_DERIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

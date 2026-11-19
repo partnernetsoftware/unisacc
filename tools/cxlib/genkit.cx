@@ -24,7 +24,8 @@
  *   int gk_devmeta(int check, const char *name, const void *buf, long n)
  *     the double-write copy of a build/ table under the dev metadata directory (cxlib/awpath
  *     awp_devmeta, root "."): --write publishes it atomically (directory made when missing);
- *     --check returns 1 with "DIFF<TAB>devmeta-differs<TAB>PATH" on stdout when it differs.
+ *     --check ignores a missing local mirror, and prints "MIRROR_STALE<TAB>PATH<TAB>hint=refresh with --write"
+ *     when an existing mirror differs (never failing --check rc or incrementing gk_drift).
  *     2 on a bad name or a failed write.
  *   int gk_files(void), int gk_drift(void)
  *     outputs handled and outputs drifted so far (gk_emit and gk_devmeta both count).
@@ -105,10 +106,14 @@ int gk_devmeta(int check, const char *name, const void *buf, long n) {
     if (awp_devmeta(".", name, !check, dm, sizeof dm)) return 2;
     gk_nfiles++;
     if (check) {
-        if (gk_same_file(dm, buf, n)) return 0;
-        gk_ndrift++;
-        sy_printf("DIFF\tdevmeta-differs\t%s\n", dm);
-        return 1;
+        size_t z = 0;
+        char *old = cx_read(dm, &z);
+        if (!old) return 0;
+        if ((long)z != n || (n > 0 && !mm_same(old, buf, n))) {
+            sy_printf("MIRROR_STALE\t%s\thint=refresh with --write\n", dm);
+        }
+        mm_free(old);
+        return 0;
     }
     if (sy_write_atomic(dm, buf, (int64_t)n, 0644)) return 2;
     return 0;
