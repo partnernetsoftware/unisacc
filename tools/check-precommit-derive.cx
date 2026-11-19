@@ -1,7 +1,7 @@
 /* tools/check-precommit-derive.cx -- fixed-fixture & real-commit flow checks for the precommit derive_gate.
  *   sh ./unisacc.com tools/check-precommit-derive.cx
  * Builds a private mini git repo under $TMPDIR with exec/facts/derive.tsv (links row), tests/batches.tsv,
- * build/links.tsv, notes.txt and a real .git/hooks/pre-commit wired to tools/precommit-flow.cx, and verifies 9 contracts:
+ * build/links.tsv, notes.txt and a real .git/hooks/pre-commit wired to tools/precommit-flow.cx, and verifies 10 contracts:
  *   1. unrelated-file-passes              staging notes.txt -> rc 0, derive gate not triggered
  *   2. input-changed-no-recompute-blocked staging tests/batches.tsv without recomputing links -> rc 1 BLOCKED + fix cmd
  *   3. recomputed-but-unstaged-blocked    recomputing build/links.tsv in worktree without staging it -> rc 1 BLOCKED
@@ -11,12 +11,14 @@
  *   7. real-commit-after-recompute-ok     real `git commit` via pre-commit hook blocked when stale, succeeds after recompute
  *   8. real-commit-unrelated-zero-overhead real `git commit` on notes.txt succeeds with no derive node planned
  *   9. fail-safe-unavailable-allows       broken tools/derive.cx prints DERIVE_GATE_UNAVAILABLE warning and allows commit (rc 0)
+ *  10. table-index-new-tool-real-commit   real `git commit` adding tools/ with ignored build/product-map.tsv: check- tool passes, reader tool blocks until table-index recomputed and staged
  * Last line: CHECK_PRECOMMIT_DERIVE<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.env
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 
 #define CPD_PW 4400
@@ -205,6 +207,91 @@ int main(void) {
         int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         ck(rc == 0 && ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE") && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"),
             "fail-safe-unavailable-allows: broken derive.cx warns DERIVE_GATE_UNAVAILABLE and allows rc=0");
+    }
+
+    /* 10. Real git commit adding tools/*.cx with ignored build/product-map.tsv present vs absent:
+     *     (a) ignored build/product-map.tsv is excluded from build/table-index.tsv;
+     *     (b) adding tools/check-newdemo.cx does not change table-index -> real git commit passes rc=0;
+     *     (c) adding tools/newreader.cx referencing build/links.tsv changes readers_count -> blocked until recomputed & staged. */
+    {
+        char repo3[CPD_PW], hp[CPD_PW];
+        const char *der = "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+                          "table-index\ttools/tool-index.cx\tsh ./unisacc.com tools/tool-index.cx -- --check-tables\tsh ./unisacc.com tools/tool-index.cx -- --tables\tbuild/table-index.tsv\ttools/* tests/batches.tsv build/*\t7\t30\n";
+        const char *bat = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                          "demo1\tIMPLEMENTED\tcontract\ttools/check-newdemo.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/check-newdemo.cx\t-\tcontract.d1\trc0:D1\tproduct\tcommit\n"
+                          "demo2\tIMPLEMENTED\tcontract\ttools/check-newreader.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/check-newreader.cx\t-\tcontract.d2\trc0:D2\tproduct\tcommit\n";
+        const char *hook = "#!/bin/sh\nUNISACC_PRECOMMIT_SERIAL=1 exec sh ./unisacc.com tools/precommit.cx\n";
+        if (cx_fmt(repo3, sizeof repo3, "%s/repo-tidx", work)) cpd_abort("r3");
+        cpd_mk(repo3);
+        if (cx_fmt(p, sizeof p, "%s/exec", repo3)) cpd_abort("r3p1"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/exec/facts", repo3)) cpd_abort("r3p2"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/tests", repo3)) cpd_abort("r3p3"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/build", repo3)) cpd_abort("r3p4"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/tools", repo3)) cpd_abort("r3p5"); cpd_mk(p);
+        if (cx_fmt(cmd, sizeof cmd,
+            "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -s '%s/cx' '%s/cx' && ln -s '%s/ext' '%s/ext' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+            "ln -s '%s/tools/precommit.cx' '%s/tools/precommit.cx' && ln -s '%s/tools/derive.cx' '%s/tools/derive.cx' && "
+            "ln -s '%s/tools/tool-index.cx' '%s/tools/tool-index.cx' && ln -s '%s/tools/bound' '%s/tools/bound' && ln -s '%s/tools/bound.c' '%s/tools/bound.c' && ln -s '%s/tools/cxlib' '%s/tools/cxlib'",
+            cwd, repo3, cwd, repo3, cwd, repo3, cwd, repo3,
+            cwd, repo3, cwd, repo3, cwd, repo3, cwd, repo3, cwd, repo3, cwd, repo3)) cpd_abort("r3ln");
+        cpd_sh(cmd, out);
+        if (cx_fmt(p, sizeof p, "%s/.gitignore", repo3)) cpd_abort("r3g");
+        if (cx_write(p, "/build/product-map.tsv\n/.devsvc/\n", 33)) cpd_abort("r3gw");
+        if (cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", repo3)) cpd_abort("r3f1");
+        if (cx_write(p, der, strlen(der))) cpd_abort("r3w1");
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo3)) cpd_abort("r3f2");
+        if (cx_write(p, bat, strlen(bat))) cpd_abort("r3w2");
+        if (cx_fmt(p, sizeof p, "%s/build/links.tsv", repo3)) cpd_abort("r3f3");
+        if (cx_write(p, "# links\na\tb\n", 12)) cpd_abort("r3w3");
+        if (cx_fmt(p, sizeof p, "%s/build/product-map.tsv", repo3)) cpd_abort("r3f4");
+        if (cx_write(p, "ignored\tlocal\n", 14)) cpd_abort("r3w4");
+        if (cx_fmt(p, sizeof p, "%s/tools/check-newreader.cx", repo3)) cpd_abort("r3f5");
+        if (cx_write(p, "int main(void){return 0;}\n", 26)) cpd_abort("r3w5");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only table-index && git init -q && "
+            "git add .gitignore exec/facts/derive.tsv tests/batches.tsv build/links.tsv build/table-index.tsv tools/check-newreader.cx && "
+            "git -c user.name=t -c user.email=t@t commit -q -m init", repo3)) cpd_abort("r3init");
+        cpd_sh(cmd, out);
+        if (cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", repo3)) cpd_abort("r3hp");
+        if (cx_write(hp, hook, strlen(hook))) cpd_abort("r3whp");
+        (void)chmod(hp, 0755);
+
+        /* Verify build/table-index.tsv excludes ignored product-map.tsv */
+        int no_pmap = 0;
+        {
+            size_t tin = 0;
+            char *tib;
+            if (cx_fmt(p, sizeof p, "%s/build/table-index.tsv", repo3)) cpd_abort("r3ti");
+            tib = (char *)cx_read(p, &tin);
+            no_pmap = (tib != 0 && !ckk_has(tib, (long)tin, "product-map.tsv"));
+            if (tib) mm_free(tib);
+        }
+
+        /* (a) Add tools/check-newdemo.cx (does not change table-index), remove untracked product-map.tsv to mimic clean hook sandbox -> commit passes */
+        if (cx_fmt(p, sizeof p, "%s/tools/check-newdemo.cx", repo3)) cpd_abort("r3nd");
+        if (cx_write(p, "int main(void){return 0;}\n", 26)) cpd_abort("r3wnd");
+        if (cx_fmt(p, sizeof p, "%s/build/product-map.tsv", repo3)) cpd_abort("r3pm");
+        (void)sy_unlink(p);
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git add tools/check-newdemo.cx && git -c user.name=t -c user.email=t@t commit -q -m add-check", repo3)) cpd_abort("r3c1");
+        int rc_chk_ok = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+
+        /* (b) Add tools/newreader.cx referencing build/links.tsv -> blocked without table-index recompute, passes after recompute + stage */
+        if (cx_fmt(p, sizeof p, "%s/tools/newreader.cx", repo3)) cpd_abort("r3nr");
+        if (cx_write(p, "/* reads build/links.tsv */\nint main(void){return 0;}\n", 54)) cpd_abort("r3wnr");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git add tools/newreader.cx && git -c user.name=t -c user.email=t@t commit -q -m add-reader-stale", repo3)) cpd_abort("r3c2");
+        int rc_rd_blk = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int rd_blk_ok = (rc_rd_blk != 0 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=table-index"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only table-index && git add build/table-index.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m add-reader-ok", repo3)) cpd_abort("r3c3");
+        int rc_rd_ok = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+
+        ck(no_pmap && rc_chk_ok == 0 && rd_blk_ok && rc_rd_ok == 0,
+            "table-index-new-tool-real-commit: excludes ignored product-map.tsv; check- tool passes, reader tool blocks until recomputed");
     }
 
     {
