@@ -1,0 +1,77 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char setup[] =
+    "let a=Matrix3_set(0,2.0,1.0,3.0,0.0,4.0,5.0,1.0,0.0,6.0);"
+    "let b=Matrix3_set(80,1.0,2.0,0.0,0.0,1.0,0.0,0.0,0.0,2.0);"
+    "let p=ux_f64_put(256,2.0);let q=ux_f64_put(296,3.0);let r=ux_f64_put(336,4.0);"
+    "let w=ux_f64_put(376,1.0);";
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *cases[]={
+        "return ux_f64(a+48);",
+        "let m=Matrix3_identity(a);return ux_f64(m+32);",
+        "let m=Matrix3_copy(a,b);return ux_f64(m+24);",
+        "let m=Matrix3_clone(400,a);return ux_f64(m+16);",
+        "let m=Matrix3_extractBasis(a,400,424,448);return ux_f64(456);",
+        "let m=Matrix3_setFromMatrix4(a,256);return ux_f64(m+64);",
+        "let m=Matrix3_multiply(a,b);return ux_f64(m+24);",
+        "let m=Matrix3_premultiply(a,b);return ux_f64(m+24);",
+        "let m=Matrix3_multiplyMatrices(400,a,b);return ux_f64(m+24);",
+        "let m=Matrix3_multiplyScalar(a,2.0);return ux_f64(m+56);",
+        "return Matrix3_determinant(a);",
+        "let m=Matrix3_invert(a);return ux_f64(m+48);",
+        "let s=Matrix3_set(400,1.0,2.0,3.0,2.0,4.0,6.0,4.0,8.0,12.0);let m=Matrix3_invert(s);return ux_f64(m);",
+        "let m=Matrix3_transpose(a);return ux_f64(m+8);",
+        "let m=Matrix3_getNormalMatrix(a,256);return ux_f64(m+32);",
+        "let m=Matrix3_transposeIntoArray(a,400);return ux_f64(408);",
+        "let m=Matrix3_setUvTransform(a,2.0,3.0,4.0,5.0,0.0,0.5,0.25);return ux_f64(m+48);",
+        "let m=Matrix3_scale(a,2.0,3.0);return ux_f64(m+32);",
+        "let i=Matrix3_identity(400);let m=Matrix3_rotate(i,1.5707963267948966);return ux_f64(m+8);",
+        "let m=Matrix3_translate(a,2.0,3.0);return ux_f64(m+48);",
+        "let m=Matrix3_makeTranslation(a,0.0-2.0,3.0);return ux_f64(m+48);",
+        "let m=Matrix3_makeRotation(a,1.5707963267948966);return ux_f64(m+8);",
+        "let m=Matrix3_makeScale(a,2.0,3.0);return ux_f64(m+32);",
+        "let m=Matrix3_clone(400,a);return Matrix3_equals(a,m);",
+        "return Matrix3_equals(a,b);",
+        "let m=Matrix3_copy(408,a);let v=Matrix3_fromArray(b,400,1);return ux_f64(v+56);",
+        "let m=Matrix3_toArray(a,400,1);return ux_f64(472);",
+        "let m=Matrix3_multiplyMatrices(a,a,a);return ux_f64(m);"
+    };
+    enum { count=sizeof cases/sizeof cases[0] };
+    const double gold[count]={3,1,2,1,5,4,5,9,5,10,41,-7.0/41.0,0,1,1.0/3.0,1,0.5,12,-1,15,-2,1,3,1,0,5,6,7};
+    unsigned char *source=0,*math=0,*views=0;
+    int64_t n=0;
+    char dir[256],ujs[300],wasm[300],library[27000];
+    int rc=sy_read_file("ujs/practice/uxe/base/matrix3.ujs",&source,&n,16000) ||
+        sy_read_file("ujs/practice/uxe/base/f64-math.ujs",&math,&n,9000) ||
+        sy_read_file("ujs/practice/uxe/base/views.ujs",&views,&n,4000);
+    int length=rc?-1:tx_snprintf(library,sizeof library,"%s\n%s\n%s",math,views,source);
+    mm_free(source); mm_free(math); mm_free(views);
+    if(length<0 || length>=(int)sizeof library || sy_mkdtemp("/tmp","ujs-matrix3-",dir,sizeof dir)) return 2;
+    tx_snprintf(ujs,sizeof ujs,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double oracle[count];
+    int failed=g_math_reference("matrix3",oracle,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        double actual=0;
+        const char *example=mutate && i==6?cases[7]:cases[i];
+        if(g_math_sample(ujs,wasm,library,setup,example,&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(oracle[i],gold[i],1e-9)) {
+            printf("MATRIX3 case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,oracle[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH Matrix3 cases=%d failed=%d\n",count,failed);
+    return failed;
+}

@@ -149,6 +149,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): M1 Vector4 使用四个连续 f64。矩阵乘法保留齐次分量 w，角轴转换的输入为单位四元数或列主序纯旋转矩阵。`sh ./unisacc.com ujs/tests/vector4-math.cx` 检查 51 项独立金值与 r160 JSON，包括恒等与半周奇异点附近的分支，`--mutate` 移除矩阵变换后仍用原金值。
 
+修订(cdx2): M1 Matrix3 接收行序参数并存成列主序 f64。乘法支持目标与任一输入重合，求逆对奇异矩阵写零，法线矩阵从 Matrix4 的左上 3×3 构造。`sh ./unisacc.com ujs/tests/matrix3-math.cx` 检查 28 项独立金值与 r160 JSON，`--mutate` 交换矩阵乘法顺序。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
