@@ -1,0 +1,52 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    unsigned char *input=0;
+    int64_t bytes=0;
+    const char path[]="ujs/practice/uxe/base/gpu-state-constants.tsv";
+    const char header[]="family\tname\tvalue\tstatus\n";
+    if(sy_read_file(path,&input,&bytes,12000) || bytes<(int64_t)sizeof header-1 ||
+       !tx_prefixz((const char *)input,header,sizeof header-1)) { mm_free(input); return 2; }
+    char *at=(char *)input+sizeof header-1,*end=(char *)input+bytes;
+    double expected[64],actual[64];
+    int rows=0;
+    while(at<end && rows<64) {
+        int fields=0;
+        while(at<end && *at!='\n' && fields<2) if(*at++=='\t') fields++;
+        char *next=0;
+        double value=tx_strtod(at,&next);
+        if(next<=at || next>=end || *next!='\t') break;
+        at=next+1;
+        double result=tx_strtod(at,&next);
+        if(next<=at || next>=end || *next!='\n') break;
+        expected[rows++]=value*32+result;
+        at=next+1;
+    }
+    int read_all=at==end;
+    mm_free(input);
+    if(!read_all || rows!=64) return 2;
+    char dir[260];
+    if(sy_mkdtemp("/tmp","ujs-gpu-state-constants-",dir,sizeof dir)) return 2;
+    int failed=g_math_reference("gpu-state-constants",actual,rows,dir);
+    if(!failed) {
+        for(int i=0;i<rows;i++) {
+            double gold=expected[i]+(mutate && i==0);
+            if(actual[i]!=gold) {
+                printf("GPU_STATE_CONSTANT case=%d actual=%.0f expected=%.0f\n",i,actual[i],gold);
+                failed++;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0},*out=0;
+    size_t n=0;
+    if(cx_runv_timeout(clean,5,&out,&n)) failed++;
+    mm_free(out);
+    printf("G_STRUCT GPU_STATE_CONSTANTS cases=%d failed=%d\n",rows,failed);
+    return failed!=0;
+}

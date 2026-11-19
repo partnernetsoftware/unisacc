@@ -10,7 +10,7 @@ export function readRenderState(gl, packet, at, span) {
   const [depth, depthWrite, blend, eqRgb, eqAlpha, srcRgb, dstRgb, srcAlpha, dstAlpha, ,
     stencil, ref, readMask, writeMask, fail, zFail, pass, cull, clockwise, offset, , , colorMask] = state;
   if (depth > 8 || depthWrite > 1) return -9n;
-  if (blend > 1 || eqRgb < 100 || eqRgb > 104 || eqAlpha < 100 || eqAlpha > 104 ||
+  if ((blend !== 0 && blend !== 5) || eqRgb < 100 || eqRgb > 104 || eqAlpha < 100 || eqAlpha > 104 ||
       [srcRgb, dstRgb, srcAlpha, dstAlpha].some(value => value < 200 || value > 214) ||
       [dstRgb, srcAlpha, dstAlpha].includes(210)) return -8n;
   const constantColor = value => value === 211 || value === 212;
