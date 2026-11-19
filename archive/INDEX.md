@@ -72,3 +72,6 @@
 | [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.md](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.md) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
 | [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
 | [archive/pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch.sha256](pre080/release/evidence/v0.0.73-patches/stream-budget-rc3.patch.sha256) | 已归档 | 0.0.80 | release 旧杂项(0.0.73 以前候选、裁决与补丁记录) |
+| [archive/pre080/research/c38-open-rulings.md](pre080/research/c38-open-rulings.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
+| [archive/pre080/research/c39-r1-gate-infra-review.md](pre080/research/c39-r1-gate-infra-review.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
+| [archive/pre080/research/r20-c99-seed-a-audit.md](pre080/research/r20-c99-seed-a-audit.md) | 已归档 | 0.0.80 | research 0.0.50 以前研究记录 |
