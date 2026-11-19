@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { linkUxeModules } from "./host-abi.js";
+import { Box3, BufferGeometry, Frustum, Matrix4, Mesh, Scene, Sphere, Vector3, REVISION } from "./three.module.js";
+
+function load(name) {
+  const request=new XMLHttpRequest();
+  request.open("GET",name+".wasm",false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return new WebAssembly.Module(Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255));
+}
+
+const result=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const linked=linkUxeModules([["uxe_scene_v1",load("scene")],["uxe_box_world_v1",load("box")],
+    ["uxe_frustum_test_v1",load("frustum")]],{});
+  const scene=linked.get("uxe_scene_v1").uxe_scene;
+  const box=linked.get("uxe_box_world_v1").uxe_box_world;
+  const intersects=linked.get("uxe_frustum_test_v1").uxe_frustum_test;
+  const root=BigInt(scene(0n,4n,0n,0,0,0));
+  const a=BigInt(scene(1n,root,0n,4,0,0));
+  const b=BigInt(scene(1n,root,0n,-0.25,0,0));
+  scene(2n,root,0n,0,0,0);
+  const actual=[box(0n,root),box(1n,root),Number(intersects(a)),Number(intersects(b))];
+  const s=new Scene();
+  function mesh(x,low,high) {
+    const g=new BufferGeometry();
+    g.boundingBox=new Box3(new Vector3(...low),new Vector3(...high));
+    g.boundingSphere=new Sphere(new Vector3(),0.5);
+    const m=new Mesh(g);
+    m.position.x=x;
+    s.add(m);
+    return m;
+  }
+  const ma=mesh(4,[0,0,0],[2,1,1]), mb=mesh(-0.25,[-1,-1,-1],[1,1,1]);
+  s.updateMatrixWorld();
+  const bounds=new Box3().setFromObject(s);
+  const view=new Frustum().setFromProjectionMatrix(new Matrix4());
+  result.textContent=JSON.stringify([...actual,bounds.min.x,bounds.max.x,
+    Number(view.intersectsObject(ma)),Number(view.intersectsObject(mb))]);
+} catch(error) {
+  result.textContent=String(error);
+}
+</script>
