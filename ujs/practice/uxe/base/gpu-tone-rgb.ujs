@@ -1,0 +1,75 @@
+native function gpu_tone_sat(x:f64) f64 {
+  if(x<0.0) { return 0.0; }
+  if(x>1.0) { return 1.0; }
+  return x;
+}
+
+native function gpu_tone_cineon(value:f64) f64 {
+  let x=value-0.004;
+  if(x<=0.0) { return 0.0; }
+  let powered=x*(6.2*x+0.5)/(x*(6.2*x+1.7)+0.06);
+  return ux_math_pow(powered,2.2);
+}
+
+native function gpu_tone_aces_curve(x:f64) f64 {
+  return (x*x+0.0245786*x-0.000090537)/(0.983729*x*x+0.4329510*x+0.238081);
+}
+
+native function gpu_tone_agx_curve(value:f64) f64 {
+  let x=value;
+  if(x<0.0000000001) { x=0.0000000001; }
+  let ev=ux_math_log(x)*1.4426950408889634;
+  let t=gpu_tone_sat((ev+12.47393)/16.499999);
+  return (((((15.5*t-40.14)*t+31.96)*t-6.868)*t+0.4298)*t+0.1191)*t-0.00232;
+}
+
+native function gpu_tone_agx_gamma(x:f64) f64 {
+  if(x<=0.0) { return 0.0; }
+  return ux_math_pow(x,2.2);
+}
+
+native function GpuMaterial_toneRgb(out:i64,mode:i64,r:f64,g:f64,b:f64,exposure:f64,gain:f64) i64 {
+  if(out<0 || out%8!=0 || out>6291456-24 || mode<3 || mode>6 ||
+     r<0.0 || g<0.0 || b<0.0 || exposure<0.0 || gain<0.0 ||
+     r!=r || g!=g || b!=b || exposure!=exposure || gain!=gain) { return 0-1; }
+  let red=r;
+  let green=g;
+  let blue=b;
+  if(mode==3) {
+    red=gpu_tone_cineon(r*exposure);
+    green=gpu_tone_cineon(g*exposure);
+    blue=gpu_tone_cineon(b*exposure);
+  }
+  if(mode==4) {
+    let scale=exposure/0.6;
+    let ar=gpu_tone_aces_curve(scale*(0.59719*r+0.35458*g+0.04823*b));
+    let ag=gpu_tone_aces_curve(scale*(0.076*r+0.90834*g+0.01566*b));
+    let ab=gpu_tone_aces_curve(scale*(0.0284*r+0.13383*g+0.83777*b));
+    red=gpu_tone_sat(1.60475*ar-0.53108*ag-0.07367*ab);
+    green=gpu_tone_sat(0.0-0.10208*ar+1.10813*ag-0.00605*ab);
+    blue=gpu_tone_sat(0.0-0.00327*ar-0.07276*ag+1.07602*ab);
+  }
+  if(mode==5) {
+    red=r*gain;
+    green=g*gain;
+    blue=b*gain;
+  }
+  if(mode==6) {
+    let rr=(0.6274*r+0.3293*g+0.0433*b)*exposure;
+    let gg=(0.0691*r+0.9195*g+0.0113*b)*exposure;
+    let bb=(0.0164*r+0.0880*g+0.8956*b)*exposure;
+    let ir=gpu_tone_agx_curve(0.856627153315983*rr+0.0951212405381588*gg+0.0482516061458583*bb);
+    let ig=gpu_tone_agx_curve(0.137318972929847*rr+0.761241990602591*gg+0.101439036467562*bb);
+    let ib=gpu_tone_agx_curve(0.11189821299995*rr+0.0767994186031903*gg+0.811302368396859*bb);
+    let or=gpu_tone_agx_gamma(1.1271005818144368*ir-0.11060664309660323*ig-0.016493938717834573*ib);
+    let og=gpu_tone_agx_gamma(0.0-0.1413297634984383*ir+1.157823702216272*ig-0.016493938717834257*ib);
+    let ob=gpu_tone_agx_gamma(0.0-0.14132976349843826*ir-0.11060664309660294*ig+1.2519364065950405*ib);
+    red=1.6605*or-0.5876*og-0.0728*ob;
+    green=0.0-0.1246*or+1.1329*og-0.0083*ob;
+    blue=0.0-0.0182*or-0.1006*og+1.1187*ob;
+  }
+  let wr=ux_f64_put(out,red);
+  let wg=ux_f64_put(out+8,green);
+  let wb=ux_f64_put(out+16,blue);
+  return out;
+}

@@ -102,7 +102,7 @@ static int gpu_check(char *start) {
     const double state[]={1,516,0,1,32778,32779,770,771,1,771,1,514,
         3,240,15,7680,7681,7682,1029,2304,1.5,-2,0,0,0,0,0};
     const double clip[]={1,4,4,8,8,0.5,3,255,0,0,255,0,0,0,255,255,0,0,255,255,0,0,255,255,0,0,255};
-    int failed=0,total=1518;
+    int failed=0,total=1682;
     double lit[20], distance[4];
     for(int i=0;i<total;i++) {
         char *next=0;
@@ -114,6 +114,23 @@ static int gpu_check(char *start) {
         double expected=0,tolerance=0;
         if(i<(int)(sizeof status/sizeof status[0])) expected=status[i];
         else if(i>=198 && i<204) expected=stateStatus[i-198];
+        else if(i>=1518) {
+            int scene=(i-1518)/41, sample=(i-1518)%41;
+            if(sample) {
+                int cell=(sample-1)%20, channel=cell%4;
+                if(sample<=20) lit[cell]=value;
+                if(channel==3) expected=255;
+                else if(cell/4!=0 && cell/4!=2) expected=0;
+                else if(scene==2) {
+                    const int half[]={92,44,4};
+                    expected=half[channel]; tolerance=1;
+                } else if(sample>20) { expected=lit[cell]; tolerance=2; }
+                else {
+                    expected=value;
+                    if(value<0 || value>255 || (channel==0 && value<40)) failed++;
+                }
+            }
+        }
         else if(i>=1477) {
             int sample=i-1477;
             if(sample && (sample-1)%20==3) { expected=128; tolerance=1; }
@@ -332,6 +349,7 @@ int main(int argc,char **argv) {
     int sprite_mutate=argc==2 && tx_eqz(argv[1],"--sprite-mutate");
     int shader_mutate=argc==2 && tx_eqz(argv[1],"--shader-mutate");
     int shadow_mutate=argc==2 && tx_eqz(argv[1],"--shadow-mutate");
+    int tone_suite_mutate=argc==2 && tx_eqz(argv[1],"--tone-suite-mutate");
     int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
     int clip_mutate=argc==2 && tx_eqz(argv[1],"--clip-mutate");
     int target_mutate=argc==2 && tx_eqz(argv[1],"--target-mutate");
@@ -340,7 +358,8 @@ int main(int argc,char **argv) {
        !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
        !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate && !normal_mutate &&
        !depth_mutate && !point_mutate && !line_mutate && !matcap_mutate && !distance_mutate &&
-       !sprite_mutate && !shader_mutate && !shadow_mutate && !state_mutate && !clip_mutate && !targets)
+       !sprite_mutate && !shader_mutate && !shadow_mutate && !tone_suite_mutate &&
+       !state_mutate && !clip_mutate && !targets)
         return 2;
     char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
     if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
@@ -356,11 +375,12 @@ int main(int argc,char **argv) {
         lighting_mutate?"?lighting-mutate":phong_light_mutate?"?phong-light-mutate":
         normal_mutate?"?normal-mutate":depth_mutate?"?depth-mutate":point_mutate?"?point-mutate":
         line_mutate?"?line-mutate":matcap_mutate?"?matcap-mutate":distance_mutate?"?distance-mutate":
-        sprite_mutate?"?sprite-mutate":shader_mutate?"?shader-mutate":shadow_mutate?"?shadow-mutate":"");
+        sprite_mutate?"?sprite-mutate":shader_mutate?"?shader-mutate":shadow_mutate?"?shadow-mutate":
+        tone_suite_mutate?"?tone-suite-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
-    char *compile[27]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+    char *compile[28]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
         "ujs/practice/uxe/base/gpu-packet.ujs"};
     int args=4;
     if(targets) compile[args++]="ujs/practice/uxe/base/gpu-target.ujs";
@@ -375,6 +395,7 @@ int main(int argc,char **argv) {
         compile[args++]="ujs/practice/uxe/base/gpu-material-standard.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-texture-sample.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-material-tone.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-tone-rgb.ujs";
         compile[args++]="ujs/practice/uxe/base/vector-scalar.ujs";
         compile[args++]="ujs/practice/uxe/base/matrix3.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-texture-uv.ujs";
@@ -440,6 +461,6 @@ int main(int argc,char **argv) {
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
     printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
-        targets?"GPU_TARGET":"GPU_PACKET",targets?5:39,targets?93:1518,compiled.size,lines+target_lines,failed);
+        targets?"GPU_TARGET":"GPU_PACKET",targets?5:43,targets?93:1682,compiled.size,lines+target_lines,failed);
     return failed!=0;
 }

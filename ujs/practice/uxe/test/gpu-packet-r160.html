@@ -4,7 +4,8 @@
 <pre id="toon"></pre>
 <script type="module">
 import {
-  BasicShadowMap, BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
+  ACESFilmicToneMapping, AgXToneMapping, BasicShadowMap, BoxGeometry, BufferAttribute, BufferGeometry,
+  Camera, CineonToneMapping, Color, CullFaceBack, CustomBlending, CustomToneMapping, DoubleSide, ShaderChunk,
   CanvasTexture, CubeTexture, DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth,
   IncrementStencilOp, KeepStencilOp, LessDepth, Line, LineBasicMaterial, LineLoop, LineSegments,
   PlaneGeometry, PointLight, Points, PointsMaterial, ShaderMaterial, ShadowMaterial, SphereGeometry, Sprite,
@@ -169,6 +170,8 @@ try {
   const actualShader = pixels(gl);
   const shadowStatus = Number(step(location.search === "?shadow-mutate" ? 149n : 148n));
   const actualShadow = pixels(gl);
+  const toneSuiteStart = location.search === "?tone-suite-mutate" ? 154 : 150;
+  const advancedTones = [0, 1, 2, 3].map(i => [Number(step(BigInt(toneSuiteStart + i))), ...pixels(gl)]);
   for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
     status.push(Number(step(mode)));
     actual.push(...pixels(gl));
@@ -506,6 +509,29 @@ try {
   blockerGeometry.dispose();
   blockerMaterial.dispose();
   shadowLight.shadow.dispose();
+  renderer.shadowMap.enabled = false;
+  renderer.setClearColor(0, 1);
+  renderer.toneMappingExposure = 2;
+  basicMaterial.color.set(0x804008);
+  basicMaterial.map = null;
+  basicMaterial.needsUpdate = true;
+  const toneCases = [CineonToneMapping, ACESFilmicToneMapping, CustomToneMapping, AgXToneMapping];
+  const toneResults = toneCases.flatMap((mapping, i) => {
+    const backup = ShaderChunk.tonemapping_pars_fragment;
+    if (mapping === CustomToneMapping) {
+      ShaderChunk.tonemapping_pars_fragment = backup.replace(
+        "CustomToneMapping( vec3 color ) { return color; }",
+        "CustomToneMapping( vec3 color ) { return color * 0.5; }",
+      );
+    }
+    renderer.toneMapping = mapping;
+    try {
+      renderer.render(basicScene, camera);
+      return [...advancedTones[i], ...pixels(three.gl)];
+    } finally {
+      ShaderChunk.tonemapping_pars_fragment = backup;
+    }
+  });
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
@@ -522,7 +548,8 @@ try {
     ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon,
     ...litResults.slice(0, 6).flat(), pointStatus, ...actualPoint, ...referencePoint, ...lineResults,
     ...litResults.slice(6).flat(), spriteStatus, ...actualSprite, ...referenceSprite,
-    shaderStatus, ...actualShader, ...referenceShader, shadowStatus, ...actualShadow, ...referenceShadow]);
+    shaderStatus, ...actualShader, ...referenceShader, shadowStatus, ...actualShadow, ...referenceShadow,
+    ...toneResults]);
 } catch (error) {
   result.textContent = String(error);
 }
