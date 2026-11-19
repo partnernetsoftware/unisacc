@@ -7,6 +7,11 @@
  *     builder unpacks the named commit; each invocation has its own logs. unisacc.com is a real
  *     copy of APE (not a link), then `git init` plus one private commit so the git inventory of
  *     tests/tools-compile.cx works (v0.0.73 found rc 2 "git inventory failed" in a bare archive).
+ *     A kit window timeout flushes a pending-batch checkpoint and permits one
+ *     more material window under the same evidence lock before batches launch.
+ *     Cold preparation can take up to two producer builds plus two 55 s windows.
+ *     A caller capped at 55-58 s may interrupt the second attempt. Its flushed
+ *     checkpoint permits --resume after process exit; it is not fsynced for power loss.
  * (3) Batch set: sample = the 12 named batches of the v0.0.73 strict evidence plus 10 random
  *     tools-compile shards (the seed is written to the evidence); product-qualification = every
  *     id of tests/batch-domain-index.tsv in that domain; --ids replaces the set. --list prints
@@ -145,6 +150,14 @@ static void classify(Batch *b, const char *path, int timed_out, int code) {
     b->rc = atoi(rc);
     if (strcmp(b->cand, sha)) { cx_fmt(b->status, sizeof b->status, "INVALID"); cx_fmt(b->note, sizeof b->note, "candidate-mismatch expected=%s", sha); return; }
     cx_fmt(b->status, sizeof b->status, "%s", st[0] ? st : "UNKNOWN");
+    if (!strcmp(b->status, "UNKNOWN")) {
+        char transport[16];
+        field(b->raw, "transport", transport, sizeof transport);
+        if (!strcmp(transport, "-1")) {
+            cx_fmt(b->note, sizeof b->note, "transport-failed-raw-neg1");
+            return;
+        }
+    }
     if (rundir[0]) {   /* case counts the batch printed (TAG<TAB>pass=N<TAB>fail=M), kept as a note only */
         char lp[1200]; unsigned char *lb = 0; int64_t ln = 0;
         if (!cx_fmt(lp, sizeof lp, "%s/%s.log", rundir, b->id) && !sy_read_file(lp, &lb, &ln, 16L << 20) && lb) {
@@ -356,7 +369,11 @@ static int prepare_kit(void) {
     if(cx_fmt(lock,sizeof lock,"%s/.git/qualify-kit.lock",lay))return die("kit lock path",0);
     int fd=open(lock,O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW,0600);
     if(fd<0)return die("kit lock ",lock);
+#ifdef DVQUALIFY_GATE_FIXTURE
+    long limit=sy_now_ms()+2500; /* Exercise actual producer cancellation in the bounded fixture. */
+#else
     long limit=sy_now_ms()+55000;
+#endif
     for(;;){
         int lk=sy_flock(fd,6);
         if(!lk)break;
@@ -517,11 +534,17 @@ int main(int argc, char **argv) {
     static int pending[MAXB], retry[MAXB];
     int count = 0, completed = 0, number = 0;
     for (int i = 0; i < nb; i++) if (!resumed[i]) pending[count++] = i;
-    int kit_state=count?prepare_kit():0;
-    if(kit_state){
+    for(int attempt=1;count && attempt<=2;attempt++){
+        int kit_state=prepare_kit();
+        if(!kit_state)break;
         if(kit_state==1){
             fprintf(f,"# UNKNOWN kit-window\nCHECKPOINT\tremaining=%d\tape_sha256=%s\n",count,sha);
+            if(fflush(f) || ferror(f)){if(outp)fclose(f);return die("cannot flush kit checkpoint ",outp?outp:"stdout");}
             fprintf(stderr,"QUALIFY_KIT\tUNKNOWN\treason=kit-window\tremaining=%d\tresume=%s\n",count,outp?outp:"-");
+            if(attempt==1){
+                fprintf(stderr,"QUALIFY_KIT\tRETRY\tattempt=2\tcandidate=%s\n",sha);
+                continue;
+            }
         }
         if(outp)fclose(f);
         return kit_state;

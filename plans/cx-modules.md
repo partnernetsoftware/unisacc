@@ -606,7 +606,7 @@ flowchart TD
 
 ## 164. 2026-10-30 混合候选 148 格全 SAME，六个驱动对象 -O1 改成默认
 
-对拍的是 `out/grk-opt2-o1/candidate`。2959636 字节，权限 0755，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。这只是显式 `--o1-drivers` 编的：drive、host、driveface、driveroute、cxmod、tapegate 为 `-O1`，其余 `-O2`。构造数字在 [plans/perf-bottlenecks-2026-10-30.md](perf-bottlenecks-2026-10-30.md) 的 B5。已装产品没换。
+对拍的是 `out/grk-opt2-o1/candidate`。2959636 字节，权限 0755，sha256 `e477a4c70be28c11b86f9fce129fae2acf4e6c6813aa7d8436a8881d75160970`。这只是显式 `--o1-drivers` 编的：drive、host、driveface、driveroute、cxmod、tapegate 为 `-O1`，其余 `-O2`。构造数字在 [archive/plans/perf-bottlenecks-2026-10-30.md](../archive/plans/perf-bottlenecks-2026-10-30.md) 的 B5。已装产品没换。
 
 检查器是 `tools/check-cx-entry.cx`。表是 `out/grk-opt2-mx/cx-entry-matrix-2026-10-30.tsv`。进度文件 `out/grk-opt2-mx/cx-entry-matrix.progress` 是 0 和 148。148 行数据全是 SAME，没有 DIFF，没有 TIMEOUT，没有 CRASH。最后一片从格 98 跑到 148，stdout 以 `SAME -D -iquote -`、`SAME lib abs -`、`LEFT:0` 结尾，退出 0。前面几片退出 2，是那一片没跑完。每次开工没有别的 `unisacc.com`。`UNISA_CONTAINER` 和 `UNISACC_CONTAINER` 都去掉了。跑的时候没改检查器、候选、产品和语料。
 

@@ -54,7 +54,7 @@
 - 模块图必须无环,否则拒绝 `module cycle`(CX-M-3)。
 - 符号级导入实测可用:`#pragma unisa use text.text::tx_len` 后调用 `tx_len("hello", 64)`,输出 `len=5`。
 - 已知缺口(实测):`use text.text::tx_len as slen` 能通过规划,但默认运行与 `-o` 产物都在调用时报 `unisacc: no host function slen`(rc=127)。别名在当前产品上不可用,冲突请改用符号级导入避开。
-- 再导出未实现:[plans/cx-use-alias-reexport.md](plans/cx-use-alias-reexport.md) 第 3 部分的 `#pragma unisa export` 实测被拒(`unknown unisa pragma export`)。被多处需要的底层模块,各使用方自己 `use`。
+- 再导出未实现:[archive/plans/cx-use-alias-reexport.md](archive/plans/cx-use-alias-reexport.md) 第 3 部分的 `#pragma unisa export` 实测被拒(`unknown unisa pragma export`)。被多处需要的底层模块,各使用方自己 `use`。
 - `dock` 的完整设计见 [plans/cx-dock-pragma.md](plans/cx-dock-pragma.md);带参数写法 `dock libc|include` 本文未实测(UNVERIFIED)。
 
 ### 3.3 仓外脚本的包根(实测)

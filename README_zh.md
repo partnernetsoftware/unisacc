@@ -60,7 +60,7 @@ sh ./unisacc.com tests/run.cx -- --smoke      # 测试入口;另有 --all、--li
 | 格式与互操作 | [docs/tapebin-v1.md](docs/tapebin-v1.md)、[docs/host-interop.md](docs/host-interop.md)、[docs/glossary.md](docs/glossary.md) |
 | 任务看板、账本、工作流 | [prd_mempalace.md](prd_mempalace.md)(唯一协同入口;`archive/agentwork-retire-2026-11/` 已退役,仅作历史) |
 | agent 工作规则 | [AGENTS.md](AGENTS.md#unisacc-工作规则)(`CLAUDE.md` 是其软链) |
-| 当前版本计划与发布说明 | [plans/v0.0.59-unisacc.md](plans/v0.0.59-unisacc.md)、[plans/](plans/) |
+| 当前版本计划与发布说明 | [archive/plans/v0.0.59-unisacc.md](archive/plans/v0.0.59-unisacc.md)、[plans/](plans/) |
 | 先验工作综述 | [research/prior-art.md](research/prior-art.md) |
 | UJS(平行 JS/WASM 产品,论文 B) | [ujs/README.md](ujs/README.md)、[ujs/prd.md](ujs/prd.md) |
 | 详细使用手册(中文)与已知限制:全部选项、头文件、`-c`/`-S`/对象与归档 | [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)、[七](docs/readme-detail.md#七已知限制) |

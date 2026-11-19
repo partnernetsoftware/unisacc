@@ -49,7 +49,7 @@
 (2) cx-booter-ape、tools-default-regression、cx-model-decode 材料无生产者,UNMEASURED。
 (3) -funit 对外函数 7 个及以上整型参数、浮点参数、单元内取址外传(qsort 回调)静默算错(FUNIT-SYSV-ARGS-OVER-6-FLOAT-FNPTR-SILENT,归 0.0.82)。
 (4) 单元内 printf 无输出(改前就有)。
-(5) arm64 的 SysV 桩未做;.init_array 在 arm64、osx、win 对象上未实测,UNMEASURED。
+(5) arm64 的 SysV 桩未做;.init_array 在 arm64、osx、win 对象上未实测,UNMEASURED。公开后补测(2026-11-19,qemu-aarch64-static 与 aarch64-linux-gnu-gcc 实跑,材料为本版公开件):lnx/arm64 的 -c -funit 对象带 .init_array 与 R_AARCH64_ABS64,但 arm64 的 __init_u 没有 AAPCS64 入口包装(代码 ldr x17,[x7]; add x7,x7,#8; ret x17,按内部约定从 x7 栈取返回地址),被 libc 经 .init_array 以 AAPCS64 调入时 x7 无定义而崩溃:任何链接了这类对象的 arm64 程序在启动时段错误(rc 139),与链接单个或多个 -funit 对象无关;改前(0.0.79)arm64 -funit 对象无 .init_array,只有被 C 调用其中函数时才崩。结论:lnx/arm64 的 -funit 对象产出在本版不可用(改前同样不可被 C 调用,本版把崩溃提前到启动),缺口 OBJABI-ARM64-INIT-U-NO-AAPCS-ENTRY,与 F2 arm64 桩同类,0.0.81 与 cx-dev arm64 配方重建一并处理。
 (6) -funit 对象 __init_u 符号类型为 NOTYPE。
 (7) 真实 apps 的 -c -funit 对象与 gcc crt 链接时 _start 重复定义(改前就有)。
 (8) const 仍落在非只读节。

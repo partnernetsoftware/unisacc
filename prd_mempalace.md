@@ -16,7 +16,7 @@
 flowchart LR
   subgraph 版本流水线
     V66["0.0.66 已公开,备份 ~/.cache/unisacc/ape-0.0.66"]
-    V67["0.0.67 已公开 Latest 已装(APE a99ea71d)<br/>release/、plans/release-notes-0.0.67.md"]
+    V67["0.0.67 已公开 Latest 已装(APE a99ea71d)<br/>release/、archive/plans/release-notes-0.0.67.md"]
     V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
@@ -26,7 +26,7 @@ flowchart LR
     V74["0.0.74 已公开 Latest(冻结 F 0dae4d3024)<br/>release/evidence/0.0.74/"]
     V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
     V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
-    V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>plans/v0.0.77.md"]
+    V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>archive/plans/v0.0.77.md"]
     ECO["0.0.78 至 0.0.87 路线(内存安全二段、表网卫生、对象产出合同、netraw、库包、门面、锁文件、DNS 与 inflate、执行器吞吐、链接单元二期,见 build/version-seq.tsv)<br/>G0 推算 0.0.81<br/>prd_cx.md 0.9"]
     PERF["0.0.82 执行器吞吐、0.0.83 链接单元二期<br/>prd.md 候选池 性能新方向"]
     V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
@@ -108,7 +108,7 @@ flowchart LR
 - 仓库根 out/:逐项迁移到 sy_tmpdir,清单见归档同名条。
 - 大型二维自动数组:已装编译器报 not covered(复现 $CLAUDE_JOB_DIR/tmp/repro-large-2d-auto-array.cx)。
 - compile-as-limit:低限额具名拒绝两项未过,候选上实跑,不过则补产品合同。
-- cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
+- cc 额度暂停期间由 cdx 按项目所有者授权临时接班(2026-11-17)：第五条 4c2e7ad167 性能实验已终止、原证据保留，不重起同输入；计划备忘真实末次命中与独立开关对照已核，结论与未验范围见 archive/plans/local-product-0.0.71.md 的第五条链接班核验节。三张额度中断的小单均未完成验收，不把隔离树中的半成品当成已交付补丁；共享 tests 大批纯执行位改动来源未核，提交须排除这些改动。
 - ujs `compiler_min.cx` cxraw 实测 96(tsv 基线曾 50,限期 0.0.9 压回 <=50)。决定:不把 96 当合格,不并 G1。依据:d473474f14 与 ujs/prd.md C4。证据:`sh ./unisacc.com -run tests/cxraw.cx -- --check --files ujs/seed/stage0/compiler_min.cx`;host1_vm 实测 34。回滚:到期未压回则拒绝合入 main/公开;不升基线冒充。
 - ujs/product 九文件 cxraw/cxapis/cxtrunc 缺行已按实测补基线(2026-11-18,合入请求):gold-ic 18/3, gold-lex 25/3, gold-parse 17/3, gold-rest 15/4, gold-type 17/3, net-gold-check 34/2/6, net-lex-check 13, net-parse-check 18/1, pack-nets 27/4/2。不把缺行当 0。限期 0.0.80 压回各表该行 calls 至少减半(cxraw 优先 sy_*)。证据:`sh ./unisacc.com tests/cxraw.cx -- --check --files ujs/product/gold-ic.cx ...`。回滚:删这九行则棘轮再 FAIL;到期未压回拒绝公开升格。
 

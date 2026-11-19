@@ -1,0 +1,302 @@
+/* tools/check-realprog.cx -- external real-program verification (E4: jsmn-simple, cjson, jsmn-dump, kilo).
+ *   sh ./unisacc.com tools/check-realprog.cx -- [--product P] [--dir DIR] [--only NAME] [--url-base BASE]
+ * Prepares pinned sources via tools/realprog-fetch.cx (unless already cached and pin-verified), builds each
+ * program with both the target product P (default ./unisacc.com) and host cc (-std=c99 -D_GNU_SOURCE -w),
+ * runs both with identical args/stdin, and compares stdout+stderr byte-for-byte plus exit code.
+ * Verdicts per case:
+ *   CASE<TAB>NAME<TAB>PASS        product & cc both build and outputs/exit codes match byte-for-byte
+ *   CASE<TAB>NAME<TAB>FAIL        both build, but outputs or exit codes differ
+ *   CASE<TAB>NAME<TAB>REJECT      product refused to build (first stderr line printed; never PASS)
+ *   CASE<TAB>NAME<TAB>UNVERIFIED  material absent or host cc failed to build
+ * Last line: CHECK_REALPROG<TAB>pass=N<TAB>fail=M<TAB>reject=R<TAB>unverified=U<TAB>ms=T */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define RP_PW 4400
+#define RP_OUT 16384
+
+typedef struct {
+    const char *name;
+    const char *repo;
+    const char *src1;
+    const char *src2;
+    const char *inc;
+    const char *arg1;
+    const char *stdin_rel;
+} RpEntry;
+
+static const RpEntry RP_CASES[] = {
+    {"jsmn-simple", "jsmn",  "example/simple.c",   0,        "-I.", 0,           0},
+    {"cjson",       "cJSON", "cJSON.c",            "test.c", "-I.", 0,           0},
+    {"jsmn-dump",   "jsmn",  "example/jsondump.c", 0,        "-I.", 0,           "../cJSON/tests/inputs/test1"},
+    {"kilo",        "kilo",  "kilo.c",             0,        0,     "/dev/null", 0},
+    {0, 0, 0, 0, 0, 0, 0}
+};
+
+static int rp_exec_io(char **av, const char *cwd, const char *in_file, const char *out_file, long limit_ms) {
+    fflush(stdout);
+    fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        setpgid(0, 0);
+        if (cwd && chdir(cwd) != 0) _exit(127);
+        int fd_in = open(in_file ? in_file : "/dev/null", O_RDONLY);
+        int fd_out = open(out_file ? out_file : "/dev/null", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd_in < 0 || fd_out < 0) _exit(127);
+        dup2(fd_in, 0);
+        dup2(fd_out, 1);
+        dup2(fd_out, 2);
+        if (fd_in > 2) close(fd_in);
+        if (fd_out > 2) close(fd_out);
+        execvp(av[0], av);
+        _exit(127);
+    }
+    setpgid(pid, pid);
+    long t0 = sy_now_ms();
+    for (;;) {
+        int st = 0;
+        if (waitpid(pid, &st, WNOHANG) == pid) {
+            return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+        }
+        if (sy_now_ms() - t0 > limit_ms) {
+            kill(-pid, SIGKILL);
+            waitpid(pid, &st, 0);
+            return 124;
+        }
+        sy_sleep_ms(5);
+    }
+}
+
+static void rp_first_line(const char *path, char *dst, size_t cap) {
+    size_t sz = 0, o = 0;
+    char *s = cx_read(path, &sz);
+    dst[0] = 0;
+    if (!s) return;
+    for (size_t i = 0; i < sz && o + 1 < cap; i++) {
+        char c = s[i];
+        if (c == '\n' || c == '\r') {
+            if (o > 0) break;
+            continue;
+        }
+        if (c == '\t') c = ' ';
+        dst[o++] = c;
+    }
+    dst[o] = 0;
+    free(s);
+}
+
+static int rp_file_ok(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int rp_is_com(const char *p) {
+    size_t n = strlen(p);
+    return n > 4 && tx_eqz(p + n - 4, ".com");
+}
+
+int main(int argc, char **argv) {
+    long t_all = sy_now_ms();
+    const char *opt_prod = sy_env_or("UNISACC", "./unisacc.com");
+    const char *opt_dir = 0;
+    const char *opt_only = 0;
+    const char *opt_url = 0;
+    char cwd[RP_PW], prod_abs[RP_PW], mat_dir[RP_PW], work_dir[RP_PW];
+    int pass = 0, fail = 0, reject = 0, unverified = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--product") && i + 1 < argc) opt_prod = argv[++i];
+        else if (tx_eqz(argv[i], "--dir") && i + 1 < argc) opt_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--only") && i + 1 < argc) opt_only = argv[++i];
+        else if (tx_eqz(argv[i], "--url-base") && i + 1 < argc) opt_url = argv[++i];
+        else {
+            fprintf(stderr, "usage: check-realprog [--product P] [--dir DIR] [--only NAME] [--url-base BASE]\n");
+            return 2;
+        }
+    }
+
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (opt_prod[0] == '/') {
+        if (cx_fmt(prod_abs, sizeof prod_abs, "%s", opt_prod)) return 2;
+    } else {
+        if (cx_fmt(prod_abs, sizeof prod_abs, "%s/%s", cwd, opt_prod)) return 2;
+    }
+
+    {
+        const char *td = sy_tmpdir();
+        const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+        if (opt_dir) {
+            if (cx_fmt(mat_dir, sizeof mat_dir, "%s", opt_dir)) return 2;
+        } else {
+            if (cx_fmt(mat_dir, sizeof mat_dir, "%s/unisacc-realprog-cache", base_td)) return 2;
+        }
+        if (cx_fmt(work_dir, sizeof work_dir, "%s/check-realprog-%d", base_td, (int)getpid())) return 2;
+        if (mkdir(work_dir, 0700) != 0 && errno != EEXIST) return 2;
+    }
+
+    /* Step 1: prepare pinned materials via tools/realprog-fetch.cx */
+    {
+        char fetch_out[RP_OUT];
+        char *fav[12];
+        int k = 0;
+        fav[k++] = "sh";
+        fav[k++] = (char *)sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product runs material producer via checkout product; UNISACC overrides */
+        fav[k++] = "tools/realprog-fetch.cx";
+        fav[k++] = "--";
+        fav[k++] = "--dir";
+        fav[k++] = mat_dir;
+        if (opt_url) {
+            fav[k++] = "--url-base";
+            fav[k++] = (char *)opt_url;
+        }
+        fav[k] = 0;
+        int frc = ck_run(fav, fetch_out, sizeof fetch_out);
+        if (frc == 2) {
+            fprintf(stderr, "check-realprog: material producer REFUSE:\n%s\n", fetch_out);
+            (void)rmdir(work_dir);
+            return 2;
+        }
+    }
+
+    /* Step 2: run each selected case */
+    for (int i = 0; RP_CASES[i].name; i++) {
+        const RpEntry *c = &RP_CASES[i];
+        char repo_dir[RP_PW], s1[RP_PW], s2[RP_PW], in_path[RP_PW];
+        char ref_bin[RP_PW], got_bin[RP_PW], want_out[RP_PW], got_out[RP_PW], err_log[RP_PW];
+        long tc0 = sy_now_ms();
+
+        if (opt_only && !tx_eqz(opt_only, c->name)) continue;
+
+        if (cx_fmt(repo_dir, sizeof repo_dir, "%s/%s", mat_dir, c->repo)) return 2;
+        if (cx_fmt(s1, sizeof s1, "%s/%s", repo_dir, c->src1)) return 2;
+        if (c->src2) {
+            if (cx_fmt(s2, sizeof s2, "%s/%s", repo_dir, c->src2)) return 2;
+        }
+        if (c->stdin_rel) {
+            if (cx_fmt(in_path, sizeof in_path, "%s/%s", repo_dir, c->stdin_rel)) return 2;
+        }
+
+        if (!rp_file_ok(s1) || (c->src2 && !rp_file_ok(s2)) || (c->stdin_rel && !rp_file_ok(in_path))) {
+            printf("CASE\t%s\tUNVERIFIED\treason=missing-material\n", c->name);
+            unverified++;
+            continue;
+        }
+
+        if (cx_fmt(ref_bin, sizeof ref_bin, "%s/%s.ref", work_dir, c->name)) return 2;
+        if (cx_fmt(got_bin, sizeof got_bin, "%s/%s.got", work_dir, c->name)) return 2;
+        if (cx_fmt(want_out, sizeof want_out, "%s/%s.want.out", work_dir, c->name)) return 2;
+        if (cx_fmt(got_out, sizeof got_out, "%s/%s.got.out", work_dir, c->name)) return 2;
+        if (cx_fmt(err_log, sizeof err_log, "%s/%s.err", work_dir, c->name)) return 2;
+
+        /* 2a. Build reference with host cc */
+        {
+            char *av[16];
+            int k = 0;
+            av[k++] = "cc";
+            av[k++] = "-std=c99";
+            av[k++] = "-D_GNU_SOURCE";
+            av[k++] = "-w";
+            if (c->inc) av[k++] = (char *)c->inc;
+            av[k++] = "-o";
+            av[k++] = ref_bin;
+            av[k++] = (char *)c->src1;
+            if (c->src2) av[k++] = (char *)c->src2;
+            av[k++] = "-lm";
+            av[k++] = "-ldl";
+            av[k++] = "-lpthread";
+            av[k] = 0;
+            int crc = rp_exec_io(av, repo_dir, 0, err_log, 35000);
+            if (crc != 0) {
+                char msg[128];
+                rp_first_line(err_log, msg, sizeof msg);
+                printf("CASE\t%s\tUNVERIFIED\treason=cc-build-failed:%s\n", c->name, msg[0] ? msg : "unknown");
+                unverified++;
+                (void)sy_unlink(err_log);
+                continue;
+            }
+        }
+
+        /* 2b. Run reference */
+        int want_rc;
+        {
+            char *av[4];
+            int k = 0;
+            av[k++] = ref_bin;
+            if (c->arg1) av[k++] = (char *)c->arg1;
+            av[k] = 0;
+            want_rc = rp_exec_io(av, repo_dir, c->stdin_rel ? in_path : 0, want_out, 25000);
+        }
+
+        /* 2c. Build with target product */
+        {
+            char *av[16];
+            int k = 0;
+            if (rp_is_com(prod_abs)) av[k++] = "sh";
+            av[k++] = prod_abs;
+            av[k++] = "-O2";
+            if (c->inc) av[k++] = (char *)c->inc;
+            av[k++] = (char *)c->src1;
+            if (c->src2) av[k++] = (char *)c->src2;
+            av[k++] = "-o";
+            av[k++] = got_bin;
+            av[k] = 0;
+            int prc = rp_exec_io(av, repo_dir, 0, err_log, 40000);
+            if (prc != 0) {
+                char msg[128];
+                rp_first_line(err_log, msg, sizeof msg);
+                printf("CASE\t%s\tREJECT\tms=%ld\treason=%s\n", c->name, sy_now_ms() - tc0, msg[0] ? msg : "build-nonzero");
+                reject++;
+                (void)sy_unlink(ref_bin);
+                (void)sy_unlink(want_out);
+                (void)sy_unlink(err_log);
+                continue;
+            }
+        }
+
+        /* 2d. Run product binary and compare byte-for-byte + exit code */
+        (void)chmod(got_bin, 0755);
+        int got_rc;
+        {
+            char *av[4];
+            int k = 0;
+            av[k++] = got_bin;
+            if (c->arg1) av[k++] = (char *)c->arg1;
+            av[k] = 0;
+            got_rc = rp_exec_io(av, repo_dir, c->stdin_rel ? in_path : 0, got_out, 25000);
+        }
+
+        {
+            size_t wn = 0, gn = 0;
+            char *wb = cx_read(want_out, &wn);
+            char *gb = cx_read(got_out, &gn);
+            int eq = wb && gb && wn == gn && tx_same(wb, (long)wn, gb, (long)gn);
+            if (got_rc == want_rc && eq) {
+                printf("CASE\t%s\tPASS\trc=%d\tbytes=%zu\tms=%ld\n", c->name, got_rc, gn, sy_now_ms() - tc0);
+                pass++;
+            } else {
+                printf("CASE\t%s\tFAIL\tgot_rc=%d\twant_rc=%d\tgot_bytes=%zu\twant_bytes=%zu\tms=%ld\n",
+                    c->name, got_rc, want_rc, gn, wn, sy_now_ms() - tc0);
+                fail++;
+            }
+            if (wb) free(wb);
+            if (gb) free(gb);
+        }
+
+        (void)sy_unlink(ref_bin);
+        (void)sy_unlink(got_bin);
+        (void)sy_unlink(want_out);
+        (void)sy_unlink(got_out);
+        (void)sy_unlink(err_log);
+    }
+
+    (void)rmdir(work_dir);
+    printf("CHECK_REALPROG\tpass=%d\tfail=%d\treject=%d\tunverified=%d\tms=%ld\n",
+        pass, fail, reject, unverified, sy_now_ms() - t_all);
+    if (fail > 0 || reject > 0) return 1;
+    if (unverified > 0) return 3;
+    return 0;
+}

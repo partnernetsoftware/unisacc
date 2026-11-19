@@ -1,0 +1,173 @@
+/* tools/check-realprog-fetch.cx -- offline fixed-fixture checks for tools/realprog-fetch.cx.
+ *   sh ./unisacc.com tools/check-realprog-fetch.cx
+ * Builds tools/realprog-fetch.cx once (-o, into a private temp dir under $TMPDIR, never /tmp root),
+ * creates a local single-commit git repo as a file:// mirror, and verifies 7 contracts:
+ *   1. tempdir-not-tmp-root   work & cache paths live inside a unique subdir under $TMPDIR
+ *   2. fetch-ok-prepared      clones local mirror, verifies exact 40-char pin -> rc 0 PREPARED (fetched)
+ *   3. cache-hit-verified     second run hits cache without touching upstream (bad url-base still rc 0 cached)
+ *   4. cache-tampered-refuse  extra commit in cached repo -> rc 2 REFUSE cached pin mismatch (not overwritten)
+ *   5. pin-mismatch-refuse    wrong pin against upstream -> rc 2 REFUSE checkout pin, no PREPARED
+ *   6. offline-unverified-rc3 nonexistent mirror -> rc 3 UNVERIFIED fetch-failed
+ *   7. usage-bad-arg-rc2      unknown flag -> rc 2
+ * Last line: CHECK_REALPROG_FETCH<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CRF_PW 4400
+#define CRF_OUT 16384
+
+static void crf_fail(const char *why) {
+    fprintf(stderr, "check-realprog-fetch: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void crf_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) crf_fail("mkdir");
+}
+
+static int crf_git(const char *repo, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, const char *a6, char *out) {
+    char *av[12];
+    int k = 0;
+    av[k++] = "git";
+    if (repo) {
+        av[k++] = "-C";
+        av[k++] = (char *)repo;
+    }
+    if (a1) av[k++] = (char *)a1;
+    if (a2) av[k++] = (char *)a2;
+    if (a3) av[k++] = (char *)a3;
+    if (a4) av[k++] = (char *)a4;
+    if (a5) av[k++] = (char *)a5;
+    if (a6) av[k++] = (char *)a6;
+    av[k] = 0;
+    return ck_run(av, out, CRF_OUT);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CRF_OUT];
+    char work[CRF_PW], bin[CRF_PW], mirror[CRF_PW], owner[CRF_PW], up[CRF_PW], fpath[CRF_PW];
+    char cache1[CRF_PW], cache2[CRF_PW], cache3[CRF_PW], url[CRF_PW], bad_url[CRF_PW];
+    char sha[128], pin_spec[256], want_fetch[256], want_cached[256];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (cx_fmt(work, sizeof work, "%s/check-realprog-fetch-%d", base_td, (int)getpid())) crf_fail("work-path");
+    crf_mk(work);
+    if (cx_fmt(bin, sizeof bin, "%s/realprog-fetch", work)) crf_fail("bin-path");
+    if (cx_fmt(mirror, sizeof mirror, "%s/mirror", work)) crf_fail("mirror-path");
+    if (cx_fmt(owner, sizeof owner, "%s/antirez", mirror)) crf_fail("owner-path");
+    if (cx_fmt(up, sizeof up, "%s/kilo.git", owner)) crf_fail("up-path");
+    if (cx_fmt(cache1, sizeof cache1, "%s/cache1", work)) crf_fail("c1-path");
+    if (cx_fmt(cache2, sizeof cache2, "%s/cache2", work)) crf_fail("c2-path");
+    if (cx_fmt(cache3, sizeof cache3, "%s/cache3", work)) crf_fail("c3-path");
+    if (cx_fmt(url, sizeof url, "file://%s", mirror)) crf_fail("url-fmt");
+    if (cx_fmt(bad_url, sizeof bad_url, "file://%s/no-such-mirror", work)) crf_fail("bad-url-fmt");
+
+    /* Build tools/realprog-fetch.cx once */
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/realprog-fetch.cx", "-o", bin, 0}; /* lint:allow R1-product builds realprog-fetch with this checkout's product; UNISACC overrides */
+        if (ck_run(av, out, sizeof out) != 0) {
+            fprintf(stderr, "check-realprog-fetch: build failed:\n%s\n", out);
+            crf_fail("build-realprog-fetch");
+        }
+    }
+
+    /* Create local single-commit git repository under work/mirror/antirez/kilo.git */
+    crf_mk(mirror);
+    crf_mk(owner);
+    crf_mk(up);
+    if (crf_git(up, "init", "-q", 0, 0, 0, 0, out) != 0) crf_fail("git-init");
+    if (cx_fmt(fpath, sizeof fpath, "%s/kilo.c", up)) crf_fail("kilo-path");
+    if (cx_write(fpath, "int main(void){return 0;}\n", 26)) crf_fail("write-kilo");
+    if (crf_git(up, "add", "kilo.c", 0, 0, 0, 0, out) != 0) crf_fail("git-add");
+    {
+        char *av[] = {"git", "-C", up, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "init", 0};
+        if (ck_run(av, out, sizeof out) != 0) crf_fail("git-commit");
+    }
+    if (crf_git(up, "rev-parse", "HEAD", 0, 0, 0, 0, out) != 0) crf_fail("git-rev-parse");
+    {
+        size_t n = strlen(out);
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
+        if (n != 40) crf_fail("sha-len");
+        if (cx_fmt(sha, sizeof sha, "%s", out)) crf_fail("sha-fmt");
+    }
+    if (cx_fmt(pin_spec, sizeof pin_spec, "kilo=%s", sha)) crf_fail("pin-fmt");
+    if (cx_fmt(want_fetch, sizeof want_fetch, "PREPARED\tkilo\t%s\tfetched", sha)) crf_fail("wf-fmt");
+    if (cx_fmt(want_cached, sizeof want_cached, "PREPARED\tkilo\t%s\tcached", sha)) crf_fail("wc-fmt");
+
+    /* 1. Private subdir under $TMPDIR, never /tmp root */
+    ck(!tx_eqz(work, "/tmp") && !tx_eqz(cache1, "/tmp") && tx_find(cache1, (long)strlen(cache1), "check-realprog-fetch-", 21) >= 0,
+        "tempdir-not-tmp-root: cache dir is a unique subdir under $TMPDIR");
+
+    /* 2. Positive case: fetch from local mirror and verify 40-char pin */
+    {
+        char *av[] = {bin, "--dir", cache1, "--only", "kilo", "--url-base", url, "--pin", pin_spec, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRF_OUT, want_fetch) && ckk_has(out, CRF_OUT, "status=PREPARED"),
+            "fetch-ok-prepared: rc=0, 40-char pin verified, PREPARED fetched");
+    }
+
+    /* 3. Cache hit: second run uses cache without touching upstream (nonexistent url-base still succeeds) */
+    {
+        char *av[] = {bin, "--dir", cache1, "--only", "kilo", "--url-base", bad_url, "--pin", pin_spec, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRF_OUT, want_cached) && ckk_has(out, CRF_OUT, "status=PREPARED"),
+            "cache-hit-verified: second run hits cache without re-fetching and still verifies pin");
+    }
+
+    /* 4. Tampered cache: append a commit in cached repo -> REFUSE rc=2 (current contract: refuse without overwrite) */
+    {
+        char cdir[CRF_PW], cfile[CRF_PW];
+        if (cx_fmt(cdir, sizeof cdir, "%s/kilo", cache1)) crf_fail("cdir-path");
+        if (cx_fmt(cfile, sizeof cfile, "%s/kilo.c", cdir)) crf_fail("cfile-path");
+        if (cx_write(cfile, "int main(void){return 7;}\n", 26)) crf_fail("tamper-write");
+        if (crf_git(cdir, "add", "kilo.c", 0, 0, 0, 0, out) != 0) crf_fail("tamper-add");
+        {
+            char *av[] = {"git", "-C", cdir, "-c", "user.name=test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "tamper", 0};
+            if (ck_run(av, out, sizeof out) != 0) crf_fail("tamper-commit");
+        }
+        {
+            char *av[] = {bin, "--dir", cache1, "--only", "kilo", "--url-base", url, "--pin", pin_spec, 0};
+            int rc = ck_run(av, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CRF_OUT, "REFUSE kilo cached pin mismatch") && ckk_has(out, CRF_OUT, "status=REFUSE") && !ckk_has(out, CRF_OUT, "PREPARED\tkilo"),
+                "cache-tampered-refuse: tampered cache HEAD -> rc=2 REFUSE without PREPARED");
+        }
+    }
+
+    /* 5. Pin mismatch against upstream -> REFUSE rc=2, no PREPARED */
+    {
+        char *av[] = {bin, "--dir", cache2, "--only", "kilo", "--url-base", url, "--pin", "kilo=0000000000000000000000000000000000000000", 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CRF_OUT, "REFUSE kilo checkout pin") && ckk_has(out, CRF_OUT, "status=REFUSE") && !ckk_has(out, CRF_OUT, "PREPARED\tkilo"),
+            "pin-mismatch-refuse: wrong pin -> rc=2 REFUSE checkout pin, no PREPARED");
+    }
+
+    /* 6. Offline mirror -> UNVERIFIED rc=3 */
+    {
+        char *av[] = {bin, "--dir", cache3, "--only", "kilo", "--url-base", bad_url, "--pin", pin_spec, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 3 && ckk_has(out, CRF_OUT, "UNVERIFIED\tkilo\tfetch-failed") && ckk_has(out, CRF_OUT, "status=UNVERIFIED"),
+            "offline-unverified-rc3: unreachable url-base -> rc=3 UNVERIFIED");
+    }
+
+    /* 7. Unknown option -> usage rc=2 */
+    {
+        char *av[] = {bin, "--no-such-option", 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 2, "usage-bad-arg-rc2: unknown option refused with rc=2");
+    }
+
+    /* Clean up private temporary directory (safe: unique workdir created above) */
+    {
+        char *av[] = {"rm", "-rf", work, 0};
+        (void)ck_run(av, out, sizeof out);
+    }
+
+    printf("CHECK_REALPROG_FETCH\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

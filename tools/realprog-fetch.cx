@@ -1,0 +1,168 @@
+/* tools/realprog-fetch.cx -- material producer for external real-program checks (E4).
+ *   sh ./unisacc.com tools/realprog-fetch.cx -- [--dir DIR] [--only NAME] [--url-base BASE] [--pin NAME=SHA]
+ * Fetches pinned upstream repositories (kilo, jsmn, cJSON) into DIR (default $TMPDIR/unisacc-realprog-cache),
+ * verifies the exact 40-char git commit hash (even on cache hit), and reports PREPARED only (never PASS).
+ * On network/fetch failure prints UNVERIFIED and exits 3; on hash mismatch prints REFUSE and exits 2.
+ * Last line: REALPROG_FETCH<TAB>prepared=N<TAB>unverified=U<TAB>dir=DIR<TAB>status=PREPARED|UNVERIFIED|REFUSE */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define RF_PW 4400
+#define RF_OUT 16384
+
+typedef struct {
+    const char *name;
+    const char *slug;
+    const char *pin;
+} RfRepo;
+
+static const RfRepo RF_REPOS[] = {
+    {"kilo",  "antirez/kilo.git",    "323d93b29bd89a2cb446de90c4ed4fea1764176e"},
+    {"jsmn",  "zserge/jsmn.git",     "fdcef3ebf886fa210d14956d3c068a653e76a24e"},
+    {"cJSON", "DaveGamble/cJSON.git","acc76239bee01d8e9c858ae2cab296704e52d916"},
+    {0, 0, 0}
+};
+
+typedef struct {
+    char name[64];
+    char pin[128];
+} RfPinOv;
+
+static RfPinOv rf_ovs[8];
+static int rf_nov;
+
+static const char *rf_pin_for(const RfRepo *r) {
+    for (int i = 0; i < rf_nov; i++) {
+        if (tx_eqz(rf_ovs[i].name, r->name)) return rf_ovs[i].pin;
+    }
+    return r->pin;
+}
+
+static void rf_trim_nl(char *s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ')) s[--n] = 0;
+}
+
+static int rf_verify_pin(const char *repo_dir, const char *pin, char *got_pin, size_t got_cap) {
+    char out[RF_OUT];
+    char *av[] = {"git", "-C", (char *)repo_dir, "rev-parse", "HEAD", 0};
+    int rc = ck_run(av, out, sizeof out);
+    if (rc != 0) return -1;
+    rf_trim_nl(out);
+    if (cx_fmt(got_pin, (int)got_cap, "%s", out)) return -1;
+    return tx_eqz(out, pin) ? 0 : 1;
+}
+
+static int rf_prepare_one(const char *base_dir, const char *url_base, const RfRepo *r) {
+    char dst[RF_PW], part[RF_PW], url[RF_PW], out[RF_OUT], got[128];
+    const char *pin = rf_pin_for(r);
+    struct stat st;
+
+    if (cx_fmt(dst, sizeof dst, "%s/%s", base_dir, r->name)) return 2;
+    if (stat(dst, &st) == 0 && S_ISDIR(st.st_mode)) {
+        int vr = rf_verify_pin(dst, pin, got, sizeof got);
+        if (vr == 0) {
+            printf("PREPARED\t%s\t%s\tcached\n", r->name, pin);
+            return 0;
+        }
+        fprintf(stderr, "realprog-fetch: REFUSE %s cached pin mismatch (got=%s want=%s)\n", r->name, vr > 0 ? got : "unreadable", pin);
+        return 2;
+    }
+
+    if (cx_fmt(part, sizeof part, "%s/.%s.part.%d", base_dir, r->name, (int)getpid())) return 2;
+    if (cx_fmt(url, sizeof url, "%s/%s", url_base, r->slug)) return 2;
+
+    {
+        char *av[] = {"git", "clone", "--quiet", url, part, 0};
+        int rc = ck_run(av, out, sizeof out);
+        if (rc != 0) {
+            rf_trim_nl(out);
+            printf("UNVERIFIED\t%s\tfetch-failed\trc=%d\n", r->name, rc);
+            return 3;
+        }
+    }
+    {
+        char *av[] = {"git", "-C", part, "checkout", "--quiet", (char *)pin, 0};
+        int rc = ck_run(av, out, sizeof out);
+        if (rc != 0) {
+            fprintf(stderr, "realprog-fetch: REFUSE %s checkout pin %s failed (rc=%d)\n", r->name, pin, rc);
+            return 2;
+        }
+    }
+    {
+        int vr = rf_verify_pin(part, pin, got, sizeof got);
+        if (vr != 0) {
+            fprintf(stderr, "realprog-fetch: REFUSE %s pin mismatch after checkout (got=%s want=%s)\n", r->name, vr > 0 ? got : "unreadable", pin);
+            return 2;
+        }
+    }
+    if (rename(part, dst) != 0) {
+        if (stat(dst, &st) == 0 && S_ISDIR(st.st_mode) && rf_verify_pin(dst, pin, got, sizeof got) == 0) {
+            printf("PREPARED\t%s\t%s\tcached\n", r->name, pin);
+            return 0;
+        }
+        fprintf(stderr, "realprog-fetch: REFUSE %s rename failed\n", r->name);
+        return 2;
+    }
+    printf("PREPARED\t%s\t%s\tfetched\n", r->name, pin);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char dir[RF_PW];
+    const char *opt_dir = 0;
+    const char *opt_only = 0;
+    const char *url_base = "https://github.com";
+    int prepared = 0, unverified = 0, refused = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--dir") && i + 1 < argc) opt_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--only") && i + 1 < argc) opt_only = argv[++i];
+        else if (tx_eqz(argv[i], "--url-base") && i + 1 < argc) url_base = argv[++i];
+        else if (tx_eqz(argv[i], "--pin") && i + 1 < argc) {
+            const char *spec = argv[++i];
+            const char *eq = strchr(spec, '=');
+            if (!eq || eq == spec || !eq[1] || rf_nov >= 8) {
+                fprintf(stderr, "realprog-fetch: REFUSE bad --pin spec\n");
+                return 2;
+            }
+            if (cx_fmt(rf_ovs[rf_nov].name, sizeof rf_ovs[rf_nov].name, "%.*s", (int)(eq - spec), spec)) return 2;
+            if (cx_fmt(rf_ovs[rf_nov].pin, sizeof rf_ovs[rf_nov].pin, "%s", eq + 1)) return 2;
+            rf_nov++;
+        } else {
+            fprintf(stderr, "usage: realprog-fetch [--dir DIR] [--only NAME] [--url-base BASE] [--pin NAME=SHA]\n");
+            return 2;
+        }
+    }
+    if (opt_dir) {
+        if (cx_fmt(dir, sizeof dir, "%s", opt_dir)) return 2;
+    } else {
+        const char *td = sy_tmpdir();
+        if (cx_fmt(dir, sizeof dir, "%s/unisacc-realprog-cache", td && td[0] == '/' ? td : "/tmp")) return 2;
+    }
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) {
+        fprintf(stderr, "realprog-fetch: REFUSE mkdir %s failed\n", dir);
+        return 2;
+    }
+
+    for (int i = 0; RF_REPOS[i].name; i++) {
+        if (opt_only && !tx_eqz(opt_only, RF_REPOS[i].name)) continue;
+        int rc = rf_prepare_one(dir, url_base, &RF_REPOS[i]);
+        if (rc == 0) prepared++;
+        else if (rc == 3) unverified++;
+        else refused++;
+    }
+
+    if (refused > 0) {
+        printf("REALPROG_FETCH\tprepared=%d\tunverified=%d\tdir=%s\tstatus=REFUSE\n", prepared, unverified, dir);
+        return 2;
+    }
+    if (unverified > 0) {
+        printf("REALPROG_FETCH\tprepared=%d\tunverified=%d\tdir=%s\tstatus=UNVERIFIED\n", prepared, unverified, dir);
+        return 3;
+    }
+    printf("REALPROG_FETCH\tprepared=%d\tunverified=0\tdir=%s\tstatus=PREPARED\n", prepared, dir);
+    return 0;
+}
