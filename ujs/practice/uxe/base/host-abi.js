@@ -40,6 +40,43 @@ export function linkUxe(baseModule, productModule, host) {
   return { base: base.exports, product: product.exports };
 }
 
+// Link modules in dependency order. Only explicitly exported UXE ABI functions cross instances.
+export function linkUxeModules(modules, host) {
+  const exportsByName = new Map();
+  const memories = new Set();
+  for (const [namespace, module] of modules) {
+    const entry = /^uxe_(?:[a-z][a-z0-9_]*_)?v([1-9][0-9]{0,2})$/.exec(namespace);
+    const expectedVersion = entry && Number(entry[1]);
+    if (!expectedVersion || expectedVersion > 255 || exportsByName.has(namespace)) {
+      throw new WebAssembly.LinkError("UXE module namespace");
+    }
+    if (!(module instanceof WebAssembly.Module)) throw new WebAssembly.LinkError("missing UXE module");
+    const imports = Object.create(null);
+    for (const binding of WebAssembly.Module.imports(module)) {
+      const { module: dependency, name, kind } = binding;
+      const isHost = dependency === "env";
+      const available = isHost ? host : exportsByName.get(dependency);
+      if (!available) throw new WebAssembly.LinkError("missing UXE dependency");
+      const publicName = name.startsWith("uxe_") && name !== "uxe_abi_version";
+      if (kind !== "function" || (isHost ? !HOST_IMPORTS.has(name) : !publicName) ||
+          typeof available[name] !== "function") {
+        throw new WebAssembly.LinkError("unsupported ABI import");
+      }
+      (imports[dependency] ??= Object.create(null))[name] = available[name];
+    }
+    const { exports } = new WebAssembly.Instance(module, imports);
+    if (typeof exports.uxe_abi_version !== "function" || exports.uxe_abi_version() !== expectedVersion) {
+      throw new WebAssembly.LinkError("UXE ABI version");
+    }
+    if (!(exports.memory instanceof WebAssembly.Memory) || memories.has(exports.memory)) {
+      throw new WebAssembly.LinkError("UXE memory ownership");
+    }
+    memories.add(exports.memory);
+    exportsByName.set(namespace, exports);
+  }
+  return exportsByName;
+}
+
 export function createBrowserHost(canvas, keys, asset = new Uint8Array(), audioContext = null, pointerEnabled = false) {
   let memory, pressed = 0n, audio = audioContext, audioEnd = 0;
   let pointerId, pointerBits = 0n, wheel = 0;

@@ -497,7 +497,7 @@ enum {
   OP_ABI_CALL, OP_ABI_RET, OP_U32, OP_FLOOR_I64
 };
 enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 32 };
-enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_TYPE_BASE = 14 };
+enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_MAX_ALIASES = 8, ABI_TYPE_BASE = 14 };
 enum { MAX_LAYOUTS = 24, MAX_LAYOUT_FIELDS = 24 };
 typedef struct {
   char name[MAXN];
@@ -513,6 +513,11 @@ typedef struct {
   uint8_t args[ABI_MAX_ARGS];
   int count, result;
 } AbiFn;
+typedef struct {
+  AbiFn signature;
+  int64_t bound[ABI_MAX_ARGS];
+  int count;
+} AbiAlias;
 typedef struct { uint8_t op; int64_t a; } Ins;
 /* stage0 fn: call-site inline (no extra wasm funcs). kind 0=expr arrow, 1=block. */
 typedef struct {
@@ -541,7 +546,8 @@ typedef struct {
   int fn_ret; /* local holding return value when in_fn, or -1 */
   int fn_did_ret;
   AbiFn imports[ABI_MAX_IMPORTS], api;
-  int import_count, abi_version;
+  AbiAlias aliases[ABI_MAX_ALIASES];
+  int import_count, alias_count, abi_version;
   const char *err;
 } Prog;
 
@@ -974,12 +980,60 @@ static int abi_type(Lex *L, Prog *P) {
 }
 
 static int abi_import_module(const char *name) {
-  const char *prefix = "uxe_v";
+  const char *prefix = "uxe_";
   if (intrinsic_name(name, "env")) return 1;
   while (*prefix && *name == *prefix) { name++; prefix++; }
-  if (*prefix || *name < '1' || *name > '9') return 0;
-  while (dig(*name)) name++;
-  return !*name;
+  if (*prefix || *name < 'a' || *name > 'z') return 0;
+  const char *version = name;
+  for (; *name; name++) {
+    if (*name == '_' && name[1] == 'v') version = name + 1;
+    if (!dig(*name) && *name != '_' && (*name < 'a' || *name > 'z')) return 0;
+  }
+  if (*version++ != 'v' || *version < '1' || *version > '9') return 0;
+  int value = 0;
+  while (dig(*version)) {
+    value = value * 10 + (*version++ - '0');
+    if (value > 255) return 0;
+  }
+  return !*version;
+}
+
+static int abi_export_name(const char *name) {
+  return name[0] == 'u' && name[1] == 'x' && name[2] == 'e' &&
+      name[3] == '_' && name[4] && !intrinsic_name(name, "uxe_abi_version");
+}
+
+static int abi_alias(Lex *L, Prog *P) {
+  if (!P->abi_version || P->alias_count == ABI_MAX_ALIASES) {
+    P->err = "abi alias declaration limit"; return 0;
+  }
+  next(L);
+  AbiAlias *alias = &P->aliases[P->alias_count];
+  char *name = alias->signature.name;
+  if (L->tok != T_ID || !abi_name_copy(name, L->id) || !abi_export_name(name) ||
+      intrinsic_name(name, P->api.name)) { P->err = "abi alias export name"; return 0; }
+  for (int i = 0; i < P->alias_count; i++)
+    if (intrinsic_name(name, P->aliases[i].signature.name)) { P->err = "abi duplicate alias"; return 0; }
+  for (int i = 0; i < P->import_count; i++)
+    if (intrinsic_name(name, P->imports[i].name)) { P->err = "abi alias shadows import"; return 0; }
+  next(L);
+  if (!expect(L, T_LP, P, "abi alias (")) return 0;
+  for (;;) {
+    int index = alias->count;
+    if (index >= P->api.count || P->api.args[index] != TY_I64 || L->tok != T_NUM) {
+      P->err = "abi alias binding requires i64 literal"; return 0;
+    }
+    alias->bound[alias->count++] = L->num;
+    next(L);
+    if (L->tok != T_COMMA) break;
+    next(L);
+  }
+  if (!expect(L, T_RP, P, "abi alias )") || !expect(L, T_SEMI, P, "abi alias ;")) return 0;
+  alias->signature.result = P->api.result;
+  for (int i = alias->count; i < P->api.count; i++)
+    alias->signature.args[alias->signature.count++] = P->api.args[i];
+  P->alias_count++;
+  return 1;
 }
 
 static int abi_decl(Lex *L, Prog *P, int exports) {
@@ -991,8 +1045,7 @@ static int abi_decl(Lex *L, Prog *P, int exports) {
   f = exports ? &P->api : &P->imports[P->import_count];
   next(L);
   if (L->tok != T_ID || !abi_name_copy(f->name, L->id)) { P->err = "abi name"; return 0; }
-  if (exports && (f->name[0] != 'u' || f->name[1] != 'x' || f->name[2] != 'e' ||
-      f->name[3] != '_' || !f->name[4] || intrinsic_name(f->name, "uxe_abi_version"))) {
+  if (exports && !abi_export_name(f->name)) {
     P->err = "abi export name"; return 0;
   }
   for (int i = 0; i < P->import_count; i++) {
@@ -3020,20 +3073,31 @@ static int abi_wasm_type(Buf *types, AbiFn *f) {
   return bleu(types, 1) && bu8(types, f->result == TY_I64 ? 0x7e : 0x7c);
 }
 
+static int abi_alias_body(Buf *code, const AbiAlias *alias, int target) {
+  if (!bleu(code, 0)) return 0;
+  for (int i = 0; i < alias->count; i++)
+    if (!bu8(code, 0x42) || !blei64(code, alias->bound[i])) return 0;
+  for (int i = 0; i < alias->signature.count; i++)
+    if (!bu8(code, 0x20) || !bleu(code, (uint32_t)i)) return 0;
+  return wcall(code, (uint32_t)target) && bu8(code, 0x0b);
+}
+
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[37];
+  Buf cs[37 + ABI_MAX_ALIASES];
   int i, ng = P->ng > 0 ? P->ng : 1;
   enum { NCORE = 19, NHOST = 16, NFUNCS = NCORE + NHOST };
   int api = P->abi_version != 0;
-  int nfuncs = NFUNCS + 2 * api;
+  int alias_start = NFUNCS + 2 * api;
+  int alias_type = ABI_TYPE_BASE + P->import_count + api;
+  int nfuncs = alias_start + P->alias_count;
   int nimports = g_need_gpu + P->import_count;
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
   for (i = 0; i < nfuncs; i++)
     if (!binit(&cs[i], i == 1 || i == NFUNCS ? 8192 : 256)) return 0;
 
-  if (!bleu(&types, ABI_TYPE_BASE + P->import_count + api)) return 0;
+  if (!bleu(&types, alias_type + P->alias_count)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7e)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,0)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7f)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
@@ -3051,6 +3115,8 @@ static int build_mod(Prog *P, Buf *mod) {
 
   for (i = 0; i < P->import_count; i++) if (!abi_wasm_type(&types, &P->imports[i])) return 0;
   if (api && !abi_wasm_type(&types, &P->api)) return 0;
+  for (i = 0; i < P->alias_count; i++)
+    if (!abi_wasm_type(&types, &P->aliases[i].signature)) return 0;
   if (!bleu(&funcs, nfuncs)) return 0;
   uint8_t fty[NFUNCS] = {
     0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
@@ -3062,10 +3128,12 @@ static int build_mod(Prog *P, Buf *mod) {
   };
   for (i = 0; i < NFUNCS; i++) if (!bu8(&funcs, fty[i])) return 0;
   if (api && (!bu8(&funcs, ABI_TYPE_BASE + P->import_count) || !bu8(&funcs, 1))) return 0;
+  for (i = 0; i < P->alias_count; i++)
+    if (!bleu(&funcs, alias_type + i)) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
   /* exports */
-  if (!bleu(&exps, 28 + 2 * api)) return 0;
+  if (!bleu(&exps, 28 + 2 * api + P->alias_count)) return 0;
   #define EXP(name, kind, idx) do { \
     uint32_t _i = ((kind) == 0) ? (uint32_t)(idx) + (uint32_t)nimports : (uint32_t)(idx); \
     if (!bstr(&exps, name)||!bu8(&exps, kind)||!bleu(&exps, _i)) return 0; \
@@ -3101,6 +3169,10 @@ static int build_mod(Prog *P, Buf *mod) {
   if (api) {
     EXP(P->api.name, 0x00, NFUNCS);
     EXP("uxe_abi_version", 0x00, NFUNCS + 1);
+  }
+  for (i = 0; i < P->alias_count; i++) {
+    EXP(P->aliases[i].signature.name, 0x00, alias_start + i);
+    if (!abi_alias_body(&cs[alias_start + i], &P->aliases[i], NFUNCS)) return 0;
   }
 
   if (!mk_num_body(&cs[0], 0)) return 0;
@@ -3276,6 +3348,9 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
     if (!abi_decl(&L, &P, intrinsic_name(L.id, "export"))) {
       set_err(P.err ? P.err : "abi declaration"); return 1;
     }
+  }
+  while (L.tok == T_ID && intrinsic_name(L.id, "alias")) {
+    if (!abi_alias(&L, &P)) { set_err(P.err); return 1; }
   }
 #ifdef UJS_HOST
   if (parse_net_top_is_bad(L.tok)) { g_need_gpu = 0; set_err("parse-net"); return 1; }

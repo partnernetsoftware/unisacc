@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { linkUxeModules } from "./host-abi.js";
+
+function read(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name + ".wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return new WebAssembly.Module(Uint8Array.from(request.responseText, ch => ch.charCodeAt(0) & 255));
+}
+
+function outcome(modules) {
+  try {
+    linkUxeModules(modules, {});
+    return "accepted";
+  } catch (error) {
+    if (!(error instanceof WebAssembly.LinkError)) return error.name;
+    if (error.message === "UXE ABI version") return "version";
+    if (error.message === "missing UXE dependency") return "missing";
+    if (error.message === "unsupported ABI import") return "hidden";
+    if (error.message === "UXE module namespace") return "namespace";
+    return /expected type|signature|type mismatch/i.test(error.message) ? "signature" : error.message;
+  }
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const math = ["uxe_math_v2", read("math")];
+  const render = ["uxe_render_v1", read("render")];
+  const product = ["uxe_product_v3", read("product")];
+  const wrongVersion = [math[0], read("version")];
+  const wrongSignature = [math[0], read("signature")];
+  const chosen = location.hash === "#multi-tamper" ? wrongVersion : math;
+  const linked = linkUxeModules([chosen, render, product], {});
+  const exports = WebAssembly.Module.exports(math[1]).map(entry => entry.name);
+  const output = linked.get(product[0]).uxe_product(5n);
+  result.textContent = [
+    output,
+    Number(!exports.includes("private_double")),
+    new Set([...linked.values()].map(value => value.memory)).size,
+    outcome([wrongVersion, render, product]),
+    outcome([wrongSignature, render, product]),
+    outcome([render, product]),
+    outcome([math, ["uxe_hidden_v1", read("hidden")]]),
+    outcome([math, math])
+  ].join(" ");
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>
