@@ -6,7 +6,8 @@
 import {
   BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
   CanvasTexture, CubeTexture, DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth,
-  IncrementStencilOp, KeepStencilOp, LessDepth, PointLight, Points, PointsMaterial, SphereGeometry, Vector3,
+  IncrementStencilOp, KeepStencilOp, LessDepth, Line, LineBasicMaterial, LineLoop, LineSegments,
+  PointLight, Points, PointsMaterial, SphereGeometry, Vector3,
   LinearToneMapping, ReinhardToneMapping,
   LinearFilter, LinearSRGBColorSpace, NearestFilter, NoToneMapping,
   LinearMipmapLinearFilter, MirroredRepeatWrapping, RepeatWrapping,
@@ -41,9 +42,9 @@ function context(api = "webgl") {
   if (!gl) throw new Error("WebGL unavailable");
   return { canvas, gl };
 }
-function pixels(gl) {
+function pixels(gl, points = samples) {
   const values = [];
-  for (const [x, y] of samples) {
+  for (const [x, y] of points) {
     const rgba = new Uint8Array(4);
     gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
     values.push(...rgba);
@@ -155,6 +156,9 @@ try {
   gl.compileShader = compileShader;
   const pointStatus = Number(step(location.search === "?point-mutate" ? 131n : 130n));
   const actualPoint = pixels(gl);
+  const linePoints = [[8, 8], [8, 11], [4, 10], [1, 1]];
+  const lineStart = location.search === "?line-mutate" ? 135 : 132;
+  const lineSamples = [0, 1, 2].map(i => [Number(step(BigInt(lineStart + i))), ...pixels(gl, linePoints)]);
   for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
     status.push(Number(step(mode)));
     actual.push(...pixels(gl));
@@ -418,6 +422,20 @@ try {
   const referencePoint = pixels(three.gl);
   pointGeometry.dispose();
   pointMaterial.dispose();
+  const lineResults = [LineSegments, Line, LineLoop].flatMap((Shape, i) => {
+    const xy = [-0.4375, 0.0625, 0, 0.75, 0.0625, 0, -0.4375, 0.75, 0];
+    if (i === 0) xy.push(0.75, 0.75, 0);
+    const positions = new BufferGeometry();
+    positions.setAttribute("position", new BufferAttribute(new Float32Array(xy), 3));
+    const red = new LineBasicMaterial({ color: 0xff0000 });
+    const scene = new Scene();
+    scene.add(new Shape(positions, red));
+    renderer.render(scene, camera);
+    const reference = pixels(three.gl, linePoints);
+    positions.dispose();
+    red.dispose();
+    return [...lineSamples[i], ...reference];
+  });
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
@@ -432,7 +450,7 @@ try {
     sampledMirrorStatus, ...actualSampledMirror, ...referenceSampledMirror,
     sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle,
     ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon,
-    ...litResults, pointStatus, ...actualPoint, ...referencePoint]);
+    ...litResults, pointStatus, ...actualPoint, ...referencePoint, ...lineResults]);
 } catch (error) {
   result.textContent = String(error);
 }
