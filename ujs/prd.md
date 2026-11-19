@@ -177,6 +177,8 @@ S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译�
 
 每个导出页内联 JS 与事件属性各 0 行，其他 JS 文件 0 个，共享桥的传递闭包至多 300 物理行，每行最多 120 字符。按唯一规范路径计一次，包含注释、空白和无末尾换行的末行。禁止压缩或生成形式规避检查，禁止动态代码生成、脚本注入、非静态依赖和路径逃逸。独立 `.cx` 门解析实际导出 HTML 与 JS，沿依赖核函数符号、签名、宿主调用点和行数，输出页、路径、行数与违规条款。隔离副本分别加入超预算一行、非白名单函数、内联脚本和传递依赖中的外加 JS，皆须返回非零。
 
+D1 的静态壳检查入口为 `sh ./unisacc.com ujs/tests/uxe-host-budget.cx -- <临时导出目录>/index.html`。HTML 使用受限的静态标签与属性，脚本只能向同目录的 `./host-abi.js` 发起一次模块加载。检查器独立计行宽与行数，并核对已审阅的独立宿主桥文件摘要，保证脚本闭包只有该文件。宿主桥新增能力时需核其宿主调用点并同步摘要。`--fixture` 为正例，`--over`、`--inline`、`--other`、`--handler`、`--bridge` 为反例。
+
 #### 编译器现状和前置缺口
 
 0a 新增 `./ujs/ujs2wasm.com FILE.ujs -o OUT.wasm`。薄启动脚本复用 `ujs/product/build-ape.cx` 已构建的 `ujs/ujs.com`，原样转发参数和退出码。`--run` 由 host1 迷你 VM 执行。现有生成器已通过该入口重编 D1。`ujs/product/run-host.cx` 实跑 28 例通过，`ujs/product/corpus-host.cx` 实跑 28 个正例、8 个源码拒绝例及坏 Wasm 拒绝通过。S1 全套 smoke 的日志已到 `build-ape.cx: ok`，外层 57 秒截止在末项 `check-ujs-ape.cx` 完成前触发。历史 `compile.mjs`、归档 Python 和旧语料不作为目标构建入口。
