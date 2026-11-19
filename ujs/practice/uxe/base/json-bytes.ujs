@@ -1,0 +1,124 @@
+// JSON output addresses are byte offsets in UXE memory. Writers return the
+// next address or -1 when the complete token does not fit.
+native function json_write_string(dst:i64,end:i64,src:i64,size:i64) i64 {
+  if(dst<0 || end<dst || end>6291456 || src<0 || src>6291456 ||
+     size<0 || size>6291456-src || (size>0 && dst<src+size && src<end)) { return 0-1; }
+  let needed=2;
+  let i=0;
+  while(i<size) {
+    let c=ux_u8(src+i);
+    if(c<32) { needed=needed+6; }
+    else if(c==34 || c==92) { needed=needed+2; }
+    else { needed=needed+1; }
+    i=i+1;
+  }
+  if(needed>end-dst) { return 0-1; }
+  let start=ux_u8_put(dst,34);
+  let cursor=dst+1;
+  i=0;
+  while(i<size) {
+    let c=ux_u8(src+i);
+    if(c<32) {
+      let slash=ux_u8_put(cursor,92);
+      let u=ux_u8_put(cursor+1,117);
+      let h0=ux_u8_put(cursor+2,48);
+      let h1=ux_u8_put(cursor+3,48);
+      let h2=ux_u8_put(cursor+4,48+c/16);
+      let low=c%16;
+      if(low>=10) { low=low+39; }
+      let h3=ux_u8_put(cursor+5,48+low);
+      cursor=cursor+6;
+    } else {
+      if(c==34 || c==92) {
+        let slash=ux_u8_put(cursor,92);
+        cursor=cursor+1;
+      }
+      let byte=ux_u8_put(cursor,c);
+      cursor=cursor+1;
+    }
+    i=i+1;
+  }
+  let finish=ux_u8_put(cursor,34);
+  return cursor+1;
+}
+
+// Emit an exact decimal value so the consumer can round it back to the same
+// IEEE-754 number. The caller supplies a disjoint 1104-byte scratch span.
+native function json_write_f64(dst:i64,end:i64,value:f64,scratch:i64) i64 {
+  if(dst<0 || end<dst || end>6291456 || scratch<0 || scratch>6291456-1104 ||
+     scratch%8!=0 || (dst<scratch+1104 && scratch<end)) { return 0-1; }
+  let binary=ux_f64_put(scratch,value);
+  let high=ux_u32(scratch+4);
+  let sign=high/2147483648;
+  let bits=high%2147483648;
+  let exponent=bits/1048576;
+  let mantissa=(bits%1048576)*4294967296+ux_u32(scratch);
+  if(exponent==2047) {
+    if(end-dst<4) { return 0-1; }
+    let n=ux_u8_put(dst,110);
+    let u=ux_u8_put(dst+1,117);
+    let l=ux_u8_put(dst+2,108);
+    let l2=ux_u8_put(dst+3,108);
+    return dst+4;
+  }
+  if(exponent==0 && mantissa==0) {
+    if(dst==end) { return 0-1; }
+    let zero=ux_u8_put(dst,48);
+    return dst+1;
+  }
+  if(exponent>0) { mantissa=mantissa+4503599627370496; }
+  else { exponent=1; }
+  let power=exponent-1075;
+  while(power<0 && mantissa%2==0) {
+    mantissa=mantissa/2;
+    power=power+1;
+  }
+  let digits=scratch+8;
+  let count=0;
+  while(mantissa>0) {
+    let byte=ux_u8_put(digits+count,mantissa%10);
+    count=count+1;
+    mantissa=mantissa/10;
+  }
+  let decimal=0;
+  let factor=2;
+  let times=power;
+  if(power<0) { decimal=0-power; times=decimal; factor=5; }
+  while(times>0) {
+    let carry=0;
+    let i=0;
+    while(i<count) {
+      let next=ux_u8(digits+i)*factor+carry;
+      let byte=ux_u8_put(digits+i,next%10);
+      carry=next/10;
+      i=i+1;
+    }
+    if(carry>0) {
+      let byte=ux_u8_put(digits+count,carry);
+      count=count+1;
+    }
+    times=times-1;
+  }
+  let width=count;
+  if(decimal>=width) { width=decimal+1; }
+  let length=width+sign+(decimal!=0);
+  if(length>end-dst) { return 0-1; }
+  let cursor=dst;
+  if(sign!=0) {
+    let minus=ux_u8_put(cursor,45);
+    cursor=cursor+1;
+  }
+  let remaining=width;
+  while(remaining>0) {
+    if(remaining==decimal) {
+      let point=ux_u8_put(cursor,46);
+      cursor=cursor+1;
+    }
+    let digit=0;
+    if(remaining<=count) { digit=ux_u8(digits+remaining-1); }
+    let byte=ux_u8_put(cursor,48+digit);
+    cursor=cursor+1;
+    remaining=remaining-1;
+  }
+  return cursor;
+}
