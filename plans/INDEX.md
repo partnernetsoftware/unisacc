@@ -9,7 +9,7 @@
 | 类别 | 文件 |
 | --- | --- |
 | 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、changes-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md |
-| 现行版本计划 | v0.0.82.md、v0.0.83.md、v0.0.81.md(上一版,前两版保留) |
+| 现行版本计划 | v0.0.84.md(下一版)、v0.0.83.md、v0.0.82.md、v0.0.81.md(前几版保留) |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、product-refactor-plan.md、q11-merge-rehearsal.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
 | 审阅记录 | nn-table-review-2026-11-18.md |
@@ -76,6 +76,7 @@
 | [plans/roadmap-0.0.83-0.0.99.md](roadmap-0.0.83-0.0.99.md) | 现行 | - | 0.0.83 到 0.0.99 容量模型与逐版编排,及 0.0.100 汇编级精修阶段入口准则(估计值,每 3 版重估) |
 | [plans/v0.0.82.md](v0.0.82.md) | 现行 | - | 0.0.82 详细计划(前端诊断二期、ref 判据替换、速度专项首批) |
 | [plans/v0.0.83.md](v0.0.83.md) | 现行 | - | 0.0.83 Q-P 首次尝试版计划与 CI 对账前置(2026-11-20 已公开;四道表 0/10 完成,12 项计划外,Q-P 报告未做) |
+| [plans/v0.0.84.md](v0.0.84.md) | 现行 | - | 0.0.84 冷启动第一块计划:模型装载与前端网 E3 与 E2 固定工作量削减,产物字节不变(planned=9,其中 3 项可砍;附录保留 cdx 网级推理剖面与候选项) |
 | [plans/changes-rev3.md](changes-rev3.md) | 现行 | - | 修订版 3 相对旧版的差异清单与三个最危险假设 |
 | [plans/nn-migration-rev3.md](nn-migration-rev3.md) | 现行 | - | 启动器与六片逻辑迁移 NN 的现状、分版本路线、决策门(与 slice-nn-migration.md 旧表互补) |
 | [plans/speed-first-rev4.md](speed-first-rev4.md) | 现行 | - | 速度项前置重排(四类速度 P/B/V/D、R0 到 R3、总口径为槽到公开总墙钟、吞吐度量,fable 2026-11-19)与 0.0.82 到 0.0.86 速度道逐版清单 |
