@@ -23,7 +23,7 @@ static void remove_probe(UxProbe *probe) {
 }
 
 static int ux_probe(UxProbe *probe, const char *library, const char *body, double gold, double tolerance, int trap) {
-    char source[4096], *out = 0, *end = 0;
+    char source[8192], *out = 0, *end = 0;
     char *args[] = {"./ujs/ujs2wasm.com", probe->source, "-o", probe->wasm, "--run", 0};
     const char marker[] = "\"value\":";
     const char err[] = "unreachable";
@@ -147,6 +147,49 @@ int check_ux_views(int mutate) {
     mm_free(views);
     remove_probe(&probe);
     printf("CHECK_UX_VIEWS checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
+int check_f64_math(int mutate) {
+    UxProbe probe;
+    unsigned char *library = 0;
+    int64_t size = 0;
+    if (sy_read_file("ujs/practice/uxe/base/f64-math.ujs", &library, &size, 7800)) return 1;
+    if (prepare_probe(&probe)) { mm_free(library); return 1; }
+    const struct { const char *source; double gold, tolerance; } cases[] = {
+        {"return ux_math_sin(0.7);", 0.6442176872376911, 2e-15},
+        {"return ux_math_cos(100000.0);", -0.9993608074382124, 2e-11},
+        {"return ux_math_tan(0.7);", 0.8422883804630794, 2e-15},
+        {"return ux_math_atan(1.0 / 0.0);", 1.5707963267948966, 1e-15},
+        {"return ux_math_atan2(1.0, 0.0 - 1.0);", 2.356194490192345, 1e-15},
+        {"return ux_math_asin(0.7);", 0.7753974966107531, 2e-15},
+        {"return ux_math_acos(0.7);", 0.7953988301841436, 2e-15},
+        {"return ux_math_exp(0.7);", 2.013752707470477, 3e-15},
+        {"return ux_math_log(0.7);", -0.35667494393873245, 2e-15},
+        {"return ux_math_pow(2.0, 0.5);", 1.4142135623730951, 2e-15},
+        {"return ux_math_pow(0.0 - 2.0, 3.0);", -8, 8e-15},
+        {"return ux_math_cbrt(0.0 - 2.0);", -1.2599210498948732, 2e-15},
+        {"return ux_math_hypot(3.0, 4.0);", 5, 2e-15},
+        {"let n = ux_math_asin(2.0); return n != n;", 1, 0},
+        {"let n = ux_math_log(0.0 - 1.0); return n != n;", 1, 0},
+        {"let n = ux_math_sin(1048577.0); return n != n;", 1, 0},
+        {"return ux_math_exp(710.0) == 1.0 / 0.0;", 1, 0},
+        {"return ux_math_exp(0.0 - 746.0) == 0.0;", 1, 0},
+        {"return ux_math_atan2(0.0 / (0.0 - 1.0), 0.0 - 1.0);", -3.141592653589793, 1e-15},
+        {"return ux_math_hypot(1.0 / 0.0, 0.0 / 0.0) == 1.0 / 0.0;", 1, 0},
+    };
+    const int checks = sizeof cases / sizeof cases[0];
+    int passed = 0;
+    for (int i = 0; i < checks; i++) {
+        const char *body = cases[i].source;
+        if (mutate && i == 1) body = "return ux_math_cos(100001.0);";
+        if (mutate && i == 4) body = "return ux_math_atan2(1.0, 1.0);";
+        if (mutate && i == 13) body = "let n = ux_math_asin(0.2); return n != n;";
+        passed += ux_probe(&probe, (char *)library, body, cases[i].gold, cases[i].tolerance, 0);
+    }
+    mm_free(library);
+    remove_probe(&probe);
+    printf("CHECK_F64_MATH checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
     return passed != checks;
 }
 

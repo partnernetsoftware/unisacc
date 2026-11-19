@@ -127,6 +127,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): C1 的 `.ujs` 接口采用显式缓冲视图。对 Float32Array、Uint16Array、Uint32Array、Int32Array、Float64Array，先用 `ux_typed_index(base, count, index, width)` 得到字节偏移，再用 `ux_f32`、`ux_u16`、`ux_u32`、`ux_i32`、`ux_f64` 及其 `_put` 写入。DataView 切片通过 `ux_data_offset(base, bytes, offset, width)` 支持非对齐访问，目前接口使用小端字节序。负返回值为 `UX_VIEW_BOUNDS=-1` 或 `UX_VIEW_ALIGNMENT=-2`，调用者须先检查再读写。整数写入截为目标位宽，f32 写入舍入到单精度。入口仍由 `ujs2wasm.com` 编译，现有 u8、f32 与 span 指令序列保留。验收运行 `sh ./unisacc.com ujs/product/cli-host.cx -- --ux-views` 及 `--mutate-ux-views`。
 
+修订(cdx2): C2 的 `f64-math.ujs` 由编译器随消费者一起编成 Wasm。三角函数的角度按弧度计，`sin/cos/tan` 对绝对值大于 1048576 的输入返回 NaN。正切在极点附近的误差受余弦分母影响。`hypot` 接收两个坐标。域外反三角函数、非正对数、指数上下溢和带符号零分别按独立金值检查。测试覆盖已列采样点，超大角度约简、全域正确舍入和可变参数 `hypot` 仍待补齐。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
