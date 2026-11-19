@@ -2,8 +2,8 @@
  *   sh ./unisacc.com tools/check-speed-ledger.cx
  * Builds tools/speed-ledger.cx once (-o, into a private temp dir under $TMPDIR), constructs a small
  * git repo with pinned commit timestamps, synthetic chain-run.tsv / bg.log dirs, and strict evidence TSVs,
- * and verifies 8 contracts:
- *   1. full-row-exact                 computed row matches hand-derived literal values byte-for-byte
+ * and verifies 12 contracts:
+ *   1. full-row-exact                 computed 18-col row matches hand-derived literal values byte-for-byte
  *   2. missing-data-unmeasured        version without chain/prerun/public reports UNMEASURED (never guesses)
  *   3. check-pass                     --check against matching ledger -> rc 0 status=OK
  *   4. check-drift-one-digit          1-digit mutation in ledger (2.50 -> 2.51) -> rc 1 DIFF status=DRIFT
@@ -11,6 +11,10 @@
  *   6. usage-missing-version          missing --version -> rc 2
  *   7. multi-chain-base-eff           --chain-base scans all variant dirs + bg.log BLOCKER/SUPERVISE (1/3, 43.1%)
  *   8. selected-dedup-raw-and-unknown deduplicates repeated RAW BATCH_RUN ids + non-RAW UNKNOWN rows (3/4, 75.0%)
+ *   9. units-and-throughput           plans/vVER.md planned/done/unplanned + throughput + post_chain_to_public_min
+ *  10. post-chain-commits-window      counts only product/tools commits strictly between chain_start and freeze tag
+ *  11. roadmap-fallback-and-units-file roadmap D-table planned_units fallback + --units-file override
+ *  12. header-18-cols                 --header prints exact 18-column TSV header
  * Last line: CHECK_SPEED_LEDGER<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -50,8 +54,8 @@ int main(void) {
     char work[CSL_PW], bin[CSL_PW], repo[CSL_PW], chdir_p[CSL_PW], led_ok[CSL_PW], led_bad[CSL_PW], tmp[CSL_PW];
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
-    const char *want_full = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.50\t2.50\t2/4\t50.0%";
-    const char *want_part = "9.9.8\t0.0\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED";
+    const char *want_full = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.50\t2.50\t2/4\t50.0%\tUNMEASURED\tUNMEASURED\tUNMEASURED\t0\tUNMEASURED\t20.0";
+    const char *want_part = "9.9.8\t0.0\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED";
 
     if (cx_fmt(work, sizeof work, "%s/check-speed-ledger-%d", base_td, (int)getpid())) csl_abort("work-path");
     csl_mk(work);
@@ -136,7 +140,7 @@ int main(void) {
 
     /* 4. --check drift on 1-digit mutation (2.50 -> 2.51) */
     {
-        const char *bad_row = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.51\t2.50\t2/4\t50.0%\n";
+        const char *bad_row = "9.9.9\t0.0\t10.0\t20.0\t30.0\t40.0\t1/1\t100.0%\t2.51\t2.50\t2/4\t50.0%\tUNMEASURED\tUNMEASURED\tUNMEASURED\t0\tUNMEASURED\t20.0\n";
         if (cx_write(led_bad, bad_row, strlen(bad_row))) csl_abort("write-led-bad");
         char *av[] = {bin, "--check", led_bad, "--version", "9.9.9", "--repo", repo, "--chain-dir", chdir_p, 0};
         int rc = ck_run(av, out, sizeof out);
@@ -213,6 +217,79 @@ int main(void) {
         int rc = ck_run(av, out, sizeof out);
         ck(rc == 0 && ckk_has(out, CSL_OUT, "\t3/4\t75.0%"),
             "selected-dedup-raw-and-unknown: 2 unique RAW + 1 unique non-RAW UNKNOWN -> 3/4 75.0%");
+    }
+
+    /* 9 & 10. Units + throughput + post_chain_to_public_min + post_chain_commits window */
+    {
+        char ch97[CSL_PW], tagcmd[8192];
+        if (cx_fmt(ch97, sizeof ch97, "%s/chain-997", work)) csl_abort("ch97");
+        csl_mk(ch97);
+        if (cx_fmt(tmp, sizeof tmp, "%s/tools", repo)) csl_abort("tdir"); csl_mk(tmp);
+        if (cx_fmt(tmp, sizeof tmp, "%s/src", repo)) csl_abort("sdir"); csl_mk(tmp);
+        if (cx_fmt(tmp, sizeof tmp, "%s/release/evidence/9.9.7", repo)) csl_abort("e997"); csl_mk(tmp);
+
+        csl_commit(repo, "plans/v9.9.7.md",
+            "# v9.9.7\nplanned_units=10\ndone_units=8\nunplanned_units=1.5\n", "1700010000");
+        csl_commit(repo, "tools/pre.cx", "/* pre-chain */\n", "1700011000");
+        csl_commit(repo, "tools/mid.cx", "/* post-chain 1 */\n", "1700012000");
+        csl_commit(repo, "src/mid.c", "/* post-chain 2 */\n", "1700013000");
+        csl_commit(repo, "plans/doc.md", "# doc only, not counted\n", "1700013500");
+        csl_commit(repo, "release/freeze-997.txt", "FREEZE\n", "1700015000");
+        if (cx_fmt(tagcmd, sizeof tagcmd, "git -C '%s' tag v9.9.7", repo)) csl_abort("tagcmd");
+        if (ckk_sh("check-speed-ledger", tagcmd, out, sizeof out) != 0) csl_abort("git-tag");
+        csl_commit(repo, "tools/post.cx", "/* after freeze, not counted */\n", "1700016000");
+        csl_commit(repo, "release/evidence/9.9.7/public-readback.txt", "PUBLIC\n", "1700017200");
+
+        if (cx_fmt(tmp, sizeof tmp, "%s/chain-run.tsv", ch97)) csl_abort("cr97");
+        {
+            const char *cr97 =
+                "LIMITS\t1700011800\tn=1\n"
+                "ATTEMPT_TIME\tphase=p1\twall_ms=1800000\n"
+                "SUPERVISE\t1700013600\titeration=1\trc=0\tresidue=0\n";
+            if (cx_write(tmp, cr97, strlen(cr97))) csl_abort("wcr97");
+        }
+
+        char *av[] = {bin, "--version", "9.9.7", "--repo", repo, "--chain-dir", ch97, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CSL_OUT, "\t10\t8\t1.5\t") && ckk_has(out, CSL_OUT, "\t4.00\t60.0"),
+            "units-and-throughput: planned=10 done=8 unplanned=1.5 throughput=4.00 post_chain_to_public=60.0");
+        ck(rc == 0 && ckk_has(out, CSL_OUT, "\t10\t8\t1.5\t2\t4.00\t60.0"),
+            "post-chain-commits-window: counts only 2 product/tools commits between chain_start and freeze tag");
+    }
+
+    /* 11. Roadmap D-table planned_units fallback + --units-file override */
+    {
+        char ufile[CSL_PW];
+        if (cx_fmt(tmp, sizeof tmp, "%s/release/evidence/9.9.6", repo)) csl_abort("e996"); csl_mk(tmp);
+        csl_commit(repo, "plans/roadmap-0.0.83-0.0.99.md",
+            "| 9.9.6 | theme | f | s | q | u | 9.5/12 | 79% |\n", "1700020000");
+        csl_commit(repo, "plans/v9.9.6.md", "# v9.9.6 without explicit units\n", "1700020000");
+        csl_commit(repo, "release/evidence/9.9.6/public-readback.txt", "PUBLIC\n", "1700027200");
+
+        {
+            char *av[] = {bin, "--version", "9.9.6", "--repo", repo, 0};
+            int rc = ck_run(av, out, sizeof out);
+            int ok_rm = (rc == 0 && ckk_has(out, CSL_OUT, "\t9.5\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED"));
+            if (cx_fmt(ufile, sizeof ufile, "%s/units.tsv", work)) csl_abort("uf");
+            {
+                const char *ubody = "version\tplanned_units\tdone_units\tunplanned_units\n9.9.6\t10\t9\t0.5\n";
+                if (cx_write(ufile, ubody, strlen(ubody))) csl_abort("wuf");
+            }
+            char *av2[] = {bin, "--version", "9.9.6", "--repo", repo, "--units-file", ufile, 0};
+            int rc2 = ck_run(av2, out, sizeof out);
+            int ok_uf = (rc2 == 0 && ckk_has(out, CSL_OUT, "\t10\t9\t0.5\tUNMEASURED\t4.50\tUNMEASURED"));
+            ck(ok_rm && ok_uf,
+                "roadmap-fallback-and-units-file: roadmap gives planned=9.5, --units-file overrides to 10/9/0.5 tput=4.50");
+        }
+    }
+
+    /* 12. --header prints exact 18-column header */
+    {
+        const char *want_hdr = "version\tslot_min\tchain_start_min\tchain_exit_min\tprerun_done_min\tpublic_min\tchains\tchain_eff\tchain_par\tprerun_par\tselected_batches\tdomain_ratio\tplanned_units\tdone_units\tunplanned_units\tpost_chain_commits\tthroughput\tpost_chain_to_public_min\n";
+        char *av[] = {bin, "--header", "--version", "9.9.8", "--repo", repo, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CSL_OUT, want_hdr),
+            "header-18-cols: --header outputs exact 18-column TSV header");
     }
 
     {
