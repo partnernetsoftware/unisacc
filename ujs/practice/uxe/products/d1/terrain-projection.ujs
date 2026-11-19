@@ -1,0 +1,100 @@
+// Product memory: height field at 4096, per-column first uncovered row at 512.
+persist let fieldReady = 0;
+persist let viewBank = 0.0;
+if (fieldReady == 0) {
+  let prepared = uxe_dispatch(1, 426, 240);
+  let mapCell = 0;
+  while (mapCell < 65536) {
+    let heightValue = d1_elevation(458752 + mapCell);
+    let written = ux_f32_put(4096 + 4 * mapCell, heightValue * 1.0);
+    mapCell = mapCell + 1;
+  }
+  fieldReady = 1;
+}
+
+viewBank = (3.0 * viewBank + bank) / 4.0;
+let viewMagnitude = viewBank;
+if (viewMagnitude < 0.0) { viewMagnitude = 0.0 - viewMagnitude; }
+let viewRadians = heading * 0.017453292519943296;
+let viewSin = ux_sin(viewRadians);
+let viewCos = ux_sin(viewRadians + 1.5707963267948966);
+let viewTilt = 0.0 - viewBank * 0.29;
+let viewSide = 0.0 - viewBank * 0.43;
+let viewCam = altitude + 20.0 + viewMagnitude * 0.34;
+let viewX = (x - 2048) / 8.0 + viewCos * viewSide;
+let viewZ = (z - 2048) / 8.0 + viewSin * viewSide;
+let viewHorizon = 100 + f64_floor_i64(pitch * 0.5 + 0.5);
+
+let skyRow = 0;
+while (skyRow < 240) {
+  let skyTone = skyRow / (viewHorizon * 1.0);
+  if (skyTone > 1.0) { skyTone = 1.0; }
+  let skyRed = f64_floor_i64(42.5 + 147.0 * skyTone);
+  let skyGreen = f64_floor_i64(126.5 + 103.0 * skyTone);
+  let skyBlue = f64_floor_i64(185.5 + 54.0 * skyTone);
+  let paintedSky = uxe_dispatch(11, 4096 * skyRow + 16777216 * 425,
+    4278190080 + skyRed + 256 * skyGreen + 65536 * skyBlue);
+  skyRow = skyRow + 1;
+}
+
+let viewCol = 0;
+while (viewCol < 426) {
+  let initializedColumn = ux_u8_put(512 + viewCol, 240);
+  viewCol = viewCol + 1;
+}
+let viewDepth = 4.0;
+while (viewDepth <= 400.0) {
+  let viewFade = f64_floor_i64((viewDepth - 52.0) / 13.0);
+  if (viewFade < 0) { viewFade = 0; }
+  if (viewFade > 16) { viewFade = 16; }
+  let viewFog = viewFade * 0.05375;
+  let viewRayX = viewX + viewDepth * viewSin + 256.0;
+  let viewRayZ = viewZ - viewDepth * viewCos + 256.0;
+  viewCol = 0;
+  while (viewCol < 426) {
+    let viewLimit = ux_u8(512 + viewCol);
+    let viewLateral = (viewCol - 212.5) * viewDepth / 151.0;
+    let fineX = u32_and(f64_floor_i64((viewRayX + viewLateral * viewCos) * 2.0), 1023);
+    let fineY = u32_and(f64_floor_i64((viewRayZ + viewLateral * viewSin) * 2.0), 1023);
+    let fieldX = fineX / 4;
+    let fieldY = fineY / 4;
+    let fieldNextX = (fieldX + 1) % 256;
+    let fieldNextY = (fieldY + 1) % 256;
+    let fieldMixX = (fineX % 4) / 4.0;
+    let fieldMixY = (fineY % 4) / 4.0;
+    let fieldFront = ux_f32(4096 + 4 * (fieldY * 256 + fieldX)) * (1.0 - fieldMixX)
+      + ux_f32(4096 + 4 * (fieldY * 256 + fieldNextX)) * fieldMixX;
+    let fieldBack = ux_f32(4096 + 4 * (fieldNextY * 256 + fieldX)) * (1.0 - fieldMixX)
+      + ux_f32(4096 + 4 * (fieldNextY * 256 + fieldNextX)) * fieldMixX;
+    let ground = f64_floor_i64(fieldFront * (1.0 - fieldMixY) + fieldBack * fieldMixY);
+    let rise = ground;
+    if (rise < 0) { rise = 0; }
+    let viewTop = f64_floor_i64(viewHorizon + viewTilt * (viewCol - 213) / 213.0
+      + (viewCam - rise * 0.22) * 151.0 / viewDepth);
+    if (viewTop < 0) { viewTop = 0; }
+    if (viewTop < viewLimit) {
+      let soil = 19 + 67 * 256 + 128 * 65536;
+      if (ground >= -25) { soil = 30 + 111 * 256 + 165 * 65536; }
+      if (ground >= -8) { soil = 45 + 158 * 256 + 190 * 65536; }
+      if (ground >= 0) { soil = 231 + 204 * 256 + 134 * 65536; }
+      if (ground >= 8) { soil = 133 + 183 * 256 + 71 * 65536; }
+      if (ground >= 28) { soil = 89 + 153 * 256 + 59 * 65536; }
+      if (ground >= 55) { soil = 60 + 115 * 256 + 61 * 65536; }
+      if (ground >= 101) { soil = 119 + 111 * 256 + 121 * 65536; }
+      let soilR = soil % 256;
+      let soilG = (soil / 256) % 256;
+      let soilB = soil / 65536;
+      let fogRed = f64_floor_i64(soilR + 0.5 + (173 - soilR) * viewFog);
+      let fogGreen = f64_floor_i64(soilG + 0.5 + (214 - soilG) * viewFog);
+      let fogBlue = f64_floor_i64(soilB + 0.5 + (234 - soilB) * viewFog);
+      let drew = uxe_dispatch(10, viewCol + 4096 * viewTop + 16777216 * (viewLimit - 1),
+        4278190080 + fogRed + 256 * fogGreen + 65536 * fogBlue);
+      let occluded = ux_u8_put(512 + viewCol, viewTop);
+    }
+    viewCol = viewCol + 1;
+  }
+  let nextDepth = viewDepth * 0.022;
+  if (nextDepth < 0.60) { nextDepth = 0.60; }
+  viewDepth = viewDepth + nextDepth;
+}
+let presented = uxe_dispatch(3, 0, 0);

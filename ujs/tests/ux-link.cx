@@ -1,6 +1,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use sys.fs
 #pragma unisa use text.fmt
+#pragma unisa use text.num
 #pragma unisa use text.text
 
 static const char base_source[] = "ujs/practice/uxe/test/ux-link-base.ujs";
@@ -49,6 +50,60 @@ static int copy_fixture(const char *dir, const char *leaf, const char *source) {
     return rc != 0;
 }
 
+static int projection_product(const char *dir, int mutate) {
+    const char *sources[] = {"ujs/practice/uxe/products/d1/main.ujs", "ujs/practice/uxe/base/math.ujs",
+        "ujs/practice/uxe/products/d1/terrain.ujs", "ujs/practice/uxe/products/d1/terrain-projection.ujs"};
+    unsigned char *bytes[4] = {0};
+    int64_t sizes[4] = {0};
+    char path[320];
+    char *program = (char *)mm_alloc(65536);
+    int rc = 1;
+    if (!program) return 1;
+    for (int i = 0; i < 4; i++) if (sy_read_file(sources[i], &bytes[i], &sizes[i], 16384)) goto done;
+    if (mutate) {
+        const char ray[] = "viewDepth <= 400.0";
+        long pos = tx_find((char *)bytes[3], sizes[3], ray, sizeof ray - 1);
+        if (pos < 0) goto done;
+        bytes[3][pos + 13] = '0';
+        bytes[3][pos + 15] = '4';
+    }
+    long preamble = tx_find((char *)bytes[0], sizes[0], "\n\n", 2);
+    const char tail[] = "\nreturn heading;";
+    long body_end = tx_find((char *)bytes[0], sizes[0], tail, sizeof tail - 1);
+    if (preamble < 0 || body_end <= preamble) goto done;
+    int n = tx_snprintf(program, 65536, "%.*s\n%s\n%s\n%.*s\n%s\nreturn heading;\n",
+        (int)preamble, bytes[0], bytes[1], bytes[2],
+        (int)(body_end - preamble), bytes[0] + preamble, bytes[3]);
+    if (n < 0 || n >= 65536) goto done;
+    tx_snprintf(path, sizeof path, "%s/projection.ujs", dir);
+    if (sy_write_file(path, program, n, 0600)) goto done;
+    rc = generated(dir, "product", path, 0, 0);
+    sy_unlink(path);
+done:
+    for (int i = 0; i < 4; i++) mm_free(bytes[i]);
+    mm_free(program);
+    return rc;
+}
+
+static int export_projection(const char *dir) {
+    if (tx_len(dir, 250) <= 0 || sy_mkdir(dir, 0700)) return 2;
+    int rc = generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
+        projection_product(dir, 0) ||
+        copy_fixture(dir, "index.html", "ujs/practice/uxe/products/d1/projection-preview.html") ||
+        copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
+    if (rc) {
+        const char *leaves[] = {"base.wasm","product.wasm","index.html","host-abi.js"};
+        char path[4096];
+        for (int i = 0; i < 4; i++) {
+            tx_snprintf(path, sizeof path, "%s/%s", dir, leaves[i]);
+            sy_unlink(path);
+        }
+        sy_rmdir(dir);
+    }
+    printf("D1_PROJECTION_EXPORT dir=%s failed=%d\n", dir, rc);
+    return rc;
+}
+
 typedef struct { int heading, bank, x, z, altitude, speed, pitch; } Flight;
 
 static int approach(int value, int target, int increment) {
@@ -89,7 +144,36 @@ static int flight_gold(char *gold, int cap) {
     return n;
 }
 
-static int browser(const char *dir, const char *mode, int base_check, int flight_check) {
+static int projected_pixels(const char *text, long length) {
+    const char *at = text;
+    const long header[] = {426,240,0,3};
+    long first[80];
+    int sky = 0, ocean = 0, land = 0, changed = 0;
+    for (int i = 0; i < 164; i++) {
+        char *end = 0;
+        long value = tx_strtol(at, &end, 10);
+        if (end == at || end > text + length) return 1;
+        at = end;
+        if (i < 4) {
+            if (value != header[i]) return 1;
+            continue;
+        }
+        int j = i - 4, r = value & 255, g = (value >> 8) & 255, b = (value >> 16) & 255;
+        if ((value >> 24) != 255) return 1;
+        if (j < 80) {
+            first[j] = value;
+            if (j < 10 && r == 42 && g == 126 && b == 185) sky++;
+            if (j >= 20 && b >= r + 32 && b >= g + 12 && r <= 160) ocean++;
+            if (j >= 20 && g >= b + 12 && r >= 50) land++;
+        } else if (first[j - 80] != value) changed++;
+    }
+    int failed = sky != 10 || ocean < 8 || land < 2 || changed < 6 || at != text + length;
+    printf("D1_PROJECTION_PIXELS sky=%d ocean=%d land=%d view_change=%d failed=%d\n",
+        sky, ocean, land, changed, failed);
+    return failed;
+}
+
+static int browser(const char *dir, const char *mode, int base_check, int flight_check, int projection_check) {
     char profile[350], url[380], gold[240], *out = 0;
     const char start[] = "<pre id=\"ux-link-result\">";
     const char end[] = "</pre>";
@@ -117,8 +201,10 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
         from += sizeof start - 1;
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
-            pass = !rc && tx_same(out + from, to, gold, gold_n);
+            pass = !rc && (projection_check ? !projected_pixels(out + from, to) : tx_same(out + from, to, gold, gold_n));
+            if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
+                projection_check ? "CHECK_UXE_D1_PROJECTION" :
                 flight_check ? "CHECK_UXE_D1_FLIGHT_WASM" : base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
                 mode, (int)to, out + from, !pass);
         }
@@ -132,14 +218,21 @@ int main(int argc, char **argv) {
     char dir[256], *removed = 0;
     char *clean[] = {"rm", "-rf", "--", dir, 0};
     size_t removed_n = 0;
+    if (argc == 3 && tx_eq(argv[1], "--export-projection", sizeof "--export-projection"))
+        return export_projection(argv[2]);
     const char *mode = argc == 2 ? argv[1] : "";
     int base_check = tx_eq(mode, "base", 5) || tx_eq(mode, "base-color", 11);
     int flight_check = tx_eq(mode, "flight", 7) || tx_eq(mode, "flight-heading", 15);
+    int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
-        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check)) return 2;
+        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check && !projection_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
     int rc = copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
-    if (flight_check) {
+    if (projection_check) {
+        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-projection-probe.html") ||
+            generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
+            projection_product(dir, tx_eq(mode, "projection-short", 17));
+    } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
             generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
@@ -162,7 +255,7 @@ int main(int argc, char **argv) {
             generated(dir, "version", base_source, "version 1;", "version 2;") ||
             generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)");
     }
-    rc = rc || browser(dir, mode, base_check, flight_check);
+    rc = rc || browser(dir, mode, base_check, flight_check, projection_check);
     if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
     mm_free(removed);
     return rc;
