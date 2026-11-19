@@ -10,6 +10,10 @@ persist let height = 0;
 persist let assetReadBytes = 0;
 persist let sceneFocal = 0;
 persist let sceneNear = 0;
+persist let sceneLight = 255;
+persist let sceneFogStart = 0;
+persist let sceneFogEnd = 0;
+persist let sceneFogColor = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -327,15 +331,52 @@ if (op == 20) {
         if (triangleInvZ > ux_f32(triangleDepthAt)) {
           let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
           triangleIndex = triangleIndex * 4;
-          triangleInk = ux_u8_put(triangleIndex, b % 256);
-          triangleInk = ux_u8_put(triangleIndex + 1, b / 256 % 256);
-          triangleInk = ux_u8_put(triangleIndex + 2, b / 65536);
+          let triangleFog = 0.0;
+          if (sceneFogEnd > sceneFogStart) {
+            triangleFog = (1.0 / triangleInvZ - sceneFogStart) / (sceneFogEnd - sceneFogStart);
+            if (triangleFog < 0.0) { triangleFog = 0.0; }
+            if (triangleFog > 1.0) { triangleFog = 1.0; }
+          }
+          let materialColor = b;
+          let hazeColor = sceneFogColor;
+          let triangleChannel = 0;
+          while (triangleChannel < 3) {
+            let lit = (materialColor % 256 * sceneLight + 127) / 255;
+            let haze = hazeColor % 256;
+            triangleInk = ux_u8_put(triangleIndex + triangleChannel,
+              f64_floor_i64(lit + 0.5 + (haze - lit) * triangleFog));
+            materialColor = materialColor / 256;
+            hazeColor = hazeColor / 256;
+            triangleChannel = triangleChannel + 1;
+          }
           triangleInk = ux_u8_put(triangleIndex + 3, 255);
         }
       }
       triangleX = triangleX + 1;
     }
     triangleY = triangleY + 1;
+  }
+  return 0;
+}
+// Fog range is packed as two unsigned 16-bit depths; zero disables fog.
+if (op == 21) {
+  if (a < 0 || a > 4294967295 || b < 0 || b > 16777215) { return 0 - 1; }
+  let fogStart = a % 65536;
+  let fogEnd = a / 65536;
+  if (a != 0 && fogEnd <= fogStart) { return 0 - 1; }
+  sceneFogStart = fogStart;
+  sceneFogEnd = fogEnd;
+  sceneFogColor = b;
+  return 0;
+}
+// Preserve explicit unshaded material support; toon materials use three bands.
+if (op == 22) {
+  if (a < 0 || a > 255 || b < 0 || b > 1) { return 0 - 1; }
+  sceneLight = a;
+  if (b == 1) {
+    sceneLight = 112;
+    if (a >= 80) { sceneLight = 192; }
+    if (a >= 176) { sceneLight = 255; }
   }
   return 0;
 }
