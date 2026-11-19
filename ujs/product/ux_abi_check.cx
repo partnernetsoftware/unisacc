@@ -9,6 +9,19 @@ typedef struct {
     char dir[256], source[280], wasm[280];
 } UxProbe;
 
+static int prepare_probe(UxProbe *probe) {
+    if (sy_mkdtemp("/tmp", "ujs-ux-abi-", probe->dir, sizeof probe->dir)) return 1;
+    tx_snprintf(probe->source, sizeof probe->source, "%s/test.ujs", probe->dir);
+    tx_snprintf(probe->wasm, sizeof probe->wasm, "%s/test.wasm", probe->dir);
+    return 0;
+}
+
+static void remove_probe(UxProbe *probe) {
+    sy_unlink(probe->source);
+    sy_unlink(probe->wasm);
+    sy_rmdir(probe->dir);
+}
+
 static int ux_probe(UxProbe *probe, const char *library, const char *body, double gold, double tolerance, int trap) {
     char source[4096], *out = 0, *end = 0;
     char *args[] = {"./ujs/ujs2wasm.com", probe->source, "-o", probe->wasm, "--run", 0};
@@ -39,13 +52,11 @@ int check_ux_abi(int mutate) {
     int checks = 0, passed = 0;
     if (sy_read_file("ujs/practice/uxe/base/math.ujs", &math, &math_n, 2048) ||
         sy_read_file("ujs/practice/uxe/base/text.ujs", &text, &text_n, 2048) ||
-        sy_mkdtemp("/tmp", "ujs-ux-abi-", probe.dir, sizeof probe.dir)) {
+        prepare_probe(&probe)) {
         mm_free(math);
         mm_free(text);
         return 1;
     }
-    tx_snprintf(probe.source, sizeof probe.source, "%s/test.ujs", probe.dir);
-    tx_snprintf(probe.wasm, sizeof probe.wasm, "%s/test.wasm", probe.dir);
     const char *angles[] = {"return ux_sin(0.5235987755982988);",
         "return ux_sin(0.0 - 1.5707963267948966);",
         "return ux_sin(1000.0);", "return ux_sin(1.0471975511965976 + 1.5707963267948966);"};
@@ -94,9 +105,40 @@ int check_ux_abi(int mutate) {
     }
     mm_free(math);
     mm_free(text);
-    sy_unlink(probe.source);
-    sy_unlink(probe.wasm);
-    sy_rmdir(probe.dir);
+    remove_probe(&probe);
     printf("CHECK_UX_ABI checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
+static unsigned noise_hash(int x, int y, int seed) {
+    uint32_t n = (((uint32_t)x + 17u) * 374761393u) ^
+        (((uint32_t)y + 29u) * 668265263u) ^ ((uint32_t)seed * 1442695041u);
+    n = (n ^ (n >> 13)) * 1274126177u;
+    return (n ^ (n >> 16)) & 255u;
+}
+
+int check_u32(int mutate) {
+    const int points[][3] = {
+        {0,0,7}, {63,127,7}, {127,63,10}, {255,255,12}, {0,0,31}, {1,0,12},
+        {0,1,31}, {426,239,86}, {1023,1023,7}, {1023,0,86}, {-17,-29,7}, {-23,81,91}
+    };
+    UxProbe probe;
+    int checks = 0, passed = 0;
+    if (prepare_probe(&probe)) return 1;
+    for (int i = 0; i < (int)(sizeof points / sizeof points[0]); i++) {
+        char body[512];
+        int x = points[i][0], y = points[i][1], seed = points[i][2];
+        int n = tx_snprintf(body, sizeof body,
+            "let n = u32_xor(u32_xor(u32_mul(%d + 17, 374761393), u32_mul(%d + 29, 668265263)), u32_mul(%d, 1442695041));"
+            "n = u32_mul(u32_xor(n, u32_shr(n, %d)), 1274126177);"
+            "return u32_and(u32_xor(n, u32_shr(n, 16)), 255);", x, y, seed, mutate && !i ? 12 : 13);
+        if (n > 0 && n < (int)sizeof body) passed += ux_probe(&probe, "", body, noise_hash(x, y, seed), 0, 0);
+        checks++;
+    }
+    passed += ux_probe(&probe, "", "return u32_shr(0 - 1, 45);", 524287, 0, 0);
+    passed += ux_probe(&probe, "", "return u32_mul(4294967295, 4294967295);", 1, 0, 0);
+    checks += 2;
+    remove_probe(&probe);
+    printf("CHECK_UJS_U32 checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
     return passed != checks;
 }
