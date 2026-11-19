@@ -7,6 +7,7 @@ export uxe_dispatch(op:i64, a:i64, b:i64) i64 version 1;
 
 persist let width = 0;
 persist let height = 0;
+persist let assetReadBytes = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -65,7 +66,8 @@ if (op == 3) {
 }
 if (op == 4) {
   if (a < 0 || b < 0 || b > 1048576) { return 0 - 1; }
-  return host_asset_read(a, ux_span(4194304, b), b);
+  assetReadBytes = host_asset_read(a, ux_span(4194304, b), b);
+  return assetReadBytes;
 }
 if (op == 5) {
   if (a < 0 || a >= 48000 || b < 0 - 32768 || b > 32767) { return 0 - 1; }
@@ -84,5 +86,41 @@ if (op == 7) {
 if (op == 8) {
   if (a < 0 || a >= 1048576) { return 0 - 1; }
   return ux_u8(4194304 + a);
+}
+// Draw an RGBA asset from the resource buffer, rotated about its center.
+if (op == 12) {
+  if (a < 0 || a >= 281474976710656 || b < 0 - 1570 || b > 1570 || pixels == 0) { return 0 - 1; }
+  let centerX = a % 4096;
+  let centerY = (a / 4096) % 4096;
+  let assetWidth = (a / 16777216) % 4096;
+  let assetHeight = a / 68719476736;
+  if (assetWidth < 1 || assetHeight < 1 || assetWidth * assetHeight * 4 > assetReadBytes) { return 0 - 1; }
+  let rot = b / 1000.0;
+  let rot2 = rot * rot;
+  let sine = rot * (1.0 - rot2 / 6.0 + rot2 * rot2 / 120.0 - rot2 * rot2 * rot2 / 5040.0);
+  let cosine = 1.0 - rot2 / 2.0 + rot2 * rot2 / 24.0 - rot2 * rot2 * rot2 / 720.0;
+  let assetY = 0;
+  while (assetY < assetHeight) {
+    let assetX = 0;
+    while (assetX < assetWidth) {
+      let sourcePixel = 4194304 + 4 * (assetY * assetWidth + assetX);
+      if (ux_u8(sourcePixel + 3) == 255) {
+        let localX = assetX - assetWidth / 2;
+        let localY = assetY - assetHeight / 2;
+        let drawX = f64_floor_i64(centerX + 0.5 + localX * cosine - localY * sine);
+        let drawY = f64_floor_i64(centerY + 0.5 + localX * sine + localY * cosine);
+        if (drawX >= 0 && drawX < width && drawY >= 0 && drawY < height) {
+          let targetPixel = (drawY * width + drawX) * 4;
+          let wroteR = ux_u8_put(targetPixel, ux_u8(sourcePixel));
+          let wroteG = ux_u8_put(targetPixel + 1, ux_u8(sourcePixel + 1));
+          let wroteB = ux_u8_put(targetPixel + 2, ux_u8(sourcePixel + 2));
+          let wroteA = ux_u8_put(targetPixel + 3, 255);
+        }
+      }
+      assetX = assetX + 1;
+    }
+    assetY = assetY + 1;
+  }
+  return 0;
 }
 return 0 - 1;

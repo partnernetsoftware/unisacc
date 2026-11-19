@@ -80,6 +80,62 @@ static int audio_rows(char *out, int cap) {
     return ok ? used : -1;
 }
 
+static int airframe_asset(const char *dir) {
+    const char *names[] = {"wing", "fin", "root", "body", "keel", "plate", "jet"};
+    const int heights[] = {10, 10, 7, 17, 11, 4, 8};
+    const int stamps[][4] = {{0,8,21,1},{0,87,21,-1},{0,8,18,1},{0,87,18,-1},
+        {2,28,18,1},{2,67,18,-1},{1,26,9,1},{1,69,9,-1},
+        {4,36,25,1},{3,37,10,1},{5,43,25,1},{6,39,28,1},{6,50,28,1}};
+    const char glyphs[] = "KDMLHGCBAOYSTUFRJW";
+    const unsigned colors[] = {0x141a24,0x252e3c,0x3e4a56,0x64707a,0x8e9796,
+        0x295c66,0x429ba4,0x8ad5cb,0x943c2a,0xd36132,0xed9448,
+        0x556575,0xa8b3b5,0x263344,0xa74433,0xf15b31,0xffad4a,0xffe598};
+    const char *rows[7][17];
+    int lengths[7][17];
+    unsigned char plate[96 * 50 * 4] = {0}, *source = 0;
+    int64_t size = 0;
+    int rc = 1;
+    if (sy_read_file("ujs/practice/uxe/products/d1/airframe-art.tsv", &source, &size, 4096)) return 1;
+    const char *at = (char *)source, *end = at + size;
+    for (int part = 0; part < 7; part++) {
+        long prefix = tx_len(names[part], 8);
+        for (int row = 0; row < heights[part]; row++) {
+            if (end - at <= prefix || !tx_same(at, prefix, names[part], prefix) || at[prefix] != '\t') goto done;
+            at += prefix + 1;
+            long len = tx_find(at, end - at, "\n", 1);
+            if (len <= 0 || len > 40) goto done;
+            rows[part][row] = at;
+            lengths[part][row] = (int)len;
+            at += len + 1;
+        }
+    }
+    if (at != end) goto done;
+    for (int i = 0; i < (int)(sizeof stamps / sizeof stamps[0]); i++) {
+        int part = stamps[i][0];
+        for (int y = 0; y < heights[part]; y++) {
+            for (int x = 0; x < lengths[part][y]; x++) {
+                char mark = rows[part][y][x];
+                if (mark == '.') continue;
+                long ink = tx_find(glyphs, sizeof glyphs - 1, &mark, 1);
+                int px = stamps[i][1] + x * stamps[i][3], py = stamps[i][2] + y;
+                if (ink < 0 || px < 0 || px >= 96 || py < 0 || py >= 50) goto done;
+                unsigned rgb = colors[ink];
+                int off = (py * 96 + px) * 4;
+                plate[off] = rgb >> 16;
+                plate[off + 1] = rgb >> 8;
+                plate[off + 2] = rgb;
+                plate[off + 3] = 255;
+            }
+        }
+    }
+    char path[320];
+    tx_snprintf(path, sizeof path, "%s/airframe.rgba", dir);
+    rc = sy_write_file(path, plate, sizeof plate, 0600) != 0;
+done:
+    mm_free(source);
+    return rc;
+}
+
 static int projection_product(const char *dir, int mutate) {
     const char *sources[] = {"ujs/practice/uxe/products/d1/main.ujs", "ujs/practice/uxe/base/math.ujs",
         "ujs/practice/uxe/products/d1/terrain.ujs", "ujs/practice/uxe/products/d1/terrain-projection.ujs",
@@ -91,7 +147,7 @@ static int projection_product(const char *dir, int mutate) {
     int rc = 1;
     if (!program) return 1;
     for (int i = 0; i < 6; i++) if (sy_read_file(sources[i], &bytes[i], &sizes[i], 16384)) goto done;
-    if (audio_rows(audio, sizeof audio) < 0) goto done;
+    if (audio_rows(audio, sizeof audio) < 0 || airframe_asset(dir)) goto done;
     if (mutate == 1) {
         const char ray[] = "viewDepth <= 400.0";
         long pos = tx_find((char *)bytes[3], sizes[3], ray, sizeof ray - 1);
@@ -116,10 +172,14 @@ static int projection_product(const char *dir, int mutate) {
     int n = tx_snprintf(program, 65536,
         "%.*s\n%s\n%s\n%s\n%.*s\npersist let audioTableReady = 0;\n"
         "if (audioTableReady == 0) { let audioTableWrite = 0;\n%s audioTableReady = 1; }\n"
-        "%.*s\n%s\n%.*s\n%s\nreturn heading;\n",
+        "%.*s\n%s\n%.*s\n%s\n%s\nlet presented = uxe_dispatch(3, 0, 0);\nreturn heading;\n",
         (int)preamble, bytes[0], bytes[1], bytes[2], bytes[4], (int)voices, bytes[5], audio,
         (int)(tick - preamble), bytes[0] + preamble, bytes[5] + voices,
-        (int)(body_end - tick), bytes[0] + tick, bytes[3]);
+        (int)(body_end - tick), bytes[0] + tick, bytes[3], mutate == 3 ? "" :
+        "let aircraftAsset = uxe_dispatch(4, 0, 19200);\n"
+        "let aircraftPose = 213 + 4096 * (158 - f64_floor_i64(pitch * 0.55 + 0.5))"
+        " + 16777216 * 96 + 68719476736 * 50;\n"
+        "let aircraftDrawn = uxe_dispatch(12, aircraftPose, f64_floor_i64(bank * 37.81546712654381 + 0.5));\n");
     if (n < 0 || n >= 65536) goto done;
     tx_snprintf(path, sizeof path, "%s/projection.ujs", dir);
     if (sy_write_file(path, program, n, 0600)) goto done;
@@ -138,9 +198,9 @@ static int export_projection(const char *dir) {
         copy_fixture(dir, "index.html", "ujs/practice/uxe/products/d1/projection-preview.html") ||
         copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
     if (rc) {
-        const char *leaves[] = {"base.wasm","product.wasm","index.html","host-abi.js"};
+        const char *leaves[] = {"base.wasm","product.wasm","index.html","host-abi.js","airframe.rgba"};
         char path[4096];
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             tx_snprintf(path, sizeof path, "%s/%s", dir, leaves[i]);
             sy_unlink(path);
         }
@@ -267,6 +327,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
     }
     if (flight_check) gold_n = flight_gold(gold, sizeof gold);
     if (projection_check == 2) gold_n = audio_gold(gold, sizeof gold);
+    if (projection_check == 3) gold_n = tx_snprintf(gold, sizeof gold, "20,26,36,255 138,213,203,255 241,91,49,255");
     if (gold_n < 0) return 1;
     rc = cx_runv_timeout(cmd, 15, &out, &n);
     from = out ? tx_find(out, n, start, sizeof start - 1) : -1;
@@ -305,6 +366,8 @@ int main(int argc, char **argv) {
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
+    int art_mutate = tx_eq(mode, "projection-art-missing", sizeof "projection-art-missing");
+    if (tx_eq(mode, "projection-art", sizeof "projection-art") || art_mutate) projection_check = 3;
     if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
         !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check && !projection_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
@@ -312,7 +375,7 @@ int main(int argc, char **argv) {
     if (projection_check) {
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-projection-probe.html") ||
             generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
-            projection_product(dir, audio_mutate ? 2 : tx_eq(mode, "projection-short", 17));
+            projection_product(dir, art_mutate ? 3 : audio_mutate ? 2 : tx_eq(mode, "projection-short", 17));
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
