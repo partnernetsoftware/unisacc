@@ -274,6 +274,11 @@ static void rollback(void) {
 }
 
 /* ---- G1: strict evidence --------------------------------------------------------- */
+typedef struct {
+    char rc[16], cand[72], marker[64], trans[16];
+    int has_fp, bad_fp, has_raw, seg;
+} rx_frec;
+
 static int rx_hex64(const char *s) {
     if (!s) return 0;
     for (int i = 0; i < 64; i++) {
@@ -675,36 +680,82 @@ static void gate_strict(void) {
                             cx_fmt(d, sizeof d, "batch %s image= expected-fail expired (%s > %s)", id, cand.version, expv); free(t); refuse("EXPECTED_FAIL", d);
                         }
                     }
-                    /* Every FAIL row of this batch must carry the fingerprint: its note (column 9) starts with
-                       image=OLD->NEW, or the line right after it is a NETREGEN_DIFF bound to the same case and target. */
-                    char rk[160], f2[32], im[192], dold[72], dnew[72], dcase[48], dtgt[48], did[160]; long a2 = 0, l2; const char *s2;
-                    int pending = 0, fails = 0, bad = 0;
+                    /* Every FAIL row of this batch must carry the exact fingerprint, except an earlier
+                       note='-' row whose failure signature (status=FAIL, rc, marker, transport=0, candidate)
+                       matches a later fingerprinted FAIL row with no PASS row of this batch in between.
+                       The final FAIL row must carry the fingerprint. */
+                    char rk[160], f2[32], im[192], dold[72], dnew[72], dcase[48], dtgt[48], did[160];
+                    char rid[128], rst[32], rrc[16], rcand[72], rtr[16], rmk[64];
+                    rx_frec frec[64]; long a2 = 0, l2; const char *s2;
+                    int nf = 0, cur = -1, bad = 0, seg = 0;
                     cx_fmt(rk, sizeof rk, "%s\t", id);
                     while (line_next(t, n, &a2, &s2, &l2)) {
-                        int is_fail = l2 > tlen(rk) && !memcmp(s2, rk, (size_t)tlen(rk)) && tab_field(s2, l2, 2, f2, sizeof f2) && tx_eqz(f2, "FAIL");
+                        int is_row = l2 > tlen(rk) && !memcmp(s2, rk, (size_t)tlen(rk)) && tab_field(s2, l2, 2, f2, sizeof f2);
+                        int is_fail = is_row && tx_eqz(f2, "FAIL");
+                        if (is_row && tx_eqz(f2, "PASS")) seg++;
                         int is_diff = l2 > 14 && !memcmp(s2, "NETREGEN_DIFF\t", 14);
-                        if (pending && is_diff) {
+                        int is_raw = l2 > 14 && !memcmp(s2, "RAW\tBATCH_RUN\t", 14);
+                        if (is_fail) {
+                            if (nf >= 64) { bad++; break; }
+                            rx_frec *fr = &frec[nf];
+                            fr->rc[0] = fr->cand[0] = fr->marker[0] = fr->trans[0] = 0;
+                            fr->has_fp = fr->bad_fp = fr->has_raw = 0; fr->seg = seg;
+                            tab_field(s2, l2, 3, fr->rc, sizeof fr->rc);
+                            tab_field(s2, l2, 4, fr->cand, sizeof fr->cand);
+                            im[0] = 0;
+                            tab_field(s2, l2, 8, im, sizeof im);
+                            if (!strncmp(im, "image=", 6)) {
+                                long q = 0; while (im[q] && im[q] != ';') q++;
+                                im[q] = 0; cx_fmt(got, sizeof got, "%s", im);
+                                if (tx_eqz(got, want)) fr->has_fp = 1; else fr->bad_fp = 1;
+                            } else if (!tx_eqz(im, "-")) {
+                                fr->bad_fp = 1;
+                            }
+                            cur = nf++;
+                        } else if (is_diff && cur >= 0 && !frec[cur].has_fp && !frec[cur].bad_fp) {
                             dold[0] = dnew[0] = dcase[0] = dtgt[0] = 0;
                             kv(s2, l2, "\told=", dold, sizeof dold); kv(s2, l2, "\tnew=", dnew, sizeof dnew);
                             kv(s2, l2, "\tcase=", dcase, sizeof dcase); kv(s2, l2, "\ttarget=", dtgt, sizeof dtgt);
                             for (long q = 0; dtgt[q]; q++) if (dtgt[q] == '/') dtgt[q] = '-';
                             if (!cx_fmt(did, sizeof did, "netregen-%s-%s", dcase, dtgt) && tx_eqz(did, id) && tlen(dold) == 64 && tlen(dnew) == 64) {
-                                cx_fmt(got, sizeof got, "image=%s->%s", dold, dnew); if (tx_eqz(got, want)) pending = 0;
+                                cx_fmt(got, sizeof got, "image=%s->%s", dold, dnew); if (tx_eqz(got, want)) frec[cur].has_fp = 1;
                             }
-                        }
-                        if (pending) bad++;
-                        pending = 0;
-                        if (is_fail) {
-                            fails++;
-                            if (tab_field(s2, l2, 8, im, sizeof im) && !strncmp(im, "image=", 6)) {
-                                long q = 0; while (im[q] && im[q] != ';') q++;
-                                im[q] = 0; cx_fmt(got, sizeof got, "%s", im);
-                                if (!tx_eqz(got, want)) pending = 1;
-                            } else pending = 1;
+                        } else if (is_raw) {
+                            if (cur >= 0) {
+                                rid[0] = rst[0] = rrc[0] = rcand[0] = rtr[0] = rmk[0] = 0;
+                                kv(s2, l2, "id=", rid, sizeof rid); kv(s2, l2, "status=", rst, sizeof rst);
+                                kv(s2, l2, "rc=", rrc, sizeof rrc); kv(s2, l2, "candidate=", rcand, sizeof rcand);
+                                kv(s2, l2, "transport=", rtr, sizeof rtr); kv(s2, l2, "marker=", rmk, sizeof rmk);
+                                if (tx_eqz(rid, id) && tx_eqz(rst, "FAIL")) {
+                                    rx_frec *fr = &frec[cur];
+                                    fr->has_raw = 1;
+                                    cx_fmt(fr->trans, sizeof fr->trans, "%s", rtr);
+                                    cx_fmt(fr->marker, sizeof fr->marker, "%s", rmk);
+                                    if (!tx_eqz(rrc, fr->rc) || !tx_eqz(rcand, fr->cand)) fr->bad_fp = 1;
+                                    if (rtr[0] && !tx_eqz(rtr, "0")) fr->bad_fp = 1;
+                                }
+                            }
+                            cur = -1;
+                        } else cur = -1;
+                    }
+                    if (nf == 0 || !frec[nf - 1].has_fp) bad++;
+                    for (int k = 0; k < nf && !bad; k++) {
+                        if (frec[k].bad_fp) { bad++; break; }
+                        if (!frec[k].has_fp) {
+                            int inherited = 0;
+                            if (frec[k].has_raw && (!frec[k].trans[0] || tx_eqz(frec[k].trans, "0"))) {
+                                for (int j = k + 1; j < nf; j++) {
+                                    if (frec[j].has_fp && frec[j].has_raw && frec[j].seg == frec[k].seg &&
+                                        tx_eqz(frec[k].rc, frec[j].rc) && tx_eqz(frec[k].cand, frec[j].cand) &&
+                                        tx_eqz(frec[k].marker, frec[j].marker) && tx_eqz(frec[k].trans, frec[j].trans)) {
+                                        inherited = 1; break;
+                                    }
+                                }
+                            }
+                            if (!inherited) bad++;
                         }
                     }
-                    if (pending) bad++;
-                    match = fails > 0 && bad == 0;
+                    match = nf > 0 && bad == 0;
                     if (!match) { cx_fmt(d, sizeof d, "batch %s FAIL image %s != expected %s", id, got[0] ? got : "none", want); free(t); refuse("EXPECTED_FAIL", d); }
                     if(!replacement){xf++;continue;}
                 } else {
