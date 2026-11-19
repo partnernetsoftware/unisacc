@@ -1,0 +1,68 @@
+function Camera_blocksOverlap(cam_a,...cam_range) {
+  return cam_a<cam_range[1]+cam_range[2] && cam_range[1]<cam_a+cam_range[0];
+}
+
+// The caller owns the camera record and three contiguous f64 matrices.
+native function Camera_init(cam:i64,matrices:i64) i64 {
+  if(cam<0 || cam>6291456-Camera.size || cam%4!=0 ||
+     matrices<0 || matrices>6291456-384 || matrices%8!=0 ||
+     Camera_blocksOverlap(cam,Camera.size,matrices,384)) { return 0-1; }
+  let view_slot=ux_u32_put(cam+Camera.matrixWorldInverse,matrices);
+  let projection_slot=ux_u32_put(cam+Camera.projectionMatrix,matrices+128);
+  let inverse_slot=ux_u32_put(cam+Camera.projectionMatrixInverse,matrices+256);
+  let coords=ux_u32_put(cam+Camera.coordinateSystem,2000);
+  let view=Matrix4_identity(matrices);
+  let projection=Matrix4_identity(matrices+128);
+  let inverse=Matrix4_identity(matrices+256);
+  return cam;
+}
+
+function Camera_updateMatrixWorld(cam_view,...cam_view_args) {
+  let destination=ux_u32(cam_view+Camera.matrixWorldInverse);
+  let copy=Matrix4_copy(destination,cam_view_args[0]);
+  return Matrix4_invert(copy);
+}
+
+function Camera_updateWorldMatrix(cam_update,...cam_update_args) {
+  return Camera_updateMatrixWorld(cam_update,cam_update_args[0]);
+}
+
+function Camera_updateProjectionInverse(cam_projection) {
+  let source=ux_u32(cam_projection+Camera.projectionMatrix);
+  let destination=ux_u32(cam_projection+Camera.projectionMatrixInverse);
+  let copy=Matrix4_copy(destination,source);
+  return Matrix4_invert(copy);
+}
+
+function Camera_getWorldDirection(cam_direction,...cam_direction_args) {
+  let world=cam_direction_args[0];
+  let x=ux_f64(world+64);
+  let y=ux_f64(world+72);
+  let z=ux_f64(world+80);
+  let length=f64_sqrt(x*x+y*y+z*z);
+  if(length==0.0) { length=1.0; }
+  let dx=ux_f64_put(cam_direction,0.0-x/length);
+  let dy=ux_f64_put(cam_direction+8,0.0-y/length);
+  let dz=ux_f64_put(cam_direction+16,0.0-z/length);
+  return cam_direction;
+}
+
+native function Camera_copy(cam_copy:i64,source:i64) i64 {
+  let view=Matrix4_copy(ux_u32(cam_copy+Camera.matrixWorldInverse),ux_u32(source+Camera.matrixWorldInverse));
+  let projection=Matrix4_copy(ux_u32(cam_copy+Camera.projectionMatrix),ux_u32(source+Camera.projectionMatrix));
+  let inverse=Matrix4_copy(ux_u32(cam_copy+Camera.projectionMatrixInverse),ux_u32(source+Camera.projectionMatrixInverse));
+  let coords=ux_u32_put(cam_copy+Camera.coordinateSystem,ux_u32(source+Camera.coordinateSystem));
+  return cam_copy;
+}
+
+native function Camera_clone(cam_clone:i64,clone_source:i64,clone_matrices:i64) i64 {
+  if(clone_source<0 || clone_source>6291456-Camera.size || clone_source%4!=0) { return 0-1; }
+  let clone_source_matrices=ux_u32(clone_source+Camera.matrixWorldInverse);
+  if(Camera_blocksOverlap(cam_clone,Camera.size,clone_source,Camera.size) ||
+     Camera_blocksOverlap(cam_clone,Camera.size,clone_source_matrices,384) ||
+     Camera_blocksOverlap(clone_matrices,384,clone_source,Camera.size) ||
+     Camera_blocksOverlap(clone_matrices,384,clone_source_matrices,384)) { return 0-1; }
+  let camera=Camera_init(cam_clone,clone_matrices);
+  if(camera<0) { return camera; }
+  return Camera_copy(camera,clone_source);
+}
