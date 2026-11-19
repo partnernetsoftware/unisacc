@@ -64,7 +64,7 @@ static int gpu_check(char *start) {
     const double state[]={1,516,0,1,32778,32779,770,771,1,771,1,514,
         3,240,15,7680,7681,7682,1029,2304,1.5,-2,0,0,0,0,0};
     const double clip[]={1,4,4,8,8,0.5,3,255,0,0,255,0,0,0,255,255,0,0,255,255,0,0,255,255,0,0,255};
-    int failed=0,total=396;
+    int failed=0,total=437;
     for(int i=0;i<total;i++) {
         char *next=0;
         double value=tx_strtod(start,&next);
@@ -75,14 +75,16 @@ static int gpu_check(char *start) {
         double expected=0,tolerance=0;
         if(i<(int)(sizeof status/sizeof status[0])) expected=status[i];
         else if(i>=198 && i<204) expected=stateStatus[i-198];
-        else if(i>=315 && i!=355) {
-            const int basic[]={128,64,8,255}, lambert[]={92,44,4,255}, inside[]={1,0,1,0,0};
-            const int *color=i<355?basic:lambert;
-            int cell=(i-(i<355?315:356))%20;
-            expected=cell%4==3?255:inside[cell/4]*color[cell%4];
-            tolerance=1;
+        else if(i>=314) {
+            const int colors[][4]={{128,64,8,255},{92,44,4,255},{148,101,81,255}};
+            const int inside[]={1,0,1,0,0};
+            int offset=i-314, sample=offset%41;
+            if(sample) {
+                int cell=(sample-1)%20;
+                expected=cell%4==3?255:inside[cell/4]*colors[offset/41][cell%4];
+                tolerance=1;
+            }
         }
-        else if(i==314 || i==355) expected=0;
         else if(i>=260) expected=clip[(i-260)%27];
         else if(i>=258) expected=i==258?0:-4;
         else if(i>=204) expected=state[(i-204)%27];
@@ -133,11 +135,13 @@ int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     int basic_mutate=argc==2 && tx_eqz(argv[1],"--basic-mutate");
     int lambert_mutate=argc==2 && tx_eqz(argv[1],"--lambert-mutate");
+    int phong_mutate=argc==2 && tx_eqz(argv[1],"--phong-mutate");
     int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
     int clip_mutate=argc==2 && tx_eqz(argv[1],"--clip-mutate");
     int target_mutate=argc==2 && tx_eqz(argv[1],"--target-mutate");
     int targets=target_mutate || (argc==2 && tx_eqz(argv[1],"--targets"));
-    if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !state_mutate && !clip_mutate && !targets) return 2;
+    if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate &&
+       !state_mutate && !clip_mutate && !targets) return 2;
     char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
     if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
@@ -145,11 +149,12 @@ int main(int argc,char **argv) {
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
     tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,
         mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":
-        target_mutate?"?target-mutate":basic_mutate?"?basic-mutate":lambert_mutate?"?lambert-mutate":"");
+        target_mutate?"?target-mutate":basic_mutate?"?basic-mutate":lambert_mutate?"?lambert-mutate":
+        phong_mutate?"?phong-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
-    char *compile[15]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+    char *compile[16]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
         "ujs/practice/uxe/base/gpu-packet.ujs"};
     int args=4;
     if(targets) compile[args++]="ujs/practice/uxe/base/gpu-target.ujs";
@@ -160,6 +165,7 @@ int main(int argc,char **argv) {
         compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-material-basic.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-material-lambert.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-phong.ujs";
     }
     compile[args++]=shaders;
     compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
@@ -210,6 +216,6 @@ int main(int argc,char **argv) {
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
     printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
-        targets?"GPU_TARGET":"GPU_PACKET",targets?5:6,targets?93:396,compiled.size,lines+target_lines,failed);
+        targets?"GPU_TARGET":"GPU_PACKET",targets?5:7,targets?93:437,compiled.size,lines+target_lines,failed);
     return failed!=0;
 }
