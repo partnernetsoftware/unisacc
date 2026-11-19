@@ -313,11 +313,15 @@ static void random_program(unsigned seed, char *src, size_t cap, char *want, siz
     APPN(src, cap, " printf(\"%%llu %%llu %%llu %%llu\\n\",v0,v1,v2,v3);\n return (int)(v0%%7ULL);\n}\n");
     snprintf(want, wcap, "%llu %llu %llu %llu\n", v[0], v[1], v[2], v[3]);
 }
-static void group_random(void) {
+static void group_random(int first,int end) {
     enum { NP = 16 }; char cat[8192] = ""; int distinct = 1;
     for (int p = 0; p < NP; p++) { static char src[8192], want[256]; unsigned seed = 20261028u + 7919u * (unsigned)p; random_program(seed, src, sizeof src, want, sizeof want);
-        char cp[4400], img[4400], lab[160]; { if (cx_fmt(cp, sizeof cp, "%s/r%02d.c", work, p)) { fprintf(stderr, "properties-cases-gen: text too long for cp\n"); exit(2); } } { if (cx_fmt(img, sizeof img, "%s/r%02d.img", work, p)) { fprintf(stderr, "properties-cases-gen: text too long for img\n"); exit(2); } } saved(cp, src, strlen(src));
+        char cp[4400], img[4400], lab[160]; { if (cx_fmt(cp, sizeof cp, "%s/r%02d.c", work, p)) { fprintf(stderr, "properties-cases-gen: text too long for cp\n"); exit(2); } } { if (cx_fmt(img, sizeof img, "%s/r%02d.img", work, p)) { fprintf(stderr, "properties-cases-gen: text too long for img\n"); exit(2); } }
         { char line[300]; { if (cx_fmt(line, sizeof line, "|%s", want)) { fprintf(stderr, "properties-cases-gen: text too long for line\n"); exit(2); } } if (strstr(cat, line)) distinct = 0; { size_t cl = strlen(cat); if (cx_fmt(cat + cl, sizeof cat - cl, "%s", "|")) { fprintf(stderr, "properties-cases-gen: text too long for cat\n"); exit(2); } } } if (strlen(cat) + strlen(want) + 1 < sizeof cat) { size_t cl = strlen(cat); if (cx_fmt(cat + cl, sizeof cat - cl, "%s", want)) { fprintf(stderr, "properties-cases-gen: text too long for cat\n"); exit(2); } }
+        /* Every shard checks all 16 simulator outputs for distinctness. Only
+         * the selected programs are built and executed in this window. */
+        if(p<first||p>=end)continue;
+        saved(cp,src,strlen(src));
         np_result r; { if (cx_fmt(lab, sizeof lab, "seed-%u.executes", seed)) { fprintf(stderr, "properties-cases-gen: text too long for lab\n"); exit(2); } }
         if (compile(cp, "-O2", targets[0], img, noenv, &r) || r.rc) { row("NOT_RUN", "prop.meta.random-programs", lab, "compile failed"); np_free(&r); continue; } np_free(&r);
         char *v[] = { img, 0 }; if (run(v, noenv, 3, &r)) { row("NOT_RUN", "prop.meta.random-programs", lab, "image did not run"); continue; }
@@ -376,11 +380,11 @@ static void group_bound(void) {
 int main(int argc, char **argv) {
     if ((argc != 6 && argc != 7) || !realpath(argv[1], root) || !realpath(argv[2], stream4) || !realpath(argv[3], stream5) || argv[4][0] != '/' || (argc == 7 && !realpath(argv[6], ref))) { fputs("usage: ROOT STREAM4_COM STREAM5_COM ABS_OUT det|meta|bound|tu|lower|random [REF]\n", stderr); return 2; }
     if (ref[0] && rw_open(root,ref,reference_dir,sizeof reference_dir)) return 2;
-    const char *group = argv[5]; if (!tx_eqz(group, "det") && !tx_eqz(group, "meta") && !tx_eqz(group, "bound") && !tx_eqz(group, "tu") && !tx_eqz(group, "lower") && !tx_eqz(group, "random")) die("group");
+    const char *group = argv[5];int random=tx_eqz(group,"random")||tx_eqz(group,"random-0-7")||tx_eqz(group,"random-8-15"); if (!tx_eqz(group, "det") && !tx_eqz(group, "meta") && !tx_eqz(group, "bound") && !tx_eqz(group, "tu") && !tx_eqz(group, "lower") && !random) die("group");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[4])) { fprintf(stderr, "properties-cases-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
     path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
-    if(tx_eqz(group,"lower")||tx_eqz(group,"random")){
+    if(tx_eqz(group,"lower")||random){
         np_result h={0};char why[256],*hv[]={bound,"--helper",0};
         if(np_run(hv,root,0,10,&h,why,sizeof why)||h.rc||h.outn<2||h.out[0]!='/'||
            h.out[h.outn-1]!='\n'||tx_copy(bound,sizeof bound,h.out,h.outn-1))die("bound helper");
@@ -388,7 +392,7 @@ int main(int argc, char **argv) {
     }
     char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, group)) { fprintf(stderr, "properties-cases-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], h4[65], h5[65]; if (!shafile(product, hp) || !shafile(stream4, h4) || !shafile(stream5, h5)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream4=%s\tstream5=%s\n", hp, h4, h5); }
-    if (tx_eqz(group, "det")) group_det(); else if (tx_eqz(group, "meta")) group_meta(); else if (tx_eqz(group, "tu")) group_tu(); else if (tx_eqz(group, "lower")) group_lower(); else if (tx_eqz(group, "random")) group_random(); else group_bound();
+    if (tx_eqz(group, "det")) group_det(); else if (tx_eqz(group, "meta")) group_meta(); else if (tx_eqz(group, "tu")) group_tu(); else if (tx_eqz(group, "lower")) group_lower(); else if (random) group_random(tx_eqz(group,"random-8-15")?8:0,tx_eqz(group,"random-0-7")?8:16); else group_bound();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("PROPERTY_CASES\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;
