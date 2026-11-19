@@ -1,4 +1,5 @@
 #pragma unisa use text.utf8
+#pragma unisa use mem.heap
 /* stage0 host unit: UJS-1_ship → \0asm. Product path only (.cx + prelude).
  * Build: ./unisacc.com -run ujs/product/build.cx  (-DUJS_HOST)
  * No #include. No freestanding libc stubs (would clash with cx.h).
@@ -27,12 +28,29 @@ enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PE
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 enum { TY_CLOSURE_BASE = 16 };
 
-static uint8_t  g_heap[256 * 1024];
+enum { EMIT_INITIAL = 256 * 1024, EMIT_LIMIT = 8 * 1024 * 1024 };
+#ifdef UJS_HOST
+static uint8_t g_heap_initial[EMIT_INITIAL];
+static uint8_t *g_heap = g_heap_initial;
+#else
+// The freestanding compiler uses stable exported linear-memory addresses.
+static uint8_t g_heap[EMIT_LIMIT];
+#endif
+static uint32_t g_heap_size = EMIT_INITIAL;
 static uint32_t g_bump;
 static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_len;
 static int g_need_gpu;
 static int g_need_ux;
 static int g_abi_imports;
+static const char *g_capacity;
+static uint32_t g_used, g_request, g_limit;
+
+static void capacity_error(const char *name, uint32_t used, uint32_t request, uint32_t limit) {
+  g_capacity = name;
+  g_used = used;
+  g_request = request;
+  g_limit = limit;
+}
 #ifdef UJS_HOST
 static int g_legacy_inline;
 
@@ -41,8 +59,26 @@ void ujs_host_legacy_inline(int enabled) { g_legacy_inline = enabled != 0; }
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
+  if (n > EMIT_LIMIT - g_bump) {
+    capacity_error("emit buffer", g_bump, n, EMIT_LIMIT);
+    return 0;
+  }
   uint32_t nx = (g_bump + n + 7u) & ~7u;
-  if (nx > sizeof(g_heap)) return 0;
+  if (nx > g_heap_size) {
+    uint32_t size = g_heap_size;
+    while (size < nx) size *= 2;
+#ifdef UJS_HOST
+    uint8_t *grown = mm_alloc(size);
+    if (!grown) {
+      capacity_error("emit allocation", g_bump, n, EMIT_LIMIT);
+      return 0;
+    }
+    memcpy(grown, g_heap, g_bump);
+    if (g_heap != g_heap_initial) mm_free(g_heap);
+    g_heap = grown;
+#endif
+    g_heap_size = size;
+  }
   g_bump = nx;
   return p;
 }
@@ -53,10 +89,17 @@ static uint32_t poff(uint32_t o) { return o; }
 static uint32_t poff(uint32_t o) { return (uint32_t)(uintptr_t)(g_heap + o); }
 #endif
 
+static void set_err(const char *m);
 #ifndef UJS_HOST
 __attribute__((export_name("alloc")))
 #endif
-uint32_t alloc(uint32_t n) { uint32_t o = hall(n); return o ? poff(o) : 0; }
+uint32_t alloc(uint32_t n) {
+  g_capacity = 0;
+  g_err_ptr = g_err_len = 0;
+  uint32_t o = hall(n);
+  if (!o) set_err("allocation failed");
+  return o ? poff(o) : 0;
+}
 #ifndef UJS_HOST
 __attribute__((export_name("out_ptr")))
 #endif
@@ -84,19 +127,39 @@ uint32_t err_len(void)  { return g_err_len; }
 
 #ifdef UJS_HOST
 void ujs_host_write(uint32_t off, const void *p, uint32_t n) {
-  if (off + n > sizeof(g_heap)) return;
+  if (off > g_heap_size || n > g_heap_size - off) return;
   memcpy(g_heap + off, p, n);
 }
 const uint8_t *ujs_host_mem(void) { return g_heap; }
-uint32_t ujs_host_mem_size(void) { return (uint32_t)sizeof(g_heap); }
+uint32_t ujs_host_mem_size(void) { return g_heap_size; }
 #endif
 
+static void diagnostic_text(uint32_t *at, const char *s) {
+  while (*s && *at < 63) g_heap[(*at)++] = (uint8_t)*s++;
+}
+
+static void diagnostic_number(uint32_t *at, uint32_t n) {
+  char digits[11];
+  uint32_t count = 0;
+  do { digits[count++] = (char)('0' + n % 10); n /= 10; } while (n);
+  while (count && *at < 63) g_heap[(*at)++] = (uint8_t)digits[--count];
+}
+
 static void set_err(const char *m) {
-  uint32_t n = (uint32_t)strlen(m);
-  uint32_t o = hall(n + 1);
-  if (!o) { g_err_ptr = g_err_len = 0; return; }
-  memcpy(g_heap + o, m, n + 1);
-  g_err_ptr = poff(o); g_err_len = n;
+  // The allocator starts at byte 64. Errors remain readable even at capacity.
+  uint32_t at = 1;
+  diagnostic_text(&at, g_capacity ? g_capacity : m);
+  if (g_capacity) {
+    diagnostic_text(&at, " used=");
+    diagnostic_number(&at, g_used);
+    diagnostic_text(&at, " need=");
+    diagnostic_number(&at, g_request);
+    diagnostic_text(&at, " limit=");
+    diagnostic_number(&at, g_limit);
+  }
+  g_heap[at] = 0;
+  g_err_ptr = poff(1);
+  g_err_len = at - 1;
 }
 
 /* ---- buf ---- */
@@ -148,6 +211,12 @@ static int bi32(Buf *b, int32_t v) {
 static int braw(Buf *b, const uint8_t *s, uint32_t n) {
   if (!bres(b, n)) return 0; memcpy(bd(b) + b->n, s, n); b->n += n; return 1;
 }
+static int braw_heap(Buf *b, uint32_t source, uint32_t n) {
+  if (!bres(b, n)) return 0;
+  memcpy(bd(b) + b->n, g_heap + source, n);
+  b->n += n;
+  return 1;
+}
 static int bstr(Buf *b, const char *s) {
   uint32_t n = (uint32_t)strlen(s); if (!bleu(b, n)) return 0; return braw(b, (const uint8_t *)s, n);
 }
@@ -159,7 +228,7 @@ static int bf64(Buf *b, int64_t bits) {
 }
 static int sect(Buf *m, uint8_t id, Buf *body) {
   if (!bu8(m, id) || !bleu(m, body->n)) return 0;
-  return braw(m, bd(body), body->n);
+  return braw_heap(m, body->off, body->n);
 }
 static int wcall(Buf *c, uint32_t n) {
   return bu8(c, 0x10) && bleu(c, n + (uint32_t)(g_need_gpu + g_abi_imports));
@@ -505,7 +574,7 @@ enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 
 enum { MAX_CALL_ARGS = 32 };
 enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_MAX_ALIASES = 8, ABI_TYPE_BASE = 14 };
 enum { MAX_LAYOUTS = 24, MAX_LAYOUT_FIELDS = 24 };
-enum { MAX_NATIVE = 16, MAX_NATIVE_DEPTH = 8 };
+enum { MAX_NATIVE = 128, MAX_NATIVE_DEPTH = 8 };
 typedef struct {
   char name[MAXN];
   int offset, nested;
@@ -564,18 +633,22 @@ typedef struct {
   AbiAlias aliases[ABI_MAX_ALIASES];
   int import_count, alias_count, abi_version;
   NativeFn natives[MAX_NATIVE];
+  int native_index[MAX_NATIVE];
   int native_count, native_visible, native_result, native_params, native_base, native_depth, native_return;
   const char *err;
 } Prog;
 
 static int emit(Prog *P, uint8_t op, int64_t a) {
-  if (P->nc >= MAXC) { P->err = "code overflow"; return 0; }
+  if (P->nc >= MAXC) { capacity_error("instruction buffer", P->nc, 1, MAXC); return 0; }
   P->code[P->nc].op = op; P->code[P->nc].a = a; P->nc++; return 1;
 }
 /* OP_SCONST a = (pool_off << 16) | len; bytes at P->sdata[off..]. */
 static int emit_sconst_bytes(Prog *P, const char *s, uint32_t n) {
   if (n > MAXSTRLIT) { P->err = "string too long"; return 0; }
-  if (P->sn + n > MAXSDATA) { P->err = "string pool overflow"; return 0; }
+  if (P->sn + n > MAXSDATA) {
+    capacity_error("string pool overflow", P->sn, n, MAXSDATA);
+    return 0;
+  }
   uint32_t off = P->sn;
   for (uint32_t i = 0; i < n; i++) P->sdata[P->sn++] = (uint8_t)s[i];
   return emit(P, OP_SCONST, ((int64_t)off << 16) | (int64_t)n);
@@ -589,7 +662,7 @@ enum { LOCAL_RESERVED = 65535 };
 static int intrinsic_name(const char *actual, const char *expected);
 
 static int fresh_local(Prog *P, const char *name) {
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   strncpy(P->names[P->nl], name, MAXN - 1);
   P->names[P->nl][MAXN - 1] = 0;
   P->lty[P->nl] = TY_I64;
@@ -660,7 +733,7 @@ static int glob(Prog *P, const char *name, int create) {
 }
 static int ensure_scratch(Prog *P) {
   if (P->scratch >= 0) return P->scratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_LIST;
   P->lety[P->nl] = TY_I64;
@@ -669,7 +742,7 @@ static int ensure_scratch(Prog *P) {
 }
 static int ensure_fscratch(Prog *P) {
   if (P->fscratch >= 0) return P->fscratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_F64;
   P->lety[P->nl] = TY_F64;
@@ -678,7 +751,7 @@ static int ensure_fscratch(Prog *P) {
 }
 static int ensure_lscratch(Prog *P) {
   if (P->lscratch >= 0) return P->lscratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_I64;
   P->lety[P->nl] = TY_I64;
@@ -688,7 +761,7 @@ static int ensure_lscratch(Prog *P) {
 
 static int ensure_uxaddr(Prog *P) {
   if (P->uxaddr >= 0) return P->uxaddr;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_LIST;
   P->uxaddr = P->nl;
@@ -759,14 +832,14 @@ static int capture_block_body(Lex *L, Prog *P, FnDef *F) {
 }
 
 static int register_fn(Prog *P, FnDef *tmp) {
-  if (P->nfn >= MAXFN) { P->err = "too many fns"; return -1; }
+  if (P->nfn >= MAXFN) { capacity_error("too many fns", P->nfn, 1, MAXFN); return -1; }
   if (find_fn(P, tmp->name) >= 0 || find_native(P, tmp->name) >= 0) { P->err = "dup fn"; return -1; }
   P->fns[P->nfn] = *tmp;
   return P->nfn++;
 }
 
 static int invocation_slot(Prog *P, int type) {
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = (uint8_t)type;
   P->lety[P->nl] = TY_I64;
@@ -1061,7 +1134,10 @@ static int find_native(Prog *P, const char *name) {
 }
 
 static int native_decl(Lex *L, Prog *P) {
-  if (P->native_count == MAX_NATIVE) { P->err = "native function limit"; return 0; }
+  if (P->native_count == MAX_NATIVE) {
+    capacity_error("native function limit", P->native_count, 1, MAX_NATIVE);
+    return 0;
+  }
   NativeFn *fn = &P->natives[P->native_count];
   next(L);
   if (!expect(L, T_FUNCTION, P, "native function keyword")) return 0;
@@ -2222,7 +2298,8 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x10) || !bleu(c, (uint32_t)(g_need_gpu + ins->a))) return 0;
       break;
     case OP_NATIVE_CALL:
-      if (!wcall(c, (uint32_t)(P->native_base + ins->a))) return 0;
+      if (P->native_index[ins->a] < 0) { P->err = "native call target not emitted"; return 0; }
+      if (!wcall(c, (uint32_t)(P->native_base + P->native_index[ins->a]))) return 0;
       break;
     case OP_ABI_RET:
       if (!bu8(c, 0x0f)) return 0;
@@ -3269,7 +3346,13 @@ static void init_prog(Prog *p, const char *source, uint32_t len) {
   p->srclen = len;
 }
 
-static int native_body(Prog *owner, Buf *body, int index) {
+static void native_calls(const Prog *p, uint8_t *calls) {
+  for (int i = 0; i < p->nc; i++) {
+    if (p->code[i].op == OP_NATIVE_CALL) calls[p->code[i].a] = 1;
+  }
+}
+
+static int native_body(Prog *owner, Buf *body, int index, uint8_t *calls) {
   static Prog frame;
   NativeFn *fn = &owner->natives[index];
   init_prog(&frame, owner->src, owner->srclen);
@@ -3283,7 +3366,10 @@ static int native_body(Prog *owner, Buf *body, int index) {
   frame.nfn = fn->inline_count;
   frame.nlayouts = owner->nlayouts;
   frame.import_count = owner->import_count;
-  for (int i = 0; i < frame.native_count; i++) frame.natives[i] = owner->natives[i];
+  for (int i = 0; i < frame.native_count; i++) {
+    frame.natives[i] = owner->natives[i];
+    frame.native_index[i] = owner->native_index[i];
+  }
   for (int i = 0; i < frame.nfn; i++) frame.fns[i] = owner->fns[i];
   for (int i = 0; i < frame.nlayouts; i++) frame.layouts[i] = owner->layouts[i];
   for (int i = 0; i < frame.import_count; i++) frame.imports[i] = owner->imports[i];
@@ -3305,7 +3391,34 @@ static int native_body(Prog *owner, Buf *body, int index) {
     if (frame.lty[i] != fn->sig.args[i]) { owner->err = "native parameter type changed"; return 0; }
   }
   fn->depth = frame.native_depth;
-  return emit_locals(body, &frame) && emit_ops(body, &frame) && bu8(body, 0x00) && bu8(body, 0x0b);
+  if (calls) {
+    native_calls(&frame, calls);
+    return 1;
+  }
+  if (emit_locals(body, &frame) && emit_ops(body, &frame) && bu8(body, 0x00) && bu8(body, 0x0b)) return 1;
+  owner->err = frame.err;
+  return 0;
+}
+
+static int native_select(Prog *p) {
+  if (!p->native_count || p->legacy_inline) {
+    for (int i = 0; i < p->native_count; i++) p->native_index[i] = i;
+    return p->native_count;
+  }
+  uint8_t edges[MAX_NATIVE][MAX_NATIVE] = {{0}};
+  uint8_t reachable[MAX_NATIVE] = {0};
+  // The ordinary entry, ABI entry and aliases all execute the same root IR.
+  native_calls(p, reachable);
+  // Validate every definition, including unused ones, in declaration order.
+  for (int i = 0; i < p->native_count; i++)
+    if (!native_body(p, 0, i, edges[i])) return -1;
+  // Native calls only point to earlier declarations, so one pass closes the graph.
+  for (int i = p->native_count - 1; i >= 0; i--)
+    if (reachable[i])
+      for (int j = 0; j < i; j++) reachable[j] |= edges[i][j];
+  int count = 0;
+  for (int i = 0; i < p->native_count; i++) p->native_index[i] = reachable[i] ? count++ : -1;
+  return count;
 }
 
 static int build_mod(Prog *P, Buf *mod) {
@@ -3318,7 +3431,9 @@ static int build_mod(Prog *P, Buf *mod) {
   int alias_type = ABI_TYPE_BASE + P->import_count + api;
   int native_type = alias_type + P->alias_count;
   P->native_base = alias_start + P->alias_count;
-  int nfuncs = P->native_base + P->native_count;
+  int selected = native_select(P);
+  if (selected < 0) return 0;
+  int nfuncs = P->native_base + selected;
   int nimports = g_need_gpu + P->import_count;
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
@@ -3326,8 +3441,8 @@ static int build_mod(Prog *P, Buf *mod) {
     if (!binit(&cs[i], i == 1 || i == NFUNCS ? 8192 : 256)) return 0;
 
   for (i = 0; i < P->native_count; i++)
-    if (!native_body(P, &cs[P->native_base + i], i)) return 0;
-  if (!bleu(&types, native_type + P->native_count)) return 0;
+    if (P->native_index[i] >= 0 && !native_body(P, &cs[P->native_base + P->native_index[i]], i, 0)) return 0;
+  if (!bleu(&types, native_type + selected)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7e)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,0)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7f)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
@@ -3348,7 +3463,7 @@ static int build_mod(Prog *P, Buf *mod) {
   for (i = 0; i < P->alias_count; i++)
     if (!abi_wasm_type(&types, &P->aliases[i].signature)) return 0;
   for (i = 0; i < P->native_count; i++)
-    if (!abi_wasm_type(&types, &P->natives[i].sig)) return 0;
+    if (P->native_index[i] >= 0 && !abi_wasm_type(&types, &P->natives[i].sig)) return 0;
   if (!bleu(&funcs, nfuncs)) return 0;
   uint8_t fty[NFUNCS] = {
     0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
@@ -3362,7 +3477,7 @@ static int build_mod(Prog *P, Buf *mod) {
   if (api && (!bu8(&funcs, ABI_TYPE_BASE + P->import_count) || !bu8(&funcs, 1))) return 0;
   for (i = 0; i < P->alias_count; i++)
     if (!bleu(&funcs, alias_type + i)) return 0;
-  for (i = 0; i < P->native_count; i++)
+  for (i = 0; i < selected; i++)
     if (!bleu(&funcs, native_type + i)) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
@@ -3477,7 +3592,7 @@ static int build_mod(Prog *P, Buf *mod) {
 
   if (!bleu(&codes, nfuncs)) return 0;
   for (i = 0; i < nfuncs; i++) {
-    if (!bleu(&codes, cs[i].n) || !braw(&codes, bd(&cs[i]), cs[i].n)) return 0;
+    if (!bleu(&codes, cs[i].n) || !braw_heap(&codes, cs[i].off, cs[i].n)) return 0;
   }
   if (!binit(mod, 32768)) return 0;
   static const uint8_t hdr[] = {0,0x61,0x73,0x6d,1,0,0,0};
@@ -3508,7 +3623,7 @@ static int build_mod(Prog *P, Buf *mod) {
     if (!binit(&custom, 1024)) return 0;
     if (!bleu(&custom, 7)) return 0;
     if (!braw(&custom, nm, 7)) return 0;
-    if (!braw(&custom, g_heap + g_meta_ptr, g_meta_len)) return 0;
+    if (!braw_heap(&custom, g_meta_ptr - poff(0), g_meta_len)) return 0;
     if (!sect(mod, 0, &custom)) return 0;
   }
   return 1;
@@ -3562,13 +3677,16 @@ __attribute__((export_name("compile")))
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   static char native_source[100000];
   g_bump = 64;
+  g_capacity = 0;
   g_need_gpu = 0;
   g_need_ux = 0;
   g_abi_imports = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
   if (src_len > 100000) { g_need_gpu = 0; set_err("src too large"); return 1; }
 #ifdef UJS_HOST
-  if (src_ptr + src_len > sizeof(g_heap)) { g_need_gpu = 0; set_err("bad src"); return 1; }
+  if (src_ptr > g_heap_size || src_len > g_heap_size - src_ptr) {
+    set_err("bad src"); return 1;
+  }
   const char *src = (const char *)(g_heap + src_ptr);
 #else
   const char *src = (const char *)(uintptr_t)src_ptr;
@@ -3610,7 +3728,11 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
   g_abi_imports = P.import_count;
-  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err(P.err ? P.err : "emit"); return 1; }
+  if (!build_mod(&P, &mod)) {
+    g_need_gpu = 0;
+    set_err(P.err ? P.err : "module emission failed");
+    return 1;
+  }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
   g_need_gpu = 0;
   (void)PERSIST_FIT;

@@ -16,6 +16,7 @@ uint32_t err_len(void);
 void ujs_host_write(uint32_t off, const void *p, uint32_t n);
 void ujs_host_legacy_inline(int enabled);
 const uint8_t *ujs_host_mem(void);
+uint32_t ujs_host_mem_size(void);
 
 static const char *VERSION = "ujs.com 0.0.7";
 int host1_wasm_run(const uint8_t *wasm, uint32_t wasm_n, char *out, uint32_t out_cap);
@@ -33,7 +34,7 @@ static void usage(FILE *f) {
   fprintf(f, "  ujs.com FILE.ujs [-o OUT.wasm]\n");
   fprintf(f, "  ujs.com FILE.ujs [FILE.ujs ...] --run [-o OUT.wasm]\n");
   fprintf(f, "  ujs.com FILE.ujs FILE.ujs [...] -o OUT.wasm\n");
-  fprintf(f, "  --legacy-inline: reproduce frozen legacy inline-slot allocation\n");
+  fprintf(f, "  --legacy-inline: reproduce frozen inline slots and native function layout\n");
   fprintf(f, "contract:\n");
   fprintf(f, "  compile closed UJS-1_ship subset to \\0asm (bridge=stage0-host)\n");
   fprintf(f, "  default -o: same path with .ujs replaced by .wasm\n");
@@ -318,7 +319,8 @@ static int compile_to_mem(const char **sources, int count, uint8_t **out, size_t
   src[src_n] = 0;
   ptr = alloc((uint32_t)src_n + 1u);
   if (!ptr) {
-    fprintf(stderr, "ujs.com: alloc failed\n");
+    const uint8_t *arena = ujs_host_mem();
+    fprintf(stderr, "ujs.com: %.*s\n", (int)err_len(), (const char *)(arena+err_ptr()));
     mm_free(src);
     return 1;
   }
@@ -329,7 +331,7 @@ static int compile_to_mem(const char **sources, int count, uint8_t **out, size_t
   if (st != 0) {
     ep = err_ptr();
     el = err_len();
-    if (el && ep + el <= 256u * 1024u)
+    if (el && ep <= ujs_host_mem_size() && el <= ujs_host_mem_size() - ep)
       fprintf(stderr, "ujs.com: %.*s\n", (int)el, (const char *)(mem + ep));
     else
       fprintf(stderr, "ujs.com: compile failed\n");
@@ -337,7 +339,7 @@ static int compile_to_mem(const char **sources, int count, uint8_t **out, size_t
   }
   op = out_ptr();
   ol = out_len();
-  if (ol < 4 || op + ol > 256u * 1024u ||
+  if (ol < 4 || op > ujs_host_mem_size() || ol > ujs_host_mem_size() - op ||
       mem[op] != 0 || mem[op + 1] != 0x61 ||
       mem[op + 2] != 0x73 || mem[op + 3] != 0x6d) {
     fprintf(stderr, "ujs.com: not \\0asm\n");

@@ -1,0 +1,116 @@
+native function object_copy_pose(dst:i64,src:i64) i64 {
+  let visible=ux_u32_put(dst+Object3D.visible,ux_u32(src+Object3D.visible));
+  let mask=ux_u32_put(dst+Object3D.layerMask,ux_u32(src+Object3D.layerMask));
+  let dirty=ux_u32_put(dst+Object3D.dirty,3);
+  let at=88;
+  while(at<424) {
+    let word=ux_u32_put(dst+at,ux_u32(src+at));
+    at=at+4;
+  }
+  if(ux_u32(dst+Scene.size)==3 && ux_u32(src+Scene.size)==3) {
+    let background=ux_u32_put(dst+Scene.background,ux_u32(src+Scene.background));
+    let environment=ux_u32_put(dst+Scene.environment,ux_u32(src+Scene.environment));
+    let fog=ux_u32_put(dst+Scene.fog,ux_u32(src+Scene.fog));
+    let material=ux_u32_put(dst+Scene.overrideMaterial,ux_u32(src+Scene.overrideMaterial));
+  }
+  return dst;
+}
+
+native function object_clone_node(arena:i64,source:i64) i64 {
+  let handle=Object3D_create(arena);
+  if(handle<0) { return handle; }
+  let target=Object3D_address(arena,handle);
+  let kind=ux_u32_put(target+Scene.size,ux_u32(source+Scene.size));
+  let copied=object_copy_pose(target,source);
+  return handle;
+}
+
+native function object_clone_room(arena:i64,needed:i64) i64 {
+  let available=0;
+  let i=0;
+  let size=ux_u32(arena);
+  while(i<size && available<needed) {
+    let node=arena+8+424*i;
+    if(ux_u32(node+84)==0 && ux_u32(node+Object3D.generation)<65535) {
+      available=available+1;
+    }
+    i=i+1;
+  }
+  return available>=needed;
+}
+
+// Check capacity before touching the destination. In the same arena the
+// destination must be outside the source subtree.
+native function object_clone_count(src_arena:i64,root:i64,forbidden:i64,recursive:i64) i64 {
+  let count=1;
+  if(root==forbidden) { return 0-1; }
+  if(recursive==0) { return count; }
+  let cursor=Object3D_traverseNext(src_arena,root,root,1);
+  while(cursor>0) {
+    if(cursor==forbidden) { return 0-1; }
+    count=count+1;
+    cursor=Object3D_traverseNext(src_arena,root,cursor,1);
+  }
+  if(cursor<0) { return cursor; }
+  return count;
+}
+
+native function object_clone_children(dst_arena:i64,dst:i64,src_arena:i64,src:i64) i64 {
+  let source=src;
+  let target=dst;
+  let descend=1;
+  while(source>0) {
+    let at=Object3D_address(src_arena,source);
+    let next=0;
+    if(descend!=0) { next=ux_u32(at+Object3D.firstChild); }
+    if(next!=0) {
+      let fresh=object_clone_node(dst_arena,Object3D_address(src_arena,next));
+      let child=Object3D_add(dst_arena,target,fresh);
+      source=next;
+      target=fresh;
+    } else {
+      if(source==src) { return dst; }
+      let parent=ux_u32(Object3D_address(dst_arena,target)+Object3D.parent);
+      let sibling=ux_u32(at+Object3D.nextSibling);
+      if(sibling==0) {
+        source=ux_u32(at+Object3D.parent);
+        target=parent;
+        descend=0;
+      } else {
+        let fresh=object_clone_node(dst_arena,Object3D_address(src_arena,sibling));
+        let child=Object3D_add(dst_arena,parent,fresh);
+        source=sibling;
+        target=fresh;
+        descend=1;
+      }
+    }
+  }
+  return dst;
+}
+
+// Object resources are opaque handles in the current object layout.
+native function Object3D_copy(dst_arena:i64,dst:i64,src_arena:i64,src:i64,recursive:i64) i64 {
+  let dst_addr=Object3D_address(dst_arena,dst);
+  let src_addr=Object3D_address(src_arena,src);
+  if(dst_addr<0 || src_addr<0) { return 0-1; }
+  if(dst_addr==src_addr) { return dst; }
+  let forbidden=0;
+  if(dst_arena==src_arena && recursive!=0) { forbidden=dst; }
+  let count=object_clone_count(src_arena,src,forbidden,recursive);
+  if(count<0) { return count; }
+  if(object_clone_room(dst_arena,count-1)==0) { return 0-2; }
+  let pose=object_copy_pose(dst_addr,src_addr);
+  if(recursive!=0) { return object_clone_children(dst_arena,dst,src_arena,src); }
+  return dst;
+}
+
+native function Object3D_clone(dst_arena:i64,src_arena:i64,src:i64,recursive:i64) i64 {
+  let src_addr=Object3D_address(src_arena,src);
+  if(src_addr<0) { return 0-1; }
+  let count=object_clone_count(src_arena,src,0,recursive);
+  if(count<0) { return count; }
+  if(object_clone_room(dst_arena,count)==0) { return 0-2; }
+  let root=object_clone_node(dst_arena,src_addr);
+  if(recursive!=0) { return object_clone_children(dst_arena,root,src_arena,src); }
+  return root;
+}

@@ -1,0 +1,242 @@
+// Input, scratch and the caller-owned output arena must be disjoint.
+// Loading targets an initialized empty BufferGeometry.
+native function geometry_json_field(obj:i64,end:i64,scratch:i64,id:i64,head:i64,size:i64) i64 {
+  let written=json_write_token(scratch,scratch+120,id);
+  if(written<0 || head+size>written-scratch) { return 0-1; }
+  return json_find_key(obj,end,scratch+head,size);
+}
+
+native function geometry_json_kind(at:i64,end:i64,scratch:i64) i64 {
+  let last=json_scan_string(at,end);
+  if(last<0) { return 0-1; }
+  let kinds=[ObjectJsonType.uint8,ObjectJsonType.int8,ObjectJsonType.uint8Clamped,
+    ObjectJsonType.uint16,ObjectJsonType.int16,ObjectJsonType.uint32,ObjectJsonType.int32,
+    ObjectJsonType.float32,ObjectJsonType.float64];
+  let i=0;
+  while(i<9) {
+    let token=json_write_token(scratch,scratch+120,ObjectJsonToken.size+kinds[i]);
+    let match=token-scratch==last-at;
+    let j=0;
+    while(match && at+j<last) {
+      match=ux_u8(at+j)==ux_u8(scratch+j);
+      j=j+1;
+    }
+    if(match) {
+      if(i>=7) { return i+2; }
+      return i+1;
+    }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function geometry_json_store(data:i64,kind:i64,value:f64) i64 {
+  if(value!=value) { return 0-1; }
+  if(kind==9) { return ux_f32_put(data,value); }
+  if(kind==10) { return ux_f64_put(data,value); }
+  if(value<0.0-2147483648.0 || value>4294967295.0) { return 0-1; }
+  let integer=f64_floor_i64(value);
+  if(value!=0.0+integer) { return 0-1; }
+  if(kind<=3) {
+    if((kind==2 && (integer<0-128 || integer>127)) ||
+       (kind!=2 && (integer<0 || integer>255))) { return 0-1; }
+    return ux_u8_put(data,u32_and(integer,255));
+  }
+  if(kind<=5) {
+    if((kind==5 && (integer<0-32768 || integer>32767)) ||
+       (kind==4 && (integer<0 || integer>65535))) { return 0-1; }
+    return ux_u16_put(data,u32_and(integer,65535));
+  }
+  if((kind==6 && integer<0) || (kind==7 && integer>2147483647)) { return 0-1; }
+  return ux_u32_put(data,u32_and(integer,4294967295));
+}
+
+native function geometry_json_load_view(obj:i64,end:i64,scratch:i64,view:i64,limit:i64,index:i64) i64 {
+  if(view<0 || view%8!=0 || limit-view<BufferAttribute.size) { return 0-1; }
+  let type=geometry_json_field(obj,end,scratch,ObjectJsonToken.typeField,1,4);
+  let kind=geometry_json_kind(type,end,scratch);
+  if(kind<0) { return 0-1; }
+  let components=1;
+  let normalized=0;
+  let usage=35044;
+  if(index==0) {
+    let size=geometry_json_field(obj,end,scratch,ObjectJsonToken.itemSize,2,8);
+    let amount=json_read_number(size,end);
+    if(amount!=amount || amount<1.0 || amount>6291456.0) { return 0-1; }
+    components=f64_floor_i64(amount);
+    if(amount!=0.0+components) { return 0-1; }
+    let flag=geometry_json_field(obj,end,scratch,ObjectJsonToken.normalized,2,10);
+    if(flag>=0) {
+      if(ux_u8(flag)==116) { normalized=1; }
+      else if(ux_u8(flag)!=102) { return 0-1; }
+    }
+    let mode=geometry_json_field(obj,end,scratch,ObjectJsonToken.usage,2,5);
+    if(mode>=0) {
+      let parsed=json_read_number(mode,end);
+      if(parsed!=parsed || parsed<0.0 || parsed>4294967295.0) { return 0-1; }
+      usage=f64_floor_i64(parsed);
+      if(parsed!=0.0+usage) { return 0-1; }
+    }
+  } else if(kind!=1 && kind!=4 && kind!=6) { return 0-1; }
+  let width=4;
+  if(kind<=3) { width=1; }
+  else if(kind<=5) { width=2; }
+  else if(kind==10) { width=8; }
+  let array=geometry_json_field(obj,end,scratch,ObjectJsonToken.values,2,5);
+  if(array<0 || ux_u8(array)!=91) { return 0-1; }
+  let data=view+BufferAttribute.size;
+  let p=json_space(array+1,end);
+  let scalars=0;
+  while(p>=0 && p<end && ux_u8(p)!=93) {
+    let value=json_read_number(p,end);
+    if(ux_u8(p)==110) { value=0.0; }
+    if(scalars>=(limit-data)/width || geometry_json_store(data+scalars*width,kind,value)<0) { return 0-1; }
+    scalars=scalars+1;
+    let next=json_value_end(p,end);
+    p=json_space(next,end);
+    if(p>=0 && p<end && ux_u8(p)==44) { p=json_space(p+1,end); }
+    else if(p<0 || p>=end || ux_u8(p)!=93) { return 0-1; }
+  }
+  if(p<0 || p>=end || scalars%components!=0) { return 0-1; }
+  let after=(data+scalars*width+7)/8*8;
+  if(after>limit) { return 0-1; }
+  let d=ux_u32_put(view+BufferAttribute.data,data);
+  let c=ux_u32_put(view+BufferAttribute.count,scalars/components);
+  let s=ux_u32_put(view+BufferAttribute.itemSize,components);
+  let st=ux_u32_put(view+BufferAttribute.stride,components*width);
+  let t=ux_u32_put(view+BufferAttribute.componentType,kind);
+  let n=ux_u32_put(view+BufferAttribute.normalized,normalized);
+  let u=ux_u32_put(view+BufferAttribute.usage,usage);
+  let v=ux_u32_put(view+BufferAttribute.version,0);
+  return after;
+}
+
+native function geometry_json_semantic(at:i64,last:i64,names:i64,count:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let row=names+i*12;
+    let address=ux_u32(row+4);
+    let size=ux_u32(row+8);
+    if(address>6291456 || size>6291456-address) { return 0-1; }
+    let match=size==last-at-2;
+    let j=0;
+    while(match && j<size) {
+      match=ux_u8(at+1+j)==ux_u8(address+j);
+      j=j+1;
+    }
+    if(match) { return ux_u32(row); }
+    i=i+1;
+  }
+  return 0-2;
+}
+
+native function BufferGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i64 {
+  if(geo<0 || geo>6291456-BufferGeometry.size || geo%4!=0 ||
+     options<0 || options>6291456-GeometryJsonLoad.size || options%4!=0) { return 0-1; }
+  let top=json_value_end(input,end);
+  if(top<0 || json_space(top,end)!=end) { return 0-1; }
+  let scratch=ux_u32(options+GeometryJsonLoad.scratch);
+  let names=ux_u32(options+GeometryJsonLoad.names);
+  let name_count=ux_u32(options+GeometryJsonLoad.nameCount);
+  let cursor=ux_u32(options+GeometryJsonLoad.arena);
+  let limit=ux_u32(options+GeometryJsonLoad.arenaEnd);
+  if(scratch>6291456-120 || names>6291456 || names%4!=0 || name_count>(6291456-names)/12 ||
+     cursor%8!=0 || cursor>limit || limit>6291456) { return 0-1; }
+  let table=ux_u32(geo+BufferGeometry.attributes);
+  let groups=ux_u32(geo+BufferGeometry.groups);
+  if(table>6291448 || table%4!=0 || groups>6291448 || groups%4!=0 ||
+     ux_u32(table)!=0 || ux_u32(groups)!=0 || ux_u32(geo+BufferGeometry.index)!=0) { return 0-1; }
+  let capacity=ux_u32(table+4);
+  let group_capacity=ux_u32(groups+4);
+  if(capacity>(6291448-table)/8 || group_capacity>(6291448-groups)/12) { return 0-1; }
+  let data=geometry_json_field(input,end,scratch,ObjectJsonToken.data,2,4);
+  let attrs=geometry_json_field(data,end,scratch,ObjectJsonToken.data,10,10);
+  if(attrs<0 || ux_u8(attrs)!=123) { return 0-1; }
+  let p=json_space(attrs+1,end);
+  let count=0;
+  while(p>=0 && p<end && ux_u8(p)!=125) {
+    if(count==capacity) { return 0-3; }
+    let close=json_scan_string(p,end);
+    if(close<0) { return 0-1; }
+    let semantic=geometry_json_semantic(p,close,names,name_count);
+    if(semantic<0) { return semantic; }
+    let colon=json_space(close,end);
+    let value=json_space(colon+1,end);
+    let next=geometry_json_load_view(value,end,scratch,cursor,limit,0);
+    if(next<0) { return next; }
+    let row=table+8+8*count;
+    let id=ux_u32_put(row,semantic);
+    let view=ux_u32_put(row+4,cursor);
+    cursor=next;
+    count=count+1;
+    p=json_space(json_value_end(value,end),end);
+    if(p>=0 && p<end && ux_u8(p)==44) { p=json_space(p+1,end); }
+  }
+  if(p<0 || p>=end) { return 0-1; }
+  let index=geometry_json_field(data,end,scratch,ObjectJsonToken.indexField,2,5);
+  let encoded=0;
+  if(index>=0) {
+    let next=geometry_json_load_view(index,end,scratch,cursor,limit,1);
+    if(next<0) { return next; }
+    encoded=cursor+1;
+    cursor=next;
+  }
+  let group_values=geometry_json_field(data,end,scratch,ObjectJsonToken.groups,2,6);
+  let group_count=0;
+  if(group_values>=0) {
+    if(ux_u8(group_values)!=91) { return 0-1; }
+    p=json_space(group_values+1,end);
+    while(p>=0 && p<end && ux_u8(p)!=93) {
+      if(group_count==group_capacity) { return 0-3; }
+      let start=json_read_number(geometry_json_field(p,end,scratch,ObjectJsonToken.groupStart,2,5),end);
+      let amount=json_read_number(geometry_json_field(p,end,scratch,ObjectJsonToken.groupCount,2,5),end);
+      let material=json_read_number(geometry_json_field(p,end,scratch,ObjectJsonToken.groupMaterial,2,13),end);
+      if(start!=start || amount!=amount || material!=material ||
+         start<0.0 || start>4294967295.0 || amount<0.0 || amount>4294967295.0 ||
+         material<0.0 || material>4294967295.0) { return 0-1; }
+      let first=f64_floor_i64(start);
+      let size=f64_floor_i64(amount);
+      let slot=f64_floor_i64(material);
+      if(start!=0.0+first || amount!=0.0+size || material!=0.0+slot) { return 0-1; }
+      let row=groups+8+group_count*12;
+      let a=ux_u32_put(row,first);
+      let b=ux_u32_put(row+4,size);
+      let m=ux_u32_put(row+8,slot);
+      group_count=group_count+1;
+      p=json_space(json_value_end(p,end),end);
+      if(p>=0 && p<end && ux_u8(p)==44) { p=json_space(p+1,end); }
+    }
+    if(p<0 || p>=end) { return 0-1; }
+  }
+  let sphere=geometry_json_field(data,end,scratch,ObjectJsonToken.sphere,2,14);
+  let sphere_pointer=0;
+  if(sphere>=0) {
+    if(limit-cursor<32) { return 0-3; }
+    let center=geometry_json_field(sphere,end,scratch,ObjectJsonToken.sphere,20,6);
+    if(center<0 || ux_u8(center)!=91) { return 0-1; }
+    p=json_space(center+1,end);
+    let axis=0;
+    while(p>=0 && p<end && axis<3) {
+      let coordinate=json_read_number(p,end);
+      if(coordinate!=coordinate) { return 0-1; }
+      let component=ux_f64_put(cursor+axis*8,coordinate);
+      p=json_space(json_scalar_end(p,end),end);
+      axis=axis+1;
+      if(axis<3) {
+        if(p<0 || p>=end || ux_u8(p)!=44) { return 0-1; }
+        p=json_space(p+1,end);
+      }
+    }
+    if(axis!=3 || p<0 || p>=end || ux_u8(p)!=93) { return 0-1; }
+    let radius=json_read_number(geometry_json_field(sphere,end,scratch,ObjectJsonToken.radius,3,6),end);
+    if(radius!=radius) { return 0-1; }
+    let rv=ux_f64_put(cursor+24,radius);
+    sphere_pointer=cursor+1;
+    cursor=cursor+32;
+  }
+  let a=ux_u32_put(table,count);
+  let g=ux_u32_put(groups,group_count);
+  let i=ux_u32_put(geo+BufferGeometry.index,encoded);
+  let b=ux_u32_put(geo+BufferGeometry.boundingSphere,sphere_pointer);
+  return cursor;
+}

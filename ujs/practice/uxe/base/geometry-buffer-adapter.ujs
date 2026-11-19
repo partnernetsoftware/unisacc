@@ -1,0 +1,102 @@
+native function geometry_unpack_attribute(view:i64,raw:i64,count:i64,offset:i64,components:i64) i64 {
+  let data=view+BufferAttribute.size;
+  let initialized=BufferAttribute_init(view,data,count,components,9,0);
+  let i=0;
+  while(i<count) {
+    let src=raw+32*i+offset;
+    let dest=data+4*components*i;
+    let x=ux_u32_put(dest,ux_u32(src));
+    let y=ux_u32_put(dest+4,ux_u32(src+4));
+    if(components==3) { let z=ux_u32_put(dest+8,ux_u32(src+8)); }
+    i=i+1;
+  }
+  return (data+count*components*4+7)/8*8;
+}
+
+// Convert generated vertices to the common geometry representation.
+// Attribute bits and semantic IDs use position=1, normal=2, uv=4.
+// The destination descriptor, tables and arena are disjoint from all inputs.
+native function GeometryBuffers_asGeometry(raw:i64,geometry:i64,arena:i64,bytes:i64,
+                                                mask:i64,groups:i64,group_count:i64) i64 {
+  if(raw<0 || raw>6291456-GeometryBuffers.size || raw%4!=0 ||
+     geometry<0 || geometry>6291456-BufferGeometry.size || geometry%4!=0 ||
+     arena<0 || arena>6291456 || arena%8!=0 || bytes<0 || bytes>6291456-arena ||
+     mask<1 || mask>7 || mask%2==0 || groups<0 || groups>6291456 || groups%4!=0 ||
+     group_count<0 || group_count>(6291456-groups)/12) { return 0-1; }
+  let raw_vertices=ux_u32(raw+GeometryBuffers.vertices);
+  let raw_indices=ux_u32(raw+GeometryBuffers.indices);
+  let vertices=ux_u32(raw+GeometryBuffers.vertexCount);
+  let indices=ux_u32(raw+GeometryBuffers.indexCount);
+  if(raw_vertices>6291456 || raw_vertices%4!=0 || vertices>(6291456-raw_vertices)/32 ||
+     raw_indices>6291456 || raw_indices%4!=0 || indices>(6291456-raw_indices)/4 ||
+     vertices>ux_u32(raw+GeometryBuffers.vertexCapacity) ||
+     indices>ux_u32(raw+GeometryBuffers.indexCapacity)) { return 0-1; }
+  let table=ux_u32(geometry+BufferGeometry.attributes);
+  let group_table=ux_u32(geometry+BufferGeometry.groups);
+  let normal=mask/2%2;
+  let uv=mask/4;
+  if(table>6291448 || table%4!=0 || group_table>6291448 || group_table%4!=0 ||
+     ux_u32(table)!=0 || ux_u32(group_table)!=0 || BufferGeometry_getIndex(geometry)>=0) { return 0-1; }
+  let attr_count=1+normal+uv;
+  if(attr_count>ux_u32(table+4) || attr_count>(6291448-table)/8 ||
+     group_count>ux_u32(group_table+4) || group_count>(6291448-group_table)/12) { return 0-2; }
+  let indexed_count=vertices;
+  let index_width=2;
+  let i=0;
+  if(indices>0) { indexed_count=indices; }
+  while(i<indices) {
+    let index=ux_u32(raw_indices+i*4);
+    if(index>=vertices) { return 0-1; }
+    if(index>=65535) { index_width=4; }
+    i=i+1;
+  }
+  i=0;
+  while(i<group_count) {
+    let row=groups+12*i;
+    let start=ux_u32(row);
+    let count=ux_u32(row+4);
+    if(start>indexed_count || count>indexed_count-start) { return 0-1; }
+    i=i+1;
+  }
+  let position_bytes=(vertices*12+7)/8*8;
+  let uv_bytes=vertices*8;
+  let attribute_bytes=attr_count*BufferAttribute.size+position_bytes*(1+normal)+uv_bytes*uv;
+  let index_bytes=0;
+  if(indices>0) { index_bytes=BufferAttribute.size+(indices*index_width+7)/8*8; }
+  if(attribute_bytes+index_bytes>bytes) { return 0-2; }
+  let cursor=geometry_unpack_attribute(arena,raw_vertices,vertices,0,3);
+  let position=BufferGeometry_setAttribute(geometry,1,arena);
+  if(normal!=0) {
+    let view=cursor;
+    cursor=geometry_unpack_attribute(view,raw_vertices,vertices,12,3);
+    let normals=BufferGeometry_setAttribute(geometry,2,view);
+  }
+  if(uv!=0) {
+    let view=cursor;
+    cursor=geometry_unpack_attribute(view,raw_vertices,vertices,24,2);
+    let coordinates=BufferGeometry_setAttribute(geometry,4,view);
+  }
+  if(indices>0) {
+    let view=cursor;
+    let data=view+BufferAttribute.size;
+    let component=4;
+    if(index_width==4) { component=6; }
+    let initialized=BufferAttribute_init(view,data,indices,1,component,0);
+    i=0;
+    while(i<indices) {
+      let index=ux_u32(raw_indices+i*4);
+      if(index_width==2) { let copied=ux_u16_put(data+i*2,index); }
+      else { let copied=ux_u32_put(data+i*4,index); }
+      i=i+1;
+    }
+    let written=BufferGeometry_setIndex(geometry,view);
+    cursor=arena+attribute_bytes+index_bytes;
+  }
+  i=0;
+  while(i<group_count) {
+    let row=groups+12*i;
+    let written=BufferGeometry_addGroup(geometry,ux_u32(row),ux_u32(row+4),ux_u32(row+8));
+    i=i+1;
+  }
+  return cursor;
+}
