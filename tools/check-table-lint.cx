@@ -1,0 +1,123 @@
+/* tools/check-table-lint.cx -- fixed-fixture regression checks for tools/table-lint.cx.
+ *   sh ./unisacc.com tools/check-table-lint.cx
+ * Builds tools/table-lint.cx once (-o, into a private temp dir) and runs 4 synthetic delta fixtures
+ * covering r-state reachable domain totality:
+ *   neg1  CMPI -> r-state R with keys 0..1 only           -> rc 1, ERROR total R 1 keys without an edge (first 2)
+ *   neg2  DIVMOD10 -> r-state R with keys 0..18 only      -> rc 1, ERROR total R 1 keys without an edge (first 19)
+ *   neg3  CMPI -> b-state X (no r-setter) -> R keys 0..2  -> rc 1, ERROR total R 254 keys without an edge (first 3)
+ *   pos1  CMPI -> r-state R with keys 0..2 (complete)     -> rc 0, errors=0, no ERROR line
+ * Last line: CHECK_TABLE_LINT<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+
+#define PW 4400
+#define OUTCAP 16384
+#define DCAP 32768
+
+static char workdir[PW], tl_bin[PW];
+
+static void ctl_die(const char *msg) {
+    fprintf(stderr, "check-table-lint: REFUSE %s\n", msg);
+    exit(2);
+}
+
+static size_t ctl_push(char *buf, size_t pos, const char *s) {
+    size_t len = strlen(s);
+    if (pos + len >= DCAP) ctl_die("delta-bound");
+    if (len && mm_copy(buf + pos, (long)(DCAP - pos), s, (long)len)) ctl_die("delta-copy");
+    buf[pos + len] = 0;
+    return pos + len;
+}
+
+static size_t ctl_edges(char *buf, size_t pos, int hi, const char *dst, int seq) {
+    char tok[64];
+    for (int i = 0; i <= hi; i++) {
+        if (cx_fmt(tok, sizeof tok, "\"%d\":[\"%s\",%d]%s", i, dst, seq, i < hi ? "," : "")) ctl_die("edge-fmt");
+        pos = ctl_push(buf, pos, tok);
+    }
+    return pos;
+}
+
+static int ctl_case(const char *name, const char *mid, int s0_seq, int r_hi, char *out, size_t outcap) {
+    char *buf = malloc(DCAP);
+    char jp[PW];
+    size_t pos = 0;
+    int rc;
+    if (!buf) ctl_die("alloc");
+    buf[0] = 0;
+    pos = ctl_push(buf, pos, "{\"start\":\"S0\",\"states\":{\"S0\":[\"b\",{");
+    pos = ctl_edges(buf, pos, 256, mid ? mid : "R", s0_seq);
+    pos = ctl_push(buf, pos, "}]");
+    if (mid) {
+        pos = ctl_push(buf, pos, ",\"");
+        pos = ctl_push(buf, pos, mid);
+        pos = ctl_push(buf, pos, "\":[\"b\",{");
+        pos = ctl_edges(buf, pos, 256, "R", 0);
+        pos = ctl_push(buf, pos, "}]");
+    }
+    pos = ctl_push(buf, pos, ",\"R\":[\"r\",{");
+    pos = ctl_edges(buf, pos, r_hi, "HALT", 0);
+    pos = ctl_push(buf, pos, "}]},\"seqs\":[[],[[\"CMPI\",\"y\",0]],[[\"LDI\",\"y\",5],[\"DIVMOD10\",\"y\"]]]}");
+
+    if (cx_fmt(jp, sizeof jp, "%s/%s.json", workdir, name)) ctl_die("json-path");
+    if (cx_write(jp, buf, pos)) ctl_die("write-json");
+    free(buf);
+
+    {
+        char *av[] = {tl_bin, jp, 0};
+        rc = ck_run(av, out, outcap);
+    }
+    (void)sy_unlink(jp);
+    return rc;
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[OUTCAP];
+    const char *td = sy_tmpdir();
+
+    if (cx_fmt(workdir, sizeof workdir, "%s/check-table-lint-%d", td && td[0] == '/' ? td : "/tmp", (int)getpid())) ctl_die("workdir-path");
+    if (mkdir(workdir, 0700) && errno != EEXIST) ctl_die("mkdir");
+    if (cx_fmt(tl_bin, sizeof tl_bin, "%s/table-lint", workdir)) ctl_die("bin-path");
+
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/table-lint.cx", "-o", tl_bin, 0}; /* lint:allow R1-product builds table-lint with this checkout's product; UNISACC overrides */
+        int brc = ck_run(av, out, sizeof out);
+        if (brc != 0) {
+            fprintf(stderr, "check-table-lint: build failed (rc=%d):\n%s\n", brc, out);
+            (void)rmdir(workdir);
+            ctl_die("build-table-lint");
+        }
+    }
+
+    {
+        int rc = ctl_case("neg1", 0, 1, 1, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, OUTCAP, "ERROR\ttotal\tR\t1 keys without an edge (first 2)") && ckk_has(out, OUTCAP, "errors=1"),
+            "neg1: CMPI->R(0..1) rc=1 and ERROR total R 1 keys without an edge (first 2)");
+    }
+    {
+        int rc = ctl_case("neg2", 0, 2, 18, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, OUTCAP, "ERROR\ttotal\tR\t1 keys without an edge (first 19)") && ckk_has(out, OUTCAP, "errors=1"),
+            "neg2: DIVMOD10->R(0..18) rc=1 and ERROR total R 1 keys without an edge (first 19)");
+    }
+    {
+        int rc = ctl_case("neg3", "X", 1, 2, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, OUTCAP, "ERROR\ttotal\tR\t254 keys without an edge (first 3)") && ckk_has(out, OUTCAP, "errors=1"),
+            "neg3: CMPI->X(b)->R(0..2) rc=1 and ERROR total R 254 keys without an edge (first 3)");
+    }
+    {
+        int rc = ctl_case("pos1", 0, 1, 2, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, OUTCAP, "errors=0") && !ckk_has(out, OUTCAP, "ERROR\t"),
+            "pos1: CMPI->R(0..2) rc=0 and errors=0");
+    }
+
+    (void)sy_unlink(tl_bin);
+    (void)rmdir(workdir);
+
+    printf("CHECK_TABLE_LINT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
