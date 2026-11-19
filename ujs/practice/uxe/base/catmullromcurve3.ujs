@@ -1,0 +1,59 @@
+native function catmull_interval(a:i64,b:i64,kind:i64) f64 {
+  let x=ux_f64(a)-ux_f64(b);
+  let y=ux_f64(a+8)-ux_f64(b+8);
+  let z=ux_f64(a+16)-ux_f64(b+16);
+  let distance=f64_sqrt(x*x+y*y+z*z);
+  if(kind==1) { distance=f64_sqrt(distance); }
+  return distance;
+}
+
+// kind 0 is uniform Catmull-Rom, 1 centripetal, 2 chordal.
+native function CatmullRomCurve3_getPoint(dst:i64,points:i64,count:i64,t:f64,
+                                         closed:i64,kind:i64,tension:f64) i64 {
+  if(count<2 || t<0.0 || t>1.0 || kind<0 || kind>2) { return 0-1; }
+  let extent=count-1;
+  if(closed!=0) { extent=count; }
+  let parameter=t*extent;
+  let segment=f64_floor_i64(parameter);
+  let weight=parameter-segment;
+  if(closed==0 && segment==count-1) { segment=count-2; weight=1.0; }
+  let before=points+24*((segment+count-1)%count);
+  let left=points+24*(segment%count);
+  let right=points+24*((segment+1)%count);
+  let after=points+24*((segment+2)%count);
+  let extrapolate_left=closed==0 && segment==0;
+  let extrapolate_right=closed==0 && segment+2>=count;
+  let dt0=1.0;
+  let dt1=1.0;
+  let dt2=1.0;
+  if(kind!=0) {
+    let interval=catmull_interval(left,right,kind);
+    dt1=interval;
+    if(dt1<0.0001) { dt1=1.0; }
+    dt0=interval;
+    dt2=interval;
+    if(!extrapolate_left) { dt0=catmull_interval(before,left,kind); }
+    if(!extrapolate_right) { dt2=catmull_interval(right,after,kind); }
+    if(dt0<0.0001) { dt0=dt1; }
+    if(dt2<0.0001) { dt2=dt1; }
+  }
+  let axis=0;
+  while(axis<24) {
+    let a=ux_f64(before+axis);
+    let b=ux_f64(left+axis);
+    let c=ux_f64(right+axis);
+    let d=ux_f64(after+axis);
+    if(extrapolate_left) { a=2.0*b-c; }
+    if(extrapolate_right) { d=2.0*c-b; }
+    let db=tension*(c-a);
+    let dc=tension*(d-b);
+    if(kind!=0) {
+      db=dt1*((b-a)/dt0-(c-a)/(dt0+dt1)+(c-b)/dt1);
+      dc=dt1*((c-b)/dt1-(d-b)/(dt1+dt2)+(d-c)/dt2);
+    }
+    let value=curve_hermite(weight,b,c,db,dc);
+    let written=ux_f64_put(dst+axis,value);
+    axis=axis+8;
+  }
+  return dst;
+}
