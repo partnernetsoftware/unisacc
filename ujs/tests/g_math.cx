@@ -52,3 +52,44 @@ int g_math_sample(const char *source, const char *wasm, const char *library,
 int g_math_near(double a, double b, double tolerance) {
     return a - b <= tolerance && b - a <= tolerance;
 }
+
+int g_math_run(const char *name, const char *fixture, const char *const *modules,
+               const char *setup, const char *const *cases, const double *gold,
+               int count, int mutate_index, const char *mutation) {
+    char library[60000]={0};
+    int used=0;
+    if(count<=0 || count>100) return 2;
+    for(int i=0;modules[i];i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t bytes=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&bytes,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-math-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[100]={0};
+    int failed=g_math_reference(fixture,refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        double actual=0;
+        const char *statement=i==mutate_index?mutation:cases[i];
+        if(g_math_sample(source,wasm,library,setup,statement,&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("%s case=%d actual=%.17g r160=%.17g gold=%.17g\n",name,i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH %s cases=%d failed=%d\n",name,count,failed);
+    return failed;
+}
