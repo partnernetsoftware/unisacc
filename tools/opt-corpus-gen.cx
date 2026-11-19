@@ -2,27 +2,31 @@
  * literal and classic-reference-differential oracles.
  *   sh ./unisacc.com tools/opt-corpus-gen.cx -- ROOT ABS_OUT GROUP [REF] [TCC]
  * GROUP (each stays under the 60 s rule; a compile costs about 0.13 s):
- *   corpus-N : one program each (a compile costs about 0.35 s; 72 product + 72 reference compiles per program):
+ *   corpus-N : one program each; six flags and six targets:
  *              0 corpus.int64-edges, 1 corpus.float-double, 2 corpus.calls-abi, 3 corpus.switch-dense,
  *              4 corpus.pointer-memory, 5 corpus.large-frame, 6 corpus.multi-tu, 7 corpus.varargs,
  *              8 corpus.deep-recursion, 9 corpus.float-mixed (e4.sem.corpus-breadth)
- *   closure  : closure.reference-tape (product -O1/-O2 -S tape == REF tape, whole corpus), default.native-image
- *              (no-flag image == -O0 image bytes and executes to the literal)
+ *   closure[-0-4|-5-9] REF HOST_CC: repeat and reoptimize O1/O2 tapes, execute each
+ *              against the host and hand literals, frame classic O0 for E4 versus classic O2.
+ *              Default images match explicit O1 (55cc27a7e8).
  *   ccdiff   : corpus.cc-differential, 4th argument = host C compiler (declared oracle): host -O0/-O2 and product
  *              -O0/-O2 lnx images execute to the literal and to each other, all ten programs
  *              optional TCC (sixth argv entry) adds a separate no-optimization-flag C99 oracle and three-way rows.
  *   cli      : refusal.other-spellings (-Og, -Ofast, -O-1, -O4, -O5: named refusal, rc 1, no image); REF's behaviour
  *              on the same spellings is recorded as INFO (measured 2026-10-28: the classic reference accepts them silently)
  * Per corpus program and each of the six flags (-O0 -O1 -O -O2 -O3 -Os): the lnx/x86_64 image executes to the
- * hand-derived literal (stdout and exit code), and with REF the product image equals the reference image byte for
- * byte on all six targets (the arm64/osx/win encodings). Non-vacuity guard per program: the -O0 tape differs from the
- * -O2 tape, else VACUOUS. REF is the classic reference (`make ref` from the frozen export); without it the six-target
- * rows are UNVERIFIED and only the lnx execution is asserted. determinism.repeat-bytes and closure.o2-idempotence are
- * the same observations as tools/properties-cases-gen.cx det/meta and are not repeated here.
+ * hand-derived literal (stdout and exit code). The frozen reference executes against the same literal.
+ * Compare executable format, architecture, entry and mapped permissions across both implementations.
+ * A second product build must reproduce the first image byte for byte. Record unavailable execution
+ * separately for each target and flag. QEMU_AARCH64 may name an absolute arm64 runner.
+ * The -O0 and -O2 tapes must both exist, be nonempty and differ. Adjacent-release image byte
+ * comparisons belong to the netregen batches.
  * Programs are UB-free C99 (no signed overflow, no shifts of negative values beyond implementation-defined >>). */
 #pragma unisa use cxlib.netpack
 #pragma unisa use refworkspace
+#pragma unisa use refimage
 #pragma unisa use text.text
+#pragma unisa use sys.time
 static char reference_dir[4096];
 
 static char root[4096], outdir[4096], work[4200], bound[4400], product[4400], ref[4096], tcc[4096];
@@ -94,34 +98,130 @@ static int compile_with(const char *tool, const char *a, const char *b, const ch
 }
 static int exact(const np_result *r, const char *s, int rc) { size_t n = strlen(s); return r->rc == rc && !r->errn && r->outn == n && !memcmp(r->out, s, n); }
 
-static void corpus_program(const Prog *p) {
+static void corpus_program(const Prog *p,int first,int count) {
+    char *helper[]={bound,"--helper",0},why[256];np_result prepared={0};
+    if(np_run(helper,root,0,10,&prepared,why,sizeof why)||prepared.rc||prepared.outn<2||
+        prepared.out[0]!='/'||prepared.out[prepared.outn-1]!='\n'||
+        tx_copy(bound,sizeof bound,prepared.out,prepared.outn-1))die("bound helper preparation");
+    np_free(&prepared);
+    char repeat_dir[4400];path(repeat_dir,sizeof repeat_dir,work,"repeat");
+    if(ref[0]&&mkdir(repeat_dir,0700))die("fresh reproducibility directory");
     char a[4400], b[4400], t0[4400], t2[4400], lab[200]; np_result r; sources(p, a, sizeof a, b, sizeof b);
     { if (cx_fmt(t0, sizeof t0, "%s/%s.O0.tape", work, p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for t0\n"); exit(2); } } { if (cx_fmt(t2, sizeof t2, "%s/%s.O2.tape", work, p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for t2\n"); exit(2); } }
     if (compile_with("product", a, b, "-O0", 0, t0, &r) || r.rc) { row("NOT_RUN", p->cell, "O0-tape", "compile failed"); np_free(&r); return; } np_free(&r);
     if (compile_with("product", a, b, "-O2", 0, t2, &r) || r.rc) { row("NOT_RUN", p->cell, "O2-tape", "compile failed"); np_free(&r); return; } np_free(&r);
+    struct stat s0,s2;
+    if(stat(t0,&s0)||stat(t2,&s2)||s0.st_size<=0||s2.st_size<=0){row("NOT_RUN",p->cell,"guard","missing or empty tape");return;}
     if (same_file(t0, t2)) { row("VACUOUS", p->cell, "guard", "O0 tape == O2 tape: nothing for the flags to differ on"); return; }
-    for (int f = 0; f < 6; f++) for (int t = 0; t < 6; t++) {
+    for (int f = first; f < first+count; f++) {
+        int64_t start=sy_now_ms();
+        for (int t = 0; t < 6; t++) {
         char img[4400]; { if (cx_fmt(img, sizeof img, "%s/%s.%s.%s", work, p->name, fslug[f], tslug[t])) { fprintf(stderr, "opt-corpus-gen: text too long for img\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.%s", fslug[f], tslug[t])) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
         if (compile_with("product", a, b, flags[f], targets[t], img, &r) || r.rc) { row("NOT_RUN", p->cell, lab, "product compile failed"); np_free(&r); continue; } np_free(&r);
         if (t == 0) { char *v[] = { img, 0 }; char d[200]; if (run(v, 3, &r)) row("NOT_RUN", p->cell, lab, "image did not run"); else { { if (cx_fmt(d, sizeof d, "exit %d, stdout literal", p->exit_want)) { fprintf(stderr, "opt-corpus-gen: text too long for d\n"); exit(2); } } char l2[220]; { if (cx_fmt(l2, sizeof l2, "%s.executes", lab)) { fprintf(stderr, "opt-corpus-gen: text too long for l2\n"); exit(2); } } check(exact(&r, p->stdout_want, p->exit_want), p->cell, l2, exact(&r, p->stdout_want, p->exit_want) ? d : "stdout or exit differs from literal"); } np_free(&r); }
-        if (ref[0]) { char rimg[4400]; { if (cx_fmt(rimg, sizeof rimg, "%s.ref", img)) { fprintf(stderr, "opt-corpus-gen: text too long for rimg\n"); exit(2); } } char l2[220]; { if (cx_fmt(l2, sizeof l2, "%s.image-equals-reference", lab)) { fprintf(stderr, "opt-corpus-gen: text too long for l2\n"); exit(2); } }
-            if (compile_with(ref, a, b, flags[f], targets[t], rimg, &r) || r.rc) row("NOT_RUN", p->cell, l2, "reference compile failed"); else check(same_file(img, rimg), p->cell, l2, "byte equality"); np_free(&r); }
+        if (ref[0]) {
+            char ri[4600],second[4600],label[256];
+            if(cx_fmt(ri,sizeof ri,"%s.ref",img))die("reference path");
+            path(second,sizeof second,repeat_dir,strrchr(img,'/')+1);
+            if(compile_with(ref,a,b,flags[f],targets[t],ri,&r)||r.rc){
+                row("NOT_RUN",p->cell,lab,"reference compile failed");np_free(&r);continue;
+            }
+            np_free(&r);
+            if(cx_fmt(label,sizeof label,"%s.image-structure",lab))die("label bound");
+            check(ri_equal(img,ri,t),p->cell,label,"target, executable entry and segment permissions");
+            if(cx_fmt(label,sizeof label,"%s.image-reproducible",lab))die("label bound");
+            int repeated=!compile_with("product",a,b,flags[f],targets[t],second,&r)&&!r.rc&&same_file(img,second);
+            np_free(&r);check(repeated,p->cell,label,"same input and flags, separate output directory, full bytes");
+            if(cx_fmt(label,sizeof label,"%s.execution",lab))die("label bound");
+            char *qemu=t==1?getenv("QEMU_AARCH64"):0;
+            if(t){
+                fprintf(res,"UNVERIFIED\t%s\t%s\tno native target execution\n",p->cell,label);
+                if(!qemu||qemu[0]!='/'||access(qemu,X_OK))continue;
+                if(cx_fmt(label,sizeof label,"%s.qemu-reference",lab))die("label bound");
+            }
+            char *exec_ref[]={qemu?qemu:ri,qemu?ri:0,0};
+            int rok=!run(exec_ref,3,&r)&&exact(&r,p->stdout_want,p->exit_want);np_free(&r);
+            check(rok,p->cell,label,"classic executable stdout, stderr and rc against literal");
+            if(qemu){char *exec_product[]={qemu,img,0};int pok=!run(exec_product,3,&r)&&exact(&r,p->stdout_want,p->exit_want);
+                np_free(&r);check(pok,p->cell,lab,"arm64 product execution against literal");}
+        }
+    }
+        fprintf(res,"FLAG_TIMING\t%s\t%s\tms=%lld\n",p->cell,flags[f],(long long)(sy_now_ms()-start));
+        fflush(res);
     }
     if (!ref[0]) { { if (cx_fmt(lab, sizeof lab, "%s.six-targets", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } fprintf(res, "UNVERIFIED\t%s\t%s\tno REF: foreign-target images not compared\n", p->cell, lab); }
 }
 
-static void group_closure(void) {
-    for (int i = 0; i < NPROG; i++) { const Prog *p = &progs[i]; char a[4400], b[4400]; np_result r; sources(p, a, sizeof a, b, sizeof b);
-        for (int f = 0; f < 2; f++) { const char *fl = f ? "-O2" : "-O1"; char pt[4400], rt[4400], lab[200]; { if (cx_fmt(pt, sizeof pt, "%s/%s.%s.tape", work, p->name, fl + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for pt\n"); exit(2); } } { if (cx_fmt(rt, sizeof rt, "%s/%s.%s.ref.tape", work, p->name, fl + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for rt\n"); exit(2); } } { if (cx_fmt(lab, sizeof lab, "%s.%s.tape-equals-reference", p->name, fl + 1)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } }
-            if (!ref[0]) { fprintf(res, "UNVERIFIED\tclosure.reference-tape\t%s\tno REF\n", lab); continue; }
-            if (compile_with("product", a, b, fl, 0, pt, &r) || r.rc) { row("NOT_RUN", "closure.reference-tape", lab, "product tape failed"); np_free(&r); continue; } np_free(&r);
-            if (compile_with(ref, a, b, fl, 0, rt, &r) || r.rc) { row("NOT_RUN", "closure.reference-tape", lab, "reference tape failed"); np_free(&r); continue; } np_free(&r);
-            check(same_file(pt, rt), "closure.reference-tape", lab, "byte equality"); }
-        { char nf[4400], o0[4400], lab[200]; { if (cx_fmt(nf, sizeof nf, "%s/%s.noflag.img", work, p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for nf\n"); exit(2); } } { if (cx_fmt(o0, sizeof o0, "%s/%s.O0.img", work, p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for o0\n"); exit(2); } }
-          if (compile_with("product", a, b, 0, targets[0], nf, &r) || r.rc) { row("NOT_RUN", "default.native-image", p->name, "no-flag compile failed"); np_free(&r); continue; } np_free(&r);
-          if (compile_with("product", a, b, "-O0", targets[0], o0, &r) || r.rc) { row("NOT_RUN", "default.native-image", p->name, "-O0 compile failed"); np_free(&r); continue; } np_free(&r);
-          { if (cx_fmt(lab, sizeof lab, "%s.noflag-equals-O0-bytes", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } check(same_file(nf, o0), "default.native-image", lab, "byte equality");
-          char *v[] = { nf, 0 }; { if (cx_fmt(lab, sizeof lab, "%s.noflag-executes", p->name)) { fprintf(stderr, "opt-corpus-gen: text too long for lab\n"); exit(2); } } if (run(v, 3, &r)) row("NOT_RUN", "default.native-image", lab, "image did not run"); else { check(exact(&r, p->stdout_want, p->exit_want), "default.native-image", lab, "literal stdout and exit"); } np_free(&r); } }
+static int closure_build(const char *compiler,const char *a,const char *b,const char *flag,const char *target,const char *output){
+    np_result r={0};
+    int ok=!compile_with(compiler,a,b,flag,target,output,&r)&&!r.rc;
+    np_free(&r);
+    return ok;
+}
+static int closure_run(char **argv,const Prog *p){
+    np_result r={0};
+    int ok=!run(argv,4,&r)&&exact(&r,p->stdout_want,p->exit_want);
+    np_free(&r);
+    return ok;
+}
+static int closure_e4(const char *level,const char *input,const char *expected,int classic){
+    size_t n=0;
+    char *bytes=cx_read(expected,&n);
+    if(!bytes||!n){free(bytes);return 0;}
+    char *v[]={"sh","-c","exec sh \"$1\" stream e4 --level \"$2\" --raw < \"$3\"","closure-e4",product,(char *)level,(char *)input,0};
+    np_result r={0};
+    int ok=!run(v,12,&r)&&!r.rc&&!r.errn&&r.outn==n+(classic?5:0)&&!memcmp(r.out,bytes,n)&&
+        (!classic||!memcmp(r.out+n,".end\n",5));
+    np_free(&r);free(bytes);
+    return ok;
+}
+static void group_closure(int first,int count,const char *host){
+    const char *cell="closure.reference-tape";
+    char *helper[]={bound,"--helper",0},why[256];np_result h={0};
+    if(np_run(helper,root,0,10,&h,why,sizeof why)||h.rc||h.outn<2||
+       h.out[0]!='/'||h.out[h.outn-1]!='\n'||tx_copy(bound,sizeof bound,h.out,h.outn-1))die("bound helper");
+    np_free(&h);
+    for(int i=first;i<first+count;i++){
+        const Prog *p=&progs[i];char a[4400],b[4400],dir[4400];
+        sources(p,a,sizeof a,b,sizeof b);path(dir,sizeof dir,work,p->name);
+        if(mkdir(dir,0700))die("closure program directory");
+        char zero[4600],one[4600],def[4600];
+        path(zero,sizeof zero,dir,"O0.img");path(one,sizeof one,dir,"O1.img");path(def,sizeof def,dir,"default.img");
+        int default_ok=closure_build("product",a,b,0,targets[0],def)&&closure_build("product",a,b,"-O1",targets[0],one);
+        check(default_ok&&same_file(def,one),"default.native-image",p->name,"default and explicit O1 images");
+        char *xd[]={def,0};
+        check(default_ok&&closure_run(xd,p),"default.native-image",p->name,"default stdout and exit");
+        if(i==0)check(default_ok&&closure_build("product",a,b,"-O0",targets[0],zero)&&!same_file(zero,one),"default.native-image",p->name,"O0 and O1 witness");
+        for(int f=0;f<2;f++){
+            const char *flag=f?"-O2":"-O1";char leveldir[4600],tape[4800],repeat[4800],rt[4800],img[4800],hi[4800],lab[160];
+            path(leveldir,sizeof leveldir,dir,flag+1);if(mkdir(leveldir,0700))die("closure level directory");
+            if(cx_fmt(lab,sizeof lab,"%s.%s",p->name,flag+1))die("closure label");
+            path(tape,sizeof tape,leveldir,"product.tape");path(repeat,sizeof repeat,leveldir,"repeat.tape");
+            path(rt,sizeof rt,leveldir,"classic.tape");path(img,sizeof img,leveldir,"tape.img");path(hi,sizeof hi,leveldir,"host.img");
+            int built=closure_build("product",a,b,flag,0,tape);
+            check(built&&closure_build("product",a,b,flag,0,repeat)&&same_file(tape,repeat),cell,lab,"repeat emission");
+            check(built&&closure_e4(f?"2":"1",tape,tape,0),cell,lab,"same-level E4 fixed point");
+            char *xi[]={img,0};
+            check(built&&closure_build("product",tape,"","-O0",targets[0],img)&&closure_run(xi,p),cell,lab,"execute emitted tape versus hand literal");
+            if(host&&*host){
+                char *hv[]={(char *)host,"-std=c99","-w",(char *)flag,a,b[0]?b:"-o",b[0]?"-o":hi,b[0]?hi:0,0},*xh[]={hi,0};
+                np_result r={0};int cok=!run(hv,20,&r)&&!r.rc;np_free(&r);
+                check(cok&&closure_run(xh,p),cell,lab,"host CC stdout and exit versus same hand literal");
+            }else fprintf(res,"UNVERIFIED\t%s\t%s\tno host compiler\n",cell,lab);
+            if(!ref[0]){fprintf(res,"UNVERIFIED\t%s\t%s\tno classic reference\n",cell,lab);continue;}
+            char ph[65],rh[65];int classic=closure_build(ref,a,b,flag,0,rt)&&shafile(rt,rh);
+            check(classic&&built&&shafile(tape,ph),cell,lab,"product and classic tape identities");
+            if(classic&&built&&shafile(tape,ph))fprintf(res,"TAPE\t%s\tproduct=%s\tclassic=%s\n",lab,ph,rh);
+            if(f){
+                char raw[4800],sealed[4800];size_t n=0;
+                path(raw,sizeof raw,leveldir,"classic-O0.tape");path(sealed,sizeof sealed,leveldir,"classic-O0.framed.tape");
+                char *data=closure_build(ref,a,b,"-O0",0,raw)?cx_read(raw,&n):0;
+                if(data&&n){FILE *fp=fopen(sealed,"wbx");if(!fp||fwrite(data,1,n,fp)!=n||fwrite(".end\n",1,5,fp)!=5||fclose(fp))die("frame reference tape");}
+                free(data);
+                check(n&&classic&&closure_e4("2",sealed,rt,1),cell,lab,"classic O0 plus end frame through E4 versus framed classic O2");
+            }
+        }
+    }
 }
 
 static void group_cli(void) {
@@ -210,15 +310,25 @@ int main(int argc, char **argv) {
     if ((argc != 4 && argc != 5 && argc != 6) || !realpath(argv[1], root) || argv[2][0] != '/' || (argc >= 5 && !realpath(argv[4], ref)) || (argc == 6 && !realpath(argv[5], tcc))) { fputs("usage: ROOT ABS_OUT corpus-0..corpus-9|closure|cli [REF] | ccdiff|ccdiff-2|ccdiff-3|ccdiff-4 HOST_CC [TCC]\n", stderr); return 2; }
     if (ref[0] && strncmp(argv[3],"ccdiff",6) && rw_open(root,ref,reference_dir,sizeof reference_dir)) return 2;
     const char *group = argv[3]; int gp = -1, gl = tx_eqz(group, "closure"), gi = tx_eqz(group, "cli"), gc = tx_eqz(group, "ccdiff"), gc2 = tx_eqz(group, "ccdiff-2"), gc3 = tx_eqz(group, "ccdiff-3"), gc4 = tx_eqz(group, "ccdiff-4");
-    if (!strncmp(group, "corpus-", 7) && group[7] >= '0' && group[7] < '0' + NPROG && !group[8]) gp = group[7] - '0';
+    int first=0,count=6,closure_first=0,closure_count=NPROG;
+    if(tx_eqz(group,"closure-0-4")||tx_eqz(group,"closure-5-9")){gl=1;closure_first=group[8]-'0';closure_count=5;}
+    if(!strncmp(group,"closure-",8)&&group[8]>='0'&&group[8]<='9'&&!group[9]){gl=1;closure_first=group[8]-'0';closure_count=1;}
+    if (!strncmp(group,"corpus-",7)&&group[7]>='0'&&group[7]<'0'+NPROG){
+        const char *suffix=group+8;
+        if(!*suffix)gp=group[7]-'0';
+        else {
+            const char *pairs[]={"-O0-O1","-O-O2","-O3-Os"};
+            for(int i=0;i<3;i++)if(tx_eqz(suffix,pairs[i])){gp=group[7]-'0';first=i*2;count=2;}
+        }
+    }
     if (gp < 0 && !gl && !gi && !gc && !gc2 && !gc3 && !gc4) die("group");
-    if (tcc[0] && !gc && !gc2 && !gc3 && !gc4) die("TCC only supported for ccdiff groups");
+    if (tcc[0] && !gl && !gc && !gc2 && !gc3 && !gc4) die("TCC only supported for ccdiff groups");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[2])) { fprintf(stderr, "opt-corpus-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, group); if (mkdir(work, 0700)) die("group dir must be absent");
     path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
     char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, group)) { fprintf(stderr, "opt-corpus-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { char hp[65], hr[65]; if (!shafile(product, hp)) die("product"); fprintf(res, "IDENTITY\tproduct=%s\n", hp); if (ref[0]) { if (!shafile(ref, hr)) die("ref"); fprintf(res, "IDENTITY\tref=%s\n", hr); } }
-    if (gp >= 0) corpus_program(&progs[gp]);
-    else if (gl) group_closure(); else if (gc) group_ccdiff(progs, NPROG); else if (gc2) group_ccdiff(progs2, NPROG2); else if (gc3) group_ccdiff(progs3, NPROG3); else if (gc4) group_ccdiff(progs4, NPROG4); else group_cli();
+    if (gp >= 0) corpus_program(&progs[gp],first,count);
+    else if (gl) group_closure(closure_first,closure_count,tcc); else if (gc) group_ccdiff(progs, NPROG); else if (gc2) group_ccdiff(progs2, NPROG2); else if (gc3) group_ccdiff(progs3, NPROG3); else if (gc4) group_ccdiff(progs4, NPROG4); else group_cli();
     fprintf(res, "SUMMARY\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun); fclose(res);
     printf("OPT_CORPUS\tgroup=%s\tpass=%d\tfail=%d\tvacuous=%d\tnot_run=%d\n", group, npass, nfail, nvac, nnotrun);
     return nfail || nvac || nnotrun ? 1 : 0;

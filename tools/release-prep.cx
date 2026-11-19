@@ -6,7 +6,7 @@
  *
  * Reads only: DIR/SHA256SUMS (unisacc.com line; DIR/unisacc.com is hashed when present and
  * must match), DIR/build.json "commit" (unless --commit), the strict evidence TSV (default:
- * newest committed release/evidence/vVERSION-strict-*.tsv, devsvc qualify format: 9-column
+ * last matching release/evidence/vVERSION-strict-*.tsv in filename order, including untracked files, devsvc qualify format: 9-column
  * rows, RAW BATCH_RUN lines, SUMMARY), release/evidence/PREV/expected-fail.tsv,
  * release/evidence/VERSION/{chain-promote.txt,pack-run.out} when present,
  * release/notes-PREV.md (previous APE sha256 for the rollback target), build/pkg-gaps.tsv.
@@ -35,6 +35,7 @@
  * ratchets 55 s). Check: tools/check-release-prep.cx. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.posix
 #pragma unisa use sys.env
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
@@ -108,14 +109,34 @@ static void read_layout(void) {
 
 /* ---- strict evidence ---- */
 static void find_strict(void) {
-    np_result r = {0}; char pat[128]; char *v[] = {"git", "ls-files", "--", pat, 0}; long at = 0, ll; const char *ls; char best[512] = {0};
+    char dir[4400],pre[128],best[512]={0},why[256];static char names[262144];
     if (strictp[0]) return;
-    cx_fmt(pat, sizeof pat, "release/evidence/v%s-strict-*.tsv", ver);
-    if (run(v, here, 30, &r)) die("STRICT", "git ls-files failed");
-    while (next_line(r.out, (long)r.outn, &at, &ls, &ll)) if (ll > 0 && ll < 500) { char c[512]; mm_copy(c, sizeof c, ls, ll); c[ll] = 0; if (strcmp(c, best) > 0) mm_copy(best, sizeof best, c, ll + 1); }
-    np_free(&r);
-    if (!best[0]) die("STRICT", "no committed release/evidence/vVERSION-strict-*.tsv; pass --strict");
-    if (path2(strictp, sizeof strictp, here, best)) die("STRICT", "path");
+    if(path2(dir,sizeof dir,here,"release/evidence") || cx_fmt(pre,sizeof pre,"v%s-strict-",ver) ||
+       cx_fmt(why,sizeof why,"no release/evidence/%s*.tsv; pass --strict FILE",pre))die("STRICT","path");
+    int fd=sy_open_read(dir);
+    if(fd==-ENOENT)die("STRICT",why);
+    if(fd<0)die("STRICT","release/evidence unreadable");
+    int count=sy_dir_names(fd,names,sizeof names);sy_close(fd);
+    if(count<0)die("STRICT","cannot enumerate release/evidence");
+    const char *name=names;size_t prefix=strlen(pre);int matches=0;
+    for(int i=0;i<count;i++,name+=strlen(name)+1){
+        size_t n=strlen(name);
+        if(n<prefix+4 || strncmp(name,pre,prefix) || strcmp(name+n-4,".tsv"))continue;
+        char p[4400];sy_stat_t st;
+        if(path2(p,sizeof p,dir,name) || sy_lstat(p,&st))die("STRICT","cannot stat evidence");
+        if(st.kind!='f')continue;
+        matches++;
+        if(strcmp(name,best)>0 && cx_fmt(best,sizeof best,"%s",name))die("STRICT","filename");
+    }
+    if(!best[0])die("STRICT",why);
+    if(path2(strictp,sizeof strictp,dir,best))die("STRICT","path");
+    char rel[640];np_result result={0};
+    if(path2(rel,sizeof rel,"release/evidence",best))die("STRICT","path");
+    char *tracked[]={"git","--literal-pathspecs","ls-files","--error-unmatch","--",rel,0};
+    int rc=run(tracked,here,10,&result);np_free(&result);
+    if(rc!=0 && rc!=1)die("STRICT","cannot determine tracking state");
+    if(matches>1)sy_eprintf("WARN\tSTRICT_MULTIPLE\tmatches=%d\tlexicographically last selected; use --strict FILE to override\n",matches);
+    sy_printf("STRICT_SOURCE\tselected=%s\ttracked=%s\n",rel,rc?"no":"yes");
 }
 static int find_b(const char *id) { int i; for (i = 0; i < nb; i++) if (tx_eqz(bid[i], id)) return i; return -1; }
 static void read_strict(void) {

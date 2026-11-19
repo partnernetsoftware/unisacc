@@ -622,6 +622,43 @@ static int x_candidate_ok(const char *sha) {
     free(cur);
     return ok;
 }
+/* A prior phase can commit the exact table before X. Bind its raw bytes to
+ * the last touching commit, including ci_run_id. Verify publication before
+ * appending any new receipt. */
+static int committed_x(char *ref,long cap) {
+    char spec[128],stored[64],current[64];
+    char *last[]={"git","log","-1","--format=%H","HEAD","--","release/candidate.tsv",0};
+    char *blob[]={"git","rev-parse","--verify",spec,0};
+    char *work[]={"git","hash-object","--no-filters","--","release/candidate.tsv",0};
+    char *present[]={"git","ls-tree","HEAD","--","release/candidate.tsv",0};
+    char entry[256];
+    if(run(present,15,entry,sizeof entry))refuse("X_PUSHED","cannot inspect HEAD candidate entry");
+    if(!entry[0])return 0;
+    if(run(last,15,ref,cap) || !is_hex(ref,40) || cx_fmt(spec,sizeof spec,"%s:release/candidate.tsv",ref) ||
+       run(blob,15,stored,sizeof stored) || !is_hex(stored,40) ||
+       run(work,15,current,sizeof current) || !is_hex(current,40))refuse("X_PUSHED","cannot compare committed candidate bytes");
+    return tx_eqz(stored,current);
+}
+/* Preserve every historical X row. Even an earlier conflicting row matters
+ * when the last row happens to match. */
+static int check_x_index(const char *expected) {
+    long n,at=0,len;
+    const char *line;
+    int found=0;
+    char *text=slurp(indexp,&n);
+    if(!text){if(errno==ENOENT)return 0;refuse("X_INDEX","cannot read INDEX.tsv");}
+    while(line_next(text,n,&at,&line,&len)){
+        long pos,width;
+        if(tx_field(line,len,'\t',0,&pos,&width) || !tx_same(line+pos,width,"exec-1-X-commit",15))continue;
+        if(!expected || tx_field(line,len,'\t',3,&pos,&width) || !tx_same(line+pos,width,expected,40))
+            refuse("X_INDEX_CONFLICT","exec-1-X-commit already names a different commit");
+        found=1;
+    }
+    free(text);return found;
+}
+static void record_x(void) {
+    if(!check_x_index(xsha))index_row("X-commit","-",xsha,"release/candidate.tsv");
+}
 static void step_x(void) {
     char head[64], p[4500], msg[200];
     char *v[] = {"sh", checkout_product, "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", "--push", 0};
@@ -644,17 +681,24 @@ static void step_x(void) {
         }
     }
     if (index_ref("exec-1-X-commit", "commit-X", xsha, sizeof xsha) && x_candidate_ok(xsha)) {
+        if(!dry)check_x_index(xsha);
         show(v, "DONE");
         say("SKIP", "X already recorded", xsha);
     } else if (cur_step < from_step) {
         refuse("RESUME", "no X recorded in INDEX.tsv for a verify-only step");
+    } else if (!dry && committed_x(head,sizeof head)) {
+        if(!pushed(head))refuse("X_PUSHED","committed candidate is not an ancestor of origin/main");
+        cx_fmt(xsha,sizeof xsha,"%s",head);
+        record_x();
+        say("SKIP","X already committed and pushed",xsha);
     } else {
+        if(!dry)check_x_index(0);
         if (act(v, 55, 0, 0)) refuse("X_PUSHED", "devsvc git commit X failed");
         if (dry) { gate_deferred("X_PUSHED", "X not created in --dry"); cx_fmt(xsha, sizeof xsha, "{commit-x}"); return; }
         { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0};
           if (run(g, 15, head, sizeof head) || !x_candidate_ok(head)) refuse("X_PUSHED", "X commit not found for the current candidate");
           cx_fmt(xsha, sizeof xsha, "%s", head); }
-        index_row("X-commit", "-", xsha, "release/candidate.tsv");
+        record_x();
     }
     if (!pushed(xsha)) refuse("X_PUSHED", "X is not an ancestor of origin/main");
     gate_pass("X_PUSHED", xsha);

@@ -115,6 +115,36 @@ int main(int argc, char **argv) {
 
     /* (1) positive: replay 0.0.74 with the real ratchets run on the frozen commit */
     if (part == 3) {
+        /* Stage A has written the evidence in the checkout, before git add. */
+        char work[4400], evidence[4500], strict[4600], result[4500], oid[48];
+        if(cx_fmt(work,sizeof work,"%s/discovery",tmp) || cx_fmt(evidence,sizeof evidence,"%s/release/evidence",work) ||
+           cx_fmt(strict,sizeof strict,"%s/v0.0.74-strict-local.tsv",evidence) || cx_fmt(result,sizeof result,"%s/drafts",work) ||
+           sy_mkdir_all(evidence,0700))return 2;
+        char *init[]={"git","-C",work,"init","-q",0};
+        char *ci[]={"git","-C",work,"-c","user.name=fixture","-c","user.email=f@localhost","-c","commit.gpgsign=false","commit","--allow-empty","-qm","freeze",0};
+        char *rev[]={"git","-C",work,"rev-parse","HEAD",0};
+        if(!runv(init,10,&rc)||rc||!runv(ci,10,&rc)||rc||!runv(rev,10,&rc)||rc||strlen(out)!=41)return 2;
+        out[40]=0;if(cx_fmt(oid,sizeof oid,"%s",out))return 2;
+        char rats[4400],source[180];
+        if(cx_fmt(rats,sizeof rats,"%s/rats",work) || cx_fmt(source,sizeof source,"SOURCE\tfrozen-commit\tcommit=%s\n",oid) ||
+           wr(work,"rats",source))return 2;
+        char *discover[]={"env","-C",work,bin,"0.0.74","--layout",lay,"--commit",oid,"--out",result,"--ratchets",rats,0};
+        if(wr(evidence,"v0.0.75-strict-wrong.tsv","other version\n"))return 2;
+        check("missing-strict-names-version-and-override",runv(discover,10,&rc)&&rc==2&&has(out,"v0.0.74-strict-*.tsv")&&has(out,"--strict"));
+        if(wr(evidence,"v0.0.74-strict-local.tsv","incomplete evidence\n"))return 2;
+        check("untracked-strict-reaches-content-validation",runv(discover,10,&rc)&&rc==2&&has(out,"no batch rows"));
+        check("unique-untracked-selection-reported",has(out,"selected=release/evidence/v0.0.74-strict-local.tsv\ttracked=no")&&!has(out,"STRICT_MULTIPLE"));
+        if(wr(evidence,"v0.0.74-strict-first.tsv","older draft\n"))return 2;
+        char *add[]={"git","-C",work,"add","--","release/evidence/v0.0.74-strict-local.tsv",0};
+        if(!runv(add,10,&rc)||rc)return 2;
+        check("multiple-same-version-warns-reports-tracked-choice",runv(discover,10,&rc)&&rc==2&&has(out,"WARN\tSTRICT_MULTIPLE\tmatches=2")&&has(out,"selected=release/evidence/v0.0.74-strict-local.tsv\ttracked=yes"));
+        const char *valid="batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "probe\tproduct-qualification\tPASS\t0\t" T_APE "\t1\t0\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=probe\tstatus=PASS\trc=0\tcandidate=" T_APE "\n"
+            "SUMMARY\tape_sha256=" T_APE "\n";
+        char *unstage[]={"git","-C",work,"rm","--cached","--","release/evidence/v0.0.74-strict-local.tsv",0};
+        if(!runv(unstage,10,&rc)||rc||sy_write_file(strict,valid,strlen(valid),0644))return 2;
+        check("untracked-strict-produces-verified-drafts",runv(discover,10,&rc)&&rc==0&&has(out,"batches=1\tpass=1\tfail=0\tuncovered=0"));
         /* Only draft structure is observed in this invocation. Supply the fixture
            input separately; the ratchets batch verifies the real frozen-tree run. */
         char supplied[4500];

@@ -4,6 +4,7 @@
  * candidate= is the sha256 of the layout copy of itself (id "bad" prints a wrong candidate).
  * It also refuses (rc 3/4) when the layout root has no git inventory or unisacc.com is a link.
  * Optional first argument selects a prebuilt dvqualify for red/green comparison.
+ * --evidence, --layout, --resume and --route partition the ordinary assertions.
  * Last case: the devsvc entry `devsvc qualify --list` of the real repository answers.
  * --gate mutation control: just before the timeout branch in run_set, set
  * admit=1 when admitting_since is set and the elapsed time reaches its limit.
@@ -14,6 +15,8 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
+#pragma unisa use sys.netraw
+#pragma unisa use sys.net
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
@@ -58,6 +61,122 @@ static const char *ape_text =
     "if [ \"$4\" = lost ]; then printf 'BATCH_RUN\\tid=lost\\tstatus=UNKNOWN\\trc=0\\ttransport=-1\\tcandidate=%s\\n' \"$s\"; exit 0; fi\n"
     "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
 
+/* The full queue and the abandoned bound pathname are real Linux sockets. */
+static int wire_has_field(const char *wire,const char *field) {
+    size_t len=strlen(field);
+    while(*wire){
+        size_t n=strcspn(wire,"\t");
+        if(n==len && !memcmp(wire,field,n))return 1;
+        wire+=n;
+        if(*wire)wire++;
+    }
+    return 0;
+}
+
+static int shadow_fixture(char *probe,char *starts,char *marks) {
+    sy_addr_t peer;peer.family=SY_AF_UNIX;
+    char sockenv[256],raw[600]="",wire[512];unsigned char address[128];
+    if(cx_fmt(peer.path,sizeof peer.path,"%s/observer.s2",tmp) ||
+       cx_fmt(sockenv,sizeof sockenv,"DEVSVC_SOCK=%s/observer",tmp))return 2;
+    int len=sy_sa_unix(address,sizeof address,peer.path);
+    int af=sy_sock_num(SY_SN_AF_UNIX),type=sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK;
+    int rx=sy_sock_open(af,type),tx=sy_sock_open(af,type);
+    if(rx<0 || tx<0 || len<=0 || sy_sock_bind(rx,address,len))return 2;
+    for(int mode=0;mode<3;mode++){
+        if(mode==1){
+            int fill=0;long sent=1;
+            while(fill++<8192){
+                sent=sy_udp_send_to(tx,"x",1,&peer);
+                if(sent==1)continue;
+                if(sent!=-EAGAIN)return 2;
+                sy_close(tx);tx=sy_sock_open(af,type);
+                if(tx<0)return 2;
+                sent=sy_udp_send_to(tx,"x",1,&peer);
+                if(sent==-EAGAIN)break;
+                if(sent!=1)return 2;
+            }
+            if(sent!=-EAGAIN)return 2;
+        }
+        if(mode==2){sy_close(rx);rx=-1;}
+        char *v[]={"env",starts,sockenv,"DEVSVC_S2_SHADOW=1","QG_CASE=boundary",probe,repo,"--candidate",apep,"--ids","alpha",0};
+        int rc=-1;unsigned char *s=0;int64_t count=0;
+        if(put(tmp,"starts","",0600) || !runv(v,root,15,&rc) || sy_read_file(marks,&s,&count,1024))return 2;
+        free(s);
+        const char *p=strstr(out,"RAW\tBATCH_RUN\t"),*end=p?strchr(p,'\n'):0;
+        if(!mode && end && end-p<sizeof raw && !mm_copy(raw,sizeof raw,p,end-p))raw[end-p]=0;
+        check(mode==0?"shadow-one-start":mode==1?"shadow-full-keeps-raw-rc-starts":"shadow-dead-keeps-raw-rc-starts",
+              rc==0 && count==1 && end && raw[0] && end-p==strlen(raw) && !memcmp(p,raw,end-p));
+        if(!mode){
+            int launches=0,finishes=0;long n;
+            int reads=0;
+            while(reads++<16 && (n=sy_sock_recv(rx,wire,sizeof wire-1))>0){
+                wire[n]=0;if(!wire_has_field(wire,"id=alpha"))return 2;
+                if(!strncmp(wire,"kind=launch\t",12))launches++;
+                if(!strncmp(wire,"kind=finish\t",12))finishes++;
+            }
+            check("shadow-launch-and-finish-once",n==-EAGAIN && launches==1 && finishes==1);
+            /* Force serial order: both delimiter-bearing IDs finish before alpha. */
+            char *bad[]={"env",starts,sockenv,"DEVSVC_S2_SHADOW=1","QG_CASE=boundary",probe,repo,
+                         "--candidate",apep,"--jobs","1","--ids","bad\tid,bad\nid,alpha",0};
+            if(!runv(bad,root,15,&rc))return 2;
+            int counted=0,foreign=0;
+            for(int j=0;j<16 && (n=sy_sock_recv(rx,wire,sizeof wire-1))>0;j++){
+                wire[n]=0;
+                if(!wire_has_field(wire,"id=alpha"))foreign++;
+                if(!strncmp(wire,"kind=launch\t",12) && wire_has_field(wire,"dropped=4"))counted++;
+            }
+            check("shadow-delimiter-ids-counted-dropped",counted==1 && foreign==0);
+        }
+    }
+    sy_close(tx);sy_unlink(peer.path);
+    return 0;
+}
+
+/* Start a dedicated real service. Use its event API as the read barrier. */
+static int receiver_fixture(char *core) {
+    char instance[4400],self[4400],wire[600],job[64],sender[48];
+    if(cx_fmt(instance,sizeof instance,"UNISACC_DEVSVC_DIR=%s",tmp) ||
+       cx_fmt(self,sizeof self,"DEVSVC_SELF_BIN=%s",core) ||
+       cx_fmt(tmpenv,sizeof tmpenv,"TMPDIR=%s",tmp) ||
+       cx_fmt(job,sizeof job,"qualify-%ld-%d",sy_now_ms(),sy_pid()) ||
+       cx_fmt(sender,sizeof sender,"\tsender=%d\t",sy_pid()))return 2;
+    char *start[]={"env",instance,self,"DEVSVC_S2_SHADOW=1",core,"start","--ttl","45","--idle","30",0};
+    int rc=-1;if(!runv(start,root,10,&rc) || rc)return 2;
+    sy_addr_t peer;peer.family=SY_AF_UNIX;
+    if(cx_fmt(peer.path,sizeof peer.path,"%s/sock.s2",tmp))return 2;
+    int fd=sy_sock_open(sy_sock_num(SY_SN_AF_UNIX),sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK);
+    if(fd<0)return 2;
+    const char *ids[]={"ok","reordered","oversized","last"};
+    int seqs[]={2,1,3,4};
+    for(int i=0;i<4;i++){
+        if(cx_fmt(wire,sizeof wire,"kind=wait\tjob=%s\tid=%s\tcandidate=%064d\tattempt=0\tpid=0\tms=1\tload1=7.00\tdropped=0\tseq=%d",job,ids[i],0,seqs[i]))return 2;
+        long n=strlen(wire);if(i==2){memset(wire+n,'x',sizeof wire-n);n=sizeof wire;}
+        if(sy_udp_send_to(fd,wire,n,&peer)!=n)return 2;
+    }
+    char *events[]={"env",instance,core,"events","--since","0",0};
+    if(!runv(events,root,5,&rc)||rc)return 2;
+    check("receiver-authenticated-and-live",has(out,"\ts2.observe\t") && has(out,"\tid=ok\t") && has(out,"\tid=last\t") && has(out,sender));
+    check("receiver-rejects-reordered",!has(out,"\tid=reordered\t"));
+    check("receiver-rejects-oversized",!has(out,"\tid=oversized\t"));
+    long t0=sy_now_ms();
+    for(int i=0;i<40;i++){
+        if(cx_fmt(wire,sizeof wire,"kind=wait\tjob=%s\tid=burst\tcandidate=%064d\tattempt=0\tpid=0\tms=1\tload1=7.00\tdropped=0\tseq=%d",job,0,i+5))return 2;
+        long n=strlen(wire);if(sy_udp_send_to(fd,wire,n,&peer)!=n)return 2;
+    }
+    sy_close(fd);
+    /* A control request may be served between groups of 16 datagrams. */
+    for(int i=0;i<3;i++)if(!runv(events,root,5,&rc)||rc)return 2;
+    int writes=0;const char *p=out;
+    while((p=strstr(p,"\tid=burst\t"))){writes++;p++;}
+    int late=sy_now_ms()-t0>=1000;
+    if(!late)check("receiver-write-rate-bounded",writes>0 && writes<=32);
+    char *stop[]={"env",instance,core,"stop",0};
+    if(!runv(stop,root,5,&rc)||rc)return 2;
+    if(late){fprintf(stderr,"UNMEASURED\treceiver-burst-window\n");return 3;}
+    printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
+    return !!failed;
+}
+
 static int gate_fixture(void) {
     char probe[4300], marks[4300], option[4600];
     int rc=-1;
@@ -65,7 +184,7 @@ static int gate_fixture(void) {
        cx_fmt(marks,sizeof marks,"%s/starts",tmp) ||
        cx_fmt(option,sizeof option,"QG_STARTS=%s",marks)) return 2;
     const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
-    char *build[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",probe,0};
+    char *build[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","-DDVQUALIFY_S2_TAP","tools/dvqualify.cx","-o",probe,0};
     if(!runv(build,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
     const char *cases[]={"boundary","expired","drops","retry","retry-boundary"};
     for(int i=0;i<5;i++){
@@ -83,6 +202,7 @@ static int gate_fixture(void) {
     char *lost[]={"env","QG_CASE=boundary",option,probe,repo,"--candidate",apep,"--ids","lost",0};
     check("transport-failure-keeps-raw-and-names-reason",runv(lost,root,15,&rc) && rc==1 &&
           has(out,"\ttransport-failed-raw-neg1\nRAW\tBATCH_RUN\tid=lost\tstatus=UNKNOWN\trc=0\ttransport=-1\t"));
+    if(shadow_fixture(probe,option,marks))return 2;
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
     return !!failed;
 }
@@ -135,16 +255,23 @@ static int kit_fixture(void) {
 int main(int argc, char **argv) {
     char why[512]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
+    if(argc==3 && !strcmp(argv[1],"--s2-receiver")){
+        int result=receiver_fixture(argv[2]);char *del[]={"rm","-rf",tmp,0};
+        runv(del,0,10,&rc);return result;
+    }
     int gate=argc==2 && !strcmp(argv[1],"--gate");
     int kit=argc==2 && !strcmp(argv[1],"--kit");
-    if (!gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    int part=0;
+    const char *parts[]={"--evidence","--layout","--resume","--route"};
+    if(argc==2)for(int i=0;i<4;i++)if(!strcmp(argv[1],parts[i]))part=i+1;
+    if (!part && !gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else if(kit) {
         const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
         if(cx_fmt(bin,sizeof bin,"%s/dvqualify",tmp))return 2;
         char *v[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",bin,0};
         if(!runv(v,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
     }
-    else if(!gate) { char s[4200]; if (argc != 1 || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
+    else if(!gate && part!=4) { char s[4200]; if ((!part && argc != 1) || cx_fmt(bin, sizeof bin, "%s/dvqualify", tmp) || cx_fmt(s, sizeof s, "%s/tools/dvqualify.cx", root) || tq_native(root, s, bin, why, sizeof why)) { fprintf(stderr, "build failed: %s\n", why); return 2; } }
     if (cx_fmt(repo, sizeof repo, "%s/repo", tmp) || cx_fmt(apep, sizeof apep, "%s/ape.com", tmp) || cx_fmt(ev, sizeof ev, "%s/ev.tsv", tmp) ||
         cx_fmt(tmpenv, sizeof tmpenv, "TMPDIR=%s", tmp)) return 2;
     /* fixture repository with a domain index and one committed file */
@@ -163,6 +290,7 @@ int main(int argc, char **argv) {
            sy_write_file(apep,script,strlen(script),0755))return 2;
         int r=gate_fixture();char *del[]={"rm","-rf",tmp,0};runv(del,0,20,&rc);return r;
     }
+    if(!part || part==1){
     /* Q1 list of the product-qualification set follows the domain index */
     { char *v[] = {bin, repo, "--set", "product-qualification", "--list", 0};
       check("list-domain-set", runv(v, 0, 30, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\tproduct-qualification\twindow=1") &&
@@ -232,6 +360,13 @@ int main(int argc, char **argv) {
         int resumed=runv(v,tmp,20,&rc) && rc==0 && !has(out,"QUALIFY_BATCH\talpha\t");
         check("resume-after-sigkill-relative-hardlink",busy && killed && reaped && resumed);
     }
+    }
+    if(!part || part==2){
+    /* The reuse assertion needs a previously published layout. */
+    if(part==2){
+        char *seed[]={bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
+        if(!runv(seed,0,40,&rc) || rc)return 2;
+    }
     /* Q3 valid-only run exits 0 */
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
       char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
@@ -246,6 +381,8 @@ int main(int argc, char **argv) {
       if(!runv(advance,0,20,&rc)||rc)return 2;
       check("same-ape-different-head-new-layout",runv(v,0,40,&rc) && rc==0 &&
             has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t") && has(out,"QUALIFY_BATCH\talpha\tPASS")); }
+    }
+    if(!part || part==3){
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
                    "--segment-batches", "2", 0};
       int ok = runv(v, 0, 40, &rc); char *e = cx_read(ev, 0);
@@ -277,6 +414,8 @@ int main(int argc, char **argv) {
       check("resume-keeps-real-fail-retries-invalid", ok && runv(again, 0, 40, &rc) && rc == 1 &&
             !has(out, "QUALIFY_BATCH\treject\t") && has(out, "QUALIFY_BATCH\tbad\tINVALID"));
     }
+    }
+    if(!part || part==4){
     { char timing[4400];
       if(cx_fmt(timing,sizeof timing,"%s/timing",tmp) || tq_native(root,"tools/dvtiming.cx",timing,why,sizeof why))return 2;
       if(put(tmp,"events.tsv","EV\t1\t100\tphase\tcmd=qualify\tphase=total\tms=123\tinput=fixture\trc=0\tload1=1\tjob=fixture\n",0600))return 2;
@@ -286,6 +425,7 @@ int main(int argc, char **argv) {
     { const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the real devsvc route check */
       char *v[] = {"sh", (char*)launcher, "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
       check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }
+    }
     { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 0, 30, &rc); }
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;

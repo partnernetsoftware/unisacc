@@ -65,6 +65,8 @@
 #pragma unisa use net.unix
 #pragma unisa use net.tcp
 #pragma unisa use net.sock
+#pragma unisa use sys.ffi
+#pragma unisa use sys.netraw
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -407,6 +409,7 @@ static int native_try_fast(const char *root, const char *tool, char *bin, int ca
     return 0;
 }
 static int in_native_worker;
+#define S2_TOOL "tools/dvqualify.cx@s2-v2"
 static long native_max_ms(void) {
     const char *v = getenv("DEVSVC_NATIVE_MAX_MS");
     long n = (v && v[0]) ? atol(v) : 0;
@@ -425,7 +428,8 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     if (strstr(tool, "..") || tool[0] == '/' || tool[0] == '-') return -EINVAL;
     static char cl[1 << 16]; long cn = 0;
     char phex[65]; long rl = (long)strlen(root); int fileref = 0;
-    F(src, sizeof src, "%s/%s", root, tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
+    int s2=!strcmp(tool,S2_TOOL);
+    F(src, sizeof src, "%s/%s", root, s2?"tools/dvqualify.cx":tool); F(prod, sizeof prod, "%s/%s", root, cfg.product);
     if (sy_exists(src) != 1) return -ENOENT;
     if (sy_realpath(prod, real, sizeof real) < 0) return -ENOENT;
     native_dirs(0, "-", 0, 0, mdir, sizeof mdir);
@@ -516,7 +520,8 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
         if (crem > 50000) crem = 50000;
         F(tmp, sizeof tmp, "%s.tmp%d", bin, sy_pid());
         F(nlog, sizeof nlog, "%s.build.log", bin);
-        {   char *v[] = {"sh", prod, src, "-o", tmp, 0}; int lf = sy_open(nlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        {   char *v[] = {"sh", prod, src, "-o", tmp, 0, 0}; int lf = sy_open(nlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if(s2)v[5]="-DDVQUALIFY_S2_TAP=1";
             sy_spawn_init(&o); o.argv = v; o.cwd = root; o.pgroup = in_native_worker ? 0 : -1; o.deadline_ms = crem;
             o.in_fd = SY_STDIO_NULL; o.out_fd = lf >= 0 ? lf : SY_STDIO_NULL; o.err_fd = lf >= 0 ? lf : SY_STDIO_NULL;
             rc = sy_proc_run(&o, &ex);
@@ -642,6 +647,113 @@ static int native_worker(void *ud) {
 }
 static int jobs_gc(void);
 static int flowdir_gc(void);
+/* Linux LP64 recvmsg layout used by sys.netmsg. Its recvfrom wrapper does not
+ * return ancillary data. Authenticate each datagram with kernel credentials. */
+static int s2_rx=-1;
+static void *s2_recvmsg,*s2_poll;
+static char s2_path[108];
+static void s2_listen(void) {
+    unsigned char address[128];
+    if(s2_rx>=0 || !sy_sock_have() || cx_fmt(s2_path,sizeof s2_path,"%s.s2",sockp))return;
+    int len=sy_sa_unix(address,sizeof address,s2_path);
+    if(len<=0)return;
+    if(!s2_recvmsg)s2_recvmsg=sy_ffi_dlsym(sy_ffi_default(),"recvmsg");
+    if(!s2_poll)s2_poll=sy_ffi_dlsym(sy_ffi_default(),"poll");
+    if(!s2_recvmsg || !s2_poll)return;
+    int fd=sy_sock_open(sy_sock_num(SY_SN_AF_UNIX),sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK);
+    if(fd<0)return;
+    /* Only the owner of the live stream listener enters this function. */
+    if(sy_sock_setopt(fd,sy_sock_num(SY_SN_SOL_SOCKET),16,1)<0){sy_close(fd);return;}
+    sy_unlink(s2_path);
+    if(sy_sock_bind(fd,address,len)<0){sy_close(fd);return;}
+    s2_rx=fd;
+}
+static int s2_wire_ok(const char *s,long n) {
+    static const char *keys[]={"kind=","job=","id=","candidate=","attempt=","pid=","ms=","load1=","dropped=","seq="};
+    const char *end=s+n;
+    for(int i=0;i<10;i++){
+        long k=strlen(keys[i]);
+        if(end-s<=k || memcmp(s,keys[i],k))return 0;
+        s+=k;const char *v=s;
+        while(s<end && *s!='\t'){
+            char c=*s++;
+            if(i==9 && (c<'0'||c>'9'))return 0;
+            if(!((c>='0'&&c<='9')||(c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='-'||c=='_'||c=='.'))return 0;
+        }
+        if(s==v || (i==3 && s-v!=64) || (i<9 && s==end))return 0;
+        if(i<9)s++;
+    }
+    return s==end;
+}
+/* No more than 32 writes in any rolling second, across all senders. */
+static int s2_recordable(char *wire,int sender,long now) {
+    static struct s2_stream {char job[64];int sender;long seq,last;} stream[256];
+    static long writes[32];static int cursor;
+    char *job=strstr(wire,"\tjob=")+5,*end=strchr(job,'\t'),*tail;
+    char *sequence=strstr(wire,"\tseq=")+5;
+    errno=0;long seqno=strtol(sequence,&tail,10);
+    if(errno || *tail || seqno<=0 || !end || end-job>=sizeof stream[0].job)return 0;
+    int avail=-1;
+    for(int i=0;i<256;i++){
+        if(stream[i].sender==sender && strlen(stream[i].job)==end-job && !memcmp(stream[i].job,job,end-job)){
+            if(seqno<=stream[i].seq)return 0;
+            avail=i;break;
+        }
+        if(avail<0 && (!stream[i].sender || now-stream[i].last>1800000L))avail=i;
+    }
+    if(avail<0)return 0;
+    if(mm_copy(stream[avail].job,sizeof stream[avail].job,job,end-job))return 0;
+    stream[avail].job[end-job]=0;stream[avail].sender=sender;
+    stream[avail].seq=seqno;stream[avail].last=now;
+    if(writes[cursor] && now-writes[cursor]<1000)return 0;
+    writes[cursor]=now;cursor=(cursor+1)%32;return 1;
+}
+static void s2_drain(void) {
+    for(int i=0;i<16;i++){
+        char wire[448];long control[4]={0},iov[2]={(long)wire,sizeof wire-1};
+        long msg[7]={0,0,(long)iov,1,(long)control,sizeof control,0};
+        int flags=0x40000000;void *mp=msg; /* Linux MSG_CMSG_CLOEXEC */
+        int types[]={SY_FFI_INT,SY_FFI_POINTER,SY_FFI_INT};
+        void *args[]={&s2_rx,&mp,&flags};long n=-1;
+        if(sy_ffi_call(s2_recvmsg,SY_FFI_LONG,types,args,3,3,&n) || n<0)return;
+        /* cmsghdr (16 bytes), ucred (pid,uid,gid). Also reject MSG_CTRUNC. */
+        int *c=(int *)control;
+        /* A sender may supply SCM_RIGHTS. Release any descriptors installed
+         * even when the control buffer was truncated, before rejecting. */
+        for(long off=0;off+16<=msg[5] && msg[5]<=sizeof control;){
+            long *header=control+off/8;long len=*header;
+            int *h=(int *)header;
+            if(len<16 || len>msg[5]-off)break;
+            if(h[2]==1 && h[3]==1)
+                for(long j=4;j<len/4;j++)sy_close(h[j]);
+            off+=(len+7)&~7L;
+        }
+        if(n<=0 || n>=sizeof wire || (msg[6]&~0x40000000L) || msg[5]!=32 || control[0]!=28 ||
+           c[2]!=1 || c[3]!=2 || c[4]<=0 || c[5]!=(int)sy_uid() || !s2_wire_ok(wire,n))continue;
+        wire[n]=0;
+        if(!s2_recordable(wire,c[4],sy_now_ms()))continue;
+        char record[500];char *pid=strstr(wire,"\tpid=");unsigned long long birth=0;
+        if(pid && !strncmp(wire,"kind=launch\t",12))pi_read_ticks(atoi(pid+5),&birth,0);
+        if(!cx_fmt(record,sizeof record,"%s\tsender=%d\tstart_ticks=%llu",wire,c[4],birth))
+            ev_add("s2.observe",record);
+    }
+}
+static int s2_accept(int listener) {
+    /* One poll replaces the ordinary stream wait. Linux pollfd is int/short/short. */
+    struct s2_pollfd {int fd;short events,revents;};
+    struct s2_pollfd ready[2]={{listener,1,0},{s2_rx,1,0}};
+    void *fds=ready;unsigned long count=2;int ms=200;long result=-1;
+    int kinds[]={SY_FFI_POINTER,SY_FFI_ULONG,SY_FFI_INT};
+    void *args[]={&fds,&count,&ms};
+    if(sy_ffi_call(s2_poll,SY_FFI_INT,kinds,args,3,3,&result) || (int)result<0 ||
+       (ready[1].revents & (8|16|32))){
+        sy_close(s2_rx);s2_rx=-1;sy_unlink(s2_path);
+        return -ETIMEDOUT;
+    }
+    if(ready[1].revents&1)s2_drain();
+    if(!(ready[0].revents&1))return -ETIMEDOUT;
+    return sy_sock_accept(listener,0,0);
+}
 static int serve(long ttl, long idle) {
     int ls, c, stop = 0; long t0 = sy_now_ms(), last = t0, gc_at = 0; char p[PW], info[PW + 96]; static char line[8192];
     if (ttl <= 0 || ttl > TTL_MAX || idle <= 0) { fprintf(stderr, "devsvc: ttl 1..%d, idle >= 1\n", TTL_MAX); return 2; }
@@ -660,6 +772,7 @@ static int serve(long ttl, long idle) {
     locks_load();
     chomp(info); ev_add("svc.start", info);
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
+    if(!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1"))s2_listen();
     while (!stop) {
         long now = sy_now_ms(), k = 0, r, nmax = native_max_ms();
         for (int wi = 0; wi < n_nat; ) {
@@ -678,7 +791,7 @@ static int serve(long ttl, long idle) {
         }
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
         if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
-        c = sy_tcp_accept(ls, 200);
+        c=s2_rx<0?sy_tcp_accept(ls,200):s2_accept(ls);
         if (c < 0) { if (c != -ETIMEDOUT) sy_sleep_ms(50); continue; }
         {   sy_deadline_t d = sy_deadline_in(2000);
             line[0] = 0;
@@ -700,6 +813,8 @@ static int serve(long ttl, long idle) {
                 if (rb) mm_free(rb);
             }
             if (k > 0 && !strncmp(line, "native\t", 7)) {
+                char *last_field=strrchr(line,'\t');
+                if(last_field && !strcmp(last_field+1,S2_TOOL))s2_listen();
                 char *sp1 = strchr(line + 7, '\t');
                 if (sp1 && !strchr(sp1 + 1, '\t')) {
                     char bin[PW], rbuf[PW]; long nms = 0;
@@ -739,6 +854,7 @@ static int serve(long ttl, long idle) {
         int wpid = nat_pids[--n_nat];
         (void)sy_kill(wpid);
     }
+    if(s2_rx>=0){sy_close(s2_rx);sy_unlink(s2_path);}
     sy_close(ls); sy_unlink(sockp); sy_unlink(p);
     return 0;
 }
@@ -930,9 +1046,11 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
         if (rc == 0) {
             char *p = resp + 10, *e = strchr(p, '\t');   /* OK\tnative\tPATH\tcache=..\tms=.. */
             if (e) { *e = 0; F(bin, sizeof bin, "%s", p); cache = strstr(e + 1, "cache=hit") ? "hit" : strstr(e + 1, "cache=bypass") ? "bypass" : "miss"; }
-        } else if (rc == 1) { fputs(resp, stderr); return 1; }
+        } else if (rc == 1 && strcmp(argv[0],S2_TOOL)) { fputs(resp, stderr); return 1; }
     }
-    if (!bin[0]) { local = 1; rc = native_get(root, argv[0], bin, sizeof bin, &cache, &prep); if (rc) { char tl[3600]; build_tail(tl, sizeof tl); fprintf(stderr, "devsvc: cannot build %s rc=%d log=%s\n%s", argv[0], rc, nlog[0] ? nlog : "-", tl); return 1; } }
+    if (!bin[0]) { local = 1; rc = native_get(root, argv[0], bin, sizeof bin, &cache, &prep);
+        if(rc && !strcmp(argv[0],S2_TOOL)){argv[0]="tools/dvqualify.cx";rc=native_get(root,argv[0],bin,sizeof bin,&cache,&prep);}
+        if (rc) { char tl[3600]; build_tail(tl, sizeof tl); fprintf(stderr, "devsvc: cannot build %s rc=%d log=%s\n%s", argv[0], rc, nlog[0] ? nlog : "-", tl); return 1; } }
     t1 = sy_now_ms();
     {   int k = 1, sk = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;   /* 原生执行体不收驱动的 "--",TOOL 后紧跟的一个 "--" 去掉 */
         v[0] = bin; for (i = sk; i < argc; i++) v[k++] = argv[i]; v[k] = 0; }
@@ -2834,6 +2952,7 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "qualify") && argc <= 56) {   /* qualify --candidate APE [--set ..] [--out F] [--jobs N]:tools/dvqualify.cx,timing 事件经 DEVSVC_SOCK */
         if(!flag(argc,argv,"--list")){report_kind="qualify";report_window=1800000;}
         char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvqualify.cx"; v[n++] = (char *)root;
+        if(!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1"))v[1]=S2_TOOL;
         for (int i = 0; i < argc; i++) v[n++] = argv[i];
         v[n] = 0; setenv("DEVSVC_SOCK", sockp, 1); run_deadline_ms = 1800000; return cmd_run(root, n, v);
     }

@@ -6,6 +6,7 @@
 #pragma unisa use text.text
 #pragma unisa use compiler.fwdsig
 static char root[4096],old[4096],fresh[4096],out[4096];
+static const char *opt_flag;
 static char new_models[4096];
 static char reference_product[4096];
 static const char *names[]={"small","nested","multi","module","boundary"};
@@ -32,14 +33,15 @@ static int native_product(const char *p){unsigned char magic[4];FILE *f=fopen(p,
 static void fixtures(int create){for(int i=0;i<7;i++){char p[4400];path(p,out,files[i]);if(create)save(p,texts[i],strlen(texts[i]));else equal(p,texts[i],strlen(texts[i]));}}
 static np_buf identity(void){np_buf b={0};np_puts(&b,"netregen-bytes-material-v1\nstatus\tPREPARED-no-test-result\n");row(&b,"root",root);row(&b,"out",out);bound_file(&b,"old-product",old);bound_file(&b,"new-product",fresh);char p[4400];path(p,root,"tests/check-netregen-bytes.cx");bound_file(&b,"harness",p);path(p,root,"exec/facts/pp-targets.tsv");bound_file(&b,"target-table",p);
  if(new_models[0])bound_file(&b,"new-models",new_models);
+ if(opt_flag)row(&b,"optimization",opt_flag);
  size_t n;char *s=load(p,&n);/* Match actual target rows, not a substitute local list. */
  int rows=0;for(char *at=s;*at;){char *e=strchr(at,'\n');if(!e)die("target table newline");if(*at!='#'&&e!=at){char expected[100];const char *t=rows<6?targets[rows]:"";const char *slash=strchr(t,'/');if(!slash)die("six targets required");if(cx_fmt(expected,sizeof expected,"%.*s\t%s\t",(int)(slash-t),t,slash+1))die("target row bound");if((size_t)(e-at)<strlen(expected)||memcmp(at,expected,strlen(expected)))die("target table differs");rows++;}at=e+1;}free(s);if(rows!=6)die("six targets required");
  for(int i=0;i<7;i++){path(p,out,files[i]);bound_file(&b,"positive-source",p);}return b;}
 static void bind(int create){fixtures(create);np_buf b=identity();char p[4400];path(p,out,"material.tsv");if(create)save(p,b.p,b.n);else equal(p,b.p,b.n);free(b.p);}
 static void shardpath(char p[4400],int c,int t,const char *suffix){char leaf[100];if(cx_fmt(leaf,sizeof leaf,"%s-%d.%s",names[c],t,suffix))die("shard path");path(p,out,leaf);}
-static np_buf observation(int c,int t){char a[4400],b[4400],ha[65],hb[65];shardpath(a,c,t,"old.image");shardpath(b,c,t,"new.image");size_t an,bn;char *as=load(a,&an),*bs=load(b,&bn);if(!an||an!=bn||memcmp(as,bs,an))die("machine image bytes differ or empty");cx_sha256_hex(as,an,ha);cx_sha256_hex(bs,bn,hb);free(as);free(bs);np_buf r={0};np_puts(&r,"netregen-bytes-observation-v1\n");row(&r,"case",names[c]);row(&r,"target",targets[t]);row(&r,"scope","cross-produced-image-bytes-not-native-execution");row(&r,"old-sha256",ha);row(&r,"new-sha256",hb);char p[4400],h[65];path(p,out,"material.tsv");hash(p,h);row(&r,"material-sha256",h);for(int k=0;k<2;k++){const char *suffix=k?"new.status":"old.status";shardpath(p,c,t,suffix);equal(p,"rc\t0\n",5);bound_file(&r,suffix,p);shardpath(p,c,t,k?"new.argv":"old.argv");bound_file(&r,k?"new-argv":"old-argv",p);shardpath(p,c,t,k?"new.stdout":"old.stdout");bound_file(&r,k?"new-stdout":"old-stdout",p);shardpath(p,c,t,k?"new.stderr":"old.stderr");bound_file(&r,k?"new-stderr":"old-stderr",p);}return r;}
+static np_buf observation(int c,int t){char a[4400],b[4400],ha[65],hb[65];shardpath(a,c,t,"old.image");shardpath(b,c,t,"new.image");size_t an,bn;char *as=load(a,&an),*bs=load(b,&bn);cx_sha256_hex(as,an,ha);cx_sha256_hex(bs,bn,hb);if(!an||an!=bn||memcmp(as,bs,an)){if(opt_flag)fprintf(stderr,"NETREGEN_DIFF\tcase=%s\ttarget=%s\topt=%s\told=%s\tnew=%s\n",names[c],targets[t],opt_flag,ha,hb);die("machine image bytes differ or empty");}free(as);free(bs);np_buf r={0};np_puts(&r,"netregen-bytes-observation-v1\n");row(&r,"case",names[c]);row(&r,"target",targets[t]);row(&r,"scope","cross-produced-image-bytes-not-native-execution");row(&r,"old-sha256",ha);row(&r,"new-sha256",hb);char p[4400],h[65];path(p,out,"material.tsv");hash(p,h);row(&r,"material-sha256",h);for(int k=0;k<2;k++){const char *suffix=k?"new.status":"old.status";shardpath(p,c,t,suffix);equal(p,"rc\t0\n",5);bound_file(&r,suffix,p);shardpath(p,c,t,k?"new.argv":"old.argv");bound_file(&r,k?"new-argv":"old-argv",p);shardpath(p,c,t,k?"new.stdout":"old.stdout");bound_file(&r,k?"new-stdout":"old-stdout",p);shardpath(p,c,t,k?"new.stderr":"old.stderr");bound_file(&r,k?"new-stderr":"old-stderr",p);}return r;}
 static int compile(int c,int t,int lane){const char *stems[]={"old","new","legacy"};const char *stem=stems[lane];char image[4400],source[4400],other[4400],p[4400],why[512],suffix[80];int file=c==0?0:c==1?1:c==2?2:c==3?4:6;path(source,out,files[file]);path(other,out,"other.c");if(cx_fmt(suffix,sizeof suffix,"%s.image",stem))die("lane suffix");shardpath(image,c,t,suffix);struct stat st;if(!lstat(image,&st)||errno!=ENOENT)die("fresh image required");
- char *v[14];int vn=0;const char *product=lane==2?reference_product:lane?fresh:old;if(!native_product(product))v[vn++]="sh";v[vn++]=(char *)product;if(lane==1&&new_models[0]){v[vn++]="--models";v[vn++]=new_models;}v[vn++]="-b";v[vn++]=(char *)targets[t];v[vn++]="-o";v[vn++]=image;v[vn++]=source;if(c==2)v[vn++]=other;v[vn]=0;np_buf args={0};for(int i=0;v[i];i++){np_puts(&args,v[i]);np_puts(&args,"\n");}if(cx_fmt(suffix,sizeof suffix,"%s.argv",stem))die("lane suffix");shardpath(p,c,t,suffix);save(p,args.p,args.n);free(args.p);
+ char *v[14];int vn=0;const char *product=lane==2?reference_product:lane?fresh:old;if(!native_product(product))v[vn++]="sh";v[vn++]=(char *)product;if(lane==1&&new_models[0]){v[vn++]="--models";v[vn++]=new_models;}if(opt_flag)v[vn++]=(char *)opt_flag;v[vn++]="-b";v[vn++]=(char *)targets[t];v[vn++]="-o";v[vn++]=image;v[vn++]=source;if(c==2)v[vn++]=other;v[vn]=0;np_buf args={0};for(int i=0;v[i];i++){np_puts(&args,v[i]);np_puts(&args,"\n");}if(cx_fmt(suffix,sizeof suffix,"%s.argv",stem))die("lane suffix");shardpath(p,c,t,suffix);save(p,args.p,args.n);free(args.p);
  np_result r={0};int transport=np_run(v,root,0,25,&r,why,sizeof why);if(cx_fmt(suffix,sizeof suffix,"%s.stdout",stem))die("lane suffix");shardpath(p,c,t,suffix);save(p,r.out?r.out:"",r.outn);if(cx_fmt(suffix,sizeof suffix,"%s.stderr",stem))die("lane suffix");shardpath(p,c,t,suffix);save(p,r.err?r.err:"",r.errn);char status[100];if(cx_fmt(status,sizeof status,"rc\t%d\n",transport?-1:r.rc))die("status bound");if(cx_fmt(suffix,sizeof suffix,"%s.status",stem))die("lane suffix");shardpath(p,c,t,suffix);save(p,status,strlen(status));int rejected=r.rc!=0,diagnostic=r.err&&strstr(r.err,"error:"),bad=transport||rejected||diagnostic;np_free(&r);if(transport||(bad&&lane!=2)||(diagnostic&&!rejected))die("compile failed; evidence retained");return rejected;
 }
 static np_buf reference_identity(void){np_buf b={0};np_puts(&b,"netregen-reference-material-v1\n");char p[4400];path(p,out,"material.tsv");bound_file(&b,"AB-material",p);bound_file(&b,"reference-product",reference_product);return b;}
@@ -94,7 +96,17 @@ static int optframes(int argc,char **argv){
    else{
     if(r.rc||r.errn||!r.outn)die("positive runner rejected; evidence retained");projections[m][i]=project((unsigned char *)r.out,r.outn,1,0);np_buf before=frame_records(source,in),after=frame_records((unsigned char *)r.out,r.outn);if(!samebuf(&before,&after))die("metadata record sequence changed");free(before.p);free(after.p);
     if(!m)np_put(&net_output,r.out,r.outn);else if(net_output.n!=r.outn||memcmp(net_output.p,r.out,r.outn))die("network and table output bytes differ");
-    if(label){const char *keep[]={".unitx:\n",".endx:\n","  .frame 8\n","  store64 [r7+0], r0\n","  load64 r1, [r7+0]\n","  .frame -8\n"};for(int k=0;k<6;k++)if(tx_find(projections[m][i].p,(long)projections[m][i].n,keep[k],(long)strlen(keep[k]))<0)die("real dot label lost or stack window crossed label");}
+    if(label){
+     const char *keep[]={".unitx:\n",".endx:\n","  .frame 8\n","  store64 [r7+0], r0\n","  load64 r1, [r7+0]\n","  .frame -8\n"};
+     int seen[6]={0};np_buf *projection=&projections[m][i];
+     for(size_t at=0;at<projection->n;){
+      char *lf=memchr(projection->p+at,'\n',projection->n-at);if(!lf)die("unterminated projected instruction");
+      size_t len=lf-(projection->p+at)+1;
+      for(int k=0;k<6;k++)if(strlen(keep[k])==len&&!memcmp(projection->p+at,keep[k],len))seen[k]=1;
+      at+=len;
+     }
+     for(int k=0;k<6;k++)if(!seen[k])die("real dot label lost or stack window crossed label");
+    }
    }
    np_free(&r);
   }
@@ -112,6 +124,12 @@ static int netregen_main(int argc,char **argv){if(argc>1&&!strcmp(argv[1],"opt-f
 int main(int argc,char **argv){
 
  if(argc>1&&!strcmp(argv[1],"batch")){
+  if(argc==12 && !strcmp(argv[10],"--opt")){
+   const char *flags[]={"-O0","-O1","-O2","-O3","-Os"};
+   int c,t;fixed_key(argv[6],argv[7],&c,&t);
+   if(strcmp(argv[11],flags[c]))die("optimization flag does not match fixed case");
+   opt_flag=flags[c];argc-=2;
+  }
   if(argc!=10||strcmp(argv[8],"--new-models"))die("batch ROOT OLD_PRODUCT NEW_PRODUCT ABS_OUT CASE TARGET --new-models ABS_PKG");
   char *prep[]={argv[0],"prepare",argv[2],argv[3],argv[4],argv[5],argv[8],argv[9],0};
   int rc=netregen_main(8,prep);if(rc)return rc;
