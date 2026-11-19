@@ -1,0 +1,120 @@
+struct Path {
+  segments: u32;
+  capacity: u32;
+  count: u32;
+  startX: f64;
+  startY: f64;
+  x: f64;
+  y: f64;
+}
+
+// Each segment owns an 8-byte kind prefix followed by up to eight f64 coordinates.
+native function Path_init(path:i64,segments:i64,capacity:i64) i64 {
+  if(path<0 || path>6291456-Path.size || path%8!=0 || segments<0 || segments>6291456 ||
+     segments%8!=0 || capacity<0 || capacity>(6291456-segments)/72 ||
+     (capacity!=0 && path<segments+capacity*72 && segments<path+Path.size)) { return 0-1; }
+  let data=ux_u32_put(path+Path.segments,segments);
+  let cap=ux_u32_put(path+Path.capacity,capacity);
+  let count=ux_u32_put(path+Path.count,0);
+  let a=ux_f64_put(path+Path.startX,0.0);
+  let b=ux_f64_put(path+Path.startY,0.0);
+  let x=ux_f64_put(path+Path.x,0.0);
+  let y=ux_f64_put(path+Path.y,0.0);
+  return path;
+}
+
+native function Path_moveTo(path:i64,x:f64,y:f64) i64 {
+  let a=ux_f64_put(path+Path.startX,x);
+  let b=ux_f64_put(path+Path.startY,y);
+  let current_x=ux_f64_put(path+Path.x,x);
+  let current_y=ux_f64_put(path+Path.y,y);
+  return path;
+}
+
+native function path_add(path:i64,kind:i64,x:f64,y:f64,ax:f64,ay:f64,bx:f64,by:f64) i64 {
+  let n=ux_u32(path+Path.count);
+  if(n>=ux_u32(path+Path.capacity)) { return 0-1; }
+  let at=ux_u32(path+Path.segments)+72*n;
+  let mark=ux_u32_put(at,kind);
+  let begin_x=ux_f64_put(at+8,ux_f64(path+Path.x));
+  let begin_y=ux_f64_put(at+16,ux_f64(path+Path.y));
+  let next=at+24;
+  if(kind>=2) {
+    let a_x=ux_f64_put(next,ax);
+    let a_y=ux_f64_put(next+8,ay);
+    next=next+16;
+  }
+  if(kind==3) {
+    let b_x=ux_f64_put(next,bx);
+    let b_y=ux_f64_put(next+8,by);
+    next=next+16;
+  }
+  let end_x=ux_f64_put(next,x);
+  let end_y=ux_f64_put(next+8,y);
+  let current_x=ux_f64_put(path+Path.x,x);
+  let current_y=ux_f64_put(path+Path.y,y);
+  let count=ux_u32_put(path+Path.count,n+1);
+  return path;
+}
+
+native function Path_lineTo(path:i64,x:f64,y:f64) i64 {
+  return path_add(path,1,x,y,0.0,0.0,0.0,0.0);
+}
+
+native function Path_quadraticCurveTo(path:i64,ax:f64,ay:f64,x:f64,y:f64) i64 {
+  return path_add(path,2,x,y,ax,ay,0.0,0.0);
+}
+
+native function Path_bezierCurveTo(path:i64,ax:f64,ay:f64,bx:f64,by:f64,x:f64,y:f64) i64 {
+  return path_add(path,3,x,y,ax,ay,bx,by);
+}
+
+native function Path_closePath(path:i64) i64 {
+  let x=ux_f64(path+Path.startX);
+  let y=ux_f64(path+Path.startY);
+  if(ux_f64(path+Path.x)!=x || ux_f64(path+Path.y)!=y) {
+    return Path_lineTo(path,x,y);
+  }
+  return path;
+}
+
+native function path_sample(point:i64,segment:i64,t:f64) i64 {
+  let kind=ux_u32(segment);
+  if(kind==1) { return curve_line_point(point,segment+8,2,t); }
+  return curve_bezier(point,segment+8,2,kind,t);
+}
+
+// One sample per straight edge and divisions samples per Bezier segment.
+native function Path_getPoints(path:i64,output:i64,capacity:i64,divisions:i64,scratch:i64) i64 {
+  if(output<0 || output>6291456 || output%8!=0 || capacity<0 ||
+     capacity>(6291456-output)/16 || divisions<1 || divisions>4096 ||
+     scratch<0 || scratch>6291456-16 || scratch%8!=0 ||
+     (output<scratch+16 && scratch<output+capacity*16)) { return 0-1; }
+  let last_x=0.0;
+  let last_y=0.0;
+  let count=0;
+  let total=ux_u32(path+Path.count);
+  let at=ux_u32(path+Path.segments);
+  let segment=0;
+  while(segment<total) {
+    let steps=divisions;
+    if(ux_u32(at)==1) { steps=1; }
+    let i=0;
+    while(i<=steps) {
+      let point=path_sample(scratch,at,i*1.0/steps);
+      let x=ux_f64(point);
+      let y=ux_f64(point+8);
+      if(count==0 || x!=last_x || y!=last_y) {
+        if(count>=capacity) { return 0-1; }
+        let px=ux_f64_put(output+count*16,x);
+        let py=ux_f64_put(output+count*16+8,y);
+        last_x=x; last_y=y;
+        count=count+1;
+      }
+      i=i+1;
+    }
+    at=at+72;
+    segment=segment+1;
+  }
+  return count;
+}
