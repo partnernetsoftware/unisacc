@@ -1,6 +1,6 @@
 # unisacc 0.0.79 发布说明
 
-状态:同候选原生 CI run <CI_RUN_ID>(待回填)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
+状态:同候选原生 CI run 44430678546(六目标 success;首次 run 44429827605 在 macos-15-intel 的 stream-pipe part=e 撞 55 秒分段上限失败 41 PASS 1 FAIL,经 release-exec --redispatch 重派后全成功,首次 run 记为 ci-prior FAIL 保留在 INDEX)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -11,7 +11,7 @@
 | 发布 APE SHA256(unisacc.com) | b328ed1f582e21bc427cbda96a047de855c56abb2127ebaec288077ef1ee725d(7387189 字节,与 0.0.78 同长;--version 打印 unisacc 0.0.79;打包后与链产物同字节,PACK_APE SAME) |
 | 源快照 SID | 5f973acb56e2e418a062e14133d5cc4cc011fd9b50b426f0dfc677e7d29a1965(VERIFIED,T 的链快照) |
 | pkg.bin | 72df86d11d1e015832ff228e040c30c21d988926b75a4da950b3d66c168092d2(与 0.0.78 同字节) |
-| CI run | <CI_RUN_ID> |
+| CI run | 44430678546(首次 44429827605 失败,见上) |
 
 ## 产品改动(只是 exec 表结构重构,无产品行为变化)
 
