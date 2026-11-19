@@ -124,26 +124,27 @@ demo-v2 原始需求见 [`plans/demo-v2/requirements-original.md`](plans/demo-v2
 
 ### 0.3c UXE 三层合同与迁移 S1
 
-S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译器，再逐页迁移，D1 优先。three.js 对标以功能验收为准，UXE 使用自己的版本化 API。下表现状以四页和相关实验为证据，标为部分的能力可能仍在 JS。已有的单项能力也须在基座 Wasm 中重新举证。
+S1 定三层合同，S2 已公开 D1、D2、D3 双 Wasm 页。D4 正在等 S3 后的 M7，D5 等 M12。下表更新于 2026-11-19，状态针对基座对标能力，部分实现和页面读回不等于对标已有。逐项清单、双路径和里程碑见 [UXE 对标 three.js 全表与开发计划](prd_uxe_three.md)。
 
 #### 基座 Wasm
 
-拥有场景图、资源句柄、渲染和混音策略。负责所有权、句柄生命周期和内存边界。产品通过基座 API 建场景、提交状态、查询结果。
+目标合同由基座拥有场景图、资源句柄、渲染和混音策略。当前基座统一边界、像素提交和下列原语，产品仍负责场景铺排和玩法。D1 指线上 fly-next，D2 指 water-keeps，D3 指 ink-walk。操作号对应 [uxe.ujs](practice/uxe/base/uxe.ujs)。表中 `base` 等模式均是 [ux-link.cx](tests/ux-link.cx) 的参数，发布读回见 [check-gen-uxe-pages.cx](../tools/check-gen-uxe-pages.cx)。
 
-| 能力 | three.js 对标 | 现状 | 基座验收门 |
-|---|---|---|---|
-| 场景图 | Scene、Object3D、Group | 部分，scene.js | 挂载和移除后父子变换、可见性正确 |
-| 相机 | PerspectiveCamera、OrthographicCamera | 部分，透视与路轨相机在 JS | 透视与正交的近远裁剪、屏幕投影金值 |
-| 几何与材质 | BufferGeometry、InstancedMesh、MeshToonMaterial、MeshStandardMaterial | 部分，网格、toon、描边在 JS，PBR 待补 | 索引和实例、toon 三阶和描边、标准材质的金属度和粗糙度有像素门 |
-| 光照与阴影 | DirectionalLight、PointLight、LightShadow | 部分，方向光与阴影贴图在 JS | 遮挡体移动时阴影跟随，点光衰减与多光源叠加可量测 |
-| 雾与色调 | Fog、FogExp2、WebGLRenderer 色调映射与输出色空间 | 部分，U1 空气透视和调色在 JS | 雾随距离变化，色调与线性到 sRGB 有像素金值 |
-| 纹理与精灵 | Texture、DataTexture、Sprite | 部分，UXEP v4 贴图有读回 | UV、过滤、透明遮罩、面向相机精灵各有像素样点 |
-| 粒子 | Points、PointsMaterial 及发射器调度 | 部分，点绘制已有门，烟和浪由页面步进 | 确定性发射、生命周期、混合、排序和回收 |
-| 动画与骨骼 | AnimationClip、AnimationMixer、SkinnedMesh、Skeleton | 部分，D3/D4 过程动画在 JS，缺骨骼 | 两骨蒙皮、插值、混合与暂停续播有顶点读回 |
-| 拾取 | Raycaster | 缺可复用接口证据 | 屏幕射线、多命中排序、近远裁剪与空命中 |
-| 音频 | Audio、AudioListener、PositionalAudio | 部分，D1 WebAudio 事件已有读回 | 解码或合成、混音与声像有 PCM 包络验收 |
-| 输入 | EventDispatcher、Controls 适配 | 部分，UXIN 与页面键鼠已有证据 | 事件顺序、失焦清键、触屏与录制回放 |
-| 装载 | LoadingManager、TextureLoader、GLTFLoader | 部分，宿主取字节和静态 GLB 实验已通 | 基座解析纹理和 GLB 网格、材质、贴图、蒙皮、动画，坏文件拒绝及释放 |
+| 能力 | three.js 对标 | 现状与证据 | 限制 | 基座目标验收门 |
+|---|---|---|---|---|
+| 帧缓冲与提交 | WebGLRenderer 的帧呈现 | 已有软件原语。op 1、2、3、9 至 11，`base` 核尺寸和角落像素。D1、D2、D3 使用 | CPU 写 RGBA8 位图，由宿主呈现。D1、D2 为 426x240，D3 为 960x540。发布桥无 GPU 命令入口 | 视口、清屏及绘制提交逐像素复查 |
+| 场景图 | Scene、Object3D、Group | 缺。无对应 op，D1 至 D3 均由产品布置，D4 线上仍用旧 JS | 无父子变换、可见性传播、资源生命周期或场景遍历 API | 挂载、移除、重挂载后世界矩阵与可见性读回 |
+| 相机 | PerspectiveCamera、OrthographicCamera | 部分。op 18、19、23 至 25、32、33。`base-pose-off`、`walk`、`walk-rail-off`，D3 使用透视、世界相机和路轨，D1 用产品自己的投影 | 固定透视，近面三角形整面剔除，缺正交、几何裁剪、视锥及通用跟拍 | 两种投影与近远裁剪金值 |
+| 几何与材质 | BufferGeometry、InstancedMesh、MeshToonMaterial、MeshStandardMaterial | 部分。op 18 至 20、22、25、34，`base-depth-off` 与 `walk-ink-off`。D3 用三角形、深度、材质色及标签墨线 | 无持久网格、索引、实例缓存或 PBR，描边按像素标签 | 索引、实例、toon 和标准材质逐项对照 |
+| 光照与阴影 | DirectionalLight、PointLight、LightShadow | 部分。op 26、29、30，`base-sun-off` 与 `base-shadow-off`，D3 用方向光参数生成桥影，`walk-shadow-off` 验谷地效果 | 双面三阶方向光，单张 96x96 高度阴影图，无点光、软阴影和多灯 | 移动遮挡、点光衰减与多灯叠加 |
+| 雾与色调 | Fog、FogExp2、色调映射 | 部分。op 21 与 `base-fog-off`，D3 使用线性深度雾，D1 有产品远雾 | 无指数雾、HDR 色调映射及完整输出色空间管线 | 雾曲线及线性到 sRGB 像素门 |
+| 纹理与精灵 | Texture、DataTexture、Sprite | 部分。op 12、15、27、28、31，`base-texture-off`、`walk-masonry-off` 与 D1/D2 叠层读回。D1、D2 用精灵，D3 用透视 UV、遮罩及背景 | RGBA8 字节与最近邻采样，缺过滤、mipmap、相机对齐世界精灵、图片压缩格式解析 | UV、过滤与透明遮罩样点 |
+| 粒子 | Points、PointsMaterial 与发射调度 | 部分。op 16、17，`base` 及粒子停绘反例，D2 用径向印章，D1 浪点走产品绘制 | 无通用发射器、生命周期、排序或 GPU 实例批 | 固定发射种子、寿命、合成与排序 |
+| 动画与骨骼 | AnimationClip、AnimationMixer、SkinnedMesh、Skeleton | 缺对标接口。D3 过程风在产品 Wasm，`walk-wind-off` 验证。D4 仅本地 `town-motion` 验行走和跟拍 | 无骨骼、蒙皮、剪辑、混合器，路轨插值不等于动画混合 | 两骨蒙皮、剪辑插值与混合顶点读回 |
+| 拾取 | Raycaster | 缺。无对应 op 或发布调用 | 无屏幕射线、场景相交及距离排序 | 命中数、距离、UV、空命中及排序 |
+| 音频 | Audio、AudioListener、PositionalAudio | 部分。op 5、6，`base` 与 `projection-audio` 核 PCM，D1 产品决定事件和音色并输出 | 48 kHz 单声道 PCM 输出，缺资源解码、空间声像和通用混音器 | 合成、解码、混音与声像包络 |
+| 输入与时钟 | EventDispatcher、Controls、Clock | 部分。op 0、7，`base` 验键位与失焦，D1 键盘、D2 键盘和触屏、D3 键盘和拖动滚轮触屏有发布 CDP | 事件采样桥与位图，缺通用对象事件、控制器和录制回放 | 事件顺序、焦点、输入回放及可控时钟 |
+| 装载 | LoadingManager、TextureLoader、GLTFLoader | 部分。op 4、8，`base` 验资源读回和越界。D1 精灵字节、D2 字库、D3 路轨及纹理。GLB 样例属于隔离实验 | 单次资源窗口最多 1 MiB。基座无 PNG、JPEG、GLB 解析、加载调度及资源句柄 | 好坏文件、纹理与 GLB 字段、释放及拒绝 |
 
 能力对标据 [three.js 官方 API](https://threejs.org/docs/)。仓内证据见 [UXE 专项规格](prd_uxe_sped.md)、[Host ABI](practice/uxe/HOST_ABI.md) 和 [素材实验](plans/demo-v2/asset-sources.md)。
 
@@ -191,7 +192,7 @@ D1 的静态壳检查入口为 `sh ./unisacc.com ujs/tests/uxe-host-budget.cx --
 | 字符串 | ASCII 字面量和拼接有语料。单字面量至多 255 字节，拒绝 NUL、非 ASCII 与转义，UTF-8 需有界字节 ABI |
 | import 与链接 | 已有特设 `env.host_gpu_submit(i32 ptr,i32 len)`。`import { host_time } from "env"; return host_time();` 拒绝，退出 1，诊断 `expected =`。声明式宿主导入、跨模块链接与内存交接待补 |
 
-用 `wasm-objdump -x` 核对当前 D1 导出，只有上述一个 import。导出有 `memory`、`main_export`、`run_step`、`host_reset`、`host_set_global`、值构造和标签读取等，页面依元数据定位输入槽，收 11 字节 v3 飞行提交。`tools/gen-d1-airframe.cx` 调 `sh ./ujs/ujs2wasm.com ujs/tests/d1-flight.ujs -o <临时 Wasm>` 并发布测试夹具。现有 `d1-flight.wasm` 来自该 `.ujs`，生成工具承担调用与比对。D2/D3/D4 的现行导出目录无产品 Wasm。
+S1 的旧 D1 产物 `d1-flight.wasm` 由 `tools/gen-d1-airframe.cx` 调 `ujs2wasm.com` 编译，使用旧 `main_export` 和 11 字节 v3 提交。P11、P12、P13 的现行 D1、D2、D3 分别运行基座 `base.wasm` 与产品 `product.wasm`，采用下述 0c。D4 线上仍是旧 JS。已发布的双 Wasm 文件按各自的构建版本固定，旧页无需支持后来增加的 D3 操作。
 
 0b 为正式入口增加下列 ABI。上表的 `Math.sqrt` 和 `Float32Array` 仍是常规 JS 写法的拒绝例。
 
@@ -217,7 +218,7 @@ export uxe_dispatch(op:i64, offset:i64, value:i64) i64 version 1;
 
 `sh ./unisacc.com ujs/tests/run.cx -- --ux-link` 编译两份 `.ujs` 并在隔离浏览器中读回。独立 `.cx` 计算结果 42059，核两个缓冲区及各反例原因。直接运行 `ujs/tests/ux-link.cx` 时可传 `version`、`signature`、`bounds`、`missing`，将对应反例替换为主路径，均须退出 1。探针在临时目录导出，无线上页面改动。
 
-D1 基座切片由 `practice/uxe/base/uxe.ujs` 编译，`uxe_dispatch(op,a,b)` 提供键位位图、像素缓冲、资源字节、帧提交、单调时钟与 PCM。三个相对内存区间分别为 [0,4194304) 像素、[4194304,5242880) 资源、[5242880,6291456) PCM。像素为 RGBA8，色值以低位 R、高位 A 交给基座。单声道 PCM 固定 48000 Hz，产品写入有符号 16 位采样值，基座转为 f32。
+D1 基座切片由 `practice/uxe/base/uxe.ujs` 编译，`uxe_dispatch(op,a,b)` 提供键位位图、像素缓冲、资源字节、帧提交、单调时钟与 PCM。相对内存中 [0,4194304) 为像素区，场景模式将 [2097152,4194304) 划给深度并限制为 524288 像素。[4194304,5242880) 为资源，[5242880,5434880) 为 PCM，其后放相机、轨道、阴影和轮廓等场景缓冲。像素为 RGBA8，色值以低位 R、高位 A 交给基座。单声道 PCM 固定 48000 Hz，最多 48000 样本，产品写入有符号 16 位采样值，基座转为 f32。
 
 | 操作 | a | b | 返回 |
 |---|---|---|---|
