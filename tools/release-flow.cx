@@ -1,0 +1,537 @@
+/* release-flow stage-a|check --inputs FILE --out ABS [--decisions FILE] [--against STAGE_COMMIT]
+ * Input TSV rows have key and value. Required: version, freeze (full commit), date, milestones.
+ * Each segment row has three fields: segment, SHA256, absolute path, in original execution order.
+ * Forward inputs require strict-sha256, the independently recorded SHA256 of the entire strict file.
+ * Run prep --inputs FILE --out NEW_PREP [--decisions FILE] as one job. Then supply --prep NEW_PREP
+ * to stage-a and check as separate jobs. The dry gate always executes against the selected generation.
+ * Replay uses pack (directory with candidate.tsv, cache-manager.tsv and layout), pack-log, warm,
+ * dry-log and optional notes-form. Fresh packing takes slot, source-dir, snapshot, chain-out,
+ * cm-x64 and cm-arm64 instead. Paths are absolute. Milestones supply event, timestamp, caption
+ * for prefreeze-strict, postfreeze-strict, pack, warm and dry. Machine columns are generated.
+ * Decisions start with identity, candidate SHA256, concatenated strict SHA256. Subsequent rows
+ * are FAIL/id/count/reviewed reason including expiry, or UNKNOWN/id/reason/proof name/proof path.
+ * Drafts without decisions list pending judgments in human-review.tsv. The returned statuses
+ * are 0 ready or phase complete, 1 human review, 2 invalid input, coverage gap or gate refusal.
+ * check --coverage alone uses 1 to report gaps. replay-machine only checks archived machine columns.
+ * --against replays the recorded freeze and compares to the stage commit, excluding later INDEX rows.
+ * Stage publication uses a fresh destination. Check reads that destination without editing it. */
+#pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+static void fail(const char *reason,const char *detail){
+    sy_eprintf("RELEASE_FLOW REFUSE %s %s\n",reason,detail);exit(2);
+}
+
+static char *readtext(const char *path){
+    size_t n=0;char *p=cx_read(path,&n);
+    if(!p || memchr(p,0,n))fail("INPUT",path);
+    return p;
+}
+static char *next(char **cursor,char delim){
+    char *p=*cursor;if(!p)return 0;
+    char *q=strchr(p,delim);
+    if(q){*q=0;*cursor=q+1;}else *cursor=0;
+    return p;
+}
+static int fields(char *line,char **v,int cap){
+    int n=0;char *cursor=line;
+    while(cursor){if(n==cap)return -1;v[n++]=next(&cursor,'\t');}
+    return n;
+}
+static int safe_leaf(const char *s){
+    if(!s || !*s || *s=='.')return 0;
+    for(;*s;s++)if(!((*s>='A'&&*s<='Z')||(*s>='a'&&*s<='z')||(*s>='0'&&*s<='9')||*s=='.'||*s=='_'||*s=='-'))return 0;
+    return 1;
+}
+typedef struct {char *id,*state,*count,*candidate,*rc;int witnessed,approved,row;} Batch;
+static Batch batches[8192];static int nb;
+static Batch *lookup(const char *id){
+    for(int i=0;i<nb;i++)if(!strcmp(id,batches[i].id))return batches+i;
+    return 0;
+}
+static const char *item(char **v,int n,const char *key){
+    size_t k=strlen(key);const char *value=0;
+    for(int i=0;i<n;i++)if(!strncmp(v[i],key,k)){if(value)fail("DUPLICATE_FIELD",key);value=v[i]+k;}
+    return value?value:"";
+}
+static void parse_strict(char *buf,const char *sha){
+    char *line;char *v[48];Batch *active=0;int lineno=0;
+    while((line=next(&buf,'\n'))){
+        lineno++;
+        if(!*line||*line=='#')continue;
+        int n=fields(line,v,48);if(n<1)fail("STRICT_COLUMNS","overflow");
+        if(!strcmp(v[0],"RAW")){
+            if(n<4||strcmp(v[1],"BATCH_RUN"))fail("RAW","shape");
+            if(!active||strcmp(item(v,n,"id="),active->id)||strcmp(item(v,n,"status="),active->state)||strcmp(item(v,n,"candidate="),active->candidate)||strcmp(item(v,n,"rc="),active->rc))fail("RAW_BINDING",item(v,n,"id="));
+            if(!strcmp(active->state,"PASS")&&(!strcmp(item(v,n,"rc="),"0")&&!strcmp(item(v,n,"transport="),"0")))active->witnessed=1;
+            if(!strcmp(active->state,"FAIL")&&!strcmp(item(v,n,"transport="),"0"))active->witnessed=1;
+            active=0;continue;
+        }
+        if(!strcmp(v[0],"SUMMARY")){if(sha&&strcmp(item(v,n,"ape_sha256="),sha))fail("SUMMARY_CANDIDATE",sha);active=0;continue;}
+        if(!strcmp(v[0],"batch")||!strcmp(v[0],"CHECKPOINT")){active=0;continue;}
+        if(n!=9 || !safe_leaf(v[0]))fail("BATCH_ROW",v[0]);
+        if(sha && strcmp(v[4],sha) && (strcmp(v[2],"UNKNOWN")||strcmp(v[4],"-")))fail("BATCH_CANDIDATE",v[0]);
+        if(strcmp(v[2],"PASS")&&strcmp(v[2],"FAIL")&&strcmp(v[2],"UNKNOWN"))fail("BATCH_STATUS",v[0]);
+        active=lookup(v[0]);if(!active){if(nb==8192)fail("BATCH_LIMIT",v[0]);active=batches+nb++;active->id=v[0];}
+        active->state=v[2];active->witnessed=0;active->count=0;active->rc=v[3];active->candidate=v[4];active->row=lineno;
+        char *note=v[8],*token;while((token=next(&note,';')))if(!strncmp(token,"count=",6))active->count=token+6;
+    }
+    if(!nb)fail("EMPTY_STRICT","no batch rows");
+}
+static int covered(const char *id,int pass){
+    Batch *b=lookup(id);return b&&b->witnessed&&(!pass||!strcmp(b->state,"PASS"));
+}
+static int registered(const char *registry,const char *id,size_t len){
+    const char *p=registry;
+    while(*p){
+        if(!strncmp(p,id,len)&&p[len]=='\t')return 1;
+        p=strchr(p,'\n');if(!p)break;p++;
+    }
+    return 0;
+}
+static int audit_split(const char *table,const char *registry){
+    char *s=readtext(table),*line,*v[5];int gaps=0,parents=0;
+    while((line=next(&s,'\n'))){
+        if(!*line||*line=='#')continue;
+        if(fields(line,v,5)!=5)fail("SPLIT_ROW",table);
+        parents++;
+        size_t first=strcspn(v[1],",");
+        if(registry&&!registered(registry,v[1],first)&&registered(registry,v[0],strlen(v[0])))continue;
+        if(covered(v[0],0))continue;
+        int missing=0;char *shards=v[1],*id;
+        while((id=next(&shards,',')))if(!covered(id,1)){sy_printf("MISSING_SHARD\t%s\t%s\n",v[0],id);missing++;}
+        if(!covered(v[2],1)){sy_printf("MISSING_MULTISET_CHECK\t%s\t%s\n",v[0],v[2]);missing++;}
+        if(missing){sy_printf("COVERAGE_GAP\tparent=%s\tmissing=%d\n",v[0],missing);gaps++;}
+    }
+    if(!parents)fail("EMPTY_SPLIT_TABLE",table);
+    return gaps;
+}
+typedef struct {char *key,*value;} Input;
+static Input inputs[96];static int ni,checking,pending,prep_phase,archive_check;
+static const char *prep_dir;
+static np_buf strict_bytes;
+static RcCandidate cand;
+static char outdir[4096],ed[256],strictrel[256],layout[4096],cwd[4096],scratch[4096],driver[4096];
+static const char *baseline,*decisions;
+static const char *last_segment;
+static int historical_files;
+static char *gate_inputs[8192];static int gate_count;
+static void gate_input(const char *rel){
+    if(gate_count>=8192)fail("GATE_INPUT_LIMIT",rel);
+    gate_inputs[gate_count++]=strdup(rel);
+}
+static char *relative(const char *a,const char *b){
+    size_t n=strlen(a)+strlen(b)+2;char *p=malloc(n);
+    if(!p||cx_fmt(p,n,"%s/%s",a,b))fail("PATH",b);return p;
+}
+static const char *opt(const char *key){
+    for(int i=0;i<ni;i++)if(!strcmp(inputs[i].key,key))return inputs[i].value;
+    return 0;
+}
+static const char *arg(const char *key){const char *s=opt(key);if(!s||!*s)fail("MISSING_INPUT",key);return s;}
+static int hexid(const char *s,int n){return (int)strlen(s)==n && rcand_hex(s,n);}
+static void read_inputs(const char *path){
+    char *p=readtext(path),*line,*v[3];int segments=0;
+    while((line=next(&p,'\n'))){
+        if(!*line || line[0]=='#')continue;
+        int n=fields(line,v,3);
+        if(n==3 && !strcmp(v[0],"segment")){
+            char *bytes=readtext(v[2]),hash[65];size_t len=strlen(bytes);
+            cx_sha256_hex(bytes,len,hash);
+            if(!len || bytes[len-1]!='\n' || strcmp(hash,v[1]))fail("SEGMENT_IDENTITY",v[2]);
+            np_put(&strict_bytes,bytes,len);free(bytes);segments++;last_segment=v[2];continue;
+        }
+        if(n!=2||!*v[1]||opt(v[0])||ni==96)fail("INPUT_ROW",v[0]);
+        inputs[ni].key=v[0];inputs[ni++].value=v[1];
+    }
+    if(!segments)fail("MISSING_INPUT","segment");
+    if(!baseline||opt("strict-sha256")){
+        char digest[65];cx_sha256_hex(strict_bytes.p,strict_bytes.n,digest);
+        if(strcmp(arg("strict-sha256"),digest))fail("STRICT_ORDER_IDENTITY",digest);
+    }
+}
+static char *capture(char **v,const char *dir){
+    np_result r={0};char why[256]={0};
+    if(np_run(v,dir,0,55,&r,why,sizeof why)||r.rc||r.residue){
+        sy_eprintf("RELEASE_FLOW CHILD %s rc=%d %s\n%s\n%s\n",v[0],r.rc,why,r.out?r.out:"",r.err?r.err:"");
+        fail("CHILD",v[0]);
+    }
+    char *s=r.out?r.out:strdup("");r.out=0;np_free(&r);return s;
+}
+static char *historical(const char *rel){
+    char spec[4600];if(cx_fmt(spec,sizeof spec,"%s:%s",baseline,rel))fail("PATH",rel);
+    char *v[]={"git","show",spec,0};return capture(v,cwd);
+}
+static int content(const char *s){
+    while(*s==' '||*s=='\t'||*s=='\r'||*s=='\n')s++;return *s!=0;
+}
+static int equivalent(const char *rel,char *actual,const char *expected){
+    const char *leaf=strrchr(rel,'/');leaf=leaf?leaf+1:rel;
+    int cols=!strcmp(leaf,"expected-fail.tsv")?3:!strcmp(leaf,"INDEX.tsv")?5:0;
+    if(!cols)return !strcmp(actual,expected);
+    char *want=strdup(expected),*left=actual,*right=want;int row=0,ok=1;
+    while(left&&right){
+        char *a=next(&left,'\n'),*b=next(&right,'\n');row++;
+        if(!strcmp(a,b))continue;
+        char *av[5],*bv[5];
+        if((cols==3&&row==1)||fields(a,av,5)!=cols||fields(b,bv,5)!=cols||!content(av[cols-1])){ok=0;break;}
+        for(int i=0;i<cols-1;i++)if(strcmp(av[i],bv[i]))ok=0;
+        if(!ok)break;
+    }
+    ok=ok&&!left&&!right;free(want);return ok;
+}
+static void emit(const char *rel,const char *text){
+    gate_input(rel);
+    char *p=relative(outdir,rel);
+    if(checking){
+        char *saved=readtext(p);if(!equivalent(rel,saved,text))fail("DRIFT",rel);free(saved);
+    }else if(cx_write(p,text,strlen(text)))fail("WRITE",rel);
+    if(baseline){char *old=historical(rel);if(!equivalent(rel,old,text))fail("HISTORICAL_DRIFT",rel);free(old);historical_files++;}
+    free(p);
+}
+static void evidence(const char *name,const char *text){char *rel=relative(ed,name);emit(rel,text);free(rel);}
+static void row3(np_buf *buf,const char *a,const char *b,const char *c){
+    np_puts(buf,a);np_puts(buf,"\t");np_puts(buf,b);np_puts(buf,"\t");np_puts(buf,c);np_puts(buf,"\n");
+}
+static int reason_ok(const char *s){return !strcmp(s,"no-producer")||!strcmp(s,"load-wait-timeout")||!strcmp(s,"outer-timeout");}
+static void exceptions(void){
+    np_buf f={0},u={0},review={0};np_puts(&f,"batch\texpected\treason\n");np_puts(&u,"batch\treason\tevidence\n");
+    np_puts(&review,"batch\tstatus\tcount\trow\tape_sha256\tdecision\n");
+    char digest[65];cx_sha256_hex(strict_bytes.p,strict_bytes.n,digest);
+    int bound=0;char *s=decisions?readtext(decisions):0,*line,*v[6];
+    while(s && (line=next(&s,'\n'))){
+        if(!*line||*line=='#')continue;
+        int n=fields(line,v,6);
+        if(n==3&&!strcmp(v[0],"identity")&&!bound&&!strcmp(v[1],cand.sha[0])&&!strcmp(v[2],digest)){bound=1;continue;}
+        if(!bound)fail("DECISIONS_IDENTITY",decisions);
+        if(n<4)fail("DECISION_ROW",line);
+        Batch *b=lookup(v[1]);if(!b||b->approved||strcmp(b->state,v[0]))fail("STALE_DECISION",v[1]);
+        if(!strcmp(v[0],"FAIL")){
+            if(n!=4||!b->witnessed||!b->count||strcmp(b->count,v[2])||!content(v[3])||!strstr(v[3],"到期"))fail("FAIL_APPROVAL",b->id);
+            row3(&f,b->id,b->count,v[3]);
+        }else if(!strcmp(v[0],"UNKNOWN")){
+            if(n!=5||!reason_ok(v[2])||!safe_leaf(v[3]))fail("UNKNOWN_APPROVAL",b->id);
+            char expected[512];if(cx_fmt(expected,sizeof expected,"%s-deferred.tsv",b->id)||strcmp(expected,v[3]))fail("PROOF_NAME",v[3]);
+            char *proof=readtext(v[4]);char witness[512];
+            if(!strcmp(v[2],"no-producer")){
+                if(cx_fmt(witness,sizeof witness,"DEFERRED\t%s\tprepare-failed=no-producer=",b->id))fail("ID",b->id);
+            }else if(cx_fmt(witness,sizeof witness,"%s\t",b->id))fail("ID",b->id);
+            int found=0;char *scan=strdup(proof),*l;
+            while((l=next(&scan,'\n')))if(!strncmp(l,witness,strlen(witness))&&(!strcmp(v[2],"no-producer")||strstr(l,v[2])))found=1;
+            if(!found)fail("MISSING_PROOF",b->id);
+            evidence(v[3],proof);row3(&u,b->id,v[2],v[3]);
+        }else fail("DECISION_STATUS",b->id);
+        b->approved=1;
+    }
+    if(decisions&&!bound)fail("DECISIONS_IDENTITY",decisions);
+    for(int i=0;i<nb;i++){
+        Batch *b=batches+i;
+        if(!strcmp(b->state,"PASS")&&!b->witnessed)fail("UNWITNESSED_PASS",b->id);
+        if(strcmp(b->state,"PASS")){
+            char row[850];if(cx_fmt(row,sizeof row,"%s\t%s\t%s\t%d\t%s\t%s\n",b->id,b->state,b->count?b->count:"-",b->row,cand.sha[0],b->approved?"reviewed":"pending"))fail("REVIEW_ROW",b->id);
+            np_puts(&review,row);
+        }
+        if(strcmp(b->state,"PASS")&&!b->approved){sy_printf("REVIEW\t%s\t%s\tcount=%s\n",b->id,b->state,b->count?b->count:"-");pending++;}
+    }
+    evidence("expected-fail.tsv",f.p);evidence("expected-unmeasured.tsv",u.p);
+    char *reviewpath=relative(outdir,"human-review.tsv");
+    if(checking){if(!archive_check&&strcmp(readtext(reviewpath),review.p))fail("REVIEW_DRIFT",reviewpath);}
+    else if(cx_write(reviewpath,review.p,review.n))fail("WRITE",reviewpath);
+}
+static const char *tail_value(char *text,const char *prefix){
+    char *line,*s=text;size_t n=strlen(prefix);const char *last=0;
+    while((line=next(&s,'\n')))if(!strncmp(line,prefix,n))last=line+n;
+    if(!last||!*last)fail("MISSING_RECEIPT",prefix);
+    return last;
+}
+static const char *sid,*warmname;
+static char stats[96];
+static void packed(const char *pack,const char *log){
+    char *table=relative(pack,"candidate.tsv"),why[512];
+    if(rcand_load(table,&cand,why,sizeof why)||strcmp(cand.ci_run_id,"0")||strcmp(cand.version,arg("version"))||strcmp(cand.commit,arg("freeze")))fail("PACK_CANDIDATE",table);
+    if(cx_fmt(layout,sizeof layout,"%s/layout",pack)||(!archive_check&&rcand_verify(&cand,layout,7,why,sizeof why)))fail("ASSET_IDENTITY",why);
+    char *p=readtext(log),*copy=strdup(p);
+    sid=tail_value(copy,"RELEASE_RUN\tSOURCES_SID\tVERIFIED\t");
+    if(!hexid(sid,64)||strcmp(tail_value(strdup(p),"PACK_APE\tSAME\tsha256="),cand.sha[0])||!strstr(p,"RELEASE_RUN\tRESULT\tPACK_OK\t"))fail("PACK_RECEIPT",log);
+    emit("release/candidate.tsv",readtext(table));evidence("pack-run.out",p);
+    char *cm=readtext(relative(pack,"cache-manager.tsv"));
+    if(!strstr(cm,cand.commit))fail("CACHE_MANAGER_FREEZE",cand.commit);
+    evidence("cache-manager.tsv",cm);
+}
+static void warm(const char *path){
+    char *s=readtext(path),*end=strchr(s,'\n');if(!end)fail("WARM",path);
+    char *head=strdup(s),*v[16];head[end-s]=0;int n=fields(head,v,16);
+    if(n<2||strcmp(v[0],"WARM")||strcmp(item(v,n,"candidate_sha256="),cand.sha[0])||!hexid(item(v,n,"key="),64))fail("WARM_IDENTITY",path);
+    char leaf[96];if(cx_fmt(leaf,sizeof leaf,"warm-%s.tsv",item(v,n,"key=")))fail("WARM",path);
+    warmname=strdup(leaf);evidence(leaf,s);
+}
+static void index_rows(void){
+    const char *keys[]={"prefreeze-strict","postfreeze-strict","pack","warm","dry"};
+    const char *strictref=relative("..",strrchr(strictrel,'/')+1);
+    const char *refs[]={strictref,strictref,"pack-run.out",warmname,"-"};
+    char *s=readtext(arg("milestones")),*v[3],*line;np_buf ix={0};int k=0;
+    while((line=next(&s,'\n'))){
+        if(!*line||*line=='#')continue;
+        if(fields(line,v,3)!=3||k==5||strcmp(v[0],keys[k])||!content(v[1])||!content(v[2]))fail("MILESTONE",line);
+        np_puts(&ix,keys[k]);np_puts(&ix,"\t");np_puts(&ix,v[1]);np_puts(&ix,"\tPASS\t");np_puts(&ix,refs[k]);np_puts(&ix,"\t");np_puts(&ix,v[2]);np_puts(&ix,"\n");k++;
+    }
+    if(k!=5)fail("MISSING_MILESTONE",arg("milestones"));
+    evidence("INDEX.tsv",ix.p);
+}
+static void section(const char *text,const char *title){
+    char line[192];if(cx_fmt(line,sizeof line,"\n## %s\n",title))fail("HEADING",title);
+    const char *p=strstr(text,line);
+    if(!p)fail("HUMAN_REQUIRED",title);
+    p+=strlen(line);while(*p==' '||*p=='\n'||*p=='\t')p++;
+    if(!*p||!strncmp(p,"## ",3)||!strncmp(p,"<待",4))fail("HUMAN_REQUIRED",title);
+}
+static const char *machine(const char *line,const char *label){
+    char prefix[128];if(cx_fmt(prefix,sizeof prefix,"| %s | ",label))fail("NOTES_LABEL",label);
+    const char *p=strstr(line,prefix);
+    if(!p || (p!=line && p[-1]!='\n'))fail("NOTES_IDENTITY",label);
+    return p+strlen(prefix);
+}
+static void notes(void){
+    const char *tags[]={"version","freeze","ape","sid","pkg","win","sums","summary"};
+    const char *vals[]={cand.version,cand.commit,cand.sha[0],sid,cand.sha[1],cand.sha[2],cand.sha[6],stats};
+    const char *form=opt("notes-form");
+    const char *builtin="# unisacc {version} 发布说明\n\n整体裁决 NOT_QUALIFIED\n\n## 真实身份\n\n| 对象 | 身份 |\n|---|---|\n| 冻结提交 | {freeze} |\n| 发布 APE SHA256(unisacc.com) | {ape} |\n| 源快照 SID | {sid} |\n| pkg.bin | {pkg} |\n| slice-win-arm64 | {win} |\n| SHA256SUMS | {sums} |\n\n## 严格证据\n\n{summary}\n\n## 产品改动\n\n<待填写>\n\n## 已知缺口\n\n<待填写>\n";
+    const char *text=form?readtext(form):builtin;
+    for(int i=0;i<8;i++){
+        char token[40];if(cx_fmt(token,sizeof token,"{%s}",tags[i]))fail("TOKEN",tags[i]);
+        np_buf rendered={0};if(!strstr(text,token))fail("NOTES_MISSING_TOKEN",tags[i]);
+        np_replace(text,strlen(text),token,strlen(token),vals[i],strlen(vals[i]),-1,&rendered);text=rendered.p;
+    }
+    char name[96];if(cx_fmt(name,sizeof name,"release/notes-%s.md",cand.version))fail("NOTES_PATH",cand.version);
+    char *p=relative(outdir,name);
+    if(!checking && cx_write(p,text,strlen(text)))fail("WRITE",name);
+    if(!form && !checking){pending++;return;}
+    gate_input(name);
+    const char *docs[]={readtext(p),baseline?historical(name):0};
+    for(int i=0;i<2&&docs[i];i++){
+        const char *doc=docs[i];char title[128];
+        if(cx_fmt(title,sizeof title,"# unisacc %s 发布说明\n",cand.version)||strncmp(doc,title,strlen(title))||!strstr(doc,"NOT_QUALIFIED"))fail("NOTES_VERSION",name);
+        const char *labels[]={"发布 APE SHA256(unisacc.com)","源快照 SID","pkg.bin","slice-win-arm64","SHA256SUMS"};
+        const char *hashes[]={cand.sha[0],sid,cand.sha[1],cand.sha[2],cand.sha[6]};
+        for(int j=0;j<5;j++){const char *v=machine(doc,labels[j]);if(strncmp(v,hashes[j],64)||rcand_hex(v+64,1))fail("NOTES_IDENTITY",labels[j]);}
+        const char *fp=strstr(doc,"| 冻结提交");const char *bar=fp?strchr(fp+1,'|'):0;
+        if(!bar||bar[1]!=' '||strncmp(bar+2,cand.commit,40))fail("NOTES_FREEZE",name);
+        const char *st=strstr(doc,"\n## 严格证据\n"),*match=st?strstr(st,stats):0,*end=st?strstr(st+1,"\n## "):0;
+        if(!match||(end&&match>end))fail("NOTES_COUNTS",stats);
+        section(doc,"产品改动");section(doc,"已知缺口");
+    }
+    if(baseline)historical_files++;
+}
+static void historical_inventory(void){
+    char *v[]={"git","diff-tree","--no-commit-id","--name-only","-r",(char *)baseline,"--","release",0};
+    char *lines=capture(v,cwd),*p;int listed=0,identical=0;
+    while((p=next(&lines,'\n'))){
+        if(!*p)continue;
+        char *old=historical(p),*saved=readtext(relative(outdir,p));listed++;
+        if(!strcmp(old,saved))identical++;
+        free(old);free(saved);
+    }
+    if(listed!=historical_files)fail("STAGE_INVENTORY",baseline);
+    sy_printf("REPLAY\tstage=%s\tfiles=%d\tbyte_identical=%d\n",baseline,listed,identical);
+}
+static void require_dry(const char *log){
+    char want[128];
+    if(cx_fmt(want,sizeof want,"GATE\t1\tAPE_VERSION\tPASS\tunisacc %s\n",cand.version)||
+       !strstr(log,want)||!strstr(log,"GATE\t1\tSTRICT\tPASS\t")||!strstr(log,"GATE\t2\tASSETS\tPASS\t")||
+       !strstr(log,"RELEASE_EXEC\tRESULT\tDRY_GATES_OK\tsteps=7\tdeferred=6\t"))fail("DRY_RECEIPT",cand.tag);
+}
+static char *repo_tool(const char *tool){return relative(cwd,tool);}
+static void ratchet_counts(char *s){
+    char *line=strstr(s,"\nRATCHETS\t"),*ms=line?strstr(line,"\telapsed_ms="):0;
+    if(!ms||!ms[12])fail("RATCHETS_SUMMARY","elapsed_ms");
+    const char *n=ms+12;while(*n>='0'&&*n<='9')n++;
+    if(n==ms+12||strcmp(n,"\n"))fail("RATCHETS_SUMMARY","elapsed_ms");
+    *ms=0;
+}
+static void prepare(const char *root,const char *dir){
+    char *tool=repo_tool("tools/release-prep.cx");
+    char *v[]={"sh",driver,tool,"--",cand.version,"--layout",layout,"--strict",relative(root,strictrel),"--commit",cand.commit,"--out",(char *)dir,0,0,0};
+    if(opt("ratchets")){v[13]="--ratchets";v[14]=(char *)arg("ratchets");}
+    np_result r={0};char why[256]={0};
+    if(np_run(v,root,0,55,&r,why,sizeof why)||r.residue||r.timed_out||r.rc<0||r.rc>1||!r.out||!strstr(r.out,"PREP\tSUMMARY\t")){
+        sy_eprintf("RELEASE_FLOW PREP rc=%d %s %s\n",r.rc,why,r.err?r.err:"");fail("PREP",dir);
+    }
+    sy_printf("RELEASE_FLOW PREP rc=%d receipts=%s\n",r.rc,dir);np_free(&r);
+}
+static void install_prepared(const char *root,const char *dir){
+    char *rat=readtext(relative(dir,"ratchets.txt")),prefix[128];
+    if(cx_fmt(prefix,sizeof prefix,"SOURCE\tfrozen-commit\tcommit=%s",cand.commit)||strncmp(rat,prefix,strlen(prefix)))fail("PREP_RATCHETS",dir);
+    char *gate=relative(relative(root,ed),"ratchets.txt");
+    if(cx_write(gate,rat,strlen(rat)))fail("WRITE",gate);
+    char *saved=relative(relative(outdir,ed),"ratchets.txt");
+    if(!checking){if(cx_write(saved,rat,strlen(rat)))fail("WRITE",saved);}
+    else {char *prior=readtext(saved);ratchet_counts(prior);ratchet_counts(rat);if(strcmp(prior,rat))fail("DRIFT",saved);}
+    evidence("rollback.txt",readtext(relative(dir,"rollback.txt")));
+    evidence("evidence-rows.tsv",readtext(relative(dir,"evidence-rows.tsv")));
+}
+static void hash_row(np_buf *b,const char *key,const char *path){
+    size_t n=0;char *s=cx_read(path,&n),hash[65];if(!s)fail("PREP_INPUT",path);
+    cx_sha256_hex(s,n,hash);free(s);np_puts(b,key);np_puts(b,"\t");np_puts(b,hash);np_puts(b,"\n");
+}
+static void prep_identity(const char *dir){
+    np_buf b={0};np_puts(&b,"release-flow-prep-v1\n");np_puts(&b,cand.commit);np_puts(&b,"\n");
+    char *cmd[]={"git","rev-parse","HEAD",0};np_puts(&b,capture(cmd,cwd));
+    hash_row(&b,"release-prep",repo_tool("tools/release-prep.cx"));hash_row(&b,"product",driver);
+    for(int i=0;i<gate_count;i++)hash_row(&b,gate_inputs[i],relative(outdir,gate_inputs[i]));
+    if(opt("ratchets"))hash_row(&b,"ratchets-input",arg("ratchets"));
+    const char *names[]={"ratchets.txt","rollback.txt","evidence-rows.tsv"};
+    for(int i=0;i<3;i++)hash_row(&b,names[i],relative(dir,names[i]));
+    char *p=relative(dir,"release-flow-prepared.tsv");
+    if(prep_phase){if(cx_write(p,b.p,b.n))fail("WRITE",p);}
+    else if(strcmp(readtext(p),b.p))fail("PREP_IDENTITY",p);
+}
+static void speed(const char *strictfile,const char *root){
+    char *file=relative(outdir,"speed.tsv");
+    /* S5 derives the prerun timestamp from the evidence mtime for absolute paths.
+     * Preserve the last actual segment's timestamp on its private concatenated projection. */
+    char *projection=relative(scratch,"speed-strict.tsv");
+    if(sy_copy(strictfile,projection,0600))fail("SPEED_STRICT",strictfile);
+    char *stamp[]={"touch","-r",(char *)last_segment,"--",projection,0};free(capture(stamp,root));
+    char *v[]={"sh",driver,repo_tool("tools/speed-ledger.cx"),"--","--version",cand.version,"--repo",(char *)root,"--prerun",projection,"--header",0,0,0};
+    char *row=capture(v,root);
+    if(!checking){if(cx_write(file,row,strlen(row)))fail("WRITE",file);}
+    else if(strcmp(readtext(file),row))fail("SPEED_DRIFT",file);
+    v[11]="--check";v[12]=file;
+    char *checked=capture(v,root);
+    if(!strstr(checked,"status=OK"))fail("SPEED_LEDGER",file);
+}
+static char *private_gate(const char *strictfile){
+    char *gitdir=relative(scratch,"gate");if(sy_mkdir(gitdir,0700))fail("PRIVATE_REPO",gitdir);
+    char *metadata=relative(scratch,"metadata");
+    char *init[]={"git","init","-q","--separate-git-dir",metadata,gitdir,0};free(capture(init,cwd));
+    char *objects_cmd[]={"git","rev-parse","--path-format=absolute","--git-path","objects",0};
+    char *objects=capture(objects_cmd,cwd);
+    if(*objects!='/'||cx_write(relative(metadata,"objects/info/alternates"),objects,strlen(objects)))fail("OBJECT_STORE",cwd);
+    char *checkout[]={"git","checkout","-q","--detach",cand.commit,0};free(capture(checkout,gitdir));
+    char *remote_cmd[]={"git","rev-parse","refs/remotes/origin/main",0};
+    char *main_oid=baseline?cand.commit:capture(remote_cmd,cwd);
+    main_oid[strcspn(main_oid,"\n")]=0;
+    char *ref[]={"git","update-ref","refs/remotes/origin/main",main_oid,0};free(capture(ref,gitdir));
+    if(sy_mkdir_all(relative(gitdir,ed),0700))fail("GATE_EVIDENCE_DIR",ed);
+    for(int i=0;i<gate_count;i++){
+        const char *rel=gate_inputs[i];char *bytes=readtext(relative(outdir,rel));
+        if(cx_write(relative(gitdir,rel),bytes,strlen(bytes)))fail("GATE_INPUT",rel);free(bytes);
+    }
+    if(sy_copy(repo_tool("unisacc.com"),relative(gitdir,"unisacc.com"),0700))fail("GATE_PRODUCT",gitdir);
+    if(prep_phase){
+        char *dir=relative(outdir,"prep");prepare(gitdir,dir);prep_identity(dir);
+    }else{
+    if(!baseline){
+        if(!prep_dir)fail("MISSING_PREP_PHASE","run prep and supply --prep DIR");
+        char *dir=relative(prep_dir,"prep");prep_identity(dir);install_prepared(gitdir,dir);
+    }
+    speed(strictfile,gitdir);
+    char *v[]={"sh",driver,repo_tool("tools/release-exec.cx"),"--","--execute","release/candidate.tsv","--layout",layout,"--strict",(char *)strictfile,"--out",relative(scratch,"dry"),"--dry",0};
+    char *log=capture(v,gitdir);
+    require_dry(log);if(cx_write(relative(scratch,"dry.log"),log,strlen(log)))fail("DRY_LOG",scratch);
+    }
+    char why[512]={0};
+    if(sy_unlink(relative(gitdir,".git"))||unisa_safedel(gitdir,SAFEDEL_PURGE|SAFEDEL_RECURSIVE,64000,why,sizeof why)||cx_rmtree(metadata))fail("PRIVATE_CLEANUP",why);
+    return scratch;
+}
+static void summary(void){
+    int pass=0,failures=0,unknown=0;
+    for(int i=0;i<nb;i++){if(!strcmp(batches[i].state,"PASS"))pass++;else if(!strcmp(batches[i].state,"FAIL"))failures++;else unknown++;}
+    if(cx_fmt(stats,sizeof stats,"%d 批:PASS %d、FAIL %d、UNKNOWN %d、INVALID 0",nb,pass,failures,unknown))fail("COUNTS","overflow");
+    sy_printf("STRICT_TOTAL\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\n",nb,pass,failures,unknown);
+}
+static int flow(int argc,char **argv){
+    const char *input=0,*out=0;
+    for(int i=2;i+1<argc;i+=2){
+        const char *key=argv[i],*v=argv[i+1];
+        if(!strcmp(key,"--inputs")&&!input)input=v;
+        else if(!strcmp(key,"--out")&&!out)out=v;
+        else if(!strcmp(key,"--decisions")&&!decisions)decisions=v;
+        else if(!strcmp(key,"--against")&&!baseline&&hexid(v,40))baseline=v;
+        else if(!strcmp(key,"--prep")&&!prep_dir&&v[0]=='/')prep_dir=v;
+        else fail("ARG",key);
+    }
+    if(argc%2||!input||!out||out[0]!='/')fail("USAGE","stage-a|check --inputs FILE --out ABS [--decisions FILE] [--against COMMIT40]");
+    read_inputs(input);const char *version=arg("version"),*date=arg("date");
+    if(!safe_leaf(version)||!safe_leaf(date)||!hexid(arg("freeze"),40))fail("INPUT_IDENTITY",version);
+    if(cx_fmt(ed,sizeof ed,"release/evidence/%s",version)||cx_fmt(strictrel,sizeof strictrel,"release/evidence/v%s-strict-%s.tsv",version,date))fail("PATH",version);
+    if((baseline&&prep_dir)||(prep_phase&&(baseline||prep_dir))||(archive_check&&(baseline||prep_dir||!decisions||!opt("pack")||!opt("warm")||!opt("notes-form"))))fail("ARG","conflicting or missing archive/prep options");
+    char session[4096];sy_stat_t ss;
+    if(sr_default("release-flow",session,sizeof session)|| (sy_mkdir(session,0700)&&
+       (sy_lstat(session,&ss)||ss.kind!='d'||ss.uid!=sy_uid()||ss.mode!=0700))||
+       sy_mkdtemp(session,"work",scratch,sizeof scratch))fail("PRIVATE_TMP","session");
+    if(cx_write(relative(scratch,"INCOMPLETE"),"release-flow\n",13))fail("PRIVATE_TMP",scratch);
+    if(checking){if(sy_realpath(out,outdir,sizeof outdir)<0)fail("OUTPUT_MISSING",out);}
+    else{
+        sy_stat_t st;int exists=sy_lstat(out,&st);if(!exists||exists!=-ENOENT)fail("NEW_OUT",out);
+        char *dir=strdup(out),*slash=strrchr(dir,'/');if(!slash||!slash[1])fail("OUT",out);
+        *slash=0;if(sy_mkdtemp(*dir?dir:"/","release-flow-stage",outdir,sizeof outdir)||sy_mkdir_all(relative(outdir,ed),0700))fail("NEW_OUT",out);
+        if(cx_write(relative(outdir,"INCOMPLETE"),"release-flow\n",13))fail("WRITE",outdir);
+    }
+    const char *pack=opt("pack"),*packlog=opt("pack-log");
+    if(!pack){
+        char *dst=relative(outdir,"pack");
+        char *v[]={"sh",driver,"tools/release-run.cx","--","--pack",cwd,(char *)arg("slot"),(char *)arg("source-dir"),dst,"--chain-out",(char *)arg("chain-out"),"--snap",(char *)arg("snapshot"),"--commit",(char *)arg("freeze"),"--cm-sha",(char *)arg("cm-x64"),(char *)arg("cm-arm64"),0};
+        packlog=relative(dst,"stage-a-pack.out");
+        if(!checking){char *log=capture(v,cwd);if(cx_write(packlog,log,strlen(log)))fail("PACK_LOG",packlog);}
+        pack=dst;
+    }
+    if(!packlog)fail("MISSING_INPUT","pack-log");
+    packed(pack,packlog);
+    emit(strictrel,strict_bytes.p);parse_strict(strdup(strict_bytes.p),cand.sha[0]);summary();
+    exceptions();notes();
+    /* Offline machine-column replay cannot publish or attest to asset execution. */
+    if(archive_check){
+        warm(arg("warm"));index_rows();
+        if(pending)fail("ARCHIVE_DECISIONS",version);
+        if(cx_rmtree(scratch))fail("PRIVATE_CLEANUP",scratch);
+        sy_printf("REPLAY_MACHINE\tversion=%s\tfiles=%d\tassets=UNMEASURED\n",version,gate_count);
+        return 0;
+    }
+    char frozen_batches[128];if(cx_fmt(frozen_batches,sizeof frozen_batches,"%s:tests/batches.tsv",cand.commit))fail("FREEZE",cand.commit);
+    char *registry_cmd[]={"git","show",frozen_batches,0};
+    int gaps=audit_split("tests/split-parents.tsv",capture(registry_cmd,cwd));
+    if(gaps&&!baseline)fail("COVERAGE_GAPS",version);
+    const char *warmfile=opt("warm");
+    if(!warmfile){
+        char *dst=relative(scratch,"warm");
+        char *v[]={"sh",driver,"tools/release-exec.cx","--","--warm",relative(pack,"candidate.tsv"),"--layout",layout,"--out",dst,0};
+        char *log=capture(v,cwd),*row=strdup(tail_value(log,"WARM\tRESULT\tREADY\tkey=")),*sep=strchr(row,'\t');
+        if(sep)*sep=0;
+        if(!hexid(row,64))fail("WARM_KEY",row);
+        char name[96];if(cx_fmt(name,sizeof name,"warm-%s.tsv",row))fail("WARM",row);
+        warmfile=relative(dst,name);
+    }
+    warm(warmfile);
+    if(!pending){
+        if(opt("dry-log"))require_dry(readtext(arg("dry-log")));
+        private_gate(relative(outdir,strictrel));
+        if(!prep_phase)index_rows();
+        if(baseline)historical_inventory();
+    }
+    if(gaps)fail("COVERAGE_GAPS",version);
+    if(prep_phase&&pending)fail("PREP_REVIEW_REQUIRED",version);
+    if(!checking && (sy_unlink(relative(outdir,"INCOMPLETE"))||sy_rename(outdir,out)))fail("PUBLISH_DIRECTORY",out);
+    if(cx_rmtree(scratch))fail("PRIVATE_CLEANUP",scratch);
+    sy_printf("RELEASE_FLOW\t%s\tversion=%s\tpending=%d\tcoverage_gaps=%d\n",pending?"NEEDS_REVIEW":prep_phase?"PREPARED":"READY",cand.version,pending,gaps);
+    return pending||gaps?1:0;
+}
+int main(int argc,char **argv){
+    if(sy_cwd(cwd,sizeof cwd)<0)fail("CWD",".");
+    if(sy_realpath("./unisacc.com",driver,sizeof driver)<0)fail("PRODUCT_ROOT",cwd);
+    if(argc==5&&!strcmp(argv[1],"check")&&!strcmp(argv[2],"--coverage")){
+        parse_strict(readtext(argv[4]),0);int gaps=audit_split(argv[3],0);
+        sy_printf("COVERAGE\tgaps=%d\n",gaps);return gaps?1:0;
+    }
+    if(argc<2||(strcmp(argv[1],"check")&&strcmp(argv[1],"stage-a")&&strcmp(argv[1],"prep")&&strcmp(argv[1],"replay-machine")))fail("USAGE","prep|stage-a|check|replay-machine");
+    archive_check=!strcmp(argv[1],"replay-machine");
+    prep_phase=!strcmp(argv[1],"prep");
+    checking=archive_check||!strcmp(argv[1],"check");return flow(argc,argv);
+}

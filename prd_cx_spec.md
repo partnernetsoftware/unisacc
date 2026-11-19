@@ -374,7 +374,7 @@ int main(int argc, char **argv) {
 - (6) 带界接口:写入类函数都带目标容量,装不下返回负码而不是截断;调用方必须查返回值。
 - (7) 新工具入库:放 `tools/`,带 `check-*.cx`,用 `tools/register.cx` 登记批次,并在 prd.md 能力速查补一行;建名前先 `git log --all --oneline -- tools/NAME` 查历史。
 - (8) 改过的每个 `.cx` 提交前用已装产品实编一遍,或跑 `tools/affected.cx --files ... --run`。
-- (9) 别的车道的文件(`apps/csih/`、`ujs/`)不直接改。
+- (9) 别的车道的文件(见 AGENTS.md 车道归属)不直接改。
 - (10) 不通过删断言、缩覆盖、放宽时限制造绿;未实跑不记 PASS。
 
 ## 8 稳定性与进化指针

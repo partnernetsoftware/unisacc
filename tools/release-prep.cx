@@ -138,6 +138,7 @@ static void find_strict(void) {
     if(matches>1)sy_eprintf("WARN\tSTRICT_MULTIPLE\tmatches=%d\tlexicographically last selected; use --strict FILE to override\n",matches);
     sy_printf("STRICT_SOURCE\tselected=%s\ttracked=%s\n",rel,rc?"no":"yes");
 }
+static int split_excl;
 static int find_b(const char *id) { int i; for (i = 0; i < nb; i++) if (tx_eqz(bid[i], id)) return i; return -1; }
 static void read_strict(void) {
     size_t n; char *t = cx_read(strictp, &n); long at = 0, ll; const char *ls;
@@ -156,8 +157,19 @@ static void read_strict(void) {
             continue;
         }
         field(ls, ll, 0, f0, sizeof f0);
-        if (tx_eqz(f0, "SUMMARY")) { char want[96]; has_summary = 1; cx_fmt(want, sizeof want, "ape_sha256=%s", apesha);
-            if (tx_find(ls, ll, want, 75) < 0) die("STRICT_CANDIDATE", "SUMMARY ape_sha256 differs from layout unisacc.com"); continue; }
+        if (tx_eqz(f0, "SUMMARY")) { char want[96]; long spk; has_summary = 1; cx_fmt(want, sizeof want, "ape_sha256=%s", apesha);
+            if (tx_find(ls, ll, want, 75) < 0) die("STRICT_CANDIDATE", "SUMMARY ape_sha256 differs from layout unisacc.com");
+            spk = tx_find(ls, ll, "split_parents_excluded=", 23);
+            if (spk >= 0) {
+                long p = spk + 23, v = 0, d = 0;
+                while (p < ll && ls[p] != '\t' && ls[p] != '\r') {
+                    if (ls[p] < '0' || ls[p] > '9' || d >= 6) die("STRICT", "invalid SUMMARY.split_parents_excluded");
+                    v = v * 10 + (ls[p] - '0'); d++; p++;
+                }
+                if (d == 0) die("STRICT", "empty SUMMARY.split_parents_excluded");
+                split_excl = (int)v;
+            }
+            continue; }
         if (tx_eqz(f0, "batch") || nfields(ls, ll) != 9) continue;
         if (nb >= MAXB) die("STRICT", "too many batches");
         field(ls, ll, 2, st, sizeof st); field(ls, ll, 4, cand, sizeof cand); field(ls, ll, 8, note, sizeof note);
@@ -401,7 +413,13 @@ int main(int argc, char **argv) {
     draft_expected(); draft_ratchets(); draft_notes(); draft_rollback(); draft_evidence();
     cx_fmt(notesleaf, sizeof notesleaf, "notes-%s.md", ver);
     emit("expected-fail.tsv", &efail); emit("ratchets.txt", &rat); emit(notesleaf, &notes); emit("rollback.txt", &rb); emit("evidence-rows.tsv", &ev);
-    { char l[1024]; cx_fmt(l, sizeof l, "PREP\tSUMMARY\tversion=%s\tprev=%s\tcommit=%s\tape=%s\tbatches=%d\tpass=%d\tfail=%d\tuncovered=%d\tnew_fail=%d\tout=%s\tverdict=NOT_QUALIFIED\n",
-              ver, prev, commit, apesha, nb, npass, nfail, nuncov, nnew, outd); sy_printf("%s", l); }
+    { char l[1024];
+      if (split_excl > 0)
+          cx_fmt(l, sizeof l, "PREP\tSUMMARY\tversion=%s\tprev=%s\tcommit=%s\tape=%s\tbatches=%d\tpass=%d\tfail=%d\tuncovered=%d\tnew_fail=%d\tsplit_parents_excluded=%d\tout=%s\tverdict=NOT_QUALIFIED\n",
+                 ver, prev, commit, apesha, nb, npass, nfail, nuncov, nnew, split_excl, outd);
+      else
+          cx_fmt(l, sizeof l, "PREP\tSUMMARY\tversion=%s\tprev=%s\tcommit=%s\tape=%s\tbatches=%d\tpass=%d\tfail=%d\tuncovered=%d\tnew_fail=%d\tout=%s\tverdict=NOT_QUALIFIED\n",
+                 ver, prev, commit, apesha, nb, npass, nfail, nuncov, nnew, outd);
+      sy_printf("%s", l); }
     return (nnew || nuncov) ? 1 : 0;
 }

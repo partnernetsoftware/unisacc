@@ -183,79 +183,272 @@ static int css_compare(const char *group, CssJob *jobs, int nj, long group_ms) {
     return ok ? 0 : 1;
 }
 
-static int run_signal_targets(void) {
-    long t0 = sy_now_ms();
-    CssJob jobs[4];
-    char *v0[] = {"sh", "./unisacc.com", "tools/check-signal-targets.cx", "--", ".", 0};
-    char *v1[] = {"sh", "./unisacc.com", "tools/check-signal-targets-part.cx", "--", "--part", "gen", ".", 0};
-    char *v2[] = {"sh", "./unisacc.com", "tools/check-signal-targets-part.cx", "--", "--part", "posix", ".", 0};
-    char *v3[] = {"sh", "./unisacc.com", "tools/check-signal-targets-part.cx", "--", "--part", "win", ".", 0};
-    css_start(&jobs[0], "orig", v0);
-    css_start(&jobs[1], "gen", v1);
-    css_start(&jobs[2], "posix", v2);
-    css_start(&jobs[3], "win", v3);
-    css_wait_all(jobs, 4, 55000);
-    return css_compare("signal-targets", jobs, 4, sy_now_ms() - t0);
+#define CSS_MAX_ENTRIES 32
+#define CSS_MAX_SHARDS 7
+
+typedef struct {
+    char parent[96];
+    char shards[CSS_MAX_SHARDS][96];
+    char parts[CSS_MAX_SHARDS][64];
+    int nshards;
+} CssEntry;
+
+static int css_parent_tool(const char *parent, const char **orig_cx, const char **part_cx, int *needs_workdir) {
+    if (tx_eqz(parent, "signal-targets")) {
+        *orig_cx = "tools/check-signal-targets.cx";
+        *part_cx = "tools/check-signal-targets-part.cx";
+        *needs_workdir = 0;
+        return 1;
+    }
+    if (tx_eqz(parent, "win-argv")) {
+        *orig_cx = "tools/check-win-argv.cx";
+        *part_cx = "tools/check-win-argv-part.cx";
+        *needs_workdir = 0;
+        return 1;
+    }
+    if (tx_eqz(parent, "snapshots-cx")) {
+        *orig_cx = "tests/snapshots-cx.cx";
+        *part_cx = "tools/check-snapshots-cx-part.cx";
+        *needs_workdir = 1;
+        return 1;
+    }
+    return 0;
 }
 
-static int run_win_argv(void) {
-    long t0 = sy_now_ms();
-    CssJob jobs[4];
-    char *v0[] = {"sh", "./unisacc.com", "tools/check-win-argv.cx", "--", ".", 0};
-    char *v1[] = {"sh", "./unisacc.com", "tools/check-win-argv-part.cx", "--", "--part", "facts", ".", 0};
-    char *v2[] = {"sh", "./unisacc.com", "tools/check-win-argv-part.cx", "--", "--part", "x86_64", ".", 0};
-    char *v3[] = {"sh", "./unisacc.com", "tools/check-win-argv-part.cx", "--", "--part", "arm64", ".", 0};
-    css_start(&jobs[0], "orig", v0);
-    css_start(&jobs[1], "facts", v1);
-    css_start(&jobs[2], "x86_64", v2);
-    css_start(&jobs[3], "arm64", v3);
-    css_wait_all(jobs, 4, 55000);
-    return css_compare("win-argv", jobs, 4, sy_now_ms() - t0);
+static int css_part_supported(const char *parent, const char *part) {
+    if (tx_eqz(parent, "signal-targets")) return tx_eqz(part, "gen") || tx_eqz(part, "posix") || tx_eqz(part, "win");
+    if (tx_eqz(parent, "win-argv")) return tx_eqz(part, "facts") || tx_eqz(part, "x86_64") || tx_eqz(part, "arm64");
+    if (tx_eqz(parent, "snapshots-cx")) return tx_eqz(part, "core") || tx_eqz(part, "alloc");
+    return 0;
 }
 
-static int run_snapshots_cx(const char *work) {
+static int css_run_entry(const CssEntry *en, const char *work) {
     long t0 = sy_now_ms();
-    CssJob jobs[3];
-    char d0[4096], d1[4096], d2[4096];
-    if (cx_fmt(d0, sizeof d0, "%s/snap-orig", work) ||
-        cx_fmt(d1, sizeof d1, "%s/snap-core", work) ||
-        cx_fmt(d2, sizeof d2, "%s/snap-alloc", work)) return 1;
-    char *v0[] = {"sh", "./unisacc.com", "tests/snapshots-cx.cx", "--", ".", d0, 0};
-    char *v1[] = {"sh", "./unisacc.com", "tools/check-snapshots-cx-part.cx", "--", "--part", "core", ".", d1, 0};
-    char *v2[] = {"sh", "./unisacc.com", "tools/check-snapshots-cx-part.cx", "--", "--part", "alloc", ".", d2, 0};
-    css_start(&jobs[0], "orig", v0);
-    css_start(&jobs[1], "core", v1);
-    css_start(&jobs[2], "alloc", v2);
-    css_wait_all(jobs, 3, 55000);
-    return css_compare("snapshots-cx", jobs, 3, sy_now_ms() - t0);
+    const char *orig_cx = 0, *part_cx = 0;
+    int needs_wd = 0;
+    if (!css_parent_tool(en->parent, &orig_cx, &part_cx, &needs_wd)) return 1;
+    if (en->nshards < 2 || en->nshards >= CSS_MAX_JOBS) return 1;
+
+    CssJob jobs[CSS_MAX_JOBS];
+    char dirs[CSS_MAX_JOBS][4096];
+    int nj = 1 + en->nshards;
+
+    if (needs_wd) {
+        if (cx_fmt(dirs[0], sizeof dirs[0], "%s/%s-orig", work, en->parent)) return 1;
+        char *v0[] = {"sh", "./unisacc.com", (char *)orig_cx, "--", ".", dirs[0], 0};
+        css_start(&jobs[0], "orig", v0);
+        for (int i = 0; i < en->nshards; i++) {
+            if (cx_fmt(dirs[i + 1], sizeof dirs[i + 1], "%s/%s-%s", work, en->parent, en->parts[i])) return 1;
+            char *vi[] = {"sh", "./unisacc.com", (char *)part_cx, "--", "--part", (char *)en->parts[i], ".", dirs[i + 1], 0};
+            css_start(&jobs[i + 1], en->parts[i], vi);
+        }
+    } else {
+        char *v0[] = {"sh", "./unisacc.com", (char *)orig_cx, "--", ".", 0};
+        css_start(&jobs[0], "orig", v0);
+        for (int i = 0; i < en->nshards; i++) {
+            char *vi[] = {"sh", "./unisacc.com", (char *)part_cx, "--", "--part", (char *)en->parts[i], ".", 0};
+            css_start(&jobs[i + 1], en->parts[i], vi);
+        }
+    }
+    css_wait_all(jobs, nj, 55000);
+    return css_compare(en->parent, jobs, nj, sy_now_ms() - t0);
+}
+
+static int css_batch_implemented(const char *bt, long bn, const char *id) {
+    long at = 0, idl = tx_len(id, 128);
+    while (at < bn) {
+        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
+        long o0, l0, o1, l1;
+        if (l > 0 && bt[at] != '#' &&
+            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 == idl && tx_same(bt + at + o0, l0, id, idl) &&
+            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11))
+            return 1;
+        at += l + 1;
+    }
+    return 0;
+}
+
+static int css_valid_ver3(const char *s, long n) {
+    int parts = 0, dig = 0;
+    for (long i = 0; i <= n; i++) {
+        char c = (i < n) ? s[i] : 0;
+        if (c >= '0' && c <= '9') { dig++; if (dig > 6) return 0; }
+        else if ((c == '.' || c == 0) && dig > 0) { parts++; dig = 0; if (c == 0) break; }
+        else return 0;
+    }
+    return parts == 3;
+}
+
+/* Verify every IMPLEMENTED "<parent>-*" batch in tests/batches.tsv is listed in en->shards. */
+static int css_check_all_registered_shards(const char *bt, long bn, const CssEntry *en) {
+    char pref[128];
+    if (cx_fmt(pref, sizeof pref, "%s-", en->parent)) return 1;
+    long pl = tx_len(pref, 128);
+    long at = 0;
+    int missing = 0;
+    while (at < bn) {
+        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
+        long o0, l0, o1, l1;
+        if (l > 0 && bt[at] != '#' &&
+            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 > pl && tx_same(bt + at + o0, pl, pref, pl) &&
+            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11)) {
+            char bid[128];
+            if (l0 < 128) {
+                mm_copy(bid, 128, bt + at + o0, (size_t)l0);
+                bid[l0] = 0;
+                int found = 0;
+                for (int k = 0; k < en->nshards; k++) if (tx_eqz(en->shards[k], bid)) found = 1;
+                if (!found) {
+                    sy_eprintf("check-slow-split: parent %s omits registered shard %s\n", en->parent, bid);
+                    missing++;
+                }
+            }
+        }
+        at += l + 1;
+    }
+    return missing;
+}
+
+/* Single-source loader: parses and validates tests/split-parents.tsv against tests/batches.tsv and available runners. */
+static int css_load_split_table(const char *path, CssEntry *entries, int maxe, int *out_n) {
+    int bad = 0, ne = 0;
+    size_t pn = 0, bn = 0;
+    *out_n = 0;
+    char *pb = (char *)cx_read(path, &pn);
+    if (!pb) {
+        sy_eprintf("check-slow-split: cannot read split-parents table %s\n", path);
+        sy_printf("FAIL\tslow-split.split-parents-table\treason=unreadable\n");
+        return 1;
+    }
+    char *bt = (char *)cx_read("tests/batches.tsv", &bn);
+    if (!bt) {
+        mm_free(pb);
+        sy_eprintf("check-slow-split: cannot read tests/batches.tsv\n");
+        sy_printf("FAIL\tslow-split.split-parents-table\treason=no-batches\n");
+        return 1;
+    }
+    long at = 0;
+    while (at < (long)pn) {
+        long e = tx_chr(pb + at, (long)pn - at, '\n'), l = e < 0 ? (long)pn - at : e;
+        if (l > 0 && pb[at + l - 1] == '\r') { sy_eprintf("check-slow-split: CRLF in %s\n", path); bad++; }
+        if (l > 0 && pb[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3, o4, l4;
+            if (tx_fields(pb + at, l, '\t') != 5 ||
+                tx_field(pb + at, l, '\t', 0, &o0, &l0) || tx_field(pb + at, l, '\t', 1, &o1, &l1) ||
+                tx_field(pb + at, l, '\t', 2, &o2, &l2) || tx_field(pb + at, l, '\t', 3, &o3, &l3) ||
+                tx_field(pb + at, l, '\t', 4, &o4, &l4)) {
+                sy_eprintf("check-slow-split: malformed row (need 5 cols) in %s\n", path);
+                bad++;
+            } else {
+                char par[96], shs[512], chk[96];
+                if (l0 >= 96) l0 = 95; mm_copy(par, 96, pb + at + o0, (size_t)l0); par[l0] = 0;
+                if (l1 >= 512) l1 = 511; mm_copy(shs, 512, pb + at + o1, (size_t)l1); shs[l1] = 0;
+                if (l2 >= 96) l2 = 95; mm_copy(chk, 96, pb + at + o2, (size_t)l2); chk[l2] = 0;
+                if (!tx_eqz(par, "parent")) {
+                    const char *ocx = 0, *pcx = 0; int nwd = 0;
+                    if (!css_valid_ver3(pb + at + o3, l3)) { sy_eprintf("check-slow-split: invalid since version in %s\n", path); bad++; }
+                    if (!tx_eqz(chk, "slow-split")) { sy_eprintf("check-slow-split: check batch must be slow-split (got=%s)\n", chk); bad++; }
+                    if (!css_parent_tool(par, &ocx, &pcx, &nwd)) { sy_eprintf("check-slow-split: no multiset verifier for parent %s\n", par); bad++; }
+                    for (int k = 0; k < ne; k++) if (tx_eqz(entries[k].parent, par)) { sy_eprintf("check-slow-split: duplicate parent %s\n", par); bad++; }
+                    if (!css_batch_implemented(bt, (long)bn, par)) { sy_eprintf("check-slow-split: parent %s not IMPLEMENTED\n", par); bad++; }
+                    if (!css_batch_implemented(bt, (long)bn, chk)) { sy_eprintf("check-slow-split: check %s not IMPLEMENTED\n", chk); bad++; }
+
+                    if (ne >= maxe) { sy_eprintf("check-slow-split: exceeds max parents %d\n", maxe); bad++; }
+                    else {
+                        CssEntry *en = &entries[ne];
+                        mm_fill(en, sizeof *en, 0, sizeof *en);
+                        tx_copy(en->parent, sizeof en->parent, par, tx_len(par, 95));
+                        char pref[128];
+                        (void)cx_fmt(pref, sizeof pref, "%s-", par);
+                        long pl = tx_len(pref, 128);
+                        long sp = 0, sl = tx_len(shs, 512);
+                        while (sp < sl) {
+                            long se = sp;
+                            while (se < sl && shs[se] != ',') se++;
+                            long ol = se - sp;
+                            if (ol > 0 && ol < 96 && en->nshards < CSS_MAX_SHARDS) {
+                                char one[96];
+                                mm_copy(one, 96, shs + sp, (size_t)ol); one[ol] = 0;
+                                if (tx_eqz(one, par)) { sy_eprintf("check-slow-split: parent %s listed as own shard\n", par); bad++; }
+                                for (int k = 0; k < en->nshards; k++) if (tx_eqz(en->shards[k], one)) { sy_eprintf("check-slow-split: duplicate shard %s\n", one); bad++; }
+                                if (!css_batch_implemented(bt, (long)bn, one)) { sy_eprintf("check-slow-split: shard %s not IMPLEMENTED\n", one); bad++; }
+                                if (ol <= pl || !tx_same(one, pl, pref, pl) || !css_part_supported(par, one + pl)) {
+                                    sy_eprintf("check-slow-split: unsupported shard %s for parent %s\n", one, par);
+                                    bad++;
+                                } else {
+                                    tx_copy(en->shards[en->nshards], 96, one, ol);
+                                    tx_copy(en->parts[en->nshards], 64, one + pl, ol - pl);
+                                    en->nshards++;
+                                }
+                            } else bad++;
+                            sp = se + 1;
+                        }
+                        if (en->nshards < 2) { sy_eprintf("check-slow-split: parent %s needs >=2 shards\n", par); bad++; }
+                        bad += css_check_all_registered_shards(bt, (long)bn, en);
+                        ne++;
+                    }
+                }
+            }
+        }
+        at += l + 1;
+    }
+    for (int i = 0; i < ne; i++) {
+        for (int k = 0; k < entries[i].nshards; k++) {
+            for (int j = 0; j < ne; j++) {
+                if (tx_eqz(entries[i].shards[k], entries[j].parent)) {
+                    sy_eprintf("check-slow-split: chained shard-as-parent %s\n", entries[i].shards[k]);
+                    bad++;
+                }
+            }
+        }
+    }
+    if (ne == 0) { sy_eprintf("check-slow-split: empty split-parents table %s\n", path); bad++; }
+    mm_free(bt);
+    mm_free(pb);
+    *out_n = ne;
+    sy_printf("%s\tslow-split.split-parents-table\tparents=%d\tbad=%d\n", bad ? "FAIL" : "PASS", ne, bad);
+    return bad ? 1 : 0;
 }
 
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     const char *group = "all";
+    const char *parents_path = "tests/split-parents.tsv";
+    int table_only = 0;
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
     char work[4096];
-    int ok = 0, failed = 0;
+    CssEntry entries[CSS_MAX_ENTRIES];
+    int ne = 0, ok = 0, failed = 0;
 
-    if (argc == 3 && tx_eqz(argv[1], "--group")) group = argv[2];
-    else if (argc != 1) { sy_eprintf("check-slow-split: usage [-- --group all|signal-targets|win-argv|snapshots-cx]\n"); return 2; }
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--group") && i + 1 < argc) group = argv[++i];
+        else if (tx_eqz(argv[i], "--parents") && i + 1 < argc) parents_path = argv[++i];
+        else if (tx_eqz(argv[i], "--table-only")) table_only = 1;
+        else { sy_eprintf("check-slow-split: usage [-- --group all|PARENT] [--parents FILE] [--table-only]\n"); return 2; }
+    }
+
+    int tbl_rc = css_load_split_table(parents_path, entries, CSS_MAX_ENTRIES, &ne);
+    if (table_only) {
+        if (tbl_rc == 0) ok++; else failed++;
+        sy_printf("CHECK_SLOW_SPLIT\tok=%d\tfailed=%d\tms=%ld\n", ok, failed, sy_now_ms() - t0);
+        return failed ? 1 : 0;
+    }
+    if (tbl_rc == 0) ok++; else failed++;
 
     if (cx_fmt(work, sizeof work, "%s/check-slow-split-%d", base_td, (int)sy_pid())) return 2;
     if (sy_mkdir(work, 0700) != 0) return 2;
 
-    if (tx_eqz(group, "all") || tx_eqz(group, "signal-targets")) {
-        if (run_signal_targets() == 0) ok++; else failed++;
-    }
-    if (tx_eqz(group, "all") || tx_eqz(group, "win-argv")) {
-        if (run_win_argv() == 0) ok++; else failed++;
-    }
-    if (tx_eqz(group, "all") || tx_eqz(group, "snapshots-cx")) {
-        if (run_snapshots_cx(work) == 0) ok++; else failed++;
+    int ran = 0;
+    for (int i = 0; i < ne; i++) {
+        if (tx_eqz(group, "all") || tx_eqz(group, entries[i].parent)) {
+            ran++;
+            if (css_run_entry(&entries[i], work) == 0) ok++; else failed++;
+        }
     }
     (void)cx_rmtree(work);
 
-    if (ok + failed == 0) { sy_eprintf("check-slow-split: unknown group %s\n", group); return 2; }
+    if (ran == 0) { sy_eprintf("check-slow-split: unknown group %s\n", group); return 2; }
     sy_printf("CHECK_SLOW_SPLIT\tok=%d\tfailed=%d\tms=%ld\n", ok, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;
 }
