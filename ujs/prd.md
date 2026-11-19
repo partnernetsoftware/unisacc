@@ -202,6 +202,19 @@ S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译�
 
 0b 测试将 `.ujs` 库和测试片段拼为单源后编译，跨模块链接在 0c。验收入口为 `ujs/product/cli-host.cx`，预期来自独立 `.cx` 数值、位模式和 UTF-8 用例。用 `--mutate-ux-abi` 改一项数学输入、一个边界偏移和一个 UTF-8 续字节，沿用原期望并要求非零。
 
+0c 的跨实例 ABI 在两个独立编译的 `.ujs` 入口之间启用。源文件开头先声明 import，再声明一个带参数名称和 ABI 版本的 export，随后写导出入口正文。参数和返回值支持原生 Wasm i64、f64，各声明至多八个参数，单模块至多八项声明式导入。
+
+```text
+import host_time from "env"() f64;
+export uxe_dispatch(op:i64, offset:i64, value:i64) i64 version 1;
+```
+
+基座通过 `env` 调用白名单宿主函数。产品通过 `uxe_v1` 直接绑定基座 Wasm 函数，由浏览器原生链接校验签名。两份模块均提供 `uxe_abi_version()`，版本在业务入口执行前核对。导出型模块通过浏览器 ABI 执行，旧 `main_export` 入口陷阱，host1 迷你 VM 仍用于旧单模块语料。新版不影响未声明 ABI 的源文件产物。
+
+每个实例拥有自己的线性内存。指针或偏移只在所属实例解释，写方逐次检查自身地址和长度。本轮探针由产品将自己的字节读成标量，经基座调用交接，基座将其写入自己的缓冲区。同一偏移独立读回 41 与 42，越界写由基座拒绝。这里验证标量交接，后续高吞吐缓冲协定由对应页面说明。
+
+`sh ./unisacc.com ujs/tests/run.cx -- --ux-link` 编译两份 `.ujs` 并在隔离浏览器中读回。独立 `.cx` 计算结果 42059，核两个缓冲区及各反例原因。直接运行 `ujs/tests/ux-link.cx` 时可传 `version`、`signature`、`bounds`、`missing`，将对应反例替换为主路径，均须退出 1。探针在临时目录导出，无线上页面改动。
+
 #### 构建、顺序与验收
 
 基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。

@@ -1,0 +1,100 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char base_source[] = "ujs/practice/uxe/test/ux-link-base.ujs";
+static const char product_source[] = "ujs/practice/uxe/test/ux-link-product.ujs";
+
+static int generated(const char *dir, const char *name, const char *source, const char *from, const char *to) {
+    char wasm[320], modified[320], body[4096];
+    char *cmd[] = {"./ujs/ujs2wasm.com", (char *)source, "-o", wasm, 0};
+    char *out = 0;
+    size_t out_n = 0;
+    int rc;
+    tx_snprintf(wasm, sizeof wasm, "%s/%s.wasm", dir, name);
+    if (from) {
+        unsigned char *bytes = 0;
+        int64_t n = 0;
+        long key_n = tx_len(from, 64);
+        long at;
+        int len;
+        if (sy_read_file(source, &bytes, &n, 2048)) return 1;
+        at = tx_find((char *)bytes, n, from, key_n);
+        if (at < 0 || tx_find((char *)bytes + at + key_n, n - at - key_n, from, key_n) >= 0) {
+            mm_free(bytes);
+            return 1;
+        }
+        len = tx_snprintf(body, sizeof body, "%.*s%s%s", (int)at, (char *)bytes, to, bytes + at + key_n);
+        mm_free(bytes);
+        if (len < 0 || len >= (int)sizeof body) return 1;
+        tx_snprintf(modified, sizeof modified, "%s/%s.ujs", dir, name);
+        if (sy_write_file(modified, body, len, 0600)) return 1;
+        cmd[1] = modified;
+    }
+    rc = cx_runv_timeout(cmd, 8, &out, &out_n);
+    if (rc) fprintf(stderr, "UX_LINK compile %s rc=%d %s\n", name, rc, out ? out : "");
+    mm_free(out);
+    return rc != 0;
+}
+
+static int copy_fixture(const char *dir, const char *leaf, const char *source) {
+    char path[320];
+    unsigned char *data = 0;
+    int64_t n = 0;
+    if (sy_read_file(source, &data, &n, 16384)) return 1;
+    tx_snprintf(path, sizeof path, "%s/%s", dir, leaf);
+    int rc = sy_write_file(path, data, n, 0600);
+    mm_free(data);
+    return rc != 0;
+}
+
+static int browser(const char *dir, const char *mode) {
+    char profile[350], url[380], gold[180], *out = 0;
+    const char start[] = "<pre id=\"ux-link-result\">";
+    const char end[] = "</pre>";
+    char *cmd[] = {"google-chrome", "--headless=new", "--allow-file-access-from-files",
+        "--disable-background-networking", "--no-first-run", profile, "--virtual-time-budget=4000",
+        "--dump-dom", url, 0};
+    size_t n = 0;
+    long from, to;
+    int rc, pass = 0;
+    int own = 41, transfer = own + 1, clock = 17;
+    tx_snprintf(profile, sizeof profile, "--user-data-dir=%s/chrome", dir);
+    tx_snprintf(url, sizeof url, "file://%s/probe.html#%s", dir, mode);
+    int gold_n = tx_snprintf(gold, sizeof gold, "%d %d %d 1 version signature trap missing",
+        transfer * 1000 + transfer + clock, transfer, own);
+    rc = cx_runv_timeout(cmd, 15, &out, &n);
+    from = out ? tx_find(out, n, start, sizeof start - 1) : -1;
+    if (from >= 0) {
+        from += sizeof start - 1;
+        to = tx_find(out + from, n - from, end, sizeof end - 1);
+        if (to >= 0) {
+            pass = !rc && tx_same(out + from, to, gold, gold_n);
+            printf("CHECK_UXE_LINK mode=%s val=%.*s failed=%d\n", mode, (int)to, out + from, !pass);
+        }
+    }
+    if (from < 0) fprintf(stderr, "UX_LINK browser rc=%d %s\n", rc, out ? out : "");
+    mm_free(out);
+    return !pass;
+}
+
+int main(int argc, char **argv) {
+    char dir[256], *removed = 0;
+    char *clean[] = {"rm", "-rf", "--", dir, 0};
+    size_t removed_n = 0;
+    const char *mode = argc == 2 ? argv[1] : "";
+    if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
+        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8))) return 2;
+    if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
+    int rc = copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-link-probe.html") ||
+        copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js") ||
+        generated(dir, "base", base_source, 0, 0) ||
+        generated(dir, "product", product_source, 0, 0) ||
+        generated(dir, "version", base_source, "version 1;", "version 2;") ||
+        generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)") ||
+        browser(dir, mode);
+    if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
+    mm_free(removed);
+    return rc;
+}

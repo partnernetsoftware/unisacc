@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE ABI probe</title>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { linkUxe } from "./host-abi.js";
+
+async function read(name) {
+  const response = await fetch(name + ".wasm");
+  if (!response.ok) throw new Error("fixture read");
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+
+function outcome(run) {
+  try {
+    run();
+    return "accepted";
+  } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) return "trap";
+    if (!(error instanceof WebAssembly.LinkError)) return "unexpected";
+    if (error.message === "UXE ABI version") return "version";
+    if (error.message === "missing UXE module") return "missing";
+    return /expected type|signature|type mismatch/i.test(error.message) ? "signature" : "unexpected";
+  }
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const [base, product, wrongVersion, wrongSignature] =
+    await Promise.all(["base", "product", "version", "signature"].map(read));
+  const host = { host_time: () => 17 };
+  const linked = linkUxe(base, product, host);
+  const baseBytes = new Uint8Array(linked.base.memory.buffer);
+  const productBytes = new Uint8Array(linked.product.memory.buffer);
+  const version = outcome(() => linkUxe(wrongVersion, product, host));
+  const signature = outcome(() => linkUxe(wrongSignature, product, host));
+  const missing = outcome(() => linkUxe(undefined, product, host));
+  const fault = location.hash.slice(1);
+  const [selectedBase, selectedProduct, offset] = {
+    version: [wrongVersion, product, 0n],
+    signature: [wrongSignature, product, 0n],
+    missing: [undefined, product, 0n],
+    bounds: [base, product, 6291456n]
+  }[fault] || [base, product, 0n];
+  const value = fault
+    ? outcome(() => linkUxe(selectedBase, selectedProduct, host).product.uxe_frame(offset))
+    : linked.product.uxe_frame(0n).toString();
+  const bounds = outcome(() => linked.product.uxe_frame(6291456n));
+  result.textContent = [
+    value, baseBytes[2097152], productBytes[2097152],
+    Number(baseBytes.buffer !== productBytes.buffer), version, signature, bounds, missing
+  ].join(" ");
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>
