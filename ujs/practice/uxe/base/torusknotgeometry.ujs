@@ -1,0 +1,55 @@
+native function knot_center(point:i64,angle:f64,ratio:f64,radius:f64) i64 {
+  let twist=ratio*angle;
+  let radial=radius*(2.0+ux_math_cos(twist))*0.5;
+  return frame_put(point,radial*ux_math_cos(angle),radial*ux_math_sin(angle),
+    radius*ux_math_sin(twist)*0.5);
+}
+
+// Work holds five three-component f64 vectors for the moving frame.
+native function TorusKnotGeometry_generate(mesh:i64,work:i64,radius:f64,tube:f64,
+                                           tubular:i64,radial:i64,p:f64,q:f64) i64 {
+  if(work<0 || work>6291456-120 || work%8!=0 || radius<=0.0 || p==0.0 ||
+     tubular<1 || radial<1 || tubular>262144 || radial>262144) { return 0-1; }
+  let columns=radial+1;
+  let points=columns*(tubular+1);
+  let cells=6*radial*tubular;
+  if(!GeometryBuffers_fits(mesh,points,cells)) { return 0-1; }
+  let knot_vertex=ux_u32(mesh+GeometryBuffers.vertices);
+  let knot_index=ux_u32(mesh+GeometryBuffers.indices);
+  let ratio=q/p;
+  let direction=1.0;
+  if(tube<0.0) { direction=0.0-1.0; }
+  if(tube==0.0) { direction=0.0; }
+  let row=0;
+  while(row<=tubular) {
+    let u=row*1.0/tubular;
+    let angle=u*p*6.283185307179586;
+    let center=knot_center(work,angle,ratio,radius);
+    let next=knot_center(work+24,angle+0.01,ratio,radius);
+    let tangent=frame_combine(work+48,next,center,0.0-1.0);
+    let normal=frame_combine(work+72,next,center,1.0);
+    let b=frame_cross(work+96,tangent,normal);
+    let n=frame_cross(normal,b,tangent);
+    let binormal_unit=frame_normalize(b);
+    let normal_unit=frame_normalize(n);
+    let column=0;
+    while(column<=radial) {
+      let v=column*1.0/radial;
+      let pitch=v*6.283185307179586;
+      let x=0.0-ux_math_cos(pitch);
+      let y=ux_math_sin(pitch);
+      let nx=x*ux_f64(normal_unit)+y*ux_f64(binormal_unit);
+      let ny=x*ux_f64(normal_unit+8)+y*ux_f64(binormal_unit+8);
+      let nz=x*ux_f64(normal_unit+16)+y*ux_f64(binormal_unit+16);
+      knot_vertex=GeometryBuffers_vertex(knot_vertex,ux_f64(center)+tube*nx,ux_f64(center+8)+tube*ny,
+        ux_f64(center+16)+tube*nz,nx*direction,ny*direction,nz*direction,u,v);
+      if(row<tubular && column<radial) {
+        let upper=row*columns+column;
+        knot_index=geometry_quad(knot_index,upper,upper+columns,upper+columns+1,upper+1);
+      }
+      column=column+1;
+    }
+    row=row+1;
+  }
+  return GeometryBuffers_commit(mesh,points,cells);
+}
