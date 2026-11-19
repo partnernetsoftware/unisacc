@@ -8,6 +8,8 @@ export uxe_dispatch(op:i64, a:i64, b:i64) i64 version 1;
 persist let width = 0;
 persist let height = 0;
 persist let assetReadBytes = 0;
+persist let sceneFocal = 0;
+persist let sceneNear = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -18,6 +20,7 @@ if (op == 1) {
   if (a * b > 1048576) { return 0 - 1; }
   width = a;
   height = b;
+  sceneFocal = 0;
   return width * height;
 }
 if (op == 2 || op == 9 || op == 10 || op == 11) {
@@ -250,6 +253,89 @@ if (op == 16 || op == 17) {
       blendDx = blendDx + 1;
     }
     blendDy = blendDy + 1;
+  }
+  return 0;
+}
+// Camera-space triangles. Vertex records end before the reciprocal-depth image.
+// The RGB image stays in the existing device buffer, with the host only presenting it.
+if (op == 18) {
+  if (a < 1 || a > 2048 || b < 1 || b > 65535 || pixels == 0 || pixels > 197864) { return 0 - 1; }
+  sceneFocal = a;
+  sceneNear = b;
+  let sceneClear = 0;
+  let sceneReset = ux_u8_put(5499900, 0);
+  sceneReset = ux_u8_put(5499901, 0);
+  sceneReset = ux_u8_put(5499902, 0);
+  while (sceneClear < pixels) {
+    sceneReset = ux_f32_put(5500000 + 4 * sceneClear, 0.0);
+    sceneClear = sceneClear + 1;
+  }
+  return 0;
+}
+if (op == 19) {
+  if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b >= 281474976710656) { return 0 - 1; }
+  let cameraZ = b / 4294967296;
+  let vertexState = ux_u8_put(5499900 + a, 0);
+  if (cameraZ < sceneNear) { return 0 - 1; }
+  let cameraX = b % 65536 - 32768;
+  let cameraY = b / 65536 % 65536 - 32768;
+  let vertexAt = 5499912 + 12 * a;
+  vertexState = ux_f32_put(vertexAt, f64_floor_i64(width / 2.0 + sceneFocal * cameraX / (cameraZ * 1.0) + 0.5) * 1.0);
+  vertexState = ux_f32_put(vertexAt + 4, f64_floor_i64(height / 2.0 - sceneFocal * cameraY / (cameraZ * 1.0) + 0.5) * 1.0);
+  vertexState = ux_f32_put(vertexAt + 8, 1.0 / cameraZ);
+  vertexState = ux_u8_put(5499900 + a, 1);
+  return 0;
+}
+if (op == 20) {
+  if (sceneFocal == 0 || b < 0 || b > 16777215 ||
+      ux_u8(5499900) == 0 || ux_u8(5499901) == 0 || ux_u8(5499902) == 0) { return 0 - 1; }
+  let x0 = ux_f32(5499912);
+  let y0 = ux_f32(5499916);
+  let x1 = ux_f32(5499924);
+  let y1 = ux_f32(5499928);
+  let x2 = ux_f32(5499936);
+  let y2 = ux_f32(5499940);
+  let triangleArea = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+  if (triangleArea == 0.0) { return 0; }
+  let minX = x0;
+  let minY = y0;
+  let maxX = x0;
+  let maxY = y0;
+  if (x1 < minX) { minX = x1; }
+  if (x2 < minX) { minX = x2; }
+  if (y1 < minY) { minY = y1; }
+  if (y2 < minY) { minY = y2; }
+  if (x1 > maxX) { maxX = x1; }
+  if (x2 > maxX) { maxX = x2; }
+  if (y1 > maxY) { maxY = y1; }
+  if (y2 > maxY) { maxY = y2; }
+  if (minX < 0.0) { minX = 0.0; }
+  if (minY < 0.0) { minY = 0.0; }
+  if (maxX >= width) { maxX = width - 1.0; }
+  if (maxY >= height) { maxY = height - 1.0; }
+  let triangleY = f64_floor_i64(minY);
+  while (triangleY <= maxY) {
+    let triangleX = f64_floor_i64(minX);
+    while (triangleX <= maxX) {
+      let weight0 = ((x2 - x1) * (triangleY + 0.5 - y1) - (y2 - y1) * (triangleX + 0.5 - x1)) / triangleArea;
+      let weight1 = ((x0 - x2) * (triangleY + 0.5 - y2) - (y0 - y2) * (triangleX + 0.5 - x2)) / triangleArea;
+      let weight2 = 1.0 - weight0 - weight1;
+      if (weight0 >= 0.0 && weight1 >= 0.0 && weight2 >= 0.0) {
+        let triangleInvZ = weight0 * ux_f32(5499920) + weight1 * ux_f32(5499932) + weight2 * ux_f32(5499944);
+        let triangleIndex = triangleY * width + triangleX;
+        let triangleDepthAt = 5500000 + 4 * triangleIndex;
+        if (triangleInvZ > ux_f32(triangleDepthAt)) {
+          let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
+          triangleIndex = triangleIndex * 4;
+          triangleInk = ux_u8_put(triangleIndex, b % 256);
+          triangleInk = ux_u8_put(triangleIndex + 1, b / 256 % 256);
+          triangleInk = ux_u8_put(triangleIndex + 2, b / 65536);
+          triangleInk = ux_u8_put(triangleIndex + 3, 255);
+        }
+      }
+      triangleX = triangleX + 1;
+    }
+    triangleY = triangleY + 1;
   }
   return 0;
 }
