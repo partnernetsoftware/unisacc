@@ -33,6 +33,15 @@ static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_l
 static int g_need_gpu;
 static int g_need_ux;
 static int g_abi_imports;
+static const char *g_capacity;
+static uint32_t g_used, g_request, g_limit;
+
+static void capacity_error(const char *name, uint32_t used, uint32_t request, uint32_t limit) {
+  g_capacity = name;
+  g_used = used;
+  g_request = request;
+  g_limit = limit;
+}
 #ifdef UJS_HOST
 static int g_legacy_inline;
 
@@ -41,8 +50,11 @@ void ujs_host_legacy_inline(int enabled) { g_legacy_inline = enabled != 0; }
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
+  if (n > sizeof(g_heap) - g_bump) {
+    capacity_error("emit buffer", g_bump, n, sizeof(g_heap));
+    return 0;
+  }
   uint32_t nx = (g_bump + n + 7u) & ~7u;
-  if (nx > sizeof(g_heap)) return 0;
   g_bump = nx;
   return p;
 }
@@ -91,12 +103,32 @@ const uint8_t *ujs_host_mem(void) { return g_heap; }
 uint32_t ujs_host_mem_size(void) { return (uint32_t)sizeof(g_heap); }
 #endif
 
+static void diagnostic_text(uint32_t *at, const char *s) {
+  while (*s && *at < 63) g_heap[(*at)++] = (uint8_t)*s++;
+}
+
+static void diagnostic_number(uint32_t *at, uint32_t n) {
+  char digits[11];
+  uint32_t count = 0;
+  do { digits[count++] = (char)('0' + n % 10); n /= 10; } while (n);
+  while (count && *at < 63) g_heap[(*at)++] = (uint8_t)digits[--count];
+}
+
 static void set_err(const char *m) {
-  uint32_t n = (uint32_t)strlen(m);
-  uint32_t o = hall(n + 1);
-  if (!o) { g_err_ptr = g_err_len = 0; return; }
-  memcpy(g_heap + o, m, n + 1);
-  g_err_ptr = poff(o); g_err_len = n;
+  // The allocator starts at byte 64. Errors remain readable even at capacity.
+  uint32_t at = 1;
+  diagnostic_text(&at, g_capacity ? g_capacity : m);
+  if (g_capacity) {
+    diagnostic_text(&at, " used=");
+    diagnostic_number(&at, g_used);
+    diagnostic_text(&at, " need=");
+    diagnostic_number(&at, g_request);
+    diagnostic_text(&at, " limit=");
+    diagnostic_number(&at, g_limit);
+  }
+  g_heap[at] = 0;
+  g_err_ptr = poff(1);
+  g_err_len = at - 1;
 }
 
 /* ---- buf ---- */
@@ -569,13 +601,16 @@ typedef struct {
 } Prog;
 
 static int emit(Prog *P, uint8_t op, int64_t a) {
-  if (P->nc >= MAXC) { P->err = "code overflow"; return 0; }
+  if (P->nc >= MAXC) { capacity_error("instruction buffer", P->nc, 1, MAXC); return 0; }
   P->code[P->nc].op = op; P->code[P->nc].a = a; P->nc++; return 1;
 }
 /* OP_SCONST a = (pool_off << 16) | len; bytes at P->sdata[off..]. */
 static int emit_sconst_bytes(Prog *P, const char *s, uint32_t n) {
   if (n > MAXSTRLIT) { P->err = "string too long"; return 0; }
-  if (P->sn + n > MAXSDATA) { P->err = "string pool overflow"; return 0; }
+  if (P->sn + n > MAXSDATA) {
+    capacity_error("string pool overflow", P->sn, n, MAXSDATA);
+    return 0;
+  }
   uint32_t off = P->sn;
   for (uint32_t i = 0; i < n; i++) P->sdata[P->sn++] = (uint8_t)s[i];
   return emit(P, OP_SCONST, ((int64_t)off << 16) | (int64_t)n);
@@ -589,7 +624,7 @@ enum { LOCAL_RESERVED = 65535 };
 static int intrinsic_name(const char *actual, const char *expected);
 
 static int fresh_local(Prog *P, const char *name) {
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   strncpy(P->names[P->nl], name, MAXN - 1);
   P->names[P->nl][MAXN - 1] = 0;
   P->lty[P->nl] = TY_I64;
@@ -660,7 +695,7 @@ static int glob(Prog *P, const char *name, int create) {
 }
 static int ensure_scratch(Prog *P) {
   if (P->scratch >= 0) return P->scratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_LIST;
   P->lety[P->nl] = TY_I64;
@@ -669,7 +704,7 @@ static int ensure_scratch(Prog *P) {
 }
 static int ensure_fscratch(Prog *P) {
   if (P->fscratch >= 0) return P->fscratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_F64;
   P->lety[P->nl] = TY_F64;
@@ -678,7 +713,7 @@ static int ensure_fscratch(Prog *P) {
 }
 static int ensure_lscratch(Prog *P) {
   if (P->lscratch >= 0) return P->lscratch;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_I64;
   P->lety[P->nl] = TY_I64;
@@ -688,7 +723,7 @@ static int ensure_lscratch(Prog *P) {
 
 static int ensure_uxaddr(Prog *P) {
   if (P->uxaddr >= 0) return P->uxaddr;
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = TY_LIST;
   P->uxaddr = P->nl;
@@ -759,14 +794,14 @@ static int capture_block_body(Lex *L, Prog *P, FnDef *F) {
 }
 
 static int register_fn(Prog *P, FnDef *tmp) {
-  if (P->nfn >= MAXFN) { P->err = "too many fns"; return -1; }
+  if (P->nfn >= MAXFN) { capacity_error("too many fns", P->nfn, 1, MAXFN); return -1; }
   if (find_fn(P, tmp->name) >= 0 || find_native(P, tmp->name) >= 0) { P->err = "dup fn"; return -1; }
   P->fns[P->nfn] = *tmp;
   return P->nfn++;
 }
 
 static int invocation_slot(Prog *P, int type) {
-  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  if (P->nl >= MAXL) { capacity_error("too many locals", P->nl, 1, MAXL); return -1; }
   P->names[P->nl][0] = 0;
   P->lty[P->nl] = (uint8_t)type;
   P->lety[P->nl] = TY_I64;
@@ -1061,7 +1096,10 @@ static int find_native(Prog *P, const char *name) {
 }
 
 static int native_decl(Lex *L, Prog *P) {
-  if (P->native_count == MAX_NATIVE) { P->err = "native function limit"; return 0; }
+  if (P->native_count == MAX_NATIVE) {
+    capacity_error("native function limit", P->native_count, 1, MAX_NATIVE);
+    return 0;
+  }
   NativeFn *fn = &P->natives[P->native_count];
   next(L);
   if (!expect(L, T_FUNCTION, P, "native function keyword")) return 0;
@@ -3562,6 +3600,7 @@ __attribute__((export_name("compile")))
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   static char native_source[100000];
   g_bump = 64;
+  g_capacity = 0;
   g_need_gpu = 0;
   g_need_ux = 0;
   g_abi_imports = 0;
@@ -3610,7 +3649,11 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
   g_abi_imports = P.import_count;
-  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err(P.err ? P.err : "emit"); return 1; }
+  if (!build_mod(&P, &mod)) {
+    g_need_gpu = 0;
+    set_err(P.err ? P.err : "module emission failed");
+    return 1;
+  }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
   g_need_gpu = 0;
   (void)PERSIST_FIT;

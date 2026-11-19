@@ -1,0 +1,72 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static char source[99000];
+
+static int make_case(int which) {
+    int n=0;
+    if(which==0) {
+        for(int i=0;i<48;i++) {
+            n+=tx_snprintf(source+n,sizeof source-n,"native function f%d(x:i64) i64 {",i);
+            for(int j=0;j<2;j++) {
+                n+=tx_snprintf(source+n,sizeof source-n,"let s=\"");
+                for(int k=0;k<255;k++) source[n++]='a';
+                n+=tx_snprintf(source+n,sizeof source-n,"\";");
+            }
+            n+=tx_snprintf(source+n,sizeof source-n,"return x;}\n");
+        }
+    } else if(which==1) {
+        for(int i=0;i<129;i++)
+            n+=tx_snprintf(source+n,sizeof source-n,"native function f%d(x:i64) i64{return x;}\n",i);
+    } else if(which==2) {
+        for(int i=0;i<257;i++) n+=tx_snprintf(source+n,sizeof source-n,"let a%d=0;\n",i);
+    } else if(which==3) {
+        for(int i=0;i<33;i++) {
+            n+=tx_snprintf(source+n,sizeof source-n,"let s=\"");
+            for(int j=0;j<255;j++) source[n++]='a';
+            n+=tx_snprintf(source+n,sizeof source-n,"\";\n");
+        }
+    } else {
+        for(int i=0;i<129;i++)
+            n+=tx_snprintf(source+n,sizeof source-n,"function f%d(x){return x;}\n",i);
+    }
+    return n+tx_snprintf(source+n,sizeof source-n,"return 0;\n");
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],input[300],output[300];
+    if(sy_mkdtemp("/tmp","ujs-compiler-capacity-",dir,sizeof dir)) return 2;
+    tx_snprintf(input,sizeof input,"%s/case.ujs",dir);
+    tx_snprintf(output,sizeof output,"%s/case.wasm",dir);
+    const char *expected[]={"emit buffer used=",
+        "native function limit used=128 need=1 limit=128",
+        "too many locals used=256 need=1 limit=256",
+        "string pool overflow used=8160 need=255 limit=8192",
+        "too many fns used=128 need=1 limit=128"};
+    int failed=0;
+    for(int i=0;i<5;i++) {
+        int size=make_case(i);
+        if(sy_write_file(input,source,size,0600)) { failed++; break; }
+        char *args[]={"sh","-c","exec \"$@\" 2>&1","sh","./ujs/ujs2wasm.com",input,"-o",output,0};
+        char *out=0;
+        size_t bytes=0;
+        sy_stat_t st;
+        int rc=cx_runv_timeout(args,8,&out,&bytes);
+        const char *gold=mutate && i==2?"too many locals used=255":expected[i];
+        int ok=rc==1 && out && tx_contains(out,bytes,gold,tx_len(gold,100))
+            && (i!=0 || tx_contains(out,bytes," limit=262144",13))
+            && sy_lstat(output,&st)==-ENOENT;
+        printf("CAPACITY case=%d rc=%d verified=%d %s",i,rc,ok,out?out:"\n");
+        if(!ok) failed++;
+        mm_free(out);
+        sy_unlink(output);
+    }
+    sy_unlink(input);
+    sy_rmdir(dir);
+    printf("CHECK_UJS_COMPILER_CAPACITY cases=5 failed=%d\n",failed);
+    return failed!=0;
+}
