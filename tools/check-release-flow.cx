@@ -2,6 +2,8 @@
  * Layer: interfaces. Output: CHECK_RELEASE_FLOW. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.sessionroot
 static int passed,failed;
 static void ck(int ok,const char *id){printf("%s\t%s\n",ok?"PASS":"FAIL",id);if(ok)passed++;else failed++;}
 static char tmp[4096],bin[4400];
@@ -27,9 +29,45 @@ static void fixtures(void){
     char *stage[]={bin,"stage-a","--inputs",inputs,"--out",draft,0};
     r=actual(stage);ck(r.rc==2&&r.err&&strstr(r.err,"SEGMENT_IDENTITY")&&sy_exists(draft)==0,"tampered-segment-stops-stage-before-publication");np_free(&r);
     stage[1]="check";r=actual(stage);ck(r.rc==2&&r.err&&strstr(r.err,"SEGMENT_IDENTITY"),"check-independently-rehashes-input");np_free(&r);
+    char second[4400],sum[65],a[65],c[65],rows[9600];
+    if(cx_fmt(second,sizeof second,"%s/second",tmp)||cx_write(strict,shard,strlen(shard))||cx_write(second,checker,strlen(checker)))exit(2);
+    np_buf ordered={0};np_puts(&ordered,shard);np_puts(&ordered,checker);
+    cx_sha256_hex(ordered.p,ordered.n,sum);cx_sha256_hex(shard,strlen(shard),a);cx_sha256_hex(checker,strlen(checker),c);
+    if(cx_fmt(rows,sizeof rows,"strict-sha256\t%s\nsegment\t%s\t%s\nsegment\t%s\t%s\n",sum,c,second,a,strict)||cx_write(inputs,rows,strlen(rows)))exit(2);
+    stage[1]="stage-a";r=actual(stage);ck(r.rc==2&&r.err&&strstr(r.err,"STRICT_ORDER_IDENTITY")&&sy_exists(draft)==0,"forward-reordered-segments-refused");np_free(&r);
+}
+static char *path(const char *a,const char *b){
+    size_t cap=strlen(a)+strlen(b)+2;char *p=malloc(cap);if(!p||cx_fmt(p,cap,"%s/%s",a,b))exit(2);return p;
+}
+static void expand(const char *from,const char *to,const char *dir){
+    size_t n=0;char *s=cx_read(from,&n);np_buf b={0};
+    if(!s)exit(2);np_replace(s,n,"@DIR@",5,dir,strlen(dir),-1,&b);if(cx_write(to,b.p,b.n))exit(2);
+}
+static void historical_case(int newer){
+    const char *v=newer?"82":"81",*fixtures="tests/fixtures/release-flow";
+    const char *expected=newer?"dbc52c33a84f9d1eeac4c379e3d706385377b9059a829727c2d0f20063294f1a":"44d148acda2f977cefcce56c5233576b22016c59a07dc483f376af5ffd89b6d1";
+    char *archive=path(fixtures,newer?"82.tar.gz":"81.tar.gz"),*dir=path(tmp,v);
+    size_t n=0;char *bytes=cx_read(archive,&n),digest[65];
+    if(!bytes||sy_mkdir(dir,0700))exit(2);cx_sha256_hex(bytes,n,digest);free(bytes);if(strcmp(digest,expected))exit(2);
+    char *unpack[]={"tar","-xzf",archive,"-C",dir,0};np_result r=actual(unpack);if(r.rc)exit(2);np_free(&r);
+    char *ev=path(dir,newer?"release/evidence/0.0.82":"release/evidence/0.0.81"),*pack=path(dir,"pack");
+    if(sy_mkdir(pack,0700)||sy_copy(path(dir,"release/candidate.tsv"),path(pack,"candidate.tsv"),0600)||
+       sy_copy(path(ev,"cache-manager.tsv"),path(pack,"cache-manager.tsv"),0600))exit(2);
+    char *input=path(dir,"inputs"),*approval=path(dir,"decisions");
+    expand(path(fixtures,newer?"82-inputs.tsv":"81-inputs.tsv"),input,dir);
+    expand(path(fixtures,newer?"82-decisions.tsv":"81-decisions.tsv"),approval,dir);
+    char *cmd[]={bin,"replay-machine","--inputs",input,"--out",dir,"--decisions",approval,0};r=actual(cmd);
+    ck(!r.rc&&r.out&&strstr(r.out,newer?"files=19":"files=13"),newer?"archived-stage-a-082":"archived-stage-a-081");np_free(&r);
+    char *failtable=path(ev,"expected-fail.tsv");char *rows=cx_read(failtable,&n);
+    char *line=rows?strchr(rows,'\n'):0,*count=line?strchr(line+1,'\t'):0;
+    if(!count||count[1]<'0'||count[1]>'9')exit(2);
+    count[1]=count[1]=='9'?'8':'9';if(cx_write(failtable,rows,n))exit(2);
+    r=actual(cmd);ck(r.rc==2&&r.err&&strstr(r.err,"REFUSE DRIFT release/evidence/"),newer?"machine-drift-082":"machine-drift-081");np_free(&r);
 }
 int main(int argc,char **argv){
-    if(sy_mkdtemp("/tmp","release-flow-check",tmp,sizeof tmp)||cx_fmt(bin,sizeof bin,"%s/tool",tmp))return 2;
+    char base[4096];sy_stat_t st;
+    if(sr_default("release-flow",base,sizeof base)||(sy_mkdir(base,0700)&&(sy_lstat(base,&st)||st.kind!='d'||st.uid!=sy_uid()||st.mode!=0700))||
+       sy_mkdtemp(base,"check",tmp,sizeof tmp)||cx_fmt(bin,sizeof bin,"%s/tool",tmp))return 2;
     char driver[4096];if(sy_realpath("./unisacc.com",driver,sizeof driver)<0)return 2;
     char *build[]={"sh",driver,"tools/release-flow.cx","-o",bin,0};
     if(argc==2){if(sy_realpath(argv[1],bin,sizeof bin)<0)return 2;}
@@ -41,6 +79,7 @@ int main(int argc,char **argv){
     ck(r.rc==1 && r.out && !strstr(r.out,"COVERAGE_GAP\tparent=win-argv\t") && strstr(r.out,"gaps=2"),"witnessed-parent-retained");
     np_free(&r);
     fixtures();
+    historical_case(0);historical_case(1);
     if(cx_rmtree(tmp))return 2;
     printf("CHECK_RELEASE_FLOW\tpass=%d\tfail=%d\n",passed,failed);return failed!=0;
 }
