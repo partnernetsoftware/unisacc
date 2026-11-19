@@ -1,0 +1,91 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+/* Run from the repository root. Optional final argument is the host-time budget in ms. */
+
+static int mutation_source(const char *source, const char *target) {
+    unsigned char *input = 0;
+    int64_t size = 0;
+    const char full[] = "10000000";
+    const char short_count[] = "00000001";
+    if (sy_read_file(source, &input, &size, 4096)) return 1;
+    long offset = tx_find((const char *)input, size, full, sizeof full - 1);
+    int rc = 1;
+    if (offset >= 0) {
+        for (long i = 0; i < (long)sizeof full - 1; i++) input[offset + i] = short_count[i];
+        rc = sy_write_file(target, input, size, 0600);
+    }
+    mm_free(input);
+    return rc;
+}
+
+static int benchmark(const char *mode, long budget) {
+    char dir[256], wasm[280], mutant_source[280];
+    char *output = 0, *end = 0;
+    unsigned char *wasm_bytes = 0;
+    int64_t bytes = 0;
+    size_t output_size = 0;
+    int unrolled = tx_eq(mode, "unroll", sizeof "unroll");
+    int mutate = tx_eq(mode, "mutate", sizeof "mutate");
+    const char *source = unrolled ? "ujs/tests/examples/f64-loop-unrolled.ujs" :
+        "ujs/tests/examples/f64-loop.ujs";
+    const char marker[] = "\"tag\":\"f64\",\"value\":";
+    const int additions = 10000000;
+    const double expected = (additions + 8) / 8.0;
+    long compile_ms = 0, run_ms = 0, start, at;
+    double actual = 0;
+    int rc = 0, bad = 0;
+    if (sy_mkdtemp("/tmp", "ujs-f64-bench-", dir, sizeof dir)) return 2;
+    tx_snprintf(wasm, sizeof wasm, "%s/loop.wasm", dir);
+    tx_snprintf(mutant_source, sizeof mutant_source, "%s/mutated.ujs", dir);
+    if (mutate && mutation_source(source, mutant_source)) bad = 1;
+    if (!bad) {
+        char *compile[] = {"./ujs/ujs2wasm.com", (char *)(mutate ? mutant_source : source), "-o", wasm, 0};
+        start = sy_now_ms();
+        rc = cx_runv_timeout(compile, 10, &output, &output_size);
+        compile_ms = sy_now_ms() - start;
+        mm_free(output); output = 0; output_size = 0;
+        if (rc || sy_read_file(wasm, &wasm_bytes, &bytes, 65536)) bad = 1;
+        mm_free(wasm_bytes);
+    }
+    if (!bad) {
+        char *run[] = {"./ujs/ujs2wasm.com", "--run", wasm, 0};
+        start = sy_now_ms();
+        rc = cx_runv_timeout(run, 40, &output, &output_size);
+        run_ms = sy_now_ms() - start;
+        at = !rc && output ? tx_find(output, output_size, marker, sizeof marker - 1) : -1;
+        if (at < 0) bad = 1;
+        else {
+            char *value = output + at + sizeof marker - 1;
+            actual = tx_strtod(value, &end);
+            if (end == value || *end != ',' || actual != expected) bad = 1;
+        }
+        if (budget && run_ms > budget) bad = 1;
+    }
+    if (bad && output) fprintf(stderr, "UJS_F64_BENCH rc=%d output=%s\n", rc, output);
+    mm_free(output);
+    if (mutate) sy_unlink(mutant_source);
+    sy_unlink(wasm);
+    sy_rmdir(dir);
+    printf("UJS_F64_BENCH mode=%s additions=%d compile_ms=%ld host_ms=%ld wasm_bytes=%lld"
+        " value=%.17g expected=%.17g budget_ms=%ld failed=%d\n",
+        mode, additions, compile_ms, run_ms, (long long)bytes, actual, expected, budget, bad);
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = argc >= 2 ? argv[1] : "baseline";
+    if (argc > 3 || (!tx_eq(mode, "baseline", sizeof "baseline") &&
+        !tx_eq(mode, "unroll", sizeof "unroll") && !tx_eq(mode, "mutate", sizeof "mutate"))) return 2;
+    long budget = 0;
+    if (argc == 3) {
+        char *end = 0;
+        budget = tx_strtol(argv[2], &end, 10);
+        if (!end || end == argv[2] || *end || budget <= 0 || budget > 40000) return 2;
+    }
+    return benchmark(mode, budget);
+}
