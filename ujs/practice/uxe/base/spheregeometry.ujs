@@ -1,0 +1,57 @@
+native function SphereGeometry_generate(sphere:i64,radius:f64,longitude:i64,latitude:i64,
+                                        phi_start:f64,phi_len:f64,theta_start:f64,theta_len:f64) i64 {
+  if(longitude<3) { longitude=3; }
+  if(latitude<2) { latitude=2; }
+  if(longitude>262144 || latitude>262144) { return 0-1; }
+  let theta_end=theta_start+theta_len;
+  if(theta_end>3.141592653589793) { theta_end=3.141592653589793; }
+  let north=theta_start<=0.0;
+  let south=theta_end>=3.141592653589793;
+  let columns=longitude+1;
+  let points=columns*(latitude+1);
+  let cells=3*longitude*(2*latitude-north-south);
+  if(!GeometryBuffers_fits(sphere,points,cells)) { return 0-1; }
+  let sphere_vertex=ux_u32(sphere+GeometryBuffers.vertices);
+  let sphere_index=ux_u32(sphere+GeometryBuffers.indices);
+  let sphere_sign=1.0;
+  if(radius<0.0) { sphere_sign=0.0-1.0; }
+  if(radius==0.0) { sphere_sign=0.0; }
+  let row=0;
+  while(row<=latitude) {
+    let v=row*1.0/latitude;
+    let theta=theta_start+v*theta_len;
+    let height=ux_math_cos(theta);
+    let radial=ux_math_sin(theta);
+    let u_shift=0.0;
+    if(row==0 && theta_start==0.0) { u_shift=0.5/longitude; }
+    if(row==latitude && south) { u_shift=0.0-0.5/longitude; }
+    let column=0;
+    while(column<=longitude) {
+      let u=column*1.0/longitude;
+      let phi=phi_start+u*phi_len;
+      let x=0.0-ux_math_cos(phi)*radial;
+      let z=ux_math_sin(phi)*radial;
+      sphere_vertex=GeometryBuffers_vertex(sphere_vertex,radius*x,radius*height,radius*z,
+        x*sphere_sign,height*sphere_sign,z*sphere_sign,u+u_shift,1.0-v);
+      if(row<latitude && column<longitude) {
+        let upper=row*columns+column;
+        let lower=upper+columns;
+        if(row!=0 || !north) {
+          let a=ux_u32_put(sphere_index,upper+1);
+          let b=ux_u32_put(sphere_index+4,upper);
+          let c=ux_u32_put(sphere_index+8,lower+1);
+          sphere_index=sphere_index+12;
+        }
+        if(row!=latitude-1 || !south) {
+          let d=ux_u32_put(sphere_index,upper);
+          let e=ux_u32_put(sphere_index+4,lower);
+          let f=ux_u32_put(sphere_index+8,lower+1);
+          sphere_index=sphere_index+12;
+        }
+      }
+      column=column+1;
+    }
+    row=row+1;
+  }
+  return GeometryBuffers_commit(sphere,points,cells);
+}
