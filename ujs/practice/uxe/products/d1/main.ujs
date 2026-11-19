@@ -37,13 +37,17 @@ persist let formationSin = 0.0;
 persist let formationCos = 1.0;
 persist let priorLock = 0;
 persist let lockEvents = 0;
+persist let explosionEvents = 0;
+persist let playerHealth = 100;
+persist let hitFlash = 0;
+let packetWrite = 0;
 
 // Enemy records start at byte 32. Each record holds hull and three
 // screen-space bytes: horizontal position, vertical position, and depth.
 if (started == 0) {
-  let firstHull = ux_u8_put(32, 4);
-  let secondHull = ux_u8_put(36, 2);
-  let thirdHull = ux_u8_put(40, 8);
+  packetWrite = ux_u8_put(32, 4);
+  packetWrite = ux_u8_put(36, 2);
+  packetWrite = ux_u8_put(40, 8);
 }
 
 if (started == 0) {
@@ -60,6 +64,45 @@ if (steps == 0) { return heading; }
 elapsed = elapsed % 1000000;
 
 let keys = uxe_dispatch(0, 0, 0);
+if (playerHealth == 0) {
+  if ((keys / 4096) % 2 == 0) { return heading; }
+  playerHealth = 100;
+  hitFlash = 0;
+  heading = 0;
+  bank = 0;
+  pitch = 0;
+  x = 2048;
+  z = 2048;
+  altitude = 25;
+  speed = 12;
+  combatKills = 0;
+  battleWave = 1;
+  battleSlots = 3;
+  battleDelay = 0;
+  combatTick = 0;
+  formationX = 2048;
+  formationZ = 2048;
+  formationAltitude = 25;
+  formationSin = 0.0;
+  formationCos = 1.0;
+  cannonAmmo = 96;
+  cannonCooldown = 0;
+  cannonIdle = 0;
+  missileAmmo = 3;
+  missileCooldown = 0;
+  missileTarget = 0;
+  missileTravel = 0;
+  priorLock = 0;
+  packetWrite = ux_u8_put(32, 4);
+  packetWrite = ux_u8_put(36, 2);
+  packetWrite = ux_u8_put(40, 8);
+  let clearedShot = 80;
+  while (clearedShot < 114) {
+    packetWrite = ux_u8_put(clearedShot, 0);
+    clearedShot = clearedShot + 1;
+  }
+  steps = 1;
+}
 let keyLeft = keys % 2;
 let keyRight = (keys / 2) % 2;
 let keyUp = (keys / 4) % 2;
@@ -137,6 +180,11 @@ while (steps > 0) {
       missileAmmo = 3;
       missileTarget = 0;
       missileTravel = 0;
+      let discarded = 80;
+      while (discarded < 112) {
+        packetWrite = ux_u8_put(discarded, 0);
+        discarded = discarded + 1;
+      }
       let waveSlot = 0;
       let hullBonus = battleWave - 1;
       if (hullBonus > 4) { hullBonus = 4; }
@@ -144,7 +192,7 @@ while (steps > 0) {
         let hull = 2;
         if (waveSlot % 3 == 0) { hull = 4; }
         if (waveSlot % 3 == 2) { hull = 8; }
-        let newHull = ux_u8_put(32 + 4 * waveSlot, hull + hullBonus);
+        packetWrite = ux_u8_put(32 + 4 * waveSlot, hull + hullBonus);
         waveSlot = waveSlot + 1;
       }
     }
@@ -187,14 +235,14 @@ while (steps > 0) {
     let offsetX = ((65536 + formationX + spawnX + driftX - x + 2048) % 4096 - 2048) / 8.0;
     let offsetZ = ((65536 + formationZ + spawnZ - combatTick / 3 * 8 - z + 2048) % 4096 - 2048) / 8.0;
     let depth = offsetX * battleSin - offsetZ * battleCos;
-    let recordDepth = ux_u8_put(enemyRecord + 3, 0);
+    packetWrite = ux_u8_put(enemyRecord + 3, 0);
     if (depth >= 9.0 && depth <= 345.0) {
       let screenX = f64_floor_i64(213.5 + 151.0 * (offsetX * battleCos + offsetZ * battleSin) / depth);
       let screenY = f64_floor_i64(113.5 + pitch * 0.5 + (altitude + 13 - enemyY + sweep * 0.18) * 151.0 / depth);
       if (screenX >= 12 && screenX <= 413 && screenY >= 16 && screenY < 196) {
-        let recordX = ux_u8_put(enemyRecord + 1, screenX / 2);
-        let recordY = ux_u8_put(enemyRecord + 2, screenY);
-        recordDepth = ux_u8_put(enemyRecord + 3, f64_floor_i64(depth / 2.0));
+        packetWrite = ux_u8_put(enemyRecord + 1, screenX / 2);
+        packetWrite = ux_u8_put(enemyRecord + 2, screenY);
+        packetWrite = ux_u8_put(enemyRecord + 3, f64_floor_i64(depth / 2.0));
         let aimX = screenX - 213;
         let aimY = screenY - 101 - f64_floor_i64(pitch * 0.25 + 0.5);
         let distanceSquare = aimX * aimX + aimY * aimY;
@@ -216,9 +264,10 @@ while (steps > 0) {
     cannonEvents = (cannonEvents + 1) % 65536;
     if (nearest > 0) {
       let remainingHull = ux_u8(nearest) - 1;
-      let hullStored = ux_u8_put(nearest, remainingHull);
+      packetWrite = ux_u8_put(nearest, remainingHull);
       if (remainingHull == 0) {
         combatKills = (combatKills + 1) % 100;
+        explosionEvents = (explosionEvents + 1) % 65536;
         battleAlive = battleAlive - 1;
       }
     }
@@ -232,9 +281,10 @@ while (steps > 0) {
         if (afterImpact <= 0) {
           afterImpact = 0;
           combatKills = (combatKills + 1) % 100;
+          explosionEvents = (explosionEvents + 1) % 65536;
           battleAlive = battleAlive - 1;
         }
-        let impactHull = ux_u8_put(missileTarget, afterImpact);
+        packetWrite = ux_u8_put(missileTarget, afterImpact);
       }
       missileTarget = 0;
     }
@@ -250,20 +300,69 @@ while (steps > 0) {
   if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
   if (cannonIdle == 176 && missileAmmo == 0) { missileAmmo = 3; }
   if (battleAlive == 0 && battleDelay == 0) { battleDelay = 36; }
-  let lockRecord = ux_u8_put(14, nearest);
-  let killRecord = ux_u8_put(15, combatKills);
-  let waveRecord = ux_u8_put(16, battleWave % 256);
-  let aliveRecord = ux_u8_put(17, battleAlive);
-  let missileRecord = ux_u8_put(20, missileAmmo);
-  let missileLow = ux_u8_put(21, missileEvents % 256);
-  let missileHigh = ux_u8_put(22, missileEvents / 256);
-  let missileTracking = ux_u8_put(23, missileTarget);
-  let missileETA = ux_u8_put(24, missileTravel);
+  // 80..87 are enemy fire cooldowns. Six four-byte shots start at 88.
+  if (hitFlash > 0) { hitFlash = hitFlash - 1; }
+  let shotAt = 88;
+  while (shotAt < 112) {
+    let shotAge = ux_u8(shotAt);
+    if (shotAge > 0) {
+      shotAge = shotAge - 1;
+      packetWrite = ux_u8_put(shotAt, shotAge);
+      if (shotAge == 0 && playerHealth > 0) {
+        let shotYaw = ux_u8(shotAt + 1) + 256 * ux_u8(shotAt + 2);
+        let shotShift = (heading - shotYaw + 360) % 360;
+        if (shotShift > 180) { shotShift = 360 - shotShift; }
+        let shotPitchDelta = pitch + 18 - ux_u8(shotAt + 3);
+        if (shotPitchDelta < 0) { shotPitchDelta = 0 - shotPitchDelta; }
+        if (2 * shotShift + shotPitchDelta <= 18) {
+          playerHealth = playerHealth - 20;
+          hitFlash = 6;
+        }
+      }
+    }
+    shotAt = shotAt + 4;
+  }
+  let returnSlot = 0;
+  while (returnSlot < battleSlots && playerHealth > 0) {
+    let fireCooldown = ux_u8(80 + returnSlot);
+    if (fireCooldown > 0) {
+      fireCooldown = fireCooldown - 1;
+      packetWrite = ux_u8_put(80 + returnSlot, fireCooldown);
+    }
+    let fireHull = 32 + 4 * returnSlot;
+    if (returnSlot % 3 == 0 && combatTick >= 40 + (returnSlot / 3) * 9 &&
+        fireCooldown == 0 && ux_u8(fireHull) > 0 && ux_u8(fireHull + 3) > 0) {
+      shotAt = 88 + (returnSlot / 3) * 8;
+      if (ux_u8(shotAt) != 0) { shotAt = shotAt + 4; }
+      if (ux_u8(shotAt) == 0) {
+        packetWrite = ux_u8_put(shotAt, 22);
+        packetWrite = ux_u8_put(shotAt + 1, heading % 256);
+        packetWrite = ux_u8_put(shotAt + 2, heading / 256);
+        packetWrite = ux_u8_put(shotAt + 3, pitch + 18);
+        fireCooldown = 21 - battleWave;
+        if (fireCooldown < 14) { fireCooldown = 14; }
+        packetWrite = ux_u8_put(80 + returnSlot, fireCooldown);
+      }
+    }
+    returnSlot = returnSlot + 1;
+  }
+  packetWrite = ux_u8_put(18, playerHealth);
+  packetWrite = ux_u8_put(19, hitFlash);
+  packetWrite = ux_u8_put(14, nearest);
+  packetWrite = ux_u8_put(15, combatKills);
+  packetWrite = ux_u8_put(16, battleWave % 256);
+  packetWrite = ux_u8_put(17, battleAlive);
+  packetWrite = ux_u8_put(20, missileAmmo);
+  packetWrite = ux_u8_put(21, missileEvents % 256);
+  packetWrite = ux_u8_put(22, missileEvents / 256);
+  packetWrite = ux_u8_put(23, missileTarget);
+  packetWrite = ux_u8_put(24, missileTravel);
   let lockNow = 0;
   if (nearest > 0 && ux_u8(nearest) > 0) { lockNow = 1; }
   if (lockNow == 1 && priorLock == 0) { lockEvents = (lockEvents + 1) % 65536; }
   priorLock = lockNow;
   // D1 audio tick
+  if (playerHealth == 0) { steps = 1; }
   steps = steps - 1;
 }
 priorTurn = tickTurn;
@@ -272,18 +371,18 @@ priorBoost = tickBoost;
 priorGun = tickGun;
 priorMissile = tickMissile;
 
-let packetId = ux_u8_put(0, 3);
-let headingLow = ux_u8_put(1, heading % 256);
-let headingHigh = ux_u8_put(2, heading / 256);
-let bankByte = ux_u8_put(3, bank + 24);
-let eastLow = ux_u8_put(4, x % 256);
-let eastHigh = ux_u8_put(5, x / 256);
-let northLow = ux_u8_put(6, z % 256);
-let northHigh = ux_u8_put(7, z / 256);
-let altitudeByte = ux_u8_put(8, altitude);
-let speedByte = ux_u8_put(9, speed);
-let pitchByte = ux_u8_put(10, pitch + 18);
-let ammoByte = ux_u8_put(11, cannonAmmo);
-let gunLow = ux_u8_put(12, cannonEvents % 256);
-let gunHigh = ux_u8_put(13, cannonEvents / 256);
+packetWrite = ux_u8_put(0, 3);
+packetWrite = ux_u8_put(1, heading % 256);
+packetWrite = ux_u8_put(2, heading / 256);
+packetWrite = ux_u8_put(3, bank + 24);
+packetWrite = ux_u8_put(4, x % 256);
+packetWrite = ux_u8_put(5, x / 256);
+packetWrite = ux_u8_put(6, z % 256);
+packetWrite = ux_u8_put(7, z / 256);
+packetWrite = ux_u8_put(8, altitude);
+packetWrite = ux_u8_put(9, speed);
+packetWrite = ux_u8_put(10, pitch + 18);
+packetWrite = ux_u8_put(11, cannonAmmo);
+packetWrite = ux_u8_put(12, cannonEvents % 256);
+packetWrite = ux_u8_put(13, cannonEvents / 256);
 return heading;
