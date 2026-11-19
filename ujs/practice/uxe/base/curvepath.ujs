@@ -1,0 +1,77 @@
+native function path_arc_lengths(segment:i64,scratch:i64,table:i64,steps:i64,save:i64) f64 {
+  let divisions=steps;
+  if(ux_u32(segment)==1) { divisions=1; }
+  let start=path_sample(scratch,segment,0.0);
+  let old_x=ux_f64(start);
+  let old_y=ux_f64(start+8);
+  let sum=0.0;
+  if(save!=0) { let first=ux_f64_put(table,0.0); }
+  let i=1;
+  while(i<=divisions) {
+    let at=path_sample(scratch,segment,i*1.0/divisions);
+    let x=ux_f64(at);
+    let y=ux_f64(at+8);
+    let dx=x-old_x;
+    let dy=y-old_y;
+    sum=sum+f64_sqrt(dx*dx+dy*dy);
+    if(save!=0) { let length=ux_f64_put(table+8*i,sum); }
+    old_x=x; old_y=y;
+    i=i+1;
+  }
+  return sum;
+}
+
+native function CurvePath_getCurveLengths(path:i64,lengths:i64,scratch:i64,divisions:i64) i64 {
+  if(divisions<1 || divisions>4096) { return 0-1; }
+  let count=ux_u32(path+Path.count);
+  let offset=ux_u32(path+Path.segments);
+  let total=0.0;
+  let i=0;
+  while(i<count) {
+    total=total+path_arc_lengths(offset+72*i,scratch,0,divisions,0);
+    let length=ux_f64_put(lengths+8*i,total);
+    i=i+1;
+  }
+  return count;
+}
+
+function CurvePath_getLength(curve_path_lengths,...curve_path_args) {
+  let curve_path_count=curve_path_args[0];
+  let curve_path_total=0.0;
+  if(curve_path_count>0) { curve_path_total=ux_f64(curve_path_lengths+8*(curve_path_count-1)); }
+  return curve_path_total;
+}
+
+// Work holds one two-component point followed by the active segment's arc-length table.
+native function CurvePath_getPoint(path:i64,out:i64,lengths:i64,work:i64,t:f64,divisions:i64) i64 {
+  let count=ux_u32(path+Path.count);
+  if(count==0 || t<0.0 || t>1.0 || divisions<1 || divisions>4096 ||
+     work<0 || work>6291456-16 || work%8!=0 || divisions+1>(6291456-work-16)/8) { return 0-1; }
+  let target=t*ux_f64(lengths+8*(count-1));
+  let i=0;
+  let base=ux_u32(path+Path.segments);
+  let previous=0.0;
+  while(i<count) {
+    let end=ux_f64(lengths+8*i);
+    if(end>=target) {
+      let segment=base+72*i;
+      let delta=target-previous;
+      let curve_length=end-previous;
+      if(curve_length==0.0) { return path_sample(out,segment,0.0); }
+      if(ux_u32(segment)==1) { return path_sample(out,segment,delta/curve_length); }
+      let table=work+16;
+      let sum=path_arc_lengths(segment,work,table,divisions,1);
+      let step=0;
+      while(step<divisions && ux_f64(table+8*(step+1))<delta) { step=step+1; }
+      if(step==divisions) { return path_sample(out,segment,1.0); }
+      let a=ux_f64(table+step*8);
+      let b=ux_f64(table+(step+1)*8);
+      let u=step*1.0;
+      if(b>a) { u=u+(delta-a)/(b-a); }
+      return path_sample(out,segment,u/divisions);
+    }
+    previous=end;
+    i=i+1;
+  }
+  return 0-1;
+}
