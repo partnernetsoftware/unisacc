@@ -43,11 +43,17 @@ static int copy_fixture(const char *dir, const char *leaf, const char *source) {
     char path[320];
     unsigned char *data = 0;
     int64_t n = 0;
-    if (sy_read_file(source, &data, &n, 16384)) return 1;
+    if (sy_read_file(source, &data, &n, 1048576)) return 1;
     tx_snprintf(path, sizeof path, "%s/%s", dir, leaf);
     int rc = sy_write_file(path, data, n, 0600);
     mm_free(data);
     return rc != 0;
+}
+
+static int copy_package_file(const char *dir, const char *package, const char *name) {
+    char path[512];
+    int n = tx_snprintf(path, sizeof path, "%s/%s", package, name);
+    return n < 0 || n >= (int)sizeof path || copy_fixture(dir, name, path);
 }
 
 static int audio_rows(char *out, int cap) {
@@ -422,7 +428,8 @@ int main(int argc, char **argv) {
     size_t removed_n = 0;
     if (argc == 3 && tx_eq(argv[1], "--export-projection", sizeof "--export-projection"))
         return export_projection(argv[2]);
-    const char *mode = argc == 2 ? argv[1] : "";
+    const char *package = argc == 4 && tx_eq(argv[1], "--package", sizeof "--package") ? argv[2] : 0;
+    const char *mode = package ? argv[3] : argc == 2 ? argv[1] : "";
     int base_check = tx_eq(mode, "base", 5) || tx_eq(mode, "base-color", 11);
     int cannon_mutate = tx_eq(mode, "flight-cannon", sizeof "flight-cannon");
     int hit_mutate = tx_eq(mode, "flight-hit", sizeof "flight-hit");
@@ -448,16 +455,23 @@ int main(int argc, char **argv) {
     if (tx_eq(mode, "projection-trail", sizeof "projection-trail") || trail_mutate) projection_check = 8;
     int brush_mutate = tx_eq(mode, "projection-brush-missing", sizeof "projection-brush-missing");
     if (tx_eq(mode, "projection-brush", sizeof "projection-brush") || brush_mutate) projection_check = 9;
-    if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
+    if ((argc > 2 && !package) || (package && !projection_check) ||
+        (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
         !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check && !projection_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
-    int rc = copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
+    int rc = package ? copy_package_file(dir, package, "host-abi.js") :
+        copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
     if (projection_check) {
-        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-projection-probe.html") ||
-            generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
-            projection_product(dir, brush_mutate ? 9 : trail_mutate ? 8 : enemy_mutate ? 7 : wave_pixels_mutate ? 6 :
-                cloud_mutate ? 5 : hud_mutate ? 4 : art_mutate ? 3 :
-                audio_mutate ? 2 : tx_eq(mode, "projection-short", 17));
+        int mutate = brush_mutate ? 9 : trail_mutate ? 8 : enemy_mutate ? 7 : wave_pixels_mutate ? 6 :
+            cloud_mutate ? 5 : hud_mutate ? 4 : art_mutate ? 3 : audio_mutate ? 2 : tx_eq(mode, "projection-short", 17);
+        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-projection-probe.html");
+        if (package) {
+            rc = rc || copy_package_file(dir, package, "base.wasm") ||
+                (mutate ? projection_product(dir, mutate) : copy_package_file(dir, package, "product.wasm")) ||
+                copy_package_file(dir, package, "d1-sprites.rgba");
+        } else {
+            rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
+        }
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||

@@ -1,8 +1,0 @@
-// Generated from d1-audio.tsv.
-export const sound={
-  engine:["triangle",38,2,34,40,120],
-  gun:["square",124,62,100,3,65],
-  missile:["sawtooth",188,466,85,9,225],
-  explosion:["triangle",100,28,150,5,330],
-  lock:["sine",800,800,120,8,100],
-};

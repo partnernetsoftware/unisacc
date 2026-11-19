@@ -1,6 +1,7 @@
 #pragma unisa use chrome_dom
 #pragma unisa use text.fmt
 #pragma unisa use text.text
+#pragma unisa use text.codec
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -905,12 +906,12 @@ typedef struct {
     sy_child_t child;
     int id,at,len;
     long deadline;
-    char buffer[4096],reply[8192],session[100];
+    char buffer[4096],reply[131072],session[100];
 } ChromeInput;
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 typedef struct { int x,z,speed,tick; } LiveWater;
-enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST };
+enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST,LIVE_WASM };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -1030,15 +1031,96 @@ static int key_change(ChromeInput *c,const char *key,const char *code,int vk,int
     return changed;
 }
 
-static int cdp_navigate(ChromeInput *c,const char *url) {
+static int cdp_navigate(ChromeInput *c,const char *url,int native) {
     char target[100],params[1300];
     if(!cdp_call(c,"Target.createTarget","{\"url\":\"about:blank\"}") ||
         !cdp_string(c,"\"targetId\":\"",target,sizeof target)) return 0;
     tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
     if(!cdp_call(c,"Target.attachToTarget",params) ||
         !cdp_string(c,"\"sessionId\":\"",c->session,sizeof c->session)) return 0;
+    if(native && (!cdp_call(c,"Page.enable","{}") || !cdp_call(c,"Page.addScriptToEvaluateOnNewDocument",
+        "{\"source\":\"(()=>{let next,now=0;let p;const Instance=WebAssembly.Instance;"
+        "WebAssembly.Instance=new Proxy(Instance,{construct(target,args){const i=new target(...args);"
+        "if(i.exports.uxe_frame)p=i.exports;return i;}});"
+        "window.requestAnimationFrame=f=>(next=f,1);window.cancelAnimationFrame=()=>{next=null};"
+        "window.__d1Step=(n=1)=>{if(!p||!next)return 0;"
+        "for(let j=0;j<n;j++){const f=next;next=null;f(now);now+=33.334;}return 1;};"
+        "window.__d1Packet=()=>new Uint8Array(p.memory.buffer,2097152,112);"
+        "window.__d1Error='';addEventListener('unhandledrejection',e=>{window.__d1Error=String(e.reason);});"
+        "addEventListener('error',e=>{window.__d1Error=e.message;});})()\"}"))) return 0;
     tx_snprintf(params,sizeof params,"{\"url\":\"%s\"}",url);
     return cdp_call(c,"Page.navigate",params);
+}
+
+static int native_eval(ChromeInput *c,const char *expression,char *text,int cap) {
+    char params[1600];
+    int n=tx_snprintf(params,sizeof params,"{\"expression\":\"%s\"}",expression);
+    return n>0 && n<(int)sizeof params && cdp_call(c,"Runtime.evaluate",params) &&
+        cdp_string(c,"\"value\":\"",text,cap);
+}
+
+static int native_key(ChromeInput *c,const char *key,const char *code,int vk,const char *want) {
+    char got[180];
+    if(!keyboard(c,key,code,vk,1)) return 1;
+    int ok=native_eval(c,"__d1Step();[1,3,8,9,11,15,18,20].map(i=>__d1Packet()[i]).join(',')",
+        got,sizeof got);
+    if(!keyboard(c,key,code,vk,0) || !ok) return 1;
+    printf("D1_WASM_KEY %s got=%s expect=%s failed=%d\n",code,got,want,strcmp(got,want)!=0);
+    return strcmp(got,want)!=0;
+}
+
+static int native_screenshot(ChromeInput *c,const char *path) {
+    if(!cdp_call(c,"Page.captureScreenshot","{\"format\":\"png\",\"captureBeyondViewport\":false}")) return 1;
+    const char *start=strstr(c->reply,"\"data\":\"");
+    if(!start) return 1;
+    start+=8;
+    const char *end=strchr(start,'"');
+    if(!end) return 1;
+    unsigned char *png=mm_alloc(100000);
+    if(!png) return 1;
+    long len=tx_b64_decode(start,end-start,png,100000);
+    int rc=len<=0 || sy_write_file(path,png,len,0600);
+    mm_free(png);
+    return rc;
+}
+
+static int exercise_native(ChromeInput *c,int shot) {
+    const char *packet="[1,3,8,9,11,15,18,20].map(i=>__d1Packet()[i]).join(',')";
+    char text[180]="",step[500];
+    int ready=0;
+    long deadline=sy_now_ms()+5000;
+    for(int i=0;i<120 && sy_now_ms()<deadline;i++) {
+        if(native_eval(c,"(()=>{try{return String(__d1Step(2))+'|'+__d1Error}catch(e){return String(e)}})()",text,sizeof text) &&
+           !strcmp(text,"1|")) {
+            ready=1; break;
+        }
+        sy_sleep_ms(40);
+    }
+    if(!ready) {
+        char page[300]="";
+        native_eval(c,"location.href+'|'+document.title",page,sizeof page);
+        printf("D1_WASM_READY failed=1 state=%s page=%s\n",text,page);
+        return 1;
+    }
+    if(shot) return native_screenshot(c,"/tmp/cdx2-d1-p11-verified.png");
+    if(native_key(c,"w","KeyW",87,"0,24,26,12,96,0,100,3") ||
+       native_key(c,"s","KeyS",83,"0,24,25,12,96,0,100,3") ||
+       native_key(c,"d","KeyD",68,"3,28,25,12,96,0,100,3") ||
+       native_key(c,"a","KeyA",65,"0,24,25,12,96,0,100,3") ||
+       native_key(c,"Shift","ShiftLeft",16,"0,24,25,14,96,0,100,3") ||
+       native_key(c," ","Space",32,"0,24,25,12,95,0,100,3") ||
+       native_key(c,"m","KeyM",77,"0,24,25,12,95,0,100,2")) return 1;
+    tx_snprintf(step,sizeof step,"__d1Step(13);%s",packet);
+    if(!native_eval(c,step,text,sizeof text) || strcmp(text,"0,24,25,12,95,1,100,2")) {
+        printf("D1_WASM_KO got=%s failed=1\n",text); return 1;
+    }
+    printf("D1_WASM_KO got=%s failed=0\n",text);
+    tx_snprintf(step,sizeof step,"for(let i=0;i<5;i++){__d1Packet().set([1,0,0,18],88);__d1Step();}%s",packet);
+    if(!native_eval(c,step,text,sizeof text) || strcmp(text,"0,24,25,12,95,1,0,2")) {
+        printf("D1_WASM_LOSS got=%s failed=1\n",text); return 1;
+    }
+    printf("D1_WASM_LOSS got=%s failed=0\n",text);
+    return native_key(c,"r","KeyR",82,"0,24,25,12,96,0,100,3");
 }
 
 static int read_water(ChromeInput *c,LiveWater *water) {
@@ -1633,7 +1715,9 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     int rc,n;
     int framed=candidate && !strcmp(candidate,"ujs/practice/uxe/test/d1-solid-audit.html");
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    if(framed) {
+    if(battle==LIVE_WASM) {
+        n=tx_snprintf(url,sizeof url,"%s",candidate);
+    } else if(framed) {
         if(sy_mkdtemp("/tmp","d1-keyboard-",fixture,sizeof fixture)) return input_error("cdp-fixture-dir",0);
         if(solid_keyboard_fixture(cwd,candidate,fixture)) { chd_wipe(fixture); return input_error("cdp-fixture",0); }
         n=tx_snprintf(url,sizeof url,"file://%s/solid.html?input-test=1&hold-course&%s",fixture,mutation);
@@ -1653,7 +1737,8 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     rc=sy_proc_spawn(&launch,&c.child);
     if(rc) { if(framed) chd_wipe(fixture); return input_error("cdp-spawn",0); }
     c.deadline=sy_now_ms()+22500;
-    if(!cdp_navigate(&c,url)) rc=input_error("cdp-navigate",0);
+    if(!cdp_navigate(&c,url,battle==LIVE_WASM)) rc=input_error("cdp-navigate",0);
+    else if(battle==LIVE_WASM) rc=exercise_native(&c,mutation[0]!=0);
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
     else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
     else if(battle==LIVE_BRIDGE || battle==LIVE_TOWN) rc=exercise_walk(&c,battle==LIVE_TOWN);
@@ -1673,6 +1758,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if(argc==3 && (!strcmp(argv[1],"wasm-page-input") || !strcmp(argv[1],"wasm-page-shot"))) {
+        if(strncmp(argv[2],"file:///",8) && strncmp(argv[2],"http://127.0.0.1:",17)) return 2;
+        return check_keyboard_path(!strcmp(argv[1],"wasm-page-shot")?"shot":"",LIVE_WASM,argv[2]);
+    }
     if((argc==2 || argc==3) && (!strcmp(argv[1],"solid-airframe") || !strcmp(argv[1],"published-solid")))
         return check_solid_airframe(argc==3?argv[2]:"",argv[1][0]=='p');
     if(argc==2 && !strcmp(argv[1],"solid-w1")) return check_w1("",3);
