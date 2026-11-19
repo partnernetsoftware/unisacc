@@ -20,6 +20,20 @@
  *   rc 9), a-plain int f7(void): rc 7, a-hsub3 unit calls a gcc function with three arguments: rc 82,
  *   a-stack the gcc callee works on sp-relative locals (sp must be 16-byte aligned, AAPCS64): rc 43,
  *   a-symtype __init_u FUNC in the arm64 unit.o.
+ *   a-sigalrm (OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL): the unit keeps return addresses and locals on its x7
+ *   stack while a 1 ms SIGALRM with a handler interrupts it; five runs must equal the quiet run: rc 0
+ *   (0.0.81: SIGSEGV rc 139, the signal frame landed on the x7 stack below sp).
+ *   a-sigovf: a unit recursion deeper than the reserved x7 block must stop with the fixed refusal
+ *   brk #0xf7 (SIGTRAP, reported rc=-5), never SIGSEGV (0.0.81: rc=-11).
+ *   a-icall: a static, a global and a 100-deep recursive unit-internal call, all guarded, return normally: rc 111.
+ *   a-deep: 5000-deep static and global small-frame recursion and 20 frames of 8 KB fit the 1 MB block: rc 7.
+ *   a-branchsense: same objdump; before every brk #0xf7 sits cmp x16, x7 and the word 54000043 (b.lo +8).
+ *   a-calleesaved: objdump -d of the a-sigalrm unit.o, operand column only (address and code columns
+ *   dropped, so "d8:" is not a hit): no x19-x28, w19-w28, d8-d15, s8-s15.
+ *   a-x16free: same objdump; at least one ustk guard, and after every brk #0xf7 the first x16/w16 mention within
+ *   64 instructions (or before ret) is a write, so the guard's add x16 clobbers no live value.
+ *   a-bigframe EXPECT-FAIL (OBJABI-ARM64-X7-LARGE-FRAME-SKIPS-GUARD): a 2 MB frame (single frame larger than the 1 MB block) skips the 4 KB margin check
+ *   and runs past the block instead of the fixed refusal (rc is whatever the overrun leaves, observed 3 or 7; want -5).
  * An arm64 tool missing prints CHECK_OBJABI_ARM64 UNMEASURED and the check exits 3 (never PASS) unless
  * something failed (exit 1).
  * An EXPECT-FAIL case that passes is reported as XPASS and counted as failed, so the expectation
@@ -52,6 +66,16 @@ typedef struct oa_case {
 #define OA_HSUB "int hsub(int a,int b,int c);\nint call3(void){return hsub(50,7,2)+1;}\n"
 #define OA_HSUBS "int hsub(int a,int b,int c){return a*6+b*5+c;}\n"
 #define OA_HSUBM "int call3(void);int main(void){return call3();}\n"
+#define OA_SIGU "static long mixr(long a,long b,long c,long d){long v[8];v[0]=a;v[1]=b;v[2]=c;v[3]=d;v[4]=a^b;v[5]=c+d;v[6]=a-c;v[7]=b*3;return v[0]+v[1]*2+v[2]*3+v[3]*5+v[4]+v[5]+v[6]+v[7];}\n" \
+    "long work(long n){long s=0;long i=0;while(i<n){long t[16];int k=0;while(k<16){t[k]=i+k;k=k+1;}k=0;while(k<16){s=s+mixr(t[k],i,k,s&255)%1000;k=k+1;}i=i+1;}return s;}\n"
+#define OA_SIGM "#include <signal.h>\n#include <string.h>\n#include <sys/time.h>\nlong work(long);\nvolatile long hits;\n" \
+    "static void h(int s){(void)s;hits++;}\n" \
+    "int main(void){long n=60000;long r0=work(n);struct sigaction sa;memset(&sa,0,sizeof sa);sa.sa_handler=h;sigaction(SIGALRM,&sa,0);\n" \
+    "struct itimerval it={{0,1000},{0,1000}};setitimer(ITIMER_REAL,&it,0);int bad=0;int k;for(k=0;k<5;k++){if(work(n)!=r0)bad++;}\n" \
+    "struct itimerval z;memset(&z,0,sizeof z);setitimer(ITIMER_REAL,&z,0);return bad?1:(hits>0?0:2);}\n"
+#define OA_OVFU "long rec(long n){volatile long pad[32];pad[0]=n;pad[31]=n&7;if(n<=0)return 0;return rec(n-1)+pad[0]%3+pad[31];}\n" \
+    "long deep(void){return rec(200000);}\n"
+#define OA_OVFM "long deep(void);int main(void){return deep()==7?3:4;}\n"
 
 static const oa_case oa_cases[11] = {
     {"p03", OA_P03, 0, 0, OA_P03M, 51, 0},
@@ -80,7 +104,7 @@ static const oa_case oa_cases[11] = {
 };
 
 /* lnx/arm64: a-stack's callee keeps its locals at [sp, #..]; the callee asserts frame_address(0)&15==0 (qemu-user does not raise SIGBUS on a misaligned sp) */
-static const oa_case oa_arm_cases[9] = {
+static const oa_case oa_arm_cases[14] = {
     {"a-p03", OA_P03, 0, 0, OA_P03M, 51, 0},
     {"a-multi", OA_P03, OA_Q, 0, OA_QM, 51, 0},
     {"a-initonly", "int z=9;\nint getz(void){return z;}\n", 0, 0,
@@ -97,6 +121,23 @@ static const oa_case oa_arm_cases[9] = {
     {"a-stack", "int ext0(int a);\nint call0(void){return ext0(5)+1;}\n", 0,
      "int ext0(int a){volatile long double d=2;volatile long v[4]={a,1,2,3};long *p=(long*)__builtin_frame_address(0);return (((long)p&15)==0)*30+(int)v[0]+(int)d+(int)v[3]+2;}\n",
      "int call0(void);int main(void){return call0();}\n", 43, 0},
+    {"a-sigalrm", OA_SIGU, 0, 0, OA_SIGM, 0, 0},
+    {"a-sigovf", OA_OVFU, 0, 0, OA_OVFM, -5, 0},
+    /* a-icall: guarded unit-internal calls inside the block must not trap (a static, a global and a 100-deep
+       recursion): rc 7+4+100 = 111.  Red on a guard whose branch sense is inverted (every call hit brk, rc -5). */
+    {"a-icall", "static long s4(long n){return n+4;}\nlong g7(void){return 7;}\nlong r(long n){if(n<=0)return 0;return r(n-1)+1;}\nlong ic(void){return s4(g7())+r(100);}\n", 0, 0,
+     "long ic(void);int main(void){return (int)ic();}\n", 111, 0},
+    /* a-deep: capacity of the 1 MB block (RES_4K 256): 5000-deep small-frame recursion through a static and through a
+       global function, and a 20-deep recursion of 8 KB frames, all return normally: rc 1+2+4 = 7 (gcc and 0.0.81 give
+       7; red with the first 64 KB block, rc -5) */
+    {"a-deep", "static long sr(long n){if(n<=0)return 0;return sr(n-1)+1;}\nlong gr(long n){if(n<=0)return 0;return gr(n-1)+1;}\n"
+     "long fr(long n){volatile long b[1024];b[0]=n;b[1023]=n;if(n<=0)return 0;return fr(n-1)+b[0]-b[1023]+1;}\n"
+     "long deep3(void){return (sr(5000)==5000)+(gr(5000)==5000)*2+(fr(20)==20)*4;}\n", 0, 0,
+     "long deep3(void);int main(void){return (int)deep3();}\n", 7, 0},
+    /* OBJABI-ARM64-X7-LARGE-FRAME-SKIPS-GUARD (known limit, 0.0.83): one 2 MB frame (larger than the whole 1 MB block)
+       passes the fixed 4 KB margin check at the block top and writes past the block; the wanted fixed refusal (-5) does not happen */
+    {"a-bigframe", "long big(long n){volatile long a[262144];a[0]=n;a[262143]=n+1;return a[0]+a[16383];}\nlong callbig(void){return big(3);}\n", 0, 0,
+     "long callbig(void);int main(void){return (int)callbig();}\n", -5, 1},
 };
 
 static char oa_dir[2048];
@@ -228,6 +269,118 @@ static int oa_one(const char *abs, const oa_case *c, int *failed, int *xfail) {
     return 0;
 }
 
+static int oa_isword(char ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
+}
+
+/* 1 when the operand text holds a callee-saved register token x19-x28 w19-w28 d8-d15 s8-s15 (copied into hit) */
+static int oa_csreg(const char *ops, char *hit, int hcap) {
+    int i;
+    for (i = 0; ops[i]; i++) {
+        char c = ops[i];
+        int n = 0, j = i + 1, lo, hi;
+        if ((c != 'x' && c != 'w' && c != 'd' && c != 's') || (i > 0 && oa_isword(ops[i - 1]))) continue;
+        if (ops[j] < '0' || ops[j] > '9') continue;
+        while (ops[j] >= '0' && ops[j] <= '9' && n < 1000) { n = n * 10 + (ops[j] - '0'); j++; }
+        if (oa_isword(ops[j])) continue;
+        lo = (c == 'x' || c == 'w') ? 19 : 8;
+        hi = (c == 'x' || c == 'w') ? 28 : 15;
+        if (n >= lo && n <= hi) {
+            if (cx_fmt(hit, hcap, "%c%d", c, n)) hit[0] = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* x16 liveness at each ustk guard (add x16,sp,..; cmp x16,x7; b.lo; brk #0xf7): x16 holds no live value across
+   the guard when, scanning from the instruction before the guard backwards nothing matters, and forwards from the
+   brk the first x16 mention is a write (destination operand of a non-store, non-compare instruction).  ops[i] is
+   the text after the second tab of instruction i. */
+static int oa_x16_reads_first(char ops[][96], int n, int from) {
+    int i;
+    for (i = from; i < n && i < from + 64; i++) {
+        const char *o = ops[i];
+        const char *p = o;
+        int w = 0;
+        while (*p && *p != '\t' && *p != ' ') p++;
+        while (*p == '\t' || *p == ' ') p++;
+        if (!strstr(o, "x16") && !strstr(o, "w16")) { if (tx_eqz(o, "ret")) return 0; continue; }
+        if ((p[0] == 'x' || p[0] == 'w') && p[1] == '1' && p[2] == '6' && !oa_isword(p[3]) &&
+            strncmp(o, "str", 3) && strncmp(o, "stp", 3) && strncmp(o, "cmp", 3) && strncmp(o, "cmn", 3) &&
+            strncmp(o, "tst", 3) && strncmp(o, "cb", 2) && strncmp(o, "tb", 2) && strncmp(o, "br", 2) &&
+            strncmp(o, "blr", 3)) w = 1;
+        {   /* a write that also reads x16 (add x16, x16, ..) counts as a read */
+            const char *q = p + 3;
+            if (w && (strstr(q, "x16") || strstr(q, "w16"))) w = 0;
+        }
+        return w ? 0 : 1;
+    }
+    return 0;
+}
+
+/* objdump -d unit.o; each instruction line is ADDR:<TAB>CODE<TAB>MNEMONIC<TAB>OPERANDS; only the part after the
+   second tab is scanned */
+static char oa_ops[8192][96];
+static char oa_code[8192][12];     /* the code column (instruction word as objdump prints it) of the same line */
+static int oa_calleesaved(const char *abs, int *failed) {
+    static char out[1 << 20];
+    char why[600], stage[64], hit[16], line[512];
+    char *av[] = {"aarch64-linux-gnu-objdump", "-d", "unit.o", 0};
+    int rc = 0, lines = 0, bad = 0;
+    char *p, *e;
+    if (oa_put("unit.c", OA_SIGU) || oa_unit(abs, "unit.c", "unit.o", stage, why)) {
+        printf("CASE a-calleesaved FAIL stage=unisacc-c %s\n", why); (*failed)++; return 0;
+    }
+    if (oa_run_out("objdump", av, 10, &rc, why, 512, out, sizeof out) || rc) {
+        printf("CASE a-calleesaved FAIL stage=objdump %s\n", why); (*failed)++; return 0;
+    }
+    hit[0] = 0;
+    for (p = out; *p && !bad; p = e) {
+        int n, k, tabs = 0;
+        e = p;
+        while (*e && *e != '\n') e++;
+        n = (int)(e - p);
+        if (n > 511) n = 511;
+        for (k = 0; k < n; k++) line[k] = p[k];
+        line[n] = 0;
+        for (k = 0; line[k] && tabs < 2; k++) if (line[k] == '\t') tabs++;
+        if (tabs == 2) {
+            if (lines < 8192) {
+                int m = 0, c = 0, j = 0;
+                while (line[k + m] && m < 95) { oa_ops[lines][m] = line[k + m]; m++; } oa_ops[lines][m] = 0;
+                while (line[j] && line[j] != '\t') j++;
+                if (line[j]) j++;
+                while (line[j] && line[j] != ' ' && line[j] != '\t' && c < 11) oa_code[lines][c++] = line[j++];
+                oa_code[lines][c] = 0;
+            }
+            lines++;
+            if (oa_csreg(line + k, hit, sizeof hit)) bad = 1;
+        }
+        if (*e) e++;
+    }
+    printf("CASE a-calleesaved %s insns=%d%s%s\n", (!bad && lines > 0) ? "PASS" : "FAIL", lines,
+           bad ? " hit=" : "", bad ? hit : "");
+    if (bad || lines == 0) (*failed)++;
+    {   /* a-x16free: every guard found, and after each brk #0xf7 x16 is written before it is read */
+        int i, guards = 0, live = 0, sense = 0, n = lines < 8192 ? lines : 8192;
+        for (i = 0; i < n; i++) {
+            if (strncmp(oa_ops[i], "brk", 3) || !strstr(oa_ops[i], "0xf7")) continue;
+            guards++;
+            if (oa_x16_reads_first(oa_ops, n, i + 1)) live++;
+            /* a-branchsense: cmp x16, x7 then b.lo over the brk, word 54000043 (b.lo +8: trap only when sp+MARGIN
+               reaches x7).  The inverted b.hs (54000042) trapped on every healthy call in the first 0.0.82 draft. */
+            if (i < 2 || strncmp(oa_ops[i - 2], "cmp", 3) || !strstr(oa_ops[i - 2], "x16, x7") ||
+                !tx_eqz(oa_code[i - 1], "54000043")) sense++;
+        }
+        printf("CASE a-x16free %s guards=%d live=%d\n", (guards > 0 && !live) ? "PASS" : "FAIL", guards, live);
+        if (!guards || live) (*failed)++;
+        printf("CASE a-branchsense %s guards=%d wrong=%d\n", (guards > 0 && !sense) ? "PASS" : "FAIL", guards, sense);
+        if (!guards || sense) (*failed)++;
+    }
+    return 0;
+}
+
 /* p03's unit.o is still in oa_dir when this runs */
 static int oa_symcase(const char *abs, const char *name, int *failed) {
     char why[600], stage[64];
@@ -287,13 +440,14 @@ int main(int argc, char **argv) {
             armun = 1;
         } else {
             oa_arm = 1;
-            for (i = 0; i < 9; i++) {
+            for (i = 0; i < 14; i++) {
                 oa_one(abs, &oa_arm_cases[i], &failed, &xfail);
                 if (i == 0) {
                     if (oa_put("unit.c", oa_arm_cases[0].unit)) failed++;
                     else oa_symcase(abs, "a-symtype", &failed);
                 }
             }
+            oa_calleesaved(abs, &failed);
             oa_arm = 0;
         }
     }
