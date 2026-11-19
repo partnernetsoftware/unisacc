@@ -467,17 +467,119 @@ done:
     return rc;
 }
 
-static int walk_asset(const char *dir) {
+static int walk_asset(const char *dir,int scene) {
     int rows[8][7];
-    unsigned char bytes[224];
+    const unsigned sizes[]={224,57600,65536};
+    const char *assets[]={"ujs/practice/uxe/test/d3-cloud-soft.rgba","ujs/practice/uxe/test/d3-detail.rgba"};
+    int size=scene?sizes[0]+sizes[1]+sizes[2]:sizes[0];
+    unsigned char *bytes=mm_alloc(size);
     char path[320];
-    if(walk_rows(rows)) return 1;
+    int rc=1;
+    if(!bytes) return 1;
+    if(walk_rows(rows)) goto done;
     for(int y=0;y<8;y++) for(int x=0;x<7;x++) {
         unsigned value=(unsigned)rows[y][x];
         for(int b=0;b<4;b++) bytes[4*(7*y+x)+b]=value>>(8*b);
     }
+    for(int i=0,at=224;scene && i<2;i++) {
+        unsigned char *part=0;
+        int64_t length=0;
+        int err=sy_read_file(assets[i],&part,&length,sizes[i+1]);
+        if(!err && length==sizes[i+1])
+            for(int j=0;j<length;j++) bytes[at+j]=part[j];
+        mm_free(part);
+        if(err || length!=sizes[i+1]) goto done;
+        at+=length;
+    }
     tx_snprintf(path,sizeof path,"%s/route.bin",dir);
-    return sy_write_file(path,bytes,sizeof bytes,0600)!=0;
+    rc=sy_write_file(path,bytes,size,0600)!=0;
+done:
+    mm_free(bytes);
+    return rc;
+}
+
+static int bridge_product(const char *dir,int mutate) {
+    const char *sources[]={"ujs/practice/uxe/products/d3/route.ujs",
+        "ujs/practice/uxe/base/math.ujs","ujs/practice/uxe/products/d3/bridge.ujs",
+        "ujs/practice/uxe/products/d3/valley.ujs","ujs/practice/uxe/products/d3/house.ujs",
+        "ujs/practice/uxe/products/d3/foliage.ujs"};
+    unsigned char *bytes[6]={0};
+    int64_t sizes[6]={0};
+    char path[320],body[24576];
+    int rc=1;
+    for(int i=0;i<6;i++) if(sy_read_file(sources[i],&bytes[i],&sizes[i],8192)) goto done;
+    long tail=tx_find((char *)bytes[0],sizes[0],"return walkTick;",16);
+    long header=tx_find((char *)bytes[0],sizes[0],"\n\n",2);
+    if(header<0 || tail<header) goto done;
+    const char *valley=mutate==2?"":(char *)bytes[3];
+    const char *house=mutate==3?"":(char *)bytes[4];
+    const char *foliage=mutate==4?"":(char *)bytes[5];
+    int n=tx_snprintf(body,sizeof body,"%.*s\n%s\n%.*s\n%s\n%s\n%s\n%s\n"
+        "sceneCall = uxe_dispatch(34, 2, 22 + 25 * 256 + 22 * 65536);\nsceneCall = uxe_dispatch(3, 0, 0);\nreturn walkTick;\n",
+        (int)header,bytes[0],bytes[1],(int)(tail-header),bytes[0]+header,bytes[2],valley,house,foliage);
+    if(n<0 || n>=(int)sizeof body) goto done;
+    tx_snprintf(path,sizeof path,"%s/bridge.ujs",dir);
+    if(sy_write_file(path,body,n,0600)) goto done;
+    rc=generated(dir,"product",path,
+        mutate==1?"while (bay < 10)":mutate==5?"walkTick * 0.089":
+        mutate==6?"uxe_dispatch(31, 160 + 90 * 2048, 0)":mutate==7?"128 + 128 * 2048 + 4194304, 57600":
+        mutate==8?"uxe_dispatch(29, 60, 178)":mutate==9?"while (rail < 2)":mutate==10?"while (vine < 21)":
+        mutate==11?"sceneWidth = 960":mutate==12?"while (stroke < 1800)":
+        mutate==13?"(meadowZ + 4000) * 100 / 6400":mutate==14?"y0 + y1 > 20":mutate==15?"uxe_dispatch(34, 2,":
+        mutate==16?"164 + 126 * 256 + 89 * 65536":mutate==17?"while (boulder < 15)":
+        mutate==18?"walkInput = uxe_dispatch(0, 0, 0)":
+        mutate==19?"148 + 161 * 256 + 171 * 65536":mutate==20?"while (opening < 35)":
+        mutate==21?"94 + 37 * (segment % 2)":mutate==22?"while (stroke < 1800)":0,
+        mutate==5?"0.0":mutate==6?"0 - 1":mutate==7?"0, 0":mutate==8?"uxe_dispatch(29, 0, 0)":
+        mutate==9?"while (rail < 0)":mutate==10?"while (vine < 0)":mutate==11?"sceneWidth = 426":
+        mutate==12?"while (stroke < 0)":mutate==13?"100":mutate==14?"0":
+        mutate==15?"uxe_dispatch(34, 0,":mutate==16?"118 + 124 * 256 + 139 * 65536":
+        mutate==17?"while (boulder < 0)":
+        mutate==18?"walkInput = uxe_dispatch(0, 0, 0) % 4294967296":
+        mutate==19?"224 + 202 * 256 + 170 * 65536":mutate==20?"while (opening < 16)":
+        mutate==21?"74 + 31 * (segment % 2)":mutate==22?"while (stroke < 1050)":"while (bay < 0)");
+done:
+    for(int i=0;i<6;i++) mm_free(bytes[i]);
+    return rc;
+}
+
+static int bridge_shell(const char *dir) {
+    char path[320], *out=0;
+    size_t size=0;
+    char *cmd[]={"sh","./unisacc.com","ujs/tests/uxe-host-budget.cx","--",path,0};
+    if(copy_fixture(dir,"index.html","ujs/practice/uxe/products/d3/index.html")) return 1;
+    tx_snprintf(path,sizeof path,"%s/index.html",dir);
+    int rc=cx_runv_timeout(cmd,8,&out,&size);
+    if(out) printf("%s",out);
+    mm_free(out);
+    return rc!=0;
+}
+
+static int export_walk(const char *dir) {
+    if(tx_len(dir,250)<=0 || sy_mkdir(dir,0700)) return 2;
+    int rc=generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+        bridge_product(dir,0) || walk_asset(dir,1) ||
+        copy_fixture(dir,"host-abi.js","ujs/practice/uxe/base/host-abi.js") || bridge_shell(dir);
+    const char *leaves[]={"bridge.ujs","base.wasm","product.wasm","route.bin","host-abi.js","index.html"};
+    char path[320];
+    for(int i=0;i<(rc?6:1);i++) {
+        tx_snprintf(path,sizeof path,"%s/%s",dir,leaves[i]);
+        sy_unlink(path);
+    }
+    if(rc) sy_rmdir(dir);
+    printf("D3_WALK_EXPORT dir=%s failed=%d\n",dir,rc);
+    return rc;
+}
+
+static int walk_input_check(const char *dir) {
+    char url[330], *out=0;
+    size_t size=0;
+    tx_snprintf(url,sizeof url,"file://%s/index.html",dir);
+    char *cmd[]={"sh","./unisacc.com","tools/check-uxe-d1-flight.cx","--","wasm-walk-input",url,0};
+    int rc=cx_runv_timeout(cmd,28,&out,&size);
+    if(out) printf("%s",out);
+    mm_free(out);
+    return rc!=0;
 }
 
 static int walk_gold(char *gold,int cap) {
@@ -645,8 +747,12 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             " 102240 110,60,50,255 0,0,255,160 10,20,30,255 -1"
             " 102240 167,83,61,255 41,33,36,255 10,20,30,255 10,20,30,255 -1"
             " 102240 40,160,80,255 10,20,30,255 -1 -1 102240 160,110,101,255 -1 -1"
-            " 102240 30,85,210,255 -1",
-            426 * 240, 3 * 10000 + 13 * 100 + 91);
+            " 102240 30,85,210,255 -1 102240 %d,%d,%d,255 -1"
+            " 102240 24,210,70,255 102240 24,210,70,255 -1"
+            " 102240 200,150,100,255 102240 %d,%d,%d,255 -1",
+            426 * 240, 3 * 10000 + 13 * 100 + 91,
+            (30 * 128 + 127) / 255, (85 * 128 + 127) / 255, (210 * 128 + 127) / 255,
+            (200 * 128 + 127) / 255, (150 * 128 + 127) / 255, (100 * 128 + 127) / 255);
     }
     if (flight_check == 1) gold_n = flight_gold(gold, sizeof gold);
     if (flight_check == 2) gold_n = pilot_gold(gold, sizeof gold);
@@ -666,7 +772,20 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
         from += sizeof start - 1;
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
-            if (flight_check == 14) {
+            if (flight_check == 16) {
+                int near=0,far=0,distance=0,ridge=0,meadow=0,house=0,leaf=0,grass=0,wind=0,cloud=0,grout=0,shade=0,rail=0,vines=0;
+                int surface_w=0,surface_h=0,brush=0,greens=0,lit_leaf=0,old_trunk=0,ink=0,vine_light=0,warm=0,rocks=0;
+                int blue_deck=0,door=0,beam=0,frame=0;
+                pass=!rc && sscanf(out+from,"%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+                    &near,&far,&distance,&ridge,&meadow,&house,&leaf,&grass,&wind,&cloud,&grout,&shade,&rail,&vines,
+                    &surface_w,&surface_h,&brush,&greens,&lit_leaf,&old_trunk,&ink,&vine_light,&warm,&rocks,
+                    &blue_deck,&door,&beam,&frame)==28 && blue_deck>=10000 && door>=20 && beam>=20 && frame>=100 &&
+                    warm>=1000 && rocks>=100 &&
+                    surface_w==960 && surface_h==540 && ink>=400 && vine_light>=50 &&
+                    brush>=1700 && greens>=4 && lit_leaf>=300 && old_trunk==0 &&
+                    near>=1000 && far>=1000 && distance==25*7*180 && ridge>=100 && meadow>=1000 && house>=100 &&
+                    leaf>=100 && grass>=25 && wind>=25 && cloud>=1500 && grout>=10 && shade>=50 && rail>=100 && vines>=30;
+            } else if (flight_check == 14) {
                 int dark=0,light=0,sides=0;
                 pass=!rc && sscanf(out+from,"%d %d %d",&dark,&light,&sides)==3 &&
                     dark>=40 && light>=20 && sides==2;
@@ -725,7 +844,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
-                flight_check == 15 ? "CHECK_UXE_D3_ROUTE" :
+                flight_check == 16 ? "CHECK_UXE_D3_SCENE" : flight_check == 15 ? "CHECK_UXE_D3_ROUTE" :
                 flight_check == 14 ? "CHECK_UXE_D2_SHALLOWS" : flight_check == 13 ? "CHECK_UXE_D2_GLINT" :
                 flight_check == 12 ? "CHECK_UXE_D2_TITLE" : flight_check == 11 ? "CHECK_UXE_D2_RED_LANTERNS" :
                 flight_check == 10 ? "CHECK_UXE_D2_LILIES" : flight_check == 9 ? "CHECK_UXE_D2_DOCK" :
@@ -752,6 +871,8 @@ int main(int argc, char **argv) {
         return export_projection(argv[2]);
     if (argc == 3 && tx_eq(argv[1], "--export-waterway", sizeof "--export-waterway"))
         return export_waterway(argv[2]);
+    if (argc == 3 && tx_eq(argv[1], "--export-walk", sizeof "--export-walk"))
+        return export_walk(argv[2]);
     const char *package = argc == 4 && tx_eq(argv[1], "--package", sizeof "--package") ? argv[2] : 0;
     const char *mode = package ? argv[3] : argc == 2 ? argv[1] : "";
     int base_blend = tx_eq(mode, "base-blend-bad", sizeof "base-blend-bad");
@@ -759,8 +880,11 @@ int main(int argc, char **argv) {
     int base_depth = tx_eq(mode, "base-depth-off", sizeof "base-depth-off");
     int base_fog = tx_eq(mode, "base-fog-off", sizeof "base-fog-off");
     int base_pose = tx_eq(mode, "base-pose-off", sizeof "base-pose-off");
+    int base_sun = tx_eq(mode, "base-sun-off", sizeof "base-sun-off");
+    int base_texture = tx_eq(mode,"base-texture-off",sizeof "base-texture-off");
+    int base_shadow = tx_eq(mode,"base-shadow-off",sizeof "base-shadow-off");
     int base_check = tx_eq(mode, "base", 5) || tx_eq(mode, "base-color", 11) ||
-        base_blend || base_particle || base_depth || base_fog || base_pose;
+        base_blend || base_particle || base_depth || base_fog || base_pose || base_sun || base_texture || base_shadow;
     int cannon_mutate = tx_eq(mode, "flight-cannon", sizeof "flight-cannon");
     int hit_mutate = tx_eq(mode, "flight-hit", sizeof "flight-hit");
     int wave_mutate = tx_eq(mode, "flight-wave", sizeof "flight-wave");
@@ -796,7 +920,32 @@ int main(int argc, char **argv) {
     int shallows_mutate=tx_eq(mode,"water-shallows-off",sizeof "water-shallows-off");
     if(tx_eq(mode,"water-shallows",sizeof "water-shallows") || shallows_mutate) flight_check=14;
     int walk_mutate=tx_eq(mode,"walk-short",sizeof "walk-short");
-    if(tx_eq(mode,"walk",sizeof "walk") || walk_mutate) flight_check=15;
+    int rail_mutate=tx_eq(mode,"walk-rail-off",sizeof "walk-rail-off");
+    if(tx_eq(mode,"walk",sizeof "walk") || walk_mutate || rail_mutate) flight_check=15;
+    int bridge_mutate=tx_eq(mode,"walk-bridge-off",sizeof "walk-bridge-off");
+    if(tx_eq(mode,"walk-valley-off",sizeof "walk-valley-off")) bridge_mutate=2;
+    if(tx_eq(mode,"walk-house-off",sizeof "walk-house-off")) bridge_mutate=3;
+    if(tx_eq(mode,"walk-foliage-off",sizeof "walk-foliage-off")) bridge_mutate=4;
+    if(tx_eq(mode,"walk-wind-off",sizeof "walk-wind-off")) bridge_mutate=5;
+    if(tx_eq(mode,"walk-cloud-off",sizeof "walk-cloud-off")) bridge_mutate=6;
+    if(tx_eq(mode,"walk-masonry-off",sizeof "walk-masonry-off")) bridge_mutate=7;
+    if(tx_eq(mode,"walk-shadow-off",sizeof "walk-shadow-off")) bridge_mutate=8;
+    if(tx_eq(mode,"walk-railings-off",sizeof "walk-railings-off")) bridge_mutate=9;
+    if(tx_eq(mode,"walk-vines-off",sizeof "walk-vines-off")) bridge_mutate=10;
+    if(tx_eq(mode,"walk-low-resolution",sizeof "walk-low-resolution")) bridge_mutate=11;
+    if(tx_eq(mode,"walk-meadow-brush-off",sizeof "walk-meadow-brush-off")) bridge_mutate=12;
+    if(tx_eq(mode,"walk-meadow-flat",sizeof "walk-meadow-flat")) bridge_mutate=13;
+    if(tx_eq(mode,"walk-flat-leaves",sizeof "walk-flat-leaves")) bridge_mutate=14;
+    if(tx_eq(mode,"walk-ink-off",sizeof "walk-ink-off")) bridge_mutate=15;
+    if(tx_eq(mode,"walk-purple-arch",sizeof "walk-purple-arch")) bridge_mutate=16;
+    if(tx_eq(mode,"walk-rocks-off",sizeof "walk-rocks-off")) bridge_mutate=17;
+    if(tx_eq(mode,"walk-beige-deck",sizeof "walk-beige-deck")) bridge_mutate=19;
+    if(tx_eq(mode,"walk-house-trim-off",sizeof "walk-house-trim-off")) bridge_mutate=20;
+    if(tx_eq(mode,"walk-dim-leaves",sizeof "walk-dim-leaves")) bridge_mutate=21;
+    if(tx_eq(mode,"walk-sparse-brush",sizeof "walk-sparse-brush")) bridge_mutate=22;
+    int walk_input_off=tx_eq(mode,"walk-input-off",sizeof "walk-input-off");
+    if(tx_eq(mode,"walk-input",sizeof "walk-input") || walk_input_off) flight_check=17;
+    else if(tx_eq(mode,"walk-bridge",sizeof "walk-bridge") || bridge_mutate) flight_check=16;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -831,10 +980,23 @@ int main(int argc, char **argv) {
         } else {
             rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
         }
-    } else if (flight_check == 15) {
-        rc=rc || (package!=0) || walk_asset(dir) ||
-            copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d3-route-probe.html") ||
+    } else if (flight_check == 17) {
+        rc=rc || (package!=0) || walk_asset(dir,1) || bridge_shell(dir) ||
             generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+            bridge_product(dir,walk_input_off?18:0) || walk_input_check(dir);
+    } else if (flight_check == 16) {
+        rc=rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d3-bridge-probe.html");
+        if(package) {
+            rc=rc || copy_package_file(dir,package,"route.bin") || copy_package_file(dir,package,"base.wasm") ||
+                (bridge_mutate?bridge_product(dir,bridge_mutate):copy_package_file(dir,package,"product.wasm"));
+        } else {
+            rc=rc || walk_asset(dir,1) || bridge_shell(dir) ||
+                generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) || bridge_product(dir,bridge_mutate);
+        }
+    } else if (flight_check == 15) {
+        rc=rc || (package!=0) || walk_asset(dir,0) ||
+            copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d3-route-probe.html") ||
+            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",rail_mutate?"high * delta":0,"low * delta") ||
             generated(dir,"product","ujs/practice/uxe/products/d3/route.ujs",walk_mutate?"180 * walkSteps":0,"120 * walkSteps");
     } else if (flight_check >= 2) {
         int mutate=shallows_mutate?14:glyph_mutate?13:glint_mutate?12:title_mutate?11:red_mutate?10:
@@ -861,15 +1023,15 @@ int main(int argc, char **argv) {
     } else if (base_check) {
         int mutate = tx_eq(mode, "base-color", 11);
         char path[320];
-        const unsigned char asset[] = {7, 13, 29, 91};
+        const unsigned char asset[] = {7,13,29,91,255,0,255,0,90,100,180,255,70,100,200,255,24,210,70,255};
         tx_snprintf(path, sizeof path, "%s/asset.bin", dir);
         if (sy_write_file(path, asset, sizeof asset, 0600)) rc = 1;
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-base-probe.html") ||
             generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs",
-                base_pose ? "cameraX - worldEyeX" : base_fog ? "sceneFogEnd > sceneFogStart" :
+                base_shadow ? "resolvedLight * shadowDark" : base_texture ? "if (textured &&" : base_sun ? "sunEnabled = 1;" : base_pose ? "cameraX - worldEyeX" : base_fog ? "sceneFogEnd > sceneFogStart" :
                     base_depth ? "triangleInvZ > ux_f32(triangleDepthAt)" :
                     base_particle ? "blendEdge - blendDistance" : base_blend ? "255 - blendAlpha" : 0,
-                base_pose ? "cameraX" : base_fog ? "sceneFogEnd < sceneFogStart" : base_depth ? "triangleInvZ > 0.0" :
+                base_shadow ? "resolvedLight * 255" : base_texture ? "if (0 &&" : base_sun ? "sunEnabled = 0;" : base_pose ? "cameraX" : base_fog ? "sceneFogEnd < sceneFogStart" : base_depth ? "triangleInvZ > 0.0" :
                     base_particle ? "blendEdge" : "128 - blendAlpha") ||
             generated(dir, "product", "ujs/practice/uxe/test/ux-d1-base-product.ujs",
                 mutate ? "4284782280" : 0, "4284782281");
@@ -880,7 +1042,7 @@ int main(int argc, char **argv) {
             generated(dir, "version", base_source, "version 1;", "version 2;") ||
             generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)");
     }
-    rc = rc || browser(dir, mode, base_check, flight_check, projection_check);
+    if(flight_check!=17) rc = rc || browser(dir, mode, base_check, flight_check, projection_check);
     if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
     mm_free(removed);
     return rc;

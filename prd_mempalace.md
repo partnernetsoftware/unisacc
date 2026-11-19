@@ -21,7 +21,7 @@ flowchart LR
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
     V71["0.0.71 正规构造499/499,APE ca84同字节复现<br/>/tmp/unisacc-session-v71-rc2"]
-    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>release/notes-0.0.72.md"]
+    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>archive/pre080/release/notes-0.0.72.md"]
     V73["0.0.73 已公开 Latest(冻结 F 3865c7c9e0)<br/>release/evidence/0.0.73/"]
     V74["0.0.74 已公开 Latest(冻结 F 0dae4d3024)<br/>release/evidence/0.0.74/"]
     V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
@@ -68,6 +68,10 @@ flowchart LR
 ```
 
 ## 决定(别人必须遵守)
+
+- 起链即内容截止(项目所有者授权的调度裁定 2026-11-19,依据 plans/speed-first-rev4.md:0.0.81 整链只占单版 8.5%,链后到公开占 37%,计划完成率 55%、未计划项占 57%):整链起点之后产品输入一律冻结,链后只收阻塞修复(产品输入变更须重起链);工具与测试与文档项可并行但不进候选键;0.0.83 目标压到 10 单位;R1 release-flow 与 R2 增量预跑兑现前速度道不加新大项。
+- 发布工具提前修复(R0,0.0.82):RELEASE-PREP-STRICT-NEEDS-FLAG 与 RELEASE-EXEC-X-COMMIT-EMPTY 两条缺口在 0.0.82 公开前修。
+- 提交门类与共用发布路径的变更验收:夹具绿不等于真实提交绿,必须在共享检出同款条件下真实提交一次成功(derive_gate、table-index、doc-links 三次假漂移都是靠真实提交抓到);共用路径(dvqualify、release-exec、release-prep、register)的补丁必须独立复核并做原版与补丁版真实发车对拍。
 
 - 版本编排(项目所有者 2026-11-19):每版内容要足量,四道并行(功能、速度、资格、用户),容量与逐版编排见 plans/roadmap-0.0.83-0.0.99.md(估计值,0.0.85 公开后用 S5 速度账实测替换);0.0.100 起汇编级精修的入口准则写在同一文件,0.0.99 封板必须满足。
 - 迭代速度主线 S0 事件触发预制(项目所有者提出,依据 plans/roadmap-rev3.md):内容寻址的输入身份做键,复用同候选同输入的真实实跑证据,冻结时只核身份;S1 起链预检与 S5 速度账已落库(0.0.81 公开后),S2 令牌调度是 S0 推测作业的前置。devsvc 工具线在 main 上独立开发,但不在冻结到公开期间落库(会触发 MAIN_ADVANCED)。

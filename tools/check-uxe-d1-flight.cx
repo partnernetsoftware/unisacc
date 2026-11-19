@@ -912,7 +912,7 @@ typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 typedef struct { int x,z,speed,tick; } LiveWater;
 enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST,LIVE_WASM,
-    LIVE_WATER_WASM };
+    LIVE_WATER_WASM,LIVE_WALK_WASM };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -1163,6 +1163,50 @@ static int exercise_native_water(ChromeInput *c) {
         "release_speed=%d failed=%d\n",rest.x,rest.z,rest.speed,east.x,east.z,east.speed,
         west.x,west.z,west.speed,touch_east.x,touch_east.z,touch_east.speed,touch_west.x,touch_west.z,touch_west.speed,
         released.speed,failed);
+    return failed;
+}
+
+typedef struct { int distance,yaw,pitch; } NativeWalk;
+
+static int native_walk_read(ChromeInput *c,int steps,NativeWalk *walk) {
+    char query[240],text[120];
+    tx_snprintf(query,sizeof query,"__d1Step(%d);[0,7,8].map(i=>"
+        "new Float32Array(__d1Packet().buffer,2097152,9)[i]).join(',')",steps);
+    return native_eval(c,query,text,sizeof text) &&
+        sscanf(text,"%d,%d,%d",&walk->distance,&walk->yaw,&walk->pitch)==3;
+}
+
+static int native_mouse(ChromeInput *c,const char *kind,int x,int y,int buttons) {
+    char params[240];
+    tx_snprintf(params,sizeof params,"{\"type\":\"%s\",\"x\":%d,\"y\":%d,"
+        "\"button\":\"left\",\"buttons\":%d,\"clickCount\":1}",kind,x,y,buttons);
+    return cdp_call(c,"Input.dispatchMouseEvent",params);
+}
+
+static int exercise_native_walk(ChromeInput *c) {
+    char text[80],wheel[160];
+    NativeWalk start={0},pressed={0},dragged={0},rolled={0},touch={0},released={0},forward={0},backward={0};
+    int w=0,h=0;
+    if(!native_ready(c) || !native_walk_read(c,0,&start) ||
+       !native_eval(c,"[innerWidth,innerHeight].join(',')",text,sizeof text) ||
+       sscanf(text,"%d,%d",&w,&h)!=2 || w<800 || h<500) return input_error("d3-wasm-ready",0);
+    tx_snprintf(wheel,sizeof wheel,"{\"type\":\"mouseWheel\",\"x\":%d,\"y\":%d,\"deltaX\":0,\"deltaY\":-100}",w/4,h/2);
+    if(!native_mouse(c,"mousePressed",w/4,h/2,1) || !native_walk_read(c,1,&pressed) ||
+       !native_mouse(c,"mouseMoved",w*3/8,h*5/8,1) || !native_walk_read(c,1,&dragged) ||
+       !native_mouse(c,"mouseReleased",w*3/8,h*5/8,0) ||
+       !cdp_call(c,"Input.dispatchMouseEvent",wheel) || !native_walk_read(c,1,&rolled) ||
+       !native_touch(c,"touchStart",w/2) || !native_walk_read(c,4,&touch) ||
+       !native_touch(c,"touchEnd",0) || !native_walk_read(c,3,&released) ||
+       !keyboard(c,"w","KeyW",87,1) || !native_walk_read(c,3,&forward) || !keyboard(c,"w","KeyW",87,0) ||
+       !keyboard(c,"s","KeyS",83,1) || !native_walk_read(c,3,&backward) || !keyboard(c,"s","KeyS",83,0))
+        return input_error("d3-wasm-gesture",0);
+    int failed=start.distance!=0 || start.yaw!=0 || start.pitch!=0 || pressed.distance!=0 ||
+        dragged.distance!=0 || dragged.yaw<790 || dragged.yaw>810 || dragged.pitch< -365 || dragged.pitch> -355 ||
+        rolled.distance!=540 || touch.distance!=1260 || released.distance!=touch.distance ||
+        forward.distance!=released.distance+540 || backward.distance!=released.distance;
+    printf("D3_WASM_INPUT drag=%d,%d,%d wheel=%d touch=%d release=%d W=%d S=%d failed=%d\n",
+        dragged.distance,dragged.yaw,dragged.pitch,rolled.distance,touch.distance,released.distance,
+        forward.distance,backward.distance,failed);
     return failed;
 }
 
@@ -1758,7 +1802,8 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     int rc,n;
     int framed=candidate && !strcmp(candidate,"ujs/practice/uxe/test/d1-solid-audit.html");
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    if(battle==LIVE_WASM || battle==LIVE_WATER_WASM) {
+    int native=battle==LIVE_WASM || battle==LIVE_WATER_WASM || battle==LIVE_WALK_WASM;
+    if(native) {
         n=tx_snprintf(url,sizeof url,"%s",candidate);
     } else if(framed) {
         if(sy_mkdtemp("/tmp","d1-keyboard-",fixture,sizeof fixture)) return input_error("cdp-fixture-dir",0);
@@ -1780,9 +1825,10 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     rc=sy_proc_spawn(&launch,&c.child);
     if(rc) { if(framed) chd_wipe(fixture); return input_error("cdp-spawn",0); }
     c.deadline=sy_now_ms()+22500;
-    if(!cdp_navigate(&c,url,battle==LIVE_WASM || battle==LIVE_WATER_WASM)) rc=input_error("cdp-navigate",0);
+    if(!cdp_navigate(&c,url,native)) rc=input_error("cdp-navigate",0);
     else if(battle==LIVE_WASM) rc=exercise_native(&c,mutation[0]!=0);
     else if(battle==LIVE_WATER_WASM) rc=exercise_native_water(&c);
+    else if(battle==LIVE_WALK_WASM) rc=exercise_native_walk(&c);
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
     else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
     else if(battle==LIVE_BRIDGE || battle==LIVE_TOWN) rc=exercise_walk(&c,battle==LIVE_TOWN);
@@ -1802,6 +1848,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if(argc==3 && !strcmp(argv[1],"wasm-walk-input")) {
+        if(strncmp(argv[2],"file:///",8) && strncmp(argv[2],"http://127.0.0.1:",17)) return 2;
+        return check_keyboard_path("",LIVE_WALK_WASM,argv[2]);
+    }
     if(argc==3 && !strcmp(argv[1],"wasm-water-input")) {
         if(strncmp(argv[2],"file:///",8) && strncmp(argv[2],"http://127.0.0.1:",17)) return 2;
         return check_keyboard_path("",LIVE_WATER_WASM,argv[2]);

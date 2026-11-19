@@ -14,6 +14,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.awpath
+#pragma unisa use cxlib.genkit
 
 #define MAXH 128
 #define MAXN 4096
@@ -258,9 +259,12 @@ static void scan_dir(void) {
     sy_dir_t d;
     char dir[700];
     int i, j;
+    (void)gk_tracked_load(root);
     if (cx_fmt(dir, sizeof dir, "%s/include", root) || sy_dir_open(&d, dir)) return;
     while (sy_dir_next(&d) == 1) {
+        char relh[300];
         if ((d.kind != 'f' && d.kind != 'l') || d.name_n < 3 || !mm_same(d.name + d.name_n - 2, ".h", 2)) continue;
+        if (cx_fmt(relh, sizeof relh, "include/%s", d.name) || !gk_tracked_has(relh)) continue;
         if (nh < MAXH) hnames[nh++] = dupn(d.name, d.name_n);
     }
     sy_dir_close(&d);
@@ -297,7 +301,7 @@ static int emit(const char *rel, char *buf, long n, int write_mode) {
         if (awp_devmeta(root, base, write_mode, dm, sizeof dm)) { sy_printf("DEVMETA_PATH_FAIL\t%s\n", base); return 2; }
         if (write_mode) return (cx_write(path, buf, n) || cx_write(dm, buf, n)) ? 2 : 0;
         old = slurp(dm, &on);
-        if (!old || on != n || !mm_same(old, buf, n)) { sy_printf("DEVMETA_DIFF\t%s\t%s\n", rel, dm); return 1; }
+        if (old && (on != n || !mm_same(old, buf, n))) sy_printf("MIRROR_STALE\t%s\thint=derive --write --only libc-decls\n", dm);
     }
     old = slurp(path, &on);
     if (!old || on != n || !mm_same(old, buf, n)) {

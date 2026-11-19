@@ -1,13 +1,15 @@
 /* tools/speed-ledger.cx -- offline per-version speed ledger (S5).
- *   sh ./unisacc.com tools/speed-ledger.cx -- --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N] [--header]
- *   sh ./unisacc.com tools/speed-ledger.cx -- --check FILE --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N]
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--units-file FILE] [--domain-total N] [--header]
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --check FILE --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--units-file FILE] [--domain-total N]
  * Derives one TSV row from existing read-only records (git log/tags, chain-run.tsv ATTEMPT_TIME/SUPERVISE,
  * bg.log BLOCKER/SUPERVISE across all variant dirs of --chain-base, release/evidence/vVER-strict-*.tsv
- * deduplicated by BATCH_RUN id + non-RAW batch rows, and tests/batch-domain-index.tsv).
+ * deduplicated by BATCH_RUN id + non-RAW batch rows, tests/batch-domain-index.tsv, plans/vVER.md,
+ * plans/roadmap-0.0.83-0.0.99.md, and optional --units-file).
  * Missing data is reported honestly as UNMEASURED (never guessed).
- * Columns (12):
+ * Columns (18):
  *   version slot_min chain_start_min chain_exit_min prerun_done_min public_min
- *   chains chain_eff chain_par prerun_par selected_batches domain_ratio */
+ *   chains chain_eff chain_par prerun_par selected_batches domain_ratio
+ *   planned_units done_units unplanned_units post_chain_commits throughput post_chain_to_public_min */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use sys.fs
 #pragma unisa use text.text
@@ -413,12 +415,226 @@ static long long sl_count_domain(const char *repo) {
     return n > 0 ? n : -1;
 }
 
+static long long sl_parse_dec1(const char *s) {
+    long long whole = 0, frac = 0;
+    if (!s) return -1;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s < '0' || *s > '9') return -1;
+    while (*s >= '0' && *s <= '9') { whole = whole * 10 + (*s - '0'); s++; }
+    if (*s == '.') {
+        s++;
+        if (*s < '0' || *s > '9') return -1;
+        frac = *s - '0';
+    }
+    return whole * 10 + frac;
+}
+
+static void sl_fmt_dec1(long long x10, char *dst, size_t cap) {
+    if (x10 < 0) {
+        (void)cx_fmt(dst, (int)cap, "UNMEASURED");
+        return;
+    }
+    if (x10 % 10 == 0) (void)cx_fmt(dst, (int)cap, "%lld", x10 / 10);
+    else (void)cx_fmt(dst, (int)cap, "%lld.%lld", x10 / 10, x10 % 10);
+}
+
+static const char *sl_kv_find(const char *line, const char *key) {
+    const char *p = line;
+    size_t klen = strlen(key);
+    while ((p = strstr(p, key)) != 0) {
+        if (p == line) return p + klen;
+        char prev = p[-1];
+        if (!((prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') || (prev >= '0' && prev <= '9') || prev == '_')) {
+            return p + klen;
+        }
+        p += klen;
+    }
+    return 0;
+}
+
+static void sl_units_from_kv(const char *path, long long *planned, long long *done, long long *unplanned) {
+    size_t sz = 0, i = 0;
+    char *s = cx_read(path, &sz);
+    if (!s) return;
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (len > 0 && s[a + len - 1] == '\r') len--;
+        if (i < sz && s[i] == '\n') i++;
+        if (len == 0) continue;
+
+        char line[1024];
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+        line[len] = 0;
+
+        const char *p;
+        if ((p = sl_kv_find(line, "planned_units=")) != 0) {
+            long long v = sl_parse_dec1(p);
+            if (v >= 0) *planned = v;
+        }
+        if ((p = sl_kv_find(line, "done_units=")) != 0) {
+            long long v = sl_parse_dec1(p);
+            if (v >= 0) *done = v;
+        }
+        if ((p = sl_kv_find(line, "unplanned_units=")) != 0) {
+            long long v = sl_parse_dec1(p);
+            if (v >= 0) *unplanned = v;
+        }
+    }
+    free(s);
+}
+
+static void sl_units_from_tsv(const char *path, const char *ver, long long *planned, long long *done, long long *unplanned) {
+    size_t sz = 0, i = 0;
+    char *s = cx_read(path, &sz);
+    char key[80];
+    if (!s) return;
+    if (cx_fmt(key, sizeof key, "%s\t", ver)) { free(s); return; }
+    size_t klen = strlen(key);
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (len > 0 && s[a + len - 1] == '\r') len--;
+        if (i < sz && s[i] == '\n') i++;
+        if (len < klen || !tx_same(s + a, (long)klen, key, (long)klen)) continue;
+
+        char line[512];
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+        line[len] = 0;
+
+        char *c1 = strchr(line, '\t');
+        if (!c1) break;
+        c1++;
+        char *c2 = strchr(c1, '\t');
+        if (c2) *c2++ = 0;
+        char *c3 = c2 ? strchr(c2, '\t') : 0;
+        if (c3) *c3++ = 0;
+        if (c3) {
+            char *c4 = strchr(c3, '\t');
+            if (c4) *c4 = 0;
+        }
+        long long v1 = sl_parse_dec1(c1);
+        long long v2 = c2 ? sl_parse_dec1(c2) : -1;
+        long long v3 = c3 ? sl_parse_dec1(c3) : -1;
+        if (v1 >= 0) *planned = v1;
+        if (v2 >= 0) *done = v2;
+        if (v3 >= 0) *unplanned = v3;
+        break;
+    }
+    free(s);
+}
+
+static long long sl_planned_from_roadmap(const char *repo, const char *ver) {
+    char p[SL_PW], key[80];
+    size_t sz = 0, i = 0;
+    if (cx_fmt(p, sizeof p, "%s/plans/roadmap-0.0.83-0.0.99.md", repo)) return -1;
+    if (cx_fmt(key, sizeof key, "| %s |", ver)) return -1;
+    char *s = cx_read(p, &sz);
+    if (!s) return -1;
+    size_t klen = strlen(key);
+    long long res = -1;
+    while (i < sz) {
+        size_t a = i;
+        while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a;
+        if (len > 0 && s[a + len - 1] == '\r') len--;
+        if (i < sz && s[i] == '\n') i++;
+        if (len < klen || !tx_same(s + a, (long)klen, key, (long)klen)) continue;
+
+        char line[1024];
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+        line[len] = 0;
+
+        /* Find "| <planned>/<cap> |" column in D table */
+        char *q = line;
+        while ((q = strchr(q, '|')) != 0) {
+            q++;
+            while (*q == ' ') q++;
+            if (*q >= '0' && *q <= '9') {
+                char *r = q;
+                while ((*r >= '0' && *r <= '9') || *r == '.') r++;
+                if (*r == '/' && r[1] >= '0' && r[1] <= '9') {
+                    char *e = r + 1;
+                    while ((*e >= '0' && *e <= '9') || *e == '.') e++;
+                    while (*e == ' ') e++;
+                    if (*e == '|') {
+                        res = sl_parse_dec1(q);
+                        break;
+                    }
+                }
+            }
+        }
+        if (res >= 0) break;
+    }
+    free(s);
+    return res;
+}
+
+static int sl_git_ref_exists(const char *repo, const char *ref) {
+    char out[256];
+    char *av[] = {"git", "-C", (char *)repo, "rev-parse", "--verify", "-q", (char *)ref, 0};
+    return ck_run(av, out, sizeof out) == 0 && out[0] != 0;
+}
+
+static long long sl_git_ref_ts(const char *repo, const char *ref) {
+    char out[256];
+    char *av[] = {"git", "-C", (char *)repo, "log", "-1", "--format=%ct", (char *)ref, 0};
+    if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
+    return sl_atoll(out);
+}
+
+static long long sl_count_post_chain_commits(const char *repo, const char *ver, long long start_ts, long long end_ts) {
+    if (start_ts <= 0) return -1;
+    if (end_ts > 0 && end_ts <= start_ts + 1) return 0;
+
+    char after_arg[64], before_arg[64], tag_ref[80], br_ref[80], out[256];
+    if (cx_fmt(after_arg, sizeof after_arg, "--after=%lld", start_ts + 1)) return -1;
+    if (end_ts > 0 && cx_fmt(before_arg, sizeof before_arg, "--before=%lld", end_ts - 1)) return -1;
+    if (cx_fmt(tag_ref, sizeof tag_ref, "refs/tags/v%s", ver)) return -1;
+    if (cx_fmt(br_ref, sizeof br_ref, "refs/heads/v%s", ver)) return -1;
+
+    int has_tag = sl_git_ref_exists(repo, tag_ref);
+    int has_br = sl_git_ref_exists(repo, br_ref);
+
+    char *av[24];
+    int k = 0;
+    av[k++] = "git";
+    av[k++] = "-C";
+    av[k++] = (char *)repo;
+    av[k++] = "rev-list";
+    av[k++] = "--count";
+    av[k++] = after_arg;
+    if (end_ts > 0) av[k++] = before_arg;
+    av[k++] = "HEAD";
+    if (has_tag) av[k++] = tag_ref;
+    if (has_br) av[k++] = br_ref;
+    av[k++] = "--";
+    av[k++] = "src/";
+    av[k++] = "cx/";
+    av[k++] = "exec/";
+    av[k++] = "include/";
+    av[k++] = "seed/";
+    av[k++] = "weights/";
+    av[k++] = "kernel/";
+    av[k++] = "tools/";
+    av[k] = 0;
+
+    if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
+    return sl_atoll(out);
+}
+
 int main(int argc, char **argv) {
     const char *ver = 0;
     const char *repo = ".";
     const char *opt_chain = 0;
     const char *opt_chain_base = 0;
     const char *opt_prerun = 0;
+    const char *opt_units = 0;
     const char *opt_check = 0;
     long long opt_dom = -1;
     int show_hdr = 0;
@@ -429,11 +645,12 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) opt_chain = argv[++i];
         else if (tx_eqz(argv[i], "--chain-base") && i + 1 < argc) opt_chain_base = argv[++i];
         else if (tx_eqz(argv[i], "--prerun") && i + 1 < argc) opt_prerun = argv[++i];
+        else if (tx_eqz(argv[i], "--units-file") && i + 1 < argc) opt_units = argv[++i];
         else if (tx_eqz(argv[i], "--check") && i + 1 < argc) opt_check = argv[++i];
         else if (tx_eqz(argv[i], "--domain-total") && i + 1 < argc) opt_dom = sl_atoll(argv[++i]);
         else if (tx_eqz(argv[i], "--header")) show_hdr = 1;
         else {
-            fprintf(stderr, "usage: speed-ledger --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N] [--header] [--check FILE]\n");
+            fprintf(stderr, "usage: speed-ledger --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--units-file FILE] [--domain-total N] [--header] [--check FILE]\n");
             return 2;
         }
     }
@@ -519,9 +736,46 @@ int main(int argc, char **argv) {
         (void)cx_fmt(f_drat, sizeof f_drat, "UNMEASURED");
     }
 
-    char row[1024];
-    if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
-        ver, f_slot, f_cs, f_ce, f_pr, f_pub, f_chains, f_ceff, f_cpar, f_ppar, f_sel, f_drat)) return 2;
+    long long planned_x10 = -1, done_x10 = -1, unpl_x10 = -1;
+    {
+        char plan_full[SL_PW];
+        if (!cx_fmt(plan_full, sizeof plan_full, "%s/%s", repo, plan_rel)) {
+            sl_units_from_kv(plan_full, &planned_x10, &done_x10, &unpl_x10);
+        }
+        if (planned_x10 < 0) planned_x10 = sl_planned_from_roadmap(repo, ver);
+        if (opt_units) sl_units_from_tsv(opt_units, ver, &planned_x10, &done_x10, &unpl_x10);
+    }
+
+    long long freeze_ts = -1;
+    {
+        char tag_ref[80];
+        if (!cx_fmt(tag_ref, sizeof tag_ref, "refs/tags/v%s", ver) && sl_git_ref_exists(repo, tag_ref)) {
+            freeze_ts = sl_git_ref_ts(repo, tag_ref);
+        }
+        if (freeze_ts < 0) freeze_ts = pub_ts;
+    }
+    long long post_commits = sl_count_post_chain_commits(repo, ver, agg.best.start_ts, freeze_ts);
+
+    char f_plan[32], f_done[32], f_unpl[32], f_pcc[32], f_tput[32], f_p2p[32];
+    sl_fmt_dec1(planned_x10, f_plan, sizeof f_plan);
+    sl_fmt_dec1(done_x10, f_done, sizeof f_done);
+    sl_fmt_dec1(unpl_x10, f_unpl, sizeof f_unpl);
+    if (post_commits >= 0) (void)cx_fmt(f_pcc, sizeof f_pcc, "%lld", post_commits);
+    else (void)cx_fmt(f_pcc, sizeof f_pcc, "UNMEASURED");
+
+    if (done_x10 >= 0 && slot_ts > 0 && pub_ts > slot_ts) {
+        long long pub_s = pub_ts - slot_ts;
+        long long h = (done_x10 * 36000LL + pub_s / 2) / pub_s;
+        (void)cx_fmt(f_tput, sizeof f_tput, "%lld.%02lld", h / 100, h % 100);
+    } else {
+        (void)cx_fmt(f_tput, sizeof f_tput, "UNMEASURED");
+    }
+    sl_fmt_min(pub_ts, agg.best.exit_ts, f_p2p, sizeof f_p2p);
+
+    char row[1536];
+    if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+        ver, f_slot, f_cs, f_ce, f_pr, f_pub, f_chains, f_ceff, f_cpar, f_ppar, f_sel, f_drat,
+        f_plan, f_done, f_unpl, f_pcc, f_tput, f_p2p)) return 2;
 
     if (opt_check) {
         size_t bsz = 0, i = 0;
@@ -556,7 +810,7 @@ int main(int argc, char **argv) {
     }
 
     if (show_hdr) {
-        printf("version\tslot_min\tchain_start_min\tchain_exit_min\tprerun_done_min\tpublic_min\tchains\tchain_eff\tchain_par\tprerun_par\tselected_batches\tdomain_ratio\n");
+        printf("version\tslot_min\tchain_start_min\tchain_exit_min\tprerun_done_min\tpublic_min\tchains\tchain_eff\tchain_par\tprerun_par\tselected_batches\tdomain_ratio\tplanned_units\tdone_units\tunplanned_units\tpost_chain_commits\tthroughput\tpost_chain_to_public_min\n");
     }
     printf("%s\n", row);
     return 0;

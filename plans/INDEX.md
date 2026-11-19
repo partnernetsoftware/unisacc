@@ -63,6 +63,7 @@
 | [plans/v0.0.83.md](v0.0.83.md) | 现行 | - | 0.0.83 Q-P 首次尝试版计划与 CI 对账前置 |
 | [plans/changes-rev3.md](changes-rev3.md) | 现行 | - | 修订版 3 相对旧版的差异清单与三个最危险假设 |
 | [plans/nn-migration-rev3.md](nn-migration-rev3.md) | 现行 | - | 启动器与六片逻辑迁移 NN 的现状、分版本路线、决策门(与 slice-nn-migration.md 旧表互补) |
+| [plans/speed-first-rev4.md](speed-first-rev4.md) | 现行 | - | 速度项前置重排(四类速度 P/B/V/D、R0 到 R3、总口径为槽到公开总墙钟、吞吐度量,fable 2026-11-19)与 0.0.82 到 0.0.86 速度道逐版清单 |
 | [plans/q-p-design.md](q-p-design.md) | 现行 | - | Q-P 产品资格口径草案:整域分母的五类资格状态与发布门 |
 | [plans/root-identity.md](root-identity.md) | 现行 | - | 本地根产品身份规范(11-17 维护,10 活引用) |
 | [archive/plans/runtime-speedup-lessons-2026-11-16.md](../archive/plans/runtime-speedup-lessons-2026-11-16.md) | 已归档 | roadmap-v0.0.80-v0.0.89 | 运行与启动加速外部经验与落地设计 |

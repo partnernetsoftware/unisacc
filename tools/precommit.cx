@@ -14,6 +14,7 @@
  * concurrent flow (see gate_slurp).  With no argument (the hook's call) a commit that stages a registry table is
  * handed to tools/precommit-flow.cx, everything else is judged serially here (see flow_route);
  * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict. */
+#pragma unisa use cxlib.globspan
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -732,6 +733,249 @@ static int ledger_file_gate(const char *source,const char *baseline,long bn) {
         at+=l+1;}
     mm_free(ro);if(blocked)sy_eprintf("precommit: historical artifact; inspect with tools/ledger-add.cx -- --check --ledger FILE --baseline build/ledger-format-baseline.tsv\n");return blocked;
 }
+/* Derived-table precommit gate: when staged paths hit a derived table's inputs_glob in exec/facts/derive.tsv,
+   run `tools/derive.cx -- --check --only ...` on those tables only (no cached verdict). Block on DRIFT/REFUSED,
+   and also block if a table was recomputed in the worktree (OK) but its output was not staged. */
+static void dg_today_ymd(char out[12]) {
+    long long z = (long long)(sy_wall_s() / 86400) + 719468;
+    long long era = (z >= 0 ? z : z - 146096) / 146097;
+    long long doe = z - era * 146097;
+    long long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    long long y = yoe + era * 400;
+    long long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    long long mp = (5 * doy + 2) / 153;
+    long long d = doy - (153 * mp + 2) / 5 + 1;
+    long long m = mp + (mp < 10 ? 3 : -9);
+    if (m <= 2) y++;
+    (void)cx_fmt(out, 12, "%04lld-%02lld-%02lld", y, m, d);
+}
+
+static int dg_waived(const char *wt, const char *name) {
+    char wp[1200], today[12];
+    size_t wn = 0;
+    char *wb;
+    long at = 0, nl = tx_len(name, 64);
+    int hit = 0;
+    if (cx_fmt(wp, sizeof wp, "%s%stests/derive-gate-waivers.tsv", wt ? wt : "", wt ? "/" : "")) return 0;
+    if (sy_exists(wp) != 1) return 0;
+    wb = (char *)cx_read(wp, &wn);
+    if (!wb) return 0;
+    dg_today_ymd(today);
+    while (at < (long)wn) {
+        long e = tx_chr(wb + at, (long)wn - at, '\n'), l = e < 0 ? (long)wn - at : e;
+        long o0, l0, o1, l1;
+        if (l > 0 && wb[at] != '#' &&
+            !tx_field(wb + at, l, '\t', 0, &o0, &l0) && l0 == nl && tx_same(wb + at + o0, l0, name, nl) &&
+            !tx_field(wb + at, l, '\t', 1, &o1, &l1) && l1 == 10) {
+            char exp[12];
+            mm_copy(exp, sizeof exp, wb + at + o1, 10);
+            exp[10] = 0;
+            if (strcmp(today, exp) <= 0) { hit = 1; break; }
+        }
+        at += l + 1;
+    }
+    mm_free(wb);
+    return hit;
+}
+
+static int dg_in_list(const char *list, const char *path, long pl) {
+    long i = 0, n = tx_len(list, 1024);
+    while (i < n) {
+        long s;
+        while (i < n && list[i] == ' ') i++;
+        s = i;
+        while (i < n && list[i] != ' ') i++;
+        if (i > s && i - s == pl && tx_same(list + s, i - s, path, pl)) return 1;
+    }
+    return 0;
+}
+
+static int dg_path_in_z(const char *zbuf, long zn, const char *p, long pl) {
+    long a = 0;
+    while (a < zn) {
+        long l = tx_len(zbuf + a, zn - a);
+        if (l <= 0) break;
+        if (l == pl && tx_same(zbuf + a, l, p, pl)) return 1;
+        a += l + 1;
+    }
+    return 0;
+}
+
+static int dg_matches_globs(const char *globs, long gl, const char *path, long pl) {
+    long i = 0;
+    while (i < gl) {
+        long s;
+        while (i < gl && globs[i] == ' ') i++;
+        s = i;
+        while (i < gl && globs[i] != ' ') i++;
+        if (i > s && glob_span(globs + s, (size_t)(i - s), path, (size_t)pl)) return 1;
+    }
+    return 0;
+}
+
+static int derive_gate(void) {
+    const char *wt = sy_env("GIT_WORK_TREE");
+    char dp[1200], tp[1200];
+    size_t dn = 0;
+    char *db = 0, *allz = 0, *adz = 0, *dout = 0;
+    long alln = 0, adn = 0, don = 0, at = 0;
+    char names[16][64], outs[16][512], only[1024];
+    int nsel = 0, blocked = 0;
+
+    if (cx_fmt(dp, sizeof dp, "%s%sexec/facts/derive.tsv", wt ? wt : "", wt ? "/" : "") ||
+        cx_fmt(tp, sizeof tp, "%s%stools/derive.cx", wt ? wt : "", wt ? "/" : "")) return 0;
+    if (sy_exists(dp) != 1 || sy_exists(tp) != 1) return 0;
+
+    {
+        char *av1[] = {"git", "diff", "--cached", "--name-only", "-z", 0};
+        char *av2[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=AD", "-z", 0};
+        allz = slurp(av1, &alln);
+        if (!allz || alln <= 0) { if (allz) mm_free(allz); return 0; }
+        adz = slurp(av2, &adn);
+    }
+
+    db = (char *)cx_read(dp, &dn);
+    if (!db) { mm_free(allz); if (adz) mm_free(adz); return 0; }
+
+    while (at < (long)dn && nsel < 16) {
+        long e = tx_chr(db + at, (long)dn - at, '\n'), l = e < 0 ? (long)dn - at : e;
+        long o0, l0, o3, l3, o4, l4, o5, l5;
+        if (l > 0 && db[at] != '#' &&
+            !tx_field(db + at, l, '\t', 0, &o0, &l0) && l0 > 0 && l0 < 64 &&
+            !tx_field(db + at, l, '\t', 3, &o3, &l3) &&
+            !tx_field(db + at, l, '\t', 4, &o4, &l4) && l4 > 0 && l4 < 512 &&
+            !tx_field(db + at, l, '\t', 5, &o5, &l5) && l5 > 0) {
+            char nm[64], outl[512];
+            int skip = (l3 == 1 && db[at + o3] == '-') || (l3 >= 11 && tx_same(db + at + o3, 11, "query-only ", 11));
+            mm_copy(nm, sizeof nm, db + at + o0, (size_t)l0); nm[l0] = 0;
+            mm_copy(outl, sizeof outl, db + at + o4, (size_t)l4); outl[l4] = 0;
+            if (!skip && !tx_eqz(nm, "tables-gen") && !dg_waived(wt, nm)) {
+                int ad_only = tx_eqz(nm, "table-index");
+                const char *srcz = ad_only ? adz : allz;
+                long srcn = ad_only ? adn : alln;
+                long pa = 0;
+                int hit = 0;
+                while (srcz && pa < srcn) {
+                    long pl = tx_len(srcz + pa, srcn - pa);
+                    if (pl <= 0) break;
+                    if (!dg_in_list(outl, srcz + pa, pl) && dg_matches_globs(db + at + o5, l5, srcz + pa, pl)) {
+                        hit = 1;
+                        break;
+                    }
+                    pa += pl + 1;
+                }
+                if (hit) {
+                    mm_copy(names[nsel], sizeof names[nsel], nm, (size_t)l0 + 1);
+                    mm_copy(outs[nsel], sizeof outs[nsel], outl, (size_t)l4 + 1);
+                    nsel++;
+                }
+            }
+        }
+        at += l + 1;
+    }
+    mm_free(db);
+    if (adz) mm_free(adz);
+    if (nsel == 0) { mm_free(allz); return 0; }
+
+    only[0] = 0;
+    for (int i = 0; i < nsel; i++) {
+        long cur = tx_len(only, sizeof only);
+        long nl = tx_len(names[i], 64);
+        if (cur + nl + 2 < (long)sizeof only) {
+            if (cur) only[cur++] = ',';
+            mm_copy(only + cur, sizeof only - cur, names[i], (size_t)nl);
+            only[cur + nl] = 0;
+        }
+    }
+
+    {
+        char *dv[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", "--check", "--only", only, 0}; /* lint:allow R1-product precommit runs tools/derive.cx via checkout product */
+        cur_gate = "derive";
+        slurp_okrc = 2;
+        dout = slurp(dv, &don);
+        slurp_okrc = 0;
+        cur_gate = 0;
+    }
+    if (plan_dir) {
+        if (dout) mm_free(dout);
+        mm_free(allz);
+        return 0;
+    }
+    if (!dout || tx_find(dout, don, "DERIVE_SUMMARY\t", 15) < 0) {
+        sy_eprintf("precommit: DERIVE_GATE_UNAVAILABLE only=%s (tools/derive.cx did not run; allowing commit)\n", only);
+        if (dout) mm_free(dout);
+        mm_free(allz);
+        return 0;
+    }
+
+    for (int i = 0; i < nsel; i++) {
+        long nl = tx_len(names[i], 64), da = 0;
+        int saw = 0, ok = 0;
+        char st[32];
+        st[0] = 0;
+        while (da < don) {
+            long e = tx_chr(dout + da, don - da, '\n'), l = e < 0 ? don - da : e;
+            long o1, l1, o2, l2;
+            if (tx_prefix(dout + da, l, "DERIVE\t", 7) &&
+                !tx_field(dout + da, l, '\t', 1, &o1, &l1) && l1 == nl && tx_same(dout + da + o1, l1, names[i], nl) &&
+                !tx_field(dout + da, l, '\t', 2, &o2, &l2) && l2 > 0 && l2 < (long)sizeof st) {
+                saw = 1;
+                mm_copy(st, sizeof st, dout + da + o2, (size_t)l2);
+                st[l2] = 0;
+                ok = tx_eqz(st, "OK");
+                break;
+            }
+            da += l + 1;
+        }
+        if (!saw || !ok) {
+            int staged_any = 0;
+            long oi = 0, ol = tx_len(outs[i], 512);
+            while (oi < ol) {
+                long os;
+                while (oi < ol && outs[i][oi] == ' ') oi++;
+                os = oi;
+                while (oi < ol && outs[i][oi] != ' ') oi++;
+                if (oi > os && dg_path_in_z(allz, alln, outs[i] + os, oi - os)) staged_any = 1;
+            }
+            if (saw && tx_eqz(st, "DRIFT")) {
+                sy_eprintf("precommit: BLOCKED derived-table-drift name=%s outputs=%s (%s; run: sh ./unisacc.com tools/derive.cx -- --write --only %s)\n",
+                    names[i], outs[i], staged_any ? "staged output still drifts" : "missing from staged paths", names[i]);
+            } else {
+                sy_eprintf("precommit: BLOCKED derived-table-check-failed name=%s status=%s (run: sh ./unisacc.com tools/derive.cx -- --write --only %s)\n",
+                    names[i], saw ? st : "MISSING", names[i]);
+            }
+            blocked++;
+        } else {
+            /* OK in worktree: also verify no output has unstaged modifications relative to the index */
+            long oi = 0, ol = tx_len(outs[i], 512);
+            while (oi < ol) {
+                long os;
+                while (oi < ol && outs[i][oi] == ' ') oi++;
+                os = oi;
+                while (oi < ol && outs[i][oi] != ' ') oi++;
+                if (oi > os && outs[i][oi - 1] != '/') {
+                    char op[512];
+                    char *uv[] = {"git", "diff", "--name-only", "--", op, 0};
+                    long un = 0;
+                    char *uo;
+                    mm_copy(op, sizeof op, outs[i] + os, (size_t)(oi - os));
+                    op[oi - os] = 0;
+                    uo = slurp(uv, &un);
+                    if (uo && un > 0) {
+                        sy_eprintf("precommit: BLOCKED derived-table-unstaged name=%s output=%s (recomputed in worktree but not staged in this commit; stage it with this commit)\n",
+                            names[i], op);
+                        blocked++;
+                    }
+                    if (uo) mm_free(uo);
+                }
+            }
+        }
+    }
+    mm_free(dout);
+    mm_free(allz);
+    return blocked;
+}
+
 static int ledger_gate(void) {
     char *names,*baseline=0;long dn,bn=0,at=0;int blocked=0;
     names=gate_diff("ledger",&dn);if(!names){sy_eprintf("precommit: git diff --cached (ledger) failed\n");return 1;}
@@ -1005,6 +1249,7 @@ int main(int argc, char **argv) {
     }
     blocked += freeze_gate();
     blocked += ledger_gate();
+    blocked += derive_gate();
     if (!plan_dir) gt_line();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
     blocked += new_tools();

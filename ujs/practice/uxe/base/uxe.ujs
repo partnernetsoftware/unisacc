@@ -18,6 +18,16 @@ persist let worldEyeX = 0;
 persist let worldEyeY = 0;
 persist let worldEyeZ = 0;
 persist let worldBasisReady = 0;
+persist let sunEnabled = 0;
+persist let sunAmbient = 0;
+persist let textureWidth = 0;
+persist let textureHeight = 0;
+persist let textureOffset = 0;
+persist let textureWash = 0;
+persist let shadowCell = 0;
+persist let shadowDark = 0;
+persist let railRows = 0;
+persist let contourReady = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -77,6 +87,7 @@ if (op == 3) {
 }
 if (op == 4) {
   if (a < 0 || b < 0 || b > 1048576) { return 0 - 1; }
+  textureWidth = 0;
   assetReadBytes = host_asset_read(a, ux_span(4194304, b), b);
   return assetReadBytes;
 }
@@ -267,15 +278,17 @@ if (op == 16 || op == 17) {
 // Camera-space triangles. Vertex records end before the reciprocal-depth image.
 // The RGB image stays in the existing device buffer, with the host only presenting it.
 if (op == 18) {
-  if (a < 1 || a > 2048 || b < 1 || b > 65535 || pixels == 0 || pixels > 197864) { return 0 - 1; }
+  // The color and depth planes must both end before the resource scratch region.
+  if (a < 1 || a > 2048 || b < 1 || b > 65535 || pixels == 0 || pixels > 524288) { return 0 - 1; }
   sceneFocal = a;
   sceneNear = b;
+  contourReady = 0;
   let sceneClear = 0;
   let sceneReset = ux_u8_put(5499900, 0);
   sceneReset = ux_u8_put(5499901, 0);
   sceneReset = ux_u8_put(5499902, 0);
   while (sceneClear < pixels) {
-    sceneReset = ux_f32_put(5500000 + 4 * sceneClear, 0.0);
+    sceneReset = ux_f32_put(2097152 + 4 * sceneClear, 0.0);
     sceneClear = sceneClear + 1;
   }
   return 0;
@@ -284,10 +297,14 @@ if (op == 19 || op == 25) {
   if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b >= 281474976710656) { return 0 - 1; }
   let cameraZ = (b / 4294967296) * 1.0;
   let vertexState = ux_u8_put(5499900 + a, 0);
+  let worldVertex = 5480032 + 12 * a;
   let cameraX = (b % 65536 - 32768) * 1.0;
   let cameraY = (b / 65536 % 65536 - 32768) * 1.0;
   if (op == 25) {
     if (worldBasisReady == 0) { return 0 - 1; }
+    vertexState = ux_f32_put(worldVertex, cameraX);
+    vertexState = ux_f32_put(worldVertex + 4, cameraY);
+    vertexState = ux_f32_put(worldVertex + 8, cameraZ - 32768.0);
     let relativeX = cameraX - worldEyeX;
     let relativeY = cameraY - worldEyeY;
     let relativeZ = cameraZ - 32768.0 - worldEyeZ;
@@ -295,25 +312,66 @@ if (op == 19 || op == 25) {
     cameraY = relativeX * ux_f32(5480008) + relativeY * ux_f32(5480012) + relativeZ * ux_f32(5480016);
     cameraZ = relativeX * ux_f32(5480020) + relativeY * ux_f32(5480024) + relativeZ * ux_f32(5480028);
   }
-  if (cameraZ < sceneNear) { return 0 - 1; }
+  if (cameraZ < sceneNear) {
+    if (op == 25) { vertexState = ux_u8_put(5499900 + a, 3); }
+    return 0 - 1;
+  }
   let vertexAt = 5499912 + 12 * a;
   vertexState = ux_f32_put(vertexAt, f64_floor_i64(width / 2.0 + sceneFocal * cameraX / (cameraZ * 1.0) + 0.5) * 1.0);
   vertexState = ux_f32_put(vertexAt + 4, f64_floor_i64(height / 2.0 - sceneFocal * cameraY / (cameraZ * 1.0) + 0.5) * 1.0);
   vertexState = ux_f32_put(vertexAt + 8, 1.0 / cameraZ);
-  vertexState = ux_u8_put(5499900 + a, 1);
+  vertexState = ux_u8_put(5499900 + a, 1 + (op == 25));
   return 0;
 }
-if (op == 20) {
+if (op == 20 || op == 30) {
   if (sceneFocal == 0 || b < 0 || b > 16777215 ||
       ux_u8(5499900) == 0 || ux_u8(5499901) == 0 || ux_u8(5499902) == 0) { return 0 - 1; }
+  let worldFace = ux_u8(5499900) >= 2 && ux_u8(5499901) >= 2 && ux_u8(5499902) >= 2;
+  if (op == 20 && (ux_u8(5499900) == 3 || ux_u8(5499901) == 3 || ux_u8(5499902) == 3)) { return 0 - 1; }
+  if (op == 30 && (shadowCell == 0 || !worldFace)) { return 0 - 1; }
   let x0 = ux_f32(5499912);
   let y0 = ux_f32(5499916);
   let x1 = ux_f32(5499924);
   let y1 = ux_f32(5499928);
   let x2 = ux_f32(5499936);
   let y2 = ux_f32(5499940);
+  let targetWidth = width;
+  let targetHeight = height;
+  if (op == 30) {
+    // Orthographic footprint along the sun ray on the XZ plane.
+    x0 = 48.0 + (ux_f32(5480032) - ux_f32(5480036) * ux_f32(5480104)) / shadowCell;
+    y0 = 48.0 + (ux_f32(5480040) - ux_f32(5480036) * ux_f32(5480108)) / shadowCell;
+    x1 = 48.0 + (ux_f32(5480044) - ux_f32(5480048) * ux_f32(5480104)) / shadowCell;
+    y1 = 48.0 + (ux_f32(5480052) - ux_f32(5480048) * ux_f32(5480108)) / shadowCell;
+    x2 = 48.0 + (ux_f32(5480056) - ux_f32(5480060) * ux_f32(5480104)) / shadowCell;
+    y2 = 48.0 + (ux_f32(5480064) - ux_f32(5480060) * ux_f32(5480108)) / shadowCell;
+    targetWidth = 96;
+    targetHeight = 96;
+  }
   let triangleArea = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
   if (triangleArea == 0.0) { return 0; }
+  let faceLight = sceneLight;
+  let textured = textureWidth > 0 && textureOffset + 4 * textureWidth * textureHeight <= assetReadBytes;
+  if (op == 20 && sunEnabled == 1 && worldFace) {
+    let edgeX = ux_f32(5480044) - ux_f32(5480032);
+    let edgeY = ux_f32(5480048) - ux_f32(5480036);
+    let edgeZ = ux_f32(5480052) - ux_f32(5480040);
+    let acrossX = ux_f32(5480056) - ux_f32(5480032);
+    let acrossY = ux_f32(5480060) - ux_f32(5480036);
+    let acrossZ = ux_f32(5480064) - ux_f32(5480040);
+    let normalX = edgeY * acrossZ - edgeZ * acrossY;
+    let normalY = edgeZ * acrossX - edgeX * acrossZ;
+    let normalZ = edgeX * acrossY - edgeY * acrossX;
+    let normalLength = f64_sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+    if (normalLength > 0.0) {
+      let illumination = (normalX * ux_f32(5480068) + normalY * ux_f32(5480072) + normalZ * ux_f32(5480076)) / normalLength;
+      if (illumination < 0.0) { illumination = 0.0 - illumination; }
+      let tone = sunAmbient;
+      if (illumination >= 0.28) { tone = sunAmbient + (255 - sunAmbient) / 2; }
+      if (illumination >= 0.70) { tone = 255; }
+      faceLight = (faceLight * tone + 127) / 255;
+    }
+  }
   let minX = x0;
   let minY = y0;
   let maxX = x0;
@@ -328,8 +386,8 @@ if (op == 20) {
   if (y2 > maxY) { maxY = y2; }
   if (minX < 0.0) { minX = 0.0; }
   if (minY < 0.0) { minY = 0.0; }
-  if (maxX >= width) { maxX = width - 1.0; }
-  if (maxY >= height) { maxY = height - 1.0; }
+  if (maxX >= targetWidth) { maxX = targetWidth - 1.0; }
+  if (maxY >= targetHeight) { maxY = targetHeight - 1.0; }
   let triangleY = f64_floor_i64(minY);
   while (triangleY <= maxY) {
     let triangleX = f64_floor_i64(minX);
@@ -337,12 +395,44 @@ if (op == 20) {
       let weight0 = ((x2 - x1) * (triangleY + 0.5 - y1) - (y2 - y1) * (triangleX + 0.5 - x1)) / triangleArea;
       let weight1 = ((x0 - x2) * (triangleY + 0.5 - y2) - (y0 - y2) * (triangleX + 0.5 - x2)) / triangleArea;
       let weight2 = 1.0 - weight0 - weight1;
-      if (weight0 >= 0.0 && weight1 >= 0.0 && weight2 >= 0.0) {
+      if (op == 30 && weight0 >= 0.0 && weight1 >= 0.0 && weight2 >= 0.0) {
+        let heightAt = 5440000 + 4 * (triangleY * 96 + triangleX);
+        let blockerY = weight0 * ux_f32(5480036) + weight1 * ux_f32(5480048) + weight2 * ux_f32(5480060);
+        if (blockerY > ux_f32(heightAt)) {
+          let shadowWrite = ux_f32_put(heightAt, blockerY);
+        }
+      }
+      if (op == 20 && weight0 >= 0.0 && weight1 >= 0.0 && weight2 >= 0.0) {
         let triangleInvZ = weight0 * ux_f32(5499920) + weight1 * ux_f32(5499932) + weight2 * ux_f32(5499944);
         let triangleIndex = triangleY * width + triangleX;
-        let triangleDepthAt = 5500000 + 4 * triangleIndex;
-        if (triangleInvZ > ux_f32(triangleDepthAt)) {
+        let triangleDepthAt = 2097152 + 4 * triangleIndex;
+        let materialColor = b;
+        let texelAlpha = 255;
+        if (textured && triangleInvZ > ux_f32(triangleDepthAt)) {
+          let sampleU = (weight0 * ux_f32(5480080) * ux_f32(5499920)
+            + weight1 * ux_f32(5480088) * ux_f32(5499932)
+            + weight2 * ux_f32(5480096) * ux_f32(5499944)) / triangleInvZ;
+          let sampleV = (weight0 * ux_f32(5480084) * ux_f32(5499920)
+            + weight1 * ux_f32(5480092) * ux_f32(5499932)
+            + weight2 * ux_f32(5480100) * ux_f32(5499944)) / triangleInvZ;
+          let texelX = f64_floor_i64(sampleU * textureWidth);
+          let texelY = f64_floor_i64(sampleV * textureHeight);
+          if (texelX >= textureWidth) { texelX = textureWidth - 1; }
+          if (texelY >= textureHeight) { texelY = textureHeight - 1; }
+          let texelAt = 4194304 + textureOffset + 4 * (texelY * textureWidth + texelX);
+          texelAlpha = ux_u8(texelAt + 3);
+          materialColor = ux_u8(texelAt) + 256 * ux_u8(texelAt + 1) + 65536 * ux_u8(texelAt + 2);
+          if (textureWash == 1) {
+            let wash = 128 + ux_u8(texelAt) / 2;
+            let washR = (b % 256 * wash + 127) / 255;
+            let washG = (b / 256 % 256 * wash + 127) / 255;
+            let washB = (b / 65536 * wash + 127) / 255;
+            materialColor = washR + washG * 256 + washB * 65536;
+          }
+        }
+        if (texelAlpha >= 128 && triangleInvZ > ux_f32(triangleDepthAt)) {
           let triangleInk = ux_f32_put(triangleDepthAt, triangleInvZ);
+          if (contourReady == 1) { triangleInk = ux_u8_put(5600000 + triangleIndex, a % 256); }
           triangleIndex = triangleIndex * 4;
           let triangleFog = 0.0;
           if (sceneFogEnd > sceneFogStart) {
@@ -350,11 +440,26 @@ if (op == 20) {
             if (triangleFog < 0.0) { triangleFog = 0.0; }
             if (triangleFog > 1.0) { triangleFog = 1.0; }
           }
-          let materialColor = b;
           let hazeColor = sceneFogColor;
+          let resolvedLight = faceLight;
+          if (shadowCell > 0 && worldFace) {
+            let p0 = weight0 * ux_f32(5499920) / triangleInvZ;
+            let p1 = weight1 * ux_f32(5499932) / triangleInvZ;
+            let p2 = 1.0 - p0 - p1;
+            let wx = p0 * ux_f32(5480032) + p1 * ux_f32(5480044) + p2 * ux_f32(5480056);
+            let wy = p0 * ux_f32(5480036) + p1 * ux_f32(5480048) + p2 * ux_f32(5480060);
+            let wz = p0 * ux_f32(5480040) + p1 * ux_f32(5480052) + p2 * ux_f32(5480064);
+            let cellX = f64_floor_i64(48.0 + (wx - wy * ux_f32(5480104)) / shadowCell);
+            let cellZ = f64_floor_i64(48.0 + (wz - wy * ux_f32(5480108)) / shadowCell);
+            if (cellX >= 0 && cellX < 96 && cellZ >= 0 && cellZ < 96) {
+              if (ux_f32(5440000 + 4 * (cellZ * 96 + cellX)) > wy + shadowCell * 0.75) {
+                resolvedLight = (resolvedLight * shadowDark + 127) / 255;
+              }
+            }
+          }
           let triangleChannel = 0;
           while (triangleChannel < 3) {
-            let lit = (materialColor % 256 * sceneLight + 127) / 255;
+            let lit = (materialColor % 256 * resolvedLight + 127) / 255;
             let haze = hazeColor % 256;
             triangleInk = ux_u8_put(triangleIndex + triangleChannel,
               f64_floor_i64(lit + 0.5 + (haze - lit) * triangleFog));
@@ -419,6 +524,161 @@ if (op == 23 || op == 24) {
   basisWrite = ux_f32_put(5480024, axisY / length);
   basisWrite = ux_f32_put(5480028, axisZ / length);
   worldBasisReady = 1;
+  return 0;
+}
+// Two-sided toon sun. A value of 256 for a disables it; otherwise a is ambient light.
+if (op == 26) {
+  if (a < 0 || a > 256 || b < 0 || b >= 281474976710656) { return 0 - 1; }
+  if (a == 256) { sunEnabled = 0; return 0; }
+  let sunX = b % 65536 - 32768;
+  let sunY = b / 65536 % 65536 - 32768;
+  let sunZ = b / 4294967296 - 32768;
+  let sunLength = f64_sqrt((sunX * sunX + sunY * sunY + sunZ * sunZ) * 1.0);
+  if (sunLength == 0.0) { return 0 - 1; }
+  let sunWrite = ux_f32_put(5480068, sunX / (sunLength * 1.0));
+  sunWrite = ux_f32_put(5480072, sunY / (sunLength * 1.0));
+  sunWrite = ux_f32_put(5480076, sunZ / (sunLength * 1.0));
+  sunAmbient = a;
+  sunEnabled = 1;
+  return 0;
+}
+// Bind an RGBA8 texture inside the last resource read. Zero dimensions unbind it.
+if (op == 27) {
+  if (a < 0 || a > 8388607 || b < 0) { return 0 - 1; }
+  if (a == 0) { textureWidth = 0; return 0; }
+  let columns = a % 2048;
+  let rows = a / 2048 % 2048;
+  if (columns < 1 || rows < 1 || b > assetReadBytes || 4 * columns * rows > assetReadBytes - b) { return 0 - 1; }
+  textureWidth = columns;
+  textureHeight = rows;
+  textureOffset = b;
+  textureWash = a / 4194304;
+  return 0;
+}
+// Per-vertex normalized UV, as two unsigned 16-bit values.
+if (op == 28) {
+  if (a < 0 || a > 2 || b < 0 || b > 4294967295) { return 0 - 1; }
+  let uv = ux_f32_put(5480080 + 8 * a, (b % 65536) / 65535.0);
+  uv = ux_f32_put(5480084 + 8 * a, (b / 65536) / 65535.0);
+  return 0;
+}
+// Begin a shadow map over a 96 by 96 world grid. Set a to 0 to disable it.
+if (op == 29) {
+  if (a < 0 || a > 1024 || b < 0 || b > 255) { return 0 - 1; }
+  if (a == 0) { shadowCell = 0; return 0; }
+  let sunUp = ux_f32(5480072);
+  if (sunEnabled == 0 || sunUp < 0.05) { return 0 - 1; }
+  let shadowSetup = ux_f32_put(5480104, ux_f32(5480068) / sunUp);
+  shadowSetup = ux_f32_put(5480108, ux_f32(5480076) / sunUp);
+  shadowCell = a;
+  shadowDark = b;
+  let cell = 0;
+  while (cell < 9216) {
+    shadowSetup = ux_f32_put(5440000 + cell * 4, 0.0 - 65536.0);
+    cell = cell + 1;
+  }
+  return 0;
+}
+// Stretch an RGBA backdrop over the framebuffer without writing scene depth.
+if (op == 31) {
+  if (a < 1 || a > 4194303 || b < 0 || pixels == 0) { return 0 - 1; }
+  let sourceWidth = a % 2048;
+  let sourceHeight = a / 2048;
+  if (sourceWidth == 0 || sourceHeight == 0 || b > assetReadBytes ||
+      4 * sourceWidth * sourceHeight > assetReadBytes - b) { return 0 - 1; }
+  let destY = 0;
+  while (destY < height) {
+    let sourceRow = 4194304 + b + 4 * (destY * sourceHeight / height) * sourceWidth;
+    let destX = 0;
+    while (destX < width) {
+      let texel = sourceRow + 4 * (destX * sourceWidth / width);
+      let dest = 4 * (destY * width + destX);
+      let rgba = ux_u8_put(dest, ux_u8(texel));
+      rgba = ux_u8_put(dest + 1, ux_u8(texel + 1));
+      rgba = ux_u8_put(dest + 2, ux_u8(texel + 2));
+      rgba = ux_u8_put(dest + 3, 255);
+      destX = destX + 1;
+    }
+    destY = destY + 1;
+  }
+  return 0;
+}
+// Load a rail of signed 32-bit little-endian records: distance, eye xyz, forward xyz.
+if (op == 32) {
+  if (a < 2 || a > 32 || b < 0 || b > assetReadBytes || a * 28 > assetReadBytes - b) { return 0 - 1; }
+  railRows = 0;
+  let railCell = 0;
+  let previousMark = 0 - 1;
+  while (railCell < 7 * a) {
+    let sourceAt = 4194304 + b + railCell * 4;
+    let entry = ux_u8(sourceAt) + 256 * ux_u8(sourceAt + 1)
+      + 65536 * ux_u8(sourceAt + 2) + 16777216 * ux_u8(sourceAt + 3);
+    if (entry >= 2147483648) { entry = entry - 4294967296; }
+    if (entry < 0 - 10000000 || entry > 10000000) { return 0 - 1; }
+    if (railCell % 7 == 0) {
+      if (entry <= previousMark) { return 0 - 1; }
+      previousMark = entry;
+    }
+    let railWrite = ux_f32_put(5480200 + railCell * 4, entry * 1.0);
+    railCell = railCell + 1;
+  }
+  railRows = a;
+  return 0;
+}
+// Evaluate one channel in thousandths of the track units, clamped to the endpoints.
+if (op == 33) {
+  if (railRows < 2 || b < 1 || b > 6) { return 0 - 1; }
+  let railDistance = a;
+  let first = f64_floor_i64(ux_f32(5480200));
+  let last = f64_floor_i64(ux_f32(5480200 + 28 * (railRows - 1)));
+  if (railDistance < first) { railDistance = first; }
+  if (railDistance > last) { railDistance = last; }
+  let edge = 1;
+  while (edge < railRows - 1 && ux_f32(5480200 + 28 * edge) <= railDistance) {
+    edge = edge + 1;
+  }
+  let end = 5480200 + edge * 28;
+  let start = end - 28;
+  let from = f64_floor_i64(ux_f32(start));
+  let span = f64_floor_i64(ux_f32(end)) - from;
+  let delta = railDistance - from;
+  let low = f64_floor_i64(ux_f32(start + b * 4));
+  let high = f64_floor_i64(ux_f32(end + b * 4));
+  return 1000 * (low * (span - delta) + high * delta) / span;
+}
+// Start a contour pass with a=0, then composite inward ink of radius 1 or 2.
+if (op == 34) {
+  if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b > 16777215) { return 0 - 1; }
+  if (a == 0) {
+    let sample = 0;
+    while (sample < pixels) {
+      let cleared = ux_u8_put(5600000 + sample, 0);
+      sample = sample + 1;
+    }
+    contourReady = 1;
+    return 0;
+  }
+  if (contourReady == 0) { return 0 - 1; }
+  let inkRed = b % 256;
+  let inkGreen = b / 256 % 256;
+  let inkBlue = b / 65536;
+  let contourY = a;
+  while (contourY < height - a) {
+    let contourX = a;
+    while (contourX < width - a) {
+      let idx = contourY * width + contourX;
+      let label = 5600000 + idx;
+      let kind = ux_u8(label);
+      if (kind > 0 && (kind > ux_u8(label - a) || kind > ux_u8(label + a) ||
+          kind > ux_u8(label - a * width) || kind > ux_u8(label + a * width))) {
+        let paint = ux_u8_put(idx * 4, inkRed);
+        paint = ux_u8_put(idx * 4 + 1, inkGreen);
+        paint = ux_u8_put(idx * 4 + 2, inkBlue);
+      }
+      contourX = contourX + 1;
+    }
+    contourY = contourY + 1;
+  }
   return 0;
 }
 return 0 - 1;

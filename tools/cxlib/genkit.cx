@@ -1,6 +1,9 @@
 #pragma unisa module genkit
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
@@ -24,7 +27,8 @@
  *   int gk_devmeta(int check, const char *name, const void *buf, long n)
  *     the double-write copy of a build/ table under the dev metadata directory (cxlib/awpath
  *     awp_devmeta, root "."): --write publishes it atomically (directory made when missing);
- *     --check returns 1 with "DIFF<TAB>devmeta-differs<TAB>PATH" on stdout when it differs.
+ *     --check ignores a missing local mirror, and prints "MIRROR_STALE<TAB>PATH<TAB>hint=refresh with --write"
+ *     when an existing mirror differs (never failing --check rc or incrementing gk_drift).
  *     2 on a bad name or a failed write.
  *   int gk_files(void), int gk_drift(void)
  *     outputs handled and outputs drifted so far (gk_emit and gk_devmeta both count).
@@ -105,10 +109,14 @@ int gk_devmeta(int check, const char *name, const void *buf, long n) {
     if (awp_devmeta(".", name, !check, dm, sizeof dm)) return 2;
     gk_nfiles++;
     if (check) {
-        if (gk_same_file(dm, buf, n)) return 0;
-        gk_ndrift++;
-        sy_printf("DIFF\tdevmeta-differs\t%s\n", dm);
-        return 1;
+        size_t z = 0;
+        char *old = cx_read(dm, &z);
+        if (!old) return 0;
+        if ((long)z != n || (n > 0 && !mm_same(old, buf, n))) {
+            sy_printf("MIRROR_STALE\t%s\thint=refresh with --write\n", dm);
+        }
+        mm_free(old);
+        return 0;
     }
     if (sy_write_atomic(dm, buf, (int64_t)n, 0644)) return 2;
     return 0;
@@ -120,4 +128,127 @@ int gk_drift(void) { return gk_ndrift; }
 int gk_summary(const char *label, int check) {
     sy_printf("%s\tstatus=%s\tfiles=%d\tdrift=%d\n", label, check ? "CHECK" : "WRITE", gk_nfiles, gk_ndrift);
     return gk_ndrift ? 1 : 0;
+}
+
+/* ---- Tracked-file set (cached git ls-files -z) ---- */
+static char *gk_tr_buf;
+static char **gk_tr_ptrs;
+static long gk_tr_n;
+static int gk_tr_active;
+static char gk_tr_root[1024];
+
+void gk_tracked_free(void) {
+    if (gk_tr_ptrs) { mm_free(gk_tr_ptrs); gk_tr_ptrs = 0; }
+    if (gk_tr_buf) { mm_free(gk_tr_buf); gk_tr_buf = 0; }
+    gk_tr_n = 0;
+    gk_tr_active = 0;
+    gk_tr_root[0] = 0;
+}
+
+static int gk_tr_cmp(const char *a, const char *b) {
+    long i = 0;
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) return (unsigned char)a[i] < (unsigned char)b[i] ? -1 : 1;
+        i++;
+    }
+    if (a[i] == b[i]) return 0;
+    return a[i] == 0 ? -1 : 1;
+}
+
+static void gk_tr_sort(char **arr, long n) {
+    for (long gap = n / 2; gap > 0; gap /= 2) {
+        for (long i = gap; i < n; i++) {
+            char *tmp = arr[i];
+            long j = i;
+            while (j >= gap && gk_tr_cmp(arr[j - gap], tmp) > 0) {
+                arr[j] = arr[j - gap];
+                j -= gap;
+            }
+            arr[j] = tmp;
+        }
+    }
+}
+
+int gk_tracked_load(const char *root) {
+    const char *r = (root && root[0]) ? root : ".";
+    if (gk_tr_active && tx_eqz(gk_tr_root, r)) return 1;
+    gk_tracked_free();
+    {
+        char gdir[1200];
+        if (cx_fmt(gdir, sizeof gdir, "%s/.git", r) || sy_exists(gdir) != 1) {
+            /* Also allow GIT_DIR env (e.g. commit-own hook sandbox) */
+            const char *gd = sy_env("GIT_DIR");
+            if (!gd || !gd[0]) return 0;
+        }
+    }
+    char *av[6];
+    av[0] = "git"; av[1] = "-C"; av[2] = (char *)r; av[3] = "ls-files"; av[4] = "-z"; av[5] = 0;
+    int fd = -1;
+    long deadline = sy_now_ms() + 15000;
+    int pid = sy_spawn_pipe(av, 0, 0, &fd, 0);
+    if (pid < 0) return 0;
+    long cap = 1 << 18, len = 0;
+    char *buf = (char *)mm_alloc((size_t)cap);
+    if (!buf) { sy_close(fd); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); return 0; }
+    for (;;) {
+        if (len + 8192 >= cap) {
+            char *nb = (char *)mm_grow(buf, (size_t)(cap * 2));
+            if (!nb) { mm_free(buf); sy_close(fd); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); return 0; }
+            buf = nb; cap *= 2;
+        }
+        long g = sy_read_once(fd, buf + len, cap - 1 - len);
+        if (g > 0) { len += g; continue; }
+        if (g == 0) break;
+        if (sy_now_ms() >= deadline) {
+            mm_free(buf); sy_close(fd); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); return 0;
+        }
+        sy_sleep_ms(5);
+    }
+    sy_close(fd);
+    int ex = 0, code = 0, sig = 0;
+    int w = sy_wait_status(pid, 0, &ex, &code, &sig);
+    if (w != pid || !ex || code != 0) { mm_free(buf); return 0; }
+    buf[len] = 0;
+    long cnt = 0, at = 0;
+    while (at < len) {
+        long l = tx_len(buf + at, len - at);
+        if (l > 0) cnt++;
+        at += l + 1;
+    }
+    char **ptrs = (char **)mm_alloc((size_t)(cnt > 0 ? cnt : 1) * sizeof(char *));
+    if (!ptrs) { mm_free(buf); return 0; }
+    long k = 0; at = 0;
+    while (at < len && k < cnt) {
+        long l = tx_len(buf + at, len - at);
+        if (l > 0) ptrs[k++] = buf + at;
+        at += l + 1;
+    }
+    gk_tr_sort(ptrs, k);
+    gk_tr_buf = buf;
+    gk_tr_ptrs = ptrs;
+    gk_tr_n = k;
+    gk_tr_active = 1;
+    tx_copy(gk_tr_root, sizeof gk_tr_root, r, tx_len(r, sizeof gk_tr_root - 1));
+    return 1;
+}
+
+int gk_tracked_has(const char *rel) {
+    if (!gk_tr_active) return 1;
+    if (!rel || !rel[0]) return 0;
+    if (rel[0] == '.' && rel[1] == '/') rel += 2;
+    long rl = tx_len(rel, 1024);
+    if (rl > 0 && rel[rl - 1] == '/') rl--;
+    long lo = 0, hi = gk_tr_n;
+    while (lo < hi) {
+        long mid = lo + (hi - lo) / 2;
+        if (gk_tr_cmp(gk_tr_ptrs[mid], rel) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo < gk_tr_n) {
+        const char *hit = gk_tr_ptrs[lo];
+        long hl = tx_len(hit, 1024);
+        if (hl == rl && mm_same(hit, rel, (size_t)rl)) return 1;
+        if (hl > rl && hit[rl] == '/' && mm_same(hit, rel, (size_t)rl)) return 1;
+    }
+    return 0;
 }

@@ -1,0 +1,86 @@
+/* tools/check-register-next.cx -- fixed-fixture checks for REGISTER_NEXT derive hint in tools/register.cx.
+ *   sh ./unisacc.com tools/check-register-next.cx
+ * Copies tests/batches.tsv and tests/coverage.tsv into a private temp dir (UNISACC_TABLES), runs
+ * tools/register.cx on fixture cases (never touching real tables), and verifies 3 contracts:
+ *   1. register-ok-prints-next     successful registration prints REGISTER_NEXT derive --write --only links,batch-domains
+ *   2. register-rollback-no-next   failed batch rollback prints ROLLED_BACK and omits REGISTER_NEXT
+ *   3. register-refuse-no-next     preflight refusal (rc0: prefix) exits 2 and omits REGISTER_NEXT
+ * Last line: CHECK_REGISTER_NEXT<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CRN_PW 4400
+#define CRN_OUT 16384
+
+static void crn_abort(const char *why) {
+    fprintf(stderr, "check-register-next: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void crn_copy(const char *src, const char *dst) {
+    size_t sz = 0;
+    char *b = cx_read(src, &sz);
+    if (!b) crn_abort("copy-read");
+    if (cx_write(dst, b, sz)) crn_abort("copy-write");
+    free(b);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CRN_OUT];
+    char work[CRN_PW], tdir[CRN_PW], bin[CRN_PW], p[CRN_PW], cmd[8192];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (cx_fmt(work, sizeof work, "%s/check-register-next-%d", base_td, (int)getpid())) crn_abort("work");
+    if (mkdir(work, 0700) != 0 && errno != EEXIST) crn_abort("mkdir-work");
+    if (cx_fmt(tdir, sizeof tdir, "%s/tables", work)) crn_abort("tdir");
+    if (mkdir(tdir, 0700) != 0 && errno != EEXIST) crn_abort("mkdir-tdir");
+    if (cx_fmt(bin, sizeof bin, "%s/register", work)) crn_abort("bin");
+
+    if (cx_fmt(p, sizeof p, "%s/batches.tsv", tdir)) crn_abort("bpath");
+    crn_copy("tests/batches.tsv", p);
+    if (cx_fmt(p, sizeof p, "%s/coverage.tsv", tdir)) crn_abort("cpath");
+    crn_copy("tests/coverage.tsv", p);
+
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/register.cx", "-o", bin, 0}; /* lint:allow R1-product builds register with checkout product; UNISACC overrides */
+        if (ck_run(av, out, sizeof out) != 0) crn_abort("build-register");
+    }
+
+    /* 1. Successful registration prints REGISTER_NEXT */
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_TABLES='%s' '%s' reg-next-ok-fixture tools/register-fixture.cx REGISTER_FIXTURE_OK 'fixture coverage' 'tools/register-fixture.cx'", tdir, bin)) crn_abort("cmd1");
+    {
+        int rc = ckk_sh("check-register-next", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRN_OUT, "REGISTER\tid=reg-next-ok-fixture\tstatus=REGISTERED") && ckk_has(out, CRN_OUT, "REGISTER_NEXT\tderive --write --only links,batch-domains"),
+            "register-ok-prints-next: rc=0, status=REGISTERED, REGISTER_NEXT printed");
+    }
+
+    /* 2. Failed batch rollback omits REGISTER_NEXT */
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_TABLES='%s' '%s' reg-next-fail-fixture tools/register-fixture.cx WRONG_MARKER_NEVER_PRINTED 'fixture coverage' 'tools/register-fixture.cx'", tdir, bin)) crn_abort("cmd2");
+    {
+        int rc = ckk_sh("check-register-next", cmd, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CRN_OUT, "REGISTER\tid=reg-next-fail-fixture\tstatus=ROLLED_BACK") && !ckk_has(out, CRN_OUT, "REGISTER_NEXT"),
+            "register-rollback-no-next: rc=1, ROLLED_BACK, REGISTER_NEXT omitted");
+    }
+
+    /* 3. Preflight refusal omits REGISTER_NEXT */
+    if (cx_fmt(cmd, sizeof cmd, "UNISACC_TABLES='%s' '%s' reg-next-refuse-fixture tools/register-fixture.cx rc0:BAD 'fixture coverage' 'tools/register-fixture.cx'", tdir, bin)) crn_abort("cmd3");
+    {
+        int rc = ckk_sh("check-register-next", cmd, out, sizeof out);
+        ck(rc == 2 && !ckk_has(out, CRN_OUT, "REGISTER_NEXT"),
+            "register-refuse-no-next: rc=2 preflight refusal omits REGISTER_NEXT");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_REGISTER_NEXT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

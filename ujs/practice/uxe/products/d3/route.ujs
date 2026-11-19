@@ -6,21 +6,15 @@ persist let walkLast = 0;
 persist let walkPending = 0;
 persist let walkDistance = 0;
 persist let walkYaw = 0;
+persist let walkPitch = 0;
 persist let walkTick = 0;
+persist let walkHadPointer = 0;
+persist let walkPointerX = 0;
+persist let walkPointerY = 0;
 
 if (walkStarted == 0) {
   if (uxe_dispatch(4, 0, 224) != 224) { return 0 - 1; }
-  let walkCell = 0;
-  while (walkCell < 56) {
-    let walkAt = 4 * walkCell;
-    let walkValue = uxe_dispatch(8, walkAt, 0)
-      + 256 * uxe_dispatch(8, walkAt + 1, 0)
-      + 65536 * uxe_dispatch(8, walkAt + 2, 0)
-      + 16777216 * uxe_dispatch(8, walkAt + 3, 0);
-    if (walkValue >= 2147483648) { walkValue = walkValue - 4294967296; }
-    let dataWrite = ux_f32_put(1024 + walkAt, walkValue * 1.0);
-    walkCell = walkCell + 1;
-  }
+  if (uxe_dispatch(32, 8, 0) != 0) { return 0 - 1; }
   walkStarted = 1;
   walkLast = now;
 }
@@ -41,29 +35,40 @@ if (walkInput / 16 % 2 == 1) { walkForward = 1; }
 if (walkInput / 32 % 2 == 1) { walkBack = 1; }
 if (walkInput / 64 % 2 == 1) { walkLeft = 1; }
 if (walkInput / 128 % 2 == 1) { walkRight = 1; }
+// Above the key bits: pointer held, normalized x/y, touch flag, signed wheel notches.
+let walkPointer = walkInput / 4294967296 % 2;
+let wheelNotches = walkInput / 72057594037927936 % 128;
+if (wheelNotches >= 64) { wheelNotches = wheelNotches - 128; }
+if (walkPointer == 1) {
+  let pointerX = walkInput / 8589934592 % 2048;
+  let pointerY = walkInput / 17592186044416 % 2048;
+  if (walkHadPointer == 1) {
+    walkYaw = walkYaw + (pointerX - walkPointerX) * 25 / 4;
+    walkPitch = walkPitch - (pointerY - walkPointerY) * 45 / 16;
+  }
+  walkPointerX = pointerX;
+  walkPointerY = pointerY;
+  if (walkInput / 36028797018963968 % 2 == 1) { walkForward = 1; }
+}
+walkHadPointer = walkPointer;
+walkDistance = walkDistance - 540 * wheelNotches;
 walkDistance = walkDistance + 180 * walkSteps * (walkForward - walkBack);
 if (walkDistance < 0) { walkDistance = 0; }
 if (walkDistance > 67000) { walkDistance = 67000; }
 walkYaw = walkYaw + 28 * walkSteps * (walkRight - walkLeft);
 if (walkYaw < 0 - 1180) { walkYaw = 0 - 1180; }
 if (walkYaw > 1180) { walkYaw = 1180; }
+if (walkPitch < 0 - 500) { walkPitch = 0 - 500; }
+if (walkPitch > 600) { walkPitch = 600; }
 walkTick = walkTick + walkSteps;
 
-let routeEnd = 1;
-while (routeEnd < 7 && ux_f32(1024 + 28 * routeEnd) <= walkDistance) {
-  routeEnd = routeEnd + 1;
-}
-let walkEndAt = 1024 + 28 * routeEnd;
-let walkBeginAt = walkEndAt - 28;
-let walkBlend = (walkDistance - ux_f32(walkBeginAt)) / (ux_f32(walkEndAt) - ux_f32(walkBeginAt));
 let poseField = 1;
 while (poseField < 7) {
-  let fieldByte = 4 * poseField;
-  let poseStart = ux_f32(walkBeginAt + fieldByte);
-  let poseValue = poseStart + (ux_f32(walkEndAt + fieldByte) - poseStart) * walkBlend;
-  let poseWrite = ux_f32_put(fieldByte, poseValue);
+  let poseValue = uxe_dispatch(33, walkDistance, poseField);
+  let poseWrite = ux_f32_put(4 * poseField, poseValue / 1000.0);
   poseField = poseField + 1;
 }
 let walkPacket = ux_f32_put(0, walkDistance * 1.0);
 walkPacket = ux_f32_put(28, walkYaw * 1.0);
+walkPacket = ux_f32_put(32, walkPitch * 1.0);
 return walkTick;

@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D3 bridge probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function readBytes(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name, false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return Uint8Array.from(request.responseText, ch => ch.charCodeAt(0) & 255);
+}
+
+const result = document.querySelector("#ux-link-result");
+const canvas = document.querySelector("canvas");
+try {
+  const host = createBrowserHost(canvas, ["KeyW", "KeyS", "KeyA", "KeyD"], readBytes("route.bin"));
+  const linked = linkUxe(new WebAssembly.Module(readBytes("base.wasm")),
+    new WebAssembly.Module(readBytes("product.wasm")), host);
+  host.attachMemory(linked.base.memory);
+  function pigment(r, g, b, red, green, blue) {
+    const fog = (b - blue) / (216 - blue);
+    return fog >= 0 && fog < 0.5 &&
+      Math.abs(r - (red + (111 - red) * fog)) < 1.15 &&
+      Math.abs(g - (green + (165 - green) * fog)) < 1.15;
+  }
+  function scenePixels() {
+    const bytes = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let stone = 0, ridge = 0, meadow = 0, house = 0, leaf = 0, grass = 0, cloud = 0, shade = 0, rail = 0, vines = 0, brush = 0;
+    const stoneLightness = new Set();
+    const meadowLightness = new Set();
+    let litLeaf = 0, oldTrunk = 0, ink = 0, vineLight = 0, warm = 0, rocks = 0;
+    let blueDeck = 0, door = 0, beam = 0, frame = 0;
+    for (let i = 0; i < bytes.length; i += 4) {
+      const [r, g, b] = bytes.subarray(i, i + 3);
+      if (r >= 170 && Math.abs(g - r * 214 / 246) < 1.2 && Math.abs(b - r * 168 / 246) < 1.2) {
+        stone++;
+        stoneLightness.add(r);
+      }
+      if (r >= 99 && r <= 148 && Math.abs(g - r * 161 / 148) < 1.2 && Math.abs(b - r * 171 / 148) < 1.2) {
+        stone++;
+        blueDeck++;
+      }
+      if (r >= 106 && r <= 155 && Math.abs(g - (168 + (r - 106) * 26 / 49)) < 2 &&
+          Math.abs(b - (79 - (r - 106) * 20 / 49)) < 2) {
+        meadow++;
+        meadowLightness.add(r);
+      }
+      if (r >= 74 && r <= 108 && Math.abs(g - (168 * 178 / 255 + (r - 106 * 178 / 255) * 26 / 49)) < 2 &&
+          Math.abs(b - (79 * 178 / 255 - (r - 106 * 178 / 255) * 20 / 49)) < 2) shade++;
+      if (b === 52 && ((r === 131 && g === 155) || (r === 168 && g === 197))) brush++;
+      if (g > r + 34 && b < g + 45 && b > g + 12) ridge++;
+      if (r > 190 && r > g + 45 && g > b + 45) house++;
+      if (r === 59 && g === 120 && b === 67) leaf++;
+      if ((r === 94 && g === 131 && b === 63) || (r === 131 && g === 161 && b === 72)) litLeaf++;
+      if (pigment(r, g, b, 112, 71, 37)) door++;
+      if (pigment(r, g, b, 83, 53, 35)) beam++;
+      if (pigment(r, g, b, 184, 147, 95)) frame++;
+      if (r === 99 && g === 70 && b === 47) oldTrunk++;
+      if (r === 22 && g === 25 && b === 22) ink++;
+      if (r === 46 && g === 88 && b === 51) grass++;
+      if (r === 27 && g === 33 && b === 37) rail++;
+      if (r === 75 && g === 99 && b === 36) vines++;
+      if (r === 103 && g === 128 && b === 47) vineLight++;
+      if (r >= 88 && r <= 164 && Math.abs(g - r * 126 / 164) < 1.1 && Math.abs(b - r * 89 / 164) < 1.1) warm++;
+      if ((r === 98 && g === 126 && b === 141) || (r === 136 && g === 157 && b === 166) ||
+          (r === 68 && g === 88 && b === 98) || (r === 95 && g === 110 && b === 116)) rocks++;
+      if (i < canvas.width * Math.floor(canvas.height * 55 / 240) * 4 && r >= 185 && b > r && b < r + 35) cloud++;
+    }
+    return { stone, ridge, meadow, house, leaf, grass, cloud, grout: stoneLightness.size,
+      shade, rail, vines, brush, greens: meadowLightness.size, litLeaf, oldTrunk, ink, vineLight, warm, rocks,
+      blueDeck, door, beam, frame, bytes };
+  }
+  linked.product.uxe_frame(0n);
+  const opening = scenePixels();
+  for (let step = 1n; step <= 3n; step++) linked.product.uxe_frame(step * 224000n);
+  const windy = scenePixels();
+  let movement = 0;
+  for (let i = 0; i < opening.bytes.length; i += 4) {
+    if (opening.bytes[i + 1] !== windy.bytes[i + 1]) movement++;
+  }
+  dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW", cancelable: true }));
+  for (let step = 4n; step <= 28n; step++) linked.product.uxe_frame(step * 224000n);
+  const pose = new Float32Array(linked.product.memory.buffer, 2097152, 1);
+  const later = scenePixels();
+  result.textContent = [opening.stone, later.stone, pose[0], opening.ridge, opening.meadow,
+    opening.house + later.house, opening.leaf, opening.grass, movement, opening.cloud, opening.grout,
+    opening.shade, opening.rail + later.rail, opening.vines + later.vines, canvas.width, canvas.height,
+    opening.brush, opening.greens, opening.litLeaf, opening.oldTrunk + later.oldTrunk, opening.ink + later.ink,
+    opening.vineLight + later.vineLight, opening.warm + later.warm, opening.rocks + later.rocks,
+    later.blueDeck, opening.door + later.door, opening.beam + later.beam, opening.frame + later.frame].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>

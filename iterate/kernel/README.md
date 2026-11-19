@@ -225,4 +225,4 @@ The kernel layout itself was not changed.
   ENC_X86_ALU2, ENC_X86_SETCC, ENC_X86_SHIFTEXT, ENC_ARM_ALU3 and
   ENC_ARM_INVCOND, each with its N* define.
 
-> 2026-10-02 note: the `MAXTKW=256` limit is no longer only theoretical — the current `lexcls` table has 257 field values (research/r20-c99-seed-a-audit.md), so `genmodel.c` rejects it. Re-test only; the seed constructor is in `seed/`.
+> 2026-10-02 note: the `MAXTKW=256` limit is no longer only theoretical — the current `lexcls` table has 257 field values (archive/pre080/research/r20-c99-seed-a-audit.md), so `genmodel.c` rejects it. Re-test only; the seed constructor is in `seed/`.

@@ -17,6 +17,6 @@ timeout -k 2s 55s sh ./unisacc.com tools/ctestsuite.cx -- "$ROOT" "$MATERIAL" /t
 
 每个被执行用例先核对源码与 `.c.expected` 的完整字节哈希。编译阶段单独记接受/拒绝，再使用产品默认 `-run` 执行已接受输入；期望退出0、合并输出与上游期望一致。UNKNOWN 不算拒绝或成功，WRONG 不算通过。不是六目标资格或 C99 完整符合性证明。
 
-首轮使用 c46-3 APE `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`（`unisacc 0.0.46`）：220例，编译接受216、期望符合216、错误输出0、拒绝4、未知0。拒绝为00213/00214/00219的 `this is not the start of an expression` 和00216的 `reject: unexpected character`，不移除这些例、不回填PASS。逐例见 `c46-3-first-run.tsv`，首错直方图见 `c46-3-first-errors.tsv`。
+首轮使用 c46-3 APE `884adfef1815e87750c86c7036d3074552a66ce18dfa855588ab279c2aa99fcf`（`unisacc 0.0.46`）：220例，编译接受216、期望符合216、错误输出0、拒绝4、未知0。拒绝为00213/00214/00219的 `this is not the start of an expression` 和00216的 `reject: unexpected character`，不移除这些例、不回填PASS。逐例见 `archive/pre080/tests/corpus-ctestsuite/c46-3-first-run.tsv`，首错直方图见 `archive/pre080/tests/corpus-ctestsuite/c46-3-first-errors.tsv`。
 
 `tools/check-ctestsuite.cx` 用独立夹具验证接受、源码篡改、期望篡改和真正输出不符分类；不是用清单行数或探针非空冒充语义验收。
