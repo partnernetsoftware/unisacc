@@ -110,6 +110,46 @@ int check_ux_abi(int mutate) {
     return passed != checks;
 }
 
+int check_ux_views(int mutate) {
+    UxProbe probe;
+    unsigned char *views = 0;
+    int64_t size = 0;
+    if (sy_read_file("ujs/practice/uxe/base/views.ujs", &views, &size, 2048)) return 1;
+    if (prepare_probe(&probe)) { mm_free(views); return 1; }
+    const char *cases[] = {
+        "let p = ux_typed_index(8, 2, 1, 2); let w = ux_u16_put(p, 65534); return ux_u16(p);",
+        "let p = ux_typed_index(8, 2, 1, 4); let w = ux_u32_put(p, 4294967294); return ux_u32(p);",
+        "let p = ux_typed_index(8, 2, 1, 4); let w = ux_i32_put(p, 0 - 2147483648); return ux_i32(p);",
+        "let p = ux_typed_index(8, 2, 1, 4); let w = ux_f32_put(p, 1.1); return ux_f32(p);",
+        "let p = ux_typed_index(8, 2, 1, 8); let w = ux_f64_put(p, 1.1); return ux_f64(p);",
+        "let p = ux_data_offset(9, 10, 1, 4); let w = ux_u32_put(p, 305419896); return ux_u8(p) * 256 + ux_u8(p + 3);",
+        "let p = ux_data_offset(9, 8, 0, 8); let w = ux_f64_put(p, 1.5); return ux_u16(p + 6);",
+        "return ux_typed_index(0, 2, 2, 4);",
+        "return ux_typed_index(6, 2, 0, 4);",
+        "return ux_typed_index(0, 9223372036854775807, 0, 8);",
+        "return ux_data_offset(9, 8, 1, 8);",
+        "return ux_data_offset(6291450, 7, 0, 2);",
+        "return ux_f64(6291449);"
+    };
+    const double gold[] = {
+        65534, 4294967294.0, -2147483648.0, (double)(float)1.1, 1.1,
+        0x7812, 0x3ff8, -1, -2, -1, -1, -1, 0
+    };
+    const int checks = sizeof cases / sizeof cases[0];
+    int passed = 0;
+    for (int i = 0; i < checks; i++) {
+        const char *body = cases[i];
+        if (mutate && i == 0) body = "let w = ux_u16_put(10, 65533); return ux_u16(10);";
+        if (mutate && i == 7) body = "return ux_typed_index(0, 2, 1, 4);";
+        if (mutate && i == 8) body = "return ux_typed_index(8, 2, 0, 4);";
+        passed += ux_probe(&probe, (char *)views, body, gold[i], 0, i == checks - 1);
+    }
+    mm_free(views);
+    remove_probe(&probe);
+    printf("CHECK_UX_VIEWS checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
 static unsigned noise_hash(int x, int y, int seed) {
     uint32_t n = (((uint32_t)x + 17u) * 374761393u) ^
         (((uint32_t)y + 29u) * 668265263u) ^ ((uint32_t)seed * 1442695041u);

@@ -8,6 +8,20 @@ enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         PERSIST_BASE = 948976, PERSIST_STRIDE = 16 };
 enum { PERSIST_SPAN = 64 * PERSIST_STRIDE };
 enum { UX_BUFFER_BASE = 2097152, UX_BUFFER_SIZE = 6291456 };
+enum { UX_U8 = 1, UX_U16, UX_U32, UX_F32, UX_I32, UX_F64 };
+
+static int ux_width(int kind) {
+  if (kind == UX_U8) return 1;
+  if (kind == UX_U16) return 2;
+  return kind == UX_F64 ? 8 : 4;
+}
+
+static const char *ux_read_names[] = {
+  "", "ux_u8", "ux_u16", "ux_u32", "ux_f32", "ux_i32", "ux_f64"
+};
+static const char *ux_write_names[] = {
+  "", "ux_u8_put", "ux_u16_put", "ux_u32_put", "ux_f32_put", "ux_i32_put", "ux_f64_put"
+};
 enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PERSIST_BASE > HEAP0 && PERSIST_BASE > GBASE && PERSIST_BASE + PERSIST_SPAN <= STORE_WIN) };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
 
@@ -1074,35 +1088,39 @@ static int pprim(Lex *L, Prog *P) {
       return TY_F64;
     }
     {
-      int get8 = intrinsic_name(L->id, "ux_u8");
-      int get32 = intrinsic_name(L->id, "ux_f32");
-      int put8 = intrinsic_name(L->id, "ux_u8_put");
-      int put32 = intrinsic_name(L->id, "ux_f32_put");
+      int kind = 0, put = 0;
+      for (int k = UX_U8; k <= UX_F64; k++) {
+        if (intrinsic_name(L->id, ux_read_names[k])) { kind = k; break; }
+        if (intrinsic_name(L->id, ux_write_names[k])) { kind = k; put = 1; break; }
+      }
       int span = intrinsic_name(L->id, "ux_span");
-      if (get8 || get32 || put8 || put32 || span) {
+      if (kind || span) {
         g_need_ux = 1;
-        int width = span ? 0 : (get32 || put32 ? 4 : 1);
+        int width = span ? 0 : ux_width(kind);
+        int type = (kind == UX_F32 || kind == UX_F64) ? TY_F64 : TY_I64;
         int tmp = ensure_lscratch(P);
         if (tmp < 0) return 0;
         next(L);
         if (!expect(L, T_LP, P, "ux buffer (")) return 0;
         if (pexpr(L, P) != TY_I64) { P->err = "ux buffer offset requires i64"; return 0; }
         if (!emit(P, OP_UX_ADDR, tmp * 256 + width)) return 0;
-        if (put8 || put32) {
+        if (put) {
           if (!expect(L, T_COMMA, P, "ux buffer ,")) return 0;
-          if (pexpr(L, P) != (put32 ? TY_F64 : TY_I64)) {
+          if (pexpr(L, P) != type) {
             P->err = "ux buffer value type"; return 0;
           }
-          if (put8 && !emit(P, OP_UX_BYTE, tmp)) return 0;
-          if (!emit(P, OP_UX_STORE, width) || !emit(P, OP_CONST, 0)) return 0;
+          if (kind == UX_U8) {
+            if (!emit(P, OP_UX_BYTE, tmp)) return 0;
+          } else if (type == TY_I64 && !emit(P, OP_IWRAP, 0)) return 0;
+          if (!emit(P, OP_UX_STORE, kind) || !emit(P, OP_CONST, 0)) return 0;
         } else if (span) {
           int addr = ensure_uxaddr(P);
           if (addr < 0 || !expect(L, T_COMMA, P, "ux span ,")) return 0;
           if (pexpr(L, P) != TY_I64) { P->err = "ux span count requires i64"; return 0; }
           if (!emit(P, OP_UX_SPAN, tmp * 256 + addr)) return 0;
-        } else if (!emit(P, OP_UX_LOAD, width)) return 0;
+        } else if (!emit(P, OP_UX_LOAD, kind)) return 0;
         if (!expect(L, T_RP, P, "ux buffer )")) return 0;
-        return get32 ? TY_F64 : TY_I64;
+        return put || span ? TY_I64 : type;
       }
     }
     /* list(n) → zeroed list of length n (i64 elems); for inject buffers */
@@ -1813,14 +1831,19 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x20) || !bleu(c, addr) || !bu8(c, 0xad)) return 0;
       break;
     }
-    case OP_UX_LOAD:
-      if (!bu8(c, ins->a == 4 ? 0x2a : 0x2d) || !bu8(c, 0) || !bleu(c, 0)) return 0;
-      if (!bu8(c, ins->a == 4 ? 0xbb : 0xad)) return 0;
+    case OP_UX_LOAD: {
+      static const uint8_t load[] = {0, 0x2d, 0x2f, 0x28, 0x2a, 0x28, 0x2b};
+      if (!bu8(c, load[ins->a]) || !bu8(c, 0) || !bleu(c, 0)) return 0;
+      if (ins->a != UX_F64 &&
+          !bu8(c, ins->a == UX_F32 ? 0xbb : ins->a == UX_I32 ? 0xac : 0xad)) return 0;
       break;
-    case OP_UX_STORE:
-      if (ins->a == 4 && !bu8(c, 0xb6)) return 0;
-      if (!bu8(c, ins->a == 4 ? 0x38 : 0x3a) || !bu8(c, 0) || !bleu(c, 0)) return 0;
+    }
+    case OP_UX_STORE: {
+      static const uint8_t store[] = {0, 0x3a, 0x3b, 0x36, 0x38, 0x36, 0x39};
+      if (ins->a == UX_F32 && !bu8(c, 0xb6)) return 0;
+      if (!bu8(c, store[ins->a]) || !bu8(c, 0) || !bleu(c, 0)) return 0;
       break;
+    }
     case OP_CONST:
       if (!bu8(c, 0x42) || !blei64(c, ins->a)) return 0; break;
     case OP_FCONST:
