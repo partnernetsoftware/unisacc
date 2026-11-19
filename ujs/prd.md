@@ -191,6 +191,17 @@ S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译�
 
 用 `wasm-objdump -x` 核对当前 D1 导出，只有上述一个 import。导出有 `memory`、`main_export`、`run_step`、`host_reset`、`host_set_global`、值构造和标签读取等，页面依元数据定位输入槽，收 11 字节 v3 飞行提交。`tools/gen-d1-airframe.cx` 调 `sh ./ujs/ujs2wasm.com ujs/tests/d1-flight.ujs -o <临时 Wasm>` 并发布测试夹具。现有 `d1-flight.wasm` 来自该 `.ujs`，生成工具承担调用与比对。D2/D3/D4 的现行导出目录无产品 Wasm。
 
+0b 为正式入口增加下列 ABI。上表的 `Math.sqrt` 和 `Float32Array` 仍是常规 JS 写法的拒绝例。
+
+| 能力 | 0b 合同 |
+|---|---|
+| f64 | `f64_sqrt(f64)` 编为 Wasm f64.sqrt。host1 运行金例使用数值误差门。基座 `math.ujs` 提供 `ux_sin(angle)`，弧度范围含 -2048 到 2048，范围外返回 NaN。余弦用相位偏移 pi/2 后调用同一函数，偏移后受同一范围限制。独立样点绝对误差上限 2e-9 |
+| 连续视图 | 每实例占用线性内存 [2097152, 8388608) 作为 ABI 缓冲区。偏移单位为字节。`ux_u8`、`ux_u8_put` 读取和写入 0 到 255。`ux_f32`、`ux_f32_put` 读写四字节小端 IEEE 754 binary32，UJS 标量读回类型为 f64，允许未对齐 |
+| 有界跨度 | `ux_span(offset,count)` 先检查 i64 范围再返回线性内存地址，可取末尾零长度段。负数、超长和窄化前越界会陷阱。使用 ABI 视图的模块在装箱分配前也检查堆边界。模块间的内存所有权与交接仍由 0c 定义 |
+| 文本 | 以偏移和明确字节数传递 UTF-8，NUL 可作为内容。`text.ujs` 的 `ux_utf8(offset,length)` 返回 1 或 0，拒绝截断、孤立续字节、过长编码、代理区与超出 U+10FFFF。越界跨度陷阱。字符串字面量原合同保持 |
+
+0b 测试将 `.ujs` 库和测试片段拼为单源后编译，跨模块链接在 0c。验收入口为 `ujs/product/cli-host.cx`，预期来自独立 `.cx` 数值、位模式和 UTF-8 用例。用 `--mutate-ux-abi` 改一项数学输入、一个边界偏移和一个 UTF-8 续字节，沿用原期望并要求非零。
+
 #### 构建、顺序与验收
 
 基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。
