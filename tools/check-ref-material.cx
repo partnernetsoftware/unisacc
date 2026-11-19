@@ -5,7 +5,8 @@
  * Only this check's exclusive temporary directory is modified. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
-#pragma unisa use sysx.process
+#pragma unisa use refworkspace
+#pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 
 static char temp[4096],root[4096],driver[4096],ape[4096],empty[4096];
@@ -35,6 +36,20 @@ static void flip(const char *file){
     FILE *f=fopen(file,"r+b");if(!f)exit(2);
     int c=fgetc(f);if(c==EOF||fseek(f,0,SEEK_SET)||fputc(c^1,f)==EOF||fclose(f))exit(2);
 }
+static void isolation(const char *elf,const char *prepared){
+    char dirty[4096],headers[4096],poison[4096],src[4096],image[4096],dir[4096],why[256];
+    path(dirty,temp,"product");path(headers,dirty,"include");path(poison,headers,"stdio.h");
+    path(src,dirty,"probe.c");path(image,temp,"probe.img");
+    const char *c="#include <stdio.h>\nint main(void){printf(\"ok\\n\");return 0;}\n";
+    const char *broken="invalid poison header\n";
+    if(sy_mkdir(dirty,0700)||sy_mkdir(headers,0700)||sy_write_file(poison,broken,strlen(broken),0600)||
+       sy_write_file(src,c,strlen(c),0600))exit(2);
+    char *v[]={(char *)elf,src,"-O0","-b","lnx/x86_64","-o",image,0};np_result r={0};
+    check(!np_run(v,dirty,0,8,&r,why,sizeof why)&&r.rc!=0,"polluted-cwd-control-rejects");np_free(&r);
+    check(!rw_open(dirty,elf,dir,sizeof dir)&&!np_run(v,dir,0,8,&r,why,sizeof why)&&!r.rc&&sy_exists(image)==1,
+          "same-source-from-frozen-export-compiles");np_free(&r);
+    check(rw_open(prepared,elf,dir,sizeof dir)==2,"product-root-reference-cwd-refused");
+}
 int main(int argc,char **argv){
     char source[4096],fresh[4096],copy[4096],bin[4096],rec[4096],original[4096],p[4096];
     if(argc!=2||!realpath(argv[1],ape)||!getcwd(root,sizeof root)||sy_mkdtemp(sy_tmpdir(),"check-ref-",temp,sizeof temp)||atexit(cleanup))return 2;
@@ -50,11 +65,16 @@ int main(int argc,char **argv){
     int ready=probe(tx_eqz(prepared,fresh)?"prepare":"verify",repo,ape,prepared,0,"REF_MATERIAL\tPREPARED");
     check(ready,"pinned-real-compiler-prepared");if(!ready)return 1;
     path(original,prepared,"ua_ref");
+    isolation(original,prepared);
     check(probe("prepare",empty,ape,prepared,0,"REF_MATERIAL\tPREPARED"),"offline-cache-reverified");
     check(probe("verify",empty,original,prepared,2,"candidate-is-reference"),"candidate-copy-refused");
     if(sy_mkdir(copy,0700))return 2;
     path(bin,copy,"ua_ref");path(rec,copy,"material.tsv");path(p,prepared,"material.tsv");
     if(sy_copy(original,bin,0700)||sy_copy(p,rec,0600))return 2;
+    path(p,prepared,"include");char *cp[]={"/bin/cp","-a",p,copy,0};
+    if(!call(cp,4,0,0))return 2;
+    path(p,copy,"include/stdio.h");flip(p);
+    check(probe("verify",empty,ape,copy,2,"frozen-include-sha-mismatch"),"one-byte-frozen-header-change-refused");flip(p);
     flip(rec);check(probe("prepare",empty,ape,copy,2,"receipt-mismatch"),"one-byte-receipt-change-refused");flip(rec);
     flip(bin);check(probe("prepare",empty,ape,copy,2,"artifact-sha-mismatch"),"one-byte-cache-change-refused");flip(bin);
     const char *wrapper="#!/bin/sh\nexec ./unisacc.com \"$@\"\n";

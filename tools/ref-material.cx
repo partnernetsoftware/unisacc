@@ -7,7 +7,8 @@
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use sys.env
-#pragma unisa use sysx.process
+#pragma unisa use refworkspace
+#pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
@@ -31,7 +32,7 @@ static void cleanup(void){
         char p[4096];
         if(!cx_path_join(p,sizeof p,publish_dir,"ua_ref"))sy_unlink(p);
         if(!cx_path_join(p,sizeof p,publish_dir,"material.tsv"))sy_unlink(p);
-        sy_rmdir(publish_dir);
+        cx_rmtree(publish_dir);
     }
 }
 static void path(char *p,const char *dir,const char *leaf){
@@ -65,8 +66,8 @@ static void profile(void){
     char *host[]={"/usr/bin/uname","-sm",0},*target[]={compiler,"-dumpmachine",0};
     command(host,0,3,3,"unsupported-host","Linux x86_64\n");
     command(target,0,3,3,"unsupported-compiler-target","x86_64-linux-gnu\n");
-    if(cx_fmt(receipt,sizeof receipt,"ref-material-v1\nstatus\tPREPARED\ncommit\t%s\ntree\t%s\nflat\t%s\nsource-manifest\t%s\nwrapped-C\t%s\nhost\tLinux x86_64\ncompiler\t%s\ncompiler-sha256\t%s\ntarget\tx86_64-linux-gnu\nflags\t-w -std=c99 -O2\nartifact\t%s\n",
-        commit_id,tree_id,flat_sha,source_manifest_sha,wrapped_sha,compiler,sha,elf_sha))stop(2,"receipt-bound");
+    if(cx_fmt(receipt,sizeof receipt,"ref-material-v2\nstatus\tPREPARED\ncommit\t%s\ntree\t%s\nflat\t%s\nsource-manifest\t%s\nwrapped-C\t%s\nhost\tLinux x86_64\ncompiler\t%s\ncompiler-sha256\t%s\ntarget\tx86_64-linux-gnu\nflags\t-w -std=c99 -O2\nheaders-sha256\t%s\nartifact\t%s\n",
+        commit_id,tree_id,flat_sha,source_manifest_sha,wrapped_sha,compiler,sha,rw_header_sha(),elf_sha))stop(2,"receipt-bound");
 }
 static void verify(const char *dir){
     char p[4096];sy_stat_t st;unsigned char *s;int64_t n;
@@ -77,6 +78,7 @@ static void verify(const char *dir){
     if(sy_lstat(p,&st)||st.kind!='f'||sy_read_file(p,&s,&n,sizeof receipt))stop(2,"receipt-read");
     int bad=n!=(long)strlen(receipt)||memcmp(s,receipt,n);mm_free(s);
     if(bad)stop(2,"receipt-mismatch");
+    if(!rw_verify(dir))stop(2,"frozen-include-sha-mismatch");
 }
 static void build(const char *repo,const char *out){
     char tree_spec[80],tree_line[64],parent[4096],archive_opt[4400],p[4096];
@@ -110,6 +112,8 @@ static void build(const char *repo,const char *out){
     path(p,publish_dir,"ua_ref");
     char *cc[]={"/usr/bin/cc","-w","-std=c99","-O2","ua_ref.c","-o",p,0};
     command(cc,work,40,2,"reference-compile",0);
+    char *copy[]={"/bin/cp","-a","include",publish_dir,0};
+    command(copy,work,4,2,"frozen-include-export",0);
     path(p,publish_dir,"material.tsv");if(sy_write_file(p,receipt,strlen(receipt),0600))stop(2,"receipt-write");
     verify(publish_dir);
     int rc=sy_rename(publish_dir,out);
@@ -126,6 +130,6 @@ int main(int argc,char **argv){
     if(rc==-ENOENT&&tx_eqz(argv[1],"prepare"))build(argv[2],argv[4]);
     else if(rc)stop(rc==-ENOENT?3:2,"material-unavailable");
     verify(argv[4]);
-    printf("REF_MATERIAL\tPREPARED\tcommit=%s\tsha256=%s\tpath=%s/ua_ref\n",commit_id,elf_sha,argv[4]);
+    printf("REF_MATERIAL\tPREPARED\tcommit=%s\texport=%s\theaders_sha256=%s\tsha256=%s\tpath=%s/ua_ref\n",commit_id,argv[4],rw_header_sha(),elf_sha,argv[4]);
     return 0;
 }

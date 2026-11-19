@@ -18,7 +18,9 @@
  * and one whose @data is shorter than the used size, else VACUOUS. The table goes to ABS_OUT/layout-table-SLICE.tsv.
  * Not checked here: the data run's file offset inside each container (formats cells). */
 #pragma unisa use cxlib.netpack
+#pragma unisa use refworkspace
 #pragma unisa use text.text
+static char reference_dir[4096];
 
 static char root[4096], stream6[4096], outdir[4096], work[4200], inc[4400], bound[4400], product[4400], ref[4096];
 static FILE *res, *table; static int npass, nfail, nnotrun;
@@ -28,7 +30,7 @@ static void saved(const char *p, const char *s, size_t n) { int f = open(p, O_WR
 static int shafile(const char *p, char h[65]) { size_t n; char *s = cx_read(p, &n); if (!s) { if (errno != ENOENT) die("read for digest"); return 0; } cx_sha256_hex(s, n, h); free(s); return 1; }
 static int same_file(const char *a, const char *b) { size_t na, nb; char *x = cx_read(a, &na), *y = cx_read(b, &nb); int ok = x && y && na == nb && !memcmp(x, y, na); free(x); free(y); return ok; }
 static void row(const char *state, const char *label, const char *detail) { fprintf(res, "%s\tprop.bound.data-layout-mod8\t%s\t%s\n", state, label, detail); if (tx_eqz(state, "PASS")) npass++; else if (tx_eqz(state, "FAIL")) nfail++; else nnotrun++; }
-static int run(char *const argv[], char *const env[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; { if (cx_fmt(s, sizeof s, "%d", secs)) { fprintf(stderr, "layout-cases-gen: text too long for s\n"); exit(2); } } v[n++] = s; for (int i = 0; argv[i]; i++) v[n++] = argv[i]; v[n] = 0; return np_run(v, root, env, secs + 2, r, why, sizeof why); }
+static int run(char *const argv[], char *const env[], int secs, np_result *r) { char why[1024]; char *v[64]; int n = 0; v[n++] = bound; char s[16]; { if (cx_fmt(s, sizeof s, "%d", secs)) { fprintf(stderr, "layout-cases-gen: text too long for s\n"); exit(2); } } v[n++] = s; for (int i = 0; argv[i]; i++) v[n++] = argv[i]; v[n] = 0; return np_run(v, reference_dir[0] && tx_eqz(argv[0],ref) ? reference_dir : root, env, secs + 2, r, why, sizeof why); }
 static char *noenv[] = { 0 };
 #define APPN(dst, cap, ...) do { size_t _l = strlen(dst); int _n = snprintf(dst + _l, (cap) - _l, __VA_ARGS__); if (_n < 0 || (size_t)_n >= (cap) - _l) die("text bound"); } while (0)
 
@@ -59,12 +61,27 @@ static void layout(Layout *L) {
     L->zero_tail = L->stored < (L->used - 8);   /* the scratch cell is always a zero tail; ask for one from the sequence itself */
 }
 
+static void load_product(void){
+    char cfg[4400],line[4096];int found=0;
+    path(cfg,sizeof cfg,root,"tools/devsvc-repo.tsv");
+    FILE *f=fopen(cfg,"rb");if(!f)die("repository product declaration");
+    while(fgets(line,sizeof line,f)){
+        if(strncmp(line,"product\t",8))continue;
+        char *leaf=line+8,*tab=strchr(leaf,'\t');
+        if(!tab)die("product declaration columns");
+        *tab=0;if(!*leaf||strchr(leaf,'/')||tx_eqz(leaf,".")||tx_eqz(leaf,".."))die("product declaration name");
+        path(product,sizeof product,root,leaf);found++;
+    }
+    if(ferror(f)||fclose(f)||found!=1)die("repository product declaration");
+}
+
 int main(int argc, char **argv) {
     if ((argc != 5 && argc != 6) || !realpath(argv[1], root) || !realpath(argv[2], stream6) || argv[3][0] != '/' || (argc == 6 && !realpath(argv[5], ref))) { fputs("usage: ROOT STREAM6_COM ABS_OUT len12|len3-0..len3-5 [REF]\n", stderr); return 2; }
+    if (ref[0] && rw_open(root,ref,reference_dir,sizeof reference_dir)) return 2;
     const char *slice = argv[4]; int lo = -1, hi = -1, len12 = tx_eqz(slice, "len12");
     if (!strncmp(slice, "len3-", 5) && slice[5] >= '0' && slice[5] <= '5' && !slice[6]) lo = hi = slice[5] - '0'; else if (!len12) die("slice");
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[3])) { fprintf(stderr, "layout-cases-gen: text too long for outdir\n"); exit(2); } } if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir"); path(work, sizeof work, outdir, slice); if (mkdir(work, 0700)) die("slice dir must be absent");
-    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); path(product, sizeof product, root, "unisacc.com");
+    path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound"); load_product();
     char rp[4400]; { if (cx_fmt(rp, sizeof rp, "%s/results-%s.tsv", outdir, slice)) { fprintf(stderr, "layout-cases-gen: text too long for rp\n"); exit(2); } } res = fopen(rp, "wbx"); if (!res) die("results exclusive");
     { if (cx_fmt(rp, sizeof rp, "%s/layout-table-%s.tsv", outdir, slice)) { fprintf(stderr, "layout-cases-gen: text too long for rp\n"); exit(2); } } table = fopen(rp, "wbx"); if (!table) die("table exclusive"); fprintf(table, "sequence\tsym_d0\tsym_d1\tsym_d2\tsym_o\tused\tdata_hex_len\n");
     { char hp[65], h6[65], hr[65]; if (!shafile(product, hp) || !shafile(stream6, h6)) die("identity"); fprintf(res, "IDENTITY\tproduct=%s\tstream6=%s\n", hp, h6); if (ref[0]) { if (!shafile(ref, hr)) die("ref"); fprintf(res, "IDENTITY\tref=%s\n", hr); } }
