@@ -1,0 +1,83 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int check_hex_string(const char *source,const char *wasm,const char *library,const char *setup) {
+    char text[64000];
+    int size=tx_snprintf(text,sizeof text,"%s\n%s\nlet r=Color_setHex(a,11259375,1);return Color_getHexString(r,1);",
+        library,setup);
+    if(size<0 || size>=(int)sizeof text || sy_write_file(source,text,size,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,"--run",0};
+    char *out=0;
+    size_t n=0;
+    const char expected[]="\"value\":\"abcdef\"";
+    int failed=cx_runv_timeout(args,6,&out,&n) || !out || tx_find(out,n,expected,sizeof expected-1)<0;
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","vector-scalar","color"};
+    char library[60000]={0};
+    int used=0;
+    for(int i=0;i<3;i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&size,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    const char *setup="let a=Color_setRGB(0,0.25,0.5,0.75);let b=Color_setRGB(24,0.75,0.25,0.5);";
+    const char *cases[]={
+        "let r=Color_add(a,b);return ux_f64(r+8);",
+        "let r=Color_sub(a,b);return ux_f64(r);",
+        "let r=Color_multiply(a,b);return ux_f64(r+16);",
+        "let r=Color_lerp(a,b,0.25);return ux_f64(r);",
+        "let r=Color_setHSL(a,0.3333333333333333,1.0,0.5);return ux_f64(r+8);",
+        "let r=Color_getHSL(48,a);return ux_f64(r+16);",
+        "let r=Color_setHex(a,8421504,1);return ux_f64(r);",
+        "let r=Color_setHex(a,11259375,1);return Color_getHex(r,1);",
+        "",
+        "let r=Color_offsetHSL(a,0.0,0.0,0.125,48);return ux_f64(r+8);",
+        "let r=Color_lerpHSL(a,24.0,0.5,48.0);return ux_f64(r);"
+    };
+    const double gold[]={0.75,0,0.375,0.375,1,0.5,0.21586050010324415,11259375,1,0.625,0.5};
+    enum {count=sizeof gold/sizeof gold[0]};
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-color-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[count];
+    int failed=g_math_reference("color",refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        const char *statement=mutate && i==6?"let r=Color_setHex(a,8421504,0);return ux_f64(r);":cases[i];
+        double actual=0;
+        int sample_failed;
+        if(i==8) {
+            sample_failed=check_hex_string(source,wasm,library,setup);
+            actual=!sample_failed;
+        } else {
+            sample_failed=g_math_sample(source,wasm,library,setup,statement,&actual);
+        }
+        if(sample_failed ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("COLOR case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH Color cases=%d failed=%d\n",count,failed);
+    return failed;
+}
