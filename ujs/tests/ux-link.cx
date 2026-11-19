@@ -354,53 +354,94 @@ static int pilot_gold(char *gold, int cap) {
     return contacts ? used : -1;
 }
 
-static int water_font_asset(const char *dir) {
-    enum { GLYPHS=19, LARGE=1024, SMALL=256 };
+enum { WATER_GLYPHS=19, WATER_ROWS=28, WATER_LARGE=1024, WATER_SMALL=576 };
+
+static int water_font_rows(unsigned rows[WATER_GLYPHS][WATER_ROWS]) {
     const char digits[]="0123456789abcdef";
-    unsigned char atlas[GLYPHS*(LARGE+SMALL)]={0},*data=0;
+    unsigned char *data=0;
     int64_t count=0;
     int rc=1;
     if(sy_read_file("ujs/practice/uxe/products/d2/water-glyphs.tsv",&data,&count,4096)) return 1;
     const char *at=(char *)data,*end=at+count;
-    for(int glyph=0;glyph<GLYPHS;glyph++) {
+    while(at<end && *at=='#') {
+        long line=tx_find(at,end-at,"\n",1);
+        if(line<0) goto done;
+        at+=line+1;
+    }
+    for(int glyph=0;glyph<WATER_GLYPHS;glyph++) {
         long name=tx_find(at,end-at,"\t",1);
         if(name!=3) goto done;
         at+=name+1;
-        while(at<end && *at!='\n') {
-            int xy[4];
-            if(end-at<5) goto done;
+        for(int row=0;row<WATER_ROWS;row++) {
+            if(row==16 && (at>=end || *at++!='\t')) goto done;
+            if(end-at<4) goto done;
+            unsigned mask=0;
             for(int i=0;i<4;i++) {
-                xy[i]=(int)tx_find(digits,16,at+i,1);
-                if(xy[i]<0) goto done;
+                long value=tx_find(digits,16,at+i,1);
+                if(value<0) goto done;
+                mask=mask*16+(unsigned)value;
             }
             at+=4;
-            int dx=xy[2]-xy[0],dy=xy[3]-xy[1];
-            int length=abs(dx)>abs(dy)?abs(dx):abs(dy);
-            if(!length) length=1;
-            for(int i=0;i<=length;i++) {
-                int x=(xy[0]*(length-i)+xy[2]*i+length/2)/length;
-                int y=(xy[1]*(length-i)+xy[3]*i+length/2)/length;
-                int addresses[]={glyph*LARGE+4*(16*y+x), GLYPHS*LARGE+glyph*SMALL+4*(8*(y/2)+x/2)};
-                for(int j=0;j<2;j++) {
-                    atlas[addresses[j]]=249;
-                    atlas[addresses[j]+1]=230;
-                    atlas[addresses[j]+2]=187;
-                    atlas[addresses[j]+3]=255;
-                }
-            }
-            if(*at==' ') at++;
-            else if(*at!='\n') goto done;
+            if(row>=16 && mask>=4096) goto done;
+            rows[glyph][row]=mask;
         }
         if(at>=end || *at!='\n') goto done;
         at++;
     }
-    if(at!=end) goto done;
-    char path[320];
-    tx_snprintf(path,sizeof path,"%s/d2-type.rgba",dir);
-    rc=sy_write_file(path,atlas,sizeof atlas,0600)!=0;
+    rc=at!=end;
 done:
     mm_free(data);
     return rc;
+}
+
+static int water_font_asset(const char *dir,int mutate) {
+    unsigned rows[WATER_GLYPHS][WATER_ROWS];
+    unsigned char atlas[WATER_GLYPHS*(WATER_LARGE+WATER_SMALL)]={0};
+    if(water_font_rows(rows)) return 1;
+    for(int glyph=0;glyph<WATER_GLYPHS;glyph++) for(int row=0;row<WATER_ROWS;row++) {
+        int large=row<16, width=large?16:12, y=large?row:row-16;
+        int start=large?glyph*WATER_LARGE:WATER_GLYPHS*WATER_LARGE+glyph*WATER_SMALL;
+        unsigned mask=rows[glyph][row];
+        if(mutate==13 && glyph==0 && large) mask=(mask<<1)&65535u;
+        for(int x=0;x<width;x++) if(mask&(1u<<x)) {
+            int address=start+4*(y*width+x);
+            atlas[address]=249;
+            atlas[address+1]=230;
+            atlas[address+2]=187;
+            atlas[address+3]=255;
+        }
+    }
+    char path[320];
+    tx_snprintf(path,sizeof path,"%s/d2-type.rgba",dir);
+    return sy_write_file(path,atlas,sizeof atlas,0600)!=0;
+}
+
+static int water_font_iou(const char *pixels,long length) {
+    const char *names[]={"灯","舟","水","道","1","/","8","苇","汀"};
+    const unsigned numbers[]={29850,4688,31727};
+    unsigned expected[WATER_GLYPHS][WATER_ROWS];
+    long at=0;
+    int failed=0;
+    if(water_font_rows(expected)) return 1;
+    for(int glyph=0;glyph<9;glyph++) {
+        int digits=glyph>=4 && glyph<=6;
+        int width=glyph<4?16:digits?3:12;
+        int height=digits?5:width;
+        int intersection=0,total=0;
+        for(int y=0;y<height;y++) {
+            unsigned row=glyph<4?expected[glyph][y]:digits?numbers[glyph-4]>>(3*y):expected[glyph-3][16+y];
+            for(int x=0;x<width;x++) {
+                if(at>=length || (pixels[at]!='0' && pixels[at]!='1')) return 1;
+                int got=pixels[at++]=='1',want=(row>>x)&1u;
+                intersection+=got && want;
+                total+=got || want;
+            }
+        }
+        int iou=total?intersection*1000/total:0;
+        printf("D2_GLYPH %s iou_milli=%d\n",names[glyph],iou);
+        if(iou<980) failed++;
+    }
+    return failed || at!=length;
 }
 
 static int pilot_product(const char *dir,int mutate,int draw) {
@@ -417,7 +458,7 @@ static int pilot_product(const char *dir,int mutate,int draw) {
     const char tail[]="\nreturn boatTick;";
     long body=tx_find((char *)pilot,pn,tail,sizeof tail-1);
     if (header < 0 || body <= header) goto done;
-    if(draw && water_font_asset(dir)) goto done;
+    if(draw && water_font_asset(dir,mutate)) goto done;
     int n=tx_snprintf(program,sizeof program,"%.*s\n%s%.*s\n",
         (int)header,pilot,math,(int)(body-header),pilot+header);
     if (n<0 || n>=(int)sizeof program) goto done;
@@ -562,8 +603,8 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
                 pass=!rc && sscanf(out+from,"%d %d %d",&pixels,&runs,&longest)==3 &&
                     pixels>=200 && runs>=35 && longest<=80;
             } else if (flight_check == 12) {
-                int title=0,subtitle=0;
-                pass=!rc && sscanf(out+from,"%d %d",&title,&subtitle)==2 && title>=80 && subtitle>=35;
+                pass=!rc && !water_font_iou(out+from,to);
+                if (to>200) to=0;
             } else if (flight_check == 11) {
                 int pixels=0,clusters=0;
                 pass=!rc && sscanf(out+from,"%d %d",&pixels,&clusters)==2 && pixels>=200 && clusters==3;
@@ -671,7 +712,8 @@ int main(int argc, char **argv) {
     int red_mutate=tx_eq(mode,"water-red-off",sizeof "water-red-off");
     if(tx_eq(mode,"water-red",sizeof "water-red") || red_mutate) flight_check=11;
     int title_mutate=tx_eq(mode,"water-title-off",sizeof "water-title-off");
-    if(tx_eq(mode,"water-title",sizeof "water-title") || title_mutate) flight_check=12;
+    int glyph_mutate=tx_eq(mode,"water-title-glyph",sizeof "water-title-glyph");
+    if(tx_eq(mode,"water-title",sizeof "water-title") || title_mutate || glyph_mutate) flight_check=12;
     int glint_mutate=tx_eq(mode,"water-glint-off",sizeof "water-glint-off");
     if(tx_eq(mode,"water-glint",sizeof "water-glint") || glint_mutate) flight_check=13;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
@@ -711,7 +753,7 @@ int main(int argc, char **argv) {
     } else if (flight_check >= 2) {
         rc = rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d2-pilot-probe.html") ||
             generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
-            pilot_product(dir,glint_mutate?12:title_mutate?11:red_mutate?10:lilies_mutate?9:dock_mutate?8:
+            pilot_product(dir,glyph_mutate?13:glint_mutate?12:title_mutate?11:red_mutate?10:lilies_mutate?9:dock_mutate?8:
                 reeds_mutate?7:skyline_mutate?6:prow_mutate?5:mirror_mutate?4:dark_mutate?3:dry_mutate?2:pilot_mutate,
                 flight_check>=3);
     } else if (flight_check) {
