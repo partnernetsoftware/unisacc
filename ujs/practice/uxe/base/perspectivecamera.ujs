@@ -1,0 +1,115 @@
+struct PerspectiveCamera {
+  fov: f64;
+  aspect: f64;
+  near: f64;
+  far: f64;
+  zoom: f64;
+  filmGauge: f64;
+  filmOffset: f64;
+  viewFullWidth: f64;
+  viewFullHeight: f64;
+  viewX: f64;
+  viewY: f64;
+  viewWidth: f64;
+  viewHeight: f64;
+  viewEnabled: u32;
+}
+
+function PerspectiveCamera_init(lens,...lens_args) {
+  let fov=ux_f64_put(lens+PerspectiveCamera.fov,lens_args[0]);
+  let aspect=ux_f64_put(lens+PerspectiveCamera.aspect,lens_args[1]);
+  let near=ux_f64_put(lens+PerspectiveCamera.near,lens_args[2]);
+  let far=ux_f64_put(lens+PerspectiveCamera.far,lens_args[3]);
+  let zoom=ux_f64_put(lens+PerspectiveCamera.zoom,1.0);
+  let film=ux_f64_put(lens+PerspectiveCamera.filmGauge,35.0);
+  let filmOffset=ux_f64_put(lens+PerspectiveCamera.filmOffset,0.0);
+  let view=ux_u32_put(lens+PerspectiveCamera.viewEnabled,0);
+  return lens;
+}
+
+function PerspectiveCamera_getFilmWidth(film_lens) {
+  let film_aspect=ux_f64(film_lens+PerspectiveCamera.aspect);
+  if(film_aspect>1.0) { film_aspect=1.0; }
+  return ux_f64(film_lens+PerspectiveCamera.filmGauge)*film_aspect;
+}
+
+function PerspectiveCamera_getFilmHeight(height_lens) {
+  let height_aspect=ux_f64(height_lens+PerspectiveCamera.aspect);
+  if(height_aspect<1.0) { height_aspect=1.0; }
+  return ux_f64(height_lens+PerspectiveCamera.filmGauge)/height_aspect;
+}
+
+function PerspectiveCamera_getFocalLength(focal_lens) {
+  let angle=ux_f64(focal_lens+PerspectiveCamera.fov)*0.008726646259971648;
+  return PerspectiveCamera_getFilmHeight(focal_lens)*0.5*ux_math_cos(angle)/ux_math_sin(angle);
+}
+
+function PerspectiveCamera_setFocalLength(set_focal,...set_focal_args) {
+  let angle=ux_math_atan(PerspectiveCamera_getFilmHeight(set_focal)*0.5/set_focal_args[0]);
+  let fov=ux_f64_put(set_focal+PerspectiveCamera.fov,angle*114.59155902616465);
+  return set_focal;
+}
+
+function PerspectiveCamera_getEffectiveFOV(effective_lens) {
+  let half=ux_f64(effective_lens+PerspectiveCamera.fov)*0.008726646259971648;
+  let ratio=ux_math_sin(half)/(ux_math_cos(half)*ux_f64(effective_lens+PerspectiveCamera.zoom));
+  return ux_math_atan(ratio)*114.59155902616465;
+}
+
+function PerspectiveCamera_setViewOffset(view_lens,...view_args) {
+  let full_w=ux_f64_put(view_lens+PerspectiveCamera.viewFullWidth,view_args[0]);
+  let full_h=ux_f64_put(view_lens+PerspectiveCamera.viewFullHeight,view_args[1]);
+  let off_x=ux_f64_put(view_lens+PerspectiveCamera.viewX,view_args[2]);
+  let off_y=ux_f64_put(view_lens+PerspectiveCamera.viewY,view_args[3]);
+  let sub_w=ux_f64_put(view_lens+PerspectiveCamera.viewWidth,view_args[4]);
+  let sub_h=ux_f64_put(view_lens+PerspectiveCamera.viewHeight,view_args[5]);
+  let aspect=ux_f64_put(view_lens+PerspectiveCamera.aspect,view_args[0]/view_args[1]);
+  let enabled=ux_u32_put(view_lens+PerspectiveCamera.viewEnabled,1);
+  return view_lens;
+}
+
+function PerspectiveCamera_clearViewOffset(clear_lens) {
+  let disabled=ux_u32_put(clear_lens+PerspectiveCamera.viewEnabled,0);
+  return clear_lens;
+}
+
+native function perspective_project(perspective:i64,camera:i64) i64 {
+  let n=ux_f64(perspective+PerspectiveCamera.near);
+  let f=ux_f64(perspective+PerspectiveCamera.far);
+  let zoom=ux_f64(perspective+PerspectiveCamera.zoom);
+  let aspect=ux_f64(perspective+PerspectiveCamera.aspect);
+  let angle=ux_f64(perspective+PerspectiveCamera.fov)*0.008726646259971648;
+  if(n<=0.0 || f<=n || zoom<=0.0 || aspect<=0.0 || angle<=0.0 || angle>=1.5707963267948966) {
+    return 0-1;
+  }
+  let top=n*ux_math_sin(angle)/(zoom*ux_math_cos(angle));
+  let height=2.0*top;
+  let width=aspect*height;
+  let left=0.0-width*0.5;
+  if(ux_u32(perspective+PerspectiveCamera.viewEnabled)!=0) {
+    let full_w=ux_f64(perspective+PerspectiveCamera.viewFullWidth);
+    let full_h=ux_f64(perspective+PerspectiveCamera.viewFullHeight);
+    let sub_w=ux_f64(perspective+PerspectiveCamera.viewWidth);
+    let sub_h=ux_f64(perspective+PerspectiveCamera.viewHeight);
+    if(full_w<=0.0 || full_h<=0.0 || sub_w<=0.0 || sub_h<=0.0) { return 0-1; }
+    left=left+ux_f64(perspective+PerspectiveCamera.viewX)*width/full_w;
+    top=top-ux_f64(perspective+PerspectiveCamera.viewY)*height/full_h;
+    width=width*sub_w/full_w;
+    height=height*sub_h/full_h;
+  }
+  let film_offset=ux_f64(perspective+PerspectiveCamera.filmOffset);
+  if(film_offset!=0.0) {
+    let film_width=PerspectiveCamera_getFilmWidth(perspective);
+    if(film_width<=0.0) { return 0-1; }
+    left=left+n*film_offset/film_width;
+  }
+  let matrix=ux_u32(camera+Camera.projectionMatrix);
+  let coords=ux_u32(camera+Camera.coordinateSystem);
+  let projected=Matrix4_makePerspective(matrix,left,left+width,top,top-height,n,f,coords*1.0);
+  if(projected<0) { return projected; }
+  return Camera_updateProjectionInverse(camera);
+}
+
+function PerspectiveCamera_updateProjectionMatrix(projection_lens,...projection_args) {
+  return perspective_project(projection_lens,projection_args[0]);
+}
