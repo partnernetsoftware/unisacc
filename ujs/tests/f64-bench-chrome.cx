@@ -1,0 +1,65 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int mutation(const char *path, const char *target) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    const char count[]="10000000";
+    if(sy_read_file(path,&raw,&bytes,4096)) return 1;
+    long at=tx_find((const char *)raw,bytes,count,sizeof count-1);
+    if(at>=0) raw[at]='0';
+    int rc=at<0 || sy_write_file(target,raw,bytes,0600);
+    mm_free(raw);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    const char *mode=argc==2?argv[1]:"baseline";
+    int unroll=tx_eqz(mode,"unroll"), mutate=tx_eqz(mode,"mutate");
+    if(argc>2 || (!unroll && !mutate && !tx_eqz(mode,"baseline"))) return 2;
+    const char *source=unroll?"ujs/tests/examples/f64-loop-unrolled.ujs":"ujs/tests/examples/f64-loop.ujs";
+    const char fixture[]="ujs/practice/uxe/test/f64-bench-chrome.html";
+    const char marker[]="<pre id=\"benchmark\">[";
+    char dir[256], wasm[300], probe[300], modified[300], profile[320], url[340];
+    char *out=0;
+    size_t n=0;
+    if(sy_mkdtemp("/tmp","ujs-f64-chrome-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/loop.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.html",dir);
+    tx_snprintf(modified,sizeof modified,"%s/mutate.ujs",dir);
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    tx_snprintf(url,sizeof url,"file://%s",probe);
+    int fail=sy_copy(fixture,probe,0600) || (mutate && mutation(source,modified));
+    char *compile[]={"./ujs/ujs2wasm.com",(char *)(mutate?modified:source),"-o",wasm,0};
+    long start=sy_now_ms();
+    if(!fail) fail=cx_runv_timeout(compile,10,&out,&n)!=0;
+    long compile_ms=sy_now_ms()-start;
+    mm_free(out); out=0; n=0;
+    char *chrome[]={"google-chrome","--headless=new","--allow-file-access-from-files",
+        "--disable-background-networking","--no-first-run",profile,"--dump-dom",url,0};
+    if(!fail) fail=cx_runv_timeout(chrome,15,&out,&n)!=0;
+    long at=!fail && out?tx_find(out,n,marker,sizeof marker-1):-1;
+    double metrics[9]={0};
+    if(at>=0) {
+        char *next=out+at+sizeof marker-1;
+        for(int i=0;i<9;i++) {
+            char *end=0;
+            metrics[i]=tx_strtod(next,&end);
+            if(end==next || *end!=(i==8?']':',')) { at=-1; break; }
+            next=end+1;
+        }
+    }
+    const double expected=1.0+10000000/8.0;
+    fail=at<0 || metrics[0]!=expected || metrics[5]<=0;
+    mm_free(out); out=0; n=0;
+    char *cleanup[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(cleanup,5,&out,&n)) fail=1;
+    mm_free(out);
+    printf("UJS_F64_CHROME mode=%s compile_ms=%ld instantiate_ms=%.3f min_ms=%.3f median_ms=%.3f max_ms=%.3f samples=7 value=%.17g expected=%.17g failed=%d\n",
+        mode,compile_ms,metrics[1],metrics[2],metrics[5],metrics[8],metrics[0],expected,fail);
+    return fail;
+}
