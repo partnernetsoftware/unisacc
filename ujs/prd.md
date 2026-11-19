@@ -179,7 +179,7 @@ S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译�
 
 #### 编译器现状和前置缺口
 
-实测仓根和 `ujs/` 下无 `ujs2wasm.com`，PATH 亦未命中。现有入口为 `sh ./ujs/ujs.com FILE.ujs -o OUT.wasm`，`--run` 由 host1 迷你 VM 执行。`ujs/product/run-host.cx` 实跑 28 例通过，`ujs/product/corpus-host.cx` 实跑 28 个正例、8 个源码拒绝例及坏 Wasm 拒绝通过。全套 smoke 达本轮命令时限，本节只采用分项实测。历史 `compile.mjs`、归档 Python 和旧语料不作为目标构建入口。
+0a 新增 `./ujs/ujs2wasm.com FILE.ujs -o OUT.wasm`。薄启动脚本复用 `ujs/product/build-ape.cx` 已构建的 `ujs/ujs.com`，原样转发参数和退出码。`--run` 由 host1 迷你 VM 执行。现有生成器已通过该入口重编 D1。`ujs/product/run-host.cx` 实跑 28 例通过，`ujs/product/corpus-host.cx` 实跑 28 个正例、8 个源码拒绝例及坏 Wasm 拒绝通过。S1 全套 smoke 的日志已到 `build-ape.cx: ok`，外层 57 秒截止在末项 `check-ujs-ape.cx` 完成前触发。历史 `compile.mjs`、归档 Python 和旧语料不作为目标构建入口。
 
 | 特性 | 现入口的证据与限制 |
 |---|---|
@@ -189,7 +189,7 @@ S1 记录现状和目标合同。S2 等督导与所有者确认，先补编译�
 | 字符串 | ASCII 字面量和拼接有语料。单字面量至多 255 字节，拒绝 NUL、非 ASCII 与转义，UTF-8 需有界字节 ABI |
 | import 与链接 | 已有特设 `env.host_gpu_submit(i32 ptr,i32 len)`。`import { host_time } from "env"; return host_time();` 拒绝，退出 1，诊断 `expected =`。声明式宿主导入、跨模块链接与内存交接待补 |
 
-用 `wasm-objdump -x` 核对当前 D1 导出，只有上述一个 import。导出有 `memory`、`main_export`、`run_step`、`host_reset`、`host_set_global`、值构造和标签读取等，页面依元数据定位输入槽，收 11 字节 v3 飞行提交。`tools/gen-d1-airframe.cx` 调 `sh ./ujs/ujs.com ujs/tests/d1-flight.ujs -o <临时 Wasm>` 并发布测试夹具，实跑 `--check` 得 `GEN_D1_AIRFRAME failed=0`。现有 `d1-flight.wasm` 来自该 `.ujs`，生成工具承担调用与比对。D2/D3/D4 的现行导出目录无产品 Wasm。
+用 `wasm-objdump -x` 核对当前 D1 导出，只有上述一个 import。导出有 `memory`、`main_export`、`run_step`、`host_reset`、`host_set_global`、值构造和标签读取等，页面依元数据定位输入槽，收 11 字节 v3 飞行提交。`tools/gen-d1-airframe.cx` 调 `sh ./ujs/ujs2wasm.com ujs/tests/d1-flight.ujs -o <临时 Wasm>` 并发布测试夹具。现有 `d1-flight.wasm` 来自该 `.ujs`，生成工具承担调用与比对。D2/D3/D4 的现行导出目录无产品 Wasm。
 
 #### 构建、顺序与验收
 
