@@ -98,15 +98,37 @@ static int kit_fixture(void) {
     if(!runv(commit,repo,15,&rc)||rc||sy_sha256_hex(table,strlen(table),want))return 2;
     if(cx_fmt(src,sizeof src,"#!/bin/sh\nif [ \"$2\" = -o ]; then cp \"$0\" \"$3\" && chmod 700 \"$3\"; exit $?; fi\n"
        "if [ \"$1\" = kit ]; then\n test \"$2:$3\" = --jobs:4 || exit 2\n"
+       " if [ -n \"$KIT_TEST_WINDOW\" ]; then\n"
+       "  printf X >> \"$TMPDIR/kit-attempts\"\n"
+       "  if [ \"$KIT_TEST_WINDOW\" = twice ] || [ \"$(cat \"$TMPDIR/kit-attempts\")\" = X ]; then exec sleep 30; fi\n"
+       "  printf 'PREPARED\\ttlib-kit\\tno-test-result\\n'; exit 0\n fi\n"
        " if [ -n \"$KIT_TEST_CORRUPT\" ]; then printf 'tlib: TAMPERED\\tfixture\\n' >&2; fi\n"
        " printf X >> .git/kit-calls\n printf 'PREPARED\\ttlib-kit\\tno-test-result\\n'; exit 0\nfi\n"
-       "if [ \"$1\" = tools/affected.cx ]; then test \"$(cat .git/kit-calls)\" = X || exit 124; fi\n%s",ape_text)||
+       "if [ \"$1\" = tools/affected.cx ]; then\n"
+       " if [ -n \"$KIT_TEST_WINDOW\" ]; then test \"$(cat \"$TMPDIR/kit-attempts\")\" = XX || exit 124;\n"
+       " else test \"$(cat .git/kit-calls)\" = X || exit 124; fi\nfi\n%s",ape_text)||
        sy_write_file(apep,src,strlen(src),0755))return 2;
     char *pos[]={"env","QG_CASE=boundary",bin,repo,"--candidate",apep,"--ids","alpha,beta","--out",ev,0};
     check("kit-before-first-wave",runv(pos,root,15,&rc)&&rc==0&&has(out,"QUALIFY_KIT")&&has(out,want)&&
           has(out,"alpha\tPASS")&&has(out,"beta\tPASS"));
     char *neg[]={"env","KIT_TEST_CORRUPT=1",bin,repo,"--candidate",apep,"--ids","alpha",0};
     check("kit-tampered-refused",runv(neg,root,15,&rc)&&rc!=0&&has(out,"kit-tampered")&&!has(out,"QUALIFY_BATCH"));
+    const char *modes[]={"KIT_TEST_WINDOW=once","KIT_TEST_WINDOW=twice"};
+    for(int i=0;i<2;i++){
+        char *v[]={"env","QG_CASE=boundary",(char*)modes[i],bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
+        char path[4400],*e=0,*calls=0;
+        size_t en=0,cn=0;
+        if(cx_fmt(path,sizeof path,"%s/kit-attempts",tmp) || put(tmp,"kit-attempts","",0600) ||
+           !runv(v,root,15,&rc))return 2;
+        e=cx_read(ev,&en); calls=cx_read(path,&cn);
+        int twice=cn==2 && calls && !memcmp(calls,"XX",2);
+        int checkpoint=has(e,"# UNKNOWN kit-window\nCHECKPOINT\tremaining=1\tape_sha256=");
+        if(i==0)check("kit-window-resumes-once",twice && checkpoint && rc==0 &&
+                      has(e,"\nRAW\tBATCH_RUN\tid=alpha\tstatus=PASS") && has(e,"\nSUMMARY\tbatches=1\tPASS=1"));
+        else check("kit-second-window-stops-before-batches",twice && checkpoint && rc==1 &&
+                   !has(e,"\nRAW\t") && !has(e,"\nSUMMARY\t") && !has(out,"QUALIFY_BATCH"));
+        free(e); free(calls);
+    }
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
     return !!failed;
 }
