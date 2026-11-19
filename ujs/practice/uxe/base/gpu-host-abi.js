@@ -5,7 +5,7 @@ const bufferSize = 6291456;
 const headerSize = 24;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-function readDraw(packet, at, span) {
+function readDraw(packet, at, span, textured, limit) {
   if (span < 24) return null;
   const word = field => packet.getUint32(at + field, true);
   const count = word(8);
@@ -14,9 +14,20 @@ function readDraw(packet, at, span) {
   const vertexSpan = Math.ceil(vertexBytes / 4) * 4;
   const fragmentSpan = Math.ceil(fragmentBytes / 4) * 4;
   const data = 24 + vertexSpan + fragmentSpan;
+  const end = data + count * 28;
   if (count === 0 || count % 3 !== 0 || word(20) !== 0 ||
       vertexBytes < 1 || vertexBytes > 4096 || fragmentBytes < 1 || fragmentBytes > 4096 ||
-      data + count * 28 !== span) return null;
+      (textured ? end + 20 > span : end !== span)) return null;
+  let texture = null;
+  if (textured) {
+    const [width, height, min, wrapS, wrapT] = [0, 4, 8, 12, 16].map(n => word(end + n));
+    if (!width || !height || width > limit || height > limit || min > 2 || wrapS > 2 || wrapT > 2 ||
+        end + 20 + width * height * 4 !== span) return null;
+    const nonPower = (width & (width - 1)) || (height & (height - 1));
+    if (nonPower && (min === 2 || wrapS || wrapT)) return null;
+    texture = { width, height, min, wrapS, wrapT,
+      bytes: new Uint8Array(packet.buffer, packet.byteOffset + at + end + 20, width * height * 4) };
+  }
   const text = (start, bytes, padded) => {
     const encoded = new Uint8Array(packet.buffer, packet.byteOffset + at + start, padded);
     if (encoded.subarray(bytes).some(value => value !== 0)) throw new Error("shader padding");
@@ -35,7 +46,7 @@ function readDraw(packet, at, span) {
     if (!Number.isFinite(value)) return null;
     vertices[i] = value;
   }
-  return { count, vertex, fragment, vertices };
+  return { count, vertex, fragment, vertices, texture };
 }
 
 function makeDraw(gl, draw) {
@@ -76,10 +87,14 @@ function runCommands(gl, commands, targets, packet) {
   const draws = new Map();
   try {
     for (const command of commands) {
-      if (command[0] !== 4) continue;
+      if (command[0] !== 4 && command[0] !== 13) continue;
       const setup = makeDraw(gl, command[1]);
       if (!setup) return gl.isContextLost() ? -6n : -7n;
       draws.set(command, setup);
+      if (command[1].texture) {
+        setup.texture = gl.createTexture();
+        if (!setup.texture) return gl.isContextLost() ? -6n : -7n;
+      }
     }
     for (const command of commands) {
       const [opcode, a, b, c, d] = command;
@@ -98,9 +113,23 @@ function runCommands(gl, commands, targets, packet) {
         gl.blendEquation(gl.FUNC_ADD);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       }
-      if (opcode === 4) {
-        const { program, buffer } = draws.get(command);
+      if (opcode === 4 || opcode === 13) {
+        const { program, buffer, texture } = draws.get(command);
         gl.useProgram(program);
+        let previousTexture;
+        if (texture) {
+          const { width, height, min, wrapS, wrapT, bytes } = a.texture;
+          const wraps = [gl.CLAMP_TO_EDGE, gl.REPEAT, gl.MIRRORED_REPEAT];
+          previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR][min]);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, min ? gl.LINEAR : gl.NEAREST);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wraps[wrapS]);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wraps[wrapT]);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+          if (min === 2) gl.generateMipmap(gl.TEXTURE_2D);
+          gl.uniform1i(gl.getUniformLocation(program, "u_texture"), gl.getParameter(gl.ACTIVE_TEXTURE) - gl.TEXTURE0);
+        }
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
         gl.bufferData(gl.ARRAY_BUFFER, a.vertices, gl.STREAM_DRAW);
         gl.enableVertexAttribArray(0);
@@ -108,6 +137,7 @@ function runCommands(gl, commands, targets, packet) {
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
         gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 28, 12);
         gl.drawArrays(gl.TRIANGLES, 0, a.count);
+        if (texture) gl.bindTexture(gl.TEXTURE_2D, previousTexture);
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -133,14 +163,15 @@ function runCommands(gl, commands, targets, packet) {
         if (a & 4) { gl.clearStencil(d); bits |= gl.STENCIL_BUFFER_BIT; }
         gl.clear(bits);
       }
-      if (opcode >= 9) {
+      if (opcode >= 9 && opcode <= 12) {
         const result = targets.execute(opcode, a, packet);
         if (result !== 0n) return result;
       }
     }
     return gl.isContextLost() ? -6n : 0n;
   } finally {
-    for (const { program, buffer } of draws.values()) {
+    for (const { program, buffer, texture } of draws.values()) {
+      if (texture) gl.deleteTexture(texture);
       gl.deleteBuffer(buffer);
       gl.deleteProgram(program);
     }
@@ -191,8 +222,9 @@ export function createGpuSubmit(gl, memory, generation, targets = null) {
         const state = [word(at + 8), word(at + 12), word(at + 16)];
         if (state.some(value => value > 1)) return -4n;
         commands.push([opcode, ...state]);
-      } else if (opcode === 4) {
-        const draw = readDraw(packet, at, span);
+      } else if (opcode === 4 || opcode === 13) {
+        const limit = opcode === 13 ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 0;
+        const draw = readDraw(packet, at, span, opcode === 13, limit);
         if (!draw) return -4n;
         commands.push([opcode, draw]);
       } else if (opcode === 5) {
