@@ -1,9 +1,10 @@
 /* tools/speed-ledger.cx -- offline per-version speed ledger (S5).
- *   sh ./unisacc.com tools/speed-ledger.cx -- --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N] [--header]
- *   sh ./unisacc.com tools/speed-ledger.cx -- --check FILE --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N]
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N] [--header]
+ *   sh ./unisacc.com tools/speed-ledger.cx -- --check FILE --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N]
  * Derives one TSV row from existing read-only records (git log/tags, chain-run.tsv ATTEMPT_TIME/SUPERVISE,
- * release/evidence/vVER-strict-*.tsv SUMMARY, tests/batch-domain-index.tsv). Missing data is reported
- * honestly as UNMEASURED (never guessed).
+ * bg.log BLOCKER/SUPERVISE across all variant dirs of --chain-base, release/evidence/vVER-strict-*.tsv
+ * deduplicated by BATCH_RUN id + non-RAW batch rows, and tests/batch-domain-index.tsv).
+ * Missing data is reported honestly as UNMEASURED (never guessed).
  * Columns (12):
  *   version slot_min chain_start_min chain_exit_min prerun_done_min public_min
  *   chains chain_eff chain_par prerun_par selected_batches domain_ratio */
@@ -14,6 +15,22 @@
 
 #define SL_PW 4400
 #define SL_OUT 65536
+#define SL_MAXB 2048
+
+static char sl_seen_b[SL_MAXB][128];
+static int sl_nseen_b;
+
+static void sl_add_batch_id(const char *id, size_t len) {
+    if (len == 0 || len >= 128) return;
+    for (int i = 0; i < sl_nseen_b; i++) {
+        if (strlen(sl_seen_b[i]) == len && tx_same(sl_seen_b[i], (long)len, id, (long)len)) return;
+    }
+    if (sl_nseen_b < SL_MAXB) {
+        if (mm_copy(sl_seen_b[sl_nseen_b], 128, id, (long)len)) return;
+        sl_seen_b[sl_nseen_b][len] = 0;
+        sl_nseen_b++;
+    }
+}
 
 static long long sl_atoll(const char *s) {
     long long v = 0;
@@ -47,7 +64,6 @@ static long long sl_git_ts(const char *repo, int earliest, const char *rel_path)
     av[k] = 0;
     if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
     if (!earliest) return sl_atoll(out);
-    /* earliest: last non-empty line */
     {
         char *p = out, *last = 0;
         while (*p) {
@@ -106,16 +122,15 @@ typedef struct {
     long long sum_ms;
     int ok;
     int valid;
+    int bg_blockers;
+    int bg_sup_ok;
+    int bg_sup_fail;
 } SlChainInfo;
 
-static void sl_parse_chain_tsv(const char *path, SlChainInfo *ci) {
+static void sl_parse_bg_log(const char *path, SlChainInfo *ci) {
     size_t sz = 0, i = 0;
     char *s = cx_read(path, &sz);
-    memset(ci, 0, sizeof *ci);
-    ci->start_ts = -1;
-    ci->exit_ts = -1;
     if (!s) return;
-    ci->valid = 1;
     while (i < sz) {
         size_t a = i;
         while (i < sz && s[i] != '\n') i++;
@@ -129,26 +144,68 @@ static void sl_parse_chain_tsv(const char *path, SlChainInfo *ci) {
         if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
         line[len] = 0;
 
-        if (tx_prefixz(line, "LIMITS\t", 7) || tx_prefixz(line, "SEGMENT\t", 8)) {
-            char *t1 = strchr(line, '\t');
-            long long ts = t1 ? sl_atoll(t1 + 1) : -1;
-            if (ts > 0 && (ci->start_ts < 0 || ts < ci->start_ts)) ci->start_ts = ts;
-        } else if (tx_prefixz(line, "ATTEMPT_TIME\t", 13)) {
-            long long w = sl_num_after(line, "wall_ms=");
-            if (w > 0) ci->sum_ms += w;
+        if (strstr(line, "BLOCKER") != 0) {
+            ci->bg_blockers++;
         } else if (tx_prefixz(line, "SUPERVISE\t", 10)) {
-            char *t1 = strchr(line, '\t');
-            long long ts = t1 ? sl_atoll(t1 + 1) : -1;
             long long rc = sl_num_after(line, "rc=");
-            if (ts > 0) ci->exit_ts = ts;
-            if (rc == 0) ci->ok = 1;
+            if (rc == 0) ci->bg_sup_ok++;
+            else if (rc > 0) ci->bg_sup_fail++;
         }
     }
     free(s);
 }
 
+static void sl_parse_chain_dir(const char *dir, SlChainInfo *ci) {
+    char p[SL_PW], bg[SL_PW];
+    size_t sz = 0, i = 0;
+    char *s;
+    memset(ci, 0, sizeof *ci);
+    ci->start_ts = -1;
+    ci->exit_ts = -1;
+    if (cx_fmt(p, sizeof p, "%s/chain-run.tsv", dir)) return;
+    s = cx_read(p, &sz);
+    if (s) {
+        ci->valid = 1;
+        while (i < sz) {
+            size_t a = i;
+            while (i < sz && s[i] != '\n') i++;
+            size_t len = i - a;
+            if (len > 0 && s[a + len - 1] == '\r') len--;
+            if (i < sz && s[i] == '\n') i++;
+            if (len == 0) continue;
+
+            char line[1024];
+            if (len >= sizeof line) len = sizeof line - 1;
+            if (mm_copy(line, (long)sizeof line, s + a, (long)len)) break;
+            line[len] = 0;
+
+            if (tx_prefixz(line, "LIMITS\t", 7) || tx_prefixz(line, "SEGMENT\t", 8) || tx_prefixz(line, "YIELD\t", 6)) {
+                char *t1 = strchr(line, '\t');
+                long long ts = t1 ? sl_atoll(t1 + 1) : -1;
+                if (ts > 0) {
+                    if (ci->start_ts < 0 || ts < ci->start_ts) ci->start_ts = ts;
+                    if (ts > ci->exit_ts) ci->exit_ts = ts;
+                }
+            } else if (tx_prefixz(line, "ATTEMPT_TIME\t", 13)) {
+                long long w = sl_num_after(line, "wall_ms=");
+                if (w > 0) ci->sum_ms += w;
+            } else if (tx_prefixz(line, "SUPERVISE\t", 10)) {
+                char *t1 = strchr(line, '\t');
+                long long ts = t1 ? sl_atoll(t1 + 1) : -1;
+                long long rc = sl_num_after(line, "rc=");
+                if (ts > 0 && ts > ci->exit_ts) ci->exit_ts = ts;
+                if (rc == 0) ci->ok = 1;
+            }
+        }
+        free(s);
+    }
+    if (!cx_fmt(bg, sizeof bg, "%s/bg.log", dir)) {
+        sl_parse_bg_log(bg, ci);
+        if (ci->bg_blockers > 0 || ci->bg_sup_ok > 0 || ci->bg_sup_fail > 0) ci->valid = 1;
+    }
+}
+
 static void sl_ver_short(const char *ver, char *out, size_t cap) {
-    /* "0.0.81" -> "081" */
     const char *p = ver;
     size_t o = 0;
     if (tx_prefixz(p, "0.", 2)) p += 2;
@@ -158,52 +215,98 @@ static void sl_ver_short(const char *ver, char *out, size_t cap) {
     out[o] = 0;
 }
 
-static void sl_discover_chains(const char *ver, const char *opt_chain_dir, SlChainInfo *best, int *chains_ok, int *chains_total) {
-    memset(best, 0, sizeof *best);
-    best->start_ts = -1;
-    best->exit_ts = -1;
-    *chains_ok = 0;
-    *chains_total = 0;
+typedef struct {
+    SlChainInfo best;
+    int chains_ok;
+    int chains_total;
+    long long min_start_ts;
+    long long max_exit_ts;
+    long long sum_wall_s;
+} SlChainAgg;
+
+static void sl_accum_chain(SlChainAgg *agg, const SlChainInfo *ci) {
+    int dir_ok = (ci->ok || ci->bg_sup_ok > 0) ? 1 : 0;
+    int dir_fail = ci->bg_sup_fail + ci->bg_blockers;
+    if (!dir_ok && dir_fail == 0) dir_fail = 1;
+    agg->chains_ok += dir_ok;
+    agg->chains_total += dir_ok + dir_fail;
+
+    if (ci->start_ts > 0) {
+        if (agg->min_start_ts < 0 || ci->start_ts < agg->min_start_ts) agg->min_start_ts = ci->start_ts;
+    }
+    if (ci->exit_ts > 0) {
+        if (agg->max_exit_ts < 0 || ci->exit_ts > agg->max_exit_ts) agg->max_exit_ts = ci->exit_ts;
+    }
+    if (ci->start_ts > 0 && ci->exit_ts > ci->start_ts) {
+        agg->sum_wall_s += (ci->exit_ts - ci->start_ts);
+    }
+    if (!agg->best.valid || (dir_ok && !agg->best.ok) || (dir_ok == agg->best.ok && ci->start_ts > agg->best.start_ts)) {
+        agg->best = *ci;
+        agg->best.ok = dir_ok;
+    }
+}
+
+static void sl_discover_chains(const char *ver, const char *opt_chain_dir, const char *opt_chain_base, SlChainAgg *agg) {
+    memset(agg, 0, sizeof *agg);
+    agg->best.start_ts = -1;
+    agg->best.exit_ts = -1;
+    agg->min_start_ts = -1;
+    agg->max_exit_ts = -1;
 
     if (opt_chain_dir) {
-        char p[SL_PW];
-        if (!cx_fmt(p, sizeof p, "%s/chain-run.tsv", opt_chain_dir)) {
-            sl_parse_chain_tsv(p, best);
-            if (best->valid) {
-                *chains_total = 1;
-                *chains_ok = best->ok ? 1 : 0;
-            }
-        }
+        SlChainInfo ci;
+        sl_parse_chain_dir(opt_chain_dir, &ci);
+        if (ci.valid) sl_accum_chain(agg, &ci);
         return;
     }
 
-    char vshort[32], pref[64];
-    sl_ver_short(ver, vshort, sizeof vshort);
-    if (cx_fmt(pref, sizeof pref, "unisacc-session-v%s-chain", vshort)) return;
-    size_t plen = strlen(pref);
+    char parent[SL_PW], pref[256];
+    if (opt_chain_base) {
+        const char *sl = strrchr(opt_chain_base, '/');
+        if (!sl) return;
+        size_t plen = (size_t)(sl - opt_chain_base);
+        if (plen == 0) {
+            if (cx_fmt(parent, sizeof parent, "/")) return;
+        } else {
+            if (plen >= sizeof parent || mm_copy(parent, (long)sizeof parent, opt_chain_base, (long)plen)) return;
+            parent[plen] = 0;
+        }
+        if (cx_fmt(pref, sizeof pref, "%s", sl + 1)) return;
+    } else {
+        char vshort[32];
+        sl_ver_short(ver, vshort, sizeof vshort);
+        if (cx_fmt(parent, sizeof parent, "/tmp")) return;
+        if (cx_fmt(pref, sizeof pref, "unisacc-session-v%s-chain", vshort)) return;
+    }
 
-    DIR *dp = opendir("/tmp");
+    size_t prlen = strlen(pref);
+    DIR *dp = opendir(parent);
     if (!dp) return;
     struct dirent *de;
     while ((de = readdir(dp)) != 0) {
-        if (!tx_prefixz(de->d_name, pref, (long)plen)) continue;
+        if (!tx_prefixz(de->d_name, pref, (long)prlen)) continue;
         char sdir[SL_PW];
-        if (cx_fmt(sdir, sizeof sdir, "/tmp/%s", de->d_name)) continue;
+        if (cx_fmt(sdir, sizeof sdir, "%s/%s", parent, de->d_name)) continue;
+
+        /* Support both direct chain-run.tsv/bg.log in variant dir and nested <sha>/ subdirs */
+        {
+            SlChainInfo direct;
+            sl_parse_chain_dir(sdir, &direct);
+            if (direct.valid) {
+                sl_accum_chain(agg, &direct);
+                continue;
+            }
+        }
         DIR *sub = opendir(sdir);
         if (!sub) continue;
         struct dirent *sde;
         while ((sde = readdir(sub)) != 0) {
             if (sde->d_name[0] == '.') continue;
-            char fpath[SL_PW];
+            char subp[SL_PW];
             SlChainInfo ci;
-            if (cx_fmt(fpath, sizeof fpath, "%s/%s/chain-run.tsv", sdir, sde->d_name)) continue;
-            sl_parse_chain_tsv(fpath, &ci);
-            if (!ci.valid) continue;
-            (*chains_total)++;
-            if (ci.ok) (*chains_ok)++;
-            if (!best->valid || (ci.ok && !best->ok) || (ci.ok == best->ok && ci.start_ts > best->start_ts)) {
-                *best = ci;
-            }
+            if (cx_fmt(subp, sizeof subp, "%s/%s", sdir, sde->d_name)) continue;
+            sl_parse_chain_dir(subp, &ci);
+            if (ci.valid) sl_accum_chain(agg, &ci);
         }
         closedir(sub);
     }
@@ -237,6 +340,8 @@ static int sl_find_strict(const char *repo, const char *ver, char *rel_out, size
 static void sl_parse_prerun(const char *path, long long *sel_batches, long long *sum_ms, long long *wall_ms) {
     size_t sz = 0, i = 0;
     char *s = cx_read(path, &sz);
+    long long summary_b = -1;
+    sl_nseen_b = 0;
     *sel_batches = -1;
     *sum_ms = 0;
     *wall_ms = 0;
@@ -257,10 +362,21 @@ static void sl_parse_prerun(const char *path, long long *sel_batches, long long 
         if (tx_prefixz(line, "SUMMARY\t", 8)) {
             long long b = sl_num_after(line, "batches=");
             long long tm = sl_num_after(line, "total_ms=");
-            if (b >= 0) *sel_batches = b;
+            if (b >= 0) summary_b = b;
             if (tm > 0) *wall_ms += tm;
-        } else if (!tx_prefixz(line, "RAW\t", 4) && !tx_prefixz(line, "batch\t", 6)) {
-            /* dvqualify strict row: col 0..5 -> batch, domain, status, rc, tag, ms */
+        } else if (tx_prefixz(line, "RAW\t", 4)) {
+            const char *idp = strstr(line, "id=");
+            if (idp) {
+                idp += 3;
+                size_t k = 0;
+                while (idp[k] && idp[k] != '\t' && idp[k] != ' ') k++;
+                sl_add_batch_id(idp, k);
+            }
+        } else if (!tx_prefixz(line, "batch\t", 6)) {
+            char *t1 = strchr(line, '\t');
+            if (t1 && t1 > line) {
+                sl_add_batch_id(line, (size_t)(t1 - line));
+            }
             char *p = line;
             int col = 0;
             while (p && col < 5) {
@@ -275,6 +391,8 @@ static void sl_parse_prerun(const char *path, long long *sel_batches, long long 
         }
     }
     free(s);
+    if (sl_nseen_b > 0) *sel_batches = sl_nseen_b;
+    else if (summary_b >= 0) *sel_batches = summary_b;
 }
 
 static long long sl_count_domain(const char *repo) {
@@ -299,6 +417,7 @@ int main(int argc, char **argv) {
     const char *ver = 0;
     const char *repo = ".";
     const char *opt_chain = 0;
+    const char *opt_chain_base = 0;
     const char *opt_prerun = 0;
     const char *opt_check = 0;
     long long opt_dom = -1;
@@ -308,12 +427,13 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
         else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
         else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) opt_chain = argv[++i];
+        else if (tx_eqz(argv[i], "--chain-base") && i + 1 < argc) opt_chain_base = argv[++i];
         else if (tx_eqz(argv[i], "--prerun") && i + 1 < argc) opt_prerun = argv[++i];
         else if (tx_eqz(argv[i], "--check") && i + 1 < argc) opt_check = argv[++i];
         else if (tx_eqz(argv[i], "--domain-total") && i + 1 < argc) opt_dom = sl_atoll(argv[++i]);
         else if (tx_eqz(argv[i], "--header")) show_hdr = 1;
         else {
-            fprintf(stderr, "usage: speed-ledger --version VER [--repo DIR] [--chain-dir DIR] [--prerun FILE] [--domain-total N] [--header] [--check FILE]\n");
+            fprintf(stderr, "usage: speed-ledger --version VER [--repo DIR] [--chain-dir DIR] [--chain-base PREFIX] [--prerun FILE] [--domain-total N] [--header] [--check FILE]\n");
             return 2;
         }
     }
@@ -330,9 +450,8 @@ int main(int argc, char **argv) {
     long long pub_ts = sl_git_ts(repo, 0, pub_rel);
     if (pub_ts < 0) pub_ts = sl_git_tag_ts(repo, ver);
 
-    SlChainInfo ci;
-    int c_ok = 0, c_tot = 0;
-    sl_discover_chains(ver, opt_chain, &ci, &c_ok, &c_tot);
+    SlChainAgg agg;
+    sl_discover_chains(ver, opt_chain, opt_chain_base, &agg);
 
     long long prerun_ts = -1, sel_b = -1, pr_sum = 0, pr_wall = 0;
     strict_rel[0] = 0;
@@ -359,21 +478,28 @@ int main(int argc, char **argv) {
     char f_slot[32], f_cs[32], f_ce[32], f_pr[32], f_pub[32];
     char f_chains[32], f_ceff[32], f_cpar[32], f_ppar[32], f_sel[32], f_drat[32];
     sl_fmt_min(slot_ts, slot_ts, f_slot, sizeof f_slot);
-    sl_fmt_min(ci.start_ts, slot_ts, f_cs, sizeof f_cs);
-    sl_fmt_min(ci.exit_ts, slot_ts, f_ce, sizeof f_ce);
+    sl_fmt_min(agg.best.start_ts, slot_ts, f_cs, sizeof f_cs);
+    sl_fmt_min(agg.best.exit_ts, slot_ts, f_ce, sizeof f_ce);
     sl_fmt_min(prerun_ts, slot_ts, f_pr, sizeof f_pr);
     sl_fmt_min(pub_ts, slot_ts, f_pub, sizeof f_pub);
 
-    if (c_tot > 0) {
-        (void)cx_fmt(f_chains, sizeof f_chains, "%d/%d", c_ok, c_tot);
-        sl_fmt_pct1(c_ok, c_tot, f_ceff, sizeof f_ceff);
+    if (agg.chains_total > 0) {
+        (void)cx_fmt(f_chains, sizeof f_chains, "%d/%d", agg.chains_ok, agg.chains_total);
+        long long ok_wall_s = (agg.best.ok && agg.best.start_ts > 0 && agg.best.exit_ts > agg.best.start_ts) ? (agg.best.exit_ts - agg.best.start_ts) : 0;
+        long long span_s = (agg.min_start_ts > 0 && agg.max_exit_ts > agg.min_start_ts) ? (agg.max_exit_ts - agg.min_start_ts) : 0;
+        long long tot_wall_s = agg.sum_wall_s > span_s ? agg.sum_wall_s : span_s;
+        if (ok_wall_s > 0 && tot_wall_s > 0) {
+            sl_fmt_pct1(ok_wall_s, tot_wall_s, f_ceff, sizeof f_ceff);
+        } else {
+            sl_fmt_pct1(agg.chains_ok, agg.chains_total, f_ceff, sizeof f_ceff);
+        }
     } else {
         (void)cx_fmt(f_chains, sizeof f_chains, "UNMEASURED");
         (void)cx_fmt(f_ceff, sizeof f_ceff, "UNMEASURED");
     }
 
-    if (ci.valid && ci.start_ts > 0 && ci.exit_ts > ci.start_ts && ci.sum_ms > 0) {
-        sl_fmt_ratio2(ci.sum_ms, (ci.exit_ts - ci.start_ts) * 1000LL, f_cpar, sizeof f_cpar);
+    if (agg.best.valid && agg.best.start_ts > 0 && agg.best.exit_ts > agg.best.start_ts && agg.best.sum_ms > 0) {
+        sl_fmt_ratio2(agg.best.sum_ms, (agg.best.exit_ts - agg.best.start_ts) * 1000LL, f_cpar, sizeof f_cpar);
     } else {
         (void)cx_fmt(f_cpar, sizeof f_cpar, "UNMEASURED");
     }
