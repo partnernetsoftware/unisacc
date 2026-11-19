@@ -1,0 +1,98 @@
+struct RenderItem {
+  objectId: u32;
+  materialId: u32;
+  groupOrder: f64;
+  renderOrder: f64;
+  z: f64;
+  pass: u32;
+}
+
+native function render_item_before(a:i64,b:i64) i64 {
+  let pass=ux_u32(a+RenderItem.pass);
+  let other=ux_u32(b+RenderItem.pass);
+  if(pass!=other) { return pass<other; }
+  let ag=ux_f64(a+RenderItem.groupOrder);
+  let bg=ux_f64(b+RenderItem.groupOrder);
+  if(ag!=bg) { return ag<bg; }
+  let ar=ux_f64(a+RenderItem.renderOrder);
+  let br=ux_f64(b+RenderItem.renderOrder);
+  if(ar!=br) { return ar<br; }
+  if(pass==0) {
+    let am=ux_u32(a+RenderItem.materialId);
+    let bm=ux_u32(b+RenderItem.materialId);
+    if(am!=bm) { return am<bm; }
+  }
+  let az=ux_f64(a+RenderItem.z);
+  let bz=ux_f64(b+RenderItem.z);
+  if(az!=bz) {
+    if(pass==0) { return az<bz; }
+    return az>bz;
+  }
+  return ux_u32(a+RenderItem.objectId)<ux_u32(b+RenderItem.objectId);
+}
+
+// Return stable item indices in opaque, transmissive, and transparent order.
+// Work and output each contain count u32 entries. All spans are disjoint.
+native function RenderList_sort(items:i64,count:i64,output:i64,work:i64) i64 {
+  if(count<0 || count>65536 || items<0 || items%8!=0 || items>6291456-count*RenderItem.size ||
+     output<0 || output%4!=0 || output>6291456-count*4 ||
+     work<0 || work%4!=0 || work>6291456-count*4) { return 0-1; }
+  let bytes=count*4;
+  let item_bytes=count*RenderItem.size;
+  if(count>0 && ((items<output+bytes && output<items+item_bytes) ||
+     (items<work+bytes && work<items+item_bytes) || (output<work+bytes && work<output+bytes))) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let at=items+i*RenderItem.size;
+    let g=ux_f64(at+RenderItem.groupOrder);
+    let r=ux_f64(at+RenderItem.renderOrder);
+    let z=ux_f64(at+RenderItem.z);
+    if(ux_u32(at+RenderItem.pass)>2 || g-g!=0.0 || r-r!=0.0 || z-z!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let initialized=ux_u32_put(output+i*4,i);
+    i=i+1;
+  }
+  let from=output;
+  let to=work;
+  let width=1;
+  while(width<count) {
+    let lo=0;
+    while(lo<count) {
+      let mid=lo+width;
+      let hi=mid+width;
+      if(mid>count) { mid=count; }
+      if(hi>count) { hi=count; }
+      let left=lo;
+      let right=mid;
+      let at=lo;
+      while(at<hi) {
+        let pick=0;
+        let choose_left=left<mid;
+        if(choose_left && right<hi) {
+          let a=items+RenderItem.size*ux_u32(from+right*4);
+          let b=items+RenderItem.size*ux_u32(from+left*4);
+          choose_left=!render_item_before(a,b);
+        }
+        if(choose_left) {
+          pick=ux_u32(from+left*4);
+          left=left+1;
+        } else {
+          pick=ux_u32(from+right*4);
+          right=right+1;
+        }
+        let saved=ux_u32_put(to+at*4,pick);
+        at=at+1;
+      }
+      lo=hi;
+    }
+    let old=from;
+    from=to;
+    to=old;
+    width=width*2;
+  }
+  if(from!=output) { let copied=uxe_copy_record(output,from,bytes); }
+  return count;
+}
