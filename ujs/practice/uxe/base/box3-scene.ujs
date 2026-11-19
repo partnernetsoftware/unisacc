@@ -1,0 +1,57 @@
+// One row per geometry-bearing node in the subtree. Matrices are already world transforms.
+// localBounds = 0xffffffff requests bounds from the position view.
+// layout 0 is packed f64, layout 1 is f32. canScan=0 selects cached/aggregate bounds.
+struct Box3SceneRow {
+  matrix: u32; localBounds: u32; position: u32; count: u32;
+  stride: u32; layout: u32; canScan: u32;
+}
+
+// Separate scratch holds the 48-byte local box and one 24-byte transformed vertex.
+native function Box3_sceneExpand(b3_tree_box:i64,b3_rows:i64,b3_rows_count:i64,b3_precise:i64,b3_tree_tmp:i64) i64 {
+  if(b3_rows<0 || b3_rows>6291456 || b3_rows_count<0 || b3_rows_count>(6291456-b3_rows)/Box3SceneRow.size) { return 0-1; }
+  let b3_scene_span=ux_span(b3_tree_tmp,72);
+  let b3_scene_vertex=b3_tree_tmp+48;
+  let b3_row_index=0;
+  while(b3_row_index<b3_rows_count) {
+    let b3_row=b3_rows+b3_row_index*Box3SceneRow.size;
+    let b3_world=ux_u32(b3_row+Box3SceneRow.matrix);
+    let b3_local=ux_u32(b3_row+Box3SceneRow.localBounds);
+    let b3_point_base=ux_u32(b3_row+Box3SceneRow.position);
+    let b3_point_count=ux_u32(b3_row+Box3SceneRow.count);
+    let b3_point_stride=ux_u32(b3_row+Box3SceneRow.stride);
+    let b3_point_layout=ux_u32(b3_row+Box3SceneRow.layout);
+    let b3_need_points=b3_precise!=0 && ux_u32(b3_row+Box3SceneRow.canScan)!=0;
+    let b3_width=24;
+    if(b3_point_layout==1) { b3_width=12; }
+    if((b3_need_points || b3_local==4294967295) && b3_point_count>0) {
+      if(b3_point_layout>1 || b3_point_stride<b3_width || b3_point_base>6291456-b3_width ||
+          b3_point_count-1>(6291456-b3_point_base-b3_width)/b3_point_stride) { return 0-1; }
+    }
+    if(b3_need_points) {
+      let b3_scene_index=0;
+      while(b3_scene_index<b3_point_count) {
+        let b3_scene_at=b3_point_base+b3_scene_index*b3_point_stride;
+        if(b3_point_layout==0) {
+          let b3_scene_f64=Vector3_set(b3_scene_vertex,ux_f64(b3_scene_at),ux_f64(b3_scene_at+8),ux_f64(b3_scene_at+16));
+        } else {
+          let b3_scene_f32=Vector3_set(b3_scene_vertex,ux_f32(b3_scene_at),ux_f32(b3_scene_at+4),ux_f32(b3_scene_at+8));
+        }
+        let b3_placed=Vector3_applyMatrix4(b3_scene_vertex,b3_world);
+        let b3_fit_world=Box3_fitXYZ(b3_tree_box,ux_f64(b3_placed),ux_f64(b3_placed+8),ux_f64(b3_placed+16));
+        b3_scene_index=b3_scene_index+1;
+      }
+    } else {
+      let b3_local_box=b3_tree_tmp;
+      if(b3_local==4294967295) {
+        b3_local_box=Box3_setFromBuffers(b3_tree_tmp,b3_point_base,b3_point_count,b3_point_stride,b3_point_layout);
+      } else {
+        b3_local_box=Box3_set(b3_tree_tmp,b3_local,b3_local+24);
+      }
+      if(b3_local_box<0) { return 0-1; }
+      let b3_world_box=Box3_applyMatrix4(b3_local_box,b3_world,b3_scene_vertex);
+      let b3_grown=Box3_union(b3_tree_box,b3_world_box);
+    }
+    b3_row_index=b3_row_index+1;
+  }
+  return b3_tree_box;
+}
