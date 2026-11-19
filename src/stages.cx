@@ -246,7 +246,7 @@ static void st_stamp(const char *stage, int rc, long long a, long long b) {
     const char *env;
     env = getenv("UNISACC_RR_TIME");
     if (!env || !env[0] || a < 0 || b < 0) return;
-    if (rc < 0) fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=inflate\tns=%lld\n", stage, b - a);
+    if (rc < 0) fprintf(stderr, "RR_TIME\tmodel\tstage=%s\tsource=%s\tns=%lld\n", stage, rc == -2 ? "raw" : "inflate", b - a);
     else fprintf(stderr, "RR_TIME\tinference\tstage=%s\trc=%d\tns=%lld\n", stage, rc, b - a);
 }
 
@@ -261,10 +261,10 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
     void ex_unload(void);
     int pm_along(const char *, int, const char **);
     int pm_model(const char *, const char *, const unsigned char **, long *, int *, unsigned *, int *);
-    int pm_ver(void);
     int ex_inflate(unsigned char *, unsigned long, const unsigned char *, unsigned long);
     unsigned ex_crc32(char *, int);
     long long hs_ns(void);
+    int rt_raw(const unsigned char *, long, int, unsigned, unsigned (*)(char *, int), char *, long);
     int rt_open(int, int, const unsigned char *, int, unsigned char *, int, unsigned, int (*)(unsigned char *, unsigned long, const unsigned char *, unsigned long), unsigned (*)(char *, int), int *, int *, char *, long);
     int sh_apply(int, int, int, int, const char *, void *, unsigned char *, int, unsigned char *, void (*)(const char *), void (*)(void *), void (*)(void), void (*)(int), void (*)(unsigned char *, int), void (*)(void *), void (*)(void), void (*)(void *), void (*)(void *));
     int rt_strip(int);
@@ -293,7 +293,6 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
         long on;
         int raw;
         int compressed;
-        int ver;
         int opened;
         int use_owned;
         int out_len;
@@ -337,9 +336,8 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
             st_put(why, cap, pr == 2 ? "model" : "model");
             return pr == 4 ? 4 : 1;
         }
-        ver = pm_ver();
         owned = 0;
-        if (ver >= 3) {
+        if (compressed == 1) {
             if (raw <= 0 || raw > 1073741824 || mn < 0 || mn > 2147483647L) {
                 free(curb);
                 st_put(why, cap, "model too large");
@@ -356,7 +354,10 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
         out_len = 0;
         openwhy[0] = 0;
         t0 = hs_ns();
-        opened = rt_open(ver, 0, mb, (int)mn, owned, ver >= 3 ? raw : 0, ver >= 3 ? crcsum : 0,
+        if (compressed == 2) {
+            opened = rt_raw(mb, mn, raw, crcsum, ex_crc32, openwhy, 80);
+            out_len = raw;
+        } else opened = rt_open(compressed ? 3 : 1, 0, mb, (int)mn, owned, raw, crcsum,
                          ex_inflate, ex_crc32, &use_owned, &out_len, openwhy, 80);
         st_why = why;
         st_wcap = cap;
@@ -364,10 +365,9 @@ int st_span(const char *route, const char *tgt, const char *src, int cx, unsigne
         pr = sh_apply(opened, use_owned, out_len, 0, openwhy, 0, (unsigned char *)mb, (int)mn, owned,
                       st_fail, 0, st_clear, st_loading, st_load, st_release, st_lb, 0, 0);
         t1 = hs_ns();
-        st_stamp(stage, -1, t0, t1);
+        st_stamp(stage, compressed == 2 ? -2 : -1, t0, t1);
         if (pr == 2 || pr == 3) {
-            if (pr == 3) free(owned);
-            if (pr == 2) free(owned);
+            free(owned);
             free(curb);
             ex_unload();
             if (!why || cap <= 0 || !why[0]) st_put(why, cap, openwhy[0] ? openwhy : "model");

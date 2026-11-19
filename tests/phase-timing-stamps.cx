@@ -186,8 +186,8 @@ typedef struct stamps {
     long long lookup_hit, lookup_ns, art_hit, art_mode, mem_rc, mem_ns;
     /* in-product phase stamps (exec/c/compiler.c package()/output, exec/c/run.c runroute_range):
        construction (package parse), model (per stage: inflate or cache bind), inference (per stage), output */
-    int con_n, model_n, model_inflate_n, model_cache_n, inf_n, inf_rc_bad, out_n, modelcache_n, modelphase_n;
-    long long con_ns, model_ns, inf_ns, out_ns;
+    int con_n, model_n, model_inflate_n, model_raw_n, model_cache_n, inf_n, inf_rc_bad, out_n, modelcache_n, modelphase_n;
+    long long con_ns, model_ns, model_inflate_ns, inf_ns, out_ns;
     int out_image_n;
     char inf_seq[96];   /* inference stage names in print order, each followed by one space */
 } stamps;
@@ -227,9 +227,11 @@ static void parse_stamps(const char *e, size_t n, stamps *st) {
         } else if (prefixed(l, ln, "RR_TIME\tconstruction\tns=", &k) && digits(l + k, ln - k, &b, 1)) {
             st->con_n++; st->con_ns += b;
         } else if (prefixed(l, ln, "RR_TIME\tmodel\tstage=", &k) && tail_ns(l, ln, &b) &&
-                   (has_field(l, ln, "\tsource=inflate\t") || has_field(l, ln, "\tsource=cache\t"))) {
+                   (has_field(l, ln, "\tsource=inflate\t") || has_field(l, ln, "\tsource=raw\t") || has_field(l, ln, "\tsource=cache\t"))) {
             st->model_n++; st->model_ns += b;
-            if (has_field(l, ln, "\tsource=cache\t")) st->model_cache_n++; else st->model_inflate_n++;
+            if (has_field(l, ln, "\tsource=cache\t")) st->model_cache_n++;
+            else if (has_field(l,ln,"\tsource=raw\t")) st->model_raw_n++;
+            else {st->model_inflate_n++; st->model_inflate_ns+=b;}
         } else if (prefixed(l, ln, "RR_TIME\tmodelcache\tresult=", &k) && (prefixed(l + k, ln - k, "hit\tbytes=", &k2) || prefixed(l + k, ln - k, "miss\tbytes=", &k2) ||
                    prefixed(l + k, ln - k, "corrupt\tbytes=", &k2)) && digits(l + k + k2, ln - k - k2, &b, 1)) {
             st->modelcache_n++;   /* SPEED-01 lever 4 (2026-11-04): the inflated-model cache reports one row per model lookup */
@@ -680,9 +682,9 @@ int main(int argc, char **argv) {
     put_cell("loading.memory-bind", "hot", -1, "skipped-by-reuse:hit-sets-execrun(compiler.c:1044);also-cold-reason");
     put_cell("loading.forward-exec", "cold", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
     put_cell("loading.forward-exec", "hot", -1, "needs-product-stamp:forward_exec-memfd-write+execveat");
-    int cold_models = run_cold.st.model_inflate_n > 0 && !run_cold.st.model_cache_n && run_cold.st.model_n == run_cold.st.inf_n;
+    int cold_models = (run_cold.st.model_inflate_n + run_cold.st.model_raw_n > 0) && !run_cold.st.model_cache_n && run_cold.st.model_n == run_cold.st.inf_n;
     int cold_inf = run_cold.st.inf_n > 0 && !run_cold.st.inf_rc_bad && run_cold.st.model_n == run_cold.st.inf_n;
-    put_cell("loading.model-inflate", "cold", cold_models ? run_cold.st.model_ns : -1,
+    put_cell("loading.model-inflate", "cold", cold_models ? run_cold.st.model_inflate_ns : -1,
              cold_models ? "product-stamp:sum-of-RR_TIME-model-source=inflate(run.c-runroute_range)-per-stage" : "needs-product-stamp:no-RR_TIME-model-lines");
     put_cell("loading.model-inflate", "hot", -1, hit_stamped && !run_hit.st.model_n
              ? "skipped-by-reuse:hit-runs-no-stage(zero-RR_TIME-model-lines-on-hit)" : "needs-product-stamp:no-RR_TIME-model-lines");
