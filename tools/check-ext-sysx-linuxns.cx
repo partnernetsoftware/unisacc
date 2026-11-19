@@ -1,0 +1,307 @@
+/* From repository root: sh ./unisacc.com tools/check-ext-sysx-linuxns.cx
+ * checks ext/sysx/linuxns.cx (sysx.linuxns): Linux namespace/mount/prctl primitives in real
+ * unprivileged user-namespace children, argument/OOB/unprivileged refusals, and win/x86_64 +
+ * osx/x86_64 cross-target compilation.  Last line failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.netraw
+#pragma unisa use os.osx
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use sysx.linuxns
+
+static int lns_passed, lns_failed;
+
+static void lns_ck(int ok, const char *name) {
+    if (ok) lns_passed++; else lns_failed++;
+    sy_printf("%s\tsysx-linuxns.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static void lns_msg(const char *s) {
+    long n = tx_len(s, 4096);
+    if (n > 0) sy_write_all(1, s, n);
+}
+
+static int lns_read_text(const char *path, char *buf, int cap) {
+    int fd = sy_open_read(path);
+    long n;
+    if (fd < 0) return -1;
+    n = sy_read(fd, buf, (long)cap - 1);
+    sy_close(fd);
+    if (n < 0) return -1;
+    buf[n] = 0;
+    return (int)n;
+}
+
+static int lns_write_text(const char *path, const char *s) {
+    int fd = sy_open(path, 1 /* O_WRONLY */, 0600);
+    int r;
+    if (fd < 0) return fd;
+    r = sy_write_all(fd, s, tx_len(s, 4096));
+    sy_close(fd);
+    return r;
+}
+
+static int lns_has_line(const char *buf, int n, const char *needle) {
+    long m = tx_len(needle, 256), i, j;
+    for (i = 0; i + m <= (long)n; i++) {
+        for (j = 0; j < m && buf[i + j] == needle[j]; j++) {}
+        if (j == m) return 1;
+    }
+    return 0;
+}
+
+static int lns_read_gid(int *gid_out) {
+    char b[4096];
+    int n = lns_read_text("/proc/self/status", b, (int)sizeof b);
+    long pos, i;
+    int v = 0;
+    if (n <= 0) return -1;
+    pos = tx_find(b, (long)n, "\nGid:", 5);
+    if (pos < 0) return -1;
+    i = pos + 5;
+    while (i < n && (b[i] == ' ' || b[i] == '\t')) i++;
+    if (i >= n || b[i] < '0' || b[i] > '9') return -1;
+    while (i < n && b[i] >= '0' && b[i] <= '9') { v = v * 10 + (b[i] - '0'); i++; }
+    *gid_out = v;
+    return 0;
+}
+
+static int lns_setup_userns(int uid, int gid) {
+    char line[128];
+    if (cx_fmt(line, sizeof line, "0 %d 1\n", uid)) return -1;
+    if (lns_write_text("/proc/self/uid_map", line) != 0) return -1;
+    (void)lns_write_text("/proc/self/setgroups", "deny\n");
+    if (cx_fmt(line, sizeof line, "0 %d 1\n", gid)) return -1;
+    if (lns_write_text("/proc/self/gid_map", line) != 0) return -1;
+    return 0;
+}
+
+static int lns_run_child(int (*fn)(void *), void *ud, char *out, int cap, int *rc_out) {
+    int fds[2], pid, ex = 0, code = -1, sig = 0;
+    long n = 0, r;
+    *rc_out = -1;
+    out[0] = 0;
+    pid = sy_fork_session(fn, ud, fds);
+    if (pid < 0) return pid;
+    sy_close(fds[1]);
+    while (n < (long)cap - 1) {
+        r = sy_read(fds[0], out + n, (long)cap - 1 - n);
+        if (r <= 0) break;
+        n += r;
+    }
+    out[n] = 0;
+    sy_close(fds[0]);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) return -1;
+    *rc_out = ex ? code : (128 + sig);
+    return (int)n;
+}
+
+static int lns_child_prctl_seccomp(void *ud) {
+    char st[8192];
+    int n, uid, gid;
+    (void)ud;
+    uid = sy_uid();
+    if (lns_read_gid(&gid) != 0) { lns_msg("FAIL:read_gid\n"); return 1; }
+    if (sy_pdeathsig(15) != 0 || sy_pdeathsig(0) != 0) { lns_msg("FAIL:pdeathsig\n"); return 1; }
+    lns_msg("OK:pdeathsig\n");
+    if (sy_set_dumpable(0) != 0 || sy_set_dumpable(1) != 0) { lns_msg("FAIL:set_dumpable\n"); return 1; }
+    lns_msg("OK:set_dumpable\n");
+    if (sy_unshare(SY_CLONE_NEWUSER) != 0 || lns_setup_userns(uid, gid) != 0) {
+        lns_msg("FAIL:userns_caps\n"); return 1;
+    }
+    if (sy_drop_all_caps() != 0) { lns_msg("FAIL:drop_all_caps\n"); return 1; }
+    n = lns_read_text("/proc/self/status", st, (int)sizeof st);
+    if (n <= 0 || !lns_has_line(st, n, "CapEff:\t0000000000000000")
+        || !lns_has_line(st, n, "CapBnd:\t0000000000000000")) {
+        lns_msg("FAIL:caps_zero\n"); return 1;
+    }
+    if (sy_drop_all_caps() != -EPERM) { lns_msg("FAIL:drop_caps_unpriv_eperm\n"); return 1; }
+    lns_msg("OK:drop_all_caps\n");
+    if (sy_seccomp_filter() != -EACCES) { lns_msg("FAIL:seccomp_needs_nnp\n"); return 1; }
+    if (sy_no_new_privs() != 0) { lns_msg("FAIL:no_new_privs\n"); return 1; }
+    n = lns_read_text("/proc/self/status", st, (int)sizeof st);
+    if (n <= 0 || !lns_has_line(st, n, "NoNewPrivs:\t1")) { lns_msg("FAIL:nnp_proc\n"); return 1; }
+    lns_msg("OK:no_new_privs\n");
+    if (sy_seccomp_filter() != 0) { lns_msg("FAIL:seccomp_filter\n"); return 1; }
+    n = lns_read_text("/proc/self/status", st, (int)sizeof st);
+    if (n <= 0 || !lns_has_line(st, n, "Seccomp:\t2")) { lns_msg("FAIL:seccomp_proc\n"); return 1; }
+    if (sy_unshare(SY_CLONE_NEWUTS) != -EPERM || sy_setns(0, 0) != -EPERM
+        || sy_mount("none", "/tmp", "tmpfs", 0, 0) != -EPERM
+        || sy_umount2("/tmp", 0) != -EPERM
+        || sy_pivot_root("/tmp", "/tmp") != -EPERM) {
+        lns_msg("FAIL:seccomp_blocks\n"); return 1;
+    }
+    lns_msg("OK:seccomp_filter\n");
+    return 0;
+}
+
+static int lns_udp_lo_reachable(void) {
+    unsigned char sa[SY_SA_MAX], ip[4];
+    int fd, r;
+    ip[0] = 127; ip[1] = 0; ip[2] = 0; ip[3] = 1;
+    if (sy_sa_inet4(sa, (int)sizeof sa, ip, 9) != SY_SA_INET4_LEN) return -EINVAL;
+    fd = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_DGRAM));
+    if (fd < 0) return fd;
+    r = sy_sock_connect(fd, sa, SY_SA_INET4_LEN);
+    sy_close(fd);
+    return r;
+}
+
+static int lns_child_ns_mount_pivot(void *ud) {
+    const char *td = (const char *)ud;
+    char hn[128], oldp[4200], mntdir[4200];
+    unsigned long fl = 0;
+    int uid = sy_uid(), gid = 0, fd;
+    if (lns_read_gid(&gid) != 0) { lns_msg("FAIL:read_gid\n"); return 1; }
+    if (sy_unshare(SY_CLONE_NEWUSER | SY_CLONE_NEWNS | SY_CLONE_NEWUTS | SY_CLONE_NEWIPC | SY_CLONE_NEWNET) != 0) {
+        lns_msg("FAIL:unshare_all\n"); return 1;
+    }
+    if (lns_setup_userns(uid, gid) != 0) { lns_msg("FAIL:uid_gid_map\n"); return 1; }
+    lns_msg("OK:unshare\n");
+    if (sy_sethostname("cage-lns", 8) != 0) { lns_msg("FAIL:sethostname\n"); return 1; }
+    mm_fill(hn, (long)sizeof hn, 0, (long)sizeof hn);
+    if (sy_hostname(hn, (int)sizeof hn) != 8 || !tx_eqz(hn, "cage-lns")) {
+        lns_msg("FAIL:hostname_verify\n"); return 1;
+    }
+    lns_msg("OK:sethostname\n");
+    if (lns_udp_lo_reachable() == 0) { lns_msg("FAIL:lo_initially_up\n"); return 1; }
+    if (sy_net_lo_up() != 0 || sy_net_lo_up() != 0) { lns_msg("FAIL:net_lo_up\n"); return 1; }
+    if (lns_udp_lo_reachable() != 0) { lns_msg("FAIL:lo_still_down\n"); return 1; }
+    lns_msg("OK:net_lo_up\n");
+    if (cx_fmt(mntdir, sizeof mntdir, "%s/mnt", td) || sy_mkdir(mntdir, 0700) != 0) {
+        lns_msg("FAIL:mkdir_mnt\n"); return 1;
+    }
+    if (sy_mount("none", "/", 0, (unsigned long)(SY_MS_REC | SY_MS_PRIVATE), 0) != 0) {
+        lns_msg("FAIL:mount_private\n"); return 1;
+    }
+    if (sy_mount("none", mntdir, "tmpfs", 0, "size=1m,mode=0700") != 0) {
+        lns_msg("FAIL:mount_tmpfs\n"); return 1;
+    }
+    if (sy_mount(mntdir, mntdir, 0, (unsigned long)(SY_MS_BIND | SY_MS_REMOUNT | SY_MS_RDONLY | SY_MS_NOSUID | SY_MS_NODEV | SY_MS_NOEXEC), 0) != 0) {
+        lns_msg("FAIL:remount_ro\n"); return 1;
+    }
+    if (sy_mnt_flags(mntdir, &fl) != 0 || (fl & (unsigned long)(SY_MS_RDONLY | SY_MS_NOSUID | SY_MS_NODEV | SY_MS_NOEXEC))
+        != (unsigned long)(SY_MS_RDONLY | SY_MS_NOSUID | SY_MS_NODEV | SY_MS_NOEXEC)) {
+        lns_msg("FAIL:mnt_flags\n"); return 1;
+    }
+    lns_msg("OK:mount_flags\n");
+    if (sy_umount2(mntdir, SY_MNT_DETACH) != 0) { lns_msg("FAIL:umount2\n"); return 1; }
+    lns_msg("OK:umount2\n");
+    if (sy_mount("none", mntdir, "tmpfs", 0, "size=1m,mode=0755") != 0) {
+        lns_msg("FAIL:remount_rw_pivot\n"); return 1;
+    }
+    if (cx_fmt(oldp, sizeof oldp, "%s/old", mntdir) || sy_mkdir(oldp, 0700) != 0) {
+        lns_msg("FAIL:mkdir_old\n"); return 1;
+    }
+    if (sy_chdir(mntdir) != 0 || sy_pivot_root(".", "old") != 0) {
+        lns_msg("FAIL:pivot_root\n"); return 1;
+    }
+    if (sy_umount2("/old", SY_MNT_DETACH) != 0 || sy_rmdir("/old") != 0) {
+        lns_msg("FAIL:post_pivot_cleanup\n"); return 1;
+    }
+    fd = sy_open_read("/");
+    if (fd < 0) { lns_msg("FAIL:open_newroot\n"); return 1; }
+    sy_close(fd);
+    lns_msg("OK:pivot_root\n");
+    return 0;
+}
+
+static int lns_child_setns(void *ud) {
+    int fd;
+    (void)ud;
+    if (sy_unshare(SY_CLONE_NEWUSER | SY_CLONE_NEWUTS) != 0) { lns_msg("FAIL:setns_unshare\n"); return 1; }
+    fd = sy_open_read("/proc/self/ns/uts");
+    if (fd < 0) { lns_msg("FAIL:setns_open\n"); return 1; }
+    if (sy_setns(fd, SY_CLONE_NEWUTS) != 0) { sy_close(fd); lns_msg("FAIL:setns_ok\n"); return 1; }
+    if (sy_setns(fd, SY_CLONE_NEWNET) != -EINVAL) { sy_close(fd); lns_msg("FAIL:setns_wrong_type\n"); return 1; }
+    sy_close(fd);
+    lns_msg("OK:setns\n");
+    return 0;
+}
+
+static int lns_cross_compile(const char *td, const char *target, const char *outname) {
+    char cwd[4096], src[4200], out[4200], s_root[4200], l_root[4200], s_ext[4200], l_ext[4200], s_cx[4200], l_cx[4200];
+    static const char probe[] =
+        "#pragma unisa use sysx.linuxns\n"
+        "int main(void) {\n"
+        "    unsigned long fl = 0;\n"
+        "    int r = sy_unshare(SY_CLONE_NEWNS) | sy_setns(-1, 0) | sy_mount(\"a\", \"b\", \"c\", SY_MS_RDONLY, 0)\n"
+        "          | sy_umount2(\"b\", SY_MNT_DETACH) | sy_pivot_root(\"a\", \"b\") | sy_sethostname(\"x\", 1)\n"
+        "          | sy_net_lo_up() | sy_seccomp_filter() | sy_mnt_flags(\"/\", &fl)\n"
+        "          | sy_pdeathsig(15) | sy_set_dumpable(0) | sy_no_new_privs() | sy_drop_all_caps();\n"
+        "    return r ? 0 : 1;\n"
+        "}\n";
+    sy_spawn_t sp;
+    sy_exit_t st;
+    char *av[8];
+    int64_t sz = 0;
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return 0;
+    if (cx_fmt(src, sizeof src, "%s/probe.cx", td) || cx_fmt(out, sizeof out, "%s/%s", td, outname)) return 0;
+    if (cx_fmt(s_root, sizeof s_root, "%s/cxroot.tsv", cwd) || cx_fmt(l_root, sizeof l_root, "%s/cxroot.tsv", td)) return 0;
+    if (cx_fmt(s_ext, sizeof s_ext, "%s/ext", cwd) || cx_fmt(l_ext, sizeof l_ext, "%s/ext", td)) return 0;
+    if (cx_fmt(s_cx, sizeof s_cx, "%s/cx", cwd) || cx_fmt(l_cx, sizeof l_cx, "%s/cx", td)) return 0;
+    (void)sy_symlink(s_root, l_root);
+    (void)sy_symlink(s_ext, l_ext);
+    (void)sy_symlink(s_cx, l_cx);
+    if (sy_write_file(src, probe, (int64_t)(sizeof probe - 1), 0600) != 0) return 0;
+    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "-b"; av[3] = (char *)target;
+    av[4] = src; av[5] = "-o"; av[6] = out; av[7] = 0;
+    sy_spawn_init(&sp);
+    sp.argv = av;
+    sp.deadline_ms = 20000;
+    if (sy_proc_run(&sp, &st) != 0 || !st.exited || st.code != 0) return 0;
+    if (sy_file_size(out, &sz) != 0 || sz <= 0) return 0;
+    return 1;
+}
+
+int main(void) {
+    char td[4096], out[8192], longname[80];
+    unsigned long fl = 123;
+    int rc = -1, n, i;
+
+    if (sy_mkdtemp(sy_tmpdir(), "check-sysx-lns-", td, (int)sizeof td) < 0) return 2;
+    for (i = 0; i < 70; i++) longname[i] = 'a';
+    longname[70] = 0;
+
+    lns_ck(sy_setns(-1, 0) == -EBADF, "setns-ebadf");
+    lns_ck(sy_mount("none", "", "tmpfs", 0, 0) == -EINVAL && sy_mount("none", 0, "tmpfs", 0, 0) == -EINVAL, "mount-einval");
+    lns_ck(sy_umount2("", 0) == -EINVAL && sy_umount2(0, 0) == -EINVAL, "umount2-einval");
+    lns_ck(sy_pivot_root("", "old") == -EINVAL && sy_pivot_root(".", "") == -EINVAL, "pivot-root-einval");
+    lns_ck(sy_sethostname("", 0) == -EINVAL && sy_sethostname(0, 4) == -EINVAL && sy_sethostname(longname, 70) == -EINVAL, "sethostname-einval");
+    lns_ck(sy_sethostname("ab", 5) == -EINVAL && sy_sethostname("abcdef", 3) == -EINVAL, "sethostname-len-mismatch-einval");
+    lns_ck(sy_pdeathsig(-1) == -EINVAL && sy_pdeathsig(99) == -EINVAL, "pdeathsig-einval");
+    lns_ck(sy_set_dumpable(2) == -EINVAL && sy_set_dumpable(-1) == -EINVAL, "set-dumpable-einval");
+    lns_ck(sy_mnt_flags("", &fl) == -EINVAL && sy_mnt_flags("/", 0) == -EINVAL, "mnt-flags-einval");
+    lns_ck(sy_mnt_flags("/", &fl) == 0 && sy_mnt_flags("/nonexistent-lns-path", &fl) == -ENOENT, "mnt-flags-host-root-and-enoent");
+    if (sy_uid() != 0) lns_ck(sy_drop_all_caps() == -EPERM, "unpriv-drop-caps-nonzero");
+    else lns_ck(1, "unpriv-drop-caps-nonzero");
+
+    n = lns_run_child(lns_child_prctl_seccomp, 0, out, (int)sizeof out, &rc);
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:pdeathsig\n"), "child-pdeathsig");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:set_dumpable\n"), "child-set-dumpable");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:no_new_privs\n"), "child-no-new-privs");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:drop_all_caps\n"), "child-drop-all-caps");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:seccomp_filter\n"), "child-seccomp-filter");
+
+    n = lns_run_child(lns_child_ns_mount_pivot, td, out, (int)sizeof out, &rc);
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:unshare\n"), "child-unshare");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:sethostname\n"), "child-sethostname");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:net_lo_up\n"), "child-net-lo-up");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:mount_flags\n"), "child-mount-and-flags");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:umount2\n"), "child-umount2");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:pivot_root\n"), "child-pivot-root");
+
+    n = lns_run_child(lns_child_setns, 0, out, (int)sizeof out, &rc);
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:setns\n"), "child-setns");
+
+    lns_ck(lns_cross_compile(td, "win/x86_64", "probe-win.exe"), "compile-win-x86_64");
+    lns_ck(lns_cross_compile(td, "osx/x86_64", "probe-osx.bin"), "compile-osx-x86_64");
+
+    sy_remove_all(td);
+    sy_printf("CHECK_EXT_SYSX_LINUXNS\tpassed=%d\tfailed=%d\n", lns_passed, lns_failed);
+    return lns_failed ? 1 : 0;
+}

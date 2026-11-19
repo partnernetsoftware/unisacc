@@ -1,0 +1,405 @@
+/* ext/sysx/linuxns.cx -- Linux namespaces, mount/pivot/net_lo_up/seccomp, and prctl/caps primitives.
+ * Zero #include, zero #define: all OS/arch syscall numbers and AUDIT_ARCH live in lns_targets[]
+ * dispatched via sys.sysinfo.  Non-Linux targets (including Windows/macOS) compile cleanly and
+ * refuse at runtime with -ENOSYS. */
+#pragma unisa module linuxns
+#pragma unisa dock
+#pragma unisa use sys.fs
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.netraw
+#pragma unisa use mem.bytes
+
+enum {
+    SY_CLONE_NEWTIME   = 0x00000080,
+    SY_CLONE_NEWNS     = 0x00020000,
+    SY_CLONE_NEWCGROUP = 0x02000000,
+    SY_CLONE_NEWUTS    = 0x04000000,
+    SY_CLONE_NEWIPC    = 0x08000000,
+    SY_CLONE_NEWUSER   = 0x10000000,
+    SY_CLONE_NEWPID    = 0x20000000,
+    SY_CLONE_NEWNET    = 0x40000000,
+    SY_CLONE_NS_MASK   = 0x7e020080
+};
+
+enum {
+    SY_MS_RDONLY      = 1,
+    SY_MS_NOSUID      = 2,
+    SY_MS_NODEV       = 4,
+    SY_MS_NOEXEC      = 8,
+    SY_MS_SYNCHRONOUS = 16,
+    SY_MS_REMOUNT     = 32,
+    SY_MS_MANDLOCK    = 64,
+    SY_MS_DIRSYNC     = 128,
+    SY_MS_NOSYMFOLLOW = 256,
+    SY_MS_NOATIME     = 1024,
+    SY_MS_NODIRATIME  = 2048
+};
+
+enum {
+    SY_MS_BIND        = 4096,
+    SY_MS_MOVE        = 8192,
+    SY_MS_REC         = 16384,
+    SY_MS_SILENT      = 32768,
+    SY_MS_PRIVATE     = 262144,
+    SY_MS_SLAVE       = 524288,
+    SY_MS_SHARED      = 1048576,
+    SY_MS_RELATIME    = 2097152,
+    SY_MS_STRICTATIME = 16777216,
+    SY_MS_LAZYTIME    = 33554432
+};
+
+enum {
+    SY_MNT_FORCE       = 1,
+    SY_MNT_DETACH      = 2,
+    SY_MNT_EXPIRE      = 4,
+    SY_UMOUNT_NOFOLLOW = 8
+};
+
+typedef struct {
+    const char *os;
+    const char *arch;
+    long mount;
+    long umount2;
+    long pivot_root;
+    long unshare;
+    long setns;
+    long clone;
+    long clone3;
+    long open_tree;
+    long move_mount;
+    long fsopen;
+    long fsconfig;
+    long fsmount;
+    long fspick;
+    long ptrace;
+    long process_vm_readv;
+    long process_vm_writev;
+    long bpf;
+    long perf_event_open;
+    long userfaultfd;
+    long keyctl;
+    long add_key;
+    long request_key;
+    long kexec_load;
+    long kexec_file_load;
+    long init_module;
+    long finit_module;
+    long delete_module;
+    long capset;
+    long seccomp;
+    long prctl;
+    long statfs;
+    long ioctl;
+    long sethostname;
+    long open_by_handle_at;
+    long io_uring_setup;
+    long io_uring_enter;
+    long io_uring_register;
+    long pidfd_open;
+    long pidfd_getfd;
+    long mount_setattr;
+    unsigned int audit_arch;
+} LnsTarget;
+
+static const LnsTarget lns_targets[2] = {
+    {
+        "linux", "x86_64",
+        165, 166, 155, 272, 308, 56, 435, 428, 429,
+        430, 431, 432, 433, 101, 310, 311, 321, 298, 323,
+        250, 248, 249, 246, 320, 175, 313, 176, 126, 317,
+        157, 137, 16, 170, 304, 425, 426, 427, 434, 438,
+        442, 0xc000003eU
+    },
+    {
+        "linux", "arm64",
+        40, 39, 41, 97, 268, 220, 435, 428, 429,
+        430, 431, 432, 433, 117, 270, 271, 280, 241, 282,
+        219, 217, 218, 104, 294, 105, 273, 106, 91, 277,
+        167, 43, 29, 161, 265, 425, 426, 427, 434, 438,
+        442, 0xc00000b7U
+    }
+};
+
+static int lns_streq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *a == *b) { a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+static const LnsTarget *lns_target(void) {
+    const char *os = sy_os_name();
+    const char *arch = sy_arch_name();
+    int i;
+    for (i = 0; i < 2; i++) {
+        if (lns_streq(os, lns_targets[i].os) && lns_streq(arch, lns_targets[i].arch)) return &lns_targets[i];
+    }
+    return 0;
+}
+
+static int lns_unavail(void) {
+    return -ENOSYS; /* ENOSYS: refuse, Linux x86_64/arm64 only */
+}
+
+static long lns_sys(long n, long a, long b, long c, long d, long e) {
+#ifdef _WIN32
+    (void)n; (void)a; (void)b; (void)c; (void)d; (void)e;
+    return -ENOSYS; /* ENOSYS: refuse, not implemented on Windows */
+#else
+    if (n <= 0 || !lns_streq(sy_os_name(), "linux")) return -ENOSYS; /* ENOSYS: refuse, Linux syscall unavailable on this target */
+    return __syscall6(_UNISA_SC(n), a, b, c, d, e);
+#endif
+}
+
+/* unshare(2): disassociate parts of process execution context indicated by FLAGS.
+   0, or -errno (-ENOSYS on non-Linux targets). */
+int sy_unshare(int flags) {
+    const LnsTarget *t = lns_target();
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->unshare, (long)flags, 0, 0, 0, 0);
+}
+
+/* setns(2): reassociate calling thread with namespace referred to by FD.
+   0, or -errno (-EBADF on negative FD, -ENOSYS on non-Linux targets). */
+int sy_setns(int fd, int nstype) {
+    const LnsTarget *t = lns_target();
+    if (fd < 0) return -EBADF;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->setns, (long)fd, (long)nstype, 0, 0, 0);
+}
+
+/* mount(2): attach/remount/propagate filesystem on TGT.
+   0, or -errno (-EINVAL on empty TGT, -ENOSYS on non-Linux targets). */
+int sy_mount(const char *src, const char *tgt, const char *fstype, unsigned long flags, const void *data) {
+    const LnsTarget *t = lns_target();
+    if (!tgt || !tgt[0]) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->mount, (long)src, (long)tgt, (long)fstype, (long)flags, (long)data);
+}
+
+/* umount2(2): unmount TGT with FLAGS (e.g., SY_MNT_DETACH).
+   0, or -errno (-EINVAL on empty TGT, -ENOSYS on non-Linux targets). */
+int sy_umount2(const char *tgt, int flags) {
+    const LnsTarget *t = lns_target();
+    if (!tgt || !tgt[0]) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->umount2, (long)tgt, (long)flags, 0, 0, 0);
+}
+
+/* pivot_root(2): raw syscall moving root mount of calling mount namespace to NEW_ROOT and old root to PUT_OLD.
+   Does NOT prepare propagation (e.g. MS_PRIVATE) or bind-mount NEW_ROOT onto itself beforehand; caller must set up
+   mount propagation and make NEW_ROOT a mount point before calling.  0, or -errno (-EINVAL/-ENOSYS). */
+int sy_pivot_root(const char *new_root, const char *put_old) {
+    const LnsTarget *t = lns_target();
+    if (!new_root || !new_root[0] || !put_old || !put_old[0]) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->pivot_root, (long)new_root, (long)put_old, 0, 0, 0);
+}
+
+/* sethostname(2): set hostname in calling UTS namespace to NUL-terminated NAME whose exact byte length equals LEN (1..64).
+   Checks actual NUL-terminated string length against LEN to prevent out-of-bounds kernel reads.
+   0, or -errno (-EINVAL on NULL, bad LEN, or LEN != strlen(NAME); -ENOSYS on non-Linux targets). */
+int sy_sethostname(const char *name, long len) {
+    const LnsTarget *t = lns_target();
+    long sl = 0;
+    if (!name || !name[0] || len <= 0 || len > 64) return -EINVAL;
+    while (sl <= 64 && name[sl]) sl++;
+    if (sl != len) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->sethostname, (long)name, len, 0, 0, 0);
+}
+
+/* Read statfs.f_flags of PATH into *FLAGS_OUT.
+   0, or -errno (-EINVAL on bad args, -ENOSYS on non-Linux targets). */
+int sy_mnt_flags(const char *path, unsigned long *flags_out) {
+    const LnsTarget *t = lns_target();
+    unsigned long st[16];
+    long r;
+    if (!path || !path[0] || !flags_out) return -EINVAL;
+    if (!t) return lns_unavail();
+    mm_fill(st, (long)sizeof st, 0, (long)sizeof st);
+    r = lns_sys(t->statfs, (long)path, (long)st, 0, 0, 0);
+    if (r < 0) return (int)r;
+    *flags_out = st[10];
+    return 0;
+}
+
+/* Bring the "lo" loopback interface up via SIOCGIFFLAGS/SIOCSIFFLAGS.
+   0, or -errno (-ENOSYS on non-Linux targets). */
+int sy_net_lo_up(void) {
+    const LnsTarget *t = lns_target();
+    unsigned char ifr[40];
+    int s;
+    long r;
+    if (!t) return lns_unavail();
+    s = sy_sock_open((int)sy_sock_num(SY_SN_AF_INET4), (int)sy_sock_num(SY_SN_SOCK_DGRAM));
+    if (s < 0) return s;
+    mm_fill(ifr, (long)sizeof ifr, 0, (long)sizeof ifr);
+    ifr[0] = 'l';
+    ifr[1] = 'o';
+    r = lns_sys(t->ioctl, (long)s, 0x8913L /* SIOCGIFFLAGS */, (long)ifr, 0, 0);
+    if (r < 0) { sy_close(s); return (int)r; }
+    ifr[16] |= 1; /* IFF_UP */
+    r = lns_sys(t->ioctl, (long)s, 0x8914L /* SIOCSIFFLAGS */, (long)ifr, 0, 0);
+    sy_close(s);
+    return r < 0 ? (int)r : 0;
+}
+
+/* prctl(PR_SET_PDEATHSIG, SIG): set parent-death signal (0 clears, 1..64 sets).
+   0, or -errno (-EINVAL out of range, -ENOSYS on non-Linux targets). */
+int sy_pdeathsig(int sig) {
+    const LnsTarget *t = lns_target();
+    if (sig < 0 || sig > 64) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->prctl, 1L /* PR_SET_PDEATHSIG */, (long)sig, 0, 0, 0);
+}
+
+/* prctl(PR_SET_DUMPABLE, DUMPABLE): 0 disables ptrace/core dump, 1 enables.
+   0, or -errno (-EINVAL if not 0 or 1, -ENOSYS on non-Linux targets). */
+int sy_set_dumpable(int dumpable) {
+    const LnsTarget *t = lns_target();
+    if (dumpable != 0 && dumpable != 1) return -EINVAL;
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->prctl, 4L /* PR_SET_DUMPABLE */, (long)dumpable, 0, 0, 0);
+}
+
+/* prctl(PR_SET_NO_NEW_PRIVS, 1): irreversibly disallow gaining new privileges across execve.
+   0, or -errno (-ENOSYS on non-Linux targets). */
+int sy_no_new_privs(void) {
+    const LnsTarget *t = lns_target();
+    if (!t) return lns_unavail();
+    return (int)lns_sys(t->prctl, 38L /* PR_SET_NO_NEW_PRIVS */, 1L, 0, 0, 0);
+}
+
+/* Drop all bounding-set capabilities (0..CAP_LAST_CAP) and clear inheritable/permitted/effective caps.
+   Caller MUST inspect the return value: PR_CAPBSET_DROP requires CAP_SETPCAP in the current user namespace;
+   an unprivileged caller fails immediately at cap 0 with -EPERM (without reaching capset), and ignoring the
+   return code would falsely suggest capabilities were cleared.  0, or -errno (-EPERM/-ENOSYS). */
+int sy_drop_all_caps(void) {
+    const LnsTarget *t = lns_target();
+    int c;
+    if (!t) return lns_unavail();
+    for (c = 0; c < 64; c++) {
+        long r = lns_sys(t->prctl, 24L /* PR_CAPBSET_DROP */, (long)c, 0, 0, 0);
+        if (r == -EINVAL) break;
+        if (r < 0) return (int)r;
+    }
+    {
+        struct { unsigned int version; int pid; } hdr;
+        struct { unsigned int effective; unsigned int permitted; unsigned int inheritable; } data[2];
+        hdr.version = 0x20080522U;
+        hdr.pid = 0;
+        mm_fill(data, (long)sizeof data, 0, (long)sizeof data);
+        return (int)lns_sys(t->capset, (long)&hdr, (long)data, 0, 0, 0);
+    }
+}
+
+typedef struct {
+    unsigned short code;
+    unsigned char jt;
+    unsigned char jf;
+    unsigned int k;
+} LnsBpfInsn;
+
+static void lns_bpf_push(LnsBpfInsn *f, int *n, int cap, unsigned short code, unsigned char jt, unsigned char jf, unsigned int k) {
+    if (*n >= cap) {
+        *n = cap + 1;
+        return;
+    }
+    f[*n].code = code;
+    f[*n].jt = jt;
+    f[*n].jf = jf;
+    f[*n].k = k;
+    (*n)++;
+}
+
+/* seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog): install sandbox BPF filter blocking namespace creation,
+   mount/pivot_root/open_tree/fsmount, ptrace/bpf/io_uring/pidfd_getfd/kexec/modules, x32, and TIOCSTI/TIOCLINUX.
+   No TSYNC flag is passed, so the filter applies ONLY to the calling thread (and future descendants).
+   Uses denylist semantics: unlisted syscalls are allowed by default.
+   Requires CAP_SYS_ADMIN or prior sy_no_new_privs().  0, or -errno (-ENOSPC/-EACCES/-ENOSYS). */
+int sy_seccomp_filter(void) {
+    const LnsTarget *t = lns_target();
+    LnsBpfInsn f[160];
+    int n = 0, cap = 160, i, dcnt;
+    unsigned int ret_eperm = 0x00050000U | 1U;
+    unsigned int ret_enosys = 0x00050000U | 38U;
+    unsigned int sc_allow = 0x7fff0000U;
+    unsigned int sc_kill = 0x80000000U;
+    unsigned int bpf_ld = 0x20U, bpf_jeq = 0x15U, bpf_jset = 0x45U, bpf_ret = 0x06U;
+    if (!t) return lns_unavail();
+
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 4U);
+    lns_bpf_push(f, &n, cap, bpf_jeq, 1, 0, t->audit_arch);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_kill);
+
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 0U);
+    lns_bpf_push(f, &n, cap, bpf_jset, 0, 1, 0x40000000U);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 1, (unsigned int)t->clone3);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_enosys);
+
+    {
+        const unsigned int deny_list[] = {
+            (unsigned int)t->unshare,
+            (unsigned int)t->setns,
+            (unsigned int)t->mount,
+            (unsigned int)t->umount2,
+            (unsigned int)t->pivot_root,
+            (unsigned int)t->open_tree,
+            (unsigned int)t->move_mount,
+            (unsigned int)t->fsopen,
+            (unsigned int)t->fsconfig,
+            (unsigned int)t->fsmount,
+            (unsigned int)t->fspick,
+            (unsigned int)t->ptrace,
+            (unsigned int)t->process_vm_readv,
+            (unsigned int)t->process_vm_writev,
+            (unsigned int)t->bpf,
+            (unsigned int)t->perf_event_open,
+            (unsigned int)t->userfaultfd,
+            (unsigned int)t->keyctl,
+            (unsigned int)t->add_key,
+            (unsigned int)t->request_key,
+            (unsigned int)t->kexec_load,
+            (unsigned int)t->kexec_file_load,
+            (unsigned int)t->init_module,
+            (unsigned int)t->finit_module,
+            (unsigned int)t->delete_module,
+            (unsigned int)t->open_by_handle_at,
+            (unsigned int)t->io_uring_setup,
+            (unsigned int)t->io_uring_enter,
+            (unsigned int)t->io_uring_register,
+            (unsigned int)t->pidfd_open,
+            (unsigned int)t->pidfd_getfd,
+            (unsigned int)t->mount_setattr
+        };
+        dcnt = (int)(sizeof deny_list / sizeof deny_list[0]);
+        for (i = 0; i < dcnt; i++) {
+            lns_bpf_push(f, &n, cap, bpf_jeq, 0, 1, deny_list[i]);
+            lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);
+        }
+    }
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 4, (unsigned int)t->clone);
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 16U);
+    lns_bpf_push(f, &n, cap, bpf_jset, 0, 1, (unsigned int)SY_CLONE_NS_MASK);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_allow);
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 4, (unsigned int)t->ioctl);
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 24U);
+    lns_bpf_push(f, &n, cap, bpf_jeq, 1, 0, 0x5412U /* TIOCSTI */);
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 1, 0x541CU /* TIOCLINUX */);
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);
+
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_allow);
+    if (n > cap) return -ENOSPC;
+
+    {
+        struct { unsigned short len; const LnsBpfInsn *filter; } prog;
+        prog.len = (unsigned short)n;
+        prog.filter = f;
+        return (int)lns_sys(t->seccomp, 1L /* SECCOMP_SET_MODE_FILTER */, 0, (long)&prog, 0, 0);
+    }
+}
