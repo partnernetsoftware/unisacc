@@ -209,9 +209,9 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 T1合同登记（登记不等于通过）：`generator-location`批次自建真实GCC hostgen，并保留 `ROOT ABS_GEN FRESH_OUT` 独立入口；`unipp2-reference`必须绑定 `newpp-run/newpp-net`；30个`netregen-CASE-OS-ARCH`批次必须绑定 `old-product/new-product/new-models`，各自prepare后执行A/B镜像比较。PREPARED不作测试结果；镜像字节同不代表外机执行资格。`opt-frame4-o1-*`与`opt-frame4-o2-*`共8片各显式绑定对应o1-run/o1-net/o1-table或o2-run/o2-net/o2-table，分别执行positive/negative-label/negative-end/negative-eof；两算法路径分别登记，覆盖语义投影、有序元数据、唯一end、真实dot标签与精确截断拒绝，不升级为产品全链覆盖。
 
-
 | 动作 | 现成用法 | 说明 |
 |---|---|---|
+| 真实提交预演 | `sh ./unisacc.com tools/check-real-commit.cx -- --patch FILE`；`--probe FILE` 检查采用补丁后能否提交无关文件。批次 `real-commit` | 从最新取回的 origin/main 归档建私仓，复制提交钩子与产品，真实提交后核父提交和完整拟写树；输出门原行，私仓无远端。 |
 | 核对队友报告里的事实 | `sh ./unisacc.com tools/report-verify.cx -- CLAIMS.tsv`；校验 `tools/check-report-verify.cx` | commit/tsvcount/receipts/sha256/ratchets 五类断言逐条核实，输出 OK/MISMATCH/MISSING，有 MISMATCH 退出 1 |
 | 查模块层向与包边界 | `sh ./unisacc.com tools/check-cx-layers.cx [PRODUCT]`（`-- --fixtures` 跑夹具） | 编号层 L0–L3 直接 `use`，向上越层即红；`ext/` 是包层：产品层（`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`、`cx/cx0`、`cx/workspace` 与 `tests/cx-module-freeze.tsv` 的 core 模块）`use` 到 `ext/` 即红；core 模块文件集合按冻结表只许减（新增行即红、行无文件亦红） |
 | whole-front 整程序展开预检 | `sh ./unisacc.com tools/check-whole-front-expand.cx -- ROOT NEW_ABS_OUT [--partition FIRST COUNT ...]`；`--selftest` 为轻量负控 | 从 release-build 的实际根表调用 `cx0_plan`，拒绝跨单元定义冲突；默认按实际展开数推导 32/32/末片并核覆盖，不再固定85。保留 plan.tsv/diagnostic.txt；不跑 e2/e3、对象或图像，不代表阶段等价或候选资格。批 whole-front-expand 与 whole-front-expand-controls |
