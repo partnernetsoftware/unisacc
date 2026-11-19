@@ -72,7 +72,7 @@ function makeDraw(gl, draw) {
   return { program, buffer };
 }
 
-function runCommands(gl, commands) {
+function runCommands(gl, commands, targets, packet) {
   const draws = new Map();
   try {
     for (const command of commands) {
@@ -133,6 +133,10 @@ function runCommands(gl, commands) {
         if (a & 4) { gl.clearStencil(d); bits |= gl.STENCIL_BUFFER_BIT; }
         gl.clear(bits);
       }
+      if (opcode >= 9) {
+        const result = targets.execute(opcode, a, packet);
+        if (result !== 0n) return result;
+      }
     }
     return gl.isContextLost() ? -6n : 0n;
   } finally {
@@ -143,7 +147,7 @@ function runCommands(gl, commands) {
   }
 }
 
-export function createGpuSubmit(gl, memory, generation) {
+export function createGpuSubmit(gl, memory, generation, targets = null) {
   return (offset, length) => {
     if (offset < 0n || length < 24n || length > 65536n ||
         offset + length > BigInt(bufferSize) || offset % 4n !== 0n) return -1n;
@@ -160,6 +164,7 @@ export function createGpuSubmit(gl, memory, generation) {
     const count = word(16);
     if (count > 256) return -4n;
     if (gl.isContextLost()) return -6n;
+    const targetPlan = targets?.plan(packet, stamp);
     const commands = [];
     let at = headerSize;
     for (let i = 0; i < count; i++) {
@@ -167,14 +172,15 @@ export function createGpuSubmit(gl, memory, generation) {
       const opcode = word(at);
       const span = word(at + 4);
       if (span < 8 || span % 4 !== 0 || span > size - at) return -4n;
+      const [drawWidth, drawHeight] = targetPlan ? targetPlan.size() : [gl.drawingBufferWidth, gl.drawingBufferHeight];
       if (opcode === 1) {
         if (span !== 24) return -4n;
         const x = word(at + 8);
         const y = word(at + 12);
         const width = word(at + 16);
         const height = word(at + 20);
-        if (width === 0 || height === 0 || x + width > Math.min(8192, gl.drawingBufferWidth) ||
-            y + height > Math.min(8192, gl.drawingBufferHeight)) return -4n;
+        if (width === 0 || height === 0 || x + width > Math.min(8192, drawWidth) ||
+            y + height > Math.min(8192, drawHeight)) return -4n;
         commands.push([opcode, x, y, width, height]);
       } else if (opcode === 2) {
         if (span !== 12) return -4n;
@@ -201,19 +207,25 @@ export function createGpuSubmit(gl, memory, generation) {
       } else if (opcode === 7) {
         if (span !== 28 || word(at + 8) > 1) return -4n;
         const [x, y, width, height] = [12, 16, 20, 24].map(offset => word(at + offset));
-        if (x + width > Math.min(8192, gl.drawingBufferWidth) || y + height > Math.min(8192, gl.drawingBufferHeight)) return -4n;
+        if (x + width > Math.min(8192, drawWidth) || y + height > Math.min(8192, drawHeight)) return -4n;
         commands.push([opcode, word(at + 8), x, y, width, height]);
       } else if (opcode === 8) {
         if (span !== 24) return -4n;
         const mask = word(at + 8), depth = packet.getFloat32(at + 16, true), stencil = word(at + 20);
         if (mask < 1 || mask > 7 || !Number.isFinite(depth) || depth < 0 || depth > 1 || stencil > 255) return -4n;
         commands.push([opcode, mask, word(at + 12), depth, stencil]);
+      } else if (opcode >= 9 && opcode <= 12) {
+        if (!targetPlan) return -13n;
+        const target = targetPlan.read(opcode, at, span);
+        if (typeof target === "bigint") return target;
+        commands.push([opcode, target]);
       } else {
         return -5n;
       }
       at += span;
     }
     if (at !== size) return -4n;
-    return runCommands(gl, commands);
+    targetPlan?.prepare();
+    return runCommands(gl, commands, targets, packet);
   };
 }

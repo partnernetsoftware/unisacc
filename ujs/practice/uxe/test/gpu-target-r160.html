@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  BufferGeometry, Camera, Float32BufferAttribute, Mesh, MeshBasicMaterial, REVISION, Scene,
+  WebGL3DRenderTarget, WebGLArrayRenderTarget, WebGLCubeRenderTarget,
+  WebGLMultipleRenderTargets, WebGLRenderTarget, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+import { createGpuTargets } from "./gpu-target-abi.js";
+const result = document.querySelector("#gpu");
+
+function openContext(type) {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 8;
+  const gl = canvas.getContext(type, { alpha: true, antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error(type + " unavailable");
+  return { canvas, gl };
+}
+
+function samples(bytes) {
+  return [...bytes.slice(20, 24), ...bytes.slice(60, 64)];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const request = new XMLHttpRequest();
+  request.open("GET", "probe.wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
+  const module = new WebAssembly.Module(bytes);
+  let generation = 1;
+  function engine(gl) {
+    let base;
+    const submit = createGpuSubmit(gl, () => base.exports.memory, () => generation, createGpuTargets(gl));
+    base = new WebAssembly.Instance(module, { uxe_gpu_v1: { host_gpu_submit: submit } });
+    return base.exports;
+  }
+  const { gl } = openContext("webgl2");
+  const actual = engine(gl);
+  const altered = new URLSearchParams(location.search).has("target-mutate");
+  const status = [], readback = [];
+  for (let kind = 0; kind < 5; kind++) {
+    status.push(Number(actual.uxe_gpu_probe(BigInt(altered && kind === 1 ? 5 : kind))));
+    readback.push(...samples(new Uint8Array(actual.memory.buffer, 2097152 + 8000, 64)));
+  }
+  status.push(Number(actual.uxe_gpu_probe(8n)));
+  status.push(Number(engine(openContext("webgl").gl).uxe_gpu_probe(2n)));
+  status.push(gl.getError());
+  status.push(Number(actual.uxe_gpu_probe(6n)));
+  generation = 2;
+  status.push(Number(actual.uxe_gpu_probe(8n)), Number(actual.uxe_gpu_probe(10n)), Number(actual.uxe_gpu_probe(7n)));
+  const loss = gl.getExtension("WEBGL_lose_context");
+  if (!loss) throw new Error("WEBGL_lose_context unavailable");
+  loss.loseContext();
+  status.push(Number(actual.uxe_gpu_probe(7n)));
+
+  const reference = openContext("webgl2");
+  const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl });
+  const targets = [
+    new WebGLRenderTarget(4, 4), new WebGLCubeRenderTarget(4),
+    new WebGLArrayRenderTarget(4, 4, 2), new WebGL3DRenderTarget(4, 4, 2),
+    new WebGLMultipleRenderTargets(4, 4, 2),
+  ];
+  const layers = [0, 5, 1, 1, 0], colors = [0x0000ff, 0xff0000, 0x00ff00, 0xffff00, 0x00ffff];
+  const expected = [];
+  for (const [kind, target] of targets.entries()) {
+    renderer.setRenderTarget(target, layers[kind]);
+    renderer.setClearColor(colors[kind], 1);
+    renderer.clear();
+    if (kind === 0) {
+      const geo = new BufferGeometry();
+      geo.setAttribute("position", new Float32BufferAttribute([-0.75,-0.75,0,0.75,-0.75,0,0,0.75,0], 3));
+      const material = new MeshBasicMaterial({ color: 0xff0000 });
+      const mesh = new Mesh(geo, material);
+      mesh.frustumCulled = false;
+      const scene = new Scene();
+      scene.add(mesh);
+      renderer.render(scene, new Camera());
+      geo.dispose();
+      material.dispose();
+    }
+    reference.gl.readBuffer(reference.gl.COLOR_ATTACHMENT0 + Number(kind === 4));
+    const pixels = new Uint8Array(64);
+    reference.gl.readPixels(0, 0, 4, 4, reference.gl.RGBA, reference.gl.UNSIGNED_BYTE, pixels);
+    expected.push(...samples(pixels));
+    renderer.setRenderTarget(null);
+    target.dispose();
+  }
+  renderer.dispose();
+  result.textContent = JSON.stringify([...status, ...readback, ...expected]);
+} catch (error) {
+  result.textContent = String(error);
+}
+</script>

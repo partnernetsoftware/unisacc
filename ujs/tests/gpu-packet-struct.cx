@@ -98,39 +98,76 @@ static int gpu_check(char *start) {
     return failed;
 }
 
+static int target_check(char *start) {
+    const int status[]={0,0,0,0,0,-12,-13,0,0,-3,-12,0,-6};
+    const int colors[][4]={{0,0,255,255},{255,0,0,255},{0,255,0,255},{255,255,0,255},{0,255,255,255}};
+    int failed=0;
+    for(int i=0;i<93;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==92?']':',')) return failed+1;
+        int expected=0;
+        if(i<13) expected=status[i];
+        else {
+            int sample=(i-13)%40;
+            expected=colors[sample<4?1:sample/8][sample%4];
+        }
+        if(actual!=expected) {
+            printf("GPU_TARGET cell=%d actual=%.0f expected=%d\n",i,actual,expected);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
     int clip_mutate=argc==2 && tx_eqz(argv[1],"--clip-mutate");
-    if(argc!=1 && !mutate && !state_mutate && !clip_mutate) return 2;
+    int target_mutate=argc==2 && tx_eqz(argv[1],"--target-mutate");
+    int targets=target_mutate || (argc==2 && tx_eqz(argv[1],"--targets"));
+    if(argc!=1 && !mutate && !state_mutate && !clip_mutate && !targets) return 2;
     char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
     if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
     tx_snprintf(shaders,sizeof shaders,"%s/shaders.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
     tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,
-        mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":"");
+        mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":target_mutate?"?target-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
-    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
-        "ujs/practice/uxe/base/geometry-buffers.ujs","ujs/practice/uxe/base/boxgeometry.ujs",
-        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-state.ujs",
-        shaders,"ujs/practice/uxe/test/gpu-packet-probe.ujs",
-        "-o",wasm,0};
+    char *compile[13]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs"};
+    int args=4;
+    if(targets) compile[args++]="ujs/practice/uxe/base/gpu-target.ujs";
+    else {
+        compile[args++]="ujs/practice/uxe/base/geometry-buffers.ujs";
+        compile[args++]="ujs/practice/uxe/base/boxgeometry.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-state.ujs";
+    }
+    compile[args++]=shaders;
+    compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
+    compile[args++]="-o";
+    compile[args++]=wasm;
+    compile[args]=0;
     char *out=0;
     size_t bytes=0;
     sy_stat_t compiled={0};
     const char bridge[]="ujs/practice/uxe/base/gpu-host-abi.js";
     const char states[]="ujs/practice/uxe/base/gpu-state-abi.js";
+    const char target_bridge[]="ujs/practice/uxe/base/gpu-target-abi.js";
     int lines=bridge_lines(bridge)+bridge_lines(states);
+    int target_lines=targets?bridge_lines(target_bridge):0;
     int ready=lines>0 && lines<=300 &&
         !sy_write_file(abi,declarations,sizeof declarations-1,0600) && !build_shaders(shaders)
         && !cx_runv_timeout(compile,10,&out,&bytes)
         && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
-        && !gpu_copy(dir,"probe.html","ujs/practice/uxe/test/gpu-packet-r160.html")
+        && !gpu_copy(dir,"probe.html",targets?"ujs/practice/uxe/test/gpu-target-r160.html":"ujs/practice/uxe/test/gpu-packet-r160.html")
         && !gpu_copy(dir,"gpu-host-abi.js",bridge)
         && !gpu_copy(dir,"gpu-state-abi.js",states)
+        && (!targets || (target_lines>0 && !gpu_copy(dir,"gpu-target-abi.js",target_bridge)))
         && !gpu_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js");
     if(!ready && out) printf("GPU_PACKET compile=%s\n",out);
     mm_free(out);
@@ -148,14 +185,17 @@ int main(int argc,char **argv) {
             const char label[]="<pre id=\"gpu\">";
             long detail=out?tx_find(out,bytes,label,sizeof label-1):-1;
             printf("GPU_PACKET chrome_rc=%d detail=%.210s\n",rc,detail>=0?out+detail:"");
-        } else failed=gpu_check(out+at+sizeof marker-1);
+        } else {
+            char *values=out+at+sizeof marker-1;
+            failed=targets?target_check(values):gpu_check(values);
+        }
     }
     mm_free(out);
     char *clean[]={"rm","-rf","--",dir,0};
     out=0;
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
-    printf("G_PIXEL GPU_PACKET scenes=4 values=314 wasm_bytes=%ld bridge_lines=%d failed=%d\n",
-        compiled.size,lines,failed);
+    printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
+        targets?"GPU_TARGET":"GPU_PACKET",targets?5:4,targets?93:314,compiled.size,lines+target_lines,failed);
     return failed!=0;
 }
