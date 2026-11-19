@@ -147,11 +147,108 @@ static int each_row(const char *rel, void (*fn)(char *, char *, void *), void *u
     free(b); return 0;
 }
 static char shards[512][96]; static int nshard;
+static char known_ids[4096][96]; static int nknown;
+static char split_parents[64][96]; static char split_shards_all[256][96];
+static int nsplit_parent, nsplit_shards_all, split_excluded;
+static void take_known(char *id, char *c1, void *ud) {
+    (void)c1; (void)ud;
+    if (!id[0] || !strcmp(id, "id") || nknown >= 4096) return;
+    cx_fmt(known_ids[nknown++], 96, "%s", id);
+}
+static int is_known_batch(const char *id) {
+    for (int i = 0; i < nknown; i++) if (!strcmp(known_ids[i], id)) return 1;
+    return 0;
+}
+static int is_split_parent(const char *id) {
+    for (int i = 0; i < nsplit_parent; i++) if (!strcmp(split_parents[i], id)) return 1;
+    return 0;
+}
+static int valid_ver3(const char *s) {
+    int parts = 0, dig = 0;
+    if (!s || !*s) return 0;
+    for (const char *p = s; ; p++) {
+        if (*p >= '0' && *p <= '9') { dig++; if (dig > 6) return 0; }
+        else if (*p == '.' || *p == 0) {
+            if (!dig) return 0;
+            parts++; dig = 0;
+            if (!*p) break;
+        } else return 0;
+    }
+    return parts == 3;
+}
+/* Strictly load and validate tests/split-parents.tsv (5 cols: parent, shards, check, since, reason).
+ * Absent file (ENOENT) returns 0; any malformed row, CRLF, >64 rows, duplicate parent, <2 shards,
+ * unknown batch id, or chained shard-as-parent refuses with non-zero. */
+static int load_split_parents(void) {
+    char p[4300]; unsigned char *b = 0; int64_t n = 0; sy_stat_t st;
+    if (cx_fmt(p, sizeof p, "%s/tests/split-parents.tsv", root)) return die("split-parents: path too long", 0);
+    int sr = sy_lstat(p, &st);
+    if (sr == -ENOENT) return 0;
+    if (sr || st.kind != 'f' || sy_read_file(p, &b, &n, 1L << 20) || !b) return die("split-parents: unreadable", 0);
+    nknown = 0; (void)each_row("tests/batch-domain-index.tsv", take_known, 0);
+    char *s = (char *)b, *end = s + n;
+    while (s < end) {
+        char *e = memchr(s, '\n', end - s); if (!e) e = end;
+        for (char *q = s; q < e; q++) if (*q == '\r') { free(b); return die("split-parents: CRLF rejected", 0); }
+        *e = 0;
+        if (*s && *s != '#') {
+            char *f[6]; int nf = 1; f[0] = s;
+            for (char *q = s; *q; q++) if (*q == '\t') { if (nf < 6) { *q = 0; f[nf++] = q + 1; } else nf++; }
+            if (nf != 5) { free(b); return die("split-parents: expected 5 columns", 0); }
+            if (strcmp(f[0], "parent")) {
+                if (!f[0][0] || !f[1][0] || !f[2][0] || !f[3][0] || !f[4][0]) { free(b); return die("split-parents: empty column", 0); }
+                if (nsplit_parent >= 64) { free(b); return die("split-parents: exceeds 64 rows", 0); }
+                if (is_split_parent(f[0])) { free(b); return die("split-parents: duplicate parent: ", f[0]); }
+                if (!valid_ver3(f[3])) { free(b); return die("split-parents: invalid since version: ", f[3]); }
+                if (!is_known_batch(f[0])) { free(b); return die("split-parents: unknown parent batch: ", f[0]); }
+                if (!is_known_batch(f[2])) { free(b); return die("split-parents: unknown check batch: ", f[2]); }
+                cx_fmt(split_parents[nsplit_parent++], 96, "%s", f[0]);
+                char row_sh[32][96]; int nr = 0;
+                char *q = f[1];
+                while (1) {
+                    char *c = strchr(q, ','); if (c) *c = 0;
+                    if (!*q || strlen(q) >= 96) { free(b); return die("split-parents: empty or oversize shard for ", f[0]); }
+                    if (!strcmp(q, f[0])) { free(b); return die("split-parents: parent listed as own shard: ", q); }
+                    if (!is_known_batch(q)) { free(b); return die("split-parents: unknown shard batch: ", q); }
+                    for (int k = 0; k < nr; k++) if (!strcmp(row_sh[k], q)) { free(b); return die("split-parents: duplicate shard: ", q); }
+                    if (nr >= 32 || nsplit_shards_all >= 256) { free(b); return die("split-parents: too many shards", 0); }
+                    cx_fmt(row_sh[nr++], 96, "%s", q);
+                    cx_fmt(split_shards_all[nsplit_shards_all++], 96, "%s", q);
+                    if (!c) break;
+                    q = c + 1;
+                }
+                if (nr < 2) { free(b); return die("split-parents: need >=2 shards for ", f[0]); }
+            }
+        }
+        s = e + 1;
+    }
+    free(b);
+    for (int i = 0; i < nsplit_shards_all; i++) {
+        if (is_split_parent(split_shards_all[i])) return die("split-parents: chained shard-as-parent: ", split_shards_all[i]);
+    }
+    if (nsplit_parent > 0) {
+        char cssp[4300], cbuf[256]; sy_stat_t cst;
+        if (cx_fmt(cssp, sizeof cssp, "%s/tools/check-slow-split.cx", root) || sy_lstat(cssp, &cst) != 0 || cst.kind != 'f') {
+            return die("split-parents: missing tools/check-slow-split.cx for cross-check", 0);
+        }
+        const char *u = ape[0] ? ape : "./unisacc.com";
+        char *cv[] = {"sh", (char *)u, "tools/check-slow-split.cx", "--", "--table-only", "--parents", p, 0};
+        if (run(cv, root, 30, cbuf, sizeof cbuf) != 0) {
+            return die("split-parents: unproven or mismatched parent rejected by check-slow-split", 0);
+        }
+    }
+    return 0;
+}
 static void take_shard(char *id, char *c1, void *ud) {
     (void)c1; (void)ud; long n = strlen(id);
     if (n > 14 && !strncmp(id, "tools-compile-", 14) && nshard < 512) { for (long i = 14; i < n; i++) if (id[i] < '0' || id[i] > '9') return; cx_fmt(shards[nshard++], 96, "%s", id); }
 }
-static void take_domain(char *id, char *c1, void *ud) { if (!strcmp(c1, (const char *)ud) && strcmp(id, "id")) add(id); }
+static void take_domain(char *id, char *c1, void *ud) {
+    if (!strcmp(c1, (const char *)ud) && strcmp(id, "id")) {
+        if (is_split_parent(id)) { split_excluded++; return; }
+        add(id);
+    }
+}
 static void set_domain(char *id, char *c1, void *ud) {
     (void)ud; for (int i = 0; i < nb; i++) if (!strcmp(bs[i].id, id)) cx_fmt(bs[i].domain, sizeof bs[i].domain, "%s", c1);
 }
@@ -498,9 +595,9 @@ static void write_batch(FILE *f, const Batch *b) {
 int main(int argc, char **argv) {
     use_native=!strcmp(sy_env_or("DVQUALIFY_NATIVE_RUN_BATCH","0"),"1");
     const char *set = "sample", *ids = 0, *outp = 0, *resume = 0;
-    int jobs = 2, list = 0, segment = 0;
+    int jobs = 2, list = 0, segment = 0, include_split_parents = 0;
     long seed = -1;
-    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0) return die("usage: devsvc qualify --candidate APE [--set sample|product-qualification] [--ids A,B] [--out FILE|--resume FILE] [--jobs N] [--segment-batches N] [--seed N] [--list]", 0);
+    if (argc < 2 || sy_realpath(argv[1], root, sizeof root) < 0) return die("usage: devsvc qualify --candidate APE [--set sample|product-qualification] [--ids A,B] [--out FILE|--resume FILE] [--jobs N] [--segment-batches N] [--seed N] [--include-split-parents] [--list]", 0);
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--candidate") && i + 1 < argc) { if (sy_realpath(argv[++i], ape, sizeof ape) < 0) return die("candidate not found: ", argv[i]); }
         else if (!strcmp(argv[i], "--set") && i + 1 < argc) set = argv[++i];
@@ -513,15 +610,17 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "--jobs") && i + 1 < argc) { jobs = atoi(argv[++i]); if (jobs < 1 || jobs > 16) return die("--jobs must be 1..16", 0); }
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc) seed = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--include-split-parents")) include_split_parents = 1;
         else if (!strcmp(argv[i], "--list")) list = 1;
         else return die("unknown argument ", argv[i]);
     }
     if (strcmp(set, "sample") && strcmp(set, "product-qualification")) return die("--set must be sample or product-qualification: ", set);
     if (seed < 0) seed = sy_wall_s() % 1000000;
+    if (!ids && !include_split_parents) { if (load_split_parents()) return 2; }
     /* (3) batch set */
     if (ids) { char t[8192]; cx_fmt(t, sizeof t, "%s", ids); for (char *p = strtok(t, ","); p; p = strtok(0, ",")) add(p); }
     else if (!strcmp(set, "sample")) {
-        for (int i = 0; sample_ids[i]; i++) add(sample_ids[i]);
+        for (int i = 0; sample_ids[i]; i++) { if (is_split_parent(sample_ids[i])) { split_excluded++; continue; } add(sample_ids[i]); }
         if (each_row("tests/batches.tsv", take_shard, 0) || nshard < 10) return die("tools-compile shards not found in tests/batches.tsv", 0);
         unsigned long x = (unsigned long)seed * 2654435761UL + 1;
         for (int k = 0; k < 10; k++) {
@@ -536,7 +635,10 @@ int main(int argc, char **argv) {
     each_row("tests/batch-domain-index.tsv", set_domain, 0);
     if (list) {
         for (int i = 0; i < nb; i++) printf("QUALIFY_LIST\t%s\t%s\twindow=%d\n", bs[i].id, bs[i].domain, i / jobs + 1);
-        printf("QUALIFY_LIST_SUMMARY\tset=%s\tbatches=%d\tjobs=%d\twindows=%d\twindow_s=55\tseed=%ld\n", ids ? "ids" : set, nb, jobs, (nb + jobs - 1) / jobs, seed);
+        if (split_excluded > 0)
+            printf("QUALIFY_LIST_SUMMARY\tset=%s\tbatches=%d\tjobs=%d\twindows=%d\twindow_s=55\tseed=%ld\tsplit_parents_excluded=%d\n", ids ? "ids" : set, nb, jobs, (nb + jobs - 1) / jobs, seed, split_excluded);
+        else
+            printf("QUALIFY_LIST_SUMMARY\tset=%s\tbatches=%d\tjobs=%d\twindows=%d\twindow_s=55\tseed=%ld\n", ids ? "ids" : set, nb, jobs, (nb + jobs - 1) / jobs, seed);
         return 0;
     }
     if (!ape[0]) return die("--candidate APE is required", 0);
@@ -644,7 +746,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!s[0]) continue; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
     if (remaining) fprintf(f, "# PLANNED=%d\n", remaining);
     const char *shadow_summary=remaining?"":(shadow_on?"\tshadow=on":"\tshadow=off");
-    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld%s\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, shadow_summary, sha, version);
+    if (split_excluded > 0)
+        fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld%s\tape_sha256=%s\tversion=%s\tsplit_parents_excluded=%d\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, shadow_summary, sha, version, split_excluded);
+    else
+        fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld%s\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, shadow_summary, sha, version);
     if (fflush(f) || (outp && fclose(f))) return die("cannot finish evidence ", outp);
     emit("total", total, (remaining || cu || ci) ? 1 : 0, "-");
     fprintf(stderr, "QUALIFY_DONE\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tout=%s\n", nb, cp, cf, cu, ci, total, outp ? outp : "-");

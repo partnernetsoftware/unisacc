@@ -453,6 +453,92 @@ static void strict_terminals(char *t,long n) {
         }else if(!b->witnessed)refuse("STRICT_UNKNOWN",b->id);
     }
     if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing final SUMMARY");
+    /* Split-parent gate (tests/split-parents.tsv, 5 cols: parent, shards, check, since, reason):
+       Applies when cand.version >= since. If a split parent is absent from strict_batches,
+       every shard (>=2) must be present & witnessed (FAIL/UNKNOWN follow normal expected-fail/unmeasured rules)
+       AND the multiset check batch (slow-split) must be witnessed AND PASS.
+       Also cross-checks tests/split-parents.tsv against tools/check-slow-split.cx --table-only when present. */
+    {
+        char spath[4500], sbuf[1024]; long sn = 0, sat = 0, slen = 0; const char *sl; sy_stat_t sst;
+        int any_applicable = 0;
+        if (!cx_fmt(spath, sizeof spath, "%s/tests/split-parents.tsv", here) && sy_lstat(spath, &sst) == 0) {
+            char *st = slurp(spath, &sn);
+            if (!st) refuse("STRICT_SPLIT_INCOMPLETE", "unreadable tests/split-parents.tsv");
+            /* Parse cand.version into (ca, cb, cc) */
+            int ca = 0, cb = 0, cc = 0, cv_ok = 0;
+            {
+                const char *p = cand.version; int parts = 0, vals[3] = {0, 0, 0}, dig = 0;
+                for (; ; p++) {
+                    if (*p >= '0' && *p <= '9') { vals[parts] = vals[parts] * 10 + (*p - '0'); dig++; if (dig > 6) break; }
+                    else if ((*p == '.' || *p == 0) && dig > 0) {
+                        parts++; dig = 0;
+                        if (*p == 0) { if (parts == 3) { ca = vals[0]; cb = vals[1]; cc = vals[2]; cv_ok = 1; } break; }
+                        if (parts >= 3) break;
+                    } else break;
+                }
+            }
+            while (line_next(st, sn, &sat, &sl, &slen)) {
+                char *sf[6];
+                if (!slen || *sl == '#') continue;
+                if (slen >= (long)sizeof sbuf) refuse("STRICT_SPLIT_INCOMPLETE", "oversize split-parents.tsv row");
+                if (mm_copy(sbuf, sizeof sbuf, sl, slen)) refuse("STRICT_SPLIT_INCOMPLETE", "copy failed");
+                int snf = strict_split(sbuf, slen, sf, 6);
+                if (snf != 5) refuse("STRICT_SPLIT_INCOMPLETE", "malformed split-parents.tsv (need 5 cols, no CRLF)");
+                if (tx_eqz(sf[0], "parent")) continue;
+                /* Parse since version (sa, sb, sc) */
+                int sa = 0, sb = 0, sc = 0, sv_ok = 0;
+                {
+                    const char *p = sf[3]; int parts = 0, vals[3] = {0, 0, 0}, dig = 0;
+                    for (; ; p++) {
+                        if (*p >= '0' && *p <= '9') { vals[parts] = vals[parts] * 10 + (*p - '0'); dig++; if (dig > 6) break; }
+                        else if ((*p == '.' || *p == 0) && dig > 0) {
+                            parts++; dig = 0;
+                            if (*p == 0) { if (parts == 3) { sa = vals[0]; sb = vals[1]; sc = vals[2]; sv_ok = 1; } break; }
+                            if (parts >= 3) break;
+                        } else break;
+                    }
+                }
+                if (!sv_ok) refuse("STRICT_SPLIT_INCOMPLETE", "invalid since version in split-parents.tsv");
+                if (cv_ok) {
+                    int cmp = (ca != sa) ? (ca - sa) : (cb != sb) ? (cb - sb) : (cc - sc);
+                    if (cmp < 0) continue; /* historical evidence predating since: gate not applicable */
+                }
+                any_applicable = 1;
+                int has_par = 0, has_chk_pass = 0, nsh = 0, missing_shard = 0;
+                for (int i = 0; i < strict_count; i++) {
+                    if (tx_eqz(strict_batches[i].id, sf[0]) && strict_batches[i].witnessed) has_par = 1;
+                    if (tx_eqz(strict_batches[i].id, sf[2]) && strict_batches[i].witnessed && tx_eqz(strict_batches[i].status, "PASS")) has_chk_pass = 1;
+                }
+                if (has_par) continue;
+                char *q = sf[1];
+                while (*q) {
+                    char *e = q; while (*e && *e != ',') e++;
+                    char ch = *e; *e = 0;
+                    if (!*q) refuse("STRICT_SPLIT_INCOMPLETE", sf[0]);
+                    nsh++;
+                    int found = 0;
+                    for (int i = 0; i < strict_count; i++) if (tx_eqz(strict_batches[i].id, q) && strict_batches[i].witnessed && tx_eqz(strict_batches[i].status, "PASS")) found = 1;
+                    if (!found) missing_shard = 1;
+                    *e = ch; q = ch ? e + 1 : e;
+                }
+                if (nsh < 2 || missing_shard || !has_chk_pass) refuse("STRICT_SPLIT_INCOMPLETE", sf[0]);
+            }
+            free(st);
+            if (any_applicable) {
+                char cssp[4500]; sy_stat_t cst;
+                if (cx_fmt(cssp, sizeof cssp, "%s/tools/check-slow-split.cx", here) || sy_lstat(cssp, &cst) != 0 || cst.kind != 'f') {
+                    refuse("STRICT_SPLIT_TABLE_MISMATCH", "missing tools/check-slow-split.cx");
+                }
+                char *cv[] = {"sh", "./unisacc.com", "tools/check-slow-split.cx", "--", "--table-only", "--parents", spath, 0};
+                np_result cr = {0}; char cwhy[256];
+                if (np_run(cv, here, 0, 30, &cr, cwhy, sizeof cwhy) || cr.rc != 0) {
+                    np_free(&cr);
+                    refuse("STRICT_SPLIT_TABLE_MISMATCH", "tests/split-parents.tsv differs from check-slow-split");
+                }
+                np_free(&cr);
+            }
+        }
+    }
 }
 /* Locate the final later attempt for this batch without issuing diagnostics.
    The full structured parser checks the witnesses before G1 can pass. */

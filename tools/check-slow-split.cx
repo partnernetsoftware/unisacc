@@ -230,16 +230,133 @@ static int run_snapshots_cx(const char *work) {
     return css_compare("snapshots-cx", jobs, 3, sy_now_ms() - t0);
 }
 
+static int css_batch_implemented(const char *bt, long bn, const char *id) {
+    long at = 0, idl = tx_len(id, 128);
+    while (at < bn) {
+        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
+        long o0, l0, o1, l1;
+        if (l > 0 && bt[at] != '#' &&
+            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 == idl && tx_same(bt + at + o0, l0, id, idl) &&
+            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11))
+            return 1;
+        at += l + 1;
+    }
+    return 0;
+}
+
+static int css_valid_ver3(const char *s, long n) {
+    int parts = 0, dig = 0;
+    for (long i = 0; i <= n; i++) {
+        char c = (i < n) ? s[i] : 0;
+        if (c >= '0' && c <= '9') { dig++; if (dig > 6) return 0; }
+        else if ((c == '.' || c == 0) && dig > 0) { parts++; dig = 0; if (c == 0) break; }
+        else return 0;
+    }
+    return parts == 3;
+}
+
+static int check_split_parents_table(const char *path) {
+    static const char *want_p[3] = {"signal-targets", "win-argv", "snapshots-cx"};
+    static const char *want_s[3] = {
+        "signal-targets-gen,signal-targets-posix,signal-targets-win",
+        "win-argv-facts,win-argv-x86_64,win-argv-arm64",
+        "snapshots-cx-core,snapshots-cx-alloc"
+    };
+    int seen[3] = {0, 0, 0}, bad = 0;
+    size_t pn = 0, bn = 0;
+    char *pb = (char *)cx_read(path, &pn);
+    if (!pb) {
+        sy_eprintf("check-slow-split: cannot read split-parents table %s\n", path);
+        sy_printf("FAIL\tslow-split.split-parents-table\treason=unreadable\n");
+        return 1;
+    }
+    char *bt = (char *)cx_read("tests/batches.tsv", &bn);
+    if (!bt) {
+        mm_free(pb);
+        sy_eprintf("check-slow-split: cannot read tests/batches.tsv\n");
+        sy_printf("FAIL\tslow-split.split-parents-table\treason=no-batches\n");
+        return 1;
+    }
+    long at = 0;
+    while (at < (long)pn) {
+        long e = tx_chr(pb + at, (long)pn - at, '\n'), l = e < 0 ? (long)pn - at : e;
+        if (l > 0 && pb[at + l - 1] == '\r') { sy_eprintf("check-slow-split: CRLF in %s\n", path); bad++; }
+        if (l > 0 && pb[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3, o4, l4;
+            if (tx_fields(pb + at, l, '\t') != 5 ||
+                tx_field(pb + at, l, '\t', 0, &o0, &l0) || tx_field(pb + at, l, '\t', 1, &o1, &l1) ||
+                tx_field(pb + at, l, '\t', 2, &o2, &l2) || tx_field(pb + at, l, '\t', 3, &o3, &l3) ||
+                tx_field(pb + at, l, '\t', 4, &o4, &l4)) {
+                sy_eprintf("check-slow-split: malformed row (need 5 cols) in %s\n", path);
+                bad++;
+            } else {
+                char par[128], shs[512], chk[128];
+                if (l0 >= 128) l0 = 127; mm_copy(par, 128, pb + at + o0, (size_t)l0); par[l0] = 0;
+                if (l1 >= 512) l1 = 511; mm_copy(shs, 512, pb + at + o1, (size_t)l1); shs[l1] = 0;
+                if (l2 >= 128) l2 = 127; mm_copy(chk, 128, pb + at + o2, (size_t)l2); chk[l2] = 0;
+                if (!tx_eqz(par, "parent")) {
+                    if (!css_valid_ver3(pb + at + o3, l3)) { sy_eprintf("check-slow-split: invalid since version in %s\n", path); bad++; }
+                    int idx = -1;
+                    for (int k = 0; k < 3; k++) if (tx_eqz(par, want_p[k])) idx = k;
+                    if (idx < 0 || seen[idx]) {
+                        sy_eprintf("check-slow-split: unknown or duplicate parent %s in %s\n", par, path);
+                        bad++;
+                    } else {
+                        seen[idx] = 1;
+                        if (!tx_eqz(shs, want_s[idx])) {
+                            sy_eprintf("check-slow-split: parent %s shards mismatch (got=%s want=%s)\n", par, shs, want_s[idx]);
+                            bad++;
+                        }
+                    }
+                    if (!tx_eqz(chk, "slow-split")) { sy_eprintf("check-slow-split: check batch must be slow-split (got=%s)\n", chk); bad++; }
+                    if (!css_batch_implemented(bt, (long)bn, par)) { sy_eprintf("check-slow-split: parent %s not IMPLEMENTED\n", par); bad++; }
+                    if (!css_batch_implemented(bt, (long)bn, chk)) { sy_eprintf("check-slow-split: check %s not IMPLEMENTED\n", chk); bad++; }
+                    long sp = 0, sl = tx_len(shs, 512); int nsh = 0;
+                    while (sp < sl) {
+                        long se = sp;
+                        while (se < sl && shs[se] != ',') se++;
+                        char one[128]; long ol = se - sp;
+                        if (ol > 0 && ol < 128) {
+                            mm_copy(one, 128, shs + sp, (size_t)ol); one[ol] = 0; nsh++;
+                            if (!css_batch_implemented(bt, (long)bn, one)) { sy_eprintf("check-slow-split: shard %s not IMPLEMENTED\n", one); bad++; }
+                        } else bad++;
+                        sp = se + 1;
+                    }
+                    if (nsh < 2) bad++;
+                }
+            }
+        }
+        at += l + 1;
+    }
+    for (int k = 0; k < 3; k++) if (!seen[k]) { sy_eprintf("check-slow-split: missing parent %s in %s\n", want_p[k], path); bad++; }
+    mm_free(bt);
+    mm_free(pb);
+    sy_printf("%s\tslow-split.split-parents-table\tparents=3\tbad=%d\n", bad ? "FAIL" : "PASS", bad);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     const char *group = "all";
+    const char *parents_path = "tests/split-parents.tsv";
+    int table_only = 0;
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
     char work[4096];
     int ok = 0, failed = 0;
 
-    if (argc == 3 && tx_eqz(argv[1], "--group")) group = argv[2];
-    else if (argc != 1) { sy_eprintf("check-slow-split: usage [-- --group all|signal-targets|win-argv|snapshots-cx]\n"); return 2; }
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--group") && i + 1 < argc) group = argv[++i];
+        else if (tx_eqz(argv[i], "--parents") && i + 1 < argc) parents_path = argv[++i];
+        else if (tx_eqz(argv[i], "--table-only")) table_only = 1;
+        else { sy_eprintf("check-slow-split: usage [-- --group all|signal-targets|win-argv|snapshots-cx] [--parents FILE] [--table-only]\n"); return 2; }
+    }
+
+    if (table_only) {
+        if (check_split_parents_table(parents_path) == 0) ok++; else failed++;
+        sy_printf("CHECK_SLOW_SPLIT\tok=%d\tfailed=%d\tms=%ld\n", ok, failed, sy_now_ms() - t0);
+        return failed ? 1 : 0;
+    }
 
     if (cx_fmt(work, sizeof work, "%s/check-slow-split-%d", base_td, (int)sy_pid())) return 2;
     if (sy_mkdir(work, 0700) != 0) return 2;
@@ -252,6 +369,9 @@ int main(int argc, char **argv) {
     }
     if (tx_eqz(group, "all") || tx_eqz(group, "snapshots-cx")) {
         if (run_snapshots_cx(work) == 0) ok++; else failed++;
+    }
+    if (tx_eqz(group, "all") && sy_exists(parents_path) == 1) {
+        if (check_split_parents_table(parents_path) == 0) ok++; else failed++;
     }
     (void)cx_rmtree(work);
 
