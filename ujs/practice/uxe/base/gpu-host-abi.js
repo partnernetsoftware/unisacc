@@ -5,7 +5,7 @@ const bufferSize = 6291456;
 const headerSize = 24;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-function readDraw(packet, at, span, textured, limit) {
+function readDraw(packet, at, span, faces, limit) {
   if (span < 24) return null;
   const word = field => packet.getUint32(at + field, true);
   const count = word(8);
@@ -17,16 +17,17 @@ function readDraw(packet, at, span, textured, limit) {
   const end = data + count * 28;
   if (count === 0 || count % 3 !== 0 || word(20) !== 0 ||
       vertexBytes < 1 || vertexBytes > 4096 || fragmentBytes < 1 || fragmentBytes > 4096 ||
-      (textured ? end + 20 > span : end !== span)) return null;
+      (faces ? end + 20 > span : end !== span)) return null;
   let texture = null;
-  if (textured) {
+  if (faces) {
     const [width, height, min, wrapS, wrapT] = [0, 4, 8, 12, 16].map(n => word(end + n));
+    const bytes = width * height * 4 * faces;
     if (!width || !height || width > limit || height > limit || min > 2 || wrapS > 2 || wrapT > 2 ||
-        end + 20 + width * height * 4 !== span) return null;
+        (faces === 6 && width !== height) || end + 20 + bytes !== span) return null;
     const nonPower = (width & (width - 1)) || (height & (height - 1));
     if (nonPower && (min === 2 || wrapS || wrapT)) return null;
-    texture = { width, height, min, wrapS, wrapT,
-      bytes: new Uint8Array(packet.buffer, packet.byteOffset + at + end + 20, width * height * 4) };
+    texture = { width, height, min, wrapS, wrapT, faces,
+      bytes: new Uint8Array(packet.buffer, packet.byteOffset + at + end + 20, bytes) };
   }
   const text = (start, bytes, padded) => {
     const encoded = new Uint8Array(packet.buffer, packet.byteOffset + at + start, padded);
@@ -87,7 +88,7 @@ function runCommands(gl, commands, targets, packet) {
   const draws = new Map();
   try {
     for (const command of commands) {
-      if (command[0] !== 4 && command[0] !== 13) continue;
+      if (command[0] !== 4 && command[0] !== 13 && command[0] !== 14) continue;
       const setup = makeDraw(gl, command[1]);
       if (!setup) return gl.isContextLost() ? -6n : -7n;
       draws.set(command, setup);
@@ -113,21 +114,28 @@ function runCommands(gl, commands, targets, packet) {
         gl.blendEquation(gl.FUNC_ADD);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
       }
-      if (opcode === 4 || opcode === 13) {
+      if (opcode === 4 || opcode === 13 || opcode === 14) {
         const { program, buffer, texture } = draws.get(command);
         gl.useProgram(program);
-        let previousTexture;
+        let target, previousTexture;
         if (texture) {
-          const { width, height, min, wrapS, wrapT, bytes } = a.texture;
+          const { width, height, min, wrapS, wrapT, faces, bytes } = a.texture;
+          const cube = faces === 6;
+          target = cube ? gl.TEXTURE_CUBE_MAP : gl.TEXTURE_2D;
           const wraps = [gl.CLAMP_TO_EDGE, gl.REPEAT, gl.MIRRORED_REPEAT];
-          previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
-          gl.bindTexture(gl.TEXTURE_2D, texture);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR][min]);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, min ? gl.LINEAR : gl.NEAREST);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wraps[wrapS]);
-          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wraps[wrapT]);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
-          if (min === 2) gl.generateMipmap(gl.TEXTURE_2D);
+          previousTexture = gl.getParameter(cube ? gl.TEXTURE_BINDING_CUBE_MAP : gl.TEXTURE_BINDING_2D);
+          gl.bindTexture(target, texture);
+          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR][min]);
+          gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, min ? gl.LINEAR : gl.NEAREST);
+          gl.texParameteri(target, gl.TEXTURE_WRAP_S, wraps[wrapS]);
+          gl.texParameteri(target, gl.TEXTURE_WRAP_T, wraps[wrapT]);
+          const faceBytes = width * height * 4;
+          for (let i = 0; i < faces; i++) {
+            const face = cube ? gl.TEXTURE_CUBE_MAP_POSITIVE_X + i : target;
+            const image = bytes.subarray(i * faceBytes, (i + 1) * faceBytes);
+            gl.texImage2D(face, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
+          }
+          if (min === 2) gl.generateMipmap(target);
           gl.uniform1i(gl.getUniformLocation(program, "u_texture"), gl.getParameter(gl.ACTIVE_TEXTURE) - gl.TEXTURE0);
         }
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -137,7 +145,7 @@ function runCommands(gl, commands, targets, packet) {
         gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
         gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 28, 12);
         gl.drawArrays(gl.TRIANGLES, 0, a.count);
-        if (texture) gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+        if (texture) gl.bindTexture(target, previousTexture);
         gl.disableVertexAttribArray(0);
         gl.disableVertexAttribArray(1);
         gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -222,9 +230,10 @@ export function createGpuSubmit(gl, memory, generation, targets = null) {
         const state = [word(at + 8), word(at + 12), word(at + 16)];
         if (state.some(value => value > 1)) return -4n;
         commands.push([opcode, ...state]);
-      } else if (opcode === 4 || opcode === 13) {
-        const limit = opcode === 13 ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 0;
-        const draw = readDraw(packet, at, span, opcode === 13, limit);
+      } else if (opcode === 4 || opcode === 13 || opcode === 14) {
+        const faces = opcode === 4 ? 0 : opcode === 13 ? 1 : 6;
+        const limit = faces ? gl.getParameter(faces === 6 ? gl.MAX_CUBE_MAP_TEXTURE_SIZE : gl.MAX_TEXTURE_SIZE) : 0;
+        const draw = readDraw(packet, at, span, faces, limit);
         if (!draw) return -4n;
         commands.push([opcode, draw]);
       } else if (opcode === 5) {

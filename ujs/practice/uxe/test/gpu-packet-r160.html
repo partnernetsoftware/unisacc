@@ -4,7 +4,8 @@
 <script type="module">
 import {
   BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
-  DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth, IncrementStencilOp, KeepStencilOp, LessDepth,
+  CanvasTexture, CubeTexture, DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth,
+  IncrementStencilOp, KeepStencilOp, LessDepth, Vector3,
   LinearToneMapping, ReinhardToneMapping,
   LinearFilter, LinearSRGBColorSpace, NearestFilter, NoToneMapping,
   LinearMipmapLinearFilter, MirroredRepeatWrapping, RepeatWrapping,
@@ -123,6 +124,11 @@ try {
   const actualSampledMip = pixels(gl);
   const lifecycle = [location.search === "?texture-life-mutate" ? 101n : 100n, 102n, 103n, 104n, 105n]
     .map(mode => Number(step(mode)));
+  const cubeSamples = [];
+  for (let i = 0; i < 6; i++) {
+    const mode = i === 0 && location.search === "?cube-mutate" ? 116 : 110 + i;
+    cubeSamples.push([Number(step(BigInt(mode))), ...pixels(gl).slice(0, 4)]);
+  }
   for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
     status.push(Number(step(mode)));
     actual.push(...pixels(gl));
@@ -272,6 +278,43 @@ try {
   renderer.render(basicScene, camera);
   const referenceSampledMip = pixels(three.gl);
   sampled.dispose();
+  function swatch(colors) {
+    const image = document.createElement("canvas");
+    image.width = colors.length;
+    image.height = 1;
+    const ctx = image.getContext("2d");
+    for (const [i, color] of colors.entries()) {
+      ctx.fillStyle = color;
+      ctx.fillRect(i, 0, 1, 1);
+    }
+    return image;
+  }
+  const canvasMap = new CanvasTexture(swatch(["#f00", "#0f0"]));
+  canvasMap.minFilter = canvasMap.magFilter = NearestFilter;
+  basicMaterial.map = canvasMap;
+  renderer.render(basicScene, camera);
+  const referenceCanvas = pixels(three.gl);
+  canvasMap.dispose();
+  const cubeMap = new CubeTexture(["#f00", "#0f0", "#00f", "#ff0", "#f0f", "#0ff"].map(color => swatch([color])));
+  cubeMap.minFilter = cubeMap.magFilter = NearestFilter;
+  cubeMap.generateMipmaps = false;
+  cubeMap.needsUpdate = true;
+  const direction = new Vector3();
+  const rawCube = new RawShaderMaterial({
+    uniforms: { cubeMap: { value: cubeMap }, direction: { value: direction } },
+    vertexShader: "attribute vec3 position; void main(){ gl_Position=vec4(position,1.0); }",
+    fragmentShader: "precision mediump float; uniform samplerCube cubeMap; uniform vec3 direction; void main(){ gl_FragColor=textureCube(cubeMap,direction); }",
+  });
+  const cubeScene = new Scene();
+  cubeScene.add(new Mesh(basicGeometry, rawCube));
+  const cubeResults = cubeSamples.flatMap((sample, face) => {
+    direction.set(0, 0, 0);
+    direction.setComponent(Math.floor(face / 2), face % 2 ? -1 : 1);
+    renderer.render(cubeScene, camera);
+    return [...sample, ...pixels(three.gl).slice(0, 4)];
+  });
+  rawCube.dispose();
+  cubeMap.dispose();
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
@@ -284,7 +327,8 @@ try {
     sampledLinearStatus, ...actualSampledLinear, ...referenceSampledLinear,
     sampledRepeatStatus, ...actualSampledRepeat, ...referenceSampledRepeat,
     sampledMirrorStatus, ...actualSampledMirror, ...referenceSampledMirror,
-    sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle]);
+    sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle,
+    ...cubeResults, sampledNearestStatus, ...referenceCanvas]);
 } catch (error) {
   result.textContent = String(error);
 }
