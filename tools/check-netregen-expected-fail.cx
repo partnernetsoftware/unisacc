@@ -1,0 +1,483 @@
+/* tools/check-netregen-expected-fail.cx -- regression checks for netregen image fingerprint expected-fail (G1).
+ *   sh ./unisacc.com tools/check-netregen-expected-fail.cx
+ * Verifies 12 end-to-end contracts (no snprintf; cx_fmt only):
+ *   1. netregen-nonopt-emits-diff-and-refuses   non-opt check-netregen-bytes prints NETREGEN_DIFF (sha+len) & rc=2 REFUSE
+ *   2. g1-image-fingerprint-exact-passes        expected-fail image=OLD->NEW matching batch note + valid expires -> PASS
+ *   3. g1-image-fingerprint-diff-line-passes    expected-fail image=OLD->NEW matching nearby NETREGEN_DIFF line -> PASS
+ *   4. g1-image-wrong-old-hash-refused          1-hex-char mismatch in old hash -> rc=2 EXPECTED_FAIL
+ *   5. g1-image-wrong-new-hash-refused          1-hex-char mismatch in new hash -> rc=2 EXPECTED_FAIL
+ *   6. g1-image-missing-diff-refused            no image= note and no NETREGEN_DIFF line -> rc=2 EXPECTED_FAIL
+ *   7. g1-image-expired-refused                 candidate 0.0.83 > expires=0.0.82 -> rc=2 EXPECTED_FAIL
+ *   8. g1-image-missing-expires-refused         image= entry without expires=0.0.NN -> rc=2 EXPECTED_FAIL
+ *   9. g1-count-format-unchanged                legacy count=53/9 passes and mismatched count still refused
+ *  10. g1-image-expires-token-only              "noexpires=0.0.99" is not an expiry -> rc=2 EXPECTED_FAIL
+ *  11. g1-image-diff-bound-to-batch             NETREGEN_DIFF of another case/target -> rc=2 EXPECTED_FAIL
+ *  12. g1-image-every-fail-row                  earlier FAIL row with another image not masked -> rc=2 EXPECTED_FAIL
+ *  13. g1-image-older-dash-inherits-same-sig    earlier note='-' FAIL inherits later matching fingerprint when rc/marker/transport/cand match -> PASS
+ *  14. g1-image-older-diff-rc-refused           earlier note='-' FAIL with different rc -> rc=2 EXPECTED_FAIL
+ *  15. g1-image-older-diff-cand-refused         earlier note='-' FAIL with different candidate -> rc=2 refused
+ *  16. g1-image-older-diff-marker-refused       earlier note='-' FAIL with different marker -> rc=2 EXPECTED_FAIL
+ *  17. g1-image-older-transport-nonzero-refused earlier note='-' FAIL with transport=-1 -> rc=2 EXPECTED_FAIL
+ *  18. g1-image-only-unfingerprinted-refused    only note='-' FAIL rows (no fingerprinted later row) -> rc=2 EXPECTED_FAIL
+ *  19. g1-image-last-row-unfingerprinted-refused fingerprinted row followed by note='-' FAIL (last lacks fp) -> rc=2 EXPECTED_FAIL
+ *  20. g1-image-no-inherit-across-pass      note='-' FAIL, PASS, fingerprinted FAIL: no inheritance across PASS -> rc=2 EXPECTED_FAIL
+ * Last line: CHECK_NETREGEN_EXPECTED_FAIL<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CNE_PW 4400
+#define CNE_OUT 16384
+
+static void cne_abort(const char *why) {
+    fprintf(stderr, "check-netregen-expected-fail: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void cne_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) cne_abort("mkdir");
+}
+
+static void cne_w(const char *dir, const char *rel, const char *body) {
+    char p[CNE_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) cne_abort("fmt-w");
+    if (cx_write(p, body, strlen(body))) cne_abort("write");
+}
+
+static void cne_sha(const char *s, char hex[65]) {
+    if (sy_sha256_hex((const unsigned char *)s, (long)strlen(s), hex)) cne_abort("sha");
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CNE_OUT], cwd[CNE_PW], work[CNE_PW], g1[CNE_PW], lay[CNE_PW], rxbin[CNE_PW], p[CNE_PW], cmd[8192];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (!getcwd(cwd, sizeof cwd)) cne_abort("cwd");
+    if (cx_fmt(work, sizeof work, "%s/check-netregen-ef-%d", base_td, (int)getpid())) cne_abort("work");
+    cne_mk(work);
+
+    /* 1. tests/check-netregen-bytes.cx non-opt shard prints NETREGEN_DIFF with sha+len and still rc=2 REFUSE */
+    {
+        char nrb[CNE_PW], ndir[CNE_PW], oldp[CNE_PW], newp[CNE_PW], img_a[CNE_PW], img_b[CNE_PW];
+        const char *fake_old = "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do if [ \"$1\" = '-o' ]; then out=\"$2\"; shift 2; else shift; fi; done\nprintf 'OLD_IMAGE_BYTES_AAAA' > \"$out\"\nexit 0\n";
+        const char *fake_new = "#!/bin/sh\nout=''\nwhile [ $# -gt 0 ]; do if [ \"$1\" = '-o' ]; then out=\"$2\"; shift 2; else shift; fi; done\nprintf 'NEW_IMAGE_BYTES_BBBB_LONGER' > \"$out\"\nexit 0\n";
+        char ha[65], hb[65], want_diff[256];
+        cne_sha("OLD_IMAGE_BYTES_AAAA", ha);
+        cne_sha("NEW_IMAGE_BYTES_BBBB_LONGER", hb);
+        if (cx_fmt(nrb, sizeof nrb, "%s/check-netregen-bytes.bin", work)) cne_abort("nrb");
+        if (cx_fmt(ndir, sizeof ndir, "%s/nr-out", work)) cne_abort("ndir");
+        if (cx_fmt(oldp, sizeof oldp, "%s/fake-old.sh", work)) cne_abort("oldp");
+        if (cx_fmt(newp, sizeof newp, "%s/fake-new.sh", work)) cne_abort("newp");
+        (void)img_a; (void)img_b;
+        cne_w(work, "fake-old.sh", fake_old); (void)chmod(oldp, 0755);
+        cne_w(work, "fake-new.sh", fake_new); (void)chmod(newp, 0755);
+
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tests/check-netregen-bytes.cx' -o '%s'", cwd, cwd, nrb)) cne_abort("build-nrb");
+        if (ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out) != 0) cne_abort("compile-nrb");
+
+        if (cx_fmt(cmd, sizeof cmd, "'%s' prepare '%s' '%s' '%s' '%s' && '%s' case '%s' '%s' '%s' '%s' module lnx/x86_64",
+            nrb, cwd, oldp, newp, ndir, nrb, cwd, oldp, newp, ndir)) cne_abort("run-nrb");
+        int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+        if (cx_fmt(want_diff, sizeof want_diff, "NETREGEN_DIFF\tcase=module\ttarget=lnx/x86_64\topt=none\told=%s\tnew=%s\told_len=20\tnew_len=27", ha, hb)) cne_abort("wd");
+        ck(rc == 2 && ckk_has(out, CNE_OUT, want_diff) && ckk_has(out, CNE_OUT, "NETREGEN_BYTES\tREFUSE"),
+            "netregen-nonopt-emits-diff-and-refuses: non-opt prints NETREGEN_DIFF with sha+len and rc=2 REFUSE");
+    }
+
+    /* 2-9. Real release-exec.cx --dry G1 tests */
+    {
+        char sha_ape[65], sha_f[65], cand[2048], ev[8192], ef[1024];
+        const char *fake_ape = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'unisacc 0.0.83'; exit 0; fi\nexit 0\n";
+        const char *blob = "fixture-payload\n";
+        const char *h_old = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const char *h_new = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const char *h_old_bad = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab";
+        const char *h_new_bad = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbba";
+        cne_sha(fake_ape, sha_ape);
+        cne_sha(blob, sha_f);
+
+        if (cx_fmt(rxbin, sizeof rxbin, "%s/release-exec.bin", work)) cne_abort("rxbin");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-exec.cx' -o '%s'", cwd, cwd, rxbin)) cne_abort("build-rx");
+        if (ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out) != 0) cne_abort("compile-rx");
+
+        if (cx_fmt(g1, sizeof g1, "%s/g1repo", work)) cne_abort("g1"); cne_mk(g1);
+        if (cx_fmt(p, sizeof p, "%s/release", g1)) cne_abort("g1r"); cne_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/release/evidence", g1)) cne_abort("g1e"); cne_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/release/evidence/0.0.83", g1)) cne_abort("g1e83"); cne_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/tools", g1)) cne_abort("g1to"); cne_mk(p);
+        if (cx_fmt(lay, sizeof lay, "%s/layout", work)) cne_abort("lay"); cne_mk(lay);
+
+        cne_w(g1, "tools/devsvc-repo.tsv", "product\tunisacc.com\t-\n");
+        cne_w(lay, "unisacc.com", fake_ape);
+        if (cx_fmt(p, sizeof p, "%s/unisacc.com", lay)) cne_abort("chm"); (void)chmod(p, 0755);
+        cne_w(lay, "pkg.bin", blob); cne_w(lay, "slice-win-arm64", blob);
+        cne_w(lay, "unisacc.com.build.json", blob); cne_w(lay, "build.json", blob); cne_w(lay, "SHA256SUMS", blob);
+
+        cne_w(g1, "release/evidence/0.0.83/ratchets.txt", "RATCHETS\tok=15\tfail=0\telapsed_ms=1\n");
+        cne_w(g1, "release/evidence/0.0.83/INDEX.tsv", "item\ttime\tverdict\tpath_or_ref\tnote\n");
+        cne_w(g1, "release/evidence.tsv", "1\tPASS\tx\n");
+        cne_w(g1, "release/decision.txt", "RELEASE_DECIDE\tfx\n");
+        cne_w(g1, "release/rollback.txt", "# rb\n");
+
+        const char *cand_hdr = "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n";
+        if (cx_fmt(cand, sizeof cand,
+            "%sexample/fx\tv0.0.83\t1111111111111111111111111111111111111111\t0.0.83\tci.yml\tv0.0.83\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+            cand_hdr, sha_ape, sha_f, sha_f, sha_f, sha_f, sha_f)) cne_abort("cand");
+        cne_w(g1, "release/candidate.tsv", cand);
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git init -q && git add release/candidate.tsv && git -c user.name=t -c user.email=t@t commit -q -m init", g1)) cne_abort("g1git");
+        if (ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out) != 0) cne_abort("g1git-run");
+
+        /* Strict evidence with note=image=OLD->NEW */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev2");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+
+        /* 2. Exact image fingerprint + valid expires=0.0.84 -> GATE 1 STRICT PASS */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\t0.0.83 include memsz delta 0x270; expires=0.0.84\n",
+            h_old, h_new)) cne_abort("ef2");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o2' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c2");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(ckk_has(out, CNE_OUT, "GATE\t1\tSTRICT\tPASS"),
+                "g1-image-fingerprint-exact-passes: matching image=OLD->NEW note with valid expires passes G1");
+            (void)rc;
+        }
+
+        /* 3. Exact image fingerprint via nearby NETREGEN_DIFF line (note='-') -> GATE 1 STRICT PASS */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "NETREGEN_DIFF\tcase=module\ttarget=lnx/x86_64\topt=none\told=%s\tnew=%s\told_len=448530\tnew_len=452626\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev3");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o3' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c3");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(ckk_has(out, CNE_OUT, "GATE\t1\tSTRICT\tPASS"),
+                "g1-image-fingerprint-diff-line-passes: nearby NETREGEN_DIFF line satisfies image= expected-fail");
+            (void)rc;
+        }
+
+        /* 4. Wrong old hash -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\twrong old; expires=0.0.84\n",
+            h_old_bad, h_new)) cne_abort("ef4");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o4' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c4");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-wrong-old-hash-refused: mismatched old sha256 refused with EXPECTED_FAIL");
+        }
+
+        /* 5. Wrong new hash -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\twrong new; expires=0.0.84\n",
+            h_old, h_new_bad)) cne_abort("ef5");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o5' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c5");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-wrong-new-hash-refused: mismatched new sha256 refused with EXPECTED_FAIL");
+        }
+
+        /* 6. Missing NETREGEN_DIFF / image= in strict evidence -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\tvalid; expires=0.0.84\n",
+            h_old, h_new)) cne_abort("ef6");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape)) cne_abort("ev6");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o6' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c6");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-missing-diff-refused: missing NETREGEN_DIFF and image= note refused");
+        }
+
+        /* Restore strict evidence with image= note for expiry tests */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev7");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+
+        /* 7. Expired (candidate 0.0.83 > expires=0.0.82) -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\texpired; expires=0.0.82\n",
+            h_old, h_new)) cne_abort("ef7");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o7' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c7");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-expired-refused: candidate 0.0.83 > expires=0.0.82 refused");
+        }
+
+        /* 8. Missing expires= on image= entry -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\tno expiry listed\n",
+            h_old, h_new)) cne_abort("ef8");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o8' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c8");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-missing-expires-refused: image= entry without expires= refused");
+        }
+
+        /* 10. expires= only counts as its own token: "noexpires=0.0.99" is no expiry -> REFUSE */
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\tsubstring; noexpires=0.0.99\n",
+            h_old, h_new)) cne_abort("ef10");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o10' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c10");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-expires-token-only: noexpires= substring is not an expiry");
+        }
+        if (cx_fmt(ef, sizeof ef,
+            "batch\texpected\treason\n"
+            "netregen-module-lnx-x86_64\timage=%s->%s\tvalid; expires=0.0.84\n",
+            h_old, h_new)) cne_abort("ef11");
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv", ef);
+
+        /* 11. NETREGEN_DIFF of another case/target right after the FAIL row does not satisfy it -> REFUSE */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "NETREGEN_DIFF\tcase=boundary\ttarget=win/arm64\topt=none\told=%s\tnew=%s\told_len=1\tnew_len=1\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev11");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o11' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c11");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-diff-bound-to-batch: NETREGEN_DIFF of another case/target refused");
+        }
+
+        /* 12. Two FAIL rows of the batch: the first with another image is not masked by a later match -> REFUSE */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_new, h_new, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev12");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o12' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c12");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-every-fail-row: an earlier FAIL row with another image is not masked");
+        }
+
+        /* 13. Earlier note='-' FAIL row + later fingerprinted FAIL row with identical rc/marker/transport=0/candidate -> PASS */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev13");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o13' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c13");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            (void)rc;
+            ck(ckk_has(out, CNE_OUT, "GATE\t1\tSTRICT\tPASS"),
+                "g1-image-older-dash-inherits-same-sig: earlier note='-' FAIL inherits later matching fingerprint");
+        }
+
+        /* 14. Earlier note='-' FAIL with different rc (rc=1 vs rc=2) -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t1\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=1\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev14");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o14' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c14");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-older-diff-rc-refused: earlier note='-' FAIL with different rc refused");
+        }
+
+        /* 15. Earlier note='-' FAIL with different candidate sha256 -> REFUSE */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            h_old, h_old, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev15");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o15' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c15");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && (ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_CANDIDATE_SHA") || ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL")),
+                "g1-image-older-diff-cand-refused: earlier note='-' FAIL with different candidate refused");
+        }
+
+        /* 16. Earlier note='-' FAIL with different marker -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=OTHER_MARKER\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev16");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o16' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c16");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-older-diff-marker-refused: earlier note='-' FAIL with different marker refused");
+        }
+
+        /* 17. Earlier note='-' FAIL with transport=-1 (timeout/transport failure) -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=-1\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev17");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o17' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c17");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-older-transport-nonzero-refused: earlier transport=-1 FAIL refused");
+        }
+
+        /* 18. Only note='-' FAIL rows (no later fingerprinted row) -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, sha_ape, sha_ape)) cne_abort("ev18");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o18' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c18");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-only-unfingerprinted-refused: only note='-' FAIL rows refused");
+        }
+
+        /* 19. Fingerprinted row followed by note='-' FAIL (last FAIL row lacks fingerprint) -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=2\tPASS=0\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=200\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, h_old, h_new, sha_ape, sha_ape, sha_ape, sha_ape)) cne_abort("ev19");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o19' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c19");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-last-row-unfingerprinted-refused: last FAIL row without fingerprint refused");
+        }
+
+        /* 20. note='-' FAIL, then PASS, then fingerprinted FAIL: no inheritance across the PASS -> REFUSE EXPECTED_FAIL */
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tPASS\t0\t%s\t100\t0.5\t0\t-\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=PASS\trc=0\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "netregen-module-lnx-x86_64\tproduct-qualification\tFAIL\t2\t%s\t100\t0.5\t0\timage=%s->%s\n"
+            "RAW\tBATCH_RUN\tid=netregen-module-lnx-x86_64\tstatus=FAIL\trc=2\ttransport=0\tmarker=NETREGEN_SHARD_SAME\tcandidate=%s\n"
+            "SUMMARY\tbatches=3\tPASS=1\tFAIL=2\tUNKNOWN=0\tINVALID=0\ttotal_ms=300\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape, sha_ape, sha_ape, h_old, h_new, sha_ape, sha_ape)) cne_abort("ev20");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o20' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c20");
+        {
+            int rc = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"),
+                "g1-image-no-inherit-across-pass: note='-' FAIL before a PASS does not inherit a later fingerprint");
+        }
+
+        /* 9. Legacy count=53/9 format unchanged (passes on match, refuses on mismatch) */
+        cne_w(g1, "release/evidence/0.0.83/expected-fail.tsv",
+            "batch\texpected\treason\n"
+            "c-negative\t53/9\tlegacy count format\n");
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "c-negative\tproduct-qualification\tFAIL\t1\t%s\t100\t0.5\t0\tcount=53/9\n"
+            "RAW\tBATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape)) cne_abort("ev9a");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o9a' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c9a");
+        int rc9a = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+        int ok9a = ckk_has(out, CNE_OUT, "GATE\t1\tSTRICT\tPASS");
+
+        if (cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "c-negative\tproduct-qualification\tFAIL\t1\t%s\t100\t0.5\t0\tcount=53/10\n"
+            "RAW\tBATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\ttransport=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=1\tPASS=0\tFAIL=1\tUNKNOWN=0\tINVALID=0\ttotal_ms=100\tape_sha256=%s\tversion=unisacc 0.0.83\n",
+            sha_ape, sha_ape, sha_ape)) cne_abort("ev9b");
+        cne_w(g1, "release/evidence/v0.0.83-strict-2026-01-01.tsv", ev);
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/o9b' --baseline /nonexistent", g1, rxbin, lay, work)) cne_abort("c9b");
+        int rc9b = ckk_sh("check-netregen-expected-fail", cmd, out, sizeof out);
+        int ok9b = (rc9b == 2 && ckk_has(out, CNE_OUT, "RELEASE_EXEC_GATE_EXPECTED_FAIL"));
+        (void)rc9a;
+        ck(ok9a && ok9b, "g1-count-format-unchanged: count=53/9 passes and count=53/10 refused");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_NETREGEN_EXPECTED_FAIL\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

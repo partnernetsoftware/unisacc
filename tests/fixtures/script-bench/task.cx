@@ -1,0 +1,56 @@
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use json
+#pragma unisa use cxlib.globspan
+#pragma unisa use cxlib.netpack
+
+static long matches(const char *path){
+    DIR *d=opendir(path);if(!d)exit(2);long count=0;struct dirent *e;
+    while((e=readdir(d))){
+        if(!strcmp(e->d_name,".")||!strcmp(e->d_name,".."))continue;
+        char p[4096];sy_stat_t st;
+        if(cx_fmt(p,sizeof p,"%s/%s",path,e->d_name)||sy_lstat(p,&st))exit(2);
+        if(st.kind=='d')count+=matches(p);
+        else if(st.kind=='f'&&glob_span("*.cx",4,e->d_name,strlen(e->d_name)))count++;
+    }
+    if(closedir(d))exit(2);return count;
+}
+static long json_bytes(const char *s,size_t n){
+    char error[128];js_val *root=js_parse(s,n,error,sizeof error);
+    if(js_kind(root)!=JS_ARR)exit(2);np_buf out={0};np_puts(&out,"[");
+    for(long i=0;i<js_len(root);i++){
+        js_val *item=js_at(root,i);if(js_kind(item)!=JS_NUM)exit(2);
+        double v=js_num(item);if(v<0||v>9||v!=(int)v)exit(2);
+        char digits[8];if(cx_fmt(digits,sizeof digits,"%d",(int)v))exit(2);
+        if(i)np_puts(&out,",");np_puts(&out,digits);
+    }
+    np_puts(&out,"]");if(n!=out.n||memcmp(s,out.p,n))exit(2);js_free(root);free(out.p);return n;
+}
+static long work(const char *kind,const char *root){
+    char p[4096];const char *leaf=!strcmp(kind,"glob")?"tree":!strcmp(kind,"json")?"data.json":"data.tsv";
+    if(cx_fmt(p,sizeof p,"%s/%s",root,leaf))exit(2);
+    if(!strcmp(kind,"glob"))return matches(p);
+    if(!strcmp(kind,"spawn")){
+        long long deadline=sy_mono_ns()+6000000000LL;
+        char *cmd[]={"/bin/true",0};char out[32];for(int i=0;i<100;i++)if(sy_mono_ns()>deadline||sy_run(cmd,out,sizeof out,0))exit(2);return 100;
+    }
+    size_t n;char *s=cx_read(p,&n);if(!s)exit(2);long result=0;
+    if(!strcmp(kind,"lines")){for(size_t i=0;i<n;i++)if(s[i]=='\n')result++;}
+    else if(!strcmp(kind,"split")){char *t=strtok(s,"\t\n");while(t){result++;t=strtok(0,"\t\n");}}
+    else if(!strcmp(kind,"json"))result=json_bytes(s,n);
+    else if(!strcmp(kind,"tsv")){
+        long sums[10]={0};char *line=s;
+        while(*line){
+            char *end=strchr(line,'\n'),*tab=strchr(line,'\t');if(!end||!tab||tab>=end||line[0]!='g')exit(2);
+            *end=0;*tab=0;int group=atoi(line+1);if(group<0||group>=10)exit(2);
+            sums[group]+=atol(tab+1);line=end+1;
+        }
+        for(int i=0;i<10;i++)result+=(i+1)*sums[i];
+    }else exit(2);
+    free(s);return result;
+}
+int main(int argc,char **argv){
+    if(argc!=3)return 2;long long start=sy_mono_ns();long result=work(argv[1],argv[2]);long long end=sy_mono_ns();
+    printf("RESULT\t%ld\t%lld\t%lld\n",result,start,end);return 0;
+}

@@ -1,0 +1,180 @@
+/* tools/check-asm-attr-reject.cx -- regression check for asm and __attribute__ named rejections (0.0.83).
+ *   sh ./unisacc.com tools/check-asm-attr-reject.cx
+ * Override product under test via ASM_ATTR_CC=/path/to/cx-dev (or UNISACC).
+ * Verifies:
+ *   - 14 reject cases: __asm__("nop"), asm("nop"), asm label, aligned, packed, cleanup, section,
+ *     weak, alias, naked, vector_size, visibility("hidden"), unknown attr, mixed (unused, aligned)
+ *     -> rc!=0, stderr contains "not covered:", no object produced.
+ *   - 6 accept cases: constructor+destructor actually execute, visibility("default"),
+ *     all 13 harmless whitelist attrs + __name__ + multi-attr + format/deprecated/nonnull args,
+ *     empty __attribute__(()), plain identifiers asm/__asm__, and unterminated attribute error.
+ * Last line: CHECK_ASM_ATTR_REJECT<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CAAR_PW 4400
+#define CAAR_OUT 16384
+
+static char caar_work[CAAR_PW];
+static const char *caar_cc;
+static int caar_use_sh;
+
+static int caar_compile(const char *name, const char *src, char *out, size_t cap, char *bin_out, size_t bcap) {
+    char cpath[CAAR_PW];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s.c", caar_work, name)) return -1;
+    if (cx_fmt(bin_out, (int)bcap, "%s/%s.bin", caar_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(bin_out);
+    if (caar_use_sh) {
+        char *av[] = {"sh", (char *)caar_cc, cpath, "-o", bin_out, 0};
+        return ck_run(av, out, (int)cap);
+    }
+    char *av[] = {(char *)caar_cc, cpath, "-o", bin_out, 0};
+    return ck_run(av, out, (int)cap);
+}
+
+static void caar_expect_reject(const char *id, const char *src, const char *want_msg) {
+    char out[CAAR_OUT], bin[CAAR_PW];
+    int rc = caar_compile(id, src, out, sizeof out, bin, sizeof bin);
+    struct stat st;
+    int no_bin = (stat(bin, &st) != 0);
+    ck(rc != 0 && no_bin && ckk_has(out, CAAR_OUT, want_msg), id);
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    char out[CAAR_OUT], bin[CAAR_PW];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    const char *ov = sy_env_or("ASM_ATTR_CC", "");
+    if (argc >= 2 && argv[1][0] == '/') {
+        /* batch mode: argv[1] is the candidate product, run as sh PRODUCT */
+        caar_cc = argv[1];
+        caar_use_sh = 1;
+    } else if (ov && ov[0]) {
+        caar_cc = ov;
+        caar_use_sh = 0;
+    } else {
+        caar_cc = sy_env_or("UNISACC", "./unisacc.com");
+        caar_use_sh = 1;
+    }
+
+    if (cx_fmt(caar_work, sizeof caar_work, "%s/check-asm-attr-%d", base_td, (int)getpid())) return 2;
+    if (mkdir(caar_work, 0700) != 0 && errno != EEXIST) return 2;
+
+    /* 17 named rejections */
+    caar_expect_reject("reject-asm-basic", "int main(void){ __asm__(\"nop\"); return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-asm-toplevel", "asm(\"nop\"); int main(void){ return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-asm-label", "int f(void) __asm__(\"myf\"); int main(void){ return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-asm-volatile", "int main(void){ __asm__ volatile(\"nop\"); return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-asm-__volatile__", "int main(void){ __asm__ __volatile__(\"nop\"); return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-asm-plain-volatile", "int main(void){ asm volatile(\"nop\"); return 0; }\n", "not covered: inline asm");
+    caar_expect_reject("reject-attr-aligned", "struct S { int x; } __attribute__((aligned(32))); int main(void){ return 0; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-packed", "struct P { char a; int b; } __attribute__((packed)); int main(void){ return 0; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-cleanup", "void cl(int *p){(void)p;} int main(void){ int x __attribute__((cleanup(cl))) = 1; return x; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-section", "int x __attribute__((section(\".mysec\"))) = 1; int main(void){ return x; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-weak", "int f(void) __attribute__((weak)); int f(void){ return 0; } int main(void){ return f(); }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-alias", "int g(void){ return 1; } int f(void) __attribute__((alias(\"g\"))); int main(void){ return 0; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-naked", "void f(void) __attribute__((naked)); void f(void){} int main(void){ return 0; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-vector-size", "typedef int v4i __attribute__((vector_size(16))); int main(void){ return 0; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-visibility-hidden", "int f(void) __attribute__((visibility(\"hidden\"))); int f(void){ return 0; } int main(void){ return f(); }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-unknown", "int x __attribute__((made_up_attr)) = 0; int main(void){ return x; }\n", "not covered: attribute");
+    caar_expect_reject("reject-attr-mixed-list", "int x __attribute__((unused, aligned(16))) = 0; int main(void){ return x; }\n", "not covered: attribute");
+
+    /* 6 accept / runtime-behaviour cases */
+    {
+        const char *ctor_src =
+            "#include <stdio.h>\n"
+            "static int v = 0;\n"
+            "__attribute__((constructor)) static void c1(void){ v = 7; }\n"
+            "__attribute__((destructor)) static void d1(void){ printf(\"D\"); }\n"
+            "int main(void){ printf(\"%d\", v); return 0; }\n";
+        int rc = caar_compile("accept-ctor-dtor", ctor_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc == 0) {
+            char *rv[] = {bin, 0};
+            int rrc = ck_run(rv, out, sizeof out);
+            run_ok = (rrc == 0 && ckk_has(out, CAAR_OUT, "7D"));
+        }
+        ck(rc == 0 && run_ok, "accept-ctor-dtor: constructor and destructor still execute (output 7D)");
+    }
+    {
+        const char *vis_src =
+            "__attribute__((visibility(\"default\"))) int a(void){ return 1; }\n"
+            "__attribute__((__visibility__(\"default\"))) int b(void){ return 2; }\n"
+            "int main(void){ return a() + b() == 3 ? 0 : 1; }\n";
+        int rc = caar_compile("accept-vis-default", vis_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc == 0) {
+            char *rv[] = {bin, 0};
+            run_ok = (ck_run(rv, out, sizeof out) == 0);
+        }
+        ck(rc == 0 && run_ok, "accept-vis-default: visibility(\"default\") and __visibility__(\"default\") accepted");
+    }
+    {
+        const char *wl_src =
+            "__attribute__((noinline, cold)) int f1(int x __attribute__((unused))){ return x; }\n"
+            "__attribute__((always_inline, hot)) static int f2(int x){ return x + 1; }\n"
+            "__attribute__((__unused__, used)) static int g1 = 0;\n"
+            "__attribute__((warn_unused_result)) int f3(void){ return 3; }\n"
+            "__attribute__((deprecated(\"use f3()\"))) int f4(void){ return 4; }\n"
+            "__attribute__((format(printf, 1, 2))) void f5(const char *fmt, ...);\n"
+            "__attribute__((nonnull(1))) void f6(const char *p){ (void)p; }\n"
+            "__attribute__((noreturn)) void f7(void);\n"
+            "typedef int __attribute__((may_alias)) ma_int;\n"
+            "int main(void){ ma_int z = f1(f2(f3())); f6(\"ok\"); switch(z){ case 4: __attribute__((fallthrough)); default: break; } return z == 4 ? 0 : 1; }\n";
+        int rc = caar_compile("accept-whitelist-13", wl_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc == 0) {
+            char *rv[] = {bin, 0};
+            run_ok = (ck_run(rv, out, sizeof out) == 0);
+        }
+        ck(rc == 0 && run_ok, "accept-whitelist-13: all 13 harmless attrs + __name__ + args accepted");
+    }
+    {
+        const char *wl8_src =
+            "__attribute__((pure)) int p1(int x){ return x + 1; }\n"
+            "__attribute__((const)) int p2(int x){ return x * 2; }\n"
+            "__attribute__((malloc, alloc_size(1))) void *p3(unsigned long n);\n"
+            "__attribute__((nothrow, leaf)) int p4(void){ return 4; }\n"
+            "__attribute__((sentinel)) void p5(const char *a, ...);\n"
+            "__attribute__((returns_twice)) int p6(void);\n"
+            "__attribute__((__pure__, __const__)) int p7(int x){ return x; }\n"
+            "int main(void){ int asm = 1; int volatile_ok = asm + p1(1) + p2(2) + p4() + p7(0); return volatile_ok == 11 ? 0 : 1; }\n";
+        int rc = caar_compile("accept-whitelist-8-extra", wl8_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc == 0) {
+            char *rv[] = {bin, 0};
+            run_ok = (ck_run(rv, out, sizeof out) == 0);
+        }
+        ck(rc == 0 && run_ok, "accept-whitelist-8-extra: pure/const/malloc/nothrow/leaf/sentinel/alloc_size/returns_twice accepted");
+    }
+    {
+        const char *empty_src = "int __attribute__(()) x = 0; int main(void){ return x; }\n";
+        int rc = caar_compile("accept-empty-attr", empty_src, out, sizeof out, bin, sizeof bin);
+        ck(rc == 0, "accept-empty-attr: empty __attribute__(()) accepted");
+    }
+    {
+        const char *ident_src = "int main(void){ int asm = 1; int __asm__ = 2; return (asm + __asm__) == 3 ? 0 : 1; }\n";
+        int rc = caar_compile("accept-asm-ident", ident_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc == 0) {
+            char *rv[] = {bin, 0};
+            run_ok = (ck_run(rv, out, sizeof out) == 0);
+        }
+        ck(rc == 0 && run_ok, "accept-asm-ident: asm and __asm__ without '(' remain plain identifiers");
+    }
+    caar_expect_reject("reject-unterminated-attr", "int x __attribute__((unused\n", "unterminated attribute or asm");
+
+    {
+        char *rmv[] = {"rm", "-rf", caar_work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_ASM_ATTR_REJECT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

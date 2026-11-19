@@ -220,7 +220,7 @@ static int execve(const char *__u_path, char *const __u_argv[], char *const __u_
    (a tentative definition with external linkage in every unit, merged at link, C99 6.9.2), so an
    assignment in one unit is what getenv and execv see in every other. */
 #include <stdlib.h>
-#define environ _unisa_env
+extern char **environ;
 /* execv passes the current environ (POSIX; 0.0.28 E20) */
 #if !__UNISA_FTRIM_LIBC || __UN_execv
 static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, environ); }

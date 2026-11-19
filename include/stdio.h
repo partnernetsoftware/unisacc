@@ -1548,7 +1548,10 @@ static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
    there fills before main); a program with no unit including <stdlib.h> has none, and the child gets
    the block the kernel left after argv */
 #if !__UNISA_FTRIM_LIBC || __UN_popen
-char **_unisa_env;
+char **environ;
+#ifndef _unisa_env
+#define _unisa_env environ
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_popen
 static FILE *popen(const char *__u_cmd, const char *__u_mode) {

@@ -1,0 +1,115 @@
+/* Tool selfcheck: script-bench. prepare NEW_DIR then run DIR CASE (one bounded cell per engine).
+   TSV times in ms. Wall includes process launcher and capture. Cold uses empty private CX
+   caches per sample, hot uses an unmeasured warmup. OS page cache stays shared.
+   Startup-only, compiler-only and exit-only clocks are unavailable. No timing thresholds. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+static const char *cases[]={"hello-cold","hello-hot","lines","split","json","glob","spawn","tsv"};
+static const long answers[]={0,0,100000,200000,8193,64,100,3850000};
+static const char *engines[]={"cx","node","python3","bun"};
+static const char *suffix[]={"cx","cjs","py","cjs"};
+static void refused(const char *why){fprintf(stderr,"SCRIPT_BENCH REFUSE %s\n",why);exit(2);}
+static void path(char *out,const char *dir,const char *leaf){if(cx_fmt(out,4096,"%s/%s",dir,leaf))refused("path");}
+static void mkdir_new(const char *p){if(sy_mkdir(p,0700))refused(p);}
+static FILE *new_file(const char *dir,const char *leaf){
+    char p[4096];path(p,dir,leaf);int fd=open(p,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+    FILE *f=fd<0?0:fdopen(fd,"w");if(!f)refused(p);return f;
+}
+static void finish(FILE *f){if(ferror(f)||fclose(f))refused("write");}
+static void prepare(const char *root){
+    mkdir_new(root);FILE *f=new_file(root,"data.tsv");
+    for(int i=0;i<100000;i++)fprintf(f,"g%02d\t%d\n",i%10,1+i%10);finish(f);
+    f=new_file(root,"data.json");fputc('[',f);for(int i=0;i<4096;i++)fprintf(f,"%s%d",i?",":"",i%10);fputc(']',f);finish(f);
+    char tree[4096];path(tree,root,"tree");mkdir_new(tree);
+    for(int i=0;i<16;i++){char dir[4096],leaf[32];cx_fmt(leaf,sizeof leaf,"d%02d",i);path(dir,tree,leaf);mkdir_new(dir);
+        for(int j=0;j<8;j++){cx_fmt(leaf,sizeof leaf,"f%d.%s",j,j%2?"txt":"cx");f=new_file(dir,leaf);fputs("x\n",f);finish(f);}}
+}
+static int cmp_ns(const void *a,const void *b){long long x=*(const long long *)a,y=*(const long long *)b;return (x>y)-(x<y);}
+static long long stats(long long *v,int n){
+    if(n!=7)return -1;qsort(v,n,sizeof *v,cmp_ns);return v[3];
+}
+static int locate(const char *name,char *out){
+    const char *env=getenv("PATH");if(!env)return 0;char *copy=strdup(env);
+    for(char *d=strtok(copy,":");d;d=strtok(0,":")){path(out,d,name);if(access(out,X_OK)==0){free(copy);return 1;}}
+    free(copy);return 0;
+}
+static void set_cache(const char *root,int c,int e,int i){
+    char dir[4096],name[100];cx_fmt(name,sizeof name,"cache-%d-%d-%d-%d",(int)getpid(),c,e,c==0?i:0);path(dir,root,name);
+    if(mkdir(dir,0700)&&(errno!=EEXIST||c==0||i<0))refused("cache-dir");
+    const char *keys[]={"UNISACC_CACHE_DIR","UNISACC_E3CACHE","XDG_CACHE_HOME","BUN_RUNTIME_TRANSPILER_CACHE_PATH","NODE_COMPILE_CACHE","PYTHONPYCACHEPREFIX"};
+    for(int k=0;k<6;k++)if(sy_setenv(keys[k],dir,1))refused("cache-env");
+    if(sy_setenv("UNISACC_RUN_CACHE","1",1)||sy_setenv("UNISACC_UNIT_CACHE","1",1))refused("cache-enable");
+}
+static int measure(const char *root,int c,int e,double *med){
+    char exe[4096],file[4096],leaf[160],why[512];const char *kind=cases[c];
+    if(e&&!locate(engines[e],exe)){
+        cx_fmt(leaf,sizeof leaf,"%s-%s.samples.tsv",kind,engines[e]);FILE *absent=new_file(root,leaf);
+        fputs("UNMEASURED:missing-interpreter\n",absent);finish(absent);printf("\tUNMEASURED:missing-interpreter");return 0;
+    }
+    cx_fmt(leaf,sizeof leaf,"%s.%s",c<2?"hello":"task",suffix[e]);path(file,"tests/fixtures/script-bench",leaf);
+    char product[4096];if(!realpath("unisacc.com",product))refused("product-path");
+    char *cx[]={"sh",product,file,"--",(char*)kind,(char*)root,0};
+    char *other[]={exe,file,(char*)kind,(char*)root,0};if(c<2){cx[3]=0;other[2]=0;}
+    cx_fmt(leaf,sizeof leaf,"%s-%s.samples.tsv",kind,engines[e]);FILE *raw=new_file(root,leaf);
+    fputs("trial\trc\twall_ns\twork_ns\tvalidated\n",raw);long long wall[7],work[7];int n=0;
+    for(int i=c==0?0:-1;i<7;i++){
+        set_cache(root,c,e,i);np_result r={0};long long result=-1,a=0,b=0;
+        long long start=sy_mono_ns();int err=np_run(e?other:cx,0,0,i<0?30:7,&r,why,sizeof why);long long elapsed=sy_mono_ns()-start;
+        int ok=!err&&!r.rc&&elapsed>0;
+        if(ok&&c<2)ok=r.out&&!strcmp(r.out,"hello\n");
+        if(ok&&c>=2){char extra;ok=r.out&&sscanf(r.out,"RESULT\t%lld\t%lld\t%lld %c",&result,&a,&b,&extra)==3&&result==answers[c]&&a>0&&b>=a&&b-a<=elapsed;}
+        fprintf(raw,"%d\t%d\t%lld\t%lld\t%d\n",i,err?-1:r.rc,elapsed,b-a,ok);
+        if(!ok){fprintf(stderr,"%s/%s sample=%d result=%lld %s\n",kind,engines[e],i,result,err?why:r.err?r.err:"");np_free(&r);break;}
+        if(i>=0){wall[n]=elapsed;work[n]=b-a;n++;}np_free(&r);
+    }
+    finish(raw);long long m=stats(wall,n);if(m<0){printf("\tFAILED:n=%d",n);return 1;}
+    *med=m/1e6;printf("\t%.3f/%.3f/%.3f/",wall[0]/1e6,*med,wall[6]/1e6);
+    if(c<2)printf("UNMEASURED");else printf("%.3f",stats(work,n)/1e6);return 0;
+}
+static int report(const char *root){
+    int passed=0,missing=0,failed=0;
+    puts("case\tcx_min/median/max/work_median_ms\tnode_min/median/max/work_median_ms\tpython3_min/median/max/work_median_ms\tbun_min/median/max/work_median_ms\tcx/node\tcx/python3\tcx/bun\tstartup_ms\tcompile_ms\texit_ms");
+    for(int c=0;c<8;c++){
+        double med[4]={0};printf("%s",cases[c]);
+        for(int e=0;e<4;e++){
+            char p[4096],leaf[160],line[256]={0};cx_fmt(leaf,sizeof leaf,"%s-%s.samples.tsv",cases[c],engines[e]);path(p,root,leaf);
+            FILE *f=fopen(p,"r");if(!f){printf("\tINCOMPLETE");failed++;continue;}
+            if(fgets(line,sizeof line,f)&&!strcmp(line,"UNMEASURED:missing-interpreter\n")&&fgetc(f)==EOF){
+                fclose(f);printf("\tUNMEASURED:missing-interpreter");missing++;continue;
+            }
+            long long w[7],x[7];int idx=c?-1:0,valid=!strcmp(line,"trial\trc\twall_ns\twork_ns\tvalidated\n");
+            while(valid&&fgets(line,sizeof line,f)){
+                int trial,rc,ok;long long a,b;char extra;
+                valid=sscanf(line,"%d %d %lld %lld %d %c",&trial,&rc,&a,&b,&ok,&extra)==5&&trial==idx&&idx<7&&rc==0&&ok==1&&a>0&&b>=0&&b<=a;
+                if(valid&&idx>=0){w[idx]=a;x[idx]=b;}idx++;
+            }
+            valid=valid&&!ferror(f)&&idx==7;fclose(f);
+            if(!valid){failed++;printf("\tFAILED");continue;}
+            med[e]=stats(w,7)/1e6;printf("\t%.3f/%.3f/%.3f/",w[0]/1e6,med[e],w[6]/1e6);
+            if(c<2)printf("UNMEASURED");else printf("%.3f",stats(x,7)/1e6);passed++;
+        }
+        for(int e=1;e<4;e++){if(med[0]&&med[e])printf("\t%.3f",med[0]/med[e]);else printf("\tUNMEASURED");}
+        puts("\tUNMEASURED\tUNMEASURED\tUNMEASURED");
+    }
+    printf("SUMMARY\tmeasured=%d\tmissing_interpreter=%d\tincomplete_or_failed=%d\n",passed,missing,failed);return !!failed;
+}
+int main(int argc,char **argv){
+    if(argc==3&&!strcmp(argv[1],"report"))return report(argv[2]);
+    if(argc==5&&!strcmp(argv[1],"cell")&&argv[2][0]=='/'){
+        for(int c=0;c<8;c++)for(int e=0;e<4;e++)if(!strcmp(argv[3],cases[c])&&!strcmp(argv[4],engines[e])){
+            double median=0;int rc=measure(argv[2],c,e,&median);puts("");return rc;}
+        refused("unknown-cell");
+    }
+    if(argc==3&&!strcmp(argv[1],"prepare")&&argv[2][0]=='/'){prepare(argv[2]);return 0;}
+    if(argc>=2&&!strcmp(argv[1],"stats")){
+        long long v[7];if(argc!=9)return 1;for(int i=0;i<7;i++){char *end;v[i]=strtoll(argv[i+2],&end,10);if(*end||v[i]<=0)return 1;}
+        long long m=stats(v,7);printf("min_ms=%.3f median_ms=%.3f max_ms=%.3f\n",v[0]/1e6,m/1e6,v[6]/1e6);return 0;
+    }
+    if(argc!=4||strcmp(argv[1],"run")||argv[2][0]!='/')refused("usage: prepare NEW_ABS_DIR | run ABS_DIR CASE");
+    int c=0;while(c<8&&strcmp(argv[3],cases[c]))c++;if(c==8)refused("unknown-case");
+    double med[4]={0};int failed=0;printf("%s",cases[c]);for(int e=0;e<4;e++)failed+=measure(argv[2],c,e,&med[e]);
+    for(int e=1;e<4;e++){if(med[0]&&med[e])printf("\t%.3f",med[0]/med[e]);else printf("\tUNMEASURED");}
+    puts("");return failed?1:0;
+}

@@ -1,0 +1,401 @@
+/* tools/check-posix-fix.cx -- regression checks for 0.0.83 POSIX fixes (sigprocmask, environ, wchar/stddef).
+ *   sh ./unisacc.com tools/check-posix-fix.cx [-- CANDIDATE_APE] [--include-dir DIR]
+ * Tests 9 contracts across the 3 fixes (no snprintf; cx_fmt only):
+ *   1. sig-block-defers-raise      SIG_BLOCK defers raise(SIGUSR1) until SIG_UNBLOCK (OK:0:10:1)
+ *   2. sig-setmask-and-oldmask     sigprocmask returns previous blocked mask in *old
+ *   3. sig-invalid-how-einval      invalid how returns -1 with errno=EINVAL
+ *   4. environ-without-unistd      extern char **environ non-NULL without <unistd.h> and reflects setenv
+ *   5. environ-with-unistd         extern char **environ works alongside <unistd.h>
+ *   6. environ-ftrim-libc          -ftrim-libc keeps _unisa_environ_init so environ != NULL without getenv
+ *   7. wchar-and-stdlib-order1     #include <wchar.h> + <stdlib.h> compiles & runs (sizeof(wchar_t)==4)
+ *   8. stdlib-then-wchar-order2    #include <stdlib.h> + <stddef.h> + <wchar.h> compiles & runs
+ *   9. stddef-then-wchar-order3    #include <stddef.h> + <wchar.h> compiles & runs
+ * Last line: CHECK_POSIX_FIX<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CPF_PW 4400
+#define CPF_OUT 16384
+
+static char cpf_work[CPF_PW];
+static const char *cpf_cc;
+static const char *cpf_inc;
+static int cpf_use_sh;
+
+static int cpf_run_c(const char *name, const char *src, const char *extra_flag, char *out, size_t cap) {
+    char cpath[CPF_PW], bin[CPF_PW], cout[CPF_OUT];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s.c", cpf_work, name)) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/%s.bin", cpf_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(bin);
+
+    char *av[12];
+    int k = 0;
+    if (cpf_use_sh) av[k++] = "sh";
+    av[k++] = (char *)cpf_cc;
+    if (cpf_inc && cpf_inc[0]) {
+        av[k++] = "-I";
+        av[k++] = (char *)cpf_inc;
+    }
+    if (extra_flag && extra_flag[0]) av[k++] = (char *)extra_flag;
+    av[k++] = cpath;
+    av[k++] = "-o";
+    av[k++] = bin;
+    av[k] = 0;
+
+    int crc = ck_run(av, cout, sizeof cout);
+    if (crc != 0) {
+        (void)cx_fmt(out, (int)cap, "COMPILE_FAIL rc=%d %.200s", crc, cout);
+        return -2;
+    }
+    char *rv[] = {bin, 0};
+    return ck_run(rv, out, (int)cap);
+}
+
+static int cpf_run_c2(const char *name, const char *src_a, const char *src_b, char *out, size_t cap) {
+    char pa[CPF_PW], pb[CPF_PW], bin[CPF_PW], cout[CPF_OUT];
+    if (cx_fmt(pa, sizeof pa, "%s/%s_a.c", cpf_work, name)) return -1;
+    if (cx_fmt(pb, sizeof pb, "%s/%s_b.c", cpf_work, name)) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/%s.bin", cpf_work, name)) return -1;
+    if (cx_write(pa, src_a, strlen(src_a)) || cx_write(pb, src_b, strlen(src_b))) return -1;
+    (void)unlink(bin);
+
+    char *av[12];
+    int k = 0;
+    if (cpf_use_sh) av[k++] = "sh";
+    av[k++] = (char *)cpf_cc;
+    if (cpf_inc && cpf_inc[0]) { av[k++] = "-I"; av[k++] = (char *)cpf_inc; }
+    av[k++] = pa;
+    av[k++] = pb;
+    av[k++] = "-o";
+    av[k++] = bin;
+    av[k] = 0;
+    int crc = ck_run(av, cout, sizeof cout);
+    if (crc != 0) {
+        (void)cx_fmt(out, (int)cap, "COMPILE_FAIL rc=%d %.200s", crc, cout);
+        return -2;
+    }
+    char *rv[] = {bin, 0};
+    return ck_run(rv, out, (int)cap);
+}
+
+static int cpf_run_gcc(const char *name, const char *src, char *out, size_t cap) {
+    char cpath[CPF_PW], bin[CPF_PW], cout[CPF_OUT];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s_gcc.c", cpf_work, name)) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/%s_gcc.bin", cpf_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(bin);
+    char *av[] = {"gcc", "-D_POSIX_C_SOURCE=200809L", cpath, "-o", bin, 0};
+    if (ck_run(av, cout, sizeof cout) != 0) return -2;
+    char *rv[] = {bin, 0};
+    return ck_run(rv, out, (int)cap);
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    char out[CPF_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    cpf_cc = sy_env_or("UNISACC", "./unisacc.com");
+    cpf_inc = sy_env_or("POSIX_FIX_INC", "");
+    cpf_use_sh = 1;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--include-dir") && i + 1 < argc) {
+            cpf_inc = argv[++i];
+        } else if (argv[i][0] != '-') {
+            cpf_cc = argv[i];
+            size_t l = strlen(cpf_cc);
+            cpf_use_sh = (l >= 4 && tx_eqz(cpf_cc + l - 4, ".com")) ? 1 : 0;
+        }
+    }
+
+    /* the product ignores a bare relative -I such as "include"; pass the canonical absolute path */
+    static char cpf_incabs[CPF_PW];
+    if (cpf_inc && cpf_inc[0]) {
+        if (sy_realpath(cpf_inc, cpf_incabs, (int)sizeof cpf_incabs) <= 0) return 2;
+        cpf_inc = cpf_incabs;
+    }
+    if (cx_fmt(cpf_work, sizeof cpf_work, "%s/check-posix-fix-%d", base_td, (int)getpid())) return 2;
+    if (mkdir(cpf_work, 0700) != 0 && errno != EEXIST) return 2;
+
+    /* 1. sigprocmask(SIG_BLOCK) defers raise(SIGUSR1) until SIG_UNBLOCK */
+    {
+        const char *s1 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "static volatile int got = 0;\n"
+            "static void h(int sig){ got = sig; }\n"
+            "int main(void){\n"
+            "    struct sigaction sa, old;\n"
+            "    sigset_t set;\n"
+            "    sa.sa_handler = h; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR1, &sa, &old) != 0) return 1;\n"
+            "    sigemptyset(&set); sigaddset(&set, SIGUSR1);\n"
+            "    if (sigprocmask(SIG_BLOCK, &set, 0) != 0) return 2;\n"
+            "    raise(SIGUSR1);\n"
+            "    int during = got;\n"
+            "    if (sigprocmask(SIG_UNBLOCK, &set, 0) != 0) return 3;\n"
+            "    int after = got;\n"
+            "    printf(\"OK:%d:%d:%d\\n\", during, after, after == SIGUSR1 ? 1 : 0);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("sig1", s1, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "OK:0:10:1"),
+            "sig-block-defers-raise: SIG_BLOCK defers raise(SIGUSR1) until SIG_UNBLOCK");
+    }
+
+    /* 2. sigprocmask returns previous blocked mask in *old and supports SIG_SETMASK */
+    {
+        const char *s2 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "int main(void){\n"
+            "    sigset_t a, b, old;\n"
+            "    sigemptyset(&a); sigaddset(&a, SIGUSR1);\n"
+            "    sigemptyset(&b); sigaddset(&b, SIGUSR2);\n"
+            "    if (sigprocmask(SIG_BLOCK, &a, 0) != 0) return 1;\n"
+            "    if (sigprocmask(SIG_SETMASK, &b, &old) != 0) return 2;\n"
+            "    int m1 = sigismember(&old, SIGUSR1);\n"
+            "    int m2 = sigismember(&old, SIGUSR2);\n"
+            "    if (sigprocmask(SIG_UNBLOCK, &b, &old) != 0) return 3;\n"
+            "    int m3 = sigismember(&old, SIGUSR2);\n"
+            "    printf(\"MASK:%d:%d:%d\\n\", m1, m2, m3);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("sig2", s2, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "MASK:1:0:1"),
+            "sig-setmask-and-oldmask: sigprocmask reports old mask accurately");
+    }
+
+    /* 3. sigprocmask invalid how -> -1 and errno=EINVAL */
+    {
+        const char *s3 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "#include <errno.h>\n"
+            "int main(void){\n"
+            "    sigset_t s; sigemptyset(&s); errno = 0;\n"
+            "    int r = sigprocmask(99, &s, 0);\n"
+            "    printf(\"INV:%d:%d\\n\", r, errno == EINVAL ? 1 : 0);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("sig3", s3, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "INV:-1:1"),
+            "sig-invalid-how-einval: invalid how returns -1 with EINVAL");
+    }
+
+    /* 4. extern char **environ without <unistd.h> */
+    {
+        const char *s4 =
+            "#include <stdio.h>\n"
+            "#include <stdlib.h>\n"
+            "#include <string.h>\n"
+            "extern char **environ;\n"
+            "int main(void){\n"
+            "    int nonnull = (environ != 0) ? 1 : 0;\n"
+            "    setenv(\"UNISA_T19_KEY\", \"val99\", 1);\n"
+            "    int found = 0;\n"
+            "    if (environ) {\n"
+            "        for (int i = 0; environ[i]; i++) {\n"
+            "            if (strcmp(environ[i], \"UNISA_T19_KEY=val99\") == 0) found = 1;\n"
+            "        }\n"
+            "    }\n"
+            "    const char *v = getenv(\"UNISA_T19_KEY\");\n"
+            "    printf(\"ENV:%d:%d:%s\\n\", nonnull, found, v ? v : \"NULL\");\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("env1", s4, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "ENV:1:1:val99"),
+            "environ-without-unistd: extern char **environ non-NULL and reflects setenv");
+    }
+
+    /* 5. extern char **environ with <unistd.h> */
+    {
+        const char *s5 =
+            "#include <stdio.h>\n"
+            "#include <unistd.h>\n"
+            "#include <stdlib.h>\n"
+            "extern char **environ;\n"
+            "int main(void){\n"
+            "    setenv(\"UNISA_T19_U\", \"ok83\", 1);\n"
+            "    printf(\"ENVU:%d:%s\\n\", environ != 0 ? 1 : 0, getenv(\"UNISA_T19_U\"));\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("env2", s5, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "ENVU:1:ok83"),
+            "environ-with-unistd: extern char **environ works alongside <unistd.h>");
+    }
+
+    /* 6. -ftrim-libc keeps _unisa_environ_init when only extern char **environ is read */
+    {
+        const char *s6 =
+            "#include <stdio.h>\n"
+            "#include <stdlib.h>\n"
+            "extern char **environ;\n"
+            "int main(void){\n"
+            "    printf(\"TRIM:%d\\n\", environ != 0 ? 1 : 0);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("env3", s6, "-ftrim-libc", out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "TRIM:1"),
+            "environ-ftrim-libc: -ftrim-libc initializes environ without getenv/setenv");
+    }
+
+    /* 7. #include <wchar.h> + #include <stdlib.h> */
+    {
+        const char *s7 =
+            "#include <wchar.h>\n"
+            "#include <stdlib.h>\n"
+            "#include <stdio.h>\n"
+            "int main(void){\n"
+            "    wchar_t w = L'A';\n"
+            "    printf(\"WC1:%d:%d\\n\", (int)sizeof(wchar_t), (int)w);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("wc1", s7, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "WC1:4:65"),
+            "wchar-and-stdlib-order1: <wchar.h> then <stdlib.h> compiles without typedef conflict");
+    }
+
+    /* 8. #include <stdlib.h> + #include <stddef.h> + #include <wchar.h> */
+    {
+        const char *s8 =
+            "#include <stdlib.h>\n"
+            "#include <stddef.h>\n"
+            "#include <wchar.h>\n"
+            "#include <stdio.h>\n"
+            "int main(void){\n"
+            "    wchar_t w = L'B';\n"
+            "    printf(\"WC2:%d:%d\\n\", (int)sizeof(wchar_t), (int)w);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("wc2", s8, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "WC2:4:66"),
+            "stdlib-then-wchar-order2: <stdlib.h>+<stddef.h>+<wchar.h> compiles without conflict");
+    }
+
+    /* 9. #include <stddef.h> + #include <wchar.h> */
+    {
+        const char *s9 =
+            "#include <stddef.h>\n"
+            "#include <wchar.h>\n"
+            "#include <stdio.h>\n"
+            "int main(void){\n"
+            "    wchar_t w = L'C';\n"
+            "    printf(\"WC3:%d:%d\\n\", (int)sizeof(wchar_t), (int)w);\n"
+            "    return 0;\n"
+            "}\n";
+        int rc = cpf_run_c("wc3", s9, 0, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "WC3:4:67"),
+            "stddef-then-wchar-order3: <stddef.h> then <wchar.h> compiles without conflict");
+    }
+
+    /* 10. Multi-TU shared signal table + blocked/pending mask (a.c blocks, b.c raises) */
+    {
+        const char *sa =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "extern void b_raise_usr1(void);\n"
+            "static volatile int got = 0;\n"
+            "static void h(int sig){ got = sig; }\n"
+            "int main(void){\n"
+            "    struct sigaction sa;\n"
+            "    sigset_t set;\n"
+            "    sa.sa_handler = h; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR1, &sa, 0) != 0) return 1;\n"
+            "    sigemptyset(&set); sigaddset(&set, SIGUSR1);\n"
+            "    if (sigprocmask(SIG_BLOCK, &set, 0) != 0) return 2;\n"
+            "    b_raise_usr1();\n"
+            "    int during = got;\n"
+            "    if (sigprocmask(SIG_UNBLOCK, &set, 0) != 0) return 3;\n"
+            "    printf(\"MULTI:%d:%d:%d\\n\", during, got, got == SIGUSR1 ? 1 : 0);\n"
+            "    return 0;\n"
+            "}\n";
+        const char *sb =
+            "#include <signal.h>\n"
+            "void b_raise_usr1(void){ raise(SIGUSR1); }\n";
+        int rc = cpf_run_c2("sig_multi", sa, sb, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "MULTI:0:10:1"),
+            "sig-multi-tu-shared-mask: a.c blocks and b.c raises via shared global mask");
+    }
+
+    /* 11. sigaction sa_mask + default self-masking (no SA_NODEFER), byte-equal with gcc */
+    {
+        const char *s11 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "static volatile int h1_calls = 0, h2_calls = 0, h2_during_h1 = -1, reentered = 0;\n"
+            "static void h2(int sig){ (void)sig; h2_calls++; }\n"
+            "static void h1(int sig){\n"
+            "    (void)sig;\n"
+            "    h1_calls++;\n"
+            "    if (h1_calls == 1) {\n"
+            "        raise(SIGUSR2);\n"
+            "        h2_during_h1 = h2_calls;\n"
+            "        raise(SIGUSR1);\n"
+            "        if (h1_calls > 1) reentered = 1;\n"
+            "    }\n"
+            "}\n"
+            "int main(void){\n"
+            "    struct sigaction a1, a2;\n"
+            "    a2.sa_handler = h2; sigemptyset(&a2.sa_mask); a2.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR2, &a2, 0) != 0) return 1;\n"
+            "    a1.sa_handler = h1; sigemptyset(&a1.sa_mask); sigaddset(&a1.sa_mask, SIGUSR2); a1.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR1, &a1, 0) != 0) return 2;\n"
+            "    raise(SIGUSR1);\n"
+            "    printf(\"SAMASK:%d:%d:%d:%d\\n\", h2_during_h1, h2_calls, reentered, h1_calls);\n"
+            "    return 0;\n"
+            "}\n";
+        char gout[CPF_OUT];
+        int rc = cpf_run_c("sig_samask", s11, 0, out, sizeof out);
+        int grc = cpf_run_gcc("sig_samask", s11, gout, sizeof gout);
+        ck(rc == 0 && grc == 0 && tx_eqz(out, gout) && ckk_has(out, CPF_OUT, "SAMASK:0:1:0:2"),
+            "sig-sa-mask-matches-gcc: sa_mask blocks SIGUSR2 and self-mask blocks re-entry until return");
+    }
+
+    /* 12. sigaction SA_NODEFER allows self-reentry, byte-equal with gcc */
+    {
+        const char *s12 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "static volatile int depth = 0, max_depth = 0;\n"
+            "static void h1(int sig){\n"
+            "    (void)sig;\n"
+            "    depth++;\n"
+            "    if (depth > max_depth) max_depth = depth;\n"
+            "    if (depth == 1) raise(SIGUSR1);\n"
+            "    depth--;\n"
+            "}\n"
+            "int main(void){\n"
+            "    struct sigaction a1;\n"
+            "    a1.sa_handler = h1; sigemptyset(&a1.sa_mask); a1.sa_flags = SA_NODEFER;\n"
+            "    if (sigaction(SIGUSR1, &a1, 0) != 0) return 1;\n"
+            "    raise(SIGUSR1);\n"
+            "    printf(\"NODEFER:%d:%d\\n\", max_depth, depth);\n"
+            "    return 0;\n"
+            "}\n";
+        char gout[CPF_OUT];
+        int rc = cpf_run_c("sig_nodefer", s12, 0, out, sizeof out);
+        int grc = cpf_run_gcc("sig_nodefer", s12, gout, sizeof gout);
+        ck(rc == 0 && grc == 0 && tx_eqz(out, gout) && ckk_has(out, CPF_OUT, "NODEFER:2:0"),
+            "sig-sa-nodefer-matches-gcc: SA_NODEFER permits self-reentry matching gcc");
+    }
+
+    /* KNOWN-LIMIT: kill(getpid(), sig) invokes the kernel syscall directly and does not consult
+       in-process _unisa_sig/_unisa_sigblocked (recorded in include/signal.h, not silently faked). */
+    printf("KNOWN_LIMIT\tkill-self-uses-kernel-syscall\tuse raise(sig) for in-process signal mask delivery\n");
+
+    {
+        char *rmv[] = {"rm", "-rf", cpf_work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_POSIX_FIX\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

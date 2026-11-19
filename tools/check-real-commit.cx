@@ -1,0 +1,222 @@
+/* Contract: checks tools/commit-own.cx through the real devsvc git commit route.
+ * Run from the checkout root. --patch FILE rehearses a trusted local patch against
+ * the locally fetched origin/main. --probe FILE prepares the patched tree as HEAD
+ * and exercises the next unrelated commit. Each route has its own deadline.
+ * --selftest stages an unrelated new file on the unmodified baseline.
+ * The private repository has no remote. A success requires a new HEAD whose tree
+ * equals the complete proposed index. The checked-out hook must be executable.
+ */
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use net.unix
+#pragma unisa use net.tcp
+#pragma unisa use net.sock
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+static char root[4096], scratch[4096], repo[4096], patchfile[4096], base[65];
+static char launcher[4096];
+static np_result last;
+static long deadline;
+static int window_expired;
+static int cmd(char **args,const char *cwd,int seconds) {
+    np_free(&last);
+    long remaining=(deadline-sy_now_ms())/1000;
+    if(remaining<1){window_expired=1;return 124;}
+    if(seconds>remaining)seconds=(int)remaining;
+    char why[512]={0};
+    int transport=np_run(args,cwd,0,seconds,&last,why,sizeof why);
+    if(transport) fprintf(stderr,"REAL_COMMIT process=%s reason=%s\n",args[0],why);
+    if(last.timed_out){window_expired=1;return 124;}
+    return transport?2:last.rc;
+}
+static int step(char **args,const char *cwd) {
+    int rc=cmd(args,cwd,55);
+    if(rc) fprintf(stderr,"REAL_COMMIT setup=%s argument=%s rc=%d %s\n",args[0],args[1],rc,last.err?last.err:"");
+    return rc;
+}
+static int line(char **args,const char *cwd,char *buf,size_t cap) {
+    if(step(args,cwd)||!last.outn||last.out[last.outn-1]!='\n') return 2;
+    size_t n=last.outn-1;
+    if(n>=cap||memchr(last.out,'\n',n)) return 2;
+    if(mm_copy(buf,cap,last.out,n))return 2;
+    buf[n]=0;
+    return 0;
+}
+static int setup(int selftest) {
+    char hook[4096],objects[4096],archive[4096],alternates[4096],instance[4096];
+    char *rev[]={"git","rev-parse","--verify","refs/remotes/origin/main^{commit}",0};
+    char *tracking[]={"git","show-ref","--verify","--quiet","refs/remotes/origin/main",0};
+    if(selftest&&cmd(tracking,root,5)==1){
+        rev[3]="HEAD^{commit}";
+        puts("REAL_COMMIT fixture-base=layout-HEAD");
+    }
+    char *hooks[]={"git","rev-parse","--path-format=absolute","--git-path","hooks/pre-commit",0};
+    char *odb[]={"git","rev-parse","--path-format=absolute","--git-path","objects",0};
+    if(line(rev,root,base,sizeof base)||line(hooks,root,hook,sizeof hook)||
+       line(odb,root,objects,sizeof objects))return 2;
+    int missing=access(hook,X_OK)!=0;
+    if(missing&&(!selftest||errno!=ENOENT)){fprintf(stderr,"REAL_COMMIT REFUSE source-hook-unavailable\n");return 2;}
+    if(cx_fmt(repo,sizeof repo,"%s/tree",scratch)||cx_fmt(instance,sizeof instance,"%s/instance",scratch)
+       ||cx_fmt(archive,sizeof archive,"%s/main.tar",scratch)
+       ||cx_fmt(alternates,sizeof alternates,"%s/.git/objects/info/alternates",repo)) return 2;
+    if(mkdir(repo,0700)||mkdir(instance,0700)||setenv("UNISACC_DEVSVC_DIR",instance,1)) return 2;
+    char *pack[]={"git","archive","-o",archive,base,0};
+    char *extract[]={"tar","-xf",archive,0};
+    char *init[]={"git","init","-q","--template=","-b","main",0};
+    if(step(pack,root)||step(extract,repo)||unlink(archive)||step(init,repo)) return 2;
+    /* The source object store is a read-only alternate. All refs, locks and new
+     * objects belong to the private git dir. Pin the real parent, including history. */
+    char record[4100];
+    if(cx_fmt(record,sizeof record,"%s\n",objects)||cx_write(alternates,record,strlen(record)))return 2;
+    char *pin[]={"git","update-ref","refs/heads/main",base,0};
+    char *index[]={"git","read-tree",base,0};
+    char *check[]={"git","diff","--quiet","--",0};
+    char *sethooks[]={"git","config","core.hooksPath",".git/hooks",0};
+    char *copyhook[]={"install","-D","-m","0700",hook,".git/hooks/pre-commit",0};
+    if(missing){
+        if(cx_fmt(hook,sizeof hook,"%s/layout-hook",scratch))return 2;
+        const char *entry="#!/bin/sh\nexec sh ./unisacc.com tools/precommit.cx\n";
+        if(cx_write(hook,entry,strlen(entry)))return 2;
+        puts("REAL_COMMIT fixture-hook=standard-precommit-entry");
+    }
+    char *name[]={"git","config","user.name","R3 rehearsal",0};
+    char *mail[]={"git","config","user.email","r3@localhost",0};
+    if(step(pin,repo)||step(index,repo)||step(check,repo)||step(sethooks,repo)||
+       step(copyhook,repo)||pp_copy_product(root,repo)||step(name,repo)||step(mail,repo))return 2;
+    char digest[65],hookid[65],localhook[4096];
+    if(pp_product_digest(repo,digest)||cx_fmt(localhook,sizeof localhook,"%s/.git/hooks/pre-commit",repo))return 2;
+    size_t size=0;char *contents=cx_read(localhook,&size);
+    if(!contents)return 2;
+    cx_sha256_hex(contents,size,hookid);free(contents);
+    printf("REAL_COMMIT base=%s product=%s hook=%s\n",base,digest,hookid);
+    return 0;
+}
+static int rehearsal(int selftest,int probe) {
+    if(setup(selftest)) {fprintf(stderr,"REAL_COMMIT REFUSE setup base=%s\n",base);return 2;}
+    char expected_parent[65];
+    if(mm_copy(expected_parent,sizeof expected_parent,base,strlen(base)+1))return 2;
+    if(!selftest){
+        char *apply[]={"git","apply","--index","--",patchfile,0};
+        if(step(apply,repo))return 2;
+    }
+    if(probe){
+        char prepared[65];
+        char *tree[]={"git","write-tree",0};
+        char *snapshot[]={"git","commit-tree",prepared,"-p",base,"-m","R3 prepared input",0};
+        char *pin[]={"git","update-ref","HEAD",expected_parent,base,0};
+        if(line(tree,repo,prepared,sizeof prepared)||line(snapshot,repo,expected_parent,sizeof expected_parent)||
+           step(pin,repo))return 2;
+        printf("REAL_COMMIT PREPARED base=%s patched_tree=%s probe_parent=%s\n",base,prepared,expected_parent);
+    }
+    if(selftest||probe) {
+        char path[4096];
+        if(cx_fmt(path,sizeof path,"%s/r3-rehearsal.txt",repo)||sy_exists(path)!=0||
+           cx_write(path,"R3\n",3)) return 2;
+        char *add[]={"git","add","--","r3-rehearsal.txt",0};
+        if(step(add,repo))return 2;
+    }
+    char wanted[65],actual[65],parent[65];
+    char *tree[]={"git","write-tree",0};
+    char *files[]={"git","diff","--cached","--no-renames","--name-only","-z",0};
+    if(line(tree,repo,wanted,sizeof wanted)||step(files,repo)||!last.outn)return 2;
+    char *paths=malloc(last.outn);
+    if(!paths)return 2;
+    size_t bytes=last.outn;
+    if(mm_copy(paths,bytes,last.out,bytes)){free(paths);return 2;}
+    char *args[64]={"sh",launcher,"tools/devsvc.cx","--","git","commit","-m","R3 private rehearsal","--whole"};
+    int argc=9;
+    for(size_t i=0;i<bytes;) {
+        char *p=paths+i;
+        if(argc>=54||!*p||*p=='-'||strchr(p,'\n')||strchr(p,'\t')) {
+            fprintf(stderr,"REAL_COMMIT REFUSE unsupported-path-or-path-count\n");free(paths);return 2;
+        }
+        args[argc++]=p; i+=strlen(p)+1;
+    }
+    args[argc]=0;
+    printf("REAL_COMMIT base=%s proposed_tree=%s paths=%d\n",base,wanted,argc-9);
+    fflush(stdout);
+    int rc=cmd(args,repo,55);
+    free(paths);
+    const char *out=last.out?last.out:"",*err=last.err?last.err:"";
+    fputs(out,stdout); fputs(err,stderr);
+    if(rc) {
+        int derived=strstr(out,"derived-table-")!=0||strstr(err,"derived-table-")!=0;
+        int expired=rc==124||strstr(out,"X\ttimeout\trc=124")||strstr(err,"X\ttimeout\trc=124");
+        const char *why=expired?"TIMEOUT":derived?"DERIVED":"REFUSED";
+        printf("REAL_COMMIT status=%s rc=%d derived=%d timeout=%d\n",why,rc,derived,expired);
+        char *current[]={"git","rev-parse","HEAD",0};
+        if(!expired&&(line(current,repo,actual,sizeof actual)||strcmp(actual,expected_parent))){
+            fprintf(stderr,"REAL_COMMIT REFUSE head-changed-on-failure\n");return 2;
+        }
+        return rc;
+    }
+    char *result[]={"git","rev-parse","HEAD^{tree}",0};
+    char *previous[]={"git","rev-parse","HEAD^",0};
+    if(!strstr(out,"GIT_COMMIT\trc=0\tcommit=")||!strstr(out,"pushed=0")||
+       line(result,repo,actual,sizeof actual)||strcmp(wanted,actual)||
+       line(previous,repo,parent,sizeof parent)||strcmp(expected_parent,parent)) {
+        fprintf(stderr,"REAL_COMMIT REFUSE receipt-or-tree-mismatch\n");return 2;
+    }
+    printf("REAL_COMMIT status=COMMITTED pushed=0 tree=%s\n",actual);
+    return 0;
+}
+static int dispose(void) {
+    char socketpath[4096],metadata[4096],retired[4096];
+    if(cx_fmt(socketpath,sizeof socketpath,"%s/instance/sock",scratch)||
+       cx_fmt(metadata,sizeof metadata,"%s/.git",repo)||
+       cx_fmt(retired,sizeof retired,"%s/retired-metadata",scratch))return 2;
+    /* Stop only the instance in this invocation's private directory. */
+    if(sy_exists(socketpath)==1){
+        sy_deadline_t deadline=sy_deadline_in(2000);
+        int fd=sy_unix_connect(socketpath,deadline);
+        if(fd>=0){
+            char response[120]={0};
+            int sent=sy_send_all_until(fd,"stop\n",5,deadline);
+            long got=sy_recv_until(fd,response,sizeof response-1,deadline);
+            sy_close(fd);
+            if(sent||got<3||memcmp(response,"OK\t",3))return 2;
+        }else if(fd!=-ECONNREFUSED&&fd!=-ENOENT)return 2;
+    }
+    if(repo[0]){
+        int move=sy_rename(metadata,retired);
+        if(move&&move!=-ENOENT)return 2;
+    }
+    char why[600];
+    int rc=unisa_safedel(scratch,SAFEDEL_RECURSIVE|SAFEDEL_PURGE,100000,why,sizeof why);
+    if(rc)fprintf(stderr,"REAL_COMMIT cleanup %s\n",why);
+    return rc;
+}
+int main(int argc,char **argv) {
+    int selftest=argc==2&&!strcmp(argv[1],"--selftest");
+    int probe=argc==3&&!strcmp(argv[1],"--probe");
+    if(!selftest&&(argc!=3||(!probe&&strcmp(argv[1],"--patch"))||!realpath(argv[2],patchfile))){
+        fprintf(stderr,"usage: check-real-commit --patch FILE | --probe FILE | --selftest\n");return 2;
+    }
+    deadline=sy_now_ms()+(selftest?46000:55000);
+    if(sy_child_subreaper()<0){fprintf(stderr,"REAL_COMMIT REFUSE subreaper-unavailable\n");return 2;}
+    const char *clear[]={"GIT_DIR","GIT_COMMON_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES","GIT_CONFIG_PARAMETERS","GIT_CONFIG_COUNT","DEVSVC_DEV","DEVSVC_REPO_TABLE","DEVSVC_REPO_TABLE_PIN","DEVSVC_SELF_BIN","DV_PIN_DIR","UNISACC_FLOW_ROOT","UNISACC_FLOW_ROOT_JOB","DEVSVC_GIT_PARSE_ONLY","DEVSVC_FG_CWD","DEVSVC_FG_TOP","DEVSVC_FG_COMMON","DEVSVC_FG_HEAD",0};
+    for(int i=0;clear[i];i++)sy_unsetenv(clear[i]);
+    char members[32][64],shas[32][65];long sizes[32];
+    if(!realpath(".",root))return 2;
+    int count=pp_member_list(root,members,shas,sizes,32);
+    for(int i=0;i<count;i++)if(!strcmp(members[i],"unisacc.com"))
+        if(cx_fmt(launcher,sizeof launcher,"./%s",members[i]))return 2;
+    char tmp[4096],resolved[4096];ptf_gettempdir(tmp,sizeof tmp);
+    if(!realpath(tmp,resolved))return 2;
+    size_t nroot=strlen(root);
+    if(!strncmp(root,resolved,nroot)&&(resolved[nroot]=='/'||!resolved[nroot])){
+        fprintf(stderr,"REAL_COMMIT REFUSE temporary-directory-in-checkout\n");return 2;
+    }
+    if(!launcher[0]||ptf_mkdtemp(resolved,"unisacc-r3-",scratch,sizeof scratch))return 2;
+    int rc=rehearsal(selftest,probe);
+    if(window_expired){puts("REAL_COMMIT deadline=expired");rc=124;}
+    np_free(&last);
+    if(dispose()){fprintf(stderr,"REAL_COMMIT cleanup-failed dir=%s\n",scratch);return 2;}
+    np_free(&last);
+    if(selftest)printf("CHECK_REAL_COMMIT\tchecks=1\tfailed=%d\n",rc!=0);
+    return rc;
+}
