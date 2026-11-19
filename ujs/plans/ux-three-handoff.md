@@ -18,6 +18,8 @@ M5 增补 Normal、Depth、Matcap、Distance、Points、三种直线、Sprite、
 
 Display P3 画布已两次复现。r160 WebGL1 与每色空间独立的 WebGL2 上下文均有 4 个通道不符，光栅中心红、蓝分别读回 117、14，独立色域与传递函数金值为 119、25。日志为 `/tmp/devsvc-flow-21559245761-324647/out/x.out` 与 `/tmp/devsvc-flow-21559316131-338155/out/x.out`。单独保留 `--p3-readback` 的原断言，下一步隔离浏览器绘图缓冲色彩管理和 WebGLProgram 的输出编码。其他三种经 `--output-mutate` 验证 18 项转红。
 
+M6 已对照单一 AmbientLight、HemisphereLight、Fog 与 FogExp2，入口为 `gpu-packet-struct.cx` 的 `--ambient`、`--hemisphere`、`--fog`、`--fog-exp2`，每门 41 项，均有同名的 `-mutate` 反例。余下灯光继续复用这一分片，方向光和点光的既有逐片元证据见材质主门。四类阴影图先接持久纹理、投影与发生深度，再分别验 Basic、PCF、PCFSoft 与 VSM 的边缘。
+
 [清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
 
 ## 直接续作
