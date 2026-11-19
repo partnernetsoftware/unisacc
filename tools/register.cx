@@ -11,8 +11,9 @@
  * that need a consistent four-table view must take the registry lock.
  * The inventory preview holds the registration lock. It may create
  * .register.lock in the table directory. Only the private layout receives
- * proposed table bytes. Coverage and product declarations are fingerprinted
- * for concurrent changes but have no proposed rows in this inventory mode.
+ * proposed table bytes. The shared compile coverage row must agree across
+ * its registry and shard manifests. New shard manifests use the official
+ * package projection. Product input declarations are fingerprinted only.
  *
  * Appends one SOURCE batch row to tests/batches.tsv
  *   ID IMPLEMENTED LAYER CHECK SOURCE lnx/x86_64 55 - CHECK - LAYER.ID rc0:MARKER HEADERS
@@ -385,6 +386,13 @@ static char *rg_recovery_image(const char *path,int declarations,
         if(!live)insert[i]=anchor;
         else replace[pos]=orig;
     }
+    /* Rows removed at the tail belong after the last surviving original
+       row, before any independent rows appended during the interruption. */
+    int previous=-1;
+    for(int i=0;i<nb;i++){
+        if(insert[i]==nc)insert[i]=previous+1;
+        else if(insert[i]<0){int pos=rg_find_row(now,nc,&old[i]);if(pos>=0)previous=pos;}
+    }
     for(int i=0;i<na;i++){
         const RegRow *post=&published[i],*live=0;
         if(rg_find_row(old,nb,post)>=0)continue;
@@ -502,9 +510,76 @@ static char *rg_read_regular(const char *p,size_t *n){
     sy_stat_t st;if(sy_lstat(p,&st) || st.kind!='f')rg_die("transaction-file-invalid",p);
     char *b=cx_read(p,n);if(!b)rg_die("transaction-read",p);return b;
 }
+/* Only the decimal shard number crosses the journal boundary. */
+typedef struct {int shard,mode;char *before,*after;size_t bn,an;} RgManifest;
+static int rg_manifest_dir(char *dir,size_t cap){
+    rg_file(dir,cap,rg_tdir(),"manifests");
+    sy_stat_t st;int rc=sy_lstat(dir,&st);
+    if(rc==-ENOENT)return 0;
+    if(rc||st.kind!='d')rg_die("manifest-directory-invalid",dir);
+    return 1;
+}
+static void rg_manifest_path(int shard,char *path,size_t cap){
+    char dir[4400];rg_manifest_dir(dir,sizeof dir);
+    if(shard<0 || shard>=100000 || cx_fmt(path,cap,"%s/tools-compile-%03d.tsv",dir,shard))rg_die("manifest-path-invalid",dir);
+}
+static int rg_manifest_state(RgManifest *m,int apply,int rollback){
+    char path[4600],now[65],before[65]="",after[65]="";rg_manifest_path(m->shard,path,sizeof path);
+    if(rg_snapshot(path,now)||(m->before&&sy_sha256_hex(m->before,m->bn,before))||
+       (m->after&&sy_sha256_hex(m->after,m->an,after)))rg_die("manifest-state-invalid",path);
+    if(*now){
+        sy_stat_t st;if(sy_lstat(path,&st) || st.mode!=m->mode)rg_die("manifest-mode-changed",path);
+    }
+    if(tx_eqz(now,rollback?before:after))return 0;
+    if(!tx_eqz(now,rollback?after:before))rg_die("manifest-input-changed",path);
+    char *bytes=rollback?m->before:m->after;
+    if(!apply)return 0;
+    if(!bytes)return sy_unlink(path);
+    char tmp[4500];rg_file(tmp,sizeof tmp,journal,"table.tmp");
+    return sy_write_atomic(tmp,bytes,rollback?m->bn:m->an,0600)||sy_chmod(tmp,m->mode)||sy_rename(tmp,path);
+}
+static char *rg_manifest_bytes(RgManifest *m,int count,size_t *n){
+    size_t cap=1;
+    for(int i=0;i<count;i++)cap+=80+m[i].bn+m[i].an;
+    char *b=malloc(cap);if(!b)rg_die("allocation",0);
+    *n=0;
+    for(int i=0;i<count;i++){
+        if(cx_fmt(b+*n,cap-*n,"%d %d %ld %ld\n",m[i].shard,m[i].mode,m[i].before?(long)m[i].bn:-1L,m[i].after?(long)m[i].an:-1L))rg_die("manifest-record-bound",0);
+        *n+=strlen(b+*n);
+        if(m[i].bn && mm_copy(b+*n,cap-*n,m[i].before,m[i].bn))rg_die("manifest-record-bound",0);
+        *n+=m[i].bn;
+        if(m[i].an && mm_copy(b+*n,cap-*n,m[i].after,m[i].an))rg_die("manifest-record-bound",0);
+        *n+=m[i].an;
+    }
+    return b;
+}
+static RgManifest *rg_manifest_decode(char *b,size_t n,int *count){
+    int cap=8;RgManifest *m=calloc(cap,sizeof *m);if(!m)rg_die("allocation",0);
+    *count=0;
+    for(size_t at=0;at<n;){
+        char header[80];int shard,mode;long bn,an;
+        if(sscanf(b+at,"%d %d %ld %ld",&shard,&mode,&bn,&an)!=4 || shard<0 || shard>=100000 || mode<0 || mode>0777 || bn< -1 || an< -1 ||
+           (bn<0)==(an<0) || cx_fmt(header,sizeof header,"%d %d %ld %ld\n",shard,mode,bn,an) ||
+           strlen(header)>n-at || memcmp(header,b+at,strlen(header)))rg_die("manifest-journal-invalid",0);
+        at+=strlen(header);
+        if((size_t)(bn<0?an:bn)>n-at || (*count && shard<=m[*count-1].shard))rg_die("manifest-journal-invalid",0);
+        if(*count==cap){cap*=2;m=realloc(m,cap*sizeof *m);if(!m)rg_die("allocation",0);}
+        RgManifest *r=m+*count;*count+=1;r->shard=shard;r->mode=mode;r->bn=bn<0?0:bn;r->an=an<0?0:an;
+        r->before=bn<0?0:b+at;r->after=an<0?0:b+at;at+=r->bn+r->an;
+    }
+    return m;
+}
 /* All names in the journal are constants; it cannot supply a write path. */
-static void rg_record(RgTable *tables,const char *dir,int reading){
+static void rg_record(RgTable *tables,const char *dir,int reading,RgManifest **manifests,int *count,int *create_dir){
     char record[4096]="REGISTER_TXN\t1\n",p[4500],name[128],digest[65],seal[128];size_t used=strlen(record),n;
+    rg_file(p,sizeof p,dir,"record.tsv");
+    char *saved=reading?rg_read_regular(p,&n):0;
+    int v2=reading?(n>=used && !memcmp(saved,"REGISTER_TXN\t2\n",used)):1;
+    if(v2)record[used-2]='2';
+    else if(reading){
+        sy_stat_t st;rg_file(p,sizeof p,dir,"manifests.bin");
+        if(sy_lstat(p,&st)!=-ENOENT)rg_die("transaction-digest-mismatch",p);
+    }
     for(int i=0;i<4;i++){
         RgTable *t=tables+i;rg_file(t->path,sizeof t->path,rg_tdir(),rg_names[i]);
         for(int j=0;j<2;j++){
@@ -517,13 +592,21 @@ static void rg_record(RgTable *tables,const char *dir,int reading){
             used=strlen(record);
         }
     }
+    size_t mn=0;char *payload=0;
+    if(v2){
+        rg_file(p,sizeof p,dir,"manifests.bin");
+        payload=reading?rg_read_regular(p,&mn):rg_manifest_bytes(*manifests,*count,&mn);
+        if(reading)*create_dir=n>used+6 && !memcmp(saved+used,"mkdir=1",7);
+        if((!reading && sy_write_atomic(p,payload,mn,0600))||sy_sha256_hex(payload,mn,digest)||
+           cx_fmt(record+used,sizeof record-used,"mkdir=%d\nmanifests.bin\t%s\n",*create_dir,digest))rg_die("manifest-record",p);
+        used=strlen(record);
+    }
     if(sy_sha256_hex(record,used,digest) || cx_fmt(seal,sizeof seal,"id\t%s\n",digest) || used+strlen(seal)>=sizeof record)rg_die("transaction seal",dir);
     if(mm_copy(record+used,sizeof record-used,seal,strlen(seal)+1))rg_die("record bound",dir);used+=strlen(seal);
     rg_file(p,sizeof p,dir,"record.tsv");
     if(!reading){if(sy_write_atomic(p,record,used,0600))rg_die("transaction-record-write",p);return;}
-    char *b=rg_read_regular(p,&n);
-    if(n!=used || memcmp(b,record,n))rg_die("transaction-digest-mismatch",p);
-    free(b);
+    if(n!=used || memcmp(saved,record,n))rg_die("transaction-digest-mismatch",p);
+    free(saved);if(v2)*manifests=rg_manifest_decode(payload,mn,count);
 }
 static void rg_retire(void){
     char trash[4400],dest[4500];
@@ -539,6 +622,8 @@ static void rg_retire(void){
         if(sy_unlink(file))rg_die("retired-snapshot-cleanup",file);
     }
     rg_file(file,sizeof file,dest,"record.tsv");
+    char side[4700];rg_file(side,sizeof side,dest,"manifests.bin");
+    tmp_rc=sy_unlink(side);if(tmp_rc && tmp_rc!=-ENOENT)rg_die("retired-manifest-cleanup",side);
     if(sy_unlink(file)||sy_rmdir(dest)||sy_rmdir(trash))rg_die("retired-record-cleanup",dest);
 }
 /* Preserve the table's access mode even when the caller's umask is 077. */
@@ -551,7 +636,8 @@ static int rg_replace_table(const char *path,const char *bytes,size_t size){
 static void rg_recover(void){
     RgTable t[4]={0};
     fprintf(stderr,"REGISTER_SYNC\tRECOVERY_REQUIRED\t%s\n",journal);
-    rg_record(t,journal,1);
+    int count=0,create_dir=0;RgManifest *m=0;rg_record(t,journal,1,&m,&count,&create_dir);
+    for(int i=0;i<count;i++)rg_manifest_state(m+i,0,1);
 #ifdef REGISTER_TXN_FAULT_TEST
     if(tx_eqz(sy_env_or("REGISTER_RECOVER_STOP",""),"1"))sy_signal(sy_pid(),19);
 #endif
@@ -566,32 +652,42 @@ static void rg_recover(void){
         if(t[i].cn!=t[i].un || memcmp(t[i].cur,t[i].undo,t[i].un))
             if(rg_replace_table(t[i].path,t[i].undo,t[i].un))rg_die("recovery-write",t[i].path);
     }
+    for(int i=0;i<count;i++)if(rg_manifest_state(m+i,1,1))rg_die("manifest-rollback-write",journal);
+    char dir[4500];if(create_dir && rg_manifest_dir(dir,sizeof dir)){
+        int rc=sy_rmdir(dir);if(rc && rc!=-ENOTEMPTY)rg_die("manifest-directory-rollback",dir);
+    }
     rg_retire();puts("REGISTER_SYNC\tRECOVERED\tpolicy=rollback");
 }
-static int rg_sync_publish(const char *sources,size_t sn,const char *batch,size_t bn,char versions[][65]){
+static int rg_sync_publish(const char *sources,size_t sn,const char *batch,size_t bn,const char *coverage,size_t cn,RgManifest *m,int count,char versions[][65]){
     RgTable t[4]={0};const int order[]={2,0,1,3};int changed=0;
     char tmp[4400],hash[65];
     for(int i=0;i<4;i++){
         rg_file(t[i].path,sizeof t[i].path,rg_tdir(),rg_names[i]);t[i].before=rg_read_regular(t[i].path,&t[i].bn);
         if(sy_sha256_hex(t[i].before,t[i].bn,hash)||!tx_eqz(hash,versions[order[i]]))return 4;
-        t[i].after=i==0?(char*)sources:i==1?(char*)batch:t[i].before;
-        t[i].an=i==0?sn:i==1?bn:t[i].bn;
+        t[i].after=i==0?(char*)sources:i==1?(char*)batch:i==2?(char*)coverage:t[i].before;
+        t[i].an=i==0?sn:i==1?bn:i==2?cn:t[i].bn;
         if(t[i].an!=t[i].bn || memcmp(t[i].before,t[i].after,t[i].an))changed++;
     }
-    if(!changed){puts("REGISTER_SYNC\tstatus=UNCHANGED");return 0;}
+    if(!changed && !count){puts("REGISTER_SYNC\tstatus=UNCHANGED");return 0;}
     if(sy_mkdtemp(rg_tdir(),".register-stage-",tmp,sizeof tmp))rg_die("transaction-stage",rg_tdir());
-    rg_record(t,tmp,0);
+    char dir[4500];int create_dir=count && !rg_manifest_dir(dir,sizeof dir);
+    rg_record(t,tmp,0,&m,&count,&create_dir);
     if(sy_rename(tmp,journal)){cx_rmtree(tmp);rg_die("transaction-activate",journal);}
+    if(create_dir && sy_mkdir(dir,0755)){rg_recover();return 4;}
     for(int i=0;i<4;i++){
         if(rg_snapshot(t[i].path,hash) || !tx_eqz(hash,versions[order[i]]) ||
-           (i<2 && rg_replace_table(t[i].path,t[i].after,t[i].an))){rg_recover();return 4;}
+           ((t[i].an!=t[i].bn || memcmp(t[i].before,t[i].after,t[i].an)) && rg_replace_table(t[i].path,t[i].after,t[i].an))){rg_recover();return 4;}
 #ifdef REGISTER_TXN_FAULT_TEST
         /* Linux fixture binary only. The parent observes WUNTRACED before it sends SIGKILL. */
         const char *stop=sy_env_or("REGISTER_TXN_STOP","");
         if(stop[0]=='1'+i && !stop[1])sy_signal(sy_pid(),19);
 #endif
     }
-    rg_retire();printf("REGISTER_SYNC\tstatus=PUBLISHED\tchanged_tables=%d\n",changed);return 0;
+    for(int i=0;i<count;i++)if(rg_manifest_state(m+i,1,0)){rg_recover();return 4;}
+#ifdef REGISTER_TXN_FAULT_TEST
+    if(count && tx_eqz(sy_env_or("REGISTER_TXN_STOP",""),"manifest"))sy_signal(sy_pid(),19);
+#endif
+    rg_retire();printf("REGISTER_SYNC\tstatus=PUBLISHED\tchanged_tables=%d\tchanged_manifests=%d\n",changed,count);return 0;
 }
 /* A cold layout contains the complete tracked source tree and fresh compiler intermediates. */
 static int rg_clean_layout(const char *private_dir){
@@ -601,7 +697,7 @@ static int rg_clean_layout(const char *private_dir){
 }
 /* Archive the exact index tree that supplied the proposed inventory, then run the real batch
    in its own single-commit repository. Only the batch invocation counts against 33000 ms. */
-static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const char *batch,size_t bn,int shard){
+static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const char *batch,size_t bn,const char *coverage,size_t cn,int shard){
     char lay[4400],tar[4500],idx[4500],envindex[4600],out[4550],p[4600],buf[32768],tree[80],id[64],want[128],ape[4096];
     sy_stat_t st;
     if(sy_mkdtemp(stage,"layout-",lay,sizeof lay))return 2;
@@ -618,8 +714,8 @@ static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const c
     for(int i=0;i<4;i++){
         char testdir[4500],live[4500];size_t n;rg_file(testdir,sizeof testdir,lay,"tests");
         rg_file(p,sizeof p,testdir,rg_names[i]);rg_file(live,sizeof live,rg_tdir(),rg_names[i]);
-        char *extra=i>1?rg_read_regular(live,&n):0;
-        int rc=sy_write_atomic(p,i==0?sources:i==1?batch:extra,i==0?sn:i==1?bn:n,0644);free(extra);if(rc)return 2;
+        char *extra=i==3?rg_read_regular(live,&n):0;
+        int rc=sy_write_atomic(p,i==0?sources:i==1?batch:i==2?coverage:extra,i==0?sn:i==1?bn:i==2?cn:n,0644);free(extra);if(rc)return 2;
     }
     char db[4500],dbarg[4600],gitlink[4500];rg_file(db,sizeof db,stage,"cold-git-objects");
     if(cx_fmt(dbarg,sizeof dbarg,"--separate-git-dir=%s",db))return 2;
@@ -643,6 +739,137 @@ static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const c
     if(elapsed>33000){fprintf(stderr,"REFUSE OVER_33000MS id=%s wall_ms=%ld run_ms=%s\n",id,elapsed,value);return 2;}
     if(rc || !strstr(buf,want) || tx_eqz(value,"UNMEASURED")){fprintf(stderr,"REFUSE cold-batch-receipt id=%s %s\n",id,buf);return 2;}
     return 0;
+}
+typedef struct {const RegRow *old,*next;RegRow pkg;char hash[65],*file;size_t bytes;int mode;} RgShard;
+typedef struct {RgShard *shards;int limit,count;RgManifest *changes;RegRow fact;char *coverage,*original;size_t cn,on;} RgShardPlan;
+static void rg_coverage_source(RegRow *chosen,RegRow source){
+    int tabs=0;for(int i=0;i<source.n;i++)if(source.p[i]=='\t')tabs++;
+    if(tabs!=4 || source.n<19 || memcmp(source.p,"tools.compile-all\t",18) || source.p[source.n-1]!='\n')rg_die("coverage-source-invalid","tools.compile-all");
+    if(chosen->p && !rg_same_row(chosen,&source))rg_die("coverage-key-conflict","tools.compile-all");
+    *chosen=source;
+}
+static void rg_shard_manifest(RgShard *s,RegRow *chosen){
+    int count,have_batch=0,have_pkg=0,have_cov=0;RegRow *rows=rg_rows(s->file,s->bytes,&count);
+    for(int j=0;j<count;j++){
+        RegRow r=rows[j];if(r.key+1>=r.n)rg_die("manifest-row-invalid",0);
+        const char *tag=r.p;r.p+=r.key+1;r.n-=r.key+1;
+        if(r.key==5 && !memcmp(tag,"batch",5)){
+            if(have_batch++ || !rg_same_row(&r,s->old?s->old:s->next))rg_die("manifest-batch-conflict",0);
+        }else if(r.key==8 && !memcmp(tag,"packages",8)){
+            if(have_pkg++ || !rg_same_row(&r,&s->pkg))rg_die("manifest-packages-conflict",0);
+        }else if(r.key==8 && !memcmp(tag,"coverage",8)){
+            if(have_cov++)rg_die("manifest-duplicate-coverage",0);
+            rg_coverage_source(chosen,r);
+        }else if(r.key!=7 || memcmp(tag,"compile",7))rg_die("manifest-tag-invalid",0);
+    }
+    if(!have_batch||!have_pkg||!have_cov)rg_die("manifest-incomplete",0);
+    free(rows);
+}
+/* Other batches may share the same coverage key. Their manifest is never
+   rewritten by shard registration, but a conflicting row blocks publication. */
+static void rg_check_shared_coverage(RgShardPlan *plan){
+    if(!plan->fact.p)return;
+    char dir[4500],path[4800];if(!rg_manifest_dir(dir,sizeof dir))return;
+    DIR *d=opendir(dir);if(!d)rg_die("manifest-directory-invalid",dir);
+    for(;;){
+        errno=0;struct dirent *e=readdir(d);if(!e){if(errno)rg_die("manifest-directory-read",dir);break;}
+        size_t len=strlen(e->d_name);
+        if(len<5 || memcmp(e->d_name+len-4,".tsv",4))continue;
+        rg_file(path,sizeof path,dir,e->d_name);
+        size_t n;char *bytes=rg_read_regular(path,&n);
+        for(size_t at=0;at<n;){
+            char *lf=memchr(bytes+at,'\n',n-at);size_t end=lf?(size_t)(lf-bytes)+1:n;
+            const char *prefix="coverage\ttools.compile-all\t";
+            if(end-at>=strlen(prefix)&&!memcmp(bytes+at,prefix,strlen(prefix))){
+                RegRow value={bytes+at+9,end-at-9,17};
+                if(!rg_same_row(&plan->fact,&value))rg_die("coverage-key-conflict",path);
+            }
+            at=end;
+        }
+        free(bytes);
+    }
+    closedir(d);
+}
+static int rg_shard_inputs_current(RgShardPlan *plan){
+    for(int i=0;i<plan->limit;i++){
+        RgShard *s=plan->shards+i;if(!s->old&&!s->next)continue;
+        char path[4600],hash[65];rg_manifest_path(i,path,sizeof path);
+        if(rg_snapshot(path,hash)||!tx_eqz(hash,s->hash))return 0;
+        if(s->file){sy_stat_t st;if(sy_lstat(path,&st)||st.mode!=s->mode)return 0;}
+    }
+    return 1;
+}
+static void rg_plan_shards(RgShardPlan *plan,const char *stage,const char *bb,size_t bn,const char *nb,size_t nbn){
+    int counts[2];RegRow *rows[2];rows[0]=rg_rows(bb,bn,counts);rows[1]=rg_rows(nb,nbn,counts+1);
+    for(int k=0;k<2;k++)for(int j=0;j<counts[k];j++){
+        long id=rg_shard_of(rows[k][j].p,rows[k][j].n);
+        if(id>=100000)rg_die("shard-index-bound",0);
+        if(id>=plan->limit)plan->limit=id+1;
+    }
+    plan->shards=calloc(plan->limit+1,sizeof *plan->shards);
+    plan->changes=calloc(plan->limit+1,sizeof *plan->changes);
+    if(!plan->shards||!plan->changes)rg_die("allocation",0);
+    for(int k=0;k<2;k++)for(int j=0;j<counts[k];j++){
+        RegRow *r=rows[k]+j;long id=rg_shard_of(r->p,r->n);if(id<0)continue;
+        char name[64];if(cx_fmt(name,sizeof name,"tools-compile-%03ld",id)||strlen(name)!=r->key||memcmp(r->p,name,r->key))rg_die("shard-key-invalid",0);
+        RgShard *s=plan->shards+id;const RegRow **slot=k?&s->next:&s->old;
+        if(*slot)rg_die("duplicate-shard-key",name);*slot=r;
+    }
+    plan->original=rg_read_regular(rg_cpath(),&plan->on);plan->coverage=plan->original;plan->cn=plan->on;
+    if(!plan->limit)return;
+    RegRow chosen={0};int nc;RegRow *cr=rg_rows(plan->original,plan->on,&nc);
+    for(int j=0;j<nc;j++)if(cr[j].key==17&&!memcmp(cr[j].p,"tools.compile-all",17)){
+        if(chosen.p)rg_die("duplicate-coverage-key","tools.compile-all");rg_coverage_source(&chosen,cr[j]);
+    }
+    int has_coverage=chosen.p!=0;
+    char in[4600];rg_file(in,sizeof in,stage,"manifest-query.tsv");
+    FILE *f=fopen(in,"wb");if(!f)rg_die("manifest-query-stage",in);
+    for(int i=0;i<plan->limit;i++){
+        RgShard *s=plan->shards+i;const RegRow *r=s->next?s->next:s->old;
+        if(r && fwrite(r->p,1,r->n,f)!=(size_t)r->n)rg_die("manifest-query-write",in);
+    }
+    if(fclose(f))rg_die("manifest-query-write",in);
+    char product[4096];if(!realpath("unisacc.com",product))rg_die("manifest-query-product",0);
+    char *query[]={"sh",product,"tools/batch-packages-gen.cx","--","--query","--registry",in,0},*output=0;size_t bytes=0;
+    if(cx_runv_timeout(query,30,&output,&bytes)||!output)rg_die("manifest-packages-query",in);
+    int np;RegRow *packages=rg_rows(output,bytes,&np);
+    for(int j=0;j<np;j++){
+        RegRow r=packages[j];if(r.key!=5||memcmp(r.p,"batch",5))continue;
+        long id=rg_shard_of(r.p+6,r.n-6);
+        if(id<0||id>=plan->limit||plan->shards[id].pkg.p)rg_die("manifest-query-invalid",in);
+        plan->shards[id].pkg=r;
+    }
+    for(int i=0;i<plan->limit;i++){
+        RgShard *s=plan->shards+i;if(!s->old&&!s->next)continue;
+        if(!s->pkg.p)rg_die("manifest-query-missing",in);
+        char path[4600];rg_manifest_path(i,path,sizeof path);sy_stat_t st;int rc=sy_lstat(path,&st);
+        if(rc==-ENOENT)continue;
+        if(rc || st.kind!='f' || st.mode>0777)rg_die("manifest-file-invalid",path);
+        s->mode=st.mode;
+        s->file=rg_read_regular(path,&s->bytes);
+        if(sy_sha256_hex(s->file,s->bytes,s->hash))rg_die("manifest-hash",path);
+        rg_shard_manifest(s,&chosen);
+    }
+    if(!chosen.p)rg_die("coverage-source-missing","tools.compile-all");
+    plan->fact=chosen;rg_check_shared_coverage(plan);
+    if(!has_coverage){
+        if(plan->on && plan->original[plan->on-1]!='\n')rg_die("coverage-incomplete",rg_cpath());
+        plan->cn+=chosen.n;plan->coverage=malloc(plan->cn+1);
+        if(!plan->coverage||mm_copy(plan->coverage,plan->cn,plan->original,plan->on)||
+           mm_copy(plan->coverage+plan->on,chosen.n,chosen.p,chosen.n))rg_die("allocation",0);
+        plan->coverage[plan->cn]=0;
+    }
+    for(int i=0;i<plan->limit;i++){
+        RgShard *s=plan->shards+i;RgManifest *m=plan->changes+plan->count;
+        if(s->old&&!s->next&&s->file){m->before=s->file;m->bn=s->bytes;}
+        else if(!s->old&&s->next&&!s->file){
+            size_t cap=32+s->next->n+chosen.n+s->pkg.n;m->after=malloc(cap);
+            if(!m->after||cx_fmt(m->after,cap,"batch\t%.*scoverage\t%.*spackages\t%.*s",(int)s->next->n,s->next->p,(int)chosen.n,chosen.p,(int)s->pkg.n,s->pkg.p))rg_die("manifest-format",0);
+            m->an=strlen(m->after);
+        }else continue;
+        m->shard=i;m->mode=m->before?s->mode:0644;plan->count++;
+        printf("REGISTER_SYNC_MANIFEST\ttools-compile-%03d\t%s\n",i,m->after?"add":"remove");
+    }
 }
 static int rg_tool_mode(int argc, char **argv) {
     static char buf[1 << 15];
@@ -772,12 +999,14 @@ static int rg_tool_mode(int argc, char **argv) {
         char *verify[]={"./tools/bound","30","env",gitdir,worktree,"sh","./unisacc.com","tests/tools-compile.cx","--","--shards",stage,0};
         rc=run(verify,buf,sizeof buf);
         if(cx_fmt(want,sizeof want,"%ld\n",shards) || rc || !tx_eqz(buf,want))rg_die("sync shard verification",buf);
+        RgShardPlan plan={0};rg_plan_shards(&plan,stage,bb,bn,nb,nbn);
         if(publishing && added_sh){
             rg_unlock(lk);
-            for(j=0;j<shards;j++)if(!seen[j] && rg_cold_shard(stage,ns,nsn,nb,nbn,j)){
+            for(j=0;j<shards;j++)if(!seen[j] && rg_cold_shard(stage,ns,nsn,nb,nbn,plan.coverage,plan.cn,j)){
                 rg_clean_layout(stage);rg_die("cold-shard-preflight",0);
             }
             lk=rg_lock();
+            rg_check_shared_coverage(&plan);
         }
         if(publishing?rg_clean_layout(stage):cx_rmtree(stage))rg_die("sync cleanup",stage);
         for(int t=0;t<4;t++){
@@ -786,12 +1015,13 @@ static int rg_tool_mode(int argc, char **argv) {
         }
         if(publishing){
             char now[65],ape[4096];
-            if(rg_snapshot(index_path,now)||!tx_eqz(now,index_hash)||!realpath("unisacc.com",ape)||rg_snapshot(ape,now)||!tx_eqz(now,product_hash)){rg_unlock(lk);return 4;}
+            if(rg_snapshot(index_path,now)||!tx_eqz(now,index_hash)||!realpath("unisacc.com",ape)||rg_snapshot(ape,now)||!tx_eqz(now,product_hash)||!rg_shard_inputs_current(&plan)){rg_unlock(lk);return 4;}
         }
         rg_plan_delta(sourcepath,sb,sn,ns,nsn);rg_plan_delta(rg_bpath(),bb,bn,nb,nbn);
-        printf("REGISTER_SYNC_TABLE\t%s\tnot_checked\nREGISTER_SYNC_TABLE\t%s\tnot_checked\n",rg_cpath(),decl);
+        rg_plan_delta(rg_cpath(),plan.original,plan.on,plan.coverage,plan.cn);
+        printf("REGISTER_SYNC_TABLE\t%s\tnot_checked\n",decl);
         printf("REGISTER_SYNC\tmode=%s\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\n",sync_dry?"dry":"write",shards,added_sh,removed_sh);
-        rc=publishing?rg_sync_publish(ns,nsn,nb,nbn,versions):0;
+        rc=publishing?rg_sync_publish(ns,nsn,nb,nbn,plan.coverage,plan.cn,plan.changes,plan.count,versions):0;
         rg_unlock(lk);free(sb);free(bb);free(ns);free(nb);free(seen);return rc;
     }
     /* (c) 64-hex literals without a pins row */
