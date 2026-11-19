@@ -39,6 +39,13 @@ float srgb(float value) {
 
 void main() {
   vec3 normal = normalize(worldNormal);
+  if (lightingMode >= 20.0) {
+    float referenceZ = lightingMode >= 21.0 ? 1.4 : 1.0;
+    float unitDepth = clamp((length(worldPosition - vec3(0.0, 0.0, referenceZ)) - 0.25) * 0.5, 0.0, 1.0);
+    vec4 digits = vec4(fract(unitDepth * vec3(16777216.0, 65536.0, 256.0)), unitDepth);
+    gl_FragColor = (digits - vec4(0.0, digits.rgb) / 256.0) * (256.0 / 255.0);
+    return;
+  }
   if (lightingMode >= 10.0) {
     vec3 view = normalize(vec3(0.0, 0.0, 1.0) - worldPosition);
     vec3 horizontal = normalize(vec3(view.z, 0.0, -view.x));
