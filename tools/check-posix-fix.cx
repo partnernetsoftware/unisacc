@@ -56,6 +56,45 @@ static int cpf_run_c(const char *name, const char *src, const char *extra_flag, 
     return ck_run(rv, out, (int)cap);
 }
 
+static int cpf_run_c2(const char *name, const char *src_a, const char *src_b, char *out, size_t cap) {
+    char pa[CPF_PW], pb[CPF_PW], bin[CPF_PW], cout[CPF_OUT];
+    if (cx_fmt(pa, sizeof pa, "%s/%s_a.c", cpf_work, name)) return -1;
+    if (cx_fmt(pb, sizeof pb, "%s/%s_b.c", cpf_work, name)) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/%s.bin", cpf_work, name)) return -1;
+    if (cx_write(pa, src_a, strlen(src_a)) || cx_write(pb, src_b, strlen(src_b))) return -1;
+    (void)unlink(bin);
+
+    char *av[12];
+    int k = 0;
+    if (cpf_use_sh) av[k++] = "sh";
+    av[k++] = (char *)cpf_cc;
+    if (cpf_inc && cpf_inc[0]) { av[k++] = "-I"; av[k++] = (char *)cpf_inc; }
+    av[k++] = pa;
+    av[k++] = pb;
+    av[k++] = "-o";
+    av[k++] = bin;
+    av[k] = 0;
+    int crc = ck_run(av, cout, sizeof cout);
+    if (crc != 0) {
+        (void)cx_fmt(out, (int)cap, "COMPILE_FAIL rc=%d %.200s", crc, cout);
+        return -2;
+    }
+    char *rv[] = {bin, 0};
+    return ck_run(rv, out, (int)cap);
+}
+
+static int cpf_run_gcc(const char *name, const char *src, char *out, size_t cap) {
+    char cpath[CPF_PW], bin[CPF_PW], cout[CPF_OUT];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s_gcc.c", cpf_work, name)) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/%s_gcc.bin", cpf_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(bin);
+    char *av[] = {"gcc", "-D_POSIX_C_SOURCE=200809L", cpath, "-o", bin, 0};
+    if (ck_run(av, cout, sizeof cout) != 0) return -2;
+    char *rv[] = {bin, 0};
+    return ck_run(rv, out, (int)cap);
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     char out[CPF_OUT];
@@ -256,6 +295,101 @@ int main(int argc, char **argv) {
         ck(rc == 0 && ckk_has(out, CPF_OUT, "WC3:4:67"),
             "stddef-then-wchar-order3: <stddef.h> then <wchar.h> compiles without conflict");
     }
+
+    /* 10. Multi-TU shared signal table + blocked/pending mask (a.c blocks, b.c raises) */
+    {
+        const char *sa =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "extern void b_raise_usr1(void);\n"
+            "static volatile int got = 0;\n"
+            "static void h(int sig){ got = sig; }\n"
+            "int main(void){\n"
+            "    struct sigaction sa;\n"
+            "    sigset_t set;\n"
+            "    sa.sa_handler = h; sigemptyset(&sa.sa_mask); sa.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR1, &sa, 0) != 0) return 1;\n"
+            "    sigemptyset(&set); sigaddset(&set, SIGUSR1);\n"
+            "    if (sigprocmask(SIG_BLOCK, &set, 0) != 0) return 2;\n"
+            "    b_raise_usr1();\n"
+            "    int during = got;\n"
+            "    if (sigprocmask(SIG_UNBLOCK, &set, 0) != 0) return 3;\n"
+            "    printf(\"MULTI:%d:%d:%d\\n\", during, got, got == SIGUSR1 ? 1 : 0);\n"
+            "    return 0;\n"
+            "}\n";
+        const char *sb =
+            "#include <signal.h>\n"
+            "void b_raise_usr1(void){ raise(SIGUSR1); }\n";
+        int rc = cpf_run_c2("sig_multi", sa, sb, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPF_OUT, "MULTI:0:10:1"),
+            "sig-multi-tu-shared-mask: a.c blocks and b.c raises via shared global mask");
+    }
+
+    /* 11. sigaction sa_mask + default self-masking (no SA_NODEFER), byte-equal with gcc */
+    {
+        const char *s11 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "static volatile int h1_calls = 0, h2_calls = 0, h2_during_h1 = -1, reentered = 0;\n"
+            "static void h2(int sig){ (void)sig; h2_calls++; }\n"
+            "static void h1(int sig){\n"
+            "    (void)sig;\n"
+            "    h1_calls++;\n"
+            "    if (h1_calls == 1) {\n"
+            "        raise(SIGUSR2);\n"
+            "        h2_during_h1 = h2_calls;\n"
+            "        raise(SIGUSR1);\n"
+            "        if (h1_calls > 1) reentered = 1;\n"
+            "    }\n"
+            "}\n"
+            "int main(void){\n"
+            "    struct sigaction a1, a2;\n"
+            "    a2.sa_handler = h2; sigemptyset(&a2.sa_mask); a2.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR2, &a2, 0) != 0) return 1;\n"
+            "    a1.sa_handler = h1; sigemptyset(&a1.sa_mask); sigaddset(&a1.sa_mask, SIGUSR2); a1.sa_flags = 0;\n"
+            "    if (sigaction(SIGUSR1, &a1, 0) != 0) return 2;\n"
+            "    raise(SIGUSR1);\n"
+            "    printf(\"SAMASK:%d:%d:%d:%d\\n\", h2_during_h1, h2_calls, reentered, h1_calls);\n"
+            "    return 0;\n"
+            "}\n";
+        char gout[CPF_OUT];
+        int rc = cpf_run_c("sig_samask", s11, 0, out, sizeof out);
+        int grc = cpf_run_gcc("sig_samask", s11, gout, sizeof gout);
+        ck(rc == 0 && grc == 0 && tx_eqz(out, gout) && ckk_has(out, CPF_OUT, "SAMASK:0:1:0:2"),
+            "sig-sa-mask-matches-gcc: sa_mask blocks SIGUSR2 and self-mask blocks re-entry until return");
+    }
+
+    /* 12. sigaction SA_NODEFER allows self-reentry, byte-equal with gcc */
+    {
+        const char *s12 =
+            "#include <stdio.h>\n"
+            "#include <signal.h>\n"
+            "static volatile int depth = 0, max_depth = 0;\n"
+            "static void h1(int sig){\n"
+            "    (void)sig;\n"
+            "    depth++;\n"
+            "    if (depth > max_depth) max_depth = depth;\n"
+            "    if (depth == 1) raise(SIGUSR1);\n"
+            "    depth--;\n"
+            "}\n"
+            "int main(void){\n"
+            "    struct sigaction a1;\n"
+            "    a1.sa_handler = h1; sigemptyset(&a1.sa_mask); a1.sa_flags = SA_NODEFER;\n"
+            "    if (sigaction(SIGUSR1, &a1, 0) != 0) return 1;\n"
+            "    raise(SIGUSR1);\n"
+            "    printf(\"NODEFER:%d:%d\\n\", max_depth, depth);\n"
+            "    return 0;\n"
+            "}\n";
+        char gout[CPF_OUT];
+        int rc = cpf_run_c("sig_nodefer", s12, 0, out, sizeof out);
+        int grc = cpf_run_gcc("sig_nodefer", s12, gout, sizeof gout);
+        ck(rc == 0 && grc == 0 && tx_eqz(out, gout) && ckk_has(out, CPF_OUT, "NODEFER:2:0"),
+            "sig-sa-nodefer-matches-gcc: SA_NODEFER permits self-reentry matching gcc");
+    }
+
+    /* KNOWN-LIMIT: kill(getpid(), sig) invokes the kernel syscall directly and does not consult
+       in-process _unisa_sig/_unisa_sigblocked (recorded in include/signal.h, not silently faked). */
+    printf("KNOWN_LIMIT\tkill-self-uses-kernel-syscall\tuse raise(sig) for in-process signal mask delivery\n");
 
     {
         char *rmv[] = {"rm", "-rf", cpf_work, 0};
