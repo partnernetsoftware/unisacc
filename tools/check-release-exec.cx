@@ -189,6 +189,12 @@ static int fake_unisacc(int argc, char **argv) {
     if (tx_eqz(argv[3], "tools/ratchets.cx")) { sy_printf("RATCHETS\tok=15\tfail=0\n"); return 0; }
     if (tx_eqz(argv[3], "tools/devsvc.cx")) {
         int mi=argi(argc,argv,"-m");
+        if(mi>0 && mi+1<argc && has(argv[mi+1]," X: candidate table")){
+            char *add[]={"git","add","--","release/candidate.tsv",0};
+            char *commit[]={"git","-c","user.name=fixture","-c","user.email=f@localhost","-c","commit.gpgsign=false","commit","-qm","X",0};
+            char *push[]={"git","push","-q","origin","HEAD:main",0};
+            if(sh(add,".",0,0)||sh(commit,".",0,0)||sh(push,".",0,0))return 1;
+        }
         if(mi>0 && mi+1<argc && has(argv[mi+1]," Y1")){
             if(argi(argc,argv,"release/evidence/0.0.99/INDEX.tsv")<0)return 2;
             for(int i=argi(argc,argv,"--whole")+1;i<argc && argv[i][0]!='-';i++){
@@ -571,6 +577,37 @@ static void part_a(void) {
 }
 static void part_b(void) {
     int rc; char *c, p[4500];
+    /* Phase A already pushed X. An unrelated later HEAD must not become X. */
+    fixture(99,0,0,1);
+    char origin_x[64],later[64],same_tree[64],expected[120];
+    if(git("rev-parse","HEAD",0,0,0,origin_x,sizeof origin_x) ||
+       git("rev-parse","HEAD^{tree}",0,0,0,same_tree,sizeof same_tree) ||
+       git("commit-tree",same_tree,"-p",origin_x,"-mfixture-later",later,sizeof later) ||
+       git("update-ref","refs/heads/main",later,origin_x,0,0,0) ||
+       git("push","origin","main",0,0,0,0))die("phase A history");
+    rc=rx(0,0,0,0);c=calls();
+    cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/INDEX.tsv",fx);
+    char *record=catf(p);cx_fmt(expected,sizeof expected,"\t-\t%s\trelease/candidate.tsv",origin_x);
+    ck(rc==0 && c && !has(c,"unisacc tools/devsvc -- git commit -m v0.0.99 X:") && has(record,expected),"X.phase-A-pushed-last-touch-reused");
+    free(record);free(c);
+    fixture(99,0,0,1);
+    const char *conflict="exec-1-X-commit\tfixture\t-\t0000000000000000000000000000000000000001\trelease/candidate.tsv\n";
+    if(put(fx,"release/evidence/0.0.99/INDEX.tsv",conflict))die("conflicting X fixture");
+    cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/INDEX.tsv",fx);
+    rc=rx(0,0,0,0);record=catf(p);
+    ck(rc==2 && has(out,"release-exec: REFUSE RELEASE_EXEC_GATE_X_INDEX_CONFLICT") && record && tx_eqz(record,conflict),"X.conflicting-index-refused-before-append");
+    free(record);
+    fixture(99,0,0,1);
+    cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);
+    char *saved=slurp(p);
+    if(!saved || put(fx,"release/candidate.tsv","prior slot\n") || git("add","release/candidate.tsv",0,0,0,0,0) ||
+       git("commit","-qm","prior",0,0,0,0) || git("push","origin","main",0,0,0,0) ||
+       put(fx,"release/candidate.tsv",saved) || git("add","release/candidate.tsv",0,0,0,0,0) ||
+       git("commit","-qm","unpublished",0,0,0,0))die("unpublished X fixture");
+    free(saved);
+    rc=rx(0,0,0,0);cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/INDEX.tsv",fx);record=catf(p);
+    ck(rc==2 && has(out,"committed candidate is not an ancestor of origin/main") && record && !has(record,"exec-1-X-commit"),"X.unpushed-table-keeps-index-empty");
+    free(record);
     static const char *seq[] = {"unisacc tools/devsvc -- git commit -m v0.0.99 X: candidate table", "gh -R example/fixture release create v0.0.99 --draft",
         "gh -R example/fixture release upload v0.0.99", "gh -R example/fixture release download v0.0.99 -D", "gh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99",
         "gh -R example/fixture run view 777001 --json conclusion", "gh -R example/fixture run view 777001 --log", "unisacc tools/devsvc -- git commit -m v0.0.99 Y1",
@@ -578,6 +615,12 @@ static void part_b(void) {
         "unisacc release/tools/c47-1-readback", "unisacc tools/devsvc -- git commit -m v0.0.99 Y2: public readback"};
     /* E1 full execute */
     fixture(99, 0, 0, 1);
+    cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);
+    char *current=slurp(p);
+    if(!current || put(fx,"release/candidate.tsv","prior candidate slot\n") ||
+       git("add","release/candidate.tsv",0,0,0,0,0) || git("commit","-qm","prior slot",0,0,0,0) ||
+       git("push","origin","main",0,0,0,0) || put(fx,"release/candidate.tsv",current))die("changed X fixture");
+    free(current);
     put(td,"readback-timeout-once","1");
     {char d[4500];cx_fmt(d,sizeof d,"%s/release/evidence/0.0.99/nested",fx);sy_mkdir(d,0700);}
     rc = rx(0, 0, 0, 0); c = calls();
