@@ -1,0 +1,552 @@
+// Matrix4 occupies sixteen f64 cells in column-major order.
+function Matrix4_set(m4_dst, ...m4_rows) {
+  let m4_span = ux_span(m4_dst, 128);
+  let m4_entry = 0;
+  while (m4_entry < 16) {
+    let m4_row = m4_entry / 4;
+    let m4_column = m4_entry % 4;
+    let m4_written = ux_f64_put(m4_dst + (m4_column * 4 + m4_row) * 8, m4_rows[m4_entry]);
+    m4_entry = m4_entry + 1;
+  }
+  return m4_dst;
+}
+
+function Matrix4_identity(m4_identity) {
+  return Matrix4_set(m4_identity, 1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0,
+      0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_copy(m4_copy_dst, ...m4_copy_args) {
+  let m4_copy_src = m4_copy_args[0];
+  return Matrix4_set(m4_copy_dst,
+      ux_f64(m4_copy_src),ux_f64(m4_copy_src+32),ux_f64(m4_copy_src+64),ux_f64(m4_copy_src+96),
+      ux_f64(m4_copy_src+8),ux_f64(m4_copy_src+40),ux_f64(m4_copy_src+72),ux_f64(m4_copy_src+104),
+      ux_f64(m4_copy_src+16),ux_f64(m4_copy_src+48),ux_f64(m4_copy_src+80),ux_f64(m4_copy_src+112),
+      ux_f64(m4_copy_src+24),ux_f64(m4_copy_src+56),ux_f64(m4_copy_src+88),ux_f64(m4_copy_src+120));
+}
+
+function Matrix4_clone(m4_clone_dst, ...m4_clone_args) {
+  return Matrix4_copy(m4_clone_dst, m4_clone_args[0]);
+}
+
+function Matrix4_transpose(m4_transpose) {
+  return Matrix4_set(m4_transpose,
+      ux_f64(m4_transpose),ux_f64(m4_transpose+8),ux_f64(m4_transpose+16),ux_f64(m4_transpose+24),
+      ux_f64(m4_transpose+32),ux_f64(m4_transpose+40),ux_f64(m4_transpose+48),ux_f64(m4_transpose+56),
+      ux_f64(m4_transpose+64),ux_f64(m4_transpose+72),ux_f64(m4_transpose+80),ux_f64(m4_transpose+88),
+      ux_f64(m4_transpose+96),ux_f64(m4_transpose+104),ux_f64(m4_transpose+112),ux_f64(m4_transpose+120));
+}
+
+function Matrix4_multiplyMatrices(m4_product_dst, ...m4_product_args) {
+  let m4_product_a = m4_product_args[0];
+  let m4_product_b = m4_product_args[1];
+  let m4_product_cells = [0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,
+      0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0];
+  let m4_product_i = 0;
+  while (m4_product_i < 16) {
+    let m4_product_row = (m4_product_i / 4) * 8;
+    let m4_product_column = (m4_product_i % 4) * 32;
+    m4_product_cells[m4_product_i] =
+        ux_f64(m4_product_a+m4_product_row) * ux_f64(m4_product_b+m4_product_column) +
+        ux_f64(m4_product_a+m4_product_row+32) * ux_f64(m4_product_b+m4_product_column+8) +
+        ux_f64(m4_product_a+m4_product_row+64) * ux_f64(m4_product_b+m4_product_column+16) +
+        ux_f64(m4_product_a+m4_product_row+96) * ux_f64(m4_product_b+m4_product_column+24);
+    m4_product_i = m4_product_i + 1;
+  }
+  return Matrix4_set(m4_product_dst, m4_product_cells[0],m4_product_cells[1],m4_product_cells[2],m4_product_cells[3],
+      m4_product_cells[4],m4_product_cells[5],m4_product_cells[6],m4_product_cells[7],
+      m4_product_cells[8],m4_product_cells[9],m4_product_cells[10],m4_product_cells[11],
+      m4_product_cells[12],m4_product_cells[13],m4_product_cells[14],m4_product_cells[15]);
+}
+
+function Matrix4_multiply(m4_multiply_dst, ...m4_multiply_args) {
+  return Matrix4_multiplyMatrices(m4_multiply_dst, m4_multiply_dst, m4_multiply_args[0]);
+}
+
+function Matrix4_premultiply(m4_premultiply_dst, ...m4_premultiply_args) {
+  return Matrix4_multiplyMatrices(m4_premultiply_dst, m4_premultiply_args[0], m4_premultiply_dst);
+}
+
+function Matrix4_multiplyScalar(m4_scalar_dst, ...m4_scalar_args) {
+  let m4_scalar_span = ux_span(m4_scalar_dst, 128);
+  let m4_scalar_offset = 0;
+  while (m4_scalar_offset < 128) {
+    let m4_scalar_address = m4_scalar_dst + m4_scalar_offset;
+    let m4_scalar_done = ux_f64_put(m4_scalar_address, ux_f64(m4_scalar_address) * m4_scalar_args[0]);
+    m4_scalar_offset = m4_scalar_offset + 8;
+  }
+  return m4_scalar_dst;
+}
+
+function Matrix4_eliminate(m4_elimination, ...m4_elim_args) {
+  let m4_write_inverse = m4_elim_args[0];
+  let m4_aug = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+      0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+  let m4_r = 0;
+  while (m4_r < 4) {
+    let m4_c = 0;
+    while (m4_c < 4) {
+      m4_aug[m4_r*8+m4_c] = ux_f64(m4_elimination + (m4_c*4+m4_r)*8);
+      m4_c = m4_c + 1;
+    }
+    m4_aug[m4_r*8+4+m4_r] = 1.0;
+    m4_r = m4_r + 1;
+  }
+  let m4_determinant = 1.0;
+  let m4_pivot_index = 0;
+  let m4_elim_singular = 0;
+  while (m4_pivot_index < 4 && !m4_elim_singular) {
+    let m4_selected = m4_pivot_index;
+    let m4_candidate = m4_pivot_index + 1;
+    let m4_abs_pivot = ux_math_abs(m4_aug[m4_pivot_index*8+m4_pivot_index]);
+    while (m4_candidate < 4) {
+      let m4_abs_candidate = ux_math_abs(m4_aug[m4_candidate*8+m4_pivot_index]);
+      if (m4_abs_candidate > m4_abs_pivot) {
+        m4_selected = m4_candidate;
+        m4_abs_pivot = m4_abs_candidate;
+      }
+      m4_candidate = m4_candidate + 1;
+    }
+    if (m4_abs_pivot == 0.0) {
+      m4_elim_singular = 1;
+      m4_determinant = 0.0;
+    } else {
+      let m4_pivot_row = m4_pivot_index * 8;
+      if (m4_selected != m4_pivot_index) {
+        let m4_swap = 0;
+        while (m4_swap < 8) {
+          let m4_save = m4_aug[m4_pivot_row+m4_swap];
+          m4_aug[m4_pivot_row+m4_swap] = m4_aug[m4_selected*8+m4_swap];
+          m4_aug[m4_selected*8+m4_swap] = m4_save;
+          m4_swap = m4_swap + 1;
+        }
+        m4_determinant = 0.0 - m4_determinant;
+      }
+      let m4_pivot = m4_aug[m4_pivot_row+m4_pivot_index];
+      m4_determinant = m4_determinant * m4_pivot;
+      let m4_normal = 0;
+      while (m4_normal < 8) {
+        m4_aug[m4_pivot_row+m4_normal] = m4_aug[m4_pivot_row+m4_normal] / m4_pivot;
+        m4_normal = m4_normal + 1;
+      }
+      let m4_other = 0;
+      while (m4_other < 4) {
+        if (m4_other != m4_pivot_index) {
+          let m4_other_row = m4_other*8;
+          let m4_factor = m4_aug[m4_other_row+m4_pivot_index];
+          let m4_column_index = 0;
+          while (m4_column_index < 8) {
+            m4_aug[m4_other_row+m4_column_index] = m4_aug[m4_other_row+m4_column_index] -
+                m4_factor*m4_aug[m4_pivot_row+m4_column_index];
+            m4_column_index = m4_column_index + 1;
+          }
+        }
+        m4_other = m4_other + 1;
+      }
+    }
+    m4_pivot_index = m4_pivot_index + 1;
+  }
+  if (m4_write_inverse) {
+    let m4_output_index = 0;
+    while (m4_output_index < 16) {
+      let m4_inverse_value = 0.0;
+      if (!m4_elim_singular) {
+        m4_inverse_value = m4_aug[(m4_output_index % 4)*8+4+m4_output_index/4];
+      }
+      let m4_inverse_store = ux_f64_put(m4_elimination + m4_output_index * 8, m4_inverse_value);
+      m4_output_index = m4_output_index + 1;
+    }
+  }
+  return m4_determinant;
+}
+
+function Matrix4_determinant(m4_det_matrix) {
+  return Matrix4_eliminate(m4_det_matrix, 0);
+}
+
+function Matrix4_invert(m4_inverse_matrix) {
+  let m4_invert_det = Matrix4_eliminate(m4_inverse_matrix, 1);
+  return m4_inverse_matrix;
+}
+
+function Matrix4_setPosition(m4_pos_dst, ...m4_pos_args) {
+  let m4_position_span = ux_span(m4_pos_dst,128);
+  let m4_px = ux_f64_put(m4_pos_dst+96,m4_pos_args[0]);
+  let m4_py = ux_f64_put(m4_pos_dst+104,m4_pos_args[1]);
+  let m4_pz = ux_f64_put(m4_pos_dst+112,m4_pos_args[2]);
+  return m4_pos_dst;
+}
+
+function Matrix4_copyPosition(m4_copy_pos_dst, ...m4_copy_pos_args) {
+  let m4_copy_pos_src = m4_copy_pos_args[0];
+  return Matrix4_setPosition(m4_copy_pos_dst,ux_f64(m4_copy_pos_src+96),ux_f64(m4_copy_pos_src+104),
+      ux_f64(m4_copy_pos_src+112));
+}
+
+function Matrix4_setFromMatrix3(m4_from3_dst, ...m4_from3_args) {
+  let m4_from3_src = m4_from3_args[0];
+  return Matrix4_set(m4_from3_dst,
+      ux_f64(m4_from3_src),ux_f64(m4_from3_src+24),ux_f64(m4_from3_src+48),0.0,
+      ux_f64(m4_from3_src+8),ux_f64(m4_from3_src+32),ux_f64(m4_from3_src+56),0.0,
+      ux_f64(m4_from3_src+16),ux_f64(m4_from3_src+40),ux_f64(m4_from3_src+64),0.0,
+      0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeBasis(m4_basis_dst, ...m4_basis_args) {
+  let m4_basis_x = m4_basis_args[0];
+  let m4_basis_y = m4_basis_args[1];
+  let m4_basis_z = m4_basis_args[2];
+  return Matrix4_set(m4_basis_dst, ux_f64(m4_basis_x),ux_f64(m4_basis_y),ux_f64(m4_basis_z),0.0,
+      ux_f64(m4_basis_x+8),ux_f64(m4_basis_y+8),ux_f64(m4_basis_z+8),0.0,
+      ux_f64(m4_basis_x+16),ux_f64(m4_basis_y+16),ux_f64(m4_basis_z+16),0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_extractBasis(m4_basis_src, ...m4_extract_args) {
+  let m4_axis0 = ux_span(m4_extract_args[0],24);
+  let m4_axis1 = ux_span(m4_extract_args[1],24);
+  let m4_axis2 = ux_span(m4_extract_args[2],24);
+  let m4_basis_values = [ux_f64(m4_basis_src),ux_f64(m4_basis_src+8),ux_f64(m4_basis_src+16),
+      ux_f64(m4_basis_src+32),ux_f64(m4_basis_src+40),ux_f64(m4_basis_src+48),
+      ux_f64(m4_basis_src+64),ux_f64(m4_basis_src+72),ux_f64(m4_basis_src+80)];
+  let m4_basis_column = 0;
+  while (m4_basis_column < 3) {
+    let m4_ax = m4_extract_args[m4_basis_column];
+    let m4_basis_cell = m4_basis_column*3;
+    let m4_basis_write_x = ux_f64_put(m4_ax,m4_basis_values[m4_basis_cell]);
+    let m4_basis_write_y = ux_f64_put(m4_ax+8,m4_basis_values[m4_basis_cell+1]);
+    let m4_basis_write_z = ux_f64_put(m4_ax+16,m4_basis_values[m4_basis_cell+2]);
+    m4_basis_column = m4_basis_column + 1;
+  }
+  return m4_basis_src;
+}
+
+function Matrix4_columnLengthSq(m4_length_column) {
+  let m4_column_x = ux_f64(m4_length_column);
+  let m4_column_y = ux_f64(m4_length_column+8);
+  let m4_column_z = ux_f64(m4_length_column+16);
+  return m4_column_x*m4_column_x + m4_column_y*m4_column_y + m4_column_z*m4_column_z;
+}
+
+function Matrix4_extractRotation(m4_extract_rotation_dst, ...m4_extract_rot_args) {
+  let m4_er = m4_extract_rot_args[0];
+  let m4_er_x = 1.0 / f64_sqrt(Matrix4_columnLengthSq(m4_er));
+  let m4_er_y = 1.0 / f64_sqrt(Matrix4_columnLengthSq(m4_er+32));
+  let m4_er_z = 1.0 / f64_sqrt(Matrix4_columnLengthSq(m4_er+64));
+  return Matrix4_set(m4_extract_rotation_dst,
+      ux_f64(m4_er)*m4_er_x,ux_f64(m4_er+32)*m4_er_y,ux_f64(m4_er+64)*m4_er_z,0.0,
+      ux_f64(m4_er+8)*m4_er_x,ux_f64(m4_er+40)*m4_er_y,ux_f64(m4_er+72)*m4_er_z,0.0,
+      ux_f64(m4_er+16)*m4_er_x,ux_f64(m4_er+48)*m4_er_y,ux_f64(m4_er+80)*m4_er_z,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_getMaxScaleOnAxis(m4_maxaxis) {
+  let m4_xscale_sq = Matrix4_columnLengthSq(m4_maxaxis);
+  let m4_yscale_sq = Matrix4_columnLengthSq(m4_maxaxis+32);
+  let m4_zscale_sq = Matrix4_columnLengthSq(m4_maxaxis+64);
+  let m4_max_sq = m4_xscale_sq;
+  if (m4_yscale_sq > m4_max_sq) { m4_max_sq = m4_yscale_sq; }
+  if (m4_zscale_sq > m4_max_sq) { m4_max_sq = m4_zscale_sq; }
+  if (m4_yscale_sq != m4_yscale_sq || m4_zscale_sq != m4_zscale_sq) { m4_max_sq = 0.0 / 0.0; }
+  return f64_sqrt(m4_max_sq);
+}
+
+function Matrix4_scale(m4_scale_dst, ...m4_scale_args) {
+  let m4_scale_vec = m4_scale_args[0];
+  let m4_scale_values = [ux_f64(m4_scale_vec),ux_f64(m4_scale_vec+8),ux_f64(m4_scale_vec+16)];
+  let m4_scale_span = ux_span(m4_scale_dst,128);
+  let m4_scale_i = 0;
+  while (m4_scale_i < 12) {
+    let m4_scale_at = m4_scale_dst + m4_scale_i*8;
+    let m4_scaled = ux_f64_put(m4_scale_at, ux_f64(m4_scale_at)*m4_scale_values[m4_scale_i/4]);
+    m4_scale_i = m4_scale_i + 1;
+  }
+  return m4_scale_dst;
+}
+
+function Matrix4_makeTranslation(m4_translate_dst, ...m4_translate_args) {
+  return Matrix4_set(m4_translate_dst, 1.0,0.0,0.0,m4_translate_args[0],
+      0.0,1.0,0.0,m4_translate_args[1], 0.0,0.0,1.0,m4_translate_args[2], 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeScale(m4_make_scale, ...m4_make_scale_args) {
+  return Matrix4_set(m4_make_scale, m4_make_scale_args[0],0.0,0.0,0.0, 0.0,m4_make_scale_args[1],0.0,0.0,
+      0.0,0.0,m4_make_scale_args[2],0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeShear(m4_shear, ...m4_shear_args) {
+  return Matrix4_set(m4_shear, 1.0,m4_shear_args[2],m4_shear_args[4],0.0,
+      m4_shear_args[0],1.0,m4_shear_args[5],0.0, m4_shear_args[1],m4_shear_args[3],1.0,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_composeValues(m4_compose_dst, ...m4_compose_values) {
+  let m4_qx = m4_compose_values[3];
+  let m4_qy = m4_compose_values[4];
+  let m4_qz = m4_compose_values[5];
+  let m4_qw = m4_compose_values[6];
+  let m4_sx = m4_compose_values[7];
+  let m4_sy = m4_compose_values[8];
+  let m4_sz = m4_compose_values[9];
+  let m4_xx = 2.0*m4_qx*m4_qx;
+  let m4_yy = 2.0*m4_qy*m4_qy;
+  let m4_zz = 2.0*m4_qz*m4_qz;
+  let m4_xy = 2.0*m4_qx*m4_qy;
+  let m4_xz = 2.0*m4_qx*m4_qz;
+  let m4_yz = 2.0*m4_qy*m4_qz;
+  let m4_wx = 2.0*m4_qw*m4_qx;
+  let m4_wy = 2.0*m4_qw*m4_qy;
+  let m4_wz = 2.0*m4_qw*m4_qz;
+  return Matrix4_set(m4_compose_dst,
+      (1.0-(m4_yy+m4_zz))*m4_sx,(m4_xy-m4_wz)*m4_sy,(m4_xz+m4_wy)*m4_sz,m4_compose_values[0],
+      (m4_xy+m4_wz)*m4_sx,(1.0-(m4_xx+m4_zz))*m4_sy,(m4_yz-m4_wx)*m4_sz,m4_compose_values[1],
+      (m4_xz-m4_wy)*m4_sx,(m4_yz+m4_wx)*m4_sy,(1.0-(m4_xx+m4_yy))*m4_sz,m4_compose_values[2],
+      0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_compose(m4_compose_matrix, ...m4_compose_args) {
+  let m4_compose_pos = m4_compose_args[0];
+  let m4_compose_quat = m4_compose_args[1];
+  let m4_compose_scale = m4_compose_args[2];
+  return Matrix4_composeValues(m4_compose_matrix,
+      ux_f64(m4_compose_pos),ux_f64(m4_compose_pos+8),ux_f64(m4_compose_pos+16),
+      ux_f64(m4_compose_quat),ux_f64(m4_compose_quat+8),ux_f64(m4_compose_quat+16),ux_f64(m4_compose_quat+24),
+      ux_f64(m4_compose_scale),ux_f64(m4_compose_scale+8),ux_f64(m4_compose_scale+16));
+}
+
+function Matrix4_makeRotationFromQuaternion(m4_from_quat_dst, ...m4_from_quat_args) {
+  let m4_from_quat = m4_from_quat_args[0];
+  return Matrix4_composeValues(m4_from_quat_dst,0.0,0.0,0.0,
+      ux_f64(m4_from_quat),ux_f64(m4_from_quat+8),ux_f64(m4_from_quat+16),ux_f64(m4_from_quat+24),1.0,1.0,1.0);
+}
+
+function Matrix4_makeRotationX(m4_rotx, ...m4_rotx_args) {
+  let m4_xc = ux_math_cos(m4_rotx_args[0]);
+  let m4_xs = ux_math_sin(m4_rotx_args[0]);
+  return Matrix4_set(m4_rotx,1.0,0.0,0.0,0.0, 0.0,m4_xc,0.0-m4_xs,0.0,
+      0.0,m4_xs,m4_xc,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeRotationY(m4_roty, ...m4_roty_args) {
+  let m4_yc = ux_math_cos(m4_roty_args[0]);
+  let m4_ys = ux_math_sin(m4_roty_args[0]);
+  return Matrix4_set(m4_roty,m4_yc,0.0,m4_ys,0.0, 0.0,1.0,0.0,0.0,
+      0.0-m4_ys,0.0,m4_yc,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeRotationZ(m4_rotz, ...m4_rotz_args) {
+  let m4_zc = ux_math_cos(m4_rotz_args[0]);
+  let m4_zs = ux_math_sin(m4_rotz_args[0]);
+  return Matrix4_set(m4_rotz,m4_zc,0.0-m4_zs,0.0,0.0, m4_zs,m4_zc,0.0,0.0,
+      0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0);
+}
+
+function Matrix4_makeRotationAxis(m4_axis_dst, ...m4_axis_args) {
+  let m4_rotation_axis = f64_floor_i64(m4_axis_args[0]);
+  let m4_axis_half = m4_axis_args[1]*0.5;
+  let m4_axis_sin = ux_math_sin(m4_axis_half);
+  return Matrix4_composeValues(m4_axis_dst,0.0,0.0,0.0,
+      ux_f64(m4_rotation_axis)*m4_axis_sin,ux_f64(m4_rotation_axis+8)*m4_axis_sin,
+      ux_f64(m4_rotation_axis+16)*m4_axis_sin,ux_math_cos(m4_axis_half),1.0,1.0,1.0);
+}
+
+function Matrix4_makeRotationFromEuler(m4_euler_dst, ...m4_euler_args) {
+  let m4_euler_src = m4_euler_args[0];
+  let m4_euler_order = ux_u32(m4_euler_src+24);
+  let m4_order = [0,1,2, 1,0,2, 2,0,1, 2,1,0, 1,2,0, 0,2,1];
+  let m4_euler_result = 0-1;
+  if (m4_euler_order < 6) {
+    let m4_euler_angles = [ux_f64(m4_euler_src),ux_f64(m4_euler_src+8),ux_f64(m4_euler_src+16)];
+    let m4_ex = 0.0; let m4_ey = 0.0; let m4_ez = 0.0; let m4_ew = 1.0;
+    let m4_euler_start = m4_euler_order*3;
+    let m4_euler_step = 0;
+    while (m4_euler_step < 3) {
+      let m4_eaxis = m4_order[m4_euler_start+m4_euler_step];
+      let m4_ehalf = m4_euler_angles[m4_eaxis]*0.5;
+      let m4_es = ux_math_sin(m4_ehalf);
+      let m4_ec = ux_math_cos(m4_ehalf);
+      let m4_ax = 0.0; let m4_ay = 0.0; let m4_az = 0.0;
+      if (m4_eaxis == 0) { m4_ax = m4_es; }
+      if (m4_eaxis == 1) { m4_ay = m4_es; }
+      if (m4_eaxis == 2) { m4_az = m4_es; }
+      let m4_e_next_x = m4_ew*m4_ax + m4_ex*m4_ec + m4_ey*m4_az - m4_ez*m4_ay;
+      let m4_e_next_y = m4_ew*m4_ay - m4_ex*m4_az + m4_ey*m4_ec + m4_ez*m4_ax;
+      let m4_e_next_z = m4_ew*m4_az + m4_ex*m4_ay - m4_ey*m4_ax + m4_ez*m4_ec;
+      m4_ew = m4_ew*m4_ec - m4_ex*m4_ax - m4_ey*m4_ay - m4_ez*m4_az;
+      m4_ex = m4_e_next_x; m4_ey = m4_e_next_y; m4_ez = m4_e_next_z;
+      m4_euler_step = m4_euler_step+1;
+    }
+    m4_euler_result = Matrix4_composeValues(m4_euler_dst,0.0,0.0,0.0,m4_ex,m4_ey,m4_ez,m4_ew,1.0,1.0,1.0);
+  }
+  return m4_euler_result;
+}
+
+function Matrix4_makePerspective(m4_perspective, ...m4_frustum) {
+  let m4_l=m4_frustum[0]; let m4_right=m4_frustum[1];
+  let m4_t=m4_frustum[2]; let m4_b=m4_frustum[3];
+  let m4_near=m4_frustum[4]; let m4_far=m4_frustum[5];
+  let m4_perspective_coords=m4_frustum[6];
+  let m4_depth_a=0.0; let m4_depth_b=0.0;
+  let m4_perspective_result=0-1;
+  if (m4_perspective_coords==2000.0 || m4_perspective_coords==2001.0) {
+    let m4_depth_range=m4_far-m4_near;
+    let m4_clip_scale=1.0;
+    let m4_clip_bias=0.0;
+    if (m4_perspective_coords==2000.0) { m4_clip_scale=2.0; m4_clip_bias=m4_near; }
+    m4_depth_a=(0.0-(m4_far+m4_clip_bias))/m4_depth_range;
+    m4_depth_b=(0.0-m4_clip_scale*m4_far*m4_near)/m4_depth_range;
+    m4_perspective_result=Matrix4_set(m4_perspective,
+        2.0*m4_near/(m4_right-m4_l),0.0,(m4_right+m4_l)/(m4_right-m4_l),0.0,
+        0.0,2.0*m4_near/(m4_t-m4_b),(m4_t+m4_b)/(m4_t-m4_b),0.0,
+        0.0,0.0,m4_depth_a,m4_depth_b, 0.0,0.0,0.0-1.0,0.0);
+  }
+  return m4_perspective_result;
+}
+
+function Matrix4_makeOrthographic(m4_ortho, ...m4_ortho_args) {
+  let m4_ol=m4_ortho_args[0]; let m4_or=m4_ortho_args[1];
+  let m4_ot=m4_ortho_args[2]; let m4_ob=m4_ortho_args[3];
+  let m4_on=m4_ortho_args[4]; let m4_of=m4_ortho_args[5];
+  let m4_ortho_coords=m4_ortho_args[6];
+  let m4_ortho_result=0-1;
+  if (m4_ortho_coords==2000.0 || m4_ortho_coords==2001.0) {
+    let m4_ortho_x=1.0/(m4_or-m4_ol);
+    let m4_ortho_y=1.0/(m4_ot-m4_ob);
+    let m4_ortho_z=1.0/(m4_of-m4_on);
+    let m4_ortho_clip=0.0-1.0;
+    let m4_ortho_bias=m4_on;
+    if (m4_ortho_coords==2000.0) { m4_ortho_clip=0.0-2.0; m4_ortho_bias=m4_ortho_bias+m4_of; }
+    m4_ortho_result=Matrix4_set(m4_ortho,2.0*m4_ortho_x,0.0,0.0,(0.0-(m4_or+m4_ol))*m4_ortho_x,
+      0.0,2.0*m4_ortho_y,0.0,(0.0-(m4_ot+m4_ob))*m4_ortho_y,
+      0.0,0.0,m4_ortho_clip*m4_ortho_z,(0.0-m4_ortho_bias)*m4_ortho_z, 0.0,0.0,0.0,1.0);
+  }
+  return m4_ortho_result;
+}
+
+function Matrix4_equals(m4_equal_a, ...m4_equal_args) {
+  let m4_equal_b=m4_equal_args[0];
+  let m4_equal_offset=0;
+  let m4_equal=1;
+  while (m4_equal && m4_equal_offset<128) {
+    m4_equal=ux_f64(m4_equal_a+m4_equal_offset)==ux_f64(m4_equal_b+m4_equal_offset);
+    m4_equal_offset=m4_equal_offset+8;
+  }
+  return m4_equal;
+}
+
+function Matrix4_arrayOffset(m4_array_base, ...m4_array_args) {
+  let m4_array_result=0-1;
+  if (m4_array_base>=0 && m4_array_base<=6291328) {
+    m4_array_result=ux_typed_index(m4_array_base,(6291328-m4_array_base)/8+1,m4_array_args[0],8);
+  }
+  return m4_array_result;
+}
+
+function Matrix4_fromArray(m4_array_dst, ...m4_array_read_args) {
+  let m4_array_source=Matrix4_arrayOffset(m4_array_read_args[0],m4_array_read_args[1]);
+  let m4_array_read=m4_array_source;
+  if (m4_array_source>=0) { m4_array_read=Matrix4_copy(m4_array_dst,m4_array_source); }
+  return m4_array_read;
+}
+
+function Matrix4_toArray(m4_array_src, ...m4_array_write_args) {
+  let m4_array_target=Matrix4_arrayOffset(m4_array_write_args[0],m4_array_write_args[1]);
+  let m4_array_written=m4_array_target;
+  if (m4_array_target>=0) { m4_array_written=Matrix4_copy(m4_array_target,m4_array_src); }
+  return m4_array_written;
+}
+
+function Matrix4_lookAt(m4_look_dst, ...m4_look_args) {
+  let m4_eye=m4_look_args[0]; let m4_target=m4_look_args[1]; let m4_up=m4_look_args[2];
+  let m4_zx=ux_f64(m4_eye)-ux_f64(m4_target);
+  let m4_zy=ux_f64(m4_eye+8)-ux_f64(m4_target+8);
+  let m4_zz=ux_f64(m4_eye+16)-ux_f64(m4_target+16);
+  let m4_look_span=ux_span(m4_look_dst,128);
+  if (m4_zx==0.0 && m4_zy==0.0 && m4_zz==0.0) { m4_zz=1.0; }
+  let m4_zinv=1.0/f64_sqrt(m4_zx*m4_zx+m4_zy*m4_zy+m4_zz*m4_zz);
+  m4_zx=m4_zx*m4_zinv; m4_zy=m4_zy*m4_zinv; m4_zz=m4_zz*m4_zinv;
+  let m4_up_x=ux_f64(m4_up); let m4_up_y=ux_f64(m4_up+8); let m4_up_z=ux_f64(m4_up+16);
+  let m4_right_x=m4_up_y*m4_zz-m4_up_z*m4_zy;
+  let m4_right_y=m4_up_z*m4_zx-m4_up_x*m4_zz;
+  let m4_right_z=m4_up_x*m4_zy-m4_up_y*m4_zx;
+  if (m4_right_x==0.0 && m4_right_y==0.0 && m4_right_z==0.0) {
+    if (ux_math_abs(m4_up_z)==1.0) { m4_zx=m4_zx+0.0001; }
+    else { m4_zz=m4_zz+0.0001; }
+    m4_zinv=1.0/f64_sqrt(m4_zx*m4_zx+m4_zy*m4_zy+m4_zz*m4_zz);
+    m4_zx=m4_zx*m4_zinv; m4_zy=m4_zy*m4_zinv; m4_zz=m4_zz*m4_zinv;
+    m4_right_x=m4_up_y*m4_zz-m4_up_z*m4_zy;
+    m4_right_y=m4_up_z*m4_zx-m4_up_x*m4_zz;
+    m4_right_z=m4_up_x*m4_zy-m4_up_y*m4_zx;
+  }
+  let m4_right_len=f64_sqrt(m4_right_x*m4_right_x+m4_right_y*m4_right_y+m4_right_z*m4_right_z);
+  if (m4_right_len==0.0 || m4_right_len!=m4_right_len) { m4_right_len=1.0; }
+  m4_right_x=m4_right_x/m4_right_len; m4_right_y=m4_right_y/m4_right_len; m4_right_z=m4_right_z/m4_right_len;
+  let m4_l00=ux_f64_put(m4_look_dst,m4_right_x);
+  let m4_l01=ux_f64_put(m4_look_dst+8,m4_right_y);
+  let m4_l02=ux_f64_put(m4_look_dst+16,m4_right_z);
+  let m4_l10=ux_f64_put(m4_look_dst+32,m4_zy*m4_right_z-m4_zz*m4_right_y);
+  let m4_l11=ux_f64_put(m4_look_dst+40,m4_zz*m4_right_x-m4_zx*m4_right_z);
+  let m4_l12=ux_f64_put(m4_look_dst+48,m4_zx*m4_right_y-m4_zy*m4_right_x);
+  let m4_l20=ux_f64_put(m4_look_dst+64,m4_zx);
+  let m4_l21=ux_f64_put(m4_look_dst+72,m4_zy);
+  let m4_l22=ux_f64_put(m4_look_dst+80,m4_zz);
+  return m4_look_dst;
+}
+
+// Recover the quaternion using the largest reliable diagonal-derived component.
+function Matrix4_basisQuaternion(m4_quat_target, ...m4_basis_rows) {
+  let m4_b00=m4_basis_rows[0]; let m4_b01=m4_basis_rows[1]; let m4_b02=m4_basis_rows[2];
+  let m4_b10=m4_basis_rows[3]; let m4_b11=m4_basis_rows[4]; let m4_b12=m4_basis_rows[5];
+  let m4_b20=m4_basis_rows[6]; let m4_b21=m4_basis_rows[7]; let m4_b22=m4_basis_rows[8];
+  let m4_btrace=m4_b00+m4_b11+m4_b22;
+  let m4_bqx=0.0; let m4_bqy=0.0; let m4_bqz=0.0; let m4_bqw=0.0;
+  if (m4_btrace>0.0) {
+    let m4_bs=2.0*f64_sqrt(m4_btrace+1.0);
+    m4_bqx=(m4_b21-m4_b12)/m4_bs; m4_bqy=(m4_b02-m4_b20)/m4_bs;
+    m4_bqz=(m4_b10-m4_b01)/m4_bs; m4_bqw=m4_bs*0.25;
+  } else if (m4_b00>m4_b11 && m4_b00>m4_b22) {
+    let m4_bsx=2.0*f64_sqrt(1.0+m4_b00-m4_b11-m4_b22);
+    m4_bqx=m4_bsx*0.25; m4_bqy=(m4_b01+m4_b10)/m4_bsx;
+    m4_bqz=(m4_b02+m4_b20)/m4_bsx; m4_bqw=(m4_b21-m4_b12)/m4_bsx;
+  } else if (m4_b11>m4_b22) {
+    let m4_bsy=2.0*f64_sqrt(1.0+m4_b11-m4_b00-m4_b22);
+    m4_bqx=(m4_b01+m4_b10)/m4_bsy; m4_bqy=m4_bsy*0.25;
+    m4_bqz=(m4_b12+m4_b21)/m4_bsy; m4_bqw=(m4_b02-m4_b20)/m4_bsy;
+  } else {
+    let m4_bsz=2.0*f64_sqrt(1.0+m4_b22-m4_b00-m4_b11);
+    m4_bqx=(m4_b02+m4_b20)/m4_bsz; m4_bqy=(m4_b12+m4_b21)/m4_bsz;
+    m4_bqz=m4_bsz*0.25; m4_bqw=(m4_b10-m4_b01)/m4_bsz;
+  }
+  let m4_bspan=ux_span(m4_quat_target,32);
+  let m4_bwrite_x=ux_f64_put(m4_quat_target,m4_bqx);
+  let m4_bwrite_y=ux_f64_put(m4_quat_target+8,m4_bqy);
+  let m4_bwrite_z=ux_f64_put(m4_quat_target+16,m4_bqz);
+  let m4_bwrite_w=ux_f64_put(m4_quat_target+24,m4_bqw);
+  return m4_quat_target;
+}
+
+native function Matrix4_decompose(m4_decomp:i64, m4_pos_target:i64, m4_q_target:i64, m4_scale_target:i64) i64 {
+  let m4_pos_span=ux_span(m4_pos_target,24);
+  let m4_scale_target_span=ux_span(m4_scale_target,24);
+  let m4_position_x=ux_f64(m4_decomp+96);
+  let m4_position_y=ux_f64(m4_decomp+104);
+  let m4_position_z=ux_f64(m4_decomp+112);
+  let m4_decomp_sx=f64_sqrt(Matrix4_columnLengthSq(m4_decomp));
+  let m4_decomp_sy=f64_sqrt(Matrix4_columnLengthSq(m4_decomp+32));
+  let m4_decomp_sz=f64_sqrt(Matrix4_columnLengthSq(m4_decomp+64));
+  let m4_dr00=ux_f64(m4_decomp); let m4_dr01=ux_f64(m4_decomp+32); let m4_dr02=ux_f64(m4_decomp+64);
+  let m4_dr10=ux_f64(m4_decomp+8); let m4_dr11=ux_f64(m4_decomp+40); let m4_dr12=ux_f64(m4_decomp+72);
+  let m4_dr20=ux_f64(m4_decomp+16); let m4_dr21=ux_f64(m4_decomp+48); let m4_dr22=ux_f64(m4_decomp+80);
+  let m4_orientation=m4_dr00*(m4_dr11*m4_dr22-m4_dr12*m4_dr21) -
+      m4_dr01*(m4_dr10*m4_dr22-m4_dr12*m4_dr20) + m4_dr02*(m4_dr10*m4_dr21-m4_dr11*m4_dr20);
+  if (m4_orientation<0.0) { m4_decomp_sx=0.0-m4_decomp_sx; }
+  let m4_dsx=1.0/m4_decomp_sx; let m4_dsy=1.0/m4_decomp_sy; let m4_dsz=1.0/m4_decomp_sz;
+  let m4_quaternion=Matrix4_basisQuaternion(m4_q_target,
+      m4_dr00*m4_dsx,m4_dr01*m4_dsy,m4_dr02*m4_dsz,
+      m4_dr10*m4_dsx,m4_dr11*m4_dsy,m4_dr12*m4_dsz,
+      m4_dr20*m4_dsx,m4_dr21*m4_dsy,m4_dr22*m4_dsz);
+  let m4_dpx=ux_f64_put(m4_pos_target,m4_position_x);
+  let m4_dpy=ux_f64_put(m4_pos_target+8,m4_position_y);
+  let m4_dpz=ux_f64_put(m4_pos_target+16,m4_position_z);
+  let m4_ds0=ux_f64_put(m4_scale_target,m4_decomp_sx);
+  let m4_ds1=ux_f64_put(m4_scale_target+8,m4_decomp_sy);
+  let m4_ds2=ux_f64_put(m4_scale_target+16,m4_decomp_sz);
+  return m4_decomp;
+}
