@@ -40,6 +40,7 @@ static uint32_t g_heap_size = EMIT_INITIAL;
 static uint32_t g_bump;
 static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_len;
 static int g_need_gpu;
+static int g_versioned_gpu;
 static int g_need_ux;
 static int g_abi_imports;
 static const char *g_capacity;
@@ -494,7 +495,7 @@ static void next(Lex *L) {
     L->id[n] = 0;
     {
       const char *t = L->id;
-      if (t[0]=='h'&&t[1]=='o'&&t[2]=='s'&&t[3]=='t'&&t[4]=='_'&&t[5]=='g'&&t[6]=='p'&&t[7]=='u'&&t[8]=='_'&&t[9]=='s'&&t[10]=='u'&&t[11]=='b'&&t[12]=='m'&&t[13]=='i'&&t[14]=='t'&&t[15]==0)
+      if (!g_versioned_gpu && t[0]=='h'&&t[1]=='o'&&t[2]=='s'&&t[3]=='t'&&t[4]=='_'&&t[5]=='g'&&t[6]=='p'&&t[7]=='u'&&t[8]=='_'&&t[9]=='s'&&t[10]=='u'&&t[11]=='b'&&t[12]=='m'&&t[13]=='i'&&t[14]=='t'&&t[15]==0)
         g_need_gpu = 1;
     }
     if (!strcmp(L->id,"let")) L->tok = T_LET;
@@ -1276,7 +1277,9 @@ static int abi_decl(Lex *L, Prog *P, int exports) {
     if (L->tok != T_ID || !intrinsic_name(L->id, "from")) { P->err = "abi import from"; return 0; }
     next(L);
     if (L->tok != T_STR || !abi_import_module(L->str) || !abi_name_copy(f->module, L->str) ||
-        intrinsic_name(f->name, "host_gpu_submit")) { P->err = "abi import module or name"; return 0; }
+        (intrinsic_name(f->name, "host_gpu_submit") && !intrinsic_name(f->module, "uxe_gpu_v1"))) {
+      P->err = "abi import module or name"; return 0;
+    }
     next(L);
   }
   if (!expect(L, T_LP, P, "abi declaration (")) return 0;
@@ -1303,6 +1306,13 @@ static int abi_decl(Lex *L, Prog *P, int exports) {
   if (!expect(L, T_RP, P, "abi declaration )")) return 0;
   f->result = abi_type(L, P);
   if (!f->result) return 0;
+  if (!exports && intrinsic_name(f->name, "host_gpu_submit")) {
+    if (f->count != 2 || f->args[0] != TY_I64 || f->args[1] != TY_I64 || f->result != TY_I64) {
+      P->err = "gpu submit ABI signature"; return 0;
+    }
+    g_versioned_gpu = 1;
+    g_need_gpu = 0;
+  }
   if (exports) {
     if (L->tok != T_ID || !intrinsic_name(L->id, "version")) { P->err = "abi version"; return 0; }
     next(L);
@@ -1595,7 +1605,7 @@ static int pprim(Lex *L, Prog *P) {
       const char *k = "host_gpu_submit";
       int hi = 0;
       while (k[hi] && t[hi] == k[hi]) hi++;
-      if (!k[hi] && !t[hi]) {
+      if (!g_versioned_gpu && !k[hi] && !t[hi]) {
         int a, b;
         next(L);
         if (!expect(L, T_LP, P, "gpu (")) return 0;
@@ -2171,7 +2181,7 @@ static int pstmt(Lex *L, Prog *P) {
       const char *k = "host_gpu_submit";
       int hi = 0;
       while (k[hi] && name[hi] == k[hi]) hi++;
-      if (!k[hi] && !name[hi] && L->tok == T_LP) {
+      if (!g_versioned_gpu && !k[hi] && !name[hi] && L->tok == T_LP) {
         int a, b;
         next(L);
         a = pexpr(L, P); if (!a) return 0;
@@ -3679,6 +3689,7 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   g_bump = 64;
   g_capacity = 0;
   g_need_gpu = 0;
+  g_versioned_gpu = 0;
   g_need_ux = 0;
   g_abi_imports = 0;
   g_out_ptr = g_out_len = g_meta_ptr = g_meta_len = g_err_ptr = g_err_len = 0;
