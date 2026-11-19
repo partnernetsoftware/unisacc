@@ -356,10 +356,10 @@ static int pilot_gold(char *gold, int cap) {
 
 static int pilot_product(const char *dir,int mutate,int draw) {
     const char *sources[]={"ujs/practice/uxe/products/d2/pilot.ujs","ujs/practice/uxe/base/math.ujs"};
-    unsigned char *pilot=0,*math=0,*water=0,*crossing=0;
-    int64_t pn=0,mn=0,wn=0,cn=0;
+    unsigned char *pilot=0,*math=0,*water=0,*crossing=0,*foreground=0;
+    int64_t pn=0,mn=0,wn=0,cn=0,fn=0;
     int rc=1;
-    char path[320],program[16384];
+    char path[320],program[32768];
     if (sy_read_file(sources[0],&pilot,&pn,7000) || sy_read_file(sources[1],&math,&mn,1000)) goto done;
     long header=tx_find((char *)pilot,pn,"\n\n",2);
     const char tail[]="\nreturn boatTick;";
@@ -367,9 +367,11 @@ static int pilot_product(const char *dir,int mutate,int draw) {
     if (header < 0 || body <= header) goto done;
     if(draw && sy_read_file("ujs/practice/uxe/products/d2/waterway.ujs",&water,&wn,8192)) goto done;
     if(draw && sy_read_file("ujs/practice/uxe/products/d2/crossing.ujs",&crossing,&cn,8192)) goto done;
-    int n=tx_snprintf(program,sizeof program,"%.*s\n%s%.*s\n%s\n%s\n%s%s",
+    if(draw && mutate!=5 && sy_read_file("ujs/practice/uxe/products/d2/foreground.ujs",&foreground,&fn,8192)) goto done;
+    int n=tx_snprintf(program,sizeof program,"%.*s\n%s%.*s\n%s\n%s\n%s\n%s%s",
         (int)header,pilot,math,(int)(body-header),pilot+header,water?(char *)water:"",
-        crossing?(char *)crossing:"",draw?"packetWrite = uxe_dispatch(3, 0, 0);\n":"",pilot+body);
+        crossing?(char *)crossing:"",foreground?(char *)foreground:"",
+        draw?"packetWrite = uxe_dispatch(3, 0, 0);\n":"",pilot+body);
     if (n<0 || n>=(int)sizeof program) goto done;
     tx_snprintf(path,sizeof path,"%s/pilot.ujs",dir);
     if(sy_write_file(path,program,n,0600)) goto done;
@@ -382,6 +384,7 @@ done:
     mm_free(math);
     mm_free(water);
     mm_free(crossing);
+    mm_free(foreground);
     return rc;
 }
 
@@ -493,7 +496,11 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
         from += sizeof start - 1;
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
-            if (flight_check == 5) {
+            if (flight_check == 6) {
+                int lamp=0,hull=0,motes=0;
+                pass = !rc && sscanf(out+from,"%d %d %d",&lamp,&hull,&motes)==3 &&
+                    lamp>=15 && hull>=400 && motes>=20;
+            } else if (flight_check == 5) {
                 int top=0, lower=0, spread=0;
                 pass = !rc && sscanf(out+from,"%d %d %d",&top,&lower,&spread)==3 &&
                     top>=30 && top>lower && spread>=4;
@@ -521,7 +528,8 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
-                flight_check == 5 ? "CHECK_UXE_D2_MIRROR" : flight_check == 4 ? "CHECK_UXE_D2_BRIDGE" :
+                flight_check == 6 ? "CHECK_UXE_D2_FOREGROUND" : flight_check == 5 ? "CHECK_UXE_D2_MIRROR" :
+                flight_check == 4 ? "CHECK_UXE_D2_BRIDGE" :
                 flight_check == 3 ? "CHECK_UXE_D2_WATERWAY" :
                 flight_check == 2 ? "CHECK_UXE_D2_PILOT" :
                 flight_check ? "CHECK_UXE_D1_FLIGHT_WASM" : base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
@@ -561,6 +569,8 @@ int main(int argc, char **argv) {
     if(tx_eq(mode,"water-bridge",sizeof "water-bridge") || dark_mutate) flight_check=4;
     int mirror_mutate=tx_eq(mode,"water-mirror-off",sizeof "water-mirror-off");
     if(tx_eq(mode,"water-mirror",sizeof "water-mirror") || mirror_mutate) flight_check=5;
+    int prow_mutate=tx_eq(mode,"water-foreground-off",sizeof "water-foreground-off");
+    if(tx_eq(mode,"water-foreground",sizeof "water-foreground") || prow_mutate) flight_check=6;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -598,7 +608,7 @@ int main(int argc, char **argv) {
     } else if (flight_check >= 2) {
         rc = rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d2-pilot-probe.html") ||
             generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
-            pilot_product(dir,mirror_mutate?4:dark_mutate?3:dry_mutate?2:pilot_mutate,flight_check>=3);
+            pilot_product(dir,prow_mutate?5:mirror_mutate?4:dark_mutate?3:dry_mutate?2:pilot_mutate,flight_check>=3);
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
