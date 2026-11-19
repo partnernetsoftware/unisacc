@@ -14,7 +14,9 @@
 | M5 | 纯色 Basic、单方向平面 Lambert、Phong、Standard，线性与 Reinhard 色调有 r160 像素门。UXEP 操作 13 和 14 已对照二维与六面纹理。Toon 的 WebGL1 黑色已定位为参考着色器导数扩展问题，显式梯度与 r160 WebGL2 对照通过，默认导数过渡待补 |
 | M6 至 M12 | 按规划的独立验收出口继续。M7 前保持 D4 发布包；M12 用真时钟检验上下文恢复与资源代数 |
 
-M5 新增验收为 Normal、Depth、Matcap 默认灰阶、Distance RGBA 距离、固定尺寸 Points、三种纯色直线、正交旋转 Sprite、ShaderMaterial、RawShaderMaterial 和 ShadowMaterial 的透明收影。点线使用 UXEP 操作 15。每项有 r160 对照和独立金值，入口 `gpu-packet-struct.cx` 共 1518 项。ShadowMaterial 已测矩形投影的透明输出，通用阴影图仍归 M6。Toon 已复跑 WebGL2 正例和篡改，仍为部分。下一步是剩余色调映射与输出色彩空间，再进 M6。
+M5 增补 Normal、Depth、Matcap、Distance、Points、三种直线、Sprite、ShaderMaterial、RawShaderMaterial 和 ShadowMaterial。点线使用 UXEP 操作 15。ShadowMaterial 已测矩形投影的透明输出，通用阴影图仍归 M6。Toon 已复跑 WebGL2 正例和篡改，仍为部分。Cineon、ACESFilmic、AgX 与自定义增益通过 r160 对照。主门 1682 项，输出色空间分门 `--colors` 123 项。Display P3 的 ColorManagement 数学转换通过，画布编码仍有缺口。
+
+Display P3 画布已两次复现。r160 WebGL1 与每色空间独立的 WebGL2 上下文均有 4 个通道不符，光栅中心红、蓝分别读回 117、14，独立色域与传递函数金值为 119、25。日志为 `/tmp/devsvc-flow-21559245761-324647/out/x.out` 与 `/tmp/devsvc-flow-21559316131-338155/out/x.out`。单独保留 `--p3-readback` 的原断言，下一步隔离浏览器绘图缓冲色彩管理和 WebGLProgram 的输出编码。其他三种经 `--output-mutate` 验证 18 项转红。
 
 [清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
 

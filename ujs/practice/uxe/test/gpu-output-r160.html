@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  BufferAttribute, BufferGeometry, Camera, DisplayP3ColorSpace, LinearDisplayP3ColorSpace,
+  LinearSRGBColorSpace, Mesh, MeshBasicMaterial, Scene, SRGBColorSpace, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+function open(api = "webgl") {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 16;
+  const options = { alpha: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false };
+  const gl = canvas.getContext(api, options);
+  if (!gl) throw new Error("WebGL unavailable");
+  return { canvas, gl, options };
+}
+
+function pixels(gl) {
+  return [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]].flatMap(([x, y]) => {
+    const px = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return [...px];
+  });
+}
+
+const result = document.querySelector("#gpu");
+try {
+  const { gl } = open();
+  let exports;
+  const submit = createGpuSubmit(gl, () => exports.memory, () => 1);
+  const wasm = await fetch("./probe.wasm").then(response => response.arrayBuffer());
+  ({ instance: { exports } } = await WebAssembly.instantiate(wasm, { uxe_gpu_v1: { host_gpu_submit: submit } }));
+  const camera = new Camera();
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array([-0.75,-0.75,0,0.75,-0.75,0,0,0.75,0]), 3));
+  const material = new MeshBasicMaterial({ color: 0x804008 });
+  const scene = new Scene();
+  scene.add(new Mesh(geometry, material));
+  const offset = location.search === "?output-mutate" ? 4 : 0;
+  const spaces = [LinearSRGBColorSpace, SRGBColorSpace, LinearDisplayP3ColorSpace];
+  if (location.search === "?p3-readback") spaces.push(DisplayP3ColorSpace);
+  const samples = spaces.flatMap((space, i) => {
+    const status = Number(exports.uxe_gpu_probe(BigInt(offset + i)));
+    const reference = open("webgl2");
+    const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl, ...reference.options });
+    renderer.outputColorSpace = space;
+    renderer.setSize(16, 16, false);
+    renderer.setClearColor(0, 1);
+    renderer.render(scene, camera);
+    const values = pixels(reference.gl);
+    renderer.dispose();
+    return [status, ...pixels(gl), ...values];
+  });
+  geometry.dispose();
+  material.dispose();
+  result.textContent = JSON.stringify(samples);
+} catch (error) {
+  result.textContent = String(error);
+}
+</script>
