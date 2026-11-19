@@ -46,7 +46,7 @@
 | 里程碑 | 子树 | r160 名字(数量) | 现状 |
 |---|---|---|---|
 | M1 数学 | Vector2、Vector3、Vector4、Matrix3、Matrix4、Quaternion、Euler、Color、ColorManagement、Box2、Box3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SphericalHarmonics3、MathUtils | 21 | 修订(cdx2):21 项已有且有 G-math 门。Interpolant 系按开发计划归 M8 |
-| M2 核心图 | EventDispatcher、Object3D、Group、Scene、Layers、Clock、Cache、Source、Uniform、UniformsGroup、BufferAttribute 全家(Int8 到 Float64、Uint8Clamped、Float16、Instanced、Interleaved、GLBufferAttribute 共 14)、BufferGeometry、InstancedBufferGeometry、DataUtils、ImageUtils | 约 32 | 缺:产品自己摆场景,无父子变换 |
+| M2 核心图 | EventDispatcher、Object3D、Group、Scene、Layers、Clock、Cache、Source、Uniform、UniformsGroup、BufferAttribute 全家(Int8 到 Float64、Uint8Clamped、Float16、Instanced、Interleaved、GLBufferAttribute 共 14)、BufferGeometry、InstancedBufferGeometry、DataUtils、ImageUtils | 约 32 | 部分。基座已有父子变换，产品接入和各类剩余方法以清单为准 |
 | M3 相机与几何 | Camera、PerspectiveCamera、OrthographicCamera、ArrayCamera、CubeCamera、StereoCamera;Geometry 23 个(Box、Capsule、Circle、Cone、Cylinder、Dodecahedron、Edges、Extrude、Icosahedron、Lathe、Octahedron、Plane、Polyhedron、Ring、Shape、Sphere、Tetrahedron、Torus、TorusKnot、Tube、Wireframe 等);Curve 11、Path、Shape、ShapePath、ShapeUtils | 6 加 23 加 约 15 | 部分:透视投影与相机空间变换已在 `uxe.ujs`;无通用几何生成 |
 | M4 GPU 渲染基座 | WebGLRenderer 对应面:渲染循环、渲染列表(不透明/透明排序)、视锥剔除、清屏、视口、裁剪、状态机(混合、深度、模板、剔除面)、RenderTarget 5 种、WebGLUtils、ShaderChunk、ShaderLib、UniformsLib、UniformsUtils、GLSL1/GLSL3 | 约 12 | 缺:现为软件光栅化,无 GPU 命令包 |
 | M5 材质与纹理 | Material 18(Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Shadow、Points、Line*、Sprite、Shader、RawShader);Texture 12(Canvas、Compressed*、Cube、Data、Data3D、DataArray、Depth、Framebuffer、Video 等);颜色空间与色调映射 7;Mapping 13、Filter 10、Wrapping 3 | 约 40 | 部分:toon 三阶、描边、雾、阴影图在软件路径;无 PBR |
@@ -179,7 +179,7 @@ export uxe_frame(now:i64) i64 version 1;
 | M1 | 数学类按 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、ColorManagement、Box2/3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils 推进，每类含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 21 个 M1 数学项全部已有 |
 | M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门,D1 的场景改用 Scene 与 Object3D |
 
-修订(cdx2): M2 基座布局由 gen-object-layout.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录仍由消费模块持有，场景模块只交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
+修订(cdx2): M2 基座布局由 gen-object-layouts.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录由消费模块持有，场景模块交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
 | M3 | 相机四种与投影矩阵、视锥;23 个几何生成器各一提交,顶点与索引与 three.js 逐项对;Curve 系、Path、Shape、ShapeUtils(三角剖分) | 20 到 26 | G-math 对几何的顶点哈希 |
 | M4 | GPU 命令包格式(写进 HOST_ABI 与 prd),桥 `host_gpu_submit` 的白名单扩展;渲染列表与排序;视锥剔除;状态机;RenderTarget;B 栏混合、深度、模板、比较、剔除常量 | 12 到 16 | 一个三角形、一个立方体、深度测试、混合像素对照 three.js |
 | M5 | 着色器库(ShaderChunk 对标)与 Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Points、Line、Sprite、ShadowMaterial、ShaderMaterial、RawShaderMaterial;Texture 与 Mapping、Filter、Wrapping、颜色空间、色调映射 7 种 | 28 到 36 | G-pixel 门逐材质,PBR 对照 4% |
