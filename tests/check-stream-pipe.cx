@@ -22,6 +22,7 @@
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.hostid
+#pragma unisa use sys.fs
 
 #define SP_N65 65
 
@@ -106,23 +107,45 @@ static int sp_image_pipe(const char *src, const char *out, const char *tag, char
     return sp_stage("elf", sp_cat(a, " --raw"), f[5], out, 0, 0);
 }
 /* Per-source e2|e1 on the unit route, then frame. INS collects the --in list. */
-static int sp_units(const char **srcs, int n, const char *frame) {
+static int sp_unit_range(const char **srcs, int begin, int end) {
     char a[600], in1[600], in2[600];
+    int j, rc;
+    for (j = begin; j < end; j++) {
+        if (cx_fmt(a, sizeof a, "--route %s/unit --unit %d --source %s", sp_target(), j, srcs[j]) ||
+            cx_fmt(in1, sizeof in1, "%s.u2", srcs[j]) || cx_fmt(in2, sizeof in2, "%s.u1", srcs[j])) sp_die("args");
+        if ((rc = sp_stage("e2", a, srcs[j], in1, 0, 0)) != 0 || (rc = sp_stage("e1", a, in1, in2, 0, 0)) != 0) return rc;
+    }
+    return 0;
+}
+static int sp_frame(const char **srcs, int n, const char *frame) {
     char *cmd;
     int j, rc;
     cmd = malloc(200 + (size_t)n * 1300);
     if (!cmd) sp_die("alloc");
     if (cx_fmt(cmd, 200 + (size_t)n * 1300, "exec %s stream frame", sp_prod)) sp_die("cmd");
     for (j = 0; j < n; j++) {
-        if (cx_fmt(a, sizeof a, "--route %s/unit --unit %d --source %s", sp_target(), j, srcs[j]) ||
-            cx_fmt(in1, sizeof in1, "%s.u2", srcs[j]) || cx_fmt(in2, sizeof in2, "%s.u1", srcs[j])) sp_die("args");
-        if ((rc = sp_stage("e2", a, srcs[j], in1, 0, 0)) != 0 || (rc = sp_stage("e1", a, in1, in2, 0, 0)) != 0) { free(cmd); return rc; }
-        sp_cat(cmd, " --in "); sp_cat(cmd, srcs[j]); sp_cat(cmd, "="); sp_cat(cmd, in2);
+        sp_cat(cmd, " --in "); sp_cat(cmd, srcs[j]); sp_cat(cmd, "="); sp_cat(cmd, srcs[j]); sp_cat(cmd, ".u1");
     }
     sp_cat(cmd, " > "); sp_cat(cmd, frame);
     rc = sp_sh(cmd, 0, 0);
     free(cmd);
     return rc;
+}
+static int sp_units(const char **srcs, int n, const char *frame) {
+    int rc = sp_unit_range(srcs, 0, n);
+    return rc ? rc : sp_frame(srcs, n, frame);
+}
+/* Transfer only complete stage outputs between children of this cell. The
+   parent owns a fresh directory. Never replace an existing handoff file. */
+static void sp_transfer(const char *session, const char *stem, const char *suffix, int publish) {
+    char local[4600], shared[4600]; size_t n=0;
+    if (!session || !*session || cx_fmt(local,sizeof local,"%s/%s%s",sp_dir,stem,suffix) ||
+        cx_fmt(shared,sizeof shared,"%s/%s%s",session,stem,suffix)) sp_die("part session");
+    char *bytes=cx_read(publish ? local : shared,&n);
+    if (!bytes || !n) sp_die("part input missing or empty");
+    int fd=sy_open_new(publish ? shared : local,0600);
+    if(fd<0 || sy_write_all(fd,bytes,n) || sy_close(fd)) sp_die("part output");
+    free(bytes);
 }
 static int sp_multi_image(const char *frame, const char *first, const char *out, const char *tag) {
     char a[600], f[6][600];
@@ -185,6 +208,7 @@ int main(int argc, char **argv) {
     static char list65[SP_N65 * 16];
     const char *two[2] = {"a.c", "b.c"};
     const char *tmp = getenv("TMPDIR");
+    const char *session = getenv("SP_SESSION");
     char *e_ref = 0, *e_pipe = 0;
     size_t n_ref = 0, n_pipe = 0;
     int i, rc, rc2, shift;
@@ -195,6 +219,7 @@ int main(int argc, char **argv) {
     { const char *self = tn_self(); if (!self || !self[0]) sp_die("no self target"); if (cx_fmt(sp_tgt, sizeof sp_tgt, "%s", self)) sp_die("self target bound"); }
     sp_tgt_override = getenv("SP_TGT_OVERRIDE");   /* negative control only */
     if (sp_tgt_override && sp_tgt_override[0]) printf("NOTE\toverride=%s\tSP_TGT_OVERRIDE is set; the route target is not this slice's own\n", sp_tgt_override);
+    if (session && *session) tmp = session;
     if (cx_fmt(sp_dir, sizeof sp_dir, "%s/stream-pipe-XXXXXX", tmp && tmp[0] ? tmp : "/tmp") || !mkdtemp(sp_dir)) sp_die("scratch");
     sp_put("plain.c", "int f(int x){return x*2;}\nint main(void){return f(21)-42;}\n");
     sp_put("hello.c", "#include <stdio.h>\nint main(void){printf(\"hi %d\\n\",42);return 0;}\n");
@@ -214,13 +239,21 @@ int main(int argc, char **argv) {
         sp_cat(list65, names[i]); sp_cat(list65, " ");
     }
     /* A: the product has the subcommand (usage is rc 2, not "cannot open stream"). */
-    /* SP_PART splits the run so each part keeps its own 55 s limit (CI osx/x86_64 ran the whole
-       check into 55 s twice for 0.0.74): main = A I B C D H F G (11), e = E G (2); unset = all (12). */
+    /* Legacy entry points: main = A I B C D H F G (11), e = E G (2), unset = all (12).
+       The cell splits main by scenario. E uses a private session: one reference,
+       five disjoint 13-unit ranges and one byte comparison over all 65 units. */
     const char *part = getenv("SP_PART");
     int pm = !part || !part[0] || !strcmp(part, "main"), pe = !part || !part[0] || !strcmp(part, "e");
-    int want = pm && pe ? 12 : pm ? 11 : 2;
-    if (part && part[0] && strcmp(part, "main") && strcmp(part, "e")) sp_die("SP_PART must be main or e");
-    if (pm) {
+    int basic=pm, stdio=pm, multi=pm, reject=pm, units=-1, reference=0, finish=0;
+    if(!pm && !pe){
+        basic=!strcmp(part,"basic"); stdio=!strcmp(part,"stdio"); multi=!strcmp(part,"multi"); reject=!strcmp(part,"reject");
+        reference=!strcmp(part,"e-ref"); finish=!strcmp(part,"e-compare");
+        if(strlen(part)==3 && part[0]=='e' && part[1]=='-' && part[2]>='0' && part[2]<='4') units=part[2]-'0';
+        if(!basic&&!stdio&&!multi&&!reject&&!reference&&!finish&&units<0)sp_die("unknown SP_PART");
+    }
+    int cleanup_assert=pm || pe || reject || finish;
+    int want=6*basic+stdio+multi+2*reject+(pe||finish)+cleanup_assert;
+    if (basic) {
     sp_ck(sp_stage("", "", "/dev/null", "/dev/null", 0, 0) == 2, "A stream-subcommand");
     sp_attr_table();
     /* B, C: single source -o.  Every reference below passes -O0 explicitly: the pipes are built
@@ -228,23 +261,44 @@ int main(int argc, char **argv) {
     rc = sp_ref("-O0 -o", "plain.ref", "plain.c", 0, 0);
     rc2 = sp_image_pipe("plain.c", "plain.pipe", "p", 0, 0);
     sp_ck(rc == 0 && rc2 == 0 && sp_same("plain.ref", "plain.pipe"), "B plain-image-pipe-cmp");
+    }
+    if (stdio) {
     rc = sp_ref("-O0 -o", "hello.ref", "hello.c", 0, 0);
     rc2 = sp_image_pipe("hello.c", "hello.pipe", "h", 0, 0);
     sp_ck(rc == 0 && rc2 == 0 && sp_same("hello.ref", "hello.pipe"), "C hello-stdio-image-pipe-cmp");
+    }
+    if (multi) {
     /* D: two sources -o through frame and units. */
     rc = sp_ref("-O0 -o", "ab.ref", "a.c b.c", 0, 0);
     rc2 = sp_units(two, 2, "ab.frame");
     if (rc2 == 0) rc2 = sp_multi_image("ab.frame", "a.c", "ab.pipe", "m");
     sp_ck(rc == 0 && rc2 == 0 && sp_same("ab.ref", "ab.pipe"), "D two-source-image-pipe-cmp");
     }
-    if (pe) {
+    if (units>=0) {
+        int begin=13*units, end=begin+13;
+        if(sp_unit_range(s65,begin,end))sp_die("E unit stages");
+        for(i=begin;i<end;i++)sp_transfer(session,s65[i],".u1",1);
+    }
+    if (pe || reference) {
+        rc = sp_ref("-O0 -S -o", "s65.ref", list65, 0, 0);
+        if (reference) {
+            if (rc) sp_die("E reference");
+            sp_transfer(session, "s65", ".ref", 1);
+        }
+    }
+    if (pe || finish) {
     /* E: 65 sources -S. */
-    rc = sp_ref("-O0 -S -o", "s65.ref", list65, 0, 0);
-    rc2 = sp_units(s65, SP_N65, "s65.frame");
+    if(finish){
+        sp_transfer(session,"s65",".ref",0);
+        for(i=0;i<SP_N65;i++)sp_transfer(session,s65[i],".u1",0);
+        rc=0;rc2=sp_frame(s65,SP_N65,"s65.frame");
+    } else {
+        rc2=sp_units(s65,SP_N65,"s65.frame");
+    }
     if (rc2 == 0) rc2 = sp_multi_tape("s65.frame", "m0.c", "s65.pipe", "t");
     sp_ck(rc == 0 && rc2 == 0 && sp_same("s65.ref", "s65.pipe"), "E 65-source-tape-pipe-cmp");
     }
-    if (pm) {
+    if (basic) {
     /* H: negative control -- the compare must be live.  Force a route target that is NOT this
        slice's own, rebuild the same pipe, and require the byte compare to FAIL.  On a host whose
        own target is the only row the pipe cannot be built at all, which is also a non-equal result
@@ -258,6 +312,8 @@ int main(int argc, char **argv) {
         rc2 = sp_image_pipe("plain.c", "plain.wrong.pipe", "w", 0, 0);
         sp_ck(rc2 != 0 || !sp_same("plain.ref", "plain.wrong.pipe"), "H wrong-target-pipe-not-equal");
         sp_tgt_override = keep;   /* restore this slice's own target (or the env override) */ }
+    }
+    if (reject) {
     /* F: a reject stops at e3 with the product's diagnostic; the next stage reports the empty pipe. */
     rc = sp_ref("-O0 -o", "bad.ref", "bad.c", &e_ref, &n_ref);
     rc2 = sp_image_pipe("bad.c", "bad.pipe", "b", &e_pipe, &n_pipe);
@@ -268,10 +324,11 @@ int main(int argc, char **argv) {
     free(e_ref); free(e_pipe);
     }
     /* G: no residue. */
-    {   char cmd[4600];
-        if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", sp_dir)) sp_die("cmd");
-        rc = sp_sh(cmd, 0, 0);
-        sp_ck(rc == 0 && access(sp_dir, F_OK) != 0, "G scratch-removed");
+    {
+        rc = cx_rmtree(sp_dir);
+        int removed=rc==0 && access(sp_dir,F_OK)!=0;
+        if(cleanup_assert)sp_ck(removed,"G scratch-removed");
+        else if(!removed)sp_die("scratch cleanup");
     }
     if (sp_count != want) { printf("FAIL\tassertion-count expected=%d got=%d part=%s\n", want, sp_count, part && part[0] ? part : "all"); sp_failed++; }
     printf("CHECK_STREAM_PIPE\tfailed=%d\n", sp_failed);

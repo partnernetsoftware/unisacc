@@ -813,6 +813,116 @@ static int dg_matches_globs(const char *globs, long gl, const char *path, long p
     return 0;
 }
 
+static int dg_is_prodgen_tool(const char *p, long pl) {
+    if (pl == 19 && tx_same(p, 19, "tools/cx-flatten.cx", 19)) return 1;
+    if (tx_prefix(p, pl, "tools/", 6) && !tx_prefix(p, pl, "tools/check-", 12) && pl >= 13 &&
+        tx_same(p + pl - 7, 7, "-gen.cx", 7)) return 1;
+    return 0;
+}
+
+static int dg_is_prodgen_input(const char *p, long pl) {
+    if (pl <= 0) return 0;
+    if (tx_prefix(p, pl, "include/", 8)) return 1;
+    if (tx_prefix(p, pl, "exec/facts/", 11) && !(pl == 21 && tx_same(p, 21, "exec/facts/derive.tsv", 21))) return 1;
+    if (pl == 26 && tx_same(p, 26, "exec/c/compiler-routes.tsv", 26)) return 1;
+    if (pl == 30 && tx_same(p, 30, "exec/pipeline/image-stages.tsv", 30)) return 1;
+    if (pl == 22 && tx_same(p, 22, "exec/pp/predefines.tsv", 22)) return 1;
+    if (tx_prefix(p, pl, "seed/", 5)) return 1;
+    if (pl == 21 && tx_same(p, 21, "build/std-surface.tsv", 21)) return 1;
+    if (dg_is_prodgen_tool(p, pl)) return 1;
+    return 0;
+}
+
+static int dg_genall_gate(const char *wt, const char *allz, long alln) {
+    char gp[1200], only_list[512], scmd[2048];
+    long pa = 0, gon = 0;
+    int hit = 0, tool_only = 1, blocked = 0;
+    char *gout = 0;
+    if (cx_fmt(gp, sizeof gp, "%s%stools/gen-all-check.cx", wt ? wt : "", wt ? "/" : "")) return 0;
+    if (sy_exists(gp) != 1 || dg_waived(wt, "gen-all")) return 0;
+    only_list[0] = 0;
+    while (allz && pa < alln) {
+        long pl = tx_len(allz + pa, alln - pa);
+        if (pl <= 0) break;
+        if (dg_is_prodgen_input(allz + pa, pl)) {
+            hit = 1;
+            if (dg_is_prodgen_tool(allz + pa, pl)) {
+                /* strip "tools/" (6) and ".cx" (3) */
+                long nl = pl - 9;
+                long cur = tx_len(only_list, sizeof only_list);
+                if (nl > 0 && cur + nl + 2 < (long)sizeof only_list) {
+                    if (cur) only_list[cur++] = ',';
+                    mm_copy(only_list + cur, sizeof only_list - (size_t)cur, allz + pa + 6, (size_t)nl);
+                    only_list[cur + nl] = 0;
+                } else {
+                    tool_only = 0;
+                }
+            } else {
+                tool_only = 0;
+            }
+        }
+        pa += pl + 1;
+    }
+    if (!hit) return 0;
+    /* Check the staged index tree (git write-tree + git archive) rather than the dirty worktree,
+       so unrelated unstaged edits by other sessions (e.g. cx/) never cause false blocks, while
+       recomputed-but-unstaged product tables are caught directly on the index snapshot.
+       Bounded to 25s via ./tools/bound (kills entire process group on timeout, zero orphans). */
+    if (tool_only && only_list[0]) {
+        if (cx_fmt(scmd, sizeof scmd,
+            "t=$(git write-tree) || exit 2; d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-genall.XXXXXX\") || exit 2; "
+            "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+            "if [ -x ./tools/bound ]; then ./tools/bound 25 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
+            "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; fi",
+            only_list, only_list)) return 0;
+    } else {
+        if (cx_fmt(scmd, sizeof scmd,
+            "t=$(git write-tree) || exit 2; d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-genall.XXXXXX\") || exit 2; "
+            "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+            "if [ -x ./tools/bound ]; then ./tools/bound 25 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
+            "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; fi")) return 0;
+    }
+    {
+        char *gv[] = {"sh", "-c", scmd, 0}; /* lint:allow R1-product precommit runs tools/gen-all-check.cx bounded on staged index tree */
+        cur_gate = "genall";
+        slurp_okrc = 2;
+        gout = slurp(gv, &gon);
+        slurp_okrc = 0;
+        cur_gate = 0;
+    }
+    if (plan_dir) {
+        if (gout) mm_free(gout);
+        return 0;
+    }
+    if (!gout || tx_find(gout, gon, "GEN_ALL_SUMMARY\t", 16) < 0) {
+        sy_eprintf("precommit: GEN_ALL_GATE_UNAVAILABLE (tools/gen-all-check.cx timed out or did not run; allowing commit)\n");
+        if (gout) mm_free(gout);
+        return 0;
+    }
+    if (tx_find(gout, gon, "\tdiff=0\terror=0\t", 16) < 0) {
+        long ga = 0;
+        while (ga < gon) {
+            long e = tx_chr(gout + ga, gon - ga, '\n'), l = e < 0 ? gon - ga : e;
+            if (tx_prefix(gout + ga, l, "GEN_CHECK\t", 10) &&
+                (tx_find(gout + ga, l, "\tDIFF\t", 6) >= 0 || tx_find(gout + ga, l, "\tERROR\t", 7) >= 0)) {
+                char line[400];
+                long cp = l < 399 ? l : 399;
+                mm_copy(line, sizeof line, gout + ga, (size_t)cp);
+                line[cp] = 0;
+                sy_eprintf("precommit: BLOCKED product-table-drift %s\n", line);
+                blocked++;
+            }
+            ga += l + 1;
+        }
+        if (!blocked) {
+            sy_eprintf("precommit: BLOCKED product-table-drift (run: sh ./unisacc.com tools/gen-all-check.cx -- --root .)\n");
+            blocked++;
+        }
+    }
+    mm_free(gout);
+    return blocked;
+}
+
 static int derive_gate(void) {
     const char *wt = sy_env("GIT_WORK_TREE");
     char dp[1200], tp[1200];
@@ -875,7 +985,11 @@ static int derive_gate(void) {
     }
     mm_free(db);
     if (adz) mm_free(adz);
-    if (nsel == 0) { mm_free(allz); return 0; }
+    if (nsel == 0) {
+        blocked += dg_genall_gate(wt, allz, alln);
+        mm_free(allz);
+        return blocked;
+    }
 
     only[0] = 0;
     for (int i = 0; i < nsel; i++) {
@@ -972,6 +1086,7 @@ static int derive_gate(void) {
         }
     }
     mm_free(dout);
+    blocked += dg_genall_gate(wt, allz, alln);
     mm_free(allz);
     return blocked;
 }
@@ -1239,7 +1354,7 @@ int main(int argc, char **argv) {
     { long fsn; char *fnames = gate_diff("facts", &fsn);
       if (!fnames) { sy_eprintf("precommit: git diff --cached (facts) failed\n"); return 1; }
       if (fsn > 0) {
-          char *frows; cur_gate = "facts"; frows = slurp(fgv, &rn); cur_gate = 0;
+          char *frows; cur_gate = "facts"; slurp_okrc = 1; frows = slurp(fgv, &rn); slurp_okrc = 0; cur_gate = 0;
           if (!frows) { sy_eprintf("precommit: tools/facts-gen.cx did not run\n"); return 1; }
           if (tx_prefix(frows, rn, "DIFF", 4)) {
               sy_eprintf("precommit: facts-gen --check pp-autoinc-gen DIFF; run tools/facts-gen.cx -- --write ROOT pp-autoinc-gen\n");

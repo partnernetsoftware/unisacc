@@ -1,0 +1,45 @@
+/* Batch: stream-pipe-parts. Layer: interfaces. Exercise the real POSIX cell
+ * dispatcher and compare its PASS label multiset with both legacy parts. */
+#pragma unisa use cxlib.netpack
+
+typedef struct { char labels[24][128]; int n; } SpLabels;
+
+static int capture(char **av,char **env,SpLabels *bag){
+    np_result r={0}; char why[256];int ok=!np_run(av,".",env,53,&r,why,sizeof why)&&!r.rc&&!r.residue;
+    if(ok){
+        char *p=r.out;
+        while(p&&*p){
+            char *end=strchr(p,'\n'); if(end)*end=0;
+            if(!strncmp(p,"PASS\t",5)){
+                if(bag->n>=24||cx_fmt(bag->labels[bag->n],128,"%s",p+5)){ok=0;break;}
+                bag->n++;
+            }
+            p=end?end+1:0;
+        }
+    }
+    if(!ok)fprintf(stderr,"stream-pipe-parts rc=%d %s %.300s\n",r.rc,why,r.err?r.err:"");
+    np_free(&r);return ok;
+}
+static int order(const void *a,const void *b){return strcmp(a,b);}
+static int same(SpLabels *a,SpLabels *b){
+    qsort(a->labels,a->n,128,order);qsort(b->labels,b->n,128,order);
+    return a->n==b->n&&!memcmp(a->labels,b->labels,128*a->n);
+}
+int main(void){
+    char *legacy[]={"sh","./unisacc.com","tests/check-stream-pipe.cx",0};
+    char *mainenv[]={"SP_PART=main",0},*eenv[]={"SP_PART=e",0};
+    char *parts[]={"sh","./unisacc.com","tests/candidate-qualify.cx","--","stream-parts",0};
+    SpLabels old={0},split={0};
+    int ran=capture(legacy,mainenv,&old)&&capture(legacy,eenv,&old)&&capture(parts,0,&split);
+    int equal=ran&&old.n==13&&same(&old,&split);
+    printf("%s\tlegacy-and-cell-assertion-multisets old=%d split=%d\n",equal?"PASS":"FAIL",old.n,split.n);
+    int missing=0,duplicate=0;
+    if(equal){
+        split.n--;missing=!same(&old,&split);
+        memcpy(split.labels[split.n],split.labels[0],128);split.n++;
+        duplicate=!same(&old,&split);
+    }
+    printf("%s\tmissing-label\n%s\treplaced-by-duplicate\n",missing?"PASS":"FAIL",duplicate?"PASS":"FAIL");
+    int failed=!equal+!missing+!duplicate;
+    printf("CHECK_STREAM_PIPE_PARTS\tfailed=%d\n",failed);return failed!=0;
+}
