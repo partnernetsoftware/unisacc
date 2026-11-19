@@ -204,24 +204,53 @@ if (op == 15) {
   }
   return 0;
 }
-// Straight-alpha source-over, with round-to-nearest and transparent no-op.
-if (op == 16) {
-  if (a < 0 || a >= pixels || b < 0 || b > 4294967295) { return 0 - 1; }
-  let blendAlpha = b / 16777216;
-  if (blendAlpha == 0) { return 0; }
-  let blendAt = a * 4;
-  let blendSource = blendAlpha * 255;
-  let blendDest = ux_u8(blendAt + 3) * (255 - blendAlpha);
-  let blendTotal = blendSource + blendDest;
-  let blendChannel = 0;
-  while (blendChannel < 3) {
-    let blendColor = ((b % 256) * blendSource + ux_u8(blendAt + blendChannel) * blendDest
-      + blendTotal / 2) / blendTotal;
-    let blendWrite = ux_u8_put(blendAt + blendChannel, blendColor);
-    b = b / 256;
-    blendChannel = blendChannel + 1;
+// Straight-alpha source-over. Particle stamps add a clipped radial falloff.
+// Stamp a: biased x/y in 13 bits each, followed by radius (1 through 16).
+if (op == 16 || op == 17) {
+  if (a < 0 || b < 0 || b > 4294967295 || pixels == 0) { return 0 - 1; }
+  let blendX = 0;
+  let blendY = 0;
+  let blendRadius = 0;
+  if (op == 16) {
+    if (a >= pixels) { return 0 - 1; }
+    blendX = a % width;
+    blendY = a / width;
+  } else {
+    blendX = a % 8192 - 4096;
+    blendY = (a / 8192) % 8192 - 4096;
+    blendRadius = a / 67108864;
+    if (blendRadius < 1 || blendRadius > 16) { return 0 - 1; }
   }
-  let blendCoverage = ux_u8_put(blendAt + 3, (blendTotal + 127) / 255);
+  let blendEdge = blendRadius * blendRadius + 1;
+  let blendDy = 0 - blendRadius;
+  while (blendDy <= blendRadius) {
+    let blendDx = 0 - blendRadius;
+    while (blendDx <= blendRadius) {
+      let blendDistance = blendDx * blendDx + blendDy * blendDy;
+      if (blendDistance < blendEdge && blendX + blendDx >= 0 && blendX + blendDx < width &&
+          blendY + blendDy >= 0 && blendY + blendDy < height) {
+        let blendAlpha = (b / 16777216) * (blendEdge - blendDistance) / blendEdge;
+        if (blendAlpha > 0) {
+          let blendAt = ((blendY + blendDy) * width + blendX + blendDx) * 4;
+          let blendSource = blendAlpha * 255;
+          let blendDest = ux_u8(blendAt + 3) * (255 - blendAlpha);
+          let blendTotal = blendSource + blendDest;
+          let blendChannel = 0;
+          let blendBytes = b;
+          while (blendChannel < 3) {
+            let blendColor = ((blendBytes % 256) * blendSource + ux_u8(blendAt + blendChannel) * blendDest
+              + blendTotal / 2) / blendTotal;
+            let blendWrite = ux_u8_put(blendAt + blendChannel, blendColor);
+            blendBytes = blendBytes / 256;
+            blendChannel = blendChannel + 1;
+          }
+          let blendCoverage = ux_u8_put(blendAt + 3, (blendTotal + 127) / 255);
+        }
+      }
+      blendDx = blendDx + 1;
+    }
+    blendDy = blendDy + 1;
+  }
   return 0;
 }
 return 0 - 1;
