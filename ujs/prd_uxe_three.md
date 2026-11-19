@@ -211,6 +211,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(ccapi): D1 出口使用 `d1-scene-probe.cx` 在私有页启动两个 Wasm 模块。产品建立 Scene 及 Object3D 父子树，同一基座完成世界矩阵更新和投影。独立 CX 按既有 D1 相机方程计算开场和三个转向代表状态，逐项读回三维相机空间坐标和二维像素坐标。正式 D1 场景图切换排在 M4 GPU 路径之后。
 
+修订(cdx2): M3b 的 `g_geometry.cx` 对 23 类网格生成器及 BufferGeometryUtils 各追加 15 个值。编译产物将生成缓冲转为通用网格，再读回克隆数据、组、平移后包围盒与源数据。独立 CX 从顶点金值算预期，本地 r160 用相同原顶点复算。类型专属参数 JSON、完整相机与路径序列化等仍列部分。
+
 修订(cdx2): M3 的基础口径是 A 栏 43 项和 C 栏 3 项都有真实入口与独立门。23 个几何类包括 21 个 r160 核心几何类，以及 ConvexGeometry 和 TextGeometry 两个扩展。BufferGeometryUtils 是另计的扩展工具。各构造器的顶点、法线、UV 和适用的索引由 CX 用独立金值对照浏览器读回数据。ConvexGeometry 的输出按坐标和法线规整顺序后比对。测试页在 `ujs/practice/uxe/test/`。
 
 修订(cdx2): 严格覆盖仍标为部分。CubeCamera 缺渲染目标更新，ArrayCamera 缺渲染器多视口接入，几何类还缺若干材质分组、序列化与更多输入场景。ShapeUtils 支持单个凹轮廓和一个内孔，多孔与通用归并待补。ExtrudeGeometry 支持无倒角简单轮廓，Path 支持线段和贝塞尔段。TextGeometry 消费已解析字形轮廓，字体加载属于 M9。ConvexGeometry 覆盖有界一般位置点云，共面多边形面待补。BufferGeometryUtils 覆盖同布局网格合并。

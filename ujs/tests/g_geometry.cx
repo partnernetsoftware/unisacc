@@ -39,7 +39,36 @@ static int geometry_run(char **args,int seconds) {
     return rc;
 }
 
-static int geometry_read(const char *dir,const double *gold,int count,int index_from) {
+static int geometry_values(const char *out,size_t bytes,const char *marker,const double *gold,
+                           int count,int index_from) {
+    long at=out?tx_find(out,bytes,marker,tx_len(marker,96)):-1;
+    if(at<0) {
+        if(out) printf("G_GEOMETRY document=%s\n",out);
+        return 1;
+    }
+    char *next=(char *)out+at+tx_len(marker,96);
+    int mismatches=0;
+    for(int i=0;i<2*count;i++) {
+        char *end=0;
+        double value=tx_strtod(next,&end),difference=value-gold[i%count];
+        double tolerance=i%count<index_from?1e-6:0;
+        if(end==next || *end!=(i==2*count-1?']':',')) {
+            printf("G_GEOMETRY malformed side=%d case=%d\n",i/count,i%count);
+            return 1;
+        }
+        if(!(difference>=-tolerance && difference<=tolerance)) {
+            if(mismatches<12) printf("G_GEOMETRY side=%d case=%d actual=%.17g gold=%.17g\n",
+                i/count,i%count,value,gold[i%count]);
+            mismatches++;
+        }
+        next=end+1;
+    }
+    if(mismatches>12) printf("G_GEOMETRY mismatches=%d\n",mismatches);
+    return mismatches!=0;
+}
+
+static int geometry_read(const char *dir,const double *gold,int count,int index_from,
+                         const double *generic,int generic_count) {
     char profile[320],url[380];
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     tx_snprintf(url,sizeof url,"file://%s/probe.html",dir);
@@ -49,67 +78,140 @@ static int geometry_read(const char *dir,const double *gold,int count,int index_
     char *out=0;
     size_t bytes=0;
     int rc=cx_runv_timeout(args,14,&out,&bytes);
-    const char marker[]="<pre id=\"r160\">[";
-    long at=!rc && out?tx_find(out,bytes,marker,sizeof marker-1):-1;
-    int failed=0;
-    if(at<0) {
-        if(out) printf("G_GEOMETRY document=%s\n",out);
-        failed=1;
-    } else {
-        char *next=out+at+sizeof marker-1;
-        int mismatches=0;
-        for(int i=0;i<2*count;i++) {
-            char *end=0;
-            double value=tx_strtod(next,&end),difference=value-gold[i%count];
-            double tolerance=i%count<index_from?1e-6:0;
-            if(end==next || *end!=(i==2*count-1?']':',')) {
-                printf("G_GEOMETRY malformed side=%d case=%d\n",i/count,i%count);
-                failed=1;
-                break;
-            }
-            if(!(difference>=-tolerance && difference<=tolerance)) {
-                if(mismatches<12) printf("G_GEOMETRY side=%d case=%d actual=%.17g gold=%.17g\n",
-                    i/count,i%count,value,gold[i%count]);
-                mismatches++;
-                failed=1;
-            }
-            next=end+1;
-        }
-        if(mismatches>12) printf("G_GEOMETRY mismatches=%d\n",mismatches);
-    }
+    int failed=rc || geometry_values(out,bytes,"<pre id=\"r160\">[",gold,count,index_from);
+    if(!failed) failed=geometry_values(out,bytes,"<pre id=\"generic\">[",generic,generic_count,generic_count);
     mm_free(out);
     return failed;
 }
 
+static const char geometry_probe_after[]=
+    "\n}\nlet raw=build_raw(0);if(raw<0){return raw;}"
+    "let g=BufferGeometry_init(262144,262400,3,262560,1);"
+    "let adapted=GeometryBuffers_asGeometry(raw,g,263000,65536,7,0,0);"
+    "if(adapted<0){return adapted;}"
+    "let source_view=BufferGeometry_getAttribute(g,1);"
+    "let count=ux_u32(source_view+BufferAttribute.count);"
+    "let idx=BufferGeometry_getIndex(g);let index_count=0;"
+    "if(idx>=0){index_count=ux_u32(idx+BufferAttribute.count);}"
+    "let draw=count;if(index_count>0){draw=index_count;}"
+    "let group=BufferGeometry_addGroup(g,0,draw,11);"
+    "let clone=BufferGeometry_init(400000,400128,3,400256,1);"
+    "let copied=BufferGeometry_clone(clone,g,411000,65536);"
+    "if(copied<0){return copied;}"
+    "let translated=BufferGeometry_translate(clone,2.0,0.0-3.0,1.0,400512.0,1.0,2.0,3.0);"
+    "if(translated<0){return translated;}"
+    "let bounds=BufferGeometry_computeBoundingBox(clone,1,400448);"
+    "if(bounds<0){return bounds;}"
+    "let c0=ux_f64_put(520000,0.0+count);let c1=ux_f64_put(520008,0.0+index_count);"
+    "let gr=ux_f64_put(520016,0.0+ux_u32(400256));"
+    "let gs=ux_f64_put(520024,0.0+ux_u32(400264));"
+    "let gn=ux_f64_put(520032,0.0+ux_u32(400268));"
+    "let gm=ux_f64_put(520040,0.0+ux_u32(400272));"
+    "let p=ux_u32(source_view+BufferAttribute.data);let axis=0;"
+    "while(axis<3){"
+    "let first=ux_f64_put(520048+axis*8,ux_f32(p+axis*4));"
+    "let min=ux_f64_put(520072+axis*8,ux_f64(400448+axis*8));"
+    "let max=ux_f64_put(520096+axis*8,ux_f64(400472+axis*8));axis=axis+1;}"
+    "return raw;";
+
+static const char geometry_fixture_after[]=
+    "\n<pre id=\"generic\">pending</pre><script type=\"module\">\n"
+    "import {BufferAttribute,BufferGeometry,REVISION} from './three.module.js';\n"
+    "const result=document.querySelector('#generic');\n"
+    "try {\n"
+    "if(REVISION!=='160')throw new Error('three.js revision mismatch');\n"
+    "const data=JSON.parse(document.querySelector('#r160').textContent);\n"
+    "const reference=data.slice(data.length/2),[count,indexCount]=reference;\n"
+    "const position=new Float32Array(count*3);\n"
+    "for(let i=0;i<count;i++)for(let axis=0;axis<3;axis++)position[3*i+axis]=reference[2+8*i+axis];\n"
+    "const original=new BufferGeometry();\n"
+    "original.setAttribute('position',new BufferAttribute(position,3));\n"
+    "original.addGroup(0,indexCount||count,11);\n"
+    "const copy=original.clone().translate(2,-3,1);copy.computeBoundingBox();\n"
+    "const group=copy.groups[0];\n"
+    "const expected=[count,indexCount,copy.groups.length,group.start,group.count,group.materialIndex,\n"
+    "...position.slice(0,3),...copy.boundingBox.min.toArray(),...copy.boundingBox.max.toArray()];\n"
+    "const request=new XMLHttpRequest();request.open('GET','probe.wasm',false);\n"
+    "request.overrideMimeType('text/plain; charset=x-user-defined');request.send();\n"
+    "const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);\n"
+    "const {exports}=new WebAssembly.Instance(new WebAssembly.Module(bytes),{});\n"
+    "if(exports.uxe_geometry_probe()!==0n)throw new Error('generated mesh lifecycle rejected');\n"
+    "const actual=new Float64Array(exports.memory.buffer,2097152+520000,expected.length);\n"
+    "result.textContent=JSON.stringify([...actual,...expected]);\n"
+    "}catch(error){result.textContent=String(error);}\n"
+    "</script>\n";
+
+static int geometry_lifecycle_fixture(const char *dir,const char *source) {
+    char path[320],page[24000];
+    unsigned char *raw=0;
+    int64_t size=0;
+    if(sy_read_file(source,&raw,&size,18000)) return 1;
+    int n=tx_snprintf(page,sizeof page,"%s%s",raw,geometry_fixture_after);
+    mm_free(raw);
+    tx_snprintf(path,sizeof path,"%s/probe.html",dir);
+    return n<0 || n>=(int)sizeof page || sy_write_file(path,page,n,0600);
+}
+
+static void geometry_lifecycle_gold(const double *gold,double *out) {
+    int count=(int)gold[0],indices=(int)gold[1];
+    double offsets[]={2,-3,1};
+    out[0]=count; out[1]=indices; out[2]=1; out[3]=0; out[4]=indices?indices:count; out[5]=11;
+    for(int axis=0;axis<3;axis++) {
+        out[6+axis]=(float)gold[2+axis];
+        out[9+axis]=out[12+axis]=(float)(out[6+axis]+offsets[axis]);
+        for(int i=1;i<count;i++) {
+            double value=(float)((double)(float)gold[2+i*8+axis]+offsets[axis]);
+            if(value<out[9+axis]) out[9+axis]=value;
+            if(value>out[12+axis]) out[12+axis]=value;
+        }
+    }
+}
+
 int g_geometry_check_with(const char *name,const char *fixture,const char *const *modules,
         const char *source,const double *gold,int count,int index_from,const char *add_ons) {
-    char dir[256],header[320],body[320],wasm[320],fixture_path[320],module_paths[16][256];
+    char dir[256],header[320],body[320],wasm[320],fixture_path[320],module_paths[32][256],program[22000];
+    if(count<10 || gold[0]<1 || gold[0]>(count-2)/8) return 2;
     if(sy_mkdtemp("/tmp","ujs-geometry-",dir,sizeof dir)) return 2;
     tx_snprintf(header,sizeof header,"%s/abi.ujs",dir);
     tx_snprintf(body,sizeof body,"%s/probe.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
     tx_snprintf(fixture_path,sizeof fixture_path,"ujs/practice/uxe/test/%s-r160.html",fixture);
-    char *compile[24]={"./ujs/ujs2wasm.com",header};
+    char *compile[40]={"./ujs/ujs2wasm.com",header};
     int n=2;
     for(int i=0;modules[i];i++) {
         if(i==16) return 2;
         tx_snprintf(module_paths[i],sizeof module_paths[i],"ujs/practice/uxe/base/%s.ujs",modules[i]);
         compile[n++]=module_paths[i];
     }
+    const char *lifecycle[]={"f64-math","views","matrix3","matrix4","object-layouts","datautils",
+        "bufferattribute","buffergeometry","geometry-buffer-adapter","geometry-lifecycle","geometry-transform",0};
+    for(int i=0;lifecycle[i];i++) {
+        int present=0;
+        for(int j=0;modules[j];j++) if(tx_eqz(modules[j],lifecycle[i])) present=1;
+        if(!present) {
+            int slot=n-2;
+            tx_snprintf(module_paths[slot],sizeof module_paths[slot],
+                "ujs/practice/uxe/base/%s.ujs",lifecycle[i]);
+            compile[n++]=module_paths[slot];
+        }
+    }
     compile[n++]=body;
     compile[n++]="-o";
     compile[n++]=wasm;
     compile[n]=0;
     const char abi[]="export uxe_geometry_probe() i64 version 1;";
-    int ready=!sy_write_file(header,abi,sizeof abi-1,0600) &&
-        !sy_write_file(body,source,tx_len(source,16384),0600) &&
-        !geometry_run(compile,10) && !geometry_copy(dir,"probe.html",fixture_path) &&
+    int size=tx_snprintf(program,sizeof program,"function build_raw(seed) {\n%s%s",source,geometry_probe_after);
+    double generic[15];
+    geometry_lifecycle_gold(gold,generic);
+    int ready=size>0 && size<(int)sizeof program && !sy_write_file(header,abi,sizeof abi-1,0600) &&
+        !sy_write_file(body,program,size,0600) &&
+        !geometry_run(compile,10) && !geometry_lifecycle_fixture(dir,fixture_path) &&
         !geometry_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js") &&
         !geometry_copy_addons(dir,add_ons);
-    int failed=!ready || geometry_read(dir,gold,count,index_from);
+    int failed=!ready || geometry_read(dir,gold,count,index_from,generic,sizeof generic/sizeof generic[0]);
     char *clean[]={"rm","-rf","--",dir,0};
     if(geometry_run(clean,5)) return 2;
-    printf("G_GEOMETRY %s cases=%d failed=%d\n",name,count,failed);
+    printf("G_GEOMETRY %s cases=%d lifecycle=%d failed=%d\n",name,count,(int)(sizeof generic/sizeof generic[0]),failed);
     return ready?failed:2;
 }
 
