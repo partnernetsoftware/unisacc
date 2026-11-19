@@ -36,6 +36,8 @@
  *  14-root-record  build.json product_digest and bytes match the APE (else root-record-digest-mismatch); the
  *                  commit equals the release/candidate.tsv row of the APE's --version (else
  *                  root-record-commit-mismatch); no row, or sources_sha256: WARN root-record-stale-fields, PASS.
+ *  15-gen-all      tools/gen-all-check.cx -- --root REPO: GEN_ALL_SUMMARY diff=0 error=0 (rc 0); any product
+ *                  table generator DIFF or ERROR blocks the chain with its --write fix.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -160,6 +162,20 @@ static int j_slot(const char *o, long n, int rc, char *ev, int cap) {
     line_with(o, n, "CHAIN_READY_VERSION_SLOT", l, sizeof l);
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "REFUSE CHAIN_READY_VERSION_SLOT no verdict line"); return 0;
 }
+static int j_genall(const char *o, long n, int rc, char *ev, int cap) {
+    char l[200];
+    line_with(o, n, "GEN_ALL_SUMMARY\t", l, sizeof l);
+    if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "diff=0") && has(l, (long)tx_len(l, 200), "error=0")) {
+        put_ev(ev, cap, l); return 1;
+    }
+    {
+        char d[200];
+        line_with(o, n, "\tDIFF\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tERROR\t", d, sizeof d);
+        cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %s", rc, l[0] ? l : "no GEN_ALL_SUMMARY", d[0] ? d : "none");
+    }
+    return 0;
+}
 /* one P1 child output: 1 when the file was planned or rejected with an old message, 0 on a new rejection */
 static int j_p1file(const char *o, long n) {
     int i;
@@ -178,6 +194,7 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "affected")) return j_affected(o, n, rc, ev, cap);
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
     if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "genall")) return j_genall(o, n, rc, ev, cap);
     if (tx_eqz(kind, "p1file")) { put_ev(ev, cap, "p1file"); return j_p1file(o, n); }
     put_ev(ev, cap, "unknown judge kind"); return -1;
 }
@@ -484,13 +501,15 @@ int main(int argc, char **argv) {
     static char *g_chain[] = {"./tools/bound", "80", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, 0};
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
-    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot};
-    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot"};
-    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight", "slot"};
+    static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
+    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot, g_genall};
+    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot", "15-gen-all"};
+    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight", "slot", "genall"};
     g_status[4] = (char *)repo; g_branch[4] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain[6] = outd; g_chain[7] = cached;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
-    for (k = 0; k < 9; k++) {
+    g_genall[7] = (char *)repo;
+    for (k = 0; k < 10; k++) {
         int c, i;
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev"))) continue;
         if (k == 6 && !have_tmp) continue;

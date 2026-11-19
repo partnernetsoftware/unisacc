@@ -1,0 +1,540 @@
+/* tools/gen-all-check.cx -- unified gate for all product-table generators (--check).
+ *
+ *   sh ./unisacc.com tools/gen-all-check.cx -- [--root DIR] [--jobs N] [--only NAME] [--list]
+ *   sh ./unisacc.com tools/gen-all-check.cx -- --bg DIR [--root DIR] [--jobs N] [--only NAME]
+ *   sh ./unisacc.com tools/gen-all-check.cx -- --poll DIR
+ *
+ * Discovers product-table generators from:
+ *   (1) Core product generators (facts-gen, win-argv-gen, cx-flatten, arity-gen, libc-decl-scan)
+ *   (2) Auto-scan of ROOT/tools/*-gen.cx (excluding check-*-gen.cx, derive.tsv-owned metadata
+ *       generators, and declared non-product/test-corpus generators); any remaining *-gen.cx
+ *       without --check or needing special arguments is listed via GEN_UNCOVERED.
+ * Runs all selected generators in parallel (default 8 lanes, each bounded 45s) on frozen ROOT.
+ * Output:
+ *   GEN_CHECK<TAB>name<TAB>PASS|DIFF|ERROR<TAB>ms<TAB>detail
+ *   GEN_UNCOVERED<TAB>tool<TAB>reason
+ *   GEN_ALL_SUMMARY<TAB>total=N<TAB>pass=P<TAB>diff=D<TAB>error=E<TAB>uncovered=U<TAB>ms=T
+ * Exit: 0 when diff==0 && error==0; 1 on DIFF; 2 on ERROR or usage; 3 on --poll RUNNING.
+ * Check: tools/check-gen-all-check.cx. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.poll
+#pragma unisa use sys.env
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define GAC_MAX 128
+#define GAC_PW 4096
+#define GAC_MAX_DERIVE 64
+
+enum { GAC_NOARG = 0, GAC_ROOT = 1 };
+
+typedef struct {
+    char name[64];
+    char tool[128];
+    char write_cmd[256];
+    int mode;
+    int pid, ofd, rc, state;
+    char *out;
+    long n, cap, t0, ms;
+} GacItem;
+
+typedef struct {
+    char tool[128];
+    char reason[64];
+} GacUncov;
+
+static GacItem gac_items[GAC_MAX];
+static int gac_n;
+static GacUncov gac_uncov[GAC_MAX];
+static int gac_nu;
+static char gac_derive_tools[GAC_MAX_DERIVE][128];
+static int gac_nd;
+
+static int gac_ends(const char *s, const char *suf) {
+    long sl = (long)tx_len(s, 4096), fl = (long)tx_len(suf, 256);
+    return sl >= fl && mm_same(s + sl - fl, suf, (size_t)fl);
+}
+
+static int gac_starts(const char *s, const char *pre) {
+    long pl = (long)tx_len(pre, 256), sl = (long)tx_len(s, 4096);
+    return sl >= pl && mm_same(s, pre, (size_t)pl);
+}
+
+static int gac_has_str(const char *h, long n, const char *w) {
+    long wl = (long)tx_len(w, 256);
+    return wl > 0 && tx_find(h, n, w, wl) >= 0;
+}
+
+static int gac_in_items(const char *tool) {
+    for (int i = 0; i < gac_n; i++) if (tx_eqz(gac_items[i].tool, tool)) return 1;
+    return 0;
+}
+
+static int gac_in_derive(const char *tool) {
+    for (int i = 0; i < gac_nd; i++) if (tx_eqz(gac_derive_tools[i], tool)) return 1;
+    return 0;
+}
+
+static void gac_add_item(const char *name, const char *tool, int mode, const char *wcmd) {
+    if (gac_n >= GAC_MAX || gac_in_items(tool)) return;
+    cx_fmt(gac_items[gac_n].name, sizeof gac_items[gac_n].name, "%s", name);
+    cx_fmt(gac_items[gac_n].tool, sizeof gac_items[gac_n].tool, "%s", tool);
+    cx_fmt(gac_items[gac_n].write_cmd, sizeof gac_items[gac_n].write_cmd, "%s", wcmd);
+    gac_items[gac_n].mode = mode;
+    gac_items[gac_n].pid = 0;
+    gac_items[gac_n].ofd = -1;
+    gac_items[gac_n].rc = 0;
+    gac_items[gac_n].state = 0;
+    gac_items[gac_n].out = 0;
+    gac_items[gac_n].n = 0;
+    gac_items[gac_n].cap = 0;
+    gac_items[gac_n].t0 = 0;
+    gac_items[gac_n].ms = 0;
+    gac_n++;
+}
+
+static void gac_add_uncov(const char *tool, const char *reason) {
+    if (gac_nu >= GAC_MAX) return;
+    cx_fmt(gac_uncov[gac_nu].tool, sizeof gac_uncov[gac_nu].tool, "%s", tool);
+    cx_fmt(gac_uncov[gac_nu].reason, sizeof gac_uncov[gac_nu].reason, "%s", reason);
+    gac_nu++;
+}
+
+static void gac_load_derive(const char *root) {
+    char p[GAC_PW];
+    size_t n = 0;
+    char *b;
+    long at = 0;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/derive.tsv", root)) return;
+    b = (char *)cx_read(p, &n);
+    if (!b) return;
+    while (at < (long)n && gac_nd < GAC_MAX_DERIVE) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), l = e < 0 ? (long)n - at : e;
+        long o1, l1;
+        if (l > 0 && b[at] != '#' && !tx_field(b + at, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < 128) {
+            mm_copy(gac_derive_tools[gac_nd], sizeof gac_derive_tools[gac_nd], b + at + o1, (size_t)l1);
+            gac_derive_tools[gac_nd][l1] = 0;
+            gac_nd++;
+        }
+        at += l + 1;
+    }
+    free(b);
+}
+
+static int gac_is_nonproduct(const char *fn) {
+    static const char *skip[] = {
+        "chain-facts-gen.cx",
+        "chain-phase-need-gen.cx",
+        "decide-gen.cx",
+        "exitclass-gen.cx",
+        "flow-gen.cx",
+        "g2-budget-gen.cx",
+        "limits-gen.cx",
+        "manifest-gen.cx",
+        "matrix-flip-gen.cx",
+        "opt-corpus-gen.cx",
+        "reg-gen.cx",
+        "slice-migration-gen.cx",
+        "state-gen.cx",
+        "surface-doc-gen.cx",
+        "units-gen.cx",
+        0
+    };
+    if (gac_starts(fn, "check-")) return 1;
+    if (gac_ends(fn, "-cases-gen.cx")) return 1;
+    if (gac_starts(fn, "stream-e3-")) return 1;
+    for (int i = 0; skip[i]; i++) if (tx_eqz(fn, skip[i])) return 1;
+    return 0;
+}
+
+static void gac_sort_items(void) {
+    for (int i = 1; i < gac_n; i++) {
+        GacItem k = gac_items[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(gac_items[j].name, k.name) > 0) {
+            gac_items[j + 1] = gac_items[j];
+            j--;
+        }
+        gac_items[j + 1] = k;
+    }
+}
+
+static int gac_in_only(const char *only, const char *name) {
+    long nl;
+    const char *p;
+    if (!only || !*only) return 1;
+    nl = (long)tx_len(name, 128);
+    p = only;
+    while (*p) {
+        const char *q = p;
+        while (*q && *q != ',') q++;
+        if (q - p == nl && mm_same(p, name, (size_t)nl)) return 1;
+        if (!*q) break;
+        p = q + 1;
+    }
+    return 0;
+}
+
+static void gac_discover(const char *root, const char *only) {
+    char p[GAC_PW], tdir[GAC_PW];
+    sy_dir_t d;
+    int next;
+
+    gac_load_derive(root);
+
+    /* (1) Core product generators (explicitly registered with exact mode and write fix) */
+    {
+        static const char *core_nm[] = {"facts-gen", "win-argv-gen", "cx-flatten", "arity-gen", "libc-decl-scan", 0};
+        static const char *core_tl[] = {"tools/facts-gen.cx", "tools/win-argv-gen.cx", "tools/cx-flatten.cx", "tools/arity-gen.cx", "tools/libc-decl-scan.cx", 0};
+        static const int core_md[] = {GAC_ROOT, GAC_ROOT, GAC_ROOT, GAC_ROOT, GAC_NOARG};
+        static const char *core_wr[] = {
+            "sh ./unisacc.com tools/facts-gen.cx -- --write .",
+            "sh ./unisacc.com tools/win-argv-gen.cx -- --write .",
+            "sh ./unisacc.com tools/cx-flatten.cx -- --write .",
+            "sh ./unisacc.com tools/arity-gen.cx -- --write .",
+            "sh ./unisacc.com tools/libc-decl-scan.cx -- --write"
+        };
+        for (int i = 0; core_nm[i]; i++) {
+            if (!gac_in_only(only, core_nm[i])) continue;
+            if (!cx_fmt(p, sizeof p, "%s/%s", root, core_tl[i]) && sy_exists(p) == 1)
+                gac_add_item(core_nm[i], core_tl[i], core_md[i], core_wr[i]);
+        }
+    }
+
+    /* (2) Auto-scan ROOT/tools/*-gen.cx */
+    if (cx_fmt(tdir, sizeof tdir, "%s/tools", root)) return;
+    if (sy_dir_open(&d, tdir)) return;
+    while ((next = sy_dir_next(&d)) == 1) {
+        char tool[128], nm[64], wcmd[256];
+        size_t n = 0;
+        char *src;
+        if (!gac_ends(d.name, "-gen.cx")) continue;
+        if (gac_is_nonproduct(d.name)) continue;
+        if (cx_fmt(tool, sizeof tool, "tools/%s", d.name)) continue;
+        if (gac_in_items(tool) || gac_in_derive(tool)) continue;
+        if (tx_eqz(d.name, "ucn-pp-gen.cx")) {
+            if (!only) gac_add_uncov(tool, "needs-pristine-root;expires=0.0.86");
+            continue;
+        }
+        if (tx_eqz(d.name, "rt-shared-gen.cx")) {
+            if (!only) gac_add_uncov(tool, "known-gap:_unisa_lbin-not-in-rt-shared.tsv;expires=0.0.85");
+            continue;
+        }
+        {
+            long dl = (long)tx_len(d.name, 128);
+            long nl = dl - 3; /* strip .cx */
+            if (nl <= 0 || nl >= 64) continue;
+            mm_copy(nm, sizeof nm, d.name, (size_t)nl);
+            nm[nl] = 0;
+        }
+        if (!gac_in_only(only, nm)) continue;
+        if (cx_fmt(p, sizeof p, "%s/%s", root, tool)) continue;
+        src = (char *)cx_read(p, &n);
+        if (!src) { gac_add_uncov(tool, "unreadable"); continue; }
+        if (!gac_has_str(src, (long)n, "--check")) {
+            free(src);
+            gac_add_uncov(tool, "no-check-flag");
+            continue;
+        }
+        {
+            int needs_root = gac_has_str(src, (long)n, "--check ROOT")
+                || gac_has_str(src, (long)n, "--check|--write ROOT")
+                || gac_has_str(src, (long)n, "--write|--check ROOT");
+            int has_write = gac_has_str(src, (long)n, "--write");
+            free(src);
+            if (has_write) {
+                if (needs_root) cx_fmt(wcmd, sizeof wcmd, "sh ./unisacc.com %s -- --write .", tool);
+                else cx_fmt(wcmd, sizeof wcmd, "sh ./unisacc.com %s -- --write", tool);
+            } else {
+                cx_fmt(wcmd, sizeof wcmd, "manual-inspect %s", tool);
+            }
+            gac_add_item(nm, tool, needs_root ? GAC_ROOT : GAC_NOARG, wcmd);
+        }
+    }
+    sy_dir_close(&d);
+    gac_sort_items();
+}
+
+static int gac_start(GacItem *it, const char *root, const char *uc_abs, const char *bound_abs) {
+    char cmd[GAC_PW * 2];
+    int pfd[2];
+    int pid;
+    if (it->mode == GAC_ROOT) {
+        if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && '%s' 45 sh '%s' '%s' -- --check .",
+            root, bound_abs, uc_abs, it->tool)) return -1;
+    } else {
+        if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && '%s' 45 sh '%s' '%s' -- --check",
+            root, bound_abs, uc_abs, it->tool)) return -1;
+    }
+    if (pipe(pfd) != 0) return -1;
+    pid = fork();
+    if (pid < 0) { close(pfd[0]); close(pfd[1]); return -1; }
+    if (pid == 0) {
+        char *av[4];
+        close(pfd[0]);
+        dup2(pfd[1], 1);
+        dup2(pfd[1], 2);
+        close(pfd[1]);
+        av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+        execvp("sh", av);
+        _exit(127);
+    }
+    close(pfd[1]);
+    it->pid = pid;
+    it->ofd = pfd[0];
+    it->t0 = sy_now_ms();
+    it->state = 1;
+    it->cap = 4096;
+    it->out = (char *)mm_alloc((size_t)it->cap);
+    it->n = 0;
+    if (it->out) it->out[0] = 0;
+    return 0;
+}
+
+static void gac_drain_fd(GacItem *it) {
+    char buf[2048];
+    long r = read(it->ofd, buf, sizeof buf);
+    if (r > 0) {
+        if (it->out && it->n + r + 1 > it->cap && it->cap < 65536) {
+            long nc = it->cap * 2;
+            while (nc < it->n + r + 1 && nc < 65536) nc *= 2;
+            char *nb = (char *)mm_alloc((size_t)nc);
+            if (nb) {
+                mm_copy(nb, (size_t)nc, it->out, (size_t)it->n);
+                mm_free(it->out);
+                it->out = nb;
+                it->cap = nc;
+            }
+        }
+        if (it->out && it->n + r + 1 <= it->cap) {
+            mm_copy(it->out + it->n, (size_t)(it->cap - it->n), buf, (size_t)r);
+            it->n += r;
+            it->out[it->n] = 0;
+        }
+    } else if (r == 0) {
+        int st = 0;
+        close(it->ofd);
+        it->ofd = -1;
+        waitpid(it->pid, &st, 0);
+        it->rc = WIFEXITED(st) ? WEXITSTATUS(st) : (WIFSIGNALED(st) ? 128 + WTERMSIG(st) : 2);
+        it->ms = sy_now_ms() - it->t0;
+        it->state = 2;
+    }
+}
+
+static void gac_first_detail(const char *o, long n, char *dst, long cap) {
+    long at = 0;
+    dst[0] = 0;
+    /* Prefer first line containing DIFF, else first non-empty line */
+    for (int pass = 0; pass < 2; pass++) {
+        at = 0;
+        while (at < n) {
+            long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+            if (ln > 0 && (pass == 1 || gac_has_str(o + at, ln, "DIFF") || gac_has_str(o + at, ln, "diff") || gac_has_str(o + at, ln, "drift"))) {
+                long k = 0;
+                for (long i = 0; i < ln && k < cap - 1 && k < 140; i++) {
+                    char c = o[at + i];
+                    dst[k++] = (c == '\t' || c == '\r') ? ' ' : c;
+                }
+                dst[k] = 0;
+                return;
+            }
+            at += ln + 1;
+        }
+    }
+}
+
+static int gac_run_all(const char *root, const char *uc_abs, const char *bound_abs, int jobs, FILE *outf) {
+    long t0 = sy_now_ms();
+    int started = 0, done = 0, running = 0;
+    int npass = 0, ndiff = 0, nerr = 0;
+
+    while (done < gac_n) {
+        while (started < gac_n && running < jobs) {
+            if (gac_start(&gac_items[started], root, uc_abs, bound_abs) == 0) {
+                running++;
+            } else {
+                gac_items[started].state = 2;
+                gac_items[started].rc = 2;
+                done++;
+            }
+            started++;
+        }
+        if (running > 0) {
+            sy_pollfd_t pfds[GAC_MAX];
+            int idx[GAC_MAX], np = 0;
+            for (int i = 0; i < gac_n; i++) {
+                if (gac_items[i].state == 1 && gac_items[i].ofd >= 0) {
+                    pfds[np].fd = gac_items[i].ofd;
+                    pfds[np].events = SY_POLLIN;
+                    pfds[np].revents = 0;
+                    idx[np++] = i;
+                }
+            }
+            if (np > 0) {
+                int pr = sy_poll(pfds, np, 200);
+                if (pr > 0) {
+                    for (int k = 0; k < np; k++) {
+                        if (pfds[k].revents) {
+                            GacItem *it = &gac_items[idx[k]];
+                            gac_drain_fd(it);
+                            if (it->state == 2) { running--; done++; }
+                        }
+                    }
+                } else if (pr < 0) {
+                    for (int k = 0; k < np; k++) {
+                        GacItem *it = &gac_items[idx[k]];
+                        gac_drain_fd(it);
+                        if (it->state == 2) { running--; done++; }
+                    }
+                }
+            }
+        }
+    }
+
+    for (int i = 0; i < gac_n; i++) {
+        GacItem *it = &gac_items[i];
+        char det[200];
+        const char *st = "PASS";
+        gac_first_detail(it->out ? it->out : "", it->n, det, sizeof det);
+        if (it->rc == 0) {
+            npass++;
+            fprintf(outf, "GEN_CHECK\t%s\tPASS\t%ld\tSAME\n", it->name, it->ms);
+        } else if (it->rc == 1 || (it->out && gac_has_str(it->out, it->n, "DIFF"))) {
+            st = "DIFF";
+            ndiff++;
+            fprintf(outf, "GEN_CHECK\t%s\t%s\t%ld\t%s; fix: %s\n",
+                it->name, st, it->ms, det[0] ? det : "table differs", it->write_cmd);
+        } else {
+            st = "ERROR";
+            nerr++;
+            fprintf(outf, "GEN_CHECK\t%s\t%s\t%ld\trc=%d %s; fix: %s\n",
+                it->name, st, it->ms, it->rc, det[0] ? det : "check failed", it->write_cmd);
+        }
+        if (it->out) { mm_free(it->out); it->out = 0; }
+    }
+    for (int i = 0; i < gac_nu; i++) {
+        fprintf(outf, "GEN_UNCOVERED\t%s\t%s\n", gac_uncov[i].tool, gac_uncov[i].reason);
+    }
+    fprintf(outf, "GEN_ALL_SUMMARY\ttotal=%d\tpass=%d\tdiff=%d\terror=%d\tuncovered=%d\tms=%ld\n",
+        gac_n, npass, ndiff, nerr, gac_nu, sy_now_ms() - t0);
+    fflush(outf);
+    if (nerr > 0) return 2;
+    if (ndiff > 0) return 1;
+    return 0;
+}
+
+static int gac_poll_dir(const char *dir) {
+    char p_rc[GAC_PW], p_out[GAC_PW], p_pid[GAC_PW];
+    size_t n = 0;
+    char *b;
+    if (cx_fmt(p_rc, sizeof p_rc, "%s/rc", dir) ||
+        cx_fmt(p_out, sizeof p_out, "%s/out.tsv", dir) ||
+        cx_fmt(p_pid, sizeof p_pid, "%s/pid", dir)) return 2;
+    b = (char *)cx_read(p_rc, &n);
+    if (b) {
+        int rc = atoi(b);
+        free(b);
+        b = (char *)cx_read(p_out, &n);
+        if (b) { fwrite(b, 1, n, stdout); free(b); }
+        return rc;
+    }
+    b = (char *)cx_read(p_pid, &n);
+    if (b) {
+        int pid = atoi(b);
+        free(b);
+        if (pid > 0 && kill(pid, 0) == 0) {
+            printf("GEN_ALL_BG\tpid=%d\tdir=%s\tstatus=RUNNING\n", pid, dir);
+            return 3;
+        }
+    }
+    printf("GEN_ALL_BG\tdir=%s\tstatus=DIED\n", dir);
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    const char *root_arg = ".", *only = 0, *bg_dir = 0, *poll_dir = 0;
+    int jobs = 8, list_only = 0;
+    char cwd[GAC_PW], root[GAC_PW], uc_abs[GAC_PW], bound_abs[GAC_PW];
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--jobs") && i + 1 < argc) { jobs = atoi(argv[++i]); if (jobs < 1) jobs = 1; if (jobs > 16) jobs = 16; }
+        else if (tx_eqz(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+        else if (tx_eqz(argv[i], "--list")) list_only = 1;
+        else if (tx_eqz(argv[i], "--bg") && i + 1 < argc) bg_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--poll") && i + 1 < argc) poll_dir = argv[++i];
+        else {
+            fprintf(stderr, "gen-all-check: usage: [--root DIR] [--jobs N] [--only NAME] [--list] [--bg DIR|--poll DIR]\n");
+            return 2;
+        }
+    }
+
+    if (poll_dir) return gac_poll_dir(poll_dir);
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (root_arg[0] == '/') {
+        if (cx_fmt(root, sizeof root, "%s", root_arg)) return 2;
+    } else if (tx_eqz(root_arg, ".")) {
+        if (cx_fmt(root, sizeof root, "%s", cwd)) return 2;
+    } else {
+        if (cx_fmt(root, sizeof root, "%s/%s", cwd, root_arg)) return 2;
+    }
+    if (cx_fmt(uc_abs, sizeof uc_abs, "%s/unisacc.com", cwd)) return 2;
+    if (cx_fmt(bound_abs, sizeof bound_abs, "%s/tools/bound", cwd)) return 2;
+    if (sy_exists(uc_abs) != 1 || sy_exists(bound_abs) != 1) {
+        fprintf(stderr, "gen-all-check: REFUSE missing unisacc.com or tools/bound in %s\n", cwd);
+        return 2;
+    }
+
+    gac_discover(root, only);
+
+    if (list_only) {
+        for (int i = 0; i < gac_n; i++) {
+            printf("GEN_ITEM\t%s\t%s\t%s\t%s\n",
+                gac_items[i].name, gac_items[i].tool,
+                gac_items[i].mode == GAC_ROOT ? "root" : "noarg",
+                gac_items[i].write_cmd);
+        }
+        for (int i = 0; i < gac_nu; i++) {
+            printf("GEN_UNCOVERED\t%s\t%s\n", gac_uncov[i].tool, gac_uncov[i].reason);
+        }
+        printf("GEN_LIST_SUMMARY\ttotal=%d\tuncovered=%d\n", gac_n, gac_nu);
+        return 0;
+    }
+
+    if (bg_dir) {
+        char p_pid[GAC_PW], p_out[GAC_PW], p_rc[GAC_PW], p_tmp[GAC_PW], pb[32];
+        int pid;
+        if (mkdir(bg_dir, 0700) != 0 && errno != EEXIST) return 2;
+        if (cx_fmt(p_pid, sizeof p_pid, "%s/pid", bg_dir) ||
+            cx_fmt(p_out, sizeof p_out, "%s/out.tsv", bg_dir) ||
+            cx_fmt(p_rc, sizeof p_rc, "%s/rc", bg_dir) ||
+            cx_fmt(p_tmp, sizeof p_tmp, "%s/rc.tmp", bg_dir)) return 2;
+        unlink(p_rc);
+        pid = fork();
+        if (pid < 0) return 2;
+        if (pid > 0) {
+            if (!cx_fmt(pb, sizeof pb, "%d\n", pid)) (void)cx_write(p_pid, pb, strlen(pb));
+            printf("GEN_ALL_BG\tpid=%d\tdir=%s\tstatus=STARTED\n", pid, bg_dir);
+            return 0;
+        }
+        {
+            FILE *fp = fopen(p_out, "w");
+            int rc = fp ? gac_run_all(root, uc_abs, bound_abs, jobs, fp) : 2;
+            if (fp) fclose(fp);
+            if (!cx_fmt(pb, sizeof pb, "%d\n", rc)) {
+                (void)cx_write(p_tmp, pb, strlen(pb));
+                rename(p_tmp, p_rc);
+            }
+            _exit(rc);
+        }
+    }
+
+    return gac_run_all(root, uc_abs, bound_abs, jobs, stdout);
+}
