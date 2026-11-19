@@ -1,0 +1,76 @@
+import uxe_dispatch from "uxe_v1"(i64, i64, i64) i64;
+export uxe_frame(now:i64) i64 version 1;
+
+persist let boatX = 0.0;
+persist let boatZ = 0.0;
+persist let boatSpeed = 0.35;
+persist let boatYaw = 0.0;
+persist let boatTick = 0;
+persist let clockStarted = 0;
+persist let lastFrame = 0;
+persist let pending = 0;
+persist let previousSteer = 0;
+persist let previousThrust = 0;
+
+if (clockStarted == 0) {
+  lastFrame = now;
+  clockStarted = 1;
+}
+let delta = now - lastFrame;
+if (delta < 0) { return 0 - 1; }
+lastFrame = now;
+if (delta > 240000) { delta = 240000; }
+pending = pending + delta * 30;
+let steps = pending / 1000000;
+pending = pending % 1000000;
+if (steps == 0) { return boatTick; }
+
+// W A S D followed by their arrow aliases.
+let keys = uxe_dispatch(0, 0, 0);
+let forward = keys % 2;
+let left = (keys / 2) % 2;
+let reverse = (keys / 4) % 2;
+let right = (keys / 8) % 2;
+if ((keys / 16) % 2 == 1) { forward = 1; }
+if ((keys / 32) % 2 == 1) { left = 1; }
+if ((keys / 64) % 2 == 1) { reverse = 1; }
+if ((keys / 128) % 2 == 1) { right = 1; }
+let steer = previousSteer;
+let thrust = previousThrust;
+let rubbing = 0;
+while (steps > 0) {
+  if (steps == 1) { steer = right - left; thrust = forward - reverse; }
+  let bound = 12.3 + 1.9 * ux_sin(boatZ / 39.0);
+  let channel = 5.4 * ux_sin(boatZ / 49.0) + 4.3 * ux_sin(boatZ / 117.0);
+  boatYaw = boatYaw + 0.13 * (steer - boatYaw);
+  boatX = boatX + boatYaw * (0.12 + boatSpeed * 0.17) + (channel - boatX) * 0.011;
+  rubbing = 0;
+  if (boatX < channel - bound) { boatX = channel - bound; rubbing = 1; }
+  if (boatX > channel + bound) { boatX = channel + bound; rubbing = 1; }
+  let target = 0.35;
+  let damping = 0.085;
+  if (thrust > 0) { target = 1.65; }
+  if (thrust < 0) { target = 0.0 - 0.48; }
+  if (rubbing == 1) { target = 0.16; damping = 0.30; }
+  boatSpeed = boatSpeed + (target - boatSpeed) * damping;
+  boatZ = boatZ + boatSpeed;
+  if (boatZ < 0.0) { boatZ = 0.0; }
+  if (boatZ > 1728.0) { boatZ = 1728.0; }
+  boatTick = boatTick + 1;
+  steps = steps - 1;
+}
+previousSteer = steer;
+previousThrust = thrust;
+
+let pilotX = 32768 + f64_floor_i64(boatX * 1000.0 + 0.5);
+let pilotZ = f64_floor_i64(boatZ * 1000.0 + 0.5);
+let pilotSpeed = 1024 + f64_floor_i64(boatSpeed * 1000.0 + 0.5);
+let packetWrite = ux_u8_put(0, pilotX % 256);
+packetWrite = ux_u8_put(1, pilotX / 256);
+packetWrite = ux_u8_put(2, pilotZ % 256);
+packetWrite = ux_u8_put(3, (pilotZ / 256) % 256);
+packetWrite = ux_u8_put(4, pilotZ / 65536);
+packetWrite = ux_u8_put(5, pilotSpeed % 256);
+packetWrite = ux_u8_put(6, pilotSpeed / 256);
+packetWrite = ux_u8_put(7, rubbing);
+return boatTick;

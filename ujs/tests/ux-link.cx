@@ -308,6 +308,72 @@ static int flight_gold(char *gold, int cap) {
     return n + tx_snprintf(gold + n, cap - n, "%s", cannon);
 }
 
+static double pilot_wave(double sample) {
+    const double pi = 3.141592653589793;
+    while (sample > pi) sample -= 2 * pi;
+    if (sample > pi / 2) sample = pi - sample;
+    if (sample < -pi / 2) sample = -pi - sample;
+    double term = sample, result = sample;
+    for (int i = 1; i <= 9; i++) {
+        term *= -sample * sample / ((2 * i) * (2 * i + 1));
+        result += term;
+    }
+    return result;
+}
+
+static int pilot_round(double value) {
+    double v = value * 1000.0 + 0.5;
+    int truncated = (int)v;
+    return truncated - (truncated > v);
+}
+
+static int pilot_gold(char *gold, int cap) {
+    double x = 0, z = 0, speed = 0.35, yaw = 0;
+    int used = 0, contacts = 0;
+    for (int tick = 1; tick <= 320; tick++) {
+        int direction = tick <= 240 ? 1 : -1;
+        double bank = 12.3 + 1.9 * pilot_wave(z / 39);
+        double center = 5.4 * pilot_wave(z / 49) + 4.3 * pilot_wave(z / 117);
+        yaw += 0.13 * (direction - yaw);
+        x += yaw * (0.12 + 0.17 * speed) + 0.011 * (center - x);
+        int hit = x < center - bank || x > center + bank;
+        if (x < center - bank) x = center - bank;
+        if (x > center + bank) x = center + bank;
+        contacts += hit;
+        speed += ((hit ? 0.16 : direction > 0 ? 1.65 : -0.48) - speed) * (hit ? 0.30 : 0.085);
+        z += speed;
+        if (z < 0) z = 0;
+        if (z > 1728) z = 1728;
+        if (tick == 1 || tick == 24 || tick == 96 || tick == 180 || tick == 240 || tick == 280 || tick == 320) {
+            int n = tx_snprintf(gold + used, cap - used, "%s%d,%d,%d,%d,%d", used ? " " : "",
+                tick, pilot_round(x), pilot_round(z), pilot_round(speed), contacts);
+            if (n < 0 || n >= cap - used) return -1;
+            used += n;
+        }
+    }
+    return contacts ? used : -1;
+}
+
+static int pilot_product(const char *dir,int mutate) {
+    const char *sources[]={"ujs/practice/uxe/products/d2/pilot.ujs","ujs/practice/uxe/base/math.ujs"};
+    unsigned char *pilot=0,*math=0;
+    int64_t pn=0,mn=0;
+    int rc=1;
+    char path[320],program[8192];
+    if (sy_read_file(sources[0],&pilot,&pn,7000) || sy_read_file(sources[1],&math,&mn,1000)) goto done;
+    long header=tx_find((char *)pilot,pn,"\n\n",2);
+    if (header < 0) goto done;
+    int n=tx_snprintf(program,sizeof program,"%.*s\n%s%s",(int)header,pilot,math,pilot+header);
+    if (n<0 || n>=(int)sizeof program) goto done;
+    tx_snprintf(path,sizeof path,"%s/pilot.ujs",dir);
+    if(sy_write_file(path,program,n,0600)) goto done;
+    rc=generated(dir,"product",path,mutate?"target = 0.16":0,"target = 1.65");
+done:
+    mm_free(pilot);
+    mm_free(math);
+    return rc;
+}
+
 static int projected_pixels(const char *text, long length) {
     const char *at = text;
     const long header[] = {426,240,0,3};
@@ -382,7 +448,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             " 102240 167,83,61,255 41,33,36,255 10,20,30,255 10,20,30,255 -1",
             426 * 240, 3 * 10000 + 13 * 100 + 91);
     }
-    if (flight_check) gold_n = flight_gold(gold, sizeof gold);
+    if (flight_check) gold_n = flight_check == 2 ? pilot_gold(gold, sizeof gold) : flight_gold(gold, sizeof gold);
     if (projection_check == 2) gold_n = audio_gold(gold, sizeof gold);
     if (projection_check == 3) gold_n = tx_snprintf(gold, sizeof gold, "20,26,36,255 138,213,203,255 241,91,49,255");
     if (projection_check == 4) gold_n = tx_snprintf(gold, sizeof gold,
@@ -415,6 +481,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
+                flight_check == 2 ? "CHECK_UXE_D2_PILOT" :
                 flight_check ? "CHECK_UXE_D1_FLIGHT_WASM" : base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
                 mode, (int)to, out + from, !pass);
         }
@@ -442,6 +509,8 @@ int main(int argc, char **argv) {
     int health_mutate = tx_eq(mode, "flight-health", sizeof "flight-health");
     int flight_check = tx_eq(mode, "flight", 7) || tx_eq(mode, "flight-heading", 15) ||
         cannon_mutate || hit_mutate || wave_mutate || missile_mutate || health_mutate;
+    int pilot_mutate = tx_eq(mode, "pilot-no-drag", sizeof "pilot-no-drag");
+    if (tx_eq(mode, "pilot", sizeof "pilot") || pilot_mutate) flight_check = 2;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -476,6 +545,9 @@ int main(int argc, char **argv) {
         } else {
             rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
         }
+    } else if (flight_check == 2) {
+        rc = rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d2-pilot-probe.html") ||
+            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) || pilot_product(dir,pilot_mutate);
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
