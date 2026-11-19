@@ -1,0 +1,69 @@
+import uxe_dispatch from "uxe_v1"(i64, i64, i64) i64;
+export uxe_frame(now:i64) i64 version 1;
+
+persist let walkStarted = 0;
+persist let walkLast = 0;
+persist let walkPending = 0;
+persist let walkDistance = 0;
+persist let walkYaw = 0;
+persist let walkTick = 0;
+
+if (walkStarted == 0) {
+  if (uxe_dispatch(4, 0, 224) != 224) { return 0 - 1; }
+  let walkCell = 0;
+  while (walkCell < 56) {
+    let walkAt = 4 * walkCell;
+    let walkValue = uxe_dispatch(8, walkAt, 0)
+      + 256 * uxe_dispatch(8, walkAt + 1, 0)
+      + 65536 * uxe_dispatch(8, walkAt + 2, 0)
+      + 16777216 * uxe_dispatch(8, walkAt + 3, 0);
+    if (walkValue >= 2147483648) { walkValue = walkValue - 4294967296; }
+    let dataWrite = ux_f32_put(1024 + walkAt, walkValue * 1.0);
+    walkCell = walkCell + 1;
+  }
+  walkStarted = 1;
+  walkLast = now;
+}
+
+let walkDelta = now - walkLast;
+if (walkDelta < 0) { return 0 - 1; }
+walkLast = now;
+if (walkDelta > 240000) { walkDelta = 240000; }
+walkPending = walkPending + walkDelta;
+let walkSteps = walkPending / 32000;
+walkPending = walkPending % 32000;
+let walkInput = uxe_dispatch(0, 0, 0);
+let walkForward = walkInput % 2;
+let walkBack = walkInput / 2 % 2;
+let walkLeft = walkInput / 4 % 2;
+let walkRight = walkInput / 8 % 2;
+if (walkInput / 16 % 2 == 1) { walkForward = 1; }
+if (walkInput / 32 % 2 == 1) { walkBack = 1; }
+if (walkInput / 64 % 2 == 1) { walkLeft = 1; }
+if (walkInput / 128 % 2 == 1) { walkRight = 1; }
+walkDistance = walkDistance + 180 * walkSteps * (walkForward - walkBack);
+if (walkDistance < 0) { walkDistance = 0; }
+if (walkDistance > 67000) { walkDistance = 67000; }
+walkYaw = walkYaw + 28 * walkSteps * (walkRight - walkLeft);
+if (walkYaw < 0 - 1180) { walkYaw = 0 - 1180; }
+if (walkYaw > 1180) { walkYaw = 1180; }
+walkTick = walkTick + walkSteps;
+
+let routeEnd = 1;
+while (routeEnd < 7 && ux_f32(1024 + 28 * routeEnd) <= walkDistance) {
+  routeEnd = routeEnd + 1;
+}
+let walkEndAt = 1024 + 28 * routeEnd;
+let walkBeginAt = walkEndAt - 28;
+let walkBlend = (walkDistance - ux_f32(walkBeginAt)) / (ux_f32(walkEndAt) - ux_f32(walkBeginAt));
+let poseField = 1;
+while (poseField < 7) {
+  let fieldByte = 4 * poseField;
+  let poseStart = ux_f32(walkBeginAt + fieldByte);
+  let poseValue = poseStart + (ux_f32(walkEndAt + fieldByte) - poseStart) * walkBlend;
+  let poseWrite = ux_f32_put(fieldByte, poseValue);
+  poseField = poseField + 1;
+}
+let walkPacket = ux_f32_put(0, walkDistance * 1.0);
+walkPacket = ux_f32_put(28, walkYaw * 1.0);
+return walkTick;

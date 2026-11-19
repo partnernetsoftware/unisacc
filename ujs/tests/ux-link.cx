@@ -444,6 +444,68 @@ static int water_font_iou(const char *pixels,long length) {
     return failed || at!=length;
 }
 
+static int walk_rows(int rows[8][7]) {
+    unsigned char *data=0;
+    int64_t size=0;
+    int rc=1;
+    if(sy_read_file("ujs/practice/uxe/test/d3-walk-audit.tsv",&data,&size,4096)) return 1;
+    long header=tx_find((char *)data,size,"\n",1);
+    if(header<0) goto done;
+    char *at=(char *)data+header+1;
+    for(int y=0;y<8;y++) for(int x=0;x<7;x++) {
+        char *end=0;
+        long value=tx_strtol(at,&end,10);
+        if(end==at || end>=(char *)data+size || *end!=(x==6?'\n':'\t') || value< -100000 || value>100000) goto done;
+        rows[y][x]=(int)value;
+        at=end+1;
+    }
+    if(at!=(char *)data+size || rows[0][0]!=0 || rows[7][0]!=67000) goto done;
+    for(int i=1;i<8;i++) if(rows[i][0]<=rows[i-1][0]) goto done;
+    rc=0;
+done:
+    mm_free(data);
+    return rc;
+}
+
+static int walk_asset(const char *dir) {
+    int rows[8][7];
+    unsigned char bytes[224];
+    char path[320];
+    if(walk_rows(rows)) return 1;
+    for(int y=0;y<8;y++) for(int x=0;x<7;x++) {
+        unsigned value=(unsigned)rows[y][x];
+        for(int b=0;b<4;b++) bytes[4*(7*y+x)+b]=value>>(8*b);
+    }
+    tx_snprintf(path,sizeof path,"%s/route.bin",dir);
+    return sy_write_file(path,bytes,sizeof bytes,0600)!=0;
+}
+
+static int walk_gold(char *gold,int cap) {
+    const int marks[]={0,1,60,100,170,373,400,420};
+    int rows[8][7],n=0;
+    if(walk_rows(rows)) return -1;
+    for(int j=0;j<8;j++) {
+        int tick=marks[j],distance=tick>400?67000-(tick-400)*180:tick*180;
+        if(distance>67000) distance=67000;
+        int yaw=tick<60?0:tick<100?(tick-59)*28:1120;
+        if(tick>400) yaw-=(tick-400)*28;
+        int hi=1;
+        while(hi<7 && rows[hi][0]<=distance) hi++;
+        int values[6];
+        double t=(distance-rows[hi-1][0])*1.0/(rows[hi][0]-rows[hi-1][0]);
+        for(int i=0;i<6;i++) {
+            double v=rows[hi-1][i+1]+(rows[hi][i+1]-rows[hi-1][i+1])*t+0.5;
+            int trunc=(int)v;
+            values[i]=trunc-(trunc>v);
+        }
+        int used=tx_snprintf(gold+n,cap-n,"%s%d,%d,%d,%d,%d,%d,%d,%d,%d",
+            n?" ":"",tick,distance,values[0],values[1],values[2],values[3],values[4],values[5],yaw);
+        if(used<0 || used>=cap-n) return -1;
+        n+=used;
+    }
+    return n;
+}
+
 static int pilot_product(const char *dir,int mutate,int draw) {
     const char *sources[]={"ujs/practice/uxe/products/d2/pilot.ujs","ujs/practice/uxe/base/math.ujs"};
     const char *layers[]={"waterway.ujs","skyline.ujs","reed-banks.ujs","crossing.ujs","title-reflection.ujs",
@@ -587,6 +649,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
     }
     if (flight_check == 1) gold_n = flight_gold(gold, sizeof gold);
     if (flight_check == 2) gold_n = pilot_gold(gold, sizeof gold);
+    if (flight_check == 15) gold_n = walk_gold(gold, sizeof gold);
     if (projection_check == 2) gold_n = audio_gold(gold, sizeof gold);
     if (projection_check == 3) gold_n = tx_snprintf(gold, sizeof gold, "20,26,36,255 138,213,203,255 241,91,49,255");
     if (projection_check == 4) gold_n = tx_snprintf(gold, sizeof gold,
@@ -661,6 +724,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
+                flight_check == 15 ? "CHECK_UXE_D3_ROUTE" :
                 flight_check == 14 ? "CHECK_UXE_D2_SHALLOWS" : flight_check == 13 ? "CHECK_UXE_D2_GLINT" :
                 flight_check == 12 ? "CHECK_UXE_D2_TITLE" : flight_check == 11 ? "CHECK_UXE_D2_RED_LANTERNS" :
                 flight_check == 10 ? "CHECK_UXE_D2_LILIES" : flight_check == 9 ? "CHECK_UXE_D2_DOCK" :
@@ -727,6 +791,8 @@ int main(int argc, char **argv) {
     if(tx_eq(mode,"water-glint",sizeof "water-glint") || glint_mutate) flight_check=13;
     int shallows_mutate=tx_eq(mode,"water-shallows-off",sizeof "water-shallows-off");
     if(tx_eq(mode,"water-shallows",sizeof "water-shallows") || shallows_mutate) flight_check=14;
+    int walk_mutate=tx_eq(mode,"walk-short",sizeof "walk-short");
+    if(tx_eq(mode,"walk",sizeof "walk") || walk_mutate) flight_check=15;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -761,6 +827,11 @@ int main(int argc, char **argv) {
         } else {
             rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
         }
+    } else if (flight_check == 15) {
+        rc=rc || (package!=0) || walk_asset(dir) ||
+            copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d3-route-probe.html") ||
+            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+            generated(dir,"product","ujs/practice/uxe/products/d3/route.ujs",walk_mutate?"180 * walkSteps":0,"120 * walkSteps");
     } else if (flight_check >= 2) {
         int mutate=shallows_mutate?14:glyph_mutate?13:glint_mutate?12:title_mutate?11:red_mutate?10:
             lilies_mutate?9:dock_mutate?8:reeds_mutate?7:skyline_mutate?6:prow_mutate?5:mirror_mutate?4:
