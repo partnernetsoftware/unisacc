@@ -14,6 +14,8 @@
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
+#pragma unisa use sys.netraw
+#pragma unisa use sys.net
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
@@ -58,6 +60,55 @@ static const char *ape_text =
     "if [ \"$4\" = lost ]; then printf 'BATCH_RUN\\tid=lost\\tstatus=UNKNOWN\\trc=0\\ttransport=-1\\tcandidate=%s\\n' \"$s\"; exit 0; fi\n"
     "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
 
+/* The full queue and the abandoned bound pathname are real Linux sockets. */
+static int shadow_fixture(char *probe,char *starts,char *marks) {
+    sy_addr_t peer;peer.family=SY_AF_UNIX;
+    char sockenv[256],raw[600]="",wire[512];unsigned char address[128];
+    if(cx_fmt(peer.path,sizeof peer.path,"%s/observer.s2",tmp) ||
+       cx_fmt(sockenv,sizeof sockenv,"DEVSVC_SOCK=%s/observer",tmp))return 2;
+    int len=sy_sa_unix(address,sizeof address,peer.path);
+    int af=sy_sock_num(SY_SN_AF_UNIX),type=sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK;
+    int rx=sy_sock_open(af,type),tx=sy_sock_open(af,type);
+    if(rx<0 || tx<0 || len<=0 || sy_sock_bind(rx,address,len))return 2;
+    for(int mode=0;mode<3;mode++){
+        if(mode==1){
+            int fill=0;long sent=1;
+            while(fill++<8192){
+                sent=sy_udp_send_to(tx,"x",1,&peer);
+                if(sent==1)continue;
+                if(sent!=-EAGAIN)return 2;
+                sy_close(tx);tx=sy_sock_open(af,type);
+                if(tx<0)return 2;
+                sent=sy_udp_send_to(tx,"x",1,&peer);
+                if(sent==-EAGAIN)break;
+                if(sent!=1)return 2;
+            }
+            if(sent!=-EAGAIN)return 2;
+        }
+        if(mode==2){sy_close(rx);rx=-1;}
+        char *v[]={"env",starts,sockenv,"DEVSVC_S2_SHADOW=1","QG_CASE=boundary",probe,repo,"--candidate",apep,"--ids","alpha",0};
+        int rc=-1;unsigned char *s=0;int64_t count=0;
+        if(put(tmp,"starts","",0600) || !runv(v,root,15,&rc) || sy_read_file(marks,&s,&count,1024))return 2;
+        free(s);
+        const char *p=strstr(out,"RAW\tBATCH_RUN\t"),*end=p?strchr(p,'\n'):0;
+        if(!mode && end && end-p<sizeof raw && !mm_copy(raw,sizeof raw,p,end-p))raw[end-p]=0;
+        check(mode==0?"shadow-one-start":mode==1?"shadow-full-keeps-raw-rc-starts":"shadow-dead-keeps-raw-rc-starts",
+              rc==0 && count==1 && end && raw[0] && end-p==strlen(raw) && !memcmp(p,raw,end-p));
+        if(!mode){
+            int launches=0,finishes=0;long n;
+            int reads=0;
+            while(reads++<16 && (n=sy_sock_recv(rx,wire,sizeof wire-1))>0){
+                wire[n]=0;if(!strstr(wire,"\tid=alpha\t"))return 2;
+                if(!strncmp(wire,"kind=launch\t",12))launches++;
+                if(!strncmp(wire,"kind=finish\t",12))finishes++;
+            }
+            check("shadow-launch-and-finish-once",n==-EAGAIN && launches==1 && finishes==1);
+        }
+    }
+    sy_close(tx);sy_unlink(peer.path);
+    return 0;
+}
+
 static int gate_fixture(void) {
     char probe[4300], marks[4300], option[4600];
     int rc=-1;
@@ -65,7 +116,7 @@ static int gate_fixture(void) {
        cx_fmt(marks,sizeof marks,"%s/starts",tmp) ||
        cx_fmt(option,sizeof option,"QG_STARTS=%s",marks)) return 2;
     const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
-    char *build[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","tools/dvqualify.cx","-o",probe,0};
+    char *build[]={"sh",(char*)launcher,"-DDVQUALIFY_GATE_FIXTURE","-DDVQUALIFY_S2_TAP","tools/dvqualify.cx","-o",probe,0};
     if(!runv(build,root,55,&rc)||rc){fprintf(stderr,"%s\n",out);return 2;}
     const char *cases[]={"boundary","expired","drops","retry","retry-boundary"};
     for(int i=0;i<5;i++){
@@ -83,6 +134,7 @@ static int gate_fixture(void) {
     char *lost[]={"env","QG_CASE=boundary",option,probe,repo,"--candidate",apep,"--ids","lost",0};
     check("transport-failure-keeps-raw-and-names-reason",runv(lost,root,15,&rc) && rc==1 &&
           has(out,"\ttransport-failed-raw-neg1\nRAW\tBATCH_RUN\tid=lost\tstatus=UNKNOWN\trc=0\ttransport=-1\t"));
+    if(shadow_fixture(probe,option,marks))return 2;
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
     return !!failed;
 }
