@@ -1,0 +1,76 @@
+native function path_used_bytes(path:i64) i64 {
+  if(path<0 || path>6291456-Path.size || path%8!=0) { return 0-1; }
+  let storage=ux_u32(path+Path.segments);
+  let count=ux_u32(path+Path.count);
+  if(storage>6291456 || storage%8!=0 ||
+     count>ux_u32(path+Path.capacity) || count>(6291456-storage)/72) { return 0-1; }
+  return count*72;
+}
+
+native function Path_copy(dst:i64,src:i64) i64 {
+  let size=path_used_bytes(src);
+  if(size<0 || path_used_bytes(dst)<0) { return 0-1; }
+  if(dst==src) { return dst; }
+  let data=ux_u32(dst+Path.segments);
+  if(size/72>ux_u32(dst+Path.capacity) || size>6291456-data) { return 0-2; }
+  let rows=uxe_copy_record(data,ux_u32(src+Path.segments),size);
+  let cursor=uxe_copy_record(dst+Path.startX,src+Path.startX,Path.size-Path.startX);
+  let count=ux_u32_put(dst+Path.count,size/72);
+  return dst;
+}
+
+native function Path_clone(dst:i64,src:i64,storage:i64,capacity:i64) i64 {
+  let size=path_used_bytes(src);
+  if(size<0 || capacity<size/72) { return 0-1; }
+  let source_data=ux_u32(src+Path.segments);
+  if((dst<src+Path.size && src<dst+Path.size) ||
+     (size!=0 && dst<source_data+size && source_data<dst+Path.size)) { return 0-1; }
+  let initialize=Path_init(dst,storage,capacity);
+  if(initialize<0) { return initialize; }
+  return Path_copy(dst,src);
+}
+
+// The caller retains ownership of the arena. The new shape owns independent
+// contour and hole slots in it. The arena does not alias any input records.
+native function Shape_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  if(dst<0 || dst>6291456-Shape.size || dst%4!=0 ||
+     src<0 || src>6291456-Shape.size || src%4!=0 ||
+     arena<0 || arena>6291456 || arena%8!=0 || bytes<0 || bytes>6291456-arena ||
+     (dst<arena+bytes && arena<dst+Shape.size)) { return 0-1; }
+  if(dst==src) { return dst; }
+  let count=ux_u32(src+Shape.count);
+  let holes=ux_u32(src+Shape.holes);
+  let contour=ux_u32(src+Shape.contour);
+  if(holes>6291456 || holes%4!=0 || count>(6291456-holes)/4 ||
+     count>ux_u32(src+Shape.capacity)) { return 0-1; }
+  let first=arena+(count*4+7)/8*8;
+  let used=first-arena;
+  let i=0-1;
+  while(i<count) {
+    let path=contour;
+    if(i>=0) { path=ux_u32(holes+i*4); }
+    let size=path_used_bytes(path);
+    if(size<0) { return 0-1; }
+    used=used+Path.size+size;
+    if(used>bytes) { return 0-2; }
+    i=i+1;
+  }
+  let next=first;
+  let init=Shape_init(dst,first,arena,count);
+  i=0-1;
+  while(i<count) {
+    let path=contour;
+    if(i>=0) { path=ux_u32(holes+i*4); }
+    let size=path_used_bytes(path);
+    let clone=Path_clone(next,path,next+Path.size,size/72);
+    if(clone<0) { return clone; }
+    if(i>=0) { let added=Shape_addHole(dst,clone); }
+    next=next+Path.size+size;
+    i=i+1;
+  }
+  return dst;
+}
+
+function Shape_clone(dst,...args) {
+  return Shape_copy(dst,args[0],args[1],args[2]);
+}
