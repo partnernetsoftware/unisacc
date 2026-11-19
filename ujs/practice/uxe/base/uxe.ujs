@@ -14,6 +14,10 @@ persist let sceneLight = 255;
 persist let sceneFogStart = 0;
 persist let sceneFogEnd = 0;
 persist let sceneFogColor = 0;
+persist let worldEyeX = 0;
+persist let worldEyeY = 0;
+persist let worldEyeZ = 0;
+persist let worldBasisReady = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -276,13 +280,22 @@ if (op == 18) {
   }
   return 0;
 }
-if (op == 19) {
+if (op == 19 || op == 25) {
   if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b >= 281474976710656) { return 0 - 1; }
-  let cameraZ = b / 4294967296;
+  let cameraZ = (b / 4294967296) * 1.0;
   let vertexState = ux_u8_put(5499900 + a, 0);
+  let cameraX = (b % 65536 - 32768) * 1.0;
+  let cameraY = (b / 65536 % 65536 - 32768) * 1.0;
+  if (op == 25) {
+    if (worldBasisReady == 0) { return 0 - 1; }
+    let relativeX = cameraX - worldEyeX;
+    let relativeY = cameraY - worldEyeY;
+    let relativeZ = cameraZ - 32768.0 - worldEyeZ;
+    cameraX = relativeX * ux_f32(5480000) + relativeZ * ux_f32(5480004);
+    cameraY = relativeX * ux_f32(5480008) + relativeY * ux_f32(5480012) + relativeZ * ux_f32(5480016);
+    cameraZ = relativeX * ux_f32(5480020) + relativeY * ux_f32(5480024) + relativeZ * ux_f32(5480028);
+  }
   if (cameraZ < sceneNear) { return 0 - 1; }
-  let cameraX = b % 65536 - 32768;
-  let cameraY = b / 65536 % 65536 - 32768;
   let vertexAt = 5499912 + 12 * a;
   vertexState = ux_f32_put(vertexAt, f64_floor_i64(width / 2.0 + sceneFocal * cameraX / (cameraZ * 1.0) + 0.5) * 1.0);
   vertexState = ux_f32_put(vertexAt + 4, f64_floor_i64(height / 2.0 - sceneFocal * cameraY / (cameraZ * 1.0) + 0.5) * 1.0);
@@ -378,6 +391,34 @@ if (op == 22) {
     if (a >= 80) { sceneLight = 192; }
     if (a >= 176) { sceneLight = 255; }
   }
+  return 0;
+}
+// World camera uses signed 16-bit coordinates and an arbitrary forward vector.
+if (op == 23 || op == 24) {
+  if (b < 0 || b >= 281474976710656) { return 0 - 1; }
+  let axisX = b % 65536 - 32768;
+  let axisY = b / 65536 % 65536 - 32768;
+  let axisZ = b / 4294967296 - 32768;
+  if (op == 23) {
+    worldEyeX = axisX;
+    worldEyeY = axisY;
+    worldEyeZ = axisZ;
+    return 0;
+  }
+  let horizontal = f64_sqrt((axisX * axisX + axisZ * axisZ) * 1.0);
+  if (horizontal == 0.0) { worldBasisReady = 0; return 0 - 1; }
+  let length = f64_sqrt(horizontal * horizontal + axisY * axisY);
+  let orthX = (0.0 - axisZ) / horizontal;
+  let orthZ = axisX / horizontal;
+  let basisWrite = ux_f32_put(5480000, orthX);
+  basisWrite = ux_f32_put(5480004, orthZ);
+  basisWrite = ux_f32_put(5480008, (0.0 - orthZ) * axisY / length);
+  basisWrite = ux_f32_put(5480012, horizontal / length);
+  basisWrite = ux_f32_put(5480016, orthX * axisY / length);
+  basisWrite = ux_f32_put(5480020, axisX / length);
+  basisWrite = ux_f32_put(5480024, axisY / length);
+  basisWrite = ux_f32_put(5480028, axisZ / length);
+  worldBasisReady = 1;
   return 0;
 }
 return 0 - 1;
