@@ -1,8 +1,10 @@
 #pragma unisa use chrome_dom
 #pragma unisa use text.fmt
+#pragma unisa use text.text
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
+#pragma unisa use mem.heap
 
 typedef struct { int r,g,b; } Color;
 typedef struct { int row,h,lo,hi,paint; } Span;
@@ -1578,11 +1580,52 @@ static int exercise_walk(ChromeInput *c,int town) {
         depth!=37000 || back_depth!=22000 || margin<30 || back_margin>=0;
 }
 
+static int solid_keyboard_fixture(const char *cwd,const char *source,const char *dir) {
+    const char *needles[] = {"<meta charset=\"utf-8\">", "let pointer=null,buttons=0;",
+        "keys.add(event.code);", "previous=now;", "const steps=Math.floor((pending+.25)/frameInterval);\n      pending-=steps*frameInterval;"};
+    char html[24576], path[1260], base[1260];
+    unsigned char *input=0;
+    int64_t size=0;
+    int used=0, rc=1;
+    tx_snprintf(base,sizeof base,"<meta charset=\"utf-8\">\n<base href=\"file://%s/ujs/practice/uxe/test/\">",cwd);
+    const char *replacements[] = {base,
+        "let pointer=null,buttons=0;\n"
+        "  let frameKeys=true,frameBudget=1;\n"
+        "  window.d1RunFrames=()=>{ frameKeys=false; };\n"
+        "  if(query.has('no-explosion-sound')) {\n"
+        "    const trigger=audio.trigger;\n"
+        "    combat=combatModel(buffer,query,name=>{if(name!=='explosion')trigger(name);});\n"
+        "  }",
+        "keys.add(event.code);\n    if(frameKeys && !event.repeat) frameBudget++;",
+        "previous=now;\n    if(frameKeys && !frameBudget) { pending=0; requestAnimationFrame(loop); return; }",
+        "const steps=frameKeys?1:Math.floor((pending+.25)/frameInterval);\n"
+        "      if(frameKeys) { frameBudget--; pending=0; } else pending-=steps*frameInterval;"};
+    if(sy_read_file(source,&input,&size,20000)) return 1;
+    const char *at=(char *)input;
+    long left=size;
+    for(size_t i=0;i<sizeof needles/sizeof needles[0];i++) {
+        long key=tx_len(needles[i],256), before=tx_find(at,left,needles[i],key);
+        if(before<0) goto done;
+        int n=tx_snprintf(html+used,sizeof html-used,"%.*s%s",(int)before,at,replacements[i]);
+        if(n<0 || n>=(int)sizeof html-used) goto done;
+        used+=n;
+        at+=before+key;
+        left-=before+key;
+    }
+    if(left>=(long)sizeof html-used) goto done;
+    if(tx_snprintf(html+used,sizeof html-used,"%.*s",(int)left,at)!=left) goto done;
+    tx_snprintf(path,sizeof path,"%s/solid.html",dir);
+    rc=sy_write_file(path,html,used+left,0600)!=0;
+done:
+    mm_free(input);
+    return rc;
+}
+
 static int check_keyboard_path(const char *mutation,int battle,const char *candidate) {
     ChromeInput c={0};
     sy_spawn_t launch;
     sy_exit_t ended;
-    char cwd[1024],url[1260],profile[128],option[160];
+    char cwd[1024],url[1260],profile[128],option[160],fixture[128]="";
     char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","chrome-pipe",
         "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
         "--use-angle=swiftshader","--enable-unsafe-swiftshader",
@@ -1590,21 +1633,25 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     int rc,n;
     int framed=candidate && !strcmp(candidate,"ujs/practice/uxe/test/d1-solid-audit.html");
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    n=tx_snprintf(url,sizeof url,"file://%s/%s?%s&%s%s",cwd,
+    if(framed) {
+        if(sy_mkdtemp("/tmp","d1-keyboard-",fixture,sizeof fixture)) return input_error("cdp-fixture-dir",0);
+        if(solid_keyboard_fixture(cwd,candidate,fixture)) { chd_wipe(fixture); return input_error("cdp-fixture",0); }
+        n=tx_snprintf(url,sizeof url,"file://%s/solid.html?input-test=1&hold-course&%s",fixture,mutation);
+    } else n=tx_snprintf(url,sizeof url,"file://%s/%s?%s&%s",cwd,
         candidate?candidate:battle==LIVE_COAST?"ujs/practice/uxe/test/d1-coast-audit.html":
         battle==LIVE_BRIDGE?"docs/uxe/ink-walk/index.html":battle==LIVE_TOWN?"docs/uxe/oneshot/index.html":
         battle>=LIVE_WATER?"docs/uxe/water-keeps/index.html":
         battle==LIVE_MUTE?"ujs/practice/uxe/test/d1-pixel-a.html":"docs/uxe/fly-next/index.html",
         battle==LIVE_COAST || battle==LIVE_BATTLE?"input-test=1&hold-course":
-        battle>=LIVE_WATER_AUTO?"auto=1":"input-test=1",mutation,framed?"&frame-keys":"");
-    if(n<0 || n>=(int)sizeof url) return input_error("cdp-url",0);
+        battle>=LIVE_WATER_AUTO?"auto=1":"input-test=1",mutation);
+    if(n<0 || n>=(int)sizeof url) { if(framed) chd_wipe(fixture); return input_error("cdp-url",0); }
     tx_snprintf(profile,sizeof profile,"/tmp/chrome-d1-keyboard-%d",(int)getpid());
     tx_snprintf(option,sizeof option,"--user-data-dir=%s",profile);
     sy_spawn_init(&launch);
     launch.argv=argv; launch.in_fd=SY_STDIO_PIPE; launch.out_fd=SY_STDIO_PIPE;
     launch.err_fd=SY_STDIO_NULL; launch.pgroup=-1; launch.deadline_ms=23000;
     rc=sy_proc_spawn(&launch,&c.child);
-    if(rc) return input_error("cdp-spawn",0);
+    if(rc) { if(framed) chd_wipe(fixture); return input_error("cdp-spawn",0); }
     c.deadline=sy_now_ms()+22500;
     if(!cdp_navigate(&c,url)) rc=input_error("cdp-navigate",0);
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
@@ -1616,6 +1663,7 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     sy_proc_kill(&c.child,9);
     sy_proc_wait(&c.child,&ended);
     chd_wipe(profile);
+    if(framed) chd_wipe(fixture);
     return rc;
 }
 
