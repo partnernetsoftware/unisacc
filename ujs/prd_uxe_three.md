@@ -145,6 +145,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): M1 Vector3 使用三个连续 f64。矩阵沿用列主序，相机变换接收两份矩阵，Euler 记录以三个 f64 角度加一个 u32 顺序码表示。分量读取、随机源、连续 f32 属性和角度域与 Vector2 使用同一合同。`sh ./unisacc.com ujs/tests/vector3-math.cx` 检查 74 项独立金值与 r160 JSON，`--mutate` 将点积的右操作数换为左操作数。Vector2 与 Vector3 共享舍入、限幅和金值读回。
 
+修订(cdx2): M1 Vector4 使用四个连续 f64。矩阵乘法保留齐次分量 w，角轴转换的输入为单位四元数或列主序纯旋转矩阵。`sh ./unisacc.com ujs/tests/vector4-math.cx` 检查 51 项独立金值与 r160 JSON，包括恒等与半周奇异点附近的分支，`--mutate` 移除矩阵变换后仍用原金值。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
