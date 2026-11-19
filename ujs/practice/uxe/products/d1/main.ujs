@@ -1,0 +1,98 @@
+import uxe_dispatch from "uxe_v1"(i64, i64, i64) i64;
+export uxe_frame(now:i64) i64 version 1;
+
+persist let heading = 0;
+persist let bank = 0;
+persist let x = 2048;
+persist let z = 2048;
+persist let altitude = 25;
+persist let speed = 12;
+persist let pitch = 0;
+persist let started = 0;
+persist let last = 0;
+persist let elapsed = 0;
+persist let priorTurn = 0;
+persist let priorClimb = 0;
+persist let priorBoost = 0;
+
+if (started == 0) {
+  last = now;
+  started = 1;
+}
+let delta = now - last;
+if (delta < 0) { return 0 - 1; }
+last = now;
+if (delta > 200000) { delta = 200000; }
+elapsed = elapsed + delta * 30;
+let steps = elapsed / 1000000;
+if (steps == 0) { return heading; }
+elapsed = elapsed % 1000000;
+
+let keys = uxe_dispatch(0, 0, 0);
+let keyLeft = keys % 2;
+let keyRight = (keys / 2) % 2;
+let keyUp = (keys / 4) % 2;
+let keyDown = (keys / 8) % 2;
+let keyBoost = (keys / 16) % 2;
+if (((keys / 32) % 2) == 1) { keyBoost = 1; }
+if (((keys / 64) % 2) == 1) { keyLeft = 1; }
+if (((keys / 128) % 2) == 1) { keyRight = 1; }
+if (((keys / 256) % 2) == 1) { keyUp = 1; }
+if (((keys / 512) % 2) == 1) { keyDown = 1; }
+
+let tickTurn = priorTurn;
+let tickClimb = priorClimb;
+let tickBoost = priorBoost;
+while (steps > 0) {
+  if (steps == 1) {
+    tickTurn = keyRight - keyLeft;
+    tickClimb = keyUp - keyDown;
+    tickBoost = keyBoost;
+  }
+  let target = tickTurn * 24;
+  if (bank < target) { bank = bank + 4; }
+  else { if (bank > target) { bank = bank - 4; } }
+  heading = (heading + tickTurn * 3 + 360) % 360;
+  let cruise = 12;
+  if (tickBoost > 0) { cruise = 28; }
+  if (speed < cruise) { speed = speed + 2; }
+  else { if (speed > cruise) { speed = speed - 2; } }
+  let pitchTarget = 0;
+  if (tickClimb > 0) {
+    pitchTarget = 18;
+    if (altitude < 106) { altitude = altitude + 1; }
+  } else {
+    if (tickClimb < 0) {
+      pitchTarget = 0 - 18;
+      if (altitude > 12) { altitude = altitude - 1; }
+    }
+  }
+  if (pitch < pitchTarget) { pitch = pitch + 3; }
+  else { if (pitch > pitchTarget) { pitch = pitch - 3; } }
+  let phase = heading % 180;
+  let dx = phase * (180 - phase) * speed / 8100;
+  if (heading >= 180) { dx = 0 - dx; }
+  let axis = (heading + 90) % 360;
+  phase = axis % 180;
+  let dz = phase * (180 - phase) * speed / 8100;
+  if (axis >= 180) { dz = 0 - dz; }
+  x = (x + dx + 4096) % 4096;
+  z = (z - dz + 4096) % 4096;
+  steps = steps - 1;
+}
+priorTurn = tickTurn;
+priorClimb = tickClimb;
+priorBoost = tickBoost;
+
+let packetId = ux_u8_put(0, 3);
+let headingLow = ux_u8_put(1, heading % 256);
+let headingHigh = ux_u8_put(2, heading / 256);
+let bankByte = ux_u8_put(3, bank + 24);
+let eastLow = ux_u8_put(4, x % 256);
+let eastHigh = ux_u8_put(5, x / 256);
+let northLow = ux_u8_put(6, z % 256);
+let northHigh = ux_u8_put(7, z / 256);
+let altitudeByte = ux_u8_put(8, altitude);
+let speedByte = ux_u8_put(9, speed);
+let pitchByte = ux_u8_put(10, pitch + 18);
+return heading;

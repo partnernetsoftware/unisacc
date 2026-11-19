@@ -19,7 +19,7 @@ static int generated(const char *dir, const char *name, const char *source, cons
         long key_n = tx_len(from, 64);
         long at;
         int len;
-        if (sy_read_file(source, &bytes, &n, 2048)) return 1;
+        if (sy_read_file(source, &bytes, &n, sizeof body - 256)) return 1;
         at = tx_find((char *)bytes, n, from, key_n);
         if (at < 0 || tx_find((char *)bytes + at + key_n, n - at - key_n, from, key_n) >= 0) {
             mm_free(bytes);
@@ -49,8 +49,48 @@ static int copy_fixture(const char *dir, const char *leaf, const char *source) {
     return rc != 0;
 }
 
-static int browser(const char *dir, const char *mode, int base_check) {
-    char profile[350], url[380], gold[180], *out = 0;
+typedef struct { int heading, bank, x, z, altitude, speed, pitch; } Flight;
+
+static int approach(int value, int target, int increment) {
+    if (value < target) return value + increment;
+    if (value > target) return value - increment;
+    return value;
+}
+
+static int move_axis(int heading, int speed) {
+    int phase = heading % 180;
+    int displacement = phase * (180 - phase) * speed / 8100;
+    return heading >= 180 ? -displacement : displacement;
+}
+
+static int flight_gold(char *gold, int cap) {
+    Flight state = {0, 0, 2048, 2048, 25, 12, 0};
+    int n = tx_snprintf(gold, cap, "0 -1");
+    for (int tick = 1; tick <= 27; tick++) {
+        int turn = tick <= 6 || tick == 27 ? 1 : tick >= 13 && tick <= 18 ? -1 : 0;
+        int climb = tick == 27 ? 0 : turn;
+        int speed_target = climb == 0 ? 12 : 28;
+        state.heading = (state.heading + 360 + 3 * turn) % 360;
+        state.bank = approach(state.bank, 24 * turn, 4);
+        state.speed = approach(state.speed, speed_target, 2);
+        state.pitch = approach(state.pitch, 18 * climb, 3);
+        state.altitude += climb;
+        state.x = (state.x + move_axis(state.heading, state.speed) + 4096) % 4096;
+        state.z = (state.z - move_axis((state.heading + 90) % 360, state.speed) + 4096) % 4096;
+        if (tick % 6 == 0 || tick == 27) {
+            int written = tx_snprintf(gold + n, cap - n, " 3,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                state.heading % 256, state.heading / 256, 24 + state.bank,
+                state.x % 256, state.x / 256, state.z % 256, state.z / 256,
+                state.altitude, state.speed, 18 + state.pitch);
+            if (written < 0 || written >= cap - n) return -1;
+            n += written;
+        }
+    }
+    return n;
+}
+
+static int browser(const char *dir, const char *mode, int base_check, int flight_check) {
+    char profile[350], url[380], gold[240], *out = 0;
     const char start[] = "<pre id=\"ux-link-result\">";
     const char end[] = "</pre>";
     char *cmd[] = {"google-chrome", "--headless=new", "--allow-file-access-from-files",
@@ -69,6 +109,8 @@ static int browser(const char *dir, const char *mode, int base_check) {
             "%d 426 240 10,20,30,255 200,150,100,255 3 2 0 %d 2 0.5 -0.25 48000 -1 1 -1 -1",
             426 * 240, 3 * 10000 + 13 * 100 + 91);
     }
+    if (flight_check) gold_n = flight_gold(gold, sizeof gold);
+    if (gold_n < 0) return 1;
     rc = cx_runv_timeout(cmd, 15, &out, &n);
     from = out ? tx_find(out, n, start, sizeof start - 1) : -1;
     if (from >= 0) {
@@ -76,7 +118,8 @@ static int browser(const char *dir, const char *mode, int base_check) {
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
             pass = !rc && tx_same(out + from, to, gold, gold_n);
-            printf("%s mode=%s val=%.*s failed=%d\n", base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
+            printf("%s mode=%s val=%.*s failed=%d\n",
+                flight_check ? "CHECK_UXE_D1_FLIGHT_WASM" : base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
                 mode, (int)to, out + from, !pass);
         }
     }
@@ -91,11 +134,18 @@ int main(int argc, char **argv) {
     size_t removed_n = 0;
     const char *mode = argc == 2 ? argv[1] : "";
     int base_check = tx_eq(mode, "base", 5) || tx_eq(mode, "base-color", 11);
+    int flight_check = tx_eq(mode, "flight", 7) || tx_eq(mode, "flight-heading", 15);
     if (argc > 2 || (argc == 2 && !tx_eq(mode, "version", 8) && !tx_eq(mode, "signature", 10) &&
-        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check)) return 2;
+        !tx_eq(mode, "bounds", 7) && !tx_eq(mode, "missing", 8) && !base_check && !flight_check)) return 2;
     if (sy_mkdtemp("/tmp", "uxe-link-", dir, sizeof dir)) return 2;
     int rc = copy_fixture(dir, "host-abi.js", "ujs/practice/uxe/base/host-abi.js");
-    if (base_check) {
+    if (flight_check) {
+        int mutate = tx_eq(mode, "flight-heading", 15);
+        rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
+            generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) ||
+            generated(dir, "product", "ujs/practice/uxe/products/d1/main.ujs",
+                mutate ? "tickTurn * 3" : 0, "tickTurn * 2");
+    } else if (base_check) {
         int mutate = tx_eq(mode, "base-color", 11);
         char path[320];
         const unsigned char asset[] = {7, 13, 29, 91};
@@ -112,7 +162,7 @@ int main(int argc, char **argv) {
             generated(dir, "version", base_source, "version 1;", "version 2;") ||
             generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)");
     }
-    rc = rc || browser(dir, mode, base_check);
+    rc = rc || browser(dir, mode, base_check, flight_check);
     if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
     mm_free(removed);
     return rc;

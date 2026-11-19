@@ -232,6 +232,8 @@ D1 基座切片由 `practice/uxe/base/uxe.ujs` 编译，`uxe_dispatch(op,a,b)` �
 
 参数越界返回 -1。浏览器宿主校验基座内存跨度，转发 DOM 输入、画布呈现与音频设备输出。白名单桥提供静态画布入口、模块加载、可选资源预取、帧回调和销毁。基座探针用 `sh ./unisacc.com ujs/tests/ux-link.cx -- base` 实测浏览器帧、键盘、资源和音频缓冲。用 `base-color` 改产品测试源的角落颜色，原期望须失败。
 
+D1 产品的键盘飞行状态已迁入 `practice/uxe/products/d1/main.ujs`，由产品 Wasm 将原始键位解释为转向、升降和加速。用单调微秒积累 30 Hz 步进，补步沿用上次输入，最后一步使用本次按键。测试从产品自己的内存读回 11 字节兼容指标。`ujs/tests/ux-link.cx -- flight` 对照独立仿真核五个读点，包含按键释放和三步补步。将每步航向从 3 度篡改为 2 度的 `flight-heading` 须失败。此切片尚未接入场景渲染、指针、战斗、HUD、重开和游戏音色。
+
 #### 构建、顺序与验收
 
 基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。

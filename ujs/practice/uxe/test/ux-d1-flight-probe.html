@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D1 flight probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function read(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name + ".wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, character => character.charCodeAt(0) & 255);
+  return new WebAssembly.Module(bytes);
+}
+
+const result = document.querySelector("#ux-link-result");
+try {
+  const canvas = document.querySelector("canvas");
+  const keys = ["KeyA", "KeyD", "KeyW", "KeyS", "ShiftLeft", "ShiftRight",
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
+  const host = createBrowserHost(canvas, keys);
+  const [base, product] = ["base", "product"].map(read);
+  const linked = linkUxe(base, product, host);
+  host.attachMemory(linked.base.memory);
+  const run = linked.product.uxe_frame;
+  const packet = new Uint8Array(linked.product.memory.buffer, 2097152, 11);
+  const snapshot = () => packet.join(",");
+  const key = (type, ...codes) => {
+    for (const code of codes) dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+  };
+  const snapshots = [];
+  run(0n);
+  const early = run(33333n);
+  for (let i = 1; i <= 24; i++) {
+    if (i === 1) key("keydown", "KeyD", "KeyW", "ShiftLeft");
+    if (i === 7) key("keyup", "KeyD", "KeyW", "ShiftLeft");
+    if (i === 13) key("keydown", "ArrowLeft", "ArrowDown", "ShiftRight");
+    if (i === 19) dispatchEvent(new Event("blur"));
+    run(BigInt(i) * 33334n);
+    if (i % 6 === 0) snapshots.push(snapshot());
+  }
+  const backwards = run(800000n);
+  key("keydown", "KeyD");
+  run(27n * 33334n);
+  snapshots.push(snapshot());
+  result.textContent = [early, backwards, ...snapshots].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>
