@@ -1,0 +1,419 @@
+/* tools/handwritten-census.cx -- lower-only logical LOC census for handwritten .cx/.c outside the OS interface layer.
+ *   sh ./unisacc.com tools/handwritten-census.cx -- [--root DIR] --write FILE
+ *   sh ./unisacc.com tools/handwritten-census.cx -- [--root DIR] --check FILE
+ *   sh ./unisacc.com tools/handwritten-census.cx -- [--root DIR] --report
+ * Scope (direct files only, no recursion into ext/, tools/, tests/ or subdirs):
+ *   src/*.cx, src/*.c, cx/compiler/*.cx, cx/runtime/*.cx, cx/driver/*.cx, cx/cx0/*.cx
+ * LOC rule: excludes blank lines, comment-only lines (// and block comments, keeping lines with code + comment),
+ *   and directive-only #pragma / #include lines.
+ * Symlinks: counted once per canonical target, marked `symlink` in output, never double-counted in TOTAL.
+ * Last line: HANDWRITTEN_CENSUS<TAB>files=N<TAB>loc=M<TAB>over=A<TAB>under=B<TAB>gone=C<TAB>status=PASS|FAIL */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define HC_MAX 1024
+#define HC_NDIRS 5
+
+typedef struct {
+    char path[256];
+    char dir[64];
+    char kind[4];
+    char real[512];
+    long loc;
+    int is_sym;
+    int dup_sym;
+} HcItem;
+
+typedef struct {
+    char path[256];
+    char kind[4];
+    long loc;
+    int seen;
+} HcBase;
+
+static const char *HC_DIRS[HC_NDIRS] = {
+    "src", "cx/compiler", "cx/runtime", "cx/driver", "cx/cx0"
+};
+static const int HC_ALLOW_C[HC_NDIRS] = { 1, 0, 0, 0, 0 };
+
+static HcItem hc_items[HC_MAX];
+static int hc_n;
+static HcBase hc_base[HC_MAX];
+static int hc_nb;
+
+static void hc_refuse(const char *why) {
+    fprintf(stderr, "handwritten-census: REFUSE %s\n", why);
+    exit(2);
+}
+
+static int hc_is_skip_directive(const char *head) {
+    int i = 0;
+    if (head[0] != '#') return 0;
+    i = 1;
+    while (head[i] == ' ' || head[i] == '\t') i++;
+    if (tx_prefixz(head + i, "pragma", 6)) {
+        char c = head[i + 6];
+        if (!c || c == ' ' || c == '\t' || c == '\r') return 1;
+    }
+    if (tx_prefixz(head + i, "include", 7)) {
+        char c = head[i + 7];
+        if (!c || c == ' ' || c == '\t' || c == '<' || c == '"' || c == '\r') return 1;
+    }
+    return 0;
+}
+
+static long hc_count_loc(const char *s, size_t n) {
+    long loc = 0;
+    int in_block = 0;
+    size_t i = 0;
+
+    while (i < n) {
+        int has_code = 0;
+        char in_str = 0;
+        char head[24];
+        int hn = 0;
+
+        while (i < n && s[i] != '\n') {
+            char c = s[i];
+            if (in_block) {
+                if (c == '*' && i + 1 < n && s[i + 1] == '/') {
+                    in_block = 0;
+                    i += 2;
+                    continue;
+                }
+                i++;
+                continue;
+            }
+            if (in_str) {
+                if (c == '\\' && i + 1 < n && s[i + 1] != '\n') {
+                    i += 2;
+                    continue;
+                }
+                if (c == in_str) in_str = 0;
+                i++;
+                continue;
+            }
+            if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+                while (i < n && s[i] != '\n') i++;
+                break;
+            }
+            if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+                in_block = 1;
+                i += 2;
+                continue;
+            }
+            if (c == ' ' || c == '\t' || c == '\r') {
+                if (has_code && hn < 20) head[hn++] = c;
+                i++;
+                continue;
+            }
+            has_code = 1;
+            if (hn < 20) head[hn++] = c;
+            if (c == '"' || c == '\'') in_str = c;
+            i++;
+        }
+        if (i < n && s[i] == '\n') i++;
+        if (has_code) {
+            head[hn] = 0;
+            if (!hc_is_skip_directive(head)) loc++;
+        }
+    }
+    return loc;
+}
+
+static int hc_cmp_path(const void *a, const void *b) {
+    const HcItem *x = (const HcItem *)a;
+    const HcItem *y = (const HcItem *)b;
+    return strcmp(x->path, y->path);
+}
+
+static int hc_cmp_loc_desc(const void *a, const void *b) {
+    int ia = *(const int *)a;
+    int ib = *(const int *)b;
+    if (hc_items[ib].loc > hc_items[ia].loc) return 1;
+    if (hc_items[ib].loc < hc_items[ia].loc) return -1;
+    return strcmp(hc_items[ia].path, hc_items[ib].path);
+}
+
+static void hc_scan(const char *root) {
+    int use_root = root && root[0] && !tx_eqz(root, ".");
+    hc_n = 0;
+    for (int d = 0; d < HC_NDIRS; d++) {
+        const char *dir = HC_DIRS[d];
+        char fdir[512];
+        DIR *dp;
+        struct dirent *de;
+        if (use_root) {
+            if (cx_fmt(fdir, sizeof fdir, "%s/%s", root, dir)) hc_refuse("dir-path-too-long");
+        } else {
+            if (cx_fmt(fdir, sizeof fdir, "%s", dir)) hc_refuse("dir-path-too-long");
+        }
+        dp = opendir(fdir);
+        if (!dp) hc_refuse("opendir-failed");
+        while ((de = readdir(dp)) != 0) {
+            const char *nm = de->d_name;
+            size_t nl = strlen(nm);
+            const char *kind = 0;
+            char rel[256], fpath[768];
+            struct stat lst, st;
+            size_t sz = 0;
+            char *buf;
+            HcItem *it;
+
+            if (nm[0] == '.') continue;
+            if (nl > 3 && tx_eqz(nm + nl - 3, ".cx")) kind = "cx";
+            else if (HC_ALLOW_C[d] && nl > 2 && tx_eqz(nm + nl - 2, ".c")) kind = "c";
+            else continue;
+
+            if (cx_fmt(rel, sizeof rel, "%s/%s", dir, nm)) hc_refuse("rel-path-too-long");
+            if (use_root) {
+                if (cx_fmt(fpath, sizeof fpath, "%s/%s", root, rel)) hc_refuse("full-path-too-long");
+            } else {
+                if (cx_fmt(fpath, sizeof fpath, "%s", rel)) hc_refuse("full-path-too-long");
+            }
+            if (lstat(fpath, &lst) != 0) hc_refuse("lstat-failed");
+            if (stat(fpath, &st) != 0) {
+                if (S_ISLNK(lst.st_mode)) hc_refuse("broken-symlink");
+                hc_refuse("stat-failed");
+            }
+            if (!S_ISREG(st.st_mode)) continue;
+            if (hc_n >= HC_MAX) hc_refuse("too-many-files");
+
+            it = &hc_items[hc_n++];
+            memset(it, 0, sizeof *it);
+            if (cx_fmt(it->path, sizeof it->path, "%s", rel)) hc_refuse("path-bound");
+            if (cx_fmt(it->dir, sizeof it->dir, "%s", dir)) hc_refuse("dir-bound");
+            if (cx_fmt(it->kind, sizeof it->kind, "%s", kind)) hc_refuse("kind-bound");
+            it->is_sym = S_ISLNK(lst.st_mode) ? 1 : 0;
+            if (sy_realpath(fpath, it->real, sizeof it->real) < 0) hc_refuse("realpath-failed");
+
+            buf = cx_read(fpath, &sz);
+            if (!buf) hc_refuse("read-failed");
+            it->loc = hc_count_loc(buf, sz);
+            free(buf);
+        }
+        closedir(dp);
+    }
+    qsort(hc_items, (size_t)hc_n, sizeof hc_items[0], hc_cmp_path);
+
+    /* Deduplicate symlinks against canonical targets (prefer non-symlink owner). */
+    for (int i = 0; i < hc_n; i++) {
+        if (!hc_items[i].is_sym) continue;
+        for (int j = 0; j < hc_n; j++) {
+            if (i == j) continue;
+            if (!tx_eqz(hc_items[i].real, hc_items[j].real)) continue;
+            if (!hc_items[j].is_sym || j < i) {
+                hc_items[i].dup_sym = 1;
+                break;
+            }
+        }
+    }
+}
+
+static long hc_total_loc(int *counted_files) {
+    long total = 0;
+    int nf = 0;
+    for (int i = 0; i < hc_n; i++) {
+        if (hc_items[i].dup_sym) continue;
+        total += hc_items[i].loc;
+        nf++;
+    }
+    if (counted_files) *counted_files = nf;
+    return total;
+}
+
+static int hc_do_write(const char *path) {
+    size_t cap = 65536, pos = 0;
+    char *out = malloc(cap);
+    char line[512];
+    int nf = 0;
+    long total = hc_total_loc(&nf);
+
+    if (!out) hc_refuse("alloc");
+    {
+        const char *hdr = "# path\tkind\tloc\n";
+        size_t hl = strlen(hdr);
+        if (mm_copy(out, (long)cap, hdr, (long)hl)) hc_refuse("copy");
+        pos = hl;
+    }
+    for (int i = 0; i < hc_n; i++) {
+        HcItem *it = &hc_items[i];
+        size_t ll;
+        if (it->is_sym) {
+            if (cx_fmt(line, sizeof line, "%s\t%s\t%ld\tsymlink\n", it->path, it->kind, it->loc)) hc_refuse("line-fmt");
+        } else {
+            if (cx_fmt(line, sizeof line, "%s\t%s\t%ld\n", it->path, it->kind, it->loc)) hc_refuse("line-fmt");
+        }
+        ll = strlen(line);
+        if (pos + ll + 64 >= cap) {
+            cap *= 2;
+            out = realloc(out, cap);
+            if (!out) hc_refuse("realloc");
+        }
+        if (mm_copy(out + pos, (long)(cap - pos), line, (long)ll)) hc_refuse("copy");
+        pos += ll;
+    }
+    if (cx_fmt(line, sizeof line, "TOTAL\t-\t%ld\n", total)) hc_refuse("total-fmt");
+    {
+        size_t ll = strlen(line);
+        if (pos + ll >= cap) {
+            cap = pos + ll + 64;
+            out = realloc(out, cap);
+            if (!out) hc_refuse("realloc");
+        }
+        if (mm_copy(out + pos, (long)(cap - pos), line, (long)ll)) hc_refuse("copy");
+        pos += ll;
+    }
+    if (cx_write(path, out, pos)) hc_refuse("write-baseline");
+    free(out);
+    printf("HANDWRITTEN_CENSUS\tfiles=%d\tloc=%ld\tover=0\tunder=0\tgone=0\tstatus=PASS\n", nf, total);
+    return 0;
+}
+
+static void hc_load_baseline(const char *path) {
+    size_t sz = 0;
+    char *s = cx_read(path, &sz);
+    size_t i = 0;
+
+    if (!s) hc_refuse("baseline-unreadable");
+    hc_nb = 0;
+    while (i < sz) {
+        size_t start = i;
+        while (i < sz && s[i] != '\n') i++;
+        {
+            size_t len = i - start;
+            if (len > 0 && s[start + len - 1] == '\r') len--;
+            if (len > 0 && s[start] != '#') {
+                char line[512];
+                char *t1, *t2, *t3;
+                if (len >= sizeof line) hc_refuse("baseline-line-too-long");
+                if (mm_copy(line, (long)sizeof line, s + start, (long)len)) hc_refuse("copy");
+                line[len] = 0;
+                if (!tx_prefixz(line, "TOTAL\t", 6)) {
+                    t1 = strchr(line, '\t');
+                    t2 = t1 ? strchr(t1 + 1, '\t') : 0;
+                    if (!t1 || !t2) hc_refuse("baseline-bad-tsv");
+                    *t1 = 0;
+                    *t2 = 0;
+                    t3 = strchr(t2 + 1, '\t');
+                    if (t3) *t3 = 0;
+                    if (hc_nb >= HC_MAX) hc_refuse("baseline-too-many-rows");
+                    memset(&hc_base[hc_nb], 0, sizeof hc_base[hc_nb]);
+                    if (cx_fmt(hc_base[hc_nb].path, sizeof hc_base[hc_nb].path, "%s", line)) hc_refuse("base-path");
+                    if (cx_fmt(hc_base[hc_nb].kind, sizeof hc_base[hc_nb].kind, "%s", t1 + 1)) hc_refuse("base-kind");
+                    hc_base[hc_nb].loc = atol(t2 + 1);
+                    hc_nb++;
+                }
+            }
+        }
+        if (i < sz && s[i] == '\n') i++;
+    }
+    free(s);
+}
+
+static int hc_do_check(const char *path) {
+    int over = 0, under = 0, gone = 0, nf = 0;
+    long total = hc_total_loc(&nf);
+
+    hc_load_baseline(path);
+    for (int i = 0; i < hc_n; i++) {
+        HcItem *it = &hc_items[i];
+        int found = -1;
+        for (int j = 0; j < hc_nb; j++) {
+            if (tx_eqz(hc_base[j].path, it->path)) {
+                found = j;
+                break;
+            }
+        }
+        if (found < 0) {
+            printf("OVER\t%s\tbaseline=0\tnow=%ld\tnew-file%s\n", it->path, it->loc, it->is_sym ? "\tsymlink" : "");
+            over++;
+        } else {
+            long bl = hc_base[found].loc;
+            hc_base[found].seen = 1;
+            if (it->loc > bl) {
+                printf("OVER\t%s\tbaseline=%ld\tnow=%ld\tdelta=+%ld%s\n", it->path, bl, it->loc, it->loc - bl, it->is_sym ? "\tsymlink" : "");
+                over++;
+            } else if (it->loc < bl) {
+                printf("UNDER\t%s\tbaseline=%ld\tnow=%ld\tdelta=-%ld\thint=tighten with --write%s\n", it->path, bl, it->loc, bl - it->loc, it->is_sym ? "\tsymlink" : "");
+                under++;
+            }
+        }
+    }
+    for (int j = 0; j < hc_nb; j++) {
+        if (!hc_base[j].seen) {
+            printf("GONE\t%s\tbaseline=%ld\tnow=0\n", hc_base[j].path, hc_base[j].loc);
+            gone++;
+        }
+    }
+    printf("HANDWRITTEN_CENSUS\tfiles=%d\tloc=%ld\tover=%d\tunder=%d\tgone=%d\tstatus=%s\n",
+        nf, total, over, under, gone, over ? "FAIL" : "PASS");
+    return over ? 1 : 0;
+}
+
+static int hc_do_report(void) {
+    int order[HC_MAX];
+    int nf = 0;
+    long total = hc_total_loc(&nf);
+
+    for (int d = 0; d < HC_NDIRS; d++) {
+        int df = 0;
+        long dloc = 0;
+        for (int i = 0; i < hc_n; i++) {
+            if (!tx_eqz(hc_items[i].dir, HC_DIRS[d])) continue;
+            if (hc_items[i].dup_sym) continue;
+            df++;
+            dloc += hc_items[i].loc;
+        }
+        printf("DIR\t%s\tfiles=%d\tloc=%ld\n", HC_DIRS[d], df, dloc);
+    }
+
+    for (int i = 0; i < hc_n; i++) order[i] = i;
+    qsort(order, (size_t)hc_n, sizeof order[0], hc_cmp_loc_desc);
+    {
+        int top = hc_n < 15 ? hc_n : 15;
+        for (int k = 0; k < top; k++) {
+            HcItem *it = &hc_items[order[k]];
+            if (it->is_sym) {
+                printf("TOP\t%d\t%s\t%s\t%ld\tsymlink\n", k + 1, it->path, it->kind, it->loc);
+            } else {
+                printf("TOP\t%d\t%s\t%s\t%ld\n", k + 1, it->path, it->kind, it->loc);
+            }
+        }
+    }
+
+    printf("HANDWRITTEN_CENSUS\tfiles=%d\tloc=%ld\tover=0\tunder=0\tgone=0\tstatus=PASS\n", nf, total);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    const char *file = 0;
+    int mode = 0; /* 1=write, 2=check, 3=report */
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) {
+            root = argv[++i];
+        } else if (tx_eqz(argv[i], "--write") && i + 1 < argc && !mode) {
+            mode = 1;
+            file = argv[++i];
+        } else if (tx_eqz(argv[i], "--check") && i + 1 < argc && !mode) {
+            mode = 2;
+            file = argv[++i];
+        } else if (tx_eqz(argv[i], "--report") && !mode) {
+            mode = 3;
+        } else {
+            fprintf(stderr, "usage: handwritten-census [--root DIR] --write FILE | --check FILE | --report\n");
+            return 2;
+        }
+    }
+    if (!mode) {
+        fprintf(stderr, "usage: handwritten-census [--root DIR] --write FILE | --check FILE | --report\n");
+        return 2;
+    }
+    hc_scan(root);
+    if (mode == 1) return hc_do_write(file);
+    if (mode == 2) return hc_do_check(file);
+    return hc_do_report();
+}

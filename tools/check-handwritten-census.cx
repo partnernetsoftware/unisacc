@@ -1,0 +1,240 @@
+/* tools/check-handwritten-census.cx -- fixed-fixture regression checks for tools/handwritten-census.cx.
+ *   sh ./unisacc.com tools/check-handwritten-census.cx
+ * Builds tools/handwritten-census.cx once (-o, into a private temp dir), creates a synthetic 5-dir tree
+ * (never scans the real repo), and verifies:
+ *   - LOC counting rules (blank, //, /* * /, code+comment, #pragma/#include, #define, strings with // or /*,
+ *     C non-nested /* /* * /, and unclosed /* extending to EOF)
+ *   - src/*.c included as kind c while cx/compiler/*.c is ignored
+ *   - symlinks marked `symlink` and not double-counted in files/TOTAL
+ *   - --write TSV format (header, sorted paths, TOTAL row)
+ *   - --check states: equal (PASS), grow OVER (FAIL rc 1), shrink UNDER (PASS rc 0 + tighten hint),
+ *     new file OVER (FAIL rc 1), missing file GONE (PASS rc 0)
+ *   - --report directory subtotals and top-15 ordering
+ * Last line: CHECK_HANDWRITTEN_CENSUS<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CHC_PW 4400
+#define CHC_OUT 16384
+
+static char chc_dir[CHC_PW], chc_tree[CHC_PW], chc_bin[CHC_PW], chc_base[CHC_PW];
+
+static void chc_abort(const char *reason) {
+    fprintf(stderr, "check-handwritten-census: REFUSE %s\n", reason);
+    exit(2);
+}
+
+static void chc_mkdir(const char *rel) {
+    char p[CHC_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", chc_tree, rel)) chc_abort("mkdir-path");
+    if (mkdir(p, 0700) && errno != EEXIST) chc_abort("mkdir");
+}
+
+static void chc_write(const char *rel, const char *body) {
+    char p[CHC_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", chc_tree, rel)) chc_abort("file-path");
+    if (cx_write(p, body, strlen(body))) chc_abort("write-file");
+}
+
+static void chc_rm(const char *rel) {
+    char p[CHC_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", chc_tree, rel)) chc_abort("rm-path");
+    (void)sy_unlink(p);
+}
+
+static void chc_rmdir(const char *rel) {
+    char p[CHC_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", chc_tree, rel)) chc_abort("rmdir-path");
+    (void)rmdir(p);
+}
+
+static int chc_exec(const char *mode, const char *arg, char *out) {
+    char *av[6];
+    int k = 0;
+    av[k++] = chc_bin;
+    av[k++] = "--root";
+    av[k++] = chc_tree;
+    av[k++] = (char *)mode;
+    if (arg) av[k++] = (char *)arg;
+    av[k] = 0;
+    return ck_run(av, out, CHC_OUT);
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CHC_OUT];
+    const char *td = sy_tmpdir();
+
+    if (cx_fmt(chc_dir, sizeof chc_dir, "%s/check-handwritten-census-%d", td && td[0] == '/' ? td : "/tmp", (int)getpid())) chc_abort("dir-path");
+    if (mkdir(chc_dir, 0700) && errno != EEXIST) chc_abort("mkdir-root");
+    if (cx_fmt(chc_tree, sizeof chc_tree, "%s/tree", chc_dir)) chc_abort("tree-path");
+    if (mkdir(chc_tree, 0700) && errno != EEXIST) chc_abort("mkdir-tree");
+    if (cx_fmt(chc_bin, sizeof chc_bin, "%s/handwritten-census", chc_dir)) chc_abort("bin-path");
+    if (cx_fmt(chc_base, sizeof chc_base, "%s/base.tsv", chc_dir)) chc_abort("base-path");
+
+    {
+        char *av[] = {"sh", (char *)sy_env_or("UNISACC", "./unisacc.com"), "tools/handwritten-census.cx", "-o", chc_bin, 0}; /* lint:allow R1-product builds handwritten-census with this checkout's product; UNISACC overrides */
+        int brc = ck_run(av, out, sizeof out);
+        if (brc != 0) {
+            fprintf(stderr, "check-handwritten-census: build failed (rc=%d):\n%s\n", brc, out);
+            chc_abort("build-handwritten-census");
+        }
+    }
+
+    chc_mkdir("src");
+    chc_mkdir("cx");
+    chc_mkdir("cx/compiler");
+    chc_mkdir("cx/runtime");
+    chc_mkdir("cx/driver");
+    chc_mkdir("cx/cx0");
+
+    /* 9 logical lines: blank, //, /* * /, #pragma/#include excluded; #define, code+comment, strings, C non-nested /* /* * / kept */
+    chc_write("src/syntax.cx",
+        "\n"
+        "   \t  \n"
+        "// line comment only\n"
+        "/* single-line block comment */\n"
+        "/* multi-line block\n"
+        "   middle of block\n"
+        "   end of block */\n"
+        "#pragma unisa use text.text\n"
+        "  #include <stdio.h>\n"
+        "/* lead */ #pragma foo // trail\n"
+        "#define HC_TEST 1\n"
+        "int a = 1; // trailing comment\n"
+        "/* leading comment */ int b = 2;\n"
+        "int c = 3; /* start block\n"
+        "   still in block\n"
+        "   end block */ int d = 4;\n"
+        "const char *s1 = \"not // comment\";\n"
+        "const char *s2 = \"not /* comment */\";\n"
+        "const char *s3 = \"esc \\\" // still code\";\n"
+        "/* outer /* inner */ int after_nest = 5;\n");
+
+    /* 1 logical line: unclosed block comment runs to EOF (swallows following lines) */
+    chc_write("src/unclosed.cx",
+        "int before_unclosed = 1;\n"
+        "/* unclosed block comment\n"
+        "int swallowed_by_comment = 2;\n");
+
+    /* 1 logical line as kind c */
+    chc_write("src/legacy.c",
+        "#include \"x.h\"\n"
+        "int leg(void) { return 0; }\n");
+
+    /* cx/compiler/*.c must be ignored; mod.cx has 2 logical lines */
+    chc_write("cx/compiler/mod.cx",
+        "int m1(void) { return 1; }\n"
+        "int m2(void) { return 2; }\n");
+    chc_write("cx/compiler/ignored.c",
+        "int ig(void) { return 0; }\n");
+
+    /* cx/runtime/rt.cx + symlink rt_link.cx -> rt.cx */
+    chc_write("cx/runtime/rt.cx", "int rt(void) { return 1; }\n");
+    {
+        char lp[CHC_PW];
+        if (cx_fmt(lp, sizeof lp, "%s/cx/runtime/rt_link.cx", chc_tree)) chc_abort("link-path");
+        if (symlink("rt.cx", lp) != 0) chc_abort("symlink");
+    }
+
+    chc_write("cx/driver/drv.cx", "int drv(void) { return 1; }\n");
+    chc_write("cx/cx0/p.cx", "int p0(void) { return 1; }\n");
+
+    /* 1..6: --write output, format, LOC rules, symlink dedup */
+    {
+        int rc = chc_exec("--write", chc_base, out);
+        ck(rc == 0 && ckk_has(out, CHC_OUT, "HANDWRITTEN_CENSUS\tfiles=7\tloc=16\tover=0\tunder=0\tgone=0\tstatus=PASS"),
+            "write-pass: rc=0 files=7 loc=16 status=PASS");
+    }
+    {
+        size_t bn = 0;
+        char *tsv = cx_read(chc_base, &bn);
+        long p_mod, p_leg;
+        if (!tsv) chc_abort("read-base");
+        p_mod = tx_find(tsv, (long)bn, "cx/compiler/mod.cx\tcx\t2\n", 24);
+        p_leg = tx_find(tsv, (long)bn, "src/legacy.c\tc\t1\n", 17);
+        ck(tx_prefixz(tsv, "# path\tkind\tloc\n", 16) && tx_find(tsv, (long)bn, "TOTAL\t-\t16\n", 11) >= 0 && p_mod >= 0 && p_leg > p_mod && tx_find(tsv, (long)bn, "ignored.c", 9) < 0,
+            "write-format: header, sorted paths, TOTAL=16, cx/compiler/*.c ignored");
+        ck(tx_find(tsv, (long)bn, "src/syntax.cx\tcx\t9\n", 19) >= 0,
+            "loc-syntax: blank/comments/pragma/include excluded, code+comment/strings/non-nested block kept -> 9");
+        ck(tx_find(tsv, (long)bn, "src/unclosed.cx\tcx\t1\n", 21) >= 0,
+            "loc-unclosed-block: unclosed block comment swallows trailing lines to EOF -> 1");
+        ck(tx_find(tsv, (long)bn, "src/legacy.c\tc\t1\n", 17) >= 0,
+            "loc-src-c: src/*.c recorded as kind c with #include excluded -> 1");
+        ck(tx_find(tsv, (long)bn, "cx/runtime/rt_link.cx\tcx\t1\tsymlink\n", 35) >= 0 && tx_find(tsv, (long)bn, "TOTAL\t-\t16\n", 11) >= 0,
+            "symlink-dedup: symlink marked and not double-counted in TOTAL");
+        free(tsv);
+    }
+
+    /* 7: --check equal */
+    {
+        int rc = chc_exec("--check", chc_base, out);
+        ck(rc == 0 && ckk_has(out, CHC_OUT, "HANDWRITTEN_CENSUS\tfiles=7\tloc=16\tover=0\tunder=0\tgone=0\tstatus=PASS"),
+            "check-equal: rc=0 over=0 under=0 gone=0 status=PASS");
+    }
+
+    /* 8: --check grow OVER */
+    chc_write("src/legacy.c",
+        "#include \"x.h\"\n"
+        "int leg(void) { return 0; }\n"
+        "int leg2(void) { return 1; }\n");
+    {
+        int rc = chc_exec("--check", chc_base, out);
+        ck(rc == 1 && ckk_has(out, CHC_OUT, "OVER\tsrc/legacy.c\tbaseline=1\tnow=2\tdelta=+1") && ckk_has(out, CHC_OUT, "over=1\tunder=0\tgone=0\tstatus=FAIL"),
+            "check-over-grow: rc=1 OVER src/legacy.c delta=+1 status=FAIL");
+    }
+    chc_write("src/legacy.c", "#include \"x.h\"\nint leg(void) { return 0; }\n");
+
+    /* 9: --check shrink UNDER */
+    chc_write("cx/compiler/mod.cx", "int m1(void) { return 1; }\n");
+    {
+        int rc = chc_exec("--check", chc_base, out);
+        ck(rc == 0 && ckk_has(out, CHC_OUT, "UNDER\tcx/compiler/mod.cx\tbaseline=2\tnow=1\tdelta=-1\thint=tighten with --write") && ckk_has(out, CHC_OUT, "over=0\tunder=1\tgone=0\tstatus=PASS"),
+            "check-under-shrink: rc=0 UNDER cx/compiler/mod.cx with tighten hint status=PASS");
+    }
+    chc_write("cx/compiler/mod.cx", "int m1(void) { return 1; }\nint m2(void) { return 2; }\n");
+
+    /* 10: --check new file OVER */
+    chc_write("cx/driver/extra.cx", "int ex(void) { return 9; }\n");
+    {
+        int rc = chc_exec("--check", chc_base, out);
+        ck(rc == 1 && ckk_has(out, CHC_OUT, "OVER\tcx/driver/extra.cx\tbaseline=0\tnow=1\tnew-file") && ckk_has(out, CHC_OUT, "over=1\tunder=0\tgone=0\tstatus=FAIL"),
+            "check-over-newfile: rc=1 OVER new-file cx/driver/extra.cx status=FAIL");
+    }
+    chc_rm("cx/driver/extra.cx");
+
+    /* 11: --check missing file GONE */
+    chc_rm("cx/cx0/p.cx");
+    {
+        int rc = chc_exec("--check", chc_base, out);
+        ck(rc == 0 && ckk_has(out, CHC_OUT, "GONE\tcx/cx0/p.cx\tbaseline=1\tnow=0") && ckk_has(out, CHC_OUT, "over=0\tunder=0\tgone=1\tstatus=PASS"),
+            "check-gone: rc=0 GONE cx/cx0/p.cx status=PASS");
+    }
+    chc_write("cx/cx0/p.cx", "int p0(void) { return 1; }\n");
+
+    /* 12: --report directory subtotals and top ranking */
+    {
+        int rc = chc_exec("--report", 0, out);
+        ck(rc == 0 && ckk_has(out, CHC_OUT, "DIR\tsrc\tfiles=3\tloc=11") && ckk_has(out, CHC_OUT, "DIR\tcx/runtime\tfiles=1\tloc=1") && ckk_has(out, CHC_OUT, "TOP\t1\tsrc/syntax.cx\tcx\t9") && ckk_has(out, CHC_OUT, "cx/runtime/rt_link.cx\tcx\t1\tsymlink") && ckk_has(out, CHC_OUT, "HANDWRITTEN_CENSUS\tfiles=7\tloc=16\tover=0\tunder=0\tgone=0\tstatus=PASS"),
+            "report-summary: rc=0 dir subtotals, top-1 syntax.cx=9, symlink marked");
+    }
+
+    /* clean up private temp dir */
+    chc_rm("src/syntax.cx"); chc_rm("src/unclosed.cx"); chc_rm("src/legacy.c");
+    chc_rm("cx/compiler/mod.cx"); chc_rm("cx/compiler/ignored.c");
+    chc_rm("cx/runtime/rt.cx"); chc_rm("cx/runtime/rt_link.cx");
+    chc_rm("cx/driver/drv.cx"); chc_rm("cx/cx0/p.cx");
+    chc_rmdir("src"); chc_rmdir("cx/compiler"); chc_rmdir("cx/runtime");
+    chc_rmdir("cx/driver"); chc_rmdir("cx/cx0"); chc_rmdir("cx");
+    (void)rmdir(chc_tree);
+    (void)sy_unlink(chc_base);
+    (void)sy_unlink(chc_bin);
+    (void)rmdir(chc_dir);
+
+    printf("CHECK_HANDWRITTEN_CENSUS\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
