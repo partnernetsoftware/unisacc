@@ -10,3 +10,17 @@
 | [archive/pre080/release/notes-0.0.76.md](pre080/release/notes-0.0.76.md) | 已归档 | 0.0.80 | 0.0.76 发布说明 |
 | [archive/pre080/release/notes-0.0.77.md](pre080/release/notes-0.0.77.md) | 已归档 | 0.0.80 | 0.0.77 发布说明 |
 | [archive/pre080/release/notes-0.0.78.md](pre080/release/notes-0.0.78.md) | 已归档 | 0.0.80 | 0.0.78 发布说明 |
+| [archive/pre080/release/notes-0.0.72.md](pre080/release/notes-0.0.72.md) | 已归档 | 0.0.80 | 0.0.72 发布说明 |
+| [archive/pre080/release/evidence/0.0.72/INDEX.tsv](pre080/release/evidence/0.0.72/INDEX.tsv) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/chain4-ape-receipt.txt](pre080/release/evidence/0.0.72/chain4-ape-receipt.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/chain4-checkpoint.tsv](pre080/release/evidence/0.0.72/chain4-checkpoint.tsv) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/ci-44232611754.json](pre080/release/evidence/0.0.72/ci-44232611754.json) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/ci-44232611754.log](pre080/release/evidence/0.0.72/ci-44232611754.log) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/draft-readback.txt](pre080/release/evidence/0.0.72/draft-readback.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/layout-check.out](pre080/release/evidence/0.0.72/layout-check.out) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/pack-ape-receipt.txt](pre080/release/evidence/0.0.72/pack-ape-receipt.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/pack-candidate.tsv](pre080/release/evidence/0.0.72/pack-candidate.tsv) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/pack-run.out](pre080/release/evidence/0.0.72/pack-run.out) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/pack-state.tsv](pre080/release/evidence/0.0.72/pack-state.tsv) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/public-readback.txt](pre080/release/evidence/0.0.72/public-readback.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.72/version-check.txt](pre080/release/evidence/0.0.72/version-check.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
