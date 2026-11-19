@@ -494,7 +494,7 @@ enum {
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET,
   OP_UX_ADDR, OP_UX_SPAN, OP_UX_LOAD, OP_UX_STORE, OP_UX_BYTE, OP_FSQRT,
-  OP_ABI_CALL, OP_ABI_RET, OP_U32, OP_FLOOR_I64
+  OP_ABI_CALL, OP_ABI_RET, OP_I32_BITS, OP_FLOOR_I64
 };
 enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 32 };
 enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_MAX_ALIASES = 8, ABI_TYPE_BASE = 14 };
@@ -1106,11 +1106,20 @@ static int abi_invoke(Lex *L, Prog *P, int which) {
   return f->result;
 }
 
-static int u32_opcode(const char *name) {
-  if (intrinsic_name(name, "u32_mul")) return 0x6c;
-  if (intrinsic_name(name, "u32_and")) return 0x71;
-  if (intrinsic_name(name, "u32_xor")) return 0x73;
-  if (intrinsic_name(name, "u32_shr")) return 0x76;
+enum { I32_SIGNED = 256, I32_UNARY = 512 };
+static int i32_opcode(const char *name) {
+  static const struct { const char *name; int op; } ops[] = {
+    {"wrap", I32_UNARY}, {"add", 0x6a}, {"sub", 0x6b}, {"mul", 0x6c},
+    {"and", 0x71}, {"or", 0x72}, {"xor", 0x73}, {"shl", 0x74},
+    {"shr", 0x76}, {"rotl", 0x77}, {"rotr", 0x78}
+  };
+  if ((name[0] != 'u' && name[0] != 'i') || name[1] != '3' ||
+      name[2] != '2' || name[3] != '_') return 0;
+  const int sign = name[0] == 'i' ? I32_SIGNED : 0;
+  for (uint32_t i = 0; i < sizeof ops / sizeof ops[0]; i++) {
+    if (intrinsic_name(name + 4, ops[i].name))
+      return (sign && ops[i].op == 0x76 ? 0x75 : ops[i].op) | sign;
+  }
   return 0;
 }
 
@@ -1246,15 +1255,18 @@ static int pprim(Lex *L, Prog *P) {
   if (L->tok == T_ID && (!pact || !strcmp(pact, "ident"))) {
     if (intrinsic_name(L->id, "closure")) return closure_expr(L, P);
     if (intrinsic_name(L->id, "str_slice")) return string_slice_expr(L, P);
-    int bit_op = u32_opcode(L->id);
+    int bit_op = i32_opcode(L->id);
     if (bit_op) {
       next(L);
-      if (!expect(L, T_LP, P, "u32 intrinsic (")) return 0;
-      if (pexpr(L, P) != TY_I64) { P->err = "u32 intrinsic requires i64"; return 0; }
-      if (!emit(P, OP_IWRAP, 0) || !expect(L, T_COMMA, P, "u32 intrinsic ,")) return 0;
-      if (pexpr(L, P) != TY_I64) { P->err = "u32 intrinsic requires i64"; return 0; }
-      if (!emit(P, OP_IWRAP, 0) || !expect(L, T_RP, P, "u32 intrinsic )")) return 0;
-      if (!emit(P, OP_U32, bit_op)) return 0;
+      if (!expect(L, T_LP, P, "i32 intrinsic (")) return 0;
+      if (pexpr(L, P) != TY_I64) { P->err = "i32 intrinsic requires i64"; return 0; }
+      if (!emit(P, OP_IWRAP, 0)) return 0;
+      if (!(bit_op & I32_UNARY)) {
+        if (!expect(L, T_COMMA, P, "i32 intrinsic ,")) return 0;
+        if (pexpr(L, P) != TY_I64) { P->err = "i32 intrinsic requires i64"; return 0; }
+        if (!emit(P, OP_IWRAP, 0)) return 0;
+      }
+      if (!expect(L, T_RP, P, "i32 intrinsic )") || !emit(P, OP_I32_BITS, bit_op)) return 0;
       return TY_I64;
     }
     if (!strcmp(L->id, "len")) {
@@ -2038,8 +2050,9 @@ static int emit_ops(Buf *c, Prog *P) {
     case OP_FLOOR_I64:
       if (!bu8(c, 0x9c) || !bu8(c, 0xb0)) return 0;
       break;
-    case OP_U32:
-      if (!bu8(c, (uint8_t)ins->a) || !bu8(c, 0xad)) return 0;
+    case OP_I32_BITS:
+      if (!(ins->a & I32_UNARY) && !bu8(c, (uint8_t)ins->a)) return 0;
+      if (!bu8(c, ins->a & I32_SIGNED ? 0xac : 0xad)) return 0;
       break;
     case OP_ABI_CALL:
       if (!bu8(c, 0x10) || !bleu(c, (uint32_t)(g_need_gpu + ins->a))) return 0;
