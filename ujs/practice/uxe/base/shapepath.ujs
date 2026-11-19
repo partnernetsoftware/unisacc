@@ -1,0 +1,98 @@
+struct ShapePath {
+  paths: u32;
+  capacity: u32;
+  count: u32;
+}
+
+function ShapePath_init(shape_path,...shape_path_args) {
+  let path_entries=ux_u32_put(shape_path+ShapePath.paths,shape_path_args[0]);
+  let capacity=ux_u32_put(shape_path+ShapePath.capacity,shape_path_args[1]);
+  let count=ux_u32_put(shape_path+ShapePath.count,0);
+  return shape_path;
+}
+
+function ShapePath_add(shape_path,...shape_path_args) {
+  let count=ux_u32(shape_path+ShapePath.count);
+  let result=0-1;
+  if(count<ux_u32(shape_path+ShapePath.capacity)) {
+    let row=ux_u32(shape_path+ShapePath.paths)+count*4;
+    let written=ux_u32_put(row,shape_path_args[0]);
+    let updated=ux_u32_put(shape_path+ShapePath.count,count+1);
+    result=shape_path;
+  }
+  return result;
+}
+
+function ShapePath_signedArea(shape_points,...shape_area_args) {
+  let n=shape_area_args[0];
+  let result=0.0;
+  if(n>=3) {
+    let prev=shape_points+(n-1)*16;
+    let next=shape_points;
+    while(next<shape_points+n*16) {
+      result=result+ux_f64(prev)*ux_f64(next+8)-ux_f64(next)*ux_f64(prev+8);
+      prev=next;
+      next=next+16;
+    }
+  }
+  return result*0.5;
+}
+
+// Assemble ordered outlines and holes using winding. Each solid owns a fixed
+// number of slots in the supplied hole table. Leading holes join the first solid.
+function ShapePath_toShapes(shape_path,...shape_build) {
+  let result=shape_build[0];
+  let result_cap=shape_build[1];
+  let holes=shape_build[2];
+  let holes_per_shape=shape_build[3];
+  let samples=shape_build[4];
+  let sample_cap=shape_build[5];
+  let scratch=shape_build[6];
+  let divisions=shape_build[7];
+  let is_ccw=shape_build[8];
+  let entries=ux_u32(shape_path+ShapePath.paths);
+  let paths=ux_u32(shape_path+ShapePath.count);
+  let solid_count=0;
+  let i=0;
+  let failed=0;
+  let leading=0;
+  while(i<paths && !failed) {
+    let path=ux_u32(entries+i*4);
+    let count=Path_getPoints(path,samples,sample_cap,divisions,scratch);
+    if(count<3) {
+      failed=1;
+    } else {
+      let area=ShapePath_signedArea(samples,count);
+      let solid=area<0.0;
+      if(is_ccw!=0) { solid=area>0.0; }
+      if(solid || paths==1) {
+        if(solid_count>=result_cap) {
+          failed=1;
+        } else {
+          let at=result+solid_count*Shape.size;
+          let base=holes+4*solid_count*holes_per_shape;
+          let written=Shape_init(at,path,base,holes_per_shape);
+          if(written<0) { failed=1; }
+          if(solid_count==0) {
+            let j=0;
+            while(j<leading && !failed) {
+              let added=Shape_addHole(at,ux_u32(entries+j*4));
+              if(added<0) { failed=1; }
+              j=j+1;
+            }
+          }
+          solid_count=solid_count+1;
+        }
+      } else if(solid_count==0) {
+        leading=leading+1;
+      } else {
+        let entry=Shape_addHole(result+(solid_count-1)*Shape.size,path);
+        if(entry<0) { failed=1; }
+      }
+    }
+    i=i+1;
+  }
+  if(solid_count==0 && paths>0) { failed=1; }
+  if(failed) { solid_count=0-1; }
+  return solid_count;
+}
