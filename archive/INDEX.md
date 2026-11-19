@@ -24,3 +24,16 @@
 | [archive/pre080/release/evidence/0.0.72/pack-state.tsv](pre080/release/evidence/0.0.72/pack-state.tsv) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
 | [archive/pre080/release/evidence/0.0.72/public-readback.txt](pre080/release/evidence/0.0.72/public-readback.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
 | [archive/pre080/release/evidence/0.0.72/version-check.txt](pre080/release/evidence/0.0.72/version-check.txt) | 已归档 | 0.0.80 | 0.0.72 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/INDEX.tsv](pre080/release/evidence/0.0.77/INDEX.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/cache-manager.tsv](pre080/release/evidence/0.0.77/cache-manager.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/ci-44363578812.json](pre080/release/evidence/0.0.77/ci-44363578812.json) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/ci-44363578812.log](pre080/release/evidence/0.0.77/ci-44363578812.log) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/draft-readback.txt](pre080/release/evidence/0.0.77/draft-readback.txt) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/expected-fail.tsv](pre080/release/evidence/0.0.77/expected-fail.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/expected-unmeasured.tsv](pre080/release/evidence/0.0.77/expected-unmeasured.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/pack-run.out](pre080/release/evidence/0.0.77/pack-run.out) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/public-readback.txt](pre080/release/evidence/0.0.77/public-readback.txt) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/ratchets.txt](pre080/release/evidence/0.0.77/ratchets.txt) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/rollback.txt](pre080/release/evidence/0.0.77/rollback.txt) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/tools-default-regression-deferred.tsv](pre080/release/evidence/0.0.77/tools-default-regression-deferred.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
+| [archive/pre080/release/evidence/0.0.77/warm-6f4f13e04c82b21521a6a51b828171e7667479efdfe7de36bd45315a726a10b5.tsv](pre080/release/evidence/0.0.77/warm-6f4f13e04c82b21521a6a51b828171e7667479efdfe7de36bd45315a726a10b5.tsv) | 已归档 | 0.0.80 | 0.0.77 发布证据 |
