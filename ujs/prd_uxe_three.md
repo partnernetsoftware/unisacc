@@ -164,6 +164,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): M1 数学层的验收入口是 `ujs/tests/<小写类名>-math.cx`。对应 r160 夹具位于 `ujs/practice/uxe/test/`，每项独立编译并读回。MathUtils 使用调用方持有的 Mulberry32 状态，并接收外部随机样本和 UUID 熵。`mathutils-math.cx` 对照 37 项，含六种固有欧拉顺序、类型归一化、两步随机序列、负模和 UUID。
 
+修订(cdx2): Color 的 Wasm 接口按缓冲类型分别提供 RGB、十六进制、样式和已有颜色入口。CSS 解析使用显式长度字节视图，覆盖 r160 的整数或百分比 RGB、逗号 HSL、短长十六进制和命名颜色。148 个不透明色作为事实表，`sh ./unisacc.com ujs/tools-ux/gen-color-names.cx -- --check` 核生成表，`color-style-math.cx` 比对 CSS 读写。颜色事实来源为 [CSS Color Module Level 4 命名颜色表](https://www.w3.org/TR/2026/CRD-css-color-4-20261118/#named-colors)。
+
 修订(cdx2): M1 组合源实测触发 `too many fns`。`compiler_min.cx` 的 `MAXFN` 为 128，`MAX_NATIVE` 为 16。包围球与平面检查只装载各自实际需要的向量和包围盒源，并保留相交测试的原生早退。M2 若需要把所有数学类合在一个编译单元，先用 0c 模块链接划定边界，再实测函数预算。
 
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。

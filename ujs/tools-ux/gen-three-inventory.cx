@@ -161,10 +161,28 @@ static int good_priority(const char *s) {
 static int good_milestone(const char *s) {
     return one_of(s,"|M1|M2|M3|M4|M5|M6|M7|M8|M9|M10|M11|M12|");
 }
+
+static int math_fixture(const char *stem,const char *label) {
+    char path[220],proof[145];
+    unsigned char *gate=0,*reference=0;
+    int64_t gate_size=0,reference_size=0;
+    tx_snprintf(path,sizeof path,"ujs/tests/%s-math.cx",stem);
+    int ok=!sy_read_file(path,&gate,&gate_size,100000);
+    tx_snprintf(path,sizeof path,"ujs/practice/uxe/test/%s-r160.html",stem);
+    ok=ok && !sy_read_file(path,&reference,&reference_size,100000);
+    if(ok) {
+        tx_snprintf(proof,sizeof proof,"G_MATH %s",label);
+        ok=tx_contains((const char *)gate,gate_size,proof,tx_len(proof,sizeof proof)) &&
+            tx_contains((const char *)reference,reference_size,"three.module.js",15);
+    }
+    mm_free(gate); mm_free(reference);
+    return ok;
+}
+
 static int math_evidence(const Row *r, const char *methods, const char *evidence) {
     char stem[100], path[220], proof[145];
-    unsigned char *source_bytes=0,*gate=0,*reference=0;
-    int64_t source_size=0, gate_size=0, reference_size=0;
+    unsigned char *source_bytes=0,*extra=0;
+    int64_t source_size=0,extra_size=0;
     if(r->lane!='A' || !tx_eqz(r->milestone,"M1")) return 0;
     tx_snprintf(proof,sizeof proof,"G-math %s",r->name);
     if(!starts(evidence,proof)) return 0;
@@ -175,15 +193,10 @@ static int math_evidence(const Row *r, const char *methods, const char *evidence
     }
     stem[i]=0;
     tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",stem);
-    int ok=!sy_read_file(path,&source_bytes,&source_size,100000);
-    tx_snprintf(path,sizeof path,"ujs/tests/%s-math.cx",stem);
-    ok=ok && !sy_read_file(path,&gate,&gate_size,100000);
-    tx_snprintf(path,sizeof path,"ujs/practice/uxe/test/%s-r160.html",stem);
-    ok=ok && !sy_read_file(path,&reference,&reference_size,100000);
-    if(ok) {
-        tx_snprintf(proof,sizeof proof,"G_MATH %s",r->name);
-        ok=tx_contains((const char *)gate,gate_size,proof,tx_len(proof,sizeof proof)) &&
-            tx_contains((const char *)reference,reference_size,"three.module.js",15);
+    int ok=!sy_read_file(path,&source_bytes,&source_size,100000) && math_fixture(stem,r->name);
+    if(ok && tx_eqz(r->name,"Color")) {
+        ok=!sy_read_file("ujs/practice/uxe/base/color-style.ujs",&extra,&extra_size,100000) &&
+            math_fixture("color-style","Color CSS");
     }
     const char *at=methods;
     while(ok && *at) {
@@ -191,10 +204,12 @@ static int math_evidence(const Row *r, const char *methods, const char *evidence
         while(identifier(*end)) end++;
         if(end==at || (*end && *end!=',')) { ok=0; break; }
         tx_snprintf(proof,sizeof proof,"function %s_%.*s(",r->name,(int)(end-at),at);
-        ok=tx_contains((const char *)source_bytes,source_size,proof,tx_len(proof,sizeof proof));
+        long length=tx_len(proof,sizeof proof);
+        ok=tx_contains((const char *)source_bytes,source_size,proof,length) ||
+            (extra && tx_contains((const char *)extra,extra_size,proof,length));
         at=*end?end+1:end;
     }
-    mm_free(source_bytes); mm_free(gate); mm_free(reference);
+    mm_free(source_bytes); mm_free(extra);
     return ok;
 }
 
