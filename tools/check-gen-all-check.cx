@@ -28,6 +28,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.env
+#pragma unisa use mem.bytes
 #pragma unisa use text.text
 
 #define CGAC_PW 4400
@@ -68,11 +69,40 @@ static void cgac_prep_minirepo(const char *cwd, const char *rep, char *out) {
     if (ckk_sh("check-gen-all-check", cmd, out, CGAC_OUT) != 0) cgac_abort("minirepo-run");
 }
 
+static int cgac_list_slice(const char *out, int start, int count, char *dst, size_t dcap) {
+    int idx = 0, got = 0;
+    size_t out_n = strlen(out), pos = 0, dp = 0;
+    dst[0] = 0;
+    while (pos < out_n) {
+        size_t ls = pos;
+        while (pos < out_n && out[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < out_n) pos++;
+        if (le > ls && out[le - 1] == '\r') le--;
+        if (le - ls > 9 && memcmp(out + ls, "GEN_ITEM\t", 9) == 0) {
+            size_t ns = ls + 9, ne = ns;
+            while (ne < le && out[ne] != '\t') ne++;
+            if (idx >= start && idx < start + count && ne > ns) {
+                size_t nl = ne - ns;
+                if (dp + (got ? 1 : 0) + nl + 1 >= dcap) return -1;
+                if (got) dst[dp++] = ',';
+                mm_copy(dst + dp, dcap - dp, out + ns, nl);
+                dp += nl;
+                dst[dp] = 0;
+                got++;
+            }
+            idx++;
+        }
+    }
+    return got;
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     char cwd[CGAC_PW], work[CGAC_PW], cmd[8192], out[CGAC_OUT];
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    int part2_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--part2"));
     int synth_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--synth"));
     int drift_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--drift"));
     int unstaged_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--unstaged"));
@@ -83,14 +113,16 @@ int main(int argc, char **argv) {
 
     if (!getcwd(cwd, sizeof cwd)) cgac_abort("getcwd");
     if (split_mode) {
-        static const char *bids[7] = {
-            "check-gen-all-check", "check-gen-all-synth", "check-gen-all-drift",
-            "check-gen-all-unstaged", "check-gen-all-pass", "check-gen-all-ready",
-            "check-gen-all-hang"
+        static const char *bids[8] = {
+            "check-gen-all-check", "check-gen-all-part2", "check-gen-all-synth",
+            "check-gen-all-drift", "check-gen-all-unstaged", "check-gen-all-pass",
+            "check-gen-all-ready", "check-gen-all-hang"
         };
-        static const char *bargs[7] = { "-", "--synth", "--drift", "--unstaged", "--pass-gates", "--chain-ready", "--hang" };
-        static const int bexp[7] = { 2, 5, 2, 1, 1, 2, 2 };
-        int bfound[7] = { 0, 0, 0, 0, 0, 0, 0 };
+        static const char *bargs[8] = {
+            "-", "--part2", "--synth", "--drift", "--unstaged", "--pass-gates", "--chain-ready", "--hang"
+        };
+        static const int bexp[8] = { 2, 1, 5, 2, 1, 1, 2, 2 };
+        int bfound[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
         char bpath[CGAC_PW];
         size_t bn = 0;
         if (cx_fmt(bpath, sizeof bpath, "%s/tests/batches.tsv", cwd)) cgac_abort("sp-path");
@@ -117,7 +149,7 @@ int main(int argc, char **argv) {
                 p++;
             }
             if (nc < 10) continue;
-            for (int i = 0; i < 7; i++) {
+            for (int i = 0; i < 8; i++) {
                 size_t idl = strlen(bids[i]);
                 size_t argl = strlen(bargs[i]);
                 const char *src_need = "tools/check-gen-all-check.cx";
@@ -132,13 +164,13 @@ int main(int argc, char **argv) {
         }
         free(buf);
         int total_assertions = 0;
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 8; i++) {
             char msg[160];
             (void)cx_fmt(msg, sizeof msg, "split-batch-registered: %s args=%s", bids[i], bargs[i]);
             ck(bfound[i] == 1, msg);
             total_assertions += bexp[i];
         }
-        ck(total_assertions == 15, "split-assertion-partition-total: 2+5+2+1+1+2+2 == 15 assertions (13 core + 2 history)");
+        ck(total_assertions == 16, "split-assertion-partition-total: 2+1+5+2+1+1+2+2 == 16 assertions (14 core + 2 history, 21+21=42 gens)");
         printf("CHECK_GEN_ALL_SPLIT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
         return ck_failures() ? 1 : 0;
     }
@@ -152,19 +184,28 @@ int main(int argc, char **argv) {
         if (cx_fmt(rep, sizeof rep, "%s/drift-repo", work)) cgac_abort("drep");
         cgac_prep_minirepo(cwd, rep, out);
 
-        /* Staging include/stdlib.h without recompute -> precommit blocks with real facts-gen + cx-flatten DIFF (no unisacc.com false DIFF) */
+        /* Step 1: direct gen-all-check on edited include/stdlib.h -> facts-gen + cx-flatten DIFF + --write fix (also warms unit cache) */
         if (cx_fmt(cmd, sizeof cmd,
             "unset UNISA_CONTAINER && cd '%s' && printf '\\n/* cgac-precommit-drift */\\n' >> include/stdlib.h && "
-            "git add include/stdlib.h && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("d1");
+            "sh ./unisacc.com tools/gen-all-check.cx -- --root '%s' --only facts-gen,cx-flatten", rep, rep)) cgac_abort("d1a");
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-        ck(rc != 0 && ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tDIFF\t") &&
+        ck(rc == 1 && ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tDIFF\t") &&
            ckk_has(out, CGAC_OUT, "k2-gen2") &&
            ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/facts-gen.cx -- --write .") &&
            ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tDIFF\t") &&
            ckk_has(out, CGAC_OUT, "fix: sh ./unisacc.com tools/cx-flatten.cx -- --write ."),
            "synthetic-header-drift-refused: editing include/stdlib.h refused by facts-gen and cx-flatten with --write fix");
+
+        /* Step 2: staging arity-gen.cx (uses unisacc.com) + drifted winargs table without recompute -> precommit blocks with real DIFF (no unisacc.com false DIFF) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "unset UNISA_CONTAINER && cd '%s' && git checkout -- include/stdlib.h && "
+            "printf '\\n/* cgac-arity-touch */\\n' >> tools/arity-gen.cx && "
+            "printf '\\n/* cgac-winargv-drift */\\n' >> tools/win-argv-gen.cx && "
+            "git add tools/arity-gen.cx tools/win-argv-gen.cx && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("d1b");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
         ck(rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") && !ckk_has(out, CGAC_OUT, "cannot open"),
-           "precommit-derive-gate-blocks-drift: staging include/stdlib.h without recompute blocked by real DIFF without unisacc.com false DIFF");
+           "precommit-derive-gate-blocks-drift: staging product input without recompute blocked by real DIFF without unisacc.com false DIFF");
 
         { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
         printf("CHECK_GEN_ALL_DRIFT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
@@ -311,33 +352,49 @@ int main(int argc, char **argv) {
         return ck_failures() ? 1 : 0;
     }
 
-    if (!synth_mode) {
-        /* Default mode: full-tree 42/42 PASS + --list (fast even under cold UNISACC_RUN_CACHE=0) */
-        {
-            int rc;
-            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --jobs 16", cwd, cwd, cwd))
-                cgac_abort("c1a");
-            rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-            ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\ttotal=42\tpass=42\tdiff=0\terror=0\t") &&
-               ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tPASS\t") &&
-               ckk_has(out, CGAC_OUT, "GEN_CHECK\twin-argv-gen\tPASS\t") &&
-               ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tPASS\t") &&
-               ckk_has(out, CGAC_OUT, "expires=0.0.85"),
-               "current-tree-all-same: --root . passes all 42 product-table generators (diff=0 error=0)");
-        }
+    if (part2_mode) {
+        char slice[2048];
+        int rc, got;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --list", cwd, cwd, cwd))
+            cgac_abort("p2list");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        got = (rc == 0) ? cgac_list_slice(out, 21, 21, slice, sizeof slice) : -1;
+        if (got != 21) cgac_abort("p2slice");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --jobs 12 --only '%s'",
+            cwd, cwd, cwd, slice)) cgac_abort("p2run");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\ttotal=21\tpass=21\tdiff=0\terror=0\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\twin-argv-gen\tPASS\t"),
+           "current-tree-all-same-part2: --root . passes second half (21/21) of 42 product-table generators");
 
-        {
-            int rc;
-            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --list", cwd, cwd, cwd))
-                cgac_abort("c1b");
-            rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-            ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_LIST_SUMMARY\ttotal=42\tuncovered=2") &&
-               ckk_has(out, CGAC_OUT, "GEN_ITEM\tfacts-gen\t") &&
-               ckk_has(out, CGAC_OUT, "GEN_ITEM\twin-argv-gen\t") &&
-               ckk_has(out, CGAC_OUT, "GEN_ITEM\tcx-flatten\t") &&
-               ckk_has(out, CGAC_OUT, "expires=0.0.85"),
-               "current-tree-list-42: --list discovers 42 generators with dated uncovered entries");
-        }
+        { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+        printf("CHECK_GEN_ALL_PART2\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+        return ck_failures() ? 1 : 0;
+    }
+
+    if (!synth_mode) {
+        /* Default mode: --list 42 + first half (21/21) of 42 product-table generators (paired with --part2 for full 42/42 cold coverage) */
+        char slice[2048];
+        int rc, got;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --list", cwd, cwd, cwd))
+            cgac_abort("c1b");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_LIST_SUMMARY\ttotal=42\tuncovered=2") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\tfacts-gen\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\twin-argv-gen\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_ITEM\tcx-flatten\t") &&
+           ckk_has(out, CGAC_OUT, "expires=0.0.85"),
+           "current-tree-list-42: --list discovers 42 generators with dated uncovered entries");
+
+        got = (rc == 0) ? cgac_list_slice(out, 0, 21, slice, sizeof slice) : -1;
+        if (got != 21) cgac_abort("c1slice");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/gen-all-check.cx' -- --root '%s' --jobs 12 --only '%s'",
+            cwd, cwd, cwd, slice)) cgac_abort("c1a");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_SUMMARY\ttotal=21\tpass=21\tdiff=0\terror=0\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\tfacts-gen\tPASS\t") &&
+           ckk_has(out, CGAC_OUT, "GEN_CHECK\tcx-flatten\tPASS\t"),
+           "current-tree-all-same: --root . passes first half (21/21) of 42 product-table generators");
 
         { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
         printf("CHECK_GEN_ALL_CHECK\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
