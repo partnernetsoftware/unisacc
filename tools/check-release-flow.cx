@@ -1,0 +1,46 @@
+/* Contract: checks tools/release-flow.cx using offline fixtures and historical strict bytes.
+ * Layer: interfaces. Output: CHECK_RELEASE_FLOW. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+static int passed,failed;
+static void ck(int ok,const char *id){printf("%s\t%s\n",ok?"PASS":"FAIL",id);if(ok)passed++;else failed++;}
+static char tmp[4096],bin[4400];
+static np_result actual(char **v){
+    np_result r={0};char why[512];if(np_run(v,0,0,30,&r,why,sizeof why)){fprintf(stderr,"check-release-flow: %s\n",why);exit(2);}return r;
+}
+static void fixtures(void){
+    char table[4400],strict[4400],inputs[4400],draft[4400];
+    if(cx_fmt(table,sizeof table,"%s/parents",tmp)||cx_fmt(strict,sizeof strict,"%s/strict",tmp)||
+       cx_fmt(inputs,sizeof inputs,"%s/inputs",tmp)||cx_fmt(draft,sizeof draft,"%s/draft",tmp))exit(2);
+    const char *rules="parent\tshard\tchecker\t0.0.1\tfixture\n";
+    const char *shard="shard\td\tPASS\t0\tx\t1\t0\t0\t-\nRAW\tBATCH_RUN\tid=shard\tstatus=PASS\trc=0\tcandidate=x\ttransport=0\n";
+    const char *checker="checker\td\tPASS\t0\tx\t1\t0\t0\t-\nRAW\tBATCH_RUN\tid=checker\tstatus=PASS\trc=0\tcandidate=x\ttransport=0\n";
+    char *args[]={bin,"check","--coverage",table,strict,0};np_buf b={0};
+    if(cx_write(table,rules,strlen(rules))||cx_write(strict,shard,strlen(shard)))exit(2);
+    np_result r=actual(args);
+    ck(r.rc==1&&r.out&&strstr(r.out,"MISSING_MULTISET_CHECK\tparent\tchecker"),"unwitnessed-multiset-check");np_free(&r);
+    np_puts(&b,shard);np_puts(&b,checker);if(cx_write(strict,b.p,b.n))exit(2);
+    r=actual(args);ck(r.rc==0&&r.out&&strstr(r.out,"gaps=0"),"all-shards-and-multiset-check");np_free(&r);
+    np_puts(&b,"shard\td\tUNKNOWN\t2\tx\t1\t0\t0\t-\n");if(cx_write(strict,b.p,b.n))exit(2);
+    r=actual(args);ck(r.rc==1&&r.out&&strstr(r.out,"MISSING_SHARD\tparent\tshard"),"last-attempt-overrides-earlier-pass");np_free(&r);
+    char row[4600];if(cx_fmt(row,sizeof row,"segment\tinvalid\t%s\n",strict)||cx_write(inputs,row,strlen(row)))exit(2);
+    char *stage[]={bin,"stage-a","--inputs",inputs,"--out",draft,0};
+    r=actual(stage);ck(r.rc==2&&r.err&&strstr(r.err,"SEGMENT_IDENTITY")&&sy_exists(draft)==0,"tampered-segment-stops-stage-before-publication");np_free(&r);
+    stage[1]="check";r=actual(stage);ck(r.rc==2&&r.err&&strstr(r.err,"SEGMENT_IDENTITY"),"check-independently-rehashes-input");np_free(&r);
+}
+int main(int argc,char **argv){
+    if(sy_mkdtemp("/tmp","release-flow-check",tmp,sizeof tmp)||cx_fmt(bin,sizeof bin,"%s/tool",tmp))return 2;
+    char driver[4096];if(sy_realpath("./unisacc.com",driver,sizeof driver)<0)return 2;
+    char *build[]={"sh",driver,"tools/release-flow.cx","-o",bin,0};
+    if(argc==2){if(sy_realpath(argv[1],bin,sizeof bin)<0)return 2;}
+    else{np_result b=actual(build);if(b.rc){fprintf(stderr,"%s",b.err?b.err:"");return 2;}np_free(&b);}
+    char *v[]={bin,"check","--coverage","tests/split-parents.tsv","release/evidence/v0.0.82-strict-2026-11-19.tsv",0};
+    np_result r=actual(v);
+    ck(r.rc==1 && r.out && strstr(r.out,"COVERAGE_GAP\tparent=signal-targets\t"),"missing-signal-targets");
+    ck(r.rc==1 && r.out && strstr(r.out,"COVERAGE_GAP\tparent=snapshots-cx\t"),"missing-snapshots");
+    ck(r.rc==1 && r.out && !strstr(r.out,"COVERAGE_GAP\tparent=win-argv\t") && strstr(r.out,"gaps=2"),"witnessed-parent-retained");
+    np_free(&r);
+    fixtures();
+    if(cx_rmtree(tmp))return 2;
+    printf("CHECK_RELEASE_FLOW\tpass=%d\tfail=%d\n",passed,failed);return failed!=0;
+}
