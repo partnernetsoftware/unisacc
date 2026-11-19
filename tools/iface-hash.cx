@@ -23,6 +23,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.awpath
+#pragma unisa use cxlib.genkit
 
 enum { MAXR = 4096, MAXP = 64 };
 static long rn[MAXR], rl[MAXR];      /* per row: name offset/len */
@@ -108,13 +109,17 @@ static int sort_names(int np) {
     return 0;
 }
 
-static int build(const char *api, TpBuf *out) {
+static int build(const char *root, const char *api, TpBuf *out) {
     sy_dir_t d;
     int np = 0, a;
+    if (root) (void)gk_tracked_load(root);
+    else gk_tracked_free();
     if (sy_dir_open(&d, api) < 0) { sy_eprintf("iface-hash: cannot open %s\n", api); return 2; }
     while (sy_dir_next(&d) > 0) {
         long n = d.name_n;
+        char rela[256];
         if (n > 4 && n < 120 && tx_eqz(d.name + n - 4, ".tsv") && np < MAXP) {
+            if (cx_fmt(rela, sizeof rela, "build/layer-api/%s", d.name) || !gk_tracked_has(rela)) continue;
             tx_copy(names[np], 128, d.name, n - 4);
             np++;
         }
@@ -159,7 +164,7 @@ int main(int argc, char **argv) {
         else { write = -1; break; }
     }
     if (write < 0) { sy_eprintf("iface-hash: usage: --write|--check [--api DIR] [--table FILE]\n"); return 2; }
-    rc = build(api, &b);
+    rc = build(tx_eqz(api, "build/layer-api") ? "." : 0, api, &b);
     if (rc) { mm_free(b.b); return rc; }
     for (i = 0; i < (long)b.n; i++) if (b.b[i] == '\n') np++;
     np -= 2;

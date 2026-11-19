@@ -1,0 +1,193 @@
+/* tools/check-derive-tracked-only.cx -- 校验全部 derive 生成器只读受跟踪文件,不被未跟踪或忽略文件造成假漂移。
+ *   sh ./unisacc.com tools/check-derive-tracked-only.cx
+ * Builds a private git repo under $TMPDIR, verifies:
+ *   1. genkit-tracked-api      gk_tracked_load/gk_tracked_has accepts tracked files/dirs and rejects untracked/ignored
+ *   2. tool-table-index-clean  planting ignored/untracked files under tools/, build/, .devsvc/ keeps tool-index & table-index OK
+ *   3. tables-gen-clean        planting untracked tests/manifests/noise.tsv keeps tables-gen --check unchanged
+ *   4. iface-hash-clean        planting untracked build/layer-api/noise.tsv keeps iface-hash --check OK
+ *   5. libc-decls-clean        planting untracked include/noise.h keeps libc-decl-scan --check OK
+ *   6. all-14-derive-audited   every generator in exec/facts/derive.tsv either uses gk_tracked_has/git-ls-files or does no raw dir scan
+ * Last line: CHECK_DERIVE_TRACKED_ONLY<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.genkit
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define CDT_PW 4400
+#define CDT_OUT 16384
+
+static void cdt_abort(const char *why) {
+    fprintf(stderr, "check-derive-tracked-only: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void cdt_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) cdt_abort("mkdir");
+}
+
+static void cdt_sh(const char *cmd, char *out) {
+    if (ckk_sh("check-derive-tracked-only", cmd, out, CDT_OUT) != 0) {
+        fprintf(stderr, "check-derive-tracked-only: setup failed:\n%s\n", out);
+        cdt_abort("setup-sh");
+    }
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char out[CDT_OUT], cwd[CDT_PW], work[CDT_PW], repo[CDT_PW], p[CDT_PW], cmd[8192];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+
+    if (!getcwd(cwd, sizeof cwd)) cdt_abort("cwd");
+    if (cx_fmt(work, sizeof work, "%s/check-derive-tracked-%d", base_td, (int)getpid())) cdt_abort("work");
+    cdt_mk(work);
+    if (cx_fmt(repo, sizeof repo, "%s/repo", work)) cdt_abort("repo");
+    cdt_mk(repo);
+
+    if (cx_fmt(p, sizeof p, "%s/tools", repo)) cdt_abort("d1"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/build", repo)) cdt_abort("d2"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/build/layer-api", repo)) cdt_abort("d3"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tests", repo)) cdt_abort("d4"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/tests/manifests", repo)) cdt_abort("d5"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/include", repo)) cdt_abort("d6"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec", repo)) cdt_abort("d7"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/exec/facts", repo)) cdt_abort("d8"); cdt_mk(p);
+    if (cx_fmt(p, sizeof p, "%s/.devsvc", repo)) cdt_abort("d9"); cdt_mk(p);
+
+    if (cx_fmt(p, sizeof p, "%s/.gitignore", repo)) cdt_abort("gi");
+    if (cx_write(p, "/unisacc.com\n/gcc_cx.com\n/clang_cx.com\n/build/tool-index.tsv\n/build/product-map.tsv\n/build/batch-packages.tsv\n/.devsvc/\n", 125)) cdt_abort("wgi");
+    if (cx_fmt(p, sizeof p, "%s/tools/demo.cx", repo)) cdt_abort("f1");
+    if (cx_write(p, "/* tools/demo.cx -- demo tool. */\nint main(void){return 0;}\n", 60)) cdt_abort("wf1");
+    if (cx_fmt(p, sizeof p, "%s/build/demo.tsv", repo)) cdt_abort("f2");
+    if (cx_write(p, "# demo table\na\tb\n", 17)) cdt_abort("wf2");
+    if (cx_fmt(p, sizeof p, "%s/build/layer-api/demo.tsv", repo)) cdt_abort("f3");
+    if (cx_write(p, "# layer-api v1 demo\nfoo\tint foo(void);\t1234567890abcdef\tdemo.cx\n", 63)) cdt_abort("wf3");
+    if (cx_fmt(p, sizeof p, "%s/include/demo.h", repo)) cdt_abort("f4");
+    if (cx_write(p, "static int demo_fn(void) { return 0; }\n", 39)) cdt_abort("wf4");
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/libc99posix.tsv", repo)) cdt_abort("f5");
+    if (cx_write(p, "# sym\theader\tstatus\n", 20)) cdt_abort("wf5");
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cdt_abort("f6");
+    if (cx_write(p, "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n", 111)) cdt_abort("wf6");
+    if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", repo)) cdt_abort("f7");
+    if (cx_write(p, "# id\timplementation\ttext\n", 25)) cdt_abort("wf7");
+    if (cx_fmt(p, sizeof p, "%s/tests/batch-packages.tsv", repo)) cdt_abort("f8");
+    if (cx_write(p, "# id\tpackages\n", 14)) cdt_abort("wf8");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git init -q && git add .gitignore tools/demo.cx build/demo.tsv build/layer-api/demo.tsv "
+        "include/demo.h exec/facts/libc99posix.tsv tests/batches.tsv tests/coverage.tsv tests/batch-packages.tsv && "
+        "git -c user.name=t -c user.email=t@t commit -q -m init", repo)) cdt_abort("init");
+    cdt_sh(cmd, out);
+
+    /* Generate clean baseline outputs (iface-hash & libc-decls first so table-index sees all tracked build/*.tsv) */
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && sh '%s/unisacc.com' '%s/tools/iface-hash.cx' -- --write && "
+        "sh '%s/unisacc.com' '%s/tools/libc-decl-scan.cx' -- --write --root '%s' && "
+        "git add build/iface-hash.tsv build/libc-decls.tsv && "
+        "sh '%s/unisacc.com' '%s/tools/tool-index.cx' -- --write --root '%s' && "
+        "git add build/table-index.tsv && "
+        "git -c user.name=t -c user.email=t@t commit -q -m tables",
+        repo, cwd, cwd, cwd, cwd, repo, cwd, cwd, repo)) cdt_abort("gen");
+    cdt_sh(cmd, out);
+
+    /* Plant ignored + untracked noise files */
+    if (cx_fmt(p, sizeof p, "%s/gcc_cx.com", repo)) cdt_abort("n1"); (void)cx_write(p, "x\n", 2);
+    if (cx_fmt(p, sizeof p, "%s/clang_cx.com", repo)) cdt_abort("n2"); (void)cx_write(p, "x\n", 2);
+    if (cx_fmt(p, sizeof p, "%s/build/product-map.tsv", repo)) cdt_abort("n3"); (void)cx_write(p, "# ignored\n", 10);
+    if (cx_fmt(p, sizeof p, "%s/build/batch-packages.tsv", repo)) cdt_abort("n4"); (void)cx_write(p, "# ignored\n", 10);
+    if (cx_fmt(p, sizeof p, "%s/build/untracked-noise.tsv", repo)) cdt_abort("n5"); (void)cx_write(p, "# noise\n", 8);
+    if (cx_fmt(p, sizeof p, "%s/tools/untracked-noise.cx", repo)) cdt_abort("n6"); (void)cx_write(p, "/* noise */\nint main(void){return 0;}\n", 38);
+    if (cx_fmt(p, sizeof p, "%s/tests/manifests/untracked-noise.tsv", repo)) cdt_abort("n7"); (void)cx_write(p, "BAD_ROW\n", 8);
+    if (cx_fmt(p, sizeof p, "%s/build/layer-api/untracked-noise.tsv", repo)) cdt_abort("n8"); (void)cx_write(p, "x\tint x(void);\tabc\tx.cx\n", 24);
+    if (cx_fmt(p, sizeof p, "%s/include/untracked-noise.h", repo)) cdt_abort("n9"); (void)cx_write(p, "static int noise_fn(void){return 0;}\n", 37);
+    if (cx_fmt(p, sizeof p, "%s/.devsvc/table-index.tsv", repo)) cdt_abort("n10"); (void)cx_write(p, "stale\n", 6);
+
+    /* 1. Unified genkit tracked API */
+    {
+        int loaded = gk_tracked_load(repo);
+        int ok1 = loaded && gk_tracked_has("tools/demo.cx") && gk_tracked_has("build/layer-api") &&
+                  !gk_tracked_has("tools/untracked-noise.cx") && !gk_tracked_has("build/product-map.tsv") &&
+                  !gk_tracked_has("gcc_cx.com");
+        gk_tracked_free();
+        ck(ok1, "genkit-tracked-api: tracked files/dirs accepted; untracked & ignored rejected");
+    }
+
+    /* 2. tool-index & table-index ignore untracked/ignored files */
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/tool-index.cx' -- --check-tables --root '%s'", cwd, cwd, repo)) cdt_abort("c2");
+    {
+        int rc = ckk_sh("check-derive-tracked-only", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CDT_OUT, "OK\tbuild/table-index.tsv"),
+           "tool-table-index-clean: untracked tools/build & ignored files do not drift tool-index/table-index");
+    }
+
+    /* 3. tables-gen ignores untracked tests/manifests/untracked-noise.tsv */
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/tables-gen.cx' -- --check --root '%s'", cwd, cwd, repo)) cdt_abort("c3");
+    {
+        int rc = ckk_sh("check-derive-tracked-only", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CDT_OUT, "TABLES_GEN\tmanifests=0\tstale=0"),
+           "tables-gen-clean: untracked manifest file ignored by tables-gen");
+    }
+
+    /* 4. iface-hash ignores untracked build/layer-api/untracked-noise.tsv */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' '%s/tools/iface-hash.cx' -- --check", repo, cwd, cwd)) cdt_abort("c4");
+    {
+        int rc = ckk_sh("check-derive-tracked-only", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CDT_OUT, "IFACE_HASH\tok\tpackages=1"),
+           "iface-hash-clean: untracked layer-api file ignored by iface-hash");
+    }
+
+    /* 5. libc-decl-scan ignores untracked include/untracked-noise.h */
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/libc-decl-scan.cx' -- --check --root '%s'", cwd, cwd, repo)) cdt_abort("c5");
+    {
+        int rc = ckk_sh("check-derive-tracked-only", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CDT_OUT, "OK\tbuild/libc-decls.tsv"),
+           "libc-decls-clean: untracked header ignored by libc-decl-scan");
+    }
+
+    /* 6. Audit all 14 rows in exec/facts/derive.tsv: every generator with dir scan uses gk_tracked_has or git ls-files */
+    {
+        size_t dn = 0;
+        char *db = (char *)cx_read("exec/facts/derive.tsv", &dn);
+        int rows = 0, bad = 0;
+        if (db) {
+            long at = 0;
+            while (at < (long)dn) {
+                long e = tx_chr(db + at, (long)dn - at, '\n'), l = e < 0 ? (long)dn - at : e;
+                long o1, l1;
+                if (l > 0 && db[at] != '#' && !tx_field(db + at, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < 200) {
+                    char gp[256];
+                    size_t gn = 0;
+                    rows++;
+                    if (cx_fmt(gp, sizeof gp, "%.*s", (int)l1, db + at + o1) == 0) {
+                        char *gb = (char *)cx_read(gp, &gn);
+                        if (!gb) bad++;
+                        else {
+                            int scans_dir = (ckk_has(gb, (long)gn, "sy_dir_open(") || ckk_has(gb, (long)gn, "opendir("));
+                            int guarded = (ckk_has(gb, (long)gn, "gk_tracked_has(") || ckk_has(gb, (long)gn, "git ls-files"));
+                            if (scans_dir && !guarded) {
+                                fprintf(stderr, "check-derive-tracked-only: UNGUARDED dir scan in %s\n", gp);
+                                bad++;
+                            }
+                            mm_free(gb);
+                        }
+                    }
+                }
+                at += l + 1;
+            }
+            mm_free(db);
+        } else bad++;
+        ck(rows >= 14 && bad == 0, "all-14-derive-audited: every derive.tsv generator guards dir scans with tracked set");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_DERIVE_TRACKED_ONLY\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
