@@ -1,0 +1,55 @@
+// Revolve caller-owned f64 radius/height pairs about the vertical axis.
+native function LatheGeometry_generate(lathe:i64,profile:i64,count:i64,segments:i64,
+                                       start:f64,length:f64) i64 {
+  if(count<2 || segments<1 || segments>262144 || profile<0 || profile%8!=0 ||
+     profile>6291456 || count>(6291456-profile)/16) { return 0-1; }
+  let lathe_points=(segments+1)*count;
+  let lathe_cells=segments*(count-1)*6;
+  if(!GeometryBuffers_fits(lathe,lathe_points,lathe_cells)) { return 0-1; }
+  if(length<0.0) { length=0.0; }
+  if(length>6.283185307179586) { length=6.283185307179586; }
+  let lathe_vertex=ux_u32(lathe+GeometryBuffers.vertices);
+  let lathe_index=ux_u32(lathe+GeometryBuffers.indices);
+  let slice=0;
+  while(slice<=segments) {
+    let u=slice*1.0/segments;
+    let angle=start+u*length;
+    let sine=ux_math_sin(angle);
+    let cosine=ux_math_cos(angle);
+    let profile_row=0;
+    let prev_x=0.0;
+    let prev_y=0.0;
+    while(profile_row<count) {
+      let profile_at=profile+profile_row*16;
+      let r=ux_f64(profile_at);
+      let h=ux_f64(profile_at+8);
+      let nx=prev_x;
+      let ny=prev_y;
+      if(profile_row<count-1) {
+        let current_x=ux_f64(profile_at+24)-h;
+        let current_y=r-ux_f64(profile_at+16);
+        nx=nx+current_x;
+        ny=ny+current_y;
+        prev_x=current_x;
+        prev_y=current_y;
+        let magnitude=f64_sqrt(nx*nx+ny*ny);
+        if(magnitude!=0.0) { nx=nx/magnitude; ny=ny/magnitude; }
+      }
+      lathe_vertex=GeometryBuffers_vertex(lathe_vertex,r*sine,h,r*cosine,nx*sine,ny,nx*cosine,u,
+        profile_row*1.0/(count-1));
+      if(slice<segments && profile_row<count-1) {
+        let first=slice*count+profile_row;
+        let a=ux_u32_put(lathe_index,first);
+        let b=ux_u32_put(lathe_index+4,first+count);
+        let d=ux_u32_put(lathe_index+8,first+1);
+        let c=ux_u32_put(lathe_index+12,first+count+1);
+        let e=ux_u32_put(lathe_index+16,first+1);
+        let f=ux_u32_put(lathe_index+20,first+count);
+        lathe_index=lathe_index+24;
+      }
+      profile_row=profile_row+1;
+    }
+    slice=slice+1;
+  }
+  return GeometryBuffers_commit(lathe,lathe_points,lathe_cells);
+}
