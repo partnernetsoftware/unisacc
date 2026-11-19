@@ -1,0 +1,114 @@
+native function geometry_copy_bytes(dst:i64,src:i64,size:i64) i64 {
+  let i=0;
+  while(i<size) {
+    let written=ux_u8_put(dst+i,ux_u8(src+i));
+    i=i+1;
+  }
+  return dst;
+}
+
+native function geometry_copy_view(src:i64,dst:i64,end:i64,publish:i64) i64 {
+  if(src<0 || src>6291456-BufferAttribute.size || src%4!=0 ||
+     dst>end || BufferAttribute.size>end-dst) { return 0-1; }
+  let data=ux_u32(src+BufferAttribute.data);
+  let count=ux_u32(src+BufferAttribute.count);
+  let stride=ux_u32(src+BufferAttribute.stride);
+  let kind=ux_u32(src+BufferAttribute.componentType);
+  let components=ux_u32(src+BufferAttribute.itemSize);
+  if(kind<1 || kind>10 || components<1 || data>6291456) { return 0-1; }
+  let width=4;
+  if(kind<=3) { width=1; }
+  else if(kind<=5 || kind==8) { width=2; }
+  else if(kind==10) { width=8; }
+  let row_bytes=components*width;
+  if(data%width!=0 || stride%width!=0 || stride<row_bytes) { return 0-1; }
+  let bytes=0;
+  if(count!=0) {
+    if(row_bytes>6291456-data || count-1>(6291456-data-row_bytes)/stride) { return 0-1; }
+    bytes=(count-1)*stride+row_bytes;
+  }
+  let output=dst+BufferAttribute.size;
+  let next=(output+bytes+7)/8*8;
+  if(next>end) { return 0-1; }
+  if(publish!=0) {
+    let header=geometry_copy_bytes(dst,src,BufferAttribute.size);
+    let records=geometry_copy_bytes(output,data,bytes);
+    let pointer=ux_u32_put(dst+BufferAttribute.data,output);
+    let fresh=ux_u32_put(dst+BufferAttribute.version,0);
+  }
+  return next;
+}
+
+// Destination descriptor/tables are initialized, and its arena is disjoint
+// from both descriptors, all tables, and all source attribute storage.
+native function BufferGeometry_copy(dst:i64,src:i64,arena:i64,size:i64) i64 {
+  if(dst==src) { return dst; }
+  if(dst<0 || src<0 || dst>6291456-BufferGeometry.size || src>6291456-BufferGeometry.size ||
+     dst%4!=0 || src%4!=0 || arena<0 || arena>6291456 || arena%8!=0 ||
+     size<0 || size>6291456-arena) { return 0-1; }
+  let end=arena+size;
+  let sa=ux_u32(src+BufferGeometry.attributes);
+  let da=ux_u32(dst+BufferGeometry.attributes);
+  let sg=ux_u32(src+BufferGeometry.groups);
+  let dg=ux_u32(dst+BufferGeometry.groups);
+  let attributes=ux_u32(sa);
+  let groups=ux_u32(sg);
+  let index=BufferGeometry_getIndex(src);
+  let box=ux_u32(src+BufferGeometry.boundingBox)-1;
+  let sphere=ux_u32(src+BufferGeometry.boundingSphere)-1;
+  if(attributes>ux_u32(da+4) || groups>ux_u32(dg+4)) { return 0-2; }
+  let pass=0;
+  while(pass<2) {
+    let cursor=arena;
+    if(index>=0) {
+      let next=geometry_copy_view(index,cursor,end,pass);
+      if(next<0) { return next; }
+      if(pass!=0) { let id=BufferGeometry_setIndex(dst,cursor); }
+      cursor=next;
+    } else if(pass!=0) {
+      let empty=BufferGeometry_setIndex(dst,0-1);
+    }
+    let i=0;
+    while(i<attributes) {
+      let old=sa+8+i*8;
+      let entry=ux_u32(old+4);
+      let next=geometry_copy_view(entry,cursor,end,pass);
+      if(next<0) { return next; }
+      if(pass!=0) {
+        let key=ux_u32_put(da+8+i*8,ux_u32(old));
+        let view=ux_u32_put(da+12+i*8,cursor);
+      }
+      cursor=next;
+      i=i+1;
+    }
+    if(box>=0) {
+      if(box>6291456-48 || cursor+48>end) { return 0-1; }
+      if(pass!=0) {
+        let box_copy=geometry_copy_bytes(cursor,box,48);
+        let pointer=ux_u32_put(dst+BufferGeometry.boundingBox,cursor+1);
+      }
+      cursor=cursor+48;
+    } else if(pass!=0) {
+      let empty=ux_u32_put(dst+BufferGeometry.boundingBox,0);
+    }
+    if(sphere>=0) {
+      if(sphere>6291456-32 || cursor+32>end) { return 0-1; }
+      if(pass!=0) {
+        let sphere_copy=geometry_copy_bytes(cursor,sphere,32);
+        let pointer=ux_u32_put(dst+BufferGeometry.boundingSphere,cursor+1);
+      }
+    } else if(pass!=0) {
+      let empty=ux_u32_put(dst+BufferGeometry.boundingSphere,0);
+    }
+    pass=pass+1;
+  }
+  let group_rows=geometry_copy_bytes(dg+8,sg+8,groups*12);
+  let draw=BufferGeometry_setDrawRange(dst,ux_u32(src+BufferGeometry.drawStart),ux_u32(src+BufferGeometry.drawCount));
+  let write_attributes=ux_u32_put(da,attributes);
+  let write_groups=ux_u32_put(dg,groups);
+  return dst;
+}
+
+function BufferGeometry_clone(dst_clone,...clone_args) {
+  return BufferGeometry_copy(dst_clone,clone_args[0],clone_args[1],clone_args[2]);
+}
