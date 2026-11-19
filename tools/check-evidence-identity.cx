@@ -65,7 +65,8 @@ static void mutations(const char *dir){
     if(sy_unlink(join(repo,"unisacc.com")))exit(2);
     r=run_at(advice,repo);proved=!r.rc&&r.out&&strstr(r.out,"MUST_RERUN\tx\tselector-unavailable");
     printf("%s\tselector-unavailable\n",proved?"PASS":"FAIL");if(proved)passed++;else failed++;np_free(&r);
-    char *rawline=strstr(receipt,"RAW\tBATCH_RUN");if(!rawline)exit(2);*rawline=0;write_input(strict,receipt);cx_sha256_hex(receipt,strlen(receipt),digest);
+    char *header_end=strchr(receipt,'\n'),*batch_end=header_end?strchr(header_end+1,'\n'):0;
+    if(!batch_end)exit(2);batch_end[1]=0;write_input(strict,receipt);cx_sha256_hex(receipt,strlen(receipt),digest);
     r=run_at(advice,repo);proved=!r.rc&&r.out&&strstr(r.out,"MUST_RERUN\tx\tmissing-raw");
     printf("%s\tmissing-original-raw\n",proved?"PASS":"FAIL");if(proved)passed++;else failed++;np_free(&r);
     char *changes[]={ape,dep,header,source,recipe};const char *labels[]={"candidate-byte","transitive-runner-byte","material-header-byte","child-read-byte","chain-recipe-byte"};
@@ -80,11 +81,52 @@ static void mutations(const char *dir){
     write_input(join(runtime,"readset.tsv"),"incomplete\n");match(cmd,repo,1,"unknown-readset");
     if(sy_unlink(join(repo,".git")))exit(2);
 }
+/* --history 81|82 RELEASE_APE replays the two original source generations offline.
+ * The denominator for safety is every distinct batch in the archived later run. */
+static int replay_history(const char *version,const char *product,const char *dir){
+    size_t n;char *facts=cx_read("tests/fixtures/evidence-identity-history.tsv",&n),*v[8];
+    if(!facts)return 2;char *p=facts;int found=0;
+    while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(*p!='#'){int k=0;char *f=p;while(f&&k<8){v[k++]=f;char *tab=strchr(f,'\t');if(tab)*tab++=0;f=tab;}
+            if(k!=8||f)return 2;if(!strcmp(v[0],version)){found=1;break;}}
+        p=end+1;
+    }if(!found)return 2;
+    char whole[65],hash_a[65],hash_b[65];char *bytes=cx_read(product,&n);
+    if(!bytes)return 2;cx_sha256_hex(bytes,n,whole);free(bytes);if(strcmp(whole,v[3]))return 2;
+    bytes=cx_read(v[4],&n);if(!bytes)return 2;cx_sha256_hex(bytes,n,whole);size_t offset=atol(v[6]);
+    if(strcmp(whole,v[5])||!offset||offset>=n||bytes[offset-1]!='\n')return 2;
+    char *a=join(dir,"old"),*b=join(dir,"later");
+    if(cx_write(a,bytes,offset)||cx_write(b,bytes+offset,n-offset))return 2;
+    cx_sha256_hex(bytes,offset,hash_a);cx_sha256_hex(bytes+offset,n-offset,hash_b);free(bytes);
+    char *predict[]={exe,"--advise",v[2],(char *)product,"-","-","-",v[1],(char *)product,hash_a,a,0};
+    char *actual[]={exe,"--origin",(char *)product,v[2],hash_b,b,0};
+    np_result advice=run_at(predict,"."),observed=run_at(actual,".");if(advice.rc||observed.rc)return 2;
+    int seen=0,missed=0,covered=0,missing=0,runner=0,unresolved=0;
+    p=observed.out;while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(!strncmp(p,"MUST_RERUN\t",11)||!strncmp(p,"ORIGIN\t",7)){
+            char *id=strchr(p,'\t')+1,*tab=strchr(id,'\t');if(!tab)return 2;*tab=0;
+            char key[256];if(cx_fmt(key,sizeof key,"\nMUST_RERUN\t%s\t",id))return 2;
+            int rerun=strstr(advice.out,key)!=0||!strncmp(advice.out,key+1,strlen(key+1));
+            printf("HISTORY_BATCH\t%s\t%s\t%s\n",version,id,rerun?"MUST_RERUN":"MISSING_OR_COVERED");seen++;if(!rerun)missed++;
+        }p=end+1;
+    }
+    int total=0;p=advice.out;while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(!strncmp(p,"COVERED\t",8)){covered++;total++;}
+        if(!strncmp(p,"MUST_RERUN\t",11)){total++;const char *reason=strrchr(p,'\t')+1;
+            if(!strcmp(reason,"runner-unknown"))runner++;else if(!strcmp(reason,"unresolved"))unresolved++;else if(!strcmp(reason,"missing-origin"))missing++;}
+        p=end+1;
+    }
+    printf("HISTORY_SAFETY\t%s\tactual=%d\tmissed=%d\n",version,seen,missed);
+    printf("HISTORY_EFFICIENCY\t%s\tbatches=%d\tcovered=%d\tmust_rerun=%d\trunner_unknown=%d\tmissing_origin=%d\tunresolved=%d\n",version,total,covered,total-covered,runner,missing,unresolved);
+    np_free(&advice);np_free(&observed);return !total||seen!=atoi(v[7])||missed;
+}
 int main(int argc,char **argv){
     char dir[4096],driver[4096];if(sy_mkdtemp(sy_tmpdir(),"unisacc-identity-",dir,sizeof dir)||sy_realpath("./unisacc.com",driver,sizeof driver)<0||
        cx_fmt(ape,sizeof ape,"%s/ape",dir)||cx_fmt(strict,sizeof strict,"%s/strict",dir)||cx_fmt(exe,sizeof exe,"%s/tool",dir)||cx_write(ape,"ape",3))return 2;
     cx_sha256_hex("ape",3,candidate);
     char *build[]={"sh",driver,"tools/evidence-identity.cx","-o",exe,0};np_result b={0};char why[256];if(np_run(build,0,0,40,&b,why,sizeof why)||b.rc){fprintf(stderr,"check-evidence-identity: build %s\n",b.err?b.err:why);return 2;}np_free(&b);
+    if(argc==4&&!strcmp(argv[1],"--history")){int rc=replay_history(argv[2],argv[3],dir);if(cx_rmtree(dir))return 2;return rc;}
+    if(argc!=1)return 2;
     fixture("actual-pass","PASS","0","55","\trunner=sh","","ORIGIN\tx\tPASS",0);
     fixture("actual-fail","FAIL","1","55","\trunner=native","","ORIGIN\tx\tFAIL",0);
     fixture("missing-runner","PASS","0","55","","","runner-unknown",0);
