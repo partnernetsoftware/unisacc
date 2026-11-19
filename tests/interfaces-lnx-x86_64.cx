@@ -64,7 +64,15 @@ static int absent(const char *p){struct stat st;if(!lstat(p,&st))return 0;if(err
 static unsigned le32(const char *p){const unsigned char *u=(const unsigned char *)p;return (unsigned)u[0]|(unsigned)u[1]<<8|(unsigned)u[2]<<16|(unsigned)u[3]<<24;}
 static void put32(np_buf *b,unsigned x){char v[4];int i;for(i=0;i<4;i++)v[i]=(char)(x>>(8*i));np_put(b,v,4);}
 static int same(const char *a,size_t an,const char *b,size_t bn){return an==bn&&(!an||!memcmp(a,b,an));}
-static int exact_err(np_result *r,const char *want){return same(r->err,r->errn,want,strlen(want));}
+static int exact_err(np_result *r,const char *want){
+ size_t wn=strlen(want),sn=strlen(source[0]),at;
+ if(same(r->err,r->errn,want,wn))return 1;
+ /* 0.0.73+ diagnostics may append one exact `<source>:<line>: \n` location line. */
+ if(r->errn<=wn+sn+3||memcmp(r->err,want,wn)||memcmp(r->err+wn,source[0],sn)||r->err[wn+sn]!=':')return 0;
+ at=wn+sn+1;if(at>=r->errn||r->err[at]<'0'||r->err[at]>'9')return 0;
+ while(at<r->errn&&r->err[at]>='0'&&r->err[at]<='9')at++;
+ return (at+2==r->errn&&r->err[at]==':'&&r->err[at+1]==' ')||(at+3==r->errn&&r->err[at]==':'&&r->err[at+1]==' '&&r->err[at+2]=='\n');
+}
 static size_t find(const char *h,size_t hn,const char *s){size_t sn=strlen(s),i;for(i=0;i+sn<=hn;i++)if(!memcmp(h+i,s,sn))return i;die("fixture-anchor-missing");return 0;}
 
 /* One stage run. Input bytes go to a fresh exclusive file; via_stdin feeds that file on fd 0 and
@@ -257,17 +265,19 @@ static void refusals(void){
   struct{const char *tag;size_t keep;const char *tail;size_t tn;const char *want;}tc[]={
    {"tape-trailing-garbage",edge[0][3].n,"zz",2,OP_REJ},{"tape-trailing-nul",edge[0][3].n,"\0\1\2",3,OP_REJ},
    {"tape-truncated-mid-instruction",at,"",0,LABEL_REJ},{"tape-empty",0,"",0,TGT_REJ}};
-  int c;for(c=0;c<4;c++){np_buf t={0};char side[4200],lab[160];np_result r;int s,ok=1;np_put(&t,edge[0][3].p,tc[c].keep);np_put(&t,tc[c].tail,tc[c].tn);
-   for(s=3;s<6&&ok;s++){r=stage(s,0,t.p,t.n,tc[c].tag,0,side,sizeof side);ok=r.rc==1&&!r.outn&&exact_err(&r,"reject: not covered: tape truncated\n");
+  int c;for(c=0;c<4;c++){np_buf t={0};char side[4200],lab[160],ew[96];np_result r;int s,ok=1;np_put(&t,edge[0][3].p,tc[c].keep);np_put(&t,tc[c].tail,tc[c].tn);
+   for(s=3;s<6&&ok;s++){r=stage(s,0,t.p,t.n,tc[c].tag,0,side,sizeof side);
+    if(c==3){if(cx_fmt(ew,sizeof ew,"unisacc: stream: %s: no input\n",names[s]))die("label-bound");ok=r.rc==1&&!r.outn&&exact_err(&r,ew);}
+    else ok=r.rc==1&&!r.outn&&exact_err(&r,"reject: tape truncated\n");
     label3(lab,sizeof lab,names[s],tc[c].tag,"refuse-truncated-frame");check(ok,lab);np_free(&r);}
    free(t.p);}}
  /* elf: target.text header (@target, @data, @sym, @src_os, @data_len, @bss, @relocs) then target ops */
  rewrite(&b,6,"@target lnx/x86_64\n","@targex lnx/x86_64\n");refuse(6,"bad-magic",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,"@target lnx/x86_64\n","");refuse(6,"target-missing",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,"@target lnx/x86_64\n","@target zzz/q\n");refuse(6,"unknown-target",b.p,b.n,1,TGT_REJ);
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n@data_len ")+5);refuse(6,"truncated-header-mid-line",b.p,b.n,1,"reject: not covered: tape truncated\n");
- prefix(&b,6,strlen("@target lnx/x86_64\n"));refuse(6,"truncated-header-target-line-only",b.p,b.n,1,"reject: not covered: tape truncated\n");
- refuse(6,"empty","",0,1,"reject: not covered: tape truncated\n");
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n@data_len ")+5);refuse(6,"truncated-header-mid-line",b.p,b.n,1,"reject: tape truncated\n");
+ prefix(&b,6,strlen("@target lnx/x86_64\n"));refuse(6,"truncated-header-target-line-only",b.p,b.n,1,"reject: tape truncated\n");
+ refuse(6,"empty","",0,1,"unisacc: stream: elf: no input\n");
  line_of(line,sizeof line,6,"\n@data_len ");rewrite(&b,6,line,"");refuse(6,"length-missing",b.p,b.n,1,TGT_REJ);
  rewrite(&b,6,line,"@data_len 8\n");refuse(6,"length-understated",b.p,b.n,1,EXT_REJ);
  rewrite(&b,6,line,"@data_len 99999999999999999999\n");refuse(6,"length-overflow",b.p,b.n,1,EXT_REJ);
@@ -275,12 +285,14 @@ static void refusals(void){
  line_of(line,sizeof line,6,"\n@sym __argvv ");rewrite(&b,6,line,"@sym __argvv 99999\n");refuse(6,"symbol-length-overstated",b.p,b.n,1,EXT_REJ);
  /* Real cuts remain unclosed and exercise the frame guard. Complete operand,
     opcode, and label mutations below retain their original semantic refusals. */
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\nsetreg rdx, imm 0 role=arg2\n")+strlen("\nsetreg rd"));refuse(6,"truncated-final-op",b.p,b.n,1,"reject: not covered: tape truncated\n");
- prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n__main_ret:\n")+1);refuse(6,"truncated-before-branch-target",b.p,b.n,1,"reject: not covered: tape truncated\n");
- append(&b,6,"zz\n",3);refuse(6,"trailing-garbage-line",b.p,b.n,1,"reject: not covered: tape truncated\n");
- append(&b,6,"\0",1);refuse(6,"trailing-nul",b.p,b.n,1,"reject: not covered: tape truncated\n");
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\nsetreg rdx, imm 0 role=arg2\n")+strlen("\nsetreg rd"));refuse(6,"truncated-final-op",b.p,b.n,1,"reject: tape truncated\n");
+ prefix(&b,6,find(edge[0][6].p,edge[0][6].n,"\n__main_ret:\n")+1);refuse(6,"truncated-before-branch-target",b.p,b.n,1,"reject: tape truncated\n");
+ append(&b,6,"zz\n",3);refuse(6,"trailing-garbage-line",b.p,b.n,1,"reject: tape truncated\n");
+ append(&b,6,"\0",1);refuse(6,"trailing-nul",b.p,b.n,1,"reject: tape truncated\n");
  rewrite(&b,6,".end\n","zz\n.end\n");refuse(6,"complete-unknown-op",b.p,b.n,1,OP_REJ);
- rewrite(&b,6,"setreg rdx, imm 0 role=arg2\n","setreg rd, imm 0 role=arg2\n");refuse(6,"complete-invalid-register",b.p,b.n,1,OPERAND_REJ);
+ if(np_count(edge[0][6].p,edge[0][6].n,"setreg rdx, imm 0 role=arg2\n",strlen("setreg rdx, imm 0 role=arg2\n"))<1)die("rewrite-anchor-missing");
+ np_replace(edge[0][6].p,edge[0][6].n,"setreg rdx, imm 0 role=arg2\n",strlen("setreg rdx, imm 0 role=arg2\n"),"setreg rd, imm 0 role=arg2\n",strlen("setreg rd, imm 0 role=arg2\n"),1,&b);
+ refuse(6,"complete-invalid-register",b.p,b.n,1,OPERAND_REJ);
  rewrite(&b,6,"\n__main_ret:\n","\nmissing_main_ret:\n");refuse(6,"complete-undefined-label",b.p,b.n,1,LABEL_REJ);
  free(b.p);
 }
