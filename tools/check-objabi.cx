@@ -1,11 +1,11 @@
-/* tools/check-objabi.cx -- object ABI contract of `-c -funit` units linked by gcc (0.0.80 F1a).
+/* tools/check-objabi.cx -- object ABI contract of `-c -funit` units linked by gcc (0.0.80 F1a, 0.0.81 arm64).
  *
  *   sh ./unisacc.com tools/check-objabi.cx -- --product CANDIDATE.com
  *
  * Each case writes a unit and a gcc main into a private session directory (sr_default under
  * sy_tmpdir), compiles the unit with `sh CANDIDATE -c -funit unit.c -o unit.o`, compiles the main with
  * gcc -c, links with gcc -no-pie and runs the program; every child is bounded (compile and link 30 s,
- * run 10 s).  Cases and expectations:
+ * run 10 s).  Cases and expectations (lnx/x86_64):
  *   p03     int x=5; const int k=32; main returns getx()*10+(getk()==32): rc 51 (F1 .init_array).
  *   multi   two -funit units (p03 and q: int y=3) in one link: no multiple definition of __init_u;
  *           main returns getx()*10+(getk()==32)+gety()-3: rc 51.
@@ -13,6 +13,15 @@
  *   p2arg   add2(30,12) with add2(a,b)=a+b: rc 42; p3arg mix3(1,2,3)-100 with a*100+b*10+c: rc 23 (F2).
  *   p07     weak weak_hook (returns 1) linked with a strong one (returns 7): rc 7.  Known gap until
  *           F3 (STB_WEAK): EXPECT-FAIL.
+ *   symtype the unit.o of p03 holds __init_u as a FUNC symbol (readelf -sW; 0.0.81, was NOTYPE).
+ * The lnx/arm64 cases (0.0.81) compile the unit with --target=lnx/arm64, the main with
+ * aarch64-linux-gnu-gcc, link -static and run under qemu-aarch64-static (PATH or ~/.local/bin):
+ *   a-p03 a-multi a-p02c a-p2arg a-p3arg as above, a-initonly (main does nothing, only .init_array runs:
+ *   rc 9), a-plain int f7(void): rc 7, a-hsub3 unit calls a gcc function with three arguments: rc 82,
+ *   a-stack the gcc callee works on sp-relative locals (sp must be 16-byte aligned, AAPCS64): rc 43,
+ *   a-symtype __init_u FUNC in the arm64 unit.o.
+ * An arm64 tool missing prints CHECK_OBJABI_ARM64 UNMEASURED and the check exits 3 (never PASS) unless
+ * something failed (exit 1).
  * An EXPECT-FAIL case that passes is reported as XPASS and counted as failed, so the expectation
  * list must be updated when F2 or F3 lands.  Prints one line per case
  *   CASE name PASS|FAIL|EXPECT-FAIL|XPASS rc=got/want [stage=...]
@@ -36,12 +45,17 @@ typedef struct oa_case {
     int expect_fail;
 } oa_case;
 
+#define OA_P03 "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n"
+#define OA_P03M "int getx(void);int getk(void);int main(void){return getx()*10+(getk()==32);}\n"
+#define OA_Q "int y=3;\nint gety(void){return y;}\n"
+#define OA_QM "int getx(void);int getk(void);int gety(void);int main(void){return getx()*10+(getk()==32)+gety()-3;}\n"
+#define OA_HSUB "int hsub(int a,int b,int c);\nint call3(void){return hsub(50,7,2)+1;}\n"
+#define OA_HSUBS "int hsub(int a,int b,int c){return a*6+b*5+c;}\n"
+#define OA_HSUBM "int call3(void);int main(void){return call3();}\n"
+
 static const oa_case oa_cases[11] = {
-    {"p03", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n", 0, 0,
-     "int getx(void);int getk(void);int main(void){return getx()*10+(getk()==32);}\n", 51, 0},
-    {"multi", "int x=5;\nconst int k=32;\nint getx(void){return x;}\nint getk(void){return k;}\n",
-     "int y=3;\nint gety(void){return y;}\n", 0,
-     "int getx(void);int getk(void);int gety(void);int main(void){return getx()*10+(getk()==32)+gety()-3;}\n", 51, 0},
+    {"p03", OA_P03, 0, 0, OA_P03M, 51, 0},
+    {"multi", OA_P03, OA_Q, 0, OA_QM, 51, 0},
     {"p02c", "int add_one(int v){return v+11;}\n", 0, 0,
      "int add_one(int);int main(void){return add_one(0);}\n", 11, 0},
     {"p2arg", "int add2(int a,int b){return a+b;}\n", 0, 0,
@@ -54,9 +68,7 @@ static const oa_case oa_cases[11] = {
     {"ext0sse", "int ext0(void);\nint call0(void){return ext0()+1;}\n", 0,
      "typedef float v4 __attribute__((vector_size(16)));\nint ext0(void){volatile v4 x={1,2,3,4};return (int)x[3]+38;}\n",
      "int call0(void);int main(void){return call0();}\n", 43, 0},
-    {"hsub3", "int hsub(int a,int b,int c);\nint call3(void){return hsub(50,7,2)+1;}\n", 0,
-     "int hsub(int a,int b,int c){return a*6+b*5+c;}\n",
-     "int call3(void);int main(void){return call3();}\n", 82, 0},
+    {"hsub3", OA_HSUB, 0, OA_HSUBS, OA_HSUBM, 82, 0},
     {"XL-args7", "int s7(int,int,int,int,int,int,int);\nint call7(void){return s7(1,2,3,4,5,6,7);}\n", 0,
      "int s7(int a,int b,int c,int d,int e,int f,int g){return a+b+c+d+e+f+g;}\n",
      "int call7(void);int main(void){return call7();}\n", 28, 1},
@@ -67,7 +79,29 @@ static const oa_case oa_cases[11] = {
      "int sortit(void);int main(void){return sortit();}\n", 123, 1},
 };
 
+/* lnx/arm64: a-stack's callee keeps its locals at [sp, #..]; the callee asserts frame_address(0)&15==0 (qemu-user does not raise SIGBUS on a misaligned sp) */
+static const oa_case oa_arm_cases[9] = {
+    {"a-p03", OA_P03, 0, 0, OA_P03M, 51, 0},
+    {"a-multi", OA_P03, OA_Q, 0, OA_QM, 51, 0},
+    {"a-initonly", "int z=9;\nint getz(void){return z;}\n", 0, 0,
+     "int getz(void);int main(void){return 9;}\n", 9, 0},
+    {"a-plain", "int f7(void){return 7;}\n", 0, 0,
+     "int f7(void);int main(void){return f7();}\n", 7, 0},
+    {"a-p02c", "int add_one(int v){return v+11;}\n", 0, 0,
+     "int add_one(int);int main(void){return add_one(0);}\n", 11, 0},
+    {"a-p2arg", "int add2(int a,int b){return a+b;}\n", 0, 0,
+     "int add2(int,int);int main(void){return add2(30,12);}\n", 42, 0},
+    {"a-p3arg", "int mix3(int a,int b,int c){return a*100+b*10+c;}\n", 0, 0,
+     "int mix3(int,int,int);int main(void){return mix3(1,2,3)-100;}\n", 23, 0},
+    {"a-hsub3", OA_HSUB, 0, OA_HSUBS, OA_HSUBM, 82, 0},
+    {"a-stack", "int ext0(int a);\nint call0(void){return ext0(5)+1;}\n", 0,
+     "int ext0(int a){volatile long double d=2;volatile long v[4]={a,1,2,3};long *p=(long*)__builtin_frame_address(0);return (((long)p&15)==0)*30+(int)v[0]+(int)d+(int)v[3]+2;}\n",
+     "int call0(void);int main(void){return call0();}\n", 43, 0},
+};
+
 static char oa_dir[2048];
+static int oa_arm;                 /* 1 while the arm64 cases run */
+static char oa_qemu[2300];
 
 static int oa_put(const char *name, const char *text) {
     char path[2300];
@@ -75,13 +109,20 @@ static int oa_put(const char *name, const char *text) {
     return sy_write_file(path, text, (int64_t)strlen(text), 0644) ? -1 : 0;
 }
 
-static int oa_run(const char *label, char *const argv[], int secs, int *rc, char *why, int wcap) {
+static int oa_run_out(const char *label, char *const argv[], int secs, int *rc, char *why, int wcap,
+                      char *out, int ocap) {
     pr_result r;
     int t = pr_run(label, argv, oa_dir[0] ? oa_dir : 0, 0, secs, &r);
     if (t) { if (cx_fmt(why, wcap, "%s", r.why)) why[0] = 0; pr_free(&r); return -1; }
     *rc = r.rc;
     why[0] = 0;
     if (r.rc && r.errn) { if (cx_fmt(why, wcap, "%.200s", r.err)) why[0] = 0; }
+    if (out) {
+        int n = r.out ? (int)r.outn : 0;
+        if (n > ocap - 1) n = ocap - 1;
+        { int k; for (k = 0; k < n; k++) out[k] = r.out[k]; }
+        out[n > 0 ? n : 0] = 0;
+    }
     pr_free(&r);
     {
         int i;
@@ -90,15 +131,22 @@ static int oa_run(const char *label, char *const argv[], int secs, int *rc, char
     return 0;
 }
 
+static int oa_run(const char *label, char *const argv[], int secs, int *rc, char *why, int wcap) {
+    return oa_run_out(label, argv, secs, rc, why, wcap, 0, 0);
+}
+
 static int oa_stage(char *stage, const char *s) {
     if (cx_fmt(stage, 64, "%s", s)) stage[0] = 0;
     return -1;
 }
 
+static const char *oa_gcc(void) { return oa_arm ? "aarch64-linux-gnu-gcc" : "gcc"; }
+
 static int oa_unit(const char *product, const char *src, const char *obj, char *stage, char *why) {
     int rc = 0;
     char *av[] = {"sh", (char *)product, "-c", "-funit", (char *)src, "-o", (char *)obj, 0};
-    if (oa_run("unisacc-c", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "unisacc-c");
+    char *aa[] = {"sh", (char *)product, "--target=lnx/arm64", "-c", "-funit", (char *)src, "-o", (char *)obj, 0};
+    if (oa_run("unisacc-c", oa_arm ? aa : av, 30, &rc, why, 512) || rc) return oa_stage(stage, "unisacc-c");
     return 0;
 }
 
@@ -113,18 +161,19 @@ static int oa_case_run(const char *product, const oa_case *c, int *got, char *st
         if (oa_unit(product, "unit2.c", "unit2.o", stage, why)) return -1;
     }
     if (c->strong) {
-        char *av[] = {"gcc", "-c", "strong.c", "-o", "strong.o", 0};
+        char *av[] = {(char *)oa_gcc(), "-c", "strong.c", "-o", "strong.o", 0};
         if (oa_put("strong.c", c->strong)) return oa_stage(stage, "write");
         if (oa_run("gcc-strong", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "gcc-strong");
     }
     {
-        char *av[] = {"gcc", "-c", "main.c", "-o", "main.o", 0};
+        char *av[] = {(char *)oa_gcc(), "-c", "main.c", "-o", "main.o", 0};
         if (oa_run("gcc-main", av, 30, &rc, why, 512) || rc) return oa_stage(stage, "gcc-main");
     }
     {
         char *av[8];
         int n = 0;
-        av[n++] = "gcc"; av[n++] = "-no-pie"; av[n++] = "-o"; av[n++] = "prog"; av[n++] = "main.o"; av[n++] = "unit.o";
+        av[n++] = (char *)oa_gcc(); av[n++] = oa_arm ? "-static" : "-no-pie"; av[n++] = "-o"; av[n++] = "prog";
+        av[n++] = "main.o"; av[n++] = "unit.o";
         if (c->unit2) av[n++] = "unit2.o";
         else if (c->strong) av[n++] = "strong.o";
         av[n] = 0;
@@ -132,16 +181,74 @@ static int oa_case_run(const char *product, const oa_case *c, int *got, char *st
     }
     {
         char *av[] = {"./prog", 0};
-        if (oa_run("run", av, 10, &rc, why, 512)) return oa_stage(stage, "run");
+        char *aq[] = {oa_qemu, "./prog", 0};
+        if (oa_run("run", oa_arm ? aq : av, 10, &rc, why, 512)) return oa_stage(stage, "run");
         *got = rc;
     }
     return 0;
 }
 
+/* 1 when readelf -sW unit.o shows __init_u as FUNC, 0 when it shows another type, -1 when it could not tell */
+static int oa_symtype(char *why) {
+    static char out[65536];
+    char *av[] = {"readelf", "-sW", "unit.o", 0};
+    int rc = 0;
+    char *p, *e;
+    if (oa_run_out("readelf", av, 10, &rc, why, 512, out, sizeof out) || rc) return -1;
+    for (p = out; *p; p = e) {
+        e = p;
+        while (*e && *e != '\n') e++;
+        {
+            char line[512];
+            int n = (int)(e - p);
+            if (n > 511) n = 511;
+            { int k; for (k = 0; k < n; k++) line[k] = p[k]; }
+            line[n] = 0;
+            if (strstr(line, " __init_u") && !strstr(line, "__init_u.")) {
+                if (cx_fmt(why, 512, "%.200s", line)) why[0] = 0;
+                return strstr(line, " FUNC ") ? 1 : 0;
+            }
+        }
+        if (*e) e++;
+    }
+    if (cx_fmt(why, 512, "no __init_u symbol")) why[0] = 0;
+    return -1;
+}
+
+static int oa_one(const char *abs, const oa_case *c, int *failed, int *xfail) {
+    char why[600], stage[64];
+    int got = -1000;
+    int t = oa_case_run(abs, c, &got, stage, why);
+    int pass = !t && got == c->want;
+    const char *verdict = pass ? (c->expect_fail ? "XPASS" : "PASS") : (c->expect_fail ? "EXPECT-FAIL" : "FAIL");
+    if (t) printf("CASE %s %s rc=-/%d stage=%s %s\n", c->name, verdict, c->want, stage, why);
+    else printf("CASE %s %s rc=%d/%d\n", c->name, verdict, got, c->want);
+    if (pass ? c->expect_fail : !c->expect_fail) (*failed)++;
+    else if (!pass) (*xfail)++;
+    return 0;
+}
+
+/* p03's unit.o is still in oa_dir when this runs */
+static int oa_symcase(const char *abs, const char *name, int *failed) {
+    char why[600], stage[64];
+    int s;
+    if (oa_unit(abs, "unit.c", "unit.o", stage, why)) { printf("CASE %s FAIL stage=%s %s\n", name, stage, why); (*failed)++; return 0; }
+    s = oa_symtype(why);
+    printf("CASE %s %s want=FUNC %s\n", name, s == 1 ? "PASS" : "FAIL", why);
+    if (s != 1) (*failed)++;
+    return 0;
+}
+
+static int oa_have(const char *label, char *const argv[]) {
+    int rc = 0;
+    char w[600];
+    return !oa_run(label, argv, 10, &rc, w, sizeof w) && rc == 0;
+}
+
 int main(int argc, char **argv) {
     const char *product = 0;
-    char abs[4096], id[64], why[600], stage[64];
-    int i, failed = 0, xfail = 0, rc = 0;
+    char abs[4096], id[64];
+    int i, failed = 0, xfail = 0, rc = 0, armun = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--product") && i + 1 < argc) product = argv[++i];
         else { fprintf(stderr, "check-objabi: usage: --product CANDIDATE.com\n"); return 2; }
@@ -160,21 +267,41 @@ int main(int argc, char **argv) {
     if (cx_fmt(id, sizeof id, "objabi-%d", (int)getpid()) || sr_default(id, oa_dir, sizeof oa_dir) ||
         sy_mkdir_all(oa_dir, 0755)) { fprintf(stderr, "check-objabi: cannot make session directory\n"); return 2; }
     for (i = 0; i < 11; i++) {
-        const oa_case *c = &oa_cases[i];
-        int got = -1000;
-        int t = oa_case_run(abs, c, &got, stage, why);
-        int pass = !t && got == c->want;
-        const char *verdict = pass ? (c->expect_fail ? "XPASS" : "PASS") : (c->expect_fail ? "EXPECT-FAIL" : "FAIL");
-        if (t) printf("CASE %s %s rc=-/%d stage=%s %s\n", c->name, verdict, c->want, stage, why);
-        else printf("CASE %s %s rc=%d/%d\n", c->name, verdict, got, c->want);
-        if (pass ? c->expect_fail : !c->expect_fail) failed++;
-        else if (!pass) xfail++;
+        oa_one(abs, &oa_cases[i], &failed, &xfail);
+        if (i == 0) {
+            if (oa_put("unit.c", oa_cases[0].unit)) failed++;
+            else oa_symcase(abs, "symtype", &failed);
+        }
+    }
+    {
+        char *ag[] = {"aarch64-linux-gnu-gcc", "--version", 0};
+        const char *home = sy_env("HOME");
+        char *aq[] = {oa_qemu, "--version", 0};
+        int haveq = 0;
+        if (cx_fmt(oa_qemu, sizeof oa_qemu, "qemu-aarch64-static")) oa_qemu[0] = 0;
+        haveq = oa_have("qemu-probe", aq);
+        if (!haveq && home && !cx_fmt(oa_qemu, sizeof oa_qemu, "%s/.local/bin/qemu-aarch64-static", home))
+            haveq = oa_have("qemu-probe", aq);
+        if (!oa_have("agcc-probe", ag) || !haveq) {
+            printf("CHECK_OBJABI_ARM64 UNMEASURED %s\n", haveq ? "no-aarch64-linux-gnu-gcc" : "no-qemu-aarch64-static");
+            armun = 1;
+        } else {
+            oa_arm = 1;
+            for (i = 0; i < 9; i++) {
+                oa_one(abs, &oa_arm_cases[i], &failed, &xfail);
+                if (i == 0) {
+                    if (oa_put("unit.c", oa_arm_cases[0].unit)) failed++;
+                    else oa_symcase(abs, "a-symtype", &failed);
+                }
+            }
+            oa_arm = 0;
+        }
     }
     {
         char *av[] = {"rm", "-rf", oa_dir, 0};
         pr_result r;
         if (!pr_run("cleanup", av, 0, 0, 10, &r)) pr_free(&r);
     }
-    printf("CHECK_OBJABI failed=%d expect_fail=%d\n", failed, xfail);
-    return failed ? 1 : 0;
+    printf("CHECK_OBJABI failed=%d expect_fail=%d%s\n", failed, xfail, armun ? " arm64=UNMEASURED" : "");
+    return failed ? 1 : (armun ? 3 : 0);
 }
