@@ -1,0 +1,119 @@
+// Nine RGB coefficients in l-major band order occupy 27 consecutive f64 cells.
+native function SH3_map(h_dst:i64,h_src:i64,h_mode:i64,h_factor:f64) i64 {
+  let h_span=ux_span(h_dst,216);
+  if(h_mode==0 || h_mode==2 || h_mode==3) { let h_input_span=ux_span(h_src,216); }
+  let h_iter=0;
+  let h_step=8;
+  if(h_src<h_dst && h_src+216>h_dst) { h_iter=208; h_step=0-8; }
+  while(h_iter>=0 && h_iter<216) {
+    let h_result=0.0;
+    if(h_mode==0) { h_result=ux_f64(h_src+h_iter); }
+    if(h_mode==1) { h_result=ux_f64(h_dst+h_iter)*h_factor; }
+    if(h_mode==2) { h_result=ux_f64(h_dst+h_iter)+ux_f64(h_src+h_iter)*h_factor; }
+    if(h_mode==3) {
+      let h_current=ux_f64(h_dst+h_iter);
+      h_result=h_current+(ux_f64(h_src+h_iter)-h_current)*h_factor;
+    }
+    let h_output=ux_f64_put(h_dst+h_iter,h_result);
+    h_iter=h_iter+h_step;
+  }
+  return h_dst;
+}
+
+function SphericalHarmonics3_set(h_set,...h_set_args) {
+  return SH3_map(h_set,h_set_args[0],0,0.0);
+}
+
+function SphericalHarmonics3_zero(h_zero) {
+  return SH3_map(h_zero,h_zero,4,0.0);
+}
+
+function SphericalHarmonics3_copy(h_copy,...h_copy_args) {
+  return SH3_map(h_copy,h_copy_args[0],0,0.0);
+}
+
+function SphericalHarmonics3_clone(h_clone,...h_clone_args) {
+  return SH3_map(h_clone,h_clone_args[0],0,0.0);
+}
+
+function SphericalHarmonics3_add(h_add,...h_add_args) {
+  return SH3_map(h_add,h_add_args[0],2,1.0);
+}
+
+native function SphericalHarmonics3_addScaledSH(h_scaled:i64,h_scaled_other:i64,h_multiplier:f64) i64 {
+  return SH3_map(h_scaled,h_scaled_other,2,h_multiplier);
+}
+
+native function SphericalHarmonics3_scale(h_scale:i64,h_scale_factor:f64) i64 {
+  return SH3_map(h_scale,h_scale,1,h_scale_factor);
+}
+
+native function SphericalHarmonics3_lerp(h_lerp:i64,h_other:i64,h_alpha:f64) i64 {
+  return SH3_map(h_lerp,h_other,3,h_alpha);
+}
+
+native function SphericalHarmonics3_equals(h_equal:i64,h_equal_other:i64) i64 {
+  let h_equal_index=0;
+  while(h_equal_index<216) {
+    if(ux_f64(h_equal+h_equal_index)!=ux_f64(h_equal_other+h_equal_index)) { return 0; }
+    h_equal_index=h_equal_index+8;
+  }
+  return 1;
+}
+
+function SphericalHarmonics3_fromArray(h_from,...h_from_args) {
+  return SH3_map(h_from,h_from_args[0]+8*h_from_args[1],0,0.0);
+}
+
+function SphericalHarmonics3_toArray(h_to,...h_to_args) {
+  let h_to_written=SH3_map(h_to_args[0]+8*h_to_args[1],h_to,0,0.0);
+  return h_to_args[0];
+}
+
+native function SH3_basis(h_basis_dst:i64,h_normal:i64,h_irradiance:i64) i64 {
+  let h_x=ux_f64(h_normal); let h_y=ux_f64(h_normal+8); let h_z=ux_f64(h_normal+16);
+  let h_a=0.282095; let h_b=0.488603; let h_c=1.092548; let h_d=0.546274;
+  let h_diag=0.315392*(3.0*h_z*h_z-1.0);
+  if(h_irradiance!=0) {
+    h_a=0.886227; h_b=1.023328; h_c=0.858086; h_d=0.429043;
+    h_diag=0.743125*h_z*h_z-0.247708;
+  }
+  let h_values=[h_a,h_b*h_y,h_b*h_z,h_b*h_x,h_c*h_x*h_y,h_c*h_y*h_z,h_diag,h_c*h_x*h_z,
+    h_d*(h_x*h_x-h_y*h_y)];
+  let h_basis_index=0;
+  while(h_basis_index<9) {
+    let h_basis_put=ux_f64_put(h_basis_dst+8*h_basis_index,h_values[h_basis_index]);
+    h_basis_index=h_basis_index+1;
+  }
+  return h_basis_dst;
+}
+
+function SphericalHarmonics3_getBasisAt(h_basis,...h_basis_args) {
+  return SH3_basis(h_basis,h_basis_args[0],0);
+}
+
+native function SH3_eval(h_target:i64,h_coeffs:i64,h_direction:i64,h_kind:i64,h_scratch:i64) i64 {
+  let h_weights=SH3_basis(h_scratch,h_direction,h_kind);
+  let h_eval_r=0.0; let h_eval_g=0.0; let h_eval_b=0.0;
+  let h_band=0;
+  while(h_band<9) {
+    let h_band_offset=h_coeffs+h_band*24;
+    let h_band_weight=ux_f64(h_weights+h_band*8);
+    h_eval_r=h_eval_r+h_band_weight*ux_f64(h_band_offset);
+    h_eval_g=h_eval_g+h_band_weight*ux_f64(h_band_offset+8);
+    h_eval_b=h_eval_b+h_band_weight*ux_f64(h_band_offset+16);
+    h_band=h_band+1;
+  }
+  let h_write_r=ux_f64_put(h_target,h_eval_r);
+  let h_write_g=ux_f64_put(h_target+8,h_eval_g);
+  let h_write_b=ux_f64_put(h_target+16,h_eval_b);
+  return h_target;
+}
+
+function SphericalHarmonics3_getAt(h_at,...h_at_args) {
+  return SH3_eval(h_at,h_at_args[0],h_at_args[1],0,h_at_args[2]);
+}
+
+function SphericalHarmonics3_getIrradianceAt(h_irradiate,...h_irradiate_args) {
+  return SH3_eval(h_irradiate,h_irradiate_args[0],h_irradiate_args[1],1,h_irradiate_args[2]);
+}
