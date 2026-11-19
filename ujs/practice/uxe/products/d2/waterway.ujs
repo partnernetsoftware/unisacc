@@ -1,0 +1,83 @@
+// Dusk background and winding banks. Product coordinates are in channel units.
+persist let waterSurfaceReady = 0;
+if (waterSurfaceReady == 0) {
+  packetWrite = uxe_dispatch(1, 426, 240);
+  waterSurfaceReady = 1;
+}
+let waterSun = 282.0 - (boatX - 5.4 * ux_sin(boatZ / 49.0) - 4.3 * ux_sin(boatZ / 117.0)) * 1.8;
+let waterRow = 0;
+while (waterRow < 240) {
+  let waterDrift = waterRow - 90;
+  let waterDepth = 1550.0;
+  if (waterDrift > 0) { waterDepth = 1550.0 / waterDrift; }
+  let waterWorldZ = boatZ + waterDepth;
+  let waterCenter = 5.4 * ux_sin(waterWorldZ / 49.0) + 4.3 * ux_sin(waterWorldZ / 117.0);
+  let waterHalf = 13.2 + 1.9 * ux_sin(waterWorldZ / 39.0);
+  let waterStart = f64_floor_i64(213.0 + (waterCenter - waterHalf - boatX) * 155.0 / waterDepth);
+  let waterEnd = f64_floor_i64(213.0 + (waterCenter + waterHalf - boatX) * 155.0 / waterDepth);
+  let waterSway = ux_sin(waterRow * 0.58 + (boatTick % 256) * 0.16);
+  let waterCol = 0;
+  while (waterCol < 426) {
+    let waterHashX = waterCol / 2;
+    let waterHashY = waterRow / 2;
+    if (waterDrift >= 0) {
+      waterHashX = (waterCol + 16 + f64_floor_i64(waterSway * (2.0 + waterDrift * 0.025))) / 4;
+      waterHashY = f64_floor_i64(waterWorldZ * 0.64);
+    }
+    let waterNoise = u32_xor(u32_mul(waterHashX + 71, 374761393), u32_mul(waterHashY + 97, 668265263));
+    waterNoise = u32_mul(u32_xor(waterNoise, u32_shr(waterNoise, 13)), 1274126177);
+    waterNoise = u32_and(u32_xor(waterNoise, u32_shr(waterNoise, 16)), 255);
+    let waterR = 0;
+    let waterG = 0;
+    let waterB = 0;
+    if (waterDrift < 0) {
+      waterR = 151 + (104 * waterRow) / 90;
+      waterG = 113 + (74 * waterRow) / 90;
+      waterB = 80 + (15 * waterRow) / 90;
+      let sunX = waterCol - waterSun;
+      let sunY = waterRow - 53;
+      let sunDistance = sunX * sunX + sunY * sunY;
+      if (sunDistance < 529.0) { waterR = 255; waterG = 221; waterB = 151; }
+      else {
+        if (sunDistance < 2304.0 && waterNoise > 186) {
+          waterR = waterR + (255 - waterR) * 42 / 100;
+          waterG = waterG + (221 - waterG) * 42 / 100;
+          waterB = waterB + (151 - waterB) * 42 / 100;
+        }
+      }
+    } else {
+      if (waterCol > waterStart && waterCol < waterEnd) {
+        waterR = 166 - waterDrift * 90 / 149;
+        waterG = 114 - waterDrift * 47 / 149;
+        waterB = 66 - waterDrift * 6 / 149;
+        let beam = waterCol - waterSun - waterSway * (2.0 + waterDrift * 0.025);
+        if (beam < 0.0) { beam = 0.0 - beam; }
+        if (beam < 3.0 + waterDrift * 0.23 && waterNoise > 115) {
+          waterR = 238; waterG = 181; waterB = 110;
+        } else {
+          if ((waterRow + (waterCol / 16) % 2 + 8 + f64_floor_i64(waterSway * 3.0)) % 6 == 0 &&
+              waterDrift > 18 && waterNoise > 70 && waterNoise % 32 < 25) {
+            waterR = 233; waterG = 181; waterB = 112;
+          } else {
+            if (beam > 25.0 + waterDrift * 0.19 && waterDrift > 32 && waterRow % 11 < 3) {
+              waterR = waterR * 78 / 100;
+              waterG = waterG * 87 / 100;
+            }
+          }
+        }
+      } else {
+        waterR = 83; waterG = 57; waterB = 43;
+        if (waterDrift > 8 && waterNoise < 36 + waterDrift) {
+          waterR = 58; waterG = 57; waterB = 43;
+        }
+      }
+    }
+    let waterGrain = waterNoise % 4 - 1;
+    if (waterR + waterGrain > 255) { waterGrain = 0; }
+    packetWrite = uxe_dispatch(2, waterRow * 426 + waterCol, 4278190080
+      + waterR + waterGrain + 256 * (waterG + waterGrain) + 65536 * (waterB + waterGrain));
+    waterCol = waterCol + 1;
+  }
+  waterRow = waterRow + 1;
+}
+packetWrite = uxe_dispatch(3, 0, 0);

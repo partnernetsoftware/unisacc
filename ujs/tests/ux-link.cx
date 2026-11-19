@@ -354,23 +354,46 @@ static int pilot_gold(char *gold, int cap) {
     return contacts ? used : -1;
 }
 
-static int pilot_product(const char *dir,int mutate) {
+static int pilot_product(const char *dir,int mutate,int draw) {
     const char *sources[]={"ujs/practice/uxe/products/d2/pilot.ujs","ujs/practice/uxe/base/math.ujs"};
-    unsigned char *pilot=0,*math=0;
-    int64_t pn=0,mn=0;
+    unsigned char *pilot=0,*math=0,*water=0;
+    int64_t pn=0,mn=0,wn=0;
     int rc=1;
-    char path[320],program[8192];
+    char path[320],program[16384];
     if (sy_read_file(sources[0],&pilot,&pn,7000) || sy_read_file(sources[1],&math,&mn,1000)) goto done;
     long header=tx_find((char *)pilot,pn,"\n\n",2);
-    if (header < 0) goto done;
-    int n=tx_snprintf(program,sizeof program,"%.*s\n%s%s",(int)header,pilot,math,pilot+header);
+    const char tail[]="\nreturn boatTick;";
+    long body=tx_find((char *)pilot,pn,tail,sizeof tail-1);
+    if (header < 0 || body <= header) goto done;
+    if(draw && sy_read_file("ujs/practice/uxe/products/d2/waterway.ujs",&water,&wn,8192)) goto done;
+    int n=tx_snprintf(program,sizeof program,"%.*s\n%s%.*s\n%s%s",
+        (int)header,pilot,math,(int)(body-header),pilot+header,water?(char *)water:"",pilot+body);
     if (n<0 || n>=(int)sizeof program) goto done;
     tx_snprintf(path,sizeof path,"%s/pilot.ujs",dir);
     if(sy_write_file(path,program,n,0600)) goto done;
-    rc=generated(dir,"product",path,mutate?"target = 0.16":0,"target = 1.65");
+    rc=generated(dir,"product",path,mutate==2?"waterCol > waterStart && waterCol < waterEnd":mutate==1?"target = 0.16":0,
+        mutate==2?"waterCol < waterStart && waterCol > waterEnd":"target = 1.65");
 done:
     mm_free(pilot);
     mm_free(math);
+    mm_free(water);
+    return rc;
+}
+
+static int export_waterway(const char *dir) {
+    if(tx_len(dir,250)<=0 || sy_mkdir(dir,0700)) return 2;
+    int rc=generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+        pilot_product(dir,0,1) ||
+        copy_fixture(dir,"index.html","ujs/practice/uxe/products/d2/water-preview.html") ||
+        copy_fixture(dir,"host-abi.js","ujs/practice/uxe/base/host-abi.js");
+    const char *leaves[]={"pilot.ujs","base.wasm","product.wasm","index.html","host-abi.js"};
+    char path[320];
+    for(int i=0;i<(rc?5:1);i++) {
+        tx_snprintf(path,sizeof path,"%s/%s",dir,leaves[i]);
+        sy_unlink(path);
+    }
+    if(rc) sy_rmdir(dir);
+    printf("D2_WATERWAY_EXPORT dir=%s failed=%d\n",dir,rc);
     return rc;
 }
 
@@ -448,7 +471,8 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             " 102240 167,83,61,255 41,33,36,255 10,20,30,255 10,20,30,255 -1",
             426 * 240, 3 * 10000 + 13 * 100 + 91);
     }
-    if (flight_check) gold_n = flight_check == 2 ? pilot_gold(gold, sizeof gold) : flight_gold(gold, sizeof gold);
+    if (flight_check == 1) gold_n = flight_gold(gold, sizeof gold);
+    if (flight_check == 2) gold_n = pilot_gold(gold, sizeof gold);
     if (projection_check == 2) gold_n = audio_gold(gold, sizeof gold);
     if (projection_check == 3) gold_n = tx_snprintf(gold, sizeof gold, "20,26,36,255 138,213,203,255 241,91,49,255");
     if (projection_check == 4) gold_n = tx_snprintf(gold, sizeof gold,
@@ -464,7 +488,11 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
         from += sizeof start - 1;
         to = tx_find(out + from, n - from, end, sizeof end - 1);
         if (to >= 0) {
-            if (projection_check == 6) {
+            if (flight_check == 3) {
+                int sun=0, first=0, later=0, changed=0;
+                pass = !rc && sscanf(out+from,"%d %d %d %d",&sun,&first,&later,&changed)==4 &&
+                    sun>=1500 && first>=8000 && later>=8000 && changed>=500;
+            } else if (projection_check == 6) {
                 int first=0, later=0, changed=0;
                 pass = !rc && sscanf(out + from, "%d %d %d", &first, &later, &changed)==3 &&
                     first>=100 && later>=100 && changed>=100;
@@ -481,7 +509,7 @@ static int browser(const char *dir, const char *mode, int base_check, int flight
             if (projection_check && to > 500) to = 0;
             printf("%s mode=%s val=%.*s failed=%d\n",
                 projection_check == 2 ? "CHECK_UXE_D1_PCM" : projection_check ? "CHECK_UXE_D1_PROJECTION" :
-                flight_check == 2 ? "CHECK_UXE_D2_PILOT" :
+                flight_check == 3 ? "CHECK_UXE_D2_WATERWAY" : flight_check == 2 ? "CHECK_UXE_D2_PILOT" :
                 flight_check ? "CHECK_UXE_D1_FLIGHT_WASM" : base_check ? "CHECK_UXE_D1_BASE" : "CHECK_UXE_LINK",
                 mode, (int)to, out + from, !pass);
         }
@@ -497,6 +525,8 @@ int main(int argc, char **argv) {
     size_t removed_n = 0;
     if (argc == 3 && tx_eq(argv[1], "--export-projection", sizeof "--export-projection"))
         return export_projection(argv[2]);
+    if (argc == 3 && tx_eq(argv[1], "--export-waterway", sizeof "--export-waterway"))
+        return export_waterway(argv[2]);
     const char *package = argc == 4 && tx_eq(argv[1], "--package", sizeof "--package") ? argv[2] : 0;
     const char *mode = package ? argv[3] : argc == 2 ? argv[1] : "";
     int base_blend = tx_eq(mode, "base-blend-bad", sizeof "base-blend-bad");
@@ -511,6 +541,8 @@ int main(int argc, char **argv) {
         cannon_mutate || hit_mutate || wave_mutate || missile_mutate || health_mutate;
     int pilot_mutate = tx_eq(mode, "pilot-no-drag", sizeof "pilot-no-drag");
     if (tx_eq(mode, "pilot", sizeof "pilot") || pilot_mutate) flight_check = 2;
+    int dry_mutate = tx_eq(mode,"waterway-dry",sizeof "waterway-dry");
+    if (tx_eq(mode,"waterway",sizeof "waterway") || dry_mutate) flight_check = 3;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -545,9 +577,10 @@ int main(int argc, char **argv) {
         } else {
             rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
         }
-    } else if (flight_check == 2) {
+    } else if (flight_check >= 2) {
         rc = rc || copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d2-pilot-probe.html") ||
-            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) || pilot_product(dir,pilot_mutate);
+            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+            pilot_product(dir,dry_mutate?2:pilot_mutate,flight_check==3);
     } else if (flight_check) {
         int mutate = tx_eq(mode, "flight-heading", 15);
         rc = rc || copy_fixture(dir, "probe.html", "ujs/practice/uxe/test/ux-d1-flight-probe.html") ||
