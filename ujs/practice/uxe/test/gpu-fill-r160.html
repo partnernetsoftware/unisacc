@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  AmbientLight, BufferAttribute, BufferGeometry, Camera, Color, Mesh, MeshLambertMaterial, Scene, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+const options = { alpha: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 16;
+  const gl = canvas.getContext("webgl", options);
+  if (!gl) throw new Error("WebGL unavailable");
+  return { canvas, gl };
+}
+
+function samples(gl) {
+  return [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]].flatMap(([x, y]) => {
+    const px = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return [...px];
+  });
+}
+
+const output = document.querySelector("#gpu");
+try {
+  const { gl } = context();
+  let exports;
+  const submit = createGpuSubmit(gl, () => exports.memory, () => 1);
+  const wasm = await fetch("./probe.wasm").then(response => response.arrayBuffer());
+  ({ instance: { exports } } = await WebAssembly.instantiate(wasm, { uxe_gpu_v1: { host_gpu_submit: submit } }));
+  const status = Number(exports.uxe_gpu_probe(location.search === "?ambient-mutate" ? 1n : 0n));
+  const reference = context();
+  const renderer = new WebGLRenderer({ ...reference, context: reference.gl, ...options });
+  renderer.setSize(16, 16, false);
+  renderer.setClearColor(0, 1);
+  const scene = new Scene();
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array([-0.75,-0.75,0,0.75,-0.75,0,0,0.75,0]), 3));
+  geometry.computeVertexNormals();
+  const material = new MeshLambertMaterial({ color: 0x804008 });
+  const light = new AmbientLight(new Color().setRGB(0.5, 0.25, 0.125), Math.PI);
+  scene.add(new Mesh(geometry, material), light);
+  renderer.render(scene, new Camera());
+  output.textContent = JSON.stringify([status, ...samples(gl), ...samples(reference.gl)]);
+  geometry.dispose();
+  material.dispose();
+  renderer.dispose();
+} catch (error) {
+  output.textContent = String(error);
+}
+</script>
