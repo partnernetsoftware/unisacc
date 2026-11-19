@@ -1,0 +1,88 @@
+#pragma unisa module g_geometry
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int geometry_copy(const char *dir,const char *leaf,const char *source) {
+    char path[320];
+    tx_snprintf(path,sizeof path,"%s/%s",dir,leaf);
+    return sy_copy(source,path,0600);
+}
+
+static int geometry_run(char **args,int seconds) {
+    char *out=0;
+    size_t n=0;
+    int rc=cx_runv_timeout(args,seconds,&out,&n);
+    if(rc && out) printf("%s\n",out);
+    mm_free(out);
+    return rc;
+}
+
+static int geometry_read(const char *dir,const double *gold,int count,int index_from) {
+    char profile[320],url[380];
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    tx_snprintf(url,sizeof url,"file://%s/probe.html",dir);
+    char *args[]={"google-chrome","--headless=new","--allow-file-access-from-files",
+        "--disable-background-networking","--no-first-run",profile,
+        "--virtual-time-budget=4000","--dump-dom",url,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,14,&out,&bytes);
+    const char marker[]="<pre id=\"r160\">[";
+    long at=!rc && out?tx_find(out,bytes,marker,sizeof marker-1):-1;
+    int failed=0;
+    if(at<0) {
+        if(out) printf("G_GEOMETRY document=%s\n",out);
+        failed=1;
+    } else {
+        char *next=out+at+sizeof marker-1;
+        for(int i=0;i<2*count;i++) {
+            char *end=0;
+            double value=tx_strtod(next,&end),difference=value-gold[i%count];
+            double tolerance=i%count<index_from?1e-6:0;
+            if(end==next || *end!=(i==2*count-1?']':',') ||
+                !(difference>=-tolerance && difference<=tolerance)) {
+                printf("G_GEOMETRY side=%d case=%d actual=%.17g gold=%.17g\n",
+                    i/count,i%count,value,gold[i%count]);
+                failed=1;
+                break;
+            }
+            next=end+1;
+        }
+    }
+    mm_free(out);
+    return failed;
+}
+
+int g_geometry_check(const char *name,const char *fixture,const char *const *modules,
+        const char *source,const double *gold,int count,int index_from) {
+    char dir[256],header[320],body[320],wasm[320],fixture_path[320],module_paths[16][256];
+    if(sy_mkdtemp("/tmp","ujs-geometry-",dir,sizeof dir)) return 2;
+    tx_snprintf(header,sizeof header,"%s/abi.ujs",dir);
+    tx_snprintf(body,sizeof body,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(fixture_path,sizeof fixture_path,"ujs/practice/uxe/test/%s-r160.html",fixture);
+    char *compile[24]={"./ujs/ujs2wasm.com",header};
+    int n=2;
+    for(int i=0;modules[i];i++) {
+        if(i==16) return 2;
+        tx_snprintf(module_paths[i],sizeof module_paths[i],"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        compile[n++]=module_paths[i];
+    }
+    compile[n++]=body;
+    compile[n++]="-o";
+    compile[n++]=wasm;
+    compile[n]=0;
+    const char abi[]="export uxe_geometry_probe() i64 version 1;";
+    int ready=!sy_write_file(header,abi,sizeof abi-1,0600) &&
+        !sy_write_file(body,source,tx_len(source,16384),0600) &&
+        !geometry_run(compile,10) && !geometry_copy(dir,"probe.html",fixture_path) &&
+        !geometry_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js");
+    int failed=!ready || geometry_read(dir,gold,count,index_from);
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(geometry_run(clean,5)) return 2;
+    printf("G_GEOMETRY %s cases=%d failed=%d\n",name,count,failed);
+    return ready?failed:2;
+}
