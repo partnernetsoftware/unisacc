@@ -1,0 +1,110 @@
+// Samples a caller-supplied UJS closure returning an f64 position view.
+function Curve_getPoints(curve_sample,...curve_points_args) {
+  let curve_out=curve_points_args[0];
+  let curve_divisions=curve_points_args[1];
+  let curve_dims=curve_points_args[2];
+  let curve_count=0-1;
+  if(curve_divisions>0 && curve_dims>=2 && curve_dims<=3 && curve_out>=0 &&
+     curve_out<=6291456 && curve_divisions+1<=(6291456-curve_out)/(8*curve_dims)) {
+    curve_count=0;
+    while(curve_count<=curve_divisions) {
+      let curve_ptr=curve_sample(curve_count*1.0/curve_divisions);
+      let curve_axis=0;
+      while(curve_axis<curve_dims) {
+        let curve_written=ux_f64_put(curve_out+8*(curve_count*curve_dims+curve_axis),
+          ux_f64(curve_ptr+8*curve_axis));
+        curve_axis=curve_axis+1;
+      }
+      curve_count=curve_count+1;
+    }
+  }
+  return curve_count;
+}
+
+function Curve_getLengths(curve_length_sample,...curve_length_args) {
+  let length_table=curve_length_args[0];
+  let steps=curve_length_args[1];
+  let dims=curve_length_args[2];
+  let result=0-1;
+  if(steps>0 && dims>=2 && dims<=3 && length_table>=0 && length_table<=6291456 &&
+     steps+1<=(6291456-length_table)/8) {
+    let length_previous=curve_length_sample(0.0);
+    let old_x=ux_f64(length_previous);
+    let old_y=ux_f64(length_previous+8);
+    let old_z=0.0;
+    if(dims==3) { old_z=ux_f64(length_previous+16); }
+    let sum=0.0;
+    let zero=ux_f64_put(length_table,0.0);
+    let i=1;
+    while(i<=steps) {
+      let length_next=curve_length_sample(i*1.0/steps);
+      let x=ux_f64(length_next);
+      let y=ux_f64(length_next+8);
+      let z=0.0;
+      if(dims==3) { z=ux_f64(length_next+16); }
+      let dx=x-old_x;
+      let dy=y-old_y;
+      let dz=z-old_z;
+      sum=sum+f64_sqrt(dx*dx+dy*dy+dz*dz);
+      let length_written=ux_f64_put(length_table+8*i,sum);
+      old_x=x; old_y=y; old_z=z;
+      i=i+1;
+    }
+    result=length_table;
+  }
+  return result;
+}
+
+native function Curve_getLength(lengths:i64,divisions:i64) f64 {
+  return ux_f64(lengths+divisions*8);
+}
+
+native function Curve_getUtoTmapping(lengths:i64,divisions:i64,u:f64) f64 {
+  if(divisions<=0 || u<0.0 || u>1.0) { return 0.0/0.0; }
+  let target=u*Curve_getLength(lengths,divisions);
+  let first=0;
+  let last=divisions;
+  while(first<last) {
+    let middle=(first+last+1)/2;
+    if(ux_f64(lengths+8*middle)<=target) { first=middle; }
+    else { last=middle-1; }
+  }
+  let t=first*1.0/divisions;
+  if(first==divisions) { return t; }
+  let before=ux_f64(lengths+first*8);
+  let after=ux_f64(lengths+(first+1)*8);
+  if(after==before) { return t; }
+  return t+(target-before)/(after-before)/divisions;
+}
+
+function Curve_getPointAt(curve_arc_sample,...curve_arc_args) {
+  let lengths=f64_floor_i64(curve_arc_args[0]);
+  let steps=f64_floor_i64(curve_arc_args[1]);
+  return curve_arc_sample(Curve_getUtoTmapping(lengths,steps,curve_arc_args[2]));
+}
+
+function Curve_getTangent(curve_tangent_sample,...curve_tangent_args) {
+  let out=f64_floor_i64(curve_tangent_args[0]);
+  let dimensions=f64_floor_i64(curve_tangent_args[1]);
+  let t=curve_tangent_args[2];
+  let low=t-0.0001;
+  let high=t+0.0001;
+  if(low<0.0) { low=0.0; }
+  if(high>1.0) { high=1.0; }
+  let a=curve_tangent_sample(low);
+  let ax=ux_f64(a);
+  let ay=ux_f64(a+8);
+  let az=0.0;
+  if(dimensions==3) { az=ux_f64(a+16); }
+  let b=curve_tangent_sample(high);
+  let x=ux_f64(b)-ax;
+  let y=ux_f64(b+8)-ay;
+  let z=0.0;
+  if(dimensions==3) { z=ux_f64(b+16)-az; }
+  let distance=f64_sqrt(x*x+y*y+z*z);
+  if(distance==0.0) { distance=1.0; }
+  let dx=ux_f64_put(out,x/distance);
+  let dy=ux_f64_put(out+8,y/distance);
+  if(dimensions==3) { let dz=ux_f64_put(out+16,z/distance); }
+  return out;
+}
