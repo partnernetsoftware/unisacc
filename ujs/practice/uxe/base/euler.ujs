@@ -1,0 +1,102 @@
+struct Euler { x: f64; y: f64; z: f64; order: u32; }
+
+native function Euler_set(e_dst:i64, e_x:f64, e_y:f64, e_z:f64, e_order:i64) i64 {
+  if (e_order<0 || e_order>=6) { return 0-1; }
+  let e_span=ux_span(e_dst,Euler.size);
+  let e_x_write=ux_f64_put(e_dst+Euler.x,e_x);
+  let e_y_write=ux_f64_put(e_dst+Euler.y,e_y);
+  let e_z_write=ux_f64_put(e_dst+Euler.z,e_z);
+  let e_order_write=ux_u32_put(e_dst+Euler.order,e_order);
+  return e_dst;
+}
+
+function Euler_copy(e_copy_dst, ...e_copy_args) {
+  let e_from=e_copy_args[0];
+  return Euler_set(e_copy_dst,ux_f64(e_from),ux_f64(e_from+Euler.y),ux_f64(e_from+Euler.z),
+      ux_u32(e_from+Euler.order));
+}
+
+function Euler_clone(e_clone_dst, ...e_clone_args) {
+  return Euler_copy(e_clone_dst,e_clone_args[0]);
+}
+
+function Euler_setFromVector3(e_vector_dst, ...e_vector_args) {
+  let e_vector=e_vector_args[0];
+  return Euler_set(e_vector_dst,ux_f64(e_vector),ux_f64(e_vector+8),ux_f64(e_vector+16),e_vector_args[1]);
+}
+
+native function Euler_atan(e_num:f64,e_den:f64) f64 {
+  return ux_math_atan2(e_num,e_den);
+}
+
+native function Euler_setFromRotationMatrix(e_matrix_dst:i64, e_matrix_src:i64, e_matrix_order:i64) i64 {
+  if (e_matrix_order<0 || e_matrix_order>=6) { return 0-1; }
+  let e_basis=[ux_f64(e_matrix_src),ux_f64(e_matrix_src+32),ux_f64(e_matrix_src+64),
+      ux_f64(e_matrix_src+8),ux_f64(e_matrix_src+40),ux_f64(e_matrix_src+72),
+      ux_f64(e_matrix_src+16),ux_f64(e_matrix_src+48),ux_f64(e_matrix_src+80)];
+  // Each row encodes the middle angle and the two atan2 pairs, with one pair at gimbal lock.
+  // A signed matrix-cell number is one-based, while output axes are zero-based.
+  let e_map=[
+      1,3,   0,0-6,9, 2,0-2,1, 0,8,5,
+      0,0-6, 1,3,9,   2,4,5,   1,0-7,1,
+      0,8,   1,0-7,9, 2,0-2,5, 2,4,1,
+      1,0-7, 0,8,9,   2,4,1,   2,0-2,5,
+      2,4,   0,0-6,5, 1,0-7,1, 1,3,9,
+      2,0-2, 0,8,5,   1,3,1,   0,0-6,9];
+  let e_map_start=e_matrix_order*11;
+  let e_mid_index=e_map[e_map_start+1];
+  let e_mid_sign=1.0;
+  if(e_mid_index<0) { e_mid_index=0-e_mid_index; e_mid_sign=0.0-1.0; }
+  let e_middle=e_basis[e_mid_index-1]*e_mid_sign;
+  let e_limited=vector_limit(e_middle,0.0-1.0,1.0);
+  let e_angles=[0.0,0.0,0.0];
+  e_angles[e_map[e_map_start]]=ux_math_asin(e_limited);
+  let e_atan_start=e_map_start+2;
+  let e_atan_end=e_map_start+8;
+  if(ux_math_abs(e_middle)>=0.9999999) {
+    e_atan_start=e_map_start+8;
+    e_atan_end=e_map_start+11;
+  }
+  while(e_atan_start<e_atan_end) {
+    let e_target_axis=e_map[e_atan_start];
+    let e_num_index=e_map[e_atan_start+1];
+    let e_num_sign=1.0;
+    if(e_num_index<0) { e_num_index=0-e_num_index; e_num_sign=0.0-1.0; }
+    let e_denom_index=e_map[e_atan_start+2];
+    let e_numerator=e_num_sign*e_basis[e_num_index-1];
+    e_angles[e_target_axis]=Euler_atan(e_numerator,e_basis[e_denom_index-1]);
+    e_atan_start=e_atan_start+3;
+  }
+  return Euler_set(e_matrix_dst,e_angles[0],e_angles[1],e_angles[2],e_matrix_order);
+}
+
+native function Euler_setFromQuaternion(e_quat_dst:i64, e_quat:i64, e_quat_order:i64, e_matrix_scratch:i64) i64 {
+  if (e_quat_order<0 || e_quat_order>=6) { return 0-1; }
+  let e_rotation=Matrix4_makeRotationFromQuaternion(e_matrix_scratch,e_quat);
+  return Euler_setFromRotationMatrix(e_quat_dst,e_rotation,e_quat_order);
+}
+
+native function Euler_reorder(e_reorder:i64, e_next_order:i64, e_scratch_q:i64, e_scratch_m:i64) i64 {
+  if (e_next_order<0 || e_next_order>=6) { return 0-1; }
+  let e_previous_quat=Quaternion_setFromEuler(e_scratch_q,e_reorder);
+  if(e_previous_quat<0) { return e_previous_quat; }
+  return Euler_setFromQuaternion(e_reorder,e_previous_quat,e_next_order,e_scratch_m);
+}
+
+function Euler_equals(e_equal_a, ...e_equal_args) {
+  let e_equal_b=e_equal_args[0];
+  return ux_f64(e_equal_a)==ux_f64(e_equal_b) && ux_f64(e_equal_a+8)==ux_f64(e_equal_b+8) &&
+      ux_f64(e_equal_a+16)==ux_f64(e_equal_b+16) &&
+      ux_u32(e_equal_a+Euler.order)==ux_u32(e_equal_b+Euler.order);
+}
+
+function Euler_fromArray(e_list_dst, ...e_list_args) {
+  return Euler_copy(e_list_dst,e_list_args[0]);
+}
+
+function Euler_toArray(e_list_src, ...e_list_write) {
+  let e_array_at=ux_record_index(e_list_write[0],e_list_write[1],e_list_write[2],Euler.size,8);
+  let e_array_result=e_array_at;
+  if(e_array_at>=0) { e_array_result=Euler_copy(e_array_at,e_list_src); }
+  return e_array_result;
+}
