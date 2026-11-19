@@ -494,11 +494,12 @@ enum {
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET, OP_GPU, OP_STOREBYTES, OP_PLET,
   OP_UX_ADDR, OP_UX_SPAN, OP_UX_LOAD, OP_UX_STORE, OP_UX_BYTE, OP_FSQRT,
-  OP_ABI_CALL, OP_ABI_RET, OP_I32_BITS, OP_FLOOR_I64
+  OP_ABI_CALL, OP_ABI_RET, OP_I32_BITS, OP_FLOOR_I64, OP_NATIVE_CALL
 };
 enum { MAXC = 16384, MAXL = 256, MAXG = 64, MAXN = 32, MAXSDATA = 8192, MAXFN = 128 };
 enum { ABI_MAX_IMPORTS = 8, ABI_MAX_ARGS = 8, ABI_MAX_ALIASES = 8, ABI_TYPE_BASE = 14 };
 enum { MAX_LAYOUTS = 24, MAX_LAYOUT_FIELDS = 24 };
+enum { MAX_NATIVE = 16, MAX_NATIVE_DEPTH = 8 };
 typedef struct {
   char name[MAXN];
   int offset, nested;
@@ -513,6 +514,12 @@ typedef struct {
   uint8_t args[ABI_MAX_ARGS];
   int count, result;
 } AbiFn;
+typedef struct {
+  AbiFn sig;
+  char params[ABI_MAX_ARGS][MAXN];
+  uint32_t off, len;
+  int inline_count, depth;
+} NativeFn;
 typedef struct {
   AbiFn signature;
   int64_t bound[ABI_MAX_ARGS];
@@ -548,6 +555,8 @@ typedef struct {
   AbiFn imports[ABI_MAX_IMPORTS], api;
   AbiAlias aliases[ABI_MAX_ALIASES];
   int import_count, alias_count, abi_version;
+  NativeFn natives[MAX_NATIVE];
+  int native_count, native_visible, native_result, native_params, native_base, native_depth, native_return;
   const char *err;
 } Prog;
 
@@ -579,6 +588,7 @@ static int loc(Prog *P, const char *name, int create) {
   return P->nl++;
 }
 static int glob(Prog *P, const char *name, int create) {
+  if (P->native_result) { P->err = "native function requires an explicit local"; return -1; }
   for (int i = 0; i < P->ng; i++) if (!strcmp(P->gnames[i], name)) return i;
   if (!create) return -1;
   if (P->ng >= MAXG) { P->err = "too many globals"; return -1; }
@@ -631,6 +641,7 @@ static int pexpr(Lex *L, Prog *P);
 static int pstmt(Lex *L, Prog *P);
 static int invoke_fn(Lex *L, Prog *P, int fi);
 static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver);
+static int find_native(Prog *P, const char *name);
 
 static int expect(Lex *L, int t, Prog *P, const char *m) {
   if (L->tok != t) { P->err = m; return 0; }
@@ -689,7 +700,7 @@ static int capture_block_body(Lex *L, Prog *P, FnDef *F) {
 
 static int register_fn(Prog *P, FnDef *tmp) {
   if (P->nfn >= MAXFN) { P->err = "too many fns"; return -1; }
-  if (find_fn(P, tmp->name) >= 0) { P->err = "dup fn"; return -1; }
+  if (find_fn(P, tmp->name) >= 0 || find_native(P, tmp->name) >= 0) { P->err = "dup fn"; return -1; }
   P->fns[P->nfn] = *tmp;
   return P->nfn++;
 }
@@ -977,6 +988,75 @@ static int abi_type(Lex *L, Prog *P) {
   if (!type) { P->err = "abi requires i64 or f64"; return 0; }
   next(L);
   return type;
+}
+
+static int find_native(Prog *P, const char *name) {
+  for (int i = 0; i < P->native_count; i++)
+    if (intrinsic_name(name, P->natives[i].sig.name)) return i;
+  return -1;
+}
+
+static int native_decl(Lex *L, Prog *P) {
+  if (P->native_count == MAX_NATIVE) { P->err = "native function limit"; return 0; }
+  NativeFn *fn = &P->natives[P->native_count];
+  next(L);
+  if (!expect(L, T_FUNCTION, P, "native function keyword")) return 0;
+  if (L->tok != T_ID || !abi_name_copy(fn->sig.name, L->id) ||
+      find_fn(P, L->id) >= 0 || find_native(P, L->id) >= 0) {
+    P->err = "native function name"; return 0;
+  }
+  for (int i = 0; i < P->import_count; i++) {
+    if (intrinsic_name(L->id, P->imports[i].name)) { P->err = "native function shadows import"; return 0; }
+  }
+  next(L);
+  if (!expect(L, T_LP, P, "native function (")) return 0;
+  if (L->tok != T_RP) for (;;) {
+    int idx = fn->sig.count;
+    if (idx == ABI_MAX_ARGS) { P->err = "native parameter limit"; return 0; }
+    if (L->tok != T_ID || !abi_name_copy(fn->params[idx], L->id)) {
+      P->err = "native parameter name"; return 0;
+    }
+    for (int i = 0; i < idx; i++)
+      if (intrinsic_name(fn->params[i], L->id)) { P->err = "native duplicate parameter"; return 0; }
+    next(L);
+    if (!expect(L, T_COLON, P, "native parameter :")) return 0;
+    int type = abi_type(L, P);
+    if (!type) return 0;
+    fn->sig.args[fn->sig.count++] = (uint8_t)type;
+    if (L->tok != T_COMMA) break;
+    next(L);
+  }
+  if (!expect(L, T_RP, P, "native function )")) return 0;
+  fn->sig.result = abi_type(L, P);
+  FnDef span;
+  if (!fn->sig.result || !capture_block_body(L, P, &span) ||
+      !expect(L, T_RB, P, "native function }")) return 0;
+  fn->off = span.off;
+  fn->len = span.len;
+  fn->inline_count = P->nfn;
+  P->native_count++;
+  return 1;
+}
+
+static int native_invoke(Lex *L, Prog *P, int index) {
+  NativeFn *fn = &P->natives[index];
+  if (P->native_result && index >= P->native_visible) {
+    P->err = "native call cycle or forward reference"; return 0;
+  }
+  if (P->native_result) {
+    int depth = fn->depth + 1;
+    if (depth > MAX_NATIVE_DEPTH) { P->err = "native call depth limit"; return 0; }
+    if (depth > P->native_depth) P->native_depth = depth;
+  }
+  if (!expect(L, T_LP, P, "native call (")) return 0;
+  for (int i = 0; i < fn->sig.count; i++) {
+    if (i && !expect(L, T_COMMA, P, "native call ,")) return 0;
+    int type = pexpr(L, P);
+    if (!type) return 0;
+    if (type != fn->sig.args[i]) { P->err = "native argument type"; return 0; }
+  }
+  if (!expect(L, T_RP, P, "native call )") || !emit(P, OP_NATIVE_CALL, index)) return 0;
+  return fn->sig.result;
 }
 
 static int abi_import_module(const char *name) {
@@ -1399,6 +1479,8 @@ static int pprim(Lex *L, Prog *P) {
       fi = find_fn(P, nbuf);
       next(L);
       if (L->tok == T_LP) {
+        int native = find_native(P, nbuf);
+        if (native >= 0) return native_invoke(L, P, native);
         for (int j = 0; j < P->import_count; j++)
           if (intrinsic_name(nbuf, P->imports[j].name)) return abi_invoke(L, P, j);
       }
@@ -1875,8 +1957,10 @@ static int pstmt(Lex *L, Prog *P) {
       P->fn_did_ret = 1;
       return expect(L, T_SEMI, P, "expected ;");
     }
-    if (P->abi_version) {
-      if (ty != P->api.result) { P->err = "abi return type"; return 0; }
+    if (P->abi_version || P->native_result) {
+      int result_type = P->native_result ? P->native_result : P->api.result;
+      if (ty != result_type) { P->err = P->native_result ? "native return type" : "abi return type"; return 0; }
+      P->native_return = 1;
       if (!emit(P, OP_ABI_RET, 0)) return 0;
       return expect(L, T_SEMI, P, "expected ;");
     }
@@ -2056,6 +2140,9 @@ static int emit_ops(Buf *c, Prog *P) {
       break;
     case OP_ABI_CALL:
       if (!bu8(c, 0x10) || !bleu(c, (uint32_t)(g_need_gpu + ins->a))) return 0;
+      break;
+    case OP_NATIVE_CALL:
+      if (!wcall(c, (uint32_t)(P->native_base + ins->a))) return 0;
       break;
     case OP_ABI_RET:
       if (!bu8(c, 0x0f)) return 0;
@@ -2406,7 +2493,7 @@ static int mk_num_body(Buf *c, int is_f64) {
 }
 
 static int emit_locals(Buf *c, Prog *P) {
-  int params = P->abi_version ? P->api.count : 0;
+  int params = P->native_result ? P->native_params : P->abi_version ? P->api.count : 0;
   if (!bleu(c, (uint32_t)(P->nl - params))) return 0;
   for (int i = params; i < P->nl; i++) {
     if (!bleu(c, 1)) return 0;
@@ -3095,22 +3182,71 @@ static int abi_alias_body(Buf *code, const AbiAlias *alias, int target) {
   return wcall(code, (uint32_t)target) && bu8(code, 0x0b);
 }
 
+static void init_prog(Prog *p, const char *source, uint32_t len) {
+  memset(p, 0, sizeof *p);
+  p->scratch = p->fscratch = p->lscratch = p->uxaddr = p->fn_ret = -1;
+  p->src = source;
+  p->srclen = len;
+}
+
+static int native_body(Prog *owner, Buf *body, int index) {
+  static Prog frame;
+  NativeFn *fn = &owner->natives[index];
+  init_prog(&frame, owner->src, owner->srclen);
+  frame.native_count = owner->native_count;
+  frame.native_visible = index;
+  frame.native_result = fn->sig.result;
+  frame.native_params = fn->sig.count;
+  frame.native_base = owner->native_base;
+  frame.native_depth = 1;
+  frame.nfn = fn->inline_count;
+  frame.nlayouts = owner->nlayouts;
+  frame.import_count = owner->import_count;
+  for (int i = 0; i < frame.native_count; i++) frame.natives[i] = owner->natives[i];
+  for (int i = 0; i < frame.nfn; i++) frame.fns[i] = owner->fns[i];
+  for (int i = 0; i < frame.nlayouts; i++) frame.layouts[i] = owner->layouts[i];
+  for (int i = 0; i < frame.import_count; i++) frame.imports[i] = owner->imports[i];
+  for (int i = 0; i < frame.native_params; i++) {
+    int local = loc(&frame, fn->params[i], 1);
+    if (local < 0) { owner->err = frame.err; return 0; }
+    frame.lty[local] = fn->sig.args[i];
+  }
+  Lex lex;
+  lex.src = owner->src + fn->off;
+  lex.len = fn->len;
+  lex.pos = 0;
+  next(&lex);
+  while (lex.tok != T_EOF) {
+    if (!pstmt(&lex, &frame)) { owner->err = frame.err; return 0; }
+  }
+  if (!frame.native_return) { owner->err = "native function missing return"; return 0; }
+  for (int i = 0; i < frame.native_params; i++) {
+    if (frame.lty[i] != fn->sig.args[i]) { owner->err = "native parameter type changed"; return 0; }
+  }
+  fn->depth = frame.native_depth;
+  return emit_locals(body, &frame) && emit_ops(body, &frame) && bu8(body, 0x00) && bu8(body, 0x0b);
+}
+
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[37 + ABI_MAX_ALIASES];
+  Buf cs[37 + ABI_MAX_ALIASES + MAX_NATIVE];
   int i, ng = P->ng > 0 ? P->ng : 1;
   enum { NCORE = 19, NHOST = 16, NFUNCS = NCORE + NHOST };
   int api = P->abi_version != 0;
   int alias_start = NFUNCS + 2 * api;
   int alias_type = ABI_TYPE_BASE + P->import_count + api;
-  int nfuncs = alias_start + P->alias_count;
+  int native_type = alias_type + P->alias_count;
+  P->native_base = alias_start + P->alias_count;
+  int nfuncs = P->native_base + P->native_count;
   int nimports = g_need_gpu + P->import_count;
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
   for (i = 0; i < nfuncs; i++)
     if (!binit(&cs[i], i == 1 || i == NFUNCS ? 8192 : 256)) return 0;
 
-  if (!bleu(&types, alias_type + P->alias_count)) return 0;
+  for (i = 0; i < P->native_count; i++)
+    if (!native_body(P, &cs[P->native_base + i], i)) return 0;
+  if (!bleu(&types, native_type + P->native_count)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7e)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,0)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
   if (!bu8(&types,0x60)||!bleu(&types,1)||!bu8(&types,0x7f)||!bleu(&types,1)||!bu8(&types,0x7f)) return 0;
@@ -3130,6 +3266,8 @@ static int build_mod(Prog *P, Buf *mod) {
   if (api && !abi_wasm_type(&types, &P->api)) return 0;
   for (i = 0; i < P->alias_count; i++)
     if (!abi_wasm_type(&types, &P->aliases[i].signature)) return 0;
+  for (i = 0; i < P->native_count; i++)
+    if (!abi_wasm_type(&types, &P->natives[i].sig)) return 0;
   if (!bleu(&funcs, nfuncs)) return 0;
   uint8_t fty[NFUNCS] = {
     0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
@@ -3143,6 +3281,8 @@ static int build_mod(Prog *P, Buf *mod) {
   if (api && (!bu8(&funcs, ABI_TYPE_BASE + P->import_count) || !bu8(&funcs, 1))) return 0;
   for (i = 0; i < P->alias_count; i++)
     if (!bleu(&funcs, alias_type + i)) return 0;
+  for (i = 0; i < P->native_count; i++)
+    if (!bleu(&funcs, native_type + i)) return 0;
   if (!bleu(&mems,1)||!bu8(&mems,0)||!bleu(&mems, MEM_PAGES)) return 0;
 
   /* exports */
@@ -3339,6 +3479,7 @@ static int write_meta(Prog *P) {
 __attribute__((export_name("compile")))
 #endif
 int32_t compile(uint32_t src_ptr, uint32_t src_len) {
+  static char native_source[100000];
   g_bump = 64;
   g_need_gpu = 0;
   g_need_ux = 0;
@@ -3352,9 +3493,8 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   const char *src = (const char *)(uintptr_t)src_ptr;
 #endif
 
-  Prog P; memset(&P, 0, sizeof P); P.scratch = -1; P.fscratch = -1; P.lscratch = -1;
-  P.uxaddr = -1;
-  P.src = src; P.srclen = src_len; P.fn_ret = -1;
+  Prog P;
+  init_prog(&P, src, src_len);
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
   while (L.tok == T_ID && (intrinsic_name(L.id, "import") || intrinsic_name(L.id, "export"))) {
@@ -3370,17 +3510,23 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
 #endif
   while (L.tok != T_EOF) {
     int is_layout = L.tok == T_ID && intrinsic_name(L.id, "struct");
-    if (!(is_layout ? layout_decl(&L, &P) : pstmt(&L, &P))) {
+    int is_native = L.tok == T_ID && intrinsic_name(L.id, "native");
+    if (!(is_layout ? layout_decl(&L, &P) : is_native ? native_decl(&L, &P) : pstmt(&L, &P))) {
       g_need_gpu = 0; set_err(P.err ? P.err : "parse"); return 1;
     }
   }
   for (int i = 0; i < P.api.count; i++) {
     if (P.lty[i] != P.api.args[i]) { set_err("abi parameter type changed"); return 1; }
   }
+  if (P.native_count) {
+    // The emitter reuses the input arena for section buffers.
+    for (uint32_t i = 0; i < src_len; i++) native_source[i] = src[i];
+    P.src = native_source;
+  }
   if (!write_meta(&P)) { g_need_gpu = 0; set_err("meta"); return 1; }
   Buf mod;
   g_abi_imports = P.import_count;
-  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err("emit"); return 1; }
+  if (!build_mod(&P, &mod)) { g_need_gpu = 0; set_err(P.err ? P.err : "emit"); return 1; }
   g_out_ptr = poff(mod.off); g_out_len = mod.n;
   g_need_gpu = 0;
   (void)PERSIST_FIT;

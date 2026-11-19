@@ -23,7 +23,7 @@ static void remove_probe(UxProbe *probe) {
 }
 
 static int ux_probe(UxProbe *probe, const char *library, const char *body, double gold, double tolerance, int trap) {
-    char source[8192], *out = 0, *end = 0;
+    char source[18000], *out = 0, *end = 0;
     char *args[] = {"./ujs/ujs2wasm.com", probe->source, "-o", probe->wasm, "--run", 0};
     const char marker[] = "\"value\":";
     const char err[] = "unreachable";
@@ -352,6 +352,109 @@ int check_i32_ops(int mutate) {
     }
     remove_probe(&probe);
     printf("CHECK_I32_OPS checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
+static int native_fixture(char *dst, int cap, const char *name, int locals, const char *result) {
+    int used = tx_snprintf(dst, cap, "native function %s(input:i64) i64 {\n", name);
+    for (int i = 0; i < locals; i++) {
+        if (used < 0 || used >= cap) return -1;
+        int step = tx_snprintf(dst + used, cap - used, "let slot_%d=%d;\n", i, i);
+        if (step < 0 || step >= cap - used) return -1;
+        used += step;
+    }
+    if (used < 0 || used >= cap) return -1;
+    int last = tx_snprintf(dst + used, cap - used, "return %s;\n}\n", result);
+    return last < 0 || last >= cap - used ? -1 : used + last;
+}
+
+static int native_refusal(UxProbe *probe, const char *source, const char *reason) {
+    char *out = 0;
+    size_t n = 0;
+    char *args[] = {"sh", "-c", "exec sh ./ujs/ujs2wasm.com \"$1\" -o \"$2\" 2>&1",
+        "native-probe", probe->source, probe->wasm, 0};
+    if (sy_write_file(probe->source, source, tx_len(source, 18000), 0600)) return 0;
+    sy_unlink(probe->wasm);
+    int rc = cx_runv_timeout(args, 8, &out, &n);
+    int pass = rc == 1 && out && tx_contains(out, n, reason, tx_len(reason, 128));
+    if (!pass) fprintf(stderr, "NATIVE_REFUSAL expected=%s rc=%d output=%s\n", reason, rc, out ? out : "");
+    mm_free(out);
+    return pass;
+}
+
+static int native_uleb(const unsigned char *raw, long limit, long *at, unsigned *value) {
+    unsigned out = 0;
+    for (unsigned shift = 0; shift < 32 && *at < limit; shift += 7) {
+        unsigned byte = raw[(*at)++];
+        if (shift == 28 && byte > 15) return 0;
+        out |= (byte & 127u) << shift;
+        if (!(byte & 128u)) { *value = out; return 1; }
+    }
+    return 0;
+}
+
+static int native_frames(const char *path, unsigned expected) {
+    unsigned char *raw = 0;
+    int64_t size = 0;
+    if (sy_read_file(path, &raw, &size, 64000)) return 0;
+    long at = 8;
+    int ok = 0;
+    while (at < size) {
+        unsigned section = raw[at++], bytes = 0, count = 0;
+        if (!native_uleb(raw, size, &at, &bytes) || bytes > size - at) break;
+        long end = at + bytes;
+        if (section == 3) {
+            ok = native_uleb(raw, end, &at, &count) && count == expected;
+            break;
+        }
+        at = end;
+    }
+    mm_free(raw);
+    return ok;
+}
+
+int check_native_calls(int mutate) {
+    UxProbe probe;
+    char source[16000];
+    if (prepare_probe(&probe)) return 1;
+    int left = native_fixture(source, sizeof source, "left_frame", 255,
+        mutate ? "slot_253 + input" : "slot_254 + input");
+    int right = left < 0 ? -1 : native_fixture(source + left, sizeof source - left, "right_frame", 255,
+        "left_frame(input) + slot_254");
+    int checks = 0, passed = 0;
+    if (right >= 0) {
+        passed += ux_probe(&probe, source, "return right_frame(7) + left_frame(3);", 3 * 254 + 7 + 3, 0, 0);
+        passed += native_frames(probe.wasm, 37);
+    }
+    checks += 2;
+    passed += ux_probe(&probe,
+        "native function calc(x:f64, n:i64) f64 { if (n==0) { return x; } return x*n; }",
+        "return calc(2.25,4);", 9, 0, 0);
+    checks++;
+    int excessive = native_fixture(source, sizeof source, "too_large", 256, "slot_255");
+    passed += excessive >= 0 && native_refusal(&probe, source, "too many locals");
+    checks++;
+    passed += native_refusal(&probe,
+        "native function recur(x:i64) i64 { return recur(x); } return recur(1);",
+        "native call cycle or forward reference");
+    checks++;
+    passed += native_refusal(&probe,
+        "native function now() i64 { return later(); } native function later() i64 { return now(); } return now();",
+        "native call cycle or forward reference");
+    checks++;
+    int used = tx_snprintf(source, sizeof source, "native function frame0() i64 { return 1; }\n");
+    for (int i = 1; i <= 7; i++)
+        used += tx_snprintf(source + used, sizeof source - used, "native function frame%d() i64 { return frame%d(); }\n", i, i - 1);
+    passed += ux_probe(&probe, source, "return frame7();", 1, 0, 0);
+    checks++;
+    tx_snprintf(source + used, sizeof source - used, "native function frame8() i64 { return frame7(); }\n");
+    passed += native_refusal(&probe, source, "native call depth limit");
+    checks++;
+    passed += native_refusal(&probe,
+        "native function typed(x:f64) f64 { return x; } return typed(1);", "native argument type");
+    checks++;
+    remove_probe(&probe);
+    printf("CHECK_UJS_NATIVE_CALL checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
     return passed != checks;
 }
 

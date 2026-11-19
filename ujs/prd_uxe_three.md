@@ -120,10 +120,15 @@ export uxe_frame(now:i64) i64 version 1;
 | C6 | 多模块与符号可见性、跨模块常量与导出表的版本检查 | 0c 之上扩展 |
 | C7 | 运算 u32、i32 位移与移位已有部分补齐 | 语料 |
 | C8 | 性能:内联与循环展开基线,`ujs.com` 对 1e7 次浮点循环的耗时基线 | 记基线与目标,不得退化 |
+| C9 | 显式非内联函数与独立 Wasm 局部槽 | 256/257 旧规格保持，跨函数独立槽，递归与深度拒绝，篡改转红 |
 
 修订(cdx2): 现有基础为 `f64_sqrt`、`f64_floor_i64`、有界 `ux_span`、u8/f32 连续视图、独立线性内存和声明式链接。不支持任意 JavaScript 或浏览器 `Float32Array` 语法。字典键最多 8 字节，ASCII 字符串字面量最多 255 字节，UTF-8 目前走有界字节而非通用字符串。闭包只证实了短例外层读取，无逃逸或可变捕获合同。WebGL 端大批顶点与纹理上传须先量测跨度搬运和桥接次数，避免逐顶点宿主调用。
 
 ## 5 开发计划(给 cdx2 的逐里程碑任务)
+
+修订(cdx2): 从仓根运行 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。C9 本机五切片构造实测约 39 秒。`ujs/ujs2wasm.com` 用它编译 `.ujs`。CLI/host1、G-math、Wasm 链接、C8 基准及需要重编产品源的验证依赖这个构造。清单生成与 `--check` 只读已跟踪的对标输入，检查冻结发布包的哈希也可独立执行。
+
+修订(cdx2): C9 使用 `native function name(x:i64, y:f64) f64 { ... }` 生成独立 Wasm 函数和 `call`。stage0 原 `MAXL=256` 及 `invocation_slot` 把传统内联调用的临时量计入调用方。host1 的 `h1_exec` 逐帧检查局部声明，`h1_call` 为每帧保留 256 槽。C9 保持每帧 256 槽和原 257 槽拒绝；原有 `function` 仍内联。原生函数参数和返回值使用 i64/f64，最多 8 个参数和 8 层原生调用，只允许调用已声明的原生函数。递归、前向引用和深度超过上限在编译时具名拒绝，host1 操作数栈溢出也具名拒绝。`cli-host.cx -- --native-calls` 检查两份 256 槽帧、独立 Wasm 函数数目及拒绝，`--mutate-native-calls` 验证金值保持。
 
 修订(cdx2): C1 的 `.ujs` 接口采用显式缓冲视图。对 Float32Array、Uint16Array、Uint32Array、Int32Array、Float64Array，先用 `ux_typed_index(base, count, index, width)` 得到字节偏移，再用 `ux_f32`、`ux_u16`、`ux_u32`、`ux_i32`、`ux_f64` 及其 `_put` 写入。DataView 切片通过 `ux_data_offset(base, bytes, offset, width)` 支持非对齐访问，目前接口使用小端字节序。负返回值为 `UX_VIEW_BOUNDS=-1` 或 `UX_VIEW_ALIGNMENT=-2`，调用者须先检查再读写。整数写入截为目标位宽，f32 写入舍入到单精度。入口仍由 `ujs2wasm.com` 编译，现有 u8、f32 与 span 指令序列保留。验收运行 `sh ./unisacc.com ujs/product/cli-host.cx -- --ux-views` 及 `--mutate-ux-views`。
 
@@ -156,7 +161,7 @@ export uxe_frame(now:i64) i64 version 1;
 | 阶段 | 任务 | 预计提交 | 出口 |
 |---|---|---|---|
 | S3 | 生成器 `ujs/tools-ux/gen-three-inventory.cx` 解析 `three.module.js` 导出表为 TSV,`--check` 与篡改自测;TSV 含 A、B、C 栏、里程碑列、现状列(默认缺)、门编号列;对标树渲染成 `ujs/prd_uxe_three.md` 附表;现状按严格口径重判 | 3 到 4 | 清单与基线百分比,A 栏已有项数、B 栏已有项数 |
-| M0 | C1 到 C8,每项一提交 | 8 到 12 | 编译器门全绿,基线记录 |
+| M0 | C1 到 C9,每项一提交 | 9 到 13 | 编译器门全绿,基线记录 |
 | M1 | 数学类:顺序 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、Box、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils;每类一提交含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 数学 A 栏全部已有 |
 | M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门,D1 的场景改用 Scene 与 Object3D |
 | M3 | 相机四种与投影矩阵、视锥;23 个几何生成器各一提交,顶点与索引与 three.js 逐项对;Curve 系、Path、Shape、ShapeUtils(三角剖分) | 20 到 26 | G-math 对几何的顶点哈希 |
