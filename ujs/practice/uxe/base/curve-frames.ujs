@@ -1,0 +1,100 @@
+native function curve_frame_dot(a:i64,b:i64) f64 {
+  return ux_f64(a)*ux_f64(b)+ux_f64(a+8)*ux_f64(b+8)+ux_f64(a+16)*ux_f64(b+16);
+}
+
+native function curve_frame_angle(dot:f64) f64 {
+  if(dot>1.0) { dot=1.0; }
+  if(dot<0.0-1.0) { dot=0.0-1.0; }
+  return ux_math_acos(dot);
+}
+
+native function curve_frame_rotate(dst:i64,vector:i64,axis:i64,angle:f64) i64 {
+  let x=ux_f64(vector);
+  let y=ux_f64(vector+8);
+  let z=ux_f64(vector+16);
+  let a=ux_f64(axis);
+  let b=ux_f64(axis+8);
+  let c=ux_f64(axis+16);
+  let cosine=ux_math_cos(angle);
+  let sine=ux_math_sin(angle);
+  let projection=(a*x+b*y+c*z)*(1.0-cosine);
+  return frame_put(dst,x*cosine+(b*z-c*y)*sine+a*projection,
+    y*cosine+(c*x-a*z)*sine+b*projection,z*cosine+(a*y-b*x)*sine+c*projection);
+}
+
+native function curve_initial_normal(dst:i64,tangent:i64,axis:i64,temp:i64) i64 {
+  let ax=ux_math_abs(ux_f64(tangent));
+  let ay=ux_math_abs(ux_f64(tangent+8));
+  let az=ux_math_abs(ux_f64(tangent+16));
+  let active=0;
+  if(ay<=ax) { active=1; }
+  if(az<=ax && az<=ay) { active=2; }
+  let guide=frame_put(axis,(active==0)*1.0,(active==1)*1.0,(active==2)*1.0);
+  let crossing=frame_cross(temp,tangent,guide);
+  let unit=frame_normalize(crossing);
+  return frame_cross(dst,tangent,unit);
+}
+
+// Frame output uses the same nine f64 channels per sample as TubeGeometry.
+// Work holds four vec3 buffers followed by a curve tangent scratch vector.
+function Curve_computeFrenetFrames(frame_evaluate,...frame_args) {
+  let frames=frame_args[0];
+  let segments=frame_args[1];
+  let lengths=frame_args[2];
+  let length_divisions=frame_args[3];
+  let work=frame_args[4];
+  let closed=frame_args[5];
+  let result=0-1;
+  if(frames>=0 && frames<=6291456 && frames%8==0 && segments>0 &&
+      segments+1<=(6291456-frames)/72 && work>=0 && work<=6291456-120 && work%8==0 &&
+      !(work<frames+72*(segments+1) && frames<work+120)) {
+    let i=0;
+    while(i<=segments) {
+      let u=i*1.0/segments;
+      let t=Curve_getUtoTmapping(lengths,length_divisions,u);
+      let tangent=Curve_getTangent(frame_evaluate,(work+96)*1.0,3.0,t);
+      let sample=frame_evaluate(t);
+      let frame=frames+i*72;
+      let center=frame_put(frame,ux_f64(sample),ux_f64(sample+8),ux_f64(sample+16));
+      let normal=frame+24;
+      if(i==0) {
+        let initial=curve_initial_normal(normal,tangent,work+24,work+48);
+      } else {
+        let previous=normal-72;
+        let axis=frame_cross(work+24,work,tangent);
+        let axis_length=curve_frame_dot(axis,axis);
+        if(axis_length>0.00000000000000000000000000000004930380657631324) {
+          let unit=frame_normalize(axis);
+          let d=curve_frame_dot(work,tangent);
+          let angle=curve_frame_angle(d);
+          let rotated=curve_frame_rotate(normal,previous,unit,angle);
+        } else {
+          let copied=frame_put(normal,ux_f64(previous),ux_f64(previous+8),ux_f64(previous+16));
+        }
+      }
+      let binormal=frame_cross(frame+48,tangent,normal);
+      let prior=frame_put(work,ux_f64(tangent),ux_f64(tangent+8),ux_f64(tangent+16));
+      i=i+1;
+    }
+    if(closed!=0) {
+      let first=frames+24;
+      let last=first+segments*72;
+      let begin_tangent=frame_cross(work,first,first+24);
+      let axis=frame_cross(work+24,first,last);
+      let n=curve_frame_dot(first,last);
+      let twist=curve_frame_angle(n)/segments;
+      if(curve_frame_dot(begin_tangent,axis)>0.0) { twist=0.0-twist; }
+      i=1;
+      while(i<=segments) {
+        let normal=frames+72*i+24;
+        let binormal=normal+24;
+        let tangent=frame_cross(work,normal,binormal);
+        let fixed=curve_frame_rotate(normal,normal,tangent,twist*i);
+        let next=frame_cross(binormal,tangent,normal);
+        i=i+1;
+      }
+    }
+    result=frames;
+  }
+  return result;
+}
