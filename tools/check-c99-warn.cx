@@ -8,6 +8,14 @@
  *   (3) legal neighbours with -Wall: rc 0, object present, stderr has no `-Wc99-` (block shadowing, sibling blocks,
  *       for-scope, struct tag vs object, distinct names).
  *   (4) parameter and local of the same name: NEW and OLD agree on rc and stderr with -Wall (existing contract kept).
+ *   (5) step 2: a static local on either side of a same-block redefinition warns exactly once with -Wall; a call with
+ *       no visible binding warns exactly once `call to undeclared function 'NAME' [-Wc99-implicit-function]`, rc 0,
+ *       object present (unregistered __ names included, no prefix exemption).
+ *   (6) step 2 positive controls with -Wall carry no `-Wc99-`: declared prototypes, earlier definitions, function
+ *       pointer calls, macro-expanded calls, <stdio.h> printf, the registered intrinsics __write, __mmap, __mprotect.
+ * Known false positive (not asserted, not masked; gap C99WARN-IMPLICIT-BUILTIN-FALSE-POSITIVE): the compiler builtin
+ *   family, e.g. `int g(int x){return __builtin_expect(x,1);}` warns `call to undeclared function '__builtin_expect'`;
+ *   the fix before the 0.0.83 turn-to-reject is a registered known-builtin name table, never a `__` prefix exemption.
  * Output: ABS_OUT/results.tsv and one line per check on stdout; exit 0 only when every check passes. */
 #pragma unisa use cxlib.netpack
 
@@ -24,6 +32,7 @@ static int compile(const char *prod, int wall, const char *c, const char *o, np_
     return runin(wall ? a : b, r); }
 static void first(const np_result *r, char *d, size_t cap) { size_t k = 0; while (k < r->errn && k + 1 < cap && k < 160) { d[k] = r->err[k] == '\n' || r->err[k] == '\t' ? ' ' : r->err[k]; k++; } d[k] = 0; }
 static int has(const np_result *r, const char *s) { size_t m = strlen(s); if (r->errn < m) return 0; for (size_t i = 0; i + m <= r->errn; i++) if (!memcmp(r->err + i, s, m)) return 1; return 0; }
+static int count(const np_result *r, const char *s) { size_t m = strlen(s); int k = 0; if (r->errn < m) return 0; for (size_t i = 0; i + m <= r->errn; i++) if (!memcmp(r->err + i, s, m)) k++; return k; }
 /* default route: NEW and OLD byte-identical object, stderr and rc */
 static void same_default(const char *name, const char *c) {
     char on[96], oo[96]; FMT(on, "%s.new.o", name); FMT(oo, "%s.old.o", name);
@@ -38,7 +47,7 @@ int main(int argc, char **argv) {
     if (cx_fmt(outdir, sizeof outdir, "%s", argv[3])) die("outdir"); if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir create");
     char rp[4400]; FMT(rp, "%s/results.tsv", outdir); res = fopen(rp, "wbx"); if (!res) die("results");
     { const char *pp[2] = { newp, oldp }; for (int i = 0; i < 2; i++) { size_t n; char *b = cx_read(pp[i], &n); if (!b) die("product"); char h[65]; cx_sha256_hex(b, n, h); free(b); fprintf(res, "IDENTITY\t%s\t%s\tsha256=%s\n", i ? "old" : "new", pp[i], h); } }
-    struct { const char *name, *line; int kind; } fx[] = {
+    struct { const char *name, *line; int kind; const char *rule, *msg; } fx[] = {
         { "local-redefinition", "void f(void){int x=1;int x=2;(void)x;}", 0 },
         { "block-shadow", "void f(void){int x=1;{int x=2;(void)x;}(void)x;}", 1 },
         { "sibling-blocks", "void f(void){{int x=1;(void)x;}{int x=2;(void)x;}}", 1 },
@@ -48,6 +57,26 @@ int main(int argc, char **argv) {
         { "distinct-names", "void f(void){int x=1;int y=2;(void)x;(void)y;}", 1 },
         { "nested-redef-inner", "void f(void){{int x=1;int x=2;(void)x;}}", 0 },
         { "parameter-and-local", "void f(int a){int a=1;(void)a;}", 2 },
+        /* step 2 (A): a static local as the earlier or the later binding; exactly one warning each */
+        { "static-after-local", "void f(void){int x=1;static int x;(void)x;}", 3, "[-Wc99-local-redefinition]", "redefinition of local object 'x'" },
+        { "local-after-static", "void f(void){static int x;int x=2;(void)x;}", 3, "[-Wc99-local-redefinition]", "redefinition of local object 'x'" },
+        { "static-after-static", "void f(void){static int x;static int x;(void)x;}", 3, "[-Wc99-local-redefinition]", "redefinition of local object 'x'" },
+        { "static-block-shadow", "void f(void){static int x;{int x=2;(void)x;}(void)x;}", 1 },
+        { "file-static-and-local", "static int x;\nvoid f(void){int x=1;(void)x;}", 1 },
+        { "global-and-static-local", "int g;\nvoid f(void){static int g;(void)g;}", 1 },
+        { "proto-param-after-static", "void f(void){static int x;void h(int x);(void)x;}", 1 },
+        { "parameter-and-static", "void f(int a){static int a;(void)a;}", 2 },
+        /* step 2 (B): call with no visible binding -> -Wc99-implicit-function, object still written */
+        { "implicit-undeclared", "void f(void){undeclared_fn();}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'undeclared_fn'" },
+        { "implicit-unregistered-dunder", "void f(void){__nosuch(1);}", 3, "[-Wc99-implicit-function]", "call to undeclared function '__nosuch'" },
+        { "implicit-defined-later", "void f(void){later();}\nvoid later(void){}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'later'" },
+        { "declared-prototype", "int ext(int);\nvoid f(void){ext(1);}", 1 },
+        { "defined-before", "static int g1(void){return 1;}\nvoid f(void){g1();}", 1 },
+        { "function-pointer-call", "int k(int);\nvoid f(void){int (*p)(int)=k;p(1);}", 1 },
+        { "macro-expanded-call", "#define CALL(x) ext2(x)\nint ext2(int);\nvoid f(void){CALL(1);}", 1 },
+        { "include-printf", "#include <stdio.h>\nvoid f(void){printf(\"x\");}", 1 },
+        { "intrinsic-write", "void f(void){__write(1,\"x\",1);}", 1 },
+        { "intrinsic-mmap-mprotect", "void f(void){void *p=__mmap(0,4096,3,0x22,0-1,0);__mprotect(p,4096,5);}", 1 },
     };
     for (size_t i = 0; i < sizeof fx / sizeof *fx; i++) {
         char c[96], o[96], src[400]; FMT(c, "%s.c", fx[i].name); FMT(o, "%s.wall.o", fx[i].name);
@@ -58,6 +87,9 @@ int main(int argc, char **argv) {
         if (fx[i].kind == 0) {
             char loc[120]; FMT(loc, "%s:1:", c);
             check(r.rc == 0 && ob && has(&r, "[-Wc99-local-redefinition]") && has(&r, "redefinition of local object 'x'") && has(&r, loc) && has(&r, ": warning: "), fx[i].name, "warns", d);
+        } else if (fx[i].kind == 3) {
+            char loc[120]; FMT(loc, "%s:", c);
+            check(r.rc == 0 && ob && count(&r, fx[i].rule) == 1 && count(&r, "-Wc99-") == 1 && has(&r, fx[i].msg) && has(&r, loc) && has(&r, ": warning: "), fx[i].name, "warns-once", d);
         } else if (fx[i].kind == 1) {
             check(r.rc == 0 && ob && !has(&r, "-Wc99-"), fx[i].name, "no-c99-warning", d);
         } else {
