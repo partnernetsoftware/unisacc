@@ -1,0 +1,104 @@
+native function Geometry_indexAt(geo_index:i64,geo_i:i64) i64 {
+  if(geo_index<0) { return geo_i; }
+  let geo_at=ux_u32(geo_index+BufferAttribute.data)+geo_i*ux_u32(geo_index+BufferAttribute.stride);
+  let geo_kind=ux_u32(geo_index+BufferAttribute.componentType);
+  if(geo_kind==1) { return ux_u8(geo_at); }
+  if(geo_kind==4) { return ux_u16(geo_at); }
+  return ux_u32(geo_at);
+}
+
+// Accumulate area-weighted face normals for indexed geometry. Non-indexed
+// geometry is the same loop with consecutive vertex indices.
+native function Geometry_normals(geo_position:i64,geo_index_view:i64,geo_normal_data:i64,geo_normal_size:i64) i64 {
+  let geo_vertices=ux_u32(geo_position+BufferAttribute.count);
+  let geo_kind=ux_u32(geo_position+BufferAttribute.componentType);
+  let geo_base=ux_u32(geo_position+BufferAttribute.data);
+  let geo_stride=ux_u32(geo_position+BufferAttribute.stride);
+  if(geo_vertices>geo_normal_size/12 || ux_u32(geo_position+BufferAttribute.itemSize)<3 ||
+      (geo_kind!=9 && geo_kind!=10)) { return 0-1; }
+  let geo_width=4;
+  if(geo_kind==10) { geo_width=8; }
+  let geo_indices=geo_vertices;
+  if(geo_index_view>=0) {
+    let geo_index_kind=ux_u32(geo_index_view+BufferAttribute.componentType);
+    if(geo_index_kind!=1 && geo_index_kind!=4 && geo_index_kind!=6) { return 0-1; }
+    geo_indices=ux_u32(geo_index_view+BufferAttribute.count);
+  }
+  if(geo_indices%3!=0) { return 0-1; }
+  let geo_check=0;
+  while(geo_check<geo_indices) {
+    if(Geometry_indexAt(geo_index_view,geo_check)>=geo_vertices) { return 0-1; }
+    geo_check=geo_check+1;
+  }
+  let geo_span=ux_span(geo_normal_data,geo_vertices*12);
+  let geo_clear=0;
+  while(geo_clear<geo_vertices*12) {
+    let geo_zero=ux_f32_put(geo_normal_data+geo_clear,0.0);
+    geo_clear=geo_clear+4;
+  }
+  let geo_face=0;
+  while(geo_face<geo_indices) {
+    let geo_v0=Geometry_indexAt(geo_index_view,geo_face);
+    let geo_v1=Geometry_indexAt(geo_index_view,geo_face+1);
+    let geo_v2=Geometry_indexAt(geo_index_view,geo_face+2);
+    let geo_a=geo_base+geo_stride*geo_v0;
+    let geo_b=geo_base+geo_stride*geo_v1;
+    let geo_c=geo_base+geo_stride*geo_v2;
+    let geo_abx=BufferGeometry_coordinate(geo_b,geo_kind)-BufferGeometry_coordinate(geo_a,geo_kind);
+    let geo_aby=BufferGeometry_coordinate(geo_b+geo_width,geo_kind)-BufferGeometry_coordinate(geo_a+geo_width,geo_kind);
+    let geo_abz=BufferGeometry_coordinate(geo_b+2*geo_width,geo_kind)-BufferGeometry_coordinate(geo_a+2*geo_width,geo_kind);
+    let geo_acx=BufferGeometry_coordinate(geo_c,geo_kind)-BufferGeometry_coordinate(geo_a,geo_kind);
+    let geo_acy=BufferGeometry_coordinate(geo_c+geo_width,geo_kind)-BufferGeometry_coordinate(geo_a+geo_width,geo_kind);
+    let geo_acz=BufferGeometry_coordinate(geo_c+2*geo_width,geo_kind)-BufferGeometry_coordinate(geo_a+2*geo_width,geo_kind);
+    let geo_nx=geo_aby*geo_acz-geo_abz*geo_acy;
+    let geo_ny=geo_abz*geo_acx-geo_abx*geo_acz;
+    let geo_nz=geo_abx*geo_acy-geo_aby*geo_acx;
+    let geo_triple=[geo_v0,geo_v1,geo_v2];
+    let geo_corner=0;
+    while(geo_corner<3) {
+      let geo_out=geo_normal_data+12*geo_triple[geo_corner];
+      let geo_put_x=ux_f32_put(geo_out,ux_f32(geo_out)+geo_nx);
+      let geo_put_y=ux_f32_put(geo_out+4,ux_f32(geo_out+4)+geo_ny);
+      let geo_put_z=ux_f32_put(geo_out+8,ux_f32(geo_out+8)+geo_nz);
+      geo_corner=geo_corner+1;
+    }
+    geo_face=geo_face+3;
+  }
+  let geo_normal=0;
+  while(geo_normal<geo_vertices*12) {
+    let geo_address=geo_normal_data+geo_normal;
+    let geo_x=ux_f32(geo_address);
+    let geo_y=ux_f32(geo_address+4);
+    let geo_z=ux_f32(geo_address+8);
+    let geo_len=f64_sqrt(geo_x*geo_x+geo_y*geo_y+geo_z*geo_z);
+    if(geo_len!=0.0) {
+      let geo_normal_x=ux_f32_put(geo_address,geo_x/geo_len);
+      let geo_normal_y=ux_f32_put(geo_address+4,geo_y/geo_len);
+      let geo_normal_z=ux_f32_put(geo_address+8,geo_z/geo_len);
+    }
+    geo_normal=geo_normal+12;
+  }
+  return geo_normal_data;
+}
+
+function BufferGeometry_computeVertexNormals(geo_normal_self,...geo_normal_args) {
+  let geo_pos=BufferGeometry_getAttribute(geo_normal_self,geo_normal_args[0]);
+  let geo_norm_result=0-1;
+  if(geo_pos>=0) {
+    let geo_index_arg=BufferGeometry_getIndex(geo_normal_self);
+    let geo_output=Geometry_normals(geo_pos,geo_index_arg,geo_normal_args[3],geo_normal_args[4]);
+    if(geo_output>=0) {
+      let geo_view=geo_normal_args[2];
+      let geo_out_data=ux_u32_put(geo_view+BufferAttribute.data,geo_output);
+      let geo_count=ux_u32_put(geo_view+BufferAttribute.count,ux_u32(geo_pos+BufferAttribute.count));
+      let geo_axes=ux_u32_put(geo_view+BufferAttribute.itemSize,3);
+      let geo_out_stride=ux_u32_put(geo_view+BufferAttribute.stride,12);
+      let geo_out_kind=ux_u32_put(geo_view+BufferAttribute.componentType,9);
+      let geo_norm_off=ux_u32_put(geo_view+BufferAttribute.normalized,0);
+      let geo_usage_out=ux_u32_put(geo_view+BufferAttribute.usage,35044);
+      let geo_version_out=ux_u32_put(geo_view+BufferAttribute.version,1);
+      geo_norm_result=BufferGeometry_setAttribute(geo_normal_self,geo_normal_args[1],geo_view);
+    }
+  }
+  return geo_norm_result;
+}
