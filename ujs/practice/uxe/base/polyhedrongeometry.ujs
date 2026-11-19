@@ -1,0 +1,138 @@
+struct PolyhedronGeometry {
+  sourcePositions: u32;
+  sourceCount: u32;
+  sourceIndices: u32;
+  cornerCount: u32;
+  scratch: u32;
+}
+
+function PolyhedronGeometry_init(poly,...poly_args) {
+  let poly_pos=ux_u32_put(poly+PolyhedronGeometry.sourcePositions,poly_args[0]);
+  let poly_count=ux_u32_put(poly+PolyhedronGeometry.sourceCount,poly_args[1]);
+  let poly_ids=ux_u32_put(poly+PolyhedronGeometry.sourceIndices,poly_args[2]);
+  let poly_corners=ux_u32_put(poly+PolyhedronGeometry.cornerCount,poly_args[3]);
+  let poly_scratch=ux_u32_put(poly+PolyhedronGeometry.scratch,poly_args[4]);
+  return poly;
+}
+
+native function poly_project(dst:i64,a:i64,b:i64,c:i64,cols:i64,row:i64,col:i64,radius:f64) i64 {
+  let wa=(cols-row-col)*1.0/cols;
+  let wb=col*1.0/cols;
+  let wc=row*1.0/cols;
+  let x=ux_f64(a)*wa+ux_f64(b)*wb+ux_f64(c)*wc;
+  let y=ux_f64(a+8)*wa+ux_f64(b+8)*wb+ux_f64(c+8)*wc;
+  let z=ux_f64(a+16)*wa+ux_f64(b+16)*wb+ux_f64(c+16)*wc;
+  let magnitude=f64_sqrt(x*x+y*y+z*z);
+  if(magnitude!=0.0) { magnitude=radius/magnitude; }
+  let px=ux_f64_put(dst,x*magnitude);
+  let py=ux_f64_put(dst+8,y*magnitude);
+  let pz=ux_f64_put(dst+16,z*magnitude);
+  return dst;
+}
+
+native function poly_azimuth(point:i64) f64 {
+  let x=0.0-ux_f64(point);
+  let z=ux_f64(point+16);
+  return ux_math_atan2(z,x);
+}
+
+native function poly_emit_triangle(vertex:i64,points:i64,smooth:i64) i64 {
+  let triangle_ax=ux_f64(points);
+  let triangle_ay=ux_f64(points+8);
+  let triangle_az=ux_f64(points+16);
+  let b_x=ux_f64(points+24);
+  let b_y=ux_f64(points+32);
+  let b_z=ux_f64(points+40);
+  let c_x=ux_f64(points+48);
+  let c_y=ux_f64(points+56);
+  let c_z=ux_f64(points+64);
+  let center=ux_math_atan2(triangle_az+b_z+c_z,0.0-triangle_ax-b_x-c_x);
+  let abx=b_x-triangle_ax;
+  let aby=b_y-triangle_ay;
+  let abz=b_z-triangle_az;
+  let acx=c_x-triangle_ax;
+  let acy=c_y-triangle_ay;
+  let acz=c_z-triangle_az;
+  let nx=aby*acz-abz*acy;
+  let ny=abz*acx-abx*acz;
+  let nz=abx*acy-aby*acx;
+  let norm=f64_sqrt(nx*nx+ny*ny+nz*nz);
+  if(norm!=0.0) { nx=nx/norm; ny=ny/norm; nz=nz/norm; }
+  let point=points;
+  let uv_min=1.0;
+  let uv_max=0.0;
+  let cursor=vertex;
+  while(point<points+72) {
+    let x=ux_f64(point);
+    let y=ux_f64(point+8);
+    let z=ux_f64(point+16);
+    let horizontal=poly_azimuth(point)*0.15915494309189535+0.5;
+    if(center<0.0 && horizontal==1.0) { horizontal=0.0; }
+    if(x==0.0 && z==0.0) { horizontal=center*0.15915494309189535+0.5; }
+    if(horizontal<uv_min) { uv_min=horizontal; }
+    if(horizontal>uv_max) { uv_max=horizontal; }
+    let elev=ux_math_atan2(y,f64_sqrt(x*x+z*z))*0.3183098861837907+0.5;
+    let normal_x=nx;
+    let normal_y=ny;
+    let normal_z=nz;
+    if(smooth!=0) {
+      let normal_len=f64_sqrt(x*x+y*y+z*z);
+      if(normal_len==0.0) { normal_len=1.0; }
+      normal_x=x/normal_len; normal_y=y/normal_len; normal_z=z/normal_len;
+    }
+    cursor=GeometryBuffers_vertex(cursor,x,y,z,normal_x,normal_y,normal_z,horizontal,elev);
+    point=point+24;
+  }
+  if(uv_max>0.9 && uv_min<0.1) {
+    let seam=vertex+24;
+    while(seam<cursor) {
+      let u=ux_f32(seam);
+      if(u<0.2) { let fixed=ux_f32_put(seam,u+1.0); }
+      seam=seam+32;
+    }
+  }
+  return cursor;
+}
+
+native function PolyhedronGeometry_generate(mesh:i64,params:i64,radius:f64,detail:i64) i64 {
+  let source=ux_u32(params+PolyhedronGeometry.sourcePositions);
+  let count=ux_u32(params+PolyhedronGeometry.sourceCount);
+  let indices=ux_u32(params+PolyhedronGeometry.sourceIndices);
+  let corners=ux_u32(params+PolyhedronGeometry.cornerCount);
+  let scratch=ux_u32(params+PolyhedronGeometry.scratch);
+  if(source>6291456 || count>(6291456-source)/24 || source%8!=0 ||
+     indices>6291456 || corners>(6291456-indices)/4 || indices%4!=0 || corners%3!=0 ||
+     scratch>6291456-72 || scratch%8!=0 || detail<0 || detail>255) { return 0-1; }
+  let cols=detail+1;
+  let vertices=corners*cols*cols;
+  if(!GeometryBuffers_fits(mesh,vertices,0)) { return 0-1; }
+  let dest=ux_u32(mesh+GeometryBuffers.vertices);
+  let face=0;
+  while(face<corners) {
+    let a=ux_u32(indices+face*4);
+    let b=ux_u32(indices+face*4+4);
+    let c=ux_u32(indices+face*4+8);
+    if(a>=count || b>=count || c>=count) { return 0-1; }
+    a=source+a*24; b=source+b*24; c=source+c*24;
+    let row=0;
+    while(row<cols) {
+      let segment=0;
+      while(segment<2*(cols-row)-1) {
+        let col=segment/2;
+        let ab=poly_project(scratch,a,b,c,cols,row,col+1,radius);
+        if(segment%2==0) {
+          let bc=poly_project(scratch+24,a,b,c,cols,row+1,col,radius);
+          let ca=poly_project(scratch+48,a,b,c,cols,row,col,radius);
+        } else {
+          let bb=poly_project(scratch+24,a,b,c,cols,row+1,col+1,radius);
+          let cb=poly_project(scratch+48,a,b,c,cols,row+1,col,radius);
+        }
+        dest=poly_emit_triangle(dest,scratch,detail!=0);
+        segment=segment+1;
+      }
+      row=row+1;
+    }
+    face=face+3;
+  }
+  return GeometryBuffers_commit(mesh,vertices,0);
+}
