@@ -25,6 +25,15 @@
 static CxPackageDecode package;
 static const char *source_label,*include_dir;
 static unsigned char one=1,empty=0;
+/* stream-pack writes canonical M headers. Both package decoder ABIs provide
+ * the payload offset; read the codec preceding the decimal CRC at that offset. */
+static int stored_codec(const CxPackage *p){
+    long end=p->off[0]-1, at=end;
+    if(end<=0||p->b[end]!='\n')return -1;
+    while(at>0&&p->b[at-1]>='0'&&p->b[at-1]<='9')at--;
+    if(at==end||at<3||p->b[at-1]!=' '||p->b[at-3]!=' ')return -1;
+    return p->b[at-2]-'0';
+}
 void core_host_panic(const char *reason){sy_eprintf("isolated-stream: %s\n",reason?reason:"panic");sy_exit(2);}
 const CxPackage *pm_package(void){return &package.package;}
 static void *allocate(void *p,size_t n){return mm_grow(p,n?n:1);}
@@ -87,7 +96,11 @@ int main(int argc,char **argv){
     for(int i=0;i<p->nr;i++)if(p->res[i].rawlen>67108864)core_host_panic("resource bound");
     unsigned char *raw=mm_alloc(p->raw[0]);if(!raw)core_host_panic("model allocation");
     CxCodecCrc crc;uint32_t actual;
-    if(cxcodec_inflate(raw,p->raw[0],p->b+p->off[0],p->len[0])||cxcodec_crc_init(&crc)||cxcodec_crc(&crc,(const char *)raw,p->raw[0],&actual)||actual!=p->crc[0])core_host_panic("compressed model CRC");
+    int codec=stored_codec(p);
+    if(codec==0){
+        if(p->ver!=4||p->len[0]!=p->raw[0]||mm_copy(raw,p->raw[0],p->b+p->off[0],p->len[0]))core_host_panic("invalid raw model");
+    }else if(codec!=1||cxcodec_inflate(raw,p->raw[0],p->b+p->off[0],p->len[0]))core_host_panic("compressed model CRC");
+    if(cxcodec_crc_init(&crc)||cxcodec_crc(&crc,(const char *)raw,p->raw[0],&actual)||actual!=p->crc[0])core_host_panic("compressed model CRC");
     CxDecode decoded={0};decoded.allocate=allocate;decoded.release=mm_free;
     if(cxmd_decode(&decoded,raw,p->raw[0]))core_host_panic(decoded.why);
     CoreModel model;bind_model(&model,&decoded.model);

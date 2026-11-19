@@ -1,10 +1,11 @@
 #pragma unisa module streampack
+#pragma unisa use runtime.codec
 /* Single-stream development containers, not a release/compiler PASS.
  * Default-run: FILE.cx -- BASE_COM CANDIDATE_PKG NEW_OUTDIR [TARGET [LEVEL]].
  * TARGET selects one of the six image targets (default lnx/x86_64); LEVEL selects O0, O1 or O2 (default O2).
- * Strict canonical P3 directory/extents, original compressed M records and all
+ * Strict canonical P3/P4 directory/extents, original stored M records and all
  * resource records are carried byte-for-byte. No model inflation/construction.
- * model_sha256 is explicitly SHA of compressed payload, not decoded weights.
+ * Historical compressed_model_sha256 names the digest of the stored payload.
  * Caller supplies the stream-aware base runner; this tool does not prove its ABI.
  * Metadata schema2 uses stream_units_in_source and per-entry stream_unit;
  * binary P3/UNIPKG1 payload bytes retain their existing contract.
@@ -45,7 +46,13 @@ int stream_pack(int argc,char **argv){char *base,*v[8],*body,*image;const char *
   found=1;}
  if(!found&&strcmp(st[i].name,"tapecheck")&&!strcmp(st[i].route,route))fail("unexpected selected-route stream");}}
  for(k=0;k<SP_NSTREAM;k++){if(selected[k]<0)fail("missing selected stream");for(j=0;j<k;j++)if(st[selected[k]].idx==st[selected[j]].idx)fail("selected streams reuse model index");}
- for(i=0;i<pm;i++){m[i].at=POS;n=line(v,8);if(n!=5||strcmp(v[0],"M"))fail("model header");len=num(v[1],PN);m[i].raw=num(v[2],2147483647);if(!len||!m[i].raw||strcmp(v[3],"1"))fail("compressed model length/codec");m[i].crc=num(v[4],4294967295ULL);if(len>PN-POS)fail("compressed model truncated");m[i].data=POS;m[i].compressed=(size_t)len;POS+=(size_t)len;m[i].bytes=POS-m[i].at;
+ CxCodecCrc crc;if(cxcodec_crc_init(&crc))fail("CRC setup");
+ for(i=0;i<pm;i++){m[i].at=POS;n=line(v,8);if(n!=5||strcmp(v[0],"M"))fail("model header");len=num(v[1],PN);m[i].raw=num(v[2],2147483647);
+ int raw=!strcmp(v[3],"0");
+ if(!len||!m[i].raw||(raw?(ver!=4||len!=m[i].raw):strcmp(v[3],"1")))fail("compressed model length/codec");
+ m[i].crc=num(v[4],4294967295ULL);if(len>PN-POS)fail("compressed model truncated");
+ if(raw){uint32_t actual;if(cxcodec_crc(&crc,PK+POS,(long)len,&actual)||actual!=m[i].crc)fail("raw model CRC");}
+ m[i].data=POS;m[i].compressed=(size_t)len;POS+=(size_t)len;m[i].bytes=POS-m[i].at;
  for(j=0;j<i;j++)if(m[i].compressed==m[j].compressed&&m[i].raw==m[j].raw&&m[i].crc==m[j].crc&&!memcmp(PK+m[i].data,PK+m[j].data,m[i].compressed))fail("duplicate model block");}
  resource_at=POS;for(i=0;i<nr;i++){n=line(v,8);if((n!=(ver>=4?6:3))||strcmp(v[0],"F"))fail("resource header");keylen=num(v[1],PN);datalen=num(v[2],PN);if(!keylen||keylen>PN-POS||datalen>PN-POS-(size_t)keylen)fail("resource truncated");rk[i]=POS;rl[i]=(size_t)keylen;for(j=0;j<i;j++)if(rl[j]==rl[i]&&!memcmp(PK+rk[j],PK+POS,rl[i]))fail("duplicate resource key");POS+=(size_t)keylen+(size_t)datalen;}if(POS!=PN)fail("trailing package bytes");resource_n=PN-resource_at;cx_sha256_hex(PK+resource_at,resource_n,reshash);
  /* Re-read both identities before any output: rejects changed inputs. */
