@@ -1,0 +1,44 @@
+# UXE 对标交接
+
+## 当前状态
+
+合同、分母与里程碑见 [UXE 对标规划](../prd_uxe_three.md)。软件与 GPU 两条渲染路径共用一个基座 Wasm 模块。产品是第二个 Wasm 模块。宿主桥只转发 ABI，GPU 预算 600 行，软件预算 300 行。线上 D1、D2、D3 已使用两模块软件路径。D4 迁移排在 M7 后，D5 等 M12 验收。
+
+| 里程碑 | 已有证据与待办 |
+| --- | --- |
+| M0 | C1 至 C14 的编译器基础已落库。GPU 导入有 ABI 门。新工作复现局部槽不足时先用有显式签名的原生函数隔离各作用域，既有 256 槽规格保持 |
+| M1 | 数学基础有 .cx 金值与 r160 对照。对象边界及视锥对象接口另有浏览器联接门 |
+| M2 | 对象与缓冲布局、固定对象树、事件、层、缓存等有结构门。完整的对象生命周期、序列化以及部分缓冲和图像格式依清单逐项补齐 |
+| M3 | 相机、几何生成器、曲线、路径与形状有主干门。派生类 JSON 往返、复杂曲线与特殊几何继续按清单的证据缺口验收 |
+| M4 | 排序、视锥剔除、状态、裁剪、五类目标和读回已验。私有 GPU 目标实验有 600 行预算，正式导出闭包仍须审阅登记。真实上下文恢复移到 M12 |
+| M5 | 纯色 Basic、单方向平面 Lambert、Phong、Standard，线性与 Reinhard 色调有 r160 像素门。UXEP 操作 13 验证 RGBA8 最近点、线性、mipmap、重复与镜像及 UV 偏移缩放，806 项通过，环绕篡改 2 项红。Toon 的 r160 基准两次读回黑色，按规划中的日志继续隔离 |
+| M6 至 M12 | 按规划的独立验收出口继续。M7 前保持 D4 发布包；M12 用真时钟检验上下文恢复与资源代数 |
+
+[清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
+
+## 直接续作
+
+(1) M5 纹理生命周期。跟进 `gpu-packet.ujs` 的 `GpuTextureSource` 与 `gpu-host-abi.js` 操作 13。当前纹理随绘制创建释放，后续需按代数验证句柄复用、更新、释放，以及颜色空间、像素存储状态、尺寸与错误条件。Texture 的矩阵构造复用 `Matrix3_setUvTransform`。GPU 当前没有登记为正式导出页的完整启动桥，增加宿主能力时更新 `uxe-host-budget.cx` 中已审阅的闭包摘要。
+
+(2) M5 Phong 和 Standard。当前在 `gpu-material-phong.ujs` 与 `gpu-material-standard.ujs` 计算直接光切片。在同一正交相机下分别画球和立方体，顶点从现有几何生成器取得，使用插值法线算逐片元光照。r160 分别用 MeshPhongMaterial 与 MeshStandardMaterial，.cx 单独取内部高光、漫反射和阴影侧，边缘像素另计。为 Phong 和 Standard 分别造一个材料参数反例。PBR 像素差上限按规划 4%。
+
+(3) 并行窗口建议从稳定尖端分开工作树。M8 可先做插值器和时间采样，沿现有向量与原生导出接口写 G-anim；M9 先做有界文件字节及 GLB 容器解析，沿现有资源 ABI 写 G-io；M10 可先做由 M1 的 Ray 与 M3 相机矩阵得到射线并排序的 G-ray；M11 可复用基座 PCM 做有界混音及空间衰减对照。场景树、GPU 命令包和清单生成表的写入在集成时串行。各窗口新增的事实行保持独立，重算生成表后一起核对。
+
+## 复跑
+
+在仓内 ujs 工作树运行。忽略的 `ujs/ujs.com` 由 `sh ./unisacc.com ujs/product/build-ape.cx` 构造，依赖它的门会重新编译 .ujs。r160 对照使用仓内 `ujs/practice/web/game/three.module.js`，对照和夹具留在 ujs。
+
+```sh
+uptime
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --sampled-mutate
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --targets
+sh ./unisacc.com ujs/tests/uxe-host-budget.cx -- --gpu-fixture
+sh ./unisacc.com ujs/tools-ux/gen-three-inventory.cx -- --check
+sh ./unisacc.com ujs/tools-ux/check-three-inventory.cx
+sh ./unisacc.com tools/gen-uxe-pages.cx -- --check
+```
+
+纹理采样反例预期非零。一次只跑一路 Chrome。向主线提合入前先合最新 origin/main，再跑 M1 至 M3 全部门、C9 至 C14、CLI、清单、UXE 回归十项、页面生成和 doc-links。集成路径只含 ujs 与重算后的 build/doc-links.tsv。
+
+交接时无待提交文件。回归入口加 `-- --wrap-mutate` 可复跑环绕反例。复杂几何材料门尚未开始，先从 Phong 球体的独立对照切入。
