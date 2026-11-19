@@ -1,0 +1,86 @@
+native function ShapeUtils_area(contour:i64,count:i64) f64 {
+  if(contour<0 || contour>6291456 || contour%8!=0 || count<0 || count>(6291456-contour)/16) {
+    return 0.0/0.0;
+  }
+  if(count<3) { return 0.0; }
+  let previous=contour+(count-1)*16;
+  let vertex=contour;
+  let sum=0.0;
+  while(vertex<contour+count*16) {
+    sum=sum+ux_f64(previous)*ux_f64(vertex+8)-ux_f64(vertex)*ux_f64(previous+8);
+    previous=vertex;
+    vertex=vertex+16;
+  }
+  return sum*0.5;
+}
+
+function ShapeUtils_isClockWise(clockwise,...clockwise_args) {
+  return ShapeUtils_area(clockwise,clockwise_args[0])<0.0;
+}
+
+native function shape_turn(a:i64,b:i64,c:i64) f64 {
+  let x=ux_f64(b)-ux_f64(a);
+  let y=ux_f64(b+8)-ux_f64(a+8);
+  return x*(ux_f64(c+8)-ux_f64(a+8))-y*(ux_f64(c)-ux_f64(a));
+}
+
+native function shape_is_ear(contour:i64,links:i64,a:i64,b:i64,c:i64) i64 {
+  let av=contour+a*16;
+  let bv=contour+b*16;
+  let cv=contour+c*16;
+  if(!(shape_turn(av,bv,cv)>0.0)) { return 0; }
+  let j=ux_u32(links+c*8+4);
+  while(j!=a) {
+    let p=contour+j*16;
+    let previous=contour+ux_u32(links+j*8)*16;
+    let following=contour+ux_u32(links+j*8+4)*16;
+    if(shape_turn(previous,p,following)<=0.0 &&
+       shape_turn(av,bv,p)>=0.0 && shape_turn(bv,cv,p)>=0.0 && shape_turn(cv,av,p)>=0.0) { return 0; }
+    j=ux_u32(links+j*8+4);
+  }
+  return 1;
+}
+
+// Triangulation for one simple contour. Scratch is two u32 links per point.
+native function ShapeUtils_triangulateShape(contour:i64,count:i64,indices:i64,
+                                           capacity:i64,links:i64) i64 {
+  if(contour<0 || contour>6291456 || count<3 || count>4096 ||
+     count>(6291456-contour)/16 || contour%8!=0 ||
+     indices<0 || indices>6291456 || indices%4!=0 ||
+     capacity<3*(count-2) || capacity>(6291456-indices)/4 ||
+     links<0 || links>6291456 || links%4!=0 || count>(6291456-links)/8) { return 0-1; }
+  let area=ShapeUtils_area(contour,count);
+  if(area==0.0) { return 0-1; }
+  let direction=1;
+  let cursor=count-1;
+  if(area<0.0) { direction=count-1; cursor=0; }
+  let i=0;
+  while(i<count) {
+    let before=ux_u32_put(links+i*8,(i+count-direction)%count);
+    let after=ux_u32_put(links+i*8+4,(i+direction)%count);
+    i=i+1;
+  }
+  let remaining=count;
+  let misses=0;
+  let output=indices;
+  while(remaining>2 && misses<remaining) {
+    let prev=ux_u32(links+cursor*8);
+    let next=ux_u32(links+cursor*8+4);
+    if(shape_is_ear(contour,links,prev,cursor,next)) {
+      let a=ux_u32_put(output,prev);
+      let b=ux_u32_put(output+4,cursor);
+      let c=ux_u32_put(output+8,next);
+      let join_prev=ux_u32_put(links+prev*8+4,next);
+      let join_next=ux_u32_put(links+next*8,prev);
+      cursor=ux_u32(links+next*8+4);
+      output=output+12;
+      remaining=remaining-1;
+      misses=0;
+    } else {
+      cursor=next;
+      misses=misses+1;
+    }
+  }
+  if(remaining>2) { return 0-1; }
+  return (output-indices)/4;
+}
