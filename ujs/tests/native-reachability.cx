@@ -1,0 +1,57 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int exec_has(char **args,const char *expected) {
+    char *out=0;
+    size_t size=0;
+    int rc=cx_runv_timeout(args,10,&out,&size);
+    int ok=rc==0 && (!expected || (out && tx_contains(out,size,expected,tx_len(expected,100))));
+    if(!ok) printf("NATIVE_REACHABILITY rc=%d output=%s\n",rc,out?out:"");
+    mm_free(out);
+    return ok;
+}
+
+static int compile_case(char *src,char *out,int legacy) {
+    char *args[]={"./ujs/ujs2wasm.com",src,"-o",out,legacy?"--legacy-inline":0,0};
+    return exec_has(args,0);
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],src[300],a[300],b[300],old[300],api[300],text[600];
+    if(sy_mkdtemp("/tmp","ujs-native-reachability-",dir,sizeof dir)) return 2;
+    tx_snprintf(src,sizeof src,"%s/probe.ujs",dir);
+    tx_snprintf(a,sizeof a,"%s/min.wasm",dir);
+    tx_snprintf(b,sizeof b,"%s/dead.wasm",dir);
+    tx_snprintf(old,sizeof old,"%s/legacy.wasm",dir);
+    tx_snprintf(api,sizeof api,"%s/api.wasm",dir);
+    const char dead[]="native function unused(x:i64) i64 {return x*11;}\n";
+    const char chain[]="native function leaf(x:i64) i64 {return x+7;}\n"
+        "native function branch(x:i64) i64 {return leaf(x)*2;}\n";
+    int n=tx_snprintf(text,sizeof text,"%sreturn branch(5);",chain);
+    int ready=!sy_write_file(src,text,n,0600) && compile_case(src,a,0);
+    n=tx_snprintf(text,sizeof text,"%s%sreturn branch(5);",dead,chain);
+    ready=ready && !sy_write_file(src,text,n,0600) && compile_case(src,b,0) && compile_case(src,old,1);
+    n=tx_snprintf(text,sizeof text,"export uxe_probe() i64 version 1;\n%s%sreturn branch(%d);",
+        dead,chain,mutate?6:5);
+    ready=ready && !sy_write_file(src,text,n,0600) && compile_case(src,api,0);
+    char *same[]={"cmp",a,b,0};
+    char *valid[]={"wasm-validate",b,0};
+    char *run[]={"./ujs/ujs2wasm.com","--run",b,0};
+    char *exported[]={"wasm-interp",api,"--run-all-exports",0};
+    sy_stat_t minStat={0},oldStat={0};
+    int stripped=ready && exec_has(same,0);
+    int legacy=ready && !sy_lstat(b,&minStat) && !sy_lstat(old,&oldStat) &&
+        oldStat.size>minStat.size;
+    int indirect=ready && exec_has(valid,0) && exec_has(run,"\"value\":24,");
+    int exported_ok=ready && exec_has(exported,"uxe_probe() => i64:24");
+    sy_unlink(src); sy_unlink(a); sy_unlink(b); sy_unlink(old); sy_unlink(api);
+    sy_rmdir(dir);
+    int failed=4-stripped-legacy-indirect-exported_ok;
+    printf("CHECK_UJS_NATIVE_REACHABILITY stripped=%d legacy=%d transitive=%d export=%d bytes=%ld legacy_bytes=%ld failed=%d\n",
+        stripped,legacy,indirect,exported_ok,minStat.size,oldStat.size,failed);
+    return failed!=0;
+}
