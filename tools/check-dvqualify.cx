@@ -61,6 +61,17 @@ static const char *ape_text =
     "printf 'BATCH_RUN\\tid=%s\\tstatus=PASS\\trc=0\\ttransport=0\\tmarker=FIXTURE\\tcandidate=%s\\theaders=product\\tscope=actual-one-batch-no-cached-result\\n' \"$4\" \"$s\"\n";
 
 /* The full queue and the abandoned bound pathname are real Linux sockets. */
+static int wire_has_field(const char *wire,const char *field) {
+    size_t len=strlen(field);
+    while(*wire){
+        size_t n=strcspn(wire,"\t");
+        if(n==len && !memcmp(wire,field,n))return 1;
+        wire+=n;
+        if(*wire)wire++;
+    }
+    return 0;
+}
+
 static int shadow_fixture(char *probe,char *starts,char *marks) {
     sy_addr_t peer;peer.family=SY_AF_UNIX;
     char sockenv[256],raw[600]="",wire[512];unsigned char address[128];
@@ -98,15 +109,71 @@ static int shadow_fixture(char *probe,char *starts,char *marks) {
             int launches=0,finishes=0;long n;
             int reads=0;
             while(reads++<16 && (n=sy_sock_recv(rx,wire,sizeof wire-1))>0){
-                wire[n]=0;if(!strstr(wire,"\tid=alpha\t"))return 2;
+                wire[n]=0;if(!wire_has_field(wire,"id=alpha"))return 2;
                 if(!strncmp(wire,"kind=launch\t",12))launches++;
                 if(!strncmp(wire,"kind=finish\t",12))finishes++;
             }
             check("shadow-launch-and-finish-once",n==-EAGAIN && launches==1 && finishes==1);
+            /* Force serial order: both delimiter-bearing IDs finish before alpha. */
+            char *bad[]={"env",starts,sockenv,"DEVSVC_S2_SHADOW=1","QG_CASE=boundary",probe,repo,
+                         "--candidate",apep,"--jobs","1","--ids","bad\tid,bad\nid,alpha",0};
+            if(!runv(bad,root,15,&rc))return 2;
+            int counted=0,foreign=0;
+            for(int j=0;j<16 && (n=sy_sock_recv(rx,wire,sizeof wire-1))>0;j++){
+                wire[n]=0;
+                if(!wire_has_field(wire,"id=alpha"))foreign++;
+                if(!strncmp(wire,"kind=launch\t",12) && wire_has_field(wire,"dropped=4"))counted++;
+            }
+            check("shadow-delimiter-ids-counted-dropped",counted==1 && foreign==0);
         }
     }
     sy_close(tx);sy_unlink(peer.path);
     return 0;
+}
+
+/* Start a dedicated real service. Use its event API as the read barrier. */
+static int receiver_fixture(char *core) {
+    char instance[4400],self[4400],wire[600],job[64],sender[48];
+    if(cx_fmt(instance,sizeof instance,"UNISACC_DEVSVC_DIR=%s",tmp) ||
+       cx_fmt(self,sizeof self,"DEVSVC_SELF_BIN=%s",core) ||
+       cx_fmt(tmpenv,sizeof tmpenv,"TMPDIR=%s",tmp) ||
+       cx_fmt(job,sizeof job,"qualify-%ld-%d",sy_now_ms(),sy_pid()) ||
+       cx_fmt(sender,sizeof sender,"\tsender=%d\t",sy_pid()))return 2;
+    char *start[]={"env",instance,self,"DEVSVC_S2_SHADOW=1",core,"start","--ttl","45","--idle","30",0};
+    int rc=-1;if(!runv(start,root,10,&rc) || rc)return 2;
+    sy_addr_t peer;peer.family=SY_AF_UNIX;
+    if(cx_fmt(peer.path,sizeof peer.path,"%s/sock.s2",tmp))return 2;
+    int fd=sy_sock_open(sy_sock_num(SY_SN_AF_UNIX),sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK);
+    if(fd<0)return 2;
+    const char *ids[]={"ok","reordered","oversized","last"};
+    int seqs[]={2,1,3,4};
+    for(int i=0;i<4;i++){
+        if(cx_fmt(wire,sizeof wire,"kind=wait\tjob=%s\tid=%s\tcandidate=%064d\tattempt=0\tpid=0\tms=1\tload1=7.00\tdropped=0\tseq=%d",job,ids[i],0,seqs[i]))return 2;
+        long n=strlen(wire);if(i==2){memset(wire+n,'x',sizeof wire-n);n=sizeof wire;}
+        if(sy_udp_send_to(fd,wire,n,&peer)!=n)return 2;
+    }
+    char *events[]={"env",instance,core,"events","--since","0",0};
+    if(!runv(events,root,5,&rc)||rc)return 2;
+    check("receiver-authenticated-and-live",has(out,"\ts2.observe\t") && has(out,"\tid=ok\t") && has(out,"\tid=last\t") && has(out,sender));
+    check("receiver-rejects-reordered",!has(out,"\tid=reordered\t"));
+    check("receiver-rejects-oversized",!has(out,"\tid=oversized\t"));
+    long t0=sy_now_ms();
+    for(int i=0;i<40;i++){
+        if(cx_fmt(wire,sizeof wire,"kind=wait\tjob=%s\tid=burst\tcandidate=%064d\tattempt=0\tpid=0\tms=1\tload1=7.00\tdropped=0\tseq=%d",job,0,i+5))return 2;
+        long n=strlen(wire);if(sy_udp_send_to(fd,wire,n,&peer)!=n)return 2;
+    }
+    sy_close(fd);
+    /* A control request may be served between groups of 16 datagrams. */
+    for(int i=0;i<3;i++)if(!runv(events,root,5,&rc)||rc)return 2;
+    int writes=0;const char *p=out;
+    while((p=strstr(p,"\tid=burst\t"))){writes++;p++;}
+    int late=sy_now_ms()-t0>=1000;
+    if(!late)check("receiver-write-rate-bounded",writes>0 && writes<=32);
+    char *stop[]={"env",instance,core,"stop",0};
+    if(!runv(stop,root,5,&rc)||rc)return 2;
+    if(late){fprintf(stderr,"UNMEASURED\treceiver-burst-window\n");return 3;}
+    printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
+    return !!failed;
 }
 
 static int gate_fixture(void) {
@@ -187,6 +254,10 @@ static int kit_fixture(void) {
 int main(int argc, char **argv) {
     char why[512]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
+    if(argc==3 && !strcmp(argv[1],"--s2-receiver")){
+        int result=receiver_fixture(argv[2]);char *del[]={"rm","-rf",tmp,0};
+        runv(del,0,10,&rc);return result;
+    }
     int gate=argc==2 && !strcmp(argv[1],"--gate");
     int kit=argc==2 && !strcmp(argv[1],"--kit");
     if (!gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }

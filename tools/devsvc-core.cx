@@ -409,7 +409,7 @@ static int native_try_fast(const char *root, const char *tool, char *bin, int ca
     return 0;
 }
 static int in_native_worker;
-#define S2_TOOL "tools/dvqualify.cx@s2-v1"
+#define S2_TOOL "tools/dvqualify.cx@s2-v2"
 static long native_max_ms(void) {
     const char *v = getenv("DEVSVC_NATIVE_MAX_MS");
     long n = (v && v[0]) ? atol(v) : 0;
@@ -669,20 +669,44 @@ static void s2_listen(void) {
     s2_rx=fd;
 }
 static int s2_wire_ok(const char *s,long n) {
-    static const char *keys[]={"kind=","job=","id=","candidate=","attempt=","pid=","ms=","load1=","dropped="};
+    static const char *keys[]={"kind=","job=","id=","candidate=","attempt=","pid=","ms=","load1=","dropped=","seq="};
     const char *end=s+n;
-    for(int i=0;i<9;i++){
+    for(int i=0;i<10;i++){
         long k=strlen(keys[i]);
         if(end-s<=k || memcmp(s,keys[i],k))return 0;
         s+=k;const char *v=s;
         while(s<end && *s!='\t'){
             char c=*s++;
+            if(i==9 && (c<'0'||c>'9'))return 0;
             if(!((c>='0'&&c<='9')||(c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='-'||c=='_'||c=='.'))return 0;
         }
-        if(s==v || (i==3 && s-v!=64) || (i<8 && s==end))return 0;
-        if(i<8)s++;
+        if(s==v || (i==3 && s-v!=64) || (i<9 && s==end))return 0;
+        if(i<9)s++;
     }
     return s==end;
+}
+/* No more than 32 writes in any rolling second, across all senders. */
+static int s2_recordable(char *wire,int sender,long now) {
+    static struct s2_stream {char job[64];int sender;long seq,last;} stream[256];
+    static long writes[32];static int cursor;
+    char *job=strstr(wire,"\tjob=")+5,*end=strchr(job,'\t'),*tail;
+    char *sequence=strstr(wire,"\tseq=")+5;
+    errno=0;long seqno=strtol(sequence,&tail,10);
+    if(errno || *tail || seqno<=0 || !end || end-job>=sizeof stream[0].job)return 0;
+    int avail=-1;
+    for(int i=0;i<256;i++){
+        if(stream[i].sender==sender && strlen(stream[i].job)==end-job && !memcmp(stream[i].job,job,end-job)){
+            if(seqno<=stream[i].seq)return 0;
+            avail=i;break;
+        }
+        if(avail<0 && (!stream[i].sender || now-stream[i].last>1800000L))avail=i;
+    }
+    if(avail<0)return 0;
+    if(mm_copy(stream[avail].job,sizeof stream[avail].job,job,end-job))return 0;
+    stream[avail].job[end-job]=0;stream[avail].sender=sender;
+    stream[avail].seq=seqno;stream[avail].last=now;
+    if(writes[cursor] && now-writes[cursor]<1000)return 0;
+    writes[cursor]=now;cursor=(cursor+1)%32;return 1;
 }
 static void s2_drain(void) {
     for(int i=0;i<16;i++){
@@ -707,6 +731,7 @@ static void s2_drain(void) {
         if(n<=0 || n>=sizeof wire || (msg[6]&~0x40000000L) || msg[5]!=32 || control[0]!=28 ||
            c[2]!=1 || c[3]!=2 || c[4]<=0 || c[5]!=(int)sy_uid() || !s2_wire_ok(wire,n))continue;
         wire[n]=0;
+        if(!s2_recordable(wire,c[4],sy_now_ms()))continue;
         char record[500];char *pid=strstr(wire,"\tpid=");unsigned long long birth=0;
         if(pid && !strncmp(wire,"kind=launch\t",12))pi_read_ticks(atoi(pid+5),&birth,0);
         if(!cx_fmt(record,sizeof record,"%s\tsender=%d\tstart_ticks=%llu",wire,c[4],birth))
@@ -747,6 +772,7 @@ static int serve(long ttl, long idle) {
     locks_load();
     chomp(info); ev_add("svc.start", info);
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
+    if(!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1"))s2_listen();
     while (!stop) {
         long now = sy_now_ms(), k = 0, r, nmax = native_max_ms();
         for (int wi = 0; wi < n_nat; ) {

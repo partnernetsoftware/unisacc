@@ -61,17 +61,20 @@ static int resumed[MAXB];
 static char root[4096], lay[4096], ape[4096], sha[65], version[256], head[64], outlog[4200];
 static const char *sockp, *job_id;
 static char jobbuf[64];
+static int shadow_on;
 
 /* The default native recipe erases these calls before compilation. The
  * instrumented recipe is selected once by the qualify client. */
 #ifdef DVQUALIFY_S2_TAP
 static int s2_fd = -1;
 static unsigned s2_dropped;
+static long s2_seq;
 static sy_addr_t s2_to;
 static void s2_open(void) {
     int saved=errno;
     s2_to.family=SY_AF_UNIX;
-    if(sockp && !strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1") &&
+    shadow_on=!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1");
+    if(sockp && shadow_on &&
        !cx_fmt(s2_to.path,sizeof s2_to.path,"%s.s2",sockp))
         s2_fd=sy_sock_open(sy_sock_num(SY_SN_AF_UNIX),sy_sock_num(SY_SN_SOCK_DGRAM)|O_NONBLOCK);
     errno=saved;
@@ -79,9 +82,12 @@ static void s2_open(void) {
 static void s2_emit(const char *kind,const Batch *b,int attempt,int pid,long now,double load) {
     int saved=errno;
     char wire[448];
-    if(s2_fd>=0 && !cx_fmt(wire,sizeof wire,"kind=%s\tjob=%s\tid=%s\tcandidate=%s\tattempt=%d\tpid=%d\tms=%ld\tload1=%.2f\tdropped=%u",
-                           kind,job_id,b->id,sha,attempt,pid,now,load,s2_dropped)){
+    s2_seq++;
+    if(s2_fd>=0 && !strpbrk(b->id,"\r\n\t") &&
+       !cx_fmt(wire,sizeof wire,"kind=%s\tjob=%s\tid=%s\tcandidate=%s\tattempt=%d\tpid=%d\tms=%ld\tload1=%.2f\tdropped=%u\tseq=%ld",
+               kind,job_id,b->id,sha,attempt,pid,now,load,s2_dropped,s2_seq)){
         long n=strlen(wire);
+        /* sys.net sy_udp_send_to passes MSG_NOSIGNAL to sendto. */
         if(sy_udp_send_to(s2_fd,wire,n,&s2_to)==n){s2_dropped=0;errno=saved;return;}
     }
     if(s2_dropped!=UINT_MAX)s2_dropped++;
@@ -637,7 +643,8 @@ int main(int argc, char **argv) {
     int cp = 0, cf = 0, cu = 0, ci = 0, remaining = count - completed;
     for (int i = 0; i < nb; i++) { const char *s = bs[i].status; if (!s[0]) continue; if (!strcmp(s, "PASS")) cp++; else if (!strcmp(s, "FAIL")) cf++; else if (!strcmp(s, "INVALID")) ci++; else cu++; }
     if (remaining) fprintf(f, "# PLANNED=%d\n", remaining);
-    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, sha, version);
+    const char *shadow_summary=remaining?"":(shadow_on?"\tshadow=on":"\tshadow=off");
+    fprintf(f, "%s\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tlayout_ms=%ld%s\tape_sha256=%s\tversion=%s\n", remaining ? "CHECKPOINT" : "SUMMARY", nb, cp, cf, cu, ci, total, layout_ms, shadow_summary, sha, version);
     if (fflush(f) || (outp && fclose(f))) return die("cannot finish evidence ", outp);
     emit("total", total, (remaining || cu || ci) ? 1 : 0, "-");
     fprintf(stderr, "QUALIFY_DONE\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\ttotal_ms=%ld\tout=%s\n", nb, cp, cf, cu, ci, total, outp ? outp : "-");
