@@ -19,6 +19,12 @@ persist let cannonAmmo = 96;
 persist let cannonCooldown = 0;
 persist let cannonIdle = 0;
 persist let cannonEvents = 0;
+persist let priorMissile = 0;
+persist let missileAmmo = 3;
+persist let missileCooldown = 0;
+persist let missileTarget = 0;
+persist let missileTravel = 0;
+persist let missileEvents = 0;
 persist let combatTick = 0;
 persist let combatKills = 0;
 persist let battleWave = 1;
@@ -58,6 +64,7 @@ let keyUp = (keys / 4) % 2;
 let keyDown = (keys / 8) % 2;
 let keyBoost = (keys / 16) % 2;
 let keyGun = (keys / 1024) % 2;
+let keyMissile = (keys / 2048) % 2;
 if (((keys / 32) % 2) == 1) { keyBoost = 1; }
 if (((keys / 64) % 2) == 1) { keyLeft = 1; }
 if (((keys / 128) % 2) == 1) { keyRight = 1; }
@@ -68,12 +75,14 @@ let tickTurn = priorTurn;
 let tickClimb = priorClimb;
 let tickBoost = priorBoost;
 let tickGun = priorGun;
+let tickMissile = priorMissile;
 while (steps > 0) {
   if (steps == 1) {
     tickTurn = keyRight - keyLeft;
     tickClimb = keyUp - keyDown;
     tickBoost = keyBoost;
     tickGun = keyGun;
+    tickMissile = keyMissile;
   }
   let target = tickTurn * 24;
   if (bank < target) { bank = bank + 4; }
@@ -123,6 +132,9 @@ while (steps > 0) {
       formationSin = battleSin;
       formationCos = battleCos;
       cannonAmmo = 96;
+      missileAmmo = 3;
+      missileTarget = 0;
+      missileTravel = 0;
       let waveSlot = 0;
       let hullBonus = battleWave - 1;
       if (hullBonus > 4) { hullBonus = 4; }
@@ -193,6 +205,7 @@ while (steps > 0) {
     enemySlot = enemySlot + 1;
   }
   if (cannonCooldown > 0) { cannonCooldown = cannonCooldown - 1; }
+  if (missileCooldown > 0) { missileCooldown = missileCooldown - 1; }
   if (cannonIdle < 176) { cannonIdle = cannonIdle + 1; }
   if (tickGun == 1 && cannonAmmo > 0 && cannonCooldown == 0) {
     cannonAmmo = cannonAmmo - 1;
@@ -208,18 +221,49 @@ while (steps > 0) {
       }
     }
   }
+  if (missileTarget > 0) {
+    missileTravel = missileTravel - 1;
+    if (missileTravel == 0) {
+      let missileHull = ux_u8(missileTarget);
+      if (missileHull > 0 && ux_u8(missileTarget + 3) > 0) {
+        let afterImpact = missileHull - 4;
+        if (afterImpact <= 0) {
+          afterImpact = 0;
+          combatKills = (combatKills + 1) % 100;
+          battleAlive = battleAlive - 1;
+        }
+        let impactHull = ux_u8_put(missileTarget, afterImpact);
+      }
+      missileTarget = 0;
+    }
+  }
+  if (tickMissile == 1 && missileAmmo > 0 && missileCooldown == 0 && nearest > 0) {
+    missileAmmo = missileAmmo - 1;
+    missileTarget = nearest;
+    missileTravel = 13;
+    missileCooldown = 18;
+    cannonIdle = 0;
+    missileEvents = (missileEvents + 1) % 65536;
+  }
   if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
+  if (cannonIdle == 176 && missileAmmo == 0) { missileAmmo = 3; }
   if (battleAlive == 0 && battleDelay == 0) { battleDelay = 36; }
   let lockRecord = ux_u8_put(14, nearest);
   let killRecord = ux_u8_put(15, combatKills);
   let waveRecord = ux_u8_put(16, battleWave % 256);
   let aliveRecord = ux_u8_put(17, battleAlive);
+  let missileRecord = ux_u8_put(20, missileAmmo);
+  let missileLow = ux_u8_put(21, missileEvents % 256);
+  let missileHigh = ux_u8_put(22, missileEvents / 256);
+  let missileTracking = ux_u8_put(23, missileTarget);
+  let missileETA = ux_u8_put(24, missileTravel);
   steps = steps - 1;
 }
 priorTurn = tickTurn;
 priorClimb = tickClimb;
 priorBoost = tickBoost;
 priorGun = tickGun;
+priorMissile = tickMissile;
 
 let packetId = ux_u8_put(0, 3);
 let headingLow = ux_u8_put(1, heading % 256);
