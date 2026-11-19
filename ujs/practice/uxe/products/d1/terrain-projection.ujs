@@ -88,9 +88,11 @@ while (viewDepth <= 400.0) {
       if (ground >= 28) { soil = 89 + 153 * 256 + 59 * 65536; }
       if (ground >= 55) { soil = 60 + 115 * 256 + 61 * 65536; }
       if (ground >= 101) { soil = 119 + 111 * 256 + 121 * 65536; }
-      if (ground < 0) {
+      // Water masks and land marks use the same world-space hash.
+      if (ground < 0 || ground >= 8) {
         let wavePass = 0;
-        while (wavePass < 3) {
+        if (ground >= 8) { wavePass = 3; }
+        while (wavePass < 7) {
           let waveX = (fineX + wavePhase) % 1024 / 4;
           let waveY = fineY / 2;
           let waveSalt = 9;
@@ -111,15 +113,67 @@ while (viewDepth <= 400.0) {
             waveCutoff = 255;
             if (ground > 0 - 3) { waveCutoff = 165; }
           }
-          let waveNoise = u32_xor(u32_xor(u32_mul(waveX + 17, 374761393),
-            u32_mul(waveY + 29, 668265263)), u32_mul(waveSalt, 1442695041));
-          waveNoise = u32_mul(u32_xor(waveNoise, u32_shr(waveNoise, 13)), 1274126177);
-          waveNoise = u32_and(u32_xor(waveNoise, u32_shr(waveNoise, 16)), 255);
+          if (wavePass == 3) {
+            waveX = fineX;
+            waveY = fineY;
+            waveSalt = 26;
+            waveCutoff = 234;
+            if (ground % 10 < 2) { waveCutoff = 0 - 1; }
+          }
+          if (wavePass == 4) {
+            waveX = fineX / 32;
+            waveY = fineY / 32;
+            waveSalt = 34;
+            waveCutoff = 255;
+            if (ground < 28 && (fineX + 2 * fineY) % 13 < 3) { waveCutoff = 83; }
+          }
+          if (wavePass == 5) {
+            waveX = fineX / 2;
+            waveY = fineY / 2;
+            waveSalt = 38;
+            waveCutoff = 255;
+            if (ground >= 28 && ground < 101) { waveCutoff = 224; }
+          }
+          if (wavePass == 6) {
+            waveX = fineX / 4;
+            waveY = fineY / 4;
+            waveSalt = 86;
+            waveCutoff = 255;
+            if (ground >= 81 && ground <= 120) { waveCutoff = 0 - 1; }
+          }
+          let waveNoise = 0;
+          if (waveCutoff < 255 && (waveCutoff >= 0 || wavePass == 6)) {
+            waveNoise = u32_xor(u32_xor(u32_mul(waveX + 17, 374761393),
+              u32_mul(waveY + 29, 668265263)), u32_mul(waveSalt, 1442695041));
+            waveNoise = u32_mul(u32_xor(waveNoise, u32_shr(waveNoise, 13)), 1274126177);
+            waveNoise = u32_and(u32_xor(waveNoise, u32_shr(waveNoise, 16)), 255);
+          }
           if (waveNoise > waveCutoff) {
-            soil = 174 + 225 * 256 + 231 * 65536;
-            wavePass = 3;
+            if (wavePass < 3) {
+              soil = 174 + 225 * 256 + 231 * 65536;
+              wavePass = 6;
+            }
+            if (wavePass == 3) {
+              soil = f64_floor_i64((soil % 256) * 0.87 + 0.5)
+                + 256 * f64_floor_i64((soil / 256 % 256) * 0.87 + 0.5)
+                + 65536 * f64_floor_i64((soil / 65536) * 0.87 + 0.5);
+            }
+            if (wavePass == 4) { soil = 121 + 155 * 256 + 65 * 65536; }
+            if (wavePass == 5) {
+              soil = 103 + 168 * 256 + 81 * 65536;
+              if ((fineX + fineY) % 3 == 0) { soil = 52 + 104 * 256 + 56 * 65536; }
+            }
+            if (wavePass == 6 && ground >= 81) {
+              waveCutoff = f64_floor_i64(0.5 + (ground - 84 + (waveNoise - 128) / 18.0) * 0.25);
+              if (waveCutoff < 0) { waveCutoff = 0; }
+              if (waveCutoff > 8) { waveCutoff = 8; }
+              soil = (60 + (59 * waveCutoff + 4) / 8)
+                + 256 * (115 - (4 * waveCutoff + 3) / 8)
+                + 65536 * (61 + (60 * waveCutoff + 4) / 8);
+            }
           }
           wavePass = wavePass + 1;
+          if (ground < 0 && wavePass == 3) { wavePass = 7; }
         }
       }
       let soilR = soil % 256;
