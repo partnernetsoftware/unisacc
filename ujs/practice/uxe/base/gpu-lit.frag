@@ -39,6 +39,10 @@ float srgb(float value) {
 
 void main() {
   vec3 normal = normalize(worldNormal);
+  if (lightingMode >= 6.0) {
+    gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
+    return;
+  }
   vec3 variation = max(abs(dFdx(normal)), abs(dFdy(normal)));
   float roughness = min(1.0, 0.5 + max(max(variation.x, variation.y), variation.z));
   bool standard = mod(lightingMode, 2.0) > 0.5;
