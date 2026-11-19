@@ -1,0 +1,39 @@
+/* devsvc tool selfcheck: verify capacity observations against private procfs and cgroup fixtures. */
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.netpack
+static char base[4096];
+static int failed, passed;
+static void file(const char *name,const char *value){
+    char path[4400];if(cx_fmt(path,sizeof path,"%s/%s",base,name))exit(2);
+    if(sy_write_atomic(path,value,strlen(value),0600))exit(2);
+}
+static void sample(const char *label,const char *expected){
+    char *argv[]={"sh","./unisacc.com","tools/dvshadow.cx","--","sample","--root",base,0};
+    np_result r;char why[160];
+    int rc=np_run(argv,0,0,20,&r,why,sizeof why);
+    int ok=!rc && !r.rc && r.outn==strlen(expected) && !memcmp(r.out,expected,r.outn);
+    if(!rc)np_free(&r);
+    printf("%s\t%s\n",ok?"PASS":"FAIL",label);if(ok)passed++;else failed++;
+}
+int main(void){
+    if(sy_mkdtemp(getenv("TMPDIR")?getenv("TMPDIR"):"/tmp","s2-capacity-",base,sizeof base))return 2;
+    const char *dirs[]={"proc","proc/self","cg","cg/group","cg/group/job",0};
+    for(int i=0;dirs[i];i++){char path[4400];if(cx_fmt(path,sizeof path,"%s/%s",base,dirs[i])||sy_mkdir(path,0700))return 2;}
+    file("proc/self/status","Cpus_allowed_list:\t0-2,7,12\n");
+    file("proc/self/cgroup","0::/tenant/group/job\n");
+    file("proc/self/mountinfo","32 26 0:30 /tenant /cg rw - cgroup2 cgroup rw\n");
+    file("proc/meminfo","MemTotal: 4096 kB\nMemAvailable: 700 kB\n");
+    file("cg/group/cpuset.cpus.effective","1-2,5,7\n");
+    file("cg/group/cpu.max","150000 100000\n");file("cg/group/job/cpu.max","max 100000\n");
+    sample("sparse-intersection-parent-quota","S2_CAPACITY\tallowed_cpus=3\tquota_mcpu=1500\tcapacity_mcpu=1500\tmem_available_kb=700\n");
+    file("cg/group/cpu.max","max 100000\n");
+    sample("explicit-unlimited","S2_CAPACITY\tallowed_cpus=3\tquota_mcpu=max\tcapacity_mcpu=3000\tmem_available_kb=700\n");
+    char a[4400],b[4400];if(cx_fmt(a,sizeof a,"%s/cg/group/cpu.max",base)||cx_fmt(b,sizeof b,"%s/cg/group/job/cpu.max",base)||sy_unlink(a)||sy_unlink(b))return 2;
+    sample("missing-quota-unmeasured","S2_CAPACITY\tallowed_cpus=3\tquota_mcpu=UNMEASURED\tcapacity_mcpu=UNMEASURED\tmem_available_kb=700\n");
+    file("cg/group/job/cpu.max","1 0\n");file("proc/meminfo","MemAvailable: -1 kB\n");
+    sample("bad-period-and-memory-unmeasured","S2_CAPACITY\tallowed_cpus=3\tquota_mcpu=UNMEASURED\tcapacity_mcpu=UNMEASURED\tmem_available_kb=UNMEASURED\n");
+    file("cg/group/job/cpu.max","max 100000\n");file("proc/self/status","Cpus_allowed_list: 7-2\n");
+    sample("bad-affinity-unmeasured","S2_CAPACITY\tallowed_cpus=UNMEASURED\tquota_mcpu=max\tcapacity_mcpu=UNMEASURED\tmem_available_kb=UNMEASURED\n");
+    if(cx_rmtree(base))return 2;
+    printf("CHECK_DVSHADOW\tpassed=%d\tfailed=%d\n",passed,failed);return failed?1:0;
+}

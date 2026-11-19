@@ -1,0 +1,102 @@
+/* devsvc shadow telemetry. sample [--root FIXTURE] reads Linux capacity without acquiring slots. */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#define DS_PATH 4096
+#define DS_CPUS 8192
+static char prefix[DS_PATH];
+/* Read one field starting at column zero, or the first line of a scalar file. */
+static int field(const char *name,const char *key,char *out,size_t cap){
+    char path[DS_PATH],line[16384];size_t n=strlen(key);
+    if(cx_fmt(path,sizeof path,"%s%s",prefix,name))return -1;
+    FILE *f=fopen(path,"r");if(!f)return errno==ENOENT?-2:-1;
+    int result=-1;
+    while(fgets(line,sizeof line,f)){
+        size_t len=strlen(line);if(!len||line[len-1]!='\n')break;
+        if(len<=n||memcmp(line,key,n))continue;
+        line[len-1]=0;char *p=line+n;while(*p==' '||*p=='\t')p++;
+        if(tx_copy(out,cap,p,strlen(p))==0)result=0;
+        break;
+    }
+    fclose(f);return result;
+}
+static int number(const char **pp,long *out){
+    const char *p=*pp;long v=0;if(*p<'0'||*p>'9')return 0;
+    while(*p>='0'&&*p<='9'){int d=*p++-'0';if(v>(LONG_MAX-d)/10)return 0;v=v*10+d;}
+    *pp=p;*out=v;return 1;
+}
+static int cpus(const char *p,unsigned char *bits){
+    while(*p){
+        long a,b;if(!number(&p,&a))return 0;b=a;
+        if(*p=='-'){p++;if(!number(&p,&b))return 0;}
+        if(b<a||b>=DS_CPUS)return 0;
+        for(long i=a;i<=b;i++)bits[i]=1;
+        if(!*p)return 1;
+        if(*p++!=','||!*p)return 0;
+    }
+    return 0;
+}
+static int safe_path(const char *s){
+    if(*s!='/')return 0;
+    for(const char *p=s;*p;p++){
+        if(*p=='\\'||*p<' ')return 0;
+        if(*p=='/' && p[1]=='.' && (!p[2]||p[2]=='/'||(p[2]=='.'&&(!p[3]||p[3]=='/'))))return 0;
+    }
+    return 1;
+}
+static int mount_for(const char *group,char *base,char *leaf){
+    char path[DS_PATH],line[16384],root[DS_PATH],mount[DS_PATH];
+    if(!safe_path(group)||cx_fmt(path,sizeof path,"%s/proc/self/mountinfo",prefix))return 0;
+    FILE *f=fopen(path,"r");if(!f)return 0;int best=-1;
+    while(fgets(line,sizeof line,f)){
+        if(!strchr(line,'\n')||!strstr(line," - cgroup2 "))continue;
+        if(sscanf(line,"%*s %*s %*s %4095s %4095s",root,mount)!=2||!safe_path(root)||!safe_path(mount))continue;
+        int n=!strcmp(root,"/")?0:(int)strlen(root);
+        if(n<=best||strncmp(group,root,n)||(group[n]&&group[n]!='/'))continue;
+        if(cx_fmt(base,DS_PATH,"%s",mount)||cx_fmt(leaf,DS_PATH,"%s%s",mount,group[n]&&strcmp(group+n,"/")?group+n:""))continue;
+        best=n;
+    }
+    fclose(f);return best>=0;
+}
+/* -2 is an explicitly unlimited cpu.max. -1 means unavailable or malformed. */
+static long quota(const char *p){
+    long q=0,period=0;int unlimited=!strncmp(p,"max ",4);
+    if(unlimited)p+=3;else if(!number(&p,&q)||q<=0||q>LONG_MAX/1000)return -1;
+    if(*p!=' '&&*p!='\t')return -1;while(*p==' '||*p=='\t')p++;
+    if(!number(&p,&period)||period<=0||*p)return -1;
+    return unlimited?-2:q*1000/period;
+}
+static void capacity(long *allowed,long *limit){
+    char group[DS_PATH],base[DS_PATH],dir[DS_PATH],path[DS_PATH],buf[16384];
+    unsigned char aff[DS_CPUS]={0},set[DS_CPUS]={0};
+    int affinity=!field("/proc/self/status","Cpus_allowed_list:",buf,sizeof buf)&&cpus(buf,aff);
+    if(field("/proc/self/cgroup","0::",group,sizeof group)||!mount_for(group,base,dir))return;
+    int set_ok=0,bad=0,seen=0;long bound=-2;
+    for(;;){
+        if(!set_ok){
+            if(cx_fmt(path,sizeof path,"%s/cpuset.cpus.effective",dir))return;
+            int rc=field(path,"",buf,sizeof buf);
+            if(!rc)set_ok=cpus(buf,set)?1:-1;else if(rc!=-2)set_ok=-1;
+        }
+        if(cx_fmt(path,sizeof path,"%s/cpu.max",dir))return;
+        int rc=field(path,"",buf,sizeof buf);
+        if(!rc){long v=quota(buf);seen=1;if(v==-1)bad=1;if(v>=0&&(bound<0||v<bound))bound=v;}
+        else if(rc!=-2)bad=1;
+        if(!strcmp(dir,base))break;
+        char *end=strrchr(dir,'/');if(!end||end<=dir)return;*end=0;
+    }
+    if(affinity&&set_ok==1){*allowed=0;for(int i=0;i<DS_CPUS;i++)if(set[i]&&aff[i])(*allowed)++;}
+    if(seen&&!bad)*limit=bound;
+}
+static void metric(const char *key,long v){
+    if(v==-2)printf("\t%s=max",key);else if(v<0)printf("\t%s=UNMEASURED",key);else printf("\t%s=%ld",key,v);
+}
+int main(int argc,char **argv){
+    if((argc!=2&&argc!=4)||strcmp(argv[1],"sample"))return 2;
+    if(argc==4&&(strcmp(argv[2],"--root")||!safe_path(argv[3])||tx_copy(prefix,sizeof prefix,argv[3],strlen(argv[3]))))return 2;
+    long allowed=-1,limit=-1,cap=-1,mem=-1;char buf[128];
+    capacity(&allowed,&limit);
+    if(allowed>=0&&limit!=-1){cap=allowed*1000;if(limit>=0&&limit<cap)cap=limit;}
+    if(!field("/proc/meminfo","MemAvailable:",buf,sizeof buf)){const char *p=buf;long v;if(number(&p,&v)&&!strcmp(p," kB"))mem=v;}
+    printf("S2_CAPACITY");metric("allowed_cpus",allowed);metric("quota_mcpu",limit);metric("capacity_mcpu",cap);metric("mem_available_kb",mem);puts("");
+    return 0;
+}
