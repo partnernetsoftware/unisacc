@@ -306,7 +306,7 @@ static void find_strict(void) {
 }
 /* Fold qualify's append-only evidence in its recorded order, like --resume.
    RAW identifies the execution associated with the latest structured row. */
-typedef struct { char id[128], status[8], rc[16]; int reason, allowed, witnessed, segment; } strict_batch;
+typedef struct { char id[128], status[8], rc[16]; int reason, allowed, witnessed, segment, unresolved_raw_unknown; } strict_batch;
 static strict_batch strict_batches[1024];
 static int strict_count;
 static strict_batch *strict_slot(const char *id) {
@@ -423,6 +423,7 @@ static void strict_terminals(char *t,long n) {
             if(!b->status[0])refuse("STRICT_UNKNOWN","RAW without a corresponding batch row");
             b->witnessed=tx_eqz(sha,cand.sha[0])&&tx_eqz(b->status,st)&&tx_eqz(b->rc,rc);
             if(tx_eqz(st,"FAIL") && !b->witnessed)refuse("STRICT_UNKNOWN","FAIL receipt differs from its batch row");
+            if(tx_eqz(st,"UNKNOWN") && !b->witnessed)refuse("STRICT_UNKNOWN","UNKNOWN receipt differs from its batch row");
             continue;
         }
         if(nf!=9)refuse("STRICT_UNKNOWN","invalid qualify batch row");
@@ -444,6 +445,7 @@ static void strict_terminals(char *t,long n) {
     }
     for(int i=0;i<strict_count;i++){
         strict_batch *b=&strict_batches[i];
+        if(b->unresolved_raw_unknown && !tx_eqz(b->status,"UNKNOWN"))refuse("STRICT_UNKNOWN",b->id);
         if(b->allowed && !tx_eqz(b->status,"UNKNOWN"))refuse("STRICT_UNKNOWN",b->id);
         if(!b->status[0])continue;
         if(tx_eqz(b->status,"UNKNOWN")){
@@ -500,7 +502,8 @@ static void gate_strict(void) {
             kv(ls, ll, "id=", id, sizeof id); kv(ls, ll, "status=", st, sizeof st); kv(ls, ll, "candidate=", c, sizeof c);
             if (!tx_eqz(c, cand.sha[0])) { cx_fmt(d, sizeof d, "batch %s candidate=%s != ape_sha256 %s", id, c, cand.sha[0]); free(t); refuse("CANDIDATE_SHA", d); }
             if (tx_eqz(st, "PASS")) continue;
-            long replacement=raw && tx_eqz(st,"FAIL") ? later_pass(t,n,at,row,id) : 0;
+            int raw_unknown=raw && tx_eqz(st,"UNKNOWN");
+            long replacement=raw && (tx_eqz(st,"FAIL") || raw_unknown) ? later_pass(t,n,at,row,id) : 0;
             if (tx_eqz(st, "FAIL") && expected_fail(id, want, sizeof want)) {
                 /* the COUNT row of this batch must equal the listed expectation */
                 long a2 = 0, l2; const char *s2; char key[160], pf[32], ff[32]; int match = 0;
@@ -526,9 +529,11 @@ static void gate_strict(void) {
                 if(!replacement){xf++;continue;}
             }
             if(replacement){
-                sy_printf("GATE\t1\tSTRICT\tSUPERSEDED\tid=%s\tfail_row=%ld\tpass_row=%ld\tcandidate=%s\n",id,row,replacement,c);
+                sy_printf("GATE\t1\tSTRICT\tSUPERSEDED\tid=%s\tfail_row=%ld\tpass_row=%ld\tcandidate=%s%s\n",id,row,replacement,c,raw_unknown?"\tstatus=UNKNOWN":"");
                 superseded++;continue;
             }
+            /* Without a replacing PASS, only the registered terminal UNKNOWN can account for this receipt. */
+            if(raw_unknown){strict_slot(id)->unresolved_raw_unknown=1;continue;}
             cx_fmt(d, sizeof d, "batch %s status=%s not PASS and not in expected-fail.tsv", id, st); free(t); refuse("STRICT", d);
         }
         if (ll >= 7 && !memcmp(ls, "INVALID", 7)) { free(t); refuse("STRICT", "INVALID row"); }
