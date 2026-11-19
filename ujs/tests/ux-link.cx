@@ -526,12 +526,14 @@ static int bridge_product(const char *dir,int mutate) {
         mutate==8?"uxe_dispatch(29, 60, 178)":mutate==9?"while (rail < 2)":mutate==10?"while (vine < 21)":
         mutate==11?"sceneWidth = 960":mutate==12?"while (stroke < 1050)":
         mutate==13?"(meadowZ + 4000) * 100 / 6400":mutate==14?"y0 + y1 > 20":mutate==15?"uxe_dispatch(34, 2,":
-        mutate==16?"164 + 126 * 256 + 89 * 65536":mutate==17?"while (boulder < 15)":0,
+        mutate==16?"164 + 126 * 256 + 89 * 65536":mutate==17?"while (boulder < 15)":
+        mutate==18?"walkInput = uxe_dispatch(0, 0, 0)":0,
         mutate==5?"0.0":mutate==6?"0 - 1":mutate==7?"0, 0":mutate==8?"uxe_dispatch(29, 0, 0)":
         mutate==9?"while (rail < 0)":mutate==10?"while (vine < 0)":mutate==11?"sceneWidth = 426":
         mutate==12?"while (stroke < 0)":mutate==13?"100":mutate==14?"0":
         mutate==15?"uxe_dispatch(34, 0,":mutate==16?"118 + 124 * 256 + 139 * 65536":
-        mutate==17?"while (boulder < 0)":"while (bay < 0)");
+        mutate==17?"while (boulder < 0)":
+        mutate==18?"walkInput = uxe_dispatch(0, 0, 0) % 4294967296":"while (bay < 0)");
 done:
     for(int i=0;i<6;i++) mm_free(bytes[i]);
     return rc;
@@ -563,6 +565,17 @@ static int export_walk(const char *dir) {
     if(rc) sy_rmdir(dir);
     printf("D3_WALK_EXPORT dir=%s failed=%d\n",dir,rc);
     return rc;
+}
+
+static int walk_input_check(const char *dir) {
+    char url[330], *out=0;
+    size_t size=0;
+    tx_snprintf(url,sizeof url,"file://%s/index.html",dir);
+    char *cmd[]={"sh","./unisacc.com","tools/check-uxe-d1-flight.cx","--","wasm-walk-input",url,0};
+    int rc=cx_runv_timeout(cmd,28,&out,&size);
+    if(out) printf("%s",out);
+    mm_free(out);
+    return rc!=0;
 }
 
 static int walk_gold(char *gold,int cap) {
@@ -920,7 +933,9 @@ int main(int argc, char **argv) {
     if(tx_eq(mode,"walk-ink-off",sizeof "walk-ink-off")) bridge_mutate=15;
     if(tx_eq(mode,"walk-purple-arch",sizeof "walk-purple-arch")) bridge_mutate=16;
     if(tx_eq(mode,"walk-rocks-off",sizeof "walk-rocks-off")) bridge_mutate=17;
-    if(tx_eq(mode,"walk-bridge",sizeof "walk-bridge") || bridge_mutate) flight_check=16;
+    int walk_input_off=tx_eq(mode,"walk-input-off",sizeof "walk-input-off");
+    if(tx_eq(mode,"walk-input",sizeof "walk-input") || walk_input_off) flight_check=17;
+    else if(tx_eq(mode,"walk-bridge",sizeof "walk-bridge") || bridge_mutate) flight_check=16;
     int projection_check = tx_eq(mode, "projection", 11) || tx_eq(mode, "projection-short", 17);
     int audio_mutate = tx_eq(mode, "projection-audio-mute", sizeof "projection-audio-mute");
     if (tx_eq(mode, "projection-audio", sizeof "projection-audio") || audio_mutate) projection_check = 2;
@@ -955,6 +970,10 @@ int main(int argc, char **argv) {
         } else {
             rc = rc || generated(dir, "base", "ujs/practice/uxe/base/uxe.ujs", 0, 0) || projection_product(dir, mutate);
         }
+    } else if (flight_check == 17) {
+        rc=rc || (package!=0) || walk_asset(dir,1) || bridge_shell(dir) ||
+            generated(dir,"base","ujs/practice/uxe/base/uxe.ujs",0,0) ||
+            bridge_product(dir,walk_input_off?18:0) || walk_input_check(dir);
     } else if (flight_check == 16) {
         rc=rc || (package!=0) || walk_asset(dir,1) || bridge_shell(dir) ||
             copy_fixture(dir,"probe.html","ujs/practice/uxe/test/ux-d3-bridge-probe.html") ||
@@ -1008,7 +1027,7 @@ int main(int argc, char **argv) {
             generated(dir, "version", base_source, "version 1;", "version 2;") ||
             generated(dir, "signature", base_source, "value:i64)", "value:i64, spare:i64)");
     }
-    rc = rc || browser(dir, mode, base_check, flight_check, projection_check);
+    if(flight_check!=17) rc = rc || browser(dir, mode, base_check, flight_check, projection_check);
     if (cx_runv_timeout(clean, 8, &removed, &removed_n)) rc = 1;
     mm_free(removed);
     return rc;
