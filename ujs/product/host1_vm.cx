@@ -143,7 +143,7 @@ static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_e
       if (*ip < bn) (*ip)++;
       depth++;
     } else if (o2 == 0x05 && depth == 1 && stop_else) {
-      return 1; /* at else */
+      return 2; /* at else */
     } else if (o2 == 0x0b) {
       depth--;
     } else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
@@ -159,7 +159,7 @@ static int h1_skip_block(const uint8_t *b, uint32_t bn, uint32_t *ip, int stop_e
       uint32_t a, o; if (!h1_uleb(b, bn, ip, &a) || !h1_uleb(b, bn, ip, &o)) return 0;
     }
   }
-  return 1;
+  return depth == 0;
 }
 
 static int h1_parse(H1 *h, const uint8_t *p, uint32_t n) {
@@ -320,9 +320,9 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
       if (op == 0x04) {
         h1_pop_to(h, &a);
         if (!((a.k == WK_I32) ? a.i32 : (int32_t)a.i64)) {
-          if (!h1_skip_block(b, bn, &ip, 1)) return h1_err(h, "skip if");
-          /* now either at else body or past end */
-          if (csp < H1_CTL) {
+          int skipped = h1_skip_block(b, bn, &ip, 1);
+          if (!skipped) return h1_err(h, "skip if");
+          if (skipped == 2 && csp < H1_CTL) {
             ctl[csp].kind = 0x04; ctl[csp].start_ip = ip; ctl[csp].end_ip = 0;
             csp++;
           }
@@ -361,27 +361,10 @@ static int h1_exec(H1 *h, uint32_t fi, WV *locals, uint32_t nloc, int depth) {
           ip = ctl[target].start_ip; /* loop continue */
           continue;
         }
-        /* block/if break: skip to matching end from current ip — rewalk from frame start */
-        {
-          uint32_t sip = ctl[target].start_ip;
-          int depth_blk = 1;
-          ip = sip;
-          while (ip < bn && depth_blk) {
-            uint8_t o2 = b[ip++];
-            if (o2 == 0x02 || o2 == 0x03 || o2 == 0x04) { if (ip < bn) ip++; depth_blk++; }
-            else if (o2 == 0x0b) depth_blk--;
-            else if (o2 == 0x0c || o2 == 0x0d || o2 == 0x20 || o2 == 0x21 || o2 == 0x22 || o2 == 0x10) {
-              uint32_t x; h1_uleb(b, bn, &ip, &x);
-            } else if (o2 == 0x41) { int32_t x; h1_sleb32(b, bn, &ip, &x); }
-            else if (o2 == 0x42) { int64_t x; h1_sleb64(b, bn, &ip, &x); }
-            else if (o2 == 0x44) ip += 8;
-            else if (h1_memory_width(o2)) {
-              uint32_t aa, oo; h1_uleb(b, bn, &ip, &aa); h1_uleb(b, bn, &ip, &oo);
-            } else if (o2 == 0x05) { /* else keeps same depth */ }
-          }
-          csp = target;
-          continue;
-        }
+        ip = ctl[target].start_ip;
+        if (!h1_skip_block(b, bn, &ip, 0)) return h1_err(h, "skip branch");
+        csp = target;
+        continue;
       }
     }
     if (op == 0x10) {
