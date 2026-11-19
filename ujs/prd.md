@@ -238,6 +238,8 @@ D1 产品的键盘飞行状态已迁入 `practice/uxe/products/d1/main.ujs`，�
 
 D1 地形哈希依赖 32 位环绕乘法、按位与、异或和逻辑右移。编译器提供 `u32_mul`、`u32_and`、`u32_xor`、`u32_shr`，入参接收 i64 的低 32 位，运算按 Wasm i32 语义，结果零扩展为 i64。移位量取低 5 位。host1 的乘法环绕及逻辑右移与浏览器 Wasm 一致。独立 `.cx` 用地形坐标与种子计算哈希金值，`cli-host.cx -- --mutate-u32` 将一处逻辑右移量从 13 改为 12，验收须红。
 
+地形离散化使用 `f64_floor_i64(x)`，生成 Wasm 的向下取整与有符号整数转换。负小数向下取整，普通 f64 赋到 i64 仍向零截断。host1 也支持这两条不同操作，拒绝 NaN、无穷或超出 i64 范围的转换。`cli-host.cx -- --mutate-floor` 检查舍入方向反例。
+
 #### 构建、顺序与验收
 
 基座入口规划为 `ujs/practice/uxe/base/uxe.ujs`。产品入口规划为 `ujs/practice/uxe/products/{d1,d2,d3,d4}/main.ujs`，各自目录存模块和资源事实表。S2 交付编译器后，分别用 `./ujs/ujs2wasm.com ujs/practice/uxe/base/uxe.ujs -o <阶段目录>/uxe.wasm` 和 `./ujs/ujs2wasm.com ujs/practice/uxe/products/d1/main.ujs -o <阶段目录>/product.wasm` 构建，余页同形。可以复用现编译器实现并保留 `ujs.com` 入口。两份 Wasm 都须由 `.ujs` 经正式的 `ujs2wasm.com` 编译，禁止手写 Wasm 字节、由 `.cx` 直接生成 Wasm 字节或用 JS 代替。生成器记录编译器、依赖和 ABI 版本，并以重编字节比较作为检查。授权发布时由 `ujs/practice/uxe/pages.tsv` 明列两个 Wasm、共享桥和数据，经 `gen-uxe-pages.cx` 导出与复核哈希。候选先导出到临时目录。
