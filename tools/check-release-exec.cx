@@ -420,7 +420,31 @@ static void part_n(void) {
       ck(r.rc == 2 && has(o, "release-run: REFUSE usage") && !has(o, "RELEASE_EXEC") && !has(o, "release-exec: REFUSE"), "N0.old-release-run-has-no-execute");
       np_free(&r); }
 }
+static void raw_unknown_cases(void) {
+    const char *header="batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n";
+    const char *key="release/evidence/v0.0.99-strict-2026-01-01.tsv";
+    const char *exceptions="release/evidence/0.0.99/expected-unmeasured.tsv";
+    const char *empty="batch\treason\n";
+    char unknown[640],pass[320],raw[320],text[2400],audit[320];
+    fixture(99,4,0,1);
+    cx_fmt(unknown,sizeof unknown,"sample\tproduct-qualification\tUNKNOWN\t0\t%s\t54733\t4.24\t0\touter-timeout-60s\nRAW\tBATCH_RUN\tid=sample\tstatus=UNKNOWN\trc=0\ttransport=-1\tcandidate=%s\n",sha[0],sha[0]);
+    cx_fmt(pass,sizeof pass,"sample\tproduct-qualification\tPASS\t0\t%s\t3638\t2.84\t0\t-\n",sha[0]);
+    cx_fmt(audit,sizeof audit,"GATE\t1\tSTRICT\tSUPERSEDED\tid=sample\tfail_row=3\tpass_row=5\tcandidate=%s\tstatus=UNKNOWN",sha[0]);
+    const char *labels[]={"raw-unknown-then-pass","raw-pass-then-unknown","raw-unknown-wrong-candidate","raw-unknown-no-pass-witness","raw-terminal-unknown-unlisted","raw-terminal-unknown-listed"};
+    for(int i=0;i<6;i++){
+        int terminal=i==1||i>=4;
+        cx_fmt(raw,sizeof raw,"RAW\tBATCH_RUN\tid=sample\tstatus=PASS\trc=0\ttransport=0\tcandidate=%s\n",i==2?sha[1]:sha[0]);
+        cx_fmt(text,sizeof text,"%s%s%s%s%sSUMMARY\tUNKNOWN=%d\tape_sha256=%s\tversion=unisacc 0.0.99\n",
+            header,i==1?pass:unknown,i==1?raw:i<4?pass:"",i==1?unknown:i<3?raw:"","",terminal,sha[0]);
+        put(fx,key,text);put(fx,exceptions,i==5?"sample\touter-timeout\n":empty);
+        int rc=rx("--dry",0,0,0);
+        if(i==0)ck(rc==0&&has(out,audit)&&has(out,"expected_fail=0 superseded=1"),labels[i]);
+        else if(i==5)ck(rc==0&&has(out,"GATE\t1\tSTRICT\tPASS")&&!has(out,"SUPERSEDED"),labels[i]);
+        else ck(rc==2&&has(out,"release-exec: REFUSE RELEASE_EXEC_GATE_")&&!has(out,"GATE\t1\tSTRICT\tPASS")&&!has(out,"SUPERSEDED"),labels[i]);
+    }
+}
 static void unknown_cases(void) {
+    raw_unknown_cases();
     fixture(99,4,0,1);
     const char *labels[]={"unknown-then-pass","pass-then-unknown","exact-exception","wrong-reason","summary-mismatch","missing-raw","free-text-exception"};
     char pass[640],raw[240],evidence[2400];
