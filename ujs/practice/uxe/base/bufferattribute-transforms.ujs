@@ -1,0 +1,84 @@
+// mode 0: Matrix3, 1: Matrix4, 2: normal matrix, 3: direction via Matrix4.
+native function BufferAttribute_transform(ba_tf:i64,ba_tf_matrix:i64,ba_tf_scratch:i64,ba_tf_mode:i64) i64 {
+  let ba_tf_axes=ux_u32(ba_tf+BufferAttribute.itemSize);
+  if(ba_tf_axes<3 && !(ba_tf_axes==2 && ba_tf_mode==0)) { return 0-1; }
+  let ba_tf_n=ux_u32(ba_tf+BufferAttribute.count);
+  let ba_tf_column=24;
+  if(ba_tf_mode==1 || ba_tf_mode==3) { ba_tf_column=32; }
+  let ba_tf_i=0;
+  while(ba_tf_i<ba_tf_n) {
+    let ba_tf_x=BufferAttribute_getComponent(ba_tf,ba_tf_i,0);
+    let ba_tf_y=BufferAttribute_getComponent(ba_tf,ba_tf_i,1);
+    let ba_tf_z=1.0;
+    if(ba_tf_axes>=3) { ba_tf_z=BufferAttribute_getComponent(ba_tf,ba_tf_i,2); }
+    let ba_tf_mx=ba_tf_matrix;
+    let ba_tf_my=ba_tf_matrix+ba_tf_column;
+    let ba_tf_mz=ba_tf_matrix+2*ba_tf_column;
+    let ba_tf_out_x=ux_f64(ba_tf_mx)*ba_tf_x+ux_f64(ba_tf_my)*ba_tf_y+ux_f64(ba_tf_mz)*ba_tf_z;
+    let ba_tf_out_y=ux_f64(ba_tf_mx+8)*ba_tf_x+ux_f64(ba_tf_my+8)*ba_tf_y+ux_f64(ba_tf_mz+8)*ba_tf_z;
+    let ba_tf_out_z=ux_f64(ba_tf_mx+16)*ba_tf_x+ux_f64(ba_tf_my+16)*ba_tf_y+ux_f64(ba_tf_mz+16)*ba_tf_z;
+    if(ba_tf_mode==1) {
+      let ba_tf_p=ba_tf_matrix+96;
+      let ba_tf_w=1.0/(ux_f64(ba_tf_mx+24)*ba_tf_x+ux_f64(ba_tf_my+24)*ba_tf_y+
+        ux_f64(ba_tf_mz+24)*ba_tf_z+ux_f64(ba_tf_p+24));
+      ba_tf_out_x=(ba_tf_out_x+ux_f64(ba_tf_p))*ba_tf_w;
+      ba_tf_out_y=(ba_tf_out_y+ux_f64(ba_tf_p+8))*ba_tf_w;
+      ba_tf_out_z=(ba_tf_out_z+ux_f64(ba_tf_p+16))*ba_tf_w;
+    } else if(ba_tf_mode>=2) {
+      let ba_tf_len=f64_sqrt(ba_tf_out_x*ba_tf_out_x+ba_tf_out_y*ba_tf_out_y+ba_tf_out_z*ba_tf_out_z);
+      if(ba_tf_len!=0.0) {
+        ba_tf_out_x=ba_tf_out_x/ba_tf_len;
+        ba_tf_out_y=ba_tf_out_y/ba_tf_len;
+        ba_tf_out_z=ba_tf_out_z/ba_tf_len;
+      }
+    }
+    let ba_tf_copy_n=3;
+    if(ba_tf_axes==2) { ba_tf_copy_n=2; }
+    let ba_tf_result=BufferAttribute_setTuple(ba_tf,ba_tf_i,ba_tf_copy_n,
+      ba_tf_out_x,ba_tf_out_y,ba_tf_out_z,0.0,ba_tf_scratch);
+    if(ba_tf_result<0) { return ba_tf_result; }
+    ba_tf_i=ba_tf_i+1;
+  }
+  return ba_tf;
+}
+
+function BufferAttribute_applyMatrix3(ba_m3,...ba_m3_args) {
+  return BufferAttribute_transform(ba_m3,ba_m3_args[0],ba_m3_args[1],0);
+}
+function BufferAttribute_applyMatrix4(ba_m4,...ba_m4_args) {
+  return BufferAttribute_transform(ba_m4,ba_m4_args[0],ba_m4_args[1],1);
+}
+function BufferAttribute_applyNormalMatrix(ba_nm,...ba_nm_args) {
+  return BufferAttribute_transform(ba_nm,ba_nm_args[0],ba_nm_args[1],2);
+}
+function BufferAttribute_transformDirection(ba_dir,...ba_dir_args) {
+  return BufferAttribute_transform(ba_dir,ba_dir_args[0],ba_dir_args[1],3);
+}
+
+function BufferAttribute_set(ba_set_array,...ba_set_array_args) {
+  let ba_array_at=ba_set_array_args[0];
+  let ba_array_size=ba_set_array_args[1];
+  let ba_array_offset=ba_set_array_args[2];
+  let ba_array_temp=ba_set_array_args[3];
+  let ba_array_axes=ux_u32(ba_set_array+BufferAttribute.itemSize);
+  let ba_array_capacity=ba_array_axes*ux_u32(ba_set_array+BufferAttribute.count);
+  let ba_array_result=0-1;
+  if(ba_array_axes>0 && ba_array_size>=0 && ba_array_offset>=0 && ba_array_offset<=ba_array_capacity &&
+      ba_array_size<=ba_array_capacity-ba_array_offset) {
+    let ba_array_span=ux_span(ba_array_at,8*ba_array_size);
+    let ba_array_kind=ux_u32(ba_set_array+BufferAttribute.componentType);
+    let ba_array_index=0;
+    while(ba_array_index<ba_array_size) {
+      let ba_array_flat=ba_array_offset+ba_array_index;
+      let ba_array_cell=BufferAttribute_index(ba_set_array,ba_array_flat/ba_array_axes,ba_array_flat%ba_array_axes);
+      let ba_array_write=BufferAttribute_write(ba_array_cell,ba_array_kind,ux_f64(ba_array_at+8*ba_array_index),ba_array_temp);
+      ba_array_index=ba_array_index+1;
+    }
+    ba_array_result=ba_set_array;
+  }
+  return ba_array_result;
+}
+
+function BufferAttribute_copyArray(ba_array,...ba_array_args) {
+  return BufferAttribute_set(ba_array,ba_array_args[0],ba_array_args[1],0,ba_array_args[2]);
+}
