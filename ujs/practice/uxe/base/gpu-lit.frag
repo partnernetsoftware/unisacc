@@ -39,6 +39,14 @@ float srgb(float value) {
 
 void main() {
   vec3 normal = normalize(worldNormal);
+  if (lightingMode >= 10.0) {
+    vec3 view = normalize(vec3(0.0, 0.0, 1.0) - worldPosition);
+    vec3 horizontal = normalize(vec3(view.z, 0.0, -view.x));
+    float vertical = dot(cross(view, horizontal), normal);
+    float neutralCap = 0.5 + 0.297 * vertical;
+    gl_FragColor = vec4(vec3(srgb(neutralCap)), 1.0);
+    return;
+  }
   if (lightingMode >= 8.0) {
     gl_FragColor = vec4(vec3(1.0 - gl_FragCoord.z), 1.0);
     return;
