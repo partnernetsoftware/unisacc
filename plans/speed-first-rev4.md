@@ -168,6 +168,10 @@ R2 第二半先在独立开关下双跑证明读集与执行证据等价，再�
 
 ## R3 独立复核模板与提交预演
 
+资格预跑分两相执行。先从 `QUALIFY_LAYOUT` 取本轮单提交布局目录，在该目录执行 `tools/bound 55 sh ./unisacc.com tools/devsvc.cx -- prebuild-self`。保存 rc=0 的 `PREPARED key=... commit=...`，核 commit 等于该布局的 HEAD，并记录源提交与候选 APE 的 SHA256。准备失败时保留原始输出，本轮 R3 记未验证。
+
+再从同一冻结源工作树执行 `devsvc qualify --candidate "$APE" --ids real-commit --out "$EVIDENCE" --jobs 1`，核两相布局路径与候选身份相同。批次仍在私仓过真实提交门，核完整树、父提交与 pushed=0，只凭本次 RAW 判批次结果。0.0.84 的 T3 在冷构造叠加时首跑 60050ms 超窗，分相后同候选实跑 35991ms、load1=2.90、PASS。新候选的自动备料排在 0.0.85。
+
 0.0.83 的复核样本包括 R1、拆分父批 r4、第 18 至 20 题；第 23 题在途，结论待取。原始材料在任务目录 tmp 下。rfrev.A5WIAY/order2.log 末段同时出现 `COVERAGE_GAP parent=snapshots-cx missing=3` 与 NEEDS_REVIEW，说明只看最终目录存在会漏判。rv4 有坏候选、父批与子片同时出现、PASS 后 FAIL、重复 UNKNOWN 及 since100 的对照；t18-out 的属性白名单区分可忽略提示与改变 ABI 的属性；t19-out 的信号探针同时核返回值与 EINVAL；t20-netregen-out 与 netregen083/all 分别保存固定对抗夹具与逐目标实跑。设计补丁、执行收据和未跑场景须分列。
 
 |类别|复核者须独立执行并记录的对照|
