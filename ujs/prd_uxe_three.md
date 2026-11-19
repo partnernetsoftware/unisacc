@@ -123,6 +123,7 @@ export uxe_frame(now:i64) i64 version 1;
 | C9 | 显式非内联函数与独立 Wasm 局部槽 | 256/257 旧规格保持，跨函数独立槽，递归与深度拒绝，篡改转红 |
 | C10 | 多个 UJS 源文件编译成一个 Wasm 模块 | 跨文件调用、重名与缺源具名拒绝，连接边界和篡改对照 |
 | C11 | 混合整数与浮点表达式及局部槽类型校验 | 二元算术与比较用 wasm-validate 和金值复核，浮点取余与异型重声明具名拒绝 |
+| C12 | 内联局部绑定隔离 | 同型、异型、嵌套与循环验算，篡改转红，D1 至 D3 冻结 Wasm 重编字节相容 |
 
 修订(cdx2): 现有基础为 `f64_sqrt`、`f64_floor_i64`、有界 `ux_span`、u8/f32 连续视图、独立线性内存和声明式链接。不支持任意 JavaScript 或浏览器 `Float32Array` 语法。字典键最多 8 字节，ASCII 字符串字面量最多 255 字节，UTF-8 目前走有界字节而非通用字符串。闭包只证实了短例外层读取，无逃逸或可变捕获合同。WebGL 端大批顶点与纹理上传须先量测跨度搬运和桥接次数，避免逐顶点宿主调用。
 
@@ -133,6 +134,8 @@ export uxe_frame(now:i64) i64 version 1;
 修订(cdx2): C9 使用 `native function name(x:i64, y:f64) f64 { ... }` 生成独立 Wasm 函数和 `call`。stage0 原 `MAXL=256` 及 `invocation_slot` 把传统内联调用的临时量计入调用方。host1 的 `h1_exec` 逐帧检查局部声明，`h1_call` 为每帧保留 256 槽。C9 保持每帧 256 槽和原 257 槽拒绝；原有 `function` 仍内联。原生函数参数和返回值使用 i64/f64，最多 8 个参数和 8 层原生调用，只允许调用已声明的原生函数。递归、前向引用和深度超过上限在编译时具名拒绝，host1 操作数栈溢出也具名拒绝。`cli-host.cx -- --native-calls` 检查两份 256 槽帧、独立 Wasm 函数数目及拒绝，`--mutate-native-calls` 验证金值保持。
 
 修订(ccapi): 数学、场景、几何、材质各由独立 UJS 源文件维护，按顺序编译为单一 base.wasm，共用基座线性内存。产品 Wasm 仍为第二个模块，通过 0c 的版本化入口传递标量和句柄。C10 的命令为 `ujs/ujs2wasm.com abi.ujs math.ujs scene.ujs geometry.ujs material.ujs -o base.wasm`，ABI 声明放最前，符号按编译单元的声明顺序可见，重复函数与布局具名拒绝。该入口目前最多接受 64 个源文件，总源文件合计最多 100000 字节。D1 私有场景探针实测 base.wasm 为 23694 字节。探针超过 4 MiB 时输出 `D1_SCENE_BASE_BUDGET_EXCEEDED` 并失败。该体积是探针基线，后续基座增加功能须重测。
+
+修订(cdx2): C12 默认给内联局部绑定独立的活动作用域。用完的槽只在类型匹配时复用。查找仍支持已在活动父作用域的值，同一作用域的异型重声明仍具名拒绝。默认模式试编 D1 和 D3 的旧产品时槽索引发生变化，因此既有 D1 投影、D3 漫游包的构造明确指定 `--legacy-inline` 以重现冻结字节。新基座和新产品使用默认作用域规则。D2 继续使用默认模式，前后字节一致。
 
 修订(cdx2): C1 的 `.ujs` 接口采用显式缓冲视图。对 Float32Array、Uint16Array、Uint32Array、Int32Array、Float64Array，先用 `ux_typed_index(base, count, index, width)` 得到字节偏移，再用 `ux_f32`、`ux_u16`、`ux_u32`、`ux_i32`、`ux_f64` 及其 `_put` 写入。DataView 切片通过 `ux_data_offset(base, bytes, offset, width)` 支持非对齐访问，目前接口使用小端字节序。负返回值为 `UX_VIEW_BOUNDS=-1` 或 `UX_VIEW_ALIGNMENT=-2`，调用者须先检查再读写。整数写入截为目标位宽，f32 写入舍入到单精度。入口仍由 `ujs2wasm.com` 编译，现有 u8、f32 与 span 指令序列保留。验收运行 `sh ./unisacc.com ujs/product/cli-host.cx -- --ux-views` 及 `--mutate-ux-views`。
 
@@ -179,7 +182,7 @@ export uxe_frame(now:i64) i64 version 1;
 | 阶段 | 任务 | 预计提交 | 出口 |
 |---|---|---|---|
 | S3 | 生成器 `ujs/tools-ux/gen-three-inventory.cx` 解析 `three.module.js` 导出表为 TSV,`--check` 与篡改自测;TSV 含 A、B、C 栏、里程碑列、现状列(默认缺)、门编号列;对标树渲染成 `ujs/prd_uxe_three.md` 附表;现状按严格口径重判 | 3 到 4 | 清单与基线百分比,A 栏已有项数、B 栏已有项数 |
-| M0 | C1 到 C11,每项一提交 | 11 到 15 | 编译器门全绿,基线记录 |
+| M0 | C1 到 C12,每项一提交 | 12 到 16 | 编译器门全绿,基线记录 |
 | M1 | 数学类按 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、ColorManagement、Box2/3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils 推进，每类含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 21 个 M1 数学项全部已有 |
 | M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门，D1 私有探针验证 Scene 与 Object3D 接线 |
 | M3 | 相机四种与投影矩阵、视锥;23 个几何生成器各一提交,顶点与索引与 three.js 逐项对;Curve 系、Path、Shape、ShapeUtils(三角剖分) | 20 到 26 | G-math 对几何的顶点哈希 |

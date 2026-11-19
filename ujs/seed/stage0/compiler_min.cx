@@ -33,6 +33,11 @@ static uint32_t g_out_ptr, g_out_len, g_meta_ptr, g_meta_len, g_err_ptr, g_err_l
 static int g_need_gpu;
 static int g_need_ux;
 static int g_abi_imports;
+#ifdef UJS_HOST
+static int g_legacy_inline;
+
+void ujs_host_legacy_inline(int enabled) { g_legacy_inline = enabled != 0; }
+#endif
 static uint32_t hall(uint32_t n) {
   if (g_bump < 64) g_bump = 64;
   uint32_t p = g_bump;
@@ -540,6 +545,8 @@ typedef struct {
 typedef struct {
   Ins code[MAXC]; int nc;
   char names[MAXL][MAXN]; uint8_t lty[MAXL]; uint8_t lety[MAXL]; int nl;
+  uint16_t local_scope[MAXL];
+  int legacy_inline;
   char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; uint8_t gpersist[MAXG]; int ng;
   uint8_t sdata[MAXSDATA]; uint32_t sn; /* string pool for OP_SCONST */
   int scratch; /* i32 temp for list/dict init, or -1 */
@@ -578,15 +585,67 @@ static int emit_sconst_cstr(Prog *P, const char *s) {
   while (s[n]) n++;
   return emit_sconst_bytes(P, s, n);
 }
-static int loc(Prog *P, const char *name, int create) {
-  for (int i = 0; i < P->nl; i++) if (!strcmp(P->names[i], name)) return i;
-  if (!create) return -1;
+enum { LOCAL_RESERVED = 65535 };
+static int intrinsic_name(const char *actual, const char *expected);
+
+static int fresh_local(Prog *P, const char *name) {
   if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
   strncpy(P->names[P->nl], name, MAXN - 1);
   P->names[P->nl][MAXN - 1] = 0;
   P->lty[P->nl] = TY_I64;
   P->lety[P->nl] = TY_I64;
+  P->local_scope[P->nl] = (uint16_t)(P->in_fn + 1);
   return P->nl++;
+}
+
+static int local_here(Prog *P, const char *name) {
+  for (int i = 0; i < P->nl; i++)
+    if ((P->legacy_inline || P->local_scope[i] == P->in_fn + 1) && intrinsic_name(P->names[i], name)) return i;
+  return -1;
+}
+
+static int reuse_local(Prog *P, const char *name, int type) {
+  if (P->legacy_inline) return -1;
+  for (int i = 0; i < P->nl; i++)
+    if (!P->local_scope[i] && (!type || P->lty[i] == type) && intrinsic_name(P->names[i], name)) return i;
+  return -1;
+}
+
+static int loc(Prog *P, const char *name, int create) {
+  if (P->legacy_inline) {
+    int i = local_here(P, name);
+    return i >= 0 || !create ? i : fresh_local(P, name);
+  }
+  if (create) {
+    int i = local_here(P, name);
+    return i >= 0 ? i : fresh_local(P, name);
+  }
+  int best = -1;
+  int scope = 0;
+  for (int i = 0; i < P->nl; i++) {
+    int candidate = P->local_scope[i];
+    if (candidate > scope && candidate <= P->in_fn + 1 && intrinsic_name(P->names[i], name)) {
+      scope = candidate;
+      best = i;
+    }
+  }
+  return best;
+}
+
+static int bind_local(Prog *P, const char *name, int type) {
+  int i = local_here(P, name);
+  if (i >= 0) {
+    if (P->lty[i] == type) return i;
+    if (P->legacy_inline) { P->lty[i] = (uint8_t)type; return i; }
+    P->err = "local redeclaration changes type"; return -1;
+  }
+  i = reuse_local(P, name, type);
+  if (i < 0) i = fresh_local(P, name);
+  if (i >= 0) {
+    P->lty[i] = (uint8_t)type;
+    P->local_scope[i] = (uint16_t)(P->in_fn + 1);
+  }
+  return i;
 }
 static int glob(Prog *P, const char *name, int create) {
   if (P->native_result) { P->err = "native function requires an explicit local"; return -1; }
@@ -741,13 +800,16 @@ static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver) {
   }
   if (!expect(L, T_RP, P, "call )")) return 0;
   /* Bind parameters from each invocation's typed temporaries. */
+  P->in_fn++;
   if (F->has_p0) {
     int pi, ai;
     if (narg < 1) { P->err = "missing arg"; return 0; }
     ai = arg_slot[0];
-    pi = loc(P, F->p0, 0);
-    if (pi >= 0 && P->lty[pi] != P->lty[ai]) { P->err = "fn parameter type changed"; return 0; }
-    if (pi < 0) pi = loc(P, F->p0, 1);
+    if (P->legacy_inline) {
+      pi = loc(P, F->p0, 0);
+      if (pi >= 0 && P->lty[pi] != P->lty[ai]) { P->err = "fn parameter type changed"; return 0; }
+    }
+    pi = bind_local(P, F->p0, P->lty[ai]);
     if (pi < 0) return 0;
     P->lty[pi] = P->lty[ai];
     if (!emit(P, OP_LOAD, ai)) return 0;
@@ -758,7 +820,7 @@ static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver) {
     int base = F->has_p0 ? 1 : 0;
     int rest_type = rest_n ? P->lty[arg_slot[base]] : TY_I64;
     if (rest_n < 0) rest_n = 0;
-    ri = loc(P, F->rest, 1); if (ri < 0) return 0;
+    ri = bind_local(P, F->rest, TY_LIST); if (ri < 0) return 0;
     scratch = invocation_slot(P, TY_LIST); if (scratch < 0) return 0;
     if (!emit(P, OP_MKLIST, rest_n)) return 0;
     if (!emit(P, OP_STORE, scratch)) return 0;
@@ -785,7 +847,6 @@ static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver) {
   ret_local = invocation_slot(P, TY_I64); if (ret_local < 0) return 0;
   P->fn_ret = ret_local;
   P->fn_did_ret = 0;
-  P->in_fn++;
   {
     Lex B;
     B.src = P->src + F->off;
@@ -805,6 +866,8 @@ static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver) {
       ty = P->lty[ret_local];
     }
   }
+  for (i = 0; i < P->nl; i++)
+    if (P->local_scope[i] == P->in_fn + 1) P->local_scope[i] = 0;
   P->in_fn--;
   P->fn_ret = outer_ret;
   P->fn_did_ret = outer_did_ret;
@@ -1743,7 +1806,7 @@ static int pstmt(Lex *L, Prog *P) {
     if (!capture_block_body(L, P, &F)) return 0;
     if (!expect(L, T_RB, P, "fn }")) return 0;
     fi = register_fn(P, &F); if (fi < 0) return 0;
-    li = loc(P, F.name, 1); if (li < 0) return 0;
+    li = bind_local(P, F.name, TY_FN); if (li < 0) return 0;
     P->lty[li] = TY_FN;
     if (!emit(P, OP_CONST, fi)) return 0;
     if (!emit(P, OP_STORE, li)) return 0;
@@ -1805,7 +1868,7 @@ static int pstmt(Lex *L, Prog *P) {
             if (!expect(L, T_SEMI, P, "expected ;")) return 0;
           }
           fi = register_fn(P, &F); if (fi < 0) return 0;
-          li = loc(P, nm, 1); if (li < 0) return 0;
+          li = bind_local(P, nm, TY_FN); if (li < 0) return 0;
           P->lty[li] = TY_FN;
           if (!emit(P, OP_CONST, fi)) return 0;
           if (!emit(P, OP_STORE, li)) return 0;
@@ -1814,15 +1877,24 @@ static int pstmt(Lex *L, Prog *P) {
         L->pos = save_pos; L->tok = save_tok; L->num = save_num; L->fnum = save_fnum;
         L->tok_start = save_ts; strncpy(L->id, save_id, 64);
       }
-      int previous = loc(P, nm, 0);
-      int previous_type = previous < 0 ? TY_ERR : P->lty[previous];
-      i = loc(P, nm, 1); if (i < 0) return 0;
+      int previous = local_here(P, nm);
+      int dormant = previous < 0 ? reuse_local(P, nm, TY_ERR) : -1;
+      i = previous >= 0 ? previous : dormant;
+      if (i < 0) i = fresh_local(P, nm);
+      if (i < 0) return 0;
+      if (previous < 0) P->local_scope[i] = LOCAL_RESERVED;
       {
         int ty = pexpr(L, P); if (!ty) return 0;
         // The emitter uses one Wasm local type per slot, including all earlier stores.
-        if (previous >= 0 && previous_type != ty) {
+        if (previous >= 0 && P->lty[previous] != ty) {
           P->err = "local redeclaration changes type"; return 0;
         }
+        if (dormant >= 0 && P->lty[dormant] != ty) {
+          P->local_scope[dormant] = 0;
+          i = bind_local(P, nm, ty);
+          if (i < 0) return 0;
+        }
+        P->local_scope[i] = (uint16_t)(P->in_fn + 1);
         P->lty[i] = (uint8_t)ty;
         if (ty == TY_LIST) P->lety[i] = (uint8_t)P->list_elem_ty;
         if (!emit(P, OP_STORE, i)) return 0;
@@ -1860,9 +1932,9 @@ static int pstmt(Lex *L, Prog *P) {
     snprintf(an, sizeof an, "#a%d", fo_gen);
     snprintf(in, sizeof in, "#i%d", fo_gen);
     fo_gen++;
-    xa = loc(P, an, 1); if (xa < 0) return 0;
-    ia = loc(P, in, 1); if (ia < 0) return 0;
-    va = loc(P, xn, 1); if (va < 0) return 0;
+    xa = bind_local(P, an, TY_LIST); if (xa < 0) return 0;
+    ia = bind_local(P, in, TY_I64); if (ia < 0) return 0;
+    va = bind_local(P, xn, et); if (va < 0) return 0;
     P->lty[xa] = TY_LIST; P->lety[xa] = (uint8_t)et;
     P->lty[ia] = TY_I64;
     P->lty[va] = (uint8_t)et;
@@ -3201,6 +3273,7 @@ static int native_body(Prog *owner, Buf *body, int index) {
   static Prog frame;
   NativeFn *fn = &owner->natives[index];
   init_prog(&frame, owner->src, owner->srclen);
+  frame.legacy_inline = owner->legacy_inline;
   frame.native_count = owner->native_count;
   frame.native_visible = index;
   frame.native_result = fn->sig.result;
@@ -3503,6 +3576,9 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
 
   Prog P;
   init_prog(&P, src, src_len);
+#ifdef UJS_HOST
+  P.legacy_inline = g_legacy_inline;
+#endif
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
   while (L.tok == T_ID && (intrinsic_name(L.id, "import") || intrinsic_name(L.id, "export"))) {

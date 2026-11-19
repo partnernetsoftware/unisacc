@@ -1,0 +1,63 @@
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int command(char **args, const char *marker) {
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,10,&out,&bytes);
+    int ok=!rc && (!marker || (out && tx_contains(out,bytes,marker,tx_len(marker,256))));
+    if(!ok && out) printf("%s\n",out);
+    mm_free(out);
+    return ok;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *test[]={
+        "function inner(){let x=7;return x;}let x=5;let got=inner();return x+got;",
+        "function inner(){let x=0.5;return x;}let x=5;let got=inner();return x+got;",
+        "function a(v){let x=v*2;return x;}function b(v){let x=v*3;let q=a(v);return x+q;}"
+        "function c(v){let x=v*4;let q=b(v);return x+q;}let x=1;let got=c(2);return x+got;",
+        "function inner(i){let total=i*2;return total;}let total=1;let i=0;"
+        "while(i<4){let got=inner(i);total=total+got;i=i+1;}return total;",
+        "function inner(...vals){return vals[1];}let vals=40;let got=inner(1,2);return vals+got;",
+        "let start=5;let fn=x=>{let y=x+start;return y;};return fn(7);"
+    };
+    const char *gold[]={
+        "\"tag\":\"i64\",\"value\":12,","\"tag\":\"f64\",\"value\":5.5,",
+        "\"tag\":\"i64\",\"value\":19,","\"tag\":\"i64\",\"value\":13,",
+        "\"tag\":\"i64\",\"value\":42,","\"tag\":\"i64\",\"value\":12,"
+    };
+    char dir[256], source[300], wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-inline-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    char *compile[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
+    char *validate[]={"wasm-validate",wasm,0};
+    char *run[]={"./ujs/ujs2wasm.com","--run",wasm,0};
+    int failed=0;
+    for(int i=0;i<6;i++) {
+        const char *input=i==0 && mutate?"function inner(){x=7;return x;}let x=5;let got=inner();return x+got;":test[i];
+        if(sy_write_file(source,input,tx_len(input,1024),0600) ||
+           !command(compile,0) || !command(validate,0) || !command(run,gold[i])) {
+            printf("INLINE_SCOPES case=%d\n",i);
+            failed++;
+        }
+        sy_unlink(wasm);
+    }
+    char *legacy[]={"./ujs/ujs2wasm.com",source,"-o",wasm,"--legacy-inline",0};
+    if(sy_write_file(source,test[0],tx_len(test[0],1024),0600) ||
+       !command(legacy,0) || !command(validate,0) ||
+       !command(run,"\"tag\":\"i64\",\"value\":14,")) {
+        printf("INLINE_SCOPES legacy replay\n");
+        failed++;
+    }
+    sy_unlink(wasm);
+    sy_unlink(source);
+    sy_rmdir(dir);
+    printf("CHECK_UJS_INLINE_SCOPES cases=7 failed=%d\n",failed);
+    return failed!=0;
+}
