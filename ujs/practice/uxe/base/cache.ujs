@@ -1,0 +1,71 @@
+// Keys are caller-interned u32 tokens. Values are opaque u32 handles.
+native function Cache_init(cache_dst:i64,cache_rows:i64,cache_capacity:i64) i64 {
+  if(cache_capacity<0 || cache_rows<0 || cache_rows>6291456 ||
+    cache_capacity>(6291456-cache_rows)/8) { return 0-1; }
+  let cache_span=ux_span(cache_dst,Cache.size);
+  let cache_out_rows=ux_u32_put(cache_dst+Cache.entries,cache_rows);
+  let cache_out_capacity=ux_u32_put(cache_dst+Cache.capacity,cache_capacity);
+  let cache_zero=ux_u32_put(cache_dst+Cache.count,0);
+  let cache_disabled=ux_u32_put(cache_dst+Cache.enabled,0);
+  return cache_dst;
+}
+
+native function Cache_find(cache_find:i64,cache_key:i64) i64 {
+  let cache_table=ux_u32(cache_find+Cache.entries);
+  let cache_length=ux_u32(cache_find+Cache.count);
+  let cache_index=0;
+  while(cache_index<cache_length) {
+    let cache_entry=cache_table+8*cache_index;
+    if(ux_u32(cache_entry)==cache_key) { return cache_index; }
+    cache_index=cache_index+1;
+  }
+  return 0-1;
+}
+
+native function Cache_add(cache_add:i64,cache_add_key:i64,cache_value:i64) i64 {
+  if(ux_u32(cache_add+Cache.enabled)==0) { return cache_add; }
+  if(cache_add_key<0 || cache_add_key>4294967295 || cache_value<0 || cache_value>4294967295) { return 0-1; }
+  let cache_count=ux_u32(cache_add+Cache.count);
+  let cache_slot=Cache_find(cache_add,cache_add_key);
+  if(cache_slot<0 && cache_count>=ux_u32(cache_add+Cache.capacity)) { return 0-2; }
+  let cache_new=cache_slot<0;
+  if(cache_new) { cache_slot=cache_count; }
+  let cache_set_row=ux_u32(cache_add+Cache.entries)+8*cache_slot;
+  let cache_set_key=ux_u32_put(cache_set_row,cache_add_key);
+  let cache_set_val=ux_u32_put(cache_set_row+4,cache_value);
+  let cache_set_count=ux_u32_put(cache_add+Cache.count,cache_count+cache_new);
+  return cache_add;
+}
+
+function Cache_get(cache_get,...cache_get_args) {
+  let cache_found=0-1;
+  if(ux_u32(cache_get+Cache.enabled)!=0) {
+    let cache_at=Cache_find(cache_get,cache_get_args[0]);
+    if(cache_at>=0) { cache_found=ux_u32(ux_u32(cache_get+Cache.entries)+8*cache_at+4); }
+  }
+  return cache_found;
+}
+
+function Cache_remove(cache_remove,...cache_rm_args) {
+  let cache_rm=Cache_find(cache_remove,cache_rm_args[0]);
+  if(cache_rm>=0) {
+    let cache_rm_tail=ux_u32(cache_remove+Cache.count)-1;
+    let cache_rm_table=ux_u32(cache_remove+Cache.entries);
+    let cache_src=cache_rm_table+8*cache_rm_tail;
+    let cache_dst=cache_rm_table+8*cache_rm;
+    let cache_new_key=ux_u32_put(cache_dst,ux_u32(cache_src));
+    let cache_new_value=ux_u32_put(cache_dst+4,ux_u32(cache_src+4));
+    let cache_new_count=ux_u32_put(cache_remove+Cache.count,cache_rm_tail);
+  }
+  return cache_remove;
+}
+
+function Cache_clear(cache_clear) {
+  let cache_clear_count=ux_u32_put(cache_clear+Cache.count,0);
+  return cache_clear;
+}
+
+function Cache_setEnabled(cache_state,...cache_args) {
+  let cache_set_state=ux_u32_put(cache_state+Cache.enabled,cache_args[0]!=0);
+  return cache_state;
+}
