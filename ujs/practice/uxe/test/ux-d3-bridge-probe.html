@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UXE D3 bridge probe</title>
+<canvas></canvas>
+<pre id="ux-link-result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "./host-abi.js";
+
+function readBytes(name) {
+  const request = new XMLHttpRequest();
+  request.open("GET", name, false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  return Uint8Array.from(request.responseText, ch => ch.charCodeAt(0) & 255);
+}
+
+const result = document.querySelector("#ux-link-result");
+const canvas = document.querySelector("canvas");
+try {
+  const host = createBrowserHost(canvas, ["KeyW", "KeyS", "KeyA", "KeyD"], readBytes("route.bin"));
+  const linked = linkUxe(new WebAssembly.Module(readBytes("base.wasm")),
+    new WebAssembly.Module(readBytes("product.wasm")), host);
+  host.attachMemory(linked.base.memory);
+  function stonePixels() {
+    const bytes = canvas.getContext("2d").getImageData(0, 0, 426, 240).data;
+    let count = 0;
+    for (let i = 0; i < bytes.length; i += 4) {
+      if (bytes[i] >= 180 && bytes[i] > bytes[i + 1] && bytes[i + 1] > bytes[i + 2]) count++;
+    }
+    return count;
+  }
+  linked.product.uxe_frame(0n);
+  const opening = stonePixels();
+  dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW", cancelable: true }));
+  for (let step = 1n; step <= 25n; step++) linked.product.uxe_frame(step * 224000n);
+  const pose = new Float32Array(linked.product.memory.buffer, 2097152, 1);
+  result.textContent = [opening, stonePixels(), pose[0]].join(" ");
+  host.destroy();
+} catch (error) {
+  result.textContent = error.name + " " + error.message;
+}
+</script>
