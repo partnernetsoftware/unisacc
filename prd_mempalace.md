@@ -21,7 +21,7 @@ flowchart LR
     V69["0.0.69 prune 原样判定前置(性能 R1)"]
     V70["0.0.70 cxmod 内存安全乙期"]
     V71["0.0.71 正规构造499/499,APE ca84同字节复现<br/>/tmp/unisacc-session-v71-rc2"]
-    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>release/notes-0.0.72.md"]
+    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>archive/pre080/release/notes-0.0.72.md"]
     V73["0.0.73 已公开 Latest(冻结 F 3865c7c9e0)<br/>release/evidence/0.0.73/"]
     V74["0.0.74 已公开 Latest(冻结 F 0dae4d3024)<br/>release/evidence/0.0.74/"]
     V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
