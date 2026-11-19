@@ -3,11 +3,19 @@
  *   sh ./unisacc.com tools/o2-cases-gen.cx -- ROOT REF STREAM4_COM ABS_OUT
  * Oracle (mechanical, measured 2026-10-28): for a C source S, `REF -O0 -S S` is the unoptimised tape and
  * `REF -O2 -S S` the reference O2 tape; the E4 O2 stream container run on the O0 tape must be byte-identical to
- * the reference O2 tape. A case is only meaningful when O0 != O2 (something was rewritten) and when the O2 tape
+ * the reference O2 tape followed by the T1 ".end\n" frame. Both classic
+ * tapes remain verbatim on disk. Only the E4 input copy gets a frame, and
+ * its complete prefix and exact suffix are read back before execution.
+ * A case is only meaningful when O0 != O2 (something was rewritten) and when the O2 tape
  * shows the rewrite the cell is about (its witness substring); otherwise it is VACUOUS, counted and never PASS.
  * REF is the host-built classic reference (`make ref`, prd/matrix: "reference O2 tape"); the C inputs are inline.
  * Each reference run is bounded 20 s, each container run 12 s; the whole tool stays under the 60 s rule. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use refworkspace
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+static char reference_dir[4096];
 
 static char root[4096], ref[4096], stream4[4096], outdir[4096], inc[4400], bound[4400];
 static void die(const char *s) { fprintf(stderr, "o2-cases: REFUSE %s errno=%d\n", s, errno); exit(2); }
@@ -47,10 +55,22 @@ static const Case cases[] = {
 };
 
 static int has(const char *h, size_t hn, const char *n) { size_t nn = strlen(n); if (nn > hn) return 0; for (size_t i = 0; i + nn <= hn; i++) if (!memcmp(h + i, n, nn)) return 1; return 0; }
-static int run_to(char *const argv[], int secs, np_result *r, char *why, size_t wl) { char *env[] = { "UNISA_ATTRIBUTES=", 0 }; return np_run(argv, root, env, secs, r, why, wl); }
+static int framed(const char *bytes,size_t n,const char *classic,size_t size){
+    return n==size+5&&!memcmp(bytes,classic,size)&&!memcmp(bytes+size,".end\n",5);
+}
+static void ref_end_frame(const char *file,const np_result *classic){
+    if(!classic->outn||classic->out[classic->outn-1]!='\n')die("classic tape incomplete line");
+    FILE *f=fopen(file,"wbx");
+    if(!f||fwrite(classic->out,1,classic->outn,f)!=classic->outn||fputs(".end\n",f)<0||fclose(f))die("ref-end-frame write");
+    unsigned char *p;int64_t n;
+    if(sy_read_file(file,&p,&n,16777216)||!framed((char *)p,n,classic->out,classic->outn))die("ref-end-frame bytes");
+    mm_free(p);
+}
+static int run_to(char *const argv[], int secs, np_result *r, char *why, size_t wl) { char *env[] = { "UNISA_ATTRIBUTES=", 0 }; return np_run(argv, reference_dir[0] && tx_eqz(argv[2],ref) ? reference_dir : root, env, secs, r, why, wl); }
 
 int main(int argc, char **argv) {
     if (argc != 5 || !realpath(argv[1], root) || !realpath(argv[2], ref) || !realpath(argv[3], stream4) || argv[4][0] != '/') { fputs("usage: ROOT REF STREAM4_COM ABS_OUT\n", stderr); return 2; }
+    if (ref[0] && rw_open(root,ref,reference_dir,sizeof reference_dir)) return 2;
     { if (cx_fmt(outdir, sizeof outdir, "%s", argv[4])) { fprintf(stderr, "o2-cases-gen: text too long for outdir\n"); exit(2); } }
     path(inc, sizeof inc, root, "include"); path(bound, sizeof bound, root, "tools/bound");
     if (mkdir(outdir, 0700) && errno != EEXIST) die("out dir");
@@ -69,10 +89,19 @@ int main(int argc, char **argv) {
         int same = r0.outn == r2.outn && !memcmp(r0.out, r2.out, r0.outn);
         int witness = has(r2.out, r2.outn, c->witness);
         if (same || !witness) { nvac++; fprintf(res, "VACUOUS\t%s\t%s\n", key, same ? "O0==O2: nothing rewritten" : "witness absent from O2 tape"); np_free(&r0); np_free(&r2); continue; }
+        char sealed[4800];if(cx_fmt(sealed,sizeof sealed,"%s.framed",o0))die("framed path");
         char *ve[] = { bound, "12", stream4, o0, o0, inc, 0 };
+        if(i==0){
+            np_result neg={0};const char *msg="reject: tape truncated\n";
+            int refused=!run_to(ve,14,&neg,why,sizeof why)&&neg.rc==1&&!neg.outn&&neg.errn==strlen(msg)&&!memcmp(neg.err,msg,neg.errn);
+            fprintf(res,"%s\tunframed-classic-tape-refused\n",refused?"PASS":"FAIL");
+            if(!refused)nfail++;
+            np_free(&neg);
+        }
+        ref_end_frame(sealed,&r0);ve[3]=sealed;ve[4]=sealed;
         if (run_to(ve, 14, &re, why, sizeof why)) { nnotrun++; fprintf(res, "NOT_RUN\t%s\tE4 %s\n", key, why); np_free(&r0); np_free(&r2); continue; }
         saved(e4, re.out, re.outn);
-        int ok = !re.rc && re.outn == r2.outn && !memcmp(re.out, r2.out, re.outn);
+        int ok = !re.rc && framed(re.out,re.outn,r2.out,r2.outn);
         if (ok) npass++; else nfail++;
         fprintf(res, "%s\t%s\tO0=%zu O2=%zu E4=%zu bytes rc=%d\n", ok ? "PASS" : "FAIL", key, r0.outn, r2.outn, re.outn, re.rc);
         np_free(&r0); np_free(&r2); np_free(&re);

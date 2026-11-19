@@ -1,0 +1,84 @@
+/* Tool selfcheck for tools/ref-material.cx. Offline integration with the pinned
+ * classic Git tree (UNISACC_REF_SOURCE_REPO for a one-commit test layout).
+ * A previously prepared material may supply fixture bytes via
+ * UNISACC_REF_MATERIAL_DIR; the gate authenticates them before copying.
+ * Only this check's exclusive temporary directory is modified. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use refworkspace
+#pragma unisa use cxlib.netpack
+#pragma unisa use text.text
+
+static char temp[4096],root[4096],driver[4096],ape[4096],empty[4096];
+static int passed,failed;
+static void path(char *p,const char *dir,const char *leaf){
+    if(cx_path_join(p,4096,dir,leaf)){fprintf(stderr,"check-ref-material: path bound\n");exit(2);}
+}
+static void cleanup(void){if(temp[0])cx_rmtree(temp);}
+static void check(int ok,const char *name){
+    printf("%s\t%s\n",ok?"ok":"FAIL",name);if(ok)passed++;else failed++;
+}
+static int call(char **v,int sec,int rc,const char *needle){
+    np_result r={0};char why[256];
+    int ok=!np_run(v,root,0,sec,&r,why,sizeof why)&&r.rc==rc&&!r.residue;
+    if(ok&&needle){
+        char *s=rc?r.err:r.out;long n=rc?r.errn:r.outn;
+        ok=s&&tx_find(s,n,needle,strlen(needle))>=0;
+    }
+    if(!ok)fprintf(stderr,"check-ref-material: child rc=%d expected=%d %.*s\n",r.rc,rc,(int)(r.errn<400?r.errn:400),r.err?r.err:"");
+    np_free(&r);return ok;
+}
+static int probe(const char *verb,const char *repo,const char *cand,const char *dir,int rc,const char *needle){
+    char *v[]={driver,(char *)verb,(char *)repo,(char *)cand,(char *)dir,0};
+    return call(v,55,rc,needle);
+}
+static void flip(const char *file){
+    FILE *f=fopen(file,"r+b");if(!f)exit(2);
+    int c=fgetc(f);if(c==EOF||fseek(f,0,SEEK_SET)||fputc(c^1,f)==EOF||fclose(f))exit(2);
+}
+static void isolation(const char *elf,const char *prepared){
+    char dirty[4096],headers[4096],poison[4096],src[4096],image[4096],dir[4096],why[256];
+    path(dirty,temp,"product");path(headers,dirty,"include");path(poison,headers,"stdio.h");
+    path(src,dirty,"probe.c");path(image,temp,"probe.img");
+    const char *c="#include <stdio.h>\nint main(void){printf(\"ok\\n\");return 0;}\n";
+    const char *broken="invalid poison header\n";
+    if(sy_mkdir(dirty,0700)||sy_mkdir(headers,0700)||sy_write_file(poison,broken,strlen(broken),0600)||
+       sy_write_file(src,c,strlen(c),0600))exit(2);
+    char *v[]={(char *)elf,src,"-O0","-b","lnx/x86_64","-o",image,0};np_result r={0};
+    check(!np_run(v,dirty,0,8,&r,why,sizeof why)&&r.rc!=0,"polluted-cwd-control-rejects");np_free(&r);
+    check(!rw_open(dirty,elf,dir,sizeof dir)&&!np_run(v,dir,0,8,&r,why,sizeof why)&&!r.rc&&sy_exists(image)==1,
+          "same-source-from-frozen-export-compiles");np_free(&r);
+    check(rw_open(prepared,elf,dir,sizeof dir)==2,"product-root-reference-cwd-refused");
+}
+int main(int argc,char **argv){
+    char source[4096],fresh[4096],copy[4096],bin[4096],rec[4096],original[4096],p[4096];
+    if(argc!=2||!realpath(argv[1],ape)||!getcwd(root,sizeof root)||sy_mkdtemp(sy_tmpdir(),"check-ref-",temp,sizeof temp)||atexit(cleanup))return 2;
+    path(source,root,"tools/ref-material.cx");path(driver,temp,"driver");
+    path(empty,temp,"empty.git");path(fresh,temp,"fresh");path(copy,temp,"copy");
+    char *init[]={"/usr/bin/git","init","--bare","-q",empty,0};
+    char *compile[]={"sh",ape,source,"-o",driver,0};
+    if(!call(init,4,0,0)||!call(compile,15,0,0))return 2;
+    check(probe("prepare",empty,ape,fresh,3,"frozen-source-unavailable")&&sy_exists(fresh)==0,"missing-frozen-tree-unverified-no-publication");
+    const char *repo=getenv("UNISACC_REF_SOURCE_REPO"),*prepared=getenv("UNISACC_REF_MATERIAL_DIR");
+    if(!repo||!*repo)repo=root;
+    if(!prepared||!*prepared)prepared=fresh;
+    int ready=probe(tx_eqz(prepared,fresh)?"prepare":"verify",repo,ape,prepared,0,"REF_MATERIAL\tPREPARED");
+    check(ready,"pinned-real-compiler-prepared");if(!ready)return 1;
+    path(original,prepared,"ua_ref");
+    isolation(original,prepared);
+    check(probe("prepare",empty,ape,prepared,0,"REF_MATERIAL\tPREPARED"),"offline-cache-reverified");
+    check(probe("verify",empty,original,prepared,2,"candidate-is-reference"),"candidate-copy-refused");
+    if(sy_mkdir(copy,0700))return 2;
+    path(bin,copy,"ua_ref");path(rec,copy,"material.tsv");path(p,prepared,"material.tsv");
+    if(sy_copy(original,bin,0700)||sy_copy(p,rec,0600))return 2;
+    path(p,prepared,"include");char *cp[]={"/bin/cp","-a",p,copy,0};
+    if(!call(cp,4,0,0))return 2;
+    path(p,copy,"include/stdio.h");flip(p);
+    check(probe("verify",empty,ape,copy,2,"frozen-include-sha-mismatch"),"one-byte-frozen-header-change-refused");flip(p);
+    flip(rec);check(probe("prepare",empty,ape,copy,2,"receipt-mismatch"),"one-byte-receipt-change-refused");flip(rec);
+    flip(bin);check(probe("prepare",empty,ape,copy,2,"artifact-sha-mismatch"),"one-byte-cache-change-refused");flip(bin);
+    const char *wrapper="#!/bin/sh\nexec ./unisacc.com \"$@\"\n";
+    if(sy_write_file(bin,wrapper,strlen(wrapper),0700))return 2;
+    check(probe("verify",empty,ape,copy,2,"artifact-sha-mismatch"),"forwarding-script-refused");
+    printf("CHECK_REF_MATERIAL\tpassed=%d\tfailed=%d\n",passed,failed);return failed?1:0;
+}
