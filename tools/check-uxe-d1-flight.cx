@@ -911,7 +911,8 @@ typedef struct {
 typedef struct { int heading,ammo,missiles,lock,frames,elapsed,gap; } LiveFlight;
 typedef struct { int hp_first,hp_last,ko,loss; } LiveBattle;
 typedef struct { int x,z,speed,tick; } LiveWater;
-enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST,LIVE_WASM };
+enum { LIVE_FLIGHT,LIVE_BATTLE,LIVE_MUTE,LIVE_WATER,LIVE_WATER_AUTO,LIVE_BRIDGE,LIVE_TOWN,LIVE_COAST,LIVE_WASM,
+    LIVE_WATER_WASM };
 
 static int cdp_message(ChromeInput *c,long deadline) {
     int n=0;
@@ -1084,9 +1085,8 @@ static int native_screenshot(ChromeInput *c,const char *path) {
     return rc;
 }
 
-static int exercise_native(ChromeInput *c,int shot) {
-    const char *packet="[1,3,8,9,11,15,18,20].map(i=>__d1Packet()[i]).join(',')";
-    char text[180]="",step[500];
+static int native_ready(ChromeInput *c) {
+    char text[180]="";
     int ready=0;
     long deadline=sy_now_ms()+5000;
     for(int i=0;i<120 && sy_now_ms()<deadline;i++) {
@@ -1100,8 +1100,15 @@ static int exercise_native(ChromeInput *c,int shot) {
         char page[300]="";
         native_eval(c,"location.href+'|'+document.title",page,sizeof page);
         printf("D1_WASM_READY failed=1 state=%s page=%s\n",text,page);
-        return 1;
+        return 0;
     }
+    return 1;
+}
+
+static int exercise_native(ChromeInput *c,int shot) {
+    const char *packet="[1,3,8,9,11,15,18,20].map(i=>__d1Packet()[i]).join(',')";
+    char text[180]="",step[500];
+    if(!native_ready(c)) return 1;
     if(shot) return native_screenshot(c,"/tmp/cdx2-d1-p11-verified.png");
     if(native_key(c,"w","KeyW",87,"0,24,26,12,96,0,100,3") ||
        native_key(c,"s","KeyS",83,"0,24,25,12,96,0,100,3") ||
@@ -1121,6 +1128,42 @@ static int exercise_native(ChromeInput *c,int shot) {
     }
     printf("D1_WASM_LOSS got=%s failed=0\n",text);
     return native_key(c,"r","KeyR",82,"0,24,25,12,96,0,100,3");
+}
+
+static int native_water_read(ChromeInput *c,int steps,LiveWater *water) {
+    char expr[530],text[130];
+    tx_snprintf(expr,sizeof expr,"__d1Step(%d);(()=>{const p=__d1Packet();"
+        "return [p[0]+256*p[1]-32768,p[2]+256*p[3]+65536*p[4],p[5]+256*p[6]-1024,p[7]].join(',')})()",steps);
+    return native_eval(c,expr,text,sizeof text) &&
+        sscanf(text,"%d,%d,%d,%d",&water->x,&water->z,&water->speed,&water->tick)==4;
+}
+
+static int native_touch(ChromeInput *c,const char *kind,int x) {
+    char params[200];
+    if(!strcmp(kind,"touchEnd")) return cdp_call(c,"Input.dispatchTouchEvent",
+        "{\"type\":\"touchEnd\",\"touchPoints\":[]}");
+    tx_snprintf(params,sizeof params,"{\"type\":\"%s\",\"touchPoints\":[{\"x\":%d,\"y\":400,\"id\":0}]}",kind,x);
+    return cdp_call(c,"Input.dispatchTouchEvent",params);
+}
+
+static int exercise_native_water(ChromeInput *c) {
+    LiveWater rest={0},east={0},west={0},touch_east={0},touch_west={0},released={0};
+    if(!native_ready(c) || !native_water_read(c,0,&rest) ||
+       !keyboard(c,"w","KeyW",87,1) || !keyboard(c,"d","KeyD",68,1) || !native_water_read(c,18,&east) ||
+       !keyboard(c,"w","KeyW",87,0) || !keyboard(c,"d","KeyD",68,0) ||
+       !keyboard(c,"a","KeyA",65,1) || !keyboard(c,"s","KeyS",83,1) || !native_water_read(c,24,&west) ||
+       !keyboard(c,"a","KeyA",65,0) || !keyboard(c,"s","KeyS",83,0) ||
+       !native_touch(c,"touchStart",1050) || !native_water_read(c,24,&touch_east) ||
+       !native_touch(c,"touchMove",230) || !native_water_read(c,24,&touch_west) ||
+       !native_touch(c,"touchEnd",0) || !native_water_read(c,24,&released)) return input_error("d2-wasm-input",0);
+    int failed=rest.speed!=350 || east.x<=rest.x || east.z<=rest.z || east.speed<1000 ||
+        west.x>=east.x || west.speed>=0 || touch_east.x<=west.x || touch_east.speed<1000 ||
+        touch_west.x>=touch_east.x || released.speed>=touch_west.speed;
+    printf("D2_WASM_INPUT start=%d,%d,%d WASD=%d,%d,%d then %d,%d,%d touch=%d,%d,%d then %d,%d,%d "
+        "release_speed=%d failed=%d\n",rest.x,rest.z,rest.speed,east.x,east.z,east.speed,
+        west.x,west.z,west.speed,touch_east.x,touch_east.z,touch_east.speed,touch_west.x,touch_west.z,touch_west.speed,
+        released.speed,failed);
+    return failed;
 }
 
 static int read_water(ChromeInput *c,LiveWater *water) {
@@ -1715,7 +1758,7 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     int rc,n;
     int framed=candidate && !strcmp(candidate,"ujs/practice/uxe/test/d1-solid-audit.html");
     if(!getcwd(cwd,sizeof cwd)) return input_error("cdp-cwd",0);
-    if(battle==LIVE_WASM) {
+    if(battle==LIVE_WASM || battle==LIVE_WATER_WASM) {
         n=tx_snprintf(url,sizeof url,"%s",candidate);
     } else if(framed) {
         if(sy_mkdtemp("/tmp","d1-keyboard-",fixture,sizeof fixture)) return input_error("cdp-fixture-dir",0);
@@ -1737,8 +1780,9 @@ static int check_keyboard_path(const char *mutation,int battle,const char *candi
     rc=sy_proc_spawn(&launch,&c.child);
     if(rc) { if(framed) chd_wipe(fixture); return input_error("cdp-spawn",0); }
     c.deadline=sy_now_ms()+22500;
-    if(!cdp_navigate(&c,url,battle==LIVE_WASM)) rc=input_error("cdp-navigate",0);
+    if(!cdp_navigate(&c,url,battle==LIVE_WASM || battle==LIVE_WATER_WASM)) rc=input_error("cdp-navigate",0);
     else if(battle==LIVE_WASM) rc=exercise_native(&c,mutation[0]!=0);
+    else if(battle==LIVE_WATER_WASM) rc=exercise_native_water(&c);
     else if(battle==LIVE_WATER) rc=exercise_water(&c);
     else if(battle==LIVE_WATER_AUTO) rc=exercise_water_auto(&c);
     else if(battle==LIVE_BRIDGE || battle==LIVE_TOWN) rc=exercise_walk(&c,battle==LIVE_TOWN);
@@ -1758,6 +1802,10 @@ static int check_pages_keyboard(const char *mutation,int battle) {
 
 int main(int argc,char **argv) {
     int rc;
+    if(argc==3 && !strcmp(argv[1],"wasm-water-input")) {
+        if(strncmp(argv[2],"file:///",8) && strncmp(argv[2],"http://127.0.0.1:",17)) return 2;
+        return check_keyboard_path("",LIVE_WATER_WASM,argv[2]);
+    }
     if(argc==3 && (!strcmp(argv[1],"wasm-page-input") || !strcmp(argv[1],"wasm-page-shot"))) {
         if(strncmp(argv[2],"file:///",8) && strncmp(argv[2],"http://127.0.0.1:",17)) return 2;
         return check_keyboard_path(!strcmp(argv[1],"wasm-page-shot")?"shot":"",LIVE_WASM,argv[2]);

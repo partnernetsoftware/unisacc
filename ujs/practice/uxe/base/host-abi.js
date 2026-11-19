@@ -40,11 +40,12 @@ export function linkUxe(baseModule, productModule, host) {
   return { base: base.exports, product: product.exports };
 }
 
-export function createBrowserHost(canvas, keys, asset = new Uint8Array(), audioContext = null) {
+export function createBrowserHost(canvas, keys, asset = new Uint8Array(), audioContext = null, pointerEnabled = false) {
   let memory, pressed = 0n, audio = audioContext, audioEnd = 0;
+  let pointerId, pointerBits = 0n;
   const context = canvas.getContext("2d");
   const keyBits = new Map(keys.map((key, i) => [key, 1n << BigInt(i)]));
-  if (keys.length > 63 || keyBits.size !== keys.length) throw new RangeError("input codes");
+  if (keys.length > (pointerEnabled ? 32 : 63) || keyBits.size !== keys.length) throw new RangeError("input codes");
   const listeners = new AbortController();
   const options = { signal: listeners.signal };
   const keydown = event => {
@@ -60,7 +61,27 @@ export function createBrowserHost(canvas, keys, asset = new Uint8Array(), audioC
   };
   addEventListener("keydown", keydown, options);
   addEventListener("keyup", keyup, options);
-  addEventListener("blur", () => { pressed = 0n; }, options);
+  const clearPointer = () => { pointerId = undefined; pointerBits = 0n; };
+  addEventListener("blur", () => { pressed = 0n; clearPointer(); }, options);
+  if (pointerEnabled) {
+    const sample = event => {
+      if (event.pointerId !== pointerId) return;
+      const bounds = canvas.getBoundingClientRect();
+      const x = bounds.width ? (event.clientX - bounds.left) / bounds.width : 0.5;
+      const quantized = Math.round(1024 * Math.max(0, Math.min(1, x)));
+      pointerBits = (1n << 32n) | (BigInt(quantized) << 33n);
+    };
+    canvas.addEventListener("pointerdown", event => {
+      if (pointerId !== undefined) return;
+      pointerId = event.pointerId;
+      canvas.setPointerCapture(pointerId);
+      sample(event);
+    }, options);
+    canvas.addEventListener("pointermove", sample, options);
+    canvas.addEventListener("lostpointercapture", event => {
+      if (event.pointerId === pointerId) clearPointer();
+    }, options);
+  }
   const unlock = () => {
     if (!audio && typeof AudioContext === "function") audio = new AudioContext({ sampleRate: 48000 });
     if (audio?.state === "suspended") void audio.resume();
@@ -82,7 +103,7 @@ export function createBrowserHost(canvas, keys, asset = new Uint8Array(), audioC
       if (audio && audio !== audioContext) void audio.close();
     },
     host_time: () => performance.now(),
-    host_input_read: () => pressed,
+    host_input_read: () => pressed | pointerBits,
     host_frame_present(ptr, width, height) {
       if (width < 1n || height < 1n || width * height > 1048576n) return -1n;
       const pixels = new Uint8ClampedArray(...span(ptr, width * height * 4n));
@@ -122,13 +143,13 @@ async function fetchBytes(path) {
 }
 
 export async function boot(canvas) {
-  const { uxeBase, uxeProduct, uxeAsset, uxeKeys = "" } = canvas.dataset;
+  const { uxeBase, uxeProduct, uxeAsset, uxeKeys = "", uxePointer } = canvas.dataset;
   const [base, product, asset] = await Promise.all([
     fetchBytes(uxeBase).then(WebAssembly.compile),
     fetchBytes(uxeProduct).then(WebAssembly.compile),
     uxeAsset ? fetchBytes(uxeAsset).then(bytes => new Uint8Array(bytes)) : new Uint8Array()
   ]);
-  const host = createBrowserHost(canvas, uxeKeys.split(/\s+/).filter(Boolean), asset);
+  const host = createBrowserHost(canvas, uxeKeys.split(/\s+/).filter(Boolean), asset, null, uxePointer === "1");
   let pending;
   try {
     const linked = linkUxe(base, product, host);
