@@ -1,0 +1,117 @@
+struct CylinderGeometry {
+  top: f64;
+  bottom: f64;
+  height: f64;
+  start: f64;
+  sweep: f64;
+  radial: u32;
+  vertical: u32;
+  open: u32;
+}
+
+function CylinderGeometry_init(cylinder,...cyl_args) {
+  let top=ux_f64_put(cylinder+CylinderGeometry.top,cyl_args[0]);
+  let bottom=ux_f64_put(cylinder+CylinderGeometry.bottom,cyl_args[1]);
+  let height=ux_f64_put(cylinder+CylinderGeometry.height,cyl_args[2]);
+  let start=ux_f64_put(cylinder+CylinderGeometry.start,cyl_args[3]);
+  let sweep=ux_f64_put(cylinder+CylinderGeometry.sweep,cyl_args[4]);
+  let radial=ux_u32_put(cylinder+CylinderGeometry.radial,f64_floor_i64(cyl_args[5]));
+  let vertical=ux_u32_put(cylinder+CylinderGeometry.vertical,f64_floor_i64(cyl_args[6]));
+  let open=ux_u32_put(cylinder+CylinderGeometry.open,f64_floor_i64(cyl_args[7]));
+  return cylinder;
+}
+
+native function cylinder_cap(cap_vertex:i64,cap_index:i64,first:i64,steps:i64,
+                            radius:f64,height:f64,start:f64,sweep:f64) i64 {
+  let cap_sign=1.0;
+  if(height<0.0) { cap_sign=0.0-1.0; }
+  let i=0;
+  while(i<steps) {
+    cap_vertex=GeometryBuffers_vertex(cap_vertex,0.0,height,0.0,0.0,cap_sign,0.0,0.5,0.5);
+    i=i+1;
+  }
+  i=0;
+  while(i<=steps) {
+    let angle=start+sweep*i/steps;
+    let x=ux_math_sin(angle);
+    let z=ux_math_cos(angle);
+    cap_vertex=GeometryBuffers_vertex(cap_vertex,radius*x,height,radius*z,0.0,cap_sign,0.0,
+      z*0.5+0.5,x*0.5*cap_sign+0.5);
+    if(i<steps) {
+      let edge=first+steps+i;
+      let winding=0;
+      if(height<0.0) { winding=1; }
+      let a=ux_u32_put(cap_index,edge+winding);
+      let b=ux_u32_put(cap_index+4,edge+1-winding);
+      let c=ux_u32_put(cap_index+8,first+i);
+      cap_index=cap_index+12;
+    }
+    i=i+1;
+  }
+  return cap_vertex;
+}
+
+native function cylinder_mesh(mesh:i64,config:i64,r_top:f64) i64 {
+  let r_bottom=ux_f64(config+CylinderGeometry.bottom);
+  let height=ux_f64(config+CylinderGeometry.height);
+  let start=ux_f64(config+CylinderGeometry.start);
+  let sweep=ux_f64(config+CylinderGeometry.sweep);
+  let radial=ux_u32(config+CylinderGeometry.radial);
+  let vertical=ux_u32(config+CylinderGeometry.vertical);
+  let closed=ux_u32(config+CylinderGeometry.open)==0;
+  if(!(height>0.0) || radial<1 || vertical<1 || radial>262144 || vertical>262144) { return 0-1; }
+  let top_cap=closed && r_top>0.0;
+  let bottom_cap=closed && r_bottom>0.0;
+  let columns=radial+1;
+  let torso_points=columns*(vertical+1);
+  let torso_cells=6*radial*vertical;
+  let cap_points=2*radial+1;
+  let cap_indices=3*radial;
+  let points=torso_points+(top_cap+bottom_cap)*cap_points;
+  let cells=torso_cells+(top_cap+bottom_cap)*cap_indices;
+  if(!GeometryBuffers_fits(mesh,points,cells)) { return 0-1; }
+  let torso_vertex=ux_u32(mesh+GeometryBuffers.vertices);
+  let torso_index=ux_u32(mesh+GeometryBuffers.indices);
+  let slope=(r_bottom-r_top)/height;
+  let unit=1.0/f64_sqrt(1.0+slope*slope);
+  let row=0;
+  while(row<=vertical) {
+    let v=row*1.0/vertical;
+    let radius=r_top+(r_bottom-r_top)*v;
+    let column=0;
+    while(column<=radial) {
+      let u=column*1.0/radial;
+      let angle=start+sweep*u;
+      let x=ux_math_sin(angle);
+      let z=ux_math_cos(angle);
+      torso_vertex=GeometryBuffers_vertex(torso_vertex,radius*x,(0.5-v)*height,radius*z,
+        x*unit,slope*unit,z*unit,u,1.0-v);
+      column=column+1;
+    }
+    row=row+1;
+  }
+  let stripe=0;
+  while(stripe<radial) {
+    let section=0;
+    while(section<vertical) {
+      let origin=section*columns+stripe;
+      torso_index=geometry_quad(torso_index,origin,origin+columns,origin+columns+1,origin+1);
+      section=section+1;
+    }
+    stripe=stripe+1;
+  }
+  if(top_cap) {
+    torso_vertex=cylinder_cap(torso_vertex,torso_index,torso_points,radial,r_top,height*0.5,start,sweep);
+    torso_index=torso_index+4*cap_indices;
+  }
+  if(bottom_cap) {
+    let cap=cylinder_cap(torso_vertex,torso_index,torso_points+top_cap*cap_points,
+      radial,r_bottom,0.0-height*0.5,start,sweep);
+  }
+  return GeometryBuffers_commit(mesh,points,cells);
+}
+
+function CylinderGeometry_generate(mesh_cylinder,...cylinder_args) {
+  let config_cylinder=cylinder_args[0];
+  return cylinder_mesh(mesh_cylinder,config_cylinder,ux_f64(config_cylinder+CylinderGeometry.top));
+}
