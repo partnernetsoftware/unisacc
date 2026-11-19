@@ -1,0 +1,65 @@
+#pragma unisa use g_math
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int node=-1;
+    if(argc==2 && !mutate) {
+        const char *options[]={"--world-root","--world-a","--world-b","--world-c"};
+        for(int i=0;i<4;i++) if(tx_eqz(argv[1],options[i])) node=i;
+        if(node<0) return 2;
+    }
+    if(argc>2) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d",0};
+    const char *setup=
+        "let arena=Object3D_initArena(0,8);let root=Object3D_create(arena);let a=Object3D_create(arena);"
+        "let b=Object3D_create(arena);let c=Object3D_create(arena);"
+        "let ra=Object3D_address(arena,root);let aa=Object3D_address(arena,a);"
+        "let ba=Object3D_address(arena,b);let ca=Object3D_address(arena,c);"
+        "let ar=ux_f64_put(ux_u32(ra+Object3D.position),10.0);"
+        "let qr=ux_u32(ra+Object3D.quaternion);let qz=ux_f64_put(qr+16,0.7071067811865475);"
+        "let qw=ux_f64_put(qr+24,0.7071067811865476);"
+        "let xa=ux_f64_put(ux_u32(aa+Object3D.position),2.0);"
+        "let yb=ux_f64_put(ux_u32(ba+Object3D.position)+8,3.0);"
+        "let xc=ux_f64_put(ux_u32(ca+Object3D.position),4.0);"
+        "let bv=Object3D_setVisible(arena,b,0);"
+        "let i=Object3D_add(arena,root,a);let j=Object3D_add(arena,root,b);let k=Object3D_add(arena,b,c);"
+        "let update=Object3D_updateMatrixWorld(arena,root,0);";
+    double gold[90]={10,0,1,10,2,1,7,0,0,7,4,1,4,1,2,3,4,2,1,2,8,8,4,1,1,0};
+    enum {count=sizeof gold/sizeof gold[0], core=26};
+    const char *nodes[]={"ra","aa","ba","ca"};
+    const char *move="let d=ux_f64_put(ux_u32(ra+Object3D.position),11.0);let p=Object3D_markDirty(arena,root);";
+    const char *cases[count];
+    char programs[count][512];
+    for(int i=0;i<12;i++) {
+        if(i%3==2) tx_snprintf(programs[i],sizeof programs[i],"return ux_u32(%s+Object3D.visible);",nodes[i/3]);
+        else tx_snprintf(programs[i],sizeof programs[i],"return ux_f64(ux_u32(%s+Object3D.worldMatrix)+%d);",nodes[i/3],96+8*(i%3));
+    }
+    for(int i=12;i<20;i++) {
+        const char *method=i<17?"Object3D_traverse":"Object3D_traverseVisible";
+        if(i==12 || i==17) tx_snprintf(programs[i],sizeof programs[i],"return %s(arena,root,3500,8);",method);
+        else tx_snprintf(programs[i],sizeof programs[i],"let n=%s(arena,root,3500,8);return ux_u32(%d)%%65536;",
+            method,3500+4*(i-(i<17?13:18)));
+    }
+    tx_snprintf(programs[20],sizeof programs[20],"%slet w=Object3D_getWorldPosition(3520,arena,c);return ux_f64(w);",move);
+    for(int i=21;i<=23;i++) {
+        const char *read=i==21?"let w=Object3D_getWorldPosition(3520,arena,c);return ux_f64(w);":
+            (i==22?"let w=Object3D_getWorldPosition(3520,arena,c);return ux_f64(w+8);":"return ux_u32(ca+Object3D.parent)==a;");
+        tx_snprintf(programs[i],sizeof programs[i],"%slet attached=Object3D_attach(arena,a,c,3600);%s",move,read);
+    }
+    tx_snprintf(programs[24],sizeof programs[24],"let removed=Object3D_remove(arena,b,c);return ux_u32(ca+Object3D.parent)==0;");
+    tx_snprintf(programs[25],sizeof programs[25],"let cleared=Object3D_clear(arena,root);return ux_u32(ra+Object3D.firstChild);");
+    const double x[]={10,10,7,7},y[]={0,2,0,4};
+    const double rotation[]={0,1,0,0,-1,0,0,0,0,0,1,0,0,0,0,1};
+    for(int i=0;i<4;i++) for(int j=0;j<16;j++) {
+        int k=core+16*i+j;
+        gold[k]=j==12?x[i]:(j==13?y[i]:rotation[j]);
+        tx_snprintf(programs[k],sizeof programs[k],"return ux_f64(ux_u32(%s+Object3D.worldMatrix)+%d);",nodes[i],8*j);
+    }
+    for(int i=0;i<count;i++) cases[i]=programs[i];
+    int first=node<0?0:core+16*node;
+    int end=node<0?core:first+16;
+    return g_math_run_range("G_STRUCT Object3D","object3d",modules,setup,cases,gold,count,first,end,
+        mutate?17:-1,"return Object3D_traverse(arena,root,3500,8);");
+}
