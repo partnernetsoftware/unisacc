@@ -1,0 +1,33 @@
+// Outline records have point offset and count. Font layout resolves glyphs
+// before this stage. This path emits non-beveled extrusions of simple contours.
+native function TextGeometry_generate(mesh:i64,outlines:i64,count:i64,height:f64,
+                                       steps:i64,work:i64,work_bytes:i64) i64 {
+  if(outlines<0 || outlines>6291456 || outlines%4!=0 ||
+     count<0 || count>(6291456-outlines)/8 || steps<1 || steps>4096 ||
+     !(height>0.0) || work<0 || work>6291456 || work%8!=0 ||
+     work_bytes<24 || work_bytes>6291456-work) { return 0-1; }
+  let i=0;
+  let total=0;
+  while(i<count) {
+    let points=ux_u32(outlines+8*i+4);
+    if(points<3 || points>4096 || points>(work_bytes-24)/36) { return 0-1; }
+    total=total+6*(points-2)+6*points*steps;
+    if(!GeometryBuffers_fits(mesh,total,0)) { return 0-1; }
+    i=i+1;
+  }
+  let out=ux_u32(mesh+GeometryBuffers.vertices);
+  let written=0;
+  i=0;
+  while(i<count) {
+    let contour=ux_u32(outlines+8*i);
+    let points=ux_u32(outlines+8*i+4);
+    let size=6*(points-2)+6*points*steps;
+    let glyph=GeometryBuffers_init(work,out+32*written,size,0,0);
+    if(glyph<0) { return 0-1; }
+    let result=ExtrudeGeometry_generate(glyph,contour,points,height,steps,work+24);
+    if(result<0) { return 0-1; }
+    written=written+ux_u32(glyph+GeometryBuffers.vertexCount);
+    i=i+1;
+  }
+  return GeometryBuffers_commit(mesh,written,0);
+}

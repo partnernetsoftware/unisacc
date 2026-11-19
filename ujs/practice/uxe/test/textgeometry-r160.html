@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"./three.module.js"}}</script>
+<script type="module">
+import { REVISION, Shape, Vector2 } from "./three.module.js";
+import { TextGeometry } from "./geometries/TextGeometry.js";
+const dump = document.querySelector("#r160");
+try {
+if (REVISION !== "160") throw new Error("three.js revision mismatch");
+const request = new XMLHttpRequest();
+request.open("GET", "probe.wasm", false);
+request.overrideMimeType("text/plain; charset=x-user-defined");
+request.send();
+const bytes = Uint8Array.from(request.responseText, char => char.charCodeAt(0) & 255);
+const { exports } = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+const record = exports.uxe_geometry_probe();
+if (record !== 0n) throw new Error("text geometry rejected");
+const memory = 2097152;
+const header = new Uint32Array(exports.memory.buffer, memory, 6);
+const [vertices, , indices, , count, indexCount] = header;
+if (count > 24 || indexCount !== 0) throw new Error("text geometry range");
+const actual = [count, indexCount,
+  ...new Float32Array(exports.memory.buffer, memory + vertices, count * 8),
+  ...new Uint32Array(exports.memory.buffer, memory + indices, indexCount)];
+const font = { generateShapes(text, size) {
+  if (text !== "A" || size !== 1) throw new Error("unexpected glyph");
+  return [new Shape([[0, 0], [2, 0], [0, 1]].map(p => new Vector2(...p)))];
+} };
+const geometry = new TextGeometry("A", { font, size: 1, height: 2 });
+const { position, normal, uv } = geometry.attributes;
+const reference = [position.count, 0];
+for (let i = 0; i < position.count; i++) {
+  reference.push(position.getX(i), position.getY(i), position.getZ(i),
+    normal.getX(i), normal.getY(i), normal.getZ(i), uv.getX(i), uv.getY(i));
+}
+
+dump.textContent = JSON.stringify([...actual, ...reference]);
+} catch (error) {
+  dump.textContent = String(error);
+}
+</script>
