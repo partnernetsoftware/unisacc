@@ -19,6 +19,7 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use runtime.codec
 #pragma unisa use cxlib.productpkg
+#pragma unisa use mem.bytes
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
@@ -26,6 +27,7 @@
 
 static int ps_failed, ps_asserts;
 static char ps_root[4096];
+static char ps_cache[4400], ps_slice[4400];
 static void ps_die(const char *s);
 static void ps_pkg(char *o, int cap) { if (pp_package_path(ps_root, o, cap)) ps_die("package"); }
 static void ps_elf(char *o, int cap) {
@@ -35,16 +37,16 @@ static void ps_elf(char *o, int cap) {
     }
     {
         char ape[4400], dir[4400], ents[65536], why[256];
-        const char *home = getenv("HOME");
+        if (ps_slice[0]) { if(cx_fmt(o,cap,"%s",ps_slice)) ps_die("path"); return; }
+        char cache_env[4500];
         int fd, off = 0;
-        long best = 0;
-        char bestn[256];
         np_result r;
-        bestn[0] = 0;
         if (snprintf(ape, sizeof ape, "%s/unisacc.com", ps_root) >= (int)sizeof ape) ps_die("path");
-        { char *av[] = {"sh", ape, "--version", 0}; if (np_run(av, ps_root, 0, 20, &r, why, sizeof why)) ps_die(why); np_free(&r); }
-        if (!home || !home[0]) ps_die("HOME");
-        if (snprintf(dir, sizeof dir, "%s/.cache/unisacc", home) >= (int)sizeof dir) ps_die("path");
+        if (!mkdtemp(ps_cache) || cx_fmt(cache_env,sizeof cache_env,"XDG_CACHE_HOME=%s",ps_cache)) ps_die("private slice cache");
+        { char *av[] = {"sh", ape, "--version", 0}, *env[]={cache_env,0};
+          if (np_run(av, ps_root, env, 20, &r, why, sizeof why)) ps_die(why);
+          if(r.rc||r.residue) ps_die("candidate extraction"); np_free(&r); }
+        if (cx_fmt(dir,sizeof dir,"%s/unisacc",ps_cache)) ps_die("path");
         fd = sy_open(dir, 0, 0);
         if (fd < 0) ps_die("ape-cache-dir");
         if (sy_dir_names(fd, ents, sizeof ents) < 0) { sy_close(fd); ps_die("ape-cache-list"); }
@@ -55,15 +57,11 @@ static void ps_elf(char *o, int cap) {
             sy_stat_t st;
             if (len > 8 && !memcmp(ents + off, "unisacc-", 8)) {
                 if (snprintf(p, sizeof p, "%s/%s", dir, ents + off) >= (int)sizeof p) ps_die("path");
-                if (!sy_stat(p, &st) && st.kind == 'f' && st.size > best && st.size > 1000000) {
-                    best = st.size;
-                    { int t = 0; while (t < 255 && ents[off + t]) { bestn[t] = ents[off + t]; t++; } bestn[t] = 0; }
-                }
+                if (ps_slice[0] || sy_lstat(p,&st) || st.kind!='f' || st.size<=0 || cx_fmt(ps_slice,sizeof ps_slice,"%s",p)) ps_die("candidate slice identity");
             }
             off += (int)len + 1;
-            if (!ents[off]) break;
         }
-        if (!bestn[0] || snprintf(o, cap, "%s/%s", dir, bestn) >= cap) ps_die("ape-cache-elf");
+        if (!ps_slice[0] || cx_fmt(o,cap,"%s",ps_slice)) ps_die("ape-cache-elf");
     }
 }
 
@@ -168,13 +166,18 @@ static int ps_record(const char *b, const PsPkg *p, long idx, char **rec, size_t
             if (!*rec) return 0;
             for (k = 0; k < (long)*recn; k++) (*rec)[k] = b[st + k];
             if (p->ver >= 3) {
-                long rawlen;
-                if (sscanf(line, "M %*d %ld", &rawlen) != 1) { free(*rec); return 0; }
+                long rawlen; int codec; unsigned sum;
+                if (sscanf(line, "M %*d %ld %d %u", &rawlen,&codec,&sum) != 3 || rawlen<=0 || rawlen>2147483647L ||
+                    (codec!=1 && (codec!=0 || p->ver!=4 || rawlen!=stored))) { free(*rec); return 0; }
                 *raw = malloc((size_t)rawlen + 1);
                 if (!*raw) { free(*rec); return 0; }
                 {
                     extern int cxcodec_inflate(unsigned char *, unsigned long, const unsigned char *, unsigned long);
-                    if (cxcodec_inflate((unsigned char *)*raw, (unsigned long)rawlen,
+                    if (!codec) {
+                        CxCodecCrc crc; uint32_t actual;
+                        if(cxcodec_crc_init(&crc)||cxcodec_crc(&crc,b+e+1,rawlen,&actual)||actual!=sum||
+                           mm_copy(*raw,rawlen,b+e+1,rawlen)){ free(*raw); free(*rec); return 0; }
+                    } else if (cxcodec_inflate((unsigned char *)*raw, (unsigned long)rawlen,
                                         (const unsigned char *)(b + e + 1), (unsigned long)stored)) {
                         free(*raw); free(*rec); return 0;
                     }
@@ -234,6 +237,7 @@ int main(int argc, char **argv) {
         if (!realpath(argv[1], ps_root)) ps_die("root");
         if (!realpath(argv[2], work)) ps_die("work directory must exist");
     } else ps_die("usage [ROOT WORKDIR]");
+    if(cx_fmt(ps_cache,sizeof ps_cache,"%s/candidate-cache-XXXXXX",work))ps_die("path");
 
     /* 包取已装产品的 dev 分体（P3/P4 都接受；ps_body 会剥 UNIPKG1 footer），不再读 out/。 */
     ps_pkg(pkg, (int)sizeof pkg);
@@ -320,7 +324,7 @@ int main(int argc, char **argv) {
     {   /* S4a: 把已装开发包里模型 0 的 CRC 改坏一位,再用 side ELF + UNISA_CONTAINER 指这个包,
            让产品真的走到模型解码;要求非零退出、stderr 具名 "compressed model CRC"、不产出对象。
            旧版本构造的单流坏包在该路由上到不了解码(产品先报 NOT_IMPLEMENTED),所以记 NOT_RUN。 */
-        char badcrc[4400];
+        char badcrc[4400]; int damaged_codec=-1;
         if (snprintf(badcrc, sizeof badcrc, "%s/badcrc.bin", work) >= (int)sizeof badcrc) ps_die("path");
         {   PsPkg q;
             size_t qn;
@@ -333,7 +337,10 @@ int main(int argc, char **argv) {
                 for (k = 0; k < e - st; k++) line[k] = qb[st + k];
                 line[e - st] = 0;
                 if (sscanf(line, "M %ld", &stored) != 1) ps_die("bad M");
-                if (i == 0) { target_at = st; target_end = e + 1 + stored; }
+                if (i == 0) {
+                    if(sscanf(line,"M %*d %*d %d",&damaged_codec)!=1 || (damaged_codec!=0 && damaged_codec!=1)) ps_die("bad M codec");
+                    target_at = st; target_end = e + 1 + stored;
+                }
                 at = e + 1 + stored;
             }
             if (target_at < 0) ps_die("no model 0 record");
@@ -381,7 +388,10 @@ int main(int argc, char **argv) {
                 np_result r; char why[1024];
                 if (np_run(av, ps_root, envp, 30, &r, why, sizeof why)) ps_die(why);
                 ps_ck(r.rc != 0, "S4a.bad-crc-refused-nonzero");
-                ps_ck(r.errn > 0 && ps_has(r.err, (long)r.errn, "compressed model CRC"), "S4a.bad-crc-named");
+                const char *expected_crc = damaged_codec ? "compressed model CRC" : "raw model CRC";
+                int named=r.errn>0 && ps_has(r.err,(long)r.errn,expected_crc);
+                if(!named && r.errn)fwrite(r.err,1,r.errn,stderr);
+                ps_ck(named, "S4a.bad-crc-named");
                 ps_ck(access(obj, F_OK) != 0, "S4a.bad-crc-no-object");
                 np_free(&r);
             }
@@ -494,6 +504,7 @@ int main(int argc, char **argv) {
             free(rec); free(raw); free(qb);
         }
     }
+    if(ps_slice[0] && cx_rmtree(ps_cache)) ps_die("private slice cache cleanup");
     printf("CHECK_P3_SWAP\tassertions=%d\tfailed=%d\n", ps_asserts, ps_failed);
     return ps_failed ? 1 : 0;
 }
