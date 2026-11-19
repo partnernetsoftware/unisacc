@@ -1,0 +1,80 @@
+native function shape_append_bridge(work:i64,map:i64,at:i64,source:i64,original:i64) i64 {
+  let x=ux_f64_put(work+at*16,ux_f64(source));
+  let y=ux_f64_put(work+at*16+8,ux_f64(source+8));
+  let id=ux_u32_put(map+at*4,original);
+  return at+1;
+}
+
+// Connect a single interior ring to its outside contour by a leftward bridge.
+// Uses 28 bytes of work per input point plus two duplicated bridge endpoints.
+// Index output addresses the original outer points followed by the hole points.
+native function ShapeUtils_triangulateHole(outer:i64,outer_count:i64,hole:i64,hole_count:i64,
+                                          indices:i64,capacity:i64,work:i64) i64 {
+  let nodes=outer_count+hole_count+2;
+  if(outer_count<3 || hole_count<3 || nodes>4096 || work<0 || work>6291456 ||
+     work%8!=0 || nodes>(6291456-work)/28) { return 0-1; }
+  let outer_area=ShapeUtils_area(outer,outer_count);
+  let hole_area=ShapeUtils_area(hole,hole_count);
+  if(outer_area==0.0 || hole_area==0.0 || outer_area!=outer_area || hole_area!=hole_area) { return 0-1; }
+  let start=0;
+  let l=ux_f64(hole);
+  let y=ux_f64(hole+8);
+  let i=1;
+  while(i<hole_count) {
+    let px=ux_f64(hole+i*16);
+    let py=ux_f64(hole+i*16+8);
+    if(px<l || (px==l && py<y)) { start=i; l=px; y=py; }
+    i=i+1;
+  }
+  let anchor=0-1;
+  let crossing=0.0-1.0/0.0;
+  i=0;
+  while(i<outer_count) {
+    let next=(i+1)%outer_count;
+    let a=outer+i*16;
+    let b=outer+next*16;
+    let ay=ux_f64(a+8);
+    let by=ux_f64(b+8);
+    if((ay>y)!=(by>y)) {
+      let ax=ux_f64(a);
+      let bx=ux_f64(b);
+      let x=ax+(bx-ax)*(y-ay)/(by-ay);
+      if(x<=l && x>crossing) {
+        crossing=x;
+        anchor=i;
+        if(bx<ax || (bx==ax && by<ay)) { anchor=next; }
+      }
+    }
+    i=i+1;
+  }
+  if(anchor<0) { return 0-1; }
+  let mapping=work+16*nodes;
+  let out=0;
+  i=0;
+  while(i<outer_count) {
+    let index=i;
+    if(outer_area<0.0) { index=outer_count-1-i; }
+    let source=outer+index*16;
+    out=shape_append_bridge(work,mapping,out,source,index);
+    if(index==anchor) {
+      let j=0;
+      while(j<=hole_count) {
+        let ring=(start+j)%hole_count;
+        if(hole_area>0.0) { ring=(start+hole_count-(j%hole_count))%hole_count; }
+        out=shape_append_bridge(work,mapping,out,hole+ring*16,outer_count+ring);
+        j=j+1;
+      }
+      out=shape_append_bridge(work,mapping,out,source,index);
+    }
+    i=i+1;
+  }
+  let count=ShapeUtils_triangulateShape(work,out,indices,capacity,work+20*nodes);
+  i=0;
+  while(i<count) {
+    let index=ux_u32(indices+i*4);
+    let original=ux_u32(mapping+4*index);
+    let written=ux_u32_put(indices+i*4,original);
+    i=i+1;
+  }
+  return count;
+}
