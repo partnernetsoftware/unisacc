@@ -17,7 +17,17 @@ function read(name) {
 const result = document.querySelector("#ux-link-result");
 try {
   const canvas = document.querySelector("canvas");
-  const host = createBrowserHost(canvas, ["KeyA", "KeyD", "KeyW"]);
+  const host = createBrowserHost(canvas,
+    ["KeyA", "KeyD", "KeyW", "KeyS", "ShiftLeft", "ShiftRight", "ArrowLeft",
+      "ArrowRight", "ArrowUp", "ArrowDown", "Space", "KeyM"]);
+  const audioMode = location.hash.startsWith("#projection-audio");
+  const pcm = [];
+  let frameAudio = "";
+  if (audioMode) host.host_audio_write = (pointer, count) => {
+    const samples = new Float32Array(linked.base.memory.buffer, Number(pointer), Number(count));
+    frameAudio = count + "," + Math.round(samples[100] * 32768);
+    return count;
+  };
   const linked = linkUxe(read("base"), read("product"), host);
   host.attachMemory(linked.base.memory);
   const run = linked.product.uxe_frame;
@@ -34,12 +44,25 @@ try {
     return pixels;
   };
   run(0n);
-  const straight = run(33334n);
-  const first = capture();
-  dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD" }));
-  dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW" }));
-  const banked = run(66668n);
-  result.textContent = [canvas.width, canvas.height, straight, banked, ...first, ...capture()].join(" ");
+  if (audioMode) {
+    const key = (type, code) => dispatchEvent(new KeyboardEvent(type, { code, cancelable: true }));
+    for (let tick = 1; tick <= 16; tick++) {
+      if (tick === 2) key("keydown", "Space");
+      if (tick === 3) { key("keyup", "Space"); key("keydown", "KeyM"); }
+      if (tick === 4) key("keyup", "KeyM");
+      frameAudio = "none";
+      run(BigInt(tick) * 33334n);
+      if (tick <= 3 || tick === 16) pcm.push(frameAudio);
+    }
+    result.textContent = pcm.join(" ");
+  } else {
+    const straight = run(33334n);
+    const first = capture();
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyD" }));
+    dispatchEvent(new KeyboardEvent("keydown", { code: "KeyW" }));
+    const banked = run(66668n);
+    result.textContent = [canvas.width, canvas.height, straight, banked, ...first, ...capture()].join(" ");
+  }
   host.destroy();
 } catch (error) {
   result.textContent = error.name + " " + error.message;
