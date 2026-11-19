@@ -1,0 +1,75 @@
+native function convex_plane(work:i64,a:i64,b:i64,c:i64) f64 {
+  let abx=ux_f64(b)-ux_f64(a);
+  let aby=ux_f64(b+8)-ux_f64(a+8);
+  let abz=ux_f64(b+16)-ux_f64(a+16);
+  let acx=ux_f64(c)-ux_f64(a);
+  let acy=ux_f64(c+8)-ux_f64(a+8);
+  let acz=ux_f64(c+16)-ux_f64(a+16);
+  let x=aby*acz-abz*acy;
+  let y=abz*acx-abx*acz;
+  let z=abx*acy-aby*acx;
+  let length=f64_sqrt(x*x+y*y+z*z);
+  if(length>0.0) { let normal=frame_put(work,x/length,y/length,z/length); }
+  return length;
+}
+
+native function convex_corner(out:i64,point:i64,normal:i64,sign:f64) i64 {
+  return GeometryBuffers_vertex(out,ux_f64(point),ux_f64(point+8),ux_f64(point+16),
+    sign*ux_f64(normal),sign*ux_f64(normal+8),sign*ux_f64(normal+16),0.0,0.0);
+}
+
+// Bounded hull of a small general-position point cloud. Supporting planes
+// with more than three points require a polygonal hull and are rejected.
+native function ConvexGeometry_generate(mesh:i64,points:i64,count:i64,work:i64,epsilon:f64) i64 {
+  if(count<4 || count>48 || points<0 || points>6291456 || points%8!=0 ||
+     count>(6291456-points)/24 || work<0 || work>6291456-24 || work%8!=0 ||
+     !(epsilon>0.0) || (work<points+24*count && points<work+24)) { return 0-1; }
+  let out=ux_u32(mesh+GeometryBuffers.vertices);
+  let faces=0;
+  let i=0;
+  while(i<count-2) {
+    let j=i+1;
+    while(j<count-1) {
+      let k=j+1;
+      while(k<count) {
+        let a=points+24*i;
+        let b=points+24*j;
+        let c=points+24*k;
+        let length=convex_plane(work,a,b,c);
+        if(length>epsilon) {
+          let positive=0;
+          let negative=0;
+          let flat=0;
+          let u=0;
+          while(u<count && !(positive && negative)) {
+            if(u!=i && u!=j && u!=k) {
+              let p=points+24*u;
+              let x=ux_f64(p)-ux_f64(a);
+              let y=ux_f64(p+8)-ux_f64(a+8);
+              let z=ux_f64(p+16)-ux_f64(a+16);
+              let distance=x*ux_f64(work)+y*ux_f64(work+8)+z*ux_f64(work+16);
+              if(distance>epsilon) { positive=1; }
+              else if(distance<0.0-epsilon) { negative=1; }
+              else { flat=1; }
+            }
+            u=u+1;
+          }
+          if(positive!=negative) {
+            if(flat || !GeometryBuffers_fits(mesh,3*(faces+1),0)) { return 0-1; }
+            let sign=1.0;
+            if(positive) { sign=0.0-1.0; let swapped=b; b=c; c=swapped; }
+            out=convex_corner(out,a,work,sign);
+            out=convex_corner(out,b,work,sign);
+            out=convex_corner(out,c,work,sign);
+            faces=faces+1;
+          }
+        }
+        k=k+1;
+      }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  if(faces==0) { return 0-1; }
+  return GeometryBuffers_commit(mesh,3*faces,0);
+}

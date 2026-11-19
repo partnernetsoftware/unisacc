@@ -11,6 +11,25 @@ static int geometry_copy(const char *dir,const char *leaf,const char *source) {
     return sy_copy(source,path,0600);
 }
 
+static int geometry_copy_addons(const char *dir,const char *root) {
+    if(!root) return 0;
+    char path[320];
+    tx_snprintf(path,sizeof path,"%s/geometries",dir);
+    if(sy_mkdir(path,0700)) return 1;
+    tx_snprintf(path,sizeof path,"%s/math",dir);
+    if(sy_mkdir(path,0700)) return 1;
+    tx_snprintf(path,sizeof path,"%s/utils",dir);
+    if(sy_mkdir(path,0700)) return 1;
+    const char *sources[]={"ConvexGeometry.js","ConvexHull.js","TextGeometry.js","BufferGeometryUtils.js"};
+    const char *targets[]={"geometries/ConvexGeometry.js","math/ConvexHull.js","geometries/TextGeometry.js",
+        "utils/BufferGeometryUtils.js"};
+    for(int i=0;i<4;i++) {
+        int n=tx_snprintf(path,sizeof path,"%s/%s",root,sources[i]);
+        if(n<0 || n>=(int)sizeof path || geometry_copy(dir,targets[i],path)) return 1;
+    }
+    return 0;
+}
+
 static int geometry_run(char **args,int seconds) {
     char *out=0;
     size_t n=0;
@@ -62,8 +81,8 @@ static int geometry_read(const char *dir,const double *gold,int count,int index_
     return failed;
 }
 
-int g_geometry_check(const char *name,const char *fixture,const char *const *modules,
-        const char *source,const double *gold,int count,int index_from) {
+int g_geometry_check_with(const char *name,const char *fixture,const char *const *modules,
+        const char *source,const double *gold,int count,int index_from,const char *add_ons) {
     char dir[256],header[320],body[320],wasm[320],fixture_path[320],module_paths[16][256];
     if(sy_mkdtemp("/tmp","ujs-geometry-",dir,sizeof dir)) return 2;
     tx_snprintf(header,sizeof header,"%s/abi.ujs",dir);
@@ -85,10 +104,16 @@ int g_geometry_check(const char *name,const char *fixture,const char *const *mod
     int ready=!sy_write_file(header,abi,sizeof abi-1,0600) &&
         !sy_write_file(body,source,tx_len(source,16384),0600) &&
         !geometry_run(compile,10) && !geometry_copy(dir,"probe.html",fixture_path) &&
-        !geometry_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js");
+        !geometry_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js") &&
+        !geometry_copy_addons(dir,add_ons);
     int failed=!ready || geometry_read(dir,gold,count,index_from);
     char *clean[]={"rm","-rf","--",dir,0};
     if(geometry_run(clean,5)) return 2;
     printf("G_GEOMETRY %s cases=%d failed=%d\n",name,count,failed);
     return ready?failed:2;
+}
+
+int g_geometry_check(const char *name,const char *fixture,const char *const *modules,
+        const char *source,const double *gold,int count,int index_from) {
+    return g_geometry_check_with(name,fixture,modules,source,gold,count,index_from,0);
 }

@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<script type="importmap">{"imports":{"three":"./three.module.js"}}</script>
+<pre id="r160">pending</pre>
+<script type="module">
+import { Vector3, REVISION } from "./three.module.js";
+import { ConvexGeometry } from "./geometries/ConvexGeometry.js";
+const dump = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const request = new XMLHttpRequest();
+  request.open("GET", "probe.wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, c => c.charCodeAt(0) & 255);
+  const { exports } = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+  if (exports.uxe_geometry_probe() !== 0n) throw new Error("convex geometry rejected");
+  const memory = 2097152;
+  const [offset, , , , count, indexCount] = new Uint32Array(exports.memory.buffer, memory, 6);
+  if (count > 12 || indexCount !== 0) throw new Error("convex geometry range");
+  const actual = [];
+  for (let i = 0; i < count; i++) {
+    actual.push(Array.from(new Float32Array(exports.memory.buffer, memory + offset + i * 32, 8)));
+  }
+  const points = [[0, 0, 0], [2, 0, 0], [0, 2, 0], [0, 0, 2], [0.2, 0.2, 0.2]];
+  const { position, normal } = new ConvexGeometry(points.map(p => new Vector3(...p))).attributes;
+  const reference = [];
+  for (let i = 0; i < position.count; i++) {
+    reference.push([position.getX(i), position.getY(i), position.getZ(i),
+      normal.getX(i), normal.getY(i), normal.getZ(i), 0, 0]);
+  }
+  function compare(a, b) {
+    for (let i = 0; i < 6; i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return 0;
+  }
+  dump.textContent = JSON.stringify([count, 0, ...actual.sort(compare).flat(),
+    position.count, 0, ...reference.sort(compare).flat()]);
+} catch (error) {
+  dump.textContent = String(error);
+}
+</script>
