@@ -1,0 +1,74 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","vector-scalar","matrix4","quaternion","euler"};
+    char library[60000]={0};
+    int used=0;
+    for(int i=0;i<6;i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&size,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    const char *cases[]={
+        "let m=Matrix4_makeRotationFromEuler(128,s);let r=Euler_setFromRotationMatrix(64,m,0);return ux_f64(r)+2.0*ux_f64(r+8)+3.0*ux_f64(r+16);",
+        "return ux_f64(g);","return ux_f64(g+8);","return ux_f64(g+16);",
+        "let r=Euler_setFromQuaternion(64,q,3,128);return ux_f64(r+16);",
+        "let e=Euler_set(64,0.0,0.0,0.75,0);let r=Euler_reorder(e,3,256,128);return ux_f64(r+16);",
+        "let r=Euler_copy(64,s);return ux_f64(r+8);",
+        "let r=Euler_clone(64,s);return ux_f64(r);",
+        "let r=Euler_clone(64,s);return Euler_equals(r,s);",
+        "let r=Euler_set(64,0.25,0.5,0.75,3);return Euler_equals(r,s);",
+        "let v=ux_f64_put(264,2.0);let r=Euler_setFromVector3(64,256,2);return ux_f64(r+8);",
+        "let r=Euler_fromArray(64,s);return ux_f64(r+16);",
+        "let r=Euler_toArray(s,64,1,0);return ux_f64(r+8);",
+        "return ux_u32(s+Euler.order);"
+    };
+    const double gold[]={3.5,3.5,3.5,3.5,3.5,3.5,0.25,1.5707963267948966,0,
+        0.75,0.75,0.5,0.25,1,0,2,0.75,0.5,0};
+    enum {count=sizeof gold/sizeof gold[0]};
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-euler-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[count];
+    int failed=g_math_reference("euler",refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        char setup[768],statement[384];
+        tx_snprintf(setup,sizeof setup,"let s=Euler_set(0,0.25,0.5,0.75,%d);",i<6?i:0);
+        const char *example=i<6?cases[0]:cases[i-5];
+        if(i<6)
+            tx_snprintf(statement,sizeof statement,
+                "let m=Matrix4_makeRotationFromEuler(128,s);let r=Euler_setFromRotationMatrix(64,m,%d);return ux_f64(r)+2.0*ux_f64(r+8)+3.0*ux_f64(r+16);",
+                mutate && i==1?0:i);
+        else if(i<9)
+            tx_snprintf(statement,sizeof statement,
+                "let e=Euler_set(32,0.25,1.5707963267948966,0.0,0);let m=Matrix4_makeRotationFromEuler(128,e);let exact=ux_f64_put(m+64,1.0);let g=Euler_setFromRotationMatrix(64,m,0);%s",example);
+        else
+            tx_snprintf(statement,sizeof statement,"%s%s",i==9?"let q=Quaternion_set(256,0.0,0.0,0.36627252908604757,0.9305076219123143);":"",example);
+        double actual=0;
+        if(g_math_sample(source,wasm,library,setup,statement,&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("EULER case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH Euler cases=%d failed=%d\n",count,failed);
+    return failed;
+}

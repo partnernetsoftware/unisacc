@@ -1,0 +1,103 @@
+// Six packed planes in right, left, bottom, top, far, near order.
+native function Frustum_set(f_dst:i64,f_right:i64,f_left:i64,f_bottom:i64,f_top:i64,f_far:i64,f_near:i64) i64 {
+  let f_out=ux_span(f_dst,192);
+  let f_sources=[f_right,f_left,f_bottom,f_top,f_far,f_near];
+  let f_before=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,
+    0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+  let f_index=0;
+  while(f_index<24) {
+    f_before[f_index]=ux_f64(f_sources[f_index/4]+8*(f_index%4));
+    f_index=f_index+1;
+  }
+  f_index=0;
+  while(f_index<24) {
+    let f_written=ux_f64_put(f_dst+8*f_index,f_before[f_index]);
+    f_index=f_index+1;
+  }
+  return f_dst;
+}
+
+function Frustum_copy(f_copy,...f_copy_args) {
+  let f_source=f_copy_args[0];
+  return Frustum_set(f_copy,f_source,f_source+32,f_source+64,f_source+96,f_source+128,f_source+160);
+}
+
+function Frustum_clone(f_clone,...f_clone_args) {
+  return Frustum_copy(f_clone,f_clone_args[0]);
+}
+
+// Clip convention 0 is -w <= z <= w; 1 is 0 <= z <= w.
+native function Frustum_setFromProjectionMatrix(f_projection:i64,f_matrix:i64,f_clip:i64) i64 {
+  if(f_clip<0 || f_clip>1) { return 0-1; }
+  let f_span=ux_span(f_projection,192);
+  let f_rows=[0,0,1,1,2,2];
+  let f_sign=[0.0-1.0,1.0,1.0,0.0-1.0,0.0-1.0,1.0];
+  let f_plane=0;
+  let f_n=[0.0,0.0,0.0,0.0];
+  while(f_plane<6) {
+    let f_col=0;
+    while(f_col<4) {
+      let f_cell=f_matrix+32*f_col;
+      f_n[f_col]=ux_f64(f_cell+24)+f_sign[f_plane]*ux_f64(f_cell+8*f_rows[f_plane]);
+      if(f_plane==5 && f_clip==1) { f_n[f_col]=ux_f64(f_cell+16); }
+      f_col=f_col+1;
+    }
+    let f_inverse=1.0/f64_sqrt(f_n[0]*f_n[0]+f_n[1]*f_n[1]+f_n[2]*f_n[2]);
+    let f_plane_out=f_projection+32*f_plane;
+    let f_write0=ux_f64_put(f_plane_out,f_n[0]*f_inverse);
+    let f_write1=ux_f64_put(f_plane_out+8,f_n[1]*f_inverse);
+    let f_write2=ux_f64_put(f_plane_out+16,f_n[2]*f_inverse);
+    let f_write3=ux_f64_put(f_plane_out+24,f_n[3]*f_inverse);
+    f_plane=f_plane+1;
+  }
+  return f_projection;
+}
+
+native function Frustum_testBounds(f_test:i64,f_volume:i64,f_mode:i64) i64 {
+  let f_face=0;
+  while(f_face<192) {
+    let f_normal=f_test+f_face;
+    let f_distance=0.0;
+    let f_axis=0;
+    while(f_axis<24) {
+      let f_component=ux_f64(f_normal+f_axis);
+      let f_support=f_volume+f_axis;
+      if(f_mode==2 && f_component>0.0) { f_support=f_support+24; }
+      f_distance=f_distance+f_component*ux_f64(f_support);
+      f_axis=f_axis+8;
+    }
+    f_distance=f_distance+ux_f64(f_normal+24);
+    let f_limit=0.0;
+    if(f_mode==1) { f_limit=0.0-ux_f64(f_volume+24); }
+    if(f_distance<f_limit) { return 0; }
+    f_face=f_face+32;
+  }
+  return 1;
+}
+
+function Frustum_containsPoint(f_point,...f_point_args) {
+  return Frustum_testBounds(f_point,f_point_args[0],0);
+}
+
+function Frustum_intersectsSphere(f_sphere,...f_sphere_args) {
+  return Frustum_testBounds(f_sphere,f_sphere_args[0],1);
+}
+
+function Frustum_intersectsBox(f_box,...f_box_args) {
+  return Frustum_testBounds(f_box,f_box_args[0],2);
+}
+
+// The object passes its computed local sphere and a world matrix.
+function Frustum_intersectsObject(f_object,...f_object_args) {
+  let f_object_scratch=Sphere_copy(f_object_args[2],f_object_args[0]);
+  let f_object_world=Sphere_applyMatrix4(f_object_scratch,f_object_args[1]);
+  return Frustum_testBounds(f_object,f_object_world,1);
+}
+
+function Frustum_intersectsSprite(f_sprite,...f_sprite_args) {
+  let f_sprite_scratch=f_sprite_args[1];
+  let f_sprite_center=Vector3_set(f_sprite_scratch,0.0,0.0,0.0);
+  let f_sprite_local=Sphere_set(f_sprite_scratch,f_sprite_center,0.7071067811865476);
+  let f_sprite_world=Sphere_applyMatrix4(f_sprite_local,f_sprite_args[0]);
+  return Frustum_testBounds(f_sprite,f_sprite_world,1);
+}

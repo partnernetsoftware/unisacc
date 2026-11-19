@@ -1,0 +1,92 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static double random_gold(unsigned *state) {
+    *state+=1831565813U;
+    unsigned t=(*state^(*state>>15)) * (*state|1U);
+    t^=t+(t^(t>>7))*(t|61U);
+    return (t^(t>>14))/4294967296.0;
+}
+
+static int uuid_sample(void) {
+    const char *files[]={"vector-scalar","f64-math","mathutils"};
+    const char *statement="let a=ux_u32_put(0,2147483647);let b=ux_u32_put(4,1073741823);"
+        "let c=ux_u32_put(8,3221225471);let d=ux_u32_put(12,536870911);return MathUtils_generateUUID(0);";
+    const char expected[]="\"value\":\"ffffff7f-ffff-4f3f-bfff-ffbfffffff1f\"";
+    char text[32000]={0},dir[256],source[300],wasm[300];
+    int used=0;
+    for(int i=0;i<3;i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t bytes=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",files[i]);
+        if(sy_read_file(path,&data,&bytes,sizeof text-used-2)) return 1;
+        int added=tx_snprintf(text+used,sizeof text-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof text-used) return 1;
+        used+=added;
+    }
+    int added=tx_snprintf(text+used,sizeof text-used,"%s",statement);
+    if(added<0 || added>=(int)sizeof text-used || sy_mkdtemp("/tmp","ujs-uuid-",dir,sizeof dir)) return 1;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    char *args[]={"./ujs/ujs2wasm.com",source,"-o",wasm,"--run",0};
+    char *out=0;
+    size_t n=0;
+    int failed=sy_write_file(source,text,used+added,0600) || cx_runv_timeout(args,6,&out,&n) ||
+        !out || tx_find(out,n,expected,sizeof expected-1)<0;
+    if(failed && out) printf("UUID %s\n",out);
+    mm_free(out);
+    char *clean[]={"rm","-rf","--",dir,0};
+    out=0;
+    if(cx_runv_timeout(clean,5,&out,&n)) failed=1;
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"vector-scalar","f64-math","mathutils",0};
+    const char *setup="let seed=ux_u32_put(0,17);";
+    const char *cases[]={
+        "return MathUtils_clamp(5.0,0.0,3.0);","return MathUtils_euclideanModulo(0.0-5.0,3.0);",
+        "return MathUtils_euclideanModulo(5.0,0.0-3.0);","return MathUtils_euclideanModulo(10000000000.0*10000000000.0,3.0);",
+        "return MathUtils_mapLinear(2.0,0.0,4.0,10.0,20.0);","return MathUtils_inverseLerp(0.0,8.0,3.0);",
+        "return MathUtils_inverseLerp(4.0,4.0,3.0);",
+        "return MathUtils_lerp(2.0,6.0,0.25);","return MathUtils_damp(0.0,1.0,1.0,0.6931471805599453);",
+        "return MathUtils_pingpong(0.0-1.25,1.0);",
+        "return MathUtils_smoothstep(0.25,0.0,1.0);","return MathUtils_smootherstep(0.25,0.0,1.0);",
+        "return MathUtils_randInt(2.0,8.0,0.25);","return MathUtils_randFloat(2.0,8.0,0.25);",
+        "return MathUtils_randFloatSpread(8.0,0.25);",
+        "return MathUtils_seededRandom(0);","let first=MathUtils_seededRandom(0);return MathUtils_seededRandom(0);",
+        "return MathUtils_degToRad(90.0);","return MathUtils_radToDeg(3.141592653589793);",
+        "return MathUtils_isPowerOfTwo(16);","return MathUtils_isPowerOfTwo(15);",
+        "return MathUtils_ceilPowerOfTwo(17.0);","return MathUtils_floorPowerOfTwo(17.0);",
+        "return MathUtils_floorPowerOfTwo(0.3);","return MathUtils_ceilPowerOfTwo(0.3);",
+        "return MathUtils_ceilPowerOfTwo(16.0);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,0.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,1.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,2.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,3.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,4.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "let q=MathUtils_setQuaternionFromProperEuler(32,1.5707963267948966,1.5707963267948966,0.0,5.0);return ux_f64(q)+2.0*ux_f64(q+8)+4.0*ux_f64(q+16)+8.0*ux_f64(q+24);",
+        "return MathUtils_normalize(0.5,3);","return MathUtils_denormalize(0.0-128.0,6);",
+        "return MathUtils_normalize(0.0-0.5,5);","return MathUtils_denormalize(32768.0,2);","return 1;"
+    };
+    double gold[]={3,1,-1,1,15,0.375,0,3,0.5,0.75,0.15625,0.103515625,3,3.5,2,
+        0,0,1.5707963267948966,180,1,0,32,16,0.25,0.5,16,7.5,7.5,7.5,5.5,3.5,6.5,
+        128,-1,-16383,32768.0/65535,1};
+    unsigned state=17;
+    gold[15]=random_gold(&state);
+    gold[16]=random_gold(&state);
+    if(!mutate && uuid_sample()) {
+        printf("G_MATH MathUtils uuid failed=1\n");
+        return 1;
+    }
+    return g_math_run("G_MATH MathUtils","mathutils",modules,setup,cases,gold,sizeof gold/sizeof gold[0],
+        mutate?1:-1,"return MathUtils_euclideanModulo(5.0,3.0);");
+}

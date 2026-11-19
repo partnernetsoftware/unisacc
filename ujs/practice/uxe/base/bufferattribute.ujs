@@ -1,0 +1,226 @@
+// Component kinds: u8, i8, u8-clamped, u16, i16, u32, i32, f16, f32, f64.
+native function BufferAttribute_width(ba_kind:i64) i64 {
+  if(ba_kind<1 || ba_kind>10) { return 0; }
+  if(ba_kind<=3) { return 1; }
+  if(ba_kind<=5 || ba_kind==8) { return 2; }
+  if(ba_kind==10) { return 8; }
+  return 4;
+}
+
+native function BufferAttribute_init(ba_dst:i64,ba_data:i64,ba_count:i64,ba_size:i64,
+  ba_type:i64,ba_normalized:i64) i64 {
+  let ba_width=BufferAttribute_width(ba_type);
+  if(ba_width==0 || ba_size<=0 || ba_size>6291456/ba_width || ba_count<0) { return 0-1; }
+  let ba_stride=ba_width*ba_size;
+  if(ba_data<0 || ba_data>6291456 || ba_data%ba_width!=0 || ba_count>(6291456-ba_data)/ba_stride) { return 0-1; }
+  let ba_record=ux_span(ba_dst,BufferAttribute.size);
+  let ba_pointer=ux_u32_put(ba_dst+BufferAttribute.data,ba_data);
+  let ba_n=ux_u32_put(ba_dst+BufferAttribute.count,ba_count);
+  let ba_components=ux_u32_put(ba_dst+BufferAttribute.itemSize,ba_size);
+  let ba_step=ux_u32_put(ba_dst+BufferAttribute.stride,ba_stride);
+  let ba_component=ux_u32_put(ba_dst+BufferAttribute.componentType,ba_type);
+  let ba_norm=ux_u32_put(ba_dst+BufferAttribute.normalized,ba_normalized!=0);
+  let ba_usage=ux_u32_put(ba_dst+BufferAttribute.usage,35044);
+  let ba_version=ux_u32_put(ba_dst+BufferAttribute.version,0);
+  return ba_dst;
+}
+
+native function BufferAttribute_index(ba_index_self:i64,ba_index:i64,ba_axis:i64) i64 {
+  if(ba_index<0 || ba_index>=ux_u32(ba_index_self+BufferAttribute.count) ||
+    ba_axis<0 || ba_axis>=ux_u32(ba_index_self+BufferAttribute.itemSize)) { return 0-1; }
+  return ux_u32(ba_index_self+BufferAttribute.data)+ba_index*ux_u32(ba_index_self+BufferAttribute.stride)+
+    ba_axis*BufferAttribute_width(ux_u32(ba_index_self+BufferAttribute.componentType));
+}
+
+native function BufferAttribute_normMax(ba_max_type:i64) f64 {
+  if(ba_max_type==1) { return 255.0; }
+  if(ba_max_type==2) { return 127.0; }
+  if(ba_max_type==4) { return 65535.0; }
+  if(ba_max_type==5) { return 32767.0; }
+  if(ba_max_type==6) { return 4294967295.0; }
+  if(ba_max_type==7) { return 2147483647.0; }
+  if(ba_max_type==9) { return 1.0; }
+  return 0.0;
+}
+
+native function BufferAttribute_read(ba_read:i64,ba_read_kind:i64) f64 {
+  if(ba_read_kind==10) { return ux_f64(ba_read); }
+  if(ba_read_kind==9) { return ux_f32(ba_read); }
+  if(ba_read_kind==8) { return DataUtils_fromHalfFloat(ux_u16(ba_read)); }
+  if(ba_read_kind==7) { return 0.0+ux_i32(ba_read); }
+  if(ba_read_kind==6) { return 0.0+ux_u32(ba_read); }
+  if(ba_read_kind==4 || ba_read_kind==5) {
+    let ba_short=ux_u16(ba_read);
+    if(ba_read_kind==5 && ba_short>=32768) { ba_short=ba_short-65536; }
+    return 0.0+ba_short;
+  }
+  let ba_byte=ux_u8(ba_read);
+  if(ba_read_kind==2 && ba_byte>=128) { ba_byte=ba_byte-256; }
+  return 0.0+ba_byte;
+}
+
+native function BufferAttribute_getComponent(ba_get:i64,ba_get_index:i64,ba_get_axis:i64) f64 {
+  let ba_read_at=BufferAttribute_index(ba_get,ba_get_index,ba_get_axis);
+  if(ba_read_at<0) { return 0.0/0.0; }
+  let ba_get_type=ux_u32(ba_get+BufferAttribute.componentType);
+  let ba_value=BufferAttribute_read(ba_read_at,ba_get_type);
+  if(ux_u32(ba_get+BufferAttribute.normalized)==0) { return ba_value; }
+  let ba_denominator=BufferAttribute_normMax(ba_get_type);
+  if(ba_denominator==0.0) { return 0.0/0.0; }
+  let ba_fraction=ba_value/ba_denominator;
+  if(ba_fraction<0.0-1.0) { return 0.0-1.0; }
+  return ba_fraction;
+}
+
+native function BufferAttribute_int(ba_integral:f64) i64 {
+  let ba_limit=1099511627776.0*17592186044416.0;
+  if(ba_integral!=ba_integral || ba_integral>=ba_limit ||
+    ba_integral<=0.0-ba_limit) { return 0; }
+  let ba_sign=1;
+  let ba_abs=ba_integral;
+  if(ba_abs<0.0) { ba_abs=0.0-ba_abs; ba_sign=0-1; }
+  let ba_blocks=f64_floor_i64(ba_abs/4294967296.0);
+  return ba_sign*f64_floor_i64(ba_abs-ba_blocks*4294967296.0);
+}
+
+native function BufferAttribute_write(ba_write:i64,ba_write_kind:i64,ba_write_value:f64,ba_scratch:i64) i64 {
+  if(ba_write_kind==10) { return ux_f64_put(ba_write,ba_write_value); }
+  if(ba_write_kind==9) { return ux_f32_put(ba_write,ba_write_value); }
+  if(ba_write_kind==8) { return ux_u16_put(ba_write,DataUtils_toHalfFloat(ba_write_value,ba_scratch)); }
+  if(ba_write_kind==3) {
+    if(ba_write_value!=ba_write_value || ba_write_value<=0.0) { return ux_u8_put(ba_write,0); }
+    if(ba_write_value>=255.0) { return ux_u8_put(ba_write,255); }
+    let ba_lower=f64_floor_i64(ba_write_value);
+    let ba_rem=ba_write_value-ba_lower;
+    if(ba_rem>0.5 || (ba_rem==0.5 && ba_lower%2!=0)) { ba_lower=ba_lower+1; }
+    return ux_u8_put(ba_write,ba_lower);
+  }
+  let ba_integer=BufferAttribute_int(ba_write_value);
+  if(ba_write_kind<=2) { return ux_u8_put(ba_write,u32_and(ba_integer,255)); }
+  if(ba_write_kind<=5) { return ux_u16_put(ba_write,ba_integer); }
+  return ux_u32_put(ba_write,ba_integer);
+}
+
+native function BufferAttribute_setComponent(ba_set:i64,ba_set_index:i64,ba_set_axis:i64,
+    ba_set_value:f64,ba_set_scratch:i64) i64 {
+  let ba_set_at=BufferAttribute_index(ba_set,ba_set_index,ba_set_axis);
+  if(ba_set_at<0) { return 0-1; }
+  let ba_set_type=ux_u32(ba_set+BufferAttribute.componentType);
+  if(ux_u32(ba_set+BufferAttribute.normalized)!=0) {
+    let ba_multiplier=BufferAttribute_normMax(ba_set_type);
+    if(ba_multiplier==0.0) { return 0-1; }
+    if(ba_set_type!=9) { ba_set_value=0.0+f64_floor_i64(ba_set_value*ba_multiplier+0.5); }
+  }
+  let ba_written=BufferAttribute_write(ba_set_at,ba_set_type,ba_set_value,ba_set_scratch);
+  return ba_set;
+}
+
+function BufferAttribute_getX(ba_x,...ba_x_args) { return BufferAttribute_getComponent(ba_x,ba_x_args[0],0); }
+function BufferAttribute_getY(ba_y,...ba_y_args) { return BufferAttribute_getComponent(ba_y,ba_y_args[0],1); }
+function BufferAttribute_getZ(ba_z,...ba_z_args) { return BufferAttribute_getComponent(ba_z,ba_z_args[0],2); }
+function BufferAttribute_getW(ba_w,...ba_w_args) { return BufferAttribute_getComponent(ba_w,ba_w_args[0],3); }
+
+function BufferAttribute_setX(ba_sx,...ba_sx_args) {
+  return BufferAttribute_setComponent(ba_sx,f64_floor_i64(ba_sx_args[0]),0,ba_sx_args[1],f64_floor_i64(ba_sx_args[2]));
+}
+function BufferAttribute_setY(ba_sy,...ba_sy_args) {
+  return BufferAttribute_setComponent(ba_sy,f64_floor_i64(ba_sy_args[0]),1,ba_sy_args[1],f64_floor_i64(ba_sy_args[2]));
+}
+function BufferAttribute_setZ(ba_sz,...ba_sz_args) {
+  return BufferAttribute_setComponent(ba_sz,f64_floor_i64(ba_sz_args[0]),2,ba_sz_args[1],f64_floor_i64(ba_sz_args[2]));
+}
+function BufferAttribute_setW(ba_sw,...ba_sw_args) {
+  return BufferAttribute_setComponent(ba_sw,f64_floor_i64(ba_sw_args[0]),3,ba_sw_args[1],f64_floor_i64(ba_sw_args[2]));
+}
+
+native function BufferAttribute_setTuple(ba_tuple:i64,ba_tuple_index:i64,ba_tuple_count:i64,
+    ba_tuple_x:f64,ba_tuple_y:f64,ba_tuple_z:f64,ba_tuple_w:f64,ba_tuple_scratch:i64) i64 {
+  if(BufferAttribute_index(ba_tuple,ba_tuple_index,ba_tuple_count-1)<0) { return 0-1; }
+  let ba_tuple_values=[ba_tuple_x,ba_tuple_y,ba_tuple_z,ba_tuple_w];
+  let ba_tuple_axis=0;
+  while(ba_tuple_axis<ba_tuple_count) {
+    let ba_tuple_store=BufferAttribute_setComponent(ba_tuple,ba_tuple_index,ba_tuple_axis,
+        ba_tuple_values[ba_tuple_axis],ba_tuple_scratch);
+    if(ba_tuple_store<0) { return ba_tuple_store; }
+    ba_tuple_axis=ba_tuple_axis+1;
+  }
+  return ba_tuple;
+}
+
+function BufferAttribute_setXY(ba_xy,...ba_xy_args) {
+  return BufferAttribute_setTuple(ba_xy,f64_floor_i64(ba_xy_args[0]),2,
+    ba_xy_args[1],ba_xy_args[2],0.0,0.0,f64_floor_i64(ba_xy_args[3]));
+}
+function BufferAttribute_setXYZ(ba_xyz,...ba_xyz_args) {
+  return BufferAttribute_setTuple(ba_xyz,f64_floor_i64(ba_xyz_args[0]),3,
+    ba_xyz_args[1],ba_xyz_args[2],ba_xyz_args[3],0.0,f64_floor_i64(ba_xyz_args[4]));
+}
+function BufferAttribute_setXYZW(ba_xyzw,...ba_xyzw_args) {
+  return BufferAttribute_setTuple(ba_xyzw,f64_floor_i64(ba_xyzw_args[0]),4,
+    ba_xyzw_args[1],ba_xyzw_args[2],ba_xyzw_args[3],ba_xyzw_args[4],f64_floor_i64(ba_xyzw_args[5]));
+}
+
+// byte ranges may overlap; copying order is determined before the first write.
+native function BufferAttribute_copyBytes(ba_copy_dst:i64,ba_copy_src:i64,ba_copy_n:i64) i64 {
+  let ba_copy_dst_check=ux_span(ba_copy_dst,ba_copy_n);
+  let ba_copy_src_check=ux_span(ba_copy_src,ba_copy_n);
+  let ba_copy_at=0;
+  let ba_copy_step=1;
+  if(ba_copy_dst>ba_copy_src && ba_copy_dst<ba_copy_src+ba_copy_n) {
+    ba_copy_at=ba_copy_n-1;
+    ba_copy_step=0-1;
+  }
+  while(ba_copy_at>=0 && ba_copy_at<ba_copy_n) {
+    let ba_copy_byte=ux_u8_put(ba_copy_dst+ba_copy_at,ux_u8(ba_copy_src+ba_copy_at));
+    ba_copy_at=ba_copy_at+ba_copy_step;
+  }
+  return ba_copy_dst;
+}
+
+native function BufferAttribute_copyAt(ba_dest:i64,ba_dest_i:i64,ba_source:i64,ba_source_i:i64) i64 {
+  let ba_dest_count=ux_u32(ba_dest+BufferAttribute.itemSize);
+  let ba_source_count=ux_u32(ba_source+BufferAttribute.itemSize);
+  if(ba_source_count<ba_dest_count) { return 0-1; }
+  let ba_dest_at=BufferAttribute_index(ba_dest,ba_dest_i,0);
+  let ba_source_at=BufferAttribute_index(ba_source,ba_source_i,0);
+  if(ba_dest_at<0 || ba_source_at<0) { return 0-1; }
+  let ba_dest_kind=ux_u32(ba_dest+BufferAttribute.componentType);
+  if(ba_dest_kind!=ux_u32(ba_source+BufferAttribute.componentType)) { return 0-1; }
+  let ba_copy_count=ba_dest_count*BufferAttribute_width(ba_dest_kind);
+  let ba_item_copy=BufferAttribute_copyBytes(ba_dest_at,ba_source_at,ba_copy_count);
+  return ba_dest;
+}
+
+native function BufferAttribute_copy(ba_copy_record:i64,ba_copy_from:i64,ba_copy_data:i64,ba_copy_capacity:i64) i64 {
+  let ba_copy_kind=ux_u32(ba_copy_from+BufferAttribute.componentType);
+  let ba_copy_count=ux_u32(ba_copy_from+BufferAttribute.count);
+  let ba_copy_axes=ux_u32(ba_copy_from+BufferAttribute.itemSize);
+  let ba_copy_stride=BufferAttribute_width(ba_copy_kind)*ba_copy_axes;
+  if(ba_copy_kind==0 || ba_copy_count*ba_copy_stride>ba_copy_capacity ||
+    ba_copy_stride!=ux_u32(ba_copy_from+BufferAttribute.stride)) { return 0-1; }
+  let ba_copy_data_at=ux_u32(ba_copy_from+BufferAttribute.data);
+  let ba_copy_norm=ux_u32(ba_copy_from+BufferAttribute.normalized);
+  let ba_copy_usage=ux_u32(ba_copy_from+BufferAttribute.usage);
+  let ba_copy_new=BufferAttribute_init(ba_copy_record,ba_copy_data,ba_copy_count,ba_copy_axes,ba_copy_kind,ba_copy_norm);
+  if(ba_copy_new<0) { return ba_copy_new; }
+  let ba_copy_raw=BufferAttribute_copyBytes(ba_copy_data,ba_copy_data_at,ba_copy_count*ba_copy_stride);
+  let ba_copy_use=ux_u32_put(ba_copy_new+BufferAttribute.usage,ba_copy_usage);
+  return ba_copy_new;
+}
+
+function BufferAttribute_clone(ba_clone,...ba_clone_args) {
+  return BufferAttribute_copy(ba_clone,ba_clone_args[0],ba_clone_args[1],ba_clone_args[2]);
+}
+
+function BufferAttribute_setUsage(ba_usage_self,...ba_usage_args) {
+  let ba_usage_write=ux_u32_put(ba_usage_self+BufferAttribute.usage,ba_usage_args[0]);
+  return ba_usage_self;
+}
+
+function BufferAttribute_needsUpdate(ba_update,...ba_update_args) {
+  if(ba_update_args[0]!=0) {
+    let ba_version_at=ba_update+BufferAttribute.version;
+    let ba_increment=ux_u32_put(ba_version_at,ux_u32(ba_version_at)+1);
+  }
+  return ba_update;
+}

@@ -1,0 +1,93 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int style_program(char *program,int cap,const char *css,const char *body) {
+    int used=tx_snprintf(program,cap,"let text=[");
+    for(int i=0;css[i];i++) {
+        int added=tx_snprintf(program+used,cap-used,"%s%d",i?",":"",(int)css[i]);
+        if(added<0 || added>=cap-used) return 1;
+        used+=added;
+    }
+    int added=tx_snprintf(program+used,cap-used,
+        "];let i=0;let size=%d;while(i<size){let w=ux_u8_put(128+i,text[i]);i=i+1;}%s",
+        (int)tx_len(css,256),body);
+    return added<0 || added>=cap-used;
+}
+
+static int check_text(const char *source,const char *wasm,const char *library,const char *body,const char *expected) {
+    char text[64000];
+    int size=tx_snprintf(text,sizeof text,"%s\n%s",library,body);
+    if(size<0 || size>=(int)sizeof text || sy_write_file(source,text,size,0600)) return 1;
+    char value[128];
+    tx_snprintf(value,sizeof value,"\"value\":\"%s\"",expected);
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,"--run",0};
+    char *out=0;
+    size_t n=0;
+    int failed=cx_runv_timeout(args,6,&out,&n) || !out || tx_find(out,n,value,tx_len(value,sizeof value))<0;
+    if(failed && out) printf("COLOR CSS TEXT %s\n",out);
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","vector-scalar","strings","color","colormanagement","color-names","color-style",0};
+    char library[60000];
+    int used=0;
+    for(int i=0;modules[i];i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t bytes=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&bytes,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    const char *styles[]={"#A2c","#123456","rgb(300,52,86)","rgba(100%, 0%, 0%, .2)","hsl(0,100%,50%)",
+        "hsla(120.0,100%,50%,0.5)","ReBeccAPurple","lightgoldenrodyellow","ReBeccAPurple","rgb(1.5,2,3)"};
+    const double gold[]={11150028,1193046,16725078,16711680,16711680,65280,6697881,16448210,6697881,1,1,1};
+    enum {count=sizeof gold/sizeof gold[0]};
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-color-css-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[count]={0};
+    int failed=g_math_reference("color-style",refs,count,dir);
+    const char *style="let r=Color_setStyle(a,128,size,2,1,256);return Color_getHex(r,1);";
+    for(int i=0;!failed && i<count;i++) {
+        double actual=1;
+        int rc=0;
+        if(i<10) {
+            char program[512];
+            const char *input=mutate && i==7?"lightgoldenrod":styles[i];
+            const char *branch=style;
+            if(i==8) branch="let r=Color_setColorName(a,128,size,2,1);return Color_getHex(r,1);";
+            if(i==9) branch="let r=Color_setStyle(a,128,size,2,1,256);return r<0 && ux_f64(a)==0.25;";
+            if(mutate && i==7) branch="let r=Color_setStyle(a,128,size,2,1,256);return r;";
+            rc=style_program(program,sizeof program,input,branch) ||
+                g_math_sample(source,wasm,library,"let a=Color_setRGB(0,0.25,0.5,0.75);",program,&actual);
+        } else if(i==10) {
+            rc=check_text(source,wasm,library,"let r=Color_setHex(0,1193046,1);return Color_getStyle(r,1,2,96);","rgb(18,52,86)");
+        } else {
+            rc=check_text(source,wasm,library,"let r=Color_setRGB(0,0.25,0.5,0.75);return Color_getStyle(r,1,1,96);",
+                "color(srgb-linear 0.250 0.500 0.750)");
+        }
+        if(rc || !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("COLOR CSS case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH Color CSS cases=%d failed=%d\n",count,failed);
+    return failed;
+}

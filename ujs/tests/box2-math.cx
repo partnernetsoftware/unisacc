@@ -1,0 +1,76 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"vector-scalar","f64-math","views","vector2","box2"};
+    char library[60000]={0};
+    int used=0;
+    for(int i=0;i<5;i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&size,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    const char *setup="let low=Vector2_set(0,0.0-2.0,0.0-1.0);let high=Vector2_set(16,4.0,3.0);"
+        "let blo=Vector2_set(32,2.0,0.0-4.0);let bhi=Vector2_set(48,7.0,1.0);"
+        "let a=Box2_set(64,low,high);let b=Box2_set(96,blo,bhi);"
+        "let center=Vector2_set(128,1.0,1.0);let p=Vector2_set(144,7.0,7.0);"
+        "let third=Vector2_set(160,0.0-2.0,3.0);let size=Vector2_set(176,6.0,4.0);";
+    const char *cases[]={
+        "let r=Box2_set(192,low,high);return ux_f64(r);",
+        "let r=Box2_setFromPoints(192,center,3);return ux_f64(r+24);",
+        "let r=Box2_setFromCenterAndSize(192,center,size);return ux_f64(r+8);",
+        "let r=Box2_clone(192,a);return ux_f64(r+16);",
+        "let r=Box2_copy(192,a);return ux_f64(r+24);",
+        "let r=Box2_makeEmpty(a);return Box2_isEmpty(r);","return Box2_isEmpty(a);",
+        "let r=Box2_getCenter(192,a);return ux_f64(r);",
+        "let r=Box2_getSize(192,a);return ux_f64(r);",
+        "let r=Box2_expandByPoint(a,p);return ux_f64(r+24);",
+        "let r=Box2_expandByVector(a,center);return ux_f64(r+8);",
+        "let r=Box2_expandByScalar(a,2.0);return ux_f64(r+16);",
+        "return Box2_containsPoint(a,center);","return Box2_containsBox(a,b);",
+        "let r=Box2_getParameter(192,a,center);return ux_f64(r+8);","return Box2_intersectsBox(a,b);",
+        "let r=Box2_clampPoint(192,a,p);return ux_f64(r);","return Box2_distanceToPoint(a,p);",
+        "let r=Box2_intersect(a,b);return ux_f64(r+24);",
+        "let r=Box2_union(a,b);return ux_f64(r+8);",
+        "let r=Box2_translate(a,center);return ux_f64(r);",
+        "let r=Box2_clone(192,a);return Box2_equals(a,r);",
+        "let q=Vector2_set(256,5.0,6.0);let t=Vector2_set(272,7.0,8.0);"
+        "let s=Box2_set(192,q,t);let r=Box2_intersect(a,s);return Box2_isEmpty(r);",
+        "let e=Box2_makeEmpty(a);let r=Box2_getCenter(192,e);return ux_f64(r+8);"
+    };
+    const double gold[]={-2,7,-1,4,3,1,0,1,6,7,-2,6,1,0,0.5,1,4,5,1,-4,-1,1,1,0};
+    enum {count=sizeof gold/sizeof gold[0]};
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-box2-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[count]={0};
+    int failed=g_math_reference("box2",refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        const char *statement=mutate && i==18?"let r=Box2_union(a,b);return ux_f64(r+24);":cases[i];
+        double actual=0;
+        if(g_math_sample(source,wasm,library,setup,statement,&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("BOX2 case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH Box2 cases=%d failed=%d\n",count,failed);
+    return failed;
+}

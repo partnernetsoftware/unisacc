@@ -1,0 +1,164 @@
+struct Plane { x: f64; y: f64; z: f64; constant: f64; }
+
+native function Plane_setComponents(p_dst:i64,p_x:f64,p_y:f64,p_z:f64,p_c:f64) i64 {
+  let p_span=ux_span(p_dst,Plane.size);
+  let p_n=Vector3_set(p_dst,p_x,p_y,p_z);
+  let p_w=ux_f64_put(p_dst+24,p_c);
+  return p_dst;
+}
+
+native function Plane_set(p_set:i64,p_normal:i64,p_constant:f64) i64 {
+  return Plane_setComponents(p_set,ux_f64(p_normal),ux_f64(p_normal+8),ux_f64(p_normal+16),p_constant);
+}
+
+function Plane_copy(p_copy_dst,...p_copy_args) {
+  let p_copy_source=p_copy_args[0];
+  return Plane_set(p_copy_dst,p_copy_source,ux_f64(p_copy_source+24));
+}
+
+function Plane_clone(p_clone_dst,...p_clone_args) {
+  return Plane_copy(p_clone_dst,p_clone_args[0]);
+}
+
+function Plane_setFromNormalAndCoplanarPoint(p_coplanar_dst,...p_coplanar_args) {
+  let p_coplanar_normal=p_coplanar_args[0];
+  let p_dot=Vector3_dot(p_coplanar_normal,p_coplanar_args[1]);
+  return Plane_set(p_coplanar_dst,p_coplanar_normal,0.0-p_dot);
+}
+
+native function Plane_setFromCoplanarPoints(p_three:i64,p_a:i64,p_b:i64,p_cc:i64) i64 {
+  let p_ux=ux_f64(p_cc)-ux_f64(p_b); let p_uy=ux_f64(p_cc+8)-ux_f64(p_b+8);
+  let p_uz=ux_f64(p_cc+16)-ux_f64(p_b+16);
+  let p_vx=ux_f64(p_a)-ux_f64(p_b); let p_vy=ux_f64(p_a+8)-ux_f64(p_b+8);
+  let p_vz=ux_f64(p_a+16)-ux_f64(p_b+16);
+  let p_cross_x=p_uy*p_vz-p_uz*p_vy; let p_cross_y=p_uz*p_vx-p_ux*p_vz;
+  let p_cross_z=p_ux*p_vy-p_uy*p_vx;
+  let p_len=f64_sqrt(p_cross_x*p_cross_x+p_cross_y*p_cross_y+p_cross_z*p_cross_z);
+  if(p_len==0.0) { p_len=1.0; }
+  let p_bias=0.0-(p_cross_x*ux_f64(p_a)+p_cross_y*ux_f64(p_a+8)+p_cross_z*ux_f64(p_a+16))/p_len;
+  return Plane_setComponents(p_three,p_cross_x/p_len,p_cross_y/p_len,p_cross_z/p_len,p_bias);
+}
+
+native function Plane_normalize(p_norm:i64) i64 {
+  let p_norm_scale=1.0/Vector3_length(p_norm);
+  return Plane_setComponents(p_norm,ux_f64(p_norm)*p_norm_scale,ux_f64(p_norm+8)*p_norm_scale,
+     ux_f64(p_norm+16)*p_norm_scale,ux_f64(p_norm+24)*p_norm_scale);
+}
+
+function Plane_negate(p_flip) {
+  return Plane_setComponents(p_flip,0.0-ux_f64(p_flip),0.0-ux_f64(p_flip+8),
+      0.0-ux_f64(p_flip+16),0.0-ux_f64(p_flip+24));
+}
+
+native function Plane_distanceToPoint(p_distance:i64,p_distance_point:i64) f64 {
+  return Vector3_dot(p_distance,p_distance_point)+ux_f64(p_distance+24);
+}
+
+function Plane_distanceToSphere(p_dist_sphere,...p_dist_args) {
+  return Plane_distanceToPoint(p_dist_sphere,p_dist_args[0])-ux_f64(p_dist_args[0]+24);
+}
+
+function Plane_projectPoint(p_proj_dst,...p_proj_args) {
+  let p_proj_plane=p_proj_args[0];
+  let p_proj_point=p_proj_args[1];
+  let p_proj_dist=Plane_distanceToPoint(p_proj_plane,p_proj_point);
+  return Vector3_set(p_proj_dst,ux_f64(p_proj_point)-p_proj_dist*ux_f64(p_proj_plane),
+      ux_f64(p_proj_point+8)-p_proj_dist*ux_f64(p_proj_plane+8),
+      ux_f64(p_proj_point+16)-p_proj_dist*ux_f64(p_proj_plane+16));
+}
+
+native function Plane_intersectLine(p_hit:i64,p_hit_plane:i64,p_line:i64) i64 {
+  let p_line_dx=ux_f64(p_line+24)-ux_f64(p_line);
+  let p_line_dy=ux_f64(p_line+32)-ux_f64(p_line+8);
+  let p_line_dz=ux_f64(p_line+40)-ux_f64(p_line+16);
+  let p_line_denom=p_line_dx*ux_f64(p_hit_plane)+p_line_dy*ux_f64(p_hit_plane+8)+p_line_dz*ux_f64(p_hit_plane+16);
+  let p_line_dist=Plane_distanceToPoint(p_hit_plane,p_line);
+  if(p_line_denom==0.0) {
+    if(p_line_dist==0.0) { return Vector3_copy(p_hit,p_line); }
+    return 0-1;
+  }
+  let p_line_t=(0.0-p_line_dist)/p_line_denom;
+  if(p_line_t<0.0 || p_line_t>1.0) { return 0-1; }
+  return Vector3_set(p_hit,ux_f64(p_line)+p_line_t*p_line_dx,ux_f64(p_line+8)+p_line_t*p_line_dy,
+    ux_f64(p_line+16)+p_line_t*p_line_dz);
+}
+
+function Plane_intersectsLine(p_intersect_line,...p_intersects_args) {
+  let p_intersects_at=p_intersects_args[0];
+  let p_start_d=Plane_distanceToPoint(p_intersect_line,p_intersects_at);
+  let p_end_d=Plane_distanceToPoint(p_intersect_line,p_intersects_at+24);
+  return (p_start_d<0.0 && p_end_d>0.0) || (p_start_d>0.0 && p_end_d<0.0);
+}
+
+function Plane_intersectsBox(p_box_plane,...p_box_args) {
+  return Box3_intersectsPlane(p_box_args[0],p_box_plane);
+}
+
+function Plane_intersectsSphere(p_overlap_sphere,...p_overlap_args) {
+  let p_overlap_distance=Plane_distanceToPoint(p_overlap_sphere,p_overlap_args[0]);
+  let p_overlap_radius=ux_f64(p_overlap_args[0]+24);
+  return p_overlap_distance<=p_overlap_radius && p_overlap_distance>=0.0-p_overlap_radius;
+}
+
+function Plane_coplanarPoint(p_surface_dst,...p_surface_args) {
+  let p_surface_plane=p_surface_args[0];
+  let p_surface_scale=0.0-ux_f64(p_surface_plane+24);
+  return Vector3_set(p_surface_dst,ux_f64(p_surface_plane)*p_surface_scale,
+    ux_f64(p_surface_plane+8)*p_surface_scale,ux_f64(p_surface_plane+16)*p_surface_scale);
+}
+
+function Plane_translate(p_translate,...p_translate_args) {
+  let p_translate_v=p_translate_args[0];
+  let p_translate_d=ux_f64_put(p_translate+24,ux_f64(p_translate+24)-Vector3_dot(p_translate,p_translate_v));
+  return p_translate;
+}
+
+function Plane_equals(p_equal,...p_equal_args) {
+  let p_equal_other=p_equal_args[0];
+  return Vector3_equals(p_equal,p_equal_other) && ux_f64(p_equal+24)==ux_f64(p_equal_other+24);
+}
+
+// The optional normal matrix is a column-major Matrix3 or -1 to derive it.
+native function Plane_applyMatrix4(p_apply:i64,p_transform:i64,p_normal_matrix:i64,p_apply_tmp:i64) i64 {
+  let p_old=[ux_f64(p_apply),ux_f64(p_apply+8),ux_f64(p_apply+16)];
+  let p_reference_scale=0.0-ux_f64(p_apply+24);
+  let p_reference=Vector3_set(p_apply_tmp,p_old[0]*p_reference_scale,
+    p_old[1]*p_reference_scale,p_old[2]*p_reference_scale);
+  let p_reference_world=Vector3_applyMatrix4(p_reference,p_transform);
+  let p_r=[0.0,0.0,0.0];
+  if(p_normal_matrix>=0) {
+    let p_matrix_row=0;
+    while(p_matrix_row<3) {
+      let p_matrix_cell=p_normal_matrix+8*p_matrix_row;
+      p_r[p_matrix_row]=ux_f64(p_matrix_cell)*p_old[0]+ux_f64(p_matrix_cell+24)*p_old[1]+
+        ux_f64(p_matrix_cell+48)*p_old[2];
+      p_matrix_row=p_matrix_row+1;
+    }
+  } else {
+    let p_cofactor=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let p_column=0;
+    while(p_column<3) {
+      let p_left=p_transform+32*((p_column+1)%3);
+      let p_right=p_transform+32*((p_column+2)%3);
+      p_cofactor[3*p_column]=ux_f64(p_left+8)*ux_f64(p_right+16)-ux_f64(p_left+16)*ux_f64(p_right+8);
+      p_cofactor[3*p_column+1]=ux_f64(p_left+16)*ux_f64(p_right)-ux_f64(p_left)*ux_f64(p_right+16);
+      p_cofactor[3*p_column+2]=ux_f64(p_left)*ux_f64(p_right+8)-ux_f64(p_left+8)*ux_f64(p_right);
+      p_column=p_column+1;
+    }
+    let p_det=p_cofactor[0]*ux_f64(p_transform)+p_cofactor[1]*ux_f64(p_transform+8)+
+      p_cofactor[2]*ux_f64(p_transform+16);
+    if(p_det!=0.0) {
+      let p_cofactor_axis=0;
+      while(p_cofactor_axis<3) {
+        p_r[p_cofactor_axis]=(p_cofactor[p_cofactor_axis]*p_old[0]+p_cofactor[p_cofactor_axis+3]*p_old[1]+
+          p_cofactor[p_cofactor_axis+6]*p_old[2])/p_det;
+        p_cofactor_axis=p_cofactor_axis+1;
+      }
+    }
+  }
+  let p_new_len=f64_sqrt(p_r[0]*p_r[0]+p_r[1]*p_r[1]+p_r[2]*p_r[2]);
+  if(p_new_len==0.0) { p_new_len=1.0; }
+  let p_new_constant=0.0-(p_r[0]*ux_f64(p_reference_world)+p_r[1]*ux_f64(p_reference_world+8)+
+    p_r[2]*ux_f64(p_reference_world+16))/p_new_len;
+  return Plane_setComponents(p_apply,p_r[0]/p_new_len,p_r[1]/p_new_len,p_r[2]/p_new_len,p_new_constant);
+}

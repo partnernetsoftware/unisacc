@@ -1,0 +1,276 @@
+struct Quaternion { x: f64; y: f64; z: f64; w: f64; }
+
+native function Quaternion_set(quat_dst:i64, quat_x:f64, quat_y:f64, quat_z:f64, quat_w:f64) i64 {
+  let quat_span = ux_span(quat_dst, Quaternion.size);
+  let quat_write_x = ux_f64_put(quat_dst + Quaternion.x, quat_x);
+  let quat_write_y = ux_f64_put(quat_dst + Quaternion.y, quat_y);
+  let quat_write_z = ux_f64_put(quat_dst + Quaternion.z, quat_z);
+  let quat_write_w = ux_f64_put(quat_dst + Quaternion.w, quat_w);
+  return quat_dst;
+}
+
+function Quaternion_copy(q_copy_dst, ...q_copy_args) {
+  let q_copy_src = q_copy_args[0];
+  return Quaternion_set(q_copy_dst, ux_f64(q_copy_src), ux_f64(q_copy_src + Quaternion.y),
+      ux_f64(q_copy_src + Quaternion.z), ux_f64(q_copy_src + Quaternion.w));
+}
+
+function Quaternion_clone(q_clone_dst, ...q_clone_args) {
+  return Quaternion_copy(q_clone_dst, q_clone_args[0]);
+}
+
+function Quaternion_identity(q_identity) {
+  return Quaternion_set(q_identity, 0.0, 0.0, 0.0, 1.0);
+}
+
+function Quaternion_conjugate(q_conjugate) {
+  let q_conjugate_sign = 0.0 - 1.0;
+  return Quaternion_set(q_conjugate, q_conjugate_sign * ux_f64(q_conjugate),
+      q_conjugate_sign * ux_f64(q_conjugate + Quaternion.y),
+      q_conjugate_sign * ux_f64(q_conjugate + Quaternion.z), ux_f64(q_conjugate + Quaternion.w));
+}
+
+function Quaternion_invert(q_inverse) {
+  return Quaternion_conjugate(q_inverse);
+}
+
+function Quaternion_dot(q_dot_a, ...q_dot_args) {
+  let q_dot_b = q_dot_args[0];
+  return ux_f64(q_dot_a) * ux_f64(q_dot_b) +
+      ux_f64(q_dot_a + Quaternion.y) * ux_f64(q_dot_b + Quaternion.y) +
+      ux_f64(q_dot_a + Quaternion.z) * ux_f64(q_dot_b + Quaternion.z) +
+      ux_f64(q_dot_a + Quaternion.w) * ux_f64(q_dot_b + Quaternion.w);
+}
+
+function Quaternion_lengthSq(q_square) {
+  return Quaternion_dot(q_square, q_square);
+}
+
+function Quaternion_length(q_length) {
+  return f64_sqrt(Quaternion_lengthSq(q_length));
+}
+
+function Quaternion_normalize(q_normal) {
+  let q_norm = Quaternion_length(q_normal);
+  let q_normalized = q_normal;
+  if (q_norm == 0.0) {
+    q_normalized = Quaternion_identity(q_normal);
+  } else {
+    let q_inverse_norm = 1.0 / q_norm;
+    q_normalized = Quaternion_set(q_normal, ux_f64(q_normal) * q_inverse_norm,
+        ux_f64(q_normal + Quaternion.y) * q_inverse_norm,
+        ux_f64(q_normal + Quaternion.z) * q_inverse_norm,
+        ux_f64(q_normal + Quaternion.w) * q_inverse_norm);
+  }
+  return q_normalized;
+}
+
+native function Quaternion_multiplyQuaternions(q_product_dst:i64, q_product_a:i64, q_product_b:i64) i64 {
+  let q_ax = ux_f64(q_product_a);
+  let q_ay = ux_f64(q_product_a + Quaternion.y);
+  let q_az = ux_f64(q_product_a + Quaternion.z);
+  let q_aw = ux_f64(q_product_a + Quaternion.w);
+  let q_bx = ux_f64(q_product_b);
+  let q_by = ux_f64(q_product_b + Quaternion.y);
+  let q_bz = ux_f64(q_product_b + Quaternion.z);
+  let q_bw = ux_f64(q_product_b + Quaternion.w);
+  return Quaternion_set(q_product_dst,
+      q_ax*q_bw + q_aw*q_bx + q_ay*q_bz - q_az*q_by,
+      q_ay*q_bw + q_aw*q_by + q_az*q_bx - q_ax*q_bz,
+      q_az*q_bw + q_aw*q_bz + q_ax*q_by - q_ay*q_bx,
+      q_aw*q_bw - q_ax*q_bx - q_ay*q_by - q_az*q_bz);
+}
+
+function Quaternion_multiply(q_multiply_dst, ...q_multiply_args) {
+  return Quaternion_multiplyQuaternions(q_multiply_dst, q_multiply_dst, q_multiply_args[0]);
+}
+
+function Quaternion_premultiply(q_premultiply_dst, ...q_premultiply_args) {
+  return Quaternion_multiplyQuaternions(q_premultiply_dst, q_premultiply_args[0], q_premultiply_dst);
+}
+
+native function Quaternion_setFromEuler(q_euler_dst:i64, q_euler:i64) i64 {
+  let q_euler_order = ux_u32(q_euler+24);
+  if (q_euler_order >= 6) { return 0-1; }
+  let q_angles = [ux_f64(q_euler),ux_f64(q_euler+8),ux_f64(q_euler+16)];
+  let q_axes = [0,1,2, 1,0,2, 2,0,1, 2,1,0, 1,2,0, 0,2,1];
+  let q_ex=0.0; let q_ey=0.0; let q_ez=0.0; let q_ew=1.0;
+  let q_step=0;
+  while (q_step<3) {
+    let q_axis=q_axes[q_euler_order*3+q_step];
+    let q_half=q_angles[q_axis]*0.5;
+    let q_s=ux_math_sin(q_half); let q_c=ux_math_cos(q_half);
+    let q_rx=0.0; let q_ry=0.0; let q_rz=0.0;
+    if (q_axis==0) { q_rx=q_s; }
+    if (q_axis==1) { q_ry=q_s; }
+    if (q_axis==2) { q_rz=q_s; }
+    let q_next_x=q_ew*q_rx+q_ex*q_c+q_ey*q_rz-q_ez*q_ry;
+    let q_next_y=q_ew*q_ry-q_ex*q_rz+q_ey*q_c+q_ez*q_rx;
+    let q_next_z=q_ew*q_rz+q_ex*q_ry-q_ey*q_rx+q_ez*q_c;
+    q_ew=q_ew*q_c-q_ex*q_rx-q_ey*q_ry-q_ez*q_rz;
+    q_ex=q_next_x; q_ey=q_next_y; q_ez=q_next_z;
+    q_step=q_step+1;
+  }
+  return Quaternion_set(q_euler_dst,q_ex,q_ey,q_ez,q_ew);
+}
+
+native function Quaternion_setFromAxisAngle(q_axis_dst:i64, q_axis_src:i64, q_angle:f64) i64 {
+  let q_axis_half=q_angle*0.5;
+  let q_axis_sin=ux_math_sin(q_axis_half);
+  return Quaternion_set(q_axis_dst,ux_f64(q_axis_src)*q_axis_sin,ux_f64(q_axis_src+8)*q_axis_sin,
+      ux_f64(q_axis_src+16)*q_axis_sin,ux_math_cos(q_axis_half));
+}
+
+function Quaternion_setFromRotationMatrix(q_matrix_dst, ...q_matrix_args) {
+  let q_matrix=q_matrix_args[0];
+  return Matrix4_basisQuaternion(q_matrix_dst,
+      ux_f64(q_matrix),ux_f64(q_matrix+32),ux_f64(q_matrix+64),
+      ux_f64(q_matrix+8),ux_f64(q_matrix+40),ux_f64(q_matrix+72),
+      ux_f64(q_matrix+16),ux_f64(q_matrix+48),ux_f64(q_matrix+80));
+}
+
+native function Quaternion_setFromUnitVectors(q_unit_dst:i64, q_unit_a:i64, q_unit_b:i64) i64 {
+  let q_ux=ux_f64(q_unit_a); let q_uy=ux_f64(q_unit_a+8); let q_uz=ux_f64(q_unit_a+16);
+  let q_vx=ux_f64(q_unit_b); let q_vy=ux_f64(q_unit_b+8); let q_vz=ux_f64(q_unit_b+16);
+  let q_uxv=q_uy*q_vz-q_uz*q_vy;
+  let q_uyv=q_uz*q_vx-q_ux*q_vz;
+  let q_uzv=q_ux*q_vy-q_uy*q_vx;
+  let q_unit_w=1.0+q_ux*q_vx+q_uy*q_vy+q_uz*q_vz;
+  if (q_unit_w<0.000000000000000222) {
+    q_unit_w=0.0;
+    if (ux_math_abs(q_ux)>ux_math_abs(q_uz)) {
+      q_uxv=0.0-q_uy; q_uyv=q_ux; q_uzv=0.0;
+    } else {
+      q_uxv=0.0; q_uyv=0.0-q_uz; q_uzv=q_uy;
+    }
+  }
+  let q_unit_set=Quaternion_set(q_unit_dst,q_uxv,q_uyv,q_uzv,q_unit_w);
+  return Quaternion_normalize(q_unit_set);
+}
+
+function Quaternion_angleTo(q_angle_a, ...q_angle_args) {
+  let q_angle_cos=ux_math_abs(Quaternion_dot(q_angle_a,q_angle_args[0]));
+  if (q_angle_cos>1.0) { q_angle_cos=1.0; }
+  return 2.0*ux_math_acos(q_angle_cos);
+}
+
+native function Quaternion_slerpQuaternions(q_slerp_dst:i64, q_slerp_a:i64, q_slerp_b:i64, q_t:f64) i64 {
+  if (q_t==0.0) { return Quaternion_copy(q_slerp_dst,q_slerp_a); }
+  if (q_t==1.0) { return Quaternion_copy(q_slerp_dst,q_slerp_b); }
+  let q_sax=ux_f64(q_slerp_a); let q_say=ux_f64(q_slerp_a+8);
+  let q_saz=ux_f64(q_slerp_a+16); let q_saw=ux_f64(q_slerp_a+24);
+  let q_sbx=ux_f64(q_slerp_b); let q_sby=ux_f64(q_slerp_b+8);
+  let q_sbz=ux_f64(q_slerp_b+16); let q_sbw=ux_f64(q_slerp_b+24);
+  let q_cos=q_sax*q_sbx+q_say*q_sby+q_saz*q_sbz+q_saw*q_sbw;
+  if (q_cos<0.0) {
+    q_cos=0.0-q_cos;
+    q_sbx=0.0-q_sbx; q_sby=0.0-q_sby; q_sbz=0.0-q_sbz; q_sbw=0.0-q_sbw;
+  }
+  if (q_cos>=1.0) { return Quaternion_copy(q_slerp_dst,q_slerp_a); }
+  let q_sin_sq=1.0-q_cos*q_cos;
+  let q_a_weight=1.0-q_t;
+  let q_b_weight=q_t;
+  let q_linear=q_sin_sq<=0.000000000000000222;
+  if (!q_linear) {
+    let q_sin=f64_sqrt(q_sin_sq);
+    let q_theta=ux_math_atan2(q_sin,q_cos);
+    q_a_weight=ux_math_sin(q_a_weight*q_theta)/q_sin;
+    q_b_weight=ux_math_sin(q_b_weight*q_theta)/q_sin;
+  }
+  let q_interpolated=Quaternion_set(q_slerp_dst,
+      q_a_weight*q_sax+q_b_weight*q_sbx,q_a_weight*q_say+q_b_weight*q_sby,
+      q_a_weight*q_saz+q_b_weight*q_sbz,q_a_weight*q_saw+q_b_weight*q_sbw);
+  if (q_linear) { return Quaternion_normalize(q_interpolated); }
+  return q_interpolated;
+}
+
+native function Quaternion_slerp(q_slerp_inout:i64, q_slerp_other:i64, q_slerp_alpha:f64) i64 {
+  return Quaternion_slerpQuaternions(q_slerp_inout,q_slerp_inout,q_slerp_other,q_slerp_alpha);
+}
+
+native function Quaternion_rotateTowards(q_rotate_dst:i64, q_rotate_to:i64, q_rotate_step:f64) i64 {
+  let q_rotation=Quaternion_angleTo(q_rotate_dst,q_rotate_to);
+  if (q_rotation==0.0) { return q_rotate_dst; }
+  let q_rotation_alpha=q_rotate_step/q_rotation;
+  if (q_rotation_alpha>1.0) { q_rotation_alpha=1.0; }
+  return Quaternion_slerp(q_rotate_dst,q_rotate_to,q_rotation_alpha);
+}
+
+function Quaternion_equals(q_equal_a, ...q_equal_args) {
+  let q_equal_b=q_equal_args[0];
+  return ux_f64(q_equal_a)==ux_f64(q_equal_b) && ux_f64(q_equal_a+8)==ux_f64(q_equal_b+8) &&
+      ux_f64(q_equal_a+16)==ux_f64(q_equal_b+16) && ux_f64(q_equal_a+24)==ux_f64(q_equal_b+24);
+}
+
+function Quaternion_arrayOffset(q_array_base, ...q_array_args) {
+  let q_array_at=0-1;
+  if (q_array_base>=0 && q_array_base<=6291424) {
+    q_array_at=ux_typed_index(q_array_base,(6291424-q_array_base)/8+1,q_array_args[0],8);
+  }
+  return q_array_at;
+}
+
+function Quaternion_fromArray(q_from_array_dst, ...q_from_array_args) {
+  let q_from=Quaternion_arrayOffset(q_from_array_args[0],q_from_array_args[1]);
+  let q_from_status=q_from;
+  if (q_from>=0) { q_from_status=Quaternion_copy(q_from_array_dst,q_from); }
+  return q_from_status;
+}
+
+function Quaternion_toArray(q_to_array_src, ...q_to_array_args) {
+  let q_to=Quaternion_arrayOffset(q_to_array_args[0],q_to_array_args[1]);
+  let q_to_status=q_to;
+  if (q_to>=0) { q_to_status=Quaternion_copy(q_to,q_to_array_src); }
+  return q_to_status;
+}
+
+function Quaternion_toJSON(q_json_src, ...q_json_args) {
+  return Quaternion_toArray(q_json_src,q_json_args[0],0);
+}
+
+function Quaternion_fromBufferAttribute(q_attr_dst, ...q_attr_args) {
+  let q_attr_stride=q_attr_args[3];
+  let q_attr_at=0-1;
+  if (q_attr_stride>=16) {
+    q_attr_at=ux_record_index(q_attr_args[0],q_attr_args[1],q_attr_args[2],q_attr_stride,4);
+  }
+  let q_attr_status=q_attr_at;
+  if (q_attr_at>=0) {
+    q_attr_status=Quaternion_set(q_attr_dst,ux_f32(q_attr_at),ux_f32(q_attr_at+4),
+        ux_f32(q_attr_at+8),ux_f32(q_attr_at+12));
+  }
+  return q_attr_status;
+}
+
+function Quaternion_multiplyQuaternionsFlat(q_flat_dst, ...q_flat_args) {
+  let q_flat_target=Quaternion_arrayOffset(q_flat_dst,q_flat_args[0]);
+  let q_flat_lhs=Quaternion_arrayOffset(q_flat_args[1],q_flat_args[2]);
+  let q_flat_rhs=Quaternion_arrayOffset(q_flat_args[3],q_flat_args[4]);
+  let q_flat_result=0-1;
+  if (q_flat_target>=0 && q_flat_lhs>=0 && q_flat_rhs>=0) {
+    let q_flat_mul=Quaternion_multiplyQuaternions(q_flat_target,q_flat_lhs,q_flat_rhs);
+    q_flat_result=q_flat_dst;
+  }
+  return q_flat_result;
+}
+
+function Quaternion_slerpFlat(q_flat_interp_base, ...q_flat_interp_args) {
+  let q_flat_interp_target=Quaternion_arrayOffset(q_flat_interp_base,f64_floor_i64(q_flat_interp_args[0]));
+  let q_flat_interp_a=Quaternion_arrayOffset(f64_floor_i64(q_flat_interp_args[1]),f64_floor_i64(q_flat_interp_args[2]));
+  let q_flat_interp_b=Quaternion_arrayOffset(f64_floor_i64(q_flat_interp_args[3]),f64_floor_i64(q_flat_interp_args[4]));
+  let q_flat_interp_result=0-1;
+  if (q_flat_interp_target>=0 && q_flat_interp_a>=0 && q_flat_interp_b>=0) {
+    let q_flat_blended=Quaternion_slerpQuaternions(q_flat_interp_target,q_flat_interp_a,q_flat_interp_b,q_flat_interp_args[5]);
+    q_flat_interp_result=q_flat_interp_base;
+  }
+  return q_flat_interp_result;
+}
+
+function Quaternion_random(q_rand_dst, ...q_rand_args) {
+  let q_rand_1=f64_sqrt(1.0-q_rand_args[0]);
+  let q_rand_2=f64_sqrt(q_rand_args[0]);
+  let q_rand_angle_a=q_rand_args[1]*6.283185307179586;
+  let q_rand_angle_b=q_rand_args[2]*6.283185307179586;
+  return Quaternion_set(q_rand_dst,q_rand_1*ux_math_cos(q_rand_angle_a),
+      q_rand_2*ux_math_sin(q_rand_angle_b),q_rand_2*ux_math_cos(q_rand_angle_b),q_rand_1*ux_math_sin(q_rand_angle_a));
+}

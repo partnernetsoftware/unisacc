@@ -1,0 +1,250 @@
+struct Color { r: f64; g: f64; b: f64; }
+
+native function Color_setRGB(c_dst:i64,c_red:f64,c_green:f64,c_blue:f64) i64 {
+  let c_span=ux_span(c_dst,Color.size);
+  let c_write_r=ux_f64_put(c_dst+Color.r,c_red);
+  let c_write_g=ux_f64_put(c_dst+Color.g,c_green);
+  let c_write_b=ux_f64_put(c_dst+Color.b,c_blue);
+  return c_dst;
+}
+
+function Color_set(c_set,...c_set_args) {
+  return Color_setRGB(c_set,c_set_args[0],c_set_args[1],c_set_args[2]);
+}
+
+function Color_copy(c_copy_dst,...c_copy_args) {
+  let c_source=c_copy_args[0];
+  return Color_setRGB(c_copy_dst,ux_f64(c_source),ux_f64(c_source+8),ux_f64(c_source+16));
+}
+
+function Color_clone(c_clone_dst,...c_clone_args) {
+  return Color_copy(c_clone_dst,c_clone_args[0]);
+}
+
+native function Color_srgbToLinear(c_srgb:f64) f64 {
+  if(c_srgb<0.04045) { return c_srgb*0.0773993808; }
+  return ux_math_pow(c_srgb*0.9478672986+0.0521327014,2.4);
+}
+
+native function Color_linearToSrgb(c_linear:f64) f64 {
+  if(c_linear<0.0031308) { return c_linear*12.92; }
+  return 1.055*ux_math_pow(c_linear,0.41666)-0.055;
+}
+
+function Color_copySRGBToLinear(c_decode_dst,...c_decode_args) {
+  let c_decode_src=c_decode_args[0];
+  return Color_setRGB(c_decode_dst,Color_srgbToLinear(ux_f64(c_decode_src)),
+      Color_srgbToLinear(ux_f64(c_decode_src+8)),Color_srgbToLinear(ux_f64(c_decode_src+16)));
+}
+
+function Color_copyLinearToSRGB(c_encode_dst,...c_encode_args) {
+  let c_encode_src=c_encode_args[0];
+  return Color_setRGB(c_encode_dst,Color_linearToSrgb(ux_f64(c_encode_src)),
+      Color_linearToSrgb(ux_f64(c_encode_src+8)),Color_linearToSrgb(ux_f64(c_encode_src+16)));
+}
+
+function Color_convertSRGBToLinear(c_convert_decode) {
+  return Color_copySRGBToLinear(c_convert_decode,c_convert_decode);
+}
+
+function Color_convertLinearToSRGB(c_convert_encode) {
+  return Color_copyLinearToSRGB(c_convert_encode,c_convert_encode);
+}
+
+native function Color_setHex(c_hex_dst:i64,c_hex:i64,c_hex_srgb:i64) i64 {
+  let c_hex_word=c_hex%16777216;
+  if(c_hex_word<0) { c_hex_word=c_hex_word+16777216; }
+  let c_hex_r=(c_hex_word/65536)/255.0;
+  let c_hex_g=(c_hex_word/256%256)/255.0;
+  let c_hex_b=(c_hex_word%256)/255.0;
+  if(c_hex_srgb!=0) {
+    return Color_setRGB(c_hex_dst,Color_srgbToLinear(c_hex_r),Color_srgbToLinear(c_hex_g),Color_srgbToLinear(c_hex_b));
+  }
+  return Color_setRGB(c_hex_dst,c_hex_r,c_hex_g,c_hex_b);
+}
+
+native function Color_packChannel(c_channel:f64) i64 {
+  return f64_floor_i64(vector_limit(c_channel,0.0,1.0)*255.0+0.5);
+}
+
+function Color_getHex(c_pack_src,...c_pack_args) {
+  let c_pack_r=ux_f64(c_pack_src);
+  let c_pack_g=ux_f64(c_pack_src+8);
+  let c_pack_b=ux_f64(c_pack_src+16);
+  if(c_pack_args[0]!=0) {
+    c_pack_r=Color_linearToSrgb(c_pack_r);
+    c_pack_g=Color_linearToSrgb(c_pack_g);
+    c_pack_b=Color_linearToSrgb(c_pack_b);
+  }
+  return Color_packChannel(c_pack_r)*65536+Color_packChannel(c_pack_g)*256+Color_packChannel(c_pack_b);
+}
+
+function Color_toJSON(c_json) {
+  return Color_getHex(c_json,1);
+}
+
+function Color_getHexString(c_string_src,...c_string_args) {
+  let c_string_hex=Color_getHex(c_string_src,c_string_args[0]);
+  let c_string_result="";
+  let c_string_index=0;
+  while(c_string_index<6) {
+    let c_string_digit=c_string_hex%16;
+    c_string_result=str_slice("0123456789abcdef",c_string_digit,c_string_digit+1)+c_string_result;
+    c_string_hex=c_string_hex/16;
+    c_string_index=c_string_index+1;
+  }
+  return c_string_result;
+}
+
+function Color_getRGB(c_rgb_dst,...c_rgb_args) {
+  let c_rgb_src=c_rgb_args[0];
+  let c_rgb_result=c_rgb_dst;
+  if(c_rgb_args[1]!=0) { c_rgb_result=Color_copyLinearToSRGB(c_rgb_dst,c_rgb_src); }
+  else { c_rgb_result=Color_copy(c_rgb_dst,c_rgb_src); }
+  return c_rgb_result;
+}
+
+native function Color_setScalar(c_scalar_dst:i64,c_scalar:f64) i64 {
+  return Color_setRGB(c_scalar_dst,c_scalar,c_scalar,c_scalar);
+}
+
+function Color_addColors(c_add_dst,...c_add_args) {
+  let c_add_a=c_add_args[0]; let c_add_b=c_add_args[1];
+  return Color_setRGB(c_add_dst,ux_f64(c_add_a)+ux_f64(c_add_b),
+      ux_f64(c_add_a+8)+ux_f64(c_add_b+8),ux_f64(c_add_a+16)+ux_f64(c_add_b+16));
+}
+
+function Color_add(c_add_self,...c_add_one) {
+  return Color_addColors(c_add_self,c_add_self,c_add_one[0]);
+}
+
+function Color_addScalar(c_add_scalar_dst,...c_add_scalar_args) {
+  let c_add_scalar=c_add_scalar_args[0];
+  return Color_setRGB(c_add_scalar_dst,ux_f64(c_add_scalar_dst)+c_add_scalar,
+      ux_f64(c_add_scalar_dst+8)+c_add_scalar,ux_f64(c_add_scalar_dst+16)+c_add_scalar);
+}
+
+function Color_sub(c_sub_dst,...c_sub_args) {
+  let c_sub_src=c_sub_args[0];
+  return Color_setRGB(c_sub_dst,vector_limit(ux_f64(c_sub_dst)-ux_f64(c_sub_src),0.0,1.0/0.0),
+      vector_limit(ux_f64(c_sub_dst+8)-ux_f64(c_sub_src+8),0.0,1.0/0.0),
+      vector_limit(ux_f64(c_sub_dst+16)-ux_f64(c_sub_src+16),0.0,1.0/0.0));
+}
+
+function Color_multiply(c_mul_dst,...c_mul_args) {
+  let c_mul_src=c_mul_args[0];
+  return Color_setRGB(c_mul_dst,ux_f64(c_mul_dst)*ux_f64(c_mul_src),
+      ux_f64(c_mul_dst+8)*ux_f64(c_mul_src+8),ux_f64(c_mul_dst+16)*ux_f64(c_mul_src+16));
+}
+
+function Color_multiplyScalar(c_scale_dst,...c_scale_args) {
+  let c_scale=c_scale_args[0];
+  return Color_setRGB(c_scale_dst,ux_f64(c_scale_dst)*c_scale,
+      ux_f64(c_scale_dst+8)*c_scale,ux_f64(c_scale_dst+16)*c_scale);
+}
+
+native function Color_lerpColors(c_lerp_dst:i64,c_lerp_a:i64,c_lerp_b:i64,c_alpha:f64) i64 {
+  let c_lerp_r=ux_f64(c_lerp_a); let c_lerp_g=ux_f64(c_lerp_a+8); let c_lerp_blue=ux_f64(c_lerp_a+16);
+  return Color_setRGB(c_lerp_dst,c_lerp_r+(ux_f64(c_lerp_b)-c_lerp_r)*c_alpha,
+      c_lerp_g+(ux_f64(c_lerp_b+8)-c_lerp_g)*c_alpha,
+      c_lerp_blue+(ux_f64(c_lerp_b+16)-c_lerp_blue)*c_alpha);
+}
+
+function Color_lerp(c_lerp_self,...c_lerp_one) {
+  return Color_lerpColors(c_lerp_self,c_lerp_self,f64_floor_i64(c_lerp_one[0]),c_lerp_one[1]);
+}
+
+native function Color_hue(c_hue_low:f64,c_hue_high:f64,c_hue_value:f64) f64 {
+  let c_hue_wrapped=c_hue_value-f64_floor_i64(c_hue_value);
+  if(c_hue_wrapped<1.0/6.0) { return c_hue_low+(c_hue_high-c_hue_low)*6.0*c_hue_wrapped; }
+  if(c_hue_wrapped<0.5) { return c_hue_high; }
+  if(c_hue_wrapped<2.0/3.0) { return c_hue_low+(c_hue_high-c_hue_low)*6.0*(2.0/3.0-c_hue_wrapped); }
+  return c_hue_low;
+}
+
+native function Color_setHSL(c_hsl_dst:i64,c_hsl_h:f64,c_hsl_s:f64,c_hsl_l:f64) i64 {
+  let c_sat=vector_limit(c_hsl_s,0.0,1.0);
+  let c_light=vector_limit(c_hsl_l,0.0,1.0);
+  if(c_sat==0.0) { return Color_setScalar(c_hsl_dst,c_light); }
+  let c_top=c_light*(1.0+c_sat);
+  if(c_light>0.5) { c_top=c_light+c_sat-c_light*c_sat; }
+  let c_bottom=2.0*c_light-c_top;
+  return Color_setRGB(c_hsl_dst,Color_hue(c_bottom,c_top,c_hsl_h+1.0/3.0),
+    Color_hue(c_bottom,c_top,c_hsl_h),Color_hue(c_bottom,c_top,c_hsl_h-1.0/3.0));
+}
+
+native function Color_getHSL(c_get_dst:i64,c_get_src:i64) i64 {
+  let c_get_r=ux_f64(c_get_src);
+  let c_get_g=ux_f64(c_get_src+8);
+  let c_get_b=ux_f64(c_get_src+16);
+  let c_get_max=c_get_r;
+  let c_get_min=c_get_r;
+  if(c_get_g>c_get_max) { c_get_max=c_get_g; }
+  if(c_get_b>c_get_max) { c_get_max=c_get_b; }
+  if(c_get_g<c_get_min) { c_get_min=c_get_g; }
+  if(c_get_b<c_get_min) { c_get_min=c_get_b; }
+  let c_get_light=(c_get_min+c_get_max)*0.5;
+  let c_get_delta=c_get_max-c_get_min;
+  if(c_get_delta==0.0) { return Color_setRGB(c_get_dst,0.0,0.0,c_get_light); }
+  let c_get_saturation=c_get_delta/(c_get_max+c_get_min);
+  if(c_get_light>0.5) { c_get_saturation=c_get_delta/(2.0-c_get_max-c_get_min); }
+  let c_get_hue=0.0;
+  if(c_get_max==c_get_r) {
+    c_get_hue=(c_get_g-c_get_b)/c_get_delta;
+    if(c_get_g<c_get_b) { c_get_hue=c_get_hue+6.0; }
+  } else if(c_get_max==c_get_g) {
+    c_get_hue=(c_get_b-c_get_r)/c_get_delta+2.0;
+  } else {
+    c_get_hue=(c_get_r-c_get_g)/c_get_delta+4.0;
+  }
+  return Color_setRGB(c_get_dst,c_get_hue/6.0,c_get_saturation,c_get_light);
+}
+
+function Color_offsetHSL(c_offset_src,...c_offset_args) {
+  let c_offset_record=Color_getHSL(f64_floor_i64(c_offset_args[3]),c_offset_src);
+  return Color_setHSL(c_offset_src,ux_f64(c_offset_record)+c_offset_args[0],
+      ux_f64(c_offset_record+8)+c_offset_args[1],ux_f64(c_offset_record+16)+c_offset_args[2]);
+}
+
+function Color_lerpHSL(c_mix_hsl_src,...c_mix_hsl_args) {
+  let c_mix_hsl_color=f64_floor_i64(c_mix_hsl_args[0]);
+  let c_mix_hsl_tmp=f64_floor_i64(c_mix_hsl_args[2]);
+  let c_mix_hsl_a=Color_getHSL(c_mix_hsl_tmp,c_mix_hsl_src);
+  let c_mix_hsl_b=Color_getHSL(c_mix_hsl_tmp+24,c_mix_hsl_color);
+  let c_mix_hsl_result=Color_lerpColors(c_mix_hsl_a,c_mix_hsl_a,c_mix_hsl_b,c_mix_hsl_args[1]);
+  return Color_setHSL(c_mix_hsl_src,ux_f64(c_mix_hsl_result),ux_f64(c_mix_hsl_result+8),ux_f64(c_mix_hsl_result+16));
+}
+
+function Color_applyMatrix3(c_matrix_dst,...c_matrix_args) {
+  let c_matrix=c_matrix_args[0];
+  let c_matrix_r=ux_f64(c_matrix_dst);
+  let c_matrix_g=ux_f64(c_matrix_dst+8);
+  let c_matrix_b=ux_f64(c_matrix_dst+16);
+  return Color_setRGB(c_matrix_dst,
+      ux_f64(c_matrix)*c_matrix_r+ux_f64(c_matrix+24)*c_matrix_g+ux_f64(c_matrix+48)*c_matrix_b,
+      ux_f64(c_matrix+8)*c_matrix_r+ux_f64(c_matrix+32)*c_matrix_g+ux_f64(c_matrix+56)*c_matrix_b,
+      ux_f64(c_matrix+16)*c_matrix_r+ux_f64(c_matrix+40)*c_matrix_g+ux_f64(c_matrix+64)*c_matrix_b);
+}
+
+function Color_equals(c_eq_dst,...c_eq_args) {
+  let c_eq_src=c_eq_args[0];
+  return ux_f64(c_eq_dst)==ux_f64(c_eq_src) && ux_f64(c_eq_dst+8)==ux_f64(c_eq_src+8) &&
+      ux_f64(c_eq_dst+16)==ux_f64(c_eq_src+16);
+}
+
+function Color_setFromVector3(c_v_dst,...c_v_args) {
+  return Color_copy(c_v_dst,c_v_args[0]);
+}
+
+function Color_fromArray(c_array_dst,...c_array_args) {
+  return Color_copy(c_array_dst,c_array_args[0]+8*c_array_args[1]);
+}
+
+function Color_toArray(c_out_src,...c_out_args) {
+  return Color_copy(c_out_args[0]+8*c_out_args[1],c_out_src);
+}
+
+function Color_fromBufferAttribute(c_attr_dst,...c_attr_args) {
+  let c_attr_start=c_attr_args[0]+c_attr_args[1]*c_attr_args[2];
+  return Color_setRGB(c_attr_dst,ux_f32(c_attr_start),ux_f32(c_attr_start+4),ux_f32(c_attr_start+8));
+}

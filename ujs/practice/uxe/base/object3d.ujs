@@ -1,0 +1,420 @@
+// Arena header: capacity at byte 0, slots starting at byte 8. Each slot is 424 bytes.
+// Handles are generation:16 | (slot+1):16. Zero denotes no node; -1 rejects a stale handle.
+// Object3D, Group and Scene share the prefix. Slot byte 84 is the occupancy flag.
+native function Object3D_initArena(o_arena:i64,o_capacity:i64) i64 {
+  if(o_arena<0 || o_arena>6291448 || o_arena%8!=0 || o_capacity<1 ||
+      o_capacity>(6291448-o_arena)/424) { return 0-1; }
+  let o_arena_span=ux_span(o_arena,8+424*o_capacity);
+  let o_write_capacity=ux_u32_put(o_arena,o_capacity);
+  let o_init_index=0;
+  while(o_init_index<o_capacity) {
+    let o_init_slot=o_arena+8+424*o_init_index;
+    let o_init_gen=ux_u32_put(o_init_slot+Object3D.generation,1);
+    let o_init_free=ux_u32_put(o_init_slot+84,0);
+    o_init_index=o_init_index+1;
+  }
+  return o_arena;
+}
+
+native function Object3D_address(o_addr_arena:i64,o_handle:i64) i64 {
+  if(o_handle<=0 || o_handle>4294967295) { return 0-1; }
+  let o_index=o_handle%65536-1;
+  let o_count=ux_u32(o_addr_arena);
+  if(o_index<0 || o_index>=o_count) { return 0-1; }
+  let o_address=o_addr_arena+8+424*o_index;
+  if(ux_u32(o_address+84)==0 || ux_u32(o_address+Object3D.generation)!=o_handle/65536) { return 0-1; }
+  return o_address;
+}
+
+native function Object3D_create(o_new_arena:i64) i64 {
+  let o_new_count=ux_u32(o_new_arena);
+  let o_new_index=0;
+  while(o_new_index<o_new_count) {
+    let o_new=o_new_arena+8+424*o_new_index;
+    let o_gen=ux_u32(o_new+Object3D.generation);
+    if(ux_u32(o_new+84)==0 && o_gen<65535) {
+      let o_zero_index=0;
+      while(o_zero_index<424) {
+        let o_zero_write=ux_u32_put(o_new+o_zero_index,0);
+        o_zero_index=o_zero_index+4;
+      }
+      let o_write_gen=ux_u32_put(o_new+Object3D.generation,o_gen);
+      let o_occupied=ux_u32_put(o_new+84,1);
+      let o_visible=ux_u32_put(o_new+Object3D.visible,1);
+      let o_layer=ux_u32_put(o_new+Object3D.layerMask,1);
+      let o_dirty=ux_u32_put(o_new+Object3D.dirty,3);
+      let o_local=ux_u32_put(o_new+Object3D.localMatrix,o_new+88);
+      let o_world=ux_u32_put(o_new+Object3D.worldMatrix,o_new+216);
+      let o_pos=ux_u32_put(o_new+Object3D.position,o_new+344);
+      let o_quat=ux_u32_put(o_new+Object3D.quaternion,o_new+368);
+      let o_scale=ux_u32_put(o_new+Object3D.scale,o_new+400);
+      let o_quat_w=ux_f64_put(o_new+392,1.0);
+      let o_sx=ux_f64_put(o_new+400,1.0);
+      let o_sy=ux_f64_put(o_new+408,1.0);
+      let o_sz=ux_f64_put(o_new+416,1.0);
+      let o_diag=0;
+      while(o_diag<160) {
+        let o_local_identity=ux_f64_put(o_new+88+o_diag,1.0);
+        let o_world_identity=ux_f64_put(o_new+216+o_diag,1.0);
+        o_diag=o_diag+40;
+      }
+      return o_gen*65536+o_new_index+1;
+    }
+    o_new_index=o_new_index+1;
+  }
+  return 0-2;
+}
+
+native function Object3D_unlink(o_unlink_arena:i64,o_unlink_node:i64) i64 {
+  let o_parent_handle=ux_u32(o_unlink_node+Object3D.parent);
+  if(o_parent_handle==0) { return o_unlink_node; }
+  let o_unlink_parent=Object3D_address(o_unlink_arena,o_parent_handle);
+  let o_previous_handle=ux_u32(o_unlink_node+Object3D.prevSibling);
+  let o_next_handle=ux_u32(o_unlink_node+Object3D.nextSibling);
+  if(o_previous_handle==0) {
+    let o_first=ux_u32_put(o_unlink_parent+Object3D.firstChild,o_next_handle);
+  } else {
+    let o_unlink_previous=Object3D_address(o_unlink_arena,o_previous_handle);
+    let o_previous_next=ux_u32_put(o_unlink_previous+Object3D.nextSibling,o_next_handle);
+  }
+  if(o_next_handle==0) {
+    let o_last=ux_u32_put(o_unlink_parent+Object3D.lastChild,o_previous_handle);
+  } else {
+    let o_unlink_next=Object3D_address(o_unlink_arena,o_next_handle);
+    let o_next_previous=ux_u32_put(o_unlink_next+Object3D.prevSibling,o_previous_handle);
+  }
+  let o_clear_parent=ux_u32_put(o_unlink_node+Object3D.parent,0);
+  let o_clear_previous=ux_u32_put(o_unlink_node+Object3D.prevSibling,0);
+  let o_clear_next=ux_u32_put(o_unlink_node+Object3D.nextSibling,0);
+  let o_unlink_dirty=ux_u32_put(o_unlink_node+Object3D.dirty,u32_or(ux_u32(o_unlink_node+Object3D.dirty),2));
+  return o_unlink_node;
+}
+
+native function Object3D_add(o_add_arena:i64,o_parent:i64,o_child:i64) i64 {
+  let o_new_parent=Object3D_address(o_add_arena,o_parent);
+  let o_child_node=Object3D_address(o_add_arena,o_child);
+  if(o_new_parent<0 || o_child_node<0) { return 0-1; }
+  let o_ancestor=o_parent;
+  while(o_ancestor!=0) {
+    if(o_ancestor==o_child) { return 0-3; }
+    let o_ancestor_at=Object3D_address(o_add_arena,o_ancestor);
+    o_ancestor=ux_u32(o_ancestor_at+Object3D.parent);
+  }
+  let o_detached=Object3D_unlink(o_add_arena,o_child_node);
+  let o_tail=ux_u32(o_new_parent+Object3D.lastChild);
+  if(o_tail==0) {
+    let o_new_first=ux_u32_put(o_new_parent+Object3D.firstChild,o_child);
+  } else {
+    let o_tail_node=Object3D_address(o_add_arena,o_tail);
+    let o_append=ux_u32_put(o_tail_node+Object3D.nextSibling,o_child);
+  }
+  let o_new_last=ux_u32_put(o_new_parent+Object3D.lastChild,o_child);
+  let o_child_previous=ux_u32_put(o_detached+Object3D.prevSibling,o_tail);
+  let o_child_parent=ux_u32_put(o_detached+Object3D.parent,o_parent);
+  let o_append_dirty=ux_u32_put(o_detached+Object3D.dirty,u32_or(ux_u32(o_detached+Object3D.dirty),2));
+  return o_parent;
+}
+
+native function Object3D_remove(o_rm_arena:i64,o_rm_parent:i64,o_rm_child:i64) i64 {
+  if(Object3D_address(o_rm_arena,o_rm_parent)<0) { return 0-1; }
+  let o_rm_node=Object3D_address(o_rm_arena,o_rm_child);
+  if(o_rm_node<0) { return 0-1; }
+  if(ux_u32(o_rm_node+Object3D.parent)==o_rm_parent) { let o_removed=Object3D_unlink(o_rm_arena,o_rm_node); }
+  return o_rm_parent;
+}
+
+native function Object3D_clear(o_clear_arena:i64,o_clear_handle:i64) i64 {
+  let o_clear_node=Object3D_address(o_clear_arena,o_clear_handle);
+  if(o_clear_node<0) { return 0-1; }
+  let o_clear_child=ux_u32(o_clear_node+Object3D.firstChild);
+  while(o_clear_child!=0) {
+    let o_clear_child_node=Object3D_address(o_clear_arena,o_clear_child);
+    let o_clear_detached=Object3D_unlink(o_clear_arena,o_clear_child_node);
+    o_clear_child=ux_u32(o_clear_node+Object3D.firstChild);
+  }
+  return o_clear_handle;
+}
+
+native function Object3D_destroy(o_destroy_arena:i64,o_destroy_handle:i64) i64 {
+  let o_destroy_node=Object3D_address(o_destroy_arena,o_destroy_handle);
+  if(o_destroy_node<0) { return 0-1; }
+  let o_destroy_detached=Object3D_unlink(o_destroy_arena,o_destroy_node);
+  let o_destroy_children=Object3D_clear(o_destroy_arena,o_destroy_handle);
+  let o_destroy_gen=ux_u32_put(o_destroy_node+Object3D.generation,o_destroy_handle/65536+1);
+  let o_destroy_slot=ux_u32_put(o_destroy_node+84,0);
+  return 0;
+}
+
+native function Object3D_traverseNext(o_walk:i64,o_root:i64,o_current:i64,o_descend:i64) i64 {
+  let o_cursor=o_current;
+  let o_current_node=Object3D_address(o_walk,o_cursor);
+  if(o_current_node<0) { return 0-1; }
+  let o_walk_child=ux_u32(o_current_node+Object3D.firstChild);
+  if(o_descend!=0 && o_walk_child!=0) { return o_walk_child; }
+  while(o_cursor!=o_root && o_cursor!=0) {
+    let o_walk_at=Object3D_address(o_walk,o_cursor);
+    let o_sibling=ux_u32(o_walk_at+Object3D.nextSibling);
+    if(o_sibling!=0) { return o_sibling; }
+    o_cursor=ux_u32(o_walk_at+Object3D.parent);
+  }
+  return 0;
+}
+
+function Object3D_markDirty(o_dirty_arena,...o_dirty_args) {
+  let o_dirty_at=Object3D_address(o_dirty_arena,o_dirty_args[0]);
+  if(o_dirty_at>=0) { let o_dirty_write=ux_u32_put(o_dirty_at+Object3D.dirty,3); }
+  return o_dirty_at;
+}
+
+function Object3D_setVisible(o_show_arena,...o_show_args) {
+  let o_show_at=Object3D_address(o_show_arena,o_show_args[0]);
+  if(o_show_at>=0) { let o_show_write=ux_u32_put(o_show_at+Object3D.visible,o_show_args[1]!=0); }
+  return o_show_at;
+}
+
+native function Object3D_updateMatrix(o_matrix_arena:i64,o_matrix_handle:i64) i64 {
+  let o_matrix_node=Object3D_address(o_matrix_arena,o_matrix_handle);
+  if(o_matrix_node<0) { return 0-1; }
+  let o_matrix_local=ux_u32(o_matrix_node+Object3D.localMatrix);
+  let o_composed=Matrix4_compose(o_matrix_local,ux_u32(o_matrix_node+Object3D.position),
+    ux_u32(o_matrix_node+Object3D.quaternion),ux_u32(o_matrix_node+Object3D.scale));
+  let o_world_dirty=ux_u32_put(o_matrix_node+Object3D.dirty,2);
+  return o_composed;
+}
+
+native function Object3D_updateOne(o_one_arena:i64,o_one_handle:i64,o_force:i64) i64 {
+  let o_one=Object3D_address(o_one_arena,o_one_handle);
+  if(o_one<0) { return 0-1; }
+  let o_flags=ux_u32(o_one+Object3D.dirty);
+  let o_one_world=ux_u32(o_one+Object3D.worldMatrix);
+  if(o_flags==0 && o_force==0) { return o_one_world; }
+  let o_one_local=ux_u32(o_one+Object3D.localMatrix);
+  if(u32_and(o_flags,1)!=0) { o_one_local=Object3D_updateMatrix(o_one_arena,o_one_handle); }
+  let o_p=ux_u32(o_one+Object3D.parent);
+  if(o_p==0) {
+    let o_copied=Matrix4_copy(o_one_world,o_one_local);
+  } else {
+    let o_p_node=Object3D_address(o_one_arena,o_p);
+    let o_p_matrix=ux_u32(o_p_node+Object3D.worldMatrix);
+    let o_multiplied=Matrix4_multiplyMatrices(o_one_world,o_p_matrix,o_one_local);
+  }
+  let o_clean=ux_u32_put(o_one+Object3D.dirty,0);
+  let o_dirty_child=ux_u32(o_one+Object3D.firstChild);
+  while(o_dirty_child!=0) {
+    let o_dirty_child_at=Object3D_address(o_one_arena,o_dirty_child);
+    let o_flagged=ux_u32_put(o_dirty_child_at+Object3D.dirty,u32_or(ux_u32(o_dirty_child_at+Object3D.dirty),2));
+    o_dirty_child=ux_u32(o_dirty_child_at+Object3D.nextSibling);
+  }
+  return o_one_world;
+}
+
+native function Object3D_updateMatrixWorld(o_update_arena:i64,o_update_root:i64,o_update_force:i64) i64 {
+  if(Object3D_address(o_update_arena,o_update_root)<0) { return 0-1; }
+  let o_update_node=o_update_root;
+  while(o_update_node!=0) {
+    let o_updated=Object3D_updateOne(o_update_arena,o_update_node,o_update_force);
+    o_update_node=Object3D_traverseNext(o_update_arena,o_update_root,o_update_node,1);
+  }
+  return o_update_root;
+}
+
+native function Object3D_updateWorldMatrix(o_sync_arena:i64,o_sync_root:i64,o_sync_parents:i64,o_sync_children:i64) i64 {
+  let o_sync_address=Object3D_address(o_sync_arena,o_sync_root);
+  if(o_sync_address<0) { return 0-1; }
+  if(o_sync_parents!=0) {
+    let o_path=list(ux_u32(o_sync_arena));
+    let o_path_count=0;
+    let o_path_node=ux_u32(o_sync_address+Object3D.parent);
+    while(o_path_node!=0) {
+      o_path[o_path_count]=o_path_node;
+      o_path_count=o_path_count+1;
+      let o_path_at=Object3D_address(o_sync_arena,o_path_node);
+      o_path_node=ux_u32(o_path_at+Object3D.parent);
+    }
+    while(o_path_count>0) {
+      o_path_count=o_path_count-1;
+      let o_path_updated=Object3D_updateOne(o_sync_arena,o_path[o_path_count],0);
+    }
+  }
+  if(o_sync_children!=0) { return Object3D_updateMatrixWorld(o_sync_arena,o_sync_root,0); }
+  let o_sync_done=Object3D_updateOne(o_sync_arena,o_sync_root,0);
+  return o_sync_root;
+}
+
+function Object3D_getWorldPosition(o_point_dst,...o_point_args) {
+  let o_point_arena=o_point_args[0];
+  let o_point_handle=o_point_args[1];
+  let o_point_result=Object3D_updateWorldMatrix(o_point_arena,o_point_handle,1,0);
+  if(o_point_result>=0) {
+    let o_point_at=Object3D_address(o_point_arena,o_point_handle);
+    let o_point_matrix=ux_u32(o_point_at+Object3D.worldMatrix);
+    let o_point_x=ux_f64_put(o_point_dst,ux_f64(o_point_matrix+96));
+    let o_point_y=ux_f64_put(o_point_dst+8,ux_f64(o_point_matrix+104));
+    let o_point_z=ux_f64_put(o_point_dst+16,ux_f64(o_point_matrix+112));
+    o_point_result=o_point_dst;
+  }
+  return o_point_result;
+}
+
+function Object3D_getWorldMatrix(o_world_arena,...o_world_args) {
+  let o_world_node=o_world_args[0];
+  let o_world_result=Object3D_updateWorldMatrix(o_world_arena,o_world_node,1,0);
+  if(o_world_result>=0) {
+    let o_world_at=Object3D_address(o_world_arena,o_world_node);
+    o_world_result=ux_u32(o_world_at+Object3D.worldMatrix);
+  }
+  return o_world_result;
+}
+
+function Object3D_getWorldQuaternion(o_qout,...o_q_args) {
+  let o_qworld=Object3D_getWorldMatrix(o_q_args[0],o_q_args[1]);
+  let o_qresult=o_qworld;
+  if(o_qworld>=0) {
+    let o_qscratch=o_q_args[2];
+    let o_qtrs=Matrix4_decompose(o_qworld,o_qscratch,o_qout,o_qscratch+24);
+    o_qresult=o_qout;
+  }
+  return o_qresult;
+}
+
+function Object3D_getWorldScale(o_sout,...o_s_args) {
+  let o_sworld=Object3D_getWorldMatrix(o_s_args[0],o_s_args[1]);
+  let o_sresult=o_sworld;
+  if(o_sworld>=0) {
+    let o_sscratch=o_s_args[2];
+    let o_strs=Matrix4_decompose(o_sworld,o_sscratch,o_sscratch+24,o_sout);
+    o_sresult=o_sout;
+  }
+  return o_sresult;
+}
+
+function Object3D_getWorldDirection(o_dout,...o_d_args) {
+  let o_dworld=Object3D_getWorldMatrix(o_d_args[0],o_d_args[1]);
+  let o_dresult=o_dworld;
+  if(o_dworld>=0) {
+    let o_dx=ux_f64(o_dworld+64); let o_dy=ux_f64(o_dworld+72); let o_dz=ux_f64(o_dworld+80);
+    let o_dlength=f64_sqrt(o_dx*o_dx+o_dy*o_dy+o_dz*o_dz);
+    if(o_dlength==0.0) { o_dlength=1.0; }
+    let o_dwrite_x=ux_f64_put(o_dout,o_dx/o_dlength);
+    let o_dwrite_y=ux_f64_put(o_dout+8,o_dy/o_dlength);
+    let o_dwrite_z=ux_f64_put(o_dout+16,o_dz/o_dlength);
+    o_dresult=o_dout;
+  }
+  return o_dresult;
+}
+
+function Object3D_setTRSPart(o_part_arena,...o_part_args) {
+  let o_part_at=Object3D_address(o_part_arena,o_part_args[0]);
+  if(o_part_at>=0) {
+    let o_part_dst=ux_u32(o_part_at+o_part_args[1]);
+    let o_part_src=o_part_args[2];
+    let o_part_bytes=o_part_args[3];
+    let o_part_offset=0;
+    while(o_part_offset<o_part_bytes) {
+      let o_part_copy=ux_f64_put(o_part_dst+o_part_offset,ux_f64(o_part_src+o_part_offset));
+      o_part_offset=o_part_offset+8;
+    }
+    let o_part_dirty=ux_u32_put(o_part_at+Object3D.dirty,3);
+  }
+  return o_part_at;
+}
+
+function Object3D_setPosition(o_position_arena,...o_position_args) {
+  return Object3D_setTRSPart(o_position_arena,o_position_args[0],Object3D.position,o_position_args[1],24);
+}
+function Object3D_setScale(o_scale_arena,...o_scale_args) {
+  return Object3D_setTRSPart(o_scale_arena,o_scale_args[0],Object3D.scale,o_scale_args[1],24);
+}
+function Object3D_setRotationFromQuaternion(o_rotation_arena,...o_rotation_args) {
+  return Object3D_setTRSPart(o_rotation_arena,o_rotation_args[0],Object3D.quaternion,o_rotation_args[1],32);
+}
+
+function Object3D_removeFromParent(o_detach_arena,...o_detach_args) {
+  let o_detach_handle=o_detach_args[0];
+  let o_detach_result=Object3D_address(o_detach_arena,o_detach_handle);
+  if(o_detach_result>=0) {
+    let o_detach_at=Object3D_unlink(o_detach_arena,o_detach_result);
+    o_detach_result=o_detach_handle;
+  }
+  return o_detach_result;
+}
+
+native function Object3D_walk(o_walk_arena:i64,o_walk_root:i64,o_walk_output:i64,o_walk_count:i64,o_visible_only:i64) i64 {
+  if(Object3D_address(o_walk_arena,o_walk_root)<0 || o_walk_count<0 || o_walk_count>14838) { return 0-1; }
+  let o_walk_span=ux_span(o_walk_output,o_walk_count*4);
+  let o_walk_handle=o_walk_root;
+  let o_walk_written=0;
+  while(o_walk_handle!=0) {
+    let o_walk_node=Object3D_address(o_walk_arena,o_walk_handle);
+    let o_visit=o_visible_only==0 || ux_u32(o_walk_node+Object3D.visible)!=0;
+    if(o_visit) {
+      if(o_walk_written==o_walk_count) { return 0-2; }
+      let o_emit=ux_u32_put(o_walk_output+4*o_walk_written,o_walk_handle);
+      o_walk_written=o_walk_written+1;
+    }
+    o_walk_handle=Object3D_traverseNext(o_walk_arena,o_walk_root,o_walk_handle,o_visit);
+  }
+  return o_walk_written;
+}
+
+function Object3D_traverse(o_all,...o_all_args) {
+  return Object3D_walk(o_all,o_all_args[0],o_all_args[1],o_all_args[2],0);
+}
+
+function Object3D_traverseVisible(o_visible_tree,...o_visible_args) {
+  return Object3D_walk(o_visible_tree,o_visible_args[0],o_visible_args[1],o_visible_args[2],1);
+}
+
+function Object3D_traverseCallback(o_observe,...o_observe_args) {
+  let o_observe_output=o_observe_args[2];
+  let o_observe_count=Object3D_walk(o_observe_args[0],o_observe_args[1],o_observe_output,
+    o_observe_args[3],o_observe_args[4]);
+  let o_observe_index=0;
+  while(o_observe_index<o_observe_count) {
+    let o_observed=o_observe(ux_u32(o_observe_output+4*o_observe_index));
+    o_observe_index=o_observe_index+1;
+  }
+  return o_observe_count;
+}
+
+function Object3D_traverseAncestors(o_parent_observer,...o_parent_observer_args) {
+  let o_observer_tree=o_parent_observer_args[0];
+  let o_observer_at=Object3D_address(o_observer_tree,o_parent_observer_args[1]);
+  let o_observer_count=0-1;
+  if(o_observer_at>=0) {
+    o_observer_count=0;
+    let o_follow=ux_u32(o_observer_at+Object3D.parent);
+    while(o_follow!=0) {
+      let o_visit_parent=o_parent_observer(o_follow);
+      let o_visited_at=Object3D_address(o_observer_tree,o_follow);
+      o_follow=ux_u32(o_visited_at+Object3D.parent);
+      o_observer_count=o_observer_count+1;
+    }
+  }
+  return o_observer_count;
+}
+
+// Scratch receives the inverse parent matrix. Non-uniformly scaled parent chains
+// can introduce shear, following the same TRS limitation as r160.
+native function Object3D_attach(o_attach_arena:i64,o_attach_parent:i64,o_attach_child:i64,o_attach_tmp:i64) i64 {
+  let o_attach_addr=Object3D_address(o_attach_arena,o_attach_parent);
+  let o_attached=Object3D_address(o_attach_arena,o_attach_child);
+  if(o_attach_addr<0 || o_attached<0) { return 0-1; }
+  let o_attach_chain=o_attach_parent;
+  while(o_attach_chain!=0) {
+    if(o_attach_chain==o_attach_child) { return 0-3; }
+    let o_chain_at=Object3D_address(o_attach_arena,o_attach_chain);
+    o_attach_chain=ux_u32(o_chain_at+Object3D.parent);
+  }
+  let o_attach_parent_updated=Object3D_updateWorldMatrix(o_attach_arena,o_attach_parent,1,0);
+  let o_attach_child_updated=Object3D_updateWorldMatrix(o_attach_arena,o_attach_child,1,0);
+  let o_invert_copy=Matrix4_copy(o_attach_tmp,ux_u32(o_attach_addr+Object3D.worldMatrix));
+  let o_parent_inverse=Matrix4_invert(o_invert_copy);
+  let o_attached_local=Matrix4_multiplyMatrices(ux_u32(o_attached+Object3D.localMatrix),
+    o_parent_inverse,ux_u32(o_attached+Object3D.worldMatrix));
+  let o_attach_decomp=Matrix4_decompose(o_attached_local,ux_u32(o_attached+Object3D.position),
+    ux_u32(o_attached+Object3D.quaternion),ux_u32(o_attached+Object3D.scale));
+  let o_attach_changed=Object3D_add(o_attach_arena,o_attach_parent,o_attach_child);
+  let o_attach_synced=Object3D_updateMatrixWorld(o_attach_arena,o_attach_child,1);
+  return o_attach_changed;
+}

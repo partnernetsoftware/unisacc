@@ -1,6 +1,6 @@
 # unisacc —— 产品与项目总览
 
-本文回答五个问题：unisacc.com **是什么**、**有什么功能**、**结构组成**、**测试套件怎么设计**、**项目目录与文件结构**。术语歧义以 §0 为准；**结构点（层、片、流、网、模型、执行器、格式、事实表、构造链、测试）只在 §3 定义一次，其余各节只引用**；历史流水与逐版收口在 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md)（完整旧版），不在这里重复。
+本文回答五个问题：unisacc.com **是什么**、**有什么功能**、**结构组成**、**测试套件怎么设计**、**项目目录与文件结构**。术语歧义以 §0 为准；**结构点（层、片、流、网、模型、执行器、格式、事实表、构造链、测试）只在 §3 定义一次，其余各节只引用**；新来者按角色的阅读顺序见 [README_zh.md 索引](README_zh.md#索引);历史流水与逐版收口在 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md)（完整旧版），不在这里重复。
 
 ## 0. 概念与术语（先读；歧义以本节为准）
 
@@ -101,6 +101,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 签名交接成员清单：`sh ./unisacc.com tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`生成无header五角色清单；`--check DIR MANIFEST`重核实际SHA、P4/footer与四thin MachO边界；检查 `tools/check-release-members.cx ROOT`，只证明字节/结构，不认证签名或最终候选资格。
 
 #### 2.1 日常（运行、改写、查询）
+
+脚本耗时对照：tools/script-bench.cx 的 prepare NEW_ABS_DIR 生成固定输入，run DIR CASE 实跑各引擎，report DIR 给出七次墙钟和脚本内执行耗时。批次 script-bench 核对计时与失败处理。
 
 | 动作 | 现成用法 | 说明 |
 |---|---|---|

@@ -45,8 +45,8 @@
 
 | 里程碑 | 子树 | r160 名字(数量) | 现状 |
 |---|---|---|---|
-| M1 数学 | Vector2、Vector3、Vector4、Matrix3、Matrix4、Quaternion、Euler、Color、ColorManagement、Box2、Box3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SphericalHarmonics3、MathUtils、Interpolant 系(Linear/Cubic/Discrete/QuaternionLinear) | 约 37 加 5 | 部分:有散落的矩阵与向量运算,无同名 API |
-| M2 核心图 | EventDispatcher、Object3D、Group、Scene、Layers、Clock、Cache、Source、Uniform、UniformsGroup、BufferAttribute 全家(Int8 到 Float64、Uint8Clamped、Float16、Instanced、Interleaved、GLBufferAttribute 共 14)、BufferGeometry、InstancedBufferGeometry、DataUtils、ImageUtils | 约 32 | 缺:产品自己摆场景,无父子变换 |
+| M1 数学 | Vector2、Vector3、Vector4、Matrix3、Matrix4、Quaternion、Euler、Color、ColorManagement、Box2、Box3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SphericalHarmonics3、MathUtils | 21 | 修订(cdx2):21 项已有且有 G-math 门。Interpolant 系按开发计划归 M8 |
+| M2 核心图 | EventDispatcher、Object3D、Group、Scene、Layers、Clock、Cache、Source、Uniform、UniformsGroup、BufferAttribute 全家(Int8 到 Float64、Uint8Clamped、Float16、Instanced、Interleaved、GLBufferAttribute 共 14)、BufferGeometry、InstancedBufferGeometry、DataUtils、ImageUtils | 约 32 | 部分。基座已有父子变换，产品接入和各类剩余方法以清单为准 |
 | M3 相机与几何 | Camera、PerspectiveCamera、OrthographicCamera、ArrayCamera、CubeCamera、StereoCamera;Geometry 23 个(Box、Capsule、Circle、Cone、Cylinder、Dodecahedron、Edges、Extrude、Icosahedron、Lathe、Octahedron、Plane、Polyhedron、Ring、Shape、Sphere、Tetrahedron、Torus、TorusKnot、Tube、Wireframe 等);Curve 11、Path、Shape、ShapePath、ShapeUtils | 6 加 23 加 约 15 | 部分:透视投影与相机空间变换已在 `uxe.ujs`;无通用几何生成 |
 | M4 GPU 渲染基座 | WebGLRenderer 对应面:渲染循环、渲染列表(不透明/透明排序)、视锥剔除、清屏、视口、裁剪、状态机(混合、深度、模板、剔除面)、RenderTarget 5 种、WebGLUtils、ShaderChunk、ShaderLib、UniformsLib、UniformsUtils、GLSL1/GLSL3 | 约 12 | 缺:现为软件光栅化,无 GPU 命令包 |
 | M5 材质与纹理 | Material 18(Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Shadow、Points、Line*、Sprite、Shader、RawShader);Texture 12(Canvas、Compressed*、Cube、Data、Data3D、DataArray、Depth、Framebuffer、Video 等);颜色空间与色调映射 7;Mapping 13、Filter 10、Wrapping 3 | 约 40 | 部分:toon 三阶、描边、雾、阴影图在软件路径;无 PBR |
@@ -158,14 +158,28 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): M1 Matrix4 接收十六个行序标量并存成列主序 f64。为整体传入十六个矩阵值，传统内联调用的参数暂存上限扩为 32，局部槽仍为 256。`decompose` 使用 C9 原生函数，把构造和分解留在同一个 G-math 用例。分解适用于仿射位姿，投影使用显式坐标模式。用 `sh ./unisacc.com ujs/tests/matrix4-math.cx` 检查 44 项独立金值与 r160 JSON，`--mutate` 调换矩阵乘法顺序。
 
+修订(cdx2): M1 Quaternion 使用 xyzw 顺序的四个 f64。插值采用短弧，零范数归一化为单位四元数。数组与 JSON 的数值载体是明确的缓冲位置，随机样本由调用者注入，对象变更回调归 M2。`quaternion-math.cx` 实跑 32 项独立金值和 r160 JSON，`--mutate` 调换四元数乘法顺序。
+
+修订(cdx2): M1 Euler 使用三个 f64 角度与一个 u32 顺序码。纯旋转矩阵可按六种顺序提取角度，奇异点使用各顺序规定的零轴。四元数转换与重排由调用者提供独立临时缓冲。变更回调归 M2。`euler-math.cx` 比对 19 项独立金值和 r160 JSON，`--mutate` 将 YXZ 矩阵按 XYZ 提取。
+
+修订(cdx2): M1 数学层的验收入口是 `ujs/tests/<小写类名>-math.cx`。对应 r160 夹具位于 `ujs/practice/uxe/test/`，每项独立编译并读回。MathUtils 使用调用方持有的 Mulberry32 状态，并接收外部随机样本和 UUID 熵。`mathutils-math.cx` 对照 37 项，含六种固有欧拉顺序、类型归一化、两步随机序列、负模和 UUID。
+
+修订(cdx2): Color 的 Wasm 接口按缓冲类型分别提供 RGB、十六进制、样式和已有颜色入口。CSS 解析使用显式长度字节视图，覆盖 r160 的整数或百分比 RGB、逗号 HSL、短长十六进制和命名颜色。148 个不透明色作为事实表，`sh ./unisacc.com ujs/tools-ux/gen-color-names.cx -- --check` 核生成表，`color-style-math.cx` 比对 CSS 读写。颜色事实来源为 [CSS Color Module Level 4 命名颜色表](https://www.w3.org/TR/2026/CRD-css-color-4-20261118/#named-colors)。
+
+修订(cdx2): M1 组合源实测触发 `too many fns`。`compiler_min.cx` 的 `MAXFN` 为 128，`MAX_NATIVE` 为 16。包围球与平面检查只装载各自实际需要的向量和包围盒源，并保留相交测试的原生早退。M2 若需要把所有数学类合在一个编译单元，先用 0c 模块链接划定边界，再实测函数预算。
+
+修订(cdx2): M1 出口以确认的 21 个数学类为准。对标树曾把 5 个 Interpolant 同时列在 M1 数学与 M8 动画，清单现在按照逐阶段开发计划归入 M8，仍保留在 A 栏分母中。Box3 对象入口读取展开的子树包围盒、顶点和世界矩阵，Frustum 对象入口读取局部包围球与世界矩阵。M2 的场景对象负责更新并填充这些记录。两个对象适配分别对照 r160 树遍历与视锥查询，篡改精确包围盒或世界矩阵均返回失败。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
 |---|---|---|---|
 | S3 | 生成器 `ujs/tools-ux/gen-three-inventory.cx` 解析 `three.module.js` 导出表为 TSV,`--check` 与篡改自测;TSV 含 A、B、C 栏、里程碑列、现状列(默认缺)、门编号列;对标树渲染成 `ujs/prd_uxe_three.md` 附表;现状按严格口径重判 | 3 到 4 | 清单与基线百分比,A 栏已有项数、B 栏已有项数 |
 | M0 | C1 到 C9,每项一提交 | 9 到 13 | 编译器门全绿,基线记录 |
-| M1 | 数学类:顺序 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、Box、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils;每类一提交含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 数学 A 栏全部已有 |
+| M1 | 数学类按 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、ColorManagement、Box2/3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils 推进，每类含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 21 个 M1 数学项全部已有 |
 | M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门,D1 的场景改用 Scene 与 Object3D |
+
+修订(cdx2): M2 基座布局由 gen-object-layouts.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录由消费模块持有，场景模块交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
 | M3 | 相机四种与投影矩阵、视锥;23 个几何生成器各一提交,顶点与索引与 three.js 逐项对;Curve 系、Path、Shape、ShapeUtils(三角剖分) | 20 到 26 | G-math 对几何的顶点哈希 |
 | M4 | GPU 命令包格式(写进 HOST_ABI 与 prd),桥 `host_gpu_submit` 的白名单扩展;渲染列表与排序;视锥剔除;状态机;RenderTarget;B 栏混合、深度、模板、比较、剔除常量 | 12 到 16 | 一个三角形、一个立方体、深度测试、混合像素对照 three.js |
 | M5 | 着色器库(ShaderChunk 对标)与 Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Points、Line、Sprite、ShadowMaterial、ShaderMaterial、RawShaderMaterial;Texture 与 Mapping、Filter、Wrapping、颜色空间、色调映射 7 种 | 28 到 36 | G-pixel 门逐材质,PBR 对照 4% |

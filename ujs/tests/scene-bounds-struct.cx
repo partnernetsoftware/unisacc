@@ -1,0 +1,118 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int compile(const char *dir,const char *leaf,const char *const *modules,int mutate) {
+    char source[320],wasm[320],text[64000];
+    tx_snprintf(source,sizeof source,"%s/%s.ujs",dir,leaf);
+    tx_snprintf(wasm,sizeof wasm,"%s/%s.wasm",dir,leaf);
+    int n=0;
+    for(int i=0;modules[i];i++) {
+        char path[220];
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/%s.ujs",modules[i]);
+        unsigned char *raw=0;
+        int64_t size=0;
+        if(sy_read_file(path,&raw,&size,sizeof text-n-2)) return 1;
+        int written=0;
+        if(mutate && tx_eqz(modules[i],"base/scene-bounds-bridge")) {
+            const char from[]="uxe_scene(3,sb_args[0],sb_cell,0.0,0.0,0.0)";
+            const char replacement[]="uxe_scene(3,65537,sb_cell,0.0,0.0,0.0)";
+            long at=tx_find((char *)raw,size,from,sizeof from-1);
+            if(at<0) { mm_free(raw); return 1; }
+            written=tx_snprintf(text+n,sizeof text-n,"%.*s%s%s\n",(int)at,raw,replacement,raw+at+sizeof from-1);
+        } else written=tx_snprintf(text+n,sizeof text-n,"%s\n",raw);
+        mm_free(raw);
+        if(written<0 || written>=(int)sizeof text-n) return 1;
+        n+=written;
+    }
+    // ABI declarations must precede all compiled modules in a source unit.
+    char linked[64000];
+    int total=0;
+    for(int headers=1;headers>=0;headers--) {
+        int at=0;
+        while(at<n) {
+            int end=at;
+            while(end<n && text[end]!='\n') end++;
+            if(end<n) end++;
+            int abi=end-at>=7 && (tx_same(text+at,7,"import ",7) ||
+                tx_same(text+at,7,"export ",7));
+            if(abi==headers) {
+                if(end-at>(int)sizeof linked-total) return 1;
+                for(int j=at;j<end;j++) linked[total++]=text[j];
+            }
+            at=end;
+        }
+    }
+    if(sy_write_file(source,linked,total,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,9,&out,&bytes);
+    if(rc) printf("SCENE_BOUNDS compile=%s rc=%d %s\n",leaf,rc,out?out:"");
+    mm_free(out);
+    return rc!=0;
+}
+
+static int copy_input(const char *dir,const char *leaf,const char *source) {
+    char dest[320];
+    tx_snprintf(dest,sizeof dest,"%s/%s",dir,leaf);
+    return sy_copy(source,dest,0600);
+}
+
+static int browser(const char *dir) {
+    char profile[320],url[380];
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    tx_snprintf(url,sizeof url,"file://%s/probe.html",dir);
+    char *args[]={"google-chrome","--headless=new","--allow-file-access-from-files","--disable-background-networking",
+        "--no-first-run",profile,"--virtual-time-budget=4000","--dump-dom",url,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,14,&out,&bytes),failed=0;
+    const char marker[]="<pre id=\"r160\">[";
+    long at=!rc && out?tx_find(out,bytes,marker,sizeof marker-1):-1;
+    const double gold[]={-1.25,6,0,1,6};
+    if(at<0) { if(out) printf("SCENE_BOUNDS document=%s\n",out); failed=1; }
+    if(!failed) {
+        char *next=out+at+sizeof marker-1;
+        for(int i=0;i<10;i++) {
+            char *end=0;
+            double value=tx_strtod(next,&end);
+            if(end==next || *end!=(i==9?']':',') || value!=gold[i%5]) {
+                printf("SCENE_BOUNDS case=%d value=%.17g gold=%.17g\n",i,value,gold[i%5]);
+                failed=1;
+                break;
+            }
+            next=end+1;
+        }
+    }
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *scene[]={"base/f64-math","base/views","base/matrix4","base/object-layouts",
+        "base/object3d","base/scene","base/scene-abi",0};
+    const char *box[]={"base/vector-scalar","base/vector3","base/box3","base/box3-scene",
+        "base/scene-bounds-bridge","test/scene-box-abi",0};
+    const char *frustum[]={"base/vector-scalar","base/vector3","base/sphere","base/frustum",
+        "base/scene-bounds-bridge","test/scene-frustum-abi",0};
+    char dir[256];
+    if(sy_mkdtemp("/tmp","ujs-scene-bounds-",dir,sizeof dir)) return 2;
+    int prepared=!compile(dir,"scene",scene,0) && !compile(dir,"box",box,mutate) &&
+        !compile(dir,"frustum",frustum,0) &&
+        !copy_input(dir,"probe.html","ujs/practice/uxe/test/scene-bounds-r160.html") &&
+        !copy_input(dir,"host-abi.js","ujs/practice/uxe/base/host-abi.js") &&
+        !copy_input(dir,"three.module.js","ujs/practice/web/game/three.module.js");
+    int failed=!prepared || browser(dir);
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t n=0;
+    if(cx_runv_timeout(clean,5,&out,&n)) prepared=0;
+    mm_free(out);
+    printf("G_STRUCT SceneBounds cases=10 failed=%d\n",failed);
+    return prepared?failed:2;
+}

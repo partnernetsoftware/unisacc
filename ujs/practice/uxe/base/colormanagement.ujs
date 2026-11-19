@@ -1,0 +1,79 @@
+// 0: none, 1: Linear-sRGB, 2: sRGB, 3: Linear Display P3, 4: Display P3.
+// State is caller-owned; enabled defaults to 1 and working defaults to 1.
+struct ColorManagement { enabled: u32; working: u32; }
+
+function ColorManagement_init(cm_state) {
+  let cm_size=ux_span(cm_state,ColorManagement.size);
+  let cm_on=ux_u32_put(cm_state+ColorManagement.enabled,1);
+  let cm_default=ux_u32_put(cm_state+ColorManagement.working,1);
+  return cm_state;
+}
+
+function ColorManagement_setWorking(cm_set_state,...cm_set_args) {
+  let cm_set_space=cm_set_args[0];
+  let cm_set_result=0-1;
+  if(cm_set_space==1 || cm_set_space==3) {
+    let cm_set_write=ux_u32_put(cm_set_state+ColorManagement.working,cm_set_space);
+    cm_set_result=cm_set_state;
+  }
+  return cm_set_result;
+}
+
+function ColorManagement_getPrimaries(cm_primary_space) {
+  let cm_primary=0-1;
+  if(cm_primary_space==1 || cm_primary_space==2) { cm_primary=1; }
+  if(cm_primary_space==3 || cm_primary_space==4) { cm_primary=2; }
+  return cm_primary;
+}
+
+function ColorManagement_getTransfer(cm_transfer_space) {
+  let cm_transfer=0-1;
+  if(cm_transfer_space==0 || cm_transfer_space==1 || cm_transfer_space==3) { cm_transfer=1; }
+  if(cm_transfer_space==2 || cm_transfer_space==4) { cm_transfer=2; }
+  return cm_transfer;
+}
+
+native function ColorManagement_convert(cm_enabled:i64,cm_color:i64,cm_from:i64,cm_to:i64) i64 {
+  if(cm_enabled==0 || cm_from==cm_to || cm_from==0 || cm_to==0) { return cm_color; }
+  if(cm_from<1 || cm_from>4 || cm_to<1 || cm_to>4) { return 0-1; }
+  let cm_r=ux_f64(cm_color);
+  let cm_g=ux_f64(cm_color+8);
+  let cm_b=ux_f64(cm_color+16);
+  if(cm_from==2 || cm_from==4) {
+    cm_r=Color_srgbToLinear(cm_r);
+    cm_g=Color_srgbToLinear(cm_g);
+    cm_b=Color_srgbToLinear(cm_b);
+  }
+  let cm_mapped_r=cm_r;
+  let cm_mapped_g=cm_g;
+  let cm_mapped_b=cm_b;
+  if(cm_from>=3) {
+    cm_mapped_r=1.2249401*cm_r-0.2249404*cm_g;
+    cm_mapped_g=0.0-0.0420569*cm_r+1.0420571*cm_g;
+    cm_mapped_b=0.0-0.0196376*cm_r-0.0786361*cm_g+1.0982735*cm_b;
+  }
+  if(cm_to>=3) {
+    cm_r=cm_mapped_r;
+    cm_g=cm_mapped_g;
+    cm_b=cm_mapped_b;
+    cm_mapped_r=0.8224621*cm_r+0.177538*cm_g;
+    cm_mapped_g=0.0331941*cm_r+0.9668058*cm_g;
+    cm_mapped_b=0.0170827*cm_r+0.0723974*cm_g+0.9105199*cm_b;
+  }
+  if(cm_to==2 || cm_to==4) {
+    cm_mapped_r=Color_linearToSrgb(cm_mapped_r);
+    cm_mapped_g=Color_linearToSrgb(cm_mapped_g);
+    cm_mapped_b=Color_linearToSrgb(cm_mapped_b);
+  }
+  return Color_setRGB(cm_color,cm_mapped_r,cm_mapped_g,cm_mapped_b);
+}
+
+function ColorManagement_fromWorkingColorSpace(cm_from_state,...cm_from_args) {
+  return ColorManagement_convert(ux_u32(cm_from_state+ColorManagement.enabled),cm_from_args[0],
+      ux_u32(cm_from_state+ColorManagement.working),cm_from_args[1]);
+}
+
+function ColorManagement_toWorkingColorSpace(cm_to_state,...cm_to_args) {
+  return ColorManagement_convert(ux_u32(cm_to_state+ColorManagement.enabled),cm_to_args[0],
+      cm_to_args[1],ux_u32(cm_to_state+ColorManagement.working));
+}

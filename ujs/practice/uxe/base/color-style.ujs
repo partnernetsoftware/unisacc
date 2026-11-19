@@ -1,0 +1,164 @@
+// The CSS surface consumes a bounded UTF-8 byte view. Color values and scratch are independent.
+native function Color_keyword(c_text:i64,c_chars:i64) i64 {
+  if(c_chars<1 || c_chars>20) { return 0-1; }
+  let c_acc_low=0; let c_acc_high=0; let c_scan=0;
+  while(c_scan<c_chars) {
+    let c_ch=ux_u8(c_text+c_scan);
+    if(c_ch>=65 && c_ch<=90) { c_ch=c_ch+32; }
+    if(c_ch<97 || c_ch>122) { return 0-1; }
+    if(c_scan<10) { c_acc_low=c_acc_low*32+c_ch-96; }
+    else { c_acc_high=c_acc_high*32+c_ch-96; }
+    c_scan=c_scan+1;
+  }
+  return Color_lookupName(c_acc_low,c_acc_high);
+}
+
+function Color_setColorName(c_keyword_dst,...c_keyword_args) {
+  let c_keyword_hex=Color_keyword(c_keyword_args[0],c_keyword_args[1]);
+  let c_keyword_color=0-1;
+  if(c_keyword_hex>=0) {
+    let c_keyword_value=Color_setHex(c_keyword_dst,c_keyword_hex,0);
+    c_keyword_color=ColorManagement_convert(1,c_keyword_value,c_keyword_args[2],c_keyword_args[3]);
+  }
+  return c_keyword_color;
+}
+
+function Color_cssSkip(c_skip_at,...c_skip_args) {
+  let c_skip_end=c_skip_args[0];
+  let c_spaced=1;
+  while(c_skip_at<c_skip_end && c_spaced) {
+    let c_space=ux_u8(c_skip_at);
+    c_spaced=c_space==32 || (c_space>=9 && c_space<=13);
+    if(c_spaced) { c_skip_at=c_skip_at+1; }
+  }
+  return c_skip_at;
+}
+
+// Decimal scanner returns the next byte offset or -1 and writes value, percent and decimal flags.
+native function Color_cssDecimal(c_dec_at:i64,c_dec_end:i64,c_dec_output:i64) i64 {
+  let c_cursor=Color_cssSkip(c_dec_at,c_dec_end);
+  let c_value=0.0; let c_digits=0; let c_fraction=0; let c_denominator=1.0;
+  let c_valid=1;
+  while(c_cursor<c_dec_end && c_valid) {
+    let c_code=ux_u8(c_cursor);
+    if(c_code>=48 && c_code<=57) {
+      c_value=c_value*10.0+(c_code-48);
+      if(c_fraction!=0) { c_denominator=c_denominator*10.0; c_fraction=2; }
+      c_digits=c_digits+1; c_cursor=c_cursor+1;
+    } else if(c_code==46 && c_fraction==0) {
+      c_cursor=c_cursor+1; c_fraction=1;
+    } else { c_valid=0; }
+  }
+  if(c_digits==0 || c_fraction==1) { return 0-1; }
+  let c_percent=0;
+  if(c_cursor<c_dec_end && ux_u8(c_cursor)==37) { c_percent=1; c_cursor=c_cursor+1; }
+  let c_saved=ux_f64_put(c_dec_output,c_value/c_denominator);
+  let c_saved_percent=ux_u32_put(c_dec_output+8,c_percent);
+  let c_saved_fraction=ux_u32_put(c_dec_output+12,c_fraction!=0);
+  return Color_cssSkip(c_cursor,c_dec_end);
+}
+
+native function Color_cssFunctional(c_fn_dst:i64,c_fn_start:i64,c_fn_end:i64,c_fn_hsl:i64,c_fn_tmp:i64) i64 {
+  let c_fn_values=[0.0,0.0,0.0];
+  let c_fn_flags=[0,0,0];
+  let c_fn_read=c_fn_start;
+  let c_fn_axis=0;
+  while(c_fn_axis<3) {
+    c_fn_read=Color_cssDecimal(c_fn_read,c_fn_end,c_fn_tmp);
+    if(c_fn_read<0) { return 0-1; }
+    if(c_fn_hsl==0 && ux_u32(c_fn_tmp+12)!=0) { return 0-1; }
+    c_fn_values[c_fn_axis]=ux_f64(c_fn_tmp);
+    c_fn_flags[c_fn_axis]=ux_u32(c_fn_tmp+8);
+    if(c_fn_axis<2) {
+      if(c_fn_read==c_fn_end || ux_u8(c_fn_read)!=44) { return 0-1; }
+      c_fn_read=c_fn_read+1;
+    }
+    c_fn_axis=c_fn_axis+1;
+  }
+  if(c_fn_read<c_fn_end && ux_u8(c_fn_read)==44) {
+    c_fn_read=Color_cssDecimal(c_fn_read+1,c_fn_end,c_fn_tmp);
+    if(c_fn_read<0 || ux_u32(c_fn_tmp+8)!=0) { return 0-1; }
+  }
+  if(c_fn_read!=c_fn_end) { return 0-1; }
+  if(c_fn_hsl!=0) {
+    if(c_fn_flags[0]!=0 || c_fn_flags[1]!=1 || c_fn_flags[2]!=1) { return 0-1; }
+    return Color_setHSL(c_fn_dst,c_fn_values[0]/360.0,c_fn_values[1]/100.0,c_fn_values[2]/100.0);
+  }
+  if(c_fn_flags[0]!=c_fn_flags[1] || c_fn_flags[1]!=c_fn_flags[2]) { return 0-1; }
+  let c_css_scale=255.0;
+  if(c_fn_flags[0]!=0) { c_css_scale=100.0; }
+  return Color_setRGB(c_fn_dst,vector_limit(c_fn_values[0],0.0,c_css_scale)/c_css_scale,
+    vector_limit(c_fn_values[1],0.0,c_css_scale)/c_css_scale,
+    vector_limit(c_fn_values[2],0.0,c_css_scale)/c_css_scale);
+}
+
+native function Color_setStyle(c_style_dst:i64,c_style_text:i64,c_style_count:i64,
+    c_style_source:i64,c_style_working:i64,c_style_tmp:i64) i64 {
+  if(c_style_count<1 || c_style_count>255) { return 0-1; }
+  let c_style_span=ux_span(c_style_text,c_style_count);
+  let c_style_first=ux_u8(c_style_text);
+  if(c_style_first==35) {
+    if(c_style_count!=4 && c_style_count!=7) { return 0-1; }
+    let c_style_hex=0;
+    let c_style_ix=1;
+    while(c_style_ix<c_style_count) {
+      let c_hex_char=ux_u8(c_style_text+c_style_ix);
+      let c_hex_digit=0-1;
+      if(c_hex_char>=48 && c_hex_char<=57) { c_hex_digit=c_hex_char-48; }
+      if(c_hex_char>=65 && c_hex_char<=70) { c_hex_digit=c_hex_char-55; }
+      if(c_hex_char>=97 && c_hex_char<=102) { c_hex_digit=c_hex_char-87; }
+      if(c_hex_digit<0) { return 0-1; }
+      if(c_style_count==4) { c_style_hex=c_style_hex*256+17*c_hex_digit; }
+      else { c_style_hex=c_style_hex*16+c_hex_digit; }
+      c_style_ix=c_style_ix+1;
+    }
+    let c_style_value=Color_setHex(c_style_dst,c_style_hex,0);
+    return ColorManagement_convert(1,c_style_value,c_style_source,c_style_working);
+  }
+  if(c_style_count>=5 && ux_u8(c_style_text+c_style_count-1)==41) {
+    let c_style_second=ux_u8(c_style_text+1);
+    let c_style_third=ux_u8(c_style_text+2);
+    let c_is_hsl=c_style_first==104 && c_style_second==115 && c_style_third==108;
+    let c_is_rgb=c_style_first==114 && c_style_second==103 && c_style_third==98;
+    let c_paren=c_style_text+3;
+    if(ux_u8(c_paren)==97) { c_paren=c_paren+1; }
+    if((c_is_hsl || c_is_rgb) && ux_u8(c_paren)==40) {
+      let c_components=Color_cssFunctional(c_style_dst,c_paren+1,c_style_text+c_style_count-1,c_is_hsl,c_style_tmp);
+      if(c_components<0) { return 0-1; }
+      return ColorManagement_convert(1,c_components,c_style_source,c_style_working);
+    }
+  }
+  return Color_setColorName(c_style_dst,c_style_text,c_style_count,c_style_source,c_style_working);
+}
+
+function Color_cssFixed(c_fixed) {
+  let c_fixed_units=f64_floor_i64(ux_math_abs(c_fixed)*1000.0+0.5);
+  let c_fixed_decimal=c_fixed_units%1000;
+  let c_fixed_sign="";
+  let c_fixed_pad="";
+  if(c_fixed<0.0) { c_fixed_sign="-"; }
+  if(c_fixed_decimal<100) { c_fixed_pad="0"; }
+  if(c_fixed_decimal<10) { c_fixed_pad="00"; }
+  return c_fixed_sign+ux_format_i64(c_fixed_units/1000)+"."+c_fixed_pad+ux_format_i64(c_fixed_decimal);
+}
+
+function Color_getStyle(c_style,...c_style_args) {
+  let c_style_temp=Color_copy(c_style_args[2],c_style);
+  let c_style_target=c_style_args[1];
+  let c_style_converted=ColorManagement_convert(1,c_style_temp,c_style_args[0],c_style_target);
+  let c_style_r=ux_f64(c_style_converted);
+  let c_style_g=ux_f64(c_style_converted+8);
+  let c_style_b=ux_f64(c_style_converted+16);
+  let c_style_result="";
+  if(c_style_target==2) {
+    c_style_result="rgb("+ux_format_i64(f64_floor_i64(255.0*c_style_r+0.5))+","+
+      ux_format_i64(f64_floor_i64(255.0*c_style_g+0.5))+","+ux_format_i64(f64_floor_i64(255.0*c_style_b+0.5))+")";
+  } else {
+    let c_style_label="";
+    if(c_style_target==1) { c_style_label="srgb-linear"; }
+    if(c_style_target==3) { c_style_label="display-p3-linear"; }
+    if(c_style_target==4) { c_style_label="display-p3"; }
+    c_style_result="color("+c_style_label+" "+Color_cssFixed(c_style_r)+" "+Color_cssFixed(c_style_g)+" "+Color_cssFixed(c_style_b)+")";
+  }
+  return c_style_result;
+}

@@ -1,0 +1,184 @@
+struct Triangle { ax: f64; ay: f64; az: f64; bx: f64; by: f64; bz: f64; cx: f64; cy: f64; cz: f64; }
+
+native function Triangle_set(t_dst:i64,t_a:i64,t_b:i64,t_c:i64) i64 {
+  let t_span=ux_span(t_dst,Triangle.size);
+  let t_coordinates=[ux_f64(t_a),ux_f64(t_a+8),ux_f64(t_a+16),ux_f64(t_b),ux_f64(t_b+8),
+    ux_f64(t_b+16),ux_f64(t_c),ux_f64(t_c+8),ux_f64(t_c+16)];
+  let t_write_index=0;
+  while(t_write_index<9) {
+    let t_write=ux_f64_put(t_dst+8*t_write_index,t_coordinates[t_write_index]);
+    t_write_index=t_write_index+1;
+  }
+  return t_dst;
+}
+
+function Triangle_copy(t_copy,...t_copy_args) {
+  let t_rhs=t_copy_args[0];
+  return Triangle_set(t_copy,t_rhs,t_rhs+24,t_rhs+48);
+}
+
+function Triangle_clone(t_clone,...t_clone_args) {
+  return Triangle_copy(t_clone,t_clone_args[0]);
+}
+
+function Triangle_setFromPointsAndIndices(t_pts,...t_pts_args) {
+  let t_list=t_pts_args[0];
+  return Triangle_set(t_pts,t_list+24*t_pts_args[1],t_list+24*t_pts_args[2],t_list+24*t_pts_args[3]);
+}
+
+function Triangle_setFromAttributeAndIndices(t_attr,...t_attr_args) {
+  let t_data=t_attr_args[0]; let t_stride=t_attr_args[1];
+  let t_u=t_data+t_stride*t_attr_args[2];
+  let t_v=t_data+t_stride*t_attr_args[3];
+  let t_w=t_data+t_stride*t_attr_args[4];
+  let t_attr_values=[ux_f32(t_u),ux_f32(t_u+4),ux_f32(t_u+8),ux_f32(t_v),ux_f32(t_v+4),
+    ux_f32(t_v+8),ux_f32(t_w),ux_f32(t_w+4),ux_f32(t_w+8)];
+  let t_attr_index=0;
+  while(t_attr_index<9) {
+    let t_attr_write=ux_f64_put(t_attr+8*t_attr_index,t_attr_values[t_attr_index]);
+    t_attr_index=t_attr_index+1;
+  }
+  return t_attr;
+}
+
+// Writes the cross product of AB and AC. With normalize=1, return the unit normal.
+native function Triangle_normal(t_out:i64,t_triangle:i64,t_normalize:i64) i64 {
+  let t_abx=ux_f64(t_triangle+24)-ux_f64(t_triangle);
+  let t_aby=ux_f64(t_triangle+32)-ux_f64(t_triangle+8);
+  let t_abz=ux_f64(t_triangle+40)-ux_f64(t_triangle+16);
+  let t_acx=ux_f64(t_triangle+48)-ux_f64(t_triangle);
+  let t_acy=ux_f64(t_triangle+56)-ux_f64(t_triangle+8);
+  let t_acz=ux_f64(t_triangle+64)-ux_f64(t_triangle+16);
+  let t_nx=t_aby*t_acz-t_abz*t_acy;
+  let t_ny=t_abz*t_acx-t_abx*t_acz;
+  let t_nz=t_abx*t_acy-t_aby*t_acx;
+  let t_norm=1.0;
+  if(t_normalize) {
+    t_norm=f64_sqrt(t_nx*t_nx+t_ny*t_ny+t_nz*t_nz);
+    if(t_norm==0.0) { t_norm=1.0; }
+  }
+  return Vector3_set(t_out,t_nx/t_norm,t_ny/t_norm,t_nz/t_norm);
+}
+
+function Triangle_getNormal(t_normal,...t_normal_args) {
+  return Triangle_normal(t_normal,t_normal_args[0],1);
+}
+
+function Triangle_getArea(t_area,...t_area_args) {
+  let t_area_n=Triangle_normal(t_area_args[0],t_area,0);
+  return Vector3_length(t_area_n)*0.5;
+}
+
+function Triangle_getMidpoint(t_middle,...t_middle_args) {
+  let t_tri_mid=t_middle_args[0];
+  return Vector3_set(t_middle,(ux_f64(t_tri_mid)+ux_f64(t_tri_mid+24)+ux_f64(t_tri_mid+48))/3.0,
+    (ux_f64(t_tri_mid+8)+ux_f64(t_tri_mid+32)+ux_f64(t_tri_mid+56))/3.0,
+    (ux_f64(t_tri_mid+16)+ux_f64(t_tri_mid+40)+ux_f64(t_tri_mid+64))/3.0);
+}
+
+function Triangle_getPlane(t_plane,...t_plane_args) {
+  let t_plane_tri=t_plane_args[0];
+  let t_plane_n=Triangle_normal(t_plane,t_plane_tri,1);
+  let t_plane_write=ux_f64_put(t_plane+24,0.0-Vector3_dot(t_plane_n,t_plane_tri));
+  return t_plane;
+}
+
+native function Triangle_getBarycoord(t_bar:i64,t_bar_tri:i64,t_point:i64) i64 {
+  let t_dot00=0.0; let t_dot01=0.0; let t_dot11=0.0;
+  let t_dot02=0.0; let t_dot12=0.0;
+  let t_axis=0;
+  while(t_axis<24) {
+    let t_base=ux_f64(t_bar_tri+t_axis);
+    let t_s=ux_f64(t_bar_tri+24+t_axis)-t_base;
+    let t_t=ux_f64(t_bar_tri+48+t_axis)-t_base;
+    let t_p=ux_f64(t_point+t_axis)-t_base;
+    t_dot00=t_dot00+t_s*t_s; t_dot01=t_dot01+t_s*t_t; t_dot11=t_dot11+t_t*t_t;
+    t_dot02=t_dot02+t_s*t_p; t_dot12=t_dot12+t_t*t_p;
+    t_axis=t_axis+8;
+  }
+  let t_determinant=t_dot00*t_dot11-t_dot01*t_dot01;
+  if(t_determinant==0.0) {
+    let t_reset=Vector3_set(t_bar,0.0,0.0,0.0);
+    return 0-1;
+  }
+  let t_beta=(t_dot11*t_dot02-t_dot01*t_dot12)/t_determinant;
+  let t_gamma=(t_dot00*t_dot12-t_dot01*t_dot02)/t_determinant;
+  return Vector3_set(t_bar,1.0-t_beta-t_gamma,t_beta,t_gamma);
+}
+
+native function Triangle_containsPoint(t_container:i64,t_container_pt:i64,t_container_tmp:i64) i64 {
+  let t_container_bar=Triangle_getBarycoord(t_container_tmp,t_container,t_container_pt);
+  if(t_container_bar<0) { return 0; }
+  let t_container_a=ux_f64(t_container_bar);
+  let t_container_b=ux_f64(t_container_bar+8);
+  return t_container_a>=0.0 && t_container_b>=0.0 && t_container_a+t_container_b<=1.0;
+}
+
+native function Triangle_getInterpolation(t_mix:i64,t_mix_tri:i64,t_mix_pt:i64,t_mix_values:i64,
+    t_components:i64,t_mix_tmp:i64) i64 {
+  if(t_components<1 || t_components>4) { return 0-1; }
+  let t_weights=Triangle_getBarycoord(t_mix_tmp,t_mix_tri,t_mix_pt);
+  let t_weight_a=ux_f64(t_mix_tmp); let t_weight_b=ux_f64(t_mix_tmp+8); let t_weight_c=ux_f64(t_mix_tmp+16);
+  let t_mix_slot=0;
+  while(t_mix_slot<t_components) {
+    let t_m=t_mix_values+8*t_mix_slot;
+    let t_mix_result=0.0;
+    if(t_weights>=0) {
+      t_mix_result=t_weight_a*ux_f64(t_m)+t_weight_b*ux_f64(t_m+8*t_components)+
+        t_weight_c*ux_f64(t_m+16*t_components);
+    }
+    let t_mixed=ux_f64_put(t_mix+8*t_mix_slot,t_mix_result);
+    t_mix_slot=t_mix_slot+1;
+  }
+  if(t_weights<0) { return 0-1; }
+  return t_mix;
+}
+
+function Triangle_getUV(t_uv,...t_uv_args) {
+  return Triangle_getInterpolation(t_uv,t_uv_args[0],t_uv_args[1],t_uv_args[2],2,t_uv_args[3]);
+}
+
+function Triangle_isFrontFacing(t_facing,...t_facing_args) {
+  let t_face_n=Triangle_normal(t_facing_args[1],t_facing,0);
+  return Vector3_dot(t_face_n,t_facing_args[0])<0.0;
+}
+
+function Triangle_intersectsBox(t_inside,...t_inside_args) {
+  return Box3_intersectsTriangle(t_inside_args[0],t_inside);
+}
+
+native function Triangle_closestPointToPoint(t_close:i64,t_close_tri:i64,t_close_p:i64,t_close_tmp:i64) i64 {
+  if(Triangle_containsPoint(t_close_tri,t_close_p,t_close_tmp)) {
+    let t_wa=ux_f64(t_close_tmp); let t_wb=ux_f64(t_close_tmp+8); let t_wc=ux_f64(t_close_tmp+16);
+    return Vector3_set(t_close,t_wa*ux_f64(t_close_tri)+t_wb*ux_f64(t_close_tri+24)+t_wc*ux_f64(t_close_tri+48),
+      t_wa*ux_f64(t_close_tri+8)+t_wb*ux_f64(t_close_tri+32)+t_wc*ux_f64(t_close_tri+56),
+      t_wa*ux_f64(t_close_tri+16)+t_wb*ux_f64(t_close_tri+40)+t_wc*ux_f64(t_close_tri+64));
+  }
+  let t_best=1.0/0.0;
+  let t_cpx=ux_f64(t_close_p); let t_cpy=ux_f64(t_close_p+8); let t_cpz=ux_f64(t_close_p+16);
+  let t_best_x=t_cpx; let t_best_y=t_cpy; let t_best_z=t_cpz;
+  let t_edge=0;
+  while(t_edge<3) {
+    let t_forward=t_close_tri+24*t_edge;
+    let t_backward=t_close_tri+24*((t_edge+1)%3);
+    let t_sx=ux_f64(t_forward); let t_sy=ux_f64(t_forward+8); let t_sz=ux_f64(t_forward+16);
+    let t_dx=ux_f64(t_backward)-t_sx; let t_dy=ux_f64(t_backward+8)-t_sy; let t_dz=ux_f64(t_backward+16)-t_sz;
+    let t_denom=t_dx*t_dx+t_dy*t_dy+t_dz*t_dz;
+    let t_fraction=0.0;
+    if(t_denom>0.0) {
+      t_fraction=vector_limit(((t_cpx-t_sx)*t_dx+(t_cpy-t_sy)*t_dy+(t_cpz-t_sz)*t_dz)/t_denom,0.0,1.0);
+    }
+    let t_candidate_x=t_sx+t_fraction*t_dx; let t_candidate_y=t_sy+t_fraction*t_dy; let t_candidate_z=t_sz+t_fraction*t_dz;
+    let t_ex=t_candidate_x-t_cpx; let t_ey=t_candidate_y-t_cpy; let t_ez=t_candidate_z-t_cpz;
+    let t_error=t_ex*t_ex+t_ey*t_ey+t_ez*t_ez;
+    if(t_error<t_best) { t_best=t_error; t_best_x=t_candidate_x; t_best_y=t_candidate_y; t_best_z=t_candidate_z; }
+    t_edge=t_edge+1;
+  }
+  return Vector3_set(t_close,t_best_x,t_best_y,t_best_z);
+}
+
+function Triangle_equals(t_equal,...t_equal_args) {
+  let t_equal_other=t_equal_args[0];
+  return Vector3_equals(t_equal,t_equal_other) && Vector3_equals(t_equal+24,t_equal_other+24) &&
+    Vector3_equals(t_equal+48,t_equal_other+48);
+}

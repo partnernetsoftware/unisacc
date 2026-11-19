@@ -1,0 +1,139 @@
+/* Contract: checks tools/evidence-identity.cx against pinned execution receipts. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+static const char *source="0123456789abcdef0123456789abcdef01234567";
+static char ape[4096],strict[4096],exe[4096],candidate[65];
+static int passed,failed;
+static void fixture(const char *label,const char *state,const char *rc,const char *ms,const char *extra,const char *suffix,const char *want,int stale){
+    char content[4000],digest[65];
+    if(cx_fmt(content,sizeof content,"# source=%s layout=/fixture set=ids seed=1 jobs=1 window_s=55 outer_s=60 ape_sha256=%s\nx\td\t%s\t%s\t%s\t%s\t0\t0\t-\nRAW\tBATCH_RUN\tid=x\tstatus=%s\trc=%s\tcandidate=%s\ttransport=0\tmarker=CHECK_X\tscope=actual-one-batch-no-cached-result%s\n%s",source,candidate,state,rc,candidate,ms,state,rc,candidate,extra,suffix)||cx_write(strict,content,strlen(content)))exit(2);
+    cx_sha256_hex(content,strlen(content),digest);if(stale)digest[0]=digest[0]=='0'?'1':'0';
+    char *cmd[]={exe,"--origin",ape,(char *)source,digest,strict,0};np_result r={0};char why[256];
+    if(np_run(cmd,0,0,10,&r,why,sizeof why))exit(2);
+    int ok=r.rc==(stale?2:0)&&strstr(stale?r.err:r.out,want);
+    printf("%s\t%s\n",ok?"PASS":"FAIL",label);if(ok)passed++;else failed++;np_free(&r);
+}
+static char *join(const char *base,const char *name){char *s=malloc(4096);if(cx_fmt(s,4096,"%s/%s",base,name))exit(2);return s;}
+static void write_input(const char *p,const char *s){if(cx_write(p,s,strlen(s)))exit(2);}
+static np_result run_at(char **cmd,const char *cwd){
+    np_result r={0};char why[256];if(np_run(cmd,cwd,0,12,&r,why,sizeof why)){fprintf(stderr,"fixture: %s\n",why);exit(2);}return r;
+}
+static char *git_at(const char *cwd,char **cmd){np_result r=run_at(cmd,cwd);if(r.rc){fprintf(stderr,"%s",r.err?r.err:"git");exit(2);}return r.out;}
+static void match(char **cmd,const char *root,int changed,const char *label){
+    np_result r=run_at(cmd,root);const char *want=changed?"MUST_RERUN\tx\t":"INPUTS_EQUAL\tx\n";
+    int ok=!r.rc&&r.out&&strstr(r.out,want);printf("%s\t%s\n",ok?"PASS":"FAIL",label);if(ok)passed++;else failed++;np_free(&r);
+}
+static void mutations(const char *dir){
+    char *layout=join(dir,"layout"),*runtime=join(dir,"runtime"),*materials=join(dir,"materials"),*repo=join(dir,"repo");
+    char *roots[]={layout,runtime,materials,repo,join(materials,"x"),join(repo,"tests")};
+    for(int i=0;i<6;i++)if(sy_mkdir(roots[i],0700))exit(2);
+    char *table=join(repo,"tests/batches.tsv");const char *batch="id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\nx\tIMPLEMENTED\tinterfaces\tx.cx\tSOURCE\tlnx/x86_64\t55\t-\tx.cx\t--one\tinterfaces.x\n";
+    write_input(table,batch);
+    if(sy_mkdir(join(layout,"tests"),0700))exit(2);
+    write_input(join(layout,"tests/batches.tsv"),batch);write_input(join(layout,"x.cx"),"int main(void){return 0;}\n");
+    if(sy_mkdir(join(repo,"build"),0700))exit(2);
+    write_input(join(repo,"tests/coverage.tsv"),"id\tdescription\ninterfaces.x\tfixture\n");
+    write_input(join(repo,"build/batch-packages.tsv"),"kind\tid\nbatch\tx\n");
+    char *init[]={"git","init","-q","--separate-git-dir",join(dir,"metadata"),0},*add[]={"git","add","-f","tests","build/batch-packages.tsv",0};
+    char *save[]={"git","-c","user.name=fixture","-c","user.email=fixture@localhost","-c","commit.gpgsign=false","commit","-qm","batch",0};
+    char *get[]={"git","rev-parse","HEAD",0};git_at(repo,init);git_at(repo,add);git_at(repo,save);
+    char *oid=git_at(repo,get);oid[strcspn(oid,"\n")]=0;
+    const char *files[]={"runner","compiler","host.tsv","options.tsv","environment.tsv","readset.tsv","runner-kind"};
+    for(int i=0;i<7;i++)write_input(join(runtime,files[i]),"measured\n");
+    write_input(join(runtime,"runner-kind"),"sh\n");
+    write_input(join(runtime,"readset.tsv"),"readset-v1\twhole-layout\twhole-runtime\twhole-materials\tclosed\n");
+    char *prepared=join(materials,"x/PREPARED.tsv");write_input(prepared,"PREPARED\tref\n");
+    char *header=join(materials,"x/ref.h"),*dep=join(runtime,"use.cx"),*source=join(layout,"source.cx"),*recipe=join(layout,"chain.recipe");
+    write_input(header,"a");write_input(dep,"a");write_input(source,"a");write_input(recipe,"a");
+    char *cmd[]={exe,"--profile",oid,ape,layout,runtime,materials,"x",0,0,0};np_result r=run_at(cmd,repo);
+    const char *key=r.out?strstr(r.out,"\tidentity_v1="):0;if(!key||r.rc){fprintf(stderr,"profile: %s\n",r.err?r.err:"missing key");exit(2);}
+    key+=13;char pin[65];memcpy(pin,key,64);pin[64]=0;np_free(&r);
+    cmd[1]="--match-inputs";cmd[8]="sh";cmd[9]=pin;match(cmd,repo,0,"sealed-inputs-equal");
+    char tools[4096],product[4096];if(sy_realpath("tools",tools,sizeof tools)<0||sy_realpath("./unisacc.com",product,sizeof product)<0||
+        sy_symlink(tools,join(repo,"tools"))||sy_symlink(product,join(repo,"unisacc.com")))exit(2);
+    const char *kit[]={"cxroot.tsv","cx","ext","include"};
+    for(int i=0;i<4;i++){char member[4096];if(sy_realpath(kit[i],member,sizeof member)<0||sy_symlink(member,join(repo,kit[i])))exit(2);}
+    char receipt[1800],digest[65];if(cx_fmt(receipt,sizeof receipt,"# source=%s layout=/fixture window_s=55 ape_sha256=%s\nx\td\tFAIL\t1\t%s\t8\t0\t0\t-\nRAW\tBATCH_RUN\tid=x\tstatus=FAIL\trc=1\tcandidate=%s\ttransport=0\trunner=sh\tidentity_v1=%s\tmarker=CHECK_X\tscope=actual-one-batch-no-cached-result\n",oid,candidate,candidate,candidate,pin))exit(2);
+    write_input(strict,receipt);cx_sha256_hex(receipt,strlen(receipt),digest);
+    char *advice[]={exe,"--advise",oid,ape,layout,runtime,materials,oid,ape,digest,strict,0};
+    r=run_at(advice,repo);int proved=!r.rc&&r.out&&strstr(r.out,"COVERED\tx\torigin=")&&strstr(r.out,"\tstatus=FAIL\n");
+    printf("%s\tcovered-real-selector-retains-fail\n",proved?"PASS":"FAIL");if(proved)passed++;else {failed++;fprintf(stderr,"%s %s\n",r.err?r.err:"",r.out?r.out:"");}np_free(&r);
+    char *newape=join(dir,"new-ape");write_input(newape,"apf");advice[3]=newape;
+    r=run_at(advice,repo);proved=!r.rc&&r.out&&strstr(r.out,"MUST_RERUN\tx\tcandidate-changed");
+    printf("%s\told-fail-other-candidate\n",proved?"PASS":"FAIL");if(proved)passed++;else failed++;np_free(&r);advice[3]=ape;
+    if(sy_unlink(join(repo,"unisacc.com")))exit(2);
+    r=run_at(advice,repo);proved=!r.rc&&r.out&&strstr(r.out,"MUST_RERUN\tx\tselector-unavailable");
+    printf("%s\tselector-unavailable\n",proved?"PASS":"FAIL");if(proved)passed++;else failed++;np_free(&r);
+    char *header_end=strchr(receipt,'\n'),*batch_end=header_end?strchr(header_end+1,'\n'):0;
+    if(!batch_end)exit(2);batch_end[1]=0;write_input(strict,receipt);cx_sha256_hex(receipt,strlen(receipt),digest);
+    r=run_at(advice,repo);proved=!r.rc&&r.out&&strstr(r.out,"MUST_RERUN\tx\tmissing-raw");
+    printf("%s\tmissing-original-raw\n",proved?"PASS":"FAIL");if(proved)passed++;else failed++;np_free(&r);
+    char *changes[]={ape,dep,header,source,recipe};const char *labels[]={"candidate-byte","transitive-runner-byte","material-header-byte","child-read-byte","chain-recipe-byte"};
+    for(int i=0;i<5;i++){write_input(changes[i],i?"b":"apf");match(cmd,repo,1,labels[i]);write_input(changes[i],i?"a":"ape");}
+    char *member=join(layout,"new.match");write_input(member,"a");match(cmd,repo,1,"directory-membership-and-negative-probe");if(sy_unlink(member))exit(2);
+    char *provider=join(materials,"x/new-producer");write_input(provider,"new");match(cmd,repo,1,"absent-producer-now-present");if(sy_unlink(provider))exit(2);
+    if(sy_symlink(header,member))exit(2);match(cmd,repo,1,"link-leaves-layout");if(sy_unlink(member))exit(2);
+    char *edit=strdup(batch),*option=strstr(edit,"--one");if(!option)exit(2);memcpy(option,"--two",5);
+    write_input(table,edit);git_at(repo,add);git_at(repo,save);char *other=git_at(repo,get);other[strcspn(other,"\n")]=0;
+    write_input(join(layout,"tests/batches.tsv"),edit);cmd[2]=other;match(cmd,repo,1,"batch-argv-changed");cmd[2]=oid;
+    write_input(join(layout,"tests/batches.tsv"),batch);
+    write_input(join(runtime,"readset.tsv"),"incomplete\n");match(cmd,repo,1,"unknown-readset");
+    if(sy_unlink(join(repo,".git")))exit(2);
+}
+/* --history 81|82 RELEASE_APE replays the two original source generations offline.
+ * The denominator for safety is every distinct batch in the archived later run. */
+static int replay_history(const char *version,const char *product,const char *dir){
+    size_t n;char *facts=cx_read("tests/fixtures/evidence-identity-history.tsv",&n),*v[8];
+    if(!facts)return 2;char *p=facts;int found=0;
+    while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(*p!='#'){int k=0;char *f=p;while(f&&k<8){v[k++]=f;char *tab=strchr(f,'\t');if(tab)*tab++=0;f=tab;}
+            if(k!=8||f)return 2;if(!strcmp(v[0],version)){found=1;break;}}
+        p=end+1;
+    }if(!found)return 2;
+    char whole[65],hash_a[65],hash_b[65];char *bytes=cx_read(product,&n);
+    if(!bytes)return 2;cx_sha256_hex(bytes,n,whole);free(bytes);if(strcmp(whole,v[3]))return 2;
+    bytes=cx_read(v[4],&n);if(!bytes)return 2;cx_sha256_hex(bytes,n,whole);size_t offset=atol(v[6]);
+    if(strcmp(whole,v[5])||!offset||offset>=n||bytes[offset-1]!='\n')return 2;
+    char *a=join(dir,"old"),*b=join(dir,"later");
+    if(cx_write(a,bytes,offset)||cx_write(b,bytes+offset,n-offset))return 2;
+    cx_sha256_hex(bytes,offset,hash_a);cx_sha256_hex(bytes+offset,n-offset,hash_b);free(bytes);
+    char *predict[]={exe,"--advise",v[2],(char *)product,"-","-","-",v[1],(char *)product,hash_a,a,0};
+    char *actual[]={exe,"--origin",(char *)product,v[2],hash_b,b,0};
+    np_result advice=run_at(predict,"."),observed=run_at(actual,".");if(advice.rc||observed.rc)return 2;
+    int seen=0,missed=0,covered=0,missing=0,runner=0,unresolved=0;
+    p=observed.out;while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(!strncmp(p,"MUST_RERUN\t",11)||!strncmp(p,"ORIGIN\t",7)){
+            char *id=strchr(p,'\t')+1,*tab=strchr(id,'\t');if(!tab)return 2;*tab=0;
+            char key[256];if(cx_fmt(key,sizeof key,"\nMUST_RERUN\t%s\t",id))return 2;
+            int rerun=strstr(advice.out,key)!=0||!strncmp(advice.out,key+1,strlen(key+1));
+            printf("HISTORY_BATCH\t%s\t%s\t%s\n",version,id,rerun?"MUST_RERUN":"MISSING_OR_COVERED");seen++;if(!rerun)missed++;
+        }p=end+1;
+    }
+    int total=0;p=advice.out;while(*p){char *end=strchr(p,'\n');if(!end)return 2;*end=0;
+        if(!strncmp(p,"COVERED\t",8)){covered++;total++;}
+        if(!strncmp(p,"MUST_RERUN\t",11)){total++;const char *reason=strrchr(p,'\t')+1;
+            if(!strcmp(reason,"runner-unknown"))runner++;else if(!strcmp(reason,"unresolved"))unresolved++;else if(!strcmp(reason,"missing-origin"))missing++;}
+        p=end+1;
+    }
+    printf("HISTORY_SAFETY\t%s\tactual=%d\tmissed=%d\n",version,seen,missed);
+    printf("HISTORY_EFFICIENCY\t%s\tbatches=%d\tcovered=%d\tmust_rerun=%d\trunner_unknown=%d\tmissing_origin=%d\tunresolved=%d\n",version,total,covered,total-covered,runner,missing,unresolved);
+    np_free(&advice);np_free(&observed);return !total||seen!=atoi(v[7])||missed;
+}
+int main(int argc,char **argv){
+    char dir[4096],driver[4096];if(sy_mkdtemp(sy_tmpdir(),"unisacc-identity-",dir,sizeof dir)||sy_realpath("./unisacc.com",driver,sizeof driver)<0||
+       cx_fmt(ape,sizeof ape,"%s/ape",dir)||cx_fmt(strict,sizeof strict,"%s/strict",dir)||cx_fmt(exe,sizeof exe,"%s/tool",dir)||cx_write(ape,"ape",3))return 2;
+    cx_sha256_hex("ape",3,candidate);
+    char *build[]={"sh",driver,"tools/evidence-identity.cx","-o",exe,0};np_result b={0};char why[256];if(np_run(build,0,0,40,&b,why,sizeof why)||b.rc){fprintf(stderr,"check-evidence-identity: build %s\n",b.err?b.err:why);return 2;}np_free(&b);
+    if(argc==4&&!strcmp(argv[1],"--history")){int rc=replay_history(argv[2],argv[3],dir);if(cx_rmtree(dir))return 2;return rc;}
+    if(argc!=1)return 2;
+    fixture("actual-pass","PASS","0","55","\trunner=sh","","ORIGIN\tx\tPASS",0);
+    fixture("actual-fail","FAIL","1","55","\trunner=native","","ORIGIN\tx\tFAIL",0);
+    fixture("missing-runner","PASS","0","55","","","runner-unknown",0);
+    fixture("duplicate-transport","PASS","0","55","\ttransport=0\trunner=sh","","invalid-raw",0);
+    fixture("exceeded-window","PASS","0","55001","\trunner=sh","","over-window",0);
+    fixture("last-unknown","PASS","0","55","\trunner=sh","x\td\tUNKNOWN\t2\t-\t0\t0\t1\touter-timeout\n","unresolved",0);
+    fixture("strict-byte-change","PASS","0","55","\trunner=sh","","strict-sha256",1);
+    mutations(dir);
+    if(cx_rmtree(dir))return 2;printf("CHECK_EVIDENCE_IDENTITY\tpassed=%d\tfailed=%d\n",passed,failed);return failed!=0;
+}

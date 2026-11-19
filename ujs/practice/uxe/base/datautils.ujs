@@ -1,0 +1,37 @@
+// Reuse the caller's four-byte float scratch to perform the same f32 rounding
+// before reducing the exponent and mantissa to the binary16 representation.
+native function DataUtils_toHalfFloat(half_value:f64,half_scratch:i64) i64 {
+  if(half_value>65504.0) { half_value=65504.0; }
+  if(half_value<0.0-65504.0) { half_value=0.0-65504.0; }
+  let half_float=ux_f32_put(half_scratch,half_value);
+  let half_bits=ux_u32(half_scratch);
+  let half_top=u32_shr(half_bits,31)*32768;
+  let half_exp=u32_and(u32_shr(half_bits,23),255);
+  let half_tail=u32_and(half_bits,8388607);
+  if(half_exp<103) { return half_top; }
+  if(half_exp<113) { return half_top+u32_shr(8388608+half_tail,126-half_exp); }
+  if(half_exp==255) { return half_top+31744+u32_shr(half_tail,13); }
+  return half_top+(half_exp-112)*1024+u32_shr(half_tail,13);
+}
+
+native function DataUtils_fromHalfFloat(half_src:i64) f64 {
+  let half_sign=1.0;
+  if(u32_and(half_src,32768)!=0) { half_sign=0.0-1.0; }
+  let half_exponent=u32_and(u32_shr(half_src,10),31);
+  let half_mantissa=u32_and(half_src,1023);
+  if(half_exponent==0) { return half_sign*(half_mantissa/16777216.0); }
+  if(half_exponent==31) {
+    if(half_mantissa!=0) { return 0.0/0.0; }
+    return half_sign/0.0;
+  }
+  let half_result=1.0+half_mantissa/1024.0;
+  while(half_exponent>15) {
+    half_result=half_result*2.0;
+    half_exponent=half_exponent-1;
+  }
+  while(half_exponent<15) {
+    half_result=half_result*0.5;
+    half_exponent=half_exponent+1;
+  }
+  return half_sign*half_result;
+}

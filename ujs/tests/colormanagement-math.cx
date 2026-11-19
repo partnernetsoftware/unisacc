@@ -1,0 +1,68 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","vector-scalar","color","colormanagement"};
+    char library[60000]={0};
+    int used=0;
+    for(int i=0;i<4;i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&data,&size,sizeof library-used-2)) return 2;
+        int added=tx_snprintf(library+used,sizeof library-used,"%s\n",data);
+        mm_free(data);
+        if(added<0 || added>=(int)sizeof library-used) return 2;
+        used+=added;
+    }
+    const char *setup="let state=ColorManagement_init(0);let red=Color_setRGB(16,1.0,0.0,0.0);"
+        "let gray=Color_setRGB(48,0.5,0.5,0.5);";
+    const char *cases[]={
+        "return ux_u32(state+ColorManagement.enabled);",
+        "return ux_u32(state+ColorManagement.working)==1;",
+        "let r=ColorManagement_convert(1,red,1,3);return ux_f64(r+16);",
+        "let r=ColorManagement_convert(1,red,3,1);return ux_f64(r+8);",
+        "let r=ColorManagement_convert(1,gray,2,1);return ux_f64(r);",
+        "let r=ColorManagement_convert(1,gray,1,2);return ux_f64(r);",
+        "let r=ColorManagement_convert(1,red,4,4);return ux_f64(r);",
+        "let r=ColorManagement_convert(1,red,0,4);return ux_f64(r);",
+        "return ColorManagement_getPrimaries(4)!=ColorManagement_getPrimaries(2);",
+        "return ColorManagement_getTransfer(0)==ColorManagement_getTransfer(1);",
+        "let s=ColorManagement_setWorking(state,3);let r=ColorManagement_fromWorkingColorSpace(s,red,1);return ux_f64(r);",
+        "let s=ColorManagement_setWorking(state,3);let r=ColorManagement_toWorkingColorSpace(s,red,1);return ux_f64(r);",
+        "return ColorManagement_setWorking(state,2);",
+        "let z=ux_u32_put(state+ColorManagement.enabled,0);let s=ColorManagement_setWorking(state,3);"
+        "let r=ColorManagement_fromWorkingColorSpace(s,red,1);return ux_f64(r);"
+    };
+    const double gold[]={1,1,0.0170827,-0.0420569,0.2140411404715882,0.7353606352856507,
+        1,1,1,1,1.2249401,0.8224621,-1,1};
+    enum {count=sizeof gold/sizeof gold[0]};
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-color-space-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[count]={0};
+    int failed=g_math_reference("colormanagement",refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        const char *statement=mutate && i==2?"let r=ColorManagement_convert(0,red,1,3);return ux_f64(r+16);":cases[i];
+        double actual=0;
+        if(g_math_sample(source,wasm,library,setup,statement,&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("COLORSPACE case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t out_n=0;
+    if(cx_runv_timeout(clean,5,&out,&out_n)) failed=1;
+    mm_free(out);
+    printf("G_MATH ColorManagement cases=%d failed=%d\n",count,failed);
+    return failed;
+}

@@ -1,0 +1,180 @@
+struct Sphere { x: f64; y: f64; z: f64; radius: f64; }
+
+native function Sphere_set(s_dst:i64,s_center:i64,s_radius:f64) i64 {
+  let s_span=ux_span(s_dst,Sphere.size);
+  let s_new_center=Vector3_copy(s_dst,s_center);
+  let s_new_radius=ux_f64_put(s_dst+24,s_radius);
+  return s_dst;
+}
+
+function Sphere_copy(s_copy_dst,...s_copy_args) {
+  let s_copy_src=s_copy_args[0];
+  return Sphere_set(s_copy_dst,s_copy_src,ux_f64(s_copy_src+24));
+}
+
+function Sphere_clone(s_clone_dst,...s_clone_args) {
+  return Sphere_copy(s_clone_dst,s_clone_args[0]);
+}
+
+function Sphere_isEmpty(s_empty_test) {
+  return ux_f64(s_empty_test+24)<0.0;
+}
+
+function Sphere_makeEmpty(s_empty) {
+  let s_null_center=Vector3_set(s_empty,0.0,0.0,0.0);
+  return Sphere_set(s_empty,s_null_center,0.0-1.0);
+}
+
+native function Sphere_fitPoints(s_fit_dst:i64,s_points:i64,s_count:i64,s_center_at:i64) i64 {
+  let s_squared=0.0;
+  let s_index=0;
+  while(s_index<s_count) {
+    let s_distance=Vector3_distanceToSquared(s_center_at,s_points+s_index*24);
+    if(s_distance>s_squared) { s_squared=s_distance; }
+    s_index=s_index+1;
+  }
+  return Sphere_set(s_fit_dst,s_center_at,f64_sqrt(s_squared));
+}
+
+// Offset -1 derives the center from the points' AABB; scratch is 48 bytes.
+function Sphere_setFromPoints(s_points_dst,...s_points_args) {
+  let s_start=s_points_args[0];
+  let s_n=s_points_args[1];
+  let s_center=s_points_args[2];
+  let s_points_result=0-1;
+  if(s_start>=0 && s_start<=6291456 && s_n>=0 && s_n<=(6291456-s_start)/24) {
+    if(s_center<0) {
+      let s_bounds=Box3_setFromBuffers(s_points_args[3],s_start,s_n,24,0);
+      s_center=Box3_getCenter(s_points_dst,s_bounds);
+    }
+    s_points_result=Sphere_fitPoints(s_points_dst,s_start,s_n,s_center);
+  }
+  return s_points_result;
+}
+
+function Sphere_containsPoint(s_contains,...s_contains_args) {
+  let s_contains_radius=ux_f64(s_contains+24);
+  return Vector3_distanceToSquared(s_contains,s_contains_args[0])<=s_contains_radius*s_contains_radius;
+}
+
+function Sphere_distanceToPoint(s_dist,...s_dist_args) {
+  return Vector3_distanceTo(s_dist,s_dist_args[0])-ux_f64(s_dist+24);
+}
+
+function Sphere_intersectsSphere(s_intersection,...s_intersection_args) {
+  let s_other=s_intersection_args[0];
+  let s_total=ux_f64(s_intersection+24)+ux_f64(s_other+24);
+  return Vector3_distanceToSquared(s_intersection,s_other)<=s_total*s_total;
+}
+
+function Sphere_intersectsBox(s_box_sphere,...s_box_args) {
+  return Box3_intersectsSphere(s_box_args[0],s_box_sphere);
+}
+
+function Sphere_intersectsPlane(s_plane_sphere,...s_plane_args) {
+  let s_plane=s_plane_args[0];
+  let s_plane_distance=Vector3_dot(s_plane_sphere,s_plane)+ux_f64(s_plane+24);
+  let s_plane_radius=ux_f64(s_plane_sphere+24);
+  return s_plane_distance<=s_plane_radius && s_plane_distance>=0.0-s_plane_radius;
+}
+
+function Sphere_clampPoint(s_clamp_dst,...s_clamp_args) {
+  let s_clamp_sphere=s_clamp_args[0];
+  let s_clamp_target=s_clamp_args[1];
+  let s_clamp_radius=ux_f64(s_clamp_sphere+24);
+  let s_clamp_dx=ux_f64(s_clamp_target)-ux_f64(s_clamp_sphere);
+  let s_clamp_dy=ux_f64(s_clamp_target+8)-ux_f64(s_clamp_sphere+8);
+  let s_clamp_dz=ux_f64(s_clamp_target+16)-ux_f64(s_clamp_sphere+16);
+  let s_clamp_sq=s_clamp_dx*s_clamp_dx+s_clamp_dy*s_clamp_dy+s_clamp_dz*s_clamp_dz;
+  let s_clamp_result=s_clamp_dst;
+  if(s_clamp_sq>s_clamp_radius*s_clamp_radius) {
+    let s_clamp_scale=s_clamp_radius/f64_sqrt(s_clamp_sq);
+    s_clamp_result=Vector3_set(s_clamp_dst,ux_f64(s_clamp_sphere)+s_clamp_dx*s_clamp_scale,
+        ux_f64(s_clamp_sphere+8)+s_clamp_dy*s_clamp_scale,ux_f64(s_clamp_sphere+16)+s_clamp_dz*s_clamp_scale);
+  } else { s_clamp_result=Vector3_copy(s_clamp_dst,s_clamp_target); }
+  return s_clamp_result;
+}
+
+function Sphere_getBoundingBox(s_bbox,...s_bbox_args) {
+  let s_bbox_source=s_bbox_args[0];
+  let s_bbox_result=Box3_makeEmpty(s_bbox);
+  if(!Sphere_isEmpty(s_bbox_source)) {
+    let s_bbox_center=Box3_set(s_bbox,s_bbox_source,s_bbox_source);
+    s_bbox_result=Box3_expandByScalar(s_bbox_center,ux_f64(s_bbox_source+24));
+  }
+  return s_bbox_result;
+}
+
+function Sphere_applyMatrix4(s_matrix_sphere,...s_matrix_args) {
+  let s_matrix=s_matrix_args[0];
+  let s_max_sq=0.0;
+  let s_axis=0;
+  while(s_axis<96) {
+    let s_mx=ux_f64(s_matrix+s_axis);
+    let s_my=ux_f64(s_matrix+s_axis+8);
+    let s_mz=ux_f64(s_matrix+s_axis+16);
+    let s_col_sq=s_mx*s_mx+s_my*s_my+s_mz*s_mz;
+    if(s_col_sq>s_max_sq) { s_max_sq=s_col_sq; }
+    s_axis=s_axis+32;
+  }
+  let s_moved=Vector3_applyMatrix4(s_matrix_sphere,s_matrix);
+  let s_scaled=ux_f64_put(s_moved+24,ux_f64(s_moved+24)*f64_sqrt(s_max_sq));
+  return s_moved;
+}
+
+function Sphere_translate(s_translate,...s_translate_args) {
+  return Vector3_add(s_translate,s_translate_args[0]);
+}
+
+native function Sphere_expandXYZ(s_xyz:i64,s_px:f64,s_py:f64,s_pz:f64) i64 {
+  let s_old_radius=ux_f64(s_xyz+24);
+  if(s_old_radius<0.0) {
+    let s_first=Vector3_set(s_xyz,s_px,s_py,s_pz);
+    let s_zero=ux_f64_put(s_xyz+24,0.0);
+    return s_first;
+  }
+  let s_x=ux_f64(s_xyz);
+  let s_y=ux_f64(s_xyz+8);
+  let s_z=ux_f64(s_xyz+16);
+  let s_dx=s_px-s_x; let s_dy=s_py-s_y; let s_dz=s_pz-s_z;
+  let s_sq=s_dx*s_dx+s_dy*s_dy+s_dz*s_dz;
+  if(s_sq>s_old_radius*s_old_radius) {
+    let s_len=f64_sqrt(s_sq);
+    let s_shift=(s_len-s_old_radius)*0.5;
+    let s_move_factor=s_shift/s_len;
+    let s_new_xyz=Vector3_set(s_xyz,s_x+s_dx*s_move_factor,s_y+s_dy*s_move_factor,s_z+s_dz*s_move_factor);
+    let s_expanded=ux_f64_put(s_xyz+24,s_old_radius+s_shift);
+  }
+  return s_xyz;
+}
+
+function Sphere_expandByPoint(s_expand,...s_expand_args) {
+  let s_point=s_expand_args[0];
+  return Sphere_expandXYZ(s_expand,ux_f64(s_point),ux_f64(s_point+8),ux_f64(s_point+16));
+}
+
+native function Sphere_union(s_union:i64,s_union_other:i64) i64 {
+  let s_union_radius=ux_f64(s_union_other+24);
+  if(s_union_radius<0.0) { return s_union; }
+  let s_union_current=ux_f64(s_union+24);
+  if(s_union_current<0.0) { return Sphere_set(s_union,s_union_other,s_union_radius); }
+  let s_union_x=ux_f64(s_union_other); let s_union_y=ux_f64(s_union_other+8); let s_union_z=ux_f64(s_union_other+16);
+  let s_union_dx=s_union_x-ux_f64(s_union);
+  let s_union_dy=s_union_y-ux_f64(s_union+8);
+  let s_union_dz=s_union_z-ux_f64(s_union+16);
+  let s_union_len=f64_sqrt(s_union_dx*s_union_dx+s_union_dy*s_union_dy+s_union_dz*s_union_dz);
+  if(s_union_len==0.0) {
+    if(s_union_radius>s_union_current) { let s_union_max=ux_f64_put(s_union+24,s_union_radius); }
+    return s_union;
+  }
+  let s_union_t=s_union_radius/s_union_len;
+  let s_union_first=Sphere_expandXYZ(s_union,s_union_x+s_union_dx*s_union_t,s_union_y+s_union_dy*s_union_t,
+    s_union_z+s_union_dz*s_union_t);
+  return Sphere_expandXYZ(s_union_first,s_union_x-s_union_dx*s_union_t,s_union_y-s_union_dy*s_union_t,
+    s_union_z-s_union_dz*s_union_t);
+}
+
+function Sphere_equals(s_equal,...s_equal_args) {
+  let s_equal_rhs=s_equal_args[0];
+  return Vector3_equals(s_equal,s_equal_rhs) && ux_f64(s_equal+24)==ux_f64(s_equal_rhs+24);
+}

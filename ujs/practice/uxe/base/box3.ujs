@@ -1,0 +1,373 @@
+struct Box3 { minX: f64; minY: f64; minZ: f64; maxX: f64; maxY: f64; maxZ: f64; }
+
+native function Box3_set(b3_dst:i64,b3_low:i64,b3_high:i64) i64 {
+  let b3_lo=[ux_f64(b3_low),ux_f64(b3_low+8),ux_f64(b3_low+16)];
+  let b3_hi=[ux_f64(b3_high),ux_f64(b3_high+8),ux_f64(b3_high+16)];
+  let b3_span=ux_span(b3_dst,Box3.size);
+  let b3_axis=0;
+  while(b3_axis<3) {
+    let b3_write_low=ux_f64_put(b3_dst+b3_axis*8,b3_lo[b3_axis]);
+    let b3_write_high=ux_f64_put(b3_dst+24+b3_axis*8,b3_hi[b3_axis]);
+    b3_axis=b3_axis+1;
+  }
+  return b3_dst;
+}
+
+function Box3_copy(b3_copy_dst,...b3_copy_args) {
+  return Box3_set(b3_copy_dst,b3_copy_args[0],b3_copy_args[0]+24);
+}
+
+function Box3_clone(b3_clone_dst,...b3_clone_args) {
+  return Box3_copy(b3_clone_dst,b3_clone_args[0]);
+}
+
+native function Box3_makeEmpty(b3_empty:i64) i64 {
+  let b3_pos=1.0/0.0;
+  let b3_neg=0.0-b3_pos;
+  let b3_low_write=Vector3_set(b3_empty,b3_pos,b3_pos,b3_pos);
+  let b3_high_write=Vector3_set(b3_empty+24,b3_neg,b3_neg,b3_neg);
+  return b3_empty;
+}
+
+native function Box3_isEmpty(b3_empty_box:i64) i64 {
+  return ux_f64(b3_empty_box+24)<ux_f64(b3_empty_box) ||
+      ux_f64(b3_empty_box+32)<ux_f64(b3_empty_box+8) ||
+      ux_f64(b3_empty_box+40)<ux_f64(b3_empty_box+16);
+}
+
+native function Box3_fitXYZ(b3_fit:i64,b3_x:f64,b3_y:f64,b3_z:f64) i64 {
+  let b3_point_xyz=[b3_x,b3_y,b3_z];
+  let b3_fit_axis=0;
+  while(b3_fit_axis<3) {
+    let b3_fit_at=b3_fit+b3_fit_axis*8;
+    let b3_fit_value=b3_point_xyz[b3_fit_axis];
+    let b3_fit_min=vector_limit(ux_f64(b3_fit_at),0.0-1.0/0.0,b3_fit_value);
+    let b3_fit_max=vector_limit(ux_f64(b3_fit_at+24),b3_fit_value,1.0/0.0);
+    let b3_fit_put_min=ux_f64_put(b3_fit_at,b3_fit_min);
+    let b3_fit_put_max=ux_f64_put(b3_fit_at+24,b3_fit_max);
+    b3_fit_axis=b3_fit_axis+1;
+  }
+  return b3_fit;
+}
+
+function Box3_expandByPoint(b3_expand_box,...b3_expand_args) {
+  let b3_point=b3_expand_args[0];
+  return Box3_fitXYZ(b3_expand_box,ux_f64(b3_point),ux_f64(b3_point+8),ux_f64(b3_point+16));
+}
+
+// Layout 0 reads packed f64 positions, layout 1 reads f32 positions at byte stride.
+native function Box3_setFromBuffers(b3_points_box:i64,b3_start:i64,b3_count:i64,b3_stride:i64,b3_layout:i64) i64 {
+  let b3_width=24;
+  if(b3_layout==1) { b3_width=12; }
+  if(b3_start<0 || b3_start>6291456 || b3_count<0 || b3_stride<b3_width) { return 0-1; }
+  if(b3_count>0) {
+    if(b3_width>6291456-b3_start || b3_count-1>(6291456-b3_start-b3_width)/b3_stride) { return 0-1; }
+  }
+  let b3_clear=Box3_makeEmpty(b3_points_box);
+  let b3_index=0;
+  while(b3_index<b3_count) {
+    let b3_at=b3_start+b3_index*b3_stride;
+    if(b3_layout==0) {
+      let b3_fit64=Box3_fitXYZ(b3_clear,ux_f64(b3_at),ux_f64(b3_at+8),ux_f64(b3_at+16));
+    } else {
+      let b3_fit32=Box3_fitXYZ(b3_clear,ux_f32(b3_at),ux_f32(b3_at+4),ux_f32(b3_at+8));
+    }
+    b3_index=b3_index+1;
+  }
+  return b3_clear;
+}
+
+function Box3_setFromPoints(b3_points,...b3_points_args) {
+  return Box3_setFromBuffers(b3_points,b3_points_args[0],b3_points_args[1],24,0);
+}
+
+function Box3_setFromArray(b3_array,...b3_array_args) {
+  return Box3_setFromPoints(b3_array,b3_array_args[0],b3_array_args[1]/3);
+}
+
+function Box3_setFromBufferAttribute(b3_attr,...b3_attr_args) {
+  return Box3_setFromBuffers(b3_attr,b3_attr_args[0],b3_attr_args[1],b3_attr_args[2],1);
+}
+
+function Box3_setFromCenterAndSize(b3_center_box,...b3_center_args) {
+  let b3_ctr=b3_center_args[0];
+  let b3_extent=b3_center_args[1];
+  let b3_center_axis=0;
+  while(b3_center_axis<24) {
+    let b3_middle=ux_f64(b3_ctr+b3_center_axis);
+    let b3_half=ux_f64(b3_extent+b3_center_axis)*0.5;
+    let b3_center_lo=ux_f64_put(b3_center_box+b3_center_axis,b3_middle-b3_half);
+    let b3_center_hi=ux_f64_put(b3_center_box+b3_center_axis+24,b3_middle+b3_half);
+    b3_center_axis=b3_center_axis+8;
+  }
+  return b3_center_box;
+}
+
+function Box3_getCenter(b3_ctr_dst,...b3_ctr_args) {
+  let b3_ctr_src=b3_ctr_args[0];
+  let b3_ctr_result=b3_ctr_dst;
+  if(Box3_isEmpty(b3_ctr_src)) { b3_ctr_result=Vector3_set(b3_ctr_dst,0.0,0.0,0.0); }
+  else {
+    b3_ctr_result=Vector3_set(b3_ctr_dst,(ux_f64(b3_ctr_src)+ux_f64(b3_ctr_src+24))*0.5,
+      (ux_f64(b3_ctr_src+8)+ux_f64(b3_ctr_src+32))*0.5,(ux_f64(b3_ctr_src+16)+ux_f64(b3_ctr_src+40))*0.5);
+  }
+  return b3_ctr_result;
+}
+
+function Box3_getSize(b3_dim_dst,...b3_dim_args) {
+  let b3_dim_src=b3_dim_args[0];
+  let b3_dim_result=b3_dim_dst;
+  if(Box3_isEmpty(b3_dim_src)) { b3_dim_result=Vector3_set(b3_dim_dst,0.0,0.0,0.0); }
+  else {
+    b3_dim_result=Vector3_set(b3_dim_dst,ux_f64(b3_dim_src+24)-ux_f64(b3_dim_src),
+      ux_f64(b3_dim_src+32)-ux_f64(b3_dim_src+8),ux_f64(b3_dim_src+40)-ux_f64(b3_dim_src+16));
+  }
+  return b3_dim_result;
+}
+
+function Box3_expandByVector(b3_expand_vec,...b3_vec_args) {
+  let b3_vector=b3_vec_args[0];
+  let b3_vector_low=Vector3_sub(b3_expand_vec,b3_vector);
+  let b3_vector_high=Vector3_add(b3_expand_vec+24,b3_vector);
+  return b3_expand_vec;
+}
+
+native function Box3_expandByScalar(b3_scalar_box:i64,b3_scalar:f64) i64 {
+  let b3_scalar_axis=0;
+  while(b3_scalar_axis<24) {
+    let b3_scalar_at=b3_scalar_box+b3_scalar_axis;
+    let b3_scalar_low=ux_f64_put(b3_scalar_at,ux_f64(b3_scalar_at)-b3_scalar);
+    let b3_scalar_high=ux_f64_put(b3_scalar_at+24,ux_f64(b3_scalar_at+24)+b3_scalar);
+    b3_scalar_axis=b3_scalar_axis+8;
+  }
+  return b3_scalar_box;
+}
+
+function Box3_containsPoint(b3_contains,...b3_contains_args) {
+  let b3_target=b3_contains_args[0];
+  let b3_contains_axis=0;
+  let b3_contains_result=1;
+  while(b3_contains_axis<24) {
+    let b3_test=ux_f64(b3_target+b3_contains_axis);
+    if(b3_test<ux_f64(b3_contains+b3_contains_axis) || b3_test>ux_f64(b3_contains+b3_contains_axis+24)) {
+      b3_contains_result=0;
+    }
+    b3_contains_axis=b3_contains_axis+8;
+  }
+  return b3_contains_result;
+}
+
+function Box3_containsBox(b3_outer,...b3_outer_args) {
+  let b3_inner=b3_outer_args[0];
+  return ux_f64(b3_outer)<=ux_f64(b3_inner) && ux_f64(b3_outer+8)<=ux_f64(b3_inner+8) &&
+      ux_f64(b3_outer+16)<=ux_f64(b3_inner+16) && ux_f64(b3_outer+24)>=ux_f64(b3_inner+24) &&
+      ux_f64(b3_outer+32)>=ux_f64(b3_inner+32) && ux_f64(b3_outer+40)>=ux_f64(b3_inner+40);
+}
+
+function Box3_intersectsBox(b3_intersects,...b3_intersects_args) {
+  let b3_other=b3_intersects_args[0];
+  let b3_overlap_axis=0;
+  let b3_overlap=1;
+  while(b3_overlap_axis<24) {
+    let b3_test_a=b3_intersects+b3_overlap_axis;
+    let b3_test_b=b3_other+b3_overlap_axis;
+    if(ux_f64(b3_test_a+24)<ux_f64(b3_test_b) || ux_f64(b3_test_b+24)<ux_f64(b3_test_a)) { b3_overlap=0; }
+    b3_overlap_axis=b3_overlap_axis+8;
+  }
+  return b3_overlap;
+}
+
+function Box3_getParameter(b3_param_dst,...b3_param_args) {
+  let b3_param_box=b3_param_args[0];
+  let b3_param_point=b3_param_args[1];
+  let b3_param_axis=0;
+  while(b3_param_axis<24) {
+    let b3_param_at=b3_param_box+b3_param_axis;
+    let b3_param_min=ux_f64(b3_param_at);
+    let b3_param_value=(ux_f64(b3_param_point+b3_param_axis)-b3_param_min)/(ux_f64(b3_param_at+24)-b3_param_min);
+    let b3_param_write=ux_f64_put(b3_param_dst+b3_param_axis,b3_param_value);
+    b3_param_axis=b3_param_axis+8;
+  }
+  return b3_param_dst;
+}
+
+function Box3_clampPoint(b3_clamp_dst,...b3_clamp_args) {
+  let b3_clamp_box=b3_clamp_args[0];
+  let b3_clamp_point=b3_clamp_args[1];
+  let b3_clamp_axis=0;
+  while(b3_clamp_axis<24) {
+    let b3_clamp_at=b3_clamp_box+b3_clamp_axis;
+    let b3_clamp_value=vector_limit(ux_f64(b3_clamp_point+b3_clamp_axis),ux_f64(b3_clamp_at),ux_f64(b3_clamp_at+24));
+    let b3_clamp_write=ux_f64_put(b3_clamp_dst+b3_clamp_axis,b3_clamp_value);
+    b3_clamp_axis=b3_clamp_axis+8;
+  }
+  return b3_clamp_dst;
+}
+
+native function Box3_distanceSquared(b3_dist_box:i64,b3_dist_point:i64) f64 {
+  let b3_dist_axis=0;
+  let b3_dist_sum=0.0;
+  while(b3_dist_axis<24) {
+    let b3_dist_at=b3_dist_box+b3_dist_axis;
+    let b3_dist_val=ux_f64(b3_dist_point+b3_dist_axis);
+    let b3_dist_delta=vector_limit(b3_dist_val,ux_f64(b3_dist_at),ux_f64(b3_dist_at+24))-b3_dist_val;
+    b3_dist_sum=b3_dist_sum+b3_dist_delta*b3_dist_delta;
+    b3_dist_axis=b3_dist_axis+8;
+  }
+  return b3_dist_sum;
+}
+
+function Box3_distanceToPoint(b3_distance,...b3_distance_args) {
+  return f64_sqrt(Box3_distanceSquared(b3_distance,b3_distance_args[0]));
+}
+
+function Box3_intersectsSphere(b3_sphere_box,...b3_sphere_args) {
+  let b3_sphere=b3_sphere_args[0];
+  let b3_radius=ux_f64(b3_sphere+24);
+  return Box3_distanceSquared(b3_sphere_box,b3_sphere)<=b3_radius*b3_radius;
+}
+
+function Box3_intersectsPlane(b3_plane_box,...b3_plane_args) {
+  let b3_plane=b3_plane_args[0];
+  let b3_plane_min=0.0;
+  let b3_plane_max=0.0;
+  let b3_plane_axis=0;
+  while(b3_plane_axis<24) {
+    let b3_normal=ux_f64(b3_plane+b3_plane_axis);
+    let b3_box_coord=b3_plane_box+b3_plane_axis;
+    if(b3_normal>0.0) {
+      b3_plane_min=b3_plane_min+b3_normal*ux_f64(b3_box_coord);
+      b3_plane_max=b3_plane_max+b3_normal*ux_f64(b3_box_coord+24);
+    } else {
+      b3_plane_min=b3_plane_min+b3_normal*ux_f64(b3_box_coord+24);
+      b3_plane_max=b3_plane_max+b3_normal*ux_f64(b3_box_coord);
+    }
+    b3_plane_axis=b3_plane_axis+8;
+  }
+  let b3_constant=0.0-ux_f64(b3_plane+24);
+  return b3_plane_min<=b3_constant && b3_plane_max>=b3_constant;
+}
+
+function Box3_getBoundingSphere(b3_bound_dst,...b3_bound_args) {
+  let b3_bound_box=b3_bound_args[0];
+  let b3_bound_radius=0.0-1.0;
+  let b3_bound_center=Box3_getCenter(b3_bound_dst,b3_bound_box);
+  if(!Box3_isEmpty(b3_bound_box)) {
+    let b3_bound_x=ux_f64(b3_bound_box+24)-ux_f64(b3_bound_box);
+    let b3_bound_y=ux_f64(b3_bound_box+32)-ux_f64(b3_bound_box+8);
+    let b3_bound_z=ux_f64(b3_bound_box+40)-ux_f64(b3_bound_box+16);
+    b3_bound_radius=f64_sqrt(b3_bound_x*b3_bound_x+b3_bound_y*b3_bound_y+b3_bound_z*b3_bound_z)*0.5;
+  }
+  let b3_bound_write=ux_f64_put(b3_bound_center+24,b3_bound_radius);
+  return b3_bound_center;
+}
+
+function Box3_intersect(b3_cut,...b3_cut_args) {
+  let b3_cut_other=b3_cut_args[0];
+  let b3_cut_low=Vector3_max(b3_cut,b3_cut_other);
+  let b3_cut_high=Vector3_min(b3_cut+24,b3_cut_other+24);
+  let b3_cut_result=b3_cut;
+  if(Box3_isEmpty(b3_cut)) { b3_cut_result=Box3_makeEmpty(b3_cut); }
+  return b3_cut_result;
+}
+
+function Box3_union(b3_union_box,...b3_union_args) {
+  let b3_union_other=b3_union_args[0];
+  let b3_union_min=Vector3_min(b3_union_box,b3_union_other);
+  let b3_union_max=Vector3_max(b3_union_box+24,b3_union_other+24);
+  return b3_union_box;
+}
+
+function Box3_translate(b3_move,...b3_move_args) {
+  let b3_offset=b3_move_args[0];
+  let b3_move_min=Vector3_add(b3_move,b3_offset);
+  let b3_move_max=Vector3_add(b3_move+24,b3_offset);
+  return b3_move;
+}
+
+function Box3_equals(b3_equal,...b3_equal_args) {
+  let b3_equal_other=b3_equal_args[0];
+  return Vector3_equals(b3_equal,b3_equal_other) && Vector3_equals(b3_equal+24,b3_equal_other+24);
+}
+
+// See box3-scene.ujs for the packed traversal records used by these two entry points.
+function Box3_expandByObject(b3_object_dst,...b3_object_args) {
+  return Box3_sceneExpand(b3_object_dst,b3_object_args[0],b3_object_args[1],b3_object_args[2],b3_object_args[3]);
+}
+
+function Box3_setFromObject(b3_scene_dst,...b3_scene_args) {
+  let b3_scene_empty=Box3_makeEmpty(b3_scene_dst);
+  return Box3_sceneExpand(b3_scene_empty,b3_scene_args[0],b3_scene_args[1],b3_scene_args[2],b3_scene_args[3]);
+}
+
+native function Box3_applyMatrix4(b3_matrix_box:i64,b3_matrix:i64,b3_matrix_tmp:i64) i64 {
+  if(Box3_isEmpty(b3_matrix_box)) { return b3_matrix_box; }
+  let b3_limits=[ux_f64(b3_matrix_box),ux_f64(b3_matrix_box+8),ux_f64(b3_matrix_box+16),
+      ux_f64(b3_matrix_box+24),ux_f64(b3_matrix_box+32),ux_f64(b3_matrix_box+40)];
+  let b3_matrix_reset=Box3_makeEmpty(b3_matrix_box);
+  let b3_corner=0;
+  while(b3_corner<8) {
+    let b3_v=Vector3_set(b3_matrix_tmp,b3_limits[(b3_corner%2)*3],
+        b3_limits[1+(b3_corner/2%2)*3],b3_limits[2+(b3_corner/4)*3]);
+    let b3_transformed=Vector3_applyMatrix4(b3_v,b3_matrix);
+    let b3_fit_corner=Box3_fitXYZ(b3_matrix_reset,ux_f64(b3_transformed),
+        ux_f64(b3_transformed+8),ux_f64(b3_transformed+16));
+    b3_corner=b3_corner+1;
+  }
+  return b3_matrix_reset;
+}
+
+native function Box3_intersectsTriangle(b3_sat_box:i64,b3_sat_tri:i64) i64 {
+  if(Box3_isEmpty(b3_sat_box)) { return 0; }
+  let b3_sat_half=[0.0,0.0,0.0];
+  let b3_sat_vertex=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+  let b3_sat_edges=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+  let b3_sat_init=0;
+  while(b3_sat_init<3) {
+    let b3_sat_low=ux_f64(b3_sat_box+8*b3_sat_init);
+    let b3_sat_high=ux_f64(b3_sat_box+24+8*b3_sat_init);
+    let b3_sat_center=(b3_sat_low+b3_sat_high)*0.5;
+    b3_sat_half[b3_sat_init]=(b3_sat_high-b3_sat_low)*0.5;
+    b3_sat_vertex[b3_sat_init]=ux_f64(b3_sat_tri+8*b3_sat_init)-b3_sat_center;
+    b3_sat_vertex[b3_sat_init+3]=ux_f64(b3_sat_tri+24+8*b3_sat_init)-b3_sat_center;
+    b3_sat_vertex[b3_sat_init+6]=ux_f64(b3_sat_tri+48+8*b3_sat_init)-b3_sat_center;
+    b3_sat_edges[b3_sat_init]=b3_sat_vertex[b3_sat_init+3]-b3_sat_vertex[b3_sat_init];
+    b3_sat_edges[b3_sat_init+3]=b3_sat_vertex[b3_sat_init+6]-b3_sat_vertex[b3_sat_init+3];
+    b3_sat_edges[b3_sat_init+6]=b3_sat_vertex[b3_sat_init]-b3_sat_vertex[b3_sat_init+6];
+    b3_sat_init=b3_sat_init+1;
+  }
+  let b3_sat_direction=[0.0,0.0,0.0];
+  let b3_sat_axis=0;
+  while(b3_sat_axis<13) {
+    b3_sat_direction[0]=0.0; b3_sat_direction[1]=0.0; b3_sat_direction[2]=0.0;
+    if(b3_sat_axis<3) {
+      b3_sat_direction[b3_sat_axis]=1.0;
+    } else if(b3_sat_axis<12) {
+      let b3_sat_edge=(b3_sat_axis-3)/3*3;
+      let b3_sat_a=(b3_sat_axis-3)%3;
+      let b3_sat_j=(b3_sat_a+1)%3;
+      let b3_sat_k=(b3_sat_a+2)%3;
+      b3_sat_direction[b3_sat_j]=0.0-b3_sat_edges[b3_sat_edge+b3_sat_k];
+      b3_sat_direction[b3_sat_k]=b3_sat_edges[b3_sat_edge+b3_sat_j];
+    } else {
+      b3_sat_direction[0]=b3_sat_edges[1]*b3_sat_edges[5]-b3_sat_edges[2]*b3_sat_edges[4];
+      b3_sat_direction[1]=b3_sat_edges[2]*b3_sat_edges[3]-b3_sat_edges[0]*b3_sat_edges[5];
+      b3_sat_direction[2]=b3_sat_edges[0]*b3_sat_edges[4]-b3_sat_edges[1]*b3_sat_edges[3];
+    }
+    let b3_sat_ax=b3_sat_direction[0];
+    let b3_sat_ay=b3_sat_direction[1];
+    let b3_sat_az=b3_sat_direction[2];
+    let b3_sat_mx=b3_sat_ax; let b3_sat_my=b3_sat_ay; let b3_sat_mz=b3_sat_az;
+    if(b3_sat_mx<0.0) { b3_sat_mx=0.0-b3_sat_mx; }
+    if(b3_sat_my<0.0) { b3_sat_my=0.0-b3_sat_my; }
+    if(b3_sat_mz<0.0) { b3_sat_mz=0.0-b3_sat_mz; }
+    let b3_sat_radius=b3_sat_mx*b3_sat_half[0]+b3_sat_my*b3_sat_half[1]+b3_sat_mz*b3_sat_half[2];
+    let b3_sat_p0=b3_sat_ax*b3_sat_vertex[0]+b3_sat_ay*b3_sat_vertex[1]+b3_sat_az*b3_sat_vertex[2];
+    let b3_sat_p1=b3_sat_ax*b3_sat_vertex[3]+b3_sat_ay*b3_sat_vertex[4]+b3_sat_az*b3_sat_vertex[5];
+    let b3_sat_p2=b3_sat_ax*b3_sat_vertex[6]+b3_sat_ay*b3_sat_vertex[7]+b3_sat_az*b3_sat_vertex[8];
+    if(b3_sat_p0>b3_sat_radius && b3_sat_p1>b3_sat_radius && b3_sat_p2>b3_sat_radius) { return 0; }
+    if(b3_sat_p0<0.0-b3_sat_radius && b3_sat_p1<0.0-b3_sat_radius && b3_sat_p2<0.0-b3_sat_radius) { return 0; }
+    b3_sat_axis=b3_sat_axis+1;
+  }
+  return 1;
+}

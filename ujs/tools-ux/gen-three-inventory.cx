@@ -87,7 +87,7 @@ static void classify(Row *r) {
         r->category=ends(n,"Texture")?"纹理":"材质"; r->milestone="M5";
     } else if(ends(n,"Light") || starts(n,"Fog") || one_of(n,"|LightProbe|PMREMGenerator|")) {
         r->category="灯光"; r->milestone="M6";
-    } else if(starts(n,"Animation") || ends(n,"KeyframeTrack") || starts(n,"Property")) {
+    } else if(starts(n,"Animation") || ends(n,"KeyframeTrack") || starts(n,"Property") || ends(n,"Interpolant")) {
         r->category="动画"; r->milestone="M8";
     } else if(ends(n,"Mesh") || one_of(n,"|LOD|Bone|Skeleton|Sprite|Points|Line|LineSegments|LineLoop|")) {
         r->category="网格"; r->milestone="M7";
@@ -96,7 +96,7 @@ static void classify(Row *r) {
     } else if(starts(n,"WebGL") || starts(n,"Shader") || starts(n,"Uniforms") ||
               one_of(n,"|RenderTarget|createCanvasElement|")) {
         r->category="渲染"; r->milestone="M4";
-    } else if(starts(n,"Vector") || starts(n,"Matrix") || ends(n,"Interpolant") ||
+    } else if(starts(n,"Vector") || starts(n,"Matrix") ||
               one_of(n,"|Box2|Box3|Color|Cylindrical|Euler|Frustum|Line3|MathUtils|Plane|Quaternion|Ray|Sphere|Spherical|SphericalHarmonics3|Triangle|")) {
         r->category="数学"; r->milestone="M1";
     }
@@ -161,12 +161,42 @@ static int good_priority(const char *s) {
 static int good_milestone(const char *s) {
     return one_of(s,"|M1|M2|M3|M4|M5|M6|M7|M8|M9|M10|M11|M12|");
 }
-static int math_evidence(const Row *r, const char *methods, const char *evidence) {
+
+static int capability_fixture(const char *stem,const char *label,int structure) {
+    char path[220],proof[145];
+    unsigned char *gate=0,*reference=0;
+    int64_t gate_size=0,reference_size=0;
+    tx_snprintf(path,sizeof path,"ujs/tests/%s-%s.cx",stem,structure?"struct":"math");
+    int ok=!sy_read_file(path,&gate,&gate_size,100000);
+    tx_snprintf(path,sizeof path,"ujs/practice/uxe/test/%s-r160.html",stem);
+    ok=ok && !sy_read_file(path,&reference,&reference_size,100000);
+    if(ok) {
+        tx_snprintf(proof,sizeof proof,"%s %s",structure?"G_STRUCT":"G_MATH",label);
+        ok=tx_contains((const char *)gate,gate_size,proof,tx_len(proof,sizeof proof)) &&
+            tx_contains((const char *)reference,reference_size,"three.module.js",15);
+    }
+    mm_free(gate); mm_free(reference);
+    return ok;
+}
+
+static int capability_evidence(const Row *r, const char *methods, const char *evidence) {
     char stem[100], path[220], proof[145];
-    unsigned char *source_bytes=0,*gate=0,*reference=0;
-    int64_t source_size=0, gate_size=0, reference_size=0;
-    if(r->lane!='A' || !tx_eqz(r->milestone,"M1")) return 0;
-    tx_snprintf(proof,sizeof proof,"G-math %s",r->name);
+    unsigned char *source_bytes=0,*extra=0;
+    int64_t source_size=0,extra_size=0;
+    int structure=tx_eqz(r->milestone,"M2");
+    if(r->lane=='B') {
+        if(!structure || !tx_eqz(methods,"-") ||
+            !(ends(r->name,"Usage") || ends(r->name,"Type")) ||
+            !starts(evidence,"G-struct BufferConstants")) return 0;
+        tx_snprintf(proof,sizeof proof,"function %s()",r->name);
+        int ok=!sy_read_file("ujs/practice/uxe/base/bufferconstants.ujs",&source_bytes,&source_size,10000) &&
+            tx_contains((const char *)source_bytes,source_size,proof,tx_len(proof,sizeof proof)) &&
+            capability_fixture("bufferconstants","BufferConstants",1);
+        mm_free(source_bytes);
+        return ok;
+    }
+    if(r->lane!='A' || (!structure && !tx_eqz(r->milestone,"M1"))) return 0;
+    tx_snprintf(proof,sizeof proof,"%s %s",structure?"G-struct":"G-math",r->name);
     if(!starts(evidence,proof)) return 0;
     int i=0;
     for(;r->name[i];i++) {
@@ -175,26 +205,25 @@ static int math_evidence(const Row *r, const char *methods, const char *evidence
     }
     stem[i]=0;
     tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",stem);
-    int ok=!sy_read_file(path,&source_bytes,&source_size,100000);
-    tx_snprintf(path,sizeof path,"ujs/tests/%s-math.cx",stem);
-    ok=ok && !sy_read_file(path,&gate,&gate_size,100000);
-    tx_snprintf(path,sizeof path,"ujs/practice/uxe/test/%s-r160.html",stem);
-    ok=ok && !sy_read_file(path,&reference,&reference_size,100000);
-    if(ok) {
-        tx_snprintf(proof,sizeof proof,"G_MATH %s",r->name);
-        ok=tx_contains((const char *)gate,gate_size,proof,tx_len(proof,sizeof proof)) &&
-            tx_contains((const char *)reference,reference_size,"three.module.js",15);
+    int ok=!sy_read_file(path,&source_bytes,&source_size,100000) && capability_fixture(stem,r->name,structure);
+    if(ok && tx_eqz(r->name,"Color")) {
+        ok=!sy_read_file("ujs/practice/uxe/base/color-style.ujs",&extra,&extra_size,100000) &&
+            capability_fixture("color-style","Color CSS",0);
     }
+    if(ok && tx_eqz(r->name,"Box3")) ok=capability_fixture("box3-scene","Box3 objects",0);
+    if(ok && tx_eqz(r->name,"Frustum")) ok=capability_fixture("frustum-scene","Frustum objects",0);
     const char *at=methods;
     while(ok && *at) {
         const char *end=at;
         while(identifier(*end)) end++;
         if(end==at || (*end && *end!=',')) { ok=0; break; }
         tx_snprintf(proof,sizeof proof,"function %s_%.*s(",r->name,(int)(end-at),at);
-        ok=tx_contains((const char *)source_bytes,source_size,proof,tx_len(proof,sizeof proof));
+        long length=tx_len(proof,sizeof proof);
+        ok=tx_contains((const char *)source_bytes,source_size,proof,length) ||
+            (extra && tx_contains((const char *)extra,extra_size,proof,length));
         at=*end?end+1:end;
     }
-    mm_free(source_bytes); mm_free(gate); mm_free(reference);
+    mm_free(source_bytes); mm_free(extra);
     return ok;
 }
 
@@ -202,7 +231,7 @@ static int read_facts(const char *path,unsigned char **data,int addon) {
     int64_t n=0;
     const char *fields=addon?"name\tcategory\tmilestone\tpriority\tr160_module\n":
         "name\tstate\tcategory\tmilestone\tpriority\tmethods\tevidence\n";
-    if(sy_read_file(path,data,&n,16000) || !starts((char *)*data,fields)) return 1;
+    if(sy_read_file(path,data,&n,64000) || !starts((char *)*data,fields)) return 1;
     char *at=(char *)*data+tx_len(fields,128);
     while(*at) {
         char *f[7];
@@ -226,7 +255,7 @@ static int read_facts(const char *path,unsigned char **data,int addon) {
             r->evidence=f[4];
         } else {
             if(!one_of(f[1],"|缺|部分|不适用|已有|")) return 1;
-            if(tx_eqz(f[1],"已有") && !math_evidence(r,f[5],f[6])) return 1;
+            if(tx_eqz(f[1],"已有") && !capability_evidence(r,f[5],f[6])) return 1;
             if(tx_eqz(f[1],"不适用") &&
                !one_of(r->name,"|WebGL1Renderer|WebGPUCoordinateSystem|")) return 1;
             r->state=f[1];
@@ -293,6 +322,14 @@ int main(int argc,char **argv) {
         }
         printf("THREE_INVENTORY lane=%c total=%d eligible=%d ready=%d partial=%d excluded=%d percent=%.2f\n",
             lane,total,total-excluded,done,partial,excluded,100.0*done/(total-excluded));
+    }
+    if(n>=0) {
+        int math=0,verified=0;
+        for(int i=0;i<count;i++) if(rows[i].lane=='A' && tx_eqz(rows[i].milestone,"M1")) {
+            math++;
+            verified+=tx_eqz(rows[i].state,"已有");
+        }
+        printf("THREE_INVENTORY milestone=M1 rows=%d ready=%d\n",math,verified);
     }
     printf("THREE_INVENTORY rows=%d failed=%d\n",count,rc);
     mm_free(a);
