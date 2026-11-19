@@ -53,3 +53,9 @@
 | [archive/pre080/release/evidence/0.0.78/tdr-deferred.tsv](pre080/release/evidence/0.0.78/tdr-deferred.tsv) | 已归档 | 0.0.80 | 0.0.78 发布证据 |
 | [archive/pre080/release/evidence/0.0.78/ufe3-fail.log](pre080/release/evidence/0.0.78/ufe3-fail.log) | 已归档 | 0.0.80 | 0.0.78 发布证据 |
 | [archive/pre080/release/evidence/0.0.78/warm-ef2817ba791e084f5bc6cfaf3feb35127319daf1de6b90db6632bfe364c63a98.tsv](pre080/release/evidence/0.0.78/warm-ef2817ba791e084f5bc6cfaf3feb35127319daf1de6b90db6632bfe364c63a98.tsv) | 已归档 | 0.0.80 | 0.0.78 发布证据 |
+| [archive/pre080/docs/sweep/candidates-0.0.58.tsv](pre080/docs/sweep/candidates-0.0.58.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/docs/sweep/md-disposition/core-docs.tsv](pre080/docs/sweep/md-disposition/core-docs.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/docs/sweep/md-disposition/lanes-and-rest.tsv](pre080/docs/sweep/md-disposition/lanes-and-rest.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/docs/sweep/md-disposition/plans-research.tsv](pre080/docs/sweep/md-disposition/plans-research.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/docs/sweep/md-targets/core-docs.tsv](pre080/docs/sweep/md-targets/core-docs.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
+| [archive/pre080/docs/sweep/md-targets/plans-research.tsv](pre080/docs/sweep/md-targets/plans-research.tsv) | 已归档 | 0.0.80 | docs/sweep 0.0.58 文档清扫输出 |
