@@ -798,10 +798,104 @@ static const char *opt(int argc, char **argv, const char *name, const char *def)
     int i; for (i = 0; i + 1 < argc; i++) if (!strcmp(argv[i], name)) return argv[i + 1]; return def;
 }
 
+/* A private, single-request Linux subreaper. A killed child cannot recycle its
+ * PID before this process waits for it. Killing direct children brings the next
+ * generation here even when it created its own sessions. Never scan peer jobs. */
+static int reap_request(void) {
+    long end = sy_now_ms() + 2000;
+    while (sy_now_ms() < end) {
+        int status, got = waitpid(-1, &status, WNOHANG);
+        if (got > 0 || (got < 0 && errno == EINTR)) continue;
+        if (got < 0) return errno == ECHILD ? 0 : -1;
+        int fd = sy_open("/proc/thread-self/children", O_RDONLY, 0);
+        if (fd < 0) return -1;
+        char buf[4096];
+        int n = read(fd, buf, sizeof buf - 1);
+        sy_close(fd);
+        if (n < 0) return -1;
+        buf[n] = 0;
+        char *p = buf;
+        while (*p) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            char *next;
+            long pid = strtol(p, &next, 10);
+            if (next == p || pid <= 1) return -1;
+            if (!*next && n == sizeof buf - 1) break; /* partial last PID */
+            if (kill(pid, SIGKILL) && errno != ESRCH) return -1;
+            p = next;
+        }
+        sy_sleep_ms(5);
+    }
+    return -1;
+}
+static int request_launcher, request_x;
+static int own_request(void) {
+    int proc=sy_exists("/proc/thread-self/children");
+    if (proc==0) return 0;
+    if (proc<0 || sy_child_subreaper()) { fprintf(stderr,"devsvc: request descendant ownership unavailable\n"); return -1; }
+    return 1;
+}
+static int request_cancelled(void) {
+    return (request_launcher && sy_ppid() != request_launcher) || sy_sig_taken(SIGINT) || sy_sig_taken(SIGTERM) || sy_sig_taken(SIGHUP);
+}
 static long run_deadline_ms = 60000;   /* qualify 放宽为自身逐批有界(每批 60 秒)的总上限 */
 static const char *report_kind;
 static long report_window, report_epoch;
 static int report_pid;
+/* A qualify cache miss may just have started the repository server in this
+ * client. Only the execution worker may adopt or sweep the qualifier's children.
+ * Report the actual qualifier PID to the client for timing attribution. */
+static int qualify_worker(sy_spawn_t *opts,int client,int receipt) {
+    int owned=own_request();
+    if(owned<0 || sy_ppid()!=client)return 125;
+    sy_child_t child; sy_exit_t st;
+    if(sy_proc_spawn(opts,&child))return 1;
+    int pid=child.pid;
+    int reported=sy_write_all(receipt,&pid,sizeof pid)==0;
+    sy_close(receipt);
+    while(reported && sy_ppid()==client && !sy_sig_taken(SIGTERM)){
+        int done=sy_proc_try_wait(&child,&st);
+        if(done==1)return sy_exit_code(&st);
+        if(done<0)break;
+        if(sy_now_ms()>=child.deadline_at_ms)break;
+        sy_sleep_ms(10);
+    }
+    sy_proc_kill(&child,SIGKILL);
+    if(owned && reap_request())return 125;
+    if(!owned)sy_proc_wait(&child,&st);
+    return reported?124:125;
+}
+static int qualify_run(sy_spawn_t *opts) {
+    int fds[2], client=sy_pid();
+    sy_sig_watch(SIGTERM);sy_sig_watch(SIGINT);sy_sig_watch(SIGHUP);
+    if(request_cancelled())return 130;
+    if(pipe(fds))return 1;
+    if(fcntl(fds[1],F_SETFD,FD_CLOEXEC)<0 || fcntl(fds[0],F_SETFL,O_NONBLOCK)<0){
+        sy_close(fds[0]);sy_close(fds[1]);return 1;
+    }
+    fflush(stdout);fflush(stderr);
+    int pid=fork();
+    if(pid==0){sy_close(fds[0]);_exit(qualify_worker(opts,client,fds[1]));}
+    sy_close(fds[1]);
+    if(pid<0){sy_close(fds[0]);return 1;}
+    sy_child_t worker;sy_exit_t st;
+    memset(&worker,0,sizeof worker);worker.pid=pid;
+    long end=sy_now_ms()+opts->deadline_ms+2000;
+    int rc=125,cancel=0;
+    for(;;){
+        int done=sy_proc_try_wait(&worker,&st);
+        if(done==1){rc=cancel?130:sy_exit_code(&st);break;}
+        if(done<0)break;
+        if(!cancel && request_cancelled()){cancel=1;sy_proc_kill(&worker,SIGTERM);}
+        if(sy_now_ms()>=end){sy_proc_kill(&worker,SIGKILL);break;}
+        sy_sleep_ms(10);
+    }
+    int actual;
+    if(read(fds[0],&actual,sizeof actual)==sizeof actual)report_pid=actual;
+    sy_close(fds[0]);
+    return rc;
+}
 static void report_end(const char *kind,const char *job) {
     char pid[32],epoch[32],window[32];
     if(!kind || !dir[0])return;
@@ -845,8 +939,7 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
     sy_spawn_init(&o); o.argv = v; o.flags = SY_SPAWN_NO_PATH; o.pgroup = -1; o.deadline_ms = run_deadline_ms;
     fflush(stdout);
     if(report_kind && !strcmp(report_kind,"qualify")) {
-        sy_child_t child;rc=sy_proc_spawn(&o,&child);
-        if(!rc){report_pid=child.pid;rc=sy_proc_wait(&child,&ex);sy_proc_close(&child);}
+        return qualify_run(&o); /* qualify always requests quiet output */
     } else rc = sy_proc_run(&o, &ex);
     if (!quiet) fprintf(stderr, "DEVSVC_RUN\t%s\tvia=%s\tcache=%s\tprep_ms=%ld\trun_ms=%ld\trc=%d\n", argv[0], local ? "local" : "service", cache, t1 - t0, sy_now_ms() - t1, rc ? -1 : sy_exit_code(&ex));
     return rc ? 1 : sy_exit_code(&ex);
@@ -1033,7 +1126,7 @@ static void node_sha(const char *rdir, fl_node *nd, char *dst, int cap) {
         free(b);
     }
 }
-static int cancel_hit(void) { return sy_sig_taken(SIGINT) + sy_sig_taken(SIGTERM) + sy_sig_taken(SIGHUP) > 0; }
+static int cancel_hit(void) { return request_cancelled(); }
 static char x_last_err[PW + 300];   /* xmode 最近一次作业的 .err 路径(git commit 失败时回打尾部) */
 /* PATH 的最后 MAXL 行打到 stderr,前缀 GIT_COMMIT_ERR */
 static void err_tail(const char *path, int maxl) {
@@ -1179,7 +1272,17 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     sy_sig_watch(SIGINT); sy_sig_watch(SIGTERM); sy_sig_watch(SIGHUP);
     fl_set_cancel(cancel_hit);
     { long t0c = sy_now_ms();
+      /* The single x node has no write lock or transaction: wr_svc probes
+       * without starting serve. A server started by timing_finish is created
+       * only after cleanup. Never sweep a client that already owns serve:
+       * spawn_server_polls leaves it a direct child. Qualify isolates its
+       * execution worker for precisely this reason. */
+      int owned=request_x && xmode ? own_request() : 0;
+      if(owned<0){lk_drop(root);fl_free(&f);return 125;}
       r = fl_run(&f, rdir, jobs, dl, 0, &s);
+      if(owned && f.n[0].state==FL_TIMEOUT && reap_request()){
+          fprintf(stderr,"devsvc: request descendant cleanup unconfirmed\n");lk_drop(root);fl_free(&f);return 125;
+      }
       dt_flow(lock_begin,t0c,r<0?r:(xmode?f.n[0].rc:(s.fail||s.timeout?1:0)));
       lk_drop(root);
       if (fl_was_cancelled()) {   /* 客户端被 Ctrl-C/TERM/HUP:进程组已杀、锁已放,记事件后以 130 退出 */
@@ -2351,6 +2454,7 @@ static int bg_child(void *ud) {
     sy_dup2(fd, 1); sy_dup2(fd, 2); sy_close(fd);
     F(p, sizeof p, "%s/stdin", j->jd); if (sy_exists(p) == 1) { fd = sy_open(p, O_RDONLY, 0); if (fd >= 0) { sy_dup2(fd, 0); sy_close(fd); } }
     in_bg = 1;
+    request_launcher = 0;  /* detached explicitly; the job owns its deadline */
     dt_job(j->id);
     r = main2(j->argc, j->argv);
     timing_finish(r);
@@ -2622,8 +2726,11 @@ static int cxdev_kick(const char *root, const char *path) {   /* 返回 1:路径
 }
 
 int main(int argc, char **argv) {
+    const char *parent=sy_env("DEVSVC_REQUEST_PARENT");
+    if(parent) { request_launcher=atoi(parent); unsetenv("DEVSVC_REQUEST_PARENT"); }
     long t0 = sy_now_ms();dt_begin(t0);report_epoch=sy_wall_s();report_pid=sy_pid();
     int r = main2(argc, argv), a = argc > 1 && !strcmp(argv[1], "--") ? 2 : 1;
+    if(request_launcher && sy_ppid()!=request_launcher)return r;
     if(!last_job[0])timing_finish(r);
     if (!ovf && dir[0] && argc > a) {   /* 命令完成事件:kind=<命令>.<子命令>,带 owner、rc、ms;实例不在则不记(不为记事件拉起实例) */
         static const char *ev[] = {"f", "x", "flow", "doc", "git", "run", "register", "derive", 0};
@@ -2816,6 +2923,7 @@ static int main2(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(cmd, "flow") || !strcmp(cmd, "x") || !strcmp(cmd, "f")) {
+        request_x=!strcmp(cmd,"x");
         int r = cmd[0] == 'x' ? cmd_x(root, argc, argv) : cmd[1] ? cmd_flow(root, argc, argv) : cmd_f(root, argc, argv);
         if (r == 2 && !ovf && !x_ran) fprintf(stderr, "devsvc: bad %s arguments (see usage in the file header)\n", cmd);
         return r;
