@@ -18,6 +18,8 @@ persist let worldEyeX = 0;
 persist let worldEyeY = 0;
 persist let worldEyeZ = 0;
 persist let worldBasisReady = 0;
+persist let sunEnabled = 0;
+persist let sunAmbient = 0;
 let pixels = width * height;
 
 if (op == 0) {
@@ -284,10 +286,14 @@ if (op == 19 || op == 25) {
   if (sceneFocal == 0 || a < 0 || a > 2 || b < 0 || b >= 281474976710656) { return 0 - 1; }
   let cameraZ = (b / 4294967296) * 1.0;
   let vertexState = ux_u8_put(5499900 + a, 0);
+  let worldVertex = 5480032 + 12 * a;
   let cameraX = (b % 65536 - 32768) * 1.0;
   let cameraY = (b / 65536 % 65536 - 32768) * 1.0;
   if (op == 25) {
     if (worldBasisReady == 0) { return 0 - 1; }
+    vertexState = ux_f32_put(worldVertex, cameraX);
+    vertexState = ux_f32_put(worldVertex + 4, cameraY);
+    vertexState = ux_f32_put(worldVertex + 8, cameraZ - 32768.0);
     let relativeX = cameraX - worldEyeX;
     let relativeY = cameraY - worldEyeY;
     let relativeZ = cameraZ - 32768.0 - worldEyeZ;
@@ -300,7 +306,7 @@ if (op == 19 || op == 25) {
   vertexState = ux_f32_put(vertexAt, f64_floor_i64(width / 2.0 + sceneFocal * cameraX / (cameraZ * 1.0) + 0.5) * 1.0);
   vertexState = ux_f32_put(vertexAt + 4, f64_floor_i64(height / 2.0 - sceneFocal * cameraY / (cameraZ * 1.0) + 0.5) * 1.0);
   vertexState = ux_f32_put(vertexAt + 8, 1.0 / cameraZ);
-  vertexState = ux_u8_put(5499900 + a, 1);
+  vertexState = ux_u8_put(5499900 + a, 1 + (op == 25));
   return 0;
 }
 if (op == 20) {
@@ -314,6 +320,27 @@ if (op == 20) {
   let y2 = ux_f32(5499940);
   let triangleArea = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
   if (triangleArea == 0.0) { return 0; }
+  let faceLight = sceneLight;
+  if (sunEnabled == 1 && ux_u8(5499900) == 2 && ux_u8(5499901) == 2 && ux_u8(5499902) == 2) {
+    let edgeX = ux_f32(5480044) - ux_f32(5480032);
+    let edgeY = ux_f32(5480048) - ux_f32(5480036);
+    let edgeZ = ux_f32(5480052) - ux_f32(5480040);
+    let acrossX = ux_f32(5480056) - ux_f32(5480032);
+    let acrossY = ux_f32(5480060) - ux_f32(5480036);
+    let acrossZ = ux_f32(5480064) - ux_f32(5480040);
+    let normalX = edgeY * acrossZ - edgeZ * acrossY;
+    let normalY = edgeZ * acrossX - edgeX * acrossZ;
+    let normalZ = edgeX * acrossY - edgeY * acrossX;
+    let normalLength = f64_sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+    if (normalLength > 0.0) {
+      let illumination = (normalX * ux_f32(5480068) + normalY * ux_f32(5480072) + normalZ * ux_f32(5480076)) / normalLength;
+      if (illumination < 0.0) { illumination = 0.0 - illumination; }
+      let tone = sunAmbient;
+      if (illumination >= 0.28) { tone = sunAmbient + (255 - sunAmbient) / 2; }
+      if (illumination >= 0.70) { tone = 255; }
+      faceLight = (faceLight * tone + 127) / 255;
+    }
+  }
   let minX = x0;
   let minY = y0;
   let maxX = x0;
@@ -354,7 +381,7 @@ if (op == 20) {
           let hazeColor = sceneFogColor;
           let triangleChannel = 0;
           while (triangleChannel < 3) {
-            let lit = (materialColor % 256 * sceneLight + 127) / 255;
+            let lit = (materialColor % 256 * faceLight + 127) / 255;
             let haze = hazeColor % 256;
             triangleInk = ux_u8_put(triangleIndex + triangleChannel,
               f64_floor_i64(lit + 0.5 + (haze - lit) * triangleFog));
@@ -419,6 +446,22 @@ if (op == 23 || op == 24) {
   basisWrite = ux_f32_put(5480024, axisY / length);
   basisWrite = ux_f32_put(5480028, axisZ / length);
   worldBasisReady = 1;
+  return 0;
+}
+// Two-sided toon sun. A value of 256 for a disables it; otherwise a is ambient light.
+if (op == 26) {
+  if (a < 0 || a > 256 || b < 0 || b >= 281474976710656) { return 0 - 1; }
+  if (a == 256) { sunEnabled = 0; return 0; }
+  let sunX = b % 65536 - 32768;
+  let sunY = b / 65536 % 65536 - 32768;
+  let sunZ = b / 4294967296 - 32768;
+  let sunLength = f64_sqrt((sunX * sunX + sunY * sunY + sunZ * sunZ) * 1.0);
+  if (sunLength == 0.0) { return 0 - 1; }
+  let sunWrite = ux_f32_put(5480068, sunX / (sunLength * 1.0));
+  sunWrite = ux_f32_put(5480072, sunY / (sunLength * 1.0));
+  sunWrite = ux_f32_put(5480076, sunZ / (sunLength * 1.0));
+  sunAmbient = a;
+  sunEnabled = 1;
   return 0;
 }
 return 0 - 1;
