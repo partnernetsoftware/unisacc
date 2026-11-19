@@ -1,0 +1,80 @@
+#pragma unisa module refimage
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+
+/* On-disk ELF64, PE32+ and Mach-O 64 layouts, in little endian. Compare
+ * executable architecture, entry and permission map. Addresses and segment
+ * lengths may change with instruction selection. */
+typedef struct ri_image {
+    uint64_t entry;
+    uint64_t entry_delta;
+    int entry_seen;
+    int count;
+    unsigned char protection[32];
+} ri_image;
+
+static uint64_t ri_word(const unsigned char *p,int n){
+    uint64_t v=0;for(int i=n-1;i>=0;i--)v=(v<<8)|p[i];return v;
+}
+static int ri_range(uint64_t at,uint64_t size,uint64_t n){return at<=n&&size<=n-at;}
+static int ri_segment(ri_image *s,int flags,uint64_t addr,uint64_t mem,uint64_t pos,uint64_t bytes,uint64_t n){
+    if(s->count>=32||(flags&3)==3||!ri_range(pos,bytes,n))return 0;
+    s->protection[s->count++]=(unsigned char)flags;
+    if((flags&1)&&s->entry>=addr&&s->entry-addr<mem&&s->entry-addr<bytes){
+        s->entry_seen++;s->entry_delta=s->entry-addr;
+    }
+    return 1;
+}
+static int ri_elf(const unsigned char *p,uint64_t n,int arm,ri_image *s){
+    if(n<64||memcmp(p,"\177ELF\2\1",6)||ri_word(p+16,2)!=2||ri_word(p+18,2)!=(arm?183:62))return 0;
+    s->entry=ri_word(p+24,8);uint64_t ph=ri_word(p+32,8),nr=ri_word(p+56,2);
+    if(ri_word(p+54,2)!=56||!ri_range(ph,56*nr,n))return 0;
+    for(uint64_t i=0;i<nr;i++){const unsigned char *h=p+ph+i*56;if(ri_word(h,4)!=1)continue;
+        uint64_t bytes=ri_word(h+32,8),mem=ri_word(h+40,8);
+        if(bytes>mem||!ri_segment(s,ri_word(h+4,4)&7,ri_word(h+16,8),mem,ri_word(h+8,8),bytes,n))return 0;}
+    return s->entry_seen==1;
+}
+static int ri_pe(const unsigned char *p,uint64_t n,int arm,ri_image *s){
+    if(n<64||memcmp(p,"MZ",2))return 0;
+    uint64_t pe=ri_word(p+60,4);if(!ri_range(pe,24,n)||memcmp(p+pe,"PE\0\0",4))return 0;
+    const unsigned char *h=p+pe;uint64_t nr=ri_word(h+6,2),opt=ri_word(h+20,2),sect=pe+24+opt;
+    if(ri_word(h+4,2)!=(arm?0xaa64:0x8664)||!(ri_word(h+22,2)&2)||opt<24||
+       !ri_range(pe+24,opt,n)||ri_word(h+24,2)!=0x20b||!ri_range(sect,40*nr,n))return 0;
+    s->entry=ri_word(h+40,4);
+    for(uint64_t i=0;i<nr;i++){h=p+sect+i*40;uint64_t flags=ri_word(h+36,4);
+        int perm=((flags>>29)&1)|(((flags>>31)&1)<<1)|(((flags>>30)&1)<<2);
+        if(!ri_segment(s,perm,ri_word(h+12,4),ri_word(h+8,4),ri_word(h+20,4),ri_word(h+16,4),n))return 0;}
+    return s->entry_seen==1;
+}
+static int ri_macho(const unsigned char *p,uint64_t n,int arm,ri_image *s){
+    if(n<32||ri_word(p,4)!=0xfeedfacf||ri_word(p+4,4)!=(arm?0x100000c:0x1000007)||ri_word(p+12,4)!=2)return 0;
+    uint64_t size=ri_word(p+20,4),nr=ri_word(p+16,4),end=32+size;int main_count=0;
+    if(!ri_range(32,size,n)||nr>size/8)return 0;
+    for(int pass=0;pass<2;pass++){
+        uint64_t off=32;
+        for(uint64_t i=0;i<nr;i++){
+            if(!ri_range(off,8,end))return 0;
+            const unsigned char *h=p+off;uint64_t cmd=ri_word(h,4),len=ri_word(h+4,4);
+            if(len<8||!ri_range(off,len,end))return 0;
+            if(!pass&&cmd==0x80000028){if(len!=24)return 0;s->entry=ri_word(h+8,8);main_count++;}
+            if(pass&&cmd==0x19){
+                if(len<72||len!=72+80*ri_word(h+64,4))return 0;
+                int prot=ri_word(h+60,4);int perm=((prot&4)>>2)|(prot&2)|((prot&1)<<2);
+                if(!ri_segment(s,perm,ri_word(h+40,8),ri_word(h+32,8),ri_word(h+40,8),ri_word(h+48,8),n))return 0;
+            }
+            off+=len;
+        }
+        if(off!=end||main_count!=1)return 0;
+    }
+    return s->entry_seen==1;
+}
+static int ri_load(const char *path,int target,ri_image *s){
+    unsigned char *p;int64_t n;if(target<0||target>=6||sy_read_file(path,&p,&n,134217728))return 0;
+    int ok=target<2?ri_elf(p,n,target%2,s):target<4?ri_macho(p,n,target%2,s):ri_pe(p,n,target%2,s);
+    mm_free(p);return ok;
+}
+int ri_equal(const char *product,const char *reference,int target){
+    ri_image a={0},b={0};
+    return ri_load(product,target,&a)&&ri_load(reference,target,&b)&&a.entry==b.entry&&
+        a.entry_delta==b.entry_delta&&a.count==b.count&&!memcmp(a.protection,b.protection,a.count);
+}

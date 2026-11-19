@@ -1,0 +1,40 @@
+/* Tool selfcheck for tools/refimage.cx. Minimal ELF64 executable with
+ * one mapped RX segment, independently written from the ELF gABI. */
+#pragma unisa use refimage
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+int main(int argc,char **v){
+    if(argc==5&&!strcmp(v[1],"--pair")){
+        if(v[2][0]<'0'||v[2][0]>'5'||v[2][1])return 2;
+        return ri_equal(v[3],v[4],v[2][0]-'0')?0:1;
+    }
+    unsigned char elf[128]={0};char dir[4096],a[4200],b[4200];
+    if(argc!=1||sy_mkdtemp(sy_tmpdir(),"ri-elf-",dir,sizeof dir)||cx_path_join(a,sizeof a,dir,"a")||cx_path_join(b,sizeof b,dir,"b"))return 2;
+    memcpy(elf,"\177ELF\2\1\1",7);elf[16]=2;elf[18]=62;elf[24]=120;elf[32]=64;elf[52]=64;
+    elf[54]=56;elf[56]=1;elf[64]=1;elf[68]=5;elf[96]=128;elf[104]=128;
+    if(sy_write_file(a,elf,sizeof elf,0600)||sy_write_file(b,elf,sizeof elf,0600))return 2;
+    int bad=!ri_equal(a,b,0);bad+=ri_equal(a,b,1);elf[68]=7;
+    if(sy_write_file(b,elf,sizeof elf,0600))return 2;
+    bad+=ri_equal(a,b,0);elf[68]=5;elf[24]=129;
+    if(sy_write_file(b,elf,sizeof elf,0600))return 2;
+    bad+=ri_equal(a,b,0);elf[24]=120;elf[96]=160;
+    if(sy_write_file(b,elf,sizeof elf,0600))return 2;
+    bad+=ri_equal(a,b,0);
+    /* Minimal PE32+ image with one RX section. Entry is the section RVA. */
+    unsigned char pe[256]={0};memcpy(pe,"MZ",2);pe[60]=64;memcpy(pe+64,"PE\0\0",4);
+    pe[68]=0x64;pe[69]=0x86;pe[70]=1;pe[84]=24;pe[86]=2;
+    pe[88]=0x0b;pe[89]=2;pe[105]=0x10;
+    pe[120]=16;pe[125]=0x10;pe[128]=16;pe[132]=240;pe[151]=0x60;
+    if(sy_write_file(a,pe,sizeof pe,0600)||sy_write_file(b,pe,sizeof pe,0600))return 2;
+    bad+=!ri_equal(a,b,4);pe[151]=0x40;
+    if(sy_write_file(b,pe,sizeof pe,0600))return 2;bad+=ri_equal(a,b,4);
+    /* Mach-O 64, LC_SEGMENT_64 followed by LC_MAIN with entryoff 144. */
+    unsigned char mach[160]={0};memcpy(mach,"\xcf\xfa\xed\xfe",4);mach[4]=7;mach[7]=1;mach[12]=2;
+    mach[16]=2;mach[20]=96;mach[32]=0x19;mach[36]=72;mach[64]=160;mach[80]=160;
+    mach[88]=5;mach[92]=5;mach[104]=0x28;mach[107]=0x80;mach[108]=24;mach[112]=144;
+    if(sy_write_file(a,mach,sizeof mach,0600)||sy_write_file(b,mach,sizeof mach,0600))return 2;
+    bad+=!ri_equal(a,b,2);mach[112]=145;
+    if(sy_write_file(b,mach,sizeof mach,0600))return 2;bad+=ri_equal(a,b,2);
+    sy_unlink(a);sy_unlink(b);sy_rmdir(dir);
+    printf("CHECK_REFIMAGE\tchecks=9\tfailed=%d\n",bad);return bad?1:0;
+}
