@@ -18,7 +18,10 @@ typedef unsigned long size_t;
 #endif
 typedef long ptrdiff_t;
 #endif
+#ifndef _UNISA_WCHAR_T
+#define _UNISA_WCHAR_T
 typedef int wchar_t;
+#endif
 /* offsetof is a compiler intrinsic (__builtin_offsetof reads the struct
  * table), not pointer arithmetic on a null pointer.  It accepts a type name
  * that macro expansion has parenthesised. */

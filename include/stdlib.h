@@ -1006,7 +1006,10 @@ static int _unisa_envf[16];
    a tentative definition in every unit, merged at link (C99 6.9.2).  <unistd.h> names it `environ`.
    A constructor fills it before main from the block the kernel left after argv (0.0.28 F1);
    -ftrim-libc keeps it as a root (unisa/libneed.py ROOTS). */
-char **_unisa_env;
+char **environ;
+#ifndef _unisa_env
+#define _unisa_env environ
+#endif
 static char *_unisa_envv[4096];
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_environ_init
 __attribute__((constructor)) static void _unisa_environ_init(void) {

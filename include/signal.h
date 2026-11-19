@@ -55,10 +55,18 @@ static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
 }
 #endif
 
+typedef __u_uword sigset_t;
+static sigset_t _unisa_sigblocked;
+static sigset_t _unisa_sigpending;
+
 #if !__UNISA_FTRIM_LIBC || __UN_raise
 static int raise(int __u_sig) {
     void (*__u_fn)(int);
     if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return 0 - 1;
+    if (__u_sig != SIGKILL && (_unisa_sigblocked & ((sigset_t)1 << __u_sig))) {
+        _unisa_sigpending = _unisa_sigpending | ((sigset_t)1 << __u_sig);
+        return 0;
+    }
     __u_fn = _unisa_sig[__u_sig];
     if (__u_fn == SIG_IGN) return 0;
     if (__u_fn != SIG_DFL) {
@@ -72,11 +80,10 @@ static int raise(int __u_sig) {
 
 /* sigaction and the signal sets (0.0.34 L1b, for lua built with LUA_USE_POSIX).
  * They share signal()'s in-process table, so the same rule holds: a handler is
- * recorded and raise() calls it; nothing arrives from outside.  The mask and
- * flags are kept for the caller to read back and otherwise have no effect;
- * sigprocmask answers the empty set. */
+ * recorded and raise() calls it; nothing arrives from outside.  sigprocmask()
+ * maintains _unisa_sigblocked/_unisa_sigpending so blocked signals raised via
+ * raise() are deferred until unblocked. */
 #include <errno.h>
-typedef __u_uword sigset_t;
 struct sigaction {
     void (*sa_handler)(int);
     sigset_t sa_mask;
@@ -132,8 +139,28 @@ static int sigaction(int __u_sig, const struct sigaction *__u_act, struct sigact
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_sigprocmask
 static int sigprocmask(int __u_how, const sigset_t *__u_set, sigset_t *__u_old) {
-    if (__u_old) *__u_old = 0;
+    sigset_t __u_ready;
+    int __u_s;
     if (__u_set && (__u_how < SIG_BLOCK || __u_how > SIG_SETMASK)) { errno = EINVAL; return 0 - 1; }
+    if (__u_old) *__u_old = _unisa_sigblocked;
+    if (__u_set) {
+        if (__u_how == SIG_BLOCK) _unisa_sigblocked = _unisa_sigblocked | *__u_set;
+        else if (__u_how == SIG_UNBLOCK) _unisa_sigblocked = _unisa_sigblocked & ~(*__u_set);
+        else _unisa_sigblocked = *__u_set;
+        _unisa_sigblocked = _unisa_sigblocked & ~((sigset_t)1 << SIGKILL);
+        __u_ready = _unisa_sigpending & ~_unisa_sigblocked;
+        for (__u_s = 1; __u_s < _UNISA_NSIG; __u_s = __u_s + 1) {
+            sigset_t __u_bit = (sigset_t)1 << __u_s;
+            if (__u_ready & __u_bit) {
+                void (*__u_fn)(int);
+                _unisa_sigpending = _unisa_sigpending & ~__u_bit;
+                __u_fn = _unisa_sig[__u_s];
+                if (__u_fn == SIG_IGN) continue;
+                if (__u_fn != SIG_DFL) __u_fn(__u_s);
+                else __exit(128 + __u_s);
+            }
+        }
+    }
     return 0;
 }
 #endif
