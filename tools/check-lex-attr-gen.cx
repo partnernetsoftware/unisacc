@@ -1,0 +1,78 @@
+/* check-lex-attr-gen: tools/lex-attr-gen.cx contract with mutation controls.
+ *   sh ./unisacc.com tools/check-lex-attr-gen.cx [-- WORK]
+ * WORK defaults to /tmp.  Run from the repository root.
+ * Checks: whitelist exec/facts/lex-attr-whitelist.tsv has exactly 24 entries (kinds ctor/dtor/vis_default/ignore);
+ * tree --check rc 0 with words=24; --write to a fixture output is byte-identical to exec/lex/attr-byte.tsv;
+ * every whitelisted name's first byte reaches the trie; a tampered table -> --check rc 1; a whitelist with an
+ * unknown kind -> rc 2.  Ends with CHECK_LEX_ATTR_GEN<TAB>checks=N<TAB>failed=M; rc 0 only when failed=0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+static int failed, checks;
+static char outb[8000];
+static void ck(int ok, const char *n) { checks++; if (!ok) failed++; printf("%s\tlex-attr-gen.%s\n", ok ? "PASS" : "FAIL", n); }
+static int has(const char *s, const char *w) {
+    size_t n = strlen(s), k = strlen(w);
+    for (size_t i = 0; i + k <= n; i++) if (!memcmp(s + i, w, k)) return 1;
+    return 0;
+}
+static int gen(const char *flag, const char *facts, const char *out) {
+    char *v[] = {"sh", "./unisacc.com", "tools/lex-attr-gen.cx", "--", (char *)flag, "--facts", (char *)facts, "--out", (char *)out, 0};
+    char *text = 0; size_t n = 0, i; int rc = cx_runv_timeout(v, 40, &text, &n);
+    for (i = 0; text && i < n && i < sizeof outb - 1; i++) outb[i] = text[i];
+    outb[i] = 0;
+    free(text);
+    if (rc < 0 || rc >= 124) return -1;
+    return rc;
+}
+static int same(const char *a, const char *b) {
+    size_t na = 0, nb = 0; char *x = cx_read(a, &na), *y = cx_read(b, &nb);
+    int ok = x && y && na == nb && !memcmp(x, y, na);
+    free(x); free(y);
+    return ok;
+}
+int main(int argc, char **argv) {
+    const char *facts = "exec/facts/lex-attr-whitelist.tsv", *table = "exec/lex/attr-byte.tsv";
+    const char *work = argc >= 2 && argv[1][0] != '-' ? argv[1] : "/tmp";
+    char fix[2600], gout[2700], tamp[2700], badf[2700];
+    if (argc > 2 || strlen(work) > 2400) { fprintf(stderr, "check-lex-attr-gen: usage [WORK]\n"); return 2; }
+    if (cx_fmt(fix, sizeof fix, "%s/lex-attr-gen-fixture-%d", work, sy_pid())
+        || cx_fmt(gout, sizeof gout, "%s/attr-byte.tsv", fix)
+        || cx_fmt(tamp, sizeof tamp, "%s/attr-byte-tampered.tsv", fix)
+        || cx_fmt(badf, sizeof badf, "%s/whitelist-bad.tsv", fix)) return 2;
+    if (sy_mkdir(fix, 0700)) { fprintf(stderr, "check-lex-attr-gen: REFUSE mkdir %s\n", fix); return 2; }
+    /* whitelist rows: exactly 24, each with a known kind; remember first bytes */
+    size_t sz = 0, i = 0; char *s = cx_read(facts, &sz); int rows = 0, badkind = 0; char firsts[64]; int nf = 0;
+    if (!s) { fprintf(stderr, "check-lex-attr-gen: REFUSE cannot read %s\n", facts); return 2; }
+    while (i < sz) {
+        size_t a = i; while (i < sz && s[i] != '\n') i++;
+        size_t len = i - a; if (i < sz) i++;
+        if (len == 0 || s[a] == '#') continue;
+        char line[512]; if (len >= sizeof line) { badkind++; continue; }
+        mm_copy(line, (long)sizeof line, s + a, (long)len); line[len] = 0;
+        char *t1 = strchr(line, '\t'); if (!t1) { badkind++; continue; }
+        *t1++ = 0; char *t2 = strchr(t1, '\t'); if (t2) *t2 = 0;
+        if (tx_eqz(line, "name")) continue;
+        if (!tx_eqz(t1, "ctor") && !tx_eqz(t1, "dtor") && !tx_eqz(t1, "ignore") && !tx_eqz(t1, "vis_default")) badkind++;
+        rows++;
+        if (nf < 63 && !memchr(firsts, line[0], (size_t)nf)) firsts[nf++] = line[0];
+    }
+    free(s);
+    ck(rows == 24 && badkind == 0, "whitelist-24");
+    /* generated table: tree --check, fixture write identical to the tree table */
+    ck(gen("--check", facts, table) == 0 && has(outb, "words=24"), "check-tree");
+    ck(gen("--write", facts, gout) == 0 && same(gout, table), "write-identical");
+    { size_t tn = 0; char *t = cx_read(table, &tn); int miss = 0;
+      for (int k = 0; k < nf; k++) { char w[32]; if (cx_fmt(w, sizeof w, "\nATW.item\t%d\t", (unsigned char)firsts[k]) || !t || !has(t, w)) miss++; }
+      ck(t && miss == 0, "whitelist-first-bytes");
+      /* mutation: drop the last line of the table -> --check rc 1 */
+      int wr = 1;
+      if (t && tn > 2) { size_t e = tn - 1; while (e > 0 && t[e - 1] != '\n') e--; wr = cx_write(tamp, t, e); }
+      free(t);
+      ck(wr == 0 && gen("--check", facts, tamp) == 1, "tamper-rc1"); }
+    { const char *bad = "name\tkind\treason\nfoo\tbogus\tx\n";
+      ck(cx_write(badf, bad, strlen(bad)) == 0 && gen("--check", badf, table) == 2, "bad-kind-rc2"); }
+    printf("CHECK_LEX_ATTR_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}
