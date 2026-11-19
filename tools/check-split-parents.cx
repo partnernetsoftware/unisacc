@@ -397,7 +397,7 @@ int main(void) {
         /* 14. split-parents.tsv mismatch with check-slow-split.cx -> REFUSE STRICT_SPLIT_TABLE_MISMATCH */
         csp_w(g1, "tests/split-parents.tsv",
             "# parent\tshards\tcheck\tsince\treason\n"
-            "snapshots-cx\tsnapshots-cx-core,snapshots-cx-alloc\tslow-split\t0.0.82\tonly-one-row\n");
+            "snapshots-cx\tsnapshots-cx-core,snapshots-cx-bad\tslow-split\t0.0.82\tbad-shard\n");
         cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/g1o14' --baseline /nonexistent", g1, rxbin, lay, work);
         {
             int rc = ckk_sh("check-split-parents", cmd, out, sizeof out);
@@ -439,6 +439,57 @@ int main(void) {
             ck(ckk_has(out, CSP_OUT, "GATE\t1\tSTRICT\tPASS"),
                "g1-before-since-passes: v0.0.81 (< since 0.0.82) passes G1 STRICT without split shards");
             (void)rc;
+        }
+
+        /* 17. Evidence has split_parents_excluded=3 but tests/split-parents.tsv deleted -> REFUSE STRICT_SPLIT_TABLE_MISSING */
+        {
+            csp_w(lay, "unisacc.com", fake_ape);
+            if (cx_fmt(p, sizeof p, "%s/unisacc.com", lay)) csp_abort("chm17"); (void)chmod(p, 0755);
+            cx_fmt(cand, sizeof cand,
+                "%sexample/fx\tv0.0.82\t1111111111111111111111111111111111111111\t0.0.82\tci.yml\tv0.0.82\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+                cand_hdr, sha_ape, sha_f, sha_f, sha_f, sha_f, sha_f);
+            csp_w(g1, "release/candidate.tsv", cand);
+            cx_fmt(ev, sizeof ev,
+                "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+                "c99-whitespace\tproduct-qualification\tPASS\t0\t%s\t10\t0.5\t0\tcount=12/0\n"
+                "RAW\tBATCH_RUN\tid=c99-whitespace\tstatus=PASS\trc=0\tcandidate=%s\n"
+                "SUMMARY\tbatches=1\tPASS=1\tFAIL=0\tUNKNOWN=0\tINVALID=0\ttotal_ms=10\tape_sha256=%s\tversion=unisacc 0.0.82\tsplit_parents_excluded=3\n",
+                sha_ape, sha_ape, sha_ape);
+            csp_w(g1, "release/evidence/v0.0.82-strict-2026-01-01.tsv", ev);
+            if (cx_fmt(p, sizeof p, "%s/tests/split-parents.tsv", g1)) csp_abort("rm-spt");
+            (void)unlink(p);
+            cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/g1o17' --baseline /nonexistent", g1, rxbin, lay, work);
+            int rc = ckk_sh("check-split-parents", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CSP_OUT, "RELEASE_EXEC_GATE_STRICT_SPLIT_TABLE_MISSING"),
+               "g1-excluded-table-missing-refused: split_parents_excluded>0 with deleted split-parents.tsv refused");
+        }
+
+        /* 18. Evidence has split_parents_excluded=3 but all split-parents rows have future since -> REFUSE STRICT_SPLIT_INCOMPLETE */
+        {
+            csp_w(g1, "tests/split-parents.tsv",
+                "# parent\tshards\tcheck\tsince\treason\n"
+                "snapshots-cx\tsnapshots-cx-core,snapshots-cx-alloc\tslow-split\t0.0.99\tfuture\n");
+            cx_fmt(cmd, sizeof cmd, "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 '%s' --execute release/candidate.tsv --layout '%s' --dry --out '%s/g1o18' --baseline /nonexistent", g1, rxbin, lay, work);
+            int rc = ckk_sh("check-split-parents", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CSP_OUT, "RELEASE_EXEC_GATE_STRICT_SPLIT_INCOMPLETE"),
+               "g1-excluded-since-future-refused: split_parents_excluded>0 with no applicable rows refused");
+        }
+
+        /* 19. check-slow-split single-source: 1-row valid table accepted (no hardcoded 3-row list), missing registered shard refused */
+        {
+            csp_w(g1, "tests/split-parents.tsv",
+                "# parent\tshards\tcheck\tsince\treason\n"
+                "snapshots-cx\tsnapshots-cx-core,snapshots-cx-alloc\tslow-split\t0.0.83\tsingle-row\n");
+            cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/check-slow-split.cx -- --table-only --parents tests/split-parents.tsv", g1);
+            int rc1 = ckk_sh("check-split-parents", cmd, out, sizeof out);
+            int ok1 = (rc1 == 0 && ckk_has(out, CSP_OUT, "PASS\tslow-split.split-parents-table\tparents=1\tbad=0"));
+            csp_w(g1, "tests/split-parents.tsv",
+                "# parent\tshards\tcheck\tsince\treason\n"
+                "signal-targets\tsignal-targets-gen,signal-targets-posix\tslow-split\t0.0.83\tmissing-win\n");
+            int rc2 = ckk_sh("check-split-parents", cmd, out, sizeof out);
+            int ok2 = (rc2 == 1 && ckk_has(out, CSP_OUT, "FAIL\tslow-split.split-parents-table"));
+            ck(ok1 && ok2,
+               "slow-split-single-source-table: 1-row table passes dynamically, omitting registered shard fails");
         }
     }
 

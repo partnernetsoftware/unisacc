@@ -374,7 +374,7 @@ static void strict_exceptions(void) {
     free(t);
 }
 static void strict_terminals(char *t,long n) {
-    const char *s;long at=0,len;int table=0,unknowns=-1;
+    const char *s;long at=0,len;int table=0,unknowns=-1,split_excl_seen=0;
     char buf[4096],*f[32];
     strict_exceptions();
     while(line_next(t,n,&at,&s,&len)){
@@ -394,14 +394,29 @@ static void strict_terminals(char *t,long n) {
         if(mm_copy(buf,sizeof buf,s,len))refuse("STRICT_UNKNOWN","invalid qualify row length");
         int nf=strict_split(buf,len,f,32);
         if(nf<2)refuse("STRICT_UNKNOWN","malformed qualify row");
-        if(tx_eqz(f[0],"CHECKPOINT")){unknowns=-1;continue;}
+        if(tx_eqz(f[0],"CHECKPOINT")){
+            for(int i=1;i<nf;i++)if(!strncmp(f[i],"split_parents_excluded=",23)){
+                char *v=f[i]+23;
+                if(!*v || tlen(v)>6)refuse("STRICT_UNKNOWN","invalid CHECKPOINT.split_parents_excluded");
+                for(int k=0;v[k];k++)if(v[k]<'0'||v[k]>'9')refuse("STRICT_UNKNOWN","invalid CHECKPOINT.split_parents_excluded");
+                int sv=atoi(v); if(sv>split_excl_seen)split_excl_seen=sv;
+            }
+            unknowns=-1;continue;
+        }
         if(tx_eqz(f[0],"SUMMARY")){
             unknowns=-1;
-            for(int i=1;i<nf;i++)if(!strncmp(f[i],"UNKNOWN=",8)){
-                char *v=f[i]+8;
-                if(unknowns>=0 || !*v || tlen(v)>4)refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
-                for(int k=0;v[k];k++)if(v[k]<'0'||v[k]>'9')refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
-                unknowns=atoi(v);
+            for(int i=1;i<nf;i++){
+                if(!strncmp(f[i],"UNKNOWN=",8)){
+                    char *v=f[i]+8;
+                    if(unknowns>=0 || !*v || tlen(v)>4)refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
+                    for(int k=0;v[k];k++)if(v[k]<'0'||v[k]>'9')refuse("STRICT_UNKNOWN","invalid SUMMARY.UNKNOWN");
+                    unknowns=atoi(v);
+                }else if(!strncmp(f[i],"split_parents_excluded=",23)){
+                    char *v=f[i]+23;
+                    if(!*v || tlen(v)>6)refuse("STRICT_UNKNOWN","invalid SUMMARY.split_parents_excluded");
+                    for(int k=0;v[k];k++)if(v[k]<'0'||v[k]>'9')refuse("STRICT_UNKNOWN","invalid SUMMARY.split_parents_excluded");
+                    int sv=atoi(v); if(sv>split_excl_seen)split_excl_seen=sv;
+                }
             }
             if(unknowns<0)refuse("STRICT_UNKNOWN","missing SUMMARY.UNKNOWN");
             int count=0;
@@ -524,6 +539,9 @@ static void strict_terminals(char *t,long n) {
                 if (nsh < 2 || missing_shard || !has_chk_pass) refuse("STRICT_SPLIT_INCOMPLETE", sf[0]);
             }
             free(st);
+            if (split_excl_seen > 0 && !any_applicable) {
+                refuse("STRICT_SPLIT_INCOMPLETE", "evidence has split_parents_excluded>0 but no applicable split-parents rows");
+            }
             if (any_applicable) {
                 char cssp[4500]; sy_stat_t cst;
                 if (cx_fmt(cssp, sizeof cssp, "%s/tools/check-slow-split.cx", here) || sy_lstat(cssp, &cst) != 0 || cst.kind != 'f') {
@@ -537,6 +555,8 @@ static void strict_terminals(char *t,long n) {
                 }
                 np_free(&cr);
             }
+        } else if (split_excl_seen > 0) {
+            refuse("STRICT_SPLIT_TABLE_MISSING", "evidence has split_parents_excluded>0 but tests/split-parents.tsv is missing");
         }
     }
 }
