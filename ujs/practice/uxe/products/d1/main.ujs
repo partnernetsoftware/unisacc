@@ -19,6 +19,16 @@ persist let cannonAmmo = 96;
 persist let cannonCooldown = 0;
 persist let cannonIdle = 0;
 persist let cannonEvents = 0;
+persist let combatTick = 0;
+persist let combatKills = 0;
+
+// Enemy records start at byte 32. Each record holds hull and three
+// screen-space bytes: horizontal position, vertical position, and depth.
+if (started == 0) {
+  let firstHull = ux_u8_put(32, 4);
+  let secondHull = ux_u8_put(36, 2);
+  let thirdHull = ux_u8_put(40, 8);
+}
 
 if (started == 0) {
   last = now;
@@ -57,15 +67,6 @@ while (steps > 0) {
     tickBoost = keyBoost;
     tickGun = keyGun;
   }
-  if (cannonCooldown > 0) { cannonCooldown = cannonCooldown - 1; }
-  if (cannonIdle < 176) { cannonIdle = cannonIdle + 1; }
-  if (tickGun == 1 && cannonAmmo > 0 && cannonCooldown == 0) {
-    cannonAmmo = cannonAmmo - 1;
-    cannonCooldown = 5;
-    cannonIdle = 0;
-    cannonEvents = (cannonEvents + 1) % 65536;
-  }
-  if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
   let target = tickTurn * 24;
   if (bank < target) { bank = bank + 4; }
   else { if (bank > target) { bank = bank - 4; } }
@@ -95,6 +96,61 @@ while (steps > 0) {
   if (axis >= 180) { dz = 0 - dz; }
   x = (x + dx + 4096) % 4096;
   z = (z - dz + 4096) % 4096;
+  combatTick = (combatTick + 1) % 12288;
+  let yawPhase = heading % 180;
+  let battleSin = yawPhase * (180 - yawPhase) / 8100.0;
+  if (heading >= 180) { battleSin = 0.0 - battleSin; }
+  yawPhase = axis % 180;
+  let battleCos = yawPhase * (180 - yawPhase) / 8100.0;
+  if (axis >= 180) { battleCos = 0.0 - battleCos; }
+  let enemySlot = 0;
+  let nearest = 0;
+  let nearestSquare = 900;
+  while (enemySlot < 3) {
+    let enemyRecord = 32 + 4 * enemySlot;
+    let enemyX = 4;
+    let enemyZ = 0 - 91;
+    let enemyY = 45;
+    if (enemySlot == 0) { enemyX = 0 - 25; enemyZ = 0 - 53; enemyY = 53; }
+    if (enemySlot == 2) { enemyX = 94; enemyZ = 0 - 208; enemyY = 71; }
+    let offsetX = ((4096 + 2048 + enemyX * 8 - x + 2048) % 4096 - 2048) / 8.0;
+    let offsetZ = ((16384 + enemyZ * 8 - combatTick / 3 * 8 - z) % 4096 - 2048) / 8.0;
+    let depth = offsetX * battleSin - offsetZ * battleCos;
+    let recordDepth = ux_u8_put(enemyRecord + 3, 0);
+    if (depth >= 9.0 && depth <= 345.0) {
+      let screenX = f64_floor_i64(213.5 + 151.0 * (offsetX * battleCos + offsetZ * battleSin) / depth);
+      let screenY = f64_floor_i64(113.5 + pitch * 0.5 + (altitude + 13 - enemyY) * 151.0 / depth);
+      if (screenX >= 12 && screenX <= 413 && screenY >= 16 && screenY < 196) {
+        let recordX = ux_u8_put(enemyRecord + 1, screenX / 2);
+        let recordY = ux_u8_put(enemyRecord + 2, screenY);
+        recordDepth = ux_u8_put(enemyRecord + 3, f64_floor_i64(depth / 2.0));
+        let aimX = screenX - 213;
+        let aimY = screenY - 101 - f64_floor_i64(pitch * 0.25 + 0.5);
+        let distanceSquare = aimX * aimX + aimY * aimY;
+        if (ux_u8(enemyRecord) > 0 && distanceSquare < nearestSquare) {
+          nearest = enemyRecord;
+          nearestSquare = distanceSquare;
+        }
+      }
+    }
+    enemySlot = enemySlot + 1;
+  }
+  if (cannonCooldown > 0) { cannonCooldown = cannonCooldown - 1; }
+  if (cannonIdle < 176) { cannonIdle = cannonIdle + 1; }
+  if (tickGun == 1 && cannonAmmo > 0 && cannonCooldown == 0) {
+    cannonAmmo = cannonAmmo - 1;
+    cannonCooldown = 5;
+    cannonIdle = 0;
+    cannonEvents = (cannonEvents + 1) % 65536;
+    if (nearest > 0) {
+      let remainingHull = ux_u8(nearest) - 1;
+      let hullStored = ux_u8_put(nearest, remainingHull);
+      if (remainingHull == 0) { combatKills = (combatKills + 1) % 100; }
+    }
+  }
+  if (cannonIdle == 176 && cannonAmmo == 0) { cannonAmmo = 96; }
+  let lockRecord = ux_u8_put(14, nearest);
+  let killRecord = ux_u8_put(15, combatKills);
   steps = steps - 1;
 }
 priorTurn = tickTurn;
