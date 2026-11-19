@@ -1,0 +1,89 @@
+// Registry rows hold an event type token and a listener token. An event snapshot
+// is separate from the registry so consumers can change registrations while visiting it.
+native function EventDispatcher_init(d_dst:i64,d_table:i64,d_capacity:i64) i64 {
+  if(d_capacity<0 || d_capacity>786432) { return 0-1; }
+  let d_record=ux_span(d_dst,EventDispatcher.size);
+  let d_rows=ux_span(d_table,d_capacity*8);
+  let d_set_rows=ux_u32_put(d_dst+EventDispatcher.listeners,d_table);
+  let d_set_count=ux_u32_put(d_dst+EventDispatcher.listenerCount,0);
+  let d_set_capacity=ux_u32_put(d_dst+EventDispatcher.listenerCapacity,d_capacity);
+  return d_dst;
+}
+
+native function EventDispatcher_find(d_find:i64,d_find_type:i64,d_find_listener:i64) i64 {
+  let d_find_base=ux_u32(d_find+EventDispatcher.listeners);
+  let d_find_count=ux_u32(d_find+EventDispatcher.listenerCount);
+  let d_find_index=0;
+  while(d_find_index<d_find_count) {
+    let d_find_at=d_find_base+8*d_find_index;
+    if(ux_u32(d_find_at)==d_find_type && ux_u32(d_find_at+4)==d_find_listener) { return d_find_index; }
+    d_find_index=d_find_index+1;
+  }
+  return 0-1;
+}
+
+function EventDispatcher_hasEventListener(d_has,...d_has_args) {
+  return EventDispatcher_find(d_has,d_has_args[0],d_has_args[1])>=0;
+}
+
+native function EventDispatcher_addListener(d_add:i64,d_add_type:i64,d_add_handler:i64) i64 {
+  if(d_add_type<0 || d_add_type>4294967295 || d_add_handler<0 || d_add_handler>4294967295) { return 0-1; }
+  if(EventDispatcher_find(d_add,d_add_type,d_add_handler)>=0) { return d_add; }
+  let d_add_count=ux_u32(d_add+EventDispatcher.listenerCount);
+  if(d_add_count>=ux_u32(d_add+EventDispatcher.listenerCapacity)) { return 0-2; }
+  let d_add_at=ux_u32(d_add+EventDispatcher.listeners)+8*d_add_count;
+  let d_add_write_type=ux_u32_put(d_add_at,d_add_type);
+  let d_add_write_handler=ux_u32_put(d_add_at+4,d_add_handler);
+  let d_add_publish=ux_u32_put(d_add+EventDispatcher.listenerCount,d_add_count+1);
+  return d_add;
+}
+
+function EventDispatcher_addEventListener(d_add_event,...d_add_event_args) {
+  return EventDispatcher_addListener(d_add_event,d_add_event_args[0],d_add_event_args[1]);
+}
+
+native function EventDispatcher_removeListener(d_remove:i64,d_remove_type:i64,d_remove_handler:i64) i64 {
+  let d_remove_index=EventDispatcher_find(d_remove,d_remove_type,d_remove_handler);
+  if(d_remove_index<0) { return d_remove; }
+  let d_remove_count=ux_u32(d_remove+EventDispatcher.listenerCount)-1;
+  let d_remove_base=ux_u32(d_remove+EventDispatcher.listeners);
+  while(d_remove_index<d_remove_count) {
+    let d_remove_row=d_remove_base+8*d_remove_index;
+    let d_move_type=ux_u32_put(d_remove_row,ux_u32(d_remove_row+8));
+    let d_move_handler=ux_u32_put(d_remove_row+4,ux_u32(d_remove_row+12));
+    d_remove_index=d_remove_index+1;
+  }
+  let d_remove_commit=ux_u32_put(d_remove+EventDispatcher.listenerCount,d_remove_count);
+  return d_remove;
+}
+
+function EventDispatcher_removeEventListener(d_remove_event,...d_remove_event_args) {
+  return EventDispatcher_removeListener(d_remove_event,d_remove_event_args[0],d_remove_event_args[1]);
+}
+
+native function EventDispatcher_dispatchEvent(d_disp:i64,d_type:i64,d_target:i64,d_out:i64,d_limit:i64) i64 {
+  if(d_limit<0 || d_limit>786432) { return 0-1; }
+  let d_dispatch_base=ux_u32(d_disp+EventDispatcher.listeners);
+  let d_dispatch_n=ux_u32(d_disp+EventDispatcher.listenerCount);
+  let d_dispatch_matches=0;
+  let d_dispatch_index=0;
+  while(d_dispatch_index<d_dispatch_n) {
+    if(ux_u32(d_dispatch_base+8*d_dispatch_index)==d_type) { d_dispatch_matches=d_dispatch_matches+1; }
+    d_dispatch_index=d_dispatch_index+1;
+  }
+  if(d_dispatch_matches>d_limit) { return 0-2; }
+  let d_dispatch_span=ux_span(d_out,8+4*d_dispatch_matches);
+  let d_dispatch_target=ux_u32_put(d_out,d_target);
+  let d_dispatch_count=ux_u32_put(d_out+4,d_dispatch_matches);
+  d_dispatch_index=0;
+  let d_dispatch_write=0;
+  while(d_dispatch_index<d_dispatch_n) {
+    let d_dispatch_row=d_dispatch_base+8*d_dispatch_index;
+    if(ux_u32(d_dispatch_row)==d_type) {
+      let d_emit=ux_u32_put(d_out+8+4*d_dispatch_write,ux_u32(d_dispatch_row+4));
+      d_dispatch_write=d_dispatch_write+1;
+    }
+    d_dispatch_index=d_dispatch_index+1;
+  }
+  return d_dispatch_matches;
+}
