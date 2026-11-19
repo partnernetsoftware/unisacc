@@ -3,16 +3,24 @@
 <pre id="gpu">pending</pre>
 <script type="module">
 import {
-  BoxGeometry, BufferAttribute, BufferGeometry, Camera, CustomBlending, DoubleSide,
-  LessDepth, Mesh, OneMinusSrcAlphaFactor, RawShaderMaterial, REVISION,
-  Scene, SrcAlphaFactor, WebGLRenderer,
+  BoxGeometry, BufferAttribute, BufferGeometry, Camera, Color, CullFaceBack, CustomBlending, DoubleSide,
+  EqualStencilFunc, GreaterDepth, IncrementStencilOp, KeepStencilOp, LessDepth, Mesh, OneFactor,
+  OneMinusSrcAlphaFactor, RawShaderMaterial, ReplaceStencilOp, ReverseSubtractEquation, REVISION,
+  Scene, SrcAlphaFactor, SubtractEquation, WebGLRenderer,
 } from "./three.module.js";
 import { createGpuSubmit } from "./gpu-host-abi.js";
 
 const result = document.querySelector("#gpu");
 const samples = [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]];
 const size = 16;
-const options = { alpha: true, antialias: false, depth: true, preserveDrawingBuffer: true, premultipliedAlpha: false };
+const options = { alpha: true, antialias: false, depth: true, stencil: true, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function stateValues(gl) {
+  const keys = ["DEPTH_TEST", "DEPTH_FUNC", "DEPTH_WRITEMASK", "BLEND", "BLEND_EQUATION_RGB", "BLEND_EQUATION_ALPHA",
+    "BLEND_SRC_RGB", "BLEND_DST_RGB", "BLEND_SRC_ALPHA", "BLEND_DST_ALPHA", "STENCIL_TEST", "STENCIL_FUNC",
+    "STENCIL_REF", "STENCIL_VALUE_MASK", "STENCIL_WRITEMASK", "STENCIL_FAIL", "STENCIL_PASS_DEPTH_FAIL",
+    "STENCIL_PASS_DEPTH_PASS", "CULL_FACE_MODE", "FRONT_FACE", "POLYGON_OFFSET_FACTOR", "POLYGON_OFFSET_UNITS"];
+  return keys.map(key => Number(gl.getParameter(gl[key]))).concat(gl.getParameter(gl.COLOR_WRITEMASK).map(Number), gl.getError());
+}
 function context() {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;
@@ -86,6 +94,9 @@ try {
   for (let mode = 10n; mode <= 18n; mode++) status.push(Number(step(mode)));
   actual.push(...pixels(gl));
   status.push(...gl.getParameter(gl.VIEWPORT), gl.getError());
+  const stateStatus = [Number(step(new URLSearchParams(location.search).has("state-mutate") ? 26n : 20n))];
+  for (let mode = 21n; mode <= 25n; mode++) stateStatus.push(Number(step(mode)));
+  const actualState = stateValues(gl);
 
   const reference = [];
   const three = context();
@@ -104,8 +115,23 @@ try {
     reference.push(...pixels(three.gl));
     for (const mesh of scene.children) { mesh.geometry.dispose(); mesh.material.dispose(); }
   }
+  const { state } = renderer;
+  state.buffers.depth.setTest(true);
+  state.buffers.depth.setFunc(GreaterDepth);
+  state.buffers.depth.setMask(false);
+  state.setBlending(CustomBlending, SubtractEquation, SrcAlphaFactor, OneMinusSrcAlphaFactor,
+    ReverseSubtractEquation, OneFactor, OneMinusSrcAlphaFactor, new Color(0), 0, false);
+  state.buffers.stencil.setTest(true);
+  state.buffers.stencil.setFunc(EqualStencilFunc, 3, 240);
+  state.buffers.stencil.setMask(15);
+  state.buffers.stencil.setOp(KeepStencilOp, ReplaceStencilOp, IncrementStencilOp);
+  state.setCullFace(CullFaceBack);
+  state.setFlipSided(true);
+  state.setPolygonOffset(true, 1.5, -2);
+  state.buffers.color.setMask(false);
+  const referenceState = stateValues(three.gl);
   renderer.dispose();
-  result.textContent = JSON.stringify([...status, ...actual, ...reference]);
+  result.textContent = JSON.stringify([...status, ...actual, ...reference, ...stateStatus, ...actualState, ...referenceState]);
 } catch (error) {
   result.textContent = String(error);
 }

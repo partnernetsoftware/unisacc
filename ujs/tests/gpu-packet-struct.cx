@@ -60,7 +60,10 @@ static void pixel_gold(int scene,int point,int *rgba) {
 
 static int gpu_check(char *start) {
     const int status[]={0,0,0,0,-2,-3,-1,-5,-4,-7,-1,-4,-1,0,0,16,16,0};
-    int failed=0,total=198;
+    const int stateStatus[]={0,-8,-9,-10,-11,-4};
+    const double state[]={1,516,0,1,32778,32779,770,771,1,771,1,514,
+        3,240,15,7680,7681,7682,1029,2304,1.5,-2,0,0,0,0,0};
+    int failed=0,total=258;
     for(int i=0;i<total;i++) {
         char *next=0;
         double value=tx_strtod(start,&next);
@@ -68,8 +71,10 @@ static int gpu_check(char *start) {
             printf("GPU_PACKET malformed=%d\n",i);
             return failed+1;
         }
-        int expected=0,tolerance=0;
+        double expected=0,tolerance=0;
         if(i<(int)(sizeof status/sizeof status[0])) expected=status[i];
+        else if(i>=198 && i<204) expected=stateStatus[i-198];
+        else if(i>=204) expected=state[(i-204)%27];
         else {
             int pixel=i-18;
             if(pixel>=100) pixel-=100;
@@ -81,7 +86,7 @@ static int gpu_check(char *start) {
             tolerance=scene==3?1:0;
         }
         if(value<expected-tolerance || value>expected+tolerance) {
-            if(failed<16) printf("GPU_PACKET cell=%d actual=%.0f expected=%d tol=%d\n",
+            if(failed<16) printf("GPU_PACKET cell=%d actual=%.4g expected=%.4g tol=%.4g\n",
                 i,value,expected,tolerance);
             failed++;
         }
@@ -92,31 +97,35 @@ static int gpu_check(char *start) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
+    if(argc!=1 && !mutate && !state_mutate) return 2;
     char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
     if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
     tx_snprintf(shaders,sizeof shaders,"%s/shaders.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
-    tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,mutate?"?mutate":"");
+    tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,mutate?"?mutate":state_mutate?"?state-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
     char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
         "ujs/practice/uxe/base/geometry-buffers.ujs","ujs/practice/uxe/base/boxgeometry.ujs",
-        "ujs/practice/uxe/base/gpu-packet.ujs",shaders,"ujs/practice/uxe/test/gpu-packet-probe.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-state.ujs",
+        shaders,"ujs/practice/uxe/test/gpu-packet-probe.ujs",
         "-o",wasm,0};
     char *out=0;
     size_t bytes=0;
     sy_stat_t compiled={0};
     const char bridge[]="ujs/practice/uxe/base/gpu-host-abi.js";
-    int lines=bridge_lines(bridge);
+    const char states[]="ujs/practice/uxe/base/gpu-state-abi.js";
+    int lines=bridge_lines(bridge)+bridge_lines(states);
     int ready=lines>0 && lines<=300 &&
         !sy_write_file(abi,declarations,sizeof declarations-1,0600) && !build_shaders(shaders)
         && !cx_runv_timeout(compile,10,&out,&bytes)
         && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
         && !gpu_copy(dir,"probe.html","ujs/practice/uxe/test/gpu-packet-r160.html")
         && !gpu_copy(dir,"gpu-host-abi.js",bridge)
+        && !gpu_copy(dir,"gpu-state-abi.js",states)
         && !gpu_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js");
     if(!ready && out) printf("GPU_PACKET compile=%s\n",out);
     mm_free(out);
@@ -141,7 +150,7 @@ int main(int argc,char **argv) {
     out=0;
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
-    printf("G_PIXEL GPU_PACKET scenes=4 values=198 wasm_bytes=%ld bridge_lines=%d failed=%d\n",
+    printf("G_PIXEL GPU_PACKET scenes=4 values=258 wasm_bytes=%ld bridge_lines=%d failed=%d\n",
         compiled.size,lines,failed);
     return failed!=0;
 }

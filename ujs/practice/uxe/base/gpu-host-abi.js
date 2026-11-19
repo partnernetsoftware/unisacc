@@ -1,3 +1,4 @@
+import { applyRenderState, readRenderState } from "./gpu-state-abi.js";
 const magic = 0x50455855;
 const bufferBase = 2097152;
 const bufferSize = 6291456;
@@ -116,6 +117,7 @@ function runCommands(gl, commands) {
         gl.clearDepth(a);
         gl.clear(gl.DEPTH_BUFFER_BIT);
       }
+      if (opcode === 6) applyRenderState(gl, a);
     }
     return gl.isContextLost() ? -6n : 0n;
   } finally {
@@ -177,6 +179,10 @@ export function createGpuSubmit(gl, memory, generation) {
         const depth = packet.getFloat32(at + 8, true);
         if (!Number.isFinite(depth) || depth < 0 || depth > 1) return -4n;
         commands.push([opcode, depth]);
+      } else if (opcode === 6) {
+        const state = readRenderState(gl, packet, at, span);
+        if (typeof state === "bigint") return state;
+        commands.push([opcode, state]);
       } else {
         return -5n;
       }
