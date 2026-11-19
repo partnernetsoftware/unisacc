@@ -865,22 +865,34 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln) {
     }
     if (!hit) return 0;
     /* Check the staged index tree (git write-tree + git archive) rather than the dirty worktree,
-       so unrelated unstaged edits by other sessions (e.g. cx/) never cause false blocks, while
-       recomputed-but-unstaged product tables are caught directly on the index snapshot.
-       Bounded to 25s via ./tools/bound (kills entire process group on timeout, zero orphans). */
-    if (tool_only && only_list[0]) {
-        if (cx_fmt(scmd, sizeof scmd,
-            "t=$(git write-tree) || exit 2; d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-genall.XXXXXX\") || exit 2; "
-            "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
-            "if [ -x ./tools/bound ]; then ./tools/bound 25 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
-            "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; fi",
-            only_list, only_list)) return 0;
-    } else {
-        if (cx_fmt(scmd, sizeof scmd,
-            "t=$(git write-tree) || exit 2; d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-genall.XXXXXX\") || exit 2; "
-            "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
-            "if [ -x ./tools/bound ]; then ./tools/bound 25 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
-            "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; fi")) return 0;
+       linking top-level unisacc.com into the temp tree so product-calling generators (arity-gen,
+       facts-gen) run cleanly. Note: when tools/gen-all-check.cx itself is staged with edits, the
+       gate runs the worktree copy of tools/gen-all-check.cx against the staged index snapshot.
+       Bounded to 20s via ./tools/bound (kills process group, zero orphans).
+       Only DIFF blocks; generator ERROR (not DIFF) logs GEN_ALL_GATE_ERROR (stderr + session log)
+       and GEN_ALL_GATE_UNAVAILABLE and allows commit. */
+    {
+        const char *td = sy_tmpdir();
+        const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+        if (tool_only && only_list[0]) {
+            if (cx_fmt(scmd, sizeof scmd,
+                "top=$(git rev-parse --show-toplevel) || exit 2; [ -e \"$top/unisacc.com\" ] || exit 2; "
+                "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
+                "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+                "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
+                "if [ -x ./tools/bound ]; then ./tools/bound 20 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
+                "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; fi",
+                base_td, only_list, only_list)) return 0;
+        } else {
+            if (cx_fmt(scmd, sizeof scmd,
+                "top=$(git rev-parse --show-toplevel) || exit 2; [ -e \"$top/unisacc.com\" ] || exit 2; "
+                "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
+                "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+                "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
+                "if [ -x ./tools/bound ]; then ./tools/bound 20 sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
+                "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; fi",
+                base_td)) return 0;
+        }
     }
     {
         char *gv[] = {"sh", "-c", scmd, 0}; /* lint:allow R1-product precommit runs tools/gen-all-check.cx bounded on staged index tree */
@@ -895,28 +907,46 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln) {
         return 0;
     }
     if (!gout || tx_find(gout, gon, "GEN_ALL_SUMMARY\t", 16) < 0) {
-        sy_eprintf("precommit: GEN_ALL_GATE_UNAVAILABLE (tools/gen-all-check.cx timed out or did not run; allowing commit)\n");
+        sy_eprintf("precommit: GEN_ALL_GATE_UNAVAILABLE (tools/gen-all-check.cx timed out, missing unisacc.com, or did not run; allowing commit)\n");
         if (gout) mm_free(gout);
         return 0;
     }
-    if (tx_find(gout, gon, "\tdiff=0\terror=0\t", 16) < 0) {
+    {
         long ga = 0;
+        int err_cnt = 0;
         while (ga < gon) {
             long e = tx_chr(gout + ga, gon - ga, '\n'), l = e < 0 ? gon - ga : e;
-            if (tx_prefix(gout + ga, l, "GEN_CHECK\t", 10) &&
-                (tx_find(gout + ga, l, "\tDIFF\t", 6) >= 0 || tx_find(gout + ga, l, "\tERROR\t", 7) >= 0)) {
-                char line[400];
-                long cp = l < 399 ? l : 399;
-                mm_copy(line, sizeof line, gout + ga, (size_t)cp);
-                line[cp] = 0;
-                sy_eprintf("precommit: BLOCKED product-table-drift %s\n", line);
-                blocked++;
+            if (tx_prefix(gout + ga, l, "GEN_CHECK\t", 10)) {
+                if (tx_find(gout + ga, l, "\tDIFF\t", 6) >= 0) {
+                    char line[400];
+                    long cp = l < 399 ? l : 399;
+                    mm_copy(line, sizeof line, gout + ga, (size_t)cp);
+                    line[cp] = 0;
+                    sy_eprintf("precommit: BLOCKED product-table-drift %s\n", line);
+                    blocked++;
+                } else if (tx_find(gout + ga, l, "\tERROR\t", 7) >= 0) {
+                    char line[400], lp[1200], lrec[460];
+                    long cp = l < 399 ? l : 399;
+                    const char *td = sy_tmpdir();
+                    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+                    mm_copy(line, sizeof line, gout + ga, (size_t)cp);
+                    line[cp] = 0;
+                    sy_eprintf("precommit: GEN_ALL_GATE_ERROR %s\n", line);
+                    if (!cx_fmt(lp, sizeof lp, "%s/gen-all-gate-errors.log", base_td) &&
+                        !cx_fmt(lrec, sizeof lrec, "GEN_ALL_GATE_ERROR\t%s\n", line)) {
+                        (void)sy_append_file(lp, lrec, tx_len(lrec, sizeof lrec), 0600);
+                    }
+                    err_cnt++;
+                }
             }
             ga += l + 1;
         }
-        if (!blocked) {
+        if (!blocked && tx_find(gout, gon, "\tdiff=0\t", 8) < 0) {
             sy_eprintf("precommit: BLOCKED product-table-drift (run: sh ./unisacc.com tools/gen-all-check.cx -- --root .)\n");
             blocked++;
+        }
+        if (!blocked && (err_cnt > 0 || tx_find(gout, gon, "\terror=0\t", 9) < 0)) {
+            sy_eprintf("precommit: GEN_ALL_GATE_UNAVAILABLE (product-table generator ERROR without DIFF; allowing commit)\n");
         }
     }
     mm_free(gout);
