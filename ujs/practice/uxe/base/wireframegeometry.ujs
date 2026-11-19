@@ -1,0 +1,55 @@
+native function wire_position_eq(a:i64,b:i64) i64 {
+  return ux_f32(a)==ux_f32(b) && ux_f32(a+4)==ux_f32(b+4) && ux_f32(a+8)==ux_f32(b+8);
+}
+
+native function wire_segment_exists(output:i64,count:i64,first:i64,last:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let a=output+i*32;
+    let b=a+32;
+    if((wire_position_eq(a,first) && wire_position_eq(b,last)) ||
+       (wire_position_eq(a,last) && wire_position_eq(b,first))) { return 1; }
+    i=i+2;
+  }
+  return 0;
+}
+
+// Use explicit triangle groups to reproduce BufferGeometry draw order.
+// An index count of zero selects non-indexed vertices.
+native function WireframeGeometry_generate(wire:i64,triangles:i64,group_start:i64,group_count:i64) i64 {
+  let vertex_base=ux_u32(triangles+GeometryBuffers.vertices);
+  let vertex_count=ux_u32(triangles+GeometryBuffers.vertexCount);
+  let index_base=ux_u32(triangles+GeometryBuffers.indices);
+  let index_count=ux_u32(triangles+GeometryBuffers.indexCount);
+  let size=vertex_count;
+  if(index_count>0) { size=index_count; }
+  if(group_start<0 || group_count<0 || group_count%3!=0 ||
+     group_start>size || group_count>size-group_start ||
+     group_count>4095 || !GeometryBuffers_fits(wire,group_count*2,0)) { return 0-1; }
+  let result=ux_u32(wire+GeometryBuffers.vertices);
+  let wire_end=result+group_count*64;
+  if((wire_end>vertex_base && result<vertex_base+vertex_count*32) ||
+     (index_count>0 && wire_end>index_base && result<index_base+index_count*4)) { return 0-1; }
+  let edge=0;
+  let output_count=0;
+  while(edge<group_count) {
+    let start=group_start+edge;
+    let finish=group_start+edge-edge%3+(edge+1)%3;
+    if(index_count>0) {
+      start=ux_u32(index_base+4*start);
+      finish=ux_u32(index_base+4*finish);
+    }
+    if(start>=vertex_count || finish>=vertex_count) { return 0-1; }
+    let first=vertex_base+start*32;
+    let last=vertex_base+finish*32;
+    if(!wire_segment_exists(result,output_count,first,last)) {
+      let next=GeometryBuffers_vertex(result+output_count*32,ux_f32(first),ux_f32(first+4),ux_f32(first+8),
+        0.0,0.0,0.0,0.0,0.0);
+      let end=GeometryBuffers_vertex(next,ux_f32(last),ux_f32(last+4),ux_f32(last+8),
+        0.0,0.0,0.0,0.0,0.0);
+      output_count=output_count+2;
+    }
+    edge=edge+1;
+  }
+  return GeometryBuffers_commit(wire,output_count,0);
+}
