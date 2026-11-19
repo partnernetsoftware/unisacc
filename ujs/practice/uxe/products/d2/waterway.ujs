@@ -15,13 +15,14 @@ while (waterRow < 240) {
   let waterHalf = 13.2 + 1.9 * ux_sin(waterWorldZ / 39.0);
   let waterStart = f64_floor_i64(213.0 + (waterCenter - waterHalf - boatX) * 155.0 / waterDepth);
   let waterEnd = f64_floor_i64(213.0 + (waterCenter + waterHalf - boatX) * 155.0 / waterDepth);
-  let waterSway = ux_sin(waterRow * 0.58 + (boatTick % 256) * 0.16);
+  let waterSway = f64_floor_i64(ux_sin(waterRow * 0.58 + (boatTick % 256) * 0.16)
+    * (2.0 + waterDrift * 0.025));
   let waterCol = 0;
   while (waterCol < 426) {
     let waterHashX = waterCol / 2;
     let waterHashY = waterRow / 2;
     if (waterDrift >= 0) {
-      waterHashX = (waterCol + 16 + f64_floor_i64(waterSway * (2.0 + waterDrift * 0.025))) / 4;
+      waterHashX = f64_floor_i64((waterCol + waterSway) / 4.0);
       waterHashY = f64_floor_i64(waterWorldZ * 0.64);
     }
     let waterNoise = u32_xor(u32_mul(waterHashX + 71, 374761393), u32_mul(waterHashY + 97, 668265263));
@@ -30,6 +31,7 @@ while (waterRow < 240) {
     let waterR = 0;
     let waterG = 0;
     let waterB = 0;
+    let waterGrain = waterNoise % 4 - 1;
     if (waterDrift < 0) {
       waterR = 151 + (104 * waterRow) / 90;
       waterG = 113 + (74 * waterRow) / 90;
@@ -47,22 +49,47 @@ while (waterRow < 240) {
       }
     } else {
       if (waterCol > waterStart && waterCol < waterEnd) {
-        waterR = 166 - waterDrift * 90 / 149;
-        waterG = 114 - waterDrift * 47 / 149;
-        waterB = 66 - waterDrift * 6 / 149;
-        let beam = waterCol - waterSun - waterSway * (2.0 + waterDrift * 0.025);
+        waterR = f64_floor_i64(171.5 - waterDrift * 66.0 / 150.0);
+        waterG = f64_floor_i64(111.5 - waterDrift * 45.0 / 150.0);
+        waterB = f64_floor_i64(63.5 - waterDrift * 17.0 / 150.0);
+        let beam = waterCol - waterSun - waterSway;
         if (beam < 0.0) { beam = 0.0 - beam; }
         if (beam < 3.0 + waterDrift * 0.23 && waterNoise > 115) {
-          waterR = 238; waterG = 181; waterB = 110;
+          let sunMix = 0.47;
+          if (waterNoise > 205) { sunMix = 0.73; }
+          waterR = f64_floor_i64(waterR + 0.5 + (255 - waterR) * sunMix);
+          waterG = f64_floor_i64(waterG + 0.5 + (221 - waterG) * sunMix);
+          waterB = f64_floor_i64(waterB + 0.5 + (151 - waterB) * sunMix);
+          waterGrain = waterNoise % 8 - 4;
         } else {
-          if ((waterRow + (waterCol / 16) % 2 + 8 + f64_floor_i64(waterSway * 3.0)) % 6 == 0 &&
+          let crest = (waterRow + (waterCol / 16) % 2 + waterSway) % 6 == 0;
+          if (crest &&
               waterDrift > 18 && waterNoise > 70 && waterNoise % 32 < 25) {
             waterR = 233; waterG = 181; waterB = 112;
+            waterGrain = 0;
           } else {
-            if (beam > 25.0 + waterDrift * 0.19 && waterDrift > 32 && waterRow % 11 < 3) {
-              waterR = waterR * 78 / 100;
-              waterG = waterG * 87 / 100;
+            let mirrorMix = 0.22 + waterDrift / 166.0;
+            if (mirrorMix > 1.0) { mirrorMix = 1.0; }
+            let bodyMix = 0.49 - waterDrift * 0.002;
+            waterR = f64_floor_i64(waterR + 0.5 + (255 - 104 * mirrorMix - waterR) * bodyMix);
+            waterG = f64_floor_i64(waterG + 0.5 + (187 - 74 * mirrorMix - waterG) * bodyMix);
+            waterB = f64_floor_i64(waterB + 0.5 + (95 - 15 * mirrorMix - waterB) * bodyMix);
+            if (beam > 25.0 + waterDrift * 0.19 &&
+                ((waterRow + f64_floor_i64(waterSway / 2.0)) % 11 < 3 || waterDrift > 108)) {
+              bodyMix = (waterDrift - 32) / 110.0;
+              if (bodyMix < 0.0) { bodyMix = 0.0; }
+              if (bodyMix > 0.82) { bodyMix = 0.82; }
+              waterR = f64_floor_i64(waterR + 0.5 + (57 - waterR) * bodyMix);
+              waterG = f64_floor_i64(waterG + 0.5 + (75 - waterG) * bodyMix);
+              waterB = f64_floor_i64(waterB + 0.5 + (71 - waterB) * bodyMix);
+            } else {
+              if (crest) {
+                waterR = f64_floor_i64(waterR + 0.5 + (255 - waterR) * 0.16);
+                waterG = f64_floor_i64(waterG + 0.5 + (221 - waterG) * 0.16);
+                waterB = f64_floor_i64(waterB + 0.5 + (151 - waterB) * 0.16);
+              }
             }
+            waterGrain = waterNoise % 8 - 3;
           }
         }
       } else {
@@ -72,7 +99,6 @@ while (waterRow < 240) {
         }
       }
     }
-    let waterGrain = waterNoise % 4 - 1;
     if (waterR + waterGrain > 255) { waterGrain = 0; }
     packetWrite = uxe_dispatch(2, waterRow * 426 + waterCol, 4278190080
       + waterR + waterGrain + 256 * (waterG + waterGrain) + 65536 * (waterB + waterGrain));
