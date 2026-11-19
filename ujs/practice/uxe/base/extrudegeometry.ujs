@@ -1,0 +1,87 @@
+native function extrude_lid(out:i64,points:i64,face:i64,z:f64,top:i64) i64 {
+  let normal=0.0-1.0;
+  if(top!=0) { normal=1.0; }
+  let corner=0;
+  while(corner<3) {
+    let index=corner;
+    if(top==0) { index=2-corner; }
+    let point=points+16*ux_u32(face+4*index);
+    let x=ux_f64(point);
+    let y=ux_f64(point+8);
+    out=GeometryBuffers_vertex(out,x,y,z,0.0,0.0,normal,x,y);
+    corner=corner+1;
+  }
+  return out;
+}
+
+native function extrude_wall(out:i64,a:i64,b:i64,lower:f64,upper:f64) i64 {
+  let ax=ux_f64(a);
+  let ay=ux_f64(a+8);
+  let bx=ux_f64(b);
+  let by=ux_f64(b+8);
+  let dx=bx-ax;
+  let dy=by-ay;
+  let segment=f64_sqrt(dx*dx+dy*dy);
+  let nx=0.0;
+  let ny=0.0;
+  if(segment>0.0) { nx=dy/segment; ny=0.0-dx/segment; }
+  let ua=ay;
+  let ub=by;
+  if(dx*dx>dy*dy) { ua=ax; ub=bx; }
+  let low=1.0-lower;
+  let high=1.0-upper;
+  out=GeometryBuffers_vertex(out,ax,ay,lower,nx,ny,0.0,ua,low);
+  out=GeometryBuffers_vertex(out,bx,by,lower,nx,ny,0.0,ub,low);
+  out=GeometryBuffers_vertex(out,ax,ay,upper,nx,ny,0.0,ua,high);
+  out=GeometryBuffers_vertex(out,bx,by,lower,nx,ny,0.0,ub,low);
+  out=GeometryBuffers_vertex(out,bx,by,upper,nx,ny,0.0,ub,high);
+  return GeometryBuffers_vertex(out,ax,ay,upper,nx,ny,0.0,ua,high);
+}
+
+// Flat lids and side walls for a simple contour, with bevel disabled.
+native function ExtrudeGeometry_generate(mesh:i64,contour:i64,count:i64,depth:f64,
+                                         steps:i64,work:i64) i64 {
+  if(contour<0 || contour>6291456 || contour%8!=0 || count<3 || count>4096 ||
+     count>(6291456-contour)/16 || work<0 || work>6291456 || work%8!=0 ||
+     count>(6291456-work)/36 || (contour<work+count*36 && work<contour+count*16) ||
+     !(depth>0.0) || steps<1 || steps>4096) { return 0-1; }
+  let triangles=3*(count-2);
+  let vertices=2*triangles+6*count*steps;
+  if(!GeometryBuffers_fits(mesh,vertices,0)) { return 0-1; }
+  let area=ShapeUtils_area(contour,count);
+  if(area==0.0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let j=i;
+    if(area>0.0) { j=count-1-i; }
+    let source=contour+j*16;
+    let x=ux_f64_put(work+i*16,ux_f64(source));
+    let y=ux_f64_put(work+i*16+8,ux_f64(source+8));
+    i=i+1;
+  }
+  let faces=work+count*24;
+  let triangulated=ShapeUtils_triangulateShape(work,count,faces,triangles,work+count*16);
+  if(triangulated<0) { return triangulated; }
+  let out=ux_u32(mesh+GeometryBuffers.vertices);
+  let side=0;
+  while(side<2) {
+    let j=0;
+    while(j<triangulated) {
+      out=extrude_lid(out,work,faces+j*4,depth*side,side);
+      j=j+3;
+    }
+    side=side+1;
+  }
+  let edge=count;
+  while(edge>0) {
+    edge=edge-1;
+    let a=work+16*edge;
+    let b=work+16*((edge+count-1)%count);
+    let level=0;
+    while(level<steps) {
+      out=extrude_wall(out,a,b,depth*level/steps,depth*(level+1)/steps);
+      level=level+1;
+    }
+  }
+  return GeometryBuffers_commit(mesh,vertices,0);
+}
