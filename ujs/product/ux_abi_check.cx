@@ -231,6 +231,40 @@ int check_ux_layout(int mutate) {
     return passed != checks;
 }
 
+int check_ux_closure(int mutate) {
+    UxProbe probe;
+    if (prepare_probe(&probe)) return 1;
+    const char *library =
+        "function ux_advance(cells, ...changes) {"
+        "cells[0] = cells[0] + changes[0]; return cells[0]; }"
+        "function ux_make_counter(initial) { return closure(ux_advance, initial); }"
+        "function ux_apply(action) { return action(3); }";
+    const char *cases[] = {
+        "let first = ux_make_counter(5); let second = ux_make_counter(40);"
+        "let alias = first; let a = first(1); let b = second(2);"
+        "return a * 10000 + b * 100 + ux_apply(alias);",
+        "let kept = ux_make_counter(99); let i = 0; let actual = 0;"
+        "while (i < 3) { let each = ux_make_counter(i); actual = actual * 10 + each(2);"
+        "if (i == 1) { kept = each; } i = i + 1; }"
+        "return actual * 10 + kept(1);",
+        "function ux_shift(pair, ...change) { pair[1] = pair[1] + change[0];"
+        "return pair[0] * 100 + pair[1]; }"
+        "let cli = closure(ux_shift, 2, 99); let ignore = cli(1); return cli(2);"
+    };
+    const int gold[] = {64209, 2344, 302};
+    const int checks = sizeof cases / sizeof cases[0];
+    int passed = 0;
+    const char *mutant =
+        "function ux_advance(cells, ...changes) { return cells[0] + changes[0]; }"
+        "function ux_make_counter(initial) { return closure(ux_advance, initial); }"
+        "function ux_apply(action) { return action(3); }";
+    for (int i = 0; i < checks; i++)
+        passed += ux_probe(&probe, mutate ? mutant : library, cases[i], gold[i], 0, 0);
+    remove_probe(&probe);
+    printf("CHECK_UX_CLOSURE checks=%d passed=%d failed=%d\n", checks, passed, checks - passed);
+    return passed != checks;
+}
+
 static unsigned noise_hash(int x, int y, int seed) {
     uint32_t n = (((uint32_t)x + 17u) * 374761393u) ^
         (((uint32_t)y + 29u) * 668265263u) ^ ((uint32_t)seed * 1442695041u);

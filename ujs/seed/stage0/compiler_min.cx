@@ -24,6 +24,7 @@ static const char *ux_write_names[] = {
 };
 enum { PERSIST_FIT = 1 / (int)(PERSIST_BASE + PERSIST_SPAN <= HOST_SCRATCH && PERSIST_BASE > HEAP0 && PERSIST_BASE > GBASE && PERSIST_BASE + PERSIST_SPAN <= STORE_WIN) };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5, TY_FN = 7 };
+enum { TY_CLOSURE_BASE = 16 };
 
 static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
@@ -621,6 +622,7 @@ static int ensure_uxaddr(Prog *P) {
 static int pexpr(Lex *L, Prog *P);
 static int pstmt(Lex *L, Prog *P);
 static int invoke_fn(Lex *L, Prog *P, int fi);
+static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver);
 
 static int expect(Lex *L, int t, Prog *P, const char *m) {
   if (L->tok != t) { P->err = m; return 0; }
@@ -692,11 +694,16 @@ static int invocation_slot(Prog *P, int type) {
   return P->nl++;
 }
 
-static int invoke_fn(Lex *L, Prog *P, int fi) {
+static int invoke_bound_fn(Lex *L, Prog *P, int fi, int receiver) {
   FnDef *F = &P->fns[fi];
   int narg = 0, i, ty = 0, ret_local, scratch;
   int arg_slot[16];
   int outer_ret = P->fn_ret, outer_did_ret = P->fn_did_ret;
+  if (receiver >= 0) {
+    int slot = invocation_slot(P, TY_LIST);
+    if (slot < 0 || !emit(P, OP_LOAD, receiver) || !emit(P, OP_STORE, slot)) return 0;
+    arg_slot[narg++] = slot;
+  }
   /* L at `(` */
   if (!expect(L, T_LP, P, "call (")) return 0;
   if (L->tok != T_RP) {
@@ -785,6 +792,10 @@ static int invoke_fn(Lex *L, Prog *P, int fi) {
   return ty ? ty : TY_I64;
 }
 
+static int invoke_fn(Lex *L, Prog *P, int fi) {
+  return invoke_bound_fn(L, P, fi, -1);
+}
+
 static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
   if (!ty || !ty2) return 0;
   if (ty == ty2) {
@@ -812,6 +823,29 @@ static int intrinsic_name(const char *actual, const char *expected) {
 }
 
 static int abi_name_copy(char *dst, const char *src);
+
+static int closure_expr(Lex *L, Prog *P) {
+  next(L);
+  if (!expect(L, T_LP, P, "closure (")) return 0;
+  int fn = L->tok == T_ID ? find_fn(P, L->id) : -1;
+  if (fn < 0 || !P->fns[fn].has_p0) {
+    P->err = "closure callback requires a capture parameter"; return 0;
+  }
+  int scratch = invocation_slot(P, TY_LIST), at = P->nc;
+  if (scratch < 0 || !emit(P, OP_MKLIST, 0) || !emit(P, OP_STORE, scratch)) return 0;
+  next(L);
+  int count = 0;
+  while (L->tok == T_COMMA) {
+    if (count >= 16) { P->err = "closure capture limit"; return 0; }
+    next(L);
+    if (!emit(P, OP_LOAD, scratch)) return 0;
+    if (pexpr(L, P) != TY_I64) { P->err = "closure capture requires i64"; return 0; }
+    if (!emit(P, OP_BOXI, 0) || !emit(P, OP_LSET, count++)) return 0;
+  }
+  P->code[at].a = count;
+  if (!expect(L, T_RP, P, "closure )") || !emit(P, OP_LOAD, scratch)) return 0;
+  return TY_CLOSURE_BASE + fn;
+}
 
 static int layout_find(Prog *P, const char *name) {
   for (int i = 0; i < P->nlayouts; i++)
@@ -1140,6 +1174,7 @@ static int pprim(Lex *L, Prog *P) {
     return TY_DICT;
   }
   if (L->tok == T_ID && (!pact || !strcmp(pact, "ident"))) {
+    if (intrinsic_name(L->id, "closure")) return closure_expr(L, P);
     int bit_op = u32_opcode(L->id);
     if (bit_op) {
       next(L);
@@ -1287,6 +1322,8 @@ static int pprim(Lex *L, Prog *P) {
       if (L->tok == T_LP && fi >= 0) return invoke_fn(L, P, fi);
       i = loc(P, nbuf, 0);
       if (i >= 0) {
+        if (P->lty[i] >= TY_CLOSURE_BASE && L->tok == T_LP)
+          return invoke_bound_fn(L, P, P->lty[i] - TY_CLOSURE_BASE, i);
         if (P->lty[i] == TY_FN && L->tok == T_LP) {
           if (fi < 0) { P->err = "fn idx"; return 0; }
           return invoke_fn(L, P, fi);
@@ -1557,6 +1594,7 @@ static int pstmt(Lex *L, Prog *P) {
       next(L);
       if (!expect(L, T_EQ, P, "expected =")) return 0;
       ty = pexpr(L, P); if (!ty) return 0;
+      if (ty >= TY_CLOSURE_BASE) { P->err = "closure cannot persist across ABI calls"; return 0; }
       P->gty[g] = (uint8_t)ty;
       tmp = (ty == TY_F64) ? ensure_fscratch(P) : ensure_lscratch(P);
       if (tmp < 0) return 0;
@@ -1762,6 +1800,7 @@ static int pstmt(Lex *L, Prog *P) {
     {
       uint8_t op = OP_RET;
       if (ty == TY_F64) op = OP_FRET;
+      else if (ty >= TY_CLOSURE_BASE) { P->err = "closure cannot cross the host ABI"; return 0; }
       else if (ty == TY_LIST || ty == TY_DICT || ty == TY_STR) op = OP_HRET;
       if (!emit(P, op, 0)) return 0;
       return expect(L, T_SEMI, P, "expected ;");
@@ -1854,6 +1893,7 @@ static int pstmt(Lex *L, Prog *P) {
         if (!emit(P, OP_ADD, 0)) return 0;
         ty = TY_I64;
       } else if (is_g) {
+        if (ty >= TY_CLOSURE_BASE) { P->err = "closure assignment requires a local"; return 0; }
         P->gty[i] = (uint8_t)ty;
         if (ty == TY_LIST) P->glety[i] = (uint8_t)P->list_elem_ty;
       } else {
@@ -2257,7 +2297,8 @@ static int emit_locals(Buf *c, Prog *P) {
     if (!bleu(c, 1)) return 0;
     uint8_t wt = 0x7e; /* i64 */
     if (P->lty[i] == TY_F64) wt = 0x7c;
-    else if (P->lty[i] == TY_LIST || P->lty[i] == TY_DICT || P->lty[i] == TY_STR)
+    else if (P->lty[i] == TY_LIST || P->lty[i] == TY_DICT || P->lty[i] == TY_STR ||
+             P->lty[i] >= TY_CLOSURE_BASE)
       wt = 0x7f;
     if (!bu8(c, wt)) return 0;
   }
