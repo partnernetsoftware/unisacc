@@ -1,0 +1,54 @@
+#pragma unisa module g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+int g_math_reference(const char *name, double *values, int count, const char *dir) {
+    char profile[320], url[640], cwd[460], *out = 0;
+    char *args[] = {"google-chrome", "--headless=new", "--allow-file-access-from-files",
+        "--disable-background-networking", "--no-first-run", profile, "--virtual-time-budget=4000",
+        "--dump-dom", url, 0};
+    const char marker[] = "<pre id=\"r160\">[";
+    size_t size = 0;
+    if (sy_cwd(cwd, sizeof cwd)) return 1;
+    tx_snprintf(profile, sizeof profile, "--user-data-dir=%s/chrome", dir);
+    tx_snprintf(url, sizeof url, "file://%s/ujs/practice/uxe/test/%s-r160.html", cwd, name);
+    int rc = cx_runv_timeout(args, 14, &out, &size);
+    long at = !rc && out ? tx_find(out, size, marker, sizeof marker - 1) : -1;
+    if (at >= 0) {
+        char *p = out + at + sizeof marker - 1, *end = 0;
+        for (int i = 0; i < count; i++) {
+            values[i] = tx_strtod(p, &end);
+            if (end == p || *end != (i + 1 == count ? ']' : ',')) { at = -1; break; }
+            p = end + 1;
+        }
+    }
+    mm_free(out);
+    return at < 0;
+}
+
+int g_math_sample(const char *source, const char *wasm, const char *library,
+                  const char *prelude, const char *statement, double *value) {
+    char text[64000], *out = 0, *end = 0;
+    const char marker[] = "\"value\":";
+    char *args[] = {"./ujs/ujs2wasm.com", (char *)source, "-o", (char *)wasm, "--run", 0};
+    int size = tx_snprintf(text, sizeof text, "%s\n%s\n%s\n", library, prelude, statement);
+    if (size < 0 || size >= (int)sizeof text || sy_write_file(source, text, size, 0600)) return 1;
+    size_t n = 0;
+    int rc = cx_runv_timeout(args, 6, &out, &n);
+    long at = !rc && out ? tx_find(out, n, marker, sizeof marker - 1) : -1;
+    if (at >= 0) {
+        char *p = out + at + sizeof marker - 1;
+        *value = tx_strtod(p, &end);
+        if (end == p || *end != ',') at = -1;
+    }
+    mm_free(out);
+    return at < 0;
+}
+
+int g_math_near(double a, double b, double tolerance) {
+    return a - b <= tolerance && b - a <= tolerance;
+}

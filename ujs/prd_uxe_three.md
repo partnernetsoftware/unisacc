@@ -143,6 +143,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 修订(cdx2): M1 Vector2 在基座缓冲区使用两个连续 f64，调用者为 clone 等操作提供目标偏移。三角函数沿用 C2 角度域，BufferAttribute 适配连续 f32 记录，随机数由调用者注入，宽高和遍历通过分量接口读取。用 `sh ./unisacc.com ujs/tests/vector2-math.cx` 复跑 55 项 r160 JSON 和独立金值对照，另检查越界数组索引。`--mutate` 用减法替换加法检验断言。此门和 M0 的编译器检查使用 `ujs/ujs2wasm.com`，须先用 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。清单生成和 `--check` 只读受跟踪的源码与证据入口。
 
+修订(cdx2): M1 Vector3 使用三个连续 f64。矩阵沿用列主序，相机变换接收两份矩阵，Euler 记录以三个 f64 角度加一个 u32 顺序码表示。分量读取、随机源、连续 f32 属性和角度域与 Vector2 使用同一合同。`sh ./unisacc.com ujs/tests/vector3-math.cx` 检查 74 项独立金值与 r160 JSON，`--mutate` 将点积的右操作数换为左操作数。Vector2 与 Vector3 共享舍入、限幅和金值读回。
+
 规则不变:小步提交,每步单独提交并贴输出,每个门含篡改红,既有门与 UXE 回归全绿后才提交,不放宽断言,不向 docs 发布(发布由我另请 cc 合入)。每个里程碑结束产出:对标表该里程碑行状态更新、门清单、可演示页(放 ujs/ 内测试页,不进 docs)。
 
 | 阶段 | 任务 | 预计提交 | 出口 |
