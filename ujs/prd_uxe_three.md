@@ -121,6 +121,7 @@ export uxe_frame(now:i64) i64 version 1;
 | C7 | 运算 u32、i32 位移与移位已有部分补齐 | 语料 |
 | C8 | 性能:内联与循环展开基线,`ujs.com` 对 1e7 次浮点循环的耗时基线 | 记基线与目标,不得退化 |
 | C9 | 显式非内联函数与独立 Wasm 局部槽 | 256/257 旧规格保持，跨函数独立槽，递归与深度拒绝，篡改转红 |
+| C10 | 多个 UJS 源文件编译成一个 Wasm 模块 | 跨文件调用、重名与缺源具名拒绝，连接边界和篡改对照 |
 
 修订(cdx2): 现有基础为 `f64_sqrt`、`f64_floor_i64`、有界 `ux_span`、u8/f32 连续视图、独立线性内存和声明式链接。不支持任意 JavaScript 或浏览器 `Float32Array` 语法。字典键最多 8 字节，ASCII 字符串字面量最多 255 字节，UTF-8 目前走有界字节而非通用字符串。闭包只证实了短例外层读取，无逃逸或可变捕获合同。WebGL 端大批顶点与纹理上传须先量测跨度搬运和桥接次数，避免逐顶点宿主调用。
 
@@ -129,6 +130,8 @@ export uxe_frame(now:i64) i64 version 1;
 修订(cdx2): 从仓根运行 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。C9 本机五切片构造实测约 39 秒。`ujs/ujs2wasm.com` 用它编译 `.ujs`。CLI/host1、G-math、Wasm 链接、C8 基准及需要重编产品源的验证依赖这个构造。清单生成与 `--check` 只读已跟踪的对标输入，检查冻结发布包的哈希也可独立执行。
 
 修订(cdx2): C9 使用 `native function name(x:i64, y:f64) f64 { ... }` 生成独立 Wasm 函数和 `call`。stage0 原 `MAXL=256` 及 `invocation_slot` 把传统内联调用的临时量计入调用方。host1 的 `h1_exec` 逐帧检查局部声明，`h1_call` 为每帧保留 256 槽。C9 保持每帧 256 槽和原 257 槽拒绝；原有 `function` 仍内联。原生函数参数和返回值使用 i64/f64，最多 8 个参数和 8 层原生调用，只允许调用已声明的原生函数。递归、前向引用和深度超过上限在编译时具名拒绝，host1 操作数栈溢出也具名拒绝。`cli-host.cx -- --native-calls` 检查两份 256 槽帧、独立 Wasm 函数数目及拒绝，`--mutate-native-calls` 验证金值保持。
+
+修订(ccapi): 数学、场景、几何、材质各由独立 UJS 源文件维护，按顺序编译为单一 base.wasm，共用基座线性内存。产品 Wasm 仍为第二个模块，通过 0c 的版本化入口传递标量和句柄。C10 的命令为 `ujs/ujs2wasm.com abi.ujs math.ujs scene.ujs geometry.ujs material.ujs -o base.wasm`，ABI 声明放最前，符号按编译单元的声明顺序可见，重复函数与布局具名拒绝。该入口目前最多接受 64 个源文件，总源文件合计最多 100000 字节。D1 私有场景探针实测 base.wasm 为 23694 字节。探针超过 4 MiB 时输出 `D1_SCENE_BASE_BUDGET_EXCEEDED` 并失败。该体积是探针基线，后续基座增加功能须重测。
 
 修订(cdx2): C1 的 `.ujs` 接口采用显式缓冲视图。对 Float32Array、Uint16Array、Uint32Array、Int32Array、Float64Array，先用 `ux_typed_index(base, count, index, width)` 得到字节偏移，再用 `ux_f32`、`ux_u16`、`ux_u32`、`ux_i32`、`ux_f64` 及其 `_put` 写入。DataView 切片通过 `ux_data_offset(base, bytes, offset, width)` 支持非对齐访问，目前接口使用小端字节序。负返回值为 `UX_VIEW_BOUNDS=-1` 或 `UX_VIEW_ALIGNMENT=-2`，调用者须先检查再读写。整数写入截为目标位宽，f32 写入舍入到单精度。入口仍由 `ujs2wasm.com` 编译，现有 u8、f32 与 span 指令序列保留。验收运行 `sh ./unisacc.com ujs/product/cli-host.cx -- --ux-views` 及 `--mutate-ux-views`。
 
@@ -175,11 +178,9 @@ export uxe_frame(now:i64) i64 version 1;
 | 阶段 | 任务 | 预计提交 | 出口 |
 |---|---|---|---|
 | S3 | 生成器 `ujs/tools-ux/gen-three-inventory.cx` 解析 `three.module.js` 导出表为 TSV,`--check` 与篡改自测;TSV 含 A、B、C 栏、里程碑列、现状列(默认缺)、门编号列;对标树渲染成 `ujs/prd_uxe_three.md` 附表;现状按严格口径重判 | 3 到 4 | 清单与基线百分比,A 栏已有项数、B 栏已有项数 |
-| M0 | C1 到 C9,每项一提交 | 9 到 13 | 编译器门全绿,基线记录 |
+| M0 | C1 到 C10,每项一提交 | 10 到 14 | 编译器门全绿,基线记录 |
 | M1 | 数学类按 Vector2/3/4、Matrix3/4、Quaternion、Euler、Color、ColorManagement、Box2/3、Sphere、Plane、Ray、Triangle、Frustum、Line3、Cylindrical、Spherical、SH3、MathUtils 推进，每类含 G-math 门与本地 three.js 参考 JSON | 18 到 24 | 21 个 M1 数学项全部已有 |
-| M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门,D1 的场景改用 Scene 与 Object3D |
-
-修订(cdx2): M2 基座布局由 gen-object-layouts.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录由消费模块持有，场景模块交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
+| M2 | 对象模型与布局表生成器;EventDispatcher、Layers、Object3D(add、remove、attach、世界矩阵缓存、遍历、getWorldPosition 等方法族)、Group、Scene、Clock;BufferAttribute 14 种、BufferGeometry、InstancedBufferGeometry、InterleavedBuffer;B 栏 Usage 与 Type 常量 | 14 到 18 | G-struct 门，D1 私有探针验证 Scene 与 Object3D 接线 |
 | M3 | 相机四种与投影矩阵、视锥;23 个几何生成器各一提交,顶点与索引与 three.js 逐项对;Curve 系、Path、Shape、ShapeUtils(三角剖分) | 20 到 26 | G-math 对几何的顶点哈希 |
 | M4 | GPU 命令包格式(写进 HOST_ABI 与 prd),桥 `host_gpu_submit` 的白名单扩展;渲染列表与排序;视锥剔除;状态机;RenderTarget;B 栏混合、深度、模板、比较、剔除常量 | 12 到 16 | 一个三角形、一个立方体、深度测试、混合像素对照 three.js |
 | M5 | 着色器库(ShaderChunk 对标)与 Basic、Lambert、Phong、Standard、Physical、Toon、Matcap、Normal、Depth、Distance、Points、Line、Sprite、ShadowMaterial、ShaderMaterial、RawShaderMaterial;Texture 与 Mapping、Filter、Wrapping、颜色空间、色调映射 7 种 | 28 到 36 | G-pixel 门逐材质,PBR 对照 4% |
@@ -192,6 +193,10 @@ export uxe_frame(now:i64) i64 version 1;
 | M12 | 软件路径接入同一场景图;D1 到 D4 基于新基座重整;删除页面产品重复的光栅化;对标表最终判定与未达项原因表;99% 复核由独立 `.cx` 重算 | 8 到 12 | 所有者验收,D5 放行 |
 
 合计约 200 到 260 个提交,按每天 12 到 20 个提交估,13 到 20 个工作日量级。此估计偏乐观,每个里程碑末复估一次。
+
+修订(cdx2): M2 基座布局由 gen-object-layouts.cx 生成。固定树用 object3d-struct.cx 对照 4 个节点的世界矩阵、可见性、遍历与世界空间查询。scene-bounds-struct.cx 在浏览器链接独立的场景与查询模块，读回 Box3 的对象边界与 Frustum 的对象裁剪。几何记录由消费模块持有，场景模块交付矩阵标量。D1 仍使用既有产品渲染路径，发布包接入场景模块尚未验证。图像编码和序列化等未验证的方法保留清单的部分状态。
+
+修订(ccapi): D1 出口使用 `d1-scene-probe.cx` 在私有页启动两个 Wasm 模块。产品建立 Scene 及 Object3D 父子树，同一基座完成世界矩阵更新和投影。独立 CX 按既有 D1 相机方程计算开场和三个转向代表状态，逐项读回三维相机空间坐标和二维像素坐标。正式 D1 场景图切换排在 M4 GPU 路径之后。
 
 修订(cdx2): D4 从 M7 恢复时先接场景树与城镇实例批，再接四腿刚体层级和步态，随后接跟拍相机及烟发射生命周期。已有本地 `town-motion` 的行走与跟拍位姿金值，线上还未迁移。M7 先验两节刚体 FK/IK、实例变换和遮挡，M8 再验混合器。烟的发射、排序与回收是另一个门，M7 若只交像素印章，保留在部分。M9 的压缩编解码器和第三方格式逐项估算。未纳入当前清单的插件、扩展及设备能力不能用提交数估计当作已覆盖。
 
