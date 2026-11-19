@@ -3,7 +3,8 @@
 <pre id="gpu">pending</pre>
 <script type="module">
 import {
-  AmbientLight, BufferAttribute, BufferGeometry, Camera, Color, Mesh, MeshLambertMaterial, Scene, WebGLRenderer,
+  AmbientLight, BufferAttribute, BufferGeometry, Camera, Color, HemisphereLight, Mesh, MeshLambertMaterial,
+  Scene, WebGLRenderer,
 } from "./three.module.js";
 import { createGpuSubmit } from "./gpu-host-abi.js";
 
@@ -31,7 +32,9 @@ try {
   const submit = createGpuSubmit(gl, () => exports.memory, () => 1);
   const wasm = await fetch("./probe.wasm").then(response => response.arrayBuffer());
   ({ instance: { exports } } = await WebAssembly.instantiate(wasm, { uxe_gpu_v1: { host_gpu_submit: submit } }));
-  const status = Number(exports.uxe_gpu_probe(location.search === "?ambient-mutate" ? 1n : 0n));
+  const hemisphere = location.search.startsWith("?hemisphere");
+  const mode = (hemisphere ? 2 : 0) + (location.search.endsWith("-mutate") ? 1 : 0);
+  const status = Number(exports.uxe_gpu_probe(BigInt(mode)));
   const reference = context();
   const renderer = new WebGLRenderer({ ...reference, context: reference.gl, ...options });
   renderer.setSize(16, 16, false);
@@ -41,7 +44,10 @@ try {
   geometry.setAttribute("position", new BufferAttribute(new Float32Array([-0.75,-0.75,0,0.75,-0.75,0,0,0.75,0]), 3));
   geometry.computeVertexNormals();
   const material = new MeshLambertMaterial({ color: 0x804008 });
-  const light = new AmbientLight(new Color().setRGB(0.5, 0.25, 0.125), Math.PI);
+  const light = hemisphere
+    ? new HemisphereLight(new Color().setRGB(0.75, 0.5, 0.25), new Color().setRGB(0.25, 0.125, 0), Math.PI)
+    : new AmbientLight(new Color().setRGB(0.5, 0.25, 0.125), Math.PI);
+  if (hemisphere) light.position.set(Math.sqrt(3) * 0.5, 0, 0.5);
   scene.add(new Mesh(geometry, material), light);
   renderer.render(scene, new Camera());
   output.textContent = JSON.stringify([status, ...samples(gl), ...samples(reference.gl)]);
