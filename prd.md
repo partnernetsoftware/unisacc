@@ -102,6 +102,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 #### 2.1 日常（运行、改写、查询）
 
+脚本耗时对照：tools/script-bench.cx 的 prepare NEW_ABS_DIR 生成固定输入，run DIR CASE 实跑各引擎，report DIR 给出七次墙钟和脚本内执行耗时。批次 script-bench 核对计时与失败处理。
+
 | 动作 | 现成用法 | 说明 |
 |---|---|---|
 | 动态执行 C／`.cx` 工具 | `./unisacc.com FILE.cx -- ARGS` | 默认即 `-run`；`.c` 同样适用 |
