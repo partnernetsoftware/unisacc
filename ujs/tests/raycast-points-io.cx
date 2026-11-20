@@ -1,0 +1,49 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","vector-scalar","vector3","ray","raycast-memory","raycaster-state",
+        "raycast-affine","raycast-hit-sort","raycast-points",0};
+    const char *setup=
+        "let state=0;let query=128;let world=256;let scale=384;let pos=512;let indices=640;let out=768;let work=1024;"
+        "let origin=Vector3_set(672,1.0,0.0,0.0);let direction=Vector3_set(704,0.0,0.0,0.0-1.0);"
+        "let ray=Raycaster_init(state,origin,direction,0.0,10.0);"
+        "let threshold=ux_f64_put(state+RaycasterState.pointThreshold,0.4);"
+        "let m0=ux_f64_put(world,2.0);let m5=ux_f64_put(world+40,1.0);let m10=ux_f64_put(world+80,1.0);"
+        "let m15=ux_f64_put(world+120,1.0);let offset=ux_f64_put(world+96,1.0);"
+        "let size=Vector3_set(scale,2.0,1.0,1.0);"
+        "let a=ux_u32_put(query+RayPointsBuffer.positions,pos);let b=ux_u32_put(query+RayPointsBuffer.count,4);"
+        "let c=ux_u32_put(query+RayPointsBuffer.stride,16);let d=ux_u32_put(query+RayPointsBuffer.indices,indices);"
+        "let e=ux_u32_put(query+RayPointsBuffer.indexCount,4);let f=ux_u32_put(query+RayPointsBuffer.indexBytes,1);"
+        "let g=ux_u32_put(query+RayPointsBuffer.drawCount,4);let h=ux_u32_put(query+RayPointsBuffer.world,world);"
+        "let i=ux_u32_put(query+RayPointsBuffer.layerMask,1);let j=ux_u32_put(query+RayPointsBuffer.scale,scale);"
+        "let x0=ux_f32_put(pos,0.125);let z0=ux_f32_put(pos+8,0.0-5.0);"
+        "let x1=ux_f32_put(pos+16,0.25);let z1=ux_f32_put(pos+24,0.0-2.0);"
+        "let x2=ux_f32_put(pos+32,0.75);let z2=ux_f32_put(pos+40,0.0-3.0);"
+        "let x3=ux_f32_put(pos+48,0.0-0.25);let z3=ux_f32_put(pos+56,0.0-2.0);"
+        "let i0=ux_u8_put(indices,3);let i1=ux_u8_put(indices+1,1);let i2=ux_u8_put(indices+2,0);let i3=ux_u8_put(indices+3,2);";
+    #define HIT "let hits=Raycaster_intersectPointsBuffer(state,query,out,4,work,512);"
+    const char *cases[]={
+        HIT "return 0.0+hits;",
+        HIT "return 0.0+ux_u32(out+RayPointsHit.index);",
+        HIT "return 0.0+ux_u32(out+RayPointsHit.size+RayPointsHit.index);",
+        HIT "return ux_f64(out+RayPointsHit.distanceToRay);",
+        HIT "return ux_f64(out+RayPointsHit.x);",
+        HIT "return ux_f64(out+RayPointsHit.size*2+RayPointsHit.distance);",
+        "let start=ux_u32_put(query+RayPointsBuffer.drawStart,2);"
+        HIT "return 0.0+hits;",
+        "let mask=ux_u32_put(query+RayPointsBuffer.layerMask,2);" HIT "return 0.0+hits;",
+        "let near=ux_f64_put(state+RaycasterState.near,3.0);" HIT "return 0.0+hits;",
+        "let noindex=ux_u32_put(query+RayPointsBuffer.indexBytes,0);"
+        HIT "return 0.0+ux_u32(out+RayPointsHit.index);",
+        "let guard=ux_u32_put(out,77);let bad=ux_u8_put(indices+3,9);" HIT "return 0.0+ux_u32(out);",
+        "let bad=ux_u8_put(indices+3,9);" HIT "return 0.0+hits;",
+        "return 0.0+Raycaster_intersectPointsBuffer(state,query,work,4,work,512);",
+    };
+    const double gold[]={3,3,1,0.25,1,5,1,0,1,1,77,-2,-1};
+    return g_wasm_batch("G_RAY Raycaster points buffer","raycast-points",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?0:-1,
+        "let t=ux_f64_put(state+RaycasterState.pointThreshold,0.2);" HIT "return 0.0+hits;");
+}

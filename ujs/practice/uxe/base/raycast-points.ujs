@@ -1,0 +1,119 @@
+struct RayPointsBuffer {
+  positions: u32;
+  count: u32;
+  stride: u32;
+  indices: u32;
+  indexCount: u32;
+  indexBytes: u32;
+  drawStart: u32;
+  drawCount: u32;
+  world: u32;
+  layerMask: u32;
+  scale: u32;
+}
+
+struct RayPointsHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  distanceToRay: f64;
+  index: u32;
+}
+
+native function ray_points_index(indices:i64,width:i64,i:i64) i64 {
+  if(width==0) { return i; }
+  if(width==1) { return ux_u8(indices+i); }
+  if(width==2) { return ux_u16(indices+i*2); }
+  return ux_u32(indices+i*4);
+}
+
+native function ray_points_writable(at:i64,bytes:i64,state:i64,query:i64) i64 {
+  let positions=ux_u32(query+RayPointsBuffer.positions);
+  let count=ux_u32(query+RayPointsBuffer.count);
+  let stride=ux_u32(query+RayPointsBuffer.stride);
+  let indices=ux_u32(query+RayPointsBuffer.indices);
+  let index_count=ux_u32(query+RayPointsBuffer.indexCount);
+  let index_bytes=ux_u32(query+RayPointsBuffer.indexBytes);
+  return !raycaster_overlap(at,bytes,state,RaycasterState.size) &&
+    !raycaster_overlap(at,bytes,query,RayPointsBuffer.size) &&
+    !raycaster_overlap(at,bytes,positions,(count-1)*stride+12) &&
+    !raycaster_overlap(at,bytes,indices,index_count*index_bytes) &&
+    !raycaster_overlap(at,bytes,ux_u32(query+RayPointsBuffer.world),128) &&
+    !raycaster_overlap(at,bytes,ux_u32(query+RayPointsBuffer.scale),24);
+}
+
+native function Raycaster_intersectPointsBuffer(state:i64,query:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(query,RayPointsBuffer.size) ||
+     !raycaster_span(work,space) || capacity<0) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(query+RayPointsBuffer.layerMask))==0) { return 0; }
+  let positions=ux_u32(query+RayPointsBuffer.positions);
+  let count=ux_u32(query+RayPointsBuffer.count);
+  let stride=ux_u32(query+RayPointsBuffer.stride);
+  let indices=ux_u32(query+RayPointsBuffer.indices);
+  let index_count=ux_u32(query+RayPointsBuffer.indexCount);
+  let width=ux_u32(query+RayPointsBuffer.indexBytes);
+  let world=ux_u32(query+RayPointsBuffer.world);
+  let scale=ux_u32(query+RayPointsBuffer.scale);
+  if(count>65536 || index_count>65536 || stride<12 || stride%4!=0 || positions%4!=0 ||
+     (width!=0 && width!=1 && width!=2 && width!=4) || (width!=0 && indices%width!=0) ||
+     indices>6291456-index_count*width || !raycaster_span(world,128) || !raycaster_span(scale,24)) { return 0-1; }
+  if(count==0) { return 0; }
+  if(positions>6291456-((count-1)*stride+12)) { return 0-1; }
+  let start=ux_u32(query+RayPointsBuffer.drawStart);
+  let stop=start+ux_u32(query+RayPointsBuffer.drawCount);
+  let max=count;
+  if(width!=0) { max=index_count; }
+  if(stop>max) { stop=max; }
+  if(stop<=start) { return 0; }
+  let result_bytes=(stop-start)*RayPointsHit.size;
+  if(capacity<stop-start || space<96+result_bytes || !raycaster_span(out,result_bytes) ||
+     raycaster_overlap(out,result_bytes,work,space) ||
+     !ray_points_writable(out,result_bytes,state,query) || !ray_points_writable(work,space,state,query)) { return 0-1; }
+  let near=ux_f64(state+RaycasterState.near);
+  let far=ux_f64(state+RaycasterState.far);
+  let threshold=ux_f64(state+RaycasterState.pointThreshold);
+  let average=(ux_f64(scale)+ux_f64(scale+8)+ux_f64(scale+16))/3.0;
+  if(near<0.0 || near-near!=0.0 || far!=far || far<near || threshold<0.0 ||
+     threshold-threshold!=0.0 || average==0.0 || average-average!=0.0) { return 0-1; }
+  let i=start;
+  while(i<stop) {
+    let index=ray_points_index(indices,width,i);
+    if(index>=count) { return 0-2; }
+    let at=positions+index*stride;
+    let x=ux_f32(at);
+    let y=ux_f32(at+4);
+    let z=ux_f32(at+8);
+    if(x-x!=0.0 || y-y!=0.0 || z-z!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  let local=ray_local_affine(work,state,world);
+  if(local<0) { return 0-1; }
+  let pos=work+48;
+  let closest=work+72;
+  let local_threshold=threshold/average;
+  let squared=local_threshold*local_threshold;
+  let count_hit=0;
+  i=start;
+  while(i<stop) {
+    let index=ray_points_index(indices,width,i);
+    let at=positions+index*stride;
+    let point=Vector3_set(pos,ux_f32(at),ux_f32(at+4),ux_f32(at+8));
+    let distance_sq=Ray_distanceSqToPoint(local,point);
+    if(distance_sq<squared) {
+      let nearest=Ray_closestPointToPoint(closest,local,point);
+      let hit=Vector3_applyMatrix4(nearest,world);
+      let distance=Vector3_distanceTo(hit,state);
+      if(distance>=near && distance<=far) {
+        let row=out+count_hit*RayPointsHit.size;
+        let saved=uxe_copy_record(row,hit,24);
+        let a=ux_f64_put(row+RayPointsHit.distance,distance);
+        let b=ux_f64_put(row+RayPointsHit.distanceToRay,f64_sqrt(distance_sq));
+        let c=ux_u32_put(row+RayPointsHit.index,index);
+        count_hit=count_hit+1;
+      }
+    }
+    i=i+1;
+  }
+  return ray_sort_hits(out,work+96,count_hit,RayPointsHit.size,RayPointsHit.distance);
+}
