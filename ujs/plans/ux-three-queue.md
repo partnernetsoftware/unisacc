@@ -65,7 +65,7 @@
 - CompressedTextureLoader | G-io compressedtextureloader-io.cx：DXT1、DXT3 与 DXT5 单级块长度和发布；完整容器、mip 链及 GPU 上传待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - CubeTextureLoader | G-io cubetextureloader-io.cx：按约定装六面、任一坏面导致全批不发布；其余图像格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - DataTextureLoader | G-io datatextureloader-io.cx：解析方交付 RGBA8 后检查长度与线性采样；其他数据格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
-- ImageLoader | G-io imageloader-io.cx：文件响应到 Wasm PNG RGBA 输出、失败时不发布图像；其他色型、缓存及 JPEG 接线待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
+- ImageLoader | G-io 文件响应到 Wasm PNG 或基线 JPEG 的 RGBA 输出。PNG 其他色型、渐进 JPEG、缓存及通用加载配置待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - TextureLoader | G-io textureloader-io.cx：连续图像到 GPU 纹理描述、默认采样；上传调度与异步资源接线待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - WebGL3DRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照三维纹理第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - WebGLArrayRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照二维纹理数组第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
@@ -190,6 +190,7 @@
 - ~~JPEG 4:4:4 彩色基线解码 | G-io 三分量、末端截断、错采样、失败保持输出 | JPEG 灰度与 IDCT。~~ 9 项通过，红蓝读回替换反例转红。
 - ~~JPEG 4:2:0 与 4:2:2 彩色基线解码 | G-io 跨块色度采样与坏表拒绝 | JPEG 4:4:4 与 IDCT。~~ 10 项通过，跳过色度插值读回的反例由 171 变为 185，4:4:4 的 9 项仍通过。
 - ~~JPEG 基线重启间隔 | G-io 灰度和彩色的预测器重置、错序号转红 | 彩色基线解码。~~ 灰度 10 项、色度采样 13 项、4:4:4 九项通过，错序号替换反例转红。
+- ~~ImageLoader 基线 JPEG 读取 | G-io 文件响应、宽度与步长、坏图保持描述与像素、过期响应拒绝 | 基线 JPEG 与 FileLoader。~~ 13 项通过，步长替换反例转红。
 - JPEG 渐进解码 | G-io 渐进帧、多次扫描、逐次逼近、重启与坏序号 | 彩色基线与重启间隔。
 - JPEG 编码与 ImageUtils 接线 | G-io Canvas 大图分支、PNG/JPEG URI 及有损误差 | JPEG 彩色与 ImageUtils PNG。
 - PNG 调色板、透明色键及隔行 | G-io 色型、透明度、Adam7 与坏文件 | PNG 解码和扫描行。
