@@ -30,7 +30,7 @@ unisacc.com	751a40ac556e4a1d617a15dea3975cb3951edec6387e46fb84de6b41f9435324	842
 
 (3) 标记:写 `ROOT/unisacc.com.candidate.tsv` 一行 `CANDIDATE rev= sha= bytes= version= source= not=PUBLISHED`;不重写本文身份块(受控文档不记未公开产品),不写 release/evidence。公开件正常安装(--write)时删除该标记(CANDIDATE_CLEARED)。
 
-(4) 回退:`install-ape.cx -- ROOT --rollback --write` 有备份索引时恢复最新一份(恢复前核备份 sha 与目录名一致,恢复后核 Root sha),备份中没有的文件(如标记)一并删除;无备份索引时走原 split 时代回退。
+(4) 回退:`install-ape.cx -- ROOT --rollback --write` 恢复最新一份备份:先按备份内 manifest.tsv 核全部文件(unisacc.com、build.json、ape-receipt、sha 记录、标记)的 sha 与字节,并核 unisacc.com 与目录名一致,任一不符具名拒绝;全部先写到临时名并复核,再逐个 rename,被替换的旧文件先移到旁边,中途失败时把已替换的放回;备份中没有的文件(如标记)一并删除;恢复后核 Root sha,再删备份目录(只删备份集内的文件名加 rmdir,失败具名报错且索引保留),最后出索引。索引不存在或为空时拒绝 `no-candidate-backup`(没有候选备份);原 split 时代回退改为显式 `--rollback-split`。淘汰超过 3 份的最旧备份同样检查删除结果,删不掉时拒绝安装并在索引里保留它。
 
 (5) 防误用:`install-ape.cx -- ROOT --release-gate` 有标记 rc 1 `REFUSED root-candidate`;release-exec(含 --dry)遇仓根标记拒绝 `REFUSE RELEASE_EXEC_GATE_ROOT_CANDIDATE`,release-run --pack 遇 ROOT 标记拒绝 `REFUSE RELEASE_PACK_ROOT_CANDIDATE`;chain-ready 第 17 条 `17-root-public` 有标记时记 PASS 加 `WARN root-candidate ... RELEASE_BLOCKED`,只列不拦起链。发布必须以公开件为基线。
 
