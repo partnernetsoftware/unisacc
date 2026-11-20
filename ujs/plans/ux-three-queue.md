@@ -251,7 +251,8 @@
 
 - ~~EffectComposer 开启的 Pass 顺序与双目标计划 | G-struct 实际 r160 调度、交换及最后一步输出 | M4 RenderTarget。~~ 12 项通过，交换读写反例转红。
 - EffectComposer GPU 生命周期 | G-pixel 两目标复用、resize、旁路、遮罩与释放 | 调度计划、M4 RenderTarget。
-- RenderPass | G-pixel 场景清屏与纹理读回 | EffectComposer、M4。
+- ~~RenderPass 读目标清屏 | G-pixel EffectComposer 计划、WebGL2 实际清屏、双目标读回 | EffectComposer、M4。~~ 16 项通过，篡改目标交换绿蓝像素使四项红。
+- RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
 - UnrealBloomPass | G-pixel 阈值、羽化、多级混合 | RenderPass、EffectComposer。
 - OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
 - FXAA | G-pixel 锯齿阶跃、采样方向及对照 | EffectComposer。

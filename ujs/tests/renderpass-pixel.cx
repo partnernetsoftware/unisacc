@@ -1,0 +1,41 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],url[690];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-renderpass-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/renderpass.wasm",dir);
+    int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/renderpass-r160.html?package=%s&wasm=%s&mode=%d",
+        cwd,argv[1],wasm,mutate);
+    const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\nexport uxe_render_pass(mode:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-target.ujs","ujs/practice/uxe/base/effectcomposer.ujs",
+        "ujs/practice/uxe/base/renderpass.ujs","ujs/practice/uxe/test/renderpass-probe.ujs","-o",wasm,0};
+    const double gold[]={0,255,0,255,0,0,255,255,0,255,0,255,0,0,255,255};
+    double actual[16]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("G_PIXEL RenderPass compiler_rc=%d\n",rc); failed++; }
+        mm_free(output); output=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,16,dir);
+    if(!failed) for(int i=0;i<16;i++) if(actual[i]!=gold[i]) {
+        printf("G_PIXEL RenderPass case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed++;
+    mm_free(output);
+    printf("G_PIXEL RenderPass cases=16 failed=%d\n",failed);
+    return failed!=0;
+}

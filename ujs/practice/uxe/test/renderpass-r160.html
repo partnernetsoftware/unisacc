@@ -1,0 +1,47 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { Camera, Color, REVISION, Scene, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+const output=document.querySelector("#r160");
+try{
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const {RenderPass}=await import(`file://${query.get("package")}/examples/jsm/postprocessing/RenderPass.js`);
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=4;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 required");
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1,createGpuTargets(gl));
+  const bytes=await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(bytes,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const status=Number(wasm.uxe_render_pass(BigInt(query.get("mode"))));
+  if(status<0) throw new Error(`GPU submit rejected ${status}`);
+  const read=at=>new Uint8Array(wasm.memory.buffer,2097152+at,4);
+  const renderer=new WebGLRenderer({preserveDrawingBuffer:true});
+  renderer.setSize(4,4);
+  const first=new WebGLRenderTarget(4,4),second=new WebGLRenderTarget(4,4);
+  for(const target of [first,second]){
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(new Color(0x0000ff),1);
+    renderer.clear();
+  }
+  const scene=new Scene();
+  scene.background=new Color(0x00ff00);
+  const pass=new RenderPass(scene,new Camera());
+  pass.render(renderer,second,first);
+  function pixel(target){
+    const data=new Uint8Array(4);
+    renderer.readRenderTargetPixels(target,0,0,1,1,data);
+    return data;
+  }
+  output.textContent=JSON.stringify([...read(4000),...read(4016),...pixel(first),...pixel(second)]);
+  first.dispose();
+  second.dispose();
+  renderer.dispose();
+}catch(error){output.textContent=`error:${error.message}`;}
+</script>

@@ -1,0 +1,23 @@
+// A RenderPass writes the read target without swapping. Pass draws follow
+// this packet prefix and use the framebuffer selected here.
+native function RenderPass_begin(packet:i64,capacity:i64,step:i64,mask:i64,rgba:i64,depth:f64,stencil:i64) i64 {
+  if(step<0 || step%4!=0 || step>6291456-ComposerStep.size ||
+     !gpu_draw_range(step,ComposerStep.size,packet,capacity)) { return 0-1; }
+  let flags=ux_u32(step+ComposerStep.flags);
+  let screen=ux_u32(step+ComposerStep.screen);
+  let target=ux_u32(step+ComposerStep.read);
+  if(flags>7 || u32_and(flags,3)!=1 || screen>1 || target<1 || target>1024) { return 0-1; }
+  if(screen!=0) { target=0; }
+  let clear=u32_and(flags,4)!=0;
+  let reserve=16;
+  if(clear) {
+    if(mask<1 || mask>7 || rgba<0 || rgba>4294967295 || depth!=depth ||
+       depth<0.0 || depth>1.0 || stencil<0 || stencil>255) { return 0-1; }
+    reserve=40;
+  }
+  let room=gpu_packet_slot(packet,capacity,reserve);
+  if(room<0 || (clear && ux_u32(packet+GpuPacket.commands)>=255)) { return 0-1; }
+  let bound=GpuTarget_bind(packet,capacity,target,0);
+  if(!clear) { return bound; }
+  return GpuPacket_clearBuffers(packet,capacity,mask,rgba,depth,stencil);
+}
