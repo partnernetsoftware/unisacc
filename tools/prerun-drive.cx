@@ -1,7 +1,8 @@
 /* tools/prerun-drive.cx -- bounded window-granularity qualification prerun driver and offline replay verifier.
  * Subcommands:
  *   plan   --ids-file FILE --out DIR [--win-size 8..12] [--heavy-file FILE] [--warmup N]
- *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--load-cap N] [--max-retries 2]
+ *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--max-retries 2]
+ *          (--load-cap N is still accepted but ignored with a PRERUN_DEPRECATED line: load gates retired 2026-11-20)
  *   merge  --in-dir DIR --out DIR [--version VER] [--skip-name FILE]
  *   g1-dry --root DIR --strict FILE --expected-fail FILE --expected-unmeasured FILE --out DIR [--version VER]
  *   replay --ids-file FILE --evidence-dir DIR --out DIR [--expected-strict FILE] [--expected-g1dry FILE]
@@ -257,15 +258,6 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     return 0;
 }
 
-static int pd_read_load1_int(void) {
-    unsigned char *b = 0; int64_t n = 0;
-    if (sy_read_file("/proc/loadavg", &b, &n, 256) || !b || n <= 0) return 0;
-    int v = 0;
-    for (int64_t i = 0; i < n && b[i] >= '0' && b[i] <= '9'; i++) v = v * 10 + (b[i] - '0');
-    mm_free(b);
-    return v;
-}
-
 static int pd_state_find(const char *id) {
     for (int i = 0; i < pd_nstates; i++) if (tx_eqz(pd_states[i].id, id)) return i;
     if (pd_nstates >= PD_MAX_IDS) return -1;
@@ -362,8 +354,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             skipped++;
             continue;
         }
-        int load1 = pd_read_load1_int();
-        if (load1 >= load_cap && jobs > 1) jobs = 1;
+        (void)load_cap;   /* load gates retired 2026-11-20: --max-jobs is the fixed bound, load1 never lowers it */
         if (tx_eqz(phase, "prebuild-self")) {
             char cmd[8192], why[256];
             np_result r = {0};
@@ -715,7 +706,7 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
             else if (tx_eqz(argv[i], "--resume")) resume = 1;
             else if (tx_eqz(argv[i], "--max-jobs") && i + 1 < argc) max_j = atoi(argv[++i]);
-            else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) load_cap = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) { load_cap = atoi(argv[++i]); fprintf(stderr, "PRERUN_DEPRECATED\t--load-cap\tignored: load gates retired 2026-11-20, use --max-jobs\n"); }
             else if (tx_eqz(argv[i], "--max-retries") && i + 1 < argc) max_ret = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
             else return pd_refuse("unknown-run-arg");
