@@ -1,0 +1,114 @@
+/* tools/check-codemap.cx -- the shadow code-map must notice every change, update exactly, and select conservatively.
+ *
+ *   sh ./unisacc.com tools/check-codemap.cx [--src CODEMAP_SOURCE]
+ *
+ * Compiles tools/codemap.cx (or --src, used to run hand mutations) once into a fresh /tmp directory and drives it
+ * against a small git fixture repository built there (two .cx units with a use edge, batches/coverage/pins/
+ * lane-inputs/batch-product-inputs tables, a chain template).  Nothing is written inside the repository.
+ * Ends with CHECK_CODEMAP<TAB>failed=N; exit 0 only when N is 0.
+ * Hand mutations used at landing (each turned this check red): status ignoring the sha diff, incremental
+ * skipping rs_update_file, select not widening an unknown path to all=1.
+ *
+ * Cases
+ *   fresh-after-build             build then status: state=fresh, rc 0
+ *   stale-names-modified          edit b.cx: status rc 1 and names "STALE modified b.cx"   (the M5 red/green)
+ *   stale-names-added-deleted     a new untracked file and a deleted file are both named
+ *   incremental-equals-full       build --incremental after edits == a full build into another dir, byte for byte
+ *                                 (files.tsv, edges.tsv, meta)
+ *   table-row-incremental         a changed tests/batches.tsv row: same byte identity, row digest moved
+ *   select-through-use            a.cx is used by b.cx, batch t1 runs b.cx: select a.cx selects batch:t1
+ *   select-declared-prefix        a path under a declared prefix selects that batch
+ *   edge-removal-changes-select   dropping the use edge from the stored edges.tsv makes batch:t1 disappear
+ *   unknown-path-is-all           an unknown path selects all=1
+ *   stale-path-is-all             a modified-but-not-updated path selects all=1 (the store is not trusted for it)
+ *   new-node-kinds                sym-def, batch, cov, pin, lane, declared and phase edges are all present
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.die
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+static int failed;
+static char T[512], BIN[700], FX[700], O[65536];
+static void die(const char *s) { tool_die("check-codemap", s, 0, 2); }
+static void ok(const char *name, int cond, const char *detail) {
+    printf("%s\t%s%s%s\n", cond ? "PASS" : "FAIL", name, cond ? "" : "\t", cond ? "" : detail);
+    if (!cond) failed++;
+}
+/* run SCRIPT under sh with the fixture variables set; output in O; returns rc */
+static int sh(const char *script) {
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "T='%s'; B='%s'; F='%s'; %s", T, BIN, FX, script)) die("script too long");
+    return ckk_sh("check-codemap", full, O, (int)sizeof O);
+}
+static int has(const char *w) { return ckk_has(O, (int)sizeof O, w); }
+
+int main(int argc, char **argv) {
+    const char *src = "tools/codemap.cx";
+    char cmd[2048]; int rc;
+    if (argc == 3 && !strcmp(argv[1], "--src")) src = argv[2];
+    else if (argc != 1) die("usage: check-codemap.cx [--src CODEMAP_SOURCE]");
+    if (ckk_sh("check-codemap", "mktemp -d /tmp/check-codemap.XXXXXX", O, (int)sizeof O)) die("mktemp");
+    O[tx_len(O, sizeof O) - 1] = 0;
+    if (cx_fmt(T, sizeof T, "%s", O) || cx_fmt(BIN, sizeof BIN, "%s/codemap", T) || cx_fmt(FX, sizeof FX, "%s/fx", T)) die("paths");
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com %s -o %s 2>&1", src, BIN)) die("cmd");
+    rc = ckk_sh_t("check-codemap", cmd, O, (int)sizeof O, 55);
+    if (rc) { fprintf(stderr, "%s", O); die("compile codemap"); }
+
+    rc = sh("mkdir -p $F/tests $F/tools/templates $F/build $F/lib && cd $F && git init -q . && "
+            "printf '#pragma unisa module a\\nint a_f(int x) {\\n    return x;\\n}\\n' > lib/a.cx && "
+            "printf '#pragma unisa use a\\nint main(void) {\\n    return a_f(0);\\n}\\n' > lib/b.cx && "
+            "printf 'R\\ta\\tlib\\n' > /dev/null && "
+            "printf 'id\\timplementation\\tsource\\tentry\\nt1\\tIMPLEMENTED\\tlib/b.cx\\tlib/b.cx\\nt2\\tIMPLEMENTED\\tdocs/x.md\\tdocs/x.md\\nt3\\tIMPLEMENTED\\tlib/z.cx\\tlib/z.cx\\n' > tests/batches.tsv && "
+            "printf 'id\\tlayer\\timplementation\\texpected_or_gap\\tsource\\nc1\\tcontract\\tIMPLEMENTED\\tgap\\tlib/a.cx + x\\n' > tests/coverage.tsv && "
+            "printf '# comment\\nkind\\tkey\\tinputs\\tbasis\\nid\\tt3\\tseed/,lib/z\\tb\\n' > tests/batch-product-inputs.tsv && "
+            "printf 'path\\tkind\\ttarget\\tvalue\\towner\\tstatus\\nlib/a.cx#k\\tliteral\\t-\\tv\\to\\tok\\n' > tools/pins.tsv && "
+            "printf '# gen\\n# path\\tlane\\tsource\\nlib/a.cx\\tA\\tmodel-tree\\n' > build/lane-inputs.tsv && "
+            "printf 'tmpl\\n' > tools/templates/chain.tmpl && printf 'z\\n' > lib/z.cx && mkdir -p docs && printf 'x\\n' > docs/x.md && "
+            "git add -A && git -c user.email=f@f -c user.name=f commit -qm fx && echo FIXTURE_OK");
+    if (rc || !has("FIXTURE_OK")) { fprintf(stderr, "%s", O); die("fixture"); }
+
+    sh("$B build --root $F --dir $T/s1; echo BRC=$?; $B status --root $F --dir $T/s1; echo SRC=$?");
+    ok("fresh-after-build", has("BRC=0") && has("state=fresh") && has("SRC=0"), O);
+
+    sh("cut -f1 $T/s1/edges.tsv | sort -u | tr '\\n' ' '; echo");
+    ok("new-node-kinds", has("sym-def") && has("batch ") && has("cov ") && has("pin ") && has("lane ") && has("declared ") &&
+       has("phase ") && has("use "), O);
+
+    sh("$B select --root $F --dir $T/s1 lib/a.cx");
+    ok("select-through-use", has("SELECT\tbatch:t1\n") && has("all=0") && !has("batch:t2"), O);
+    sh("$B select --root $F --dir $T/s1 lib/z.cx");
+    ok("select-declared-prefix", has("SELECT\tbatch:t3\n") && has("all=0"), O);
+    sh("$B select --root $F --dir $T/s1 no/such.cx");
+    ok("unknown-path-is-all", has("UNKNOWN\tno/such.cx") && has("all=1"), O);
+
+    /* mutation fixture: the stored graph minus the one use edge b.cx -> a.cx */
+    sh("cp -r $T/s1 $T/s1m && grep -v '^use\tlib/b.cx\tlib/a.cx' $T/s1/edges.tsv > $T/s1m/edges.tsv; "
+       "$B select --root $F --dir $T/s1m lib/a.cx");
+    ok("edge-removal-changes-select", !has("batch:t1") && has("CODEMAP_SELECT"), O);
+
+    sh("printf '#pragma unisa use a\\nint main(void) {\\n    return a_f(1) + 1;\\n}\\nint extra(void) {\\n    return 2;\\n}\\n' > $F/lib/b.cx; "
+       "$B status --root $F --dir $T/s1; echo RC=$?");
+    ok("stale-names-modified", has("STALE\tmodified\tlib/b.cx\n") && has("state=stale") && has("RC=1"), O);
+    sh("$B select --root $F --dir $T/s1 lib/b.cx");
+    ok("stale-path-is-all", has("UNKNOWN\tlib/b.cx") && has("all=1"), O);
+
+    sh("rm $F/docs/x.md && printf 'new\\n' > $F/docs/new.md && $B status --root $F --dir $T/s1; echo RC=$?");
+    ok("stale-names-added-deleted", has("STALE\tadded\tdocs/new.md\n") && has("STALE\tdeleted\tdocs/x.md\n") && has("RC=1"), O);
+
+    sh("$B build --incremental --root $F --dir $T/s1 && $B build --root $F --dir $T/s2 && "
+       "cmp $T/s1/edges.tsv $T/s2/edges.tsv && cmp $T/s1/files.tsv $T/s2/files.tsv && cmp $T/s1/meta $T/s2/meta && echo SAME; "
+       "$B status --root $F --dir $T/s1");
+    ok("incremental-equals-full", has("mode=incremental") && has("updated=3") && has("SAME") && has("state=fresh"), O);
+
+    sh("grep '^batch' $T/s1/edges.tsv | grep t2 > $T/before; "
+       "printf 'id\\timplementation\\tsource\\tentry\\nt1\\tIMPLEMENTED\\tlib/b.cx\\tlib/b.cx\\nt2\\tIMPLEMENTED\\tdocs/new.md\\tdocs/new.md\\nt3\\tIMPLEMENTED\\tlib/z.cx\\tlib/z.cx\\n' > $F/tests/batches.tsv && "
+       "$B build --incremental --root $F --dir $T/s1 && rm -rf $T/s2 && $B build --root $F --dir $T/s2 && "
+       "cmp $T/s1/edges.tsv $T/s2/edges.tsv && cmp $T/s1/files.tsv $T/s2/files.tsv && echo SAME; "
+       "grep '^batch' $T/s1/edges.tsv | grep t2 | cmp -s - $T/before || echo MOVED");
+    ok("table-row-incremental", has("updated=1") && has("SAME") && has("MOVED"), O);
+
+    sh("rm -rf $T");
+    printf("CHECK_CODEMAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
