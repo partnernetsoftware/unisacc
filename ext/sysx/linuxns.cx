@@ -408,6 +408,15 @@ int sy_seccomp_filter(void) {
     }
 }
 
+/* Map a raw seccomp(SECCOMP_SET_MODE_FILTER) kernel return to the "0 or -errno" contract:
+   0 -> 0; -errno (-4095..-1) -> unchanged; positive (TSYNC: TID of the thread that failed to
+   synchronize) -> -ESRCH; anything below -4095 -> -EINVAL.  Pure function, all targets. */
+int sy_seccomp_kret(long kret) {
+    if (kret > 0) return -ESRCH; /* TSYNC: TID of a thread that failed to synchronize */
+    if (kret < -4095) return -EINVAL;
+    return (int)kret;
+}
+
 /* seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog): install a default-deny filter.
    Layout (fixed 20-insn prologue, then 2 insns per entry, then RET EPERM):
      foreign AUDIT_ARCH -> KILL_PROCESS; x32 bit (0x40000000) in nr -> EPERM; clone3 -> ENOSYS;
@@ -419,7 +428,21 @@ int sy_seccomp_filter(void) {
    SY_SECCOMP_FLAG_TSYNC (passed as SECCOMP_FILTER_FLAG_TSYNC; otherwise only the calling thread).
    Refusals: -EINVAL for a null list, ALLOW_CNT outside 1..310, an entry outside 0..4095 or unknown
    FLAGS bits; -ENOSPC when the program would exceed the 640-insn buffer (ALLOW_CNT 310 needs 641);
-   -ENOSYS on non-Linux targets; -EACCES without CAP_SYS_ADMIN or prior sy_no_new_privs(); else -errno. */
+   -ENOSYS on non-Linux targets; -EACCES without CAP_SYS_ADMIN or prior sy_no_new_privs(); else -errno.
+   With TSYNC the kernel reports a sibling thread that could not be synchronized by returning that
+   thread's TID (a positive value); this is mapped to -ESRCH via sy_seccomp_kret(), so the result is
+   always 0 or -errno and no filter was installed on any thread in that case.
+   Argument validation runs before the target check: on non-Linux targets bad arguments yield
+   -EINVAL and valid arguments yield -ENOSYS (via lns_unavail()).
+   Contract notes (agy-cage contract, deliberate):
+     - clone without namespace flags and ioctl other than TIOCSTI/TIOCLINUX are ALLOWED whether or
+       not clone/ioctl appear in ALLOW_NRS; the guards only add refusals, they never require listing.
+     - The x32 guard is defense in depth only: ALLOW_NRS entries are limited to 0..4095, so an
+       x32-tagged nr can never match the allow scan and would reach the final EPERM anyway.
+     - High-risk syscalls (unshare, setns, ptrace, process_vm_*, openat2, io_uring_*, userfaultfd,
+       bpf, perf_event_open, keyctl, memfd_create, execveat, personality, kcmp, pidfd_getfd,
+       open_by_handle_at, the new mount API, other tty ioctls) are NOT guarded here: excluding them
+       is the caller's generation-side responsibility; this entry point does not backstop them. */
 int sy_seccomp_allowlist(const int *allow_nrs, int allow_cnt, int flags) {
     const LnsTarget *t = lns_target();
     LnsBpfInsn f[640];
@@ -474,6 +497,6 @@ int sy_seccomp_allowlist(const int *allow_nrs, int allow_cnt, int flags) {
         struct { unsigned short len; const LnsBpfInsn *filter; } prog;
         prog.len = (unsigned short)n;
         prog.filter = f;
-        return (int)lns_sys(t->seccomp, 1L /* SECCOMP_SET_MODE_FILTER */, kflags, (long)&prog, 0, 0);
+        return sy_seccomp_kret(lns_sys(t->seccomp, 1L /* SECCOMP_SET_MODE_FILTER */, kflags, (long)&prog, 0, 0));
     }
 }

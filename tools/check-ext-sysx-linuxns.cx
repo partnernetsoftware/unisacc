@@ -3,6 +3,9 @@
  * unprivileged user-namespace children, argument/OOB/unprivileged refusals, sy_seccomp_allowlist
  * installed in forked children (TSYNC and adversarial 309-entry lists, checked by raw x86_64 syscalls:
  * allow, deny EPERM, clone3 ENOSYS, NS clone EPERM, TIOCSTI/TIOCLINUX EPERM, x32 EPERM), the
+ * per-bit clone namespace guard inside a user namespace holding CAP_SYS_ADMIN (control: kernel allows
+ * each bit; filtered: EPERM), sy_seccomp_kret TSYNC mapping (unit only, no real multi-thread run),
+ * source-level non-Linux -ENOSYS assertion (foreign targets not run),
  * sy_seccomp_filter denylist compat oracle, and win/x86_64 +
  * osx/x86_64 cross-target compilation.  Last line failed=N. */
 #pragma unisa use sys.env
@@ -254,6 +257,103 @@ static void lns_al_child_ck(const LnsAlCfg *cfg, const char *tag) {
     }
 }
 
+/* Per-bit clone namespace guard, discriminating: inside a fresh user namespace the child is root with
+   CAP_SYS_ADMIN, so the kernel itself ALLOWS clone(<ns bit>) (control phase proves it, before the
+   filter).  After sy_seccomp_allowlist the same clone must be EPERM; if a bit were dropped from
+   SY_CLONE_NS_MASK the filtered clone would succeed and the check turns red. */
+static const struct { int bit; const char *name; } lns_ns_bits[] = {
+    { SY_CLONE_NEWTIME, "newtime" }, { SY_CLONE_NEWNS, "newns" }, { SY_CLONE_NEWCGROUP, "newcgroup" },
+    { SY_CLONE_NEWUTS, "newuts" }, { SY_CLONE_NEWIPC, "newipc" }, { SY_CLONE_NEWUSER, "newuser" },
+    { SY_CLONE_NEWPID, "newpid" }, { SY_CLONE_NEWNET, "newnet" }
+};
+static int lns_ns_nbits(void) { return (int)(sizeof lns_ns_bits / sizeof lns_ns_bits[0]); }
+
+/* raw clone(flags|SIGCHLD), child exits at once; returns 0 if the clone succeeded and was reaped,
+   else the negative clone result (or -1000 when the reap failed). */
+static long lns_clone_try(long flags) {
+    long r = lns_raw(56 /* clone */, flags | 17 /* SIGCHLD */, 0, 0);
+    int st[1];
+    if (r == 0) { (void)lns_raw(231 /* exit_group */, 0, 0, 0); return 0; }
+    if (r < 0) return r;
+    st[0] = 0;
+    if (__syscall6(61 /* wait4 */, r, (long)st, 0x40000000L /* __WALL */, 0, 0) != r) return -1000;
+    return 0;
+}
+
+static int lns_child_al_userns_ns(void *ud) {
+    int uid = sy_uid(), gid = 0, i;
+    char line[96];
+    long r;
+    (void)ud;
+    if (!lns_is_x86_64()) { lns_msg("FAIL:ns_not_x86_64\n"); return 1; }
+    if (lns_read_gid(&gid) != 0) { lns_msg("FAIL:ns_read_gid\n"); return 1; }
+    if (sy_unshare(SY_CLONE_NEWUSER) != 0 || lns_setup_userns(uid, gid) != 0) { lns_msg("FAIL:ns_userns\n"); return 1; }
+    for (i = 0; i < lns_ns_nbits(); i++) {
+        r = lns_clone_try(lns_ns_bits[i].bit);
+        if (cx_fmt(line, sizeof line, "%s:ctl_%s\n", r == 0 ? "OK" : "FAIL", lns_ns_bits[i].name)) return 1;
+        lns_msg(line);
+    }
+    if (sy_no_new_privs() != 0) { lns_msg("FAIL:ns_nnp\n"); return 1; }
+    if (sy_seccomp_allowlist(lns_al_base, (int)(sizeof lns_al_base / sizeof lns_al_base[0]), 0) != 0) {
+        lns_msg("FAIL:ns_install\n"); return 1;
+    }
+    for (i = 0; i < lns_ns_nbits(); i++) {
+        r = lns_clone_try(lns_ns_bits[i].bit);
+        if (cx_fmt(line, sizeof line, "%s:flt_%s\n", r == -EPERM ? "OK" : "FAIL", lns_ns_bits[i].name)) return 1;
+        lns_msg(line);
+    }
+    return 0;
+}
+
+static void lns_al_userns_ck(void) {
+    char out[8192], name[128], mark[64];
+    int rc = -1, n, i;
+    n = lns_run_child(lns_child_al_userns_ns, 0, out, (int)sizeof out, &rc);
+    for (i = 0; i < lns_ns_nbits(); i++) {
+        int ok = !cx_fmt(name, sizeof name, "allowlist-userns-ctl-%s-kernel-allows", lns_ns_bits[i].name)
+                 && !cx_fmt(mark, sizeof mark, "OK:ctl_%s\n", lns_ns_bits[i].name);
+        lns_ck(ok && n > 0 && rc == 0 && lns_has_line(out, n, mark), name);
+        ok = !cx_fmt(name, sizeof name, "allowlist-userns-flt-%s-eperm", lns_ns_bits[i].name)
+             && !cx_fmt(mark, sizeof mark, "OK:flt_%s\n", lns_ns_bits[i].name);
+        lns_ck(ok && n > 0 && rc == 0 && lns_has_line(out, n, mark), name);
+    }
+}
+
+/* TSYNC failure mapping, unit level only: real multi-thread TSYNC failure is NOT exercised (cx has no
+   thread primitive here); sy_seccomp_kret is the exact mapping sy_seccomp_allowlist applies to the
+   raw kernel return. */
+static void lns_al_kret(void) {
+    lns_ck(sy_seccomp_kret(0) == 0, "kret-zero");
+    lns_ck(sy_seccomp_kret(1) == -ESRCH && sy_seccomp_kret(12345) == -ESRCH
+           && sy_seccomp_kret(0x7fffffffL) == -ESRCH, "kret-positive-tid-esrch");
+    lns_ck(sy_seccomp_kret(-EACCES) == -EACCES && sy_seccomp_kret(-EINVAL) == -EINVAL
+           && sy_seccomp_kret(-4095) == -4095, "kret-negative-errno-passthrough");
+    lns_ck(sy_seccomp_kret(-4096) == -EINVAL, "kret-out-of-errno-range-einval");
+}
+
+/* Non-Linux degradation, SOURCE LEVEL ONLY (foreign targets are compiled, not run): the allowlist
+   body must refuse via lns_unavail() when no Linux target matches, and lns_unavail must return
+   -ENOSYS; the installing syscall result must pass through sy_seccomp_kret. */
+static void lns_al_source(void) {
+    static char src[65536];
+    long n, a, b, u, ue;
+    int fd = sy_open_read("ext/sysx/linuxns.cx");
+    if (fd < 0) { lns_ck(0, "allowlist-nonlinux-enosys-source"); lns_ck(0, "allowlist-kret-applied-source"); return; }
+    n = sy_read(fd, src, (long)sizeof src - 1);
+    sy_close(fd);
+    if (n < 0) n = 0;
+    src[n] = 0;
+    a = tx_find(src, n, "int sy_seccomp_allowlist(", 25);
+    b = a < 0 ? -1 : tx_find(src + a, n - a, "\n}\n", 3);
+    u = tx_find(src, n, "static int lns_unavail(void) {", 30);
+    ue = u < 0 ? -1 : tx_find(src + u, n - u, "\n}\n", 3);
+    lns_ck(a >= 0 && b > 0 && u >= 0 && ue > 0
+           && tx_find(src + a, b, "if (!t) return lns_unavail();", 29) >= 0
+           && tx_find(src + u, ue, "return -ENOSYS;", 15) >= 0, "allowlist-nonlinux-enosys-source");
+    lns_ck(a >= 0 && b > 0 && tx_find(src + a, b, "return sy_seccomp_kret(lns_sys(t->seccomp,", 42) >= 0,
+           "allowlist-kret-applied-source");
+}
+
 static void lns_al_args(void) {
     int big[311], one[1], i;
     for (i = 0; i < 311; i++) big[i] = 39;
@@ -430,6 +530,9 @@ int main(void) {
         lns_al_child_ck(&al_tsync, "tsync");
         lns_al_child_ck(&al_adv, "adversarial309");
     }
+    lns_al_userns_ck();
+    lns_al_kret();
+    lns_al_source();
 
     n = lns_run_child(lns_child_ns_mount_pivot, td, out, (int)sizeof out, &rc);
     lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:unshare\n"), "child-unshare");
