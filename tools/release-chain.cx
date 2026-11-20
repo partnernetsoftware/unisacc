@@ -9,13 +9,24 @@
  *   2 stage-a      release-flow stage-a --inputs F --prep STATE/prep --out STATE/stage [--decisions D]
  *                  (the stage carries ratchets.txt, evidence-rows.tsv and rollback.txt from prep;
  *                  release-flow scrubs home paths from every evidence file)
- *   3 stage-commit operator commit of STATE/stage into the checkout (never done by this tool):
+ *   3 stage-commit operator commit and push of STATE/stage into origin/main (never done by this tool):
  *                  verified every run: release/candidate.tsv, release/evidence/V/ratchets.txt and
- *                  evidence-rows.tsv in HEAD must equal the stage bytes
+ *                  evidence-rows.tsv in HEAD must equal the stage bytes, and when refs/remotes/origin/main
+ *                  exists, HEAD must be an ancestor of origin/main (X_PUSHED)
  *   4 stage-dry    release-exec --execute release/candidate.tsv --layout L --strict S --dry on the
  *                  committed tree (the freeze-time dry run does not count)
  *   5 execute      release-exec --execute ... is printed, never run here (it polls CI up to 25 min):
  *                  start it with devsvc x --bg; release-exec's own steps resume with --from-step.
+ *                  On failed CI redo: clear stale ci_run_id, rename ci-<id>.* to ci-failed-<id>.*,
+ *                  delete stale draft release, resolve X_INDEX_CONFLICT before re-running execute.
+ *   6 post-publish printed only (never auto-run): version-metrics-gen --write, day-metrics --write,
+ *                  install verified APE to local unisacc.com (verify sha256), update prd_mempalace.md.
+ * Pre-checks:
+ *   - Unregistered UNISACC_* env vars: warned in plan, refused (rc 1) in run before step 1.
+ *   - UNISACC_IDENT_HELPER: warned in plan when inputs lacks pack= (required before release-run --pack).
+ *   - warm= receipt: warned in plan when absent (running pack+warm together inside prep risks 55 s timeout).
+ *   - expected-fail counts: checks carrying known failures emit a <NAME>_COUNT summary line (e.g.
+ *     ENV_SEMANTICS_COUNT) matching release/evidence/V/expected-fail.tsv pass/fail counts.
  * State: STATE/NAME.done holds the receipt of a finished step; steps below --from that are done
  * are skipped, step 3 is re-verified every run. A failed step prints CHAIN FAIL N NAME rc=R and a
  * NEXT line with the resume command (release-chain run ... --from N).
@@ -91,18 +102,72 @@ static int same_in_head(const char *rel) {
     int same = s && n == r.outn && !memcmp(s, r.out, n);
     free(s); np_free(&r); return same;
 }
+extern char **environ;
+
+static int allowed_unisacc_env(const char *k, size_t kl) {
+    static const char *ok[] = {
+        "UNISACC_IDENT_HELPER", "UNISACC_CACHE_DIR", "UNISACC_PREP_CACHE",
+        "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR", "UNISACC_BATCH_TIMES",
+        "UNISACC_COMMIT_OWN_RUN", 0
+    };
+    for (int i = 0; ok[i]; i++) if (strlen(ok[i]) == kl && !memcmp(k, ok[i], kl)) return 1;
+    return 0;
+}
+static void check_preconditions(void) {
+    if (environ) {
+        for (char **ep = environ; *ep; ep++) {
+            if (!strncmp(*ep, "UNISACC_", 8)) {
+                const char *eq = strchr(*ep, '=');
+                size_t kl = eq ? (size_t)(eq - *ep) : strlen(*ep);
+                if (!allowed_unisacc_env(*ep, kl)) {
+                    if (planning) sy_printf("CHAIN\tWARN\tenv\tunregistered UNISACC_* var=%.*s (unset before chain/release)\n", (int)kl, *ep);
+                    else {
+                        sy_printf("CHAIN\tFAIL\t0\tenv-check\tunregistered UNISACC_* var=%.*s (unset before chain/release)\n", (int)kl, *ep);
+                        exit(1);
+                    }
+                }
+            }
+        }
+    }
+    if (planning) {
+        char *pk = input_value("pack");
+        char *wm = input_value("warm");
+        const char *ih = sy_env("UNISACC_IDENT_HELPER");
+        if (!pk && (!ih || !ih[0]))
+            sy_printf("CHAIN\tWARN\tident-helper\tUNISACC_IDENT_HELPER unset (required before pack)\n");
+        if (!wm)
+            sy_printf("CHAIN\tWARN\twarm\tinputs lacks warm= receipt; prep will run pack+warm in one 55s step (run release-exec --warm separately first)\n");
+        free(pk); free(wm);
+    }
+}
+static int head_pushed_to_origin_main(void) {
+    char *chk[] = {"git", "rev-parse", "--verify", "-q", "refs/remotes/origin/main", 0};
+    np_result r = {0}; char why[128];
+    if (np_run(chk, cwd, 0, 15, &r, why, sizeof why) || r.rc) { np_free(&r); return 1; } /* offline repo without origin/main */
+    np_free(&r);
+    char *anc[] = {"git", "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main", 0};
+    int bad = np_run(anc, cwd, 0, 15, &r, why, sizeof why);
+    int ok = (!bad && r.rc == 0);
+    np_free(&r);
+    return ok;
+}
 static void stage_commit(void) {
     char a[300], b[300];
     if (cx_fmt(a, sizeof a, "release/evidence/%s/ratchets.txt", version) || cx_fmt(b, sizeof b, "release/evidence/%s/evidence-rows.tsv", version)) usage("version");
     const char *rels[] = {"release/candidate.tsv", a, b, 0};
-    sy_printf("CHAIN\tCMD\t3\tstage-commit\tcopy %s/stage/release into the checkout and commit it (devsvc git commit --whole ...)\n", state);
+    sy_printf("CHAIN\tCMD\t3\tstage-commit\tcopy %s/stage/release into the checkout, commit and push to origin/main (devsvc git commit --whole ... --push)\n", state);
     if (planning) return;
     for (int i = 0; rels[i]; i++) if (!same_in_head(rels[i])) {
         sy_printf("CHAIN\tFAIL\t3\tstage-commit\tHEAD lacks the stage bytes of %s\n", rels[i]);
-        next_line(3, "commit the stage directory");
+        next_line(3, "commit and push the stage directory");
         exit(1);
     }
-    sy_printf("CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv\n");
+    if (!head_pushed_to_origin_main()) {
+        sy_printf("CHAIN\tFAIL\t3\tstage-commit\tHEAD not pushed to origin/main (X_PUSHED)\n");
+        next_line(3, "push stage-a commit to origin/main");
+        exit(1);
+    }
+    sy_printf("CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv (X_PUSHED ok)\n");
 }
 int main(int argc, char **argv) {
     if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan");
@@ -129,10 +194,12 @@ int main(int argc, char **argv) {
     if (decisions) { s1[9] = "--decisions"; s1[10] = (char *)decisions; s2[11] = "--decisions"; s2[12] = (char *)decisions; }
     char *s4[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "dry"), "--dry", 0};
     char *s5[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "exec"), 0};
+    check_preconditions();
     step(1, s1); step(2, s2); stage_commit(); step(4, s4);
     /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
     show(5, s5);
     sy_printf("CHAIN\tSTOP\t5\texecute\tstart it as a long job: devsvc x --bg --par 1 -- <CMD above>, then devsvc wait; resume inside with --from-step\n");
+    sy_printf("CHAIN\tCMD\t6\tpost-publish\tsh ./unisacc.com tools/version-metrics-gen.cx -- --write && sh ./unisacc.com tools/day-metrics.cx -- --write && install verified APE to unisacc.com (verify sha256) && update prd_mempalace.md\n");
     sy_printf("CHAIN\tRESULT\t%s\tversion=%s\n", planning ? "PLAN" : "READY_TO_EXECUTE", version);
     return 0;
 }
