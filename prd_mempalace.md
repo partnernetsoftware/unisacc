@@ -71,6 +71,8 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+- 编排最小战略层(项目所有者 2026-11-20 要求,编排者决定):决定:北极星表 build/north-star.tsv 与投资组合表 build/portfolio.tsv 落库(在途上限 7 条,新项进入须先移出一项),由编排者在整链终态、公开完成、每天 21:00 更新;复盘只按这三类时点触发,每次至多一停一启一调,不做每 2 小时复盘;督导由 15 分钟定时轮询改为事件驱动(有上限 Monitor 只在停下或终态唤醒,例行巡检 60 分钟)。依据:~/.claude/jobs/2798e440/tmp/pipeline-fastest-path.md 第 3A 节(协调者 115 分钟内 81% 空等、42% 工具调用为盯链、同日在途 30 余项)。证据入口:plans/v0.0.87.md"编排运行模型(2026-11-20)"。回滚:不满意即回到固定轮询督导,删两张表与该节。
+
 - 绝对家目录路径(隐私,主调度 2026-11-20):决定:证据入口与文档一律写 ~/ 或仓内相对路径,不写 /home/<用户名>/、/Users/<用户名>/;新增棘轮 no-home-path(第 16 项,基线 build/no-home-path-baseline.tsv 只降不升)与 tools/no-home-path.cx --staged(暂存新增行守卫,precommit 接入补丁待复核),改写用 tools/scrub-home-paths.cx --write。历史证据保留不改:release/evidence/、research/、archive/(INDEX 记哈希或为历史原件)、apps/csih 与 ujs(他车道)、tests/stream-e1/e2-domain-matrix.tsv(material 身份依赖)、tests/real-inputs.tsv(实参路径)、ape-receipt.txt 与 tools/check-preflight.cx 加 build/preflight-rules.tsv 与 tools/libneed-material.cx 与 tests/check-guard-edit.cx(工具生成或断言字面,后续在生成处规范化)。已公开不可撤回:v0.0.85 树内 227 个文件含 /home/ 路径(非 archive 121 个),其中用户名 devali 的家目录前缀 966 处,另有 CI 机 runner 与 box 的家目录前缀;只泄露系统用户名 devali,无凭据,不重写历史。风险:低(用户名可关联本机账户名,无访问能力)。回滚:删 ratchets.cx 的 no-home-path 项并还原 check-ratchets 计数即可。
 
 - release/decision.txt 发布证据链缺口(清洁线 2026-11-20 查实):release-exec 第 7 步用停在 0.0.74 的陈旧 evidence.tsv 与 decision.txt 比对恒等;不证明裁决对应当前版本。决定:下次发布前必须改为从当次证据重算并写出 decision.txt;未修不得公开。证据入口:清洁线报告与本文件"待核(清洁 2026-11-20)"条;排期 plans/v0.0.87.md S6 子项 S6a。回滚:撤本行与 S6a。
