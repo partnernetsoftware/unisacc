@@ -124,7 +124,7 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 外部根与工作树:`task open` 可加 `--write-ext ABSDIR`(可多次;须已存在的绝对目录,拒绝 / 与 HOME 本身及上两级;目录内文件按内容 sha 做快照,done 时比对,此时 `--write` 可省)和 `--cwd DIR`(验收命令在该目录执行;须在仓内 `.claude/worktrees/` 下或某个 `--write-ext` 目录下,缺省仍是主检出根)。
 - `--write` 里的前缀写成 `.claude/worktrees/v0.0.NN` 时,status 与 done 会另对该工作树做 `git -C` 脏文件快照,路径以 `.claude/worktrees/v0.0.NN/` 开头;验收放在工作树里的检查用 `--cwd 该工作树绝对路径`。检查 `tools/check-devtask.cx` 的 ext-、worktree-、cwd- 开头用例。
 - 新建文档:`devsvc doc create FILE 标题`(FILE 须匹配配置表 doc 行,已存在 rc 1 拒绝,内容为一行一级标题,内部取锁 doc:FILE);其后再用 doc append/set。服务空闲巡检另会回收自己的 /tmp/devsvc-flow-* 运行目录(超 2 小时且无进程引用,每次至多 200 个,记 flowdir.gc 事件)。dcheck 遇批次登记预算超过 55 的,在该批 CHECK 行前打 DCHECK_WARN budget-above-node-cap。
-- git commit 参数约定(2026-11-16):`devsvc git commit -m 说明 (--whole 路径... | --keyed 路径 KEY | --registered ID...) [--push] [--bg]` 严格解析。必须有 -m 与至少一个路径来源;出现未知选项或 --help 一律打印用法、rc 2、不提交(HEAD 与索引不变)。说明首行不得为空,不得以 Co-Authored-By: 或 Signed-off-by: 开头,违反 rc 2 并提示"说明首行必须是正文,署名放最后空行后"。检查 check-devsvc 的 gitargs- 用例(夹具仓,环境变量 DEVSVC_GIT_PARSE_ONLY 只过解析)。
+- git commit 参数约定(2026-11-16):`devsvc git commit -m 说明 (--whole 路径... | --keyed 路径 KEY | --registered ID...) [--push] [--bg]` 严格解析。必须有 -m 与至少一个路径来源;出现未知选项或 --help 一律打印用法、rc 2、不提交(HEAD 与索引不变)。说明先就地剔除署名行(2026-11-20 所有者明令:Co-Authored-By:、Signed-off-by: 行与行首为 Generated with [Claude Code] 的工具归属行,整行大小写不敏感,连同前面的空行;tools/cxlib/trailer.cx,commit-own、dvgitx、git merge -m 同用),剔除后首行不得为空,否则 rc 2 empty message;DEVSVC_GIT_PARSE_ONLY 时打 `GIT_ARGS_OK<TAB>stripped=N`。直接 git commit 由 commit-msg 钩子同样剔除(`sh ./unisacc.com tools/commit-msg.cx -- --install` 写 .git/hooks/commit-msg,`--check-installed` 核)。检查 check-devsvc 的 gitargs- 用例(夹具仓,只过解析)、check-trailer(单元)、check-commit-msg(私有 git 目录实提交)。
 - task open 路径约定(2026-11-16):`--cwd` 可写绝对路径或相对仓根的路径(如 .claude/worktrees/v0.0.68),须落在 .claude/worktrees/ 或某个 --write-ext 目录下,否则 rc 2 并给示例;`--write` 写仓内相对前缀,也接受以仓根为前缀的绝对路径(内部转为相对,登记与输出均为相对),仓外绝对路径 rc 2。检查 check-devtask 的 write-abs- 用例。
 - dcheck 选批与跑批分两作业:先 `dcheck --select-only --out /tmp/m.tsv [路径...] --bg` 选批(devsvc wait 得 DCHECK_SELECT 与 DCHECK_MANIFEST,清单落盘含每批预算),再 `dcheck --from /tmp/m.tsv --par 8 --bg` 只跑批,每批各自 55 s 节点,不共用选批的整窗;不带这两个选项仍一次完成。清单损坏(头、字段、id 字符、重复、计数)rc 2。
 
@@ -152,7 +152,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 6 已知限制与下一单
 
-重写(2026-11-20,依据第"2026-11-20 演进评审"节与 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
+重写(2026-11-20,依据第"2026-11-20 演进评审"节与 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
 
 已做:
 
@@ -261,7 +261,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 2026-11-20 演进评审
 
-依据:fable 报告 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
+依据:fable 报告 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
 
 ### 事实修正
 
@@ -288,13 +288,14 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 ### 节拍与负责人
 
 - 工具线只在公开后到下次起链前落库,每版最多两项。
-- 负责人:agyneon 实现、cc 集成与真实提交验收、opus 做夹具、cdx(额度紧)只提缺口;devsvc 在 main 上开发(CLAUDE.md 例外规则)不变。
+- 负责人:agyneon 实现、cc 集成与真实提交验收、opus 做夹具、cdx(额度紧)只提缺口(过时,2026-11-20 更正:cdx 额度不受限(项目所有者 2026-11-20 明确),承担 0.0.86 产品线 D2 c-negative 余项与后续单元实现);devsvc 在 main 上开发(CLAUDE.md 例外规则)不变。
 - 版本分配:0.0.86 拒绝回执与事件(0.5)加自有垃圾清理(0.5,379 个空实例目录与 50 个 commit-derive 残留);0.0.87 提交自愈(2)加合并收尾 git merge --continue(0.5);0.0.88 持久作业与 status(2)加登记表由清单生成(1);合计约 6.5 单位,不进候选键,与 0.0.86 的 W1 W2 M2 无文件相交。
 - 日常投放做成一条带 INSTALLED 回执的 flow,不建标签不走 CI,最后一步预热 prebuild-self 与 tlib kit。
 
 ### 收缩清单
 
 - 删 react 冻结(影子从未满足 24 小时条件,running=0)与 rel 常驻图(端到端实测无收益)。
+  - 补注(主调度 2026-11-20):react 冻结改为按 plans/v0.0.86.md T3(推测链真起加并行确认)重做准入与采纳键后复用,不是删除。原因是失效四因:触发键按内容而采纳键按提交;准入 load1 小于 6 而本机常 9 到 15;放行要求影子满 24 小时而常驻上限 7200 秒无人重拉;正规链不经 devsvc 起,事件流无链事件。见 prd_mempalace.md 决定"整链预制路线"。
 - 合并队列、S2 第二期单元二三、S7、S0 推测不排。
 - 两个检查夹具缓存(check-devsvc-core 2.6G、check-precommit-gates 2.4G)合计 5G 加容量上限。
 - 第 6 节按已做、未做、作废重写(已做,见第 6 节)。
@@ -359,6 +360,8 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 
 ## 9 flow 负载准入(2026-11-17)
+
+已废除(项目所有者 2026-11-20):负载门与 load1 减半均已删除,配置行 admit_load_max/admit_load_wait_ms 已移除,flow 只受 --par 与机器令牌(核数与内存)约束,load1 只作记录;0.0.87 预跑发车去 load1 阈值一项已提前完成(dvqualify 不再按 load1 等待)。以下为历史记录。
 
 - 规则:并发总量以机器负载不高于 10 为界(prd_mempalace.md 决定)。flow 的 exec 节点起跑前,除机器令牌(cxlib.flowadmit,容量按核数与内存,load1 超两倍核数减半)外,再过负载门:load1 高于阈值时本次运行不放行任何新 exec 节点,已在跑的不动,load1 回落到阈值及以下即放行。
 - 有界:每次 flow 运行因负载推迟的累计时间有上限,到期照常放行并在回执标记;运行总 deadline 仍然有效,不会无界等待。

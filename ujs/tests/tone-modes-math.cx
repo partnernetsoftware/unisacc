@@ -1,22 +1,68 @@
 #pragma unisa use g_math
 #pragma unisa use text.text
 
+static double aces_fit(double x) {
+    return (x*(x+0.0245786)-0.000090537)/(x*(0.983729*x+0.432951)+0.238081);
+}
+
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     int reinhard_mutate=argc==2 && tx_eqz(argv[1],"--reinhard-mutate");
-    if(argc!=1 && !mutate && !reinhard_mutate) return 2;
-    const char *modules[]={"gpu-material-tone",0};
+    int cineon_mutate=argc==2 && tx_eqz(argv[1],"--cineon-mutate");
+    int aces_mutate=argc==2 && tx_eqz(argv[1],"--aces-mutate");
+    int agx_mutate=argc==2 && tx_eqz(argv[1],"--agx-mutate");
+    int custom_mutate=argc==2 && tx_eqz(argv[1],"--custom-mutate");
+    if(argc!=1 && !mutate && !reinhard_mutate && !cineon_mutate && !aces_mutate && !agx_mutate && !custom_mutate) return 2;
+    const char *modules[]={"f64-math","gpu-material-tone","gpu-tone-rgb",0};
     const char *cases[]={
         "return GpuMaterial_toneChannel(1,0.25,2.0);",
         "return GpuMaterial_toneChannel(1,2.0,2.0);",
         "return GpuMaterial_toneChannel(1,2.0,0.0);",
         "return GpuMaterial_toneChannel(2,0.25,2.0);",
         "return GpuMaterial_toneChannel(2,2.0,2.0);",
-        "return GpuMaterial_toneChannel(2,2.0,0.0);"
+        "return GpuMaterial_toneChannel(2,2.0,0.0);",
+        "let result=GpuMaterial_toneRgb(0,3,half,0.0,0.002,2.0,1.0);return ux_f64(result);",
+        "let result=GpuMaterial_toneRgb(0,3,half,0.0,0.002,2.0,1.0);return ux_f64(result+16);",
+        "let result=GpuMaterial_toneRgb(0,0,2.0,0.0,0.0,0.0,1.0);return ux_f64(result);",
+        "return GpuMaterial_toneRgb(0,7,half,0.0,0.0,2.0,1.0);",
+        "let result=GpuMaterial_toneRgb(0,4,0.5,0.0,0.0,1.2,1.0);return ux_f64(result);",
+        "let result=GpuMaterial_toneRgb(0,4,0.5,0.0,0.0,1.2,1.0);return ux_f64(result+8);",
+        "let result=GpuMaterial_toneRgb(0,4,0.5,0.0,0.0,1.2,1.0);return ux_f64(result+16);",
+        "let result=GpuMaterial_toneRgb(0,4,2.0,1.0,0.5,0.0,1.0);return ux_f64(result);",
+        "let result=GpuMaterial_toneRgb(0,4,32.0,32.0,32.0,1.2,1.0);return ux_f64(result);",
+        "let result=GpuMaterial_toneRgb(0,6,64.0,64.0,64.0,1.0,1.0);return ux_f64(result);",
+        "let result=GpuMaterial_toneRgb(0,6,64.0,2.0,1.0,0.0,1.0);return ux_f64(result+8);",
+        "let a=GpuMaterial_toneRgb(0,6,0.2,0.4,0.1,2.0,1.0);"
+        "let b=GpuMaterial_toneRgb(24,6,0.4,0.8,0.2,1.0,1.0);return ux_f64(a+16)-ux_f64(b+16);",
+        "let out=run_custom(0,64);return ux_f64(out);",
+        "let out=run_custom(0,64);return ux_f64(out+8);",
+        "let out=run_custom(0,64);return ux_f64(out+16);",
+        "return run_custom(64,64);"
     };
-    const double gold[]={0.5,1,0,1.0/3.0,0.8,0};
-    return g_math_run("G_MATH ToneModes","tone-modes",modules,"",cases,gold,6,
-        reinhard_mutate?3:mutate?0:-1,reinhard_mutate?
+    double ar=aces_fit(0.59719), ag=aces_fit(0.076), ab=aces_fit(0.0284);
+    double green=-0.10208*ar+1.10813*ag-0.00605*ab;
+    double blue=-0.00327*ar-0.07276*ag+1.07602*ab;
+    /* Upper EV clamp gives t=1. Expand the 2.2 power around one. */
+    double d=0.00142;
+    double agx_peak=(1.6605-0.5876-0.0728)*(1-2.2*d+1.32*d*d-0.088*d*d*d);
+    const double gold[]={0.5,1,0,1.0/3.0,0.8,0,0.217637640824031,0,2,-1,
+        1.60475*ar-0.53108*ag-0.07367*ab,green>0?green:0,blue>0?blue:0,0,1,agx_peak,0,0,
+        0.25,0.75,1,-1};
+    return g_math_run("G_MATH ToneModes","tone-modes",modules,
+        "function testTone(ctx,...args){let dest=args[0];let src=args[1];"
+        "let r=ux_f64(src);let g=ux_f64(src+8);let b=ux_f64(src+16);let exposure=ux_f64(src+24);"
+        "let a=ux_f64_put(dest,b*exposure);let m=ux_f64_put(dest+8,r+g);"
+        "let c=ux_f64_put(dest+16,r*exposure);return dest;}\n"
+        "native function run_custom(out:i64,src:i64) i64 {let tone=closure(testTone,0);"
+        "return GpuMaterial_toneCustom(tone,out,src);}\n"
+        "let rr=ux_f64_put(64,0.5);let gg=ux_f64_put(72,0.25);let bb=ux_f64_put(80,0.125);let ee=ux_f64_put(88,2.0);"
+        "let root=f64_sqrt(1.978);let sum=0.7+root;let ratio=sum/12.4;let lifted=0.004+ratio;let half=lifted*0.5;",
+        cases,gold,sizeof gold/sizeof gold[0],
+        custom_mutate?18:agx_mutate?15:aces_mutate?10:cineon_mutate?6:reinhard_mutate?3:mutate?0:-1,custom_mutate?
+        "let edit=ux_f64_put(88,1.0);let out=run_custom(0,64);return ux_f64(out);":agx_mutate?
+        "let result=GpuMaterial_toneRgb(0,6,64.0,64.0,64.0,0.001,1.0);return ux_f64(result);":aces_mutate?
+        "let result=GpuMaterial_toneRgb(0,4,0.5,0.0,0.0,0.6,1.0);return ux_f64(result);":cineon_mutate?
+        "let result=GpuMaterial_toneRgb(0,3,half,0.0,0.002,1.0,1.0);return ux_f64(result);":reinhard_mutate?
         "return GpuMaterial_toneChannel(1,0.25,2.0);":
         "return GpuMaterial_toneChannel(2,0.25,2.0);");
 }

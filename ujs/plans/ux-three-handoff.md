@@ -26,9 +26,23 @@ M6 阴影及面积光已补切片。Basic、PCF、PCFSoft、VSM 都经 GPU 深�
 
 燃尽表入口为 `sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --write`，随后运行 `--check`。加 `--check --mutate` 模拟撤掉方法覆盖，须返回非零。
 
-[清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
+[清单事实表](../practice/uxe/three-r160-annotations.tsv) 记录每项的覆盖范围与待证语义。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏已有 31/214，B 栏已有 25/200。本轮目标 40 项已升格 7 项，尚余 33 项。UniformsGroup 已补继承的监听接口，GPU 统一缓冲待接入，状态仍为部分。
+
+M4 至 M6 候选 `7760ee0` 包含主线 `6c9196081a`。其 `ujs/` 与 `docs/` 字节等同受完整审查的 `582a37f`。25 个 G-math、69 个 G-struct、24 个 G-geometry 和 14 个 G-pixel 门通过。旧 UXE 聚合入口超外层 60 秒，原 10 项随后逐一串行运行全部通过。检查及回归执行入口保持原判据。
 
 ## 直接续作
+
+M7 尚未开始。恢复后先继续 40 项收口，本轮剩 33 项。燃尽表目前列出全部 115 个部分项，按预计门数与依赖排序。每行的缺口、方法差集和证据可回查同名清单事实行，升格前须补齐实际语义与独立验收。M7 依次接入 Mesh、InstancedMesh、BatchedMesh、LOD、Sprite、Points、三种 Line、Bone、Skeleton 和 SkinnedMesh。
+
+已知缺口及验证入口如下。
+
+(1) WebGL 上下文恢复归 M12。待用真实浏览器上下文丢失与恢复验证资源重建和旧句柄代数拒绝。
+
+(2) Display P3 画布编码未通过。用 `gpu-packet-struct.cx -- --p3-readback` 复查浏览器输出，数学转换与其他色域门仍单独运行。
+
+(3) RectAreaLight 的漫反射切片已通过。镜面 LTC 查表与通用投影仍待实现，以 `gpu-packet-struct.cx -- --area` 和 `--area-mutate` 保留基线。
+
+(4) Toon 显式梯度已与 r160 WebGL2 对照并验证篡改失败，默认梯度过渡仍待验收。
 
 (1) M5 纹理生命周期。`gpu-texture-table.ujs` 已验证 Wasm 固定容量、句柄代数、更新版本、释放与千次回收，纹理描述与像素地址由调用者提供，绘制时复制进包。WebGL 纹理随绘制创建释放，下一步补持久 GPU 句柄、失效与回收，以及颜色空间和像素存储状态。CubeTexture 六面、DataTexture 和 CanvasTexture 的基础像素已有 r160 对照。面内方向、其他数据格式和 Canvas 字节取回仍待补。Texture 矩阵复用 `Matrix3_setUvTransform`。增加宿主能力时更新 `uxe-host-budget.cx` 中审阅后的闭包摘要。
 
@@ -42,6 +56,10 @@ M6 阴影及面积光已补切片。Basic、PCF、PCFSoft、VSM 都经 GPU 深�
 
 ```sh
 uptime
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/build-ape.cx
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/cli-host.cx
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --check
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/uniformsgroup-struct.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --sampled-mutate
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --targets
@@ -53,4 +71,4 @@ sh ./unisacc.com tools/gen-uxe-pages.cx -- --check
 
 纹理采样反例预期非零。一次只跑一路 Chrome。向主线提合入前先合最新 origin/main，再跑 M1 至 M3 全部门、C9 至 C14、CLI、清单、UXE 回归十项、页面生成和 doc-links。集成路径只含 ujs 与重算后的 build/doc-links.tsv。
 
-交接时无待提交文件。回归入口加 `-- --wrap-mutate` 可复跑环绕反例，加 `-- --phong-light-mutate` 或 `-- --lighting-mutate` 分别复跑 Phong、Standard 的光源反例。
+StereoCamera 的缓存语义实验仅存于 `/tmp/cdx2-burndown-rework.patch`，复用时只取 `stereocamera.ujs`、`stereocamera-r160.html` 与 `stereocamera-struct.cx` 三个同名路径。旧 9 项通过，扩展用例第 0 项曾读到 0，期望 0.5。先逐个读回投影缓存命中、左右眼偏移和调用结束后的记录字段，再考虑升格。其余按燃尽表从上向下选没有跨里程碑依赖的项。收口后按规划进入 M7，先接 Mesh 的几何、材质与对象树，再接实例、批次、LOD、点线精灵和骨骼。回归入口加 `-- --wrap-mutate` 可复跑环绕反例，加 `-- --phong-light-mutate` 或 `-- --lighting-mutate` 分别复跑 Phong、Standard 的光源反例。
