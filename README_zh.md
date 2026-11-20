@@ -19,7 +19,7 @@ C99 编译器,六个目标 {Linux, macOS, Windows} x {x86-64, arm64}:自己的�
 <a id="builtin"></a>
 ## 内置能力
 
-以 0.0.83 公开件实测(`unisacc 0.0.83`,APE 7399573 字节,Linux x86-64 宿主;POSIX 与 asm 面数字为 0.0.82 实测,0.0.83 修复项见 [release/notes-0.0.83.md](release/notes-0.0.83.md))。详见 [prd.md 1](prd.md#1-unisacccom-是什么)、[docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)。
+以 0.0.84 公开件实测(`unisacc 0.0.84`,APE 8417722 字节,Linux x86-64 宿主;POSIX 与 asm 面数字为 0.0.82 实测,0.0.83 与 0.0.84 未重测,0.0.83 修复项见 [release/notes-0.0.83.md](release/notes-0.0.83.md),0.0.84 见 [release/notes-0.0.84.md](release/notes-0.0.84.md))。详见 [prd.md 1](prd.md#1-unisacccom-是什么)、[docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制)。
 
 | 能力 | 是什么 | 实测现状与限制 |
 |---|---|---|
@@ -30,11 +30,11 @@ C99 编译器,六个目标 {Linux, macOS, Windows} x {x86-64, arm64}:自己的�
 
 另:一个 APE 文件在 Linux 与 macOS(x86-64、arm64)上直接运行;为六目标写出 ELF、Mach-O、PE;`-c` 与 `-S` 输出目标文件与汇编。
 
-实跑(0.0.83):
+实跑(0.0.84):
 
 ```text
 $ sh ./unisacc.com --version
-unisacc 0.0.83
+unisacc 0.0.84
 $ sh ./unisacc.com h.c a b          # h.c 打印 argc
 hello c argc=3
 $ sh ./unisacc.com hello.cx -- a b  # #pragma unisa use text.text::tx_len

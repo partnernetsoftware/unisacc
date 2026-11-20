@@ -153,7 +153,7 @@ static int state_load(void) {
 }
 
 /* ---- package ---- */
-typedef struct { char *body; size_t n; long nm, at[MAXM], len[MAXM]; } Pkg;
+typedef struct { char *body; size_t n; long nm, at[MAXM], len[MAXM], codec[MAXM]; } Pkg;
 static void pkg_parse(Pkg *p, char *f, size_t fn) {
     long ver, nm, ns, nr, i; size_t at = 0; unsigned long long ext = 0; char *e;
     if (fn < 16 || memcmp(f + fn - 16, "UNIPKG1\n", 8)) refuse("package-footer", 0);
@@ -166,20 +166,24 @@ static void pkg_parse(Pkg *p, char *f, size_t fn) {
     for (i = 0; i < nm; i++) {
         long cl, raw, codec; unsigned long crc;
         e = memchr(p->body + at, '\n', p->n - at);
-        if (!e || sscanf(p->body + at, "M %ld %ld %ld %lu", &cl, &raw, &codec, &crc) != 4 || cl <= 0 || codec != 1) refuse("package-model-row", 0);
+        if (!e || sscanf(p->body + at, "M %ld %ld %ld %lu", &cl, &raw, &codec, &crc) != 4 || cl <= 0 || raw <= 0 || (codec != 1 && !(ver==4 && codec==0 && cl==raw))) refuse("package-model-row", 0);
+        p->codec[i] = codec;
         p->at[i] = (long)at; p->len[i] = (long)(e - (p->body + at)) + 1 + cl;
         if ((size_t)(p->at[i] + p->len[i]) > p->n) refuse("package-model-extent", 0);
         at += (size_t)p->len[i];
     }
 }
 /* text net -> the compressed M record exactly as release packs it (netwire + dz_deflate + CRC32) */
-static char *mrec(const char *net, size_t nn, size_t *on) {
+static char *mrec(const char *net, size_t nn, int codec, size_t *on) {
     char why[200], line[96], *raw, *blob, *out; size_t rawn = 0, ln; long cap, cn;
     why[0] = 0;
     if (!(raw = nw_binary_net(net, nn, &rawn, why, sizeof why))) return 0;
+    if (!codec) { blob=raw; raw=0; cn=(long)rawn; }
+    else {
     cap = dz_bound((long)rawn); blob = malloc((size_t)(cap > 0 ? cap : 1)); if (!blob) refuse("allocation", 0);
     cn = dz_deflate((const unsigned char *)raw, (long)rawn, (unsigned char *)blob, cap);
-    if (cn <= 0 || cx_fmt(line, sizeof line, "M %lu %lu 1 %lu\n", (unsigned long)cn, (unsigned long)rawn, dz_crc32(0, (const unsigned char *)raw, (long)rawn))) { free(raw); free(blob); return 0; }
+    }
+    if (cn <= 0 || cx_fmt(line, sizeof line, "M %lu %lu %d %lu\n", (unsigned long)cn, (unsigned long)rawn, codec, dz_crc32(0, (const unsigned char *)(codec ? raw : blob), (long)rawn))) { free(raw); free(blob); return 0; }
     ln = strlen(line); out = malloc(ln + (size_t)cn); if (!out) refuse("allocation", 0);
     cpy(out, ln + (size_t)cn, line, ln); cpy(out + ln, (size_t)cn, blob, (size_t)cn); *on = ln + (size_t)cn; free(raw); free(blob); return out;
 }
@@ -659,20 +663,28 @@ static void reload(const char *fp, int report) {
     if (report && nshared) fprintf(stderr, "CXDEV_SHARED\tbaseline_nets=%d\n", nshared);
     run_jobs(jobs, nj, par);
     /* locate, then collect the new M records */
-    for (i = 0; i < nj; i++) {
+    /* Locate the unchanged baseline before encoding the edited recipe in its installed format. */
+    for (int pass=0;pass<2;pass++) for (i = 0; i < nj; i++) {
+        if (jobs[i].base != (pass==0)) continue;
         Rec *r = &recs[jobs[i].rec]; char *net, *m; size_t nn, mn; long x;
         for (t = 0; t < 4; t++) if (jobs[i].ms[t] > 0) sum[t] += jobs[i].ms[t];
         if (!jobs[i].cached) nbuilt++;
         if (!jobs[i].cached && jobs[i].shared[0] && !strcmp(jobs[i].status, "ok")) { char sl[PW + 8], lcp[PW + 8]; if (!cx_fmt(sl, sizeof sl, "%s.lint", jobs[i].shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", jobs[i].cache)) { copyfile(lcp, sl, 0600); copyfile(jobs[i].cache, jobs[i].shared, 0600); } }
         if (strcmp(jobs[i].status, "ok")) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "%s%s", jobs[i].base ? "baseline-" : "", jobs[i].status)) refuse("text-too-long", 0); } continue; }
-        if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
-        free(net);
+        if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, (!jobs[i].base && r->idx>=0 && r->idx<inst.nm) ? inst.codec[r->idx] : 1, &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
         if (jobs[i].base) {
             for (x = 0; x < inst.nm; x++) if ((size_t)inst.len[x] == mn && !memcmp(inst.body + inst.at[x], m, mn)) break;
+            if (x == inst.nm) {
+                free(m); m=mrec(net,nn,0,&mn);
+                if (!m) refuse("raw-model-encode",r->id);
+                for (x=0;x<inst.nm;x++) if (!inst.codec[x] && (size_t)inst.len[x]==mn && !memcmp(inst.body+inst.at[x],m,mn)) break;
+            }
+            free(net);
             if (x < inst.nm) { char line[96]; FILE *f = fopen(idxp, "a"); r->idx = (int)x; if (f) { { if (cx_fmt(line, sizeof line, "%s\t%ld\n", r->id, x)) refuse("text-too-long", 0); } fputs(line, f); fclose(f); } }
             else if (!r->why[0]) { if (cx_fmt(r->why, 96, "recipe-not-located")) refuse("text-too-long", 0); }
             free(m);
         } else {
+            free(net);
             /* lint gate, relative to the installed tables: an ERROR line the installed delta does not have stops the swap */
             char wl2[PW + 8], bl2[PW + 8], *ws, *bs, *s, *l; size_t wn, bn; int b2;
             for (b2 = 0; b2 < nj; b2++) if (jobs[b2].base && jobs[b2].rec == jobs[i].rec) break;

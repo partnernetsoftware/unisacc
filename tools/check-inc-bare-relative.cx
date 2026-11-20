@@ -1,0 +1,134 @@
+/* tools/check-inc-bare-relative.cx -- regression checks for bare relative -I include paths.
+ *   sh ./unisacc.com tools/check-inc-bare-relative.cx [-- [COMPILER_PATH]]
+ * Verifies 8 end-to-end contracts (no snprintf; cx_fmt only):
+ *   1. bare-I-include-space       -I include finds include/myhdr.h (rc 42)
+ *   2. bare-I-include-joined      -Iinclude finds include/myhdr.h (rc 42)
+ *   3. bare-I-include-slash       -I include/ finds include/myhdr.h (rc 42)
+ *   4. bare-I-include-subdir      -I include/sub finds include/sub/subhdr.h (rc 43)
+ *   5. no-I-builtin-not-shadowed  without -I, poisoned include/stdio.h does NOT shadow built-in <stdio.h>
+ *   6. dot-slash-I-include-works  -I ./include continues to find include/myhdr.h (rc 42)
+ *   7. other-I-src-unchanged      -I src finds src/srchdr.h (rc 44, unaffected by normalization)
+ *   8. other-I-inc-unchanged      -I inc finds inc/inchdr.h (rc 45, unaffected by normalization)
+ * Last line: CHECK_INC_BARE_RELATIVE<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define IBR_PW 4400
+#define IBR_OUT 8192
+
+static void ibr_abort(const char *why) {
+    fprintf(stderr, "check-inc-bare-relative: REFUSE %s\n", why);
+    exit(2);
+}
+
+static void ibr_mk(const char *p) {
+    if (mkdir(p, 0700) != 0 && errno != EEXIST) ibr_abort("mkdir");
+}
+
+static void ibr_w(const char *dir, const char *rel, const char *body) {
+    char p[IBR_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) ibr_abort("path");
+    if (cx_write(p, (const unsigned char *)body, (long)strlen(body))) ibr_abort("write");
+}
+
+static int ibr_run_in(const char *dir, const char *comp, const char *flag1, const char *flag2,
+                      const char *src, char *out, long cap) {
+    char cmd[IBR_PW];
+    long cl = (long)strlen(comp);
+    int is_com = (cl >= 4 && !memcmp(comp + cl - 4, ".com", 4));
+    if (is_com) {
+        if (flag2) {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && sh '%s' %s %s %s", dir, comp, flag1, flag2, src)) ibr_abort("cmd");
+        } else if (flag1) {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && sh '%s' %s %s", dir, comp, flag1, src)) ibr_abort("cmd");
+        } else {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && sh '%s' %s", dir, comp, src)) ibr_abort("cmd");
+        }
+    } else {
+        if (flag2) {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && '%s' %s %s %s", dir, comp, flag1, flag2, src)) ibr_abort("cmd");
+        } else if (flag1) {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && '%s' %s %s", dir, comp, flag1, src)) ibr_abort("cmd");
+        } else {
+            if (cx_fmt(cmd, sizeof cmd, "unset UNISA_CONTAINER && cd '%s' && '%s' %s", dir, comp, src)) ibr_abort("cmd");
+        }
+    }
+    return ckk_sh("check-inc-bare-relative", cmd, out, cap);
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    char cwd[IBR_PW], comp[IBR_PW], root[IBR_PW], dinc[IBR_PW], dsub[IBR_PW], dsrc[IBR_PW], dinc2[IBR_PW], out[IBR_OUT];
+    const char *raw_comp = 0;
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    int rc;
+
+    if (!getcwd(cwd, sizeof cwd)) ibr_abort("getcwd");
+    if (argc >= 2 && argv[1] && argv[1][0]) raw_comp = argv[1];
+    if (!raw_comp) {
+        if (cx_fmt(comp, sizeof comp, "%s/unisacc.com", cwd)) ibr_abort("comp");
+    } else if (raw_comp[0] == '/') {
+        if (cx_fmt(comp, sizeof comp, "%s", raw_comp)) ibr_abort("comp");
+    } else {
+        if (cx_fmt(comp, sizeof comp, "%s/%s", cwd, raw_comp)) ibr_abort("comp");
+    }
+
+    if (cx_fmt(root, sizeof root, "%s/ibr-check-%d", base_td, (int)getpid())) ibr_abort("root");
+    ibr_mk(root);
+    if (cx_fmt(dinc, sizeof dinc, "%s/include", root)) ibr_abort("dinc");
+    ibr_mk(dinc);
+    if (cx_fmt(dsub, sizeof dsub, "%s/include/sub", root)) ibr_abort("dsub");
+    ibr_mk(dsub);
+    if (cx_fmt(dsrc, sizeof dsrc, "%s/src", root)) ibr_abort("dsrc");
+    ibr_mk(dsrc);
+    if (cx_fmt(dinc2, sizeof dinc2, "%s/inc", root)) ibr_abort("dinc2");
+    ibr_mk(dinc2);
+
+    ibr_w(root, "include/myhdr.h", "#define IBR_VAL 42\n");
+    ibr_w(root, "include/sub/subhdr.h", "#define IBR_SUB_VAL 43\n");
+    ibr_w(root, "include/stdio.h", "#error poisoned local include/stdio.h must not shadow builtin\n");
+    ibr_w(root, "src/srchdr.h", "#define IBR_SRC_VAL 44\n");
+    ibr_w(root, "inc/inchdr.h", "#define IBR_INC_VAL 45\n");
+    ibr_w(root, "t_main.c", "#include <myhdr.h>\nint main(void) { return IBR_VAL; }\n");
+    ibr_w(root, "t_sub.c", "#include <subhdr.h>\nint main(void) { return IBR_SUB_VAL; }\n");
+    ibr_w(root, "t_std.c", "#include <stdio.h>\nint main(void) { return 0; }\n");
+    ibr_w(root, "t_src.c", "#include <srchdr.h>\nint main(void) { return IBR_SRC_VAL; }\n");
+    ibr_w(root, "t_inc.c", "#include <inchdr.h>\nint main(void) { return IBR_INC_VAL; }\n");
+
+    rc = ibr_run_in(root, comp, "-I", "include", "t_main.c", out, sizeof out);
+    ck(rc == 42, "bare-I-include-space: -I include finds include/myhdr.h and returns 42");
+
+    rc = ibr_run_in(root, comp, "-Iinclude", 0, "t_main.c", out, sizeof out);
+    ck(rc == 42, "bare-I-include-joined: -Iinclude finds include/myhdr.h and returns 42");
+
+    rc = ibr_run_in(root, comp, "-I", "include/", "t_main.c", out, sizeof out);
+    ck(rc == 42, "bare-I-include-slash: -I include/ finds include/myhdr.h and returns 42");
+
+    rc = ibr_run_in(root, comp, "-I", "include/sub", "t_sub.c", out, sizeof out);
+    ck(rc == 43, "bare-I-include-subdir: -I include/sub finds include/sub/subhdr.h and returns 43");
+
+    rc = ibr_run_in(root, comp, 0, 0, "t_std.c", out, sizeof out);
+    ck(rc == 0, "no-I-builtin-not-shadowed: without -I, local include/stdio.h does not shadow builtin");
+
+    rc = ibr_run_in(root, comp, "-I", "./include", "t_main.c", out, sizeof out);
+    ck(rc == 42, "dot-slash-I-include-works: -I ./include continues to find include/myhdr.h");
+
+    rc = ibr_run_in(root, comp, "-I", "src", "t_src.c", out, sizeof out);
+    ck(rc == 44, "other-I-src-unchanged: -I src finds src/srchdr.h and returns 44");
+
+    rc = ibr_run_in(root, comp, "-I", "inc", "t_inc.c", out, sizeof out);
+    ck(rc == 45, "other-I-inc-unchanged: -I inc finds inc/inchdr.h and returns 45");
+
+    {
+        char *rmv[] = {"rm", "-rf", root, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+
+    printf("CHECK_INC_BARE_RELATIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

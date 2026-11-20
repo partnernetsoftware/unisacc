@@ -8,6 +8,7 @@ typedef struct UnisaPackage {
     char *path; CxPackageStamp stamp; int complete;
     unsigned char *file,*b; int n,m,s,ver;
     int *off,*len,*raw; uint32_t *crc; CxPackageStage *stages; CxPackageResource *res; int nr;
+    unsigned char *model_codec; /* P3/P4 M record codec, indexed by model. */
 } CxPackage;
 void cxpl_release(CxPackage *,void (*)(void *));
 int cxmn_tag(const unsigned char *,long,long *,int,int *);

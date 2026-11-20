@@ -32,7 +32,7 @@ static void app(char *d, size_t cap, size_t *at, const char *s) {
  * 路由在 /multi/ 下（writer 只从 multi 路由取它）。 */
 static const char *names[8] = {"e2", "e1", "units", "e3", "e4", "prune", "lower", "elf"};
 /* build(ver): synthetic source package; fills block offsets and resource offset */
-static size_t build(char *buf, size_t cap, int ver, size_t *model_at, size_t *res_at) {
+static size_t build(char *buf, size_t cap, int ver, const char *first, size_t *model_at, size_t *res_at) {
     size_t at = 0; int i; char t[256];
     cx_fmt(t, sizeof t, "P %d 8 8 2\n", ver); app(buf, cap, &at, t);
     for (i = 0; i < 8; i++) {
@@ -42,7 +42,7 @@ static size_t build(char *buf, size_t cap, int ver, size_t *model_at, size_t *re
     for (i = 0; i < 8; i++) {
         model_at[i] = at;
         if (cx_fmt(t, sizeof t, "M 1 1 1 0\n%c", 'A' + i)) die("format");
-        app(buf, cap, &at, t);
+        app(buf, cap, &at, i == 0 && first ? first : t);
     }
     *res_at = at;
     if (ver >= 4) app(buf, cap, &at, "F 1 1 1 0 0\nkvF 1 1 1 0 0\njw");
@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
     { size_t n; char *b = slurp("/bin/true", &n); (void)b; bn = n; free(b); }
     for (int pass = 3; pass <= 4; pass += 1) {
         char outdir[4096], pkgpath[4096], comfile[4096]; char *pkg; size_t at = 0;
-        srcn = build(src, sizeof src, pass, model_at, &res_at);
+        srcn = build(src, sizeof src, pass, NULL, model_at, &res_at);
         cx_fmt(pkgpath, sizeof pkgpath, "%s/source-p%d.pkg", work, pass); 
         int fd = open(pkgpath, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
         if (fd < 0) die("source package create");
@@ -87,8 +87,7 @@ int main(int argc, char **argv) {
           if (r.rc) fputs(r.err ? r.err : "", stderr);
           np_free(&r); }
         for (i = 0; i < 8; i++) {
-            size_t hn, blen = (size_t)(model_at[i + 1 < 8 ? i + 1 : 8] - model_at[i]);
-            if (i == 7) blen = res_at - model_at[7];
+            size_t hn, blen = (i == 7 ? res_at : model_at[i + 1]) - model_at[i];
             cx_fmt(comfile, sizeof comfile, "%s/unisacc-stream%zu.com", outdir, i + 1);
             pkg = out_pkg(comfile, bn, &pn);
             cx_fmt(t, sizeof t, "P %d 1 1 2\nD stream %s t t 0\n", pass, names[i]);
@@ -114,7 +113,33 @@ int main(int argc, char **argv) {
         free(pkg);
         printf("PREPARED\tstreampack-p%d\tno-foreign-target\n", pass);
     }
-    (void)p;
+    const char *records[] = {"M 1 1 0 3554254475\nA", "M 1 1 0 3554254475\nB", "M 1 2 0 3554254475\nA", "M 1 1 0 3554254475\nA", "M 1 1 2 3554254475\nA"};
+    const char *labels[] = {"p4.raw-copied", "p4.raw-crc", "p4.raw-length", "p3.raw-forbidden", "p4.unknown-codec"};
+    const char *errors[] = {"", "raw model CRC", "model length/codec", "model length/codec", "model length/codec"};
+    for (int k = 0; k < 5; k++) {
+        char out[4096], file[4096], why[512]; np_result r = {0};
+        srcn = build(src, sizeof src, k == 3 ? 3 : 4, records[k], model_at, &res_at);
+        if (cx_fmt(p,sizeof p,"%s/raw.pkg",work) || cx_fmt(out,sizeof out,"%s/raw-out",work) || cx_write(p,src,srcn)) die("raw fixture");
+        char *av[] = {"sh","./unisacc.com","tools/stream-pack.cx","/bin/true",p,out,0};
+        if (np_run(av,root,0,30,&r,why,sizeof why)) die(why);
+        if (k) ck(r.rc == 2 && r.err && strstr(r.err,errors[k]) && access(out,F_OK) != 0, labels[k]);
+        else {
+            int ok = 0;
+            if (!r.rc) {
+                if (cx_fmt(file,sizeof file,"%s/unisacc-stream1.com",out)) die("raw path");
+                char *bytes = out_pkg(file,bn,&pn);
+                const char *header = "P 4 1 1 2\nD stream e2 t t 0\n";
+                size_t expected = strlen(header) + strlen(records[k]) + srcn - res_at;
+                ok = pn == expected && !memcmp(bytes,header,strlen(header)) && !memcmp(bytes+strlen(header),records[k],strlen(records[k])) && !memcmp(bytes+strlen(header)+strlen(records[k]),src+res_at,srcn-res_at);
+                free(bytes);
+                for (int s=1;s<=8;s++) { if (cx_fmt(file,sizeof file,"%s/unisacc-stream%d.com",out,s) || sy_unlink(file)) die("raw cleanup"); }
+                if (cx_fmt(file,sizeof file,"%s/streams.json",out) || sy_unlink(file) || sy_rmdir(out)) die("raw cleanup");
+            }
+            ck(ok,labels[k]);
+        }
+        np_free(&r);
+        if (sy_unlink(p)) die("raw fixture cleanup");
+    }
     /* Leave nothing behind: the writer's own outputs and source packages. */
     { int left = 0, pass, i; char p[8192], q[8192];
       for (pass = 3; pass <= 4; pass++) {

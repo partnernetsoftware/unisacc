@@ -58,6 +58,8 @@ int main(int argc, char **argv) {
     char man[4400], line[9000], path[4400], h[65];
     int reps = 1, a, count = 0, failed = 0;
     long long total = 0;
+    int version = 0;
+    CxCodecCrc crc; if (cxcodec_crc_init(&crc)) die("CRC setup");
     Out all = {0};
     FILE *f;
     if (argc < 2) die("usage: EXPLODED_DIR [--reps N]");
@@ -66,14 +68,21 @@ int main(int argc, char **argv) {
     if (cx_fmt(man, sizeof man, "%s/manifest.tsv", argv[1])) die("path");
     f = fopen(man, "rb"); if (!f) die("manifest");
     while (fgets(line, sizeof line, f)) {
-        long raw = 0, stored = 0; int id = count; char rel[512];
+        long raw = 0, stored = 0; int id = count, codec; unsigned sum; char rel[512];
+        if (!strncmp(line,"header\tP ",9)) { if (sscanf(line+9,"%d",&version)!=1) die("manifest header"); continue; }
         if (strncmp(line, "model\tM ", 8)) continue;   /* model<TAB>M stored raw codec crc<TAB>models/model-NNN.bin<TAB>sha */
-        if (sscanf(line + 8, "%ld %ld %*d %*u\t%511[^\t]", &stored, &raw, rel) != 3 || raw <= 0 || stored <= 0) die("manifest model row");
+        if (sscanf(line + 8, "%ld %ld %d %u\t%511[^\t]", &stored, &raw, &codec, &sum, rel) != 5 || raw <= 0 || raw > 2147483647L || stored <= 0) die("manifest model row");
+        if (codec != 1 && (codec != 0 || version != 4 || stored != raw)) die("manifest model codec/length");
         if (cx_fmt(path, sizeof path, "%s/%s", argv[1], rel)) die("path");
         {   size_t n; unsigned char *z = (unsigned char *)cx_read(path, &n), *u; Out b = {0}; int r, rc = 0; CxDecode d = {0};
             if (!z) die("member read");
+            if (n != (size_t)stored) die("stored length");
             u = malloc((size_t)raw); if (!u) die("out of memory");
-            if (cxcodec_inflate(u, (unsigned long)raw, z, (unsigned long)n)) { printf("MDSHA\tmodel-%03d\tinflate-failed\n", id); failed++; free(z); free(u); count++; continue; }
+            if (!codec) {
+                uint32_t actual;
+                if (cxcodec_crc(&crc,(const char *)z,raw,&actual) || actual!=sum) die("raw model CRC");
+                if (mm_copy(u,raw,z,(long)n)) die("raw model copy");
+            } else if (cxcodec_inflate(u, (unsigned long)raw, z, (unsigned long)n)) { printf("MDSHA\tmodel-%03d\tinflate-failed\n", id); failed++; free(z); free(u); count++; continue; }
             d.allocate = heap; d.release = release;
             for (r = 0; r < reps && !rc; r++) {
                 long long t0 = ns_now();

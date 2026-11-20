@@ -1,6 +1,12 @@
 /* Release chain for one slice at a time.
    sh ./unisacc.com tools/release-build.cx -- [--rev REV] p3 ROOT SRC_PKG OUT_PKG
    sh ./unisacc.com tools/release-build.cx -- [--rev REV] slice ROOT PKG OUT [--target TARGET]
+   sh ./unisacc.com tools/release-build.cx -- release-models BOOTSTRAP_PKG OUTPUT
+
+   In a P4 model row, M stored_bytes raw_bytes codec crc32, codec 0 stores
+   the binary network verbatim and requires equal positive lengths. Codec 1
+   is DEFLATE. Both paths validate the raw CRC before decoding the network.
+   release-models runs after bootstrap so earlier readers can build the slices.
 
    p3 writes P 4 by default (every \0hdr/ header deflated, 2.04MB -> 1.44MB,
    46.33s vs 46.98s); --no-compress-resources writes the input's version
@@ -46,6 +52,7 @@
 #pragma unisa use cxlib.packagefooter
 #pragma unisa use runtime.model_number
 #pragma unisa use compiler.bindstage
+#pragma unisa use compiler.streamname
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use sys.fs
@@ -1465,7 +1472,73 @@ static int rb_slice(int argc, char **argv) {
     return 0;
 }
 
+/* Build the distributable package only after the bootstrap generations finish.
+   Resolve hot members through the package directory; physical indices may move. */
+static int rb_release_models(const char *input, const char *output) {
+    int selected[7];
+    size_t n;
+    unsigned char *file = (unsigned char *)cx_read(input, &n);
+    PackageFooter foot;
+    CxPackageDecode dec = {0};
+    RbBuf out = {0};
+    dec.allocate = rb_alloc;
+    dec.release = rb_drop;
+    if (!file || n > 2147483647UL || !packagefooter_locate_bytes(file,(long)n,&foot) ||
+        foot.package_offset || foot.package_length + 16 != (long)n ||
+        cxpk_decode(&dec,file,foot.package_length)) rb_die("release models: invalid package");
+    CxPackage *p = &dec.package;
+    if (p->ver != 4) rb_die("release models: P4 required");
+    if (sn_count() != 7) rb_die("release models: changed image stage inventory");
+    for (int h = 0; h < 7; h++) {
+        const char *official, *stage;
+        if (sn_at(h, &official, &stage)) rb_die("release models: image stage inventory");
+        selected[h] = -1;
+        for (int s = 0; s < p->s; s++) {
+            CxPackageStage *d = &p->stages[s];
+            if (tx_eqz(d->route,"lnx/x86_64/image/O1") && tx_eqz(d->name,stage)) {
+                if (selected[h] >= 0) rb_die("release models: ambiguous stage");
+                selected[h] = d->model;
+            }
+        }
+        if (selected[h] < 0) rb_die("release models: missing stage");
+        for (int j = 0; j < h; j++)
+            if (selected[h] == selected[j]) rb_die("release models: aliased hot stages");
+    }
+    long last = 0;
+    for (int i = 0; i < p->m; i++) {
+        int wanted = 0;
+        for (int h = 0; h < 7; h++) if (selected[h] == i) wanted = 1;
+        if (!wanted) continue;
+        long start = p->off[i] - 2;
+        while (start >= last && file[start] != 'M') start--;
+        if (start < last || file[start+1] != ' ') rb_die("release models: header boundary");
+        int rawlen = p->raw[i];
+        if (rawlen < 9 || rawlen > 1073741824 || p->model_codec[i] != 1) rb_die("release models: invalid input extent");
+        unsigned char *raw = mm_alloc(rawlen);
+        if (!raw || cxcodec_inflate(raw,rawlen,file+p->off[i],p->len[i]) ||
+            dz_crc32(0,raw,rawlen) != p->crc[i] || !mm_same(raw,"UNINETB1N",9))
+            rb_die("release models: input CRC or binary network");
+        rb_put(&out,file+last,start-last);
+        char row[96];
+        if (cx_fmt(row,sizeof row,"M %d %d 0 %u\n",rawlen,rawlen,p->crc[i])) rb_die("release models: header");
+        rb_put(&out,row,strlen(row));
+        rb_put(&out,raw,rawlen);
+        mm_free(raw);
+        last = p->off[i] + p->len[i];
+    }
+    rb_put(&out,file+last,p->n-last);
+    unsigned char footer[16] = "UNIPKG1\n";
+    unsigned long long bytes = out.n;
+    for (int k = 0; k < 8; k++) { footer[8+k] = (unsigned char)bytes; bytes >>= 8; }
+    rb_put(&out,footer,16);
+    if (sy_write_atomic(output,out.p,out.n,0644)) rb_die("release models: publish");
+    sy_printf("RELEASE_MODELS\traw=7\tmembers=%d\tbytes=%ld\n",p->m,out.n);
+    cxpl_release(p,rb_drop); mm_free(file); mm_free(out.p);
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && tx_eqz(argv[1], "release-models")) return rb_release_models(argv[2],argv[3]);
     const char *rev = "HEAD";
     int i;
     if (argc >= 3 && tx_eqz(argv[1], "--rev")) {
