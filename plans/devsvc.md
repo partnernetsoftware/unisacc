@@ -361,6 +361,8 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 9 flow 负载准入(2026-11-17)
 
+已废除(项目所有者 2026-11-20):负载门与 load1 减半均已删除,配置行 admit_load_max/admit_load_wait_ms 已移除,flow 只受 --par 与机器令牌(核数与内存)约束,load1 只作记录;0.0.87 预跑发车去 load1 阈值一项已提前完成(dvqualify 不再按 load1 等待)。以下为历史记录。
+
 - 规则:并发总量以机器负载不高于 10 为界(prd_mempalace.md 决定)。flow 的 exec 节点起跑前,除机器令牌(cxlib.flowadmit,容量按核数与内存,load1 超两倍核数减半)外,再过负载门:load1 高于阈值时本次运行不放行任何新 exec 节点,已在跑的不动,load1 回落到阈值及以下即放行。
 - 有界:每次 flow 运行因负载推迟的累计时间有上限,到期照常放行并在回执标记;运行总 deadline 仍然有效,不会无界等待。
 - 配置(`tools/devsvc-repo.tsv`,按行首键精确匹配):`admit_load_max`(阈值,缺省 10)、`admit_load_wait_ms`(每次运行推迟总上限毫秒,缺省 5000)。表来源 `$DEVSVC_REPO_TABLE`,否则当前目录下的 `tools/devsvc-repo.tsv`;测试缝 `DEVSVC_LOAD_MAX`、`DEVSVC_LOAD_WAIT_MS`、`DEVSVC_LOADAVG`。
