@@ -7,6 +7,16 @@ struct StereoCamera {
   rightWorld: u32;
   leftMask: u32;
   rightMask: u32;
+  leftAutoUpdate: u32;
+  rightAutoUpdate: u32;
+  cached: u32;
+  cachedFov: f64;
+  cachedZoom: f64;
+  cachedAspect: f64;
+  cachedFocus: f64;
+  cachedDepth: f64;
+  cachedOffset: f64;
+  cachedEyeSep: f64;
 }
 
 function StereoCamera_init(stereo,...stereo_args) {
@@ -18,15 +28,14 @@ function StereoCamera_init(stereo,...stereo_args) {
   let right_w=ux_u32_put(stereo+StereoCamera.rightWorld,stereo_args[3]);
   let left_layer=ux_u32_put(stereo+StereoCamera.leftMask,3);
   let right_layer=ux_u32_put(stereo+StereoCamera.rightMask,5);
+  let left_manual=ux_u32_put(stereo+StereoCamera.leftAutoUpdate,0);
+  let right_manual=ux_u32_put(stereo+StereoCamera.rightAutoUpdate,0);
+  let dirty=ux_u32_put(stereo+StereoCamera.cached,0);
   return stereo;
 }
 
-native function stereo_eye(project:i64,world:i64,src_project:i64,src_world:i64,
-                           gap:f64,scale:f64,shift:f64) i64 {
-  let projection=Matrix4_copy(project,src_project);
+native function stereo_eye_world(world:i64,src_world:i64,gap:f64) i64 {
   let eye=Matrix4_copy(world,src_world);
-  let horizontal=ux_f64_put(projection,scale);
-  let center=ux_f64_put(projection+64,shift);
   let axis=0;
   while(axis<4) {
     let offset=axis*8;
@@ -37,7 +46,15 @@ native function stereo_eye(project:i64,world:i64,src_project:i64,src_world:i64,
   return eye;
 }
 
-native function StereoCamera_update(stereo:i64,projection:i64,world:i64,
+native function stereo_eye(project:i64,world:i64,src_project:i64,src_world:i64,
+                           gap:f64,scale:f64,shift:f64) i64 {
+  let projection=Matrix4_copy(project,src_project);
+  let horizontal=ux_f64_put(projection,scale);
+  let center=ux_f64_put(projection+64,shift);
+  return stereo_eye_world(world,src_world,gap);
+}
+
+native function stereo_update_full(stereo:i64,projection:i64,world:i64,
                                    fov:f64,zoom:f64,aspect:f64,focus:f64) i64 {
   if(fov<=0.0 || fov>=180.0 || zoom<=0.0 || aspect<=0.0 || focus<=0.0) { return 0-1; }
   let half_angle=fov*0.008726646259971648;
@@ -49,5 +66,37 @@ native function StereoCamera_update(stereo:i64,projection:i64,world:i64,
     projection,world,0.0-half_eye,1.0/half_width,center);
   let right=stereo_eye(ux_u32(stereo+StereoCamera.rightProjection),ux_u32(stereo+StereoCamera.rightWorld),
     projection,world,half_eye,1.0/half_width,0.0-center);
+  return stereo;
+}
+
+native function StereoCamera_update(stereo:i64,projection:i64,world:i64,
+                                   fov:f64,zoom:f64,aspect:f64,focus:f64) i64 {
+  let width=aspect*ux_f64(stereo+StereoCamera.aspect);
+  let eye_sep=ux_f64(stereo+StereoCamera.eyeSep);
+  // Cache the perspective depth coefficients that encode near and far.
+  let depth=ux_f64(projection+80);
+  let offset=ux_f64(projection+112);
+  if(ux_u32(stereo+StereoCamera.cached)!=0 &&
+     fov==ux_f64(stereo+StereoCamera.cachedFov) &&
+     zoom==ux_f64(stereo+StereoCamera.cachedZoom) &&
+     width==ux_f64(stereo+StereoCamera.cachedAspect) &&
+     focus==ux_f64(stereo+StereoCamera.cachedFocus) &&
+     eye_sep==ux_f64(stereo+StereoCamera.cachedEyeSep) &&
+     depth==ux_f64(stereo+StereoCamera.cachedDepth) &&
+     offset==ux_f64(stereo+StereoCamera.cachedOffset)) {
+    let left=stereo_eye_world(ux_u32(stereo+StereoCamera.leftWorld),world,0.0-eye_sep*0.5);
+    let right=stereo_eye_world(ux_u32(stereo+StereoCamera.rightWorld),world,eye_sep*0.5);
+    return stereo;
+  }
+  let result=stereo_update_full(stereo,projection,world,fov,zoom,aspect,focus);
+  if(result<0) { return result; }
+  let cf=ux_f64_put(stereo+StereoCamera.cachedFov,fov);
+  let cz=ux_f64_put(stereo+StereoCamera.cachedZoom,zoom);
+  let ca=ux_f64_put(stereo+StereoCamera.cachedAspect,width);
+  let co=ux_f64_put(stereo+StereoCamera.cachedFocus,focus);
+  let ce=ux_f64_put(stereo+StereoCamera.cachedEyeSep,eye_sep);
+  let cd=ux_f64_put(stereo+StereoCamera.cachedDepth,depth);
+  let ct=ux_f64_put(stereo+StereoCamera.cachedOffset,offset);
+  let clean=ux_u32_put(stereo+StereoCamera.cached,1);
   return stereo;
 }
