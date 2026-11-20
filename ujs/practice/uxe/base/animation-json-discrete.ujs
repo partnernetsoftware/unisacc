@@ -6,6 +6,8 @@ struct AnimationJsonDiscreteRows {
   textCapacity: u32;
   count: u32;
   textBytes: u32;
+  valueCapacity: u32;
+  valueCount: u32;
 }
 
 native function animation_json_region(at:i64,size:i64,input:i64,bytes:i64,key:i64,keyBytes:i64,out:i64,work:i64) i64 {
@@ -28,7 +30,9 @@ native function AnimationUtils_flattenDiscrete(input:i64,bytes:i64,key:i64,keyBy
   let text=ux_u32(out+AnimationJsonDiscreteRows.text);
   let capacity=ux_u32(out+AnimationJsonDiscreteRows.capacity);
   let textCapacity=ux_u32(out+AnimationJsonDiscreteRows.textCapacity);
-  let valueBytes=capacity*kind*4;
+  let valueCapacity=ux_u32(out+AnimationJsonDiscreteRows.valueCapacity);
+  if(valueCapacity==0) { valueCapacity=capacity; }
+  let valueBytes=valueCapacity*kind*4;
   let timeBytes=capacity*4;
   if(!animation_json_region(times,timeBytes,input,bytes,key,keyBytes,out,work) ||
      !animation_json_region(values,valueBytes,input,bytes,key,keyBytes,out,work) ||
@@ -43,9 +47,11 @@ native function AnimationUtils_flattenDiscrete(input:i64,bytes:i64,key:i64,keyBy
   let timeKey=ux_u32_put(work,1701669236);
   let pass=0;
   let count=0;
+  let valueCount=0;
   let textBytes=0;
   while(pass<2) {
     count=0;
+    valueCount=0;
     textBytes=0;
     let cursor=json_space(begin+1,end);
     while(cursor>=0 && cursor<parsed-1) {
@@ -58,19 +64,31 @@ native function AnimationUtils_flattenDiscrete(input:i64,bytes:i64,key:i64,keyBy
         let scale=4294967296.0;
         let bound=(2.0-1.0/8388608.0)*2147483648.0*scale*scale*scale;
         if(time-time!=0.0 || time>bound || time<0.0-bound) { return 0-3; }
-        if(kind==1) {
-          let token=ux_u8(item);
-          if(token!=102 && token!=116) { return 0-3; }
-          if(pass!=0) { let saved=ux_u32_put(values+count*4,token==116); }
-        } else {
-          let length=Json_stringBytes(item,after);
-          if(length<0 || length>textCapacity-textBytes) { return 0-3; }
-          if(pass!=0) {
-            let copied=Json_decodeString(item,after,text+textBytes,length);
-            let addr=ux_u32_put(values+count*8,text+textBytes);
-            let size=ux_u32_put(values+count*8+4,length);
+        let array=ux_u8(item)==91;
+        let field=item;
+        if(array) { field=json_space(item+1,after); }
+        let finished=0;
+        while(!finished && field>=0 && field<after && ux_u8(field)!=93) {
+          if(valueCount>=valueCapacity) { return 0-3; }
+          if(kind==1) {
+            let token=ux_u8(field);
+            if(token!=102 && token!=116) { return 0-3; }
+            if(pass!=0) { let saved=ux_u32_put(values+valueCount*4,token==116); }
+          } else {
+            let length=Json_stringBytes(field,after);
+            if(length<0 || length>textCapacity-textBytes) { return 0-3; }
+            if(pass!=0) {
+              let copied=Json_decodeString(field,after,text+textBytes,length);
+              let addr=ux_u32_put(values+valueCount*8,text+textBytes);
+              let size=ux_u32_put(values+valueCount*8+4,length);
+            }
+            textBytes=textBytes+length;
           }
-          textBytes=textBytes+length;
+          valueCount=valueCount+1;
+          if(array) {
+            field=json_space(json_value_end(field,after),after);
+            if(ux_u8(field)==44) { field=json_space(field+1,after); }
+          } else { finished=1; }
         }
         if(pass!=0) { let timeAt=ux_f32_put(times+count*4,time); }
         count=count+1;
@@ -82,5 +100,6 @@ native function AnimationUtils_flattenDiscrete(input:i64,bytes:i64,key:i64,keyBy
   }
   let a=ux_u32_put(out+AnimationJsonDiscreteRows.count,count);
   let b=ux_u32_put(out+AnimationJsonDiscreteRows.textBytes,textBytes);
+  let c=ux_u32_put(out+AnimationJsonDiscreteRows.valueCount,valueCount);
   return out;
 }
