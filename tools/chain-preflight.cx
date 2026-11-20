@@ -524,6 +524,9 @@ int main(int argc, char **argv) {
             eff_rev = resolved_rev;
         }
     }
+    if (eff_rev && !tx_eqz(eff_rev, "none") && !tx_eqz(eff_rev, "HEAD")) {
+        sy_setenv("UNISACC_PREFLIGHT_REV", eff_rev, 1);
+    }
 
     if (item) {
         if (tx_eqz(item, "root-types")) return item_root_types(root);
@@ -548,30 +551,61 @@ int main(int argc, char **argv) {
 
     char failed_list[512] = {0};
     int nfailed = 0;
+    int node_pids[32] = {0};
+    int node_rcs[32] = {0};
+    int my_pid = (int)sy_pid();
+
+    /* First run fast built-in items and launch external table nodes in parallel */
     for (int i = 0; i < nnodes; i++) {
-        int rc = 0;
         if (tx_eqz(nodes[i].name, "root-types")) {
-            rc = item_root_types(root);
+            node_rcs[i] = item_root_types(root);
         } else if (tx_eqz(nodes[i].name, "snap-cache-types")) {
-            rc = item_snap_cache_types(snap_base, eff_rev);
+            node_rcs[i] = item_snap_cache_types(snap_base, eff_rev);
         } else if (tx_eqz(nodes[i].name, "parse2-bind")) {
-            rc = item_parse2_bind(repo, rev, force_cold);
+            node_rcs[i] = item_parse2_bind(repo, rev, force_cold);
+        } else if (tx_eqz(nodes[i].name, "template-compile") && pf_check_template_sha(repo) != 0) {
+            node_rcs[i] = 1;
         } else {
-            long nt0 = sy_now_ms();
-            if (tx_eqz(nodes[i].name, "template-compile") && pf_check_template_sha(repo) != 0) {
-                rc = 1;
-            } else {
-                char out[2048], subcmd[1024];
+            fflush(stdout);
+            fflush(stderr);
+            int cpid = (int)fork();
+            if (cpid == 0) {
+                long nt0 = sy_now_ms();
+                char out[2048], subcmd[1024], line[512], opath[512];
+                int crc = 0;
                 if (!tx_eqz(repo, ".") && !cx_fmt(subcmd, sizeof subcmd, "cd '%s' && %s", repo, nodes[i].cmd)) {
-                    rc = ckk_sh_t("CHAIN_PREFLIGHT", subcmd, out, sizeof out, nodes[i].timeout_s);
+                    crc = ckk_sh_t("CHAIN_PREFLIGHT", subcmd, out, sizeof out, nodes[i].timeout_s);
                 } else {
-                    rc = ckk_sh_t("CHAIN_PREFLIGHT", nodes[i].cmd, out, sizeof out, nodes[i].timeout_s);
+                    crc = ckk_sh_t("CHAIN_PREFLIGHT", nodes[i].cmd, out, sizeof out, nodes[i].timeout_s);
                 }
-                printf("PREFLIGHT_ITEM\t%s\t%s\trc=%d\tms=%ld\n",
-                       nodes[i].name, rc == 0 ? "PASS" : "FAIL", rc, sy_now_ms() - nt0);
+                if (!cx_fmt(line, sizeof line, "PREFLIGHT_ITEM\t%s\t%s\trc=%d\tms=%ld\n",
+                            nodes[i].name, crc == 0 ? "PASS" : "FAIL", crc, sy_now_ms() - nt0) &&
+                    !cx_fmt(opath, sizeof opath, "%s/pf-node-%d-%d.out", sy_tmpdir(), my_pid, i)) {
+                    sy_write_file(opath, line, (int64_t)strlen(line), 0600);
+                }
+                _exit(crc == 0 ? 0 : 1);
+            }
+            node_pids[i] = cpid;
+        }
+    }
+
+    for (int i = 0; i < nnodes; i++) {
+        if (node_pids[i] > 0) {
+            int ex = 0, code = 0, sig = 0;
+            sy_wait_status(node_pids[i], 0, &ex, &code, &sig);
+            node_rcs[i] = (ex && code == 0) ? 0 : 1;
+            char opath[512];
+            unsigned char *ob = 0;
+            int64_t on = 0;
+            if (!cx_fmt(opath, sizeof opath, "%s/pf-node-%d-%d.out", sy_tmpdir(), my_pid, i)) {
+                if (sy_read_file(opath, &ob, &on, 4096) == 0 && ob && on > 0) {
+                    fwrite(ob, 1, (size_t)on, stdout);
+                    mm_free(ob);
+                }
+                sy_unlink(opath);
             }
         }
-        if (rc != 0) {
+        if (node_rcs[i] != 0) {
             size_t fl = strlen(failed_list);
             cx_fmt(failed_list + fl, sizeof failed_list - fl, "%s%s", nfailed ? "," : "", nodes[i].name);
             nfailed++;
