@@ -168,6 +168,7 @@ Lxrmissing:
 Lxrtransitionbad:
     movl $2,M_STATUS(%r12)
 Lxrfinished:
+    movq %r14,RESULT_STEPS(%rbp)
     cmpl $0,M_STATUS(%r12)
     jne Lxrerrorout
     movq M_OUT+BUF_BYTES(%r12),%rax

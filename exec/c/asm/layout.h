@@ -96,4 +96,5 @@
 #define CM_QA 56
 #define RESULT_OUT 0
 #define RESULT_ERR 24
-#define RESULT_SIZE 64
+#define RESULT_STEPS 64
+#define RESULT_SIZE 72
