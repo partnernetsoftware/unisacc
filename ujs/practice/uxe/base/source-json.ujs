@@ -100,3 +100,43 @@ native function Source_toJSON(source:i64,dst:i64,end:i64,uuid:i64,uuid_bytes:i64
   }
   return json_byte(p,end,125);
 }
+
+// Metadata stores a count followed by rows of UUID and JSON views. The caller
+// keeps each accepted UUID and JSON span immutable for the lifetime of meta.
+// The returned row holds { uuid, uuidBytes, json, jsonBytes } in four u32s.
+native function Source_toJSONMeta(source:i64,dst:i64,end:i64,uuid:i64,uuid_bytes:i64,
+                                 scratch:i64,meta:i64,capacity:i64) i64 {
+  if(meta<0 || meta>6291456-4 || meta%4!=0 || capacity<0 ||
+    capacity>(6291456-meta-4)/16 || uuid<0 || uuid>6291456 ||
+    uuid_bytes<0 || uuid_bytes>6291456-uuid) { return 0-1; }
+  let used=ux_u32(meta);
+  if(used>capacity) { return 0-1; }
+  let i=0;
+  while(i<used) {
+    let row=meta+4+16*i;
+    let key=ux_u32(row);
+    let length=ux_u32(row+4);
+    if(key>6291456 || length>6291456-key) { return 0-1; }
+    if(length==uuid_bytes) {
+      let n=0;
+      while(n<length && ux_u8(key+n)==ux_u8(uuid+n)) { n=n+1; }
+      if(n==length) {
+        let data=ux_u32(row+8);
+        let bytes=ux_u32(row+12);
+        if(data>6291456 || bytes>6291456-data) { return 0-1; }
+        return row;
+      }
+    }
+    i=i+1;
+  }
+  if(used==capacity || !source_input_ok(meta,4+16*capacity,dst,end,scratch)) { return 0-1; }
+  let finish=Source_toJSON(source,dst,end,uuid,uuid_bytes,scratch);
+  if(finish<0) { return finish; }
+  let row=meta+4+16*used;
+  let key=ux_u32_put(row,uuid);
+  let key_bytes=ux_u32_put(row+4,uuid_bytes);
+  let text=ux_u32_put(row+8,dst);
+  let text_bytes=ux_u32_put(row+12,finish-dst);
+  let publish=ux_u32_put(meta,used+1);
+  return row;
+}
