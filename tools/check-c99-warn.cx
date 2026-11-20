@@ -87,10 +87,11 @@ int main(int argc, char **argv) {
         { "global-and-static-local", "int g;\nvoid f(void){static int g;(void)g;}", 1 },
         { "proto-param-after-static", "void f(void){static int x;void h(int x);(void)x;}", 1 },
         { "parameter-and-static", "void f(int a){static int a;(void)a;}", 2 },
-        /* step 2 (B): call with no visible binding -> -Wc99-implicit-function, object still written */
-        { "implicit-undeclared", "void f(void){undeclared_fn();}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'undeclared_fn'" },
-        { "implicit-unregistered-dunder", "void f(void){__nosuch(1);}", 3, "[-Wc99-implicit-function]", "call to undeclared function '__nosuch'" },
-        { "implicit-defined-later", "void f(void){later();}\nvoid later(void){}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'later'" },
+        /* C99 6.5.1p2: default rejects, while -Wall keeps its warning and produces an object. */
+        { "implicit-undeclared", "void f(void){undeclared_fn();}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'undeclared_fn'", 14 },
+        { "implicit-unregistered-dunder", "void f(void){__nosuch(1);}", 3, "[-Wc99-implicit-function]", "call to undeclared function '__nosuch'", 14 },
+        { "implicit-defined-later", "void f(void){later();}\nvoid later(void){}", 3, "[-Wc99-implicit-function]", "call to undeclared function 'later'", 14 },
+        { "visible-prototype-and-definition", "int ext3(int);int f(void){return ext3(7);}int ext3(int n){return n;}", 1 },
         { "declared-prototype", "int ext(int);\nvoid f(void){ext(1);}", 1 },
         { "defined-before", "static int g1(void){return 1;}\nvoid f(void){g1();}", 1 },
         { "function-pointer-call", "int k(int);\nvoid f(void){int (*p)(int)=k;p(1);}", 1 },
@@ -102,8 +103,12 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < sizeof fx / sizeof *fx; i++) {
         char c[96], o[96], src[400]; FMT(c, "%s.c", fx[i].name); FMT(o, "%s.wall.o", fx[i].name);
         if (cx_fmt(src, sizeof src, "%s\nint main(void){return 0;}\n", fx[i].line)) die("src"); char p[4400]; FMT(p, "%s/%s", outdir, c); saved(p, src, strlen(src));
-        if (fx[i].reject_col) reject_default(fx[i].name, c, fx[i].reject_col, "redefinition of local object 'x' [-Wc99-local-redefinition]");
-        else same_default(fx[i].name, c);
+        if (fx[i].reject_col) {
+            char message[256];
+            FMT(message, "%s %s", fx[i].msg ? fx[i].msg : "redefinition of local object 'x'",
+                fx[i].rule ? fx[i].rule : "[-Wc99-local-redefinition]");
+            reject_default(fx[i].name, c, fx[i].reject_col, message);
+        } else same_default(fx[i].name, c);
         np_result r; if (compile(newp, 1, c, o, &r)) { check(0, fx[i].name, "wall", "transport"); continue; }
         size_t on = 0; char *ob = slurp(o, &on); char d[260], e[170]; first(&r, e, sizeof e); FMT(d, "rc=%d obj=%zu stderr=%s", r.rc, on, e);
         if (fx[i].kind == 0) {
