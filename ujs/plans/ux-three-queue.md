@@ -211,7 +211,8 @@
 - MaterialLoader 余下材质与属性 | G-io 材质构造、类型专属参数及其余贴图 | 材质与纹理表。
 - ~~ObjectLoader 嵌套 Scene 与 Group | G-io 多层树、同级顺序、世界变换及失败清空草稿 | Scene、Object3D。~~ 10 项通过，子节点世界 X 从 7 篡改为 8 转红，旧六项通过。
 - ObjectLoader 两阶段整景 | G-io 变换矩阵、几何、材质、图像引用及失败回退 | 嵌套树、BufferGeometryLoader、MaterialLoader、图像加载。
-- GLTFLoader 访问器与网格 | G-io 稀疏访问器、全部几何属性、坏范围与真实 r160 插件 | GLB 密集访问器。
+- ~~GLTFLoader 稀疏访问器 | G-io 零底阵列、交错底阵列、顺序、边界和失败保留 | GLB 密集访问器。~~ 14 项通过，补丁索引篡改转红，旧访问器和三角形各八项通过。现阶段对照本地 r160 Attribute。
+- GLTFLoader 访问器接入网格 | G-io 稀疏与密集并用、全部几何属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。
 - GLTFLoader 材质与纹理 | G-io 采样器、UV、内嵌与外部资源以及 JPEG | GLTF 网格、图像加载与材质。
 - GLTFLoader 蒙皮与动画 | G-io 骨骼构建、反绑、动画通道和插值 | GLTF 网格、M7/M8。
 - GLTFLoader 整景提交与失败回收 | G-io 完整模型、失败注入与资源代数 | GLTF 网格、纹理、蒙皮与动画。

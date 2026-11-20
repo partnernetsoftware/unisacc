@@ -1,0 +1,55 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"loadingmanager","fileloader","glb-container","json-read","loader-json","gltf-accessor","gltf-sparse-accessor",0};
+    #define PATCH "\"componentType\":5123,\"count\":4,\"type\":\"SCALAR\",\"sparse\":{" \
+        "\"count\":2,\"indices\":{\"bufferView\":1,\"componentType\":5121},\"values\":{\"bufferView\":2}}"
+    const char json[]="{\"accessors\":[{" PATCH "},{\"bufferView\":0," PATCH "}],\"bufferViews\":["
+        "{\"buffer\":0,\"byteLength\":16,\"byteStride\":4},"
+        "{\"buffer\":0,\"byteOffset\":16,\"byteLength\":2},"
+        "{\"buffer\":0,\"byteOffset\":20,\"byteLength\":4}]}";
+    const int size=sizeof json-1;
+    char setup[4500];
+    int n=tx_snprintf(setup,sizeof setup,
+        "let input=128;let bin=1024;let out=1200;let target=1400;let key=1500;"
+        "let a=ux_u32_put(GlbResource.json,input);let b=ux_u32_put(GlbResource.jsonBytes,%d);"
+        "let c=ux_u32_put(GlbResource.bin,bin);let d=ux_u32_put(GlbResource.binBytes,24);"
+        "let p=ux_u16_put(bin,10);let q=ux_u16_put(bin+4,20);"
+        "let r=ux_u16_put(bin+8,30);let s=ux_u16_put(bin+12,40);"
+        "let i0=ux_u8_put(bin+16,1);let i1=ux_u8_put(bin+17,3);"
+        "let v0=ux_u16_put(bin+20,55);let v1=ux_u16_put(bin+22,99);",size);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let raw=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,raw[i]);i=i+1;}}",count,at);
+    }
+    #define ZERO "let read=GltfLoader_sparseAccessor(0,0,out,target,8,key);"
+    #define BASE "let read=GltfLoader_sparseAccessor(0,1,out,target,8,key);"
+    const char *cases[]={
+        ZERO "return 0.0+ux_u32(read+GltfAccessor.count);",
+        ZERO "return 0.0+ux_u32(read+GltfAccessor.stride);",
+        ZERO "return 0.0+ux_u16(target);",
+        ZERO "return 0.0+ux_u16(target+2);",
+        ZERO "return 0.0+ux_u16(target+6);",
+        BASE "return 0.0+ux_u16(target);",
+        BASE "return 0.0+ux_u16(target+4);",
+        BASE "return 0.0+ux_u16(target+6);",
+        "let bad=ux_u8_put(bin+17,1);" ZERO "return 0.0+read;",
+        "let bad=ux_u8_put(bin+17,4);" ZERO "return 0.0+read;",
+        "let keep=ux_u16_put(target,777);let saved=ux_u32_put(out,35);let bad=ux_u8_put(bin+17,4);"
+        ZERO "return 0.0+ux_u16(target)*100+ux_u32(out);",
+        "let bad=ux_u32_put(GlbResource.binBytes,23);" ZERO "return 0.0+read;",
+        "return 0.0+GltfLoader_sparseAccessor(0,0,out,target,7,key);",
+        "return 0.0+GltfLoader_sparseAccessor(0,0,out,bin,8,key);",
+    };
+    const double gold[]={4,2,0,55,99,10,30,99,-5,-5,77735,-3,-4,-1};
+    return g_wasm_batch("G_IO Gltf sparse accessor","gltf-sparse-accessor",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?4:-1,
+        "let bad=ux_u8_put(bin+17,2);" ZERO "return 0.0+ux_u16(target+6);");
+}
