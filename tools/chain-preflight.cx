@@ -1,10 +1,12 @@
-/* tools/chain-preflight.cx -- unified pre-chain preflight table runner and root/snap-cache file-type checks (unit M2).
+/* tools/chain-preflight.cx -- unified pre-chain preflight table runner, root/snap-cache file-type checks (M2),
+ * and parse2 --locations binding preflight check (M3).
  * Usage:
- *   sh ./unisacc.com tools/chain-preflight.cx [-- [--root DIR] [--snap-base DIR] [--rev REV] [--table FILE] [--events-file FILE] [--strict]]
- *   sh ./unisacc.com tools/chain-preflight.cx -- --item root-types|snap-cache-types [--root DIR] [--snap-base DIR] [--rev REV]
+ *   sh ./unisacc.com tools/chain-preflight.cx [-- [--root DIR] [--repo DIR] [--snap-base DIR] [--rev REV] [--table FILE] [--events-file FILE] [--strict] [--cold]]
+ *   sh ./unisacc.com tools/chain-preflight.cx -- --item root-types|snap-cache-types|parse2-bind [--root DIR] [--repo DIR] [--snap-base DIR] [--rev REV] [--cold]
  *   sh ./unisacc.com tools/chain-preflight.cx -- --check-table [--table FILE]
  * Shadow mode (default): validates tools/flows/chain-preflight.tsv, runs all preflight nodes, prints PREFLIGHT_ITEM lines
  * and CHAIN_PREFLIGHT<TAB>rev=..<TAB>verdict=PASS|FAIL<TAB>failed=..<TAB>nodes=..<TAB>ms=..<TAB>mode=shadow, exits 0. */
+#pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
@@ -13,6 +15,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.netpack
 
 typedef struct {
     char name[64];
@@ -107,6 +110,232 @@ static int item_snap_cache_types(const char *snap_base, const char *rev) {
     return bad ? 1 : 0;
 }
 
+static int pf_release_tag(const char *repo, char tag[64]) {
+    char *av[] = { "git", "show", "HEAD:build/version-seq.tsv", 0 };
+    char why[160];
+    np_result r = {0};
+    tag[0] = 0;
+    if (np_run(av, repo, 0, 4, &r, why, sizeof why) || r.rc != 0 || r.residue || !r.out) {
+        np_free(&r);
+        return 0;
+    }
+    long pos = 0, n = (long)r.outn;
+    while (pos < n) {
+        long ls = pos;
+        while (pos < n && r.out[pos] != '\n') pos++;
+        long le = pos;
+        if (pos < n) pos++;
+        if (le > ls && r.out[le - 1] == '\r') le--;
+        const char *line = r.out + ls;
+        long len = le - ls;
+        const char *cols[6];
+        long clens[6];
+        int nc = 0;
+        long q = 0;
+        while (nc < 6 && q <= len) {
+            long cs = q;
+            while (q < len && line[q] != '\t') q++;
+            cols[nc] = line + cs;
+            clens[nc] = q - cs;
+            nc++;
+            q++;
+        }
+        if (nc >= 5 && clens[1] > 0 && clens[1] < 32 && clens[3] == 9 && memcmp(cols[3], "已公开", 9) == 0) {
+            char vbuf[32];
+            mm_copy(vbuf, sizeof vbuf, cols[1], (size_t)clens[1]);
+            vbuf[clens[1]] = 0;
+            cx_fmt(tag, 64, "refs/tags/v%s", vbuf);
+        }
+    }
+    np_free(&r);
+    return tag[0] != 0;
+}
+
+static int pf_resolve_sha(const char *repo, const char *spec, char sha[41]) {
+    char *av[] = { "git", "rev-parse", "--verify", "--end-of-options", (char *)spec, 0 };
+    char why[160];
+    np_result r = {0};
+    int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && r.rc == 0 && !r.residue &&
+             r.out && r.outn >= 40 && strspn(r.out, "0123456789abcdef") >= 40;
+    if (ok) {
+        mm_copy(sha, 41, r.out, 40);
+        sha[40] = 0;
+    }
+    np_free(&r);
+    return ok;
+}
+
+static void pf_extract_err(const char *err, long errn, char fbuf[256], char lbuf[32], char rbuf[256]) {
+    tx_copy(fbuf, 256, "exec/parse2", 11);
+    tx_copy(lbuf, 32, "1", 1);
+    tx_copy(rbuf, 256, "parse2-locations-failed", 23);
+    if (!err || errn <= 0) return;
+    long pos = 0;
+    while (pos < errn) {
+        long ls = pos;
+        while (pos < errn && err[pos] != '\n') pos++;
+        long le = pos;
+        if (pos < errn) pos++;
+        if (le > ls && err[le - 1] == '\r') le--;
+        const char *line = err + ls;
+        long len = le - ls;
+        long p = tx_find(line, len, "seed-gen: ", 10);
+        if (p < 0) continue;
+        const char *body = line + p + 10;
+        long blen = len - (p + 10);
+        long c1 = -1, c2 = -1;
+        for (long i = 0; i < blen; i++) {
+            if (body[i] == ':' && i + 1 < blen && body[i + 1] >= '0' && body[i + 1] <= '9') {
+                long j = i + 1;
+                while (j < blen && body[j] >= '0' && body[j] <= '9') j++;
+                if (j < blen && body[j] == ':') {
+                    c1 = i;
+                    c2 = j;
+                    break;
+                }
+            }
+        }
+        if (c1 > 0 && c1 < 255 && c2 > c1 + 1 && (c2 - c1 - 1) < 31) {
+            mm_copy(fbuf, 256, body, (size_t)c1);
+            fbuf[c1] = 0;
+            mm_copy(lbuf, 32, body + c1 + 1, (size_t)(c2 - c1 - 1));
+            lbuf[c2 - c1 - 1] = 0;
+            long rs = c2 + 1;
+            while (rs < blen && body[rs] == ' ') rs++;
+            long rlen = blen - rs;
+            if (rlen > 0) {
+                if (rlen >= 255) rlen = 255;
+                mm_copy(rbuf, 256, body + rs, (size_t)rlen);
+                rbuf[rlen] = 0;
+            }
+            return;
+        }
+    }
+}
+
+static int item_parse2_bind(const char *repo, const char *rev, int force_cold) {
+    char tag[64] = {0}, base_spec[96], tip_spec[256], seed_spec[96];
+    char base[41] = {0}, tip[41] = {0}, seed_sha[41] = {0}, why[200];
+    const char *rev_arg = (rev && rev[0] && !tx_eqz(rev, "none")) ? rev : "HEAD";
+    long t0 = sy_now_ms();
+
+    if (!pf_release_tag(repo, tag) ||
+        cx_fmt(base_spec, sizeof base_spec, "%s^{commit}", tag) ||
+        cx_fmt(tip_spec, sizeof tip_spec, "%s^{commit}", rev_arg) ||
+        !pf_resolve_sha(repo, base_spec, base) ||
+        !pf_resolve_sha(repo, tip_spec, tip)) {
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\trev=%s\tfile=build/version-seq.tsv\tline=1\tlocation=build/version-seq.tsv:1\treason=bad-revision-or-release-tag\tms=%ld\n",
+               rev_arg, sy_now_ms() - t0);
+        return 1;
+    }
+
+    char *diff_av[] = { "git", "diff", "--no-ext-diff", "--quiet", base, tip, "--", "exec/parse2", "exec/facts", "seed/gen.c", 0 };
+    np_result dr = {0};
+    int diff_ok = !np_run(diff_av, repo, 0, 5, &dr, why, sizeof why) && !dr.residue;
+    int diff_rc = dr.rc;
+    np_free(&dr);
+    if (diff_ok && diff_rc == 0 && !force_cold) {
+        printf("PREFLIGHT_ITEM\tparse2-bind\tPASS\tbase=%s\trev=%s\tstatus=parse2-inputs-unchanged\tseed_gen=skipped\tcompile_ms=0\trun_ms=0\tms=%ld\n",
+               base, tip, sy_now_ms() - t0);
+        return 0;
+    }
+    if (!diff_ok || (diff_rc != 0 && diff_rc != 1)) {
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=exec/parse2\tline=1\tlocation=exec/parse2:1\treason=git-diff-failed\tms=%ld\n",
+               base, tip, sy_now_ms() - t0);
+        return 1;
+    }
+
+    char tmp[1200], archive[1400], tmp_gen[1400], cache_bin[1400], cache_tmp[1450], json_path[1400];
+    if (sy_mkdtemp(sy_tmpdir(), "chain-preflight-parse2-", tmp, sizeof tmp) ||
+        cx_fmt(archive, sizeof archive, "%s/tree.tar", tmp) ||
+        cx_fmt(tmp_gen, sizeof tmp_gen, "%s/seed-gen", tmp) ||
+        cx_fmt(json_path, sizeof json_path, "%s/parse2.json", tmp)) {
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=exec/parse2\tline=1\tlocation=exec/parse2:1\treason=mkdtemp-failed\tms=%ld\n",
+               base, tip, sy_now_ms() - t0);
+        return 1;
+    }
+
+    char *pack_av[] = { "git", "archive", "-o", archive, tip, "exec", "seed", 0 };
+    char *ext_av[] = { "tar", "-xf", archive, "-C", tmp, 0 };
+    np_result sr = {0};
+    if (np_run(pack_av, repo, 0, 8, &sr, why, sizeof why) || sr.rc != 0 || sr.residue) {
+        np_free(&sr);
+        sy_remove_all(tmp);
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=exec/parse2\tline=1\tlocation=exec/parse2:1\treason=git-archive-failed\tms=%ld\n",
+               base, tip, sy_now_ms() - t0);
+        return 1;
+    }
+    np_free(&sr);
+    if (np_run(ext_av, tmp, 0, 8, &sr, why, sizeof why) || sr.rc != 0 || sr.residue) {
+        np_free(&sr);
+        sy_remove_all(tmp);
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=exec/parse2\tline=1\tlocation=exec/parse2:1\treason=tar-extract-failed\tms=%ld\n",
+               base, tip, sy_now_ms() - t0);
+        return 1;
+    }
+    np_free(&sr);
+
+    const char *gen_bin = tmp_gen;
+    const char *seed_mode = "cold";
+    long compile_ms = 0;
+    sy_stat_t cst;
+    if (!cx_fmt(seed_spec, sizeof seed_spec, "%s:seed", tip) &&
+        pf_resolve_sha(repo, seed_spec, seed_sha) &&
+        !cx_fmt(cache_bin, sizeof cache_bin, "%s/unisacc-parse2-seedgen-%s", sy_tmpdir(), seed_sha)) {
+        if (!force_cold && sy_lstat(cache_bin, &cst) == 0 && cst.kind == 'f' && cst.size > 0) {
+            gen_bin = cache_bin;
+            seed_mode = "warm";
+        }
+    }
+
+    if (tx_eqz(seed_mode, "cold")) {
+        long tc0 = sy_now_ms();
+        char *cc_av[] = { "gcc", "-std=c99", "-O2", "-w", "-I", "seed", "seed/gen.c", "-o", tmp_gen, 0 };
+        if (np_run(cc_av, tmp, 0, 20, &sr, why, sizeof why) || sr.rc != 0 || sr.residue) {
+            np_free(&sr);
+            sy_remove_all(tmp);
+            printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=seed/gen.c\tline=1\tlocation=seed/gen.c:1\treason=seed-gen-compile-failed\tms=%ld\n",
+                   base, tip, sy_now_ms() - t0);
+            return 1;
+        }
+        np_free(&sr);
+        compile_ms = sy_now_ms() - tc0;
+        if (seed_sha[0] && !cx_fmt(cache_tmp, sizeof cache_tmp, "%s.%d", cache_bin, (int)sy_pid())) {
+            unsigned char *gb = 0;
+            int64_t gn = 0;
+            if (sy_read_file(tmp_gen, &gb, &gn, 16 << 20) == 0 && gb && gn > 0) {
+                if (sy_write_file(cache_tmp, gb, gn, 0755) == 0) {
+                    sy_chmod(cache_tmp, 0755);
+                    if (sy_rename(cache_tmp, cache_bin) == 0) gen_bin = cache_bin;
+                    else sy_unlink(cache_tmp);
+                }
+            }
+            if (gb) mm_free(gb);
+        }
+    }
+
+    long tr0 = sy_now_ms();
+    char *run_av[] = { (char *)gen_bin, "parse2", json_path, "--locations", 0 };
+    int run_ok = !np_run(run_av, tmp, 0, 15, &sr, why, sizeof why) && sr.rc == 0 && !sr.residue;
+    long run_ms = sy_now_ms() - tr0;
+    sy_stat_t jst;
+    if (run_ok && sy_lstat(json_path, &jst) == 0 && jst.kind == 'f' && jst.size > 0) {
+        np_free(&sr);
+        sy_remove_all(tmp);
+        printf("PREFLIGHT_ITEM\tparse2-bind\tPASS\tbase=%s\trev=%s\tstatus=gen-shared-e3\tseed_gen=%s\tcompile_ms=%ld\trun_ms=%ld\tms=%ld\n",
+               base, tip, seed_mode, compile_ms, run_ms, sy_now_ms() - t0);
+        return 0;
+    }
+
+    char fbuf[256], lbuf[32], rbuf[256];
+    pf_extract_err(sr.err ? sr.err : "", (long)sr.errn, fbuf, lbuf, rbuf);
+    np_free(&sr);
+    sy_remove_all(tmp);
+    printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\tbase=%s\trev=%s\tfile=%s\tline=%s\tlocation=%s:%s\treason=%s\tseed_gen=%s\tcompile_ms=%ld\trun_ms=%ld\tms=%ld\n",
+           base, tip, fbuf, lbuf, fbuf, lbuf, rbuf, seed_mode, compile_ms, run_ms, sy_now_ms() - t0);
+    return 1;
+}
+
 static int load_table(const char *tpath, PfNode *nodes, int max_nodes, int *out_n) {
     unsigned char *b = 0;
     int64_t n = 0;
@@ -116,7 +345,7 @@ static int load_table(const char *tpath, PfNode *nodes, int max_nodes, int *out_
         printf("PREFLIGHT_TABLE\tstatus=FAIL\treason=unreadable\n");
         return 2;
     }
-    int saw_hdr = 0, has_root = 0, has_snap = 0, cnt = 0;
+    int saw_hdr = 0, has_root = 0, has_snap = 0, has_parse2 = 0, cnt = 0;
     int64_t pos = 0;
     while (pos < n) {
         int64_t ls = pos;
@@ -176,11 +405,12 @@ static int load_table(const char *tpath, PfNode *nodes, int max_nodes, int *out_
         }
         if (tx_eqz(nd->name, "root-types")) has_root = 1;
         if (tx_eqz(nd->name, "snap-cache-types")) has_snap = 1;
+        if (tx_eqz(nd->name, "parse2-bind")) has_parse2 = 1;
         cnt++;
     }
     mm_free(b);
-    if (!saw_hdr || cnt < 2 || !has_root || !has_snap) {
-        printf("PREFLIGHT_TABLE\tstatus=FAIL\treason=missing-mandatory-m2-rows\n");
+    if (!saw_hdr || cnt < 3 || !has_root || !has_snap || !has_parse2) {
+        printf("PREFLIGHT_TABLE\tstatus=FAIL\treason=missing-mandatory-m2-m3-rows\n");
         return 2;
     }
     *out_n = cnt;
@@ -188,9 +418,9 @@ static int load_table(const char *tpath, PfNode *nodes, int max_nodes, int *out_
 }
 
 int main(int argc, char **argv) {
-    const char *root = ".", *snap_base = 0, *rev = "none", *tpath = "tools/flows/chain-preflight.tsv";
+    const char *root = ".", *repo = ".", *snap_base = 0, *rev = "none", *tpath = "tools/flows/chain-preflight.tsv";
     const char *item = 0, *ev_file = 0;
-    int check_table = 0, strict = 0;
+    int check_table = 0, strict = 0, force_cold = 0;
     char dflt_snap[2048];
     const char *home = sy_env("HOME");
     if (home && home[0] && !cx_fmt(dflt_snap, sizeof dflt_snap, "%s/.cache/unisacc/chains/snap", home)) {
@@ -202,6 +432,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
         else if (tx_eqz(argv[i], "--snap-base") && i + 1 < argc) snap_base = argv[++i];
         else if (tx_eqz(argv[i], "--rev") && i + 1 < argc) rev = argv[++i];
         else if (tx_eqz(argv[i], "--table") && i + 1 < argc) tpath = argv[++i];
@@ -209,6 +440,7 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--events-file") && i + 1 < argc) ev_file = argv[++i];
         else if (tx_eqz(argv[i], "--check-table")) check_table = 1;
         else if (tx_eqz(argv[i], "--strict")) strict = 1;
+        else if (tx_eqz(argv[i], "--cold")) force_cold = 1;
         else {
             fprintf(stderr, "chain-preflight: bad argument: %s\n", argv[i]);
             return 2;
@@ -218,6 +450,7 @@ int main(int argc, char **argv) {
     if (item) {
         if (tx_eqz(item, "root-types")) return item_root_types(root);
         if (tx_eqz(item, "snap-cache-types")) return item_snap_cache_types(snap_base, rev);
+        if (tx_eqz(item, "parse2-bind")) return item_parse2_bind(repo, rev, force_cold);
         fprintf(stderr, "chain-preflight: unknown item: %s\n", item);
         return 2;
     }
@@ -239,6 +472,8 @@ int main(int argc, char **argv) {
             rc = item_root_types(root);
         } else if (tx_eqz(nodes[i].name, "snap-cache-types")) {
             rc = item_snap_cache_types(snap_base, rev);
+        } else if (tx_eqz(nodes[i].name, "parse2-bind")) {
+            rc = item_parse2_bind(repo, rev, force_cold);
         } else {
             char out[2048];
             rc = ckk_sh_t("CHAIN_PREFLIGHT", nodes[i].cmd, out, sizeof out, nodes[i].timeout_s);
