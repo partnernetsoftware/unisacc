@@ -1,0 +1,46 @@
+native function raycaster_span(base:i64,size:i64) i64 {
+  return base>=0 && base%8==0 && base<=6291456-size;
+}
+
+native function raycaster_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
+  return a<b+size && b<a+bytes;
+}
+
+// webGL NDC. Camera kind 1 is perspective, kind 2 is orthographic.
+// The caller supplies the updated world matrix and 48 bytes of scratch.
+native function Raycaster_setFromCamera(ray:i64,camera:i64,world:i64,ndc:i64,kind:i64,work:i64) i64 {
+  if(!raycaster_span(ray,Ray.size) || !raycaster_span(world,128) || !raycaster_span(ndc,16) ||
+     !raycaster_span(work,48) || camera<0 || camera>6291456-Camera.size || camera%4!=0 ||
+     (kind!=1 && kind!=2) || ux_u32(camera+Camera.coordinateSystem)!=2000) { return 0-1; }
+  let inverse=ux_u32(camera+Camera.projectionMatrixInverse);
+  let projection=ux_u32(camera+Camera.projectionMatrix);
+  if(!raycaster_span(inverse,128) || !raycaster_span(projection,128) ||
+     raycaster_overlap(work,48,world,128) || raycaster_overlap(work,48,inverse,128) ||
+     raycaster_overlap(work,48,projection,128) || raycaster_overlap(work,48,camera,Camera.size) ||
+     raycaster_overlap(work,48,ndc,16) || raycaster_overlap(work,48,ray,Ray.size) ||
+     raycaster_overlap(ray,Ray.size,world,128) || raycaster_overlap(ray,Ray.size,inverse,128) ||
+     raycaster_overlap(ray,Ray.size,projection,128) || raycaster_overlap(ray,Ray.size,camera,Camera.size) ||
+     raycaster_overlap(ray,Ray.size,ndc,16)) { return 0-1; }
+  let x=ux_f64(ndc);
+  let y=ux_f64(ndc+8);
+  if(x-x!=0.0 || y-y!=0.0) { return 0-2; }
+  let origin=work;
+  let direction=work+24;
+  if(kind==1) {
+    let a=Vector3_set(origin,ux_f64(world+96),ux_f64(world+104),ux_f64(world+112));
+    let b=Vector3_set(direction,x,y,0.5);
+    let c=Vector3_unproject(direction,inverse,world);
+    let d=Vector3_sub(direction,origin);
+  } else {
+    let a=Vector3_set(origin,x,y,ux_f64(projection+112));
+    let b=Vector3_unproject(origin,inverse,world);
+    let c=Vector3_set(direction,0.0-ux_f64(world+64),0.0-ux_f64(world+72),0.0-ux_f64(world+80));
+  }
+  let size=Vector3_length(direction);
+  let ox=ux_f64(origin);
+  let oy=ux_f64(origin+8);
+  let oz=ux_f64(origin+16);
+  if(size<=0.0 || size-size!=0.0 || ox-ox!=0.0 || oy-oy!=0.0 || oz-oz!=0.0) { return 0-2; }
+  let unit=Vector3_normalize(direction);
+  return Ray_set(ray,origin,unit);
+}
