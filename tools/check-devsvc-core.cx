@@ -69,7 +69,19 @@ static int group(int g) {
     if (ovf) return 2;
     /* 夹具:克隆、放入工作副本三件、提交、链接产品 */
     {   char gd[600]; F(gd, sizeof gd, "%s/.git", fx);
-        if (access(gd, F_OK) != 0) { char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-clone\n"); return 1; } } }
+        if (access(gd, F_OK) != 0) { char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-clone\n"); return 1; } }
+        /* 复用的夹具克隆每次先对齐仓根当前 HEAD:否则新增的 use 依赖(如 cxlib/trailer.cx)不在旧克隆里,整组编译失败。
+           reset --hard 只许作用于夹具私有克隆:fx 必须在 ~/.cache/unisacc/check-devsvc-core/ 下、不等于仓根,
+           且 git 认定的顶层恰为 fx 本身;git 命令显式带 --git-dir/--work-tree,不向上找仓 */
+        {   char wt[620], gdo[620], top[600]; long n;
+            F(wt, sizeof wt, "--work-tree=%s", fx); F(gdo, sizeof gdo, "--git-dir=%s", gd);
+            if (ovf || !strstr(fx, "/.cache/unisacc/check-devsvc-core/") || !strcmp(fx, root)) { printf("REFUSE\tdevsvc-core.fixture-path\t%s\n", fx); return 2; }
+            {   char *v[] = {"git", "rev-parse", "--show-toplevel", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-toplevel\n"); return 1; } }
+            n = (long)strlen(out); while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
+            F(top, sizeof top, "%s", out);
+            if (ovf || strcmp(top, fx) != 0) { printf("REFUSE\tdevsvc-core.fixture-toplevel\tgot=%s\twant=%s\n", top, fx); return 2; }
+            {   char *v[] = {"git", gdo, wt, "fetch", "-q", root, "HEAD", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-fetch\n"); return 1; } }
+            {   char *v[] = {"git", gdo, wt, "reset", "-q", "--hard", "FETCH_HEAD", 0}; if (run(v, fx, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-sync\n"); return 1; } } } }
     {   /* 末项可选:flowexec 引到的 flowadmit 在工作副本里有就一并放入(只把 ENOENT 当没有) */
         char dv[640]; F(dv, sizeof dv, "%s/tools/dv", fx);
         if (ovf || sy_mkdir_all(dv, 0755)) return 2;
