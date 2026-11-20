@@ -1,6 +1,6 @@
 /* tools/version-metrics-gen.cx -- 版本节拍表生成器与校验器 (0.0.87 S6 度量补账)。
  *
- *   sh ./unisacc.com tools/version-metrics-gen.cx -- --write|--check|--print [--root DIR]
+ *   sh ./unisacc.com tools/version-metrics-gen.cx -- --write|--check|--print|--write-history [--root DIR]
  *
  * 从仓内只读证据决定性派生 build/version-cadence.tsv，0.0.81..0.0.85 每版一行加 0.0.86 进行中一行。
  * 证据：
@@ -10,6 +10,8 @@
  *   freeze      tag v0.0.V 所指提交的提交时间；
  *   public      INDEX.tsv exec-5-publish 行时间戳；
  *   commits     git rev-list --count v0.0.(V-1)..v0.0.V。
+ * --write-history 从带发布标签的 Git 树写 build/version-cadence-git.tsv。
+ * 单提交布局使用这份原始 Git 查询输入，仍重算并校验最终表。
  * 链墙钟、预跑并行度、A/B/C 类提交数、返工次数在仓内没有可核记录，一律 UNMEASURED，绝不估算。
  * 输出 VERSION_CADENCE\tstatus=WRITE|CHECK\trows=N\tunmeasured=M；--check 遇漂移报 DIFF 退出 1，用法错误退出 2。
  */
@@ -27,6 +29,10 @@
 static char root[4096];
 static char tbl[VG_TBL];
 static int tlen, unmeasured;
+static char history[8192] = "# kind\tkey\tgit-output\n";
+static char *history_read;
+static size_t history_len;
+static int live_history;
 
 static void die(const char *a, const char *b) { tool_die("version-metrics-gen", a, b, 2); }
 
@@ -123,6 +129,28 @@ static int git_earliest(const char *pat, char *dst, int cap) {
     return 0;
 }
 
+/* Consume the original Git query rows in the same order as the live path.
+   Release timestamps and timing calculations still come from INDEX and row(). */
+static void git_fact(const char *kind, const char *key, char *value, int cap) {
+    char prefix[128];
+    if (cx_fmt(prefix, sizeof prefix, "%s\t%s\t", kind, key)) die("history key", key);
+    if (live_history) {
+        size_t at = strlen(history);
+        if (cx_fmt(history + at, sizeof history - at, "%s%s\n", prefix, *value ? value : "-"))
+            die("history extent", key);
+    } else {
+        const char *end = strchr(history_read, '\n');
+        size_t pref = strlen(prefix);
+        if (!end || (size_t)(end - history_read) <= pref || memcmp(history_read, prefix, pref))
+            die("missing or mismatched Git input", key);
+        const char *text = history_read + pref;
+        int n = (int)(end - text);
+        if (n == 1 && *text == '-') value[0] = 0;
+        else if (n >= cap || cx_fmt(value, cap, "%.*s", n, text)) die("history value", key);
+        history_read = (char *)end + 1;
+    }
+}
+
 /* find INDEX row by name; copy timestamp (col 2) and description (col 5) */
 static int index_row(const char *idx, const char *name, char *ts, int tcap, char *desc, int dcap) {
     const char *p = idx;
@@ -205,11 +233,15 @@ static void row(int v) {
     cx_fmt(ver, sizeof ver, "0.0.%d", v);
     cx_fmt(tag, sizeof tag, "v%s", ver);
     cx_fmt(range, sizeof range, "v0.0.%d..v%s", v - 1, ver);
-    cx_fmt(pat, sizeof pat, "预置 %s 候选版本槽", ver);
-    if (git_earliest(pat, buf, sizeof buf) != 0) {
-        cx_fmt(pat, sizeof pat, "%s 版本槽", ver);
-        if (git_earliest(pat, buf, sizeof buf) != 0) buf[0] = 0;
+    buf[0] = 0;
+    if (live_history) {
+        cx_fmt(pat, sizeof pat, "预置 %s 候选版本槽", ver);
+        if (git_earliest(pat, buf, sizeof buf) != 0) {
+            cx_fmt(pat, sizeof pat, "%s 版本槽", ver);
+            if (git_earliest(pat, buf, sizeof buf) != 0) buf[0] = 0;
+        }
     }
+    git_fact("slot", ver, buf, sizeof buf);
     t = buf[0] ? strchr(buf, '\t') : 0;
     if (t) {
         *t = 0;
@@ -219,7 +251,10 @@ static void row(int v) {
     }
     {
         char *av[] = {"git", "-C", root, "log", "-1", "--format=%ci\t%h", tag, 0};
-        if (run1(av, buf, sizeof buf) == 0 && (t = strchr(buf, '\t')) != 0) {
+        buf[0] = 0;
+        if (live_history) (void)run1(av, buf, sizeof buf);
+        git_fact("freeze", ver, buf, sizeof buf);
+        if ((t = strchr(buf, '\t')) != 0) {
             *t = 0;
             cx_fmt(freeze, sizeof freeze, "%.16s", buf);
             cx_fmt(freeze_src, sizeof freeze_src, "tag:%s:%s", tag, t + 1);
@@ -227,7 +262,10 @@ static void row(int v) {
     }
     {
         char *av[] = {"git", "-C", root, "rev-list", "--count", range, 0};
-        if (run1(av, buf, sizeof buf) == 0) { trim_nl(buf); cx_fmt(commits, sizeof commits, "%s", buf); }
+        buf[0] = 0;
+        if (live_history) (void)run1(av, buf, sizeof buf);
+        git_fact("commits", ver, buf, sizeof buf);
+        if (*buf) { trim_nl(buf); cx_fmt(commits, sizeof commits, "%s", buf); }
     }
     cx_fmt(idxp, sizeof idxp, "%s/release/evidence/%s/INDEX.tsv", root, ver);
     idx = cx_read(idxp, &n);
@@ -246,7 +284,10 @@ static void row(int v) {
                 h[k] = 0;
                 if (k >= 7) {
                     char *av[] = {"git", "-C", root, "log", "-1", "--format=%ci", h, 0};
-                    if (run1(av, buf, sizeof buf) == 0) {
+                    buf[0] = 0;
+                    if (live_history) (void)run1(av, buf, sizeof buf);
+                    git_fact("cutoff", h, buf, sizeof buf);
+                    if (*buf) {
                         cx_fmt(cut, sizeof cut, "%.16s", buf);
                         cx_fmt(cut_src, sizeof cut_src, "INDEX:prefreeze-strict:T=%s", h);
                     }
@@ -281,19 +322,44 @@ static void row_open(void) {
 
 int main(int argc, char **argv) {
     int mode = 0;
-    char path[4400];
+    char path[4400], history_path[4400], tag_oid[65];
     cx_fmt(root, sizeof root, ".");
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--write")) mode = 1;
         else if (!strcmp(argv[i], "--check")) mode = 2;
         else if (!strcmp(argv[i], "--print")) mode = 3;
+        else if (!strcmp(argv[i], "--write-history")) mode = 4;
         else if (!strcmp(argv[i], "--root") && i + 1 < argc) cx_fmt(root, sizeof root, "%s", argv[++i]);
         else die("unknown option", argv[i]);
     }
-    if (!mode) die("usage", "--write|--check|--print [--root DIR]");
+    if (!mode) die("usage", "--write|--check|--print|--write-history [--root DIR]");
+    char *tag_probe[] = {"git", "-C", root, "rev-parse", "--verify", "refs/tags/v0.0.85^{commit}", 0};
+    live_history = run1(tag_probe, tag_oid, sizeof tag_oid) == 0 && strlen(tag_oid) == 40;
+    if (cx_fmt(history_path, sizeof history_path, "%s/build/version-cadence-git.tsv", root)) die("history path", root);
+    char *saved_history = mode == 4 ? 0 : cx_read(history_path, &history_len);
+    if (!live_history) {
+        const char *header = "# kind\tkey\tgit-output\n";
+        size_t n = strlen(header);
+        if (mode == 4 || !saved_history || history_len <= n || history_len >= sizeof history ||
+            memchr(saved_history, 0, history_len) || memcmp(saved_history, header, n))
+            die("Git history input unavailable", history_path);
+        history_read = saved_history + n;
+    }
     put("# version\tstate\tslot_open\tslot_src\tcontent_cutoff\tcutoff_src\tchain_wall_min\tprerun_start\tprerun_end\tprerun_wall_min\tprerun_par\tfreeze\tfreeze_src\tpublic\tslot_to_public_min\tcommits\tcommits_A\tcommits_B\tcommits_C\trework\tnote\n");
     put("# generated by tools/version-metrics-gen.cx --write; times +0800; public = release/evidence/VER/INDEX.tsv exec-5-publish; commits = git rev-list --count prev_tag..tag; do not edit\n");
     for (int v = 81; v <= 85; v++) row(v);
+    if (!live_history && *history_read) die("unused Git history rows", history_path);
+    if (mode == 4) {
+        if (cx_write(history_path, history, strlen(history))) die("write Git history", history_path);
+        printf("VERSION_CADENCE_HISTORY\tstatus=WRITE\n");
+        return 0;
+    }
+    if (mode == 2 && live_history &&
+        (!saved_history || history_len != strlen(history) || memcmp(saved_history, history, history_len))) {
+        printf("DIFF\t%s\n", history_path);
+        return 1;
+    }
+    free(saved_history);
     row_open();
     cx_fmt(path, sizeof path, "%s/build/version-cadence.tsv", root);
     if (mode == 3) { fputs(tbl, stdout); return 0; }

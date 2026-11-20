@@ -1,0 +1,106 @@
+/* Candidate object preflight for the same root closure used by whole-front.
+ * ROOT APE NEW_OUT TARGET PART(0..3). Each part compiles disjoint whole units.
+ */
+#pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define SPAN_MAX 128
+#define SPAN_PARTS 4
+
+static char root[4400], ape[4400], output[4400], temp_env[4450];
+static char *child_env[] = {temp_env, 0};
+static char roots[SPAN_MAX][4400];
+static char *units[SPAN_MAX];
+
+static int refuse(const char *why) {
+    fprintf(stderr, "SPAN_COMPILE REFUSE %s\n", why);
+    return 2;
+}
+
+static int plan(const char *target, np_result *r) {
+    char *args[SPAN_MAX + 7] = {"sh", ape, "-b", (char *)target, "-cx-plan"};
+    int nr = cf_root_count();
+    if (nr <= 0 || nr > SPAN_MAX) return -1;
+    for (int i = 0; i < nr; i++) {
+        if (cx_fmt(roots[i], sizeof roots[i], "%s/%s", root, cf_root_source(i))) return -1;
+        args[5 + i] = roots[i];
+    }
+    char why[256] = {0};
+    if (np_run(args, root, child_env, 7, r, why, sizeof why) || r->rc || r->residue || !r->outn) {
+        if (*why) fprintf(stderr, "%s\n", why);
+        if (r->errn) fwrite(r->err, 1, r->errn, stderr);
+        return -1;
+    }
+    int n = 0;
+    char *end = r->out + r->outn;
+    for (char *row = r->out; row < end;) {
+        char *line = memchr(row, '\n', (size_t)(end - row));
+        if (!line || n == SPAN_MAX) return -1;
+        *line = 0;
+        char *tab = strchr(row, '\t');
+        if (!tab) return -1;
+        *tab = 0;
+        char ordinal[16];
+        if (cx_fmt(ordinal, sizeof ordinal, "%d", n) || !tx_eqz(ordinal, row)) return -1;
+        char *path = tab + 1;
+        tab = strchr(path, '\t');
+        if (tab) *tab = 0;
+        if (strncmp(path, root, strlen(root)) || path[strlen(root)] != '/') return -1;
+        for (int i = 0; i < n; i++) if (tx_eqz(units[i], path)) return -1;
+        units[n++] = path;
+        row = line + 1;
+    }
+    return n >= nr ? n : -1;
+}
+
+static int compile_unit(char *target, char *unit, long deadline) {
+    char object[4400], why[256] = {0};
+    np_result r = {0};
+    sy_stat_t st;
+    long left = (deadline - sy_now_ms()) / 1000;
+    if (left < 1 || cx_fmt(object, sizeof object, "%s/unit.o", output)) return 0;
+    char *args[] = {"sh", ape, "-b", target, "-c", "-funit", "-DRT_UNIT", unit, "-o", object, 0};
+    int transport = np_run(args, root, child_env, left < 15 ? (int)left : 15, &r, why, sizeof why);
+    int made = !sy_lstat(object, &st);
+    int ok = !transport && !r.rc && !r.residue && (!r.err || !strstr(r.err, "error:")) &&
+        made && st.kind == 'f' && st.size > 0;
+    printf("SPAN_UNIT\t%s\t%s\t%s\trc=%d\ttransport=%d\n", ok ? "PASS" : "FAIL", target,
+           unit + strlen(root) + 1, r.rc, transport);
+    if (!ok && *why) fprintf(stderr, "%s\n", why);
+    if (!ok && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    if (made && sy_unlink(object)) ok = 0;
+    np_free(&r);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    const char *targets[] = {"lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    if (argc != 6 || !realpath(argv[1], root) || !realpath(argv[2], ape) || argv[3][0] != '/' ||
+        strlen(argv[5]) != 1 || argv[5][0] < '0' || argv[5][0] >= '0' + SPAN_PARTS)
+        return refuse("usage ROOT APE NEW_OUT TARGET PART");
+    int valid = 0;
+    for (int i = 0; i < 6; i++) valid |= tx_eqz(argv[4], targets[i]);
+    if (!valid) return refuse("target");
+    if (cx_fmt(output, sizeof output, "%s", argv[3]) || sy_mkdir(output, 0700)) return refuse("new output required");
+    if (cx_fmt(temp_env, sizeof temp_env, "TMPDIR=%s/tmp", output) || sy_mkdir(temp_env + 7, 0700))
+        return refuse("private temp");
+    long start = sy_now_ms();
+    np_result r = {0};
+    int n = plan(argv[4], &r);
+    if (n < SPAN_PARTS) {
+        np_free(&r);
+        return refuse("invalid candidate unit plan");
+    }
+    int part = argv[5][0] - '0', first = n * part / SPAN_PARTS, last = n * (part + 1) / SPAN_PARTS;
+    int failed = 0;
+    for (int i = first; i < last; i++) failed += !compile_unit(argv[4], units[i], start + 40000);
+    np_free(&r);
+    if (sy_remove_all(temp_env + 7)) return refuse("temp cleanup");
+    printf("CHECK_SPAN_COMPILE\ttarget=%s\tpart=%d\tplan=%d\tfirst=%d\tchecked=%d\tfailed=%d\tms=%ld\n",
+           argv[4], part, n, first, last - first, failed, sy_now_ms() - start);
+    return failed != 0;
+}

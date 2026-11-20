@@ -37,6 +37,10 @@ static int cnf_compile(const char *name, const char *src, const char *flag, char
 static void cnf_reject(const char *id, const char *src, const char *col, const char *msg) {
     char out[CNF_OUT], obj[CNF_PW], where[256]; struct stat st;
     int rc = cnf_compile(id, src, 0, out, sizeof out, obj, sizeof obj);
+    if (!col) {
+        ck(rc == 1 && sy_exists(obj) == 0 && ckk_has(out, CNF_OUT, msg), id);
+        return;
+    }
     if (cx_fmt(where, sizeof where, "%s.c:1:%s: error:", id, col)) { ck(0, id); return; }
     ck(rc != 0 && stat(obj, &st) != 0 && ckk_has(out, CNF_OUT, msg) && ckk_has(out, CNF_OUT, where), id);
 }
@@ -72,6 +76,96 @@ int main(int argc, char **argv) {
     cnf_accept("ipi-ok-same", "int r3(int *a){ int *p = a; char b[4]; char *c = b; const char *k = \"x\"; return p != 0 && c != 0 && k != 0; }\nint main(void){return 0;}\n");
     cnf_accept("ipi-ok-void", "int r4(int *a){ void *v = a; char *c = v; unsigned char *u = (unsigned char *)c; return u != 0; }\nint main(void){return 0;}\n");
     cnf_accept("ipi-ok-struct", "struct S { int x; }; int r5(struct S *s){ struct S *t = s; int **pp = 0; int **qq = pp; return t != 0 && qq == 0; }\nint main(void){return 0;}\n");
+    /* local-redefinition: C99 6.7p3, a second declaration of the same local object in the same block; inner-block
+     * shadowing and sibling blocks pass. */
+    cnf_reject("lrd-same", "int a13(void){ int x = 1; int x = 2; return x; }\nint main(void){return 0;}\n", "31", "redefinition of local object 'x'");
+    cnf_accept("lrd-ok-shadow", "int a14(void){ int x = 1; { int x = 2; if (x) return x; } { int y = 3; return y + x; } }\nint main(void){return 0;}\n");
+    cnf_accept("lrd-ok-loops", "int a15(void){ int s = 0; for (int i = 0; i < 2; i++) s += i; for (int i = 0; i < 2; i++) { int t = i; s += t; } return s; }\nint main(void){return 0;}\n");
+    const char *const_write = "assignment to const-qualified object (C99 6.5.16p2)";
+    cnf_reject("const-global", "const int k=1;void f(void){k=2;}\n", "28", const_write);
+    cnf_reject("const-local", "int f(void){const int k=1;k=2;return k;}\n", "27", const_write);
+    cnf_reject("const-member", "struct S {const int a;int b;};int f(void){struct S x={1,0};x.a=3;return x.a;}\n", "62", const_write);
+    cnf_accept("const-member-neighbour", "struct S {const int a;int b;};int f(void){struct S x={1,0};x.b=3;return x.a;}\n");
+    cnf_accept("const-shadow", "const int k=1;int f(void){int k=2;k=3;return k;}\n");
+    cnf_accept("const-pointer-rebind", "int f(const int *p,const int *q){p=q;return *p;}\n");
+    cnf_reject("const-pointee-index", "int f(const char *p){p[0]='x';return 0;}\n", "22", const_write);
+    cnf_reject("const-pointee-star", "int f(const int *p){*p=2;return 0;}\n", "22", const_write);
+    cnf_reject("const-pointee-compound", "int f(const int *p){(*p)+=1;return *p;}\n", "23", const_write);
+    cnf_accept("const-pointee-explicit-cast", "int f(const int *p){*(int *)p=2;return *p;}\n");
+    cnf_reject("const-pointee-nested-index", "int f(const char *p,int *i){p[*i]='x';return 0;}\n", "29", const_write);
+    cnf_accept("const-pointer-mutable-pointee", "int f(int *const p){*p=2;return *p;}\n");
+    cnf_accept("mutable-pointee-of-const-member", "struct R{long *n;};int f(const struct R *r){*r->n=0;return 0;}\n");
+    const char *drop = "conversion discards const qualifier from pointed-to type (C99 6.5.16.1p1)";
+    cnf_reject("drop-const-address", "int f(void){const int c=1;int *p=&c;return *p;}\n", "35", drop);
+    cnf_reject("drop-const-assignment", "int f(const int *p,int *q){q=p;return *q;}\n", "30", drop);
+    cnf_accept("copy-const-pointer-object", "int f(int *p){int *const q=p;int *r=q;return *r;}\n");
+    cnf_accept("cast-away-const", "int f(const int *p){int *q=(int *)p;return *q;}\n");
+    cnf_accept("keep-const-pointee", "int f(const int *p){const int *q=p;return *q;}\n");
+    cnf_accept("call-argument-const-is-not-result-type", "void *g(const char *name);int f(const char *name){void *p;p=g(name);return p!=0;}\n");
+    /* C99 6.5.9p2: compatible qualified pointees, object versus void and null constants are allowed. */
+    cnf_reject("eq-char-int", "int f(char *p,int *q){return p==q;}\nint main(void){return 0;}\n", "31", "comparison of distinct pointer types");
+    cnf_accept("eq-qualified", "int f(const int *p,int *q){return p==q;}\nint main(void){return 0;}\n");
+    cnf_accept("eq-void", "int f(int **p,void *v){return v==p || p!=v;}\nint main(void){return 0;}\n");
+    cnf_accept("eq-null", "int f(int *p){return p==0 || 0!=p;}\nint main(void){return 0;}\n");
+    cnf_reject("eq-deep-void", "int f(void **p,int **q){return p!=q;}\nint main(void){return 0;}\n", "33", "comparison of distinct pointer types");
+    cnf_reject("eq-function-void", "int f(void *p,int (*q)(int)){return p==q;}\nint main(void){return 0;}\n", "38", "comparison of distinct pointer types");
+    cnf_reject("eq-tag-identity", "struct A{int v;};struct B{int v;};int f(struct A *p,struct B *q){return p==q;}\nint main(void){return 0;}\n", "74", "comparison of distinct pointer types");
+    cnf_reject("ft-return", "int n2(int); char n2(int);\nint main(void){return 0;}\n", "19", "conflicting return types for function");
+    cnf_accept("ft-consistent", "int f(int);int f(int x){return x;}\nint main(void){return f(0);}\n");
+    cnf_accept("ft-array-adjust", "int f(int x[3]);int f(int *x){return *x;}\nint main(void){return 0;}\n");
+    const char *conflict = "conflicting parameter types for function (C99 6.7p4)";
+    cnf_reject("ft-arity", "int f(int);int f(int,int);int main(void){return 0;}\n", "16", conflict);
+    cnf_reject("ft-depth", "int f(int);int f(int *);int main(void){return 0;}\n", "16", conflict);
+    cnf_reject("ft-base", "int f(char *);int f(int *);int main(void){return 0;}\n", "19", conflict);
+    cnf_reject("ft-variadic", "int f(int);int f(int,...);int main(void){return 0;}\n", "16", conflict);
+    cnf_reject("ft-composite", "int f(int);int f();int f(double);int main(void){return 0;}\n", "24", conflict);
+    cnf_reject("ft-promotion", "int f();int f(char);int main(void){return 0;}\n", "13", conflict);
+    cnf_accept("ft-default-promotion", "int f();int f(int);int main(void){return 0;}\n");
+    cnf_accept("ft-callback-definition-before-abstract-prototype",
+        "void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);} void f(void *,void (*)(void *)); int main(void){return 0;}\n");
+    cnf_accept("ft-callback-repeated-declarations",
+        "void f(void *,void (*)(void *)); void f(void *p,void (*cb)(void *)); void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-top-level-const",
+        "void f(void *const p,void (*const cb)(void *)); void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-const-pointee",
+        "void f(const void *,void (*)(const void *)); void f(const void *p,void (*cb)(const void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-function-adjust",
+        "void f(void cb(int)); void f(void (*cb)(int)){cb(1);}\n");
+    cnf_accept("ft-callback-array-adjust",
+        "void f(void (*cb)(int a[3])); void f(void (*cb)(int *)){int a[3]={0};cb(a);}\n");
+    cnf_accept("ft-callback-followed-by-void-pointer",
+        "void f(void cb(int),void *p);void f(void (*cb)(int),void *p){if(p)cb(1);}\n");
+    const char *named_void = "parameter of type void must be unnamed and alone (C99 6.7.5.3p10)";
+    cnf_reject("ft-void-named-nonfunction",
+        "void f(void item);\nint main(void){return 0;}\n", 0, named_void);
+    cnf_reject("ft-callback-followed-by-void",
+        "void f(void cb(int),void);\nint main(void){return 0;}\n", 0, named_void);
+    cnf_reject("ft-callback-followed-by-named-void",
+        "void f(void cb(int),void item);\nint main(void){return 0;}\n", 0, named_void);
+    {
+        struct stat st;
+        if (cx_fmt(obj, sizeof obj, "%s/fwd-import.o", cnf_work)) return 2;
+        char *av[] = {"sh", (char *)cnf_cc, "-c", "-b", "lnx/x86_64",
+                      "tests/cases/d2-callback-import.cx", "-o", obj, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && stat(obj, &st) == 0, "ft-callback-import-abstract-prototype");
+    }
+    const char *callback_conflict = "incompatible semantic declaration type";
+    cnf_reject("ft-callback-conflict-depth",
+        "void f(void (*cb)(void **)); void f(void (*cb)(void *)){cb(0);}\n", 0, callback_conflict);
+    cnf_reject("ft-callback-conflict-arity",
+        "void f(void (*cb)(void *,int)); void f(void (*cb)(void *)){cb(0);}\n", 0, callback_conflict);
+    cnf_reject("ft-callback-conflict-pointee",
+        "void f(void (*cb)(double *)); void f(void (*cb)(int *)){cb(0);}\n", 0, callback_conflict);
+    cnf_reject("implicit-undeclared-call", "void f(void){undeclared_fn();}\n", "14", "call to undeclared function 'undeclared_fn' [-Wc99-implicit-function]");
+    cnf_reject("implicit-unregistered-dunder", "void f(void){__nosuch(1);}\n", "14", "call to undeclared function '__nosuch' [-Wc99-implicit-function]");
+    cnf_accept("implicit-visible-prototype", "int ext(int);int f(void){return ext(1);}\n");
+    cnf_accept("implicit-registered-intrinsic", "void f(void){__write(1,\"x\",1);}\n");
+    cnf_accept("mutable-route-copy", "typedef struct{int n;const char *target;const char *native;} Route;static Route g;int f(void){const char *t;Route r;t=\"x\";r=g;return r.target==t;}\n");
+    cnf_accept("mutable-decoder-compound", "typedef struct{const unsigned char *b;long n;void *(*a)(void *,unsigned long);void (*r)(void *);const char *why;} D;int f(void){D d={0};d=(D){0};return d.why!=0;}\n");
+    cnf_accept("mutable-profile-copy", "typedef struct{const char *id,*src;int n;const char *a,*b;} P;int f(P *out){P p={\"i\",\"s\",1};p.a=\"a\";p.b=p.src;*out=p;return 1;}\n");
+    cnf_accept("qualified-comma-after-cast", "#include <string.h>\nint f(const char *t,unsigned long n){const char *p=t,*end=t+n;while(p<end){const char *nl=memchr(p,10,(unsigned long)(end-p)),*le=nl?nl:end;return le-p;}return 0;}\n");
+    cnf_accept("qualified-comma-after-call", "#include <string.h>\nint f(const char *t,unsigned long n){const char *e=memchr(t,10,(size_t)(t+n-t)),*q;const char *cell=t;for(q=cell;q<t+n;)q++;return e==q;}\n");
     {   /* -Wall keeps the c99-warn contract: warning, rc 0, object written */
         struct stat st;
         int rc = cnf_compile("itp-wall", "int f8(void){ int *p = 5; return p != 0; }\nint main(void){return 0;}\n", "-Wall", out, sizeof out, obj, sizeof obj);

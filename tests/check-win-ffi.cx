@@ -17,11 +17,40 @@
 #pragma unisa use sysx.process
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use compiler.fwdstub
 
 static int built, ran, notrun, failed;
 
 static void say(const char *verdict, const char *target, const char *probe, const char *why) {
     printf("%s\t%s\t%s\t%s\n", verdict, target, probe, why);
+}
+
+static int stub_has(const char *needle) {
+    size_t n = strlen(needle);
+    const char *text = fwd_text();
+    for (size_t i = 0; i + n <= (size_t)fwd_count(); ++i)
+        if (!memcmp(text + i, needle, n)) return 1;
+    return 0;
+}
+
+static void check_forwarded_unsigned(void) {
+    int kind[] = {0, 8};
+    int width[] = {2, 8};
+    int uns[] = {1, 0};
+    fwd_set_target("osx/arm64");
+    fwd_reset();
+    int fixed = fwd_emit("unsigned_fixed", 14, 2, kind, width, uns, 0, 0, 4, 0) &&
+        stub_has("unsigned_fixed(unsigned short a0, double a1)") &&
+        stub_has("kinds[0] = 11;");
+    say(fixed ? "PASS" : "FAIL", "osx/arm64", "forwarded-unsigned-fixed", "unsigned declaration and libffi kind");
+    if (!fixed) failed++;
+    fwd_reset();
+    int variadic = fwd_emit_var("unsigned_variadic", 17, 1, kind, width, uns, 0, 0, 4, 0) &&
+        stub_has("unsigned_variadic(unsigned short a0, ...)") &&
+        stub_has("kinds[0] = 11;");
+    say(variadic ? "PASS" : "FAIL", "osx/arm64", "forwarded-unsigned-variadic", "unsigned fixed declaration and libffi kind");
+    if (!variadic) failed++;
+    fwd_reset();
 }
 
 int main(int argc, char **argv) {
@@ -30,8 +59,14 @@ int main(int argc, char **argv) {
     char root[4096], work[4400], cases[4400], src[4600], img[4600], expect[4600], why[512];
     int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
     int t, p;
+    if (argc == a + 1 && tx_eqz(argv[a], "--stub-only")) {
+        check_forwarded_unsigned();
+        printf("WIN_FFI_STUB\tassertions=2\tfailed=%d\n", failed);
+        return failed ? 1 : 0;
+    }
     if (argc > a + 1) { fprintf(stderr, "usage: check-win-ffi.cx [-- ROOT]\n"); return 2; }
     if (!realpath(argc > a ? argv[a] : ".", root)) { fprintf(stderr, "check-win-ffi: root\n"); return 2; }
+    check_forwarded_unsigned();
     if (cx_fmt(cases, sizeof cases, "%s/tests/cases", root)) return 2;
     {   const char *td = getenv("TMPDIR");
         if (cx_fmt(work, sizeof work, "%s/check-win-ffi-XXXXXX", td && td[0] ? td : "/tmp") || !mkdtemp(work)) {

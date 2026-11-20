@@ -38,7 +38,7 @@ typedef struct {
    is interpreted by the core; even NUL bytes are ordinary key bytes. */
 int core_host_fetch(const unsigned char *key,int n,unsigned char **bytes,int *len);
 void core_host_panic(const char *reason); /* fatal; must not return */
-typedef struct { Buf out, err; const char *reason; int reason_n; } CoreResult;
+typedef struct { Buf out, err; const char *reason; int reason_n; I steps; } CoreResult;
 /* Mutable state shared with the action engine. Byte owners are cleaned up by
    core_run; model/result and the original input are borrowed. */
 typedef struct {
