@@ -1,0 +1,281 @@
+/* tools/check-commit-concurrency.cx -- concurrent-commit fixture: today's real concurrency shapes, measured.
+ *
+ *   sh ./unisacc.com tools/check-commit-concurrency.cx -- --selftest [--cases C1,C2,...]
+ *   sh ./unisacc.com tools/check-commit-concurrency.cx -- --report --impl fixed|unfixed|real [--cases C1,...]
+ *
+ * Every case runs in a private throwaway repo under sy_tmpdir()/check-commit-concurrency-PID (git init, one base
+ * commit; --impl real uses a `git clone --local` of the current checkout plus the installed product, so the
+ * committed tools/commit-own.cx is what is measured).  The commit primitive under test is IMPL:
+ *   IMPL commit MSG PATH...     env CCC_DERIVED=1 also commits the derived table (build/zz-ccc-links.tsv in the
+ *                               fixture repo, --derive for real), CCC_KEYED=TABLE:KEY commits only the KEY row of a
+ *                               shared registration table (--keyed for real)
+ *   IMPL push                   push HEAD to origin's branch of the same name
+ * Cases (N concurrent processes, success rate and p50/p90 latency per case, plus named invariants INV):
+ *   C1  8 agents commit 8 different paths at once                -> all 8 in HEAD, exactly 8 new commits
+ *   C2  8 agents commit 8 new plans docs with the derived table  -> all 8 in HEAD, table == generator(HEAD)
+ *   C3  8 agents register 8 checks (row in tests/batches.tsv)    -> 8 rows exactly once, 8 tools in HEAD
+ *   C4  8 disjoint commits while a merge is in progress          -> MERGE_HEAD kept, intersecting path refused
+ *                                                                   (negative control), merge commit has 2
+ *                                                                   parents and the 8 paths
+ *   C5  two clones push the same branch at once, 3 rounds        -> 6/6 pushes land, foreign untracked bytes kept
+ *   C6  kill -9 of a commit holding its locks, plus a dead        -> next commit succeeds, dead index.lock reclaimed;
+ *       .git/index.lock                                             a live slot holder is waited for, not removed
+ *                                                                   (negative control; fixture impls only)
+ *   C7  foreign staged, unstaged, untracked and broken .cx files -> own path committed, every foreign file byte and
+ *                                                                   index state unchanged
+ * A case is GREEN when every process succeeded (rate 100%, no manual step) and every INV holds.
+ *
+ * --report prints one CASE row per case and COMMIT_CONCURRENCY_REPORT; it exits 0 whatever the verdicts (it is a
+ * measurement; the real baseline is expected red today).  --selftest checks the fixture itself with two stand-ins
+ * written into the private dir: `fixed` (private index, compare-and-swap ref update with retry, disjoint commits
+ * during a merge, push replay loop, flock slots, dead index.lock reclaim, gate reads only the committed paths) must
+ * be GREEN on C1..C7; `unfixed` (shared index, mkdir lock, merge refused, plain push, register self-test against
+ * HEAD, derive gate on the work tree, gate reading the work tree) must be GREEN on C1 and RED on C2..C7.
+ * CCC_MUT=cas|merge|push|reclaim breaks one property of `fixed` (mutation proof: the matching case turns red).
+ * Prints PASS/FAIL per expectation and CHECK_COMMIT_CONCURRENCY<TAB>failed=N; exit 1 when N > 0, 2 on a fixture
+ * error. */
+#pragma unisa use sys.fs
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use cxlib.productpkg
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.sig
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use sys.time
+
+static int failed;
+static char base[4096];
+static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-commit-concurrency.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-commit-concurrency.%s\n", name); } }
+static void die(const char *s) { sy_eprintf("check-commit-concurrency: REFUSE %s\n", s); sy_exit(2); }
+
+static int sh(const char *script, char *out, int cap, int bound) {
+    char *av[] = {"sh", "-c", 0, 0}, *o = 0; size_t on = 0; int rc;
+    char full[8192];
+    if (cx_fmt(full, sizeof full, "{ %s\n} 2>&1", script)) die("script too long");
+    av[2] = full;
+    rc = cx_runv_timeout(av, bound, &o, &on);
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else out[0] = 0; }
+    if (o) mm_free(o);
+    return rc;
+}
+
+/* ---- scripts written into the private dir ---- */
+static const char *MK =
+    "set -eu\nD=$1; rm -rf \"$D\"\n"
+    "if [ -n \"${CCC_REAL:-}\" ]; then git clone -q --local \"$CCC_ROOT\" \"$D\"; cd \"$D\"; else mkdir -p \"$D\"; cd \"$D\"; git init -q -b main .; fi\n"
+    "git config user.email t@t; git config user.name t\n"
+    "mkdir -p plans build tests tools\n"
+    "printf 'base\\n' > plans/zz-ccc-base.md; printf 'u\\n' > zz-ccc-u.txt\n"
+    "if [ -z \"${CCC_REAL:-}\" ]; then printf 'id\\tcheck\\n' > tests/batches.tsv; printf 'plans/zz-ccc-base.md\\n' > build/zz-ccc-links.tsv; git add tests/batches.tsv build/zz-ccc-links.tsv; fi\n"
+    "git add plans/zz-ccc-base.md zz-ccc-u.txt; git commit -q --no-verify -m base\n";
+
+static const char *FIXED =
+    "set -u\nop=$1; shift\nG=$(git rev-parse --absolute-git-dir) || exit 2\nbr=$(git rev-parse --abbrev-ref HEAD)\n"
+    "if [ \"$op\" = push ]; then\n"
+    "  t=3; [ \"${CCC_MUT:-}\" != push ] || t=1; n=0\n"
+    "  while [ $n -lt $t ]; do n=$((n+1))\n"
+    "    git push -q origin \"HEAD:$br\" 2>/dev/null && exit 0\n"
+    "    git fetch -q origin && git rebase -q \"origin/$br\" >/dev/null 2>&1 || { echo REFUSE replay-conflict; exit 1; }\n"
+    "  done; echo REFUSE push-retries; exit 1\nfi\n"
+    "msg=$1; shift\n"
+    "exec 9>>\"$G/ccc-slot.lock\"; flock -s -w 20 9 || { echo REFUSE slot-wait; exit 1; }\n"
+    "[ -z \"${CCC_PAUSE:-}\" ] || sleep \"$CCC_PAUSE\"\n"
+    "if [ -f \"$G/MERGE_HEAD\" ]; then\n"
+    "  [ \"${CCC_MUT:-}\" != merge ] || { echo REFUSE merge-in-progress; exit 1; }\n"
+    "  m=$(git diff --name-only HEAD MERGE_HEAD; git ls-files -u | cut -f2)\n"
+    "  for p; do if printf '%s\\n' \"$m\" | grep -qxF -- \"$p\"; then echo \"REFUSE path-in-merge $p\"; exit 3; fi; done\nfi\n"
+    "I=\"$G/ccc-idx.$$\"; n=0\n"
+    "while :; do n=$((n+1)); [ $n -le 200 ] || { echo REFUSE cas-retries; exit 1; }\n"
+    "  old=$(git rev-parse -q --verify HEAD) || exit 2\n"
+    "  rm -f \"$I\"; GIT_INDEX_FILE=\"$I\" git read-tree \"$old\" || exit 2\n"
+    "  GIT_INDEX_FILE=\"$I\" git update-index --add -- \"$@\" || exit 2\n"
+    "  if [ -n \"${CCC_KEYED:-}\" ]; then f=${CCC_KEYED%%:*}; k=${CCC_KEYED#*:}\n"
+    "    { git show \"$old:$f\"; grep \"^$k\t\" \"$f\"; } > \"$I.k\"; b=$(git hash-object -w \"$I.k\")\n"
+    "    GIT_INDEX_FILE=\"$I\" git update-index --add --cacheinfo \"100644,$b,$f\"; fi\n"
+    "  if [ -n \"${CCC_DERIVED:-}\" ]; then t=$(GIT_INDEX_FILE=\"$I\" git write-tree)\n"
+    "    git ls-tree -r --name-only \"$t\" plans/ > \"$I.d\"; b=$(git hash-object -w \"$I.d\")\n"
+    "    GIT_INDEX_FILE=\"$I\" git update-index --add --cacheinfo \"100644,$b,build/zz-ccc-links.tsv\"; fi\n"
+    "  t=$(GIT_INDEX_FILE=\"$I\" git write-tree); c=$(git commit-tree \"$t\" -p \"$old\" -m \"$msg\")\n"
+    "  if [ \"${CCC_MUT:-}\" = cas ]; then git update-ref HEAD \"$c\" 2>/dev/null && break\n"
+    "  else git update-ref HEAD \"$c\" \"$old\" 2>/dev/null && break; fi\n"
+    "  sleep 0.0$(( $$ % 9 + 1 ))\ndone\n"
+    "rm -f \"$I\" \"$I.k\" \"$I.d\"\n"
+    "L=\"$G/index.lock\"\n"
+    "if [ \"${CCC_MUT:-}\" != reclaim ] && [ -f \"$L\" ] && [ -n \"$(find \"$L\" -mmin +1 2>/dev/null)\" ]; then rm -f \"$L\"; echo \"RECLAIM index.lock\"; fi\n"
+    "for p in \"$@\" ${CCC_KEYED:+${CCC_KEYED%%:*}} ${CCC_DERIVED:+build/zz-ccc-links.tsv}; do\n"
+    "  b=$(git rev-parse \"HEAD:$p\") || continue; k=0\n"
+    "  until git update-index --add --cacheinfo \"100644,$b,$p\" 2>/dev/null; do k=$((k+1)); [ $k -le 40 ] || { echo \"NOTE index-unsynced $p\"; break; }; sleep 0.05; done\n"
+    "done\nexit 0\n";
+
+static const char *UNFIXED =
+    "set -u\nop=$1; shift\nG=$(git rev-parse --absolute-git-dir) || exit 2\nbr=$(git rev-parse --abbrev-ref HEAD)\n"
+    "if [ \"$op\" = push ]; then git push -q origin \"HEAD:$br\" 2>/dev/null || { echo REFUSE non-fast-forward; exit 1; }; exit 0; fi\n"
+    "msg=$1; shift\n"
+    "[ ! -f \"$G/MERGE_HEAD\" ] || { echo REFUSE merge-in-progress; exit 1; }\n"
+    "n=0; until mkdir \"$G/ccc-unfixed.d\" 2>/dev/null; do n=$((n+1)); [ $n -le 40 ] || { echo REFUSE lock-wait; exit 1; }; sleep 0.05; done\n"
+    "trap 'rmdir \"$G/ccc-unfixed.d\"' EXIT\n"
+    "[ -z \"${CCC_PAUSE:-}\" ] || sleep \"$CCC_PAUSE\"\n"
+    "O=\"$G/ccc-own.$$\"; printf '%s\\n' \"$@\" ${CCC_KEYED:+${CCC_KEYED%%:*}} ${CCC_DERIVED:+build/zz-ccc-links.tsv} > \"$O\"\n"
+    "for f in $(git ls-files -mo --exclude-standard | grep -vxF -f \"$O\"); do if grep -q BROKEN \"$f\" 2>/dev/null; then echo \"REFUSE gate $f\"; exit 1; fi; done\n"
+    "if [ -n \"${CCC_KEYED:-}\" ]; then f=${CCC_KEYED%%:*}; k=${CCC_KEYED#*:}; git show \"HEAD:$f\" > \"$O.h\"\n"
+    "  grep -v \"^$k\t\" \"$f\" | cmp -s - \"$O.h\" || { echo REFUSE register-selftest; exit 1; }; fi\n"
+    "[ -z \"${CCC_DERIVED:-}\" ] || git ls-files -co --exclude-standard plans/ > build/zz-ccc-links.tsv\n"
+    "git add -- $(cat \"$O\") 2>/dev/null || { echo REFUSE index-lock; exit 1; }\n"
+    "if [ -n \"${CCC_DERIVED:-}\" ]; then git ls-files plans/ > \"$O.d\"; git show :build/zz-ccc-links.tsv | cmp -s - \"$O.d\" || { echo REFUSE derive-drift; exit 1; }; fi\n"
+    "git commit -q --no-verify -m \"$msg\" -- $(cat \"$O\") 2>/dev/null || { echo REFUSE commit; exit 1; }\n"
+    "rm -f \"$O\" \"$O.h\" \"$O.d\"\nexit 0\n";
+
+static const char *REAL =
+    "set -u\nop=$1; shift\nbr=$(git rev-parse --abbrev-ref HEAD)\n"
+    "if [ \"$op\" = push ]; then git push -q origin \"HEAD:$br\" 2>/dev/null || { echo REFUSE non-fast-forward; exit 1; }; exit 0; fi\n"
+    "msg=$1; shift; a=\nfor p; do a=\"$a --whole $p\"; done\n"
+    "[ -z \"${CCC_KEYED:-}\" ] || a=\"$a --keyed ${CCC_KEYED%%:*} ${CCC_KEYED#*:}\"\n"
+    "[ -z \"${CCC_DERIVED:-}\" ] || a=\"$a --derive\"\n"
+    "exec sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m \"$msg\" $a\n";
+
+static const char *CASES =
+    "set -u\nC=$1; D=$2; W=$3; rm -rf \"$W\"; mkdir -p \"$W\"; cd \"$D\" || exit 2\nIM=$CCC_IMPL\n"
+    "launch(){ i=1; while [ $i -le $1 ]; do ( s=$(date +%s%N); job $i > \"$W/o.$i\" 2>&1; rc=$?; e=$(date +%s%N); "
+    "printf 'R %s %s %s %s\\n' $i $rc $(( (e-s)/1000000 )) \"$(grep -m1 -oE '(REFUSE|COMMIT_OWN_FAIL|COMMIT_MERGE_[A-Z_]+|COMMIT_[A-Z_]*REFUSE[A-Z_]*)[^[:space:]]*([[:space:]][^[:space:]]+)?' \"$W/o.$i\" | tr '\\t' ' ')\" > \"$W/r.$i\" ) & i=$((i+1)); done; wait; cat \"$W\"/r.*; rm -f \"$W\"/r.*; }\n"
+    "inv(){ if eval \"$2\" >/dev/null 2>&1; then echo \"INV $1 1\"; else echo \"INV $1 0\"; fi; }\n"
+    "B0=$(git rev-parse HEAD)\n"
+    "case $C in\n"
+    "C1) for i in 1 2 3 4 5 6 7 8; do printf 'c1 %s\\n' $i > zz-ccc-c1-$i.txt; done\n"
+    "  job(){ $IM commit c1-$1 zz-ccc-c1-$1.txt; }; launch 8\n"
+    "  inv paths8 '[ $(git ls-tree --name-only HEAD | grep -c \"^zz-ccc-c1-\") = 8 ]'\n"
+    "  inv commits8 '[ $(git rev-list --count $B0..HEAD) = 8 ]';;\n"
+    "C2) for i in 1 2 3 4 5 6 7 8; do printf '# d%s\\n' $i > plans/zz-ccc-d$i.md; done\n"
+    "  job(){ CCC_DERIVED=1 $IM commit c2-$1 plans/zz-ccc-d$1.md; }; launch 8\n"
+    "  inv docs8 '[ $(git ls-tree -r --name-only HEAD plans/ | grep -c \"^plans/zz-ccc-d\") = 8 ]'\n"
+    "  if [ -n \"${CCC_REAL:-}\" ]; then echo 'INV table-consistent skip'; else inv table-consistent '[ \"$(git show HEAD:build/zz-ccc-links.tsv)\" = \"$(git ls-tree -r --name-only HEAD plans/)\" ]'; fi;;\n"
+    "C3) for i in 1 2 3 4 5 6 7 8; do printf 'int main(void){return 0;}\\n' > tools/zz-ccc-k$i.cx; printf 'zz-ccc-k%s\\ttools/zz-ccc-k%s.cx\\n' $i $i >> tests/batches.tsv; done\n"
+    "  job(){ CCC_KEYED=tests/batches.tsv:zz-ccc-k$1 $IM commit c3-$1 tools/zz-ccc-k$1.cx; }; launch 8\n"
+    "  inv rows8 '[ $(git show HEAD:tests/batches.tsv | grep -c \"^zz-ccc-k[1-8]\t\") = 8 ] && [ $(git show HEAD:tests/batches.tsv | grep \"^zz-ccc-k[1-8]\t\" | sort -u | wc -l) = 8 ]'\n"
+    "  inv tools8 '[ $(git ls-tree --name-only HEAD tools/ | grep -c \"^tools/zz-ccc-k\") = 8 ]';;\n"
+    "C4) printf 'm0\\n' > zz-ccc-m.txt; git add zz-ccc-m.txt; git commit -q --no-verify -m m0 -- zz-ccc-m.txt\n"
+    "  B=$(git rev-parse --abbrev-ref HEAD); git checkout -q -b zz-ccc-side; printf 'side\\n' > zz-ccc-m.txt; git commit -q --no-verify -m side -- zz-ccc-m.txt; git checkout -q \"$B\"\n"
+    "  git merge -q --no-ff --no-commit zz-ccc-side >/dev/null 2>&1; inv merge-started '[ -f .git/MERGE_HEAD ]'\n"
+    "  for i in 1 2 3 4 5 6 7 8; do printf 'c4 %s\\n' $i > zz-ccc-c4-$i.txt; done\n"
+    "  job(){ $IM commit c4-$1 zz-ccc-c4-$1.txt; }; launch 8\n"
+    "  inv merge-head-kept '[ -f .git/MERGE_HEAD ]'\n"
+    "  printf 'mine\\n' > zz-ccc-m.txt; $IM commit c4-x zz-ccc-m.txt > \"$W/neg\" 2>&1; nr=$?; printf 'side\\n' > zz-ccc-m.txt\n"
+    "  inv neg-intersect-refused '[ $nr -ne 0 ]'\n"
+    "  git commit -q --no-verify --no-edit >/dev/null 2>&1\n"
+    "  inv two-parents '[ $(git rev-list --parents -n1 HEAD | wc -w) = 3 ]'\n"
+    "  inv own8-in-merge '[ $(git ls-tree --name-only HEAD | grep -c \"^zz-ccc-c4-\") = 8 ]';;\n"
+    "C5) S=\"$W/seed\"; mkdir -p \"$S\"; (cd \"$S\"; git init -q -b main .; printf 's\\n' > zz-ccc-s.txt; git add .; git -c user.email=t@t -c user.name=t commit -q -m s)\n"
+    "  git clone -q --bare \"$S\" \"$W/o.git\"; for x in A B; do git clone -q \"$W/o.git\" \"$W/$x\"; (cd \"$W/$x\"; git config user.email t@t; git config user.name t; printf 'keep %s\\n' $x > zz-ccc-keep.txt); done\n"
+    "  for r in 1 2 3; do for x in A B; do (cd \"$W/$x\"; printf '%s %s\\n' $x $r > zz-ccc-p$x$r.txt; git add zz-ccc-p$x$r.txt; git commit -q --no-verify -m p$x$r); done\n"
+    "    job(){ x=A; [ $1 = 1 ] || x=B; cd \"$W/$x\" && $IM push; }; launch 2; done\n"
+    "  inv origin6 '[ $(git -C \"$W/o.git\" ls-tree --name-only main | grep -c \"^zz-ccc-p\") = 6 ]'\n"
+    "  inv keep-bytes '[ \"$(cat \"$W/A/zz-ccc-keep.txt\")\" = \"keep A\" ] && [ \"$(cat \"$W/B/zz-ccc-keep.txt\")\" = \"keep B\" ]';;\n"
+    "C6) for i in 1 2 3; do printf 'k%s\\n' $i > zz-ccc-k$i.txt; done\n"
+    "  CCC_PAUSE=5 setsid sh -c 'echo $$ > \"$1\"; shift; exec \"$@\"' k \"$W/kpid\" $IM commit c6-k1 zz-ccc-k1.txt > \"$W/killed\" 2>&1 &\n"
+    "  sleep ${CCC_KILL_AFTER:-0.5}; kp=$(cat \"$W/kpid\"); [ \"$(ps -o pgid= -p $kp | tr -d ' ')\" = $kp ] && kill -9 -$kp && echo 'INV killed-group 1' || echo 'INV killed-group 0'; sleep 0.2\n"
+    "  : > .git/index.lock; touch -d '-2 min' .git/index.lock\n"
+    "  job(){ $IM commit c6-k2 zz-ccc-k2.txt; }; launch 1\n"
+    "  inv k2-in-head '[ -n \"$(git ls-tree HEAD zz-ccc-k2.txt)\" ]'\n"
+    "  inv index-lock-reclaimed '[ ! -e .git/index.lock ]'\n"
+    "  if [ -n \"${CCC_REAL:-}\" ]; then echo 'INV live-lock-respected skip'; else\n"
+    "    flock -x .git/ccc-slot.lock sleep 1.5 & h=$!; sleep 0.2\n"
+    "    s=$(date +%s%N); $IM commit c6-k3 zz-ccc-k3.txt > \"$W/k3\" 2>&1; k3=$?; e=$(( ($(date +%s%N)-s)/1000000 )); wait $h; hr=$?\n"
+    "    inv live-lock-respected '[ $k3 = 0 ] && [ $e -ge 1000 ] && [ $hr = 0 ] && [ -e .git/ccc-slot.lock ]'; fi;;\n"
+    "C7) printf 'fs\\n' > zz-ccc-fs.txt; git add zz-ccc-fs.txt; printf 'u2\\n' > zz-ccc-u.txt; printf 'un\\n' > zz-ccc-un.txt; printf 'BROKEN(\\n' > tools/zz-ccc-bad.cx; printf 'mine\\n' > zz-ccc-mine.txt\n"
+    "  job(){ $IM commit c7 zz-ccc-mine.txt; }; launch 1\n"
+    "  inv own-in-head '[ -n \"$(git ls-tree HEAD zz-ccc-mine.txt)\" ]'\n"
+    "  inv foreign-staged-kept '[ \"$(git diff --cached --name-only)\" = zz-ccc-fs.txt ]'\n"
+    "  inv foreign-not-in-head '[ -z \"$(git ls-tree HEAD zz-ccc-fs.txt)\" ]'\n"
+    "  inv unstaged-bytes '[ \"$(cat zz-ccc-u.txt)\" = u2 ] && [ \"$(git diff --name-only)\" = zz-ccc-u.txt ]'\n"
+    "  inv untracked-kept '[ \"$(cat zz-ccc-un.txt)\" = un ] && [ \"$(cat tools/zz-ccc-bad.cx)\" = \"BROKEN(\" ] && ! git ls-files --error-unmatch zz-ccc-un.txt && ! git ls-files --error-unmatch tools/zz-ccc-bad.cx';;\n"
+    "*) exit 2;;\nesac\nexit 0\n";
+
+static void put(const char *name, const char *text) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", base, name) || sy_write_atomic(p, text, strlen(text), 0644)) die("cannot write a fixture script");
+}
+
+static long num(const char *s, long *at) { long v = 0; int neg = 0; while (s[*at] == ' ') (*at)++; if (s[*at] == '-') { neg = 1; (*at)++; } while (s[*at] >= '0' && s[*at] <= '9') { v = v * 10 + (s[*at] - '0'); (*at)++; } return neg ? -v : v; }
+
+/* run case C with IMPL; prints the CASE row; returns 1 when GREEN */
+static int run_case(const char *impl, const char *c, int bound) {
+    static char out[65536];
+    char dir[4400], wdir[4400], s[9000], cmd[600], reason[512], invf[1024], root[4400];
+    long ms[64]; int n = 0, ok = 0, i, j, invbad = 0, rc;
+    int real = !strcmp(impl, "real");
+    if (cx_fmt(dir, sizeof dir, "%s/%s-%s/r", base, impl, c) || cx_fmt(wdir, sizeof wdir, "%s/%s-%s/w", base, impl, c)) die("path");
+    if (cx_fmt(cmd, sizeof cmd, "sh %s/%s.sh", base, impl)) die("path");
+    if (sy_setenv("CCC_IMPL", cmd, 1) || sy_setenv("CCC_REAL", real ? "1" : "", 1) || sy_setenv("CCC_KILL_AFTER", real ? "3" : "0.5", 1)) die("env");
+    if (cx_fmt(s, sizeof s, "sh %s/mk.sh %s", base, dir)) die("path");
+    if (sh(s, out, sizeof out, 50) != 0) { sy_printf("DETAIL\t%s\n", out); die("cannot prepare the case repo"); }
+    if (real) { if (sy_cwd(root, sizeof root) < 0) die("cwd"); if (pp_copy_product(root, dir)) die("cannot copy the product into the case repo"); }
+    if (cx_fmt(s, sizeof s, "sh %s/cases.sh %s %s %s", base, c, dir, wdir)) die("path");
+    rc = sh(s, out, sizeof out, bound);
+    reason[0] = 0; invf[0] = 0;
+    {   long L = tx_len(out, sizeof out), at = 0;
+        while (at < L) {
+            long e = at; while (e < L && out[e] != '\n') e++;
+            if (out[at] == 'R' && out[at + 1] == ' ' && n < 64) {
+                long p = at + 2; long r; (void)num(out, &p); r = num(out, &p); ms[n++] = num(out, &p);
+                if (r == 0) ok++;
+                else if (!reason[0]) { while (p < e && out[p] == ' ') p++; if (p < e) tx_copy(reason, sizeof reason, out + p, e - p); else cx_fmt(reason, sizeof reason, "rc=%ld", r); }
+            } else if (e - at > 4 && !strncmp(out + at, "INV ", 4)) {
+                if (out[e - 1] == '0' && out[e - 2] == ' ') {
+                    long k = tx_len(invf, sizeof invf); invbad++;
+                    if (k + (e - at) + 2 < (long)sizeof invf) { if (k) invf[k++] = ','; tx_copy(invf + k, sizeof invf - k, out + at + 4, e - at - 6); }
+                }
+            }
+            at = e + 1;
+        }
+    }
+    for (i = 1; i < n; i++) for (j = i; j > 0 && ms[j - 1] > ms[j]; j--) { long t = ms[j]; ms[j] = ms[j - 1]; ms[j - 1] = t; }
+    {   int green = rc == 0 && n > 0 && ok == n && invbad == 0;
+        if (rc != 0 && !reason[0]) cx_fmt(reason, sizeof reason, "case-script rc=%d (bound %d s)", rc, bound);
+        sy_printf("CASE\t%s\timpl=%s\tok=%d/%d\trate=%d%%\tp50_ms=%ld\tp90_ms=%ld\tinv_fail=%s\treason=%s\tverdict=%s\n", c, impl, ok, n,
+                  n ? ok * 100 / n : 0, n ? ms[(n - 1) / 2] : -1, n ? ms[(9 * n - 1) / 10] : -1, invf[0] ? invf : "-", reason[0] ? reason : "-", green ? "GREEN" : "RED");
+        if (!green && sy_env("CCC_DETAIL")) sy_printf("DETAIL\t%s\n", out);
+        return green; }
+}
+
+static const char *ALL[] = {"C1", "C2", "C3", "C4", "C5", "C6", "C7", 0};
+static int want(const char *cases, const char *c) {
+    long L, at = 0, k = tx_len(c, 8);
+    if (!cases) return 1;
+    L = tx_len(cases, 256);
+    while (at < L) { long e = at; while (e < L && cases[e] != ',') e++; if (e - at == k && !strncmp(cases + at, c, k)) return 1; at = e + 1; }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cases = 0, *impl = 0; int selftest = 0, report = 0, i, green = 0, red = 0;
+    char root[4400], out[512], rm[4500];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--selftest")) selftest = 1;
+        else if (!strcmp(argv[i], "--report")) report = 1;
+        else if (!strcmp(argv[i], "--cases") && i + 1 < argc) cases = argv[++i];
+        else if (!strcmp(argv[i], "--impl") && i + 1 < argc) impl = argv[++i];
+        else die("usage: --selftest [--cases C1,..] | --report --impl fixed|unfixed|real [--cases C1,..]");
+    }
+    if (selftest == report) die("exactly one of --selftest and --report");
+    if (report && (!impl || (strcmp(impl, "fixed") && strcmp(impl, "unfixed") && strcmp(impl, "real")))) die("--report needs --impl fixed|unfixed|real");
+    if (sy_cwd(root, sizeof root) < 0 || sy_setenv("CCC_ROOT", root, 1)) die("cwd");
+    if (cx_fmt(base, sizeof base, "%s/check-commit-concurrency-%d", sy_tmpdir(), (int)sy_pid())) die("path");
+    if (cx_fmt(rm, sizeof rm, "rm -rf %s && mkdir -p %s", base, base) || sh(rm, out, sizeof out, 20) != 0) die("cannot create the private dir");
+    put("mk.sh", MK); put("fixed.sh", FIXED); put("unfixed.sh", UNFIXED); put("real.sh", REAL); put("cases.sh", CASES);
+    for (i = 0; ALL[i]; i++) {
+        if (!want(cases, ALL[i])) continue;
+        /* real: the clone and product copy come first, so the case itself gets 45 s inside the 55 s command */
+        if (report) { if (run_case(impl, ALL[i], strcmp(impl, "real") ? 50 : 45)) green++; else red++; }
+        else {
+            char nm[64]; int gf = run_case("fixed", ALL[i], 40), gu = run_case("unfixed", ALL[i], 40);
+            int expu = !strcmp(ALL[i], "C1");
+            cx_fmt(nm, sizeof nm, "%s-fixed-green", ALL[i]); ck(gf, nm);
+            cx_fmt(nm, sizeof nm, "%s-unfixed-%s", ALL[i], expu ? "green" : "red"); ck(gu == expu, nm);
+        }
+    }
+    if (!sy_env("CCC_KEEP") && !cx_fmt(rm, sizeof rm, "rm -rf %s", base)) sh(rm, out, sizeof out, 30);
+    if (report) { sy_printf("COMMIT_CONCURRENCY_REPORT\timpl=%s\tgreen=%d\tred=%d\n", impl, green, red); return 0; }
+    sy_printf("CHECK_COMMIT_CONCURRENCY\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
