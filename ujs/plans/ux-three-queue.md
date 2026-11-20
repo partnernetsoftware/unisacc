@@ -213,7 +213,8 @@
 - ObjectLoader 两阶段整景 | G-io 变换矩阵、几何、材质、图像引用及失败回退 | 嵌套树、BufferGeometryLoader、MaterialLoader、图像加载。
 - ~~GLTFLoader 稀疏访问器 | G-io 零底阵列、交错底阵列、顺序、边界和失败保留 | GLB 密集访问器。~~ 14 项通过，补丁索引篡改转红，旧访问器和三角形各八项通过。现阶段对照本地 r160 Attribute。
 - GLTFLoader 访问器接入网格 | G-io 稀疏与密集并用、全部几何属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。
-- GLTFLoader 材质与纹理 | G-io 采样器、UV、内嵌与外部资源以及 JPEG | GLTF 网格、图像加载与材质。
+- ~~GLTFLoader 采样器及 r160 插件对照入口 | G-io 过滤、环绕、默认值及异常枚举 | 纹理资源与 GLB 容器。~~ 采样器十一项通过，错绑环绕反例转红。Chromium 真实 r160 插件采样器和稀疏访问器对照十二项通过。
+- GLTFLoader 材质与纹理 | G-io UV、内嵌与外部资源以及 JPEG | GLTF 网格、图像加载、采样器与材质。
 - GLTFLoader 蒙皮与动画 | G-io 骨骼构建、反绑、动画通道和插值 | GLTF 网格、M7/M8。
 - GLTFLoader 整景提交与失败回收 | G-io 完整模型、失败注入与资源代数 | GLTF 网格、纹理、蒙皮与动画。
 
