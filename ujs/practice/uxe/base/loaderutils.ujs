@@ -15,3 +15,118 @@ native function LoaderUtils_extractUrlBase(url:i64,bytes:i64,out:i64,capacity:i6
   let slash=ux_u8_put(out+1,47);
   return 2;
 }
+
+native function loader_url_span(at:i64,size:i64) i64 {
+  return at>=0 && size>=0 && size<=65535 && at<=6291456-size;
+}
+
+native function loader_url_fold(byte:i64) i64 {
+  if(byte>=65 && byte<=90) { return byte+32; }
+  return byte;
+}
+
+native function loader_url_http(at:i64,size:i64) i64 {
+  if(size>=2 && ux_u8(at)==47 && ux_u8(at+1)==47) { return 2; }
+  if(size<7 || loader_url_fold(ux_u8(at))!=104 || loader_url_fold(ux_u8(at+1))!=116 ||
+     loader_url_fold(ux_u8(at+2))!=116 || loader_url_fold(ux_u8(at+3))!=112) { return 0; }
+  let colon=4;
+  if(loader_url_fold(ux_u8(at+4))==115) { colon=5; }
+  if(size<colon+3 || ux_u8(at+colon)!=58 || ux_u8(at+colon+1)!=47 || ux_u8(at+colon+2)!=47) { return 0; }
+  return colon+3;
+}
+
+native function loader_url_inline(at:i64,size:i64) i64 {
+  if(size<5 || ux_u8(at+4)!=58) { return 0; }
+  let a=loader_url_fold(ux_u8(at));
+  let b=loader_url_fold(ux_u8(at+1));
+  let c=loader_url_fold(ux_u8(at+2));
+  let d=loader_url_fold(ux_u8(at+3));
+  let blob=a==98 && b==108 && c==111 && d==98;
+  let data=a==100 && b==97 && c==116 && d==97;
+  if(!blob && !data) { return 0; }
+  let comma=0;
+  let i=5;
+  while(i<size) {
+    let byte=ux_u8(at+i);
+    if(byte==10 || byte==13 ||
+       (byte==226 && i+2<size && ux_u8(at+i+1)==128 && (ux_u8(at+i+2)==168 || ux_u8(at+i+2)==169))) { return 0; }
+    if(byte==44) { comma=1; }
+    i=i+1;
+  }
+  return blob || comma;
+}
+
+// Mirror LoaderUtils.resolveURL's prefix rules, without browser path normalization.
+native function LoaderUtils_resolveURL(url:i64,bytes:i64,path:i64,pathBytes:i64,out:i64,capacity:i64) i64 {
+  if(!loader_url_span(url,bytes) || !loader_url_span(path,pathBytes) || !loader_url_span(out,capacity) ||
+     (capacity>0 && bytes>0 && out<url+bytes && url<out+capacity) ||
+     (capacity>0 && pathBytes>0 && out<path+pathBytes && path<out+capacity)) { return 0-1; }
+  if(bytes==0) { return 0; }
+  let prefix=pathBytes;
+  if(loader_url_http(url,bytes)>0 || loader_url_inline(url,bytes)) { prefix=0; }
+  else {
+    let host=loader_url_http(path,pathBytes);
+    if(ux_u8(url)==47 && host>2 && host<pathBytes && ux_u8(path+host)!=47) {
+      prefix=host;
+      while(prefix<pathBytes && ux_u8(path+prefix)!=47) { prefix=prefix+1; }
+    }
+  }
+  if(bytes+prefix>capacity) { return 0-2; }
+  let a=uxe_copy_record(out,path,prefix);
+  let b=uxe_copy_record(out+prefix,url,bytes);
+  return prefix+bytes;
+}
+
+// Positive widths are valid UTF-8, negative widths consume malformed prefixes.
+native function loader_utf8_width(at:i64,end:i64) i64 {
+  let lead=ux_u8(at);
+  if(lead<128) { return 1; }
+  if(lead<194 || lead>244) { return 0-1; }
+  let width=2;
+  if(lead>=224) { width=3; }
+  if(lead>=240) { width=4; }
+  let i=1;
+  while(i<width) {
+    if(at+i>=end) { return 0-i; }
+    let byte=ux_u8(at+i);
+    if(byte<128 || byte>=192) { return 0-i; }
+    if(i==1 && ((lead==224 && byte<160) || (lead==237 && byte>=160) ||
+        (lead==240 && byte<144) || (lead==244 && byte>=144))) { return 0-1; }
+    i=i+1;
+  }
+  return width;
+}
+
+// Return the UTF-8 encoding of r160 TextDecoder output, including U+FFFD.
+native function LoaderUtils_decodeText(input:i64,bytes:i64,out:i64,capacity:i64) i64 {
+  if(!loader_url_span(input,bytes) || !loader_url_span(out,capacity) ||
+     (bytes>0 && capacity>0 && out<input+bytes && input<out+capacity)) { return 0-1; }
+  let end=input+bytes;
+  let start=input;
+  if(bytes>=3 && ux_u8(input)==239 && ux_u8(input+1)==187 && ux_u8(input+2)==191) { start=start+3; }
+  let cursor=start;
+  let needed=0;
+  while(cursor<end) {
+    let width=loader_utf8_width(cursor,end);
+    if(width<0) { needed=needed+3; cursor=cursor-width; }
+    else { needed=needed+width; cursor=cursor+width; }
+  }
+  if(needed>capacity) { return 0-2; }
+  cursor=start;
+  let write=out;
+  while(cursor<end) {
+    let width=loader_utf8_width(cursor,end);
+    if(width<0) {
+      let a=ux_u8_put(write,239);
+      let b=ux_u8_put(write+1,191);
+      let c=ux_u8_put(write+2,189);
+      write=write+3;
+      cursor=cursor-width;
+    } else {
+      let copied=uxe_copy_record(write,cursor,width);
+      cursor=cursor+width;
+      write=write+width;
+    }
+  }
+  return needed;
+}
