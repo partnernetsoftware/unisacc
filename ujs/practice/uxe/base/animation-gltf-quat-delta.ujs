@@ -1,0 +1,44 @@
+// Read a cubic quaternion reference and replace the target values, leaving
+// both incoming and outgoing tangents intact.
+native function AnimationUtils_gltfQuatDelta(target:i64,reference:i64,time:f64,out:i64,capacity:i64,work:i64) i64 {
+  if(!animation_span(target,AnimationSamples.size) || !animation_span(reference,AnimationSamples.size) ||
+     !animation_span(out,capacity) || !animation_span(work,132) || work%8!=0 || time!=time) { return 0-1; }
+  let count=ux_u32(target+AnimationSamples.count);
+  let refCount=ux_u32(reference+AnimationSamples.count);
+  if(count<1 || count>65536 || refCount<1 || refCount>65536 ||
+     ux_u32(target+AnimationSamples.stride)!=12 || ux_u32(reference+AnimationSamples.stride)!=12) { return 0-1; }
+  let bytes=count*48;
+  if(capacity<bytes) { return 0-2; }
+  let times=ux_u32(target+AnimationSamples.times);
+  let values=ux_u32(target+AnimationSamples.values);
+  let refTimes=ux_u32(reference+AnimationSamples.times);
+  let refValues=ux_u32(reference+AnimationSamples.values);
+  if(!animation_span(times,count*4) || !animation_span(values,bytes) ||
+     !animation_span(refTimes,refCount*4) || !animation_span(refValues,refCount*48) ||
+     animation_overlap(work,132,out,bytes) || animation_overlap(work,132,times,count*4) ||
+     animation_overlap(work,132,values,bytes) || animation_overlap(work,132,refTimes,refCount*4) ||
+     animation_overlap(work,132,refValues,refCount*48) ||
+     animation_overlap(work,132,target,AnimationSamples.size) || animation_overlap(work,132,reference,AnimationSamples.size) ||
+     animation_overlap(out,bytes,times,count*4) || animation_overlap(out,bytes,values,bytes) ||
+     animation_overlap(out,bytes,refTimes,refCount*4) || animation_overlap(out,bytes,refValues,refCount*48) ||
+     animation_overlap(out,bytes,target,AnimationSamples.size) || animation_overlap(out,bytes,reference,AnimationSamples.size)) { return 0-1; }
+  let sampled=GltfCubic_evaluate(reference,time,work,1);
+  if(sampled<0 || !animation_quat_finite(work)) { return 0-3; }
+  let row=0;
+  while(row<count) {
+    if(!animation_quat_finite(values+row*48+16)) { return 0-3; }
+    row=row+1;
+  }
+  let copy=uxe_copy_record(out,values,bytes);
+  let timeSlot=work+128;
+  let fixed=ux_f32_put(timeSlot,0.0);
+  row=0;
+  while(row<count) {
+    let offset=row*48+16;
+    let view=AnimationSamples_init(work+112,timeSlot,values+offset,1,4);
+    let delta=AnimationUtils_quatDelta(view,work,out+offset,16,work+16);
+    if(delta!=16) { return 0-3; }
+    row=row+1;
+  }
+  return bytes;
+}
