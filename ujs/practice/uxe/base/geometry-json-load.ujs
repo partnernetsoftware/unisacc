@@ -130,8 +130,29 @@ native function geometry_json_semantic(at:i64,last:i64,names:i64,count:i64) i64 
   return 0-2;
 }
 
+native function geometry_json_overlap(a:i64,size:i64,b:i64,span:i64) i64 {
+  return size>0 && span>0 && a<b+span && b<a+size;
+}
+
+native function geometry_json_writable(at:i64,size:i64,options:i64,input:i64,length:i64) i64 {
+  let names=ux_u32(options+GeometryJsonLoad.names);
+  let count=ux_u32(options+GeometryJsonLoad.nameCount);
+  if(geometry_json_overlap(at,size,options,GeometryJsonLoad.size) ||
+     geometry_json_overlap(at,size,input,length) ||
+     geometry_json_overlap(at,size,names,count*12)) { return 0; }
+  let i=0;
+  while(i<count) {
+    let key=ux_u32(names+i*12+4);
+    let bytes=ux_u32(names+i*12+8);
+    if(key>6291456-bytes || geometry_json_overlap(at,size,key,bytes)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
 native function BufferGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i64 {
-  if(geo<0 || geo>6291456-BufferGeometry.size || geo%4!=0 ||
+  if(input<0 || end<=input || end>6291456 ||
+     geo<0 || geo>6291456-BufferGeometry.size || geo%4!=0 ||
      options<0 || options>6291456-GeometryJsonLoad.size || options%4!=0) { return 0-1; }
   let top=json_value_end(input,end);
   if(top<0 || json_space(top,end)!=end) { return 0-1; }
@@ -149,6 +170,24 @@ native function BufferGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i
   let capacity=ux_u32(table+4);
   let group_capacity=ux_u32(groups+4);
   if(capacity>(6291448-table)/8 || group_capacity>(6291448-groups)/12) { return 0-1; }
+  let table_size=8+capacity*8;
+  let group_size=8+group_capacity*12;
+  let arena_size=limit-cursor;
+  if(!geometry_json_writable(geo,BufferGeometry.size,options,input,end-input) ||
+     !geometry_json_writable(table,table_size,options,input,end-input) ||
+     !geometry_json_writable(groups,group_size,options,input,end-input) ||
+     !geometry_json_writable(scratch,120,options,input,end-input) ||
+     !geometry_json_writable(cursor,arena_size,options,input,end-input) ||
+     geometry_json_overlap(geo,BufferGeometry.size,table,table_size) ||
+     geometry_json_overlap(geo,BufferGeometry.size,groups,group_size) ||
+     geometry_json_overlap(geo,BufferGeometry.size,scratch,120) ||
+     geometry_json_overlap(geo,BufferGeometry.size,cursor,arena_size) ||
+     geometry_json_overlap(table,table_size,groups,group_size) ||
+     geometry_json_overlap(table,table_size,scratch,120) ||
+     geometry_json_overlap(table,table_size,cursor,arena_size) ||
+     geometry_json_overlap(groups,group_size,scratch,120) ||
+     geometry_json_overlap(groups,group_size,cursor,arena_size) ||
+     geometry_json_overlap(scratch,120,cursor,arena_size)) { return 0-1; }
   let data=geometry_json_field(input,end,scratch,ObjectJsonToken.data,2,4);
   let attrs=geometry_json_field(data,end,scratch,ObjectJsonToken.data,10,10);
   if(attrs<0 || ux_u8(attrs)!=123) { return 0-1; }
