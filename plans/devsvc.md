@@ -152,7 +152,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 6 已知限制与下一单
 
-重写(2026-11-20,依据第"2026-11-20 演进评审"节与 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
+重写(2026-11-20,依据第"2026-11-20 演进评审"节与 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
 
 已做:
 
@@ -261,7 +261,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 2026-11-20 演进评审
 
-依据:fable 报告 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
+依据:fable 报告 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
 
 ### 事实修正
 
