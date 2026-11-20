@@ -1,0 +1,102 @@
+// Image descriptor kinds 1..10 match the scalar buffer types, 11 is an
+// encoded data URI, and 12 is a table of image descriptor addresses.
+struct SourceImage {
+  kind: u32;
+  data: u32;
+  count: u32;
+  width: u32;
+  height: u32;
+}
+
+native function source_image_width(kind:i64) i64 {
+  if(kind<=3 || kind==11) { return 1; }
+  if(kind<=5 || kind==8) { return 2; }
+  if(kind==10) { return 8; }
+  return 4;
+}
+
+native function source_input_ok(start:i64,size:i64,dst:i64,end:i64,scratch:i64) i64 {
+  return start>=0 && start<=6291456 && size>=0 && size<=6291456-start &&
+    (size==0 || ((start>=end || dst>=start+size) &&
+      (start>=scratch+1104 || scratch>=start+size)));
+}
+
+native function source_image_ok(image:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(image<=0 || image%4!=0 || !source_input_ok(image,SourceImage.size,dst,end,scratch)) { return 0; }
+  let kind=ux_u32(image+SourceImage.kind);
+  if(kind==0) { return 1; }
+  if(kind>11) { return 0; }
+  let width=source_image_width(kind);
+  let start=ux_u32(image+SourceImage.data);
+  let size=ux_u32(image+SourceImage.count)*width;
+  return start%width==0 && source_input_ok(start,size,dst,end,scratch);
+}
+
+native function source_json_image(dst:i64,end:i64,image:i64,scratch:i64) i64 {
+  let kind=ux_u32(image+SourceImage.kind);
+  let data=ux_u32(image+SourceImage.data);
+  let count=ux_u32(image+SourceImage.count);
+  if(kind==0) { return json_byte(json_byte(dst,end,123),end,125); }
+  if(kind==11) { return json_write_string(dst,end,data,count); }
+  let width=source_image_width(kind);
+  let types=[ObjectJsonType.uint8,ObjectJsonType.int8,ObjectJsonType.uint8Clamped,
+    ObjectJsonType.uint16,ObjectJsonType.int16,ObjectJsonType.uint32,ObjectJsonType.int32,
+    ObjectJsonType.uint16,ObjectJsonType.float32,ObjectJsonType.float64];
+  let p=json_write_token(dst,end,ObjectJsonToken.sourceData);
+  let i=0;
+  while(p>=0 && i<count) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,json_typed_value(data+i*width,kind),scratch);
+    i=i+1;
+  }
+  p=json_write_token(p,end,ObjectJsonToken.sourceWidth);
+  p=json_write_f64(p,end,0.0+ux_u32(image+SourceImage.width),scratch);
+  p=json_write_token(p,end,ObjectJsonToken.sourceHeight);
+  p=json_write_f64(p,end,0.0+ux_u32(image+SourceImage.height),scratch);
+  p=json_write_token(p,end,ObjectJsonToken.typedField);
+  p=json_write_token(p,end,ObjectJsonToken.size+types[kind-1]);
+  return json_byte(p,end,125);
+}
+
+native function Source_toJSON(source:i64,dst:i64,end:i64,uuid:i64,uuid_bytes:i64,scratch:i64) i64 {
+  if(dst<0 || dst>end || end>6291456 || scratch<0 || scratch>6291456-1104 || scratch%8!=0 ||
+    (dst<scratch+1104 && scratch<end) || source%4!=0 ||
+    !source_input_ok(source,Source.size,dst,end,scratch) ||
+    !source_input_ok(uuid,uuid_bytes,dst,end,scratch)) { return 0-1; }
+  let image=ux_u32(source+Source.data);
+  let cube=0;
+  let table=0;
+  let count=0;
+  if(image!=0) {
+    if(image%4!=0 || !source_input_ok(image,SourceImage.size,dst,end,scratch)) { return 0-1; }
+    cube=ux_u32(image+SourceImage.kind)==12;
+    if(cube) {
+      table=ux_u32(image+SourceImage.data);
+      count=ux_u32(image+SourceImage.count);
+      if(table%4!=0 || !source_input_ok(table,count*4,dst,end,scratch)) { return 0-1; }
+      let j=0;
+      while(j<count) {
+        if(!source_image_ok(ux_u32(table+4*j),dst,end,scratch)) { return 0-1; }
+        j=j+1;
+      }
+    } else if(!source_image_ok(image,dst,end,scratch)) { return 0-1; }
+  }
+  let p=json_write_token(dst,end,ObjectJsonToken.sourceHeader);
+  p=json_write_string(p,end,uuid,uuid_bytes);
+  p=json_write_token(p,end,ObjectJsonToken.sourceUrl);
+  if(image==0) {
+    p=json_write_string(p,end,0,0);
+  } else if(cube) {
+    p=json_byte(p,end,91);
+    let i=0;
+    while(p>=0 && i<count) {
+      if(i!=0) { p=json_byte(p,end,44); }
+      p=source_json_image(p,end,ux_u32(table+4*i),scratch);
+      i=i+1;
+    }
+    p=json_byte(p,end,93);
+  } else {
+    p=source_json_image(p,end,image,scratch);
+  }
+  return json_byte(p,end,125);
+}
