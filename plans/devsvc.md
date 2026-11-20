@@ -288,7 +288,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 ### 节拍与负责人
 
 - 工具线只在公开后到下次起链前落库,每版最多两项。
-- 负责人:agyneon 实现、cc 集成与真实提交验收、opus 做夹具、cdx(额度紧)只提缺口;devsvc 在 main 上开发(CLAUDE.md 例外规则)不变。
+- 负责人:agyneon 实现、cc 集成与真实提交验收、opus 做夹具、cdx(额度紧)只提缺口(过时,2026-11-20 更正:cdx 额度不受限(项目所有者 2026-11-20 明确),承担 0.0.86 产品线 D2 c-negative 余项与后续单元实现);devsvc 在 main 上开发(CLAUDE.md 例外规则)不变。
 - 版本分配:0.0.86 拒绝回执与事件(0.5)加自有垃圾清理(0.5,379 个空实例目录与 50 个 commit-derive 残留);0.0.87 提交自愈(2)加合并收尾 git merge --continue(0.5);0.0.88 持久作业与 status(2)加登记表由清单生成(1);合计约 6.5 单位,不进候选键,与 0.0.86 的 W1 W2 M2 无文件相交。
 - 日常投放做成一条带 INSTALLED 回执的 flow,不建标签不走 CI,最后一步预热 prebuild-self 与 tlib kit。
 
