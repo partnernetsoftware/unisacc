@@ -92,6 +92,94 @@ native function shape_path_solids(entries:i64,paths:i64,result:i64,capacity:i64,
   return paths;
 }
 
+native function shape_path_contains(samples:i64,count:i64,x:f64,y:f64) i64 {
+  let inside=0;
+  let previous=count-1;
+  let current=0;
+  while(current<count) {
+    let a=samples+previous*16;
+    let b=samples+current*16;
+    let ax=ux_f64(a);
+    let ay=ux_f64(a+8);
+    let bx=ux_f64(b);
+    let by=ux_f64(b+8);
+    let side=(bx-ax)*(y-ay)-(by-ay)*(x-ax);
+    if(side==0.0 && ((ax<=x && x<=bx) || (bx<=x && x<=ax)) &&
+       ((ay<=y && y<=by) || (by<=y && y<=ay))) { return 1; }
+    if((ay>y)!=(by>y) && ax+(bx-ax)*(y-ay)/(by-ay)>x) { inside=1-inside; }
+    previous=current;
+    current=current+1;
+  }
+  return inside;
+}
+
+native function shape_path_owner(path:i64,result:i64,solids:i64,samples:i64,capacity:i64,
+                                 scratch:i64,divisions:i64) i64 {
+  let first=ux_u32(path+Path.segments)+8;
+  let x=ux_f64(first);
+  let y=ux_f64(first+8);
+  let owner=0-2;
+  let i=0;
+  while(i<solids) {
+    let contour=ux_u32(result+i*Shape.size+Shape.contour);
+    let count=Path_getPoints(contour,samples,capacity,divisions,scratch);
+    if(count<3) { return 0-1; }
+    if(shape_path_contains(samples,count,x,y)) {
+      if(owner>=0) { return 0-3; }
+      owner=i;
+    }
+    i=i+1;
+  }
+  return owner;
+}
+
+function shape_path_assign(entries,...group) {
+  let paths=group[0];
+  let result=group[1];
+  let solids=group[2];
+  let samples=group[3];
+  let capacity=group[4];
+  let scratch=group[5];
+  let divisions=group[6];
+  let first=ux_u32(result+Shape.contour);
+  let holesFirst=ux_u32(entries)!=first;
+  let ambiguous=0;
+  let failed=0;
+  let pass=0;
+  while(pass<2 && !failed) {
+    let seen=0;
+    let i=0;
+    while(i<paths && !failed) {
+      let path=ux_u32(entries+i*4);
+      let isSolid=0;
+      if(seen<solids) { isSolid=path==ux_u32(result+seen*Shape.size+Shape.contour); }
+      if(isSolid) { seen=seen+1; }
+      else {
+        let fallback=seen-1;
+        if(holesFirst) { fallback=seen; }
+        if(fallback>=0 && fallback<solids) {
+          let owner=fallback;
+          if(solids>1 && !ambiguous) {
+            let found=shape_path_owner(path,result,solids,samples,capacity,scratch,divisions);
+            if(found==0-3) { ambiguous=1; }
+            if(found==0-1) { failed=1; }
+            if(found>=0) { owner=found; }
+          }
+          if(pass==1 && !failed) {
+            let appended=Shape_addHole(result+owner*Shape.size,path);
+            if(appended<0) { failed=1; }
+          }
+        }
+      }
+      i=i+1;
+    }
+    pass=pass+1;
+  }
+  let status=solids;
+  if(failed) { status=0-1; }
+  return status;
+}
+
 function ShapePath_toShapes(shape_path,...shape_build) {
   let result=shape_build[0];
   let result_cap=shape_build[1];
@@ -107,7 +195,6 @@ function ShapePath_toShapes(shape_path,...shape_build) {
   let solid_count=0;
   let i=0;
   let failed=0;
-  let leading=0;
   while(i<paths && !failed) {
     let path=ux_u32(entries+i*4);
     let count=Path_getPoints(path,samples,sample_cap,divisions,scratch);
@@ -125,21 +212,8 @@ function ShapePath_toShapes(shape_path,...shape_build) {
           let base=holes+4*solid_count*holes_per_shape;
           let written=Shape_init(at,path,base,holes_per_shape);
           if(written<0) { failed=1; }
-          if(solid_count==0) {
-            let j=0;
-            while(j<leading && !failed) {
-              let added=Shape_addHole(at,ux_u32(entries+j*4));
-              if(added<0) { failed=1; }
-              j=j+1;
-            }
-          }
           solid_count=solid_count+1;
         }
-      } else if(solid_count==0) {
-        leading=leading+1;
-      } else {
-        let entry=Shape_addHole(result+(solid_count-1)*Shape.size,path);
-        if(entry<0) { failed=1; }
       }
     }
     i=i+1;
@@ -147,6 +221,8 @@ function ShapePath_toShapes(shape_path,...shape_build) {
   // When no ring has the chosen winding, r160 treats each ring as a solid.
   if(!failed && solid_count==0 && paths>0) {
     solid_count=shape_path_solids(entries,paths,result,result_cap,holes,holes_per_shape);
+  } else if(!failed && solid_count>0) {
+    solid_count=shape_path_assign(entries,paths,result,solid_count,samples,sample_cap,scratch,divisions);
   }
   if(failed) { solid_count=0-1; }
   return solid_count;
