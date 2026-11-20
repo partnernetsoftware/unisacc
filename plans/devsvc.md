@@ -579,3 +579,27 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
 
 环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+
+## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
+
+按来源工具归类(du 与个数为 2026-11-20 实测,/tmp 与 ~/.cache/unisacc):
+
+| 位置与前缀 | 个数 | 占用 | 来源工具(按前缀推断) | 建议 |
+|---|---|---|---|---|
+| /tmp/product-map-query-check-* | 6 | 2.3G | tools/check-product-map-query 夹具 | 白名单前缀,检查退出即删;保留最近 1 个供失败取证 |
+| /tmp/derive-readset-* | 4 | 999M | derive 读集检查 | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-session-* | 3 | 491M | sessionroot 会话目录 | 仅当无存活 PID 引用时删(发布打包曾依赖,见 pkg-gaps EVIDENCE-DEPENDS-ON-TMP-CLEANUP) |
+| /tmp/check-commit-own-* | 1 | 249M | tools/check-commit-own.cx 夹具 | 白名单前缀,退出即删 |
+| /tmp/cx-* | 10 | 96M | 产品临时编译目录 | 超 1 小时且无持有进程删 |
+| /tmp/precommit-flow-* | 52 | 80M | precommit flow | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-affected-* | 275 | 35M | tools/affected.cx | 白名单前缀,超 1 小时删(个数多) |
+| /tmp/chain-ready* | 70 | 4.8M | tools/chain-ready.cx | 白名单前缀,超 1 小时删 |
+| /tmp/omp-flow-cli*、devsvc-flow-*、precommit-lint* | 225、63、101 | 约 1.6M | flow 客户端与 lint | 白名单前缀,超 1 小时删 |
+| /tmp/pcfck-fx-*、tmp.* | 4、8 | 0 | 夹具空目录 | 空目录直接删 |
+| /tmp/s9nr-* | 0 | 0 | s9 夹具 | 本次未见,保留前缀进白名单 |
+| ~/.cache/unisacc/check-devsvc-core | - | 3.6G | check-devsvc-core 夹具缓存 | 设容量上限,超限按最旧删 |
+| ~/.cache/unisacc/check-precommit-gates | - | 2.8G | check-precommit-gates 夹具缓存 | 同上 |
+| ~/.cache/unisacc/check-derive-flow | - | 592M | check-derive-flow 夹具缓存 | 同上 |
+| ~/.cache/unisacc/tlib、chains、symindex、e3cache | - | 16G、7.4G、5.3G、2.9G | 构造缓存与整链 | 非垃圾,不进白名单;chains 只删已发布版本且无引用的链目录 |
+
+保留规则:(1) 只删白名单前缀;(2) 有存活进程(按真实 PID 核 /proc/PID/cwd 与打开文件)引用的不删;(3) 被 release/evidence 或 cache-manager 记录引用的路径不删;(4) 每次清理写事件(前缀、个数、字节),删不掉具名报告。
