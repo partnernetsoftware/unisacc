@@ -128,11 +128,17 @@ static void remember(const char *path, FcCapture *r) {
     mm_free(output_buffers[ix]); output_buffers[ix] = r->fc_payload; output_sizes[ix] = r->fc_size;
     if (cx_write(path, r->fc_payload, r->fc_size)) failed++;
 }
+static long fc_find(const char *buf, long n, const char *pat, long pl) {
+    long i;
+    if (!buf || !pat || pl <= 0 || pl > n) return -1;
+    for (i = 0; i + pl <= n; i++) if (tx_same(buf + i, pl, pat, pl)) return i;
+    return -1;
+}
 static int count(const char *path, const char *pat) {
     int ix, c = 0, pl = (int)tx_len(pat, 64); long at = 0;
     for (ix = 0; ix < output_count; ix++) if (tx_eqz(output_keys[ix], path)) break;
     if (ix == output_count) return -1;
-    while (at + pl <= output_sizes[ix]) { int k = tx_find(output_buffers[ix] + at, output_sizes[ix] - at, pat, pl); if (k < 0) break; c++; at += k + pl; }
+    while (at + pl <= output_sizes[ix]) { long k = fc_find(output_buffers[ix] + at, output_sizes[ix] - at, pat, pl); if (k < 0) break; c++; at += k + pl; }
     return c;
 }
 static int hits(const char *err) { return count(err, "unitcache\tresult=hit"); }
@@ -146,14 +152,23 @@ static void put(const char *dir, const char *name, const char *body) {
     }
 }
 /* 一次编译:env 前缀、参数串、-o 到 W/NAME.bin,stderr 到 W/NAME.err;返回 rc */
-static int cc(const char *prod, const char *env, const char *args, const char *w, const char *name) {
-    char cmd[4000], path[900]; FcCapture r;
-    cx_fmt(cmd, sizeof cmd, "%s %s %s -o %s/o.bin; r=$?; mv %s/o.bin %s/%s.bin 2>/dev/null; exit $r", env, prod, args, w, w, w, name);
+static int cc_start(FcCapture *r, const char *prod, const char *env, const char *args, const char *w, const char *name) {
+    char cmd[4000];
+    const char *outf = tx_eqz(name, "x") ? "o.x.bin" : "o.bin";
+    cx_fmt(cmd, sizeof cmd, "%s %s %s -o %s/%s; r=$?; mv %s/%s %s/%s.bin 2>/dev/null; exit $r", env, prod, args, w, outf, w, outf, w, name);
+    return capture_start(r, cmd, 0);
+}
+static int cc_finish(FcCapture *r, const char *w, const char *name) {
+    char path[900];
     cx_fmt(path, sizeof path, "%s/%s.err", w, name);
-    int rc = capture_start(&r, cmd, 0);
-    if (rc) return rc;
-    rc = capture_finish(&r, 0); remember(path, &r);
+    int rc = capture_finish(r, 0); remember(path, r);
     return rc;
+}
+static int cc(const char *prod, const char *env, const char *args, const char *w, const char *name) {
+    FcCapture r;
+    int rc = cc_start(&r, prod, env, args, w, name);
+    if (rc) return rc;
+    return cc_finish(&r, w, name);
 }
 /* 把缓存目录里的运行缓存条目(非 uc-、非 mc-)移到 TO,迫使下一次走单元缓存 */
 static void drop_run(const char *d, const char *to) {
@@ -222,9 +237,14 @@ static int one_case(int k) {
         cx_fmt(args, sizeof args, "%s", CASES[k]);
     }
     cx_fmt(d, sizeof d, "%s/D", w); cx_fmt(ds, sizeof ds, "%s/Ds", w); cx_fmt(dt, sizeof dt, "%s/Dt", w);
-    rx = cc(PROD, "UNISACC_RUN_CACHE=0", args, w, "x");
     cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
-    rc_ = cc(PROD, env, args, w, "c");
+    {
+        FcCapture rx_cap, rc_cap;
+        int sx = cc_start(&rx_cap, PROD, "UNISACC_RUN_CACHE=0", args, w, "x");
+        int sc = cc_start(&rc_cap, PROD, env, args, w, "c");
+        rx = sx ? sx : cc_finish(&rx_cap, w, "x");
+        rc_ = sc ? sc : cc_finish(&rc_cap, w, "c");
+    }
     drop_run(d, ds);
     rd = cc(PROD, env, args, w, "d");
     drop_run(d, dt);
@@ -242,25 +262,72 @@ static int one_case(int k) {
     sy_printf("CASE\t%s\t%s\trc=%d/%d/%d\thit=%d\tmiss=%d\tdeps=%s\n", CASES[k], ok ? "PASS" : "FAIL", rx, rc_, rd, hits(b), misses(b), dq == 0 ? "EQ" : "DIFF");
     return ok ? 0 : 1;
 }
-static void mode_equiv(int shard) {
-    char cmd[1500], res[900], nm[64]; int k, slot = 0; FcCapture children[6];
-    for (k = shard; k < NCASE; k += 5) {
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/check-unit-frontcache.cx -- %s case%d --product '%s'", OUT, k, PROD);
-        capture_start(&children[slot++], cmd, 1);
+static const int EQUIV3A_CASES[] = { 3 };
+static const int EQUIV3B_CASES[] = { 8, 13, 18, 23 };
+#define NEQUIV3A 1
+#define NEQUIV3B 4
+
+static void mode_equiv_list(const int *idxs, int n) {
+    char cmd[1500], res[900], nm[64]; int j; FcCapture children[6];
+    for (j = 0; j < n; j++) {
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/check-unit-frontcache.cx -- %s case%d --product '%s'", OUT, idxs[j], PROD);
+        capture_start(&children[j], cmd, 1);
     }
-    slot = 0;
-    for (k = shard; k < NCASE; k += 5) {
-        FcCapture *r = &children[slot++];
+    for (j = 0; j < n; j++) {
+        FcCapture *r = &children[j];
         int rc = capture_finish(r, 1);
-        cx_fmt(res, sizeof res, "%s/case%d.txt", OUT, k);
+        cx_fmt(res, sizeof res, "%s/case%d.txt", OUT, idxs[j]);
         if (r->fc_payload) {
             if (cx_write(res, r->fc_payload, r->fc_size)) failed++;
             sy_printf("%s", r->fc_payload);
         }
-        cx_fmt(nm, sizeof nm, "equiv.%d", k);
-        ck(r->fc_payload && tx_find(r->fc_payload, r->fc_size, "\tPASS\t", 6) >= 0 && tx_find(r->fc_payload, r->fc_size, "\tFAIL\t", 6) < 0 && rc == 0, nm);
+        cx_fmt(nm, sizeof nm, "equiv.%d", idxs[j]);
+        ck(r->fc_payload && fc_find(r->fc_payload, r->fc_size, "\tPASS\t", 6) >= 0 && fc_find(r->fc_payload, r->fc_size, "\tFAIL\t", 6) < 0 && rc == 0, nm);
         mm_free(r->fc_payload);
     }
+}
+static void mode_equiv(int shard) {
+    if (shard == 3) { mode_equiv_list(EQUIV3A_CASES, NEQUIV3A); return; }
+    int idxs[6], n = 0, k;
+    for (k = shard; k < NCASE; k += 5) idxs[n++] = k;
+    mode_equiv_list(idxs, n);
+}
+static void mode_equiv3_split(void) {
+    int want[NCASE], got[NCASE], k, j;
+    for (k = 0; k < NCASE; k++) { want[k] = (k % 5 == 3) ? 1 : 0; got[k] = 0; }
+    for (j = 0; j < NEQUIV3A; j++) { int idx = EQUIV3A_CASES[j]; if (idx >= 0 && idx < NCASE) got[idx]++; }
+    for (j = 0; j < NEQUIV3B; j++) { int idx = EQUIV3B_CASES[j]; if (idx >= 0 && idx < NCASE) got[idx]++; }
+    int exact = 1;
+    for (k = 0; k < NCASE; k++) if (want[k] != got[k]) exact = 0;
+    ck(exact, "equiv3-split.multiset-exact");
+    ck(NEQUIV3A + NEQUIV3B == 5, "equiv3-split.count-5");
+    long bn = 0;
+    char *bt = slurp("tests/batches.tsv", &bn);
+    int f3a = 0, f3b = 0;
+    if (bt && bn > 0) {
+        long pos = 0;
+        while (pos < bn) {
+            long ls = pos; while (pos < bn && bt[pos] != '\n') pos++;
+            long le = pos; if (pos < bn) pos++;
+            if (le > ls && bt[le - 1] == '\r') le--;
+            const char *cols[16]; long clens[16]; int nc = 0; long p = ls;
+            while (nc < 16) {
+                long cs = p; while (p < le && bt[p] != '\t') p++;
+                cols[nc] = bt + cs; clens[nc] = p - cs; nc++;
+                if (p >= le) break; p++;
+            }
+            if (nc >= 10 && clens[1] == 11 && tx_same(cols[1], 11, "IMPLEMENTED", 11) &&
+                clens[3] == 30 && tx_same(cols[3], 30, "tools/check-unit-frontcache.cx", 30)) {
+                if (clens[0] == 22 && tx_same(cols[0], 22, "unit-frontcache-equiv3", 22) &&
+                    clens[9] >= 7 && tx_same(cols[9] + clens[9] - 7, 7, ";equiv3", 7)) f3a++;
+                if (clens[0] == 23 && tx_same(cols[0], 23, "unit-frontcache-equiv3b", 23) &&
+                    clens[9] >= 8 && tx_same(cols[9] + clens[9] - 8, 8, ";equiv3b", 8)) f3b++;
+            }
+        }
+        mm_free(bt);
+    }
+    ck(f3a == 1, "equiv3-split.batch-equiv3-registered");
+    ck(f3b == 1, "equiv3-split.batch-equiv3b-registered");
 }
 /* ---- neg ---- */
 static char NW[700], ND[900], NENV[1000], NFL[1500];
@@ -595,12 +662,18 @@ int main(int argc, char **argv) {
         sy_printf("REFUSE\tbudget subject cache environment\n");
         return 2;
     }
+    if (tx_eqz(mode, "equiv3-split")) {
+        mode_equiv3_split();
+        sy_printf("CHECK_UNIT_FRONTCACHE_SPLIT\tmode=%s\tfailed=%d\n", mode, failed);
+        return failed ? 1 : 0;
+    }
     if (!have_feature()) {
         sy_printf("DEFERRED\tneeds-product-with-unitcache\t%s\n", PROD);
         sy_printf("CHECK_UNIT_FRONTCACHE\tmode=%s\tfailed=0\tdeferred=1\n", mode);
         return 3;
     }
-    if (tx_len(mode, 16) == 6 && tx_same(mode, 5, "equiv", 5) && mode[5] >= '0' && mode[5] <= '4') mode_equiv(mode[5] - '0');
+    if (tx_eqz(mode, "equiv3b")) mode_equiv_list(EQUIV3B_CASES, NEQUIV3B);
+    else if (tx_len(mode, 16) == 6 && tx_same(mode, 5, "equiv", 5) && mode[5] >= '0' && mode[5] <= '4') mode_equiv(mode[5] - '0');
     else if (tx_eqz(mode, "neg")) mode_neg(0);
     else if (tx_eqz(mode, "race")) mode_neg(1);
     else if (tx_eqz(mode, "stderr")) mode_stderr();
