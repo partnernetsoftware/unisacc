@@ -1,0 +1,291 @@
+/* tools/check-trainjob-why.cx -- verify tools/trainjob.cx why subcommand on the seven chain failure shapes
+ * (five one-hop stderr cases plus two two-hop child-*.stderr cases) and unlocated directories.
+ * Marker: CHECK_TRAINJOB_WHY<TAB>failed=N */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.ckrun
+
+static int failed = 0, assertions = 0;
+static char fx_root[1024];
+
+static void ck(int ok, const char *name, const char *detail) {
+    assertions++;
+    if (!ok) {
+        failed++;
+        printf("FAIL\t%s\t%s\n", name, detail ? detail : "-");
+    } else {
+        printf("PASS\t%s\n", name);
+    }
+}
+
+#define has(o, s) ckk_has((o), 2048, (s))
+
+static void mk_dir(const char *p) {
+    char tmp[1024];
+    size_t n = strlen(p);
+    if (n >= sizeof tmp || mm_copy(tmp, sizeof tmp, p, n + 1)) return;
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = 0;
+            sy_mkdir(tmp, 0700);
+            tmp[i] = '/';
+        }
+    }
+    sy_mkdir(tmp, 0700);
+}
+
+static void wr_file(const char *dir, const char *rel, const char *content) {
+    char p[1200];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return;
+    sy_write_file(p, content, (int64_t)strlen(content), 0600);
+}
+
+static int run_why(const char *args, char *out, int cap) {
+    char cmd[2048];
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/trainjob.cx -- %s", args)) return -1;
+    return ckk_sh("CHECK_TRAINJOB_WHY", cmd, out, cap);
+}
+
+static void build_fixtures(void) {
+    char d[1200], cdir[1200], msg[2048];
+
+    /* 1. chain1: snap preflight entry (hops=1) */
+    cx_fmt(d, sizeof d, "%s/c1/rev1", fx_root);
+    mk_dir(d);
+    wr_file(d, "bg.log",
+        "EXIT\t1795167163\tpid=3069901\trc=2\twhy=exited\n"
+        "BLOCKER\tphase=snap\treason=first-failure\trc=2\tattempts=3\tresumes=0\n"
+        "SUPERVISE\tSTOP\titerations=1\trc=2\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t1\tphase=prepare-watch\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t2\tphase=prepare-candidate\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t3\tphase=snap\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "BLOCKER\tphase=snap\treason=first-failure\trc=2\tattempts=3\tresumes=0\n");
+    wr_file(d, "chain-run-3.stderr",
+        "candidate-chain: REFUSE preflight: entry\n");
+
+    /* 2. chain2: ctx root-epoch-product-stat with earlier recovered rc=124 (hops=1) */
+    cx_fmt(d, sizeof d, "%s/c2/rev2", fx_root);
+    mk_dir(d);
+    wr_file(d, "bg.log",
+        "BLOCKER\tphase=ctx\treason=first-failure\trc=2\tattempts=11\tresumes=0\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t3\tphase=snap\trc=124\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t4\tphase=snap\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t5\tphase=build-objects\trc=124\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t6\tphase=build-objects\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t10\tphase=wave-runner\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t11\tphase=ctx\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "BLOCKER\tphase=ctx\treason=first-failure\trc=2\tattempts=11\tresumes=0\n");
+    cx_fmt(msg, sizeof msg,
+        "source-package: REFUSE root-epoch-product-stat errno=2\n"
+        "chain-step: prepare-context: %s/ctx\n"
+        "candidate-chain: ctx: %s/ctx\n", d, d);
+    wr_file(d, "chain-run-11.stderr", msg);
+
+    /* 3. chain3: ctx root-epoch-product-stat attempt 9 (hops=1) */
+    cx_fmt(d, sizeof d, "%s/c3/rev3", fx_root);
+    mk_dir(d);
+    wr_file(d, "bg.log",
+        "BLOCKER\tphase=ctx\treason=first-failure\trc=2\tattempts=9\tresumes=0\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t8\tphase=build\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t9\tphase=ctx\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "BLOCKER\tphase=ctx\treason=first-failure\trc=2\tattempts=9\tresumes=0\n");
+    cx_fmt(msg, sizeof msg,
+        "source-package: REFUSE root-epoch-product-stat errno=2\n"
+        "chain-step: prepare-context: %s/ctx\n"
+        "candidate-chain: ctx: %s/ctx\n", d, d);
+    wr_file(d, "chain-run-9.stderr", msg);
+
+    /* 4. chain4: jobs-gen seed-gen clone-push target mismatch (hops=1) */
+    cx_fmt(d, sizeof d, "%s/c4/rev4", fx_root);
+    mk_dir(d);
+    wr_file(d, "bg.log",
+        "BLOCKER\tphase=jobs-gen\treason=first-failure\trc=2\tattempts=14\tresumes=0\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t13\tphase=jobs-tool\trc=0\tresidue=0\tbound=120\tmemo=off\n"
+        "ATTEMPT\t14\tphase=jobs-gen\trc=2\tresidue=0\tbound=151\tmemo=off\n"
+        "BLOCKER\tphase=jobs-gen\treason=first-failure\trc=2\tattempts=14\tresumes=0\n");
+    wr_file(d, "chain-run-14.stderr",
+        "seed-gen: exec/parse2/parenfold-template.tsv:3: clone-push target mismatch\n"
+        "source-package: REFUSE actual-job-command-failed-partial-retained errno=0\n"
+        "source-wave: wave failed; raw outputs retained errno=0\n"
+        "candidate-chain: job action: jobs-gen-0-start\n");
+
+    /* 5. chain5: wf-prepare -> wf-prep/child-1.stderr conflicting parameter types (hops=2, BLOCKER in bg.log) */
+    cx_fmt(d, sizeof d, "%s/c5/rev5", fx_root);
+    cx_fmt(cdir, sizeof cdir, "%s/c5-cache/wf-prep", fx_root);
+    mk_dir(d);
+    mk_dir(cdir);
+    wr_file(d, "bg.log",
+        "BLOCKER\tphase=wf-prepare\treason=first-failure\trc=2\tattempts=116\tresumes=0\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t115\tphase=wf-prepare\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t116\tphase=wf-span-prep\trc=2\tresidue=0\tbound=90\tmemo=on\n");
+    cx_fmt(msg, sizeof msg,
+        "whole-front: REFUSE child failed (see exclusive logs)\n"
+        "candidate-chain: wf-prepare: %s\n", cdir);
+    wr_file(d, "chain-run-115.stderr", msg);
+    wr_file(d, "chain-run-116.stderr", "whole-front: REFUSE child failed (see exclusive logs)\n");
+    wr_file(cdir, "child-0.stderr", "");
+    cx_fmt(msg, sizeof msg,
+        "%s/worker.cx:33:12: error: conflicting parameter types for function (C99 6.7p4)\n"
+        "  extern int cx_fmt(char *, int, const char *, ...);\n"
+        "             ^\n", cdir);
+    wr_file(cdir, "child-1.stderr", msg);
+
+    /* 6. chain6: wf-prepare REFUSE template SHA != ... with rc=77 yields after (hops=1) */
+    cx_fmt(d, sizeof d, "%s/c6/rev6", fx_root);
+    mk_dir(d);
+    wr_file(d, "bg.log",
+        "BLOCKER\tphase=wf-prepare\treason=first-failure\trc=2\tattempts=117\tresumes=0\n");
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t15\tphase=jobs-tbl\trc=76\tresidue=0\tbound=133\tmemo=off\n"
+        "ATTEMPT\t16\tphase=jobs-tbl\trc=0\tresidue=0\tbound=133\tmemo=off\n"
+        "ATTEMPT\t116\tphase=wf-prepare\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t117\tphase=wf-span-prep\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t114\tphase=g2-lnx-x86_64-closure-prepare\trc=77\tresidue=0\tbound=90\tmemo=on\n"
+        "ATTEMPT\t115\tphase=g2-lnx-arm64-closure-prepare\trc=77\tresidue=0\tbound=90\tmemo=on\n"
+        "BLOCKER\tphase=wf-prepare\treason=first-failure\trc=2\tattempts=117\tresumes=0\n");
+    wr_file(d, "chain-run-116.stderr",
+        "candidate-chain: REFUSE template SHA != ba945f3238 tools/templates/whole-front.cx.in: a8fc39b5ac01da73b48eb7edb09893e9d356c6c21406eb59342631921135fe46\n");
+
+    /* 7. chain7: g2-win-x86_64 -> gen2/win-x86_64-e3.control/check-uqjfng/child-1.stderr (hops=2) */
+    cx_fmt(d, sizeof d, "%s/c7/rev7", fx_root);
+    cx_fmt(cdir, sizeof cdir, "%s/c7-cache/gen2/win-x86_64-e3.control/check-uqjfng", fx_root);
+    mk_dir(d);
+    mk_dir(cdir);
+    {
+        char tdir[1200];
+        cx_fmt(tdir, sizeof tdir, "%s/c7-cache/gen2/win-x86_64-e3", fx_root);
+        mk_dir(tdir);
+        wr_file(d, "bg.log",
+            "BLOCKER\tphase=g2-win-x86_64\treason=first-failure\trc=2\tattempts=179\tresumes=0\n");
+        wr_file(d, "chain-run.tsv",
+            "ATTEMPT\t176\tphase=g2-win-x86_64\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+            "ATTEMPT\t178\tphase=wf-span-prep-g3\trc=0\tresidue=0\tbound=86\tmemo=on\n"
+            "ATTEMPT\t179\tphase=g3-lnx-arm64\trc=0\tresidue=0\tbound=82\tmemo=on\n"
+            "ATTEMPT\t177\tphase=gen2-osx-arm64-stub\trc=0\tresidue=0\tbound=90\tmemo=on\n"
+            "BLOCKER\tphase=g2-win-x86_64\treason=first-failure\trc=2\tattempts=179\tresumes=0\n");
+        cx_fmt(msg, sizeof msg,
+            "whole-front: REFUSE child failed (see exclusive logs)\n"
+            "candidate-chain: gen2-win-x86_64-e3: %s\n", tdir);
+        wr_file(d, "chain-run-176.stderr", msg);
+    }
+    wr_file(cdir, "child-0.stderr", "");
+    wr_file(cdir, "child-1.stderr",
+        "string.h:1:1: error: call to undeclared function 'fork' [-Wc99-implicit-function]\n"
+        "   \n"
+        "  ^\n"
+        "WORKER_TIME\tspan\tfirst=e3\tlast=e3\trc=1\tns=18536391440\n"
+        "worker: st_span: \n");
+
+    /* 8. clue-free directory -> unlocated */
+    cx_fmt(d, sizeof d, "%s/c8-empty/rev8", fx_root);
+    mk_dir(d);
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t1\tphase=snap\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+        "BLOCKER\tphase=snap\treason=first-failure\trc=2\tattempts=1\tresumes=0\n");
+    wr_file(d, "chain-run-1.stderr", "some unrelated informational line without diagnostic\n");
+
+    /* 9. no BLOCKER line with trailing rc=77 yield after rc=2 failure */
+    cx_fmt(d, sizeof d, "%s/c9-yield/rev9", fx_root);
+    mk_dir(d);
+    wr_file(d, "chain-run.tsv",
+        "ATTEMPT\t14\tphase=jobs-gen\trc=2\tresidue=0\tbound=151\tmemo=off\n"
+        "ATTEMPT\t15\tphase=g2-lnx-x86_64-closure-prepare\trc=77\tresidue=0\tbound=90\tmemo=on\n");
+    wr_file(d, "chain-run-14.stderr",
+        "seed-gen: exec/parse2/parenfold-template.tsv:3: clone-push target mismatch\n");
+    wr_file(d, "chain-run-15.stderr",
+        "candidate-chain: REFUSE preflight: entry\n");
+}
+
+int main(void) {
+    char out[2048], arg[1400], rmcmd[1400];
+    long t0 = sy_now_ms();
+    cx_fmt(fx_root, sizeof fx_root, "%s/check-trainjob-why-%d", sy_tmpdir(), (int)sy_pid());
+    build_fixtures();
+
+    /* Case 1 */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c1/rev1", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=snap\tattempt=3\trc=2\thops=1\t") &&
+       has(out, "why=candidate-chain: REFUSE preflight: entry"),
+       "case1-snap-preflight-entry", out);
+
+    /* Case 2 */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c2/rev2", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=ctx\tattempt=11\trc=2\thops=1\t") &&
+       has(out, "why=source-package: REFUSE root-epoch-product-stat errno=2"),
+       "case2-ctx-root-epoch-stat", out);
+
+    /* Case 3 */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c3/rev3", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=ctx\tattempt=9\trc=2\thops=1\t") &&
+       has(out, "why=source-package: REFUSE root-epoch-product-stat errno=2"),
+       "case3-ctx-root-epoch-stat-repeat", out);
+
+    /* Case 4 */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c4/rev4", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=jobs-gen\tattempt=14\trc=2\thops=1\t") &&
+       has(out, "why=seed-gen: exec/parse2/parenfold-template.tsv:3: clone-push target mismatch"),
+       "case4-jobs-gen-clone-push-mismatch", out);
+
+    /* Case 5 (hops=2 via wf-prep/child-1.stderr) */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c5/rev5", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=wf-prepare\tattempt=115\trc=2\thops=2\t") &&
+       has(out, "worker.cx:33:12: error: conflicting parameter types for function (C99 6.7p4)"),
+       "case5-wf-prepare-hop2-child-stderr", out);
+
+    /* Case 6 */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c6/rev6", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=wf-prepare\tattempt=116\trc=2\thops=1\t") &&
+       has(out, "why=candidate-chain: REFUSE template SHA != ba945f3238 tools/templates/whole-front.cx.in"),
+       "case6-wf-prepare-template-sha", out);
+
+    /* Case 7 (hops=2 via gen2/win-x86_64-e3.control/check-X/child-1.stderr) */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c7/rev7", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=g2-win-x86_64\tattempt=176\trc=2\thops=2\t") &&
+       has(out, "why=string.h:1:1: error: call to undeclared function 'fork' [-Wc99-implicit-function]"),
+       "case7-g2-win-x86_64-hop2-control-child-stderr", out);
+
+    /* Case 8: clue-free directory -> unlocated */
+    cx_fmt(arg, sizeof arg, "why --dir %s/c8-empty/rev8", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=snap\tattempt=1\trc=2\thops=0\t") &&
+       has(out, "why=unlocated"),
+       "case8-unlocated-when-no-rule-matches", out);
+
+    /* Case 9: positional BASE/REV, rc=77 yield ignored without BLOCKER, missing dir unlocated, and invalid args refusal */
+    cx_fmt(arg, sizeof arg, "why %s/c1/rev1", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=snap\tattempt=3\trc=2\thops=1\t"),
+       "case9-positional-dir-accepted", out);
+    cx_fmt(arg, sizeof arg, "why --dir %s/c9-yield/rev9", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=jobs-gen\tattempt=14\trc=2\thops=1\t") &&
+       has(out, "clone-push target mismatch"),
+       "case10-rc77-yield-ignored-without-blocker", out);
+    cx_fmt(arg, sizeof arg, "why --dir %s/nonexistent", fx_root);
+    ck(run_why(arg, out, sizeof out) == 0 &&
+       has(out, "phase=-\tattempt=0\trc=0\thops=0\tlog=-\twhy=unlocated"),
+       "case11-missing-dir-unlocated", out);
+    ck(run_why("unknown-subcmd", out, sizeof out) == 2, "case12-bad-subcmd-refused", out);
+
+    cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx_root);
+    ckk_sh("CHECK_TRAINJOB_WHY", rmcmd, out, sizeof out);
+
+    printf("CHECK_TRAINJOB_WHY\tfailed=%d\tassertions=%d\tms=%ld\n", failed, assertions, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

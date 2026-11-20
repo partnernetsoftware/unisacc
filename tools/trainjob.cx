@@ -1,0 +1,253 @@
+/* tools/trainjob.cx -- read-only release-train job observer and failure locator (unit J4: why subcommand).
+ * Usage:
+ *   sh ./unisacc.com tools/trainjob.cx -- why [--dir] BASE/REV
+ * Reads chain-run.tsv (and bg.log), locates the BLOCKER phase's failing attempt (ignoring rc=0 and rc=77 yield),
+ * scans chain-run-N.stderr against the hop-1 rule table, and when hop-1 points to a child directory via
+ * "REFUSE child failed" + "candidate-chain: <step>: <dir>", scans <dir>/child-*.stderr and
+ * <dir>.control/check-X/child-*.stderr against the hop-2 rule table.
+ * Prints:
+ *   TRAINJOB_WHY<TAB>phase=<PHASE><TAB>attempt=<N><TAB>rc=<RC><TAB>hops=<0|1|2><TAB>log=<PATH><TAB>why=<DIAG_OR_unlocated>
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+typedef struct {
+    int hop;
+    const char *pat;
+} TjRule;
+
+static const TjRule tj_rules[] = {
+    { 1, "REFUSE preflight:" },
+    { 1, "REFUSE root-epoch-" },
+    { 1, "clone-push target mismatch" },
+    { 1, "REFUSE template SHA !=" },
+    { 2, ": error:" },
+    { 0, 0 }
+};
+
+static int match_rule(int hop, const char *line, long len) {
+    for (int i = 0; tj_rules[i].pat; i++) {
+        if (tj_rules[i].hop != hop) continue;
+        long plen = (long)strlen(tj_rules[i].pat);
+        if (len >= plen && tx_find(line, len, tj_rules[i].pat, plen) >= 0) return 1;
+    }
+    return 0;
+}
+
+static int scan_file_hop(const char *path, int hop, char *why_out, size_t why_cap, char *ptr_out, size_t ptr_cap) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int has_child_fail = 0, matched = 0;
+    if (sy_read_file(path, &b, &n, 2 << 20) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (b[le - 1] == '\r' || b[le - 1] == ' ' || b[le - 1] == '\t')) le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        if (len <= 0) continue;
+        if (!matched && match_rule(hop, line, len)) {
+            size_t cl = (size_t)len < why_cap - 1 ? (size_t)len : why_cap - 1;
+            mm_copy(why_out, why_cap, line, cl);
+            why_out[cl] = 0;
+            for (size_t k = 0; k < cl; k++) if (why_out[k] == '\t') why_out[k] = ' ';
+            matched = 1;
+        }
+        if (hop == 1 && tx_find(line, len, "REFUSE child failed", 19) >= 0) {
+            has_child_fail = 1;
+        }
+        if (hop == 1 && ptr_out && ptr_cap > 0 && len > 17 && memcmp(line, "candidate-chain: ", 17) == 0) {
+            long cpos = tx_find(line + 17, len - 17, ": ", 2);
+            if (cpos >= 0) {
+                const char *p = line + 17 + cpos + 2;
+                long plen = len - (17 + cpos + 2);
+                if (plen > 0 && (size_t)plen < ptr_cap) {
+                    mm_copy(ptr_out, ptr_cap, p, (size_t)plen);
+                    ptr_out[plen] = 0;
+                }
+            }
+        }
+    }
+    mm_free(b);
+    if (hop == 1 && !has_child_fail && ptr_out && ptr_cap > 0) ptr_out[0] = 0;
+    return matched;
+}
+
+static int scan_hop2_dir(const char *tdir, char *log_out, size_t log_cap, char *why_out, size_t why_cap) {
+    char p[2048], cdir[2048];
+    for (int i = 0; i < 8; i++) {
+        if (cx_fmt(p, sizeof p, "%s/child-%d.stderr", tdir, i)) continue;
+        if (scan_file_hop(p, 2, why_out, why_cap, 0, 0)) {
+            cx_fmt(log_out, log_cap, "%s", p);
+            return 1;
+        }
+    }
+    if (!cx_fmt(cdir, sizeof cdir, "%s.control", tdir)) {
+        sy_dir_t d;
+        if (sy_dir_open(&d, cdir) == 0) {
+            while (sy_dir_next(&d) == 1) {
+                if (d.name_n > 6 && memcmp(d.name, "check-", 6) == 0) {
+                    for (int i = 0; i < 8; i++) {
+                        if (cx_fmt(p, sizeof p, "%s/%s/child-%d.stderr", cdir, d.name, i)) continue;
+                        if (scan_file_hop(p, 2, why_out, why_cap, 0, 0)) {
+                            sy_dir_close(&d);
+                            cx_fmt(log_out, log_cap, "%s", p);
+                            return 1;
+                        }
+                    }
+                }
+            }
+            sy_dir_close(&d);
+        }
+    }
+    return 0;
+}
+
+static void scan_blocker_buf(const char *b, int64_t n, char *b_phase, size_t bp_cap, int *b_rc) {
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = b + ls;
+        if (len > 8 && memcmp(line, "BLOCKER\t", 8) == 0) {
+            long pp = tx_find(line, len, "\tphase=", 7);
+            if (pp >= 0) {
+                const char *s = line + pp + 7;
+                long sl = 0;
+                while (pp + 7 + sl < len && s[sl] != '\t') sl++;
+                if (sl > 0 && (size_t)sl < bp_cap) {
+                    mm_copy(b_phase, bp_cap, s, (size_t)sl);
+                    b_phase[sl] = 0;
+                }
+            }
+            long rp = tx_find(line, len, "\trc=", 4);
+            if (rp >= 0) *b_rc = atoi(line + rp + 4);
+        }
+    }
+}
+
+static int parse_chain_tsv(const char *dir, char *phase_out, size_t phase_cap, int *att_out, int *rc_out) {
+    char p[2048], bgp[2048], b_phase[128] = {0};
+    unsigned char *b = 0, *bg = 0;
+    int64_t n = 0, bgn = 0;
+    int b_rc = 0, found_att = 0, best_att = 0, best_rc = 0;
+    char best_phase[128] = {0};
+    if (cx_fmt(p, sizeof p, "%s/chain-run.tsv", dir) || sy_read_file(p, &b, &n, 4 << 20) || !b) return 0;
+
+    /* Pass 1: find BLOCKER phase from chain-run.tsv or bg.log */
+    scan_blocker_buf((const char *)b, n, b_phase, sizeof b_phase, &b_rc);
+    if (!b_phase[0] && !cx_fmt(bgp, sizeof bgp, "%s/bg.log", dir) && !sy_read_file(bgp, &bg, &bgn, 4 << 20) && bg) {
+        scan_blocker_buf((const char *)bg, bgn, b_phase, sizeof b_phase, &b_rc);
+        mm_free(bg);
+    }
+
+    /* Pass 2: find matching ATTEMPT row (rc != 0 && rc != 77) for BLOCKER phase */
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        if (len > 8 && memcmp(line, "ATTEMPT\t", 8) == 0) {
+            const char *cols[8];
+            long clens[8];
+            int nc = 0;
+            long q = 0;
+            while (nc < 8 && q <= len) {
+                long cs = q;
+                while (q < len && line[q] != '\t') q++;
+                cols[nc] = line + cs;
+                clens[nc] = q - cs;
+                nc++;
+                q++;
+            }
+            if (nc >= 4 && clens[1] > 0 && clens[2] > 6 && memcmp(cols[2], "phase=", 6) == 0 &&
+                clens[3] > 3 && memcmp(cols[3], "rc=", 3) == 0) {
+                char num_s[32], ph_s[128], rc_s[32];
+                size_t nl = (size_t)clens[1] < sizeof num_s - 1 ? (size_t)clens[1] : sizeof num_s - 1;
+                size_t pl = (size_t)(clens[2] - 6) < sizeof ph_s - 1 ? (size_t)(clens[2] - 6) : sizeof ph_s - 1;
+                size_t rl = (size_t)(clens[3] - 3) < sizeof rc_s - 1 ? (size_t)(clens[3] - 3) : sizeof rc_s - 1;
+                mm_copy(num_s, sizeof num_s, cols[1], nl); num_s[nl] = 0;
+                mm_copy(ph_s, sizeof ph_s, cols[2] + 6, pl); ph_s[pl] = 0;
+                mm_copy(rc_s, sizeof rc_s, cols[3] + 3, rl); rc_s[rl] = 0;
+                int att = atoi(num_s);
+                int arc = atoi(rc_s);
+                if (arc != 0 && arc != 77) {
+                    if (!b_phase[0] || tx_eqz(ph_s, b_phase)) {
+                        best_att = att;
+                        best_rc = arc;
+                        cx_fmt(best_phase, sizeof best_phase, "%s", ph_s);
+                        found_att = 1;
+                    }
+                }
+            }
+        }
+    }
+    mm_free(b);
+    if (!found_att) return 0;
+    cx_fmt(phase_out, phase_cap, "%s", best_phase);
+    *att_out = best_att;
+    *rc_out = best_rc ? best_rc : b_rc;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *dir = 0;
+    if (argc < 2 || !tx_eqz(argv[1], "why")) {
+        fprintf(stderr, "trainjob: usage: trainjob.cx -- why [--dir] BASE/REV\n");
+        return 2;
+    }
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
+        else if (argv[i][0] != '-' && !dir) dir = argv[i];
+        else {
+            fprintf(stderr, "trainjob: bad argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!dir || !dir[0]) {
+        fprintf(stderr, "trainjob: why requires directory\n");
+        return 2;
+    }
+
+    char phase[128] = "-";
+    int att = 0, rc = 0;
+    if (!parse_chain_tsv(dir, phase, sizeof phase, &att, &rc)) {
+        printf("TRAINJOB_WHY\tphase=-\tattempt=0\trc=0\thops=0\tlog=-\twhy=unlocated\n");
+        return 0;
+    }
+
+    char sfile[2048], why[512] = "unlocated", ptr[2048] = {0}, logp[2048] = "-";
+    cx_fmt(sfile, sizeof sfile, "%s/chain-run-%d.stderr", dir, att);
+    cx_fmt(logp, sizeof logp, "%s", sfile);
+
+    if (scan_file_hop(sfile, 1, why, sizeof why, ptr, sizeof ptr)) {
+        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=1\tlog=%s\twhy=%s\n",
+               phase, att, rc, logp, why);
+        return 0;
+    }
+    if (ptr[0] && scan_hop2_dir(ptr, logp, sizeof logp, why, sizeof why)) {
+        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=2\tlog=%s\twhy=%s\n",
+               phase, att, rc, logp, why);
+        return 0;
+    }
+    printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=0\tlog=%s\twhy=unlocated\n",
+           phase, att, rc, logp);
+    return 0;
+}
