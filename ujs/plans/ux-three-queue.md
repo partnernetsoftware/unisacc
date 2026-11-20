@@ -238,7 +238,7 @@
 - ~~Sprite 拾取 | G-ray 面向相机、旋转和 UV | 相机射线和 M7 Sprite。~~ 11 项通过，停用旋转后 V 由 0.375 变为 0.625，旧结构八项通过。
 - ~~LOD 拾取目标 | G-ray 射线原点、世界位置与阈值切换 | M7 LOD。~~ 扩展结构门 13 项通过，迟滞及拾取目标两个反例各自转红。
 - LOD 场景分派 | G-ray 选定对象的面命中与层过滤 | Mesh 场景拾取及 LOD 拾取目标。
-- SkinnedMesh 拾取 | G-ray 骨骼变形后命中和面索引 | Mesh 拾取与 M7 蒙皮。
+- ~~SkinnedMesh 拾取 | G-ray 骨骼变形后命中和面索引 | Mesh 拾取与 M7 蒙皮。~~ 八项通过，跳过骨骼位移从命中变为未命中，旧蒙皮与两种绑定各五项通过。
 - ~~OrbitControls 透视旋转与滚轮 | G-ray r160 插件事件、阻尼、缩放及指针归属 | 输入 ABI、相机。~~ 11 项通过，反向拖动从 -10 变为 10 转红。
 - OrbitControls 完整输入接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏、正交和约束 | 透视旋转与滚轮、输入 ABI。
 - MapControls | G-ray 旋转和平移映射 | OrbitControls。

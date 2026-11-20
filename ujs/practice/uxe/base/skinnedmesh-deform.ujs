@@ -1,0 +1,61 @@
+struct SkinnedMesh {
+  mesh: u32;
+  skeleton: u32;
+  bindMatrix: u32;
+  bindInverse: u32;
+}
+
+native function skinned_valid(skin:i64) i64 {
+  return skin>=0 && skin<=6291456-SkinnedMesh.size && skin%4==0;
+}
+
+native function skin_axis(matrix:i64,axis:i64,x:f64,y:f64,z:f64) f64 {
+  return ux_f64(matrix+axis)*x+ux_f64(matrix+axis+32)*y+
+    ux_f64(matrix+axis+64)*z+ux_f64(matrix+axis+96);
+}
+
+native function skin_palette_axis(matrix:i64,axis:i64,x:f64,y:f64,z:f64) f64 {
+  return ux_f32(matrix+axis)*x+ux_f32(matrix+axis+16)*y+
+    ux_f32(matrix+axis+32)*z+ux_f32(matrix+axis+48);
+}
+
+native function SkinnedMesh_applyBoneTransform(skin:i64,vertex:i64,indices:i64,weights:i64) i64 {
+  if(!skinned_valid(skin) || vertex<0 || vertex>6291456-24 || vertex%8!=0 ||
+     indices<0 || indices>6291456-16 || indices%4!=0 ||
+     weights<0 || weights>6291456-16 || weights%4!=0) { return 0-1; }
+  let skeleton=ux_u32(skin+SkinnedMesh.skeleton);
+  if(skeleton==0 || !skeleton_valid(skeleton)) { return 0-1; }
+  let palette=ux_u32(skeleton+Skeleton.palette);
+  let count=ux_u32(skeleton+Skeleton.count);
+  let bind=ux_u32(skin+SkinnedMesh.bindMatrix);
+  let inverse=ux_u32(skin+SkinnedMesh.bindInverse);
+  let x=ux_f64(vertex);
+  let y=ux_f64(vertex+8);
+  let z=ux_f64(vertex+16);
+  let bx=skin_axis(bind,0,x,y,z);
+  let by=skin_axis(bind,8,x,y,z);
+  let bz=skin_axis(bind,16,x,y,z);
+  let sx=0.0;
+  let sy=0.0;
+  let sz=0.0;
+  let i=0;
+  while(i<4) {
+    let w=ux_f32(weights+4*i);
+    if(w!=0.0) {
+      let index=ux_u32(indices+4*i);
+      if(index>=count || w!=w) { return 0-1; }
+      let matrix=palette+64*index;
+      sx=sx+skin_palette_axis(matrix,0,bx,by,bz)*w;
+      sy=sy+skin_palette_axis(matrix,4,bx,by,bz)*w;
+      sz=sz+skin_palette_axis(matrix,8,bx,by,bz)*w;
+    }
+    i=i+1;
+  }
+  let ax=skin_axis(inverse,0,sx,sy,sz);
+  let ay=skin_axis(inverse,8,sx,sy,sz);
+  let az=skin_axis(inverse,16,sx,sy,sz);
+  let a=ux_f64_put(vertex,ax);
+  let b=ux_f64_put(vertex+8,ay);
+  let c=ux_f64_put(vertex+16,az);
+  return vertex;
+}

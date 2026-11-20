@@ -1,0 +1,74 @@
+struct RaySkinStreams {
+  joints: u32;
+  weights: u32;
+  jointStride: u32;
+  weightStride: u32;
+}
+
+// Pose the f32 positions into caller-owned scratch before intersecting.
+// Joint and weight records contain four u32 and four f32 values respectively.
+native function Raycaster_intersectSkinned(state:i64,mesh:i64,skin:i64,streams:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(mesh,RayMeshBuffer.size) ||
+     !skinned_valid(skin) || !raycaster_span(streams,RaySkinStreams.size) ||
+     !raycaster_span(work,space) || capacity<0) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(mesh+RayMeshBuffer.layerMask))==0) { return 0; }
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+  if(vertices>65536 || faces>65536) { return 0-1; }
+  if(faces==0) { return 0; }
+  if(vertices<1 || capacity<faces) { return 0-1; }
+  let positions=ux_u32(mesh+RayMeshBuffer.positions);
+  let pos_stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let face_indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let index_width=ux_u32(mesh+RayMeshBuffer.indexBytes);
+  let world=ux_u32(mesh+RayMeshBuffer.matrixWorld);
+  let joints=ux_u32(streams+RaySkinStreams.joints);
+  let weights=ux_u32(streams+RaySkinStreams.weights);
+  let joint_stride=ux_u32(streams+RaySkinStreams.jointStride);
+  let weight_stride=ux_u32(streams+RaySkinStreams.weightStride);
+  let skeleton=ux_u32(skin+SkinnedMesh.skeleton);
+  let bind=ux_u32(skin+SkinnedMesh.bindMatrix);
+  let inverse=ux_u32(skin+SkinnedMesh.bindInverse);
+  if(skeleton==0 || !skeleton_valid(skeleton) || !raycaster_span(bind,128) ||
+     !raycaster_span(inverse,128) || !raycaster_span(world,128) || positions%4!=0 || joints%4!=0 ||
+     weights%4!=0 || pos_stride<12 || pos_stride%4!=0 || joint_stride<16 || joint_stride%4!=0 ||
+     weight_stride<16 || weight_stride%4!=0) { return 0-1; }
+  let bones=ux_u32(skeleton+Skeleton.count);
+  let palette=ux_u32(skeleton+Skeleton.palette);
+  let size=faces*RayMeshHit.size;
+  let pose_bytes=(vertices*12+7)/8*8;
+  if(bones<1 || bones>65536 || palette%4!=0 || !raycaster_span(out,size) ||
+     space<304+pose_bytes+size || raycaster_overlap(out,size,work,space) ||
+     !ray_instance_readonly(state,RaycasterState.size,out,size,work,space) ||
+     !ray_instance_readonly(mesh,RayMeshBuffer.size,out,size,work,space) ||
+     !ray_instance_readonly(skin,SkinnedMesh.size,out,size,work,space) ||
+     !ray_instance_readonly(streams,RaySkinStreams.size,out,size,work,space) ||
+     !ray_instance_readonly(skeleton,Skeleton.size,out,size,work,space) ||
+     !ray_instance_readonly(bind,128,out,size,work,space) ||
+     !ray_instance_readonly(inverse,128,out,size,work,space) ||
+     !ray_instance_readonly(world,128,out,size,work,space) ||
+     !ray_instance_readonly(palette,bones*64,out,size,work,space) ||
+     !ray_instance_readonly(positions,(vertices-1)*pos_stride+12,out,size,work,space) ||
+     !ray_instance_readonly(face_indices,faces*3*index_width,out,size,work,space) ||
+     !ray_instance_readonly(joints,(vertices-1)*joint_stride+16,out,size,work,space) ||
+     !ray_instance_readonly(weights,(vertices-1)*weight_stride+16,out,size,work,space)) { return 0-1; }
+  let vertex=work+40;
+  let pose=work+64;
+  let i=0;
+  while(i<vertices) {
+    let source=positions+i*pos_stride;
+    let raw=Vector3_set(vertex,ux_f32(source),ux_f32(source+4),ux_f32(source+8));
+    let changed=SkinnedMesh_applyBoneTransform(skin,raw,joints+i*joint_stride,weights+i*weight_stride);
+    if(changed<0 || !raycaster_finite_vector(vertex)) { return 0-2; }
+    let target=pose+i*12;
+    let x=ux_f32_put(target,ux_f64(vertex));
+    let y=ux_f32_put(target+4,ux_f64(vertex+8));
+    let z=ux_f32_put(target+8,ux_f64(vertex+16));
+    i=i+1;
+  }
+  let copy=uxe_copy_record(work,mesh,RayMeshBuffer.size);
+  let a=ux_u32_put(work+RayMeshBuffer.positions,pose);
+  let b=ux_u32_put(work+RayMeshBuffer.positionStride,12);
+  let offset=64+pose_bytes;
+  return Raycaster_intersectMeshBuffer(state,work,out,capacity,work+offset,space-offset);
+}
