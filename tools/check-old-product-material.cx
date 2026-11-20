@@ -6,6 +6,8 @@
 #pragma unisa use sys.fs
 #pragma unisa use fsx.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
 #pragma unisa use text.text
@@ -69,6 +71,57 @@ int main(void){
     /* (9) prepare: models outside the candidate directory */
     char *p2[]={"prepare",root,cand,cache,out,"--models",a,0};rc=run(p2,&r);
     ck(rc==2&&has(&r,"reason=models-not-bound-to-candidate")&&sy_exists(out)!=1,"foreign-models-refused");np_free(&r);
+    /* (10) layout switch with same candidate bytes & shared prep-cache must not fail material-absent */
+    {
+        char mir[4096],fake_old[4096],fsha[65],prep[4096],la[4096],lb[4096],assets[512],shcmd[8192];
+        const char *old_script="#!/bin/sh\necho \"unisacc 0.0.1\"\n";
+        long old_len=tx_len(old_script,256);
+        if(cx_path_join(mir,sizeof mir,dir,"mirror")||cx_path_join(fake_old,sizeof fake_old,mir,"unisacc.com")||
+           cx_path_join(prep,sizeof prep,dir,"shared-prep")||cx_path_join(la,sizeof la,dir,"layout-a")||
+           cx_path_join(lb,sizeof lb,dir,"layout-b"))die("layout path");
+        sy_mkdir(mir,0700);sy_mkdir(prep,0700);
+        if(sy_write_file(fake_old,old_script,old_len,0700))die("fake old write");
+        sha(fake_old,fsha);
+        if(cx_fmt(assets,sizeof assets,"version\trepo\ttag\tasset\tbytes\tsha256\n0.0.1\tpartnernetsoftware/unisacc\tv0.0.1\tunisacc.com\t%ld\t%s\n",old_len,fsha))die("assets fmt");
+        for(int k=0;k<2;k++){
+            const char *ld=k==0?la:lb;
+            char td[4096],ap[4096],up[4096];
+            if(cx_path_join(td,sizeof td,ld,"tools")||cx_path_join(ap,sizeof ap,td,"old-product-assets.tsv")||cx_path_join(up,sizeof up,ld,"unisacc.com"))die("ld path");
+            sy_mkdir(ld,0700);
+            if(cx_fmt(shcmd,sizeof shcmd,
+                "for d in cx cxroot.tsv ext include tests exec build src apps seed weights iterate ujs tools; do "
+                "[ -e '%s/'\"$d\" ] && (cp -al '%s/'\"$d\" '%s/'\"$d\" 2>/dev/null || cp -a '%s/'\"$d\" '%s/'\"$d\"); done && "
+                "rm -f '%s/tools/old-product-assets.tsv'",
+                root,root,ld,root,ld,ld))die("mk layout fmt");
+            { char *sv[]={"sh","-c",shcmd,0}; char why[256]; np_result sr={0};
+              if(np_run(sv,root,0,15,&sr,why,sizeof why)||sr.rc||sr.residue)die("mk layout"); np_free(&sr); }
+            if(sy_write_file(ap,assets,tx_len(assets,sizeof assets),0600))die("assets write");
+            if(sy_copy(cand,up,0755))die("cand copy");
+        }
+        if(cx_fmt(shcmd,sizeof shcmd,
+            "UNISACC_PREP_CACHE='%s' UNISACC_OLD_PRODUCT_MIRROR='%s' UNISACC_OLD_PRODUCT_VERSION=0.0.1 "
+            "sh '%s' tools/affected.cx -- --root '%s' --materials-dump --ids netregen-small-lnx-x86_64 --prepare-materials",
+            prep,mir,cand,la))die("la cmd");
+        { char *sv[]={"sh","-c",shcmd,0}; char why[256]; np_result sr={0};
+          if(np_run(sv,root,0,40,&sr,why,sizeof why)||sr.residue)die("la run");
+          int ok_a=(sr.rc==0&&has(&sr,"layout-a/unisacc.com")&&!has(&sr,"material-absent"));
+          if(!ok_a)fprintf(stderr,"la rc=%d out=%.*s err=%.*s\n",sr.rc,(int)(sr.outn<300?sr.outn:300),sr.out?sr.out:"",(int)(sr.errn<300?sr.errn:300),sr.err?sr.err:"");
+          ck(ok_a,"layout-a-prepared");
+          np_free(&sr); }
+        /* Remove layout A so stale receipt pointing to layout-a/unisacc.com would fail material-absent */
+        { char *rmv[]={"rm","-rf",la,0}; char why[256]; np_result sr={0};
+          if(np_run(rmv,root,0,15,&sr,why,sizeof why)||sr.rc)die("rm layout-a"); np_free(&sr); }
+        if(cx_fmt(shcmd,sizeof shcmd,
+            "UNISACC_PREP_CACHE='%s' UNISACC_OLD_PRODUCT_MIRROR='%s' UNISACC_OLD_PRODUCT_VERSION=0.0.1 "
+            "sh '%s' tools/affected.cx -- --root '%s' --materials-dump --ids netregen-small-lnx-x86_64 --prepare-materials",
+            prep,mir,cand,lb))die("lb cmd");
+        { char *sv[]={"sh","-c",shcmd,0}; char why[256]; np_result sr={0};
+          if(np_run(sv,root,0,40,&sr,why,sizeof why)||sr.residue)die("lb run");
+          int ok_b=(sr.rc==0&&has(&sr,"layout-b/unisacc.com")&&!has(&sr,"material-absent"));
+          if(!ok_b)fprintf(stderr,"lb rc=%d out=%.*s err=%.*s\n",sr.rc,(int)(sr.outn<300?sr.outn:300),sr.out?sr.out:"",(int)(sr.errn<300?sr.errn:300),sr.err?sr.err:"");
+          ck(ok_b,"layout-b-switch-no-material-absent");
+          np_free(&sr); }
+    }
     printf("CHECK_OLD_PRODUCT_MATERIAL\tpass=%d\tfail=%d\n",pass,fail);
     return fail?1:0;
 }
