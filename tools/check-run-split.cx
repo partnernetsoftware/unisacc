@@ -19,8 +19,8 @@
 static char root[4096], work[4096], prod[4200], cache_dir[4200], cache_env[4400];
 static int is_elf, npass, nfail;
 
-static void check(int ok, const char *name, const char *detail) {
-    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "");
+static void crs_note(int ok, const char *name, const char *detail) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "-");
     if (ok) npass++; else nfail++;
 }
 
@@ -29,8 +29,9 @@ static void die(const char *m) {
     exit(2);
 }
 
-static void write_txt(const char *path, const char *s) {
-    if (cx_write(path, s, (size_t)tx_len(s, 1L << 20))) die(path);
+static void crs_put(const char *path, const char *s) {
+    long n = tx_len(s, 1L << 20);
+    if (n < 0 || cx_write(path, s, (size_t)n)) die(path);
 }
 
 static int run_prod(const char *src, const char *arg1, const char *e1, const char *e2, const char *e3, np_result *r) {
@@ -86,7 +87,7 @@ static void compare_two(const char *tag, const char *src, const char *arg1, int 
              r0.errn == r1.errn && (!r0.errn || !memcmp(r0.err, r1.err, r0.errn));
     char det[200];
     cx_fmt(det, sizeof det, "rc=%d/%d(want %d) out=%zu/%zu err=%zu/%zu", r0.rc, r1.rc, want_rc, r0.outn, r1.outn, r0.errn, r1.errn);
-    check(ok, tag, det);
+    crs_note(ok, tag, det);
     if (!ok) {
         fprintf(stderr, "MISMATCH %s s0_out=[%.*s] s1_out=[%.*s] s0_err=[%.*s] s1_err=[%.*s]\n",
                 tag, (int)r0.outn, r0.out ? r0.out : "", (int)r1.outn, r1.out ? r1.out : "",
@@ -123,12 +124,12 @@ int main(void) {
         cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) ||
         cx_fmt(cxrootp, sizeof cxrootp, "%s/cxroot.tsv", work)) die("cx paths");
     if (symlink(cxsrc, cxlink)) die("symlink cx");
-    write_txt(cxrootp, "CXROOT1\nR\tsys\tcx/sys\nR\tmem\tcx/mem\nR\ttext\tcx/text\n");
+    crs_put(cxrootp, "CXROOT1\nR\tsys\tcx/sys\nR\tmem\tcx/mem\nR\ttext\tcx/text\n");
 
     /* 1. Experiment script (use sys.env sys.fs mem.heap): cold split populates .uo cache */
     char s1[4200];
     cx_fmt(s1, sizeof s1, "%s/exp.cx", work);
-    write_txt(s1,
+    crs_put(s1,
         "#pragma unisa use sys.env\n"
         "#pragma unisa use sys.fs\n"
         "#pragma unisa use mem.heap\n"
@@ -148,7 +149,7 @@ int main(void) {
     printf("INFO\tsplit_active=%d\tuo_files=%d\n", split_active, uo_after);
 
     /* 2. Edit one line in main file and rerun with RR_TIME: only main unit e3..elf when active */
-    write_txt(s1,
+    crs_put(s1,
         "#pragma unisa use sys.env\n"
         "#pragma unisa use sys.fs\n"
         "#pragma unisa use mem.heap\n"
@@ -170,7 +171,7 @@ int main(void) {
         int ok = !tr && rr.rc == 3 && (!split_active || (e3n == 1 && elfn == 1));
         char det[128];
         cx_fmt(det, sizeof det, "rc=%d split_active=%d e3=%d elf=%d", rr.rc, split_active, e3n, elfn);
-        check(ok, "edit1-rr-single-unit", det);
+        crs_note(ok, "edit1-rr-single-unit", det);
         np_free(&rr);
     }
     compare_two("eq-exp-v2-shadow", s1, "gamma", 3, "UNISACC_RUN_SPLIT=shadow", "RSPL_TAG=sh");
@@ -178,7 +179,7 @@ int main(void) {
     /* 3. Second multi-module script (text.text + sys.sha) */
     char s2[4200];
     cx_fmt(s2, sizeof s2, "%s/s2.cx", work);
-    write_txt(s2,
+    crs_put(s2,
         "#pragma unisa use text.text\n"
         "#pragma unisa use sys.sha\n"
         "int main(void) {\n"
@@ -191,7 +192,7 @@ int main(void) {
     /* 4. Silent fallback on objlink refusal (host-forwarded setpgid): zero extra stderr */
     char fb[4200];
     cx_fmt(fb, sizeof fb, "%s/fb.cx", work);
-    write_txt(fb,
+    crs_put(fb,
         "#pragma unisa use sys.env\n"
         "#pragma unisa use mem.heap\n"
         "int main(void) {\n"
@@ -204,7 +205,7 @@ int main(void) {
     /* 5. Syntax error: exact stderr and rc, no duplicate diagnostic */
     char bad[4200];
     cx_fmt(bad, sizeof bad, "%s/bad.cx", work);
-    write_txt(bad, "#pragma unisa use sys.env\nint main(void){return @;}\n");
+    crs_put(bad, "#pragma unisa use sys.env\nint main(void){return @;}\n");
     compare_two("syntax-err-no-dup", bad, 0, 1, "UNISACC_RUN_SPLIT=1", 0);
 
     cx_rmtree(work);
