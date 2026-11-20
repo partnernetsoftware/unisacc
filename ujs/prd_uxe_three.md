@@ -140,6 +140,8 @@ export uxe_frame(now:i64) i64 version 1;
 
 GPU 主门通过 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx` 运行。旧合并输入在编译阶段 10203 毫秒退出 124。最小 GPU 包基座探针编译为 678 毫秒，Chrome 新配置打开空页为 504 毫秒。拆分后冷编译的管线与图元、材质与纹理、逐片元光照三个输入分别为 4025、6650、3722 毫秒，Chrome 含像素读回为 5682 毫秒。单片编译仍限 10 秒，Chrome 仍限 20 秒。三个测试模块各自持有 Wasm 线性内存，沿原顺序提交至同一 WebGL 上下文，汇总仍检查 43 个场景的并集和原有 1682 个返回值。用 `-- --scene-omit-mutate` 验证缺少场景 111 时汇总失败。产品基座的单模块合同沿用本节下文。
 
+重复运行可让 devsvc 的子命令通过 `env UXE_GPU_WASM_CACHE=/tmp/自己的已创建目录` 传入私有缓存目录。缓存键包含编译器和入口、声明、着色器生成物及所有源文件的有序内容哈希。命中仍校验载荷 SHA-256，并重新运行 Chrome 与全部断言。显式 `-- --check` 重编三个模块，对比各自缓存包哈希后执行同一门。截断记录会在进入 Chrome 前具名失败。GPU 探针的原生调用共用线性内存，当前的版本化模块 ABI 不支持跨实例传递这些地址，因此缓存三份编译产物，各模块内的场景复用同一实例。
+
 修订(cdx2): 从仓根运行 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。C9 本机五切片构造实测约 39 秒。`ujs/ujs2wasm.com` 用它编译 `.ujs`。CLI/host1、G-math、Wasm 链接、C8 基准及需要重编产品源的验证依赖这个构造。清单生成与 `--check` 只读已跟踪的对标输入，检查冻结发布包的哈希也可独立执行。
 
 修订(cdx2): C9 使用 `native function name(x:i64, y:f64) f64 { ... }` 生成独立 Wasm 函数和 `call`。stage0 原 `MAXL=256` 及 `invocation_slot` 把传统内联调用的临时量计入调用方。host1 的 `h1_exec` 逐帧检查局部声明，`h1_call` 为每帧保留 256 槽。C9 保持每帧 256 槽和原 257 槽拒绝；原有 `function` 仍内联。原生函数参数和返回值使用 i64/f64，最多 8 个参数和 8 层原生调用，只允许调用已声明的原生函数。递归、前向引用和深度超过上限在编译时具名拒绝，host1 操作数栈溢出也具名拒绝。`cli-host.cx -- --native-calls` 检查两份 256 槽帧、独立 Wasm 函数数目及拒绝，`--mutate-native-calls` 验证金值保持。

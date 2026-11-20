@@ -1,5 +1,8 @@
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use text.fmt
 #pragma unisa use text.num
@@ -129,20 +132,98 @@ static int gpu_probe_inputs(const char *flat,const char *material,const char *li
     return rc;
 }
 
+static int gpu_file_hash(const char *path,char sha[65]) {
+    unsigned char *payload=0;
+    int64_t n=0;
+    int rc=sy_read_file(path,&payload,&n,16*1024*1024);
+    if(!rc) rc=sy_sha256_any_hex(payload,n,sha);
+    mm_free(payload);
+    return rc;
+}
+
+static int gpu_key(char **argv,int inputs,char key[65]) {
+    char material[2400];
+    int n=tx_snprintf(material,sizeof material,"uxe-gpu-shard-v1\n");
+    for(int i=-1;i<inputs;i++) {
+        char sha[65];
+        if(gpu_file_hash(i<0?"ujs/ujs.com":argv[i],sha) || n<0 || n+65>=(int)sizeof material) return 1;
+        n+=tx_snprintf(material+n,sizeof material-n,"%s\n",sha);
+    }
+    return sy_sha256_any_hex(material,n,key);
+}
+
+// Cache records are published with one rename and bind both input identity and payload.
+static int gpu_cache_read(const char *path,const char *key,const char *output,char sha[65]) {
+    unsigned char *record=0;
+    int64_t n=0;
+    int rc=sy_read_file(path,&record,&n,4*1024*1024+130);
+    if(!rc) {
+        if(n<138 || record[64]!='\n' || record[129]!='\n') rc=1;
+        else if(!tx_same((const char *)record,64,key,64)) rc=-ENOENT;
+        else if(sy_sha256_any_hex(record+130,n-130,sha) ||
+            !tx_same((const char *)record+65,64,sha,64)) rc=1;
+        else if(output) rc=sy_write_file(output,record+130,n-130,0600);
+    }
+    mm_free(record);
+    return rc;
+}
+
+static int gpu_cache_write(const char *cache,const char *path,const char *key,const char *output) {
+    unsigned char *wasm=0;
+    int64_t n=0;
+    if(sy_read_file(output,&wasm,&n,4*1024*1024)) return 1;
+    unsigned char *record=mm_alloc(n+131);
+    char sha[65],stage[600],tmp[610];
+    int rc=1;
+    if(record && !sy_sha256_any_hex(wasm,n,sha)) {
+        tx_snprintf((char *)record,131,"%s\n%s\n",key,sha);
+        mm_copy(record+130,n,wasm,n);
+        if(!sy_mkdtemp(cache,".uxe-wasm-",stage,sizeof stage)) {
+            tx_snprintf(tmp,sizeof tmp,"%s/record",stage);
+            rc=sy_write_file(tmp,record,n+130,0600) || sy_rename(tmp,path);
+            if(rc) sy_unlink(tmp);
+            sy_rmdir(stage);
+        }
+    }
+    mm_free(wasm);
+    mm_free(record);
+    return rc;
+}
+
 static int gpu_compile_shard(char **argv,int prefix,const char *dir,const char *name,
-        const char *entry,char **out,size_t *bytes) {
+        const char *entry,char **out,size_t *bytes,int check) {
     char path[340];
     tx_snprintf(path,sizeof path,"%s/%s.wasm",dir,name);
     argv[prefix++]=(char *)entry;
+    const char *cache=sy_env("UXE_GPU_WASM_CACHE");
+    char stored[550],key[65],expected[65];
+    if(cache && *cache) {
+        int n=tx_snprintf(stored,sizeof stored,"%s/%s.bin",cache,name);
+        if(n<=0 || n>=(int)sizeof stored || gpu_key(argv,prefix,key)) return 1;
+        int rc=gpu_cache_read(stored,key,check?0:path,expected);
+        if(!rc && !check) { printf("GPU_CACHE %s hit sha=%s\n",name,expected); return 0; }
+        if((rc && rc!=-ENOENT) || (rc && check)) {
+            printf("GPU_CACHE %s rejected rc=%d\n",name,rc);
+            return 1;
+        }
+    } else if(check) return 1;
     argv[prefix++]="-o";
     argv[prefix++]=path;
     argv[prefix]=0;
     if(gpu_timed(name,argv,10,out,bytes)) return 1;
     sy_stat_t artifact={0};
-    return sy_lstat(path,&artifact) || artifact.size<=0 || artifact.size>4*1024*1024;
+    if(sy_lstat(path,&artifact) || artifact.size<=0 || artifact.size>4*1024*1024) return 1;
+    if(!cache || !*cache) return 0;
+    if(check) {
+        char actual[65];
+        int rc=gpu_file_hash(path,actual) || !tx_same(actual,64,expected,64);
+        printf("GPU_CACHE %s check failed=%d\n",name,rc);
+        return rc;
+    }
+    return gpu_cache_write(cache,stored,key,path);
 }
 
-static int gpu_compile_shards(const char *dir,char *abi,char *shaders,char **out,size_t *bytes) {
+static int gpu_compile_shards(const char *dir,char *abi,char *shaders,char **out,size_t *bytes,int check) {
     char flat[340],material[340],lit[340];
     tx_snprintf(flat,sizeof flat,"%s/flat.ujs",dir);
     tx_snprintf(material,sizeof material,"%s/material.ujs",dir);
@@ -164,11 +245,11 @@ static int gpu_compile_shards(const char *dir,char *abi,char *shaders,char **out
         "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/f64-math.ujs",
         "ujs/practice/uxe/base/geometry-buffers.ujs","ujs/practice/uxe/base/boxgeometry.ujs",
         "ujs/practice/uxe/base/spheregeometry.ujs",shaders,"ujs/practice/uxe/test/gpu-lit-probe.ujs"};
-    if(gpu_compile_shard(flat_args,10,dir,"probe",flat,out,bytes)) return 1;
+    if(gpu_compile_shard(flat_args,10,dir,"probe",flat,out,bytes,check)) return 1;
     mm_free(*out);*out=0;
-    if(gpu_compile_shard(material_args,18,dir,"material",material,out,bytes)) return 1;
+    if(gpu_compile_shard(material_args,18,dir,"material",material,out,bytes,check)) return 1;
     mm_free(*out);*out=0;
-    return gpu_compile_shard(lit_args,10,dir,"lit",lit,out,bytes);
+    return gpu_compile_shard(lit_args,10,dir,"lit",lit,out,bytes,check);
 }
 
 static int bridge_lines(const char *path) {
@@ -522,6 +603,7 @@ static int target_check(char *start) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int cache_check=argc==2 && tx_eqz(argv[1],"--check");
     int scene_omit=argc==2 && tx_eqz(argv[1],"--scene-omit-mutate");
     int basic_mutate=argc==2 && tx_eqz(argv[1],"--basic-mutate");
     int lambert_mutate=argc==2 && tx_eqz(argv[1],"--lambert-mutate");
@@ -579,7 +661,7 @@ int main(int argc,char **argv) {
     int fill=ambient || hemisphere || fog || exp_fog || spot || light_probe;
     int simple=colors || fill || area;
     int shards=!targets && !simple && !shadow_map;
-    if(argc!=1 && !scene_omit && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
+    if(argc!=1 && !cache_check && !scene_omit && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
        !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
        !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate && !normal_mutate &&
        !depth_mutate && !point_mutate && !line_mutate && !matcap_mutate && !distance_mutate &&
@@ -658,7 +740,7 @@ int main(int argc,char **argv) {
     int ready=lines>0 && lines+target_lines<=600 &&
         !sy_write_file(abi,declarations,sizeof declarations-1,0600) &&
         !build_shaders(shaders,targets || simple || shadow_map,shadow_map,area)
-        && !(shards?gpu_compile_shards(dir,abi,shaders,&out,&bytes):gpu_timed("compile",compile,10,&out,&bytes))
+        && !(shards?gpu_compile_shards(dir,abi,shaders,&out,&bytes,cache_check):gpu_timed("compile",compile,10,&out,&bytes))
         && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
         && !gpu_copy(dir,"probe.html",targets?"ujs/practice/uxe/test/gpu-target-r160.html":
             shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-r160.html":
@@ -699,7 +781,7 @@ int main(int argc,char **argv) {
                 fill?flat_triangle_check(values,(fog || exp_fog)?fog_gold:light_probe?probe_gold:spot?spot_gold:
                     hemisphere?hemisphere_gold:ambient_gold,1):
                 gpu_check(values);
-            if(shards) failed+=gpu_scene_union(out,bytes,argc==1 || scene_omit);
+            if(shards) failed+=gpu_scene_union(out,bytes,argc==1 || cache_check || scene_omit);
             if(colors) {
                 const char reject[]="<pre id=\"color-contract\">[-1,-1,-1,-1]</pre>";
                 if(tx_find(out,bytes,reject,sizeof reject-1)<0) {
