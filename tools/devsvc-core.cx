@@ -882,10 +882,15 @@ static int spawn_server_polls(const char *root, const char *ttl, const char *idl
 static int spawn_server(const char *root, const char *ttl, const char *idle) {
     return spawn_server_polls(root,ttl,idle,400);
 }
+/* Set when this command's flow/x saw a node timeout. Only then does
+ * timing_finish start the repo server (first-timeout timing); a command
+ * that ends without a timeout never leaves a resident server behind, so
+ * read-only commands stay via=local. */
+static int timing_timed_out;
 static void timing_finish(int rc) {
     const char *root=dt_root();
     if(!*root)return;
-    if(sy_exists(sockp)==0){
+    if(timing_timed_out && sy_exists(sockp)==0){
         int fd=spawn_server_polls(root,"1800","300",3);
         if(fd>=0)sy_close(fd);
     }
@@ -1340,7 +1345,7 @@ static int flow_txn;   /* flow --txn:事务化(同节点表首行 txn 1),引擎�
 static const char *lock_for(const char *p);
 /* text 非空即内联节点表(写进 RUN/flow.tsv)。xmode:单条 exec,把节点 stdout/stderr 原样转出,返回节点退出码。 */
 static int flow_go(const char *root, const char *file, const char *text, const char *rdir_in, int jobs, long dl, int cat, long wait_ms, int xmode) {
-    static fl_flow f; fl_sum s; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0; AB sums = {0, 0, 0};
+    static fl_flow f; fl_sum s = {0}; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0; AB sums = {0, 0, 0};
     if (rdir_in) F(rdir, sizeof rdir, "%s", rdir_in); else F(rdir, sizeof rdir, "%s/devsvc-flow-%ld-%d", sy_tmpdir(), sy_now_ms(), sy_pid());
     if (ovf || sy_mkdir_all(rdir, 0755)) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable\n", rdir); return 2; }
     if (text) {
@@ -1399,6 +1404,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
       int owned=request_x && xmode ? own_request() : 0;
       if(owned<0){lk_drop(root);fl_free(&f);return 125;}
       r = fl_run(&f, rdir, jobs, dl, 0, &s);
+      if(s.timeout>0)timing_timed_out=1;
       if(owned && f.n[0].state==FL_TIMEOUT && reap_request()){
           fprintf(stderr,"devsvc: request descendant cleanup unconfirmed\n");lk_drop(root);fl_free(&f);return 125;
       }

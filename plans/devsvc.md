@@ -563,6 +563,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 (5) 实现落点:`tools/devsvc.cx` 新增 `win state` 子命令与事件类型,钩子侧(宿主 Stop/Notification 钩子)只调用该子命令,不在钩子里写判断。
 (6) 估时:上报子命令加事件约 1 单位;心跳超时自发事件约 0.5 单位;wait-ledger 生成器加检查约 1 单位;钩子接线约 0.5 单位;合计约 3 单位,另需对拍夹具(四状态、缺 blocker 拒绝、心跳丢失)。
 (7) 未做:全部实现与实测;compacting 状态由宿主是否暴露压缩信号决定,未核。
+(8) 与 task.ack 的关系(2026-11-20,见"(C)(7) 编排者对接"):task.ack 是派工送达事件,由窗口 task pull 拉到合同时发出,只证明合同送达与摘要一致;window.state 是窗口状态心跳,证明窗口活着及在做什么。两者互补不替代:ack 之后窗口应上报 working 且 task 填该任务键;超过 ack 时限未拉取发 task.unacked,心跳超时发 heartbeat-lost,两类事件分别计送达率与心跳丢失率。
 
 ## 分布式演进(2026-11-20)
 
@@ -579,6 +580,36 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
 
 环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+
+起链前置教训(2026-11-20):0.0.86 首次起链因工作树 unisacc.com 符号链接被换成真实文件而缺 unisacc.com.build.json,在 preflight entry 被拒,损失约 5 分钟;chain-ready 应直接核 preflight entry 的 PASS,列入 0.0.87 S4/S6。
+
+### (C)(7) 编排者对接:B 为主加上报与拉取,最小切片
+
+项目所有者 2026-11-20 想法(原话):"我有个idea,不成熟但可能有机会,就是把devsvc从工具再进化成harness,可能接上类似我们rawagy-flow和omp-workflow + omp-flow等工作流机制,从而让编排者直接对接它(以后再考虑把它升级出编排者角色)"。
+
+(1) 对方形态(只读评估者结论):omp-workflow(~/repos/moltbaby/omp-workflow,TypeScript)状态大多是进程内单例与宿主钩子,没有稳定跨进程协议,持久化只有 agenda JSONL、wf-runs.jsonl 与 queue TSV;bin/flow 是 mapp flow 算子 CLI(MCP 离线后备),与 omp-workflow 的 flow 工具同名但是两套东西(推断,未核);bin/rawagy-flow 给 agy 原生 TUI 加 AGY_FLOW=1 与插件 agy-flow,挂 SessionStart 与 PreInvocation 钩子调 route.sh 分流 answer/research/direct/plan 四类,规划者是主会话,执行者是 swarm worker neon,验收用 gemini-decision-1 判分记 verify.tsv,信封走 bin/tmux-envelope send-keys。
+
+(2) 对应关系:devsvc 的 devtask(任务单带写域、验收命令、截止)、收尾验收、流图 id/after、截止、写互斥、提交门、prebuild-self、react 等价或更强;事件部分等价(omp 把事件派生成待办议程)。devsvc 缺:升级档位、agenda 自续、窗口状态机与 assignee 存在性、派工送达确认(双方都没有);证据台账语义不同(omp 记工具输出原文且在进程内,devsvc 记产物身份)。决策类型与守卫属模型侧,不进 devsvc。
+
+(3) 三种对接形态:A 协议级并存(约 3 单位,风险最高,不建议:omp 核心状态在进程内且格式无版本号,unisacc 不能依赖 bun/TypeScript,违 cx 铁律);B 概念采纳,用 cx 重实现需要的子集(约 8 到 12 单位,只取任务合同、窗口状态机、升级(flow 节点按档位重派)、证据(按身份引用));C 由 devsvc 驱动,窗口只做上报与拉取(约 4 单位,窗口经钩子调 devsvc win state 上报,devsvc 不往 tmux 注入,注入只作唤醒提示)。
+
+(4) 主调度决定:B 为主加 C 的上报与拉取,不选 A。
+
+(5) 最小可行切片(两周内,约 7.5 单位):cc 经 devsvc 派任务给 agy-flow 窗口,全程不读屏。
+- 接口:devtask task open 加 --lease-to WIN --ack-s 120;新增 devsvc win state WIN STATE [--task ID] [--blocker B],字段同"等待心跳事件设计"五字段;新增 devsvc task pull --win WIN(窗口拉到合同即记送达并发 task.ack 事件,合同带 sha256,窗口回报必须带同一摘要);
+- task done 沿用现有流程,通过后 flow 节点依次触发变异自检门与复核节点(复核派给另一个窗口,同样走 pull);
+- 超过 ack 时限没拉取发 task.unacked,心跳超过 10 分钟发 heartbeat-lost;
+- 接线:agy-flow 的 SessionStart 钩子调 pull,Stop 钩子调 win state,钩子只调 devsvc 子命令不写判断逻辑(改动在 moltbaby 仓侧,由其维护者改);
+- 先红后绿夹具 check-devsvc-lease.cx:红五种(没 pull 就 done 被拒;摘要不符被拒;waiting 不带 blocker 被拒;心跳丢失出事件;写域外有改动 done 返回 rc 1);绿:一个真实 agy 窗口走完 ack -> working -> done -> 复核全程,events.tsv 逐行对上;
+- 估单位:win state 1.5、lease 与 pull 2、超时事件 1、复核节点 1、夹具 1.5、钩子接线 0.5。
+
+(6) 编排者角色升级前置条件(只列不设计):租约队列与窗口状态总线实跑超一个版本,有送达率与心跳丢失率数据;升级档位与复核判据只看验收命令不看模型自评;合同签名或摘要防篡改有负控夹具;有真实模型路由与额度事实表;信封派工量降到零或接近零有统计;devsvc 截止自退与持锁在多实例下有检查;有可审计的决策留痕写在 prd_mempalace。
+
+(7) 风险:协议漂移(B 只吸收概念,风险低);两个运行时 done 语义分歧(只认 devsvc 的结果);tmux 注入不稳(合同不走注入,没 ack 发事件,不盲目重发);派工合同被篡改(合同存实例目录持锁写入,窗口回报带摘要,验收命令只从合同读,不接受窗口传来的命令);与信封共存(迁移期双轨,派工以 devtask 为准,信封只做通知,统计信封量逐步下降)。
+
+(8) 未核:agy 宿主是否有 Stop 类钩子、能否暴露压缩信号;agy-flow 的 route.sh 是否有现成状态出口;decision-model.ts 与 flow-graph.ts 正文、devsvc-core.cx 子命令全表未读。
+
+(9) 挂接:plans/v0.0.87.md S6(win state 先行,作为切片前置);plans/v0.0.88.md (C)(5)(本切片为第一刀)。
 
 ## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
 
@@ -613,3 +644,151 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
   - 守护(自退):`setsid nohup timeout -k 5 28860 sh ./unisacc.com tools/stray-link-watch.cx -- --daemon 28800 >LOG 2>&1 &`(devsvc x 的 --timeout-ms 上限 300000,起不了 8 小时作业,是 devsvc 缺口)
   - 看事件:`$CLAUDE_JOB_DIR/tmp/stray-link-watch/events.log`(启动者会话的作业目录;无该变量时 /tmp/stray-link-watch/events.log),`grep '=== EVENT' events.log`
   - 停止:`pgrep -af stray-link-watch` 取真实 PGID 后 `kill -TERM -- -PGID`;到期自退。
+
+## 产线化(2026-11-20 决定)
+
+来源:fable 产线化报告(~/.claude/jobs/2798e440/tmp/devsvc-pipeline.md,只读取证与设计)。项目所有者 2026-11-20 的比喻:devsvc 是软件流水线的物理承载,编排者与 agent-team 是流水线上的工人。主调度决定:从 0.0.87 开工,第 0 阶段今天起在 main 上写新文件(tools/ 与 plans/,C 类轻车道,不动 A 类输入,不挤占 0.0.86 冻结到公开);原 0.0.88 的 lease、pull、ack 切片与持久作业记录(U6)整体提前到 0.0.87。派工清单见 plans/line-phase0-units.md。
+
+### (1) 设计原则
+
+- 产线承载状态、流转、质检;工人(编排者、各窗口 agent、子代理)只做判断与创造。
+- 不做调度器,不新增常驻进程。产线是磁盘状态机加有界对账命令 `line tick`(一次不超过 55 秒,flock line/tick.lock,拿不到立即退);谁调都行(服务空闲巡检、任何 pull、任何窗口手调)。
+- 降级:devsvc 挂了或 tick 不可用时,`line next --print` 打出每张 READY 机器工单的完整手工命令(即今天人敲的那条);工位命令全是现有工具,产线挂了损失的是自动流转,不是能力。
+- 产线逻辑不进 devsvc-core:子命令 line、win、art 由入口直接转到独立小工具(tools/line.cx、tools/winstate.cx、tools/art.cx,与 bump 同形),核心零改动;状态全在盘上,进程无记忆,重启后先对账再动作。
+- 现有工具原样做工位命令,不重写:bg-candidate、prerun-drive、release-flow、release-exec、install-ape(以及 chain-ready、dvqualify、version-metrics-gen)。产线只负责"输入齐了就起、起之前自检、结束记身份与耗时"。
+
+### (2) 盘上合同(U1 到 U5 检查的共同常量定义)
+
+本节是唯一权威定义。U1 到 U5 的检查与工具必须从同一处引用列头常量(建议 tools/cxlib/lineorder.cx 导出 `LINE_HDR_*` 与 `LINE_EV_*` 常量,check 只调该常量,不各自抄写字面);改列头只能在本节与该常量同提交改,且只追加列不改旧列。
+
+位置:devsvc 实例目录(按 git 公共目录取键,所有工作目录共用)下的 line/;不入库。仓内只放两张事实表 tools/line-stations.tsv、tools/line-release.tsv(只读 git HEAD 版,工作副本改到一半不影响产线)。写入一律先 flock 对象目录锁,再写临时文件原子改名;每次状态迁移同时追加一条事件到实例 events.tsv。
+
+目录布局:
+
+```
+line/
+  tick.lock                       同一时刻只许一个 tick
+  wo/ID/                          一张工单一个目录(ID 合 dw_id_ok:不含 / 与 .)
+    lock                          对象锁
+    contract.tsv                  开单后不可变
+    contract.sha                  contract.tsv 的 sha256(一行 64 位十六进制)
+    state.tsv                     只追加
+    lease.tsv                     当前租约(单行,原子改名替换)
+    out.tsv                       输出产物键与证据路径,只追加
+    handoff.md                    交接说明(可选,四段固定)
+  win/NAME.tsv                    窗口状态单行(原子改名替换)
+  art.idx                         产物库键索引(可选,只追加;权威在 ~/.cache/unisacc/art/)
+产物库: ~/.cache/unisacc/art/KIND/KEY/{meta.tsv, payload | seal.tsv}
+```
+
+列头(TSV,首行 `#` 加列名,制表符分隔):
+
+- contract.tsv(key 与 value 两列,一行一字段,accept 与 in 可多行):`key	value`;合法 key:`id title kind version lane station priority deadline_s write in out deps accept lease_to ack_s devtask`。kind 取值 `dev review merge sweep preflight chain prerun freeze stage-a release post root decide`;lane 取值 `A B C`(build/lane-inputs.tsv 的 lane 列);devtask 为对应 devtask 工单号(可空记 `-`)。
+- state.tsv:`seq	time_s	id	from	to	actor	reason	attempt`。
+- lease.tsv:`id	win	leased_s	ack_deadline_s	contract_sha	attempt`。
+- out.tsv:`seq	time_s	id	kind	art_key	path	sha256`。
+- win/NAME.tsv:`window	caps	model	state	since	task	blocker	ctx_left_pct	heartbeat`;state 取 `working idle waiting compacting`,waiting 必带 blocker,其它状态 blocker 记 `-`;since 与 heartbeat 由收方记,不信客户端时钟。
+- art meta.tsv(key 与 value 两列):`key	value`;合法 key:`kind recipe in out_sha256 bytes job wo time_s`,in 可多行(每个输入身份一行,排序后参与键)。KEY = sha256(kind、recipe、排序后的各 in 拼接,以换行分隔)。
+- tools/line-stations.tsv:`station	type	cmd	caps	max_par	excl	in_kinds	out_kinds	preflight	deadline_s	resumable	auto`;type 取 `machine agent decide`;auto 取 `yes shadow no`;cmd 占位只允许 `{in.NAME}`、`{out}`、`{version}`。
+- tools/line-release.tsv:`station	wo_suffix	deps	in	out`(line open VERSION 按行开工单,工单号 = VERSION 加 wo_suffix)。
+
+事件种类与字段(追加到 events.tsv,字段为 key=value,空格分隔,值内不含空白):
+
+| 种类 | 字段 |
+|---|---|
+| wo.state | id from to actor reason attempt |
+| task.ack | id win contract_sha |
+| task.unacked | id win ack_s |
+| window.state | window state task blocker |
+| art.put / art.hit / art.miss | kind key in_n reason(miss 时:absent、sha-mismatch、meta-bad) |
+| station.start | station id input job |
+| station.done | station id input job rc ms |
+| chain.done | input seal rc ms |
+| prerun.window | input win_no batches rc ms |
+
+工单状态迁移表(其余一律拒绝,rc 2,不写盘):
+
+| from | to | 谁触发 | 条件 |
+|---|---|---|---|
+| OPEN | READY | tick | deps 全 DONE 且 in 列产物键在产物库核到 |
+| OPEN、READY | BLOCKED | tick 或工位 preflight | 必带 blocker 原因 |
+| BLOCKED | READY | tick | 原因消失(重算) |
+| READY | LEASED | line pull | 能力匹配、写域与已租工单不相交、独占资源可得 |
+| LEASED | RUNNING | 工人或机器工位起作业 | 已 ack(task.ack 已发) |
+| LEASED、RUNNING | EXPIRED | tick | ack 超时或心跳超 10 分钟或作业经 PGID 加 boot_id 核实已丢且无 rc 文件 |
+| EXPIRED | READY | tick | 自动 |
+| RUNNING | SUBMITTED | line done | 带回摘要等于 contract.sha |
+| SUBMITTED | ACCEPTED | 验收命令实跑全过 | 验收只从 contract.tsv 读 |
+| SUBMITTED | REJECTED | 验收或质检不过 | 带原因码 |
+| REJECTED | READY | tick | attempt 加一 |
+| ACCEPTED | DONE | 质检口(变异自检门、复核单) | 回执齐 |
+| 任意非 DONE | SUPERSEDED | tick | 任一输入身份变了;旧单终态 |
+| LEASED、RUNNING | READY | line handoff | attempt 不加,handoff.md 必在 |
+
+DONE、SUPERSEDED 为终态。READY 只由 tick 计算,不由工人声明。等待时长 = 相邻 wo.state 事件时间差:READY 段为等工人,SUBMITTED 段为等验收,ACCEPTED 到 DONE 为等质检。
+
+### (3) 本节落库前的两项核对(文档写者 2026-11-20,本次读源)
+
+- devtask 的 work/ 布局(tools/cxlib/devtask.cx 第 241 行起):作业式工单存 DIR/work/ID.tsv(key、value 两列:id title write root opened deadline done ext cwd owner,accept 与 snap 每行一条)加 DIR/work/index.tsv(只追加)与 DIR/work/ID.pass;另有 DIR/tasks.tsv、DIR/task-events.tsv。装载函数(约第 417 到 435 行)对未知 key 置 bad=1 并报 "malformed file"。结论:直接往 work/ID.tsv 追加新字段不可行,会让现有 devtask 读不了自己的单。因此产线字段放独立的 line/wo/ID/contract.tsv,经 devtask 键关联,devtask 文件格式不动;若将来要合并,先让装载函数容忍未知 key(单独一刀,带负控),再谈追加。"字段只追加"只对 line/ 自己的 TSV 成立。
+- precommit.cx 的 freeze_in_lane_a(第 300 行起)与 freeze_gate:读工作区 build/freeze.tsv(无文件即无冻结;release/freeze.tsv 是另一张,只给 tests/freezecheck.cx 用)首个非注释行五列(candidate_sid base_commit owner deadline_epoch_s paths);截止过期即不拦;UNISACC_INTEGRATOR 等于 owner 时放行;paths 中写 `@lane:A` 时读暂存索引里的 build/lane-inputs.tsv,只拦 lane 为 A 的路径,表缺失、为空、格式坏或无一条 A 时整体 fail-closed 拒绝。结论:冻结期产品输入挡板已存在(单路径级、有截止、集成者豁免);它不挡 tools/ 与 plans/ 路径,所以合并队列的"冻结期工具线只收不落"挡板是另一件事,要新做,不能指望 freeze_gate;合并队列的挡板应复用同一张 build/freeze.tsv 的截止与 owner 语义,不另立标记文件。
+
+### (4) 工位表摘要(W0 到 W12,0.0.85 实测,分钟)
+
+| 号 | 工位 | 分钟 | 可自动 |
+|---|---|---|---|
+| W0 | 开槽(计划、判定门、预置槽) | 47 | 预置槽与工作目录全自动;范围裁定是人 |
+| W1、W2 | 产品开发与单元验证 | 67 | 开发是工人;验证提交后可自动起 |
+| W3 | 集成合并 | 15 | 无冲突时全自动 |
+| W4 | 提交门 | p50 7.8 秒 | 已自动;0.0.85 窗失败率 29.5% |
+| W5 | 内容截止 | 0 | 人裁决一行 |
+| W6 | 整链 | 33 | 全自动 |
+| W7 | 预跑 435 批 | 87(并行度 1.72) | 全自动(续窗、合并) |
+| W8 | 冻结合并与核对 | 4 | 无冲突全自动 |
+| W9 | 阶段 A(pack、warm、dry) | 6 | 全自动;裁决是人 |
+| W10 | release-exec 七步 | 8.2 | 已自动,CI 7.4 固有 |
+| W11 | 公开后记账与 Root 升级 | 6 | 全自动 |
+| W12 | 解除冻结、下一版开槽 | 重叠 | 全自动(合并队列挡板) |
+
+列车 W6 到 W11 共 138 分钟,devsvc 事件流里 0 条(这些工具今天不经 devsvc 也不发事件)。
+
+### (5) 目标与证伪
+
+- 截止(决定公开)到公开回读:基线 138 分钟;0.0.88 不超过 60;0.0.90 不超过 20。
+- 预跑墙钟:87 -> 20 分钟。
+- 提交失败率:0.0.88 低于 15%,0.0.90 低于 5%。
+- 列车手敲命令数:0.0.88 不超过 2 条(截止、决定公开)。
+- 证伪(写死):0.0.88 公开时截止到公开仍高于 100 分钟,或手敲命令数没有下降,即判产线没起作用,停止向第 2、3 阶段投入,退回只保留工单与心跳。
+- 基线注意:取证时 load1 异常(313,16 核,单点读数,来源未分解),今天的提交失败率(0.0.86 窗 40.1%)与作业非 0 率(47.7%)带着这个负载,不能当产线前的干净基线;干净基线须在负载正常时重取,在此之前对比用 58 小时基线 30.5%。
+
+### (6) 第 0 阶段任务与并行组
+
+U0 本节(先行)。U1 工单字段与状态机;U2 租约 pull、ack、done、handoff;U3 win state 与心跳;U4 产物库(只开 candidate-ape);U5 工位表、产线定义表、line open、tick 只打印、next --print;U6 持久作业记录(jobs/ID/meta 落 PGID、boot_id);U7 列车三工具发 station 事件;U8 起链前置补 preflight entry;U9 变异自检门可调用命令(原型已完成,落库中);U10 登记与收尾。并行组:甲 U1 接 U2、乙 U3、丙 U4、丁 U5、戊 U6、己 U7、庚 U8、辛 U9,八组写域互不相交,U0 落库后同时开;U10 串行收尾。各单元写域、验收(先红后绿)、变异要求、估时、负责人见 plans/line-phase0-units.md。
+
+### (7) 与已排项映射
+
+| 已排项 | 处置 |
+|---|---|
+| 0.0.87 S1 产物库与按 A 键(内容键)复用 | 通用部分即 U4 产物库;S1 只剩"bg-candidate 采纳键改内容键"一刀 |
+| S3 清扫左移 | 改为产线 sweep 工位,不自带触发与状态,基线入产物库 sweep-base |
+| S4 候选装 Root | 原样做 root 工位命令,工具不改 |
+| S5a 登记表清单化 | 保留,为合并队列前置,提到第 1 阶段头部 |
+| S6 度量与窗口状态 | 拆:win state 提前为 U3;wait-ledger 留第 1 阶段;S6a 发布正确性缺陷单独先修,不属产线 |
+| T3 推测链 | 不单列:即 chain 工位触发条件由截止改为合入,第 2、3 阶段开关一行 |
+| 变异自检门 | 质检口的一个机器工位(U9 原型,第 1 阶段接入) |
+| 0.0.88 (C)(5) lease、pull、ack | 提前到 0.0.87 第 0 阶段(U2) |
+| 演进评审第三项持久作业 | 提前为 U6(tick 判丢依赖它) |
+
+### (8) 风险与铁律落点
+
+- 每个单元交付带变异回执:对本补丁产品代码施加至少 3 个变异,自带检查逐个变红;检查不得重写被测函数副本,必须调真实入口;没有变异回执不开复核单。
+- 产物库只存构造产物,无"PASS 结论"一类;get 命中必重算 payload 摘要与 meta 对拍,不符即删并报 miss;evidence 只对同一候选身份可引用;工单 done 每次实跑验收。
+- 写共享状态持锁:对象目录 flock 加原子改名;机器工位独占资源用现有命名锁;合并用 git-index 锁。
+- 可从磁盘恢复:line status 只读盘即可重建;在途作业凭 jobs/ID/meta 的 PGID 与 boot_id 核存活(依赖 U6);判丢必须 PGID 与 boot_id 都核不到且无 rc 文件;同一工单同一 attempt 至多一个作业。
+- 降级回手工:line next --print;每版发布前跑一次"拔掉 tick 手工走一步"演练。
+- 合同防篡改:合同开单后不可变,摘要随 pull 发出、随 done 带回;验收命令与工位命令只从合同与 HEAD 版工位表读,不接受窗口传入的命令。devsvc 无鉴权,同机同用户下这不是安全边界,如实写明。
+- 不放宽时限:tick 不改任何命令上限;可续工位靠分段与 --resume。
+- 不可逆对外动作:公开保留一张 decide 工单,由编排者 done 才触发 release-exec;产线不自动公开,到第 3 阶段有数据再议。
+
+### (9) 数据缺口与未核项
+
+(1) 信封量无计数入口,派工走信封比例 100% 为推断;(2) 窗口等待分钟全部 UNMEASURED(U3 补);(3) 评审回合无正式记录;(4) 列车手敲命令数"约 12 条以上"为推断;(5) cadence 表 0.0.81 到 0.0.85 多列 UNMEASURED,并行度 1.72 未复算;(6) devtask work/ 布局与 freeze_in_lane_a 已在本节 (3) 核对;(7) 各窗口真实能力、额度与宿主钩子(Stop、压缩信号)未核;(8) 0.0.86 工位时间线未成形;(9) 事件文件只留一代轮转,度量生成器须在轮转前跑,否则丢数;(10) candidate-ape 键的完备性未核,须由 S1 六类负控证明;(11) flowexec、candidate-chain、register、commit-own 等正文未读,接法以头注释为据。

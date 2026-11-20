@@ -30,6 +30,10 @@
  *                  bytes.  Otherwise FAIL with REFUSE CHAIN_READY_VERSION_SLOT <why>.
  *  12-root-files   ROOT (--root DIR, else --repo) unisacc.com and unisacc.com.build.json are regular files (lstat,
  *                  no symbolic link): else READY=no worktree-root-file-not-regular path=... fix: cp the real file.
+ *  12p-preflight-entry  ROOT/unisacc.com.build.json exists and is a regular file: the chain-run preflight entry
+ *                  reads it first (0.0.86 start 1 refused there).  Else READY=no preflight-entry-build-json
+ *                  kind=missing|symlink|not-regular with the cp --remove-destination -L fix.  Kept apart from 12 so
+ *                  the missing record is named on its own; tools/bg-candidate.cx start runs --only 12 (both).
  *  13-snap-cache   if the chain snapshot of this rev (cxlib.chainroot cr_snap; --rev REV, else git rev-parse HEAD)
  *                  exists, its unisacc.com and build.json are regular and sha256-equal to ROOT's, else
  *                  READY=no snap-cache-file-not-regular|snap-cache-stale with a mv command (never removed here).
@@ -396,6 +400,13 @@ static void root_items(const char *repo, const char *root, const char *revarg, c
     }
     if (ok) cx_fmt(ev, sizeof ev, "unisacc.com and unisacc.com.build.json under %s are regular files", root);
     if (!only || tx_prefix("12-root-files", 13, only, (long)tx_len(only, 64))) row_judged("12-root-files", ok, ev, sy_now_ms() - t0);
+    /* 12p: the preflight entry of chain-run reads ROOT/unisacc.com.build.json before anything else */
+    if (!only || tx_prefix("12p-preflight-entry", 19, only, (long)tx_len(only, 64))) {
+        cx_fmt(p, sizeof p, "%s/unisacc.com.build.json", root);
+        if (rf_regular(p, &kind)) cx_fmt(ev, sizeof ev, "preflight entry record %s is a regular file", p);
+        else cx_fmt(ev, sizeof ev, "READY=no preflight-entry-build-json path=%s kind=%s fix: cp --remove-destination -L REAL_REPO/unisacc.com.build.json %s/", p, kind, root);
+        row_judged("12p-preflight-entry", rf_regular(p, &kind), ev, sy_now_ms() - t0);
+    }
     /* 13: a snapshot of the same revision is reused by chain-step snap without a file-type check */
     if (!only || tx_prefix("13-snap-cache", 13, only, (long)tx_len(only, 64))) {
         char rev[64], snap[4600]; t0 = sy_now_ms(); rev[0] = 0;
@@ -611,7 +622,7 @@ int main(int argc, char **argv) {
             row_judged("10-envhygiene", 1, "no inherited deadline and no forced cache variable in this environment", 0);
         }
     }
-    if (WANT("12-root-files") || WANT("13-snap-cache") || WANT("14-root-record")) root_items(repo, rootarg ? rootarg : repo, revarg, only);
+    if (WANT("12-root-files") || WANT("12p-preflight-entry") || WANT("13-snap-cache") || WANT("14-root-record")) root_items(repo, rootarg ? rootarg : repo, revarg, only);
     /* 17-root-public (0.0.87 S4): a Root installed from an unpublished candidate is fine for a chain and for
        development, but not for a release step; listed here, never counted as a failure. */
     if (WANT("17-root-public")) {
