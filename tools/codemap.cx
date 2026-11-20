@@ -1,0 +1,445 @@
+/* tools/codemap.cx -- shadow code-map: the rel-v1 relation store extended with symbol, table-row, batch/check and
+ * chain-phase nodes, kept fresh by content digests and updated one file at a time.
+ *
+ *   sh ./unisacc.com tools/codemap.cx -- build  [--root R] [--dir D] [--incremental]
+ *   sh ./unisacc.com tools/codemap.cx -- status [--root R] [--dir D]
+ *   sh ./unisacc.com tools/codemap.cx -- select [--root R] [--dir D] PATH...
+ *
+ * Not a second graph: storage is tools/cxlib/relstore.cx (rel-v1: meta, files.tsv with a sha per file, edges.tsv
+ * in links v1 form kind/src/dst/via/attr) and .cx use/include edges come from tools/cxlib/relscan.cx unchanged.
+ * Added node kinds (each edge's SRC is the file it was extracted from, so a per-file update stays exact):
+ *   sym-def   SRC.cx      -> FILE#NAME     top-level function definitions (lexical, conservative)
+ *   batch     batches.tsv -> batch:ID      via = source and entry path        attr = row digest
+ *   cov       coverage.tsv-> cov:ID        via = first path in source column   attr = row digest
+ *   declared  batch-product-inputs.tsv -> batch:KEY  via = input PREFIX (prefix match on select)
+ *   pin       tools/pins.tsv -> pin:PATH   via = file part of PATH             attr = row digest
+ *   lane      build/lane-inputs.tsv -> lane:L   via = path                    attr = row digest
+ *   phase     tools/templates/F -> phase:F  (the chain template is a phase input)
+ * Every file node has its content sha in files.tsv; every row node carries a row digest in attr.
+ *
+ * Store directory: --dir, else ~/.cache/unisacc/codemap/<sha16 of the root path>/ (never inside the repo).
+ * Identity: sha of tools/codemap.cx + relscan.cx + relstore.cx (read from the current directory) combined with
+ * the root's cxroot.tsv (rs_identity); a different identity makes status stale and --incremental fall back to full.
+ *
+ * status: re-hashes the inventory (git ls-files -c -o --exclude-standard) against files.tsv and names every
+ *   modified/added/deleted path: STALE<TAB>modified<TAB>PATH ... then CODEMAP_STATUS state=fresh|stale. rc 0 fresh,
+ *   1 stale, 2 error.
+ * build --incremental: re-extracts only the stale paths (rs_update_file); a .cx file added or deleted forces a full
+ *   rebuild, because use resolution of OTHER files can depend on it (conservative).  The result is byte-identical
+ *   to a full build of the same tree -- tools/check-codemap.cx pins that.
+ * select: reverse closure from the given paths; prints SELECT<TAB>NODE for batch:/cov:/pin:/lane:/phase: nodes and
+ *   CODEMAP_SELECT ... all=0|1.  A path without a node (unknown, untracked, stale store) selects the full set
+ *   (all=1): an unknown path is never "affects nothing".
+ * Reads the repo only; writes only under the store directory.  Every child process is bounded (20 s). */
+#pragma unisa use cxlib.relstore
+#pragma unisa use cxlib.relscan
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.die
+#pragma unisa use text.build
+#pragma unisa use text.text
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+
+static char g_root[4096], g_dir[4096], g_xsha[65];
+static void die(const char *what, const char *d) { tool_die("codemap", what, d, 2); }
+
+typedef struct { char *path; char sha[65]; long long size; } cm_file;
+static cm_file *g_files; static long g_nf;
+
+static int ends(const char *s, const char *suf) {
+    size_t a = strlen(s), b = strlen(suf);
+    return a >= b && !strcmp(s + a - b, suf);
+}
+static void sha16(const char *s, long n, char out[17]) {
+    char h[65];
+    if (sy_sha256_hex(s, n, h)) die("sha", 0);
+    mm_copy(out, 17, h, 16); out[16] = 0;
+}
+
+static int read_all(const char *path, char **b, long *n) {
+    unsigned char *p = 0; int64_t m = 0;
+    int rc = sy_read_file(path, &p, &m, (int64_t)1 << 28);
+    if (rc) return rc;
+    *b = (char *)p; *n = (long)m;
+    return 0;
+}
+
+/* ---- inventory: tracked plus untracked-not-ignored, with a content sha each */
+static int cmp_file(const void *a, const void *b) { return strcmp(((const cm_file *)a)->path, ((const cm_file *)b)->path); }
+static void inventory(void) {
+    char *v[] = {"git", "-C", g_root, "ls-files", "-z", "-c", "-o", "--exclude-standard", 0};
+    np_result r = {0}; char err[512];
+    size_t i, cap = 1024;
+    if (np_run(v, g_root, 0, 20, &r, err, sizeof err) || r.rc || r.residue) die("inventory", err);
+    g_files = malloc(cap * sizeof *g_files); g_nf = 0;
+    for (i = 0; i < r.outn;) {
+        size_t e = i; char abs[8192]; char *b = 0; long n = 0; int rc;
+        while (e < r.outn && r.out[e]) e++;
+        if (e > i) {
+            char *p = malloc(e - i + 1);
+            mm_copy(p, (long)(e - i + 1), r.out + i, (long)(e - i)); p[e - i] = 0;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", g_root, p)) die("path", p);
+            rc = read_all(abs, &b, &n);
+            if (rc == -ENOENT) { free(p); i = e + 1; continue; }   /* deleted in the worktree, or broken link */
+            if (g_nf > 0 && !strcmp(g_files[g_nf - 1].path, p)) { if (!rc) free(b); free(p); i = e + 1; continue; }
+            if ((size_t)g_nf == cap) { cap *= 2; g_files = realloc(g_files, cap * sizeof *g_files); }
+            g_files[g_nf].path = p;
+            if (rc) { cx_fmt(g_files[g_nf].sha, 65, "unreadable%d", -rc); g_files[g_nf].size = 0; }
+            else { if (sy_sha256_hex(b, n, g_files[g_nf].sha)) die("sha", p); g_files[g_nf].size = n; free(b); }
+            g_nf++;
+        }
+        i = e + 1;
+    }
+    np_free(&r);
+    qsort(g_files, (size_t)g_nf, sizeof *g_files, cmp_file);
+}
+
+/* ---- extraction for one file: appends links v1 rows to OUT */
+static long col_of(const char *hdr, long hn, const char *name) {
+    long at = 0, c = 0, nl = (long)strlen(name);
+    while (at <= hn) {
+        long e = at; while (e < hn && hdr[e] != '\t') e++;
+        if (e - at == nl && !memcmp(hdr + at, name, (size_t)nl)) return c;
+        c++; at = e + 1;
+    }
+    return -1;
+}
+static int field(const char *l, long n, long c, char *out, long cap) {
+    long at = 0, k = 0;
+    while (k < c) { while (at < n && l[at] != '\t') at++; if (at >= n) { out[0] = 0; return 1; } at++; k++; }
+    { long e = at; while (e < n && l[e] != '\t') e++;
+      if (e - at >= cap) e = at + cap - 1;
+      mm_copy(out, cap, l + at, e - at); out[e - at] = 0; }
+    return 0;
+}
+static void row(sb *o, const char *k, const char *s, const char *d, const char *v, const char *a) {
+    if (sb_puts(o, k) || sb_putc(o, '\t') || sb_puts(o, s) || sb_putc(o, '\t') || sb_puts(o, *d ? d : "-") || sb_putc(o, '\t') ||
+        sb_puts(o, *v ? v : "-") || sb_putc(o, '\t') || sb_puts(o, a) || sb_putc(o, '\n')) die("builder", s);
+}
+static int idch(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+static void ex_syms(const char *path, const char *b, long n, sb *o) {
+    long at = 0;
+    while (at < n) {
+        long e = at, k, last;
+        while (e < n && b[e] != '\n') e++;
+        last = e - 1; while (last > at && (b[last] == ' ' || b[last] == '\t' || b[last] == '\r')) last--;
+        if (e - at > 7 && idch((unsigned char)b[at]) && (b[last] == '{' || b[last] == ')') &&
+            memcmp(b + at, "typedef", 7) && memcmp(b + at, "return", 6)) {
+            for (k = at; k < e && b[k] != '(' && b[k] != '=' && b[k] != ';'; k++) { }
+            if (k < e && b[k] == '(') {
+                long ne = k, ns;
+                while (ne > at && b[ne - 1] == ' ') ne--;
+                ns = ne; while (ns > at && idch((unsigned char)b[ns - 1])) ns--;
+                if (ne > ns && ne - ns < 200) {
+                    char dst[4400], nm[201], dg[17], a[40];
+                    mm_copy(nm, 201, b + ns, ne - ns); nm[ne - ns] = 0;
+                    sha16(b + at, e - at, dg);
+                    cx_fmt(a, sizeof a, "digest=%s", dg);
+                    if (!cx_fmt(dst, sizeof dst, "%s#%s", path, nm)) row(o, "sym-def", path, dst, "-", a);
+                }
+            }
+        }
+        at = e + 1;
+    }
+}
+
+/* first token of S holding a '/' -- the path a coverage source column names */
+static void first_path(const char *s, char *out, long cap) {
+    long at = 0, n = (long)strlen(s);
+    out[0] = 0;
+    while (at < n) {
+        long e = at; while (e < n && s[e] != ' ') e++;
+        if (e > at && memchr(s + at, '/', (size_t)(e - at)) && e - at < cap) { mm_copy(out, cap, s + at, e - at); out[e - at] = 0; return; }
+        at = e + 1;
+    }
+}
+
+static void ex_table(const char *path, const char *b, long n, sb *o) {
+    int is_b = !strcmp(path, "tests/batches.tsv"), is_c = !strcmp(path, "tests/coverage.tsv");
+    int is_d = !strcmp(path, "tests/batch-product-inputs.tsv"), is_p = !strcmp(path, "tools/pins.tsv");
+    int is_l = !strcmp(path, "build/lane-inputs.tsv");
+    long at = 0, hn = -1, cid = 0, csrc = -1, cent = -1;
+    const char *hdr = 0;
+    while (at < n) {
+        long e = at; char a[40], dg[17], id[4096], f1[4096], f2[4096], dst[4400];
+        while (e < n && b[e] != '\n') e++;
+        if (e == at || b[at] == '#') { at = e + 1; continue; }
+        if (!hdr && !is_l) {
+            hdr = b + at; hn = e - at;
+            if (is_b) { cid = col_of(hdr, hn, "id"); csrc = col_of(hdr, hn, "source"); cent = col_of(hdr, hn, "entry"); }
+            if (is_c) { cid = col_of(hdr, hn, "id"); csrc = col_of(hdr, hn, "source"); }
+            if (is_p) { cid = col_of(hdr, hn, "path"); }
+            if (is_d) { cid = col_of(hdr, hn, "key"); csrc = col_of(hdr, hn, "inputs"); }
+            if (cid < 0) die("table-header", path);
+            at = e + 1; continue;
+        }
+        sha16(b + at, e - at, dg); cx_fmt(a, sizeof a, "digest=%s", dg);
+        field(b + at, e - at, is_l ? 0 : cid, id, sizeof id);
+        f1[0] = 0; f2[0] = 0;
+        if (is_b) {
+            cx_fmt(dst, sizeof dst, "batch:%s", id);
+            if (csrc >= 0) field(b + at, e - at, csrc, f1, sizeof f1);
+            row(o, "batch", path, dst, f1, a);
+            if (cent >= 0 && !field(b + at, e - at, cent, f2, sizeof f2) && strcmp(f1, f2)) row(o, "batch", path, dst, f2, a);
+        } else if (is_c) {
+            cx_fmt(dst, sizeof dst, "cov:%s", id);
+            if (csrc >= 0) field(b + at, e - at, csrc, f2, sizeof f2);
+            first_path(f2, f1, sizeof f1);
+            row(o, "cov", path, dst, f1, a);
+        } else if (is_p) {
+            char *h;
+            cx_fmt(dst, sizeof dst, "pin:%s", id);
+            h = strchr(id, '#'); if (h) *h = 0;
+            row(o, "pin", path, dst, id, a);
+        } else if (is_l) {
+            field(b + at, e - at, 1, f1, sizeof f1);
+            cx_fmt(dst, sizeof dst, "lane:%s", f1);
+            row(o, "lane", path, dst, id, a);
+        } else if (is_d) {
+            char kind[64];
+            field(b + at, e - at, 0, kind, sizeof kind);
+            if (!strcmp(kind, "id") && csrc >= 0 && !field(b + at, e - at, csrc, f1, sizeof f1)) {
+                long s = 0, m = (long)strlen(f1);
+                cx_fmt(dst, sizeof dst, "batch:%s", id);
+                while (s < m) { long t = s; while (t < m && f1[t] != ',') t++;
+                    if (t > s) { char px[4096]; mm_copy(px, sizeof px, f1 + s, t - s); px[t - s] = 0; row(o, "declared", path, dst, px, a); }
+                    s = t + 1; }
+            }
+        }
+        at = e + 1;
+    }
+}
+
+static int is_table(const char *p) {
+    return !strcmp(p, "tests/batches.tsv") || !strcmp(p, "tests/coverage.tsv") || !strcmp(p, "tests/batch-product-inputs.tsv") ||
+           !strcmp(p, "tools/pins.tsv") || !strcmp(p, "build/lane-inputs.tsv");
+}
+static void extract(const char *path, sb *o) {
+    char abs[8192]; char *b = 0; long n = 0; int rc;
+    if (cx_fmt(abs, sizeof abs, "%s/%s", g_root, path)) die("path", path);
+    if (!ends(path, ".cx") && !is_table(path) && strncmp(path, "tools/templates/", 16)) return;
+    rc = read_all(abs, &b, &n);
+    if (rc) return;                       /* ENOENT or unreadable (directory/gitlink): file node only */
+    if (ends(path, ".cx")) {
+        char why[300]; RlsStats st = {0};
+        /* an extraction failure is a fact, not a smaller graph: the file depends on "unknown:all" and any
+           selection reaching it widens to the full set */
+        if (rls_extract(g_root, path, b, n, o, &st, why, sizeof why)) {
+            char a[340]; long k;
+            cx_fmt(a, sizeof a, "why=%s", why);
+            for (k = 0; a[k]; k++) if (a[k] == '\t' || a[k] == '\n') a[k] = ' ';
+            row(o, "scan-error", path, "unknown:all", "-", a);
+        }
+        ex_syms(path, b, n, o);
+    } else if (is_table(path)) {
+        ex_table(path, b, n, o);
+    } else if (!strchr(path + 16, '/')) {
+        char dst[4400]; cx_fmt(dst, sizeof dst, "phase:%s", path + 16);
+        row(o, "phase", path, dst, "-", "-");
+    }
+    free(b);
+}
+
+/* ---- identity */
+static void identity(void) {
+    const char *parts[] = {"tools/codemap.cx", "tools/cxlib/relscan.cx", "tools/cxlib/relstore.cx", 0};
+    np_buf all = {0}; char x[65], cr[8192]; char *b = 0; long n = 0; int i;
+    for (i = 0; parts[i]; i++) { if (read_all(parts[i], &b, &n)) die("extractor-source (run from the repo root)", parts[i]); np_put(&all, b, (size_t)n); free(b); }
+    if (sy_sha256_hex(all.p, (long)all.n, x)) die("sha", 0);
+    free(all.p); all.p = 0; all.n = 0; all.cap = 0;
+    cx_fmt(cr, sizeof cr, "%s/cxroot.tsv", g_root);
+    if (!read_all(cr, &b, &n)) { np_puts(&all, "cxroot.tsv\n"); np_put(&all, b, (size_t)n); free(b); }
+    if (rs_identity(x, all.p, (long)all.n, g_xsha)) die("identity", 0);
+    free(all.p);
+}
+
+static void full_build(void) {
+    sb *o = sb_new(); rs_file *rf; long i; char why[300];
+    if (!o) die("builder", 0);
+    rf = malloc((size_t)(g_nf + 1) * sizeof *rf);
+    for (i = 0; i < g_nf; i++) {
+        extract(g_files[i].path, o);
+        rf[i].path = g_files[i].path; rf[i].sha = g_files[i].sha; rf[i].size = g_files[i].size;
+    }
+    if (rs_rebuild(g_dir, g_xsha, rf, g_nf, sb_cstr(o) ? sb_cstr(o) : "", sb_len(o), why, sizeof why)) die("rebuild", why);
+    printf("CODEMAP_BUILD\tmode=full\tfiles=%ld\tedge_bytes=%ld\n", g_nf, sb_len(o));
+    free(rf); sb_free(o);
+}
+
+/* ---- stored files.tsv -> (path, sha) pairs, compared against the inventory */
+typedef struct { char *path; char *sha; } st_row;
+static st_row *g_st; static long g_nst; static char *g_stbuf;
+static void load_stored(void) {
+    np_buf f = {0}; char why[300]; long at = 0, cap = 1024;
+    if (rs_read_files(g_dir, &f, why, sizeof why)) die("read-files", why);
+    g_stbuf = f.p; g_st = malloc((size_t)cap * sizeof *g_st); g_nst = 0;
+    while (g_stbuf && at < (long)f.n) {
+        long e = at, t1, t2;
+        while (e < (long)f.n && g_stbuf[e] != '\n') e++;
+        for (t1 = at; t1 < e && g_stbuf[t1] != '\t'; t1++) { }
+        for (t2 = t1 + 1; t2 < e && g_stbuf[t2] != '\t'; t2++) { }
+        if (t2 >= e) die("files.tsv", "fields");
+        g_stbuf[t1] = 0; g_stbuf[t2] = 0;
+        if (g_nst == cap) { cap *= 2; g_st = realloc(g_st, (size_t)cap * sizeof *g_st); }
+        g_st[g_nst].path = g_stbuf + at; g_st[g_nst].sha = g_stbuf + t1 + 1; g_nst++;
+        at = e + 1;
+    }
+}
+
+/* the diff: 'm' modified, 'a' added, 'd' deleted (both lists sorted by path) */
+typedef struct { char kind; const char *path; long fi; } dlt;
+static dlt *g_d; static long g_nd;
+static void diff(void) {
+    long i = 0, j = 0;
+    g_d = malloc((size_t)(g_nf + g_nst + 1) * sizeof *g_d); g_nd = 0;
+    while (i < g_nf || j < g_nst) {
+        int c = i >= g_nf ? 1 : j >= g_nst ? -1 : strcmp(g_files[i].path, g_st[j].path);
+        if (c < 0) { g_d[g_nd].kind = 'a'; g_d[g_nd].path = g_files[i].path; g_d[g_nd].fi = i; g_nd++; i++; }
+        else if (c > 0) { g_d[g_nd].kind = 'd'; g_d[g_nd].path = g_st[j].path; g_d[g_nd].fi = -1; g_nd++; j++; }
+        else { if (strcmp(g_files[i].sha, g_st[j].sha)) { g_d[g_nd].kind = 'm'; g_d[g_nd].path = g_files[i].path; g_d[g_nd].fi = i; g_nd++; } i++; j++; }
+    }
+}
+
+static int status_cmd(void) {
+    char why[300]; int st = rs_status(g_dir, g_xsha, why, sizeof why); long i;
+    if (st < 0) die("status", why);
+    if (st == 1) { printf("STALE\tstore\t%s\nCODEMAP_STATUS\tstate=stale\treason=%s\tchanged=all\n", why, why); return 1; }
+    inventory(); load_stored(); diff();
+    for (i = 0; i < g_nd; i++)
+        printf("STALE\t%s\t%s\n", g_d[i].kind == 'm' ? "modified" : g_d[i].kind == 'a' ? "added" : "deleted", g_d[i].path);
+    printf("CODEMAP_STATUS\tstate=%s\tfiles=%ld\tchanged=%ld\n", g_nd ? "stale" : "fresh", g_nf, g_nd);
+    return g_nd ? 1 : 0;
+}
+
+static void incremental(void) {
+    char why[300]; int st = rs_status(g_dir, g_xsha, why, sizeof why); long i;
+    if (st < 0) die("status", why);
+    inventory();
+    if (st == 1) { printf("CODEMAP_INCREMENTAL\tfallback=full\treason=%s\n", why); full_build(); return; }
+    load_stored(); diff();
+    for (i = 0; i < g_nd; i++)
+        if (g_d[i].kind != 'm' && ends(g_d[i].path, ".cx")) {
+            printf("CODEMAP_INCREMENTAL\tfallback=full\treason=cx-%s\tpath=%s\n", g_d[i].kind == 'a' ? "added" : "deleted", g_d[i].path);
+            full_build(); return;
+        }
+    for (i = 0; i < g_nd; i++) {
+        sb *o = sb_new(); rs_file f;
+        f.path = g_d[i].path;
+        if (g_d[i].kind == 'd') { f.sha = 0; f.size = 0; }
+        else { extract(g_d[i].path, o); f.sha = g_files[g_d[i].fi].sha; f.size = g_files[g_d[i].fi].size; }
+        if (rs_update_file(g_dir, g_xsha, &f, sb_cstr(o) ? sb_cstr(o) : "", sb_len(o), why, sizeof why)) die("update-file", why);
+        printf("UPDATED\t%c\t%s\n", g_d[i].kind, g_d[i].path);
+        sb_free(o);
+    }
+    printf("CODEMAP_BUILD\tmode=incremental\tfiles=%ld\tupdated=%ld\n", g_nf, g_nd);
+}
+
+/* ---- select: dependency pairs (dependent <- dependency), reverse closure */
+typedef struct { const char *dep; const char *who; int prefix; } pr;
+static int cmp_pr(const void *a, const void *b) { return strcmp(((const pr *)a)->dep, ((const pr *)b)->dep); }
+static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static char **g_set; static long g_nset, g_scap;
+static void add_node(const char *w) {
+    long m;
+    for (m = 0; m < g_nset; m++) if (!strcmp(g_set[m], w)) return;
+    if (g_nset == g_scap) { g_scap *= 2; g_set = realloc(g_set, (size_t)g_scap * sizeof *g_set); }
+    g_set[g_nset++] = (char *)w;
+}
+
+static int select_cmd(int argc, char **argv, int first) {
+    char why[300]; np_buf e = {0}; long at = 0, np = 0, cap = 4096, i, nx;
+    pr *p; int st, all = 0;
+    st = rs_status(g_dir, g_xsha, why, sizeof why);
+    if (st != 0) { printf("CODEMAP_SELECT\tall=1\treason=store-%s\n", st < 0 ? "error" : why); return 0; }
+    inventory(); load_stored(); diff();
+    if (rs_read_edges(g_dir, &e, why, sizeof why)) die("read-edges", why);
+    p = malloc((size_t)cap * sizeof *p);
+    while (e.p && at < (long)e.n) {
+        long t[5], k = 0, q, end = at;
+        char *kind, *src, *dst, *via;
+        while (end < (long)e.n && e.p[end] != '\n') end++;
+        t[0] = at; for (q = at; q < end && k < 4; q++) if (e.p[q] == '\t') { e.p[q] = 0; t[++k] = q + 1; }
+        e.p[end] = 0;
+        if (k < 4) die("edges.tsv", "fields");
+        kind = e.p + t[0]; src = e.p + t[1]; dst = e.p + t[2]; via = e.p + t[3];
+        if (np + 3 > cap) { cap *= 2; p = realloc(p, (size_t)cap * sizeof *p); }
+        if (!strcmp(kind, "use") || !strcmp(kind, "include")) { p[np].dep = dst; p[np].who = src; p[np].prefix = 0; np++; }
+        else {
+            p[np].dep = src; p[np].who = dst; p[np].prefix = 0; np++;
+            if (strcmp(via, "-")) { p[np].dep = via; p[np].who = dst; p[np].prefix = !strcmp(kind, "declared"); np++; }
+        }
+        at = end + 1;
+    }
+    qsort(p, (size_t)np, sizeof *p, cmp_pr);
+    g_scap = 256; g_set = malloc((size_t)g_scap * sizeof *g_set); g_nset = 0;
+    for (i = first; i < argc; i++) {
+        long lo = 0, hi = g_nst - 1, d; int hit = 0;
+        while (lo <= hi) { long mid = (lo + hi) / 2; int c = strcmp(g_st[mid].path, argv[i]); if (!c) { hit = 1; break; } if (c < 0) lo = mid + 1; else hi = mid - 1; }
+        for (d = 0; d < g_nd; d++) if (!strcmp(g_d[d].path, argv[i])) hit = 0;   /* stale node: not trusted */
+        if (!hit) { printf("UNKNOWN\t%s\n", argv[i]); all = 1; }
+        add_node(argv[i]);
+    }
+    for (nx = 0; nx < g_nset; nx++) {
+        const char *cur = g_set[nx]; long lo = 0, hi = np, k;
+        while (lo < hi) { long mid = (lo + hi) / 2; if (strcmp(p[mid].dep, cur) < 0) lo = mid + 1; else hi = mid; }
+        for (k = lo; k < np && !strcmp(p[k].dep, cur); k++) if (!p[k].prefix) add_node(p[k].who);
+        for (k = 0; k < np; k++) if (p[k].prefix && !strncmp(cur, p[k].dep, strlen(p[k].dep))) add_node(p[k].who);
+    }
+    for (i = 0; i < g_nset; i++) if (!strcmp(g_set[i], "unknown:all")) { printf("UNKNOWN\tscan-error-reached\n"); all = 1; }
+    qsort(g_set, (size_t)g_nset, sizeof *g_set, cmp_str);
+    {   long nb = 0;
+        for (i = 0; i < g_nset; i++)
+            if (!strncmp(g_set[i], "batch:", 6) || !strncmp(g_set[i], "cov:", 4) || !strncmp(g_set[i], "pin:", 4) ||
+                !strncmp(g_set[i], "lane:", 5) || !strncmp(g_set[i], "phase:", 6)) {
+                printf("SELECT\t%s\n", g_set[i]);
+                if (!strncmp(g_set[i], "batch:", 6)) nb++;
+            }
+        printf("CODEMAP_SELECT\tall=%d\tnodes=%ld\tbatches=%ld\tedges=%ld\n", all, g_nset, nb, np);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cmd; int i, inc = 0, first = 0; long t0 = sy_now_ms();
+    g_root[0] = 0; g_dir[0] = 0;
+    if (argc < 2) die("usage", "build|status|select [--root R] [--dir D] [--incremental] [PATH...]");
+    cmd = argv[1];
+    for (i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) { if (cx_fmt(g_root, sizeof g_root, "%s", argv[++i])) die("root", 0); }
+        else if (!strcmp(argv[i], "--dir") && i + 1 < argc) { if (cx_fmt(g_dir, sizeof g_dir, "%s", argv[++i])) die("dir", 0); }
+        else if (!strcmp(argv[i], "--incremental")) inc = 1;
+        else { first = i; break; }
+    }
+    if (!g_root[0]) {
+        char *v[] = {"git", "rev-parse", "--show-toplevel", 0}; np_result r = {0}; char err[300];
+        if (np_run(v, ".", 0, 20, &r, err, sizeof err) || r.rc || r.outn < 2) die("toplevel", err);
+        mm_copy(g_root, sizeof g_root, r.out, (long)r.outn - 1); g_root[r.outn - 1] = 0;
+        np_free(&r);
+    }
+    if (g_root[0] != '/') die("root-not-absolute", g_root);
+    if (!g_dir[0]) {
+        const char *h = sy_env("HOME"); char d[17];
+        if (!h || !*h) die("HOME", 0);
+        sha16(g_root, (long)strlen(g_root), d);
+        if (cx_fmt(g_dir, sizeof g_dir, "%s/.cache/unisacc/codemap/%s", h, d)) die("dir", 0);
+    }
+    identity();
+    if (!strcmp(cmd, "build")) {
+        if (first) die("usage", "build takes no paths");
+        if (inc) incremental(); else { inventory(); full_build(); }
+        printf("CODEMAP_TIME\tcmd=build\tmode=%s\tms=%ld\n", inc ? "incremental" : "full", sy_now_ms() - t0);
+        return 0;
+    }
+    if (!strcmp(cmd, "status")) {
+        int rc = status_cmd();
+        printf("CODEMAP_TIME\tcmd=status\tms=%ld\n", sy_now_ms() - t0);
+        return rc;
+    }
+    if (!strcmp(cmd, "select")) { if (!first) die("usage", "select needs PATH..."); return select_cmd(argc, argv, first); }
+    die("usage", cmd);
+    return 2;
+}
