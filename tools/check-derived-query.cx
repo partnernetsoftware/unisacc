@@ -56,6 +56,60 @@ int main(void) {
     ck(has(o, "TMPLEFT=0"), "no-temp-left");
     ck(has(o, "BADTMO=2"), "timeout-above-cap-refused");
     ck(has(o, "VERIFY_RC=0")&&has(o, "DQ_CHECK\ttool-index\tOK"),"query-check-independently-recomputes");
+    if (o) { free(o); o = 0; }
+
+    /* U2: links + doc-links + batch-domains R1 byte-identical & 6 invalidation negative controls */
+    cx_fmt(cmd, sizeof cmd,
+        "D=%s/u2; C=%s/u2c; mkdir -p $D/exec/facts $D/tests $D/tools $D/cx; "
+        "sh ./unisacc.com -o %s/dq.bin tools/derived-query.cx || exit 9; "
+        "DQ=%s/dq.bin; "
+        /* 1. links fixture */
+        "printf 'name\\tgen\\tcheck\\twrite\\tout\\tinputs\\tphase\\tbound\\nlinks\\ttools/links-gen.cx\\t-\\t-\\tbuild/links.tsv\\t-\\t1\\t20\\n' > $D/exec/facts/derive.tsv; "
+        "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\nb-one\\tIMPLEMENTED\\tx\\ttools/a.cx\\tSOURCE\\tlnx\\t5\\t-\\ttools/a.cx\\n' > $D/tests/batches.tsv; "
+        "$DQ links --root $D --cache $C > $D/l1 2> $D/le1; echo L1RC=$?; echo LS1=$(cut -f3 $D/le1); "
+        "sh ./unisacc.com tools/links-gen.cx -- --root $D --emit $D/lref; cmp -s $D/l1 $D/lref && echo L_SAME_AS_GEN; "
+        "$DQ links --root $D --cache $C > $D/l2 2> $D/le2; echo LS2=$(cut -f3 $D/le2); "
+        "$DQ links --root $D --cache $C --check > $D/lc 2> $D/lce; echo LCRC=$?; grep '^DQ_CHECK' $D/lc; "
+        "LK1=$($DQ links --root $D --cache $C --key); "
+        "printf 'unrelated\\n' > $D/unrelated.txt; "
+        "LK_UNREL=$($DQ links --root $D --cache $C --key); [ \"$LK1\" = \"$LK_UNREL\" ] && echo L_UNREL_HIT; "
+        "printf 'b-two\\tIMPLEMENTED\\tx\\ttools/b.cx\\tSOURCE\\tlnx\\t5\\t-\\ttools/b.cx\\n' >> $D/tests/batches.tsv; "
+        "LK2=$($DQ links --root $D --cache $C --key); [ \"$LK1\" != \"$LK2\" ] && echo L_INPUT_INVALIDATES; "
+        "$DQ links --root $D --cache $C > $D/l3 2> $D/le3; echo LS3=$(cut -f3 $D/le3); "
+        "printf 'corrupt\\n' > $C/links/$LK2.tsv; $DQ links --root $D --cache $C > $D/l4 2> $D/le4; echo LS4=$(cut -f3 $D/le4); cmp -s $D/l4 $D/l3 && echo L_CORR_OK; "
+        "$DQ bad-table --root $D --cache $C >/dev/null 2>&1; echo BAD_TBL_RC=$?; "
+        /* 2. doc-links fixture in isolated git repo */
+        "G=%s/u2g; mkdir -p $G/tools $G/build; git -C $G init -q; git -C $G config user.email t@t; git -C $G config user.name t; "
+        "printf 'src\\tline\\tdst\\treason\\n' > $G/tools/doc-links-baseline.tsv; "
+        "printf '# Doc\\nSee [b](b.md)\\n' > $G/a.md; printf '# B\\nSee [a](a.md)\\n' > $G/b.md; "
+        "git -C $G add a.md b.md tools/doc-links-baseline.tsv; git -C $G commit -q -m init; "
+        "$DQ doc-links --root $G --cache $C > $D/d1 2> $D/de1; echo D1RC=$?; echo DS1=$(cut -f3 $D/de1 | tail -n 1); "
+        "sh ./unisacc.com tools/doc-links-gen.cx -- --write --root $G --table $D/dref >/dev/null 2>&1; cmp -s $D/d1 $D/dref && echo D_SAME_AS_GEN; "
+        "$DQ doc-links --root $G --cache $C --check > $D/dc 2> $D/dce; echo DCRC=$?; grep '^DQ_CHECK' $D/dc; "
+        "DK1=$($DQ doc-links --root $G --cache $C --key); "
+        "printf '# C\\n' > $G/c.md; git -C $G add c.md; "
+        "DK2=$($DQ doc-links --root $G --cache $C --key); [ \"$DK1\" != \"$DK2\" ] && echo D_ADD_INVALIDATES; "
+        "git -C $G rm -qf c.md; DK3=$($DQ doc-links --root $G --cache $C --key); [ \"$DK1\" = \"$DK3\" ] && echo D_DEL_REVERTS; "
+        "printf '# Doc\\nSee [missing](no-such-file.md)\\n' > $G/a.md; "
+        "$DQ doc-links --root $G --cache $C >/dev/null 2>&1; echo D_BROKEN_RC=$?; "
+        /* 3. batch-domains live check + cache hit */
+        "$DQ batch-domains --root . --cache $C --check > $D/bc1 2> $D/be1; echo B1RC=$?; grep '^DQ_CHECK' $D/bc1; "
+        "$DQ batch-domains --root . --cache $C > /dev/null 2> $D/be2; echo BS2=$(cut -f3 $D/be2 | tail -n 1); "
+        "rm -rf %s",
+        dir, dir, dir, dir, dir, dir);
+    {
+        char *v[] = {"sh", "-c", cmd, 0};
+        rc = cx_runv_timeout(v, 58, &o, &n);
+    }
+    if (o) sy_printf("%s", o);
+    ck(rc == 0 && has(o, "L1RC=0") && has(o, "LS1=miss\n") && has(o, "L_SAME_AS_GEN"), "links-r1-byte-identical");
+    ck(has(o, "LS2=hit\n") && has(o, "LCRC=0") && has(o, "DQ_CHECK\tlinks\tOK"), "links-hit-and-deterministic-check");
+    ck(has(o, "L_UNREL_HIT") && has(o, "L_INPUT_INVALIDATES") && has(o, "LS3=miss\n") && has(o, "LS4=recovered\n") && has(o, "L_CORR_OK"), "links-invalidation-and-corrupt-recovery");
+    ck(has(o, "BAD_TBL_RC=2"), "unknown-table-refused");
+    ck(has(o, "D1RC=0") && has(o, "D_SAME_AS_GEN") && has(o, "DCRC=0") && has(o, "DQ_CHECK\tdoc-links\tOK"), "doc-links-r1-byte-identical-and-check");
+    ck(has(o, "D_ADD_INVALIDATES") && has(o, "D_DEL_REVERTS") && has(o, "D_BROKEN_RC=4"), "doc-links-add-del-and-broken-refused");
+    ck(has(o, "B1RC=0") && has(o, "DQ_CHECK\tbatch-domains\tOK") && has(o, "BS2=hit\n"), "batch-domains-check-and-hit");
+
     sy_printf("CHECK_DERIVED_QUERY\t%s\tfailed=%d\n", failed ? "FAIL" : "PASS", failed);
     return failed ? 1 : 0;
 }
