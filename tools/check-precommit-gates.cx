@@ -78,16 +78,19 @@ static void setup(const char *group) {
     sh(c, out, sizeof out, 0);
     if (!has(out, "LOCK_OK")) { lockd[0] = 0; die("another check-precommit-gates run holds the fixture lock"); }
     if (cx_fmt(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s && cp %s/tools/precommit.cx %s/tools/commit-own.cx %s/tools/"
-                            " && cp %s/tests/precommit-gates.tsv %s/tests/tools-compile.cx %s/tests/ && git -C %s show " PCG_BASE ":tools/precommit.cx > %s/tools/precommit-base.cx"
-                            " && git -C %s show " PCG_BASE_CO ":tools/commit-own.cx > %s/tools/commit-own-base.cx"
+                            " && cp %s/tests/precommit-gates.tsv %s/tests/tools-compile.cx %s/tests/"
+                            " && test -s %s/tests/fixtures/precommit-gates/precommit-base-" PCG_BASE ".cx.txt"
+                            " && test -s %s/tests/fixtures/precommit-gates/commit-own-base-" PCG_BASE_CO ".cx.txt"
+                            " && cp %s/tests/fixtures/precommit-gates/precommit-base-" PCG_BASE ".cx.txt %s/tools/precommit-base.cx"
+                            " && cp %s/tests/fixtures/precommit-gates/commit-own-base-" PCG_BASE_CO ".cx.txt %s/tools/commit-own-base.cx"
                             " && cd %s && ln -s %s/unisacc.com unisacc.com && git init -q && git config user.name pcg && git config user.email pcg@example.invalid"
                             " && printf 'tools/commit-own-base.cx" T "regular\\ntools/precommit-base.cx" T "regular\\n' >> tests/tools-compile-sources.tsv"
                             /* the two base copies can push the inventory past a multiple of 8 (1088 -> 1090 needs shard 136):
                                register any shard the fixture inventory now needs, with the exact tools-compile batch contract */
                             " && n=$(grep -c . tests/tools-compile-sources.tsv) && i=$(grep -c '^tools-compile-' tests/batches.tsv) && while [ $i -lt $(( (n + 7) / 8 )) ]; do"
                             " printf 'tools-compile-%%03d" T "IMPLEMENTED" T "contract" T "tests/tools-compile.cx" T "SOURCE" T "lnx/x86_64" T "55" T "-" T "tests/tools-compile.cx" T "{root};{out};%%d" T "tools.compile-all" T "rc0:TOOLS_COMPILE" T "product" T "commit\\n' $i $i >> tests/batches.tsv; i=$((i + 1)); done"
-                            " && git add -A && git commit -qm base && echo SETUP_OK",
-               fx, fx, root, fx, root, root, fx, root, root, fx, root, fx, root, fx, fx, root)) die("script");
+                            " && git add -A && sh ./unisacc.com tools/tool-index.cx -- --tables && git add build/table-index.tsv && git commit -qm base && echo SETUP_OK",
+               fx, fx, root, fx, root, root, fx, root, root, fx, root, root, root, fx, root, fx, fx, root)) die("script");
     sh(c, out, sizeof out, 0);
     if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup"); }
     if (cx_fmt(c, sizeof c, "cp %s/tools/check-precommit-gates.cx %s/tools/", root, fx) || sh(c, out, sizeof out, 0)) die("fixture helper copy");
@@ -179,9 +182,8 @@ static void group_toolsreg(int part) {
        " echo AHINT=$(grep -c 'tools/register.cx -- --tool tools/NAME.cx' p.out);"
        " cp tools/zzt.cx zzt.keep; sh ./unisacc.com tests/tools-compile.cx -- --register . \"$PWD/tools/zzt.cx\" > tc.out 2>&1; echo TRC=$?;"
        " echo TMSG=$(grep -c 'REFUSE --register would overwrite existing.*tools/register.cx -- --tool' tc.out); cmp -s tools/zzt.cx zzt.keep && echo TKEEP=1;"
-       " sh ./unisacc.com tests/tools-compile.cx -- --register . \"$PWD/tools/zzt.cx\" --force > tc.out 2>&1; echo FRC=$?; cmp -s tools/zzt.cx zzt.keep && echo FKEEP=1; rm -f zzt.keep tc.out;"
-       " printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);",
-       pc, pc)) die("script");
+       " sh ./unisacc.com tests/tools-compile.cx -- --register . \"$PWD/tools/zzt.cx\" --force > tc.out 2>&1; echo FRC=$?; cmp -s tools/zzt.cx zzt.keep && echo FKEEP=1; rm -f zzt.keep tc.out;",
+       pc)) die("script");
     if (cx_fmt(sr, sizeof sr,
        " git add tests/tools-compile-sources.tsv; %s BRC=$?; echo BMSG=$(grep -c 'BLOCKED tools' p.out); grep '^PRECOMMIT_GATES' p.out | sed 's/^/B_/';",
        pc)) die("script");
@@ -193,10 +195,15 @@ static void group_toolsreg(int part) {
     sh(c, out, sizeof out, 1);
     if (part == 0 || part == 1) {
         ck(has(out, "ARC=1\n") && has(out, "AMSG=1\n"), "toolsreg.added-unregistered-refused-by-name");
-        ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
         ck(has(out, "AHINT=") && !has(out, "AHINT=0\n"), "toolsreg.blocked-hint-names-register-tool");
         ck(has(out, "TRC=2\n") && has(out, "TMSG=1\n") && has(out, "TKEEP=1\n"), "toolsreg.tools-compile-register-refuses-existing-source");
         ck(has(out, "FRC=2\n") && has(out, "FKEEP=1\n"), "toolsreg.tools-compile-register-force-refuses-non-registry");
+        if (failed) sy_printf("%s\n", out);
+        if (part == 1) {
+            if (cx_fmt(c, sizeof c, "printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);", pc)) die("script");
+            sh(c, out, sizeof out, 1);
+            ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
+        }
     }
     if (part == 0 || part == 2)
         ck(has(out, "BRC=") && has(out, "BMSG=0\n") && has(out, "B_PRECOMMIT_GATES") && !has(out, "toolsreg,") && !has(out, ",toolsreg\t"), "toolsreg.added-registered-passes");
