@@ -826,11 +826,14 @@ int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
         const char *source = tx_eqz(argv[3], "tool") ? "tools/candidate-chain.cx" :
                              tx_eqz(argv[3], "generator") ? "tools/chain-phases-gen.cx" : 0;
-        char bin[4400], why[512]; int reused;
+        char bin[4400], pfile[4500], why[512]; int reused;
         if (!source || argv[2][0] != '/' || sy_realpath(".", cwd, sizeof cwd) < 0) return 2;
         if (sy_mkdir(argv[2], 0700) && sy_exists(argv[2]) != 1) return 2;
         if (rn_prepare(cwd, source, argv[2], bin, sizeof bin, &reused, why, sizeof why)) {
             fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        }
+        if (cx_fmt(pfile, sizeof pfile, "%s/%s", argv[2], tx_eqz(argv[3], "tool") ? ".native_tool.path" : ".native_gen.path") == 0) {
+            (void)cx_write(pfile, bin, strlen(bin));
         }
         printf("PREPARED\tcandidate-check\t%s\t%s\tno-test-result\n", argv[3], bin);
         return 0;
@@ -956,52 +959,101 @@ int main(int argc, char **argv) {
       mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0;
       { size_t i; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0; }
     }
-    int group=0;
-    if(argc>=4){
+    int group=0,by_cache=0;
+    if(argc==5&&tx_eqz(argv[3],"--cases")){
+        by_cache=1;
+        if(tx_eqz(argv[4],"core"))group=1;
+        else if(tx_eqz(argv[4],"core-a"))group=11;
+        else if(tx_eqz(argv[4],"core-b"))group=12;
+        else if(tx_eqz(argv[4],"core-c"))group=13;
+        else if(tx_eqz(argv[4],"objects"))group=2;
+        else if(tx_eqz(argv[4],"watch"))group=3;
+        else return 2;
+    }else if(argc>=4){
         if(tx_eqz(argv[argc-1],"--core"))group=1;
         else if(tx_eqz(argv[argc-1],"--objects"))group=2;
         else if(tx_eqz(argv[argc-1],"--watch"))group=3;
         else return 2;
     }
-    if(group){
+    if(group&&!by_cache){
         if(argc!=(group==1?5:4)||sy_realpath(argv[2],native_tool,sizeof native_tool)<0||
            (group==1&&sy_realpath(argv[3],native_generator,sizeof native_generator)<0)){
             printf("DEFERRED\tneeds-materials=candidate-chain-tool,chain-phases-gen-tool\n");return 3;
         }
     }
-    if ((!group&&argc!=3) || argv[1][0] != '/' || argv[2][0] != '/') {
-        fprintf(stderr, "usage: ABS_OUT ABS_CACHE | ABS_OUT CANDIDATE_NATIVE [GENERATOR_NATIVE] --core|--objects|--watch\n");
+    if (((!group&&argc!=3)&&!by_cache) || argv[1][0] != '/' || argv[2][0] != '/') {
+        fprintf(stderr, "usage: ABS_OUT ABS_CACHE [--cases core|core-a|core-b|core-c|objects|watch] | ABS_OUT CANDIDATE_NATIVE [GENERATOR_NATIVE] --core|--objects|--watch\n");
         return 2;
     }
     if(sy_mkdir(argv[1],0700)&&sy_exists(argv[1])!=1)return 2;
-    if(!group){
+    if(!group||by_cache){
     /* The cache directory comes from the batch's own {out} argument (args column), and {out} itself is
        absent until this batch runs: create it and its subdirectory here instead of relying on a
        leftover ROOT/out path, which a fresh clone does not have. */
-    { char mk[4700];
-      if (cx_fmt(mk, sizeof mk, "mkdir -p '%s'", argv[2]) || sh(mk, out, sizeof out)) return 2; }
-    {
-        char why[512]; int reused, pid;
-        pid = fork();
-        if (pid < 0) return 2;
-        if (pid == 0) {
-            if(group==2||group==3)_exit(0);
-            if (rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
-                fprintf(stderr, "check-candidate-chain: %s\n", why); _exit(2);
+    char mk[4700],lockp[4700],tp[4700],gp[4700];int lfd=-1;
+    int need_gen=(group==0||group==1||group==13);
+    if (cx_fmt(mk, sizeof mk, "mkdir -p '%s'", argv[2]) || sh(mk, out, sizeof out)) return 2;
+    cx_fmt(tp, sizeof tp, "%s/.native_tool.path", argv[2]);
+    cx_fmt(gp, sizeof gp, "%s/.native_gen.path", argv[2]);
+    if (cx_fmt(lockp, sizeof lockp, "%s/.prep.lock", argv[2]) == 0) {
+        lfd = sy_open(lockp, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+        if (lfd >= 0) (void)sy_flock(lfd, 2);
+    }
+    native_tool[0] = 0; native_generator[0] = 0;
+    if (sy_exists(tp) == 1) {
+        size_t tn = 0; char *tb = cx_read(tp, &tn);
+        if (tb && tn > 1 && tn < sizeof native_tool) {
+            mm_copy(native_tool, sizeof native_tool, tb, tn); native_tool[tn] = 0;
+            if (sy_exists(native_tool) != 1) native_tool[0] = 0;
+        }
+        free(tb);
+    }
+    if (sy_exists(gp) == 1) {
+        size_t gn = 0; char *gb = cx_read(gp, &gn);
+        if (gb && gn > 1 && gn < sizeof native_generator) {
+            mm_copy(native_generator, sizeof native_generator, gb, gn); native_generator[gn] = 0;
+            if (sy_exists(native_generator) != 1) native_generator[0] = 0;
+        }
+        free(gb);
+    }
+    if (!native_tool[0] || (need_gen && !native_generator[0])) {
+        char why[512]; int reused = 0, pid = -1;
+        if (!native_generator[0]) {
+            pid = fork();
+            if (pid < 0) { if (lfd >= 0) { (void)sy_flock(lfd, 8); sy_close(lfd); } return 2; }
+            if (pid == 0) {
+                if (rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why)) {
+                    fprintf(stderr, "check-candidate-chain: %s\n", why); _exit(2);
+                }
+                (void)cx_write(gp, native_generator, strlen(native_generator));
+                _exit(0);
             }
-            _exit(0);
         }
-        if (rn_prepare(cwd, "tools/candidate-chain.cx", argv[2], native_tool, sizeof native_tool, &reused, why, sizeof why)) {
-            (void)sy_wait(pid, 0);
-            fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        if (!native_tool[0]) {
+            if (rn_prepare(cwd, "tools/candidate-chain.cx", argv[2], native_tool, sizeof native_tool, &reused, why, sizeof why)) {
+                if (pid > 0) (void)sy_wait(pid, 0);
+                if (lfd >= 0) { (void)sy_flock(lfd, 8); sy_close(lfd); }
+                fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+            }
+            (void)cx_write(tp, native_tool, strlen(native_tool));
         }
-        if (sy_wait(pid, 0) != 0 ||
-            ((group==0||group==1)&&rn_prepare(cwd, "tools/chain-phases-gen.cx", argv[2], native_generator, sizeof native_generator, &reused, why, sizeof why))) {
-            fprintf(stderr, "check-candidate-chain: %s\n", why); return 2;
+        if (pid > 0) {
+            if (sy_wait(pid, 0) != 0) {
+                if (lfd >= 0) { (void)sy_flock(lfd, 8); sy_close(lfd); }
+                fprintf(stderr, "check-candidate-chain: generator prepare failed\n"); return 2;
+            }
+            if (sy_exists(gp) == 1) {
+                size_t gn = 0; char *gb = cx_read(gp, &gn);
+                if (gb && gn > 1 && gn < sizeof native_generator) {
+                    mm_copy(native_generator, sizeof native_generator, gb, gn); native_generator[gn] = 0;
+                }
+                free(gb);
+            }
         }
     }
+    if (lfd >= 0) { (void)sy_flock(lfd, 8); sy_close(lfd); lfd = -1; }
     }
-    if(group==0||group==1){
+    if(group==0||group==1||group==11){
     { char cmd[1800];
       if (cx_fmt(cmd, sizeof cmd, "'%s' --plan 2>&1", native_tool)) { ck(0, "fmt"); return 1; }
       ck(sh(cmd, out, sizeof out) == 0 && has(out, "phases=") && has(out, "g2-osx-x86_64") && has(out, "g3-win-arm64") && has(out, "warmup") && has(out, "gen1-lnx-arm64") && has(out, "child_bound=90") && has(out, "p3-models") && has(out, "g2-lnx-x86_64-obj-0") && has(out, "g2-lnx-arm64-obj-43") && has(out, "jobs-net-41-finish"), "plan"); }
@@ -1240,6 +1292,8 @@ int main(int argc, char **argv) {
         ck(sh(cmd, out, sizeof out) != 0 && has(out, "REFUSE --until unknown phase"), "dynamic-closure-leading-zero-refused");
         cx_rmtree(td);
     }
+    }
+    if(group==0||group==1||group==12){
     {
         /* pack 切片取址: 只在新位置(chain_work/gen1/...)时找得到;缺失仍拒绝;旧位置不被接受 */
         char cmd[2400], w[600], expected[900];
@@ -1349,6 +1403,8 @@ int main(int argc, char **argv) {
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "PHASE\t0\tbuild") && has(out, "PHASE\t1\tsnap"), "phase-order-consumed");
         cx_rmtree(td);
     }
+    }
+    if(group==0||group==1||group==13){
     {
         char cmd[2400];
         if (cx_fmt(cmd, sizeof cmd, "'%s' --check 2>&1", native_generator)) { ck(0, "phase-generator-path"); return 1; }
@@ -1464,8 +1520,12 @@ int main(int argc, char **argv) {
       /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */
       if(sy_realpath("unisacc.com",product,sizeof product)<0||sy_realpath("tools/check-candidate-chain.cx",self,sizeof self)<0||
          cx_fmt(launcher,sizeof launcher,"%s/canary-launcher.sh",argv[1])||
-         cx_fmt(body,sizeof body,"#!/bin/sh\nshift 2\nexec '%s' \"$@\"\n",native_tool)||cx_write(launcher,body,strlen(body))||
-         cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-split '%s' '%s' 2>&1",product,self,argv[1],launcher))return 2;
+         cx_fmt(body,sizeof body,"#!/bin/sh\nshift 2\nexec '%s' \"$@\"\n",native_tool)||cx_write(launcher,body,strlen(body)))return 2;
+      if(argv[0]&&argv[0][0]=='/'&&sy_exists(argv[0])==1){
+          if(cx_fmt(cmd,sizeof cmd,"'%s' --g2g3-split '%s' '%s' 2>&1",argv[0],argv[1],launcher))return 2;
+      }else{
+          if(cx_fmt(cmd,sizeof cmd,"sh '%s' '%s' -- --g2g3-split '%s' '%s' 2>&1",product,self,argv[1],launcher))return 2;
+      }
       int rc=sh(cmd,out,sizeof out);sy_printf("%s",out);
       ck(rc==0&&has(out,"G2G3_SPLIT\tfailed=0"),"g2g3-canary-regression-fixture"); }
     if(group==0||group==3){ /* Real observer process, with no chain construction and no signal intervention. */

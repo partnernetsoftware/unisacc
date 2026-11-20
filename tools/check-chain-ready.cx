@@ -68,7 +68,10 @@ int main(void) {
     jt("branch-other-fail", "branch", "feature\n", "0", "FAIL", "not main");
     jt("derive-ok-pass", "derive", "DERIVE\ttables-gen\tOK\t5\nDERIVE_SUMMARY\tok=7\tdrift=0\trefused=0\tskipped=0\telapsed_ms=9\n", "0", "PASS", "drift=0");
     jt("derive-drift-fail", "derive", "DERIVE\ttool-index\tDRIFT\t6\trc=1\tx\nDERIVE_SUMMARY\tok=4\tdrift=2\trefused=0\tskipped=0\telapsed_ms=9\n", "1", "FAIL", "DRIFT");
+    jt("derive-drift-names-generator", "derive", "DERIVE\ttool-index\tDRIFT\t6\trc=1\tx\nDERIVE_SUMMARY\tok=4\tdrift=2\trefused=0\tskipped=0\telapsed_ms=9\n", "1", "FAIL", "failed_generator=tool-index(DRIFT)");
     jt("derive-refused-fail", "derive", "DERIVE\tproduct-map\tREFUSED\t1\trc=2\tx\nDERIVE_SUMMARY\tok=4\tdrift=0\trefused=1\tskipped=0\telapsed_ms=9\n", "2", "FAIL", "REFUSED");
+    jt("derive-timeout-row-names-generator", "derive", "DERIVE\tproduct-map\tTIMEOUT\t45000\trc=142\tx\nDERIVE_SUMMARY\tok=0\tdrift=0\trefused=1\tskipped=13\telapsed_ms=45001\n", "2", "FAIL", "failed_generator=product-map(TIMEOUT)");
+    jt("derive-outer-timeout-shard-names-unfinished-generators", "derive:doc-links,tool-index,table-index", "DERIVE\tdoc-links\tOK\t11000\n", "142", "FAIL", "failed_generator=tool-index(TIMEOUT),table-index(TIMEOUT)");
     jt("derive-no-summary-fail", "derive", "garbage\n", "0", "FAIL", "no DERIVE_SUMMARY");
     jt("ratchets-13-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=13\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=13");
     jt("ratchets-16-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=16\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=16");
@@ -79,6 +82,31 @@ int main(void) {
     jt("extract-drift-fail", "extract", "CX0_EXTRACT\tDRIFT\tbytes=1\n", "1", "FAIL", "DRIFT");
     jt("chain-fail-row", "chain", "PASS\ta\nFAIL\tcheck-candidate-chain.b\n", "1", "FAIL", "fail=1");
     jt("chain-pass", "chain", "PASS\ta\nPASS\tb\n", "0", "PASS", "pass=2");
+    {
+        char cs_ok[4096], cs_136[4096], cs_to[4096];
+        static const char *sn[4] = {"core-a", "core-b", "objects", "watch"};
+        static const int sc_ok[4] = {60, 54, 16, 7}, sc_136[4] = {60, 54, 16, 6}, sc_to[4] = {60, 54, 16, 0};
+        static const int rc_ok[4] = {0, 0, 0, 0}, rc_to[4] = {0, 0, 0, 142};
+        int m, s, c;
+        for (m = 0; m < 3; m++) {
+            char *buf = m == 0 ? cs_ok : m == 1 ? cs_136 : cs_to;
+            const int *cnts = m == 0 ? sc_ok : m == 1 ? sc_136 : sc_to;
+            const int *rcs = m == 2 ? rc_to : rc_ok;
+            long pos = 0;
+            buf[0] = 0;
+            for (s = 0; s < 4; s++) {
+                cx_fmt(buf + pos, 4096 - (size_t)pos, "SHARD\t%s\trc=%d\n", sn[s], rcs[s]);
+                pos = (long)tx_len(buf, 4096);
+                for (c = 0; c < cnts[s]; c++) {
+                    cx_fmt(buf + pos, 4096 - (size_t)pos, "PASS\tcase\n");
+                    pos = (long)tx_len(buf, 4096);
+                }
+            }
+        }
+        jt("chain-shards-137-pass", "chain-shards", cs_ok, "0", "PASS", "rc=0 pass=137 fail=0 (baseline=137 shards=4: core-a=60,core-b=54,objects=16,watch=7)");
+        jt("chain-shards-136-below-baseline-fail", "chain-shards", cs_136, "0", "FAIL", "<137 baseline");
+        jt("chain-shards-watch-timeout-rc142-fail", "chain-shards", cs_to, "142", "FAIL", "failed_shard=watch(rc=142,timeout,pass=0,fail=0)");
+    }
     jt("slot-ok-pass", "slot", "VERSION_SLOT\tOK\tversion=0.0.76\ttarget=0.0.76\tsource=arg\texpect_self_report=unisacc 0.0.76\n", "0", "PASS", "version=0.0.76");
     jt("slot-refuse-fail", "slot", "REFUSE\tCHAIN_READY_VERSION_SLOT\tslot-version-differs-from-target\t0.0.75\t0.0.76\n", "2", "FAIL", "CHAIN_READY_VERSION_SLOT");
     jt("slot-silent-fail", "slot", "", "0", "FAIL", "no verdict line");
