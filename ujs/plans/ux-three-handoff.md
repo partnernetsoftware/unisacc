@@ -18,7 +18,9 @@ M5 增补 Normal、Depth、Matcap、Distance、Points、三种直线、Sprite、
 
 Display P3 画布已两次复现。r160 WebGL1 与每色空间独立的 WebGL2 上下文均有 4 个通道不符，光栅中心红、蓝分别读回 117、14，独立色域与传递函数金值为 119、25。日志为 `/tmp/devsvc-flow-21559245761-324647/out/x.out` 与 `/tmp/devsvc-flow-21559316131-338155/out/x.out`。单独保留 `--p3-readback` 的原断言，下一步隔离浏览器绘图缓冲色彩管理和 WebGLProgram 的输出编码。其他三种经 `--output-mutate` 验证 18 项转红。
 
-M6 已对照单一 AmbientLight、HemisphereLight、Fog 与 FogExp2，入口为 `gpu-packet-struct.cx` 的 `--ambient`、`--hemisphere`、`--fog`、`--fog-exp2`，每门 41 项，均有同名的 `-mutate` 反例。余下灯光继续复用这一分片，方向光和点光的既有逐片元证据见材质主门。四类阴影图先接持久纹理、投影与发生深度，再分别验 Basic、PCF、PCFSoft 与 VSM 的边缘。
+M6 已对照 AmbientLight、HemisphereLight、SpotLight、LightProbe、Fog 与 FogExp2。入口为 `gpu-packet-struct.cx` 的 `--ambient`、`--hemisphere`、`--spot`、`--light-probe`、`--fog`、`--fog-exp2`，每门 41 项，均有同名的 `-mutate` 反例。方向光和点光沿用材质主门的双方向灯球体和点灯立方体，反例分别为 `--phong-light-mutate` 与 `--lighting-mutate`。
+
+M6 未完成的是 RectAreaLight 和四类通用阴影图。面积光需接入 LTC 取样，并用同一宽高与朝向对照 r160。阴影图从 `gpu-target.ujs` 的产生和读回接到 `gpu-packet.ujs` 的纹理输入。验收应同时取遮挡内、无影区与边缘样点，再分别比较 Basic、PCF、PCFSoft、VSM。M5 透明收影测试只覆盖矩形投影，清单未把它算作 BasicShadowMap 能力。
 
 [清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
 
