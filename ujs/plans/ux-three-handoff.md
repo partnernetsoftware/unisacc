@@ -26,7 +26,9 @@ M6 阴影及面积光已补切片。Basic、PCF、PCFSoft、VSM 都经 GPU 深�
 
 燃尽表入口为 `sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --write`，随后运行 `--check`。加 `--check --mutate` 模拟撤掉方法覆盖，须返回非零。
 
-[清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
+[清单事实表](../practice/uxe/three-r160-annotations.tsv) 记录每项的覆盖范围与待证语义。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏已有 31/214，B 栏已有 25/200。本轮目标 40 项已升格 7 项，尚余 33 项。UniformsGroup 已补继承的监听接口，GPU 统一缓冲待接入，状态仍为部分。
+
+M4 至 M6 候选 `7760ee0` 包含主线 `6c9196081a`。其 `ujs/` 与 `docs/` 字节等同受完整审查的 `582a37f`。25 个 G-math、69 个 G-struct、24 个 G-geometry 和 14 个 G-pixel 门通过。旧 UXE 聚合入口超外层 60 秒，原 10 项随后逐一串行运行全部通过。检查及回归执行入口保持原判据。
 
 ## 直接续作
 
@@ -53,4 +55,4 @@ sh ./unisacc.com tools/gen-uxe-pages.cx -- --check
 
 纹理采样反例预期非零。一次只跑一路 Chrome。向主线提合入前先合最新 origin/main，再跑 M1 至 M3 全部门、C9 至 C14、CLI、清单、UXE 回归十项、页面生成和 doc-links。集成路径只含 ujs 与重算后的 build/doc-links.tsv。
 
-交接时无待提交文件。回归入口加 `-- --wrap-mutate` 可复跑环绕反例，加 `-- --phong-light-mutate` 或 `-- --lighting-mutate` 分别复跑 Phong、Standard 的光源反例。
+StereoCamera 的缓存语义实验仅存于 `/tmp/cdx2-burndown-rework.patch`，复用时只取 `stereocamera.ujs`、`stereocamera-r160.html` 与 `stereocamera-struct.cx` 三个同名路径。旧 9 项通过，扩展用例第 0 项曾读到 0，期望 0.5。先逐个读回投影缓存命中、左右眼偏移和调用结束后的记录字段，再考虑升格。其余按燃尽表从上向下选没有跨里程碑依赖的项。收口后按规划进入 M7，先接 Mesh 的几何、材质与对象树，再接实例、批次、LOD、点线精灵和骨骼。回归入口加 `-- --wrap-mutate` 可复跑环绕反例，加 `-- --phong-light-mutate` 或 `-- --lighting-mutate` 分别复跑 Phong、Standard 的光源反例。
