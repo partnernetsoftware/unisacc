@@ -65,7 +65,7 @@
 - CompressedTextureLoader | G-io compressedtextureloader-io.cx：DXT1、DXT3 与 DXT5 单级块长度和发布；完整容器、mip 链及 GPU 上传待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - CubeTextureLoader | G-io cubetextureloader-io.cx：按约定装六面、任一坏面导致全批不发布；其余图像格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - DataTextureLoader | G-io datatextureloader-io.cx：解析方交付 RGBA8 后检查长度与线性采样；其他数据格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
-- ImageLoader | G-io 文件响应到 Wasm PNG 或基线 JPEG 的 RGBA 输出。PNG 其他色型、渐进 JPEG、缓存及通用加载配置待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
+- ImageLoader | G-io 文件响应到 Wasm PNG、基线及渐进 JPEG 的 RGBA 输出。PNG 其余色型、JPEG 非 YCbCr 彩色模式、缓存及通用加载配置待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - TextureLoader | G-io textureloader-io.cx：连续图像到 GPU 纹理描述、默认采样；上传调度与异步资源接线待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - WebGL3DRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照三维纹理第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - WebGLArrayRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照二维纹理数组第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
@@ -195,7 +195,7 @@
 - ~~JPEG 渐进 AC 细化 | G-io 新系数、符号、ZRL、EOBRUN 与浏览器像素 | 渐进频带首传。~~ 16 项通过，AC 细化反例由 161 变为 150，DC 反例仍红。
 - ~~JPEG 灰度渐进解码 | G-io 多次扫描、逐次逼近、重启与坏序号 | 渐进扫描频带与重启间隔。~~ 11 项通过，翻转 AC 细化位反例转红。
 - ~~JPEG 彩色渐进解码 | G-io 交错 DC、分量 AC 扫描、色度采样与坏序号 | 灰度渐进、彩色基线与重启间隔。~~ 11 项通过，跨块坐标替换反例由 129 变为 128。
-- ImageLoader 渐进 JPEG 分派 | G-io 灰度和彩色渐进文件响应，失败保持输出 | 渐进 JPEG 解码。
+- ~~ImageLoader 渐进 JPEG 分派 | G-io 灰度和彩色渐进文件响应，失败保持输出 | 渐进 JPEG 解码。~~ 灰度 13 项、彩色 14 项通过，两个步长篡改反例转红。
 - JPEG 编码与 ImageUtils 接线 | G-io Canvas 大图分支、PNG/JPEG URI 及有损误差 | JPEG 彩色与 ImageUtils PNG。
 - PNG 调色板、透明色键及隔行 | G-io 色型、透明度、Adam7 与坏文件 | PNG 解码和扫描行。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。

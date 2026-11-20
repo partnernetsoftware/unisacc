@@ -53,33 +53,6 @@ native function jpeg_progressive_layout(frame:i64,records:i64,memory:i64,end:i64
   return sampling;
 }
 
-native function jpeg_progressive_dc_unit(reader:i64,rec:i64,table:i64,level:i64,mx:i64,my:i64) i64 {
-  let h=ux_u32(rec+JpegProgressComponent.horizontal);
-  let v=ux_u32(rec+JpegProgressComponent.vertical);
-  let width=ux_u32(rec+JpegProgressComponent.stride);
-  let coeff=ux_u32(rec+JpegProgressComponent.coeff);
-  let predictor=ux_i32(rec+JpegProgressComponent.dc);
-  let y=0;
-  while(y<v) {
-    let x=0;
-    while(x<h) {
-      let at=coeff+256*((my*v+y)*width+mx*h+x);
-      if(level<16) {
-        let next=jpeg_progressive_dc_first(reader,table,predictor,level,at);
-        if(next<0) { return next; }
-        predictor=next-65536;
-      } else {
-        let refined=jpeg_progressive_dc_refine(reader,level%16,at);
-        if(refined<0) { return refined; }
-      }
-      x=x+1;
-    }
-    y=y+1;
-  }
-  let saved=ux_i32_put(rec+JpegProgressComponent.dc,predictor);
-  return 0;
-}
-
 native function jpeg_progressive_interleaved(reader:i64,scanRecords:i64,count:i64,cols:i64,rows:i64,level:i64,interval:i64) i64 {
   let i=0;
   while(i<cols*rows) {
@@ -90,9 +63,28 @@ native function jpeg_progressive_interleaved(reader:i64,scanRecords:i64,count:i6
     let j=0;
     while(j<count) {
       let rec=ux_u32(scanRecords+8*j);
-      if(i==0 || (interval>0 && i%interval==0)) { let reset=ux_u32_put(rec+JpegProgressComponent.dc,0); }
-      let unit=jpeg_progressive_dc_unit(reader,rec,ux_u32(scanRecords+8*j+4),level,i%cols,i/cols);
-      if(unit<0) { return unit; }
+      let table=ux_u32(scanRecords+8*j+4);
+      let h=ux_u32(rec+JpegProgressComponent.horizontal);
+      let v=ux_u32(rec+JpegProgressComponent.vertical);
+      let width=ux_u32(rec+JpegProgressComponent.stride);
+      let coeff=ux_u32(rec+JpegProgressComponent.coeff);
+      let predictor=ux_i32(rec+JpegProgressComponent.dc);
+      if(i==0 || (interval>0 && i%interval==0)) { predictor=0; }
+      let base=coeff+256*(i/cols*v*width+i%cols*h);
+      let tile=0;
+      while(tile<h*v) {
+        let at=base+256*(tile/h*width+tile%h);
+        if(level<16) {
+          let next=jpeg_progressive_dc_first(reader,table,predictor,level,at);
+          if(next<0) { return next; }
+          predictor=next-65536;
+        } else {
+          let refined=jpeg_progressive_dc_refine(reader,level%16,at);
+          if(refined<0) { return refined; }
+        }
+        tile=tile+1;
+      }
+      let saved=ux_i32_put(rec+JpegProgressComponent.dc,predictor);
       j=j+1;
     }
     i=i+1;
