@@ -40,6 +40,7 @@ int g_math_sample(const char *source, const char *wasm, const char *library,
     size_t n = 0;
     int rc = cx_runv_timeout(args, 6, &out, &n);
     long at = !rc && out ? tx_find(out, n, marker, sizeof marker - 1) : -1;
+    if(at<0) printf("G_MATH_SAMPLE compiler_rc=%d bytes=%ld\n",rc,(long)n);
     if (at >= 0) {
         char *p = out + at + sizeof marker - 1;
         *value = tx_strtod(p, &end);
@@ -53,9 +54,11 @@ int g_math_near(double a, double b, double tolerance) {
     return a - b <= tolerance && b - a <= tolerance;
 }
 
-int g_math_run_range(const char *name, const char *fixture, const char *const *modules,
+typedef int (*g_math_oracle_fn)(const char *,double *,int,const char *);
+
+static int g_math_run_oracle_range(const char *name, const char *fixture, const char *const *modules,
                const char *setup, const char *const *cases, const double *gold,
-               int count, int first, int limit, int mutate_index, const char *mutation) {
+               int count, int first, int limit, int mutate_index, const char *mutation,g_math_oracle_fn oracle) {
     char library[96000]={0};
     int used=0;
     if(count<=0 || count>100 || first<0 || limit<=first || limit>count) return 2;
@@ -79,7 +82,7 @@ int g_math_run_range(const char *name, const char *fixture, const char *const *m
     tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
     double refs[100]={0};
-    int failed=g_math_reference(fixture,refs,count,dir);
+    int failed=oracle(fixture,refs,count,dir);
     for(int i=first;!failed && i<limit;i++) {
         double actual=0;
         const char *statement=i==mutate_index?mutation:cases[i];
@@ -96,6 +99,18 @@ int g_math_run_range(const char *name, const char *fixture, const char *const *m
     mm_free(out);
     printf("%s cases=%d failed=%d\n",name,limit-first,failed);
     return failed;
+}
+
+int g_math_run_range(const char *name, const char *fixture, const char *const *modules,
+               const char *setup, const char *const *cases, const double *gold,
+               int count, int first, int limit, int mutate_index, const char *mutation) {
+    return g_math_run_oracle_range(name,fixture,modules,setup,cases,gold,count,first,limit,mutate_index,mutation,g_math_reference);
+}
+
+int g_math_run_oracle(const char *name, const char *fixture, const char *const *modules,
+               const char *setup, const char *const *cases, const double *gold,
+               int count, int mutate_index, const char *mutation,g_math_oracle_fn oracle) {
+    return g_math_run_oracle_range(name,fixture,modules,setup,cases,gold,count,0,count,mutate_index,mutation,oracle);
 }
 
 int g_math_run(const char *name, const char *fixture, const char *const *modules,
