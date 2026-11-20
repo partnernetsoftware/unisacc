@@ -24,7 +24,8 @@
 - ~~AnimationUtils f32 子片段装配 | G-anim 多轨道截取、统一时间原点、持续时间和输入不变 | 帧范围、AnimationClip 与 KeyframeTrack。~~ 9 项通过，按各轨道平移的反例转红。
 - AnimationUtils 非数值子片段 | G-anim 布尔和字符串轨道保留类型和值 | 非数值轨道统一装配。
 - ~~AnimationUtils 数值轨道加法差量 | G-anim 数值参考值、分量、溢出与原数据不变 | 样本布局。~~ 8 项通过，分量替换反例转红。
-- AnimationUtils 完整加法转换及数组工具 | G-anim convertArray、isTypedArray、flattenJSON、makeClipAdditive，验证各类型与 r160 | 样本布局、类型视图与混合器。
+- ~~AnimationUtils 四元数轨道加法差量 | G-anim r160 对照参考四元数归一化、乘法次序和非法跨度 | f32 四元数样本与 Quaternion。~~ 7 项通过，反转乘法顺序反例转红。
+- AnimationUtils 整片段加法与数组工具 | G-anim convertArray、isTypedArray、flattenJSON、makeClipAdditive，验证各类型与 r160 | 样本布局、类型视图与混合器。
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
 - CubicInterpolant | G-anim cubicinterpolant-anim.cx：两端自然、零斜率、环绕三种设置与越界夹取；区间缓存和通用缓冲类型待补。补齐 constructor,intervalChanged_,interpolate_,getSettings_,copySampleValue_，运行独立金值及 r160 篡改门 | -
