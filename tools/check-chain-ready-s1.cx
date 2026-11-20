@@ -1,4 +1,4 @@
-/* tools/check-chain-ready-s1.cx -- fixtures for chain-ready items 12-root-files, 13-snap-cache, 14-root-record
+/* tools/check-chain-ready-s1.cx -- fixtures for chain-ready items 12-root-files, 12p-preflight-entry, 13-snap-cache, 14-root-record
  * (the 0.0.81 start failures: symlinked worktree product files, a snapshot that froze the symlinks, a stale
  * build record).  Every fixture lives in a private temp dir with HOME pointed into it, so the snapshot cache
  * path (cxlib.chainroot cr_snap) is a fixture too; the real cache is never read or written.
@@ -82,6 +82,21 @@ int main(void) {
     cx_fmt(p2, sizeof p2, "%s/unisacc.com", w); sy_unlink(p2); cx_fmt(p1, sizeof p1, "%s/unisacc.com", g); sy_symlink(p1, p2);
     rc = ready(w, "12", out, sizeof out);
     ck(rc != 0 && has(out, "12-root-files\tFAIL") && has(out, "worktree-root-file-not-regular") && has(out, "kind=symlink") && has(out, "fix: cp") && has(out, "READY\tno"), "red-symlink-worktree", out);
+    /* 12p-preflight-entry (0.0.86 start 1 and 2): green on the good root, red without build.json and on a symlinked one */
+    rc = ready(g, "12p", out, sizeof out);
+    ck(rc == 0 && has(out, "12p-preflight-entry\tPASS") && has(out, "READY\tyes"), "green-12p-preflight-entry", out);
+    {   char nj[400], sj[400];
+        cx_fmt(nj, sizeof nj, "%s/nojson", tmpd); mkroot(nj, COMMIT, 0);
+        cx_fmt(p2, sizeof p2, "%s/unisacc.com.build.json", nj); sy_unlink(p2);
+        rc = ready(nj, "12p", out, sizeof out);
+        ck(rc != 0 && has(out, "12p-preflight-entry\tFAIL") && has(out, "preflight-entry-build-json") && has(out, "kind=missing") && has(out, "fix: cp --remove-destination -L") && has(out, "READY\tno\tfailed=12p-preflight-entry"), "red-12p-missing-build-json", out);
+        cx_fmt(sj, sizeof sj, "%s/symjson", tmpd); mkroot(sj, COMMIT, 0);
+        cx_fmt(p2, sizeof p2, "%s/unisacc.com.build.json", sj); sy_unlink(p2); cx_fmt(p1, sizeof p1, "%s/unisacc.com.build.json", g); sy_symlink(p1, p2);
+        rc = ready(sj, "12p", out, sizeof out);
+        ck(rc != 0 && has(out, "12p-preflight-entry\tFAIL") && has(out, "kind=symlink") && has(out, "READY\tno"), "red-12p-symlink-build-json", out);
+        rc = ready(nj, "12", out, sizeof out);
+        ck(rc != 0 && has(out, "12-root-files\tFAIL") && has(out, "12p-preflight-entry\tFAIL") && has(out, "failed=12-root-files,12p-preflight-entry"), "red-only-12-runs-both-for-bg-candidate", out);
+    }
     /* red 2: snapshot that froze a symlink (ROOT itself fixed) */
     cx_fmt(s, sizeof s, "%s/snapfrozen", tmpd); mkroot(s, COMMIT, 0);
     snapdir(s, snap, sizeof snap);

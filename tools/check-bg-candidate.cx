@@ -12,6 +12,9 @@
  *     and the seal exist, status says DONE with the APE sha; a chain that exits non-zero is FAILED
  *     with its rc; a chain that outlives deadline plus slack is killed, recorded as such, and its
  *     process is gone; a bad revision and a relative --chain are usage errors;
+ *     start first runs tools/chain-ready.cx --only 12 on ROOT: a Root without unisacc.com.build.json
+ *     (0.0.86 start 1) and a Root whose unisacc.com is a symbolic link (0.0.86 start 2) are refused
+ *     before any candidate directory exists, each naming its failed item and the cp -L fix;
  * (2) status: DONE with the APE sha, UNOWNED, ORPHANED, FAILED for a missing phase and for a
  *     blocker after the terminal row, the phase counts, and the single-revision form;
  * (3) promote --check: a complete candidate is accepted and its APE path and sha, source SID and
@@ -296,6 +299,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (sy_mkdir(fxroot, 0755) || join(dir, fxroot, "build") || sy_mkdir(dir, 0755) || put(fxroot, "build/chain-phases.tsv", PLAN) ||
+        put(fxroot, "unisacc.com", "fixture-ape\n") || put(fxroot, "unisacc.com.build.json", "{}\n") ||
         put(fxroot, "build/chain-phase-fallthrough.tsv", FALLTHROUGH) || sha_text("fake-ape", ape)) {
         sy_printf("FAIL\tbgc.fixture-prepare\n");
         return 1;
@@ -362,6 +366,26 @@ int main(int argc, char **argv) {
     rc = tool(b1, "start", "--rev", "abc", "--chain", self, 0);
     rc2 = tool(b1, "start", "--rev", REV_D, "--chain", "fake-chain.native", 0);
     ck(rc == 2 && rc2 == 2 && !present(b1, REV_D) && tool(b1, "start", 0, 0, 0, 0, 0) == 2 && tool(b1, "frobnicate", 0, 0, 0, 0, 0) == 2, "start-usage-rc2");
+    /* start preflight: the two Root shapes that refused the 0.0.86 chain starts */
+    {   char keep[P], bad[P], bp[P], ln[P], tgt[P];
+        if (cx_fmt(keep, sizeof keep, "%s", fxroot) || join(bad, work, "root-nojson") || join(bp, work, "bpre") || sy_mkdir(bad, 0755) ||
+            put(bad, "unisacc.com", "fixture-ape\n") || join(ln, bad, "build") || sy_mkdir(ln, 0755) || put(bad, "build/chain-phases.tsv", PLAN)) return 2;
+        cx_fmt(fxroot, sizeof fxroot, "%s", bad);
+        rc = start(bp, REV_D, "ok", "30", "5");
+        ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1 &&
+           lines("BG_CANDIDATE\tREFUSE-ITEM\t12p-preflight-entry\tFAIL\tREADY=no preflight-entry-build-json", 0, 0, 0) == 1 && !present(bp, REV_D),
+           "start-refuses-root-without-build-json");
+        if (join(bad, work, "root-symlink") || sy_mkdir(bad, 0755) || put(bad, "unisacc.com.build.json", "{}\n") ||
+            join(ln, bad, "unisacc.com") || join(tgt, keep, "unisacc.com") || sy_symlink(tgt, ln) ||
+            join(ln, bad, "build") || sy_mkdir(ln, 0755) || put(bad, "build/chain-phases.tsv", PLAN)) return 2;
+        cx_fmt(fxroot, sizeof fxroot, "%s", bad);
+        rc = start(bp, REV_D, "ok", "30", "5");
+        ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1 &&
+           lines("BG_CANDIDATE\tREFUSE-ITEM\t12-root-files\tFAIL\tREADY=no worktree-root-file-not-regular", 0, 0, 0) == 1 &&
+           lines("BG_CANDIDATE\tREFUSE-ITEM\t12p-preflight-entry", 0, 0, 0) == 0 && !present(bp, REV_D),
+           "start-refuses-root-with-symlink-ape");
+        cx_fmt(fxroot, sizeof fxroot, "%s", keep);
+    }
 
     /* (2) status on written candidates */
     rc = good(b2, REV_A, 100);
