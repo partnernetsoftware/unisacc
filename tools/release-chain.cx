@@ -3,6 +3,8 @@
  *   sh ./unisacc.com tools/release-chain.cx -- run --inputs FILE --state ABS_DIR --layout DIR
  *        [--decisions FILE] [--from N]
  *   sh ./unisacc.com tools/release-chain.cx -- plan --inputs FILE --state ABS_DIR --layout DIR [--decisions FILE]
+ *   sh ./unisacc.com tools/release-chain.cx -- retry-ci --version V --run-id ID --evidence-dir DIR
+ *        --candidate FILE [--tag TAG] [--gh BIN] [--dry]
  *
  * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
  *   1 prep         release-flow prep --inputs F --out STATE/prep [--decisions D]
@@ -169,8 +171,203 @@ static void stage_commit(void) {
     }
     sy_printf("CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv (X_PUSHED ok)\n");
 }
+/* ---- retry-ci: idempotent recovery after a failed CI run without rewriting main history or deleting tags ---- */
+static int is_digits(const char *s) {
+    if (!s || !s[0]) return 0;
+    for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return 0;
+    return 1;
+}
+static int retry_reset_candidate(const char *candp, int dry) {
+    size_t n = 0; char *s = cx_read(candp, &n);
+    if (!s || !n) usage("candidate unreadable");
+    char *nl = strchr(s, '\n');
+    if (!nl || !nl[1]) { free(s); usage("candidate needs header + data row"); }
+    /* Find ci_run_id column index in header */
+    int ci_col = -1, col = 0;
+    for (char *p = s; p < nl; ) {
+        char *t = memchr(p, '\t', (size_t)(nl - p));
+        size_t len = t ? (size_t)(t - p) : (size_t)(nl - p);
+        if (len == 9 && !memcmp(p, "ci_run_id", 9)) { ci_col = col; break; }
+        if (!t) break;
+        p = t + 1; col++;
+    }
+    if (ci_col < 0) { free(s); usage("candidate missing ci_run_id column"); }
+    /* Locate ci_run_id field in row 2 */
+    char *row = nl + 1, *rend = strchr(row, '\n');
+    if (!rend) rend = s + n;
+    char *fp = row, *fe = rend; col = 0;
+    while (col < ci_col && fp < rend) {
+        char *t = memchr(fp, '\t', (size_t)(rend - fp));
+        if (!t) { free(s); usage("candidate row too few columns"); }
+        fp = t + 1; col++;
+    }
+    char *nt = memchr(fp, '\t', (size_t)(rend - fp));
+    if (nt) fe = nt;
+    size_t fl = (size_t)(fe - fp);
+    if (fl == 1 && fp[0] == '0') {
+        sy_printf("RETRY_CI\tCANDIDATE\tskip\tci_run_id=0\n");
+        free(s); return 0;
+    }
+    if (dry) {
+        sy_printf("RETRY_CI\tCANDIDATE\tdry\told=%.*s\tnew=0\n", (int)fl, fp);
+        free(s); return 0;
+    }
+    size_t outn = n - fl + 1;
+    char *out = malloc(outn + 1);
+    if (!out) { free(s); usage("oom"); }
+    size_t pref = (size_t)(fp - s), suff = n - (size_t)(fe - s);
+    mm_copy(out, outn + 1, s, pref);
+    out[pref] = '0';
+    mm_copy(out + pref + 1, outn - pref, fe, suff);
+    out[outn] = 0;
+    if (sy_write_atomic(candp, out, outn, 0644) != 0) { free(out); free(s); usage("candidate write"); }
+    sy_printf("RETRY_CI\tCANDIDATE\treset\told=%.*s\tnew=0\n", (int)fl, fp);
+    free(out); free(s);
+    return 0;
+}
+static void retry_archive_pair(const char *evdir, const char *src_leaf, const char *dst_leaf, int dry) {
+    char *sp = cat2(evdir, src_leaf), *dp = cat2(evdir, dst_leaf);
+    int hs = (sy_exists(sp) == 1), hd = (sy_exists(dp) == 1);
+    if (hs && !hd) {
+        if (dry) sy_printf("RETRY_CI\tARCHIVE\tdry\t%s -> %s\n", src_leaf, dst_leaf);
+        else if (sy_rename(sp, dp) != 0) { free(sp); free(dp); usage("archive rename failed"); }
+        else sy_printf("RETRY_CI\tARCHIVE\trenamed\t%s -> %s\n", src_leaf, dst_leaf);
+    } else if (!hs && hd) {
+        sy_printf("RETRY_CI\tARCHIVE\tskip\talready=%s\n", dst_leaf);
+    } else if (hs && hd) {
+        sy_printf("RETRY_CI\tARCHIVE\tskip\tboth-exist=%s\n", dst_leaf);
+    } else {
+        sy_printf("RETRY_CI\tARCHIVE\tabsent\t%s\n", src_leaf);
+    }
+    free(sp); free(dp);
+}
+static void retry_clean_index(const char *evdir, const char *run_id, int dry) {
+    char *idxp = cat2(evdir, "INDEX.tsv");
+    if (sy_exists(idxp) != 1) { sy_printf("RETRY_CI\tINDEX\tabsent\tINDEX.tsv\n"); free(idxp); return; }
+    size_t n = 0; char *s = cx_read(idxp, &n);
+    if (!s) { free(idxp); usage("INDEX.tsv unreadable"); }
+    char *kept = malloc(n + 2), *rem = malloc(n + 2);
+    if (!kept || !rem) { free(s); free(idxp); usage("oom"); }
+    size_t kn = 0, rn = 0; int removed = 0;
+    char *p = s, *end = s + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p + 1) : (size_t)(end - p);
+        int is_exec13 = (!strncmp(p, "exec-1-", 7) || !strncmp(p, "exec-2-", 7) || !strncmp(p, "exec-3-", 7));
+        if (is_exec13) { mm_copy(rem + rn, n + 2 - rn, p, ll); rn += ll; removed++; }
+        else { mm_copy(kept + kn, n + 2 - kn, p, ll); kn += ll; }
+        p += ll;
+    }
+    if (removed == 0) {
+        sy_printf("RETRY_CI\tINDEX\tskip\tno exec-1..3 rows\n");
+    } else if (dry) {
+        sy_printf("RETRY_CI\tINDEX\tdry\tremoved=%d\n", removed);
+    } else {
+        char bkleaf[96]; cx_fmt(bkleaf, sizeof bkleaf, "index-failed-%s.tsv", run_id);
+        char *bkp = cat2(evdir, bkleaf);
+        if (sy_write_atomic(bkp, rem, rn, 0644) != 0 || sy_write_atomic(idxp, kept, kn, 0644) != 0) {
+            free(bkp); free(kept); free(rem); free(s); free(idxp); usage("INDEX.tsv write failed");
+        }
+        sy_printf("RETRY_CI\tINDEX\tcleaned\tremoved=%d\tbackup=%s\n", removed, bkleaf);
+        free(bkp);
+    }
+    free(kept); free(rem); free(s); free(idxp);
+}
+static int cmd_retry_ci(int argc, char **argv) {
+    const char *ver = 0, *run_id = 0, *evdir = 0, *cand = 0, *tag = 0, *gh = "gh";
+    int dry = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--dry")) { dry = 1; continue; }
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--version")) ver = v;
+        else if (!strcmp(k, "--run-id")) run_id = v;
+        else if (!strcmp(k, "--evidence-dir")) evdir = v;
+        else if (!strcmp(k, "--candidate")) cand = v;
+        else if (!strcmp(k, "--tag")) tag = v;
+        else if (!strcmp(k, "--gh")) gh = v;
+        else usage(k);
+        i++;
+    }
+    if (!ver || !is_digits(run_id) || !evdir || !cand) usage("retry-ci needs --version V --run-id DIGITS --evidence-dir DIR --candidate FILE");
+    char tagbuf[64];
+    if (!tag) { if (cx_fmt(tagbuf, sizeof tagbuf, "v%s", ver)) usage("tag"); tag = tagbuf; }
+    if (sy_cwd(cwd, sizeof cwd) < 0) usage("cwd");
+
+    /* (a) Preserve old stage-a commit on main (never rewrite history) */
+    sy_printf("RETRY_CI\tKEEP_HISTORY\tok\told stage-a commit preserved on main\n");
+
+    /* (b) Reset candidate ci_run_id back to 0 */
+    retry_reset_candidate(cand, dry);
+
+    /* (c) Archive failed CI logs and draft readback (preserve as evidence) */
+    char s1[96], d1[96], s2[96], d2[96], d3[96];
+    cx_fmt(s1, sizeof s1, "ci-%s.json", run_id); cx_fmt(d1, sizeof d1, "ci-failed-%s.json", run_id);
+    cx_fmt(s2, sizeof s2, "ci-%s.log", run_id);  cx_fmt(d2, sizeof d2, "ci-failed-%s.log", run_id);
+    cx_fmt(d3, sizeof d3, "draft-readback-failed-%s.txt", run_id);
+    retry_archive_pair(evdir, s1, d1, dry);
+    retry_archive_pair(evdir, s2, d2, dry);
+    retry_archive_pair(evdir, "draft-readback.txt", d3, dry);
+
+    /* (d) Clean old exec-1..3 rows from INDEX.tsv with backup */
+    retry_clean_index(evdir, run_id, dry);
+
+    /* (e) Write rollback note before deleting draft release (only if isDraft=true; never delete tag) */
+    char rbleaf[96], rbtxt[512];
+    cx_fmt(rbleaf, sizeof rbleaf, "retry-ci-rollback-%s.txt", run_id);
+    char *rbp = cat2(evdir, rbleaf);
+    cx_fmt(rbtxt, sizeof rbtxt,
+           "# retry-ci rollback note\nversion=%s\ntag=%s\nfailed_run_id=%s\n"
+           "action=delete-draft-release-only (tag preserved; old main commit preserved; evidence archived as ci-failed-%s.*)\n"
+           "rollback=re-create draft via release-exec --execute after stage-a\n",
+           ver, tag, run_id, run_id);
+    if (!dry) {
+        if (sy_write_atomic(rbp, rbtxt, strlen(rbtxt), 0644) != 0) { free(rbp); usage("rollback note write"); }
+        sy_printf("RETRY_CI\tROLLBACK_NOTE\twritten\t%s\n", rbleaf);
+    } else {
+        sy_printf("RETRY_CI\tROLLBACK_NOTE\tdry\t%s\n", rbleaf);
+    }
+    free(rbp);
+
+    char *viewv[] = {(char *)gh, "release", "view", (char *)tag, "--json", "isDraft", 0};
+    np_result r = {0}; char why[128];
+    int vbad = np_run(viewv, cwd, 0, 30, &r, why, sizeof why);
+    if (vbad || r.rc != 0) {
+        sy_printf("RETRY_CI\tDRAFT\tskip\tabsent\ttag=%s\n", tag);
+        np_free(&r);
+    } else if (r.out && strstr(r.out, "\"isDraft\":false")) {
+        sy_printf("RETRY_CI\tFAIL\tdraft\tREFUSE non-draft release %s\n", tag);
+        np_free(&r);
+        return 1;
+    } else if (!r.out || !strstr(r.out, "\"isDraft\":true")) {
+        sy_printf("RETRY_CI\tFAIL\tdraft\tREFUSE unrecognized gh release view output for %s\n", tag);
+        np_free(&r);
+        return 1;
+    } else {
+        np_free(&r);
+        if (dry) {
+            sy_printf("RETRY_CI\tDRAFT\tdry\twould-delete-draft\ttag=%s\n", tag);
+        } else {
+            char *delv[] = {(char *)gh, "release", "delete", (char *)tag, "--yes", 0};
+            if (np_run(delv, cwd, 0, 30, &r, why, sizeof why) || r.rc != 0) {
+                sy_printf("RETRY_CI\tFAIL\tdraft\tgh release delete failed rc=%d\n", r.rc);
+                np_free(&r);
+                return 1;
+            }
+            np_free(&r);
+            sy_printf("RETRY_CI\tDRAFT\tdeleted\ttag=%s\ttag_kept=1\n", tag);
+        }
+    }
+
+    /* (f) Print resume commands */
+    sy_printf("RETRY_CI\tNEXT\tre-run release-chain run --inputs ... --state ... --layout ... (prep, stage-a, stage-commit --push, stage-dry), then execute\n");
+    sy_printf("RETRY_CI\tRESULT\tOK\tversion=%s\trun_id=%s\tdry=%d\n", ver, run_id, dry);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan");
+    if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci");
     planning = !strcmp(argv[1], "plan");
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;

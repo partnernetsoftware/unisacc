@@ -121,6 +121,49 @@ int main(int argc, char **argv) {
         ck(has(&r, "CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv (X_PUSHED ok)") && !has(&r, "X_PUSHED)"), "stage-commit-passes-after-push");
         np_free(&r);
     }
+    /* (5b) retry-ci: dry mode, real recovery with fake gh + fake evidence, idempotent rerun, non-draft refusal, bad run-id */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/rci; mkdir -p \"$T/ev\" && "
+            "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\n"
+            "o/r\\tv0.0.99\\tabc\\t0.0.99\\tw.yml\\tv0.0.99\\t44772879607\\tu.com\\n' > \"$T/cand.tsv\" && "
+            "printf 'j\\n' > \"$T/ev/ci-44772879607.json\" && printf 'l\\n' > \"$T/ev/ci-44772879607.log\" && "
+            "printf 'd\\n' > \"$T/ev/draft-readback.txt\" && "
+            "printf 'prefreeze-strict\\tt\\tPASS\\ts\\tn\\nexec-1-X-commit\\tt\\t-\\tx\\tn\\nexec-2-draft-readback\\tt\\tPASS\\td\\tn\\nexec-3-ci\\tt\\tFAIL\\t44772879607\\tn\\n' > \"$T/ev/INDEX.tsv\" && "
+            "printf '#!/bin/sh\\necho \"$*\" >> \"%s/rci/gh.log\"\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = view ]; then [ -f \"%s/rci/deleted\" ] && exit 1; printf \"{\\\\\"isDraft\\\\\":true}\\\\n\"; exit 0; fi\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = delete ]; then : > \"%s/rci/deleted\"; exit 0; fi\\nexit 2\\n' > \"$T/gh-draft.sh\" && chmod +x \"$T/gh-draft.sh\" && "
+            "printf '#!/bin/sh\\necho \"$*\" >> \"%s/rci/gh-pub.log\"\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = view ]; then printf \"{\\\\\"isDraft\\\\\":false}\\\\n\"; exit 0; fi\\nexit 2\\n' > \"$T/gh-pub.sh\" && chmod +x \"$T/gh-pub.sh\" && "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\" --dry; echo DRYRC=$?; "
+            "grep -q '44772879607' \"$T/cand.tsv\" && echo DRY_KEPT=1; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\"; echo RUNRC=$?; "
+            "grep -q '\t0\tu.com' \"$T/cand.tsv\" && echo CAND_ZERO=1; "
+            "test -f \"$T/ev/ci-failed-44772879607.json\" && test -f \"$T/ev/ci-failed-44772879607.log\" && test -f \"$T/ev/draft-readback-failed-44772879607.txt\" && test -f \"$T/ev/index-failed-44772879607.tsv\" && test -f \"$T/ev/retry-ci-rollback-44772879607.txt\" && echo FILES_OK=1; "
+            "! grep -q '^exec-' \"$T/ev/INDEX.tsv\" && grep -q '^prefreeze-strict' \"$T/ev/INDEX.tsv\" && echo IDX_OK=1; "
+            "grep -q 'release delete v0.0.99 --yes' \"$T/gh.log\" && ! grep -q 'cleanup-tag' \"$T/gh.log\" && echo GH_OK=1; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\"; echo IDEMRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-pub.sh\"; echo PUBRC=$?; "
+            "! grep -q 'delete' \"$T/gh-pub.log\" && echo PUB_SAFE=1; "
+            "%s retry-ci --version 0.0.99 --run-id abc --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" 2>&1; echo BADIDRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\" --dry; echo ONE_DIGIT_RC=$?; "
+            "%s retry-ci --version 0.0.99 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" 2>&1; echo NOIDRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/missing.tsv\" 2>&1; echo MISSCANDRC=$?; "
+            "printf 'repo\\tci_run_id\\n' > \"$T/hdr-only.tsv\"; %s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/hdr-only.tsv\" 2>&1; echo HDRONLYRC=$?; "
+            "rm -rf \"$T\"",
+            tmp, tmp, tmp, tmp, tmp, bin, bin, bin, bin, bin, bin, bin, bin, bin);
+        char *vr[] = {"sh", "-c", cmd, 0};
+        r = actual(vr);
+        ck(has(&r, "DRYRC=0\n") && has(&r, "DRY_KEPT=1\n") && has(&r, "RETRY_CI\tDRAFT\tdry\twould-delete-draft"), "retry-ci-dry-no-mutation");
+        ck(has(&r, "RUNRC=0\n") && has(&r, "CAND_ZERO=1\n") && has(&r, "FILES_OK=1\n") && has(&r, "IDX_OK=1\n") && has(&r, "GH_OK=1\n") && has(&r, "RETRY_CI\tDRAFT\tdeleted\ttag=v0.0.99\ttag_kept=1\n"), "retry-ci-recovers-and-archives");
+        ck(has(&r, "IDEMRC=0\n") && has(&r, "RETRY_CI\tCANDIDATE\tskip\tci_run_id=0\n") && has(&r, "RETRY_CI\tINDEX\tskip\tno exec-1..3 rows\n") && has(&r, "RETRY_CI\tDRAFT\tskip\tabsent\t"), "retry-ci-idempotent-rerun");
+        ck(has(&r, "PUBRC=1\n") && has(&r, "REFUSE non-draft release v0.0.99\n") && has(&r, "PUB_SAFE=1\n"), "retry-ci-refuses-published-release");
+        ck(has(&r, "BADIDRC=2\n") && has(&r, "ONE_DIGIT_RC=0\n") && has(&r, "NOIDRC=2\n") &&
+           has(&r, "MISSCANDRC=2\n") && has(&r, "candidate unreadable") &&
+           has(&r, "HDRONLYRC=2\n") && has(&r, "candidate needs header + data row"), "retry-ci-bad-run-id-rc2");
+        np_free(&r);
+    }
     /* (5) usage */
     char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};
     r = actual(bad); ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE CHAIN_USAGE"), "missing-state-refused"); np_free(&r);
