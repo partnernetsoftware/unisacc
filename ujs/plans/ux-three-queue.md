@@ -8,7 +8,7 @@
 - ~~ShapeUtils 多孔输入边界校验 | G-struct 双孔、越界、相交和失败输出不变 | 已有多孔剖分。~~ 10 项通过，漏孔与外孔反例均转红。
 - ~~ShapeUtils 闭合重复点 | G-struct 尾点归一化与 r160 的面积、数量和紧凑索引对照 | 已有多孔剖分与边界校验。~~ 5 项通过，跳过归一化反例转红。
 - ~~ShapeUtils 双孔凹形对照 | G-struct U 形轮廓与双孔的面积、绕向及空洞 | 已有多孔剖分。~~ 4 项通过，漏掉右孔反例 12 对 18。
-- ShapeUtils 通用桥接和共线边界 | G-struct 多种凹形、共线边与多个内孔，对照 r160 面积、索引和空洞 | 已有多孔剖分与归一化。
+- ShapeUtils 通用桥接和共线边界 BLOCKED | G-struct 多种凹形、共线边与多个内孔，对照 r160 面积、索引和空洞。原输入得到 16 个三角，先删共线输入点仍得 14，r160 为 12。日志为 /tmp/devsvc-flow-21619425583-98794/out/x.out 与 /tmp/devsvc-flow-21619474165-107825/out/x.out，复现为 /tmp/cdx2-shape-collinear-rings-struct.cx 与 /tmp/cdx2-shape-collinear-rings-r160.html | 解阻需要剖分阶段处理共线桥与退化边，保留紧凑索引合同。
 - StereoCamera | G-struct StereoCamera；stereocamera-struct.cx 与 stereo-eye-record-struct.cx 对照双眼投影、局部轴、自动更新、更新缓存以及独立 Camera 和 PerspectiveCamera 镜头记录。持久子对象与双眼渲染待接。补齐 -，运行独立金值及 r160 篡改门 | -
 - UniformsGroup | G-struct UniformsGroup；uniformsgroup-struct.cx 独立金值与 r160 JSON 已对照监听去重、派发目标和移除。组序列和深拷贝资源由调用方提供，GPU 统一缓冲待接入。补齐 -，运行独立金值及 r160 篡改门 | -
 - PropertyMixer | G-anim propertymixer-anim.cx：数值加权与加法、补足原值、按帧清零；四元数和非数值待补。补齐 constructor，运行独立金值及 r160 篡改门 | -
