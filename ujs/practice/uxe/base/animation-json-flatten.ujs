@@ -1,0 +1,92 @@
+struct AnimationJsonRows {
+  times: u32;
+  values: u32;
+  rowCapacity: u32;
+  valueCapacity: u32;
+  rowCount: u32;
+  valueCount: u32;
+}
+
+native function animation_json_values(at:i64,end:i64,output:i64,capacity:i64,write:i64) i64 {
+  if(at<0 || at>=end) { return 0-1; }
+  if(ux_u8(at)!=91) {
+    let value=json_read_number(at,end);
+    if(value-value!=0.0 || capacity<1) { return 0-1; }
+    if(write!=0) { let item=ux_f64_put(output,value); }
+    return 1;
+  }
+  let cursor=json_space(at+1,end);
+  let count=0;
+  while(cursor>=0 && cursor<end && ux_u8(cursor)!=93) {
+    let value=json_read_number(cursor,end);
+    if(value-value!=0.0 || count>=capacity) { return 0-1; }
+    if(write!=0) { let item=ux_f64_put(output+count*8,value); }
+    count=count+1;
+    cursor=json_space(json_value_end(cursor,end),end);
+    if(cursor<0 || cursor>=end) { return 0-1; }
+    if(ux_u8(cursor)==44) { cursor=json_space(cursor+1,end); }
+    else if(ux_u8(cursor)!=93) { return 0-1; }
+  }
+  if(cursor<0 || cursor>=end) { return 0-1; }
+  return count;
+}
+
+native function animation_json_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n>0 && m>0 && animation_overlap(a,n,b,m);
+}
+
+// Flatten a JSON array of key records into caller-owned f64 spans. Missing
+// properties are skipped. Numeric scalars and numeric arrays follow r160.
+native function AnimationUtils_flattenJSON(input:i64,bytes:i64,key:i64,keyBytes:i64,
+                                            out:i64,work:i64) i64 {
+  if(input<0 || bytes<2 || input>6291456-bytes || key<0 || keyBytes<1 || keyBytes>255 ||
+     key>6291456-keyBytes || !animation_span(out,AnimationJsonRows.size) || !animation_span(work,4)) { return 0-1; }
+  let times=ux_u32(out+AnimationJsonRows.times);
+  let values=ux_u32(out+AnimationJsonRows.values);
+  let rows=ux_u32(out+AnimationJsonRows.rowCapacity);
+  let entries=ux_u32(out+AnimationJsonRows.valueCapacity);
+  let timeBytes=rows*8;
+  let valueBytes=entries*8;
+  if(!animation_span(times,timeBytes) || !animation_span(values,valueBytes) || times%8!=0 || values%8!=0 ||
+     animation_json_overlap(input,bytes,times,timeBytes) || animation_json_overlap(input,bytes,values,valueBytes) ||
+     animation_json_overlap(input,bytes,out,AnimationJsonRows.size) || animation_json_overlap(input,bytes,work,4) ||
+     animation_json_overlap(key,keyBytes,times,timeBytes) || animation_json_overlap(key,keyBytes,values,valueBytes) ||
+     animation_json_overlap(key,keyBytes,out,AnimationJsonRows.size) || animation_json_overlap(key,keyBytes,work,4) ||
+     animation_json_overlap(times,timeBytes,values,valueBytes) || animation_json_overlap(times,timeBytes,out,AnimationJsonRows.size) ||
+     animation_json_overlap(values,valueBytes,out,AnimationJsonRows.size) ||
+     animation_json_overlap(times,timeBytes,work,4) || animation_json_overlap(values,valueBytes,work,4) ||
+     animation_json_overlap(out,AnimationJsonRows.size,work,4)) { return 0-1; }
+  let end=input+bytes;
+  let begin=json_space(input,end);
+  let parsed=json_value_end(begin,end);
+  if(begin<0 || begin>=end || ux_u8(begin)!=91 || parsed<0 || json_space(parsed,end)!=end) { return 0-2; }
+  let timeKey=ux_u32_put(work,1701669236);
+  let pass=0;
+  let rowCount=0;
+  let valueCount=0;
+  while(pass<2) {
+    rowCount=0;
+    valueCount=0;
+    let cursor=json_space(begin+1,end);
+    while(cursor>=0 && cursor<parsed-1) {
+      if(ux_u8(cursor)!=123) { return 0-2; }
+      let after=json_value_end(cursor,end);
+      let item=json_find_key(cursor,after,key,keyBytes);
+      if(item!=0-2) {
+        let time=json_read_number(json_find_key(cursor,after,work,4),after);
+        if(time-time!=0.0 || rowCount>=rows) { return 0-3; }
+        let added=animation_json_values(item,after,values+valueCount*8,entries-valueCount,pass);
+        if(added<0) { return 0-3; }
+        if(pass!=0) { let stored=ux_f64_put(times+rowCount*8,time); }
+        rowCount=rowCount+1;
+        valueCount=valueCount+added;
+      }
+      cursor=json_space(after,end);
+      if(ux_u8(cursor)==44) { cursor=json_space(cursor+1,end); }
+    }
+    pass=pass+1;
+  }
+  let a=ux_u32_put(out+AnimationJsonRows.rowCount,rowCount);
+  let b=ux_u32_put(out+AnimationJsonRows.valueCount,valueCount);
+  return out;
+}
