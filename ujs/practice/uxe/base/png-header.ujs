@@ -1,0 +1,55 @@
+struct PngHeader {
+  width: u32;
+  height: u32;
+  depth: u32;
+  color: u32;
+  interlace: u32;
+}
+
+native function png_u32be(at:i64) i64 {
+  return ux_u8(at)*16777216+ux_u8(at+1)*65536+ux_u8(at+2)*256+ux_u8(at+3);
+}
+
+native function png_crc32(src:i64,bytes:i64) i64 {
+  let crc=4294967295;
+  let i=0;
+  while(i<bytes) {
+    crc=u32_xor(crc,ux_u8(src+i));
+    let j=0;
+    while(j<8) {
+      let low=crc%2;
+      crc=u32_shr(crc,1);
+      if(low!=0) { crc=u32_xor(crc,3988292384); }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return u32_xor(crc,4294967295);
+}
+
+// -1 is span/alias, -2 signature or chunk structure, -3 CRC, -4 format.
+native function PngHeader_probe(src:i64,bytes:i64,out:i64) i64 {
+  if(src<0 || bytes<0 || src>6291456-bytes || out<0 || out%4!=0 || out>6291456-PngHeader.size ||
+      (bytes>0 && src<out+PngHeader.size && out<src+bytes)) { return 0-1; }
+  if(bytes<33 || ux_u32(src)!=1196314761 || ux_u32(src+4)!=169478669 ||
+     png_u32be(src+8)!=13 || png_u32be(src+12)!=1229472850) { return 0-2; }
+  if(png_crc32(src+12,17)!=png_u32be(src+29)) { return 0-3; }
+  let width=png_u32be(src+16);
+  let height=png_u32be(src+20);
+  let depth=ux_u8(src+24);
+  let color=ux_u8(src+25);
+  let interlace=ux_u8(src+28);
+  if(width<1 || width>2147483647 || height<1 || height>2147483647 || ux_u8(src+26)!=0 ||
+     ux_u8(src+27)!=0 || interlace>1) { return 0-4; }
+  let valid=0;
+  if(color==0) { valid=depth==1 || depth==2 || depth==4 || depth==8 || depth==16; }
+  if(color==2 || color==4 || color==6) { valid=depth==8 || depth==16; }
+  if(color==3) { valid=depth==1 || depth==2 || depth==4 || depth==8; }
+  if(!valid) { return 0-4; }
+  let w=ux_u32_put(out+PngHeader.width,width);
+  let h=ux_u32_put(out+PngHeader.height,height);
+  let d=ux_u32_put(out+PngHeader.depth,depth);
+  let c=ux_u32_put(out+PngHeader.color,color);
+  let i=ux_u32_put(out+PngHeader.interlace,interlace);
+  return out;
+}
