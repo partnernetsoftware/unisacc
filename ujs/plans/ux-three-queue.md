@@ -59,7 +59,7 @@
 - Shape | G-struct shape-struct.cx 与 path-lifecycle-struct.cx 独立金值和 r160 对照。外轮廓和孔轮廓独立克隆并分别采样。序列化待接。补齐 toJSON,fromJSON,setFromPoints,moveTo,lineTo,quadraticCurveTo,bezierCurveTo,splineThru,arc,absarc,ellipse,absellipse,add,closePath,getPoint,getLength,updateArcLengths,getCurveLengths,getSpacedPoints,getPoints,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - Source | G-struct Source；对照版本、空源、URI、类型化图像、立方体数组和 UUID 元数据缓存。原始画布像素编码待 M9。补齐 constructor,needsUpdate,toJSON，运行独立金值及 r160 篡改门 | -
 - Loader | G-io loader-io.cx：普通路径和资源路径独立、凭据标记与超界拒绝；请求头和跨域策略待补。补齐 constructor,load,loadAsync,parse,setCrossOrigin,setRequestHeader，运行独立金值及 r160 篡改门 | -
-- AnimationLoader | G-io animationloader-io.cx：读取单数字轨道片段；多片段、多轨道及其他轨道类型待补。补齐 constructor,loadAsync,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
+- AnimationLoader | G-io 批量读取数值、向量、颜色和四元数轨道片段。布尔、字符串和通用加载配置待补。补齐 constructor,loadAsync,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - AudioLoader | G-io audioloader-io.cx：PCM16 WAV 头、采样与 r160 真时钟读回；其他格式和音频加载调度待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - BufferGeometryLoader | G-io buffergeometryloader-io.cx：读回 BufferGeometry JSON 的位置和失败状态；其他属性类型与几何元数据待补。补齐 constructor,loadAsync,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - CompressedTextureLoader | G-io compressedtextureloader-io.cx：DXT1、DXT3 与 DXT5 单级块长度和发布；完整容器、mip 链及 GPU 上传待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
@@ -202,7 +202,8 @@
 - ~~PNG Adam7 隔行 | G-io 七遍位置、过滤复位、空遍、RGB/RGBA 与调色板 | PNG 解码和调色板。~~ 16 项通过，行位置替换反例由 15 变为 30。
 - ~~PNG 灰度、透明色键与 16 位 | G-io 灰度及灰度 alpha、精度、非索引 tRNS 与坏文件 | PNG 解码和扫描行。~~ 15 项通过，比较但截掉低字节的反例由不透明变为透明，ImageLoader 七项通过。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。
-- AnimationLoader 多片段与多轨道 | G-io r160 JSON 的类型、插值、错误与回收 | M8 轨道和片段。
+- ~~AnimationLoader 多片段与数值轨道 | G-io r160 JSON 的数值、向量、颜色、四元数、帧率、插值与失败保留 | M8 轨道和片段。~~ 14 项通过，替换关键帧时间反例转红，旧七项通过。
+- AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。
 - BufferGeometryLoader 通用 JSON | G-io 索引、组、类型化、交错、变形属性与错误 | BufferGeometry、BufferAttribute。
 - MaterialLoader 材质和纹理表 | G-io r160 材质 JSON、纹理引用和坏类型 | M5 材质和纹理。
 - ObjectLoader 两阶段整景 | G-io 子树、几何、材质、图像引用及失败回退 | BufferGeometryLoader、MaterialLoader、图像加载。

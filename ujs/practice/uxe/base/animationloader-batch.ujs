@@ -1,0 +1,133 @@
+// KeyframeTrack occupies the prefix. Kind travels with the handle so the
+// consumer can select the numeric, color or quaternion interpolant.
+struct AnimationLoadedTrack {
+  name: u32;
+  nameBytes: u32;
+  samples: u32;
+  interpolation: u32;
+  kind: u32;
+}
+
+native function animation_json_count(array:i64,end:i64,limit:i64) i64 {
+  if(array<0 || array>=end || ux_u8(array)!=91) { return 0-1; }
+  let item=json_space(array+1,end);
+  let total=0;
+  while(item>=0 && item<end) {
+    if(ux_u8(item)==93) { return total; }
+    if(total>=limit || ux_u8(item)!=123) { return 0-1; }
+    total=total+1;
+    let next=json_space(json_value_end(item,end),end);
+    if(next<0 || next>=end) { return 0-1; }
+    if(ux_u8(next)==93) { return total; }
+    if(ux_u8(next)!=44) { return 0-1; }
+    item=json_space(next+1,end);
+  }
+  return 0-1;
+}
+
+native function animation_json_track_kind(text:i64,end:i64) i64 {
+  let stop=json_scan_string(text,end);
+  if(stop<0 || stop-text<6) { return 0-1; }
+  let length=stop-text-2;
+  let head=ux_u32(text+1);
+  if(length==6 && head==1651340654 && ux_u8(text+5)==101 && ux_u8(text+6)==114) { return 1; }
+  if(length==6 && head==1952671094 && ux_u8(text+5)==111 && ux_u8(text+6)==114) { return 2; }
+  if(length==5 && head==1869377379 && ux_u8(text+5)==114) { return 3; }
+  if(length==10 && head==1952544113 && ux_u32(text+5)==1768845925 && ux_u8(text+9)==111 && ux_u8(text+10)==110) { return 4; }
+  return 0-1;
+}
+
+native function animation_batch_track(obj:i64,end:i64,scratch:i64,track:i64,fps:f64) i64 {
+  let kind=animation_json_track_kind(LoaderJson_find(obj,end,scratch,1701869940,0,0,4),end);
+  if(kind<1) { return 0-3; }
+  let name=track+40;
+  let nameBytes=animation_json_name(LoaderJson_find(obj,end,scratch,1701667182,0,0,4),end,name);
+  if(nameBytes<1) { return 0-3; }
+  let times=track+104;
+  let values=track+360;
+  let count=animation_json_array(LoaderJson_find(obj,end,scratch,1701669236,115,0,5),end,times);
+  let valueCount=animation_json_array(LoaderJson_find(obj,end,scratch,1970037110,29541,0,6),end,values);
+  if(count<1 || valueCount<1 || valueCount%count!=0) { return 0-3; }
+  let lanes=valueCount/count;
+  if((kind==1 && lanes!=1) || (kind==3 && lanes!=3) || (kind==4 && lanes!=4)) { return 0-3; }
+  let i=0;
+  while(i<count) {
+    let at=times+i*4;
+    let scaled=ux_f32_put(at,ux_f32(at)*(1.0/fps));
+    i=i+1;
+  }
+  let view=AnimationSamples_init(track+24,times,values,count,lanes);
+  if(view<0 || KeyframeTrack_init(track,name,nameBytes,view)<0) { return 0-3; }
+  let saved=ux_u32_put(track+AnimationLoadedTrack.kind,kind);
+  // interpolation: the core accepts an optional mode and preserves its
+  // default when r160 ignores a mode unsupported by this track type.
+  let tail=ux_u8_put(scratch+12,110);
+  let mode=LoaderJson_number(LoaderJson_find(obj,end,scratch,1702129257,1819242610,1869182049,13),end,2301.0);
+  if(mode==2300.0 || (mode==2302.0 && kind!=4)) { let update=KeyframeTrack_setInterpolation(track,f64_floor_i64(mode)); }
+  return track;
+}
+
+native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:i64) i64 {
+  let tracks=LoaderJson_find(obj,end,scratch,1667330676,29547,0,6);
+  let count=animation_json_count(tracks,end,32);
+  if(count<0) { return 0-3; }
+  let names=clip+32;
+  let handles=clip+96;
+  let storage=(handles+count*4+7)/8*8;
+  if(storage>limit || count>(limit-storage)/616) { return 0-1; }
+  let name=LoaderJson_find(obj,end,scratch,1701667182,0,0,4);
+  let nameBytes=0;
+  if(name>=0) { nameBytes=animation_json_name(name,end,names); }
+  if(nameBytes<0) { return 0-3; }
+  let fps=LoaderJson_number(LoaderJson_find(obj,end,scratch,7565414,0,0,3),end,1.0);
+  if(fps==0.0) { fps=1.0; }
+  if(fps<0.0 || fps-fps!=0.0) { return 0-3; }
+  let item=json_space(tracks+1,end);
+  let i=0;
+  while(i<count) {
+    let track=animation_batch_track(item,end,scratch,storage+i*616,fps);
+    if(track<0) { return track; }
+    let saved=ux_u32_put(handles+4*i,track);
+    item=json_space(json_space(json_value_end(item,end),end)+1,end);
+    i=i+1;
+  }
+  let duration=LoaderJson_number(LoaderJson_find(obj,end,scratch,1634891108,1852795252,0,8),end,-1.0);
+  let blend=LoaderJson_number(LoaderJson_find(obj,end,scratch,1852140642,1685015908,101,9),end,2500.0);
+  if(blend!=2500.0 && blend!=2501.0) { return 0-3; }
+  if(AnimationClip_init(clip,names,nameBytes,handles,count,duration,f64_floor_i64(blend))<0) { return 0-3; }
+  return storage+count*616;
+}
+
+// Publish only after the entire array parsed. Storage is borrowed from work
+// and remains valid until the caller releases the arena for this asset.
+native function AnimationLoader_parseNumeric(file:i64,out:i64,countLimit:i64,work:i64,space:i64) i64 {
+  if(countLimit<0 || countLimit>32 || out%4!=0 || !loading_span(out,countLimit*4) ||
+     !loading_span(work,space) || work%8!=0 || space<64 || !loading_span(file,FileLoader.size) ||
+     ux_u32(file+FileLoader.state)!=2 || !file_disjoint(out,countLimit*4,file,FileLoader.size) ||
+     !file_disjoint(work,space,file,FileLoader.size) || !file_disjoint(work,space,out,countLimit*4)) { return 0-1; }
+  let src=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(src>6291456-bytes || !file_disjoint(src,bytes,work,space) || !file_disjoint(src,bytes,out,countLimit*4)) { return 0-1; }
+  let end=src+bytes;
+  let array=json_space(src,end);
+  let stop=json_value_end(array,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-2; }
+  let count=animation_json_count(array,end,32);
+  if(count<0) { return 0-2; }
+  let staged=work+64;
+  let item=json_space(array+1,end);
+  let cursor=(staged+count*4+7)/8*8;
+  let limit=work+space;
+  if(count>countLimit || cursor>limit) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let next=animation_batch_clip(item,end,work,cursor,limit);
+    if(next<0) { return next; }
+    let saved=ux_u32_put(staged+i*4,cursor);
+    cursor=next;
+    item=json_space(json_space(json_value_end(item,end),end)+1,end);
+    i=i+1;
+  }
+  let published=uxe_copy_record(out,staged,count*4);
+  return count;
+}
