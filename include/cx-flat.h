@@ -5583,6 +5583,9 @@ static int unlink(const char *__u_path) {
 #define AT_REMOVEDIR 0x200
 #endif
 #endif
+#if defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_rmdir)
+static int rmdir(const char *__u_p); /* unlinkat's _WIN32 branch calls it; the body sits further down */
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlinkat
 static int unlinkat(int __u_dfd, const char *__u_p, int __u_fl) {
 #ifdef _WIN32
@@ -7054,6 +7057,9 @@ static int unlink(const char *__u_path) {
 #define AT_SYMLINK_NOFOLLOW 0x100
 #define AT_REMOVEDIR 0x200
 #endif
+#endif
+#if defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_rmdir)
+static int rmdir(const char *__u_p); /* unlinkat's _WIN32 branch calls it; the body sits further down */
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlinkat
 static int unlinkat(int __u_dfd, const char *__u_p, int __u_fl) {
