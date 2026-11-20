@@ -238,7 +238,8 @@
 - ~~LOD 拾取目标 | G-ray 射线原点、世界位置与阈值切换 | M7 LOD。~~ 扩展结构门 13 项通过，迟滞及拾取目标两个反例各自转红。
 - LOD 场景分派 | G-ray 选定对象的面命中与层过滤 | Mesh 场景拾取及 LOD 拾取目标。
 - SkinnedMesh 拾取 | G-ray 骨骼变形后命中和面索引 | Mesh 拾取与 M7 蒙皮。
-- OrbitControls | G-ray 实键信号与固定步长相机终值 | 输入 ABI、相机。
+- ~~OrbitControls 透视旋转与滚轮 | G-ray r160 插件事件、阻尼、缩放及指针归属 | 输入 ABI、相机。~~ 11 项通过，反向拖动从 -10 变为 10 转红。
+- OrbitControls 完整输入接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏、正交和约束 | 透视旋转与滚轮、输入 ABI。
 - MapControls | G-ray 旋转和平移映射 | OrbitControls。
 - PointerLockControls | G-ray 相对位移、锁定及退出 | 输入 ABI。
 - TransformControls | G-ray 选轴、吸附、坐标模式与结束事件 | Mesh 拾取与输入 ABI。

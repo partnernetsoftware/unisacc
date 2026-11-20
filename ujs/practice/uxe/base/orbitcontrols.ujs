@@ -1,0 +1,128 @@
+struct OrbitControls {
+  x: f64;
+  y: f64;
+  z: f64;
+  targetX: f64;
+  targetY: f64;
+  targetZ: f64;
+  radius: f64;
+  phi: f64;
+  theta: f64;
+  phiDelta: f64;
+  thetaDelta: f64;
+  zoomScale: f64;
+  height: f64;
+  rotateSpeed: f64;
+  zoomSpeed: f64;
+  damping: f64;
+  minRadius: f64;
+  maxRadius: f64;
+  minPolar: f64;
+  maxPolar: f64;
+  lastX: f64;
+  lastY: f64;
+  active: u32;
+  pointer: u32;
+}
+
+native function orbit_valid(control:i64) i64 {
+  return control>=0 && control%8==0 && control<=6291456-OrbitControls.size;
+}
+
+native function OrbitControls_init(control:i64,eye:i64,target:i64,height:f64) i64 {
+  if(!orbit_valid(control) || eye<0 || eye%8!=0 || eye>6291456-24 ||
+     target<0 || target%8!=0 || target>6291456-24 || height<=0.0 || height-height!=0.0) { return 0-1; }
+  let x=ux_f64(eye); let y=ux_f64(eye+8); let z=ux_f64(eye+16);
+  let tx=ux_f64(target); let ty=ux_f64(target+8); let tz=ux_f64(target+16);
+  let dx=x-tx; let dy=y-ty; let dz=z-tz;
+  let radius=f64_sqrt(dx*dx+dy*dy+dz*dz);
+  if(radius-radius!=0.0) { return 0-1; }
+  let theta=0.0;
+  let phi=0.0;
+  if(radius>0.0) {
+    theta=ux_math_atan2(dx,dz);
+    phi=ux_math_acos(vector_limit(dy/radius,0.0-1.0,1.0));
+  }
+  let a=ux_f64_put(control+OrbitControls.x,x); let b=ux_f64_put(control+OrbitControls.y,y);
+  let c=ux_f64_put(control+OrbitControls.z,z); let d=ux_f64_put(control+OrbitControls.targetX,tx);
+  let e=ux_f64_put(control+OrbitControls.targetY,ty); let f=ux_f64_put(control+OrbitControls.targetZ,tz);
+  let g=ux_f64_put(control+OrbitControls.radius,radius); let h=ux_f64_put(control+OrbitControls.phi,phi);
+  let i=ux_f64_put(control+OrbitControls.theta,theta);
+  let j=ux_f64_put(control+OrbitControls.phiDelta,0.0); let k=ux_f64_put(control+OrbitControls.thetaDelta,0.0);
+  let l=ux_f64_put(control+OrbitControls.zoomScale,1.0); let m=ux_f64_put(control+OrbitControls.height,height);
+  let n=ux_f64_put(control+OrbitControls.rotateSpeed,1.0); let o=ux_f64_put(control+OrbitControls.zoomSpeed,1.0);
+  let p=ux_f64_put(control+OrbitControls.damping,0.0);
+  let q=ux_f64_put(control+OrbitControls.minRadius,0.0); let r=ux_f64_put(control+OrbitControls.maxRadius,1.0/0.0);
+  let s=ux_f64_put(control+OrbitControls.minPolar,0.0); let t=ux_f64_put(control+OrbitControls.maxPolar,3.141592653589793);
+  let u=ux_f64_put(control+OrbitControls.lastX,0.0); let v=ux_f64_put(control+OrbitControls.lastY,0.0);
+  let w=ux_u32_put(control+OrbitControls.active,0); let id=ux_u32_put(control+OrbitControls.pointer,0);
+  return control;
+}
+
+// Actions 1/2/3 are rotate pointer start/move/end. The host forwards pixels
+// and a pointer ID, while input ownership and camera motion remain in Wasm.
+native function OrbitControls_pointer(control:i64,action:i64,pointer:i64,x:f64,y:f64) i64 {
+  if(!orbit_valid(control) || action<1 || action>3 || pointer<0 || pointer>4294967295 ||
+     x-x!=0.0 || y-y!=0.0) { return 0-1; }
+  let active=ux_u32(control+OrbitControls.active);
+  if(action==1) {
+    if(active!=0) { return 0; }
+    let saved=ux_u32_put(control+OrbitControls.pointer,pointer);
+    let taken=ux_u32_put(control+OrbitControls.active,1);
+  } else {
+    if(active==0 || pointer!=ux_u32(control+OrbitControls.pointer)) { return 0; }
+    if(action==3) { let released=ux_u32_put(control+OrbitControls.active,0); return 1; }
+    let speed=ux_f64(control+OrbitControls.rotateSpeed)*6.283185307179586/ux_f64(control+OrbitControls.height);
+    let dx=(x-ux_f64(control+OrbitControls.lastX))*speed;
+    let dy=(y-ux_f64(control+OrbitControls.lastY))*speed;
+    let theta=ux_f64(control+OrbitControls.thetaDelta)-dx;
+    let phi=ux_f64(control+OrbitControls.phiDelta)-dy;
+    if(theta-theta!=0.0 || phi-phi!=0.0) { return 0-1; }
+    let a=ux_f64_put(control+OrbitControls.thetaDelta,theta);
+    let b=ux_f64_put(control+OrbitControls.phiDelta,phi);
+  }
+  let a=ux_f64_put(control+OrbitControls.lastX,x);
+  let b=ux_f64_put(control+OrbitControls.lastY,y);
+  return 1;
+}
+
+native function OrbitControls_wheel(control:i64,delta:f64,dpr:i64) i64 {
+  if(!orbit_valid(control) || delta-delta!=0.0 || dpr<1 || dpr>64) { return 0-1; }
+  if(ux_u32(control+OrbitControls.active)!=0 || delta==0.0) { return 0; }
+  let power=ux_math_abs(delta)*ux_f64(control+OrbitControls.zoomSpeed)/(100*dpr);
+  let ratio=ux_math_pow(0.95,power);
+  if(delta>0.0) { ratio=1.0/ratio; }
+  let scale=ux_f64(control+OrbitControls.zoomScale)*ratio;
+  if(scale<=0.0 || scale-scale!=0.0) { return 0-1; }
+  let saved=ux_f64_put(control+OrbitControls.zoomScale,scale);
+  return 1;
+}
+
+native function OrbitControls_step(control:i64) i64 {
+  if(!orbit_valid(control)) { return 0-1; }
+  let damping=ux_f64(control+OrbitControls.damping);
+  let blend=1.0;
+  if(damping>0.0) { blend=damping; }
+  let dp=ux_f64(control+OrbitControls.phiDelta);
+  let dt=ux_f64(control+OrbitControls.thetaDelta);
+  let radius=vector_limit(ux_f64(control+OrbitControls.radius)*ux_f64(control+OrbitControls.zoomScale),
+    ux_f64(control+OrbitControls.minRadius),ux_f64(control+OrbitControls.maxRadius));
+  let phi=vector_limit(ux_f64(control+OrbitControls.phi)+dp*blend,
+    ux_f64(control+OrbitControls.minPolar),ux_f64(control+OrbitControls.maxPolar));
+  phi=vector_limit(phi,0.000001,3.141592653589793-0.000001);
+  let theta=ux_f64(control+OrbitControls.theta)+dt*blend;
+  if(radius-radius!=0.0 || theta!=theta || theta<0.0-1000000000.0 || theta>1000000000.0 ||
+     phi-phi!=0.0 || blend>1.0) { return 0-1; }
+  theta=theta-6.283185307179586*f64_floor_i64((theta+3.141592653589793)/6.283185307179586);
+  let plane=radius*ux_math_sin(phi);
+  let x=ux_f64(control+OrbitControls.targetX)+plane*ux_math_sin(theta);
+  let y=ux_f64(control+OrbitControls.targetY)+radius*ux_math_cos(phi);
+  let z=ux_f64(control+OrbitControls.targetZ)+plane*ux_math_cos(theta);
+  let a=ux_f64_put(control+OrbitControls.x,x); let b=ux_f64_put(control+OrbitControls.y,y);
+  let c=ux_f64_put(control+OrbitControls.z,z); let d=ux_f64_put(control+OrbitControls.radius,radius);
+  let e=ux_f64_put(control+OrbitControls.phi,phi); let f=ux_f64_put(control+OrbitControls.theta,theta);
+  let g=ux_f64_put(control+OrbitControls.phiDelta,dp*(1.0-blend));
+  let h=ux_f64_put(control+OrbitControls.thetaDelta,dt*(1.0-blend));
+  let i=ux_f64_put(control+OrbitControls.zoomScale,1.0);
+  return control;
+}

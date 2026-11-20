@@ -273,6 +273,8 @@ GLB 当前支持 2.0 清单与内嵌 BIN、密集访问器、三角形位置与�
 
 G-ray 用透视和正交及带旋转缩放的对象树，对照 r160 的命中顺序和数值。覆盖材质单面、层过滤、近远裁剪、实例 ID、LOD 代理、线点阈值及蒙皮顶点。控制门播放同一拖拽、捏合、滚轮和固定步长轨迹，与 r160 同事件输入对照相机终值与事件顺序。反例分别改矩阵逆、近远限制、层掩码和指针结束处理。
 
+透视旋转、滚轮与阻尼门用上节核过的 r160 包，另解包 `package/examples/jsm/controls/OrbitControls.js`，运行 `sh ./unisacc.com ujs/tests/orbitcontrols-io.cx -- /tmp/three-r160/package`。参考页把指针与滚轮事件送入真实插件，Wasm 从同一像素位移和滚轮 deltas 读回相机位置。产品宿主事件到该入口的路由留给完整控制接线门。
+
 预计依次交付相机射线、Mesh 命中与结果排序、实例与批次、点线精灵与 LOD、蒙皮、Orbit 与 Map、PointerLock、Transform 控制及浏览器输入读回。样本命中与对应 HUD 或选中效果一起核对。
 
 ### 5.5 M11 后处理、辅助对象与音频
