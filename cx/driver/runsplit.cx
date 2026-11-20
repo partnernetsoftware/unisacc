@@ -1,0 +1,278 @@
+#pragma unisa module runsplit
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use driver.unitobj
+#pragma unisa use driver.objlink
+/* W2 second-stage unit-level split compile for the -run route (v0.0.86).
+ * Default off: UNISACC_RUN_SPLIT=1 enables split compile + objlink + exec;
+ * UNISACC_RUN_SPLIT=shadow validates split compile + objlink then falls back
+ * to the whole-program route without executing the user program twice.
+ * Any refusal, compile failure, or unsupported option silently falls back to
+ * the whole-program route with zero extra stderr bytes.
+ * Direct libc stays out; uses L0 sy_, mm_, tx_ and driver.{unitobj,objlink}. */
+
+#define RSPL_MAX_UNITS 256
+#define RSPL_MAX_HDRS 256
+
+static const char rspl_clo_src[] =
+    "#include <stdio.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <string.h>\n"
+    "#include <ctype.h>\n"
+    "#include <errno.h>\n"
+    "#include <signal.h>\n"
+    "#include <unistd.h>\n";
+
+static long rspl_len(const char *s, long max) {
+    long n = 0;
+    if (!s) return -1;
+    while (n < max && s[n]) n++;
+    return s[n] ? -1 : n;
+}
+
+static int rspl_eqz(const char *a, const char *b) {
+    long i = 0;
+    if (!a || !b) return 0;
+    while (a[i] && a[i] == b[i]) i++;
+    return a[i] == b[i];
+}
+
+/* 0 = off (default), 1 = split execute, 2 = shadow validate then fallback. */
+int rspl_mode(void) {
+    const char *v = sy_env("UNISACC_RUN_SPLIT");
+    if (!v || !v[0] || rspl_eqz(v, "0")) return 0;
+    if (rspl_eqz(v, "1")) return 1;
+    if (rspl_eqz(v, "shadow")) return 2;
+    return 0;
+}
+
+static int rspl_cat(char *dst, int cap, int *at, const char *s) {
+    long n = rspl_len(s, 4096);
+    if (n < 0 || *at < 0 || *at + (int)n + 1 > cap) return 1;
+    if (n && mm_copy(dst + *at, (size_t)(cap - *at), s, (size_t)n)) return 1;
+    *at = *at + (int)n;
+    dst[*at] = 0;
+    return 0;
+}
+
+static int rspl_cat_u(char *dst, int cap, int *at, unsigned long long v) {
+    char rev[24], tmp[24];
+    int r = 0, i = 0;
+    if (v == 0) rev[r++] = '0';
+    while (v) { rev[r++] = (char)('0' + (int)(v % 10)); v = v / 10; }
+    while (r) tmp[i++] = rev[--r];
+    tmp[i] = 0;
+    return rspl_cat(dst, cap, at, tmp);
+}
+
+/* Resolve <cache-base>/unitobj directory. Returns 0 on success, 1 if disabled/unavailable. */
+static int rspl_cache_dir(char *out, int cap) {
+    const char *rc = sy_env("UNISACC_RUN_CACHE");
+    const char *uc = sy_env("UNISACC_UNIT_CACHE");
+    const char *base = sy_env("UNISACC_CACHE_DIR");
+    int at = 0;
+    if ((rc && rspl_eqz(rc, "0")) || (uc && rspl_eqz(uc, "0"))) return 1;
+    out[0] = 0;
+    if (base && base[0]) {
+        if (rspl_cat(out, cap, &at, base) || rspl_cat(out, cap, &at, "/unitobj")) return 1;
+    } else {
+        const char *xdg = sy_env("XDG_CACHE_HOME");
+        if (xdg && xdg[0]) {
+            if (rspl_cat(out, cap, &at, xdg) || rspl_cat(out, cap, &at, "/unisacc/unitobj")) return 1;
+        } else {
+            const char *home = sy_env("HOME");
+            if (!home || !home[0]) return 1;
+            if (rspl_cat(out, cap, &at, home) || rspl_cat(out, cap, &at, "/.cache/unisacc/unitobj")) return 1;
+        }
+    }
+    if (sy_mkdir_all(out, 0700)) return 1;
+    return 0;
+}
+
+static int rspl_tmp_obj(char *out, int cap, int pid, int idx) {
+    const char *td = sy_tmpdir();
+    int at = 0;
+    if (!td || !td[0]) return 1;
+    out[0] = 0;
+    if (rspl_cat(out, cap, &at, td) || rspl_cat(out, cap, &at, "/unisa-rspl-") ||
+        rspl_cat_u(out, cap, &at, (unsigned long long)pid) || rspl_cat(out, cap, &at, "-") ||
+        rspl_cat_u(out, cap, &at, (unsigned long long)idx) || rspl_cat(out, cap, &at, ".o")) return 1;
+    return 0;
+}
+
+static int rspl_is_cx(const char *p) {
+    long n = rspl_len(p, 4096);
+    return n >= 3 && p[n - 3] == '.' && p[n - 2] == 'c' && p[n - 1] == 'x';
+}
+
+/* Build header identity list for one unit from NUL-delimited forced-include list.
+ * Always includes "rt:RT_EXTERN" and "closure:<clo_sha>". Returns count or -1 on error. */
+static int rspl_collect_hdrs(const unsigned char *ib, int il, const char clo_sha[65],
+                             char pool[RSPL_MAX_HDRS][80], const char *ptrs[RSPL_MAX_HDRS]) {
+    int nh = 0, at = 0, p = 0;
+    if (rspl_cat(pool[nh], 80, &at, "rt:RT_EXTERN")) return -1;
+    ptrs[nh] = pool[nh]; nh++;
+    at = 0;
+    if (rspl_cat(pool[nh], 80, &at, "closure:") || rspl_cat(pool[nh], 80, &at, clo_sha)) return -1;
+    ptrs[nh] = pool[nh]; nh++;
+    while (ib && p < il) {
+        int e = p;
+        while (e < il && ib[e] != 0) e++;
+        if (e > p) {
+            const char *hp = (const char *)(ib + p);
+            if (nh >= RSPL_MAX_HDRS) return -1;
+            at = 0;
+            if (rspl_eqz(hp, "cx.h")) {
+                if (rspl_cat(pool[nh], 80, &at, "hdr:cx.h")) return -1;
+            } else {
+                unsigned char *hb = 0;
+                int64_t hn = 0;
+                char hex[65];
+                if (sy_read_file(hp, &hb, &hn, 1L << 24) || !hb) return -1;
+                if (sy_sha256_hex(hb, (long)hn, hex)) { mm_free(hb); return -1; }
+                mm_free(hb);
+                if (rspl_cat(pool[nh], 80, &at, "if:") || rspl_cat(pool[nh], 80, &at, hex)) return -1;
+            }
+            ptrs[nh] = pool[nh];
+            nh++;
+        }
+        p = e + 1;
+    }
+    return nh;
+}
+
+/* Try split-compile + objlink for a multi-unit lnx/x86_64 -run invocation.
+ * Returns 0 on success (*img_out / *imgn_out filled, caller frees with mm_free);
+ * returns 1 to silently fall back to the whole-program route (zero extra stderr). */
+int rspl_try(const char *cand_sha, const char *tgt, int level, int nsrc, const char *const *srcv,
+             int (*inc_fn)(const char *, const unsigned char **, int *),
+             int (*compile_fn)(const char *, int, const char *, unsigned char *, long, unsigned char **, long *),
+             unsigned char **img_out, long *imgn_out) {
+    char cdir[1024];
+    int use_cache = 0;
+    char clo_key[65], clo_sha[65];
+    unsigned char *clo_b = 0;
+    long clo_n = 0;
+    int pid = sy_pid();
+    char **paths = 0;
+    int npaths = 0;
+    int j, mode = rspl_mode();
+
+    if (img_out) *img_out = 0;
+    if (imgn_out) *imgn_out = 0;
+    if (!mode || !cand_sha || !cand_sha[0] || !tgt || !rspl_eqz(tgt, "lnx/x86_64") ||
+        nsrc < 2 || nsrc >= RSPL_MAX_UNITS || !srcv || !inc_fn || !compile_fn || !img_out || !imgn_out)
+        return 1;
+    if (pid < 0) pid = 0;
+    if (rspl_cache_dir(cdir, (int)sizeof cdir) == 0) use_cache = 1;
+
+    /* 1. Load or compile the W2 runtime closure (-DRT_UNIT). */
+    {
+        const char *chdr[1];
+        chdr[0] = "rt:RT_UNIT:v1";
+        if (uo_key(clo_key, cand_sha, tgt, 0, 101,
+                   (const unsigned char *)rspl_clo_src, (long)(sizeof rspl_clo_src - 1), chdr, 1))
+            return 1;
+        if (!use_cache || uo_load(cdir, clo_key, &clo_b, &clo_n) != 0) {
+            unsigned char *csrc = (unsigned char *)mm_alloc((long)(sizeof rspl_clo_src));
+            if (!csrc) return 1;
+            mm_copy(csrc, sizeof rspl_clo_src, rspl_clo_src, sizeof rspl_clo_src);
+            if (compile_fn("rtclosure-root.c", 0, "RT_UNIT", csrc, (long)(sizeof rspl_clo_src - 1), &clo_b, &clo_n) || !clo_b || clo_n <= 0) {
+                if (clo_b) mm_free(clo_b);
+                return 1;
+            }
+            if (use_cache) (void)uo_store(cdir, clo_key, clo_b, clo_n);
+        }
+        if (sy_sha256_hex(clo_b, clo_n, clo_sha)) { uo_free(clo_b); return 1; }
+    }
+
+    paths = (char **)mm_alloc((long)(nsrc + 1) * (long)sizeof(char *));
+    if (!paths) { uo_free(clo_b); return 1; }
+    for (j = 0; j < nsrc + 1; j++) paths[j] = 0;
+
+    /* Write closure object to tmp path [0]. */
+    paths[0] = (char *)mm_alloc(1024);
+    if (!paths[0] || rspl_tmp_obj(paths[0], 1024, pid, 0) ||
+        sy_write_file(paths[0], clo_b, (int64_t)clo_n, 0600)) {
+        uo_free(clo_b);
+        goto fail;
+    }
+    uo_free(clo_b);
+    clo_b = 0;
+    npaths = 1;
+
+    /* 2. For each unit srcv[0..nsrc-1], lookup/compile USE35 object (-DRT_EXTERN). */
+    for (j = 0; j < nsrc; j++) {
+        unsigned char *sb = 0, *ob = 0;
+        int64_t sn = 0;
+        long on = 0;
+        const unsigned char *ib = 0;
+        int il = 0, cx = rspl_is_cx(srcv[j]);
+        char ukey[65];
+        char hpool[RSPL_MAX_HDRS][80];
+        const char *hptrs[RSPL_MAX_HDRS];
+        int nh;
+
+        if (sy_read_file(srcv[j], &sb, &sn, 1L << 26) || !sb) goto fail;
+        if (cx && inc_fn(srcv[j], &ib, &il)) { mm_free(sb); goto fail; }
+        nh = rspl_collect_hdrs(cx ? ib : 0, cx ? il : 0, clo_sha, hpool, hptrs);
+        if (nh < 0 || uo_key(ukey, cand_sha, tgt, level, 102, sb, (long)sn, hptrs, nh)) {
+            mm_free(sb);
+            goto fail;
+        }
+        if (!use_cache || uo_load(cdir, ukey, &ob, &on) != 0) {
+            if (compile_fn(srcv[j], cx, "RT_EXTERN", sb, (long)sn, &ob, &on) || !ob || on <= 0) {
+                if (ob) mm_free(ob);
+                goto fail;
+            }
+            if (use_cache) (void)uo_store(cdir, ukey, ob, on);
+        } else {
+            mm_free(sb);
+        }
+        paths[npaths] = (char *)mm_alloc(1024);
+        if (!paths[npaths] || rspl_tmp_obj(paths[npaths], 1024, pid, npaths) ||
+            sy_write_file(paths[npaths], ob, (int64_t)on, 0600)) {
+            uo_free(ob);
+            goto fail;
+        }
+        uo_free(ob);
+        npaths++;
+    }
+
+    /* 3. Link closure + units in dv_units order via objlink. */
+    {
+        unsigned char *img = 0;
+        long imgn = 0;
+        int lrc = ol_link(npaths, (const char **)paths, &img, &imgn);
+        for (j = 0; j < npaths; j++) {
+            if (paths[j]) { sy_unlink(paths[j]); mm_free(paths[j]); }
+        }
+        mm_free(paths);
+        paths = 0;
+        if (lrc || !img || imgn <= 0) {
+            if (img) mm_free(img);
+            return 1;
+        }
+        if (mode == 2) {
+            /* shadow mode: validated link without executing user program twice */
+            mm_free(img);
+            return 1;
+        }
+        *img_out = img;
+        *imgn_out = imgn;
+        return 0;
+    }
+
+fail:
+    if (paths) {
+        for (j = 0; j < nsrc + 1; j++) {
+            if (paths[j]) { sy_unlink(paths[j]); mm_free(paths[j]); }
+        }
+        mm_free(paths);
+    }
+    return 1;
+}
