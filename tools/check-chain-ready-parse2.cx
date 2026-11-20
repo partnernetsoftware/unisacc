@@ -1,0 +1,85 @@
+/* Committed fixture trees keep this test independent of release history. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
+
+static char work[4400], repo[4400], native[4400];
+static int failed;
+
+static void cleanup(void) { if (*work) (void)sy_remove_all(work); }
+
+static int run(char **av, const char *cwd, int seconds) {
+    char why[160];
+    np_result r = {0};
+    int ok = !np_run(av,cwd,0,seconds,&r,why,sizeof why) && !r.rc && !r.residue;
+    if (!ok && r.errn) fwrite(r.err,1,r.errn,stderr);
+    np_free(&r);
+    return ok;
+}
+
+static int put(const char *leaf, const char *body) {
+    char path[4400];
+    return !cx_fmt(path,sizeof path,"%s/%s",repo,leaf) && !cx_write(path,body,strlen(body));
+}
+
+static int directory(const char *leaf) {
+    char path[4400];
+    return !cx_fmt(path,sizeof path,"%s/%s",repo,leaf) && !mkdir(path,0700);
+}
+
+static int save(const char *name) {
+    char *add[] = {"git","add","--all",0};
+    char *commit[] = {"git","-c","user.name=fixture","-c","user.email=fixture@example.invalid",
+        "-c","core.hooksPath=/dev/null","-c","commit.gpgsign=false","commit","-qm",(char *)name,0};
+    return run(add,repo,3) && run(commit,repo,3);
+}
+
+static void check(const char *rev, int code, const char *needle, const char *name) {
+    char *av[] = {native,"--only","18","--repo",repo,"--rev",(char *)rev,0};
+    char why[160];
+    np_result r = {0};
+    int ok = !np_run(av,0,0,12,&r,why,sizeof why) && r.rc == code && !r.residue &&
+        r.out && strstr(r.out,needle) && strstr(r.out,code ? "READY\tno\t" : "READY\tyes\t");
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if (!ok && r.outn) fwrite(r.out,1,r.outn,stdout);
+    if (!ok && r.errn) fwrite(r.err,1,r.errn,stderr);
+    failed += !ok;
+    np_free(&r);
+}
+
+int main(void) {
+    if (sy_mkdtemp(sy_tmpdir(),"check-chain-ready-parse2-",work,sizeof work) || sy_atexit(cleanup) ||
+        cx_fmt(repo,sizeof repo,"%s/repo",work) || mkdir(repo,0700) ||
+        cx_fmt(native,sizeof native,"%s/chain-ready",work)) return 2;
+    char *build[] = {"sh","./unisacc.com","tools/chain-ready.cx","-o",native,0}; /* lint:allow R1 tool compiles the checked entry with the installed product */
+    char *init[] = {"git","init","-q",0};
+    const char *seed =
+        "#include <stdio.h>\n#include <string.h>\n"
+        "int main(int n,char **a){"
+        "if(n!=4||strcmp(a[1],\"parse2\")||strcmp(a[3],\"--locations\"))return 2;"
+        "FILE *f=fopen(\"exec/parse2/token.tsv\",\"r\");if(!f)return 3;"
+        "int bad=fgetc(f)=='b';fclose(f);"
+        "f=fopen(a[2],\"w\");if(!f)return 4;fputs(\"{}\\n\",f);fclose(f);"
+        "if(bad)fputs(\"seed-gen: exec/parse2/parenfold-template.tsv:3: clone-push target mismatch\\n\",stderr);"
+        "return bad;}\n";
+    if (!run(build,0,24) || !run(init,repo,3) || !directory("build") || !directory("seed") ||
+        !directory("exec") || !directory("exec/parse2") ||
+        !put("build/version-seq.tsv","slot\tversion\tclass\tstate\tnote\n1\t0.0.1\ttest\t已公开\tfixture\n") ||
+        !put("seed/gen.c",seed) || !put("exec/parse2/token.tsv","good\n") ||
+        !save("baseline")) return 2;
+    char *tag[] = {"git","tag","v0.0.1",0};
+    if (!run(tag,repo,3) || !put("exec/parse2/token.tsv","bad\n") || !save("bad parse2")) return 2;
+    check("HEAD",1,"clone-push target mismatch","changed-parse2-failed-real-recipe");
+    if (!put("exec/parse2/token.tsv","good\n") || !save("restore-parse2")) return 2;
+    check("HEAD",0,"parse2-inputs-unchanged","unchanged-skips-recipe");
+    char changed[2048];
+    if (cx_fmt(changed,sizeof changed,"/* changed generator */\n%s",seed) ||
+        !put("seed/gen.c",changed) || !save("change-seed-gen")) return 2;
+    check("HEAD",0,"gen-shared-e3 rc=0","changed-seed-runs-located-recipe");
+    /* Re-read an older candidate even though the worktree now has unobstructed input. */
+    check("HEAD~2",1,"clone-push target mismatch","candidate-snapshot-not-worktree");
+    printf("CHECK_CHAIN_READY_PARSE2\tchecks=4\tfailed=%d\n",failed);
+    return failed != 0;
+}
