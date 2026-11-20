@@ -249,7 +249,8 @@
 
 ## M11 后处理、辅助与音频
 
-- EffectComposer | G-pixel Pass 次序、目标复用、resize、旁路与释放 | M4 RenderTarget。
+- ~~EffectComposer 开启的 Pass 顺序与双目标计划 | G-struct 实际 r160 调度、交换及最后一步输出 | M4 RenderTarget。~~ 12 项通过，交换读写反例转红。
+- EffectComposer GPU 生命周期 | G-pixel 两目标复用、resize、旁路、遮罩与释放 | 调度计划、M4 RenderTarget。
 - RenderPass | G-pixel 场景清屏与纹理读回 | EffectComposer、M4。
 - UnrealBloomPass | G-pixel 阈值、羽化、多级混合 | RenderPass、EffectComposer。
 - OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
