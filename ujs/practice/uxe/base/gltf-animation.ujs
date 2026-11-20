@@ -2,6 +2,7 @@ struct GltfAnimationChannel {
   samples: u32;
   node: u32;
   interpolation: u32;
+  path: u32;
 }
 
 native function gltf_interpolation(at:i64,end:i64) i64 {
@@ -15,7 +16,20 @@ native function gltf_interpolation(at:i64,end:i64) i64 {
   return 0-1;
 }
 
-native function GltfLoader_translationChannel(glb:i64,animation:i64,channel:i64,nodes:i64,out:i64,work:i64) i64 {
+native function gltf_animation_path(token:i64,end:i64) i64 {
+  let close=json_scan_string(token,end);
+  if(close<0) { return 0-1; }
+  let length=close-token-2;
+  if(length==11 && ux_u32(token+1)==1851880052 && ux_u32(token+5)==1952541811 &&
+     ux_u8(token+9)==105 && ux_u8(token+10)==111 && ux_u8(token+11)==110) { return 1; }
+  if(length==5 && ux_u32(token+1)==1818321779 && ux_u8(token+5)==101) { return 2; }
+  if(length==8 && ux_u32(token+1)==1635020658 && ux_u32(token+5)==1852795252) { return 3; }
+  if(length==7 && ux_u32(token+1)==1734960503 && ux_u8(token+5)==104 &&
+     ux_u8(token+6)==116 && ux_u8(token+7)==115) { return 4; }
+  return 0-1;
+}
+
+native function gltf_load_animation_channel(glb:i64,animation:i64,channel:i64,nodes:i64,out:i64,work:i64,expected:i64,weights:i64) i64 {
   if(!loading_span(glb,GlbResource.size) || !loading_span(out,GltfAnimationChannel.size) ||
      !loading_span(work,96) || work%4!=0 || !file_disjoint(glb,GlbResource.size,out,GltfAnimationChannel.size) ||
      !file_disjoint(glb,GlbResource.size,work,96) || !file_disjoint(out,GltfAnimationChannel.size,work,96)) { return 0-1; }
@@ -34,9 +48,8 @@ native function GltfLoader_translationChannel(glb:i64,animation:i64,channel:i64,
   let target=LoaderJson_find(row,end,work,1735549300,29797,0,6);
   let node=LoaderJson_uint(LoaderJson_find(target,end,work,1701080942,0,0,4),end,0-1);
   if(node<0 || node>=nodes) { return 0-3; }
-  let path=LoaderJson_find(target,end,work,1752457584,0,0,4);
-  if(path<0 || json_scan_string(path,end)!=path+13 || ux_u32(path+1)!=1851880052 ||
-     ux_u32(path+5)!=1952541811 || ux_u8(path+9)!=105 || ux_u8(path+10)!=111 || ux_u8(path+11)!=110) { return 0-3; }
+  let path=gltf_animation_path(LoaderJson_find(target,end,work,1752457584,0,0,4),end);
+  if(path<0 || (expected!=0 && path!=expected) || (path==4 && (weights<1 || weights>64))) { return 0-3; }
   let samplerIndex=LoaderJson_uint(LoaderJson_find(row,end,work,1886216563,7497068,0,7),end,0-1);
   let sampler=LoaderJson_item(LoaderJson_find(clip,end,work,1886216563,1936876908,0,8),end,samplerIndex);
   if(sampler<0) { return 0-4; }
@@ -47,20 +60,46 @@ native function GltfLoader_translationChannel(glb:i64,animation:i64,channel:i64,
   let output=LoaderJson_uint(LoaderJson_find(sampler,end,work,1886680431,29813,0,6),end,0-1);
   let times=GltfLoader_accessor(glb,input,work+16,work);
   let points=GltfLoader_accessor(glb,output,work+48,work);
+  let lanes=3;
+  if(path==3) { lanes=4; }
+  if(path==4) { lanes=1; }
   if(times<0 || points<0 || ux_u32(times+GltfAccessor.component)!=5126 ||
      ux_u32(points+GltfAccessor.component)!=5126 || ux_u32(times+GltfAccessor.lanes)!=1 ||
-     ux_u32(points+GltfAccessor.lanes)!=3 || ux_u32(times+GltfAccessor.stride)!=4 ||
-     ux_u32(points+GltfAccessor.stride)!=12) { return 0-5; }
+     ux_u32(points+GltfAccessor.lanes)!=lanes || ux_u32(times+GltfAccessor.stride)!=4 ||
+     ux_u32(points+GltfAccessor.stride)!=4*lanes) { return 0-5; }
   let count=ux_u32(times+GltfAccessor.count);
   let vectors=1;
   if(mode==2303) { vectors=3; }
+  let row_size=lanes*vectors;
+  if(path==4) { vectors=vectors*weights; row_size=vectors; }
   if(count*vectors!=ux_u32(points+GltfAccessor.count)) { return 0-5; }
   let timeBytes=ux_u32(times+GltfAccessor.bytes);
   if(ux_f32(timeBytes)<0.0) { return 0-5; }
-  let samples=AnimationSamples_init(work+80,timeBytes,ux_u32(points+GltfAccessor.bytes),count,3*vectors);
+  let i=1;
+  while(i<count) {
+    if(ux_f32(timeBytes+4*i)<=ux_f32(timeBytes+4*(i-1))) { return 0-5; }
+    i=i+1;
+  }
+  let values=ux_u32(points+GltfAccessor.bytes);
+  i=0;
+  while(i<count*row_size) {
+    let value=ux_f32(values+i*4);
+    if(value-value!=0.0) { return 0-5; }
+    i=i+1;
+  }
+  let samples=AnimationSamples_init(work+80,timeBytes,values,count,row_size);
   if(samples<0) { return 0-5; }
   let a=ux_u32_put(out+GltfAnimationChannel.samples,samples);
   let b=ux_u32_put(out+GltfAnimationChannel.node,node);
   let c=ux_u32_put(out+GltfAnimationChannel.interpolation,mode);
+  let d=ux_u32_put(out+GltfAnimationChannel.path,path);
   return out;
+}
+
+native function GltfLoader_translationChannel(glb:i64,animation:i64,channel:i64,nodes:i64,out:i64,work:i64) i64 {
+  return gltf_load_animation_channel(glb,animation,channel,nodes,out,work,1,0);
+}
+
+native function GltfLoader_animationChannel(glb:i64,animation:i64,channel:i64,nodes:i64,out:i64,work:i64,weights:i64) i64 {
+  return gltf_load_animation_channel(glb,animation,channel,nodes,out,work,0,weights);
 }
