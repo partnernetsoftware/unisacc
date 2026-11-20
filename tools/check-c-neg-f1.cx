@@ -19,18 +19,29 @@
 static char cnf_work[CNF_PW];
 static const char *cnf_cc;
 
-static int cnf_compile(const char *name, const char *src, const char *flag, char *out, size_t cap, char *obj, size_t ocap) {
+static int cnf_compile_flags(const char *name, const char *src, const char *flag, int wall,
+                             char *out, size_t cap, char *obj, size_t ocap) {
     char cpath[CNF_PW];
     if (cx_fmt(cpath, sizeof cpath, "%s/%s.c", cnf_work, name)) return -1;
     if (cx_fmt(obj, (int)ocap, "%s/%s.o", cnf_work, name)) return -1;
     if (cx_write(cpath, src, strlen(src))) return -1;
     (void)unlink(obj);
-    if (flag) {
-        char *av[] = {"sh", (char *)cnf_cc, (char *)flag, "-c", "-b", "lnx/x86_64", cpath, "-o", obj, 0};
-        return ck_run(av, out, (int)cap);
-    }
-    char *av[] = {"sh", (char *)cnf_cc, "-c", "-b", "lnx/x86_64", cpath, "-o", obj, 0};
+    char *av[11] = {"sh", (char *)cnf_cc};
+    int n = 2;
+    if (wall) av[n++] = "-Wall";
+    if (flag) av[n++] = (char *)flag;
+    av[n++] = "-c";
+    av[n++] = "-b";
+    av[n++] = "lnx/x86_64";
+    av[n++] = cpath;
+    av[n++] = "-o";
+    av[n++] = obj;
+    av[n] = 0;
     return ck_run(av, out, (int)cap);
+}
+
+static int cnf_compile(const char *name, const char *src, const char *flag, char *out, size_t cap, char *obj, size_t ocap) {
+    return cnf_compile_flags(name, src, flag, 0, out, cap, obj, ocap);
 }
 
 /* reject: rc != 0, no object, message present, located at NAME.c:1:COL: */
@@ -64,6 +75,15 @@ static void cnf_declaration_warning(const char *id, const char *src, const char 
     ck(rc == 0 && sy_exists(obj) == 1 && ckk_has(out, CNF_OUT, line) &&
        tx_count(out, (long)strlen(out), name, (long)strlen(name)) == 1 &&
        ckk_has(out, CNF_OUT, "warning: ") && !ckk_has(out, CNF_OUT, "error: "), id);
+}
+
+static void cnf_warning_as_error(const char *id, const char *src, const char *name, int wall) {
+    char out[CNF_OUT] = {0}, obj[CNF_PW], line[256];
+    int rc = cnf_compile_flags(id, src, "-Werror", wall, out, sizeof out, obj, sizeof obj);
+    if (cx_fmt(line, sizeof line, "%s.c:1:", id)) { ck(0, id); return; }
+    ck(rc == 1 && sy_exists(obj) == 0 && ckk_has(out, CNF_OUT, line) &&
+       tx_count(out, (long)strlen(out), name, (long)strlen(name)) == 1 &&
+       ckk_has(out, CNF_OUT, "1 warning generated."), id);
 }
 
 int main(int argc, char **argv) {
@@ -213,14 +233,22 @@ int main(int argc, char **argv) {
     cnf_declaration_warning("ft-warn-ordinary-rank-wall",
         "int f(long);int f(long long n){return (int)n;}\n",
         "-Wall", "[-Wd2-function-integer-rank]");
-    {
-        int rc = cnf_compile("ft-warn-declaration-werror",
-            "int f(long);int f(long long n){return (int)n;}\n",
-            "-Werror", out, sizeof out, obj, sizeof obj);
-        ck(rc == 1 && sy_exists(obj) == 0 &&
-           ckk_has(out, CNF_OUT, "ft-warn-declaration-werror.c:1:") &&
-           ckk_has(out, CNF_OUT, "[-Wd2-function-integer-rank]") &&
-           ckk_has(out, CNF_OUT, "1 warning generated."), "ft-warn-declaration-werror");
+    static const struct { const char *id, *src, *name; } werror_cases[] = {
+        {"ft-warn-declaration-werror", "int f(long);int f(long long n){return (int)n;}\n",
+         "[-Wd2-function-integer-rank]"},
+        {"ft-warn-callback-const-werror", "void f(void (*cb)(const char *));void f(void (*cb)(char *)){(void)cb;}\n",
+         "[-Wd2-callback-pointee-qualifier]"},
+        {"ft-warn-callback-tag-werror", "struct A;struct B;void f(void (*cb)(struct A *));void f(void (*cb)(struct B *)){(void)cb;}\n",
+         "[-Wd2-callback-struct-tag]"},
+        {"ft-warn-callback-rank-werror", "void f(void (*cb)(long));void f(void (*cb)(long long)){(void)cb;}\n",
+         "[-Wd2-callback-integer-rank]"}
+    };
+    for (int i = 0; i < 4; i++) {
+        const char *id = werror_cases[i].id;
+        char wall_id[96];
+        if (cx_fmt(wall_id, sizeof wall_id, "%s-wall", id)) return 2;
+        cnf_warning_as_error(id, werror_cases[i].src, werror_cases[i].name, 0);
+        cnf_warning_as_error(wall_id, werror_cases[i].src, werror_cases[i].name, 1);
     }
     cnf_accept_quiet("ft-warn-ignore-top-level-callback-const",
         "void f(void (*cb)(char *const));void f(void (*cb)(char *)){(void)cb;}\n");
