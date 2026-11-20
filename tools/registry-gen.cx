@@ -1,0 +1,528 @@
+/* tools/registry-gen.cx -- shard-manifest splitter, synthesizer, checker, and shard-stability probe (0.0.87 S5a).
+ * Tables covered in stage-1 read-only proof:
+ *   0: batches              -> tests/batches.tsv              (key = col 0 id)
+ *   1: coverage             -> tests/coverage.tsv             (key = col 0 id)
+ *   2: tools-compile-sources-> tests/tools-compile-sources.tsv(key = col 0 path)
+ *   3: batch-domain-index   -> tests/batch-domain-index.tsv   (key = col 0 id; derived table, included in stage-1 parity proof)
+ *
+ * Manifest shard format (DIR/<safe_id>.tsv):
+ *   # registry-shard-v1
+ *   <table_name>\t<seq>\t<key>\t<raw_line>\n
+ * Header metadata (DIR/_headers.tsv):
+ *   <table_name>\t<seq>\t<raw_header_or_comment_line>\n
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/registry-gen.cx -- --split --root ROOT --dir OUT_DIR
+ *   sh ./unisacc.com tools/registry-gen.cx -- --check [--root ROOT] [--dir DIR]
+ *   sh ./unisacc.com tools/registry-gen.cx -- --write --root ROOT --dir DIR [--out OUT_DIR]
+ *   sh ./unisacc.com tools/registry-gen.cx -- --shard-experiment [--root ROOT]
+ * Check: tools/check-registry-gen.cx (batch registry-gen)
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+#define RG_NTABLES 4
+
+static const char *const RG_TNAME[RG_NTABLES] = {
+    "batches",
+    "coverage",
+    "tools-compile-sources",
+    "batch-domain-index"
+};
+
+static const char *const RG_TPATH[RG_NTABLES] = {
+    "tests/batches.tsv",
+    "tests/coverage.tsv",
+    "tests/tools-compile-sources.tsv",
+    "tests/batch-domain-index.tsv"
+};
+
+static void die(const char *m) {
+    fprintf(stderr, "registry-gen: REFUSE %s\n", m);
+    exit(2);
+}
+
+static int find_table(const char *name, size_t n) {
+    for (int i = 0; i < RG_NTABLES; i++) {
+        if (strlen(RG_TNAME[i]) == n && !memcmp(RG_TNAME[i], name, n)) return i;
+    }
+    return -1;
+}
+
+typedef struct {
+    int tid;
+    int is_hdr;
+    long seq;
+    char *key;
+    char *raw;
+    size_t raw_len;
+} RegRow;
+
+typedef struct {
+    RegRow *v;
+    int n;
+    int cap;
+} RowVec;
+
+static void rv_push(RowVec *rv, int tid, int is_hdr, long seq, const char *key, size_t kn, const char *raw, size_t rn) {
+    if (rv->n == rv->cap) {
+        int nc = rv->cap ? rv->cap * 2 : 512;
+        RegRow *nv = (RegRow *)mm_alloc((long)nc * (long)sizeof(RegRow));
+        if (!nv) die("oom");
+        if (rv->v) {
+            mm_copy(nv, (long)nc * (long)sizeof(RegRow), rv->v, (long)rv->n * (long)sizeof(RegRow));
+            mm_free(rv->v);
+        }
+        rv->v = nv;
+        rv->cap = nc;
+    }
+    RegRow *r = &rv->v[rv->n++];
+    r->tid = tid;
+    r->is_hdr = is_hdr;
+    r->seq = seq;
+    r->key = (char *)mm_alloc((long)kn + 1);
+    r->raw = (char *)mm_alloc((long)rn + 1);
+    if (!r->key || !r->raw) die("oom");
+    if (kn) mm_copy(r->key, (long)kn + 1, key, (long)kn);
+    r->key[kn] = 0;
+    if (rn) mm_copy(r->raw, (long)rn + 1, raw, (long)rn);
+    r->raw[rn] = 0;
+    r->raw_len = rn;
+}
+
+static void rv_free(RowVec *rv) {
+    for (int i = 0; i < rv->n; i++) {
+        mm_free(rv->v[i].key);
+        mm_free(rv->v[i].raw);
+    }
+    if (rv->v) mm_free(rv->v);
+    rv->v = 0; rv->n = 0; rv->cap = 0;
+}
+
+static int rv_cmp_order(const void *a, const void *b) {
+    const RegRow *ra = (const RegRow *)a;
+    const RegRow *rb = (const RegRow *)b;
+    if (ra->tid != rb->tid) return ra->tid - rb->tid;
+    if (ra->is_hdr != rb->is_hdr) return rb->is_hdr - ra->is_hdr; /* headers first */
+    long sa = ra->seq > 0 ? ra->seq : 1000000000L;
+    long sb = rb->seq > 0 ? rb->seq : 1000000000L;
+    if (sa != sb) return sa < sb ? -1 : 1;
+    return strcmp(ra->key, rb->key);
+}
+
+static void safe_shard_name(int tid, const char *key, char *out, size_t cap) {
+    /* Prefix by table class so batch ids, coverage ids, and tool paths never collide on disk. */
+    const char *pre = (tid == 0 || tid == 3) ? "b-" : (tid == 1 ? "c-" : "t-");
+    size_t at = 0;
+    size_t pl = strlen(pre);
+    if (pl + 2 >= cap) die("shard-name-bound");
+    mm_copy(out, (long)cap, pre, (long)pl);
+    at = pl;
+    for (const char *p = key; *p && at + 6 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+            out[at++] = (char)c;
+        } else if (c == '/' || c == '.') {
+            out[at++] = '_';
+        } else {
+            out[at++] = '_';
+        }
+    }
+    out[at] = 0;
+}
+
+static int is_header_line(int tid, long line_no, const char *s, size_t len) {
+    if (len == 0) return 1;
+    if (s[0] == '#') return 1;
+    if (tid == 0 && line_no == 1 && len >= 3 && !memcmp(s, "id\t", 3)) return 1;
+    if (tid == 1 && line_no == 1 && len >= 3 && !memcmp(s, "id\t", 3)) return 1;
+    if (tid == 3 && line_no <= 2 && len >= 3 && !memcmp(s, "id\t", 3)) return 1;
+    return 0;
+}
+
+static int do_split(const char *root, const char *dir) {
+    if (sy_mkdir_all(dir, 0755)) die("mkdir-dir");
+    np_buf hdrs = {0};
+    np_puts(&hdrs, "# registry-headers-v1\n");
+
+    int shard_files = 0;
+    int total_rows = 0;
+    /* Collect rows from all 4 tables, group by shard filename to write each shard once. */
+    typedef struct {
+        char fname[256];
+        np_buf body;
+    } ShardOut;
+    /* Simple sorted array of rows by shard filename */
+    RowVec all = {0};
+
+    for (int tid = 0; tid < RG_NTABLES; tid++) {
+        char fp[4400];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", root, RG_TPATH[tid])) die("path-bound");
+        size_t fn = 0;
+        char *fb = cx_read(fp, &fn);
+        if (!fb) die(RG_TPATH[tid]);
+        char *cur = fb, *end = fb + fn;
+        long lno = 0;
+        while (cur < end) {
+            lno++;
+            char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+            size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+            if (is_header_line(tid, lno, cur, len)) {
+                char pre[128];
+                cx_fmt(pre, sizeof pre, "%s\t%ld\t", RG_TNAME[tid], lno);
+                np_puts(&hdrs, pre);
+                np_put(&hdrs, cur, len);
+                np_puts(&hdrs, "\n");
+            } else {
+                char *tab = (char *)memchr(cur, '\t', len);
+                size_t kn = tab ? (size_t)(tab - cur) : len;
+                rv_push(&all, tid, 0, lno, cur, kn, cur, len);
+                total_rows++;
+            }
+            cur = nl ? nl + 1 : end;
+        }
+        free(fb);
+    }
+
+    /* Write _headers.tsv */
+    {
+        char hp[4400];
+        if (cx_fmt(hp, sizeof hp, "%s/_headers.tsv", dir)) die("hdr-path");
+        if (sy_write_atomic(hp, hdrs.p, hdrs.n, 0644)) die("write-headers");
+        free(hdrs.p);
+    }
+
+    /* Compute shard filename for each row and write shards (group rows sharing the same shard name) */
+    char **snames = (char **)mm_alloc((long)(all.n ? all.n : 1) * (long)sizeof(char *));
+    int *order = (int *)mm_alloc((long)(all.n ? all.n : 1) * (long)sizeof(int));
+    if (!snames || !order) die("oom");
+    for (int i = 0; i < all.n; i++) {
+        snames[i] = (char *)mm_alloc(256);
+        if (!snames[i]) die("oom");
+        safe_shard_name(all.v[i].tid, all.v[i].key, snames[i], 256);
+        order[i] = i;
+    }
+
+    /* Simple bucket-by-name via direct open-append? No, sort index array using qsort on a tiny pair struct */
+    typedef struct { const char *name; int idx; } Pair;
+    Pair *pairs = (Pair *)mm_alloc((long)(all.n ? all.n : 1) * (long)sizeof(Pair));
+    if (!pairs) die("oom");
+    for (int i = 0; i < all.n; i++) { pairs[i].name = snames[i]; pairs[i].idx = i; }
+
+    /* Shell sort pairs by name (no static global comparator needed) */
+    for (int gap = all.n / 2; gap > 0; gap /= 2) {
+        for (int i = gap; i < all.n; i++) {
+            Pair tmp = pairs[i];
+            int j = i;
+            while (j >= gap && strcmp(pairs[j - gap].name, tmp.name) > 0) {
+                pairs[j] = pairs[j - gap];
+                j -= gap;
+            }
+            pairs[j] = tmp;
+        }
+    }
+
+    int i = 0;
+    while (i < all.n) {
+        int j = i + 1;
+        while (j < all.n && !strcmp(pairs[j].name, pairs[i].name)) j++;
+        np_buf sb = {0};
+        np_puts(&sb, "# registry-shard-v1\n");
+        for (int k = i; k < j; k++) {
+            RegRow *r = &all.v[pairs[k].idx];
+            char pre[256];
+            cx_fmt(pre, sizeof pre, "%s\t%ld\t", RG_TNAME[r->tid], r->seq);
+            np_puts(&sb, pre);
+            np_puts(&sb, r->key);
+            np_puts(&sb, "\t");
+            np_put(&sb, r->raw, r->raw_len);
+            np_puts(&sb, "\n");
+        }
+        char sp[4600];
+        if (cx_fmt(sp, sizeof sp, "%s/%s.tsv", dir, pairs[i].name)) die("shard-path");
+        if (sy_write_file(sp, sb.p, (int64_t)sb.n, 0644)) die("write-shard");
+        free(sb.p);
+        shard_files++;
+        i = j;
+    }
+
+    for (int k = 0; k < all.n; k++) mm_free(snames[k]);
+    mm_free(snames);
+    mm_free(order);
+    mm_free(pairs);
+    rv_free(&all);
+    printf("REGISTRY_SPLIT\tshards=%d\trows=%d\tdir=%s\n", shard_files, total_rows, dir);
+    return 0;
+}
+
+static void load_manifest_dir(const char *dir, RowVec *all) {
+    /* 1. Load _headers.tsv */
+    char hp[4400];
+    if (cx_fmt(hp, sizeof hp, "%s/_headers.tsv", dir)) die("hdr-path");
+    size_t hn = 0;
+    char *hb = cx_read(hp, &hn);
+    if (!hb) die("missing-_headers.tsv");
+    char *cur = hb, *end = hb + hn;
+    while (cur < end) {
+        char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+        size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+        if (len > 0 && cur[0] != '#') {
+            char *t1 = (char *)memchr(cur, '\t', len);
+            char *t2 = t1 ? (char *)memchr(t1 + 1, '\t', (size_t)(cur + len - (t1 + 1))) : 0;
+            if (!t1 || !t2) die("bad-header-line");
+            int tid = find_table(cur, (size_t)(t1 - cur));
+            if (tid < 0) die("bad-header-table");
+            char sbuf[32];
+            size_t sl = (size_t)(t2 - (t1 + 1));
+            if (sl >= sizeof sbuf) die("bad-header-seq");
+            mm_copy(sbuf, sizeof sbuf, t1 + 1, (long)sl); sbuf[sl] = 0;
+            long seq = atol(sbuf);
+            rv_push(all, tid, 1, seq, "", 0, t2 + 1, (size_t)(cur + len - (t2 + 1)));
+        }
+        cur = nl ? nl + 1 : end;
+    }
+    free(hb);
+
+    /* 2. Scan all *.tsv shard files in dir */
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir)) die("opendir-manifests");
+    int next;
+    while ((next = sy_dir_next(&d)) == 1) {
+        long ln = tx_len(d.name, 256);
+        if (ln <= 4 || strcmp(d.name + ln - 4, ".tsv") != 0) continue;
+        if (tx_eqz(d.name, "_headers.tsv")) continue;
+        char sp[4600];
+        if (cx_fmt(sp, sizeof sp, "%s/%s", dir, d.name)) die("shard-path");
+        size_t sn = 0;
+        char *sb = cx_read(sp, &sn);
+        if (!sb) die("read-shard");
+        char *p = sb, *se = sb + sn;
+        while (p < se) {
+            char *nl = (char *)memchr(p, '\n', (size_t)(se - p));
+            size_t len = nl ? (size_t)(nl - p) : (size_t)(se - p);
+            if (len > 0 && p[0] != '#') {
+                char *t1 = (char *)memchr(p, '\t', len);
+                char *t2 = t1 ? (char *)memchr(t1 + 1, '\t', (size_t)(p + len - (t1 + 1))) : 0;
+                char *t3 = t2 ? (char *)memchr(t2 + 1, '\t', (size_t)(p + len - (t2 + 1))) : 0;
+                if (!t1 || !t2 || !t3) { free(sb); sy_dir_close(&d); die("bad-shard-line"); }
+                int tid = find_table(p, (size_t)(t1 - p));
+                if (tid < 0) { free(sb); sy_dir_close(&d); die("bad-shard-table"); }
+                char sbuf[32];
+                size_t sl = (size_t)(t2 - (t1 + 1));
+                if (sl >= sizeof sbuf) { free(sb); sy_dir_close(&d); die("bad-shard-seq"); }
+                mm_copy(sbuf, sizeof sbuf, t1 + 1, (long)sl); sbuf[sl] = 0;
+                long seq = atol(sbuf);
+                rv_push(all, tid, 0, seq, t2 + 1, (size_t)(t3 - (t2 + 1)), t3 + 1, (size_t)(p + len - (t3 + 1)));
+            }
+            p = nl ? nl + 1 : se;
+        }
+        free(sb);
+    }
+    sy_dir_close(&d);
+    if (next < 0) die("readdir-manifests");
+    if (all->n > 1) qsort(all->v, (size_t)all->n, sizeof(RegRow), rv_cmp_order);
+}
+
+static void synth_tables(const char *dir, np_buf out[RG_NTABLES]) {
+    for (int i = 0; i < RG_NTABLES; i++) { out[i].p = 0; out[i].n = 0; out[i].cap = 0; }
+    RowVec all = {0};
+    load_manifest_dir(dir, &all);
+    for (int i = 0; i < all.n; i++) {
+        RegRow *r = &all.v[i];
+        np_put(&out[r->tid], r->raw, r->raw_len);
+        np_puts(&out[r->tid], "\n");
+    }
+    rv_free(&all);
+}
+
+static int do_check_dir(const char *root, const char *dir) {
+    np_buf gen[RG_NTABLES];
+    synth_tables(dir, gen);
+    int diffs = 0;
+    size_t total_bytes = 0;
+    for (int tid = 0; tid < RG_NTABLES; tid++) {
+        char fp[4400];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", root, RG_TPATH[tid])) die("path-bound");
+        size_t en = 0;
+        char *eb = cx_read(fp, &en);
+        int same = (eb && en == gen[tid].n && (!en || !memcmp(eb, gen[tid].p, en)));
+        if (!same) {
+            fprintf(stderr, "REGISTRY_GEN\tDIFF\ttable=%s\texisting=%zu\tgenerated=%zu\n",
+                    RG_TPATH[tid], eb ? en : 0, gen[tid].n);
+            diffs++;
+        } else {
+            total_bytes += en;
+        }
+        free(eb);
+        free(gen[tid].p);
+    }
+    if (diffs) return 1;
+    printf("REGISTRY_GEN\tSAME\ttables=%d\tbytes=%zu\n", RG_NTABLES, total_bytes);
+    return 0;
+}
+
+static int do_write_dir(const char *dir, const char *out_root) {
+    np_buf gen[RG_NTABLES];
+    synth_tables(dir, gen);
+    char tdir[4400];
+    if (cx_fmt(tdir, sizeof tdir, "%s/tests", out_root)) die("out-path");
+    sy_mkdir_all(tdir, 0755);
+    size_t total_bytes = 0;
+    for (int tid = 0; tid < RG_NTABLES; tid++) {
+        char fp[4400];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", out_root, RG_TPATH[tid])) die("path-bound");
+        if (sy_write_atomic(fp, gen[tid].p, gen[tid].n, 0644)) die("write-table");
+        total_bytes += gen[tid].n;
+        free(gen[tid].p);
+    }
+    printf("REGISTRY_GEN\tWROTE\ttables=%d\tbytes=%zu\tout=%s\n", RG_NTABLES, total_bytes, out_root);
+    return 0;
+}
+
+static unsigned long long fnv1a_64(const char *s) {
+    unsigned long long h = 14695981039346656037ULL;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= (unsigned long long)*p;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* Quantify how many tools-compile shards change when inserting 1 new tool:
+ * sequential 8-per-shard vs stable FNV-1a 64-bit hash bucketing (B=200). */
+static int do_shard_experiment(const char *root) {
+    char fp[4400];
+    if (cx_fmt(fp, sizeof fp, "%s/tests/tools-compile-sources.tsv", root)) die("path-bound");
+    size_t fn = 0;
+    char *fb = cx_read(fp, &fn);
+    if (!fb) die("read-sources");
+    int n = 0;
+    int B = 200;
+    int cnt[200];
+    for (int i = 0; i < B; i++) cnt[i] = 0;
+    char *cur = fb, *end = fb + fn;
+    while (cur < end) {
+        char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+        size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+        if (len > 0 && cur[0] != '#') {
+            char *tab = (char *)memchr(cur, '\t', len);
+            size_t kn = tab ? (size_t)(tab - cur) : len;
+            char kbuf[256];
+            if (kn < sizeof kbuf) {
+                mm_copy(kbuf, sizeof kbuf, cur, (long)kn); kbuf[kn] = 0;
+                cnt[(int)(fnv1a_64(kbuf) % (unsigned long long)B)]++;
+                n++;
+            }
+        }
+        cur = nl ? nl + 1 : end;
+    }
+    free(fb);
+    int seq_shards = (n + 7) / 8;
+    int seq_affected_head = seq_shards;        /* inserting at index 0 shifts every shard */
+    int seq_affected_mid = (seq_shards + 1) / 2;
+    int min_b = cnt[0], max_b = cnt[0], empty_b = 0;
+    for (int i = 0; i < B; i++) {
+        if (cnt[i] < min_b) min_b = cnt[i];
+        if (cnt[i] > max_b) max_b = cnt[i];
+        if (cnt[i] == 0) empty_b++;
+    }
+    printf("SHARD_EXPERIMENT\ttools=%d\tseq_shards=%d\tseq_add_head_affected=%d\tseq_add_mid_affected=%d\thash_buckets=%d\thash_add_any_affected=1\thash_min=%d\thash_max=%d\thash_empty=%d\n",
+           n, seq_shards, seq_affected_head, seq_affected_mid, B, min_b, max_b, empty_b);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int mode = 0; /* 1=split, 2=check, 3=write, 4=shard-experiment */
+    const char *root_arg = ".", *dir_arg = 0, *out_arg = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--split")) mode = 1;
+        else if (tx_eqz(argv[i], "--check")) mode = 2;
+        else if (tx_eqz(argv[i], "--write")) mode = 3;
+        else if (tx_eqz(argv[i], "--shard-experiment")) mode = 4;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--dir") && i + 1 < argc) dir_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_arg = argv[++i];
+        else if (argv[i][0] != '-') root_arg = argv[i];
+        else die("usage: --split|--check|--write|--shard-experiment [--root ROOT] [--dir DIR] [--out OUT]");
+    }
+    if (!mode) die("usage: --split|--check|--write|--shard-experiment");
+
+    char root[4096];
+    if (sy_realpath(root_arg, root, sizeof root) < 0) die("root-realpath");
+
+    if (mode == 4) return do_shard_experiment(root);
+    if (mode == 1) {
+        if (!dir_arg) die("--split requires --dir");
+        return do_split(root, dir_arg);
+    }
+    if (mode == 3) {
+        if (!dir_arg) die("--write requires --dir");
+        return do_write_dir(dir_arg, out_arg ? out_arg : root);
+    }
+
+    /* mode == 2 (--check): if --dir given, check directly; else use ROOT/tests/registry.d if present,
+     * otherwise run stage-1 read-only in-memory split -> synth -> byte-compare roundtrip (fast for gen-all-check). */
+    if (dir_arg) return do_check_dir(root, dir_arg);
+    char def_dir[4400];
+    if (cx_fmt(def_dir, sizeof def_dir, "%s/tests/registry.d", root)) die("def-dir-bound");
+    sy_stat_t st;
+    if (sy_lstat(def_dir, &st) == 0 && st.kind == 'd') return do_check_dir(root, def_dir);
+
+    RowVec all = {0};
+    for (int tid = 0; tid < RG_NTABLES; tid++) {
+        char fp[4400];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", root, RG_TPATH[tid])) die("path-bound");
+        size_t fn = 0;
+        char *fb = cx_read(fp, &fn);
+        if (!fb) die(RG_TPATH[tid]);
+        char *cur = fb, *end = fb + fn;
+        long lno = 0;
+        while (cur < end) {
+            lno++;
+            char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+            size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+            if (is_header_line(tid, lno, cur, len)) {
+                rv_push(&all, tid, 1, lno, "", 0, cur, len);
+            } else {
+                char *tab = (char *)memchr(cur, '\t', len);
+                size_t kn = tab ? (size_t)(tab - cur) : len;
+                rv_push(&all, tid, 0, lno, cur, kn, cur, len);
+            }
+            cur = nl ? nl + 1 : end;
+        }
+        free(fb);
+    }
+    if (all.n > 1) qsort(all.v, (size_t)all.n, sizeof(RegRow), rv_cmp_order);
+    np_buf gen[RG_NTABLES];
+    for (int i = 0; i < RG_NTABLES; i++) { gen[i].p = 0; gen[i].n = 0; gen[i].cap = 0; }
+    for (int i = 0; i < all.n; i++) {
+        np_put(&gen[all.v[i].tid], all.v[i].raw, all.v[i].raw_len);
+        np_puts(&gen[all.v[i].tid], "\n");
+    }
+    rv_free(&all);
+    int diffs = 0;
+    size_t total_bytes = 0;
+    for (int tid = 0; tid < RG_NTABLES; tid++) {
+        char fp[4400];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", root, RG_TPATH[tid])) die("path-bound");
+        size_t en = 0;
+        char *eb = cx_read(fp, &en);
+        int same = (eb && en == gen[tid].n && (!en || !memcmp(eb, gen[tid].p, en)));
+        if (!same) {
+            fprintf(stderr, "REGISTRY_GEN\tDIFF\ttable=%s\texisting=%zu\tgenerated=%zu\n",
+                    RG_TPATH[tid], eb ? en : 0, gen[tid].n);
+            diffs++;
+        } else total_bytes += en;
+        free(eb);
+        free(gen[tid].p);
+    }
+    if (diffs) return 1;
+    printf("REGISTRY_GEN\tSAME\ttables=%d\tbytes=%zu\n", RG_NTABLES, total_bytes);
+    return 0;
+}
