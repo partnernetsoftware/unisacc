@@ -1,0 +1,57 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"loadingmanager","fileloader","glb-container","json-read","loader-json",
+        "gltf-accessor","gltf-sparse-accessor","gltf-primitive-attribute",0};
+    const char json[]="{\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"TEXCOORD_0\":1,\"_DENSITY\":2}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        "{\"componentType\":5126,\"count\":3,\"type\":\"VEC2\",\"sparse\":{\"count\":1,\"indices\":{\"bufferView\":1,\"componentType\":5121},"
+        "\"values\":{\"bufferView\":2}}},{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\",\"normalized\":true}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":1},"
+        "{\"buffer\":0,\"byteOffset\":40,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":48,\"byteLength\":6}]}";
+    const int size=sizeof json-1;
+    char setup[5200];
+    int n=tx_snprintf(setup,sizeof setup,
+        "let input=128;let bin=1024;let request=1200;let out=1248;let target=1344;let key=1440;"
+        "let a=ux_u32_put(GlbResource.json,input);let b=ux_u32_put(GlbResource.jsonBytes,%d);"
+        "let c=ux_u32_put(GlbResource.bin,bin);let d=ux_u32_put(GlbResource.binBytes,54);"
+        "let k=[80,79,83,73,84,73,79,78,84,69,88,67,79,79,82,68,95,48,95,68,69,78,83,73,84,89,85,78,75];"
+        "let j=0;while(j<29){let a=ux_u8_put(1568+j,k[j]);j=j+1;}"
+        "let a=ux_f32_put(bin+12,1.0);let i=ux_u8_put(bin+36,1);let u=ux_f32_put(bin+40,0.5);"
+        "let v=ux_f32_put(bin+44,0.75);let n0=ux_u16_put(bin+48,65535);let n1=ux_u16_put(bin+50,42);"
+        "let n2=ux_u16_put(bin+52,0);",size);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let raw=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,raw[i]);i=i+1;}}",count,at);
+    }
+    #define ATTR(ptr, len) "let n=ux_u32_put(request+GltfPrimitiveAttributeRequest.semanticBytes," len ");" \
+        "let name=ux_u32_put(request+GltfPrimitiveAttributeRequest.semantic," ptr ");" \
+        "let attr=GltfLoader_primitiveAttribute(0,request,out,target,24,key);"
+    #define POS ATTR("1568","8")
+    #define UV ATTR("1576","10")
+    #define DENSITY ATTR("1586","8")
+    const char *cases[]={
+        POS "if(attr<0){return 0.0+attr;}return 0.0+ux_u32(attr+GltfAccessor.count);",
+        POS "return 0.0+(ux_u32(attr+GltfAccessor.bytes)==bin);",
+        POS "return ux_f32(ux_u32(attr+GltfAccessor.bytes)+12);",
+        UV "return 0.0+(ux_u32(attr+GltfAccessor.bytes)==target);",
+        UV "if(attr<0){return 0.0+attr;}return ux_f32(ux_u32(attr+GltfAccessor.bytes)+12);",
+        UV "return ux_f32(ux_u32(attr+GltfAccessor.bytes));",
+        DENSITY "if(attr<0){return 0.0+attr;}return 0.0+ux_u32(attr+GltfAccessor.normalized);",
+        DENSITY "if(attr<0){return 0.0+attr;}return 0.0+ux_u16(ux_u32(attr+GltfAccessor.bytes)+2);",
+        ATTR("1594","3") "return 0.0+attr;",
+        "let bad=ux_u8_put(bin+36,3);let keep=ux_u32_put(out,77);" UV "return 0.0+ux_u32(out);",
+        "let bad=ux_u8_put(bin+36,3);" UV "return 0.0+attr;",
+    };
+    const double gold[]={3,1,1,1,0.75,0,1,42,-8,77,-5};
+    return g_wasm_batch_page("G_IO glTF primitive attributes","gltf-primitive-attribute",
+        "ujs/practice/uxe/test/wasm-batch.html",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?4:-1,UV "return ux_f32(ux_u32(attr+GltfAccessor.bytes)+8);");
+}

@@ -213,7 +213,8 @@
 - ~~ObjectLoader 序列化矩阵 | G-io r160 toJSON、矩阵分解、固定局部矩阵与世界值 | 嵌套树与 Matrix4。~~ 八项通过，拿局部矩阵替换世界矩阵反例从 13 变为 4。
 - ObjectLoader 两阶段整景 | G-io 几何、材质、图像引用及失败回退 | 嵌套树、BufferGeometryLoader、MaterialLoader、图像加载。
 - ~~GLTFLoader 稀疏访问器 | G-io 零底阵列、交错底阵列、顺序、边界和失败保留 | GLB 密集访问器。~~ 14 项通过，补丁索引篡改转红，旧访问器和三角形各八项通过。现阶段对照本地 r160 Attribute。
-- GLTFLoader 访问器接入网格 | G-io 稀疏与密集并用、全部几何属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。
+- ~~GLTFLoader 网格属性访问 | G-io 稀疏 UV、密集位置、归一化自定义属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。~~ 11 项和实际插件 18 项通过，替换 UV 分量反例转红。
+- GLTFLoader 图元整体装配 | G-io 图元模式、拓扑、全部属性数量、稀疏索引及发布 | 网格属性访问、GLB 图元。
 - ~~GLTFLoader 采样器及 r160 插件对照入口 | G-io 过滤、环绕、默认值及异常枚举 | 纹理资源与 GLB 容器。~~ 采样器十一项通过，错绑环绕反例转红。Chromium 真实 r160 插件采样器和稀疏访问器对照十二项通过。
 - GLTFLoader 材质与纹理 | G-io UV、内嵌与外部资源 | GLTF 网格、图像加载、采样器与材质。
 - BLOCKED GLTFLoader 内嵌 JPEG | G-io JPEG 字节、颜色、损坏视图及失败保留 | 图像解码与采样器。共享解码重构及复用现有解码器两种写法均在编译段从六秒界限退出，日志 `/tmp/devsvc-flow-21640281622-3224886/out/x.out` 与 `/tmp/devsvc-flow-21640649511-3296065/out/x.out`。草稿在 `/tmp/cdx2-gltf-jpeg-blocked`，保留断言和时限。
