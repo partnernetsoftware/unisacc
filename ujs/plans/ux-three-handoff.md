@@ -32,6 +32,18 @@ M4 至 M6 候选 `7760ee0` 包含主线 `6c9196081a`。其 `ujs/` 与 `docs/` �
 
 ## 直接续作
 
+M7 尚未开始。恢复后先继续 40 项收口，本轮剩 33 项。燃尽表目前列出全部 115 个部分项，按预计门数与依赖排序。每行的缺口、方法差集和证据可回查同名清单事实行，升格前须补齐实际语义与独立验收。M7 依次接入 Mesh、InstancedMesh、BatchedMesh、LOD、Sprite、Points、三种 Line、Bone、Skeleton 和 SkinnedMesh。
+
+已知缺口及验证入口如下。
+
+(1) WebGL 上下文恢复归 M12。待用真实浏览器上下文丢失与恢复验证资源重建和旧句柄代数拒绝。
+
+(2) Display P3 画布编码未通过。用 `gpu-packet-struct.cx -- --p3-readback` 复查浏览器输出，数学转换与其他色域门仍单独运行。
+
+(3) RectAreaLight 的漫反射切片已通过。镜面 LTC 查表与通用投影仍待实现，以 `gpu-packet-struct.cx -- --area` 和 `--area-mutate` 保留基线。
+
+(4) Toon 显式梯度已与 r160 WebGL2 对照并验证篡改失败，默认梯度过渡仍待验收。
+
 (1) M5 纹理生命周期。`gpu-texture-table.ujs` 已验证 Wasm 固定容量、句柄代数、更新版本、释放与千次回收，纹理描述与像素地址由调用者提供，绘制时复制进包。WebGL 纹理随绘制创建释放，下一步补持久 GPU 句柄、失效与回收，以及颜色空间和像素存储状态。CubeTexture 六面、DataTexture 和 CanvasTexture 的基础像素已有 r160 对照。面内方向、其他数据格式和 Canvas 字节取回仍待补。Texture 矩阵复用 `Matrix3_setUvTransform`。增加宿主能力时更新 `uxe-host-budget.cx` 中审阅后的闭包摘要。
 
 (2) M5 Phong 和 Standard。已在同一正交相机对照球体双方向灯与立方体点灯，使用几何生成器的法线算逐片元光照。`gpu-lit.frag` 用固定的对照材料和光源，下一步把参数接入材质与场景句柄，覆盖金属、贴图、阴影及环境光。
@@ -44,6 +56,10 @@ M4 至 M6 候选 `7760ee0` 包含主线 `6c9196081a`。其 `ujs/` 与 `docs/` �
 
 ```sh
 uptime
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/build-ape.cx
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/cli-host.cx
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --check
+sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/uniformsgroup-struct.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --sampled-mutate
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx -- --targets
