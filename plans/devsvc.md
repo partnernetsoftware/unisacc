@@ -152,6 +152,44 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 6 已知限制与下一单
 
+重写(2026-11-20,依据第"2026-11-20 演进评审"节与 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
+
+已做:
+
+| 项 | 证据入口 |
+|---|---|
+| 固定版本启动器加原生执行体缓存(热调用约 23 ms) | tools/devsvc.cx |
+| 带私有索引的提交事务(私有树求值、CAS 落 ref、他人暂存不被吞;--keyed、--derive、门复用、derive_gate、gen-all 总闸) | tools/commit-own.cx、tools/precommit 系 |
+| 有界命令代理 x、flow、--bg、wait、jobs;flow 引擎(节点表、并发、锁、截止) | tools/cxlib/flowexec.cx |
+| 派生表现算现查 R1 试点两张表(tool-index、product-map) | 第 10 节 |
+| f append、worktree(dvgitx) | build/pkg-gaps.tsv 中 DEVSVC-F-APPEND、DEVSVC-WORKTREE 为 CLOSED |
+
+未做(按版本排期,见演进评审节):
+
+| 项 | 版本 | 单位 |
+|---|---|---|
+| (a) 门拒绝回执带门名、原因码、请求键并入事件;JOB_LOST 入事件 | 0.0.86 | 0.5 |
+| 自有垃圾清理(379 个空实例目录、50 个 commit-derive 残留、两个夹具缓存合计 5G 加容量上限) | 0.0.86 | 0.5 |
+| (b) 提交自愈:doc-links、links、table-index、batch-domain-index 停跟踪;剩余派生漂移在私有树重算并入同一提交 | 0.0.87 | 2 |
+| (d 前半) git merge --continue | 0.0.87 | 0.5 |
+| (c) 持久作业记录加 status --tsv | 0.0.88 | 2 |
+| (d 后半) 登记表(batches.tsv、coverage.tsv 等)由清单生成 | 0.0.88 | 1 |
+| (e) 门按相分预算加短门保留槽 | 0.0.88 之后,以两版门数据决定 | 1.5 |
+| 超时杀脱组后代(DEVSVC-X-TIMEOUT-ORPHANS-DVQUALIFY) | 随 (c) 验收 | - |
+| 参数顺序(DEVSVC-COMMIT-ARG-ORDER) | 随 (a) 用法错度量 | - |
+
+作废(不再投入,设计稿保留):
+
+| 项 | 理由 |
+|---|---|
+| react 链尾反应(冻结) | 影子从未满足 24 小时条件,running=0 |
+| rel 常驻关系图(去掉常驻持有路线项,保留库与 rel 命令) | 端到端实测无收益(398 到 455 ms,与本地扫描无差) |
+| 合并队列 R2 | 已降为回退,不排 |
+| S2 第二期单元二三、S7、S0 推测 | 数据不支持资源仲裁是瓶颈,不排 |
+| 按负载伸缩的门 | 数据不支持负载归因,且触碰不放宽时限 |
+
+以下为原流水账(被上表取代):
+
 - (1) 服务单线程:native 构造期间其它请求排队。改为构造放子进程,主循环继续收请求。
 - (2) 事件环不落盘、无阻塞订阅。加 `events wait --since N --timeout S`(长轮询)与落盘尾段。
 - (3) status 不标路径归属。接 `tools/domain.cx` 与 `tools/own-diff.cx`。
@@ -220,6 +258,57 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 
 - (14) 公开接口改动后整体派生仍可能超过 55 秒:np 双门面迁移使 layer-api、iface-hash、product-map、tool-index、tables-gen、batch-packages-gen、links、doc-links 进入闭包;两次派生阶段在 55806/55654 ms 退出 rc124、stage=none,第二次低载仍复现。分相只隔开提交阶段,尚未把派生本身按表分相。临时按表在同一私有输入树实际构造并全量检查,绑定每表前后身份,再经收据复核提交;不延时限、不跳表。后续单:派生按表调度并行、接口哈希按机械读集只重算受影响消费者,失败实时指明表名与可恢复身份。证据入口 /tmp/npbuf-cdx 与 devsvc jobs/21357621022-2539683。
+
+## 2026-11-20 演进评审
+
+依据:fable 报告 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
+
+### 事实修正
+
+此前叙述里把提交门超窗归因于负载(缺口名 GATE-INNER-DEADLINE-NOT-LOAD-AWARE),数据不支持:近 58 小时主实例 793 次 git.commit 有 242 次非 0(30.5%),提交失败率在 load1 小于 8、8 到 12、不小于 12 三档为 29.9%、37.7%、31.0%,命令超时率 2.0%、1.4%、1.8%(高负载档只有 29 次提交,样本薄:只能说不支持不能说已证伪),125 次门拒绝在事件里不记是哪道门。结论:先让提交会记账与自愈,再谈令牌调度;不做按负载伸缩的门(数据不支持,且触碰不放宽时限)。
+
+### 演进前五项
+
+- (a) 门拒绝回执带门名与原因码与请求键并入事件(0.5 单位,是其余四项验收的前提)。验收先红后绿:夹具故意让 doc-links 漂移提交一次,改前事件只有 class==precommit 查不到 gate=(红),改后含 gate=derive reason=drift:doc-links;原样重试通过后 devsvc budget --gates 对该 request 记 false_stop_candidate=1。
+- (b) 提交自愈(2 单位):doc-links、links、table-index、batch-domain-index 停跟踪(记忆宫殿已有决定 路线 1 派生表停止跟踪,尚未做完),剩余派生物漂移在私有树重算并入同一提交,不复用任何门的通过结论,自愈只重算并独立 --check。验收:git archive 临时仓新增被 plans 引用的文档并提交,改前 rc 1 derive-drift(红),改后一次通过、derive --check drift=0、他人未暂存改动字节不变;停跟踪沿用 R1 逐字节对拍与六类失效负控。
+- (c) 持久作业记录加 status --tsv(2 单位),JOB_LOST 入事件。验收:--bg 作业后对客户端与服务各 kill -9,改前 wait 得 JOB_LOST 空输出(红),改后得真实 rc 与尾部;超时负控:作业自行 setsid 的孙进程超时后 pgrep 为空。
+- (d) git merge --continue 加登记表(batches.tsv coverage.tsv 等)改由清单生成(1.5 单位),不做 keyed 合并驱动。验收:两个私有索引各登记一个新批次先后提交,改前第二笔需重登记(红),改后两笔一次通过且表逐字节等于 tables-gen --write;带冲突的版本分支合入一条命令结束。
+- (e) 门按相分预算加短门保留槽(1.5 单位)。验收:并发 8 路长 flow 时连发 20 笔真实私仓提交,改前出现内层 60005 ms 超窗(红),改后 0 次且各相耗时入事件。
+
+时限裁定:每相有界,但单条命令总耗时仍不得超过 60 秒(不放宽);需要更久则拆成两条各自有界的命令(先备料后提交)。
+
+### 度量基线与判据
+
+- 基线:提交失败率 30.5%;成功提交 p50 7.8 秒 p90 30.9 秒;提交超时 2.4%;后台作业超时 7.3%;用法错 66 次(8.3%)。
+- 0.0.88 判据:提交失败率低于 15%、用法错低于 2%、文档提交的派生拒绝为 0;两版不动就回退。
+- 反向指标:周产品路径提交占比(上次 5.8%)不得继续下降。
+- 需新增记录:门名与原因码、请求键(数人工重试)、JOB_LOST 事件、speed-ledger 每版一行提交门数据。
+- 假停手判定口径:同一请求被拒后原树或只多了派生物即通过记假停手,人改了非派生内容才通过记真拦截;新门首落先影子一版只记不拦。
+
+### 节拍与负责人
+
+- 工具线只在公开后到下次起链前落库,每版最多两项。
+- 负责人:agyneon 实现、cc 集成与真实提交验收、opus 做夹具、cdx(额度紧)只提缺口;devsvc 在 main 上开发(CLAUDE.md 例外规则)不变。
+- 版本分配:0.0.86 拒绝回执与事件(0.5)加自有垃圾清理(0.5,379 个空实例目录与 50 个 commit-derive 残留);0.0.87 提交自愈(2)加合并收尾 git merge --continue(0.5);0.0.88 持久作业与 status(2)加登记表由清单生成(1);合计约 6.5 单位,不进候选键,与 0.0.86 的 W1 W2 M2 无文件相交。
+- 日常投放做成一条带 INSTALLED 回执的 flow,不建标签不走 CI,最后一步预热 prebuild-self 与 tlib kit。
+
+### 收缩清单
+
+- 删 react 冻结(影子从未满足 24 小时条件,running=0)与 rel 常驻图(端到端实测无收益)。
+- 合并队列、S2 第二期单元二三、S7、S0 推测不排。
+- 两个检查夹具缓存(check-devsvc-core 2.6G、check-precommit-gates 2.4G)合计 5G 加容量上限。
+- 第 6 节按已做、未做、作废重写(已做,见第 6 节)。
+- 建议(只写建议,不动 CLAUDE.md,需项目所有者改规则):Read 强制改道 f read 降为告警。
+
+### 未核项(报告第 10 节)
+
+- devtask 无使用:只看了主实例,别的实例的 task-events.tsv 未读。
+- 负载与失败率弱相关:负载取近邻 phase 行,高负载桶样本 29,不能排除 load 18 那段集中超窗;结论是不支持,不是已证伪。
+- git add -N 需求随默认自愈消失:推断。
+- 历史无清单的登记行数量:未核。
+- doc 接口、bump、dvshadow 使用量:未统计。
+- 近 3 天 1481 个提交只计共享检出 main,未含未合入版本分支。
+- 调查中三条只读命令用了 awk、sed -n、grep(未改文件),统计本身用 .cx。
 
 ## 7 路线
 
