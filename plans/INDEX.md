@@ -39,7 +39,8 @@
 | [archive/plans/dep-split.md](../archive/plans/dep-split.md) | 已归档 | net-deps 门 | 共享 facts 与生成器拆分方案 |
 | [plans/dev-methodology-2026-10-28.md](dev-methodology-2026-10-28.md) | 现行 | - | 双车道开发方法学(CLAUDE.md 与 doc-links 保护) |
 | [archive/plans/devsvc-speedup-2026-11-16.md](../archive/plans/devsvc-speedup-2026-11-16.md) | 已归档 | plans/devsvc.md | devsvc 协同提速方案(已合入 devsvc.md) |
-| [plans/devsvc.md](devsvc.md) | 现行 | - | devsvc 仓开发服务设计稿(cc 指定保留);2026-11-20 演进评审(前五项、度量基线、0.0.86 到 0.0.88 工具线节拍)见其"2026-11-20 演进评审"节;分布式演进(产物库、合并队列、状态总线、数据流触发、租约队列、按泳道子门)见其"分布式演进(2026-11-20)"节 |
+| [plans/devsvc.md](devsvc.md) | 现行 | - | devsvc 仓开发服务设计稿(cc 指定保留);2026-11-20 演进评审(前五项、度量基线、0.0.86 到 0.0.88 工具线节拍)见其"2026-11-20 演进评审"节;分布式演进(产物库、合并队列、状态总线、数据流触发、租约队列、按泳道子门)见其"分布式演进(2026-11-20)"节;产线化(设计原则、line/ 盘上合同、目标与证伪)见其"产线化(2026-11-20 决定)"节 |
+| [plans/line-phase0-units.md](line-phase0-units.md) | 现行 | - | 产线化第 0 阶段派工清单(2026-11-20):U1 到 U10 每单元写域、验收命令(先红后绿)、变异要求、估时、依赖、建议负责人;挂 plans/v0.0.87.md L 线 |
 | [archive/plans/goal-10m-unisacc.md](../archive/plans/goal-10m-unisacc.md) | 已归档 | v0.0.80 | 历史定时器提示词(仅 1 处 release 引用) |
 | [archive/plans/goal-oneoff-unisacc.md](../archive/plans/goal-oneoff-unisacc.md) | 已归档 | v0.0.80 | 2026-11-16 一次性 /goal 提示词 |
 | [archive/plans/identity-inventory-2026-11-02.md](../archive/plans/identity-inventory-2026-11-02.md) | 已归档 | plans/root-identity.md | 2026-11-02 身份指纹机制盘点 |
