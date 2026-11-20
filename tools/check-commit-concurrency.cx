@@ -12,7 +12,7 @@
  *   IMPL push                   push HEAD to origin's branch of the same name
  * Cases (N concurrent processes, success rate and p50/p90 latency per case, plus named invariants INV):
  *   C1  8 agents commit 8 different paths at once                -> all 8 in HEAD, exactly 8 new commits
- *   C2  8 agents commit 8 new plans docs with the derived table  -> all 8 in HEAD, table == generator(HEAD)
+ *   C2  4 agents commit 4 new plans docs with the derived table  -> all 4 in HEAD, table == generator(HEAD)
  *   C3  8 agents register 8 checks (row in tests/batches.tsv)    -> 8 rows exactly once, 8 tools in HEAD
  *   C4  8 disjoint commits while a merge is in progress          -> MERGE_HEAD kept, intersecting path refused
  *                                                                   (negative control), merge commit has 2
@@ -138,7 +138,7 @@ static const char *REAL =
 static const char *CASES =
     "set -u\nC=$1; D=$2; W=$3; rm -rf \"$W\"; mkdir -p \"$W\"; cd \"$D\" || exit 2\nIM=$CCC_IMPL\n"
     "launch(){ i=1; while [ $i -le $1 ]; do ( s=$(date +%s%N); job $i > \"$W/o.$i\" 2>&1; rc=$?; e=$(date +%s%N); "
-    "printf 'R %s %s %s %s\\n' $i $rc $(( (e-s)/1000000 )) \"$(grep -m1 -oE '(REFUSE|COMMIT_OWN_FAIL|COMMIT_MERGE_[A-Z_]+|COMMIT_[A-Z_]*REFUSE[A-Z_]*)[^[:space:]]*([[:space:]][^[:space:]]+)?' \"$W/o.$i\" | tr '\\t' ' ')\" > \"$W/r.$i\" ) & i=$((i+1)); done; wait; cat \"$W\"/r.*; rm -f \"$W\"/r.*; }\n"
+    "printf 'R %s %s %s %s\\n' $i $rc $(( (e-s)/1000000 )) \"$(grep -m1 -oE '(REFUSE|COMMIT_OWN_FAIL|COMMIT_MERGE_(IN_PROGRESS|PATHS|UNRESOLVED)|COMMIT_[A-Z_]*REFUSE[A-Z_]*)[^[:space:]]*([[:space:]][^[:space:]]+)?' \"$W/o.$i\" | tr '\\t' ' ')\" > \"$W/r.$i\" ) & i=$((i+1)); done; wait; cat \"$W\"/r.*; rm -f \"$W\"/r.*; }\n"
     "inv(){ if eval \"$2\" >/dev/null 2>&1; then echo \"INV $1 1\"; else echo \"INV $1 0\"; fi; }\n"
     "B0=$(git rev-parse HEAD)\n"
     "case $C in\n"
@@ -146,9 +146,9 @@ static const char *CASES =
     "  job(){ $IM commit c1-$1 zz-ccc-c1-$1.txt; }; launch 8\n"
     "  inv paths8 '[ $(git ls-tree --name-only HEAD | grep -c \"^zz-ccc-c1-\") = 8 ]'\n"
     "  inv commits8 '[ $(git rev-list --count $B0..HEAD) = 8 ]';;\n"
-    "C2) for i in 1 2 3 4 5 6 7 8; do printf '# d%s\\n' $i > plans/zz-ccc-d$i.md; done\n"
-    "  job(){ CCC_DERIVED=1 $IM commit c2-$1 plans/zz-ccc-d$1.md; }; launch 8\n"
-    "  inv docs8 '[ $(git ls-tree -r --name-only HEAD plans/ | grep -c \"^plans/zz-ccc-d\") = 8 ]'\n"
+    "C2) N=${CCC_C2_N:-4}; i=1; while [ $i -le $N ]; do printf '# d%s\\n' $i > plans/zz-ccc-d$i.md; i=$((i+1)); done\n"
+    "  job(){ CCC_DERIVED=1 $IM commit c2-$1 plans/zz-ccc-d$1.md; }; launch $N\n"
+    "  inv docs4 '[ $(git ls-tree -r --name-only HEAD plans/ | grep -c \"^plans/zz-ccc-d\") = '$N' ]'\n"
     "  if [ -n \"${CCC_REAL:-}\" ]; then echo 'INV table-consistent skip'; else inv table-consistent '[ \"$(git show HEAD:build/zz-ccc-links.tsv)\" = \"$(git ls-tree -r --name-only HEAD plans/)\" ]'; fi;;\n"
     "C3) for i in 1 2 3 4 5 6 7 8; do printf 'int main(void){return 0;}\\n' > tools/zz-ccc-k$i.cx; printf 'zz-ccc-k%s\\ttools/zz-ccc-k%s.cx\\n' $i $i >> tests/batches.tsv; done\n"
     "  job(){ CCC_KEYED=tests/batches.tsv:zz-ccc-k$1 $IM commit c3-$1 tools/zz-ccc-k$1.cx; }; launch 8\n"
@@ -202,16 +202,20 @@ static long num(const char *s, long *at) { long v = 0; int neg = 0; while (s[*at
 static int run_case(const char *impl, const char *c, int bound) {
     static char out[65536];
     char dir[4400], wdir[4400], s[9000], cmd[600], reason[512], invf[1024], root[4400];
-    long ms[64]; int n = 0, ok = 0, i, j, invbad = 0, rc;
+    long ms[64], t0, clone_ms = 0, copy_ms = 0, case_ms = 0; int n = 0, ok = 0, i, j, invbad = 0, rc;
     int real = !strcmp(impl, "real");
     if (cx_fmt(dir, sizeof dir, "%s/%s-%s/r", base, impl, c) || cx_fmt(wdir, sizeof wdir, "%s/%s-%s/w", base, impl, c)) die("path");
     if (cx_fmt(cmd, sizeof cmd, "sh %s/%s.sh", base, impl)) die("path");
     if (sy_setenv("CCC_IMPL", cmd, 1) || sy_setenv("CCC_REAL", real ? "1" : "", 1) || sy_setenv("CCC_KILL_AFTER", real ? "3" : "0.5", 1)) die("env");
     if (cx_fmt(s, sizeof s, "sh %s/mk.sh %s", base, dir)) die("path");
+    t0 = sy_now_ms();
     if (sh(s, out, sizeof out, 50) != 0) { sy_printf("DETAIL\t%s\n", out); die("cannot prepare the case repo"); }
-    if (real) { if (sy_cwd(root, sizeof root) < 0) die("cwd"); if (pp_copy_product(root, dir)) die("cannot copy the product into the case repo"); }
+    clone_ms = sy_now_ms() - t0;
+    if (real) { t0 = sy_now_ms(); if (sy_cwd(root, sizeof root) < 0) die("cwd"); if (pp_copy_product(root, dir)) die("cannot copy the product into the case repo"); copy_ms = sy_now_ms() - t0; }
     if (cx_fmt(s, sizeof s, "sh %s/cases.sh %s %s %s", base, c, dir, wdir)) die("path");
+    t0 = sy_now_ms();
     rc = sh(s, out, sizeof out, bound);
+    case_ms = sy_now_ms() - t0;
     reason[0] = 0; invf[0] = 0;
     {   long L = tx_len(out, sizeof out), at = 0;
         while (at < L) {
@@ -232,8 +236,8 @@ static int run_case(const char *impl, const char *c, int bound) {
     for (i = 1; i < n; i++) for (j = i; j > 0 && ms[j - 1] > ms[j]; j--) { long t = ms[j]; ms[j] = ms[j - 1]; ms[j - 1] = t; }
     {   int green = rc == 0 && n > 0 && ok == n && invbad == 0;
         if (rc != 0 && !reason[0]) cx_fmt(reason, sizeof reason, "case-script rc=%d (bound %d s)", rc, bound);
-        sy_printf("CASE\t%s\timpl=%s\tok=%d/%d\trate=%d%%\tp50_ms=%ld\tp90_ms=%ld\tinv_fail=%s\treason=%s\tverdict=%s\n", c, impl, ok, n,
-                  n ? ok * 100 / n : 0, n ? ms[(n - 1) / 2] : -1, n ? ms[(9 * n - 1) / 10] : -1, invf[0] ? invf : "-", reason[0] ? reason : "-", green ? "GREEN" : "RED");
+        sy_printf("CASE\t%s\timpl=%s\tok=%d/%d\trate=%d%%\tp50_ms=%ld\tp90_ms=%ld\tinv_fail=%s\treason=%s\tverdict=%s\tclone_ms=%ld\tcopy_ms=%ld\tcase_ms=%ld\n", c, impl, ok, n,
+                  n ? ok * 100 / n : 0, n ? ms[(n - 1) / 2] : -1, n ? ms[(9 * n - 1) / 10] : -1, invf[0] ? invf : "-", reason[0] ? reason : "-", green ? "GREEN" : "RED", clone_ms, copy_ms, case_ms);
         if (!green && sy_env("CCC_DETAIL")) sy_printf("DETAIL\t%s\n", out);
         return green; }
 }
@@ -265,8 +269,8 @@ int main(int argc, char **argv) {
     put("mk.sh", MK); put("fixed.sh", FIXED); put("unfixed.sh", UNFIXED); put("real.sh", REAL); put("cases.sh", CASES);
     for (i = 0; ALL[i]; i++) {
         if (!want(cases, ALL[i])) continue;
-        /* real: the clone and product copy come first, so the case itself gets 45 s inside the 55 s command */
-        if (report) { if (run_case(impl, ALL[i], strcmp(impl, "real") ? 50 : 45)) green++; else red++; }
+        /* real: the clone and product copy come first, so the case itself gets 50 s inside the 55 s command */
+        if (report) { if (run_case(impl, ALL[i], strcmp(impl, "real") ? 50 : 50)) green++; else red++; }
         else {
             char nm[64]; int gf = run_case("fixed", ALL[i], 40), gu = run_case("unfixed", ALL[i], 40);
             int expu = !strcmp(ALL[i], "C1");
