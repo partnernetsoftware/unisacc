@@ -1,0 +1,69 @@
+struct GltfTextureUriOptions {
+  path: u32;
+  pathBytes: u32;
+  work: u32;
+  workBytes: u32;
+}
+
+struct GltfTextureUri {
+  url: u32;
+  length: u32;
+  sampler: u32;
+  inlineData: u32;
+}
+
+native function gltf_uri_disjoint(at:i64,size:i64,out:i64,url:i64,capacity:i64,work:i64,space:i64) i64 {
+  return file_disjoint(at,size,out,GltfTextureUri.size) &&
+    file_disjoint(at,size,url,capacity) && file_disjoint(at,size,work,space);
+}
+
+// Resolve one texture URI for the resource ABI. The host fetches the owned
+// URL buffer. Data URLs retain their bytes and are marked for inline decode.
+native function GltfLoader_textureUri(glb:i64,index:i64,out:i64,url:i64,capacity:i64,options:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || !loading_span(out,GltfTextureUri.size) ||
+     !loading_span(options,GltfTextureUriOptions.size) || !loader_url_span(url,capacity) ||
+     !file_disjoint(out,GltfTextureUri.size,url,capacity)) { return 0-1; }
+  let work=ux_u32(options+GltfTextureUriOptions.work);
+  let space=ux_u32(options+GltfTextureUriOptions.workBytes);
+  let path=ux_u32(options+GltfTextureUriOptions.path);
+  let path_bytes=ux_u32(options+GltfTextureUriOptions.pathBytes);
+  let json=ux_u32(glb+GlbResource.json);
+  let json_bytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let bin_bytes=ux_u32(glb+GlbResource.binBytes);
+  if(space<13 || work>6291456-space || !loader_url_span(path,path_bytes) ||
+     json>6291456-json_bytes || bin>6291456-bin_bytes ||
+     !gltf_uri_disjoint(glb,GlbResource.size,out,url,capacity,work,space) ||
+     !gltf_uri_disjoint(options,GltfTextureUriOptions.size,out,url,capacity,work,space) ||
+     !gltf_uri_disjoint(json,json_bytes,out,url,capacity,work,space) ||
+     !gltf_uri_disjoint(bin,bin_bytes,out,url,capacity,work,space) ||
+     !gltf_uri_disjoint(path,path_bytes,out,url,capacity,work,space) ||
+     !file_disjoint(out,GltfTextureUri.size,work,space) ||
+     !file_disjoint(url,capacity,work,space)) { return 0-1; }
+  let end=json+json_bytes;
+  let texture=LoaderJson_item(LoaderJson_find(json,end,work,1954047348,1936028277,0,8),end,index);
+  if(texture<0) { return 0-2; }
+  let source=LoaderJson_uint(LoaderJson_find(texture,end,work,1920298867,25955,0,6),end,0-1);
+  let sampler=LoaderJson_uint(LoaderJson_find(texture,end,work,1886216563,7497068,0,7),end,4294967295);
+  let image=LoaderJson_item(LoaderJson_find(json,end,work,1734438249,29541,0,6),end,source);
+  if(image<0 || sampler<0) { return 0-2; }
+  let token=LoaderJson_find(image,end,work,6910581,0,0,3);
+  let view=LoaderJson_find(image,end,work,1717990754,1767273061,30565,10);
+  if(token<0 || view!=0-2) { return 0-3; }
+  let decoded=work+12;
+  let decoded_bytes=Json_decodeString(token,end,decoded,space-12);
+  if(decoded_bytes<=0 || decoded_bytes>65535) { return 0-3; }
+  let i=0;
+  while(i<decoded_bytes) {
+    if(ux_u8(decoded+i)<32 || ux_u8(decoded+i)==127) { return 0-3; }
+    i=i+1;
+  }
+  let length=LoaderUtils_resolveURL(decoded,decoded_bytes,path,path_bytes,url,capacity);
+  if(length<0) { return 0-4; }
+  let inline=loader_url_inline(decoded,decoded_bytes) && loader_url_fold(ux_u8(decoded))==100;
+  let a=ux_u32_put(out+GltfTextureUri.url,url);
+  let b=ux_u32_put(out+GltfTextureUri.length,length);
+  let c=ux_u32_put(out+GltfTextureUri.sampler,sampler);
+  let d=ux_u32_put(out+GltfTextureUri.inlineData,inline);
+  return out;
+}
