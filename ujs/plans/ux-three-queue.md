@@ -36,7 +36,8 @@
 - ~~AnimationUtils GLTF 三次标量与向量差量 | G-anim 三次参考采样、仅修改中间值、切线原样保留 | GLTF 三次插值。~~ 7 项通过，切换到末端参考反例转红。
 - ~~AnimationUtils GLTF 三次四元数差量 | G-anim 四元数乘法次序、归一化与切线保留 | 已有 GLTF 三次插值。~~ 7 项通过，错轴反例转红。
 - AnimationUtils GLTF 整片段接线 | G-anim 同名同类型匹配、混合三次与普通轨道 | 三次轨道数值和四元数差量。
-- Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
+- ~~Raycaster 构造与设置 | G-ray 默认方向、近远、层和阈值，set 保留设置 | 射线布局。~~ 10 项通过，交换近远字段反例转红。
+- Raycaster 场景遍历与排序 | G-ray 递归、层、近远、面索引、UV 和排序 | 对象树与静态三角面拾取。
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
 - CubicInterpolant | G-anim cubicinterpolant-anim.cx：两端自然、零斜率、环绕三种设置与越界夹取；区间缓存和通用缓冲类型待补。补齐 constructor,intervalChanged_,interpolate_,getSettings_,copySampleValue_，运行独立金值及 r160 篡改门 | -
 - DiscreteInterpolant | G-anim discreteinterpolant-anim.cx：连续 f32 视图、重复时刻、倒向查询与区间夹取；非数值样本和缓存待补。补齐 constructor,interpolate_,getSettings_,copySampleValue_,intervalChanged_，运行独立金值及 r160 篡改门 | -
