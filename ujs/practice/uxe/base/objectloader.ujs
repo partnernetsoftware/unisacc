@@ -41,28 +41,43 @@ native function object_load_fields(obj:i64,end:i64,key:i64,node:i64) i64 {
 native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key:i64) i64 {
   if(children==0-2) { return root; }
   if(children<0 || ux_u8(children)!=91) { return 0-3; }
+  let parents=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+  let resume=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
+  let parent=root;
+  let depth=0;
   let at=json_space(children+1,end);
   while(at>=0 && at<end) {
-    if(ux_u8(at)==93) { return root; }
-    if(object_load_kind(at,end,key)!=2) { return 0-3; }
-    let nested=LoaderJson_find(at,end,key,1818847331,1852142180,0,8);
-    if(nested>=0) {
-      let after=json_space(nested+1,end);
-      if(ux_u8(nested)!=91 || after<0 || after>=end || ux_u8(after)!=93) { return 0-3; }
+    if(ux_u8(at)==93) {
+      if(depth==0) { return root; }
+      depth=depth-1;
+      parent=parents[depth];
+      at=resume[depth];
+    } else {
+      if(object_load_kind(at,end,key)!=2) { return 0-3; }
+      let nested=LoaderJson_find(at,end,key,1818847331,1852142180,0,8);
+      if((nested>=0 && ux_u8(nested)!=91) || nested==0-1) { return 0-3; }
+      let group=Group_create(arena);
+      if(group<0) { return 0-4; }
+      if(object_load_fields(at,end,key,Object3D_address(arena,group))<0 ||
+         Object3D_add(arena,parent,group)<0) { return 0-3; }
+      let next=json_space(json_value_end(at,end),end);
+      if(next<0 || next>=end) { return 0-3; }
+      if(ux_u8(next)==44) { next=json_space(next+1,end); }
+      else if(ux_u8(next)!=93) { return 0-3; }
+      if(nested>=0) {
+        if(depth==16) { return 0-3; }
+        parents[depth]=parent;
+        resume[depth]=next;
+        depth=depth+1;
+        parent=group;
+        at=json_space(nested+1,end);
+      } else { at=next; }
     }
-    let group=Group_create(arena);
-    if(group<0) { return 0-4; }
-    if(object_load_fields(at,end,key,Object3D_address(arena,group))<0 || Object3D_add(arena,root,group)<0) { return 0-3; }
-    at=json_space(json_value_end(at,end),end);
-    if(at<0 || at>=end) { return 0-3; }
-    if(ux_u8(at)==93) { return root; }
-    if(ux_u8(at)!=44) { return 0-3; }
-    at=json_space(at+1,end);
   }
   return 0-3;
 }
 
-// Use a private draft arena to prepare a Scene plus its direct Group children.
+// Use a private draft arena to prepare a Scene and its descendant Groups.
 native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 {
   if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
      arena<0 || arena%8!=0 || arena>6291448 || capacity<1 || capacity>(6291448-arena)/424 || !loading_span(key,12)) { return 0-1; }

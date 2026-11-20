@@ -1,0 +1,50 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d","scene","group","json-read","loader-json",
+        "loadingmanager","fileloader","objectloader",0};
+    const char json[]="{\"object\":{\"type\":\"Scene\",\"position\":[1,0,0],\"children\":["
+        "{\"type\":\"Group\",\"position\":[2,0,0],\"children\":[{\"type\":\"Group\",\"visible\":false,\"position\":[4,0,0]},"
+        "{\"type\":\"Group\",\"children\":[]}]},{\"type\":\"Group\",\"position\":[8,0,0]}]}}";
+    const int size=sizeof json-1;
+    const long x=tx_find(json,size,"[4,0,0]",7);
+    const long flag=tx_find(json,size,"false",5);
+    if(x<0 || flag<0) return 2;
+    char setup[4200];
+    int n=tx_snprintf(setup,sizeof setup,"let input=256;let arena=1024;let size=%d;let x=input+%ld;let flag=input+%ld;",
+        size,x+1,flag);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let bytes=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,bytes[i]);i=i+1;}}",count,at);
+    }
+    tx_snprintf(setup+n,sizeof setup-n,"let manager=LoadingManager_init(0);let file=FileLoader_init(32,manager);"
+        "let id=FileLoader_begin(file,64);let decoded=FileLoader_receive(file,id,200,input,size,64);");
+    #define READ "let root=ObjectLoader_scene(file,arena,5,768);let node=Object3D_address(arena,root);"
+    #define FIRST "let branch=ux_u32(node+Object3D.firstChild);let group=Object3D_address(arena,branch);"
+    #define LEAF "let leaf=Object3D_address(arena,ux_u32(group+Object3D.firstChild));"
+    #define WORLD "let updated=Object3D_updateMatrixWorld(arena,root,0);"
+    const char *cases[]={
+        READ "return 0.0+Scene_isScene(arena,root);",
+        READ FIRST "return 0.0+(ux_u32(group+Object3D.parent)==root);",
+        READ FIRST LEAF "return 0.0+(ux_u32(leaf+Object3D.parent)==branch);",
+        READ FIRST LEAF "return 0.0+ux_u32(leaf+Object3D.visible);",
+        READ FIRST LEAF WORLD "return ux_f64(ux_u32(leaf+Object3D.worldMatrix)+96);",
+        READ FIRST WORLD "let sibling=Object3D_address(arena,ux_u32(group+Object3D.nextSibling));"
+        "return ux_f64(ux_u32(sibling+Object3D.worldMatrix)+96);",
+        READ FIRST LEAF "return 0.0+(ux_u32(leaf+Object3D.nextSibling)==ux_u32(group+Object3D.lastChild));",
+        "return 0.0+ObjectLoader_scene(file,arena,4,768);",
+        "let failed=ObjectLoader_scene(file,arena,4,768);return 0.0+Object3D_address(arena,65537);",
+        "let a=ux_u8_put(flag,120);return 0.0+ObjectLoader_scene(file,arena,5,768);",
+    };
+    const double gold[]={1,1,1,0,7,9,1,-4,-1,-2};
+    return g_wasm_batch("G_IO ObjectLoader nested scene","objectloader-tree",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?4:-1,
+        "let a=ux_u8_put(x,53);" READ FIRST LEAF WORLD "return ux_f64(ux_u32(leaf+Object3D.worldMatrix)+96);");
+}
