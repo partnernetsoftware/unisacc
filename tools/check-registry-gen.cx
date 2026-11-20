@@ -11,6 +11,7 @@
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.proc
 #pragma unisa use sys.env
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -54,6 +55,75 @@ static int count_tsv(const char *dir) {
     }
     sy_dir_close(&d);
     return n;
+}
+
+static void crg_check_insert(const char *sdir, const char *outdir) {
+    char path[4500];
+    if (cx_fmt(path, sizeof path, "%s/b-u3-exclusive%%2fa.tsv", sdir)) die("exclusive-path");
+    char *a[] = {"./tools/bound", "12", "sh", prod, gen_src, "--", "--add-row", "--dir", (char *)sdir,
+                 "--table", "batches", "--row", "u3-exclusive/a\tfirst", 0};
+    char *b[] = {"./tools/bound", "12", "sh", prod, gen_src, "--", "--add-row", "--dir", (char *)sdir,
+                 "--table", "batches", "--row", "u3-exclusive/a\tsecond", 0};
+    int pa = sy_spawn(a), pb = sy_spawn(b);
+    int ra = pa > 0 ? sy_wait(pa, 0) : -1, rb = pb > 0 ? sy_wait(pb, 0) : -1;
+    size_t n = 0;
+    char *saved = cx_read(path, &n);
+    const char *want = ra == 0 ? "# registry-shard-v1\nbatches\t0\tu3-exclusive/a\tu3-exclusive/a\tfirst\n"
+                              : "# registry-shard-v1\nbatches\t0\tu3-exclusive/a\tu3-exclusive/a\tsecond\n";
+    crg_record(((ra == 0 && rb == 2) || (ra == 2 && rb == 0)) && saved && n == strlen(want) && !memcmp(saved, want, n),
+               "concurrent-same-key-one-winner", "one rc=0, one rc=2, only the winner's row persists");
+    free(saved);
+
+    char *w[] = {"sh", prod, gen_src, "--", "--write", "--dir", (char *)sdir, "--out", (char *)outdir, 0};
+    np_result r = {0};
+    int rc = run_rg(w, &r);
+    char aggregate[4500];
+    if (cx_fmt(aggregate, sizeof aggregate, "%s/tests/batches.tsv", outdir)) die("aggregate-path");
+    char *table = cx_read(aggregate, &n);
+    crg_record(!rc && !r.rc && table && strstr(table, ra == 0 ? "\nu3-exclusive/a\tfirst\n" : "\nu3-exclusive/a\tsecond\n"),
+               "reserved-row-enters-aggregate", "synthesized from the reserved file");
+    np_free(&r);
+    free(table);
+
+    const char *forged = "# registry-shard-v1\nbatches\t0\tu3-exclusive/a\tother-key\tfirst\n";
+    int wrote = !cx_write(path, forged, strlen(forged));
+    rc = wrote ? run_rg(w, &r) : -1;
+    crg_record(!rc && r.rc == 2 && r.err && strstr(r.err, "shard-row-key-mismatch"),
+               "raw-key-must-match-filename", "a second key cannot be hidden behind the encoded filename");
+    np_free(&r);
+    sy_unlink(path);
+}
+
+static int crg_git(char *const av[], const char *cwd, np_result *result) {
+    char why[512];
+    return !np_run(av, cwd, 0, 10, result, why, sizeof why) && result->rc == 0;
+}
+
+static void crg_check_snapshot(const char *gitroot, const char *shards, const char *outdir) {
+    char kept[4600], foreign[4600], aggregate[4600];
+    if (cx_fmt(kept, sizeof kept, "%s/t-ours.tsv", shards) ||
+        cx_fmt(foreign, sizeof foreign, "%s/t-foreign.tsv", shards) ||
+        cx_fmt(aggregate, sizeof aggregate, "%s/tests/tools-compile-sources.tsv", outdir)) die("snapshot-path");
+    const char *ours = "# registry-shard-v1\ntools-compile-sources\t0\tours\tours\tregular\n";
+    const char *their = "# registry-shard-v1\ntools-compile-sources\t0\tforeign\tforeign\tregular\n";
+    char *stage[] = {"git", "add", "--", "tests/registry.d/t-ours.tsv", 0};
+    char *tree[] = {"git", "write-tree", 0};
+    np_result r = {0}, t = {0}, gen = {0};
+    int ok = !cx_write(kept, ours, strlen(ours)) && !cx_write(foreign, their, strlen(their)) &&
+             crg_git(stage, gitroot, &r) && crg_git(tree, gitroot, &t) && t.outn == 41 && t.out[40] == '\n';
+    if (ok) {
+        t.out[40] = 0;
+        char *write[] = {"sh", prod, gen_src, "--", "--write", "--root", (char *)gitroot,
+                         "--from-tree", t.out, "--out", (char *)outdir, 0};
+        ok = !run_rg(write, &gen) && gen.rc == 0;
+    }
+    size_t size = 0;
+    char *bytes = cx_read(aggregate, &size);
+    crg_record(ok && bytes && strstr(bytes, "tools/alpha.cx\tregular\n") &&
+               strstr(bytes, "ours\tregular\n") && !strstr(bytes, "foreign\tregular\n"),
+               "snapshot-sees-staged-shard-only", "committed base plus own staged row; untracked foreign row excluded");
+    free(bytes);
+    np_free(&gen); np_free(&t); np_free(&r);
 }
 
 int main(void) {
@@ -277,6 +347,7 @@ int main(void) {
         free(tb);
         np_free(&rw);
         crg_record(ok, "two-branch-conflict-free-merge", ok ? "merged-and-synthed" : "failed");
+        crg_check_snapshot(grepo, gdir, gout);
     }
 
     /* 9. Real-insertion tools-compile hash-bucket stability experiment (B=256 power-of-2) */
@@ -293,6 +364,7 @@ int main(void) {
         np_free(&r);
     }
 
+    crg_check_insert(sdir, wout);
     rm_tree(work);
     printf("CHECK_REGISTRY_GEN\tpass=%d\tfail=%d\n", npass, nfail);
     return nfail ? 1 : 0;
