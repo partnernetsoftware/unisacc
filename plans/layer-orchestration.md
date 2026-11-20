@@ -100,6 +100,7 @@
 - 派工后确认送达。
 - 任务板与督导定时器每 15 分钟。
 - 未验证问题不派落库与改配置。
+- 证据入口一律写 ~/ 或仓内相对路径,不写 /home/<用户名>/、/Users/<用户名>/ 这类带系统用户名的绝对路径(本仓有公开发布);ratchet no-home-path 与 tools/no-home-path.cx --staged 守,已写的用 tools/scrub-home-paths.cx --write 改写。工具生成的证据在生成处输出规范化路径。
 
 ## (11) 未核
 

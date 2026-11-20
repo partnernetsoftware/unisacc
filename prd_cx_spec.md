@@ -62,7 +62,7 @@
 脚本放在仓外(如 `$CLAUDE_JOB_DIR/tmp`)时找不到仓根 `cxroot.tsv`,实测报 `module sys.fs: no file .../sys/fs.cx`。做法:在脚本目录放一个链接和一份自己的 `cxroot.tsv`。
 
 ```
-ln -sfn /home/devali/repos/unisacc r        在脚本目录内
+ln -sfn ~/repos/unisacc r        在脚本目录内
 cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把仓根各行的目录加前缀 r/
 需要网络时追加 R<TAB>net<TAB>r/ext/net
 ```

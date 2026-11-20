@@ -1,6 +1,6 @@
 # 核心层接口面与扩展应用层需求矩阵(2026-11-20,只读取证,未改仓,未提交)
 
-基线:main 624f6f8cde,已装产品 0.0.85。统计脚本(.cx):/home/devali/.claude/jobs/2798e440/tmp/cem/usemat.cx(use 与裸 libc 记号扫描,跳注释与字符串,不跟符号链接)、gaps.cx(pkg-gaps 分类)。原始输出:同目录 usemat.tsv、gaps-sum.txt、gaps-open.txt。前序报告(layer-lanes、core-layer-marking、asm-acceleration)的数直接引用,不重做。
+基线:main 624f6f8cde,已装产品 0.0.85。统计脚本(.cx):~/.claude/jobs/2798e440/tmp/cem/usemat.cx(use 与裸 libc 记号扫描,跳注释与字符串,不跟符号链接)、gaps.cx(pkg-gaps 分类)。原始输出:同目录 usemat.tsv、gaps-sum.txt、gaps-open.txt。前序报告(layer-lanes、core-layer-marking、asm-acceleration)的数直接引用,不重做。
 
 ## 0 最重要的判断
 

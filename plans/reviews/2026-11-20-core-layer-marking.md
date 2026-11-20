@@ -1,6 +1,6 @@
 # 核心层如何被区分与强制:取证与立场(2026-11-20)
 
-只读取证,未改仓内文件,未提交。统计脚本 `/home/devali/.claude/jobs/2798e440/tmp/corestat.cx`(逐文件明细 `perfile.tsv` 同目录),实测探针在 `corelayer-probe-1120/`。输入:共享检出 main 22e3e32ef4,`git ls-files '*.cx'` 去掉 archive、ujs、research 后 2366 路径,其中常规文件 2315 个(符号链接不重复计)。
+只读取证,未改仓内文件,未提交。统计脚本 `~/.claude/jobs/2798e440/tmp/corestat.cx`(逐文件明细 `perfile.tsv` 同目录),实测探针在 `corelayer-probe-1120/`。输入:共享检出 main 22e3e32ef4,`git ls-files '*.cx'` 去掉 archive、ujs、research 后 2366 路径,其中常规文件 2315 个(符号链接不重复计)。
 
 过程事故如实记:一次探针命令因目录名与已有文件撞名,cd 失败后把四个探针文件(main1.cx asm1.cx asm2.cx dockscript.cx)写到了仓根;已当场只删这四个自己的文件,`git status` 复核回到原状(仅剩原有的 release/state.tsv 未跟踪)。
 

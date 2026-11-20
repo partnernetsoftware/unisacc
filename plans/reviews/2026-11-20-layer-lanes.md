@@ -12,8 +12,8 @@
 
 ## 1 取证方法与原始数
 
-- 统计脚本:/home/devali/.claude/jobs/2798e440/tmp/lanes/lanes-stat.cx(.cx,git log --no-merges --numstat 分类)。
-- 身份推演:git archive HEAD 到 /home/devali/.claude/jobs/2798e440/tmp/lanes/snap(私有副本),宿主 cc 编 seed/ident.c 得 SID 助手,product-map-query --root snap --candidate-key 得候选键。未跑整链,未改仓内文件。
+- 统计脚本:~/.claude/jobs/2798e440/tmp/lanes/lanes-stat.cx(.cx,git log --no-merges --numstat 分类)。
+- 身份推演:git archive HEAD 到 ~/.claude/jobs/2798e440/tmp/lanes/snap(私有副本),宿主 cc 编 seed/ident.c 得 SID 助手,product-map-query --root snap --candidate-key 得候选键。未跑整链,未改仓内文件。
 
 提交分布(一个提交可同时计入多类;lines 为增加加删除):
 
