@@ -1219,6 +1219,38 @@ static int ev_expand(char **v, int k, int cap) {
     for (int i = 0; i < m && k < cap - 8; i++) v[k++] = ev_names[i];
     return k;
 }
+/* Verify release/evidence.tsv is bound to cand.version and every PASS evidence file exists.
+ * Only an UNKNOWN row with literal path "-" (absent evidence) is whitelisted without cand.version. */
+static void check_evidence_current(const char *evpath, const char *ver) {
+    long n, at = 0, ll; const char *ls; int rows = 0;
+    char *s = slurp(evpath, &n);
+    if (!s) refuse("DECISION", "release/evidence.tsv missing");
+    while (line_next(s, n, &at, &ls, &ll)) {
+        long t1 = tx_chr(ls, ll, '\t');
+        if (t1 != 1 || ls[0] < '1' || ls[0] > '8') continue;
+        const char *r1 = ls + t1 + 1; long rl1 = ll - t1 - 1;
+        long t2 = tx_chr(r1, rl1, '\t');
+        if (t2 <= 0 || t2 >= 16) { free(s); refuse("DECISION", "release/evidence.tsv malformed row"); }
+        char verd[16], pbuf[512];
+        mm_copy(verd, sizeof verd, r1, (size_t)t2); verd[t2] = 0;
+        long plen = rl1 - t2 - 1;
+        if (plen <= 0 || plen >= (long)sizeof pbuf) { free(s); refuse("DECISION", "release/evidence.tsv missing path"); }
+        mm_copy(pbuf, sizeof pbuf, r1 + t2 + 1, (size_t)plen); pbuf[plen] = 0;
+        rows++;
+        if (tx_eqz(verd, "UNKNOWN") && tx_eqz(pbuf, "-")) continue;
+        if (!has(pbuf, plen, ver)) { free(s); refuse("DECISION", "release/evidence.tsv stale: path does not reference candidate version"); }
+        if (tx_eqz(verd, "PASS") && sy_exists(pbuf) != 1) { free(s); refuse("DECISION", "release/evidence.tsv PASS path missing"); }
+    }
+    free(s);
+    if (rows == 0) refuse("DECISION", "release/evidence.tsv has no step rows");
+}
+static void check_decision_current(const char *dpath, const char *ver) {
+    long n = 0; char *s = slurp(dpath, &n);
+    if (!s || n <= 0) { free(s); refuse("DECISION", "decision.txt missing or empty"); }
+    int ok = has(s, n, ver);
+    free(s);
+    if (!ok) refuse("DECISION", "decision.txt does not reference candidate version");
+}
 static void step_y1(void) {
     char notes[200], msg[200], dp[4500];
     char *dv[] = {"sh", checkout_product, "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
@@ -1233,9 +1265,11 @@ static void step_y1(void) {
     else if (cur_step < from_step) refuse("RESUME", "no Y1 recorded for a verify-only step");
     else {
         if (!tx_eqz(cand.ci_run_id, runid)) { if (dry) sy_printf("EDIT\t%d\tDRY\trelease/candidate.tsv ci_run_id=%s\n", cur_step, runid); else set_ci_run_id(); }
+        check_evidence_current("release/evidence.tsv", cand.version);
         cx_fmt(dp, sizeof dp, "%s/decision.txt", dry ? outdir : "release");
         show(dv, "LOCAL");
         if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
+        check_decision_current(dp, cand.version);
         if (act(v, 55, 0, 0)) refuse("Y1_PUSHED", "devsvc git commit Y1 failed");
         if (dry) { gate_deferred("Y1_PUSHED", "Y1 not created in --dry"); return; }
         { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0}; if (run(g, 10, y1sha, sizeof y1sha)) refuse("Y1_PUSHED", "Y1 commit lookup"); }
@@ -1353,9 +1387,12 @@ static void step_y2(void) {
     v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
     gate_main();
+    check_evidence_current("release/evidence.tsv", cand.version);
     cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
     show(dv, "LOCAL");
     if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
+    check_decision_current(dp, cand.version);
+    check_decision_current("release/decision.txt", cand.version);
     ta = slurp(dp, &a); tb = slurp("release/decision.txt", &b);
     same = ta && tb && a == b && !memcmp(ta, tb, (size_t)a);
     free(ta); free(tb);
