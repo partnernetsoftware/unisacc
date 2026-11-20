@@ -22,6 +22,10 @@ enum {
 };
 
 enum {
+    SY_SECCOMP_FLAG_TSYNC = 1
+};
+
+enum {
     SY_MS_RDONLY      = 1,
     SY_MS_NOSUID      = 2,
     SY_MS_NODEV       = 4,
@@ -401,5 +405,75 @@ int sy_seccomp_filter(void) {
         prog.len = (unsigned short)n;
         prog.filter = f;
         return (int)lns_sys(t->seccomp, 1L /* SECCOMP_SET_MODE_FILTER */, 0, (long)&prog, 0, 0);
+    }
+}
+
+/* seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog): install a default-deny filter.
+   Layout (fixed 20-insn prologue, then 2 insns per entry, then RET EPERM):
+     foreign AUDIT_ARCH -> KILL_PROCESS; x32 bit (0x40000000) in nr -> EPERM; clone3 -> ENOSYS;
+     clone with any SY_CLONE_NS_MASK bit in flags -> EPERM, other clone -> ALLOW;
+     ioctl TIOCSTI (0x5412) / TIOCLINUX (0x541C) on the low 32 bits of cmd -> EPERM, other ioctl -> ALLOW;
+     reload nr; ALLOW for each ALLOW_NRS[i]; everything else -> EPERM.
+   The guards precede the allow scan, so listing clone, clone3 or ioctl in ALLOW_NRS cannot bypass them.
+   Duplicate entries are tolerated (they only cost instructions).  FLAGS may only hold
+   SY_SECCOMP_FLAG_TSYNC (passed as SECCOMP_FILTER_FLAG_TSYNC; otherwise only the calling thread).
+   Refusals: -EINVAL for a null list, ALLOW_CNT outside 1..310, an entry outside 0..4095 or unknown
+   FLAGS bits; -ENOSPC when the program would exceed the 640-insn buffer (ALLOW_CNT 310 needs 641);
+   -ENOSYS on non-Linux targets; -EACCES without CAP_SYS_ADMIN or prior sy_no_new_privs(); else -errno. */
+int sy_seccomp_allowlist(const int *allow_nrs, int allow_cnt, int flags) {
+    const LnsTarget *t = lns_target();
+    LnsBpfInsn f[640];
+    int n = 0, cap = 640, i;
+    unsigned int ret_eperm = 0x00050000U | 1U;
+    unsigned int ret_enosys = 0x00050000U | 38U;
+    unsigned int sc_allow = 0x7fff0000U;
+    unsigned int sc_kill = 0x80000000U;
+    unsigned int bpf_ld = 0x20U, bpf_jeq = 0x15U, bpf_jset = 0x45U, bpf_ret = 0x06U;
+    long kflags = 0;
+    if ((flags & ~SY_SECCOMP_FLAG_TSYNC) != 0) return -EINVAL;
+    if (!allow_nrs || allow_cnt <= 0 || allow_cnt > 310) return -EINVAL;
+    for (i = 0; i < allow_cnt; i++) {
+        if (allow_nrs[i] < 0 || allow_nrs[i] > 4095) return -EINVAL;
+    }
+    if (!t) return lns_unavail();
+    if (flags & SY_SECCOMP_FLAG_TSYNC) kflags = 1L; /* SECCOMP_FILTER_FLAG_TSYNC */
+
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 4U);                          /* 0: A = arch */
+    lns_bpf_push(f, &n, cap, bpf_jeq, 1, 0, t->audit_arch);              /* 1 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_kill);                    /* 2 */
+
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 0U);                          /* 3: A = nr */
+    lns_bpf_push(f, &n, cap, bpf_jset, 0, 1, 0x40000000U);               /* 4: x32 -> 5, else 6 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);                  /* 5 */
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 1, (unsigned int)t->clone3);    /* 6: -> 7, else 8 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_enosys);                 /* 7 */
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 4, (unsigned int)t->clone);     /* 8: -> 9, else 13 */
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 16U);                         /* 9: A = args[0] low */
+    lns_bpf_push(f, &n, cap, bpf_jset, 0, 1, (unsigned int)SY_CLONE_NS_MASK); /* 10: -> 11, else 12 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);                  /* 11 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_allow);                   /* 12 */
+
+    lns_bpf_push(f, &n, cap, bpf_jeq, 0, 5, (unsigned int)t->ioctl);     /* 13: -> 14, else 19 */
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 24U);                         /* 14: A = args[1] low */
+    lns_bpf_push(f, &n, cap, bpf_jeq, 2, 0, 0x5412U /* TIOCSTI */);      /* 15: -> 18, else 16 */
+    lns_bpf_push(f, &n, cap, bpf_jeq, 1, 0, 0x541CU /* TIOCLINUX */);    /* 16: -> 18, else 17 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_allow);                   /* 17 */
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);                  /* 18 */
+    lns_bpf_push(f, &n, cap, bpf_ld, 0, 0, 0U);                          /* 19: reload A = nr */
+
+    for (i = 0; i < allow_cnt; i++) {
+        lns_bpf_push(f, &n, cap, bpf_jeq, 0, 1, (unsigned int)allow_nrs[i]);
+        lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, sc_allow);
+    }
+    lns_bpf_push(f, &n, cap, bpf_ret, 0, 0, ret_eperm);
+    if (n > cap) return -ENOSPC;
+
+    {
+        struct { unsigned short len; const LnsBpfInsn *filter; } prog;
+        prog.len = (unsigned short)n;
+        prog.filter = f;
+        return (int)lns_sys(t->seccomp, 1L /* SECCOMP_SET_MODE_FILTER */, kflags, (long)&prog, 0, 0);
     }
 }

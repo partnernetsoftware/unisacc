@@ -1,6 +1,9 @@
 /* From repository root: sh ./unisacc.com tools/check-ext-sysx-linuxns.cx
  * checks ext/sysx/linuxns.cx (sysx.linuxns): Linux namespace/mount/prctl primitives in real
- * unprivileged user-namespace children, argument/OOB/unprivileged refusals, and win/x86_64 +
+ * unprivileged user-namespace children, argument/OOB/unprivileged refusals, sy_seccomp_allowlist
+ * installed in forked children (TSYNC and adversarial 309-entry lists, checked by raw x86_64 syscalls:
+ * allow, deny EPERM, clone3 ENOSYS, NS clone EPERM, TIOCSTI/TIOCLINUX EPERM, x32 EPERM), the
+ * sy_seccomp_filter denylist compat oracle, and win/x86_64 +
  * osx/x86_64 cross-target compilation.  Last line failed=N. */
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
@@ -8,6 +11,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.netraw
+#pragma unisa use sys.sysinfo
 #pragma unisa use os.osx
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
@@ -100,6 +104,16 @@ static int lns_run_child(int (*fn)(void *), void *ud, char *out, int cap, int *r
     return (int)n;
 }
 
+/* Raw x86_64 syscall oracle, independent of lns_targets[]; the batch runs on lnx/x86_64 only. */
+static int lns_is_x86_64(void) {
+    const char *a = sy_arch_name(), *o = sy_os_name();
+    return a && o && tx_eqz(a, "x86_64") && tx_eqz(o, "linux");
+}
+
+static long lns_raw(long n, long a, long b, long c) {
+    return __syscall6(n, a, b, c, 0, 0);
+}
+
 static int lns_child_prctl_seccomp(void *ud) {
     char st[8192];
     int n, uid, gid;
@@ -136,7 +150,126 @@ static int lns_child_prctl_seccomp(void *ud) {
         lns_msg("FAIL:seccomp_blocks\n"); return 1;
     }
     lns_msg("OK:seccomp_filter\n");
+    /* Denylist compat oracle: unlisted getppid still allowed, clone3 -> ENOSYS, TIOCSTI -> EPERM,
+       x32 bit -> EPERM, plain clone flags allowed path untouched. */
+    {
+        int c = 0;
+        if (!lns_is_x86_64() || lns_raw(110 /* getppid */, 0, 0, 0) <= 0
+            || lns_raw(435 /* clone3 */, 0, 0, 0) != -ENOSYS
+            || lns_raw(16 /* ioctl */, 1, 0x5412, (long)&c) != -EPERM
+            || lns_raw(16 /* ioctl */, 1, 0x541C, (long)&c) != -EPERM
+            || lns_raw(56 /* clone */, SY_CLONE_NEWUSER | 17, 0, 0) != -EPERM
+            || lns_raw(0x40000000L | 39L, 0, 0, 0) != -EPERM) {
+            lns_msg("FAIL:seccomp_filter_compat\n"); return 1;
+        }
+    }
+    lns_msg("OK:seccomp_filter_compat\n");
     return 0;
+}
+
+/* ---- sy_seccomp_allowlist: real installs in forked children, checked with raw x86_64 syscalls ---- */
+
+typedef struct {
+    int flags;
+    int adversarial;   /* also list clone/clone3/ioctl and pad with duplicates to 309 entries */
+} LnsAlCfg;
+
+static const int lns_al_base[] = {
+    0 /* read */, 1 /* write */, 2 /* open */, 3 /* close */, 5 /* fstat */, 8 /* lseek */,
+    15 /* rt_sigreturn */, 17 /* pread64 */, 39 /* getpid */, 60 /* exit */, 61 /* wait4 */,
+    231 /* exit_group */, 257 /* openat */, 262 /* newfstatat */
+};
+
+static int lns_child_allowlist(void *ud) {
+    const LnsAlCfg *cfg = (const LnsAlCfg *)ud;
+    int list[320], cnt = 0, i, st[1], c = 0, iv = 0, n;
+    char buf[8192];
+    long r;
+    if (!lns_is_x86_64()) { lns_msg("FAIL:al_not_x86_64\n"); return 1; }
+    for (i = 0; i < (int)(sizeof lns_al_base / sizeof lns_al_base[0]); i++) list[cnt++] = lns_al_base[i];
+    if (cfg->adversarial) {
+        list[cnt++] = 56;  /* clone */
+        list[cnt++] = 435; /* clone3 */
+        list[cnt++] = 16;  /* ioctl */
+        while (cnt < 309) list[cnt++] = 39;
+    }
+    if (sy_seccomp_allowlist(list, cnt, cfg->flags) != -EACCES) { lns_msg("FAIL:al_needs_nnp\n"); return 1; }
+    lns_msg("OK:al_needs_nnp\n");
+    if (sy_no_new_privs() != 0) { lns_msg("FAIL:al_nnp\n"); return 1; }
+    if (sy_seccomp_allowlist(list, cnt, cfg->flags) != 0) { lns_msg("FAIL:al_install\n"); return 1; }
+    lns_msg("OK:al_install\n");
+    n = lns_read_text("/proc/self/status", buf, (int)sizeof buf);
+    if (n <= 0 || !lns_has_line(buf, n, "Seccomp:\t2")) { lns_msg("FAIL:al_proc\n"); return 1; }
+    lns_msg("OK:al_proc\n");
+    if (lns_raw(39 /* getpid */, 0, 0, 0) <= 0) { lns_msg("FAIL:al_allow\n"); return 1; }
+    lns_msg("OK:al_allow\n");
+    if (lns_raw(110 /* getppid */, 0, 0, 0) != -EPERM
+        || lns_raw(272 /* unshare */, SY_CLONE_NEWUTS, 0, 0) != -EPERM
+        || lns_raw(165 /* mount */, (long)"none", (long)"/tmp", (long)"tmpfs") != -EPERM
+        || lns_raw(155 /* pivot_root */, (long)"/tmp", (long)"/tmp", 0) != -EPERM
+        || lns_raw(101 /* ptrace */, 0, 0, 0) != -EPERM
+        || lns_raw(311 /* process_vm_writev */, 0, 0, 0) != -EPERM) {
+        lns_msg("FAIL:al_deny\n"); return 1;
+    }
+    lns_msg("OK:al_deny\n");
+    if (lns_raw(435 /* clone3 */, 0, 0, 0) != -ENOSYS) { lns_msg("FAIL:al_clone3\n"); return 1; }
+    lns_msg("OK:al_clone3\n");
+    if (lns_raw(56, SY_CLONE_NEWUSER | 17, 0, 0) != -EPERM || lns_raw(56, SY_CLONE_NEWNS | 17, 0, 0) != -EPERM
+        || lns_raw(56, SY_CLONE_NEWTIME | 17, 0, 0) != -EPERM || lns_raw(56, SY_CLONE_NEWNET | 17, 0, 0) != -EPERM
+        || lns_raw(56, SY_CLONE_NEWPID | 17, 0, 0) != -EPERM) {
+        lns_msg("FAIL:al_clone_ns\n"); return 1;
+    }
+    lns_msg("OK:al_clone_ns\n");
+    r = lns_raw(56 /* clone */, 17 /* SIGCHLD */, 0, 0);
+    if (r == 0) { (void)lns_raw(231 /* exit_group */, 0, 0, 0); return 0; }
+    st[0] = 0;
+    if (r < 0 || lns_raw(61 /* wait4 */, r, (long)st, 0) != r) { lns_msg("FAIL:al_clone_plain\n"); return 1; }
+    lns_msg("OK:al_clone_plain\n");
+    if (lns_raw(16, 1, 0x5412, (long)&c) != -EPERM || lns_raw(16, 1, 0x541C, (long)&c) != -EPERM
+        || lns_raw(16, 1, 0x100005412L, (long)&c) != -EPERM) {
+        lns_msg("FAIL:al_ioctl_guard\n"); return 1;
+    }
+    lns_msg("OK:al_ioctl_guard\n");
+    if (lns_raw(16, 1, 0x541B /* FIONREAD */, (long)&iv) != 0) { lns_msg("FAIL:al_ioctl_other\n"); return 1; }
+    lns_msg("OK:al_ioctl_other\n");
+    if (lns_raw(0x40000000L | 39L, 0, 0, 0) != -EPERM || lns_raw(0x40000000L | 1L, 1, 0, 0) != -EPERM) {
+        lns_msg("FAIL:al_x32\n"); return 1;
+    }
+    lns_msg("OK:al_x32\n");
+    return 0;
+}
+
+static void lns_al_child_ck(const LnsAlCfg *cfg, const char *tag) {
+    static const char *const marks[] = {
+        "al_needs_nnp", "al_install", "al_proc", "al_allow", "al_deny", "al_clone3", "al_clone_ns",
+        "al_clone_plain", "al_ioctl_guard", "al_ioctl_other", "al_x32"
+    };
+    char out[8192], name[128], mark[64];
+    int rc = -1, n, i;
+    n = lns_run_child(lns_child_allowlist, (void *)cfg, out, (int)sizeof out, &rc);
+    for (i = 0; i < (int)(sizeof marks / sizeof marks[0]); i++) {
+        int ok = !cx_fmt(name, sizeof name, "allowlist-%s-%s", tag, marks[i])
+                 && !cx_fmt(mark, sizeof mark, "OK:%s\n", marks[i]);
+        lns_ck(ok && n > 0 && rc == 0 && lns_has_line(out, n, mark), name);
+    }
+}
+
+static void lns_al_args(void) {
+    int big[311], one[1], i;
+    for (i = 0; i < 311; i++) big[i] = 39;
+    one[0] = 39;
+    lns_ck(sy_seccomp_allowlist(0, 1, 0) == -EINVAL, "allowlist-null-einval");
+    lns_ck(sy_seccomp_allowlist(one, 0, 0) == -EINVAL && sy_seccomp_allowlist(one, -1, 0) == -EINVAL, "allowlist-cnt-nonpos-einval");
+    lns_ck(sy_seccomp_allowlist(big, 311, 0) == -EINVAL, "allowlist-cnt-over-310-einval");
+    lns_ck(sy_seccomp_allowlist(big, 310, 0) == -ENOSPC, "allowlist-cnt-310-enospc");
+    lns_ck(sy_seccomp_allowlist(one, 1, 2) == -EINVAL && sy_seccomp_allowlist(one, 1, -1) == -EINVAL
+           && sy_seccomp_allowlist(one, 1, SY_SECCOMP_FLAG_TSYNC | 4) == -EINVAL, "allowlist-flags-einval");
+    big[5] = -1;
+    lns_ck(sy_seccomp_allowlist(big, 6, 0) == -EINVAL, "allowlist-nr-negative-einval");
+    big[5] = 0x40000000 | 39;
+    lns_ck(sy_seccomp_allowlist(big, 6, 0) == -EINVAL, "allowlist-nr-x32-einval");
+    big[5] = 4096;
+    lns_ck(sy_seccomp_allowlist(big, 6, 0) == -EINVAL, "allowlist-nr-over-4095-einval");
 }
 
 static int lns_udp_lo_reachable(void) {
@@ -233,6 +366,8 @@ static int lns_cross_compile(const char *td, const char *target, const char *out
         "          | sy_umount2(\"b\", SY_MNT_DETACH) | sy_pivot_root(\"a\", \"b\") | sy_sethostname(\"x\", 1)\n"
         "          | sy_net_lo_up() | sy_seccomp_filter() | sy_mnt_flags(\"/\", &fl)\n"
         "          | sy_pdeathsig(15) | sy_set_dumpable(0) | sy_no_new_privs() | sy_drop_all_caps();\n"
+        "    static const int al[2] = { 0, 1 };\n"
+        "    if (sy_seccomp_allowlist(al, 2, SY_SECCOMP_FLAG_TSYNC) != -ENOSYS && sy_seccomp_allowlist(al, 2, 0) == 0) return 2;\n"
         "    return r ? 0 : 1;\n"
         "}\n";
     sy_spawn_t sp;
@@ -286,6 +421,15 @@ int main(void) {
     lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:no_new_privs\n"), "child-no-new-privs");
     lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:drop_all_caps\n"), "child-drop-all-caps");
     lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:seccomp_filter\n"), "child-seccomp-filter");
+    lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:seccomp_filter_compat\n"), "child-seccomp-filter-compat");
+
+    lns_al_args();
+    {
+        static const LnsAlCfg al_tsync = { SY_SECCOMP_FLAG_TSYNC, 0 };
+        static const LnsAlCfg al_adv = { 0, 1 };
+        lns_al_child_ck(&al_tsync, "tsync");
+        lns_al_child_ck(&al_adv, "adversarial309");
+    }
 
     n = lns_run_child(lns_child_ns_mount_pivot, td, out, (int)sizeof out, &rc);
     lns_ck(n > 0 && rc == 0 && lns_has_line(out, n, "OK:unshare\n"), "child-unshare");
