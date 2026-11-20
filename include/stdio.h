@@ -36,7 +36,9 @@ typedef struct { __u_word __u_pos; int __u_count; unsigned int __u_wch; } fpos_t
 #define stdout ((FILE *)(_UNISA_STDIO_BASE + 1))
 #define stderr ((FILE *)(_UNISA_STDIO_BASE + 2))
 
-static int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
+/* tmpfile uses this helper before its definition. Its parameter types
+   are unchanged by the default argument promotions. */
+static __u_word _u_digits();
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
 static int _unisa_fd(FILE *__u_f) {
