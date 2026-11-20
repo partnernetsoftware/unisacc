@@ -59,6 +59,7 @@
  * sets plus the outputs -> inputs closure inside derive.cx), one --write --touched, and --check --only NAME for EVERY
  * selected table (not only the ones a --write wrote), so a cache-identical row is still checked. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
 #pragma unisa use sys.time
@@ -395,7 +396,7 @@ static void co_reclaim_one_slot(const char *base) {
         if (d_pos >= 0) dl = atol(t + d_pos + 11);
 
         unsigned long long cur_bt = pi_host_btime();
-        long now_s = sy_now_ms() / 1000L;
+        long now_s = sy_wall_s();
         if (bt > 0ULL && cur_bt > 0ULL && bt != cur_bt) reason = "btime-mismatch";
         else if (dl > 0 && now_s > dl) reason = "expired";
         else if (pid > 0 && sy_signal(pid, 0) == -ESRCH) reason = "holder-dead";
@@ -411,6 +412,56 @@ static void co_reclaim_one_slot(const char *base) {
     (void)sy_unlink(owp);
 }
 
+/* U6: return 1 if any live git process has cwd inside worktree WT (live-lock negative control). */
+static int co_active_git_in_cwd(const char *wt) {
+    sy_dir_t d;
+    long wlen = tx_len(wt, 4096);
+    int me = (int)sy_pid(), found = 0;
+    if (!wlen || sy_dir_open(&d, "/proc") != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        int pid = 0;
+        long i;
+        if (d.name_n <= 0 || d.name_n > 12) continue;
+        for (i = 0; i < (long)d.name_n; i++) {
+            if (d.name[i] < '0' || d.name[i] > '9') { pid = -1; break; }
+            pid = pid * 10 + (d.name[i] - '0');
+        }
+        if (pid <= 0 || pid == me) continue;
+        char cp[64], lp[64], cwd[4096], cb[64];
+        if (tx_snprintf(cp, sizeof cp, "/proc/%d/comm", pid) >= (int)sizeof cp) continue;
+        int cfd = sy_open(cp, O_RDONLY, 0);
+        if (cfd < 0) continue;
+        long cn = sy_read(cfd, cb, sizeof cb - 1);
+        sy_close(cfd);
+        if (cn <= 0) continue;
+        while (cn > 0 && (cb[cn - 1] == '\n' || cb[cn - 1] == '\r')) cn--;
+        if (!(cn == 3 && cb[0] == 'g' && cb[1] == 'i' && cb[2] == 't')) continue;
+        if (tx_snprintf(lp, sizeof lp, "/proc/%d/cwd", pid) >= (int)sizeof lp) continue;
+        long rn = sy_readlink(lp, cwd, (long)sizeof cwd - 1);
+        if (rn <= 0) continue;
+        cwd[rn] = 0;
+        if (rn >= wlen && !memcmp(cwd, wt, (size_t)wlen) && (rn == wlen || cwd[wlen] == '/')) { found = 1; break; }
+    }
+    sy_dir_close(&d);
+    return found;
+}
+
+/* U6: reclaim stale .git/index.lock when mtime > 60 s and no live git process has cwd in this worktree. */
+static void co_reclaim_git_index_lock(void) {
+    char gdir[4096], wt[4096], lk[4200];
+    char *gv[] = {"git", "rev-parse", "--absolute-git-dir", 0};
+    char *wv[] = {"git", "rev-parse", "--show-toplevel", 0};
+    sy_stat_t st;
+    if (run(gv, gdir, sizeof gdir) != 0 || !gdir[0]) return;
+    if (run(wv, wt, sizeof wt) != 0 || !wt[0]) return;
+    if (tx_snprintf(lk, sizeof lk, "%s/index.lock", gdir) >= (int)sizeof lk) return;
+    if (sy_stat(lk, &st) != 0) return;
+    long now_s = sy_wall_s();
+    if (now_s - (long)st.mtime < 60L) return;
+    if (co_active_git_in_cwd(wt)) return;
+    if (sy_unlink(lk) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=index-lock-expired\n", lk);
+}
+
 static void co_reclaim_stale_locks(const char *tdir) {
     char base[480];
     if (!tdir || !tdir[0]) return;
@@ -422,6 +473,7 @@ static void co_reclaim_stale_locks(const char *tdir) {
         if (tx_snprintf(base, sizeof base, "%s/commit-own-d%d", tdir, d) < (int)sizeof base)
             co_reclaim_one_slot(base);
     }
+    co_reclaim_git_index_lock();
 }
 /* --derive, after the commit: the shared work-tree copy of PATH gets only the recomputed lines (see the header for
    the count rule).  OLDB = the HEAD blob ("" = new file), NEWB = the committed blob.  0 written or nothing to do. */
@@ -1478,6 +1530,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         for (k = 0; k < np0; k++) {   /* a commit path that derive also rewrote (blob differs from the work tree) */
             int j; for (j = 0; j < nder; j++) if (tx_eqz(path[k], dpath[j])) { char ob[48], om[8]; entry(basec, path[k], ob, om); co_merge(path[k], ob, blob[k]); }
         }
+        co_reclaim_git_index_lock();
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
             entry(0, path[k], ib, im);

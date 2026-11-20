@@ -90,28 +90,72 @@ static void scan_dir(const char *dir, const char *prefix, long since) {
 }
 /* 事件侧 */
 typedef struct { char o[64]; int c[7]; } Own;
+typedef struct { char k[64]; int n; } KvCnt;
 static Own ow[64]; static int now_;
+static KvCnt cf_gates[64], sl_reasons[32];
+static int ncf_gates, nsl_reasons, cf_total, cf_fail, sl_total;
 static const char *kinds[7] = {"f", "x", "flow", "doc", "git", "lock", "run"};
-static int scan_events(const char *path) {
+static void kv_inc(KvCnt *arr, int *n, int cap, const char *k) {
+    int i;
+    for (i = 0; i < *n; i++) if (!strcmp(arr[i].k, k)) { arr[i].n++; return; }
+    if (*n < cap) { F(arr[*n].k, sizeof arr[*n].k, "%s", k); arr[*n].n = 1; (*n)++; }
+}
+static int ev_field(const char *s, const char *key, char *dst, size_t cap) {
+    size_t kl = strlen(key); const char *p = s;
+    while ((p = strstr(p, key))) {
+        if (p == s || p[-1] == '\t' || p[-1] == ' ') {
+            size_t i = 0; p += kl;
+            while (*p == '=') p++;
+            while (p[i] && p[i] != '\t' && p[i] != ' ' && i + 1 < cap) { dst[i] = p[i]; i++; }
+            dst[i] = 0;
+            return 1;
+        }
+        p += kl;
+    }
+    return 0;
+}
+static int scan_events(const char *path, long since) {
     void *buf = 0; long n = 0; char *q, *e; int got = 0;
     if (sy_read_file(path, &buf, &n, 1L << 26) || !buf) return 0;
     for (q = (char *)buf; q < (char *)buf + n; q = e + 1) {
-        char kind[32], o[64]; char *t[5]; int k, i, w; Own *x;
+        char kind[32], fullk[48], o[64]; char *t[5]; int k, i, w; Own *x;
         e = memchr(q, '\n', (char *)buf + n - q); if (!e) e = (char *)buf + n;
         { char sv = *e; *e = 0;
           if (!strncmp(q, "EV\t", 3)) {
             t[0] = q;
             for (i = 0; i < 4 && t[i]; i++) { t[i + 1] = strchr(t[i], '\t'); if (t[i + 1]) t[i + 1]++; }
             if (t[3]) {
+                long ts = t[2] ? atol(t[2]) : 0;
+                long ts_s = ts > 1000000000000L ? ts / 1000L : ts;
+                int in_win = (ts_s < 1000000000L || ts_s >= since);
                 char *a = strstr(t[3], "owner="); w = 0;
                 for (i = 0; t[3][i] && t[3][i] != '\t' && t[3][i] != '.' && i < 31; i++) kind[w++] = t[3][i];
                 kind[w] = 0;
+                w = 0;
+                for (i = 0; t[3][i] && t[3][i] != '\t' && i < 47; i++) fullk[w++] = t[3][i];
+                fullk[w] = 0;
                 if (a) { for (i = 0, a += 6; a[i] && a[i] != '\t' && a[i] != ' ' && i < 63; i++) o[i] = a[i]; o[i] = 0; } else F(o, sizeof o, "-");
                 for (k = 0; k < 7 && strcmp(kind, kinds[k]); k++) ;
                 if (k < 7) {
                     for (x = ow; x < ow + now_ && strcmp(x->o, o); x++) ;
                     if (x == ow + now_ && now_ < 64) { memset(x, 0, sizeof *x); F(x->o, sizeof x->o, "%s", o); now_++; }
                     if (x < ow + now_) { x->c[k]++; got++; }
+                }
+                if (in_win && !strcmp(fullk, "git.commit")) {
+                    char rcs[16], gt[64], cl[64];
+                    cf_total++;
+                    if (ev_field(t[4] ? t[4] : t[3], "rc=", rcs, sizeof rcs) && atoi(rcs) != 0) {
+                        const char *bucket = "unknown";
+                        cf_fail++;
+                        if (ev_field(t[4] ? t[4] : t[3], "gate=", gt, sizeof gt) && gt[0] && strcmp(gt, "-")) bucket = gt;
+                        else if (ev_field(t[4] ? t[4] : t[3], "class=", cl, sizeof cl) && cl[0] && strcmp(cl, "-")) bucket = cl;
+                        kv_inc(cf_gates, &ncf_gates, 64, bucket);
+                    }
+                } else if (in_win && !strcmp(fullk, "commit.stale_lock")) {
+                    char rs[64];
+                    sl_total++;
+                    if (!ev_field(t[4] ? t[4] : t[3], "reason=", rs, sizeof rs) || !rs[0]) F(rs, sizeof rs, "unknown");
+                    kv_inc(sl_reasons, &nsl_reasons, 32, rs);
                 }
             }
           }
@@ -120,11 +164,11 @@ static int scan_events(const char *path) {
     free(buf);
     return got;
 }
-static void scan_events_default(void) {
+static void scan_events_default(long since) {
     char base[700], p[1100]; sy_dir_t d; int got = 0;
     F(base, sizeof base, "%s/.cache/unisacc/devsvc", home);
     if (sy_dir_open(&d, base)) return;
-    while (sy_dir_next(&d) == 1) if (d.kind == 'd') { F(p, sizeof p, "%s/%s/events.tsv", base, d.name); got += scan_events(p); }
+    while (sy_dir_next(&d) == 1) if (d.kind == 'd') { F(p, sizeof p, "%s/%s/events.tsv", base, d.name); got += scan_events(p, since); }
     sy_dir_close(&d);
 }
 /* ISO 时间 2026-11-15T09:44:48.879Z(UTC)转 epoch 秒;不是这个形状返回 -1 */
@@ -162,23 +206,31 @@ static void hookwarn(const char *path, long since) {
     if (!nn) printf("HOOKWARN\tnone\t0\n");
 }
 int main(int argc, char **argv) {
-    long hours = 6, since, now = 0; int i; char proj[1100], warnf[1100]; const char *evf = 0, *h;
+    long hours = 6, since, now = 0; int i, cf_only = 0; char proj[1100], warnf[1100]; const char *evf = 0, *h;
     h = getenv("HOME"); F(home, sizeof home, "%s", h ? h : "/root");
     if (!sy_cwd(root, sizeof root)) {} else root[0] = 0;
     F(proj, sizeof proj, "%s/.claude/projects/-home-devali-repos-unisacc", home);
     F(warnf, sizeof warnf, "%s/.cache/unisacc/devsvc/hook-warn.tsv", home);
-    for (i = 1; i + 1 < argc; i += 2) {
-        if (!strcmp(argv[i], "--hours")) hours = atol(argv[i + 1]);
-        else if (!strcmp(argv[i], "--proj")) F(proj, sizeof proj, "%s", argv[i + 1]);
-        else if (!strcmp(argv[i], "--events")) evf = argv[i + 1];
-        else if (!strcmp(argv[i], "--warn")) F(warnf, sizeof warnf, "%s", argv[i + 1]);
-        else if (!strcmp(argv[i], "--now")) now = atol(argv[i + 1]);   /* 窗口终点(epoch 秒),检查用;缺省取当前时间 */
-        else if (!strcmp(argv[i], "--root")) F(root, sizeof root, "%s", argv[i + 1]);
+    for (i = 1; i < argc; ) {
+        if (!strcmp(argv[i], "--commit-fail-only")) { cf_only = 1; i++; }
+        else if (i + 1 < argc && !strcmp(argv[i], "--hours")) { hours = atol(argv[i + 1]); i += 2; }
+        else if (i + 1 < argc && !strcmp(argv[i], "--proj")) { F(proj, sizeof proj, "%s", argv[i + 1]); i += 2; }
+        else if (i + 1 < argc && !strcmp(argv[i], "--events")) { evf = argv[i + 1]; i += 2; }
+        else if (i + 1 < argc && !strcmp(argv[i], "--warn")) { F(warnf, sizeof warnf, "%s", argv[i + 1]); i += 2; }
+        else if (i + 1 < argc && !strcmp(argv[i], "--now")) { now = atol(argv[i + 1]); i += 2; }   /* 窗口终点(epoch 秒),检查用;缺省取当前时间 */
+        else if (i + 1 < argc && !strcmp(argv[i], "--root")) { F(root, sizeof root, "%s", argv[i + 1]); i += 2; }
         else { fprintf(stderr, "devsvc-usage: REFUSE unknown arg %s\n", argv[i]); return 2; }
     }
     if (hours < 1 || !root[0]) { fprintf(stderr, "devsvc-usage: REFUSE bad hours/root\n"); return 2; }
-    since = (now > 0 ? now : sy_now_ms() / 1000) - hours * 3600;
-    if (evf) scan_events(evf); else scan_events_default();
+    since = (now > 0 ? now : sy_wall_s()) - hours * 3600;
+    if (evf) scan_events(evf, since); else scan_events_default(since);
+    for (i = 0; i < ncf_gates; i++)
+        printf("COMMIT_FAIL_GATE\tgate=%s\tcount=%d\n", cf_gates[i].k, cf_gates[i].n);
+    printf("COMMIT_FAIL\ttotal=%d\tfail=%d\trate=%.1f\n", cf_total, cf_fail, cf_total ? (double)cf_fail * 100.0 / cf_total : 0.0);
+    for (i = 0; i < nsl_reasons; i++)
+        printf("STALE_LOCK\treason=%s\tcount=%d\n", sl_reasons[i].k, sl_reasons[i].n);
+    printf("STALE_LOCK_TOTAL\tcount=%d\n", sl_total);
+    if (cf_only) return 0;
     if (!now_) printf("EVENTS\tnone\n");
     for (i = 0; i < now_; i++)
         printf("EVENTS\towner=%s\tf=%d\tx=%d\tflow=%d\tdoc=%d\tgit=%d\tlock=%d\trun=%d\n", ow[i].o, ow[i].c[0], ow[i].c[1], ow[i].c[2], ow[i].c[3], ow[i].c[4], ow[i].c[5], ow[i].c[6]);

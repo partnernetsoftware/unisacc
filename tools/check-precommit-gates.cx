@@ -284,7 +284,7 @@ static void group_tree_isolate(void) {
 /* PC: commit-own reclaims stale slot index locks (0-byte no-holder, dead PID, btime mismatch, expired)
  * and never removes an active lock held by a live process within deadline. */
 static void group_stale_lock(void) {
-    char out[16384], cmd[2048], root[2048], tmp[256];
+    char out[16384], cmd[4096], root[2048], tmp[256];
     if (sy_realpath(".", root, sizeof root) < 0) { ck(0, "stale-lock.realpath"); return; }
     if (cx_fmt(tmp, sizeof tmp, "%s/pc-slk-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms() % 100000L)) { ck(0, "stale-lock.tmp"); return; }
 
@@ -345,11 +345,76 @@ static void group_stale_lock(void) {
         "printf 'pid=%%s\\tbtime=%%s\\tdeadline_s=%%s\\n' \"$HP\" \"$BT\" \"$FUT\" > '%s/t5/commit-own-s0.owner' && "
         "(cd '%s/repo' && TMPDIR='%s/t5' UNISACC_COMMIT_OWN_RUN=1 '%s/co.bin' -m t5 --whole a.cx --dry-run > '%s/o5' 2>&1; echo T5RC=$?; cat '%s/o5'); "
         "test -f '%s/t5/commit-own-s0.idx.lock' && echo T5_KEPT=1 || echo T5_KEPT=0; "
-        "kill -9 $HP 2>/dev/null || true; wait $HP 2>/dev/null || true; "
-        "rm -rf '%s'",
-        tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp);
+        "kill -9 $HP 2>/dev/null || true; wait $HP 2>/dev/null || true",
+        tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp);
     sh(cmd, out, sizeof out, 0);
     ck(has(out, "T5RC=0\n") && has(out, "T5_KEPT=1\n"), "stale-lock.active-holder-preserved");
+
+    /* T6 (U6): stale .git/index.lock (>60s, no active git cwd) is reclaimed and emits COMMIT_OWN_STALE_LOCK */
+    cx_fmt(cmd, sizeof cmd,
+        ": > '%s/repo/.git/index.lock' && touch -d '-2 min' '%s/repo/.git/index.lock' && "
+        "(cd '%s/repo' && TMPDIR='%s/t1' UNISACC_COMMIT_OWN_RUN=1 '%s/co.bin' -m t6 --whole a.cx --dry-run > '%s/o6' 2>&1; echo T6RC=$?; cat '%s/o6'); "
+        "test ! -e '%s/repo/.git/index.lock' && echo T6_GONE=1 || echo T6_GONE=0",
+        tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp);
+    sh(cmd, out, sizeof out, 0);
+    ck(has(out, "T6RC=0\n") && has(out, "T6_GONE=1\n") && has(out, "COMMIT_OWN_STALE_LOCK\t") && has(out, "reason=index-lock-expired\n"),
+       "stale-lock.index-lock-expired-reclaimed");
+
+    /* T7 (U6 negative control): fresh .git/index.lock (<60s) must NOT be reclaimed */
+    cx_fmt(cmd, sizeof cmd,
+        ": > '%s/repo/.git/index.lock' && "
+        "(cd '%s/repo' && TMPDIR='%s/t1' UNISACC_COMMIT_OWN_RUN=1 '%s/co.bin' -m t7 --whole a.cx --dry-run > '%s/o7' 2>&1; echo T7RC=$?; cat '%s/o7'); "
+        "test -f '%s/repo/.git/index.lock' && echo T7_KEPT=1 || echo T7_KEPT=0; "
+        "rm -f '%s/repo/.git/index.lock'",
+        tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp);
+    sh(cmd, out, sizeof out, 0);
+    ck(has(out, "T7_KEPT=1\n") && !has(out, "reason=index-lock-expired\n"), "stale-lock.index-lock-fresh-preserved");
+
+    /* T8 (U6 negative control): old .git/index.lock (>60s) with an active git process whose cwd is the repo must NOT be reclaimed */
+    cx_fmt(cmd, sizeof cmd,
+        ": > '%s/repo/.git/index.lock' && touch -d '-2 min' '%s/repo/.git/index.lock' && "
+        "mkfifo '%s/gitfifo' && exec 8<>'%s/gitfifo' && (cd '%s/repo' && exec git hash-object --stdin < '%s/gitfifo' >/dev/null 2>&1) & GP=$!; "
+        "sleep 0.2; "
+        "(cd '%s/repo' && TMPDIR='%s/t1' UNISACC_COMMIT_OWN_RUN=1 '%s/co.bin' -m t8 --whole a.cx --dry-run > '%s/o8' 2>&1; echo T8RC=$?; cat '%s/o8'); "
+        "test -f '%s/repo/.git/index.lock' && echo T8_KEPT=1 || echo T8_KEPT=0; "
+        "exec 8>&-; kill -9 $GP 2>/dev/null || true; wait $GP 2>/dev/null || true; "
+        "rm -rf '%s'",
+        tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp);
+    sh(cmd, out, sizeof out, 0);
+    ck(has(out, "T8_KEPT=1\n") && !has(out, "reason=index-lock-expired\n"), "stale-lock.index-lock-live-git-preserved");
+}
+
+/* T9 (U6 end-to-end): devsvc git commit reclaims stale .git/index.lock and emits commit.stale_lock into events.tsv */
+static void group_stale_lock_e2e(void) {
+    char out[16384], cmd[4096], root[2048], tmp[256];
+    if (sy_realpath(".", root, sizeof root) < 0) { ck(0, "stale-lock.e2e-realpath"); return; }
+    if (cx_fmt(tmp, sizeof tmp, "%s/pc-slke-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms() % 100000L)) { ck(0, "stale-lock.e2e-tmp"); return; }
+    cx_fmt(cmd, sizeof cmd,
+        "R='%s'; T='%s'; C=\"${UNISACC_CACHE_DIR:-$HOME/.cache/unisacc}\"; mkdir -p \"$T/dvh/inst\" \"$T/repo/tools\" && "
+        "git -C \"$T/repo\" init -q && git -C \"$T/repo\" config user.email t@t && git -C \"$T/repo\" config user.name t && "
+        "ln -sf \"$R/unisacc.com\" \"$T/repo/unisacc.com\" && ln -sf \"$R/cxroot.tsv\" \"$T/repo/cxroot.tsv\" && ln -sf \"$R/cx\" \"$T/repo/cx\" && ln -sf \"$R/ext\" \"$T/repo/ext\" && "
+        "for f in devsvc.cx devsvc-core.cx devsvc-repo.tsv commit-own.cx cxlib dv; do ln -sf \"$R/tools/$f\" \"$T/repo/tools/$f\"; done && "
+        "printf 'int ok(void){return 0;}\\n' > \"$T/repo/a.cx\" && git -C \"$T/repo\" add a.cx && git -C \"$T/repo\" commit -q -m init && "
+        "printf 'int ok(void){return 2;}\\n' > \"$T/repo/a.cx\" && "
+        "printf '#!/bin/sh\\nexit 0\\n' > \"$T/repo/.git/hooks/pre-commit\" && chmod +x \"$T/repo/.git/hooks/pre-commit\" && "
+        "sh \"$R/unisacc.com\" -o \"$T/dv.bin\" \"$R/tools/devsvc-core.cx\" && "
+        ": > \"$T/repo/.git/index.lock\" && touch -d '-2 min' \"$T/repo/.git/index.lock\" && "
+        "(cd \"$T/repo\" || exit 2; "
+        "UNISACC_DEVSVC_DIR=\"$T/dvh/inst\" UNISACC_CACHE_DIR=\"$C\" DEVSVC_NO_AUTO_PIN=1 "
+        "setsid \"$T/dv.bin\" serve --ttl 20 </dev/null >/dev/null 2>&1 & SP=$!; sleep 0.4; "
+        "UNISACC_DEVSVC_DIR=\"$T/dvh/inst\" UNISACC_CACHE_DIR=\"$C\" DEVSVC_NO_AUTO_PIN=1 UNISACC_COMMIT_OWN_RUN=1 "
+        "\"$T/dv.bin\" git commit -m t9-stale --whole a.cx > \"$T/o9\" 2>&1; echo T9RC=$?; "
+        "UNISACC_DEVSVC_DIR=\"$T/dvh/inst\" \"$T/dv.bin\" stop >/dev/null 2>&1 || true; "
+        "kill -9 -$SP 2>/dev/null || true; wait $SP 2>/dev/null || true); "
+        "EVF=\"$T/dvh/inst/events.tsv\"; "
+        "grep 'commit.stale_lock' \"$EVF\" 2>/dev/null || true; "
+        "sh \"$R/unisacc.com\" \"$R/tools/devsvc-usage.cx\" -- --commit-fail-only --hours 1 --events \"$EVF\" 2>&1 || true; "
+        "rm -rf \"$T\"",
+        root, tmp);
+    sh(cmd, out, sizeof out, 0);
+    ck(has(out, "T9RC=0\n") && has(out, "\tcommit.stale_lock\t") && has(out, "reason=index-lock-expired") &&
+       has(out, "STALE_LOCK\treason=index-lock-expired\tcount=1\n") && has(out, "STALE_LOCK_TOTAL\tcount=1\n"),
+       "stale-lock.devsvc-emits-stale-lock-event");
 }
 
 /* U4: while MERGE_HEAD is present, disjoint path commits succeed (preserving MERGE_HEAD),
@@ -417,9 +482,10 @@ int main(int argc, char **argv) {
         else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d | --bench before|after\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench"); bench(bn); unlock(); return 0; }
-    if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc"))) {
+    if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc"))) {
         if (tx_eqz(group, "tree-isolate") || tx_eqz(group, "pc")) group_tree_isolate();
-        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "pc")) group_stale_lock();
+        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "pc")) group_stale_lock();
+        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "pc")) group_stale_lock_e2e();
         if (tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc")) group_merge_disjoint();
         sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
         return failed ? 1 : 0;

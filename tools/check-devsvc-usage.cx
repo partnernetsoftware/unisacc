@@ -66,6 +66,29 @@ int main(void) {
     ca_local_assert(has("SESSION\ts1\tdevsvc=1\tnative=3\tratio=0.25"), "session-counts");
     ca_local_assert(has("\tRead:/rootfx/a.cx"), "sample-read");
     ca_local_assert(has("DEVSVC_USAGE sessions=1 devsvc=1 native=3 ratio=0.25\n"), "last-line");
+    {   /* U6: commit_fail per-gate breakdown + commit.stale_lock + --hours window + --commit-fail-only */
+        char ev2[400]; int rc3;
+        wfile("events-u6.tsv",
+              "EV\t1\t1794699000000\tgit.commit\towner=a\trc=0\tclass=ok\tgate=-\treason=ok\n"
+              "EV\t2\t1794699100000\tgit.commit\towner=a\trc=1\tclass=precommit\tgate=derive\treason=drift\n"
+              "EV\t8\t1794699150000\tgit.commit\towner=a\trc=1\tclass=precommit\tgate=derive\treason=drift\n"
+              "EV\t3\t1794699200000\tgit.commit\towner=b\trc=1\tclass=precommit\tgate=doc-links\treason=broken\n"
+              "EV\t4\t1794699300000\tgit.commit\towner=c\trc=2\tclass==args\tgate=-\treason=args\n"
+              "EV\t5\t1794690000000\tgit.commit\towner=old\trc=1\tclass=precommit\tgate=old-gate\treason=old\n"
+              "EV\t6\t1794699400000\tcommit.stale_lock\towner=a\tpid=10\tpath=/r/.git/index.lock\treason=index-lock-expired\treq=r1\n"
+              "EV\t7\t1794699500000\tcommit.stale_lock\towner=b\tpid=11\tpath=/tmp/s0.idx.lock\treason=no-holder\treq=r2\n");
+        F(ev2, sizeof ev2, "%s/events-u6.tsv", fx);
+        { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--commit-fail-only", "--hours", "1", "--now", "1794700000", "--events", ev2, 0}; rc3 = ck_run(v, out, sizeof out); }
+        ca_local_assert(rc3 == 0 && has("COMMIT_FAIL_GATE\tgate=derive\tcount=2\n") && has("COMMIT_FAIL_GATE\tgate=doc-links\tcount=1\n") && has("COMMIT_FAIL_GATE\tgate=args\tcount=1\n"), "u6-commit-fail-per-gate");
+        ca_local_assert(!has("gate=old-gate"), "u6-commit-fail-window-excludes-old");
+        ca_local_assert(has("COMMIT_FAIL\ttotal=5\tfail=4\trate=80.0\n"), "u6-commit-fail-summary");
+        ca_local_assert(has("STALE_LOCK\treason=index-lock-expired\tcount=1\n") && has("STALE_LOCK\treason=no-holder\tcount=1\n") && has("STALE_LOCK_TOTAL\tcount=2\n"), "u6-stale-lock-stats");
+        ca_local_assert(!has("DEVSVC_USAGE "), "u6-commit-fail-only-skips-sessions");
+        /* U6 default-path scan (no --events): exercises scan_events_default under isolated HOME */
+        F(c, sizeof c, "mkdir -p %s/fhome/.cache/unisacc/devsvc/inst1 && cp %s/events-u6.tsv %s/fhome/.cache/unisacc/devsvc/inst1/events.tsv && HOME=%s/fhome sh ./unisacc.com tools/devsvc-usage.cx -- --commit-fail-only --hours 1 --now 1794700000", fx, fx, fx, fx);
+        { char *v[] = {"sh", "-c", c, 0}; rc3 = ck_run(v, out, sizeof out); }
+        ca_local_assert(rc3 == 0 && has("COMMIT_FAIL\ttotal=5\tfail=4\trate=80.0\n") && has("STALE_LOCK_TOTAL\tcount=2\n"), "u6-default-events-scan");
+    }
     { char *v[] = {"sh", "./unisacc.com", "tools/devsvc-usage.cx", "--", "--bogus", "1", 0}; rc = ck_run(v, out, sizeof out); ca_local_assert(rc == 2, "bad-arg-rc2"); }
     F(rt, sizeof rt, "rm -rf %s", fx);
     { char *v[] = {"sh", "-c", rt, 0}; (void)ck_run(v, out, sizeof out); }
