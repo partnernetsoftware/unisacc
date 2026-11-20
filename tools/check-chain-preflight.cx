@@ -1,0 +1,208 @@
+/* tools/check-chain-preflight.cx -- verify tools/flows/chain-preflight.tsv schema and tools/chain-preflight.cx
+ * root-types and snap-cache-types checks (regular files required; symlink, dangling-symlink, directory, missing
+ * must FAIL naming path and expected=regular; shadow mode emits verdict=FAIL with rc 0; M3/M4 appended rows supported).
+ * Marker: CHECK_CHAIN_PREFLIGHT<TAB>failed=N */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.ckrun
+
+static int failed = 0, assertions = 0;
+static char fx[1024];
+
+static void pf_ck(int ok, const char *name, const char *detail) {
+    assertions++;
+    if (!ok) {
+        failed++;
+        printf("FAIL\t%s\t%s\n", name, detail ? detail : "none");
+    } else {
+        printf("PASS\t%s\n", name);
+    }
+}
+
+#define ck pf_ck
+#define has(o, s) ckk_has((o), 4096, (s))
+
+static void pf_mkdir(const char *p) {
+    char tmp[1024];
+    size_t n = strlen(p);
+    if (n >= sizeof tmp || mm_copy(tmp, sizeof tmp, p, n + 1)) return;
+    for (size_t i = 1; i < n; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = 0;
+            sy_mkdir(tmp, 0700);
+            tmp[i] = '/';
+        }
+    }
+    sy_mkdir(tmp, 0700);
+}
+
+#define mk_dir pf_mkdir
+
+static void pf_write(const char *dir, const char *rel, const char *content) {
+    char p[1200];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return;
+    sy_write_file(p, content, (int64_t)strlen(content), 0600);
+}
+
+#define wr_file pf_write
+
+static int run_pf(const char *args, char *out, int cap) {
+    char cmd[2048];
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-preflight.cx -- %s", args)) return -1;
+    return ckk_sh("CHECK_CHAIN_PREFLIGHT", cmd, out, cap);
+}
+
+int main(void) {
+    char out[4096], arg[1600], root_ok[1200], root_dir[1200], root_dangling[1200], root_sym[1200];
+    char snap_base[1200], snap_entry[1200], t_ext[1200], t_bad1[1200], t_bad2[1200], evf[1200], rmcmd[1400];
+    const char *rev = "3224e3518ed8f49b362b784972525d303d2073c2";
+    long t0 = sy_now_ms();
+
+    cx_fmt(fx, sizeof fx, "%s/check-chain-preflight-%d", sy_tmpdir(), (int)sy_pid());
+    mk_dir(fx);
+
+    /* 1. Table schema check on live tools/flows/chain-preflight.tsv */
+    ck(run_pf("--check-table --table tools/flows/chain-preflight.tsv", out, sizeof out) == 0 &&
+       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=2"),
+       "table-schema-live-ok", out);
+
+    /* 2. Valid root and valid snap cache -> verdict=PASS */
+    cx_fmt(root_ok, sizeof root_ok, "%s/root-ok", fx);
+    cx_fmt(snap_base, sizeof snap_base, "%s/snap-ok", fx);
+    cx_fmt(snap_entry, sizeof snap_entry, "%s/3224e3518e-8cc2381c", snap_base);
+    mk_dir(root_ok);
+    mk_dir(snap_entry);
+    wr_file(root_ok, "unisacc.com", "APE_BYTES");
+    wr_file(root_ok, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
+    wr_file(snap_entry, "unisacc.com", "APE_BYTES");
+    wr_file(snap_entry, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
+    cx_fmt(evf, sizeof evf, "%s/events.tsv", fx);
+    cx_fmt(arg, sizeof arg, "--root %s --snap-base %s --rev %s --events-file %s", root_ok, snap_base, rev, evf);
+    ck(run_pf(arg, out, sizeof out) == 0 &&
+       has(out, "PREFLIGHT_ITEM\troot-types\tPASS\t") &&
+       has(out, "PREFLIGHT_ITEM\tsnap-cache-types\tPASS\t") &&
+       has(out, "CHAIN_PREFLIGHT\trev=3224e3518ed8f49b362b784972525d303d2073c2\tverdict=PASS\tfailed=-\tnodes=2\t"),
+       "all-regular-verdict-pass", out);
+
+    /* 3. Root file replaced with a directory -> FAIL naming path and expected=regular (shadow mode rc=0) */
+    cx_fmt(root_dir, sizeof root_dir, "%s/root-dir", fx);
+    mk_dir(root_dir);
+    wr_file(root_dir, "unisacc.com", "APE_BYTES");
+    {
+        char bj_dir[1200];
+        cx_fmt(bj_dir, sizeof bj_dir, "%s/unisacc.com.build.json", root_dir);
+        mk_dir(bj_dir);
+    }
+    cx_fmt(arg, sizeof arg, "--root %s --snap-base %s --rev %s", root_dir, snap_base, rev);
+    ck(run_pf(arg, out, sizeof out) == 0 &&
+       has(out, "PREFLIGHT_ITEM\troot-types\tFAIL\t") &&
+       has(out, "unisacc.com.build.json\texpected=regular\tactual=directory") &&
+       has(out, "verdict=FAIL\tfailed=root-types\t"),
+       "root-build-json-directory-fails-with-path-and-expected-type", out);
+
+    /* 4. Root file replaced with a dangling symlink -> FAIL naming path and expected=regular */
+    cx_fmt(root_dangling, sizeof root_dangling, "%s/root-dangling", fx);
+    mk_dir(root_dangling);
+    {
+        char p_ape[1200];
+        cx_fmt(p_ape, sizeof p_ape, "%s/unisacc.com", root_dangling);
+        sy_symlink("/nonexistent-dangling-target-preflight", p_ape);
+    }
+    wr_file(root_dangling, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
+    cx_fmt(arg, sizeof arg, "--root %s --snap-base %s --rev %s", root_dangling, snap_base, rev);
+    ck(run_pf(arg, out, sizeof out) == 0 &&
+       has(out, "PREFLIGHT_ITEM\troot-types\tFAIL\t") &&
+       has(out, "unisacc.com\texpected=regular\tactual=dangling-symlink") &&
+       has(out, "verdict=FAIL\tfailed=root-types\t"),
+       "root-ape-dangling-symlink-fails-with-path-and-expected-type", out);
+
+    /* 5. Root file replaced with a valid symlink -> FAIL naming path and expected=regular */
+    cx_fmt(root_sym, sizeof root_sym, "%s/root-sym", fx);
+    mk_dir(root_sym);
+    wr_file(root_sym, "real-ape", "APE_BYTES");
+    {
+        char p_real[1200], p_ape[1200];
+        cx_fmt(p_real, sizeof p_real, "%s/real-ape", root_sym);
+        cx_fmt(p_ape, sizeof p_ape, "%s/unisacc.com", root_sym);
+        sy_symlink(p_real, p_ape);
+    }
+    wr_file(root_sym, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
+    cx_fmt(arg, sizeof arg, "--item root-types --root %s", root_sym);
+    ck(run_pf(arg, out, sizeof out) == 1 &&
+       has(out, "PREFLIGHT_ITEM\troot-types\tFAIL\t") &&
+       has(out, "unisacc.com\texpected=regular\tactual=symlink"),
+       "root-ape-live-symlink-fails", out);
+
+    /* 6. Snap cache file replaced with a symlink or directory -> FAIL naming snap path and expected=regular */
+    {
+        char sb_bad[1200], se_bad[1200], sp_bj[1200];
+        cx_fmt(sb_bad, sizeof sb_bad, "%s/snap-bad", fx);
+        cx_fmt(se_bad, sizeof se_bad, "%s/3224e3518e-deadbeef", sb_bad);
+        mk_dir(se_bad);
+        wr_file(se_bad, "unisacc.com", "APE_BYTES");
+        cx_fmt(sp_bj, sizeof sp_bj, "%s/unisacc.com.build.json", se_bad);
+        sy_symlink("/nonexistent-snap-build-json", sp_bj);
+        cx_fmt(arg, sizeof arg, "--root %s --snap-base %s --rev %s", root_ok, sb_bad, rev);
+        ck(run_pf(arg, out, sizeof out) == 0 &&
+           has(out, "PREFLIGHT_ITEM\tsnap-cache-types\tFAIL\t") &&
+           has(out, "3224e3518e-deadbeef/unisacc.com.build.json\texpected=regular\tactual=dangling-symlink") &&
+           has(out, "verdict=FAIL\tfailed=snap-cache-types\t"),
+           "snap-cache-dangling-symlink-fails-with-path-and-expected-type", out);
+
+        sy_unlink(sp_bj);
+        mk_dir(sp_bj);
+        cx_fmt(arg, sizeof arg, "--item snap-cache-types --root %s --snap-base %s --rev %s", root_ok, sb_bad, rev);
+        ck(run_pf(arg, out, sizeof out) == 1 &&
+           has(out, "3224e3518e-deadbeef/unisacc.com.build.json\texpected=regular\tactual=directory"),
+           "snap-cache-directory-fails-with-path-and-expected-type", out);
+    }
+
+    /* 7. Table extensibility for M3 (parse2-bind) and M4 (template-compile, sys-six-target) plus schema rejections */
+    cx_fmt(t_ext, sizeof t_ext, "%s/chain-preflight-ext.tsv", fx);
+    wr_file(fx, "chain-preflight-ext.tsv",
+        "# extended table with M3 and M4 rows\n"
+        "name\tpatterns\tcmd\ttimeout_s\n"
+        "root-types\t*,unisacc.com,unisacc.com.build.json\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+        "snap-cache-types\t*,unisacc.com,unisacc.com.build.json\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+        "parse2-bind\texec/parse2/*,exec/facts/*\ttrue\t30\n"
+        "template-compile\ttools/templates/*,cx/compiler/*\ttrue\t45\n"
+        "sys-six-target\tcx/sys/*,ext/sysx/*,include/*\ttrue\t55\n");
+    cx_fmt(arg, sizeof arg, "--check-table --table %s", t_ext);
+    ck(run_pf(arg, out, sizeof out) == 0 &&
+       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=5"),
+       "table-extensible-m3-m4-rows-accepted", out);
+    cx_fmt(arg, sizeof arg, "--table %s --root %s --snap-base %s --rev %s", t_ext, root_ok, snap_base, rev);
+    ck(run_pf(arg, out, sizeof out) == 0 &&
+       has(out, "verdict=PASS\tfailed=-\tnodes=5\t"),
+       "table-extensible-m3-m4-runs-5-nodes", out);
+
+    /* 8. Malformed table rows (timeout > 55 or duplicate node name) refused with rc 2 */
+    cx_fmt(t_bad1, sizeof t_bad1, "%s/bad-timeout.tsv", fx);
+    wr_file(fx, "bad-timeout.tsv",
+        "name\tpatterns\tcmd\ttimeout_s\n"
+        "root-types\t*\ttrue\t60\n"
+        "snap-cache-types\t*\ttrue\t10\n");
+    cx_fmt(arg, sizeof arg, "--check-table --table %s", t_bad1);
+    ck(run_pf(arg, out, sizeof out) == 2 && has(out, "PREFLIGHT_TABLE\tstatus=FAIL"),
+       "table-timeout-over-55-refused", out);
+
+    cx_fmt(t_bad2, sizeof t_bad2, "%s/bad-dup.tsv", fx);
+    wr_file(fx, "bad-dup.tsv",
+        "name\tpatterns\tcmd\ttimeout_s\n"
+        "root-types\t*\ttrue\t10\n"
+        "root-types\t*\ttrue\t10\n");
+    cx_fmt(arg, sizeof arg, "--check-table --table %s", t_bad2);
+    ck(run_pf(arg, out, sizeof out) == 2 && has(out, "PREFLIGHT_TABLE\tstatus=FAIL"),
+       "table-duplicate-node-refused", out);
+
+    cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx);
+    ckk_sh("CHECK_CHAIN_PREFLIGHT", rmcmd, out, sizeof out);
+
+    printf("CHECK_CHAIN_PREFLIGHT\tfailed=%d\tassertions=%d\tms=%ld\n", failed, assertions, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}
