@@ -20,7 +20,9 @@
 - ~~ShapePath 全反向轮廓回退 | G-struct 全部反向时保留轮廓顺序并转为独立实体 | Path 采样。~~ 5 项通过，错取轮廓反例转红。
 - ~~ShapePath 多轮廓孔洞归属 | G-struct r160 多外环、错序、重叠歧义与绕向对照 | Path 采样与 Shape 孔数组。~~ 5 项通过，孔归属篡改转红。
 - ~~ShapePath 单路径退化边界与清单收口 | G-struct r160 空组、单条开放轮廓与窄容量行为，重跑本类所有门 | 已有样条与孔洞归属。~~ 空组替代单路径的反例转红，ShapePath 升为已有。
-- AnimationUtils | G-anim animationutils-anim.cx：稳定时间顺序、分量行重排与非法位置拒绝；子片段和加法转换待补。补齐 convertArray,isTypedArray,flattenJSON,subclip,makeClipAdditive，运行独立金值及 r160 篡改门 | -
+- ~~AnimationUtils 子片段帧范围 | G-anim r160 对照重复帧、半开边界、空片段和数组避让 | 已有有序 Float32 时间视图。~~ 7 项通过，纳入结束帧反例转红。
+- AnimationUtils 子片段装配 | G-anim 多轨道截取、统一时间原点、持续时间和输入不变 | 帧范围、AnimationClip 与 KeyframeTrack。
+- AnimationUtils 加法转换及数组工具 | G-anim convertArray、isTypedArray、flattenJSON、makeClipAdditive，验证各类型与 r160 | 样本布局、类型视图与混合器。
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
 - CubicInterpolant | G-anim cubicinterpolant-anim.cx：两端自然、零斜率、环绕三种设置与越界夹取；区间缓存和通用缓冲类型待补。补齐 constructor,intervalChanged_,interpolate_,getSettings_,copySampleValue_，运行独立金值及 r160 篡改门 | -
