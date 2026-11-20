@@ -8,6 +8,10 @@ int main(int argc, char **argv) {
     fd = open(argc > 1 ? argv[1] : "win-ffi-pread.c", O_RDONLY);
     if (fd < 0) { puts("open-failed"); return 1; }
     n = pread(fd, b, 3, 0);
+    if (pwrite(-1, b, 0, 0) != -1) return 1;
+#ifndef _WIN32
+    if (fchown(-1, (uid_t)-1, (gid_t)-1) != -1) return 1;
+#endif
     b[n > 0 ? n : 0] = 0;
     puts(b);
     return n == 3 ? 0 : 1;
