@@ -1,0 +1,75 @@
+struct GltfSkeletonBinding {
+  arena: u32;
+  nodes: u32;
+  nodeCount: u32;
+  joints: u32;
+  jointCount: u32;
+  inverseBytes: u32;
+  inverseStride: u32;
+}
+
+native function gltf_skeleton_disjoint(a:i64,size:i64,out:i64,storage:i64,bytes:i64) i64 {
+  return a>=0 && size>=0 && a<=6291456-size &&
+    !skeleton_overlap(a,size,out,Skeleton.size) && !skeleton_overlap(a,size,storage,bytes);
+}
+
+// The scene table maps GLTF node indices to live Object3D bone handles.
+// Inverse records are f32 MAT4 rows or identities if inverseStride is zero.
+native function GltfLoader_bindSkeleton(source:i64,out:i64,storage:i64,capacity:i64) i64 {
+  if(source<0 || source%4!=0 || source>6291456-GltfSkeletonBinding.size ||
+     !skeleton_valid(out) || storage<0 || storage%8!=0 || capacity<0 ||
+     storage>6291456-capacity) { return 0-1; }
+  let arena=ux_u32(source+GltfSkeletonBinding.arena);
+  let nodes=ux_u32(source+GltfSkeletonBinding.nodes);
+  let node_count=ux_u32(source+GltfSkeletonBinding.nodeCount);
+  let joints=ux_u32(source+GltfSkeletonBinding.joints);
+  let joint_count=ux_u32(source+GltfSkeletonBinding.jointCount);
+  let inv=ux_u32(source+GltfSkeletonBinding.inverseBytes);
+  let stride=ux_u32(source+GltfSkeletonBinding.inverseStride);
+  if(arena%8!=0 || arena>6291448 || nodes%4!=0 || joints%4!=0 ||
+     node_count<1 || node_count>65535 || joint_count<1 || joint_count>256 ||
+     (stride!=0 && (stride<64 || stride%4!=0 || inv%4!=0))) { return 0-1; }
+  let arena_rows=ux_u32(arena);
+  if(arena_rows<1 || arena_rows>(6291448-arena)/424) { return 0-1; }
+  let bone_bytes=(joint_count*4+7)/8*8;
+  let size=bone_bytes+joint_count*192;
+  let inv_bytes=0;
+  if(stride!=0) { inv_bytes=(joint_count-1)*stride+64; }
+  if(size>capacity || skeleton_overlap(out,Skeleton.size,storage,size) ||
+     !gltf_skeleton_disjoint(source,GltfSkeletonBinding.size,out,storage,size) ||
+     !gltf_skeleton_disjoint(arena,8+arena_rows*424,out,storage,size) ||
+     !gltf_skeleton_disjoint(nodes,node_count*4,out,storage,size) ||
+     !gltf_skeleton_disjoint(joints,joint_count*4,out,storage,size) ||
+     !gltf_skeleton_disjoint(inv,inv_bytes,out,storage,size)) { return 0-1; }
+  let i=0;
+  while(i<joint_count) {
+    let index=ux_u32(joints+i*4);
+    if(index>=node_count || !Bone_isBone(arena,ux_u32(nodes+index*4))) { return 0-2; }
+    if(stride!=0) {
+      let j=0;
+      while(j<16) {
+        let value=ux_f32(inv+i*stride+j*4);
+        if(value-value!=0.0) { return 0-2; }
+        j=j+1;
+      }
+    }
+    i=i+1;
+  }
+  let inverse=storage+bone_bytes;
+  let palette=inverse+joint_count*128;
+  i=0;
+  while(i<joint_count) {
+    let index=ux_u32(joints+i*4);
+    let bone=ux_u32_put(storage+i*4,ux_u32(nodes+index*4));
+    let j=0;
+    while(j<16) {
+      let value=(j%5==0)*1.0;
+      if(stride!=0) { value=ux_f32(inv+i*stride+j*4); }
+      let saved=ux_f64_put(inverse+i*128+j*8,value);
+      let zero=ux_f32_put(palette+i*64+j*4,0.0);
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return Skeleton_init(out,storage,inverse,palette,joint_count);
+}
