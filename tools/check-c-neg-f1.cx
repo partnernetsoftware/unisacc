@@ -37,6 +37,10 @@ static int cnf_compile(const char *name, const char *src, const char *flag, char
 static void cnf_reject(const char *id, const char *src, const char *col, const char *msg) {
     char out[CNF_OUT], obj[CNF_PW], where[256]; struct stat st;
     int rc = cnf_compile(id, src, 0, out, sizeof out, obj, sizeof obj);
+    if (!col) {
+        ck(rc == 1 && sy_exists(obj) == 0 && ckk_has(out, CNF_OUT, msg), id);
+        return;
+    }
     if (cx_fmt(where, sizeof where, "%s.c:1:%s: error:", id, col)) { ck(0, id); return; }
     ck(rc != 0 && stat(obj, &st) != 0 && ckk_has(out, CNF_OUT, msg) && ckk_has(out, CNF_OUT, where), id);
 }
@@ -117,6 +121,42 @@ int main(int argc, char **argv) {
     cnf_reject("ft-composite", "int f(int);int f();int f(double);int main(void){return 0;}\n", "24", conflict);
     cnf_reject("ft-promotion", "int f();int f(char);int main(void){return 0;}\n", "13", conflict);
     cnf_accept("ft-default-promotion", "int f();int f(int);int main(void){return 0;}\n");
+    cnf_accept("ft-callback-definition-before-abstract-prototype",
+        "void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);} void f(void *,void (*)(void *)); int main(void){return 0;}\n");
+    cnf_accept("ft-callback-repeated-declarations",
+        "void f(void *,void (*)(void *)); void f(void *p,void (*cb)(void *)); void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-top-level-const",
+        "void f(void *const p,void (*const cb)(void *)); void f(void *p,void (*cb)(void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-const-pointee",
+        "void f(const void *,void (*)(const void *)); void f(const void *p,void (*cb)(const void *)){if(p&&cb)cb(p);}\n");
+    cnf_accept("ft-callback-function-adjust",
+        "void f(void cb(int)); void f(void (*cb)(int)){cb(1);}\n");
+    cnf_accept("ft-callback-array-adjust",
+        "void f(void (*cb)(int a[3])); void f(void (*cb)(int *)){int a[3]={0};cb(a);}\n");
+    cnf_accept("ft-callback-followed-by-void-pointer",
+        "void f(void cb(int),void *p);void f(void (*cb)(int),void *p){if(p)cb(1);}\n");
+    const char *named_void = "parameter of type void must be unnamed and alone (C99 6.7.5.3p10)";
+    cnf_reject("ft-void-named-nonfunction",
+        "void f(void item);\nint main(void){return 0;}\n", 0, named_void);
+    cnf_reject("ft-callback-followed-by-void",
+        "void f(void cb(int),void);\nint main(void){return 0;}\n", 0, named_void);
+    cnf_reject("ft-callback-followed-by-named-void",
+        "void f(void cb(int),void item);\nint main(void){return 0;}\n", 0, named_void);
+    {
+        struct stat st;
+        if (cx_fmt(obj, sizeof obj, "%s/fwd-import.o", cnf_work)) return 2;
+        char *av[] = {"sh", (char *)cnf_cc, "-c", "-b", "lnx/x86_64",
+                      "tests/cases/d2-callback-import.cx", "-o", obj, 0};
+        int rc = ck_run(av, out, sizeof out);
+        ck(rc == 0 && stat(obj, &st) == 0, "ft-callback-import-abstract-prototype");
+    }
+    const char *callback_conflict = "incompatible semantic declaration type";
+    cnf_reject("ft-callback-conflict-depth",
+        "void f(void (*cb)(void **)); void f(void (*cb)(void *)){cb(0);}\n", 0, callback_conflict);
+    cnf_reject("ft-callback-conflict-arity",
+        "void f(void (*cb)(void *,int)); void f(void (*cb)(void *)){cb(0);}\n", 0, callback_conflict);
+    cnf_reject("ft-callback-conflict-pointee",
+        "void f(void (*cb)(double *)); void f(void (*cb)(int *)){cb(0);}\n", 0, callback_conflict);
     cnf_reject("implicit-undeclared-call", "void f(void){undeclared_fn();}\n", "14", "call to undeclared function 'undeclared_fn' [-Wc99-implicit-function]");
     cnf_reject("implicit-unregistered-dunder", "void f(void){__nosuch(1);}\n", "14", "call to undeclared function '__nosuch' [-Wc99-implicit-function]");
     cnf_accept("implicit-visible-prototype", "int ext(int);int f(void){return ext(1);}\n");
