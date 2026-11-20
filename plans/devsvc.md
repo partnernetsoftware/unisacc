@@ -546,3 +546,20 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 (3) 前置门:每步只在上一步证据对同键成立时触发;任何一步 rc 非 0 或门 FAIL 即停,发 react 事件 tail.stop(键、步名、rc、证据路径),不自动重试,同一失败连续两次上报。
 (4) 与 devsvc react 的接口:react 订阅 chain.done(bg-candidate 封条写出)事件,载荷带 rev 与 APE sha;react 只按 --tail-plan 的行顺序逐步调 devsvc x(每步有界 60 秒,pack/qualify 按其自身分段),每步完成发 tail.step(键、步、rc、证据);常驻、锁与截止由 devsvc 现有 react 框架负责,本草案不新起常驻。之后接 release-run --prepare 出草稿,公开仍由 --execute 人工确认触发。
 (5) 未做:react 侧订阅与执行器、同键证据探测的实现、对 0.0.75 实跑计时。
+
+## 等待心跳事件设计(0.0.87 S6,2026-11-20,只设计,未实现)
+
+问题:窗口与代理的空等量没有账(fast-iteration 数据缺口节),督导靠读屏判断谁在等、等什么,不可核也不可累计。
+
+(1) 窗口终态上报:每个窗口(Claude Code 及其它 harness)在状态变化时经 `devsvc win state` 上报一行,字段固定五个:
+- window:窗口名(与写窗口锁的持有者名同一命名空间);
+- state:working / idle / waiting / compacting 四值之一,其它值拒绝;
+- since:进入该状态的时刻(秒,+0800 渲染),由 devsvc 收到时记,不信客户端时钟;
+- task:当前任务键(prd_mempalace 下一动作号或 job ID),空记 `-`;
+- blocker:waiting 时必填(等的作业 ID、锁名或窗口名),其它状态记 `-`;waiting 而无 blocker 拒绝。
+(2) devsvc 事件 `window.state`:收到上报即追加到事件流(与现有作业事件同一订阅通道),同窗口同状态重复上报只刷新心跳不发新事件;心跳超过上限(建议 10 分钟)未刷新则 devsvc 自发 `window.state` state=idle blocker=`heartbeat-lost`,不猜测窗口真实状态。
+(3) 督导只读事件不读屏:督导与主调度订阅 `window.state`,按 window 聚合 waiting 段的起止得出等待分钟与 blocker 分布;读屏不再作为判断依据。
+(4) 入账:由事件流离线派生 `build/wait-ledger.tsv`(window、task、state、since、until、minutes、blocker),生成器带 `--check`,与 build/version-cadence.tsv 同口径按版本切分;事件缺失的时段记 UNMEASURED,不补估。
+(5) 实现落点:`tools/devsvc.cx` 新增 `win state` 子命令与事件类型,钩子侧(宿主 Stop/Notification 钩子)只调用该子命令,不在钩子里写判断。
+(6) 估时:上报子命令加事件约 1 单位;心跳超时自发事件约 0.5 单位;wait-ledger 生成器加检查约 1 单位;钩子接线约 0.5 单位;合计约 3 单位,另需对拍夹具(四状态、缺 blocker 拒绝、心跳丢失)。
+(7) 未做:全部实现与实测;compacting 状态由宿主是否暴露压缩信号决定,未核。
