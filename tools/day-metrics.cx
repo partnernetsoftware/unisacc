@@ -1,0 +1,712 @@
+/* tools/day-metrics.cx -- N9 北极星指标生成器(事实表 -> 生成器 -> build/north-star.tsv)。
+ *
+ *   sh ./unisacc.com tools/day-metrics.cx -- [--check | --write | --print]
+ *     [--facts FILE]          (默认 exec/facts/north-star-facts.tsv)
+ *     [--out FILE]            (默认 build/north-star.tsv)
+ *     [--events FILE]         (devsvc events.tsv; 传入后实时算 commit_fail_rate 与分 gate / stale_lock)
+ *     [--hours N] [--now S]   (事件时间窗, 默认 24 小时)
+ *     [--portfolio FILE]      (默认 build/portfolio.tsv; 统计 active+queued -> inflight_lines)
+ *     [--cadence FILE]        (默认 build/version-cadence.tsv)
+ *     [--index FILE]          (release/evidence/<VER>/INDEX.tsv -> slot_to_public)
+ *     [--version VER]         (版本名, 配合 cadence/index)
+ *     [--slot-open TS]        (覆盖起槽时间 YYYY-MM-DD HH:MM 或 YYYY-MM-DDTHH:MM)
+ *     [--chain-runs FILE]     (整链清单文件或逗号分隔 chain-run.tsv/bg.log 列表 -> chain_fail_starts / fail_to_restart_median)
+ *     [--prerun-dir DIR]      (含 supervise.log 与 done.W* -> prerun_minutes / first_red_minutes)
+ *     [--branches-file FILE]  (分支名列表文件; 传 --live-branches 时读 git branch -> stray_branches)
+ *     [--live-branches]       (读取本机 git branch 算 stray_branches)
+ *     [--measured-at ISO]     (覆盖动态项的 measured_at 时间戳)
+ *
+ * 原则:
+ *   (1) 事实表 -> 生成器(--check/--write) -> 表; 不传外部动态参数时只读仓内确定性表,保证 --check 跨机逐字节一致。
+ *   (2) 计划或源头缺失的指标一律写 UNMEASURED,不编数。
+ *   (3) 指标口径写入 build/north-star.tsv 表头注释。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+#define DM_MAX_ROWS 32
+#define DM_MAX_KV   64
+#define DM_MAX_RUNS 64
+#define DM_S48      48
+#define DM_S64      64
+#define DM_S24      24
+#define DM_S40      40
+#define DM_S256     256
+#define DM_S512     512
+
+typedef struct {
+    char metric[DM_S48];
+    char baseline[DM_S48];
+    char unit[DM_S24];
+    char source[DM_S512];
+    char measured_at[DM_S40];
+    char target[DM_S48];
+    char falsify[DM_S256];
+} DmRow;
+
+typedef struct { char k[DM_S64]; int n; } DmKv;
+typedef struct { long start_s, end_s; int rc; } DmRun;
+
+static DmRow rows[DM_MAX_ROWS];
+static int nrows;
+static DmKv cf_gates[DM_MAX_KV], sl_reasons[DM_MAX_KV];
+static int ncf_gates, nsl_reasons, cf_total, cf_fail, sl_total, has_events;
+
+static void dm_die(const char *msg) {
+    sy_eprintf("day-metrics: REFUSE %s\n", msg);
+    exit(2);
+}
+
+static void kv_inc(DmKv *arr, int *n, int cap, const char *k) {
+    for (int i = 0; i < *n; i++) {
+        if (!strcmp(arr[i].k, k)) { arr[i].n++; return; }
+    }
+    if (*n < cap) {
+        (void)cx_fmt(arr[*n].k, sizeof arr[*n].k, "%s", k);
+        arr[*n].n = 1;
+        (*n)++;
+    }
+}
+
+static DmRow *find_row(const char *metric) {
+    for (int i = 0; i < nrows; i++) {
+        if (!strcmp(rows[i].metric, metric)) return &rows[i];
+    }
+    return 0;
+}
+
+static int parse_digits(const char *s, int n) {
+    int v = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v;
+}
+
+/* Parse "YYYY-MM-DD HH:MM[:SS]" or "YYYY-MM-DDTHH:MM[:SS]" to civil epoch seconds (timezone-consistent diff). */
+static long parse_ts(const char *s) {
+    if (!s || strlen(s) < 16) return -1;
+    if (s[4] != '-' || s[7] != '-' || (s[10] != ' ' && s[10] != 'T') || s[13] != ':') return -1;
+    int y = parse_digits(s, 4);
+    int m = parse_digits(s + 5, 2);
+    int d = parse_digits(s + 8, 2);
+    int H = parse_digits(s + 11, 2);
+    int M = parse_digits(s + 14, 2);
+    int S = 0;
+    if (strlen(s) >= 19 && s[16] == ':') {
+        S = parse_digits(s + 17, 2);
+        if (S < 0) return -1;
+    }
+    if (y < 1970 || m < 1 || m > 12 || d < 1 || d > 31 || H < 0 || H > 23 || M < 0 || M > 59 || S > 60) return -1;
+    if (m <= 2) y--;
+    long era = y / 400;
+    long yoe = y - era * 400;
+    long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097L + doe - 719468L) * 86400L + H * 3600L + M * 60L + S;
+}
+
+static int ev_field(const char *s, const char *key, char *dst, size_t cap) {
+    size_t kl = strlen(key);
+    const char *p = s;
+    while ((p = strstr(p, key))) {
+        if (p == s || p[-1] == '\t' || p[-1] == ' ') {
+            size_t i = 0;
+            p += kl;
+            while (*p == '=') p++;
+            while (p[i] && p[i] != '\t' && p[i] != ' ' && p[i] != '\r' && p[i] != '\n' && i + 1 < cap) {
+                dst[i] = p[i];
+                i++;
+            }
+            dst[i] = 0;
+            return 1;
+        }
+        p += kl;
+    }
+    return 0;
+}
+
+static int split_tabs(char *line, char **cols, int maxc) {
+    int n = 0;
+    char *p = line;
+    while (n < maxc) {
+        cols[n++] = p;
+        char *t = strchr(p, '\t');
+        if (!t) break;
+        *t = 0;
+        p = t + 1;
+    }
+    return n;
+}
+
+static void load_facts(const char *path) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 1 << 20) != 0 || !buf) dm_die("cannot read facts table");
+    char *p = (char *)buf, *end = (char *)buf + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        if (nl > p && nl[-1] == '\r') nl[-1] = 0;
+        if (p[0] && p[0] != '#' && strncmp(p, "metric\t", 7) != 0) {
+            char *c[8];
+            int nc = split_tabs(p, c, 8);
+            if (nc < 7) { mm_free(buf); dm_die("malformed facts row (need 7 columns)"); }
+            if (nrows >= DM_MAX_ROWS) { mm_free(buf); dm_die("too many facts rows"); }
+            DmRow *r = &rows[nrows++];
+            (void)cx_fmt(r->metric, sizeof r->metric, "%s", c[0]);
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "%s", c[1]);
+            (void)cx_fmt(r->unit, sizeof r->unit, "%s", c[2]);
+            (void)cx_fmt(r->source, sizeof r->source, "%s", c[3]);
+            (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", c[4]);
+            (void)cx_fmt(r->target, sizeof r->target, "%s", c[5]);
+            (void)cx_fmt(r->falsify, sizeof r->falsify, "%s", c[6]);
+        }
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    mm_free(buf);
+    if (nrows == 0) dm_die("empty facts table");
+}
+
+static void scan_events_file(const char *path, long since, const char *measured_at) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    has_events = 1;
+    if (sy_read_file(path, &buf, &n, 1 << 26) != 0 || !buf) {
+        DmRow *r = find_row("commit_fail_rate");
+        if (r) {
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "UNMEASURED");
+            (void)cx_fmt(r->source, sizeof r->source, "events=%s unreadable", path);
+            if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+        }
+        return;
+    }
+    char *p = (char *)buf, *end = (char *)buf + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        if (!strncmp(p, "EV\t", 3)) {
+            char *t[5] = {0, 0, 0, 0, 0};
+            t[0] = p;
+            for (int i = 0; i < 4 && t[i]; i++) {
+                t[i + 1] = strchr(t[i], '\t');
+                if (t[i + 1]) t[i + 1]++;
+            }
+            if (t[3]) {
+                long ts = t[2] ? atol(t[2]) : 0;
+                long ts_s = ts > 1000000000000L ? ts / 1000L : ts;
+                int in_win = (ts_s < 1000000000L || ts_s >= since);
+                char kind[48];
+                int w = 0;
+                while (t[3][w] && t[3][w] != '\t' && w < 47) { kind[w] = t[3][w]; w++; }
+                kind[w] = 0;
+                const char *body = t[4] ? t[4] : t[3];
+                if (in_win && !strcmp(kind, "git.commit")) {
+                    char rcs[16], gt[64], cl[64];
+                    cf_total++;
+                    if (ev_field(body, "rc=", rcs, sizeof rcs) && atoi(rcs) != 0) {
+                        const char *bucket = "unknown";
+                        cf_fail++;
+                        if (ev_field(body, "gate=", gt, sizeof gt) && gt[0] && strcmp(gt, "-")) bucket = gt;
+                        else if (ev_field(body, "class=", cl, sizeof cl) && cl[0] && strcmp(cl, "-")) bucket = cl;
+                        kv_inc(cf_gates, &ncf_gates, DM_MAX_KV, bucket);
+                    }
+                } else if (in_win && !strcmp(kind, "commit.stale_lock")) {
+                    char rs[64];
+                    sl_total++;
+                    if (!ev_field(body, "reason=", rs, sizeof rs) || !rs[0]) (void)cx_fmt(rs, sizeof rs, "unknown");
+                    kv_inc(sl_reasons, &nsl_reasons, DM_MAX_KV, rs);
+                }
+            }
+        }
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    mm_free(buf);
+    DmRow *r = find_row("commit_fail_rate");
+    if (r) {
+        if (cf_total > 0) {
+            double pct = (double)cf_fail * 100.0 / (double)cf_total;
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "%.1f", pct);
+            (void)cx_fmt(r->source, sizeof r->source, "day-metrics events: %d 次提交非 0 共 %d 次(stale_lock=%d)", cf_total, cf_fail, sl_total);
+        } else {
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "UNMEASURED");
+            (void)cx_fmt(r->source, sizeof r->source, "day-metrics events: 窗口内 0 次提交样本");
+        }
+        if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+    }
+}
+
+static void scan_portfolio(const char *path, const char *measured_at) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 1 << 20) != 0 || !buf) return;
+    int cnt = 0;
+    char *p = (char *)buf, *end = (char *)buf + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        if (p[0] && p[0] != '#' && strncmp(p, "id\t", 3) != 0) {
+            char *c[6];
+            if (split_tabs(p, c, 6) >= 4) {
+                if (!strcmp(c[3], "active") || !strcmp(c[3], "queued")) cnt++;
+            }
+        }
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    mm_free(buf);
+    DmRow *r = find_row("inflight_lines");
+    if (r) {
+        (void)cx_fmt(r->baseline, sizeof r->baseline, "%d", cnt);
+        (void)cx_fmt(r->source, sizeof r->source, "%s active 加 queued 行数", path);
+        if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+    }
+}
+
+static int is_allowed_branch(const char *b) {
+    if (!strcmp(b, "main") || !strcmp(b, "ujs")) return 1;
+    if (!strncmp(b, "v0.0.", 5) && b[5] >= '0' && b[5] <= '9') {
+        const char *q = b + 5;
+        while (*q >= '0' && *q <= '9') q++;
+        if (*q == 0) return 1;
+    }
+    return 0;
+}
+
+static void scan_branches_buf(char *buf, long n, const char *src, const char *measured_at) {
+    int stray = 0;
+    char *p = buf, *end = buf + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        while (*p == ' ' || *p == '*') p++;
+        long l = (long)strlen(p);
+        while (l > 0 && (p[l - 1] == '\r' || p[l - 1] == ' ')) p[--l] = 0;
+        if (l > 0 && !is_allowed_branch(p)) stray++;
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    DmRow *r = find_row("stray_branches");
+    if (r) {
+        (void)cx_fmt(r->baseline, sizeof r->baseline, "%d", stray);
+        (void)cx_fmt(r->source, sizeof r->source, "%s 非 main/v0.0.NN/ujs 分支条数", src);
+        if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+    }
+}
+
+static void scan_branches_file(const char *path, const char *measured_at) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 1 << 20) != 0 || !buf) dm_die("cannot read branches file");
+    scan_branches_buf((char *)buf, (long)n, path, measured_at);
+    mm_free(buf);
+}
+
+static void scan_branches_live(const char *measured_at) {
+    char *av[] = {"git", "branch", "--format=%(refname:short)", 0};
+    char *o = 0;
+    size_t on = 0;
+    if (cx_runv_timeout(av, 10, &o, &on) == 0 && o) {
+        scan_branches_buf(o, (long)on, "git branch", measured_at);
+    }
+    if (o) mm_free(o);
+}
+
+static void scan_slot_to_public(const char *cadence, const char *index_path, const char *ver, const char *slot_override, const char *measured_at) {
+    char slot_s[64], pub_s[64], vuse[32];
+    slot_s[0] = 0; pub_s[0] = 0; vuse[0] = 0;
+    if (ver && ver[0]) (void)cx_fmt(vuse, sizeof vuse, "%s", ver);
+    if (slot_override && slot_override[0]) {
+        (void)cx_fmt(slot_s, sizeof slot_s, "%s", slot_override);
+    } else if (cadence && cadence[0]) {
+        unsigned char *buf = 0;
+        int64_t n = 0;
+        if (sy_read_file(cadence, &buf, &n, 1 << 20) == 0 && buf) {
+            char *p = (char *)buf, *end = (char *)buf + n;
+            while (p < end) {
+                char *nl = memchr(p, '\n', (size_t)(end - p));
+                if (!nl) nl = end;
+                char sv = *nl;
+                *nl = 0;
+                if (p[0] && p[0] != '#') {
+                    char *c[6];
+                    if (split_tabs(p, c, 6) >= 3) {
+                        if (!vuse[0] || !strcmp(c[0], vuse)) {
+                            (void)cx_fmt(slot_s, sizeof slot_s, "%s", c[2]);
+                            if (!vuse[0]) (void)cx_fmt(vuse, sizeof vuse, "%s", c[0]);
+                        }
+                    }
+                }
+                *nl = sv;
+                p = (nl < end) ? nl + 1 : end;
+            }
+            mm_free(buf);
+        }
+    }
+    if (index_path && index_path[0]) {
+        unsigned char *buf = 0;
+        int64_t n = 0;
+        if (sy_read_file(index_path, &buf, &n, 1 << 20) == 0 && buf) {
+            char *p = (char *)buf, *end = (char *)buf + n;
+            while (p < end) {
+                char *nl = memchr(p, '\n', (size_t)(end - p));
+                if (!nl) nl = end;
+                char sv = *nl;
+                *nl = 0;
+                if (!strncmp(p, "exec-5-publish\t", 15)) {
+                    char *c[4];
+                    if (split_tabs(p, c, 4) >= 2) (void)cx_fmt(pub_s, sizeof pub_s, "%s", c[1]);
+                }
+                *nl = sv;
+                p = (nl < end) ? nl + 1 : end;
+            }
+            mm_free(buf);
+        }
+    }
+    DmRow *r = find_row("slot_to_public");
+    if (!r) return;
+    long t0 = parse_ts(slot_s), t1 = parse_ts(pub_s);
+    if (t0 >= 0 && t1 >= t0) {
+        long mins = (t1 - t0 + 30L) / 60L;
+        (void)cx_fmt(r->baseline, sizeof r->baseline, "%ld", mins);
+        (void)cx_fmt(r->source, sizeof r->source, "%s 起槽 %s 至 INDEX exec-5-publish %s 实测 %ld 分钟", vuse[0] ? vuse : "-", slot_s, pub_s, mins);
+    } else {
+        (void)cx_fmt(r->baseline, sizeof r->baseline, "UNMEASURED");
+        (void)cx_fmt(r->source, sizeof r->source, "slot_open 或 INDEX exec-5-publish 缺失");
+    }
+    if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+}
+
+static int parse_one_chain_log(const char *path, DmRun *out) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 1 << 24) != 0 || !buf) return -1;
+    out->start_s = -1;
+    out->end_s = -1;
+    out->rc = -1;
+    char *p = (char *)buf, *end = (char *)buf + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        char *c[6];
+        int nc = split_tabs(p, c, 6);
+        if (nc >= 2) {
+            if (!strcmp(c[0], "LIMITS") || !strcmp(c[0], "SEGMENT") || !strcmp(c[0], "CHAIN_START")) {
+                long ts = atol(c[1]);
+                if (ts > 1000000000L && (out->start_s < 0 || ts < out->start_s)) out->start_s = ts;
+                if (ts > 1000000000L && ts > out->end_s) out->end_s = ts;
+            } else if (!strcmp(c[0], "SUPERVISE") || !strcmp(c[0], "CHAIN_END")) {
+                long ts = atol(c[1]);
+                if (ts > 1000000000L) out->end_s = ts;
+                char rcs[16];
+                for (int i = 1; i < nc; i++) {
+                    if (ev_field(c[i], "rc=", rcs, sizeof rcs)) out->rc = atoi(rcs);
+                }
+            }
+        }
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    mm_free(buf);
+    if (out->rc < 0) out->rc = 1; /* incomplete log without rc=0 counts as failed start */
+    if (out->end_s < out->start_s) out->end_s = out->start_s;
+    return 0;
+}
+
+static void scan_chains(const char *manifest_path, const char *measured_at) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(manifest_path, &buf, &n, 1 << 20) != 0 || !buf) dm_die("cannot read chain-runs manifest");
+    DmRun runs[DM_MAX_RUNS];
+    int nruns = 0;
+    char *p = (char *)buf, *end = (char *)buf + n;
+    while (p < end && nruns < DM_MAX_RUNS) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        if (!nl) nl = end;
+        char sv = *nl;
+        *nl = 0;
+        if (nl > p && nl[-1] == '\r') nl[-1] = 0;
+        if (p[0] && p[0] != '#') {
+            if (parse_one_chain_log(p, &runs[nruns]) == 0) nruns++;
+        }
+        *nl = sv;
+        p = (nl < end) ? nl + 1 : end;
+    }
+    mm_free(buf);
+    /* Sort runs by start_s */
+    for (int i = 1; i < nruns; i++) {
+        DmRun cur = runs[i];
+        int j = i - 1;
+        while (j >= 0 && runs[j].start_s > cur.start_s) { runs[j + 1] = runs[j]; j--; }
+        runs[j + 1] = cur;
+    }
+    int fails = 0;
+    double gaps[DM_MAX_RUNS];
+    int ngaps = 0;
+    for (int i = 0; i < nruns; i++) {
+        if (runs[i].rc != 0) {
+            fails++;
+            if (i + 1 < nruns && runs[i].end_s > 0 && runs[i + 1].start_s >= runs[i].end_s) {
+                gaps[ngaps++] = (double)(runs[i + 1].start_s - runs[i].end_s) / 60.0;
+            }
+        }
+    }
+    for (int i = 1; i < ngaps; i++) {
+        double v = gaps[i];
+        int j = i - 1;
+        while (j >= 0 && gaps[j] > v) { gaps[j + 1] = gaps[j]; j--; }
+        gaps[j + 1] = v;
+    }
+    const char *cnames[2] = {"chain_fail_starts", "failed_chain_starts"};
+    for (int k = 0; k < 2; k++) {
+        DmRow *r = find_row(cnames[k]);
+        if (!r) continue;
+        if (nruns > 0) {
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "%d", fails);
+            (void)cx_fmt(r->source, sizeof r->source, "day-metrics chain-runs: %d 次起链 %d 次失败", nruns, fails);
+        } else {
+            (void)cx_fmt(r->baseline, sizeof r->baseline, "UNMEASURED");
+            (void)cx_fmt(r->source, sizeof r->source, "day-metrics chain-runs: 无起链样本");
+        }
+        if (measured_at) (void)cx_fmt(r->measured_at, sizeof r->measured_at, "%s", measured_at);
+    }
+    DmRow *rm = find_row("fail_to_restart_median");
+    if (rm) {
+        if (ngaps > 0) {
+            double med = (ngaps % 2) ? gaps[ngaps / 2] : (gaps[ngaps / 2 - 1] + gaps[ngaps / 2]) / 2.0;
+            (void)cx_fmt(rm->baseline, sizeof rm->baseline, "%.1f", med);
+            (void)cx_fmt(rm->source, sizeof rm->source, "day-metrics chain-runs: %d 次起链 %d 个失败重起间隔中位", nruns, ngaps);
+        } else {
+            (void)cx_fmt(rm->baseline, sizeof rm->baseline, "UNMEASURED");
+            (void)cx_fmt(rm->source, sizeof rm->source, "day-metrics chain-runs: 无失败重起间隔样本");
+        }
+        if (measured_at) (void)cx_fmt(rm->measured_at, sizeof rm->measured_at, "%s", measured_at);
+    }
+}
+
+static void scan_prerun(const char *dir, const char *measured_at) {
+    char slog[1024], dp[1024], first_red_win[32];
+    first_red_win[0] = 0;
+    long start_ts = -1, end_ts = -1, red_ts = -1;
+    long first_red_ms = -1;
+    (void)cx_fmt(slog, sizeof slog, "%s/supervise.log", dir);
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(slog, &buf, &n, 1 << 24) == 0 && buf) {
+        char *p = (char *)buf, *end = (char *)buf + n;
+        while (p < end) {
+            char *nl = memchr(p, '\n', (size_t)(end - p));
+            if (!nl) nl = end;
+            char sv = *nl;
+            *nl = 0;
+            char tsv[32], wv[32], msv[32];
+            if (!strncmp(p, "PRERUN_SUPERVISE_START\t", 23) && ev_field(p, "ts=", tsv, sizeof tsv)) {
+                long ts = atol(tsv);
+                if (ts > 0 && (start_ts < 0 || ts < start_ts)) start_ts = ts;
+            } else if (!strncmp(p, "PRERUN_SUPERVISE_DONE\t", 22) && ev_field(p, "ts=", tsv, sizeof tsv)) {
+                long ts = atol(tsv);
+                if (ts > end_ts) end_ts = ts;
+            } else if (!strncmp(p, "PRERUN_KEEP_GOING\t", 18) && !first_red_win[0]) {
+                if (strstr(p, "\tFAIL\t") || strstr(p, "status=FAIL")) {
+                    if (ev_field(p, "window=", wv, sizeof wv)) (void)cx_fmt(first_red_win, sizeof first_red_win, "%s", wv);
+                    if (ev_field(p, "ts=", tsv, sizeof tsv)) red_ts = atol(tsv);
+                    if (ev_field(p, "total_ms=", msv, sizeof msv)) first_red_ms = atol(msv);
+                }
+            }
+            *nl = sv;
+            p = (nl < end) ? nl + 1 : end;
+        }
+        mm_free(buf);
+    }
+    /* Fallback to done.W* mtimes when supervise.log has no explicit ts= */
+    if (start_ts < 0 || end_ts < 0) {
+        sy_dir_t d;
+        if (sy_dir_open(&d, dir) == 0) {
+            while (sy_dir_next(&d) == 1) {
+                if (d.name_n > 6 && !strncmp(d.name, "done.W", 6)) {
+                    sy_stat_t st;
+                    if (cx_fmt(dp, sizeof dp, "%s/%s", dir, d.name) == 0 && sy_stat(dp, &st) == 0) {
+                        if (start_ts < 0 || (long)st.mtime < start_ts) start_ts = (long)st.mtime;
+                        if ((long)st.mtime > end_ts) end_ts = (long)st.mtime;
+                    }
+                }
+            }
+            sy_dir_close(&d);
+        }
+    }
+    if (red_ts < 0 && first_red_win[0]) {
+        sy_stat_t st;
+        if (cx_fmt(dp, sizeof dp, "%s/done.%s", dir, first_red_win) == 0 && sy_stat(dp, &st) == 0) {
+            red_ts = (long)st.mtime;
+        }
+    }
+    DmRow *rp = find_row("prerun_minutes");
+    if (rp) {
+        if (start_ts > 0 && end_ts >= start_ts) {
+            double mins = (double)(end_ts - start_ts) / 60.0;
+            (void)cx_fmt(rp->baseline, sizeof rp->baseline, "%.1f", mins);
+            (void)cx_fmt(rp->source, sizeof rp->source, "day-metrics prerun %s 墙钟 %.1f 分钟", dir, mins);
+        } else {
+            (void)cx_fmt(rp->baseline, sizeof rp->baseline, "UNMEASURED");
+            (void)cx_fmt(rp->source, sizeof rp->source, "day-metrics prerun %s 无时间戳样本", dir);
+        }
+        if (measured_at) (void)cx_fmt(rp->measured_at, sizeof rp->measured_at, "%s", measured_at);
+    }
+    DmRow *rr = find_row("first_red_minutes");
+    if (rr) {
+        if (start_ts > 0 && red_ts >= start_ts) {
+            double mins = (double)(red_ts - start_ts) / 60.0;
+            (void)cx_fmt(rr->baseline, sizeof rr->baseline, "%.1f", mins);
+            (void)cx_fmt(rr->source, sizeof rr->source, "day-metrics prerun %s 首红窗 %s %.1f 分钟", dir, first_red_win[0] ? first_red_win : "-", mins);
+        } else if (first_red_ms > 0) {
+            double mins = (double)first_red_ms / 60000.0;
+            (void)cx_fmt(rr->baseline, sizeof rr->baseline, "%.1f", mins);
+            (void)cx_fmt(rr->source, sizeof rr->source, "day-metrics prerun %s 首红窗 %s %.1f 分钟", dir, first_red_win[0] ? first_red_win : "-", mins);
+        } else {
+            (void)cx_fmt(rr->baseline, sizeof rr->baseline, "UNMEASURED");
+            (void)cx_fmt(rr->source, sizeof rr->source, "day-metrics prerun %s 无首红样本", dir);
+        }
+        if (measured_at) (void)cx_fmt(rr->measured_at, sizeof rr->measured_at, "%s", measured_at);
+    }
+}
+
+static size_t render_table(char *out, size_t cap) {
+    size_t pos = 0;
+    const char *hdr =
+        "# generated by tools/day-metrics.cx --write from exec/facts/north-star-facts.tsv; do not hand-edit\n"
+        "# 口径: commit_fail_rate=窗口内 devsvc git.commit rc!=0 占比(附 COMMIT_FAIL_GATE 与 commit.stale_lock);"
+        " slot_to_public=INDEX exec-5-publish 减起槽时间(分);"
+        " chain_fail_starts/failed_chain_starts=整链起链 rc!=0 次数;"
+        " fail_to_restart_median=失败链终态到下次起链间隔中位(分);"
+        " prerun_minutes=预跑首窗到末窗墙钟(分);"
+        " first_red_minutes=预跑起跑到首个 FAIL 窗分钟数;"
+        " inflight_lines=build/portfolio.tsv active+queued 行数;"
+        " stray_branches=本地非 main/v0.0.NN/ujs 分支数; 未测写 UNMEASURED,不编数\n"
+        "metric\tbaseline\tunit\tsource\tmeasured_at\ttarget_0087\tfalsify_if\n";
+    size_t hl = strlen(hdr);
+    if (hl >= cap) dm_die("render buffer too small");
+    mm_copy(out, cap, hdr, hl);
+    pos = hl;
+    for (int i = 0; i < nrows; i++) {
+        DmRow *r = &rows[i];
+        char line[1024];
+        if (cx_fmt(line, sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                   r->metric, r->baseline, r->unit, r->source, r->measured_at, r->target, r->falsify))
+            dm_die("row too long");
+        size_t ll = strlen(line);
+        if (pos + ll >= cap) dm_die("render buffer overflow");
+        mm_copy(out + pos, cap - pos, line, ll);
+        pos += ll;
+    }
+    out[pos] = 0;
+    return pos;
+}
+
+int main(int argc, char **argv) {
+    int mode = 0; /* 0=print, 1=check, 2=write */
+    const char *facts = "exec/facts/north-star-facts.tsv";
+    const char *outp = "build/north-star.tsv";
+    const char *events = 0, *portfolio = 0, *cadence = 0, *indexp = 0, *ver = 0, *slot_open = 0;
+    const char *chains = 0, *prerun = 0, *branches_file = 0, *measured_at = 0;
+    int live_branches = 0;
+    long hours = 24, now = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--print")) mode = 0;
+        else if (!strcmp(argv[i], "--check")) mode = 1;
+        else if (!strcmp(argv[i], "--write")) mode = 2;
+        else if (!strcmp(argv[i], "--live-branches")) live_branches = 1;
+        else if (!strcmp(argv[i], "--facts") && i + 1 < argc) facts = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) outp = argv[++i];
+        else if (!strcmp(argv[i], "--events") && i + 1 < argc) events = argv[++i];
+        else if (!strcmp(argv[i], "--hours") && i + 1 < argc) hours = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--now") && i + 1 < argc) now = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--portfolio") && i + 1 < argc) portfolio = argv[++i];
+        else if (!strcmp(argv[i], "--cadence") && i + 1 < argc) cadence = argv[++i];
+        else if (!strcmp(argv[i], "--index") && i + 1 < argc) indexp = argv[++i];
+        else if (!strcmp(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+        else if (!strcmp(argv[i], "--slot-open") && i + 1 < argc) slot_open = argv[++i];
+        else if (!strcmp(argv[i], "--chain-runs") && i + 1 < argc) chains = argv[++i];
+        else if (!strcmp(argv[i], "--prerun-dir") && i + 1 < argc) prerun = argv[++i];
+        else if (!strcmp(argv[i], "--branches-file") && i + 1 < argc) branches_file = argv[++i];
+        else if (!strcmp(argv[i], "--measured-at") && i + 1 < argc) measured_at = argv[++i];
+        else dm_die("unknown or incomplete argument");
+    }
+    if (hours < 1) dm_die("bad --hours");
+
+    load_facts(facts);
+    long since = (now > 0 ? now : sy_wall_s()) - hours * 3600L;
+    if (events) scan_events_file(events, since, measured_at);
+    if (portfolio) scan_portfolio(portfolio, measured_at);
+    if (branches_file) scan_branches_file(branches_file, measured_at);
+    else if (live_branches) scan_branches_live(measured_at);
+    if (indexp || cadence || slot_open) scan_slot_to_public(cadence, indexp, ver, slot_open, measured_at);
+    if (chains) scan_chains(chains, measured_at);
+    if (prerun) scan_prerun(prerun, measured_at);
+
+    static char rendered[65536];
+    size_t rlen = render_table(rendered, sizeof rendered);
+    int unm = 0;
+    for (int i = 0; i < nrows; i++) if (!strcmp(rows[i].baseline, "UNMEASURED")) unm++;
+
+    if (mode == 0) {
+        sy_printf("%s", rendered);
+        if (has_events) {
+            for (int i = 0; i < ncf_gates; i++)
+                sy_printf("COMMIT_FAIL_GATE\tgate=%s\tcount=%d\n", cf_gates[i].k, cf_gates[i].n);
+            for (int i = 0; i < nsl_reasons; i++)
+                sy_printf("STALE_LOCK\treason=%s\tcount=%d\n", sl_reasons[i].k, sl_reasons[i].n);
+            sy_printf("STALE_LOCK_TOTAL\tcount=%d\n", sl_total);
+        }
+        sy_printf("DAY_METRICS\tmode=print\trows=%d\tmeasured=%d\tunmeasured=%d\n", nrows, nrows - unm, unm);
+        return 0;
+    }
+    if (mode == 2) {
+        if (sy_write_atomic(outp, rendered, rlen, 0644) != 0) dm_die("cannot write output table");
+        sy_printf("DAY_METRICS\tmode=write\tout=%s\trows=%d\tmeasured=%d\tunmeasured=%d\n", outp, nrows, nrows - unm, unm);
+        return 0;
+    }
+    /* mode == 1: --check */
+    unsigned char *cur = 0;
+    int64_t clen = 0;
+    if (sy_read_file(outp, &cur, &clen, 1 << 20) != 0 || !cur) {
+        sy_printf("DIFF\t%s\treason=missing\nDAY_METRICS\tmode=check\tresult=DRIFT\n", outp);
+        return 1;
+    }
+    int same = ((size_t)clen == rlen && !memcmp(cur, rendered, rlen));
+    int diff_line = 1;
+    if (!same) {
+        size_t lim = (size_t)clen < rlen ? (size_t)clen : rlen;
+        for (size_t i = 0; i < lim; i++) {
+            if (cur[i] != (unsigned char)rendered[i]) break;
+            if (rendered[i] == '\n') diff_line++;
+        }
+    }
+    mm_free(cur);
+    if (!same) {
+        sy_printf("DIFF\t%s\tline=%d\nDAY_METRICS\tmode=check\tresult=DRIFT\n", outp, diff_line);
+        return 1;
+    }
+    sy_printf("DAY_METRICS\tmode=check\tout=%s\trows=%d\tresult=OK\n", outp, nrows);
+    return 0;
+}
