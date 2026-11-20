@@ -1,41 +1,15 @@
-native function json_hex_digit(byte:i64) i64 {
-  if(byte>=48 && byte<=57) { return byte-48; }
-  if(byte>=65 && byte<=70) { return byte-55; }
-  return byte-87;
-}
-
 native function json_hex_word(bytes:i64) i64 {
   let out=0;
   let i=0;
-  while(i<4) { out=out*16+json_hex_digit(ux_u8(bytes+i)); i=i+1; }
+  while(i<4) {
+    let byte=ux_u8(bytes+i);
+    let digit=byte-87;
+    if(byte>=48 && byte<=57) { digit=byte-48; }
+    else if(byte>=65 && byte<=70) { digit=byte-55; }
+    out=out*16+digit;
+    i=i+1;
+  }
   return out;
-}
-
-native function json_escape_width(input:i64,limit:i64) i64 {
-  if(ux_u8(input+1)!=117) { return 2; }
-  let high=json_hex_word(input+2);
-  if(high>=55296 && high<=56319 && input+12<=limit &&
-     ux_u8(input+6)==92 && ux_u8(input+7)==117) {
-    let low=json_hex_word(input+8);
-    if(low>=56320 && low<=57343) { return 12; }
-  }
-  return 6;
-}
-
-native function json_escape_value(input:i64,width:i64) i64 {
-  let value=ux_u8(input+1);
-  if(value==117) {
-    let high=json_hex_word(input+2);
-    if(width==12) { return 65536+(high-55296)*1024+json_hex_word(input+8)-56320; }
-    if(high>=55296 && high<=57343) { return 65533; }
-    return high;
-  }
-  if(value==98) { return 8; }
-  if(value==102) { return 12; }
-  if(value==110) { return 10; }
-  if(value==114) { return 13; }
-  if(value==116) { return 9; }
-  return value;
 }
 
 native function json_utf8_scalar(out:i64,scalar:i64,write:i64) i64 {
@@ -66,8 +40,26 @@ native function json_string_pass(at:i64,close:i64,out:i64,write:i64) i64 {
   while(cursor<close-1) {
     let width=1;
     if(ux_u8(cursor)==92) {
-      width=json_escape_width(cursor,close-1);
-      let scalar=json_escape_value(cursor,width);
+      width=2;
+      let scalar=ux_u8(cursor+1);
+      if(scalar==117) {
+        width=6;
+        let high=json_hex_word(cursor+2);
+        scalar=high;
+        if(high>=55296 && high<=57343) { scalar=65533; }
+        if(high>=55296 && high<=56319 && cursor+12<=close-1 &&
+           ux_u8(cursor+6)==92 && ux_u8(cursor+7)==117) {
+          let low=json_hex_word(cursor+8);
+          if(low>=56320 && low<=57343) {
+            width=12;
+            scalar=65536+(high-55296)*1024+low-56320;
+          }
+        }
+      } else if(scalar==98) { scalar=8; }
+      else if(scalar==102) { scalar=12; }
+      else if(scalar==110) { scalar=10; }
+      else if(scalar==114) { scalar=13; }
+      else if(scalar==116) { scalar=9; }
       size=size+json_utf8_scalar(out+size,scalar,write);
     } else {
       width=loader_utf8_width(cursor,close-1);

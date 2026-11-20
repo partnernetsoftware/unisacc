@@ -34,22 +34,35 @@ native function animation_json_track_kind(text:i64,end:i64) i64 {
   if(length==6 && head==1952671094 && ux_u8(text+5)==111 && ux_u8(text+6)==114) { return 2; }
   if(length==5 && head==1869377379 && ux_u8(text+5)==114) { return 3; }
   if(length==10 && head==1952544113 && ux_u32(text+5)==1768845925 && ux_u8(text+9)==111 && ux_u8(text+10)==110) { return 4; }
+  if(head==1819242338 && (length==4 || (length==7 && ux_u8(text+5)==101 && ux_u8(text+6)==97 && ux_u8(text+7)==110))) { return 5; }
+  if(length==6 && head==1769108595 && ux_u8(text+5)==110 && ux_u8(text+6)==103) { return 6; }
   return 0-1;
 }
 
-native function animation_batch_track(obj:i64,end:i64,scratch:i64,track:i64,fps:f64) i64 {
+native function animation_batch_track(obj:i64,end:i64,scratch:i64,track:i64,limit:i64,fps:f64,kinds:i64) i64 {
+  if(limit-track<616) { return 0-1; }
   let kind=animation_json_track_kind(LoaderJson_find(obj,end,scratch,1701869940,0,0,4),end);
-  if(kind<1) { return 0-3; }
+  if(kind<1 || kind>kinds) { return 0-3; }
   let name=track+40;
-  let nameBytes=animation_json_name(LoaderJson_find(obj,end,scratch,1701667182,0,0,4),end,name);
+  let nameBytes=Json_decodeString(LoaderJson_find(obj,end,scratch,1701667182,0,0,4),end,name,64);
   if(nameBytes<1) { return 0-3; }
   let times=track+104;
   let values=track+360;
   let count=animation_json_array(LoaderJson_find(obj,end,scratch,1701669236,115,0,5),end,times);
-  let valueCount=animation_json_array(LoaderJson_find(obj,end,scratch,1970037110,29541,0,6),end,values);
+  let valueArray=LoaderJson_find(obj,end,scratch,1970037110,29541,0,6);
+  let valueCount=0;
+  let next=track+616;
+  if(kind<=4) { valueCount=animation_json_array(valueArray,end,values); }
+  else {
+    let decoded=animation_batch_discrete(valueArray,end,values,next,limit,kind);
+    if(decoded<0) { return decoded; }
+    valueCount=decoded%128;
+    next=(next+decoded/128+7)/8*8;
+    if(next>limit) { return 0-1; }
+  }
   if(count<1 || valueCount<1 || valueCount%count!=0) { return 0-3; }
   let lanes=valueCount/count;
-  if((kind==1 && lanes!=1) || (kind==3 && lanes!=3) || (kind==4 && lanes!=4)) { return 0-3; }
+  if((kind==1 && lanes!=1) || (kind==3 && lanes!=3) || (kind==4 && lanes!=4) || (kind==6 && lanes%2!=0)) { return 0-3; }
   let i=0;
   while(i<count) {
     let at=times+i*4;
@@ -63,11 +76,12 @@ native function animation_batch_track(obj:i64,end:i64,scratch:i64,track:i64,fps:
   // default when r160 ignores a mode unsupported by this track type.
   let tail=ux_u8_put(scratch+12,110);
   let mode=LoaderJson_number(LoaderJson_find(obj,end,scratch,1702129257,1819242610,1869182049,13),end,2301.0);
-  if(mode==2300.0 || (mode==2302.0 && kind!=4)) { let update=KeyframeTrack_setInterpolation(track,f64_floor_i64(mode)); }
-  return track;
+  if(kind>=5 || mode==2300.0) { let update=KeyframeTrack_setInterpolation(track,2300); }
+  else if(mode==2302.0 && kind!=4) { let update=KeyframeTrack_setInterpolation(track,2302); }
+  return next;
 }
 
-native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:i64) i64 {
+native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:i64,kinds:i64) i64 {
   let tracks=LoaderJson_find(obj,end,scratch,1667330676,29547,0,6);
   let count=animation_json_count(tracks,end,32);
   if(count<0) { return 0-3; }
@@ -77,7 +91,7 @@ native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:
   if(storage>limit || count>(limit-storage)/616) { return 0-1; }
   let name=LoaderJson_find(obj,end,scratch,1701667182,0,0,4);
   let nameBytes=0;
-  if(name>=0) { nameBytes=animation_json_name(name,end,names); }
+  if(name>=0) { nameBytes=Json_decodeString(name,end,names,64); }
   if(nameBytes<0) { return 0-3; }
   let fps=LoaderJson_number(LoaderJson_find(obj,end,scratch,7565414,0,0,3),end,1.0);
   if(fps==0.0) { fps=1.0; }
@@ -85,9 +99,10 @@ native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:
   let item=json_space(tracks+1,end);
   let i=0;
   while(i<count) {
-    let track=animation_batch_track(item,end,scratch,storage+i*616,fps);
-    if(track<0) { return track; }
-    let saved=ux_u32_put(handles+4*i,track);
+    let next=animation_batch_track(item,end,scratch,storage,limit,fps,kinds);
+    if(next<0) { return next; }
+    let saved=ux_u32_put(handles+4*i,storage);
+    storage=next;
     item=json_space(json_space(json_value_end(item,end),end)+1,end);
     i=i+1;
   }
@@ -95,13 +110,13 @@ native function animation_batch_clip(obj:i64,end:i64,scratch:i64,clip:i64,limit:
   let blend=LoaderJson_number(LoaderJson_find(obj,end,scratch,1852140642,1685015908,101,9),end,2500.0);
   if(blend!=2500.0 && blend!=2501.0) { return 0-3; }
   if(AnimationClip_init(clip,names,nameBytes,handles,count,duration,f64_floor_i64(blend))<0) { return 0-3; }
-  return storage+count*616;
+  return storage;
 }
 
 // Publish only after the entire array parsed. Storage is borrowed from work
 // and remains valid until the caller releases the arena for this asset.
-native function AnimationLoader_parseNumeric(file:i64,out:i64,countLimit:i64,work:i64,space:i64) i64 {
-  if(countLimit<0 || countLimit>32 || out%4!=0 || !loading_span(out,countLimit*4) ||
+native function AnimationLoader_parse(file:i64,out:i64,countLimit:i64,work:i64,space:i64,kinds:i64) i64 {
+  if((kinds!=4 && kinds!=6) || countLimit<0 || countLimit>32 || out%4!=0 || !loading_span(out,countLimit*4) ||
      !loading_span(work,space) || work%8!=0 || space<64 || !loading_span(file,FileLoader.size) ||
      ux_u32(file+FileLoader.state)!=2 || !file_disjoint(out,countLimit*4,file,FileLoader.size) ||
      !file_disjoint(work,space,file,FileLoader.size) || !file_disjoint(work,space,out,countLimit*4)) { return 0-1; }
@@ -121,7 +136,7 @@ native function AnimationLoader_parseNumeric(file:i64,out:i64,countLimit:i64,wor
   if(count>countLimit || cursor>limit) { return 0-1; }
   let i=0;
   while(i<count) {
-    let next=animation_batch_clip(item,end,work,cursor,limit);
+    let next=animation_batch_clip(item,end,work,cursor,limit,kinds);
     if(next<0) { return next; }
     let saved=ux_u32_put(staged+i*4,cursor);
     cursor=next;
@@ -130,4 +145,8 @@ native function AnimationLoader_parseNumeric(file:i64,out:i64,countLimit:i64,wor
   }
   let published=uxe_copy_record(out,staged,count*4);
   return count;
+}
+
+native function AnimationLoader_parseNumeric(file:i64,out:i64,countLimit:i64,work:i64,space:i64) i64 {
+  return AnimationLoader_parse(file,out,countLimit,work,space,4);
 }

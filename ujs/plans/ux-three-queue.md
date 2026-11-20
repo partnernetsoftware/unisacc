@@ -204,7 +204,7 @@
 - ~~AudioLoader WAV 多格式解码 | G-io PCM8/16/24/32、IEEE float32、双声道、非有限值与越界 | FileLoader、LoadingManager。~~ 14 项通过，换声道反例转红，旧 PCM16 七项通过。浏览器拒绝 IEEE float64，保持同样拒绝。
 - ~~AudioLoader 异步加载调度 | G-io 并发、过期响应、出错与回收 | FileLoader、LoadingManager 与 WAV 解码。~~ 15 项通过，漏报解码错误反例转红，FileLoader 七项与 LoadingManager 八项通过。
 - ~~AnimationLoader 多片段与数值轨道 | G-io r160 JSON 的数值、向量、颜色、四元数、帧率、插值与失败保留 | M8 轨道和片段。~~ 14 项通过，替换关键帧时间反例转红，旧七项通过。
-- AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。
+- ~~AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。~~ 14 项通过，读取错位的字符串字节由 10 变为 65，反例转红；数值片段 14 项及 UTF-8 九项通过。
 - BufferGeometryLoader 通用 JSON | G-io 索引、组、类型化、交错、变形属性与错误 | BufferGeometry、BufferAttribute。
 - MaterialLoader 材质和纹理表 | G-io r160 材质 JSON、纹理引用和坏类型 | M5 材质和纹理。
 - ObjectLoader 两阶段整景 | G-io 子树、几何、材质、图像引用及失败回退 | BufferGeometryLoader、MaterialLoader、图像加载。
