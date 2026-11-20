@@ -196,7 +196,8 @@
 - ~~JPEG 灰度渐进解码 | G-io 多次扫描、逐次逼近、重启与坏序号 | 渐进扫描频带与重启间隔。~~ 11 项通过，翻转 AC 细化位反例转红。
 - ~~JPEG 彩色渐进解码 | G-io 交错 DC、分量 AC 扫描、色度采样与坏序号 | 灰度渐进、彩色基线与重启间隔。~~ 11 项通过，跨块坐标替换反例由 129 变为 128。
 - ~~ImageLoader 渐进 JPEG 分派 | G-io 灰度和彩色渐进文件响应，失败保持输出 | 渐进 JPEG 解码。~~ 灰度 13 项、彩色 14 项通过，两个步长篡改反例转红。
-- JPEG 编码与 ImageUtils 接线 | G-io Canvas 大图分支、PNG/JPEG URI 及有损误差 | JPEG 彩色与 ImageUtils PNG。
+- ~~JPEG 彩色基线编码 | G-io 尺寸、边缘块、色差、质量参数和失败保持输出 | JPEG 彩色与 DCT。~~ 12 项通过，替换源像素反例转红。
+- ImageUtils JPEG 与 PNG 数据 URI 分派 | G-io Canvas 大图分支、两类 URI 浏览器解码及容量拒绝 | JPEG 编码与 ImageUtils PNG。
 - PNG 调色板、透明色键及隔行 | G-io 色型、透明度、Adam7 与坏文件 | PNG 解码和扫描行。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。
 - AnimationLoader 多片段与多轨道 | G-io r160 JSON 的类型、插值、错误与回收 | M8 轨道和片段。

@@ -1,0 +1,142 @@
+native function jpeg_encode_quant(table:i64,quality:i64) i64 {
+  let standard=[16,11,12,14,12,10,16,14,13,14,18,17,16,19,24,40,26,24,22,22,24,49,35,37,29,40,58,51,61,60,57,51,
+    56,55,64,72,92,78,64,68,87,69,55,56,80,109,81,87,95,98,103,104,103,62,77,113,121,112,100,120,92,101,103,99];
+  let scale=200-2*quality;
+  if(quality<50) { scale=5000/quality; }
+  let i=0;
+  while(i<64) {
+    let value=(50+standard[i]*scale)/100;
+    if(value<1) { value=1; }
+    if(value>255) { value=255; }
+    let saved=ux_u8_put(table+i,value);
+    i=i+1;
+  }
+  return table;
+}
+
+native function jpeg_write_header(dst:i64,quant:i64,width:i64,height:i64) i64 {
+  let prefix=[255,216,255,219,0,67,0];
+  let i=0;
+  while(i<7) { let saved=ux_u8_put(dst+i,prefix[i]); i=i+1; }
+  i=0;
+  while(i<64) { let saved=ux_u8_put(dst+7+i,ux_u8(quant+i)); i=i+1; }
+  let frame=[255,192,0,17,8,height/256,height%256,width/256,width%256,3,1,17,0,2,17,0,3,17,0];
+  i=0;
+  while(i<19) { let saved=ux_u8_put(dst+71+i,frame[i]); i=i+1; }
+  let start=[255,196,0,210,0];
+  i=0;
+  while(i<5) { let saved=ux_u8_put(dst+90+i,start[i]); i=i+1; }
+  i=0;
+  while(i<16) {
+    let nodes=0;
+    if(i==3) { nodes=12; }
+    let saved=ux_u8_put(dst+95+i,nodes);
+    i=i+1;
+  }
+  i=0;
+  while(i<12) { let saved=ux_u8_put(dst+111+i,i); i=i+1; }
+  let ac=ux_u8_put(dst+123,16);
+  i=0;
+  while(i<16) {
+    let nodes=0;
+    if(i==7) { nodes=162; }
+    let saved=ux_u8_put(dst+124+i,nodes);
+    i=i+1;
+  }
+  let eob=ux_u8_put(dst+140,0);
+  let zrl=ux_u8_put(dst+141,240);
+  i=0;
+  while(i<160) { let saved=ux_u8_put(dst+142+i,i/10*16+i%10+1); i=i+1; }
+  let scan=[255,218,0,12,3,1,0,2,0,3,0,0,63,0];
+  i=0;
+  while(i<14) { let saved=ux_u8_put(dst+302+i,scan[i]); i=i+1; }
+  return dst+316;
+}
+
+native function jpeg_load_tile(image:i64,plane:i64,left:i64,top:i64,channel:i64) i64 {
+  let rgba=ux_u32(image+ImageResource.rgba);
+  let w=ux_u32(image+ImageResource.width);
+  let h=ux_u32(image+ImageResource.height);
+  let pitch=ux_u32(image+ImageResource.rowBytes);
+  let y=0;
+  while(y<8) {
+    let yy=top+y;
+    if(yy>=h) { yy=h-1; }
+    let x=0;
+    while(x<8) {
+      let xx=left+x;
+      if(xx>=w) { xx=w-1; }
+      let at=rgba+yy*pitch+xx*4;
+      let a=(0.0+ux_u8(at+3))/255.0;
+      let r=a*ux_u8(at);
+      let g=a*ux_u8(at+1);
+      let b=a*ux_u8(at+2);
+      let value=0.299*r+0.587*g+0.114*b;
+      if(channel==1) { value=128.0-0.168736*r-0.331264*g+0.5*b; }
+      if(channel==2) { value=128.0+0.5*r-0.418688*g-0.081312*b; }
+      let saved=ux_u8_put(plane+y*8+x,jpeg_color_byte(value));
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return plane;
+}
+
+native function JpegEncode_rgba8(image:i64,quality:i64,out:i64,capacity:i64,scratch:i64,space:i64) i64 {
+  if(image<0 || image%4!=0 || image>6291456-ImageResource.size || quality<1 || quality>100 ||
+     out<0 || capacity<318 || out>6291456-capacity || scratch<0 || scratch%8!=0 ||
+     space<1758 || scratch>6291456-space || jpeg_overlap(out,capacity,scratch,space) ||
+     jpeg_overlap(image,ImageResource.size,scratch,space) || jpeg_overlap(image,ImageResource.size,out,capacity)) { return 0-1; }
+  let rgba=ux_u32(image+ImageResource.rgba);
+  let width=ux_u32(image+ImageResource.width);
+  let height=ux_u32(image+ImageResource.height);
+  let pitch=ux_u32(image+ImageResource.rowBytes);
+  if(width<1 || width>65535 || height<1 || height>65535 || pitch<4*width || rgba>6291456-4*width ||
+     height-1>(6291456-4*width-rgba)/pitch) { return 0-1; }
+  let input=(height-1)*pitch+4*width;
+  if(jpeg_overlap(rgba,input,scratch,space) || jpeg_overlap(rgba,input,out,capacity)) { return 0-1; }
+  let writer=scratch;
+  let quant=jpeg_encode_quant(scratch+16,quality);
+  let basis=jpeg_idct_basis(scratch+80);
+  let work=scratch+592;
+  let coeff=scratch+1104;
+  let plane=scratch+1360;
+  let dc=scratch+1424;
+  let staged=scratch+1440;
+  let max=capacity;
+  if(max>space-1440) { max=space-1440; }
+  let first=jpeg_write_header(staged,quant,width,height);
+  let cursor=ux_u32_put(writer+JpegWriteBits.next,first);
+  let limit=ux_u32_put(writer+JpegWriteBits.end,staged+max-2);
+  let empty=ux_u32_put(writer+JpegWriteBits.used,0);
+  let zero=ux_u32_put(writer+JpegWriteBits.byte,0);
+  let k=0;
+  while(k<3) { let reset=ux_u32_put(dc+4*k,0); k=k+1; }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let c=0;
+      while(c<3) {
+        let tile=jpeg_load_tile(image,plane,x,y,c);
+        let transformed=jpeg_fdct_quantize(tile,basis,quant,work,coeff);
+        if(transformed<0) { return transformed; }
+        let packed=jpeg_encode_block(writer,coeff,ux_i32(dc+4*c));
+        if(packed<0) { return packed; }
+        let stored=ux_i32_put(dc+4*c,packed-65536);
+        c=c+1;
+      }
+      x=x+8;
+    }
+    y=y+8;
+  }
+  let fill=(8-ux_u32(writer+JpegWriteBits.used))%8;
+  let last=jpeg_put_bits(writer,u32_shl(1,fill)-1,fill);
+  if(last<0) { return last; }
+  let marker=ux_u8_put(last,255);
+  let end=ux_u8_put(last+1,217);
+  let bytes=last+2-staged;
+  k=0;
+  while(k<bytes) { let saved=ux_u8_put(out+k,ux_u8(staged+k)); k=k+1; }
+  return bytes;
+}
