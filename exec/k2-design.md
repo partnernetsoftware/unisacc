@@ -118,8 +118,8 @@ Every slice must keep the hash identical for every generator and mode it touches
   4. Any case where installation feeds back into facts, such as a `group-tail` return used by a later row's facts. This is handled by `result=` storing into the environment, but a fact function that inspects `g` would break the "facts are graph-independent" rule. Each such case should be listed under `keep` with a reason.
 
 ### Critical Files for Implementation
-- /Users/wjc/repos/unisacc/exec/finite_rules.py
-- /Users/wjc/repos/unisacc/exec/parse2/gen2.py
-- /Users/wjc/repos/unisacc/exec/parse2/valueranks.py
-- /Users/wjc/repos/unisacc/exec/parse2/structreturnexpr.py
-- /Users/wjc/repos/unisacc/tests/decisionledger.py
+- ~/repos/unisacc/exec/finite_rules.py
+- ~/repos/unisacc/exec/parse2/gen2.py
+- ~/repos/unisacc/exec/parse2/valueranks.py
+- ~/repos/unisacc/exec/parse2/structreturnexpr.py
+- ~/repos/unisacc/tests/decisionledger.py

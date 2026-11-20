@@ -1,0 +1,100 @@
+/* tools/scrub-home-paths.cx -- rewrite absolute home paths that leak a system user name into "~/".
+ *
+ *   sh ./unisacc.com tools/scrub-home-paths.cx -- --check|--write|--list (FILE... | --tracked-docs)
+ *
+ * The rewrite: "/home/<NAME>/" and "/Users/<NAME>/" -> "~/", "C:\Users\<NAME>\" -> "~\", where NAME is
+ * [A-Za-z0-9._-]+ and the leading "/" (or drive letter) is not preceded by [A-Za-z0-9._-].
+ * Only text files are touched: a file with a NUL byte in it is skipped (SKIP binary).  Idempotent: a
+ * rewritten file has no further match.
+ *   --list   one line per file with matches: FILE<TAB>N (matching lines)
+ *   --check  every matching line: FILE:LINE:<text>, then SCRUB<TAB>files=F<TAB>lines=L; exit 1 when L>0
+ *   --write  rewrites the files in place, prints WROTE<TAB>FILE<TAB>N, then SCRUB<TAB>files=F<TAB>lines=L
+ * --tracked-docs takes the files from `git grep -lI` over the tracked tree outside archive/, release/evidence/,
+ * research/, apps/ and ujs/ (history and other lanes kept as is: see build/no-home-path-baseline.tsv).
+ * The guard for new lines is tools/no-home-path.cx. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int nm_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+/* length of the home prefix at s[i] (whole "/home/<NAME>/" etc.), 0 when none; *win = 1 for the C:\ form */
+static long home_at(const char *s, long n, long i, int *win) {
+    static const char *px[] = {"/home/", "/Users/"};
+    long k, j;
+    *win = 0;
+    if (i > 0 && nm_ch(s[i - 1])) return 0;
+    for (k = 0; k < 2; k++) {
+        long pl = tx_len(px[k], 16);
+        if (i + pl < n && tx_same(s + i, pl, px[k], pl)) {
+            j = i + pl;
+            while (j < n && nm_ch(s[j])) j++;
+            if (j > i + pl && j < n && s[j] == '/') return j + 1 - i;
+        }
+    }
+    if (i + 9 < n && ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) && tx_same(s + i + 1, 8, ":\\Users\\", 8)) {
+        j = i + 9;
+        while (j < n && nm_ch(s[j])) j++;
+        if (j > i + 9 && j < n && s[j] == '\\') { *win = 1; return j + 1 - i; }
+    }
+    return 0;
+}
+
+/* scrub one file; mode 0 list, 1 check, 2 write; returns matching lines, -1 unreadable, -2 binary */
+static long scrub(const char *path, int mode) {
+    size_t n0; char *b = (char *)cx_read(path, &n0), *o; long n = (long)n0, i, at = 0, lines = 0, on = 0, line = 1;
+    if (!b) return -1;
+    for (i = 0; i < n; i++) if (!b[i]) return -2;
+    o = mm_alloc(n + 1);
+    if (!o) return -1;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e, hit = 0;
+        for (i = at; i < at + ln; ) {
+            int win; long h = home_at(b, at + ln, i, &win);
+            if (h) { hit = 1; o[on++] = '~'; o[on++] = win ? '\\' : '/'; i += h; }
+            else o[on++] = b[i++];
+        }
+        if (hit) { lines++; if (mode == 1) printf("%s:%ld:%.*s\n", path, line, (int)ln, b + at); }
+        if (e >= 0) o[on++] = '\n';
+        at += ln + 1; line++;
+    }
+    if (mode == 2 && lines && cx_write(path, o, on)) { fprintf(stderr, "scrub-home-paths: cannot write %s\n", path); return -1; }
+    if (mode == 2 && lines) printf("WROTE\t%s\t%ld\n", path, lines);
+    if (mode == 0 && lines) printf("%s\t%ld\n", path, lines);
+    return lines;
+}
+
+int main(int argc, char **argv) {
+    int mode, k, files = 0, bad = 0; long total = 0;
+    if (argc < 3) { fprintf(stderr, "usage: tools/scrub-home-paths.cx --check|--write|--list (FILE... | --tracked-docs)\n"); return 2; }
+    if (tx_eqz(argv[1], "--list")) mode = 0; else if (tx_eqz(argv[1], "--check")) mode = 1; else if (tx_eqz(argv[1], "--write")) mode = 2;
+    else { fprintf(stderr, "scrub-home-paths: unknown mode %s\n", argv[1]); return 2; }
+    if (argc == 3 && tx_eqz(argv[2], "--tracked-docs")) {
+        char *gv[] = {"./tools/bound", "30", "git", "grep", "-lI", "-E", "(^|[^A-Za-z0-9._-])/(home|Users)/[A-Za-z0-9._-]+/", "--", ".",
+                      ":!archive", ":!release/evidence", ":!research", ":!apps", ":!ujs", 0};
+        static char out[1 << 20]; int cut = 0; long r = sy_run(gv, out, sizeof out - 1, &cut), at = 0;
+        if (r < 0 || r > 1 || cut) { fprintf(stderr, "scrub-home-paths: git grep failed\n"); return 2; }
+        r = r ? 0 : tx_len(out, sizeof out);   /* sy_run returns the exit status; 1 = no match */
+        while (at < r) {
+            long e = tx_chr(out + at, r - at, '\n'), ln = e < 0 ? r - at : e; char p[1024]; long c;
+            if (ln > 0 && ln < (long)sizeof p) {
+                mm_copy(p, sizeof p, out + at, ln); p[ln] = 0;
+                c = scrub(p, mode);
+                if (c > 0) { files++; total += c; } else if (c == -1) bad++;
+            }
+            at += ln + 1;
+        }
+    } else for (k = 2; k < argc; k++) {
+        long c = scrub(argv[k], mode);
+        if (c > 0) { files++; total += c; }
+        else if (c == -1) { fprintf(stderr, "scrub-home-paths: cannot read %s\n", argv[k]); bad++; }
+        else if (c == -2) printf("SKIP\tbinary\t%s\n", argv[k]);
+    }
+    if (mode) printf("SCRUB\tfiles=%d\tlines=%ld\n", files, total);
+    if (bad) return 2;
+    return mode == 1 && total ? 1 : 0;
+}

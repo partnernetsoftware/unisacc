@@ -1,0 +1,69 @@
+/* tools/check-version-metrics-gen.cx -- tools/version-metrics-gen.cx 的检查。
+ *
+ *   sh ./unisacc.com tools/check-version-metrics-gen.cx [-- WORK]
+ *
+ * 覆盖：
+ * (1) check-tree: 入库 build/version-cadence.tsv 执行 --check rc=0；
+ * (2) rows-and-columns: 表含 0.0.81..0.0.86 六行、每行 21 列，0.0.86 行状态 OPEN；
+ * (3) print-equals-tree: --print 输出逐字节等于入库表；
+ * (4) no-guess: 链墙钟列(第 7 列)在 0.0.81..0.0.85 全为 UNMEASURED(仓内无链起止证据，不得估算)；
+ * (5) neg-usage: 无模式或未知选项 rc=2。
+ * 输出 PASS/FAIL 与 CHECK_VERSION_METRICS_GEN\tfailed=N。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+
+static int failed;
+static char out[65536];
+
+static void res(const char *name, int ok) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+
+int main(void) {
+    size_t n = 0;
+    char *tbl = cx_read("build/version-cadence.tsv", &n);
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/version-metrics-gen.cx", "--", "--check", 0};
+        res("check-tree", ck_run(av, out, sizeof out) == 0 && strstr(out, "status=CHECK") != 0);
+    }
+    {
+        int rows = 0, cols_ok = 1, open_ok = 0, nochain = 1;
+        const char *p = tbl;
+        while (p && *p) {
+            const char *e = strchr(p, '\n');
+            size_t ln = e ? (size_t)(e - p) : strlen(p);
+            if (*p != '#') {
+                int tabs = 0;
+                const char *f7 = 0;
+                for (size_t i = 0; i < ln; i++) if (p[i] == '\t') { tabs++; if (tabs == 6) f7 = p + i + 1; }
+                if (tabs != 20) cols_ok = 0;
+                rows++;
+                if (!strncmp(p, "0.0.86\tOPEN\t", 12)) open_ok = 1;
+                else if (!f7 || strncmp(f7, "UNMEASURED\t", 11)) nochain = 0;
+            }
+            p = e ? e + 1 : 0;
+        }
+        res("rows-and-columns", tbl && rows == 6 && cols_ok && open_ok);
+        res("no-guess", tbl && nochain);
+    }
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/version-metrics-gen.cx", "--", "--print", 0};
+        int rc = ck_run(av, out, sizeof out);
+        res("print-equals-tree", rc == 0 && tbl && strlen(out) == n && memcmp(out, tbl, n) == 0);
+    }
+    {
+        char *a1[] = {"sh", "./unisacc.com", "tools/version-metrics-gen.cx", 0};
+        char *a2[] = {"sh", "./unisacc.com", "tools/version-metrics-gen.cx", "--", "--bogus", 0};
+        int r1 = ck_run(a1, out, sizeof out);
+        int r2 = ck_run(a2, out, sizeof out);
+        res("neg-usage", r1 == 2 && r2 == 2);
+    }
+    printf("CHECK_VERSION_METRICS_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

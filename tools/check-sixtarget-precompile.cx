@@ -1,0 +1,213 @@
+/* tools/check-sixtarget-precompile.cx -- self-check for tools/sixtarget-precompile.cx (M4/J10).
+ * Marker: CHECK_SIXTARGET<TAB>failed=N */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.ckrun
+
+static int passed = 0, failed = 0;
+static void st_ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    printf("%s\tsixtarget.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+int main(void) {
+    char out[16384], cmd[4096], root[2048];
+    long t0 = sy_now_ms();
+
+    if (sy_realpath(".", root, sizeof root) < 0) {
+        printf("FAIL\tresolve-root\nCHECK_SIXTARGET\tfailed=1\tms=0\n");
+        return 1;
+    }
+
+    char tmp[256], stbin[320], good_cx[320], bad_err_cx[320], bad_fn_cx[320], d2_wrap[320], nod2_wrap[320];
+    tx_snprintf(tmp, sizeof tmp, "/tmp/ck-st-%d-%ld", (int)getpid(), t0 % 100000L);
+    tx_snprintf(stbin, sizeof stbin, "%s/sixtarget.bin", tmp);
+    tx_snprintf(good_cx, sizeof good_cx, "%s/good.cx", tmp);
+    tx_snprintf(bad_err_cx, sizeof bad_err_cx, "%s/badwin_err.cx", tmp);
+    tx_snprintf(bad_fn_cx, sizeof bad_fn_cx, "%s/badwin_fn.cx", tmp);
+    tx_snprintf(d2_wrap, sizeof d2_wrap, "%s/d2-wrap.sh", tmp);
+    tx_snprintf(nod2_wrap, sizeof nod2_wrap, "%s/nod2-wrap.sh", tmp);
+    sy_mkdir_all(tmp, 0700);
+
+    tx_snprintf(cmd, sizeof cmd, "sh ./unisacc.com -o %s tools/sixtarget-precompile.cx", stbin);
+    if (ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) != 0) {
+        st_ck(0, "compile-sixtarget-precompile");
+        tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
+        ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+        printf("CHECK_SIXTARGET\tfailed=%d\tms=%ld\n", failed, sy_now_ms() - t0);
+        return 1;
+    }
+
+    /* 1. CLI refusal checks */
+    tx_snprintf(cmd, sizeof cmd, "%s", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "usage:"), "no-args-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --bad-flag", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "bad argument"), "bad-flag-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode nope", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "usage:"), "bad-mode-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "at least one --file"), "files-empty-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --target bad/arch", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "invalid --target"), "bad-target-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --part 2/2", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "bad --part"), "bad-part-range-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --part noslash", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "bad --part"), "bad-part-syntax-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --deadline-s 56", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "1..55"), "bad-deadline-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode templates --root /nonexistent-st-root", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "cannot resolve --root"), "bad-root-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode templates --compiler /nonexistent-st-comp", stbin);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "cannot resolve --compiler"), "bad-compiler-refused");
+
+    /* Write fixture units */
+    const char *good_src = "int st_good_fn(void) { return 42; }\n";
+    sy_write_file(good_cx, good_src, (int64_t)strlen(good_src), 0600);
+
+    const char *bad_err_src =
+        "int st_bad_err(void) {\n"
+        "#ifdef _WIN32\n"
+        "    return win_only_undeclared_sym + 1;\n"
+        "#else\n"
+        "    return 0;\n"
+        "#endif\n"
+        "}\n";
+    sy_write_file(bad_err_cx, bad_err_src, (int64_t)strlen(bad_err_src), 0600);
+
+    const char *bad_fn_src =
+        "int st_bad_fn(void) {\n"
+        "#ifdef _WIN32\n"
+        "    return undeclared_win_only_fn(1);\n"
+        "#else\n"
+        "    return 0;\n"
+        "#endif\n"
+        "}\n";
+    sy_write_file(bad_fn_cx, bad_fn_src, (int64_t)strlen(bad_fn_src), 0600);
+
+    /* Self-contained D2 wrapper and non-D2 wrapper around real ./unisacc.com */
+    char wbuf[1024];
+    int wn = tx_snprintf(wbuf, sizeof wbuf,
+        "#!/bin/sh\n"
+        "tgt=\"\"; src=\"\"\n"
+        "prev=\"\"\n"
+        "for a in \"$@\"; do\n"
+        "  if [ \"$prev\" = \"-b\" ]; then tgt=\"$a\"; fi\n"
+        "  case \"$a\" in *.cx) src=\"$a\" ;; esac\n"
+        "  prev=\"$a\"\n"
+        "done\n"
+        "case \"$tgt\" in win/*)\n"
+        "  if [ -n \"$src\" ] && grep -qE '_st_d2_undeclared_fn|undeclared_win_only_fn' \"$src\"; then\n"
+        "    echo \"$src:3:12: error: call to undeclared function 'undeclared_win_only_fn' [-Wc99-implicit-function]\" >&2\n"
+        "    exit 1\n"
+        "  fi ;;\n"
+        "esac\n"
+        "exec sh '%s/unisacc.com' \"$@\"\n", root);
+    sy_write_file(d2_wrap, wbuf, wn, 0700);
+
+    int nwn = tx_snprintf(wbuf, sizeof wbuf,
+        "#!/bin/sh\n"
+        "out=\"\"\n"
+        "prev=\"\"\n"
+        "for a in \"$@\"; do\n"
+        "  if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi\n"
+        "  prev=\"$a\"\n"
+        "done\n"
+        "if [ -n \"$out\" ]; then printf 'FAKEOBJ' > \"$out\"; fi\n"
+        "exit 0\n");
+    sy_write_file(nod2_wrap, wbuf, nwn, 0700);
+
+    /* 2. Positive: good.cx passes all 6 targets */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s", stbin, good_cx);
+    int rc_g = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_g == 0 &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=lnx/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=lnx/arm64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=osx/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=osx/arm64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=win/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=win/arm64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=files\ttargets=6\tchecked=6\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "\tverdict=PASS\n"),
+       "files-good-all-6-targets");
+
+    /* 3. Target sharding (--part 0/2 and --part 1/2) */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --part 0/2", stbin, good_cx);
+    int rc_p0 = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_p0 == 0 && ckk_has(out, sizeof out, "\ttargets=3\tchecked=3\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "target=lnx/x86_64") && !ckk_has(out, sizeof out, "target=lnx/arm64"),
+       "shard-part-0-of-2");
+
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --part 1/2", stbin, good_cx);
+    int rc_p1 = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_p1 == 0 && ckk_has(out, sizeof out, "\ttargets=3\tchecked=3\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "target=win/arm64") && !ckk_has(out, sizeof out, "target=win/x86_64"),
+       "shard-part-1-of-2");
+
+    /* 4. Negative: real win-only compile error fails win targets with target + diag line */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s", stbin, bad_err_cx);
+    int rc_be = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_be == 1 &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=lnx/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=win/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=win/arm64\t") &&
+       ckk_has(out, sizeof out, "error:") &&
+       ckk_has(out, sizeof out, "\ttargets=6\tchecked=6\tfailed=2\t") &&
+       ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
+       "win-only-error-fails-win-targets-with-diag");
+
+    /* 5. D2 probe: --require-d2 refuses non-D2 compiler; D2 compiler fails win undeclared function */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --compiler %s --require-d2", stbin, bad_fn_cx, nod2_wrap);
+    int rc_nd2 = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_nd2 == 2 && ckk_has(out, sizeof out, "SIXTARGET_REFUSE\treason=compiler-lacks-d2"),
+       "require-d2-refuses-non-d2-compiler");
+
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --compiler %s --require-d2", stbin, bad_fn_cx, d2_wrap);
+    int rc_d2 = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_d2 == 1 &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=lnx/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=win/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=win/arm64\t") &&
+       ckk_has(out, sizeof out, "undeclared_win_only_fn") &&
+       ckk_has(out, sizeof out, "\tfailed=2\t") &&
+       ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
+       "d2-win-undeclared-fn-fails-with-target-and-diag");
+
+    /* 6. Templates mode (J10): instantiates both templates and precompiles */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode templates --target win/x86_64", stbin);
+    int rc_tpl = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_tpl == 0 &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=win/x86_64\tunit=tools/templates/whole-front.cx.in\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=win/x86_64\tunit=tools/templates/whole-win-span.cx.in\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=templates\ttargets=1\tchecked=2\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "\tverdict=PASS\n"),
+       "templates-mode-win-x86_64");
+
+    /* 7. Chain-units mode with --filter /sys/ and unit sharding --part 0/4 */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode chain-units --filter /sys/ --target win/x86_64 --part 0/4", stbin);
+    int rc_cu = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_cu == 0 &&
+       ckk_has(out, sizeof out, "SIXTARGET_OK\ttarget=win/x86_64\t") &&
+       ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=chain-units\ttargets=1\t") &&
+       ckk_has(out, sizeof out, "\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "\tverdict=PASS\n"),
+       "chain-units-filter-sys-sharded");
+
+    /* 8. Chain-units empty filter result must FAIL (never silent PASS) */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode chain-units --filter __no_such_unit__ --target lnx/x86_64", stbin);
+    int rc_ce = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_ce == 1 && ckk_has(out, sizeof out, "plan-empty-or-failed") && ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
+       "chain-units-empty-refused");
+
+    /* Cleanup */
+    tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
+    ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+
+    printf("CHECK_SIXTARGET\tfailed=%d\tms=%ld\n", failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

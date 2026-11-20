@@ -1,0 +1,303 @@
+/* tools/cxlib/jobrec.cx -- devsvc job record library (J1: meta, pid, rc, state machine, atomic rename).
+ * Reuses devsvc jobs/ID/ layout:
+ *   pid         atomic rename (<pid>\n)
+ *   meta        atomic rename (key<TAB>value\n, <4096 bytes; devsvc keys cmd/owner/start + kind/input/pgid/procid/deadline_s/base/log)
+ *   rc          atomic rename (<rc><TAB><ms>\n)
+ *   state.tsv   append-only (<time_s><TAB><from><TAB><to><TAB><reason>\n)
+ *   lost.probe  atomic rename (<count><TAB><first_s>\n) for two-confirmation LOST guard
+ *
+ * State machine:
+ *   NONE -> RUNNING
+ *   RUNNING -> DONE | FAILED | TIMEOUT | LOST (LOST requires two confirmations >= min_gap_s apart)
+ *   LOST -> DONE | FAILED | TIMEOUT (recovery)
+ *   All other transitions return JR_ERR_INVALID (2) without writing disk.
+ */
+#pragma unisa module jobrec
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+enum {
+    JR_ST_NONE    = 0,
+    JR_ST_RUNNING = 1,
+    JR_ST_DONE    = 2,
+    JR_ST_FAILED  = 3,
+    JR_ST_TIMEOUT = 4,
+    JR_ST_LOST    = 5,
+    JR_OK          = 0,
+    JR_PENDING     = 1,
+    JR_ERR_INVALID = 2,
+    JR_ERR_IO      = 3,
+    JR_META_MAX    = 4095
+};
+
+typedef struct {
+    char cmd[1024];
+    char owner[128];
+    long start_ms;
+    char kind[64];
+    char input[256];
+    int pgid;
+    char procid[256];
+    long deadline_s;
+    char base[1024];
+    char log[1024];
+} JrMeta;
+
+typedef struct {
+    int state;
+    int lost_checks;
+    long first_lost_s;
+    long last_time_s;
+    char last_reason[128];
+} JrState;
+
+static long jr_seq;
+
+/* Atomic write via temp file in same directory + rename(2) so readers never see partial bytes. */
+int jr_write_atomic(const char *path, const char *data, size_t len, int mode) {
+    char tmp[4600];
+    int n = tx_snprintf(tmp, sizeof tmp, "%s.tmp.%d.%ld", path, (int)getpid(), ++jr_seq);
+    if ((size_t)n >= sizeof tmp) return JR_ERR_IO;
+    if (sy_write_file(tmp, data, (int64_t)len, mode) != 0) { sy_unlink(tmp); return JR_ERR_IO; }
+    if (sy_rename(tmp, path) != 0) { sy_unlink(tmp); return JR_ERR_IO; }
+    return JR_OK;
+}
+
+const char *jr_state_name(int st) {
+    if (st == JR_ST_RUNNING) return "RUNNING";
+    if (st == JR_ST_DONE)    return "DONE";
+    if (st == JR_ST_FAILED)  return "FAILED";
+    if (st == JR_ST_TIMEOUT) return "TIMEOUT";
+    if (st == JR_ST_LOST)    return "LOST";
+    return "NONE";
+}
+
+int jr_state_parse(const char *s) {
+    if (!s) return JR_ST_NONE;
+    if (tx_eqz(s, "RUNNING")) return JR_ST_RUNNING;
+    if (tx_eqz(s, "DONE"))    return JR_ST_DONE;
+    if (tx_eqz(s, "FAILED"))  return JR_ST_FAILED;
+    if (tx_eqz(s, "TIMEOUT")) return JR_ST_TIMEOUT;
+    if (tx_eqz(s, "LOST"))    return JR_ST_LOST;
+    return JR_ST_NONE;
+}
+
+/* Explicit transition table covering the 6 state-machine rules (8 directed edges). */
+int jr_valid_transition(int from, int to) {
+    static const int edges[8][2] = {
+        { JR_ST_NONE,    JR_ST_RUNNING },
+        { JR_ST_RUNNING, JR_ST_DONE    },
+        { JR_ST_RUNNING, JR_ST_FAILED  },
+        { JR_ST_RUNNING, JR_ST_TIMEOUT },
+        { JR_ST_RUNNING, JR_ST_LOST    },
+        { JR_ST_LOST,    JR_ST_DONE    },
+        { JR_ST_LOST,    JR_ST_FAILED  },
+        { JR_ST_LOST,    JR_ST_TIMEOUT }
+    };
+    for (int i = 0; i < 8; i++) {
+        if (edges[i][0] == from && edges[i][1] == to) return 1;
+    }
+    return 0;
+}
+
+static int jr_sanitize(const char *s) {
+    if (!s) return 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\n' || *p == '\r' || *p == '\t') return 0;
+    }
+    return 1;
+}
+
+int jr_write_meta(const char *jdir, const JrMeta *m) {
+    if (!jdir || !m) return JR_ERR_INVALID;
+    if (!jr_sanitize(m->cmd) || !jr_sanitize(m->owner) || !jr_sanitize(m->kind) ||
+        !jr_sanitize(m->input) || !jr_sanitize(m->procid) || !jr_sanitize(m->base) || !jr_sanitize(m->log))
+        return JR_ERR_INVALID;
+    char buf[JR_META_MAX + 1];
+    int n = tx_snprintf(buf, sizeof buf,
+        "cmd\t%s\nowner\t%s\nstart\t%ld\nkind\t%s\ninput\t%s\npgid\t%d\nprocid\t%s\ndeadline_s\t%ld\nbase\t%s\nlog\t%s\n",
+        m->cmd[0] ? m->cmd : "-",
+        m->owner[0] ? m->owner : "-",
+        m->start_ms,
+        m->kind[0] ? m->kind : "-",
+        m->input[0] ? m->input : "-",
+        m->pgid,
+        m->procid[0] ? m->procid : "-",
+        m->deadline_s,
+        m->base[0] ? m->base : "-",
+        m->log[0] ? m->log : "-");
+    if (n <= 0 || n >= (int)sizeof buf) return JR_ERR_INVALID;
+    char p[4400];
+    int pn = tx_snprintf(p, sizeof p, "%s/meta", jdir);
+    if (pn < 0 || (size_t)pn >= sizeof p) return JR_ERR_IO;
+    return jr_write_atomic(p, buf, (size_t)n, 0600);
+}
+
+int jr_read_meta(const char *jdir, JrMeta *out) {
+    if (!jdir || !out) return JR_ERR_INVALID;
+    memset(out, 0, sizeof *out);
+    char p[4400];
+    int pn = tx_snprintf(p, sizeof p, "%s/meta", jdir);
+    if (pn < 0 || (size_t)pn >= sizeof p) return JR_ERR_IO;
+    unsigned char *buf = 0; int64_t n = 0;
+    if (sy_read_file(p, &buf, &n, JR_META_MAX) != 0 || !buf) { if (buf) mm_free(buf); return JR_ERR_IO; }
+    int seen_cmd = 0, seen_kind = 0;
+    const char *s = (const char *)buf, *end = s + n;
+    while (s < end) {
+        const char *nl = (const char *)memchr(s, '\n', (size_t)(end - s));
+        size_t ll = nl ? (size_t)(nl - s) : (size_t)(end - s);
+        const char *tb = (const char *)memchr(s, '\t', ll);
+        if (tb) {
+            size_t kl = (size_t)(tb - s);
+            const char *v = tb + 1;
+            size_t vl = ll - kl - 1;
+            char vbuf[1024];
+            size_t cp = vl < sizeof vbuf - 1 ? vl : sizeof vbuf - 1;
+            if (cp) mm_copy(vbuf, sizeof vbuf, v, (long)cp);
+            vbuf[cp] = 0;
+            if (kl == 3 && !memcmp(s, "cmd", 3)) { seen_cmd = 1; tx_snprintf(out->cmd, sizeof out->cmd, "%s", vbuf); }
+            else if (kl == 5 && !memcmp(s, "owner", 5)) tx_snprintf(out->owner, sizeof out->owner, "%s", vbuf);
+            else if (kl == 5 && !memcmp(s, "start", 5)) out->start_ms = atol(vbuf);
+            else if (kl == 4 && !memcmp(s, "kind", 4)) { seen_kind = 1; tx_snprintf(out->kind, sizeof out->kind, "%s", vbuf); }
+            else if (kl == 5 && !memcmp(s, "input", 5)) tx_snprintf(out->input, sizeof out->input, "%s", vbuf);
+            else if (kl == 4 && !memcmp(s, "pgid", 4)) out->pgid = atoi(vbuf);
+            else if (kl == 6 && !memcmp(s, "procid", 6)) tx_snprintf(out->procid, sizeof out->procid, "%s", vbuf);
+            else if (kl == 10 && !memcmp(s, "deadline_s", 10)) out->deadline_s = atol(vbuf);
+            else if (kl == 4 && !memcmp(s, "base", 4)) tx_snprintf(out->base, sizeof out->base, "%s", vbuf);
+            else if (kl == 3 && !memcmp(s, "log", 3)) tx_snprintf(out->log, sizeof out->log, "%s", vbuf);
+        }
+        s = nl ? nl + 1 : end;
+    }
+    mm_free(buf);
+    return (seen_cmd && seen_kind) ? JR_OK : JR_ERR_INVALID;
+}
+
+int jr_write_pid(const char *jdir, int pid) {
+    if (!jdir || pid <= 0) return JR_ERR_INVALID;
+    char p[4400], b[32];
+    int pn = tx_snprintf(p, sizeof p, "%s/pid", jdir);
+    int bn = tx_snprintf(b, sizeof b, "%d\n", pid);
+    if (pn < 0 || (size_t)pn >= sizeof p || bn <= 0) return JR_ERR_IO;
+    return jr_write_atomic(p, b, (size_t)bn, 0600);
+}
+
+int jr_write_rc(const char *jdir, int rc, long ms) {
+    if (!jdir) return JR_ERR_INVALID;
+    char p[4400], b[64];
+    int pn = tx_snprintf(p, sizeof p, "%s/rc", jdir);
+    int bn = tx_snprintf(b, sizeof b, "%d\t%ld\n", rc, ms);
+    if (pn < 0 || (size_t)pn >= sizeof p || bn <= 0) return JR_ERR_IO;
+    return jr_write_atomic(p, b, (size_t)bn, 0600);
+}
+
+int jr_read_rc(const char *jdir, int *rc_out, long *ms_out) {
+    char p[4400];
+    int pn = tx_snprintf(p, sizeof p, "%s/rc", jdir);
+    if (pn < 0 || (size_t)pn >= sizeof p) return JR_ERR_IO;
+    unsigned char *buf = 0; int64_t n = 0;
+    if (sy_read_file(p, &buf, &n, 128) != 0 || !buf || n <= 0) { if (buf) mm_free(buf); return JR_ERR_IO; }
+    char t[128];
+    size_t cp = (size_t)n < sizeof t - 1 ? (size_t)n : sizeof t - 1;
+    mm_copy(t, sizeof t, buf, (long)cp); t[cp] = 0;
+    mm_free(buf);
+    if (rc_out) *rc_out = atoi(t);
+    char *tb = strchr(t, '\t');
+    if (ms_out) *ms_out = tb ? atol(tb + 1) : 0;
+    return JR_OK;
+}
+
+static void jr_read_probe(const char *jdir, int *checks, long *first_s) {
+    *checks = 0; *first_s = 0;
+    char p[4400];
+    if (tx_snprintf(p, sizeof p, "%s/lost.probe", jdir) >= (int)sizeof p) return;
+    unsigned char *buf = 0; int64_t n = 0;
+    if (sy_read_file(p, &buf, &n, 128) != 0 || !buf || n <= 0) { if (buf) mm_free(buf); return; }
+    char t[128];
+    size_t cp = (size_t)n < sizeof t - 1 ? (size_t)n : sizeof t - 1;
+    mm_copy(t, sizeof t, buf, (long)cp); t[cp] = 0;
+    mm_free(buf);
+    *checks = atoi(t);
+    char *tb = strchr(t, '\t');
+    if (tb) *first_s = atol(tb + 1);
+}
+
+int jr_read_state(const char *jdir, JrState *st) {
+    if (!jdir || !st) return JR_ERR_INVALID;
+    memset(st, 0, sizeof *st);
+    st->state = JR_ST_NONE;
+    char p[4400];
+    int pn = tx_snprintf(p, sizeof p, "%s/state.tsv", jdir);
+    if (pn < 0 || (size_t)pn >= sizeof p) return JR_ERR_IO;
+    unsigned char *buf = 0; int64_t n = 0;
+    if (sy_read_file(p, &buf, &n, 1 << 20) == 0 && buf && n > 0) {
+        const char *s = (const char *)buf, *end = s + n;
+        while (s < end) {
+            const char *nl = (const char *)memchr(s, '\n', (size_t)(end - s));
+            size_t ll = nl ? (size_t)(nl - s) : (size_t)(end - s);
+            if (ll > 0) {
+                const char *t1 = (const char *)memchr(s, '\t', ll);
+                const char *t2 = t1 ? (const char *)memchr(t1 + 1, '\t', ll - (size_t)(t1 - s) - 1) : 0;
+                const char *t3 = t2 ? (const char *)memchr(t2 + 1, '\t', ll - (size_t)(t2 - s) - 1) : 0;
+                if (t1 && t2 && t3) {
+                    char sb[32], to[32];
+                    size_t sl = (size_t)(t1 - s) < 31 ? (size_t)(t1 - s) : 31;
+                    mm_copy(sb, sizeof sb, s, (long)sl); sb[sl] = 0;
+                    st->last_time_s = atol(sb);
+                    size_t tl = (size_t)(t3 - (t2 + 1)) < 31 ? (size_t)(t3 - (t2 + 1)) : 31;
+                    mm_copy(to, sizeof to, t2 + 1, (long)tl); to[tl] = 0;
+                    st->state = jr_state_parse(to);
+                    size_t rl = ll - (size_t)(t3 + 1 - s);
+                    if (rl >= sizeof st->last_reason) rl = sizeof st->last_reason - 1;
+                    if (rl) mm_copy(st->last_reason, sizeof st->last_reason, t3 + 1, (long)rl);
+                    st->last_reason[rl] = 0;
+                }
+            }
+            s = nl ? nl + 1 : end;
+        }
+    }
+    if (buf) mm_free(buf);
+    jr_read_probe(jdir, &st->lost_checks, &st->first_lost_s);
+    return JR_OK;
+}
+
+int jr_transition(const char *jdir, int to_state, const char *reason, long now_s, int min_lost_gap_s) {
+    if (!jdir || !reason || !jr_sanitize(reason)) return JR_ERR_INVALID;
+    JrState cur;
+    if (jr_read_state(jdir, &cur) != JR_OK) return JR_ERR_IO;
+    if (!jr_valid_transition(cur.state, to_state)) return JR_ERR_INVALID;
+
+    char prb[4400];
+    if (tx_snprintf(prb, sizeof prb, "%s/lost.probe", jdir) >= (int)sizeof prb) return JR_ERR_IO;
+    if (cur.state == JR_ST_RUNNING && to_state == JR_ST_LOST) {
+        if (cur.lost_checks < 1) {
+            char pb[64];
+            int bn = tx_snprintf(pb, sizeof pb, "1\t%ld\n", now_s);
+            if (jr_write_atomic(prb, pb, (size_t)bn, 0600) != JR_OK) return JR_ERR_IO;
+            return JR_PENDING;
+        }
+        if (now_s - cur.first_lost_s < (long)min_lost_gap_s) return JR_PENDING;
+        sy_unlink(prb);
+    } else {
+        sy_unlink(prb);
+    }
+
+    char sp[4400], row[320];
+    int sn = tx_snprintf(sp, sizeof sp, "%s/state.tsv", jdir);
+    int rn = tx_snprintf(row, sizeof row, "%ld\t%s\t%s\t%s\n", now_s, jr_state_name(cur.state), jr_state_name(to_state), reason);
+    if (sn < 0 || (size_t)sn >= sizeof sp || rn <= 0 || rn >= (int)sizeof row) return JR_ERR_IO;
+    if (sy_append_file(sp, row, (size_t)rn, 0600) != 0) return JR_ERR_IO;
+    return JR_OK;
+}
+
+int jr_create(const char *jdir, int pid, const JrMeta *m, long now_s) {
+    if (!jdir || !m || pid <= 0) return JR_ERR_INVALID;
+    if (sy_mkdir_all(jdir, 0700) != 0 && sy_exists(jdir) != 1) return JR_ERR_IO;
+    if (jr_write_pid(jdir, pid) != JR_OK) return JR_ERR_IO;
+    if (jr_write_meta(jdir, m) != JR_OK) return JR_ERR_IO;
+    return jr_transition(jdir, JR_ST_RUNNING, "adopted", now_s, 0);
+}

@@ -69,6 +69,10 @@
 - L1:复核通过,整改中。
 - fable:矩阵已出(plans/reviews/2026-11-20-core-ext-matrix.md)。
 
+## (6a) 流程总纲:按环节分割
+
+各流程(需求单、影响评估、每周节拍)按 plans/v0.0.87.md"总纲:按环节分割"的环节分割表执行:每个环节写清输入身份、输出身份、等待时做什么;合入、复扫、发布列车、复核、集成者单点五个切法;门是唯一裁判,门过即合,冲突才升级给人。
+
 ## (7) 需求单流程(扩展层 -> 核心层)
 
 - 需求单复用 build/pkg-gaps.tsv,先修表再加列。字段:使用者(路径加调用点数,用命令给出)、缺口(一句话加最小默认运行复现路径)、不满足的后果(现在的绕法及代价)、建议接口(签名草案、错误合同、三目标列)、验收(一条命令加预期末行)、归属类与层。
@@ -96,7 +100,57 @@
 - 派工后确认送达。
 - 任务板与督导定时器每 15 分钟。
 - 未验证问题不派落库与改配置。
+- 证据入口一律写 ~/ 或仓内相对路径,不写 /home/<用户名>/、/Users/<用户名>/ 这类带系统用户名的绝对路径(本仓有公开发布);ratchet no-home-path 与 tools/no-home-path.cx --staged 守,已写的用 tools/scrub-home-paths.cx --write 改写。工具生成的证据在生成处输出规范化路径。
 
 ## (11) 未核
 
 归类条数未逐条回源;include/regex.h 实现程度未测;工作者进程池可替代线程未做原型;工具裸 libc 是习惯而非缺口只有 sandbox-cx 一个样本;信号定时器槽位;export 名单是否强制。
+
+## (12) 流程:主调度(cc)自身的事实批评与改进规则(2026-11-20,依据 plans/reviews/2026-11-20-fast-iteration.md 第 5 节)
+
+事实:路线图一天改排 5 次(两次相隔 2 分钟);当天 12 份分析报告;0.5 单位的 T1 评审四轮跨 3 小时 18 分;load1 门当天加当天用 4 个提交撤;消费者清扫放在七条规则之后。
+
+改进规则:
+- 派工前先判问题是否成立。
+- 分析报告每天不超过 3 份,且必须带决策。
+- 评审超过两轮就削减范围,先落核心。
+- 清扫左移:消费者清扫在每个产品提交后自动后台跑,不放到版本末尾(见 plans/v0.0.87.md S3)。
+
+## (13) 流程:复核包、评审回合封顶与变异自检门(2026-11-20 起对新补丁生效,已在流程中的补丁不追溯)
+
+依据:T1 v6 坏案例变异自检得 0/25 且 uncovered=13,好案例 6ca81690a1 得 15/26=0.58 被旧门限 0.7 误挡;门限改 0.6,uncovered>0 默认 FAIL(见 tools/mutation-gate.cx 文件头)。
+
+复核包模板(作者交评审前备齐,缺一项评审直接退回):
+- (1) 补丁文件路径与 sha256。
+- (2) 先红后绿:新检查对旧代码的红输出原行与对新代码的绿输出原行(含 CHECK_* ok/failed 汇总行)。
+- (3) 变异自检:MUTATION_GATE 与 MUTATION_COVERAGE 原行、MG_UNCOVERED 行与 survivors.tsv;每条存活注明 equivalent(等价变异,附理由)或 补用例(写明补哪条);裁定为 equivalent/out-of-scope 的进 --adjudicated 清单,未覆盖函数逐一裁定的进 --allow-uncovered 清单。
+- (4) 对抗夹具清单:每个夹具想打穿的错误形态与对应用例名。
+- (5) 冷环境耗时三次(私有树、无缓存),给每次毫秒数。
+- (6) 变更前后行为对拍:同一组输入在旧版与新版上的输出差异,差异须逐条解释为预期。
+
+评审回合封顶两轮:第二轮结束时仍有未裁定存活或 uncovered>0(且未经 --allow-uncovered 裁定),退回作者拆小重做,不开第三轮。
+
+关键路径工具补丁(提交门、运行器、dvqualify、release-*、install-ape、register 等)提交前必须附 MUTATION_GATE 证据(verdict=PASS 原行与复核包第 3 项)。
+
+四步用法:(1) `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run --patch P --base REV --check 'CMD' --out DIR --coverage-check`;(2) `devsvc wait` 取 MUTATION_GATE 行;(3) 读 DIR/survivors.tsv 与 MG_UNCOVERED,补用例或写裁定清单;(4) `mutation-gate.cx -- report --out DIR [--adjudicated F] [--allow-uncovered F]` 重出汇总(raw 与 adjudicated 两个分数同列)。
+
+## 工作树清单 2026-11-20(清洁执行者实测,只列不删)
+
+归属按名字与分支推断;"合入"指 HEAD 是 origin/main 祖先;最后活动均为 2026-11-20;共享检出 5.2G 未列。
+
+| 工作树 | 分支或 HEAD | 归属(推断) | 合入 | 占用 | 建议 |
+|---|---|---|---|---|---|
+| d2-v086-private | detached e75c162dff | D2 窗口(cdx) | 合入 | 197M | 可删 |
+| tools-s4 | tools-s4 | 工具 S4 窗口 | 合入 | 199M | 可删工作树,分支保留到 0.0.87 公开 |
+| tools-s5 | tools-s5 | 工具 S5 窗口 | 合入 | 199M | 同上 |
+| ujs | ujs | 论文 B 车道 | 合入 | 200M | 归论文 B,问维护者,unisacc 侧不动 |
+| v0.0.84-prep | v0.0.84-prep | 0.0.84 预跑 | 未合入 | 215M | 0.0.84 已公开,核差异后可删 |
+| d2-086-sync | cdx-d2-086-integrated | D2 窗口 | 未合入 | 207M | 0.0.86 冻结后复核 |
+| d2-v086-const、func、ptr、final-scan | detached | D2 窗口分项 | 未合入 | 各约 198M | func 与 ptr 同一提交 29503ed611,可并一个 |
+| tools-s2、tools-s3 | 同名分支 | 工具 S2、S3 窗口 | 未合入 | 各 199M | 待合入后删 |
+| ujs-v085-integration | detached de422f82a2 | 论文 B | 未合入 | 199M | 问维护者 |
+| v0.0.86、v0.0.86-d2、-l1、-w2d | 同名分支 | 0.0.86 版本车道 | 未合入 | 各约 198M | 在用,不动 |
+
+分支(只列可清理):已合入且无工作树的 bench-v083、cdx-s3-land、r0-v082、v0.0.82-s2、v0.0.83-r2、v0.0.83-r2-identity、v0.0.83-release-flow、v0.0.84-s3 可删本地分支;v0.0.65 到 v0.0.85 版本分支均已合入,按规则保留到下一版公开后可删到最近两版;未合入的 cdx-s3-verified-snapshot、rehearsal-v082、ujs-d4-paused、v0.0.84-f1-meter 需各自归属窗口确认。
+
+README 陈旧实测数字(停在 0.0.84,未在 0.0.85 重跑,未改):README.md 与 README_zh.md 第 22 行(0.0.84 公开件、APE 8417722 字节,POSIX 与 asm 面为 0.0.82)、第 33 行"实跑(0.0.84)"、第 37 行 `unisacc 0.0.84` 示例输出。

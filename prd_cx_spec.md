@@ -62,7 +62,7 @@
 脚本放在仓外(如 `$CLAUDE_JOB_DIR/tmp`)时找不到仓根 `cxroot.tsv`,实测报 `module sys.fs: no file .../sys/fs.cx`。做法:在脚本目录放一个链接和一份自己的 `cxroot.tsv`。
 
 ```
-ln -sfn /home/devali/repos/unisacc r        在脚本目录内
+ln -sfn ~/repos/unisacc r        在脚本目录内
 cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把仓根各行的目录加前缀 r/
 需要网络时追加 R<TAB>net<TAB>r/ext/net
 ```
@@ -123,7 +123,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 | 写法 | 现行为(2026-11-14 已装产品实测) | 计划行为 | 计划中的拒绝 |
 |---|---|---|---|
-| `export NAME`(裸名,D1a) | 拒绝 `unknown unisa pragma export` | 公开名单,见上 | 见 10.7 X1 至 X11(名字无定义、static、类型、重复、与 cxpack 不等、调用未导出函数等) |
+| `export NAME`(裸名,D1a) | 被接受 rc=0(实测 2026-11-20 已装 0.0.85),名单是否强制未核 | 公开名单,见上 | 见 10.7 X1 至 X11(名字无定义、static、类型、重复、与 cxpack 不等、调用未导出函数等) |
 | `export use MODULE[::sym]`(D1b) | 拒绝 `unknown unisa pragma export` | 门面重导出,见上 | 非模块单元写:`export outside module`;导出自己:`exports itself`;成环:`module cycle` |
 | `export use M::sym as alias` | 拒绝 `unknown unisa pragma export` | 首版仍拒绝 | `export alias unsupported` |
 | `use PFX.*` | 拒绝 `bad module name "PFX.*"` | 见上 | 空展开:`wildcard PFX.* matches no module`;产品层(`src/`、`cx/`、`ext/`)使用:棘轮拒绝;展开后超 48 条 use:沿用现上限拒绝 |

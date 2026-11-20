@@ -1,0 +1,91 @@
+/* check-winstate: tools/winstate.cx window state and heartbeat contracts (plans/devsvc.md "产线化" (2), unit U3),
+ * run through the real entry on a private line directory (--dir under /tmp), events kept local (WINSTATE_EMIT=0),
+ * clock injected with WINSTATE_NOW. Covers: the four states round trip through status --tsv; an illegal state value
+ * is refused (rc 2) and the stored row is unchanged; waiting without blocker is refused; a blocker with a non-waiting
+ * state is refused; a repeated identical report only refreshes heartbeat (since kept, no new event); a heartbeat
+ * exactly 600 s old is not lost, 601 s is, lost --emit writes window.state blocker=heartbeat-lost once per stale
+ * heartbeat; status header equals the contract column list; caps and ctx_left_pct are kept across reports; beat on an
+ * unknown window is refused (rc 1); bad --ctx refused. Marker line: CHECK_WINSTATE<TAB>failed=N. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* contract column list of win/NAME.tsv (plans/devsvc.md (2)); to be replaced by LINE_HDR_WIN of tools/cxlib/lineorder.cx */
+#define HDR "#window\tcaps\tmodel\tstate\tsince\ttask\tblocker\tctx_left_pct\theartbeat\n"
+static int failed, assertions;
+static char T[] = "/tmp/check-winstate-XXXXXX", cwd[1024];
+static np_result r;
+static void ck(int ok, const char *s) { assertions++; failed += !ok; printf("%s\t%s\n", ok ? "PASS" : "FAIL", s); }
+/* run winstate at clock now with args; output in r; returns rc or -1 */
+static int ws(long now, const char *args) {
+    char cmd[2048], w[256]; char *v[] = {"sh", "-c", cmd, 0};
+    { np_result z = {0}; np_free(&r); r = z; }
+    if (cx_fmt(cmd, sizeof cmd, "WINSTATE_EMIT=0 WINSTATE_NOW=%ld sh ./unisacc.com tools/winstate.cx -- %s --dir %s/line", now, args, T)) return -1;
+    if (np_run(v, cwd, 0, 50, &r, w, sizeof w)) return -1;
+    return r.rc;
+}
+/* 1 when buf[0..n) holds the bytes of k */
+static int has(const char *buf, long n, const char *k) {
+    long kl = (long)strlen(k), i = 0;
+    while (buf && i + kl <= n && memcmp(buf + i, k, kl)) i++;
+    return buf && i + kl <= n;
+}
+#define out_has(k) has(r.out, (long)r.outn, (k))
+#define err_has(k) has(r.err, (long)r.errn, (k))
+/* rows in DIR/win-events.tsv, -1 unreadable (0 when absent) */
+static long events(void) {
+    char p[1200]; unsigned char *b = 0; int64_t n = 0; long c = 0; int rc;
+    if (cx_fmt(p, sizeof p, "%s/line/win-events.tsv", T)) return -1;
+    rc = sy_read_file(p, &b, &n, 1 << 20);
+    if (rc == -ENOENT) return 0;
+    if (rc) return -1;
+    for (long i = 0; i < n; i++) c += b[i] == '\n';
+    free(b); return c;
+}
+static int ev_has(const char *k) {
+    char p[1200]; unsigned char *b = 0; int64_t n = 0; int hit;
+    if (cx_fmt(p, sizeof p, "%s/line/win-events.tsv", T) || sy_read_file(p, &b, &n, 1 << 20)) return 0;
+    hit = has((char *)b, (long)n, k); free(b); return hit;
+}
+int main(void) {
+    char cmd[1200], *v[] = {"rm", "-rf", T, 0}; long t0 = sy_now_ms(), e0;
+    if (sy_cwd(cwd, sizeof cwd) < 0 || !mkdtemp(T)) { printf("CHECK_WINSTATE\tfailed=1\tfixture\n"); return 1; }
+    /* red line: an illegal state value must be refused and leave nothing behind */
+    ck(ws(1000, "set w1 --state sleeping") == 2 && err_has("bad state") && events() == 0, "illegal-state-refused-nothing-written");
+    ck(ws(1000, "status --tsv") == 0 && r.out && (long)r.outn == (long)strlen(HDR) && !memcmp(r.out, HDR, strlen(HDR)), "status-header-equals-contract-no-rows");
+    /* four states round trip */
+    ck(ws(1000, "set w1 --state working --task T1 --caps dev,review --model opus --ctx 80") == 0 && out_has("STATE=working\tSINCE=1000\tHEARTBEAT=1000\tEVENT=1"), "set-working");
+    ck(ws(1001, "status --tsv") == 0 && out_has("\nw1\tdev,review\topus\tworking\t1000\tT1\t-\t80\t1000\n"), "status-row-working");
+    ck(ws(1010, "set w1 --state idle") == 0 && out_has("STATE=idle\tSINCE=1010\tHEARTBEAT=1010\tEVENT=1"), "set-idle");
+    ck(ws(1020, "set w1 --state waiting --blocker review-T1 --task T1") == 0 && out_has("STATE=waiting\tSINCE=1020\tHEARTBEAT=1020\tEVENT=1"), "set-waiting-with-blocker");
+    ck(ws(1021, "status --tsv") == 0 && out_has("\nw1\tdev,review\topus\twaiting\t1020\tT1\treview-T1\t80\t1020\n"), "status-row-waiting-caps-ctx-kept");
+    ck(ws(1030, "set w1 --state compacting --ctx 5") == 0 && out_has("STATE=compacting\tSINCE=1030\tHEARTBEAT=1030\tEVENT=1"), "set-compacting");
+    ck(ws(1040, "set w1 --state working --task T2") == 0 && out_has("EVENT=1"), "back-to-working");
+    ck(events() == 5 && ev_has("window.state\twindow=w1 state=waiting task=T1 blocker=review-T1\n") && ev_has("window.state\twindow=w1 state=compacting task=- blocker=-\n"), "one-event-per-change");
+    /* refusals leave the row and events unchanged */
+    e0 = events();
+    ck(ws(1050, "set w1 --state waiting --task T2") == 2 && err_has("waiting needs --blocker"), "waiting-without-blocker-refused");
+    ck(ws(1050, "set w1 --state idle --blocker x") == 2 && err_has("blocker only with state waiting"), "blocker-with-idle-refused");
+    ck(ws(1050, "set w1 --state WORKING") == 2 && err_has("bad state"), "state-case-sensitive-refused");
+    ck(ws(1050, "set w1 --state idle --ctx 101") == 2 && err_has("bad --ctx"), "ctx-out-of-range-refused");
+    ck(ws(1051, "status --tsv") == 0 && out_has("\nw1\tdev,review\topus\tworking\t1040\tT2\t-\t5\t1040\n") && events() == e0, "refusals-change-nothing");
+    /* repeated identical report: heartbeat only */
+    ck(ws(1100, "set w1 --state working --task T2 --ctx 60") == 0 && out_has("SINCE=1040\tHEARTBEAT=1100\tEVENT=0") && events() == e0, "repeat-refreshes-heartbeat-no-event");
+    ck(ws(1101, "status --tsv") == 0 && out_has("\nw1\tdev,review\topus\tworking\t1040\tT2\t-\t60\t1100\n"), "repeat-row-since-kept");
+    ck(ws(1200, "beat w1") == 0 && out_has("WINSTATE_BEAT\tWINDOW=w1\tHEARTBEAT=1200") && events() == e0, "beat-no-event");
+    ck(ws(1200, "beat nobody") == 1 && err_has("unknown window"), "beat-unknown-refused");
+    ck(ws(1200, "set ../x --state idle") == 2, "bad-window-name-refused");
+    /* heartbeat-lost judgment: 600 s is still alive, 601 s is lost */
+    ck(ws(1800, "lost --emit") == 0 && !out_has("WIN_LOST") && events() == e0, "heartbeat-600s-not-lost");
+    ck(ws(1801, "lost --emit") == 0 && out_has("WIN_LOST\tWINDOW=w1\tSTATE=working\tHEARTBEAT=1200\tAGE_S=601") && events() == e0 + 1 && ev_has("1801\twindow.state\twindow=w1 state=working task=T2 blocker=heartbeat-lost\n"), "heartbeat-601s-lost-event");
+    ck(ws(1900, "lost --emit") == 0 && out_has("WIN_LOST\tWINDOW=w1") && events() == e0 + 1, "heartbeat-lost-event-once");
+    ck(ws(1950, "set w2 --state idle") == 0 && ws(1960, "lost") == 0 && out_has("WINDOW=w1") && !out_has("WINDOW=w2"), "lost-lists-only-stale");
+    ck(ws(1961, "status --tsv") == 0 && out_has(HDR) && out_has("\nw1\t") && out_has("\nw2\t-\t-\tidle\t1950\t-\t-\t-\t1950\n"), "status-two-windows-sorted");
+    np_free(&r);
+    (void)cmd; { np_result q = {0}; char w[128]; np_run(v, 0, 0, 20, &q, w, sizeof w); np_free(&q); }
+    printf("CHECK_WINSTATE\tfailed=%d\tassertions=%d\tms=%ld\n", failed, assertions, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

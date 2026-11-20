@@ -7,7 +7,7 @@
 ## 1 取证入口与口径
 
 - 本次整链:/tmp/unisacc-session-v085-chain/e75c162dff.../(chain-run.tsv、checkpoint.tsv、exit.tsv rc=0、seal.tsv)。取证期间该链跑完。
-- 分桶脚本:/home/devali/.claude/jobs/2798e440/tmp/ci-chain.cx(读 owner 行 start 节拍与 ATTEMPT_TIME,按相族求和、并集与并发秒数),结果 ci-chain-v085.tsv。
+- 分桶脚本:~/.claude/jobs/2798e440/tmp/ci-chain.cx(读 owner 行 start 节拍与 ATTEMPT_TIME,按相族求和、并集与并发秒数),结果 ci-chain-v085.tsv。
 - 事件统计脚本:ci-ev.cx(devsvc events.tsv 与 events.tsv.1,共 67906 条,跨 59 小时)。
 - 相输入集脚本:ci-inputs.cx(build/chain-phase-inputs.tsv)。
 - 0.0.82 到 0.0.84 的整链会话目录已不在 /tmp(只剩 v085),跨版对比只能靠标签差异与文档里的旧数,标"未核"。

@@ -3,7 +3,9 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.env
-/* L0 sys/proc: child processes (plans/cx-layers.md). Exit status as one int:
+/* L0 sys/proc: child processes (plans/cx-layers.md). Windows does not provide
+   the fork/exec or process-group contracts below; those operations return -ENOSYS.
+   Exit status as one int:
    0..255 an exit code, 128+N killed by signal N, -errno when it could not run
    or be waited for. No #include: fork/pipe/exec/waitpid/kill come with the
    implicit prelude. A run with a time limit is cx_runv_timeout until that
@@ -39,12 +41,16 @@ static int sy_status(int st) {
 /* Run ARGV (argv[0] found on PATH) to the end; its stdout and stderr go to
    OUT (NUL-terminated; what does not fit in CAP-1 bytes is read and dropped,
    and *CUT is set when given). The exit status, as above. */
-int sy_run(char **argv, char *out, int cap, int *cut) {
+static int syp_run_os(char **argv, char *out, int cap, int *cut) {
+    if (cut) *cut = 0;
+    if (!argv || !argv[0]) return -EINVAL;
+#if defined(_WIN32)
+    (void)out; (void)cap;
+    return -ENOSYS;
+#else
     int p[2], st;
     size_t off = 0;
     pid_t pid;
-    if (cut) *cut = 0;
-    if (!argv || !argv[0]) return -EINVAL;
     if (pipe(p) != 0) return -errno;
     sy_prespawn();
     pid = fork();
@@ -72,13 +78,18 @@ int sy_run(char **argv, char *out, int cap, int *cut) {
     close(p[0]);
     while (waitpid(pid, &st, 0) < 0) if (errno != EINTR) return -errno;
     return sy_status(st);
+#endif
 }
+int sy_run(char **argv, char *out, int cap, int *cut) { return syp_run_os(argv, out, cap, cut); }
 
 /* Start ARGV in the background, in its own process group (so sy_kill takes
    its children too), stdin from /dev/null. Its pid, or -errno. */
-int sy_spawn(char **argv) {
-    pid_t pid;
+static int syp_spawn_os(char **argv) {
     if (!argv || !argv[0]) return -EINVAL;
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    pid_t pid;
     sy_prespawn();
     pid = fork();
     if (pid < 0) return -errno;
@@ -90,7 +101,9 @@ int sy_spawn(char **argv) {
         _exit(127);
     }
     return (int)pid;
+#endif
 }
+int sy_spawn(char **argv) { return syp_spawn_os(argv); }
 
 /* Start ARGV (argv[0] a path: not looked up on PATH) in THIS process group and
    session, stdin/stdout/stderr inherited: a terminal stays the child's terminal
@@ -99,11 +112,15 @@ int sy_spawn(char **argv) {
    across exec; every other descriptor keeps its own close-on-exec flag. Its
    pid, or -errno; a failed exec comes back as its errno (over a close-on-exec
    pipe), not as a child that exits 127. */
-int sy_spawn_inherit(char **argv, int keep) {
+static int syp_inherit_os(char **argv, int keep) {
+    if (!argv || !argv[0]) return -EINVAL;
+#if defined(_WIN32)
+    (void)keep;
+    return -ENOSYS;
+#else
     int p[2], e = 0, st;
     long k;
     pid_t pid;
-    if (!argv || !argv[0]) return -EINVAL;
     if (pipe(p) != 0) return -errno;
     if (fcntl(p[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(p[1], F_SETFD, FD_CLOEXEC) != 0) {
         e = errno; close(p[0]); close(p[1]); return -e;
@@ -126,17 +143,23 @@ int sy_spawn_inherit(char **argv, int keep) {
         return e ? -e : -EIO;
     }
     return (int)pid;
+#endif
 }
+int sy_spawn_inherit(char **argv, int keep) { return syp_inherit_os(argv, keep); }
 
 /* Run FN(UD) in a forked child that leads a new session (no controlling
    terminal; sy_killpg(pid, 9) takes its whole group), stdin from /dev/null,
    stdout into a pipe whose read end is FDS[0] and stderr into FDS[1] (both
    close-on-exec in the parent). The child exits with FN's return value and
    does not flush stdio: FN writes with sy_write_all. Its pid, or -errno. */
-int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
+static int syp_session_os(int (*fn)(void *), void *ud, int fds[2]) {
+    if (!fn || !fds) return -EINVAL;
+#if defined(_WIN32)
+    (void)ud;
+    return -ENOSYS;
+#else
     int po[2], pe[2], e;
     pid_t pid;
-    if (!fn || !fds) return -EINVAL;
     if (pipe(po) != 0) return -errno;
     if (pipe(pe) != 0) { e = errno; close(po[0]); close(po[1]); return -e; }
     sy_prespawn();
@@ -157,7 +180,9 @@ int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) {
     fds[0] = po[0];
     fds[1] = pe[0];
     return (int)pid;
+#endif
 }
+int sy_fork_session(int (*fn)(void *), void *ud, int fds[2]) { return syp_session_os(fn, ud, fds); }
 
 enum {
     SY_SPAWN_STDERR_SPLIT = 1,   /* stderr into its own pipe (*err_fd), not merged into *out_fd */
@@ -168,18 +193,21 @@ enum {
 /* Create a pipe, both ends close-on-exec, into FDS[0] = read end, FDS[1] = write end.
    0, or -errno (both ends closed on any failure).  The bounded single syscall behind
    the spawn/run helpers: an upper layer needing a bare pipe uses this, not libc pipe. */
-int sy_pipe(int fds[2]) {
-    int e;
+static int syp_pipe_os(int fds[2]) {
     if (!fds) return -EINVAL;
     errno = 0;
     if (pipe(fds) != 0) return -errno;
+#if !defined(_WIN32)
     if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
-        e = errno;
+        int e = errno;
         close(fds[0]); close(fds[1]);
         return -e;
     }
+#endif
+    /* The Windows pipe provider creates non-inheritable handles. */
     return 0;
 }
+int sy_pipe(int fds[2]) { return syp_pipe_os(fds); }
 
 /* ---- the one spawn-options struct (build/std-surface.tsv area process) ---- */
 
@@ -234,24 +262,25 @@ int sy_exit_code(const sy_exit_t *st) {
     return 128 + st->sig;
 }
 
-static void syp_dup_null(int fd, int mode) {
+#if !defined(_WIN32)
+static void syp_dup_null_os(int fd, int mode) {
     int dn = open("/dev/null", mode);
     if (dn >= 0) { dup2(dn, fd); close(dn); }
 }
 
-static void syp_child_exec(const sy_spawn_t *o, int *pi, int *po, int *pe, int ps1) {
+static void syp_child_exec_os(const sy_spawn_t *o, int *pi, int *po, int *pe, int ps1) {
     int e;
     char **argv = o->argv;
     if (o->pgroup < 0) sy_setpgid(0, 0);
     else if (o->pgroup > 0) sy_setpgid(0, o->pgroup);
-    if (o->in_fd == SY_STDIO_NULL) syp_dup_null(0, O_RDONLY);
+    if (o->in_fd == SY_STDIO_NULL) syp_dup_null_os(0, O_RDONLY);
     else if (o->in_fd == SY_STDIO_PIPE) dup2(pi[0], 0);
     else if (o->in_fd >= 0) dup2(o->in_fd, 0);
-    if (o->out_fd == SY_STDIO_NULL) syp_dup_null(1, O_WRONLY);
+    if (o->out_fd == SY_STDIO_NULL) syp_dup_null_os(1, O_WRONLY);
     else if (o->out_fd == SY_STDIO_PIPE) dup2(po[1], 1);
     else if (o->out_fd >= 0) dup2(o->out_fd, 1);
     if (o->flags & SY_SPAWN_ERR_TO_OUT) dup2(1, 2);
-    else if (o->err_fd == SY_STDIO_NULL) syp_dup_null(2, O_WRONLY);
+    else if (o->err_fd == SY_STDIO_NULL) syp_dup_null_os(2, O_WRONLY);
     else if (o->err_fd == SY_STDIO_PIPE) dup2(pe[1], 2);
     else if (o->err_fd >= 0) dup2(o->err_fd, 2);
     if (o->cwd && chdir(o->cwd) != 0) e = errno;
@@ -286,16 +315,20 @@ static void syp_child_exec(const sy_spawn_t *o, int *pi, int *po, int *pe, int p
     write(ps1, &e, sizeof e);
     _exit(127);
 }
+#endif
 
 /* Start a child as O describes. 0 and *C filled, or -errno (-ENOENT no such program,
    -EINVAL empty argv); a failed chdir or exec comes back as its errno over a close-on-exec
    pipe, with nothing left open and the child reaped. */
-int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) {
+static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
+    if (!o || !c || !o->argv || !o->argv[0]) return -EINVAL;
+    c->pid = 0; c->in_fd = c->out_fd = c->err_fd = -1; c->deadline_at_ms = 0; c->h = 0;
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
     int pi[2] = {-1, -1}, po[2] = {-1, -1}, pe[2] = {-1, -1}, ps[2] = {-1, -1}, e = 0, st, i;
     long k;
     pid_t pid = -1;
-    if (!o || !c || !o->argv || !o->argv[0]) return -EINVAL;
-    c->pid = 0; c->in_fd = c->out_fd = c->err_fd = -1; c->deadline_at_ms = 0; c->h = 0;
     if (pipe(ps) != 0) return -errno;
     if (fcntl(ps[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(ps[1], F_SETFD, FD_CLOEXEC) != 0) e = errno;
     if (!e && o->in_fd == SY_STDIO_PIPE && pipe(pi) != 0) e = errno;
@@ -313,7 +346,7 @@ int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) {
         if (pi[1] >= 0) close(pi[1]);
         if (po[0] >= 0) close(po[0]);
         if (pe[0] >= 0) close(pe[0]);
-        syp_child_exec(o, pi, po, pe, ps[1]);
+        syp_child_exec_os(o, pi, po, pe, ps[1]);
     }
     close(ps[1]);
     if (pi[0] >= 0) close(pi[0]);
@@ -339,7 +372,9 @@ int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) {
     }
     c->h = o->pgroup < 0 ? (int)pid : o->pgroup;
     return 0;
+#endif
 }
+int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) { return syp_proc_spawn_os(o, c); }
 
 /* Signal the child (its whole group when it has one). 0, or -errno (-ESRCH once gone). */
 int sy_proc_kill(sy_child_t *c, int sig) {
@@ -414,8 +449,15 @@ int sy_proc_run(const sy_spawn_t *o, sy_exit_t *st) {
     return r;
 }
 
-/* The parent's pid. */
-int sy_ppid(void) { return (int)getppid(); }
+/* The parent's pid, or -ENOSYS where the prelude has no getppid. */
+static int syp_ppid_os(void) {
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    return (int)getppid();
+#endif
+}
+int sy_ppid(void) { return syp_ppid_os(); }
 
 /* Start ARGV in its own process group (sy_kill/sy_killpg take its children too), in directory
    CWD (0: the caller's), stdin from /dev/null, stdout and stderr merged into one pipe whose read

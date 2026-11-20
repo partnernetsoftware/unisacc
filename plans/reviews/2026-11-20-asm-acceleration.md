@@ -8,7 +8,7 @@
 
 一句话:加速侧,汇编现在只在一个地方值钱,就是执行器每步那 25 到 45 纳秒(占冷编约 77%,并且按比例乘到改一行再跑、工具冷编、整链);其余候选(sha、拷贝、文本扫描、装载)要么占比不到 2%,要么该用缓存、数据布局或修后端来解决,不该写汇编。语言侧,同意前移,但证据只支持前移到"内建函数、符号属性、.S 输入、原子与 TLS 原语、带约束内联 asm"这五片,不支持把 SIMD 内建函数与 -S 输出 GAS 文本算进基本需求。
 
-取证口径:宿主 Intel Xeon Skylake 16 核,无 sha_ni(有 avx2、avx512f、bmi2、pclmulqdq、erms);本机 perf 不可用(缺 linux-tools-5.15.0-60),所以凡涉及缓存缺失与指令数的判断都是读源码推断,标"推断";load1 约 3 到 5,有他人负载。已装产品 0.0.85(RR_TIME 无步数字段),步数取自 rr-steps-086/ns-per-step.tsv(M1 补丁实测)。本次新测的原始数据在 /home/devali/.claude/jobs/2798e440/tmp/asm-accel/(hello-cold-1.rr、hello-cold-2.rr、prim.tsv、prim.cx)。
+取证口径:宿主 Intel Xeon Skylake 16 核,无 sha_ni(有 avx2、avx512f、bmi2、pclmulqdq、erms);本机 perf 不可用(缺 linux-tools-5.15.0-60),所以凡涉及缓存缺失与指令数的判断都是读源码推断,标"推断";load1 约 3 到 5,有他人负载。已装产品 0.0.85(RR_TIME 无步数字段),步数取自 rr-steps-086/ns-per-step.tsv(M1 补丁实测)。本次新测的原始数据在 ~/.claude/jobs/2798e440/tmp/asm-accel/(hello-cold-1.rr、hello-cold-2.rr、prim.tsv、prim.cx)。
 
 ## 1 汇编作为语言能力(项目所有者追加的两问,按"基本需求前移"重写)
 

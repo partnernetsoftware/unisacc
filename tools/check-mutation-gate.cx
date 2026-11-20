@@ -1,0 +1,98 @@
+/* check-mutation-gate.cx -- tools/mutation-gate.cx tells a strong check from a weak one.
+ *
+ *   sh ./unisacc.com tools/check-mutation-gate.cx
+ *
+ * A private git repo (mkdtemp under $TMPDIR or /tmp) holds tools/fx.cx; the fixture patch adds a small
+ * function with comparisons, a condition, constants, a string and a return.  Cases:
+ *   strong-high      exact-output check: score >= 0.6, verdict PASS, rc 0
+ *   weak-zero        constant-PASS check (echo failed=0): score 0/N, verdict FAIL, rc 1, survivors listed
+ *   weak-coverage    --coverage-check with the constant check reports uncovered >= 1
+ *   default-min-0.6 / explicit-min-overrides   default threshold 0.60, --min-score on report wins over conf
+ *   uncovered-default-fail   report --min-score 0 on the weak run: uncovered > 0 still FAIL, MG_UNCOVERED blocking
+ *   allow-uncovered-pass     same with --allow-uncovered listing both functions: PASS
+ *   adjudicated-none / adjudicated-changes-score   --adjudicated with one survivor moves adjudicated off 0
+ *   adjudicated-bad-verdict-refused   a verdict word other than equivalent/out-of-scope is rc 2
+ *   red-baseline    a check that is red on the unmutated tree is refused, rc 2
+ *   summary-file     SUMMARY holds the MUTATION_GATE line
+ * Output: CHECK_MUTATION_GATE<TAB>ok=N<TAB>failed=M (the batch marker needs a TAB after the name); rc 1 on any failure.  Only the scratch is written. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use text.text
+
+static int ok, failed;
+static void ck(int c, const char *n) { if (c) ok++; else { failed++; printf("FAIL %s\n", n); } }
+
+static char T[512];
+
+static int gate(const char *name, const char *check, const char *extra, char *out, int cap) {
+    char sc[4096];
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- run --repo %s/repo --base base --patch %s/fx.patch "
+           "--check '%s' --out %s/%s --par 4 --max 12 --deadline-s 45 %s 2>&1", T, T, check, T, name, extra);
+    return ckk_sh_t("check-mutation-gate", sc, out, cap, 55);
+}
+
+int main(void) {
+    static char out[65536], sc[8192]; int rc;
+    rc = ckk_sh_t("check-mutation-gate", "mktemp -d \"${TMPDIR:-/tmp}/mg-check.XXXXXX\"", T, sizeof T, 10);
+    { int n = (int)tx_len(T, sizeof T); while (n > 0 && (T[n - 1] == '\n' || T[n - 1] == ' ')) T[--n] = 0; }
+    if (rc != 0 || !T[0]) { printf("CHECK_MUTATION_GATE\tok=0\tfailed=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc,
+        "set -e; cd %s; mkdir -p repo/tools; cd repo; git init -q; git config user.email t@t; git config user.name t;\n"
+        "printf '%%s\\n' 'int main(void) {' '    printf(\"start\\n\");' '    return 0;' '}' > tools/fx.cx\n"
+        "git add tools/fx.cx; git commit -q -m base; git tag base\n"
+        "printf '%%s\\n' 'static int clampadd(int a, int b, int lim) {' '    int s = a + b;' '    if (s > lim) return lim * 2;' "
+        "'    if (a < 0 && b < 0) return -1;' '    return s;' '}' 'int main(void) {' '    printf(\"start\\n\");' "
+        "'    printf(\"R=%%d %%d %%d %%d %%d\\n\", clampadd(2, 3, 10), clampadd(7, 8, 10), clampadd(-1, -2, 10), clampadd(5, 5, 10), clampadd(0, -2, 10));' "
+        "'    return 0;' '}' > tools/fx.cx\n"
+        "git diff > ../fx.patch; git checkout -q tools/fx.cx", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 0, "fixture-repo");
+    if (rc != 0) { printf("%s\nCHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", out, ok, failed); return 1; }
+
+    rc = gate("strong", "o=$(sh ./unisacc.com tools/fx.cx) && test \"$o\" = \"$(printf \"start\\nR=5 20 -1 10 -2\")\"", "", out, sizeof out);
+    ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && !ckk_has(out, sizeof out, " mutants=0 "), "strong-high");
+    if (!(rc == 0)) printf("%.1500s\n", out);
+
+    rc = gate("weak", "echo CHECK ok=1 failed=0", "--coverage-check", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, " killed=0 ") && ckk_has(out, sizeof out, "score=0/") && ckk_has(out, sizeof out, "verdict=FAIL"), "weak-zero");
+    ck(ckk_has(out, sizeof out, "MUTATION_COVERAGE") && !ckk_has(out, sizeof out, "uncovered=0"), "weak-coverage");
+    if (rc != 1) printf("%.1500s\n", out);
+    cx_fmt(sc, sizeof sc, "test $(wc -l < %s/weak/survivors.tsv) -ge 3 && grep -q '^MUTATION_GATE mutants=' %s/weak/SUMMARY", T, T);
+    ck(ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "summary-file");
+
+    /* default threshold is 0.6; an explicit --min-score overrides the value saved by prep */
+    ck(ckk_has(out, sizeof out, " min=0.60 "), "default-min-0.6");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0.7 2>&1", T);
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(ckk_has(out, sizeof out, " min=0.70 "), "explicit-min-overrides");
+
+    /* uncovered > 0 fails by default even when the score gate is open; the reviewer list releases it */
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0 2>&1", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 1 && ckk_has(out, sizeof out, "verdict=FAIL") && ckk_has(out, sizeof out, "MG_UNCOVERED tools/fx.cx clampadd blocking"), "uncovered-default-fail");
+    if (rc != 1) printf("%.1500s\n", out);
+    cx_fmt(sc, sizeof sc, "printf 'tools/fx.cx\\tclampadd\\tfixture\\ntools/fx.cx\\tmain\\tfixture\\n' > %s/allow.tsv && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0 --allow-uncovered %s/allow.tsv 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && ckk_has(out, sizeof out, "MG_UNCOVERED tools/fx.cx clampadd allowed") && !ckk_has(out, sizeof out, " blocking "), "allow-uncovered-pass");
+    if (rc != 0) printf("%.1500s\n", out);
+
+    /* adjudicated survivors leave the denominator: raw and adjudicated scores both shown */
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak 2>&1", T);
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(ckk_has(out, sizeof out, " adjudicated=0 ") && ckk_has(out, sizeof out, " score_adj=0/"), "adjudicated-none");
+    cx_fmt(sc, sizeof sc, "head -n 2 %s/weak/survivors.tsv | tail -n 1 | cut -f2,3,4 | tr -d '\\n' > %s/adj.tsv && printf '\\tequivalent\\tfixture\\n' >> %s/adj.tsv && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --adjudicated %s/adj.tsv 2>&1", T, T, T, T, T);
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(!ckk_has(out, sizeof out, " adjudicated=0 ") && ckk_has(out, sizeof out, " adjudicated="), "adjudicated-changes-score");
+    cx_fmt(sc, sizeof sc, "printf 'tools/fx.cx\\t3\\tcmp\\tmaybe\\twhy\\n' > %s/adjbad.tsv && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --adjudicated %s/adjbad.tsv 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "equivalent or out-of-scope"), "adjudicated-bad-verdict-refused");
+
+    rc = gate("red", "echo CHECK ok=0 failed=1", "", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "baseline check not green"), "red-baseline");
+
+    cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
+    printf("CHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", ok, failed);
+    return failed ? 1 : 0;
+}

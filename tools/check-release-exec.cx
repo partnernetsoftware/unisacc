@@ -196,7 +196,7 @@ static int fake_unisacc(int argc, char **argv) {
             if(sh(add,".",0,0)||sh(commit,".",0,0)||sh(push,".",0,0))return 1;
         }
         if(mi>0 && mi+1<argc && has(argv[mi+1]," Y1")){
-            if(argi(argc,argv,"release/evidence/0.0.99/INDEX.tsv")<0)return 2;
+            if(argi(argc,argv,"release/evidence/0.0.99/INDEX.tsv")<0 && argi(argc,argv,"release/evidence/0.0.85/INDEX.tsv")<0 && argi(argc,argv,"release/evidence/0.0.86/INDEX.tsv")<0)return 2;
             for(int i=argi(argc,argv,"--whole")+1;i<argc && argv[i][0]!='-';i++){
                 sy_stat_t st;if(!sy_lstat(argv[i],&st) && st.kind=='d')return 2;
             }
@@ -315,8 +315,9 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     if (with_expected) put(fx, "release/evidence/0.0.99/expected-fail.tsv", strict_variant == 2 ? "batch\texpected\treason\nc-negative\t50/8\tfixture\n" : "batch\texpected\treason\nc-negative\t50/9\tfixture\n");
     cx_fmt(t, sizeof t, "RATCHETS\tok=%d\tfail=%d\telapsed_ms=1\n", 15 - ratchet_fail, ratchet_fail); put(fx, "release/evidence/0.0.99/ratchets.txt", t);
     put(fx, "release/evidence/0.0.99/INDEX.tsv", "item\ttime\tverdict\tpath_or_ref\tnote\n");
-    put(fx, "release/evidence.tsv", "1\tPASS\tx\n");
-    put(fx, "release/decision.txt", "RELEASE_DECIDE\tfixture\n"); put(td, "decision.txt", "RELEASE_DECIDE\tfixture\n");
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.99\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\t0.0.99\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
     put(fx, "release/rollback.txt", "# 0.0.99 rollback fixture\n");
     /* CI evidence answered by the fake gh */
     ci_json(0);
@@ -809,6 +810,278 @@ static void part_c(void) {
     free(c);
     part_m();
     part_w();
+    /* G7 evidence/decision freshness & step-7 recompute chain (0.0.86 pre-release fix) */
+    /* (1) Positive control: real release/evidence/0.0.85 files + cand.version=0.0.85 + UNKNOWN "-" whitelist -> PASS */
+    {
+        char src[4600], dst[4600], ev85[4600];
+        fixture(85, 0, 0, 1);
+        /* Retarget fixture candidate/strict/evidence dir to 0.0.85 with real 0.0.85 evidence files from repo */
+        cx_fmt(ev85, sizeof ev85, "%s/release/evidence/0.0.85", fx);
+        { char *v[] = {"mkdir", "-p", ev85, 0}; sh(v, "/", 0, 0); }
+        {
+            static const char *const files85[] = {
+                "pack-run.out", "draft-readback.txt", "ci-44680404617.log", 0
+            };
+            for (int i = 0; files85[i]; i++) {
+                cx_fmt(src, sizeof src, "%s/release/evidence/0.0.85/%s", root, files85[i]);
+                cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/%s", fx, files85[i]);
+                if (sy_exists(src) == 1) sy_copy(src, dst, 0644);
+                else put(fx, files85[i], "real-85\n");
+            }
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/ratchets.txt", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/ratchets.txt", fx);
+            sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/expected-fail.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/expected-fail.tsv", fx);
+            sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/INDEX.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/INDEX.tsv", fx);
+            sy_copy(src, dst, 0644);
+        }
+        {
+            char t85[8192];
+            cx_fmt(t85, sizeof t85, "APE\tsha256=%s\n# --version\nunisacc 0.0.85\n"
+                "BATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\tcandidate=%s\nCOUNT\tc-negative\tpass=50\tfail=9\texpected=50/9\n"
+                "BATCH_RUN\tid=pp-negative\tstatus=PASS\trc=0\tcandidate=%s\n", sha[0], sha[0], sha[0]);
+            put(fx, "release/evidence/v0.0.85-strict-2026-11-20.tsv", t85);
+            put(lay, "unisacc.com.build.json", "{\"version\":\"0.0.85\"}\n");
+            put(lay, "build.json", "{\"version\":\"0.0.85\"}\n");
+            for (int i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s", lay, leafs[i]); sha_of(p, sha[i]); }
+            { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
+              for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
+              cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+            cx_fmt(t85, sizeof t85,
+                "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+                "example/fixture\tv0.0.85\t1111111111111111111111111111111111111111\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+                sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+            put(fx, "release/candidate.tsv", t85);
+            { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0); }
+        }
+        const char *ev_real85 =
+            "# v0.0.85 real evidence paths + UNKNOWN dash whitelist\n"
+            "3\tPASS\trelease/evidence/0.0.85/pack-run.out\n"
+            "4\tUNKNOWN\trelease/evidence/v0.0.85-strict-2026-11-20.tsv\n"
+            "5\tPASS\trelease/evidence/0.0.85/pack-run.out\n"
+            "6\tPASS\trelease/evidence/0.0.85/draft-readback.txt\n"
+            "7\tPASS\trelease/evidence/0.0.85/ci-44680404617.log\n"
+            "8\tUNKNOWN\t-\n";
+        const char *dec_real85 =
+            "RELEASE_DECIDE\t0.0.85\n"
+            "STEP\t3\tape-pack\tPASS\trelease/evidence/0.0.85/pack-run.out\n"
+            "STEP\t8\treadback\tUNKNOWN\t-\n";
+        put(fx, "release/evidence.tsv", ev_real85);
+        put(fx, "release/decision.txt", dec_real85);
+        put(td, "decision.txt", dec_real85);
+        rc = rx(0, 0, 0, 0);
+        ck(rc == 0 && has(out, "GATE\t7\tDECISION\tPASS"), "G7.real-0085-evidence-pass");
+
+        /* (2) Negative control: same real 0.0.85 evidence paired with cand.version=0.0.86 MUST refuse at DECISION */
+        fixture(86, 0, 0, 1);
+        {
+            char ev86[4600], t86[8192];
+            cx_fmt(ev86, sizeof ev86, "%s/release/evidence/0.0.86", fx);
+            cx_fmt(ev85, sizeof ev85, "%s/release/evidence/0.0.85", fx);
+            { char *v[] = {"mkdir", "-p", ev86, ev85, 0}; sh(v, "/", 0, 0); }
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/ratchets.txt", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.86/ratchets.txt", fx); sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/expected-fail.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.86/expected-fail.tsv", fx); sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/INDEX.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.86/INDEX.tsv", fx); sy_copy(src, dst, 0644);
+            cx_fmt(t86, sizeof t86, "APE\tsha256=%s\n# --version\nunisacc 0.0.86\n"
+                "BATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\tcandidate=%s\nCOUNT\tc-negative\tpass=50\tfail=9\texpected=50/9\n"
+                "BATCH_RUN\tid=pp-negative\tstatus=PASS\trc=0\tcandidate=%s\n", sha[0], sha[0], sha[0]);
+            put(fx, "release/evidence/v0.0.86-strict-2026-11-20.tsv", t86);
+            put(lay, "unisacc.com.build.json", "{\"version\":\"0.0.86\"}\n");
+            put(lay, "build.json", "{\"version\":\"0.0.86\"}\n");
+            for (int i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s", lay, leafs[i]); sha_of(p, sha[i]); }
+            { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
+              for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
+              cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+            cx_fmt(t86, sizeof t86,
+                "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+                "example/fixture\tv0.0.86\t1111111111111111111111111111111111111111\t0.0.86\tcandidate-native.yml\tv0.0.86\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+                sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+            put(fx, "release/candidate.tsv", t86);
+            { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.86", refc, 0, 0, 0, 0); }
+        }
+        put(fx, "release/evidence/0.0.85/pack-run.out", "real-85\n");
+        put(fx, "release/evidence/0.0.85/draft-readback.txt", "real-85\n");
+        put(fx, "release/evidence/0.0.85/ci-44680404617.log", "real-85\n");
+        put(fx, "release/evidence.tsv", ev_real85);
+        put(fx, "release/decision.txt", dec_real85);
+        put(td, "decision.txt", dec_real85);
+        rc = rx(0, 0, 0, 0);
+        expect_gate("G7.real-0085-evidence-on-0086-refused", rc, "DECISION");
+    }
+    /* (3) Stale 0.0.74 evidence.tsv + matching stale decision.txt MUST be refused (not self-equal PASS) */
+    fixture(99, 0, 0, 1);
+    { char d74[4600]; cx_fmt(d74, sizeof d74, "%s/release/evidence/0.0.74", fx); char *v[] = {"mkdir", "-p", d74, 0}; sh(v, "/", 0, 0); }
+    put(fx, "release/evidence/0.0.74/chain-promote.txt", "stale 0.0.74\n");
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.74\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\t0.0.74\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.stale-evidence-0074-refused", rc, "DECISION");
+    /* (4) Whitelist abuse: PASS with "-" MUST be refused (only UNKNOWN allows "-") */
+    fixture(99, 0, 0, 1);
+    put(fx, "release/evidence.tsv", "1\tPASS\t-\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.pass-dash-refused", rc, "DECISION");
+    /* (5) PASS row in evidence.tsv referencing a non-existent file for current version MUST be refused */
+    fixture(99, 0, 0, 1);
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.99/missing-evidence.txt\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-pass-missing-path-refused", rc, "DECISION");
+    /* (6) decision.txt lacking candidate version MUST be refused */
+    fixture(99, 0, 0, 1);
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\tno-version\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\tno-version\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.decision-missing-version-refused", rc, "DECISION");
+    /* (7) Comment-only, missing, 0-byte empty, malformed row, and missing-path evidence.tsv MUST be refused */
+    fixture(99, 0, 0, 1);
+    put(fx, "release/evidence.tsv", "# comment only\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-empty-refused", rc, "DECISION");
+    cx_fmt(p, sizeof p, "%s/release/evidence.tsv", fx); sy_unlink(p);
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-missing-file-refused", rc, "DECISION");
+    put(fx, "release/evidence.tsv", "");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-zero-byte-refused", rc, "DECISION");
+    put(fx, "release/evidence.tsv", "1\t\trelease/evidence/0.0.99/ratchets.txt\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-malformed-row-refused", rc, "DECISION");
+    put(fx, "release/evidence.tsv", "1\tPASS\t\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.evidence-missing-path-col-refused", rc, "DECISION");
+    /* Valid evidence with blank lines and comments passes */
+    put(fx, "release/evidence.tsv", "\n# header\n\n1\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 0, "G7.evidence-blank-and-comment-lines-ok");
+    /* (8) Step-7 (--from-step 7) independent negative controls: stale 0.0.74, missing, empty, same-version diff */
+    fixture(99, 0, 0, 1);
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 0, "G7.baseline-fresh-0099-exec-ok");
+    /* 8a: stale 0.0.74 self-equal at step 7 */
+    { char d74[4600]; cx_fmt(d74, sizeof d74, "%s/release/evidence/0.0.74", fx); char *v[] = {"mkdir", "-p", d74, 0}; sh(v, "/", 0, 0); }
+    put(fx, "release/evidence/0.0.74/chain-promote.txt", "stale 0.0.74\n");
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.74\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\t0.0.74\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+    rc = rx("--from-step", "7", 0, 0);
+    expect_gate("G7.step7-stale-evidence-refused", rc, "DECISION");
+    /* Restore fresh 0.0.99 evidence.tsv, public state, and td/decision.txt for 8b/8c/8d */
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\t0.0.99\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.99/ratchets.txt\n");
+    /* 8b: release/decision.txt missing at step 7 */
+    put(td, "state", "false");
+    cx_fmt(p, sizeof p, "%s/release/decision.txt", fx); sy_unlink(p);
+    rc = rx("--from-step", "7", 0, 0);
+    expect_gate("G7.step7-decision-missing-refused", rc, "DECISION");
+    /* 8c: release/decision.txt empty at step 7 */
+    put(td, "state", "false");
+    put(fx, "release/decision.txt", "");
+    rc = rx("--from-step", "7", 0, 0);
+    expect_gate("G7.step7-decision-empty-refused", rc, "DECISION");
+    /* 8d: release/decision.txt has same version 0.0.99 but different content (different length) at step 7 */
+    put(td, "state", "false");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.99\nTAMPERED\n");
+    rc = rx("--from-step", "7", 0, 0);
+    expect_gate("G7.step7-recompute-diff-refused", rc, "DECISION");
+    /* 8e: release/decision.txt has EXACT SAME LENGTH and same version 0.0.99, 1 byte tampered at step 7 */
+    put(td, "state", "false");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.99\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.99/ratchets.txX\n");
+    rc = rx("--from-step", "7", 0, 0);
+    expect_gate("G7.step7-same-length-tamper-refused", rc, "DECISION");
+    /* (9) Segmented version matching: 0.0.990 must NOT match cand 0.0.99; UNKNOWN with stale non-'-' path refused */
+    fixture(99, 0, 0, 1);
+    { char d990[4600]; cx_fmt(d990, sizeof d990, "%s/release/evidence/0.0.990", fx); char *v[] = {"mkdir", "-p", d990, 0}; sh(v, "/", 0, 0); }
+    put(fx, "release/evidence/0.0.990/ratchets.txt", "stale 0.0.990\n");
+    put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.990/ratchets.txt\n");
+    put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.990\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.990/ratchets.txt\n");
+    put(td, "decision.txt", "RELEASE_DECIDE\t0.0.990\nSTEP\t1\tfreeze-sid\tPASS\trelease/evidence/0.0.990/ratchets.txt\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.version-prefix-00990-refused", rc, "DECISION");
+    /* 9b: UNKNOWN row with stale 0.0.74 non-'-' path MUST be refused */
+    fixture(99, 0, 0, 1);
+    put(fx, "release/evidence.tsv", "4\tUNKNOWN\trelease/evidence/0.0.74/s9.tsv\n");
+    rc = rx(0, 0, 0, 0);
+    expect_gate("G7.unknown-stale-non-dash-refused", rc, "DECISION");
+    /* (10) End-to-end positive control: stale 0.0.74 release/evidence.tsv in repo (as on main) +
+     * real release-prep output release/evidence/0.0.85/evidence-rows.tsv -> step 4 syncs and steps 4..7 pass */
+    {
+        char ev85[4600], src[4600], dst[4600], prepout[4600], t85[8192];
+        fixture(85, 0, 0, 1);
+        cx_fmt(ev85, sizeof ev85, "%s/release/evidence/0.0.85", fx);
+        cx_fmt(prepout, sizeof prepout, "%s/prep85", td);
+        rmrf(prepout);
+        { char *v[] = {"mkdir", "-p", ev85, prepout, 0}; sh(v, "/", 0, 0); }
+        {
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.85/pack-run.out", root);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/pack-run.out", fx);
+            if (sy_exists(src) == 1) sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/ratchets.txt", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/ratchets.txt", fx); sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/expected-fail.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/expected-fail.tsv", fx); sy_copy(src, dst, 0644);
+            cx_fmt(src, sizeof src, "%s/release/evidence/0.0.99/INDEX.tsv", fx);
+            cx_fmt(dst, sizeof dst, "%s/release/evidence/0.0.85/INDEX.tsv", fx); sy_copy(src, dst, 0644);
+        }
+        cx_fmt(t85, sizeof t85, "APE\tsha256=%s\n# --version\nunisacc 0.0.85\n"
+            "BATCH_RUN\tid=c-negative\tstatus=FAIL\trc=1\tcandidate=%s\nCOUNT\tc-negative\tpass=50\tfail=9\texpected=50/9\n"
+            "BATCH_RUN\tid=pp-negative\tstatus=PASS\trc=0\tcandidate=%s\n", sha[0], sha[0], sha[0]);
+        put(fx, "release/evidence/v0.0.85-strict-2026-11-20.tsv", t85);
+        put(lay, "unisacc.com.build.json", "{\"version\":\"0.0.85\"}\n");
+        put(lay, "build.json", "{\"version\":\"0.0.85\"}\n");
+        for (int i = 0; i < 5; i++) { cx_fmt(p, sizeof p, "%s/%s", lay, leafs[i]); sha_of(p, sha[i]); }
+        { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
+          for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
+          cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+        cx_fmt(t85, sizeof t85,
+            "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+            "example/fixture\tv0.0.85\t1111111111111111111111111111111111111111\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+            sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+        put(fx, "release/candidate.tsv", t85);
+        { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0); }
+        /* Produce real evidence-rows.tsv matching release-prep output for 0.0.85 */
+        const char *rows85 =
+            "# v0.0.85 evidence-rows (release-prep format)\n"
+            "1\tPENDING\trelease/evidence/0.0.85/chain-promote.txt\n"
+            "2\tPENDING\trelease/evidence/0.0.85/chain-promote.txt\n"
+            "3\tPASS\trelease/evidence/0.0.85/pack-run.out\n"
+            "4\tUNKNOWN\trelease/evidence/v0.0.85-strict-2026-11-20.tsv\n"
+            "5\tPASS\trelease/evidence/0.0.85/pack-run.out\n"
+            "6\tPENDING\trelease/evidence/0.0.85/draft-readback.txt\n"
+            "7\tPENDING\trelease/evidence/0.0.85/ci-44680404617.log\n"
+            "8\tPENDING\trelease/evidence/0.0.85/public-readback.txt\n";
+        put(fx, "release/evidence/0.0.85/evidence-rows.tsv", rows85);
+        /* Leave release/evidence.tsv stale at 0.0.74 just like real main! */
+        put(fx, "release/evidence.tsv", "1\tPASS\trelease/evidence/0.0.74/chain-promote.txt\n");
+        const char *dec85 =
+            "RELEASE_DECIDE\t0.0.85\n"
+            "STEP\t3\tape-pack\tPASS\trelease/evidence/0.0.85/pack-run.out\n";
+        put(fx, "release/decision.txt", "RELEASE_DECIDE\t0.0.74\n");
+        put(td, "decision.txt", dec85);
+        /* Dry-run must pass without mutating release/evidence.tsv on disk */
+        rc = rx("--dry", 0, 0, 0);
+        {
+            char evp[4600]; cx_fmt(evp, sizeof evp, "%s/release/evidence.tsv", fx);
+            char *after_dry = slurp(evp);
+            ck(rc == 0 && after_dry && has(after_dry, "0.0.74/chain-promote.txt"), "G7.e2e-prep-rows-sync-0085-dry-ok");
+            free(after_dry);
+        }
+        /* Real execute must sync release/evidence/0.0.85/evidence-rows.tsv -> release/evidence.tsv and pass steps 4..7 */
+        rc = rx(0, 0, 0, 0);
+        {
+            char evp[4600]; cx_fmt(evp, sizeof evp, "%s/release/evidence.tsv", fx);
+            char *after_exec = slurp(evp);
+            ck(rc == 0 && has(out, "GATE\t7\tDECISION\tPASS") && after_exec && has(after_exec, "0.0.85/pack-run.out"),
+               "G7.e2e-prep-rows-sync-0085-exec-ok");
+            free(after_exec);
+        }
+    }
 }
 
 static int oracle(char **args,np_buf *result){

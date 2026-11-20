@@ -1,0 +1,408 @@
+/* tools/check-trainjob.cx -- entry, CLI contract, and J2 adopt/status/tail check for tools/trainjob.cx.
+ * Marker: CHECK_TRAINJOB<TAB>failed=N */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.ckrun
+
+static int failed = 0;
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int find_devsvc_bin(char *out, size_t cap) {
+    const char *sb = sy_env("DEVSVC_SELF_BIN");
+    if (sb && sb[0] && sy_exists(sb) == 1) {
+        tx_snprintf(out, cap, "%s", sb);
+        return 1;
+    }
+    const char *home = sy_env("HOME");
+    if (home && home[0]) {
+        char lg[4096];
+        tx_snprintf(lg, sizeof lg, "%s/.cache/unisacc/devsvc/pinned/last-good", home);
+        unsigned char *b = 0;
+        int64_t n = 0;
+        if (sy_read_file(lg, &b, &n, 4096) == 0 && b && n > 0) {
+            while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == '\r')) n--;
+            if (n > 0 && (size_t)n < cap) {
+                mm_copy(out, cap, b, (size_t)n);
+                out[n] = 0;
+                mm_free(b);
+                if (sy_exists(out) == 1) return 1;
+                return 0;
+            }
+        }
+        if (b) mm_free(b);
+    }
+    return 0;
+}
+
+static int extract_kv(const char *buf, const char *key, char *val, size_t cap) {
+    long bl = tx_len(buf, 8192);
+    long kl = tx_len(key, 64);
+    long pos = tx_find(buf, bl, key, kl);
+    if (pos < 0) return 0;
+    const char *s = buf + pos + kl;
+    long n = 0;
+    while (pos + kl + n < bl && s[n] != '\t' && s[n] != '\n' && s[n] != '\r' && s[n] != ' ') n++;
+    if (n <= 0 || (size_t)n >= cap) return 0;
+    mm_copy(val, cap, s, (size_t)n);
+    val[n] = 0;
+    return 1;
+}
+
+int main(void) {
+    char out[8192], cmd[4096], dvbin[1024];
+    long t0 = sy_now_ms();
+
+    /* Create isolated temp workspace + compile tools/trainjob.cx once for fast, thorough checks */
+    char tmp[256], tjbin[320], base[320], dvdir[320], fxroot[320], fxbuild[340], pbin[320], fake_sh[320], rev1[64], rev2[64], rev3[64];
+    tx_snprintf(tmp, sizeof tmp, "/tmp/ck-tj-%d-%ld", (int)getpid(), t0 % 100000L);
+    tx_snprintf(tjbin, sizeof tjbin, "%s/trainjob.bin", tmp);
+    tx_snprintf(base, sizeof base, "%s/base", tmp);
+    tx_snprintf(dvdir, sizeof dvdir, "%s/devsvc", tmp);
+    tx_snprintf(fxroot, sizeof fxroot, "%s/fxroot", tmp);
+    tx_snprintf(fxbuild, sizeof fxbuild, "%s/build", fxroot);
+    tx_snprintf(pbin, sizeof pbin, "%s/pbin", tmp);
+    tx_snprintf(fake_sh, sizeof fake_sh, "%s/fake-chain.sh", tmp);
+    tx_snprintf(rev1, sizeof rev1, "1111111111111111111111111111111111111111");
+    tx_snprintf(rev2, sizeof rev2, "2222222222222222222222222222222222222222");
+    tx_snprintf(rev3, sizeof rev3, "3333333333333333333333333333333333333333");
+    sy_mkdir_all(base, 0700);
+    sy_mkdir_all(dvdir, 0700);
+    sy_mkdir_all(fxbuild, 0700);
+    sy_mkdir_all(pbin, 0700);
+
+    tx_snprintf(cmd, sizeof cmd, "sh ./unisacc.com -o %s tools/trainjob.cx", tjbin);
+    if (ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) != 0) {
+        ck(0, "compile-trainjob");
+        tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
+        ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        printf("CHECK_TRAINJOB\tfailed=%d\tms=%ld\n", failed, sy_now_ms() - t0);
+        return 1;
+    }
+
+    /* Existing J4 skeleton + CLI refusal checks */
+    tx_snprintf(cmd, sizeof cmd, "%s", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "usage: trainjob.cx"), "no-args-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s unknown", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "usage: trainjob.cx"), "unknown-subcmd-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s why", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "why requires directory"), "why-no-dir-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s why --bad-flag", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "bad argument"), "why-bad-flag-refused");
+    ck(ckk_sh("CHECK_TRAINJOB", "sh ./unisacc.com tools/check-trainjob-why.cx", out, sizeof out) == 0 &&
+       ckk_has(out, sizeof out, "CHECK_TRAINJOB_WHY\tfailed=0"), "delegates-why-suite");
+
+    /* J2 CLI refusal checks */
+    tx_snprintf(cmd, sizeof cmd, "%s adopt", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "adopt requires"), "adopt-no-args-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s adopt --bad-flag", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "bad argument"), "adopt-bad-flag-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s adopt --dir noslash", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "BASE/REV"), "adopt-bad-dir-refused");
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, rev2);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "owner.tsv"), "adopt-missing-owner-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s status --bad-flag", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "bad argument"), "status-bad-flag-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s tail", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "tail requires"), "tail-no-id-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s tail --bad-flag", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 &&
+       ckk_has(out, sizeof out, "bad argument"), "tail-bad-flag-refused");
+
+    char fxp[384];
+    tx_snprintf(fxp, sizeof fxp, "%s/unisacc.com", fxroot);
+    sy_write_file(fxp, "fixture-ape\n", 12, 0600);
+    tx_snprintf(fxp, sizeof fxp, "%s/unisacc.com.build.json", fxroot);
+    sy_write_file(fxp, "{}\n", 3, 0600);
+    tx_snprintf(fxp, sizeof fxp, "%s/chain-phases.tsv", fxbuild);
+    const char *plan_tsv = "phase\tkind\tnote\nsnap\tprep\tfixture\nctx\tprep\tfixture\n";
+    sy_write_file(fxp, plan_tsv, (int64_t)strlen(plan_tsv), 0600);
+    tx_snprintf(fxp, sizeof fxp, "%s/chain-phase-fallthrough.tsv", fxbuild);
+    const char *ft_tsv = "phase\tfallthrough\n";
+    sy_write_file(fxp, ft_tsv, (int64_t)strlen(ft_tsv), 0600);
+    tx_snprintf(fxp, sizeof fxp, "%s/git", pbin);
+    const char *git_stub =
+        "#!/bin/sh\n"
+        "case \"$1:$2\" in\n"
+        "show:HEAD:build/version-seq.tsv) printf '1\\t0.0.1\\ttest\\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\\tfixture\\n';;\n"
+        "rev-parse:--verify) printf '1111111111111111111111111111111111111111\\n';;\n"
+        "diff:--no-ext-diff) exit 0;;\n"
+        "*) exec /usr/bin/git \"$@\";;\n"
+        "esac\n";
+    sy_write_file(fxp, git_stub, (int64_t)strlen(git_stub), 0700);
+
+    char script_body[1024];
+    int sb_n = tx_snprintf(script_body, sizeof script_body,
+        "#!/bin/sh\n"
+        "d='%s/%s'\n"
+        "printf 'ATTEMPT\\t1\\tphase=snap\\trc=77\\tresidue=1\\n' >> \"$d/chain-run.tsv\"\n"
+        "printf 'YIELD\\t1795000001\\tphase=snap\\tattempt=1\\n' >> \"$d/chain-run.tsv\"\n"
+        "printf 'ATTEMPT\\t2\\tphase=ctx\\trc=0\\tresidue=0\\n' >> \"$d/chain-run.tsv\"\n"
+        "printf 'BLOCKER\\t1795000002\\tphase=gen1\\trc=2\\n' >> \"$d/chain-run.tsv\"\n"
+        "sleep 25\n", base, rev1);
+    sy_write_file(fake_sh, script_body, sb_n, 0700);
+
+    /* 1. Start real bg-candidate daemon with fake --chain */
+    tx_snprintf(cmd, sizeof cmd,
+        "PATH=%s:\"$PATH\" sh ./unisacc.com tools/bg-candidate.cx -- start --rev %s --root %s --base %s --deadline-s 60 --segment-s 30 --max-segments 1 --chain %s",
+        pbin, rev1, fxroot, base, fake_sh);
+    int rc_start = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_start == 0, "bg-start-real-daemon");
+
+    /* Wait briefly for owner.tsv and chain-run.tsv to flush */
+    tx_snprintf(cmd, sizeof cmd,
+        "i=0; while [ $i -lt 30 ]; do [ -s %s/%s/owner.tsv ] && [ -s %s/%s/chain-run.tsv ] && break; sleep 0.1; i=$((i+1)); done; cat %s/%s/owner.tsv",
+        base, rev1, base, rev1, base, rev1);
+    char ow_out[2048];
+    int rc_ow = ckk_sh("CHECK_TRAINJOB", cmd, ow_out, sizeof ow_out);
+    char ow_pid[32] = {0}, ow_pgid[32] = {0}, ow_guard[32] = {0};
+    int have_ow = (rc_ow == 0 &&
+        extract_kv(ow_out, "pid=", ow_pid, sizeof ow_pid) &&
+        extract_kv(ow_out, "pgid=", ow_pgid, sizeof ow_pgid) &&
+        extract_kv(ow_out, "guard=", ow_guard, sizeof ow_guard));
+    ck(have_ow, "owner-tsv-present");
+
+    /* 2. Adopt live daemon */
+    tx_snprintf(cmd, sizeof cmd,
+        "UNISACC_DEVSVC_DIR=%s %s adopt --kind chain --base %s --rev %s --owner custom-ow",
+        dvdir, tjbin, base, rev1);
+    int rc_ad1 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    char jid1[128] = {0}, ad_pid[32] = {0}, ad_pgid[32] = {0}, ad_in[64] = {0};
+    int ok_ad1 = (rc_ad1 == 0 &&
+        ckk_has(out, sizeof out, "TRAINJOB_ADOPT\t") &&
+        ckk_has(out, sizeof out, "\treused=0\t") &&
+        ckk_has(out, sizeof out, "\tstate=RUNNING\t") &&
+        extract_kv(out, "id=", jid1, sizeof jid1) &&
+        extract_kv(out, "pid=", ad_pid, sizeof ad_pid) &&
+        extract_kv(out, "pgid=", ad_pgid, sizeof ad_pgid) &&
+        extract_kv(out, "input=", ad_in, sizeof ad_in) &&
+        tx_eqz(ad_pid, ow_pid) && tx_eqz(ad_pgid, ow_pgid) && tx_eqz(ad_in, rev1));
+    ck(ok_ad1, "adopt-live-matches-owner");
+
+    /* Check meta fields via cat */
+    tx_snprintf(cmd, sizeof cmd, "cat %s/jobs/%s/meta", dvdir, jid1);
+    int rc_mt = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_mt == 0 && ckk_has(out, sizeof out, "owner\tcustom-ow\n") &&
+       ckk_has(out, sizeof out, "deadline_s\t60\n") &&
+       ckk_has(out, sizeof out, "/bg.log\n"), "adopt-meta-fields-persisted");
+
+    /* 3. Adopt is idempotent (same ID, reused=1) */
+    tx_snprintf(cmd, sizeof cmd,
+        "UNISACC_DEVSVC_DIR=%s %s adopt --kind chain --base %s --rev %s",
+        dvdir, tjbin, base, rev1);
+    int rc_ad2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    char jid2[128] = {0};
+    ck(rc_ad2 == 0 && ckk_has(out, sizeof out, "\treused=1\t") &&
+       extract_kv(out, "id=", jid2, sizeof jid2) && tx_eqz(jid1, jid2), "adopt-idempotent");
+
+    /* 4. Real `devsvc jobs` sees the adopted job without error and n=1 */
+    if (find_devsvc_bin(dvbin, sizeof dvbin)) {
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s jobs", dvdir, dvbin);
+    } else {
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s sh ./unisacc.com tools/devsvc.cx -- jobs", dvdir);
+    }
+    int rc_dj = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_dj == 0 && ckk_has(out, sizeof out, jid1) && ckk_has(out, sizeof out, "JOBS\tn=1"), "devsvc-jobs-visible");
+
+    /* 5. Status reports RUNNING with exact pid, pgid, input, phase matching owner.tsv and chain-run.tsv */
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s", dvdir, tjbin, jid1);
+    int rc_st1 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    char st_pid[32] = {0}, st_pgid[32] = {0}, st_in[64] = {0};
+    ck(rc_st1 == 0 &&
+       ckk_has(out, sizeof out, "TRAINJOB_STATUS\t") &&
+       ckk_has(out, sizeof out, "\tstate=RUNNING\t") &&
+       ckk_has(out, sizeof out, "\tphase=gen1\t") &&
+       extract_kv(out, "pid=", st_pid, sizeof st_pid) &&
+       extract_kv(out, "pgid=", st_pgid, sizeof st_pgid) &&
+       extract_kv(out, "input=", st_in, sizeof st_in) &&
+       tx_eqz(st_pid, ow_pid) && tx_eqz(st_pgid, ow_pgid) && tx_eqz(st_in, rev1),
+       "status-live-matches-owner");
+
+    /* 6. Tail outputs phase/yield/blocker events and honors -n truncation */
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s tail %s -n 10", dvdir, tjbin, jid1);
+    int rc_tl = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_tl == 0 &&
+       ckk_has(out, sizeof out, "TRAINJOB_TAIL\tATTEMPT\t") &&
+       ckk_has(out, sizeof out, "TRAINJOB_TAIL\tYIELD\t") &&
+       ckk_has(out, sizeof out, "TRAINJOB_TAIL\tBLOCKER\t") &&
+       ckk_has(out, sizeof out, "\tlines=4\n"),
+       "tail-key-events");
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s tail %s -n 2", dvdir, tjbin, jid1);
+    int rc_tl2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_tl2 == 0 &&
+       !ckk_has(out, sizeof out, "phase=snap") &&
+       ckk_has(out, sizeof out, "phase=ctx") &&
+       ckk_has(out, sizeof out, "phase=gen1") &&
+       ckk_has(out, sizeof out, "\tlines=2\n"),
+       "tail-truncates-to-n");
+
+    /* 7. Kill guard first, then daemon + pgid, and remove exit.tsv: first status stays RUNNING,
+     *    min-lost-gap 60 keeps RUNNING, then min-lost-gap 0 commits LOST */
+    tx_snprintf(cmd, sizeof cmd,
+        "kill -9 %s 2>/dev/null || true; kill -9 -%s %s 2>/dev/null || true; sleep 0.3; rm -f %s/%s/exit.tsv",
+        ow_guard, ow_pgid, ow_pid, base, rev1);
+    ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s --min-lost-gap 0", dvdir, tjbin, jid1);
+    int rc_l1 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_l1 == 0 && ckk_has(out, sizeof out, "\tstate=RUNNING\t"), "lost-first-check-stays-running");
+
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s --min-lost-gap 60", dvdir, tjbin, jid1);
+    int rc_lg = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_lg == 0 && ckk_has(out, sizeof out, "\tstate=RUNNING\t"), "lost-respects-min-gap");
+
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s --min-lost-gap 0", dvdir, tjbin, jid1);
+    int rc_l2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_l2 == 0 && ckk_has(out, sizeof out, "\tstate=LOST\t"), "lost-second-check-commits-lost");
+
+    /* 8. Synthetic fixture with distinct guard/pid/pgid (410001/410002/410003) + exit rc=0 without DONE phases:
+     *    proves pgid is parsed from pgid= column (not pid=/guard=) and DONE requires real bg-candidate status. */
+    char d2[384], ow2p[420], ex2p[420];
+    tx_snprintf(d2, sizeof d2, "%s/%s", base, rev2);
+    sy_mkdir_all(d2, 0700);
+    tx_snprintf(ow2p, sizeof ow2p, "%s/owner.tsv", d2);
+    tx_snprintf(ex2p, sizeof ex2p, "%s/exit.tsv", d2);
+    char ow2_buf[256];
+    int ow2_n = tx_snprintf(ow2_buf, sizeof ow2_buf,
+        "OWNER\t1795100001\t%s\tguard=410001\tpid=410002\tpgid=410003\tdeadline_s=9000\tchain=source\n", rev2);
+    sy_write_file(ow2p, ow2_buf, ow2_n, 0600);
+    const char *ex2_buf = "EXIT\t1795100099\tpid=410002\trc=0\twhy=exited\n";
+    sy_write_file(ex2p, ex2_buf, (int64_t)strlen(ex2_buf), 0600);
+
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --dir %s/%s", dvdir, tjbin, base, rev2);
+    int rc_f2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_f2 == 0 &&
+       ckk_has(out, sizeof out, "\tpid=410002\t") &&
+       ckk_has(out, sizeof out, "\tpgid=410003\t") &&
+       ckk_has(out, sizeof out, rev2) &&
+       ckk_has(out, sizeof out, "\tstate=FAILED\t"),
+       "distinct-pgid-and-done-requires-bg-status");
+
+    /* 9. Synthetic fixture with rc=124 deadline-killed -> TIMEOUT */
+    char d3[384], ow3p[420], ex3p[420];
+    tx_snprintf(d3, sizeof d3, "%s/%s", base, rev3);
+    sy_mkdir_all(d3, 0700);
+    tx_snprintf(ow3p, sizeof ow3p, "%s/owner.tsv", d3);
+    tx_snprintf(ex3p, sizeof ex3p, "%s/exit.tsv", d3);
+    char ow3_buf[256];
+    int ow3_n = tx_snprintf(ow3_buf, sizeof ow3_buf,
+        "OWNER\t1795100101\t%s\tguard=420001\tpid=420002\tpgid=420003\tdeadline_s=60\tchain=source\n", rev3);
+    sy_write_file(ow3p, ow3_buf, ow3_n, 0600);
+    const char *ex3_buf = "EXIT\t1795100161\tpid=420002\trc=124\twhy=deadline-killed\n";
+    sy_write_file(ex3p, ex3_buf, (int64_t)strlen(ex3_buf), 0600);
+
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, rev3);
+    int rc_f3 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_f3 == 0 && ckk_has(out, sizeof out, "\tstate=TIMEOUT\t"), "timeout-state-classified");
+
+    /* 10. Status without ID lists all 3 adopted jobs */
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status", dvdir, tjbin);
+    int rc_all = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    ck(rc_all == 0 && ckk_has(out, sizeof out, rev1) && ckk_has(out, sizeof out, rev2) &&
+       ckk_has(out, sizeof out, rev3) && ckk_has(out, sizeof out, "\tstate=LOST\t") &&
+       ckk_has(out, sizeof out, "\tstate=FAILED\t") && ckk_has(out, sizeof out, "\tstate=TIMEOUT\t"),
+       "status-lists-all-jobs");
+
+    /* 11. owner.tsv empty file & rev mismatch refused */
+    tx_snprintf(cmd, sizeof cmd, ": > %s/owner.tsv", d3);
+    ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, rev3);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "owner.tsv"),
+       "adopt-empty-owner-refused");
+
+    tx_snprintf(cmd, sizeof cmd, "printf 'OWNER\\t1795100201\\t%s\\tguard=1\\tpid=2\\tpgid=3\\tdeadline_s=60\\tchain=source\\n' > %s/owner.tsv", rev1, d3);
+    ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, rev3);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "mismatch"),
+       "adopt-rev-mismatch-refused");
+
+    /* 11b. resolve_devsvc_dir fallback via HOME / UNISACC_DEVSVC_INST and empty HOME refusal */
+    char fhome[320];
+    tx_snprintf(fhome, sizeof fhome, "%s/fakehome", tmp);
+    sy_mkdir_all(fhome, 0700);
+    tx_snprintf(cmd, sizeof cmd,
+        "UNISACC_DEVSVC_DIR= UNISACC_DEVSVC_INST= HOME=%s %s adopt --base %s --rev %s && test -d %s/.cache/unisacc/devsvc/default/jobs",
+        fhome, tjbin, base, rev2, fhome);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 0 && ckk_has(out, sizeof out, "TRAINJOB_ADOPT\t"),
+       "devsvc-dir-fallback-home-default");
+    tx_snprintf(cmd, sizeof cmd,
+        "UNISACC_DEVSVC_DIR= UNISACC_DEVSVC_INST=inst9 HOME=%s %s adopt --base %s --rev %s && test -d %s/.cache/unisacc/devsvc/inst9/jobs",
+        fhome, tjbin, base, rev2, fhome);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 0 && ckk_has(out, sizeof out, "TRAINJOB_ADOPT\t"),
+       "devsvc-dir-fallback-custom-inst");
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR= HOME= %s status", tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "devsvc dir"),
+       "devsvc-dir-empty-home-refused");
+
+    /* 12. Unknown job IDs refused */
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status 99999-99999", dvdir, tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2, "status-unknown-id-refused");
+    tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s tail 99999-99999", dvdir, tjbin);
+    ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2, "tail-unknown-id-refused");
+
+    /* 13. Zombie-only PGID (simulating PR_SET_CHILD_SUBREAPER in tools/bound under run-batch/affected):
+     *     child calls setsid(), we adopt it while alive, SIGKILL it without waitpid so it stays zombie
+     *     and kill(-pgid, 0) still returns 0; trainjob status must recognize zombie-only PGID as dead
+     *     and commit LOST on second confirmation. */
+    pid_t zpid = fork();
+    if (zpid == 0) {
+        setpgid(0, 0);
+        for (;;) sleep(10);
+        _exit(0);
+    }
+    if (zpid > 0) {
+        char revz[64], dz[384], owzp[420], owz_buf[256], jidz[128] = {0};
+        tx_snprintf(revz, sizeof revz, "4444444444444444444444444444444444444444");
+        tx_snprintf(dz, sizeof dz, "%s/%s", base, revz);
+        sy_mkdir_all(dz, 0700);
+        tx_snprintf(owzp, sizeof owzp, "%s/owner.tsv", dz);
+        tx_snprintf(cmd, sizeof cmd, "sleep 0.1");
+        ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int owz_n = tx_snprintf(owz_buf, sizeof owz_buf,
+            "OWNER\t1795100301\t%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=60\tchain=source\n",
+            revz, (int)getpid(), (int)zpid, (int)zpid);
+        sy_write_file(owzp, owz_buf, owz_n, 0600);
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, revz);
+        int rc_za = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        extract_kv(out, "id=", jidz, sizeof jidz);
+        kill(zpid, SIGKILL);
+        tx_snprintf(cmd, sizeof cmd, "sleep 0.2");
+        ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s --min-lost-gap 0", dvdir, tjbin, jidz);
+        int rc_z1 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int ok_z1 = (rc_z1 == 0 && ckk_has(out, sizeof out, "\tstate=RUNNING\t"));
+        int rc_z2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int ok_z2 = (rc_z2 == 0 && ckk_has(out, sizeof out, "\tstate=LOST\t"));
+        int zst = 0;
+        waitpid(zpid, &zst, 0);
+        ck(rc_za == 0 && jidz[0] && ok_z1 && ok_z2, "zombie-pgid-subreaper-commits-lost");
+    } else {
+        ck(0, "zombie-pgid-subreaper-commits-lost");
+    }
+
+    /* Cleanup */
+    tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
+    ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+
+    printf("CHECK_TRAINJOB\tfailed=%d\tms=%ld\n", failed, sy_now_ms() - t0);
+    return failed ? 1 : 0;
+}

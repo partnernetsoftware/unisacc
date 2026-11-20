@@ -1219,9 +1219,74 @@ static int ev_expand(char **v, int k, int cap) {
     for (int i = 0; i < m && k < cap - 8; i++) v[k++] = ev_names[i];
     return k;
 }
+/* Segmented version token match: surrounding characters must not be ASCII digit or '.'
+ * so 0.0.86 does not match 0.0.860 and 0.0.8 does not match 0.0.85. */
+static int is_ver_ch(char c) { return (c >= '0' && c <= '9') || c == '.'; }
+static int has_ver(const char *s, long n, const char *ver) {
+    long vl = tlen(ver), off = 0;
+    while (off <= n - vl) {
+        long p = tx_find(s + off, n - off, ver, vl);
+        if (p < 0) return 0;
+        long pos = off + p;
+        int lo_ok = (pos == 0) || !is_ver_ch(s[pos - 1]);
+        int hi_ok = (pos + vl == n) || !is_ver_ch(s[pos + vl]);
+        if (lo_ok && hi_ok) return 1;
+        off = pos + 1;
+    }
+    return 0;
+}
+/* Sync release/evidence/<ver>/evidence-rows.tsv -> release/evidence.tsv (or outdir/evidence.tsv in --dry)
+ * before step-4 freshness checks, so real releases do not stall on stale main release/evidence.tsv. */
+static void sync_evidence_rows(char *evpath, size_t cap) {
+    char src[600];
+    if (cx_fmt(src, sizeof src, "release/evidence/%s/evidence-rows.tsv", cand.version)) die("evidence-rows path");
+    if (sy_exists(src) == 1) {
+        long n; char *b = slurp(src, &n);
+        if (!b) refuse("DECISION", "cannot read evidence-rows.tsv");
+        if (dry) cx_fmt(evpath, cap, "%s/evidence.tsv", outdir);
+        else cx_fmt(evpath, cap, "release/evidence.tsv");
+        if (cx_write(evpath, b, (size_t)n)) { free(b); refuse("DECISION", "cannot sync evidence-rows.tsv"); }
+        free(b);
+        return;
+    }
+    cx_fmt(evpath, cap, "release/evidence.tsv");
+}
+/* Verify evidence.tsv is bound to cand.version and every PASS evidence file exists.
+ * Only an UNKNOWN row with literal path "-" (absent evidence) is whitelisted without cand.version. */
+static void check_evidence_current(const char *evpath, const char *ver) {
+    long n, at = 0, ll; const char *ls; int rows = 0;
+    char *s = slurp(evpath, &n);
+    if (!s) refuse("DECISION", "release/evidence.tsv missing");
+    while (line_next(s, n, &at, &ls, &ll)) {
+        long t1 = tx_chr(ls, ll, '\t');
+        if (t1 != 1 || ls[0] < '1' || ls[0] > '8') continue;
+        const char *r1 = ls + t1 + 1; long rl1 = ll - t1 - 1;
+        long t2 = tx_chr(r1, rl1, '\t');
+        if (t2 <= 0 || t2 >= 16) { free(s); refuse("DECISION", "release/evidence.tsv malformed row"); }
+        char verd[16], pbuf[512];
+        mm_copy(verd, sizeof verd, r1, (size_t)t2); verd[t2] = 0;
+        long plen = rl1 - t2 - 1;
+        if (plen <= 0 || plen >= (long)sizeof pbuf) { free(s); refuse("DECISION", "release/evidence.tsv missing path"); }
+        mm_copy(pbuf, sizeof pbuf, r1 + t2 + 1, (size_t)plen); pbuf[plen] = 0;
+        rows++;
+        if (tx_eqz(verd, "UNKNOWN") && tx_eqz(pbuf, "-")) continue;
+        if (!has_ver(pbuf, plen, ver)) { free(s); refuse("DECISION", "release/evidence.tsv stale: path does not reference candidate version"); }
+        if (tx_eqz(verd, "PASS") && sy_exists(pbuf) != 1) { free(s); refuse("DECISION", "release/evidence.tsv PASS path missing"); }
+    }
+    free(s);
+    if (rows == 0) refuse("DECISION", "release/evidence.tsv has no step rows");
+}
+static void check_decision_current(const char *dpath, const char *ver) {
+    long n = 0; char *s = slurp(dpath, &n);
+    if (!s || n <= 0) { free(s); refuse("DECISION", "decision.txt missing or empty"); }
+    int ok = has_ver(s, n, ver);
+    free(s);
+    if (!ok) refuse("DECISION", "decision.txt does not reference candidate version");
+}
 static void step_y1(void) {
-    char notes[200], msg[200], dp[4500];
-    char *dv[] = {"sh", checkout_product, "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
+    char notes[200], msg[200], dp[4500], evpath[4500];
+    cx_fmt(evpath, sizeof evpath, "release/evidence.tsv");
+    char *dv[] = {"sh", checkout_product, "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", evpath, "--assets", layout, 0};
     char *v[120]; int k = 0;
     v[k++] = "sh"; v[k++] = checkout_product; v[k++] = "tools/devsvc.cx"; v[k++] = "--"; v[k++] = "git"; v[k++] = "commit"; v[k++] = "-m"; v[k++] = msg;
     v[k++] = "--whole"; v[k++] = "release/candidate.tsv"; k = ev_expand(v, k, 120);
@@ -1233,9 +1298,12 @@ static void step_y1(void) {
     else if (cur_step < from_step) refuse("RESUME", "no Y1 recorded for a verify-only step");
     else {
         if (!tx_eqz(cand.ci_run_id, runid)) { if (dry) sy_printf("EDIT\t%d\tDRY\trelease/candidate.tsv ci_run_id=%s\n", cur_step, runid); else set_ci_run_id(); }
+        sync_evidence_rows(evpath, sizeof evpath);
+        check_evidence_current(evpath, cand.version);
         cx_fmt(dp, sizeof dp, "%s/decision.txt", dry ? outdir : "release");
         show(dv, "LOCAL");
         if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
+        check_decision_current(dp, cand.version);
         if (act(v, 55, 0, 0)) refuse("Y1_PUSHED", "devsvc git commit Y1 failed");
         if (dry) { gate_deferred("Y1_PUSHED", "Y1 not created in --dry"); return; }
         { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0}; if (run(g, 10, y1sha, sizeof y1sha)) refuse("Y1_PUSHED", "Y1 commit lookup"); }
@@ -1265,6 +1333,7 @@ static void step_publish(void) {
 }
 
 /* ---- step 6: readback ------------------------------------------------------------------------- */
+static void warm_note(void);
 static void step_readback(void) {
     char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
     char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
@@ -1344,18 +1413,25 @@ static void step_readback(void) {
 
 /* ---- step 7: Y2 --------------------------------------------------------------------------------- */
 static void step_y2(void) {
-    char dp[4500], msg[200], ref[200]; long a, b; char *ta, *tb; int same;
-    char *dv[] = {"sh", checkout_product, "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", "release/evidence.tsv", "--assets", layout, 0};
+    char dp[4500], evpath[4500], refdp[4500], msg[200], ref[200]; long a, b; char *ta, *tb; int same;
+    cx_fmt(evpath, sizeof evpath, "%s/evidence.tsv", outdir);
+    if (!dry || sy_exists(evpath) != 1) cx_fmt(evpath, sizeof evpath, "release/evidence.tsv");
+    cx_fmt(refdp, sizeof refdp, "%s/decision.txt", outdir);
+    if (!dry || sy_exists(refdp) != 1) cx_fmt(refdp, sizeof refdp, "release/decision.txt");
+    char *dv[] = {"sh", checkout_product, "tools/release-decide.cx", "--", "--candidate", "release/candidate.tsv", "--evidence", evpath, "--assets", layout, 0};
     char *v[120]; int k = 0;
     v[k++] = "sh"; v[k++] = checkout_product; v[k++] = "tools/devsvc.cx"; v[k++] = "--"; v[k++] = "git"; v[k++] = "commit"; v[k++] = "-m"; v[k++] = msg;
     v[k++] = "--whole"; k = ev_expand(v, k, 120);
     v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
     gate_main();
+    check_evidence_current(evpath, cand.version);
     cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
     show(dv, "LOCAL");
     if (run_to(dv, 55, dp)) refuse("DECISION", "release-decide failed");
-    ta = slurp(dp, &a); tb = slurp("release/decision.txt", &b);
+    check_decision_current(dp, cand.version);
+    check_decision_current(refdp, cand.version);
+    ta = slurp(dp, &a); tb = slurp(refdp, &b);
     same = ta && tb && a == b && !memcmp(ta, tb, (size_t)a);
     free(ta); free(tb);
     if (!same) refuse("DECISION", "release-decide recompute differs from release/decision.txt");
@@ -1521,6 +1597,10 @@ int main(int argc, char **argv) {
     if (argc < 3 || (!warm && !tx_eqz(argv[1], "--execute")))
         die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE] | --warm CANDIDATE_TSV --layout DIR [--out DIR]");
     if (sy_cwd(here, sizeof here)) die("cwd");
+    /* 0.0.87 S4: a Root installed from an unpublished chain candidate (tools/install-ape.cx --candidate) is never a
+       release baseline; the release runs from a public Root. */
+    { char mk[4400]; if (cx_fmt(mk, sizeof mk, "%s/unisacc.com.candidate.tsv", here)) die("cwd path");
+      if (sy_exists(mk) == 1) die("RELEASE_EXEC_GATE_ROOT_CANDIDATE root unisacc.com is an unpublished candidate (unisacc.com.candidate.tsv); fix: tools/install-ape.cx -- ROOT --rollback --write or install the public APE"); }
     if (sy_realpath(argv[2], table, sizeof table) < 0) die("candidate table");
     cx_fmt(baseline, sizeof baseline, "%s/.unisacc-baselines/c46-2/unisacc-c46-2.com", home ? home : "");
     for (i = 3; i < argc; i++) {

@@ -1,0 +1,124 @@
+/* Compile the tracked chain templates, controller sources, and extension units
+ * with the supplied candidate. Templates use the whole-front prepare recipe.
+ * Modes: templates, chain-0..3, ext-0..5. Extension shards partition Git order.
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+static char scratch[4400];
+static long deadline;
+static int checked, failed;
+
+static int suffix(const char *p, const char *tail) {
+    size_t n = strlen(p), m = strlen(tail);
+    return n >= m && tx_eqz(p + n - m, tail);
+}
+
+static int copy_template(const char *path, const char *dest) {
+    size_t n = 0;
+    char *body = cx_read(path, &n);
+    int rc = !body || cx_write(dest, body, n);
+    free(body);
+    return rc;
+}
+
+static void compile(const char *root, char *ape, const char *path, int worker) {
+    char source[4400], copied[4400], object[4400], why[256] = {0};
+    np_result r = {0};
+    int left = (int)((deadline - sy_now_ms()) / 1000);
+    int rc = 2;
+    int transport = -1;
+    if (left > 0 &&
+        !cx_fmt(source, sizeof source, "%s/%s", root, path) &&
+        !cx_fmt(object, sizeof object, "%s/%d.o", scratch, checked) &&
+        (!worker || (!cx_fmt(copied, sizeof copied, "%s/worker-%d.cx", scratch, checked) &&
+                     !copy_template(source, copied)))) {
+        char *plain[] = {"sh", ape, "-c", source, "-o", object, 0};
+        char *unit[] = {"sh", ape, "-c", "-funit", "-DRT_UNIT", copied, "-o", object, 0};
+        char *darwin[] = {"sh", ape, "-b", "osx/x86_64", "-c", source, "-o", object, 0};
+        char **args = worker ? unit : plain;
+        if (tx_eqz(path, "ext/sysx/process_group_osx.cx")) args = darwin;
+        transport = np_run(args, root, 0, left < 20 ? left : 20, &r, why, sizeof why);
+        rc = r.rc;
+        if (!transport && !rc && sy_unlink(object)) rc = 2;
+    }
+    int ok = !transport && !rc && !r.residue;
+    printf("CHAIN_CONSUMER\t%s\t%s\trc=%d\ttransport=%d\n", ok ? "PASS" : "FAIL", path, rc, transport);
+    if (!ok && *why) fprintf(stderr, "%s: %s\n", path, why);
+    if (!ok && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    checked++;
+    failed += !ok;
+    np_free(&r);
+}
+
+static int tracked(const char *root, char *ape, int worker, int shard) {
+    char *av[] = {"git", "ls-files", "-z", "--", worker ? "tools/templates/" : "ext/", 0};
+    char why[256];
+    np_result r = {0};
+    if (np_run(av, root, 0, 4, &r, why, sizeof why) || r.rc || r.residue || !r.outn) {
+        fprintf(stderr, "CHAIN_CONSUMER REFUSE inventory\n");
+        np_free(&r);
+        return 2;
+    }
+    int whole_front = 0, whole_win = 0, ordinal = 0;
+    for (size_t i = 0; i < r.outn;) {
+        char *path = r.out + i;
+        char *end = memchr(path, 0, r.outn - i);
+        if (!end || end == path || strpbrk(path, "\r\n\t")) {
+            np_free(&r);
+            return 2;
+        }
+        i = (size_t)(end - r.out) + 1;
+        if (worker && !suffix(path, ".cx.in")) continue;
+        if (!worker && (!suffix(path, ".cx") || ordinal++ % 6 != shard)) continue;
+        whole_front |= tx_eqz(path, "tools/templates/whole-front.cx.in");
+        whole_win |= tx_eqz(path, "tools/templates/whole-win-span.cx.in");
+        compile(root, ape, path, worker);
+    }
+    np_free(&r);
+    if (worker && (!whole_front || !whole_win)) {
+        fprintf(stderr, "CHAIN_CONSUMER REFUSE missing whole-front or whole-win-span template\n");
+        return 2;
+    }
+    return 0;
+}
+
+static void chain(const char *root, char *ape, int shard) {
+    /* Candidate compilation edges from chain-run, candidate-chain and chain-step. */
+    static const char *sources[][5] = {
+        {"tools/chain-step.cx", "tools/chain-watch.cx", "tools/chain-pace.cx"},
+        {"tools/candidate-chain.cx", "tools/source-job-wave.cx", "tools/preflight.cx"},
+        {"tools/release-build.cx", "tools/source-package.cx", "tools/kernel-route.cx"},
+        {"tools/chain-run.cx", "tools/whole-front.cx", "tools/entry-build.cx",
+         "tools/release-ape.cx", "tools/cache-retain.cx"}
+    };
+    for (int i = 0; i < 5 && sources[shard][i]; i++) compile(root, ape, sources[shard][i], 0);
+}
+
+int main(int argc, char **argv) {
+    char root[4400], ape[4400], out[4400];
+    if (argc != 4 || !realpath(argv[1], root) || !realpath(argv[2], ape)) {
+        fprintf(stderr, "usage: check-chain-consumers ROOT APE templates|chain-0..3|ext-0..5\n");
+        return 2;
+    }
+    const char *mode = argv[3];
+    int worker = tx_eqz(mode, "templates");
+    int chain_mode = strlen(mode) == 7 && !memcmp(mode, "chain-", 6) && mode[6] >= '0' && mode[6] <= '3';
+    int ext_mode = strlen(mode) == 5 && !memcmp(mode, "ext-", 4) && mode[4] >= '0' && mode[4] <= '5';
+    if (!worker && !chain_mode && !ext_mode) return 2;
+    /* A template copied here inherits exactly the layout's cxroot lookup. */
+    if (cx_fmt(out, sizeof out, "%s/out", root) || sy_mkdir_all(out, 0700) ||
+        sy_mkdtemp(out, "chain-consumers-", scratch, sizeof scratch)) return 2;
+    long start = sy_now_ms();
+    deadline = start + 42000;
+    int rc = 0;
+    if (chain_mode) chain(root, ape, mode[6] - '0');
+    else rc = tracked(root, ape, worker, worker ? 0 : mode[4] - '0');
+    if (sy_remove_all(scratch)) rc = 2;
+    printf("CHECK_CHAIN_CONSUMERS\tmode=%s\tchecked=%d\tfailed=%d\tms=%ld\n",
+           mode, checked, failed, sy_now_ms() - start);
+    return rc ? rc : failed || !checked;
+}

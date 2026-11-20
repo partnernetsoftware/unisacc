@@ -69,10 +69,61 @@ static void rget(const char *b, const char *key, int col, char *o, size_t cap) {
     }
 }
 static void no_quote(const char *p) { if (strchr(p, '\'') || strchr(p, '\n')) die("path-has-quote-or-newline", p); }
+static void lane_trees(const char *repo, char *o, size_t cap) {
+    char lp[PW];
+    size_t n = 0;
+    char *b = 0;
+    if (repo && repo[0]) {
+        pj(lp, repo, "build/lane-inputs.tsv");
+        b = cx_read(lp, &n);
+    }
+    if (!b) {
+        if (cx_fmt(o, cap, "%s", IDS)) die("fmt", 0);
+        return;
+    }
+    char seen[32][64];
+    int ns = 0;
+    for (char *p = b; *p; ) {
+        char *e = strchr(p, '\n');
+        size_t l = e ? (size_t)(e - p) : strlen(p);
+        if (l > 0 && *p != '#') {
+            char *t1 = (char *)memchr(p, '\t', l);
+            if (t1 && (size_t)(t1 - p) + 2 <= l && t1[1] == 'A' &&
+                ((size_t)(t1 - p) + 2 == l || t1[2] == '\t')) {
+                size_t pl = (size_t)(t1 - p);
+                char *sl = (char *)memchr(p, '/', pl);
+                size_t tl = sl ? (size_t)(sl - p) : pl;
+                if (tl > 0 && tl < 64) {
+                    int dup = 0;
+                    for (int k = 0; k < ns; k++) if (strlen(seen[k]) == tl && !memcmp(seen[k], p, tl)) { dup = 1; break; }
+                    if (!dup && ns < 32) {
+                        mm_copy(seen[ns], 64, p, (long)tl);
+                        seen[ns][tl] = 0;
+                        ns++;
+                    }
+                }
+            }
+        }
+        p = e ? e + 1 : p + l;
+    }
+    free(b);
+    if (!ns) { if (cx_fmt(o, cap, "%s", IDS)) die("fmt", 0); return; }
+    size_t at = 0;
+    o[0] = 0;
+    for (int k = 0; k < ns; k++) {
+        size_t kl = strlen(seen[k]);
+        if (at + (at ? 1 : 0) + kl + 1 > cap) die("fmt", 0);
+        if (at) o[at++] = ' ';
+        mm_copy(o + at, (long)(cap - at), seen[k], (long)kl + 1);
+        at += kl;
+    }
+}
+
 /* tree ids of the product input directories at commit c; out is the raw rev-parse text without trailing newlines */
 static void ids_at(const char *repo, const char *c, char *o, size_t cap) {
-    np_result r = {0}; char why[512], cmd[1024]; char *av[] = {"sh", "-c", cmd, 0}; size_t n;
-    const char *d = IDS; char spec[512]; size_t k = 0;
+    np_result r = {0}; char why[512], cmd[1024], trees[512]; char *av[] = {"sh", "-c", cmd, 0}; size_t n;
+    lane_trees(repo, trees, sizeof trees);
+    const char *d = trees; char spec[768]; size_t k = 0;
     spec[0] = 0;
     while (*d) {
         const char *e = strchr(d, ' '); size_t l = e ? (size_t)(e - d) : strlen(d); char one[160];
@@ -180,6 +231,18 @@ int main(int argc, char **argv) {
         why[0] = 0; if (np_run(av, repo, 0, 30, &r, why, sizeof why) || r.rc) die("link-top-level", why);
         np_free(&r);
     }
+    char trees[512], head_spec[768];
+    lane_trees(repo, trees, sizeof trees);
+    {
+        const char *d = trees; size_t k = 0; head_spec[0] = 0;
+        while (*d) {
+            const char *e = strchr(d, ' '); size_t l = e ? (size_t)(e - d) : strlen(d); char one[160];
+            if (cx_fmt(one, sizeof one, "%sHEAD:%.*s", k ? " " : "", (int)l, d) || k + strlen(one) + 1 > sizeof head_spec) die("fmt", 0);
+            if (mm_copy(head_spec + k, (long)(sizeof head_spec - k), one, (long)strlen(one) + 1)) die("fmt", 0);
+            k += strlen(one);
+            d += l; if (*d == ' ') d++;
+        }
+    }
     if (cx_fmt(buf, sizeof buf,
         "#!/bin/sh\n"
         "# NOT_RELEASE dev-lane-v1 state=on scope=LOCAL (tools/dev-lane.cx); generated, do not edit\n"
@@ -194,13 +257,13 @@ int main(int argc, char **argv) {
         "[ \"${DEV_LANE:-on}\" = off ] && inst \"$@\"\n"
         "case \"${1:-}\" in *.cx) ;; *) inst \"$@\";; esac\n"
         "case \"$1\" in %s) inst \"$@\";; esac\n"
-        "H=$(git -C \"$R\" rev-parse HEAD:include HEAD:src HEAD:cx HEAD:exec HEAD:seed 2>/dev/null | tr '\\n' ' ')\n"
+        "H=$(git -C \"$R\" rev-parse %s 2>/dev/null | tr '\\n' ' ')\n"
         "if [ \"$H\" != \"$W \" ]; then\n"
         "  echo \"dev-lane: STALE local product (base %s; product input trees of HEAD changed); using the installed product; rebuild with tools/dev-product.cx then tools/dev-lane.cx --use\" >&2\n"
         "  inst \"$@\"\n"
         "fi\n"
         "exec sh \"$P\" \"$@\"\n",
-        repo, prod, fin, base, ids, repo, prod, ids, GATES, base)) die("path-too-long", 0);
+        repo, prod, fin, base, ids, repo, prod, ids, GATES, head_spec, base)) die("path-too-long", 0);
     pj(p, lane, "unisacc.com"); if (fsx_write(p, buf, (long)strlen(buf), 0755)) die("write", p);
     if (chmod(p, 0755)) die("chmod", p);
     printf("DEV_LANE\tstate=on\tlane=%s\tproduct=%s\tsha=%s\tbase=%s\tscope=LOCAL\n", lane, prod, fin, base);

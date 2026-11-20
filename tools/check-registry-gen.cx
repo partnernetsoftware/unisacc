@@ -1,0 +1,299 @@
+/* tools/check-registry-gen.cx -- comprehensive verification for tools/registry-gen.cx (0.0.87 S5a).
+ * Verifies all 6 pre-stage-2 review contracts:
+ *   (1) 3 source tables (batches, coverage, tools-compile-sources; batch-domain-index excluded) split -> synth 100% SAME.
+ *   (2) Missing shard red proof (--check returns rc=1 DIFF).
+ *   (3) Roundtrip fidelity: mid-file comments, blank lines, and missing trailing newline preserved byte-for-byte.
+ *   (4) Reversible case-safe safe_id: a/b, a.b, "a b", a_b, A, a, and >250B key land in distinct shard files.
+ *   (5) Filename consistency & unique key enforcement: rogue filename -> rc=2 shard-filename-mismatch; duplicate key -> rc=2 duplicate-key.
+ *   (6) Two-branch conflict-free shard merge in isolated git repo.
+ *   (7) Real-insertion shard-stability experiment (sequential vs FNV-1a power-of-2 B=256 buckets).
+ * Usage: sh ./unisacc.com tools/check-registry-gen.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char root[4096], prod[4200], gen_src[4300], work[4200];
+static int npass, nfail;
+
+static void die(const char *m) {
+    fprintf(stderr, "check-registry-gen: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void crg_record(int ok, const char *name, const char *det) {
+    printf("%s\tregistry-gen.%s\t%s\n", ok ? "PASS" : "FAIL", name, det ? det : "-");
+    if (ok) npass++; else nfail++;
+}
+
+static void rm_tree(const char *p) {
+    if (!p || !p[0]) return;
+    char *av[] = { "rm", "-rf", "--", (char *)p, 0 };
+    np_result r = {0};
+    char why[256];
+    (void)np_run(av, "/", 0, 30, &r, why, sizeof why);
+    np_free(&r);
+}
+
+static int run_rg(char *const av[], np_result *r) {
+    char why[512];
+    return np_run(av, root, 0, 50, r, why, sizeof why);
+}
+
+static int count_tsv(const char *dir) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir)) return -1;
+    int n = 0, next;
+    while ((next = sy_dir_next(&d)) == 1) {
+        long ln = tx_len(d.name, 256);
+        if (ln > 4 && !strcmp(d.name + ln - 4, ".tsv") && !tx_eqz(d.name, "_headers.tsv")) n++;
+    }
+    sy_dir_close(&d);
+    return n;
+}
+
+int main(void) {
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
+        cx_fmt(gen_src, sizeof gen_src, "%s/tools/registry-gen.cx", root) ||
+        cx_fmt(work, sizeof work, "%s/check-registry-gen-%d", sy_tmpdir(), (int)getpid())) die("paths");
+    if (sy_mkdir_all(work, 0700)) die("mkdir-work");
+
+    char sdir[4300], wout[4300];
+    cx_fmt(sdir, sizeof sdir, "%s/shards", work);
+    cx_fmt(wout, sizeof wout, "%s/synth", work);
+
+    /* 1. Read-only split of 3 source tables */
+    {
+        char *av[] = { "sh", prod, gen_src, "--", "--split", "--root", root, "--dir", sdir, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "REGISTRY_SPLIT\t") != 0;
+        crg_record(ok, "split-3-source-tables", ok ? "ok" : "split-failed");
+        np_free(&r);
+        if (!ok) { rm_tree(work); return 1; }
+    }
+
+    /* 2. GREEN: --check against live 3 tables must be 100% byte-identical */
+    {
+        char *av[] = { "sh", prod, gen_src, "--", "--check", "--root", root, "--dir", sdir, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "REGISTRY_GEN\tSAME\ttables=3\t") != 0;
+        crg_record(ok, "synth-byte-identical-3-tables", ok ? "SAME" : "DIFF");
+        np_free(&r);
+    }
+
+    /* 3. --write to tmp out and independently memcmp all 3 source tables byte-for-byte */
+    {
+        char *av[] = { "sh", prod, gen_src, "--", "--write", "--root", root, "--dir", sdir, "--out", wout, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        static const char *const tbls[3] = {
+            "tests/batches.tsv", "tests/coverage.tsv", "tests/tools-compile-sources.tsv"
+        };
+        int all_eq = (!tr && r.rc == 0);
+        for (int i = 0; all_eq && i < 3; i++) {
+            char pa[4500], pb[4500];
+            cx_fmt(pa, sizeof pa, "%s/%s", root, tbls[i]);
+            cx_fmt(pb, sizeof pb, "%s/%s", wout, tbls[i]);
+            size_t na = 0, nb = 0;
+            char *ba = cx_read(pa, &na), *bb = cx_read(pb, &nb);
+            if (!ba || !bb || na != nb || (na && memcmp(ba, bb, na))) all_eq = 0;
+            free(ba); free(bb);
+        }
+        crg_record(all_eq, "write-and-memcmp-3-tables", all_eq ? "exact-3/3" : "mismatch");
+        np_free(&r);
+    }
+
+    /* 4. RED proof: deleting any 1 shard file must make --check fail with DIFF */
+    {
+        char victim[4500], saved[4500];
+        victim[0] = 0;
+        sy_dir_t d;
+        if (!sy_dir_open(&d, sdir)) {
+            int next;
+            while ((next = sy_dir_next(&d)) == 1) {
+                long ln = tx_len(d.name, 256);
+                if (ln > 4 && !strcmp(d.name + ln - 4, ".tsv") && !tx_eqz(d.name, "_headers.tsv") && d.name[0] == 'b') {
+                    cx_fmt(victim, sizeof victim, "%s/%s", sdir, d.name);
+                    break;
+                }
+            }
+            sy_dir_close(&d);
+        }
+        cx_fmt(saved, sizeof saved, "%s/victim.bak", work);
+        int moved = victim[0] && (sy_rename(victim, saved) == 0);
+        char *av[] = { "sh", prod, gen_src, "--", "--check", "--root", root, "--dir", sdir, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        int ok = moved && !tr && r.rc == 1 && r.err && strstr(r.err, "REGISTRY_GEN\tDIFF\t") != 0;
+        if (moved) (void)sy_rename(saved, victim);
+        crg_record(ok, "red-missing-shard-detected", ok ? "rc=1-DIFF" : "missed");
+        np_free(&r);
+    }
+
+    /* 5. Fidelity: mid-file comments, blank lines, and missing trailing newline roundtrip byte-identically */
+    {
+        char fx[4300], fxt[4400], fxd[4400], p0[4500], p1[4500], p2[4500];
+        cx_fmt(fx, sizeof fx, "%s/fx-fidelity", work);
+        cx_fmt(fxt, sizeof fxt, "%s/tests", fx);
+        cx_fmt(fxd, sizeof fxd, "%s/shards", fx);
+        sy_mkdir_all(fxt, 0700);
+        cx_fmt(p0, sizeof p0, "%s/batches.tsv", fxt);
+        cx_fmt(p1, sizeof p1, "%s/coverage.tsv", fxt);
+        cx_fmt(p2, sizeof p2, "%s/tools-compile-sources.tsv", fxt);
+        const char *b_txt =
+            "id\timpl\n"
+            "alpha\tIMPLEMENTED\n"
+            "# mid comment stays here\n"
+            "\n"
+            "beta\tIMPLEMENTED"; /* intentionally NO trailing newline */
+        const char *c_txt = "id\tlayer\ncov.a\tcontract\n";
+        const char *t_txt = "tools/a.cx\tregular"; /* intentionally NO trailing newline */
+        cx_write(p0, b_txt, strlen(b_txt));
+        cx_write(p1, c_txt, strlen(c_txt));
+        cx_write(p2, t_txt, strlen(t_txt));
+        char *avs[] = { "sh", prod, gen_src, "--", "--split", "--root", fx, "--dir", fxd, 0 };
+        char *avc[] = { "sh", prod, gen_src, "--", "--check", "--root", fx, "--dir", fxd, 0 };
+        np_result rs = {0}, rc = {0};
+        int ts = run_rg(avs, &rs);
+        int tc = (!ts && rs.rc == 0) ? run_rg(avc, &rc) : 1;
+        int ok = !ts && rs.rc == 0 && !tc && rc.rc == 0 && rc.out && strstr(rc.out, "REGISTRY_GEN\tSAME\ttables=3\t") != 0;
+        crg_record(ok, "fidelity-mid-comment-blank-no-trailing-nl", ok ? "exact-SAME" : "DIFF");
+        np_free(&rs); np_free(&rc);
+    }
+
+    /* 6. Reversible case-safe safe_id: a/b, a.b, "a b", a_b, A, a, and 260-char key all get distinct files */
+    {
+        char fx[4300], fxt[4400], fxd[4400], p0[4500], p1[4500], p2[4500];
+        cx_fmt(fx, sizeof fx, "%s/fx-safeid", work);
+        cx_fmt(fxt, sizeof fxt, "%s/tests", fx);
+        cx_fmt(fxd, sizeof fxd, "%s/shards", fx);
+        sy_mkdir_all(fxt, 0700);
+        cx_fmt(p0, sizeof p0, "%s/batches.tsv", fxt);
+        cx_fmt(p1, sizeof p1, "%s/coverage.tsv", fxt);
+        cx_fmt(p2, sizeof p2, "%s/tools-compile-sources.tsv", fxt);
+        char longk1[270], longk2[270];
+        for (int i = 0; i < 260; i++) { longk1[i] = 'x'; longk2[i] = 'x'; }
+        longk1[259] = '1'; longk1[260] = 0;
+        longk2[259] = '2'; longk2[260] = 0;
+        np_buf b = {0};
+        np_puts(&b, "id\timpl\na/b\t1\na.b\t2\na b\t3\na_b\t4\nA\t5\na\t6\n");
+        np_puts(&b, longk1); np_puts(&b, "\t7\n");
+        np_puts(&b, longk2); np_puts(&b, "\t8\n");
+        cx_write(p0, b.p, b.n);
+        free(b.p);
+        cx_write(p1, "id\tlayer\n", 9);
+        cx_write(p2, "", 0);
+        char *avs[] = { "sh", prod, gen_src, "--", "--split", "--root", fx, "--dir", fxd, 0 };
+        char *avc[] = { "sh", prod, gen_src, "--", "--check", "--root", fx, "--dir", fxd, 0 };
+        np_result rs = {0}, rc = {0};
+        int ts = run_rg(avs, &rs);
+        int tc = (!ts && rs.rc == 0) ? run_rg(avc, &rc) : 1;
+        int nfiles = count_tsv(fxd);
+        int ok = !ts && rs.rc == 0 && !tc && rc.rc == 0 && nfiles == 8;
+        char det[64]; cx_fmt(det, sizeof det, "distinct_shards=%d(want 8)", nfiles);
+        crg_record(ok, "safe-id-reversible-case-and-long-key", det);
+        np_free(&rs); np_free(&rc);
+    }
+
+    /* 7. Filename-consistency & duplicate-key refusal on --check and --write */
+    {
+        char fx[4300], fxt[4400], fxd[4400], p0[4500], p1[4500], p2[4500], rogue[4500], dupf[4500];
+        cx_fmt(fx, sizeof fx, "%s/fx-dup", work);
+        cx_fmt(fxt, sizeof fxt, "%s/tests", fx);
+        cx_fmt(fxd, sizeof fxd, "%s/shards", fx);
+        sy_mkdir_all(fxt, 0700);
+        cx_fmt(p0, sizeof p0, "%s/batches.tsv", fxt);
+        cx_fmt(p1, sizeof p1, "%s/coverage.tsv", fxt);
+        cx_fmt(p2, sizeof p2, "%s/tools-compile-sources.tsv", fxt);
+        cx_write(p0, "id\timpl\nalpha\t1\n", 16);
+        cx_write(p1, "id\tlayer\n", 9);
+        cx_write(p2, "", 0);
+        char *avs[] = { "sh", prod, gen_src, "--", "--split", "--root", fx, "--dir", fxd, 0 };
+        np_result rs = {0};
+        int ts = run_rg(avs, &rs);
+        np_free(&rs);
+        /* (a) Rogue filename carrying existing key 'alpha' -> rc=2 shard-filename-mismatch */
+        cx_fmt(rogue, sizeof rogue, "%s/b-rogue.tsv", fxd);
+        const char *rline = "# registry-shard-v1\nbatches\t0\talpha\talpha\t2\n";
+        cx_write(rogue, rline, strlen(rline));
+        char *avc[] = { "sh", prod, gen_src, "--", "--check", "--root", fx, "--dir", fxd, 0 };
+        np_result r1 = {0};
+        int t1 = (!ts) ? run_rg(avc, &r1) : 1;
+        int ok1 = !t1 && r1.rc == 2 && r1.err && strstr(r1.err, "shard-filename-mismatch") != 0;
+        np_free(&r1);
+        sy_unlink(rogue);
+        /* (b) Duplicate key inside matching filename b-alpha.tsv -> rc=2 duplicate-key */
+        cx_fmt(dupf, sizeof dupf, "%s/b-alpha.tsv", fxd);
+        const char *dline = "# registry-shard-v1\nbatches\t2\talpha\talpha\t1\nbatches\t0\talpha\talpha\t2\n";
+        cx_write(dupf, dline, strlen(dline));
+        np_result r2 = {0};
+        int t2 = (!ts) ? run_rg(avc, &r2) : 1;
+        int ok2 = !t2 && r2.rc == 2 && r2.err && strstr(r2.err, "duplicate-key") != 0;
+        np_free(&r2);
+        char det[96]; cx_fmt(det, sizeof det, "mismatch_refused=%d dup_refused=%d", ok1, ok2);
+        crg_record(ok1 && ok2, "refuse-filename-mismatch-and-duplicate-key", det);
+    }
+
+    /* 8. Two-branch conflict-free merge proof in isolated git repo */
+    {
+        char grepo[4300], cmd[4800];
+        cx_fmt(grepo, sizeof grepo, "%s/git-merge-fx", work);
+        cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/tests/registry.d' && cd '%s' && "
+            "git init -q . && git config user.email a@b && git config user.name t && "
+            "printf '# registry-headers-v1\\ntools-compile-sources\\tMETA\\ttrailing_nl=1\\n' > tests/registry.d/_headers.tsv && "
+            "git add -A && git commit -qm base && "
+            "git checkout -qb br-a && "
+            "printf '# registry-shard-v1\\ntools-compile-sources\\t0\\ttools/alpha.cx\\ttools/alpha.cx\\tregular\\n' > tests/registry.d/t-tools%%2falpha%%2ecx.tsv && "
+            "git add -A && git commit -qm add-alpha && "
+            "git checkout -q - && git checkout -qb br-b && "
+            "printf '# registry-shard-v1\\ntools-compile-sources\\t0\\ttools/beta.cx\\ttools/beta.cx\\tregular\\n' > tests/registry.d/t-tools%%2fbeta%%2ecx.tsv && "
+            "git add -A && git commit -qm add-beta && "
+            "git merge -q --no-edit br-a",
+            grepo, grepo);
+        char *av[] = { "sh", "-c", cmd, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        int merged = (!tr && r.rc == 0);
+        np_free(&r);
+        char gdir[4400], gout[4400];
+        cx_fmt(gdir, sizeof gdir, "%s/tests/registry.d", grepo);
+        cx_fmt(gout, sizeof gout, "%s/out", grepo);
+        char *avw[] = { "sh", prod, gen_src, "--", "--write", "--root", grepo, "--dir", gdir, "--out", gout, 0 };
+        np_result rw = {0};
+        int tw = merged ? run_rg(avw, &rw) : 1;
+        char tcs[4500];
+        cx_fmt(tcs, sizeof tcs, "%s/tests/tools-compile-sources.tsv", gout);
+        size_t tn = 0;
+        char *tb = cx_read(tcs, &tn);
+        int ok = merged && !tw && rw.rc == 0 && tb && strstr(tb, "tools/alpha.cx\tregular\n") && strstr(tb, "tools/beta.cx\tregular\n");
+        free(tb);
+        np_free(&rw);
+        crg_record(ok, "two-branch-conflict-free-merge", ok ? "merged-and-synthed" : "failed");
+    }
+
+    /* 9. Real-insertion tools-compile hash-bucket stability experiment (B=256 power-of-2) */
+    {
+        char *av[] = { "sh", prod, gen_src, "--", "--shard-experiment", "--root", root, 0 };
+        np_result r = {0};
+        int tr = run_rg(av, &r);
+        int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "SHARD_EXPERIMENT\t") != 0 &&
+                 strstr(r.out, "hash_head_diff=1\t") != 0 &&
+                 strstr(r.out, "hash_mid_diff=1\t") != 0 &&
+                 strstr(r.out, "hash_tail_diff=1\t") != 0;
+        if (r.out && r.outn) fwrite(r.out, 1, r.outn, stdout);
+        crg_record(ok, "shard-stability-real-insert-experiment", ok ? "real-insert-1-bucket" : "failed");
+        np_free(&r);
+    }
+
+    rm_tree(work);
+    printf("CHECK_REGISTRY_GEN\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,270 @@
+/* tools/check-jobrec.cx -- self-check for tools/cxlib/jobrec.cx (J1 job record library).
+ * Covers:
+ *   1. Real `devsvc jobs` and `devsvc wait` tolerate extended meta keys (cmd/owner/start + kind/input/pgid/procid/deadline_s/base/log).
+ *   2. Full 10-key meta + pid + rc roundtrip fidelity and sanitization refusal.
+ *   3. All 6 state-machine transition rules (NONE->RUNNING, RUNNING->DONE/FAILED/TIMEOUT/LOST, LOST->DONE/FAILED/TIMEOUT).
+ *   4. Two-confirmation LOST guard (first call returns JR_PENDING=1 without writing state.tsv; <min_gap still pending; >=min_gap commits LOST).
+ *   5. Illegal transitions return JR_ERR_INVALID (2) without writing disk (state.tsv bytes unchanged).
+ *   6. Atomic rename verification (new inode per write + mid-write SIGKILL child consistency check).
+ * Check: CHECK_JOBREC.
+ */
+#pragma unisa use cxlib.jobrec
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int npass, nfail;
+static void cjr_rec(int ok, const char *name, const char *detail) {
+    if (ok) npass++; else nfail++;
+    printf("%s\tjobrec.%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "-");
+}
+
+static void cjr_rm(const char *dir) {
+    char *v[] = { "rm", "-rf", (char *)dir, 0 };
+    np_result r = {0}; char why[128] = {0};
+    np_run(v, "/", 0, 10, &r, why, sizeof why);
+    np_free(&r);
+}
+
+static void fill_meta(JrMeta *m, const char *tag) {
+    memset(m, 0, sizeof *m);
+    tx_snprintf(m->cmd, sizeof m->cmd, "bg-candidate start --rev %s", tag);
+    tx_snprintf(m->owner, sizeof m->owner, "tester-%s", tag);
+    m->start_ms = 1700000123456L;
+    tx_snprintf(m->kind, sizeof m->kind, "chain");
+    tx_snprintf(m->input, sizeof m->input, "rev-%s-0123456789abcdef", tag);
+    m->pgid = 42420;
+    tx_snprintf(m->procid, sizeof m->procid, "pid=42420:tick=998877:boot=1700000000:ns=4026531836");
+    m->deadline_s = 7200;
+    tx_snprintf(m->base, sizeof m->base, "/tmp/chain-base-%s", tag);
+    tx_snprintf(m->log, sizeof m->log, "/tmp/chain-base-%s/bg.log", tag);
+}
+
+static int meta_equal(const JrMeta *a, const JrMeta *b) {
+    return strcmp(a->cmd, b->cmd) == 0 &&
+           strcmp(a->owner, b->owner) == 0 &&
+           a->start_ms == b->start_ms &&
+           strcmp(a->kind, b->kind) == 0 &&
+           strcmp(a->input, b->input) == 0 &&
+           a->pgid == b->pgid &&
+           strcmp(a->procid, b->procid) == 0 &&
+           a->deadline_s == b->deadline_s &&
+           strcmp(a->base, b->base) == 0 &&
+           strcmp(a->log, b->log) == 0;
+}
+
+static int find_devsvc_bin(char *out, size_t cap) {
+    const char *sb = sy_env("DEVSVC_SELF_BIN");
+    if (sb && sb[0] && sy_exists(sb) == 1) {
+        tx_snprintf(out, cap, "%s", sb);
+        return 1;
+    }
+    const char *home = sy_env("HOME");
+    if (home && home[0]) {
+        char lg[4300];
+        tx_snprintf(lg, sizeof lg, "%s/.cache/unisacc/devsvc/pinned/last-good", home);
+        size_t n = 0;
+        char *b = cx_read(lg, &n);
+        if (b && n > 0) {
+            while (n > 0 && (b[n - 1] == '\n' || b[n - 1] == '\r')) b[--n] = 0;
+            if (n > 0 && n < cap && sy_exists(b) == 1) {
+                mm_copy(out, (long)cap, b, (long)n + 1);
+                free(b);
+                return 1;
+            }
+        }
+        free(b);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int unit_only = (argc > 1 && tx_eqz(argv[1], "--unit"));
+    char root[4096], work[4200];
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (sy_mkdtemp("/tmp", "check-jobrec-", work, sizeof work) != 0) return 2;
+
+    /* 1. Real `devsvc jobs` & `devsvc wait` tolerate extended meta keys (default full run) */
+    if (!unit_only) {
+        char ddir[4300], jid[64], jdir[4400], env_d[4400], dvbin[4300];
+        tx_snprintf(ddir, sizeof ddir, "%s/devsvc-inst", work);
+        tx_snprintf(jid, sizeof jid, "%ld-%d", sy_now_ms(), (int)getpid());
+        tx_snprintf(jdir, sizeof jdir, "%s/jobs/%s", ddir, jid);
+        tx_snprintf(env_d, sizeof env_d, "UNISACC_DEVSVC_DIR=%s", ddir);
+        JrMeta m; fill_meta(&m, "devsvc");
+        int cr = jr_create(jdir, (int)getpid(), &m, 1000);
+        char *ev[2] = { env_d, 0 };
+        int has_bin = find_devsvc_bin(dvbin, sizeof dvbin);
+        char *av_jobs_bin[] = { dvbin, "jobs", 0 };
+        char *av_jobs_src[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "jobs", 0 }; /* lint:allow R1-product real devsvc jobs tolerance check */
+        np_result rj = {0}; char why[256] = {0};
+        int tj = (cr == JR_OK) ? np_run(has_bin ? av_jobs_bin : av_jobs_src, root, ev, 45, &rj, why, sizeof why) : 1;
+        int jobs_ok = (cr == JR_OK && tj == 0 && rj.rc == 0 && rj.out &&
+                       strstr(rj.out, jid) != 0 && strstr(rj.out, "bg-candidate start --rev devsvc") != 0 &&
+                       strstr(rj.out, "JOBS\tn=1") != 0);
+        np_free(&rj);
+
+        int wr = jr_write_rc(jdir, 0, 1234);
+        char *av_wait_bin[] = { dvbin, "wait", jid, "--timeout-ms", "5000", 0 };
+        char *av_wait_src[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", jid, "--timeout-ms", "5000", 0 }; /* lint:allow R1-product real devsvc wait tolerance check */
+        np_result rw = {0};
+        int tw = (wr == JR_OK) ? np_run(has_bin ? av_wait_bin : av_wait_src, root, ev, 45, &rw, why, sizeof why) : 1;
+        char want_done[128]; tx_snprintf(want_done, sizeof want_done, "JOB_DONE\t%s\trc=0\tms=1234", jid);
+        int wait_ok = (wr == JR_OK && tw == 0 && rw.rc == 0 && rw.out && strstr(rw.out, want_done) != 0);
+        np_free(&rw);
+        cjr_rec(jobs_ok && wait_ok, "devsvc-jobs-and-wait-tolerate-extended-meta",
+                (jobs_ok && wait_ok) ? "jobs=ok wait=ok" : "failed");
+    }
+
+    /* 2. Meta + pid + rc roundtrip and newline/tab injection refusal */
+    {
+        char jdir[4300]; tx_snprintf(jdir, sizeof jdir, "%s/j-rt", work);
+        JrMeta m, got; fill_meta(&m, "roundtrip");
+        int cr = jr_create(jdir, 12345, &m, 1000);
+        int rr = jr_read_meta(jdir, &got);
+        int wr = jr_write_rc(jdir, 2, 9876);
+        int rc_v = -1; long ms_v = -1;
+        int rrc = jr_read_rc(jdir, &rc_v, &ms_v);
+        JrMeta bad; fill_meta(&bad, "bad");
+        tx_snprintf(bad.input, sizeof bad.input, "evil\ninjected");
+        int rej = jr_write_meta(jdir, &bad);
+        int ok = (cr == JR_OK && rr == JR_OK && meta_equal(&m, &got) &&
+                  wr == JR_OK && rrc == JR_OK && rc_v == 2 && ms_v == 9876 &&
+                  rej == JR_ERR_INVALID);
+        cjr_rec(ok, "meta-pid-rc-roundtrip-and-sanitize", ok ? "exact-10-keys" : "mismatch");
+    }
+
+    /* 3. All 6 state-machine transition rules + LOST two-confirmation guard */
+    {
+        int all_ok = (JR_ST_DONE != JR_ST_FAILED &&
+                      strcmp(jr_state_name(JR_ST_NONE), "NONE") == 0 &&
+                      jr_state_parse("BOGUS") == JR_ST_NONE);
+        /* 3a: NONE->RUNNING->DONE */
+        char j1[4300]; tx_snprintf(j1, sizeof j1, "%s/j-done", work);
+        JrMeta m; fill_meta(&m, "t1"); JrState st;
+        if (jr_create(j1, 100, &m, 1000) != JR_OK) all_ok = 0;
+        if (jr_read_state(j1, &st) != JR_OK || st.state != JR_ST_RUNNING) all_ok = 0;
+        if (jr_transition(j1, JR_ST_DONE, "exit-0", 1010, 5) != JR_OK) all_ok = 0;
+        if (jr_read_state(j1, &st) != JR_OK || st.state != JR_ST_DONE) all_ok = 0;
+
+        /* 3b: NONE->RUNNING->FAILED */
+        char j2[4300]; tx_snprintf(j2, sizeof j2, "%s/j-fail", work);
+        if (jr_create(j2, 101, &m, 1000) != JR_OK) all_ok = 0;
+        if (jr_transition(j2, JR_ST_FAILED, "exit-2", 1010, 5) != JR_OK) all_ok = 0;
+        if (jr_read_state(j2, &st) != JR_OK || st.state != JR_ST_FAILED) all_ok = 0;
+
+        /* 3c: NONE->RUNNING->TIMEOUT */
+        char j3[4300]; tx_snprintf(j3, sizeof j3, "%s/j-to", work);
+        if (jr_create(j3, 102, &m, 1000) != JR_OK) all_ok = 0;
+        if (jr_transition(j3, JR_ST_TIMEOUT, "deadline-killed", 1010, 5) != JR_OK) all_ok = 0;
+        if (jr_read_state(j3, &st) != JR_OK || st.state != JR_ST_TIMEOUT) all_ok = 0;
+
+        /* 3d: NONE->RUNNING->LOST (2 confirmations >=5s) -> DONE/FAILED/TIMEOUT recovery */
+        const int rec_targets[3] = { JR_ST_DONE, JR_ST_FAILED, JR_ST_TIMEOUT };
+        for (int k = 0; k < 3; k++) {
+            char jl[4300]; tx_snprintf(jl, sizeof jl, "%s/j-lost-%d", work, k);
+            if (jr_create(jl, 200 + k, &m, 1000) != JR_OK) all_ok = 0;
+            /* 1st probe: MUST return JR_PENDING and remain RUNNING */
+            if (jr_transition(jl, JR_ST_LOST, "proc-gone", 1010, 5) != JR_PENDING) all_ok = 0;
+            if (jr_read_state(jl, &st) != JR_OK || st.state != JR_ST_RUNNING || st.lost_checks != 1) all_ok = 0;
+            /* 2nd probe too early (gap 3s < 5s): MUST still return JR_PENDING */
+            if (jr_transition(jl, JR_ST_LOST, "proc-gone", 1013, 5) != JR_PENDING) all_ok = 0;
+            if (jr_read_state(jl, &st) != JR_OK || st.state != JR_ST_RUNNING) all_ok = 0;
+            /* 2nd confirmation with gap 5s: commits LOST */
+            if (jr_transition(jl, JR_ST_LOST, "proc-gone-confirmed", 1015, 5) != JR_OK) all_ok = 0;
+            if (jr_read_state(jl, &st) != JR_OK || st.state != JR_ST_LOST) all_ok = 0;
+            /* Recovery from LOST -> DONE/FAILED/TIMEOUT */
+            if (jr_transition(jl, rec_targets[k], "recovered", 1020, 5) != JR_OK) all_ok = 0;
+            if (jr_read_state(jl, &st) != JR_OK || st.state != rec_targets[k]) all_ok = 0;
+        }
+        cjr_rec(all_ok, "six-transitions-and-lost-two-confirm", all_ok ? "all-6-rules-ok" : "failed");
+    }
+
+    /* 4. Illegal transitions return JR_ERR_INVALID (2) without writing disk */
+    {
+        char ji[4300], sp[4400]; tx_snprintf(ji, sizeof ji, "%s/j-ill", work);
+        tx_snprintf(sp, sizeof sp, "%s/state.tsv", ji);
+        sy_mkdir_all(ji, 0700);
+        int ok = 1;
+        /* NONE -> DONE / FAILED / LOST must all return 2 and NOT create state.tsv */
+        if (jr_transition(ji, JR_ST_DONE, "bad", 1000, 5) != JR_ERR_INVALID) ok = 0;
+        if (jr_transition(ji, JR_ST_FAILED, "bad", 1000, 5) != JR_ERR_INVALID) ok = 0;
+        if (jr_transition(ji, JR_ST_LOST, "bad", 1000, 5) != JR_ERR_INVALID) ok = 0;
+        if (sy_exists(sp) != 0) ok = 0;
+
+        JrMeta m; fill_meta(&m, "ill");
+        if (jr_create(ji, 300, &m, 1000) != JR_OK) ok = 0;
+        /* RUNNING -> RUNNING illegal */
+        size_t b0n = 0, b1n = 0;
+        char *b0 = cx_read(sp, &b0n);
+        if (jr_transition(ji, JR_ST_RUNNING, "dup", 1001, 5) != JR_ERR_INVALID) ok = 0;
+        char *b1 = cx_read(sp, &b1n);
+        if (!b0 || !b1 || b0n != b1n || memcmp(b0, b1, b0n) != 0) ok = 0;
+        free(b0); free(b1);
+
+        /* DONE -> RUNNING / FAILED / TIMEOUT / LOST all illegal and leave state.tsv byte-identical */
+        if (jr_transition(ji, JR_ST_DONE, "finish", 1002, 5) != JR_OK) ok = 0;
+        size_t d0n = 0, d1n = 0;
+        char *d0 = cx_read(sp, &d0n);
+        if (jr_transition(ji, JR_ST_RUNNING, "bad", 1003, 5) != JR_ERR_INVALID) ok = 0;
+        if (jr_transition(ji, JR_ST_FAILED, "bad", 1003, 5) != JR_ERR_INVALID) ok = 0;
+        if (jr_transition(ji, JR_ST_TIMEOUT, "bad", 1003, 5) != JR_ERR_INVALID) ok = 0;
+        if (jr_transition(ji, JR_ST_LOST, "bad", 1003, 5) != JR_ERR_INVALID) ok = 0;
+        char *d1 = cx_read(sp, &d1n);
+        if (!d0 || !d1 || d0n != d1n || memcmp(d0, d1, d0n) != 0) ok = 0;
+        free(d0); free(d1);
+        cjr_rec(ok, "illegal-transitions-rc2-no-disk-write", ok ? "rc=2-unchanged" : "failed");
+    }
+
+    /* 5. Atomic rename proof (inode replacement + mid-write SIGKILL consistency) */
+    {
+        char ja[4300], mp[4400]; tx_snprintf(ja, sizeof ja, "%s/j-atom", work);
+        tx_snprintf(mp, sizeof mp, "%s/meta", ja);
+        sy_mkdir_all(ja, 0700);
+        JrMeta ma, mb, got;
+        fill_meta(&ma, "alpha-111111111111111111111111");
+        fill_meta(&mb, "bravo-222222222222222222222222");
+        int ok = (jr_write_meta(ja, &ma) == JR_OK);
+        sy_stat_t s0, s1;
+        if (sy_lstat(mp, &s0) != 0) ok = 0;
+        if (jr_write_meta(ja, &mb) != JR_OK) ok = 0;
+        if (sy_lstat(mp, &s1) != 0) ok = 0;
+        /* Atomic rename creates a fresh inode; in-place O_TRUNC keeps the same inode */
+        int inode_replaced = (s0.ino != s1.ino);
+        if (!inode_replaced) ok = 0;
+
+        /* Mid-write SIGKILL across 5 rounds: reader must always see complete ma or complete mb */
+        int kill_ok = 1;
+        for (int round = 0; round < 5; round++) {
+            fflush(stdout); fflush(stderr);
+            int p = fork();
+            if (p == 0) {
+                for (int it = 0; it < 50000; it++) {
+                    jr_write_meta(ja, (it & 1) ? &ma : &mb);
+                }
+                _exit(0);
+            }
+            if (p < 0) { kill_ok = 0; break; }
+            sy_sleep_ms(15);
+            kill(p, SIGKILL);
+            int wst = 0;
+            waitpid(p, &wst, 0);
+            if (jr_read_meta(ja, &got) != JR_OK || (!meta_equal(&got, &ma) && !meta_equal(&got, &mb))) {
+                kill_ok = 0;
+            }
+        }
+        cjr_rec(ok && kill_ok, "atomic-rename-inode-and-sigkill-consistent",
+                (ok && kill_ok) ? "new-ino-and-5-sigkill-clean" : "failed");
+    }
+
+    cjr_rm(work);
+    printf("CHECK_JOBREC\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}

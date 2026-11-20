@@ -1,0 +1,162 @@
+/* tools/check-lane-coverage.cx -- does build/lane-inputs.tsv cover the real inputs of the whole chain?
+ *
+ *   sh ./unisacc.com tools/check-lane-coverage.cx                       self-test (batch entry)
+ *   sh ./unisacc.com tools/check-lane-coverage.cx -- --report [--root DIR]   gap list, always rc 0
+ *   sh ./unisacc.com tools/check-lane-coverage.cx -- --strict [--root DIR]   gap list, rc 1 when any gap
+ *
+ * Chain input set under DIR (default "."): every file of tools/templates/, tools/pins.tsv,
+ * tools/candidate-chain.cx, tools/bg-candidate.cx, tools/whole-front.cx, every tools/chain-*.cx, and the
+ * transitive closure of tools/cxlib/NAME.cx modules named by "#pragma unisa use cxlib.NAME" in those .cx files.
+ * Each input whose path is not a first column of DIR/build/lane-inputs.tsv prints "LANE_GAP<TAB>path<TAB>kind";
+ * the last line is "LANE_COVERAGE<TAB>inputs=N<TAB>covered=M<TAB>gaps=K".
+ * The live table is known to miss the templates and pins.tsv (filling it is a generator change for
+ * tools/lane-inputs-gen.cx, after the 0.0.86 release), so the batch runs the self-test, which must stay green:
+ * on a temp fixture a table missing chain inputs is detected (--strict rc 1, named gaps), the completed table is
+ * green (rc 0, gaps=0), deleting one chain input row turns it red again, and --report on the tracked tree runs
+ * (rc 0, summary line) and its gap list is printed for the reader. Children run under ./tools/bound 50. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckrun
+
+#define LC_MAX 512
+static char g_in[LC_MAX][256]; static const char *g_kind[LC_MAX]; static int g_n;
+
+static int lc_have(const char *p) { int i; for (i = 0; i < g_n; i++) if (tx_eqz(g_in[i], p)) return 1; return 0; }
+static void lc_add(const char *p, const char *kind) {
+    if (g_n < LC_MAX && !lc_have(p) && !cx_fmt(g_in[g_n], sizeof g_in[g_n], "%s", p)) g_kind[g_n++] = kind;
+}
+static int lc_isfile(const char *root, const char *rel) {
+    char p[4400]; sy_stat_t st;
+    return !cx_fmt(p, sizeof p, "%s/%s", root, rel) && sy_stat(p, &st) == 0 && st.kind == 'f';
+}
+/* files of DIR/rel whose names start with pre, end with suf, and do not start with skip */
+static void lc_scan(const char *root, const char *rel, const char *pre, const char *suf, const char *kind) {
+    char p[4400], r[600]; sy_dir_t d; long pn = tx_len(pre, 64), sn = tx_len(suf, 64);
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel) || sy_dir_open(&d, p) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.' || d.name_n < pn + sn || memcmp(d.name, pre, (size_t)pn) || memcmp(d.name + d.name_n - sn, suf, (size_t)sn)) continue;
+        if (!cx_fmt(r, sizeof r, "%s/%s", rel, d.name) && lc_isfile(root, r)) lc_add(r, kind);
+    }
+    sy_dir_close(&d);
+}
+/* add tools/cxlib/NAME.cx for each "#pragma unisa use cxlib.NAME" of root/rel */
+static void lc_uses(const char *root, const char *rel) {
+    char p[4400], m[300]; size_t n = 0; char *b; long i = 0; const char *key = "#pragma unisa use cxlib.";
+    long kn = tx_len(key, 64);
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel) || !(b = cx_read(p, &n))) return;
+    /* line by line: a line that starts with the pragma key */
+    while (i < (long)n) {
+        long j = i, k = 0, e = i;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e - i > kn && tx_same(b + i, kn, key, kn)) {
+            j = i + kn;
+            while (j < e && k < 200 && (b[j] == '_' || (b[j] >= 'a' && b[j] <= 'z') || (b[j] >= 'A' && b[j] <= 'Z') || (b[j] >= '0' && b[j] <= '9'))) j++, k++;
+            if (k && !cx_fmt(m, sizeof m, "tools/cxlib/%.*s.cx", (int)k, b + j - k) && lc_isfile(root, m)) lc_add(m, "cxlib-use");
+        }
+        i = e + 1;
+    }
+    free(b);
+}
+
+static int lc_report(const char *root, int strict) {
+    char p[4400]; size_t n = 0; char *t; int i, gaps = 0, cov = 0;
+    const char *fixed[] = {"tools/pins.tsv", "tools/candidate-chain.cx", "tools/bg-candidate.cx", "tools/whole-front.cx", 0};
+    g_n = 0;
+    lc_scan(root, "tools/templates", "", "", "template");
+    for (i = 0; fixed[i]; i++) if (lc_isfile(root, fixed[i])) lc_add(fixed[i], "chain-tool");
+    lc_scan(root, "tools", "chain-", ".cx", "chain-tool");
+    for (i = 0; i < g_n; i++) if (tx_len(g_in[i], 256) > 3 && tx_eqz(g_in[i] + tx_len(g_in[i], 256) - 3, ".cx")) lc_uses(root, g_in[i]);
+    if (cx_fmt(p, sizeof p, "%s/build/lane-inputs.tsv", root) || !(t = cx_read(p, &n))) {
+        printf("LANE_COVERAGE\tREFUSE\tmissing build/lane-inputs.tsv under %s\n", root);
+        return 2;
+    }
+    for (i = 0; i < g_n; i++) {
+        /* a row "path<TAB>..." at the start of a line */
+        char pat[300]; long pl, at = 0, hit = 0;
+        cx_fmt(pat, sizeof pat, "%s\t", g_in[i]); pl = tx_len(pat, 300);
+        while (at < (long)n) {
+            long e = at;
+            while (e < (long)n && t[e] != '\n') e++;
+            if (e - at >= pl && tx_same(t + at, pl, pat, pl)) { hit = 1; break; }
+            at = e + 1;
+        }
+        if (hit) cov++; else { printf("LANE_GAP\t%s\t%s\n", g_in[i], g_kind[i]); gaps++; }
+    }
+    free(t);
+    printf("LANE_COVERAGE\tinputs=%d\tcovered=%d\tgaps=%d\n", g_n, cov, gaps);
+    return strict && gaps ? 1 : 0;
+}
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\tlane-coverage.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
+#define has(o, s) ckk_has((o), 1 << 16, (s))
+static char g_d[4096];
+static void put(const char *rel, const char *body) {
+    char p[4400]; cx_fmt(p, sizeof p, "%s/%s", g_d, rel);
+    cx_write(p, body, tx_len(body, 8192));
+}
+static int run(const char *mode, const char *root, char *o, int cap) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/check-lane-coverage.cx", "--", (char *)mode, "--root", (char *)root, 0};
+    int cut; o[0] = 0;
+    return sy_run(v, o, cap, &cut);
+}
+
+static int selftest(void) {
+    static char o[1 << 16]; char p[4400]; int rc, k;
+    const char *dirs[] = {"tools", "tools/templates", "tools/cxlib", "build", 0};
+    const char *full = "# path\tlane\tsource\ntools/templates/w.cx.in\tA\tx\ntools/pins.tsv\tA\tx\ntools/candidate-chain.cx\tA\tx\n"
+                       "tools/chain-run.cx\tA\tx\ntools/cxlib/alpha.cx\tA\tx\ntools/cxlib/beta.cx\tA\tx\n";
+    const char *nopin = "# path\tlane\tsource\ntools/templates/w.cx.in\tA\tx\ntools/candidate-chain.cx\tA\tx\n"
+                        "tools/chain-run.cx\tA\tx\ntools/cxlib/alpha.cx\tA\tx\ntools/cxlib/beta.cx\tA\tx\n";
+    if (cx_fmt(g_d, sizeof g_d, "%s/lane-coverage-%d", sy_tmpdir(), (int)sy_pid()) || sy_mkdir(g_d, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    for (k = 0; dirs[k]; k++) { cx_fmt(p, sizeof p, "%s/%s", g_d, dirs[k]); sy_mkdir(p, 0700); }
+    put("tools/templates/w.cx.in", "int w;\n");
+    put("tools/pins.tsv", "path\tkind\n");
+    put("tools/candidate-chain.cx", "#pragma unisa use cxlib.alpha\nint main(void){return 0;}\n");
+    put("tools/chain-run.cx", "int main(void){return 0;}\n");
+    put("tools/check-chain-run.cx", "int main(void){return 0;}\n");
+    put("tools/cxlib/alpha.cx", "#pragma unisa use cxlib.beta\n");
+    put("tools/cxlib/beta.cx", "int b;\n");
+    put("tools/cxlib/unused.cx", "int u;\n");
+    /* today's shape: templates and pins absent from the table */
+    put("build/lane-inputs.tsv", "# path\tlane\tsource\ntools/candidate-chain.cx\tA\tx\ntools/chain-run.cx\tA\tx\ntools/cxlib/alpha.cx\tA\tx\ntools/cxlib/beta.cx\tA\tx\n");
+    rc = run("--strict", g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "LANE_GAP\ttools/templates/w.cx.in\ttemplate") && has(o, "LANE_GAP\ttools/pins.tsv\tchain-tool")
+       && !has(o, "LANE_GAP\ttools/candidate-chain.cx") && has(o, "LANE_COVERAGE\tinputs=6\tcovered=4\tgaps=2"), "missing-template-and-pins-red");
+    ck(!has(o, "check-chain-run") && !has(o, "unused.cx"), "only-chain-inputs-counted");
+    put("build/lane-inputs.tsv", full);
+    rc = run("--strict", g_d, o, sizeof o);
+    ck(rc == 0 && has(o, "LANE_COVERAGE\tinputs=6\tcovered=6\tgaps=0") && !has(o, "LANE_GAP"), "completed-table-green");
+    put("build/lane-inputs.tsv", nopin);
+    rc = run("--strict", g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "LANE_GAP\ttools/pins.tsv\t") && has(o, "gaps=1"), "deleted-row-red");
+    {   const char *nobeta = "# path\tlane\tsource\ntools/templates/w.cx.in\tA\tx\ntools/pins.tsv\tA\tx\ntools/candidate-chain.cx\tA\tx\n"
+                             "tools/chain-run.cx\tA\tx\ntools/cxlib/alpha.cx\tA\tx\nxtools/cxlib/beta.cx\tA\tx\n";
+        put("build/lane-inputs.tsv", nobeta);
+        rc = run("--strict", g_d, o, sizeof o);
+        ck(rc == 1 && has(o, "LANE_GAP\ttools/cxlib/beta.cx\tcxlib-use"), "transitive-cxlib-and-line-start");
+    }
+    rc = run("--report", g_d, o, sizeof o);
+    ck(rc == 0 && has(o, "gaps=1"), "report-rc0-with-gaps");
+    rc = run("--report", ".", o, sizeof o);
+    ck(rc == 0 && has(o, "LANE_COVERAGE\tinputs="), "tracked-tree-report-runs");
+    fputs(o, stdout);
+    printf("CHECK_LANE_COVERAGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = "."; int mode = 0, i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--report")) mode = 1;
+        else if (tx_eqz(argv[i], "--strict")) mode = 2;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else { fprintf(stderr, "check-lane-coverage: REFUSE unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (!mode) return selftest();
+    return lc_report(root, mode == 2);
+}

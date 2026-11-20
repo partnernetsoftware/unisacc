@@ -55,8 +55,10 @@ static void walk(const char*p,int depth){
     sy_dir_close(&dir);if(next<0)die("walk-next");
 }
 /* --candidate-key reads the second declaration: product candidate inputs only
- * (kind tree|file|exclude, scope input). The cache readset is unchanged. */
+ * (kind tree|file|exclude, scope input). --candidate-key-a reads lane A exact
+ * paths from build/lane-inputs.tsv (generated from seed/ident.c list-current). */
 static int candidate;
+static int candidate_a;
 static void load_rules(void){
     char p[4400];fmt(p,sizeof p,executor,candidate?"tools/candidate-trigger-inputs.tsv":"tools/product-map-inputs.tsv");manifest=cx_read(p,0);if(!manifest)die("readset-manifest");char*b=pq_dup(manifest);
     for(char*s=b;*s;){char*e=strchr(s,'\n');if(!e)die("manifest-newline");*e=0;if(*s&&*s!='#'){char*f[4]={s};int n=1;for(char*q=s;*q;q++)if(*q=='\t'){*q=0;if(n==4)die("manifest-shape");f[n++]=q+1;}
@@ -142,6 +144,40 @@ static void candidate_key(char hex[65]){
         mm_free(names[i]);}
     nn=0;if(sy_sha256_hex(buffer,used,hex))die("candidate-sha");
 }
+static void candidate_key_a(char hex[65]){
+    char lp[4400];fmt(lp,sizeof lp,input,"build/lane-inputs.tsv");
+    char *mb=cx_read(lp,0);
+    if(!mb){fmt(lp,sizeof lp,executor,"build/lane-inputs.tsv");mb=cx_read(lp,0);}
+    if(!mb)die("lane-inputs-missing");
+    used=0;put("candidate-trigger-a-v1");put(mb);nn=0;
+    char *copy=pq_dup(mb);
+    for(char*s=copy;*s;){
+        char*e=strchr(s,'\n');if(!e)e=s+strlen(s);
+        int had_nl=*e=='\n';*e=0;
+        if(*s&&*s!='#'){
+            char*t1=strchr(s,'\t');
+            char*t2=t1?strchr(t1+1,'\t'):0;
+            if(!t1||!t2)die("lane-inputs-shape");
+            *t1=0;*t2=0;
+            if(!strcmp(t1+1,"A")&&*s&&*s!='/'&&!strstr(s,".."))add(names,&nn,s);
+        }
+        s=had_nl?e+1:e;
+    }
+    mm_free(copy);mm_free(mb);
+    qsort(names,nn,sizeof names[0],order);
+    sy_stat_t st;
+    for(int i=0;i<nn;i++){
+        char p[4400];fmt(p,sizeof p,input,names[i]);put(names[i]);
+        int rc=sy_lstat(p,&st);
+        if(rc==-ENOENT)put("ENOENT");else if(rc)die("identity-stat");
+        else if(st.kind=='l'){char to[4400];long k=sy_readlink(p,to,sizeof to-1);if(k<0||k>=(long)sizeof to-1)die("readlink");to[k]=0;put("SYMLINK");put(to);}
+        else if(st.kind=='d')put("DIRECTORY");
+        else if(st.kind=='f'){size_t k=0;char*b=cx_read(p,&k),h[65];if(!b||sy_sha256_hex(b,k,h))die("identity-read");put(h);mm_free(b);}
+        else die("identity-kind");
+        mm_free(names[i]);
+    }
+    nn=0;if(sy_sha256_hex(buffer,used,hex))die("candidate-a-sha");
+}
 static int declared(const char*p){
     for(int i=0;i<n_rules;i++){Rule*r=&rules[i];if(r->kind[0]=='e')continue;for(int which=0;which<2;which++){if(which==0&&!strcmp(r->scope,"executor"))continue;if(which==1&&!strcmp(r->scope,"input"))continue;char q[4400];fmt(q,sizeof q,which?executor:input,r->path);if(!strcmp(p,q)||(!strcmp(r->kind,"tree")&&under(p,q)))return 1;}}
     return 0;
@@ -187,7 +223,11 @@ static void discard(const char*ref,const char*key){const char*ext[]={"tsv","read
 static int same(const char*a,const char*b){size_t an=0,bn=0;char*x=cx_read(a,&an),*y=cx_read(b,&bn);int ok=x&&y&&an==bn&&!memcmp(x,y,an);mm_free(x);mm_free(y);return ok;}
 int main(int argc,char**argv){
     const char*root=".",*cache_arg=0;int key_only=0,sha_only=0,check=0;long start=sy_now_ms();
-    for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];else if(!strcmp(argv[i],"--cache")&&i+1<argc)cache_arg=argv[++i];else if(!strcmp(argv[i],"--key"))key_only=1;else if(!strcmp(argv[i],"--sha"))sha_only=1;else if(!strcmp(argv[i],"--check"))check=1;else if(!strcmp(argv[i],"--candidate-key"))candidate=1;else die("usage");}
+    for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--root")&&i+1<argc)root=argv[++i];else if(!strcmp(argv[i],"--cache")&&i+1<argc)cache_arg=argv[++i];else if(!strcmp(argv[i],"--key"))key_only=1;else if(!strcmp(argv[i],"--sha"))sha_only=1;else if(!strcmp(argv[i],"--check"))check=1;else if(!strcmp(argv[i],"--candidate-key"))candidate=1;else if(!strcmp(argv[i],"--candidate-key-a"))candidate_a=1;else die("usage");}
+    if(candidate&&candidate_a)die("usage");
+    if(candidate_a){if(key_only+sha_only+check||cache_arg)die("usage");if(sy_realpath(root,input,sizeof input)<0||sy_cwd(executor,sizeof executor)<0)die("root");
+        const char*git_env[]={"GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"};for(int i=0;i<5;i++)if(sy_unsetenv(git_env[i]))die("candidate-environment");
+        char hex[65];candidate_key_a(hex);printf("%s\n",hex);return 0;}
     if(candidate){if(key_only+sha_only+check||cache_arg)die("usage");if(sy_realpath(root,input,sizeof input)<0||sy_cwd(executor,sizeof executor)<0)die("root");
         const char*git_env[]={"GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_OBJECT_DIRECTORY","GIT_ALTERNATE_OBJECT_DIRECTORIES"};for(int i=0;i<5;i++)if(sy_unsetenv(git_env[i]))die("candidate-environment");
         char hex[65];load_rules();candidate_key(hex);printf("%s\n",hex);return 0;}
