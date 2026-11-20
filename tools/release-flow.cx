@@ -187,16 +187,31 @@ static int equivalent(const char *rel,char *actual,const char *expected){
     }
     ok=ok&&!left&&!right;free(want);return ok;
 }
+static int scrub_seq;
+static char *repo_tool(const char *tool);
+/* Stage evidence is committed under release/evidence/V; the no-home-path ratchet allows no absolute
+ * home path there. Every evidence file passes through tools/scrub-home-paths.cx (same rewrite rule,
+ * one implementation) before it is written, compared or gated. Text without a match is unchanged. */
+static char *scrub_home(const char *text){
+    if(!strstr(text,"/home/")&&!strstr(text,"/Users/")&&!strstr(text,":\\Users\\"))return strdup(text);
+    char name[64];if(cx_fmt(name,sizeof name,"scrub-%d.txt",scrub_seq++))fail("SCRUB","name");
+    char *p=relative(scratch,name);
+    if(cx_write(p,text,strlen(text)))fail("SCRUB",p);
+    char *v[]={"sh",driver,repo_tool("tools/scrub-home-paths.cx"),"--","--write",p,0};
+    free(capture(v,cwd));
+    char *s=readtext(p);sy_unlink(p);free(p);return s;
+}
 static void emit(const char *rel,const char *text){
     gate_input(rel);
     char *p=relative(outdir,rel);
     if(checking){
-        char *saved=readtext(p);if(!equivalent(rel,saved,text))fail("DRIFT",rel);free(saved);
+        /* stages archived before the scrub carry raw home paths: compare under the same rewrite */
+        char *raw=readtext(p),*saved=scrub_home(raw);if(!equivalent(rel,saved,text))fail("DRIFT",rel);free(saved);free(raw);
     }else if(cx_write(p,text,strlen(text)))fail("WRITE",rel);
-    if(baseline){char *old=historical(rel);if(!equivalent(rel,old,text))fail("HISTORICAL_DRIFT",rel);free(old);historical_files++;}
+    if(baseline){char *old=historical(rel),*clean=scrub_home(old);if(!equivalent(rel,clean,text))fail("HISTORICAL_DRIFT",rel);free(old);free(clean);historical_files++;}
     free(p);
 }
-static void evidence(const char *name,const char *text){char *rel=relative(ed,name);emit(rel,text);free(rel);}
+static void evidence(const char *name,const char *text){char *rel=relative(ed,name),*clean=scrub_home(text);emit(rel,clean);free(clean);free(rel);}
 static void row3(np_buf *buf,const char *a,const char *b,const char *c){
     np_puts(buf,a);np_puts(buf,"\t");np_puts(buf,b);np_puts(buf,"\t");np_puts(buf,c);np_puts(buf,"\n");
 }

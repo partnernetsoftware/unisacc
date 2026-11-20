@@ -1,0 +1,69 @@
+/* Contract: checks tools/release-chain.cx (freeze to public as one resumable command) offline:
+ * plan lists the five steps without side effects; a failing step names itself and prints the resume
+ * command; done steps are skipped on resume while the stage commit is re-verified against HEAD;
+ * usage errors refuse with rc 2. Layer: interfaces. Output: CHECK_RELEASE_CHAIN. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.sessionroot
+static int passed, failed;
+static void ck(int ok, const char *id) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", id); if (ok) passed++; else failed++; }
+static char tmp[4096], bin[4400];
+static np_result actual(char **v) {
+    np_result r = {0}; char why[512];
+    if (np_run(v, 0, 0, 50, &r, why, sizeof why)) { fprintf(stderr, "check-release-chain: %s\n", why); exit(2); }
+    return r;
+}
+static int has(np_result *r, const char *s) { return r->out && strstr(r->out, s); }
+int main(int argc, char **argv) {
+    char base[4096]; sy_stat_t st;
+    if (sr_default("release-chain", base, sizeof base) || (sy_mkdir(base, 0700) && (sy_lstat(base, &st) || st.kind != 'd' || st.uid != sy_uid() || st.mode != 0700)) ||
+        sy_mkdtemp(base, "check", tmp, sizeof tmp) || cx_fmt(bin, sizeof bin, "%s/tool", tmp)) return 2;
+    char driver[4096]; if (sy_realpath("./unisacc.com", driver, sizeof driver) < 0) return 2;
+    char *build[] = {"sh", driver, "tools/release-chain.cx", "-o", bin, 0};
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { np_result b = actual(build); if (b.rc) { fprintf(stderr, "%s", b.err ? b.err : ""); return 2; } np_free(&b); }
+    char inputs[4400], seg[4400], row[9200], state[4400], plan_state[4400];
+    if (cx_fmt(inputs, sizeof inputs, "%s/inputs", tmp) || cx_fmt(seg, sizeof seg, "%s/seg", tmp) ||
+        cx_fmt(state, sizeof state, "%s/state", tmp) || cx_fmt(plan_state, sizeof plan_state, "%s/plan-state", tmp) ||
+        cx_write(seg, "x\n", 2) ||
+        cx_fmt(row, sizeof row, "version\t0.0.99\ndate\t2026-01-01\nfreeze\t%s\nsegment\tinvalid\t%s\n", "0000000000000000000000000000000000000000", seg) ||
+        cx_write(inputs, row, strlen(row))) return 2;
+    /* (1) plan: five steps, no state written */
+    char *plan[] = {bin, "plan", "--inputs", inputs, "--state", plan_state, "--layout", "/nonexistent-layout", 0};
+    np_result r = actual(plan);
+    ck(r.rc == 0 && has(&r, "CHAIN\tCMD\t1\tprep\t") && has(&r, "CHAIN\tCMD\t2\tstage-a\t") && has(&r, "CHAIN\tCMD\t3\tstage-commit\t") &&
+       has(&r, "CHAIN\tCMD\t4\tstage-dry\t") && has(&r, "--strict release/evidence/v0.0.99-strict-2026-01-01.tsv") && has(&r, " --dry\n") &&
+       has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
+    ck(sy_exists(plan_state) == 0 && !has(&r, "CHAIN\tRUN\t"), "plan-runs-nothing");
+    np_free(&r);
+    /* (2) a failing first step names itself, prints the child refusal and the resume command */
+    char *run[] = {bin, "run", "--inputs", inputs, "--state", state, "--layout", "/nonexistent-layout", 0, 0, 0};
+    r = actual(run);
+    ck(r.rc == 1 && has(&r, "CHAIN\tFAIL\t1\tprep\trc=2") && has(&r, "SEGMENT_IDENTITY") && has(&r, "NEXT\t1\t") && has(&r, " --from 1\n") &&
+       !has(&r, "CHAIN\tRUN\t2\t"), "failed-step-named-with-resume");
+    char marker[4500]; if (cx_fmt(marker, sizeof marker, "%s/prep.done", state)) return 2;
+    ck(sy_exists(marker) == 0, "failed-step-not-marked-done");
+    np_free(&r);
+    /* (3) resume: done steps below --from are skipped, the stage commit is re-verified against HEAD */
+    char m2[4500]; if (cx_fmt(m2, sizeof m2, "%s/stage-a.done", state) || cx_write(marker, "prep\trc=0\n", 10) || cx_write(m2, "stage-a\trc=0\n", 13)) return 2;
+    run[8] = "--from"; run[9] = "3";
+    r = actual(run);
+    ck(r.rc == 1 && has(&r, "CHAIN\tSKIP\t1\tprep\tdone") && has(&r, "CHAIN\tSKIP\t2\tstage-a\tdone") &&
+       has(&r, "CHAIN\tFAIL\t3\tstage-commit\tHEAD lacks the stage bytes of release/candidate.tsv") && has(&r, " --from 3\n") &&
+       !has(&r, "CHAIN\tCMD\t4\t"), "resume-skips-done-and-reverifies-stage");
+    np_free(&r);
+    /* (4) --from 1 reruns a step even when marked done */
+    run[9] = "1";
+    r = actual(run);
+    ck(r.rc == 1 && !has(&r, "CHAIN\tSKIP\t1\t") && has(&r, "CHAIN\tFAIL\t1\tprep\t"), "from-reruns-marked-step");
+    np_free(&r);
+    /* (5) usage */
+    char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};
+    r = actual(bad); ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE CHAIN_USAGE"), "missing-state-refused"); np_free(&r);
+    char *rel[] = {bin, "run", "--inputs", inputs, "--state", "relative", "--layout", "/x", 0};
+    r = actual(rel); ck(r.rc == 2, "relative-state-refused"); np_free(&r);
+    if (cx_rmtree(tmp)) return 2;
+    printf("CHECK_RELEASE_CHAIN\tpass=%d\tfail=%d\n", passed, failed);
+    return failed != 0;
+}

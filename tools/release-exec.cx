@@ -13,6 +13,9 @@
  *   G4 CI_SUCCESS/CI_VERDICT/Y1_PUSHED                          before publish
  *   G5 PUBLIC_SHA/READBACK                                      after publish
  *   G6 DECISION                                                 at Y2
+ *   Y1_FROZEN at Y2: release/evidence.tsv and release/decision.txt must equal the sha256 pair Y1
+ *   recorded in INDEX row exec-4-Y1-frozen; a change refuses (gate DECISION) naming each changed file,
+ *   with a NEXT restore line and no rollback (operator edit, not a candidate defect).
  *   MAIN_ANCESTOR (N3) before X, Y1 and Y2: git fetch origin, then origin/main must be an ancestor
  *   of HEAD; else REFUSE RELEASE_EXEC_GATE_MAIN_ADVANCED origin/main=SHA HEAD=SHA with a NEXT line
  *   (merge yourself, then --from-step N); never merges, never rolls back public state.
@@ -1308,6 +1311,11 @@ static void step_y1(void) {
         if (dry) { gate_deferred("Y1_PUSHED", "Y1 not created in --dry"); return; }
         { char *g[] = {"git", "log", "-1", "--format=%H", "--", "release/candidate.tsv", 0}; if (run(g, 10, y1sha, sizeof y1sha)) refuse("Y1_PUSHED", "Y1 commit lookup"); }
         index_row("Y1", "-", y1sha, "candidate ci_run_id, evidence, decision, notes, rollback");
+        { char he[65], hd[65], rec[140];
+          sha_file("release/evidence.tsv", he); sha_file("release/decision.txt", hd);
+          if (!he[0] || !hd[0]) refuse("Y1_PUSHED", "cannot hash Y1 evidence.tsv or decision.txt");
+          cx_fmt(rec, sizeof rec, "%s:%s", he, hd);
+          index_row("Y1-frozen", "-", rec, "sha256 of release/evidence.tsv:release/decision.txt at Y1; frozen until Y2"); }
     }
     if (!pushed(y1sha)) refuse("Y1_PUSHED", "Y1 is not an ancestor of origin/main");
     gate_pass("Y1_PUSHED", y1sha);
@@ -1412,6 +1420,32 @@ static void step_readback(void) {
 }
 
 /* ---- step 7: Y2 --------------------------------------------------------------------------------- */
+/* Between Y1 and Y2 release/evidence.tsv and release/decision.txt are frozen: Y2 recomputes the
+ * decision from the Y1 evidence and compares bytes. An edit in between is an operator error, not a
+ * candidate defect: refuse naming each changed file, keep public state (no rollback) and print the
+ * restore command. Runs whenever Y1 is known (recorded in INDEX or created by this run). */
+static void gate_y1_frozen(void) {
+    static const char *frozen[] = {"release/evidence.tsv", "release/decision.txt", 0};
+    char changed[400] = {0}, d[600], rec[200], hex[65]; int i;
+    if (!index_ref("exec-4-Y1-frozen", 0, rec, sizeof rec) || tlen(rec) != 129 || rec[64] != ':') { say("SKIP", "Y1_FROZEN not checked: no exec-4-Y1-frozen row", "-"); return; }
+    for (i = 0; frozen[i]; i++) {
+        sha_file(frozen[i], hex);
+        if (!hex[0] || memcmp(hex, rec + 65 * i, 64)) {
+            if (changed[0]) cx_fmt(changed + tlen(changed), sizeof changed - (size_t)tlen(changed), ",");
+            cx_fmt(changed + tlen(changed), sizeof changed - (size_t)tlen(changed), "%s", frozen[i]);
+        }
+    }
+    if (changed[0]) {
+        cx_fmt(d, sizeof d, "frozen between Y1 and Y2, changed since Y1=%s: %s", y1sha, changed);
+        sy_printf("GATE\t%d\tDECISION\tFAIL\t%s\n", cur_step, d);
+        sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_DECISION step=%d %s\n", cur_step, d);
+        sy_printf("NEXT\t%d\trestore the Y1 bytes (git restore --source=%s -- %s), then resume: release-exec --execute %s --layout %s --from-step %d\n", cur_step, y1sha, changed, table, layout, cur_step);
+        sy_printf("ROLLBACK\t%d\tNONE\toperator edit after Y1; public state untouched\n", cur_step);
+        emit_phase(2);
+        sy_exit(2);
+    }
+    gate_pass("Y1_FROZEN", "release/evidence.tsv and release/decision.txt equal Y1");
+}
 static void step_y2(void) {
     char dp[4500], evpath[4500], refdp[4500], msg[200], ref[200]; long a, b; char *ta, *tb; int same;
     cx_fmt(evpath, sizeof evpath, "%s/evidence.tsv", outdir);
@@ -1425,6 +1459,7 @@ static void step_y2(void) {
     v[k++] = "release/decision.txt"; v[k++] = "release/rollback.txt"; v[k++] = "--push"; v[k] = 0;
     cx_fmt(msg, sizeof msg, "v%s Y2: public readback", cand.version);
     gate_main();
+    gate_y1_frozen();
     check_evidence_current(evpath, cand.version);
     cx_fmt(dp, sizeof dp, "%s/decision-recompute.txt", outdir);
     show(dv, "LOCAL");

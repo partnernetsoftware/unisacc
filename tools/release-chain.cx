@@ -1,0 +1,138 @@
+/* release-chain -- freeze-merge commit to public release as one resumable command.
+ *
+ *   sh ./unisacc.com tools/release-chain.cx -- run --inputs FILE --state ABS_DIR --layout DIR
+ *        [--decisions FILE] [--from N]
+ *   sh ./unisacc.com tools/release-chain.cx -- plan --inputs FILE --state ABS_DIR --layout DIR [--decisions FILE]
+ *
+ * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
+ *   1 prep         release-flow prep --inputs F --out STATE/prep [--decisions D]
+ *   2 stage-a      release-flow stage-a --inputs F --prep STATE/prep --out STATE/stage [--decisions D]
+ *                  (the stage carries ratchets.txt, evidence-rows.tsv and rollback.txt from prep;
+ *                  release-flow scrubs home paths from every evidence file)
+ *   3 stage-commit operator commit of STATE/stage into the checkout (never done by this tool):
+ *                  verified every run: release/candidate.tsv, release/evidence/V/ratchets.txt and
+ *                  evidence-rows.tsv in HEAD must equal the stage bytes
+ *   4 stage-dry    release-exec --execute release/candidate.tsv --layout L --strict S --dry on the
+ *                  committed tree (the freeze-time dry run does not count)
+ *   5 execute      release-exec --execute ... is printed, never run here (it polls CI up to 25 min):
+ *                  start it with devsvc x --bg; release-exec's own steps resume with --from-step.
+ * State: STATE/NAME.done holds the receipt of a finished step; steps below --from that are done
+ * are skipped, step 3 is re-verified every run. A failed step prints CHAIN FAIL N NAME rc=R and a
+ * NEXT line with the resume command (release-chain run ... --from N).
+ * rc 0 chain done or stopped before execute, 1 a step failed, 2 usage.
+ * Check: tools/check-release-chain.cx. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static const char *inputs, *state, *layout, *decisions, *version, *date;
+static int execute, from = 1, planning;
+static char driver[4096], cwd[4096];
+static const char *names[] = {"", "prep", "stage-a", "stage-commit", "stage-dry", "execute"};
+
+static void usage(const char *why) { sy_eprintf("release-chain: REFUSE CHAIN_USAGE %s\n", why); exit(2); }
+static char *cat2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = malloc(n);
+    if (!p || cx_fmt(p, n, "%s/%s", a, b)) usage("path");
+    return p;
+}
+static char *input_value(const char *key) {
+    size_t n = 0; char *s = cx_read(inputs, &n), *line, *cur = s; size_t k = strlen(key);
+    if (!s) usage("inputs unreadable");
+    while (cur && *cur) {
+        line = cur; cur = strchr(cur, '\n'); if (cur) *cur++ = 0;
+        if (!strncmp(line, key, k) && line[k] == '\t') return strdup(line + k + 1);
+    }
+    return 0;
+}
+static void show(int n, char **v) {
+    sy_printf("CHAIN\tCMD\t%d\t%s\t", n, names[n]);
+    for (int i = 0; v[i]; i++) sy_printf("%s%s", i ? " " : "", v[i]);
+    sy_printf("\n");
+}
+static void next_line(int n, const char *what) {
+    sy_printf("NEXT\t%d\t%s; then: release-chain run --inputs %s --state %s --layout %s%s%s%s --from %d\n",
+              n, what, inputs, state, layout, decisions ? " --decisions " : "", decisions ? decisions : "", execute ? " --execute" : "", n);
+}
+static char *marker(int n) {
+    char *p = cat2(state, names[n]); size_t k = strlen(p) + 6; char *m = malloc(k);
+    if (!m || cx_fmt(m, k, "%s.done", p)) usage("state path");
+    free(p); return m;
+}
+static void step(int n, char **v) {
+    show(n, v);
+    if (planning) return;
+    char *m = marker(n);
+    if (n < from && sy_exists(m) == 1) { sy_printf("CHAIN\tSKIP\t%d\t%s\tdone\n", n, names[n]); free(m); return; }
+    np_result r = {0}; char why[256] = {0};
+    long t0 = sy_now_ms();
+    int bad = np_run(v, cwd, 0, 55, &r, why, sizeof why);
+    sy_printf("CHAIN\tRUN\t%d\t%s\trc=%d\tms=%ld\n", n, names[n], r.rc, sy_now_ms() - t0);
+    if (bad || r.rc || r.residue || r.timed_out) {
+        sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+        sy_printf("CHAIN\tFAIL\t%d\t%s\trc=%d\t%s\n", n, names[n], r.rc, r.timed_out ? "timeout 55 s: split this step" : why);
+        next_line(n, "fix the refusal above");
+        exit(1);
+    }
+    char receipt[128]; if (cx_fmt(receipt, sizeof receipt, "%s\trc=0\n", names[n]) || cx_write(m, receipt, strlen(receipt))) usage("state write");
+    free(m); np_free(&r);
+}
+/* step 3: the operator committed the stage; HEAD must carry exactly the stage bytes */
+static int same_in_head(const char *rel) {
+    char spec[600]; if (cx_fmt(spec, sizeof spec, "HEAD:%s", rel)) return 0;
+    char *v[] = {"git", "show", spec, 0}; np_result r = {0}; char why[128];
+    if (np_run(v, cwd, 0, 30, &r, why, sizeof why) || r.rc) { np_free(&r); return 0; }
+    size_t n = 0; char *s = cx_read(cat2(cat2(state, "stage"), rel), &n);
+    int same = s && n == r.outn && !memcmp(s, r.out, n);
+    free(s); np_free(&r); return same;
+}
+static void stage_commit(void) {
+    char a[300], b[300];
+    if (cx_fmt(a, sizeof a, "release/evidence/%s/ratchets.txt", version) || cx_fmt(b, sizeof b, "release/evidence/%s/evidence-rows.tsv", version)) usage("version");
+    const char *rels[] = {"release/candidate.tsv", a, b, 0};
+    sy_printf("CHAIN\tCMD\t3\tstage-commit\tcopy %s/stage/release into the checkout and commit it (devsvc git commit --whole ...)\n", state);
+    if (planning) return;
+    for (int i = 0; rels[i]; i++) if (!same_in_head(rels[i])) {
+        sy_printf("CHAIN\tFAIL\t3\tstage-commit\tHEAD lacks the stage bytes of %s\n", rels[i]);
+        next_line(3, "commit the stage directory");
+        exit(1);
+    }
+    sy_printf("CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv\n");
+}
+int main(int argc, char **argv) {
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan");
+    planning = !strcmp(argv[1], "plan");
+    for (int i = 2; i < argc; i++) {
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--inputs")) inputs = v;
+        else if (!strcmp(k, "--state")) state = v;
+        else if (!strcmp(k, "--layout")) layout = v;
+        else if (!strcmp(k, "--decisions")) decisions = v;
+        else if (!strcmp(k, "--from")) { from = atoi(v); if (from < 1 || from > 5) usage("--from 1..5"); }
+        else usage(k);
+        i++;
+    }
+    if (!inputs || !state || !layout || state[0] != '/') usage("--inputs FILE --state ABS_DIR --layout DIR");
+    if (sy_cwd(cwd, sizeof cwd) < 0 || sy_realpath("./unisacc.com", driver, sizeof driver) < 0) usage("run from the repo root");
+    if (!(version = input_value("version")) || !(date = input_value("date"))) usage("inputs need version and date");
+    if (!planning && sy_mkdir_all(state, 0700)) usage("state dir");
+    char *prep = cat2(state, "prep"), *stage = cat2(state, "stage"), strict[300];
+    if (cx_fmt(strict, sizeof strict, "release/evidence/v%s-strict-%s.tsv", version, date)) usage("strict path");
+    char *s1[] = {"sh", driver, "tools/release-flow.cx", "--", "prep", "--inputs", (char *)inputs, "--out", prep, 0, 0, 0};
+    char *s2[] = {"sh", driver, "tools/release-flow.cx", "--", "stage-a", "--inputs", (char *)inputs, "--prep", prep, "--out", stage, 0, 0, 0};
+    if (decisions) { s1[9] = "--decisions"; s1[10] = (char *)decisions; s2[11] = "--decisions"; s2[12] = (char *)decisions; }
+    char *s4[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "dry"), "--dry", 0};
+    char *s5[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "exec"), 0};
+    step(1, s1); step(2, s2); stage_commit(); step(4, s4);
+    /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
+    show(5, s5);
+    sy_printf("CHAIN\tSTOP\t5\texecute\tstart it as a long job: devsvc x --bg --par 1 -- <CMD above>, then devsvc wait; resume inside with --from-step\n");
+    sy_printf("CHAIN\tRESULT\t%s\tversion=%s\n", planning ? "PLAN" : "READY_TO_EXECUTE", version);
+    return 0;
+}

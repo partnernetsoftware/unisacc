@@ -160,6 +160,7 @@ flowchart LR
 
 - interfaces-lnx-x86_64既有oracle:两轮FAIL且低载复现,接口oracle迁移与独立核验留下一版,保留断言与失败;入口build/state-unverified.tsv U25。
 - c-negative 与 pp-negative 静默接受:17项产品约束缺陷(C约束15项、预处理2项),下一诊断专项版本补具名拒绝并逐项保留负控;0.0.67两个代表同样接受,其余15项旧版未跑;入口build/state-unverified.tsv U26,证据release/s9-assert-0.0.71-summary.txt。
+- release-chain 端到端 --dry:未用 0.0.85 真实证据复刻形态跑全五步,仅夹具与分项检查绿;入口build/state-unverified.tsv U30。
 - 待核(清洁 2026-11-20):release/decision.txt 与 release/evidence.tsv 仓内都停在 v0.0.74 Y1(3115389996,evidence.tsv 含 0.0.74 十处、0.0.85 零处)。tools/release-exec.cx 第 4 步(约 1236 行)用 release-decide --candidate release/candidate.tsv --evidence release/evidence.tsv 重写 release/decision.txt 后随 Y1 提交;第 7 步(约 1356 行)再用同两份输入重算到 decision-recompute.txt 与 release/decision.txt 逐字节比对。两边输入同为陈旧 evidence.tsv,比对恒等,只证明可重算,不证明裁决对应本版;0.0.75 起 Y1 未改动这两份文件的原因未查。清零动作:release-exec 第 4 步断言 evidence.tsv 与 decision.txt 含本候选版本号,否则具名拒绝。
 
 ### 里程碑与跨窗口约定
