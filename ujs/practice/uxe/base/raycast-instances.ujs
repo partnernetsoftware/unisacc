@@ -1,0 +1,91 @@
+struct RayInstanceHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  face: u32;
+  instanceId: u32;
+}
+
+// Parent is f64, the packed InstancedMesh matrix is f32.
+native function ray_instance_world(out:i64,parent:i64,local:i64) i64 {
+  let column=0;
+  while(column<4) {
+    let row=0;
+    while(row<4) {
+      let value=0.0;
+      let k=0;
+      while(k<4) {
+        value=value+ux_f64(parent+k*32+row*8)*ux_f32(local+column*16+k*4);
+        k=k+1;
+      }
+      if(value-value!=0.0) { return 0-2; }
+      let saved=ux_f64_put(out+column*32+row*8,value);
+      row=row+1;
+    }
+    column=column+1;
+  }
+  return out;
+}
+
+native function ray_instance_readonly(a:i64,bytes:i64,out:i64,size:i64,work:i64,space:i64) i64 {
+  return a>=0 && bytes>=0 && a<=6291456-bytes &&
+    !raycaster_overlap(a,bytes,out,size) && !raycaster_overlap(a,bytes,work,space);
+}
+
+// Hit rows are staged until every active instance succeeds. Sort once across
+// the whole set and keep instance order for identical distances.
+native function Raycaster_intersectInstances(state:i64,mesh:i64,matrices:i64,count:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(mesh,RayMeshBuffer.size) ||
+     count<0 || count>65536 || matrices<0 || matrices%4!=0 || matrices>6291456-count*64 ||
+     capacity<0 || !raycaster_span(work,space)) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(mesh+RayMeshBuffer.layerMask))==0) { return 0; }
+  let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  if(faces>65536 || vertices>65536) { return 0-1; }
+  if(faces==0 || count==0) { return 0; }
+  if(vertices<1 || count>65536/faces) { return 0-1; }
+  let max_hits=count*faces;
+  let size=max_hits*RayInstanceHit.size;
+  let temporary=faces*RayMeshHit.size;
+  let parent=ux_u32(mesh+RayMeshBuffer.matrixWorld);
+  let stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let positions=ux_u32(mesh+RayMeshBuffer.positions);
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let index_bytes=ux_u32(mesh+RayMeshBuffer.indexBytes);
+  if(capacity<max_hits || !raycaster_span(out,size) || !raycaster_span(parent,128) ||
+     space<408+temporary*2+size*2 || raycaster_overlap(out,size,work,space) ||
+     !ray_instance_readonly(state,RaycasterState.size,out,size,work,space) ||
+     !ray_instance_readonly(mesh,RayMeshBuffer.size,out,size,work,space) ||
+     !ray_instance_readonly(matrices,count*64,out,size,work,space) ||
+     !ray_instance_readonly(parent,128,out,size,work,space) ||
+     !ray_instance_readonly(positions,(vertices-1)*stride+12,out,size,work,space) ||
+     !ray_instance_readonly(indices,faces*3*index_bytes,out,size,work,space)) { return 0-1; }
+  let world=work+40;
+  let hits=work+168;
+  let nested=hits+temporary;
+  let staged=nested+240+temporary;
+  let scratch=staged+size;
+  let copied=uxe_copy_record(work,mesh,RayMeshBuffer.size);
+  let binding=ux_u32_put(work+RayMeshBuffer.matrixWorld,world);
+  let total=0;
+  let i=0;
+  while(i<count) {
+    let matrix=ray_instance_world(world,parent,matrices+i*64);
+    if(matrix<0) { return matrix; }
+    let found=Raycaster_intersectMeshBuffer(state,work,hits,faces,nested,240+temporary);
+    if(found<0) { return found; }
+    let j=0;
+    while(j<found) {
+      let target=staged+total*RayInstanceHit.size;
+      let h=uxe_copy_record(target,hits+j*RayMeshHit.size,RayMeshHit.size);
+      let id=ux_u32_put(target+RayInstanceHit.instanceId,i);
+      total=total+1;
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let sorted=ray_sort_hits(staged,scratch,total,RayInstanceHit.size,RayInstanceHit.distance);
+  let span=uxe_copy_record(out,staged,total*RayInstanceHit.size);
+  return sorted;
+}
