@@ -1,0 +1,62 @@
+/* Run the candidate through the real driver. A successful warning-only run
+ * primes the same source before -Werror exercises the run cache key. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pytempfile
+
+static char product[4096];
+static char dir[4096];
+static void cleanup(void) { ptf_rmtree(dir); }
+static int failures, checks;
+
+static int run_case(const char *name, const char *source, int mode, int fatal, int warns) {
+    char output[96], path[4400], reason[512], *args[16];
+    int n = 0;
+    if (cx_fmt(output, sizeof output, "%s.out", name) ||
+        cx_fmt(path, sizeof path, "%s/%s", dir, output)) return 2;
+    args[n++] = "sh"; args[n++] = product;
+    args[n++] = "-Wall";
+    if (fatal) args[n++] = "-Werror";
+    if (mode == 1) args[n++] = "-c";
+    if (mode) { args[n++] = "-o"; args[n++] = output; }
+    args[n++] = (char *)source; args[n] = 0;
+    np_result result = {0};
+    if (np_run(args, dir, 0, 12, &result, reason, sizeof reason)) return 2;
+    int reject = fatal && warns;
+    int good = result.rc == (reject ? 1 : 0);
+    if (warns) good = good && result.err && strstr(result.err, "warn.c:2:") &&
+                      strstr(result.err, "[-Wunused-variable]");
+    else good = good && result.errn == 0;
+    if (mode) {
+        struct stat st;
+        int exists = lstat(path, &st);
+        if (reject) good = good && exists < 0 && errno == ENOENT;
+        else good = good && exists == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+    }
+    checks++;
+    printf("%s\t%s\trc=%d\n", good ? "PASS" : "FAIL", name, result.rc);
+    if (!good) failures++;
+    np_free(&result);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char path[4400];
+    const char *warn = "int main(void){\n int unused=1;return 0;\n}\n";
+    const char *clean = "int main(void){return 0;}\n";
+    if (argc != 2 || !realpath(argv[1], product) ||
+        ptf_mkdtemp(0, "unisacc-werror-", dir, sizeof dir) || atexit(cleanup)) return 2;
+    if (cx_fmt(path, sizeof path, "%s/warn.c", dir) || cx_write(path, warn, strlen(warn)) ||
+        cx_fmt(path, sizeof path, "%s/clean.c", dir) || cx_write(path, clean, strlen(clean))) return 2;
+    if (cx_fmt(path, sizeof path, "%s/cache", dir) || setenv("UNISACC_E3CACHE", path, 1) ||
+        setenv("XDG_CACHE_HOME", dir, 1)) return 2;
+    if (run_case("wall-object", "warn.c", 1, 0, 1) ||
+        run_case("wall-image", "warn.c", 2, 0, 1) ||
+        run_case("werror-object", "warn.c", 1, 1, 1) ||
+        run_case("werror-image", "warn.c", 2, 1, 1) ||
+        run_case("wall-run", "warn.c", 0, 0, 1) ||
+        run_case("werror-run", "warn.c", 0, 1, 1) ||
+        run_case("clean-object", "clean.c", 1, 1, 0) ||
+        run_case("clean-image", "clean.c", 2, 1, 0)) return 2;
+    printf("CHECK_WERROR_CLI\tchecks=%d\tfailed=%d\n", checks, failures);
+    return failures != 0;
+}

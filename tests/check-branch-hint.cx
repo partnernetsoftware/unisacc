@@ -1,0 +1,86 @@
+/* Compare the same C translation unit under the host compiler and candidate. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.pytempfile
+
+static char root[4096], product[4096];
+static void clean(void) { ptf_rmtree(root); }
+
+static int check_mode(int host, int object) {
+    char *out = host ? (object ? "host.o" : "host") : (object ? "candidate.o" : "candidate");
+    char *av[12], reason[300], path[4400]; int n = 0;
+    if (!host) av[n++] = "sh";
+    av[n++] = host ? "gcc" : product; av[n++] = "-Wall"; av[n++] = "-Werror";
+    if (object) av[n++] = "-c";
+    av[n++] = "branch.c"; av[n++] = "-o"; av[n++] = out; av[n] = 0;
+    np_result child = {0};
+    if (np_run(av, root, 0, 12, &child, reason, sizeof reason)) return 2;
+    struct stat st;
+    int ok = !child.rc && !child.errn && !cx_fmt(path,sizeof path,"%s/%s",root,out) &&
+             !stat(path,&st) && S_ISREG(st.st_mode) && st.st_size > 0;
+    printf("%s\t%s-%s\trc=%d\n",ok?"PASS":"FAIL",host?"gcc":"candidate",object?"object":"image",child.rc);
+    if (!ok && child.errn) fwrite(child.err,1,child.errn,stderr);
+    np_free(&child);
+    return !ok;
+}
+
+static int refuse(const char *label, const char *expr, const char *message, int object) {
+    char path[4400], output[4400], source[512], why[256];
+    char *av[12]; int n=0;
+    if(cx_fmt(path,sizeof path,"%s/reject.c",root) ||
+       cx_fmt(output,sizeof output,"%s/%s-%d",root,label,object) ||
+       cx_fmt(source,sizeof source,"int main(int argc,char **argv){\nreturn %s;\n}\n",expr) ||
+       cx_write(path,source,strlen(source))) return 1;
+    av[n++]="sh";av[n++]=product;if(object)av[n++]="-c";
+    av[n++]="-o";av[n++]=output;av[n++]="reject.c";av[n]=0;
+    np_result c={0};struct stat st;
+    int transport=np_run(av,root,0,15,&c,why,sizeof why);
+    int line=0,column=0;
+    const char *location=c.err?strstr(c.err,"reject.c:"):0;
+    int ok=!transport && c.rc!=0 && location &&
+           sscanf(location,"reject.c:%d:%d",&line,&column)==2 && line==2 && column>0 &&
+           strstr(c.err,message) && lstat(output,&st)<0 && errno==ENOENT;
+    printf("%s\t%s-%s\trc=%d\n",ok?"PASS":"FAIL",label,object?"object":"image",c.rc);
+    if(!ok && c.errn) fwrite(c.err,1,c.errn,stderr);
+    np_free(&c);return !ok;
+}
+
+int main(int argc,char **argv) {
+    const char *source =
+        "#include <stdio.h>\n"
+        "#define likely(x) __builtin_expect(!!(x),1)\n"
+        "#define unlikely(x) __builtin_expect(!!(x),0)\n"
+        "enum hint { PREDICT=2 };\n"
+        "int main(void){int i=1;int hits=0;\n"
+        "if(__builtin_expect(i,0)){hits++;}\nif(likely(++i==2)){hits++;}\n"
+        "if(unlikely(i==3))hits++;\n"
+        "long v=__builtin_expect_with_probability(__builtin_expect(-7,PREDICT),1+1,0.25);\n"
+        "long bounds=__builtin_expect_with_probability(1,0,((+1.0f)))\n"
+        " +__builtin_expect_with_probability(1,0,(-0.0))\n"
+        " +__builtin_expect_with_probability(1,0,(1+1)/2);\n"
+        "printf(\"%d %d %ld %ld\\n\",i,hits,v,bounds);return 7;}\n";
+    char path[4400], why[300]; int failures=0;
+    if(argc!=2 || !realpath(argv[1],product) || ptf_mkdtemp(0,"unisacc-hints-",root,sizeof root) ||
+       atexit(clean) || cx_fmt(path,sizeof path,"%s/branch.c",root) || cx_write(path,source,strlen(source)))return 2;
+    for(int host=0;host<=1;host++) for(int object=0;object<=1;object++) failures+=check_mode(host,object);
+    char *a[]={"./host",0}, *b[]={"./candidate",0};
+    np_result ref={0}, got={0};
+    int ok=!np_run(a,root,0,5,&ref,why,sizeof why) && !np_run(b,root,0,5,&got,why,sizeof why) &&
+        ref.rc==7 && got.rc==ref.rc && ref.errn==0 && got.errn==0 &&
+        ref.outn==9 && !memcmp(ref.out,"2 2 -7 3\n",9) && got.outn==ref.outn && !memcmp(ref.out,got.out,ref.outn);
+    if(!ok) fprintf(stderr,"host rc=%d stdout=%.*s candidate rc=%d stdout=%.*s\n",ref.rc,(int)ref.outn,ref.out?ref.out:"",got.rc,(int)got.outn,got.out?got.out:"");
+    printf("%s\texecution-and-gcc-output\n",ok?"PASS":"FAIL"); failures+=!ok;
+    np_free(&ref);np_free(&got);
+    for(int object=0;object<=1;object++) {
+        failures+=refuse("missing-hint","__builtin_expect(1)","expected ,",object);
+        failures+=refuse("missing-probability","__builtin_expect_with_probability(1,0)","expected ,",object);
+        failures+=refuse("extra-hint","__builtin_expect(1,0,2)","expected ')'",object);
+        failures+=refuse("effect-hint","__builtin_expect(1,++argc)","hint must be an integer constant expression",object);
+        failures+=refuse("var-hint","__builtin_expect(1,argc)","hint must be an integer constant expression",object);
+        failures+=refuse("var-prob","__builtin_expect_with_probability(1,0,argc)","probability must be a constant",object);
+        failures+=refuse("upper-prob","__builtin_expect_with_probability(1,0,1.25)","probability must be a constant",object);
+        failures+=refuse("lower-prob","__builtin_expect_with_probability(1,0,-0.5)","probability must be a constant",object);
+        failures+=refuse("float-expression","__builtin_expect_with_probability(1,0,0.25+0.25)","not covered: floating constant expression in __builtin_expect_with_probability",object);
+    }
+    printf("CHECK_BRANCH_HINT\tchecks=23\tfailed=%d\n",failures);
+    return failures!=0;
+}
