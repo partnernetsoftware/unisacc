@@ -985,20 +985,65 @@ static void co_pending_collect(void) {
     }
 }
 
-/* A merge in progress (MERGE_HEAD present): the private-index path below would build a one-parent commit and drop
-   the merged side.  Without --merge-continue refuse by name (COMMIT_MERGE_IN_PROGRESS, exit 2, nothing committed).
-   With --merge-continue: require MERGE_HEAD and no unmerged entry (git ls-files -u empty), take no paths, then hand
-   the staged merge result to a plain `git commit -q -m MSG` (tree = the shared index, parents = HEAD and MERGE_HEAD,
-   the pre-commit hook runs, git clears MERGE_HEAD/MERGE_MSG/MERGE_MODE) and verify both parents afterwards.
-   -1 when neither applies: the default path continues byte for byte unchanged. */
-static int co_mergecont(int mcont, const char *msg, int np, int dry) {
+static int co_path_in_lines(const char *buf, const char *p) {
+    if (!buf || !buf[0] || !p || !p[0]) return 0;
+    size_t pl = strlen(p);
+    const char *s = buf;
+    while (*s) {
+        const char *nl = strchr(s, '\n');
+        size_t len = nl ? (size_t)(nl - s) : strlen(s);
+        while (len > 0 && s[len - 1] == '\r') len--;
+        /* For `git ls-files -u`, path follows the TAB character; for `git diff --name-only`, full line is path. */
+        const char *tb = (const char *)memchr(s, '\t', len);
+        const char *entry = tb ? tb + 1 : s;
+        size_t elen = tb ? len - (size_t)(tb - s) - 1 : len;
+        if (elen == pl && memcmp(entry, p, pl) == 0) return 1;
+        s = nl ? nl + 1 : s + strlen(s);
+    }
+    return 0;
+}
+
+/* A merge in progress (MERGE_HEAD present):
+ * - Without --merge-continue: compute the merge touch set (git diff --name-only HEAD MERGE_HEAD plus
+ *   unmerged entries from git ls-files -u). When all requested paths are disjoint from the touch set,
+ *   allow the path commit to proceed via private index + CAS update-ref + cacheinfo sync (preserving MERGE_HEAD).
+ *   When any requested path intersects the touch set (or np == 0 / git fails), refuse by name
+ *   (COMMIT_MERGE_IN_PROGRESS, exit 2, nothing committed).
+ * - With --merge-continue: require MERGE_HEAD and no unmerged entry, take no paths, run plain git commit
+ *   (two parents: HEAD and MERGE_HEAD) and verify both parents afterwards. */
+static int co_mergecont(int mcont, const char *msg, int np, const char **paths, int dry) {
     char mp[4400], mh[64], out[8192], par[200];
     char *pv[] = {"git", "rev-parse", "--git-path", "MERGE_HEAD", 0}, *hv[] = {"git", "rev-parse", "-q", "--verify", "MERGE_HEAD", 0};
     if (run(pv, mp, sizeof mp) != 0 || !mp[0]) { if (!mcont) return -1; co_die("setup", "git rev-parse --git-path MERGE_HEAD failed"); }
     if (sy_exists(mp) != 1) {
         if (!mcont) return -1;
         fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_NONE: --merge-continue needs a merge in progress (no MERGE_HEAD; nothing committed)\n"); return 2; }
-    if (!mcont) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present; a path commit would drop the second parent. Resolve, stage, then: devsvc git commit -m MSG --merge-continue (nothing committed)\n"); return 2; }
+    if (!mcont) {
+        if (np <= 0 || !paths) {
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present and no paths given (nothing committed)\n"); return 2;
+        }
+        char *dv[] = {"git", "diff", "--name-only", "HEAD", "MERGE_HEAD", 0};
+        char *uv[] = {"git", "ls-files", "-u", 0};
+        char *dbuf = (char *)mm_alloc(262144), *ubuf = (char *)mm_alloc(262144);
+        int rc1 = dbuf ? run(dv, dbuf, 262144) : -1;
+        int rc2 = ubuf ? run(uv, ubuf, 262144) : -1;
+        if (rc1 != 0 || rc2 != 0) {
+            if (dbuf) mm_free(dbuf);
+            if (ubuf) mm_free(ubuf);
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present and touch set unreadable (nothing committed)\n");
+            return 2;
+        }
+        for (int i = 0; i < np; i++) {
+            if (co_path_in_lines(dbuf, paths[i]) || co_path_in_lines(ubuf, paths[i])) {
+                fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: path=%s intersects MERGE_HEAD touch set. Resolve, stage, then: devsvc git commit -m MSG --merge-continue (nothing committed)\n", paths[i]);
+                mm_free(dbuf); mm_free(ubuf);
+                return 2;
+            }
+        }
+        mm_free(dbuf); mm_free(ubuf);
+        sy_printf("COMMIT_MERGE_DISJOINT\tpaths=%d\tallowed=1\n", np);
+        return -1;
+    }
     if (np) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_PATHS: --merge-continue commits the whole staged merge result and takes no --whole/--keyed/--registered (nothing committed)\n"); return 2; }
     {   char *uv[] = {"git", "ls-files", "-u", 0};
         if (run(uv, out, sizeof out) != 0) co_die("setup", "git ls-files -u failed");
@@ -1082,7 +1127,7 @@ int main(int argc, char **argv) {
         }
     }
     if (mcont && !msg) co_die("usage", "--merge-continue needs -m MSG");
-    if (msg) { int mr = co_mergecont(mcont, msg, np, dry); if (mr >= 0) return mr; }
+    if (msg) { int mr = co_mergecont(mcont, msg, np, path, dry); if (mr >= 0) return mr; }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
     for (k = 0; k < np; k++) if (keys[k] && co_reg_of[k] < 0) co_ukey_check(path[k], keys[k]);
