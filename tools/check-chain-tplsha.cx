@@ -1,0 +1,96 @@
+/* tools/check-chain-tplsha.cx -- check tools/chain-tplsha.cx (whole-front template SHA, three-way).
+ *
+ *   sh ./unisacc.com tools/check-chain-tplsha.cx
+ *
+ * Synthetic fixture under the temp dir: template, candidate-chain.cx and check-candidate-chain.cx
+ * constants and the pins.tsv pin row all agree -> TPLSHA ok rc 0; then each of four single mutations
+ * (one template byte, the candidate-chain constant, the check-candidate-chain constant, the pins value)
+ * must give rc 1 with a TPLSHA_DIFF line naming exactly that site and the TPLSHA FAIL line naming all
+ * sites; a missing pins row is reported as pins=missing; an unknown argument is rc 2; the tracked tree
+ * passes. Every child runs under ./tools/bound 50 (below the batch 55 s). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckrun
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\tchain-tplsha.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
+#define has(o, s) ckk_has((o), 1 << 16, (s))
+
+static int run(const char *root, char *o, int cap) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/chain-tplsha.cx", "--", "--root", (char *)root, 0};
+    int cut; o[0] = 0;
+    return sy_run(v, o, cap, &cut);
+}
+
+static char g_d[4096];
+static void put(const char *rel, const char *body) {
+    char p[4300]; cx_fmt(p, sizeof p, "%s/%s", g_d, rel);
+    cx_write(p, body, tx_len(body, 8192));
+}
+/* write the three fingerprint sites with the given values */
+static void sites(const char *cc, const char *ckv, const char *pv) {
+    char b[2048];
+    cx_fmt(b, sizeof b, "static void f(void) {\n    const char *want = \"%s\";\n    die(\"REFUSE tools/templates/whole-front.cx.in\");\n}\n", cc);
+    put("tools/candidate-chain.cx", b);
+    cx_fmt(b, sizeof b, "{\n  const char *want = \"%s\";\n  cx_fmt(tp, sizeof tp, \"%%s/tools/templates/whole-front.cx.in\", cwd);\n}\n", ckv);
+    put("tools/check-candidate-chain.cx", b);
+    if (pv) {
+        cx_fmt(b, sizeof b, "path\tkind\ttarget\tvalue\towner\tstatus\ntools/candidate-chain.cx#%s\tpin\ttools/templates/whole-front.cx.in\t%s\tx\tok\n", pv, pv);
+        put("tools/pins.tsv", b);
+    } else put("tools/pins.tsv", "path\tkind\ttarget\tvalue\towner\tstatus\n");
+}
+
+int main(void) {
+    static char o[1 << 16]; char p[4300], h[65], h2[65], bad[65]; int rc;
+    const char *tpl = "int worker(void) { return 0; }\n", *tpl2 = "int worker(void) { return 1; }\n";
+    if (cx_fmt(g_d, sizeof g_d, "%s/chain-tplsha-%d", sy_tmpdir(), (int)sy_pid()) || sy_mkdir(g_d, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    cx_fmt(p, sizeof p, "%s/tools", g_d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools/templates", g_d); sy_mkdir(p, 0700);
+    if (sy_sha256_hex(tpl, tx_len(tpl, 200), h) || sy_sha256_hex(tpl2, tx_len(tpl2, 200), h2)) { ck(0, "sha"); return 1; }
+    cx_fmt(bad, sizeof bad, "%s", h); bad[0] = bad[0] == '0' ? '1' : '0';
+    put("tools/templates/whole-front.cx.in", tpl);
+
+    sites(h, h, h);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 0 && has(o, "TPLSHA\tok\tsha=") && has(o, h), "agree-passes");
+
+    put("tools/templates/whole-front.cx.in", tpl2);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "TPLSHA_DIFF\tsite=candidate-chain") && has(o, "TPLSHA_DIFF\tsite=check-candidate-chain")
+       && has(o, "TPLSHA_DIFF\tsite=pins") && has(o, "TPLSHA\tFAIL\ttemplate=") && has(o, h2) && has(o, "candidate-chain=")
+       && has(o, "pins="), "template-byte-fails-naming-three");
+    put("tools/templates/whole-front.cx.in", tpl);
+
+    sites(bad, h, h);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "TPLSHA_DIFF\tsite=candidate-chain\t") && !has(o, "site=check-candidate-chain") && !has(o, "site=pins")
+       && has(o, bad) && has(o, "TPLSHA\tFAIL"), "candidate-const-fails");
+
+    sites(h, bad, h);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "TPLSHA_DIFF\tsite=check-candidate-chain\t") && !has(o, "site=candidate-chain\t") && !has(o, "site=pins")
+       && has(o, "TPLSHA\tFAIL"), "check-const-fails");
+
+    sites(h, h, bad);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "TPLSHA_DIFF\tsite=pins\t") && !has(o, "site=candidate-chain\t") && !has(o, "site=check-candidate-chain")
+       && has(o, bad) && has(o, "TPLSHA\tFAIL"), "pins-row-fails");
+
+    sites(h, h, 0);
+    rc = run(g_d, o, sizeof o);
+    ck(rc == 1 && has(o, "pins=missing"), "pins-missing-fails");
+
+    {   char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/chain-tplsha.cx", "--", "--bogus", 0};
+        int cut; o[0] = 0; rc = sy_run(v, o, sizeof o, &cut);
+        ck(rc == 2, "unknown-arg-rc2");
+    }
+    rc = run(".", o, sizeof o);
+    ck(rc == 0 && has(o, "TPLSHA\tok\t"), "tracked-tree-passes");
+
+    printf("CHECK_CHAIN_TPLSHA\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,86 @@
+/* tools/chain-tplsha.cx -- three-way check of the whole-front template fingerprint.
+ *
+ *   sh ./unisacc.com tools/chain-tplsha.cx -- [--root DIR]
+ *
+ * Compares (1) the real SHA256 of DIR/tools/templates/whole-front.cx.in, (2) the 64-hex `want = "..."`
+ * constants next to "whole-front.cx.in" in tools/candidate-chain.cx and tools/check-candidate-chain.cx,
+ * (3) the value column of the tools/pins.tsv row with kind "pin" and target tools/templates/whole-front.cx.in.
+ * All equal -> "TPLSHA<TAB>ok<TAB>sha=..." rc 0. Any mismatch or missing site -> one "TPLSHA_DIFF" line per
+ * site that differs from the template, then "TPLSHA<TAB>FAIL<TAB>template=..<TAB>candidate-chain=..<TAB>
+ * check-candidate-chain=..<TAB>pins=.." naming every site, rc 1. Bad arguments rc 2.
+ * Origin: the sixth whole-chain run (236a8271e0) changed the template without updating the constant. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define TPL "tools/templates/whole-front.cx.in"
+
+static int is_hex64(const char *p, long left) {
+    long i;
+    if (left < 65) return 0;
+    for (i = 0; i < 64; i++) { char c = p[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0; }
+    return p[64] == '"';
+}
+
+/* the want = "<hex64>" constant whose next 600 bytes mention whole-front.cx.in */
+static void const_in(const char *root, const char *rel, char *out) {
+    char p[4200]; size_t n = 0; char *b; long i;
+    cx_fmt(out, 65, "missing");
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return;
+    b = cx_read(p, &n);
+    if (!b) return;
+    for (i = 0; i + 8 < (long)n; i++) {
+        if (b[i] != 'w' || !tx_same(b + i, 8, "want = \"", 8)) continue;
+        if (!is_hex64(b + i + 8, (long)n - i - 8)) continue;
+        {   long end = i + 8 + 600; if (end > (long)n) end = (long)n;
+            if (tx_find(b + i, end - i, "whole-front.cx.in", 17) >= 0) { mm_copy(out, 65, b + i + 8, 64); out[64] = 0; break; }
+        }
+    }
+    free(b);
+}
+
+static void pins_value(const char *root, char *out) {
+    char p[4200]; size_t n = 0; char *b, *ln, *nl;
+    cx_fmt(out, 65, "missing");
+    if (cx_fmt(p, sizeof p, "%s/tools/pins.tsv", root)) return;
+    b = cx_read(p, &n);
+    if (!b) return;
+    b[n ? n - (b[n - 1] == '\n') : 0] = 0;
+    for (ln = b; ln && *ln; ln = nl) {
+        char *f[6]; int k = 0; char *q = ln;
+        nl = strchr(ln, '\n'); if (nl) *nl++ = 0;
+        f[k++] = q;
+        while (k < 6 && (q = strchr(q, '\t'))) { *q++ = 0; f[k++] = q; }
+        if (k >= 4 && tx_eqz(f[1], "pin") && tx_eqz(f[2], TPL) && tx_len(f[3], 100) == 64) { cx_fmt(out, 65, "%s", f[3]); break; }
+    }
+    free(b);
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    char p[4200], th[65], cc[65], ck[65], pv[65]; size_t n = 0; char *b; int i, bad = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else { fprintf(stderr, "chain-tplsha: REFUSE unknown argument %s (usage: [--root DIR])\n", argv[i]); return 2; }
+    }
+    cx_fmt(th, sizeof th, "missing");
+    if (!cx_fmt(p, sizeof p, "%s/%s", root, TPL) && (b = cx_read(p, &n))) {
+        if (sy_sha256_hex(b, (long)n, th)) cx_fmt(th, sizeof th, "missing");
+        free(b);
+    }
+    const_in(root, "tools/candidate-chain.cx", cc);
+    const_in(root, "tools/check-candidate-chain.cx", ck);
+    pins_value(root, pv);
+    if (tx_eqz(th, "missing")) { printf("TPLSHA_DIFF\tsite=template\tpath=%s\tvalue=missing\n", TPL); bad++; }
+    if (!tx_eqz(cc, th)) { printf("TPLSHA_DIFF\tsite=candidate-chain\tpath=tools/candidate-chain.cx\tvalue=%s\ttemplate=%s\n", cc, th); bad++; }
+    if (!tx_eqz(ck, th)) { printf("TPLSHA_DIFF\tsite=check-candidate-chain\tpath=tools/check-candidate-chain.cx\tvalue=%s\ttemplate=%s\n", ck, th); bad++; }
+    if (!tx_eqz(pv, th)) { printf("TPLSHA_DIFF\tsite=pins\tpath=tools/pins.tsv\tvalue=%s\ttemplate=%s\n", pv, th); bad++; }
+    if (bad) {
+        printf("TPLSHA\tFAIL\ttemplate=%s\tcandidate-chain=%s\tcheck-candidate-chain=%s\tpins=%s\n", th, cc, ck, pv);
+        return 1;
+    }
+    printf("TPLSHA\tok\tsha=%s\n", th);
+    return 0;
+}
