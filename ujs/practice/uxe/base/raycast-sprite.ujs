@@ -1,0 +1,90 @@
+struct RaySpriteQuery {
+  world: u32;
+  view: u32;
+  layerMask: u32;
+  depthScale: u32;
+  centerX: f64;
+  centerY: f64;
+  rotation: f64;
+}
+
+struct RaySpriteHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  u: f64;
+  v: f64;
+}
+
+native function ray_sprite_axis(matrix:i64,x:f64,y:f64,z:f64) f64 {
+  return ux_f64(matrix)*x+ux_f64(matrix+32)*y+ux_f64(matrix+64)*z;
+}
+
+native function ray_sprite_scale(matrix:i64) f64 {
+  let x=ux_f64(matrix);
+  let y=ux_f64(matrix+8);
+  let z=ux_f64(matrix+16);
+  return f64_sqrt(x*x+y*y+z*z);
+}
+
+// The camera-facing quad is planar in view space. Inverting its rotation
+// gives the same UV coordinates as interpolation across either triangle.
+native function Raycaster_intersectSprite(state:i64,query:i64,out:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(query,RaySpriteQuery.size) ||
+     !raycaster_span(out,RaySpriteHit.size) ||
+     raycaster_overlap(out,RaySpriteHit.size,state,RaycasterState.size) ||
+     raycaster_overlap(out,RaySpriteHit.size,query,RaySpriteQuery.size)) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(query+RaySpriteQuery.layerMask))==0) { return 0; }
+  let world=ux_u32(query+RaySpriteQuery.world);
+  let view=ux_u32(query+RaySpriteQuery.view);
+  let mode=ux_u32(query+RaySpriteQuery.depthScale);
+  let center_x=ux_f64(query+RaySpriteQuery.centerX);
+  let center_y=ux_f64(query+RaySpriteQuery.centerY);
+  let rotation=ux_f64(query+RaySpriteQuery.rotation);
+  let near=ux_f64(state+RaycasterState.near);
+  let far=ux_f64(state+RaycasterState.far);
+  if(mode>1 || !raycaster_span(world,128) || !raycaster_span(view,128) ||
+     raycaster_overlap(out,RaySpriteHit.size,world,128) || raycaster_overlap(out,RaySpriteHit.size,view,128) ||
+     ux_f64(view+24)!=0.0 || ux_f64(view+56)!=0.0 || ux_f64(view+88)!=0.0 || ux_f64(view+120)!=1.0 ||
+     center_x-center_x!=0.0 || center_y-center_y!=0.0 || rotation-rotation!=0.0 ||
+     near<0.0 || near-near!=0.0 || far!=far || far<near) { return 0-1; }
+  let sx=ux_f64(world+96);
+  let sy=ux_f64(world+104);
+  let sz=ux_f64(world+112);
+  let ox=ux_f64(state);
+  let oy=ux_f64(state+8);
+  let oz=ux_f64(state+16);
+  let dx=ux_f64(state+24);
+  let dy=ux_f64(state+32);
+  let dz=ux_f64(state+40);
+  let z=ray_sprite_axis(view+16,sx,sy,sz)+ux_f64(view+112);
+  let relative_z=ray_sprite_axis(view+16,ox-sx,oy-sy,oz-sz);
+  let direction_z=ray_sprite_axis(view+16,dx,dy,dz);
+  if(direction_z==0.0) { return 0; }
+  let t=(0.0-relative_z)/direction_z;
+  let distance=t*f64_sqrt(dx*dx+dy*dy+dz*dz);
+  if(t<0.0 || distance-distance!=0.0 || distance<near || distance>far) { return 0; }
+  let factor=1.0;
+  if(mode==1) { factor=0.0-z; }
+  let width=ray_sprite_scale(world)*factor;
+  let height=ray_sprite_scale(world+32)*factor;
+  if(width==0.0 || height==0.0 || width-width!=0.0 || height-height!=0.0) { return 0; }
+  let hx=ox+t*dx;
+  let hy=oy+t*dy;
+  let hz=oz+t*dz;
+  let x=ray_sprite_axis(view,hx-sx,hy-sy,hz-sz);
+  let y=ray_sprite_axis(view+8,hx-sx,hy-sy,hz-sz);
+  let c=ux_math_cos(rotation);
+  let s=ux_math_sin(rotation);
+  let u=(x*c+y*s)/width+center_x;
+  let v=(y*c-x*s)/height+center_y;
+  if(u!=u || v!=v || u<0.0 || u>1.0 || v<0.0 || v>1.0) { return 0; }
+  let a=ux_f64_put(out+RaySpriteHit.x,hx);
+  let b=ux_f64_put(out+RaySpriteHit.y,hy);
+  let e=ux_f64_put(out+RaySpriteHit.z,hz);
+  let d=ux_f64_put(out+RaySpriteHit.distance,distance);
+  let us=ux_f64_put(out+RaySpriteHit.u,u);
+  let vs=ux_f64_put(out+RaySpriteHit.v,v);
+  return 1;
+}
