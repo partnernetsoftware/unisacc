@@ -53,8 +53,8 @@
 - 不传递:A `use` mid、mid `use` text.fmt,A 不能直接调 `tx_snprintf`;用到哪个模块就直接 `use` 它(CX-U-5)。
 - 模块图必须无环,否则拒绝 `module cycle`(CX-M-3)。
 - 符号级导入实测可用:`#pragma unisa use text.text::tx_len` 后调用 `tx_len("hello", 64)`,输出 `len=5`。
-- 已知缺口(实测):`use text.text::tx_len as slen` 能通过规划,但默认运行与 `-o` 产物都在调用时报 `unisacc: no host function slen`(rc=127)。别名在当前产品上不可用,冲突请改用符号级导入避开。
-- 再导出未实现:[archive/plans/cx-use-alias-reexport.md](archive/plans/cx-use-alias-reexport.md) 第 3 部分的 `#pragma unisa export` 实测被拒(`unknown unisa pragma export`)。被多处需要的底层模块,各使用方自己 `use`。
+- 别名可用(实测 2026-11-20,已装产品 0.0.85):`use text.text::tx_len as slen` 默认运行输出 len=5,rc=0;只测了 lnx 默认运行。旧文"调用时报 no host function slen(rc=127),别名不可用"已过时。证据 [plans/reviews/2026-11-20-core-ext-matrix.md](plans/reviews/2026-11-20-core-ext-matrix.md) 1.3 节。
+- 裸名 export 被接受(实测 2026-11-20,已装产品 0.0.85):模块里写 `#pragma unisa export pm_f`,被 use 后 rc=0;名单语义是否真被强制、与 `cxpack.tsv` 是否互校未核(只测了接受)。旧文"实测被拒 unknown unisa pragma export"已过时。门面重导出(`export use`,D1b,见 [archive/plans/cx-use-alias-reexport.md](archive/plans/cx-use-alias-reexport.md) 第 3 部分)未实测,被多处需要的底层模块仍由各使用方自己 `use`。下文 3.5 节表中"当前行为"列的 export 拒绝写法同样待按本条复核。
 - `dock` 的完整设计见 [plans/cx-dock-pragma.md](plans/cx-dock-pragma.md);带参数写法 `dock libc|include` 本文未实测(UNVERIFIED)。
 
 ### 3.3 仓外脚本的包根(实测)

@@ -300,3 +300,17 @@ SIMD 文本原语、SHA 指令、inflate、装载现在都不是瓶颈。度量�
 - 不妨碍打赢 bun/node/python:脚本是非模块不受限;真门槛是仓外脚本要自建符号链接与 cxroot.tsv 才能 use,以及 build/pkg-gaps.tsv 213 行里 169 行 OPEN。
 - 未核:cxroot.tsv 加列是否被现产品接受、宏是否随模块接口导出、各单位数均为推断。
 回滚:撤本条与 prd_mempalace.md "核心层强制"决定,plans/v0.0.86.md 删 K1 行。
+
+### 核心层与扩展应用层矩阵与版本调整(主调度裁决 2026-11-20,依据 plans/reviews/2026-11-20-core-ext-matrix.md)
+
+上文"版本编排与让位"第 (2) 条第二版排法中 0.0.88 及以后的版本号被本节取代(原文保留,不删)。
+
+(1) 事实:核心层对 cx 使用者供给基本够(sandbox-cx 11774 行去打印后裸 libc 只有 3 处),真问题是采用率与登记不全;0.0.87 到 0.0.96 十版几乎全给了外部 C 程序(汇编与 pthread),内部使用者要的 L0 小件没有槽位;L0 真缺口集中在进程一族(等待集、rusage、stderr 分离、杀树接超时、PDEATHSIG)加 sy_syscall6、熵源、mtime 纳秒;已装 0.0.85 实测:use ... as 别名可用(规范写不可用已过时)、export 被接受 rc=0(规范写被拒已过时,名单是否强制未核)、无 dock 模块写 #include 平台 #if 裸 libc 仍 rc=0(K2 未生效);ext/testx argx fsx 不在 tlib-packages 也无 layer-api 表,argx fsx net 不在仓根 cxroot 靠 tools 下符号链接解析;pkg-gaps 169 行含 OPEN 手工归类误差约正负 5:核心层必须做约 69、扩展层约 17、工具与流程约 72、文档或账本陈旧约 11,表有 17 行列数破损;裸 libc(去打印)每千行 tools/cxlib 228 candidate-chain 149 devsvc 140 ujs 42 csih 34 sandbox-cx 0;线程原子一列没有内部使用者被卡。未核:归类条数未逐条回源、include/regex.h 存在但 prd.md 写缺实现程度未测、工作者进程池可替代线程未做原型、工具裸 libc 是习惯而非缺口只有 sandbox-cx 一个样本。
+
+(2) 版本调整(主调度决定;理由:K2 必须排在 sy_syscall6 之后否则 sandbox-cx 被拒或自授权;L0 库面是不同于前端语言扩展的另一类大改,依"一个候选只含一类大改"单独成版;内部使用者采用优先)。产品车道新排法:0.0.87 A1a(汇编所有者基本需求优先,约 3);0.0.88 核心层库面小件包 = L0 小件(进程等待集、rusage、stderr 分离、杀树接超时、PDEATHSIG、sy_syscall6、熵源、mtime 纳秒,2 单位)加模块解析与 testx argx fsx 三包登记及仓外脚本包根(cxroot 前缀)1 单位(共 3);0.0.89 执行器内核产品化(M2 GO 的成果);0.0.90 K2 核心层强制(须在 sy_syscall6 之后);0.0.91 A1b;0.0.92 到 0.0.93 A2a A2b;0.0.94 A3;0.0.95 到 0.0.96 A4a A4b;0.0.97 pthread。前端硬上限(SQLite 结构体成员 64、Lua 不完整数组)插到 A1b 之前由前端组评估(待评估,不排单位)。其余被让位主题顺延,build/version-seq.tsv note 列写原版本与顺延原因。A4 在 A1 到 A3 对拍通过后重过采用门。信号定时器在 version-seq 与 plans 里无槽位(未核是否在别处),在 plans/v0.0.88.md 骨架里标待定。
+
+(3) 流程:需求单复用 build/pkg-gaps.tsv(先修表再加列);核心层每版开槽前对每条需求四选一响应(接受给版本、改派、拒绝、要求补复现);接口变更前用 layer-api 判类并列受影响使用者,新增仓外使用者登记表 build/external-users.tsv(使用者、依赖的包与接口、取源方式);每周节拍:gcc 差分普查、矩阵差分、陈旧缺口扫描、realprog 一项。细则见 plans/layer-orchestration.md。
+
+(4) 立即可做的小事(本提交已做):prd_cx_spec.md 别名与 export 两句按 2026-11-20 已装 0.0.85 实测改写;build/pkg-gaps.tsv 保守清理(列数破损修复、已修仍挂 OPEN 的行改状态并写依据,不删行)。
+
+回滚:撤本小节与 prd_mempalace.md 对应决定,build/version-seq.tsv 第 22 到 32 行恢复本提交前内容(第 32 行删除),删 plans/v0.0.88.md 与 build/external-users.tsv。
