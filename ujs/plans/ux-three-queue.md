@@ -16,7 +16,8 @@
 - ~~PropertyMixer 布尔与字符串离散选择 | G-anim r160 权重平局、加法选择、按帧清零 | 数值混合器记录。~~ 7 项通过，阈值篡改转红。
 - ~~PropertyMixer 四元数混合 | G-anim r160 球面插值、加法组合、错误输入和帧复位 | Quaternion 和混合器记录。~~ 7 项通过，反转加法组合顺序后转红。
 - PropertyMixer 构造与绑定接线 | G-anim 统一构造分派、写回及恢复原值 | 数值、选择与四元数混合器，PropertyBinding。
-- ShapePath | G-struct shapepath-struct.cx 对照当前子路径、直线和两类贝塞尔端点、简单孔归组，样条追加与多级空间归属待补。补齐 splineThru，运行独立金值及 r160 篡改门 | -
+- ~~ShapePath 与 Path 的样条追加 | G-struct 采样分辨率、端点衔接、克隆和容量 | 已有路径分段。~~ 7 项通过，采样坐标错位反例转红。
+- ShapePath 多轮廓孔洞归属 | G-struct r160 多外环、错序、重叠歧义与绕向对照 | Path 采样与 Shape 孔数组。
 - AnimationUtils | G-anim animationutils-anim.cx：稳定时间顺序、分量行重排与非法位置拒绝；子片段和加法转换待补。补齐 convertArray,isTypedArray,flattenJSON,subclip,makeClipAdditive，运行独立金值及 r160 篡改门 | -
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
@@ -34,7 +35,7 @@
 - QuadraticBezierCurve3 | G-struct quadraticbeziercurve3-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - AnimationMixer | G-anim animationmixer-anim.cx：多个动作调度同一根数值属性、失败帧回退与停止恢复原值；多属性、解绑和淡入淡出待补。补齐 constructor,clipAction,existingAction,setTime,getRoot,uncacheClip,uncacheRoot,uncacheAction,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - BufferAttribute | G-struct bufferattribute-struct.cx 与 bufferattribute-transforms-struct.cx 独立金值和 r160 JSON。上传回调、更新区间与序列化待补。补齐 onUploadCallback,updateRange,addUpdateRange,clearUpdateRanges,getX,setX,getY,setY,getZ,setZ,getW,setW,setXY,setXYZ,setXYZW,onUpload,toJSON，运行独立金值及 r160 篡改门 | -
-- Path | G-struct path-struct.cx 与 path-lifecycle-struct.cx 独立金值和 r160 对照。复制保留线段与贝塞尔控制点，覆盖共享端点去重。弧段、样条与序列化待接。补齐 setFromPoints,splineThru,arc,absarc,ellipse,absellipse,toJSON,fromJSON,add,getPoint,getLength,updateArcLengths,getCurveLengths,getSpacedPoints,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
+- Path | G-struct path-struct.cx、path-lifecycle-struct.cx 与 shapepath-spline-struct.cx；补齐 setFromPoints,arc,absarc,ellipse,absellipse,toJSON,fromJSON,add,getPoint,getLength,updateArcLengths,getCurveLengths,getSpacedPoints,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | Curve 与路径分段。
 - AnimationAction | G-anim animationaction-anim.cx：单次、重复、往返与反向跨界；淡入淡出和调度待补。补齐 constructor,play,stop,reset,isRunning,isScheduled,startAt,setEffectiveWeight,getEffectiveWeight,fadeIn,fadeOut,crossFadeFrom,crossFadeTo,stopFading,setEffectiveTimeScale,getEffectiveTimeScale,setDuration,syncWith,halt,warp,stopWarping,getMixer,getClip,getRoot，运行独立金值及 r160 篡改门 | -
 - Shape | G-struct shape-struct.cx 与 path-lifecycle-struct.cx 独立金值和 r160 对照。外轮廓和孔轮廓独立克隆并分别采样。序列化待接。补齐 toJSON,fromJSON,setFromPoints,moveTo,lineTo,quadraticCurveTo,bezierCurveTo,splineThru,arc,absarc,ellipse,absellipse,add,closePath,getPoint,getLength,updateArcLengths,getCurveLengths,getSpacedPoints,getPoints,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - Source | G-struct Source；对照版本、空源、URI、类型化图像、立方体数组和 UUID 元数据缓存。原始画布像素编码待 M9。补齐 constructor,needsUpdate,toJSON，运行独立金值及 r160 篡改门 | -
