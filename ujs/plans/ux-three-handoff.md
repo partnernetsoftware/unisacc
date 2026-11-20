@@ -20,7 +20,7 @@ Display P3 画布已两次复现。r160 WebGL1 与每色空间独立的 WebGL2 �
 
 M6 已对照 AmbientLight、HemisphereLight、SpotLight、LightProbe、Fog 与 FogExp2。入口为 `gpu-packet-struct.cx` 的 `--ambient`、`--hemisphere`、`--spot`、`--light-probe`、`--fog`、`--fog-exp2`，每门 41 项，均有同名的 `-mutate` 反例。方向光和点光沿用材质主门的双方向灯球体和点灯立方体，反例分别为 `--phong-light-mutate` 与 `--lighting-mutate`。
 
-M6 未完成的是 RectAreaLight 和四类通用阴影图。面积光需接入 LTC 取样，并用同一宽高与朝向对照 r160。阴影图从 `gpu-target.ujs` 的产生和读回接到 `gpu-packet.ujs` 的纹理输入。验收应同时取遮挡内、无影区与边缘样点，再分别比较 Basic、PCF、PCFSoft、VSM。M5 透明收影测试只覆盖矩形投影，清单未把它算作 BasicShadowMap 能力。
+M6 阴影及面积光已补切片。Basic、PCF、PCFSoft、VSM 都经 GPU 深度目标读回到纹理采样，遮挡内、无影区与边缘和 r160 对照各 11 项，反例各 4 项红。开关为 `--shadow-map`、`--shadow-pcf`、`--shadow-pcf-soft`、`--shadow-vsm`。RectAreaLight 逐片元漫反射以 `--area` 对照 41 项，反向反例 8 项红。面积光的真实镜面 LTC 查表、通用投影与点光阴影仍属部分项。
 
 [清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
 

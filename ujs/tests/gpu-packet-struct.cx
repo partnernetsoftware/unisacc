@@ -31,7 +31,7 @@ static int shader_bytes(char *source,int capacity,int n,const char *path,const c
     return n<capacity-32?n:-1;
 }
 
-static int build_shaders(const char *path,int flat_only,int shadow_map) {
+static int build_shaders(const char *path,int flat_only,int shadow_map,int area) {
     char source[29000];
     int n=tx_snprintf(source,sizeof source,"native function probe_shader_sources(shader:i64) i64 {");
     n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
@@ -41,6 +41,12 @@ static int build_shaders(const char *path,int flat_only,int shadow_map) {
         n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\nnative function probe_map_sources(shader:i64) i64 {");
         n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
         if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-shadow-map.frag","fragment",12000);
+        if(n<0) return 1;
+    }
+    if(area) {
+        n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\nnative function probe_area_sources(shader:i64) i64 {");
+        n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+        if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-area.frag","fragment",12000);
         if(n<0) return 1;
     }
     if(flat_only) {
@@ -334,6 +340,32 @@ static int flat_triangle_check(char *start,const int gold[][4],int scenes) {
     return failed;
 }
 
+static int area_check(char *start) {
+    const int center[]={64,29,2};
+    double samples[20];
+    int failed=0;
+    for(int i=0;i<41;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==40?']':',')) return failed+1;
+        double gold=0,tolerance=0;
+        if(i) {
+            int cell=(i-1)%20,channel=cell%4;
+            if(i<=20) samples[cell]=actual;
+            if(channel==3) gold=255;
+            else if(cell/4==0) { gold=center[channel]; tolerance=2; }
+            else if(cell/4==2) { gold=samples[cell]; tolerance=1; }
+        }
+        if(actual<gold-tolerance || actual>gold+tolerance || (i>20 &&
+           (actual<samples[(i-1)%20]-1 || actual>samples[(i-1)%20]+1))) {
+            printf("GPU_AREA cell=%d actual=%.0f expected=%.0f\n",i,actual,gold);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
 static int shadow_map_check(char *start,int filter) {
     const int basic[]={0,128,128,128,0,0,128,128,128,0,0};
     const int filtered[]={0,90,90,68,38,0,90,90,68,38,0};
@@ -430,8 +462,10 @@ int main(int argc,char **argv) {
     int spot=spot_mutate || (argc==2 && tx_eqz(argv[1],"--spot"));
     int probe_mutate=argc==2 && tx_eqz(argv[1],"--light-probe-mutate");
     int light_probe=probe_mutate || (argc==2 && tx_eqz(argv[1],"--light-probe"));
+    int area_mutate=argc==2 && tx_eqz(argv[1],"--area-mutate");
+    int area=area_mutate || (argc==2 && tx_eqz(argv[1],"--area"));
     int fill=ambient || hemisphere || fog || exp_fog || spot || light_probe;
-    int simple=colors || fill;
+    int simple=colors || fill || area;
     if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
        !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
        !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate && !normal_mutate &&
@@ -460,7 +494,7 @@ int main(int argc,char **argv) {
         spot_mutate?"?spot-mutate":spot?"?spot":probe_mutate?"?light-probe-mutate":light_probe?"?light-probe":
         shadow_map_mutate?"?shadow-map-mutate":pcf_mutate?"?shadow-pcf-mutate":pcf?"?shadow-pcf":
         soft_mutate?"?shadow-pcf-soft-mutate":soft?"?shadow-pcf-soft":
-        vsm_mutate?"?shadow-vsm-mutate":vsm?"?shadow-vsm":"");
+        vsm_mutate?"?shadow-vsm-mutate":vsm?"?shadow-vsm":area_mutate?"?area-mutate":"");
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
     const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
@@ -474,7 +508,7 @@ int main(int argc,char **argv) {
             compile[args++]="ujs/practice/uxe/base/gpu-sprite.ujs";
         }
     }
-    else if(simple) {
+    else if(colors || fill) {
         compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
         compile[args++]="ujs/practice/uxe/base/vector-scalar.ujs";
         compile[args++]="ujs/practice/uxe/base/color.ujs";
@@ -487,7 +521,7 @@ int main(int argc,char **argv) {
             compile[args++]="ujs/practice/uxe/base/sphericalharmonics3.ujs";
         }
     }
-    else {
+    else if(!area) {
         compile[args++]="ujs/practice/uxe/base/geometry-buffers.ujs";
         compile[args++]="ujs/practice/uxe/base/boxgeometry.ujs";
         compile[args++]="ujs/practice/uxe/base/gpu-state.ujs";
@@ -511,6 +545,7 @@ int main(int argc,char **argv) {
     if(!targets && !simple && !shadow_map) compile[args++]="ujs/practice/uxe/test/gpu-lit-probe.ujs";
     compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":
         shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-probe.ujs":
+        area?"ujs/practice/uxe/test/gpu-area-probe.ujs":
         colors?"ujs/practice/uxe/test/gpu-output-probe.ujs":
         fill?"ujs/practice/uxe/test/gpu-fill-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
     compile[args++]="-o";
@@ -526,11 +561,12 @@ int main(int argc,char **argv) {
     int target_lines=(targets || shadow_map)?bridge_lines(target_bridge):0;
     int ready=lines>0 && lines+target_lines<=600 &&
         !sy_write_file(abi,declarations,sizeof declarations-1,0600) &&
-        !build_shaders(shaders,targets || simple || shadow_map,shadow_map)
+        !build_shaders(shaders,targets || simple || shadow_map,shadow_map,area)
         && !cx_runv_timeout(compile,10,&out,&bytes)
         && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
         && !gpu_copy(dir,"probe.html",targets?"ujs/practice/uxe/test/gpu-target-r160.html":
             shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-r160.html":
+            area?"ujs/practice/uxe/test/gpu-area-r160.html":
             colors?"ujs/practice/uxe/test/gpu-output-r160.html":
             fill?"ujs/practice/uxe/test/gpu-fill-r160.html":"ujs/practice/uxe/test/gpu-packet-r160.html")
         && !gpu_copy(dir,"gpu-host-abi.js",bridge)
@@ -562,6 +598,7 @@ int main(int argc,char **argv) {
             const int spot_gold[][4]={{92,44,4,255}};
             const int probe_gold[][4]={{104,51,5,255}};
             failed=targets?target_check(values):shadow_map?shadow_map_check(values,vsm?3:soft?2:pcf):
+                area?area_check(values):
                 colors?flat_triangle_check(values,color_gold,p3_readback?4:3):
                 fill?flat_triangle_check(values,(fog || exp_fog)?fog_gold:light_probe?probe_gold:spot?spot_gold:
                     hemisphere?hemisphere_gold:ambient_gold,1):
@@ -581,9 +618,10 @@ int main(int argc,char **argv) {
     if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
     mm_free(out);
     printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
-        targets?"GPU_TARGET":shadow_map?"GPU_SHADOW_MAP":colors?"GPU_OUTPUT":light_probe?"GPU_LIGHT_PROBE":spot?"GPU_SPOT":exp_fog?"GPU_FOG_EXP2":fog?"GPU_FOG":
+        targets?"GPU_TARGET":shadow_map?"GPU_SHADOW_MAP":area?"GPU_AREA":colors?"GPU_OUTPUT":light_probe?"GPU_LIGHT_PROBE":spot?"GPU_SPOT":exp_fog?"GPU_FOG_EXP2":fog?"GPU_FOG":
         hemisphere?"GPU_HEMISPHERE":ambient?"GPU_AMBIENT":"GPU_PACKET",
-        targets?5:p3_readback?4:colors?3:(fill || shadow_map)?1:43,
-        targets?93:shadow_map?11:p3_readback?164:colors?123:fill?41:1682,compiled.size,lines+target_lines,failed);
+        targets?5:p3_readback?4:colors?3:(fill || shadow_map || area)?1:43,
+        targets?93:shadow_map?11:p3_readback?164:colors?123:(fill || area)?41:1682,
+        compiled.size,lines+target_lines,failed);
     return failed!=0;
 }

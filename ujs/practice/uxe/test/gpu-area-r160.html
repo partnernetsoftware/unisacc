@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  BufferAttribute, BufferGeometry, DataTexture, Mesh, MeshStandardMaterial, PerspectiveCamera,
+  RectAreaLight, Scene, UniformsLib, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+const options = { alpha: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 16;
+  const gl = canvas.getContext("webgl2", options);
+  if (!gl) throw new Error("WebGL2 unavailable");
+  return { canvas, gl };
+}
+function pixels(gl) {
+  return [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]].flatMap(([x, y]) => {
+    const rgba = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    return [...rgba];
+  });
+}
+const status = document.querySelector("#gpu");
+try {
+  const actual = context();
+  let exports;
+  const submit = createGpuSubmit(actual.gl, () => exports.memory, () => 1);
+  const bytes = await fetch("./probe.wasm").then(response => response.arrayBuffer());
+  ({ instance: { exports } } = await WebAssembly.instantiate(bytes, { uxe_gpu_v1: { host_gpu_submit: submit } }));
+  const result = Number(exports.uxe_gpu_probe(location.search === "?area-mutate" ? 1n : 0n));
+  const reference = context();
+  const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl, ...options });
+  renderer.setSize(16, 16, false);
+  renderer.setClearColor(0, 1);
+  const identity = new DataTexture(new Uint8Array([255, 0, 0, 255]), 1, 1);
+  const diffuseOnly = new DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1);
+  identity.needsUpdate = diffuseOnly.needsUpdate = true;
+  // The diffuse LTC term is evaluated with the identity matrix. Zero the separate specular fit.
+  UniformsLib.LTC_FLOAT_1 = UniformsLib.LTC_HALF_1 = identity;
+  UniformsLib.LTC_FLOAT_2 = UniformsLib.LTC_HALF_2 = diffuseOnly;
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array([-0.75, -0.75, 0, 0.75, -0.75, 0, 0, 0.75, 0]), 3));
+  geometry.computeVertexNormals();
+  const material = new MeshStandardMaterial({ color: 0x804008, metalness: 0, roughness: 1 });
+  const light = new RectAreaLight(0xffffff, 1, 1, 1);
+  light.position.z = 1;
+  light.lookAt(0, 0, 0);
+  const scene = new Scene();
+  scene.add(new Mesh(geometry, material), light);
+  const camera = new PerspectiveCamera(90, 1, 0.01, 2);
+  camera.position.z = 1;
+  renderer.render(scene, camera);
+  status.textContent = JSON.stringify([result, ...pixels(actual.gl), ...pixels(reference.gl)]);
+  material.dispose();
+  geometry.dispose();
+  identity.dispose();
+  diffuseOnly.dispose();
+  renderer.dispose();
+} catch (error) {
+  status.textContent = String(error);
+}
+</script>
