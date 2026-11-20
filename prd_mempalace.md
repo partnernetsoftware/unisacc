@@ -75,7 +75,7 @@ flowchart LR
   回滚:git revert 0566008dfb 并删 .git/hooks/commit-msg;agent 不得再在提交说明里写署名行。
 
 - 废除 load1 负载门(项目所有者 2026-11-20 原话"不要再用什么 load1 这样的机制了,把这个机制停掉归档掉"):一切按 load1 放行、等待、降并发、拒跑的机制已停(dvqualify、prerun-drive --load-cap、flowadmit 减半、flowexec ADMIT 门与 admit_load_* 配置行、dvreact、s9-triage RERUN_ADMIT、s9-nightly-run --load-max、dvledger、perf-baseline、cx-dev watch),改为固定显式并发上限(--jobs/--max-jobs/--par/S9_WIDTH),load1 只作记录字段;取代下文"并发总量以机器负载不高于 10 为界"。
-  回滚:git revert 本决定所在三批提交(dvqualify 加 prerun-drive ecb8cb246f、flow 系、其余);新工具不得再引入 load1 判定。
+  回滚:git revert 本决定所在三批提交(dvqualify 加 prerun-drive ecb8cb246f、flow 系 de000a79d6、其余 39cba77ba6);新工具不得再引入 load1 判定。
 - 起链即内容截止(项目所有者授权的调度裁定 2026-11-19,依据 plans/speed-first-rev4.md:0.0.81 整链只占单版 8.5%,链后到公开占 37%,计划完成率 55%、未计划项占 57%):整链起点之后产品输入一律冻结,链后只收阻塞修复(产品输入变更须重起链);工具与测试与文档项可并行但不进候选键;0.0.83 目标压到 10 单位;R1 release-flow 与 R2 增量预跑兑现前速度道不加新大项。
 - 发布工具提前修复(R0,0.0.82):RELEASE-PREP-STRICT-NEEDS-FLAG 与 RELEASE-EXEC-X-COMMIT-EMPTY 两条缺口在 0.0.82 公开前修。
 - 提交门类与共用发布路径的变更验收:夹具绿不等于真实提交绿,必须在共享检出同款条件下真实提交一次成功(derive_gate、table-index、doc-links 三次假漂移都是靠真实提交抓到);共用路径(dvqualify、release-exec、release-prep、register)的补丁必须独立复核并做原版与补丁版真实发车对拍。
