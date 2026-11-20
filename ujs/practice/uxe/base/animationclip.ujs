@@ -1,0 +1,68 @@
+struct AnimationClip {
+  name: u32;
+  nameBytes: u32;
+  tracks: u32;
+  trackCount: u32;
+  blendMode: u32;
+  duration: f64;
+}
+
+native function clip_track_duration(track:i64,clip:i64) f64 {
+  if(!keyframe_track_at(track) || animation_overlap(clip,AnimationClip.size,track,KeyframeTrack.size)) { return -1.0; }
+  let view=ux_u32(track+KeyframeTrack.samples);
+  if(!animation_span(view,AnimationSamples.size) || animation_overlap(clip,AnimationClip.size,view,AnimationSamples.size)) { return -1.0; }
+  let count=ux_u32(view+AnimationSamples.count);
+  let stride=ux_u32(view+AnimationSamples.stride);
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let name=ux_u32(track+KeyframeTrack.name);
+  let bytes=ux_u32(track+KeyframeTrack.nameBytes);
+  if(count<1 || count>65536 || stride<1 || stride>64 || !animation_span(times,count*4) ||
+     !animation_span(values,count*stride*4) || bytes<1 || bytes>65535 || name>6291456-bytes ||
+     animation_overlap(clip,AnimationClip.size,times,count*4) ||
+     animation_overlap(clip,AnimationClip.size,values,count*stride*4) ||
+     animation_overlap(clip,AnimationClip.size,name,bytes)) { return -1.0; }
+  let last=ux_f32(times+(count-1)*4);
+  if(last-last!=0.0) { return -1.0; }
+  if(last<0.0) { return 0.0; }
+  return last;
+}
+
+native function clip_duration(clip:i64,tracks:i64,count:i64) f64 {
+  if(count<0 || count>65536 || !animation_span(tracks,count*4) ||
+     (count>0 && animation_overlap(clip,AnimationClip.size,tracks,count*4))) { return -1.0; }
+  let duration=0.0;
+  let i=0;
+  while(i<count) {
+    let last=clip_track_duration(ux_u32(tracks+i*4),clip);
+    if(last<0.0) { return last; }
+    if(last>duration) { duration=last; }
+    i=i+1;
+  }
+  return duration;
+}
+
+native function AnimationClip_init(clip:i64,name:i64,bytes:i64,tracks:i64,count:i64,duration:f64,blend:i64) i64 {
+  if(!animation_span(clip,AnimationClip.size) || clip%8!=0 || duration-duration!=0.0 ||
+     (blend!=2500 && blend!=2501) || bytes<0 || bytes>65535 || name<0 || name>6291456-bytes ||
+     (bytes>0 && animation_overlap(clip,AnimationClip.size,name,bytes))) { return 0-1; }
+  let inferred=clip_duration(clip,tracks,count);
+  if(inferred<0.0) { return 0-1; }
+  let length=duration;
+  if(length<0.0) { length=inferred; }
+  let a=ux_u32_put(clip+AnimationClip.name,name);
+  let b=ux_u32_put(clip+AnimationClip.nameBytes,bytes);
+  let c=ux_u32_put(clip+AnimationClip.tracks,tracks);
+  let d=ux_u32_put(clip+AnimationClip.trackCount,count);
+  let e=ux_u32_put(clip+AnimationClip.blendMode,blend);
+  let f=ux_f64_put(clip+AnimationClip.duration,length);
+  return clip;
+}
+
+native function AnimationClip_resetDuration(clip:i64) i64 {
+  if(!animation_span(clip,AnimationClip.size) || clip%8!=0) { return 0-1; }
+  let length=clip_duration(clip,ux_u32(clip+AnimationClip.tracks),ux_u32(clip+AnimationClip.trackCount));
+  if(length<0.0) { return 0-1; }
+  let written=ux_f64_put(clip+AnimationClip.duration,length);
+  return clip;
+}
