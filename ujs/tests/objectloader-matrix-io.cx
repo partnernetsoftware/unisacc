@@ -1,0 +1,46 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d","scene","group",
+        "json-read","loader-json","loadingmanager","fileloader","objectloader",0};
+    const char json[]="{\"object\":{\"type\":\"Scene\",\"matrix\":[2,0,0,0,0,3,0,0,0,0,4,0,5,0,0,1],"
+        "\"children\":[{\"type\":\"Group\",\"matrixAutoUpdate\":false,\"matrix\":[1,0,0,0,0,1,0,0,0,0,1,0,4,0,0,1]}]}}";
+    const int size=sizeof json-1;
+    const long root_x=tx_find(json,size,",5,0,0,1",8);
+    if(root_x<0) return 2;
+    char setup[4100];
+    int n=tx_snprintf(setup,sizeof setup,
+        "let input=256;let arena=1024;let size=%d;let root_x=input+%ld;",size,root_x+1);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let bytes=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,bytes[i]);i=i+1;}}",count,at);
+    }
+    tx_snprintf(setup+n,sizeof setup-n,
+        "let manager=LoadingManager_init(0);let file=FileLoader_init(32,manager);let id=FileLoader_begin(file,64);"
+        "let decoded=FileLoader_receive(file,id,200,input,size,64);"
+        "if(selected_case==7){let bad=ux_u8_put(root_x,120);}"
+        "let root=ObjectLoader_scene(file,arena,3,768);");
+    #define ROOT "let node=Object3D_address(arena,root);"
+    #define CHILD "let child=Object3D_address(arena,ux_u32(node+Object3D.firstChild));"
+    #define WORLD "let a=Object3D_updateMatrixWorld(arena,root,0);"
+    const char *cases[]={
+        ROOT "return ux_f64(ux_u32(node+Object3D.position));",
+        ROOT "return ux_f64(ux_u32(node+Object3D.scale)+8);",
+        ROOT CHILD "return ux_f64(ux_u32(child+Object3D.position));",
+        ROOT CHILD "return ux_f64(ux_u32(child+Object3D.localMatrix)+96);",
+        ROOT CHILD WORLD "return ux_f64(ux_u32(child+Object3D.worldMatrix)+96);",
+        ROOT CHILD WORLD "return ux_f64(ux_u32(child+Object3D.worldMatrix)+80);",
+        ROOT WORLD "return ux_f64(ux_u32(node+Object3D.worldMatrix)+96);",
+        "return 0.0+root;",
+    };
+    const double gold[]={5,3,0,4,13,4,5,-2};
+    return g_wasm_batch("G_IO ObjectLoader serialized matrices","objectloader-matrix",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?4:-1,ROOT CHILD WORLD "return ux_f64(ux_u32(child+Object3D.localMatrix)+96);");
+}

@@ -8,33 +8,50 @@ native function object_load_kind(obj:i64,end:i64,key:i64) i64 {
   return 0-1;
 }
 
-native function object_load_fields(obj:i64,end:i64,key:i64,node:i64) i64 {
-  if(LoaderJson_find(obj,end,key,1920229741,30825,0,6)!=0-2) { return 0-3; }
-  let visible=LoaderJson_find(obj,end,key,1769171318,6646882,0,7);
-  if(visible>=0) {
-    let c=ux_u8(visible);
-    if(c!=102 && c!=116) { return 0-3; }
-    let saved=ux_u32_put(node+Object3D.visible,c==116);
-  }
-  let position=LoaderJson_find(obj,end,key,1769172848,1852795252,0,8);
-  if(position==0-2) { return node; }
-  if(position<0 || ux_u8(position)!=91) { return 0-3; }
-  let p=json_space(position+1,end);
-  let out=ux_u32(node+Object3D.position);
+native function object_load_members(token:i64,end:i64,out:i64,count:i64) i64 {
+  if(token<0 || ux_u8(token)!=91) { return 0-3; }
+  let p=json_space(token+1,end);
   let i=0;
-  while(i<3) {
+  while(i<count) {
     let value=json_read_number(p,end);
     if(value-value!=0.0) { return 0-3; }
     let saved=ux_f64_put(out+i*8,value);
     p=json_space(json_value_end(p,end),end);
     if(p<0 || p>=end) { return 0-3; }
-    if(i<2) {
+    if(i+1<count) {
       if(ux_u8(p)!=44) { return 0-3; }
       p=json_space(p+1,end);
     }
     i=i+1;
   }
   if(ux_u8(p)!=93) { return 0-3; }
+  return out;
+}
+
+native function object_load_fields(obj:i64,end:i64,key:i64,node:i64) i64 {
+  let visible=LoaderJson_find(obj,end,key,1769171318,6646882,0,7);
+  if(visible>=0) {
+    let c=ux_u8(visible);
+    if(c!=102 && c!=116) { return 0-3; }
+    let saved=ux_u32_put(node+Object3D.visible,c==116);
+  }
+  let matrix=LoaderJson_find(obj,end,key,1920229741,30825,0,6);
+  if(matrix!=0-2) {
+    let local=ux_u32(node+Object3D.localMatrix);
+    if(object_load_members(matrix,end,local,16)<0) { return 0-3; }
+    let tail=ux_u32_put(key+12,1702125924);
+    let auto=LoaderJson_find(obj,end,key,1920229741,1967224937,1884647284,16);
+    if(auto>=0 && ux_u8(auto)!=102 && ux_u8(auto)!=116) { return 0-3; }
+    if(auto<0 || ux_u8(auto)==116) {
+      if(Matrix4_determinant(local)==0.0) { return 0-3; }
+      let pose=Matrix4_decompose(local,ux_u32(node+Object3D.position),ux_u32(node+Object3D.quaternion),
+          ux_u32(node+Object3D.scale));
+    }
+    let dirty=ux_u32_put(node+Object3D.dirty,2);
+    return node;
+  }
+  let position=LoaderJson_find(obj,end,key,1769172848,1852795252,0,8);
+  if(position!=0-2 && object_load_members(position,end,ux_u32(node+Object3D.position),3)<0) { return 0-3; }
   return node;
 }
 
@@ -77,15 +94,15 @@ native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key
   return 0-3;
 }
 
-// Use a private draft arena to prepare a Scene and its descendant Groups.
+// Use a private draft arena and 16 disjoint key bytes.
 native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 {
   if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
-     arena<0 || arena%8!=0 || arena>6291448 || capacity<1 || capacity>(6291448-arena)/424 || !loading_span(key,12)) { return 0-1; }
+     arena<0 || arena%8!=0 || arena>6291448 || capacity<1 || capacity>(6291448-arena)/424 || !loading_span(key,16)) { return 0-1; }
   let space=8+capacity*424;
   let src=ux_u32(file+FileLoader.bytes);
   let bytes=ux_u32(file+FileLoader.length);
-  if(src>6291456-bytes || !file_disjoint(file,FileLoader.size,arena,space) || !file_disjoint(file,FileLoader.size,key,12) ||
-     !file_disjoint(src,bytes,arena,space) || !file_disjoint(src,bytes,key,12) || !file_disjoint(arena,space,key,12)) { return 0-1; }
+  if(src>6291456-bytes || !file_disjoint(file,FileLoader.size,arena,space) || !file_disjoint(file,FileLoader.size,key,16) ||
+     !file_disjoint(src,bytes,arena,space) || !file_disjoint(src,bytes,key,16) || !file_disjoint(arena,space,key,16)) { return 0-1; }
   let end=src+bytes;
   let parsed=json_value_end(src,end);
   if(parsed<0 || json_space(parsed,end)!=end) { return 0-2; }
