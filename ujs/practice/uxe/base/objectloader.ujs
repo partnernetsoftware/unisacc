@@ -1,11 +1,65 @@
+struct ObjectLoadBindings {
+  geometries: u32;
+  geometryCount: u32;
+  materials: u32;
+  materialCount: u32;
+  links: u32;
+  linkCapacity: u32;
+  linkCount: u32;
+}
+
 native function object_load_kind(obj:i64,end:i64,key:i64) i64 {
   let name=LoaderJson_find(obj,end,key,1701869940,0,0,4);
+  if(name>=0 && json_scan_string(name,end)==name+6 && ux_u32(name+1)==1752393037) { return 4; }
   if(name<0 || json_scan_string(name,end)!=name+7) { return 0-1; }
   let head=ux_u32(name+1);
   let tail=ux_u8(name+5);
   if(head==1852138323 && tail==101) { return 3; }
   if(head==1970238023 && tail==112) { return 2; }
   return 0-1;
+}
+
+// Each immutable resource row holds a UUID span and a nonzero typed handle.
+native function object_load_reference(token:i64,end:i64,table:i64,count:i64) i64 {
+  let close=json_scan_string(token,end);
+  if(close<0 || close-token<3) { return 0-1; }
+  let i=0;
+  let result=0;
+  while(i<count) {
+    let row=table+i*12;
+    let address=ux_u32(row);
+    let size=ux_u32(row+4);
+    if(size<1 || size>128 || address>6291456-size) { return 0-1; }
+    let same=size==close-token-2;
+    let j=0;
+    while(same && j<size) {
+      same=ux_u8(address+j)==ux_u8(token+1+j);
+      j=j+1;
+    }
+    if(same) {
+      if(result!=0 || ux_u32(row+8)==0) { return 0-1; }
+      result=ux_u32(row+8);
+    }
+    i=i+1;
+  }
+  if(result==0) { return 0-1; }
+  return result;
+}
+
+native function object_load_link(obj:i64,end:i64,key:i64,bindings:i64,node:i64,i:i64) i64 {
+  if(bindings<0 || i>=ux_u32(bindings+ObjectLoadBindings.linkCapacity)) { return 0-1; }
+  let geometry=LoaderJson_find(obj,end,key,1836016999,2037544037,0,8);
+  let material=LoaderJson_find(obj,end,key,1702125933,1818323314,0,8);
+  let mesh=object_load_reference(geometry,end,ux_u32(bindings+ObjectLoadBindings.geometries),
+      ux_u32(bindings+ObjectLoadBindings.geometryCount));
+  let shade=object_load_reference(material,end,ux_u32(bindings+ObjectLoadBindings.materials),
+      ux_u32(bindings+ObjectLoadBindings.materialCount));
+  if(mesh<0 || shade<0) { return 0-1; }
+  let row=ux_u32(bindings+ObjectLoadBindings.links)+i*12;
+  let a=ux_u32_put(row,node);
+  let b=ux_u32_put(row+4,mesh);
+  let c=ux_u32_put(row+8,shade);
+  return i+1;
 }
 
 native function object_load_members(token:i64,end:i64,out:i64,count:i64) i64 {
@@ -55,25 +109,35 @@ native function object_load_fields(obj:i64,end:i64,key:i64,node:i64) i64 {
   return node;
 }
 
-native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key:i64) i64 {
-  if(children==0-2) { return root; }
+native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key:i64,bindings:i64) i64 {
+  if(children==0-2) { return 0; }
   if(children<0 || ux_u8(children)!=91) { return 0-3; }
   let parents=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
   let resume=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];
   let parent=root;
   let depth=0;
+  let links=0;
   let at=json_space(children+1,end);
   while(at>=0 && at<end) {
     if(ux_u8(at)==93) {
-      if(depth==0) { return root; }
+      if(depth==0) { return links; }
       depth=depth-1;
       parent=parents[depth];
       at=resume[depth];
     } else {
-      if(object_load_kind(at,end,key)!=2) { return 0-3; }
+      let kind=object_load_kind(at,end,key);
+      if(kind!=2 && (kind!=4 || bindings<0)) { return 0-3; }
       let nested=LoaderJson_find(at,end,key,1818847331,1852142180,0,8);
       if((nested>=0 && ux_u8(nested)!=91) || nested==0-1) { return 0-3; }
-      let group=Group_create(arena);
+      let group=0;
+      if(kind==2) { group=Group_create(arena); }
+      else {
+        group=Object3D_create(arena);
+        if(group>=0) {
+          links=object_load_link(at,end,key,bindings,group,links);
+          if(links<0) { return 0-5; }
+        }
+      }
       if(group<0) { return 0-4; }
       if(object_load_fields(at,end,key,Object3D_address(arena,group))<0 ||
          Object3D_add(arena,parent,group)<0) { return 0-3; }
@@ -94,8 +158,44 @@ native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key
   return 0-3;
 }
 
+native function object_load_binding_span(at:i64,bytes:i64,src:i64,length:i64,arena:i64,space:i64,key:i64) i64 {
+  return loading_span(at,bytes) && file_disjoint(at,bytes,src,length) &&
+    file_disjoint(at,bytes,arena,space) && file_disjoint(at,bytes,key,16);
+}
+
+native function object_load_bindings_valid(bindings:i64,src:i64,length:i64,arena:i64,space:i64,key:i64,file:i64) i64 {
+  if(!object_load_binding_span(bindings,ObjectLoadBindings.size,src,length,arena,space,key) ||
+     !file_disjoint(bindings,ObjectLoadBindings.size,file,FileLoader.size) ||
+     ux_u32(bindings+ObjectLoadBindings.linkCount)!=0) { return 0; }
+  let links=ux_u32(bindings+ObjectLoadBindings.links);
+  let cap=ux_u32(bindings+ObjectLoadBindings.linkCapacity);
+  if(cap>65535 || !object_load_binding_span(links,cap*12,src,length,arena,space,key) ||
+     !file_disjoint(links,cap*12,bindings,ObjectLoadBindings.size) ||
+     !file_disjoint(links,cap*12,file,FileLoader.size)) { return 0; }
+  let table_index=0;
+  while(table_index<2) {
+    let field=bindings+table_index*8;
+    let table=ux_u32(field);
+    let count=ux_u32(field+4);
+    if(count>65535 || !object_load_binding_span(table,count*12,src,length,arena,space,key) ||
+       !file_disjoint(table,count*12,links,cap*12) ||
+       !file_disjoint(table,count*12,bindings,ObjectLoadBindings.size)) { return 0; }
+    let i=0;
+    while(i<count) {
+      let addr=ux_u32(table+i*12);
+      let bytes=ux_u32(table+i*12+4);
+      if(bytes<1 || bytes>128 || addr>6291456-bytes ||
+         !file_disjoint(addr,bytes,links,cap*12) || !file_disjoint(addr,bytes,arena,space) ||
+         !file_disjoint(addr,bytes,key,16) || !file_disjoint(addr,bytes,bindings,ObjectLoadBindings.size)) { return 0; }
+      i=i+1;
+    }
+    table_index=table_index+1;
+  }
+  return 1;
+}
+
 // Use a private draft arena and 16 disjoint key bytes.
-native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 {
+native function object_load_scene(file:i64,arena:i64,capacity:i64,key:i64,bindings:i64) i64 {
   if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
      arena<0 || arena%8!=0 || arena>6291448 || capacity<1 || capacity>(6291448-arena)/424 || !loading_span(key,16)) { return 0-1; }
   let space=8+capacity*424;
@@ -103,6 +203,7 @@ native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 
   let bytes=ux_u32(file+FileLoader.length);
   if(src>6291456-bytes || !file_disjoint(file,FileLoader.size,arena,space) || !file_disjoint(file,FileLoader.size,key,16) ||
      !file_disjoint(src,bytes,arena,space) || !file_disjoint(src,bytes,key,16) || !file_disjoint(arena,space,key,16)) { return 0-1; }
+  if(bindings>=0 && !object_load_bindings_valid(bindings,src,bytes,arena,space,key,file)) { return 0-1; }
   let end=src+bytes;
   let parsed=json_value_end(src,end);
   if(parsed<0 || json_space(parsed,end)!=end) { return 0-2; }
@@ -112,7 +213,19 @@ native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 
   let root=Scene_create(storage);
   let initialized=object_load_fields(obj,end,key,Object3D_address(arena,root));
   let result=0-3;
-  if(initialized>=0) { result=object_load_children(arena,root,LoaderJson_find(obj,end,key,1818847331,1852142180,0,8),end,key); }
-  if(result<0) { let discarded=Object3D_initArena(arena,capacity); }
-  return result;
+  if(initialized>=0) {
+    result=object_load_children(arena,root,LoaderJson_find(obj,end,key,1818847331,1852142180,0,8),end,key,bindings);
+  }
+  if(result<0) { let discarded=Object3D_initArena(arena,capacity); return result; }
+  if(bindings>=0) { let published=ux_u32_put(bindings+ObjectLoadBindings.linkCount,result); }
+  return root;
+}
+
+native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 {
+  return object_load_scene(file,arena,capacity,key,0-1);
+}
+
+native function ObjectLoader_sceneWithMeshes(file:i64,arena:i64,capacity:i64,key:i64,bindings:i64) i64 {
+  if(bindings<0) { return 0-1; }
+  return object_load_scene(file,arena,capacity,key,bindings);
 }

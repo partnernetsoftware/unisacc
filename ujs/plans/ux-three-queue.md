@@ -214,7 +214,8 @@
 - MaterialLoader 专属参数和贴图 | G-io 类型专属渲染状态、均匀量与其余贴图 | 材质类型分派与纹理表。
 - ~~ObjectLoader 嵌套 Scene 与 Group | G-io 多层树、同级顺序、世界变换及失败清空草稿 | Scene、Object3D。~~ 10 项通过，子节点世界 X 从 7 篡改为 8 转红，旧六项通过。
 - ~~ObjectLoader 序列化矩阵 | G-io r160 toJSON、矩阵分解、固定局部矩阵与世界值 | 嵌套树与 Matrix4。~~ 八项通过，拿局部矩阵替换世界矩阵反例从 13 变为 4。
-- ObjectLoader 两阶段整景 | G-io 几何、材质、图像引用及失败回退 | 嵌套树、BufferGeometryLoader、MaterialLoader、图像加载。
+- ~~ObjectLoader 场景与几何材质 UUID 链接 | G-io 嵌套 Mesh、共享资源、错误和草稿回退 | 嵌套树与已备资源表。~~ 10 项通过，材质误绑由 19 变为 11 转红，矩阵、树与原加载门通过。
+- ObjectLoader 两阶段整景 | G-io 读取内层资源定义、图像、纹理及多材质并统一发布 | 场景 UUID 链接、BufferGeometryLoader、MaterialLoader、图像加载。
 - ~~GLTFLoader 稀疏访问器 | G-io 零底阵列、交错底阵列、顺序、边界和失败保留 | GLB 密集访问器。~~ 14 项通过，补丁索引篡改转红，旧访问器和三角形各八项通过。现阶段对照本地 r160 Attribute。
 - ~~GLTFLoader 网格属性访问 | G-io 稀疏 UV、密集位置、归一化自定义属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。~~ 11 项和实际插件 18 项通过，替换 UV 分量反例转红。
 - GLTFLoader 图元整体装配 | G-io 图元模式、拓扑、全部属性数量、稀疏索引及发布 | 网格属性访问、GLB 图元。
