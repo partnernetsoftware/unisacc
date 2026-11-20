@@ -15,6 +15,7 @@
 */
 #define BASELINE "tests/cxraw.tsv"
 #define LAYERS "tests/cxraw-layers.tsv"
+#define ANCHORS "tests/cxraw-anchors.tsv"
 #define MAXROWS 4096
 #define CAP 65536
 #pragma unisa use text.text
@@ -60,14 +61,33 @@ static int unbounded(const char *s, size_t n) {
     for (k = 0; raw_names[k]; k++) if (name_is(s, n, raw_names[k])) return 1;
     return 0;
 }
+/* The unit suffix comes from the anchor fact table; exactly one unit-suffix row is required. */
+static char *unit_suffix; static long unit_suffix_n;
+static int load_anchors(void) {
+    size_t n, i = 0, e; int rows = 0; char *b = cx_read("tests/cxraw-anchors.tsv", &n);   /* literal (not ANCHORS): cx-lint R4 sees the TSV fact origin */
+    if (!b) { fprintf(stderr, "cxraw: cannot read %s\n", ANCHORS); return -1; }
+    while (i < n) {
+        e = i; while (e < n && b[e] != '\n') e++;
+        if (e < n) b[e] = 0;
+        if (e > i && b[i] != '#') {
+            if (e - i > 12 && tx_find(b + i, 12, "unit-suffix\t", 12) == 0) { unit_suffix = b + i + 12; unit_suffix_n = (long)(e - i - 12); rows++; }
+            else { fprintf(stderr, "cxraw: %s: unknown row '%s'\n", ANCHORS, b + i); return -1; }
+        }
+        i = e + 1;
+    }
+    if (rows != 1 || unit_suffix_n < 1) { fprintf(stderr, "cxraw: %s: need exactly one unit-suffix row\n", ANCHORS); return -1; }
+    return 0;
+}
 static int load_layers(void) {
-    size_t n, i = 0, e; char *b = cx_read(LAYERS, &n);
+    size_t n, i = 0, e; char *b;
+    if (load_anchors() < 0) return -1;
+    b = cx_read("tests/cxraw-layers.tsv", &n);   /* literal (not LAYERS): cx-lint R4 sees the TSV fact origin */
     if (!b) { fprintf(stderr, "cxraw: cannot read %s\n", LAYERS); return -1; }
     while (i < n) {
         e = i; while (e < n && b[e] != '\n') e++;
         if (e < n) b[e] = 0;
         if (e > i && b[i] != '#') {
-            if (nbottom == 64 || b[e - 1] != '/' && tx_find(b + i, (long)(e - i), ".cx", 3) < 0) { fprintf(stderr, "cxraw: %s: bad prefix '%s'\n", LAYERS, b + i); return -1; }
+            if (nbottom == 64 || b[e - 1] != '/' && tx_find(b + i, (long)(e - i), unit_suffix, unit_suffix_n) < 0) { fprintf(stderr, "cxraw: %s: bad prefix '%s'\n", LAYERS, b + i); return -1; }
             bottom[nbottom++] = b + i;
         }
         i = e + 1;
@@ -130,6 +150,7 @@ static int count_calls(const char *b, size_t n) {
     return c;
 }
 
+static Row *find_row(const char *path);   /* defined below; used by load_baseline (C99 forbids the implicit declaration) */
 static int load_baseline(void) {
     size_t n, i = 0, e, t; char *b = cx_read(BASELINE, &n);
     if (!b) { fprintf(stderr, "cxraw: cannot read %s (run --write once)\n", BASELINE); return -1; }
