@@ -276,3 +276,66 @@ fail:
     }
     return 1;
 }
+
+typedef void (*rspl_rst_fn)(void);
+typedef int (*rspl_span_fn)(const char *, const char *, const char *, int, unsigned, const char *, const char *, unsigned char *, long, unsigned char **, long *, char *, int);
+typedef int (*rspl_put_fn)(const char *, int, const unsigned char *, int);
+typedef int (*rspl_pop_fn)(void);
+typedef int (*rspl_inc_fn)(const char *, const unsigned char **, int *);
+typedef int (*rspl_obj_fn)(rspl_span_fn, rspl_put_fn, rspl_pop_fn, const char *, const char *, const char *, int, unsigned char *, long, unsigned char **, long *, char *, int);
+
+static rspl_rst_fn g_rst;
+static rspl_span_fn g_span;
+static rspl_put_fn g_put;
+static rspl_pop_fn g_pop;
+static rspl_obj_fn g_obj;
+static const char *g_tgt;
+static char g_obj_route[64];
+static int g_compile_err;
+
+static int rspl_drive_compile(const char *unit_src, int cx, const char *rt_macro,
+                              unsigned char *sb, long sn, unsigned char **ob, long *on) {
+    unsigned char one = 1;
+    char why[128];
+    long ml = rspl_len(rt_macro, 32);
+    int pr;
+    if (ml <= 0) { mm_free(sb); return 1; }
+    if (g_rst) g_rst();
+    if (g_put("\0cli/object", 11, &one, 1)) { mm_free(sb); return 1; }
+    if (g_put("\0cli/funit", 10, &one, 1)) { g_pop(); mm_free(sb); return 1; }
+    if (g_put("\0cli/defines", 12, (const unsigned char *)rt_macro, (int)ml + 1)) { g_pop(); g_pop(); mm_free(sb); return 1; }
+    why[0] = 0;
+    pr = g_obj(g_span, g_put, g_pop, g_obj_route, g_tgt, unit_src, cx, sb, sn, ob, on, why, 128);
+    g_pop(); g_pop(); g_pop();
+    if (g_rst) g_rst();
+    if (pr) {
+        if (pr == 1) g_compile_err = 1;
+        return pr;
+    }
+    return 0;
+}
+
+/* Entry point from src/drive.cx before dv_replay.
+ * Returns: 0 = linked ELF in *img_out/*imgn_out ready to exec;
+ *          1 = silent fallback to whole-program route (zero extra stderr);
+ *          2 = unit compilation rejected with diagnostics already on stderr. */
+int rspl_drive(const char *cont_path, const char *tgt, int level, int nsrc, const char *const *srcv,
+               rspl_rst_fn rst, rspl_span_fn span, rspl_put_fn put, rspl_pop_fn pop, rspl_inc_fn inc, rspl_obj_fn obj,
+               unsigned char **img_out, long *imgn_out) {
+    unsigned char *cb = 0;
+    int64_t cn = 0;
+    char cand_sha[65];
+    int at = 0, rc;
+    const char *ol = level == 1 ? "/object/O1" : level == 2 ? "/object/O2" : "/object/O0";
+    if (!rspl_mode() || !cont_path || !cont_path[0] || !tgt || !rspl_eqz(tgt, "lnx/x86_64")) return 1;
+    if (sy_read_file(cont_path, &cb, &cn, 1L << 29) || !cb || cn <= 0) return 1;
+    if (sy_sha256_hex(cb, (long)cn, cand_sha)) { mm_free(cb); return 1; }
+    mm_free(cb);
+    g_obj_route[0] = 0;
+    if (rspl_cat(g_obj_route, (int)sizeof g_obj_route, &at, tgt) ||
+        rspl_cat(g_obj_route, (int)sizeof g_obj_route, &at, ol)) return 1;
+    g_rst = rst; g_span = span; g_put = put; g_pop = pop; g_obj = obj; g_tgt = tgt; g_compile_err = 0;
+    rc = rspl_try(cand_sha, tgt, level, nsrc, srcv, inc, rspl_drive_compile, img_out, imgn_out);
+    if (rc == 0) return 0;
+    return g_compile_err ? 2 : 1;
+}
