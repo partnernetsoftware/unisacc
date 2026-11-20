@@ -1,0 +1,79 @@
+struct JpegBits {
+  next: u32;
+  end: u32;
+  byte: u32;
+  remaining: u32;
+}
+
+native function jpeg_bit(reader:i64) i64 {
+  let left=ux_u32(reader+JpegBits.remaining);
+  let byte=ux_u32(reader+JpegBits.byte);
+  if(left==0) {
+    let at=ux_u32(reader+JpegBits.next);
+    let end=ux_u32(reader+JpegBits.end);
+    if(at>=end) { return 0-6; }
+    byte=ux_u8(at);
+    at=at+1;
+    if(byte==255) {
+      if(at>=end || ux_u8(at)!=0) { return 0-6; }
+      at=at+1;
+    }
+    let position=ux_u32_put(reader+JpegBits.next,at);
+    let current=ux_u32_put(reader+JpegBits.byte,byte);
+    left=8;
+  }
+  left=left-1;
+  let count=ux_u32_put(reader+JpegBits.remaining,left);
+  return u32_shr(byte,left)%2;
+}
+
+// The DHT table span starts at the sixteen counts, then the symbols in the
+// order supplied by the JPEG stream (not numerical symbol order).
+native function jpeg_huffman(reader:i64,table:i64) i64 {
+  let code=0;
+  let first=0;
+  let skip=0;
+  let i=0;
+  while(i<16) {
+    let bit=jpeg_bit(reader);
+    if(bit<0) { return bit; }
+    code=code*2+bit;
+    let count=ux_u8(table+i);
+    if(code>=first && code<first+count) { return ux_u8(table+16+skip+code-first); }
+    first=(first+count)*2;
+    skip=skip+count;
+    i=i+1;
+  }
+  return 0-6;
+}
+
+native function jpeg_magnitude(reader:i64,bits:i64) i64 {
+  let value=0;
+  let scale=1;
+  let i=0;
+  while(i<bits) {
+    let bit=jpeg_bit(reader);
+    if(bit<0) { return 65536; }
+    value=value*2+bit;
+    scale=scale*2;
+    i=i+1;
+  }
+  if(bits>0 && value<scale/2) { return value-scale+1; }
+  return value;
+}
+
+native function jpeg_dht_end(counts:i64,end:i64) i64 {
+  if(counts>end-16) { return 0-2; }
+  let count=0;
+  let room=2;
+  let i=0;
+  while(i<16) {
+    let n=ux_u8(counts+i);
+    if(n>=room) { return 0-6; }
+    count=count+n;
+    room=(room-n)*2;
+    i=i+1;
+  }
+  if(count<1 || count>256 || counts+16>end-count) { return 0-6; }
+  return counts+16+count;
+}

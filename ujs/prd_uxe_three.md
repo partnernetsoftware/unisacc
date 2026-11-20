@@ -259,6 +259,8 @@ G-io 使用小型 PNG、JPEG、嵌入 PNG 的 GLB、带蒙皮动画的 GLB 和 r
 
 PNG 解码切片支持非隔行 RGBA8，以及存储、固定 Huffman 和动态 Huffman 三种 Deflate 块。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。`png-header-io.cx`、`png-stored-io.cx`、`png-fixed-io.cx` 与 `png-dynamic-io.cx` 使用程序合成的小图和浏览器像素对照。动态树需要额外 3008 字节工作区。调色板、其他色型和隔行仍待覆盖。
 
+JPEG 首个像素解码切片支持单分量 8 位基线灰度，包括 DC 和 AC 熵解码、反量化、二维逆变换及边缘裁切。`jpeg-gray-io.cx` 与 r160 ImageLoader 对照同一张合成 JPEG，并验证截断、填充位错误和失败后输出未发布。彩色、渐进与重启间隔仍待覆盖。
+
 预计提交顺序为请求管理，字节视图与加载器基类，PNG 容器与解码，JPEG 头与基线解码，图像及纹理装载，场景 JSON 两阶段链接，GLB 容器与访问器，材质与图像关联，蒙皮动画连接及失败回收。每种编码范围独立记录；渐进 JPEG、压缩扩展等只有实测通过才升格。
 
 ### 5.4 M10 拾取与控制
