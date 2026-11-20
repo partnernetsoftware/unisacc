@@ -1,0 +1,137 @@
+// The Object3D arena owns the node. Mesh owns its morph rows, while geometry,
+// material and morph attributes are shared with other mesh instances.
+struct Mesh {
+  node: u32;
+  geometry: u32;
+  material: u32;
+  morphRows: u32;
+  morphCapacity: u32;
+  morphCount: u32;
+  morphRelative: u32;
+}
+
+native function mesh_valid(mesh:i64) i64 {
+  return mesh>=0 && mesh<=6291456-Mesh.size && mesh%4==0;
+}
+
+native function Mesh_init(mesh:i64,arena:i64,node:i64,geometry:i64,material:i64,rows:i64,capacity:i64) i64 {
+  if(!mesh_valid(mesh) || geometry<0 || geometry>6291456-BufferGeometry.size || geometry%4!=0 ||
+     material<0 || material>4294967295 || rows<0 || rows>6291456 || rows%8!=0 ||
+     capacity<0 || capacity>(6291456-rows)/16 ||
+     (capacity>0 && mesh<rows+16*capacity && rows<mesh+Mesh.size) ||
+     Object3D_address(arena,node)<0) { return 0-1; }
+  let a=ux_u32_put(mesh+Mesh.node,node);
+  let b=ux_u32_put(mesh+Mesh.geometry,geometry);
+  let c=ux_u32_put(mesh+Mesh.material,material);
+  let d=ux_u32_put(mesh+Mesh.morphRows,rows);
+  let e=ux_u32_put(mesh+Mesh.morphCapacity,capacity);
+  let f=ux_u32_put(mesh+Mesh.morphCount,0);
+  let g=ux_u32_put(mesh+Mesh.morphRelative,0);
+  return mesh;
+}
+
+// A descriptor stores a BufferAttribute address and a nonzero interned name.
+// A zero name selects the numeric index. Each instance has its own influence.
+native function Mesh_updateMorphTargets(mesh:i64,descriptors:i64,count:i64,relative:i64) i64 {
+  if(!mesh_valid(mesh) || count<0 || count>ux_u32(mesh+Mesh.morphCapacity) ||
+     descriptors<0 || descriptors>6291456 || descriptors%4!=0 ||
+     count>(6291456-descriptors)/8) { return 0-1; }
+  let rows=ux_u32(mesh+Mesh.morphRows);
+  if(count>0 && rows<descriptors+8*count && descriptors<rows+16*count) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let view=ux_u32(descriptors+8*i);
+    if(view>6291456-BufferAttribute.size || view%4!=0) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let row=rows+16*i;
+    let a=ux_u32_put(row,ux_u32(descriptors+8*i));
+    let b=ux_u32_put(row+4,ux_u32(descriptors+8*i+4));
+    let c=ux_f64_put(row+8,0.0);
+    i=i+1;
+  }
+  let mode=ux_u32_put(mesh+Mesh.morphRelative,relative!=0);
+  let size=ux_u32_put(mesh+Mesh.morphCount,count);
+  return mesh;
+}
+
+native function Mesh_setMorphInfluence(mesh:i64,index:i64,weight:f64) i64 {
+  if(!mesh_valid(mesh) || index<0 || index>=ux_u32(mesh+Mesh.morphCount) || weight!=weight) { return 0-1; }
+  let put=ux_f64_put(ux_u32(mesh+Mesh.morphRows)+16*index+8,weight);
+  return mesh;
+}
+
+native function Mesh_findMorphTarget(mesh:i64,name:i64) i64 {
+  if(!mesh_valid(mesh) || name<=0 || name>4294967295) { return 0-1; }
+  let rows=ux_u32(mesh+Mesh.morphRows);
+  let i=ux_u32(mesh+Mesh.morphCount);
+  while(i>0) {
+    i=i-1;
+    if(ux_u32(rows+16*i+4)==name) { return i; }
+  }
+  return 0-1;
+}
+
+native function mesh_vertex_axis(mesh:i64,view:i64,index:i64,axis:i64) f64 {
+  let base=BufferAttribute_getComponent(view,index,axis);
+  let rows=ux_u32(mesh+Mesh.morphRows);
+  let count=ux_u32(mesh+Mesh.morphCount);
+  let relative=ux_u32(mesh+Mesh.morphRelative);
+  let value=base;
+  let i=0;
+  while(i<count) {
+    let at=rows+16*i;
+    let weight=ux_f64(at+8);
+    if(weight!=0.0) {
+      let morph=BufferAttribute_getComponent(ux_u32(at),index,axis);
+      if(relative==0) { morph=morph-base; }
+      value=value+morph*weight;
+    }
+    i=i+1;
+  }
+  return value;
+}
+
+native function Mesh_getVertexPosition(mesh:i64,out:i64,vertex:i64,position:i64) i64 {
+  if(!mesh_valid(mesh) || out<0 || out>6291456-24 || out%8!=0 || vertex<0) { return 0-1; }
+  let row=BufferGeometry_find(ux_u32(mesh+Mesh.geometry),position);
+  if(row<0) { return 0-1; }
+  let view=ux_u32(row+4);
+  if(vertex>=ux_u32(view+BufferAttribute.count) || ux_u32(view+BufferAttribute.itemSize)<3) { return 0-1; }
+  let x=mesh_vertex_axis(mesh,view,vertex,0);
+  let y=mesh_vertex_axis(mesh,view,vertex,1);
+  let z=mesh_vertex_axis(mesh,view,vertex,2);
+  if(x!=x || y!=y || z!=z) { return 0-1; }
+  let a=ux_f64_put(out,x);
+  let b=ux_f64_put(out+8,y);
+  let c=ux_f64_put(out+16,z);
+  return out;
+}
+
+native function Mesh_copy(dst:i64,dst_arena:i64,src:i64,src_arena:i64,recursive:i64) i64 {
+  if(!mesh_valid(dst) || !mesh_valid(src)) { return 0-1; }
+  if(dst==src && dst_arena==src_arena) { return dst; }
+  let count=ux_u32(src+Mesh.morphCount);
+  let from=ux_u32(src+Mesh.morphRows);
+  let to=ux_u32(dst+Mesh.morphRows);
+  if(count>ux_u32(dst+Mesh.morphCapacity) ||
+     (count>0 && to<from+16*count && from<to+16*count)) { return 0-1; }
+  let node=Object3D_copy(dst_arena,ux_u32(dst+Mesh.node),src_arena,ux_u32(src+Mesh.node),recursive);
+  if(node<0) { return node; }
+  let a=ux_u32_put(dst+Mesh.geometry,ux_u32(src+Mesh.geometry));
+  let b=ux_u32_put(dst+Mesh.material,ux_u32(src+Mesh.material));
+  let c=ux_u32_put(dst+Mesh.morphRelative,ux_u32(src+Mesh.morphRelative));
+  let i=0;
+  while(i<count) {
+    let from_row=from+16*i;
+    let to_row=to+16*i;
+    let view=ux_u32_put(to_row,ux_u32(from_row));
+    let name=ux_u32_put(to_row+4,ux_u32(from_row+4));
+    let weight=ux_f64_put(to_row+8,ux_f64(from_row+8));
+    i=i+1;
+  }
+  let n=ux_u32_put(dst+Mesh.morphCount,count);
+  return dst;
+}
