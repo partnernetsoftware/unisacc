@@ -1,0 +1,72 @@
+#pragma unisa use g_math
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+static void put_bits(unsigned char *bytes,int *at,int code,int width,int msb) {
+    for(int i=0;i<width;i++,(*at)++) {
+        const int index=msb?width-1-i:i;
+        bytes[*at/8]|=((code>>index)&1)<<(*at%8);
+    }
+}
+
+static int fixture(unsigned char p[200],int mode) {
+    const unsigned char header[]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,8,0,0,0,1,8,6,0,0,0};
+    for(int i=0;i<29;i++) p[i]=header[i];
+    be(p+29,dz_crc32(0,p+12,17));
+    unsigned char pixels[33]={0};
+    for(int i=1;i<33;i+=4) { pixels[i]=255; pixels[i+1]=40; pixels[i+2]=10; pixels[i+3]=255; }
+    p[41]=120; p[42]=1;
+    for(int i=43;i<61;i++) p[i]=0;
+    int bit=0;
+    put_bits(p+43,&bit,3,3,0);
+    for(int i=0;i<5;i++) {
+        int byte=pixels[i];
+        put_bits(p+43,&bit,byte<144?48+byte:256+byte,byte<144?8:9,1);
+    }
+    put_bits(p+43,&bit,15,7,1); // Length symbol 271: base 27 plus one.
+    put_bits(p+43,&bit,1,2,0);
+    put_bits(p+43,&bit,3,5,1); // Backreference distance four.
+    put_bits(p+43,&bit,0,7,1); // End-of-block symbol 256.
+    int n=(bit+7)/8;
+    if(mode) p[43]=(p[43]&~6u)|6;
+    unsigned a=1,b=0;
+    for(int i=0;i<33;i++) { a=(a+pixels[i])%65521; b=(b+a)%65521; }
+    be(p+43+n,(b<<16)+a);
+    const int length=n+6;
+    be(p+33,length);be(p+37,0x49444154u);
+    be(p+41+length,dz_crc32(0,p+37,4+length));
+    int end=45+length;
+    be(p+end,0);be(p+end+4,0x49454e44u);be(p+end+8,dz_crc32(0,p+end+4,4));
+    return end+12;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-fixed","png-stored",0};
+    unsigned char good[200],bad[200];int size=fixture(good,0);
+    if(size<1 || size!=fixture(bad,1)) return 2;
+    char setup[1700];int n=tx_snprintf(setup,sizeof setup,"let size=%d;let good=[",size);
+    for(int i=0;i<size;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",good[i]);
+    n+=tx_snprintf(setup+n,sizeof setup-n,"];let bad=[");
+    for(int i=0;i<size;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",bad[i]);
+    tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<size){let a=ux_u8_put(i,good[i]);let b=ux_u8_put(256+i,bad[i]);i=i+1;}");
+    const char *cases[]={
+        "return PngDecode_rgba8(0,size,512,32,1024,200);",
+        "let n=PngDecode_rgba8(0,size,512,32,1024,200);return ux_u8(512);",
+        "let n=PngDecode_rgba8(0,size,512,32,1024,200);return ux_u8(541);",
+        "let n=PngDecode_rgba8(0,size,512,32,1024,200);return ux_u8(542);",
+        "return PngDecode_stored(0,size,512,32,1024,200);",
+        "return PngDecode_rgba8(256,size,512,32,1024,200);",
+        "let guard=ux_u8_put(512,99);let n=PngDecode_rgba8(256,size,512,32,1024,200);return ux_u8(512);"
+    };
+    const double gold[]={32,255,40,10,-7,-7,99};
+    return g_math_run("G_IO PngFixed","png-fixed",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,
+        "let n=PngDecode_rgba8(0,size,512,32,1024,200);return ux_u8(542);");
+}

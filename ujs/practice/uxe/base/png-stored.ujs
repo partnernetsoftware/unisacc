@@ -29,43 +29,54 @@ native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64) i64 {
   return 0-5;
 }
 
-native function png_inflate_stored(src:i64,bytes:i64,out:i64,size:i64) i64 {
-  if(bytes<11) { return 0-6; }
+native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,fixed:i64) i64 {
+  if(bytes<8) { return 0-6; }
   let cmf=ux_u8(src);
   let flags=ux_u8(src+1);
   if(cmf%16!=8 || cmf/16>7 || (cmf*256+flags)%31!=0 || flags/32%2!=0) { return 0-6; }
-  let input=2;
+  let bit=16;
+  let limit=(bytes-4)*8;
   let output=0;
   let last=0;
+  while(last==0) {
+    let block=png_bits(src,limit,bit,3,0);
+    if(block<0) { return 0-6; }
+    bit=bit+3;
+    last=block%2;
+    if(block/2==1 && fixed!=0) {
+      let done=png_fixed_block(src,limit,bit,out,size,output);
+      if(done<0) { return done; }
+      bit=done/8388608;
+      output=done%8388608;
+    } else {
+      if(block/2!=0) { return 0-7; }
+      let input=(bit+7)/8;
+      if(input>bytes-8) { return 0-6; }
+      let length=ux_u8(src+input)+256*ux_u8(src+input+1);
+      let inverse=ux_u8(src+input+2)+256*ux_u8(src+input+3);
+      input=input+4;
+      if(length+inverse!=65535 || length>bytes-4-input || length>size-output) { return 0-6; }
+      let copied=uxe_copy_record(out+output,src+input,length);
+      bit=(input+length)*8;
+      output=output+length;
+    }
+  }
+  if((bit+7)/8!=bytes-4 || output!=size) { return 0-6; }
   let s1=1;
   let s2=0;
-  while(last==0) {
-    if(input>bytes-9) { return 0-6; }
-    let block=ux_u8(src+input);
-    if(block/2%4!=0) { return 0-7; }
-    last=block%2;
-    let length=ux_u8(src+input+1)+256*ux_u8(src+input+2);
-    let inverse=ux_u8(src+input+3)+256*ux_u8(src+input+4);
-    input=input+5;
-    if(length+inverse!=65535 || length>bytes-4-input || length>size-output) { return 0-6; }
-    let i=0;
-    while(i<length) {
-      let byte=ux_u8(src+input+i);
-      let saved=ux_u8_put(out+output+i,byte);
-      s1=(s1+byte)%65521;
-      s2=(s2+s1)%65521;
-      i=i+1;
-    }
-    input=input+length;
-    output=output+length;
+  let i=0;
+  while(i<output) {
+    s1=(s1+ux_u8(out+i))%65521;
+    s2=(s2+s1)%65521;
+    i=i+1;
   }
-  if(input!=bytes-4 || output!=size || png_u32be(src+input)!=s2*65536+s1) { return 0-6; }
+  if(png_u32be(src+bytes-4)!=s2*65536+s1) { return 0-6; }
   return output;
 }
 
-// Decode noninterlaced RGBA8 PNG with stored Deflate blocks. Scratch is
+// Decode noninterlaced RGBA8 PNG. Scratch is
 // exclusive and may change on error. The RGBA output is published last.
-native function PngDecode_stored(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,fixed:i64) i64 {
   if(src<0 || bytes<33 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
      scratch<0 || scratch%4!=0 || space<PngHeader.size || scratch>6291456-space ||
      png_overlap(src,bytes,out,cap) || png_overlap(src,bytes,scratch,space) || png_overlap(out,cap,scratch,space)) { return 0-1; }
@@ -80,7 +91,7 @@ native function PngDecode_stored(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,s
   let compressed=raw+size;
   let packed=png_idat(src,bytes,compressed,space-PngHeader.size-size);
   if(packed<0) { return packed; }
-  let made=png_inflate_stored(compressed,packed,raw,size);
+  let made=png_inflate(compressed,packed,raw,size,fixed);
   if(made<0) { return made; }
   let restored=PngScanlines_restore(raw,size,row,height,4);
   if(restored<0) { return restored; }
@@ -90,4 +101,12 @@ native function PngDecode_stored(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,s
     y=y+1;
   }
   return height*row;
+}
+
+native function PngDecode_stored(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return png_decode(src,bytes,out,cap,scratch,space,0);
+}
+
+native function PngDecode_rgba8(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return png_decode(src,bytes,out,cap,scratch,space,1);
 }
