@@ -22,6 +22,10 @@ M6 已对照 AmbientLight、HemisphereLight、SpotLight、LightProbe、Fog 与 F
 
 M6 阴影及面积光已补切片。Basic、PCF、PCFSoft、VSM 都经 GPU 深度目标读回到纹理采样，遮挡内、无影区与边缘和 r160 对照各 11 项，反例各 4 项红。开关为 `--shadow-map`、`--shadow-pcf`、`--shadow-pcf-soft`、`--shadow-vsm`。RectAreaLight 逐片元漫反射以 `--area` 对照 41 项，反向反例 8 项红。面积光的真实镜面 LTC 查表、通用投影与点光阴影仍属部分项。
 
+[燃尽表](ux-three-burndown.tsv) 从清单的部分项和固定 SHA 的 r160 格式化模块源推导。生成器枚举类公开方法、访问器、构造里安装的函数和已定位的父类方法，并与清单已登记且有 .cx 入口的名字做差。预计门数按缺失方法族加语义验收计算，为下限。按已知签名、门数、跨里程碑依赖及方法数排序。三个插件项无已跟踪的上游实现，标签名未展开。动态属性、方法别名及同名多语义仍需逐项验收。表的排名不会改写清单状态。
+
+燃尽表入口为 `sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --write`，随后运行 `--check`。加 `--check --mutate` 模拟撤掉方法覆盖，须返回非零。
+
 [清单事实表](../practice/uxe/three-r160-annotations.tsv) 每一行包含该项的覆盖范围与尚缺方法族，含 M1 至 M5 所有已登记的部分项。[生成清单](../practice/uxe/three-inventory.tsv) 可用 `rg -n '部分' ujs/practice/uxe/three-inventory.tsv` 按项查看。A 栏分母 214、已有 29，B 栏分母 200、已有 20。有限场景通过的类继续标部分。
 
 ## 直接续作
