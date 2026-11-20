@@ -6,7 +6,8 @@
 
 - ImageUtils | G-struct 与 G-io 对照 Canvas 色彩、PNG 与 JPEG 分支、数据 URL 和不同图像源 | JPEG 编码与通用图像接线。
 - ~~ShapeUtils 多孔输入边界校验 | G-struct 双孔、越界、相交和失败输出不变 | 已有多孔剖分。~~ 10 项通过，漏孔与外孔反例均转红。
-- ShapeUtils 任意凹形与退化边界 | G-struct 凹形、闭合重复点、共线边以及多孔面积、索引与 r160 对照 | 已有多孔剖分与边界校验。
+- ~~ShapeUtils 闭合重复点 | G-struct 尾点归一化与 r160 的面积、数量和紧凑索引对照 | 已有多孔剖分与边界校验。~~ 5 项通过，跳过归一化反例转红。
+- ShapeUtils 任意凹形与退化边界 | G-struct 凹形、共线边以及多孔面积、索引与 r160 对照 | 已有多孔剖分与归一化。
 - StereoCamera | G-struct StereoCamera；stereocamera-struct.cx 与 stereo-eye-record-struct.cx 对照双眼投影、局部轴、自动更新、更新缓存以及独立 Camera 和 PerspectiveCamera 镜头记录。持久子对象与双眼渲染待接。补齐 -，运行独立金值及 r160 篡改门 | -
 - UniformsGroup | G-struct UniformsGroup；uniformsgroup-struct.cx 独立金值与 r160 JSON 已对照监听去重、派发目标和移除。组序列和深拷贝资源由调用方提供，GPU 统一缓冲待接入。补齐 -，运行独立金值及 r160 篡改门 | -
 - PropertyMixer | G-anim propertymixer-anim.cx：数值加权与加法、补足原值、按帧清零；四元数和非数值待补。补齐 constructor，运行独立金值及 r160 篡改门 | -
