@@ -119,12 +119,20 @@ int main(void) {
         cx_fmt(cache_env, sizeof cache_env, "UNISACC_CACHE_DIR=%s", cache_dir)) die("paths");
     if (sy_mkdir_all(cache_dir, 0700)) die("mkdir work");
 
-    char cxlink[4200], cxsrc[4200], cxrootp[4200];
+    char cxlink[4200], cxsrc[4200], extlink[4200], extsrc[4200], cxrootp[4200];
     if (cx_fmt(cxlink, sizeof cxlink, "%s/cx", work) ||
         cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) ||
+        cx_fmt(extlink, sizeof extlink, "%s/ext", work) ||
+        cx_fmt(extsrc, sizeof extsrc, "%s/ext", root) ||
         cx_fmt(cxrootp, sizeof cxrootp, "%s/cxroot.tsv", work)) die("cx paths");
-    if (symlink(cxsrc, cxlink)) die("symlink cx");
-    crs_put(cxrootp, "CXROOT1\nR\tsys\tcx/sys\nR\tmem\tcx/mem\nR\ttext\tcx/text\n");
+    if (symlink(cxsrc, cxlink) || symlink(extsrc, extlink)) die("symlink cx/ext");
+    crs_put(cxrootp,
+        "CXROOT1\n"
+        "R\tsys\tcx/sys\n"
+        "R\tmem\tcx/mem\n"
+        "R\ttext\tcx/text\n"
+        "R\tdriver\tcx/driver\n"
+        "R\tsysx\text/sysx\n");
 
     /* 1. Experiment script (use sys.env sys.fs mem.heap): cold split populates .uo cache */
     char s1[4200];
@@ -207,6 +215,57 @@ int main(void) {
     cx_fmt(bad, sizeof bad, "%s/bad.cx", work);
     crs_put(bad, "#pragma unisa use sys.env\nint main(void){return @;}\n");
     compare_two("syntax-err-no-dup", bad, 0, 1, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 6. ABI preflight fallback: >6-param ALL_STACK (sysx.process np_run/pc_run, status.cx-like multi-module) */
+    char gt6[4200];
+    cx_fmt(gt6, sizeof gt6, "%s/gt6.cx", work);
+    crs_put(gt6,
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.sha\n"
+        "#pragma unisa use mem.heap\n"
+        "#pragma unisa use mem.bytes\n"
+        "#pragma unisa use text.text\n"
+        "#pragma unisa use sysx.process\n"
+        "int main(void) {\n"
+        "    char *v[3]; v[0] = \"/bin/true\"; v[1] = 0;\n"
+        "    np_result r = {0}; char why[128] = {0};\n"
+        "    int rc = np_run(v, 0, 0, 5, &r, why, sizeof why);\n"
+        "    char h[65]; sy_sha256_hex((const unsigned char *)\"gt6\", 3, h);\n"
+        "    printf(\"gt6=%d r=%d sha=%.8s\\n\", rc, r.rc, h);\n"
+        "    np_free(&r);\n"
+        "    return rc == 0 && r.rc == 0 ? 0 : 7;\n"
+        "}\n");
+    compare_two("fallback-abi-gt6-sysx-process", gt6, 0, 0, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 7. ABI preflight fallback: variadic '...' (sys.io sy_printf) */
+    char var[4200];
+    cx_fmt(var, sizeof var, "%s/var.cx", work);
+    crs_put(var,
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use sys.env\n"
+        "int main(void) {\n"
+        "    sy_printf(\"var=%d tag=%s\\n\", 42, sy_env_or(\"RSPL_TAG\", \"none\"));\n"
+        "    return 0;\n"
+        "}\n");
+    compare_two("fallback-abi-variadic-syprintf", var, 0, 0, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=ok");
+
+    /* 8. ABI preflight fallback: cross-unit function pointer (driver.cli CxcOps + driver.args) */
+    char fnp[4200];
+    cx_fmt(fnp, sizeof fnp, "%s/fnp.cx", work);
+    crs_put(fnp,
+        "#pragma unisa use driver.cli\n"
+        "#pragma unisa use driver.args\n"
+        "#pragma unisa use text.text\n"
+        "int main(void) {\n"
+        "    CxcOps o; o.record = cxa_record; o.line = cxa_line; o.cancel = cxa_cancel;\n"
+        "    unsigned char *buf = 0; long n = 0, cap = 0; char why[128] = {0};\n"
+        "    int rc = o.record(&buf, &n, &cap, \"A=1\", why, sizeof why);\n"
+        "    printf(\"fnp=%d n=%ld\\n\", rc, n);\n"
+        "    return rc == 0 && n > 0 ? 0 : 8;\n"
+        "}\n");
+    compare_two("fallback-abi-fnptr-driver-cli", fnp, 0, 0, "UNISACC_RUN_SPLIT=1", 0);
 
     cx_rmtree(work);
     printf("CHECK_RUN_SPLIT\tpass=%d\tfail=%d\n", npass, nfail);

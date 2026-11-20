@@ -109,6 +109,121 @@ static int rspl_is_cx(const char *p) {
     return n >= 3 && p[n - 3] == '.' && p[n - 2] == 'c' && p[n - 1] == 'x';
 }
 
+static int rspl_idch(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Check whether a generated CXIF interface header declares any cross-unit ABI
+ * shape that the -funit SysV external-call bridge does not preserve:
+ *   1 = >6 parameters (unisa ALL_STACK vs SysV bridge stack shift)
+ *   2 = variadic '...' (unisa ALL_STACK vs SysV bridge stack shift)
+ *   3 = function pointer '(*' (indirect call internal ABI vs exported SysV shim)
+ *   4 = float/double parameter or return (integer-only SysV bridge)
+ * Returns 0 when split-safe, or non-zero reason code to fall back cleanly. */
+static int rspl_hdr_needs_fallback(const unsigned char *hb, int64_t hn) {
+    int64_t i = 0;
+    int bdepth = 0, pdepth = 0, commas = 0;
+    while (i < hn) {
+        unsigned char c = hb[i];
+        if (c == '/' && i + 1 < hn && hb[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < hn && !(hb[i] == '*' && hb[i + 1] == '/')) i++;
+            i += (i + 1 < hn) ? 2 : 1;
+            continue;
+        }
+        if (c == '/' && i + 1 < hn && hb[i + 1] == '/') {
+            i += 2;
+            while (i < hn && hb[i] != '\n') i++;
+            continue;
+        }
+        if (c == '#') {
+            while (i < hn && hb[i] != '\n') i++;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            unsigned char q = c;
+            i++;
+            while (i < hn && hb[i] != q) {
+                if (hb[i] == '\\' && i + 1 < hn) i++;
+                i++;
+            }
+            if (i < hn) i++;
+            continue;
+        }
+        if (c == '.' && i + 2 < hn && hb[i + 1] == '.' && hb[i + 2] == '.') return 2;
+        if (c == '{') { bdepth++; i++; continue; }
+        if (c == '}') { if (bdepth > 0) bdepth--; i++; continue; }
+        if (c == '(') {
+            int64_t k = i + 1;
+            while (k < hn && (hb[k] == ' ' || hb[k] == '\t' || hb[k] == '\r' || hb[k] == '\n')) k++;
+            if (k < hn && hb[k] == '*') return 3;
+            if (bdepth == 0) {
+                if (pdepth == 0) commas = 0;
+                pdepth++;
+            }
+            i++;
+            continue;
+        }
+        if (c == ')') {
+            if (bdepth == 0 && pdepth > 0) pdepth--;
+            i++;
+            continue;
+        }
+        if (c == ',' && bdepth == 0 && pdepth == 1) {
+            commas++;
+            if (commas >= 6) return 1;
+            i++;
+            continue;
+        }
+        if (rspl_idch(c)) {
+            int64_t s = i;
+            while (i < hn && rspl_idch(hb[i])) i++;
+            if (bdepth == 0) {
+                int64_t wl = i - s;
+                if (wl == 5 && hb[s] == 'f' && hb[s + 1] == 'l' && hb[s + 2] == 'o' &&
+                    hb[s + 3] == 'a' && hb[s + 4] == 't') return 4;
+                if (wl == 6 && hb[s] == 'd' && hb[s + 1] == 'o' && hb[s + 2] == 'u' &&
+                    hb[s + 3] == 'b' && hb[s + 4] == 'l' && hb[s + 5] == 'e') return 4;
+            }
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Pre-flight ABI check across all .cx units' forced interface headers.
+ * Returns 0 if all interfaces are split-safe, non-zero to fall back cleanly. */
+static int rspl_preflight_abi(int nsrc, const char *const *srcv,
+                              int (*inc_fn)(const char *, const unsigned char **, int *)) {
+    int j;
+    for (j = 0; j < nsrc; j++) {
+        const unsigned char *ib = 0;
+        int il = 0, p = 0;
+        if (!rspl_is_cx(srcv[j])) continue;
+        if (inc_fn(srcv[j], &ib, &il)) return 1;
+        while (ib && p < il) {
+            int e = p;
+            while (e < il && ib[e] != 0) e++;
+            if (e > p) {
+                const char *hp = (const char *)(ib + p);
+                if (!rspl_eqz(hp, "cx.h")) {
+                    unsigned char *hb = 0;
+                    int64_t hn = 0;
+                    int bad;
+                    if (sy_read_file(hp, &hb, &hn, 1L << 24) || !hb) return 1;
+                    bad = rspl_hdr_needs_fallback(hb, hn);
+                    mm_free(hb);
+                    if (bad) return bad;
+                }
+            }
+            p = e + 1;
+        }
+    }
+    return 0;
+}
+
 /* Build header identity list for one unit from NUL-delimited forced-include list.
  * Always includes "rt:RT_EXTERN" and "closure:<clo_sha>". Returns count or -1 on error. */
 static int rspl_collect_hdrs(const unsigned char *ib, int il, const char clo_sha[65],
@@ -168,6 +283,7 @@ int rspl_try(const char *cand_sha, const char *tgt, int level, int nsrc, const c
         nsrc < 2 || nsrc >= RSPL_MAX_UNITS || !srcv || !inc_fn || !compile_fn || !img_out || !imgn_out)
         return 1;
     if (pid < 0) pid = 0;
+    if (rspl_preflight_abi(nsrc, srcv, inc_fn)) return 1;
     if (rspl_cache_dir(cdir, (int)sizeof cdir) == 0) use_cache = 1;
 
     /* 1. Load or compile the W2 runtime closure (-DRT_UNIT). */
