@@ -295,6 +295,28 @@ static int new_tools(void) {
 /* 冻结窗口闸(fable 咨询 2026-11-08):build/freeze.tsv 存在且未过期时,staged 路径命中冻结前缀、
  * 且 UNISACC_INTEGRATOR 不等于 owner 的提交被拒。列:candidate_sid base_commit owner deadline_epoch_s paths(空格分隔)。
  * 冻结是有界事件:deadline 过期即不拦;tools/ tests/ plans/ archive/ 不在 paths 内,永不受影响。 */
+static int freeze_in_lane_a(const char *path, long nl) {
+    static char *lane_buf;
+    static int lane_loaded;
+    if (!lane_loaded) {
+        size_t ln = 0;
+        lane_buf = (char *)cx_read("build/lane-inputs.tsv", &ln);
+        lane_loaded = 1;
+    }
+    if (!lane_buf) return 0;
+    for (char *p = lane_buf; *p; ) {
+        char *e = p; while (*e && *e != '\n') e++;
+        if (*p != '#' && e > p) {
+            char *t1 = p; while (t1 < e && *t1 != '\t') t1++;
+            if (t1 + 2 <= e && *t1 == '\t' && t1[1] == 'A' && (t1 + 2 == e || t1[2] == '\t')) {
+                if ((long)(t1 - p) == nl && tx_same(path, nl, p, nl)) return 1;
+            }
+        }
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+
 static int freeze_gate(void) {
     size_t zn = 0; char *z = (char *)cx_read("build/freeze.tsv", &zn), *f[6]; long fn = 0, now, dl = 0, i;
     char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
@@ -322,7 +344,12 @@ static int freeze_gate(void) {
             char *s = q, *t; long pl;
             while (*q && *q != ' ') q++;
             pl = q - s; t = s; (void)t;
-            if (pl > 0 && nl > pl && names[at + pl] == '/' && tx_prefix(names + at, nl, s, pl)) {
+            if (pl == 7 && tx_same(s, pl, "@lane:A", 7)) {
+                if (freeze_in_lane_a(names + at, nl)) {
+                    sy_eprintf("precommit: 冻结中(candidate %s,至 epoch %s):产品输入 %.*s 经集成者 patch 提交\n", f[0], f[3], (int)nl, names + at);
+                    blocked++; break;
+                }
+            } else if (pl > 0 && nl > pl && names[at + pl] == '/' && tx_prefix(names + at, nl, s, pl)) {
                 sy_eprintf("precommit: 冻结中(candidate %s,至 epoch %s):产品输入 %.*s 经集成者 patch 提交\n", f[0], f[3], (int)nl, names + at);
                 blocked++; break;
             }
