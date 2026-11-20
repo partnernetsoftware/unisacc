@@ -1,0 +1,115 @@
+struct RayBatchQuery {
+  batch: u32;
+  world: u32;
+  matrices: u32;
+  layerMask: u32;
+}
+
+struct RayBatchHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  face: u32;
+  batchId: u32;
+}
+
+native function ray_batch_mesh_safe(mesh:i64,out:i64,size:i64,work:i64,space:i64) i64 {
+  let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+  let count=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let points=ux_u32(mesh+RayMeshBuffer.positions);
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let width=ux_u32(mesh+RayMeshBuffer.indexBytes);
+  return count>=1 && count<=65536 && faces<=65536 &&
+    ray_instance_readonly(mesh,RayMeshBuffer.size,out,size,work,space) &&
+    ray_instance_readonly(points,(count-1)*stride+12,out,size,work,space) &&
+    ray_instance_readonly(indices,faces*3*width,out,size,work,space);
+}
+
+// Active BatchGeometry rows reference drawable MeshBuffer views. Hit face
+// indices include the row's start in the combined draw stream.
+native function Raycaster_intersectBatch(state:i64,query:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(query,RayBatchQuery.size) ||
+     !raycaster_span(work,space) || capacity<0) { return 0-1; }
+  let layers=ux_u32(query+RayBatchQuery.layerMask);
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),layers)==0) { return 0; }
+  let batch=ux_u32(query+RayBatchQuery.batch);
+  let world=ux_u32(query+RayBatchQuery.world);
+  let matrices=ux_u32(query+RayBatchQuery.matrices);
+  if(!batch_valid(batch) || !raycaster_span(world,128) || matrices%4!=0) { return 0-1; }
+  let count=ux_u32(batch+BatchedMesh.count);
+  let rows=ux_u32(batch+BatchedMesh.rows);
+  if(count>65536 || count>ux_u32(batch+BatchedMesh.capacity) || rows%4!=0 ||
+     rows>6291456-count*BatchGeometry.size || matrices>6291456-count*64) { return 0-1; }
+  let max_faces=0;
+  let total_faces=0;
+  let i=0;
+  while(i<count) {
+    let row=BatchedMesh_getRange(batch,i);
+    if(row>=0 && ux_u32(row+BatchGeometry.visible)!=0) {
+      let mesh=ux_u32(row+BatchGeometry.geometry);
+      if(!raycaster_span(mesh,RayMeshBuffer.size)) { return 0-1; }
+      let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+      if(faces>65536-total_faces) { return 0-1; }
+      if(faces>max_faces) { max_faces=faces; }
+      total_faces=total_faces+faces;
+    }
+    i=i+1;
+  }
+  if(total_faces==0) { return 0; }
+  let size=total_faces*RayBatchHit.size;
+  let scratch_bytes=max_faces*RayMeshHit.size;
+  if(capacity<total_faces || !raycaster_span(out,size) || space<408+scratch_bytes*2+size*2 ||
+     raycaster_overlap(out,size,work,space) ||
+     !ray_instance_readonly(state,RaycasterState.size,out,size,work,space) ||
+     !ray_instance_readonly(query,RayBatchQuery.size,out,size,work,space) ||
+     !ray_instance_readonly(batch,BatchedMesh.size,out,size,work,space) ||
+     !ray_instance_readonly(rows,count*BatchGeometry.size,out,size,work,space) ||
+     !ray_instance_readonly(world,128,out,size,work,space) ||
+     !ray_instance_readonly(matrices,count*64,out,size,work,space)) { return 0-1; }
+  i=0;
+  while(i<count) {
+    let row=BatchedMesh_getRange(batch,i);
+    if(row>=0 && ux_u32(row+BatchGeometry.visible)!=0 &&
+       !ray_batch_mesh_safe(ux_u32(row+BatchGeometry.geometry),out,size,work,space)) { return 0-1; }
+    i=i+1;
+  }
+  let composed=work+40;
+  let hits=work+168;
+  let nested=hits+scratch_bytes;
+  let staged=nested+240+scratch_bytes;
+  let sort=staged+size;
+  let total=0;
+  i=0;
+  while(i<count) {
+    let row=BatchedMesh_getRange(batch,i);
+    if(row>=0 && ux_u32(row+BatchGeometry.visible)!=0) {
+      let mesh=ux_u32(row+BatchGeometry.geometry);
+      let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+      let copy=uxe_copy_record(work,mesh,RayMeshBuffer.size);
+      let a=ux_u32_put(work+RayMeshBuffer.matrixWorld,composed);
+      let b=ux_u32_put(work+RayMeshBuffer.layerMask,layers);
+      let matrix=ray_instance_world(composed,world,matrices+i*64);
+      if(matrix<0) { return matrix; }
+      let found=Raycaster_intersectMeshBuffer(state,work,hits,faces,nested,240+scratch_bytes);
+      if(found<0) { return found; }
+      let start=ux_u32(row+BatchGeometry.vertexStart);
+      if(ux_u32(row+BatchGeometry.indexCount)!=4294967295) { start=ux_u32(row+BatchGeometry.indexStart); }
+      let j=0;
+      while(j<found) {
+        let target=staged+total*RayBatchHit.size;
+        let hit=hits+j*RayMeshHit.size;
+        let copied=uxe_copy_record(target,hit,RayMeshHit.size);
+        let face=ux_u32_put(target+RayBatchHit.face,start/3+ux_u32(hit+RayMeshHit.face));
+        let id=ux_u32_put(target+RayBatchHit.batchId,i);
+        total=total+1;
+        j=j+1;
+      }
+    }
+    i=i+1;
+  }
+  let sorted=ray_sort_hits(staged,sort,total,RayBatchHit.size,RayBatchHit.distance);
+  let copied=uxe_copy_record(out,staged,total*RayBatchHit.size);
+  return sorted;
+}
