@@ -1,0 +1,115 @@
+struct GpuTextureTable {
+  capacity: u32;
+  live: u32;
+  peak: u32;
+}
+
+struct GpuTextureSlot {
+  generation: u32;
+  version: u32;
+  source: GpuTextureSource;
+}
+
+native function GpuTextureTable_init(table:i64,capacity:i64) i64 {
+  if(table<0 || table%4!=0 || capacity<1 || capacity>256 ||
+     table>6291456-GpuTextureTable.size-capacity*GpuTextureSlot.size) { return 0-1; }
+  let cap=ux_u32_put(table+GpuTextureTable.capacity,capacity);
+  let live=ux_u32_put(table+GpuTextureTable.live,0);
+  let peak=ux_u32_put(table+GpuTextureTable.peak,0);
+  let i=0;
+  while(i<capacity) {
+    let slot=table+GpuTextureTable.size+i*GpuTextureSlot.size;
+    let generation=ux_u32_put(slot+GpuTextureSlot.generation,1);
+    let version=ux_u32_put(slot+GpuTextureSlot.version,0);
+    i=i+1;
+  }
+  return table;
+}
+
+native function gpu_texture_source_valid(source:i64) i64 {
+  if(source<0 || source%4!=0 || source>6291456-GpuTextureSource.size) { return 0; }
+  let width=ux_u32(source+GpuTextureSource.width);
+  let height=ux_u32(source+GpuTextureSource.height);
+  let filter=ux_u32(source+GpuTextureSource.filter);
+  let wrapS=ux_u32(source+GpuTextureSource.wrapS);
+  let wrapT=ux_u32(source+GpuTextureSource.wrapT);
+  let rgba=ux_u32(source+GpuTextureSource.rgba);
+  return width>=1 && width<=4096 && height>=1 && height<=4096 &&
+    filter<=2 && wrapS<=2 && wrapT<=2 && rgba<=6291456-width*height*4;
+}
+
+native function gpu_texture_capacity(table:i64) i64 {
+  if(table<0 || table%4!=0 || table>6291456-GpuTextureTable.size) { return 0; }
+  let capacity=ux_u32(table+GpuTextureTable.capacity);
+  if(capacity>256 || table>6291456-GpuTextureTable.size-capacity*GpuTextureSlot.size) { return 0; }
+  return capacity;
+}
+
+native function gpu_texture_slot(table:i64,handle:i64) i64 {
+  if(handle<65537 || handle>4294967295) { return 0-1; }
+  let number=handle%65536;
+  if(number<1 || number>gpu_texture_capacity(table)) { return 0-1; }
+  let slot=table+GpuTextureTable.size+(number-1)*GpuTextureSlot.size;
+  if(ux_u32(slot+GpuTextureSlot.version)==0 ||
+     ux_u32(slot+GpuTextureSlot.generation)!=handle/65536) { return 0-1; }
+  return slot;
+}
+
+native function GpuTextureTable_create(table:i64,source:i64) i64 {
+  if(!gpu_texture_source_valid(source)) { return 0-3; }
+  let capacity=gpu_texture_capacity(table);
+  if(capacity==0) { return 0-1; }
+  let i=0;
+  while(i<capacity) {
+    let slot=table+GpuTextureTable.size+i*GpuTextureSlot.size;
+    let generation=ux_u32(slot+GpuTextureSlot.generation);
+    if(ux_u32(slot+GpuTextureSlot.version)==0 && generation<=65535) {
+      let copied=uxe_copy_record(slot+GpuTextureSlot.source,source,GpuTextureSource.size);
+      let version=ux_u32_put(slot+GpuTextureSlot.version,1);
+      let active=ux_u32(table+GpuTextureTable.live)+1;
+      let live=ux_u32_put(table+GpuTextureTable.live,active);
+      if(active>ux_u32(table+GpuTextureTable.peak)) { let peak=ux_u32_put(table+GpuTextureTable.peak,active); }
+      return generation*65536+i+1;
+    }
+    i=i+1;
+  }
+  return 0-2;
+}
+
+native function GpuTextureTable_version(table:i64,handle:i64) i64 {
+  let slot=gpu_texture_slot(table,handle);
+  if(slot<0) { return slot; }
+  return ux_u32(slot+GpuTextureSlot.version);
+}
+
+native function gpu_texture_source(table:i64,handle:i64) i64 {
+  let slot=gpu_texture_slot(table,handle);
+  if(slot<0) { return slot; }
+  return slot+GpuTextureSlot.source;
+}
+
+native function GpuTextureTable_draw(table:i64,handle:i64,packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64) i64 {
+  let source=gpu_texture_source(table,handle);
+  if(source<0) { return source; }
+  return GpuPacket_drawTexture(packet,capacity,vertices,count,shader,source);
+}
+
+native function GpuTextureTable_update(table:i64,handle:i64,expected:i64,source:i64) i64 {
+  let slot=gpu_texture_slot(table,handle);
+  if(slot<0) { return slot; }
+  let version=ux_u32(slot+GpuTextureSlot.version);
+  if(expected!=version || version==4294967295) { return 0-4; }
+  if(!gpu_texture_source_valid(source)) { return 0-3; }
+  let copied=uxe_copy_record(slot+GpuTextureSlot.source,source,GpuTextureSource.size);
+  let saved=ux_u32_put(slot+GpuTextureSlot.version,version+1);
+  return version+1;
+}
+
+native function GpuTextureTable_dispose(table:i64,handle:i64) i64 {
+  let slot=gpu_texture_slot(table,handle);
+  if(slot<0) { return slot; }
+  let generation=ux_u32_put(slot+GpuTextureSlot.generation,handle/65536+1);
+  let version=ux_u32_put(slot+GpuTextureSlot.version,0);
+  let live=ux_u32_put(table+GpuTextureTable.live,ux_u32(table+GpuTextureTable.live)-1);
+  return 0;
+}

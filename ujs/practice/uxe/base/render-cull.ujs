@@ -1,0 +1,50 @@
+struct RenderCandidate {
+  item: u32;
+  sphere: u32;
+  worldMatrix: u32;
+  flags: u32;
+}
+
+// The caller supplies non-overlapping spans. Flags 1 and 2 indicate
+// visibility and frustum testing respectively. A visible uncullable item
+// needs neither a local sphere nor a world matrix.
+native function RenderList_collect(src:i64,count:i64,planes:i64,dst:i64,capacity:i64,scratch:i64) i64 {
+  if(count<0 || count>65536 || capacity<count || capacity>65536 ||
+     src<0 || src%4!=0 || src>6291456-count*RenderCandidate.size ||
+     planes<0 || planes%8!=0 || planes>6291456-192 ||
+     dst<0 || dst%8!=0 || dst>6291456-capacity*RenderItem.size ||
+     scratch<0 || scratch%8!=0 || scratch>6291456-32) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let at=src+i*RenderCandidate.size;
+    let flags=ux_u32(at+RenderCandidate.flags);
+    if(flags>3) { return 0-2; }
+    if(flags%2!=0) {
+      let item=ux_u32(at+RenderCandidate.item);
+      if(item%8!=0 || item>6291456-RenderItem.size) { return 0-2; }
+      if(flags==3) {
+        let sphere=ux_u32(at+RenderCandidate.sphere);
+        let world=ux_u32(at+RenderCandidate.worldMatrix);
+        if(sphere%8!=0 || sphere>6291456-32 || world%8!=0 || world>6291456-128) { return 0-2; }
+      }
+    }
+    i=i+1;
+  }
+  let kept=0;
+  i=0;
+  while(i<count) {
+    let at=src+i*RenderCandidate.size;
+    let flags=ux_u32(at+RenderCandidate.flags);
+    let visible=flags%2;
+    if(flags==3) {
+      visible=Frustum_intersectsObject(planes,ux_u32(at+RenderCandidate.sphere),
+        ux_u32(at+RenderCandidate.worldMatrix),scratch);
+    }
+    if(visible!=0) {
+      let copied=uxe_copy_record(dst+kept*RenderItem.size,ux_u32(at+RenderCandidate.item),RenderItem.size);
+      kept=kept+1;
+    }
+    i=i+1;
+  }
+  return kept;
+}

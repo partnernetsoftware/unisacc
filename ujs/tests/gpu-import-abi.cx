@@ -1,0 +1,47 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int check(char **args,int expected,const char *needle) {
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    int ok=rc==expected && (!needle || (out && tx_contains(out,bytes,needle,tx_len(needle,100))));
+    if(!ok) printf("GPU_IMPORT rc=%d expected=%d output=%s\n",rc,expected,out?out:"");
+    mm_free(out);
+    return ok;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],src[340],wasm[340],source[440];
+    if(sy_mkdtemp("/tmp","ujs-gpu-import-",dir,sizeof dir)) return 2;
+    tx_snprintf(src,sizeof src,"%s/input.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/result.wasm",dir);
+    char *compile[]={"sh","-c","exec \"$@\" 2>&1","sh","./ujs/ujs2wasm.com",src,"-o",wasm,0};
+    char *inspect[]={"wasm-objdump","-x",wasm,0};
+    char *validate[]={"wasm-validate",wasm,0};
+    const char *modules[]={"uxe_gpu_v1","env","uxe_gpu_v1","uxe_other_v1"};
+    const char *codes[]={0,"abi import module or name","gpu submit ABI signature","abi import module or name"};
+    int pass=0;
+    for(int i=0;i<4;i++) {
+        int n=tx_snprintf(source,sizeof source,
+            "import host_gpu_submit from \"%s\"(%s) i64;\n"
+            "export uxe_probe() i64 version 1;\nreturn host_gpu_submit(0,24);",modules[i],i==2?"i64,f64":"i64,i64");
+        if(n<0 || n>=(int)sizeof source || sy_write_file(src,source,n,0600)) break;
+        if(i==0) {
+            if(check(compile,0,0) && check(validate,0,0) && check(inspect,0,"Import[1]:") && check(inspect,0,
+                mutate?"uxe_gpu_v2.host_gpu_submit":"uxe_gpu_v1.host_gpu_submit")) pass++;
+        } else {
+            sy_stat_t st;
+            if(check(compile,1,codes[i]) && sy_lstat(wasm,&st)==-ENOENT) pass++;
+        }
+        sy_unlink(wasm);
+    }
+    sy_unlink(src);
+    sy_rmdir(dir);
+    printf("CHECK_UJS_GPU_IMPORT cases=4 failed=%d\n",4-pass);
+    return pass!=4;
+}

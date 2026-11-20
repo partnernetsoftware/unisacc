@@ -1,0 +1,130 @@
+/* tools/check-register-layout-gate.cx -- verifies NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE in tools/register.cx.
+ * Uses a private UNISACC_TABLES copy so the repo's real tests/batches.tsv is never touched.
+ * Scenarios:
+ *   (1) 0.0.84 check-gen-all-check history dependency (git archive d20a8f64af): refused & rolled back by shallow layout gate.
+ *   (2) CLAUDE_JOB_DIR env dependency: passes normal trial when set, refused (reason=env-dependency) & rolled back by shallow layout gate.
+ *   (3) Clean self-contained batch: passes both normal trial and shallow cold layout selftest (REGISTER_LAYOUT_SELFTEST status=PASS).
+ * Ends: CHECK_REGISTER_LAYOUT_GATE<TAB>ok=N<TAB>failed=M<TAB>ms=T. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+#define CRLG_PW 4400
+#define CRLG_OUT 65536
+
+static void crlg_abort(const char *why) {
+    fprintf(stderr, "check-register-layout-gate: REFUSE %s\n", why);
+    exit(2);
+}
+
+int main(int argc, char **argv) {
+    /* Self-contained fixture modes invoked by register.cx during the test */
+    if (argc >= 2 && argv[1] && tx_eqz(argv[1], "--fixture-hist")) {
+        char out[4096];
+        int rc = ckk_sh("crlg-hist", "git archive -o /dev/null d20a8f64af -- cxroot.tsv", out, sizeof out);
+        if (rc != 0) {
+            fputs(out, stderr);
+            return 2;
+        }
+        puts("FIXTURE_HIST");
+        return 0;
+    }
+    if (argc >= 2 && argv[1] && tx_eqz(argv[1], "--fixture-env")) {
+        const char *j = getenv("CLAUDE_JOB_DIR");
+        if (!j || !*j) {
+            fprintf(stderr, "missing CLAUDE_JOB_DIR\n");
+            return 1;
+        }
+        puts("FIXTURE_ENV");
+        return 0;
+    }
+    if (argc >= 2 && argv[1] && tx_eqz(argv[1], "--fixture-clean")) {
+        puts("FIXTURE_CLEAN");
+        return 0;
+    }
+
+    int env_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--env"));
+    int clean_mode = (argc >= 2 && argv[1] && tx_eqz(argv[1], "--clean"));
+    long t0 = sy_now_ms();
+    char cwd[CRLG_PW], work[CRLG_PW], tdir[CRLG_PW], cmd[8192];
+    static char out[CRLG_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    int have_hist = 0;
+
+    if (!getcwd(cwd, sizeof cwd)) crlg_abort("getcwd");
+    if (cx_fmt(work, sizeof work, "%s/crlg-%d", base_td, (int)getpid()) ||
+        cx_fmt(tdir, sizeof tdir, "%s/tables", work)) crlg_abort("paths");
+    if (mkdir(work, 0700) != 0 && errno != EEXIST) crlg_abort("mkdir-work");
+    if (mkdir(tdir, 0700) != 0 && errno != EEXIST) crlg_abort("mkdir-tdir");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "cp '%s/tests/batches.tsv' '%s/tests/coverage.tsv' '%s/'",
+        cwd, cwd, tdir)) crlg_abort("cp-tables");
+    if (ckk_sh("crlg", cmd, out, sizeof out) != 0) crlg_abort("cp-tables-run");
+
+    if (env_mode) {
+        int rc;
+        if (cx_fmt(cmd, sizeof cmd,
+            "CLAUDE_JOB_DIR=/tmp/crlg-fake-job UNISACC_TABLES='%s' sh '%s/unisacc.com' '%s/tools/register.cx' -- --layout-selftest "
+            "crlg-env-bad tools/check-register-layout-gate.cx FIXTURE_ENV \"crlg env fixture\" "
+            "\"tools/check-register-layout-gate.cx\" contract --args --fixture-env",
+            tdir, cwd, cwd)) crlg_abort("s2");
+        rc = ckk_sh("crlg", cmd, out, sizeof out);
+        ck(rc != 0 &&
+           ckk_has(out, CRLG_OUT, "REGISTER_LAYOUT_SELFTEST\tid=crlg-env-bad\tstatus=REFUSE\treason=env-dependency\t") &&
+           ckk_has(out, CRLG_OUT, "REGISTER\tid=crlg-env-bad\tstatus=ROLLED_BACK\t"),
+           "env-dep-refused-by-layout-gate: CLAUDE_JOB_DIR dependency refused with reason=env-dependency and rolled back");
+        { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+        printf("CHECK_REGISTER_LAYOUT_ENV\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+        return ck_failures() ? 1 : 0;
+    }
+
+    if (clean_mode) {
+        int rc;
+        if (cx_fmt(cmd, sizeof cmd,
+            "UNISACC_TABLES='%s' sh '%s/unisacc.com' '%s/tools/register.cx' -- --layout-selftest "
+            "crlg-clean-ok tools/check-register-layout-gate.cx FIXTURE_CLEAN \"crlg clean fixture\" "
+            "\"tools/check-register-layout-gate.cx\" contract --args --fixture-clean",
+            tdir, cwd, cwd)) crlg_abort("s3");
+        rc = ckk_sh("crlg", cmd, out, sizeof out);
+        ck(rc == 0 &&
+           ckk_has(out, CRLG_OUT, "REGISTER_LAYOUT_SELFTEST\tid=crlg-clean-ok\tstatus=PASS\t") &&
+           ckk_has(out, CRLG_OUT, "REGISTER\tid=crlg-clean-ok\tstatus=REGISTERED"),
+           "clean-batch-passes-layout-gate: self-contained batch passes single-commit cold layout selftest");
+        { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+        printf("CHECK_REGISTER_LAYOUT_CLEAN\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+        return ck_failures() ? 1 : 0;
+    }
+
+    have_hist = (ckk_sh("crlg", "git cat-file -e d20a8f64af^{commit} 2>/dev/null", out, sizeof out) == 0);
+
+    {
+        int rc;
+        if (cx_fmt(cmd, sizeof cmd,
+            "UNISACC_TABLES='%s' sh '%s/unisacc.com' '%s/tools/register.cx' -- --layout-selftest "
+            "crlg-hist-bad tools/check-register-layout-gate.cx FIXTURE_HIST \"crlg hist fixture\" "
+            "\"tools/check-register-layout-gate.cx\" contract --args --fixture-hist",
+            tdir, cwd, cwd)) crlg_abort("s1");
+        rc = ckk_sh("crlg", cmd, out, sizeof out);
+        if (have_hist) {
+            int ok = (rc != 0 &&
+               ckk_has(out, CRLG_OUT, "REGISTER_LAYOUT_SELFTEST\tid=crlg-hist-bad\tstatus=REFUSE\treason=git-history-dependency\t") &&
+               ckk_has(out, CRLG_OUT, "REGISTER\tid=crlg-hist-bad\tstatus=ROLLED_BACK\t"));
+            if (!ok) fprintf(stderr, "S1 rc=%d out=%.*s\n", rc, 800, out);
+            ck(ok, "history-dep-refused-by-layout-gate: git archive d20a8f64af refused with reason=git-history-dependency and rolled back");
+        } else {
+            int ok = (rc != 0 && ckk_has(out, CRLG_OUT, "REGISTER\tid=crlg-hist-bad\tstatus=ROLLED_BACK\t"));
+            if (!ok) fprintf(stderr, "S1(shallow) rc=%d out=%.*s\n", rc, 800, out);
+            ck(ok, "history-dep-refused-in-shallow-root: git archive d20a8f64af fails and rolls back");
+        }
+    }
+
+    { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+    printf("CHECK_REGISTER_LAYOUT_GATE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

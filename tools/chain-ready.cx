@@ -463,6 +463,7 @@ static void root_items(const char *repo, const char *root, const char *revarg, c
 
 int main(int argc, char **argv) {
     int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0;
+    long disk_override_gb = -1;
     long T0 = sy_now_ms();
     if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
         size_t n; char *b = cx_read(argv[3], &n); char ev[512]; int ok;
@@ -481,7 +482,8 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
         else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] | --judge KIND FILE RC]\n"); return 2; }
+        else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) { int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++; }
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
     }
     static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
@@ -610,6 +612,51 @@ int main(int argc, char **argv) {
     if (WANT("4-p1")) {
         if (fast) row("4-p1", "SKIPPED", "--fast: cx0_plan scan of every .cx with a use pragma not run", 0);
         else { char ev[640]; long ms; run_p1(&ms, ev, sizeof ev); row_judged("4-p1", ms >= 0, ev, ms < 0 ? -ms : ms); }
+    }
+    if (WANT("16-disk-free")) {
+        long t0 = sy_now_ms(), avail_gb = disk_override_gb;
+        char ev[320];
+        if (avail_gb < 0) {
+            char *dv[4]; dv[0] = "df"; dv[1] = "-Pk"; dv[2] = (char *)repo; dv[3] = 0;
+            int dfd = -1; int dpid = sy_spawn_pipe(dv, 0, 0, &dfd, 0);
+            if (dpid >= 0 && dfd >= 0) {
+                char db[2048]; long dn = 0, r;
+                while (dn < (long)sizeof db - 1 && (r = sy_read(dfd, db + dn, (size_t)(sizeof db - 1 - (size_t)dn))) > 0) dn += r;
+                db[dn] = 0; sy_close(dfd);
+                int ex = 0, code = 0, sig = 0;
+                sy_wait_status(dpid, 0, &ex, &code, &sig);
+                if (ex && code == 0) {
+                    long nl = tx_chr(db, dn, '\n');
+                    if (nl >= 0 && nl + 1 < dn) {
+                        const char *p = db + nl + 1;
+                        int col = 0;
+                        while (*p && *p != '\n') {
+                            while (*p == ' ' || *p == '\t') p++;
+                            const char *s = p;
+                            while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+                            if (col == 3 && p > s) {
+                                int64_t kb = 0;
+                                if (!tx_to_i64(s, (long)(p - s), 10, &kb)) avail_gb = (long)(kb / (1024L * 1024L));
+                                break;
+                            }
+                            col++;
+                        }
+                    }
+                }
+            }
+        }
+        if (avail_gb < 0) {
+            row("16-disk-free", "UNMEASURED", "df -Pk unavailable", sy_now_ms() - t0);
+        } else if (avail_gb < 8) {
+            cx_fmt(ev, sizeof ev, "DISK_BLOCKED avail_gb=%ld (<8G); free disk space before starting chain", avail_gb);
+            row_judged("16-disk-free", 0, ev, sy_now_ms() - t0);
+        } else if (avail_gb < 20) {
+            cx_fmt(ev, sizeof ev, "DISK_LOW avail_gb=%ld (<20G warning, >=8G allowed)", avail_gb);
+            row_judged("16-disk-free", 1, ev, sy_now_ms() - t0);
+        } else {
+            cx_fmt(ev, sizeof ev, "avail_gb=%ld (>=20G)", avail_gb);
+            row_judged("16-disk-free", 1, ev, sy_now_ms() - t0);
+        }
     }
     if (WANT("7-recipe")) row("7-recipe", "UNMEASURED", "manual: recipe steps 1-5 (private root checkout of REV, commit-tree, UNISACC_IDENT_HELPER, fresh --out, 5400 s)", 0);
     if (WANT("9-ledger")) row("9-ledger", "UNMEASURED", "manual: one ledger line in prd_mempalace.md (REV, PID/PGID, deadline, output dir) before the chain", 0);

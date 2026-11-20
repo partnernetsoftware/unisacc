@@ -740,6 +740,106 @@ static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const c
     if(rc || !strstr(buf,want) || tx_eqz(value,"UNMEASURED")){fprintf(stderr,"REFUSE cold-batch-receipt id=%s %s\n",id,buf);return 2;}
     return 0;
 }
+static void rg_mkdirs(const char *dir){
+    char tmp[4600]; size_t n=strlen(dir);
+    if(n>=sizeof tmp || mm_copy(tmp,sizeof tmp,dir,n+1))return;
+    for(size_t i=1;i<n;i++)if(tmp[i]=='/'){tmp[i]=0;sy_mkdir(tmp,0700);tmp[i]='/';}
+    sy_mkdir(tmp,0700);
+}
+/* NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE: run a newly registered batch inside a single-commit
+   shallow tree (no git history, no CLAUDE_JOB_DIR, cold run/unit/prep caches) before accepting
+   registration. Any failure rolls back the appended rows and emits a named REFUSE reason. */
+static int rg_qualify_layout_selftest(const char *root,const char *id,const char *check_src,const char *files,const char *batchbin,int use_dev,const char *devdir){
+    char stage[4400],lay[4500],tar[4600],db[4500],dbarg[4600],gitlink[4600],out[4600],p[4600],src_abs[4600],ape[4096];
+    char privtmp[4600],coldcache[4600],coldprep[4600],envtmp[4700],envcache[4700],envprep[4700],want[128];
+    static char buf[1<<16];
+    sy_stat_t st;
+    if(sy_mkdtemp(sy_tmpdir(),"unisacc-reg-layout-",stage,sizeof stage))return 2;
+    rg_file(lay,sizeof lay,stage,"tree");
+    if(sy_mkdir(lay,0700)){rg_clean_layout(stage);return 2;}
+    rg_file(tar,sizeof tar,stage,"head.tar");
+    {
+        char *ar[]={"./tools/bound","55","git","archive","-o",tar,"HEAD",0};
+        char *ex[]={"./tools/bound","55","tar","-xf",tar,"-C",lay,0};
+        if(run(ar,buf,sizeof buf)||run(ex,buf,sizeof buf)||sy_unlink(tar)){rg_clean_layout(stage);return 2;}
+    }
+    /* Overlay the new batch source file and declared files (may be untracked/modified in worktree) plus live tables. */
+    if(check_src[0]!='/' && cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,check_src)==0 && cx_fmt(p,sizeof p,"%s/%s",lay,check_src)==0){
+        char *sl=strrchr(p,'/');
+        if(sl){*sl=0;rg_mkdirs(p);*sl='/';}
+        sy_unlink(p);
+        if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
+    }
+    if(files && *files){
+        const char *q=files;
+        while(*q){
+            while(*q==' '||*q=='\t')q++;
+            const char *s=q;
+            while(*q && *q!=' ' && *q!='\t')q++;
+            size_t fl=(size_t)(q-s);
+            if(fl>0 && fl<1024 && s[0]!='/' && !(fl>=2 && s[0]=='.' && s[1]=='.')){
+                char rel[1024]; if(mm_copy(rel,sizeof rel,s,fl))continue; rel[fl]=0;
+                if(cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,rel)==0 && sy_lstat(src_abs,&st)==0 && st.kind=='f' &&
+                   cx_fmt(p,sizeof p,"%s/%s",lay,rel)==0){
+                    char *sl=strrchr(p,'/');
+                    if(sl){*sl=0;rg_mkdirs(p);*sl='/';}
+                    sy_unlink(p);
+                    if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
+                }
+            }
+        }
+    }
+    {
+        char dst_b[4600],dst_c[4600];
+        if(cx_fmt(dst_b,sizeof dst_b,"%s/tests/batches.tsv",lay)||cx_fmt(dst_c,sizeof dst_c,"%s/tests/coverage.tsv",lay)){rg_clean_layout(stage);return 2;}
+        sy_unlink(dst_b);sy_unlink(dst_c);
+        if(sy_copy(rg_bpath(),dst_b,0644)||sy_copy(rg_cpath(),dst_c,0644)){rg_clean_layout(stage);return 2;}
+    }
+    rg_file(p,sizeof p,lay,"unisacc.com");
+    if(!realpath("./unisacc.com",ape)||sy_lstat(p,&st)!=-ENOENT||sy_copy(ape,p,0755)){rg_clean_layout(stage);return 2;}
+    rg_file(db,sizeof db,stage,"shallow-git");
+    if(cx_fmt(dbarg,sizeof dbarg,"--separate-git-dir=%s",db)){rg_clean_layout(stage);return 2;}
+    rg_file(gitlink,sizeof gitlink,lay,".git");
+    {
+        char *init[]={"./tools/bound","15","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"init","-q",dbarg,0};
+        char *add[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"add","-Af","--",".",":(exclude)unisacc.com",0};
+        char *commit[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"-c","user.name=register","-c","user.email=register@localhost","-c","commit.gpgsign=false","commit","-qm","register single-commit qualify layout",0};
+        if(run(init,buf,sizeof buf)||run(add,buf,sizeof buf)||run(commit,buf,sizeof buf)){sy_unlink(gitlink);rg_clean_layout(stage);return 2;}
+    }
+    rg_file(p,sizeof p,lay,"out");if(sy_mkdir(p,0700)){sy_unlink(gitlink);rg_clean_layout(stage);return 2;}
+    rg_file(out,sizeof out,p,"trial");rg_file(privtmp,sizeof privtmp,p,"cold-tmp");
+    rg_file(coldcache,sizeof coldcache,p,"cold-cache");rg_file(coldprep,sizeof coldprep,p,"cold-prep");
+    if(sy_mkdir(out,0700)||sy_mkdir(privtmp,0700)||sy_mkdir(coldcache,0700)||sy_mkdir(coldprep,0700)||
+       cx_fmt(envtmp,sizeof envtmp,"TMPDIR=%s",privtmp)||cx_fmt(envcache,sizeof envcache,"UNISACC_CACHE_DIR=%s",coldcache)||
+       cx_fmt(envprep,sizeof envprep,"UNISACC_PREP_CACHE=%s",coldprep)||cx_fmt(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\t",id)){
+        sy_unlink(gitlink);rg_clean_layout(stage);return 2;
+    }
+    char *trial[32]; int n=0;
+    trial[n++]="./tools/bound"; trial[n++]="55"; trial[n++]="env"; trial[n++]="-C"; trial[n++]=lay;
+    trial[n++]="-u"; trial[n++]="GIT_DIR"; trial[n++]="-u"; trial[n++]="GIT_WORK_TREE"; trial[n++]="-u"; trial[n++]="GIT_INDEX_FILE";
+    trial[n++]="-u"; trial[n++]="CLAUDE_JOB_DIR"; trial[n++]="-u"; trial[n++]="UNISACC_TABLES";
+    trial[n++]=envcache; trial[n++]=envprep;
+    trial[n++]="UNISACC_BATCH_TIMES=off";
+    trial[n++]=(char *)batchbin;
+    if(use_dev){trial[n++]="--candidate"; trial[n++]=(char *)devdir;}
+    trial[n++]=lay; trial[n++]=out; trial[n++]=(char *)id; trial[n]=0;
+    long start=sy_now_ms();
+    int rc=run(trial,buf,sizeof buf);
+    long elapsed=sy_now_ms()-start;
+    sy_unlink(gitlink);
+    rg_clean_layout(stage);
+    if(rc==0 && strstr(buf,want)){
+        printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=PASS\tms=%ld\n",id,elapsed);
+        return 0;
+    }
+    const char *why="layout-selftest-failed";
+    if(rc==124 || strstr(buf,"transport=-1"))why="timeout-55s-cold";
+    else if(strstr(buf,"not a valid object name") || strstr(buf,"unknown revision") || strstr(buf,"bad object"))why="git-history-dependency";
+    else if(strstr(buf,"CLAUDE_JOB_DIR"))why="env-dependency";
+    printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=%s\trc=%d\tms=%ld\n",id,why,rc,elapsed);
+    fputs(buf,stderr);
+    return 1;
+}
 typedef struct {const RegRow *old,*next;RegRow pkg;char hash[65],*file;size_t bytes;int mode;} RgShard;
 typedef struct {RgShard *shards;int limit,count;RgManifest *changes;RegRow fact;char *coverage,*original;size_t cn,on;} RgShardPlan;
 static void rg_coverage_source(RegRow *chosen,RegRow source){
@@ -1132,7 +1232,7 @@ int main(int argc, char **argv) {
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";
     static char normargs[8192];
-    int norun = 0;
+    int norun = 0, force_layout = 0;
     char devdir[4096];int use_dev=0;
     {   int w = 1, r;   /* --no-run may stand anywhere: strip it and keep the rest in order */
         for (r = 1; r < argc; r++) {
@@ -1142,7 +1242,9 @@ int main(int argc, char **argv) {
                 sy_stat_t st;
                 if(sy_realpath(argv[++r],devdir,sizeof devdir)<0 || sy_stat(devdir,&st) || st.kind!='d')rg_die("--runner invalid dev-product directory",argv[r]);
                 use_dev=1;
-            } else if (tx_eqz(argv[r], "--no-run")) norun = 1; else argv[w++] = argv[r];
+            } else if (tx_eqz(argv[r], "--no-run")) norun = 1;
+            else if (tx_eqz(argv[r], "--layout-selftest")) force_layout = 1;
+            else argv[w++] = argv[r];
         }
         argc = w; argv[argc] = 0;
     }
@@ -1220,6 +1322,9 @@ int main(int argc, char **argv) {
             if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
             okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
             if (!okrun) fputs(buf, stderr);
+            if (okrun && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES") || force_layout)) {
+                if (rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir) != 0) okrun = 0;
+            }
         }
     }
     if (parent[0]) sy_rmdir(parent);   /* the trial run's empty reservation: sy_tmpdir()/register-ID-PID must not pile up */

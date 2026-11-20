@@ -304,6 +304,44 @@ static void sec_residue(void) {
         cx_fmt(val, sizeof val, "count=%d oldest_s=%ld", nents, oldest < 0 ? 0 : oldest);
         emit("residue", pre[k], val, oldest, g_tmp, 0);
     }
+    {
+        char lp[4400]; sy_stat_t st;
+        if (!cx_fmt(lp, sizeof lp, "%s/cx/cx", g_root) && sy_lstat(lp, &st) == 0) {
+            emit("residue", "cx/cx", "STRAY_SELF_LINK fix: rm cx/cx", -1, lp, 1);
+        }
+    }
+    {
+        char *dv[4]; dv[0] = "df"; dv[1] = "-Pk"; dv[2] = (char *)g_root; dv[3] = 0;
+        np_result dr = {0}; char why[128] = {0}; long avail_gb = -1;
+        if (!np_run(dv, 0, 0, 5, &dr, why, sizeof why) && !dr.residue && dr.rc == 0 && dr.out && dr.outn > 0) {
+            long i = 0; while (i < (long)dr.outn && dr.out[i] != '\n') i++;
+            if (i + 1 < (long)dr.outn) {
+                const char *p = dr.out + i + 1, *end = dr.out + dr.outn;
+                int col = 0;
+                while (p < end && *p != '\n') {
+                    while (p < end && (*p == ' ' || *p == '\t')) p++;
+                    const char *s = p;
+                    while (p < end && *p != ' ' && *p != '\t' && *p != '\n') p++;
+                    if (col == 3 && p > s) {
+                        long kb = 0;
+                        while (s < p && *s >= '0' && *s <= '9') kb = kb * 10 + (*s++ - '0');
+                        avail_gb = kb / (1024L * 1024L);
+                        break;
+                    }
+                    col++;
+                }
+            }
+        }
+        np_free(&dr);
+        if (avail_gb < 0) unmeasured("residue", "disk", "df -Pk unavailable", g_root);
+        else {
+            char val[160];
+            if (avail_gb < 8) cx_fmt(val, sizeof val, "DISK_LOW DISK_BLOCKED avail_gb=%ld (<8G)", avail_gb);
+            else if (avail_gb < 20) cx_fmt(val, sizeof val, "DISK_LOW avail_gb=%ld (<20G)", avail_gb);
+            else cx_fmt(val, sizeof val, "avail_gb=%ld (>=20G)", avail_gb);
+            emit("residue", "disk", val, -1, g_root, avail_gb < 20 ? 1 : 0);
+        }
+    }
 }
 
 /* ---------------- full-mode read-only checks ---------------- */

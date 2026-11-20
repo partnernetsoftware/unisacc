@@ -1,0 +1,636 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int shader_bytes(char *source,int capacity,int n,const char *path,const char *name,int address) {
+    unsigned char *input=0;
+    int64_t bytes=0;
+    if(sy_read_file(path,&input,&bytes,4096) || bytes<=0 || n<0 ||
+       (long)capacity-n<bytes*5+512) { mm_free(input); return -1; }
+    int words=(bytes+3)/4;
+    for(int start=0;start<words;start+=128) {
+        int count=words-start<128?words-start:128;
+        n+=tx_snprintf(source+n,capacity-n,"let %s%d=[",name,start);
+        for(int i=0;i<count;i++) {
+            unsigned packed=0;
+            for(int j=0;j<4;j++) {
+                int byte=4*(start+i)+j;
+                if(byte<bytes) packed|=(unsigned)input[byte]<<(8*j);
+            }
+            n+=tx_snprintf(source+n,capacity-n,"%s%u",i?",":"",packed);
+        }
+        n+=tx_snprintf(source+n,capacity-n,
+            "];let i=0;while(i<%d){let b=ux_u32_put(%d+4*i,%s%d[i]);i=i+1;}",
+            count,address+4*start,name,start);
+    }
+    n+=tx_snprintf(source+n,capacity-n,"let p=ux_u32_put(shader+GpuShaderSource.%s,%d);"
+        "let s=ux_u32_put(shader+GpuShaderSource.%sBytes,%ld);",name,address,name,(long)bytes);
+    mm_free(input);
+    return n<capacity-32?n:-1;
+}
+
+static int build_shaders(const char *path,int flat_only,int shadow_map,int area) {
+    char source[29000];
+    int n=tx_snprintf(source,sizeof source,"native function probe_shader_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.frag","fragment",6800);
+    if(n<0) return 1;
+    if(shadow_map) {
+        n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\nnative function probe_map_sources(shader:i64) i64 {");
+        n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+        if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-shadow-map.frag","fragment",12000);
+        if(n<0) return 1;
+    }
+    if(area) {
+        n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\nnative function probe_area_sources(shader:i64) i64 {");
+        n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+        if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-area.frag","fragment",12000);
+        if(n<0) return 1;
+    }
+    if(flat_only) {
+        n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\n");
+        return sy_write_file(path,source,n,0600)!=0;
+    }
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_texture_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-texture.vert","vertex",7100);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-texture.frag","fragment",7400);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_cube_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-cubetexture.vert","vertex",12300);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-cubetexture.frag","fragment",12600);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_lit_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-lit.vert","vertex",200000);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-lit.frag","fragment",201000);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_custom_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-custom.frag","fragment",6800);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,
+        "return shader;}\nnative function probe_shadow_sources(shader:i64) i64 {");
+    n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-flat.vert","vertex",6500);
+    if(n>=0) n=shader_bytes(source,sizeof source,n,"ujs/practice/uxe/base/gpu-shadow.frag","fragment",6800);
+    if(n<0) return 1;
+    n+=tx_snprintf(source+n,sizeof source-n,"return shader;}\n");
+    return sy_write_file(path,source,n,0600)!=0;
+}
+
+static int gpu_copy(const char *dir,const char *leaf,const char *source) {
+    char path[340];
+    tx_snprintf(path,sizeof path,"%s/%s",dir,leaf);
+    return sy_copy(source,path,0600)!=0;
+}
+
+static int bridge_lines(const char *path) {
+    unsigned char *source=0;
+    int64_t bytes=0;
+    if(sy_read_file(path,&source,&bytes,80000) || bytes<=0) {
+        mm_free(source);
+        return 0;
+    }
+    int lines=source[bytes-1]!='\n';
+    for(int64_t i=0;i<bytes;i++) lines+=source[i]=='\n';
+    mm_free(source);
+    return lines;
+}
+
+static void pixel_gold(int scene,int point,int *rgba) {
+    const int tri[]={1,0,1,0,0},cube[]={1,0,1,0,1};
+    rgba[0]=0; rgba[1]=0; rgba[2]=0; rgba[3]=255;
+    if(scene==1) rgba[1]=cube[point]*255;
+    else if(scene==3) {
+        rgba[0]=tri[point]*128;
+        rgba[2]=255-tri[point]*128;
+        rgba[3]=255-tri[point]*64;
+    } else rgba[0]=tri[point]*255;
+}
+
+static int gpu_check(char *start) {
+    const int status[]={0,0,0,0,-2,-3,-1,-5,-4,-7,-1,-4,-1,0,0,16,16,0};
+    const int stateStatus[]={0,-8,-9,-10,-11,-4};
+    const double state[]={1,516,0,1,32778,32779,770,771,1,771,1,514,
+        3,240,15,7680,7681,7682,1029,2304,1.5,-2,0,0,0,0,0};
+    const double clip[]={1,4,4,8,8,0.5,3,255,0,0,255,0,0,0,255,255,0,0,255,255,0,0,255,255,0,0,255};
+    int failed=0,total=1682;
+    double lit[20], distance[4];
+    for(int i=0;i<total;i++) {
+        char *next=0;
+        double value=tx_strtod(start,&next);
+        if(next==start || *next!=(i==total-1?']':',')) {
+            printf("GPU_PACKET malformed=%d\n",i);
+            return failed+1;
+        }
+        double expected=0,tolerance=0;
+        if(i<(int)(sizeof status/sizeof status[0])) expected=status[i];
+        else if(i>=198 && i<204) expected=stateStatus[i-198];
+        else if(i>=1518) {
+            int scene=(i-1518)/41, sample=(i-1518)%41;
+            if(sample) {
+                int cell=(sample-1)%20, channel=cell%4;
+                if(sample<=20) lit[cell]=value;
+                if(channel==3) expected=255;
+                else if(cell/4!=0 && cell/4!=2) expected=0;
+                else if(scene==2) {
+                    const int half[]={92,44,4};
+                    expected=half[channel]; tolerance=1;
+                } else if(sample>20) { expected=lit[cell]; tolerance=2; }
+                else {
+                    expected=value;
+                    if(value<0 || value>255 || (channel==0 && value<40)) failed++;
+                }
+            }
+        }
+        else if(i>=1477) {
+            int sample=i-1477;
+            if(sample && (sample-1)%20==3) { expected=128; tolerance=1; }
+        }
+        else if(i>=1436) {
+            int sample=i-1436;
+            if(sample) {
+                int cell=(sample-1)%20;
+                const int color[]={191,80,128,255};
+                if(cell%4==3 || cell/4==0 || cell/4==2) expected=color[cell%4];
+                tolerance=1;
+            }
+        }
+        else if(i>=1395) {
+            int sample=i-1395;
+            if(sample) {
+                int cell=(sample-1)%20;
+                if(cell%4==3 || cell==0 || cell==8) expected=255;
+            }
+        }
+        else if(i>=1354) {
+            int sample=i-1354;
+            if(sample) {
+                int cell=(sample-1)%20, point=cell/4, channel=cell%4;
+                if(sample<=20) lit[cell]=value;
+                if(point==1) expected=channel==3?255:0;
+                else {
+                    expected=value;
+                    distance[channel]=value;
+                    if(channel==3) {
+                        double decoded=(distance[3]+(distance[2]+(distance[1]+distance[0]/256)/256)/256)/256;
+                        double *raw=lit+point*4;
+                        double compared=(raw[3]+(raw[2]+(raw[1]+raw[0]/256)/256)/256)/256;
+                        if(sample>20 && (decoded<compared-0.000002 || decoded>compared+0.000002)) {
+                            printf("GPU_DISTANCE point=%d actual=%.8f reference=%.8f\n",point,compared,decoded);
+                            failed++;
+                        }
+                        if(!point && (decoded<0.118 || decoded>0.122)) failed++;
+                    }
+                }
+            }
+        }
+        else if(i>=1313) {
+            int sample=i-1313;
+            if(sample) {
+                int channel=(sample-1)%20;
+                if(sample<=20) lit[channel]=value;
+                if(channel%4==3) expected=255;
+                else if(channel>=4 && channel<8) expected=0;
+                else if(channel<4) { expected=192; tolerance=1; }
+                else if(sample<=20) expected=value;
+                else { expected=lit[channel]; tolerance=1; }
+            }
+        }
+        else if(i>=1214) {
+            int scene=(i-1214)/33, sample=(i-1214)%33;
+            if(sample) {
+                int cell=(sample-1)%16;
+                if(cell%4==3 || (cell%4==0 && cell/4<=scene)) expected=255;
+            }
+        }
+        else if(i>=1173) {
+            int sample=i-1173;
+            if(sample) {
+                int cell=(sample-1)%20;
+                if(cell%4==3 || cell==0) expected=255;
+            }
+        }
+        else if(i>=1091) {
+            int material=(i-1091)/41, sample=(i-1091)%41;
+            if(sample) {
+                int channel=(sample-1)%20;
+                if(sample<=20) lit[channel]=value;
+                if(channel%4==3) expected=255;
+                else if(channel>=4 && channel<8) expected=0;
+                else if(channel<4) {
+                    const int front[]={191,128,238};
+                    expected=material==0?front[channel]:194;
+                    tolerance=1;
+                } else if(sample<=20) expected=value;
+                else { expected=lit[channel]; tolerance=1; }
+            }
+        }
+        else if(i>=927) {
+            int sample=(i-927)%41;
+            if(sample) {
+                int channel=(sample-1)%20;
+                if(sample<=20) lit[channel]=value;
+                if(channel%4==3) expected=255;
+                else if(channel>=4 && channel<8) expected=0;
+                else if(sample<=20) {
+                    expected=value;
+                    if(value<0 || value>255 || (channel==0 && value<30) || (channel==1 && value<10)) {
+                        printf("GPU_LIGHT cell=%d interior=%.0f\n",i,value);
+                        failed++;
+                    }
+                } else {
+                    expected=lit[channel];
+                    tolerance=value*0.04;
+                    if(tolerance<1) tolerance=1;
+                }
+            }
+        }
+        else if(i>=886) {
+            const int toon[]={108,53,6,255}, inside[]={1,0,1,0,0};
+            int sample=i-886;
+            if(sample) {
+                int cell=(sample-1)%20;
+                expected=cell%4==3?255:inside[cell/4]*toon[cell%4];
+                tolerance=1;
+            }
+        }
+        else if(i>=865) {
+            const int canvas[]={0,0,255,0,255,0,0,0,255,255,0,0,255,0,0,0,255,0,0,0,255};
+            expected=canvas[i-865];
+        }
+        else if(i>=811) {
+            const int colors[][4]={{255,0,0,255},{0,255,0,255},{0,0,255,255},
+                {255,255,0,255},{255,0,255,255},{0,255,255,255}};
+            int cell=(i-811)%9;
+            if(cell) expected=colors[(i-811)/9][(cell-1)%4];
+        }
+        else if(i>=806) {
+            const int lifecycle[]={1000,2,2,0,1002};
+            expected=lifecycle[i-806];
+        }
+        else if(i>=601) {
+            int offset=i-601, sample=offset%41;
+            if(sample) {
+                int cell=(sample-1)%20, point=cell/4, channel=cell%4;
+                const int texel[][2][2]={{{0,255},{255,0}},{{112,143},{207,48}},{{0,255},{255,0}},
+                    {{255,0},{0,255}},{{128,128},{128,128}}};
+                if(channel==3) expected=255;
+                else if(channel<2 && (point==0 || point==2)) expected=texel[offset/41][point/2][channel];
+                tolerance=1;
+            }
+        }
+        else if(i>=314) {
+            const int colors[][4]={{128,64,8,255},{92,44,4,255},{148,101,81,255},{165,127,112,255},
+                {124,170,203,255},{175,90,15,255},{149,86,15,255}};
+            const int inside[]={1,0,1,0,0};
+            int offset=i-314, sample=offset%41;
+            if(sample) {
+                int cell=(sample-1)%20;
+                expected=cell%4==3?255:inside[cell/4]*colors[offset/41][cell%4];
+                tolerance=1;
+            }
+        }
+        else if(i>=260) expected=clip[(i-260)%27];
+        else if(i>=258) expected=i==258?0:-4;
+        else if(i>=204) expected=state[(i-204)%27];
+        else {
+            int pixel=i-18;
+            if(pixel>=100) pixel-=100;
+            int scene=pixel/20;
+            if(scene==4) scene=3;
+            int gold[4];
+            pixel_gold(scene,(pixel%20)/4,gold);
+            expected=gold[pixel%4];
+            tolerance=scene==3?1:0;
+        }
+        if(value<expected-tolerance || value>expected+tolerance) {
+            if(failed<16) printf("GPU_PACKET cell=%d actual=%.4g expected=%.4g tol=%.4g\n",
+                i,value,expected,tolerance);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
+static int flat_triangle_check(char *start,const int gold[][4],int scenes) {
+    int failed=0;
+    int total=scenes*41;
+    for(int i=0;i<total;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==total-1?']':',')) return failed+1;
+        int scene=i/41, sample=i%41, expected=0, tolerance=0;
+        if(sample) {
+            int cell=(sample-1)%20;
+            if(cell%4==3 || cell/4==0 || cell/4==2) expected=gold[scene][cell%4];
+            tolerance=1;
+        }
+        if(actual<expected-tolerance || actual>expected+tolerance) {
+            printf("GPU_TRIANGLE scene=%d channel=%d actual=%.0f expected=%d\n",scene,sample,actual,expected);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
+static int area_check(char *start) {
+    const int center[]={64,29,2};
+    double samples[20];
+    int failed=0;
+    for(int i=0;i<41;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==40?']':',')) return failed+1;
+        double gold=0,tolerance=0;
+        if(i) {
+            int cell=(i-1)%20,channel=cell%4;
+            if(i<=20) samples[cell]=actual;
+            if(channel==3) gold=255;
+            else if(cell/4==0) { gold=center[channel]; tolerance=2; }
+            else if(cell/4==2) { gold=samples[cell]; tolerance=1; }
+        }
+        if(actual<gold-tolerance || actual>gold+tolerance || (i>20 &&
+           (actual<samples[(i-1)%20]-1 || actual>samples[(i-1)%20]+1))) {
+            printf("GPU_AREA cell=%d actual=%.0f expected=%.0f\n",i,actual,gold);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
+static int shadow_map_check(char *start,int filter) {
+    const int basic[]={0,128,128,128,0,0,128,128,128,0,0};
+    const int filtered[]={0,90,90,68,38,0,90,90,68,38,0};
+    const int soft[]={0,128,128,85,43,0,128,128,85,43,0};
+    const int moments[]={0,128,128,115,43,0,128,128,115,43,0};
+    const int *gold=filter==3?moments:filter==2?soft:filter==1?filtered:basic;
+    int failed=0;
+    for(int i=0;i<11;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==10?']':',')) return failed+1;
+        int tolerance=gold[i]?(filter==3?2:1):0;
+        if(actual<gold[i]-tolerance || actual>gold[i]+tolerance) {
+            printf("GPU_SHADOW_MAP cell=%d actual=%.0f expected=%d\n",i,actual,gold[i]);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
+static int target_check(char *start) {
+    const int status[]={0,0,0,0,0,-12,-13,0,0,-3,-12,0,-6};
+    const int colors[][4]={{0,0,255,255},{255,0,0,255},{0,255,0,255},{255,255,0,255},{0,255,255,255}};
+    int failed=0;
+    for(int i=0;i<93;i++) {
+        char *next=0;
+        double actual=tx_strtod(start,&next);
+        if(next==start || *next!=(i==92?']':',')) return failed+1;
+        int expected=0;
+        if(i<13) expected=status[i];
+        else {
+            int sample=(i-13)%40;
+            expected=colors[sample<4?1:sample/8][sample%4];
+        }
+        if(actual!=expected) {
+            printf("GPU_TARGET cell=%d actual=%.0f expected=%d\n",i,actual,expected);
+            failed++;
+        }
+        start=next+1;
+    }
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int basic_mutate=argc==2 && tx_eqz(argv[1],"--basic-mutate");
+    int lambert_mutate=argc==2 && tx_eqz(argv[1],"--lambert-mutate");
+    int phong_mutate=argc==2 && tx_eqz(argv[1],"--phong-mutate");
+    int standard_mutate=argc==2 && tx_eqz(argv[1],"--standard-mutate");
+    int texture_mutate=argc==2 && tx_eqz(argv[1],"--texture-mutate");
+    int tone_mutate=argc==2 && tx_eqz(argv[1],"--tone-mutate");
+    int sampled_mutate=argc==2 && tx_eqz(argv[1],"--sampled-mutate");
+    int wrap_mutate=argc==2 && tx_eqz(argv[1],"--wrap-mutate");
+    int texture_life_mutate=argc==2 && tx_eqz(argv[1],"--texture-life-mutate");
+    int cube_mutate=argc==2 && tx_eqz(argv[1],"--cube-mutate");
+    int toon_mutate=argc==2 && tx_eqz(argv[1],"--toon-mutate");
+    int lighting_mutate=argc==2 && tx_eqz(argv[1],"--lighting-mutate");
+    int phong_light_mutate=argc==2 && tx_eqz(argv[1],"--phong-light-mutate");
+    int normal_mutate=argc==2 && tx_eqz(argv[1],"--normal-mutate");
+    int depth_mutate=argc==2 && tx_eqz(argv[1],"--depth-mutate");
+    int point_mutate=argc==2 && tx_eqz(argv[1],"--point-mutate");
+    int line_mutate=argc==2 && tx_eqz(argv[1],"--line-mutate");
+    int matcap_mutate=argc==2 && tx_eqz(argv[1],"--matcap-mutate");
+    int distance_mutate=argc==2 && tx_eqz(argv[1],"--distance-mutate");
+    int sprite_mutate=argc==2 && tx_eqz(argv[1],"--sprite-mutate");
+    int shader_mutate=argc==2 && tx_eqz(argv[1],"--shader-mutate");
+    int shadow_mutate=argc==2 && tx_eqz(argv[1],"--shadow-mutate");
+    int tone_suite_mutate=argc==2 && tx_eqz(argv[1],"--tone-suite-mutate");
+    int state_mutate=argc==2 && tx_eqz(argv[1],"--state-mutate");
+    int clip_mutate=argc==2 && tx_eqz(argv[1],"--clip-mutate");
+    int target_mutate=argc==2 && tx_eqz(argv[1],"--target-mutate");
+    int targets=target_mutate || (argc==2 && tx_eqz(argv[1],"--targets"));
+    int shadow_map_mutate=argc==2 && tx_eqz(argv[1],"--shadow-map-mutate");
+    int pcf_mutate=argc==2 && tx_eqz(argv[1],"--shadow-pcf-mutate");
+    int pcf=pcf_mutate || (argc==2 && tx_eqz(argv[1],"--shadow-pcf"));
+    int soft_mutate=argc==2 && tx_eqz(argv[1],"--shadow-pcf-soft-mutate");
+    int soft=soft_mutate || (argc==2 && tx_eqz(argv[1],"--shadow-pcf-soft"));
+    int vsm_mutate=argc==2 && tx_eqz(argv[1],"--shadow-vsm-mutate");
+    int vsm=vsm_mutate || (argc==2 && tx_eqz(argv[1],"--shadow-vsm"));
+    int shadow_map=shadow_map_mutate || pcf || soft || vsm || (argc==2 && tx_eqz(argv[1],"--shadow-map"));
+    int output_mutate=argc==2 && tx_eqz(argv[1],"--output-mutate");
+    int p3_readback=argc==2 && tx_eqz(argv[1],"--p3-readback");
+    int colors=output_mutate || p3_readback || (argc==2 && tx_eqz(argv[1],"--colors"));
+    int ambient_mutate=argc==2 && tx_eqz(argv[1],"--ambient-mutate");
+    int ambient=ambient_mutate || (argc==2 && tx_eqz(argv[1],"--ambient"));
+    int hemisphere_mutate=argc==2 && tx_eqz(argv[1],"--hemisphere-mutate");
+    int hemisphere=hemisphere_mutate || (argc==2 && tx_eqz(argv[1],"--hemisphere"));
+    int fog_mutate=argc==2 && tx_eqz(argv[1],"--fog-mutate");
+    int fog=fog_mutate || (argc==2 && tx_eqz(argv[1],"--fog"));
+    int exp_fog_mutate=argc==2 && tx_eqz(argv[1],"--fog-exp2-mutate");
+    int exp_fog=exp_fog_mutate || (argc==2 && tx_eqz(argv[1],"--fog-exp2"));
+    int spot_mutate=argc==2 && tx_eqz(argv[1],"--spot-mutate");
+    int spot=spot_mutate || (argc==2 && tx_eqz(argv[1],"--spot"));
+    int probe_mutate=argc==2 && tx_eqz(argv[1],"--light-probe-mutate");
+    int light_probe=probe_mutate || (argc==2 && tx_eqz(argv[1],"--light-probe"));
+    int area_mutate=argc==2 && tx_eqz(argv[1],"--area-mutate");
+    int area=area_mutate || (argc==2 && tx_eqz(argv[1],"--area"));
+    int fill=ambient || hemisphere || fog || exp_fog || spot || light_probe;
+    int simple=colors || fill || area;
+    if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
+       !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
+       !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate && !normal_mutate &&
+       !depth_mutate && !point_mutate && !line_mutate && !matcap_mutate && !distance_mutate &&
+       !sprite_mutate && !shader_mutate && !shadow_mutate && !tone_suite_mutate &&
+       !state_mutate && !clip_mutate && !targets && !simple && !shadow_map)
+        return 2;
+    char dir[256],abi[340],shaders[340],wasm[340],url[380],profile[340];
+    if(sy_mkdtemp("/tmp","ujs-gpu-packet-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(shaders,sizeof shaders,"%s/shaders.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,
+        mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":
+        target_mutate?"?target-mutate":basic_mutate?"?basic-mutate":lambert_mutate?"?lambert-mutate":
+        phong_mutate?"?phong-mutate":standard_mutate?"?standard-mutate":texture_mutate?"?texture-mutate":
+        tone_mutate?"?tone-mutate":sampled_mutate?"?sampled-mutate":wrap_mutate?"?wrap-mutate":
+        texture_life_mutate?"?texture-life-mutate":cube_mutate?"?cube-mutate":toon_mutate?"?toon-mutate":
+        lighting_mutate?"?lighting-mutate":phong_light_mutate?"?phong-light-mutate":
+        normal_mutate?"?normal-mutate":depth_mutate?"?depth-mutate":point_mutate?"?point-mutate":
+        line_mutate?"?line-mutate":matcap_mutate?"?matcap-mutate":distance_mutate?"?distance-mutate":
+        sprite_mutate?"?sprite-mutate":shader_mutate?"?shader-mutate":shadow_mutate?"?shadow-mutate":
+        tone_suite_mutate?"?tone-suite-mutate":output_mutate?"?output-mutate":p3_readback?"?p3-readback":
+        ambient_mutate?"?ambient-mutate":hemisphere_mutate?"?hemisphere-mutate":hemisphere?"?hemisphere":
+        fog_mutate?"?fog-mutate":fog?"?fog":exp_fog_mutate?"?fog-exp2-mutate":exp_fog?"?fog-exp2":
+        spot_mutate?"?spot-mutate":spot?"?spot":probe_mutate?"?light-probe-mutate":light_probe?"?light-probe":
+        shadow_map_mutate?"?shadow-map-mutate":pcf_mutate?"?shadow-pcf-mutate":pcf?"?shadow-pcf":
+        soft_mutate?"?shadow-pcf-soft-mutate":soft?"?shadow-pcf-soft":
+        vsm_mutate?"?shadow-vsm-mutate":vsm?"?shadow-vsm":area_mutate?"?area-mutate":"");
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    const char declarations[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_gpu_probe(mode:i64) i64 version 1;\n";
+    char *compile[28]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs"};
+    int args=4;
+    if(targets || shadow_map) {
+        compile[args++]="ujs/practice/uxe/base/gpu-target.ujs";
+        if(shadow_map) {
+            compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
+            compile[args++]="ujs/practice/uxe/base/gpu-sprite.ujs";
+        }
+    }
+    else if(colors || fill) {
+        compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
+        compile[args++]="ujs/practice/uxe/base/vector-scalar.ujs";
+        compile[args++]="ujs/practice/uxe/base/color.ujs";
+        compile[args++]="ujs/practice/uxe/base/colormanagement.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-output-color.ujs";
+        if(fill) {
+            compile[args++]="ujs/practice/uxe/base/gpu-material-lambert.ujs";
+            compile[args++]="ujs/practice/uxe/base/gpu-light-fill.ujs";
+            compile[args++]="ujs/practice/uxe/base/gpu-fog.ujs";
+            compile[args++]="ujs/practice/uxe/base/fog.ujs";
+            compile[args++]="ujs/practice/uxe/base/fogexp2.ujs";
+            compile[args++]="ujs/practice/uxe/base/sphericalharmonics3.ujs";
+        }
+    }
+    else if(!area) {
+        compile[args++]="ujs/practice/uxe/base/geometry-buffers.ujs";
+        compile[args++]="ujs/practice/uxe/base/boxgeometry.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-state.ujs";
+        compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-basic.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-lambert.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-phong.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-standard.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-texture-sample.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-tone.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-tone-rgb.ujs";
+        compile[args++]="ujs/practice/uxe/base/vector-scalar.ujs";
+        compile[args++]="ujs/practice/uxe/base/matrix3.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-texture-uv.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-texture-table.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-material-toon.ujs";
+        compile[args++]="ujs/practice/uxe/base/spheregeometry.ujs";
+        compile[args++]="ujs/practice/uxe/base/gpu-sprite.ujs";
+    }
+    compile[args++]=shaders;
+    if(!targets && !simple && !shadow_map) compile[args++]="ujs/practice/uxe/test/gpu-lit-probe.ujs";
+    compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":
+        shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-probe.ujs":
+        area?"ujs/practice/uxe/test/gpu-area-probe.ujs":
+        colors?"ujs/practice/uxe/test/gpu-output-probe.ujs":
+        fill?"ujs/practice/uxe/test/gpu-fill-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
+    compile[args++]="-o";
+    compile[args++]=wasm;
+    compile[args]=0;
+    char *out=0;
+    size_t bytes=0;
+    sy_stat_t compiled={0};
+    const char bridge[]="ujs/practice/uxe/base/gpu-host-abi.js";
+    const char states[]="ujs/practice/uxe/base/gpu-state-abi.js";
+    const char target_bridge[]="ujs/practice/uxe/base/gpu-target-abi.js";
+    int lines=bridge_lines(bridge)+bridge_lines(states);
+    int target_lines=(targets || shadow_map)?bridge_lines(target_bridge):0;
+    int ready=lines>0 && lines+target_lines<=600 &&
+        !sy_write_file(abi,declarations,sizeof declarations-1,0600) &&
+        !build_shaders(shaders,targets || simple || shadow_map,shadow_map,area)
+        && !cx_runv_timeout(compile,10,&out,&bytes)
+        && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
+        && !gpu_copy(dir,"probe.html",targets?"ujs/practice/uxe/test/gpu-target-r160.html":
+            shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-r160.html":
+            area?"ujs/practice/uxe/test/gpu-area-r160.html":
+            colors?"ujs/practice/uxe/test/gpu-output-r160.html":
+            fill?"ujs/practice/uxe/test/gpu-fill-r160.html":"ujs/practice/uxe/test/gpu-packet-r160.html")
+        && !gpu_copy(dir,"gpu-host-abi.js",bridge)
+        && !gpu_copy(dir,"gpu-state-abi.js",states)
+        && (!(targets || shadow_map) || (target_lines>0 && !gpu_copy(dir,"gpu-target-abi.js",target_bridge)))
+        && !gpu_copy(dir,"three.module.js","ujs/practice/web/game/three.module.js");
+    if(!ready && out) printf("GPU_PACKET compile=%s\n",out);
+    mm_free(out);
+    out=0;
+    const char marker[]="<pre id=\"gpu\">[";
+    long at=-1;
+    int failed=1;
+    if(ready) {
+        char *chrome[]={"google-chrome","--headless=new","--no-first-run","--disable-background-networking",
+            "--allow-file-access-from-files","--enable-unsafe-swiftshader","--use-angle=swiftshader",
+            "--virtual-time-budget=7000","--dump-dom",profile,url,0};
+        int rc=cx_runv_timeout(chrome,20,&out,&bytes);
+        if(!rc && out) at=tx_find(out,bytes,marker,sizeof marker-1);
+        if(at<0) {
+            const char label[]="<pre id=\"gpu\">";
+            long detail=out?tx_find(out,bytes,label,sizeof label-1):-1;
+            printf("GPU_PACKET chrome_rc=%d detail=%.210s\n",rc,detail>=0?out+detail:"");
+        } else {
+            char *values=out+at+sizeof marker-1;
+            const int color_gold[][4]={{55,13,1,255},{128,64,8,255},{47,14,2,255},{119,67,25,255}};
+            const int ambient_gold[][4]={{92,30,1,255}};
+            const int hemisphere_gold[][4]={{102,39,2,255}};
+            const int fog_gold[][4]={{128,0,128,255}};
+            const int spot_gold[][4]={{92,44,4,255}};
+            const int probe_gold[][4]={{104,51,5,255}};
+            failed=targets?target_check(values):shadow_map?shadow_map_check(values,vsm?3:soft?2:pcf):
+                area?area_check(values):
+                colors?flat_triangle_check(values,color_gold,p3_readback?4:3):
+                fill?flat_triangle_check(values,(fog || exp_fog)?fog_gold:light_probe?probe_gold:spot?spot_gold:
+                    hemisphere?hemisphere_gold:ambient_gold,1):
+                gpu_check(values);
+            if(colors) {
+                const char reject[]="<pre id=\"color-contract\">[-1,-1,-1,-1]</pre>";
+                if(tx_find(out,bytes,reject,sizeof reject-1)<0) {
+                    printf("GPU_OUTPUT unknown-tag refusal failed\n");
+                    failed++;
+                }
+            }
+            const char toon_marker[]="<pre id=\"toon\">";
+            long toon_at=tx_find(out,bytes,toon_marker,sizeof toon_marker-1);
+            if(toon_at>=0) {
+                long begin=toon_at+sizeof toon_marker-1;
+                long end=tx_find(out+begin,bytes-begin,"</pre>",6);
+                if(end>=0) printf("TOON_R160 %.*s\n",(int)end,out+begin);
+            }
+        }
+    }
+    mm_free(out);
+    char *clean[]={"rm","-rf","--",dir,0};
+    out=0;
+    if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
+    mm_free(out);
+    printf("G_PIXEL %s scenes=%d values=%d wasm_bytes=%ld bridge_lines=%d failed=%d\n",
+        targets?"GPU_TARGET":shadow_map?"GPU_SHADOW_MAP":area?"GPU_AREA":colors?"GPU_OUTPUT":light_probe?"GPU_LIGHT_PROBE":spot?"GPU_SPOT":exp_fog?"GPU_FOG_EXP2":fog?"GPU_FOG":
+        hemisphere?"GPU_HEMISPHERE":ambient?"GPU_AMBIENT":"GPU_PACKET",
+        targets?5:p3_readback?4:colors?3:(fill || shadow_map || area)?1:43,
+        targets?93:shadow_map?11:p3_readback?164:colors?123:(fill || area)?41:1682,
+        compiled.size,lines+target_lines,failed);
+    return failed!=0;
+}

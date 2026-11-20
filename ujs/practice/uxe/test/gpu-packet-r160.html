@@ -1,0 +1,556 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<pre id="toon"></pre>
+<script type="module">
+import {
+  ACESFilmicToneMapping, AgXToneMapping, BasicShadowMap, BoxGeometry, BufferAttribute, BufferGeometry,
+  Camera, CineonToneMapping, Color, CullFaceBack, CustomBlending, CustomToneMapping, DoubleSide, ShaderChunk,
+  CanvasTexture, CubeTexture, DataTexture, DirectionalLight, EqualStencilFunc, GreaterDepth,
+  IncrementStencilOp, KeepStencilOp, LessDepth, Line, LineBasicMaterial, LineLoop, LineSegments,
+  PlaneGeometry, PointLight, Points, PointsMaterial, ShaderMaterial, ShadowMaterial, SphereGeometry, Sprite,
+  SpriteMaterial, Vector3,
+  LinearToneMapping, ReinhardToneMapping,
+  LinearFilter, LinearSRGBColorSpace, NearestFilter, NoToneMapping,
+  LinearMipmapLinearFilter, MirroredRepeatWrapping, RepeatWrapping,
+  RedFormat, SRGBColorSpace,
+  Mesh, MeshBasicMaterial, MeshDepthMaterial, MeshDistanceMaterial, MeshLambertMaterial, MeshMatcapMaterial,
+  MeshNormalMaterial, MeshPhongMaterial,
+  MeshStandardMaterial, MeshToonMaterial,
+  OneFactor, OrthographicCamera,
+  OneMinusSrcAlphaFactor, RawShaderMaterial, ReplaceStencilOp, ReverseSubtractEquation, REVISION,
+  Scene, SrcAlphaFactor, SubtractEquation, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+const result = document.querySelector("#gpu");
+const samples = [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]];
+const size = 16;
+const options = { alpha: true, antialias: false, depth: true, stencil: true, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function stateValues(gl) {
+  const keys = ["DEPTH_TEST", "DEPTH_FUNC", "DEPTH_WRITEMASK", "BLEND", "BLEND_EQUATION_RGB", "BLEND_EQUATION_ALPHA",
+    "BLEND_SRC_RGB", "BLEND_DST_RGB", "BLEND_SRC_ALPHA", "BLEND_DST_ALPHA", "STENCIL_TEST", "STENCIL_FUNC",
+    "STENCIL_REF", "STENCIL_VALUE_MASK", "STENCIL_WRITEMASK", "STENCIL_FAIL", "STENCIL_PASS_DEPTH_FAIL",
+    "STENCIL_PASS_DEPTH_PASS", "CULL_FACE_MODE", "FRONT_FACE", "POLYGON_OFFSET_FACTOR", "POLYGON_OFFSET_UNITS"];
+  return keys.map(key => Number(gl.getParameter(gl[key]))).concat(gl.getParameter(gl.COLOR_WRITEMASK).map(Number), gl.getError());
+}
+function clipValues(gl) {
+  return [Number(gl.isEnabled(gl.SCISSOR_TEST)), ...gl.getParameter(gl.SCISSOR_BOX),
+    gl.getParameter(gl.DEPTH_CLEAR_VALUE), gl.getParameter(gl.STENCIL_CLEAR_VALUE), ...pixels(gl)];
+}
+function context(api = "webgl") {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const gl = canvas.getContext(api, options);
+  if (!gl) throw new Error("WebGL unavailable");
+  return { canvas, gl };
+}
+function pixels(gl, points = samples) {
+  const values = [];
+  for (const [x, y] of points) {
+    const rgba = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    values.push(...rgba);
+  }
+  return values;
+}
+function triangle(z) {
+  return [-0.75, -0.75, z, 0.75, -0.75, z, 0, 0.75, z];
+}
+function cube() {
+  const box = new BoxGeometry(1, 1, 1);
+  const position = box.getAttribute("position");
+  const vertices = [];
+  for (const i of box.index.array) {
+    const x = position.getX(i), y = position.getY(i), z = position.getZ(i);
+    vertices.push(0.8*x + 0.35*z, 0.8*y - 0.25*z, 0.35*x + 0.2*y + 0.55*z);
+  }
+  box.dispose();
+  return vertices;
+}
+function referenceMesh(scene, vertices, color, depth, blend, order) {
+  const geometry = new BufferGeometry();
+  const position = new BufferAttribute(new Float32Array(vertices), 3);
+  geometry.setAttribute("position", position);
+  geometry.setAttribute("a_position", position);
+  const colors = new Float32Array(vertices.length / 3 * 4);
+  for (let i = 0; i < colors.length; i += 4) colors.set(color, i);
+  geometry.setAttribute("a_color", new BufferAttribute(colors, 4));
+  const material = new RawShaderMaterial({
+    vertexShader: "attribute vec3 a_position; attribute vec4 a_color; varying vec4 color; void main(){ color=a_color; gl_Position=vec4(a_position,1.0); }",
+    fragmentShader: "precision mediump float; varying vec4 color; void main(){ gl_FragColor=color; }",
+    side: DoubleSide, forceSinglePass: true, depthTest: depth, depthWrite: true, depthFunc: LessDepth,
+    transparent: blend, blending: CustomBlending, blendSrc: SrcAlphaFactor,
+    blendDst: OneMinusSrcAlphaFactor, blendSrcAlpha: SrcAlphaFactor, blendDstAlpha: OneMinusSrcAlphaFactor,
+  });
+  const mesh = new Mesh(geometry, material);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = order;
+  scene.add(mesh);
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const { gl } = context();
+  let base;
+  const submit = createGpuSubmit(gl, () => base.exports.memory, () => 1);
+  const request = new XMLHttpRequest();
+  request.open("GET", "probe.wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
+  base = new WebAssembly.Instance(new WebAssembly.Module(bytes), { uxe_gpu_v1: { host_gpu_submit: submit } });
+  const step = base.exports.uxe_gpu_probe;
+  const actual = [];
+  const status = [];
+  const mutate = new URLSearchParams(location.search).has("mutate");
+  const basicMode = new URLSearchParams(location.search).has("basic-mutate") ? 41n : 40n;
+  const basicStatus = Number(step(basicMode));
+  const actualBasic = pixels(gl);
+  const lambertMode = new URLSearchParams(location.search).has("lambert-mutate") ? 43n : 42n;
+  const lambertStatus = Number(step(lambertMode));
+  const actualLambert = pixels(gl);
+  const phongStatus = Number(step(location.search === "?phong-mutate" ? 45n : 44n));
+  const actualPhong = pixels(gl);
+  const standardStatus = Number(step(location.search === "?standard-mutate" ? 47n : 46n));
+  const actualStandard = pixels(gl);
+  const textureStatus = Number(step(location.search === "?texture-mutate" ? 51n : 50n));
+  const actualTexture = pixels(gl);
+  const linearStatus = Number(step(location.search === "?tone-mutate" ? 54n : 52n));
+  const actualLinear = pixels(gl);
+  const reinhardStatus = Number(step(53n));
+  const actualReinhard = pixels(gl);
+  const toonStatus = Number(step(location.search === "?toon-mutate" ? 56n : 55n));
+  const actualToon = pixels(gl);
+  const sampledNearestStatus = Number(step(location.search === "?sampled-mutate" ? 62n : 60n));
+  const actualSampledNearest = pixels(gl);
+  const sampledLinearStatus = Number(step(61n));
+  const actualSampledLinear = pixels(gl);
+  const sampledRepeatStatus = Number(step(location.search === "?wrap-mutate" ? 66n : 63n));
+  const actualSampledRepeat = pixels(gl);
+  const sampledMirrorStatus = Number(step(64n));
+  const actualSampledMirror = pixels(gl);
+  const sampledMipStatus = Number(step(65n));
+  const actualSampledMip = pixels(gl);
+  const lifecycle = [location.search === "?texture-life-mutate" ? 101n : 100n, 102n, 103n, 104n, 105n]
+    .map(mode => Number(step(mode)));
+  const cubeSamples = [];
+  for (let i = 0; i < 6; i++) {
+    const mode = i === 0 && location.search === "?cube-mutate" ? 116 : 110 + i;
+    cubeSamples.push([Number(step(BigInt(mode))), ...pixels(gl).slice(0, 4)]);
+  }
+  const litShaderErrors = [];
+  if (!gl.getExtension("OES_standard_derivatives")) throw new Error("lighting derivatives unavailable");
+  const compileShader = gl.compileShader;
+  gl.compileShader = shader => {
+    compileShader.call(gl, shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) litShaderErrors.push(gl.getShaderInfoLog(shader));
+  };
+  const litModes = [
+    location.search === "?phong-light-mutate" ? 125n : 120n, 121n, 122n,
+    location.search === "?lighting-mutate" ? 124n : 123n,
+    location.search === "?normal-mutate" ? 127n : 126n,
+    location.search === "?depth-mutate" ? 129n : 128n,
+    location.search === "?matcap-mutate" ? 139n : 138n,
+    location.search === "?distance-mutate" ? 141n : 140n,
+  ];
+  const litSamples = litModes.map(mode => {
+    const status = Number(step(mode));
+    return [status, ...pixels(gl)];
+  });
+  gl.compileShader = compileShader;
+  const pointStatus = Number(step(location.search === "?point-mutate" ? 131n : 130n));
+  const actualPoint = pixels(gl);
+  const linePoints = [[8, 8], [8, 11], [4, 10], [1, 1]];
+  const lineStart = location.search === "?line-mutate" ? 135 : 132;
+  const lineSamples = [0, 1, 2].map(i => [Number(step(BigInt(lineStart + i))), ...pixels(gl, linePoints)]);
+  const spriteStatus = Number(step(location.search === "?sprite-mutate" ? 143n : 142n));
+  const actualSprite = pixels(gl);
+  const shaderStatus = Number(step(location.search === "?shader-mutate" ? 145n : 144n));
+  const actualShader = pixels(gl);
+  const shadowStatus = Number(step(location.search === "?shadow-mutate" ? 149n : 148n));
+  const actualShadow = pixels(gl);
+  const toneSuiteStart = location.search === "?tone-suite-mutate" ? 154 : 150;
+  const advancedTones = [0, 1, 2, 3].map(i => [Number(step(BigInt(toneSuiteStart + i))), ...pixels(gl)]);
+  for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {
+    status.push(Number(step(mode)));
+    actual.push(...pixels(gl));
+  }
+  for (let mode = 10n; mode <= 18n; mode++) status.push(Number(step(mode)));
+  actual.push(...pixels(gl));
+  status.push(...gl.getParameter(gl.VIEWPORT), gl.getError());
+  const stateStatus = [Number(step(new URLSearchParams(location.search).has("state-mutate") ? 26n : 20n))];
+  for (let mode = 21n; mode <= 25n; mode++) stateStatus.push(Number(step(mode)));
+  const actualState = stateValues(gl);
+  const clipStatus = [Number(step(new URLSearchParams(location.search).has("clip-mutate") ? 32n : 30n)), Number(step(31n))];
+  const actualClip = clipValues(gl);
+
+  const reference = [];
+  const three = context();
+  const renderer = new WebGLRenderer({ canvas: three.canvas, context: three.gl, ...options });
+  renderer.setSize(size, size, false);
+  const camera = new Camera();
+  for (let sceneIndex = 0; sceneIndex < 4; sceneIndex++) {
+    const scene = new Scene();
+    const depth = sceneIndex === 1 || sceneIndex === 2;
+    const blend = sceneIndex === 3;
+    renderer.setClearColor(blend ? 0x0000ff : 0x000000, 1);
+    if (sceneIndex === 1) referenceMesh(scene, cube(), [0, 1, 0, 1], true, false, 0);
+    else referenceMesh(scene, triangle(sceneIndex === 2 ? -0.5 : 0), [1, 0, 0, blend ? 0.5 : 1], depth, blend, 0);
+    if (sceneIndex === 2) referenceMesh(scene, triangle(0.5), [0, 1, 0, 1], true, false, 1);
+    renderer.render(scene, camera);
+    reference.push(...pixels(three.gl));
+    for (const mesh of scene.children) { mesh.geometry.dispose(); mesh.material.dispose(); }
+  }
+  const { state } = renderer;
+  state.buffers.depth.setTest(true);
+  state.buffers.depth.setFunc(GreaterDepth);
+  state.buffers.depth.setMask(false);
+  state.setBlending(CustomBlending, SubtractEquation, SrcAlphaFactor, OneMinusSrcAlphaFactor,
+    ReverseSubtractEquation, OneFactor, OneMinusSrcAlphaFactor, new Color(0), 0, false);
+  state.buffers.stencil.setTest(true);
+  state.buffers.stencil.setFunc(EqualStencilFunc, 3, 240);
+  state.buffers.stencil.setMask(15);
+  state.buffers.stencil.setOp(KeepStencilOp, ReplaceStencilOp, IncrementStencilOp);
+  state.setCullFace(CullFaceBack);
+  state.setFlipSided(true);
+  state.setPolygonOffset(true, 1.5, -2);
+  state.buffers.color.setMask(false);
+  const referenceState = stateValues(three.gl);
+  state.buffers.color.setMask(true);
+  state.buffers.depth.setMask(true);
+  state.buffers.stencil.setMask(255);
+  state.buffers.depth.setClear(1);
+  state.buffers.stencil.setClear(0);
+  renderer.setScissorTest(false);
+  renderer.setClearColor(0x000000, 1);
+  renderer.clear(true, true, true);
+  renderer.setScissor(4, 4, 8, 8);
+  renderer.setScissorTest(true);
+  renderer.setClearColor(0xff0000, 1);
+  state.buffers.depth.setClear(0.5);
+  state.buffers.stencil.setClear(3);
+  renderer.clear(true, true, true);
+  const referenceClip = clipValues(three.gl);
+  renderer.setScissorTest(false);
+  renderer.setClearColor(0, 1);
+  const basicGeometry = new BufferGeometry();
+  basicGeometry.setAttribute("position", new BufferAttribute(new Float32Array(triangle(0)), 3));
+  const basicMaterial = new MeshBasicMaterial({ color: 0x804008 });
+  const basicScene = new Scene();
+  basicScene.add(new Mesh(basicGeometry, basicMaterial));
+  renderer.render(basicScene, camera);
+  const referenceBasic = pixels(three.gl);
+  basicGeometry.computeVertexNormals();
+  const lambertMaterial = new MeshLambertMaterial({ color: 0x804008 });
+  const lambertScene = new Scene();
+  lambertScene.add(new Mesh(basicGeometry, lambertMaterial));
+  const light = new DirectionalLight(0xffffff, Math.PI);
+  light.position.set(Math.sqrt(3), 0, 1);
+  lambertScene.add(light);
+  renderer.render(lambertScene, camera);
+  const referenceLambert = pixels(three.gl);
+  lambertMaterial.dispose();
+  const phongMaterial = new MeshPhongMaterial({ color: 0x804008, specular: new Color().setRGB(0.08, 0.08, 0.08), shininess: 6 });
+  const phongScene = new Scene();
+  phongScene.add(new Mesh(basicGeometry, phongMaterial));
+  light.position.set(0, 0, 1);
+  phongScene.add(light);
+  const ortho = new OrthographicCamera(-1, 1, 1, -1, 0, 2);
+  ortho.position.z = 1;
+  renderer.render(phongScene, ortho);
+  const referencePhong = pixels(three.gl);
+  phongMaterial.dispose();
+  const standardMaterial = new MeshStandardMaterial({ color: 0x804008, roughness: 0.5, metalness: 0 });
+  const standardScene = new Scene();
+  standardScene.add(new Mesh(basicGeometry, standardMaterial), light);
+  renderer.render(standardScene, ortho);
+  const referenceStandard = pixels(three.gl);
+  standardMaterial.dispose();
+  basicGeometry.setAttribute("uv", new BufferAttribute(new Float32Array([0.75, 0.5, 0.75, 0.5, 0.75, 0.5]), 2));
+  const texture = new DataTexture(new Uint8Array([255, 0, 0, 255, 51, 102, 153, 255]), 2, 1);
+  texture.needsUpdate = true;
+  basicMaterial.color.set(0xffffff);
+  basicMaterial.map = texture;
+  basicMaterial.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceTexture = pixels(three.gl);
+  texture.dispose();
+  basicMaterial.color.set(0x804008);
+  basicMaterial.map = null;
+  basicMaterial.needsUpdate = true;
+  renderer.toneMappingExposure = 2;
+  renderer.toneMapping = LinearToneMapping;
+  renderer.render(basicScene, camera);
+  const referenceLinear = pixels(three.gl);
+  renderer.toneMapping = ReinhardToneMapping;
+  renderer.render(basicScene, camera);
+  const referenceReinhard = pixels(three.gl);
+  renderer.toneMapping = NoToneMapping;
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  basicGeometry.setAttribute("uv", new BufferAttribute(new Float32Array([0.125, 0.5, 0.875, 0.5, 0.5, 0.5]), 2));
+  const sampled = new DataTexture(new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]), 2, 1);
+  sampled.minFilter = sampled.magFilter = NearestFilter;
+  sampled.needsUpdate = true;
+  basicMaterial.color.set(0xffffff);
+  basicMaterial.map = sampled;
+  basicMaterial.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceSampledNearest = pixels(three.gl);
+  sampled.minFilter = sampled.magFilter = LinearFilter;
+  sampled.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceSampledLinear = pixels(three.gl);
+  sampled.minFilter = sampled.magFilter = NearestFilter;
+  sampled.wrapS = RepeatWrapping;
+  sampled.offset.x = 1;
+  sampled.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceSampledRepeat = pixels(three.gl);
+  sampled.wrapS = MirroredRepeatWrapping;
+  sampled.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceSampledMirror = pixels(three.gl);
+  sampled.wrapS = RepeatWrapping;
+  sampled.offset.x = 0;
+  sampled.repeat.x = 64;
+  sampled.minFilter = LinearMipmapLinearFilter;
+  sampled.magFilter = LinearFilter;
+  sampled.generateMipmaps = true;
+  sampled.needsUpdate = true;
+  renderer.render(basicScene, camera);
+  const referenceSampledMip = pixels(three.gl);
+  sampled.dispose();
+  function swatch(colors) {
+    const image = document.createElement("canvas");
+    image.width = colors.length;
+    image.height = 1;
+    const ctx = image.getContext("2d");
+    for (const [i, color] of colors.entries()) {
+      ctx.fillStyle = color;
+      ctx.fillRect(i, 0, 1, 1);
+    }
+    return image;
+  }
+  const canvasMap = new CanvasTexture(swatch(["#f00", "#0f0"]));
+  canvasMap.minFilter = canvasMap.magFilter = NearestFilter;
+  basicMaterial.map = canvasMap;
+  renderer.render(basicScene, camera);
+  const referenceCanvas = pixels(three.gl);
+  canvasMap.dispose();
+  const cubeMap = new CubeTexture(["#f00", "#0f0", "#00f", "#ff0", "#f0f", "#0ff"].map(color => swatch([color])));
+  cubeMap.minFilter = cubeMap.magFilter = NearestFilter;
+  cubeMap.generateMipmaps = false;
+  cubeMap.needsUpdate = true;
+  const direction = new Vector3();
+  const rawCube = new RawShaderMaterial({
+    uniforms: { cubeMap: { value: cubeMap }, direction: { value: direction } },
+    vertexShader: "attribute vec3 position; void main(){ gl_Position=vec4(position,1.0); }",
+    fragmentShader: "precision mediump float; uniform samplerCube cubeMap; uniform vec3 direction; void main(){ gl_FragColor=textureCube(cubeMap,direction); }",
+  });
+  const cubeScene = new Scene();
+  cubeScene.add(new Mesh(basicGeometry, rawCube));
+  const cubeResults = cubeSamples.flatMap((sample, face) => {
+    direction.set(0, 0, 0);
+    direction.setComponent(Math.floor(face / 2), face % 2 ? -1 : 1);
+    renderer.render(cubeScene, camera);
+    return [...sample, ...pixels(three.gl).slice(0, 4)];
+  });
+  rawCube.dispose();
+  cubeMap.dispose();
+  const toonHost = context("webgl2");
+  const toonRenderer = new WebGLRenderer({ canvas: toonHost.canvas, context: toonHost.gl, ...options });
+  toonRenderer.setSize(size, size, false);
+  toonRenderer.setClearColor(0, 1);
+  toonRenderer.outputColorSpace = SRGBColorSpace;
+  const shaderErrors = [];
+  toonRenderer.debug.onShaderError = (gl, program, vertex, fragment) => {
+    shaderErrors.push(gl.getProgramInfoLog(program), gl.getShaderInfoLog(vertex), gl.getShaderInfoLog(fragment));
+  };
+  const toonScene = new Scene();
+  const toonLight = new DirectionalLight(0xffffff, Math.PI);
+  toonLight.position.set(Math.sqrt(15), 0, 1);
+  const toon = new MeshToonMaterial({ color: 0x804008 });
+  toonScene.add(new Mesh(basicGeometry, toon), toonLight);
+  toonRenderer.render(toonScene, ortho);
+  const defaultToon = pixels(toonHost.gl).slice(0, 4);
+  const redGradient = new DataTexture(new Uint8Array([179, 179, 179, 255]), 4, 1, RedFormat);
+  redGradient.needsUpdate = true;
+  toon.gradientMap = redGradient;
+  toon.needsUpdate = true;
+  toonRenderer.render(toonScene, ortho);
+  const singleToon = pixels(toonHost.gl).slice(0, 4);
+  const singleError = toonHost.gl.getError();
+  redGradient.dispose();
+  const rgbaGradient = new DataTexture(new Uint8Array([
+    179, 0, 0, 255, 179, 0, 0, 255, 179, 0, 0, 255, 255, 0, 0, 255,
+  ]), 4, 1);
+  rgbaGradient.needsUpdate = true;
+  toon.gradientMap = rgbaGradient;
+  toon.needsUpdate = true;
+  toonRenderer.render(toonScene, ortho);
+  const referenceToon = pixels(toonHost.gl);
+  document.querySelector("#toon").textContent = JSON.stringify({
+    defaultToon, singleToon, singleError, rgbaToon: referenceToon.slice(0, 4),
+    context: toonHost.gl.getParameter(toonHost.gl.VERSION), shaderErrors, litShaderErrors,
+  });
+  rgbaGradient.dispose();
+  toon.dispose();
+  toonRenderer.dispose();
+  renderer.outputColorSpace = SRGBColorSpace;
+  const litResults = litSamples.map((sample, i) => {
+    const litScene = new Scene();
+    const isCube = i >= 2;
+    const geometry = isCube ? new BoxGeometry(0.96, 0.96, 0.96) : new SphereGeometry(0.7, 16, 12);
+    const color = 0x804008;
+    const diagnostic = [MeshNormalMaterial, MeshDepthMaterial, MeshMatcapMaterial, MeshDistanceMaterial];
+    const material = i >= 4 ? new diagnostic[i - 4]() : i % 2
+      ? new MeshStandardMaterial({ color, metalness: 0, roughness: 0.5 })
+      : new MeshPhongMaterial({ color, shininess: 6, specular: new Color().setRGB(0.08, 0.08, 0.08) });
+    const mesh = new Mesh(geometry, material);
+    if (isCube) {
+      mesh.rotation.y = Math.PI / 6;
+      const point = new PointLight(0xffffff, 3.2, 0, 2);
+      point.position.set(0.4, -0.3, 1.6);
+      litScene.add(point);
+    } else {
+      const key = new DirectionalLight(0xffffff, 2);
+      key.position.set(1, 0, 2);
+      const fill = new DirectionalLight(0xffffff, 1);
+      fill.position.set(-1, 1, 1);
+      litScene.add(key, fill);
+    }
+    litScene.add(mesh);
+    if (material.isMeshDistanceMaterial) {
+      const referenceLight = new PointLight();
+      referenceLight.position.z = 1;
+      referenceLight.updateMatrixWorld();
+      referenceLight.shadow.camera.near = 0.25;
+      referenceLight.shadow.camera.far = 2.25;
+      renderer.properties.get(material).light = referenceLight;
+    }
+    renderer.render(litScene, ortho);
+    const reference = pixels(three.gl);
+    geometry.dispose();
+    material.dispose();
+    return [...sample, ...reference];
+  });
+  const pointGeometry = new BufferGeometry();
+  pointGeometry.setAttribute("position", new BufferAttribute(new Float32Array([0.0625, 0.0625, 0]), 3));
+  const pointMaterial = new PointsMaterial({ color: 0xff0000, size: 3, sizeAttenuation: false });
+  const pointScene = new Scene();
+  pointScene.add(new Points(pointGeometry, pointMaterial));
+  renderer.render(pointScene, camera);
+  const referencePoint = pixels(three.gl);
+  pointGeometry.dispose();
+  pointMaterial.dispose();
+  const lineResults = [LineSegments, Line, LineLoop].flatMap((Shape, i) => {
+    const xy = [-0.4375, 0.0625, 0, 0.75, 0.0625, 0, -0.4375, 0.75, 0];
+    if (i === 0) xy.push(0.75, 0.75, 0);
+    const positions = new BufferGeometry();
+    positions.setAttribute("position", new BufferAttribute(new Float32Array(xy), 3));
+    const red = new LineBasicMaterial({ color: 0xff0000 });
+    const scene = new Scene();
+    scene.add(new Shape(positions, red));
+    renderer.render(scene, camera);
+    const reference = pixels(three.gl, linePoints);
+    positions.dispose();
+    red.dispose();
+    return [...lineSamples[i], ...reference];
+  });
+  const spriteMaterial = new SpriteMaterial({ color: 0xff0000, rotation: Math.PI / 4 });
+  const spriteScene = new Scene();
+  spriteScene.add(new Sprite(spriteMaterial));
+  renderer.render(spriteScene, camera);
+  const referenceSprite = pixels(three.gl);
+  spriteMaterial.dispose();
+  const shaderGeometry = new BufferGeometry();
+  shaderGeometry.setAttribute("position", new BufferAttribute(new Float32Array(triangle(0)), 3));
+  const attribute = new Float32Array([0.125, 0.5, 0.75, 1, 0.125, 0.5, 0.75, 1, 0.125, 0.5, 0.75, 1]);
+  shaderGeometry.setAttribute("a_color", new BufferAttribute(attribute, 4));
+  const shaderMaterial = new ShaderMaterial({
+    vertexShader: "attribute vec4 a_color; varying vec4 v_color; void main() { v_color = a_color; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+    fragmentShader: "varying vec4 v_color; void main() { gl_FragColor = vec4(v_color.b, (v_color.r + v_color.g) * 0.5, v_color.g, v_color.a); }",
+  });
+  const shaderScene = new Scene();
+  shaderScene.add(new Mesh(shaderGeometry, shaderMaterial));
+  renderer.render(shaderScene, camera);
+  const referenceShader = pixels(three.gl);
+  shaderGeometry.dispose();
+  shaderMaterial.dispose();
+  const receiverGeometry = new PlaneGeometry(2, 2);
+  const receiverMaterial = new ShadowMaterial({ opacity: 0.5 });
+  const receiver = new Mesh(receiverGeometry, receiverMaterial);
+  receiver.receiveShadow = true;
+  const blockerGeometry = new BoxGeometry(0.4, 0.4, 0.2);
+  const blockerMaterial = new MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+  const blocker = new Mesh(blockerGeometry, blockerMaterial);
+  blocker.position.z = 0.3;
+  blocker.castShadow = true;
+  const shadowLight = new DirectionalLight();
+  shadowLight.position.set(0, 0, 2);
+  shadowLight.castShadow = true;
+  shadowLight.shadow.mapSize.set(64, 64);
+  const shadowCamera = shadowLight.shadow.camera;
+  shadowCamera.left = shadowCamera.bottom = -1;
+  shadowCamera.right = shadowCamera.top = 1;
+  shadowCamera.near = 0.1;
+  shadowCamera.far = 4;
+  shadowCamera.updateProjectionMatrix();
+  const shadowScene = new Scene();
+  shadowScene.add(receiver, blocker, shadowLight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = BasicShadowMap;
+  renderer.setClearColor(0, 0);
+  renderer.render(shadowScene, ortho);
+  const referenceShadow = pixels(three.gl);
+  receiverGeometry.dispose();
+  receiverMaterial.dispose();
+  blockerGeometry.dispose();
+  blockerMaterial.dispose();
+  shadowLight.shadow.dispose();
+  renderer.shadowMap.enabled = false;
+  renderer.setClearColor(0, 1);
+  renderer.toneMappingExposure = 2;
+  basicMaterial.color.set(0x804008);
+  basicMaterial.map = null;
+  basicMaterial.needsUpdate = true;
+  const toneCases = [CineonToneMapping, ACESFilmicToneMapping, CustomToneMapping, AgXToneMapping];
+  const toneResults = toneCases.flatMap((mapping, i) => {
+    const backup = ShaderChunk.tonemapping_pars_fragment;
+    if (mapping === CustomToneMapping) {
+      ShaderChunk.tonemapping_pars_fragment = backup.replace(
+        "CustomToneMapping( vec3 color ) { return color; }",
+        "CustomToneMapping( vec3 color ) { return color * 0.5; }",
+      );
+    }
+    renderer.toneMapping = mapping;
+    try {
+      renderer.render(basicScene, camera);
+      return [...advancedTones[i], ...pixels(three.gl)];
+    } finally {
+      ShaderChunk.tonemapping_pars_fragment = backup;
+    }
+  });
+  basicGeometry.dispose();
+  basicMaterial.dispose();
+  renderer.dispose();
+  result.textContent = JSON.stringify([...status, ...actual, ...reference, ...stateStatus, ...actualState, ...referenceState,
+    ...clipStatus, ...actualClip, ...referenceClip, basicStatus, ...actualBasic, ...referenceBasic,
+    lambertStatus, ...actualLambert, ...referenceLambert, phongStatus, ...actualPhong, ...referencePhong,
+    standardStatus, ...actualStandard, ...referenceStandard, textureStatus, ...actualTexture, ...referenceTexture,
+    linearStatus, ...actualLinear, ...referenceLinear, reinhardStatus, ...actualReinhard, ...referenceReinhard,
+    sampledNearestStatus, ...actualSampledNearest, ...referenceSampledNearest,
+    sampledLinearStatus, ...actualSampledLinear, ...referenceSampledLinear,
+    sampledRepeatStatus, ...actualSampledRepeat, ...referenceSampledRepeat,
+    sampledMirrorStatus, ...actualSampledMirror, ...referenceSampledMirror,
+    sampledMipStatus, ...actualSampledMip, ...referenceSampledMip, ...lifecycle,
+    ...cubeResults, sampledNearestStatus, ...referenceCanvas, toonStatus, ...actualToon, ...referenceToon,
+    ...litResults.slice(0, 6).flat(), pointStatus, ...actualPoint, ...referencePoint, ...lineResults,
+    ...litResults.slice(6).flat(), spriteStatus, ...actualSprite, ...referenceSprite,
+    shaderStatus, ...actualShader, ...referenceShader, shadowStatus, ...actualShadow, ...referenceShadow,
+    ...toneResults]);
+} catch (error) {
+  result.textContent = String(error);
+}
+</script>

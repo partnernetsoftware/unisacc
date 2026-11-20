@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  AmbientLight, BufferAttribute, BufferGeometry, Camera, Color, Fog, FogExp2, HemisphereLight, Mesh, MeshBasicMaterial,
+  LightProbe, MeshLambertMaterial, OrthographicCamera, Scene, SphericalHarmonics3, SpotLight, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+
+const options = { alpha: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 16;
+  const gl = canvas.getContext("webgl", options);
+  if (!gl) throw new Error("WebGL unavailable");
+  return { canvas, gl };
+}
+
+function samples(gl) {
+  return [[8, 8], [1, 1], [5, 8], [11, 11], [4, 10]].flatMap(([x, y]) => {
+    const px = new Uint8Array(4);
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return [...px];
+  });
+}
+
+const output = document.querySelector("#gpu");
+try {
+  const { gl } = context();
+  let exports;
+  const submit = createGpuSubmit(gl, () => exports.memory, () => 1);
+  const wasm = await fetch("./probe.wasm").then(response => response.arrayBuffer());
+  ({ instance: { exports } } = await WebAssembly.instantiate(wasm, { uxe_gpu_v1: { host_gpu_submit: submit } }));
+  const hemisphere = location.search.startsWith("?hemisphere");
+  const fog = location.search.startsWith("?fog");
+  const expFog = location.search.startsWith("?fog-exp2");
+  const spot = location.search.startsWith("?spot");
+  const probe = location.search.startsWith("?light-probe");
+  const mode = (probe ? 10 : spot ? 8 : expFog ? 6 : fog ? 4 : hemisphere ? 2 : 0) +
+    (location.search.endsWith("-mutate") ? 1 : 0);
+  const status = Number(exports.uxe_gpu_probe(BigInt(mode)));
+  const reference = context();
+  const renderer = new WebGLRenderer({ ...reference, context: reference.gl, ...options });
+  renderer.setSize(16, 16, false);
+  renderer.setClearColor(0, 1);
+  const scene = new Scene();
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(new Float32Array([-0.75,-0.75,0,0.75,-0.75,0,0,0.75,0]), 3));
+  geometry.computeVertexNormals();
+  const material = fog ? new MeshBasicMaterial({ color: 0xff0000 }) : new MeshLambertMaterial({ color: 0x804008 });
+  const sh = new SphericalHarmonics3();
+  sh.coefficients[0].setScalar(0.5);
+  sh.coefficients[2].setScalar(0.2);
+  const light = probe ? new LightProbe(sh, Math.PI)
+    : spot ? new SpotLight(0xffffff, Math.PI, 0, Math.PI / 3, 0.5, 0) : hemisphere
+    ? new HemisphereLight(new Color().setRGB(0.75, 0.5, 0.25), new Color().setRGB(0.25, 0.125, 0), Math.PI)
+    : new AmbientLight(new Color().setRGB(0.5, 0.25, 0.125), Math.PI);
+  if (hemisphere) light.position.set(Math.sqrt(3) * 0.5, 0, 0.5);
+  if (spot) {
+    const cosine = (0.5 + Math.cos(Math.PI / 6)) * 0.5;
+    light.position.set(0, 0, 1000);
+    light.target.position.x = 1000 * Math.sqrt(1 - cosine * cosine) / cosine;
+    scene.add(light.target);
+  }
+  scene.add(new Mesh(geometry, material), light);
+  const camera = fog ? new OrthographicCamera(-1, 1, 1, -1, 0, 2) : new Camera();
+  if (fog) {
+    scene.fog = expFog ? new FogExp2(0x0000ff, Math.sqrt(Math.log(2))) : new Fog(0x0000ff, 0, 2);
+    camera.position.z = 1;
+  }
+  renderer.render(scene, camera);
+  output.textContent = JSON.stringify([status, ...samples(gl), ...samples(reference.gl)]);
+  geometry.dispose();
+  material.dispose();
+  renderer.dispose();
+} catch (error) {
+  output.textContent = String(error);
+}
+</script>

@@ -8,7 +8,9 @@
 static const char bridge_hash[] = "f6fb066de99c4e0f10cd0802216ba306d7bd5778a755f6dc4515314a5bad8eed";
 static const char pointer_bridge_hash[] = "764e0f951092178c0c958d69e921b3ba08f57c247fd4f1071004ba71d205154c";
 static const char gesture_bridge_hash[] = "798662c53d1bef487d2ccabd7feba2f02b6cc8ad86594d4ce84153d218982190";
-enum { MAX_HOST_LINES = 300, MAX_HOST_COLUMNS = 120 };
+enum { MAX_HOST_LINES = 300, MAX_GPU_LINES = 600, MAX_HOST_COLUMNS = 120 };
+static const char gpu_entry_hash[] = "e8a4388b9d65f963f734e5c5ca7ad53f29ad2d94c4d878245192724b3dfdda20";
+static const char gpu_state_hash[] = "5265ac82b3b9f8308006182c8a5bca2de3bc3a12a29d124d166119f92df81413";
 
 static int lower(int ch) { return ch >= 'A' && ch <= 'Z' ? ch + 32 : ch; }
 static int blank(int ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f'; }
@@ -100,16 +102,23 @@ static const char *html_gate(const unsigned char *html, long size) {
     return scripts == 1 ? 0 : "script-count-or-source";
 }
 
-static const char *bridge_gate(const unsigned char *js, long n, int *lines) {
+static int count_lines(const unsigned char *js, long n, int *wide) {
     int columns = 0, widest = 0;
-    char actual[65];
-    *lines = n > 0 && js[n - 1] != '\n';
+    int lines = n > 0 && js[n - 1] != '\n';
     for (long i = 0; i < n; i++) {
-        if (js[i] == '\n') { (*lines)++; columns = 0; }
+        if (js[i] == '\n') { lines++; columns = 0; }
         else if (js[i] != '\r' && ++columns > widest) widest = columns;
     }
+    *wide |= widest > MAX_HOST_COLUMNS;
+    return lines;
+}
+
+static const char *bridge_gate(const unsigned char *js, long n, int *lines) {
+    int wide = 0;
+    char actual[65];
+    *lines = count_lines(js, n, &wide);
     if (*lines > MAX_HOST_LINES) return "line-budget";
-    if (widest > MAX_HOST_COLUMNS) return "line-width";
+    if (wide) return "line-width";
     if (cs_sha256_hex(js, n, actual) ||
         (!tx_eq(actual, bridge_hash, sizeof actual) && !tx_eq(actual, pointer_bridge_hash, sizeof actual) &&
          !tx_eq(actual, gesture_bridge_hash, sizeof actual))) return "host-whitelist";
@@ -125,7 +134,7 @@ static int check(const unsigned char *html, long html_n, const unsigned char *js
     return reason != 0;
 }
 
-static int package_scripts(const char *directory, int depth) {
+static int package_scripts(const char *directory, int depth, int gpu) {
     sy_dir_t scan;
     int state, ok = 1;
     if (depth > 16 || sy_dir_open(&scan, directory)) return 0;
@@ -135,20 +144,61 @@ static int package_scripts(const char *directory, int depth) {
         if (scan.kind == 'd') {
             char nested[4096];
             int size = tx_snprintf(nested, sizeof nested, "%s/%s", directory, scan.name);
-            if (size < 0 || size >= (int)sizeof nested || !package_scripts(nested, depth + 1)) {
+            if (size < 0 || size >= (int)sizeof nested || !package_scripts(nested, depth + 1, gpu)) {
                 ok = 0; break;
             }
         } else if (scan.kind != 'f' ||
             ((n >= 3 && word((unsigned char *)scan.name + n - 3, 3, ".js")) ||
              (n >= 4 && (word((unsigned char *)scan.name + n - 4, 4, ".mjs") ||
                          word((unsigned char *)scan.name + n - 4, 4, ".cjs"))))) {
-            if (scan.kind != 'f' || depth || !tx_eq(scan.name, "host-abi.js", sizeof "host-abi.js")) {
+            if (scan.kind != 'f' || depth ||
+                (!tx_eq(scan.name, "host-abi.js", sizeof "host-abi.js") &&
+                 !(gpu && tx_eq(scan.name, "gpu-state-abi.js", sizeof "gpu-state-abi.js")))) {
                 ok = 0; break;
             }
         }
     }
     sy_dir_close(&scan);
     return ok && state == 0;
+}
+
+static int gpu_check(const unsigned char *html, long html_n, const unsigned char *js, long js_n,
+    const unsigned char *state, long state_n) {
+    int wide = 0;
+    int lines = count_lines(js, js_n, &wide);
+    lines += count_lines(state, state_n, &wide);
+    const char *budget = lines > MAX_GPU_LINES ? "line-budget" : wide ? "line-width" : "ok";
+    const char *structure = html_gate(html, html_n);
+    char actual[65];
+    if (!structure && (cs_sha256_hex(js, js_n, actual) ||
+        !tx_eq(actual, gpu_entry_hash, sizeof actual))) structure = "gpu-entry-whitelist";
+    if (!structure && (cs_sha256_hex(state, state_n, actual) ||
+        !tx_eq(actual, gpu_state_hash, sizeof actual))) structure = "gpu-dependency-whitelist";
+    printf("CHECK_UXE_GPU_HOST_BUDGET lines=%d max=%d budget=%s structure=%s failed=%d\n",
+        lines, MAX_GPU_LINES, budget, structure ? structure : "ok", lines > MAX_GPU_LINES || wide || structure != 0);
+    return lines > MAX_GPU_LINES || wide || structure != 0;
+}
+
+static int gpu_fixture(const char *mode) {
+    const char shell[] = "<!doctype html><script type=\"module\" src=\"./host-abi.js\"></script>";
+    unsigned char *js = 0, *state = 0, over[MAX_GPU_LINES + 1];
+    int64_t js_n = 0, state_n = 0;
+    int rc = 2;
+    if (!sy_read_file("ujs/practice/uxe/base/gpu-host-abi.js", &js, &js_n, 65536) &&
+        !sy_read_file("ujs/practice/uxe/base/gpu-state-abi.js", &state, &state_n, 65536)) {
+        if (tx_eq(mode, "--gpu-over", 11)) {
+            int wide = 0;
+            js_n = MAX_GPU_LINES + 1 - count_lines(state, state_n, &wide);
+            for (long i = 0; i < js_n; i++) over[i] = '\n';
+            rc = gpu_check((const unsigned char *)shell, sizeof shell - 1, over, js_n, state, state_n);
+        } else {
+            if (tx_eq(mode, "--gpu-structure", 16)) state[0] = 'x';
+            rc = gpu_check((const unsigned char *)shell, sizeof shell - 1, js, js_n, state, state_n);
+        }
+    }
+    mm_free(js);
+    mm_free(state);
+    return rc;
 }
 
 static int fixture(const char *mode) {
@@ -185,7 +235,11 @@ int main(int argc, char **argv) {
     int64_t html_n = 0, js_n = 0;
     char bridge[4096], directory[4096];
     int rc = 2;
-    if (argc != 2) return 2;
+    int gpu = argc == 3 && tx_eq(argv[1], "--gpu", 6);
+    if (argc != 2 && !gpu) return 2;
+    if (argc == 2 && (tx_eq(argv[1], "--gpu-fixture", 14) || tx_eq(argv[1], "--gpu-over", 11) ||
+        tx_eq(argv[1], "--gpu-structure", 16))) return gpu_fixture(argv[1]);
+    if (gpu) argv++;
     if (tx_eq(argv[1], "--fixture", 10) || tx_eq(argv[1], "--over", 7) ||
         tx_eq(argv[1], "--inline", 9) || tx_eq(argv[1], "--other", 8) ||
         tx_eq(argv[1], "--handler", 10) || tx_eq(argv[1], "--bridge", 9)) return fixture(argv[1]);
@@ -195,12 +249,19 @@ int main(int argc, char **argv) {
     tx_snprintf(bridge, sizeof bridge, "%.*shost-abi.js", (int)(slash + 1), argv[1]);
     tx_snprintf(directory, sizeof directory, "%.*s", slash >= 0 ? (int)(slash + 1) : 1,
         slash >= 0 ? argv[1] : ".");
-    if (!package_scripts(directory, 0)) {
+    if (!package_scripts(directory, 0, gpu)) {
         printf("CHECK_UXE_HOST_BUDGET cause=package-script-files failed=1\n");
         return 1;
     }
     if (!sy_read_file(argv[1], &html, &html_n, 65536) && !sy_read_file(bridge, &js, &js_n, 65536)) {
-        rc = check(html, html_n, js, js_n);
+        if (!gpu) rc = check(html, html_n, js, js_n);
+        else {
+            unsigned char *state = 0;
+            int64_t state_n = 0;
+            tx_snprintf(bridge, sizeof bridge, "%.*sgpu-state-abi.js", (int)(slash + 1), argv[1]);
+            if (!sy_read_file(bridge, &state, &state_n, 65536)) rc = gpu_check(html, html_n, js, js_n, state, state_n);
+            mm_free(state);
+        }
     }
     mm_free(html);
     mm_free(js);

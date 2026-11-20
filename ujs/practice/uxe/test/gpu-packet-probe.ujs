@@ -1,0 +1,396 @@
+function probe_vertex(at,...attributes) {
+  let x=ux_f32_put(at,attributes[0]);
+  let y=ux_f32_put(at+4,attributes[1]);
+  let z=ux_f32_put(at+8,attributes[2]);
+  let r=ux_f32_put(at+12,attributes[3]);
+  let g=ux_f32_put(at+16,attributes[4]);
+  let b=ux_f32_put(at+20,attributes[5]);
+  let a=ux_f32_put(at+24,attributes[6]);
+  return at+28;
+}
+
+function probe_triangle(at,...options) {
+  let p0=probe_vertex(at,0.0-0.75,0.0-0.75,options[0],options[1],options[2],0.0,options[3]);
+  let p1=probe_vertex(p0,0.75,0.0-0.75,options[0],options[1],options[2],0.0,options[3]);
+  let p2=probe_vertex(p1,0.0,0.75,options[0],options[1],options[2],0.0,options[3]);
+  return 3;
+}
+
+native function probe_cube(at:i64) i64 {
+  let raw=GeometryBuffers_init(9600,10000,24,11000,36);
+  if(BoxGeometry_generate(raw,1.0,1.0,1.0,1,1,1)<0) { return 0-1; }
+  let i=0;
+  while(i<36) {
+    let p=10000+32*ux_u32(11000+4*i);
+    let x=ux_f32(p);
+    let y=ux_f32(p+4);
+    let z=ux_f32(p+8);
+    let projected=probe_vertex(at+28*i,0.8*x+0.35*z,0.8*y-0.25*z,0.35*x+0.2*y+0.55*z,
+      0.0,1.0,0.0,1.0);
+    i=i+1;
+  }
+  return 36;
+}
+
+native function probe_render_state(packet:i64,capacity:i64,mode:i64) i64 {
+  let state=12000;
+  let words=[6,0,5,101,102,204,205,201,205,0,514,3,240,15,7680,7681,7682,1,1,1,0,0,0];
+  let i=0;
+  while(i<23) {
+    let saved=ux_u32_put(state+i*4,words[i]);
+    i=i+1;
+  }
+  let factor=1.5;
+  if(mode==26) { factor=2.5; }
+  let pf=ux_f32_put(state+GpuRenderState.polygonFactor,factor);
+  let pu=ux_f32_put(state+GpuRenderState.polygonUnits,0.0-2.0);
+  if(mode==21) { let bad=ux_u32_put(state+GpuRenderState.equationRgb,105); }
+  if(mode==22) { let bad=ux_u32_put(state+GpuRenderState.depth,9); }
+  if(mode==23) { let bad=ux_u32_put(state+GpuRenderState.stencil,520); }
+  if(mode==24) { let bad=ux_u32_put(state+GpuRenderState.cull,4); }
+  if(mode==25) { let bad=ux_u32_put(state+GpuRenderState.colorMask,16); }
+  if(mode>=30) {
+    let dw=ux_u32_put(state+GpuRenderState.depthWrite,1);
+    let sw=ux_u32_put(state+GpuRenderState.stencilWriteMask,255);
+    let cm=ux_u32_put(state+GpuRenderState.colorMask,15);
+  }
+  return GpuPacket_setRenderState(packet,capacity,state);
+}
+
+native function probe_basic(packet:i64,capacity:i64,mode:i64) i64 {
+  let viewport=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clip=GpuPacket_scissor(packet,capacity,0,0,0,16,16);
+  let state=GpuPacket_state(packet,capacity,0,1,0);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let red=0.21404114048223255;
+  let green=0.05087608817155679;
+  let blue=0.0024282158683907;
+  if(mode==41) { red=0.05; }
+  if(mode==42 || mode==43) {
+    let cosine=0.5;
+    if(mode==43) { cosine=0.0-0.5; }
+    red=GpuMaterial_lambertDiffuse(red,cosine,3.141592653589793);
+    green=GpuMaterial_lambertDiffuse(green,cosine,3.141592653589793);
+    blue=GpuMaterial_lambertDiffuse(blue,cosine,3.141592653589793);
+  }
+  if(mode==44 || mode==45) {
+    let specular=0.08;
+    if(mode==45) { specular=0.0; }
+    let highlight=GpuMaterial_phongSpecular(specular,1.0,1.0,1.0,6.0,3.141592653589793);
+    red=red+highlight;
+    green=green+highlight;
+    blue=blue+highlight;
+  }
+  if(mode==46 || mode==47) {
+    let rough=0.5;
+    if(mode==47) { rough=1.0; }
+    let highlight=GpuMaterial_ggxSpecular(0.04,1.0,1.0,1.0,1.0,rough,3.141592653589793);
+    red=red+highlight;
+    green=green+highlight;
+    blue=blue+highlight;
+  }
+  if(mode==50 || mode==51) {
+    let texel0=ux_u32_put(8000,4278190335);
+    let texel1=ux_u32_put(8004,4288243251);
+    let u=0.75;
+    if(mode==51) { u=0.25; }
+    let rgba=GpuTexture_nearestRgba8(8000,2,1,u,0.5);
+    if(rgba<0) { return rgba; }
+    red=(rgba%256)*0.00392156862745098;
+    green=(rgba/256%256)*0.00392156862745098;
+    blue=(rgba/65536%256)*0.00392156862745098;
+  }
+  if(mode>=52 && mode<=54) {
+    let exposure=2.0;
+    if(mode==54) { exposure=1.0; }
+    let mapping=1+mode%2;
+    red=GpuMaterial_toneChannel(mapping,red,exposure);
+    green=GpuMaterial_toneChannel(mapping,green,exposure);
+    blue=GpuMaterial_toneChannel(mapping,blue,exposure);
+  }
+  if(mode==55 || mode==56) {
+    let band0=ux_u32_put(8000,4278190259);
+    let band1=ux_u32_put(8004,4278190259);
+    let band2=ux_u32_put(8008,4278190259);
+    let band3=ux_u32_put(8012,4278190335);
+    let dot=0.25;
+    if(mode==56) { dot=0.5; }
+    let band=GpuMaterial_toonBand(8000,4,dot);
+    if(band<0.0) { return 0-1; }
+    red=red*band;
+    green=green*band;
+    blue=blue*band;
+  }
+  if(mode>=150 && mode<=157) {
+    let exposure=2.0;
+    let gain=0.5;
+    if(mode>=154) { exposure=0.5; gain=0.8; }
+    let mapped=GpuMaterial_toneRgb(8400,3+(mode-150)%4,red,green,blue,exposure,gain);
+    if(mapped<0) { return mapped; }
+    red=ux_f64(mapped);
+    green=ux_f64(mapped+8);
+    blue=ux_f64(mapped+16);
+  }
+  let first=GpuMaterial_basicVertex(4000,0.0-0.75,0.0-0.75,0.0,red,green,blue,1.0);
+  let second=GpuMaterial_basicVertex(first,0.75,0.0-0.75,0.0,red,green,blue,1.0);
+  let last=GpuMaterial_basicVertex(second,0.0,0.75,0.0,red,green,blue,1.0);
+  let shader=probe_shader_sources(6400);
+  let draw=GpuPacket_draw(packet,capacity,4000,3,shader);
+  if(draw<0) { return draw; }
+  return GpuPacket_submit(packet);
+}
+
+native function probe_textured(packet:i64,capacity:i64,mode:i64) i64 {
+  let tv=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let tc=GpuPacket_clear(packet,capacity,4278190080);
+  let offset=0.0;
+  let repeat=1.0;
+  let wrap=0;
+  let filter=mode%2;
+  if(mode>=63) { offset=1.0; wrap=1; filter=0; }
+  if(mode==64) { wrap=2; }
+  if(mode==65) { offset=0.0; repeat=64.0; filter=2; }
+  if(mode==66) { wrap=0; }
+  let uvmat=Matrix3_setUvTransform(8200,offset,0.0,repeat,1.0,0.0,0.0,0.0);
+  let uv0=GpuTexture_transformUv(8304,8200,0.125,0.5);
+  let uv1=GpuTexture_transformUv(8320,8200,0.875,0.5);
+  let uv2=GpuTexture_transformUv(8336,8200,0.5,0.5);
+  let a=probe_vertex(4000,0.0-0.75,0.0-0.75,0.0,ux_f64(uv0),ux_f64(uv0+8),0.0,1.0);
+  let b=probe_vertex(a,0.75,0.0-0.75,0.0,ux_f64(uv1),ux_f64(uv1+8),0.0,1.0);
+  let c=probe_vertex(b,0.0,0.75,0.0,ux_f64(uv2),ux_f64(uv2+8),0.0,1.0);
+  let ts=probe_texture_sources(7000);
+  let tw=ux_u32_put(7900,2);
+  let th=ux_u32_put(7904,1);
+  let tf=ux_u32_put(7908,filter);
+  let tx=ux_u32_put(7912,wrap);
+  let ty=ux_u32_put(7916,0);
+  let tp=ux_u32_put(7920,8000);
+  let texelA=ux_u32_put(8000,4278190335);
+  let texelB=ux_u32_put(8004,4278255360);
+  if(mode==62) { let changed=ux_u32_put(8004,4294901760); }
+  let table=GpuTextureTable_init(8500,2);
+  let handle=GpuTextureTable_create(table,7900);
+  if(handle<0) { return handle; }
+  let textured=GpuTextureTable_draw(table,handle,packet,capacity,4000,3,ts);
+  let disposed=GpuTextureTable_dispose(table,handle);
+  if(textured<0) { return textured; }
+  return GpuPacket_submit(packet);
+}
+
+native function probe_texture_lifecycle(mode:i64) i64 {
+  let before=ux_u32_put(8996,123456789);
+  let after=ux_u32_put(9076,987654321);
+  let table=GpuTextureTable_init(9000,2);
+  if(table<0 || GpuTextureTable.size+2*GpuTextureSlot.size!=76) { return 0-100; }
+  let width=ux_u32_put(7900,2);
+  let height=ux_u32_put(7904,1);
+  let filter=ux_u32_put(7908,0);
+  let ws=ux_u32_put(7912,0);
+  let wt=ux_u32_put(7916,0);
+  let address=ux_u32_put(7920,8000);
+  let one=GpuTextureTable_create(table,7900);
+  let two=GpuTextureTable_create(table,7900);
+  if(one!=65537 || two!=65538 || GpuTextureTable_create(table,7900)!=0-2) { return 0-101; }
+  let v1=GpuTextureTable_version(table,one);
+  let edit=ux_u32_put(7908,1);
+  let v2=GpuTextureTable_update(table,one,1,7900);
+  if(v1!=1 || v2!=2 || GpuTextureTable_update(table,one,1,7900)!=0-4) { return 0-102; }
+  let entry=gpu_texture_source(table,one);
+  if(ux_u32(entry+GpuTextureSource.filter)!=1) { return 0-103; }
+  let malformed=ux_u32_put(7900,0);
+  if(GpuTextureTable_update(table,one,2,7900)!=0-3 || GpuTextureTable_version(table,one)!=2) { return 0-104; }
+  let restore=ux_u32_put(7900,2);
+  let close=GpuTextureTable_dispose(table,one);
+  if(mode==101) { let corrupt=ux_u32_put(9000+GpuTextureTable.size+GpuTextureSlot.generation,1); }
+  if(close!=0 || gpu_texture_source(table,one)!=0-1 || GpuTextureTable_dispose(table,one)!=0-1) { return 0-105; }
+  let cycles=0;
+  while(cycles<1000) {
+    let reuse=GpuTextureTable_create(table,7900);
+    if(reuse!=(cycles+2)*65536+1 || gpu_texture_source(table,one)!=0-1 ||
+       GpuTextureTable_update(table,one,2,7900)!=0-1 || GpuTextureTable_version(table,reuse)!=1 ||
+       GpuTextureTable_dispose(table,reuse)!=0 || ux_u32(table+GpuTextureTable.live)!=1) { return 0-106; }
+    cycles=cycles+1;
+  }
+  let last=GpuTextureTable_dispose(table,two);
+  if(last!=0 || ux_u32(table+GpuTextureTable.capacity)!=2 || ux_u32(table+GpuTextureTable.live)!=0 ||
+     ux_u32(table+GpuTextureTable.peak)!=2 || ux_u32(8996)!=123456789 || ux_u32(9076)!=987654321) { return 0-107; }
+  if(mode==102) { return ux_u32(table+GpuTextureTable.capacity); }
+  if(mode==103) { return ux_u32(table+GpuTextureTable.peak); }
+  if(mode==104) { return ux_u32(table+GpuTextureTable.live); }
+  if(mode==105) { return ux_u32(table+GpuTextureTable.size+GpuTextureSlot.generation); }
+  return cycles;
+}
+
+native function probe_cube_texture(packet:i64,capacity:i64,mode:i64) i64 {
+  let viewport=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let face=(mode-110)%6;
+  let axis=face/2;
+  let sign=1.0-2.0*(face%2);
+  let x=0.0;
+  let y=0.0;
+  let z=0.0;
+  if(axis==0) { x=sign; }
+  if(axis==1) { y=sign; }
+  if(axis==2) { z=sign; }
+  let a=probe_vertex(4000,0.0-0.75,0.0-0.75,0.0,x,y,z,1.0);
+  let b=probe_vertex(a,0.75,0.0-0.75,0.0,x,y,z,1.0);
+  let c=probe_vertex(b,0.0,0.75,0.0,x,y,z,1.0);
+  let shader=probe_cube_sources(12000);
+  let width=ux_u32_put(15000,1);
+  let height=ux_u32_put(15004,1);
+  let filter=ux_u32_put(15008,0);
+  let ws=ux_u32_put(15012,0);
+  let wt=ux_u32_put(15016,0);
+  let address=ux_u32_put(15020,15040);
+  let r=4278190335;
+  if(mode==116) { r=4278190080; }
+  let px=ux_u32_put(15040,r);
+  let nx=ux_u32_put(15044,4278255360);
+  let py=ux_u32_put(15048,4294901760);
+  let ny=ux_u32_put(15052,4278255615);
+  let pz=ux_u32_put(15056,4294902015);
+  let nz=ux_u32_put(15060,4294967040);
+  let draw=GpuPacket_drawCubeTexture(packet,capacity,4000,3,shader,15000);
+  if(draw<0) { return draw; }
+  return GpuPacket_submit(packet);
+}
+
+native function probe_custom_draw(packet:i64,capacity:i64,mode:i64) i64 {
+  let view=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let flat=GpuPacket_state(packet,capacity,0,1,0);
+  let channel=0.75;
+  if(mode==145) { channel=0.25; }
+  let a=probe_vertex(4000,0.0-0.75,0.0-0.75,0.0,0.125,0.5,channel,1.0);
+  let b=probe_vertex(a,0.75,0.0-0.75,0.0,0.125,0.5,channel,1.0);
+  let c=probe_vertex(b,0.0,0.75,0.0,0.125,0.5,channel,1.0);
+  let source=probe_custom_sources(6400);
+  let result=GpuPacket_draw(packet,capacity,4000,3,source);
+  if(result<0) { return result; }
+  return GpuPacket_submit(packet);
+}
+native function probe_shadow_draw(packet:i64,capacity:i64,mode:i64) i64 {
+  let view=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,0);
+  let flat=GpuPacket_state(packet,capacity,0,1,0);
+  let casterX=0.0;
+  if(mode==149) { casterX=0.75; }
+  let count=GpuSprite_billboard(4000,casterX,0.0,0.0,0.4,0.4,0.0,2147483648);
+  let source=probe_shadow_sources(6400);
+  let result=GpuPacket_draw(packet,capacity,4000,count,source);
+  if(result<0) { return result; }
+  return GpuPacket_submit(packet);
+}
+let capacity=2048;
+if(mode==16) { capacity=24; }
+let stamp=1;
+if(mode==11) { stamp=2; }
+let packet=GpuPacket_begin(0,capacity,stamp);
+if(mode>=150 && mode<=157) { return probe_basic(packet,capacity,mode); }
+if(mode==148 || mode==149) { return probe_shadow_draw(packet,capacity,mode); }
+if(mode==144 || mode==145) { return probe_custom_draw(packet,capacity,mode); }
+if(mode==142 || mode==143) {
+  let view=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let flat=GpuPacket_state(packet,capacity,0,1,0);
+  let theta=0.7853981633974483;
+  if(mode==143) { theta=0.0; }
+  let count=GpuSprite_billboard(4000,0.0,0.0,0.0,1.0,1.0,theta,4278190335);
+  let source=probe_shader_sources(6400);
+  let result=GpuPacket_draw(packet,capacity,4000,count,source);
+  if(result<0) { return result; }
+  return GpuPacket_submit(packet);
+}
+if(mode>=132 && mode<=137) {
+  let view=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let flat=GpuPacket_state(packet,capacity,0,1,0);
+  let topology=2+(mode-132)%3;
+  let dy=0.0;
+  if(mode>=135) { dy=0.75; }
+  let a=probe_vertex(4000,0.0-0.4375,0.0625+dy,0.0,1.0,0.0,0.0,1.0);
+  let b=probe_vertex(a,0.75,0.0625+dy,0.0,1.0,0.0,0.0,1.0);
+  let c=probe_vertex(b,0.0-0.4375,0.75+dy,0.0,1.0,0.0,0.0,1.0);
+  let count=3;
+  if(topology==2) {
+    let d=probe_vertex(c,0.75,0.75+dy,0.0,1.0,0.0,0.0,1.0);
+    count=4;
+  }
+  let source=probe_shader_sources(6400);
+  let result=GpuPacket_drawPrimitive(packet,capacity,4000,count,source,topology);
+  if(result<0) { return result; }
+  return GpuPacket_submit(packet);
+}
+if(mode==130 || mode==131) {
+  let view=GpuPacket_viewport(packet,capacity,0,0,16,16);
+  let clear=GpuPacket_clear(packet,capacity,4278190080);
+  let flat=GpuPacket_state(packet,capacity,0,1,0);
+  let x=0.0625;
+  if(mode==131) { x=0.4375; }
+  let vertex=probe_vertex(4000,x,0.0625,0.0,1.0,0.0,0.0,1.0);
+  let source=probe_shader_sources(6400);
+  let result=GpuPacket_drawPrimitive(packet,capacity,4000,1,source,1);
+  if(result<0) { return result; }
+  return GpuPacket_submit(packet);
+}
+if(mode>=120) { return probe_lit_mesh(mode-120); }
+if(mode>=110) { return probe_cube_texture(packet,capacity,mode); }
+if(mode>=100) { return probe_texture_lifecycle(mode); }
+if(mode>=60) { return probe_textured(packet,capacity,mode); }
+if(mode>=40) { return probe_basic(packet,capacity,mode); }
+if(mode>=20) {
+  let status=probe_render_state(packet,capacity,mode);
+  if(status<0) { return status; }
+  if(mode>=30) {
+    let off=GpuPacket_scissor(packet,capacity,0,0,0,16,16);
+    let black=GpuPacket_clearBuffers(packet,capacity,7,4278190080,1.0,0);
+    let left=4;
+    if(mode==31) { left=9; }
+    if(mode==32) { left=0; }
+    let clip=GpuPacket_scissor(packet,capacity,1,left,4,8,8);
+    let red=GpuPacket_clearBuffers(packet,capacity,7,4278190335,0.5,3);
+    if(red<0 || clip<0) { return 0-1; }
+  }
+  return GpuPacket_submit(packet);
+}
+let viewport_x=0;
+let viewport_width=16;
+if(mode>=10) { viewport_x=1; viewport_width=14; }
+if(mode==17) { viewport_width=16; }
+let viewport=GpuPacket_viewport(packet,capacity,viewport_x,0,viewport_width,16);
+if(viewport<0) { return viewport; }
+let background=4278190080;
+if(mode==3) { background=4294901760; }
+let cleared=GpuPacket_clear(packet,capacity,background);
+let depth=0;
+if(mode==1 || mode==2) { depth=1; }
+let state=GpuPacket_state(packet,capacity,depth,1,mode==3);
+let initial_depth=GpuPacket_clearDepth(packet,capacity,1.0);
+let shader=probe_shader_sources(6400);
+let count=3;
+if(mode==1) { count=probe_cube(4000); }
+else {
+  let z=0.0;
+  let alpha=1.0;
+  let r=1.0;
+  let g=0.0;
+  if(mode==2) { z=0.0-0.5; }
+  if(mode==3) { alpha=0.5; }
+  if(mode==9) { r=0.0; g=1.0; }
+  count=probe_triangle(4000,z,r,g,alpha);
+}
+if(mode==15) { let invalid=ux_u8_put(ux_u32(shader+GpuShaderSource.vertex),63); }
+let first=GpuPacket_draw(packet,capacity,4000,count,shader);
+if(first<0) { return first; }
+if(mode==2) {
+  let second_count=probe_triangle(4000,0.5,0.0,1.0,1.0);
+  let second=GpuPacket_draw(packet,capacity,4000,second_count,shader);
+  if(second<0) { return second; }
+}
+if(mode==10) { let changed=ux_u32_put(packet+GpuPacket.version,4); }
+if(mode==12) { return host_gpu_submit(packet,ux_u32(packet+GpuPacket.bytes)-4); }
+if(mode==13) { let unknown=ux_u32_put(48,128); }
+if(mode==14) { let excessive=ux_u32_put(packet+GpuPacket.commands,257); }
+if(mode==18) { return host_gpu_submit(6291448,40); }
+return GpuPacket_submit(packet);
