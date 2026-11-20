@@ -52,11 +52,19 @@ typedef __u_uword sigset_t;
 #define SIG_SETMASK  3
 /* Process-wide signal table and mask state: tentative definitions with external
  * linkage (C99 6.9.2), merged at link so multi-TU programs share one table and mask. */
+#if defined(RT_EXTERN)
+extern void (*_unisa_sig[_UNISA_NSIG])(int);
+extern sigset_t _unisa_sigmask[_UNISA_NSIG];
+extern int _unisa_sigflags[_UNISA_NSIG];
+extern sigset_t _unisa_sigblocked;
+extern sigset_t _unisa_sigpending;
+#else
 void (*_unisa_sig[_UNISA_NSIG])(int);
 sigset_t _unisa_sigmask[_UNISA_NSIG];
 int _unisa_sigflags[_UNISA_NSIG];
 sigset_t _unisa_sigblocked;
 sigset_t _unisa_sigpending;
+#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_signal
 static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
