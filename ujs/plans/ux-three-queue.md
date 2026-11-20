@@ -242,7 +242,8 @@
 - ~~OrbitControls 透视旋转与滚轮 | G-ray r160 插件事件、阻尼、缩放及指针归属 | 输入 ABI、相机。~~ 11 项通过，反向拖动从 -10 变为 10 转红。
 - OrbitControls 完整输入接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏、正交和约束 | 透视旋转与滚轮、输入 ABI。
 - MapControls | G-ray 旋转和平移映射 | OrbitControls。
-- PointerLockControls | G-ray 相对位移、锁定及退出 | 输入 ABI。
+- ~~PointerLockControls 事件与相对运动 | G-ray r160 事件、俯仰限制、相对位移及锁定退出 | 输入 ABI。~~ 12 项通过，反向鼠标事件使朝向 X 变号，反例转红。
+- PointerLockControls 实浏览器锁定接线 | CDP 锁定、退出与无权限事件 | 事件与相对运动、宿主锁定 ABI。
 - TransformControls | G-ray 选轴、吸附、坐标模式与结束事件 | Mesh 拾取与输入 ABI。
 - MOUSE 与 TOUCH 常量 | G-ray r160 枚举和实际输入路由 | 上述控制类型。
 
