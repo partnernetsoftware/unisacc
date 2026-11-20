@@ -71,6 +71,7 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+- release/decision.txt 发布证据链缺口(清洁线 2026-11-20 查实):release-exec 第 7 步用停在 0.0.74 的陈旧 evidence.tsv 与 decision.txt 比对恒等;不证明裁决对应当前版本。决定:下次发布前必须改为从当次证据重算并写出 decision.txt;未修不得公开。证据入口:清洁线报告与本文件"待核(清洁 2026-11-20)"条;排期 plans/v0.0.87.md S6 子项 S6a。回滚:撤本行与 S6a。
 - 分而治之与 devsvc 分布式演进(项目所有者 2026-11-20 方向加主调度决定):并发只是结果,关键是按模块、环节与泳道分割,每个环节写清输入身份、输出身份、等待时做什么;0.0.87 落产物库、合并队列、状态总线,0.0.88 落数据流触发、租约队列、按泳道子门;只复用构造产物不复用测试结论。证据入口:plans/devsvc.md"分布式演进(2026-11-20)"、plans/v0.0.87.md"总纲:按环节分割"、plans/v0.0.88.md 本版项。
   回滚:git revert 本决定所在提交,上述四处计划节随之撤回。
 - 提交不带任何署名行(依据:项目所有者 2026-11-20 明令):devsvc git commit、commit-own、dvgitx 与 commit-msg 钩子(.git/hooks/commit-msg 薄入口,由 `tools/commit-msg.cx -- --install` 写,`--check-installed` 核)在落库前剔除 Co-Authored-By:、Signed-off-by: 行与行首为 Generated with [Claude Code] 的工具归属行(tools/cxlib/trailer.cx,整行大小写不敏感,连同前面的空行),剔除后为空按空说明拒绝;历史提交不改;证据 0566008dfb、check-trailer、check-commit-msg、check-devsvc a1。
