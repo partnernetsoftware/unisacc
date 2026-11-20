@@ -1,0 +1,76 @@
+native function animation_json_single(array:i64,end:i64) i64 {
+  if(array<0 || array>=end || ux_u8(array)!=91) { return 0-1; }
+  let value=json_space(array+1,end);
+  let stop=json_space(json_value_end(value,end),end);
+  if(value<0 || stop<0 || stop>=end || ux_u8(value)!=123 || ux_u8(stop)!=93) { return 0-1; }
+  return value;
+}
+
+native function animation_json_name(text:i64,end:i64,out:i64) i64 {
+  let close=json_scan_string(text,end);
+  if(close<0 || close-text-2>64) { return 0-1; }
+  let i=text+1;
+  while(i<close-1) { if(ux_u8(i)==92) { return 0-1; } i=i+1; }
+  let size=close-text-2;
+  let copied=uxe_copy_record(out,text+1,size);
+  return size;
+}
+
+native function animation_json_array(at:i64,end:i64,out:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0-1; }
+  let cursor=json_space(at+1,end);
+  let count=0;
+  while(cursor>=0 && cursor<end) {
+    if(ux_u8(cursor)==93) { return count; }
+    if(count==64) { return 0-1; }
+    let value=json_read_number(cursor,end);
+    if(value-value!=0.0) { return 0-1; }
+    let saved=ux_f32_put(out+count*4,value);
+    let rounded=ux_f32(out+count*4);
+    if(rounded-rounded!=0.0) { return 0-1; }
+    count=count+1;
+    let after=json_space(json_value_end(cursor,end),end);
+    if(after<0 || after>=end) { return 0-1; }
+    if(ux_u8(after)==93) { return count; }
+    if(ux_u8(after)!=44) { return 0-1; }
+    cursor=json_space(after+1,end);
+  }
+  return 0-1;
+}
+
+// Load one clip with one NumberKeyframeTrack. The caller owns the work arena,
+// which preserves the named spans, typed samples and track records for the clip.
+native function AnimationLoader_number(file:i64,clip:i64,work:i64,space:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 || !loading_span(clip,AnimationClip.size) ||
+     clip%8!=0 || !loading_span(work,space) || work%8!=0 || space<768 ||
+     !file_disjoint(file,FileLoader.size,clip,AnimationClip.size) || !file_disjoint(file,FileLoader.size,work,space) ||
+     !file_disjoint(work,space,clip,AnimationClip.size)) { return 0-1; }
+  let src=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(src>6291456-bytes || !file_disjoint(src,bytes,work,space) || !file_disjoint(src,bytes,clip,AnimationClip.size)) { return 0-1; }
+  let end=src+bytes;
+  let parsed=json_value_end(src,end);
+  if(parsed<0 || json_space(parsed,end)!=end) { return 0-2; }
+  let obj=animation_json_single(json_space(src,end),end);
+  if(obj<0) { return 0-2; }
+  let trackObj=animation_json_single(LoaderJson_find(obj,end,work,1667330676,29547,0,6),end);
+  if(trackObj<0) { return 0-2; }
+  let kind=LoaderJson_find(trackObj,end,work,1701869940,0,0,4);
+  if(kind<0 || json_scan_string(kind,end)!=kind+8 || ux_u32(kind+1)!=1651340654 ||
+     ux_u8(kind+5)!=101 || ux_u8(kind+6)!=114) { return 0-3; }
+  let nameBytes=animation_json_name(LoaderJson_find(obj,end,work,1701667182,0,0,4),end,work+64);
+  let trackBytes=animation_json_name(LoaderJson_find(trackObj,end,work,1701667182,0,0,4),end,work+128);
+  if(nameBytes<0 || trackBytes<1) { return 0-3; }
+  let times=animation_json_array(LoaderJson_find(trackObj,end,work,1701669236,115,0,5),end,work+256);
+  let values=animation_json_array(LoaderJson_find(trackObj,end,work,1970037110,29541,0,6),end,work+512);
+  if(times<1 || times!=values) { return 0-3; }
+  let view=AnimationSamples_init(work+192,work+256,work+512,times,1);
+  if(view<0) { return 0-3; }
+  let track=KeyframeTrack_init(work+208,work+128,trackBytes,view);
+  if(track<0) { return 0-3; }
+  let duration=LoaderJson_number(LoaderJson_find(obj,end,work,1634891108,1852795252,0,8),end,-1.0);
+  let blend=LoaderJson_number(LoaderJson_find(obj,end,work,1852140642,1685015908,101,9),end,2500.0);
+  if(blend!=2500.0 && blend!=2501.0) { return 0-3; }
+  let saved=ux_u32_put(work+224,track);
+  return AnimationClip_init(clip,work+64,nameBytes,work+224,1,duration,f64_floor_i64(blend));
+}
