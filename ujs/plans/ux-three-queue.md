@@ -27,6 +27,7 @@
 - ~~AnimationUtils 四元数轨道加法差量 | G-anim r160 对照参考四元数归一化、乘法次序和非法跨度 | f32 四元数样本与 Quaternion。~~ 7 项通过，反转乘法顺序反例转红。
 - ~~AnimationUtils 数值数组转换和类型判定 | G-anim r160 普通数组、类型视图、DataView 排除、强复制与舍入 | 类型视图。~~ 11 项通过，错取分量反例转红。
 - ~~AnimationUtils 数值 JSON 展平 | G-anim 标量、数组、缺字段跳过和容量不足时原值不变 | JSON 字节解析。~~ 8 项通过，错取分量反例转红。
+- ~~AnimationUtils 加法参考轨道采样 | G-anim r160 对照插值、重复首帧、边界及工作区 | 已有差量与插值器。~~ 6 项通过，替换为离散插值的反例转红。
 - AnimationUtils 非数值展平与整片段加法 | G-anim 布尔及字符串值、轨道匹配和参考帧 | 非数值轨道、类型视图与混合器。
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
