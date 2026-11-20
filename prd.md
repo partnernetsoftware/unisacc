@@ -94,6 +94,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 ## 2. 有什么功能（已实现能力速查）
 
+整链跨目标预编用 `sh ./unisacc.com tools/check-span-compile.cx -- ROOT APE NEW_OUT TARGET PART`。从正式整链根列表展开候选的模块闭包，按目标和四个分片实编每个单元。同一个目标的四片覆盖完整闭包。
+
 完整工具索引按内容身份现查:`sh ./unisacc.com tools/devsvc.cx -- tool-index`(与源树一致,热命中约 0.2 秒;本地文件副本不进版本控制,需要时 `derive.cx -- --write --only tool-index`),表索引见 build/table-index.tsv(生成物,`sh ./unisacc.com tools/tool-index.cx -- --write` 重算)。
 
 前端诊断普查(S0):`sh ./unisacc.com tools/diag-census.cx -- [--probe PRODUCT] [--out TSV]`对 s9 静默接受的 17 类(c-negative 15、pp-negative 2)逐行启发式统计自身树候选违例,类型相关类记 UNMEASURED,输出本版入选与顺延;`--self-test` 与 `tools/check-diag-census.cx`(批次 diag-census)。
