@@ -1,7 +1,7 @@
 // Convert typed image channels into separate caller-owned storage.
-// kind 1 is u8, 9 is f32 and 10 is f64.
-native function ImageUtils_sRGBToLinear(img_dst:i64,img_src:i64,img_channels:i64,img_kind:i64) i64 {
-  if(img_channels<0 || (img_kind!=1 && img_kind!=9 && img_kind!=10)) { return 0-1; }
+// kind 1 is u8, 3 is clamped u8, 9 is f32 and 10 is f64.
+native function image_to_linear(img_dst:i64,img_src:i64,img_channels:i64,img_kind:i64,canvas:i64) i64 {
+  if(img_channels<0 || (img_kind!=1 && img_kind!=3 && img_kind!=9 && img_kind!=10)) { return 0-1; }
   let img_width=1;
   if(img_kind==9) { img_width=4; }
   if(img_kind==10) { img_width=8; }
@@ -11,9 +11,12 @@ native function ImageUtils_sRGBToLinear(img_dst:i64,img_src:i64,img_channels:i64
   if(img_size>0 && img_src<img_dst+img_size && img_dst<img_src+img_size) { return 0-1; }
   let img_i=0;
   while(img_i<img_size) {
-    if(img_kind==1) {
-      let img_channel=Color_srgbToLinear(ux_u8(img_src+img_i)/255.0);
-      let img_byte=ux_u8_put(img_dst+img_i,f64_floor_i64(img_channel*255.0));
+    if(img_width==1) {
+      let scaled=Color_srgbToLinear(ux_u8(img_src+img_i)/255.0)*255.0;
+      let byte=f64_floor_i64(scaled);
+      let fraction=scaled-byte;
+      if(canvas!=0 && (fraction>0.5 || (fraction==0.5 && byte%2!=0))) { byte=byte+1; }
+      let img_byte=ux_u8_put(img_dst+img_i,byte);
     } else if(img_kind==9) {
       let img_float=ux_f32_put(img_dst+img_i,Color_srgbToLinear(ux_f32(img_src+img_i)));
     } else {
@@ -22,6 +25,16 @@ native function ImageUtils_sRGBToLinear(img_dst:i64,img_src:i64,img_channels:i64
     img_i=img_i+img_width;
   }
   return img_dst;
+}
+
+native function ImageUtils_sRGBToLinear(img_dst:i64,img_src:i64,img_channels:i64,img_kind:i64) i64 {
+  return image_to_linear(img_dst,img_src,img_channels,img_kind,0);
+}
+
+// Canvas ImageData converts to Uint8ClampedArray with ties to even.
+native function ImageUtils_canvasToLinear(dst:i64,src:i64,channels:i64) i64 {
+  if(channels%4!=0) { return 0-1; }
+  return image_to_linear(dst,src,channels,3,1);
 }
 
 // Retain an already encoded URI as a view, including URLs over the string ABI limit.
