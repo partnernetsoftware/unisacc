@@ -131,6 +131,7 @@ static int fake(int argc, char **argv) {
     }
     if (!out || !rev || put(out, "fake-argv.tsv", t)) return 2;
     if (cx_fmt(t, sizeof t, "FAKE\tpid=%d\tpgid=%ld\n", sy_pid(), sy_getpgid(0)) || put(out, "fake.tsv", t)) return 2;
+    if (tx_eqz(mode, "fail-snap")) return 2;
     if (tx_eqz(mode, "fail")) {
         if (put(out, "checkpoint.tsv", "DONE\tsnap\twall_ms=1\tsha=-\n") ||
             put(out, "chain-run.tsv", "BLOCKER\tphase=ctx\treason=fixture\trc=3\tattempts=1\tresumes=0\n")) return 2;
@@ -422,6 +423,23 @@ int main(int argc, char **argv) {
             ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-preflight", 0, 0) == 1 &&
                lines("BG_CANDIDATE\tREFUSE-ITEM\tPREFLIGHT_ITEM\tsys-six-target-0\tFAIL", 0, 0, 0) == 1 &&
                !present(bp, REV_A), "start-refuses-chain-preflight-failure");
+        }
+        {
+            char bfs[P], dfs[P];
+            char *v[24];
+            int k = 0;
+            if (join(bfs, work, "bfirst") || join(dfs, bfs, REV_E)) return 2;
+            mm_free(last); last = 0; lastn = 0;
+            v[k++] = bin; v[k++] = "start"; v[k++] = "--rev"; v[k++] = (char *)REV_E;
+            v[k++] = "--first-check-s"; v[k++] = "5";
+            v[k++] = "--deadline-s"; v[k++] = "30"; v[k++] = "--slack-s"; v[k++] = "5";
+            v[k++] = "--chain"; v[k++] = self; v[k++] = "--root"; v[k++] = fxroot; v[k++] = "--base"; v[k++] = bfs;
+            v[k++] = "--"; v[k++] = "--fixture-case"; v[k++] = "fail-snap"; v[k] = 0;
+            rc = cx_runv_timeout(v, 20, &last, &lastn);
+            ck(rc == 1 && lines("BLOCKER\tphase=snap\t", 0, 0, 0) >= 1 &&
+               lines("BG_CANDIDATE\tFIRST_PHASE_CHECK", "verdict=FAIL", 0, 0) == 1 &&
+               rows(dfs, "chain-run.tsv", "BLOCKER\tphase=snap\t", 0, 0) >= 1,
+               "start-first-phase-selfcheck-writes-and-prints-blocker");
         }
     }
 

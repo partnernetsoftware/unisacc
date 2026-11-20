@@ -137,7 +137,8 @@ int main(void) {
        has(out, "PREFLIGHT_NODE\tname=sys-six-target-0\t") &&
        has(out, "PREFLIGHT_NODE\tname=sys-six-target-1\t") &&
        has(out, "PREFLIGHT_NODE\tname=sixtarget-headers\t") &&
-       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=7"),
+       has(out, "PREFLIGHT_NODE\tname=chain-to-snap\t") &&
+       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=8"),
        "table-schema-live-ok", out);
 
     /* 2. Valid root, valid snap cache (plus ignored .partial.lock), unchanged parse2 on fixture table -> verdict=PASS in default strict mode */
@@ -414,6 +415,25 @@ int main(void) {
         if (run_pf(arg, out, sizeof out) == 1 && has(out, "verdict=FAIL\tfailed=sys-six-target-0\t") && has(out, "\tmode=strict")) blocked++;
 
         ck(blocked == 7, "strict-mode-blocks-all-7-failure-shapes", out);
+    }
+
+    /* 14. chain-to-snap: red with UNISACC_INTEGRATOR=1 naming UNISACC_INTEGRATOR, green in clean environment */
+    {
+        const char *snap_rev = "de7bd89ab5d19a68c22db78087ec6dabc79aa9f4";
+        char scmd[2400];
+        if (ckk_sh("CHECK_CHAIN_PREFLIGHT", "git rev-parse --verify de7bd89ab5d19a68c22db78087ec6dabc79aa9f4^{commit}", out, sizeof out) == 0) {
+            cx_fmt(scmd, sizeof scmd, "UNISACC_INTEGRATOR=1 '%s' -- --item chain-to-snap --repo . --rev %s", pf_bin, snap_rev);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 1 &&
+               has(out, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\t") &&
+               has(out, "REFUSE chain-env UNISACC_INTEGRATOR"),
+               "chain-to-snap-integrator-env-red-names-var", out);
+
+            cx_fmt(scmd, sizeof scmd, "env -u UNISACC_INTEGRATOR '%s' -- --item chain-to-snap --repo . --rev %s", pf_bin, snap_rev);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 0 &&
+               has(out, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\t") &&
+               has(out, "\tstatus=until-snap\t"),
+               "chain-to-snap-clean-env-green", out);
+        }
     }
 
     cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx);
