@@ -1,6 +1,6 @@
 # unisacc 0.0.85 发布说明
 
-状态:阶段 A 完成(候选已打包,release-exec --dry DRY_GATES_OK;未公开)。整体裁决 NOT_QUALIFIED,待同候选原生 CI 回填:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,严格证据所列批次之外为 UNMEASURED,不得称全批资格。
+状态:已公开(release-exec EXECUTED,Y1=99eab18166,Y2=3b0a5ec143,公开读回 SHA256 与候选一致;公开时间 2026-11-20T05:28:22Z)。同候选原生 CI run 44680404617 一次通过(run_attempt=1):六目标 candidate 格 success,2026-11-20T05:20:43Z 到 05:28:01Z 约 7.3 分钟,CI 资格只覆盖这六格的冒烟子集,不等于外目标资格。整体裁决仍 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,严格证据只覆盖下列批次,严格证据所列批次之外为 UNMEASURED,不得称全批资格。
 
 ## 真实身份
 
@@ -14,7 +14,7 @@
 | slice-win-arm64 | 013c5ae7741d9a44d8c1cfd54fc38f9e662869caaa51eeb421ea9bf5014498d1 |
 | SHA256SUMS | 85bb4fb5a601b69c3668b7bf1522219a83879838ddfa7f0d1d070fb1bfa5947d |
 | cache-manager | 沿用 0.0.73 起的 x64 d34bee6c、arm64 0aae3fbc(EXPLICIT_INPUTS) |
-| CI run | 待 release-exec 回填 |
+| CI run | 44680404617(六目标 success,一次通过,headSha 为整链输入 T=e75c162dff,候选 751a40ac;release-exec Y1=99eab18166,Y2=3b0a5ec143;证据 release/evidence/0.0.85/ci-44680404617.json 与 .log) |
 
 ## 产品改动
 
@@ -53,4 +53,5 @@
 (6) inttypes.h 既有缺陷的诊断位置前缀问题沿用,本版未修。
 (7) 产品资格域非整域:严格证据所列批次之外为 UNMEASURED,不得称全批资格;cx-booter-ape 与 tools-default-regression UNKNOWN(no-producer)。
 (8) prerun-drive 五处缺陷(另派修):prebuild-self 调不存在的参数且在 root 跑;每次 attempt 删 dvqualify checkpoint 且外层 58 秒早于窗口 flush;g1-dry 复制名不符 release-exec 第 323 行要求且 g1 布局 unisacc.com 指 root 而非候选;merge 只留一条尾 SUMMARY 与 release-exec 第 454 行冲突(本次改按 0.0.84 逐窗拼接);dvqualify 不留批 stdout,equiv0/1 首轮 FAIL 无法事后定因。
-(9) 全套 s9 本版未跑;同候选原生 CI 未跑,整体裁决 NOT_QUALIFIED,待 CI 回填;外目标执行格仍 UNVERIFIED。
+(9) 全套 s9 本版未跑;同候选原生 CI run 44680404617 六目标一次通过(只覆盖 CI 冒烟子集),整体裁决 NOT_QUALIFIED;外目标执行格仍 UNVERIFIED。
+(10) 公开 GitHub release v0.0.85 正文为空(gh release view --json body 长度 0),本说明未随发布上传;已公开正文未改,更正另报主调度。仓内 release/decision.txt 仍为 0.0.74 的旧裁决,未随本版重算,本版整体裁决以本说明与 release/evidence/0.0.85/INDEX.tsv 为准。
