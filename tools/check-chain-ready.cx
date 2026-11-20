@@ -180,6 +180,99 @@ int main(void) {
             }
         }
     }
+    /* 19-chain-preflight: chain-preflight nodes + three version-scope mechanical checks (planned_units number, a_class unique, hand-modified lane-A files <= a_files_cap) */
+    {
+        char srepo[420], pft_ok[440], pft_bad[440], planf[440], lanef[440], d[440], f[460];
+        const char *t_ok =
+            "name\tpatterns\tcmd\ttimeout_s\n"
+            "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+            "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+            "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+            "sys-six-target-0\tcx/sys/\ttrue\t10\n";
+        const char *t_bad =
+            "name\tpatterns\tcmd\ttimeout_s\n"
+            "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+            "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+            "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+            "sys-six-target-0\tcx/sys/\tfalse\t10\n";
+        const char *lanes =
+            "# path\tlane\tsource\n"
+            "cx/a.cx\tA\tsid-list-current\n"
+            "cx/b.cx\tA\tsid-list-current\n"
+            "cx/c.cx\tA\tsid-list-current\n"
+            "exec/gen.tsv\tA\tsid-list-current\n"
+            "kernel/k.bin\tA\tsid-list-current\n"
+            "tools/t.cx\tB\ttools\n";
+        cx_fmt(srepo, sizeof srepo, "%s/srepo", tmpd);
+        cx_fmt(pft_ok, sizeof pft_ok, "%s/pft-ok.tsv", tmpd);
+        cx_fmt(pft_bad, sizeof pft_bad, "%s/pft-bad.tsv", tmpd);
+        cx_write(pft_ok, t_ok, tx_len(t_ok, 1024));
+        cx_write(pft_bad, t_bad, tx_len(t_bad, 1024));
+        { char *v[] = {"./tools/bound", "20", "git", "init", "-q", "-b", "v0.0.87", srepo, 0}; run(v, out, sizeof out); }
+        cx_fmt(f, sizeof f, "%s/unisacc.com", srepo); cx_write(f, "ape\n", 4);
+        cx_fmt(f, sizeof f, "%s/unisacc.com.build.json", srepo); cx_write(f, "{}\n", 3);
+        cx_fmt(d, sizeof d, "%s/build", srepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/plans", srepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/cx", srepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/exec", srepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/kernel", srepo); sy_mkdir(d, 0755);
+        cx_fmt(lanef, sizeof lanef, "%s/build/lane-inputs.tsv", srepo); cx_write(lanef, lanes, tx_len(lanes, 1024));
+        {
+            const char *vseq = "slot\tversion\tclass\tstate\tnote\n1\t0.0.1\ttest\t已公开\tfixture\n";
+            cx_fmt(f, sizeof f, "%s/build/version-seq.tsv", srepo); cx_write(f, vseq, tx_len(vseq, 256));
+        }
+        cx_fmt(f, sizeof f, "%s/cx/a.cx", srepo); cx_write(f, "int a=1;\n", 9);
+        cx_fmt(f, sizeof f, "%s/cx/b.cx", srepo); cx_write(f, "int b=1;\n", 9);
+        cx_fmt(f, sizeof f, "%s/cx/c.cx", srepo); cx_write(f, "int c=1;\n", 9);
+        cx_fmt(f, sizeof f, "%s/exec/gen.tsv", srepo); cx_write(f, "1\n", 2);
+        cx_fmt(f, sizeof f, "%s/kernel/k.bin", srepo); cx_write(f, "1\n", 2);
+        cx_fmt(planf, sizeof planf, "%s/plans/v0.0.87.md", srepo);
+        {
+            const char *p_ok = "planned_units=5\na_class=前端声明兼容\na_files_cap=2\n";
+            cx_write(planf, p_ok, tx_len(p_ok, 256));
+        }
+        git(srepo, "add", "--all", 0); git(srepo, "commit", "-qm", "base");
+        git(srepo, "tag", "v0.0.1", 0);
+        /* modify 2 lane-A cx files + exec/gen.tsv + kernel/k.bin (exec/ and kernel/ excluded from hand-modified count -> 2/2) */
+        cx_fmt(f, sizeof f, "%s/cx/a.cx", srepo); cx_write(f, "int a=2;\n", 9);
+        cx_fmt(f, sizeof f, "%s/cx/b.cx", srepo); cx_write(f, "int b=2;\n", 9);
+        cx_fmt(f, sizeof f, "%s/exec/gen.tsv", srepo); cx_write(f, "2\n", 2);
+        cx_fmt(f, sizeof f, "%s/kernel/k.bin", srepo); cx_write(f, "2\n", 2);
+        git(srepo, "add", "--all", 0); git(srepo, "commit", "-qm", "c1");
+        {
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_ok, 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "19-chain-preflight\tPASS") && has(out, "a_files=2/2") && has(out, "READY\tyes"), "preflight-19-pass");
+        }
+        {
+            const char *p_badpu = "planned_units=UNMEASURED\na_class=前端声明兼容\na_files_cap=2\n";
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_ok, 0};
+            cx_write(planf, p_badpu, tx_len(p_badpu, 256));
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "planned-units-not-number") && has(out, "READY\tno"), "preflight-19-planned-units-not-number");
+        }
+        {
+            const char *p_badac = "planned_units=5\na_class=前端声明兼容,驱动\na_files_cap=2\n";
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_ok, 0};
+            cx_write(planf, p_badac, tx_len(p_badac, 256));
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "a-class-not-unique") && has(out, "READY\tno"), "preflight-19-a-class-not-unique");
+        }
+        {
+            const char *p_ok = "planned_units=5\na_class=前端声明兼容\na_files_cap=2\n";
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_bad, 0};
+            cx_write(planf, p_ok, tx_len(p_ok, 256));
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "chain-preflight") && has(out, "READY\tno"), "preflight-19-node-fail");
+        }
+        {
+            const char *p_cap1 = "planned_units=5\na_class=前端声明兼容\na_files_cap=1\n";
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_ok, 0};
+            cx_write(planf, p_cap1, tx_len(p_cap1, 256));
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "a-files-over-cap") && has(out, "a_files=2 cap=1") && has(out, "READY\tno"), "preflight-19-a-files-over-cap");
+        }
+    }
     printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
 }

@@ -47,6 +47,10 @@
  *                  release-run --pack refuse that Root as a baseline.
  *  18-parse2-gen   compare candidate --rev (or HEAD) with the last published tag.
  *                  Changed exec/parse2 or seed/gen.c requires a successful host seed-gen parse2 --locations.
+ *  19-chain-preflight  run tools/chain-preflight.cx --strict on all nodes in tools/flows/chain-preflight.tsv
+ *                  (or --preflight-table FILE), plus three version-scope mechanical checks on plans/v<V>.md:
+ *                  planned_units is a positive integer, a_class is a single unique label, and hand-modified
+ *                  lane-A files (build/lane-inputs.tsv lane A, excluding exec/ and kernel/) <= a_files_cap.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -573,8 +577,204 @@ static void root_items(const char *repo, const char *root, const char *revarg, c
     }
 }
 
+static int is_pos_int_str(const char *s, long n, long *val) {
+    long i, v = 0;
+    if (n <= 0 || n > 9) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    if (v <= 0) return 0;
+    *val = v;
+    return 1;
+}
+
+static int lane_a_file(const char *lbuf, long llen, const char *path, long plen) {
+    long at = 0;
+    if (!lbuf || llen <= 0 || plen <= 0) return 0;
+    if (tx_prefix(path, plen, "exec/", 5) || tx_prefix(path, plen, "kernel/", 7)) return 0;
+    while (at < llen) {
+        long e = tx_chr(lbuf + at, llen - at, '\n'), ln = e < 0 ? llen - at : e;
+        if (ln > 0 && lbuf[at + ln - 1] == '\r') ln--;
+        if (ln > plen + 2 && lbuf[at] != '#' &&
+            tx_same(lbuf + at, plen, path, plen) &&
+            lbuf[at + plen] == '\t' && lbuf[at + plen + 1] == 'A' &&
+            (ln == plen + 2 || lbuf[at + plen + 2] == '\t')) {
+            return 1;
+        }
+        at += (e < 0 ? llen - at : e + 1);
+    }
+    return 0;
+}
+
+static int check_version_scope(const char *repo, const char *revarg, const char *since, const char *tver, char *scope_ev, int cap) {
+    char ver[64], planp[4400], lanep[4400], aclass[128], why[160], tag[64], base[64], tip[64];
+    size_t pn = 0, ln = 0;
+    char *pb = 0, *lb = 0;
+    long at = 0, punits = -1, afcap = -1;
+    int seen_pu = 0, seen_ac = 0, seen_cap = 0, a_count = 0;
+    ver[0] = 0; aclass[0] = 0; scope_ev[0] = 0;
+    if (tver && tver[0]) {
+        const char *v = (tver[0] == 'v') ? tver + 1 : tver;
+        cx_fmt(ver, sizeof ver, "%s", v);
+    } else {
+        char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
+        np_result r = {0};
+        if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out && r.outn > 5) {
+            long l = (long)r.outn;
+            while (l > 0 && (r.out[l - 1] == '\n' || r.out[l - 1] == '\r')) l--;
+            if (l > 5 && tx_prefix(r.out, l, "v0.0.", 5)) {
+                long k = 0, i;
+                for (i = 1; i < l && (r.out[i] == '.' || (r.out[i] >= '0' && r.out[i] <= '9')) && k < 63; i++) ver[k++] = r.out[i];
+                ver[k] = 0;
+            }
+        }
+        np_free(&r);
+    }
+    if (!ver[0]) return 1;
+    cx_fmt(planp, sizeof planp, "%s/plans/v%s.md", repo, ver);
+    if (sy_exists(planp) != 1) {
+        if (tver && tver[0]) {
+            cx_fmt(scope_ev, (size_t)cap, "READY=no version-plan-missing version=%s path=%s", ver, planp);
+            return 0;
+        }
+        return 1;
+    }
+    pb = cx_read(planp, &pn);
+    if (!pb) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no version-plan-unreadable path=%s", planp);
+        return 0;
+    }
+    while (at < (long)pn) {
+        long e = tx_chr(pb + at, (long)pn - at, '\n'), l = e < 0 ? (long)pn - at : e;
+        const char *line = pb + at;
+        if (l > 0 && line[l - 1] == '\r') l--;
+        if (tx_prefix(line, l, "planned_units=", 14)) {
+            const char *v = line + 14; long vl = l - 14;
+            seen_pu++;
+            if (!is_pos_int_str(v, vl, &punits)) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no planned-units-not-number version=%s planned_units=%.*s", ver, (int)vl, v);
+                mm_free(pb); return 0;
+            }
+        } else if (tx_prefix(line, l, "a_class=", 8)) {
+            const char *v = line + 8; long vl = l - 8, i;
+            while (vl > 0 && (*v == ' ' || *v == '\t')) { v++; vl--; }
+            while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+            seen_ac++;
+            if (vl <= 0 || vl >= (long)sizeof aclass || seen_ac > 1) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=%.*s count=%d", ver, (int)vl, v, seen_ac);
+                mm_free(pb); return 0;
+            }
+            for (i = 0; i < vl; i++) {
+                if (v[i] == ',' || v[i] == ';' || v[i] == '/' || v[i] == '+') {
+                    cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=%.*s", ver, (int)vl, v);
+                    mm_free(pb); return 0;
+                }
+            }
+            mm_copy(aclass, sizeof aclass, v, (size_t)vl); aclass[vl] = 0;
+        } else if (tx_prefix(line, l, "a_files_cap=", 12)) {
+            const char *v = line + 12; long vl = l - 12;
+            seen_cap++;
+            if (!is_pos_int_str(v, vl, &afcap)) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-cap-invalid version=%s a_files_cap=%.*s", ver, (int)vl, v);
+                mm_free(pb); return 0;
+            }
+        }
+        at += (e < 0 ? (long)pn - at : e + 1);
+    }
+    mm_free(pb);
+    if (!seen_pu || punits <= 0) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no planned-units-not-number version=%s planned_units=missing", ver);
+        return 0;
+    }
+    if (!seen_ac || !aclass[0]) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=missing", ver);
+        return 0;
+    }
+    if (!seen_cap || afcap <= 0) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-cap-invalid version=%s a_files_cap=missing", ver);
+        return 0;
+    }
+    cx_fmt(lanep, sizeof lanep, "%s/build/lane-inputs.tsv", repo);
+    lb = cx_read(lanep, &ln);
+    if (lb && ln > 0) {
+        base[0] = 0; tag[0] = 0;
+        if (since && since[0]) cx_fmt(base, sizeof base, "%s", since);
+        else if (parse2_release_tag(repo, tag) && parse2_commit(repo, tag, base)) { /* use last public tag */ }
+        else cx_fmt(base, sizeof base, "HEAD~1");
+        cx_fmt(tip, sizeof tip, "%s", revarg && revarg[0] ? revarg : "HEAD");
+        {
+            char *dv[] = {"git", "diff", "--name-only", base, tip, 0};
+            np_result r = {0};
+            if (!np_run(dv, repo, 0, 10, &r, why, sizeof why) && !r.rc && r.out) {
+                long p = 0, rn = (long)r.outn;
+                while (p < rn) {
+                    long e = tx_chr(r.out + p, rn - p, '\n'), l = e < 0 ? rn - p : e;
+                    if (l > 0 && r.out[p + l - 1] == '\r') l--;
+                    if (l > 0 && lane_a_file(lb, (long)ln, r.out + p, l)) a_count++;
+                    p += (e < 0 ? rn - p : e + 1);
+                }
+            }
+            np_free(&r);
+        }
+        mm_free(lb);
+    }
+    if (a_count > afcap) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-over-cap version=%s a_files=%d cap=%ld a_class=%s", ver, a_count, afcap, aclass);
+        return 0;
+    }
+    cx_fmt(scope_ev, (size_t)cap, "scope version=%s planned_units=%ld a_class=%s a_files=%d/%ld", ver, punits, aclass, a_count, afcap);
+    return 1;
+}
+
+/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; total gate <=180s */
+static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, char *ev, int cap) {
+    char *v[18]; int k = 0, fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, node_timeout_bounded = 1;
+    char *out = 0; long n = 0, at = 0;
+    char fail_item[240], sum_line[240], scope_ev[320];
+    (void)node_timeout_bounded;
+    fail_item[0] = 0; sum_line[0] = 0; scope_ev[0] = 0;
+    v[k++] = "sh"; v[k++] = UC; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
+    v[k++] = "--strict"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--repo"; v[k++] = (char *)repo;
+    v[k++] = "--rev"; v[k++] = (char *)(revarg && revarg[0] ? revarg : "HEAD");
+    if (pftable && pftable[0]) { v[k++] = "--table"; v[k++] = (char *)pftable; }
+    v[k] = 0;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid <= 0 || fd < 0) {
+        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight-not-started");
+        return 0;
+    }
+    slurp(fd, &out, &n); sy_close(fd);
+    sy_wait_status(pid, 0, &ex, &code, &sig);
+    while (out && at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16)) {
+            if (tx_find(out + at, ln, "\tverdict=PASS\t", 14) >= 0) pass = 1;
+            line_with(out + at, ln, "CHAIN_PREFLIGHT", sum_line, sizeof sum_line);
+        }
+        if (!fail_item[0] && tx_prefix(out + at, ln, "PREFLIGHT_ITEM\t", 15) && tx_find(out + at, ln, "\tFAIL\t", 6) >= 0) {
+            line_with(out + at, ln, "PREFLIGHT_ITEM", fail_item, sizeof fail_item);
+        }
+        at += (e < 0 ? n - at : e + 1);
+    }
+    if (out) mm_free(out);
+    if (!pass || !ex || code != 0) {
+        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight rc=%d %s%s%s",
+               ex ? code : -1, sum_line[0] ? sum_line : "no CHAIN_PREFLIGHT line",
+               fail_item[0] ? "; first: " : "", fail_item);
+        return 0;
+    }
+    if (!check_version_scope(repo, revarg, since, tver, scope_ev, sizeof scope_ev)) {
+        cx_fmt(ev, (size_t)cap, "%s", scope_ev);
+        return 0;
+    }
+    cx_fmt(ev, (size_t)cap, "%s%s%s", sum_line[0] ? sum_line : "CHAIN_PREFLIGHT verdict=PASS",
+           scope_ev[0] ? "; " : "", scope_ev);
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0;
+    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0;
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
     if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
@@ -594,8 +794,9 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
         else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
+        else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
         else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) { int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++; }
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
     }
     static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
@@ -728,6 +929,12 @@ int main(int argc, char **argv) {
         int ok = parse2_preflight(repo, revarg, made ? private_tree : 0, ev);
         if (made) (void)sy_remove_all(private_tree);
         row_judged("18-parse2-gen", ok, ev, sy_now_ms() - t0);
+    }
+    if (WANT("19-chain-preflight")) {
+        char ev[640];
+        long t0 = sy_now_ms();
+        int ok = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, ev, sizeof ev);
+        row_judged("19-chain-preflight", ok, ev, sy_now_ms() - t0);
     }
     /* 17-root-public (0.0.87 S4): a Root installed from an unpublished candidate is fine for a chain and for
        development, but not for a release step; listed here, never counted as a failure. */
