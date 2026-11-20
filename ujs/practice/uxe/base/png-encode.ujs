@@ -1,0 +1,108 @@
+native function png_be_put(at:i64,word:i64) i64 {
+  let a=ux_u8_put(at,word/16777216);
+  let b=ux_u8_put(at+1,(word/65536)%256);
+  let c=ux_u8_put(at+2,(word/256)%256);
+  let d=ux_u8_put(at+3,word%256);
+  return at+4;
+}
+
+// Encode caller-owned RGBA8 as PNG. Validate the whole output span first.
+native function PngEncode_rgba8(rgba:i64,width:i64,height:i64,out:i64,capacity:i64) i64 {
+  if(rgba<0 || rgba>6291456 || out<0 || out>6291456 || capacity<0 || capacity>6291456-out ||
+     width<1 || width>1572864 || height<1 || height>(6291456-rgba)/(width*4)) { return 0-1; }
+  let row=width*4;
+  let pixels=row*height;
+  let raw=(row+1)*height;
+  let blocks=(raw+65534)/65535;
+  let zlib=raw+blocks*5+6;
+  let total=zlib+57;
+  if(total>capacity) { return 0-2; }
+  if(out<rgba+pixels && rgba<out+total) { return 0-1; }
+  let sigA=ux_u32_put(out,1196314761);
+  let sigB=ux_u32_put(out+4,169478669);
+  let header=png_be_put(out+8,13);
+  let kind=png_be_put(out+12,1229472850);
+  let w=png_be_put(out+16,width);
+  let h=png_be_put(out+20,height);
+  let format=ux_u32_put(out+24,1544);
+  let interlace=ux_u8_put(out+28,0);
+  let crc=png_be_put(out+29,png_crc32(out+12,17));
+  let size=png_be_put(out+33,zlib);
+  let idat=png_be_put(out+37,1229209940);
+  let cmf=ux_u8_put(out+41,120);
+  let flg=ux_u8_put(out+42,1);
+  let cursor=out+43;
+  let remaining=raw;
+  let column=0;
+  let input=rgba;
+  let adlerA=1;
+  let adlerB=0;
+  while(remaining>0) {
+    let length=remaining;
+    if(length>65535) { length=65535; }
+    let final=ux_u8_put(cursor,length==remaining);
+    let inverted=65535-length;
+    let counts=ux_u32_put(cursor+1,length+65536*inverted);
+    cursor=cursor+5;
+    let i=0;
+    while(i<length) {
+      let byte=0;
+      if(column>0) { byte=ux_u8(input); input=input+1; }
+      let put=ux_u8_put(cursor,byte);
+      adlerA=(adlerA+byte)%65521;
+      adlerB=(adlerB+adlerA)%65521;
+      column=(column+1)%(row+1);
+      cursor=cursor+1;
+      i=i+1;
+    }
+    remaining=remaining-length;
+  }
+  let tail=png_be_put(cursor,adlerB*65536+adlerA);
+  let checksum=png_be_put(tail,png_crc32(out+37,zlib+4));
+  let zero=png_be_put(checksum,0);
+  let iend=png_be_put(zero,1229278788);
+  let done=png_be_put(iend,png_crc32(zero,4));
+  return total;
+}
+
+native function png_base64(value:i64) i64 {
+  if(value<26) { return value+65; }
+  if(value<52) { return value+71; }
+  if(value<62) { return value-4; }
+  if(value==62) { return 43; }
+  return 47;
+}
+
+// Caller owns the output text and temporary PNG storage. Return UTF-8 length.
+native function ImageUtils_pngDataURL(rgba:i64,width:i64,height:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(out<0 || capacity<0 || out>6291456-capacity || work<0 || space<0 || work>6291456-space ||
+     (capacity>0 && space>0 && out<work+space && work<out+capacity)) { return 0-1; }
+  let bytes=PngEncode_rgba8(rgba,width,height,work,space);
+  if(bytes<0) { return bytes; }
+  let total=22+4*((bytes+2)/3);
+  if(capacity<total) { return 0-2; }
+  let prefix=[100,97,116,97,58,105,109,97,103,101,47,112,110,103,59,98,97,115,101,54,52,44];
+  let i=0;
+  while(i<22) { let w=ux_u8_put(out+i,prefix[i]); i=i+1; }
+  let input=0;
+  let output=out+22;
+  while(input<bytes) {
+    let count=bytes-input;
+    let a=ux_u8(work+input);
+    let b=0;
+    let c=0;
+    if(count>1) { b=ux_u8(work+input+1); }
+    if(count>2) { c=ux_u8(work+input+2); }
+    let third=61;
+    let fourth=61;
+    if(count>1) { third=png_base64((b%16)*4+c/64); }
+    if(count>2) { fourth=png_base64(c%64); }
+    let w0=ux_u8_put(output,png_base64(a/4));
+    let w1=ux_u8_put(output+1,png_base64((a%4)*16+b/16));
+    let w2=ux_u8_put(output+2,third);
+    let w3=ux_u8_put(output+3,fourth);
+    input=input+3;
+    output=output+4;
+  }
+  return total;
+}
