@@ -1,0 +1,157 @@
+/* tools/check-ln-noderef.cx -- guards against directory-target `ln -s`/`ln -sf` without -n/-T
+ * (which dereferences an existing dir symlink on repeat calls and creates self-referential links like cx/cx).
+ * Also verifies:
+ *   (1) minimal two-call repro: `ln -sf` twice creates src/cx, whereas `ln -sfn` twice never does;
+ *   (2) tools/status.cx --section residue reports STRAY_SELF_LINK when cx/cx exists without auto-deleting it;
+ *   (3) full scan of tools/ and tests/ .cx files has 0 directory-target ln -s/-sf calls missing -n/-T.
+ * Ends: CHECK_LN_NODEREF<TAB>ok=N<TAB>failed=M<TAB>violations=V<TAB>ms=T. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define CLN_PW 4400
+#define CLN_OUT 16384
+
+static int cln_is_dir_target(const char *s, size_t n) {
+    static const char *dirs[] = {
+        "cx", "ext", "tools", "cxlib", "include", "tests", "exec", "build", "src", "cases", 0
+    };
+    while (n > 0 && (s[n - 1] == '\'' || s[n - 1] == '"' || s[n - 1] == ';' || s[n - 1] == ')')) n--;
+    size_t start = n;
+    while (start > 0 && s[start - 1] != '/' && s[start - 1] != '\'' && s[start - 1] != '"') start--;
+    size_t bl = n - start;
+    if (bl == 0) return 0;
+    for (int i = 0; dirs[i]; i++) {
+        size_t dl = strlen(dirs[i]);
+        if (bl == dl && memcmp(s + start, dirs[i], dl) == 0) return 1;
+    }
+    return 0;
+}
+
+static int cln_scan_file(const char *path) {
+    size_t n = 0;
+    char *b = (char *)cx_read(path, &n);
+    if (!b) return 0;
+    int viol = 0, line = 1;
+    size_t pos = 0;
+    while (pos < n) {
+        size_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < n) pos++;
+        /* Scan tokens inside the line for "ln -<flags> <src> <dst>" */
+        size_t i = ls;
+        while (i + 5 < le) {
+            int boundary = (i == ls || b[i - 1] == ' ' || b[i - 1] == '\t' || b[i - 1] == '"' || b[i - 1] == '&' || b[i - 1] == ';');
+            if (boundary && b[i] == 'l' && b[i + 1] == 'n' && b[i + 2] == ' ' && b[i + 3] == '-') {
+                size_t f0 = i + 4, f1 = f0;
+                int has_s = 0, has_safe = 0;
+                while (f1 < le && b[f1] != ' ' && b[f1] != '\t' && b[f1] != '"') {
+                    if (b[f1] == 's') has_s = 1;
+                    if (b[f1] == 'n' || b[f1] == 'T' || b[f1] == 'h') has_safe = 1;
+                    f1++;
+                }
+                if (has_s && !has_safe) {
+                    /* Skip whitespace -> src token -> whitespace -> dst token */
+                    size_t p = f1;
+                    while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+                    while (p < le && b[p] != ' ' && b[p] != '\t' && b[p] != '"' && b[p] != '&' && b[p] != ';') p++;
+                    while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+                    size_t d0 = p;
+                    while (p < le && b[p] != ' ' && b[p] != '\t' && b[p] != '"' && b[p] != '&' && b[p] != ';') p++;
+                    size_t d1 = p;
+                    if (d1 > d0 && cln_is_dir_target(b + d0, d1 - d0)) {
+                        printf("LN_NODEREF_VIOLATION\t%s:%d\t%.*s\n", path, line, (int)(d1 - d0), b + d0);
+                        viol++;
+                    }
+                }
+            }
+            i++;
+        }
+        line++;
+    }
+    free(b);
+    return viol;
+}
+
+static int cln_scan_dir(const char *dir) {
+    sy_dir_t d;
+    int viol = 0;
+    if (sy_dir_open(&d, dir) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        char sub[CLN_PW];
+        sy_stat_t st;
+        if (cx_fmt(sub, sizeof sub, "%s/%s", dir, d.name)) continue;
+        if (sy_lstat(sub, &st) != 0) continue;
+        if (st.kind == 'd') {
+            viol += cln_scan_dir(sub);
+        } else if (st.kind == 'f' && d.name_n > 3 && memcmp(d.name + d.name_n - 3, ".cx", 3) == 0) {
+            if (tx_eqz(sub, "tools/check-ln-noderef.cx")) continue;
+            viol += cln_scan_file(sub);
+        }
+    }
+    sy_dir_close(&d);
+    return viol;
+}
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char cwd[CLN_PW], work[CLN_PW], cmd[8192], out[CLN_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (cx_fmt(work, sizeof work, "%s/cln-%d", base_td, (int)getpid())) return 2;
+    if (mkdir(work, 0700) != 0 && errno != EEXIST) return 2;
+
+    /* (1) Minimal two-call repro: ln -sf twice pollutes src/cx/cx, whereas ln -sfn twice never does */
+    {
+        char bad_link[CLN_PW], good_link[CLN_PW];
+        sy_stat_t st;
+        if (cx_fmt(bad_link, sizeof bad_link, "%s/src1/cx/cx", work) ||
+            cx_fmt(good_link, sizeof good_link, "%s/src2/cx/cx", work)) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/src1/cx' '%s/dst1' && ln -sf '%s/src1/cx' '%s/dst1/cx' && ln -sf '%s/src1/cx' '%s/dst1/cx'",
+            work, work, work, work, work, work)) return 2;
+        int rc1 = ckk_sh("check-ln-noderef", cmd, out, sizeof out);
+        ck(rc1 == 0 && sy_lstat(bad_link, &st) == 0 && st.kind == 'l',
+           "repro-ln-sf-twice-pollutes: ln -sf without -n creates inner self-link on second call");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/src2/cx' '%s/dst2' && ln -sfn '%s/src2/cx' '%s/dst2/cx' && ln -sfn '%s/src2/cx' '%s/dst2/cx'",
+            work, work, work, work, work, work)) return 2;
+        int rc2 = ckk_sh("check-ln-noderef", cmd, out, sizeof out);
+        ck(rc2 == 0 && sy_lstat(good_link, &st) == -ENOENT,
+           "fix-ln-sfn-twice-clean: ln -sfn never creates inner self-link on second call");
+    }
+
+    /* (2) tools/status.cx reports STRAY_SELF_LINK when cx/cx exists and does NOT auto-delete it */
+    {
+        char fake_root[CLN_PW], self_link[CLN_PW];
+        sy_stat_t st;
+        if (cx_fmt(fake_root, sizeof fake_root, "%s/status-root", work) ||
+            cx_fmt(self_link, sizeof self_link, "%s/cx/cx", fake_root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/cx' && ln -sfn '%s/cx' '%s/cx/cx'",
+            fake_root, fake_root, fake_root)) return 2;
+        if (ckk_sh("check-ln-noderef", cmd, out, sizeof out) != 0) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/status.cx' -- --section residue --root '%s'",
+            cwd, cwd, fake_root)) return 2;
+        int rc = ckk_sh("check-ln-noderef", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CLN_OUT, "STRAY_SELF_LINK") && sy_lstat(self_link, &st) == 0,
+           "status-detects-stray-self-link: reports STRAY_SELF_LINK without auto-deleting cx/cx");
+    }
+
+    /* (3) Full scan of tools/ and tests/ .cx files for unsafe directory-target ln -s/-sf */
+    int viol = cln_scan_dir("tools") + cln_scan_dir("tests");
+    ck(viol == 0, "repo-ln-noderef-clean: zero directory-target ln -s/-sf without -n/-T in tools/ and tests/");
+
+    { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+    printf("CHECK_LN_NODEREF\tok=%d\tfailed=%d\tviolations=%d\tms=%ld\n",
+           ck_assertions() - ck_failures(), ck_failures(), viol, sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
