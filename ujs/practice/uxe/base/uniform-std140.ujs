@@ -1,0 +1,72 @@
+struct UniformField {
+  kind: u32;
+  source: u32;
+}
+
+native function uniform_std140_align(kind:i64) i64 {
+  if(kind==1) { return 4; }
+  if(kind==2) { return 8; }
+  if(kind>=3 && kind<=6) { return 16; }
+  return 0;
+}
+
+native function uniform_std140_bytes(kind:i64) i64 {
+  if(kind<=4) { return kind*4; }
+  if(kind==5) { return 48; }
+  return 64;
+}
+
+native function uniform_std140_source(kind:i64) i64 {
+  if(kind<=4) { return kind*4; }
+  if(kind==5) { return 36; }
+  return 64;
+}
+
+// Fields contain f32 scalar, vec2, vec3, vec4, mat3 or mat4 inputs.
+// Matrices are contiguous column-major input. Padding bytes are zeroed.
+native function UniformsGroup_packStd140(fields:i64,count:i64,out:i64,capacity:i64) i64 {
+  if(count<0 || count>4096 || fields<0 || fields>6291456-count*UniformField.size ||
+     out<0 || out%16!=0 || capacity<0 || out>6291456-capacity) { return 0-1; }
+  let used=0;
+  let i=0;
+  while(i<count) {
+    let row=fields+i*UniformField.size;
+    let kind=ux_u32(row+UniformField.kind);
+    let align=uniform_std140_align(kind);
+    if(align==0) { return 0-1; }
+    used=(used+align-1)/align*align+uniform_std140_bytes(kind);
+    i=i+1;
+  }
+  let size=(used+15)/16*16;
+  if(size>capacity) { return 0-2; }
+  if(size>0 && out<fields+count*UniformField.size && fields<out+size) { return 0-1; }
+  i=0;
+  while(i<count) {
+    let row=fields+i*UniformField.size;
+    let kind=ux_u32(row+UniformField.kind);
+    let source=ux_u32(row+UniformField.source);
+    let bytes=uniform_std140_source(kind);
+    if(source>6291456-bytes || source%4!=0 || (out<source+bytes && source<out+size)) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<size) { let zero=ux_u32_put(out+i,0); i=i+4; }
+  let offset=0;
+  i=0;
+  while(i<count) {
+    let row=fields+i*UniformField.size;
+    let kind=ux_u32(row+UniformField.kind);
+    let source=ux_u32(row+UniformField.source);
+    let align=uniform_std140_align(kind);
+    offset=(offset+align-1)/align*align;
+    if(kind==5) {
+      let col=0;
+      while(col<3) { let copy=uxe_copy_record(out+offset+16*col,source+12*col,12); col=col+1; }
+    } else {
+      let copy=uxe_copy_record(out+offset,source,uniform_std140_source(kind));
+    }
+    offset=offset+uniform_std140_bytes(kind);
+    i=i+1;
+  }
+  return size;
+}
