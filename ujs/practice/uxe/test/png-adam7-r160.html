@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { ImageLoader, REVISION } from "../../web/game/three.module.js";
+if (REVISION !== "160") throw new Error("three.js revision mismatch");
+const be = x => [x >>> 24, x >>> 16 & 255, x >>> 8 & 255, x & 255];
+function chunk(id, data) {
+  const bytes = [...id].map(c => c.charCodeAt(0)).concat(data);
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return [...be(data.length), ...bytes, ...be(crc ^ 0xffffffff)];
+}
+function fixture(channels, size) {
+  const palette = channels === 1;
+  const passes = [[0,0,8,8],[4,0,8,8],[0,4,4,8],[2,0,4,4],[0,2,2,4],[1,0,2,2],[0,1,1,2]];
+  const raw = [];
+  for (const [left,top,dx,dy] of passes) {
+    if (left >= size || top >= size) continue;
+    let previous = [];
+    let line = 0;
+    for (let y = top; y < size; y += dy, line++) {
+      const row = [];
+      let col = 0;
+      for (let x = left; x < size; x += dx, col++) {
+        if (palette) row[col >> 2] = (row[col >> 2] ?? 0) | (((x + 2 * y) % 4) << (6 - 2 * (col % 4)));
+        else {
+          row.push(12*x, 15*y, 7*(x+y));
+          if (channels === 4) row.push(255);
+        }
+      }
+      const filter = line % 3;
+      raw.push(filter, ...row.map((value, n) => (value - (filter === 1 && n >= channels ? row[n - channels] : filter === 2 ? previous[n] : 0)) & 255));
+      previous = row;
+    }
+  }
+  let a = 1, b = 0;
+  for (const byte of raw) { a = (a + byte) % 65521; b = (b + a) % 65521; }
+  const [lo, hi] = [raw.length & 255, raw.length >>> 8];
+  const zlib = [120,1,1,lo,hi,255-lo,255-hi,...raw,...be((b << 16) | a)];
+  const metadata = palette
+    ? [...chunk("PLTE",[255,0,0,0,255,0,0,0,255,255,255,0]), ...chunk("tRNS",[255,127,0])]
+    : [];
+  return Uint8Array.from([
+    137,80,78,71,13,10,26,10,
+    ...chunk("IHDR",[...be(size),...be(size),palette ? 2 : 8,palette ? 3 : channels === 3 ? 2 : 6,0,0,1]),
+    ...metadata,...chunk("IDAT",zlib),...chunk("IEND",[]),
+  ]);
+}
+async function decoded(channels, size) {
+  const url = URL.createObjectURL(new Blob([fixture(channels, size)], { type: "image/png" }));
+  const image = await new ImageLoader().loadAsync(url);
+  URL.revokeObjectURL(url);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return context.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+const [a,b,c,d] = await Promise.all([decoded(4,9),decoded(3,9),decoded(1,9),decoded(4,1)]);
+document.querySelector("#r160").textContent = JSON.stringify([
+  a.length,a[320],a[321],a[37],a[4],a[16],a[145],a[8],a[73],b[323],c[7],c[39],-2,99,-4,d[3],
+]);
+</script>

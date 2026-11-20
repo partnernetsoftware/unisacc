@@ -54,11 +54,7 @@ native function png_palette_index(row:i64,x:i64,depth:i64) i64 {
   return u32_shr(ux_u8(row+bit/8),8-depth-bit%8)%u32_shl(1,depth);
 }
 
-native function png_palette_rows(raw:i64,row:i64,width:i64,height:i64,depth:i64,palette:i64,out:i64) i64 {
-  let colors=ux_u32(palette);
-  let count=ux_u32(palette+4);
-  let alpha=ux_u32(palette+8);
-  let alphas=ux_u32(palette+12);
+native function png_palette_check(raw:i64,row:i64,width:i64,height:i64,depth:i64,count:i64) i64 {
   let y=0;
   while(y<height) {
     let from=raw+y*(row+1)+1;
@@ -69,22 +65,78 @@ native function png_palette_rows(raw:i64,row:i64,width:i64,height:i64,depth:i64,
     }
     y=y+1;
   }
-  y=0;
+  return 0;
+}
+
+native function png_palette_pixel(dst:i64,index:i64,palette:i64) i64 {
+  let colors=ux_u32(palette);
+  let alpha=ux_u32(palette+8);
+  let rgb=uxe_copy_record(dst,colors+index*3,3);
+  let opacity=255;
+  if(index<ux_u32(palette+12)) { opacity=ux_u8(alpha+index); }
+  return ux_u8_put(dst+3,opacity);
+}
+
+native function png_palette_rows(raw:i64,row:i64,width:i64,height:i64,depth:i64,palette:i64,out:i64) i64 {
+  let valid=png_palette_check(raw,row,width,height,depth,ux_u32(palette+4));
+  if(valid<0) { return valid; }
+  let y=0;
   while(y<height) {
     let from=raw+y*(row+1)+1;
     let x=0;
     while(x<width) {
       let index=png_palette_index(from,x,depth);
       let dst=out+4*(y*width+x);
-      let rgb=uxe_copy_record(dst,colors+index*3,3);
-      let opacity=255;
-      if(index<alphas) { opacity=ux_u8(alpha+index); }
-      let saved=ux_u8_put(dst+3,opacity);
+      let saved=png_palette_pixel(dst,index,palette);
       x=x+1;
     }
     y=y+1;
   }
   return width*height*4;
+}
+
+native function png_adam_publish(raw:i64,plan:i64,out:i64,width:i64,depth:i64,channels:i64,palette:i64) i64 {
+  let i=0;
+  if(channels==1) {
+    while(i<7) {
+      let pass=plan+i*PngPass.size;
+      let valid=png_palette_check(raw+ux_u32(pass+PngPass.offset),ux_u32(pass+PngPass.stride),
+        ux_u32(pass+PngPass.columns),ux_u32(pass+PngPass.rows),depth,ux_u32(palette+4));
+      if(valid<0) { return valid; }
+      i=i+1;
+    }
+  }
+  i=0;
+  while(i<7) {
+    let pass=plan+i*PngPass.size;
+    let bytes=ux_u32(pass+PngPass.stride);
+    let rows=ux_u32(pass+PngPass.rows);
+    let cols=ux_u32(pass+PngPass.columns);
+    let first=raw+ux_u32(pass+PngPass.offset)+1;
+    let x0=ux_u32(pass+PngPass.x);
+    let y0=ux_u32(pass+PngPass.y);
+    let dx=ux_u32(pass+PngPass.dx);
+    let dy=ux_u32(pass+PngPass.dy);
+    let y=0;
+    while(y<rows) {
+      let from=first+y*(bytes+1);
+      let dst=out+4*((y0+y*dy)*width+x0);
+      let x=0;
+      while(x<cols) {
+        let to=dst+x*dx*4;
+        if(channels==1) {
+          let pixel=png_palette_pixel(to,png_palette_index(from,x,depth),palette);
+        } else {
+          let color=uxe_copy_record(to,from+x*channels,channels);
+          if(channels==3) { let alpha=ux_u8_put(to+3,255); }
+        }
+        x=x+1;
+      }
+      y=y+1;
+    }
+    i=i+1;
+  }
+  return 0;
 }
 
 native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,huffman:i64,workspace:i64) i64 {
@@ -141,7 +193,7 @@ native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,huffman:i64,works
   return output;
 }
 
-// Decode noninterlaced RGBA8, RGB8 or indexed PNG to RGBA8. Scratch is
+// Decode RGBA8, RGB8 or indexed PNG to RGBA8. Scratch is
 // exclusive and may change on error. The RGBA output is published last.
 native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,huffman:i64) i64 {
   if(src<0 || bytes<33 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
@@ -152,7 +204,8 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   let color=ux_u32(header+PngHeader.color);
   let depth=ux_u32(header+PngHeader.depth);
   let indexed=color==3 && huffman!=0;
-  if((!indexed && (depth!=8 || (color!=6 && (color!=2 || huffman==0)))) || ux_u32(header+PngHeader.interlace)!=0) { return 0-4; }
+  let interlace=ux_u32(header+PngHeader.interlace);
+  if((!indexed && (depth!=8 || (color!=6 && (color!=2 || huffman==0)))) || (interlace!=0 && huffman==0)) { return 0-4; }
   let channels=4;
   if(color==2) { channels=3; }
   if(indexed) { channels=1; }
@@ -162,9 +215,13 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   if(indexed) { row=(width*depth+7)/8; prefix=prefix+16; }
   let rgbaRow=width*4;
   let height=ux_u32(header+PngHeader.height);
-  if(space<prefix || height>cap/rgbaRow || height>(space-prefix)/(row+1)) { return 0-1; }
+  let plan=scratch+prefix;
+  if(interlace!=0) { prefix=prefix+7*PngPass.size; }
+  if(space<prefix || height>cap/rgbaRow) { return 0-1; }
   let raw=scratch+prefix;
   let size=height*(row+1);
+  if(interlace!=0) { size=png_adam_plan(plan,width,height,depth*channels); }
+  if(size>space-prefix) { return 0-1; }
   let compressed=raw+size;
   let palette=scratch+PngHeader.size;
   let packed=png_idat(src,bytes,compressed,space-prefix-size,color,depth,palette);
@@ -173,6 +230,13 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   if(workspace>scratch+space-3008) { workspace=0-1; }
   let made=png_inflate(compressed,packed,raw,size,huffman,workspace);
   if(made<0) { return made; }
+  if(interlace!=0) {
+    let restored=png_adam_restore(raw,plan,channels);
+    if(restored<0) { return restored; }
+    let published=png_adam_publish(raw,plan,out,width,depth,channels,palette);
+    if(published<0) { return published; }
+    return height*rgbaRow;
+  }
   let restored=PngScanlines_restore(raw,size,row,height,channels);
   if(restored<0) { return restored; }
   if(indexed) { return png_palette_rows(raw,row,width,height,depth,palette,out); }

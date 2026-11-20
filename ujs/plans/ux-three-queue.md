@@ -199,7 +199,7 @@
 - ~~JPEG 彩色基线编码 | G-io 尺寸、边缘块、色差、质量参数和失败保持输出 | JPEG 彩色与 DCT。~~ 12 项通过，替换源像素反例转红。
 - ~~ImageUtils JPEG 与 PNG 数据 URI 分派 | G-io Canvas 大图分支、两类 URI 浏览器解码及容量拒绝 | JPEG 编码与 ImageUtils PNG。~~ 10 项通过，2049 改为 2048 的反例转红，Chrome 直接解码 Wasm 生成的 URI。
 - ~~PNG 调色板与索引透明度 | G-io 四种位深、过滤行、半透明、越界与坏块顺序 | PNG 解码和扫描行。~~ 12 项通过，半透明替换反例由 127 变为 0。
-- PNG Adam7 隔行 | G-io 七遍位置、过滤复位、空遍、RGB/RGBA 与调色板 | PNG 解码和调色板。
+- ~~PNG Adam7 隔行 | G-io 七遍位置、过滤复位、空遍、RGB/RGBA 与调色板 | PNG 解码和调色板。~~ 16 项通过，行位置替换反例由 15 变为 30。
 - PNG 灰度、透明色键与 16 位 | G-io 灰度及灰度 alpha、精度、非索引 tRNS 与坏文件 | PNG 解码和扫描行。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。
 - AnimationLoader 多片段与多轨道 | G-io r160 JSON 的类型、插值、错误与回收 | M8 轨道和片段。

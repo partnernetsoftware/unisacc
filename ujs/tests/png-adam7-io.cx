@@ -1,0 +1,113 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *at,unsigned value) {
+    at[0]=value>>24; at[1]=value>>16; at[2]=value>>8; at[3]=value;
+}
+
+static int chunk(unsigned char *dst,unsigned kind,const unsigned char *body,int length) {
+    be(dst,length);be(dst+4,kind);
+    for(int i=0;i<length;i++) dst[8+i]=body[i];
+    be(dst+8+length,dz_crc32(0,dst+4,4+length));
+    return 12+length;
+}
+
+static int fixture(unsigned char *dst,int channels,int side,int broken) {
+    const unsigned char magic[]={137,80,78,71,13,10,26,10};
+    const unsigned char header[]={0,0,0,side,0,0,0,side,channels==1?2:8,channels==1?3:channels==3?2:6,0,0,1};
+    for(int i=0;i<8;i++) dst[i]=magic[i];
+    int size=8+chunk(dst+8,0x49484452,header,sizeof header);
+    if(channels==1) {
+        const unsigned char colors[]={255,0,0,0,255,0,0,0,255,255,255,0};
+        const unsigned char alpha[]={255,127,0};
+        size+=chunk(dst+size,0x504c5445,colors,sizeof colors);
+        size+=chunk(dst+size,0x74524e53,alpha,sizeof alpha);
+    }
+    const int passes[][4]={{0,0,8,8},{4,0,8,8},{0,4,4,8},{2,0,4,4},{0,2,2,4},{1,0,2,2},{0,1,1,2}};
+    unsigned char raw[440]={0},zlib[452];
+    int bytes=0;
+    for(int p=0;p<7;p++) {
+        const int *pass=passes[p];
+        if(pass[0]>=side || pass[1]>=side) continue;
+        unsigned char previous[36]={0};
+        int line=0;
+        for(int y=pass[1];y<side;y+=pass[3]) {
+            unsigned char current[36]={0};
+            int columns=0;
+            for(int x=pass[0];x<side;x+=pass[2]) {
+                if(channels==1) current[columns/4]|=((x+2*y)%4)<<(6-2*(columns%4));
+                else {
+                    current[columns*channels]=12*x;
+                    current[columns*channels+1]=15*y;
+                    current[columns*channels+2]=7*(x+y);
+                    if(channels==4) current[columns*channels+3]=255;
+                }
+                columns++;
+            }
+            const int row=channels==1?(columns+3)/4:columns*channels;
+            const int filter=line%3;
+            raw[bytes++]=broken && p==6 && line==0?5:filter;
+            for(int i=0;i<row;i++) {
+                const int predict=filter==1 && i>=channels?current[i-channels]:filter==2?previous[i]:0;
+                raw[bytes++]=current[i]-predict;
+            }
+            for(int i=0;i<row;i++) previous[i]=current[i];
+            line++;
+        }
+    }
+    zlib[0]=120;zlib[1]=1;zlib[2]=1;
+    zlib[3]=bytes;zlib[4]=bytes>>8;zlib[5]=255-zlib[3];zlib[6]=255-zlib[4];
+    unsigned a=1,b=0;
+    for(int i=0;i<bytes;i++){zlib[7+i]=raw[i];a=(a+raw[i])%65521;b=(b+a)%65521;}
+    be(zlib+7+bytes,(b<<16)+a);
+    size+=chunk(dst+size,0x49444154,zlib,11+bytes);
+    size+=chunk(dst+size,0x49454e44,0,0);
+    return size;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored",0};
+    unsigned char image[600];
+    char setup[14000];
+    int used=0;
+    for(int i=0;i<5;i++) {
+        const int channels=i==1?3:i==2?1:4;
+        const int count=fixture(image,channels,i==4?1:9,i==3);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;",i,count);
+        for(int from=0;from<count;from+=60) {
+            const int take=count-from<60?count-from:60;
+            used+=tx_snprintf(setup+used,sizeof setup-used,"if(1){let bytes=[");
+            for(int j=0;j<take;j++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",j?",":"",image[from+j]);
+            used+=tx_snprintf(setup+used,sizeof setup-used,"];let p=0;while(p<%d){let v=ux_u8_put(%d+p,bytes[p]);p=p+1;}}",
+                take,128+i*640+from);
+        }
+    }
+    #define RGBA "let n=PngDecode_rgba8(128,n0,4096,324,8192,4096);"
+    #define RGB "let n=PngDecode_rgba8(768,n1,4096,324,8192,4096);"
+    #define PLTE "let n=PngDecode_rgba8(1408,n2,4096,324,8192,4096);"
+    const char *cases[]={
+        RGBA "return 0.0+n;",
+        RGBA "return 0.0+ux_u8(4096+320);",
+        RGBA "return 0.0+ux_u8(4096+321);",
+        RGBA "return 0.0+ux_u8(4096+37);",
+        RGBA "return 0.0+ux_u8(4096+4);",
+        RGBA "return 0.0+ux_u8(4096+16);",
+        RGBA "return 0.0+ux_u8(4096+145);",
+        RGBA "return 0.0+ux_u8(4096+8);",
+        RGBA "return 0.0+ux_u8(4096+73);",
+        RGB "return 0.0+ux_u8(4096+323);",
+        PLTE "return 0.0+ux_u8(4096+7);",
+        PLTE "return 0.0+ux_u8(4096+39);",
+        "return 0.0+PngDecode_rgba8(2048,n3,4096,324,8192,4096);",
+        "let guard=ux_u8_put(4096,99);let n=PngDecode_rgba8(2048,n3,4096,324,8192,4096);return 0.0+ux_u8(4096);",
+        "return 0.0+PngDecode_stored(128,n0,4096,324,8192,4096);",
+        "let n=PngDecode_rgba8(2688,n4,4096,4,8192,4096);return 0.0+ux_u8(4099);"
+    };
+    const double gold[]={324,96,120,15,12,48,60,24,30,255,127,0,-2,99,-4,255};
+    return g_wasm_batch("G_IO PngAdam7","png-adam7",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?3:-1,RGBA "return 0.0+ux_u8(4096+73);");
+}
