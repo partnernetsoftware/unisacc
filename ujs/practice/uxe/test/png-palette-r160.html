@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { ImageLoader, REVISION } from "../../web/game/three.module.js";
+if (REVISION !== "160") throw new Error("three.js revision mismatch");
+const be = x => [x >>> 24, x >>> 16 & 255, x >>> 8 & 255, x & 255];
+function chunk(id, data) {
+  const bytes = [...id].map(c => c.charCodeAt(0)).concat(data);
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return [...be(data.length), ...bytes, ...be(crc ^ 0xffffffff)];
+}
+function fixture(depth) {
+  const row = Math.ceil(5 * depth / 8);
+  const raw = [];
+  const rows = [[0,1,2,3,0],[3,2,1,0,3]];
+  for (const [y, pixels] of rows.entries()) {
+    const data = new Uint8Array(row);
+    for (const [x, code] of pixels.entries()) {
+      const bit = x * depth;
+      data[bit >>> 3] |= (code & ((1 << depth) - 1)) << (8 - depth - (bit & 7));
+    }
+    raw.push(y, ...data.map((value, x) => value - (y && x ? data[x - 1] : 0)));
+  }
+  let a = 1, b = 0;
+  for (const byte of raw) { a += byte; b += a; }
+  const zlib = [120,1,1,raw.length,0,255-raw.length,255,...raw,...be((b << 16) | a)];
+  const colors = [255,0,0,0,255,0,0,0,255,255,255,0];
+  const alpha = [255,127,0];
+  return Uint8Array.from([
+    137,80,78,71,13,10,26,10,
+    ...chunk("IHDR",[...be(5),...be(2),depth,3,0,0,0]),
+    ...chunk("PLTE", depth === 1 ? colors.slice(0, 6) : colors),
+    ...chunk("tRNS", depth === 1 ? alpha.slice(0, 2) : alpha),
+    ...chunk("IDAT",zlib),...chunk("IEND",[]),
+  ]);
+}
+async function decoded(depth) {
+  const url = URL.createObjectURL(new Blob([fixture(depth)], { type: "image/png" }));
+  const image = await new ImageLoader().loadAsync(url);
+  URL.revokeObjectURL(url);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return context.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+const [a,b,c,d] = await Promise.all([2,1,4,8].map(decoded));
+document.querySelector("#r160").textContent = JSON.stringify([a.length,a[5],a[7],a[11],a[21],b[7],c[21],d[11],-1,-5,-5,-5]);
+</script>
