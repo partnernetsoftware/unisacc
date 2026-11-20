@@ -1,0 +1,48 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"geometry-load-layout","object-json-tokens","json-read","loader-json",
+        "geometry-json-load","geometry-json-morph",0};
+    const char json[]="{\"type\":\"BufferGeometry\",\"data\":{\"attributes\":{},\"morphAttributes\":{\"position\":["
+        "{\"itemSize\":3,\"type\":\"Float32Array\",\"array\":[1,2,3,4,5,6],\"normalized\":false},"
+        "{\"itemSize\":3,\"type\":\"Float32Array\",\"array\":[7,8,9,10,11,12],\"normalized\":false}]},"
+        "\"morphTargetsRelative\":true}}";
+    const int size=sizeof json-1;
+    const long second=tx_find(json,size,"[7,8,9,10,11,12]",16);
+    if(second<0) return 2;
+    char setup[4000];
+    int n=tx_snprintf(setup,sizeof setup,
+        "let input=256;let end=input+%d;let opt=64;let out=128;let key=192;let second=input+%ld;"
+        "let a=ux_u32_put(opt+GeometryJsonLoad.arena,4096);let b=ux_u32_put(opt+GeometryJsonLoad.arenaEnd,8192);"
+        "let c=ux_u32_put(opt+GeometryJsonLoad.scratch,1024);"
+        "let a=ux_u32_put(key,1769172848);let b=ux_u32_put(key+4,1852795252);",size,second);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let bytes=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,bytes[i]);i=i+1;}}",count,at);
+    }
+    #define READ "let status=BufferGeometry_loadMorphJSON(input,end,out,opt,key,8);"
+    #define FIRST "let rows=ux_u32(out+GeometryMorphResult.rows);let attr=ux_u32(rows);"
+    #define SECOND "let rows=ux_u32(out+GeometryMorphResult.rows);let attr=ux_u32(rows+8);"
+    const char *cases[]={
+        READ "return 0.0+ux_u32(out+GeometryMorphResult.count);",
+        READ "return 0.0+ux_u32(out+GeometryMorphResult.relative);",
+        READ FIRST "return 0.0+ux_u32(attr+BufferAttribute.count);",
+        READ FIRST "return ux_f32(ux_u32(attr+BufferAttribute.data)+20);",
+        READ SECOND "return ux_f32(ux_u32(attr+BufferAttribute.data)+8);",
+        "let unknown=ux_u8_put(key,122);" READ "return 0.0+ux_u32(out+GeometryMorphResult.count);",
+        "let limit=ux_u32_put(opt+GeometryJsonLoad.arenaEnd,4104);" READ "return 0.0+status;",
+        "let bad=ux_u8_put(second,123);let keep=ux_u32_put(out+GeometryMorphResult.count,77);"
+        READ "return 0.0+ux_u32(out+GeometryMorphResult.count);",
+        "let alias=ux_u32_put(opt+GeometryJsonLoad.scratch,input);" READ "return 0.0+status;",
+    };
+    const double gold[]={2,1,2,6,9,0,-3,77,-1};
+    return g_wasm_batch("G_IO BufferGeometry morph lists","buffergeometry-morph",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?4:-1,READ SECOND "return ux_f32(ux_u32(attr+BufferAttribute.data)+4);");
+}

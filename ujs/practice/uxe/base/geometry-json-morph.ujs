@@ -1,0 +1,98 @@
+struct GeometryMorphResult {
+  rows: u32;
+  count: u32;
+  relative: u32;
+}
+
+native function geometry_morph_array_count(array:i64,end:i64) i64 {
+  if(array<0 || ux_u8(array)!=91) { return 0-1; }
+  let at=json_space(array+1,end);
+  let count=0;
+  while(at>=0 && at<end) {
+    if(ux_u8(at)==93) { return count; }
+    if(count==1024 || ux_u8(at)!=123) { return 0-1; }
+    count=count+1;
+    at=json_space(json_value_end(at,end),end);
+    if(at<0 || at>=end) { return 0-1; }
+    if(ux_u8(at)==93) { return count; }
+    if(ux_u8(at)!=44) { return 0-1; }
+    at=json_space(at+1,end);
+  }
+  return 0-1;
+}
+
+// Read the geometry JSON morph target list for one semantic into an owned
+// arena. The output pairs are BufferAttribute address and numeric name ID.
+// Zero uses Mesh's numeric fallback when a target has no interned name.
+native function BufferGeometry_loadMorphJSON(input:i64,end:i64,out:i64,options:i64,semantic:i64,semantic_bytes:i64) i64 {
+  if(input<0 || end<=input || end>6291456 || out<0 || out%4!=0 || out>6291456-GeometryMorphResult.size ||
+     options<0 || options%4!=0 || options>6291456-GeometryJsonLoad.size ||
+     semantic<0 || semantic_bytes<1 || semantic_bytes>64 || semantic>6291456-semantic_bytes) { return 0-1; }
+  let arena=ux_u32(options+GeometryJsonLoad.arena);
+  let limit=ux_u32(options+GeometryJsonLoad.arenaEnd);
+  let scratch=ux_u32(options+GeometryJsonLoad.scratch);
+  if(arena%8!=0 || arena>limit || limit>6291456 || scratch>6291456-120 ||
+     geometry_json_overlap(arena,limit-arena,scratch,120) ||
+     geometry_json_overlap(out,GeometryMorphResult.size,arena,limit-arena) ||
+     geometry_json_overlap(out,GeometryMorphResult.size,scratch,120) ||
+     geometry_json_overlap(out,GeometryMorphResult.size,input,end-input) ||
+     geometry_json_overlap(out,GeometryMorphResult.size,semantic,semantic_bytes) ||
+     geometry_json_overlap(out,GeometryMorphResult.size,options,GeometryJsonLoad.size) ||
+     geometry_json_overlap(arena,limit-arena,input,end-input) ||
+     geometry_json_overlap(arena,limit-arena,semantic,semantic_bytes) ||
+     geometry_json_overlap(arena,limit-arena,options,GeometryJsonLoad.size) ||
+     geometry_json_overlap(scratch,120,input,end-input) ||
+     geometry_json_overlap(scratch,120,semantic,semantic_bytes) ||
+     geometry_json_overlap(scratch,120,options,GeometryJsonLoad.size)) { return 0-1; }
+  let stop=json_value_end(input,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let data=geometry_json_field(input,end,scratch,ObjectJsonToken.data,2,4);
+  if(data<0 || ux_u8(data)!=123) { return 0-1; }
+  let tail=ux_u32_put(scratch+12,7562612);
+  let morph=LoaderJson_find(data,end,scratch,1886547821,1953775976,1969383794,15);
+  if(morph<0 && morph!=0-2) { return 0-1; }
+  let relative=0;
+  let count=0;
+  let cursor=arena;
+  if(morph>=0) {
+    let part=ux_u32_put(scratch+12,1634493778);
+    let rest=ux_u32_put(scratch+16,1702259060);
+    let flag=LoaderJson_find(data,end,scratch,1886547821,1918981224,1937007975,20);
+    if(flag>=0) {
+      if(ux_u8(flag)!=102 && ux_u8(flag)!=116) { return 0-1; }
+      relative=ux_u8(flag)==116;
+    }
+    let array=json_find_key(morph,end,semantic,semantic_bytes);
+    if(array!=0-2) {
+      count=geometry_morph_array_count(array,end);
+      if(count<0) { return 0-1; }
+      if(count>(limit-arena)/8) { return 0-3; }
+      cursor=arena+count*8;
+      let at=json_space(array+1,end);
+      let head=0;
+      let i=0;
+      while(i<count) {
+        let marker=geometry_json_interleaved_key(at,end,scratch,1);
+        let next=0;
+        if(marker>=0 && ux_u8(marker)==116) {
+          next=geometry_json_interleaved(at,data,end,scratch,cursor,limit,head);
+          head=cursor+1;
+        } else {
+          if(marker>=0 && ux_u8(marker)!=102) { return 0-1; }
+          next=geometry_json_load_view(at,end,scratch,cursor,limit,0);
+        }
+        if(next<0) { return next; }
+        let pointer=ux_u32_put(arena+i*8,cursor);
+        let name=ux_u32_put(arena+i*8+4,0);
+        cursor=next;
+        at=json_space(json_value_end(at,end),end);
+        i=i+1;
+        if(i<count) { at=json_space(at+1,end); }
+      }
+    }
+  }
+  let a=ux_u32_put(out+GeometryMorphResult.rows,arena);
+  let b=ux_u32_put(out+GeometryMorphResult.count,count);
+  let c=ux_u32_put(out+GeometryMorphResult.relative,relative);
+  return cursor;
+}

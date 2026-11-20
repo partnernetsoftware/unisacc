@@ -206,7 +206,8 @@
 - ~~AnimationLoader 多片段与数值轨道 | G-io r160 JSON 的数值、向量、颜色、四元数、帧率、插值与失败保留 | M8 轨道和片段。~~ 14 项通过，替换关键帧时间反例转红，旧七项通过。
 - ~~AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。~~ 14 项通过，读取错位的字符串字节由 10 变为 65，反例转红；数值片段 14 项及 UTF-8 九项通过。
 - ~~BufferGeometryLoader 通用 JSON 和交错共享缓冲 | G-io 索引、组、类型化、交错视图、同底层字节及错误 | BufferGeometry、BufferAttribute。~~ 交错与 JSON 各十项通过，独立加载十一项通过，偏移篡改转红。
-- BufferGeometryLoader 变形属性与相对目标 | G-io morphAttributes 多目标、相对标记、越界和失败保留 | 通用几何 JSON、变形属性记录。
+- ~~BufferGeometryLoader 变形属性与相对目标 | G-io morphAttributes 多目标、相对标记、越界和失败保留 | 通用几何 JSON、变形属性记录。~~ 九项通过，错分量由 9 变为 8，交错旧门十项通过。名称和实例元数据留在清单部分项。
+- BLOCKED BufferGeometry JSON 综合门复验 | G-struct 保留现有十项读回、拒绝与往返 | 通用几何 JSON。最后一次绿见 `/tmp/devsvc-flow-21639295782-3081993/out/x.out`，后续原版与提取公共调用的版本均遇六秒编译超时，证据 `/tmp/devsvc-flow-21641404134-3393208/out/x.out` 与 `/tmp/devsvc-flow-21641490635-3402938/out/x.out`。原门与时限保持。
 - ~~MaterialLoader 基础与标准材质纹理表 | G-io 四类贴图 UUID、共享纹理和坏类型 | M5 材质和纹理。~~ 11 项通过，透明贴图错绑反例转红，原八项通过。
 - MaterialLoader 余下材质与属性 | G-io 材质构造、类型专属参数及其余贴图 | 材质与纹理表。
 - ~~ObjectLoader 嵌套 Scene 与 Group | G-io 多层树、同级顺序、世界变换及失败清空草稿 | Scene、Object3D。~~ 10 项通过，子节点世界 X 从 7 篡改为 8 转红，旧六项通过。
