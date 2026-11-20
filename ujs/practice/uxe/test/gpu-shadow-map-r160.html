@@ -4,7 +4,7 @@
 <script type="module">
 import {
   BasicShadowMap, BoxGeometry, DirectionalLight, Mesh, MeshBasicMaterial, OrthographicCamera,
-  PCFShadowMap, PCFSoftShadowMap, PlaneGeometry, Scene, ShadowMaterial, WebGLRenderer,
+  PCFShadowMap, PCFSoftShadowMap, PlaneGeometry, Scene, ShadowMaterial, VSMShadowMap, WebGLRenderer,
 } from "./three.module.js";
 import { createGpuSubmit } from "./gpu-host-abi.js";
 import { createGpuTargets } from "./gpu-target-abi.js";
@@ -33,14 +33,15 @@ try {
   ({ instance: { exports } } = await WebAssembly.instantiate(bytes, { uxe_gpu_v1: { host_gpu_submit: submit } }));
   const pcf = location.search.startsWith("?shadow-pcf");
   const soft = location.search.startsWith("?shadow-pcf-soft");
-  const mode = (soft ? 4 : pcf ? 2 : 0) + (location.search.endsWith("-mutate") ? 1 : 0);
+  const vsm = location.search.startsWith("?shadow-vsm");
+  const mode = (vsm ? 6 : soft ? 4 : pcf ? 2 : 0) + (location.search.endsWith("-mutate") ? 1 : 0);
   const status = Number(exports.uxe_gpu_probe(BigInt(mode)));
   const reference = context();
   const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl, ...options });
   renderer.setSize(16,16,false);
   renderer.setClearColor(0,0);
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = soft ? PCFSoftShadowMap : pcf ? PCFShadowMap : BasicShadowMap;
+  renderer.shadowMap.type = vsm ? VSMShadowMap : soft ? PCFSoftShadowMap : pcf ? PCFShadowMap : BasicShadowMap;
   const receiver = new Mesh(new PlaneGeometry(2,2),new ShadowMaterial({ opacity: 0.5 }));
   receiver.receiveShadow = true;
   const blocker = new Mesh(new BoxGeometry(0.4,0.4,0.2),new MeshBasicMaterial({ colorWrite:false,depthWrite:false }));
@@ -51,6 +52,11 @@ try {
   light.position.y = 0;
   light.castShadow = true;
   light.shadow.radius = 2;
+  if (vsm) {
+    light.shadow.radius = 1;
+    light.shadow.blurSamples = 3;
+    light.shadow.bias = -0.005;
+  }
   light.shadow.mapSize.set(16,16);
   const shadow = light.shadow.camera;
   shadow.left = shadow.bottom = -1;
