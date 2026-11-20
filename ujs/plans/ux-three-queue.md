@@ -202,7 +202,7 @@
 - ~~PNG Adam7 隔行 | G-io 七遍位置、过滤复位、空遍、RGB/RGBA 与调色板 | PNG 解码和调色板。~~ 16 项通过，行位置替换反例由 15 变为 30。
 - ~~PNG 灰度、透明色键与 16 位 | G-io 灰度及灰度 alpha、精度、非索引 tRNS 与坏文件 | PNG 解码和扫描行。~~ 15 项通过，比较但截掉低字节的反例由不透明变为透明，ImageLoader 七项通过。
 - ~~AudioLoader WAV 多格式解码 | G-io PCM8/16/24/32、IEEE float32、双声道、非有限值与越界 | FileLoader、LoadingManager。~~ 14 项通过，换声道反例转红，旧 PCM16 七项通过。浏览器拒绝 IEEE float64，保持同样拒绝。
-- AudioLoader 异步加载调度 | G-io 并发、过期响应、出错与回收 | FileLoader、LoadingManager 与 WAV 解码。
+- ~~AudioLoader 异步加载调度 | G-io 并发、过期响应、出错与回收 | FileLoader、LoadingManager 与 WAV 解码。~~ 15 项通过，漏报解码错误反例转红，FileLoader 七项与 LoadingManager 八项通过。
 - ~~AnimationLoader 多片段与数值轨道 | G-io r160 JSON 的数值、向量、颜色、四元数、帧率、插值与失败保留 | M8 轨道和片段。~~ 14 项通过，替换关键帧时间反例转红，旧七项通过。
 - AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。
 - BufferGeometryLoader 通用 JSON | G-io 索引、组、类型化、交错、变形属性与错误 | BufferGeometry、BufferAttribute。

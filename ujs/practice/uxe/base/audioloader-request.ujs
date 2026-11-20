@@ -1,0 +1,60 @@
+struct AudioLoadResult {
+  clip: u32;
+  pcm: u32;
+  capacity: u32;
+  events: u32;
+  status: i32;
+}
+
+native function audio_load_outputs(result:i64,file:i64,manager:i64,events:i64,bytes:i64,length:i64) i64 {
+  let clip=ux_u32(result+AudioLoadResult.clip);
+  let pcm=ux_u32(result+AudioLoadResult.pcm);
+  let capacity=ux_u32(result+AudioLoadResult.capacity);
+  let eventBytes=4*LoadingEvent.size;
+  if(!loading_span(clip,AudioResource.size) || !loading_span(pcm,capacity) ||
+     !file_disjoint(clip,AudioResource.size,pcm,capacity) ||
+     !file_disjoint(result,AudioLoadResult.size,clip,AudioResource.size) || !file_disjoint(result,AudioLoadResult.size,pcm,capacity) ||
+     !file_disjoint(events,eventBytes,clip,AudioResource.size) || !file_disjoint(events,eventBytes,pcm,capacity) ||
+     !file_disjoint(file,FileLoader.size,clip,AudioResource.size) || !file_disjoint(file,FileLoader.size,pcm,capacity) ||
+     !file_disjoint(manager,LoadingManager.size,clip,AudioResource.size) || !file_disjoint(manager,LoadingManager.size,pcm,capacity) ||
+     !file_disjoint(bytes,length,clip,AudioResource.size) || !file_disjoint(bytes,length,pcm,capacity)) { return 0; }
+  return 1;
+}
+
+// A response completes the transport before decode. Decode failure appends an
+// error event and releases the FileLoader borrow without publishing a clip.
+native function AudioLoader_receive(file:i64,id:i64,http:i64,bytes:i64,length:i64,events:i64,result:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || !loading_span(result,AudioLoadResult.size) ||
+     !loading_span(events,4*LoadingEvent.size) || ux_u32(file+FileLoader.state)!=1 || ux_u32(file+FileLoader.generation)!=id) { return 0-1; }
+  let manager=ux_u32(file+FileLoader.manager);
+  if(!loading_span(manager,LoadingManager.size) ||
+     !file_disjoint(result,AudioLoadResult.size,file,FileLoader.size) ||
+     !file_disjoint(result,AudioLoadResult.size,events,4*LoadingEvent.size) ||
+     !file_disjoint(result,AudioLoadResult.size,manager,LoadingManager.size) ||
+     !file_disjoint(file,FileLoader.size,events,4*LoadingEvent.size) ||
+     !file_disjoint(events,4*LoadingEvent.size,manager,LoadingManager.size)) { return 0-1; }
+  let valid=http==0 || http==200;
+  if(valid) {
+    if(bytes<0 || length<0 || bytes>6291456-length ||
+       !file_disjoint(bytes,length,result,AudioLoadResult.size) || !file_disjoint(bytes,length,events,4*LoadingEvent.size) ||
+       !audio_load_outputs(result,file,manager,events,bytes,length)) { return 0-1; }
+  }
+  let count=FileLoader_receive(file,id,http,bytes,length,events);
+  if(count<0) { return count; }
+  let status=0-4;
+  if(valid) {
+    let decoded=AudioLoader_decodeWav(file,ux_u32(result+AudioLoadResult.clip),
+      ux_u32(result+AudioLoadResult.pcm),ux_u32(result+AudioLoadResult.capacity));
+    let released=FileLoader_release(file,id);
+    status=0;
+    if(decoded<0) {
+      status=decoded;
+      let extra=LoadingManager_item(manager,3,id,events+count*LoadingEvent.size);
+      if(extra<0) { return extra; }
+      count=count+extra;
+    }
+  }
+  let ready=ux_u32_put(result+AudioLoadResult.events,count);
+  let saved=ux_i32_put(result+AudioLoadResult.status,status);
+  return count;
+}
