@@ -1,0 +1,96 @@
+struct BatchedMesh {
+  rows: u32;
+  capacity: u32;
+  count: u32;
+  vertexLimit: u32;
+  indexLimit: u32;
+  vertexUsed: u32;
+  indexUsed: u32;
+  indexed: u32;
+}
+
+struct BatchGeometry {
+  geometry: u32;
+  vertexStart: u32;
+  vertexCount: u32;
+  indexStart: u32;
+  indexCount: u32;
+  active: u32;
+  visible: u32;
+}
+
+native function batch_valid(batch:i64) i64 {
+  return batch>=0 && batch<=6291456-BatchedMesh.size && batch%4==0;
+}
+
+native function BatchedMesh_init(batch:i64,rows:i64,capacity:i64,vertices:i64,indices:i64) i64 {
+  if(!batch_valid(batch) || rows<0 || rows>6291456 || rows%4!=0 ||
+     capacity<0 || capacity>(6291456-rows)/BatchGeometry.size ||
+     vertices<0 || vertices>4294967295 || indices<0 || indices>4294967295 ||
+     (capacity>0 && batch<rows+capacity*BatchGeometry.size && rows<batch+BatchedMesh.size)) { return 0-1; }
+  let a=ux_u32_put(batch+BatchedMesh.rows,rows);
+  let b=ux_u32_put(batch+BatchedMesh.capacity,capacity);
+  let c=ux_u32_put(batch+BatchedMesh.count,0);
+  let d=ux_u32_put(batch+BatchedMesh.vertexLimit,vertices);
+  let e=ux_u32_put(batch+BatchedMesh.indexLimit,indices);
+  let f=ux_u32_put(batch+BatchedMesh.vertexUsed,0);
+  let g=ux_u32_put(batch+BatchedMesh.indexUsed,0);
+  let h=ux_u32_put(batch+BatchedMesh.indexed,0);
+  return batch;
+}
+
+// r160 geometry IDs are append-only. Deleted entries continue to occupy their
+// reservation until compaction, and can never point to another source.
+native function BatchedMesh_addGeometry(batch:i64,geometry:i64,vertices:i64,indices:i64) i64 {
+  if(!batch_valid(batch) || geometry<0 || geometry>4294967295 ||
+    vertices<1 || indices<0-1) { return 0-1; }
+  let count=ux_u32(batch+BatchedMesh.count);
+  let indexed=indices>=0;
+  if(count>0 && indexed!=ux_u32(batch+BatchedMesh.indexed)) { return 0-1; }
+  let v=ux_u32(batch+BatchedMesh.vertexUsed);
+  let ix=ux_u32(batch+BatchedMesh.indexUsed);
+  if(count>=ux_u32(batch+BatchedMesh.capacity) ||
+     vertices>ux_u32(batch+BatchedMesh.vertexLimit)-v ||
+     indices>ux_u32(batch+BatchedMesh.indexLimit)-ix) { return 0-2; }
+  let row=ux_u32(batch+BatchedMesh.rows)+count*BatchGeometry.size;
+  let ix_start=4294967295;
+  let ix_size=4294967295;
+  if(indexed) { ix_start=ix; ix_size=indices; ix=ix+indices; }
+  let a=ux_u32_put(row+BatchGeometry.geometry,geometry);
+  let b=ux_u32_put(row+BatchGeometry.vertexStart,v);
+  let c=ux_u32_put(row+BatchGeometry.vertexCount,vertices);
+  let d=ux_u32_put(row+BatchGeometry.indexStart,ix_start);
+  let e=ux_u32_put(row+BatchGeometry.indexCount,ix_size);
+  let f=ux_u32_put(row+BatchGeometry.active,1);
+  let g=ux_u32_put(row+BatchGeometry.visible,1);
+  let h=ux_u32_put(batch+BatchedMesh.vertexUsed,v+vertices);
+  let i=ux_u32_put(batch+BatchedMesh.indexUsed,ix);
+  let j=ux_u32_put(batch+BatchedMesh.indexed,indexed);
+  let n=ux_u32_put(batch+BatchedMesh.count,count+1);
+  return count;
+}
+
+native function BatchedMesh_getRange(batch:i64,id:i64) i64 {
+  if(!batch_valid(batch) || id<0 || id>=ux_u32(batch+BatchedMesh.count)) { return 0-1; }
+  let row=ux_u32(batch+BatchedMesh.rows)+id*BatchGeometry.size;
+  if(ux_u32(row+BatchGeometry.active)==0) { return 0-1; }
+  return row;
+}
+
+native function BatchedMesh_getVisibleAt(batch:i64,id:i64) i64 {
+  let row=BatchedMesh_getRange(batch,id);
+  if(row<0) { return 0; }
+  return ux_u32(row+BatchGeometry.visible);
+}
+
+native function BatchedMesh_setVisibleAt(batch:i64,id:i64,visible:i64) i64 {
+  let row=BatchedMesh_getRange(batch,id);
+  if(row>=0) { let written=ux_u32_put(row+BatchGeometry.visible,visible!=0); }
+  return batch;
+}
+
+native function BatchedMesh_deleteGeometry(batch:i64,id:i64) i64 {
+  let row=BatchedMesh_getRange(batch,id);
+  if(row>=0) { let inactive=ux_u32_put(row+BatchGeometry.active,0); }
+  return batch;
+}
