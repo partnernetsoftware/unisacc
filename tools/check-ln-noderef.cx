@@ -3,7 +3,10 @@
  * Also verifies:
  *   (1) minimal two-call repro: `ln -sf` twice creates src/cx, whereas `ln -sfn` twice never does;
  *   (2) tools/status.cx --section residue reports STRAY_SELF_LINK when cx/cx exists without auto-deleting it;
- *   (3) full scan of tools/ and tests/ .cx files has 0 directory-target ln -s/-sf calls missing -n/-T.
+ *   (3) full scan of tools/ and tests/ .cx files has 0 directory-target ln -s/-sf calls missing -n/-T;
+ *   (4) every ln -s (with -n too) into a directory name in tools/ (.cx and #! scripts) has a real-directory
+ *       preflight within 8 lines ([ -d / [ ! -d / [ -e / [ -L / kind == 'd'), unless it is a check-* tool with
+ *       mkdtemp/mktemp fixtures; prints LN_DEST_UNGUARDED per hit (-n is no help when DEST is a real directory).
  * Ends: CHECK_LN_NODEREF<TAB>ok=N<TAB>failed=M<TAB>violations=V<TAB>ms=T. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -21,7 +24,7 @@ static int cln_is_dir_target(const char *s, size_t n) {
     static const char *dirs[] = {
         "cx", "ext", "tools", "cxlib", "include", "tests", "exec", "build", "src", "cases", 0
     };
-    while (n > 0 && (s[n - 1] == '\'' || s[n - 1] == '"' || s[n - 1] == ';' || s[n - 1] == ')')) n--;
+    while (n > 0 && (s[n - 1] == '\'' || s[n - 1] == '"' || s[n - 1] == ';' || s[n - 1] == ')' || s[n - 1] == '\\')) n--;
     size_t start = n;
     while (start > 0 && s[start - 1] != '/' && s[start - 1] != '\'' && s[start - 1] != '"') start--;
     size_t bl = n - start;
@@ -76,6 +79,88 @@ static int cln_scan_file(const char *path) {
         line++;
     }
     free(b);
+    return viol;
+}
+
+/* (4) dest preflight: every `ln -s...` (any flags, -n included) whose DEST names a directory needs a guard
+ * against DEST being a real directory in the same command or the 8 lines before it: -n only helps when DEST is
+ * a symbolic link; for a real directory ln writes DEST/<basename SRC>, i.e. cx/cx when DEST is the checkout.
+ * A check-* tool whose fixtures come from mkdtemp/mktemp counts as a private fixture path. */
+static int cln_has(const char *s, size_t n, const char *w) {
+    size_t wl = strlen(w);
+    for (size_t i = 0; i + wl <= n; i++) if (memcmp(s + i, w, wl) == 0) return 1;
+    return 0;
+}
+
+static int cln_dest_file(const char *path, const char *base) {
+    size_t n = 0;
+    char *b = (char *)cx_read(path, &n);
+    if (!b) return 0;
+    int fixture = (strncmp(base, "check-", 6) == 0) && (cln_has(b, n, "mkdtemp") || cln_has(b, n, "mktemp") ||
+                  cln_has(b, n, "getpid()") || cln_has(b, n, "sy_pid()"));
+    int viol = 0, line = 1;
+    size_t lstart[9] = {0}, pos = 0;
+    while (pos < n) {
+        size_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < n) pos++;
+        for (int k = 8; k > 0; k--) lstart[k] = lstart[k - 1];
+        lstart[0] = ls;
+        size_t win = line > 8 ? lstart[8] : 0;
+        for (size_t i = ls; i + 5 < le; i++) {
+            int boundary = (i == ls || b[i - 1] == ' ' || b[i - 1] == '\t' || b[i - 1] == '"' || b[i - 1] == '&' || b[i - 1] == ';');
+            if (!(boundary && b[i] == 'l' && b[i + 1] == 'n' && b[i + 2] == ' ' && b[i + 3] == '-')) continue;
+            size_t f1 = i + 4; int has_s = 0;
+            while (f1 < le && b[f1] != ' ' && b[f1] != '\t' && b[f1] != '"') { if (b[f1] == 's') has_s = 1; f1++; }
+            if (!has_s) continue;
+            size_t p = f1, d0, d1;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            while (p < le && b[p] != ' ' && b[p] != '\t' && b[p] != '&' && b[p] != ';') p++;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            d0 = p;
+            while (p < le && b[p] != ' ' && b[p] != '\t' && b[p] != '&' && b[p] != ';' && b[p] != '|') p++;
+            d1 = p;
+            if (d1 <= d0) continue;
+            {   /* a variable basename ($n, ${n}) may name any top-level directory: treat it as a directory target */
+                size_t e = d1; while (e > d0 && (b[e - 1] == '\'' || b[e - 1] == '"' || b[e - 1] == '\\' || b[e - 1] == '}')) e--;
+                size_t s0 = e; while (s0 > d0 && b[s0 - 1] != '/') s0--;
+                int var = s0 < e && (b[s0] == '$' || (b[s0] == '{' ));
+                if (!var && !cln_is_dir_target(b + d0, d1 - d0)) continue;
+            }
+            const char *w = b + win; size_t wn = le - win;
+            int guarded = cln_has(w, wn, "[ -d") || cln_has(w, wn, "[ ! -d") || cln_has(w, wn, "test -d") ||
+                          cln_has(w, wn, "[ -L") || cln_has(w, wn, "kind == 'd'");
+            if (!guarded && !fixture) {
+                printf("LN_DEST_UNGUARDED\t%s:%d\t%.*s\n", path, line, (int)(d1 - d0), b + d0);
+                viol++;
+            }
+        }
+        line++;
+    }
+    free(b);
+    return viol;
+}
+
+static int cln_dest_dir(const char *dir) {
+    sy_dir_t d;
+    int viol = 0;
+    if (sy_dir_open(&d, dir) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        char sub[CLN_PW]; sy_stat_t st;
+        if (d.name[0] == '.' || cx_fmt(sub, sizeof sub, "%s/%s", dir, d.name) || sy_lstat(sub, &st) != 0) continue;
+        if (st.kind == 'd') { viol += cln_dest_dir(sub); continue; }
+        if (st.kind != 'f' || tx_eqz(d.name, "check-ln-noderef.cx")) continue;
+        int is_cx = d.name_n > 3 && memcmp(d.name + d.name_n - 3, ".cx", 3) == 0;
+        if (!is_cx) {   /* shell entry points such as tools/cx-dev-root */
+            char head[3] = {0}; size_t hn = 0; char *hb = (char *)cx_read(sub, &hn);
+            if (hb && hn >= 2) { head[0] = hb[0]; head[1] = hb[1]; }
+            free(hb);
+            if (!(head[0] == '#' && head[1] == '!')) continue;
+        }
+        viol += cln_dest_file(sub, d.name);
+    }
+    sy_dir_close(&d);
     return viol;
 }
 
@@ -150,8 +235,25 @@ int main(void) {
     int viol = cln_scan_dir("tools") + cln_scan_dir("tests");
     ck(viol == 0, "repo-ln-noderef-clean: zero directory-target ln -s/-sf without -n/-T in tools/ and tests/");
 
+    /* (4) dest preflight: fixture first (an unguarded and a guarded sample), then all of tools/ */
+    int dviol = 0;
+    {
+        char fx[CLN_PW], fa[CLN_PW], fb[CLN_PW];
+        if (cx_fmt(fx, sizeof fx, "%s/destfx", work) || cx_fmt(fa, sizeof fa, "%s/a.cx", fx) || cx_fmt(fb, sizeof fb, "%s/b.cx", fx)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && printf '%%s\\n' 'x \"ln -sfn \\\"$e\\\" \\\"$2/cx\\\"\"' > '%s' && "
+                   "printf '%%s\\n' 'x \"[ -d \\\"$2/cx\\\" ] && exit 1; ln -sfn \\\"$e\\\" \\\"$2/cx\\\"\"' > '%s'", fx, fa, fb)) return 2;
+        if (ckk_sh("check-ln-noderef", cmd, out, sizeof out) != 0) return 2;
+        ck(cln_dest_file(fa, "a.cx") == 1, "dest-preflight-red: unguarded ln -sfn into a dir name is flagged");
+        ck(cln_dest_file(fb, "b.cx") == 0, "dest-preflight-green: guarded ln -sfn ([ -d DEST ] refusal) passes");
+        /* real-dir semantics the rule rests on: ln -sfn into a real directory writes DEST/cx */
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/r/cx' && ln -sfn '%s/r/cx' '%s/r/cx' && [ -L '%s/r/cx/cx' ]", fx, fx, fx, fx)) return 2;
+        ck(ckk_sh("check-ln-noderef", cmd, out, sizeof out) == 0, "repro-ln-sfn-real-dir: -n does not stop DEST/cx inside a real directory");
+        dviol = cln_dest_dir("tools");
+        ck(dviol == 0, "repo-ln-dest-guarded: every ln -s into a directory name in tools/ has a real-directory preflight");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
-    printf("CHECK_LN_NODEREF\tok=%d\tfailed=%d\tviolations=%d\tms=%ld\n",
-           ck_assertions() - ck_failures(), ck_failures(), viol, sy_now_ms() - t0);
+    printf("CHECK_LN_NODEREF\tok=%d\tfailed=%d\tviolations=%d\tdest_unguarded=%d\tms=%ld\n",
+           ck_assertions() - ck_failures(), ck_failures(), viol, dviol, sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
 }
