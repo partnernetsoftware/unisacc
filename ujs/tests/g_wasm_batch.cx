@@ -1,5 +1,6 @@
 #pragma unisa module g_wasm_batch
 #pragma unisa use g_math
+#pragma unisa use r160_wait
 #pragma unisa use mem.heap
 #pragma unisa use sys.fs
 #pragma unisa use text.fmt
@@ -37,7 +38,7 @@ static int build_source(const char *file,const char *const *modules,const char *
 
 // Compile once. A fresh WebAssembly instance supplies independent zeroed
 // memory for each case, while the r160 oracle is evaluated separately.
-int g_wasm_batch(const char *name,const char *fixture,const char *const *modules,const char *setup,
+int g_wasm_batch_page(const char *name,const char *fixture,const char *page,const char *const *modules,const char *setup,
         const char *const *cases,const double *gold,int count,int mutate,const char *mutation) {
     if(count<1 || count>64) return 2;
     char dir[256],source[300],wasm[300],html[300],profile[320],url[390],*out=0;
@@ -49,22 +50,47 @@ int g_wasm_batch(const char *name,const char *fixture,const char *const *modules
     tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/wasm-chrome",dir);
     tx_snprintf(url,sizeof url,"file://%s?count=%d",html,count);
     int failed=build_source(source,modules,setup,cases,count,mutate,mutation) ||
-        sy_copy("ujs/practice/uxe/test/wasm-batch.html",html,0600);
+        sy_copy(page,html,0600);
     double refs[64]={0};
-    if(!failed) failed=g_math_reference(fixture,refs,count,dir);
+    if(!failed && g_math_reference(fixture,refs,count,dir)) {
+        printf("WASM_BATCH oracle_failed fixture=%s\n",fixture);
+        failed=1;
+    }
     char *compile[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
     if(!failed) {
         const int rc=cx_runv_timeout(compile,6,&out,&size);
         if(rc) { printf("WASM_BATCH compile_rc=%d\n",rc); failed=1; }
         mm_free(out); out=0; size=0;
     }
-    char *browser[]={"google-chrome","--headless=new","--allow-file-access-from-files",
-        "--disable-background-networking","--no-first-run",profile,"--dump-dom",url,0};
-    if(!failed) {
+    const int uses_dom=tx_eqz(page,"ujs/practice/uxe/test/wasm-batch.html");
+    if(!failed && !uses_dom) {
+        double actual[64]={0};
+        failed=r160_wait_read(url,"#wasm-cases",actual,count,dir);
+        if(failed) printf("WASM_BATCH browser_fixture_failed=%s\n",fixture);
+        for(int i=0;!failed && i<count;i++) {
+            if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+                printf("%s case=%d actual=%.17g r160=%.17g gold=%.17g\n",name,i,actual[i],refs[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    if(!failed && uses_dom) {
+        char *browser[]={"google-chrome","--headless=new","--allow-file-access-from-files",
+            "--disable-background-networking","--no-first-run",profile,"--dump-dom",url,0};
         const int rc=cx_runv_timeout(browser,6,&out,&size);
         const char marker[]="<pre id=\"wasm-cases\">[";
         long at=!rc&&out?tx_find(out,size,marker,sizeof marker-1):-1;
-        if(at<0) failed=1;
+        if(at<0) {
+            printf("WASM_BATCH browser_rc=%d output_bytes=%ld\n",rc,(long)size);
+            const char status_marker[]="<pre id=\"wasm-cases\">";
+            const long status=out?tx_find(out,size,status_marker,sizeof status_marker-1):-1;
+            if(status>=0) {
+                const char *start=out+status+sizeof status_marker-1;
+                const long end=tx_find(start,size-(start-out),"</pre>",6);
+                if(end>=0 && end<220) printf("WASM_BATCH browser_status=%.*s\n",(int)end,start);
+            }
+            failed=1;
+        }
         else {
             char *value=out+at+sizeof marker-1;
             for(int i=0;i<count;i++) {
@@ -85,4 +111,9 @@ int g_wasm_batch(const char *name,const char *fixture,const char *const *modules
     mm_free(out);
     printf("%s cases=%d failed=%d\n",name,count,failed);
     return failed;
+}
+
+int g_wasm_batch(const char *name,const char *fixture,const char *const *modules,const char *setup,
+        const char *const *cases,const double *gold,int count,int mutate,const char *mutation) {
+    return g_wasm_batch_page(name,fixture,"ujs/practice/uxe/test/wasm-batch.html",modules,setup,cases,gold,count,mutate,mutation);
 }

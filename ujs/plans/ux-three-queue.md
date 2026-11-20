@@ -4,7 +4,7 @@
 
 ## A 栏燃尽
 
-- ImageUtils | G-struct 与 G-io 对照 Canvas 色彩、PNG 与 JPEG 分支、数据 URL 和不同图像源 | JPEG 编码与通用图像接线。
+- ImageUtils 图像源接线 | G-struct 与 G-io 对照 HTMLImageElement、ImageBitmap 的 URI 与色彩转换 | 浏览器资源描述与已完成的 Canvas 路径。
 - ~~ShapeUtils 多孔输入边界校验 | G-struct 双孔、越界、相交和失败输出不变 | 已有多孔剖分。~~ 10 项通过，漏孔与外孔反例均转红。
 - ~~ShapeUtils 闭合重复点 | G-struct 尾点归一化与 r160 的面积、数量和紧凑索引对照 | 已有多孔剖分与边界校验。~~ 5 项通过，跳过归一化反例转红。
 - ~~ShapeUtils 双孔凹形对照 | G-struct U 形轮廓与双孔的面积、绕向及空洞 | 已有多孔剖分。~~ 4 项通过，漏掉右孔反例 12 对 18。
@@ -197,7 +197,7 @@
 - ~~JPEG 彩色渐进解码 | G-io 交错 DC、分量 AC 扫描、色度采样与坏序号 | 灰度渐进、彩色基线与重启间隔。~~ 11 项通过，跨块坐标替换反例由 129 变为 128。
 - ~~ImageLoader 渐进 JPEG 分派 | G-io 灰度和彩色渐进文件响应，失败保持输出 | 渐进 JPEG 解码。~~ 灰度 13 项、彩色 14 项通过，两个步长篡改反例转红。
 - ~~JPEG 彩色基线编码 | G-io 尺寸、边缘块、色差、质量参数和失败保持输出 | JPEG 彩色与 DCT。~~ 12 项通过，替换源像素反例转红。
-- ImageUtils JPEG 与 PNG 数据 URI 分派 | G-io Canvas 大图分支、两类 URI 浏览器解码及容量拒绝 | JPEG 编码与 ImageUtils PNG。
+- ~~ImageUtils JPEG 与 PNG 数据 URI 分派 | G-io Canvas 大图分支、两类 URI 浏览器解码及容量拒绝 | JPEG 编码与 ImageUtils PNG。~~ 10 项通过，2049 改为 2048 的反例转红，Chrome 直接解码 Wasm 生成的 URI。
 - PNG 调色板、透明色键及隔行 | G-io 色型、透明度、Adam7 与坏文件 | PNG 解码和扫描行。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。
 - AnimationLoader 多片段与多轨道 | G-io r160 JSON 的类型、插值、错误与回收 | M8 轨道和片段。

@@ -1,0 +1,27 @@
+native function ImageUtils_jpegDataURL(image:i64,quality:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(out<0 || capacity<0 || out>6291456-capacity || work<0 || work%8!=0 || space<2144 || work>6291456-space ||
+     jpeg_overlap(out,capacity,work,space)) { return 0-1; }
+  // The prefix of the workspace owns the JPEG bytes. The remainder holds the
+  // coefficient buffers and staging area for a completely validated image.
+  let binaryCap=(space-1504)/16*8;
+  let length=JpegEncode_rgba8(image,quality,work,binaryCap,work+binaryCap,space-binaryCap);
+  if(length<0) { return length; }
+  let rgba=ux_u32(image+ImageResource.rgba);
+  let last=(ux_u32(image+ImageResource.height)-1)*ux_u32(image+ImageResource.rowBytes)+4*ux_u32(image+ImageResource.width);
+  if(jpeg_overlap(image,ImageResource.size,out,capacity) || jpeg_overlap(rgba,last,out,capacity)) { return 0-1; }
+  return image_encoded_data_url(work,length,out,capacity,1);
+}
+
+// Canvas ImageData provides packed RGBA rows. Match the reference's strict
+// 2048 pixel threshold in either dimension and its JPEG quality of 0.6.
+native function ImageUtils_canvasDataURL(image:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(image<0 || image%4!=0 || image>6291456-ImageResource.size) { return 0-1; }
+  let width=ux_u32(image+ImageResource.width);
+  let height=ux_u32(image+ImageResource.height);
+  if(width<1 || height<1 || width>65535 || height>65535 || ux_u32(image+ImageResource.rowBytes)!=width*4) { return 0-1; }
+  if(width>2048 || height>2048) { return ImageUtils_jpegDataURL(image,60,out,capacity,work,space); }
+  let rgba=ux_u32(image+ImageResource.rgba);
+  if(jpeg_overlap(image,ImageResource.size,out,capacity) || jpeg_overlap(image,ImageResource.size,work,space) ||
+     jpeg_overlap(rgba,width*height*4,out,capacity)) { return 0-1; }
+  return ImageUtils_pngDataURL(rgba,width,height,out,capacity,work,space);
+}
