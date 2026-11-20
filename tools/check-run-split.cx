@@ -1,0 +1,213 @@
+/* tools/check-run-split.cx -- W2 stage-2 equivalence & silent-fallback gate (v0.0.86).
+ * Compares UNISACC_RUN_SPLIT=1 (and =shadow) against UNISACC_RUN_SPLIT=0 on multi-module
+ * .cx scripts: exact byte-for-byte stdout, stderr, and rc equivalence; edit-one-line rerun
+ * compiles only the main unit (RR_TIME e3=1, elf=1 when split is active in the product);
+ * silent fallback on objlink refusal (host-forwarded setpgid) with zero extra stderr;
+ * syntax error does not duplicate stderr.
+ * Usage: sh ./unisacc.com tools/check-run-split.cx
+ * Product under test: $UNISACC_COM, default ./unisacc.com (ELF executed directly, else via sh).
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char root[4096], work[4096], prod[4200], cache_dir[4200], cache_env[4400];
+static int is_elf, npass, nfail;
+
+static void check(int ok, const char *name, const char *detail) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "");
+    if (ok) npass++; else nfail++;
+}
+
+static void die(const char *m) {
+    fprintf(stderr, "check-run-split: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void write_txt(const char *path, const char *s) {
+    if (cx_write(path, s, (size_t)tx_len(s, 1L << 20))) die(path);
+}
+
+static int run_prod(const char *src, const char *arg1, const char *e1, const char *e2, const char *e3, np_result *r) {
+    char *av[8];
+    const char *env[7];
+    char why[512];
+    int k = 0, ek = 0;
+    if (!is_elf) av[k++] = "sh";
+    av[k++] = prod;
+    av[k++] = (char *)src;
+    if (arg1) { av[k++] = "--"; av[k++] = (char *)arg1; }
+    av[k] = 0;
+    env[ek++] = cache_env;
+    env[ek++] = "UNISA_CONTAINER=";
+    if (e1) env[ek++] = e1;
+    if (e2) env[ek++] = e2;
+    if (e3) env[ek++] = e3;
+    env[ek] = 0;
+    return np_run(av, work, env, 50, r, why, sizeof why);
+}
+
+static int count_uo(void) {
+    char udir[4400];
+    if (cx_fmt(udir, sizeof udir, "%s/unitobj", cache_dir)) return 0;
+    DIR *d = opendir(udir);
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d)) != 0) {
+        long ln = tx_len(e->d_name, 256);
+        if (ln > 3 && e->d_name[ln - 3] == '.' && e->d_name[ln - 2] == 'u' && e->d_name[ln - 1] == 'o') n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static int count_substr(const char *s, size_t n, const char *needle) {
+    long nl = tx_len(needle, 128);
+    int c = 0;
+    if (!s || nl <= 0) return 0;
+    for (size_t i = 0; i + (size_t)nl <= n; i++) {
+        if (!memcmp(s + i, needle, (size_t)nl)) c++;
+    }
+    return c;
+}
+
+static void compare_two(const char *tag, const char *src, const char *arg1, int want_rc, const char *split_val, const char *extra_env) {
+    np_result r0 = {0}, r1 = {0};
+    int t1 = run_prod(src, arg1, split_val, extra_env, 0, &r1);
+    int t0 = run_prod(src, arg1, "UNISACC_RUN_SPLIT=0", extra_env, 0, &r0);
+    int ok = !t0 && !t1 && r0.rc == want_rc && r1.rc == want_rc &&
+             r0.outn == r1.outn && (!r0.outn || !memcmp(r0.out, r1.out, r0.outn)) &&
+             r0.errn == r1.errn && (!r0.errn || !memcmp(r0.err, r1.err, r0.errn));
+    char det[200];
+    cx_fmt(det, sizeof det, "rc=%d/%d(want %d) out=%zu/%zu err=%zu/%zu", r0.rc, r1.rc, want_rc, r0.outn, r1.outn, r0.errn, r1.errn);
+    check(ok, tag, det);
+    if (!ok) {
+        fprintf(stderr, "MISMATCH %s s0_out=[%.*s] s1_out=[%.*s] s0_err=[%.*s] s1_err=[%.*s]\n",
+                tag, (int)r0.outn, r0.out ? r0.out : "", (int)r1.outn, r1.out ? r1.out : "",
+                (int)r0.errn, r0.err ? r0.err : "", (int)r1.errn, r1.err ? r1.err : "");
+    }
+    np_free(&r0); np_free(&r1);
+}
+
+int main(void) {
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    const char *envp = sy_env("UNISACC_COM");
+    if (envp && envp[0]) {
+        if (!realpath(envp, prod)) die("UNISACC_COM realpath");
+    } else {
+        char def[4200];
+        if (cx_fmt(def, sizeof def, "%s/unisacc.com", root)) die("prod path");
+        if (!realpath(def, prod)) die("unisacc.com realpath");
+    }
+    {
+        unsigned char mg[4];
+        FILE *f = fopen(prod, "rb");
+        if (!f) die("open product");
+        is_elf = (fread(mg, 1, 4, f) == 4 && mg[0] == 127 && mg[1] == 'E' && mg[2] == 'L' && mg[3] == 'F');
+        fclose(f);
+    }
+    const char *td = sy_tmpdir();
+    if (cx_fmt(work, sizeof work, "%s/check-run-split-%d", td, (int)getpid()) ||
+        cx_fmt(cache_dir, sizeof cache_dir, "%s/cache", work) ||
+        cx_fmt(cache_env, sizeof cache_env, "UNISACC_CACHE_DIR=%s", cache_dir)) die("paths");
+    if (sy_mkdir_all(cache_dir, 0700)) die("mkdir work");
+
+    char cxlink[4200], cxsrc[4200], cxrootp[4200];
+    if (cx_fmt(cxlink, sizeof cxlink, "%s/cx", work) ||
+        cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) ||
+        cx_fmt(cxrootp, sizeof cxrootp, "%s/cxroot.tsv", work)) die("cx paths");
+    if (symlink(cxsrc, cxlink)) die("symlink cx");
+    write_txt(cxrootp, "CXROOT1\nR\tsys\tcx/sys\nR\tmem\tcx/mem\nR\ttext\tcx/text\n");
+
+    /* 1. Experiment script (use sys.env sys.fs mem.heap): cold split populates .uo cache */
+    char s1[4200];
+    cx_fmt(s1, sizeof s1, "%s/exp.cx", work);
+    write_txt(s1,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *v = sy_env_or(\"RSPL_TAG\", \"none\");\n"
+        "    char *p = (char *)mm_alloc(32);\n"
+        "    if (!p) return 9;\n"
+        "    cx_fmt(p, 32, \"v=%s argc=%d ver=1\", v, argc);\n"
+        "    printf(\"%s arg=%s\\n\", p, argc > 1 ? argv[1] : \"-\");\n"
+        "    fprintf(stderr, \"exp-err:%s\\n\", v);\n"
+        "    mm_free(p);\n"
+        "    return 3;\n"
+        "}\n");
+    compare_two("eq-exp-v1", s1, "alpha", 3, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=yes");
+    int uo_after = count_uo();
+    int split_active = uo_after > 0;
+    printf("INFO\tsplit_active=%d\tuo_files=%d\n", split_active, uo_after);
+
+    /* 2. Edit one line in main file and rerun with RR_TIME: only main unit e3..elf when active */
+    write_txt(s1,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *v = sy_env_or(\"RSPL_TAG\", \"none\");\n"
+        "    char *p = (char *)mm_alloc(32);\n"
+        "    if (!p) return 9;\n"
+        "    cx_fmt(p, 32, \"v=%s argc=%d ver=2\", v, argc);\n"
+        "    printf(\"%s arg=%s\\n\", p, argc > 1 ? argv[1] : \"-\");\n"
+        "    fprintf(stderr, \"exp-err:%s\\n\", v);\n"
+        "    mm_free(p);\n"
+        "    return 3;\n"
+        "}\n");
+    {
+        np_result rr = {0};
+        int tr = run_prod(s1, "beta", "UNISACC_RUN_SPLIT=1", "UNISACC_RR_TIME=1", "RSPL_TAG=yes", &rr);
+        int e3n = count_substr(rr.err, rr.errn, "RR_TIME\tinference\tstage=e3\t");
+        int elfn = count_substr(rr.err, rr.errn, "RR_TIME\tinference\tstage=elf\t");
+        int ok = !tr && rr.rc == 3 && (!split_active || (e3n == 1 && elfn == 1));
+        char det[128];
+        cx_fmt(det, sizeof det, "rc=%d split_active=%d e3=%d elf=%d", rr.rc, split_active, e3n, elfn);
+        check(ok, "edit1-rr-single-unit", det);
+        np_free(&rr);
+    }
+    compare_two("eq-exp-v2-shadow", s1, "gamma", 3, "UNISACC_RUN_SPLIT=shadow", "RSPL_TAG=sh");
+
+    /* 3. Second multi-module script (text.text + sys.sha) */
+    char s2[4200];
+    cx_fmt(s2, sizeof s2, "%s/s2.cx", work);
+    write_txt(s2,
+        "#pragma unisa use text.text\n"
+        "#pragma unisa use sys.sha\n"
+        "int main(void) {\n"
+        "    char h[65]; const char *m = \"run-split-sha\";\n"
+        "    sy_sha256_hex((const unsigned char *)m, tx_len(m, 32), h);\n"
+        "    printf(\"sha=%.16s\\n\", h); fprintf(stderr, \"s2-err\\n\"); return 5;\n"
+        "}\n");
+    compare_two("eq-text-sha", s2, 0, 5, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 4. Silent fallback on objlink refusal (host-forwarded setpgid): zero extra stderr */
+    char fb[4200];
+    cx_fmt(fb, sizeof fb, "%s/fb.cx", work);
+    write_txt(fb,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(void) {\n"
+        "    int r = setpgid(0, 0);\n"
+        "    printf(\"fb=%d v=%s\\n\", r == 0 || r == -1 ? 1 : 0, sy_env_or(\"RSPL_TAG\", \"none\"));\n"
+        "    fprintf(stderr, \"fb-err\\n\"); return 4;\n"
+        "}\n");
+    compare_two("fallback-silent-setpgid", fb, 0, 4, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=ok");
+
+    /* 5. Syntax error: exact stderr and rc, no duplicate diagnostic */
+    char bad[4200];
+    cx_fmt(bad, sizeof bad, "%s/bad.cx", work);
+    write_txt(bad, "#pragma unisa use sys.env\nint main(void){return @;}\n");
+    compare_two("syntax-err-no-dup", bad, 0, 1, "UNISACC_RUN_SPLIT=1", 0);
+
+    cx_rmtree(work);
+    printf("CHECK_RUN_SPLIT\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}
