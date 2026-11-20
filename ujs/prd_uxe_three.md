@@ -231,6 +231,60 @@ M12 上下文恢复缺口。M4 已测资源代数换代与丢失时的拒绝。M
 
 修订(cdx2): D4 从 M7 恢复时先接场景树与城镇实例批，再接四腿刚体层级和步态，随后接跟拍相机及烟发射生命周期。已有本地 `town-motion` 的行走与跟拍位姿金值，线上还未迁移。M7 先验两节刚体 FK/IK、实例变换和遮挡，M8 再验混合器。烟的发射、排序与回收是另一个门，M7 若只交像素印章，保留在部分。M9 的压缩编解码器和第三方格式逐项估算。未纳入当前清单的插件、扩展及设备能力不能用提交数估计当作已覆盖。
 
+### 5.1 M7 网格、实例与蒙皮
+
+接口草案为 `Mesh_init(node, geometry, material)`、`Mesh_setMorphInfluence(mesh, index, value)`、`InstancedMesh_setMatrixAt(mesh, index, matrix)`、`BatchedMesh_addGeometry(batch, geometry)`、`LOD_addLevel(lod, node, distance, hysteresis)`、`Skeleton_update(skeleton)`、`SkinnedMesh_bind(mesh, skeleton, matrix, mode)`。Mesh、Sprite、Points、Line 与 Bone 复用 M2 对象前缀，几何与材质继续使用独立句柄。实例矩阵内存按列主序连续存放，颜色和形变权重各用独立视图。批次记录容量、活跃槽、几何范围与可见标记，槽复用须检查代数。LOD 按距离排序并保存前一层级用于迟滞。Skeleton 持有骨句柄、逆绑定矩阵和矩阵调色板。Attached 与 Detached 模式分别使用当前世界矩阵或绑定时矩阵求逆。
+
+独立结构门读取父子世界矩阵、实例局部与世界变换、包围体、批次槽复用和 LOD 阈值两侧的选择。r160 拼同一场景，包括共用几何的两个 Mesh、遮挡中的三个实例、跨距离往返的 LOD，以及两骨骼四权重的顶点。像素门补点大小、线段断点、闭环端点与面朝相机的精灵。篡改实例索引、移除迟滞、替换逆绑定矩阵或互换绑定模式，各应命中对应门。网格拾取的最终覆盖证据由 M10 补齐。
+
+预计提交顺序为 Mesh 与形变，InstancedMesh，BatchedMesh 的几何容量与实例表，LOD，Sprite，Points，Line 三种，Bone，Skeleton，SkinnedMesh 与两种绑定模式，最后接场景遍历与 GPU 绘制对照。保留低性能实现和缺少语义的条目为部分。
+
+### 5.2 M8 动画数据与求值
+
+接口草案为 `Track_init(name, times, values, stride, interpolation)`、`Interpolant_evaluate(track, t, cursor, out)`、`Clip_init(tracks, duration, blend)`、`AnimationMixer_clipAction(mixer, clip, root)`、`AnimationMixer_update(mixer, dt)` 与 `PropertyBinding_bind(root, path)`。时间与值的视图各自记录类型、长度和步幅，字符串使用 UTF-8 字节跨度。插值缓存保存区间索引，向前与反向跳时均须重定位。Action 记录本地时间、权重、时间缩放、循环计数、混合模式与启停状态。Mixer 在帧内按绑定槽聚合，保留原属性值和恢复所需引用计数。
+
+G-anim 独立门覆盖七类 Track、离散与线性、三次插值端点、四元数最短弧与归一化。固定时间序列对照 r160，包括倒放、跨多个循环边界、PingPong、一次播放、权重淡入淡出、加法层与原值恢复。以整数步序驱动，验收关键帧间的数值、事件顺序和停止后的场景属性。篡改关键帧时间、求值方向、归一化或加法顺序，各自失败。
+
+预计依次交付视图与插值器、数值类轨道、四元数轨道、布尔与字符串轨道、Clip 与轨道处理、绑定路径与属性写入、Action 循环、Mixer 调度、混合与事件，以及 D4 四腿从固定姿态到混合姿态的探针。
+
+### 5.3 M9 加载器与图像解码
+
+接口草案为 `LoadingManager_begin/end/error`、`FileLoader_request/receive`、`ImageCodec_probe/decode`、`ObjectLoader_parse` 与 `GLTFLoader_parse`。宿主只交付字节、时钟与请求结果。基座读头、校验偏移、解码与组装；产物通过事务暂存表发布。加载记录包含资源 URI、请求代数、完成状态与引用计数。图像记录包含格式、宽高、行步幅、像素存储范围及色彩元数据。GLB 的 chunk、bufferView 和 accessor 分别校验总长、偏移、分量类型、对齐与元素数量。
+
+G-io 使用小型 PNG、JPEG、嵌入 PNG 的 GLB、带蒙皮动画的 GLB 和 r160 场景 JSON。PNG 查尺寸、滤波还原与 RGBA 精确值；JPEG 单列有损误差口径并按参考像素确认。GLB 对照规范化网格、材质、UV、骨架和动画轨道；失败门包括截断、非法 offset、整数溢出、稀疏索引越界、错误扩展以及失败后无半注册资源。来源和许可证随夹具登记。
+
+预计提交顺序为请求管理，字节视图与加载器基类，PNG 容器与解码，JPEG 头与基线解码，图像及纹理装载，场景 JSON 两阶段链接，GLB 容器与访问器，材质与图像关联，蒙皮动画连接及失败回收。每种编码范围独立记录；渐进 JPEG、压缩扩展等只有实测通过才升格。
+
+### 5.4 M10 拾取与控制
+
+接口草案为 `Raycaster_setFromCamera(ray, camera, ndc)`、`Raycaster_intersect(root, query, hits)`、`Controls_feed(control, events)`、`Controls_step(control, dt)`。查询记录包含 near、far、层过滤、递归标记和点线阈值。命中记录包含距离、世界点、网格及实例句柄、索引、UV 与面索引。控制器保存目标、球坐标、速度、输入按钮和指针代数，拖动、滚轮与触屏共同消费既有输入 ABI。
+
+G-ray 用透视和正交及带旋转缩放的对象树，对照 r160 的命中顺序和数值。覆盖材质单面、层过滤、近远裁剪、实例 ID、LOD 代理、线点阈值及蒙皮顶点。控制门播放同一拖拽、捏合、滚轮和固定步长轨迹，与 r160 同事件输入对照相机终值与事件顺序。反例分别改矩阵逆、近远限制、层掩码和指针结束处理。
+
+预计依次交付相机射线、Mesh 命中与结果排序、实例与批次、点线精灵与 LOD、蒙皮、Orbit 与 Map、PointerLock、Transform 控制及浏览器输入读回。样本命中与对应 HUD 或选中效果一起核对。
+
+### 5.5 M11 后处理、辅助对象与音频
+
+接口草案为 `EffectComposer_addPass/render/resize`、`Pass_execute(input, output)`、`Helper_update(node, source)`、`AudioMixer_render(frames, dst)`。Pass 描述采样输入、目标格式、尺寸、清屏、混合及交换标记，统一通过 M4 目标和资源代数。Helper 只生成场景可见的调试数据。音频布局分声源、监听器和 PCM 输出环；使用帧索引、通道数、采样率与距离模型参数，宿主只负责提交输出。
+
+后处理门从单一小图到逐格像素，依次对照 RenderPass、Bloom、Outline、FXAA 及调色，含 resize、旁路、目标生命周期和多 Pass 顺序篡改。辅助对象读回边界盒、相机视锥、骨和灯光方向，并以 r160 同变换场景对照。音频门读取合成脉冲和两路混音的 PCM，检查音量、循环、衰减、定位、分析窗口与关停静音；用独立公式和 r160/WebAudio 离线图对照。
+
+预计依次交付目标复用与 Pass 调度、各 Pass 与像素门、几何辅助族、灯光和相机辅助族、骨架辅助、AudioListener 与缓冲播放、PositionalAudio 与分析、跨场景生命周期。
+
+### 5.6 M12 双路径整合与发布前复核
+
+两条路径从相同的 Scene 更新和渲染列表获取对象与资源记录。GPU 继续发版本化命令包，软件端消费同一清单并保留项目像素风采样与混合。产品持有输入、玩法、镜头与样式规则。每页仍为静态壳、宿主桥、基座和产品 Wasm，按页登记资源及导出哈希。
+
+先验基座同输入的变换、可见性、排序和资源计数，再按 D1、D2、D3、D4 各一批私有页面与对照。D1 比飞行战斗、音频事件、开场与三航向，D2 比三航点、桥宽、岸线和标题倒影，D3 比三位置和可见操作，D4 比行走、跟拍、步态、烟与机械腹部。每页保留既有真时钟 CDP 输入、终值和篡改门，软件桥 300 行，GPU 桥 600 行，双路径分别跑白名单。WebGL 上下文丢失后验证资源重建、旧代数拒绝和同机位像素回读。
+
+预计提交为共享场景消费接口，软件渲染接线，GPU 上下文恢复，四页分别迁移，每页独立证据审阅，最终清单重算与缺口可复现性复核。输入输出制品逐项确认后才申请发布。D5 的放行以独立重算口径和所有者确认作准。
+
+### 5.7 M8 至 M11 并行边界
+
+M8 可先做纯数据插值及虚拟属性绑定，M9 可先做二进制解析和图像解码，M10 可先基于 M1 的 Ray 和 M3 的相机实现静态几何拾取，M11 可先做 PCM 和离屏 Pass 夹具。各线独立维护自身模块、事实行及门；共同对象布局、GPU 包、宿主桥和生成表由集成窗口串行重算。
+
+M8 对真实骨骼的绑定等 M7 句柄稳定，M9 的 GLB 蒙皮与动画组装消费 M7 和 M8 的已验记录，M10 的实例及蒙皮拾取消费 M7 更新后的矩阵和顶点，M11 的骨辅助依赖 M7，后处理依赖 M4 目标、颜色输出和阴影资源。跨边界数据先以定版夹具对读，合并后再跑真实模块交互和已有门，避免将夹具结果视为整体验收。
+
 ## 6 风险与诚实声明
 
 (1) 99% 不是对 three.js 全部运行时行为的保证,而是对清单与门的覆盖;任何未经门的项不算。
