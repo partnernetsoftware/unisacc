@@ -1,0 +1,66 @@
+struct AnimationArrayView {
+  data: u32;
+  count: u32;
+  kind: u32;
+}
+
+// Kind 0 represents a numeric Array with f64 elements. Kinds 1..10
+// share the render buffer component tags; 11 represents DataView.
+native function animation_array_width(kind:i64) i64 {
+  if(kind==0) { return 8; }
+  return BufferAttribute_width(kind);
+}
+
+native function AnimationUtils_isTypedArray(view:i64) i64 {
+  if(!animation_span(view,AnimationArrayView.size)) { return 0; }
+  let kind=ux_u32(view+AnimationArrayView.kind);
+  if(kind<1 || kind>10) { return 0; }
+  let width=animation_array_width(kind);
+  let data=ux_u32(view+AnimationArrayView.data);
+  let count=ux_u32(view+AnimationArrayView.count);
+  return data%width==0 && data<=6291456 && count<=(6291456-data)/width;
+}
+
+native function AnimationUtils_convertArray(view:i64,kind:i64,force:i64,out:i64,
+                                            data:i64,capacity:i64,work:i64) i64 {
+  if(view==0-1) { return view; }
+  if(!animation_span(view,AnimationArrayView.size)) { return 0-2; }
+  let sourceKind=ux_u32(view+AnimationArrayView.kind);
+  let sourceWidth=animation_array_width(sourceKind);
+  let width=animation_array_width(kind);
+  let source=ux_u32(view+AnimationArrayView.data);
+  let count=ux_u32(view+AnimationArrayView.count);
+  if(sourceWidth==0 || width==0 || source%sourceWidth!=0 || source>6291456 ||
+     count>(6291456-source)/sourceWidth) { return 0-2; }
+  if(sourceKind==kind && force==0) { return view; }
+  let size=count*width;
+  if(!animation_span(out,AnimationArrayView.size) || capacity<0 || size>capacity ||
+     data<0 || data%width!=0 || data>6291456-capacity ||
+     animation_overlap(out,AnimationArrayView.size,view,AnimationArrayView.size) ||
+     animation_overlap(out,AnimationArrayView.size,source,count*sourceWidth) ||
+     animation_overlap(out,AnimationArrayView.size,data,size) ||
+     animation_overlap(data,size,view,AnimationArrayView.size) ||
+     animation_overlap(data,size,source,count*sourceWidth)) { return 0-2; }
+  if(kind==8 && sourceKind!=kind &&
+     (!animation_span(work,8) || work%8!=0 || animation_overlap(work,8,data,size) ||
+      animation_overlap(work,8,view,AnimationArrayView.size) ||
+      animation_overlap(work,8,out,AnimationArrayView.size) ||
+      animation_overlap(work,8,source,count*sourceWidth))) { return 0-2; }
+  if(kind==sourceKind) { let copy=uxe_copy_record(data,source,size); }
+  else {
+    let read=sourceKind;
+    let write=kind;
+    if(read==0) { read=10; }
+    if(write==0) { write=10; }
+    let i=0;
+    while(i<count) {
+      let input=BufferAttribute_read(source+i*sourceWidth,read);
+      let saved=BufferAttribute_write(data+i*width,write,input,work);
+      i=i+1;
+    }
+  }
+  let a=ux_u32_put(out+AnimationArrayView.data,data);
+  let b=ux_u32_put(out+AnimationArrayView.count,count);
+  let c=ux_u32_put(out+AnimationArrayView.kind,kind);
+  return out;
+}
