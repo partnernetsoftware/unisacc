@@ -257,7 +257,7 @@ G-anim 独立门覆盖七类 Track、离散与线性、三次插值端点、四�
 
 G-io 使用小型 PNG、JPEG、嵌入 PNG 的 GLB、带蒙皮动画的 GLB 和 r160 场景 JSON。PNG 查尺寸、滤波还原与 RGBA 精确值；JPEG 单列有损误差口径并按参考像素确认。GLB 对照规范化网格、材质、UV、骨架和动画轨道；失败门包括截断、非法 offset、整数溢出、稀疏索引越界、错误扩展以及失败后无半注册资源。来源和许可证随夹具登记。
 
-PNG 解码切片支持非隔行 RGBA8，以及存储、固定 Huffman 和动态 Huffman 三种 Deflate 块。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。`png-header-io.cx`、`png-stored-io.cx`、`png-fixed-io.cx` 与 `png-dynamic-io.cx` 使用程序合成的小图和浏览器像素对照。动态树需要额外 3008 字节工作区。调色板、其他色型和隔行仍待覆盖。
+PNG 解码切片支持非隔行 RGBA8 与无透明色键的 RGB8，以及存储、固定 Huffman 和动态 Huffman 三种 Deflate 块。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。RGB8 解码补齐不透明 alpha。`png-header-io.cx`、`png-stored-io.cx`、`png-fixed-io.cx`、`png-dynamic-io.cx` 与 `png-rgb-io.cx` 使用程序合成的小图和浏览器像素对照。动态树需要额外 3008 字节工作区。调色板、透明色键、其他色型和隔行仍待覆盖。
 
 JPEG 首个像素解码切片支持单分量 8 位基线灰度，包括 DC 和 AC 熵解码、反量化、二维逆变换及边缘裁切。`jpeg-gray-io.cx` 与 r160 ImageLoader 对照同一张合成 JPEG，并验证截断、填充位错误和失败后输出未发布。彩色、渐进与重启间隔仍待覆盖。
 
