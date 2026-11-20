@@ -29,6 +29,7 @@
 - ~~AnimationUtils 数值 JSON 展平 | G-anim 标量、数组、缺字段跳过和容量不足时原值不变 | JSON 字节解析。~~ 8 项通过，错取分量反例转红。
 - ~~AnimationUtils 加法参考轨道采样 | G-anim r160 对照插值、重复首帧、边界及工作区 | 已有差量与插值器。~~ 6 项通过，替换为离散插值的反例转红。
 - ~~AnimationUtils 普通轨道整片段加法 | G-anim 按类型与名称匹配、默认帧率、跳过非数值、提交原子性 | 参考轨道采样和差量。~~ 8 项通过，参考帧替换反例转红。
+- ~~JSON 字符串 UTF-8 解码 | G-io 转义、代理对、无效 UTF-8 与写入上限 | JSON 分词与 UTF-8 验证。~~ 9 项通过，代理对替换反例转红。
 - AnimationUtils 非数值 JSON 展平与 GLTF 三次样本 | G-anim 布尔及字符串值、GLTF 三次轨道的中间值与切线布局 | 非数值轨道、JSON 解码与 GLTF 动画。
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
 - AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
