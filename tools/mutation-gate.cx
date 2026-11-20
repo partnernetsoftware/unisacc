@@ -1,0 +1,647 @@
+/* mutation-gate.cx -- author-side mutation gate: does a check really detect faults in the code a patch adds?
+ *
+ * Usage (cwd = a repo checkout with ./unisacc.com; the gate never writes into it):
+ *   mutation-gate.cx -- run  --patch P --base REV --check 'CMD' [--check 'CMD'...] --out DIR
+ *                            [--repo R] [--max N] [--par N] [--min-score F] [--coverage-check]
+ *                            [--mutate-checks] [--git] [--deadline-s S (30..3600, default 280)]
+ *       --git: the private tree becomes a git repo with the patch committed (for checks using git grep/diff).
+ *       prep + workers + report in one call.  It may exceed 55 s: start it with
+ *       `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run ...` and `devsvc wait`.
+ *   mutation-gate.cx -- prep   (same options)  private tree + mutants + baseline check, bounded under 55 s
+ *   mutation-gate.cx -- worker --out DIR --slot K   runs mutants with id % par == K in DIR/slot-K
+ *   mutation-gate.cx -- report --out DIR [--min-score F] [--allow-uncovered FILE] [--adjudicated FILE]
+ *       run and report both take --allow-uncovered FILE and --adjudicated FILE:
+ *       --allow-uncovered: TSV rows `file<TAB>function<TAB>reason`, one per uncovered function the reviewer
+ *         accepts; an uncovered function not listed makes the verdict FAIL.
+ *       --adjudicated: TSV rows `file<TAB>line<TAB>mutation<TAB>equivalent|out-of-scope<TAB>reason`; a surviving
+ *         mutant whose file and line match and whose mutation equals its description or kind leaves the
+ *         denominator.  Other verdict words, or a row without reason, is a refusal (rc 2).
+ *
+ * prep: `git -C R archive REV` is unpacked into DIR/slot-0 and P is applied with `git apply`; slots 1..par-1
+ * are copies.  Only added lines of .cx/.c files are mutated; blank lines, comment lines, preprocessor lines and
+ * (unless --mutate-checks) files named check-*.cx are skipped.
+ * Operators: cmp (== != < <= > >= swapped, boundary), neg (if (x) -> if (!(x))), int (n -> n+1 / 1 -> 0),
+ * str (one character of a string literal), del (drop a return / blocked += / rcpt_set statement, or turn a
+ * call statement into 0), arg (drop the last argument of a call with >= 2 arguments), logic (&& <-> ||).
+ * At most --max (default 30) are picked round robin over (file, operator) buckets.  --coverage-check adds one
+ * `cov` mutant per touched function: `*(volatile int *)0 = 0;` right after its opening brace; a surviving cov
+ * mutant means the checks never execute that function (typical cause: the check tests its own copy).
+ * worker: per mutant the line is replaced in the slot tree, the file must still compile
+ * (`sh ./unisacc.com -c -funit FILE -o TMP`; compile failures are discarded and counted), then every check
+ * runs in the slot (cwd = slot, ckk_sh_t, at most 55 s each, inside `setsid` so the process group is killed
+ * on return); a mutant is killed when some check has rc != 0 or prints failed=N with N > 0.  The original
+ * file is restored before the next mutant.
+ * report: DIR/survivors.tsv (id file line kind mutated-line), DIR/SUMMARY and the line
+ *   MUTATION_GATE mutants=N killed=K survived=S compile_fail=C missing=X score=K/N(=F) adjudicated=A
+ *                 score_adj=K/(N-A)(=G) min=M verdict=PASS|FAIL
+ * (cov mutants are reported apart as MUTATION_COVERAGE funcs=N covered=K uncovered=U allowed=W, followed by
+ * one MG_UNCOVERED file func allowed|blocking line per uncovered function).  rc 0 when the adjudicated score
+ * >= min-score (default 0.6) and every uncovered function is listed in --allow-uncovered, rc 1 otherwise,
+ * rc 2 on refusal
+ * (bad arguments, patch does not apply, baseline check not green, no mutant).  N = 0 is a refusal. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.process
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define MG_MAXCHK 8
+#define MG_MAXC 4096
+#define MG_LINE 4096
+
+static const char *g_patch, *g_base, *g_out, *g_repo = 0, *g_chk[MG_MAXCHK];
+static int g_nchk, g_max = 30, g_par = 0, g_cov, g_mutchecks, g_git, g_slot = -1, g_deadline = 280;
+static double g_min = 0.6;
+static int g_min_set;
+static const char *g_allow_unc, *g_adjud;
+
+static void die2(const char *a, const char *b) { fprintf(stderr, "mutation-gate: REFUSE %s %s\n", a, b ? b : ""); exit(2); }
+
+static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("mutation-gate", script, out, cap, secs); }
+
+/* single-quote S for sh into D */
+static void shq(char *d, int cap, const char *s) {
+    int k = 0; d[k++] = '\'';
+    for (; *s; s++) { if (k > cap - 6) die2("quote", "too long"); if (*s == '\'') { d[k++] = '\''; d[k++] = '\\'; d[k++] = '\''; d[k++] = '\''; } else d[k++] = *s; }
+    d[k++] = '\''; d[k] = 0;
+}
+
+static char *slurp(const char *p, size_t *n) { size_t z = 0; char *b = cx_read(p, &z); if (n) *n = z; return b; }
+static void spit(const char *p, const char *b, size_t n) { if (cx_write(p, b, n) != 0) die2("write", p); }
+/* checked copy: refuses instead of truncating or overrunning */
+static void cp(void *d, long cap, const void *s, long n) { if (mm_copy(d, cap, s, n) != 0) die2("copy", "out of bound"); }
+
+/* ---------- configuration persisted by prep ---------- */
+static void save_conf(void) {
+    char p[1024], b[16384]; int k = 0, i;
+    cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
+    k += snprintf(b + k, sizeof b - k, "par\t%d\nmax\t%d\nmin\t%g\ncov\t%d\n", g_par, g_max, g_min, g_cov);
+    for (i = 0; i < g_nchk; i++) k += snprintf(b + k, sizeof b - k, "check\t%s\n", g_chk[i]);
+    if (k >= (int)sizeof b) die2("conf", "too long");
+    spit(p, b, (size_t)k);
+}
+static void load_conf(void) {
+    char p[1024]; size_t n; char *b, *s, *e;
+    cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
+    b = slurp(p, &n); if (!b) die2("missing", p);
+    for (s = b; s < b + n; s = e + 1) {
+        e = s; while (e < b + n && *e != '\n') e++; *e = 0;
+        if (!strncmp(s, "par\t", 4)) g_par = atoi(s + 4);
+        else if (!strncmp(s, "max\t", 4)) g_max = atoi(s + 4);
+        else if (!strncmp(s, "cov\t", 4)) g_cov = atoi(s + 4);
+        else if (!strncmp(s, "min\t", 4) && !g_min_set) g_min = atof(s + 4);
+        else if (!strncmp(s, "check\t", 6) && g_nchk < MG_MAXCHK) g_chk[g_nchk++] = s + 6;
+    }
+}
+
+/* ---------- lexical helpers ---------- */
+/* m[i] = 1 when line[i] is code (not inside a string/char literal or comment) */
+static void code_mask(const char *l, char *m) {
+    int i = 0, st = 0;
+    for (; l[i]; i++) {
+        if (st == 0) {
+            if (l[i] == '/' && l[i + 1] == '/') { for (; l[i]; i++) m[i] = 0; break; }
+            if (l[i] == '/' && l[i + 1] == '*') { st = 3; m[i] = 0; continue; }
+            if (l[i] == '"') { st = 1; m[i] = 0; continue; }
+            if (l[i] == '\'') { st = 2; m[i] = 0; continue; }
+            m[i] = 1;
+        } else {
+            m[i] = 0;
+            if ((st == 1 || st == 2) && l[i] == '\\' && l[i + 1]) { m[++i] = 0; continue; }
+            if (st == 1 && l[i] == '"') st = 0;
+            else if (st == 2 && l[i] == '\'') st = 0;
+            else if (st == 3 && l[i] == '*' && l[i + 1] == '/') { m[++i] = 0; st = 0; }
+        }
+    }
+    m[i] = 0;
+}
+static int isid(int c) { int l = c | 32; return c == '_' || (c >= '0' && c <= '9') || (l >= 'a' && l <= 'z'); }
+static int isdig(int c) { return c >= '0' && c <= '9'; }
+/* index of the ')' matching '(' at o (code only), -1 when not on this line */
+static int match_paren(const char *l, const char *m, int o) {
+    int d = 0, i;
+    for (i = o; l[i]; i++) { if (!m[i]) continue; if (l[i] == '(') d++; else if (l[i] == ')' && --d == 0) return i; }
+    return -1;
+}
+static int splice(char *d, int cap, const char *l, int a, int b, const char *ins) {
+    /* d = l[0..a) + ins + l[b..] */
+    return cx_fmt(d, cap, "%.*s%s%s", a, l, ins, l + b) ? -1 : 0;
+}
+static int skip_line(const char *l) {
+    while (*l == ' ' || *l == '\t') l++;
+    if (!*l || *l == '\n') return 1;
+    if (l[0] == '/' && (l[1] == '/' || l[1] == '*')) return 1;
+    if (l[0] == '*' || l[0] == '#') return 1;
+    return 0;
+}
+
+/* ---------- candidates ---------- */
+typedef struct { int file, line, kind; char *text; char desc[96]; } Cand;
+static const char *KN[] = { "cmp", "neg", "int", "str", "del", "arg", "logic", "cov" };
+#define NK 8
+static Cand *g_c; static int g_nc, g_cc;
+static char *g_files[512]; static int g_nf;
+
+static void add(int f, int ln, int kind, const char *text, const char *desc) {
+    if (g_nc == g_cc) { g_cc = g_cc ? g_cc * 2 : 256; g_c = mm_grow(g_c, (long)g_cc * (long)sizeof(Cand)); }
+    g_c[g_nc].file = f; g_c[g_nc].line = ln; g_c[g_nc].kind = kind; g_c[g_nc].text = mm_strdup(text);
+    cx_fmt(g_c[g_nc].desc, sizeof g_c[g_nc].desc, "%s", desc); g_nc++;
+}
+
+static void gen_line(int f, int ln, const char *l) {
+    char m[MG_LINE], d[MG_LINE + 64], desc[96]; int i, n = (int)strlen(l), done;
+    if (n >= MG_LINE - 8) return;
+    code_mask(l, m);
+    /* cmp: first comparison operator */
+    for (i = 0, done = 0; l[i] && !done; i++) {
+        const char *rep = 0; int w = 1;
+        if (!m[i]) continue;
+        if (l[i] == '=' && l[i + 1] == '=') { rep = "!="; w = 2; }
+        else if (l[i] == '!' && l[i + 1] == '=') { rep = "=="; w = 2; }
+        else if (l[i] == '<' && l[i + 1] == '=') { rep = "<"; w = 2; }
+        else if (l[i] == '>' && l[i + 1] == '=') { rep = ">"; w = 2; }
+        else if (l[i] == '<' && l[i + 1] != '<' && (i == 0 || l[i - 1] != '<')) rep = "<=";
+        else if (l[i] == '>' && l[i + 1] != '>' && (i == 0 || (l[i - 1] != '>' && l[i - 1] != '-'))) rep = ">=";
+        if (rep && !splice(d, sizeof d, l, i, i + w, rep)) { cx_fmt(desc, sizeof desc, "col %d %.*s -> %s", i + 1, w, l + i, rep); add(f, ln, 0, d, desc); done = 1; }
+        if (rep) i += w - 1;
+    }
+    /* neg: if ( ... ) wrapped in !( ) */
+    for (i = 0; l[i]; i++) {
+        if (m[i] && l[i] == 'i' && l[i + 1] == 'f' && (i == 0 || !isid(l[i - 1])) && !isid(l[i + 2])) {
+            int o = i + 2, c; while (l[o] == ' ') o++;
+            if (l[o] != '(') continue;
+            c = match_paren(l, m, o); if (c < 0) break;
+            if (!cx_fmt(d, sizeof d, "%.*s(!(%.*s))%s", o, l, c - o - 1, l + o + 1, l + c + 1)) { cx_fmt(desc, sizeof desc, "col %d if (x) -> if (!(x))", i + 1); add(f, ln, 1, d, desc); }
+            break;
+        }
+    }
+    /* int: first decimal literal not part of an identifier */
+    for (i = 0; l[i]; i++) {
+        if (m[i] && isdig(l[i]) && (i == 0 || (!isid(l[i - 1]) && l[i - 1] != '.'))) {
+            int e = i; long v = 0; char nv[32];
+            while (isdig(l[e])) { v = v * 10 + (l[e] - '0'); e++; }
+            if (isid(l[e]) || l[e] == '.' || (e - i) > 9) { i = e; continue; }
+            cx_fmt(nv, sizeof nv, "%ld", v == 1 ? 0L : v + 1);
+            if (!splice(d, sizeof d, l, i, e, nv)) { cx_fmt(desc, sizeof desc, "col %d %ld -> %s", i + 1, v, nv); add(f, ln, 2, d, desc); }
+            break;
+        }
+    }
+    /* str: first string literal with a letter: change its last letter before '=' or its last letter */
+    for (i = 0; l[i]; i++) {
+        if (l[i] == '"' && (i == 0 || m[i - 1] || i == 0) && (i == 0 || l[i - 1] != '\'')) {
+            int e = i + 1, pick = -1, eq = -1;
+            while (l[e] && l[e] != '"') { if (l[e] == '\\' && l[e + 1]) { e += 2; continue; } if (l[e] == '=' && eq < 0) eq = e; e++; }
+            if (!l[e]) break;
+            { int j, lim = eq > 0 ? eq : e; for (j = i + 1; j < lim; j++) if ((l[j] >= 'a' && l[j] <= 'z') || (l[j] >= 'A' && l[j] <= 'Z')) { if (j > i + 1 && l[j - 1] == '%') continue; if (j > i + 1 && l[j - 1] == '\\') continue; pick = j; } }
+            if (pick > 0) {
+                char r[2]; r[0] = l[pick] == 'X' ? 'Y' : 'X'; r[1] = 0;
+                if (!splice(d, sizeof d, l, pick, pick + 1, r)) { cx_fmt(desc, sizeof desc, "col %d string char %c -> %s", pick + 1, l[pick], r); add(f, ln, 3, d, desc); }
+                break;
+            }
+            i = e;
+        }
+    }
+    /* del: whole statement line, or call statement -> 0 */
+    {
+        const char *t = l; while (*t == ' ' || *t == '\t') t++;
+        int bal = 0, k; for (k = 0; l[k]; k++) if (m[k]) { if (l[k] == '{') bal++; else if (l[k] == '}') bal--; }
+        int endsemi = 0; for (k = n - 1; k >= 0 && (l[k] == ' ' || l[k] == '\t' || l[k] == '\n' || l[k] == '\r'); k--); endsemi = k >= 0 && l[k] == ';';
+        int keyw = !strncmp(t, "return", 6) || strstr(l, "blocked +=") || strstr(l, "blocked+=") || strstr(l, "rcpt_set(");
+        if (keyw && bal == 0 && endsemi && strncmp(t, "return", 6) == 0 && !strchr(t, '{')) { add(f, ln, 4, ";", "delete return line"); }
+        else if (keyw && bal == 0 && endsemi && !strchr(t, '{') && !strncmp(t, "blocked", 7)) { add(f, ln, 4, ";", "delete blocked += line"); }
+        else {
+            const char *want[] = { "rcpt_set(", "blocked +=", "blocked+=", 0 }; int w;
+            for (w = 0; want[w]; w++) {
+                const char *p = strstr(l, want[w]); int o, c;
+                if (!p || !m[p - l]) continue;
+                o = (int)(p - l);
+                if (w == 0) { int po = o + 8; c = match_paren(l, m, po); if (c < 0) continue; if (!splice(d, sizeof d, l, o, c + 1, "(void)0")) { add(f, ln, 4, d, "rcpt_set(...) -> (void)0"); } }
+                else { const char *s2 = strchr(p, ';'); if (!s2) continue; if (!splice(d, sizeof d, l, o, (int)(s2 - l), "(void)0")) add(f, ln, 4, d, "blocked += x -> (void)0"); }
+                break;
+            }
+        }
+    }
+    /* arg: first call with >= 2 top-level args: drop the last one */
+    for (i = 1; l[i] && (l[0] == ' ' || l[0] == '\t'); i++) {   /* column-0 lines are definitions: no call to cut */
+        if (m[i] && l[i] == '(' && isid(l[i - 1])) {
+            int c = match_paren(l, m, i), d0 = 0, k, last = -1, s0 = i - 1;
+            if (c < 0) continue;
+            while (s0 > 0 && isid(l[s0 - 1])) s0--;
+            if (!strncmp(l + s0, "if", 2) && i - s0 == 2) continue;
+            if ((!strncmp(l + s0, "for", 3) && i - s0 == 3) || (!strncmp(l + s0, "while", 5) && i - s0 == 5) || (!strncmp(l + s0, "switch", 6) && i - s0 == 6) || (!strncmp(l + s0, "sizeof", 6) && i - s0 == 6) || (!strncmp(l + s0, "return", 6) && i - s0 == 6)) continue;
+            for (k = i + 1; k < c; k++) { if (!m[k]) continue; if (l[k] == '(' || l[k] == '[' || l[k] == '{') d0++; else if (l[k] == ')' || l[k] == ']' || l[k] == '}') d0--; else if (l[k] == ',' && d0 == 0) last = k; }
+            if (last < 0) continue;
+            if (!splice(d, sizeof d, l, last, c, "")) { cx_fmt(desc, sizeof desc, "col %d %.*s(...) drop last argument", s0 + 1, i - s0 > 40 ? 40 : i - s0, l + s0); add(f, ln, 5, d, desc); }
+            break;
+        }
+    }
+    /* logic */
+    for (i = 0; l[i]; i++) {
+        if (m[i] && ((l[i] == '&' && l[i + 1] == '&') || (l[i] == '|' && l[i + 1] == '|'))) {
+            if (!splice(d, sizeof d, l, i, i + 2, l[i] == '&' ? "||" : "&&")) { cx_fmt(desc, sizeof desc, "col %d %.2s swapped", i + 1, l + i); add(f, ln, 6, d, desc); }
+            break;
+        }
+    }
+}
+
+/* ---------- patch parsing ---------- */
+typedef struct { int file, line; } Add;
+static Add *g_add; static int g_nadd, g_cadd;
+
+static int want_file(const char *p) {
+    int n = (int)strlen(p), i;
+    if (!(n > 3 && !strcmp(p + n - 3, ".cx")) && !(n > 2 && !strcmp(p + n - 2, ".c"))) return 0;
+    if (g_mutchecks) return 1;
+    { const char *b = strrchr(p, '/'); b = b ? b + 1 : p; if (!strncmp(b, "check-", 6)) return 0; }
+    (void)i;   /* a check command may run the product file itself (exact-output checks): only check-*.cx is skipped */
+    return 1;
+}
+static void parse_patch(const char *patch) {
+    size_t n; char *b = slurp(patch, &n), *s, *e; int cur = -1, nl = 0;
+    if (!b) die2("cannot read patch", patch);
+    for (s = b; s < b + n; s = e + 1) {
+        e = s; while (e < b + n && *e != '\n') e++;
+        if (e - s >= 6 && !strncmp(s, "+++ ", 4)) {
+            char p[1024]; int L = (int)(e - s) - 4; const char *q = s + 4;
+            if (L > 2 && !strncmp(q, "b/", 2)) { q += 2; L -= 2; }
+            if (L >= (int)sizeof p) L = sizeof p - 1;
+            cp(p, (long)sizeof p, q, L); p[L] = 0;
+            { char *t = strchr(p, '\t'); if (t) *t = 0; }
+            cur = -1;
+            if (want_file(p) && g_nf < 512) { g_files[g_nf] = mm_strdup(p); cur = g_nf++; }
+            continue;
+        }
+        if (e - s >= 4 && !strncmp(s, "--- ", 4)) continue;
+        if (!strncmp(s, "diff ", 5)) { cur = -1; continue; }
+        if (!strncmp(s, "@@ ", 3)) { const char *pl = memchr(s, '+', (size_t)(e - s)); nl = pl ? atoi(pl + 1) : 0; continue; }
+        if (cur < 0) continue;
+        if (*s == '+') { if (g_nadd == g_cadd) { g_cadd = g_cadd ? g_cadd * 2 : 512; g_add = mm_grow(g_add, (long)g_cadd * (long)sizeof(Add)); } g_add[g_nadd].file = cur; g_add[g_nadd].line = nl; g_nadd++; nl++; }
+        else if (*s == ' ') nl++;
+    }
+    mm_free(b);
+}
+
+/* split file into lines (in place) */
+static int split_lines(char *b, size_t n, char ***out) {
+    int cnt = 1, k = 0; size_t i; char **v;
+    for (i = 0; i < n; i++) if (b[i] == '\n') cnt++;
+    v = mm_alloc((long)(cnt + 1) * (long)sizeof(char *));
+    v[k++] = b;
+    for (i = 0; i < n; i++) if (b[i] == '\n') { b[i] = 0; if (i + 1 <= n) v[k++] = b + i + 1; }
+    *out = v; return k;
+}
+
+static void gen_cov(int f, char **L, int nlines, int ln, int *seen, int nseen_cap) {
+    int j;
+    for (j = ln - 1; j >= 1; j--) {
+        const char *l = L[j - 1];
+        if (l[0] == '}' && j != ln) return;           /* left the function: added line is outside a body */
+        if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '#' && l[0] != '/' && l[0] != '*' && l[0] != '}' && strchr(l, '(') && strchr(l, '{') && !strstr(l, "typedef") && !strstr(l, "struct ") ) {
+            char m[MG_LINE], d[MG_LINE + 64], desc[96]; int k, o = -1;
+            if (strlen(l) >= MG_LINE - 40) return;
+            for (k = 0; k < nseen_cap && seen[k]; k++) if (seen[k] == j) return;
+            if (k < nseen_cap) seen[k] = j;
+            code_mask(l, m);
+            for (k = 0; l[k]; k++) if (m[k] && l[k] == '{') { o = k; break; }
+            if (o < 0) return;
+            if (splice(d, sizeof d, l, o + 1, o + 1, " *(volatile int *)0 = 0; ")) return;
+            cx_fmt(desc, sizeof desc, "abort at entry of %.60s", l);
+            add(f, j, 7, d, desc);
+            return;
+        }
+    }
+    (void)nlines;
+}
+
+/* ---------- prep ---------- */
+static void prep(void) {
+    char cmd[16384], q1[2048], q2[2048], q3[2048], out[8192], p[1024]; int rc, i, f;
+    long t0 = sy_now_ms();
+    if (!g_patch || !g_base || !g_out || !g_nchk) die2("usage", "need --patch --base --check --out");
+    if (!g_repo) { const char *h = getenv("HOME"); static char rb[512]; cx_fmt(rb, sizeof rb, "%s/repos/unisacc", h ? h : "."); g_repo = rb; }
+    if (g_par <= 0) { long nc = sy_ncpu(); g_par = nc > 1 ? (int)(nc / 2) : 1; }
+    if (g_par > 16) g_par = 16;
+    if (sy_exists(g_out)) { cx_fmt(p, sizeof p, "%s/conf.tsv", g_out); if (sy_exists(p)) die2("out dir already prepared", g_out); }
+    sy_mkdir(g_out, 0755);
+    shq(q1, sizeof q1, g_repo); shq(q2, sizeof q2, g_base); shq(q3, sizeof q3, g_out);
+    {
+        char qp[2048]; char ab[1024]; if (!realpath(g_patch, ab)) die2("patch", g_patch); shq(qp, sizeof qp, ab);
+        cx_fmt(cmd, sizeof cmd, "set -e; mkdir -p %s/slot-0 %s/m; git -C %s archive %s | tar -x -C %s/slot-0; ln -sfn \"$(pwd)/unisacc.com\" %s/slot-0/unisacc.com 2>/dev/null || true; "
+               "if [ -L unisacc.com ]; then ln -sfn \"$(readlink -f unisacc.com)\" %s/slot-0/unisacc.com; fi; cd %s/slot-0 && git apply --whitespace=nowarn %s 2>&1 || git apply --3way %s 2>&1 || exit 3",
+               q3, q3, q1, q2, q3, q3, q3, q3, qp, qp);
+    }
+    rc = sh(cmd, out, sizeof out, 55);
+    if (rc != 0) { fprintf(stderr, "%s", out); die2("archive or git apply failed rc", ""); }
+    if (g_git) {   /* checks that need a work tree (git grep, git diff) get a private repo with the patch committed */
+        cx_fmt(cmd, sizeof cmd, "set -e; cd %s/slot-0; git init -q; git -c user.email=mg@local -c user.name=mutation-gate add -A >/dev/null; "
+               "git -c user.email=mg@local -c user.name=mutation-gate commit -q -m mutation-gate-base >/dev/null", q3);
+        rc = sh(cmd, out, sizeof out, 55);
+        if (rc != 0) { fprintf(stderr, "%s", out); die2("git init of private tree failed", ""); }
+    }
+    parse_patch(g_patch);
+    /* candidates per file */
+    for (f = 0; f < g_nf; f++) {
+        size_t n; char **L; int nl, a, seen[256];
+        cx_fmt(p, sizeof p, "%s/slot-0/%s", g_out, g_files[f]);
+        char *b = slurp(p, &n); if (!b) continue;
+        nl = split_lines(b, n, &L);
+        memset(seen, 0, sizeof seen);
+        for (a = 0; a < g_nadd; a++) {
+            if (g_add[a].file != f || g_add[a].line < 1 || g_add[a].line > nl) continue;
+            if (!skip_line(L[g_add[a].line - 1])) gen_line(f, g_add[a].line, L[g_add[a].line - 1]);
+            if (g_cov) gen_cov(f, L, nl, g_add[a].line, seen, 256);
+        }
+        mm_free(L); mm_free(b);
+    }
+    /* selection: round robin over (file, kind) buckets; cov mutants are all kept (not limited by --max) */
+    {
+        int *pick = mm_zalloc((long)(g_nc + 1) * (long)sizeof(int)), *used = mm_zalloc((long)(g_nc + 1) * (long)sizeof(int)), np = 0, round, any, id = 0;
+        char tsv[1 << 16]; int tk = 0;
+        for (round = 0; np < g_max; round++) {
+            any = 0;
+            for (f = 0; f < g_nf && np < g_max; f++) for (int k = 0; k < NK - 1 && np < g_max; k++) {
+                int seen = 0, c, cand = 0; for (c = 0; c < g_nc; c++) if (g_c[c].file == f && g_c[c].kind == k) cand++;
+                if (cand == 0) continue;
+                /* stride through the bucket so later rounds spread over the file */
+                int want = round, idx = -1, cnt = 0;
+                if (want >= cand) continue;
+                for (c = 0; c < g_nc; c++) if (g_c[c].file == f && g_c[c].kind == k) { if (cnt == want) { idx = c; break; } cnt++; }
+                (void)seen;
+                if (idx >= 0 && !used[idx]) { used[idx] = 1; pick[np++] = idx; any = 1; }
+            }
+            if (!any) break;
+        }
+        if (g_cov) for (int c = 0; c < g_nc; c++) if (g_c[c].kind == 7) pick[np++] = c;
+        for (i = 0; i < np; i++) {
+            Cand *c = &g_c[pick[i]];
+            char mp[1024]; cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id);
+            spit(mp, c->text, strlen(c->text));
+            tk += snprintf(tsv + tk, sizeof tsv - tk, "%d\t%s\t%d\t%s\t%s\n", id, g_files[c->file], c->line, KN[c->kind], c->desc);
+            if (tk >= (int)sizeof tsv - 200) break;
+            id++;
+        }
+        cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); spit(p, tsv, (size_t)tk);
+        printf("MG_PREP files=%d added_lines=%d candidates=%d selected=%d par=%d\n", g_nf, g_nadd, g_nc, id, g_par);
+        if (id == 0) { save_conf(); die2("no mutant", "(patch adds no mutable .cx/.c line outside checks)"); }
+    }
+    save_conf();
+    /* baseline: every check must be green on the unmutated patched tree */
+    for (i = 0; i < g_nchk; i++) {
+        char sc[8192]; int failed;
+        { char qc[4096]; shq(qc, sizeof qc, g_chk[i]); cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qc); }
+        rc = sh(sc, out, sizeof out, 55);
+        { const char *fp = strstr(out, "failed="); failed = fp ? atoi(fp + 7) : 0; }
+        printf("MG_BASELINE check=%d rc=%d failed=%d\n", i, rc, failed);
+        if (rc != 0 || failed > 0) { fprintf(stderr, "%.2000s\n", out); die2("baseline check not green on patched tree:", g_chk[i]); }
+    }
+    /* harness self-test: the compile gate must reject a broken file, otherwise every mutant would be judged
+       on a stale or unparsed tree (a non-waiting wrapper once made every rc 0) */
+    {
+        char fp[2048], qf[2048], sc[8192]; size_t on; char *orig;
+        cx_fmt(fp, sizeof fp, "%s/slot-0/%s", g_out, g_files[g_c[0].file]);
+        orig = slurp(fp, &on); if (!orig) die2("read", fp);
+        { char *nb = mm_alloc((long)on + 64); cp(nb, (long)on + 64, orig, (long)on); cp(nb + on, 64, "\n@@ mutation-gate broken @@\n", 28); spit(fp, nb, on + 28); mm_free(nb); }
+        shq(qf, sizeof qf, g_files[g_c[0].file]);
+        cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-selftest.o >/dev/null 2>&1", q3, qf);
+        rc = sh(sc, out, sizeof out, 55);
+        spit(fp, orig, on); mm_free(orig);
+        { char tp[1024]; cx_fmt(tp, sizeof tp, "%s/slot-0/.mg-selftest.o", g_out); sy_unlink(tp); }
+        printf("MG_SELFTEST compile_gate_rejects_broken=%s\n", rc ? "yes" : "no");
+        if (rc == 0) die2("compile gate inert:", "a deliberately broken file compiled");
+    }
+    /* slot copies */
+    for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, 55)) die2("copy slot", ""); }
+    printf("MG_PREP_DONE ms=%ld\n", sy_now_ms() - t0);
+}
+
+/* ---------- worker ---------- */
+static int killed_by(const char *out, int rc) {
+    const char *p = out;
+    if (rc != 0) return 1;
+    while ((p = strstr(p, "failed=")) != 0) { if (atoi(p + 7) > 0) return 1; p += 7; }
+    return 0;
+}
+static void worker(void) {
+    char p[1024], q3[2048], sd[1024], res[1024]; size_t n; char *tsv, *s, *e; int fd_rows = 0;
+    load_conf();
+    cx_fmt(sd, sizeof sd, "%s/slot-%d", g_out, g_slot); shq(q3, sizeof q3, sd);
+    cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
+    cx_fmt(res, sizeof res, "%s/res-%d.tsv", g_out, g_slot);
+    { char acc[1 << 15]; int ak = 0;
+    for (s = tsv; s < tsv + n; s = e + 1) {
+        char row[2048], file[1024], fp[2048], mp[1024], out[65536], cmd[8192]; int id, line, L, rc, i, verdict = 0; long t0 = sy_now_ms();
+        e = s; while (e < tsv + n && *e != '\n') e++;
+        L = (int)(e - s); if (L <= 0 || L >= (int)sizeof row) continue;
+        cp(row, (long)sizeof row, s, L); row[L] = 0;
+        id = atoi(row); if (id % g_par != g_slot) continue;
+        { char *t1 = strchr(row, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0; if (!t2) continue; cp(file, (long)sizeof file - 1, t1 + 1, (long)(t2 - t1 - 1)); file[t2 - t1 - 1] = 0; line = atoi(t2 + 1); }
+        cx_fmt(fp, sizeof fp, "%s/%s", sd, file); cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id);
+        size_t on, mn; char *orig = slurp(fp, &on), *ml = slurp(mp, &mn);
+        if (!orig || !ml) { if (orig) mm_free(orig); if (ml) mm_free(ml); continue; }
+        /* build mutated file */
+        { char *nb = mm_alloc((long)(on + mn + 8)); size_t k = 0, ls = 0; int cur = 1; size_t i2;
+          for (i2 = 0; i2 <= on; i2++) {
+              if (i2 == on || orig[i2] == '\n') {
+                  if (cur == line) { cp(nb + k, (long)(on + mn + 8 - k), ml, (long)mn); k += mn; } else { cp(nb + k, (long)(on + mn + 8 - k), orig + ls, (long)(i2 - ls)); k += i2 - ls; }
+                  if (i2 < on) nb[k++] = '\n';
+                  ls = i2 + 1; cur++;
+              }
+          }
+          spit(fp, nb, k); mm_free(nb); }
+        /* compile gate */
+        { char qf[2048]; shq(qf, sizeof qf, file);
+          char ql[2048], lp[1024]; cx_fmt(lp, sizeof lp, "%s/m/%d.compile.log", g_out, id); shq(ql, sizeof ql, lp);
+          cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-compile-%d.o >%s 2>&1", q3, qf, id, ql); }
+        rc = sh(cmd, out, sizeof out, 55);
+        { char tmpo[1024]; cx_fmt(tmpo, sizeof tmpo, "%s/.mg-compile-%d.o", sd, id); sy_unlink(tmpo); }
+        if (rc != 0) verdict = 2;
+        else {
+            for (i = 0; i < g_nchk; i++) {
+                char qc[4096]; shq(qc, sizeof qc, g_chk[i]);
+                cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh -c %s 2>&1", q3, qc);
+                out[0] = 0; rc = sh(cmd, out, sizeof out, 55);
+                if (killed_by(out, rc)) { verdict = 1; break; }
+            }
+        }
+        spit(fp, orig, on); mm_free(orig); mm_free(ml);
+        ak += snprintf(acc + ak, sizeof acc - ak, "%d\t%s\t%d\t%ld\n", id, verdict == 1 ? "killed" : verdict == 2 ? "compile_fail" : "survived", rc, sy_now_ms() - t0);
+        spit(res, acc, (size_t)ak); fd_rows++;
+    } }
+    cx_fmt(p, sizeof p, "%s/done-%d", g_out, g_slot); spit(p, "1\n", 2);
+    printf("MG_WORKER slot=%d rows=%d\n", g_slot, fd_rows);
+}
+
+/* ---------- report ---------- */
+/* nth (0-based) TAB field of ROW into D; 0 when absent */
+static int field(const char *row, int nth, char *d, int cap) {
+    const char *s = row, *e; int k;
+    for (k = 0; k < nth; k++) { s = strchr(s, '\t'); if (!s) { d[0] = 0; return 0; } s++; }
+    e = s; while (*e && *e != '\t' && *e != '\n') e++;
+    k = (int)(e - s); if (k >= cap) k = cap - 1;
+    cp(d, cap, s, k); d[k] = 0; return 1;
+}
+/* function name of a cov mutant: the identifier right before the first '(' in "abort at entry of <line>" */
+static void cov_func(const char *desc, char *d, int cap) {
+    const char *p = strstr(desc, "abort at entry of "), *q, *a;
+    int k;
+    d[0] = 0; if (!p) return;
+    p += 18; q = strchr(p, '('); if (!q) return;
+    while (q > p && q[-1] == ' ') q--;
+    a = q; while (a > p && isid((unsigned char)a[-1])) a--;
+    k = (int)(q - a); if (k <= 0) return; if (k >= cap) k = cap - 1;
+    cp(d, cap, a, k); d[k] = 0;
+}
+/* reviewer list: rows split into lines; comment (#) and blank lines skipped.  NULL path -> 0 rows. */
+static int load_list(const char *path, char ***rows) {
+    size_t n; char *b; int nr;
+    *rows = 0; if (!path) return 0;
+    b = slurp(path, &n); if (!b) die2("cannot read", path);
+    nr = split_lines(b, n, rows);
+    return nr;
+}
+/* is (file, func) in the --allow-uncovered rows?  rows must have a non-empty reason */
+static int allowed_unc(char **R, int nr, const char *file, const char *func) {
+    char f[1024], fn[256], why[1024]; int i;
+    for (i = 0; i < nr; i++) {
+        if (!R[i][0] || R[i][0] == '#') continue;
+        if (!field(R[i], 0, f, sizeof f) || !field(R[i], 1, fn, sizeof fn) || !field(R[i], 2, why, sizeof why) || !why[0]) die2("--allow-uncovered row needs file, function, reason:", R[i]);
+        if (!strcmp(f, file) && !strcmp(fn, func)) return 1;
+    }
+    return 0;
+}
+/* is the surviving mutant (file, line, kind, desc) adjudicated? */
+static int adjudicated(char **R, int nr, const char *file, int line, const char *kind, const char *desc) {
+    char f[1024], ln[32], mu[256], vd[64], why[1024]; int i;
+    for (i = 0; i < nr; i++) {
+        if (!R[i][0] || R[i][0] == '#') continue;
+        if (!field(R[i], 0, f, sizeof f) || !field(R[i], 1, ln, sizeof ln) || !field(R[i], 2, mu, sizeof mu) || !field(R[i], 3, vd, sizeof vd) || !field(R[i], 4, why, sizeof why) || !why[0])
+            die2("--adjudicated row needs file, line, mutation, verdict, reason:", R[i]);
+        if (strcmp(vd, "equivalent") && strcmp(vd, "out-of-scope")) die2("--adjudicated verdict must be equivalent or out-of-scope:", R[i]);
+        if (!strcmp(f, file) && atoi(ln) == line && (!strcmp(mu, desc) || !strcmp(mu, kind))) return 1;
+    }
+    return 0;
+}
+
+static int report(void) {
+    char p[1024], sum[16384], sv[1 << 16], unc[8192]; size_t n; char *tsv, *s, *e; int N = 0, K = 0, S = 0, C = 0, CN = 0, CK = 0, CS = 0, sk = 0, missing = 0, verdict;
+    int A = 0, CW = 0, uk = 0; char **AU, **AJ; int nau, naj;
+    load_conf();
+    nau = load_list(g_allow_unc, &AU); naj = load_list(g_adjud, &AJ);
+    unc[0] = 0;
+    cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
+    char *res[16]; size_t rn[16]; int i;
+    for (i = 0; i < g_par && i < 16; i++) { cx_fmt(p, sizeof p, "%s/res-%d.tsv", g_out, i); res[i] = slurp(p, &rn[i]); if (!res[i]) rn[i] = 0; }
+    sk += snprintf(sv + sk, sizeof sv - sk, "id\tfile\tline\tkind\tmutation\tmutated_line\n");
+    for (s = tsv; s < tsv + n; s = e + 1) {
+        char row[2048], key[32], mp[1024]; int id, L, slot; const char *r = 0, *kind;
+        e = s; while (e < tsv + n && *e != '\n') e++;
+        L = (int)(e - s); if (L <= 0 || L >= (int)sizeof row) continue;
+        cp(row, (long)sizeof row, s, L); row[L] = 0; id = atoi(row); slot = id % g_par;
+        { char *t = row; int k; for (k = 0; k < 3 && t; k++) t = strchr(t + 1, '\t'); kind = t ? t + 1 : ""; }
+        int iscov = !strncmp(kind, "cov", 3);
+        cx_fmt(key, sizeof key, "%d\t", id);
+        if (slot < 16 && res[slot]) { const char *q = res[slot]; while (q && q < res[slot] + rn[slot]) { if (!strncmp(q, key, strlen(key))) { r = q + strlen(key); break; } q = memchr(q, '\n', (size_t)(res[slot] + rn[slot] - q)); if (q) q++; } }
+        if (!r) { missing++; continue; }
+        if (!strncmp(r, "compile_fail", 12)) { C++; continue; }
+        char fl[1024], kd[32], ds[256], ln[32];
+        field(row, 1, fl, sizeof fl); field(row, 2, ln, sizeof ln); field(row, 3, kd, sizeof kd); field(row, 4, ds, sizeof ds);
+        if (iscov) {
+            CN++;
+            if (!strncmp(r, "killed", 6)) CK++;
+            else {
+                char fn[256]; int ok; CS++;
+                cov_func(ds, fn, sizeof fn);
+                ok = fn[0] && allowed_unc(AU, nau, fl, fn);
+                if (ok) CW++;
+                uk += snprintf(unc + uk, sizeof unc - uk, "MG_UNCOVERED %s %s %s line=%s\n", fl, fn[0] ? fn : "?", ok ? "allowed" : "blocking", ln);
+                if (uk > (int)sizeof unc - 400) uk = (int)sizeof unc - 400;
+            }
+        }
+        else {
+            N++;
+            if (!strncmp(r, "killed", 6)) K++;
+            else { S++; if (adjudicated(AJ, naj, fl, atoi(ln), kd, ds)) A++; }
+        }
+        if (!strncmp(r, "survived", 8)) {
+            size_t mn; cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id); char *ml = slurp(mp, &mn);
+            char *t; for (t = ml; ml && *t; t++) if (*t == '\t' || *t == '\n') *t = ' ';
+            /* row = id file line kind desc */
+            sk += snprintf(sv + sk, sizeof sv - sk, "%s\t%.300s\n", row, ml ? ml : "");
+            if (sk > (int)sizeof sv - 600) sk = (int)sizeof sv - 600;
+            if (ml) mm_free(ml);
+        }
+    }
+    cx_fmt(p, sizeof p, "%s/survivors.tsv", g_out); spit(p, sv, (size_t)sk);
+    double sc = N ? (double)K / N : 0.0;
+    int NA = N - A; double sa = NA > 0 ? (double)K / NA : (N > 0 ? 1.0 : 0.0);
+    /* uncovered > 0 fails unless every uncovered function is allowed by the reviewer list */
+    verdict = (N > 0 && sa + 1e-9 >= g_min && CS == CW && missing == 0) ? 0 : 1;
+    int k2 = snprintf(sum, sizeof sum, "MUTATION_GATE mutants=%d killed=%d survived=%d compile_fail=%d missing=%d score=%d/%d(=%.2f) adjudicated=%d score_adj=%d/%d(=%.2f) min=%.2f verdict=%s\n", N, K, S, C, missing, K, N, sc, A, K, NA, sa, g_min, verdict ? "FAIL" : "PASS");
+    if (g_cov) k2 += snprintf(sum + k2, sizeof sum - k2, "MUTATION_COVERAGE funcs=%d covered=%d uncovered=%d allowed=%d\n%s", CN, CK, CS, CW, unc);
+    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out); spit(p, sum, (size_t)k2);
+    fputs(sum, stdout);
+    printf("MG_SURVIVORS %s/survivors.tsv\n", g_out);
+    if (N == 0) return 2;
+    return verdict;
+}
+
+/* ---------- run ---------- */
+static int run_all(const char *self) {
+    char cmd[16384], out[8192], q3[2048], qs[2048]; int i, rc; long t0 = sy_now_ms();
+    prep();
+    shq(q3, sizeof q3, g_out); shq(qs, sizeof qs, self);
+    for (i = 0; i < g_par; i++) {
+        cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
+        rc = sh(cmd, out, sizeof out, 30); if (rc) die2("spawn worker", "");
+    }
+    /* bounded wait: total deadline g_deadline s, poll every 2 s */
+    for (int it = 0; it < g_deadline / 2 + 10; it++) {
+        int done = 0; char p[1024];
+        for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/done-%d", g_out, i); if (sy_exists(p)) done++; }
+        if (done == g_par) break;
+        /* a worker whose process group is gone without done marker counts as finished (missing rows reported) */
+        { int alive = 0; for (i = 0; i < g_par; i++) { char sc[2048]; cx_fmt(sc, sizeof sc, "kill -0 \"$(cat %s/worker-%d.pid)\" 2>/dev/null", q3, i); if (sh(sc, 0, 0, 5) == 0) alive++; } if (alive == 0) break; }
+        sy_sleep_ms(2000);
+    }
+    /* clean leftovers by real PGID (setsid: pgid == pid) */
+    for (i = 0; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "p=$(cat %s/worker-%d.pid 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && kill -TERM -- -\"$p\" 2>/dev/null; true", q3, i); sh(cmd, 0, 0, 5); }
+    rc = report();
+    printf("MG_RUN ms=%ld\n", sy_now_ms() - t0);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *mode; int i;
+    if (argc < 2) die2("usage", "run|prep|worker|report ...");
+    mode = argv[1];
+    for (i = 2; i < argc; i++) {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!strcmp(a, "--coverage-check")) { g_cov = 1; continue; }
+        if (!strcmp(a, "--mutate-checks")) { g_mutchecks = 1; continue; }
+        if (!strcmp(a, "--git")) { g_git = 1; continue; }
+        if (!v) die2("missing value for", a);
+        if (!strcmp(a, "--patch")) g_patch = v;
+        else if (!strcmp(a, "--base")) g_base = v;
+        else if (!strcmp(a, "--out")) g_out = v;
+        else if (!strcmp(a, "--repo")) g_repo = v;
+        else if (!strcmp(a, "--check")) { if (g_nchk >= MG_MAXCHK) die2("too many", "--check"); g_chk[g_nchk++] = v; }
+        else if (!strcmp(a, "--max")) { g_max = atoi(v); if (g_max < 1 || g_max > 500) die2("--max outside 1..500", v); }
+        else if (!strcmp(a, "--par")) { g_par = atoi(v); if (g_par < 1 || g_par > 16) die2("--par outside 1..16", v); }
+        else if (!strcmp(a, "--min-score")) { g_min = atof(v); g_min_set = 1; if (g_min < 0 || g_min > 1) die2("--min-score outside 0..1", v); }
+        else if (!strcmp(a, "--allow-uncovered")) g_allow_unc = v;
+        else if (!strcmp(a, "--adjudicated")) g_adjud = v;
+        else if (!strcmp(a, "--slot")) g_slot = atoi(v);
+        else if (!strcmp(a, "--deadline-s")) { g_deadline = atoi(v); if (g_deadline < 30 || g_deadline > 3600) die2("--deadline-s outside 30..3600", v); }
+        else die2("unknown option", a);
+        i++;
+    }
+    if (!g_out) die2("usage", "--out required");
+    if (!strcmp(mode, "prep")) { prep(); return 0; }
+    if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
+    if (!strcmp(mode, "report")) return report();
+    if (!strcmp(mode, "run")) return run_all("tools/mutation-gate.cx");
+    die2("unknown mode", mode);
+    return 2;
+}

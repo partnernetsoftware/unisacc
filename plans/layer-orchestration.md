@@ -116,6 +116,24 @@
 - 评审超过两轮就削减范围,先落核心。
 - 清扫左移:消费者清扫在每个产品提交后自动后台跑,不放到版本末尾(见 plans/v0.0.87.md S3)。
 
+## (13) 流程:复核包、评审回合封顶与变异自检门(2026-11-20 起对新补丁生效,已在流程中的补丁不追溯)
+
+依据:T1 v6 坏案例变异自检得 0/25 且 uncovered=13,好案例 6ca81690a1 得 15/26=0.58 被旧门限 0.7 误挡;门限改 0.6,uncovered>0 默认 FAIL(见 tools/mutation-gate.cx 文件头)。
+
+复核包模板(作者交评审前备齐,缺一项评审直接退回):
+- (1) 补丁文件路径与 sha256。
+- (2) 先红后绿:新检查对旧代码的红输出原行与对新代码的绿输出原行(含 CHECK_* ok/failed 汇总行)。
+- (3) 变异自检:MUTATION_GATE 与 MUTATION_COVERAGE 原行、MG_UNCOVERED 行与 survivors.tsv;每条存活注明 equivalent(等价变异,附理由)或 补用例(写明补哪条);裁定为 equivalent/out-of-scope 的进 --adjudicated 清单,未覆盖函数逐一裁定的进 --allow-uncovered 清单。
+- (4) 对抗夹具清单:每个夹具想打穿的错误形态与对应用例名。
+- (5) 冷环境耗时三次(私有树、无缓存),给每次毫秒数。
+- (6) 变更前后行为对拍:同一组输入在旧版与新版上的输出差异,差异须逐条解释为预期。
+
+评审回合封顶两轮:第二轮结束时仍有未裁定存活或 uncovered>0(且未经 --allow-uncovered 裁定),退回作者拆小重做,不开第三轮。
+
+关键路径工具补丁(提交门、运行器、dvqualify、release-*、install-ape、register 等)提交前必须附 MUTATION_GATE 证据(verdict=PASS 原行与复核包第 3 项)。
+
+四步用法:(1) `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run --patch P --base REV --check 'CMD' --out DIR --coverage-check`;(2) `devsvc wait` 取 MUTATION_GATE 行;(3) 读 DIR/survivors.tsv 与 MG_UNCOVERED,补用例或写裁定清单;(4) `mutation-gate.cx -- report --out DIR [--adjudicated F] [--allow-uncovered F]` 重出汇总(raw 与 adjudicated 两个分数同列)。
+
 ## 工作树清单 2026-11-20(清洁执行者实测,只列不删)
 
 归属按名字与分支推断;"合入"指 HEAD 是 origin/main 祖先;最后活动均为 2026-11-20;共享检出 5.2G 未列。
