@@ -1,0 +1,129 @@
+/* tools/no-home-path.cx -- keep absolute home paths (which leak a system user name) out of the repo.
+ *
+ *   sh ./unisacc.com tools/no-home-path.cx -- --check            the ratchet (16th in tools/ratchets.cx)
+ *   sh ./unisacc.com tools/no-home-path.cx -- --staged           the pre-commit guard on staged added lines
+ *   sh ./unisacc.com tools/no-home-path.cx -- --staged-from DIFF the same on a saved `git diff --cached -U0`
+ *   sh ./unisacc.com tools/no-home-path.cx -- --write-baseline   rewrite build/no-home-path-baseline.tsv
+ *
+ * A hit is "/home/<NAME>/" or "/Users/<NAME>/" (NAME = [A-Za-z0-9._-]+, not preceded by [A-Za-z0-9._-]); the
+ * staged guard also catches "C:\Users\<NAME>\".  Write "~/", "$HOME/" or a repo-relative path instead
+ * (tools/scrub-home-paths.cx rewrites them).
+ * --check counts matching lines per tracked text file outside archive/ (git grep -cI) against the baseline
+ * build/no-home-path-baseline.tsv (FILE<TAB>LINES: the kept history, only goes down).  A file above its row
+ * or with hits and no row prints "no-home-path: FILE has N lines, baseline M"; the summary line is
+ * "no-home-path: ok: ..." or "no-home-path: FAIL: ...", exit 1 on FAIL.
+ * --staged prints BLOCKED<TAB>FILE<TAB>LINE for every added line with a hit and exits 1, else
+ * NO-HOME-PATH<TAB>ok<TAB>added=N and exits 0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define BASE "build/no-home-path-baseline.tsv"
+#define RX "(^|[^A-Za-z0-9._-])/(home|Users)/[A-Za-z0-9._-]+/"
+
+static int user_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+/* 1 when s[0..n) holds a home path with a user name */
+static int has_home(const char *s, long n) {
+    long i, j;
+    for (i = 0; i < n; i++) {
+        long pl = 0;
+        if (i > 0 && user_ch(s[i - 1])) continue;
+        if (i + 6 < n && tx_same(s + i, 6, "/home/", 6)) pl = 6;
+        else if (i + 7 < n && tx_same(s + i, 7, "/Users/", 7)) pl = 7;
+        if (pl) {
+            j = i + pl;
+            while (j < n && user_ch(s[j])) j++;
+            if (j > i + pl && j < n && s[j] == '/') return 1;
+        }
+        if (i + 9 < n && ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) && tx_same(s + i + 1, 8, ":\\Users\\", 8)) {
+            j = i + 9;
+            while (j < n && user_ch(s[j])) j++;
+            if (j > i + 9 && j < n && s[j] == '\\') return 1;
+        }
+    }
+    return 0;
+}
+
+static int staged(const char *d, long n) {
+    long at = 0, added = 0, blocked = 0; char file[1024]; file[0] = 0;
+    while (at < n) {
+        long e = tx_chr(d + at, n - at, '\n'), ln = e < 0 ? n - at : e; const char *l = d + at;
+        if (ln >= 6 && tx_same(l, 6, "+++ b/", 6)) { long fl = ln - 6 < 1023 ? ln - 6 : 1023; mm_copy(file, sizeof file, l + 6, fl); file[fl] = 0; }
+        else if (ln >= 1 && l[0] == '+' && !(ln >= 4 && tx_same(l, 4, "+++ ", 4))) {
+            added++;
+            if (has_home(l + 1, ln - 1)) { blocked++; printf("BLOCKED\t%s\t%.*s\n", file, (int)(ln - 1), l + 1); }
+        }
+        at += ln + 1;
+    }
+    if (blocked) {
+        fprintf(stderr, "no-home-path: %ld added line(s) carry an absolute home path (a system user name); write ~/ or $HOME/ or a repo-relative path (tools/scrub-home-paths.cx --write FILE)\n", blocked);
+        return 1;
+    }
+    printf("NO-HOME-PATH\tok\tadded=%ld\n", added);
+    return 0;
+}
+
+/* baseline lookup: lines allowed for FILE, -1 when no row */
+static long base_of(const char *b, long n, const char *f, long fl) {
+    long at = 0;
+    while (b && at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e, t = tx_chr(b + at, ln, '\t');
+        if (t == fl && tx_same(b + at, fl, f, fl) && b[at] != '#') {
+            long v = 0, j; for (j = t + 1; j < ln && b[at + j] >= '0' && b[at + j] <= '9'; j++) v = v * 10 + (b[at + j] - '0');
+            return v;
+        }
+        at += ln + 1;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    static char out[1 << 20];
+    int cut = 0, wb; long r, at = 0, files = 0, lines = 0, over = 0; size_t bn = 0; char *base;
+    if (argc == 2 && tx_eqz(argv[1], "--staged")) {
+        char *gv[] = {"./tools/bound", "20", "git", "diff", "--cached", "-U0", "--no-color", "--no-ext-diff", 0};   /* bounded child */
+        static char d[1 << 23];
+        r = sy_run(gv, d, sizeof d - 1, &cut);
+        if (r != 0 || cut) { fprintf(stderr, "no-home-path: git diff --cached failed or too large\n"); return 2; }
+        return staged(d, tx_len(d, sizeof d));   /* sy_run returns the exit status, the output NUL-terminated */
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--staged-from")) {
+        size_t dn; char *d = (char *)cx_read(argv[2], &dn);
+        if (!d) { fprintf(stderr, "no-home-path: cannot read %s\n", argv[2]); return 2; }
+        return staged(d, (long)dn);
+    }
+    if (argc != 2 || (!tx_eqz(argv[1], "--check") && !tx_eqz(argv[1], "--write-baseline"))) {
+        fprintf(stderr, "usage: tools/no-home-path.cx --check | --staged | --staged-from DIFF | --write-baseline\n"); return 2;
+    }
+    wb = tx_eqz(argv[1], "--write-baseline");
+    {   char *gv[] = {"./tools/bound", "30", "git", "grep", "-cI", "-E", RX, "--", ".", ":!archive", 0};   /* bounded child */
+        r = sy_run(gv, out, sizeof out - 1, &cut);
+        if (r < 0 || r > 1 || cut) { fprintf(stderr, "no-home-path: git grep failed\n"); return 2; }
+        r = r ? 0 : tx_len(out, sizeof out);   /* exit status 1 = no match */
+    }
+    base = wb ? 0 : (char *)cx_read(BASE, &bn);
+    if (!wb && !base) { printf("no-home-path: FAIL: cannot read %s\n", BASE); return 1; }
+    if (wb) printf("# no-home-path baseline: FILE<TAB>LINES with an absolute home path, kept history only goes down (tools/no-home-path.cx)\n");
+    while (at < r) {
+        long e = tx_chr(out + at, r - at, '\n'), ln = e < 0 ? r - at : e, c = -1, k, v = 0;
+        for (k = ln - 1; k >= 0; k--) if (out[at + k] == ':') { c = k; break; }
+        if (c > 0) {
+            for (k = c + 1; k < ln; k++) v = v * 10 + (out[at + k] - '0');
+            files++; lines += v;
+            if (wb) printf("%.*s\t%ld\n", (int)c, out + at, v);
+            else {
+                long b = base_of(base, (long)bn, out + at, c);
+                if (v > b) { over++; printf("no-home-path: %.*s has %ld lines, baseline %ld\n", (int)c, out + at, v, b < 0 ? 0 : b); }
+            }
+        }
+        at += ln + 1;
+    }
+    if (wb) return 0;
+    printf("no-home-path: %s: files=%ld lines=%ld over=%ld (fix: tools/scrub-home-paths.cx --write FILE)\n", over ? "FAIL" : "ok", files, lines, over);
+    return over ? 1 : 0;
+}

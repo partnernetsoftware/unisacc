@@ -1,0 +1,52 @@
+/* tools/check-no-home-path.cx -- check tools/no-home-path.cx (ratchets item 16).
+ *
+ *   sh ./unisacc.com tools/check-no-home-path.cx
+ *
+ * --staged-from blocks an added diff line that carries an absolute home path (red) and names it as
+ * BLOCKED FILE LINE; a diff whose added lines use "~/" or $HOME passes with NO-HOME-PATH ok added=N
+ * (green); --check passes on the tracked tree against build/no-home-path-baseline.tsv.
+ * Fixture strings are split ("/ho" "me/") so this file adds no home path to the tree. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.ckrun
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\tno-home-path.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
+#define has(o, s) ckk_has((o), 1 << 20, (s))
+/* each child: cx_runv_timeout with 50 s (below the batch 55 s); output copied NUL-ended into O */
+static int run(char **v, char *o, int cap) {
+    char *out = 0; size_t n = 0; int rc = cx_runv_timeout(v, 50, &out, &n);
+    if (n >= (size_t)cap) n = (size_t)cap - 1;
+    if (out) mm_copy(o, (size_t)cap, out, n);
+    o[out ? n : 0] = 0; mm_free(out);
+    return rc;
+}
+
+int main(void) {
+    static char o[1 << 16]; char d[4096], df[4200]; int rc;
+    if (cx_fmt(d, sizeof d, "%s/no-home-path-%d", sy_tmpdir(), (int)sy_pid()) || sy_mkdir(d, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    cx_fmt(df, sizeof df, "%s/s.diff", d);
+    {   const char *red = "diff --git a/p b/p\n+++ b/plans/p.md\n@@ -0,0 +1,2 @@\n+see /ho" "me/x/foo\n+ok ~/foo\n";
+        char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--staged-from", df, 0};
+        cx_write(df, red, tx_len(red, 4096));
+        rc = run(v, o, sizeof o);
+        ck(rc == 1 && has(o, "BLOCKED\tplans/p.md\tsee /ho" "me/x/foo") && !has(o, "BLOCKED\tplans/p.md\tok"), "staged-red-blocked");
+    }
+    {   const char *green = "+++ b/plans/p.md\n+ok ~/foo and $HOME/bar\n--- a/q\n";
+        char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--staged-from", df, 0};
+        cx_write(df, green, tx_len(green, 4096));
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "NO-HOME-PATH\tok\tadded=1"), "staged-green-passes");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--check", 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "no-home-path: ok: "), "tree-within-baseline");
+    }
+    sy_unlink(df); sy_rmdir(d);
+    printf("CHECK_NO_HOME_PATH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

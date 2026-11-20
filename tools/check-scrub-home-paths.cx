@@ -1,0 +1,71 @@
+/* tools/check-scrub-home-paths.cx -- check tools/scrub-home-paths.cx and tools/no-home-path.cx.
+ *
+ *   sh ./unisacc.com tools/check-scrub-home-paths.cx
+ *
+ * On a private temp fixture: --check lists the home-path lines and exits 1, --write rewrites
+ * "/home/<n>/", "/Users/<n>/" and "C:\Users\<n>\" to "~/" or "~\" and leaves "foo/home/<n>/" and
+ * "/home/<n>/" placeholders alone, a second --check is clean (idempotent), a file with a NUL byte is
+ * skipped as binary; no-home-path --staged-from blocks an added line with a home path (red) and passes a
+ * diff whose added lines use "~/" (green), and --check passes on the tracked tree against its baseline.
+ * Fixture strings are split ("/ho" "me/") so this file adds no home path to the tree. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckrun
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\tscrub-home.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
+#define has(o, s) ckk_has((o), 1 << 20, (s))
+/* every child runs under ./tools/bound 50 (below the batch 55 s) */
+static int run(char **v, char *o, int cap) {
+    char *bv[16] = {"./tools/bound", "50"}; int cut, i = 0;
+    while (v[i] && i < 13) { bv[i + 2] = v[i]; i++; }
+    bv[i + 2] = 0;
+    return sy_run(bv, o, cap, &cut);
+}
+
+int main(void) {
+    static char o[1 << 16]; char d[4096], f[4200], g[4200], df[4200]; int rc; size_t n; char *b;
+    const char *src = "a /ho" "me/x/b\n/Use" "rs/bob/c and C:\\Us" "ers\\al\\d\nfoo/ho" "me/x/ keep ~/ok /ho" "me/<n>/\n";
+    const char *want = "a ~/b\n~/c and ~\\d\nfoo/ho" "me/x/ keep ~/ok /ho" "me/<n>/\n";
+    if (cx_fmt(d, sizeof d, "%s/scrub-home-%d", sy_tmpdir(), (int)sy_pid()) || sy_mkdir(d, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    cx_fmt(f, sizeof f, "%s/t.txt", d); cx_fmt(g, sizeof g, "%s/bin.dat", d); cx_fmt(df, sizeof df, "%s/s.diff", d);
+    cx_write(f, src, tx_len(src, 4096));
+    cx_write(g, "x\0/ho" "me/x/y\n", 13);
+    {   char *v[] = {"sh", "./unisacc.com", "tools/scrub-home-paths.cx", "--", "--check", f, 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 1 && has(o, ":1:a /ho" "me/x/b") && has(o, ":2:") && !has(o, ":3:") && has(o, "SCRUB\tfiles=1\tlines=2"), "check-lists-and-fails");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/scrub-home-paths.cx", "--", "--write", f, g, 0};
+        rc = run(v, o, sizeof o);
+        b = (char *)cx_read(f, &n);
+        ck(rc == 0 && has(o, "SKIP\tbinary\t") && b && n == tx_len(want, 4096) && tx_same(b, (long)n, want, (long)n), "write-rewrites-and-skips-binary");
+        b = (char *)cx_read(g, &n);
+        ck(b && n == 13, "binary-untouched");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/scrub-home-paths.cx", "--", "--check", f, 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "SCRUB\tfiles=0\tlines=0"), "idempotent");
+    }
+    {   const char *red = "diff --git a/p b/p\n+++ b/plans/p.md\n@@ -0,0 +1,2 @@\n+see /ho" "me/x/foo\n+ok ~/foo\n";
+        char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--staged-from", df, 0};
+        cx_write(df, red, tx_len(red, 4096));
+        rc = run(v, o, sizeof o);
+        ck(rc == 1 && has(o, "BLOCKED\tplans/p.md\tsee /ho" "me/x/foo") && !has(o, "BLOCKED\tplans/p.md\tok"), "staged-red-blocked");
+    }
+    {   const char *green = "+++ b/plans/p.md\n+ok ~/foo and $HOME/bar\n--- a/q\n";
+        char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--staged-from", df, 0};
+        cx_write(df, green, tx_len(green, 4096));
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "NO-HOME-PATH\tok\tadded=1"), "staged-green-passes");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/no-home-path.cx", "--", "--check", 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "no-home-path: ok: "), "tree-within-baseline");
+    }
+    sy_unlink(f); sy_unlink(g); sy_unlink(df); sy_rmdir(d);
+    printf("CHECK_SCRUB_HOME_PATHS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
