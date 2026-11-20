@@ -107,6 +107,8 @@ flowchart LR
 
 - 执行类工作由主调度经 devsvc flow 并发自己做;子代理只开 fable 级(设计、难题);外部窗口 omp-cdx 停止派工(项目所有者 2026-11-16)。并发总量以机器负载不高于 10 为界。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果一律只是 LOCAL 证据,不是候选结果:检查可经假根测改过的 exec 表,基座(src、cx、include)改动要重装产品。
+- 整链预制路线(主调度 2026-11-20):事件触发预制对整链真实命中 0 次,react 从未真起(59 小时 67906 条事件中 react/bg-candidate/chain.done/PREPARED 均为 0;四因:触发键按内容而采纳键按提交、准入 load1 小于 6 而本机常 9 到 15、放行要求影子满 24 小时而常驻上限 7200 秒无人重拉、正规链不经 devsvc 无链事件;prebuild-self 只预制 devsvc 自身)。改走:0.0.86 推测链真起加并行确认(工具线第三项 T3)与周节奏命令,0.0.87 预跑发车去 load1 阈值,0.0.88 后再定采纳内容键;依据 /home/devali/.claude/jobs/2798e440/tmp/chain-incremental.md 第 9 节,plans/v0.0.86.md;回滚:停反应器(devsvc react stop),正规链冷起照旧,推测 APE 与正规 APE sha256 不等则证据自动 INVALID。
+- 多写者工作树(主调度 2026-11-20):同一版本两个及以上写者时,每个写者一个工作树 .claude/worktrees/v0.0.NN-短名(分支 v0.0.NN-短名),由 cc 合入 v0.0.NN;依据 2026-11-20 agyneon 在共享 v0.0.86 工作树提交被 cdx 未提交 exec/parse2 改动触发 batch-domains 与 k2-gen2 DIFF 拦下(缺口 DEVSVC-GATE-READS-SHARED-WORKTREE)。
 
 ### 仍未验证(缺什么 / 清零动作)
 
