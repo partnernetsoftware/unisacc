@@ -1,0 +1,224 @@
+/* tools/lane-inputs-gen.cx -- generate and check build/lane-inputs.tsv from seed/ident.c list-current.
+ * Single source of truth:
+ *   lane A: exact physical paths returned by `seed/ident.c ROOT list-current` (SID).
+ *   lane B: ext/ source files (.cx/.c/.h) not in SID (extension library packages).
+ *   lane C: non-product top-level trees (tools, tests, apps, ujs, examples, plans, archive, build).
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/lane-inputs-gen.cx -- --check [ROOT]
+ *   sh ./unisacc.com tools/lane-inputs-gen.cx -- --write [ROOT]
+ * Check: tools/check-lane-key-probes.cx (batch lane-key-probes)
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static void die(const char *m) {
+    fprintf(stderr, "lane-inputs-gen: REFUSE %s\n", m);
+    exit(2);
+}
+
+typedef struct {
+    char **v;
+    int n;
+    int cap;
+} StrVec;
+
+static void sv_push(StrVec *s, const char *p, size_t n) {
+    if (s->n == s->cap) {
+        int nc = s->cap ? s->cap * 2 : 256;
+        char **nv = (char **)mm_alloc((long)nc * (long)sizeof(char *));
+        if (!nv) die("oom");
+        if (s->v) {
+            mm_copy(nv, (long)nc * (long)sizeof(char *), s->v, (long)s->n * (long)sizeof(char *));
+            mm_free(s->v);
+        }
+        s->v = nv;
+        s->cap = nc;
+    }
+    char *copy = (char *)mm_alloc((long)n + 1);
+    if (!copy) die("oom");
+    if (n) mm_copy(copy, (long)n + 1, p, (long)n);
+    copy[n] = 0;
+    s->v[s->n++] = copy;
+}
+
+static void sv_free(StrVec *s) {
+    for (int i = 0; i < s->n; i++) mm_free(s->v[i]);
+    if (s->v) mm_free(s->v);
+    s->v = 0; s->n = 0; s->cap = 0;
+}
+
+static int sv_cmp(const void *a, const void *b) {
+    const char *sa = *(const char *const *)a;
+    const char *sb = *(const char *const *)b;
+    return strcmp(sa, sb);
+}
+
+static int sv_has_sorted(const StrVec *s, const char *key) {
+    int lo = 0, hi = s->n - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = strcmp(s->v[mid], key);
+        if (c == 0) return 1;
+        if (c < 0) lo = mid + 1; else hi = mid - 1;
+    }
+    return 0;
+}
+
+static void sv_sort_uniq(StrVec *s) {
+    if (s->n <= 1) return;
+    qsort(s->v, (size_t)s->n, sizeof(char *), sv_cmp);
+    int w = 1;
+    for (int i = 1; i < s->n; i++) {
+        if (strcmp(s->v[i], s->v[w - 1]) != 0) s->v[w++] = s->v[i];
+        else mm_free(s->v[i]);
+    }
+    s->n = w;
+}
+
+static int is_ext_src(const char *rel) {
+    long n = tx_len(rel, 4096);
+    if (n < 3) return 0;
+    if (rel[n - 3] == '.' && rel[n - 2] == 'c' && rel[n - 1] == 'x') return 1;
+    if (rel[n - 2] == '.' && (rel[n - 1] == 'c' || rel[n - 1] == 'h')) return 1;
+    return 0;
+}
+
+static void walk_ext(const char *root, const char *rel, int depth, StrVec *out) {
+    if (depth > 32) die("ext-depth");
+    char full[4400];
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel)) die("path-bound");
+    sy_stat_t st;
+    int rc = sy_lstat(full, &st);
+    if (rc == -ENOENT) return;
+    if (rc) die("ext-lstat");
+    if (st.kind == 'f') {
+        if (is_ext_src(rel)) sv_push(out, rel, strlen(rel));
+        return;
+    }
+    if (st.kind != 'd') return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, full)) die("ext-opendir");
+    int next;
+    while ((next = sy_dir_next(&d)) == 1) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        char sub[4400];
+        if (cx_fmt(sub, sizeof sub, "%s/%s", rel, d.name)) die("path-bound");
+        walk_ext(root, sub, depth + 1, out);
+    }
+    sy_dir_close(&d);
+    if (next < 0) die("ext-readdir");
+}
+
+static void generate_tsv(const char *root, np_buf *out) {
+    char prod[4400], ident[4400], why[512];
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
+        cx_fmt(ident, sizeof ident, "%s/seed/ident.c", root)) die("path-bound");
+
+    /* Run seed/ident.c ROOT list-current via unisacc.com */
+    char *av[] = { "sh", prod, ident, "--", (char *)root, "list-current", 0 };
+    np_result r = {0};
+    if (np_run(av, root, 0, 50, &r, why, sizeof why) || r.rc != 0 || !r.out || !r.outn) {
+        if (r.err && r.errn) fprintf(stderr, "%.*s\n", (int)r.errn, r.err);
+        np_free(&r);
+        die("sid-list-current-failed");
+    }
+
+    StrVec lane_a = {0};
+    char *cur = r.out, *end = r.out + r.outn;
+    while (cur < end) {
+        char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+        size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+        if (len > 0) {
+            char *tab = (char *)memchr(cur, '\t', len);
+            size_t plen = tab ? (size_t)(tab - cur) : len;
+            if (plen > 0) sv_push(&lane_a, cur, plen);
+        }
+        cur = nl ? nl + 1 : end;
+    }
+    np_free(&r);
+    sv_sort_uniq(&lane_a);
+    if (lane_a.n == 0) die("empty-sid-list");
+
+    StrVec ext_all = {0};
+    walk_ext(root, "ext", 0, &ext_all);
+    sv_sort_uniq(&ext_all);
+
+    StrVec lane_b = {0};
+    for (int i = 0; i < ext_all.n; i++) {
+        if (!sv_has_sorted(&lane_a, ext_all.v[i])) sv_push(&lane_b, ext_all.v[i], strlen(ext_all.v[i]));
+    }
+    sv_free(&ext_all);
+
+    np_puts(out, "# Generated by tools/lane-inputs-gen.cx from seed/ident.c list-current. Do not edit by hand.\n");
+    np_puts(out, "# path\tlane\tsource\n");
+    for (int i = 0; i < lane_a.n; i++) {
+        np_puts(out, lane_a.v[i]);
+        np_puts(out, "\tA\tsid-list-current\n");
+    }
+    for (int i = 0; i < lane_b.n; i++) {
+        np_puts(out, lane_b.v[i]);
+        np_puts(out, "\tB\text-non-sid\n");
+    }
+    static const char *const lane_c[] = {
+        "apps", "archive", "build", "examples", "plans", "tests", "tools", "ujs", 0
+    };
+    for (int i = 0; lane_c[i]; i++) {
+        np_puts(out, lane_c[i]);
+        np_puts(out, "\tC\tnon-product-tree\n");
+    }
+    sv_free(&lane_a);
+    sv_free(&lane_b);
+}
+
+int main(int argc, char **argv) {
+    int do_check = 0, do_write = 0;
+    const char *root_arg = ".";
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--check")) do_check = 1;
+        else if (tx_eqz(argv[i], "--write")) do_write = 1;
+        else if (argv[i][0] != '-') root_arg = argv[i];
+        else die("usage: --check|--write [ROOT]");
+    }
+    if (do_check + do_write != 1) die("usage: --check|--write [ROOT]");
+
+    char root[4096], target[4400];
+    if (sy_realpath(root_arg, root, sizeof root) < 0) die("root-realpath");
+    if (cx_fmt(target, sizeof target, "%s/build/lane-inputs.tsv", root)) die("target-bound");
+
+    np_buf gen = {0};
+    generate_tsv(root, &gen);
+
+    if (do_write) {
+        if (sy_write_atomic(target, gen.p, gen.n, 0644)) {
+            free(gen.p);
+            die("write-failed");
+        }
+        printf("LANE_INPUTS_GEN\tWROTE\tbytes=%zu\tpath=build/lane-inputs.tsv\n", gen.n);
+        free(gen.p);
+        return 0;
+    }
+
+    size_t en = 0;
+    char *eb = cx_read(target, &en);
+    if (!eb) {
+        free(gen.p);
+        fprintf(stderr, "LANE_INPUTS_GEN\tDIFF\tmissing build/lane-inputs.tsv (run --write)\n");
+        return 1;
+    }
+    int same = (en == gen.n && (!en || !memcmp(eb, gen.p, en)));
+    free(eb);
+    free(gen.p);
+    if (!same) {
+        fprintf(stderr, "LANE_INPUTS_GEN\tDIFF\tbuild/lane-inputs.tsv out of date (run --write)\n");
+        return 1;
+    }
+    printf("LANE_INPUTS_GEN\tSAME\tbytes=%zu\tpath=build/lane-inputs.tsv\n", en);
+    return 0;
+}
