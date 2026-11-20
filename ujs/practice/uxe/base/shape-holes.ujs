@@ -4,6 +4,63 @@ native function shape_holes_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
   return n>0 && m>0 && a<b+m && b<a+n;
 }
 
+native function shape_ring_between(a:f64,b:f64,x:f64) i64 {
+  return (a<=x && x<=b) || (b<=x && x<=a);
+}
+
+native function shape_ring_on(a:i64,b:i64,p:i64) i64 {
+  return shape_ring_between(ux_f64(a),ux_f64(b),ux_f64(p)) &&
+    shape_ring_between(ux_f64(a+8),ux_f64(b+8),ux_f64(p+8));
+}
+
+native function shape_ring_edges_touch(a:i64,b:i64,c:i64,d:i64) i64 {
+  let abC=shape_turn(a,b,c);
+  let abD=shape_turn(a,b,d);
+  let cdA=shape_turn(c,d,a);
+  let cdB=shape_turn(c,d,b);
+  if((abC==0.0 && shape_ring_on(a,b,c)) || (abD==0.0 && shape_ring_on(a,b,d)) ||
+     (cdA==0.0 && shape_ring_on(c,d,a)) || (cdB==0.0 && shape_ring_on(c,d,b))) { return 1; }
+  return ((abC>0.0 && abD<0.0) || (abC<0.0 && abD>0.0)) &&
+    ((cdA>0.0 && cdB<0.0) || (cdA<0.0 && cdB>0.0));
+}
+
+native function shape_ring_inside(points:i64,count:i64,sample:i64) i64 {
+  let x=ux_f64(sample);
+  let y=ux_f64(sample+8);
+  let result=0;
+  let i=0;
+  while(i<count) {
+    let a=points+i*16;
+    let b=points+((i+1)%count)*16;
+    let ay=ux_f64(a+8);
+    let by=ux_f64(b+8);
+    if((ay>y)!=(by>y)) {
+      let ax=ux_f64(a);
+      let bx=ux_f64(b);
+      if(ax+(bx-ax)*(y-ay)/(by-ay)>x) { result=1-result; }
+    }
+    i=i+1;
+  }
+  return result;
+}
+
+native function shape_ring_pair(a:i64,na:i64,b:i64,nb:i64) i64 {
+  let i=0;
+  while(i<na) {
+    let next=(i+1)%na;
+    let j=0;
+    if(a==b) { j=i+2; }
+    while(j<nb) {
+      let follow=(j+1)%nb;
+      if((a!=b || follow!=i) &&
+         shape_ring_edges_touch(a+i*16,a+next*16,b+j*16,b+follow*16)) { return 0; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
 native function shape_holes_left(points:i64,count:i64) i64 {
   let best=0;
   let i=1;
@@ -101,7 +158,7 @@ native function ShapeUtils_triangulateHoles(points:i64,outer:i64,sizes:i64,holes
   let staged=work+nodes*48;
   let rows=work+nodes*60;
   let area=ShapeUtils_area(points,outer);
-  if(area==0.0 || area-area!=0.0) { return 0-1; }
+  if(area==0.0 || area-area!=0.0 || !shape_ring_pair(points,outer,points,outer)) { return 0-1; }
   let i=0;
   while(i<outer) {
     let id=i;
@@ -113,7 +170,18 @@ native function ShapeUtils_triangulateHoles(points:i64,outer:i64,sizes:i64,holes
   j=0;
   while(j<holes) {
     let size=ux_u32(sizes+j*4);
-    let left=shape_holes_left(points+offset*16,size);
+    let current=points+offset*16;
+    if(!shape_ring_inside(points,outer,current) || !shape_ring_pair(points,outer,current,size) ||
+       !shape_ring_pair(current,size,current,size)) { return 0-2; }
+    let k=0;
+    while(k<j) {
+      let other=points+ux_u32(rows+k*12)*16;
+      let otherSize=ux_u32(rows+k*12+4);
+      if(!shape_ring_pair(other,otherSize,current,size) || shape_ring_inside(other,otherSize,current) ||
+         shape_ring_inside(current,size,other)) { return 0-2; }
+      k=k+1;
+    }
+    let left=shape_holes_left(current,size);
     let a=ux_u32_put(rows+j*12,offset);
     let b=ux_u32_put(rows+j*12+4,size);
     let c=ux_u32_put(rows+j*12+8,left);
