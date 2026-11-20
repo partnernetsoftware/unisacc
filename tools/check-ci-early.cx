@@ -1,0 +1,278 @@
+/* tools/check-ci-early.cx -- Verification and 3-mutant gate for tools/ci-early.cx.
+ *
+ *   sh ./unisacc.com tools/check-ci-early.cx
+ *
+ * Covers:
+ *   1. Red fixture (real 0.0.86 failed CI run 44772879607 json+log): rc=1, verdict=FAIL,
+ *      names win/x86_64 and win/arm64, resolves origin=include/unistd.h and rmdir diagnostic.
+ *   2. Green fixture (6 candidate cells success + CANDIDATE_QUALIFY pass=42 fail=0): rc=0, verdict=PASS.
+ *   3. Version mismatch refusal: APE --version != REV:release/candidate.tsv version -> rc=2,
+ *      REFUSE CI_EARLY_VERSION_MISMATCH.
+ *   4. Unsafe tag refusal: --tag without '-early' -> rc=2, REFUSE CI_EARLY_TAG_UNSAFE.
+ *   5. Full chain-dir staging + slice-win-arm64 version slot injection + rollback-early.txt + --dry PASS.
+ *   6. 3-mutant gate (--mutate-ignore-cell-fail, --mutate-skip-version-gate, --mutate-drop-diag-origin):
+ *      all 3 killed (score 3/3 = 1.00). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseversion
+
+#define CK_PATH 4400
+
+static int passed, failed;
+
+static int has_sub(const char *hay, const char *needle) {
+    long i, j;
+    if (!hay || !needle || !needle[0]) return 0;
+    for (i = 0; hay[i]; i++) {
+        if (hay[i] != needle[0]) continue;
+        for (j = 1; needle[j] && hay[i + j] == needle[j]; j++) {}
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static void check(int cond, const char *name, const char *detail, int quiet) {
+    if (cond) {
+        if (!quiet) {
+            passed++;
+            sy_printf("PASS\t%s\n", name);
+        }
+    } else {
+        if (!quiet) {
+            failed++;
+            sy_printf("FAIL\t%s\t%s\n", name, detail ? detail : "-");
+        }
+    }
+}
+
+static int run_cmd(char **v, const char *cwd, int timeout_s, char *out, long cap) {
+    char *b = 0;
+    size_t n = 0;
+    int rc;
+    (void)cwd;
+    if (out && cap > 0) out[0] = 0;
+    rc = cx_runv_timeout(v, timeout_s, &b, &n);
+    if (out && cap > 0 && b && n > 0) {
+        long k = (long)n < cap - 1 ? (long)n : cap - 1;
+        mm_copy(out, cap, b, k);
+        out[k] = 0;
+    }
+    free(b);
+    return rc;
+}
+
+static void build_fake_chain(const char *dir, const char *ape_ver) {
+    char apedir[CK_PATH], ctxdir[CK_PATH], ape_p[CK_PATH], p3_p[CK_PATH], wa_p[CK_PATH], rp_p[CK_PATH], ctx_p[CK_PATH];
+    char ape_body[256], wa_body[128], receipt[2048];
+    char ape_sha[65], p3_sha[65], wa_sha[65];
+    const char *p3_body = "FAKE_P3_PACKAGE_PAYLOAD_UNIPKG1\n";
+
+    cx_fmt(apedir, sizeof apedir, "%s/ape-final", dir);
+    cx_fmt(ctxdir, sizeof ctxdir, "%s/ctx", dir);
+    sy_mkdir_all(apedir, 0755);
+    sy_mkdir_all(ctxdir, 0755);
+
+    cx_fmt(ape_p, sizeof ape_p, "%s/unisacc-next.com", apedir);
+    cx_fmt(p3_p, sizeof p3_p, "%s/p3.pkg", dir);
+    cx_fmt(wa_p, sizeof wa_p, "%s/slice-win-arm64.raw", dir);
+    cx_fmt(rp_p, sizeof rp_p, "%s/ape-receipt.txt", apedir);
+    cx_fmt(ctx_p, sizeof ctx_p, "%s/context.tsv", ctxdir);
+
+    cx_fmt(ape_body, sizeof ape_body, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc %s\"; exit 0; fi\nexit 0\n", ape_ver);
+    cx_write(ape_p, ape_body, (size_t)(long)strlen(ape_body));
+    sy_chmod(ape_p, 0755);
+
+    cx_write(p3_p, p3_body, (size_t)(long)strlen(p3_body));
+
+    /* Raw win/arm64 slice carrying the 32-byte uninjected version slot */
+    memset(wa_body, 0, sizeof wa_body);
+    mm_copy(wa_body, sizeof wa_body, "PE_ARM64_HEAD_", 14);
+    mm_copy(wa_body + 16, sizeof wa_body - 16, "UNISACC_VERSION_SLOT_0000000000", 32);
+    mm_copy(wa_body + 48, sizeof wa_body - 48, "_PE_ARM64_TAIL", 14);
+    cx_write(wa_p, wa_body, 64);
+
+    sy_sha256_hex(ape_body, (long)strlen(ape_body), ape_sha);
+    sy_sha256_hex(p3_body, (long)strlen(p3_body), p3_sha);
+    sy_sha256_hex(wa_body, 64, wa_sha);
+
+    cx_fmt(receipt, sizeof receipt,
+           "p3\t%s\tsha=%s\tbytes=%ld\n"
+           "win/arm64\t%s\tsha=%s\tbytes=64\n"
+           "unisacc-next.com\t%s\tsha=%s\tbytes=%ld\n",
+           p3_p, p3_sha, (long)strlen(p3_body),
+           wa_p, wa_sha,
+           ape_p, ape_sha, (long)strlen(ape_body));
+    cx_write(rp_p, receipt, (size_t)(long)strlen(receipt));
+
+    {
+        const char *ctx = "source\t1111111111111111111111111111111111111111111111111111111111111111\n";
+        cx_write(ctx_p, ctx, (size_t)(long)strlen(ctx));
+    }
+}
+
+static int run_suite(const char *bin, const char *root, const char *tmp, const char *head_rev,
+                     const char *head_ver, const char *mut_flag, int quiet) {
+    char out[16384];
+    int ok = 1, rc;
+
+    /* 1. Red fixture: real 0.0.86 failed CI run 44772879607 */
+    {
+        char *v[] = {(char *)bin, "--parse-only",
+                     "--ci-json", "release/evidence/0.0.86/ci-failed-44772879607.json",
+                     "--ci-log", "release/evidence/0.0.86/ci-failed-44772879607.log",
+                     (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 30, out, sizeof out);
+        int c1 = (rc == 1) &&
+                 has_sub(out, "CI_EARLY_CELL\ttarget=win/x86_64\tconclusion=failure\tcheck=smoke\torigin=include/unistd.h\tdiag=stdio.h:1:1: error: call to undeclared function 'rmdir'") &&
+                 has_sub(out, "CI_EARLY_CELL\ttarget=win/arm64\tconclusion=failure\tcheck=smoke\torigin=include/unistd.h\tdiag=stdio.h:1:1: error: call to undeclared function 'rmdir'") &&
+                 has_sub(out, "CI_EARLY_CELL\ttarget=lnx/x86_64\tconclusion=success\tcheck=ALL") &&
+                 has_sub(out, "verdict=FAIL\tpass_cells=4\tfail_cells=2\tfailed_targets=win/x86_64,win/arm64\tfirst_origin=include/unistd.h\tfirst_diag=stdio.h:1:1: error: call to undeclared function 'rmdir'");
+        check(c1, "red-fixture-0.0.86-ci-44772879607", out, quiet);
+        if (!c1) ok = 0;
+    }
+
+    /* 2. Green fixture: all 6 cells success */
+    {
+        char jp[CK_PATH], lp[CK_PATH];
+        const char *jtxt =
+            "{\"conclusion\":\"success\",\"createdAt\":\"2026-11-21T00:00:00Z\",\"databaseId\":99001,\"event\":\"workflow_dispatch\","
+            "\"headSha\":\"fd3b9185fb0e4866eb6a5ccf8f7bc150f3ce16be\",\"jobs\":["
+            "{\"conclusion\":\"success\",\"databaseId\":1,\"name\":\"candidate (ubuntu-24.04, lnx, x86_64, yes)\"},"
+            "{\"conclusion\":\"success\",\"databaseId\":2,\"name\":\"candidate (ubuntu-24.04-arm, lnx, arm64, yes)\"},"
+            "{\"conclusion\":\"success\",\"databaseId\":3,\"name\":\"candidate (macos-15-intel, osx, x86_64, yes)\"},"
+            "{\"conclusion\":\"success\",\"databaseId\":4,\"name\":\"candidate (macos-15, osx, arm64, yes)\"},"
+            "{\"conclusion\":\"success\",\"databaseId\":5,\"name\":\"candidate (windows-2025, win, x86_64, yes)\"},"
+            "{\"conclusion\":\"success\",\"databaseId\":6,\"name\":\"candidate (windows-11-arm, win, arm64, file)\"}"
+            "]}\n";
+        const char *ltxt =
+            "report\tBuild the evidence table\t2026-11-21T00:05:00Z CANDIDATE_QUALIFY\tverdict=PASS\tpass=42\tfail=0\tnot_run=0\tinvalid=0\n";
+        cx_fmt(jp, sizeof jp, "%s/ci-pass.json", tmp);
+        cx_fmt(lp, sizeof lp, "%s/ci-pass.log", tmp);
+        cx_write(jp, jtxt, (size_t)(long)strlen(jtxt));
+        cx_write(lp, ltxt, (size_t)(long)strlen(ltxt));
+        char *v[] = {(char *)bin, "--parse-only", "--ci-json", jp, "--ci-log", lp, (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 30, out, sizeof out);
+        int c2 = (rc == 0) &&
+                 has_sub(out, "verdict=PASS\tpass_cells=6\tfail_cells=0\tfailed_targets=-\tfirst_origin=-\tfirst_diag=-");
+        check(c2, "green-fixture-6-cells-pass", out, quiet);
+        if (!c2) ok = 0;
+    }
+
+    /* 3. Version mismatch refusal */
+    {
+        char cdir[CK_PATH], odir[CK_PATH];
+        cx_fmt(cdir, sizeof cdir, "%s/chain-mismatch", tmp);
+        cx_fmt(odir, sizeof odir, "%s/out-mismatch", tmp);
+        build_fake_chain(cdir, "0.0.1");
+        char *v[] = {(char *)bin, "--rev", (char *)head_rev, "--chain-dir", cdir, "--out", odir, "--dry", (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 30, out, sizeof out);
+        int c3 = (rc == 2) && has_sub(out, "REFUSE\tCI_EARLY_VERSION_MISMATCH");
+        check(c3, "refuse-version-mismatch", out, quiet);
+        if (!c3) ok = 0;
+    }
+
+    /* 4. Unsafe tag refusal (missing -early) */
+    {
+        char cdir[CK_PATH], odir[CK_PATH];
+        cx_fmt(cdir, sizeof cdir, "%s/chain-ok", tmp);
+        cx_fmt(odir, sizeof odir, "%s/out-badtag", tmp);
+        build_fake_chain(cdir, head_ver);
+        char *v[] = {(char *)bin, "--rev", (char *)head_rev, "--chain-dir", cdir, "--tag", "v0.0.87", "--out", odir, "--dry", (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 30, out, sizeof out);
+        int c4 = (rc == 2) && has_sub(out, "REFUSE\tCI_EARLY_TAG_UNSAFE");
+        check(c4, "refuse-unsafe-tag", out, quiet);
+        if (!c4) ok = 0;
+    }
+
+    /* 5. Full chain-dir staging, slice-win-arm64 version injection, rollback plan, and --dry PASS */
+    {
+        char cdir[CK_PATH], odir[CK_PATH], slice_p[CK_PATH], rb_p[CK_PATH], sums_p[CK_PATH];
+        size_t sn = 0;
+        char *sb;
+        cx_fmt(cdir, sizeof cdir, "%s/chain-ok", tmp);
+        cx_fmt(odir, sizeof odir, "%s/out-ok", tmp);
+        cx_fmt(slice_p, sizeof slice_p, "%s/assets/slice-win-arm64", odir);
+        cx_fmt(rb_p, sizeof rb_p, "%s/rollback-early.txt", odir);
+        cx_fmt(sums_p, sizeof sums_p, "%s/assets/SHA256SUMS", odir);
+        char *v[] = {(char *)bin, "--rev", (char *)head_rev, "--chain-dir", cdir, "--out", odir, "--dry", (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 30, out, sizeof out);
+        sb = cx_read(slice_p, &sn);
+        int slot_injected = sb && sn == 64 &&
+                            memcmp(sb + 16, "UNISACC_VERSION_SLOT_0000000000", 31) != 0 &&
+                            memcmp(sb + 16, head_ver, strlen(head_ver)) == 0 &&
+                            sb[16 + strlen(head_ver)] == 0;
+        if (sb) free(sb);
+        int c5 = (rc == 0) && slot_injected &&
+                 sy_exists(rb_p) == 1 && sy_exists(sums_p) == 1 &&
+                 has_sub(out, "CI_EARLY_PREFLIGHT\t") &&
+                 has_sub(out, "CI_EARLY_ROLLBACK\t") &&
+                 has_sub(out, "CMD\tDRY\tgh -R partnernetsoftware/unisacc release create") &&
+                 has_sub(out, "CMD\tDRY\tgh -R partnernetsoftware/unisacc workflow run candidate-native.yml") &&
+                 has_sub(out, "CMD\tDRY\tgh -R partnernetsoftware/unisacc release delete") &&
+                 has_sub(out, "CI_EARLY_DRY\t");
+        check(c5, "chain-dir-stage-inject-and-dry-pass", out, quiet);
+        if (!c5) ok = 0;
+    }
+
+    return ok;
+}
+
+int main(void) {
+    char root[CK_PATH], tmp[CK_PATH], bin[CK_PATH], out[4096], head_rev[64], head_ver[32];
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (cx_fmt(tmp, sizeof tmp, "%s/unisacc-check-ci-early-%d", sy_tmpdir(), (int)sy_pid()) ||
+        sy_mkdir_all(tmp, 0755) ||
+        cx_fmt(bin, sizeof bin, "%s/ci-early.bin", tmp))
+        return 2;
+
+    /* Compile tools/ci-early.cx once so normal checks + 3 mutations finish in ~3s */
+    {
+        char *v[] = {"sh", "./unisacc.com", "-o", bin, "tools/ci-early.cx", 0};
+        if (run_cmd(v, root, 45, out, sizeof out) != 0) {
+            sy_eprintf("check-ci-early: compile tools/ci-early.cx failed:\n%s\n", out);
+            return 1;
+        }
+    }
+
+    {
+        char *v[] = {"git", "rev-parse", "HEAD", 0};
+        if (run_cmd(v, root, 10, head_rev, sizeof head_rev) != 0) return 2;
+        long n = (long)strlen(head_rev);
+        while (n > 0 && (head_rev[n - 1] == '\n' || head_rev[n - 1] == '\r')) head_rev[--n] = 0;
+    }
+    if (rv_load("release/candidate.tsv", head_ver)) return 2;
+
+    (void)run_suite(bin, root, tmp, head_rev, head_ver, 0, 0);
+
+    /* 3-mutant gate */
+    {
+        static const char *muts[3] = {
+            "--mutate-ignore-cell-fail",
+            "--mutate-skip-version-gate",
+            "--mutate-drop-diag-origin"
+        };
+        int i, killed = 0;
+        for (i = 0; i < 3; i++) {
+            int survived = run_suite(bin, root, tmp, head_rev, head_ver, muts[i], 1);
+            if (!survived) {
+                killed++;
+                passed++;
+                sy_printf("PASS\tmutant-killed:%s\n", muts[i]);
+            } else {
+                failed++;
+                sy_printf("FAIL\tmutant-survived:%s\n", muts[i]);
+            }
+        }
+        sy_printf("MUTATION_GATE\tmutants=3\tkilled=%d\tsurvived=%d\tscore=%d/3(=%s)\tverdict=%s\n",
+                  killed, 3 - killed, killed, killed == 3 ? "1.00" : "0.00", killed == 3 ? "PASS" : "FAIL");
+    }
+
+    sy_printf("CHECK_CI_EARLY\tpassed=%d\tfailed=%d\tverdict=%s\n",
+              passed, failed, failed == 0 ? "PASS" : "FAIL");
+    return failed == 0 ? 0 : 1;
+}
