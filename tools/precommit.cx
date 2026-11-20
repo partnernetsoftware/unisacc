@@ -295,20 +295,52 @@ static int new_tools(void) {
 /* 冻结窗口闸(fable 咨询 2026-11-08):build/freeze.tsv 存在且未过期时,staged 路径命中冻结前缀、
  * 且 UNISACC_INTEGRATOR 不等于 owner 的提交被拒。列:candidate_sid base_commit owner deadline_epoch_s paths(空格分隔)。
  * 冻结是有界事件:deadline 过期即不拦;tools/ tests/ plans/ archive/ 不在 paths 内,永不受影响。 */
+/* Load and strictly validate staged build/lane-inputs.tsv (:build/lane-inputs.tsv).
+ * Returns: 1 = path matches lane A, 0 = table valid & path not in lane A, -1 = missing/empty/malformed/zero-A (fail-closed). */
 static int freeze_in_lane_a(const char *path, long nl) {
     static char *lane_buf;
-    static int lane_loaded;
-    if (!lane_loaded) {
-        size_t ln = 0;
-        lane_buf = (char *)cx_read("build/lane-inputs.tsv", &ln);
-        lane_loaded = 1;
+    static long lane_len;
+    static int lane_status; /* 0 = unloaded, 1 = valid, -1 = malformed */
+    if (!lane_status) {
+        char *gv[] = {"git", "show", ":build/lane-inputs.tsv", 0};
+        lane_buf = slurp(gv, &lane_len);
+        if (!lane_buf || lane_len <= 0) {
+            lane_status = -1;
+        } else {
+            long a_cnt = 0;
+            int bad = 0;
+            for (char *p = lane_buf; *p; ) {
+                char *e = p; while (*e && *e != '\n') e++;
+                long ll = (long)(e - p);
+                if (ll > 0 && p[ll - 1] == '\r') ll--;
+                if (ll > 0 && *p != '#') {
+                    char *t1 = 0, *t2 = 0, *t3 = 0;
+                    for (char *q = p; q < p + ll; q++) {
+                        if (*q == '\t') {
+                            if (!t1) t1 = q;
+                            else if (!t2) t2 = q;
+                            else { t3 = q; break; }
+                        }
+                    }
+                    if (!t1 || !t2 || t3 || t1 == p || t2 - t1 != 2 || p + ll <= t2 + 1) { bad = 1; break; }
+                    char ln = t1[1];
+                    if (ln != 'A' && ln != 'B' && ln != 'C') { bad = 1; break; }
+                    if (ln == 'A') a_cnt++;
+                }
+                p = *e ? e + 1 : e;
+            }
+            lane_status = (bad || a_cnt == 0) ? -1 : 1;
+        }
     }
-    if (!lane_buf) return 0;
+    if (lane_status < 0) return -1;
+    if (!path || nl <= 0) return 0;
     for (char *p = lane_buf; *p; ) {
         char *e = p; while (*e && *e != '\n') e++;
-        if (*p != '#' && e > p) {
-            char *t1 = p; while (t1 < e && *t1 != '\t') t1++;
-            if (t1 + 2 <= e && *t1 == '\t' && t1[1] == 'A' && (t1 + 2 == e || t1[2] == '\t')) {
+        long ll = (long)(e - p);
+        if (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll > 0 && *p != '#') {
+            char *t1 = p; while (t1 < p + ll && *t1 != '\t') t1++;
+            if (t1 + 2 <= p + ll && *t1 == '\t' && t1[1] == 'A' && (t1 + 2 == p + ll || t1[2] == '\t')) {
                 if ((long)(t1 - p) == nl && tx_same(path, nl, p, nl)) return 1;
             }
         }
@@ -336,6 +368,19 @@ static int freeze_gate(void) {
     if (i == 0 || now >= dl) return 0;                   /* 过期即失效,不死锁 */
     who = sy_env("UNISACC_INTEGRATOR");
     if (who && tx_eqz(who, f[2])) return 0;
+    /* Fail-closed: if @lane:A appears in paths, validate staged build/lane-inputs.tsv up front. */
+    for (char *q = f[4]; *q; ) {
+        char *s = q; long pl;
+        while (*q && *q != ' ') q++;
+        pl = q - s;
+        if (pl == 7 && tx_same(s, pl, "@lane:A", 7)) {
+            if (freeze_in_lane_a(0, 0) < 0) {
+                sy_eprintf("precommit: freeze.tsv @lane:A malformed (staged build/lane-inputs.tsv missing, empty, or invalid)\n");
+                return 1;
+            }
+        }
+        while (*q == ' ') q++;
+    }
     names = slurp(dv, &fn); if (!names) return 0;
     for (long at = 0; at < fn; ) {
         long nl = tx_len(names + at, fn - at); char *q;
@@ -345,7 +390,12 @@ static int freeze_gate(void) {
             while (*q && *q != ' ') q++;
             pl = q - s; t = s; (void)t;
             if (pl == 7 && tx_same(s, pl, "@lane:A", 7)) {
-                if (freeze_in_lane_a(names + at, nl)) {
+                int hit = freeze_in_lane_a(names + at, nl);
+                if (hit < 0) {
+                    sy_eprintf("precommit: freeze.tsv @lane:A malformed (staged build/lane-inputs.tsv missing, empty, or invalid)\n");
+                    blocked++; break;
+                }
+                if (hit > 0) {
                     sy_eprintf("precommit: 冻结中(candidate %s,至 epoch %s):产品输入 %.*s 经集成者 patch 提交\n", f[0], f[3], (int)nl, names + at);
                     blocked++; break;
                 }
