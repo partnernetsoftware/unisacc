@@ -267,6 +267,150 @@ int main(void) {
         "}\n");
     compare_two("fallback-abi-fnptr-driver-cli", fnp, 0, 0, "UNISACC_RUN_SPLIT=1", 0);
 
+    /* 9. 8-way concurrent cold start writing shared unitobj cache: zero corruption, zero .tmp leftovers */
+    {
+        char cdir8[4200], udir8[4300], cenv8[4400];
+        cx_fmt(cdir8, sizeof cdir8, "%s/cache8", work);
+        cx_fmt(udir8, sizeof udir8, "%s/unitobj", cdir8);
+        cx_fmt(cenv8, sizeof cenv8, "UNISACC_CACHE_DIR=%s", cdir8);
+        sy_mkdir_all(cdir8, 0700);
+        np_result b0 = {0};
+        int tb0 = run_prod(s2, 0, "UNISACC_RUN_SPLIT=0", 0, 0, &b0);
+        pid_t pids[8];
+        char op[8][4300], ep[8][4300];
+        for (int i = 0; i < 8; i++) {
+            cx_fmt(op[i], sizeof op[i], "%s/c8-%d.out", work, i);
+            cx_fmt(ep[i], sizeof ep[i], "%s/c8-%d.err", work, i);
+            pids[i] = fork();
+            if (pids[i] == 0) {
+                if (chdir(work)) _exit(126);
+                setenv("UNISACC_CACHE_DIR", cdir8, 1);
+                setenv("UNISA_CONTAINER", "", 1);
+                setenv("UNISACC_RUN_SPLIT", "1", 1);
+                int fo = open(op[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                int fe = open(ep[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                if (fo >= 0) { dup2(fo, 1); close(fo); }
+                if (fe >= 0) { dup2(fe, 2); close(fe); }
+                if (is_elf) {
+                    char *av[] = { prod, s2, 0 };
+                    execv(prod, av);
+                } else {
+                    char *av[] = { "/bin/sh", prod, s2, 0 };
+                    execv("/bin/sh", av);
+                }
+                _exit(127);
+            }
+        }
+        int ok8 = (!tb0 && b0.rc == 5);
+        for (int i = 0; i < 8; i++) {
+            int st = 0;
+            waitpid(pids[i], &st, 0);
+            int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+            size_t on = 0, en = 0;
+            char *ob = cx_read(op[i], &on), *eb = cx_read(ep[i], &en);
+            if (rc != b0.rc || on != b0.outn || (on && memcmp(ob, b0.out, on)) ||
+                en != b0.errn || (en && memcmp(eb, b0.err, en))) ok8 = 0;
+            free(ob); free(eb);
+        }
+        int uo_ok = 0, uo_bad = 0, tmp_left = 0;
+        DIR *d = opendir(udir8);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                long ln = tx_len(e->d_name, 256);
+                if (ln > 4 && !strcmp(e->d_name + ln - 4, ".tmp")) { tmp_left++; continue; }
+                if (ln <= 3 || strcmp(e->d_name + ln - 3, ".uo")) continue;
+                char p[4600];
+                cx_fmt(p, sizeof p, "%s/%s", udir8, e->d_name);
+                size_t fn = 0;
+                char *b = cx_read(p, &fn);
+                int good = 0;
+                if (b && fn >= 144 && !memcmp(b, "USE35OB\n", 8)) {
+                    unsigned long long bn = 0;
+                    for (int k = 7; k >= 0; k--) bn = (bn << 8) | (unsigned char)b[8 + k];
+                    if (bn + 144ULL == (unsigned long long)fn) {
+                        char sha[65];
+                        cx_sha256_hex(b + 144, (size_t)bn, sha);
+                        if (!memcmp(b + 80, sha, 64)) good = 1;
+                    }
+                }
+                if (good) uo_ok++; else uo_bad++;
+                free(b);
+            }
+            closedir(d);
+        }
+        int ok = ok8 && uo_bad == 0 && tmp_left == 0 && (!split_active || uo_ok > 0);
+        char det[160];
+        cx_fmt(det, sizeof det, "ok8=%d uo_ok=%d uo_bad=%d tmp_left=%d", ok8, uo_ok, uo_bad, tmp_left);
+        crs_note(ok, "concurrent-8way-cold", det);
+        np_free(&b0);
+    }
+
+    /* 10. Cache corruption resilience: 0-byte truncation and valid-header bogus-ELF payload must not crash */
+    {
+        char cdir_c[4200], udir_c[4300], cenv_c[4400], sc[4200];
+        cx_fmt(cdir_c, sizeof cdir_c, "%s/cache_corrupt", work);
+        cx_fmt(udir_c, sizeof udir_c, "%s/unitobj", cdir_c);
+        cx_fmt(cenv_c, sizeof cenv_c, "UNISACC_CACHE_DIR=%s", cdir_c);
+        cx_fmt(sc, sizeof sc, "%s/sc.cx", work);
+        crs_put(sc,
+            "#pragma unisa use text.text\n"
+            "#pragma unisa use sys.sha\n"
+            "int main(void) {\n"
+            "    char h[65]; const char *m = \"corrupt-test\";\n"
+            "    sy_sha256_hex((const unsigned char *)m, tx_len(m, 32), h);\n"
+            "    printf(\"cor=%.12s\\n\", h); return 6;\n"
+            "}\n");
+        np_result b0 = {0}, r1 = {0}, r2 = {0};
+        int tb0 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=0", cenv_c, 0, &b0);
+        /* Populate unitobj cache */
+        int tw = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r1);
+        np_free(&r1);
+        /* Find first .uo file if split is active */
+        char uo_p[4600]; uo_p[0] = 0;
+        DIR *d = opendir(udir_c);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                long ln = tx_len(e->d_name, 256);
+                if (ln > 3 && !strcmp(e->d_name + ln - 3, ".uo")) {
+                    cx_fmt(uo_p, sizeof uo_p, "%s/%s", udir_c, e->d_name);
+                    break;
+                }
+            }
+            closedir(d);
+        }
+        /* (a) Truncate to 0 bytes -> uo_load drops and recompiles cleanly */
+        if (uo_p[0]) cx_write(uo_p, "", 0);
+        int t1 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r1);
+        int ok1 = !tb0 && !tw && !t1 && r1.rc == b0.rc && r1.outn == b0.outn &&
+                  (!b0.outn || !memcmp(r1.out, b0.out, b0.outn)) && r1.errn == b0.errn;
+        /* (b) Valid USE35OB header + sha256 with bogus ELF body -> objlink refuses and falls back silently */
+        if (uo_p[0]) {
+            size_t fn = 0;
+            char *orig = cx_read(uo_p, &fn);
+            if (orig && fn >= 144) {
+                unsigned char fake[144 + 256];
+                memcpy(fake, orig, 144);
+                unsigned long long bn = 256;
+                for (int k = 0; k < 8; k++) fake[8 + k] = (unsigned char)((bn >> (k * 8)) & 255);
+                memset(fake + 144, 0xAA, 256);
+                char sha[65];
+                cx_sha256_hex(fake + 144, 256, sha);
+                memcpy(fake + 80, sha, 64);
+                cx_write(uo_p, fake, sizeof fake);
+            }
+            free(orig);
+        }
+        int t2 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r2);
+        int ok2 = !tb0 && !t2 && r2.rc == b0.rc && r2.outn == b0.outn &&
+                  (!b0.outn || !memcmp(r2.out, b0.out, b0.outn)) && r2.errn == b0.errn;
+        char det[160];
+        cx_fmt(det, sizeof det, "trunc_ok=%d bogus_elf_ok=%d rc=%d/%d err=%zu/%zu", ok1, ok2, r1.rc, r2.rc, r1.errn, r2.errn);
+        crs_note(ok1 && ok2, "cache-corrupt-resilience", det);
+        np_free(&b0); np_free(&r1); np_free(&r2);
+    }
+
     cx_rmtree(work);
     printf("CHECK_RUN_SPLIT\tpass=%d\tfail=%d\n", npass, nfail);
     return nfail ? 1 : 0;
