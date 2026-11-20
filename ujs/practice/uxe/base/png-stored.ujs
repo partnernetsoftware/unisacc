@@ -29,7 +29,7 @@ native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64) i64 {
   return 0-5;
 }
 
-native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,fixed:i64) i64 {
+native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,huffman:i64,workspace:i64) i64 {
   if(bytes<8) { return 0-6; }
   let cmf=ux_u8(src);
   let flags=ux_u8(src+1);
@@ -43,8 +43,17 @@ native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,fixed:i64) i64 {
     if(block<0) { return 0-6; }
     bit=bit+3;
     last=block%2;
-    if(block/2==1 && fixed!=0) {
-      let done=png_fixed_block(src,limit,bit,out,size,output);
+    if((block/2==1 || block/2==2) && huffman!=0) {
+      let literals=0-1;
+      let distances=0-1;
+      if(block/2==2) {
+        if(workspace<0) { return 0-1; }
+        bit=png_dynamic_tables(src,limit,bit,workspace);
+        if(bit<0) { return bit; }
+        literals=workspace+320;
+        distances=literals+1344;
+      }
+      let done=png_code_block(src,limit,bit,out,size,output,literals,distances);
       if(done<0) { return done; }
       bit=done/8388608;
       output=done%8388608;
@@ -76,7 +85,7 @@ native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,fixed:i64) i64 {
 
 // Decode noninterlaced RGBA8 PNG. Scratch is
 // exclusive and may change on error. The RGBA output is published last.
-native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,fixed:i64) i64 {
+native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,huffman:i64) i64 {
   if(src<0 || bytes<33 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
      scratch<0 || scratch%4!=0 || space<PngHeader.size || scratch>6291456-space ||
      png_overlap(src,bytes,out,cap) || png_overlap(src,bytes,scratch,space) || png_overlap(out,cap,scratch,space)) { return 0-1; }
@@ -91,7 +100,9 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   let compressed=raw+size;
   let packed=png_idat(src,bytes,compressed,space-PngHeader.size-size);
   if(packed<0) { return packed; }
-  let made=png_inflate(compressed,packed,raw,size,fixed);
+  let workspace=(compressed+packed+3)/4*4;
+  if(workspace>scratch+space-3008) { workspace=0-1; }
+  let made=png_inflate(compressed,packed,raw,size,huffman,workspace);
   if(made<0) { return made; }
   let restored=PngScanlines_restore(raw,size,row,height,4);
   if(restored<0) { return restored; }

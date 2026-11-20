@@ -257,7 +257,7 @@ G-anim 独立门覆盖七类 Track、离散与线性、三次插值端点、四�
 
 G-io 使用小型 PNG、JPEG、嵌入 PNG 的 GLB、带蒙皮动画的 GLB 和 r160 场景 JSON。PNG 查尺寸、滤波还原与 RGBA 精确值；JPEG 单列有损误差口径并按参考像素确认。GLB 对照规范化网格、材质、UV、骨架和动画轨道；失败门包括截断、非法 offset、整数溢出、稀疏索引越界、错误扩展以及失败后无半注册资源。来源和许可证随夹具登记。
 
-PNG 解码切片支持非隔行 RGBA8、存储块和固定 Huffman Deflate。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。`png-header-io.cx`、`png-stored-io.cx` 与 `png-fixed-io.cx` 使用程序合成的小图和浏览器像素对照。动态 Huffman、调色板与隔行仍待覆盖。
+PNG 解码切片支持非隔行 RGBA8，以及存储、固定 Huffman 和动态 Huffman 三种 Deflate 块。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。`png-header-io.cx`、`png-stored-io.cx`、`png-fixed-io.cx` 与 `png-dynamic-io.cx` 使用程序合成的小图和浏览器像素对照。动态树需要额外 3008 字节工作区。调色板、其他色型和隔行仍待覆盖。
 
 预计提交顺序为请求管理，字节视图与加载器基类，PNG 容器与解码，JPEG 头与基线解码，图像及纹理装载，场景 JSON 两阶段链接，GLB 容器与访问器，材质与图像关联，蒙皮动画连接及失败回收。每种编码范围独立记录；渐进 JPEG、压缩扩展等只有实测通过才升格。
 

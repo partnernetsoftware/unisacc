@@ -1,0 +1,58 @@
+#pragma unisa use g_math
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+static int fixture(unsigned char p[700],int bad) {
+    const unsigned char header[]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,64,0,0,0,1,8,6,0,0,0};
+    for(int i=0;i<29;i++) p[i]=header[i];
+    be(p+29,dz_crc32(0,p+12,17));
+    unsigned char pixels[257]={0};
+    for(int i=1;i<257;i+=4) { pixels[i]=24; pixels[i+1]=128; pixels[i+2]=245; pixels[i+3]=255; }
+    p[41]=120; p[42]=1;
+    int n=(int)dz_deflate(pixels,sizeof pixels,p+43,600);
+    if(n<1 || n>=104 || p[43]/2%4!=2) {
+        printf("G_IO PngDynamic invalid fixture bytes=%d\n",n);
+        return -1;
+    }
+    if(bad) p[43]|=248;
+    unsigned a=1,b=0;
+    for(int i=0;i<257;i++) { a=(a+pixels[i])%65521; b=(b+a)%65521; }
+    be(p+43+n,(b<<16)+a);
+    const int length=n+6;
+    be(p+33,length);be(p+37,0x49444154u);
+    be(p+41+length,dz_crc32(0,p+37,4+length));
+    int end=45+length;
+    be(p+end,0);be(p+end+4,0x49454e44u);be(p+end+8,dz_crc32(0,p+end+4,4));
+    return end+12;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored",0};
+    unsigned char good[700],bad[700];int size=fixture(good,0);
+    if(size<1 || size!=fixture(bad,1)) return 2;
+    char setup[1900];int n=tx_snprintf(setup,sizeof setup,"let size=%d;let good=[",size);
+    for(int i=0;i<size;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",good[i]);
+    n+=tx_snprintf(setup+n,sizeof setup-n,"];let bad=[");
+    for(int i=0;i<size;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",bad[i]);
+    tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<size){let a=ux_u8_put(i,good[i]);let b=ux_u8_put(256+i,bad[i]);i=i+1;}");
+    const char *cases[]={
+        "return PngDecode_rgba8(0,size,512,256,2048,4096);",
+        "let n=PngDecode_rgba8(0,size,512,256,2048,4096);return ux_u8(512);",
+        "let n=PngDecode_rgba8(0,size,512,256,2048,4096);return ux_u8(765);",
+        "let n=PngDecode_rgba8(0,size,512,256,2048,4096);return ux_u8(766);",
+        "return PngDecode_rgba8(256,size,512,256,2048,4096);",
+        "let guard=ux_u8_put(512,99);let n=PngDecode_rgba8(256,size,512,256,2048,4096);return ux_u8(512);",
+        "return PngDecode_rgba8(0,size,512,256,2048,700);"
+    };
+    const double gold[]={256,24,128,245,-6,99,-1};
+    return g_math_run("G_IO PngDynamic","png-dynamic",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,
+        "let n=PngDecode_rgba8(0,size,512,256,2048,4096);return ux_u8(766);");
+}
