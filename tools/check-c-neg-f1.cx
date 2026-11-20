@@ -57,6 +57,15 @@ static void cnf_accept_quiet(const char *id, const char *src) {
     ck(rc == 0 && sy_exists(obj) == 1 && !out[0], id);
 }
 
+static void cnf_declaration_warning(const char *id, const char *src, const char *flag, const char *name) {
+    char out[CNF_OUT] = {0}, obj[CNF_PW], line[256];
+    int rc = cnf_compile(id, src, flag, out, sizeof out, obj, sizeof obj);
+    if (cx_fmt(line, sizeof line, "%s.c:1:", id)) { ck(0, id); return; }
+    ck(rc == 0 && sy_exists(obj) == 1 && ckk_has(out, CNF_OUT, line) &&
+       tx_count(out, (long)strlen(out), name, (long)strlen(name)) == 1 &&
+       ckk_has(out, CNF_OUT, "warning: ") && !ckk_has(out, CNF_OUT, "error: "), id);
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     char out[CNF_OUT], obj[CNF_PW];
@@ -189,6 +198,29 @@ int main(int argc, char **argv) {
         "typedef void (*cb_t)(void *); void f(cb_t); void f(void (*c)(void *)){c(0);}\n");
     cnf_reject("ft-callback-function-typedef-preserves-double-pointer",
         "typedef void cb_t(void *); void f(cb_t); void f(cb_t **);\n", 0, "conflicting parameter types for function");
+    cnf_declaration_warning("ft-warn-callback-pointee-const",
+        "void f(void (*cb)(const char *));void f(void (*cb)(char *)){(void)cb;}\n",
+        0, "[-Wd2-callback-pointee-qualifier]");
+    cnf_declaration_warning("ft-warn-callback-struct-tag",
+        "struct A;struct B;void f(void (*cb)(struct A *));void f(void (*cb)(struct B *)){(void)cb;}\n",
+        0, "[-Wd2-callback-struct-tag]");
+    cnf_declaration_warning("ft-warn-callback-rank",
+        "void f(void (*cb)(long));void f(void (*cb)(long long)){(void)cb;}\n",
+        0, "[-Wd2-callback-integer-rank]");
+    cnf_declaration_warning("ft-warn-ordinary-rank",
+        "int f(char);int f(signed char c){return c;}\n",
+        0, "[-Wd2-function-integer-rank]");
+    cnf_declaration_warning("ft-warn-ordinary-rank-wall",
+        "int f(long);int f(long long n){return (int)n;}\n",
+        "-Wall", "[-Wd2-function-integer-rank]");
+    cnf_accept_quiet("ft-warn-ignore-top-level-callback-const",
+        "void f(void (*cb)(char *const));void f(void (*cb)(char *)){(void)cb;}\n");
+    cnf_accept_quiet("ft-warn-same-qualified-callback",
+        "void f(void (*cb)(const char *));void f(void (*cb)(char const *)){(void)cb;}\n");
+    cnf_accept_quiet("ft-warn-same-struct-tag",
+        "struct A;typedef struct A A;void f(void (*cb)(struct A *));void f(void (*cb)(A *)){(void)cb;}\n");
+    cnf_accept_quiet("ft-warn-same-integer-rank",
+        "typedef long L;int f(L);int f(signed long int n){return (int)n;}\n");
     const char *named_void = "parameter of type void must be unnamed and alone (C99 6.7.5.3p10)";
     cnf_reject("ft-after-int-bare-void", "void f(int, void);\n", "17", named_void);
     cnf_reject("ft-void-named-nonfunction",
