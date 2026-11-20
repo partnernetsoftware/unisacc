@@ -24,6 +24,8 @@
 typedef struct {
     char id[128];
     int heavy;
+    int priority;
+    long time_ms;
 } PdBatch;
 
 typedef struct {
@@ -53,6 +55,8 @@ static PdState pd_states[PD_MAX_IDS];
 static int pd_nstates = 0;
 static char pd_heavy_extra[256][128];
 static int pd_nheavy_extra = 0;
+static int pd_has_times = 0;
+static int pd_has_priority = 0;
 
 static int pd_refuse(const char *why) {
     fprintf(stderr, "PRERUN_DRIVE\tREFUSE\treason=%s\n", why);
@@ -133,10 +137,206 @@ static int pd_load_ids(const char *path) {
         if (dup) continue;
         cx_fmt(pd_ids[pd_nids].id, sizeof pd_ids[pd_nids].id, "%s", id);
         pd_ids[pd_nids].heavy = pd_is_heavy_id(id);
+        pd_ids[pd_nids].priority = 0;
+        pd_ids[pd_nids].time_ms = 5000;
         pd_nids++;
     }
     mm_free(b);
     return 0;
+}
+
+static int pd_is_digits(const char *s, int64_t len) {
+    if (len <= 0 || len > 18) return 0;
+    for (int64_t i = 0; i < len; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+static int pd_find_id(const char *id, size_t len) {
+    if (len == 0 || len >= 127) return -1;
+    for (int i = 0; i < pd_nids; i++) {
+        if (strlen(pd_ids[i].id) == len && memcmp(pd_ids[i].id, id, len) == 0) return i;
+    }
+    return -1;
+}
+
+static int pd_load_times_file(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 16 << 20)) return -1;
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le <= ls || b[ls] == '#') continue;
+        const char *cols[10]; int64_t clens[10]; int nc = 0; int64_t p = ls;
+        while (nc < 10) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = (const char *)b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        const char *id_col = 0, *ms_col = 0;
+        int64_t id_len = 0, ms_len = 0;
+        if (nc >= 4 && pd_is_digits(cols[0], clens[0]) && pd_is_digits(cols[3], clens[3])) {
+            id_col = cols[1]; id_len = clens[1];
+            ms_col = cols[3]; ms_len = clens[3];
+        } else if (nc >= 6 && pd_is_digits(cols[5], clens[5])) {
+            id_col = cols[0]; id_len = clens[0];
+            ms_col = cols[5]; ms_len = clens[5];
+        } else if (nc >= 2 && pd_is_digits(cols[1], clens[1])) {
+            id_col = cols[0]; id_len = clens[0];
+            ms_col = cols[1]; ms_len = clens[1];
+        }
+        if (id_col && ms_col) {
+            int idx = pd_find_id(id_col, (size_t)id_len);
+            if (idx >= 0) {
+                char nbuf[24];
+                mm_copy(nbuf, sizeof nbuf, ms_col, (size_t)ms_len);
+                nbuf[ms_len] = 0;
+                long v = atol(nbuf);
+                if (v < 500) v = 500;
+                pd_ids[idx].time_ms = v;
+            }
+        }
+    }
+    mm_free(b);
+    pd_has_times = 1;
+    return 0;
+}
+
+static int pd_load_priority_file(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 8 << 20)) return -1;
+    int has_pass_rows = 0;
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le <= ls || b[ls] == '#') continue;
+        const char *cols[6]; int64_t clens[6]; int nc = 0; int64_t p = ls;
+        while (nc < 6) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = (const char *)b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc >= 3 && clens[2] == 4 && memcmp(cols[2], "PASS", 4) == 0) {
+            has_pass_rows = 1;
+            break;
+        }
+    }
+    pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (b[le - 1] == '\r' || b[le - 1] == ' ' || b[le - 1] == '\t')) le--;
+        while (ls < le && (b[ls] == ' ' || b[ls] == '\t')) ls++;
+        if (le <= ls || b[ls] == '#') continue;
+        const char *cols[6]; int64_t clens[6]; int nc = 0; int64_t p = ls;
+        while (nc < 6) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = (const char *)b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (clens[0] == 3 && memcmp(cols[0], "RAW", 3) == 0) continue;
+        if (clens[0] == 7 && memcmp(cols[0], "SUMMARY", 7) == 0) continue;
+        if (clens[0] == 10 && memcmp(cols[0], "CHECKPOINT", 10) == 0) continue;
+        if (clens[0] == 5 && memcmp(cols[0], "batch", 5) == 0) continue;
+        if (clens[0] == 2 && memcmp(cols[0], "id", 2) == 0) continue;
+        if (has_pass_rows && nc >= 3) {
+            const char *id_col = pd_is_digits(cols[0], clens[0]) ? cols[1] : cols[0];
+            int64_t id_len = pd_is_digits(cols[0], clens[0]) ? clens[1] : clens[0];
+            int is_pass = (clens[2] == 4 && memcmp(cols[2], "PASS", 4) == 0);
+            int idx = pd_find_id(id_col, (size_t)id_len);
+            if (idx >= 0) pd_ids[idx].priority = is_pass ? 0 : 1;
+        } else {
+            int64_t id_len = 0;
+            while (id_len < clens[0] && cols[0][id_len] != ' ') id_len++;
+            int idx = pd_find_id(cols[0], (size_t)id_len);
+            if (idx >= 0) pd_ids[idx].priority = 1;
+        }
+    }
+    mm_free(b);
+    pd_has_priority = 1;
+    return 0;
+}
+
+static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal) {
+    if (nrem <= 0) return;
+    if (!pd_has_times) {
+        int pos = 0;
+        while (pos < nrem && pd_nwins < PD_MAX_WINS) {
+            int take = nrem - pos;
+            if (take > win_size) {
+                if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
+                else take = win_size;
+            }
+            PdWin *w = &pd_wins[pd_nwins];
+            cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+            w->jobs = 2;
+            cx_fmt(w->phase, sizeof w->phase, "normal");
+            w->count = take;
+            for (int k = 0; k < take; k++) w->idxs[k] = rem[pos + k];
+            pos += take;
+            pd_nwins++;
+            (*w_normal)++;
+        }
+        return;
+    }
+    /* Sort descending by historical time_ms, breaking ties by original position */
+    for (int i = 1; i < nrem; i++) {
+        int v = rem[i];
+        long t = pd_ids[v].time_ms;
+        int j = i - 1;
+        while (j >= 0 && pd_ids[rem[j]].time_ms < t) {
+            rem[j + 1] = rem[j];
+            j--;
+        }
+        rem[j + 1] = v;
+    }
+    static int packed[PD_MAX_IDS];
+    for (int i = 0; i < nrem; i++) packed[i] = 0;
+    int left = nrem;
+    const long budget_ms = 45000;
+    while (left > 0 && pd_nwins < PD_MAX_WINS) {
+        PdWin *w = &pd_wins[pd_nwins];
+        cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+        w->jobs = 2;
+        cx_fmt(w->phase, sizeof w->phase, "normal");
+        w->count = 0;
+        long sum_ms = 0;
+        int first = -1;
+        for (int i = 0; i < nrem; i++) if (!packed[i]) { first = i; break; }
+        if (first < 0) break;
+        w->idxs[w->count++] = rem[first];
+        packed[first] = 1;
+        left--;
+        sum_ms += pd_ids[rem[first]].time_ms;
+        while (w->count < win_size && left > 0) {
+            int pick = -1;
+            for (int j = first + 1; j < nrem; j++) {
+                if (!packed[j] && sum_ms + pd_ids[rem[j]].time_ms <= budget_ms) { pick = j; break; }
+            }
+            if (pick < 0) break;
+            w->idxs[w->count++] = rem[pick];
+            packed[pick] = 1;
+            left--;
+            sum_ms += pd_ids[rem[pick]].time_ms;
+        }
+        pd_nwins++;
+        (*w_normal)++;
+    }
 }
 
 static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
@@ -150,7 +350,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     }
     pd_nwins = 0;
 
-    /* 1. Cold-cache warmup window (jobs=1, light batches) */
+    /* 1. Cold-cache warmup window (jobs=1, light batches; prefer non-priority batches so priority stays in W0001+) */
     if (warmup_n > 0) {
         PdWin *w = &pd_wins[pd_nwins];
         cx_fmt(w->wid, sizeof w->wid, "W0000");
@@ -158,7 +358,13 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         cx_fmt(w->phase, sizeof w->phase, "warmup");
         w->count = 0;
         for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-            if (!pd_ids[i].heavy) {
+            if (!pd_ids[i].heavy && !pd_ids[i].priority) {
+                w->idxs[w->count++] = i;
+                used[i] = 1;
+            }
+        }
+        for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
+            if (!used[i] && !pd_ids[i].heavy) {
                 w->idxs[w->count++] = i;
                 used[i] = 1;
             }
@@ -166,17 +372,62 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         if (w->count > 0) { pd_nwins++; w_warmup = 1; }
     }
 
-    /* 2. Two-phase real-commit: prebuild-self followed by single-batch jobs=1 window */
-    if (has_rc >= 0 && pd_nwins + 2 <= PD_MAX_WINS) {
+    /* 2. Priority batches first (historical non-PASS batches from --priority-file) */
+    if (pd_has_priority) {
+        if (has_rc >= 0 && !used[has_rc] && pd_ids[has_rc].priority && pd_nwins + 2 <= PD_MAX_WINS) {
+            PdWin *wp = &pd_wins[pd_nwins++];
+            cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
+            wp->jobs = 1;
+            cx_fmt(wp->phase, sizeof wp->phase, "prebuild-self");
+            wp->count = 1;
+            wp->idxs[0] = has_rc;
+
+            PdWin *wr = &pd_wins[pd_nwins++];
+            cx_fmt(wr->wid, sizeof wr->wid, "W%04d", pd_nwins - 1);
+            wr->jobs = 1;
+            cx_fmt(wr->phase, sizeof wr->phase, "heavy");
+            wr->count = 1;
+            wr->idxs[0] = has_rc;
+            used[has_rc] = 1;
+            w_heavy++;
+        }
+        for (i = 0; i < pd_nids; i++) {
+            if (!used[i] && pd_ids[i].heavy && pd_ids[i].priority && pd_nwins < PD_MAX_WINS) {
+                PdWin *w = &pd_wins[pd_nwins];
+                cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+                w->jobs = 1;
+                cx_fmt(w->phase, sizeof w->phase, "heavy");
+                w->count = 1;
+                w->idxs[0] = i;
+                used[i] = 1;
+                pd_nwins++;
+                w_heavy++;
+            }
+        }
+        {
+            static int pri_rem[PD_MAX_IDS];
+            int npri = 0;
+            for (i = 0; i < pd_nids; i++) {
+                if (!used[i] && !pd_ids[i].heavy && pd_ids[i].priority) {
+                    pri_rem[npri++] = i;
+                    used[i] = 1;
+                }
+            }
+            pd_pack_normal_group(pri_rem, npri, win_size, &w_normal);
+        }
+    }
+
+    /* 3. Two-phase real-commit: prebuild-self followed by single-batch jobs=1 window */
+    if (has_rc >= 0 && !used[has_rc] && pd_nwins + 2 <= PD_MAX_WINS) {
         PdWin *wp = &pd_wins[pd_nwins++];
-        cx_fmt(wp->wid, sizeof wp->wid, "W0001");
+        cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
         wp->jobs = 1;
         cx_fmt(wp->phase, sizeof wp->phase, "prebuild-self");
         wp->count = 1;
         wp->idxs[0] = has_rc;
 
         PdWin *wr = &pd_wins[pd_nwins++];
-        cx_fmt(wr->wid, sizeof wr->wid, "W0002");
+        cx_fmt(wr->wid, sizeof wr->wid, "W%04d", pd_nwins - 1);
         wr->jobs = 1;
         cx_fmt(wr->phase, sizeof wr->phase, "heavy");
         wr->count = 1;
@@ -185,7 +436,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         w_heavy++;
     }
 
-    /* 3. Other heavy batches: each in its own jobs=1 window */
+    /* 4. Other heavy batches: each in its own jobs=1 window */
     for (i = 0; i < pd_nids; i++) {
         if (!used[i] && pd_ids[i].heavy && pd_nwins < PD_MAX_WINS) {
             PdWin *w = &pd_wins[pd_nwins];
@@ -200,28 +451,12 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         }
     }
 
-    /* 4. Normal batches: windows of win_size (8..12) with jobs=2 */
+    /* 5. Remaining normal batches */
     {
-        int rem[PD_MAX_IDS], nrem = 0;
-        for (i = 0; i < pd_nids; i++) if (!used[i]) rem[nrem++] = i;
-        int pos = 0;
-        while (pos < nrem && pd_nwins < PD_MAX_WINS) {
-            int take = nrem - pos;
-            if (take > win_size) {
-                /* Avoid tiny trailing window < 8 when possible by balancing the last two windows */
-                if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
-                else take = win_size;
-            }
-            PdWin *w = &pd_wins[pd_nwins];
-            cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
-            w->jobs = 2;
-            cx_fmt(w->phase, sizeof w->phase, "normal");
-            w->count = take;
-            for (int k = 0; k < take; k++) w->idxs[k] = rem[pos + k];
-            pos += take;
-            pd_nwins++;
-            w_normal++;
-        }
+        static int rem[PD_MAX_IDS];
+        int nrem = 0;
+        for (i = 0; i < pd_nids; i++) if (!used[i]) { rem[nrem++] = i; used[i] = 1; }
+        pd_pack_normal_group(rem, nrem, win_size, &w_normal);
     }
 
     pd_mkdirs(out_dir);
@@ -313,6 +548,134 @@ static void pd_ingest_strict_buf(const char *b, int64_t n) {
     }
 }
 
+/* Harvest already-completed PASS rows (and their RAW lines) from an existing window evidence file
+ * so an outer window timeout or resumed partial window never discards completed batches. */
+static void pd_harvest_passed(const char *outp, const char *full_ids,
+                              char *saved_hdr, size_t hdr_cap,
+                              char *saved_rows, size_t rows_cap, size_t *rows_len,
+                              int *passed_flags, char win_ids[][128], int nwin,
+                              char *rem_ids, size_t rem_cap) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(outp, &b, &n, 4 << 20) == 0 && b && n > 0) {
+        int64_t pos = 0;
+        int last_pass_idx = -1;
+        size_t hp = strlen(saved_hdr);
+        while (pos < n) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le > ls && b[le - 1] == '\r') le--;
+            int64_t llen = le - ls;
+            const char *line = (const char *)b + ls;
+            if (llen <= 0) continue;
+            if (line[0] == '#' || (llen >= 6 && memcmp(line, "batch\t", 6) == 0)) {
+                if (tx_find(line, (long)llen, "# segment=", 10) < 0 &&
+                    tx_find(line, (long)llen, "# PLANNED=", 10) < 0 &&
+                    tx_find(saved_hdr, (long)hp, line, (long)llen) < 0 &&
+                    hp + (size_t)llen + 2 < hdr_cap) {
+                    mm_copy(saved_hdr + hp, hdr_cap - hp, line, (size_t)llen);
+                    hp += (size_t)llen;
+                    saved_hdr[hp++] = '\n';
+                    saved_hdr[hp] = 0;
+                }
+                last_pass_idx = -1;
+                continue;
+            }
+            if (llen >= 4 && memcmp(line, "RAW\t", 4) == 0) {
+                if (last_pass_idx >= 0 && *rows_len + (size_t)llen + 2 < rows_cap) {
+                    mm_copy(saved_rows + *rows_len, rows_cap - *rows_len, line, (size_t)llen);
+                    *rows_len += (size_t)llen;
+                    saved_rows[(*rows_len)++] = '\n';
+                    saved_rows[*rows_len] = 0;
+                }
+                last_pass_idx = -1;
+                continue;
+            }
+            last_pass_idx = -1;
+            if ((llen >= 8 && memcmp(line, "SUMMARY\t", 8) == 0) ||
+                (llen >= 11 && memcmp(line, "CHECKPOINT\t", 11) == 0)) continue;
+            const char *cols[6]; int64_t clens[6]; int nc = 0; int64_t p = 0;
+            while (nc < 6 && p <= llen) {
+                int64_t cs = p;
+                while (p < llen && line[p] != '\t') p++;
+                cols[nc] = line + cs; clens[nc] = p - cs; nc++; p++;
+            }
+            if (nc >= 3 && clens[2] == 4 && memcmp(cols[2], "PASS", 4) == 0) {
+                for (int wi = 0; wi < nwin; wi++) {
+                    if (!passed_flags[wi] && strlen(win_ids[wi]) == (size_t)clens[0] &&
+                        memcmp(win_ids[wi], cols[0], (size_t)clens[0]) == 0) {
+                        if (*rows_len + (size_t)llen + 2 < rows_cap) {
+                            mm_copy(saved_rows + *rows_len, rows_cap - *rows_len, line, (size_t)llen);
+                            *rows_len += (size_t)llen;
+                            saved_rows[(*rows_len)++] = '\n';
+                            saved_rows[*rows_len] = 0;
+                            passed_flags[wi] = 1;
+                            last_pass_idx = wi;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        mm_free(b);
+    }
+    rem_ids[0] = 0;
+    size_t rp = 0;
+    for (int wi = 0; wi < nwin; wi++) {
+        if (!passed_flags[wi]) {
+            size_t il = strlen(win_ids[wi]);
+            if (rp + il + 2 < rem_cap) {
+                if (rp > 0) rem_ids[rp++] = ',';
+                mm_copy(rem_ids + rp, rem_cap - rp, win_ids[wi], il);
+                rp += il;
+                rem_ids[rp] = 0;
+            }
+        }
+    }
+    (void)full_ids;
+}
+
+static void pd_prepend_saved(const char *outp, const char *saved_hdr, const char *saved_rows, size_t saved_len) {
+    if (saved_len == 0) return;
+    unsigned char *ob = 0; int64_t on = 0;
+    int has_ob = (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0);
+    size_t hlen = strlen(saved_hdr);
+    size_t cap = hlen + saved_len + (size_t)(has_ob ? on : 0) + 64;
+    char *comb = (char *)mm_alloc(cap);
+    if (!comb) { if (ob) mm_free(ob); return; }
+    size_t cp = 0;
+    if (hlen > 0) {
+        mm_copy(comb + cp, cap - cp, saved_hdr, hlen);
+        cp += hlen;
+    } else {
+        const char *dh = "# devsvc qualify\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n";
+        size_t dl = strlen(dh);
+        mm_copy(comb + cp, cap - cp, dh, dl);
+        cp += dl;
+    }
+    mm_copy(comb + cp, cap - cp, saved_rows, saved_len);
+    cp += saved_len;
+    if (has_ob) {
+        int64_t pos = 0;
+        while (pos < on) {
+            int64_t ls = pos;
+            while (pos < on && ob[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < on) pos++;
+            int64_t llen = le - ls;
+            if (llen > 0 && ob[ls] != '#' && !(llen >= 6 && memcmp(ob + ls, "batch\t", 6) == 0)) {
+                mm_copy(comb + cp, cap - cp, (const char *)ob + ls, (size_t)llen);
+                cp += (size_t)llen;
+                comb[cp++] = '\n';
+            }
+        }
+        mm_free(ob);
+    }
+    sy_write_file(outp, comb, (int64_t)cp, 0644);
+    mm_free(comb);
+}
+
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
     char wpath[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
@@ -377,22 +740,65 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             continue;
         }
 
+        char win_ids[32][128];
+        int passed_flags[32] = {0};
+        int nwin = 0;
+        {
+            const char *q = ids;
+            while (*q && nwin < 32) {
+                const char *c = strchr(q, ',');
+                size_t l = c ? (size_t)(c - q) : strlen(q);
+                if (l > 0 && l < 127) {
+                    mm_copy(win_ids[nwin], 128, q, l);
+                    win_ids[nwin][l] = 0;
+                    nwin++;
+                }
+                if (!c) break;
+                q = c + 1;
+            }
+        }
+        static char saved_hdr[2048], saved_rows[32768];
+        char rem_ids[4096];
+        size_t saved_len = 0;
+        saved_hdr[0] = 0;
+        saved_rows[0] = 0;
+        cx_fmt(rem_ids, sizeof rem_ids, "%s", ids);
+        if (resume && sy_lstat(outp, &st) == 0) {
+            pd_harvest_passed(outp, ids, saved_hdr, sizeof saved_hdr, saved_rows, sizeof saved_rows, &saved_len,
+                              passed_flags, win_ids, nwin, rem_ids, sizeof rem_ids);
+            if (!rem_ids[0]) {
+                char dline[128];
+                cx_fmt(dline, sizeof dline, "QUALIFY_DONE\twindow=%s\tjobs=%d\tattempts=1\n", wid, jobs);
+                sy_write_file(donep, dline, (int64_t)strlen(dline), 0644);
+                ran++;
+                continue;
+            }
+        }
+
         int attempt = 0;
         for (;;) {
             attempt++;
+            size_t prev_saved_len = saved_len;
             sy_unlink(outp);
             char cmd[8192], why[256];
             np_result r = {0};
+            const char *run_ids = rem_ids[0] ? rem_ids : ids;
             if (mock_runner) {
-                cx_fmt(cmd, sizeof cmd, "sh '%s' window '%s' %d '%s' '%s' %d", mock_runner, wid, jobs, ids, outp, attempt);
+                cx_fmt(cmd, sizeof cmd, "sh '%s' window '%s' %d '%s' '%s' %d", mock_runner, wid, jobs, run_ids, outp, attempt);
             } else {
-                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/dvqualify.cx -- . --candidate '%s' --ids '%s' --out '%s' --jobs %d --segment-batches 16",
-                       root, cand, ids, outp, jobs);
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/dvqualify.cx -- . --candidate '%s' --ids '%s' --out '%s' --jobs %d --segment-batches %d",
+                       root, cand, run_ids, outp, jobs, jobs);
             }
             char *av[] = {"sh", "-c", cmd, 0};
             int tr = np_run(av, root, 0, 58, &r, why, sizeof why);
             int rc = tr ? 124 : r.rc;
             np_free(&r);
+
+            if (prev_saved_len > 0) {
+                pd_prepend_saved(outp, saved_hdr, saved_rows, prev_saved_len);
+            }
+            pd_harvest_passed(outp, ids, saved_hdr, sizeof saved_hdr, saved_rows, sizeof saved_rows, &saved_len,
+                              passed_flags, win_ids, nwin, rem_ids, sizeof rem_ids);
 
             unsigned char *ob = 0; int64_t on = 0;
             int has_nonpass = 0;
@@ -415,12 +821,21 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 cx_fmt(bad_raw, sizeof bad_raw, "no-output rc=%d", rc);
             }
 
-            if (!has_nonpass && rc == 0) {
+            if (!has_nonpass && !rem_ids[0] && rc == 0) {
                 char dline[128];
                 cx_fmt(dline, sizeof dline, "QUALIFY_DONE\twindow=%s\tjobs=%d\tattempts=%d\n", wid, jobs, attempt);
                 sy_write_file(donep, dline, (int64_t)strlen(dline), 0644);
                 ran++;
                 break;
+            }
+            if (!has_nonpass && rem_ids[0]) {
+                has_nonpass = 1;
+                const char *comma = strchr(rem_ids, ',');
+                size_t bl = comma ? (size_t)(comma - rem_ids) : strlen(rem_ids);
+                if (bl >= sizeof bad_id) bl = sizeof bad_id - 1;
+                mm_copy(bad_id, sizeof bad_id, rem_ids, bl);
+                bad_id[bl] = 0;
+                cx_fmt(bad_raw, sizeof bad_raw, "window-timeout-remaining=%s rc=%d", rem_ids, rc);
             }
             /* Track per-batch retry count; stop immediately after max_retries (default 2) */
             int ridx = -1;
@@ -686,12 +1101,14 @@ int main(int argc, char **argv) {
     if (argc < 2) return pd_refuse("usage: plan|run|merge|replay");
     const char *sub = argv[1];
     if (tx_eqz(sub, "plan")) {
-        const char *ids_f = 0, *out_d = 0, *heavy_f = 0;
+        const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0;
         int win_sz = 10, warmup = 4;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
             else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
             else if (tx_eqz(argv[i], "--heavy-file") && i + 1 < argc) heavy_f = argv[++i];
+            else if (tx_eqz(argv[i], "--times-file") && i + 1 < argc) times_f = argv[++i];
+            else if (tx_eqz(argv[i], "--priority-file") && i + 1 < argc) prio_f = argv[++i];
             else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
             else return pd_refuse("unknown-plan-arg");
@@ -699,6 +1116,8 @@ int main(int argc, char **argv) {
         if (!ids_f || !out_d) return pd_refuse("plan-requires-ids-file-and-out");
         if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
         if (pd_load_ids(ids_f)) return pd_refuse("read-ids-file");
+        if (times_f && pd_load_times_file(times_f)) return pd_refuse("read-times-file");
+        if (prio_f && pd_load_priority_file(prio_f)) return pd_refuse("read-priority-file");
         return pd_build_plan(win_sz, warmup, out_d);
     }
     if (tx_eqz(sub, "run")) {

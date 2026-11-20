@@ -165,6 +165,100 @@ int main(void) {
         free(eub);
     }
 
+    /* (5) plan with --times-file (each normal window sum <= 45000 ms) and --priority-file (historical non-PASS first) */
+    {
+        char tids[CPD_PW], tfile[CPD_PW], pfile[CPD_PW], tpdir[CPD_PW];
+        if (cx_fmt(tids, sizeof tids, "%s/tids.txt", work) ||
+            cx_fmt(tfile, sizeof tfile, "%s/times.tsv", work) ||
+            cx_fmt(pfile, sizeof pfile, "%s/prio.tsv", work) ||
+            cx_fmt(tpdir, sizeof tpdir, "%s/plan-tp", work)) return 2;
+        const char *s_tids = "w1\nw2\nb1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nb10\n";
+        const char *s_tfile =
+            "1700000001\tb1\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000002\tb2\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000003\tb3\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000004\tb4\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000005\tb5\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000006\tb6\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000007\tb7\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000008\tb8\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000009\tb9\tFAIL\t15000\t14500\tfallback\t1.0\trun-batch\n"
+            "1700000010\tb10\tFAIL\t18000\t17500\tfallback\t1.0\trun-batch\n";
+        const char *s_pfile =
+            "b1\tdom\tPASS\t0\taaa\t20000\t1.0\t0\t-\n"
+            "b9\tdom\tFAIL\t1\taaa\t15000\t1.0\t0\terr\n"
+            "b10\tdom\tUNKNOWN\t124\taaa\t18000\t1.0\t0\ttimeout\n";
+        if (cx_write(tids, s_tids, strlen(s_tids)) ||
+            cx_write(tfile, s_tfile, strlen(s_tfile)) ||
+            cx_write(pfile, s_pfile, strlen(s_pfile))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, tids, tfile, pfile, tpdir)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char wp[CPD_PW]; size_t wn = 0;
+        cx_fmt(wp, sizeof wp, "%s/windows.tsv", tpdir);
+        char *wb = (char *)cx_read(wp, &wn);
+        /* W0001 must be the priority window containing b10,b9; and b1..b8 (92s total) must be split across 3 normal windows (43s, 43s, 6s) so each <= 45s */
+        ck(rc == 0 && wb &&
+           tx_find(wb, (long)wn, "W0000\t1\twarmup\t2\tw1,w2\n", 23) >= 0 &&
+           tx_find(wb, (long)wn, "W0001\t2\tnormal\t2\tb10,b9\n", 24) >= 0 &&
+           tx_find(wb, (long)wn, "W0002\t2\tnormal\t3\tb1,b2,b5\n", 26) >= 0 &&
+           tx_find(wb, (long)wn, "W0003\t2\tnormal\t3\tb3,b4,b6\n", 26) >= 0 &&
+           tx_find(wb, (long)wn, "W0004\t2\tnormal\t2\tb7,b8\n", 23) >= 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=12\twindows=5\t"),
+           "plan-times-and-priority: priority non-PASS batches run in W0001 and normal windows obey <=45s budget");
+        free(wb);
+    }
+
+    /* (6) outer window timeout preserves already-completed PASS batches on disk and only retries remaining batches */
+    {
+        char tdir[CPD_PW], tmock[CPD_PW], tids2[CPD_PW];
+        if (cx_fmt(tdir, sizeof tdir, "%s/timeout-keep", work) ||
+            cx_fmt(tmock, sizeof tmock, "%s/tmock.sh", work) ||
+            cx_fmt(tids2, sizeof tids2, "%s/tids2.txt", work)) return 2;
+        if (cx_write(tids2, "p1\np2\np3\np4\n", 12)) return 2;
+        const char *tms =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5; att=$6\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "if [ \"$att\" = 1 ]; then\n"
+            "  printf 'p1\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "  printf 'RAW\\tBATCH_RUN\\tid=p1\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "  printf 'p2\\tproduct-qualification\\tPASS\\t0\\taaa\\t60\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "  printf 'RAW\\tBATCH_RUN\\tid=p2\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "  exit 124\n"
+            "fi\n"
+            "if [ \"$ids\" != \"p3,p4\" ]; then\n"
+            "  printf 'UNEXPECTED_IDS\\tproduct-qualification\\tFAIL\\t1\\taaa\\t10\\t1.0\\t0\\tgot=%s\\n' \"$ids\" >> \"$out\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "printf 'p3\\tproduct-qualification\\tPASS\\t0\\taaa\\t70\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "printf 'RAW\\tBATCH_RUN\\tid=p3\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "printf 'p4\\tproduct-qualification\\tPASS\\t0\\taaa\\t80\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "printf 'RAW\\tBATCH_RUN\\tid=p4\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "exit 0\n";
+        if (cx_write(tmock, tms, strlen(tms))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 0",
+            cwd, cwd, tids2, tdir)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+            cwd, cwd, cwd, tdir, tmock)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char sp[CPD_PW]; size_t sn = 0;
+        cx_fmt(sp, sizeof sp, "%s/strict-W0000.tsv", tdir);
+        char *sb = (char *)cx_read(sp, &sn);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=1\t") &&
+           sb && tx_find(sb, (long)sn, "p1\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p2\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p3\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p4\tproduct-qualification\tPASS\t", 30) >= 0,
+           "run-window-timeout-preserves-completed-batches: keeps p1,p2 on disk after rc=124 and retries only p3,p4");
+        free(sb);
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
