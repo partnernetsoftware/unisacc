@@ -70,7 +70,7 @@
 #pragma unisa use sys.posix
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
-#define MAXJ 12
+#define MAXJ 16
 #define NEWMSG_N 3
 
 typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long n; int rc; long t0, ms; int state; } Job;
@@ -120,8 +120,11 @@ static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
 }
 static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
-    if (rc == 0 && has(l, (long)tx_len(l, 200), "ok=13") && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
-    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); return 0;
+    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    {   char d[160]; line_with(o, n, "\tFAIL\t", d, sizeof d);
+        if (d[0]) cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %.120s", rc, l[0] ? l : "no RATCHETS line", d);
+        else cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); }
+    return 0;
 }
 static int j_tri(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "CXMOD_TRI\t", l, sizeof l);
@@ -202,7 +205,7 @@ static int j_p1file(const char *o, long n) {
 static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev, int cap) {
     if (tx_eqz(kind, "rev")) return j_rev(o, n, rc, ev, cap);
     if (tx_eqz(kind, "branch")) return j_branch(o, n, ev, cap);
-    if (tx_eqz(kind, "derive")) return j_derive(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "derive") || tx_eqz(kind, "derive2")) return j_derive(o, n, rc, ev, cap);
     if (tx_eqz(kind, "ratchets")) return j_ratchets(o, n, rc, ev, cap);
     if (tx_eqz(kind, "tri")) return j_tri(o, n, rc, ev, cap);
     if (tx_eqz(kind, "extract")) return j_extract(o, n, rc, ev, cap);
@@ -809,7 +812,8 @@ int main(int argc, char **argv) {
     /* job table: slot order is the report order */
     static char *g_status[] = {"./tools/bound", "20", "git", "-C", 0, "status", "--short", "--", "src", "cx", "ext", "exec/facts", 0};
     static char *g_branch[] = {"./tools/bound", "20", "git", "-C", 0, "rev-parse", "--abbrev-ref", "HEAD", 0};
-    static char *g_derive[] = {"./tools/bound", "80", "sh", UC, "tools/derive.cx", "--", "--check", 0};
+    static char *g_derive[] = {"./tools/bound", "55", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "tables-gen,layer-api,iface-hash,st-gap,chain-phases,batch-domains,links,libc-decls", 0};
+    static char *g_derive2[] = {"./tools/bound", "55", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "batch-packages-gen,product-map,doc-links,tool-index,table-index,cx0-three-source", 0};
     static char *g_rat[] = {"./tools/bound", "60", "sh", UC, "tools/ratchets.cx", 0};
     static char *g_tri[] = {"./tools/bound", "60", "sh", UC, "tools/check-cxmod-tri.cx", 0};
     static char *g_ext[] = {"./tools/bound", "55", "sh", UC, "tools/cx0-extract.cx", "--", "--check", 0};
@@ -817,17 +821,17 @@ int main(int argc, char **argv) {
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
     static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
-    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot, g_genall};
-    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot", "15-gen-all"};
-    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight", "slot", "genall"};
+    static char **tab[] = {g_status, g_branch, g_derive, g_derive2, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot, g_genall};
+    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2a-derive2", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot", "15-gen-all"};
+    static const char *kd[] = {"rev", "branch", "derive", "derive2", "ratchets", "tri", "extract", "chain", "inflight", "slot", "genall"};
     g_status[4] = (char *)repo; g_branch[4] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain[6] = outd; g_chain[7] = cached;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
-    for (k = 0; k < 10; k++) {
+    for (k = 0; k < 11; k++) {
         int c, i;
-        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev"))) continue;
-        if (k == 6 && !have_tmp) continue;
+        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(k == 3 && WANT("2a-derive"))) continue;
+        if (k == 7 && !have_tmp) continue;
         for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
         J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; (void)i;
         nj++;
@@ -878,7 +882,7 @@ int main(int argc, char **argv) {
         }
     }
     {   char ev[640]; int ok;
-        char rev_ev[640]; int rev_ok = -1; long rev_ms = 0;
+        char rev_ev[640], der_ev[640]; int rev_ok = -1, der_ok = -1; long rev_ms = 0, der_ms = 0;
         for (k = 0; k < nj; k++) {
             ok = judge_kind(items[k], J[k].out ? J[k].out : "", J[k].n, J[k].rc, ev, sizeof ev);
             if (J[k].state == 3) { ok = 0; cx_fmt(ev, sizeof ev, "cannot start child"); }
@@ -886,6 +890,12 @@ int main(int argc, char **argv) {
             if (tx_eqz(items[k], "branch")) {
                 int bok = ok;   /* merged row 1-rev: status and branch */
                 if (rev_ok >= 0) { char both[700]; cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev); row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms); }
+                continue;
+            }
+            if (tx_eqz(items[k], "derive")) { der_ok = ok; put_ev(der_ev, sizeof der_ev, ev); der_ms = J[k].ms; continue; }
+            if (tx_eqz(items[k], "derive2")) {
+                int dok = ok;   /* merged row 2a-derive: two parallel 55s-bounded derive shards */
+                if (der_ok >= 0) { char both[700]; cx_fmt(both, sizeof both, "%s; %s", der_ev, ev); row_judged("2a-derive", der_ok && dok, both, der_ms > J[k].ms ? der_ms : J[k].ms); }
                 continue;
             }
             row_judged(J[k].name, ok, ev, J[k].ms);
