@@ -432,6 +432,63 @@ static int check_bg_done(const char *base, const char *rev) {
     return ok;
 }
 
+static int parse_stat_state_pgrp(const char *buf, long n, char *st_out, int *pgrp_out) {
+    long rp = -1;
+    for (long i = n - 1; i >= 0; i--) {
+        if (buf[i] == ')') { rp = i; break; }
+    }
+    if (rp < 0) return -1;
+    long p = rp + 1;
+    while (p < n && (buf[p] == ' ' || buf[p] == '\t')) p++;
+    if (p >= n) return -1;
+    *st_out = buf[p++];
+    /* Skip ppid (field 4), then read pgrp (field 5) */
+    for (int f = 0; f < 2; f++) {
+        while (p < n && (buf[p] == ' ' || buf[p] == '\t')) p++;
+        long s = p;
+        while (p < n && buf[p] != ' ' && buf[p] != '\t' && buf[p] != '\n' && buf[p] != '\r') p++;
+        if (p == s) return -1;
+        if (f == 1) {
+            char nb[32];
+            size_t nl = (size_t)(p - s) < sizeof nb - 1 ? (size_t)(p - s) : sizeof nb - 1;
+            mm_copy(nb, sizeof nb, buf + s, nl); nb[nl] = 0;
+            *pgrp_out = atoi(nb);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Under PR_SET_CHILD_SUBREAPER (e.g. tools/bound in run-batch/affected), a SIGKILLed child
+ * stays as a zombie until the subreaper waits for it, and Linux kill(-pgid, 0) still returns 0
+ * for a process group containing only zombies. Scan /proc/<pid>/stat to distinguish live members
+ * from zombie-only groups. Returns 1 if any non-Z/X member has pgrp==pgid, 0 if /proc proves none,
+ * -1 if /proc is unavailable. */
+static int pgid_has_live_member(int pgid) {
+    if (sy_exists("/proc/self/stat") != 1) return -1;
+    sy_dir_t d;
+    if (sy_dir_open(&d, "/proc") != 0) return -1;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] < '0' || d.name[0] > '9') continue;
+        char sp[128], buf[512];
+        if (cx_fmt(sp, sizeof sp, "/proc/%s/stat", d.name)) continue;
+        int fd = sy_open_read(sp);
+        if (fd < 0) continue;
+        long r = sy_read(fd, buf, (long)sizeof buf - 1);
+        sy_close(fd);
+        if (r <= 0) continue;
+        buf[r] = 0;
+        char st = 0;
+        int pgrp = 0;
+        if (parse_stat_state_pgrp(buf, r, &st, &pgrp) == 0 && pgrp == pgid && st != 'Z' && st != 'X') {
+            sy_dir_close(&d);
+            return 1;
+        }
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
 static int proc_and_pgid_alive(int pid, int pgid, const char *procid) {
     pi_id_t id;
     int have_id = (procid && procid[0] && procid[0] != '-' && pi_parse_tag_ex(procid, &id) == 0 && id.pid > 0);
@@ -451,7 +508,13 @@ static int proc_and_pgid_alive(int pid, int pgid, const char *procid) {
     int pgid_alive = 0;
     if (pgid > 1) {
         errno = 0;
-        if (kill((pid_t)-pgid, 0) == 0 || errno == EPERM) pgid_alive = 1;
+        int kr = kill((pid_t)-pgid, 0);
+        if (kr == 0) {
+            if (proc_alive) pgid_alive = 1;
+            else pgid_alive = (pgid_has_live_member(pgid) != 0);
+        } else if (errno == EPERM) {
+            pgid_alive = 1;
+        }
     }
     return (proc_alive || pgid_alive) ? 1 : 0;
 }

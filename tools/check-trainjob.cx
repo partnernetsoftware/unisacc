@@ -359,6 +359,46 @@ int main(void) {
     tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s tail 99999-99999", dvdir, tjbin);
     ck(ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out) == 2, "tail-unknown-id-refused");
 
+    /* 13. Zombie-only PGID (simulating PR_SET_CHILD_SUBREAPER in tools/bound under run-batch/affected):
+     *     child calls setsid(), we adopt it while alive, SIGKILL it without waitpid so it stays zombie
+     *     and kill(-pgid, 0) still returns 0; trainjob status must recognize zombie-only PGID as dead
+     *     and commit LOST on second confirmation. */
+    pid_t zpid = fork();
+    if (zpid == 0) {
+        setpgid(0, 0);
+        for (;;) sleep(10);
+        _exit(0);
+    }
+    if (zpid > 0) {
+        char revz[64], dz[384], owzp[420], owz_buf[256], jidz[128] = {0};
+        tx_snprintf(revz, sizeof revz, "4444444444444444444444444444444444444444");
+        tx_snprintf(dz, sizeof dz, "%s/%s", base, revz);
+        sy_mkdir_all(dz, 0700);
+        tx_snprintf(owzp, sizeof owzp, "%s/owner.tsv", dz);
+        tx_snprintf(cmd, sizeof cmd, "sleep 0.1");
+        ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int owz_n = tx_snprintf(owz_buf, sizeof owz_buf,
+            "OWNER\t1795100301\t%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=60\tchain=source\n",
+            revz, (int)getpid(), (int)zpid, (int)zpid);
+        sy_write_file(owzp, owz_buf, owz_n, 0600);
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s adopt --base %s --rev %s", dvdir, tjbin, base, revz);
+        int rc_za = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        extract_kv(out, "id=", jidz, sizeof jidz);
+        kill(zpid, SIGKILL);
+        tx_snprintf(cmd, sizeof cmd, "sleep 0.2");
+        ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        tx_snprintf(cmd, sizeof cmd, "UNISACC_DEVSVC_DIR=%s %s status %s --min-lost-gap 0", dvdir, tjbin, jidz);
+        int rc_z1 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int ok_z1 = (rc_z1 == 0 && ckk_has(out, sizeof out, "\tstate=RUNNING\t"));
+        int rc_z2 = ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
+        int ok_z2 = (rc_z2 == 0 && ckk_has(out, sizeof out, "\tstate=LOST\t"));
+        int zst = 0;
+        waitpid(zpid, &zst, 0);
+        ck(rc_za == 0 && jidz[0] && ok_z1 && ok_z2, "zombie-pgid-subreaper-commits-lost");
+    } else {
+        ck(0, "zombie-pgid-subreaper-commits-lost");
+    }
+
     /* Cleanup */
     tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
     ckk_sh("CHECK_TRAINJOB", cmd, out, sizeof out);
