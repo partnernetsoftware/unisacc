@@ -117,7 +117,7 @@ SCHECK(CoreMachine,memory,M_MEMORY);
 SCHECK(CoreMachine,blobs,M_BLOBS);
 SCHECK(CoreMachine,strings,M_STRINGS);
 SCHECK(CoreMachine,resources,M_RESOURCES);
-SCHECK(CoreResult,reason,RESULT_REASON); SCHECK(CoreResult,reason_n,RESULT_REASON_N);
+SCHECK(CoreResult,reason,RESULT_REASON); SCHECK(CoreResult,reason_n,RESULT_REASON_N); SCHECK(CoreResult,steps,RESULT_STEPS);
 SCHECK(CoreModel,str,CM_STR); SCHECK(CoreModel,strl,CM_STRL);
 typedef char machine_size[(sizeof(CoreMachine)==MACHINE_SIZE)?1:-1];
 

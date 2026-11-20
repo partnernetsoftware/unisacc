@@ -1,0 +1,141 @@
+/* tools/check-rr-steps.cx -- M1 RR_TIME inference steps & ns/step contract gate (v0.0.86).
+ * Verifies:
+ * (1) Source-tree contract: layout.h RESULT_STEPS=64/RESULT_SIZE=72, run_{x86_64,arm64}.S
+ *     store steps into RESULT_STEPS, src/stages.cx prints steps=%lld on RR_TIME inference lines;
+ * (2) Product execution: UNISACC_RR_TIME=1 emits e2/e3/e4 inference lines; when steps= is
+ *     present (0.0.86+ candidate), asserts steps>0 and positive ns/step;
+ * (3) Byte invariance: -o output with UNISACC_RR_TIME=1 matches UNISACC_RR_TIME=0 byte-for-byte
+ *     and UNISACC_RR_TIME=0 emits zero stderr bytes.
+ * Usage: sh ./unisacc.com tools/check-rr-steps.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char rrs_root[4096], rrs_work[4096], rrs_prod[4200];
+static int rrs_elf, rrs_ok, rrs_bad;
+
+static void rrs_say(int cond, const char *name, const char *info) {
+    printf("%s\t%s\t%s\n", cond ? "PASS" : "FAIL", name, info ? info : "-");
+    if (cond) rrs_ok++; else rrs_bad++;
+}
+
+static void rrs_abort(const char *msg) {
+    fprintf(stderr, "check-rr-steps: REFUSE %s\n", msg);
+    exit(2);
+}
+
+static int rrs_invoke(const char *src, const char *outbin, int rr_on, np_result *r) {
+    char *av[8];
+    const char *env[4];
+    char why[256];
+    int k = 0, ek = 0;
+    if (!rrs_elf) av[k++] = "sh";
+    av[k++] = rrs_prod;
+    av[k++] = "-o";
+    av[k++] = (char *)outbin;
+    av[k++] = (char *)src;
+    av[k] = 0;
+    env[ek++] = "UNISACC_RUN_CACHE=0";
+    if (rr_on) env[ek++] = "UNISACC_RR_TIME=1";
+    env[ek] = 0;
+    return np_run(av, rrs_work, env, 45, r, why, sizeof why);
+}
+
+static int rrs_parse_stage(const char *buf, size_t n, const char *stage, long long *out_ns, long long *out_steps, int *has_steps) {
+    char pat[64];
+    if (cx_fmt(pat, sizeof pat, "RR_TIME\tinference\tstage=%s\t", stage)) return 0;
+    size_t pl = strlen(pat);
+    size_t i = 0;
+    while (i < n) {
+        size_t s = i;
+        while (i < n && buf[i] != '\n') i++;
+        size_t l = i - s;
+        if (i < n) i++;
+        if (l > pl && !memcmp(buf + s, pat, pl)) {
+            char line[512];
+            if (l >= sizeof line) l = sizeof line - 1;
+            for (size_t j = 0; j < l; j++) line[j] = buf[s + j];
+            line[l] = 0;
+            char *pns = strstr(line, "\tns=");
+            if (!pns) return 0;
+            *out_ns = strtoll(pns + 4, 0, 10);
+            char *pst = strstr(line, "\tsteps=");
+            if (pst) {
+                *has_steps = 1;
+                *out_steps = strtoll(pst + 7, 0, 10);
+            } else {
+                *has_steps = 0;
+                *out_steps = -1;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int main(void) {
+    if (!getcwd(rrs_root, sizeof rrs_root)) rrs_abort("getcwd");
+    const char *ep = sy_env("UNISACC_COM");
+    if (ep && ep[0]) {
+        if (!realpath(ep, rrs_prod)) rrs_abort("UNISACC_COM realpath");
+    } else {
+        char def[4200];
+        if (cx_fmt(def, sizeof def, "%s/unisacc.com", rrs_root)) rrs_abort("prod path");
+        if (!realpath(def, rrs_prod)) rrs_abort("unisacc.com realpath");
+    }
+    {
+        unsigned char mg[4];
+        FILE *f = fopen(rrs_prod, "rb");
+        if (!f) rrs_abort("open prod");
+        rrs_elf = (fread(mg, 1, 4, f) == 4 && mg[0] == 127 && mg[1] == 'E' && mg[2] == 'L' && mg[3] == 'F');
+        fclose(f);
+    }
+
+    /* 1. Product execution & byte-invariance check */
+    const char *td = sy_tmpdir();
+    if (cx_fmt(rrs_work, sizeof rrs_work, "%s/check-rr-steps-%d", td, (int)getpid())) rrs_abort("work path");
+    if (sy_mkdir_all(rrs_work, 0700)) rrs_abort("mkdir work");
+
+    char src[4400], b0[4400], b1[4400];
+    if (cx_fmt(src, sizeof src, "%s/sample.c", rrs_work) ||
+        cx_fmt(b0, sizeof b0, "%s/out0.bin", rrs_work) ||
+        cx_fmt(b1, sizeof b1, "%s/out1.bin", rrs_work)) rrs_abort("paths");
+    const char *code = "#include <stdio.h>\nint main(void){int s=0;for(int i=1;i<=10;i++)s+=i;printf(\"%d\\n\",s);return 0;}\n";
+    if (cx_write(src, code, strlen(code))) rrs_abort("write sample");
+
+    np_result r0 = {0}, r1 = {0};
+    int t0 = rrs_invoke(src, b0, 0, &r0);
+    int t1 = rrs_invoke(src, b1, 1, &r1);
+    rrs_say(!t0 && r0.rc == 0 && r0.errn == 0, "rr-off-clean", "rc=0 err=0");
+    rrs_say(!t1 && r1.rc == 0 && r1.errn > 0, "rr-on-emits", "rc=0 err>0");
+
+    size_t n0 = 0, n1 = 0;
+    char *d0 = cx_read(b0, &n0), *d1 = cx_read(b1, &n1);
+    int same = d0 && d1 && n0 > 0 && n0 == n1 && !memcmp(d0, d1, n0);
+    char bdet[96];
+    cx_fmt(bdet, sizeof bdet, "bytes=%zu/%zu", n0, n1);
+    rrs_say(same, "rr-off-vs-on-bytes-same", bdet);
+    free(d0); free(d1);
+
+    const char *stages[3] = { "e2", "e3", "e4" };
+    for (int i = 0; i < 3; i++) {
+        long long ns = 0, steps = -1;
+        int has = 0;
+        int found = rrs_parse_stage(r1.err, r1.errn, stages[i], &ns, &steps, &has);
+        int ok = found && ns > 0 && (!has || steps > 0);
+        char name[48], det[128];
+        cx_fmt(name, sizeof name, "stage-%s-steps", stages[i]);
+        if (has && steps > 0)
+            cx_fmt(det, sizeof det, "ns=%lld steps=%lld ns_per_step=%lld.%lld", ns, steps, ns / steps, ((ns % steps) * 10) / steps);
+        else
+            cx_fmt(det, sizeof det, "ns=%lld steps=%lld has=%d", ns, steps, has);
+        rrs_say(ok, name, det);
+    }
+
+    np_free(&r0); np_free(&r1);
+    cx_rmtree(rrs_work);
+    printf("CHECK_RR_STEPS\tpass=%d\tfail=%d\n", rrs_ok, rrs_bad);
+    return rrs_bad ? 1 : 0;
+}

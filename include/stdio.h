@@ -36,7 +36,9 @@ typedef struct { __u_word __u_pos; int __u_count; unsigned int __u_wch; } fpos_t
 #define stdout ((FILE *)(_UNISA_STDIO_BASE + 1))
 #define stderr ((FILE *)(_UNISA_STDIO_BASE + 2))
 
-static int printf();   /* 0.0.35 H1: static like its definition (C99 6.2.2p7) */
+/* tmpfile uses this helper before its definition. Its parameter types
+   are unchanged by the default argument promotions. */
+static __u_word _u_digits();
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
 static int _unisa_fd(FILE *__u_f) {
@@ -448,6 +450,7 @@ static int getchar(void) { return fgetc(stdin); }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_vprintf
+static int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap);
 static int vprintf(const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
 }
@@ -1548,7 +1551,11 @@ static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
    there fills before main); a program with no unit including <stdlib.h> has none, and the child gets
    the block the kernel left after argv */
 #if !__UNISA_FTRIM_LIBC || __UN_popen
+#if defined(RT_EXTERN)
+extern char **environ;
+#else
 char **environ;
+#endif
 #ifndef _unisa_env
 #define _unisa_env environ
 #endif

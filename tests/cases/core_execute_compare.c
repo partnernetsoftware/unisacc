@@ -3,7 +3,7 @@
 #include "../../exec/c/run.c"
 int cx_core_run(const CoreModel *,unsigned char *,int,const char *,I,CoreResult *);
 static int same(const CoreResult *a,const CoreResult *b,int x,int y){
- if(x!=y||a->out.n!=b->out.n||a->err.n!=b->err.n||a->reason_n!=b->reason_n)return 0;
+ if(x!=y||a->out.n!=b->out.n||a->err.n!=b->err.n||a->reason_n!=b->reason_n||a->steps!=b->steps)return 0;
  if(a->out.n&&memcmp(a->out.b,b->out.b,a->out.n))return 0;
  if(a->err.n&&memcmp(a->err.b,b->err.b,a->err.n))return 0;
  if(!a->reason&&!b->reason)return 1;if(!a->reason||!b->reason)return 0;

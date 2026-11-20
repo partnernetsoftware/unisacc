@@ -1,0 +1,417 @@
+/* tools/check-run-split.cx -- W2 stage-2 equivalence & silent-fallback gate (v0.0.86).
+ * Compares UNISACC_RUN_SPLIT=1 (and =shadow) against UNISACC_RUN_SPLIT=0 on multi-module
+ * .cx scripts: exact byte-for-byte stdout, stderr, and rc equivalence; edit-one-line rerun
+ * compiles only the main unit (RR_TIME e3=1, elf=1 when split is active in the product);
+ * silent fallback on objlink refusal (host-forwarded setpgid) with zero extra stderr;
+ * syntax error does not duplicate stderr.
+ * Usage: sh ./unisacc.com tools/check-run-split.cx
+ * Product under test: $UNISACC_COM, default ./unisacc.com (ELF executed directly, else via sh).
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char root[4096], work[4096], prod[4200], cache_dir[4200], cache_env[4400];
+static int is_elf, npass, nfail;
+
+static void crs_note(int ok, const char *name, const char *detail) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "-");
+    if (ok) npass++; else nfail++;
+}
+
+static void die(const char *m) {
+    fprintf(stderr, "check-run-split: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void crs_put(const char *path, const char *s) {
+    long n = tx_len(s, 1L << 20);
+    if (n < 0 || cx_write(path, s, (size_t)n)) die(path);
+}
+
+static int run_prod(const char *src, const char *arg1, const char *e1, const char *e2, const char *e3, np_result *r) {
+    char *av[8];
+    const char *env[7];
+    char why[512];
+    int k = 0, ek = 0;
+    if (!is_elf) av[k++] = "sh";
+    av[k++] = prod;
+    av[k++] = (char *)src;
+    if (arg1) { av[k++] = "--"; av[k++] = (char *)arg1; }
+    av[k] = 0;
+    env[ek++] = cache_env;
+    env[ek++] = "UNISA_CONTAINER=";
+    if (e1) env[ek++] = e1;
+    if (e2) env[ek++] = e2;
+    if (e3) env[ek++] = e3;
+    env[ek] = 0;
+    return np_run(av, work, env, 50, r, why, sizeof why);
+}
+
+static int count_uo(void) {
+    char udir[4400];
+    if (cx_fmt(udir, sizeof udir, "%s/unitobj", cache_dir)) return 0;
+    DIR *d = opendir(udir);
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d)) != 0) {
+        long ln = tx_len(e->d_name, 256);
+        if (ln > 3 && e->d_name[ln - 3] == '.' && e->d_name[ln - 2] == 'u' && e->d_name[ln - 1] == 'o') n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static int count_substr(const char *s, size_t n, const char *needle) {
+    long nl = tx_len(needle, 128);
+    int c = 0;
+    if (!s || nl <= 0) return 0;
+    for (size_t i = 0; i + (size_t)nl <= n; i++) {
+        if (!memcmp(s + i, needle, (size_t)nl)) c++;
+    }
+    return c;
+}
+
+static void compare_two(const char *tag, const char *src, const char *arg1, int want_rc, const char *split_val, const char *extra_env) {
+    np_result r0 = {0}, r1 = {0};
+    int t1 = run_prod(src, arg1, split_val, extra_env, 0, &r1);
+    int t0 = run_prod(src, arg1, "UNISACC_RUN_SPLIT=0", extra_env, 0, &r0);
+    int ok = !t0 && !t1 && r0.rc == want_rc && r1.rc == want_rc &&
+             r0.outn == r1.outn && (!r0.outn || !memcmp(r0.out, r1.out, r0.outn)) &&
+             r0.errn == r1.errn && (!r0.errn || !memcmp(r0.err, r1.err, r0.errn));
+    char det[200];
+    cx_fmt(det, sizeof det, "rc=%d/%d(want %d) out=%zu/%zu err=%zu/%zu", r0.rc, r1.rc, want_rc, r0.outn, r1.outn, r0.errn, r1.errn);
+    crs_note(ok, tag, det);
+    if (!ok) {
+        fprintf(stderr, "MISMATCH %s s0_out=[%.*s] s1_out=[%.*s] s0_err=[%.*s] s1_err=[%.*s]\n",
+                tag, (int)r0.outn, r0.out ? r0.out : "", (int)r1.outn, r1.out ? r1.out : "",
+                (int)r0.errn, r0.err ? r0.err : "", (int)r1.errn, r1.err ? r1.err : "");
+    }
+    np_free(&r0); np_free(&r1);
+}
+
+int main(void) {
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    const char *envp = sy_env("UNISACC_COM");
+    if (envp && envp[0]) {
+        if (!realpath(envp, prod)) die("UNISACC_COM realpath");
+    } else {
+        char def[4200];
+        if (cx_fmt(def, sizeof def, "%s/unisacc.com", root)) die("prod path");
+        if (!realpath(def, prod)) die("unisacc.com realpath");
+    }
+    {
+        unsigned char mg[4];
+        FILE *f = fopen(prod, "rb");
+        if (!f) die("open product");
+        is_elf = (fread(mg, 1, 4, f) == 4 && mg[0] == 127 && mg[1] == 'E' && mg[2] == 'L' && mg[3] == 'F');
+        fclose(f);
+    }
+    const char *td = sy_tmpdir();
+    if (cx_fmt(work, sizeof work, "%s/check-run-split-%d", td, (int)getpid()) ||
+        cx_fmt(cache_dir, sizeof cache_dir, "%s/cache", work) ||
+        cx_fmt(cache_env, sizeof cache_env, "UNISACC_CACHE_DIR=%s", cache_dir)) die("paths");
+    if (sy_mkdir_all(cache_dir, 0700)) die("mkdir work");
+
+    char cxlink[4200], cxsrc[4200], extlink[4200], extsrc[4200], cxrootp[4200];
+    if (cx_fmt(cxlink, sizeof cxlink, "%s/cx", work) ||
+        cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) ||
+        cx_fmt(extlink, sizeof extlink, "%s/ext", work) ||
+        cx_fmt(extsrc, sizeof extsrc, "%s/ext", root) ||
+        cx_fmt(cxrootp, sizeof cxrootp, "%s/cxroot.tsv", work)) die("cx paths");
+    if (symlink(cxsrc, cxlink) || symlink(extsrc, extlink)) die("symlink cx/ext");
+    crs_put(cxrootp,
+        "CXROOT1\n"
+        "R\tsys\tcx/sys\n"
+        "R\tmem\tcx/mem\n"
+        "R\ttext\tcx/text\n"
+        "R\tdriver\tcx/driver\n"
+        "R\tsysx\text/sysx\n");
+
+    /* 1. Experiment script (use sys.env sys.fs mem.heap): cold split populates .uo cache */
+    char s1[4200];
+    cx_fmt(s1, sizeof s1, "%s/exp.cx", work);
+    crs_put(s1,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *v = sy_env_or(\"RSPL_TAG\", \"none\");\n"
+        "    char *p = (char *)mm_alloc(32);\n"
+        "    if (!p) return 9;\n"
+        "    cx_fmt(p, 32, \"v=%s argc=%d ver=1\", v, argc);\n"
+        "    printf(\"%s arg=%s\\n\", p, argc > 1 ? argv[1] : \"-\");\n"
+        "    fprintf(stderr, \"exp-err:%s\\n\", v);\n"
+        "    mm_free(p);\n"
+        "    return 3;\n"
+        "}\n");
+    compare_two("eq-exp-v1", s1, "alpha", 3, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=yes");
+    int uo_after = count_uo();
+    int split_active = uo_after > 0;
+    printf("INFO\tsplit_active=%d\tuo_files=%d\n", split_active, uo_after);
+
+    /* 2. Edit one line in main file and rerun with RR_TIME: only main unit e3..elf when active */
+    crs_put(s1,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *v = sy_env_or(\"RSPL_TAG\", \"none\");\n"
+        "    char *p = (char *)mm_alloc(32);\n"
+        "    if (!p) return 9;\n"
+        "    cx_fmt(p, 32, \"v=%s argc=%d ver=2\", v, argc);\n"
+        "    printf(\"%s arg=%s\\n\", p, argc > 1 ? argv[1] : \"-\");\n"
+        "    fprintf(stderr, \"exp-err:%s\\n\", v);\n"
+        "    mm_free(p);\n"
+        "    return 3;\n"
+        "}\n");
+    {
+        np_result rr = {0};
+        int tr = run_prod(s1, "beta", "UNISACC_RUN_SPLIT=1", "UNISACC_RR_TIME=1", "RSPL_TAG=yes", &rr);
+        int e3n = count_substr(rr.err, rr.errn, "RR_TIME\tinference\tstage=e3\t");
+        int elfn = count_substr(rr.err, rr.errn, "RR_TIME\tinference\tstage=elf\t");
+        int ok = !tr && rr.rc == 3 && (!split_active || (e3n == 1 && elfn == 1));
+        char det[128];
+        cx_fmt(det, sizeof det, "rc=%d split_active=%d e3=%d elf=%d", rr.rc, split_active, e3n, elfn);
+        crs_note(ok, "edit1-rr-single-unit", det);
+        np_free(&rr);
+    }
+    compare_two("eq-exp-v2-shadow", s1, "gamma", 3, "UNISACC_RUN_SPLIT=shadow", "RSPL_TAG=sh");
+
+    /* 3. Second multi-module script (text.text + sys.sha) */
+    char s2[4200];
+    cx_fmt(s2, sizeof s2, "%s/s2.cx", work);
+    crs_put(s2,
+        "#pragma unisa use text.text\n"
+        "#pragma unisa use sys.sha\n"
+        "int main(void) {\n"
+        "    char h[65]; const char *m = \"run-split-sha\";\n"
+        "    sy_sha256_hex((const unsigned char *)m, tx_len(m, 32), h);\n"
+        "    printf(\"sha=%.16s\\n\", h); fprintf(stderr, \"s2-err\\n\"); return 5;\n"
+        "}\n");
+    compare_two("eq-text-sha", s2, 0, 5, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 4. Silent fallback on objlink refusal (host-forwarded setpgid): zero extra stderr */
+    char fb[4200];
+    cx_fmt(fb, sizeof fb, "%s/fb.cx", work);
+    crs_put(fb,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(void) {\n"
+        "    int r = setpgid(0, 0);\n"
+        "    printf(\"fb=%d v=%s\\n\", r == 0 || r == -1 ? 1 : 0, sy_env_or(\"RSPL_TAG\", \"none\"));\n"
+        "    fprintf(stderr, \"fb-err\\n\"); return 4;\n"
+        "}\n");
+    compare_two("fallback-silent-setpgid", fb, 0, 4, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=ok");
+
+    /* 5. Syntax error: exact stderr and rc, no duplicate diagnostic */
+    char bad[4200];
+    cx_fmt(bad, sizeof bad, "%s/bad.cx", work);
+    crs_put(bad, "#pragma unisa use sys.env\nint main(void){return @;}\n");
+    compare_two("syntax-err-no-dup", bad, 0, 1, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 6. ABI preflight fallback: >6-param ALL_STACK (sysx.process np_run/pc_run, status.cx-like multi-module) */
+    char gt6[4200];
+    cx_fmt(gt6, sizeof gt6, "%s/gt6.cx", work);
+    crs_put(gt6,
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.sha\n"
+        "#pragma unisa use mem.heap\n"
+        "#pragma unisa use mem.bytes\n"
+        "#pragma unisa use text.text\n"
+        "#pragma unisa use sysx.process\n"
+        "int main(void) {\n"
+        "    char *v[3]; v[0] = \"/bin/true\"; v[1] = 0;\n"
+        "    np_result r = {0}; char why[128] = {0};\n"
+        "    int rc = np_run(v, 0, 0, 5, &r, why, sizeof why);\n"
+        "    char h[65]; sy_sha256_hex((const unsigned char *)\"gt6\", 3, h);\n"
+        "    printf(\"gt6=%d r=%d sha=%.8s\\n\", rc, r.rc, h);\n"
+        "    np_free(&r);\n"
+        "    return rc == 0 && r.rc == 0 ? 0 : 7;\n"
+        "}\n");
+    compare_two("fallback-abi-gt6-sysx-process", gt6, 0, 0, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 7. ABI preflight fallback: variadic '...' (sys.io sy_printf) */
+    char var[4200];
+    cx_fmt(var, sizeof var, "%s/var.cx", work);
+    crs_put(var,
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use sys.env\n"
+        "int main(void) {\n"
+        "    sy_printf(\"var=%d tag=%s\\n\", 42, sy_env_or(\"RSPL_TAG\", \"none\"));\n"
+        "    return 0;\n"
+        "}\n");
+    compare_two("fallback-abi-variadic-syprintf", var, 0, 0, "UNISACC_RUN_SPLIT=1", "RSPL_TAG=ok");
+
+    /* 8. ABI preflight fallback: cross-unit function pointer (driver.cli CxcOps + driver.args) */
+    char fnp[4200];
+    cx_fmt(fnp, sizeof fnp, "%s/fnp.cx", work);
+    crs_put(fnp,
+        "#pragma unisa use driver.cli\n"
+        "#pragma unisa use driver.args\n"
+        "#pragma unisa use text.text\n"
+        "int main(void) {\n"
+        "    CxcOps o; o.record = cxa_record; o.line = cxa_line; o.cancel = cxa_cancel;\n"
+        "    unsigned char *buf = 0; long n = 0, cap = 0; char why[128] = {0};\n"
+        "    int rc = o.record(&buf, &n, &cap, \"A=1\", why, sizeof why);\n"
+        "    printf(\"fnp=%d n=%ld\\n\", rc, n);\n"
+        "    return rc == 0 && n > 0 ? 0 : 8;\n"
+        "}\n");
+    compare_two("fallback-abi-fnptr-driver-cli", fnp, 0, 0, "UNISACC_RUN_SPLIT=1", 0);
+
+    /* 9. 8-way concurrent cold start writing shared unitobj cache: zero corruption, zero .tmp leftovers */
+    {
+        char cdir8[4200], udir8[4300], cenv8[4400];
+        cx_fmt(cdir8, sizeof cdir8, "%s/cache8", work);
+        cx_fmt(udir8, sizeof udir8, "%s/unitobj", cdir8);
+        cx_fmt(cenv8, sizeof cenv8, "UNISACC_CACHE_DIR=%s", cdir8);
+        sy_mkdir_all(cdir8, 0700);
+        np_result b0 = {0};
+        int tb0 = run_prod(s2, 0, "UNISACC_RUN_SPLIT=0", 0, 0, &b0);
+        pid_t pids[8];
+        char op[8][4300], ep[8][4300];
+        for (int i = 0; i < 8; i++) {
+            cx_fmt(op[i], sizeof op[i], "%s/c8-%d.out", work, i);
+            cx_fmt(ep[i], sizeof ep[i], "%s/c8-%d.err", work, i);
+            pids[i] = fork();
+            if (pids[i] == 0) {
+                if (chdir(work)) _exit(126);
+                setenv("UNISACC_CACHE_DIR", cdir8, 1);
+                setenv("UNISA_CONTAINER", "", 1);
+                setenv("UNISACC_RUN_SPLIT", "1", 1);
+                int fo = open(op[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                int fe = open(ep[i], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                if (fo >= 0) { dup2(fo, 1); close(fo); }
+                if (fe >= 0) { dup2(fe, 2); close(fe); }
+                if (is_elf) {
+                    char *av[] = { prod, s2, 0 };
+                    execv(prod, av);
+                } else {
+                    char *av[] = { "/bin/sh", prod, s2, 0 };
+                    execv("/bin/sh", av);
+                }
+                _exit(127);
+            }
+        }
+        int ok8 = (!tb0 && b0.rc == 5);
+        for (int i = 0; i < 8; i++) {
+            int st = 0;
+            waitpid(pids[i], &st, 0);
+            int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+            size_t on = 0, en = 0;
+            char *ob = cx_read(op[i], &on), *eb = cx_read(ep[i], &en);
+            if (rc != b0.rc || on != b0.outn || (on && memcmp(ob, b0.out, on)) ||
+                en != b0.errn || (en && memcmp(eb, b0.err, en))) ok8 = 0;
+            free(ob); free(eb);
+        }
+        int uo_ok = 0, uo_bad = 0, tmp_left = 0;
+        DIR *d = opendir(udir8);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                long ln = tx_len(e->d_name, 256);
+                if (ln > 4 && !strcmp(e->d_name + ln - 4, ".tmp")) { tmp_left++; continue; }
+                if (ln <= 3 || strcmp(e->d_name + ln - 3, ".uo")) continue;
+                char p[4600];
+                cx_fmt(p, sizeof p, "%s/%s", udir8, e->d_name);
+                size_t fn = 0;
+                char *b = cx_read(p, &fn);
+                int good = 0;
+                if (b && fn >= 144 && !memcmp(b, "USE35OB\n", 8)) {
+                    unsigned long long bn = 0;
+                    for (int k = 7; k >= 0; k--) bn = (bn << 8) | (unsigned char)b[8 + k];
+                    if (bn + 144ULL == (unsigned long long)fn) {
+                        char sha[65];
+                        cx_sha256_hex(b + 144, (size_t)bn, sha);
+                        if (!memcmp(b + 80, sha, 64)) good = 1;
+                    }
+                }
+                if (good) uo_ok++; else uo_bad++;
+                free(b);
+            }
+            closedir(d);
+        }
+        int ok = ok8 && uo_bad == 0 && tmp_left == 0 && (!split_active || uo_ok > 0);
+        char det[160];
+        cx_fmt(det, sizeof det, "ok8=%d uo_ok=%d uo_bad=%d tmp_left=%d", ok8, uo_ok, uo_bad, tmp_left);
+        crs_note(ok, "concurrent-8way-cold", det);
+        np_free(&b0);
+    }
+
+    /* 10. Cache corruption resilience: 0-byte truncation and valid-header bogus-ELF payload must not crash */
+    {
+        char cdir_c[4200], udir_c[4300], cenv_c[4400], sc[4200];
+        cx_fmt(cdir_c, sizeof cdir_c, "%s/cache_corrupt", work);
+        cx_fmt(udir_c, sizeof udir_c, "%s/unitobj", cdir_c);
+        cx_fmt(cenv_c, sizeof cenv_c, "UNISACC_CACHE_DIR=%s", cdir_c);
+        cx_fmt(sc, sizeof sc, "%s/sc.cx", work);
+        crs_put(sc,
+            "#pragma unisa use text.text\n"
+            "#pragma unisa use sys.sha\n"
+            "int main(void) {\n"
+            "    char h[65]; const char *m = \"corrupt-test\";\n"
+            "    sy_sha256_hex((const unsigned char *)m, tx_len(m, 32), h);\n"
+            "    printf(\"cor=%.12s\\n\", h); return 6;\n"
+            "}\n");
+        np_result b0 = {0}, r1 = {0}, r2 = {0};
+        int tb0 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=0", cenv_c, 0, &b0);
+        /* Populate unitobj cache */
+        int tw = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r1);
+        np_free(&r1);
+        /* Find first .uo file if split is active */
+        char uo_p[4600]; uo_p[0] = 0;
+        DIR *d = opendir(udir_c);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                long ln = tx_len(e->d_name, 256);
+                if (ln > 3 && !strcmp(e->d_name + ln - 3, ".uo")) {
+                    cx_fmt(uo_p, sizeof uo_p, "%s/%s", udir_c, e->d_name);
+                    break;
+                }
+            }
+            closedir(d);
+        }
+        /* (a) Truncate to 0 bytes -> uo_load drops and recompiles cleanly */
+        if (uo_p[0]) cx_write(uo_p, "", 0);
+        int t1 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r1);
+        int ok1 = !tb0 && !tw && !t1 && r1.rc == b0.rc && r1.outn == b0.outn &&
+                  (!b0.outn || !memcmp(r1.out, b0.out, b0.outn)) && r1.errn == b0.errn;
+        /* (b) Valid USE35OB header + sha256 with bogus ELF body -> objlink refuses and falls back silently */
+        if (uo_p[0]) {
+            size_t fn = 0;
+            char *orig = cx_read(uo_p, &fn);
+            if (orig && fn >= 144) {
+                unsigned char fake[144 + 256];
+                memcpy(fake, orig, 144);
+                unsigned long long bn = 256;
+                for (int k = 0; k < 8; k++) fake[8 + k] = (unsigned char)((bn >> (k * 8)) & 255);
+                memset(fake + 144, 0xAA, 256);
+                char sha[65];
+                cx_sha256_hex(fake + 144, 256, sha);
+                memcpy(fake + 80, sha, 64);
+                cx_write(uo_p, fake, sizeof fake);
+            }
+            free(orig);
+        }
+        int t2 = run_prod(sc, 0, "UNISACC_RUN_SPLIT=1", cenv_c, 0, &r2);
+        int ok2 = !tb0 && !t2 && r2.rc == b0.rc && r2.outn == b0.outn &&
+                  (!b0.outn || !memcmp(r2.out, b0.out, b0.outn)) && r2.errn == b0.errn;
+        char det[160];
+        cx_fmt(det, sizeof det, "trunc_ok=%d bogus_elf_ok=%d rc=%d/%d err=%zu/%zu", ok1, ok2, r1.rc, r2.rc, r1.errn, r2.errn);
+        crs_note(ok1 && ok2, "cache-corrupt-resilience", det);
+        np_free(&b0); np_free(&r1); np_free(&r2);
+    }
+
+    cx_rmtree(work);
+    printf("CHECK_RUN_SPLIT\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}

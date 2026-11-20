@@ -176,6 +176,7 @@ Lrtransitionbad:
     mov w8,#2
     str w8,[x19,#M_STATUS]
 Lrfinished:
+    str x23,[x21,#RESULT_STEPS]
     ldr w8,[x19,#M_STATUS]
     cbnz w8,Lrerrorout
     ldr x8,[x19,#M_OUT+BUF_BYTES]

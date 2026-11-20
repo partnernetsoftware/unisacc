@@ -13,6 +13,7 @@
  *     no entry named 0; default-root: HOME/.cache/unisacc/e3cache written; abs-used: the given root
  *     written, unwritable root still rc 7 with no stray dir; rel-refused: one stderr line, no dir).
  *     The repository root must not gain an entry named 0.
+ * (3) The multi-source split route accepts only absolute cache roots, including its default roots.
  * A tools/dev-product.cx launcher pins UNISACC_CACHE_DIR to its own runcache, so --product must name a
  * product that reads the environment as given (an installed or APE candidate, or a wrapper that only
  * exports UNISA_CONTAINER and execs entry/candidate).
@@ -211,6 +212,38 @@ static void run(const char *prod, const char *name, const char *setting, int wan
     es_rmtree(cwd); es_rmtree(home); unlink(errp);
 }
 
+static void run_split(const char *prod, const char *name, const char *setting, int want_objects) {
+    char cwd[4200], p[4300], q[4300], objects[4400], cmd[24000], listing[1024], explicit_root[4400];
+    char *out = 0;
+    size_t n = 0;
+    nas++;
+    explicit_root[0] = 0;
+    if (cx_fmt(cwd, sizeof cwd, "%s/split-work-%s", base, name) ||
+        cx_fmt(p, sizeof p, "%s/p.c", cwd) || cx_fmt(q, sizeof q, "%s/q.c", cwd) ||
+        cx_fmt(objects, sizeof objects, want_objects == 2 ? "%s/split-root-%s/unitobj" :
+            "%s/split-home-%s/.cache/unisacc/unitobj", base, name) ||
+        (want_objects == 2 && cx_fmt(explicit_root, sizeof explicit_root, "UNISACC_CACHE_DIR='%s/split-root-%s'", base, name)) ||
+        mkdir(cwd, 0700) || es_fixture(p, "int probe(void);int main(void){return probe();}\n") ||
+        es_fixture(q, "int probe(void){return 7;}\n") ||
+        cx_fmt(cmd, sizeof cmd,
+           "cd '%s' && exec env -u UNISACC_CACHE_DIR -u UNISACC_E3CACHE -u DEV_PRODUCT_CACHE -u XDG_CACHE_HOME "
+           "HOME='%s/split-home-%s' UNISACC_RUN_SPLIT=1 UNISACC_RUN_CACHE=1 UNISACC_UNIT_CACHE=1 "
+           "%s %s sh '%s' -run p.c q.c", cwd, base, name, setting, explicit_root, prod)) {
+        printf("FAIL\tsplit-cache-%s\tfixture\n", name);
+        fails++;
+        return;
+    }
+    char *argv[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(argv, 15, &out, &n);
+    int entries = count(cwd, listing, sizeof listing);
+    int has_objects = count(objects, 0, 0) > 0;
+    int ok = rc == 7 && entries == 2 && has_objects == (want_objects != 0);
+    printf("%s\tsplit-cache-%s\trc=%d cwd=%s home_objects=%d expected=%d\n",
+           ok ? "PASS" : "FAIL", name, rc, listing, has_objects, want_objects != 0);
+    if (!ok) fails++;
+    free(out);
+}
+
 static int tok(const char *c, const char *t) { size_t k = strlen(t); return !strncmp(c, t, k) && (c[k] == ':' || c[k] == ','); }
 
 int main(int argc, char **argv) {
@@ -253,6 +286,17 @@ int main(int argc, char **argv) {
             cx_fmt(s, sizeof s, "%s='%s'", v, abs);
             run(prod, nm, s, 2, abs);
         }
+        run_split(prod, "new-absolute-home", "", 1);
+        run_split(prod, "new-explicit-absolute", "", 2);
+        run_split(prod, "unwritable-absolute", "UNISACC_CACHE_DIR=/proc/self/split-unwritable", 0);
+        run_split(prod, "zero", "UNISACC_CACHE_DIR=0", 0);
+        run_split(prod, "empty", "UNISACC_CACHE_DIR=", 0);
+        run_split(prod, "relative", "UNISACC_CACHE_DIR=relroot", 0);
+        run_split(prod, "relative-xdg", "XDG_CACHE_HOME=xdgrel", 1);
+        run_split(prod, "relative-home", "HOME=homerel", 0);
+        run_split(prod, "run-off", "UNISACC_RUN_CACHE=0", 0);
+        run_split(prod, "unit-off", "UNISACC_UNIT_CACHE=0", 0);
+        run_split(prod, "switches-nonzero", "UNISACC_RUN_CACHE=relative UNISACC_UNIT_CACHE=", 1);
         nas++;
         if (!rz && exists(z)) { printf("FAIL\trepo-root\tentry named 0 appeared in %s\n", rootabs); fails++; }
         es_rmtree(base);
