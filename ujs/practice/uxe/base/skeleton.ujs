@@ -1,0 +1,94 @@
+struct Skeleton {
+  bones: u32;
+  inverses: u32;
+  palette: u32;
+  count: u32;
+}
+
+native function skeleton_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
+  return bytes>0 && size>0 && a<b+size && b<a+bytes;
+}
+
+native function skeleton_valid(skeleton:i64) i64 {
+  return skeleton>=0 && skeleton<=6291456-Skeleton.size && skeleton%4==0;
+}
+
+native function Skeleton_init(skeleton:i64,bones:i64,inverses:i64,palette:i64,count:i64) i64 {
+  if(!skeleton_valid(skeleton) || bones<0 || bones>6291456 || bones%4!=0 ||
+     inverses<0 || inverses>6291456 || inverses%8!=0 || palette<0 || palette>6291456 ||
+     palette%4!=0 || count<0 || count>(6291456-bones)/4 ||
+     count>(6291456-inverses)/128 || count>(6291456-palette)/64) { return 0-1; }
+  if(skeleton_overlap(skeleton,Skeleton.size,bones,4*count) ||
+     skeleton_overlap(skeleton,Skeleton.size,inverses,128*count) ||
+     skeleton_overlap(skeleton,Skeleton.size,palette,64*count) ||
+     skeleton_overlap(bones,4*count,inverses,128*count) ||
+     skeleton_overlap(bones,4*count,palette,64*count) ||
+     skeleton_overlap(inverses,128*count,palette,64*count)) { return 0-1; }
+  let a=ux_u32_put(skeleton+Skeleton.bones,bones);
+  let b=ux_u32_put(skeleton+Skeleton.inverses,inverses);
+  let c=ux_u32_put(skeleton+Skeleton.palette,palette);
+  let d=ux_u32_put(skeleton+Skeleton.count,count);
+  return skeleton;
+}
+
+native function skeleton_live(skeleton:i64,arena:i64) i64 {
+  if(!skeleton_valid(skeleton)) { return 0; }
+  let i=0;
+  let bones=ux_u32(skeleton+Skeleton.bones);
+  let count=ux_u32(skeleton+Skeleton.count);
+  while(i<count) {
+    let bone=ux_u32(bones+4*i);
+    if(bone!=0 && Object3D_address(arena,bone)<0) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function Skeleton_calculateInverses(skeleton:i64,arena:i64) i64 {
+  if(!skeleton_live(skeleton,arena)) { return 0-1; }
+  let bones=ux_u32(skeleton+Skeleton.bones);
+  let inverses=ux_u32(skeleton+Skeleton.inverses);
+  let count=ux_u32(skeleton+Skeleton.count);
+  let i=0;
+  while(i<count) {
+    let inverse=inverses+128*i;
+    let bone=ux_u32(bones+4*i);
+    if(bone==0) {
+      let identity=Matrix4_identity(inverse);
+    } else {
+      let node=Object3D_address(arena,bone);
+      let copy=Matrix4_copy(inverse,ux_u32(node+Object3D.worldMatrix));
+      let inverted=Matrix4_invert(copy);
+    }
+    i=i+1;
+  }
+  return skeleton;
+}
+
+native function Skeleton_update(skeleton:i64,arena:i64,scratch:i64) i64 {
+  if(!skeleton_live(skeleton,arena) || scratch<0 || scratch>6291456-128 || scratch%8!=0) { return 0-1; }
+  let bones=ux_u32(skeleton+Skeleton.bones);
+  let inverses=ux_u32(skeleton+Skeleton.inverses);
+  let palette=ux_u32(skeleton+Skeleton.palette);
+  let count=ux_u32(skeleton+Skeleton.count);
+  if(skeleton_overlap(scratch,128,skeleton,Skeleton.size) ||
+     skeleton_overlap(scratch,128,bones,4*count) ||
+     skeleton_overlap(scratch,128,inverses,128*count) ||
+     skeleton_overlap(scratch,128,palette,64*count)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let bone=ux_u32(bones+4*i);
+    let matrix=inverses+128*i;
+    if(bone!=0) {
+      let node=Object3D_address(arena,bone);
+      matrix=Matrix4_multiplyMatrices(scratch,ux_u32(node+Object3D.worldMatrix),matrix);
+    }
+    let j=0;
+    while(j<16) {
+      let value=ux_f32_put(palette+64*i+4*j,ux_f64(matrix+8*j));
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return palette;
+}
