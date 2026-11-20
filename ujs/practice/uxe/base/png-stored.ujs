@@ -2,11 +2,25 @@ native function png_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
   return bytes>0 && size>0 && a<b+size && b<a+bytes;
 }
 
+native function png_u16be(at:i64) i64 {
+  return ux_u8(at)*256+ux_u8(at+1);
+}
+
+native function png_color_channels(color:i64) i64 {
+  if(color==2) { return 3; }
+  if(color==4) { return 2; }
+  if(color==6) { return 4; }
+  return 1;
+}
+
+// Return the compressed byte count in the low 23 bits and the borrowed
+// non-indexed color key address in the remaining bits.
 native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64,color:i64,depth:i64,palette:i64) i64 {
   let chunk=33;
   let written=0;
   let closed=0;
   let seen=0;
+  let transparency=0;
   if(color==3) {
     let a=ux_u32_put(palette,0);
     let b=ux_u32_put(palette+4,0);
@@ -19,10 +33,9 @@ native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64,color:i64,depth:
     if(length>bytes-chunk-12) { return 0-5; }
     let kind=png_u32be(at+4);
     if(png_crc32(at+4,4+length)!=png_u32be(at+8+length)) { return 0-3; }
-    if(color==2 && kind==1951551059) { return 0-4; }
     if(kind==1229278788) {
       if(length!=0 || chunk+12!=bytes || written==0) { return 0-5; }
-      return written;
+      return written+8388608*transparency;
     }
     if(kind==1229209940) {
       if(closed!=0 || length>capacity-written || (color==3 && ux_u32(palette)==0)) { return 0-5; }
@@ -42,6 +55,15 @@ native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64,color:i64,depth:
         if(seen!=0 || ux_u32(palette)==0 || ux_u32(palette+8)!=0 || length<1 || length>ux_u32(palette+4)) { return 0-5; }
         let alpha=ux_u32_put(palette+8,at+8);
         let count=ux_u32_put(palette+12,length);
+      } else if(kind==1951551059) {
+        let channels=png_color_channels(color);
+        if((color!=0 && color!=2) || seen!=0 || transparency!=0 || length!=channels*2) { return 0-5; }
+        let i=0;
+        while(i<channels) {
+          if(png_u16be(at+8+i*2)>=u32_shl(1,depth)) { return 0-5; }
+          i=i+1;
+        }
+        transparency=at+8;
       } else if(ux_u8(at+4)/32%2==0) { return 0-5; }
     }
     chunk=chunk+12+length;
@@ -52,6 +74,40 @@ native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64,color:i64,depth:
 native function png_palette_index(row:i64,x:i64,depth:i64) i64 {
   let bit=x*depth;
   return u32_shr(ux_u8(row+bit/8),8-depth-bit%8)%u32_shl(1,depth);
+}
+
+native function png_sample(row:i64,index:i64,depth:i64) i64 {
+  if(depth==16) { return png_u16be(row+2*index); }
+  if(depth==8) { return ux_u8(row+index); }
+  return png_palette_index(row,index,depth);
+}
+
+native function png_scale_sample(sample:i64,depth:i64) i64 {
+  if(depth==16) { return sample/256; }
+  if(depth==8) { return sample; }
+  return sample*255/(u32_shl(1,depth)-1);
+}
+
+native function png_color_pixel(row:i64,x:i64,depth:i64,color:i64,key:i64,dst:i64) i64 {
+  let channels=png_color_channels(color);
+  let first=x*channels;
+  let r=png_sample(row,first,depth);
+  let g=r;
+  let b=r;
+  let alpha=255;
+  if(color==0 || color==4) {
+    if(color==4) { alpha=png_scale_sample(png_sample(row,first+1,depth),depth); }
+    else if(key!=0 && r==png_u16be(key)) { alpha=0; }
+  } else {
+    g=png_sample(row,first+1,depth);
+    b=png_sample(row,first+2,depth);
+    if(color==6) { alpha=png_scale_sample(png_sample(row,first+3,depth),depth); }
+    else if(key!=0 && r==png_u16be(key) && g==png_u16be(key+2) && b==png_u16be(key+4)) { alpha=0; }
+  }
+  let red=ux_u8_put(dst,png_scale_sample(r,depth));
+  let green=ux_u8_put(dst+1,png_scale_sample(g,depth));
+  let blue=ux_u8_put(dst+2,png_scale_sample(b,depth));
+  return ux_u8_put(dst+3,alpha);
 }
 
 native function png_palette_check(raw:i64,row:i64,width:i64,height:i64,depth:i64,count:i64) i64 {
@@ -95,9 +151,9 @@ native function png_palette_rows(raw:i64,row:i64,width:i64,height:i64,depth:i64,
   return width*height*4;
 }
 
-native function png_adam_publish(raw:i64,plan:i64,out:i64,width:i64,depth:i64,channels:i64,palette:i64) i64 {
+native function png_adam_publish(raw:i64,plan:i64,out:i64,width:i64,depth:i64,color:i64,palette:i64,key:i64) i64 {
   let i=0;
-  if(channels==1) {
+  if(color==3) {
     while(i<7) {
       let pass=plan+i*PngPass.size;
       let valid=png_palette_check(raw+ux_u32(pass+PngPass.offset),ux_u32(pass+PngPass.stride),
@@ -124,11 +180,10 @@ native function png_adam_publish(raw:i64,plan:i64,out:i64,width:i64,depth:i64,ch
       let x=0;
       while(x<cols) {
         let to=dst+x*dx*4;
-        if(channels==1) {
+        if(color==3) {
           let pixel=png_palette_pixel(to,png_palette_index(from,x,depth),palette);
         } else {
-          let color=uxe_copy_record(to,from+x*channels,channels);
-          if(channels==3) { let alpha=ux_u8_put(to+3,255); }
+          let pixel=png_color_pixel(from,x,depth,color,key,to);
         }
         x=x+1;
       }
@@ -193,7 +248,7 @@ native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,huffman:i64,works
   return output;
 }
 
-// Decode RGBA8, RGB8 or indexed PNG to RGBA8. Scratch is
+// Decode standard gray, RGB and indexed PNG samples to RGBA8. Scratch is
 // exclusive and may change on error. The RGBA output is published last.
 native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,huffman:i64) i64 {
   if(src<0 || bytes<33 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
@@ -203,16 +258,16 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   if(header<0) { return header; }
   let color=ux_u32(header+PngHeader.color);
   let depth=ux_u32(header+PngHeader.depth);
-  let indexed=color==3 && huffman!=0;
+  let indexed=color==3;
   let interlace=ux_u32(header+PngHeader.interlace);
-  if((!indexed && (depth!=8 || (color!=6 && (color!=2 || huffman==0)))) || (interlace!=0 && huffman==0)) { return 0-4; }
-  let channels=4;
-  if(color==2) { channels=3; }
-  if(indexed) { channels=1; }
+  if(huffman==0 && (color!=6 || depth!=8 || interlace!=0)) { return 0-4; }
+  let channels=png_color_channels(color);
+  let bits=depth*channels;
+  let bpp=(bits+7)/8;
   let width=ux_u32(header+PngHeader.width);
-  let row=width*channels;
+  let row=(width*bits+7)/8;
   let prefix=PngHeader.size;
-  if(indexed) { row=(width*depth+7)/8; prefix=prefix+16; }
+  if(indexed) { prefix=prefix+16; }
   let rgbaRow=width*4;
   let height=ux_u32(header+PngHeader.height);
   let plan=scratch+prefix;
@@ -220,36 +275,37 @@ native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i
   if(space<prefix || height>cap/rgbaRow) { return 0-1; }
   let raw=scratch+prefix;
   let size=height*(row+1);
-  if(interlace!=0) { size=png_adam_plan(plan,width,height,depth*channels); }
+  if(interlace!=0) { size=png_adam_plan(plan,width,height,bits); }
   if(size>space-prefix) { return 0-1; }
   let compressed=raw+size;
   let palette=scratch+PngHeader.size;
-  let packed=png_idat(src,bytes,compressed,space-prefix-size,color,depth,palette);
-  if(packed<0) { return packed; }
+  let packedMeta=png_idat(src,bytes,compressed,space-prefix-size,color,depth,palette);
+  if(packedMeta<0) { return packedMeta; }
+  let packed=packedMeta%8388608;
+  let key=packedMeta/8388608;
   let workspace=(compressed+packed+3)/4*4;
   if(workspace>scratch+space-3008) { workspace=0-1; }
   let made=png_inflate(compressed,packed,raw,size,huffman,workspace);
   if(made<0) { return made; }
   if(interlace!=0) {
-    let restored=png_adam_restore(raw,plan,channels);
+    let restored=png_adam_restore(raw,plan,bpp);
     if(restored<0) { return restored; }
-    let published=png_adam_publish(raw,plan,out,width,depth,channels,palette);
+    let published=png_adam_publish(raw,plan,out,width,depth,color,palette,key);
     if(published<0) { return published; }
     return height*rgbaRow;
   }
-  let restored=PngScanlines_restore(raw,size,row,height,channels);
+  let restored=PngScanlines_restore(raw,size,row,height,bpp);
   if(restored<0) { return restored; }
   if(indexed) { return png_palette_rows(raw,row,width,height,depth,palette,out); }
   let y=0;
   while(y<height) {
     let from=raw+y*(row+1)+1;
     let to=out+y*rgbaRow;
-    if(channels==4) { let copied=uxe_copy_record(to,from,row); }
+    if(color==6 && depth==8) { let copied=uxe_copy_record(to,from,row); }
     else {
       let x=0;
       while(x<width) {
-        let copy=uxe_copy_record(to+x*4,from+x*3,3);
-        let alpha=ux_u8_put(to+x*4+3,255);
+        let pixel=png_color_pixel(from,x,depth,color,key,to+x*4);
         x=x+1;
       }
     }

@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { ImageLoader, REVISION } from "../../web/game/three.module.js";
+if (REVISION !== "160") throw new Error("three.js revision mismatch");
+const be = x => [x >>> 24, x >>> 16 & 255, x >>> 8 & 255, x & 255];
+function chunk(id, data) {
+  const bytes = [...id].map(c => c.charCodeAt(0)).concat(data);
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return [...be(data.length), ...bytes, ...be(crc ^ 0xffffffff)];
+}
+async function decoded(width, depth, color, raw, key = [], interlace = 0) {
+  let a = 1, b = 0;
+  for (const byte of raw) { a += byte; b += a; }
+  const zlib = [120,1,1,raw.length,0,255-raw.length,255,...raw,...be((b << 16) | a)];
+  const bytes = Uint8Array.from([
+    137,80,78,71,13,10,26,10,
+    ...chunk("IHDR",[...be(width),...be(1),depth,color,0,0,interlace]),
+    ...(key.length ? chunk("tRNS",key) : []), ...chunk("IDAT",zlib), ...chunk("IEND",[]),
+  ]);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+  const image = await new ImageLoader().loadAsync(url);
+  URL.revokeObjectURL(url);
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return context.getImageData(0, 0, canvas.width, canvas.height).data;
+}
+const [gray1,gray4,grayAlpha,rgb,rgba,rgb16,gray2,interlace] = await Promise.all([
+  decoded(4,1,0,[0,80],[0,1]),
+  decoded(4,4,0,[0,4,143],[0,8]),
+  decoded(2,16,4,[0,18,52,255,255,143,0,128,0]),
+  decoded(2,8,2,[0,32,64,192,32,65,192],[0,32,0,64,0,192]),
+  decoded(2,16,6,[0,17,0,34,0,51,0,255,255,254,0,69,0,128,0,255,255]),
+  decoded(2,16,2,[0,16,4,171,0,32,0,16,5,171,0,32,0],[16,4,171,0,32,0]),
+  decoded(4,2,0,[0,27]),
+  decoded(2,16,4,[0,18,52,255,255,0,143,0,128,0],[],1),
+]);
+document.querySelector("#r160").textContent = JSON.stringify([
+  gray1.length,gray1[7],gray4[4],gray4[11],grayAlpha[0],grayAlpha[7],rgb[3],rgb[5],rgba[2],
+  rgb16[3],rgb16[7],-5,99,gray2[4],interlace[7],
+]);
+</script>

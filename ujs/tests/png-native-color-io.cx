@@ -1,0 +1,79 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned value) {
+    p[0]=value>>24;p[1]=value>>16;p[2]=value>>8;p[3]=value;
+}
+
+static int chunk(unsigned char *dst,unsigned kind,const unsigned char *body,int length) {
+    be(dst,length);be(dst+4,kind);
+    for(int i=0;i<length;i++) dst[8+i]=body[i];
+    be(dst+8+length,dz_crc32(0,dst+4,4+length));
+    return 12+length;
+}
+
+static int fixture(unsigned char *dst,int mode) {
+    const unsigned char magic[]={137,80,78,71,13,10,26,10};
+    for(int i=0;i<8;i++) dst[i]=magic[i];
+    const unsigned char params[][6]={
+        {4,1,0,0,2,2}, {4,4,0,0,3,2}, {2,16,4,0,9,0}, {2,8,2,0,7,6},
+        {2,16,6,0,17,0}, {2,16,2,0,13,6}, {4,4,0,0,3,2}, {4,2,0,0,2,0}, {2,16,4,1,10,0},
+    };
+    const unsigned char raw[][17]={
+        {0,80}, {0,4,143}, {0,18,52,255,255,143,0,128,0}, {0,32,64,192,32,65,192},
+        {0,17,0,34,0,51,0,255,255,254,0,69,0,128,0,255,255},
+        {0,16,4,171,0,32,0,16,5,171,0,32,0}, {0,4,143}, {0,27},
+        {0,18,52,255,255,0,143,0,128,0},
+    };
+    const unsigned char keys[][6]={{0,1},{0,8},{0},{0,32,0,64,0,192},{0},{16,4,171,0,32,0},{0,16},{0},{0}};
+    const unsigned char *p=params[mode];
+    const unsigned char header[]={0,0,0,p[0],0,0,0,1,p[1],p[2],0,0,p[3]};
+    int size=8+chunk(dst+8,0x49484452,header,sizeof header);
+    if(p[5]) size+=chunk(dst+size,0x74524e53,keys[mode],p[5]);
+    const int length=p[4];
+    unsigned char zlib[28]={120,1,1,length,0,255-length,255};
+    unsigned a=1,b=0;
+    for(int i=0;i<length;i++) { zlib[7+i]=raw[mode][i];a+=zlib[7+i];b+=a; }
+    be(zlib+7+length,(b<<16)+a);
+    size+=chunk(dst+size,0x49444154,zlib,11+length);
+    size+=chunk(dst+size,0x49454e44,0,0);
+    return size;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored",0};
+    unsigned char image[150];
+    char setup[6200];
+    int used=0;
+    for(int i=0;i<9;i++) {
+        const int count=fixture(image,i);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;if(1){let bytes=[",i,count);
+        for(int j=0;j<count;j++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",j?",":"",image[j]);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"];let x=0;while(x<n%d){let v=ux_u8_put(%d+x,bytes[x]);x=x+1;}}",i,128+i*256);
+    }
+    #define DECODE(P,N) "let n=PngDecode_rgba8(" #P ",n" #N ",2800,16,4096,4096);"
+    const char *cases[]={
+        DECODE(128,0) "return 0.0+n;",
+        DECODE(128,0) "return 0.0+ux_u8(2807);",
+        DECODE(384,1) "return 0.0+ux_u8(2804);",
+        DECODE(384,1) "return 0.0+ux_u8(2811);",
+        DECODE(640,2) "return 0.0+ux_u8(2800);",
+        DECODE(640,2) "return 0.0+ux_u8(2807);",
+        DECODE(896,3) "return 0.0+ux_u8(2803);",
+        DECODE(896,3) "return 0.0+ux_u8(2805);",
+        DECODE(1152,4) "return 0.0+ux_u8(2802);",
+        DECODE(1408,5) "return 0.0+ux_u8(2803);",
+        DECODE(1408,5) "return 0.0+ux_u8(2807);",
+        DECODE(1664,6) "return 0.0+n;",
+        "let keep=ux_u8_put(2800,99);" DECODE(1664,6) "return 0.0+ux_u8(2800);",
+        DECODE(1920,7) "return 0.0+ux_u8(2804);",
+        DECODE(2176,8) "return 0.0+ux_u8(2807);"
+    };
+    const double gold[]={16,0,68,0,18,128,0,65,51,0,255,-5,99,85,128};
+    return g_wasm_batch("G_IO PngNativeColors","png-native-color",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?10:-1,DECODE(1408,5) "return 0.0+ux_u8(2803);");
+}

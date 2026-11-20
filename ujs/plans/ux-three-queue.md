@@ -65,7 +65,7 @@
 - CompressedTextureLoader | G-io compressedtextureloader-io.cx：DXT1、DXT3 与 DXT5 单级块长度和发布；完整容器、mip 链及 GPU 上传待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - CubeTextureLoader | G-io cubetextureloader-io.cx：按约定装六面、任一坏面导致全批不发布；其余图像格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - DataTextureLoader | G-io datatextureloader-io.cx：解析方交付 RGBA8 后检查长度与线性采样；其他数据格式待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
-- ImageLoader | G-io 文件响应到 Wasm PNG、基线及渐进 JPEG 的 RGBA 输出。PNG 其余色型、JPEG 非 YCbCr 彩色模式、缓存及通用加载配置待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
+- ImageLoader | G-io 文件响应到 Wasm PNG、基线及渐进 JPEG 的 RGBA 输出。JPEG 非 YCbCr 彩色模式、缓存及通用加载配置待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - TextureLoader | G-io textureloader-io.cx：连续图像到 GPU 纹理描述、默认采样；上传调度与异步资源接线待补。补齐 constructor,parse,setCrossOrigin,setWithCredentials,setPath,setResourcePath,setRequestHeader，运行独立金值及 r160 篡改门 | -
 - WebGL3DRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照三维纹理第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - WebGLArrayRenderTarget | G-pixel gpu-packet-struct.cx --targets 对照二维纹理数组第二层清屏回读。高级格式待补。补齐 constructor,setSize,clone,copy,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
@@ -200,7 +200,7 @@
 - ~~ImageUtils JPEG 与 PNG 数据 URI 分派 | G-io Canvas 大图分支、两类 URI 浏览器解码及容量拒绝 | JPEG 编码与 ImageUtils PNG。~~ 10 项通过，2049 改为 2048 的反例转红，Chrome 直接解码 Wasm 生成的 URI。
 - ~~PNG 调色板与索引透明度 | G-io 四种位深、过滤行、半透明、越界与坏块顺序 | PNG 解码和扫描行。~~ 12 项通过，半透明替换反例由 127 变为 0。
 - ~~PNG Adam7 隔行 | G-io 七遍位置、过滤复位、空遍、RGB/RGBA 与调色板 | PNG 解码和调色板。~~ 16 项通过，行位置替换反例由 15 变为 30。
-- PNG 灰度、透明色键与 16 位 | G-io 灰度及灰度 alpha、精度、非索引 tRNS 与坏文件 | PNG 解码和扫描行。
+- ~~PNG 灰度、透明色键与 16 位 | G-io 灰度及灰度 alpha、精度、非索引 tRNS 与坏文件 | PNG 解码和扫描行。~~ 15 项通过，比较但截掉低字节的反例由不透明变为透明，ImageLoader 七项通过。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。
 - AnimationLoader 多片段与多轨道 | G-io r160 JSON 的类型、插值、错误与回收 | M8 轨道和片段。
 - BufferGeometryLoader 通用 JSON | G-io 索引、组、类型化、交错、变形属性与错误 | BufferGeometry、BufferAttribute。
