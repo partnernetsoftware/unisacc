@@ -1,5 +1,12 @@
 // Input, scratch and the caller-owned output arena must be disjoint.
 // Loading targets an initialized empty BufferGeometry.
+struct GeometryJsonInterleaved {
+  next: u32;
+  definition: u32;
+  array: u32;
+  bytes: u32;
+}
+
 native function geometry_json_field(obj:i64,end:i64,scratch:i64,id:i64,head:i64,size:i64) i64 {
   let written=json_write_token(scratch,scratch+120,id);
   if(written<0 || head+size>written-scratch) { return 0-1; }
@@ -111,6 +118,139 @@ native function geometry_json_load_view(obj:i64,end:i64,scratch:i64,view:i64,lim
   return after;
 }
 
+native function geometry_json_reference(object:i64,token:i64,end:i64) i64 {
+  let close=json_scan_string(token,end);
+  if(close<0 || close-token<3) { return 0-1; }
+  return json_find_key(object,end,token+1,close-token-2);
+}
+
+native function geometry_json_raw_words(array:i64,end:i64,target:i64,limit:i64) i64 {
+  if(array<0 || array>=end || ux_u8(array)!=91) { return 0-1; }
+  let item=json_space(array+1,end);
+  let size=0;
+  while(item>=0 && item<end) {
+    if(ux_u8(item)==93) { return size; }
+    let value=LoaderJson_uint(item,end,0);
+    if(value<0 || limit-target-size<4) { return 0-1; }
+    let saved=ux_u32_put(target+size,value);
+    size=size+4;
+    item=json_space(json_scalar_end(item,end),end);
+    if(item<0 || item>=end) { return 0-1; }
+    if(ux_u8(item)==93) { return size; }
+    if(ux_u8(item)!=44) { return 0-1; }
+    item=json_space(item+1,end);
+  }
+  return 0-1;
+}
+
+native function geometry_json_interleaved_key(obj:i64,end:i64,scratch:i64,attribute:i64) i64 {
+  if(attribute!=0) {
+    let key=[105,115,73,110,116,101,114,108,101,97,118,101,100,66,117,102,102,101,114,65,116,116,114,105,98,117,116,101];
+    let i=0;
+    while(i<28) { let a=ux_u8_put(scratch+i,key[i]); i=i+1; }
+    return json_find_key(obj,end,scratch,28);
+  }
+  let key=[105,110,116,101,114,108,101,97,118,101,100,66,117,102,102,101,114,115];
+  let i=0;
+  while(i<18) { let a=ux_u8_put(scratch+i,key[i]); i=i+1; }
+  return json_find_key(obj,end,scratch,18);
+}
+
+native function geometry_json_interleaved(obj:i64,root:i64,end:i64,scratch:i64,view:i64,limit:i64,head:i64) i64 {
+  let entry=view+InterleavedBufferAttribute.size;
+  if(limit-entry<GeometryJsonInterleaved.size) { return 0-3; }
+  let definitions=geometry_json_interleaved_key(root,end,scratch,0);
+  let token=geometry_json_field(obj,end,scratch,ObjectJsonToken.data,2,4);
+  let definition=geometry_json_reference(definitions,token,end);
+  if(definition<0) { return 0-1; }
+  let backing=0;
+  let raw=0;
+  let bytes=0;
+  let buffer_token=LoaderJson_find(definition,end,scratch,1717990754,29285,0,6);
+  let arrays=LoaderJson_find(root,end,scratch,1634890337,1718960761,1936876902,12);
+  let array=geometry_json_reference(arrays,buffer_token,end);
+  if(array<0) { return 0-1; }
+  let prior=head;
+  while(prior!=0 && backing==0) {
+    let old_view=prior-1;
+    let old_entry=old_view+InterleavedBufferAttribute.size;
+    let old=ux_u32(old_view+InterleavedBufferAttribute.buffer);
+    if(ux_u32(old_entry+GeometryJsonInterleaved.array)==array) {
+      raw=ux_u32(old+InterleavedBuffer.data);
+      bytes=ux_u32(old_entry+GeometryJsonInterleaved.bytes);
+    }
+    if(ux_u32(old_entry+GeometryJsonInterleaved.definition)==definition) { backing=old; }
+    prior=ux_u32(old_entry+GeometryJsonInterleaved.next);
+  }
+  let cursor=entry+GeometryJsonInterleaved.size;
+  let kind=0;
+  let width=0;
+  let stride=0;
+  let count=0;
+  if(backing==0) {
+    if(limit-cursor<InterleavedBuffer.size) { return 0-3; }
+    backing=cursor;
+    cursor=cursor+InterleavedBuffer.size;
+    if(raw==0) {
+      raw=cursor;
+      bytes=geometry_json_raw_words(array,end,raw,limit);
+      if(bytes<0) { return bytes; }
+      cursor=(raw+bytes+7)/8*8;
+      if(cursor>limit) { return 0-3; }
+    }
+    kind=geometry_json_kind(geometry_json_field(definition,end,scratch,ObjectJsonToken.typeField,1,4),end,scratch);
+    if(kind<0) { return 0-1; }
+    width=4;
+    if(kind<=3) { width=1; }
+    else if(kind<=5) { width=2; }
+    else if(kind==10) { width=8; }
+    let slots=LoaderJson_uint(LoaderJson_find(definition,end,scratch,1769108595,25956,0,6),end,0);
+    if(slots<=0 || slots>6291456/width) { return 0-1; }
+    stride=slots*width;
+    if(bytes%stride!=0) { return 0-1; }
+    count=bytes/stride;
+    let a=ux_u32_put(backing+InterleavedBuffer.data,raw);
+    let b=ux_u32_put(backing+InterleavedBuffer.count,count);
+    let c=ux_u32_put(backing+InterleavedBuffer.stride,stride);
+    let d=ux_u32_put(backing+InterleavedBuffer.componentType,kind);
+    let e=ux_u32_put(backing+InterleavedBuffer.usage,35044);
+    let f=ux_u32_put(backing+InterleavedBuffer.version,0);
+  } else {
+    kind=ux_u32(backing+InterleavedBuffer.componentType);
+    stride=ux_u32(backing+InterleavedBuffer.stride);
+    count=ux_u32(backing+InterleavedBuffer.count);
+    width=4;
+    if(kind<=3) { width=1; }
+    else if(kind<=5) { width=2; }
+    else if(kind==10) { width=8; }
+  }
+  let size=LoaderJson_uint(geometry_json_field(obj,end,scratch,ObjectJsonToken.itemSize,2,8),end,0);
+  let offset=LoaderJson_uint(LoaderJson_find(obj,end,scratch,1936090735,29797,0,6),end,0);
+  let usage=LoaderJson_uint(geometry_json_field(obj,end,scratch,ObjectJsonToken.usage,2,5),end,35044);
+  if(size<=0 || offset<0 || size+offset>stride/width || usage<0) { return 0-1; }
+  let flag=geometry_json_field(obj,end,scratch,ObjectJsonToken.normalized,2,10);
+  let normalized=0;
+  if(flag>=0) {
+    if(ux_u8(flag)==116) { normalized=1; }
+    else if(ux_u8(flag)!=102) { return 0-1; }
+  }
+  let a=ux_u32_put(view+InterleavedBufferAttribute.data,raw+offset*width);
+  let b=ux_u32_put(view+InterleavedBufferAttribute.count,count);
+  let c=ux_u32_put(view+InterleavedBufferAttribute.itemSize,size);
+  let d=ux_u32_put(view+InterleavedBufferAttribute.stride,stride);
+  let e=ux_u32_put(view+InterleavedBufferAttribute.componentType,kind);
+  let f=ux_u32_put(view+InterleavedBufferAttribute.normalized,normalized);
+  let g=ux_u32_put(view+InterleavedBufferAttribute.usage,usage);
+  let h=ux_u32_put(view+InterleavedBufferAttribute.version,0);
+  let i=ux_u32_put(view+InterleavedBufferAttribute.buffer,backing);
+  let j=ux_u32_put(view+InterleavedBufferAttribute.offset,offset);
+  let l=ux_u32_put(entry+GeometryJsonInterleaved.next,head);
+  let m=ux_u32_put(entry+GeometryJsonInterleaved.definition,definition);
+  let n=ux_u32_put(entry+GeometryJsonInterleaved.array,array);
+  let o=ux_u32_put(entry+GeometryJsonInterleaved.bytes,bytes);
+  return cursor;
+}
+
 native function geometry_json_semantic(at:i64,last:i64,names:i64,count:i64) i64 {
   let i=0;
   while(i<count) {
@@ -193,6 +333,7 @@ native function BufferGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i
   if(attrs<0 || ux_u8(attrs)!=123) { return 0-1; }
   let p=json_space(attrs+1,end);
   let count=0;
+  let interleaved_head=0;
   while(p>=0 && p<end && ux_u8(p)!=125) {
     if(count==capacity) { return 0-3; }
     let close=json_scan_string(p,end);
@@ -201,7 +342,15 @@ native function BufferGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i
     if(semantic<0) { return semantic; }
     let colon=json_space(close,end);
     let value=json_space(colon+1,end);
-    let next=geometry_json_load_view(value,end,scratch,cursor,limit,0);
+    let flag=geometry_json_interleaved_key(value,end,scratch,1);
+    let next=0;
+    if(flag>=0 && ux_u8(flag)==116) {
+      next=geometry_json_interleaved(value,data,end,scratch,cursor,limit,interleaved_head);
+      interleaved_head=cursor+1;
+    } else {
+      if(flag>=0 && ux_u8(flag)!=102) { return 0-1; }
+      next=geometry_json_load_view(value,end,scratch,cursor,limit,0);
+    }
     if(next<0) { return next; }
     let row=table+8+8*count;
     let id=ux_u32_put(row,semantic);

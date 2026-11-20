@@ -1,0 +1,63 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"geometry-load-layout","object-json-tokens","json-read","loader-json","geometry-json-load",0};
+    const char json[]="{\"data\":{\"attributes\":{"
+        "\"position\":{\"isInterleavedBufferAttribute\":true,\"data\":\"packed\",\"itemSize\":3,\"offset\":0},"
+        "\"normal\":{\"isInterleavedBufferAttribute\":true,\"data\":\"packed\",\"itemSize\":1,\"offset\":3,\"normalized\":true},"
+        "\"uv\":{\"isInterleavedBufferAttribute\":true,\"data\":\"alternate\",\"itemSize\":2,\"offset\":0}},"
+        "\"interleavedBuffers\":{\"packed\":{\"uuid\":\"packed\",\"buffer\":\"raw\",\"type\":\"Float32Array\",\"stride\":4},"
+        "\"alternate\":{\"uuid\":\"alternate\",\"buffer\":\"raw\",\"type\":\"Float32Array\",\"stride\":2}},"
+        "\"arrayBuffers\":{\"raw\":[1065353216,1073741824,1077936128,1082130432,1084227584,1086324736,1088421888,1090519040]}}}";
+    const int size=sizeof json-1;
+    const long offset=tx_find(json,size,"\"offset\":3",10);
+    const long uuid=tx_find(json,size,"\"data\":\"packed\"",15);
+    if(offset<0 || uuid<0) return 2;
+    char setup[4800];
+    int n=tx_snprintf(setup,sizeof setup,
+        "let geo=64;let opt=128;let table=192;let groups=248;let names=280;let input=512;let end=input+%d;"
+        "let offset=input+%ld;let uuid=input+%ld;"
+        "let a=ux_u32_put(geo+BufferGeometry.attributes,table);let b=ux_u32_put(geo+BufferGeometry.groups,groups);"
+        "let c=ux_u32_put(table+4,3);let d=ux_u32_put(opt+GeometryJsonLoad.arena,4096);"
+        "let e=ux_u32_put(opt+GeometryJsonLoad.arenaEnd,8192);let f=ux_u32_put(opt+GeometryJsonLoad.names,names);"
+        "let g=ux_u32_put(opt+GeometryJsonLoad.nameCount,3);let h=ux_u32_put(opt+GeometryJsonLoad.scratch,1600);"
+        "let i=ux_u32_put(names,1);let j=ux_u32_put(names+4,352);let k=ux_u32_put(names+8,8);"
+        "let l=ux_u32_put(names+12,2);let m=ux_u32_put(names+16,360);let o=ux_u32_put(names+20,6);"
+        "let p=ux_u32_put(names+24,3);let q=ux_u32_put(names+28,368);let r=ux_u32_put(names+32,2);"
+        "let key=[112,111,115,105,116,105,111,110,110,111,114,109,97,108,0,0,117,118];"
+        "let kAt=0;while(kAt<18){let a=ux_u8_put(352+kAt,key[kAt]);kAt=kAt+1;}",
+        size,offset+9,uuid+8);
+    for(int at=0;at<size;at+=64) {
+        int count=size-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let data=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let a=ux_u8_put(input+%d+i,data[i]);i=i+1;}}",count,at);
+    }
+    #define LOAD "let loaded=BufferGeometry_fromJSON(geo,input,end,opt);"
+    #define POS "let position=ux_u32(table+12);"
+    #define NORMAL "let normal=ux_u32(table+20);"
+    #define UV "let uv=ux_u32(table+28);"
+    #define PBUF "let posbuf=ux_u32(position+InterleavedBufferAttribute.buffer);"
+    #define UVBUF "let uvbuf=ux_u32(uv+InterleavedBufferAttribute.buffer);"
+    const char *cases[]={
+        LOAD "return 0.0+ux_u32(table);",
+        LOAD POS "return ux_f32(ux_u32(position+BufferAttribute.data)+ux_u32(position+BufferAttribute.stride)+4);",
+        LOAD NORMAL "return ux_f32(ux_u32(normal+BufferAttribute.data));",
+        LOAD NORMAL "return 0.0+ux_u32(normal+BufferAttribute.normalized);",
+        LOAD POS NORMAL PBUF "return 0.0+(posbuf==ux_u32(normal+InterleavedBufferAttribute.buffer));",
+        LOAD POS UV PBUF UVBUF "return 0.0+(posbuf!=uvbuf && ux_u32(posbuf+InterleavedBuffer.data)==ux_u32(uvbuf+InterleavedBuffer.data));",
+        LOAD UV "return 0.0+ux_u32(uv+BufferAttribute.count);",
+        LOAD UV "return ux_f32(ux_u32(uv+BufferAttribute.data)+ux_u32(uv+BufferAttribute.stride)*3+4);",
+        "let bad=ux_u8_put(offset,52);" LOAD "return 0.0+loaded;",
+        "let bad=ux_u8_put(uuid,122);" LOAD "return 0.0+ux_u32(table);",
+    };
+    const double gold[]={3,6,4,1,1,1,4,8,-1,0};
+    return g_wasm_batch("G_IO BufferGeometryLoader interleaved","buffergeometry-interleaved",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,
+        LOAD NORMAL "return ux_f32(ux_u32(normal+BufferAttribute.data)-4);");
+}
