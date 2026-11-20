@@ -12,7 +12,7 @@
 | 现行版本计划 | v0.0.87.md(2026-11-20 骨架第二版:A1a 内建与符号,库快车道脚本地板库;K2 改 0.0.89)、v0.0.86.md(2026-11-20 骨架:改一行再跑,路线 A,见 roadmap-0.0.83-0.0.99.md 末节修订注 2026-11-20)、v0.0.85.md(2026-11-20 修订:前端诊断三期,P0 NO-GO)、v0.0.84.md(2026-11-20 已公开)、v0.0.83.md、v0.0.82.md(前几版保留) |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、product-refactor-plan.md、q11-merge-rehearsal.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
-| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction) |
+| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction、layer-lanes);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md |
 | 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md、v0.0.79.md、v0.0.80.md、roadmap-v0.0.80-v0.0.89.md(build/version-seq.tsv 引用,state-gen 读取) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
 | 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv) |

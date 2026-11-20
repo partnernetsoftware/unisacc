@@ -259,6 +259,10 @@
 
 主调度裁决,依据 plans/reviews/2026-11-20-chain-incremental.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/chain-incremental.md 已被取代)第 9 节:事件触发预制对整链真实命中 0 次,react 从未真起;内容寻址增量整链不是第一杠杆。排期:0.0.86 推测链真起加并行确认(工具线 T3,3 单位)与周节奏落成命令(发布流程项 P1,1 到 1.5 单位);0.0.87 预跑发车去掉 load1 大于 6 即等待的规则(2 单位);0.0.88 以后再定采纳内容键相同的候选省掉正规链(等 T3 三版字节对拍数据);链内前置并行与构造产物内容键暂不排。细节见 plans/v0.0.86.md 与 prd_mempalace.md 决定"整链预制路线"。本注不改上文其它内容。
 
+### 三层分车道(主调度 2026-11-20,依据 plans/reviews/2026-11-20-layer-lanes.md)
+
+所有者诊断成立,症结不是 ext 目录本身而是产品输入有四套互不一致的口径(候选触发键八棵树只被 tools/dvreact.cx 用、seed/ident.c 的 SID、tools/dev-lane.cx 五棵树、build/freeze.tsv 手写路径)。0.0.75 到 0.0.85 共 604 个非合并提交:A 类 32、纯 ext 1、C 类 476,近三版每版都有 A 类提交,没有一次整链只因 ext 而跑;分车道收益在未来不在历史。采纳:以 SID 的 list-current 为唯一事实源生成 build/lane-inputs.tsv,其余口径都读它;promote 改为 A 键相同即复用候选(近三版 273 个提交里只有 14 个会使候选失效),收益大于整个 B 车道,是 T3 推测链的直接前置;B 车道最小验收为六目标实编、layer-api 版本同步、affected 选批、上一公开 APE 兼容实编,目标 15 分钟内,交付是 main 提交号加 build/pkg-release.tsv 一行;ext 不合并给应用层。编排(共约 7 单位):0.0.86 工具线 lane-inputs 生成器与探针 1(agyneon);0.0.87 promote 按 A 键复用 2(cdx)、去别名搬实体 1.5(agyneon,A 类随整链)、包门工具 1.5(agy-flow)、条文生效 0.5(主调度)、复核 0.5(opus)。CLAUDE.md 改写稿存 plans/claude-md-layer-lanes-draft.md,暂不生效。未核项见 prd_mempalace.md 决定"三层分车道"。本小节不改上文其它内容;回滚:撤本小节。
+
 ## 修订注 2026-11-20(汇编支持基本需求)
 
 项目所有者原话:"我觉得 cx 的核心层不是支持 #include 以及对接 libc、posix 了么,所以我是觉得核心层对 asm 支持得更完善才对";"然后 unisacc.com 对 .c 系列的 c99 posix 也应该更完整的支持汇编哦,这是基本需求"。据此:0.0.81 实测矩阵节"路线调整"第 (3) 条(扩展内联汇编、SIMD、驱动 .s 与 gcc .o 混编、-S 输出 GAS 文本归 0.0.100 汇编精修阶段评估)被取代,原文保留并标注;这些能力连同汇编标签与原子内建属于 C99 加 POSIX 编译的基本需求,不再延到 0.0.100 之后。现状:0.0.83 起基本 asm 与未实现 __attribute__ 为具名拒绝(原静默忽略)。最小切片与版本编排待 fable 汇编报告 /home/devali/.claude/jobs/2798e440/tmp/asm-acceleration.md(此入口已被取代,现为 plans/reviews/2026-11-20-asm-acceleration.md;"待"字已由下文"版本编排与让位"兑现);0.0.90 之后的原子、TLS、pthread 依赖它。0.0.100 汇编级精细优化阶段(热路径精修)本身的入口准则不变(已被下文"版本编排与让位"第 (4) 条部分取代:入口准则 (1) 改写)。本注不改上文其它内容;回滚:撤本注与 prd_mempalace.md 对应决定。
