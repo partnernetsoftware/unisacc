@@ -1446,7 +1446,7 @@ a saved record's source). The expectation is `rc0:ADOPTED_SNAPSHOT`.
 Actual invocation in this checkout:
 
 ```sh
-tools/bound 55 sh ./unisacc.com -I /home/devali/repos/unisacc/include tests/adopted-package.cx -- /home/devali/repos/unisacc /home/devali/repos/unisacc/out/c43-adopted-package-01 0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0
+tools/bound 55 sh ./unisacc.com -I ~/repos/unisacc/include tests/adopted-package.cx -- ~/repos/unisacc ~/repos/unisacc/out/c43-adopted-package-01 0d59237f3250b59514a55ff529c77b665033e5feb71061f6fcaded0c7ef925c0
 ```
 
 Both out/c43-adoptedsnapshot-probe-run-01.log and

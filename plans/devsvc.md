@@ -152,7 +152,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 6 已知限制与下一单
 
-重写(2026-11-20,依据第"2026-11-20 演进评审"节与 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
+重写(2026-11-20,依据第"2026-11-20 演进评审"节与 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 ~/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)):本节按已做、未做、作废三张表为准;其下原流水账被本表取代,原文保留仅作历史,不再冒充当前状态。
 
 已做:
 
@@ -261,7 +261,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 
 ## 2026-11-20 演进评审
 
-依据:fable 报告 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
+依据:fable 报告 plans/reviews/2026-11-20-devsvc-evolution.md(原入口 ~/.claude/jobs/2798e440/tmp/devsvc-evolution.md 已被取代)(只读调查,样本为主实例近 58 小时事件)。以下为主调度裁决。
 
 ### 事实修正
 
@@ -579,3 +579,37 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
 
 环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+
+## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
+
+按来源工具归类(du 与个数为 2026-11-20 实测,/tmp 与 ~/.cache/unisacc):
+
+| 位置与前缀 | 个数 | 占用 | 来源工具(按前缀推断) | 建议 |
+|---|---|---|---|---|
+| /tmp/product-map-query-check-* | 6 | 2.3G | tools/check-product-map-query 夹具 | 白名单前缀,检查退出即删;保留最近 1 个供失败取证 |
+| /tmp/derive-readset-* | 4 | 999M | derive 读集检查 | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-session-* | 3 | 491M | sessionroot 会话目录 | 仅当无存活 PID 引用时删(发布打包曾依赖,见 pkg-gaps EVIDENCE-DEPENDS-ON-TMP-CLEANUP) |
+| /tmp/check-commit-own-* | 1 | 249M | tools/check-commit-own.cx 夹具 | 白名单前缀,退出即删 |
+| /tmp/cx-* | 10 | 96M | 产品临时编译目录 | 超 1 小时且无持有进程删 |
+| /tmp/precommit-flow-* | 52 | 80M | precommit flow | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-affected-* | 275 | 35M | tools/affected.cx | 白名单前缀,超 1 小时删(个数多) |
+| /tmp/chain-ready* | 70 | 4.8M | tools/chain-ready.cx | 白名单前缀,超 1 小时删 |
+| /tmp/omp-flow-cli*、devsvc-flow-*、precommit-lint* | 225、63、101 | 约 1.6M | flow 客户端与 lint | 白名单前缀,超 1 小时删 |
+| /tmp/pcfck-fx-*、tmp.* | 4、8 | 0 | 夹具空目录 | 空目录直接删 |
+| /tmp/s9nr-* | 0 | 0 | s9 夹具 | 本次未见,保留前缀进白名单 |
+| ~/.cache/unisacc/check-devsvc-core | - | 3.6G | check-devsvc-core 夹具缓存 | 设容量上限,超限按最旧删 |
+| ~/.cache/unisacc/check-precommit-gates | - | 2.8G | check-precommit-gates 夹具缓存 | 同上 |
+| ~/.cache/unisacc/check-derive-flow | - | 592M | check-derive-flow 夹具缓存 | 同上 |
+| ~/.cache/unisacc/tlib、chains、symindex、e3cache | - | 16G、7.4G、5.3G、2.9G | 构造缓存与整链 | 非垃圾,不进白名单;chains 只删已发布版本且无引用的链目录 |
+
+保留规则:(1) 只删白名单前缀;(2) 有存活进程(按真实 PID 核 /proc/PID/cwd 与打开文件)引用的不删;(3) 被 release/evidence 或 cache-manager 记录引用的路径不删;(4) 每次清理写事件(前缀、个数、字节),删不掉具名报告。
+
+## 故障排查:cx/cx 型自指链接(2026-11-20)
+
+- 成因:`ln -s[f][n] SRC DEST` 在 DEST 是真实目录时会写出 DEST/<basename SRC>;-n 只对 DEST 本身是符号链接有效。DEST 为仓根顶层目录(例如 `tools/cx-dev-root DIR` 或 `dev-lane --lane` 指向仓根或任何含真实 cx/ 的目录)即得 cx/cx -> 仓根/cx。已实测确认 cx-dev-root 旧版会生成;cx-dev-root、dev-lane、prerun-drive(g1 布局)、check-split-parents、check-own-flow-product 已加真实目录拒绝。
+- 长期绊线:`tools/check-ln-noderef.cx` 第 (4) 项扫 tools/ 全部 ln -s 进目录名(含变量名 `$n`)的调用,要求 8 行内有真实目录预检(`[ -d`、`[ ! -d`、`[ -L`、`kind == 'd'`),check-* 私有夹具(mkdtemp/mktemp/getpid)除外;命中打 LN_DEST_UNGUARDED。
+- 诱捕守护:`tools/stray-link-watch.cx`,每 2 秒扫仓根与 `.claude/worktrees/*` 的 cx tools tests src ext include exec 下的 DIR/DIR 符号链接,命中写事件(时间、目标、lstat mtime、ps 全量快照、ln/sh -c/unisacc.com 进程的 cwd)后只删该链接。
+  - 单次:`sh ./unisacc.com tools/stray-link-watch.cx -- --once`
+  - 守护(自退):`setsid nohup timeout -k 5 28860 sh ./unisacc.com tools/stray-link-watch.cx -- --daemon 28800 >LOG 2>&1 &`(devsvc x 的 --timeout-ms 上限 300000,起不了 8 小时作业,是 devsvc 缺口)
+  - 看事件:`$CLAUDE_JOB_DIR/tmp/stray-link-watch/events.log`(启动者会话的作业目录;无该变量时 /tmp/stray-link-watch/events.log),`grep '=== EVENT' events.log`
+  - 停止:`pgrep -af stray-link-watch` 取真实 PGID 后 `kill -TERM -- -PGID`;到期自退。
