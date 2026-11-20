@@ -70,6 +70,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.sha
 #pragma unisa use cxlib.trailer
+#pragma unisa use dv.procid
 
 #define CO_MAX 64
 
@@ -242,6 +243,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
 #define CO_SLOT_SYNC \
     "_co_sync(){ " \
     "_r=$1 _g=$2 _pw=$3 _m=${1%.root}.meta _si=${1%.root}.idx _nt=$(git write-tree) || return 1; " \
+    "for _lk in \"$_si.lock\" \"$_si.next.lock\"; do if [ -e \"$_lk\" ]; then printf 'COMMIT_OWN_STALE_LOCK\\tpath=%s\\treason=slot-flock-held\\n' \"$_lk\" >&2; rm -f \"$_lk\"; fi; done; " \
     "_oi=$GIT_INDEX_FILE _ok=0 _ot= _og= _op=; " \
     "if [ -d \"$_r\" ] && [ -f \"$_m\" ] && [ -f \"$_si\" ]; then " \
     "{ IFS= read -r _og; IFS= read -r _op; IFS= read -r _ot; } <\"$_m\"; " \
@@ -276,7 +278,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "else rm -f \"$_si.next\"; fi; " \
     "fi; fi; fi; fi; fi; " \
     "if [ \"$_ok\" != 1 ]; then " \
-    "rm -rf \"$_r\" \"$_m\" \"$_si\" \"$_si.next\" && mkdir -p \"$_r\" || return 1; " \
+    "rm -rf \"$_r\" \"$_m\" \"$_si\" \"$_si.next\" \"$_si.lock\" \"$_si.next.lock\" && mkdir -p \"$_r\" || return 1; " \
     "GIT_INDEX_FILE=\"$_si\" git read-tree \"$_nt\" && " \
     "GIT_INDEX_FILE=\"$_si\" git ls-files -z -- . ':(exclude)archive' | GIT_INDEX_FILE=\"$_si\" git checkout-index -f -z --stdin --prefix=\"$_r/\" && " \
     "GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" update-index -q --refresh && " \
@@ -289,15 +291,17 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; " \
     "case \"$h\" in /*) ;; *) h=\"$PWD/$h\" ;; esac; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) GIT_INDEX_FILE=\"$PWD/$GIT_INDEX_FILE\"; export GIT_INDEX_FILE ;; esac; " \
-    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; _slot=0; " \
+    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; _slot=0; _ow=; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3 4 5 6 7; do c=\"${0%/*}/commit-own-s$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; _slot=1; _ow=\"$c.owner\"; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 9>&-; r=\"$0\"; }; " \
-    "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
+    "if [ -n \"$_ow\" ]; then _bt=0; if [ -r /proc/stat ]; then while read -r _k _v _; do [ \"$_k\" = btime ] && { _bt=\"$_v\"; break; }; done </proc/stat; fi; printf 'pid=%s\\tbtime=%s\\tdeadline_s=%s\\n' \"$$\" \"$_bt\" \"$(($(date +%s)+180))\" >\"$_ow\"; fi; " \
+    "case \"$r\" in */commit-own-*.root) ;; *) [ -z \"$_ow\" ] || rm -f \"$_ow\"; echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
     CO_SLOT_SYNC \
-    "_co_sync \"$r\" \"$g\" \"$PWD\" || { rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
-    "( cd \"$r\" && UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; " \
-    "if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; exit $rc"
+    "_co_sync \"$r\" \"$g\" \"$PWD\" || { [ -z \"$_ow\" ] || rm -f \"$_ow\"; rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
+    "( cd \"$r\" && UNISACC_PRECOMMIT_IN_TREE=1 UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; " \
+    "[ -z \"$_ow\" ] || rm -f \"$_ow\"; " \
+    "if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; else rm -rf \"$r/.devsvc\"; fi; exit $rc"
 /* --derive: $0 = TMP, "$@" = the commit's paths, GIT_INDEX_FILE = the private index (absolute).  See the header.
    Last line CO_DERIVE<TAB>rc=N<TAB>stage=plan|write|add|check|ok|setup; DERIVED<TAB>PATH per derived file and
    derive.cx's own DERIVE lines before it.  The root is kept per flock slot (fd 8 not inherited); fallback PID roots are removed.  The changed
@@ -317,12 +321,13 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "sh ./unisacc.com tools/derive.cx -- --write $m --touched \"$o.t\" 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
     CO_DERIVE_ADD "if [ -n \"$m\" ]; then ws=$sel; else ws=; fi; " CO_DERIVE_CHECK
 #define CO_DERIVE_SETUP \
-    "fin(){ [ -z \"$r\" ] || { cd /; rm -rf \"$r.out\".*; if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; _slot=0; " \
+    "fin(){ [ -z \"$_ow\" ] || rm -f \"$_ow\"; [ -z \"$r\" ] || { cd /; rm -rf \"$r.out\".*; if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; else rm -rf \"$r/.devsvc\"; fi; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; _slot=0; _ow=; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) fin 2 setup ;; esac; " \
     "g=$(git rev-parse --absolute-git-dir) || fin 2 setup; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3; do c=\"$0/commit-own-d$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; _slot=1; _ow=\"$c.owner\"; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 8>&-; r=\"$0/commit-own-d$$.root\"; }; " \
+    "if [ -n \"$_ow\" ]; then _bt=0; if [ -r /proc/stat ]; then while read -r _k _v _; do [ \"$_k\" = btime ] && { _bt=\"$_v\"; break; }; done </proc/stat; fi; printf 'pid=%s\\tbtime=%s\\tdeadline_s=%s\\n' \"$$\" \"$_bt\" \"$(($(date +%s)+180))\" >\"$_ow\"; fi; " \
     CO_SLOT_SYNC \
     "_co_sync \"$r\" \"$g\" \"$PWD\" || fin 2 setup; " \
     "[ -f \"$r/tools/derive.cx\" ] || fin 2 setup; " \
@@ -349,6 +354,75 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "for x in $ws; do grep '^DERIVE\t' \"$o.c.$x\" | grep -v '\tSKIPPED\t'; done; [ $w = 0 ] || fin $w check; " \
     "for p in $n; do printf 'DERIVED\\t%s\\n' \"$p\"; done; fin 0 ok"
 static int run(char **argv, char *out, long cap);
+
+/* Reclaim stale commit-own slot index locks (TMP/commit-own-s0..7.idx.lock, d0..3.idx.lock, *.idx.next.lock)
+ * whose holder is gone, from an older host boot (btime mismatch), past deadline, or unheld on slot .lock.
+ * Never removes a lock whose live holder matches current btime and is within deadline. */
+static int co_slot_flock_free(const char *slot_lock) {
+    char *fv[] = { "sh", "-c", "command -v flock >/dev/null 2>&1 || exit 0; exec 9>>\"$1\" && flock -n 9", "co-flock", (char *)slot_lock, 0 };
+    char out[64];
+    return run(fv, out, sizeof out) == 0;
+}
+
+static void co_reclaim_one_slot(const char *base) {
+    char lk1[512], lk2[512], owp[512], slk[512];
+    if (tx_snprintf(lk1, sizeof lk1, "%s.idx.lock", base) >= (int)sizeof lk1 ||
+        tx_snprintf(lk2, sizeof lk2, "%s.idx.next.lock", base) >= (int)sizeof lk2 ||
+        tx_snprintf(owp, sizeof owp, "%s.owner", base) >= (int)sizeof owp ||
+        tx_snprintf(slk, sizeof slk, "%s.lock", base) >= (int)sizeof slk) return;
+    int has1 = (sy_exists(lk1) == 1), has2 = (sy_exists(lk2) == 1);
+    if (!has1 && !has2) return;
+
+    const char *reason = 0;
+    unsigned char *ob = 0;
+    int64_t on = 0;
+    if (sy_read_file(owp, &ob, &on, 512) == 0 && ob && on > 0) {
+        char t[512];
+        size_t cp = (size_t)on < sizeof t - 1 ? (size_t)on : sizeof t - 1;
+        mm_copy(t, sizeof t, ob, cp); t[cp] = 0;
+        mm_free(ob);
+        int pid = 0;
+        unsigned long long bt = 0ULL;
+        long dl = 0;
+        long p_pos = tx_find(t, (long)cp, "pid=", 4);
+        if (p_pos >= 0) pid = atoi(t + p_pos + 4);
+        long b_pos = tx_find(t, (long)cp, "btime=", 6);
+        if (b_pos >= 0) {
+            const char *s = t + b_pos + 6;
+            while (*s >= '0' && *s <= '9') { bt = bt * 10ULL + (unsigned long long)(*s - '0'); s++; }
+        }
+        long d_pos = tx_find(t, (long)cp, "deadline_s=", 11);
+        if (d_pos >= 0) dl = atol(t + d_pos + 11);
+
+        unsigned long long cur_bt = pi_host_btime();
+        long now_s = sy_now_ms() / 1000L;
+        if (bt > 0ULL && cur_bt > 0ULL && bt != cur_bt) reason = "btime-mismatch";
+        else if (dl > 0 && now_s > dl) reason = "expired";
+        else if (pid > 0 && sy_signal(pid, 0) == -ESRCH) reason = "holder-dead";
+        else return; /* active holder */
+    } else {
+        if (ob) mm_free(ob);
+        if (co_slot_flock_free(slk)) reason = "no-holder";
+        else return; /* active flock holder */
+    }
+
+    if (has1 && sy_unlink(lk1) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=%s\n", lk1, reason);
+    if (has2 && sy_unlink(lk2) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=%s\n", lk2, reason);
+    (void)sy_unlink(owp);
+}
+
+static void co_reclaim_stale_locks(const char *tdir) {
+    char base[480];
+    if (!tdir || !tdir[0]) return;
+    for (int s = 0; s < 8; s++) {
+        if (tx_snprintf(base, sizeof base, "%s/commit-own-s%d", tdir, s) < (int)sizeof base)
+            co_reclaim_one_slot(base);
+    }
+    for (int d = 0; d < 4; d++) {
+        if (tx_snprintf(base, sizeof base, "%s/commit-own-d%d", tdir, d) < (int)sizeof base)
+            co_reclaim_one_slot(base);
+    }
+}
 /* --derive, after the commit: the shared work-tree copy of PATH gets only the recomputed lines (see the header for
    the count rule).  OLDB = the HEAD blob ("" = new file), NEWB = the committed blob.  0 written or nothing to do. */
 typedef struct { const char *p; long n; } CoLn;
@@ -1073,6 +1147,7 @@ int main(int argc, char **argv) {
         if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
     }
     t_pend = sy_now_ms() - t0 - t_sel;
+    co_reclaim_stale_locks(sy_tmpdir());
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64], basec[64], orig_basec[64], newfull[64] = "", groot[420]; int rc, cas_skipped = 0;
         static char dout[32768];

@@ -1826,6 +1826,9 @@ static const char *auto_owner(void) {
     return o;
 }
 static char commit_class[24];   /* git commit 失败类别:取自 commit-own stderr 的 COMMIT_OWN_FAIL<TAB>class=;完成事件带 class= */
+static char commit_gate[32];    /* 首个拦下提交的门名:取自 PRECOMMIT_GATE_FAIL<TAB>gate= */
+static char commit_reason[48];  /* 拒绝原因码:取自 PRECOMMIT_GATE_FAIL<TAB>reason= 或 commit_class */
+static char commit_req[48];     /* 本次提交请求键 */
 static char commit_range[180] = "old=-\tnew=-\tpaths=unknown";
 /* Count changes between the two observed worktree HEADs. Paths containing
  * newlines are a single NUL-delimited entry. Observation cannot fail a commit. */
@@ -1849,10 +1852,24 @@ static void commit_range_note(const char *cwd, char *old, char *now) {
 }
 static void commit_class_from(const char *path) {
     unsigned char *b = 0; int64_t n = 0; long i, k;
+    commit_gate[0] = 0; commit_reason[0] = 0;
     if (!path[0] || sy_read_file(path, &b, &n, 1 << 24) || !b) return;
-    for (i = 0; i + 21 <= n; i++) if (!memcmp(b + i, "COMMIT_OWN_FAIL\tclass=", 21) && (i == 0 || b[i - 1] == '\n' || b[i - 1] == '\t')) {   /* 作业 out 里经 GIT_COMMIT_ERR<TAB> 转出 */
-        for (k = 0; k < (long)sizeof commit_class - 1 && i + 21 + k < n && b[i + 21 + k] != '\n' && b[i + 21 + k] != '\t'; k++) commit_class[k] = (char)b[i + 21 + k];
-        commit_class[k] = 0;
+    for (i = 0; i + 21 <= n; i++) {
+        if (!memcmp(b + i, "COMMIT_OWN_FAIL\tclass=", 21) && (i == 0 || b[i - 1] == '\n' || b[i - 1] == '\t')) {   /* 作业 out 里经 GIT_COMMIT_ERR<TAB> 转出 */
+            for (k = 0; k < (long)sizeof commit_class - 1 && i + 21 + k < n && b[i + 21 + k] != '\n' && b[i + 21 + k] != '\t'; k++) commit_class[k] = (char)b[i + 21 + k];
+            commit_class[k] = 0;
+        }
+        if (i + 25 <= n && !memcmp(b + i, "PRECOMMIT_GATE_FAIL\tgate=", 25) && (i == 0 || b[i - 1] == '\n' || b[i - 1] == '\t')) {
+            long p = i + 25;
+            for (k = 0; k < (long)sizeof commit_gate - 1 && p + k < n && b[p + k] != '\n' && b[p + k] != '\t'; k++) commit_gate[k] = (char)b[p + k];
+            commit_gate[k] = 0;
+            p += k;
+            if (p + 8 <= n && !memcmp(b + p, "\treason=", 8)) {
+                p += 8;
+                for (k = 0; k < (long)sizeof commit_reason - 1 && p + k < n && b[p + k] != '\n' && b[p + k] != '\t'; k++) commit_reason[k] = (char)b[p + k];
+                commit_reason[k] = 0;
+            }
+        }
     }
     free(b);
 }
@@ -2133,6 +2150,13 @@ static int git_argerr;   /* cmd_git 及其子命令在参数解析处退出(尚�
                             git 子进程、commit-own 的真实 rc 2 与具名 REFUSE 的 rc 2 原样返回,不贴 usage(仿 x_ran) */
 static const char *commit_outcome(int rc) {
     return rc == 0 ? "ok" : rc == 124 ? "timeout" : commit_class[0] ? commit_class : git_argerr ? "args" : "other";
+}
+static const char *commit_gate_val(int rc) { return rc == 0 ? "-" : (commit_gate[0] ? commit_gate : "-"); }
+static const char *commit_reason_val(int rc) { return rc == 0 ? "ok" : (commit_reason[0] ? commit_reason : commit_outcome(rc)); }
+static const char *commit_req_val(const char *jid) {
+    if (jid && jid[0]) return jid;
+    if (!commit_req[0]) (void)cx_fmt(commit_req, sizeof commit_req, "%ld-%d", sy_now_ms(), sy_pid());
+    return commit_req;
 }
 /* K2/K5 私有索引合并与快进:不经共享索引与工作区算结果,ref 以 update-ref NEW OLD 比较并交换落地(HEAD 被他人移动则重做,至多 3 次),
    落地后 cxlib.gitsync gs_sync 只同步"索引与工作区都等于旧 HEAD"的路径,其余原样保留并逐行报 <前缀>\tSYNC_KEPT path= reason=。
@@ -2588,8 +2612,9 @@ static int bg_child(void *ud) {
     if(j->commit){report_window=FL_NODE_MS;report_end("git.commit",j->id);}
     else report_end(report_kind,j->id);
     fflush(stdout); fflush(stderr);
-    if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\t%s",
-                            j->owner, sy_pid(), r, sy_now_ms() - t0, commit_outcome(r), commit_range))
+    if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\tgate=%s\treason=%s\treq=%s\t%s",
+                            j->owner, sy_pid(), r, sy_now_ms() - t0, commit_outcome(r),
+                            commit_gate_val(r), commit_reason_val(r), commit_req_val(j->id), commit_range))
         request(j->root, t, 0);
     F(t, sizeof t, "%d\t%ld\n", r, sy_now_ms() - t0); F(p, sizeof p, "%s/rc", j->jd); sy_write_atomic(p, t, strlen(t), 0644);
     F(t, sizeof t, "emit\tjob.done\tid=%s\trc=%d\tms=%ld\towner=%s", j->id, r, sy_now_ms() - t0, j->owner); request(j->root, t, 0);
@@ -2886,8 +2911,9 @@ int main(int argc, char **argv) {
                 while (u < argc && argv[u][0] == '-') u += (!strcmp(sub, "git") && (!strcmp(argv[u], "-C") || !strcmp(argv[u], "-c"))) ? 2 : 1;
                 if (u < argc) { for (q = 0; q < 47 && argv[u][q]; q++) sw[q] = argv[u][q]; sw[q] = 0; clean(sw); F(fx, sizeof fx, "\tsub=%s", sw); }
             }
-            if (!strcmp(argv[a], "git") && !strcmp(sub, "commit"))   /* K6:class=ok|timeout|<COMMIT_OWN_FAIL 类别>|args(参数错)|other */
-                F(fx, sizeof fx, "\tclass=%s\t%s", commit_outcome(r), commit_range);
+            if (!strcmp(argv[a], "git") && !strcmp(sub, "commit"))   /* K6+U0: class/gate/reason/req 全部入事件 */
+                F(fx, sizeof fx, "\tclass=%s\tgate=%s\treason=%s\treq=%s\t%s",
+                  commit_outcome(r), commit_gate_val(r), commit_reason_val(r), commit_req_val(0), commit_range);
             if (!strcmp(argv[a], "f") && (!strcmp(sub, "edit") || !strcmp(sub, "write") || !strcmp(sub, "edits")) && argc > a + 2 && !strchr(argv[a + 2], '\t') && !strchr(argv[a + 2], '\n')) {
                 unsigned char *fb = 0; int64_t fn = 0; char hx[65] = "-";
                 if (!sy_read_file(argv[a + 2], &fb, &fn, 1L << 27)) (void)sy_sha256_hex(fb ? (const void *)fb : (const void *)"", (long)fn, hx);
