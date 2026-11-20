@@ -1,6 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <pre id="gpu">pending</pre>
+<pre id="gpu-scenes">pending</pre>
 <pre id="toon"></pre>
 <script type="module">
 import {
@@ -94,13 +95,23 @@ try {
   const { gl } = context();
   let base;
   const submit = createGpuSubmit(gl, () => base.exports.memory, () => 1);
-  const request = new XMLHttpRequest();
-  request.open("GET", "probe.wasm", false);
-  request.overrideMimeType("text/plain; charset=x-user-defined");
-  request.send();
-  const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
-  base = new WebAssembly.Instance(new WebAssembly.Module(bytes), { uxe_gpu_v1: { host_gpu_submit: submit } });
-  const step = base.exports.uxe_gpu_probe;
+  function instance(name) {
+    const request = new XMLHttpRequest();
+    request.open("GET", `${name}.wasm`, false);
+    request.overrideMimeType("text/plain; charset=x-user-defined");
+    request.send();
+    const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
+    return new WebAssembly.Instance(new WebAssembly.Module(bytes), { uxe_gpu_v1: { host_gpu_submit: submit } });
+  }
+  const flat = instance("probe"), material = instance("material"), lit = instance("lit");
+  const visits = [];
+  function step(mode) {
+    if (mode === 111n && location.search === "?scene-omit-mutate") return 0n;
+    base = mode >= 120n && mode <= 129n || mode >= 138n && mode <= 141n ? lit
+      : mode >= 40n && mode <= 119n || mode >= 150n ? material : flat;
+    visits.push(Number(mode));
+    return base.exports.uxe_gpu_probe(mode);
+  }
   const actual = [];
   const status = [];
   const mutate = new URLSearchParams(location.search).has("mutate");
@@ -535,6 +546,7 @@ try {
   basicGeometry.dispose();
   basicMaterial.dispose();
   renderer.dispose();
+  document.querySelector("#gpu-scenes").textContent = JSON.stringify(visits);
   result.textContent = JSON.stringify([...status, ...actual, ...reference, ...stateStatus, ...actualState, ...referenceState,
     ...clipStatus, ...actualClip, ...referenceClip, basicStatus, ...actualBasic, ...referenceBasic,
     lambertStatus, ...actualLambert, ...referenceLambert, phongStatus, ...actualPhong, ...referencePhong,

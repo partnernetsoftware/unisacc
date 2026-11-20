@@ -1,5 +1,6 @@
 #pragma unisa use mem.heap
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 #pragma unisa use text.fmt
 #pragma unisa use text.num
 #pragma unisa use text.text
@@ -88,6 +89,88 @@ static int gpu_copy(const char *dir,const char *leaf,const char *source) {
     return sy_copy(source,path,0600)!=0;
 }
 
+static int gpu_timed(const char *phase,char **argv,int limit,char **out,size_t *bytes) {
+    int64_t start=sy_mono_ns();
+    int rc=cx_runv_timeout(argv,limit,out,bytes);
+    printf("GPU_PHASE %s ms=%ld rc=%d\n",phase,(long)((sy_mono_ns()-start)/1000000),rc);
+    return rc;
+}
+
+// Keep the existing per-scene oracle and browser execution order. Split the
+// compiler input at the probe's named function and dispatch boundaries.
+static int gpu_probe_inputs(const char *flat,const char *material,const char *lit) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file("ujs/practice/uxe/test/gpu-packet-probe.ujs",&raw,&bytes,32000)) return 1;
+    const char *names[]={"native function probe_basic(","native function probe_custom_draw(",
+        "let capacity=2048;","\nif(mode>=150","if(mode==148","if(mode>=120)","if(mode>=110)","if(mode>=20)"};
+    long mark[8];
+    for(int i=0;i<8;i++) {
+        mark[i]=tx_find((const char *)raw,bytes,names[i],tx_len(names[i],100));
+        if(mark[i]<0 || (i && mark[i]<=mark[i-1])) { mm_free(raw); return 1; }
+    }
+    const char *src=(const char *)raw;
+    const char shared_end[]="function probe_triangle(";
+    long shared=tx_find(src,mark[0],shared_end,sizeof shared_end-1);
+    if(shared<0) { mm_free(raw); return 1; }
+    char output[32000];
+    int n=tx_snprintf(output,sizeof output,"%.*s%.*s%.*s%.*s",
+        (int)mark[0],src,(int)(mark[3]-mark[1]),src+mark[1],
+        (int)(mark[5]-mark[4]),src+mark[4],(int)(bytes-mark[7]),src+mark[7]);
+    int rc=n<0 || n>=(int)sizeof output || sy_write_file(flat,output,n,0600);
+    n=tx_snprintf(output,sizeof output,"%.*s%.*s%.*s%.*s%.*sreturn -1;\n",
+        (int)shared,src,(int)(mark[1]-mark[0]),src+mark[0],
+        (int)(mark[3]-mark[2]),src+mark[2],(int)(mark[4]-mark[3]),src+mark[3],
+        (int)(mark[7]-mark[6]),src+mark[6]);
+    rc=rc || n<0 || n>=(int)sizeof output || sy_write_file(material,output,n,0600);
+    const char entry[]="return probe_lit_mesh(mode-120);\n";
+    rc=rc || sy_write_file(lit,entry,sizeof entry-1,0600);
+    mm_free(raw);
+    return rc;
+}
+
+static int gpu_compile_shard(char **argv,int prefix,const char *dir,const char *name,
+        const char *entry,char **out,size_t *bytes) {
+    char path[340];
+    tx_snprintf(path,sizeof path,"%s/%s.wasm",dir,name);
+    argv[prefix++]=(char *)entry;
+    argv[prefix++]="-o";
+    argv[prefix++]=path;
+    argv[prefix]=0;
+    if(gpu_timed(name,argv,10,out,bytes)) return 1;
+    sy_stat_t artifact={0};
+    return sy_lstat(path,&artifact) || artifact.size<=0 || artifact.size>4*1024*1024;
+}
+
+static int gpu_compile_shards(const char *dir,char *abi,char *shaders,char **out,size_t *bytes) {
+    char flat[340],material[340],lit[340];
+    tx_snprintf(flat,sizeof flat,"%s/flat.ujs",dir);
+    tx_snprintf(material,sizeof material,"%s/material.ujs",dir);
+    tx_snprintf(lit,sizeof lit,"%s/lit.ujs",dir);
+    if(gpu_probe_inputs(flat,material,lit)) return 1;
+    char *flat_args[18]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/geometry-buffers.ujs",
+        "ujs/practice/uxe/base/boxgeometry.ujs","ujs/practice/uxe/base/gpu-state.ujs",
+        "ujs/practice/uxe/base/f64-math.ujs","ujs/practice/uxe/base/gpu-sprite.ujs",shaders};
+    char *material_args[25]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/gpu-material-basic.ujs","ujs/practice/uxe/base/gpu-material-lambert.ujs",
+        "ujs/practice/uxe/base/gpu-material-phong.ujs","ujs/practice/uxe/base/gpu-material-standard.ujs",
+        "ujs/practice/uxe/base/gpu-texture-sample.ujs","ujs/practice/uxe/base/gpu-material-tone.ujs",
+        "ujs/practice/uxe/base/gpu-tone-rgb.ujs","ujs/practice/uxe/base/vector-scalar.ujs",
+        "ujs/practice/uxe/base/matrix3.ujs","ujs/practice/uxe/base/gpu-texture-uv.ujs",
+        "ujs/practice/uxe/base/gpu-texture-table.ujs","ujs/practice/uxe/base/gpu-material-toon.ujs",shaders};
+    char *lit_args[18]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/geometry-buffers.ujs","ujs/practice/uxe/base/boxgeometry.ujs",
+        "ujs/practice/uxe/base/spheregeometry.ujs",shaders,"ujs/practice/uxe/test/gpu-lit-probe.ujs"};
+    if(gpu_compile_shard(flat_args,10,dir,"probe",flat,out,bytes)) return 1;
+    mm_free(*out);*out=0;
+    if(gpu_compile_shard(material_args,18,dir,"material",material,out,bytes)) return 1;
+    mm_free(*out);*out=0;
+    return gpu_compile_shard(lit_args,10,dir,"lit",lit,out,bytes);
+}
+
 static int bridge_lines(const char *path) {
     unsigned char *source=0;
     int64_t bytes=0;
@@ -110,6 +193,33 @@ static void pixel_gold(int scene,int point,int *rgba) {
         rgba[2]=255-tri[point]*128;
         rgba[3]=255-tri[point]*64;
     } else rgba[0]=tri[point]*255;
+}
+
+static int gpu_scene_union(char *out,size_t bytes,int nominal) {
+    if(!nominal) return 0;
+    const int scene[]={0,1,2,3,17,40,42,44,46,50,52,53,55,60,61,63,64,65,
+        110,111,112,113,114,115,120,121,122,123,126,128,130,132,133,134,138,140,142,144,148,150,151,152,153};
+    const char marker[]="<pre id=\"gpu-scenes\">[";
+    long start=tx_find(out,bytes,marker,sizeof marker-1);
+    if(start<0) return 1;
+    int counts[158]={0};
+    char *p=out+start+sizeof marker-1;
+    for(int i=0;i<80;i++) {
+        char *end=0;
+        long mode=tx_strtol(p,&end,10);
+        if(end==p || mode<0 || mode>=158 || (*end!=',' && *end!=']')) return 1;
+        counts[mode]++;
+        if(*end==']') {
+            for(int j=0;j<43;j++) if(counts[scene[j]]!=1) {
+                printf("GPU_SCENE_UNION scene=%d count=%d failed=1\n",scene[j],counts[scene[j]]);
+                return 1;
+            }
+            printf("GPU_SCENE_UNION scenes=43 failed=0\n");
+            return 0;
+        }
+        p=end+1;
+    }
+    return 1;
 }
 
 static int gpu_check(char *start) {
@@ -412,6 +522,7 @@ static int target_check(char *start) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int scene_omit=argc==2 && tx_eqz(argv[1],"--scene-omit-mutate");
     int basic_mutate=argc==2 && tx_eqz(argv[1],"--basic-mutate");
     int lambert_mutate=argc==2 && tx_eqz(argv[1],"--lambert-mutate");
     int phong_mutate=argc==2 && tx_eqz(argv[1],"--phong-mutate");
@@ -467,7 +578,8 @@ int main(int argc,char **argv) {
     int area=area_mutate || (argc==2 && tx_eqz(argv[1],"--area"));
     int fill=ambient || hemisphere || fog || exp_fog || spot || light_probe;
     int simple=colors || fill || area;
-    if(argc!=1 && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
+    int shards=!targets && !simple && !shadow_map;
+    if(argc!=1 && !scene_omit && !mutate && !basic_mutate && !lambert_mutate && !phong_mutate && !standard_mutate &&
        !texture_mutate && !tone_mutate && !sampled_mutate && !wrap_mutate && !texture_life_mutate &&
        !cube_mutate && !toon_mutate && !lighting_mutate && !phong_light_mutate && !normal_mutate &&
        !depth_mutate && !point_mutate && !line_mutate && !matcap_mutate && !distance_mutate &&
@@ -480,7 +592,7 @@ int main(int argc,char **argv) {
     tx_snprintf(shaders,sizeof shaders,"%s/shaders.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
     tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,
-        mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":
+        scene_omit?"?scene-omit-mutate":mutate?"?mutate":state_mutate?"?state-mutate":clip_mutate?"?clip-mutate":
         target_mutate?"?target-mutate":mesh_target_mutate?"?mesh-target-mutate":
         basic_mutate?"?basic-mutate":lambert_mutate?"?lambert-mutate":
         phong_mutate?"?phong-mutate":standard_mutate?"?standard-mutate":texture_mutate?"?texture-mutate":
@@ -526,33 +638,12 @@ int main(int argc,char **argv) {
             compile[args++]="ujs/practice/uxe/base/sphericalharmonics3.ujs";
         }
     }
-    else if(!area) {
-        compile[args++]="ujs/practice/uxe/base/geometry-buffers.ujs";
-        compile[args++]="ujs/practice/uxe/base/boxgeometry.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-state.ujs";
-        compile[args++]="ujs/practice/uxe/base/f64-math.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-basic.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-lambert.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-phong.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-standard.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-texture-sample.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-tone.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-tone-rgb.ujs";
-        compile[args++]="ujs/practice/uxe/base/vector-scalar.ujs";
-        compile[args++]="ujs/practice/uxe/base/matrix3.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-texture-uv.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-texture-table.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-material-toon.ujs";
-        compile[args++]="ujs/practice/uxe/base/spheregeometry.ujs";
-        compile[args++]="ujs/practice/uxe/base/gpu-sprite.ujs";
-    }
     compile[args++]=shaders;
-    if(!targets && !simple && !shadow_map) compile[args++]="ujs/practice/uxe/test/gpu-lit-probe.ujs";
     compile[args++]=targets?"ujs/practice/uxe/test/gpu-target-probe.ujs":
         shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-probe.ujs":
         area?"ujs/practice/uxe/test/gpu-area-probe.ujs":
         colors?"ujs/practice/uxe/test/gpu-output-probe.ujs":
-        fill?"ujs/practice/uxe/test/gpu-fill-probe.ujs":"ujs/practice/uxe/test/gpu-packet-probe.ujs";
+        "ujs/practice/uxe/test/gpu-fill-probe.ujs";
     compile[args++]="-o";
     compile[args++]=wasm;
     compile[args]=0;
@@ -567,7 +658,7 @@ int main(int argc,char **argv) {
     int ready=lines>0 && lines+target_lines<=600 &&
         !sy_write_file(abi,declarations,sizeof declarations-1,0600) &&
         !build_shaders(shaders,targets || simple || shadow_map,shadow_map,area)
-        && !cx_runv_timeout(compile,10,&out,&bytes)
+        && !(shards?gpu_compile_shards(dir,abi,shaders,&out,&bytes):gpu_timed("compile",compile,10,&out,&bytes))
         && !sy_lstat(wasm,&compiled) && compiled.size>0 && compiled.size<=4*1024*1024
         && !gpu_copy(dir,"probe.html",targets?"ujs/practice/uxe/test/gpu-target-r160.html":
             shadow_map?"ujs/practice/uxe/test/gpu-shadow-map-r160.html":
@@ -588,7 +679,7 @@ int main(int argc,char **argv) {
         char *chrome[]={"google-chrome","--headless=new","--no-first-run","--disable-background-networking",
             "--allow-file-access-from-files","--enable-unsafe-swiftshader","--use-angle=swiftshader",
             "--virtual-time-budget=7000","--dump-dom",profile,url,0};
-        int rc=cx_runv_timeout(chrome,20,&out,&bytes);
+        int rc=gpu_timed("chrome",chrome,20,&out,&bytes);
         if(!rc && out) at=tx_find(out,bytes,marker,sizeof marker-1);
         if(at<0) {
             const char label[]="<pre id=\"gpu\">";
@@ -608,6 +699,7 @@ int main(int argc,char **argv) {
                 fill?flat_triangle_check(values,(fog || exp_fog)?fog_gold:light_probe?probe_gold:spot?spot_gold:
                     hemisphere?hemisphere_gold:ambient_gold,1):
                 gpu_check(values);
+            if(shards) failed+=gpu_scene_union(out,bytes,argc==1 || scene_omit);
             if(colors) {
                 const char reject[]="<pre id=\"color-contract\">[-1,-1,-1,-1]</pre>";
                 if(tx_find(out,bytes,reject,sizeof reject-1)<0) {
