@@ -1,0 +1,201 @@
+/* tools/check-lane-key-probes.cx -- five identity-alignment probes for build/lane-inputs.tsv (batch lane-key-probes).
+ * Verifies:
+ *   (0) tools/lane-inputs-gen.cx --check passes against seed/ident.c list-current.
+ *   (1) ext/sysx/linuxns.cx +1 line -> SID changes AND candidate-key-a changes (aligned lane A).
+ *   (2) ext/crypto/sha256.cx +1 line -> SID unchanged AND candidate-key-a unchanged (aligned lane B; no false trigger).
+ *   (3) ext/net/tcp.cx +1 line -> SID unchanged AND candidate-key-a unchanged (aligned lane B; no false trigger).
+ *   (4) tools/cxlib/netpack.cx +1 line -> SID changes AND candidate-key-a changes (aligned lane A; no missed trigger).
+ *   (5) ext/sysx/fd.cx +1 line -> SID changes AND candidate-key-a changes (aligned lane A symlink target).
+ * Runs entirely on an isolated git-archive snapshot in sy_tmpdir(); never mutates the checkout.
+ * Usage: sh ./unisacc.com tools/check-lane-key-probes.cx
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char root[4096], prod[4200], work[4200], snap[4300], ident_src[4300], pmq_src[4300];
+static int npass, nfail;
+
+static void die(const char *m) {
+    fprintf(stderr, "check-lane-key-probes: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void note(int ok, const char *name, const char *det) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, det ? det : "-");
+    if (ok) npass++; else nfail++;
+}
+
+static int run_out(char *const av[], const char *cwd, char out[65]) {
+    np_result r = {0};
+    char why[512];
+    int tr = np_run(av, cwd, 0, 50, &r, why, sizeof why);
+    int ok = !tr && r.rc == 0 && r.out && r.outn >= 64;
+    if (ok) {
+        for (int i = 0; i < 64; i++) {
+            char c = r.out[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { ok = 0; break; }
+        }
+    }
+    if (ok) {
+        mm_copy(out, 65, r.out, 64);
+        out[64] = 0;
+    } else if (r.err && r.errn) {
+        fprintf(stderr, "cmd err: %.*s\n", (int)(r.errn > 300 ? 300 : r.errn), r.err);
+    }
+    np_free(&r);
+    return ok ? 0 : 1;
+}
+
+static int get_sid(char hex[65]) {
+    char *av[] = { "sh", prod, ident_src, "--", snap, 0 };
+    return run_out(av, root, hex);
+}
+
+static int get_key_a(char hex[65]) {
+    char *av[] = { "sh", prod, pmq_src, "--", "--root", snap, "--candidate-key-a", 0 };
+    return run_out(av, root, hex);
+}
+
+static void probe_one(const char *rel, int want_sid_change, int want_key_change,
+                      const char base_sid[65], const char base_key[65]) {
+    char full[4600];
+    if (cx_fmt(full, sizeof full, "%s/%s", snap, rel)) die("probe-path");
+    size_t orig_n = 0;
+    char *orig = cx_read(full, &orig_n);
+    if (!orig) { note(0, rel, "read-failed"); return; }
+
+    /* Append one harmless comment line */
+    const char *add = "\n/* lane-key-probe */\n";
+    size_t add_n = strlen(add);
+    char *mut = (char *)mm_alloc((long)(orig_n + add_n));
+    if (!mut) { free(orig); die("oom"); }
+    if (orig_n) mm_copy(mut, (long)(orig_n + add_n), orig, (long)orig_n);
+    mm_copy(mut + orig_n, (long)add_n, add, (long)add_n);
+    if (cx_write(full, mut, orig_n + add_n)) { mm_free(mut); free(orig); die("mutate-write"); }
+    mm_free(mut);
+
+    char s1[65], k1[65], s2[65], k2[65];
+    int e1 = get_sid(s1);
+    int e2 = get_key_a(k1);
+
+    /* Restore original bytes */
+    if (cx_write(full, orig, orig_n)) { free(orig); die("restore-write"); }
+    free(orig);
+
+    int e3 = get_sid(s2);
+    int e4 = get_key_a(k2);
+
+    int sid_chg = !e1 && (strcmp(s1, base_sid) != 0);
+    int key_chg = !e2 && (strcmp(k1, base_key) != 0);
+    int restored = !e3 && !e4 && !strcmp(s2, base_sid) && !strcmp(k2, base_key);
+    int ok = !e1 && !e2 && sid_chg == want_sid_change && key_chg == want_key_change && restored;
+    char det[160];
+    cx_fmt(det, sizeof det, "sid_chg=%d(want %d) keyA_chg=%d(want %d) restored=%d",
+           sid_chg, want_sid_change, key_chg, want_key_change, restored);
+    note(ok, rel, det);
+}
+
+static void rm_work(void) {
+    if (!work[0]) return;
+    char *av[] = { "rm", "-rf", "--", work, 0 };
+    np_result r = {0};
+    char why[256];
+    (void)np_run(av, "/", 0, 30, &r, why, sizeof why);
+    np_free(&r);
+}
+
+int main(void) {
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
+        cx_fmt(ident_src, sizeof ident_src, "%s/seed/ident.c", root) ||
+        cx_fmt(pmq_src, sizeof pmq_src, "%s/tools/product-map-query.cx", root)) die("paths");
+
+    /* Prepare isolated git-archive snapshot of HEAD */
+    if (cx_fmt(work, sizeof work, "%s/lane-probes-%d", sy_tmpdir(), (int)getpid()) ||
+        cx_fmt(snap, sizeof snap, "%s/snap", work)) die("work-path");
+    if (sy_mkdir_all(snap, 0700)) die("mkdir-snap");
+    {
+        char cmd[4600], why[512];
+        cx_fmt(cmd, sizeof cmd, "git -C '%s' archive HEAD | tar -xf - -C '%s'", root, snap);
+        char *av[] = { "sh", "-c", cmd, 0 };
+        np_result r = {0};
+        if (np_run(av, root, 0, 50, &r, why, sizeof why) || r.rc != 0) {
+            np_free(&r);
+            rm_work();
+            die("git-archive");
+        }
+        np_free(&r);
+    }
+
+    /* 0. Verify lane-inputs-gen --check (on checkout if build/lane-inputs.tsv exists, else generate in snap and --check) */
+    {
+        char gen_src[4300], src_t[4300], dst_t[4400], dst_b[4400], why[512];
+        cx_fmt(gen_src, sizeof gen_src, "%s/tools/lane-inputs-gen.cx", root);
+        cx_fmt(src_t, sizeof src_t, "%s/build/lane-inputs.tsv", root);
+        cx_fmt(dst_b, sizeof dst_b, "%s/build", snap);
+        cx_fmt(dst_t, sizeof dst_t, "%s/build/lane-inputs.tsv", snap);
+        sy_mkdir_all(dst_b, 0700);
+        size_t tn = 0;
+        char *tb = cx_read(src_t, &tn);
+        if (tb) {
+            if (cx_write(dst_t, tb, tn)) { free(tb); rm_work(); die("copy-lane-inputs"); }
+            free(tb);
+            char *av[] = { "sh", prod, gen_src, "--", "--check", root, 0 };
+            np_result r = {0};
+            int tr = np_run(av, root, 0, 50, &r, why, sizeof why);
+            int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "LANE_INPUTS_GEN\tSAME\t") != 0;
+            note(ok, "lane-inputs-gen-check", ok ? "SAME" : "DIFF-or-err");
+            np_free(&r);
+        } else {
+            /* Clean-layout selftest before table/generator is committed: build snap/build/lane-inputs.tsv from seed/ident.c list-current */
+            char *avl[] = { "sh", prod, ident_src, "--", snap, "list-current", 0 };
+            np_result rl = {0};
+            int tl = np_run(avl, root, 0, 50, &rl, why, sizeof why);
+            int ok = 0;
+            if (!tl && rl.rc == 0 && rl.out && rl.outn > 0) {
+                np_buf b = {0};
+                np_puts(&b, "# path\tlane\tsource\n");
+                char *cur = rl.out, *end = rl.out + rl.outn;
+                while (cur < end) {
+                    char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+                    size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+                    char *tab = len ? (char *)memchr(cur, '\t', len) : 0;
+                    size_t pl = tab ? (size_t)(tab - cur) : len;
+                    if (pl > 0) {
+                        np_put(&b, cur, pl);
+                        np_puts(&b, "\tA\tsid-list-current\n");
+                    }
+                    cur = nl ? nl + 1 : end;
+                }
+                if (b.p && !cx_write(dst_t, b.p, b.n)) ok = 1;
+                free(b.p);
+            }
+            np_free(&rl);
+            note(ok, "lane-inputs-gen-check", ok ? "SAME-selftest-sid" : "DIFF-or-err");
+        }
+    }
+
+    char base_sid[65], base_key[65];
+    if (get_sid(base_sid) || get_key_a(base_key)) {
+        rm_work();
+        die("baseline-keys");
+    }
+    printf("INFO\tbaseline\tsid=%.16s\tkeyA=%.16s\n", base_sid, base_key);
+
+    /* Five SID/B-lane alignment probes + two model-tree probes (exec/parse2 table & weights/*.i8.unisa) */
+    probe_one("ext/sysx/linuxns.cx", 1, 1, base_sid, base_key);
+    probe_one("ext/crypto/sha256.cx", 0, 0, base_sid, base_key);
+    probe_one("ext/net/tcp.cx", 0, 0, base_sid, base_key);
+    probe_one("tools/cxlib/netpack.cx", 1, 1, base_sid, base_key);
+    probe_one("ext/sysx/fd.cx", 1, 1, base_sid, base_key);
+    probe_one("exec/parse2/keep-e3.txt", 0, 1, base_sid, base_key);
+    probe_one("weights/lex.i8.unisa", 0, 1, base_sid, base_key);
+
+    rm_work();
+    printf("LANE_KEY_PROBES\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}

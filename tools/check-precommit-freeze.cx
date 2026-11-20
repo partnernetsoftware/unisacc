@@ -33,6 +33,16 @@ static int run2(const char *freeze, const char *stage, const char *env, char *ou
         td, stage, w, env, root, root)) return 99;
     return sh(cmd, out, cap);
 }
+static int run_lane(const char *freeze, const char *lane_tsv, const char *stage, const char *env, char *out, size_t cap) {
+    char cmd[3600], wf[1200], wl[1200];
+    if (freeze[0]) { if (cx_fmt(wf, sizeof wf, "printf '%s' > build/freeze.tsv && ", freeze)) return 99; } else wf[0] = 0;
+    if (lane_tsv) { if (cx_fmt(wl, sizeof wl, "printf '%s' > build/lane-inputs.tsv && ", lane_tsv)) return 99; } else wl[0] = 0;
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git rm -rf -q --cached . >/dev/null 2>&1; rm -rf exec tools ext build && mkdir -p exec tools ext/crypto build && echo x > '%s' && %s%s"
+        "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+        td, stage, wf, wl, env, root, root)) return 99;
+    return sh(cmd, out, cap);
+}
 static int has(const char *h, const char *n) {
     long hs = tx_len(h, 16000000), ns = tx_len(n, 100);
     size_t hl, nl, i;
@@ -67,6 +77,21 @@ int main(void) {
     ck(rc == 0 && has(out, "blocked=0"), "unfrozen-path-passes-during-freeze");
     rc = run2("sid1\\tbase1\\tcdx\\n", "exec/a.tsv", "", out, sizeof out);
     ck(rc == 1 && has(out, "malformed"), "malformed-freeze-refused");
+    /* @lane:A fail-closed contracts (4 cases): normal block+allow, missing table, empty table, malformed columns */
+    {
+        const char *FAR_LANE = "sid1\\tbase1\\tcdx\\t4102444800\\t@lane:A\\n";
+        const char *GOOD_LANE = "# path\\tlane\\tsource\\nexec/a.tsv\\tA\\tsid-list-current\\next/crypto/a.cx\\tB\\text-non-sid\\n";
+        rc = run_lane(FAR_LANE, GOOD_LANE, "exec/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "冻结中"), "lane-a-frozen-path-refused");
+        rc = run_lane(FAR_LANE, GOOD_LANE, "ext/crypto/a.cx", "", out, sizeof out);
+        ck(rc == 0 && has(out, "blocked=0"), "lane-a-allows-lane-b");
+        rc = run_lane(FAR_LANE, 0, "exec/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "malformed"), "lane-a-missing-table-refused");
+        rc = run_lane(FAR_LANE, "", "exec/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "malformed"), "lane-a-empty-table-refused");
+        rc = run_lane(FAR_LANE, "exec/a.tsv A sid\\n", "exec/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "malformed"), "lane-a-bad-columns-refused");
+    }
     {   char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
     sy_printf("CHECK_PRECOMMIT_FREEZE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
