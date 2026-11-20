@@ -32,7 +32,8 @@ int main(int argc, char **argv) {
     /* (1) plan: five steps + post-publish + precheck warnings, no state written */
     char *plan[] = {bin, "plan", "--inputs", inputs, "--state", plan_state, "--layout", "/nonexistent-layout", 0};
     np_result r = actual(plan);
-    ck(r.rc == 0 && has(&r, "CHAIN\tCMD\t1\tprep\t") && has(&r, "CHAIN\tCMD\t2\tstage-a\t") && has(&r, "CHAIN\tCMD\t3\tstage-commit\t") &&
+    ck(r.rc == 0 && has(&r, "CHAIN\tPRECHECK\tef-counts\t") && has(&r, "CHAIN\tCMD\t0a\tpack\t") && has(&r, "CHAIN\tCMD\t0b\twarm\t") &&
+       has(&r, "CHAIN\tCMD\t1\tprep\t") && has(&r, "CHAIN\tCMD\t2\tstage-a\t") && has(&r, "CHAIN\tCMD\t3\tstage-commit\t") &&
        has(&r, "CHAIN\tCMD\t4\tstage-dry\t") && has(&r, "--strict release/evidence/v0.0.99-strict-2026-01-01.tsv") && has(&r, " --dry\n") &&
        has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tCMD\t6\tpost-publish\t") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
     ck(sy_exists(plan_state) == 0 && !has(&r, "CHAIN\tRUN\t"), "plan-runs-nothing");
@@ -162,6 +163,55 @@ int main(int argc, char **argv) {
         ck(has(&r, "BADIDRC=2\n") && has(&r, "ONE_DIGIT_RC=0\n") && has(&r, "NOIDRC=2\n") &&
            has(&r, "MISSCANDRC=2\n") && has(&r, "candidate unreadable") &&
            has(&r, "HDRONLYRC=2\n") && has(&r, "candidate needs header + data row"), "retry-ci-bad-run-id-rc2");
+        np_free(&r);
+    }
+    /* (5c) steps 0a/0b split + idempotency + check-ef-counts positive & negative controls */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/pre0; mkdir -p \"$T/st\" \"$T/pk\" && "
+            "printf 'version\\t0.0.99\\ndate\\t2026-01-01\\npack\\t%s/pre0/pk\\nwarm\\t%s/pre0/w.tsv\\n' > \"$T/in-both.tsv\" && "
+            "%s plan --inputs \"$T/in-both.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo PBOTH=$?; "
+            "printf 'version\\t0.0.99\\ndate\\t2026-01-01\\npack\\t%s/pre0/pk\\n' > \"$T/in-nowarm.tsv\" && "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo NWRC=$?; "
+            "printf '%s/pre0/warm-fake.tsv\\n' > \"$T/st/warm.done\" && "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo WDONE=$?; "
+            "grep -q 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo RESOLVED_OK=1; "
+            "rm -rf \"$T\"",
+            tmp, tmp, tmp, bin, tmp, bin, tmp, bin, tmp);
+        char *vp[] = {"sh", "-c", cmd, 0};
+        r = actual(vp);
+        ck(has(&r, "PBOTH=0\n") && has(&r, "CHAIN\tSKIP\t0a\tpack\tprovided-in-inputs\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n"), "plan-skips-provided-pack-and-warm");
+        ck(has(&r, "NWRC=1\n") && has(&r, "CHAIN\tRUN\t0b\twarm\t") && has(&r, "CHAIN\tFAIL\t0b\twarm\t"), "run-executes-split-warm-step-before-prep");
+        ck(has(&r, "WDONE=1\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tdone\n") && has(&r, "RESOLVED_OK=1\n"), "run-skips-done-warm-and-injects-resolved-inputs");
+        np_free(&r);
+
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/efc; mkdir -p \"$T\" && "
+            "%s check-ef-counts --expected-fail release/evidence/0.0.86/expected-fail.tsv --strict release/evidence/v0.0.86-strict-2026-11-20.tsv; echo REAL86=$?; "
+            "printf 'int main(void){printf(\"FOO_BAR_COUNT\\tpass=%%d\\tfail=%%d\\n\",10,3);}\\n' > \"$T/foo-ok.cx\" && "
+            "printf 'int main(void){return 1;}\\n' > \"$T/foo-bad.cx\" && "
+            "printf 'foo-bar\\tIMPLEMENTED\\tinterfaces\\t%s/efc/foo-ok.cx\\nfoo-miss\\tIMPLEMENTED\\tinterfaces\\t%s/efc/foo-bad.cx\\n' > \"$T/batches.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nfoo-bar\\t10/3\\tok\\n' > \"$T/ef-ok.tsv\" && "
+            "printf 'FOO_BAR_COUNT\\tpass=10\\tfail=3\\n' > \"$T/st-ok.tsv\" && "
+            "printf 'RAW\\tBATCH_RUN\\tid=foo-bar\\tstatus=FAIL\\tcount=10/3\\n' > \"$T/st-raw.tsv\" && "
+            "printf 'FOO_BAR_COUNT\\tpass=10\\tfail=4\\n' > \"$T/st-bad.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nfoo-miss\\t10/3\\tno-line\\n' > \"$T/ef-nosrc.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nno-such-batch\\t1/1\\tmissing\\n' > \"$T/ef-nobat.tsv\" && "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-ok.tsv\"; echo EFOK=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-raw.tsv\"; echo EFRAW=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-bad.tsv\"; echo EFMIS=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-nosrc.tsv\" --batches \"$T/batches.tsv\"; echo EFNOSRC=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-nobat.tsv\" --batches \"$T/batches.tsv\"; echo EFNOBAT=$?; "
+            "rm -rf \"$T\"",
+            tmp, bin, tmp, tmp, bin, bin, bin, bin, bin);
+        char *ve[] = {"sh", "-c", cmd, 0};
+        r = actual(ve);
+        ck(has(&r, "REAL86=0\n") && has(&r, "EF_COUNT\tPASS\tenv-semantics\tmarker=ENV_SEMANTICS_COUNT\texpected=84/2\t"), "ef-counts-real-0.0.86-pass");
+        ck(has(&r, "EFOK=0\n") && has(&r, "EFRAW=0\n") && has(&r, "EF_COUNT\tPASS\tfoo-bar\tmarker=FOO_BAR_COUNT\texpected=10/3\t"), "ef-counts-marker-pass");
+        ck(has(&r, "EFMIS=1\n") && has(&r, "EF_COUNT\tFAIL\tfoo-bar\tcount-mismatch\twant=10/3\tgot=10/4\n"), "ef-counts-mismatch-refused");
+        ck(has(&r, "EFNOSRC=1\n") && has(&r, "EF_COUNT\tFAIL\tfoo-miss\tmissing-count-line-in-source\t"), "ef-counts-missing-source-marker-refused");
+        ck(has(&r, "EFNOBAT=1\n") && has(&r, "EF_COUNT\tFAIL\tno-such-batch\tmissing-batch-in-registry\n"), "ef-counts-missing-batch-refused");
         np_free(&r);
     }
     /* (5) usage */

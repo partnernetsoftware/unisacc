@@ -5,9 +5,12 @@
  *   sh ./unisacc.com tools/release-chain.cx -- plan --inputs FILE --state ABS_DIR --layout DIR [--decisions FILE]
  *   sh ./unisacc.com tools/release-chain.cx -- retry-ci --version V --run-id ID --evidence-dir DIR
  *        --candidate FILE [--tag TAG] [--gh BIN] [--dry]
+ *   sh ./unisacc.com tools/release-chain.cx -- check-ef-counts --expected-fail FILE [--batches FILE] [--strict FILE]
  *
  * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
- *   1 prep         release-flow prep --inputs F --out STATE/prep [--decisions D]
+ *   0a pack        release-run --pack ... into STATE/pack (skipped when inputs already sets pack=)
+ *   0b warm        release-exec --warm <pack>/candidate.tsv --layout L --out STATE/warm (skipped when inputs sets warm=)
+ *   1 prep         release-flow prep --inputs RESOLVED --out STATE/prep [--decisions D]
  *   2 stage-a      release-flow stage-a --inputs F --prep STATE/prep --out STATE/stage [--decisions D]
  *                  (the stage carries ratchets.txt, evidence-rows.tsv and rollback.txt from prep;
  *                  release-flow scrubs home paths from every evidence file)
@@ -365,9 +368,290 @@ static int cmd_retry_ci(int argc, char **argv) {
     return 0;
 }
 
+/* ---- check-ef-counts: validate <NAME>_COUNT convention in source & strict evidence against expected-fail.tsv ---- */
+static void ef_make_marker(const char *batch, char *dst, size_t cap) {
+    size_t i = 0;
+    for (const char *p = batch; *p && i + 7 < cap; p++) {
+        char c = *p;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        else if (c == '-') c = '_';
+        dst[i++] = c;
+    }
+    mm_copy(dst + i, cap - i, "_COUNT", 7);
+}
+static int ef_parse_pf(const char *s, int *pass, int *fail) {
+    const char *sl = strchr(s, '/');
+    if (!sl || sl == s || !sl[1]) return 0;
+    for (const char *p = s; p < sl; p++) if (*p < '0' || *p > '9') return 0;
+    for (const char *p = sl + 1; *p; p++) if (*p < '0' || *p > '9') return 0;
+    *pass = atoi(s);
+    *fail = atoi(sl + 1);
+    return 1;
+}
+static int ef_find_batch_src(const char *reg, size_t regn, const char *batch, char *src, size_t cap) {
+    size_t bl = strlen(batch);
+    const char *p = reg, *end = reg + regn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (ll > bl && !memcmp(p, batch, bl) && p[bl] == '\t') {
+            /* Column 3 (0-based) is the check source path */
+            const char *q = p; int col = 0;
+            while (col < 3 && q < p + ll) {
+                const char *t = memchr(q, '\t', (size_t)(p + ll - q));
+                if (!t) return 0;
+                q = t + 1; col++;
+            }
+            const char *t = memchr(q, '\t', (size_t)(p + ll - q));
+            size_t sl = t ? (size_t)(t - q) : (size_t)(p + ll - q);
+            if (sl > 0 && sl < cap) { mm_copy(src, cap, q, sl); src[sl] = 0; return 1; }
+            return 0;
+        }
+        p = nl ? nl + 1 : end;
+    }
+    return 0;
+}
+static int ef_find_strict_pf(const char *st, size_t stn, const char *batch, const char *marker, int *ap, int *af) {
+    /* Scan from start and keep the LAST matching row (window-folded semantics) */
+    int found = 0;
+    size_t ml = strlen(marker), bl = strlen(batch);
+    char idpat[160];
+    cx_fmt(idpat, sizeof idpat, "\tid=%s\t", batch);
+    const char *p = st, *end = st + stn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char line[1024];
+        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+        mm_copy(line, sizeof line, p, cp); line[cp] = 0;
+        const char *mp = strstr(line, marker);
+        if (mp && (mp == line || mp[-1] == '\t') && (mp[ml] == '\t' || mp[ml] == ' ')) {
+            const char *pp = strstr(mp, "pass="), *fp = strstr(mp, "fail=");
+            if (pp && fp) { *ap = atoi(pp + 5); *af = atoi(fp + 5); found = 1; }
+        } else if ((!strncmp(line, batch, bl) && line[bl] == '\t') || (!strncmp(line, "RAW\tBATCH_RUN\t", 14) && strstr(line, idpat))) {
+            const char *cp2 = strstr(line, "count=");
+            if (cp2) {
+                char tok[32]; size_t k = 0;
+                for (const char *q = cp2 + 6; *q && *q != '\t' && *q != ' ' && k + 1 < sizeof tok; q++) tok[k++] = *q;
+                tok[k] = 0;
+                int p2 = 0, f2 = 0;
+                if (ef_parse_pf(tok, &p2, &f2)) { *ap = p2; *af = f2; found = 1; }
+            }
+        }
+        (void)bl;
+        p = nl ? nl + 1 : end;
+    }
+    return found;
+}
+static int cmd_check_ef_counts(int argc, char **argv) {
+    const char *efp = 0, *batp = "tests/batches.tsv", *strictp = 0;
+    for (int i = 0; i < argc; i++) {
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--expected-fail")) efp = v;
+        else if (!strcmp(k, "--batches")) batp = v;
+        else if (!strcmp(k, "--strict")) strictp = v;
+        else usage(k);
+        i++;
+    }
+    if (!efp) usage("check-ef-counts needs --expected-fail FILE [--batches FILE] [--strict FILE]");
+    size_t efn = 0, regn = 0, stn = 0;
+    char *ef = cx_read(efp, &efn);
+    if (!ef) usage("expected-fail file unreadable");
+    char *reg = cx_read(batp, &regn);
+    if (!reg) { free(ef); usage("batches file unreadable"); }
+    char *st = 0;
+    if (strictp) {
+        st = cx_read(strictp, &stn);
+        if (!st) { free(ef); free(reg); usage("strict file unreadable"); }
+    }
+    int checked = 0, bad = 0;
+    char *p = ef, *end = ef + efn;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char line[1024];
+        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+        mm_copy(line, sizeof line, p, cp); line[cp] = 0;
+        if (cp > 0 && line[cp - 1] == '\r') line[--cp] = 0;
+        if (line[0] && line[0] != '#' && strncmp(line, "batch\t", 6) != 0) {
+            char *t1 = strchr(line, '\t');
+            if (t1) {
+                *t1 = 0;
+                char *exp = t1 + 1, *t2 = strchr(exp, '\t');
+                if (t2) *t2 = 0;
+                int wp = 0, wf = 0;
+                if (!ef_parse_pf(exp, &wp, &wf)) {
+                    sy_printf("EF_COUNT\tSKIP\t%s\tnon-pf=%s\n", line, exp);
+                } else {
+                    checked++;
+                    char src[256], marker[96];
+                    ef_make_marker(line, marker, sizeof marker);
+                    if (!ef_find_batch_src(reg, regn, line, src, sizeof src)) {
+                        sy_printf("EF_COUNT\tFAIL\t%s\tmissing-batch-in-registry\n", line);
+                        bad++;
+                    } else {
+                        size_t srcn = 0;
+                        char *srcb = cx_read(src, &srcn);
+                        if (!srcb) {
+                            sy_printf("EF_COUNT\tFAIL\t%s\tunreadable-source\tsrc=%s\n", line, src);
+                            bad++;
+                        } else if (!strstr(srcb, marker) || !strstr(srcb, "pass=") || !strstr(srcb, "fail=")) {
+                            sy_printf("EF_COUNT\tFAIL\t%s\tmissing-count-line-in-source\tsrc=%s\twant=%s\n", line, src, marker);
+                            bad++;
+                            free(srcb);
+                        } else {
+                            free(srcb);
+                            if (st) {
+                                int ap = -1, af = -1;
+                                if (!ef_find_strict_pf(st, stn, line, marker, &ap, &af)) {
+                                    sy_printf("EF_COUNT\tFAIL\t%s\tmissing-count-in-strict\twant=%d/%d\n", line, wp, wf);
+                                    bad++;
+                                } else if (ap != wp || af != wf) {
+                                    sy_printf("EF_COUNT\tFAIL\t%s\tcount-mismatch\twant=%d/%d\tgot=%d/%d\n", line, wp, wf, ap, af);
+                                    bad++;
+                                } else {
+                                    sy_printf("EF_COUNT\tPASS\t%s\tmarker=%s\texpected=%d/%d\tsrc=%s\n", line, marker, wp, wf, src);
+                                }
+                            } else {
+                                sy_printf("EF_COUNT\tPASS\t%s\tmarker=%s\texpected=%d/%d\tsrc=%s\n", line, marker, wp, wf, src);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(ef); free(reg); if (st) free(st);
+    sy_printf("EF_COUNT_SUMMARY\tchecked=%d\tfailed=%d\n", checked, bad);
+    return bad ? 1 : 0;
+}
+
+/* ---- steps 0a (pack) & 0b (warm): split out of prep so prep never exceeds 55 s ---- */
+static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
+    char *pk = input_value("pack"), *pklog = input_value("pack-log"), *wm = input_value("warm");
+    char *pack_dst = cat2(state, "pack"), *warm_dst = cat2(state, "warm");
+    char *cand_path = cat2(pk ? pk : pack_dst, "candidate.tsv");
+    char *m0a = cat2(state, "pack.done"), *m0b = cat2(state, "warm.done");
+    int wrote_resolved = 0;
+    *pack_dir_out = pk; *warm_file_out = wm;
+
+    /* 0a pack */
+    if (pk) {
+        sy_printf("CHAIN\tSKIP\t0a\tpack\tprovided-in-inputs\n");
+    } else {
+        char *slot = input_value("slot"), *sdir = input_value("source-dir"), *cout = input_value("chain-out");
+        char *snap = input_value("snapshot"), *frz = input_value("freeze"), *cx64 = input_value("cm-x64"), *ca64 = input_value("cm-arm64");
+        int has_pack_args = (slot && sdir && cout && snap && frz && cx64 && ca64);
+        if (planning) {
+            sy_printf("CHAIN\tCMD\t0a\tpack\tsh %s tools/release-run.cx -- --pack %s %s %s %s --chain-out %s --snap %s --commit %s --cm-sha %s %s\n",
+                      driver, cwd, slot ? slot : "<slot>", sdir ? sdir : "<source-dir>", pack_dst,
+                      cout ? cout : "<chain-out>", snap ? snap : "<snapshot>", frz ? frz : "<freeze>",
+                      cx64 ? cx64 : "<cm-x64>", ca64 ? ca64 : "<cm-arm64>");
+        } else if (has_pack_args) {
+            if (from > 0 && sy_exists(m0a) == 1) {
+                sy_printf("CHAIN\tSKIP\t0a\tpack\tdone\n");
+                *pack_dir_out = pack_dst; wrote_resolved = 1;
+            } else {
+                char *pv[] = {"sh", driver, "tools/release-run.cx", "--", "--pack", cwd, slot, sdir, pack_dst,
+                              "--chain-out", cout, "--snap", snap, "--commit", frz, "--cm-sha", cx64, ca64, 0};
+                sy_printf("CHAIN\tCMD\t0a\tpack\tsh %s tools/release-run.cx -- --pack %s %s %s %s ...\n", driver, cwd, slot, sdir, pack_dst);
+                np_result r = {0}; char why[256] = {0}; long t0 = sy_now_ms();
+                int bad = np_run(pv, cwd, 0, 55, &r, why, sizeof why);
+                sy_printf("CHAIN\tRUN\t0a\tpack\trc=%d\tms=%ld\n", r.rc, sy_now_ms() - t0);
+                if (bad || r.rc || r.residue || r.timed_out) {
+                    sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+                    sy_printf("CHAIN\tFAIL\t0a\tpack\trc=%d\t%s\n", r.rc, r.timed_out ? "timeout 55 s" : why);
+                    exit(1);
+                }
+                char *plog = cat2(pack_dst, "stage-a-pack.out");
+                if (r.out && cx_write(plog, r.out, r.outn)) usage("pack-log write");
+                if (cx_write(m0a, "pack\trc=0\n", 10)) usage("state write");
+                free(plog); np_free(&r);
+                *pack_dir_out = pack_dst; wrote_resolved = 1;
+            }
+        }
+        free(slot); free(sdir); free(cout); free(snap); free(frz); free(cx64); free(ca64);
+    }
+
+    /* 0b warm */
+    if (wm) {
+        sy_printf("CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n");
+    } else if (planning) {
+        sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, cand_path, layout, warm_dst);
+    } else if (*pack_dir_out && from <= 1) {
+        if (sy_exists(m0b) == 1) {
+            size_t mn = 0; char *mb = cx_read(m0b, &mn);
+            if (mb && mn > 0) {
+                char *nl = strchr(mb, '\n'); if (nl) *nl = 0;
+                *warm_file_out = strdup(mb);
+                wrote_resolved = 1;
+            }
+            free(mb);
+            sy_printf("CHAIN\tSKIP\t0b\twarm\tdone\n");
+        } else {
+            char *wcand = cat2(*pack_dir_out, "candidate.tsv");
+            char *wv[] = {"sh", driver, "tools/release-exec.cx", "--", "--warm", wcand, "--layout", (char *)layout, "--out", warm_dst, 0};
+            sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, wcand, layout, warm_dst);
+            np_result r = {0}; char why[256] = {0}; long t0 = sy_now_ms();
+            int bad = np_run(wv, cwd, 0, 55, &r, why, sizeof why);
+            sy_printf("CHAIN\tRUN\t0b\twarm\trc=%d\tms=%ld\n", r.rc, sy_now_ms() - t0);
+            const char *kp = r.out ? strstr(r.out, "WARM\tRESULT\tREADY\tkey=") : 0;
+            if (bad || r.rc || r.residue || r.timed_out || !kp) {
+                sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+                sy_printf("CHAIN\tFAIL\t0b\twarm\trc=%d\t%s\n", r.rc, r.timed_out ? "timeout 55 s" : (kp ? why : "missing WARM READY key"));
+                free(wcand); np_free(&r);
+                exit(1);
+            }
+            char key[80]; size_t kl = 0;
+            for (const char *q = kp + 22; *q && *q != '\t' && *q != '\n' && kl + 1 < sizeof key; q++) key[kl++] = *q;
+            key[kl] = 0;
+            char wleaf[128]; cx_fmt(wleaf, sizeof wleaf, "warm-%s.tsv", key);
+            char *wfull = cat2(warm_dst, wleaf);
+            char mrec[4500]; cx_fmt(mrec, sizeof mrec, "%s\n", wfull);
+            if (cx_write(m0b, mrec, strlen(mrec))) usage("state write");
+            *warm_file_out = wfull; wrote_resolved = 1;
+            free(wcand); np_free(&r);
+        }
+    }
+
+    const char *res_inputs = inputs;
+    if (!planning && wrote_resolved) {
+        size_t in_n = 0; char *in_b = cx_read(inputs, &in_n);
+        if (!in_b) usage("inputs unreadable");
+        char *rf = cat2(state, "inputs-resolved.tsv");
+        char extra[4096]; size_t en = 0; extra[0] = 0;
+        if (!pk && *pack_dir_out) {
+            char *plog = pklog ? pklog : cat2(*pack_dir_out, "stage-a-pack.out");
+            cx_fmt(extra + en, sizeof extra - en, "pack\t%s\npack-log\t%s\n", *pack_dir_out, plog);
+            en = strlen(extra);
+            if (!pklog) free(plog);
+        }
+        if (!wm && *warm_file_out) {
+            cx_fmt(extra + en, sizeof extra - en, "warm\t%s\n", *warm_file_out);
+            en = strlen(extra);
+        }
+        size_t tn = in_n + 1 + en;
+        char *buf = malloc(tn + 1);
+        if (!buf) usage("oom");
+        mm_copy(buf, tn + 1, in_b, in_n);
+        size_t pos = in_n;
+        if (pos > 0 && buf[pos - 1] != '\n') buf[pos++] = '\n';
+        mm_copy(buf + pos, tn + 1 - pos, extra, en); pos += en;
+        buf[pos] = 0;
+        if (sy_write_atomic(rf, buf, pos, 0644) != 0) usage("inputs-resolved write");
+        free(buf); free(in_b);
+        res_inputs = rf;
+    }
+    free(pklog); free(cand_path); free(m0a); free(m0b);
+    return res_inputs;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
-    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci");
+    if (argc >= 2 && !strcmp(argv[1], "check-ef-counts")) return cmd_check_ef_counts(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts");
     planning = !strcmp(argv[1], "plan");
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
@@ -376,7 +660,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(k, "--state")) state = v;
         else if (!strcmp(k, "--layout")) layout = v;
         else if (!strcmp(k, "--decisions")) decisions = v;
-        else if (!strcmp(k, "--from")) { from = atoi(v); if (from < 1 || from > 5) usage("--from 1..5"); }
+        else if (!strcmp(k, "--from")) { from = atoi(v); if (from < 0 || from > 5) usage("--from 0..5"); }
         else usage(k);
         i++;
     }
@@ -386,12 +670,16 @@ int main(int argc, char **argv) {
     if (!planning && sy_mkdir_all(state, 0700)) usage("state dir");
     char *prep = cat2(state, "prep"), *stage = cat2(state, "stage"), strict[300];
     if (cx_fmt(strict, sizeof strict, "release/evidence/v%s-strict-%s.tsv", version, date)) usage("strict path");
-    char *s1[] = {"sh", driver, "tools/release-flow.cx", "--", "prep", "--inputs", (char *)inputs, "--out", prep, 0, 0, 0};
-    char *s2[] = {"sh", driver, "tools/release-flow.cx", "--", "stage-a", "--inputs", (char *)inputs, "--prep", prep, "--out", stage, 0, 0, 0};
+    check_preconditions();
+    if (planning)
+        sy_printf("CHAIN\tPRECHECK\tef-counts\tsh %s tools/release-chain.cx -- check-ef-counts --expected-fail release/evidence/%s/expected-fail.tsv --strict %s\n", driver, version, strict);
+    char *pk_dir = 0, *wm_file = 0;
+    const char *eff_inputs = run_pre_steps(&pk_dir, &wm_file);
+    char *s1[] = {"sh", driver, "tools/release-flow.cx", "--", "prep", "--inputs", (char *)eff_inputs, "--out", prep, 0, 0, 0};
+    char *s2[] = {"sh", driver, "tools/release-flow.cx", "--", "stage-a", "--inputs", (char *)eff_inputs, "--prep", prep, "--out", stage, 0, 0, 0};
     if (decisions) { s1[9] = "--decisions"; s1[10] = (char *)decisions; s2[11] = "--decisions"; s2[12] = (char *)decisions; }
     char *s4[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "dry"), "--dry", 0};
     char *s5[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "exec"), 0};
-    check_preconditions();
     step(1, s1); step(2, s2); stage_commit(); step(4, s4);
     /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
     show(5, s5);
