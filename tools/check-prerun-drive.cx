@@ -259,6 +259,59 @@ int main(void) {
         free(sb);
     }
 
+    /* (7) prebuild-self window: invokes devsvc prebuild-self, and --keep-going writes done marker and continues past rc=2 instead of stopping */
+    {
+        char pbdir[CPD_PW], pbroot[CPD_PW], pbcom[CPD_PW], pbids[CPD_PW], out2[CPD_OUT];
+        if (cx_fmt(pbdir, sizeof pbdir, "%s/pb-keep", work) ||
+            cx_fmt(pbroot, sizeof pbroot, "%s/pbroot", work) ||
+            cx_fmt(pbcom, sizeof pbcom, "%s/pbroot/unisacc.com", work) ||
+            cx_fmt(pbids, sizeof pbids, "%s/pbids.txt", work)) return 2;
+        if (mkdir(pbroot, 0700) != 0 && errno != EEXIST) return 2;
+        if (cx_write(pbids, "alpha\nbeta\nreal-commit\n", 23)) return 2;
+        const char *pb_launcher =
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *\"tools/devsvc.cx -- prebuild-self\"*) exit 2 ;;\n"
+            "  *\"tools/check-real-commit.cx\"*) exit 99 ;;\n"
+            "  *\"tools/dvqualify.cx\"*)\n"
+            "    out=''; ids=''\n"
+            "    while [ $# -gt 0 ]; do\n"
+            "      if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n"
+            "      if [ \"$1\" = \"--ids\" ]; then ids=\"$2\"; shift 2; continue; fi\n"
+            "      shift\n"
+            "    done\n"
+            "    echo \"# devsvc qualify\" > \"$out\"\n"
+            "    printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "    for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "      printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "    done\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "exit 1\n";
+        if (cx_write(pbcom, pb_launcher, strlen(pb_launcher))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, pbids, pbdir)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        /* Without --keep-going: stops at W0001 prebuild-self rc=2 (proving tools/devsvc.cx -- prebuild-self was called, not check-real-commit which exits 99) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --candidate '%s' --out '%s'",
+            cwd, cwd, pbroot, pbcom, pbdir)) return 2;
+        int rc_stop = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        int ok_stop = (rc_stop == 1 && ckk_has(out, CPD_OUT, "PRERUN_STOP\twindow=W0001\tphase=prebuild-self\trc=2"));
+        /* With --keep-going (and --resume): writes done.W0001 marker, emits PRERUN_KEEP_GOING, and completes W0002 real-commit */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --candidate '%s' --out '%s' --resume --keep-going",
+            cwd, cwd, pbroot, pbcom, pbdir)) return 2;
+        int rc_kg = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        int rc_res = ckk_sh("check-prerun-drive", cmd, out2, sizeof out2);
+        ck(ok_stop && rc_kg == 0 && rc_res == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_KEEP_GOING\tbatch=prebuild-self\tretries=1\twindow=W0001\traw=prebuild-self rc=2") &&
+           ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=2\tskipped=1\t") &&
+           ckk_has(out2, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=0\tskipped=3\t"),
+           "prebuild-self-devsvc-and-keep-going: calls devsvc prebuild-self and under --keep-going writes done marker and continues past rc=2");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
