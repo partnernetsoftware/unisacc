@@ -1,0 +1,70 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="gpu">pending</pre>
+<script type="module">
+import {
+  BasicShadowMap, BoxGeometry, DirectionalLight, Mesh, MeshBasicMaterial, OrthographicCamera,
+  PlaneGeometry, Scene, ShadowMaterial, WebGLRenderer,
+} from "./three.module.js";
+import { createGpuSubmit } from "./gpu-host-abi.js";
+import { createGpuTargets } from "./gpu-target-abi.js";
+
+const options = { alpha: true, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false };
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 16;
+  const gl = canvas.getContext("webgl2", options);
+  if (!gl) throw new Error("WebGL2 unavailable");
+  return { canvas, gl };
+}
+function samples(gl) {
+  return [[8,8],[7,7],[6,8],[10,8],[1,1]].map(([x,y]) => {
+    const rgba = new Uint8Array(4);
+    gl.readPixels(x,y,1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
+    return rgba[3];
+  });
+}
+const output = document.querySelector("#gpu");
+try {
+  const actual = context();
+  let exports;
+  const submit = createGpuSubmit(actual.gl, () => exports.memory, () => 1, createGpuTargets(actual.gl));
+  const bytes = await fetch("./probe.wasm").then(response => response.arrayBuffer());
+  ({ instance: { exports } } = await WebAssembly.instantiate(bytes, { uxe_gpu_v1: { host_gpu_submit: submit } }));
+  const status = Number(exports.uxe_gpu_probe(location.search === "?shadow-map-mutate" ? 1n : 0n));
+  const reference = context();
+  const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl, ...options });
+  renderer.setSize(16,16,false);
+  renderer.setClearColor(0,0);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = BasicShadowMap;
+  const receiver = new Mesh(new PlaneGeometry(2,2),new ShadowMaterial({ opacity: 0.5 }));
+  receiver.receiveShadow = true;
+  const blocker = new Mesh(new BoxGeometry(0.4,0.4,0.2),new MeshBasicMaterial({ colorWrite:false,depthWrite:false }));
+  blocker.position.z = 0.3;
+  blocker.castShadow = true;
+  const light = new DirectionalLight();
+  light.position.z = 2;
+  light.position.y = 0;
+  light.castShadow = true;
+  light.shadow.mapSize.set(16,16);
+  const shadow = light.shadow.camera;
+  shadow.left = shadow.bottom = -1;
+  shadow.right = shadow.top = 1;
+  shadow.near = 0.1;
+  shadow.far = 4;
+  shadow.updateProjectionMatrix();
+  const scene = new Scene();
+  scene.add(receiver,blocker,light);
+  const camera = new OrthographicCamera(-1,1,1,-1,0,2);
+  camera.position.z = 1;
+  renderer.render(scene,camera);
+  output.textContent = JSON.stringify([status,...samples(actual.gl),...samples(reference.gl)]);
+  receiver.geometry.dispose();
+  receiver.material.dispose();
+  blocker.geometry.dispose();
+  blocker.material.dispose();
+  light.shadow.dispose();
+  renderer.dispose();
+} catch (error) { output.textContent = String(error); }
+</script>
