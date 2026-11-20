@@ -226,7 +226,7 @@
 - Mesh 场景拾取 | G-ray 递归、层、近远、面索引、UV 和排序 | 已有静态三角面拾取。
 - InstancedMesh 与 BatchedMesh 拾取 | G-ray 实例及批次 ID、合成矩阵 | Mesh 拾取、M7。
 - ~~Points 拾取 | G-ray 局部阈值、等距稳定排序、索引、活动范围与层 | 相机射线和 M7 Points。~~ 13 项通过，阈值篡改后命中从 3 降到 1，网格缓冲旧门九项通过。
-- Line、LineSegments、LineLoop 拾取 | G-ray 距离、闭环、断点与阈值 | 相机射线与 M7 线族。
+- ~~Line、LineSegments、LineLoop 拾取 | G-ray 距离、绘制范围、断点与阈值 | 相机射线与 M7 线族。~~ 11 项通过，阈值篡改从两个命中变为零。LineLoop 的闭合边只用于绘制，r160 拾取沿用 Line 开边。Points 回归 13 项通过。
 - Sprite 拾取 | G-ray 面向相机、旋转和 UV | 相机射线和 M7 Sprite。
 - LOD 拾取 | G-ray 当前层级及阈值切换 | Mesh 拾取与 M7 LOD。
 - SkinnedMesh 拾取 | G-ray 骨骼变形后命中和面索引 | Mesh 拾取与 M7 蒙皮。

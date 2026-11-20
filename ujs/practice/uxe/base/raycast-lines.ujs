@@ -1,0 +1,70 @@
+struct RayLineHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  index: u32;
+}
+
+// Modes 0, 1 and 2 match Line, LineSegments and LineLoop in r160.
+// LineLoop inherits Line.raycast, so its closing edge is render-only.
+native function Raycaster_intersectLinesBuffer(state:i64,query:i64,out:i64,capacity:i64,work:i64,space:i64,mode:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(query,RayPointsBuffer.size) ||
+     !raycaster_span(work,space) || capacity<0 || mode<0 || mode>2) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(query+RayPointsBuffer.layerMask))==0) { return 0; }
+  let stop=ray_vertex_range_end(query);
+  if(stop<0) { return stop; }
+  let start=ux_u32(query+RayPointsBuffer.drawStart);
+  if(stop-start<2) { return 0; }
+  let step=1;
+  let max_hits=stop-start-1;
+  if(mode==1) {
+    step=2;
+    max_hits=(stop-start)/2;
+    stop=start+max_hits*2;
+  }
+  let bytes=max_hits*RayLineHit.size;
+  if(capacity<max_hits || space<144+bytes || !raycaster_span(out,bytes) ||
+     raycaster_overlap(out,bytes,work,space) ||
+     !ray_vertex_writable(out,bytes,state,query) || !ray_vertex_writable(work,space,state,query)) { return 0-1; }
+  let near=ux_f64(state+RaycasterState.near);
+  let far=ux_f64(state+RaycasterState.far);
+  let threshold=ux_f64(state+RaycasterState.lineThreshold);
+  let scale=ux_u32(query+RayPointsBuffer.scale);
+  let average=(ux_f64(scale)+ux_f64(scale+8)+ux_f64(scale+16))/3.0;
+  if(near<0.0 || near-near!=0.0 || far!=far || far<near || threshold<0.0 ||
+     threshold-threshold!=0.0 || average==0.0 || average-average!=0.0) { return 0-1; }
+  if(!ray_vertex_indices_valid(query,start,stop)) { return 0-2; }
+  let world=ux_u32(query+RayPointsBuffer.world);
+  let local=ray_local_affine(work,state,world);
+  if(local<0) { return 0-1; }
+  let positions=ux_u32(query+RayPointsBuffer.positions);
+  let indices=ux_u32(query+RayPointsBuffer.indices);
+  let width=ux_u32(query+RayPointsBuffer.indexBytes);
+  let stride=ux_u32(query+RayPointsBuffer.stride);
+  let limit=threshold/average;
+  let squared=limit*limit;
+  let count=0;
+  let i=start;
+  while(i+1<stop) {
+    let from=positions+ray_vertex_index(indices,width,i)*stride;
+    let to=positions+ray_vertex_index(indices,width,i+1)*stride;
+    let a=Vector3_set(work+48,ux_f32(from),ux_f32(from+4),ux_f32(from+8));
+    let b=Vector3_set(work+72,ux_f32(to),ux_f32(to+4),ux_f32(to+8));
+    let difference=Ray_distanceSqToSegment(local,a,b,work+96,work+120);
+    if(difference<=squared) {
+      let on_ray=Vector3_applyMatrix4(work+96,world);
+      let distance=Vector3_distanceTo(on_ray,state);
+      if(distance>=near && distance<=far) {
+        let on_segment=Vector3_applyMatrix4(work+120,world);
+        let row=out+count*RayLineHit.size;
+        let point=uxe_copy_record(row,on_segment,24);
+        let d=ux_f64_put(row+RayLineHit.distance,distance);
+        let index=ux_u32_put(row+RayLineHit.index,i);
+        count=count+1;
+      }
+    }
+    i=i+step;
+  }
+  return ray_sort_hits(out,work+144,count,RayLineHit.size,RayLineHit.distance);
+}
