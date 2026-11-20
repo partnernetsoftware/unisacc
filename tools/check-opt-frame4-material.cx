@@ -1,0 +1,141 @@
+/* tools/check-opt-frame4-material.cx -- regression checks for tools/opt-frame4-material.cx.
+ * Covers:
+ *   (1) gate READY on all 6 valid materials + --candidate match;
+ *   (2) gate REFUSE candidate-mismatch (rc=2) when --candidate bytes differ;
+ *   (3) gate UNKNOWN no-receipt (rc=3) when receipt absent;
+ *   (4) gate UNKNOWN material-absent (rc=3) when one material file is missing;
+ *   (5) gate REFUSE material-identity-changed (rc=2) when one material is tampered;
+ *   (6) prepare refuses existing output dir (rc=2) without overwriting.
+ * Self-contained and fast (<5s even cold), passes single-commit shallow layout selftest gate.
+ * Ends: CHECK_OPT_FRAME4_MATERIAL<TAB>pass=N<TAB>fail=M. */
+#pragma unisa use sys.fs
+#pragma unisa use fsx.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int pass_n, fail_n;
+static char root_dir[4096];
+static const char *sdir;
+
+static void ck(int ok, const char *what) {
+    if (ok) pass_n++;
+    else { fail_n++; printf("FAIL\t%s\n", what); }
+}
+
+static void die(const char *s) {
+    printf("CHECK_OPT_FRAME4_MATERIAL\tREFUSE\t%s\n", s);
+    exit(2);
+}
+
+static void put(const char *leaf, const char *s, char out[4096]) {
+    if (cx_path_join(out, 4096, sdir, leaf)) die("path");
+    sy_unlink(out);
+    if (sy_write_file(out, s, tx_len(s, 1 << 20), 0600)) die("write");
+}
+
+static void sha_of(const char *p, char h[65]) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(p, &b, &n, 1 << 20) || sy_sha256_any_hex(b, n, h)) die("sha");
+    mm_free(b);
+}
+
+static int run_tool(char **args, np_result *r) {
+    char launcher[4096], why[256], *v[16]; int n = 0;
+    if (cx_path_join(launcher, sizeof launcher, root_dir, "unisacc.com")) die("path");
+    v[n++] = "sh"; v[n++] = launcher; v[n++] = "tools/opt-frame4-material.cx"; v[n++] = "--";
+    for (int i = 0; args[i] && n < 15; i++) v[n++] = args[i];
+    v[n] = 0;
+    memset(r, 0, sizeof *r);
+    if (np_run(v, root_dir, 0, 30, r, why, sizeof why) || r->residue) die("transport");
+    return r->rc;
+}
+
+static int has(np_result *r, const char *s) {
+    long n = tx_len(s, 256);
+    return (r->out && tx_find(r->out, (long)r->outn, s, n) >= 0) ||
+           (r->err && tx_find(r->err, (long)r->errn, s, n) >= 0);
+}
+
+static void write_rcpt(const char *sub, const char *body, char out[4096]) {
+    char p[4096];
+    if (cx_path_join(out, 4096, sdir, sub)) die("path");
+    sy_mkdir(out, 0700);
+    if (cx_path_join(p, sizeof p, out, "materials.tsv")) die("path");
+    sy_unlink(p);
+    if (sy_write_file(p, body, tx_len(body, 1 << 16), 0600)) die("rcpt write");
+}
+
+int main(void) {
+    char cand[4096], other[4096], f_run[4096], f_n1[4096], f_t1[4096], f_n2[4096], f_t2[4096];
+    char hc[65], hrun[65], hn1[65], ht1[65], hn2[65], ht2[65];
+    char body[32768], sub[4096];
+    np_result r;
+    int scratch;
+    if (sy_realpath(".", root_dir, sizeof root_dir) < 0) die("root");
+    if (fsx_scratch(&scratch, "check-of4") || !(sdir = fsx_scratch_dir(scratch))) die("scratch");
+
+    put("cand.bin", "cand-v1\n", cand);
+    put("other.bin", "cand-v2\n", other);
+    put("run.bin", "runner\n", f_run);
+    put("o1.net", "o1net\n", f_n1);
+    put("o1.tbl", "o1tbl\n", f_t1);
+    put("o2.net", "o2net\n", f_n2);
+    put("o2.tbl", "o2tbl\n", f_t2);
+    sha_of(cand, hc); sha_of(f_run, hrun); sha_of(f_n1, hn1);
+    sha_of(f_t1, ht1); sha_of(f_n2, hn2); sha_of(f_t2, ht2);
+
+    /* (1) All 6 materials valid + matching --candidate -> READY */
+    cx_fmt(body, sizeof body,
+        "opt-frame4-material-v1\nstatus\tPREPARED-no-test-result\ncandidate-sha\t%s\n"
+        "o1-run\t%s\t%s\no1-net\t%s\t%s\no1-table\t%s\t%s\n"
+        "o2-run\t%s\t%s\no2-net\t%s\t%s\no2-table\t%s\t%s\n",
+        hc, f_run, hrun, f_n1, hn1, f_t1, ht1, f_run, hrun, f_n2, hn2, f_t2, ht2);
+    write_rcpt("ok", body, sub);
+    { char *g[] = {"gate", sub, "--candidate", cand, 0}; int rc = run_tool(g, &r);
+      ck(rc == 0 && has(&r, "OPT_FRAME4_MATERIAL\tREADY\to1-run=") && has(&r, "\to2-table="), "six-materials-ready");
+      np_free(&r); }
+
+    /* (2) Candidate bytes differ -> REFUSE candidate-mismatch rc=2 */
+    { char *g[] = {"gate", sub, "--candidate", other, 0}; int rc = run_tool(g, &r);
+      ck(rc == 2 && has(&r, "reason=candidate-mismatch"), "candidate-mismatch-refused");
+      np_free(&r); }
+
+    /* (3) Absent receipt -> UNKNOWN no-receipt rc=3 */
+    cx_path_join(sub, sizeof sub, sdir, "no-rcpt");
+    { char *g[] = {"gate", sub, 0}; int rc = run_tool(g, &r);
+      ck(rc == 3 && has(&r, "reason=no-receipt"), "no-receipt-unknown");
+      np_free(&r); }
+
+    /* (4) Missing material file -> UNKNOWN material-absent rc=3 */
+    cx_fmt(body, sizeof body,
+        "opt-frame4-material-v1\nstatus\tPREPARED-no-test-result\ncandidate-sha\t%s\n"
+        "o1-run\t%s\t%s\no1-net\t%s/absent.net\t%s\no1-table\t%s\t%s\n"
+        "o2-run\t%s\t%s\no2-net\t%s\t%s\no2-table\t%s\t%s\n",
+        hc, f_run, hrun, sdir, hn1, f_t1, ht1, f_run, hrun, f_n2, hn2, f_t2, ht2);
+    write_rcpt("missing", body, sub);
+    { char *g[] = {"gate", sub, 0}; int rc = run_tool(g, &r);
+      ck(rc == 3 && has(&r, "reason=material-absent"), "missing-material-unknown");
+      np_free(&r); }
+
+    /* (5) Tampered material digest -> REFUSE material-identity-changed rc=2 */
+    cx_fmt(body, sizeof body,
+        "opt-frame4-material-v1\nstatus\tPREPARED-no-test-result\ncandidate-sha\t%s\n"
+        "o1-run\t%s\t%s\no1-net\t%s\t%s\no1-table\t%s\t%s\n"
+        "o2-run\t%s\t%s\no2-net\t%s\t%s\no2-table\t%s\t%s\n",
+        hc, f_run, hrun, f_n1, ht2, f_t1, ht1, f_run, hrun, f_n2, hn2, f_t2, ht2);
+    write_rcpt("tampered", body, sub);
+    { char *g[] = {"gate", sub, 0}; int rc = run_tool(g, &r);
+      ck(rc == 2 && has(&r, "reason=material-identity-changed"), "tampered-material-refused");
+      np_free(&r); }
+
+    /* (6) prepare refuses existing output directory (rc=2) */
+    { char *p[] = {"prepare", root_dir, cand, sub, 0}; int rc = run_tool(p, &r);
+      ck(rc == 2 && has(&r, "reason=new-material-directory-required"), "prepare-existing-dir-refused");
+      np_free(&r); }
+
+    printf("CHECK_OPT_FRAME4_MATERIAL\tpass=%d\tfail=%d\n", pass_n, fail_n);
+    return fail_n ? 1 : 0;
+}

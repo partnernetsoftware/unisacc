@@ -64,10 +64,8 @@
  * default 1) from the machine-wide slot pool; a ready node waits (dependency order and results
  * unchanged), and one still waiting at the run deadline is skipped with note
  * `REFUSE admission-timeout waited_ms=MS`.  fl_sum.peak_tokens / admit_wait_ms report it.
- * Load gate: while load1 is above fa_load_max() (config row admit_load_max, default 10) no new
- * exec node starts; the hold is bounded per run by fa_load_wait_ms() (row admit_load_wait_ms,
- * default 5000), after which starts go on and fl_sum.load_timeout = 1.  Each decision is an
- * `ADMIT defer|go|timeout load1=L max=M waited_ms=W` line in events.tsv (no seq).
+ * No load gate: load1 never holds, defers or refuses a start (retired 2026-11-20 by the owner);
+ * jobs (--par) and the token pool are the fixed bounds.  fl_sum.load_defer / load_timeout stay 0.
  * DEVSVC_ADMISSION=off turns it off (checks only).
  * CLI: tools/flowrun.cx.  Check: tools/check-flowrun.cx. */
 #pragma unisa module flowexec
@@ -101,7 +99,7 @@ typedef struct fl_node {
 /* par: `par N` line (1..32), 0 = not declared; callers require it or an explicit --par */
 typedef struct fl_flow { fl_node *n; int count; char *text; int txn, txn_consumers, par; } fl_flow;
 /* txn: 0 not a transaction, 1 committed, 2 nothing written (aborted or rolled back) */
-/* load_defer: times the load gate held starts back; load_timeout: 1 when its wait budget ran out and starts were let through */
+/* load_defer, load_timeout: always 0 since the load gate was retired 2026-11-20 (kept for receipt layout) */
 typedef struct fl_sum { int ok, fail, timeout, skip; long wall_ms; int max_running; int txn; int peak_tokens; long admit_wait_ms; int load_defer, load_timeout; } fl_sum;
 
 /* Diagnostic text into DST: what does not fit is cut and the cut is marked with "..." (a message,
@@ -291,16 +289,6 @@ static const char *fl_state_name[] = {"pending", "start", "ok", "fail", "timeout
 static void fl_evt(fl_ctx *x, fl_node *nd, int st, long ms, int rc, const char *sum) {
     char line[1024]; int n;
     n = snprintf(line, sizeof line, "EVT\t%d\t%s\t%s\t%ld\t%d\t%.600s\n", ++x->seq, nd->id, fl_state_name[st], ms, rc, sum);
-    if (n >= (int)sizeof line) n = (int)sizeof line - 1;
-    if (x->evfd >= 0) sy_write_all(x->evfd, line, n);
-    if (x->echo) { fwrite(line, 1, (size_t)n, stdout); fflush(stdout); }
-}
-
-/* load gate decision line in events.tsv: ADMIT<TAB>defer|go|timeout<TAB>load1=L<TAB>max=M<TAB>waited_ms=W
-   (no seq: EVT seq stays contiguous) */
-static void fl_admit(fl_ctx *x, const char *what, double l1, double lm, long waited) {
-    char line[200]; int n = snprintf(line, sizeof line, "ADMIT\t%s\tload1=%.2f\tmax=%.2f\twaited_ms=%ld\n", what, l1, lm, waited);
-    if (n < 0) return;
     if (n >= (int)sizeof line) n = (int)sizeof line - 1;
     if (x->evfd >= 0) sy_write_all(x->evfd, line, n);
     if (x->echo) { fwrite(line, 1, (size_t)n, stdout); fflush(stdout); }
@@ -517,7 +505,6 @@ int fl_was_cancelled(void) { return fl_cancelled; }
 
 int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo, fl_sum *sum) {
     fl_ctx x; char p[2600]; int i, j, running = 0, left = f->count, r, held = 0, adm = fa_enabled(); long end;
-    double lmax = 10, l1 = 0; long lwait = 0, load_t0 = 0, load_waited = 0;   /* load gate (cxlib.flowadmit fa_load_max) */
     if (jobs < 1) jobs = 1;
     if (jobs > FL_MAX_JOBS) jobs = FL_MAX_JOBS;
     if (deadline_ms < 1) deadline_ms = FL_RUN_MS;
@@ -532,11 +519,10 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
     if (x.evfd < 0) return x.evfd;
     sum->ok = sum->fail = sum->timeout = sum->skip = 0; sum->max_running = 0; sum->txn = 0;
     sum->peak_tokens = 0; sum->admit_wait_ms = 0; sum->load_defer = 0; sum->load_timeout = 0;
-    if (adm) lmax = fa_load_max(), lwait = fa_load_wait_ms();
     for (i = 0; i < f->count; i++) f->n[i].nslots = 0, f->n[i].wait_t0 = 0;
     if (f->txn) ff_txn_begin();
     while (left > 0) {
-        int progress = 0, waiting = 0, gate = -1; long now = sy_now_ms(); int late = now >= end;
+        int progress = 0, waiting = 0; long now = sy_now_ms(); int late = now >= end;
         if (!fl_cancelled && fl_cancel_fn && fl_cancel_fn()) fl_cancelled = 1;
         if (fl_cancelled) late = 1, end = now;
         /* reap, and enforce node and run bounds */
@@ -588,23 +574,6 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
             }
             if (adm && !strcmp(nd->op, "exec")) {   /* machine admission: w=N tokens or wait */
                 char wb[16]; long w = fl_arg(nd->args, "w", 0, wb, sizeof wb) > 0 ? atol(wb) : 1;
-                if (gate < 0) {   /* load gate, once per pass: hold new starts while load1 > max, bounded by lwait per run */
-                    gate = 0;
-                    if (!sum->load_timeout) {
-                        l1 = fa_load();
-                        if (l1 > lmax) {
-                            if (!load_t0) { load_t0 = now; sum->load_defer++; fl_admit(&x, "defer", l1, lmax, load_waited); }
-                            if (load_waited + (now - load_t0) >= lwait) {
-                                load_waited += now - load_t0; sum->admit_wait_ms += now - load_t0; load_t0 = 0;
-                                sum->load_timeout = 1; fl_admit(&x, "timeout", l1, lmax, load_waited);
-                            } else gate = 1;
-                        } else if (load_t0) {
-                            load_waited += now - load_t0; sum->admit_wait_ms += now - load_t0; load_t0 = 0;
-                            fl_admit(&x, "go", l1, lmax, load_waited);
-                        }
-                    }
-                }
-                if (gate) { waiting = 1; continue; }
                 nd->nslots = fa_acquire(w < 1 ? 1 : (int)w, nd->slots, 32);
                 if (!nd->nslots) { if (!nd->wait_t0) nd->wait_t0 = now; waiting = 1; continue; }
                 if (nd->wait_t0) sum->admit_wait_ms += now - nd->wait_t0;

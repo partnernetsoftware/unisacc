@@ -1,0 +1,172 @@
+/* tools/opt-frame4-material.cx -- material producer for opt-frame4-o1-* and opt-frame4-o2-* batches.
+ *   prepare ROOT CANDIDATE_APE ABS_OUT
+ *   gate    ABS_OUT [--candidate CANDIDATE_APE]
+ * Compiles seed/gen.c, seed/tbl.c, seed/net.c and the archived single-model runner
+ * (archive/reference-c/exec/c/run.c + tools/ri-shim/cxsf_close_fail.c + cx/compiler/codecgate.cx)
+ * using CANDIDATE_APE itself (no host cc dependency), builds o1.tbl/o1.net and o2.tbl/o2.net,
+ * and writes a read-only materials.tsv receipt (status=PREPARED-no-test-result).
+ * gate re-hashes all six materials on every call; missing -> UNKNOWN rc 3; tampered/mismatch -> REFUSE rc 2. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static const char *of4_names[6] = {"o1-run", "o1-net", "o1-table", "o2-run", "o2-net", "o2-table"};
+
+static int of4_refuse(const char *why) {
+    fprintf(stderr, "OPT_FRAME4_MATERIAL\tREFUSE\treason=%s\n", why);
+    return 2;
+}
+
+static int of4_unknown(const char *why) {
+    printf("OPT_FRAME4_MATERIAL\tUNKNOWN\t%s\n", why);
+    return 3;
+}
+
+static int of4_sha(const char *p, char h[65]) {
+    sy_stat_t st; unsigned char *b = 0; int64_t n = 0;
+    if (sy_lstat(p, &st) || st.kind != 'f' || st.size <= 0 || st.size > 134217728) return -1;
+    if (sy_read_file(p, &b, &n, st.size)) return -1;
+    int bad = (n != st.size) || sy_sha256_any_hex(b, n, h);
+    mm_free(b);
+    return bad ? -1 : 0;
+}
+
+static int of4_run_sh(const char *cwd, const char *cmd, int secs) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    char why[256];
+    np_result r = {0};
+    int tr = np_run(av, cwd, 0, secs, &r, why, sizeof why);
+    int rc = (tr || r.residue) ? 124 : r.rc;
+    if (rc != 0 && r.err && r.errn > 0) fwrite(r.err, 1, (size_t)(r.errn < 400 ? r.errn : 400), stderr);
+    np_free(&r);
+    return rc;
+}
+
+static int of4_prepare(int argc, char **argv) {
+    char root[4096], cand[4096], out[4096], recp[4400], cmd[8192];
+    char csha[65], rsha[65], n1sha[65], t1sha[65], n2sha[65], t2sha[65];
+    char prun[4400], pn1[4400], pt1[4400], pn2[4400], pt2[4400];
+    if (argc != 5 || argv[4][0] != '/') return of4_refuse("usage");
+    if (sy_realpath(argv[2], root, sizeof root) < 0 || sy_realpath(argv[3], cand, sizeof cand) < 0)
+        return of4_refuse("explicit-root-and-candidate");
+    if (of4_sha(cand, csha)) return of4_refuse("candidate-unreadable");
+    if (sy_mkdir(argv[4], 0700)) return of4_refuse("new-material-directory-required");
+    if (sy_realpath(argv[4], out, sizeof out) < 0) return of4_refuse("out-realpath");
+
+    /* Build gen/tbl/net/opt-run in parallel pairs using CANDIDATE_APE itself (zero host cc) */
+    if (cx_fmt(cmd, sizeof cmd,
+        "(sh '%s' -I '%s/exec/c' -I '%s/seed' '%s/seed/gen.c' -o '%s/gen.bin' & p1=$!; "
+        "sh '%s' -I '%s/seed' '%s/seed/tbl.c' -o '%s/tbl.bin' & p2=$!; "
+        "sh '%s' -I '%s/exec/c' '%s/seed/net.c' -o '%s/net.bin' & p3=$!; "
+        "sh '%s' -I '%s/archive/reference-c/exec/c' -I '%s/exec/c' '%s/archive/reference-c/exec/c/run.c' "
+        "'%s/tools/ri-shim/cxsf_close_fail.c' '%s/cx/compiler/codecgate.cx' -o '%s/opt-run.bin' & p4=$!; "
+        "wait $p1 && wait $p2 && wait $p3 && wait $p4)",
+        cand, root, root, root, out,
+        cand, root, root, out,
+        cand, root, root, out,
+        cand, root, root, root, root, root, out)) return of4_refuse("compile-cmd-bound");
+    if (of4_run_sh(root, cmd, 45) != 0) return of4_refuse("compile-builders-failed");
+
+    /* Construct o1.tbl/o1.net and o2.tbl/o2.net in parallel, then remove scratch builders & json */
+    if (cx_fmt(cmd, sizeof cmd,
+        "(('%s/gen.bin' opt '%s/o1.json' && '%s/tbl.bin' '%s/o1.json' '%s/o1.tbl' && '%s/net.bin' '%s/o1.tbl' '%s/o1.net') & p1=$!; "
+        "('%s/gen.bin' opt '%s/o2.json' --o2 && '%s/tbl.bin' '%s/o2.json' '%s/o2.tbl' && '%s/net.bin' '%s/o2.tbl' '%s/o2.net') & p2=$!; "
+        "wait $p1 && wait $p2) && rm -f '%s/gen.bin' '%s/tbl.bin' '%s/net.bin' '%s/o1.json' '%s/o2.json'",
+        out, out, out, out, out, out, out, out,
+        out, out, out, out, out, out, out, out,
+        out, out, out, out, out)) return of4_refuse("build-cmd-bound");
+    if (of4_run_sh(root, cmd, 35) != 0) return of4_refuse("construct-opt-models-failed");
+
+    if (cx_path_join(prun, sizeof prun, out, "opt-run.bin") ||
+        cx_path_join(pn1, sizeof pn1, out, "o1.net") ||
+        cx_path_join(pt1, sizeof pt1, out, "o1.tbl") ||
+        cx_path_join(pn2, sizeof pn2, out, "o2.net") ||
+        cx_path_join(pt2, sizeof pt2, out, "o2.tbl") ||
+        cx_path_join(recp, sizeof recp, out, "materials.tsv")) return of4_refuse("path-bound");
+    if (of4_sha(prun, rsha) || of4_sha(pn1, n1sha) || of4_sha(pt1, t1sha) ||
+        of4_sha(pn2, n2sha) || of4_sha(pt2, t2sha)) return of4_refuse("artifact-unreadable");
+
+    static char rec[32768];
+    if (cx_fmt(rec, sizeof rec,
+        "opt-frame4-material-v1\n"
+        "status\tPREPARED-no-test-result\n"
+        "scope\tunisacc-compiled-seed-and-archived-c-runner\n"
+        "candidate-sha\t%s\n"
+        "o1-run\t%s\t%s\n"
+        "o1-net\t%s\t%s\n"
+        "o1-table\t%s\t%s\n"
+        "o2-run\t%s\t%s\n"
+        "o2-net\t%s\t%s\n"
+        "o2-table\t%s\t%s\n",
+        csha, prun, rsha, pn1, n1sha, pt1, t1sha, prun, rsha, pn2, n2sha, pt2, t2sha))
+        return of4_refuse("receipt-bound");
+    if (sy_write_file(recp, rec, (int64_t)strlen(rec), 0400)) return of4_refuse("receipt-write");
+    printf("OPT_FRAME4_MATERIAL\tPREPARED\tno-test-result\treceipt=%s\n", recp);
+    return 0;
+}
+
+static int of4_gate(int argc, char **argv) {
+    char p[4400], paths[6][4096], shas[6][65], csha[65], h[65];
+    int have[6] = {0, 0, 0, 0, 0, 0}, have_c = 0;
+    unsigned char *d = 0; int64_t n = 0;
+    if ((argc != 3 && argc != 5) || argv[2][0] != '/' || (argc == 5 && !tx_eqz(argv[3], "--candidate")))
+        return of4_refuse("usage");
+    if (cx_path_join(p, sizeof p, argv[2], "materials.tsv")) return of4_refuse("path-bound");
+    int rc = sy_read_file(p, &d, &n, 65536);
+    if (rc == -ENOENT) return of4_unknown("no-producer=o1-run\treason=no-receipt");
+    if (rc) return of4_refuse("receipt-read");
+    if (memchr(d, 0, (size_t)n) || n < 23 || memcmp(d, "opt-frame4-material-v1\n", 23)) {
+        mm_free(d); return of4_refuse("receipt-syntax");
+    }
+    for (int64_t a = 0; a < n; ) {
+        int64_t e = a;
+        while (e < n && d[e] != '\n') e++;
+        if (e - a == 14 + 64 && memcmp(d + a, "candidate-sha\t", 14) == 0) {
+            if (mm_copy(csha, sizeof csha, (const char *)d + a + 14, 64)) { mm_free(d); return of4_refuse("receipt-row"); }
+            csha[64] = 0;
+            have_c = 1;
+        }
+        for (int k = 0; k < 6; k++) {
+            long l = tx_len(of4_names[k], 32);
+            if (e - a > l + 66 && memcmp(d + a, of4_names[k], (size_t)l) == 0 && d[a + l] == '\t') {
+                int64_t t = e - 65;
+                if (d[t] != '\t' || have[k] ||
+                    tx_copy(paths[k], sizeof paths[k], (const char *)d + a + l + 1, (long)(t - a - l - 1)) ||
+                    tx_copy(shas[k], sizeof shas[k], (const char *)d + t + 1, 64)) {
+                    mm_free(d); return of4_refuse("receipt-row");
+                }
+                have[k] = 1;
+            }
+        }
+        a = e + 1;
+    }
+    mm_free(d);
+    if (argc == 5) {
+        if (!have_c) return of4_refuse("candidate-sha-missing");
+        if (of4_sha(argv[4], h)) return of4_refuse("candidate-unreadable");
+        if (!tx_eqz(h, csha)) return of4_refuse("candidate-mismatch");
+    }
+    for (int k = 0; k < 6; k++) {
+        if (!have[k]) { char w[96]; cx_fmt(w, sizeof w, "no-producer=%s", of4_names[k]); return of4_unknown(w); }
+    }
+    for (int k = 0; k < 6; k++) {
+        if (of4_sha(paths[k], h)) {
+            char w[128]; cx_fmt(w, sizeof w, "no-producer=%s\treason=material-absent", of4_names[k]);
+            return of4_unknown(w);
+        }
+        if (!tx_eqz(h, shas[k])) return of4_refuse("material-identity-changed");
+    }
+    printf("OPT_FRAME4_MATERIAL\tREADY\to1-run=%s\to1-net=%s\to1-table=%s\to2-run=%s\to2-net=%s\to2-table=%s\n",
+           paths[0], paths[1], paths[2], paths[3], paths[4], paths[5]);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && tx_eqz(argv[1], "prepare")) return of4_prepare(argc, argv);
+    if (argc > 1 && tx_eqz(argv[1], "gate")) return of4_gate(argc, argv);
+    return of4_refuse("usage");
+}

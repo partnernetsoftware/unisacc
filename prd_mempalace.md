@@ -12,7 +12,7 @@
 
 ## 地图
 
-0.0.85 走前端诊断三期。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
+当前:0.0.85 已公开(冻结 F f6c688d2cb,APE 751a40ac,Root 已升级),下一版 0.0.86 改一行再跑(plans/v0.0.86.md,分支 v0.0.86 先合 main 再推进)。0.0.85 走前端诊断三期。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
 
 ```mermaid
 flowchart LR
@@ -71,6 +71,11 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+- 提交不带任何署名行(依据:项目所有者 2026-11-20 明令):devsvc git commit、commit-own、dvgitx 与 commit-msg 钩子(.git/hooks/commit-msg 薄入口,由 `tools/commit-msg.cx -- --install` 写,`--check-installed` 核)在落库前剔除 Co-Authored-By:、Signed-off-by: 行与行首为 Generated with [Claude Code] 的工具归属行(tools/cxlib/trailer.cx,整行大小写不敏感,连同前面的空行),剔除后为空按空说明拒绝;历史提交不改;证据 0566008dfb、check-trailer、check-commit-msg、check-devsvc a1。
+  回滚:git revert 0566008dfb 并删 .git/hooks/commit-msg;agent 不得再在提交说明里写署名行。
+
+- 废除 load1 负载门(项目所有者 2026-11-20 原话"不要再用什么 load1 这样的机制了,把这个机制停掉归档掉"):一切按 load1 放行、等待、降并发、拒跑的机制已停(dvqualify、prerun-drive --load-cap、flowadmit 减半、flowexec ADMIT 门与 admit_load_* 配置行、dvreact、s9-triage RERUN_ADMIT、s9-nightly-run --load-max、dvledger、perf-baseline、cx-dev watch),改为固定显式并发上限(--jobs/--max-jobs/--par/S9_WIDTH),load1 只作记录字段;取代下文"并发总量以机器负载不高于 10 为界"。
+  回滚:git revert 本决定所在三批提交(dvqualify 加 prerun-drive ecb8cb246f、flow 系 de000a79d6、其余 39cba77ba6);新工具不得再引入 load1 判定。
 - 起链即内容截止(项目所有者授权的调度裁定 2026-11-19,依据 plans/speed-first-rev4.md:0.0.81 整链只占单版 8.5%,链后到公开占 37%,计划完成率 55%、未计划项占 57%):整链起点之后产品输入一律冻结,链后只收阻塞修复(产品输入变更须重起链);工具与测试与文档项可并行但不进候选键;0.0.83 目标压到 10 单位;R1 release-flow 与 R2 增量预跑兑现前速度道不加新大项。
 - 发布工具提前修复(R0,0.0.82):RELEASE-PREP-STRICT-NEEDS-FLAG 与 RELEASE-EXEC-X-COMMIT-EMPTY 两条缺口在 0.0.82 公开前修。
 - 提交门类与共用发布路径的变更验收:夹具绿不等于真实提交绿,必须在共享检出同款条件下真实提交一次成功(derive_gate、table-index、doc-links 三次假漂移都是靠真实提交抓到);共用路径(dvqualify、release-exec、release-prep、register)的补丁必须独立复核并做原版与补丁版真实发车对拍。
@@ -97,6 +102,7 @@ flowchart LR
 - 仓内的门(precommit、register、derive、ratchets、affected、tlib bump)逐步迁入 devsvc 成为增量并发的 flow 节点,判定强度不降,先对拍再切换(prd.md 候选池 T)。
 - build/ 只留构建 unisacc.com 用的表;仓开发元数据改由 devsvc 维护与查询,flow 与关系 DAG 稳定后逐表迁出(先等价对拍再切读者再移除),见 prd.md 候选池 T 决定。
 - devsvc 开发只由主调度 cc 及其子代理负责(项目所有者 2026-11-15);omp-go、omp-cdx 专做 unisacc.com 产品与版本线,只作为 devsvc 使用者提缺口,不改 devsvc 源码。
+- 勘误(主调度 2026-11-20,依据 plans/devsvc.md 2026-11-20 演进评审):上条与事实不符,agyneon 已在改提交门;现状为 agyneon 实现、cc 集成(opus 做夹具,cdx 只提缺口)。原文保留。
 - 0.0.69 改为"编译覆盖缺口修复"(not covered 类产品缺陷:帧槽、单元帧与作用域、常量表达式等;cc 2026-11-15 裁定),原 0.0.69 至 0.0.72 各顺延一号;帧槽修复已在分支 v0.0.69(3babcd8287);分期见 plans/notcovered-plan.md,版本序表在普查落地后同步。0.0.68 不为此打补丁。
 - 协同开发唯一接口是 devsvc 的 flow 及其子算子并行执行(项目所有者 2026-11-15);不采用每个 agent 私有工作区或覆盖层,冲突、一致性、回滚与提交都在 flow 执行层解决。
 - prd*.md 与 plans/*.md 由 devsvc 文档接口接管(项目所有者 2026-11-15):devsvc doc 子命令与 flow 的 doc.* 算子落地后,所有 agent 只经接口改,不再直接编辑。
@@ -106,6 +112,8 @@ flowchart LR
 
 - 执行类工作由主调度经 devsvc flow 并发自己做;子代理只开 fable 级(设计、难题);外部窗口 omp-cdx 停止派工(项目所有者 2026-11-16)。并发总量以机器负载不高于 10 为界。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果一律只是 LOCAL 证据,不是候选结果:检查可经假根测改过的 exec 表,基座(src、cx、include)改动要重装产品。
+- 整链预制路线(主调度 2026-11-20):事件触发预制对整链真实命中 0 次,react 从未真起(59 小时 67906 条事件中 react/bg-candidate/chain.done/PREPARED 均为 0;四因:触发键按内容而采纳键按提交、准入 load1 小于 6 而本机常 9 到 15、放行要求影子满 24 小时而常驻上限 7200 秒无人重拉、正规链不经 devsvc 无链事件;prebuild-self 只预制 devsvc 自身)。改走:0.0.86 推测链真起加并行确认(工具线第三项 T3)与周节奏命令,0.0.87 预跑发车去 load1 阈值,0.0.88 后再定采纳内容键;依据 /home/devali/.claude/jobs/2798e440/tmp/chain-incremental.md 第 9 节,plans/v0.0.86.md;回滚:停反应器(devsvc react stop),正规链冷起照旧,推测 APE 与正规 APE sha256 不等则证据自动 INVALID。
+- 多写者工作树(主调度 2026-11-20):同一版本两个及以上写者时,每个写者一个工作树 .claude/worktrees/v0.0.NN-短名(分支 v0.0.NN-短名),由 cc 合入 v0.0.NN;依据 2026-11-20 agyneon 在共享 v0.0.86 工作树提交被 cdx 未提交 exec/parse2 改动触发 batch-domains 与 k2-gen2 DIFF 拦下(缺口 DEVSVC-GATE-READS-SHARED-WORKTREE)。
 
 ### 仍未验证(缺什么 / 清零动作)
 
@@ -154,4 +162,10 @@ flowchart LR
 - 0.0.84 公开与发布后记账(cc 2026-11-20):决定与结果:0.0.84 已公开(release-exec EXECUTED steps=7,公开读回 SHA256 3a226945354604440e4392d85c54548f92e9f19a3e73ebc3b263c67daef9c7db,8417722 字节,冻结 F=df14f1e334,Y1=f708c82ddd,Y2=f65c432114);F1 采纳:七个热模型改存原始表示,装载页冷中位净省 47 到 52 ms(93.8 -> 46.3、94.2 -> 42.9),产物逐字节不变,30 个篡改样本具名拒绝;限制:总墙钟有负收益轮次,热态 8.4 ms 未达 7.5 ms,冷启动仍约为 Node 13 倍,APE 增 1018149 字节。CI run 44647659602 一次通过(六目标约 7.5 分钟);stream-pipe 最大部件 osx/x86_64 multi 26.8 秒,三个非 lnx/x86_64 POSIX 格 STREAM_PREPARE FALLBACK(缺口 STREAM-PREPARE-OSX-FALLBACK,0.0.85)。工作项 6/9 完成、6 项计划外(逐项依据在 plans/v0.0.84.md 头注释)。预跑三次的教训(别人必须遵守):(1) 新增批次必须先在 dvqualify 单提交资格布局自测再登记(NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE);(2) 包格式变更必须附工具侧消费者清扫清单并全部实跑;(3) 范围变更先写回计划文件再派工(本版已执行)。仓根 Root 升级到 0.0.84 公开件。证据入口:release/evidence/0.0.84/、release/notes-0.0.84.md、build/version-seq.tsv 第 19 行。回滚:release/rollback.txt;Root 回退以 tools/install-ape.cx 装 0.0.83 公开件 12fd0c57。
 - 0.0.85 计划落库(cc 2026-11-20,基线 1ae28737fe):决定:0.0.85 主题定为冷启动第二块,前端固定前缀(隐式运行库与内置头的 E2、E3 固定推理)按内容身份预制入包,编译产物逐字节不变,planned=8,槽到公开目标 300 分钟、硬上限 420 分钟;开槽前 P0 判定门由 cdx 执行(45 分钟,约 07:00 出结论),固定占比低于 50% 或状态不可续接即 NO-GO;槽前工具线 agyneon 四项(OLD-PRODUCT-MATERIAL-CACHE-KEY-LACKS-LAYOUT-PATH、S1 新增批次布局自测登记门、S4 unit-frontcache-equiv3 拆分、S2 tools/prerun-drive.cx),derive 全量 --check 并行化提为槽前工具线,S3 修复半项可砍;到期项裁决位:c-negative 53/9 建议续期 0.0.87 并写明原因与计划,rt-shared-gen 的 _unisa_lbin 在 0.0.85 内修掉不续期,开槽前由主调度回填;R2 三块补丁(efa1a6adff 等)为储备 (1)(5)。依据:fable 草稿经评审通过;0.0.84 冷 hello.cx 557.7 ms 中 E3 加 E2 约 285.7 ms(固定占比为推断,待 P0 实测)。证据入口:plans/v0.0.85.md、build/version-seq.tsv 第 20 行、plans/INDEX.md。回滚:P0 判否即按 plans/v0.0.85.md (b) 功能道说明把 F1 换为路线判定入表(nn 迁移第一块),同步改写本计划 (a)(b) 与 version-seq 第 20 行;计划文件本身可按提交回退。
 - 0.0.85 主题终稿(cc 2026-11-20,基线 098f43aec9):决定:0.0.85 改为前端诊断三期(c-negative 53/9 -> 62/0 不再续期、拒绝文案带 文件:行:列、-Werror 升级与 C99WARN-IMPLICIT-BUILTIN-FALSE-POSITIVE 修复),planned=11,槽前硬前置只留 S1 S2 S4,Q2 改 opt-frame4 生产者(UNKNOWN 10 -> 2),Q3 Q-P 首次报告不可砍;固定前缀预制与路线判定入表不进本版。依据:cdx P0 NO-GO(头集固定占比可过半,但 E2 头末状态含整源复制,续接后缀沿用旧字节);fable 全局审视 (7)(8)。证据入口:plans/v0.0.85.md 附录 B、/home/devali/.claude/jobs/2798e440/tmp/p0-085/report.md、/home/devali/.claude/jobs/2798e440/tmp/global-review-085.md。回滚:回到原主题须重新做 P0(按结构备忘重设计输入边界后重测两条件)。
+- 0.0.85 公开与发布后记账(cc-post 2026-11-20):决定与结果:0.0.85 已公开(release-exec EXECUTED,公开读回 SHA256 751a40ac556e4a1d617a15dea3975cb3951edec6387e46fb84de6b41f9435324,8425614 字节,冻结 F=f6c688d2cb,Y1=99eab18166,Y2=3b0a5ec143);CI run 44680404617 一次通过(六目标约 7.3 分钟,只覆盖冒烟子集);整体裁决 NOT_QUALIFIED(全套 s9 未跑,产品资格域非整域)。计划未达(别人须知):c-negative 55/7 未清零,原"不再续期"裁定未守,剩余 7 例逐例 expected-fail 到期 0.0.86,0.0.86 不得再续;F2 25/26;Q3 Q-P 报告第三次欠账;工作项 6/11 完成、4 项计划外(超计划外位 2,逐项在 plans/v0.0.85.md 头注释)。公开 release 正文为空,未改,已报主调度;release/decision.txt 仍为 0.0.74 旧件。阻塞与下一动作:0.0.86 按 plans/v0.0.86.md,v0.0.86 分支槽行 commit=f6c688d2cb(21 列零哈希)已填,分支先合 main 再推进;各窗口冻结解除。仓根 Root 升级到 0.0.85 公开件(INSTALLED,check-install-ape failed=0,smoke 16/0 前后均过)。证据入口:release/evidence/0.0.85/、release/notes-0.0.85.md、build/version-seq.tsv 第 20 行。回滚:发布撤回见 release/rollback.txt;Root 回退以 tools/install-ape.cx 装 0.0.84 公开件 3a226945。
 - 风险登记(cc 2026-11-20,依据 fable 全局审视报告):(1) 引导编译器 0.0.59 换基排 0.0.94,与 0.0.87 新关键字可能相撞(推断);(2) SHA256SUMS 无独立签名或来源证明(未核);(3) 缓存目录即执行面的同用户篡改威胁模型未成文(未核);(4) 0.0.87 线程设计只写 ELF TLS,Mach-O 与 PE 的 TLS 未提(推断);(5) 前端硬上限到达时具名拒绝的普查未排,宜早于 0.0.96(推断)。
+- 战略决定(cc 2026-11-20,依据 fable 深度反思 /home/devali/.claude/jobs/2798e440/tmp/deep-review-085.md 与三项核实结论):路线 A 脚本运行时优先(0.0.86 改一行再跑、0.0.87 脚本地板库走库快车道、0.0.88 epoll 加 https 端到端),执行器内层循环实验出结论前冻结一切逻辑转网,原子 TLS pthread 推后 0.0.90 以后、__int128 砍;
+  发布节奏改为日常装机投放加每周一到两次正式公开,0.0.86 起视里程碑合并发布;详见 plans/roadmap-0.0.83-0.0.99.md 末节修订注与 plans/v0.0.86.md;回滚:撤该修订注并恢复 build/version-seq.tsv 第 21 到 24 行旧主题。
+- 风险登记二(cc 2026-11-20,fable 深度反思前五):(1) 流程自我消耗,预警为周产品路径提交占比低于 10%(现 5.8%,推断);(2) 网推理吞吐是硬顶,模块一多就上秒(推断);(3) 主调度单点与磁盘余量(现 31G,低于 20G 预警,未核);(4) 需求来源内循环,用户来源缺口行为 0(推断);(5) 自举与字节线锁定,语言与生成码不敢动(推断)。
+- 决定(主调度 cc 2026-11-20,devsvc 演进):事实修正,提交门超窗归因负载数据不支持(793 次提交失败 30.5%,三档负载失败率 29.9%、37.7%、31.0%,不支持非证伪),不做按负载伸缩的门;前五项 (a) 门拒绝回执与事件 (b) 提交自愈 (c) 持久作业与 status --tsv (d) merge --continue 加登记表由清单生成 (e) 门按相分预算,单条命令仍不超 60 秒;节奏为公开后到下次起链前每版最多两项,0.0.86 T1 T2、0.0.87 自愈加合并收尾、0.0.88 作业与清单,agyneon 实现、cc 集成。
+- 证据入口 /home/devali/.claude/jobs/2798e440/tmp/devsvc-evolution.md 与 plans/devsvc.md"2026-11-20 演进评审";判据 0.0.88 提交失败率低于 15%、用法错低于 2%,两版不动就回退该项;回滚办法:工具线项均为 main 上独立提交,git revert 对应提交并在本条下注明。

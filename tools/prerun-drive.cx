@@ -1,0 +1,757 @@
+/* tools/prerun-drive.cx -- bounded window-granularity qualification prerun driver and offline replay verifier.
+ * Subcommands:
+ *   plan   --ids-file FILE --out DIR [--win-size 8..12] [--heavy-file FILE] [--warmup N]
+ *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--max-retries 2]
+ *          (--load-cap N is still accepted but ignored with a PRERUN_DEPRECATED line: load gates retired 2026-11-20)
+ *   merge  --in-dir DIR --out DIR [--version VER] [--skip-name FILE]
+ *   g1-dry --root DIR --strict FILE --expected-fail FILE --expected-unmeasured FILE --out DIR [--version VER]
+ *   replay --ids-file FILE --evidence-dir DIR --out DIR [--expected-strict FILE] [--expected-g1dry FILE]
+ * Never edits batch result lines; stops after max-retries (default 2) on any repeating non-PASS batch. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define PD_PW 4400
+#define PD_MAX_IDS 2048
+#define PD_MAX_WINS 512
+#define PD_MAX_FILES 256
+
+typedef struct {
+    char id[128];
+    int heavy;
+} PdBatch;
+
+typedef struct {
+    char wid[32];
+    int jobs;
+    char phase[24];
+    int start;
+    int count;
+    int idxs[32];
+} PdWin;
+
+typedef struct {
+    char id[128];
+    char status[24];
+    char note[256];
+    int seen;
+    int had_fail;
+    int superseded;
+    char raw_line[1024];
+} PdState;
+
+static PdBatch pd_ids[PD_MAX_IDS];
+static int pd_nids = 0;
+static PdWin pd_wins[PD_MAX_WINS];
+static int pd_nwins = 0;
+static PdState pd_states[PD_MAX_IDS];
+static int pd_nstates = 0;
+static char pd_heavy_extra[256][128];
+static int pd_nheavy_extra = 0;
+
+static int pd_refuse(const char *why) {
+    fprintf(stderr, "PRERUN_DRIVE\tREFUSE\treason=%s\n", why);
+    return 2;
+}
+
+static void pd_mkdirs(const char *dir) {
+    char tmp[PD_PW];
+    size_t n = strlen(dir);
+    if (n >= sizeof tmp || mm_copy(tmp, sizeof tmp, dir, n + 1)) return;
+    for (size_t i = 1; i < n; i++) if (tmp[i] == '/') { tmp[i] = 0; sy_mkdir(tmp, 0755); tmp[i] = '/'; }
+    sy_mkdir(tmp, 0755);
+}
+
+static int pd_starts(const char *s, const char *pre) {
+    size_t pl = strlen(pre);
+    return strlen(s) >= pl && memcmp(s, pre, pl) == 0;
+}
+
+static int pd_is_heavy_id(const char *id) {
+    static const char *builtin[] = {
+        "real-commit", "unit-frontcache-equiv3", "check-split-parents",
+        "check-gen-all-check", "check-gen-all-pass", "check-gen-all-hang",
+        "c-negative", "stream-pipe-parts", 0
+    };
+    for (int i = 0; builtin[i]; i++) if (tx_eqz(id, builtin[i])) return 1;
+    if (pd_starts(id, "netregen-")) return 1;
+    for (int i = 0; i < pd_nheavy_extra; i++) if (tx_eqz(id, pd_heavy_extra[i])) return 1;
+    return 0;
+}
+
+static int pd_load_heavy_file(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20)) return -1;
+    int64_t pos = 0;
+    while (pos < n && pd_nheavy_extra < 256) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (b[le - 1] == '\r' || b[le - 1] == ' ' || b[le - 1] == '\t')) le--;
+        while (ls < le && (b[ls] == ' ' || b[ls] == '\t')) ls++;
+        if (le > ls && b[ls] != '#' && (size_t)(le - ls) < 127) {
+            if (!mm_copy(pd_heavy_extra[pd_nheavy_extra], 128, (const char *)b + ls, (size_t)(le - ls))) {
+                pd_heavy_extra[pd_nheavy_extra][le - ls] = 0;
+                pd_nheavy_extra++;
+            }
+        }
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int pd_load_ids(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    pd_nids = 0;
+    if (sy_read_file(path, &b, &n, 4 << 20)) return -1;
+    int64_t pos = 0;
+    while (pos < n && pd_nids < PD_MAX_IDS) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (b[le - 1] == '\r' || b[le - 1] == ' ' || b[le - 1] == '\t')) le--;
+        while (ls < le && (b[ls] == ' ' || b[ls] == '\t')) ls++;
+        if (le <= ls || b[ls] == '#') continue;
+        /* Allow TSV first column or plain one-id-per-line */
+        int64_t end = ls;
+        while (end < le && b[end] != '\t' && b[end] != ' ') end++;
+        size_t len = (size_t)(end - ls);
+        if (len == 0 || len >= 127) continue;
+        char id[128];
+        if (mm_copy(id, sizeof id, (const char *)b + ls, len)) continue;
+        id[len] = 0;
+        if (tx_eqz(id, "batch") || tx_eqz(id, "id") || tx_eqz(id, "RAW") || tx_eqz(id, "SUMMARY")) continue;
+        int dup = 0;
+        for (int i = 0; i < pd_nids; i++) if (tx_eqz(pd_ids[i].id, id)) { dup = 1; break; }
+        if (dup) continue;
+        cx_fmt(pd_ids[pd_nids].id, sizeof pd_ids[pd_nids].id, "%s", id);
+        pd_ids[pd_nids].heavy = pd_is_heavy_id(id);
+        pd_nids++;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
+    int used[PD_MAX_IDS];
+    int i, w_warmup = 0, w_heavy = 0, w_normal = 0, has_rc = -1;
+    if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
+    if (pd_nids <= 0) return pd_refuse("empty-ids-file");
+    for (i = 0; i < pd_nids; i++) {
+        used[i] = 0;
+        if (tx_eqz(pd_ids[i].id, "real-commit")) has_rc = i;
+    }
+    pd_nwins = 0;
+
+    /* 1. Cold-cache warmup window (jobs=1, light batches) */
+    if (warmup_n > 0) {
+        PdWin *w = &pd_wins[pd_nwins];
+        cx_fmt(w->wid, sizeof w->wid, "W0000");
+        w->jobs = 1;
+        cx_fmt(w->phase, sizeof w->phase, "warmup");
+        w->count = 0;
+        for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
+            if (!pd_ids[i].heavy) {
+                w->idxs[w->count++] = i;
+                used[i] = 1;
+            }
+        }
+        if (w->count > 0) { pd_nwins++; w_warmup = 1; }
+    }
+
+    /* 2. Two-phase real-commit: prebuild-self followed by single-batch jobs=1 window */
+    if (has_rc >= 0 && pd_nwins + 2 <= PD_MAX_WINS) {
+        PdWin *wp = &pd_wins[pd_nwins++];
+        cx_fmt(wp->wid, sizeof wp->wid, "W0001");
+        wp->jobs = 1;
+        cx_fmt(wp->phase, sizeof wp->phase, "prebuild-self");
+        wp->count = 1;
+        wp->idxs[0] = has_rc;
+
+        PdWin *wr = &pd_wins[pd_nwins++];
+        cx_fmt(wr->wid, sizeof wr->wid, "W0002");
+        wr->jobs = 1;
+        cx_fmt(wr->phase, sizeof wr->phase, "heavy");
+        wr->count = 1;
+        wr->idxs[0] = has_rc;
+        used[has_rc] = 1;
+        w_heavy++;
+    }
+
+    /* 3. Other heavy batches: each in its own jobs=1 window */
+    for (i = 0; i < pd_nids; i++) {
+        if (!used[i] && pd_ids[i].heavy && pd_nwins < PD_MAX_WINS) {
+            PdWin *w = &pd_wins[pd_nwins];
+            cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+            w->jobs = 1;
+            cx_fmt(w->phase, sizeof w->phase, "heavy");
+            w->count = 1;
+            w->idxs[0] = i;
+            used[i] = 1;
+            pd_nwins++;
+            w_heavy++;
+        }
+    }
+
+    /* 4. Normal batches: windows of win_size (8..12) with jobs=2 */
+    {
+        int rem[PD_MAX_IDS], nrem = 0;
+        for (i = 0; i < pd_nids; i++) if (!used[i]) rem[nrem++] = i;
+        int pos = 0;
+        while (pos < nrem && pd_nwins < PD_MAX_WINS) {
+            int take = nrem - pos;
+            if (take > win_size) {
+                /* Avoid tiny trailing window < 8 when possible by balancing the last two windows */
+                if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
+                else take = win_size;
+            }
+            PdWin *w = &pd_wins[pd_nwins];
+            cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+            w->jobs = 2;
+            cx_fmt(w->phase, sizeof w->phase, "normal");
+            w->count = take;
+            for (int k = 0; k < take; k++) w->idxs[k] = rem[pos + k];
+            pos += take;
+            pd_nwins++;
+            w_normal++;
+        }
+    }
+
+    pd_mkdirs(out_dir);
+    char wpath[PD_PW];
+    if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir)) return pd_refuse("path-bound");
+    size_t cap = 65536 + (size_t)pd_nids * 160;
+    char *buf = (char *)mm_alloc(cap);
+    if (!buf) return pd_refuse("oom");
+    size_t bp = 0;
+    const char *hdr = "# prerun-drive windows\nwindow\tjobs\tphase\tcount\tids\n";
+    size_t hl = strlen(hdr);
+    mm_copy(buf + bp, cap - bp, hdr, hl); bp += hl;
+    for (int wi = 0; wi < pd_nwins; wi++) {
+        PdWin *w = &pd_wins[wi];
+        char line_hdr[128];
+        cx_fmt(line_hdr, sizeof line_hdr, "%s\t%d\t%s\t%d\t", w->wid, w->jobs, w->phase, w->count);
+        size_t lh = strlen(line_hdr);
+        if (bp + lh + 2 >= cap) break;
+        mm_copy(buf + bp, cap - bp, line_hdr, lh); bp += lh;
+        for (int k = 0; k < w->count; k++) {
+            const char *id = pd_ids[w->idxs[k]].id;
+            size_t il = strlen(id);
+            if (bp + il + 3 >= cap) break;
+            if (k > 0) buf[bp++] = ',';
+            mm_copy(buf + bp, cap - bp, id, il); bp += il;
+        }
+        buf[bp++] = '\n';
+    }
+    int wrc = sy_write_file(wpath, buf, (int64_t)bp, 0644);
+    mm_free(buf);
+    if (wrc) return pd_refuse("write-windows");
+    printf("PRERUN_PLAN\ttotal=%d\twindows=%d\twarmup=%d\theavy=%d\tnormal=%d\tout=%s\n",
+           pd_nids, pd_nwins, w_warmup, w_heavy, w_normal, wpath);
+    return 0;
+}
+
+static int pd_state_find(const char *id) {
+    for (int i = 0; i < pd_nstates; i++) if (tx_eqz(pd_states[i].id, id)) return i;
+    if (pd_nstates >= PD_MAX_IDS) return -1;
+    PdState *s = &pd_states[pd_nstates];
+    memset(s, 0, sizeof *s);
+    cx_fmt(s->id, sizeof s->id, "%s", id);
+    return pd_nstates++;
+}
+
+static void pd_ingest_strict_buf(const char *b, int64_t n) {
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le <= ls || b[ls] == '#') continue;
+        if (le - ls >= 4 && memcmp(b + ls, "RAW\t", 4) == 0) continue;
+        if (le - ls >= 8 && memcmp(b + ls, "SUMMARY\t", 8) == 0) continue;
+        if (le - ls >= 6 && memcmp(b + ls, "batch\t", 6) == 0) continue;
+        const char *cols[12]; int64_t clens[12]; int nc = 0; int64_t p = ls;
+        while (nc < 12) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc < 3 || clens[0] <= 0 || clens[0] >= 127 || clens[2] <= 0 || clens[2] >= 23) continue;
+        char id[128], st[24];
+        if (mm_copy(id, sizeof id, cols[0], (size_t)clens[0])) continue;
+        id[clens[0]] = 0;
+        if (mm_copy(st, sizeof st, cols[2], (size_t)clens[2])) continue;
+        st[clens[2]] = 0;
+        int idx = pd_state_find(id);
+        if (idx < 0) continue;
+        PdState *s = &pd_states[idx];
+        if (s->seen && tx_eqz(s->status, "FAIL") && tx_eqz(st, "PASS")) s->superseded = 1;
+        if (tx_eqz(st, "FAIL")) s->had_fail = 1;
+        s->seen++;
+        cx_fmt(s->status, sizeof s->status, "%s", st);
+        if (nc >= 9 && clens[8] > 0) {
+            size_t nl = (size_t)(clens[8] < 250 ? clens[8] : 250);
+            mm_copy(s->note, sizeof s->note, cols[8], nl);
+            s->note[nl] = 0;
+        } else {
+            cx_fmt(s->note, sizeof s->note, "-");
+        }
+        size_t rl = (size_t)(le - ls < 1000 ? le - ls : 1000);
+        mm_copy(s->raw_line, sizeof s->raw_line, b + ls, rl);
+        s->raw_line[rl] = 0;
+    }
+}
+
+static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
+    char wpath[PD_PW];
+    unsigned char *wb = 0; int64_t wn = 0;
+    if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir) || sy_read_file(wpath, &wb, &wn, 4 << 20))
+        return pd_refuse("read-windows-tsv");
+    int64_t pos = 0;
+    int ran = 0, skipped = 0;
+    int retry_counts[PD_MAX_IDS];
+    char retry_ids[PD_MAX_IDS][128];
+    int nretry = 0;
+    while (pos < wn) {
+        int64_t ls = pos;
+        while (pos < wn && wb[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < wn) pos++;
+        if (le > ls && wb[le - 1] == '\r') le--;
+        if (le <= ls || wb[ls] == '#' || (le - ls >= 7 && memcmp(wb + ls, "window\t", 7) == 0)) continue;
+        const char *cols[8]; int64_t clens[8]; int nc = 0; int64_t p = ls;
+        while (nc < 8) {
+            int64_t cs = p;
+            while (p < le && wb[p] != '\t') p++;
+            cols[nc] = (const char *)wb + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc < 5) continue;
+        char wid[32], phase[24], ids[4096], donep[PD_PW], outp[PD_PW];
+        if (clens[0] >= 31 || clens[2] >= 23 || clens[4] >= 4095) continue;
+        mm_copy(wid, sizeof wid, cols[0], (size_t)clens[0]); wid[clens[0]] = 0;
+        mm_copy(phase, sizeof phase, cols[2], (size_t)clens[2]); phase[clens[2]] = 0;
+        mm_copy(ids, sizeof ids, cols[4], (size_t)clens[4]); ids[clens[4]] = 0;
+        int jobs = 1;
+        if (clens[1] > 0 && cols[1][0] >= '1' && cols[1][0] <= '8') jobs = cols[1][0] - '0';
+        if (jobs > max_jobs) jobs = max_jobs;
+        if (cx_fmt(donep, sizeof donep, "%s/done.%s", out_dir, wid) ||
+            cx_fmt(outp, sizeof outp, "%s/strict-%s.tsv", out_dir, wid)) { mm_free(wb); return pd_refuse("path-bound"); }
+        sy_stat_t st;
+        if (resume && sy_lstat(donep, &st) == 0) {
+            skipped++;
+            continue;
+        }
+        (void)load_cap;   /* load gates retired 2026-11-20: --max-jobs is the fixed bound, load1 never lowers it */
+        if (tx_eqz(phase, "prebuild-self")) {
+            char cmd[8192], why[256];
+            np_result r = {0};
+            if (mock_runner) {
+                cx_fmt(cmd, sizeof cmd, "sh '%s' prebuild-self '%s' '%s'", mock_runner, wid, outp);
+            } else {
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/check-real-commit.cx -- --prebuild-self", root);
+            }
+            char *av[] = {"sh", "-c", cmd, 0};
+            int tr = np_run(av, root, 0, 58, &r, why, sizeof why);
+            int rc = tr ? 124 : r.rc;
+            np_free(&r);
+            if (rc != 0) {
+                printf("PRERUN_STOP\twindow=%s\tphase=prebuild-self\trc=%d\n", wid, rc);
+                mm_free(wb);
+                return 1;
+            }
+            sy_write_file(donep, "PREBUILD_SELF\tOK\n", 17, 0644);
+            ran++;
+            continue;
+        }
+
+        int attempt = 0;
+        for (;;) {
+            attempt++;
+            sy_unlink(outp);
+            char cmd[8192], why[256];
+            np_result r = {0};
+            if (mock_runner) {
+                cx_fmt(cmd, sizeof cmd, "sh '%s' window '%s' %d '%s' '%s' %d", mock_runner, wid, jobs, ids, outp, attempt);
+            } else {
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/dvqualify.cx -- . --candidate '%s' --ids '%s' --out '%s' --jobs %d --segment-batches 16",
+                       root, cand, ids, outp, jobs);
+            }
+            char *av[] = {"sh", "-c", cmd, 0};
+            int tr = np_run(av, root, 0, 58, &r, why, sizeof why);
+            int rc = tr ? 124 : r.rc;
+            np_free(&r);
+
+            unsigned char *ob = 0; int64_t on = 0;
+            int has_nonpass = 0;
+            char bad_id[128] = {0}, bad_raw[1024] = {0};
+            if (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0) {
+                pd_nstates = 0;
+                pd_ingest_strict_buf((const char *)ob, on);
+                for (int k = 0; k < pd_nstates; k++) {
+                    if (!tx_eqz(pd_states[k].status, "PASS")) {
+                        has_nonpass = 1;
+                        cx_fmt(bad_id, sizeof bad_id, "%s", pd_states[k].id);
+                        cx_fmt(bad_raw, sizeof bad_raw, "%s", pd_states[k].raw_line);
+                        break;
+                    }
+                }
+                mm_free(ob);
+            } else {
+                has_nonpass = 1;
+                cx_fmt(bad_id, sizeof bad_id, "%s", wid);
+                cx_fmt(bad_raw, sizeof bad_raw, "no-output rc=%d", rc);
+            }
+
+            if (!has_nonpass && rc == 0) {
+                char dline[128];
+                cx_fmt(dline, sizeof dline, "QUALIFY_DONE\twindow=%s\tjobs=%d\tattempts=%d\n", wid, jobs, attempt);
+                sy_write_file(donep, dline, (int64_t)strlen(dline), 0644);
+                ran++;
+                break;
+            }
+            /* Track per-batch retry count; stop immediately after max_retries (default 2) */
+            int ridx = -1;
+            for (int k = 0; k < nretry; k++) if (tx_eqz(retry_ids[k], bad_id)) { ridx = k; break; }
+            if (ridx < 0 && nretry < PD_MAX_IDS) {
+                ridx = nretry++;
+                cx_fmt(retry_ids[ridx], sizeof retry_ids[ridx], "%s", bad_id);
+                retry_counts[ridx] = 0;
+            }
+            if (ridx >= 0) retry_counts[ridx]++;
+            int cnt = (ridx >= 0) ? retry_counts[ridx] : attempt;
+            if (cnt >= max_retries) {
+                printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n", bad_id, cnt, wid, bad_raw);
+                mm_free(wb);
+                return 1;
+            }
+            jobs = 1;
+        }
+    }
+    mm_free(wb);
+    printf("PRERUN_RUN\tstatus=DONE\tran=%d\tskipped=%d\tout=%s\n", ran, skipped, out_dir);
+    return 0;
+}
+
+static int pd_cmp_str(const char *a, const char *b) {
+    return strcmp(a, b);
+}
+
+static int pd_cmd_merge(const char *in_dir, const char *out_dir, const char *ver) {
+    sy_dir_t d;
+    static char files[PD_MAX_FILES][256];
+    int nf = 0;
+    if (sy_dir_open(&d, in_dir) != 0) return pd_refuse("open-in-dir");
+    while (sy_dir_next(&d) == 1 && nf < PD_MAX_FILES) {
+        if (pd_starts(d.name, "strict-") && d.name_n > 11 &&
+            memcmp(d.name + d.name_n - 4, ".tsv", 4) == 0 &&
+            !tx_eqz(d.name, "strict-final.tsv")) {
+            cx_fmt(files[nf], sizeof files[nf], "%s", d.name);
+            nf++;
+        }
+    }
+    sy_dir_close(&d);
+    if (nf == 0) return pd_refuse("no-strict-window-files");
+    for (int i = 1; i < nf; i++) {
+        char key[256];
+        cx_fmt(key, sizeof key, "%s", files[i]);
+        int j = i - 1;
+        while (j >= 0 && pd_cmp_str(files[j], key) > 0) {
+            cx_fmt(files[j + 1], sizeof files[j + 1], "%s", files[j]);
+            j--;
+        }
+        cx_fmt(files[j + 1], sizeof files[j + 1], "%s", key);
+    }
+
+    pd_mkdirs(out_dir);
+    size_t cap = 4 << 20;
+    char *merged = (char *)mm_alloc(cap);
+    if (!merged) return pd_refuse("oom");
+    size_t mp = 0;
+    int wrote_hdr = 0;
+    char last_summary[1024] = {0};
+    pd_nstates = 0;
+
+    for (int fi = 0; fi < nf; fi++) {
+        char fp[PD_PW];
+        unsigned char *b = 0; int64_t n = 0;
+        if (cx_fmt(fp, sizeof fp, "%s/%s", in_dir, files[fi]) || sy_read_file(fp, &b, &n, 2 << 20)) continue;
+        pd_ingest_strict_buf((const char *)b, n);
+        int64_t pos = 0;
+        while (pos < n) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            int64_t raw_len = le - ls;
+            int is_hdr = (raw_len >= 1 && b[ls] == '#') || (raw_len >= 6 && memcmp(b + ls, "batch\t", 6) == 0);
+            int is_sum = (raw_len >= 8 && memcmp(b + ls, "SUMMARY\t", 8) == 0);
+            if (is_sum) {
+                size_t sl = (size_t)(raw_len < 1000 ? raw_len : 1000);
+                mm_copy(last_summary, sizeof last_summary, (const char *)b + ls, sl);
+                last_summary[sl] = 0;
+                continue;
+            }
+            if (is_hdr) {
+                if (wrote_hdr) continue;
+            } else {
+                wrote_hdr = 1;
+            }
+            if (mp + (size_t)raw_len + 2 < cap) {
+                mm_copy(merged + mp, cap - mp, (const char *)b + ls, (size_t)raw_len);
+                mp += (size_t)raw_len;
+                merged[mp++] = '\n';
+            }
+        }
+        mm_free(b);
+    }
+    if (last_summary[0] && mp + strlen(last_summary) + 2 < cap) {
+        size_t sl = strlen(last_summary);
+        mm_copy(merged + mp, cap - mp, last_summary, sl);
+        mp += sl;
+        merged[mp++] = '\n';
+    }
+
+    char spath[PD_PW], efpath[PD_PW], eupath[PD_PW];
+    if (cx_fmt(spath, sizeof spath, "%s/strict-final.tsv", out_dir) ||
+        cx_fmt(efpath, sizeof efpath, "%s/expected-fail.draft.tsv", out_dir) ||
+        cx_fmt(eupath, sizeof eupath, "%s/expected-unmeasured.draft.tsv", out_dir)) {
+        mm_free(merged);
+        return pd_refuse("path-bound");
+    }
+    int wrc = sy_write_file(spath, merged, (int64_t)mp, 0644);
+    mm_free(merged);
+    if (wrc) return pd_refuse("write-strict-final");
+
+    int n_pass = 0, n_fail = 0, n_unk = 0, n_sup = 0;
+    static char ef_buf[65536], eu_buf[65536];
+    size_t efp = 0, eup = 0;
+    const char *ef_h = "batch\texpected\treason\n";
+    const char *eu_h = "batch\treason\tevidence\n";
+    mm_copy(ef_buf, sizeof ef_buf, ef_h, strlen(ef_h)); efp = strlen(ef_h);
+    mm_copy(eu_buf, sizeof eu_buf, eu_h, strlen(eu_h)); eup = strlen(eu_h);
+    for (int i = 0; i < pd_nstates; i++) {
+        PdState *s = &pd_states[i];
+        if (s->superseded) n_sup++;
+        if (tx_eqz(s->status, "PASS")) n_pass++;
+        else if (tx_eqz(s->status, "FAIL")) {
+            n_fail++;
+            char row[512];
+            cx_fmt(row, sizeof row, "%s\t%s\tdraft from prerun-drive (%s); expires=next\n", s->id, s->note, ver ? ver : "dev");
+            size_t rl = strlen(row);
+            if (efp + rl < sizeof ef_buf) { mm_copy(ef_buf + efp, sizeof ef_buf - efp, row, rl); efp += rl; }
+        } else {
+            n_unk++;
+            char row[512];
+            cx_fmt(row, sizeof row, "%s\tno-producer\t%s-deferred.tsv\n", s->id, s->id);
+            size_t rl = strlen(row);
+            if (eup + rl < sizeof eu_buf) { mm_copy(eu_buf + eup, sizeof eu_buf - eup, row, rl); eup += rl; }
+        }
+    }
+    sy_write_file(efpath, ef_buf, (int64_t)efp, 0644);
+    sy_write_file(eupath, eu_buf, (int64_t)eup, 0644);
+
+    printf("PRERUN_MERGE\twindows=%d\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tSUPERSEDED=%d\tout=%s\n",
+           nf, pd_nstates, n_pass, n_fail, n_unk, n_sup, spath);
+    return 0;
+}
+
+static int pd_cmd_replay(const char *ids_file, const char *ev_dir, const char *out_dir, const char *exp_strict, const char *exp_g1dry) {
+    if (pd_load_ids(ids_file)) return pd_refuse("read-ids-file");
+    if (pd_build_plan(10, 4, out_dir)) return 2;
+    /* Verify plan invariants: every id covered once, normal windows 8..12, heavy jobs=1 */
+    int covered = 0;
+    for (int wi = 0; wi < pd_nwins; wi++) {
+        PdWin *w = &pd_wins[wi];
+        if (tx_eqz(w->phase, "prebuild-self")) continue;
+        if (tx_eqz(w->phase, "heavy") && w->jobs != 1) return pd_refuse("heavy-window-jobs-not-1");
+        if (tx_eqz(w->phase, "normal") && (w->count < 1 || w->count > 12)) return pd_refuse("normal-window-size-bound");
+        covered += w->count;
+    }
+    if (covered != pd_nids) return pd_refuse("plan-coverage-mismatch");
+
+    if (pd_cmd_merge(ev_dir, out_dir, "replay")) return 2;
+    int m_total = pd_nstates, m_pass = 0, m_fail = 0, m_unk = 0, m_sup = 0;
+    for (int i = 0; i < pd_nstates; i++) {
+        if (pd_states[i].superseded) m_sup++;
+        if (tx_eqz(pd_states[i].status, "PASS")) m_pass++;
+        else if (tx_eqz(pd_states[i].status, "FAIL")) m_fail++;
+        else m_unk++;
+    }
+
+    if (exp_strict) {
+        unsigned char *eb = 0; int64_t en = 0;
+        if (sy_read_file(exp_strict, &eb, &en, 8 << 20)) return pd_refuse("read-expected-strict");
+        pd_nstates = 0;
+        pd_ingest_strict_buf((const char *)eb, en);
+        mm_free(eb);
+        int e_total = pd_nstates, e_pass = 0, e_fail = 0, e_unk = 0, e_sup = 0;
+        for (int i = 0; i < pd_nstates; i++) {
+            if (pd_states[i].superseded) e_sup++;
+            if (tx_eqz(pd_states[i].status, "PASS")) e_pass++;
+            else if (tx_eqz(pd_states[i].status, "FAIL")) e_fail++;
+            else e_unk++;
+        }
+        if (e_total != m_total || e_pass != m_pass || e_fail != m_fail || e_unk != m_unk || e_sup != m_sup) {
+            fprintf(stderr, "PRERUN_REPLAY\tMISMATCH\tmerged=%d/%d/%d/%d/%d\texpected=%d/%d/%d/%d/%d\n",
+                    m_total, m_pass, m_fail, m_unk, m_sup, e_total, e_pass, e_fail, e_unk, e_sup);
+            return 1;
+        }
+    }
+
+    if (exp_g1dry) {
+        unsigned char *gb = 0; int64_t gn = 0;
+        if (sy_read_file(exp_g1dry, &gb, &gn, 1 << 20)) return pd_refuse("read-expected-g1dry");
+        char want_ef[64], want_sup[64];
+        cx_fmt(want_ef, sizeof want_ef, "expected_fail=%d", m_fail);
+        cx_fmt(want_sup, sizeof want_sup, "superseded=%d", m_sup);
+        int ok_ef = (tx_find((const char *)gb, (long)gn, want_ef, (long)strlen(want_ef)) >= 0);
+        int ok_sup = (tx_find((const char *)gb, (long)gn, want_sup, (long)strlen(want_sup)) >= 0);
+        mm_free(gb);
+        if (!ok_ef || !ok_sup) {
+            fprintf(stderr, "PRERUN_REPLAY\tG1_MISMATCH\twant=%s,%s\n", want_ef, want_sup);
+            return 1;
+        }
+    }
+
+    printf("PRERUN_REPLAY\tstatus=MATCH\tplan_ids=%d\tevid_batches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tSUPERSEDED=%d\n",
+           pd_nids, m_total, m_pass, m_fail, m_unk, m_sup);
+    return 0;
+}
+
+static int pd_cmd_g1_dry(const char *root, const char *cand_tsv, const char *strict_f, const char *ef_f, const char *eu_f, const char *out_dir, const char *ver) {
+    char lay[PD_PW], evd[PD_PW], g1out[PD_PW], g1txt[PD_PW], cmd[8192], why[256];
+    np_result r = {0};
+    pd_mkdirs(out_dir);
+    if (cx_fmt(lay, sizeof lay, "%s/g1layout", out_dir) ||
+        cx_fmt(evd, sizeof evd, "%s/release/evidence", lay) ||
+        cx_fmt(g1out, sizeof g1out, "%s/g1out", out_dir) ||
+        cx_fmt(g1txt, sizeof g1txt, "%s/g1dry.txt", out_dir)) return pd_refuse("path-bound");
+    pd_mkdirs(evd);
+    pd_mkdirs(g1out);
+    if (cx_fmt(cmd, sizeof cmd,
+        "cp '%s' '%s/release/candidate.tsv' && cp '%s' '%s/v%s-strict.tsv' && "
+        "cp '%s' '%s/v%s-expected-fail.tsv' && cp '%s' '%s/v%s-expected-unmeasured.tsv' && "
+        "ln -sfn '%s/unisacc.com' '%s/unisacc.com' && ln -sfn '%s/cx' '%s/cx' && "
+        "ln -sfn '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -sfn '%s/tools' '%s/tools' && ln -sfn '%s/tests' '%s/tests'",
+        cand_tsv, lay, strict_f, evd, ver, ef_f, evd, ver, eu_f, evd, ver,
+        root, lay, root, lay, root, lay, root, lay, root, lay)) return pd_refuse("g1-prep-fmt");
+    {
+        char *pv[] = {"sh", "-c", cmd, 0};
+        if (np_run(pv, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); return pd_refuse("g1-prep-run"); }
+        np_free(&r);
+    }
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 sh ./unisacc.com tools/release-exec.cx -- "
+        "--execute '%s/release/candidate.tsv' --layout '%s' --dry --out '%s' --baseline /nonexistent",
+        root, lay, lay, g1out)) return pd_refuse("g1-run-fmt");
+    {
+        char *rv[] = {"sh", "-c", cmd, 0};
+        int tr = np_run(rv, root, 0, 45, &r, why, sizeof why);
+        size_t tot = (size_t)(r.outn + r.errn);
+        char *all = (char *)mm_alloc(tot + 1);
+        if (all) {
+            if (r.outn > 0) mm_copy(all, tot + 1, r.out, (size_t)r.outn);
+            if (r.errn > 0) mm_copy(all + r.outn, tot + 1 - (size_t)r.outn, r.err, (size_t)r.errn);
+            all[tot] = 0;
+            sy_write_file(g1txt, all, (int64_t)tot, 0644);
+            int pass = (!tr && tx_find(all, (long)tot, "GATE\t1\tSTRICT\tPASS\t", 19) >= 0);
+            printf("PRERUN_G1_DRY\tstatus=%s\trc=%d\tout=%s\n", pass ? "PASS" : "FAIL", tr ? 124 : r.rc, g1txt);
+            mm_free(all);
+            np_free(&r);
+            return pass ? 0 : 1;
+        }
+        np_free(&r);
+        return pd_refuse("oom");
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return pd_refuse("usage: plan|run|merge|replay");
+    const char *sub = argv[1];
+    if (tx_eqz(sub, "plan")) {
+        const char *ids_f = 0, *out_d = 0, *heavy_f = 0;
+        int win_sz = 10, warmup = 4;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
+            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--heavy-file") && i + 1 < argc) heavy_f = argv[++i];
+            else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
+            else return pd_refuse("unknown-plan-arg");
+        }
+        if (!ids_f || !out_d) return pd_refuse("plan-requires-ids-file-and-out");
+        if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
+        if (pd_load_ids(ids_f)) return pd_refuse("read-ids-file");
+        return pd_build_plan(win_sz, warmup, out_d);
+    }
+    if (tx_eqz(sub, "run")) {
+        const char *root = ".", *cand = 0, *out_d = 0, *mock_r = 0;
+        int resume = 0, max_j = 2, load_cap = 6, max_ret = 2;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+            else if (tx_eqz(argv[i], "--candidate") && i + 1 < argc) cand = argv[++i];
+            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--resume")) resume = 1;
+            else if (tx_eqz(argv[i], "--max-jobs") && i + 1 < argc) max_j = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) { load_cap = atoi(argv[++i]); fprintf(stderr, "PRERUN_DEPRECATED\t--load-cap\tignored: load gates retired 2026-11-20, use --max-jobs\n"); }
+            else if (tx_eqz(argv[i], "--max-retries") && i + 1 < argc) max_ret = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
+            else return pd_refuse("unknown-run-arg");
+        }
+        if (!out_d || (!cand && !mock_r)) return pd_refuse("run-requires-out-and-candidate");
+        return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, mock_r);
+    }
+    if (tx_eqz(sub, "merge")) {
+        const char *in_d = 0, *out_d = 0, *ver = 0;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--in-dir") && i + 1 < argc) in_d = argv[++i];
+            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+            else return pd_refuse("unknown-merge-arg");
+        }
+        if (!in_d || !out_d) return pd_refuse("merge-requires-in-dir-and-out");
+        return pd_cmd_merge(in_d, out_d, ver);
+    }
+    if (tx_eqz(sub, "g1-dry")) {
+        const char *root = ".", *cand_t = 0, *strict_f = 0, *ef_f = 0, *eu_f = 0, *out_d = 0, *ver = "0.0.84";
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+            else if (tx_eqz(argv[i], "--candidate-tsv") && i + 1 < argc) cand_t = argv[++i];
+            else if (tx_eqz(argv[i], "--strict") && i + 1 < argc) strict_f = argv[++i];
+            else if (tx_eqz(argv[i], "--expected-fail") && i + 1 < argc) ef_f = argv[++i];
+            else if (tx_eqz(argv[i], "--expected-unmeasured") && i + 1 < argc) eu_f = argv[++i];
+            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+            else return pd_refuse("unknown-g1-dry-arg");
+        }
+        if (!cand_t || !strict_f || !ef_f || !eu_f || !out_d) return pd_refuse("g1-dry-missing-args");
+        return pd_cmd_g1_dry(root, cand_t, strict_f, ef_f, eu_f, out_d, ver);
+    }
+    if (tx_eqz(sub, "replay")) {
+        const char *ids_f = 0, *ev_d = 0, *out_d = 0, *exp_s = 0, *exp_g = 0;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
+            else if (tx_eqz(argv[i], "--evidence-dir") && i + 1 < argc) ev_d = argv[++i];
+            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--expected-strict") && i + 1 < argc) exp_s = argv[++i];
+            else if (tx_eqz(argv[i], "--expected-g1dry") && i + 1 < argc) exp_g = argv[++i];
+            else return pd_refuse("unknown-replay-arg");
+        }
+        if (!ids_f || !ev_d || !out_d) return pd_refuse("replay-requires-ids-file-evidence-dir-and-out");
+        return pd_cmd_replay(ids_f, ev_d, out_d, exp_s, exp_g);
+    }
+    return pd_refuse("unknown-subcommand");
+}

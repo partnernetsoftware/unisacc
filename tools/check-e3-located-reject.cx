@@ -1,0 +1,138 @@
+/* tools/check-e3-located-reject.cx -- 0.0.85 diagnostics F2 (E3 group): the E3 rejections that used to print a bare
+ * "reject: REASON" now go through the located reporter (exec/parse2/errors-template.tsv reasons rows), so the first
+ * stderr line is FILE:LINE:COL: error: REASON.  The reason text is unchanged; rc stays non-zero and no object is written.
+ *   sh ./unisacc.com tools/check-e3-located-reject.cx -- PRODUCT [ABS_WORKDIR_PARENT]
+ * PRODUCT is run as `sh PRODUCT -c -o OBJ SRC` (batch argument {candidate}).  The work directory is a fresh mkdtemp
+ * under ABS_WORKDIR_PARENT (default /tmp); no environment variable and no git history is read.
+ * Cases: the 22 c-negative fixtures of the 11 E3 reasons (one line each), one multi-line source (line and column
+ * asserted), one rejection inside an included header (the header name and line asserted), and exact columns for
+ * the single-token sites (zero bound: the closing ], storage class: the second specifier).  Round 3 adds the goto
+ * to an undeclared label (reported at the label token, forward gotos and same-named labels of other functions legal).  A product without the located route (0.0.84) is red on every reject row.
+ * Last line: CHECK_E3_LOCATED_REJECT<TAB>ok=N<TAB>failed=M (rc 0 only when failed=0; rc 2 on bad usage). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+
+#define EL_PW 4400
+#define EL_OUT 16384
+
+static char el_work[EL_PW];
+static const char *el_cc;
+
+typedef struct { const char *name, *src, *reason; int line, col; } el_case;
+
+/* line/col 0 = only the FILE:LINE:COL shape is asserted */
+static const el_case el_cases[] = {
+    {"case-outside-switch", "int j(void){ case 1: return 0; }\n", "case label not within a switch", 1, 0},
+    {"default-outside-switch", "int j1(void){ default: return 0; }\n", "default label not within a switch", 1, 0},
+    {"case-in-loop-without-switch", "int j2(void){ while(1){ case 1: return 0; } }\n", "case label not within a switch", 1, 0},
+    {"case-after-completed-switch", "int j3(int x){ switch(x){case 1: break;} case 2: return 0; }\n", "case label not within a switch", 1, 0},
+    {"struct-redefinition", "struct S{int a;}; struct S{int b;};\n", "redefinition of struct or union", 1, 0},
+    {"struct-block-redefinition", "void sr(void){struct S{int a;};struct S{int b;};}\n", "redefinition of struct or union", 1, 0},
+    {"struct-in-progress-redefinition", "struct S{struct S{int b;} member;};\n", "redefinition of struct or union", 1, 0},
+    {"conflicting-typedef", "typedef int T1; typedef char T1;\n", "redefinition of typedef in the same scope", 1, 0},
+    {"typedef-same-type-repeat", "typedef int TSame; typedef int TSame;\n", "redefinition of typedef in the same scope", 1, 0},
+    {"typedef-block-repeat", "void tdblock(void){typedef int TBlock;typedef char TBlock;}\n", "redefinition of typedef in the same scope", 1, 0},
+    {"duplicate-parameter", "void vv(int a, int a){}\n", "redefinition of parameter", 1, 0},
+    {"duplicate-parameter-after-unnamed", "int pu0(int op, int x); int pu1(void *, int op, int op);\n", "redefinition of parameter", 1, 0},
+    {"void-value-used", "void vf(void){} int vu(void){ int x; x = vf(); return x; }\n", "void value not ignored as it ought to be", 1, 0},
+    {"int-plus-assign-string", "int ip(void){ int x = 0; x += \"s\"; return x; }\n", "invalid operands to compound assignment", 1, 0},
+    {"zero-array-size", "int t2[0];\n", "array size must be greater than zero", 1, 9},
+    {"void-parameter-named", "int vp(void v);\n", "parameter of type void must be unnamed and alone", 1, 0},
+    {"multiple-storage-classes", "static extern int b16;\n", "multiple storage classes in declaration specifiers", 1, 8},
+    {"duplicate-case", "int a15(void){ switch (1) { case 1: case 1: return 0; } return 1; }\n", "duplicate case value", 1, 0},
+    {"duplicate-case-zero", "int f(int x){switch(x){case 0:return 11;case 0:return 12;default:return 13;}}\n", "duplicate case value", 1, 0},
+    {"duplicate-case-folded", "int f(int x){switch(x){case 1+1:return 21;case 2:return 22;default:return 23;}}\n", "duplicate case value", 1, 0},
+    {"duplicate-case-enum", "enum{chosen=7};int f(int x){switch(x){case chosen:return 31;case 7:return 32;default:return 33;}}\n", "duplicate case value", 1, 0},
+    {"duplicate-case-converted", "int f(unsigned int x){switch(x){case -1:return 41;case ~0u:return 42;default:return 43;}}\n", "duplicate case value", 1, 0},
+    {"multi-line-zero-array", "int ok1;\n\nint ok2;\n   int t3[0];\n", "array size must be greater than zero", 4, 12},
+    {"multi-line-storage", "int ok1;\nint ok2;\nstatic\n  extern int b17;\n", "multiple storage classes in declaration specifiers", 4, 3},
+    /* F2 round 2: objectdefinitions same-unit redefinition (runs after the reasons pass, located in body-manifest) */
+    {"object-redefinition", "int x2 = 1; int x2 = 2;\n", "redefinition of this object", 1, 0},
+    {"static-object-redefinition", "static int y2 = 1; static int y2 = 2;\n", "redefinition of this object", 1, 0},
+    {"multi-line-object-redefinition", "int ok1;\nint z2 = 1;\n\n  int z2 = 2;\n", "redefinition of this object", 4, 0},
+    /* F2 round 2: a negative bound is refused at the E3 declarator like the zero bound (was a lower tape reject with a line only) */
+    {"negative-array-size", "int s2[-1];\n", "array size must be greater than zero", 1, 10},
+    {"negative-array-size-folded", "int s3[2-3];\n", "array size must be greater than zero", 1, 0},
+    {"negative-array-size-typedef", "typedef char sa_fail[1-2*1];\n", "array size must be greater than zero", 1, 0},
+    {"negative-array-size-local", "int nl(void){ int a[-4]; return 0; }\n", "array size must be greater than zero", 1, 0},
+    {"multi-line-negative-array", "int ok1;\n\n  int s4[-2];\n", "array size must be greater than zero", 3, 0},
+    /* F2 round 3: a goto to a label missing from its function is reported at the label token (C99 6.8.6.1; was the
+     * encoder's line-less "not covered: a branch to an undefined label") */
+    {"undefined-label", "int f(void){ goto nowhere; return 0; }\n", "use of undeclared label 'nowhere'", 1, 19},
+    {"undefined-label-multi-line", "int f(void){\n  int x = 0;\n  goto missing;\n  return x;\n}\n", "use of undeclared label 'missing'", 3, 8},
+    {"undefined-label-other-function", "void f(void){ L: ; }\nint g(void){ goto L; return 0; }\n", "use of undeclared label 'L'", 2, 19},
+    {"undefined-label-after-defined", "int f(void){ goto a; a: goto b; return 1; }\n", "use of undeclared label 'b'", 1, 30},
+};
+
+/* legal neighbours of the new rejects: they must still compile (rc 0, object written, empty stderr) */
+static const char *const el_accepts[][2] = {
+    {"accept-positive-bounds", "int p1[1]; int p2[2-1]; typedef char sa_ok[1-2*0]; unsigned char p3[0x7fffu]; int pl(void){ int a[3]; a[0] = 0; return a[0]; }\n"},
+    {"accept-object-once", "int q1 = 1; int q1; extern int q1; static int q2; static int q2 = 2; int qf(void){ return q1 + q2; }\n"},
+    {"accept-goto-labels", "int ga(int x){ goto fwd; back: return x; fwd: x++; if (x < 3) goto back; for (;;) { if (x) goto out; } out: switch (x) { case 1: goto back; default: { goto inner; inner: ; } } return x; }\n"
+                           "int gb(int x){ goto fwd; fwd: if (x) goto back; return 1; back: return 2; }\n"
+                           "int gc(void){ unused: return 0; }\n"},
+};
+
+static int el_digits(const char *s, int *val) { int n = 0, v = 0; while (s[n] >= '0' && s[n] <= '9') { v = v * 10 + (s[n] - '0'); n++; } *val = v; return n; }
+
+/* first line of out must be FILE:LINE:COL: error: REASON...; returns 1 when it matches */
+static int el_located(const char *out, const char *file, const char *reason, int line, int col) {
+    size_t fl = strlen(file), rl = strlen(reason); int l = 0, c = 0, n;
+    if (strncmp(out, file, fl) || out[fl] != ':') return 0;
+    out += fl + 1; if (!(n = el_digits(out, &l)) || out[n] != ':') return 0;
+    out += n + 1; if (!(n = el_digits(out, &c)) || strncmp(out + n, ": error: ", 9)) return 0;
+    out += n + 9; if (strncmp(out, reason, rl)) return 0;
+    if (line && l != line) return 0; if (col && c != col) return 0;
+    return l > 0 && c > 0;
+}
+
+static int el_compile(const char *name, const char *src, char *out, size_t cap, int *no_obj) {
+    char cpath[EL_PW], opath[EL_PW], leaf[EL_PW]; struct stat st; int rc;
+    if (cx_fmt(leaf, sizeof leaf, "%s.c", name) || cx_fmt(cpath, sizeof cpath, "%s/%s", el_work, leaf) || cx_fmt(opath, sizeof opath, "%s/%s.o", el_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    if (chdir(el_work)) return -1;
+    char *av[] = {"sh", (char *)el_cc, "-c", "-o", opath, leaf, 0};
+    rc = ck_run(av, out, cap);
+    *no_obj = stat(opath, &st) != 0;
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    char out[EL_OUT], tmpl[EL_PW], file[EL_PW];
+    if (argc < 2 || argc > 3 || argv[1][0] != '/' || (argc == 3 && argv[2][0] != '/')) { fputs("usage: check-e3-located-reject.cx -- ABS_PRODUCT [ABS_WORKDIR_PARENT]\n", stderr); return 2; }
+    el_cc = argv[1];
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/check-e3-located.XXXXXX", argc == 3 ? argv[2] : "/tmp") || !mkdtemp(tmpl)) { fputs("check-e3-located-reject: REFUSE workdir\n", stderr); return 2; }
+    if (cx_fmt(el_work, sizeof el_work, "%s", tmpl)) return 2;
+    for (size_t i = 0; i < sizeof el_cases / sizeof el_cases[0]; i++) {
+        const el_case *k = &el_cases[i]; int no_obj = 0;
+        memset(out, 0, sizeof out);
+        int rc = el_compile(k->name, k->src, out, sizeof out, &no_obj);
+        if (cx_fmt(file, sizeof file, "%s.c", k->name)) return 2;
+        ck(rc != 0 && rc != -1, k->name);
+        ck(no_obj, k->name);
+        int ok = el_located(out, file, k->reason, k->line, k->col);
+        if (!ok) fprintf(stderr, "  %s: first line: %.160s\n", k->name, out);
+        ck(ok, k->name);
+    }
+    for (size_t i = 0; i < sizeof el_accepts / sizeof el_accepts[0]; i++) {
+        int no_obj = 1;
+        memset(out, 0, sizeof out);
+        int rc = el_compile(el_accepts[i][0], el_accepts[i][1], out, sizeof out, &no_obj);
+        if (rc != 0 || no_obj || out[0]) fprintf(stderr, "  %s: rc=%d stderr: %.160s\n", el_accepts[i][0], rc, out);
+        ck(rc == 0 && !no_obj && !out[0], el_accepts[i][0]);
+    }
+    {   /* rejection inside an included header: the header name and its line are the location */
+        char hp[EL_PW]; int no_obj = 0; const char *h = "int h_ok;\ntypedef int HT; typedef char HT;\n";
+        if (cx_fmt(hp, sizeof hp, "%s/el_hdr.h", el_work) || cx_write(hp, h, strlen(h))) return 2;
+        memset(out, 0, sizeof out);
+        int rc = el_compile("include-header", "#include \"el_hdr.h\"\nint main(void){return 0;}\n", out, sizeof out, &no_obj);
+        ck(rc != 0 && rc != -1 && no_obj, "include-header.refuses");
+        int ok = el_located(out, "el_hdr.h", "redefinition of typedef in the same scope", 2, 0);
+        if (!ok) fprintf(stderr, "  include-header: first line: %.160s\n", out);
+        ck(ok, "include-header.located");
+    }
+    if (chdir("/") || cx_rmtree(el_work)) fprintf(stderr, "check-e3-located-reject: workdir left: %s\n", el_work);
+    printf("CHECK_E3_LOCATED_REJECT\tok=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() != 0;
+}

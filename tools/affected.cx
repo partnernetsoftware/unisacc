@@ -909,7 +909,7 @@ static int prep_verify(Prep *P) {
 /* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
    absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
    resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
-enum { PK_CLASSIC_REF = 11 };
+enum { PK_CLASSIC_REF = 11, PK_OPTFRAME4 = 12 };
 static int prep_kind_of(const char *name, int kind) {
     long nl = tx_len(name, 256);
     if (kind == 2) {
@@ -927,6 +927,8 @@ static int prep_kind_of(const char *name, int kind) {
     if (tx_eqz(name, "streams")) return PK_STREAMS;
     if (tx_eqz(name, "identity-helper")) return PK_IDENT;
     if (tx_eqz(name, "old-product") || tx_eqz(name, "new-product") || tx_eqz(name, "new-models")) return PK_OLDP;
+    if (tx_eqz(name, "o1-run") || tx_eqz(name, "o1-net") || tx_eqz(name, "o1-table") ||
+        tx_eqz(name, "o2-run") || tx_eqz(name, "o2-net") || tx_eqz(name, "o2-table")) return PK_OPTFRAME4;
     return PK_TOOL;
 }
 static int prep_source(const char *name, int kind, char *src, long cap, char *why, int whycap) {
@@ -938,6 +940,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
     if (pk == PK_HOSTC) { cx_fmt(src, cap, "tools/libneed-native-material.cx"); return 0; }
     if (pk == PK_OLDP) { cx_fmt(src, cap, "tools/old-product-material.cx"); return 0; }
+    if (pk == PK_OPTFRAME4) { cx_fmt(src, cap, "tools/opt-frame4-material.cx"); return 0; }
     if (pk == PK_CLASSIC_REF) return cx_fmt(src,cap,"tools/ref-material.cx");
     if (pk == PK_HOST && tx_eqz(name, "hosttcc")) {
         const char *want = getenv("TCC"), *at = getenv("PATH");
@@ -1043,6 +1046,57 @@ static int oldp_prepare(void) {
     oldp_state = 1;
     return 0;
 }
+/* PK_OPTFRAME4: o1/o2 opt-frame4 runner + net + table from tools/opt-frame4-material.cx (prepare, then gate). */
+static int optf4_state;
+static char optf4_path[6][4400], optf4_why[200];
+static int optf4_prepare(void) {
+    static const char *deps[6] = {
+        "seed/gen.c", "seed/tbl.c", "seed/net.c",
+        "exec/opt/gen-manifest.tsv", "exec/facts/opt-gen.tsv", "archive/reference-c/exec/c/run.c"
+    };
+    static const char *keys[6] = {"\to1-run=", "\to1-net=", "\to1-table=", "\to2-run=", "\to2-net=", "\to2-table="};
+    char product[4400], launcher[4400], bound[4400], csha[65], dsha[6][65], dp[4400], idl[10240], id[65], out[4400];
+    sy_stat_t st; Buf o = {0, 0, 0}; int rc, i;
+    if (optf4_state) return optf4_state > 0 ? 0 : -1;
+    optf4_state = -1;
+    if (layout_candidate(product, sizeof product, candidate_dir ? candidate_dir : root) ||
+        root_candidate(launcher, sizeof launcher) || cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) {
+        cx_fmt(optf4_why, sizeof optf4_why, "opt-frame4-path-bound"); return -1;
+    }
+    if (file_sha(product, csha)) { cx_fmt(optf4_why, sizeof optf4_why, "no-producer=o1-run:candidate-unreadable"); return -1; }
+    for (i = 0; i < 6; i++) {
+        if (cx_fmt(dp, sizeof dp, "%s/%s", root, deps[i]) || file_sha(dp, dsha[i])) {
+            cx_fmt(optf4_why, sizeof optf4_why, "no-producer=o1-run:missing-dep:%s", deps[i]); return -1;
+        }
+    }
+    if (cx_fmt(idl, sizeof idl, "opt-frame4-material-v1\n%s\nroot=%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
+               csha, root, dsha[0], dsha[1], dsha[2], dsha[3], dsha[4], dsha[5])) return -1;
+    tp_sha(idl, (size_t)tx_len(idl, sizeof idl), id);
+    if (cx_fmt(out, sizeof out, "%s/opt-frame4-material-%.16s.dir", cachedir, id)) return -1;
+    if (sy_lstat(out, &st) == -ENOENT) {
+        char *v[] = {bound, "55", "sh", launcher, "tools/opt-frame4-material.cx", "--", "prepare", root, product, out, 0};
+        rc = read_all(v, &o);
+        if (rc) { cx_fmt(optf4_why, sizeof optf4_why, "opt-frame4-material-refused=prepare:rc=%d", rc); return -1; }
+        o.n = 0;
+    }
+    {
+        char *v[] = {bound, "15", "sh", launcher, "tools/opt-frame4-material.cx", "--", "gate", out, "--candidate", product, 0};
+        rc = read_all(v, &o);
+        if (rc || !o.p || tx_find(o.p, o.n, "OPT_FRAME4_MATERIAL\tREADY\t", 26) < 0) {
+            cx_fmt(optf4_why, sizeof optf4_why, "opt-frame4-material-refused=gate:rc=%d", rc); return -1;
+        }
+        for (i = 0; i < 6; i++) {
+            long kl = tx_len(keys[i], 32), k = tx_find(o.p, o.n, keys[i], kl), e;
+            if (k < 0) { cx_fmt(optf4_why, sizeof optf4_why, "opt-frame4-material-refused=gate-row"); return -1; }
+            for (e = k + kl; e < o.n && o.p[e] != '\t' && o.p[e] != '\n'; e++) {}
+            if (tx_copy(optf4_path[i], sizeof optf4_path[i], o.p + k + kl, e - k - kl)) {
+                cx_fmt(optf4_why, sizeof optf4_why, "opt-frame4-path-bound"); return -1;
+            }
+        }
+    }
+    optf4_state = 1;
+    return 0;
+}
 /* register NAME when it is preparable; returns its slot or -1 (with WHY set) */
 static int prep_plan(const char *name, int kind, char *why, int cap) {
     int k = prep_find(name); Prep *P; char h[65], buf[600];
@@ -1080,6 +1134,15 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         int i = tx_eqz(name, "old-product") ? 0 : tx_eqz(name, "new-product") ? 1 : 2;
         if (oldp_prepare()) { cx_fmt(why, cap, "%s", oldp_why); return -1; }
         if (cx_fmt(P->path, sizeof P->path, "%s", oldp_path[i]) || file_sha(P->path, P->sha)) { cx_fmt(why, cap, "material-unreadable=%s", name); return -1; }
+        if (mm_copy(P->closure, sizeof P->closure, P->sha, 65) || mm_copy(P->id, sizeof P->id, P->sha, 16)) die("material identity bound");
+        P->id[16] = 0;
+        P->state = PS_READY; P->cached = 1; return nprep++;
+    }
+    if (P->kind == PK_OPTFRAME4) {
+        int i = tx_eqz(name, "o1-run") ? 0 : tx_eqz(name, "o1-net") ? 1 : tx_eqz(name, "o1-table") ? 2
+              : tx_eqz(name, "o2-run") ? 3 : tx_eqz(name, "o2-net") ? 4 : 5;
+        if (optf4_prepare()) { cx_fmt(why, cap, "%s", optf4_why); return -1; }
+        if (cx_fmt(P->path, sizeof P->path, "%s", optf4_path[i]) || file_sha(P->path, P->sha)) { cx_fmt(why, cap, "material-unreadable=%s", name); return -1; }
         if (mm_copy(P->closure, sizeof P->closure, P->sha, 65) || mm_copy(P->id, sizeof P->id, P->sha, 16)) die("material identity bound");
         P->id[16] = 0;
         P->state = PS_READY; P->cached = 1; return nprep++;

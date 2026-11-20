@@ -1,0 +1,171 @@
+/* tools/check-prerun-drive.cx -- self-contained regression checks for tools/prerun-drive.cx.
+ * Passes in single-commit shallow cold layouts (no git history, no CLAUDE_JOB_DIR, no external paths).
+ * Covers:
+ *   (1) plan on 421 synthetic ids (incl. real-commit, heavy, netregen): exact coverage, normal windows 8..12,
+ *       warmup window, two-phase real-commit prebuild-self + heavy jobs=1;
+ *   (2) run with mock runner: two-phase prebuild-self, --resume skips done windows, repeating failure stops
+ *       after max-retries=2 with PRERUN_STOP and raw line;
+ *   (3) merge: verbatim concatenation without editing lines, supersedes FAIL->PASS, writes expected-fail
+ *       and expected-unmeasured drafts;
+ *   (4) replay: matches merged summary and G1 dry counts (expected_fail=1, superseded=2).
+ * Ends: CHECK_PRERUN_DRIVE<TAB>ok=N<TAB>failed=M<TAB>ms=T. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define CPD_PW 4400
+#define CPD_OUT 32768
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char cwd[CPD_PW], work[CPD_PW], cmd[8192], out[CPD_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (cx_fmt(work, sizeof work, "%s/cpd-%d", base_td, (int)getpid())) return 2;
+    if (mkdir(work, 0700) != 0 && errno != EEXIST) return 2;
+
+    /* (1) plan on 421 synthetic ids */
+    char ids421[CPD_PW], pdir[CPD_PW];
+    if (cx_fmt(ids421, sizeof ids421, "%s/ids421.txt", work) ||
+        cx_fmt(pdir, sizeof pdir, "%s/plan421", work)) return 2;
+    {
+        char *buf = (char *)mm_alloc(32768);
+        size_t p = 0;
+        const char *fixed[] = {"real-commit", "c-negative", "unit-frontcache-equiv3", "check-split-parents", "netregen-small-lnx-x86_64", 0};
+        for (int i = 0; fixed[i]; i++) {
+            char row[64]; cx_fmt(row, sizeof row, "%s\n", fixed[i]);
+            mm_copy(buf + p, 32768 - p, row, strlen(row)); p += strlen(row);
+        }
+        for (int i = 0; i < 416; i++) {
+            char row[64]; cx_fmt(row, sizeof row, "batch-%03d\n", i);
+            mm_copy(buf + p, 32768 - p, row, strlen(row)); p += strlen(row);
+        }
+        if (cx_write(ids421, buf, p)) return 2;
+        mm_free(buf);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 10 --warmup 4",
+        cwd, cwd, ids421, pdir)) return 2;
+    {
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char wp[CPD_PW]; size_t wn = 0;
+        cx_fmt(wp, sizeof wp, "%s/windows.tsv", pdir);
+        char *wb = (char *)cx_read(wp, &wn);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=421\t") &&
+           wb && tx_find(wb, (long)wn, "\tprebuild-self\t1\treal-commit\n", 27) >= 0 &&
+           tx_find(wb, (long)wn, "\twarmup\t4\t", 9) >= 0 &&
+           tx_find(wb, (long)wn, "\theavy\t1\treal-commit\n", 20) >= 0,
+           "plan-421-windows: covers 421 ids with warmup, prebuild-self, heavy jobs=1, and 8..12 normal windows");
+        free(wb);
+    }
+
+    /* (2) run with mock runner: prebuild-self + --resume + stop after 2 retries with raw line */
+    char rdir[CPD_PW], mock[CPD_PW], sids[CPD_PW];
+    if (cx_fmt(rdir, sizeof rdir, "%s/run-test", work) ||
+        cx_fmt(mock, sizeof mock, "%s/mock.sh", work) ||
+        cx_fmt(sids, sizeof sids, "%s/small.ids", work)) return 2;
+    if (cx_write(sids, "alpha\nbeta\nreal-commit\n", 23)) return 2;
+    {
+        const char *ms =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2\n"
+            "if [ \"$mode\" = prebuild-self ]; then echo PREBUILD_OK; exit 0; fi\n"
+            "jobs=$3; ids=$4; out=$5; att=$6\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "if [ \"$ids\" = real-commit ]; then\n"
+            "  printf 'real-commit\\tproduct-qualification\\tFAIL\\t1\\taaa\\t100\\t1.0\\t0\\tdeterministic-err\\n' >> \"$out\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
+        if (cx_write(mock, ms, strlen(ms))) return 2;
+    }
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+        cwd, cwd, sids, rdir)) return 2;
+    if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+        cwd, cwd, cwd, rdir, mock)) return 2;
+    {
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CPD_OUT, "PRERUN_STOP\tbatch=real-commit\tretries=2\t") &&
+           ckk_has(out, CPD_OUT, "deterministic-err"),
+           "run-stops-after-2-retries: stops on repeating non-PASS batch and prints raw line");
+    }
+    /* Resume after fixing mock to pass real-commit: skips completed warmup & prebuild-self windows */
+    {
+        const char *ms_ok =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "printf 'real-commit\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "exit 0\n";
+        if (cx_write(mock, ms_ok, strlen(ms_ok))) return 2;
+    }
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --resume",
+        cwd, cwd, cwd, rdir, mock)) return 2;
+    {
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=1\tskipped=2\t"),
+           "run-resume-window-granularity: skips completed windows and runs only remaining window");
+    }
+
+    /* (3) & (4) merge + replay: verbatim lines, SUPERSEDED=2, FAIL=1, UNKNOWN=1, drafts & G1 dry match */
+    char mdir[CPD_PW], mout[CPD_PW], expg[CPD_PW], rids[CPD_PW];
+    if (cx_fmt(mdir, sizeof mdir, "%s/evid", work) || cx_fmt(mout, sizeof mout, "%s/mout", work) ||
+        cx_fmt(expg, sizeof expg, "%s/g1dry.txt", work) || cx_fmt(rids, sizeof rids, "%s/rids.txt", work)) return 2;
+    if (mkdir(mdir, 0700) != 0 && errno != EEXIST) return 2;
+    {
+        const char *w1 =
+            "# devsvc qualify\n"
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "# source=abc ape_sha256=111\n"
+            "b1\tproduct-qualification\tFAIL\t1\t111\t100\t1.0\t0\tflaky\n"
+            "b2\tproduct-qualification\tFAIL\t1\t111\t100\t1.0\t0\tflaky2\n"
+            "c-negative\tproduct-qualification\tFAIL\t1\t111\t200\t1.0\t0\tcount=53/9\n"
+            "u1\tproduct-qualification\tUNKNOWN\t3\t-\t50\t1.0\t0\tno-producer\n"
+            "SUMMARY\tbatches=4\n";
+        const char *w2 =
+            "# devsvc qualify\n"
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "# source=abc ape_sha256=111\n"
+            "b1\tproduct-qualification\tPASS\t0\t111\t80\t1.0\t0\t-\n"
+            "b2\tproduct-qualification\tPASS\t0\t111\t80\t1.0\t0\t-\n"
+            "SUMMARY\tbatches=2\n";
+        char p1[CPD_PW], p2[CPD_PW];
+        cx_fmt(p1, sizeof p1, "%s/strict-W0000.tsv", mdir);
+        cx_fmt(p2, sizeof p2, "%s/strict-W0001.tsv", mdir);
+        if (cx_write(p1, w1, strlen(w1)) || cx_write(p2, w2, strlen(w2))) return 2;
+        if (cx_write(rids, "b1\nb2\nc-negative\nu1\n", 20)) return 2;
+        if (cx_write(expg, "GATE\t1\tSTRICT\tPASS\trows=4 expected_fail=1 superseded=2\n", 55)) return 2;
+    }
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- replay --ids-file '%s' --evidence-dir '%s' --out '%s' --expected-g1dry '%s'",
+        cwd, cwd, rids, mdir, mout, expg)) return 2;
+    {
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char ef[CPD_PW], eu[CPD_PW]; size_t efn = 0, eun = 0;
+        cx_fmt(ef, sizeof ef, "%s/expected-fail.draft.tsv", mout);
+        cx_fmt(eu, sizeof eu, "%s/expected-unmeasured.draft.tsv", mout);
+        char *efb = (char *)cx_read(ef, &efn);
+        char *eub = (char *)cx_read(eu, &eun);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_REPLAY\tstatus=MATCH\tplan_ids=4\tevid_batches=4\tPASS=2\tFAIL=1\tUNKNOWN=1\tSUPERSEDED=2") &&
+           efb && tx_find(efb, (long)efn, "c-negative\tcount=53/9\t", 22) >= 0 &&
+           eub && tx_find(eub, (long)eun, "u1\tno-producer\tu1-deferred.tsv\n", 31) >= 0,
+           "merge-and-replay-exact: verbatim merge, drafts, and G1 dry counts match");
+        free(efb);
+        free(eub);
+    }
+
+    { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+    printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}

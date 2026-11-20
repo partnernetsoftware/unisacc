@@ -6,8 +6,8 @@
  * /proc/PID/stat start time differs: pid reuse) is reclaimed by rename-then-unlink, so no stale
  * lease outlives its owner.
  *
- * Capacity = min(cores, MemAvailable GB / DEVSVC_NODE_GB (default 2)), halved when load1 exceeds
- * 2 x cores, at most FA_MAX.  Test seams: DEVSVC_MEMINFO (meminfo path), DEVSVC_LOADAVG (loadavg
+ * Capacity = min(cores, MemAvailable GB / DEVSVC_NODE_GB (default 2)), at most FA_MAX; load1 never
+ * changes it (load gates retired 2026-11-20).  Test seams: DEVSVC_MEMINFO (meminfo path), DEVSVC_LOADAVG (loadavg
  * path), DEVSVC_NCPU.  DEVSVC_ADMISSION=off disables admission (for checks only).
  *
  * API:  fa_enabled()                 1 when admission applies (prepares the slot directory)
@@ -16,10 +16,8 @@
  *       fa_release(slots, n)         give the tokens back
  *       fa_budget()                  free tokens now (capacity minus live leases), at least 1;
  *                                    callers size their default parallelism by it
- *       fa_load(), fa_load_max(), fa_load_wait_ms()   load gate used by cxlib.flowexec: no new exec
- *                                    node starts while load1 > max (config row admit_load_max, default 10;
- *                                    seam DEVSVC_LOAD_MAX), for at most wait ms per run (row
- *                                    admit_load_wait_ms, default 5000; seam DEVSVC_LOAD_WAIT_MS)
+ *       fa_load()                    load1 now, for records only; it gates nothing (the load gate,
+ *                                    fa_load_max/fa_load_wait_ms and rows admit_load_*, retired 2026-11-20)
  * Admission only delays starts; it never changes what a caller runs or in which order.
  */
 #pragma unisa module flowadmit
@@ -81,33 +79,11 @@ static long fa_ncpu(void) {
     free(b); return n;
 }
 
-/* Load gate config: row KEY<TAB>VALUE of the devsvc config table ($DEVSVC_REPO_TABLE, else
-   tools/devsvc-repo.tsv under the current directory); matched at line start only, -1 when absent. */
-static double fa_cfg(const char *key) {
-    const char *t = getenv("DEVSVC_REPO_TABLE"); char *b = fa_slurp(t && *t ? t : "tools/devsvc-repo.tsv", 1L << 20), *p;
-    size_t kl = strlen(key); double v = -1;
-    for (p = b; p && *p; ) {
-        if (!strncmp(p, key, kl) && p[kl] == 9) { v = atof(p + kl + 1); break; }
-        p = strchr(p, 10); if (p) p++;
-    }
-    free(b); return v;
-}
 double fa_load(void) { return fa_load1(); }
-/* gate threshold: DEVSVC_LOAD_MAX, else row admit_load_max, else 10 */
-double fa_load_max(void) {
-    const char *e = getenv("DEVSVC_LOAD_MAX"); double v = e && *e ? atof(e) : fa_cfg("admit_load_max");
-    return v > 0 ? v : 10.0;
-}
-/* longest a flow run holds new starts back for load: DEVSVC_LOAD_WAIT_MS, else row admit_load_wait_ms, else 5000 */
-long fa_load_wait_ms(void) {
-    const char *e = getenv("DEVSVC_LOAD_WAIT_MS"); double v = e && *e ? atof(e) : fa_cfg("admit_load_wait_ms");
-    return v > 0 ? (long)v : 5000;
-}
 
 int fa_cap(void) {
     long n = fa_ncpu(), ncpu = fa_envl("DEVSVC_NCPU", n > 0 ? n : 1), gb = fa_envl("DEVSVC_NODE_GB", 2), kb = fa_meminfo_kb(), cap = ncpu;
     if (kb >= 0 && kb / (gb * 1048576L) < cap) cap = kb / (gb * 1048576L);
-    if (fa_load1() > 2.0 * (double)ncpu) cap /= 2;
     if (cap > FA_MAX) cap = FA_MAX;
     return cap < 0 ? 0 : (int)cap;
 }

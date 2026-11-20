@@ -1,0 +1,87 @@
+/* tools/check-c-neg-f1.cx -- 0.0.85 diagnostics phase 3, F1: C99 constraint violations that c-negative found
+ * accepted, now located rejections by default, with their legal neighbours still compiled.
+ *   sh ./unisacc.com tools/check-c-neg-f1.cx -- CANDIDATE
+ * CANDIDATE is the product under test (run as sh CANDIDATE -c -b lnx/x86_64 ...).  For every reject case:
+ * rc != 0, the output names the fixture file with line and column (f.c:1:N:), carries the message, and no object is
+ * written.  For every accept case: rc 0 and the object exists.  -Wall keeps the warning-and-continue contract of
+ * check-c99-warn for int-to-pointer.
+ * Last line: CHECK_C_NEG_F1<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define CNF_PW 4400
+#define CNF_OUT 16384
+
+static char cnf_work[CNF_PW];
+static const char *cnf_cc;
+
+static int cnf_compile(const char *name, const char *src, const char *flag, char *out, size_t cap, char *obj, size_t ocap) {
+    char cpath[CNF_PW];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s.c", cnf_work, name)) return -1;
+    if (cx_fmt(obj, (int)ocap, "%s/%s.o", cnf_work, name)) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(obj);
+    if (flag) {
+        char *av[] = {"sh", (char *)cnf_cc, (char *)flag, "-c", "-b", "lnx/x86_64", cpath, "-o", obj, 0};
+        return ck_run(av, out, (int)cap);
+    }
+    char *av[] = {"sh", (char *)cnf_cc, "-c", "-b", "lnx/x86_64", cpath, "-o", obj, 0};
+    return ck_run(av, out, (int)cap);
+}
+
+/* reject: rc != 0, no object, message present, located at NAME.c:1:COL: */
+static void cnf_reject(const char *id, const char *src, const char *col, const char *msg) {
+    char out[CNF_OUT], obj[CNF_PW], where[256]; struct stat st;
+    int rc = cnf_compile(id, src, 0, out, sizeof out, obj, sizeof obj);
+    if (cx_fmt(where, sizeof where, "%s.c:1:%s: error:", id, col)) { ck(0, id); return; }
+    ck(rc != 0 && stat(obj, &st) != 0 && ckk_has(out, CNF_OUT, msg) && ckk_has(out, CNF_OUT, where), id);
+}
+
+static void cnf_accept(const char *id, const char *src) {
+    char out[CNF_OUT], obj[CNF_PW]; struct stat st;
+    int rc = cnf_compile(id, src, 0, out, sizeof out, obj, sizeof obj);
+    ck(rc == 0 && stat(obj, &st) == 0, id);
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    char out[CNF_OUT], obj[CNF_PW];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (argc < 2 || argv[1][0] != '/') { fputs("usage: check-c-neg-f1 CANDIDATE (absolute path)\n", stderr); return 2; }
+    cnf_cc = argv[1];
+    if (cx_fmt(cnf_work, sizeof cnf_work, "%s/check-c-neg-f1-%d", base_td, (int)getpid())) return 2;
+    if (mkdir(cnf_work, 0700) != 0) return 2;
+
+    /* int-to-pointer-init: C99 6.5.16.1p1 via 6.7.8p11; the null pointer constant 0, casts, pointer values and
+     * calls (implicitly int-returning module functions) are not this constraint's business. */
+    cnf_reject("itp-int", "int f2(void){ int *p = 5; return p != 0; }\nint main(void){return 0;}\n", "24", "incompatible integer to pointer conversion");
+    cnf_reject("itp-var", "int f3(void){ int n = 3; char *p = n; return p != 0; }\nint main(void){return 0;}\n", "36", "incompatible integer to pointer conversion");
+    cnf_accept("itp-ok-null", "int f4(void){ int *p = 0; char *s = 0; return p == 0 && s == 0; }\nint main(void){return f4();}\n");
+    cnf_accept("itp-ok-cast", "int f5(void){ long *l = (long *)5; int *q = l ? (int *)0 : 0; return q == 0; }\nint main(void){return f5();}\n");
+    cnf_accept("itp-ok-ptr", "int f6(int *a){ int *p = a; void *v = p; char *c = (char *)v; return c != 0; }\nint main(void){return 0;}\n");
+    cnf_accept("itp-ok-scalar", "int f7(void){ int i = 5; long l = i; double d = 0; return (int)(i + l + d); }\nint main(void){return 0;}\n");
+    /* incompatible-pointer-init: C99 6.7.8p11 / 6.5.16.1p1, object pointers whose integer referenced types differ in
+     * size; same type, signedness-only differences, void *, casts, struct pointers and pointer-to-pointer pass. */
+    cnf_reject("ipi-int-char", "int r(void){ int *p = 0; char *c = p; return c != 0; }\nint main(void){return 0;}\n", "36", "incompatible pointer types");
+    cnf_reject("ipi-long-short", "int r2(long *l){ short *s = l; return s != 0; }\nint main(void){return 0;}\n", "29", "incompatible pointer types");
+    cnf_accept("ipi-ok-same", "int r3(int *a){ int *p = a; char b[4]; char *c = b; const char *k = \"x\"; return p != 0 && c != 0 && k != 0; }\nint main(void){return 0;}\n");
+    cnf_accept("ipi-ok-void", "int r4(int *a){ void *v = a; char *c = v; unsigned char *u = (unsigned char *)c; return u != 0; }\nint main(void){return 0;}\n");
+    cnf_accept("ipi-ok-struct", "struct S { int x; }; int r5(struct S *s){ struct S *t = s; int **pp = 0; int **qq = pp; return t != 0 && qq == 0; }\nint main(void){return 0;}\n");
+    {   /* -Wall keeps the c99-warn contract: warning, rc 0, object written */
+        struct stat st;
+        int rc = cnf_compile("itp-wall", "int f8(void){ int *p = 5; return p != 0; }\nint main(void){return 0;}\n", "-Wall", out, sizeof out, obj, sizeof obj);
+        ck(rc == 0 && stat(obj, &st) == 0 && ckk_has(out, CNF_OUT, "warning: incompatible integer to pointer conversion [-Wint-conversion]"), "itp-wall-warns");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", cnf_work, 0};
+        (void)ck_run(rmv, out, sizeof out);
+    }
+    printf("CHECK_C_NEG_F1\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
