@@ -1,6 +1,6 @@
 # unisacc 0.0.84 发布说明
 
-状态:同候选原生 CI run 待填。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,外目标执行格(macOS、Windows、arm64 原生)UNVERIFIED,严格证据只覆盖下列批次,不得称全批资格。
+状态:已公开(release-exec EXECUTED steps=7,公开读回 SHA256 与候选一致)。同候选原生 CI run 44647659602 一次通过:六目标 success,2026-11-20T00:39:59Z 到 00:47:15Z 约 7.5 分钟,无失败格重跑(0.0.83 曾因 osx/x86_64 stream-pipe 部件 e 超界重跑)。整体裁决 NOT_QUALIFIED:全套 s9 本版未跑,产品资格域未整域实跑,CI 六格只跑 version、hello、run、stdio-crossunit、stream-pipe、smoke 冒烟子集,不等于外目标资格,严格证据只覆盖下列批次,不得称全批资格。
 
 ## 真实身份
 
@@ -13,7 +13,7 @@
 | pkg.bin | 01fa8893715f580c87ee21d41226a1be1b983bae09d3fdde7fe99f3b9f267d87 |
 | slice-win-arm64 | 563759cfba57d20bd006c5c0274374a328331c69928af8931ca6c968f4e4e64d |
 | SHA256SUMS | f64d35f4c05487a51e8e445b372aa277510c162d41dd8c33a71c2ae807631c96 |
-| CI run | 待填 |
+| CI run | 44647659602(六目标 success,一次通过,候选 3a226945,commit 列为阶段 A F2=c9995131860cfc17cbc6672cd06e5ec5dc2a9d7c;release-exec Y1=f708c82ddd,Y2=f65c432114) |
 
 ## 产品改动
 
@@ -29,7 +29,7 @@
 ## 开发工具链(不进产品)
 
 (1) S1 生成器总闸 tools/gen-all-check.cx 接入起链(chain-ready 前置 15 条)与提交预检。三次复核教训:门在真实暂存索引树上执行并能找到已装产品;只有生成物确实漂移才以 DIFF 阻塞,工具不可用或超时保留 ERROR 原文;保留全量 42 个生成器实跑断言并另验真实提交路径;全树检查后续热修为 21 加 21 分片并与 drift 预检时限解耦。起链前 42/42 通过,另列两个既有 uncovered。
-(2) S3 stream-pipe 拆分:原 main、e 两组拆为 11 个部件(basic、stdio、multi、reject、e-ref、e-0 到 e-4、e-compare),13 个断言多重集不变,每部件界限仍 55 秒不放宽;CI 首轮各部件耗时待填,目标最慢部件不高于 40 秒。
+(2) S3 stream-pipe 拆分:原 main、e 两组拆为 11 个部件(basic、stdio、multi、reject、e-ref、e-0 到 e-4、e-compare),13 个断言多重集不变,每部件界限仍 55 秒不放宽;CI 首轮(run 44647659602)最慢部件为 osx/x86_64 multi 26829 ms,达到不高于 40 秒的目标;各格明细见已知缺口 S3 观测一节。
 (3) R1 release-flow r2:阶段 A 备料与干跑分相,核严格证据段顺序、机器列与拆分父批覆盖。
 (4) R2 第一半:送审三块(RAW 身份字段、真实程序缺口调研、闭包采集器原型);本版不据其建议免跑。
 (5) R3 真实提交预演:私有仓以完整 main 与实际钩子执行拟提交补丁(tools/check-real-commit.cx),real-commit 两相(布局内 prebuild-self 后单跑)进入严格证据。
@@ -54,10 +54,23 @@
 整链输入 fa36c2e3bf,04:49 到 05:13 约 24 分钟,一次通过。冻结 F=df14f1e334 为合入 main 工具的最终布局 T5,产品输入相对整链输入零差异(差异只在 build、tests、tools、plans、ujs)。链目录 /tmp/unisacc-session-v084-chain/fa36c2e3bfef83fdb19e025c866a83ac900d9b1c。
 
 速度账(tools/speed-ledger.cx --version 0.0.84 实跑,阶段 A 时):槽到起链 187.1 分钟;整链出口 211.1 分钟(整链 1/1 次,链效率 100%,链并行度 2.52);预跑并行度 1.43;选批 421/722(58.3%);计划单元 9;起链后提交 10;预跑完成与公开时点工具报 UNMEASURED,公开后重取。
+公开后重取(同工具实跑,2026-11-20):槽到起链 187.1 分钟,整链出口 211.1 分钟(整链 24.0 分钟),预跑三次全部完成 416.5 分钟,槽到公开 425.6 分钟,整链出口到公开 214.5 分钟(含预跑三次与阶段 A);整链 1/1,链效率 100%,链并行度 2.52,预跑并行度 1.43,选批 421/722(58.3%);planned_units 9,done_units 与 unplanned_units 工具当时报 UNMEASURED(本次在 plans/v0.0.84.md 回填 6 与 6),throughput 工具报 UNMEASURED。
 
 ## 已知缺口
 
-(1) stream-pipe 拆分后首轮 CI 各部件耗时待填(STREAM-PIPE-OSX-X86_64-55S-BOUND-THIN-MARGIN)。
+(1) S3 观测(取自 gh run view 44647659602 --log,部件界限 55 秒未放宽,全部部件 rc=0 status=OK):
+
+| 格 | STREAM_PREPARE | stream-pipe 总 ms | 部件 ms(basic stdio multi reject e-ref e-0 e-1 e-2 e-3 e-4 e-compare) | 最大部件 |
+|---|---|---|---|---|
+| lnx/x86_64 | rc=0 3854 ms PREPARED | 7080 | 260 543 172 80 480 324 327 318 316 325 78 | stdio 543 |
+| lnx/arm64 | rc=1 6530 ms FALLBACK | 85680 | 6835 7521 6915 6976 7676 7128 7284 7369 7303 7385 6757 | e-ref 7676 |
+| osx/arm64 | rc=1 15100 ms FALLBACK | 178677 | 14962 14771 15260 13601 18789 16527 14876 12576 14422 13817 13970 | e-ref 18789 |
+| osx/x86_64 | rc=1 26129 ms FALLBACK | 292372 | 23458 21613 26829 25685 20372 22981 24410 23084 25932 26360 25512 | multi 26829 |
+| win/x86_64 | 不适用 | UNMEASURED | 便携子集 6/9 子检查 PASS,POSIX 部分 NOT_RUN(缺 fork、waitpid、kill、F_SETFD、environ、F_SETFL) | UNMEASURED |
+| win/arm64 | 不适用 | UNMEASURED | 同 win/x86_64 | UNMEASURED |
+
+  - osx/x86_64 是 0.0.83 首次失败的格:本版拆分后最大部件 26.8 秒,余量约 28 秒,原缺口 STREAM-PIPE-OSX-X86_64-55S-BOUND-THIN-MARGIN 的部件层余量问题缓解,但总时 292 秒偏长。
+  - 预编译回退:三个非 lnx/x86_64 的 POSIX 格 STREAM_PREPARE 均 rc=1 FALLBACK(不止 macOS,lnx/arm64 同样),各部件各自冷编译,使总时偏长。登记缺口 STREAM-PREPARE-OSX-FALLBACK(build/pkg-gaps.tsv),建议 0.0.85 查预编译失败原因,并让 FALLBACK 不重复冷编译。
 (2) cx-dev-a 到 cx-dev-e、test-loader-com、loader-net-replacement、kernel-base、logic-distribution 不在严格域,本版未测。
 (3) check-package-decode-real 的归档 C 参照缺 core.h;old-product-material 缓存键不含布局路径;dvqualify --resume 多 SUMMARY 与 G1 的配合(DVQUALIFY-RESUME-MULTI-SUMMARY-VS-G1);real-commit 冷备料非自动(REAL-COMMIT-COLD-PREBUILD-NOT-AUTOMATIC);derive 全量 --check 约 54 秒贴界限;unit-frontcache-equiv3 单跑 54.0 秒贴界限。以 build/pkg-gaps.tsv 登记为准。
 (4) F1 总墙钟有负收益轮次,热态未达 7.5 ms;冷启动仍约为 Node 13 倍。
