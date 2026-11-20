@@ -1873,6 +1873,30 @@ static void commit_class_from(const char *path) {
     }
     free(b);
 }
+/* U6: scan commit-own stderr for COMMIT_OWN_STALE_LOCK lines and emit commit.stale_lock events into devsvc event stream. */
+static void commit_stale_locks_emit(const char *root, const char *err_path, const char *owner, const char *req) {
+    unsigned char *b = 0; int64_t n = 0; long i, k;
+    if (!err_path[0] || sy_read_file(err_path, &b, &n, 1 << 24) || !b) return;
+    for (i = 0; i + 27 <= n; i++) {
+        if (!memcmp(b + i, "COMMIT_OWN_STALE_LOCK\tpath=", 27) && (i == 0 || b[i - 1] == '\n' || b[i - 1] == '\t')) {
+            char lp[256], rs[64], ev[512];
+            long p = i + 27;
+            for (k = 0; k < (long)sizeof lp - 1 && p + k < n && b[p + k] != '\n' && b[p + k] != '\t'; k++) lp[k] = (char)b[p + k];
+            lp[k] = 0; p += k;
+            rs[0] = 0;
+            if (p + 8 <= n && !memcmp(b + p, "\treason=", 8)) {
+                p += 8;
+                for (k = 0; k < (long)sizeof rs - 1 && p + k < n && b[p + k] != '\n' && b[p + k] != '\t'; k++) rs[k] = (char)b[p + k];
+                rs[k] = 0;
+            }
+            if (!rs[0]) F(rs, sizeof rs, "unknown");
+            if (lp[0] && !cx_fmt(ev, sizeof ev, "emit\tcommit.stale_lock\towner=%s\tpid=%d\tpath=%s\treason=%s\treq=%s",
+                                 owner && owner[0] ? owner : "-", sy_pid(), lp, rs, req && req[0] ? req : "-"))
+                request(root, ev, 0);
+        }
+    }
+    free(b);
+}
 static const char *lock_for(const char *p) {   /* 路径 -> 锁名;无匹配返回 0 */
     int i; long pn = (long)strlen(p);
     for (i = 0; i < cfg.nlockname; i++) {
@@ -2551,6 +2575,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }else rc = tool_locked_cwd(root, need, "tools/commit-own.cx", cwd, n, v);
         if(!derives || derived_done)dt_worker(x_last_err,flag(n,v,"--derive-selected"));
         if (rc != 0) { err_tail(x_last_err, 20); commit_class_from(x_last_err); }   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行;类别记进完成事件 */
+        commit_stale_locks_emit(root, x_last_err, auto_owner(), commit_req_val(0));
         long push_start=sy_now_ms();int pushing=rc==0 && push;
         if (rc == 0 && push && !cwd) { char *pv[] = {"--par", "1", "--", "git", "push", "origin", "HEAD:main", 0}; pushed = cmd_x(root, 7, pv) == 0; if (!pushed) rc = 1; }
         else if (rc == 0 && push) { char rs[260]; F(rs, sizeof rs, "HEAD:refs/heads/%s", wbr);
@@ -2607,6 +2632,7 @@ static int bg_child(void *ud) {
     in_bg = 1;
     request_launcher = 0;  /* detached explicitly; the job owns its deadline */
     dt_job(j->id);
+    if (j->commit && j->id[0]) F(commit_req, sizeof commit_req, "%s", j->id);
     r = main2(j->argc, j->argv);
     timing_finish(r);
     if(j->commit){report_window=FL_NODE_MS;report_end("git.commit",j->id);}
