@@ -46,6 +46,22 @@ static const el_case el_cases[] = {
     {"duplicate-case-converted", "int f(unsigned int x){switch(x){case -1:return 41;case ~0u:return 42;default:return 43;}}\n", "duplicate case value", 1, 0},
     {"multi-line-zero-array", "int ok1;\n\nint ok2;\n   int t3[0];\n", "array size must be greater than zero", 4, 12},
     {"multi-line-storage", "int ok1;\nint ok2;\nstatic\n  extern int b17;\n", "multiple storage classes in declaration specifiers", 4, 3},
+    /* F2 round 2: objectdefinitions same-unit redefinition (runs after the reasons pass, located in body-manifest) */
+    {"object-redefinition", "int x2 = 1; int x2 = 2;\n", "redefinition of this object", 1, 0},
+    {"static-object-redefinition", "static int y2 = 1; static int y2 = 2;\n", "redefinition of this object", 1, 0},
+    {"multi-line-object-redefinition", "int ok1;\nint z2 = 1;\n\n  int z2 = 2;\n", "redefinition of this object", 4, 0},
+    /* F2 round 2: a negative bound is refused at the E3 declarator like the zero bound (was a lower tape reject with a line only) */
+    {"negative-array-size", "int s2[-1];\n", "array size must be greater than zero", 1, 10},
+    {"negative-array-size-folded", "int s3[2-3];\n", "array size must be greater than zero", 1, 0},
+    {"negative-array-size-typedef", "typedef char sa_fail[1-2*1];\n", "array size must be greater than zero", 1, 0},
+    {"negative-array-size-local", "int nl(void){ int a[-4]; return 0; }\n", "array size must be greater than zero", 1, 0},
+    {"multi-line-negative-array", "int ok1;\n\n  int s4[-2];\n", "array size must be greater than zero", 3, 0},
+};
+
+/* legal neighbours of the new rejects: they must still compile (rc 0, object written, empty stderr) */
+static const char *const el_accepts[][2] = {
+    {"accept-positive-bounds", "int p1[1]; int p2[2-1]; typedef char sa_ok[1-2*0]; unsigned char p3[0x7fffu]; int pl(void){ int a[3]; a[0] = 0; return a[0]; }\n"},
+    {"accept-object-once", "int q1 = 1; int q1; extern int q1; static int q2; static int q2 = 2; int qf(void){ return q1 + q2; }\n"},
 };
 
 static int el_digits(const char *s, int *val) { int n = 0, v = 0; while (s[n] >= '0' && s[n] <= '9') { v = v * 10 + (s[n] - '0'); n++; } *val = v; return n; }
@@ -88,6 +104,13 @@ int main(int argc, char **argv) {
         int ok = el_located(out, file, k->reason, k->line, k->col);
         if (!ok) fprintf(stderr, "  %s: first line: %.160s\n", k->name, out);
         ck(ok, k->name);
+    }
+    for (size_t i = 0; i < sizeof el_accepts / sizeof el_accepts[0]; i++) {
+        int no_obj = 1;
+        memset(out, 0, sizeof out);
+        int rc = el_compile(el_accepts[i][0], el_accepts[i][1], out, sizeof out, &no_obj);
+        if (rc != 0 || no_obj || out[0]) fprintf(stderr, "  %s: rc=%d stderr: %.160s\n", el_accepts[i][0], rc, out);
+        ck(rc == 0 && !no_obj && !out[0], el_accepts[i][0]);
     }
     {   /* rejection inside an included header: the header name and its line are the location */
         char hp[EL_PW]; int no_obj = 0; const char *h = "int h_ok;\ntypedef int HT; typedef char HT;\n";
