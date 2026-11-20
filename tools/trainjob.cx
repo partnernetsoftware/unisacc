@@ -1,18 +1,21 @@
-/* tools/trainjob.cx -- read-only release-train job observer and failure locator (unit J4: why subcommand).
+/* tools/trainjob.cx -- release-train job observer, devsvc adapter, and failure locator (units J2 + J4).
  * Usage:
  *   sh ./unisacc.com tools/trainjob.cx -- why [--dir] BASE/REV
- * Reads chain-run.tsv (and bg.log), locates the BLOCKER phase's failing attempt (ignoring rc=0 and rc=77 yield),
- * scans chain-run-N.stderr against the hop-1 rule table, and when hop-1 points to a child directory via
- * "REFUSE child failed" + "candidate-chain: <step>: <dir>", scans <dir>/child-*.stderr and
- * <dir>.control/check-X/child-*.stderr against the hop-2 rule table.
- * Prints:
- *   TRAINJOB_WHY<TAB>phase=<PHASE><TAB>attempt=<N><TAB>rc=<RC><TAB>hops=<0|1|2><TAB>log=<PATH><TAB>why=<DIAG_OR_unlocated>
+ *   sh ./unisacc.com tools/trainjob.cx -- adopt [--kind chain] (--base BASE --rev REV | --dir BASE/REV) [--owner OWNER]
+ *   sh ./unisacc.com tools/trainjob.cx -- status [ID] [--min-lost-gap N]
+ *   sh ./unisacc.com tools/trainjob.cx -- tail ID [-n N]
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.jobrec
+#pragma unisa use dv.procid
 
 typedef struct {
     int hop;
@@ -207,12 +210,8 @@ static int parse_chain_tsv(const char *dir, char *phase_out, size_t phase_cap, i
     return 1;
 }
 
-int main(int argc, char **argv) {
+static int cmd_why(int argc, char **argv) {
     const char *dir = 0;
-    if (argc < 2 || !tx_eqz(argv[1], "why")) {
-        fprintf(stderr, "trainjob: usage: trainjob.cx -- why [--dir] BASE/REV\n");
-        return 2;
-    }
     for (int i = 2; i < argc; i++) {
         if (tx_eqz(argv[i], "--dir") && i + 1 < argc) dir = argv[++i];
         else if (argv[i][0] != '-' && !dir) dir = argv[i];
@@ -250,4 +249,582 @@ int main(int argc, char **argv) {
     printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=0\tlog=%s\twhy=unlocated\n",
            phase, att, rc, logp);
     return 0;
+}
+
+/* ---- J2: devsvc job adapter (adopt, status, tail) ---- */
+
+typedef struct {
+    long start_s;
+    char rev[128];
+    int guard;
+    int pid;
+    int pgid;
+    long deadline_s;
+} TjOwner;
+
+typedef struct {
+    int present;
+    long end_s;
+    int pid;
+    int rc;
+    char why[128];
+} TjExit;
+
+static int resolve_devsvc_dir(char *out, size_t cap) {
+    const char *env = sy_env("UNISACC_DEVSVC_DIR");
+    if (env && env[0]) {
+        return cx_fmt(out, cap, "%s", env) ? -1 : 0;
+    }
+    const char *home = sy_env("HOME");
+    const char *inst = sy_env("UNISACC_DEVSVC_INST");
+    if (!home || !home[0]) return -1;
+    if (!inst || !inst[0]) inst = "default";
+    return cx_fmt(out, cap, "%s/.cache/unisacc/devsvc/%s", home, inst) ? -1 : 0;
+}
+
+static int parse_owner_tsv(const char *dir, TjOwner *ow) {
+    char p[2048];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int found = 0;
+    memset(ow, 0, sizeof *ow);
+    if (cx_fmt(p, sizeof p, "%s/owner.tsv", dir) || sy_read_file(p, &b, &n, 1 << 20) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        if (len > 6 && memcmp(line, "OWNER\t", 6) == 0) {
+            const char *cols[16];
+            long clens[16];
+            int nc = 0;
+            long q = 0;
+            while (nc < 16 && q <= len) {
+                long cs = q;
+                while (q < len && line[q] != '\t') q++;
+                cols[nc] = line + cs;
+                clens[nc] = q - cs;
+                nc++;
+                q++;
+            }
+            if (nc >= 6) {
+                char tmp[160];
+                size_t l1 = (size_t)clens[1] < sizeof tmp - 1 ? (size_t)clens[1] : sizeof tmp - 1;
+                mm_copy(tmp, sizeof tmp, cols[1], l1); tmp[l1] = 0;
+                ow->start_s = atol(tmp);
+                size_t l2 = (size_t)clens[2] < sizeof ow->rev - 1 ? (size_t)clens[2] : sizeof ow->rev - 1;
+                mm_copy(ow->rev, sizeof ow->rev, cols[2], l2); ow->rev[l2] = 0;
+                ow->guard = 0; ow->pid = 0; ow->pgid = 0; ow->deadline_s = 0;
+                for (int c = 3; c < nc; c++) {
+                    if (clens[c] > 6 && memcmp(cols[c], "guard=", 6) == 0) {
+                        size_t vl = (size_t)(clens[c] - 6) < 31 ? (size_t)(clens[c] - 6) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 6, vl); tmp[vl] = 0;
+                        ow->guard = atoi(tmp);
+                    } else if (clens[c] > 4 && memcmp(cols[c], "pid=", 4) == 0) {
+                        size_t vl = (size_t)(clens[c] - 4) < 31 ? (size_t)(clens[c] - 4) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 4, vl); tmp[vl] = 0;
+                        ow->pid = atoi(tmp);
+                    } else if (clens[c] > 5 && memcmp(cols[c], "pgid=", 5) == 0) {
+                        size_t vl = (size_t)(clens[c] - 5) < 31 ? (size_t)(clens[c] - 5) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 5, vl); tmp[vl] = 0;
+                        ow->pgid = atoi(tmp);
+                    } else if (clens[c] > 11 && memcmp(cols[c], "deadline_s=", 11) == 0) {
+                        size_t vl = (size_t)(clens[c] - 11) < 31 ? (size_t)(clens[c] - 11) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 11, vl); tmp[vl] = 0;
+                        ow->deadline_s = atol(tmp);
+                    }
+                }
+                found = 1;
+            }
+        }
+    }
+    mm_free(b);
+    return (found && ow->pid > 0 && ow->pgid > 0 && ow->rev[0]) ? 0 : -1;
+}
+
+static void parse_exit_tsv(const char *dir, TjExit *ex) {
+    char p[2048];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    memset(ex, 0, sizeof *ex);
+    if (cx_fmt(p, sizeof p, "%s/exit.tsv", dir) || sy_read_file(p, &b, &n, 1 << 20) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return;
+    }
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        if (len > 5 && memcmp(line, "EXIT\t", 5) == 0) {
+            const char *cols[12];
+            long clens[12];
+            int nc = 0;
+            long q = 0;
+            while (nc < 12 && q <= len) {
+                long cs = q;
+                while (q < len && line[q] != '\t') q++;
+                cols[nc] = line + cs;
+                clens[nc] = q - cs;
+                nc++;
+                q++;
+            }
+            if (nc >= 4) {
+                char tmp[160];
+                size_t l1 = (size_t)clens[1] < 31 ? (size_t)clens[1] : 31;
+                mm_copy(tmp, sizeof tmp, cols[1], l1); tmp[l1] = 0;
+                ex->end_s = atol(tmp);
+                ex->why[0] = 0;
+                for (int c = 2; c < nc; c++) {
+                    if (clens[c] > 4 && memcmp(cols[c], "pid=", 4) == 0) {
+                        size_t vl = (size_t)(clens[c] - 4) < 31 ? (size_t)(clens[c] - 4) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 4, vl); tmp[vl] = 0;
+                        ex->pid = atoi(tmp);
+                    } else if (clens[c] > 3 && memcmp(cols[c], "rc=", 3) == 0) {
+                        size_t vl = (size_t)(clens[c] - 3) < 31 ? (size_t)(clens[c] - 3) : 31;
+                        mm_copy(tmp, sizeof tmp, cols[c] + 3, vl); tmp[vl] = 0;
+                        ex->rc = atoi(tmp);
+                    } else if (clens[c] > 4 && memcmp(cols[c], "why=", 4) == 0) {
+                        size_t vl = (size_t)(clens[c] - 4) < sizeof ex->why - 1 ? (size_t)(clens[c] - 4) : sizeof ex->why - 1;
+                        mm_copy(ex->why, sizeof ex->why, cols[c] + 4, vl); ex->why[vl] = 0;
+                    }
+                }
+                ex->present = 1;
+            }
+        }
+    }
+    mm_free(b);
+}
+
+static int read_job_pid(const char *jdir) {
+    char p[2400];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (cx_fmt(p, sizeof p, "%s/pid", jdir) || sy_read_file(p, &b, &n, 64) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    char t[64];
+    size_t cp = (size_t)n < sizeof t - 1 ? (size_t)n : sizeof t - 1;
+    mm_copy(t, sizeof t, b, cp); t[cp] = 0;
+    mm_free(b);
+    return atoi(t);
+}
+
+static int check_bg_done(const char *base, const char *rev) {
+    char *av[] = { "sh", "./unisacc.com", "tools/bg-candidate.cx", "--", "status", (char *)rev, "--base", (char *)base, 0 };
+    char *out = 0;
+    size_t on = 0;
+    int rc = cx_runv_timeout(av, 30, &out, &on);
+    int ok = (rc == 0 && out && on > 0 && tx_find(out, (long)on, "\tstate=DONE\t", 12) >= 0);
+    if (out) mm_free(out);
+    return ok;
+}
+
+static int proc_and_pgid_alive(int pid, int pgid, const char *procid) {
+    pi_id_t id;
+    int have_id = (procid && procid[0] && procid[0] != '-' && pi_parse_tag_ex(procid, &id) == 0 && id.pid > 0);
+    if (have_id) {
+        unsigned long long cur_bt = pi_host_btime();
+        unsigned long long cur_ns = pi_self_ns_ino();
+        if (id.btime != 0ULL && cur_bt != 0ULL && id.btime != cur_bt) return 0;
+        if (id.ns_ino != 0ULL && cur_ns != 0ULL && id.ns_ino != cur_ns) return 0;
+    }
+    int proc_alive = 0;
+    if (have_id) {
+        const char *why = 0;
+        proc_alive = pi_alive_ex(&id, 0, &why);
+    } else if (pid > 0) {
+        proc_alive = (sy_signal(pid, 0) != -ESRCH);
+    }
+    int pgid_alive = 0;
+    if (pgid > 1) {
+        errno = 0;
+        if (kill((pid_t)-pgid, 0) == 0 || errno == EPERM) pgid_alive = 1;
+    }
+    return (proc_alive || pgid_alive) ? 1 : 0;
+}
+
+static void last_chain_phase(const char *dir, char *out, size_t cap) {
+    cx_fmt(out, cap, "-");
+    char p[2048];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (cx_fmt(p, sizeof p, "%s/chain-run.tsv", dir) || sy_read_file(p, &b, &n, 4 << 20) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return;
+    }
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        long pp = tx_find(line, len, "\tphase=", 7);
+        if (pp >= 0) {
+            const char *s = line + pp + 7;
+            long sl = 0;
+            while (pp + 7 + sl < len && s[sl] != '\t') sl++;
+            if (sl > 0 && (size_t)sl < cap) {
+                mm_copy(out, cap, s, (size_t)sl);
+                out[sl] = 0;
+            }
+        }
+    }
+    mm_free(b);
+}
+
+static int reconcile_job(const char *jdir, const JrMeta *meta, long now_s, int min_lost_gap_s) {
+    JrState st;
+    if (jr_read_state(jdir, &st) != JR_OK) return JR_ST_NONE;
+    if (st.state == JR_ST_DONE || st.state == JR_ST_FAILED || st.state == JR_ST_TIMEOUT) return st.state;
+
+    char rdir[2400];
+    if (cx_fmt(rdir, sizeof rdir, "%s/%s", meta->base, meta->input)) return st.state;
+
+    TjExit ex;
+    parse_exit_tsv(rdir, &ex);
+    if (ex.present) {
+        long elapsed_ms = 0;
+        if (ex.end_s > 0 && meta->start_ms > 0) {
+            long diff = ex.end_s * 1000L - meta->start_ms;
+            if (diff > 0) elapsed_ms = diff;
+        }
+        int target = JR_ST_FAILED;
+        const char *reason = ex.why[0] ? ex.why : "exited-nonzero";
+        int rc_rec = ex.rc;
+        if (ex.rc == 0) {
+            if (check_bg_done(meta->base, meta->input)) {
+                target = JR_ST_DONE;
+                reason = "bg-candidate-done";
+                rc_rec = 0;
+            } else {
+                target = JR_ST_FAILED;
+                reason = "exit-zero-not-done";
+                rc_rec = 1;
+            }
+        } else if (ex.rc == 124 || tx_eqz(ex.why, "deadline-killed")) {
+            target = JR_ST_TIMEOUT;
+            reason = ex.why[0] ? ex.why : "timeout";
+        }
+        if (jr_transition(jdir, target, reason, now_s, 0) == JR_OK) {
+            jr_write_rc(jdir, rc_rec, elapsed_ms);
+            return target;
+        }
+        if (jr_read_state(jdir, &st) == JR_OK) return st.state;
+        return target;
+    }
+
+    if (st.state == JR_ST_RUNNING) {
+        int pid = read_job_pid(jdir);
+        if (!proc_and_pgid_alive(pid, meta->pgid, meta->procid)) {
+            int tr = jr_transition(jdir, JR_ST_LOST, "proc-and-pgid-gone", now_s, min_lost_gap_s);
+            if (tr == JR_OK) return JR_ST_LOST;
+        }
+    }
+    if (jr_read_state(jdir, &st) == JR_OK) return st.state;
+    return JR_ST_NONE;
+}
+
+static int find_existing_job(const char *jobs_root, const char *kind, const char *base, const char *input, char *id_out, size_t id_cap) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, jobs_root) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        char jdir[2400];
+        if (cx_fmt(jdir, sizeof jdir, "%s/%s", jobs_root, d.name)) continue;
+        JrMeta m;
+        if (jr_read_meta(jdir, &m) == JR_OK) {
+            if (tx_eqz(m.kind, kind) && tx_eqz(m.base, base) && tx_eqz(m.input, input)) {
+                cx_fmt(id_out, id_cap, "%s", d.name);
+                sy_dir_close(&d);
+                return 1;
+            }
+        }
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int cmd_adopt(int argc, char **argv) {
+    const char *kind = "chain", *base_arg = 0, *rev_arg = 0, *dir_arg = 0, *owner_arg = "trainjob";
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--kind") && i + 1 < argc) kind = argv[++i];
+        else if (tx_eqz(argv[i], "--base") && i + 1 < argc) base_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--rev") && i + 1 < argc) rev_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--dir") && i + 1 < argc) dir_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--owner") && i + 1 < argc) owner_arg = argv[++i];
+        else {
+            fprintf(stderr, "trainjob: adopt: bad argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    char base[1024] = {0}, rev[128] = {0}, rdir[2048] = {0};
+    if (dir_arg && dir_arg[0]) {
+        long dl = (long)strlen(dir_arg);
+        while (dl > 1 && dir_arg[dl - 1] == '/') dl--;
+        long slash = -1;
+        for (long k = dl - 1; k >= 0; k--) {
+            if (dir_arg[k] == '/') { slash = k; break; }
+        }
+        if (slash <= 0 || slash + 1 >= dl) {
+            fprintf(stderr, "trainjob: adopt: --dir must be BASE/REV\n");
+            return 2;
+        }
+        if ((size_t)slash >= sizeof base || (size_t)(dl - slash - 1) >= sizeof rev) return 2;
+        mm_copy(base, sizeof base, dir_arg, (size_t)slash); base[slash] = 0;
+        mm_copy(rev, sizeof rev, dir_arg + slash + 1, (size_t)(dl - slash - 1)); rev[dl - slash - 1] = 0;
+    } else if (base_arg && base_arg[0] && rev_arg && rev_arg[0]) {
+        long bl = (long)strlen(base_arg);
+        while (bl > 1 && base_arg[bl - 1] == '/') bl--;
+        if ((size_t)bl >= sizeof base || cx_fmt(rev, sizeof rev, "%s", rev_arg)) return 2;
+        mm_copy(base, sizeof base, base_arg, (size_t)bl); base[bl] = 0;
+    } else {
+        fprintf(stderr, "trainjob: adopt requires --base BASE --rev REV or --dir BASE/REV\n");
+        return 2;
+    }
+    if (cx_fmt(rdir, sizeof rdir, "%s/%s", base, rev)) return 2;
+
+    TjOwner ow;
+    if (parse_owner_tsv(rdir, &ow) != 0) {
+        fprintf(stderr, "trainjob: adopt: cannot parse %s/owner.tsv\n", rdir);
+        return 2;
+    }
+    if (!tx_eqz(ow.rev, rev)) {
+        fprintf(stderr, "trainjob: adopt: owner.tsv rev mismatch (%s != %s)\n", ow.rev, rev);
+        return 2;
+    }
+
+    char dvdir[1536], jroot[1600], id[128] = {0}, jdir[2400];
+    if (resolve_devsvc_dir(dvdir, sizeof dvdir) != 0 || cx_fmt(jroot, sizeof jroot, "%s/jobs", dvdir)) {
+        fprintf(stderr, "trainjob: adopt: cannot resolve devsvc dir\n");
+        return 2;
+    }
+    if (sy_mkdir_all(jroot, 0700) != 0 && sy_exists(jroot) != 1) {
+        fprintf(stderr, "trainjob: adopt: cannot create %s\n", jroot);
+        return 2;
+    }
+
+    long now_s = sy_now_ms() / 1000L;
+    int reused = 0;
+    if (find_existing_job(jroot, kind, base, rev, id, sizeof id)) {
+        reused = 1;
+        if (cx_fmt(jdir, sizeof jdir, "%s/%s", jroot, id)) return 2;
+        JrMeta m;
+        int st = JR_ST_NONE;
+        if (jr_read_meta(jdir, &m) == JR_OK) {
+            st = reconcile_job(jdir, &m, now_s, 5);
+        }
+        int pid = read_job_pid(jdir);
+        printf("TRAINJOB_ADOPT\tid=%s\treused=1\tkind=%s\tinput=%s\tpid=%d\tpgid=%d\tstate=%s\tbase=%s\n",
+               id, kind, rev, pid > 0 ? pid : ow.pid, ow.pgid, jr_state_name(st), base);
+        return 0;
+    }
+
+    long start_ms = ow.start_s > 0 ? ow.start_s * 1000L : sy_now_ms();
+    int seq = 0;
+    for (;;) {
+        if (seq == 0) cx_fmt(id, sizeof id, "%ld-%d", start_ms, ow.pid);
+        else cx_fmt(id, sizeof id, "%ld-%d", start_ms + seq, ow.pid);
+        if (cx_fmt(jdir, sizeof jdir, "%s/%s", jroot, id)) return 2;
+        if (sy_exists(jdir) != 1) break;
+        seq++;
+        if (seq > 1000) return 2;
+    }
+
+    unsigned long long tk = 0ULL;
+    if (pi_read_ticks(ow.pid, &tk, 0) != 0) tk = 0ULL;
+    unsigned long long bt = pi_host_btime();
+    unsigned long long ns = pi_self_ns_ino();
+
+    JrMeta m;
+    memset(&m, 0, sizeof m);
+    cx_fmt(m.cmd, sizeof m.cmd, "bg-candidate chain %s", rev);
+    cx_fmt(m.owner, sizeof m.owner, "%s", owner_arg);
+    m.start_ms = start_ms;
+    cx_fmt(m.kind, sizeof m.kind, "%s", kind);
+    cx_fmt(m.input, sizeof m.input, "%s", rev);
+    m.pgid = ow.pgid;
+    cx_fmt(m.procid, sizeof m.procid, "%d:%llu:%llu:%llu", ow.pid, tk, bt, ns);
+    m.deadline_s = ow.deadline_s;
+    cx_fmt(m.base, sizeof m.base, "%s", base);
+    cx_fmt(m.log, sizeof m.log, "%s/bg.log", rdir);
+
+    if (jr_create(jdir, ow.pid, &m, now_s) != JR_OK) {
+        fprintf(stderr, "trainjob: adopt: jr_create failed for %s\n", jdir);
+        return 1;
+    }
+    int st = reconcile_job(jdir, &m, now_s, 5);
+    printf("TRAINJOB_ADOPT\tid=%s\treused=%d\tkind=%s\tinput=%s\tpid=%d\tpgid=%d\tstate=%s\tbase=%s\n",
+           id, reused, m.kind, m.input, ow.pid, m.pgid, jr_state_name(st), m.base);
+    return 0;
+}
+
+static void print_job_status(const char *id, const char *jdir, long now_s, int min_lost_gap_s) {
+    JrMeta m;
+    if (jr_read_meta(jdir, &m) != JR_OK) return;
+    int st = reconcile_job(jdir, &m, now_s, min_lost_gap_s);
+    int pid = read_job_pid(jdir);
+    char rdir[2400], phase[128] = "-";
+    if (!cx_fmt(rdir, sizeof rdir, "%s/%s", m.base, m.input)) {
+        last_chain_phase(rdir, phase, sizeof phase);
+    }
+    printf("TRAINJOB_STATUS\tid=%s\tkind=%s\tstate=%s\tinput=%s\tpid=%d\tpgid=%d\tphase=%s\tbase=%s\n",
+           id, m.kind, jr_state_name(st), m.input, pid, m.pgid, phase, m.base);
+}
+
+static int cmd_status(int argc, char **argv) {
+    const char *only_id = 0;
+    int min_lost_gap_s = 5;
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--min-lost-gap") && i + 1 < argc) {
+            min_lost_gap_s = atoi(argv[++i]);
+            if (min_lost_gap_s < 0) min_lost_gap_s = 0;
+        } else if (argv[i][0] != '-' && !only_id) {
+            only_id = argv[i];
+        } else {
+            fprintf(stderr, "trainjob: status: bad argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    char dvdir[1536], jroot[1600];
+    if (resolve_devsvc_dir(dvdir, sizeof dvdir) != 0 || cx_fmt(jroot, sizeof jroot, "%s/jobs", dvdir)) {
+        fprintf(stderr, "trainjob: status: cannot resolve devsvc dir\n");
+        return 2;
+    }
+    long now_s = sy_now_ms() / 1000L;
+    if (only_id) {
+        char jdir[2400];
+        if (cx_fmt(jdir, sizeof jdir, "%s/%s", jroot, only_id)) return 2;
+        JrMeta m;
+        if (jr_read_meta(jdir, &m) != JR_OK) {
+            fprintf(stderr, "trainjob: status: unknown job id: %s\n", only_id);
+            return 2;
+        }
+        print_job_status(only_id, jdir, now_s, min_lost_gap_s);
+        return 0;
+    }
+    sy_dir_t d;
+    if (sy_dir_open(&d, jroot) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        char jdir[2400];
+        if (cx_fmt(jdir, sizeof jdir, "%s/%s", jroot, d.name)) continue;
+        print_job_status(d.name, jdir, now_s, min_lost_gap_s);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int is_tail_event_line(const char *line, long len) {
+    static const char *const kws[] = {
+        "ATTEMPT\t", "PHASE\t", "RETRY\t", "YIELD\t", "SEGMENT\t", "BLOCKER\t", "EXIT\t", "DONE\t", 0
+    };
+    for (int i = 0; kws[i]; i++) {
+        long kl = (long)strlen(kws[i]);
+        if (len >= kl && memcmp(line, kws[i], (size_t)kl) == 0) return 1;
+    }
+    return 0;
+}
+
+static void collect_tail_file(const char *path, char *ring, int cap, int *total) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 4 << 20) || !b || n <= 0) {
+        if (b) mm_free(b);
+        return;
+    }
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        long len = (long)(le - ls);
+        const char *line = (const char *)b + ls;
+        if (is_tail_event_line(line, len)) {
+            int slot = (*total) % cap;
+            char *dst = ring + (size_t)slot * 512;
+            size_t cp = (size_t)len < 511 ? (size_t)len : 511;
+            mm_copy(dst, 512, line, cp);
+            dst[cp] = 0;
+            (*total)++;
+        }
+    }
+    mm_free(b);
+}
+
+static int cmd_tail(int argc, char **argv) {
+    const char *id = 0;
+    int want = 20;
+    for (int i = 2; i < argc; i++) {
+        if ((tx_eqz(argv[i], "-n") || tx_eqz(argv[i], "--lines")) && i + 1 < argc) {
+            want = atoi(argv[++i]);
+        } else if (argv[i][0] != '-' && !id) {
+            id = argv[i];
+        } else {
+            fprintf(stderr, "trainjob: tail: bad argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!id || !id[0]) {
+        fprintf(stderr, "trainjob: tail requires job ID\n");
+        return 2;
+    }
+    if (want < 1) want = 1;
+    if (want > 200) want = 200;
+
+    char dvdir[1536], jdir[2400];
+    if (resolve_devsvc_dir(dvdir, sizeof dvdir) != 0 || cx_fmt(jdir, sizeof jdir, "%s/jobs/%s", dvdir, id)) {
+        return 2;
+    }
+    JrMeta m;
+    if (jr_read_meta(jdir, &m) != JR_OK) {
+        fprintf(stderr, "trainjob: tail: unknown job id: %s\n", id);
+        return 2;
+    }
+    char *ring = (char *)mm_alloc((size_t)want * 512);
+    if (!ring) return 1;
+    int total = 0;
+    char p1[2400], p2[2400];
+    if (!cx_fmt(p1, sizeof p1, "%s/%s/chain-run.tsv", m.base, m.input)) collect_tail_file(p1, ring, want, &total);
+    if (!cx_fmt(p2, sizeof p2, "%s/%s/exit.tsv", m.base, m.input)) collect_tail_file(p2, ring, want, &total);
+
+    int count = total < want ? total : want;
+    int start = total > want ? total - want : 0;
+    for (int i = 0; i < count; i++) {
+        printf("TRAINJOB_TAIL\t%s\n", ring + (size_t)((start + i) % want) * 512);
+    }
+    printf("TRAINJOB_TAIL_END\tid=%s\tlines=%d\n", id, count);
+    mm_free(ring);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "trainjob: usage: trainjob.cx -- (why|adopt|status|tail) ...\n");
+        return 2;
+    }
+    if (tx_eqz(argv[1], "why")) return cmd_why(argc, argv);
+    if (tx_eqz(argv[1], "adopt")) return cmd_adopt(argc, argv);
+    if (tx_eqz(argv[1], "status")) return cmd_status(argc, argv);
+    if (tx_eqz(argv[1], "tail")) return cmd_tail(argc, argv);
+    fprintf(stderr, "trainjob: usage: trainjob.cx -- (why|adopt|status|tail) ...\n");
+    return 2;
 }
