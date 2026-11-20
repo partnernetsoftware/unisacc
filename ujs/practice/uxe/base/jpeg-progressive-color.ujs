@@ -1,0 +1,266 @@
+struct JpegProgressComponent {
+  coeff: u32;
+  stride: u32;
+  columns: u32;
+  rows: u32;
+  width: u32;
+  height: u32;
+  horizontal: u32;
+  vertical: u32;
+  quantId: u32;
+  dc: u32;
+  plane: u32;
+}
+
+native function jpeg_progressive_layout(frame:i64,records:i64,memory:i64,end:i64) i64 {
+  let width=jpeg_u16be(frame+3);
+  let height=jpeg_u16be(frame+1);
+  let sampling=ux_u8(frame+7);
+  if(sampling!=17 && sampling!=33 && sampling!=34) { return 0-4; }
+  let sx=sampling/16;
+  let sy=sampling%16;
+  let mx=(width+8*sx-1)/(8*sx);
+  let my=(height+8*sy-1)/(8*sy);
+  let c=0;
+  while(c<3) {
+    if(ux_u8(frame+6+3*c)!=c+1 || (c!=0 && ux_u8(frame+7+3*c)!=17)) { return 0-4; }
+    let h=1;
+    let v=1;
+    if(c==0) { h=sx; v=sy; }
+    let w=(width*h+sx-1)/sx;
+    let t=(height*v+sy-1)/sy;
+    let blocks=mx*my*h*v;
+    let area=(w*t+3)/4*4;
+    if(blocks*256+area>end-memory) { return 0-1; }
+    let rec=records+c*(JpegProgressComponent.size+64);
+    let a=ux_u32_put(rec+JpegProgressComponent.coeff,memory);
+    let b=ux_u32_put(rec+JpegProgressComponent.stride,mx*h);
+    let d=ux_u32_put(rec+JpegProgressComponent.columns,(w+7)/8);
+    let e=ux_u32_put(rec+JpegProgressComponent.rows,(t+7)/8);
+    let f=ux_u32_put(rec+JpegProgressComponent.width,w);
+    let g=ux_u32_put(rec+JpegProgressComponent.height,t);
+    let hSaved=ux_u32_put(rec+JpegProgressComponent.horizontal,h);
+    let vSaved=ux_u32_put(rec+JpegProgressComponent.vertical,v);
+    let q=ux_u32_put(rec+JpegProgressComponent.quantId,ux_u8(frame+8+3*c));
+    let plane=ux_u32_put(rec+JpegProgressComponent.plane,memory+blocks*256);
+    let i=0;
+    while(i<64) { let blank=ux_u8_put(rec+JpegProgressComponent.size+i,255); i=i+1; }
+    i=0;
+    while(i<blocks*64) { let blank=ux_u32_put(memory+i*4,0); i=i+1; }
+    memory=memory+blocks*256+area;
+    c=c+1;
+  }
+  return sampling;
+}
+
+native function jpeg_progressive_dc_unit(reader:i64,rec:i64,table:i64,level:i64,mx:i64,my:i64) i64 {
+  let h=ux_u32(rec+JpegProgressComponent.horizontal);
+  let v=ux_u32(rec+JpegProgressComponent.vertical);
+  let width=ux_u32(rec+JpegProgressComponent.stride);
+  let coeff=ux_u32(rec+JpegProgressComponent.coeff);
+  let predictor=ux_i32(rec+JpegProgressComponent.dc);
+  let y=0;
+  while(y<v) {
+    let x=0;
+    while(x<h) {
+      let at=coeff+256*((my*v+y)*width+mx*h+x);
+      if(level<16) {
+        let next=jpeg_progressive_dc_first(reader,table,predictor,level,at);
+        if(next<0) { return next; }
+        predictor=next-65536;
+      } else {
+        let refined=jpeg_progressive_dc_refine(reader,level%16,at);
+        if(refined<0) { return refined; }
+      }
+      x=x+1;
+    }
+    y=y+1;
+  }
+  let saved=ux_i32_put(rec+JpegProgressComponent.dc,predictor);
+  return 0;
+}
+
+native function jpeg_progressive_interleaved(reader:i64,scanRecords:i64,count:i64,cols:i64,rows:i64,level:i64,interval:i64) i64 {
+  let i=0;
+  while(i<cols*rows) {
+    if(interval>0 && i>0 && i%interval==0) {
+      let next=jpeg_marker(reader,ux_u32(reader+JpegBits.end),208+(i/interval-1)%8);
+      if(next<0) { return next; }
+    }
+    let j=0;
+    while(j<count) {
+      let rec=ux_u32(scanRecords+8*j);
+      if(i==0 || (interval>0 && i%interval==0)) { let reset=ux_u32_put(rec+JpegProgressComponent.dc,0); }
+      let unit=jpeg_progressive_dc_unit(reader,rec,ux_u32(scanRecords+8*j+4),level,i%cols,i/cols);
+      if(unit<0) { return unit; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return jpeg_progressive_boundary(reader);
+}
+
+native function jpeg_progressive_color_sos(reader:i64,body:i64,length:i64,records:i64,tables:i64,interval:i64) i64 {
+  let count=ux_u8(body);
+  if(count<1 || count>3 || length!=6+2*count) { return 0-4; }
+  let first=ux_u8(body+1+2*count);
+  let last=ux_u8(body+2+2*count);
+  let level=ux_u8(body+3+2*count);
+  if(count>1 && first!=0) { return 0-4; }
+  let scanRecords=records+3*(JpegProgressComponent.size+64);
+  let selected=0;
+  let i=0;
+  while(i<count) {
+    let id=ux_u8(body+1+2*i);
+    let selectors=ux_u8(body+2+2*i);
+    if(id<1 || id>3 || selectors/16>3 || selectors%16>3) { return 0-4; }
+    let mask=u32_shl(1,id-1);
+    if(selected/mask%2!=0) { return 0-4; }
+    selected=selected+mask;
+    let rec=records+(id-1)*(JpegProgressComponent.size+64);
+    let ready=jpeg_progressive_stages(rec+JpegProgressComponent.size,first,last,level);
+    if(ready<0) { return ready; }
+    let table=ux_u32(tables+32+4*(selectors%16));
+    if(first==0) { table=ux_u32(tables+16+4*(selectors/16)); }
+    if(ux_u32(tables+4*ux_u32(rec+JpegProgressComponent.quantId))==0 || (table==0 && (first!=0 || level<16))) { return 0-6; }
+    let handle=ux_u32_put(scanRecords+8*i,rec);
+    let code=ux_u32_put(scanRecords+8*i+4,table);
+    i=i+1;
+  }
+  if(count>1) {
+    let luma=records;
+    let cols=ux_u32(luma+JpegProgressComponent.stride)/ux_u32(luma+JpegProgressComponent.horizontal);
+    let height=ux_u32(luma+JpegProgressComponent.height);
+    let tile=ux_u32(luma+JpegProgressComponent.vertical)*8;
+    return jpeg_progressive_interleaved(reader,scanRecords,count,cols,(height+tile-1)/tile,level,interval);
+  }
+  let rec=ux_u32(scanRecords);
+  let cols=ux_u32(rec+JpegProgressComponent.columns);
+  let rows=ux_u32(rec+JpegProgressComponent.rows);
+  return jpeg_progressive_blocks(reader,cols*rows,ux_u32(rec+JpegProgressComponent.coeff),cols,
+    ux_u32(rec+JpegProgressComponent.stride),body+1+2*count,ux_u32(scanRecords+4),interval);
+}
+
+native function jpeg_progressive_color_scans(src:i64,bytes:i64,scratch:i64,space:i64,records:i64) i64 {
+  let tables=scratch+24;
+  let reader=scratch+72;
+  let memory=records+3*(JpegProgressComponent.size+64)+24;
+  let i=0;
+  while(i<12) { let blank=ux_u32_put(tables+i*4,0); i=i+1; }
+  let at=src+2;
+  let end=src+bytes;
+  let limit=ux_u32_put(reader+JpegBits.end,end);
+  let sampling=0;
+  let seen=0;
+  let interval=0;
+  while(at<end) {
+    if(ux_u8(at)!=255) { return 0-2; }
+    while(at<end && ux_u8(at)==255) { at=at+1; }
+    if(at>=end) { return 0-2; }
+    let marker=ux_u8(at);
+    at=at+1;
+    if(marker==217) {
+      if(at!=end || seen==0) { return 0-6; }
+      let c=0;
+      while(c<3) {
+        let stage=records+c*(JpegProgressComponent.size+64)+JpegProgressComponent.size;
+        if(ux_u8(stage)==255) { return 0-6; }
+        c=c+1;
+      }
+      return sampling;
+    }
+    if(at>end-2) { return 0-2; }
+    let length=jpeg_u16be(at);
+    if(length<2 || length>end-at) { return 0-2; }
+    let next=at+length;
+    let body=at+2;
+    if(marker==194) {
+      if(sampling!=0 || length!=17) { return 0-4; }
+      sampling=jpeg_progressive_layout(body,records,memory,scratch+space);
+      if(sampling<0) { return sampling; }
+    } else if(marker==219) {
+      if(seen!=0) { return 0-4; }
+      let parsed=jpeg_quant_tables(body,next,tables);
+      if(parsed<0) { return parsed; }
+    } else if(marker==196) {
+      let parsed=jpeg_huff_tables(body,next,tables);
+      if(parsed<0) { return parsed; }
+    } else if(marker==221) {
+      if(length!=4) { return 0-2; }
+      interval=jpeg_u16be(body);
+    } else if(marker==238 && length>=14 && ux_u32(body)==1651467329 && ux_u8(body+4)==101) {
+      if(ux_u8(body+11)!=1) { return 0-4; }
+    } else if(marker==218) {
+      if(sampling==0 || length<8) { return 0-4; }
+      let cursor=ux_u32_put(reader+JpegBits.next,next);
+      let empty=ux_u32_put(reader+JpegBits.remaining,0);
+      next=jpeg_progressive_color_sos(reader,body,length,records,tables,interval);
+      if(next<0) { return next; }
+      seen=1;
+    } else if((marker<224 || marker>239) && marker!=254) { return 0-4; }
+    at=next;
+  }
+  return 0-6;
+}
+
+native function jpeg_progressive_plane(rec:i64,quant:i64,scratch:i64,basis:i64) i64 {
+  let order=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
+  let cols=ux_u32(rec+JpegProgressComponent.columns);
+  let rows=ux_u32(rec+JpegProgressComponent.rows);
+  let stride=ux_u32(rec+JpegProgressComponent.stride);
+  let coeff=ux_u32(rec+JpegProgressComponent.coeff);
+  let pixels=ux_u32(rec+JpegProgressComponent.plane);
+  let width=ux_u32(rec+JpegProgressComponent.width);
+  let height=ux_u32(rec+JpegProgressComponent.height);
+  let working=scratch+88;
+  let i=0;
+  while(i<rows*cols) {
+    let x=i%cols;
+    let y=i/cols;
+    let source=coeff+256*(y*stride+x);
+    let k=0;
+    while(k<64) {
+      let cell=4*order[k];
+      let value=ux_i32(source+cell)*ux_u8(quant+k);
+      let saved=ux_i32_put(working+cell,value);
+      k=k+1;
+    }
+    let block=jpeg_idct_block(working,basis,scratch+856,scratch+1368);
+    let staged=jpeg_store_block(block,pixels,width,height,8*x,8*y);
+    i=i+1;
+  }
+  return pixels;
+}
+
+native function JpegDecode_progressiveColor(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  if(src<0 || bytes<4 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
+     scratch<0 || scratch%8!=0 || space<1800 || scratch>6291456-space ||
+     jpeg_overlap(src,bytes,out,cap) || jpeg_overlap(src,bytes,scratch,space) || jpeg_overlap(out,cap,scratch,space)) { return 0-1; }
+  let header=JpegHeader_probe(src,bytes,scratch);
+  if(header<0) { return header; }
+  if(ux_u32(header+JpegHeader.frame)!=194 || ux_u32(header+JpegHeader.components)!=3) { return 0-4; }
+  let width=ux_u32(header+JpegHeader.width);
+  let height=ux_u32(header+JpegHeader.height);
+  if(height>cap/(4*width)) { return 0-1; }
+  let records=scratch+1432;
+  let sampling=jpeg_progressive_color_scans(src,bytes,scratch,space,records);
+  if(sampling<0) { return sampling; }
+  let basis=jpeg_idct_basis(scratch+344);
+  let stride=JpegProgressComponent.size+64;
+  let y=jpeg_progressive_plane(records,ux_u32(scratch+24+4*ux_u32(records+JpegProgressComponent.quantId)),scratch,basis);
+  let urec=records+stride;
+  let vrec=urec+stride;
+  let cb=jpeg_progressive_plane(urec,ux_u32(scratch+24+4*ux_u32(urec+JpegProgressComponent.quantId)),scratch,basis);
+  let cr=jpeg_progressive_plane(vrec,ux_u32(scratch+24+4*ux_u32(vrec+JpegProgressComponent.quantId)),scratch,basis);
+  let cw=ux_u32(urec+JpegProgressComponent.width);
+  let ch=ux_u32(urec+JpegProgressComponent.height);
+  let i=0;
+  while(i<width*height) {
+    let u=jpeg_chroma_sample(cb,cw,ch,i%width,i/width,sampling);
+    let v=jpeg_chroma_sample(cr,cw,ch,i%width,i/width,sampling);
+    let saved=ux_u32_put(out+i*4,jpeg_color_pixel(ux_u8(y+i),u,v));
+    i=i+1;
+  }
+  return width*height*4;
+}

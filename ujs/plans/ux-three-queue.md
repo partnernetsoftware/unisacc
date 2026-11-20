@@ -194,7 +194,8 @@
 - ~~JPEG 渐进频带首传与 DC 细化 | G-io 预测器、频带范围、EOBRUN 及浏览器像素 | JPEG 熵解码。~~ 9 项通过，忽略细化位的反例由 193 变为 192。
 - ~~JPEG 渐进 AC 细化 | G-io 新系数、符号、ZRL、EOBRUN 与浏览器像素 | 渐进频带首传。~~ 16 项通过，AC 细化反例由 161 变为 150，DC 反例仍红。
 - ~~JPEG 灰度渐进解码 | G-io 多次扫描、逐次逼近、重启与坏序号 | 渐进扫描频带与重启间隔。~~ 11 项通过，翻转 AC 细化位反例转红。
-- JPEG 彩色渐进解码 | G-io 交错 DC、分量 AC 扫描、色度采样、细化与坏序号 | 灰度渐进、彩色基线与重启间隔。
+- ~~JPEG 彩色渐进解码 | G-io 交错 DC、分量 AC 扫描、色度采样与坏序号 | 灰度渐进、彩色基线与重启间隔。~~ 11 项通过，跨块坐标替换反例由 129 变为 128。
+- ImageLoader 渐进 JPEG 分派 | G-io 灰度和彩色渐进文件响应，失败保持输出 | 渐进 JPEG 解码。
 - JPEG 编码与 ImageUtils 接线 | G-io Canvas 大图分支、PNG/JPEG URI 及有损误差 | JPEG 彩色与 ImageUtils PNG。
 - PNG 调色板、透明色键及隔行 | G-io 色型、透明度、Adam7 与坏文件 | PNG 解码和扫描行。
 - AudioLoader 解码与调度 | G-io WAV 多格式、异步加载、出错与回收 | FileLoader、LoadingManager。

@@ -1,6 +1,35 @@
-native function jpeg_progressive_blocks(reader:i64,blocks:i64,coeff:i64,range:i64,level:i64,table:i64,interval:i64) i64 {
-  let first=range/64;
-  let last=range%64;
+native function jpeg_progressive_boundary(reader:i64) i64 {
+  let start=ux_u32(reader+JpegBits.next);
+  let end=ux_u32(reader+JpegBits.end);
+  let at=start;
+  while(at<end && ux_u8(at)==255) { at=at+1; }
+  if(at==start || at>=end || ux_u8(at)==0) { return 0-6; }
+  let boundary=jpeg_marker(reader,end,ux_u8(at));
+  if(boundary<0) { return boundary; }
+  return start;
+}
+
+native function jpeg_progressive_stages(stages:i64,first:i64,last:i64,level:i64) i64 {
+  let high=level/16;
+  let low=level%16;
+  if(first>last || last>63 || (first==0 && last!=0) || (first>0 && ux_u8(stages)==255) ||
+     high>13 || low>13 || (high!=0 && high!=low+1)) { return 0-4; }
+  let expected=high;
+  if(high==0) { expected=255; }
+  let k=first;
+  while(k<=last) {
+    if(ux_u8(stages+k)!=expected) { return 0-6; }
+    let saved=ux_u8_put(stages+k,low);
+    k=k+1;
+  }
+  return 0;
+}
+
+native function jpeg_progressive_blocks(reader:i64,blocks:i64,coeff:i64,cols:i64,stride:i64,
+    spectral:i64,table:i64,interval:i64) i64 {
+  let first=ux_u8(spectral);
+  let last=ux_u8(spectral+1);
+  let level=ux_u8(spectral+2);
   let high=level/16;
   let low=level%16;
   let predictor=0;
@@ -13,7 +42,7 @@ native function jpeg_progressive_blocks(reader:i64,blocks:i64,coeff:i64,range:i6
       if(next<0) { return next; }
       predictor=0;
     }
-    let block=coeff+i*256;
+    let block=coeff+(i/cols*stride+i%cols)*256;
     if(first==0) {
       if(high==0) {
         let next=jpeg_progressive_dc_first(reader,table,predictor,low,block);
@@ -34,14 +63,7 @@ native function jpeg_progressive_blocks(reader:i64,blocks:i64,coeff:i64,range:i6
     i=i+1;
   }
   if(eob!=0) { return 0-6; }
-  let start=ux_u32(reader+JpegBits.next);
-  let end=ux_u32(reader+JpegBits.end);
-  let at=start;
-  while(at<end && ux_u8(at)==255) { at=at+1; }
-  if(at==start || at>=end || ux_u8(at)==0) { return 0-6; }
-  let boundary=jpeg_marker(reader,end,ux_u8(at));
-  if(boundary<0) { return boundary; }
-  return start;
+  return jpeg_progressive_boundary(reader);
 }
 
 native function jpeg_progressive_gray_scans(src:i64,bytes:i64,scratch:i64,coeff:i64,blocks:i64) i64 {
@@ -97,24 +119,16 @@ native function jpeg_progressive_gray_scans(src:i64,bytes:i64,scratch:i64,coeff:
       let last=ux_u8(body+4);
       let level=ux_u8(body+5);
       let high=level/16;
-      let low=level%16;
-      if(first>last || last>63 || (first==0 && last!=0) || (first>0 && ux_u8(stages)==255) ||
-         high>13 || low>13 || (high!=0 && high!=low+1) || ids/16>3 || ids%16>3) { return 0-4; }
+      if(ids/16>3 || ids%16>3) { return 0-4; }
+      let stage=jpeg_progressive_stages(stages,first,last,level);
+      if(stage<0) { return stage; }
       let table=ux_u32(tables+32+4*(ids%16));
       if(first==0) { table=ux_u32(tables+16+4*(ids/16)); }
       quant=ux_u32(tables+quantId*4);
       if(quant==0 || (table==0 && (first!=0 || high==0))) { return 0-6; }
-      let k=first;
-      let expected=high;
-      if(high==0) { expected=255; }
-      while(k<=last) {
-        if(ux_u8(stages+k)!=expected) { return 0-6; }
-        let saved=ux_u8_put(stages+k,low);
-        k=k+1;
-      }
       let cursor=ux_u32_put(reader+JpegBits.next,next);
       let empty=ux_u32_put(reader+JpegBits.remaining,0);
-      next=jpeg_progressive_blocks(reader,blocks,coeff,first*64+last,level,table,interval);
+      next=jpeg_progressive_blocks(reader,blocks,coeff,blocks,blocks,body+3,table,interval);
       if(next<0) { return next; }
     } else if((marker<224 || marker>239) && marker!=254) { return 0-4; }
     at=next;
