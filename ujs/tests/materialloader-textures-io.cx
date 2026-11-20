@@ -1,0 +1,42 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"loadingmanager","fileloader","json-read","loader-json","materialloader","materialloader-textures",0};
+    const char json[]="{\"type\":\"MeshStandardMaterial\",\"map\":\"red\",\"alphaMap\":\"blue\",\"roughnessMap\":\"red\",\"opacity\":0.5}";
+    char setup[3000];
+    int n=tx_snprintf(setup,sizeof setup,"let manager=LoadingManager_init(0);let file=FileLoader_init(32,manager);"
+        "let id=FileLoader_begin(file,64);let input=256;let out=512;let key=600;let bindings=704;let table=768;"
+        "let a=ux_u32_put(table,832);let b=ux_u32_put(table+4,3);let c=ux_u32_put(table+8,17);"
+        "let d=ux_u32_put(table+12,840);let e=ux_u32_put(table+16,4);let f=ux_u32_put(table+20,42);"
+        "let g=ux_u32_put(832,6579570);let h=ux_u32_put(840,1702194274);let size=%d;",(int)sizeof json-1);
+    for(int at=0;at<(int)sizeof json-1;at+=64) {
+        int count=(int)sizeof json-1-at;
+        if(count>64) count=64;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let bytes=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[at+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,"];let i=0;while(i<%d){let byte=ux_u8_put(input+%d+i,bytes[i]);i=i+1;}}",count,at);
+    }
+    tx_snprintf(setup+n,sizeof setup-n,"let received=FileLoader_receive(file,id,200,input,size,64);");
+    #define LOAD "let loaded=MaterialLoader_parseTextures(file,out,bindings,table,2,key);"
+    const char *cases[]={
+        LOAD "return 0.0+loaded;",
+        LOAD "return 0.0+ux_u32(bindings+MaterialTextureBindings.map);",
+        LOAD "return 0.0+ux_u32(bindings+MaterialTextureBindings.alphaMap);",
+        LOAD "return 0.0+ux_u32(bindings+MaterialTextureBindings.roughnessMap);",
+        LOAD "return 0.0+ux_u32(bindings+MaterialTextureBindings.metalnessMap);",
+        LOAD "return ux_f64(out+LoadedMaterial.opacity);",
+        "let unknown=ux_u8_put(840,97);" LOAD "return 0.0+loaded;",
+        "let unknown=ux_u8_put(840,97);let saved=ux_u32_put(bindings,99);"
+        "let savedKind=ux_u32_put(out,8);" LOAD "return 0.0+ux_u32(bindings)*10+ux_u32(out);",
+        "let a=ux_u32_put(table+12,832);let b=ux_u32_put(table+16,3);" LOAD "return 0.0+loaded;",
+        "let a=ux_u32_put(table,bindings);" LOAD "return 0.0+loaded;",
+        "let a=ux_u8_put(input+9,88);" LOAD "return 0.0+loaded;",
+    };
+    const double gold[]={512,17,42,17,0,0.5,-3,998,-3,-1,-3};
+    return g_wasm_batch("G_IO MaterialLoader texture references","materialloader-textures",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,LOAD "return 0.0+ux_u32(bindings+MaterialTextureBindings.map);");
+}

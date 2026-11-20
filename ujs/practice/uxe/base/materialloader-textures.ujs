@@ -1,0 +1,86 @@
+struct MaterialTextureReference {
+  uuid: u32;
+  bytes: u32;
+  handle: u32;
+}
+
+struct MaterialTextureBindings {
+  map: u32;
+  alphaMap: u32;
+  roughnessMap: u32;
+  metalnessMap: u32;
+}
+
+native function material_texture_handle(token:i64,end:i64,table:i64,count:i64) i64 {
+  if(token==0-2) { return 0; }
+  let close=json_scan_string(token,end);
+  if(close<0 || close-token<3) { return 0-3; }
+  let result=0;
+  let i=0;
+  while(i<count) {
+    let row=table+i*MaterialTextureReference.size;
+    let uuid=ux_u32(row+MaterialTextureReference.uuid);
+    let bytes=ux_u32(row+MaterialTextureReference.bytes);
+    let match=bytes==close-token-2;
+    let j=0;
+    while(match && j<bytes) {
+      match=ux_u8(uuid+j)==ux_u8(token+1+j);
+      j=j+1;
+    }
+    if(match) {
+      if(result!=0) { return 0-3; }
+      result=ux_u32(row+MaterialTextureReference.handle);
+    }
+    i=i+1;
+  }
+  if(result==0) { return 0-3; }
+  return result;
+}
+
+native function material_texture_readonly(at:i64,bytes:i64,out:i64,bindings:i64,key:i64) i64 {
+  return loading_span(at,bytes) &&
+    file_disjoint(at,bytes,out,LoadedMaterial.size) &&
+    file_disjoint(at,bytes,bindings,MaterialTextureBindings.size) &&
+    file_disjoint(at,bytes,key,12);
+}
+
+// References remain caller-owned. Missing or ambiguous UUIDs reject the whole
+// record, so callers cannot accidentally publish a partially wired material.
+native function MaterialLoader_parseTextures(file:i64,out:i64,bindings:i64,table:i64,count:i64,key:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
+     !loading_span(out,LoadedMaterial.size) || out%8!=0 || !loading_span(key,12) ||
+     !loading_span(bindings,MaterialTextureBindings.size) || bindings%4!=0 || table%4!=0 ||
+     count<0 || count>1024 ||
+     !file_disjoint(bindings,MaterialTextureBindings.size,key,12) ||
+     !file_disjoint(bindings,MaterialTextureBindings.size,out,LoadedMaterial.size) ||
+     !file_disjoint(key,12,out,LoadedMaterial.size) ||
+     !material_texture_readonly(file,FileLoader.size,out,bindings,key) ||
+     !material_texture_readonly(table,count*MaterialTextureReference.size,out,bindings,key)) { return 0-1; }
+  let input=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(!material_texture_readonly(input,bytes,out,bindings,key)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let row=table+i*MaterialTextureReference.size;
+    let uuid=ux_u32(row+MaterialTextureReference.uuid);
+    let size=ux_u32(row+MaterialTextureReference.bytes);
+    if(size<1 || size>64 || ux_u32(row+MaterialTextureReference.handle)==0 ||
+       !material_texture_readonly(uuid,size,out,bindings,key)) { return 0-1; }
+    i=i+1;
+  }
+  let end=input+bytes;
+  let checked=json_value_end(input,end);
+  if(checked<0 || json_space(checked,end)!=end) { return 0-2; }
+  let map=material_texture_handle(LoaderJson_find(input,end,key,7364973,0,0,3),end,table,count);
+  let alpha=material_texture_handle(LoaderJson_find(input,end,key,1752198241,1885424993,0,8),end,table,count);
+  let rough=material_texture_handle(LoaderJson_find(input,end,key,1735749490,1936027240,1885425011,12),end,table,count);
+  let metal=material_texture_handle(LoaderJson_find(input,end,key,1635018093,1936027244,1885425011,12),end,table,count);
+  if(map<0 || alpha<0 || rough<0 || metal<0) { return 0-3; }
+  let parsed=MaterialLoader_parse(file,out,key);
+  if(parsed<0) { return parsed; }
+  let a=ux_u32_put(bindings+MaterialTextureBindings.map,map);
+  let b=ux_u32_put(bindings+MaterialTextureBindings.alphaMap,alpha);
+  let c=ux_u32_put(bindings+MaterialTextureBindings.roughnessMap,rough);
+  let d=ux_u32_put(bindings+MaterialTextureBindings.metalnessMap,metal);
+  return parsed;
+}

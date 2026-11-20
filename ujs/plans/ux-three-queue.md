@@ -206,7 +206,8 @@
 - ~~AnimationLoader 多片段与数值轨道 | G-io r160 JSON 的数值、向量、颜色、四元数、帧率、插值与失败保留 | M8 轨道和片段。~~ 14 项通过，替换关键帧时间反例转红，旧七项通过。
 - ~~AnimationLoader 布尔与字符串轨道 | G-io 离散模式、未转义与转义文本、所有权及失败保留 | 数值片段装配和 M8 离散轨道。~~ 14 项通过，读取错位的字符串字节由 10 变为 65，反例转红；数值片段 14 项及 UTF-8 九项通过。
 - BufferGeometryLoader 通用 JSON | G-io 索引、组、类型化、交错、变形属性与错误 | BufferGeometry、BufferAttribute。
-- MaterialLoader 材质和纹理表 | G-io r160 材质 JSON、纹理引用和坏类型 | M5 材质和纹理。
+- ~~MaterialLoader 基础与标准材质纹理表 | G-io 四类贴图 UUID、共享纹理和坏类型 | M5 材质和纹理。~~ 11 项通过，透明贴图错绑反例转红，原八项通过。
+- MaterialLoader 余下材质与属性 | G-io 材质构造、类型专属参数及其余贴图 | 材质与纹理表。
 - ObjectLoader 两阶段整景 | G-io 子树、几何、材质、图像引用及失败回退 | BufferGeometryLoader、MaterialLoader、图像加载。
 - GLTFLoader 访问器与网格 | G-io 稀疏访问器、全部几何属性、坏范围与真实 r160 插件 | GLB 密集访问器。
 - GLTFLoader 材质与纹理 | G-io 采样器、UV、内嵌与外部资源以及 JPEG | GLTF 网格、图像加载与材质。
