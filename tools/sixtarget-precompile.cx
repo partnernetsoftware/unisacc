@@ -1,0 +1,417 @@
+/* tools/sixtarget-precompile.cx -- M4/J10 six-target compile-only preflight (-c -funit -DRT_UNIT).
+ * Modes:
+ *   --mode templates    instantiate tools/templates/whole-front.cx.in & whole-win-span.cx.in and precompile
+ *   --mode chain-units  expand cf_root_source via -cx-plan and precompile candidate-compiled units (optional --filter)
+ *   --mode files        precompile explicit --file PATH inputs across targets
+ * Options:
+ *   --root DIR          repository root (default .)
+ *   --compiler APE      compiler executable (default UNISACC_SIXTARGET_COMPILER or ROOT/unisacc.com)
+ *   --target T|all      lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64 (default all)
+ *   --filter PREFIX     relative path prefix filter for chain-units mode (e.g. cx/sys/)
+ *   --part K/N          shard targets across N shards (0 <= K < N, N in 1..16)
+ *   --file PATH         explicit source file for files mode (repeatable, up to 32)
+ *   --deadline-s S      hard deadline in seconds (1..55, default 50)
+ *   --require-d2        verify compiler rejects undeclared function calls before precompiling
+ * Output:
+ *   SIXTARGET_OK<TAB>target=<T><TAB>unit=<U><TAB>ms=<MS>
+ *   SIXTARGET_FAIL<TAB>target=<T><TAB>unit=<U><TAB>rc=<RC><TAB>diag=<FIRST_DIAG>
+ *   SIXTARGET_SUMMARY<TAB>mode=<M><TAB>targets=<NT><TAB>checked=<N><TAB>failed=<F><TAB>ms=<MS><TAB>verdict=<PASS|FAIL>
+ */
+#pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+enum {
+    ST_MAX_TARGETS = 6,
+    ST_MAX_FILES   = 32,
+    ST_MAX_UNITS   = 128
+};
+
+static const char *const st_all_targets[ST_MAX_TARGETS] = {
+    "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+};
+
+static int valid_target(const char *t) {
+    if (!t || !t[0]) return 0;
+    for (int i = 0; i < ST_MAX_TARGETS; i++) {
+        if (tx_eqz(t, st_all_targets[i])) return 1;
+    }
+    return 0;
+}
+
+static int parse_part(const char *s, int *part_out, int *total_out) {
+    if (!s || !s[0]) return -1;
+    const char *sl = strchr(s, '/');
+    if (!sl || sl == s || !sl[1]) return -1;
+    char a[16], b[16];
+    size_t la = (size_t)(sl - s);
+    size_t lb = strlen(sl + 1);
+    if (la >= sizeof a || lb >= sizeof b) return -1;
+    mm_copy(a, sizeof a, s, la); a[la] = 0;
+    mm_copy(b, sizeof b, sl + 1, lb); b[lb] = 0;
+    int p = atoi(a), n = atoi(b);
+    if (n < 1 || n > 16 || p < 0 || p >= n) return -1;
+    *part_out = p;
+    *total_out = n;
+    return 0;
+}
+
+static void first_diag_line(const char *err, size_t errn, const char *why, char *out, size_t cap) {
+    if (!cap) return;
+    out[0] = 0;
+    const char *best = 0;
+    size_t best_len = 0;
+    const char *first = 0;
+    size_t first_len = 0;
+    if (err && errn > 0) {
+        size_t pos = 0;
+        while (pos < errn) {
+            size_t ls = pos;
+            while (pos < errn && err[pos] != '\n') pos++;
+            size_t le = pos;
+            if (pos < errn) pos++;
+            while (le > ls && (err[le - 1] == '\r' || err[le - 1] == ' ' || err[le - 1] == '\t')) le--;
+            if (le > ls) {
+                size_t len = le - ls;
+                const char *line = err + ls;
+                if (!first) { first = line; first_len = len; }
+                if (!best && (tx_find(line, (long)len, "error:", 6) >= 0 ||
+                              tx_find(line, (long)len, "reject:", 7) >= 0 ||
+                              tx_find(line, (long)len, "REFUSE", 6) >= 0)) {
+                    best = line;
+                    best_len = len;
+                    break;
+                }
+            }
+        }
+    }
+    const char *src = best ? best : (first ? first : (why && why[0] ? why : "compile-failed"));
+    size_t slen = best ? best_len : (first ? first_len : strlen(src));
+    size_t cp = slen < cap - 1 ? slen : cap - 1;
+    if (cp) mm_copy(out, cap, src, cp);
+    out[cp] = 0;
+    for (size_t i = 0; i < cp; i++) {
+        if (out[i] == '\t' || out[i] == '\r' || out[i] == '\n') out[i] = ' ';
+    }
+}
+
+static void rm_tree(const char *dir) {
+    char *v[] = { "rm", "-rf", (char *)dir, 0 };
+    np_result r = {0};
+    char why[128] = {0};
+    np_run(v, "/", 0, 10, &r, why, sizeof why);
+    np_free(&r);
+}
+
+static int prepare_cx_links(const char *root, const char *workdir) {
+    char cxdir[4200];
+    if (cx_fmt(cxdir, sizeof cxdir, "%s/cx", root)) return -1;
+    sy_dir_t d;
+    if (sy_dir_open(&d, cxdir) != 0) return -1;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        char src[4400], dst[4400];
+        if (cx_fmt(src, sizeof src, "%s/cx/%s", root, d.name) ||
+            cx_fmt(dst, sizeof dst, "%s/%s", workdir, d.name)) continue;
+        sy_symlink(src, dst);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int probe_d2(const char *compiler, const char *root, const char *workdir, char *const env[], long deadline_ms) {
+    char src[4400], obj[4400], why[256] = {0};
+    if (cx_fmt(src, sizeof src, "%s/_d2_probe.cx", workdir) ||
+        cx_fmt(obj, sizeof obj, "%s/_d2_probe.o", workdir)) return 0;
+    const char *body = "int _st_d2_probe(void) { return _st_d2_undeclared_fn(1); }\n";
+    if (sy_write_file(src, body, (int64_t)strlen(body), 0600) != 0) return 0;
+    long left = (deadline_ms - sy_now_ms()) / 1000L;
+    if (left < 1) return 0;
+    char *av[] = { "sh", (char *)compiler, "-b", "win/x86_64", "-c", "-funit", "-DRT_UNIT", src, "-o", obj, 0 };
+    np_result r = {0};
+    int tr = np_run(av, root, env, left < 15 ? (int)left : 15, &r, why, sizeof why);
+    int has_d2 = (!tr && r.rc != 0);
+    sy_unlink(obj);
+    sy_unlink(src);
+    np_free(&r);
+    return has_d2;
+}
+
+static int compile_one(const char *compiler, const char *root, const char *workdir, char *const env[],
+                       const char *target, const char *unit_path, const char *label, long deadline_ms) {
+    long t0 = sy_now_ms();
+    long left = (deadline_ms - t0) / 1000L;
+    if (left < 1) {
+        printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=124\tdiag=deadline-exceeded\n", target, label);
+        return 0;
+    }
+    char obj[4400], why[256] = {0};
+    if (cx_fmt(obj, sizeof obj, "%s/unit.o", workdir)) {
+        printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=2\tdiag=object-path-too-long\n", target, label);
+        return 0;
+    }
+    sy_unlink(obj);
+    char *av[] = { "sh", (char *)compiler, "-b", (char *)target, "-c", "-funit", "-DRT_UNIT", (char *)unit_path, "-o", obj, 0 };
+    np_result r = {0};
+    int tr = np_run(av, root, env, left < 20 ? (int)left : 20, &r, why, sizeof why);
+    sy_stat_t st;
+    int made = (sy_lstat(obj, &st) == 0);
+    int err_hit = (r.err && r.errn > 0 &&
+        (tx_find(r.err, (long)r.errn, "error:", 6) >= 0 ||
+         tx_find(r.err, (long)r.errn, "reject:", 7) >= 0));
+    int ok = (!tr && r.rc == 0 && r.residue == 0 && !err_hit && made && st.kind == 'f' && st.size > 0);
+    if (ok) {
+        printf("SIXTARGET_OK\ttarget=%s\tunit=%s\tms=%ld\n", target, label, sy_now_ms() - t0);
+    } else {
+        char diag[384];
+        first_diag_line(r.err, r.errn, why, diag, sizeof diag);
+        printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=%d\tdiag=%s\n", target, label, tr ? 124 : r.rc, diag);
+    }
+    if (made) sy_unlink(obj);
+    np_free(&r);
+    return ok;
+}
+
+static int collect_plan_units(const char *compiler, const char *root, char *const env[],
+                              const char *target, const char *filter,
+                              char *units_out, long deadline_ms) {
+    char roots[ST_MAX_UNITS][4400];
+    char *av[ST_MAX_UNITS + 7];
+    int nr = cf_root_count();
+    if (nr <= 0 || nr > ST_MAX_UNITS) return -1;
+    av[0] = "sh";
+    av[1] = (char *)compiler;
+    av[2] = "-b";
+    av[3] = (char *)target;
+    av[4] = "-cx-plan";
+    for (int i = 0; i < nr; i++) {
+        if (cx_fmt(roots[i], sizeof roots[i], "%s/%s", root, cf_root_source(i))) return -1;
+        av[5 + i] = roots[i];
+    }
+    av[5 + nr] = 0;
+
+    long left = (deadline_ms - sy_now_ms()) / 1000L;
+    if (left < 1) return -1;
+    np_result r = {0};
+    char why[256] = {0};
+    if (np_run(av, root, env, left < 15 ? (int)left : 15, &r, why, sizeof why) || r.rc || r.residue || !r.outn) {
+        np_free(&r);
+        return -1;
+    }
+
+    size_t rlen = strlen(root);
+    size_t flen = (filter && filter[0]) ? strlen(filter) : 0;
+    int count = 0;
+    char *end = r.out + r.outn;
+    for (char *row = r.out; row < end;) {
+        char *nl = (char *)memchr(row, '\n', (size_t)(end - row));
+        if (!nl) break;
+        *nl = 0;
+        char *tab = strchr(row, '\t');
+        if (tab) {
+            char *path = tab + 1;
+            char *tab2 = strchr(path, '\t');
+            if (tab2) *tab2 = 0;
+            if (strlen(path) > rlen + 1 && memcmp(path, root, rlen) == 0 && path[rlen] == '/') {
+                const char *rel = path + rlen + 1;
+                if (!flen || tx_find(rel, (long)strlen(rel), filter, (long)flen) >= 0) {
+                    int dup = 0;
+                    for (int k = 0; k < count; k++) {
+                        if (tx_eqz(units_out + (size_t)k * 4400, path)) { dup = 1; break; }
+                    }
+                    if (!dup && count < ST_MAX_UNITS) {
+                        if (!cx_fmt(units_out + (size_t)count * 4400, 4400, "%s", path)) count++;
+                    }
+                }
+            }
+        }
+        row = nl + 1;
+    }
+    np_free(&r);
+    return count;
+}
+
+static int copy_template_unit(const char *src_path, const char *dst_path) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(src_path, &b, &n, 2 << 20) != 0 || !b || n <= 0) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    int rc = sy_write_file(dst_path, b, n, 0600);
+    mm_free(b);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *mode = 0, *root_arg = ".", *comp_arg = 0, *target_arg = "all", *filter_arg = 0;
+    const char *files[ST_MAX_FILES];
+    int nfiles = 0, part = 0, total_parts = 1, deadline_s = 50, require_d2 = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--mode") && i + 1 < argc) mode = argv[++i];
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--compiler") && i + 1 < argc) comp_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--target") && i + 1 < argc) target_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--filter") && i + 1 < argc) filter_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--part") && i + 1 < argc) {
+            if (parse_part(argv[++i], &part, &total_parts) != 0) {
+                fprintf(stderr, "sixtarget-precompile: bad --part (expected K/N)\n");
+                return 2;
+            }
+        } else if (tx_eqz(argv[i], "--file") && i + 1 < argc) {
+            if (nfiles >= ST_MAX_FILES) { fprintf(stderr, "sixtarget-precompile: too many --file\n"); return 2; }
+            files[nfiles++] = argv[++i];
+        } else if (tx_eqz(argv[i], "--deadline-s") && i + 1 < argc) {
+            deadline_s = atoi(argv[++i]);
+            if (deadline_s < 1 || deadline_s > 55) {
+                fprintf(stderr, "sixtarget-precompile: --deadline-s must be 1..55\n");
+                return 2;
+            }
+        } else if (tx_eqz(argv[i], "--require-d2")) {
+            require_d2 = 1;
+        } else {
+            fprintf(stderr, "sixtarget-precompile: bad argument: %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    if (!mode || (!tx_eqz(mode, "templates") && !tx_eqz(mode, "chain-units") && !tx_eqz(mode, "files"))) {
+        fprintf(stderr, "sixtarget-precompile: usage: --mode (templates|chain-units|files) [--root DIR] [--compiler APE] [--target T|all] [--filter PREFIX] [--part K/N] [--file PATH] [--deadline-s 1..55] [--require-d2]\n");
+        return 2;
+    }
+    if (tx_eqz(mode, "files") && nfiles == 0) {
+        fprintf(stderr, "sixtarget-precompile: --mode files requires at least one --file\n");
+        return 2;
+    }
+
+    const char *targets[ST_MAX_TARGETS];
+    int ntargets = 0;
+    if (tx_eqz(target_arg, "all")) {
+        for (int i = 0; i < ST_MAX_TARGETS; i++) {
+            if (i % total_parts == part) targets[ntargets++] = st_all_targets[i];
+        }
+    } else if (valid_target(target_arg)) {
+        targets[ntargets++] = target_arg;
+    } else {
+        fprintf(stderr, "sixtarget-precompile: invalid --target: %s\n", target_arg);
+        return 2;
+    }
+    if (ntargets == 0) {
+        fprintf(stderr, "sixtarget-precompile: empty target shard\n");
+        return 2;
+    }
+
+    char root[4096], compiler[4400];
+    if (sy_realpath(root_arg, root, sizeof root) < 0) {
+        fprintf(stderr, "sixtarget-precompile: cannot resolve --root %s\n", root_arg);
+        return 2;
+    }
+    if (!comp_arg) comp_arg = sy_env("UNISACC_SIXTARGET_COMPILER");
+    if (comp_arg && comp_arg[0]) {
+        if (sy_realpath(comp_arg, compiler, sizeof compiler) < 0) {
+            fprintf(stderr, "sixtarget-precompile: cannot resolve --compiler %s\n", comp_arg);
+            return 2;
+        }
+    } else if (cx_fmt(compiler, sizeof compiler, "%s/unisacc.com", root) || sy_exists(compiler) != 1) {
+        fprintf(stderr, "sixtarget-precompile: missing compiler %s/unisacc.com\n", root);
+        return 2;
+    }
+
+    long t0 = sy_now_ms();
+    long deadline_ms = t0 + (long)deadline_s * 1000L;
+    char workdir[256], tmpdir[300], tmp_env[320];
+    tx_snprintf(workdir, sizeof workdir, "/tmp/sixtarget-%d-%ld", (int)getpid(), t0 % 100000L);
+    tx_snprintf(tmpdir, sizeof tmpdir, "%s/tmp", workdir);
+    tx_snprintf(tmp_env, sizeof tmp_env, "TMPDIR=%s", tmpdir);
+    if (sy_mkdir_all(tmpdir, 0700) != 0) {
+        fprintf(stderr, "sixtarget-precompile: cannot create %s\n", tmpdir);
+        return 2;
+    }
+    char *child_env[] = { tmp_env, 0 };
+
+    if (require_d2 && !probe_d2(compiler, root, workdir, child_env, deadline_ms)) {
+        printf("SIXTARGET_REFUSE\treason=compiler-lacks-d2\tcompiler=%s\n", compiler);
+        rm_tree(workdir);
+        return 2;
+    }
+
+    int checked = 0, failed = 0;
+
+    if (tx_eqz(mode, "templates")) {
+        if (prepare_cx_links(root, workdir) != 0) {
+            fprintf(stderr, "sixtarget-precompile: cannot link cx modules from %s/cx\n", root);
+            rm_tree(workdir);
+            return 2;
+        }
+        static const char *const tpls[2] = {
+            "tools/templates/whole-front.cx.in",
+            "tools/templates/whole-win-span.cx.in"
+        };
+        static const char *const dsts[2] = { "wf.cx", "ws.cx" };
+        char wpaths[2][4400];
+        for (int k = 0; k < 2; k++) {
+            char sp[4400];
+            if (cx_fmt(sp, sizeof sp, "%s/%s", root, tpls[k]) ||
+                cx_fmt(wpaths[k], sizeof wpaths[k], "%s/%s", workdir, dsts[k]) ||
+                copy_template_unit(sp, wpaths[k]) != 0) {
+                fprintf(stderr, "sixtarget-precompile: cannot instantiate %s\n", tpls[k]);
+                rm_tree(workdir);
+                return 2;
+            }
+        }
+        for (int ti = 0; ti < ntargets; ti++) {
+            for (int k = 0; k < 2; k++) {
+                checked++;
+                if (!compile_one(compiler, root, workdir, child_env, targets[ti], wpaths[k], tpls[k], deadline_ms))
+                    failed++;
+            }
+        }
+    } else if (tx_eqz(mode, "chain-units")) {
+        char *ubuf = (char *)mm_alloc((size_t)ST_MAX_UNITS * 4400);
+        if (!ubuf) { rm_tree(workdir); return 2; }
+        size_t rlen = strlen(root);
+        for (int ti = 0; ti < ntargets; ti++) {
+            int nu = collect_plan_units(compiler, root, child_env, targets[ti], filter_arg,
+                                        ubuf, deadline_ms);
+            if (nu <= 0) {
+                checked++;
+                failed++;
+                printf("SIXTARGET_FAIL\ttarget=%s\tunit=-cx-plan\trc=1\tdiag=plan-empty-or-failed\n", targets[ti]);
+                continue;
+            }
+            int shard_units = (!tx_eqz(target_arg, "all") && total_parts > 1);
+            for (int u = 0; u < nu; u++) {
+                if (shard_units && (u % total_parts != part)) continue;
+                const char *up = ubuf + (size_t)u * 4400;
+                const char *lbl = (strlen(up) > rlen + 1) ? up + rlen + 1 : up;
+                checked++;
+                if (!compile_one(compiler, root, workdir, child_env, targets[ti], up, lbl, deadline_ms))
+                    failed++;
+            }
+        }
+        mm_free(ubuf);
+    } else {
+        for (int ti = 0; ti < ntargets; ti++) {
+            for (int fi = 0; fi < nfiles; fi++) {
+                checked++;
+                if (!compile_one(compiler, root, workdir, child_env, targets[ti], files[fi], files[fi], deadline_ms))
+                    failed++;
+            }
+        }
+    }
+
+    rm_tree(workdir);
+    long elapsed = sy_now_ms() - t0;
+    int pass = (failed == 0 && checked > 0);
+    printf("SIXTARGET_SUMMARY\tmode=%s\ttargets=%d\tchecked=%d\tfailed=%d\tms=%ld\tverdict=%s\n",
+           mode, ntargets, checked, failed, elapsed, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+}
