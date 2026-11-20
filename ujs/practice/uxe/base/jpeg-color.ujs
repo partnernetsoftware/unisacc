@@ -1,5 +1,5 @@
-// Baseline, interleaved YCbCr with one block per component per MCU.
-// Offsets 0..47 hold the tables, 48..83 the scan records and 84..95 the DC predictors.
+// Baseline interleaved YCbCr. Offsets 0..47 hold the tables, 48..83 the scan
+// records, 84..95 the DC predictors and 96 the packed luma sampling factors.
 native function jpeg_color_scan(src:i64,bytes:i64,meta:i64) i64 {
   let clear=0;
   while(clear<24) { let z=ux_u32_put(meta+clear*4,0); clear=clear+1; }
@@ -20,7 +20,9 @@ native function jpeg_color_scan(src:i64,bytes:i64,meta:i64) i64 {
       if(frame!=0 || width!=17) { return 0-4; }
       let i=0;
       while(i<3) {
-        if(ux_u8(body+6+i*3)!=i+1 || ux_u8(body+7+i*3)!=17) { return 0-4; }
+        let sampling=ux_u8(body+7+i*3);
+        if(ux_u8(body+6+i*3)!=i+1 || (i!=0 && sampling!=17) ||
+           (i==0 && sampling!=17 && sampling!=33 && sampling!=34)) { return 0-4; }
         i=i+1;
       }
       frame=body;
@@ -50,6 +52,7 @@ native function jpeg_color_scan(src:i64,bytes:i64,meta:i64) i64 {
         let c=ux_u32_put(rec+8,ac);
         i=i+1;
       }
+      let sampling=ux_u32_put(meta+96,ux_u8(frame+7));
       return next;
     } else if((marker<224 || marker>239) && marker!=254) { return 0-4; }
     at=next;
@@ -70,10 +73,41 @@ native function jpeg_color_pixel(y:i64,cb:i64,cr:i64) i64 {
   return 4278190080+r+g*256+b*65536;
 }
 
-// Publish the destination only when every MCU and the end marker validate.
-native function JpegDecode_color444(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+// Interpolate centered chroma samples using their adjacent decoded samples.
+native function jpeg_chroma_sample(src:i64,w:i64,h:i64,x:i64,y:i64,sampling:i64) i64 {
+  if(sampling==17) { return ux_u8(src+y*w+x); }
+  let col=x/2;
+  let row=y;
+  if(sampling==34) { row=y/2; }
+  let nearcol=col-1+x%2*2;
+  if(nearcol<0 || nearcol>=w) { nearcol=col; }
+  let center=ux_u8(src+row*w+col);
+  let side=ux_u8(src+row*w+nearcol);
+  if(sampling==33) { return (center*3+side+1+x%2)/4; }
+  let nearrow=row-1+y%2*2;
+  if(nearrow<0 || nearrow>=h) { nearrow=row; }
+  let across=ux_u8(src+nearrow*w+col);
+  let diagonal=ux_u8(src+nearrow*w+nearcol);
+  return (9*center+3*side+3*across+diagonal+8-x%2)/16;
+}
+
+native function jpeg_store_block(block:i64,plane:i64,w:i64,h:i64,x:i64,y:i64) i64 {
+  let j=0;
+  while(j<8 && y+j<h) {
+    let i=0;
+    while(i<8 && x+i<w) {
+      let saved=ux_u8_put(plane+(y+j)*w+x+i,ux_u8(block+j*8+i));
+      i=i+1;
+    }
+    j=j+1;
+  }
+  return 0;
+}
+
+// Publish from decoded component planes only after the last MCU and EOI validate.
+native function jpeg_decode_color(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,only444:i64) i64 {
   if(src<0 || bytes<4 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
-     scratch<0 || scratch%8!=0 || space<1616 || scratch>6291456-space ||
+     scratch<0 || scratch%8!=0 || space<1496 || scratch>6291456-space ||
      jpeg_overlap(src,bytes,out,cap) || jpeg_overlap(src,bytes,scratch,space) || jpeg_overlap(out,cap,scratch,space)) { return 0-1; }
   let header=JpegHeader_probe(src,bytes,scratch);
   if(header<0) { return header; }
@@ -81,43 +115,54 @@ native function JpegDecode_color444(src:i64,bytes:i64,out:i64,cap:i64,scratch:i6
   let width=ux_u32(header+JpegHeader.width);
   let height=ux_u32(header+JpegHeader.height);
   let row=width*4;
-  if(height>cap/row || height>(space-1616)/row) { return 0-1; }
+  if(height>cap/row) { return 0-1; }
   let meta=scratch+24;
   let start=jpeg_color_scan(src,bytes,meta);
   if(start<0) { return start; }
-  let reader=scratch+120;
+  let sampling=ux_u32(meta+96);
+  if(only444!=0 && sampling!=17) { return 0-4; }
+  let sx=sampling/16;
+  let sy=sampling%16;
+  let cw=(width+sx-1)/sx;
+  let ch=(height+sy-1)/sy;
+  let ysize=width*height;
+  let csize=cw*ch;
+  if(ysize+2*csize>space-1496) { return 0-1; }
+  let reader=scratch+128;
   let next=ux_u32_put(reader+JpegBits.next,start);
   let bound=ux_u32_put(reader+JpegBits.end,src+bytes);
   let bits=ux_u32_put(reader+JpegBits.remaining,0);
-  let coeff=scratch+136;
-  let basis=jpeg_idct_basis(scratch+392);
-  let work=scratch+904;
-  let block=scratch+1416;
-  let pixels=scratch+1616;
+  let coeff=scratch+144;
+  let basis=jpeg_idct_basis(scratch+400);
+  let work=scratch+912;
+  let block=scratch+1424;
+  let pixels=scratch+1496;
+  let cb=pixels+ysize;
+  let cr=cb+csize;
   let y=0;
-  while(y<height) {
+  while(y<ch) {
     let x=0;
-    while(x<width) {
+    while(x<cw) {
       let c=0;
       while(c<3) {
         let rec=meta+48+c*12;
         let dc=meta+84+c*4;
-        let decoded=jpeg_baseline_block(reader,ux_u32(rec),ux_u32(rec+4),ux_u32(rec+8),ux_i32(dc),coeff);
-        if(decoded<0) { return decoded; }
-        let pred=ux_i32_put(dc,decoded-65536);
-        let rendered=jpeg_idct_block(coeff,basis,work,block+c*64);
-        c=c+1;
-      }
-      let j=0;
-      while(j<8 && y+j<height) {
-        let i=0;
-        while(i<8 && x+i<width) {
-          let at=block+j*8+i;
-          let rgb=jpeg_color_pixel(ux_u8(at),ux_u8(at+64),ux_u8(at+128));
-          let staged=ux_u32_put(pixels+(y+j)*row+(x+i)*4,rgb);
-          i=i+1;
+        let count=1;
+        if(c==0) { count=sx*sy; }
+        let tile=0;
+        while(tile<count) {
+          let decoded=jpeg_baseline_block(reader,ux_u32(rec),ux_u32(rec+4),ux_u32(rec+8),ux_i32(dc),coeff);
+          if(decoded<0) { return decoded; }
+          let pred=ux_i32_put(dc,decoded-65536);
+          let rendered=jpeg_idct_block(coeff,basis,work,block);
+          if(c==0) {
+            let saved=jpeg_store_block(rendered,pixels,width,height,x*sx+8*(tile%sx),y*sy+8*(tile/sx));
+          } else {
+            let saved=jpeg_store_block(rendered,cb+(c-1)*csize,cw,ch,x,y);
+          }
+          tile=tile+1;
         }
-        j=j+1;
+        c=c+1;
       }
       x=x+8;
     }
@@ -125,8 +170,20 @@ native function JpegDecode_color444(src:i64,bytes:i64,out:i64,cap:i64,scratch:i6
   }
   let complete=jpeg_finish_scan(reader,src+bytes);
   if(complete<0) { return complete; }
-  let size=row*height;
   let i=0;
-  while(i<size) { let saved=ux_u32_put(out+i,ux_u32(pixels+i)); i=i+4; }
-  return size;
+  while(i<ysize) {
+    let u=jpeg_chroma_sample(cb,cw,ch,i%width,i/width,sampling);
+    let v=jpeg_chroma_sample(cr,cw,ch,i%width,i/width,sampling);
+    let saved=ux_u32_put(out+i*4,jpeg_color_pixel(ux_u8(pixels+i),u,v));
+    i=i+1;
+  }
+  return ysize*4;
+}
+
+native function JpegDecode_color444(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return jpeg_decode_color(src,bytes,out,cap,scratch,space,1);
+}
+
+native function JpegDecode_color(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return jpeg_decode_color(src,bytes,out,cap,scratch,space,0);
 }
