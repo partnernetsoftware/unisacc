@@ -1,0 +1,61 @@
+native function ray_mesh_uv_safe(at:i64,bytes:i64,mesh:i64,hit:i64,uv:i64,uv_stride:i64) i64 {
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let position=ux_u32(mesh+RayMeshBuffer.positions);
+  let position_bytes=(vertices-1)*ux_u32(mesh+RayMeshBuffer.positionStride)+12;
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let index_bytes=ux_u32(mesh+RayMeshBuffer.faceCount)*3*ux_u32(mesh+RayMeshBuffer.indexBytes);
+  return !raycaster_overlap(at,bytes,mesh,RayMeshBuffer.size) &&
+    !raycaster_overlap(at,bytes,hit,RayMeshHit.size) &&
+    !raycaster_overlap(at,bytes,ux_u32(mesh+RayMeshBuffer.matrixWorld),128) &&
+    !raycaster_overlap(at,bytes,position,position_bytes) &&
+    !raycaster_overlap(at,bytes,indices,index_bytes) &&
+    !raycaster_overlap(at,bytes,uv,(vertices-1)*uv_stride+8);
+}
+
+// Interpolate f32 UV attributes at a prior world-space mesh hit.
+native function Raycaster_meshHitUV(mesh:i64,hit:i64,uv:i64,uv_stride:i64,out:i64,work:i64) i64 {
+  if(!raycaster_span(mesh,RayMeshBuffer.size) || !raycaster_span(hit,RayMeshHit.size) ||
+     !raycaster_span(out,16) || !raycaster_span(work,144) || raycaster_overlap(out,16,work,144) ||
+     uv<0 || uv%4!=0 || uv_stride<8 || uv_stride%4!=0) { return 0-1; }
+  let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let face=ux_u32(hit+RayMeshHit.face);
+  let points=ux_u32(mesh+RayMeshBuffer.positions);
+  let stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let width=ux_u32(mesh+RayMeshBuffer.indexBytes);
+  let world=ux_u32(mesh+RayMeshBuffer.matrixWorld);
+  if(vertices<1 || vertices>65536 || face>=faces || faces>65536 || stride<12 || stride%4!=0 ||
+     !raycaster_span(world,128) || points%4!=0 || points>6291456-12-(vertices-1)*stride ||
+     uv>6291456-8-(vertices-1)*uv_stride ||
+     (width!=0 && width!=2 && width!=4) || (width!=0 && indices%width!=0) ||
+     indices>6291456-faces*3*width ||
+     !ray_mesh_uv_safe(out,16,mesh,hit,uv,uv_stride) ||
+     !ray_mesh_uv_safe(work,144,mesh,hit,uv,uv_stride)) { return 0-1; }
+  let uv_values=work+72;
+  let i=0;
+  while(i<3) {
+    let index=ray_mesh_index(indices,width,face*3+i);
+    if(index>=vertices) { return 0-2; }
+    let position=points+index*stride;
+    let local=Vector3_set(work+i*24,ux_f32(position),ux_f32(position+4),ux_f32(position+8));
+    let world_point=Vector3_applyMatrix4(local,world);
+    let u=ux_f32(uv+index*uv_stride);
+    let v=ux_f32(uv+index*uv_stride+4);
+    if(!raycaster_finite_vector(world_point) || u-u!=0.0 || v-v!=0.0) { return 0-2; }
+    let us=ux_f64_put(uv_values+i*16,u);
+    let vs=ux_f64_put(uv_values+i*16+8,v);
+    i=i+1;
+  }
+  let weights=work+120;
+  if(!raycaster_finite_vector(hit)) { return 0-2; }
+  let bary=Triangle_getBarycoord(weights,work,hit);
+  if(bary<0) { return 0-2; }
+  let a=ux_f64(weights);
+  let b=ux_f64(weights+8);
+  let c=ux_f64(weights+16);
+  if(a-a!=0.0 || b-b!=0.0 || c-c!=0.0) { return 0-2; }
+  let saved_u=ux_f64_put(out,a*ux_f64(uv_values)+b*ux_f64(uv_values+16)+c*ux_f64(uv_values+32));
+  let saved_v=ux_f64_put(out+8,a*ux_f64(uv_values+8)+b*ux_f64(uv_values+24)+c*ux_f64(uv_values+40));
+  return out;
+}
