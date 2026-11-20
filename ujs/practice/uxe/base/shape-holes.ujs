@@ -1,0 +1,184 @@
+// Each hole descriptor contains a u32 point count. Points are packed in
+// outer-first order, and the caller supplies disjoint scratch and output.
+native function shape_holes_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n>0 && m>0 && a<b+m && b<a+n;
+}
+
+native function shape_holes_left(points:i64,count:i64) i64 {
+  let best=0;
+  let i=1;
+  while(i<count) {
+    let x=ux_f64(points+i*16);
+    let left=ux_f64(points+best*16);
+    if(x<left || (x==left && ux_f64(points+i*16+8)<ux_f64(points+best*16+8))) { best=i; }
+    i=i+1;
+  }
+  return best;
+}
+
+native function shape_holes_anchor(points:i64,count:i64,x:f64,y:f64) i64 {
+  let best=0-1;
+  let crossing=0.0-1.0/0.0;
+  let i=0;
+  while(i<count) {
+    let next=(i+1)%count;
+    let ay=ux_f64(points+i*16+8);
+    let by=ux_f64(points+next*16+8);
+    if((ay>y)!=(by>y)) {
+      let ax=ux_f64(points+i*16);
+      let bx=ux_f64(points+next*16);
+      let at=ax+(bx-ax)*(y-ay)/(by-ay);
+      if(at<x && at>crossing) {
+        crossing=at;
+        best=i;
+        if(bx<ax || (bx==ax && by<ay)) { best=next; }
+      }
+    }
+    i=i+1;
+  }
+  if(best<0) { return best; }
+  let base=ux_f64(points+best*16);
+  let baseY=ux_f64(points+best*16+8);
+  let tilt=1.0/0.0;
+  if(base<x) {
+    tilt=baseY-y;
+    if(tilt<0.0) { tilt=0.0-tilt; }
+    tilt=tilt/(x-base);
+  }
+  i=0;
+  while(i<count) {
+    let px=ux_f64(points+i*16);
+    let py=ux_f64(points+i*16+8);
+    if(px>=base && px<x && (py-y)*(baseY-y)>=0.0) {
+      let left=(px-crossing)*(baseY-y)-(py-y)*(base-crossing);
+      let right=(py-y)*(base-x)-(px-x)*(baseY-y);
+      if((left>=0.0 && right>=0.0 && baseY>=y) || (left<=0.0 && right<=0.0 && baseY<=y)) {
+        let angle=py-y;
+        if(angle<0.0) { angle=0.0-angle; }
+        angle=angle/(x-px);
+        if(angle<tilt) { best=i; tilt=angle; }
+      }
+    }
+    i=i+1;
+  }
+  return best;
+}
+
+// Bridge strictly interior, disjoint rings from left to right. Triangulation
+// can reject a contour the current visibility rule cannot bridge.
+native function ShapeUtils_triangulateHoles(points:i64,outer:i64,sizes:i64,holes:i64,
+                                            indices:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(points<0 || points%8!=0 || outer<3 || outer>4096 || holes<1 || holes>16 ||
+     sizes<0 || sizes>6291456-holes*4 || indices<0 || indices%4!=0 || indices>6291456 ||
+     capacity<0 || capacity>(6291456-indices)/4 || work<0 || work%8!=0 || space<0 ||
+     work>6291456-space) { return 0-1; }
+  let total=outer;
+  let j=0;
+  while(j<holes) {
+    let size=ux_u32(sizes+j*4);
+    if(size<3 || size>4096-total) { return 0-1; }
+    total=total+size;
+    j=j+1;
+  }
+  let nodes=total+2*holes;
+  let need=3*(nodes-2);
+  let scratch=nodes*60+holes*12;
+  if(nodes>4096 || capacity<need || space<scratch || points>6291456-total*16 ||
+     shape_holes_overlap(work,scratch,points,total*16) || shape_holes_overlap(work,scratch,sizes,holes*4) ||
+     shape_holes_overlap(work,scratch,indices,need*4) || shape_holes_overlap(indices,need*4,points,total*16) ||
+     shape_holes_overlap(indices,need*4,sizes,holes*4)) { return 0-1; }
+  let src=0;
+  while(src<total*2) {
+    let value=ux_f64(points+src*8);
+    if(value-value!=0.0) { return 0-1; }
+    src=src+1;
+  }
+  let contour=work;
+  let map=work+nodes*16;
+  let nextContour=work+nodes*20;
+  let nextMap=work+nodes*36;
+  let links=work+nodes*40;
+  let staged=work+nodes*48;
+  let rows=work+nodes*60;
+  let area=ShapeUtils_area(points,outer);
+  if(area==0.0 || area-area!=0.0) { return 0-1; }
+  let i=0;
+  while(i<outer) {
+    let id=i;
+    if(area<0.0) { id=outer-1-i; }
+    let put=shape_append_bridge(contour,map,i,points+id*16,id);
+    i=i+1;
+  }
+  let offset=outer;
+  j=0;
+  while(j<holes) {
+    let size=ux_u32(sizes+j*4);
+    let left=shape_holes_left(points+offset*16,size);
+    let a=ux_u32_put(rows+j*12,offset);
+    let b=ux_u32_put(rows+j*12+4,size);
+    let c=ux_u32_put(rows+j*12+8,left);
+    offset=offset+size;
+    j=j+1;
+  }
+  let count=outer;
+  let done=0;
+  while(done<holes) {
+    let best=0-1;
+    let x=0.0;
+    j=0;
+    while(j<holes) {
+      let size=ux_u32(rows+j*12+4);
+      if(size>0) {
+        let left=ux_u32(rows+j*12)+ux_u32(rows+j*12+8);
+        let loc=ux_f64(points+left*16);
+        if(best<0 || loc<x) { best=j; x=loc; }
+      }
+      j=j+1;
+    }
+    let row=rows+best*12;
+    let start=ux_u32(row);
+    let ring=ux_u32(row+4);
+    let first=ux_u32(row+8);
+    let ringArea=ShapeUtils_area(points+start*16,ring);
+    let y=ux_f64(points+(start+first)*16+8);
+    let anchor=shape_holes_anchor(contour,count,x,y);
+    if(anchor<0 || ringArea==0.0 || ringArea-ringArea!=0.0) { return 0-2; }
+    i=0;
+    let out=0;
+    while(i<count) {
+      let point=contour+i*16;
+      let id=ux_u32(map+i*4);
+      out=shape_append_bridge(nextContour,nextMap,out,point,id);
+      if(i==anchor) {
+        let k=0;
+        while(k<=ring) {
+          let idx=(first+k)%ring;
+          if(ringArea>0.0) { idx=(first+ring-(k%ring))%ring; }
+          let source=start+idx;
+          out=shape_append_bridge(nextContour,nextMap,out,points+source*16,source);
+          k=k+1;
+        }
+        out=shape_append_bridge(nextContour,nextMap,out,point,id);
+      }
+      i=i+1;
+    }
+    let oldContour=contour;
+    let oldMap=map;
+    contour=nextContour;
+    map=nextMap;
+    nextContour=oldContour;
+    nextMap=oldMap;
+    count=out;
+    let clear=ux_u32_put(row+4,0);
+    done=done+1;
+  }
+  let written=ShapeUtils_triangulateShape(contour,count,staged,need,links);
+  if(written!=need) { return 0-2; }
+  i=0;
+  while(i<written) {
+    let id=ux_u32(map+ux_u32(staged+i*4)*4);
+    let result=ux_u32_put(indices+i*4,id);
+    i=i+1;
+  }
+  return written;
+}
