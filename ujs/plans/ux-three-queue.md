@@ -4,7 +4,8 @@
 
 ## A 栏燃尽
 
-- ImageUtils 图像源接线 | G-struct 与 G-io 对照 HTMLImageElement、ImageBitmap 的 URI 与色彩转换 | 浏览器资源描述与已完成的 Canvas 路径。
+- ~~ImageUtils 解码图像源接线 | G-struct 与 G-io 对照 HTMLImageElement、ImageBitmap 的 URI 与不透明像素转换 | 浏览器资源描述与 Canvas 路径。~~ 线性十项、URI 七项通过，两种篡改转红，旧结构 14 项及编码 10 项通过。
+- ImageUtils 图像源透明边界 | G-io 半透明预乘、浏览器尺寸及缺 Canvas 分支 | 解码图像源接线。
 - ~~ShapeUtils 多孔输入边界校验 | G-struct 双孔、越界、相交和失败输出不变 | 已有多孔剖分。~~ 10 项通过，漏孔与外孔反例均转红。
 - ~~ShapeUtils 闭合重复点 | G-struct 尾点归一化与 r160 的面积、数量和紧凑索引对照 | 已有多孔剖分与边界校验。~~ 5 项通过，跳过归一化反例转红。
 - ~~ShapeUtils 双孔凹形对照 | G-struct U 形轮廓与双孔的面积、绕向及空洞 | 已有多孔剖分。~~ 4 项通过，漏掉右孔反例 12 对 18。

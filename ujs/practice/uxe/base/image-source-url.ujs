@@ -1,0 +1,36 @@
+struct ImageSourceUrl {
+  bytes: u32;
+  length: u32;
+  borrowed: u32;
+}
+
+// The source URI remains borrowed for data URLs. Other HTML image sources
+// and ImageBitmap values are encoded from the decoded ImageResource.
+native function ImageUtils_sourceDataURL(image:i64,uri:i64,length:i64,result:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(uri<0 || length<0 || uri>6291456-length || result<0 || result%4!=0 ||
+     result>6291456-ImageSourceUrl.size || image_source_overlap(result,ImageSourceUrl.size,uri,length)) { return 0-1; }
+  let start=uri;
+  let bytes=length;
+  let borrowed=image_data_uri(uri,length);
+  if(!borrowed) {
+    if(image<0 || image%4!=0 || image>6291456-ImageResource.size ||
+       image_source_overlap(result,ImageSourceUrl.size,image,ImageResource.size) ||
+       image_source_overlap(result,ImageSourceUrl.size,out,capacity) ||
+       image_source_overlap(result,ImageSourceUrl.size,work,space) ||
+       image_source_overlap(uri,length,out,capacity) || image_source_overlap(uri,length,work,space)) { return 0-1; }
+    let rgba=ux_u32(image+ImageResource.rgba);
+    let width=ux_u32(image+ImageResource.width);
+    let height=ux_u32(image+ImageResource.height);
+    let pitch=ux_u32(image+ImageResource.rowBytes);
+    if(width<1 || height<1 || width>6291456/4 || !pitch || rgba>6291456-width*4 ||
+       height-1>(6291456-rgba-width*4)/pitch ||
+       image_source_overlap(result,ImageSourceUrl.size,rgba,(height-1)*pitch+width*4)) { return 0-1; }
+    bytes=ImageUtils_canvasDataURL(image,out,capacity,work,space);
+    if(bytes<0) { return bytes; }
+    start=out;
+  }
+  let a=ux_u32_put(result+ImageSourceUrl.bytes,start);
+  let b=ux_u32_put(result+ImageSourceUrl.length,bytes);
+  let c=ux_u32_put(result+ImageSourceUrl.borrowed,borrowed);
+  return result;
+}
