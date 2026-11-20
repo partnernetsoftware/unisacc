@@ -1,0 +1,116 @@
+struct AnimationSubclipRequest {
+  startFrame: f64;
+  endFrame: f64;
+  fps: f64;
+  name: u32;
+  nameBytes: u32;
+}
+
+native function subclip_disjoint(src:i64,bytes:i64,arena:i64,space:i64,out:i64) i64 {
+  return src>=0 && bytes>=0 && src<=6291456-bytes &&
+    (bytes==0 || (!animation_overlap(src,bytes,arena,space) && !animation_overlap(src,bytes,out,AnimationClip.size)));
+}
+
+native function subclip_track(track:i64,arena:i64,space:i64,out:i64) i64 {
+  if(!keyframe_track_at(track) || !subclip_disjoint(track,KeyframeTrack.size,arena,space,out)) { return 0-1; }
+  let view=ux_u32(track+KeyframeTrack.samples);
+  if(!animation_span(view,AnimationSamples.size) || !subclip_disjoint(view,AnimationSamples.size,arena,space,out)) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  let lanes=ux_u32(view+AnimationSamples.stride);
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let name=ux_u32(track+KeyframeTrack.name);
+  let length=ux_u32(track+KeyframeTrack.nameBytes);
+  let interpolation=ux_u32(track+KeyframeTrack.interpolation);
+  if(count<1 || count>65536 || lanes<1 || lanes>64 || length<1 || length>65535 ||
+     interpolation<2300 || interpolation>2302 || !animation_span(times,count*4) ||
+     !animation_span(values,count*lanes*4) || !subclip_disjoint(times,count*4,arena,space,out) ||
+     !subclip_disjoint(values,count*lanes*4,arena,space,out) || !subclip_disjoint(name,length,arena,space,out)) { return 0-1; }
+  return view;
+}
+
+// Trim the 32-bit sample words without changing their track-specific layout.
+// Work owns the cloned samples and labels. String payloads remain borrowed
+// immutable UTF-8 spans and must outlive both clips.
+native function AnimationUtils_subclip(source:i64,request:i64,out:i64,arena:i64,space:i64) i64 {
+  if(!animation_span(source,AnimationClip.size) || !animation_span(request,AnimationSubclipRequest.size) ||
+     !animation_span(out,AnimationClip.size) || !animation_span(arena,space) ||
+     source%8!=0 || request%8!=0 || out%8!=0 ||
+     animation_overlap(out,AnimationClip.size,arena,space) ||
+     !subclip_disjoint(source,AnimationClip.size,arena,space,out) ||
+     !subclip_disjoint(request,AnimationSubclipRequest.size,arena,space,out)) { return 0-1; }
+  let start=ux_f64(request+AnimationSubclipRequest.startFrame);
+  let end=ux_f64(request+AnimationSubclipRequest.endFrame);
+  let fps=ux_f64(request+AnimationSubclipRequest.fps);
+  let name=ux_u32(request+AnimationSubclipRequest.name);
+  let nameBytes=ux_u32(request+AnimationSubclipRequest.nameBytes);
+  let count=ux_u32(source+AnimationClip.trackCount);
+  let tracks=ux_u32(source+AnimationClip.tracks);
+  let blend=ux_u32(source+AnimationClip.blendMode);
+  if(start-start!=0.0 || end-end!=0.0 || fps-fps!=0.0 || start>end || fps<=0.0 ||
+     nameBytes>65535 || count>256 || (blend!=2500 && blend!=2501) ||
+     !animation_span(tracks,count*4) || !subclip_disjoint(tracks,count*4,arena,space,out) ||
+     !subclip_disjoint(name,nameBytes,arena,space,out) ||
+     !subclip_disjoint(ux_u32(source+AnimationClip.name),ux_u32(source+AnimationClip.nameBytes),arena,space,out)) { return 0-1; }
+  let names=(nameBytes+3)/4*4;
+  let used=count*4+names;
+  let firstTime=1.0/0.0;
+  let i=0;
+  while(i<count) {
+    let track=ux_u32(tracks+i*4);
+    let view=subclip_track(track,arena,space,out);
+    if(view<0) { return 0-1; }
+    let times=ux_u32(view+AnimationSamples.times);
+    let frames=ux_u32(view+AnimationSamples.count);
+    let first=animation_frame_bound(times,frames,start,fps);
+    let last=animation_frame_bound(times,frames,end,fps);
+    if(last>first) {
+      let at=ux_f32(times+first*4);
+      if(at<firstTime) { firstTime=at; }
+      let lanes=ux_u32(view+AnimationSamples.stride);
+      let label=ux_u32(track+KeyframeTrack.nameBytes);
+      used=used+KeyframeTrack.size+AnimationSamples.size+(label+3)/4*4+(last-first)*(1+lanes)*4;
+    }
+    i=i+1;
+  }
+  if(used>space) { return 0-2; }
+  let clipName=arena+count*4;
+  let copy=uxe_copy_record(clipName,name,nameBytes);
+  let next=clipName+names;
+  let kept=0;
+  i=0;
+  while(i<count) {
+    let track=ux_u32(tracks+i*4);
+    let view=ux_u32(track+KeyframeTrack.samples);
+    let times=ux_u32(view+AnimationSamples.times);
+    let frames=ux_u32(view+AnimationSamples.count);
+    let first=animation_frame_bound(times,frames,start,fps);
+    let last=animation_frame_bound(times,frames,end,fps);
+    if(last>first) {
+      let rows=last-first;
+      let lanes=ux_u32(view+AnimationSamples.stride);
+      let length=ux_u32(track+KeyframeTrack.nameBytes);
+      let label=next+KeyframeTrack.size+AnimationSamples.size;
+      let timeOut=label+(length+3)/4*4;
+      let valueOut=timeOut+rows*4;
+      let copied=uxe_copy_record(label,ux_u32(track+KeyframeTrack.name),length);
+      let data=uxe_copy_record(valueOut,ux_u32(view+AnimationSamples.values)+first*lanes*4,rows*lanes*4);
+      let j=0;
+      while(j<rows) {
+        let time=ux_f32(times+(first+j)*4)-firstTime;
+        let cell=ux_f32_put(timeOut+j*4,time);
+        j=j+1;
+      }
+      let samples=AnimationSamples_init(next+KeyframeTrack.size,timeOut,valueOut,rows,lanes);
+      if(samples<0) { return 0-3; }
+      let created=KeyframeTrack_init(next,label,length,samples);
+      if(created<0) { return 0-3; }
+      let interpolation=KeyframeTrack_setInterpolation(created,ux_u32(track+KeyframeTrack.interpolation));
+      let pointer=ux_u32_put(arena+kept*4,created);
+      kept=kept+1;
+      next=valueOut+rows*lanes*4;
+    }
+    i=i+1;
+  }
+  return AnimationClip_init(out,clipName,nameBytes,arena,kept,0.0-1.0,blend);
+}

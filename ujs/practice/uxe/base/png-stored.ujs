@@ -1,0 +1,139 @@
+native function png_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
+  return bytes>0 && size>0 && a<b+size && b<a+bytes;
+}
+
+native function png_idat(src:i64,bytes:i64,out:i64,capacity:i64,color:i64) i64 {
+  let chunk=33;
+  let written=0;
+  let closed=0;
+  while(chunk<=bytes-12) {
+    let at=src+chunk;
+    let length=png_u32be(at);
+    if(length>bytes-chunk-12) { return 0-5; }
+    let kind=png_u32be(at+4);
+    if(png_crc32(at+4,4+length)!=png_u32be(at+8+length)) { return 0-3; }
+    if(color==2 && kind==1951551059) { return 0-4; }
+    if(kind==1229278788) {
+      if(length!=0 || chunk+12!=bytes || written==0) { return 0-5; }
+      return written;
+    }
+    if(kind==1229209940) {
+      if(closed!=0 || length>capacity-written) { return 0-5; }
+      let copied=uxe_copy_record(out+written,at+8,length);
+      written=written+length;
+    } else {
+      if(written>0) { closed=1; }
+      if(ux_u8(at+4)/32%2==0 && (kind!=1347179589 || written>0 || length<3 || length>768 || length%3!=0)) { return 0-5; }
+    }
+    chunk=chunk+12+length;
+  }
+  return 0-5;
+}
+
+native function png_inflate(src:i64,bytes:i64,out:i64,size:i64,huffman:i64,workspace:i64) i64 {
+  if(bytes<8) { return 0-6; }
+  let cmf=ux_u8(src);
+  let flags=ux_u8(src+1);
+  if(cmf%16!=8 || cmf/16>7 || (cmf*256+flags)%31!=0 || flags/32%2!=0) { return 0-6; }
+  let bit=16;
+  let limit=(bytes-4)*8;
+  let output=0;
+  let last=0;
+  while(last==0) {
+    let block=png_bits(src,limit,bit,3,0);
+    if(block<0) { return 0-6; }
+    bit=bit+3;
+    last=block%2;
+    if((block/2==1 || block/2==2) && huffman!=0) {
+      let literals=0-1;
+      let distances=0-1;
+      if(block/2==2) {
+        if(workspace<0) { return 0-1; }
+        bit=png_dynamic_tables(src,limit,bit,workspace);
+        if(bit<0) { return bit; }
+        literals=workspace+320;
+        distances=literals+1344;
+      }
+      let done=png_code_block(src,limit,bit,out,size,output,literals,distances);
+      if(done<0) { return done; }
+      bit=done/8388608;
+      output=done%8388608;
+    } else {
+      if(block/2!=0) { return 0-7; }
+      let input=(bit+7)/8;
+      if(input>bytes-8) { return 0-6; }
+      let length=ux_u8(src+input)+256*ux_u8(src+input+1);
+      let inverse=ux_u8(src+input+2)+256*ux_u8(src+input+3);
+      input=input+4;
+      if(length+inverse!=65535 || length>bytes-4-input || length>size-output) { return 0-6; }
+      let copied=uxe_copy_record(out+output,src+input,length);
+      bit=(input+length)*8;
+      output=output+length;
+    }
+  }
+  if((bit+7)/8!=bytes-4 || output!=size) { return 0-6; }
+  let s1=1;
+  let s2=0;
+  let i=0;
+  while(i<output) {
+    s1=(s1+ux_u8(out+i))%65521;
+    s2=(s2+s1)%65521;
+    i=i+1;
+  }
+  if(png_u32be(src+bytes-4)!=s2*65536+s1) { return 0-6; }
+  return output;
+}
+
+// Decode noninterlaced RGBA8 or RGB8 PNG to RGBA8. Scratch is
+// exclusive and may change on error. The RGBA output is published last.
+native function png_decode(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64,huffman:i64) i64 {
+  if(src<0 || bytes<33 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
+     scratch<0 || scratch%4!=0 || space<PngHeader.size || scratch>6291456-space ||
+     png_overlap(src,bytes,out,cap) || png_overlap(src,bytes,scratch,space) || png_overlap(out,cap,scratch,space)) { return 0-1; }
+  let header=PngHeader_probe(src,bytes,scratch);
+  if(header<0) { return header; }
+  let color=ux_u32(header+PngHeader.color);
+  if(ux_u32(header+PngHeader.depth)!=8 || (color!=6 && (color!=2 || huffman==0)) || ux_u32(header+PngHeader.interlace)!=0) { return 0-4; }
+  let channels=4;
+  if(color==2) { channels=3; }
+  let width=ux_u32(header+PngHeader.width);
+  let row=width*channels;
+  let rgbaRow=width*4;
+  let height=ux_u32(header+PngHeader.height);
+  if(height>cap/rgbaRow || height>(space-PngHeader.size)/(row+1)) { return 0-1; }
+  let raw=scratch+PngHeader.size;
+  let size=height*(row+1);
+  let compressed=raw+size;
+  let packed=png_idat(src,bytes,compressed,space-PngHeader.size-size,color);
+  if(packed<0) { return packed; }
+  let workspace=(compressed+packed+3)/4*4;
+  if(workspace>scratch+space-3008) { workspace=0-1; }
+  let made=png_inflate(compressed,packed,raw,size,huffman,workspace);
+  if(made<0) { return made; }
+  let restored=PngScanlines_restore(raw,size,row,height,channels);
+  if(restored<0) { return restored; }
+  let y=0;
+  while(y<height) {
+    let from=raw+y*(row+1)+1;
+    let to=out+y*rgbaRow;
+    if(channels==4) { let copied=uxe_copy_record(to,from,row); }
+    else {
+      let x=0;
+      while(x<width) {
+        let copy=uxe_copy_record(to+x*4,from+x*3,3);
+        let alpha=ux_u8_put(to+x*4+3,255);
+        x=x+1;
+      }
+    }
+    y=y+1;
+  }
+  return height*rgbaRow;
+}
+
+native function PngDecode_stored(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return png_decode(src,bytes,out,cap,scratch,space,0);
+}
+
+native function PngDecode_rgba8(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  return png_decode(src,bytes,out,cap,scratch,space,1);
+}

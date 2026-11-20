@@ -1,0 +1,36 @@
+struct AnimationFrameRange {
+  first: u32;
+  count: u32;
+}
+
+native function animation_frame_bound(times:i64,count:i64,frame:f64,fps:f64) i64 {
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    if(ux_f32(times+mid*4)*fps<frame) { lo=mid+1; }
+    else { hi=mid; }
+  }
+  return lo;
+}
+
+// AnimationSamples owns the validated immutable, sorted Float32 time span.
+// Select a half-open frame window before copying rows into a new clip.
+native function AnimationUtils_frameRange(view:i64,start:f64,end:f64,fps:f64,out:i64) i64 {
+  if(!animation_span(view,AnimationSamples.size) || !animation_span(out,AnimationFrameRange.size) ||
+     start-start!=0.0 || end-end!=0.0 || fps-fps!=0.0 || fps<=0.0 || start>end ||
+     animation_overlap(out,AnimationFrameRange.size,view,AnimationSamples.size)) { return 0-1; }
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let count=ux_u32(view+AnimationSamples.count);
+  let stride=ux_u32(view+AnimationSamples.stride);
+  if(count<1 || count>65536 || stride<1 || stride>64 ||
+     !animation_span(times,count*4) || !animation_span(values,count*stride*4) ||
+     animation_overlap(out,AnimationFrameRange.size,times,count*4) ||
+     animation_overlap(out,AnimationFrameRange.size,values,count*stride*4)) { return 0-1; }
+  let first=animation_frame_bound(times,count,start,fps);
+  let last=animation_frame_bound(times,count,end,fps);
+  let a=ux_u32_put(out+AnimationFrameRange.first,first);
+  let b=ux_u32_put(out+AnimationFrameRange.count,last-first);
+  return out;
+}

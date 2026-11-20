@@ -1,0 +1,49 @@
+// Points uses the same node, geometry and material record as Mesh.
+native function Points_init(points:i64,arena:i64,node:i64,geometry:i64,material:i64,rows:i64,capacity:i64) i64 {
+  return Mesh_init(points,arena,node,geometry,material,rows,capacity);
+}
+
+// The element is relative to the draw range, before optional index lookup.
+native function Points_vertexIndex(points:i64,element:i64,position:i64) i64 {
+  if(!mesh_valid(points) || element<0) { return 0-1; }
+  let geometry=ux_u32(points+Mesh.geometry);
+  let row=BufferGeometry_find(geometry,position);
+  if(row<0) { return 0-1; }
+  let attribute=ux_u32(row+4);
+  let vertices=ux_u32(attribute+BufferAttribute.count);
+  let first=ux_u32(geometry+BufferGeometry.drawStart);
+  let count=ux_u32(geometry+BufferGeometry.drawCount);
+  if(element>=count) { return 0-1; }
+  let ix=ux_u32(geometry+BufferGeometry.index)-1;
+  let ordinal=first+element;
+  if(ix<0) {
+    if(ordinal>=vertices) { return 0-1; }
+    return ordinal;
+  }
+  let value=BufferAttribute_getComponent(ix,ordinal,0);
+  if(value!=value || value<0.0 || value>=0.0+vertices) { return 0-1; }
+  let index=f64_floor_i64(value);
+  if(value!=0.0+index) { return 0-1; }
+  return index;
+}
+
+native function Points_worldVertex(points:i64,arena:i64,element:i64,position:i64,out:i64) i64 {
+  let index=Points_vertexIndex(points,element,position);
+  if(index<0) { return index; }
+  let node=Object3D_address(arena,ux_u32(points+Mesh.node));
+  if(node<0) { return 0-1; }
+  let local=Mesh_getVertexPosition(points,out,index,position);
+  if(local<0) { return local; }
+  let world=ux_u32(node+Object3D.worldMatrix);
+  let x=ux_f64(local);
+  let y=ux_f64(local+8);
+  let z=ux_f64(local+16);
+  let axis=0;
+  while(axis<24) {
+    let p=ux_f64(world+axis)*x+ux_f64(world+axis+32)*y+
+      ux_f64(world+axis+64)*z+ux_f64(world+axis+96);
+    let written=ux_f64_put(out+axis,p);
+    axis=axis+8;
+  }
+  return out;
+}

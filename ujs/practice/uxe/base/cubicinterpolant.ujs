@@ -1,0 +1,50 @@
+native function CubicInterpolant_evaluate(view:i64,t:f64,out:i64,endingStart:i64,endingEnd:i64) i64 {
+  let stride=animation_sample_output(view,out);
+  if(stride<0 || t!=t || endingStart<2400 || endingStart>2402 || endingEnd<2400 || endingEnd>2402) { return 0-1; }
+  let times=ux_u32(view+AnimationSamples.times);
+  let count=ux_u32(view+AnimationSamples.count);
+  let upper=animation_sample_upper(times,count,t);
+  if(upper==0 || upper==count) { return DiscreteInterpolant_evaluate(view,t,out); }
+  let lower=upper-1;
+  let previous=lower-1;
+  let next=upper+1;
+  let t0=ux_f32(times+4*lower);
+  let t1=ux_f32(times+4*upper);
+  let past=t1;
+  let future=t0;
+  if(previous>=0) { past=ux_f32(times+4*previous); }
+  else {
+    previous=upper;
+    if(endingStart==2401) { past=2.0*t0-t1; }
+    if(endingStart==2402) {
+      previous=count-2;
+      past=t0+ux_f32(times+4*previous)-ux_f32(times+4*(previous+1));
+    }
+  }
+  if(next<count) { future=ux_f32(times+4*next); }
+  else {
+    next=lower;
+    if(endingEnd==2401) { next=upper; future=2.0*t1-t0; }
+    if(endingEnd==2402) { next=1; future=t1+ux_f32(times+4)-ux_f32(times); }
+  }
+  let half=(t1-t0)*0.5;
+  let pw=half/(t0-past);
+  let nw=half/(future-t1);
+  let p=(t-t0)/(t1-t0);
+  let pp=p*p;
+  let cube=pp*p;
+  let wp=0.0-pw*cube+2.0*pw*pp-pw*p;
+  let w0=(1.0+pw)*cube+(-1.5-2.0*pw)*pp+(-0.5+pw)*p+1.0;
+  let w1=(-1.0-nw)*cube+(1.5+nw)*pp+0.5*p;
+  let wn=nw*cube-nw*pp;
+  let row=ux_u32(view+AnimationSamples.values);
+  let i=0;
+  while(i<stride) {
+    let cell=row+i*4;
+    let value=wp*ux_f32(cell+previous*stride*4)+w0*ux_f32(cell+lower*stride*4)+
+      w1*ux_f32(cell+upper*stride*4)+wn*ux_f32(cell+next*stride*4);
+    let saved=ux_f32_put(out+i*4,value);
+    i=i+1;
+  }
+  return out;
+}

@@ -1,0 +1,49 @@
+// Apply a sampled glTF cubic reference to the middle values of a cubic
+// numeric target. Copy tangents without changing any bits.
+native function AnimationUtils_gltfNumDelta(target:i64,reference:i64,time:f64,out:i64,capacity:i64,work:i64) i64 {
+  if(!animation_span(target,AnimationSamples.size) || !animation_span(reference,AnimationSamples.size) ||
+     !animation_span(out,capacity) || time!=time) { return 0-1; }
+  let count=ux_u32(target+AnimationSamples.count);
+  let stride=ux_u32(target+AnimationSamples.stride);
+  let lanes=stride/3;
+  if(count<1 || count>65536 || stride%3!=0 || lanes<1 || lanes>21 ||
+     stride!=ux_u32(reference+AnimationSamples.stride) || !animation_span(work,lanes*4)) { return 0-1; }
+  let size=count*stride*4;
+  if(capacity<size) { return 0-2; }
+  let values=ux_u32(target+AnimationSamples.values);
+  let times=ux_u32(target+AnimationSamples.times);
+  let refTimes=ux_u32(reference+AnimationSamples.times);
+  let refValues=ux_u32(reference+AnimationSamples.values);
+  let refCount=ux_u32(reference+AnimationSamples.count);
+  if(refCount<1 || refCount>65536 || !animation_span(refValues,refCount*stride*4) ||
+     !animation_span(refTimes,refCount*4) || !animation_span(values,size) ||
+     !animation_span(times,count*4) || animation_overlap(out,size,target,AnimationSamples.size) ||
+     animation_overlap(out,size,reference,AnimationSamples.size) ||
+     animation_overlap(out,size,values,size) || animation_overlap(out,size,times,count*4) ||
+     animation_overlap(out,size,refValues,refCount*stride*4) ||
+     animation_overlap(out,size,refTimes,refCount*4) ||
+     animation_overlap(work,lanes*4,target,AnimationSamples.size) || animation_overlap(work,lanes*4,values,size) ||
+     animation_overlap(work,lanes*4,times,count*4) || animation_overlap(work,lanes*4,out,size)) { return 0-1; }
+  let sampled=GltfCubic_evaluate(reference,time,work,0);
+  if(sampled<0) { return sampled; }
+  let scale=4294967296.0;
+  let max=(2.0-1.0/8388608.0)*2147483648.0*scale*scale*scale;
+  let pass=0;
+  while(pass<2) {
+    if(pass!=0) { let copied=uxe_copy_record(out,values,size); }
+    let row=0;
+    while(row<count) {
+      let at=(row*stride+lanes)*4;
+      let i=0;
+      while(i<lanes) {
+        let delta=ux_f32(values+at+i*4)-ux_f32(work+i*4);
+        if(delta-delta!=0.0 || delta>max || delta<0.0-max) { return 0-3; }
+        if(pass!=0) { let saved=ux_f32_put(out+at+i*4,delta); }
+        i=i+1;
+      }
+      row=row+1;
+    }
+    pass=pass+1;
+  }
+  return size;
+}

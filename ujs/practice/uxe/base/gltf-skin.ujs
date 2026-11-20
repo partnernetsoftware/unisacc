@@ -1,0 +1,66 @@
+struct GltfSkin {
+  joints: u32;
+  jointCount: u32;
+  skeleton: u32;
+  inverseBind: u32;
+}
+
+// The joint list and checked MAT4 accessor belong to the caller's arena.
+native function GltfLoader_skin(glb:i64,index:i64,nodeCount:i64,out:i64,work:i64,capacity:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || !loading_span(out,GltfSkin.size) ||
+     !loading_span(work,capacity) || capacity<56 ||
+     !file_disjoint(glb,GlbResource.size,out,GltfSkin.size) ||
+     !file_disjoint(glb,GlbResource.size,work,capacity) ||
+     !file_disjoint(out,GltfSkin.size,work,capacity) || nodeCount<1 || nodeCount>65535) { return 0-1; }
+  let json=ux_u32(glb+GlbResource.json);
+  let bytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let binBytes=ux_u32(glb+GlbResource.binBytes);
+  if(json>6291456-bytes || bin>6291456-binBytes ||
+     !file_disjoint(json,bytes,work,capacity) || !file_disjoint(json,bytes,out,GltfSkin.size) ||
+     !file_disjoint(bin,binBytes,work,capacity) || !file_disjoint(bin,binBytes,out,GltfSkin.size)) { return 0-1; }
+  let end=json+bytes;
+  let entry=LoaderJson_item(LoaderJson_find(json,end,work,1852402547,115,0,5),end,index);
+  if(entry<0) { return 0-2; }
+  let jointList=LoaderJson_find(entry,end,work,1852403562,29556,0,6);
+  if(jointList<0 || ux_u8(jointList)!=91) { return 0-2; }
+  let skeleton=LoaderJson_uint(LoaderJson_find(entry,end,work,1818585971,1852798053,0,8),end,4294967295);
+  if(skeleton<0 || (skeleton>=nodeCount && skeleton!=4294967295)) { return 0-3; }
+  let tail=ux_u32_put(work+12,1769108577);
+  let tail2=ux_u32_put(work+16,7562595);
+  let inv=LoaderJson_uint(LoaderJson_find(entry,end,work,1702260329,1113944946,1298427497,19),end,4294967295);
+  if(inv<0) { return 0-3; }
+  let at=json_space(jointList+1,end);
+  let count=0;
+  let joints=work+52;
+  while(at>=0 && at<end && ux_u8(at)!=93) {
+    if(count>=nodeCount || count>=256 || count>=(capacity-52)/4) { return 0-4; }
+    let node=LoaderJson_uint(at,end,0-1);
+    if(node<0 || node>=nodeCount) { return 0-3; }
+    let i=0;
+    while(i<count) {
+      if(node==ux_u32(joints+i*4)) { return 0-3; }
+      i=i+1;
+    }
+    let w=ux_u32_put(joints+count*4,node);
+    count=count+1;
+    at=json_space(json_value_end(at,end),end);
+    if(at<0 || at>=end) { return 0-2; }
+    if(ux_u8(at)!=93) {
+      if(ux_u8(at)!=44) { return 0-2; }
+      at=json_space(at+1,end);
+    }
+  }
+  if(at<0 || at>=end || count==0) { return 0-2; }
+  let matrix=0;
+  if(inv!=4294967295) {
+    matrix=GltfLoader_accessor(glb,inv,work+24,work);
+    if(matrix<0 || ux_u32(matrix+GltfAccessor.count)<count ||
+       ux_u32(matrix+GltfAccessor.component)!=5126 || ux_u32(matrix+GltfAccessor.elementBytes)!=64) { return 0-5; }
+  }
+  let a=ux_u32_put(out+GltfSkin.joints,joints);
+  let b=ux_u32_put(out+GltfSkin.jointCount,count);
+  let c=ux_u32_put(out+GltfSkin.skeleton,skeleton);
+  let d=ux_u32_put(out+GltfSkin.inverseBind,matrix);
+  return out;
+}

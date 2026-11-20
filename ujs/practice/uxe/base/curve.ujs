@@ -1,4 +1,40 @@
 // Samples a caller-supplied UJS closure returning an f64 position view.
+struct CurveArcCache {
+  table: u32;
+  capacity: u32;
+  steps: u32;
+  dimensions: u32;
+  arcLengthDivisions: u32;
+}
+
+native function CurveArcCache_init(cache:i64,table:i64,capacity:i64) i64 {
+  if(cache<0 || cache>6291456-CurveArcCache.size || cache%4!=0 ||
+     table<0 || table>6291456 || table%8!=0 || capacity<2 ||
+     capacity>(6291456-table)/8 ||
+     (table<cache+CurveArcCache.size && cache<table+capacity*8)) { return 0-1; }
+  let a=ux_u32_put(cache+CurveArcCache.table,table);
+  let b=ux_u32_put(cache+CurveArcCache.capacity,capacity);
+  let c=ux_u32_put(cache+CurveArcCache.steps,0);
+  let d=ux_u32_put(cache+CurveArcCache.arcLengthDivisions,200);
+  return cache;
+}
+
+native function Curve_copy(dst:i64,src:i64) i64 {
+  if(dst<0 || dst>6291456-CurveArcCache.size || dst%4!=0 ||
+     src<0 || src>6291456-CurveArcCache.size || src%4!=0) { return 0-1; }
+  let divisions=ux_u32(src+CurveArcCache.arcLengthDivisions);
+  let copied=ux_u32_put(dst+CurveArcCache.arcLengthDivisions,divisions);
+  return dst;
+}
+
+native function Curve_clone(dst:i64,src:i64,table:i64,capacity:i64) i64 {
+  if(src<0 || src>6291456-CurveArcCache.size || src%4!=0 ||
+     (dst<src+CurveArcCache.size && src<dst+CurveArcCache.size)) { return 0-1; }
+  let clone=CurveArcCache_init(dst,table,capacity);
+  if(clone<0) { return clone; }
+  return Curve_copy(clone,src);
+}
+
 function curve_collect(curve_sample,...curve_points_args) {
   let curve_out=curve_points_args[0];
   let curve_divisions=curve_points_args[1];
@@ -77,6 +113,37 @@ function Curve_getLengths(curve_length_sample,...curve_length_args) {
   return result;
 }
 
+function Curve_getCachedLengths(curve_sample,...cache_args) {
+  let cache=cache_args[0];
+  let steps=cache_args[1];
+  let dims=cache_args[2];
+  let result=0-1;
+  if(cache>=0 && cache<=6291456-CurveArcCache.size && cache%4==0 &&
+    steps>0 && dims>=2 && dims<=3 && steps<ux_u32(cache+CurveArcCache.capacity)) {
+    let table=ux_u32(cache+CurveArcCache.table);
+    if(steps==ux_u32(cache+CurveArcCache.steps) && dims==ux_u32(cache+CurveArcCache.dimensions)) {
+      result=table;
+    } else {
+      result=Curve_getLengths(curve_sample,table,steps,dims);
+      if(result>=0) {
+        let d=ux_u32_put(cache+CurveArcCache.dimensions,dims);
+        let publish=ux_u32_put(cache+CurveArcCache.steps,steps);
+      }
+    }
+  }
+  return result;
+}
+
+function Curve_updateArcLengths(curve_sample,...cache_args) {
+  let cache=cache_args[0];
+  let result=0-1;
+  if(cache>=0 && cache<=6291456-CurveArcCache.size && cache%4==0) {
+    let dirty=ux_u32_put(cache+CurveArcCache.steps,0);
+    result=Curve_getCachedLengths(curve_sample,cache,cache_args[1],cache_args[2]);
+  }
+  return result;
+}
+
 native function Curve_getLength(lengths:i64,divisions:i64) f64 {
   return ux_f64(lengths+divisions*8);
 }
@@ -112,6 +179,10 @@ function Curve_getPointAt(curve_arc_sample,...curve_arc_args) {
   let lengths=f64_floor_i64(curve_arc_args[0]);
   let steps=f64_floor_i64(curve_arc_args[1]);
   return curve_arc_sample(Curve_getUtoTmapping(lengths,steps,curve_arc_args[2]));
+}
+
+function Curve_getPoint(curve_sample,...curve_args) {
+  return curve_sample(curve_args[0]);
 }
 
 function Curve_getTangent(curve_tangent_sample,...curve_tangent_args) {

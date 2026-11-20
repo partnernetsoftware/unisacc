@@ -1,0 +1,119 @@
+struct RayMeshBuffer {
+  positions: u32;
+  vertexCount: u32;
+  positionStride: u32;
+  indices: u32;
+  indexBytes: u32;
+  faceCount: u32;
+  matrixWorld: u32;
+  layerMask: u32;
+  side: u32;
+}
+
+native function ray_mesh_index(indices:i64,width:i64,index:i64) i64 {
+  if(width==0) { return index; }
+  if(width==2) { return ux_u16(indices+index*2); }
+  return ux_u32(indices+index*4);
+}
+
+native function ray_merge_hits(out:i64,work:i64,count:i64) i64 {
+  let read=out;
+  let write=work;
+  let width=1;
+  while(width<count) {
+    let first=0;
+    while(first<count) {
+      let middle=first+width;
+      let end=middle+width;
+      if(middle>count) { middle=count; }
+      if(end>count) { end=count; }
+      let left=first;
+      let right=middle;
+      let i=first;
+      while(i<end) {
+        let chosen=right;
+        if(left<middle && (right>=end ||
+           ux_f64(read+left*RayMeshHit.size+RayMeshHit.distance)<=ux_f64(read+right*RayMeshHit.size+RayMeshHit.distance))) {
+          chosen=left;
+          left=left+1;
+        } else { right=right+1; }
+        let copied=uxe_copy_record(write+i*RayMeshHit.size,read+chosen*RayMeshHit.size,RayMeshHit.size);
+        i=i+1;
+      }
+      first=end;
+    }
+    let before=read;
+    read=write;
+    write=before;
+    width=width*2;
+  }
+  if(read!=out) { let copy=uxe_copy_record(out,read,count*RayMeshHit.size); }
+  return count;
+}
+
+// Raycast immutable indexed or non-indexed f32 triangles, sorted by distance.
+// Out and scratch sizes are validated against the maximum possible hits.
+native function Raycaster_intersectMeshBuffer(state:i64,mesh:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(mesh,RayMeshBuffer.size) ||
+     capacity<0 || space<0 || !raycaster_span(work,space)) { return 0-1; }
+  if(u32_and(ux_u32(state+RaycasterState.layerMask),ux_u32(mesh+RayMeshBuffer.layerMask))==0) { return 0; }
+  let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let positions=ux_u32(mesh+RayMeshBuffer.positions);
+  let stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let indexBytes=ux_u32(mesh+RayMeshBuffer.indexBytes);
+  let matrix=ux_u32(mesh+RayMeshBuffer.matrixWorld);
+  let side=ux_u32(mesh+RayMeshBuffer.side);
+  if(faces>65536 || vertices>65536 || side>2 || stride<12 || stride%4!=0 ||
+     (indexBytes!=0 && indexBytes!=2 && indexBytes!=4) || !raycaster_span(matrix,128)) { return 0-1; }
+  if(faces==0) { return 0; }
+  if(vertices<1 || (indexBytes==0 && faces*3>vertices)) { return 0-1; }
+  let positionBytes=(vertices-1)*stride+12;
+  let indexSpan=faces*3*indexBytes;
+  let resultBytes=faces*RayMeshHit.size;
+  if(positions%4!=0 || positions>6291456-positionBytes || (indexBytes!=0 && indices%indexBytes!=0) ||
+     indices>6291456-indexSpan || capacity<faces || space<240+resultBytes ||
+     !raycaster_span(out,resultBytes)) { return 0-1; }
+  if(raycaster_overlap(out,resultBytes,work,space) || raycaster_overlap(out,resultBytes,state,RaycasterState.size) ||
+     raycaster_overlap(out,resultBytes,mesh,RayMeshBuffer.size) || raycaster_overlap(out,resultBytes,matrix,128) ||
+     raycaster_overlap(out,resultBytes,positions,positionBytes) || raycaster_overlap(out,resultBytes,indices,indexSpan) ||
+     raycaster_overlap(work,space,state,RaycasterState.size) || raycaster_overlap(work,space,mesh,RayMeshBuffer.size) ||
+     raycaster_overlap(work,space,matrix,128) || raycaster_overlap(work,space,positions,positionBytes) ||
+     raycaster_overlap(work,space,indices,indexSpan)) { return 0-1; }
+  let i=0;
+  while(i<faces*3) {
+    let vertex=ray_mesh_index(indices,indexBytes,i);
+    if(vertex>=vertices) { return 0-2; }
+    let at=positions+vertex*stride;
+    let x=ux_f32(at);
+    let y=ux_f32(at+4);
+    let z=ux_f32(at+8);
+    if(x-x!=0.0 || y-y!=0.0 || z-z!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  let query=work+72;
+  let near=ux_f64_put(query+RayMeshQuery.near,ux_f64(state+RaycasterState.near));
+  let far=ux_f64_put(query+RayMeshQuery.far,ux_f64(state+RaycasterState.far));
+  let marker=ux_u32_put(query+RayMeshQuery.side,side);
+  let count=0;
+  i=0;
+  while(i<faces) {
+    let j=0;
+    while(j<3) {
+      let vertex=ray_mesh_index(indices,indexBytes,i*3+j);
+      let at=positions+vertex*stride;
+      let point=Vector3_set(work+j*24,ux_f32(at),ux_f32(at+4),ux_f32(at+8));
+      j=j+1;
+    }
+    let face=ux_u32_put(query+RayMeshQuery.face,i);
+    let found=Raycaster_meshFace(state,work,matrix,query,work+96,work+144);
+    if(found==0-1) { return found; }
+    if(found>=0) {
+      let item=uxe_copy_record(out+count*RayMeshHit.size,found,RayMeshHit.size);
+      count=count+1;
+    }
+    i=i+1;
+  }
+  return ray_merge_hits(out,work+240,count);
+}

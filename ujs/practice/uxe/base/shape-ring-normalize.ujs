@@ -1,0 +1,44 @@
+// Handle r160's repeated closing point. Output indices address the packed,
+// normalized rings, in outer-first order.
+native function ShapeUtils_triangulateRings(points:i64,outer:i64,sizes:i64,holes:i64,
+                                                  indices:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(points<0 || points%8!=0 || points>6291456 || outer<3 || outer>4096 ||
+     holes<1 || holes>16 || sizes<0 || sizes>6291456-holes*4 ||
+     indices<0 || indices%4!=0 || indices>6291456 || capacity<0 || capacity>(6291456-indices)/4 ||
+     work<0 || work%8!=0 || space<0 || work>6291456-space) { return 0-1; }
+  let inputCount=outer;
+  let i=0;
+  while(i<holes) {
+    let ring=ux_u32(sizes+i*4);
+    if(ring<3 || ring>4096-inputCount) { return 0-1; }
+    inputCount=inputCount+ring;
+    i=i+1;
+  }
+  let bytes=inputCount*16;
+  let descriptors=(holes*4+7)/8*8;
+  let prefix=bytes+descriptors;
+  if(points>6291456-bytes || prefix>space ||
+     shape_holes_overlap(work,space,points,bytes) || shape_holes_overlap(work,space,sizes,holes*4) ||
+     shape_holes_overlap(work,space,indices,capacity*4) || shape_holes_overlap(indices,capacity*4,points,bytes) ||
+     shape_holes_overlap(indices,capacity*4,sizes,holes*4)) { return 0-1; }
+  let normalized=work+bytes;
+  let input=0;
+  let output=0;
+  let outerCount=0;
+  i=0;
+  while(i<=holes) {
+    let original=outer;
+    if(i>0) { original=ux_u32(sizes+(i-1)*4); }
+    let ringAt=points+input*16;
+    let count=original;
+    if(shape_same_point(ringAt,ringAt+(count-1)*16)) { count=count-1; }
+    if(count<3) { return 0-2; }
+    let copied=uxe_copy_record(work+output*16,ringAt,count*16);
+    if(i==0) { outerCount=count; }
+    else { let put=ux_u32_put(normalized+(i-1)*4,count); }
+    input=input+original;
+    output=output+count;
+    i=i+1;
+  }
+  return ShapeUtils_triangulateHoles(work,outerCount,normalized,holes,indices,capacity,work+prefix,space-prefix);
+}

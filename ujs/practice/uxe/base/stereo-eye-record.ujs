@@ -1,0 +1,56 @@
+struct StereoEyeRecord {
+  camera: u32;
+  lens: u32;
+  world: u32;
+  layerMask: u32;
+  matrixAutoUpdate: u32;
+  eye: u32;
+}
+
+native function stereo_eye_check(stereo:i64,eye:i64,out:i64,capacity:i64) i64 {
+  let storage=704;
+  if(stereo<0 || stereo%8!=0 || stereo>6291456-StereoCamera.size ||
+     out<0 || out%8!=0 || out>6291456-storage || capacity<storage || eye<0 || eye>1 ||
+     Camera_blocksOverlap(out,storage,stereo,StereoCamera.size) ||
+     ux_u32(stereo+StereoCamera.cached)==0) { return 0-1; }
+  let projection=ux_u32(stereo+StereoCamera.leftProjection+eye*4);
+  let world=ux_u32(stereo+StereoCamera.leftWorld+eye*4);
+  if(projection%8!=0 || world%8!=0 || projection>6291456-128 || world>6291456-128 ||
+     Camera_blocksOverlap(out,storage,projection,128) ||
+     Camera_blocksOverlap(out,storage,world,128)) { return 0-1; }
+  return out;
+}
+
+// Update a previously materialized eye while preserving its lens and identity.
+native function StereoCamera_refreshEye(stereo:i64,eye:i64,out:i64,capacity:i64) i64 {
+  if(stereo_eye_check(stereo,eye,out,capacity)<0) { return 0-1; }
+  let camera=out+32;
+  if(ux_u32(out+StereoEyeRecord.eye)!=eye || ux_u32(out+StereoEyeRecord.camera)!=camera ||
+     ux_u32(out+StereoEyeRecord.lens)!=out+56 ||
+     ux_u32(out+StereoEyeRecord.world)!=out+576 || ux_u32(camera+Camera.matrixWorldInverse)!=out+192 ||
+     ux_u32(camera+Camera.projectionMatrix)!=out+320 || ux_u32(camera+Camera.projectionMatrixInverse)!=out+448) { return 0-1; }
+  let projection=ux_u32(stereo+StereoCamera.leftProjection+eye*4);
+  let world=ux_u32(stereo+StereoCamera.leftWorld+eye*4);
+  let view=Matrix4_copy(out+576,world);
+  let copy=Matrix4_copy(out+320,projection);
+  let inverse=Camera_updateProjectionInverse(camera);
+  let viewInverse=Camera_updateMatrixWorld(camera,view);
+  return out;
+}
+
+// Materialize a standalone Camera and a default PerspectiveCamera lens.
+native function StereoCamera_readEye(stereo:i64,eye:i64,out:i64,capacity:i64) i64 {
+  if(stereo_eye_check(stereo,eye,out,capacity)<0) { return 0-1; }
+  let camera=Camera_init(out+32,out+192);
+  if(camera<0) { return camera; }
+  let lens=PerspectiveCamera_init(out+56,50.0,1.0,0.1,2000.0);
+  let a=ux_u32_put(out+StereoEyeRecord.camera,camera);
+  let b=ux_u32_put(out+StereoEyeRecord.lens,lens);
+  let c=ux_u32_put(out+StereoEyeRecord.world,out+576);
+  let mask=ux_u32(stereo+StereoCamera.leftMask+eye*4);
+  let auto=ux_u32(stereo+StereoCamera.leftAutoUpdate+eye*4);
+  let d=ux_u32_put(out+StereoEyeRecord.layerMask,mask);
+  let e=ux_u32_put(out+StereoEyeRecord.matrixAutoUpdate,auto);
+  let f=ux_u32_put(out+StereoEyeRecord.eye,eye);
+  return StereoCamera_refreshEye(stereo,eye,out,capacity);
+}

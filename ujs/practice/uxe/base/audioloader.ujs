@@ -1,0 +1,68 @@
+struct AudioResource {
+  pcm: u32;
+  frames: u32;
+  channels: u32;
+  sampleRate: u32;
+}
+
+native function wav_u16(at:i64) i64 {
+  return ux_u8(at)+ux_u8(at+1)*256;
+}
+
+native function wav_u32(at:i64) i64 {
+  return wav_u16(at)+wav_u16(at+2)*65536;
+}
+
+// Decode RIFF PCM16 mono/stereo into interleaved float samples.
+native function AudioLoader_decodeWav(file:i64,clip:i64,pcm:i64,capacity:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 || !loading_span(clip,AudioResource.size) ||
+     !loading_span(pcm,capacity) || !file_disjoint(file,FileLoader.size,clip,AudioResource.size) ||
+     !file_disjoint(file,FileLoader.size,pcm,capacity) || !file_disjoint(clip,AudioResource.size,pcm,capacity)) { return 0-1; }
+  let bytes=ux_u32(file+FileLoader.length);
+  let src=ux_u32(file+FileLoader.bytes);
+  if(bytes<44 || src>6291456-bytes || !file_disjoint(src,bytes,clip,AudioResource.size) ||
+     !file_disjoint(src,bytes,pcm,capacity)) { return 0-1; }
+  if(wav_u32(src)!=1179011410 || wav_u32(src+8)!=1163280727 || wav_u32(src+4)!=bytes-8) { return 0-2; }
+  let at=12;
+  let fmt=0;
+  let sample=0;
+  let sampleBytes=0;
+  while(at<bytes) {
+    if(at>bytes-8) { return 0-2; }
+    let kind=wav_u32(src+at);
+    let length=wav_u32(src+at+4);
+    let advance=8+length+length%2;
+    if(advance>bytes-at) { return 0-2; }
+    if(kind==544501094) {
+      if(fmt!=0 || length<16) { return 0-2; }
+      fmt=src+at+8;
+    }
+    if(kind==1635017060) {
+      if(sample!=0) { return 0-2; }
+      sample=src+at+8;
+      sampleBytes=length;
+    }
+    at=at+advance;
+  }
+  if(fmt==0 || sample==0) { return 0-2; }
+  let channels=wav_u16(fmt+2);
+  let rate=wav_u32(fmt+4);
+  let stride=channels*2;
+  if(wav_u16(fmt)!=1 || channels<1 || channels>2 || rate<8000 || rate>192000 ||
+     wav_u16(fmt+14)!=16 || wav_u16(fmt+12)!=stride || wav_u32(fmt+8)!=rate*stride ||
+     sampleBytes<stride || sampleBytes%stride!=0) { return 0-3; }
+  if(sampleBytes>capacity/2) { return 0-1; }
+  let i=0;
+  while(i<sampleBytes/2) {
+    let integer=wav_u16(sample+i*2);
+    if(integer>=32768) { integer=integer-65536; }
+    if(integer< -32767) { integer=0-32767; }
+    let value=ux_f32_put(pcm+i*4,integer/32767.0);
+    i=i+1;
+  }
+  let data=ux_u32_put(clip+AudioResource.pcm,pcm);
+  let length=ux_u32_put(clip+AudioResource.frames,sampleBytes/stride);
+  let planes=ux_u32_put(clip+AudioResource.channels,channels);
+  let frequency=ux_u32_put(clip+AudioResource.sampleRate,rate);
+  return clip;
+}

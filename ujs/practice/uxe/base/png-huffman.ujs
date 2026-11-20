@@ -1,0 +1,111 @@
+// A canonical tree stores count, first code, and first symbol index for each
+// bit length, followed by up to 288 sorted u32 symbols. It occupies 1344 bytes.
+native function png_tree_build(tree:i64,lengths:i64,symbols:i64,complete:i64) i64 {
+  let i=0;
+  while(i<16) { let zero=ux_u32_put(tree+i*4,0); i=i+1; }
+  i=0;
+  while(i<symbols) {
+    let length=ux_u8(lengths+i);
+    if(length>15) { return 0-6; }
+    if(length>0) {
+      let cell=tree+length*4;
+      let count=ux_u32_put(cell,ux_u32(cell)+1);
+    }
+    i=i+1;
+  }
+  let code=0;
+  let index=0;
+  let alphabet=2;
+  let length=1;
+  while(length<=15) {
+    let count=ux_u32(tree+length*4);
+    if(code+count>alphabet) { return 0-6; }
+    let first=ux_u32_put(tree+64+length*4,code);
+    let offset=ux_u32_put(tree+128+length*4,index);
+    let entry=0;
+    while(entry<symbols && count>0) {
+      if(ux_u8(lengths+entry)==length) {
+        let saved=ux_u32_put(tree+192+index*4,entry);
+        index=index+1;
+      }
+      entry=entry+1;
+    }
+    code=(code+count)*2;
+    alphabet=alphabet*2;
+    length=length+1;
+  }
+  if(code!=65536 && (complete!=0 || (index>0 && (index!=1 || ux_u32(tree+4)!=1)))) { return 0-6; }
+  return index;
+}
+
+native function png_tree_symbol(tree:i64,src:i64,limit:i64,input:i64) i64 {
+  let code=0;
+  let length=1;
+  while(length<=15) {
+    let low=png_bits(src,limit,input+length-1,1,1);
+    if(low<0) { return low; }
+    code=code*2+low;
+    let offset=code-ux_u32(tree+64+length*4);
+    if(offset>=0 && offset<ux_u32(tree+length*4)) {
+      let index=ux_u32(tree+128+length*4)+offset;
+      return length*512+ux_u32(tree+192+index*4);
+    }
+    length=length+1;
+  }
+  return 0-6;
+}
+
+// Workspace is 3008 bytes: lengths (320), literals (1344), distance (1344).
+// The literal table first holds the temporary code-length alphabet.
+native function png_dynamic_tables(src:i64,limit:i64,start:i64,workspace:i64) i64 {
+  let literals=png_bits(src,limit,start,5,0)+257;
+  let distances=png_bits(src,limit,start+5,5,0)+1;
+  let count=png_bits(src,limit,start+10,4,0)+4;
+  if(start>limit-14 || literals>286 || distances>32) { return 0-6; }
+  let table=workspace+320;
+  let bit=start+14;
+  let positions=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+  let i=0;
+  while(i<19) { let empty=ux_u8_put(workspace+i,0); i=i+1; }
+  i=0;
+  while(i<count) {
+    let width=png_bits(src,limit,bit,3,0);
+    if(width<0) { return 0-6; }
+    let saved=ux_u8_put(workspace+positions[i],width);
+    bit=bit+3;
+    i=i+1;
+  }
+  if(png_tree_build(table,workspace,19,1)<0) { return 0-6; }
+  i=0;
+  let last=0;
+  let total=literals+distances;
+  while(i<total) {
+    let packed=png_tree_symbol(table,src,limit,bit);
+    if(packed<0) { return 0-6; }
+    bit=bit+packed/512;
+    let code=packed%512;
+    let repeat=1;
+    if(code<16) { last=code; }
+    else {
+      let extra=2;
+      let baseline=3;
+      if(code==16 && i==0) { return 0-6; }
+      if(code==17) { last=0; extra=3; }
+      if(code==18) { last=0; extra=7; baseline=11; }
+      let run=png_bits(src,limit,bit,extra,0);
+      if(run<0) { return 0-6; }
+      repeat=baseline+run;
+      bit=bit+extra;
+    }
+    if(repeat>total-i) { return 0-6; }
+    let j=0;
+    while(j<repeat) {
+      let saved=ux_u8_put(workspace+i,last);
+      i=i+1;
+      j=j+1;
+    }
+  }
+  if(ux_u8(workspace+256)==0 || png_tree_build(table,workspace,literals,0)<0 ||
+     png_tree_build(table+1344,workspace+literals,distances,0)<0) { return 0-6; }
+  return bit;
+}

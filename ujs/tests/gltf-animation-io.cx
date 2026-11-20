@@ -1,0 +1,41 @@
+#pragma unisa use g_math
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"loadingmanager","fileloader","glb-container","json-read","loader-json",
+        "gltf-accessor","animation-view","gltf-animation",0};
+    const char json[]="{\"animations\":[{\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"translation\"}}],\"samplers\":[{\"input\":0,\"output\":1}]}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":8,\"byteLength\":24}]}";
+    const int bytes=sizeof json-1;
+    char setup[3000];
+    int n=0;
+    for(int start=0;start<bytes;start+=100) {
+        int count=bytes-start<100?bytes-start:100;
+        n+=tx_snprintf(setup+n,sizeof setup-n,"if(1){let chunk=[");
+        for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[start+i]);
+        n+=tx_snprintf(setup+n,sizeof setup-n,
+            "];let i=0;while(i<%d){let cell=ux_u8_put(%d+i,chunk[i]);i=i+1;}}",count,128+start);
+    }
+    tx_snprintf(setup+n,sizeof setup-n,
+        "let a=ux_u32_put(GlbResource.json,128);let b=ux_u32_put(GlbResource.jsonBytes,%d);"
+        "let c=ux_u32_put(GlbResource.bin,512);let d=ux_u32_put(GlbResource.binBytes,32);"
+        "let t=ux_f32_put(516,2.0);let x=ux_f32_put(532,4.5);let y=ux_f32_put(536,2.0);",bytes);
+    const char *cases[]={
+        "let a=GltfLoader_translationChannel(0,0,0,2,640,680);return ux_u32(a+GltfAnimationChannel.node);",
+        "let a=GltfLoader_translationChannel(0,0,0,2,640,680);return ux_u32(a+GltfAnimationChannel.interpolation);",
+        "let a=GltfLoader_translationChannel(0,0,0,2,640,680);let s=ux_u32(a+GltfAnimationChannel.samples);"
+        "return ux_f32(ux_u32(s+AnimationSamples.times)+4);",
+        "let a=GltfLoader_translationChannel(0,0,0,2,640,680);let s=ux_u32(a+GltfAnimationChannel.samples);"
+        "return ux_f32(ux_u32(s+AnimationSamples.values)+12);",
+        "return GltfLoader_translationChannel(0,0,0,1,640,680);",
+        "let bad=ux_f32_put(512,3.0);return GltfLoader_translationChannel(0,0,0,2,640,680);",
+        "let bad=ux_u32_put(GlbResource.binBytes,27);return GltfLoader_translationChannel(0,0,0,2,640,680);"
+    };
+    const double gold[]={1,2301,2,4.5,-3,-5,-5};
+    return g_math_run("G_IO GltfAnimation","gltf-animation",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?3:-1,
+        "let a=GltfLoader_translationChannel(0,0,0,2,640,680);let s=ux_u32(a+GltfAnimationChannel.samples);"
+        "return ux_f32(ux_u32(s+AnimationSamples.values)+16);");
+}

@@ -1,0 +1,60 @@
+struct JpegHeader {
+  width: u32;
+  height: u32;
+  precision: u32;
+  components: u32;
+  frame: u32;
+}
+
+native function jpeg_u16be(at:i64) i64 {
+  return ux_u8(at)*256+ux_u8(at+1);
+}
+
+// Read only recognizable 8-bit baseline and progressive frame headers.
+// This probe does not traverse entropy-coded scans.
+native function JpegHeader_probe(src:i64,bytes:i64,out:i64) i64 {
+  if(src<0 || bytes<0 || bytes>4194304 || src>6291456-bytes || out<0 || out%4!=0 ||
+     out>6291456-JpegHeader.size || (bytes>0 && src<out+JpegHeader.size && out<src+bytes)) { return 0-1; }
+  if(bytes<4 || jpeg_u16be(src)!=65496) { return 0-2; }
+  let cursor=src+2;
+  let end=src+bytes;
+  while(cursor<end) {
+    if(ux_u8(cursor)!=255) { return 0-2; }
+    while(cursor<end && ux_u8(cursor)==255) { cursor=cursor+1; }
+    if(cursor>end-3) { return 0-2; }
+    let marker=ux_u8(cursor);
+    if(marker==0 || (marker>=208 && marker<=218) || marker==1) { return 0-2; }
+    cursor=cursor+1;
+    let length=jpeg_u16be(cursor);
+    if(length<2 || length>end-cursor) { return 0-2; }
+    if(marker==192 || marker==194) {
+      if(length<11) { return 0-2; }
+      let precision=ux_u8(cursor+2);
+      let height=jpeg_u16be(cursor+3);
+      let width=jpeg_u16be(cursor+5);
+      let components=ux_u8(cursor+7);
+      if(components<1 || components>4 || length!=8+3*components || width==0 || height==0 || precision!=8) { return 0-4; }
+      let i=0;
+      while(i<components) {
+        let at=cursor+8+3*i;
+        let sampling=ux_u8(at+1);
+        if(sampling/16<1 || sampling/16>4 || sampling%16<1 || sampling%16>4 || ux_u8(at+2)>3) { return 0-4; }
+        let j=0;
+        while(j<i) {
+          if(ux_u8(at)==ux_u8(cursor+8+3*j)) { return 0-4; }
+          j=j+1;
+        }
+        i=i+1;
+      }
+      let a=ux_u32_put(out+JpegHeader.width,width);
+      let b=ux_u32_put(out+JpegHeader.height,height);
+      let c=ux_u32_put(out+JpegHeader.precision,precision);
+      let d=ux_u32_put(out+JpegHeader.components,components);
+      let e=ux_u32_put(out+JpegHeader.frame,marker);
+      return out;
+    }
+    if(marker>=193 && marker<=207 && marker!=196 && marker!=200 && marker!=204) { return 0-4; }
+    cursor=cursor+length;
+  }
+  return 0-2;
+}

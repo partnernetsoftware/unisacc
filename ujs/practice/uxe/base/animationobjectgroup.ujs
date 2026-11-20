@@ -1,0 +1,67 @@
+struct AnimationObjectGroup {
+  entries: u32;
+  capacity: u32;
+  total: u32;
+  active: u32;
+}
+
+native function anim_group_valid(group:i64) i64 {
+  if(!animation_span(group,AnimationObjectGroup.size)) { return 0; }
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  let capacity=ux_u32(group+AnimationObjectGroup.capacity);
+  let total=ux_u32(group+AnimationObjectGroup.total);
+  return capacity>0 && capacity<=65536 && total<=capacity && ux_u32(group+AnimationObjectGroup.active)<=total &&
+    animation_span(entries,capacity*8) && !animation_overlap(group,AnimationObjectGroup.size,entries,capacity*8);
+}
+
+native function AnimationObjectGroup_init(group:i64,entries:i64,capacity:i64) i64 {
+  if(capacity<1 || capacity>65536 || !animation_span(group,AnimationObjectGroup.size) ||
+     !animation_span(entries,capacity*8) || animation_overlap(group,AnimationObjectGroup.size,entries,capacity*8)) { return 0-1; }
+  let a=ux_u32_put(group+AnimationObjectGroup.entries,entries);
+  let b=ux_u32_put(group+AnimationObjectGroup.capacity,capacity);
+  let c=ux_u32_put(group+AnimationObjectGroup.total,0);
+  let d=ux_u32_put(group+AnimationObjectGroup.active,0);
+  return group;
+}
+
+native function anim_group_find(entries:i64,total:i64,handle:i64) i64 {
+  let i=0;
+  while(i<total) {
+    if(ux_u32(entries+i*8)==handle) { return i; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function AnimationObjectGroup_update(group:i64,handle:i64,op:i64) i64 {
+  if(!anim_group_valid(group) || handle<1 || handle>4294967295 || op<0 || op>2) { return 0-1; }
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  let total=ux_u32(group+AnimationObjectGroup.total);
+  let active=ux_u32(group+AnimationObjectGroup.active);
+  let index=anim_group_find(entries,total,handle);
+  if(index<0) {
+    if(op!=0) { return group; }
+    if(total==ux_u32(group+AnimationObjectGroup.capacity)) { return 0-2; }
+    let saved=ux_u32_put(entries+total*8,handle);
+    let enabled=ux_u32_put(entries+total*8+4,1);
+    total=total+1;
+    active=active+1;
+  } else {
+    let at=entries+index*8;
+    let enabled=ux_u32(at+4);
+    if(op==2) {
+      let tail=entries+(total-1)*8;
+      let id=ux_u32_put(at,ux_u32(tail));
+      let state=ux_u32_put(at+4,ux_u32(tail+4));
+      total=total-1;
+      active=active-enabled;
+    } else {
+      let next=op==0;
+      let state=ux_u32_put(at+4,next);
+      active=active+next-enabled;
+    }
+  }
+  let count=ux_u32_put(group+AnimationObjectGroup.total,total);
+  let used=ux_u32_put(group+AnimationObjectGroup.active,active);
+  return group;
+}

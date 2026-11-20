@@ -1,0 +1,55 @@
+native function gltf_version2(at:i64,end:i64) i64 {
+  return at>=0 && json_scan_string(at,end)==at+5 && ux_u8(at+1)==50 && ux_u8(at+2)==46 && ux_u8(at+3)==48;
+}
+
+// First GLB stage: validate the manifest and its single embedded buffer.
+// Preserve the caller's published result on version, bounds or extension errors.
+native function GltfLoader_readGlb(file:i64,out:i64,scratch:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
+     !loading_span(out,GlbResource.size) || !loading_span(scratch,36) ||
+     !file_disjoint(file,FileLoader.size,out,GlbResource.size) || !file_disjoint(file,FileLoader.size,scratch,36) ||
+     !file_disjoint(out,GlbResource.size,scratch,36)) { return 0-1; }
+  let src=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(!file_disjoint(src,bytes,out,GlbResource.size) || !file_disjoint(src,bytes,scratch,36)) { return 0-1; }
+  let view=GlbContainer_probe(src,bytes,scratch);
+  if(view<0) { return view; }
+  let json=ux_u32(view+GlbResource.json);
+  let end=json+ux_u32(view+GlbResource.jsonBytes);
+  let stop=json_value_end(json,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-4; }
+  let key=scratch+16;
+  let asset=LoaderJson_find(json,end,key,1702064993,116,0,5);
+  let version=LoaderJson_find(asset,end,key,1936876918,7237481,0,7);
+  let minimum=LoaderJson_find(asset,end,key,1450076525,1769173605,28271,10);
+  if(!gltf_version2(version,end) || (minimum!=0-2 && !gltf_version2(minimum,end))) { return 0-4; }
+  let ids=[101,120,116,101,110,115,105,111,110,115,82,101,113,117,105,114,101,100];
+  let i=0;
+  while(i<18) { let saved=ux_u8_put(key+i,ids[i]); i=i+1; }
+  let required=json_find_key(json,end,key,18);
+  if(required>=0) {
+    let at=json_space(required+1,end);
+    if(ux_u8(required)!=91 || at<0 || at>=end || ux_u8(at)!=93) { return 0-5; }
+  }
+  let packed=ux_u32(view+GlbResource.bin);
+  let packedBytes=ux_u32(view+GlbResource.binBytes);
+  let buffers=LoaderJson_find(json,end,key,1717990754,7565925,0,7);
+  if(buffers>=0) {
+    let first=json_space(buffers+1,end);
+    if(ux_u8(buffers)!=91 || first<0 || first>=end) { return 0-4; }
+    if(ux_u8(first)==93) {
+      if(packed!=0) { return 0-6; }
+    } else {
+      let next=json_space(json_value_end(first,end),end);
+      if(next<0 || next>=end || ux_u8(next)!=93 || packed==0 ||
+         LoaderJson_find(first,end,key,6910581,0,0,3)!=0-2) { return 0-6; }
+      let token=LoaderJson_find(first,end,key,1702132066,1735288140,26740,10);
+      let length=json_read_number(token,end);
+      if(length!=length || length<1.0 || length>0.0+packedBytes || length<0.0+packedBytes-3.0) { return 0-6; }
+      let declared=f64_floor_i64(length);
+      if(length!=0.0+declared) { return 0-6; }
+      let bound=ux_u32_put(view+GlbResource.binBytes,declared);
+    }
+  } else if(packed!=0) { return 0-6; }
+  return uxe_copy_record(out,view,GlbResource.size);
+}

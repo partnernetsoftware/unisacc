@@ -1,0 +1,49 @@
+#pragma unisa use g_math
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","loadingmanager","fileloader","glb-container","json-read","loader-json","gltf-texture",
+        "png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored","image-layout","gltf-texture-png",0};
+    const char json[]="{\"textures\":[{\"source\":0}],\"images\":[{\"mimeType\":\"image/png\",\"bufferView\":0}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":73}]}";
+    unsigned char png[73]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,
+        0,0,0,0,0,0,0,16,73,68,65,84,120,1,1,5,0,250,255,0,255,0,128,255};
+    be(png+29,dz_crc32(0,png+12,17));
+    unsigned a=1,b=0;
+    for(int i=48;i<53;i++) { a+=png[i]; b+=a; }
+    be(png+53,(b<<16)+a);
+    be(png+57,dz_crc32(0,png+37,20));
+    be(png+65,0x49454e44u);
+    be(png+69,dz_crc32(0,png+65,4));
+    int bytes=sizeof json-1;
+    char setup[1400];
+    int n=tx_snprintf(setup,sizeof setup,"let json=[");
+    for(int i=0;i<bytes;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",json[i]);
+    n+=tx_snprintf(setup+n,sizeof setup-n,"];let data=[");
+    for(int i=0;i<(int)sizeof png;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",png[i]);
+    tx_snprintf(setup+n,sizeof setup-n,
+        "];let i=0;while(i<%d){let cell=ux_u8_put(128+i,json[i]);i=i+1;}"
+        "let j=0;while(j<73){let cell2=ux_u8_put(512+j,data[j]);j=j+1;}"
+        "let a=ux_u32_put(GlbResource.json,128);let b=ux_u32_put(GlbResource.jsonBytes,%d);"
+        "let c=ux_u32_put(GlbResource.bin,512);let d=ux_u32_put(GlbResource.binBytes,73);"
+        "let tex=GltfLoader_textureSource(0,0,640,680);",bytes,bytes);
+    const char *cases[]={
+        "let img=GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);return ux_u32(img+ImageResource.width);",
+        "let img=GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);return ux_u8(768);",
+        "let img=GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);return ux_u8(770);",
+        "let bad=ux_u8_put(561,44);return GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);",
+        "let guard=ux_u32_put(704+ImageResource.width,777);let bad=ux_u8_put(561,44);"
+        "let img=GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);return ux_u32(704+ImageResource.width);"
+    };
+    const double gold[]={1,255,128,-3,777};
+    return g_math_run("G_IO GltfTexturePng","gltf-texture-png",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,
+        "let img=GltfLoader_decodeTexturePng(tex,704,768,4,1024,4096);return ux_u8(769);");
+}

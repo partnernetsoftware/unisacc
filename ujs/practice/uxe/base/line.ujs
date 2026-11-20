@@ -1,0 +1,38 @@
+function Line_init(line,...args) {
+  return Mesh_init(line,args[0],args[1],args[2],args[3],args[4],args[5]);
+}
+
+native function line_vertex_dist(view:i64,a:i64,b:i64) f64 {
+  let x=BufferAttribute_getComponent(view,a,0)-BufferAttribute_getComponent(view,b,0);
+  let y=BufferAttribute_getComponent(view,a,1)-BufferAttribute_getComponent(view,b,1);
+  let z=BufferAttribute_getComponent(view,a,2)-BufferAttribute_getComponent(view,b,2);
+  return f64_sqrt(x*x+y*y+z*z);
+}
+
+// Renderers may bind the output as the Float32 lineDistance attribute.
+native function line_distances(line:i64,position:i64,out:i64,capacity:i64,pairs:i64) i64 {
+  if(!mesh_valid(line) || out<0 || out>6291456 || out%4!=0 || capacity<0 ||
+     capacity>(6291456-out)/4) { return 0-1; }
+  let geo=ux_u32(line+Mesh.geometry);
+  if(ux_u32(geo+BufferGeometry.index)!=0) { return 0-1; }
+  let row=BufferGeometry_find(geo,position);
+  if(row<0) { return 0-1; }
+  let view=ux_u32(row+4);
+  let count=ux_u32(view+BufferAttribute.count);
+  if(count>capacity || ux_u32(view+BufferAttribute.itemSize)<3 || (pairs!=0 && count%2!=0)) { return 0-1; }
+  let data=ux_u32(view+BufferAttribute.data);
+  let bytes=count*ux_u32(view+BufferAttribute.stride);
+  if(count>0 && (out<data+bytes && data<out+4*count)) { return 0-1; }
+  let sum=0.0;
+  let i=0;
+  while(i<count) {
+    if(i>0 && (pairs==0 || i%2!=0)) { sum=sum+line_vertex_dist(view,i-1,i); }
+    let v=ux_f32_put(out+4*i,sum);
+    i=i+1;
+  }
+  return count;
+}
+
+native function Line_computeLineDistances(line:i64,position:i64,out:i64,capacity:i64) i64 {
+  return line_distances(line,position,out,capacity,0);
+}

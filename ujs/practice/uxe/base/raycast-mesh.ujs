@@ -1,0 +1,57 @@
+struct RayMeshHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  face: u32;
+}
+
+struct RayMeshQuery {
+  near: f64;
+  far: f64;
+  side: u32;
+  face: u32;
+}
+
+native function ray_mesh_determinant(world:i64) f64 {
+  let a=ux_f64(world); let b=ux_f64(world+32); let c=ux_f64(world+64);
+  let d=ux_f64(world+8); let e=ux_f64(world+40); let f=ux_f64(world+72);
+  let g=ux_f64(world+16); let h=ux_f64(world+48); let i=ux_f64(world+80);
+  return a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g);
+}
+
+// Query one triangle from a static mesh. Material sides match r160:
+// front = 0, back = 1, double = 2. Scratch holds three world points and a hit.
+native function Raycaster_meshFace(ray:i64,local:i64,world:i64,query:i64,out:i64,work:i64) i64 {
+  if(!raycaster_span(ray,Ray.size) || !raycaster_span(local,72) || !raycaster_span(world,128) ||
+     !raycaster_span(query,RayMeshQuery.size) || !raycaster_span(out,RayMeshHit.size) || !raycaster_span(work,96) ||
+     raycaster_overlap(work,96,ray,Ray.size) || raycaster_overlap(work,96,local,72) ||
+     raycaster_overlap(work,96,world,128) || raycaster_overlap(work,96,out,RayMeshHit.size) ||
+     raycaster_overlap(work,96,query,RayMeshQuery.size) || raycaster_overlap(out,RayMeshHit.size,query,RayMeshQuery.size) ||
+     raycaster_overlap(out,RayMeshHit.size,ray,Ray.size) || raycaster_overlap(out,RayMeshHit.size,local,72) ||
+     raycaster_overlap(out,RayMeshHit.size,world,128)) { return 0-1; }
+  let side=ux_u32(query+RayMeshQuery.side);
+  let near=ux_f64(query+RayMeshQuery.near);
+  let far=ux_f64(query+RayMeshQuery.far);
+  let face=ux_u32(query+RayMeshQuery.face);
+  if(side>2 || near<0.0 || near-near!=0.0 || far!=far || far<near) { return 0-1; }
+  if(ux_f64(world+24)!=0.0 || ux_f64(world+56)!=0.0 || ux_f64(world+88)!=0.0 || ux_f64(world+120)!=1.0) { return 0-1; }
+  let determinant=ray_mesh_determinant(world);
+  if(determinant==0.0 || determinant-determinant!=0.0) { return 0-1; }
+  let a=Vector3_copy(work,local);
+  let b=Vector3_copy(work+24,local+24);
+  let c=Vector3_copy(work+48,local+48);
+  let worldA=Vector3_applyMatrix4(a,world);
+  let worldB=Vector3_applyMatrix4(b,world);
+  let worldC=Vector3_applyMatrix4(c,world);
+  let hit=0-1;
+  if(side!=2 && ((side==1)!=(determinant<0.0))) { hit=Ray_intersectTriangle(work+72,ray,worldC,worldB,worldA,1); }
+  else { hit=Ray_intersectTriangle(work+72,ray,worldA,worldB,worldC,side!=2); }
+  if(hit<0) { return 0-2; }
+  let distance=Vector3_distanceTo(hit,ray);
+  if(distance-distance!=0.0 || distance<near || distance>far) { return 0-2; }
+  let point=Vector3_copy(out,hit);
+  let d=ux_f64_put(out+RayMeshHit.distance,distance);
+  let f=ux_u32_put(out+RayMeshHit.face,face);
+  return out;
+}

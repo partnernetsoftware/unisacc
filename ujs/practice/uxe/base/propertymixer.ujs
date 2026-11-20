@@ -1,0 +1,105 @@
+struct PropertyMixer {
+  rows: u32;
+  lanes: u32;
+  weight: f64;
+  addWeight: f64;
+}
+
+native function property_mixer_lanes(mixer:i64) i64 {
+  if(mixer%8!=0 || !animation_span(mixer,PropertyMixer.size)) { return 0-1; }
+  let lanes=ux_u32(mixer+PropertyMixer.lanes);
+  let rows=ux_u32(mixer+PropertyMixer.rows);
+  if(lanes<1 || lanes>64 || rows%8!=0 || !animation_span(rows,lanes*32) ||
+     animation_overlap(mixer,PropertyMixer.size,rows,lanes*32)) { return 0-1; }
+  return lanes;
+}
+
+native function PropertyMixer_init(mixer:i64,rows:i64,original:i64,lanes:i64) i64 {
+  if(mixer%8!=0 || rows%8!=0 || original%8!=0 || lanes<1 || lanes>64 ||
+     !animation_span(mixer,PropertyMixer.size) || !animation_span(rows,lanes*32) || !animation_span(original,lanes*8) ||
+     animation_overlap(mixer,PropertyMixer.size,rows,lanes*32) ||
+     animation_overlap(mixer,PropertyMixer.size,original,lanes*8) || animation_overlap(rows,lanes*32,original,lanes*8)) { return 0-1; }
+  let i=0;
+  while(i<lanes) {
+    let value=ux_f64(original+i*8);
+    if(value-value!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  let a=ux_u32_put(mixer+PropertyMixer.rows,rows);
+  let b=ux_u32_put(mixer+PropertyMixer.lanes,lanes);
+  let c=ux_f64_put(mixer+PropertyMixer.weight,0.0);
+  let d=ux_f64_put(mixer+PropertyMixer.addWeight,0.0);
+  i=0;
+  while(i<lanes) {
+    let value=ux_f64(original+i*8);
+    let first=ux_f64_put(rows+i*8,value);
+    let last=ux_f64_put(rows+(lanes*3+i)*8,value);
+    i=i+1;
+  }
+  return mixer;
+}
+
+native function PropertyMixer_accumulate(mixer:i64,incoming:i64,weight:f64,blend:i64) i64 {
+  let lanes=property_mixer_lanes(mixer);
+  if(lanes<0 || weight-weight!=0.0 || weight<0.0 || (blend!=2500 && blend!=2501) ||
+     incoming%8!=0 || !animation_span(incoming,lanes*8)) { return 0-1; }
+  let rows=ux_u32(mixer+PropertyMixer.rows);
+  if(animation_overlap(incoming,lanes*8,rows,lanes*32) ||
+     animation_overlap(incoming,lanes*8,mixer,PropertyMixer.size)) { return 0-1; }
+  if(weight==0.0) { return mixer; }
+  let lane=PropertyMixer.weight;
+  let offset=rows+lanes*8;
+  if(blend==2501) { lane=PropertyMixer.addWeight; offset=rows+lanes*16; }
+  let old=ux_f64(mixer+lane);
+  let total=old+weight;
+  if(total-total!=0.0) { return 0-2; }
+  let fraction=weight/total;
+  let i=0;
+  while(i<lanes) {
+    let value=ux_f64(incoming+i*8);
+    if(value-value!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<lanes) {
+    let value=ux_f64(incoming+i*8);
+    let prior=0.0;
+    if(old>0.0) { prior=ux_f64(offset+i*8); }
+    if(blend==2500) {
+      if(old>0.0) { value=prior*(1.0-fraction)+value*fraction; }
+    } else { value=prior+weight*value; }
+    let cell=ux_f64_put(offset+i*8,value);
+    i=i+1;
+  }
+  let saved=ux_f64_put(mixer+lane,total);
+  return mixer;
+}
+
+native function PropertyMixer_apply(mixer:i64) i64 {
+  let lanes=property_mixer_lanes(mixer);
+  if(lanes<0) { return 0-1; }
+  let rows=ux_u32(mixer+PropertyMixer.rows);
+  let out=rows+lanes*24;
+  let weight=ux_f64(mixer+PropertyMixer.weight);
+  let add=ux_f64(mixer+PropertyMixer.addWeight);
+  let i=0;
+  while(i<lanes) {
+    let value=ux_f64(rows+i*8);
+    if(weight>0.0) {
+      let normal=ux_f64(rows+(lanes+i)*8);
+      if(weight<1.0) { value=value*(1.0-weight)+normal*weight; }
+      else { value=normal; }
+    }
+    if(add>0.0) { value=value+ux_f64(rows+(lanes*2+i)*8); }
+    let cell=ux_f64_put(out+i*8,value);
+    i=i+1;
+  }
+  let cleared=ux_f64_put(mixer+PropertyMixer.weight,0.0);
+  let clearedAdd=ux_f64_put(mixer+PropertyMixer.addWeight,0.0);
+  return out;
+}
+
+native function PropertyMixer_original(mixer:i64) i64 {
+  if(property_mixer_lanes(mixer)<0) { return 0-1; }
+  return ux_u32(mixer+PropertyMixer.rows);
+}

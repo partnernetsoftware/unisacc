@@ -1,0 +1,184 @@
+native function jpeg_progressive_boundary(reader:i64) i64 {
+  let start=ux_u32(reader+JpegBits.next);
+  let end=ux_u32(reader+JpegBits.end);
+  let at=start;
+  while(at<end && ux_u8(at)==255) { at=at+1; }
+  if(at==start || at>=end || ux_u8(at)==0) { return 0-6; }
+  let boundary=jpeg_marker(reader,end,ux_u8(at));
+  if(boundary<0) { return boundary; }
+  return start;
+}
+
+native function jpeg_progressive_stages(stages:i64,first:i64,last:i64,level:i64) i64 {
+  let high=level/16;
+  let low=level%16;
+  if(first>last || last>63 || (first==0 && last!=0) || (first>0 && ux_u8(stages)==255) ||
+     high>13 || low>13 || (high!=0 && high!=low+1)) { return 0-4; }
+  let expected=high;
+  if(high==0) { expected=255; }
+  let k=first;
+  while(k<=last) {
+    if(ux_u8(stages+k)!=expected) { return 0-6; }
+    let saved=ux_u8_put(stages+k,low);
+    k=k+1;
+  }
+  return 0;
+}
+
+native function jpeg_progressive_blocks(reader:i64,blocks:i64,coeff:i64,cols:i64,stride:i64,
+    spectral:i64,table:i64,interval:i64) i64 {
+  let first=ux_u8(spectral);
+  let last=ux_u8(spectral+1);
+  let level=ux_u8(spectral+2);
+  let high=level/16;
+  let low=level%16;
+  let predictor=0;
+  let eob=0;
+  let i=0;
+  while(i<blocks) {
+    if(interval>0 && i>0 && i%interval==0) {
+      if(eob!=0) { return 0-6; }
+      let next=jpeg_marker(reader,ux_u32(reader+JpegBits.end),208+(i/interval-1)%8);
+      if(next<0) { return next; }
+      predictor=0;
+    }
+    let block=coeff+(i/cols*stride+i%cols)*256;
+    if(first==0) {
+      if(high==0) {
+        let next=jpeg_progressive_dc_first(reader,table,predictor,low,block);
+        if(next<0) { return next; }
+        predictor=next-65536;
+      } else {
+        let result=jpeg_progressive_dc_refine(reader,low,block);
+        if(result<0) { return result; }
+      }
+    } else if(high!=0) {
+      eob=jpeg_progressive_ac_refine(reader,table,first,last,low,block,eob);
+      if(eob<0) { return eob; }
+    } else if(eob!=0) { eob=eob-1; }
+    else {
+      eob=jpeg_progressive_ac_first(reader,table,first,last,low,block);
+      if(eob<0) { return eob; }
+    }
+    i=i+1;
+  }
+  if(eob!=0) { return 0-6; }
+  return jpeg_progressive_boundary(reader);
+}
+
+native function jpeg_progressive_gray_scans(src:i64,bytes:i64,scratch:i64,coeff:i64,blocks:i64) i64 {
+  let tables=scratch+24;
+  let reader=scratch+72;
+  let stages=scratch+1432;
+  let i=0;
+  while(i<12) { let blank=ux_u32_put(tables+i*4,0); i=i+1; }
+  i=0;
+  while(i<64) { let blank=ux_u8_put(stages+i,255); i=i+1; }
+  i=0;
+  while(i<blocks*64) { let blank=ux_u32_put(coeff+i*4,0); i=i+1; }
+  let at=src+2;
+  let end=src+bytes;
+  let limit=ux_u32_put(reader+JpegBits.end,end);
+  let component=0-1;
+  let quantId=0;
+  let quant=0;
+  let interval=0;
+  while(at<end) {
+    if(ux_u8(at)!=255) { return 0-2; }
+    while(at<end && ux_u8(at)==255) { at=at+1; }
+    if(at>=end) { return 0-2; }
+    let marker=ux_u8(at);
+    at=at+1;
+    if(marker==217) {
+      if(at!=end || ux_u8(stages)==255 || quant==0) { return 0-6; }
+      return quant;
+    }
+    if(at>end-2) { return 0-2; }
+    let length=jpeg_u16be(at);
+    if(length<2 || length>end-at) { return 0-2; }
+    let next=at+length;
+    let body=at+2;
+    if(marker==194) {
+      if(component>=0 || length!=11 || ux_u8(body+7)!=17) { return 0-4; }
+      component=ux_u8(body+6);
+      quantId=ux_u8(body+8);
+    } else if(marker==219) {
+      if(quant!=0) { return 0-4; }
+      let parsed=jpeg_quant_tables(body,next,tables);
+      if(parsed<0) { return parsed; }
+    } else if(marker==196) {
+      let parsed=jpeg_huff_tables(body,next,tables);
+      if(parsed<0) { return parsed; }
+    } else if(marker==221) {
+      if(length!=4) { return 0-2; }
+      interval=jpeg_u16be(body);
+    } else if(marker==218) {
+      if(length!=8 || component<0 || ux_u8(body)!=1 || ux_u8(body+1)!=component) { return 0-4; }
+      let ids=ux_u8(body+2);
+      let first=ux_u8(body+3);
+      let last=ux_u8(body+4);
+      let level=ux_u8(body+5);
+      let high=level/16;
+      if(ids/16>3 || ids%16>3) { return 0-4; }
+      let stage=jpeg_progressive_stages(stages,first,last,level);
+      if(stage<0) { return stage; }
+      let table=ux_u32(tables+32+4*(ids%16));
+      if(first==0) { table=ux_u32(tables+16+4*(ids/16)); }
+      quant=ux_u32(tables+quantId*4);
+      if(quant==0 || (table==0 && (first!=0 || high==0))) { return 0-6; }
+      let cursor=ux_u32_put(reader+JpegBits.next,next);
+      let empty=ux_u32_put(reader+JpegBits.remaining,0);
+      next=jpeg_progressive_blocks(reader,blocks,coeff,blocks,blocks,body+3,table,interval);
+      if(next<0) { return next; }
+    } else if((marker<224 || marker>239) && marker!=254) { return 0-4; }
+    at=next;
+  }
+  return 0-6;
+}
+
+native function JpegDecode_progressiveGray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  if(src<0 || bytes<4 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
+     scratch<0 || scratch%8!=0 || space<1496 || scratch>6291456-space ||
+     jpeg_overlap(src,bytes,out,cap) || jpeg_overlap(src,bytes,scratch,space) || jpeg_overlap(out,cap,scratch,space)) { return 0-1; }
+  let header=JpegHeader_probe(src,bytes,scratch);
+  if(header<0) { return header; }
+  if(ux_u32(header+JpegHeader.frame)!=194 || ux_u32(header+JpegHeader.components)!=1) { return 0-4; }
+  let width=ux_u32(header+JpegHeader.width);
+  let height=ux_u32(header+JpegHeader.height);
+  let cols=(width+7)/8;
+  let rows=(height+7)/8;
+  let count=cols*rows;
+  if(height>cap/(4*width) || count>(space-1496)/256) { return 0-1; }
+  let coefficients=scratch+1496;
+  let quant=jpeg_progressive_gray_scans(src,bytes,scratch,coefficients,count);
+  if(quant<0) { return quant; }
+  let order=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
+  let basis=jpeg_idct_basis(scratch+344);
+  let working=scratch+88;
+  let i=0;
+  while(i<count) {
+    let k=0;
+    while(k<64) {
+      let cell=4*order[k];
+      let value=ux_i32(coefficients+i*256+cell)*ux_u8(quant+k);
+      let saved=ux_i32_put(working+cell,value);
+      k=k+1;
+    }
+    let block=jpeg_idct_block(working,basis,scratch+856,scratch+1368);
+    let x=8*(i%cols);
+    let y=8*(i/cols);
+    let row=0;
+    while(row<8 && y+row<height) {
+      let col=0;
+      while(col<8 && x+col<width) {
+        let value=ux_u8(block+row*8+col);
+        let pixel=ux_u32_put(out+4*((y+row)*width+x+col),4278190080+65793*value);
+        col=col+1;
+      }
+      row=row+1;
+    }
+    i=i+1;
+  }
+  return width*height*4;
+}

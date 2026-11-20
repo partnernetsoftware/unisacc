@@ -1,0 +1,57 @@
+struct Sprite {
+  node: u32;
+  material: u32;
+  centerX: f64;
+  centerY: f64;
+}
+
+native function sprite_valid(sprite:i64) i64 {
+  return sprite>=0 && sprite<=6291456-Sprite.size && sprite%8==0;
+}
+
+native function Sprite_init(sprite:i64,arena:i64,node:i64,material:i64) i64 {
+  if(!sprite_valid(sprite) || material<0 || material>4294967295 ||
+     Object3D_address(arena,node)<0) { return 0-1; }
+  let a=ux_u32_put(sprite+Sprite.node,node);
+  let b=ux_u32_put(sprite+Sprite.material,material);
+  let c=ux_f64_put(sprite+Sprite.centerX,0.5);
+  let d=ux_f64_put(sprite+Sprite.centerY,0.5);
+  return sprite;
+}
+
+native function Sprite_setCenter(sprite:i64,x:f64,y:f64) i64 {
+  if(!sprite_valid(sprite) || x!=x || y!=y) { return 0-1; }
+  let cx=ux_f64_put(sprite+Sprite.centerX,x);
+  let cy=ux_f64_put(sprite+Sprite.centerY,y);
+  return sprite;
+}
+
+native function sprite_axis_scale(matrix:i64) f64 {
+  let x=ux_f64(matrix);
+  let y=ux_f64(matrix+8);
+  let z=ux_f64(matrix+16);
+  return f64_sqrt(x*x+y*y+z*z);
+}
+
+// mode 1 is perspective without attenuation; mode 0 keeps world-derived scale.
+native function Sprite_buildQuad(sprite:i64,arena:i64,view:i64,out:i64,angle:f64,mode:i64,rgba:i64) i64 {
+  if(!sprite_valid(sprite) || view<0 || view>6291456-128 || view%8!=0 || mode<0 || mode>1) { return 0-1; }
+  let node=Object3D_address(arena,ux_u32(sprite+Sprite.node));
+  if(node<0) { return 0-1; }
+  let world=ux_u32(node+Object3D.worldMatrix);
+  let x=ux_f64(world+96);
+  let y=ux_f64(world+104);
+  let z=ux_f64(world+112);
+  let vx=ux_f64(view)*x+ux_f64(view+32)*y+ux_f64(view+64)*z+ux_f64(view+96);
+  let vy=ux_f64(view+8)*x+ux_f64(view+40)*y+ux_f64(view+72)*z+ux_f64(view+104);
+  let vz=ux_f64(view+16)*x+ux_f64(view+48)*y+ux_f64(view+80)*z+ux_f64(view+112);
+  let scale=1.0;
+  if(mode==1) { scale=0.0-vz; }
+  let width=sprite_axis_scale(world)*scale;
+  let height=sprite_axis_scale(world+32)*scale;
+  let dx=(0.5-ux_f64(sprite+Sprite.centerX))*width;
+  let dy=(0.5-ux_f64(sprite+Sprite.centerY))*height;
+  let c=ux_math_cos(angle);
+  let s=ux_math_sin(angle);
+  return GpuSprite_billboard(out,vx+dx*c-dy*s,vy+dx*s+dy*c,vz,width,height,angle,rgba);
+}

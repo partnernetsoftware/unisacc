@@ -1,0 +1,34 @@
+// Interleaved packet rows contain XYZ and RGBA. This path accepts affine
+// transforms only, so the packet's implicit homogeneous W remains one.
+native function MeshPacket_vertices(rows:i64,count:i64,matrix:i64,color:i64,out:i64) i64 {
+  if(count<0 || count>2048 || rows<0 || rows%4!=0 || rows>6291456-count*12 ||
+     matrix<0 || matrix%8!=0 || matrix>6291456-128 || color<0 || color%4!=0 ||
+     color>6291456-16 || out<0 || out%4!=0 || out>6291456-count*28) { return 0-1; }
+  let stop=out+count*28;
+  if(count>0 && ((rows<stop && out<rows+count*12) || (matrix<stop && out<matrix+128) ||
+     (color<stop && out<color+16))) { return 0-1; }
+  if(ux_f64(matrix+24)!=0.0 || ux_f64(matrix+56)!=0.0 ||
+     ux_f64(matrix+88)!=0.0 || ux_f64(matrix+120)!=1.0) { return 0-2; }
+  let i=0;
+  while(i<count) {
+    let src=rows+i*12;
+    let dst=out+i*28;
+    let x=ux_f32(src);
+    let y=ux_f32(src+4);
+    let z=ux_f32(src+8);
+    let j=0;
+    while(j<3) {
+      let lane=matrix+j*8;
+      let value=ux_f64(lane)*x+ux_f64(lane+32)*y+ux_f64(lane+64)*z+ux_f64(lane+96);
+      let saved=ux_f32_put(dst+j*4,value);
+      j=j+1;
+    }
+    let rgba=0;
+    while(rgba<16) {
+      let saved=ux_u32_put(dst+12+rgba,ux_u32(color+rgba));
+      rgba=rgba+4;
+    }
+    i=i+1;
+  }
+  return count;
+}

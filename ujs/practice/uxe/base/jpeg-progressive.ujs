@@ -1,0 +1,138 @@
+// Progressive coefficients remain quantized until all scans have completed.
+// The decoder owns the coefficient block and entropy cursor.
+native function jpeg_progressive_dc_first(reader:i64,table:i64,previous:i64,shift:i64,coeff:i64) i64 {
+  if(shift<0 || shift>13) { return 0-4; }
+  let size=jpeg_huffman(reader,table);
+  if(size<0 || size>11) { return 0-6; }
+  let delta=jpeg_magnitude(reader,size);
+  if(delta==65536) { return 0-6; }
+  let next=previous+delta;
+  let value=next*u32_shl(1,shift);
+  if(next< -32768 || next>32767 || value< -32768 || value>32767) { return 0-6; }
+  let saved=ux_i32_put(coeff,value);
+  return next+65536;
+}
+
+native function jpeg_progressive_dc_refine(reader:i64,shift:i64,coeff:i64) i64 {
+  if(shift<0 || shift>13) { return 0-4; }
+  let place=u32_shl(1,shift);
+  let value=ux_i32(coeff);
+  if(value%(place*2)!=0) { return 0-6; }
+  let bit=jpeg_bit(reader);
+  if(bit<0) { return bit; }
+  let saved=ux_i32_put(coeff,value+bit*place);
+  return 0;
+}
+
+native function jpeg_progressive_eob(reader:i64,run:i64) i64 {
+  let extra=0;
+  let i=0;
+  while(i<run) {
+    let bit=jpeg_bit(reader);
+    if(bit<0) { return bit; }
+    extra=extra*2+bit;
+    i=i+1;
+  }
+  return u32_shl(1,run)+extra;
+}
+
+// Store the first transmission of a single-component AC spectral band.
+// A positive return is the number of following blocks covered by EOBRUN.
+native function jpeg_progressive_ac_first(reader:i64,table:i64,first:i64,last:i64,shift:i64,coeff:i64) i64 {
+  if(first<1 || last<first || last>63 || shift<0 || shift>13) { return 0-4; }
+  let zigzag=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
+  let scale=u32_shl(1,shift);
+  let k=first;
+  while(k<=last) {
+    let symbol=jpeg_huffman(reader,table);
+    if(symbol<0) { return symbol; }
+    if(symbol==240) {
+      k=k+16;
+      if(k>last+1) { return 0-6; }
+    } else {
+      let run=symbol/16;
+      let size=symbol%16;
+      if(size==0) {
+        let count=jpeg_progressive_eob(reader,run);
+        if(count<0) { return count; }
+        return count-1;
+      }
+      k=k+run;
+      if(k>last || size>10) { return 0-6; }
+      let signed=jpeg_magnitude(reader,size);
+      let value=signed*scale;
+      if(signed==65536 || value< -32768 || value>32767) { return 0-6; }
+      let saved=ux_i32_put(coeff+4*zigzag[k],value);
+      k=k+1;
+    }
+  }
+  return 0;
+}
+
+native function jpeg_progressive_adjust(reader:i64,cell:i64,place:i64) i64 {
+  let value=ux_i32(cell);
+  let bit=jpeg_bit(reader);
+  if(bit<0) { return bit; }
+  if(bit==0 || value%(place*2)!=0) { return 0; }
+  let result=value+place;
+  if(value<0) { result=value-place; }
+  if(result< -32768 || result>32767) { return 0-6; }
+  let saved=ux_i32_put(cell,result);
+  return 0;
+}
+
+// Existing nonzero coefficients consume refinement bits even when they are
+// crossed by ZRL, a new coefficient's zero run, or an active EOBRUN.
+native function jpeg_progressive_ac_refine(reader:i64,table:i64,first:i64,last:i64,shift:i64,coeff:i64,eob:i64) i64 {
+  if(first<1 || last<first || last>63 || shift<0 || shift>13 || eob<0 || eob>=32768) { return 0-4; }
+  let zigzag=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
+  let place=u32_shl(1,shift);
+  let k=first;
+  while(k<=last && eob==0) {
+    let symbol=jpeg_huffman(reader,table);
+    if(symbol<0) { return symbol; }
+    let zeros=symbol/16;
+    let size=symbol%16;
+    if(size>1) { return 0-6; }
+    if(size==0 && zeros!=15) {
+      eob=jpeg_progressive_eob(reader,zeros);
+      if(eob<0) { return eob; }
+    } else {
+      let signed=0;
+      if(size==0) { zeros=16; }
+      else {
+        let bit=jpeg_bit(reader);
+        if(bit<0) { return bit; }
+        signed=(bit*2-1)*place;
+      }
+      let done=0;
+      while(k<=last && done==0) {
+        let cell=coeff+4*zigzag[k];
+        if(ux_i32(cell)!=0) {
+          let adjusted=jpeg_progressive_adjust(reader,cell,place);
+          if(adjusted<0) { return adjusted; }
+        } else if(zeros==0) {
+          let saved=ux_i32_put(cell,signed);
+          done=1;
+        } else {
+          zeros=zeros-1;
+          if(size==0 && zeros==0) { done=1; }
+        }
+        k=k+1;
+      }
+      if(!done) { return 0-6; }
+    }
+  }
+  if(eob==0) { return 0; }
+  while(k<=last) {
+    let cell=coeff+4*zigzag[k];
+    if(ux_i32(cell)!=0) {
+      let adjusted=jpeg_progressive_adjust(reader,cell,place);
+      if(adjusted<0) { return adjusted; }
+    }
+    k=k+1;
+  }
+  return eob-1;
+}

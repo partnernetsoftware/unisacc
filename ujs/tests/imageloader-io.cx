@@ -1,0 +1,56 @@
+#pragma unisa use g_math
+#pragma unisa use text.codec
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+static void valid_rgba(unsigned char *p) {
+    const unsigned char body[]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,
+        0,0,0,0,0,0,0,16,73,68,65,84,120,1,1,5,0,250,255,0,255,0,128,255};
+    for(int i=0;i<53;i++) p[i]=body[i];
+    be(p+29,dz_crc32(0,p+12,17));
+    unsigned a=1,b=0;
+    for(int i=48;i<53;i++) { a+=p[i]; b+=a; }
+    be(p+53,(b<<16)+a);
+    be(p+57,dz_crc32(0,p+37,20));
+    be(p+61,0);be(p+65,0x49454e44u);be(p+69,dz_crc32(0,p+65,4));
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","loadingmanager","fileloader","png-header","png-scanlines",
+        "png-bits","png-huffman","png-fixed","png-stored","image-layout","image-file","imageloader",0};
+    const char data[]="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/TsAAAAASUVORK5CYII=";
+    unsigned char bytes[128];int count=tx_b64_decode(data,sizeof data-1,bytes,sizeof bytes);
+    if(count<1) return 2;
+    char setup[1000];int n=tx_snprintf(setup,sizeof setup,"let data=[");
+    for(int i=0;i<count;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",bytes[i]);
+    n+=tx_snprintf(setup+n,sizeof setup-n,"];let size=%d;let i=0;while(i<size){let b=ux_u8_put(256+i,data[i]);i=i+1;}let rgba=[",count);
+    int valid=73;
+    valid_rgba(bytes);
+    for(int i=0;i<valid;i++) n+=tx_snprintf(setup+n,sizeof setup-n,"%s%d",i?",":"",bytes[i]);
+    tx_snprintf(setup+n,sizeof setup-n,"];let valid=%d;i=0;while(i<valid){let b=ux_u8_put(384+i,rgba[i]);i=i+1;}"
+        "let manager=LoadingManager_init(0);let file=FileLoader_init(32,manager);let id=FileLoader_begin(file,64);",valid);
+    const char *cases[]={
+        "return ImageLoader_decodePng(file,512,768,4,1024,4096);",
+        "let r=FileLoader_receive(file,id,200,256,size,64);return ImageLoader_decodePng(file,512,768,4,1024,4096);",
+        "let r=FileLoader_receive(file,id,200,256,size,64);let guard=ux_u32_put(512+ImageResource.width,77);"
+        "let image=ImageLoader_decodePng(file,512,768,4,1024,4096);return ux_u32(512+ImageResource.width);",
+        "let r=FileLoader_receive(file,id,200,256,size,64);let release=FileLoader_release(file,id);"
+        "return ImageLoader_decodePng(file,512,768,4,1024,4096);",
+        "let r=FileLoader_receive(file,id,200,384,valid,64);let image=ImageLoader_decodePng(file,512,768,4,1024,4096);"
+        "if(image<0){return image;}return ux_u32(image+ImageResource.width);",
+        "let r=FileLoader_receive(file,id,200,384,valid,64);let image=ImageLoader_decodePng(file,512,768,4,1024,4096);"
+        "if(image<0){return image;}return ux_u32(image+ImageResource.rowBytes);"
+    };
+    const double gold[]={-1,-4,77,-1,1,4};
+    return g_math_run("G_IO ImageLoader","imageloader",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?1:-1,
+        "let r=FileLoader_receive(file,id,200,256,size,64);let bad=ux_u8_put(256,0);"
+        "return ImageLoader_decodePng(file,512,768,4,1024,4096);");
+}

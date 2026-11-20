@@ -1,0 +1,79 @@
+struct PropertyBinding {
+  arena: u32;
+  handle: u32;
+  field: u32;
+  first: u32;
+  lanes: u32;
+}
+
+native function bind_arena_bytes(arena:i64) i64 {
+  if(arena<0 || arena%8!=0 || arena>6291448) { return 0-1; }
+  let slots=ux_u32(arena);
+  if(slots<1 || slots>(6291448-arena)/424) { return 0-1; }
+  return 8+424*slots;
+}
+
+// Root-local TRS paths only, including a single named component.
+native function PropertyBinding_bind(binding:i64,arena:i64,handle:i64,path:i64,bytes:i64) i64 {
+  let span=bind_arena_bytes(arena);
+  if(span<0 || !animation_span(binding,PropertyBinding.size) || path<0 || bytes<6 || bytes>14 || path>6291456-bytes ||
+     animation_overlap(binding,PropertyBinding.size,arena,span) ||
+     animation_overlap(binding,PropertyBinding.size,path,bytes) || Object3D_address(arena,handle)<0 || ux_u8(path)!=46) { return 0-1; }
+  let words=[112,111,115,105,116,105,111,110,0,0,115,99,97,108,101,0,0,0,0,0,113,117,97,116,101,114,110,105,111,110];
+  let lengths=[8,5,10];
+  let offsets=[Object3D.position,Object3D.scale,Object3D.quaternion];
+  let kind=0;
+  while(kind<3) {
+    let length=lengths[kind];
+    if(bytes==length+1 || bytes==length+4) {
+      let i=0;
+      while(i<length && ux_u8(path+1+i)==words[kind*10+i]) { i=i+1; }
+      if(i==length) {
+        let first=0;
+        let lanes=3;
+        if(kind==2) { lanes=4; }
+        if(bytes==length+4) {
+          let byte=ux_u8(path+length+2);
+          if(ux_u8(path+length+1)!=91 || ux_u8(path+length+3)!=93 || byte<119 || byte>122 ||
+             (byte==119 && lanes!=4)) { return 0-1; }
+          first=byte-120;
+          if(byte==119) { first=3; }
+          lanes=1;
+        }
+        let savedArena=ux_u32_put(binding+PropertyBinding.arena,arena);
+        let savedHandle=ux_u32_put(binding+PropertyBinding.handle,handle);
+        let savedField=ux_u32_put(binding+PropertyBinding.field,offsets[kind]);
+        let savedFirst=ux_u32_put(binding+PropertyBinding.first,first);
+        let savedLanes=ux_u32_put(binding+PropertyBinding.lanes,lanes);
+        return binding;
+      }
+    }
+    kind=kind+1;
+  }
+  return 0-1;
+}
+
+native function PropertyBinding_transfer(binding:i64,buffer:i64,write:i64) i64 {
+  if(!animation_span(binding,PropertyBinding.size)) { return 0-1; }
+  let arena=ux_u32(binding+PropertyBinding.arena);
+  let span=bind_arena_bytes(arena);
+  let first=ux_u32(binding+PropertyBinding.first);
+  let lanes=ux_u32(binding+PropertyBinding.lanes);
+  let field=ux_u32(binding+PropertyBinding.field);
+  let width=3;
+  if(field==Object3D.quaternion) { width=4; }
+  if(span<0 || (field!=Object3D.position && field!=Object3D.scale && field!=Object3D.quaternion) ||
+     lanes<1 || first+lanes>width || buffer%8!=0 || !animation_span(buffer,lanes*8) ||
+     animation_overlap(buffer,lanes*8,arena,span) || animation_overlap(buffer,lanes*8,binding,PropertyBinding.size)) { return 0-1; }
+  let target=Object3D_address(arena,ux_u32(binding+PropertyBinding.handle));
+  if(target<0) { return 0-1; }
+  let property=ux_u32(target+field)+first*8;
+  let i=0;
+  while(i<lanes) {
+    if(write!=0) { let cell=ux_f64_put(property+i*8,ux_f64(buffer+i*8)); }
+    else { let cell=ux_f64_put(buffer+i*8,ux_f64(property+i*8)); }
+    i=i+1;
+  }
+  if(write!=0) { let dirty=ux_u32_put(target+Object3D.dirty,3); }
+  return lanes;
+}

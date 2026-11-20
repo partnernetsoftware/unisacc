@@ -1,0 +1,99 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void append(unsigned char *file,int *size,const unsigned char *bytes,int count) {
+    for(int i=0;i<count;i++) file[(*size)++]=bytes[i];
+}
+
+static void entropy(unsigned char *file,int *size,const char *bits) {
+    unsigned byte=0;
+    int width=0;
+    for(int i=0;bits[i] || width;i++) {
+        const int remaining=bits[i]!=0;
+        byte=(byte<<1)|(bits[i]!='0');
+        if(++width==8) {
+            file[(*size)++]=byte;
+            if(byte==255) file[(*size)++]=0;
+            byte=0;width=0;
+        }
+        if(!remaining) i--;
+    }
+}
+
+static int build(unsigned char *file,int sampled,int *rst) {
+    const unsigned char soi[]={255,216,255,219,0,67,0};
+    const unsigned char sof[]={255,194,0,17,8,0,sampled?17:1,0,sampled?17:1,3,
+                               1,sampled?34:17,0,2,17,0,3,17,0,255,196,0,40};
+    int size=0;
+    append(file,&size,soi,sizeof soi);
+    for(int i=0;i<64;i++) file[size++]=8;
+    append(file,&size,sof,sizeof sof);
+    file[size++]=0;file[size++]=1;file[size++]=1;
+    for(int i=0;i<14;i++) file[size++]=0;
+    file[size++]=0;file[size++]=6;
+    file[size++]=16;file[size++]=1;file[size++]=1;
+    for(int i=0;i<14;i++) file[size++]=0;
+    file[size++]=1;file[size++]=0;
+    const unsigned char dri[]={255,221,0,4,0,1};
+    if(sampled) append(file,&size,dri,sizeof dri);
+    const unsigned char scan[]={255,218,0,12,3,1,0,2,0,3,0,0,0,0};
+    append(file,&size,scan,sizeof scan);
+    if(!sampled) entropy(file,&size,"01010000010011111");
+    else {
+        entropy(file,&size,"0000101000000");
+        *rst=size+1;
+        for(int i=0;i<3;i++) {
+            file[size++]=255;file[size++]=208+i;
+            entropy(file,&size,"000000");
+        }
+        append(file,&size,dri,sizeof dri);
+        file[size-1]=0;
+    }
+    for(int i=1;i<=3;i++) {
+        const unsigned char ac[]={255,218,0,8,1,i,0,1,63,0};
+        append(file,&size,ac,sizeof ac);
+        if(!sampled) entropy(file,&size,"10");
+        else if(i==1) entropy(file,&size,"10101010101010100110");
+        else entropy(file,&size,"10101010");
+    }
+    file[size++]=255;file[size++]=217;
+    return size;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","jpeg-header","jpeg-entropy","jpeg-idct","jpeg-gray","jpeg-color",
+        "jpeg-progressive","jpeg-progressive-gray","jpeg-progressive-color",0};
+    unsigned char image[230];
+    char setup[2400];
+    int used=0;
+    int rst=0;
+    for(int v=0;v<2;v++) {
+        int size=build(image,v,&rst);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;let bytes%d=[",v,size,v);
+        for(int i=0;i<size;i++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",i?",":"",image[i]);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"];let i%d=0;while(i%d<n%d){let a=ux_u8_put(%d+i%d,bytes%d[i%d]);i%d=i%d+1;}",
+            v,v,v,v*256,v,v,v,v,v);
+    }
+    tx_snprintf(setup+used,sizeof setup-used,"let restart=%d;",256+rst);
+    #define RGB "let result=JpegDecode_progressiveColor(0,n0,1024,4,4096,8192);"
+    #define GRID "let result=JpegDecode_progressiveColor(256,n1,1024,1156,4096,12288);"
+    const char *cases[]={
+        RGB "return 0.0+result;",
+        RGB "return 0.0+ux_u8(1024);",
+        RGB "return 0.0+ux_u8(1025);",
+        RGB "return 0.0+ux_u8(1026);",
+        GRID "return 0.0+result;",
+        GRID "return 0.0+ux_u8(1026+15*4);",
+        GRID "return 0.0+ux_u8(1026+16*17*4);",
+        GRID "return 0.0+ux_u8(1024+288*4);",
+        "let bad=ux_u8_put(restart,210);" GRID "return 0.0+result;",
+        "let guard=ux_u8_put(1024,79);let bad=ux_u8_put(restart,210);" GRID "return 0.0+ux_u8(1024);",
+        "return 0.0+JpegDecode_progressiveColor(256,n1,1024,1156,4096,2048);"
+    };
+    const double gold[]={4,83,140,185,1156,171,142,129,-6,79,-1};
+    return g_wasm_batch("G_IO JpegProgressiveColor","jpeg-progressive-color",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?7:-1,GRID "return 0.0+ux_u8(1024+287*4);");
+}

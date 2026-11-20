@@ -1,0 +1,83 @@
+struct GltfAccessor {
+  bytes: u32;
+  count: u32;
+  stride: u32;
+  elementBytes: u32;
+  component: u32;
+  lanes: u32;
+  normalized: u32;
+}
+
+native function gltf_shape(at:i64,end:i64) i64 {
+  let close=json_scan_string(at,end);
+  if(close<0) { return 0-1; }
+  if(close-at==8 && ux_u32(at+1)==1279345491 && ux_u8(at+5)==65 && ux_u8(at+6)==82) { return 1; }
+  if(close-at!=6) { return 0-1; }
+  let lanes=ux_u8(at+4)-48;
+  if(lanes<2 || lanes>4) { return 0-1; }
+  let prefix=ux_u8(at+1)+256*ux_u8(at+2)+65536*ux_u8(at+3);
+  if(prefix==4408662) { return lanes; }
+  if(prefix==5521741) { return lanes*16; }
+  return 0-1;
+}
+
+native function GltfLoader_accessor(glb:i64,index:i64,out:i64,key:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || !loading_span(out,GltfAccessor.size) || !loading_span(key,16) ||
+     !file_disjoint(glb,GlbResource.size,out,GltfAccessor.size) || !file_disjoint(glb,GlbResource.size,key,16) ||
+     !file_disjoint(out,GltfAccessor.size,key,16)) { return 0-1; }
+  let json=ux_u32(glb+GlbResource.json);
+  let jsonBytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let binBytes=ux_u32(glb+GlbResource.binBytes);
+  if(json>6291456-jsonBytes || bin<1 || bin>6291456-binBytes ||
+     !file_disjoint(json,jsonBytes,key,16) || !file_disjoint(json,jsonBytes,out,GltfAccessor.size) ||
+     !file_disjoint(bin,binBytes,key,16) || !file_disjoint(bin,binBytes,out,GltfAccessor.size)) { return 0-1; }
+  let end=json+jsonBytes;
+  let accessor=LoaderJson_item(LoaderJson_find(json,end,key,1701012321,1919906675,115,9),end,index);
+  if(accessor<0) { return 0-2; }
+  if(LoaderJson_find(accessor,end,key,1918988403,25971,0,6)!=0-2) { return 0-7; }
+  let viewIndex=LoaderJson_uint(LoaderJson_find(accessor,end,key,1717990754,1767273061,30565,10),end,0-1);
+  let relative=LoaderJson_uint(LoaderJson_find(accessor,end,key,1702132066,1936090703,29797,10),end,0);
+  let count=LoaderJson_uint(LoaderJson_find(accessor,end,key,1853189987,116,0,5),end,0-1);
+  let laneShape=gltf_shape(LoaderJson_find(accessor,end,key,1701869940,0,0,4),end);
+  let tail=ux_u8_put(key+12,101);
+  let component=LoaderJson_uint(LoaderJson_find(accessor,end,key,1886220131,1852141167,1886999668,13),end,0-1);
+  if(viewIndex<0 || relative<0 || count<1 || laneShape<0 || component<5120 || component>5126 || component==5124) { return 0-2; }
+  let unit=1;
+  if(component==5122 || component==5123) { unit=2; }
+  if(component>=5125) { unit=4; }
+  let normalized=0;
+  let norm=LoaderJson_find(accessor,end,key,1836216174,2053729377,25701,10);
+  if(norm>=0) {
+    let token=ux_u8(norm);
+    if(token!=116 && token!=102) { return 0-2; }
+    normalized=token==116;
+    if(normalized && unit==4) { return 0-2; }
+  }
+  let lanes=laneShape;
+  let element=unit*lanes;
+  let alignment=unit;
+  if(laneShape>=32) {
+    let columns=laneShape/16;
+    lanes=columns*columns;
+    element=((unit*columns+3)/4*4)*columns;
+    alignment=4;
+  }
+  let view=LoaderJson_item(LoaderJson_find(json,end,key,1717990754,1767273061,7567205,11),end,viewIndex);
+  if(view<0 || LoaderJson_uint(LoaderJson_find(view,end,key,1717990754,29285,0,6),end,0-1)!=0) { return 0-3; }
+  let offset=LoaderJson_uint(LoaderJson_find(view,end,key,1702132066,1936090703,29797,10),end,0);
+  let size=LoaderJson_uint(LoaderJson_find(view,end,key,1702132066,1735288140,26740,10),end,0-1);
+  let strideToken=LoaderJson_find(view,end,key,1702132066,1769108563,25956,10);
+  let stride=LoaderJson_uint(strideToken,end,element);
+  if(offset<0 || size<element || offset>binBytes-size || stride<element || stride>252 ||
+     (strideToken>=0 && stride%4!=0) || relative%unit!=0 || (offset+relative)%alignment!=0 ||
+     relative>size-element || count-1>(size-relative-element)/stride) { return 0-3; }
+  let a=ux_u32_put(out+GltfAccessor.bytes,bin+offset+relative);
+  let b=ux_u32_put(out+GltfAccessor.count,count);
+  let c=ux_u32_put(out+GltfAccessor.stride,stride);
+  let d=ux_u32_put(out+GltfAccessor.elementBytes,element);
+  let e=ux_u32_put(out+GltfAccessor.component,component);
+  let f=ux_u32_put(out+GltfAccessor.lanes,lanes);
+  let g=ux_u32_put(out+GltfAccessor.normalized,normalized);
+  return out;
+}

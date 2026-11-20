@@ -1,0 +1,111 @@
+struct LOD {
+  node: u32;
+  levels: u32;
+  count: u32;
+  capacity: u32;
+  current: u32;
+}
+
+struct LODLevel {
+  node: u32;
+  distance: f64;
+  hysteresis: f64;
+}
+
+native function lod_valid(lod:i64) i64 {
+  return lod>=0 && lod<=6291456-LOD.size && lod%4==0;
+}
+
+native function LOD_init(lod:i64,arena:i64,node:i64,levels:i64,capacity:i64) i64 {
+  if(!lod_valid(lod) || levels<0 || levels>6291456 || levels%8!=0 ||
+    capacity<0 || capacity>(6291456-levels)/LODLevel.size ||
+    (capacity>0 && lod<levels+capacity*LODLevel.size && levels<lod+LOD.size) ||
+    Object3D_address(arena,node)<0) { return 0-1; }
+  let a=ux_u32_put(lod+LOD.node,node);
+  let b=ux_u32_put(lod+LOD.levels,levels);
+  let c=ux_u32_put(lod+LOD.count,0);
+  let d=ux_u32_put(lod+LOD.capacity,capacity);
+  let e=ux_u32_put(lod+LOD.current,0);
+  return lod;
+}
+
+native function LOD_addLevel(lod:i64,arena:i64,node:i64,distance:f64,hysteresis:f64) i64 {
+  if(!lod_valid(lod) || distance!=distance || hysteresis!=hysteresis) { return 0-1; }
+  let count=ux_u32(lod+LOD.count);
+  if(count>=ux_u32(lod+LOD.capacity)) { return 0-2; }
+  let levels=ux_u32(lod+LOD.levels);
+  if(distance<0.0) { distance=0.0-distance; }
+  let added=Object3D_add(arena,ux_u32(lod+LOD.node),node);
+  if(added<0) { return added; }
+  let i=count;
+  while(i>0 && distance<ux_f64(levels+(i-1)*LODLevel.size+LODLevel.distance)) {
+    let row=levels+i*LODLevel.size;
+    let previous=row-LODLevel.size;
+    let a=ux_u32_put(row+LODLevel.node,ux_u32(previous+LODLevel.node));
+    let b=ux_f64_put(row+LODLevel.distance,ux_f64(previous+LODLevel.distance));
+    let c=ux_f64_put(row+LODLevel.hysteresis,ux_f64(previous+LODLevel.hysteresis));
+    i=i-1;
+  }
+  let row=levels+i*LODLevel.size;
+  let a=ux_u32_put(row+LODLevel.node,node);
+  let b=ux_f64_put(row+LODLevel.distance,distance);
+  let c=ux_f64_put(row+LODLevel.hysteresis,hysteresis);
+  let published=ux_u32_put(lod+LOD.count,count+1);
+  return lod;
+}
+
+native function lod_select(lod:i64,arena:i64,distance:f64) i64 {
+  if(!lod_valid(lod) || distance!=distance) { return 0-1; }
+  let count=ux_u32(lod+LOD.count);
+  if(count==0) { return 0-1; }
+  let rows=ux_u32(lod+LOD.levels);
+  let i=1;
+  while(i<count) {
+    let row=rows+i*LODLevel.size;
+    let threshold=ux_f64(row+LODLevel.distance);
+    let object=Object3D_address(arena,ux_u32(row+LODLevel.node));
+    if(object<0) { return 0-1; }
+    if(ux_u32(object+Object3D.visible)!=0) {
+      threshold=threshold-threshold*ux_f64(row+LODLevel.hysteresis);
+    }
+    if(distance<threshold) { return i-1; }
+    i=i+1;
+  }
+  return i-1;
+}
+
+native function LOD_getCurrentLevel(lod:i64) i64 {
+  if(!lod_valid(lod)) { return 0-1; }
+  return ux_u32(lod+LOD.current);
+}
+
+native function LOD_getObjectForDistance(lod:i64,arena:i64,distance:f64) i64 {
+  let index=lod_select(lod,arena,distance);
+  if(index<0) { return 0; }
+  return ux_u32(ux_u32(lod+LOD.levels)+index*LODLevel.size+LODLevel.node);
+}
+
+native function LOD_update(lod:i64,arena:i64,camera:i64,zoom:f64) i64 {
+  if(!lod_valid(lod) || zoom<=0.0 || zoom!=zoom) { return 0-1; }
+  let count=ux_u32(lod+LOD.count);
+  if(count<=1) { return lod; }
+  let own=Object3D_address(arena,ux_u32(lod+LOD.node));
+  let eye=Object3D_address(arena,camera);
+  if(own<0 || eye<0) { return 0-1; }
+  let a=ux_u32(own+Object3D.worldMatrix);
+  let b=ux_u32(eye+Object3D.worldMatrix);
+  let x=ux_f64(a+96)-ux_f64(b+96);
+  let y=ux_f64(a+104)-ux_f64(b+104);
+  let z=ux_f64(a+112)-ux_f64(b+112);
+  let at=lod_select(lod,arena,f64_sqrt(x*x+y*y+z*z)/zoom);
+  if(at<0) { return at; }
+  let levels=ux_u32(lod+LOD.levels);
+  let i=0;
+  while(i<count) {
+    let node=ux_u32(levels+i*LODLevel.size+LODLevel.node);
+    let visible=Object3D_setVisible(arena,node,i==at);
+    i=i+1;
+  }
+  let chosen=ux_u32_put(lod+LOD.current,at);
+  return lod;
+}
