@@ -1,14 +1,23 @@
 // Samples a caller-supplied UJS closure returning an f64 position view.
-function Curve_getPoints(curve_sample,...curve_points_args) {
+function curve_collect(curve_sample,...curve_points_args) {
   let curve_out=curve_points_args[0];
   let curve_divisions=curve_points_args[1];
   let curve_dims=curve_points_args[2];
+  let curve_lengths=curve_points_args[3];
+  let curve_arc_steps=curve_points_args[4];
   let curve_count=0-1;
+  let curve_arc_valid=curve_arc_steps==0 ||
+    (curve_arc_steps>0 && curve_lengths>=0 && curve_lengths<=6291456 &&
+     curve_arc_steps<(6291456-curve_lengths)/8 &&
+     (curve_lengths+8*(curve_arc_steps+1)<=curve_out ||
+      curve_lengths>=curve_out+8*curve_dims*(curve_divisions+1)));
   if(curve_divisions>0 && curve_dims>=2 && curve_dims<=3 && curve_out>=0 &&
-     curve_out<=6291456 && curve_divisions+1<=(6291456-curve_out)/(8*curve_dims)) {
+     curve_out<=6291456 && curve_divisions<(6291456-curve_out)/(8*curve_dims) && curve_arc_valid) {
     curve_count=0;
     while(curve_count<=curve_divisions) {
-      let curve_ptr=curve_sample(curve_count*1.0/curve_divisions);
+      let t=curve_count*1.0/curve_divisions;
+      if(curve_arc_steps!=0) { t=Curve_getUtoTmapping(curve_lengths,curve_arc_steps,t); }
+      let curve_ptr=curve_sample(t);
       let curve_axis=0;
       while(curve_axis<curve_dims) {
         let curve_written=ux_f64_put(curve_out+8*(curve_count*curve_dims+curve_axis),
@@ -19,6 +28,19 @@ function Curve_getPoints(curve_sample,...curve_points_args) {
     }
   }
   return curve_count;
+}
+
+function Curve_getPoints(curve_sample,...curve_points_args) {
+  return curve_collect(curve_sample,curve_points_args[0],curve_points_args[1],curve_points_args[2],0,0);
+}
+
+function Curve_getSpacedPoints(curve_sample,...curve_points_args) {
+  let count=0-1;
+  if(curve_points_args[4]>0) {
+    count=curve_collect(curve_sample,curve_points_args[0],curve_points_args[1],curve_points_args[2],
+      curve_points_args[3],curve_points_args[4]);
+  }
+  return count;
 }
 
 function Curve_getLengths(curve_length_sample,...curve_length_args) {
@@ -107,4 +129,11 @@ function Curve_getTangent(curve_tangent_sample,...curve_tangent_args) {
   let dy=ux_f64_put(out+8,y/distance);
   if(dimensions==3) { let dz=ux_f64_put(out+16,z/distance); }
   return out;
+}
+
+function Curve_getTangentAt(curve_sample,...curve_tangent_args) {
+  let lengths=f64_floor_i64(curve_tangent_args[3]);
+  let steps=f64_floor_i64(curve_tangent_args[4]);
+  let t=Curve_getUtoTmapping(lengths,steps,curve_tangent_args[2]);
+  return Curve_getTangent(curve_sample,curve_tangent_args[0],curve_tangent_args[1],t);
 }
