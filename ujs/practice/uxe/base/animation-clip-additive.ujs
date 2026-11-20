@@ -28,12 +28,12 @@ native function additive_clip_tracks(clip:i64,kinds:i64,arena:i64,space:i64,targ
   while(i<count) {
     let track=ux_u32(tracks+i*4);
     let kind=ux_u32(kinds+i*4);
-    if(kind<1 || kind>6 || subclip_track(track,arena,space,target)<0) { return 0-1; }
+    if(kind<1 || kind==7 || kind==8 || kind>12 || subclip_track(track,arena,space,target)<0) { return 0-1; }
     let j=0;
     while(j<i) {
       let earlier=ux_u32(tracks+j*4);
       if(ux_u32(track+KeyframeTrack.samples)==ux_u32(earlier+KeyframeTrack.samples) ||
-         (kind==ux_u32(kinds+j*4) && additive_name_equal(track,earlier))) { return 0-1; }
+         (kind%8==ux_u32(kinds+j*4)%8 && additive_name_equal(track,earlier))) { return 0-1; }
       j=j+1;
     }
     i=i+1;
@@ -41,9 +41,49 @@ native function additive_clip_tracks(clip:i64,kinds:i64,arena:i64,space:i64,targ
   return count;
 }
 
+native function animation_additive_scratch(kinds:i64,count:i64) i64 {
+  let i=0;
+  while(i<count) {
+    if(ux_u32(kinds+i*4)>=9) { return 624; }
+    i=i+1;
+  }
+  return 352;
+}
+
+native function animation_additive_track(view:i64,reference:i64,mode:i64,kind:i64,referenceKind:i64,
+                                         time:f64,out:i64,work:i64) i64 {
+  let stride=ux_u32(view+AnimationSamples.stride);
+  let refStride=ux_u32(reference+AnimationSamples.stride);
+  let size=ux_u32(view+AnimationSamples.count)*stride*4;
+  let quaternion=kind%8==4;
+  let route=1+quaternion;
+  if(kind<9 && referenceKind<9) {
+    return AnimationUtils_trackDelta(view,reference,mode,route,time,out,size,work);
+  }
+  if(kind<9) {
+    if(refStride!=3*stride || GltfCubic_evaluate(reference,time,work,quaternion)<0) { return 0-1; }
+    if(quaternion) { return AnimationUtils_quatDelta(view,work,out,size,work+256); }
+    return AnimationUtils_numericDelta(view,work,out,size);
+  }
+  if(referenceKind<9) {
+    if(stride!=3*refStride || animation_ref_sample(reference,mode,route,time,work)<0) { return 0-1; }
+    let fake=work+352;
+    let times=work+368;
+    let values=work+372;
+    let t=ux_f32_put(times,0.0);
+    let copy=uxe_copy_record(values+refStride*4,work,refStride*4);
+    let ready=AnimationSamples_init(fake,times,values,1,stride);
+    if(ready<0) { return ready; }
+    reference=ready;
+    time=0.0;
+  }
+  if(quaternion) { return AnimationUtils_gltfQuatDelta(view,reference,time,out,size,work); }
+  return AnimationUtils_gltfNumDelta(view,reference,time,out,size,work);
+}
+
 // Kinds 1..4 are number, vector, color and quaternion. Bool/string kinds are
-// skipped. Arena output replaces the target views only after every track
-// succeeds. Original bytes and unmatched tracks keep their existing owners.
+// skipped. Adding 8 to a numeric kind declares glTF cubic sample layout.
+// Arena output replaces target views only after every track succeeds.
 native function AnimationUtils_makeClipAdditive(target:i64,reference:i64,request:i64,arena:i64,space:i64) i64 {
   if(!animation_span(target,AnimationClip.size) || !animation_span(reference,AnimationClip.size) ||
      !animation_span(request,AnimationAdditiveRequest.size) || request%8!=0 ||
@@ -63,8 +103,11 @@ native function AnimationUtils_makeClipAdditive(target:i64,reference:i64,request
   let count=additive_clip_tracks(target,targetKinds,arena,space,target);
   let refCount=additive_clip_tracks(reference,refKinds,arena,space,target);
   if(count<0 || refCount<0) { return 0-1; }
-  let stage=arena+352;
-  let needed=352+count*8;
+  let workSize=animation_additive_scratch(targetKinds,count);
+  let referenceWork=animation_additive_scratch(refKinds,refCount);
+  if(referenceWork>workSize) { workSize=referenceWork; }
+  let stage=arena+workSize;
+  let needed=workSize+count*8;
   if(needed>space) { return 0-2; }
   let targetTracks=ux_u32(target+AnimationClip.tracks);
   let refTracks=ux_u32(reference+AnimationClip.tracks);
@@ -74,17 +117,16 @@ native function AnimationUtils_makeClipAdditive(target:i64,reference:i64,request
     let view=ux_u32(track+KeyframeTrack.samples);
     let kind=ux_u32(targetKinds+i*4);
     let output=0;
-    if(kind<=4) {
+    if(kind%8<=4) {
       let j=0;
       while(j<refCount && output==0) {
         let other=ux_u32(refTracks+j*4);
-        if(ux_u32(refKinds+j*4)==kind && additive_name_equal(track,other)) {
+        let refKind=ux_u32(refKinds+j*4);
+        if(refKind%8==kind%8 && additive_name_equal(track,other)) {
           let size=ux_u32(view+AnimationSamples.count)*ux_u32(view+AnimationSamples.stride)*4;
           if(size>space-needed) { return 0-2; }
-          let route=1;
-          if(kind==4) { route=2; }
-          let built=AnimationUtils_trackDelta(view,ux_u32(other+KeyframeTrack.samples),
-            ux_u32(other+KeyframeTrack.interpolation),route,time,arena+needed,size,arena);
+          let built=animation_additive_track(view,ux_u32(other+KeyframeTrack.samples),
+            ux_u32(other+KeyframeTrack.interpolation),kind,refKind,time,arena+needed,arena);
           if(built!=size) { return 0-3; }
           output=arena+needed;
           needed=needed+size;

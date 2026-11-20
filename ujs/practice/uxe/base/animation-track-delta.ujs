@@ -1,3 +1,20 @@
+native function animation_ref_sample(reference:i64,mode:i64,kind:i64,time:f64,work:i64) i64 {
+  let lanes=animation_sample_output(reference,work);
+  if(lanes<1 || (kind==2 && lanes!=4)) { return 0-1; }
+  let count=ux_u32(reference+AnimationSamples.count);
+  let times=ux_u32(reference+AnimationSamples.times);
+  let values=ux_u32(reference+AnimationSamples.values);
+  if(time<=ux_f32(times)) { return uxe_copy_record(work,values,lanes*4); }
+  if(time>=ux_f32(times+(count-1)*4)) {
+    return uxe_copy_record(work,values+(count-1)*lanes*4,lanes*4);
+  }
+  if(mode==2300) { return DiscreteInterpolant_evaluate(reference,time,work); }
+  if(mode==2302 && kind==1) { return CubicInterpolant_evaluate(reference,time,work,2400,2400); }
+  if(mode==2301 && kind==2) { return QuatLinearInterpolant_evaluate(reference,time,work,work+256); }
+  if(mode==2301) { return LinearInterpolant_evaluate(reference,time,work); }
+  return 0-1;
+}
+
 // Sample the matching reference track and make the target samples relative
 // to it. Kind 1 selects numeric lanes; kind 2 selects quaternion lanes.
 native function AnimationUtils_trackDelta(target:i64,reference:i64,mode:i64,kind:i64,
@@ -22,15 +39,7 @@ native function AnimationUtils_trackDelta(target:i64,reference:i64,mode:i64,kind
      animation_overlap(out,capacity,reference,AnimationSamples.size) ||
      animation_overlap(out,capacity,sourceTimes,sourceCount*4) ||
      animation_overlap(out,capacity,sourceValues,sourceCount*lanes*4)) { return 0-1; }
-  let sample=0-1;
-  if(time<=ux_f32(sourceTimes)) { sample=uxe_copy_record(work,sourceValues,lanes*4); }
-  else if(time>=ux_f32(sourceTimes+(sourceCount-1)*4)) {
-    sample=uxe_copy_record(work,sourceValues+(sourceCount-1)*lanes*4,lanes*4);
-  }
-  else if(mode==2300) { sample=DiscreteInterpolant_evaluate(reference,time,work); }
-  else if(mode==2302) { sample=CubicInterpolant_evaluate(reference,time,work,2400,2400); }
-  else if(kind==2) { sample=QuatLinearInterpolant_evaluate(reference,time,work,work+256); }
-  else { sample=LinearInterpolant_evaluate(reference,time,work); }
+  let sample=animation_ref_sample(reference,mode,kind,time,work);
   if(sample<0) { return sample; }
   if(kind==2) { return AnimationUtils_quatDelta(target,work,out,capacity,work+256); }
   return AnimationUtils_numericDelta(target,work,out,capacity);
