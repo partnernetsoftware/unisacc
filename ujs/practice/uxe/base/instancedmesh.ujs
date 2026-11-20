@@ -1,0 +1,132 @@
+struct InstancedMesh {
+  mesh: u32;
+  matrices: u32;
+  colors: u32;
+  count: u32;
+  capacity: u32;
+  hasColors: u32;
+}
+
+native function instance_overlaps(a:i64,a_bytes:i64,b:i64,b_bytes:i64) i64 {
+  return a_bytes>0 && b_bytes>0 && a<b+b_bytes && b<a+a_bytes;
+}
+
+native function InstancedMesh_init(instance:i64,mesh:i64,matrices:i64,colors:i64,count:i64) i64 {
+  if(instance<0 || instance>6291456-InstancedMesh.size || instance%4!=0 ||
+     !mesh_valid(mesh) || matrices<0 || matrices>6291456 || matrices%4!=0 ||
+     colors<0 || colors>6291456 || colors%4!=0 || count<0 ||
+     count>(6291456-matrices)/64 || count>(6291456-colors)/12) { return 0-1; }
+  if(instance_overlaps(instance,InstancedMesh.size,mesh,Mesh.size) ||
+     instance_overlaps(instance,InstancedMesh.size,matrices,count*64) ||
+     instance_overlaps(instance,InstancedMesh.size,colors,count*12) ||
+     instance_overlaps(mesh,Mesh.size,matrices,count*64) ||
+     instance_overlaps(mesh,Mesh.size,colors,count*12) ||
+     instance_overlaps(matrices,count*64,colors,count*12)) { return 0-1; }
+  let a=ux_u32_put(instance+InstancedMesh.mesh,mesh);
+  let b=ux_u32_put(instance+InstancedMesh.matrices,matrices);
+  let c=ux_u32_put(instance+InstancedMesh.colors,colors);
+  let d=ux_u32_put(instance+InstancedMesh.count,count);
+  let e=ux_u32_put(instance+InstancedMesh.capacity,count);
+  let f=ux_u32_put(instance+InstancedMesh.hasColors,0);
+  let i=0;
+  while(i<count*16) {
+    let value=(i%16%5==0)*1.0;
+    let written=ux_f32_put(matrices+4*i,value);
+    i=i+1;
+  }
+  return instance;
+}
+
+native function instance_valid(instance:i64) i64 {
+  return instance>=0 && instance<=6291456-InstancedMesh.size && instance%4==0;
+}
+
+native function InstancedMesh_setCount(instance:i64,count:i64) i64 {
+  if(!instance_valid(instance) || count<0 || count>ux_u32(instance+InstancedMesh.capacity)) { return 0-1; }
+  let written=ux_u32_put(instance+InstancedMesh.count,count);
+  return instance;
+}
+
+native function instance_matrix_at(instance:i64,index:i64) i64 {
+  if(!instance_valid(instance) || index<0 || index>=ux_u32(instance+InstancedMesh.count)) { return 0-1; }
+  return ux_u32(instance+InstancedMesh.matrices)+64*index;
+}
+
+native function InstancedMesh_getMatrixAt(instance:i64,index:i64,out:i64) i64 {
+  let source=instance_matrix_at(instance,index);
+  if(source<0 || out<0 || out>6291456-128 || out%8!=0 ||
+     instance_overlaps(source,64,out,128)) { return 0-1; }
+  let i=0;
+  while(i<16) {
+    let value=ux_f64_put(out+8*i,ux_f32(source+4*i));
+    i=i+1;
+  }
+  return out;
+}
+
+native function InstancedMesh_setMatrixAt(instance:i64,index:i64,source:i64) i64 {
+  let out=instance_matrix_at(instance,index);
+  if(out<0 || source<0 || source>6291456-128 || source%8!=0 ||
+     instance_overlaps(source,128,out,64)) { return 0-1; }
+  let i=0;
+  while(i<16) {
+    let value=ux_f32_put(out+4*i,ux_f64(source+8*i));
+    i=i+1;
+  }
+  return instance;
+}
+
+native function InstancedMesh_setColorAt(instance:i64,index:i64,r:f64,g:f64,b:f64) i64 {
+  if(!instance_valid(instance) || index<0 || index>=ux_u32(instance+InstancedMesh.count)) { return 0-1; }
+  let rows=ux_u32(instance+InstancedMesh.colors);
+  if(ux_u32(instance+InstancedMesh.hasColors)==0) {
+    let i=0;
+    while(i<3*ux_u32(instance+InstancedMesh.capacity)) {
+      let zero=ux_f32_put(rows+4*i,0.0);
+      i=i+1;
+    }
+    let published=ux_u32_put(instance+InstancedMesh.hasColors,1);
+  }
+  let at=rows+index*12;
+  let red=ux_f32_put(at,r);
+  let green=ux_f32_put(at+4,g);
+  let blue=ux_f32_put(at+8,b);
+  return instance;
+}
+
+native function InstancedMesh_getColorAt(instance:i64,index:i64,out:i64) i64 {
+  if(!instance_valid(instance) || index<0 || index>=ux_u32(instance+InstancedMesh.count) ||
+     ux_u32(instance+InstancedMesh.hasColors)==0 || out<0 || out>6291456-24 || out%8!=0) { return 0-1; }
+  let at=ux_u32(instance+InstancedMesh.colors)+12*index;
+  let r=ux_f32(at);
+  let g=ux_f32(at+4);
+  let b=ux_f32(at+8);
+  let red=ux_f64_put(out,r);
+  let green=ux_f64_put(out+8,g);
+  let blue=ux_f64_put(out+16,b);
+  return out;
+}
+
+native function InstancedMesh_computeBox(instance:i64,local:i64,out:i64,scratch:i64) i64 {
+  if(!instance_valid(instance) || local<0 || local>6291456-48 || local%8!=0 ||
+     out<0 || out>6291456-48 || out%8!=0 || scratch<0 || scratch>6291456-200 || scratch%8!=0 ||
+     instance_overlaps(local,48,out,48) || instance_overlaps(local,48,scratch,200) ||
+     instance_overlaps(out,48,scratch,200) ||
+     instance_overlaps(instance,InstancedMesh.size,out,48) ||
+     instance_overlaps(instance,InstancedMesh.size,scratch,200)) { return 0-1; }
+  let n=ux_u32(instance+InstancedMesh.count);
+  let matrices=ux_u32(instance+InstancedMesh.matrices);
+  if(instance_overlaps(matrices,64*n,out,48) ||
+     instance_overlaps(matrices,64*n,scratch,200)) { return 0-1; }
+  let empty=Box3_makeEmpty(out);
+  let i=0;
+  while(i<n) {
+    let matrix=InstancedMesh_getMatrixAt(instance,i,scratch);
+    if(matrix<0) { return matrix; }
+    let bounds=Box3_copy(scratch+128,local);
+    let transformed=Box3_applyMatrix4(bounds,matrix,scratch+176);
+    let merged=Box3_union(out,transformed);
+    i=i+1;
+  }
+  return out;
+}
