@@ -1,6 +1,6 @@
-/* tools/check-chain-preflight.cx -- verify tools/flows/chain-preflight.tsv schema and tools/chain-preflight.cx
- * root-types, snap-cache-types (M2) and parse2-bind (M3) checks (regular files required; parse2 --locations recipe
- * must FAIL with file and line on clone-push target mismatch such as ce76ca096d; shadow mode emits verdict=FAIL with rc 0).
+/* tools/check-chain-preflight.cx -- verify tools/flows/chain-preflight.tsv schema (structure only on live table:
+ * columns, unique node names, timeout_s<=55, valid patterns, M2/M3/M4 node presence; never executes live heavy nodes)
+ * and tools/chain-preflight.cx root-types, snap-cache-types (M2) and parse2-bind (M3) checks on fixture tables.
  * Marker: CHECK_CHAIN_PREFLIGHT<TAB>failed=N */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
@@ -12,7 +12,7 @@
 #pragma unisa use cxlib.ckrun
 
 static int failed = 0, assertions = 0;
-static char fx[1024];
+static char fx[1024], pf_bin[1200];
 
 static void pf_ck(int ok, const char *name, const char *detail) {
     assertions++;
@@ -53,19 +53,35 @@ static void pf_write(const char *dir, const char *rel, const char *content) {
 
 static int run_pf(const char *args, char *out, int cap) {
     char cmd[2048];
-    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-preflight.cx -- %s", args)) return -1;
+    if (cx_fmt(cmd, sizeof cmd, "'%s' -- %s", pf_bin, args)) return -1;
     return ckk_sh("CHECK_CHAIN_PREFLIGHT", cmd, out, cap);
 }
 
 int main(void) {
     char out[4096], arg[1800], root_ok[1200], root_dir[1200], root_dangling[1200], root_sym[1200];
-    char snap_base[1200], snap_entry[1200], p2repo[1200], t_ext[1200], t_bad1[1200], t_bad2[1200], evf[1200], rmcmd[1400];
+    char snap_base[1200], snap_entry[1200], p2repo[1200], t_fx[1200], t_ext[1200], t_bad1[1200], t_bad2[1200], t_bad3[1200];
+    char evf[1200], rmcmd[1400], bcmd[1600];
     char bad_sha[64] = {0}, ok_sha[64] = {0};
     const char *rev = "3224e3518ed8f49b362b784972525d303d2073c2";
     long t0 = sy_now_ms();
 
     cx_fmt(fx, sizeof fx, "%s/check-chain-preflight-%d", sy_tmpdir(), (int)sy_pid());
     mk_dir(fx);
+    cx_fmt(pf_bin, sizeof pf_bin, "%s/chain-preflight-bin", fx);
+    cx_fmt(bcmd, sizeof bcmd, "sh ./unisacc.com tools/chain-preflight.cx -o '%s'", pf_bin);
+    if (ckk_sh("CHECK_CHAIN_PREFLIGHT", bcmd, out, sizeof out) != 0) {
+        printf("FAIL\tcompile-chain-preflight\t%s\n", out);
+        return 1;
+    }
+
+    /* Fixture table for M2/M3 node execution tests (never executes heavy M4 commands from live table) */
+    cx_fmt(t_fx, sizeof t_fx, "%s/chain-preflight-fx.tsv", fx);
+    wr_file(fx, "chain-preflight-fx.tsv",
+        "# fixture table for M2 and M3 node behavior tests\n"
+        "name\tpatterns\tcmd\ttimeout_s\n"
+        "root-types\t*,unisacc.com,unisacc.com.build.json\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+        "snap-cache-types\t*,unisacc.com,unisacc.com.build.json\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+        "parse2-bind\texec/parse2/*,exec/facts/*,seed/gen.c\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n");
 
     /* Build self-contained git fixture repo for parse2-bind (independent of release history for cold shard layout) */
     cx_fmt(p2repo, sizeof p2repo, "%s/p2repo", fx);
@@ -110,12 +126,18 @@ int main(void) {
         if (strlen(out) >= 40) { mm_copy(ok_sha, sizeof ok_sha, out, 40); ok_sha[40] = 0; }
     }
 
-    /* 1. Table schema check on live tools/flows/chain-preflight.tsv (3 mandatory rows: M2 + M3) */
+    /* 1. Live tools/flows/chain-preflight.tsv structure check only (columns, unique names, timeout<=55, valid patterns, M2/M3/M4 node presence) */
     ck(run_pf("--check-table --table tools/flows/chain-preflight.tsv", out, sizeof out) == 0 &&
-       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=3"),
+       has(out, "PREFLIGHT_NODE\tname=root-types\t") &&
+       has(out, "PREFLIGHT_NODE\tname=snap-cache-types\t") &&
+       has(out, "PREFLIGHT_NODE\tname=parse2-bind\t") &&
+       has(out, "PREFLIGHT_NODE\tname=template-compile\t") &&
+       has(out, "PREFLIGHT_NODE\tname=sys-six-target-0\t") &&
+       has(out, "PREFLIGHT_NODE\tname=sys-six-target-1\t") &&
+       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=6"),
        "table-schema-live-ok", out);
 
-    /* 2. Valid root, valid snap cache, unchanged parse2 -> verdict=PASS */
+    /* 2. Valid root, valid snap cache, unchanged parse2 on fixture table -> verdict=PASS */
     cx_fmt(root_ok, sizeof root_ok, "%s/root-ok", fx);
     cx_fmt(snap_base, sizeof snap_base, "%s/snap-ok", fx);
     cx_fmt(snap_entry, sizeof snap_entry, "%s/%.10s-8cc2381c", snap_base, ok_sha[0] ? ok_sha : rev);
@@ -126,7 +148,7 @@ int main(void) {
     wr_file(snap_entry, "unisacc.com", "APE_BYTES");
     wr_file(snap_entry, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
     cx_fmt(evf, sizeof evf, "%s/events.tsv", fx);
-    cx_fmt(arg, sizeof arg, "--root %s --repo %s --snap-base %s --rev %s --events-file %s", root_ok, p2repo, snap_base, ok_sha, evf);
+    cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s --events-file %s", t_fx, root_ok, p2repo, snap_base, ok_sha, evf);
     ck(run_pf(arg, out, sizeof out) == 0 &&
        has(out, "PREFLIGHT_ITEM\troot-types\tPASS\t") &&
        has(out, "PREFLIGHT_ITEM\tsnap-cache-types\tPASS\t") &&
@@ -143,7 +165,7 @@ int main(void) {
         cx_fmt(bj_dir, sizeof bj_dir, "%s/unisacc.com.build.json", root_dir);
         mk_dir(bj_dir);
     }
-    cx_fmt(arg, sizeof arg, "--root %s --repo %s --snap-base %s --rev %s", root_dir, p2repo, snap_base, ok_sha);
+    cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_fx, root_dir, p2repo, snap_base, ok_sha);
     ck(run_pf(arg, out, sizeof out) == 0 &&
        has(out, "PREFLIGHT_ITEM\troot-types\tFAIL\t") &&
        has(out, "unisacc.com.build.json\texpected=regular\tactual=directory") &&
@@ -159,7 +181,7 @@ int main(void) {
         sy_symlink("/nonexistent-dangling-target-preflight", p_ape);
     }
     wr_file(root_dangling, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
-    cx_fmt(arg, sizeof arg, "--root %s --repo %s --snap-base %s --rev %s", root_dangling, p2repo, snap_base, ok_sha);
+    cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_fx, root_dangling, p2repo, snap_base, ok_sha);
     ck(run_pf(arg, out, sizeof out) == 0 &&
        has(out, "PREFLIGHT_ITEM\troot-types\tFAIL\t") &&
        has(out, "unisacc.com\texpected=regular\tactual=dangling-symlink") &&
@@ -192,7 +214,7 @@ int main(void) {
         wr_file(se_bad, "unisacc.com", "APE_BYTES");
         cx_fmt(sp_bj, sizeof sp_bj, "%s/unisacc.com.build.json", se_bad);
         sy_symlink("/nonexistent-snap-build-json", sp_bj);
-        cx_fmt(arg, sizeof arg, "--root %s --repo %s --snap-base %s --rev %s", root_ok, p2repo, sb_bad, ok_sha);
+        cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_fx, root_ok, p2repo, sb_bad, ok_sha);
         ck(run_pf(arg, out, sizeof out) == 0 &&
            has(out, "PREFLIGHT_ITEM\tsnap-cache-types\tFAIL\t") &&
            has(out, "unisacc.com.build.json\texpected=regular\tactual=dangling-symlink") &&
@@ -207,7 +229,7 @@ int main(void) {
            "snap-cache-directory-fails-with-path-and-expected-type", out);
     }
 
-    /* 7. Table extensibility for M3 (parse2-bind) and M4 (template-compile, sys-six-target) */
+    /* 7. Table extensibility for M3 (parse2-bind) and M4 (template-compile, sys-six-target) with fake commands in fixture */
     cx_fmt(t_ext, sizeof t_ext, "%s/chain-preflight-ext.tsv", fx);
     wr_file(fx, "chain-preflight-ext.tsv",
         "# extended table with M3 and M4 rows\n"
@@ -226,7 +248,7 @@ int main(void) {
        has(out, "verdict=PASS\tfailed=-\tnodes=5\t"),
        "table-extensible-m3-m4-runs-5-nodes", out);
 
-    /* 8. Malformed table rows (timeout > 55 or duplicate node name) refused with rc 2 */
+    /* 8. Malformed table rows (timeout > 55, duplicate node name, or invalid patterns) refused with rc 2 */
     cx_fmt(t_bad1, sizeof t_bad1, "%s/bad-timeout.tsv", fx);
     wr_file(fx, "bad-timeout.tsv",
         "name\tpatterns\tcmd\ttimeout_s\n"
@@ -247,8 +269,18 @@ int main(void) {
     ck(run_pf(arg, out, sizeof out) == 2 && has(out, "PREFLIGHT_TABLE\tstatus=FAIL"),
        "table-duplicate-node-refused", out);
 
+    cx_fmt(t_bad3, sizeof t_bad3, "%s/bad-patterns.tsv", fx);
+    wr_file(fx, "bad-patterns.tsv",
+        "name\tpatterns\tcmd\ttimeout_s\n"
+        "root-types\texec/parse2/*,,seed/gen.c\ttrue\t10\n"
+        "snap-cache-types\t*\ttrue\t10\n"
+        "parse2-bind\t*\ttrue\t30\n");
+    cx_fmt(arg, sizeof arg, "--check-table --table %s", t_bad3);
+    ck(run_pf(arg, out, sizeof out) == 2 && has(out, "PREFLIGHT_TABLE\tstatus=FAIL\treason=bad-patterns"),
+       "table-bad-patterns-refused", out);
+
     /* 9. M3 parse2-bind: fixture clone-push mismatch fails naming file and line */
-    cx_fmt(arg, sizeof arg, "--root %s --repo %s --snap-base %s --rev %s", root_ok, p2repo, snap_base, bad_sha);
+    cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_fx, root_ok, p2repo, snap_base, bad_sha);
     ck(run_pf(arg, out, sizeof out) == 0 &&
        has(out, "PREFLIGHT_ITEM\tparse2-bind\tFAIL\t") &&
        has(out, "file=exec/parse2/parenfold-template.tsv\tline=3\tlocation=exec/parse2/parenfold-template.tsv:3\treason=clone-push target mismatch") &&
@@ -292,7 +324,7 @@ int main(void) {
            "parse2-fixture-changed-seed-runs-warm", out);
     }
 
-    /* 12. M3 parse2-bind on real ce76ca096d tree when present in git history ( else verified against p2repo bad_sha ) */
+    /* 12. M3 parse2-bind on real ce76ca096d tree when present in git history (else verified against p2repo bad_sha) */
     {
         const char *ce_rev = "ce76ca096de8069650010e74962a8cc8ab4d637b";
         if (ckk_sh("CHECK_CHAIN_PREFLIGHT", "git rev-parse --verify ce76ca096de8069650010e74962a8cc8ab4d637b^{commit}", out, sizeof out) == 0) {
