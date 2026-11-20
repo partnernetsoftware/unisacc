@@ -23,13 +23,14 @@ native function jpeg_huff_tables(body:i64,next:i64,meta:i64) i64 {
   return 0;
 }
 
-native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64) i64 {
+native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64,restart:i64) i64 {
   let i=0;
   while(i<12) { let clear=ux_u32_put(meta+4*i,0); i=i+1; }
   let end=src+bytes;
   let at=src+2;
   let component=0-1;
   let quant=0-1;
+  let interval=ux_u32_put(restart,0);
   while(at<end) {
     if(ux_u8(at)!=255) { return 0-2; }
     while(at<end && ux_u8(at)==255) { at=at+1; }
@@ -50,6 +51,9 @@ native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64) i64 {
     } else if(marker==196) {
       let tables=jpeg_huff_tables(body,next,meta);
       if(tables<0) { return tables; }
+    } else if(marker==221) {
+      if(width!=4) { return 0-2; }
+      let saved=ux_u32_put(restart,jpeg_u16be(body));
     } else if(marker==218) {
       if(width!=8 || component<0 || ux_u8(body)!=1 || ux_u8(body+1)!=component ||
          ux_u8(body+3)!=0 || ux_u8(body+4)!=63 || ux_u8(body+5)!=0) { return 0-4; }
@@ -105,18 +109,25 @@ native function jpeg_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
   return bytes>0 && size>0 && a<b+size && b<a+bytes;
 }
 
-native function jpeg_finish_scan(reader:i64,end:i64) i64 {
+native function jpeg_marker(reader:i64,end:i64,expected:i64) i64 {
   let next=ux_u32(reader+JpegBits.next);
   if(next>end-2 || ux_u8(next)!=255) { return 0-6; }
   while(next<end && ux_u8(next)==255) { next=next+1; }
-  if(next!=end-1 || ux_u8(next)!=217) { return 0-6; }
+  if(next>=end || ux_u8(next)!=expected) { return 0-6; }
   let remainder=ux_u32(reader+JpegBits.remaining);
   let pad=u32_shl(1,remainder);
   if(remainder>0 && ux_u32(reader+JpegBits.byte)%pad!=pad-1) { return 0-6; }
+  let byte=ux_u32_put(reader+JpegBits.next,next+1);
+  let empty=ux_u32_put(reader+JpegBits.remaining,0);
+  return next+1;
+}
+
+native function jpeg_finish_scan(reader:i64,end:i64) i64 {
+  if(jpeg_marker(reader,end,217)!=end) { return 0-6; }
   return 0;
 }
 
-// Baseline 8-bit, one component, 1x1 sampling, without restart markers.
+// Baseline 8-bit, one component with 1x1 sampling.
 // Decode into an exclusive workspace and publish RGBA only after EOI.
 native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
   if(src<0 || bytes<4 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
@@ -129,9 +140,10 @@ native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,sp
   let height=ux_u32(header+JpegHeader.height);
   if(height>cap/(width*4) || height>(space-1480)/width) { return 0-1; }
   let meta=scratch+24;
-  let start=jpeg_gray_scan(src,bytes,meta);
-  if(start<0) { return start; }
   let reader=scratch+72;
+  let start=jpeg_gray_scan(src,bytes,meta,reader+JpegBits.byte);
+  if(start<0) { return start; }
+  let interval=ux_u32(reader+JpegBits.byte);
   let a=ux_u32_put(reader+JpegBits.next,start);
   let b=ux_u32_put(reader+JpegBits.end,src+bytes);
   let c=ux_u32_put(reader+JpegBits.remaining,0);
@@ -141,10 +153,16 @@ native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,sp
   let block=scratch+1368;
   let gray=scratch+1480;
   let prediction=0;
+  let count=0;
   let y=0;
   while(y<height) {
     let x=0;
     while(x<width) {
+      if(interval>0 && count>0 && count%interval==0) {
+        let boundary=jpeg_marker(reader,src+bytes,208+(count/interval-1)%8);
+        if(boundary<0) { return boundary; }
+        prediction=0;
+      }
       let decoded=jpeg_baseline_block(reader,ux_u32(meta),ux_u32(meta+4),ux_u32(meta+8),prediction,coeff);
       if(decoded<0) { return decoded; }
       prediction=decoded-65536;
@@ -159,6 +177,7 @@ native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,sp
         j=j+1;
       }
       x=x+8;
+      count=count+1;
     }
     y=y+8;
   }

@@ -2,7 +2,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use text.text
 
-static int make_file(unsigned char *file,int vertical) {
+static int make_file(unsigned char *file,int vertical,int restart) {
     int size=0;
     const unsigned char quant[]={255,216,255,219,0,67,0};
     for(int i=0;i<7;i++) file[size++]=quant[i];
@@ -15,14 +15,18 @@ static int make_file(unsigned char *file,int vertical) {
     file[size++]=0;file[size++]=6;
     file[size++]=16;file[size++]=1;
     for(int i=0;i<16;i++) file[size++]=0;
+    if(restart) {
+        const unsigned char interval[]={255,221,0,4,0,1};
+        for(int i=0;i<6;i++) file[size++]=interval[i];
+    }
     const unsigned char scan[]={255,218,0,12,3,1,0,2,0,3,0,0,63,0};
     for(int i=0;i<14;i++) file[size++]=scan[i];
     unsigned bits=0;
     int count=0;
     for(int unit=0;unit<2*vertical;unit++) {
-        const char *cb=unit==0?"101000000":unit==1?"100111110":"00";
+        const char *cb=unit==0?"101000000":unit==1 && !restart?"100111110":"00";
         const int ybits=4*vertical;
-        const int cbsize=unit<2?9:2;
+        const int cbsize=unit==0 || (unit==1 && !restart)?9:2;
         for(int i=0;i<ybits+cbsize+2;i++) {
             bits=(bits<<1)|(i>=ybits && i<ybits+cbsize && cb[i-ybits]=='1');
             if(++count==8) {
@@ -30,6 +34,11 @@ static int make_file(unsigned char *file,int vertical) {
                 if(bits==255) file[size++]=0;
                 bits=0;count=0;
             }
+        }
+        if(restart && unit==0) {
+            if(count) file[size++]=(bits<<(8-count))|((1<<(8-count))-1);
+            bits=0;count=0;
+            file[size++]=255;file[size++]=208;
         }
     }
     if(count) file[size++]=(bits<<(8-count))|((1<<(8-count))-1);
@@ -39,13 +48,14 @@ static int make_file(unsigned char *file,int vertical) {
 
 int main(int argc,char **argv) {
     const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    const int restart=argc==2 && tx_eqz(argv[1],"--mutate-restart");
+    if(argc!=1 && !mutate && !restart) return 2;
     const char *modules[]={"f64-math","jpeg-header","jpeg-entropy","jpeg-idct","jpeg-gray","jpeg-color",0};
     unsigned char bytes[180];
-    char setup[2200];
+    char setup[3200];
     int used=0;
-    for(int v=1;v<=2;v++) {
-        const int size=make_file(bytes,v);
+    for(int v=1;v<=3;v++) {
+        const int size=make_file(bytes,v==2?2:1,v==3);
         used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;let bytes%d=[",v,size,v);
         for(int i=0;i<size;i++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",i?",":"",bytes[i]);
         used+=tx_snprintf(setup+used,sizeof setup-used,"];let i%d=0;while(i%d<n%d){let a=ux_u8_put(%d+i%d,bytes%d[i%d]);i%d=i%d+1;}",
@@ -53,6 +63,7 @@ int main(int argc,char **argv) {
     }
     #define DEC422 "let n=JpegDecode_color(0,n1,1024,204,4096,4096);"
     #define DEC420 "let n=JpegDecode_color(256,n2,1024,1156,4096,4096);"
+    #define DEC_RST "let n=JpegDecode_color(512,n3,1024,204,4096,4096);"
     const char *cases[]={
         DEC422 "return 0.0+n;",
         DEC422 "return 0.0+ux_u8(1026+14*4);",
@@ -63,9 +74,13 @@ int main(int argc,char **argv) {
         DEC420 "return 0.0+ux_u8(1026+16*17*4);",
         DEC420 "return 0.0+ux_u8(1026+(15*17+15)*4);",
         "let corrupt=ux_u8_put(256+137,51);" DEC420 "return 0.0+n;",
-        "let guard=ux_u8_put(1024,79);let n=JpegDecode_color(256,n2-2,1024,1156,4096,4096);return 0.0+ux_u8(1024);"
+        "let guard=ux_u8_put(1024,79);let n=JpegDecode_color(256,n2-2,1024,1156,4096,4096);return 0.0+ux_u8(1024);",
+        DEC_RST "return 0.0+n;",
+        DEC_RST "return 0.0+ux_u8(1026+16*4);",
+        "let corrupt=ux_u8_put(512+n3-4,209);" DEC_RST "return 0.0+n;"
     };
-    const double gold[]={204,185,171,142,1156,171,142,160,-6,79};
+    const double gold[]={204,185,171,142,1156,171,142,160,-6,79,204,142,-6};
     return g_wasm_batch("G_IO JpegSubsampled","jpeg-sampled",modules,setup,cases,gold,
-        sizeof gold/sizeof gold[0],mutate?2:-1,DEC422 "return 0.0+ux_u8(1026+14*4);");
+        sizeof gold/sizeof gold[0],restart?12:mutate?2:-1,
+        restart?DEC_RST "return 0.0+n;":DEC422 "return 0.0+ux_u8(1026+14*4);");
 }

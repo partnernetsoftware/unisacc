@@ -4,20 +4,24 @@
 <script type="module">
 import { ImageLoader, REVISION } from "../../web/game/three.module.js";
 if (REVISION !== "160") throw new Error("three.js revision mismatch");
-async function load(vertical) {
-  const delta = ["101000000", "100111110"];
-  const entropy = Array.from({ length: 2 * vertical }, (_, unit) =>
-    "00".repeat(2 * vertical) + (delta[unit] ?? "00") + "00").join("");
+function pack(entropy) {
   const bits = entropy.padEnd(Math.ceil(entropy.length / 8) * 8, "1");
-  const packed = bits.match(/.{8}/g).flatMap(byte => {
+  return bits.match(/.{8}/g).flatMap(byte => {
     const value = Number.parseInt(byte, 2);
     return value === 255 ? [255, 0] : [value];
   });
+}
+async function load(vertical, restart = false) {
+  const delta = ["101000000", "100111110"];
+  const units = Array.from({ length: 2 * vertical }, (_, unit) =>
+    "00".repeat(2 * vertical) + (restart && unit > 0 ? "00" : (delta[unit] ?? "00")) + "00");
+  const packed = restart ? [...pack(units[0]), 255, 208, ...pack(units[1])] : pack(units.join(""));
   const bytes = Uint8Array.from([
     255, 216, 255, 219, 0, 67, 0, ...Array(64).fill(8),
     255, 192, 0, 17, 8, 0, vertical === 2 ? 17 : 3, 0, 17, 3,
     1, 32 + vertical, 0, 2, 17, 0, 3, 17, 0,
     255, 196, 0, 39, 0, 1, 1, ...Array(14).fill(0), 0, 6, 16, 1, ...Array(15).fill(0), 0,
+    ...(restart ? [255, 221, 0, 4, 0, 1] : []),
     255, 218, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0, ...packed, 255, 217,
   ]);
   const url = URL.createObjectURL(new Blob([bytes], { type: "image/jpeg" }));
@@ -32,9 +36,11 @@ async function load(vertical) {
 }
 const wide = await load(1);
 const grid = await load(2);
+const reset = await load(1, true);
 const blue = (data, x, y) => data[(y * 17 + x) * 4 + 2];
 document.querySelector("#r160").textContent = JSON.stringify([
   wide.length, blue(wide, 14, 0), blue(wide, 15, 0), blue(wide, 16, 0),
   grid.length, blue(grid, 0, 15), blue(grid, 0, 16), blue(grid, 15, 15), -6, 79,
+  reset.length, blue(reset, 16, 0), -6,
 ]);
 </script>

@@ -1,8 +1,8 @@
 // Baseline interleaved YCbCr. Offsets 0..47 hold the tables, 48..83 the scan
-// records, 84..95 the DC predictors and 96 the packed luma sampling factors.
+// records, 84..95 the DC predictors, 96 the luma sampling and 100 the interval.
 native function jpeg_color_scan(src:i64,bytes:i64,meta:i64) i64 {
   let clear=0;
-  while(clear<24) { let z=ux_u32_put(meta+clear*4,0); clear=clear+1; }
+  while(clear<26) { let z=ux_u32_put(meta+clear*4,0); clear=clear+1; }
   let end=src+bytes;
   let at=src+2;
   let frame=0;
@@ -34,6 +34,9 @@ native function jpeg_color_scan(src:i64,bytes:i64,meta:i64) i64 {
       if(h<0) { return h; }
     } else if(marker==238 && width>=14 && ux_u32(body)==1651467329 && ux_u8(body+4)==101) {
       if(ux_u8(body+11)!=1) { return 0-4; }
+    } else if(marker==221) {
+      if(width!=4) { return 0-2; }
+      let saved=ux_u32_put(meta+100,jpeg_u16be(body));
     } else if(marker==218) {
       if(frame==0 || width!=12 || ux_u8(body)!=3 || ux_u8(body+7)!=0 ||
          ux_u8(body+8)!=63 || ux_u8(body+9)!=0) { return 0-4; }
@@ -139,18 +142,27 @@ native function jpeg_decode_color(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,
   let pixels=scratch+1496;
   let cb=pixels+ysize;
   let cr=cb+csize;
+  let interval=ux_u32(meta+100);
+  let count=0;
   let y=0;
   while(y<ch) {
     let x=0;
     while(x<cw) {
+      if(interval>0 && count>0 && count%interval==0) {
+        let boundary=jpeg_marker(reader,src+bytes,208+(count/interval-1)%8);
+        if(boundary<0) { return boundary; }
+        let zeroY=ux_u32_put(meta+84,0);
+        let zeroCb=ux_u32_put(meta+88,0);
+        let zeroCr=ux_u32_put(meta+92,0);
+      }
       let c=0;
       while(c<3) {
         let rec=meta+48+c*12;
         let dc=meta+84+c*4;
-        let count=1;
-        if(c==0) { count=sx*sy; }
+        let tiles=1;
+        if(c==0) { tiles=sx*sy; }
         let tile=0;
-        while(tile<count) {
+        while(tile<tiles) {
           let decoded=jpeg_baseline_block(reader,ux_u32(rec),ux_u32(rec+4),ux_u32(rec+8),ux_i32(dc),coeff);
           if(decoded<0) { return decoded; }
           let pred=ux_i32_put(dc,decoded-65536);
@@ -165,6 +177,7 @@ native function jpeg_decode_color(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,
         c=c+1;
       }
       x=x+8;
+      count=count+1;
     }
     y=y+8;
   }
