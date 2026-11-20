@@ -1,6 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <pre id="gpu">pending</pre>
+<pre id="color-contract"></pre>
 <script type="module">
 import {
   BufferAttribute, BufferGeometry, Camera, DisplayP3ColorSpace, LinearDisplayP3ColorSpace,
@@ -38,11 +39,19 @@ try {
   const material = new MeshBasicMaterial({ color: 0x804008 });
   const scene = new Scene();
   scene.add(new Mesh(geometry, material));
-  const offset = location.search === "?output-mutate" ? 4 : 0;
+  const change = location.search === "?output-mutate";
   const spaces = [LinearSRGBColorSpace, SRGBColorSpace, LinearDisplayP3ColorSpace];
   if (location.search === "?p3-readback") spaces.push(DisplayP3ColorSpace);
+  function draw(tag) {
+    const wire = new TextEncoder().encode(tag);
+    const input = new Uint8Array(exports.memory.buffer, 2097152 + 8500, 32);
+    input.fill(0);
+    input.set(wire);
+    return Number(exports.uxe_gpu_probe(BigInt(wire.length)));
+  }
   const samples = spaces.flatMap((space, i) => {
-    const status = Number(exports.uxe_gpu_probe(BigInt(offset + i)));
+    const tag = change ? spaces[(i + 1) % spaces.length] : space;
+    const status = draw(tag);
     const reference = open("webgl2");
     const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl, ...reference.options });
     renderer.outputColorSpace = space;
@@ -53,6 +62,9 @@ try {
     renderer.dispose();
     return [status, ...pixels(gl), ...values];
   });
+  document.querySelector("#color-contract").textContent = JSON.stringify([
+    draw("SRGB"), draw("srgb-Linear"), draw("display-p3-xinear"), draw(""),
+  ]);
   geometry.dispose();
   material.dispose();
   result.textContent = JSON.stringify(samples);
