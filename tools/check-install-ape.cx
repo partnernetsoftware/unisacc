@@ -15,11 +15,24 @@
  *                         and a clean record and installed APE keep their inode and timestamps
  *   receipt-*, identity-*  --write rewrites ape-receipt.txt to one APE line and re-emits plans/root-identity.md as ape1; no doc = skipped
  *   build-record-*        installed bytes come from the APE; canonical consumers accept valid metadata and reject stale bytes or wrong metadata
+ *   cand-*                candidate mode (0.0.87 S4) in WORK/croot with a fixture bg-candidate WORK/b1/<rev>: wrong receipt sha,
+ *                         unsealed, identity of another rev and a version outside release/candidate.tsv are refused with
+ *                         the Root untouched; dry run writes nothing; install backs up the previous Root and writes the
+ *                         CANDIDATE marker (no release/evidence, no identity emit); --release-gate, release-run --pack and
+ *                         release-exec --dry refuse that Root; chain-ready 17-root-public lists it with READY yes; rollback
+ *                         restores the previous Root and drops the marker; four installs keep three backups; a tampered
+ *                         backup is refused; a public install clears the marker; the real ROOT/unisacc.com sha is unchanged.
+ *                         WORK/croot is a private mkdtemp directory under $HOME/.cache, outside every removal whitelist
+ *                         (asserted), so a rollback and a prune must really remove the backup directory; identity
+ *                         prev=<rev>, a tampered or unlisted backup file, a midway rollback failure (test hook
+ *                         UNISACC_INSTALL_APE_FAULT), an empty index and an unremovable backup are refused by name
+ *   rollback-without-backup-*  --rollback without candidate backups refuses; the split-era undo is --rollback-split
  * Prints PASS/FAIL/NOT_RUN per case and CHECK_INSTALL_APE<TAB>failed=N<TAB>not_run=M; exit 0 only when failed=0. */
 #pragma unisa use cxlib.productpkg
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -110,9 +123,235 @@ static int record_fixture(const char *path, long bytes, const char *kind, const 
     return write_file(path, text, 0600);
 }
 
+/* ---- candidate mode (0.0.87 S4): everything below runs in WORK/croot and WORK/b1; the real Root is only read ---- */
+static int run_sh(const char *cmd, char *out, int cap) {
+    char *v[4]; int cut = 0;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    return bounded_run(v, 55, out, cap, &cut);
+}
+static int tool_args(char **args, char *out, int cap) {
+    char *v[16]; int k = 0, cut = 0, i;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--";
+    for (i = 0; args[i] && k < 15; i++) v[k++] = args[i];
+    v[k] = 0;
+    return bounded_run(v, 55, out, cap, &cut);
+}
+static int cand_tool(const char *root, const char *dir, int write, char *out, int cap) {
+    char *a[5]; int k = 0;
+    a[k++] = (char *)root; a[k++] = "--candidate"; a[k++] = (char *)dir; if (write) a[k++] = "--write"; a[k] = 0;
+    return tool_args(a, out, cap);
+}
+/* 1 when one line of B (N bytes) begins with PRE: outputs are judged by their leading TSV/verdict fields */
+static int line_starts(const char *b, long n, const char *pre) {
+    long at = 0, pl = tx_len(pre, 4096);
+    while (at < n) {
+        long e = at;
+        while (e < n && b[e] != '\n') e++;
+        if (e - at >= pl && tx_same(b + at, pl, pre, pl)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+static int out_starts(const char *o, const char *pre) { return line_starts(o, tx_len(o, 1 << 14), pre); }
+/* the one-line marker begins with PRE and ends with SUF (newline included) */
+static int marker_is(const char *p, const char *pre, const char *suf) {
+    size_t n = 0; char *b = cx_read(p, &n); long pl = tx_len(pre, 4096), sl = tx_len(suf, 256); int r;
+    if (!b) return 0;
+    r = (long)n >= pl + sl && tx_same(b, pl, pre, pl) && tx_same(b + n - sl, sl, suf, sl) && tx_chr(b, (long)n - 1, '\n') < 0;
+    mm_free(b);
+    return r;
+}
+static int index_lines(const char *root) {
+    char p[4400]; size_t n = 0; char *b; int k = 0; size_t i;
+    if (cx_fmt(p, sizeof p, "%s/.unisacc-root-backups/index.tsv", root) || !(b = cx_read(p, &n))) return -1;
+    for (i = 0; i < n; i++) if (b[i] == '\n') k++;
+    mm_free(b);
+    return k;
+}
+static int sha_of_root_com(char h[65]) { char p[4400]; if (cx_fmt(p, sizeof p, "%s/unisacc.com", g_root)) return -1; return sha_of(p, h); }
+static int tree_has_rollback_tmp(const char *root) {
+    char cmd[4600], out[512];
+    if (cx_fmt(cmd, sizeof cmd, "ls -A '%s' | grep -c '^\\.rollback' || true", root)) return 1;
+    if (run_sh(cmd, out, (int)sizeof out) != 0) return 1;
+    return out[0] != '0';
+}
+/* sha of ROOT/NAME into H ("-" when absent) */
+static void sha_named(const char *root, const char *name, char h[65]) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", root, name) || sha_of(p, h)) { h[0] = '-'; h[1] = 0; }
+}
+static void cand_cases(const char *work, const char *cwork, const char *ape, const char *real, long ape_bytes) {
+    char root[4400], com[4400], mk[4400], b1[4400], dir[4400], af[4400], capef[4400], rcp[4400], seal[4400], idp[4400], ctsv[4400];
+    char ver[64], line[9000], out[4096], cmd[12000], h0[65], h[65], rg0[65], rg1[65], bk[4400], rel[4400];
+    const char *rev = "abcdef0123456789abcdef0123456789abcdef01";
+    char *ga[3];
+    if (sha_of_root_com(rg0)) { ck(0, "cand-setup", "cannot hash the real Root"); return; }
+    if (cx_fmt(root, sizeof root, "%s/croot", cwork) || sy_mkdir(root, 0755) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+        cx_fmt(mk, sizeof mk, "%s/unisacc.com.candidate.tsv", root) || cx_fmt(b1, sizeof b1, "%s/b1", work) || sy_mkdir(b1, 0755) ||
+        cx_fmt(dir, sizeof dir, "%s/%s", b1, rev) || sy_mkdir(dir, 0755) || cx_fmt(af, sizeof af, "%s/ape-final", dir) || sy_mkdir(af, 0755) ||
+        cx_fmt(capef, sizeof capef, "%s/unisacc-next.com", af) || cx_fmt(rcp, sizeof rcp, "%s/ape-receipt.txt", af) ||
+        cx_fmt(seal, sizeof seal, "%s/seal.tsv", dir) || cx_fmt(idp, sizeof idp, "%s/chain-run.identity", dir) ||
+        cx_fmt(rel, sizeof rel, "%s/release", root) || sy_mkdir(rel, 0755) || cx_fmt(ctsv, sizeof ctsv, "%s/candidate.tsv", rel) ||
+        sy_copy(ape, capef, 0755)) { ck(0, "cand-setup", "fixture"); return; }
+    {   char *v[4]; char vo[256]; int cut = 0; long i = 0;
+        v[0] = "sh"; v[1] = (char *)ape; v[2] = "--version"; v[3] = 0;
+        if (bounded_run(v, 20, vo, (int)sizeof vo, &cut) != 0 || !tx_same(vo, 8, "unisacc ", 8)) { ck(0, "cand-setup", "ape --version"); return; }
+        while (vo[8 + i] && vo[8 + i] != '\n' && vo[8 + i] != ' ' && i < 60) { ver[i] = vo[8 + i]; i++; }
+        ver[i] = 0; }
+    if (write_file(com, "#!/bin/sh\necho cand-launcher-0\n", 0755) || sha_of(com, h0)) { ck(0, "cand-setup", "launcher"); return; }
+    if (cx_fmt(line, sizeof line, "rev=%s\n", rev) || write_file(idp, line, 0644)) return;
+    /* wrong sha in the chain receipt */
+    if (cx_fmt(line, sizeof line, "unisacc-next.com\t%s\tsha=%s\tbytes=%ld\n", capef, "0000000000000000000000000000000000000000000000000000000000000000", ape_bytes) || write_file(rcp, line, 0644)) return;
+    if (write_file(seal, "sealed\n", 0644)) return;
+    if (cx_fmt(line, sizeof line, "repo\ttag\tcommit\tversion\nx\tv%s\t%s\t%s\n", ver, rev, ver) || write_file(ctsv, line, 0644)) return;
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "candidate-receipt-sha-mismatch"), "cand-neg-sha-mismatch", out);
+    sha_of(com, h);
+    ck(tx_eqz(h, h0) && sy_exists(mk) != 1, "cand-neg-sha-mismatch-left-root-alone", "Root changed on a refused candidate");
+    if (cx_fmt(line, sizeof line, "unisacc-next.com\t%s\tsha=%s\tbytes=%ld\n", capef, real, ape_bytes) || write_file(rcp, line, 0644)) return;
+    /* not sealed */
+    (void)sy_unlink(seal);
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "candidate-not-sealed"), "cand-neg-not-sealed", out);
+    if (write_file(seal, "sealed\n", 0644)) return;
+    /* identity names another rev */
+    if (write_file(idp, "rev=1111111111111111111111111111111111111111\n", 0644)) return;
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "candidate-identity-rev-mismatch"), "cand-neg-identity-rev", out);
+    /* a field that merely contains rev=<rev> (prev=<rev>) is not the identity line */
+    if (cx_fmt(line, sizeof line, "prev=%s\nmode=full\n", rev) || write_file(idp, line, 0644)) return;
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "candidate-identity-rev-mismatch"), "cand-neg-identity-prev-field", out);
+    if (cx_fmt(line, sizeof line, "rev=%s\n", rev) || write_file(idp, line, 0644)) return;
+    /* version not in the candidate list */
+    if (write_file(ctsv, "repo\ttag\tcommit\tversion\nx\tv9.9.9\tz\t9.9.9\n", 0644)) return;
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "candidate-version-not-in-candidate-list"), "cand-neg-version", out);
+    if (cx_fmt(line, sizeof line, "repo\ttag\tcommit\tversion\nx\tv%s\t%s\t%s\n", ver, rev, ver) || write_file(ctsv, line, 0644)) return;
+    sha_of(com, h);
+    ck(tx_eqz(h, h0) && sy_exists(mk) != 1, "cand-neg-all-left-root-alone", "Root changed on a refused candidate");
+    /* dry run */
+    ck(cand_tool(root, dir, 0, out, (int)sizeof out) == 0 && has(out, "DRYRUN"), "cand-dryrun", out);
+    if (cx_fmt(bk, sizeof bk, "%s/.unisacc-root-backups", root)) return;
+    sha_of(com, h);
+    ck(tx_eqz(h, h0) && sy_exists(mk) != 1 && sy_exists(bk) != 1, "cand-dryrun-writes-nothing", "dry run wrote");
+    /* install */
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "CANDIDATE") && has(out, "BACKUP") &&
+       has(out, "IDENTITY_SKIP"), "cand-install", out);
+    sha_of(com, h);
+    ck(tx_eqz(h, real), "cand-install-root-is-the-candidate-ape", h);
+    if (cx_fmt(line, sizeof line, "CANDIDATE\trev=%s\tsha=%s\tbytes=%ld\tversion=%s\t", rev, real, ape_bytes, ver)) return;
+    ck(marker_is(mk, line, "\tnot=PUBLISHED\n"), "cand-marker-names-rev-and-not-published", line);
+    {   char bc[4400]; if (cx_fmt(bc, sizeof bc, "%s/%s/unisacc.com", bk, h0)) return;
+        sha_of(bc, h);
+        ck(tx_eqz(h, h0) && index_lines(root) == 1, "cand-backup-of-previous-root", h); }
+    if (cx_fmt(line, sizeof line, "%s/evidence", rel)) return;
+    ck(sy_exists(line) != 1, "cand-no-release-evidence", "release/evidence written");
+    ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 0 && has(out, "ALREADY") && sy_exists(mk) == 1 && index_lines(root) == 1, "cand-already-keeps-marker", out);
+    /* release gates */
+    ga[0] = root; ga[1] = "--release-gate"; ga[2] = 0;
+    ck(tool_args(ga, out, (int)sizeof out) == 1 && has(out, "root-candidate"), "cand-release-gate-refuses", out);
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/release-run.cx -- --pack '%s' '%s' '%s' '%s' --chain-out '%s'", root, ctsv, work, work, work)) return;
+    {   int rc = run_sh(cmd, out, (int)sizeof out);
+        ck(rc == 2 && out_starts(out, "release-run: REFUSE RELEASE_PACK_ROOT_CANDIDATE "), "cand-release-pack-refuses", out); }
+    if (cx_fmt(cmd, sizeof cmd, "cp -rP '%s/tools' '%s/tools' && cp -rP '%s/cx' '%s/cx' && rm -f '%s/cx/cx' && cp -rP '%s/ext' '%s/ext' && cp '%s/cxroot.tsv' '%s/'",
+               g_root, root, g_root, root, root, g_root, root, g_root, root) || run_sh(cmd, out, (int)sizeof out) != 0) { ck(0, "cand-copy-tools", out); return; }
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' tools/release-exec.cx -- --execute '%s' --layout '%s' --dry", root, g_root, ctsv, work)) return;
+    {   int rc = run_sh(cmd, out, (int)sizeof out);
+        ck(rc == 2 && out_starts(out, "release-exec: REFUSE RELEASE_EXEC_GATE_ROOT_CANDIDATE "), "cand-release-exec-baseline-refuses", out); }
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 17-root-public", root)) return;
+    {   int rc = run_sh(cmd, out, (int)sizeof out); char want[200];
+        cx_fmt(want, sizeof want, "17-root-public\tPASS\tWARN root-candidate rev=%s chain=allowed RELEASE_BLOCKED", rev);
+        ck(rc == 0 && out_starts(out, want) && out_starts(out, "READY\tyes\t"), "cand-chain-ready-lists-not-blocks", out); }
+    /* rollback restores the previous Root and drops the marker */
+    ga[1] = "--rollback"; ga[2] = 0;
+    {   char *ra[4]; ra[0] = root; ra[1] = "--rollback"; ra[2] = 0;
+        ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLBACK_DRYRUN"), "cand-rollback-dryrun", out);
+        sha_of(com, h);
+        ck(tx_eqz(h, real) && sy_exists(mk) == 1, "cand-rollback-dryrun-writes-nothing", h);
+        ra[2] = "--write"; ra[3] = 0;
+        ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLED_BACK"), "cand-rollback", out);
+        sha_of(com, h);
+        ck(tx_eqz(h, h0) && sy_exists(mk) != 1 && index_lines(root) == 0, "cand-rollback-restores-previous-root", h);
+        {   char d1[4400]; cx_fmt(d1, sizeof d1, "%s/%s", bk, h0);
+            ck(sy_exists(d1) == 0, "cand-rollback-removes-backup-dir", d1); }
+        /* the same candidate installs again over the restored Root (the left-over directory used to block it) */
+        ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "BACKUP") && index_lines(root) == 1,
+           "cand-reinstall-after-rollback", out);
+        ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLED_BACK") && index_lines(root) == 0, "cand-rollback-again", out);
+        sha_of(com, h);
+        ck(tx_eqz(h, h0), "cand-rollback-again-restores", h);
+        /* an empty index: no silent fall-back to the split-era undo */
+        ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "no-candidate-backup"), "cand-rollback-empty-index-refuses", out);
+        sha_of(com, h);
+        ck(tx_eqz(h, h0) && sy_exists(mk) != 1, "cand-rollback-empty-index-left-root-alone", h); }
+    ga[1] = "--release-gate"; ga[2] = 0;
+    ck(tool_args(ga, out, (int)sizeof out) == 0 && has(out, "PUBLIC_ROOT"), "cand-release-gate-public-after-rollback", out);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' tools/release-exec.cx -- --execute '%s' --layout '%s' --dry", root, g_root, ctsv, work)) return;
+    {   run_sh(cmd, out, (int)sizeof out);
+        ck(!out_starts(out, "release-exec: REFUSE RELEASE_EXEC_GATE_ROOT_CANDIDATE") && out_starts(out, "release-exec: REFUSE "), "cand-release-exec-public-root-passes-gate", out); }
+    /* capacity: four candidate installs over four different Roots keep three backups, the oldest removed */
+    {   char hs[4][65], txt[80], d0[4400]; int i, rc = 0, pruned = 0;
+        for (i = 0; i < 4; i++) {
+            cx_fmt(txt, sizeof txt, "#!/bin/sh\necho cand-launcher-%d\n", i + 1);
+            if (write_file(com, txt, 0755) || sha_of(com, hs[i])) return;
+            rc |= cand_tool(root, dir, 1, out, (int)sizeof out);
+            if (i == 3) pruned = has(out, "BACKUP_PRUNED");
+        }
+        ck(rc == 0 && pruned && index_lines(root) == 3, "cand-backup-capacity-three", out);
+        cx_fmt(d0, sizeof d0, "%s/%s", bk, hs[0]);
+        ck(sy_exists(d0) != 1, "cand-backup-oldest-removed", d0);
+        cx_fmt(d0, sizeof d0, "%s/%s/unisacc.com", bk, hs[3]); sha_of(d0, h);
+        ck(tx_eqz(h, hs[3]), "cand-backup-newest-kept", h);
+        {   char d1[4400], d2[4400]; cx_fmt(d1, sizeof d1, "%s/%s", bk, hs[1]); cx_fmt(d2, sizeof d2, "%s/%s", bk, hs[2]);
+            ck(sy_exists(d1) == 1 && sy_exists(d2) == 1, "cand-backup-index-matches-disk", d1); }
+        /* every file of the backup is checked against its manifest; a midway failure leaves the Root as it was */
+        {   char nd[4400], rp[4400], keep[9000], hc[65], hr[65], hs2[65], hm[65], ac[65], ar[65], as[65], am[65];
+            size_t kn = 0; char *kb;
+            char *ra[4]; ra[0] = root; ra[1] = "--rollback"; ra[2] = "--write"; ra[3] = 0;
+            cx_fmt(nd, sizeof nd, "%s/%s", bk, hs[3]);
+            cx_fmt(rp, sizeof rp, "%s/ape-receipt.txt", nd);
+            kb = cx_read(rp, &kn);
+            if (!kb || kn >= sizeof keep) { ck(0, "cand-backup-has-receipt", rp); return; }
+            mm_copy(keep, sizeof keep, kb, kn); keep[kn] = 0; mm_free(kb);
+            sha_named(root, "unisacc.com", hc); sha_named(root, "ape-receipt.txt", hr); sha_named(root, "unisacc.com.ape.sha256", hs2); sha_named(root, "unisacc.com.candidate.tsv", hm);
+            if (write_file(rp, "unisacc.com\ttampered\tsha=00\tbytes=1\n", 0644)) return;
+            ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "backup-file-differs-from-manifest"), "cand-rollback-refuses-tampered-receipt", out);
+            if (write_file(rp, keep, 0644)) return;
+            cx_fmt(rp, sizeof rp, "%s/unisacc.com.build.json", nd);
+            if (write_file(rp, "{}\n", 0644)) return;
+            ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "backup-file-not-in-manifest"), "cand-rollback-refuses-unlisted-file", out);
+            (void)sy_unlink(rp);
+            if (cx_fmt(cmd, sizeof cmd, "UNISACC_INSTALL_APE_FAULT=rollback-step-2 sh ./unisacc.com '%s' -- '%s' --rollback --write", g_tool, root)) return;
+            ck(run_sh(cmd, out, (int)sizeof out) == 1 && has(out, "rollback-step-failed-root-unchanged"), "cand-rollback-midway-failure-refused", out);
+            sha_named(root, "unisacc.com", ac); sha_named(root, "ape-receipt.txt", ar); sha_named(root, "unisacc.com.ape.sha256", as); sha_named(root, "unisacc.com.candidate.tsv", am);
+            ck(tx_eqz(ac, hc) && tx_eqz(ar, hr) && tx_eqz(as, hs2) && tx_eqz(am, hm) && !tree_has_rollback_tmp(root) && index_lines(root) == 3 && sy_exists(nd) == 1,
+               "cand-rollback-midway-failure-puts-root-back", ac);
+        }
+        /* a corrupt backup is refused by name and the Root stays as it is */
+        if (write_file(d0, "#!/bin/sh\necho tampered\n", 0755)) return;
+        {   char *ra[4]; ra[0] = root; ra[1] = "--rollback"; ra[2] = "--write"; ra[3] = 0;
+            ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "backup-differs-from-its-name"), "cand-rollback-refuses-corrupt-backup", out);
+            sha_of(com, h);
+            ck(tx_eqz(h, real) && sy_exists(mk) == 1, "cand-rollback-corrupt-left-root-alone", h); }
+        /* a backup that cannot be removed (an entry outside the backup set) is refused by name; the index keeps it */
+        {   char d1[4400], junkp[4400];
+            cx_fmt(d1, sizeof d1, "%s/%s", bk, hs[1]);
+            if (cx_fmt(junkp, sizeof junkp, "%s/not-a-backup-file", d1) || write_file(junkp, "x\n", 0644)) return;
+            if (write_file(com, "#!/bin/sh\necho cand-launcher-5\n", 0755) || sha_of(com, h0)) return;
+            ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 1 && has(out, "backup-prune-failed"), "cand-prune-failure-refused", out);
+            sha_of(com, h);
+            ck(tx_eqz(h, h0) && sy_exists(d1) == 1 && index_lines(root) == 4, "cand-prune-failure-index-keeps-dir", h);
+            if (sy_unlink(junkp)) return;
+            ck(cand_tool(root, dir, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "BACKUP_PRUNED") && index_lines(root) == 3 && sy_exists(d1) == 0,
+               "cand-prune-retry-removes", out);
+        }
+    }
+    /* a public install over the candidate clears the marker */
+    if (write_file(com, "#!/bin/sh\necho public-launcher\n", 0755)) return;
+    ck(tool(root, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "CANDIDATE_CLEARED") && sy_exists(mk) != 1, "cand-public-install-clears-marker", out);
+    sha_of_root_com(rg1);
+    ck(tx_eqz(rg0, rg1), "cand-real-root-untouched", rg1);
+}
+
 int main(int argc, char **argv) {
     char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
-    char want[65], h0[65], h1[65], out[2048], launcher[4400];
+    char want[65], h0[65], h1[65], out[2048], launcher[4400], cwork[4400];
     const char *td = getenv("TMPDIR");
     int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
     int have_ape = 0;
@@ -264,7 +503,13 @@ int main(int argc, char **argv) {
             ck(sy_exists(sprev) == 1 && sy_exists(sdir) != 1, "split-dir-moved-aside", "unisacc.com.dev state");
             ck(sy_exists(bjp) == 1, "old-record-kept", "no .split-prev record");
             (void)text;
-            v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; v[k++] = root; v[k++] = "--rollback"; v[k++] = "--write"; v[k] = 0;
+            /* without candidate backups --rollback refuses by name; the split-era undo is the explicit --rollback-split */
+            {   char *ra[4]; char hb[65]; ra[0] = root; ra[1] = "--rollback"; ra[2] = "--write"; ra[3] = 0;
+                sha_of(com, hb);
+                ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "no-candidate-backup"), "rollback-without-backup-refuses", out);
+                sha_of(com, back);
+                ck(tx_eqz(back, hb) && sy_exists(dev) == 1, "rollback-without-backup-left-root-alone", back); }
+            v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; v[k++] = root; v[k++] = "--rollback-split"; v[k++] = "--write"; v[k] = 0;
             rrc = bounded_run(v, 50, out, (int)sizeof out, &cut);
             ck(rrc == 0 && has(out, "ROLLED_BACK"), "rollback", out);
             sha_of(com, back);
@@ -309,8 +554,23 @@ int main(int argc, char **argv) {
             }
             (void)rb;
         }
+        /* The candidate Root lives outside every removal whitelist (temp roots, <repo>/out, .trash, the chains cache),
+           like the real Root: a private mkdtemp directory under $HOME/.cache.  Backup removal must work there. */
+        {   const char *home = sy_env("HOME");
+            char cache[4400], why[400];
+            if (!home || !home[0] || cx_fmt(cache, sizeof cache, "%s/.cache", home) || (sy_exists(cache) != 1 && sy_mkdir(cache, 0755)) ||
+                cx_fmt(cwork, sizeof cwork, "%s/check-install-ape-croot-XXXXXX", cache) || !mkdtemp(cwork)) { ck(0, "cand-setup", "private fixture directory"); }
+            else {
+                ck(unisa_safedel(cwork, SAFEDEL_PURGE | SAFEDEL_RECURSIVE | SAFEDEL_DRYRUN, 10, why, (int)sizeof why) == SAFEDEL_REFUSED,
+                   "cand-fixture-outside-removal-whitelist", cwork);
+                cand_cases(work, cwork, ape, real, ape_bytes);
+                /* bring the private fixture under the temp scratch, then remove both with the bounded safedel below */
+                if (cx_fmt(cache, sizeof cache, "%s/croot-moved", work) || sy_rename(cwork, cache)) sy_eprintf("check-install-ape: private fixture %s kept\n", cwork);
+            }
+        }
     }
-    (void)cx_rmtree(work);
+    {   char why[200]; /* two copied tools/cx/ext trees exceed cx_rmtree's default ceiling of 1000 entries */
+        if (unisa_safedel(work, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 200000, why, (int)sizeof why)) sy_eprintf("check-install-ape: scratch %s kept: %s\n", work, why); }
     sy_printf("CHECK_INSTALL_APE\tfailed=%d\tnot_run=%d\n", failed, notrun);
     return failed ? 1 : 0;
 }

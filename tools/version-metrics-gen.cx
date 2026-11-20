@@ -1,0 +1,316 @@
+/* tools/version-metrics-gen.cx -- 版本节拍表生成器与校验器 (0.0.87 S6 度量补账)。
+ *
+ *   sh ./unisacc.com tools/version-metrics-gen.cx -- --write|--check|--print [--root DIR]
+ *
+ * 从仓内只读证据决定性派生 build/version-cadence.tsv，0.0.81..0.0.85 每版一行加 0.0.86 进行中一行。
+ * 证据：
+ *   slot_open   主线 git log 提交说明含「预置 0.0.V 候选版本槽」(退而取「0.0.V 版本槽」)的最早提交时间；
+ *   cutoff      release/evidence/0.0.V/INDEX.tsv prefreeze-strict 说明中「T=<提交>」的提交时间；
+ *   prerun      同一说明中紧跟「预跑」的「HH:MM 到 HH:MM」或「HH:MM 起至 HH:MM」，日期取该行时间戳日期，跨日回推一天；
+ *   freeze      tag v0.0.V 所指提交的提交时间；
+ *   public      INDEX.tsv exec-5-publish 行时间戳；
+ *   commits     git rev-list --count v0.0.(V-1)..v0.0.V。
+ * 链墙钟、预跑并行度、A/B/C 类提交数、返工次数在仓内没有可核记录，一律 UNMEASURED，绝不估算。
+ * 输出 VERSION_CADENCE\tstatus=WRITE|CHECK\trows=N\tunmeasured=M；--check 遇漂移报 DIFF 退出 1，用法错误退出 2。
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.die
+
+#define VG_OUT 65536
+#define VG_TBL 32768
+
+static char root[4096];
+static char tbl[VG_TBL];
+static int tlen, unmeasured;
+
+static void die(const char *a, const char *b) { tool_die("version-metrics-gen", a, b, 2); }
+
+static void put(const char *s) {
+    int n = (int)strlen(s);
+    if (tlen + n + 1 >= VG_TBL) die("table overflow", s);
+    mm_copy(tbl + tlen, VG_TBL - tlen, s, n);
+    tlen += n;
+    tbl[tlen] = 0;
+}
+
+static void cell(const char *s, int last) {
+    if (!strcmp(s, "UNMEASURED")) unmeasured++;
+    put(s);
+    put(last ? "\n" : "\t");
+}
+
+static int dig2(const char *p) {
+    if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return -1;
+    return (p[0] - '0') * 10 + (p[1] - '0');
+}
+
+static long long days_civil(long long y, int m, int d) {
+    long long era, yoe, doy, doe;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* "YYYY-MM-DD HH:MM[:SS] +0800" -> epoch seconds; -1 on malformed. */
+static long long parse_ts(const char *s) {
+    int y1, y2, mo, d, h, mi, se = 0, oh, om;
+    long long off;
+    const char *p;
+    y1 = dig2(s); y2 = dig2(s + 2);
+    if (y1 < 0 || y2 < 0 || s[4] != '-' || s[7] != '-' || s[10] != ' ' || s[13] != ':') return -1;
+    mo = dig2(s + 5); d = dig2(s + 8); h = dig2(s + 11); mi = dig2(s + 14);
+    if (mo < 0 || d < 0 || h < 0 || mi < 0) return -1;
+    p = s + 16;
+    if (*p == ':') { se = dig2(p + 1); if (se < 0) return -1; p += 3; }
+    if (p[0] != ' ' || (p[1] != '+' && p[1] != '-')) return -1;
+    oh = dig2(p + 2); om = dig2(p + 4);
+    if (oh < 0 || om < 0) return -1;
+    off = (long long)(oh * 60 + om) * 60;
+    if (p[1] == '-') off = -off;
+    return days_civil(y1 * 100 + y2, mo, d) * 86400 + h * 3600 + mi * 60 + se - off;
+}
+
+static void trim_nl(char *s) {
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ')) s[--n] = 0;
+}
+
+/* first line of command output into dst; returns 0 on success */
+static int run1(char **av, char *dst, int cap) {
+    static char out[VG_OUT];
+    char *nl;
+    long n;
+    dst[0] = 0;
+    if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
+    nl = strchr(out, '\n');
+    if (nl) *nl = 0;
+    n = (long)strlen(out);
+    if (n >= cap) return -1;
+    mm_copy(dst, cap, out, n + 1);
+    return dst[0] ? 0 : -1;
+}
+
+/* earliest commit on HEAD whose message contains pat: "<%ci>\t<%h>" */
+static int git_earliest(const char *pat, char *dst, int cap) {
+    static char out[VG_OUT];
+    char grep[256];
+    char *p, *last = 0, *nl;
+    long n;
+    char *av[] = {"git", "-C", root, "log", "--fixed-strings", grep, "--format=%ci\t%h", 0};
+    cx_fmt(grep, sizeof grep, "--grep=%s", pat);
+    dst[0] = 0;
+    if (ck_run(av, out, sizeof out) != 0 || !out[0]) return -1;
+    for (p = out; *p; ) {
+        nl = strchr(p, '\n');
+        if (p[0] >= '0' && p[0] <= '9') last = p;
+        if (!nl) break;
+        p = nl + 1;
+    }
+    if (!last) return -1;
+    nl = strchr(last, '\n');
+    n = nl ? (long)(nl - last) : (long)strlen(last);
+    if (n >= cap) return -1;
+    mm_copy(dst, cap, last, n);
+    dst[n] = 0;
+    return 0;
+}
+
+/* find INDEX row by name; copy timestamp (col 2) and description (col 5) */
+static int index_row(const char *idx, const char *name, char *ts, int tcap, char *desc, int dcap) {
+    const char *p = idx;
+    size_t nlen = strlen(name);
+    while (p && *p) {
+        const char *e = strchr(p, '\n');
+        size_t ln = e ? (size_t)(e - p) : strlen(p);
+        if (ln > nlen && !strncmp(p, name, nlen) && p[nlen] == '\t') {
+            const char *f[6];
+            const char *q = p;
+            int k = 0;
+            long n;
+            f[k++] = q;
+            while (q < p + ln && k < 6) { if (*q == '\t') f[k++] = q + 1; q++; }
+            if (k < 3) return -1;
+            n = (long)(f[2] - f[1] - 1);
+            if (n >= tcap) return -1;
+            mm_copy(ts, tcap, f[1], n);
+            ts[n] = 0;
+            if (desc) {
+                desc[0] = 0;
+                if (k >= 5) {
+                    const char *de = k >= 6 ? f[5] - 1 : p + ln;
+                    n = (long)(de - f[4]);
+                    if (n >= dcap) n = dcap - 1;
+                    mm_copy(desc, dcap, f[4], n);
+                    desc[n] = 0;
+                }
+            }
+            return 0;
+        }
+        p = e ? e + 1 : 0;
+    }
+    return -1;
+}
+
+static int is_hm(const char *p) { return dig2(p) >= 0 && p[2] == ':' && dig2(p + 3) >= 0; }
+
+static void fmt_min(long long a, long long b, char *dst, int cap) {
+    if (a < 0 || b < 0 || b < a) { cx_fmt(dst, cap, "UNMEASURED"); return; }
+    cx_fmt(dst, cap, "%lld", (b - a) / 60);
+}
+
+static void prerun_parse(const char *desc, const char *pts, char *ps, char *pe, char *pw) {
+    const char *p = strstr(desc, "预跑"), *q, *lim, *r, *sep = 0;
+    char s1[64], s2[64];
+    long long a, b;
+    if (!p) return;
+    q = p + strlen("预跑");
+    lim = q + 24;
+    while (*q && q < lim && !is_hm(q)) q++;
+    if (!*q || q >= lim) return;
+    r = q + 5;
+    if (!strncmp(r, " 到 ", strlen(" 到 "))) sep = r + strlen(" 到 ");
+    else if (!strncmp(r, " 起至 ", strlen(" 起至 "))) sep = r + strlen(" 起至 ");
+    if (!sep || !is_hm(sep)) return;
+    cx_fmt(s1, sizeof s1, "%.10s %.5s%s", pts, q, pts + 16);
+    cx_fmt(s2, sizeof s2, "%.10s %.5s%s", pts, sep, pts + 16);
+    a = parse_ts(s1);
+    b = parse_ts(s2);
+    if (a < 0 || b < 0) return;
+    if (a > b) a -= 86400;
+    cx_fmt(ps, 64, "%.5s", q);
+    cx_fmt(pe, 64, "%.5s", sep);
+    fmt_min(a, b, pw, 32);
+}
+
+static void row(int v) {
+    char ver[32], pat[128], buf[512], tag[64], range[64], idxp[4400];
+    char slot[64] = "UNMEASURED", slot_src[96] = "-";
+    char cut[64] = "UNMEASURED", cut_src[96] = "-";
+    char pre_s[64] = "UNMEASURED", pre_e[64] = "UNMEASURED", pre_w[32] = "UNMEASURED";
+    char freeze[64] = "UNMEASURED", freeze_src[96] = "-";
+    char pub[64] = "UNMEASURED", s2p[32], commits[32] = "UNMEASURED";
+    char pts[64];
+    static char desc[8192];
+    long long t_slot = -1, t_pub = -1;
+    size_t n = 0;
+    char *idx, *t;
+    cx_fmt(ver, sizeof ver, "0.0.%d", v);
+    cx_fmt(tag, sizeof tag, "v%s", ver);
+    cx_fmt(range, sizeof range, "v0.0.%d..v%s", v - 1, ver);
+    cx_fmt(pat, sizeof pat, "预置 %s 候选版本槽", ver);
+    if (git_earliest(pat, buf, sizeof buf) != 0) {
+        cx_fmt(pat, sizeof pat, "%s 版本槽", ver);
+        if (git_earliest(pat, buf, sizeof buf) != 0) buf[0] = 0;
+    }
+    t = buf[0] ? strchr(buf, '\t') : 0;
+    if (t) {
+        *t = 0;
+        t_slot = parse_ts(buf);
+        cx_fmt(slot, sizeof slot, "%.16s", buf);
+        cx_fmt(slot_src, sizeof slot_src, "git:%s", t + 1);
+    }
+    {
+        char *av[] = {"git", "-C", root, "log", "-1", "--format=%ci\t%h", tag, 0};
+        if (run1(av, buf, sizeof buf) == 0 && (t = strchr(buf, '\t')) != 0) {
+            *t = 0;
+            cx_fmt(freeze, sizeof freeze, "%.16s", buf);
+            cx_fmt(freeze_src, sizeof freeze_src, "tag:%s:%s", tag, t + 1);
+        }
+    }
+    {
+        char *av[] = {"git", "-C", root, "rev-list", "--count", range, 0};
+        if (run1(av, buf, sizeof buf) == 0) { trim_nl(buf); cx_fmt(commits, sizeof commits, "%s", buf); }
+    }
+    cx_fmt(idxp, sizeof idxp, "%s/release/evidence/%s/INDEX.tsv", root, ver);
+    idx = cx_read(idxp, &n);
+    if (idx) {
+        if (index_row(idx, "exec-5-publish", pts, sizeof pts, 0, 0) == 0) {
+            t_pub = parse_ts(pts);
+            if (t_pub >= 0) cx_fmt(pub, sizeof pub, "%.16s", pts);
+        }
+        if (index_row(idx, "prefreeze-strict", pts, sizeof pts, desc, sizeof desc) == 0) {
+            const char *p = strstr(desc, "T=");
+            if (p) {
+                char h[16];
+                int k = 0;
+                p += 2;
+                while (k < 15 && ((p[k] >= '0' && p[k] <= '9') || (p[k] >= 'a' && p[k] <= 'f'))) { h[k] = p[k]; k++; }
+                h[k] = 0;
+                if (k >= 7) {
+                    char *av[] = {"git", "-C", root, "log", "-1", "--format=%ci", h, 0};
+                    if (run1(av, buf, sizeof buf) == 0) {
+                        cx_fmt(cut, sizeof cut, "%.16s", buf);
+                        cx_fmt(cut_src, sizeof cut_src, "INDEX:prefreeze-strict:T=%s", h);
+                    }
+                }
+            }
+            prerun_parse(desc, pts, pre_s, pre_e, pre_w);
+        }
+    }
+    fmt_min(t_slot, t_pub, s2p, sizeof s2p);
+    cell(ver, 0); cell("PUBLIC", 0);
+    cell(slot, 0); cell(slot_src, 0);
+    cell(cut, 0); cell(cut_src, 0);
+    cell("UNMEASURED", 0);              /* chain_wall_min: bg-candidate out 已清，仓内无链起止 */
+    cell(pre_s, 0); cell(pre_e, 0); cell(pre_w, 0);
+    cell("UNMEASURED", 0);              /* prerun_par: 未入账 */
+    cell(freeze, 0); cell(freeze_src, 0);
+    cell(pub, 0); cell(s2p, 0);
+    cell(commits, 0);
+    cell("UNMEASURED", 0); cell("UNMEASURED", 0); cell("UNMEASURED", 0); /* A/B/C: lane-inputs 口径未落库 */
+    cell("UNMEASURED", 0);              /* rework: 整链重起无计数 */
+    cell("-", 1);
+}
+
+static void row_open(void) {
+    static const char *c[] = {
+        "0.0.86", "OPEN", "2026-11-20 13:00", "dispatch:2026-11-20",
+        "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-",
+        "UNMEASURED", "UNMEASURED", "UNMEASURED", "UNMEASURED", "UNMEASURED",
+        "planned_units=17.4..20.4(plans/v0.0.86.md)", 0};
+    for (int i = 0; c[i]; i++) cell(c[i], c[i + 1] == 0);
+}
+
+int main(int argc, char **argv) {
+    int mode = 0;
+    char path[4400];
+    cx_fmt(root, sizeof root, ".");
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--write")) mode = 1;
+        else if (!strcmp(argv[i], "--check")) mode = 2;
+        else if (!strcmp(argv[i], "--print")) mode = 3;
+        else if (!strcmp(argv[i], "--root") && i + 1 < argc) cx_fmt(root, sizeof root, "%s", argv[++i]);
+        else die("unknown option", argv[i]);
+    }
+    if (!mode) die("usage", "--write|--check|--print [--root DIR]");
+    put("# version\tstate\tslot_open\tslot_src\tcontent_cutoff\tcutoff_src\tchain_wall_min\tprerun_start\tprerun_end\tprerun_wall_min\tprerun_par\tfreeze\tfreeze_src\tpublic\tslot_to_public_min\tcommits\tcommits_A\tcommits_B\tcommits_C\trework\tnote\n");
+    put("# generated by tools/version-metrics-gen.cx --write; times +0800; public = release/evidence/VER/INDEX.tsv exec-5-publish; commits = git rev-list --count prev_tag..tag; do not edit\n");
+    for (int v = 81; v <= 85; v++) row(v);
+    row_open();
+    cx_fmt(path, sizeof path, "%s/build/version-cadence.tsv", root);
+    if (mode == 3) { fputs(tbl, stdout); return 0; }
+    if (mode == 1) {
+        if (cx_write(path, tbl, (size_t)tlen) != 0) die("write failed", path);
+        printf("VERSION_CADENCE\tstatus=WRITE\trows=6\tunmeasured=%d\n", unmeasured);
+        return 0;
+    }
+    {
+        size_t on = 0;
+        char *old = cx_read(path, &on);
+        if (!old || (int)on != tlen || memcmp(old, tbl, on) != 0) {
+            printf("DIFF\t%s\n", path);
+            printf("VERSION_CADENCE\tstatus=CHECK\trows=6\tunmeasured=%d\tresult=DIFF\n", unmeasured);
+            return 1;
+        }
+    }
+    printf("VERSION_CADENCE\tstatus=CHECK\trows=6\tunmeasured=%d\n", unmeasured);
+    return 0;
+}

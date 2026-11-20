@@ -546,3 +546,60 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 (3) 前置门:每步只在上一步证据对同键成立时触发;任何一步 rc 非 0 或门 FAIL 即停,发 react 事件 tail.stop(键、步名、rc、证据路径),不自动重试,同一失败连续两次上报。
 (4) 与 devsvc react 的接口:react 订阅 chain.done(bg-candidate 封条写出)事件,载荷带 rev 与 APE sha;react 只按 --tail-plan 的行顺序逐步调 devsvc x(每步有界 60 秒,pack/qualify 按其自身分段),每步完成发 tail.step(键、步、rc、证据);常驻、锁与截止由 devsvc 现有 react 框架负责,本草案不新起常驻。之后接 release-run --prepare 出草稿,公开仍由 --execute 人工确认触发。
 (5) 未做:react 侧订阅与执行器、同键证据探测的实现、对 0.0.75 实跑计时。
+
+## 等待心跳事件设计(0.0.87 S6,2026-11-20,只设计,未实现)
+
+问题:窗口与代理的空等量没有账(fast-iteration 数据缺口节),督导靠读屏判断谁在等、等什么,不可核也不可累计。
+
+(1) 窗口终态上报:每个窗口(Claude Code 及其它 harness)在状态变化时经 `devsvc win state` 上报一行,字段固定五个:
+- window:窗口名(与写窗口锁的持有者名同一命名空间);
+- state:working / idle / waiting / compacting 四值之一,其它值拒绝;
+- since:进入该状态的时刻(秒,+0800 渲染),由 devsvc 收到时记,不信客户端时钟;
+- task:当前任务键(prd_mempalace 下一动作号或 job ID),空记 `-`;
+- blocker:waiting 时必填(等的作业 ID、锁名或窗口名),其它状态记 `-`;waiting 而无 blocker 拒绝。
+(2) devsvc 事件 `window.state`:收到上报即追加到事件流(与现有作业事件同一订阅通道),同窗口同状态重复上报只刷新心跳不发新事件;心跳超过上限(建议 10 分钟)未刷新则 devsvc 自发 `window.state` state=idle blocker=`heartbeat-lost`,不猜测窗口真实状态。
+(3) 督导只读事件不读屏:督导与主调度订阅 `window.state`,按 window 聚合 waiting 段的起止得出等待分钟与 blocker 分布;读屏不再作为判断依据。
+(4) 入账:由事件流离线派生 `build/wait-ledger.tsv`(window、task、state、since、until、minutes、blocker),生成器带 `--check`,与 build/version-cadence.tsv 同口径按版本切分;事件缺失的时段记 UNMEASURED,不补估。
+(5) 实现落点:`tools/devsvc.cx` 新增 `win state` 子命令与事件类型,钩子侧(宿主 Stop/Notification 钩子)只调用该子命令,不在钩子里写判断。
+(6) 估时:上报子命令加事件约 1 单位;心跳超时自发事件约 0.5 单位;wait-ledger 生成器加检查约 1 单位;钩子接线约 0.5 单位;合计约 3 单位,另需对拍夹具(四状态、缺 blocker 拒绝、心跳丢失)。
+(7) 未做:全部实现与实测;compacting 状态由宿主是否暴露压缩信号决定,未核。
+
+## 分布式演进(2026-11-20)
+
+(A) 项目所有者 2026-11-20 方向(原话):"你可能误会了,并发只是结果,不是原因,不能以为只靠并发就能解决,关键应该是分而治之,就是如何更好的分割,这分割不只是模块,还有开发工作流中的每一个环节和泳道,所有的等待都应该合理的处理";"devsvc 也要再进化,要更好地支援我们这个分布式的设计理念(并发只是好的分布式设计顺便带来的必然效果)"。
+
+(C) devsvc 分布式演进(主调度决定):
+- (1) 内容身份产物库:候选 APE、预编工具二进制、消费者清扫基线、批次证据都按输入身份存取,先查后算(0.0.87);
+- (2) 合并队列:单元提交进队列,门是唯一裁判,过门自动合入版本分支;登记表(tests/batches.tsv coverage.tsv batch-domain-index tools-compile-sources 等)由每单元清单生成,消灭表冲突(0.0.87,即 devsvc 演进评审第 4 项的落地);
+- (3) 状态总线:窗口与作业心跳事件 window.state,督导读事件不读屏(0.0.87,依据本文件"等待心跳事件设计");
+- (4) 数据流触发:作业声明输入与输出身份,输入就绪即自动执行(0.0.88,承接 react 重做与 T3 推测链);
+- (5) 租约式工作队列:任务带机器可读合同(写域、验收命令、截止)加租约与抢占(0.0.88,承接 devtask 与 S2 第二期授租抢占设计);
+- (6) 按泳道选子门:提交门只跑改动路径相关的子门(0.0.88,承接 T1 门名与原因码回执)。
+
+三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
+
+环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+
+## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
+
+按来源工具归类(du 与个数为 2026-11-20 实测,/tmp 与 ~/.cache/unisacc):
+
+| 位置与前缀 | 个数 | 占用 | 来源工具(按前缀推断) | 建议 |
+|---|---|---|---|---|
+| /tmp/product-map-query-check-* | 6 | 2.3G | tools/check-product-map-query 夹具 | 白名单前缀,检查退出即删;保留最近 1 个供失败取证 |
+| /tmp/derive-readset-* | 4 | 999M | derive 读集检查 | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-session-* | 3 | 491M | sessionroot 会话目录 | 仅当无存活 PID 引用时删(发布打包曾依赖,见 pkg-gaps EVIDENCE-DEPENDS-ON-TMP-CLEANUP) |
+| /tmp/check-commit-own-* | 1 | 249M | tools/check-commit-own.cx 夹具 | 白名单前缀,退出即删 |
+| /tmp/cx-* | 10 | 96M | 产品临时编译目录 | 超 1 小时且无持有进程删 |
+| /tmp/precommit-flow-* | 52 | 80M | precommit flow | 白名单前缀,超 1 小时删 |
+| /tmp/unisacc-affected-* | 275 | 35M | tools/affected.cx | 白名单前缀,超 1 小时删(个数多) |
+| /tmp/chain-ready* | 70 | 4.8M | tools/chain-ready.cx | 白名单前缀,超 1 小时删 |
+| /tmp/omp-flow-cli*、devsvc-flow-*、precommit-lint* | 225、63、101 | 约 1.6M | flow 客户端与 lint | 白名单前缀,超 1 小时删 |
+| /tmp/pcfck-fx-*、tmp.* | 4、8 | 0 | 夹具空目录 | 空目录直接删 |
+| /tmp/s9nr-* | 0 | 0 | s9 夹具 | 本次未见,保留前缀进白名单 |
+| ~/.cache/unisacc/check-devsvc-core | - | 3.6G | check-devsvc-core 夹具缓存 | 设容量上限,超限按最旧删 |
+| ~/.cache/unisacc/check-precommit-gates | - | 2.8G | check-precommit-gates 夹具缓存 | 同上 |
+| ~/.cache/unisacc/check-derive-flow | - | 592M | check-derive-flow 夹具缓存 | 同上 |
+| ~/.cache/unisacc/tlib、chains、symindex、e3cache | - | 16G、7.4G、5.3G、2.9G | 构造缓存与整链 | 非垃圾,不进白名单;chains 只删已发布版本且无引用的链目录 |
+
+保留规则:(1) 只删白名单前缀;(2) 有存活进程(按真实 PID 核 /proc/PID/cwd 与打开文件)引用的不删;(3) 被 release/evidence 或 cache-manager 记录引用的路径不删;(4) 每次清理写事件(前缀、个数、字节),删不掉具名报告。

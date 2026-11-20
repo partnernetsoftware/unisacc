@@ -16,12 +16,36 @@
  * An identical installed APE reports ALREADY: --write repairs stale build-record bytes/kind/digest and
  * the APE receipt. Clean records are not rewritten. Without --write stale metadata is unchanged.
  * Prints INSTALL_APE<TAB>status<TAB>sha256<TAB>bytes; exit 0 ok, 1 refused, 2 usage/IO.
+ *
+ * Candidate mode (0.0.87 S4: install a chain candidate as the local Root before it is public):
+ *   sh ./unisacc.com tools/install-ape.cx -- ROOT --candidate DIR [--write]
+ *   DIR is one bg-candidate directory BASE/<rev> (40 hex basename).  Refused by name unless
+ *   DIR/chain-run.identity has the whole line rev=<rev>, DIR/seal.tsv exists, the last unisacc-next.com row of
+ *   DIR/ape-final/ape-receipt.txt names DIR/ape-final/unisacc-next.com with the file's own sha and bytes, and the
+ *   version the APE answers is a data row (column version) of ROOT/release/candidate.tsv.  Then the normal install
+ *   runs, with three differences: before unisacc.com is replaced the current Root is backed up into
+ *   ROOT/.unisacc-root-backups/<sha256>/ (unisacc.com, build record, receipt, sha record, candidate marker, and
+ *   manifest.tsv with each file's sha256 and bytes; at most three backups, index.tsv oldest first, the oldest removed
+ *   beyond three; a removal is unlink of exactly those names plus rmdir, checked: a backup that cannot be removed is
+ *   refused by name and stays in the index); ROOT/unisacc.com.candidate.tsv is
+ *   written ("CANDIDATE rev= sha= bytes= version= source= not=PUBLISHED"); plans/root-identity.md is NOT re-emitted
+ *   (a tracked document never names an unpublished product).  Nothing is written under release/evidence.
+ *   A normal (public) install --write removes the candidate marker.
+ *   ROOT --rollback [--write]: restores the newest backup: every file checked against the manifest first, all copied
+ *   to verified temporary names, then renamed into place with the replaced files kept aside until the last step (a
+ *   failing step puts them back); files absent from the backup removed; the backup directory removed (checked), then
+ *   dropped from the index.  No backup (index absent or empty): REFUSED no-candidate-backup.
+ *   ROOT --rollback-split [--write]: the old split-era rollback below (unisacc-dev back to unisacc.com).
+ *   ROOT --release-gate: rc 0 INSTALL_APE PUBLIC_ROOT when there is no candidate marker; rc 1
+ *   INSTALL_APE REFUSED root-candidate rev=... otherwise.  release-exec and release-run --pack refuse the same
+ *   marker themselves (REFUSE ..._ROOT_CANDIDATE); chain-ready item 17-root-public lists it without blocking a chain.
  * An L3 tool: no #include, no direct libc call. */
 #pragma unisa use runtime.packagefooter
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -219,6 +243,306 @@ static void ia_emit_identity(const char *root) {
     sy_printf("INSTALL_APE\tIDENTITY_EMITTED\t%s\n", doc);
 }
 
+/* ---- candidate mode: backups, marker, rollback, release gate ---------------------------------------------- */
+#define IA_KEEP 3
+#define IA_MARK "unisacc.com.candidate.tsv"
+#define IA_BDIR ".unisacc-root-backups"
+#define IA_NSAVED 5
+#define IA_MANIFEST "manifest.tsv"
+static const char *ia_saved[IA_NSAVED] = {"unisacc.com", "unisacc.com.build.json", "ape-receipt.txt", "unisacc.com.ape.sha256", IA_MARK};
+static const char *g_cand_rev, *g_cand_dir;
+static char g_cand_ver[160];
+
+static int ia_hexn(const char *s, int n) {
+    int i;
+    for (i = 0; i < n; i++) { char c = s[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0; }
+    return s[n] == 0;
+}
+
+/* index.tsv: one sha256 per line, oldest first.  Reads up to 16 entries into SHAS; returns the count, -1 none. */
+static int ia_index_read(const char *root, char shas[16][65]) {
+    char p[4400]; size_t n = 0; long at = 0; int k = 0; char *b;
+    if (cx_fmt(p, sizeof p, "%s/%s/index.tsv", root, IA_BDIR)) ia_die("path");
+    if (sy_exists(p) != 1) return -1;
+    if (!(b = cx_read(p, &n))) ia_die("cannot read the backup index");
+    while (at < (long)n && k < 16) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e - at == 64) { mm_copy(shas[k], 65, b + at, 64); shas[k][64] = 0; if (ia_hexn(shas[k], 64)) k++; }
+        at = e + 1;
+    }
+    mm_free(b);
+    return k;
+}
+static void ia_index_write(const char *root, char shas[16][65], int k) {
+    char p[4400], t[4400], buf[16 * 65 + 1]; long w = 0; int i;
+    if (cx_fmt(p, sizeof p, "%s/%s/index.tsv", root, IA_BDIR) || cx_fmt(t, sizeof t, "%s.%d", p, sy_pid())) ia_die("path");
+    for (i = 0; i < k; i++) { mm_copy(buf + w, (long)sizeof buf - w, shas[i], 64); w += 64; buf[w++] = '\n'; }
+    if (cx_write(t, buf, (size_t)w)) { (void)sy_unlink(t); ia_die("cannot write the backup index"); }
+    if (sy_rename(t, p)) { (void)sy_unlink(t); ia_die("cannot rename the backup index"); }
+}
+
+/* Remove the backup directory D.  It holds at most the IA_NSAVED saved files and the manifest: exactly those names
+   are unlinked (an explicit bound of IA_NSAVED + 1 entries, no recursion, links never followed), then D itself is
+   removed with rmdir, so any other entry makes the removal fail instead of being deleted.  0 when D is gone (or was
+   absent); otherwise -1 with WHY naming the entry that could not be removed (D then still exists). */
+static int ia_drop_backup(const char *d, char *why, int wl) {
+    char p[4400]; sy_stat_t st; int i, r;
+    r = sy_lstat(d, &st);
+    if (r == -ENOENT) return 0;
+    if (r) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", d, r); return -1; }
+    if (st.kind != 'd') { cx_fmt(why, (size_t)wl, "%s is not a directory", d); return -1; }
+    for (i = 0; i <= IA_NSAVED; i++) {
+        if (ia_join(p, (int)sizeof p, d, i < IA_NSAVED ? ia_saved[i] : IA_MANIFEST)) { cx_fmt(why, (size_t)wl, "path too long under %s", d); return -1; }
+        r = sy_lstat(p, &st);
+        if (r == -ENOENT) continue;
+        if (r) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", p, r); return -1; }
+        if (st.kind == 'd') { cx_fmt(why, (size_t)wl, "%s is a directory", p); return -1; }
+        if ((r = sy_unlink(p)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d)", p, r); return -1; }
+    }
+    if ((r = sy_rmdir(d)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d; an entry outside the backup set?)", d, r); return -1; }
+    return 0;
+}
+
+/* copy the current Root state into ROOT/.unisacc-root-backups/<sha>/ with manifest.tsv (name<TAB>sha256<TAB>bytes per
+   saved file) and keep at most IA_KEEP backups.  Every removal is checked: a backup that cannot be removed is refused
+   by name and the index keeps listing it, so index.tsv and the directories never disagree. */
+static void ia_backup(const char *root) {
+    char com[4400], bd[4400], d[4400], s[4400], t[4400], mt[4400], cur[65], hs[65], ht[65], shas[16][65], why[4600], man[2048];
+    long cb = 0, sb = 0, tb = 0, mw = 0; int k, i, j;
+    if (ia_join(com, (int)sizeof com, root, "unisacc.com") || ia_join(bd, (int)sizeof bd, root, IA_BDIR)) ia_die("path");
+    if (sy_exists(com) != 1 || ia_sha(com, cur, &cb)) { sy_printf("INSTALL_APE\tBACKUP_SKIP\tno-current-root\n"); return; }
+    if (sy_exists(bd) != 1 && sy_mkdir(bd, 0755)) ia_die("cannot make the backup directory");
+    if (ia_join(d, (int)sizeof d, bd, cur)) ia_die("path");
+    if (ia_drop_backup(d, why, (int)sizeof why)) ia_refuse("backup-not-removable", why);
+    if (sy_mkdir(d, 0755)) ia_die("cannot make the backup");
+    man[0] = 0;
+    for (i = 0; i < IA_NSAVED; i++) {
+        if (ia_join(s, (int)sizeof s, root, ia_saved[i]) || ia_join(t, (int)sizeof t, d, ia_saved[i])) ia_die("path");
+        if (sy_exists(s) != 1) continue;
+        if (ia_sha(s, hs, &sb)) ia_die("cannot read a Root file for the backup");
+        if (sy_copy(s, t, i == 0 ? 0755 : 0644)) ia_die("cannot copy into the backup");
+        if (ia_sha(t, ht, &tb) || !tx_eqz(hs, ht) || sb != tb || (i == 0 && (!tx_eqz(ht, cur) || tb != cb))) ia_die("backup copy differs from the Root");
+        if (cx_fmt(man + mw, sizeof man - (size_t)mw, "%s\t%s\t%ld\n", ia_saved[i], ht, tb)) ia_die("backup manifest");
+        mw += tx_len(man + mw, (long)sizeof man - mw);
+    }
+    if (ia_join(t, (int)sizeof t, d, IA_MANIFEST) || cx_fmt(mt, sizeof mt, "%s.%d", t, sy_pid())) ia_die("path");
+    if (cx_write(mt, man, (size_t)mw)) { (void)sy_unlink(mt); ia_die("cannot write the backup manifest"); }
+    if (sy_rename(mt, t)) { (void)sy_unlink(mt); ia_die("cannot rename the backup manifest"); }
+    k = ia_index_read(root, shas);
+    if (k < 0) k = 0;
+    for (i = j = 0; i < k; i++) if (!tx_eqz(shas[i], cur)) { if (i != j) mm_copy(shas[j], 65, shas[i], 65); j++; }
+    k = j;
+    if (k >= 16) ia_die("backup index full");
+    mm_copy(shas[k++], 65, cur, 65);
+    while (k > IA_KEEP) {
+        char old[4400];
+        if (ia_join(old, (int)sizeof old, bd, shas[0])) ia_die("path");
+        if (ia_drop_backup(old, why, (int)sizeof why)) { ia_index_write(root, shas, k); ia_refuse("backup-prune-failed", why); }
+        sy_printf("INSTALL_APE\tBACKUP_PRUNED\t%s\n", shas[0]);
+        for (i = 1; i < k; i++) mm_copy(shas[i - 1], 65, shas[i], 65);
+        k--;
+    }
+    ia_index_write(root, shas, k);
+    sy_printf("INSTALL_APE\tBACKUP\t%s\t%ld\tkept=%d\n", cur, cb, k);
+}
+
+static void ia_mark(const char *root, const char *sha, long bytes) {
+    char p[4400], t[4400], line[9000];
+    if (ia_join(p, (int)sizeof p, root, IA_MARK) || cx_fmt(t, sizeof t, "%s.%d", p, sy_pid())) ia_die("path");
+    if (!g_cand_rev) {
+        if (sy_exists(p) == 1) { if (sy_unlink(p)) ia_die("cannot remove the candidate marker"); sy_printf("INSTALL_APE\tCANDIDATE_CLEARED\t%s\n", p); }
+        return;
+    }
+    if (cx_fmt(line, sizeof line, "CANDIDATE\trev=%s\tsha=%s\tbytes=%ld\tversion=%s\tsource=%s\tnot=PUBLISHED\n", g_cand_rev, sha, bytes, g_cand_ver, g_cand_dir)) ia_die("marker format");
+    if (cx_write(t, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(t); ia_die("cannot write the candidate marker"); }
+    if (sy_rename(t, p)) { (void)sy_unlink(t); ia_die("cannot rename the candidate marker"); }
+    sy_printf("INSTALL_APE\tCANDIDATE\trev=%s\tnot=PUBLISHED\n", g_cand_rev);
+}
+
+/* Read DIR/manifest.tsv into SHA/BYTES per saved name; LISTED[i] set for a listed name.  0, or a refusal word. */
+static const char *ia_manifest(const char *d, int listed[IA_NSAVED], char sha[IA_NSAVED][65], long bytes[IA_NSAVED]) {
+    char p[4400]; size_t n = 0; long at = 0, off, len; char *b; int i;
+    for (i = 0; i < IA_NSAVED; i++) { listed[i] = 0; sha[i][0] = 0; bytes[i] = -1; }
+    if (ia_join(p, (int)sizeof p, d, IA_MANIFEST)) ia_die("path");
+    if (!(b = cx_read(p, &n))) return "backup-no-manifest";
+    while (at < (long)n) {
+        long e = at, v = 0, q; int hit = -1;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e == at) { at = e + 1; continue; }
+        if (tx_field(b + at, e - at, '\t', 0, &off, &len)) { mm_free(b); return "backup-manifest-malformed"; }
+        for (i = 0; i < IA_NSAVED; i++) if (tx_same(b + at + off, len, ia_saved[i], tx_len(ia_saved[i], 64))) hit = i;
+        if (hit < 0 || listed[hit]) { mm_free(b); return "backup-manifest-unknown-entry"; }
+        if (tx_field(b + at, e - at, '\t', 1, &off, &len) || len != 64) { mm_free(b); return "backup-manifest-malformed"; }
+        mm_copy(sha[hit], 65, b + at + off, 64); sha[hit][64] = 0;
+        if (!ia_hexn(sha[hit], 64) || tx_field(b + at, e - at, '\t', 2, &off, &len) || len < 1 || len > 18) { mm_free(b); return "backup-manifest-malformed"; }
+        for (q = 0; q < len; q++) { char c = b[at + off + q]; if (c < '0' || c > '9') { mm_free(b); return "backup-manifest-malformed"; } v = v * 10 + (c - '0'); }
+        bytes[hit] = v; listed[hit] = 1;
+        at = e + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+/* test hook: UNISACC_INSTALL_APE_FAULT=rollback-step-N makes rollback step N (0-based) fail before its rename */
+static int ia_fault_step(void) {
+    const char *f = sy_env("UNISACC_INSTALL_APE_FAULT"); int v = 0, i;
+    if (!f || !tx_same(f, 14, "rollback-step-", 14) || !f[14]) return -1;
+    for (i = 14; f[i]; i++) { if (f[i] < '0' || f[i] > '9') return -1; v = v * 10 + (f[i] - '0'); }
+    return v;
+}
+
+/* restore the newest backup; -1 when there is no backup index at all.  Every file of the backup is checked against
+   its manifest first.  The files are then copied to temporary names and verified, and only then renamed into place
+   one by one, each replaced Root file moved aside first; a failing step puts every already replaced file back, so
+   the Root is either the backup or what it was.  The backup directory is removed (checked) before the index drops it. */
+static int ia_rollback_backup(const char *root, int write) {
+    char shas[16][65], bd[4400], d[4400], s[4400], h[65], why[4600];
+    char tmpn[IA_NSAVED][4400], oldn[IA_NSAVED][4400], tgt[IA_NSAVED][4400], msha[IA_NSAVED][65];
+    int listed[IA_NSAVED], moved[IA_NSAVED], placed[IA_NSAVED], i, j, fault = ia_fault_step();
+    long b = 0, mbytes[IA_NSAVED];
+    const char *bad;
+    int k = ia_index_read(root, shas);
+    if (k < 0) return -1;
+    if (k == 0) return -1;
+    if (ia_join(bd, (int)sizeof bd, root, IA_BDIR) || ia_join(d, (int)sizeof d, bd, shas[k - 1]) || ia_join(s, (int)sizeof s, d, "unisacc.com")) ia_die("path");
+    if (ia_sha(s, h, &b) || !tx_eqz(h, shas[k - 1])) ia_refuse("backup-differs-from-its-name", d);
+    if ((bad = ia_manifest(d, listed, msha, mbytes)) != 0) ia_refuse(bad, d);
+    if (!listed[0] || !tx_eqz(msha[0], shas[k - 1])) ia_refuse("backup-manifest-names-another-root", d);
+    for (i = 0; i < IA_NSAVED; i++) {
+        if (ia_join(s, (int)sizeof s, d, ia_saved[i])) ia_die("path");
+        if (!listed[i]) { if (sy_exists(s) != 0) ia_refuse("backup-file-not-in-manifest", s); continue; }
+        if (ia_sha(s, h, &b) || !tx_eqz(h, msha[i]) || b != mbytes[i]) ia_refuse("backup-file-differs-from-manifest", s);
+    }
+    if (!write) { sy_printf("INSTALL_APE\tROLLBACK_DRYRUN\t%s\n", shas[k - 1]); return 0; }
+    for (i = 0; i < IA_NSAVED; i++) {
+        moved[i] = placed[i] = 0;
+        if (ia_join(tgt[i], (int)sizeof tgt[i], root, ia_saved[i]) || cx_fmt(tmpn[i], sizeof tmpn[i], "%s/.rollback.%d.%d", root, i, sy_pid()) ||
+            cx_fmt(oldn[i], sizeof oldn[i], "%s/.rollback-old.%d.%d", root, i, sy_pid())) ia_die("path");
+    }
+    /* phase 1: every backup file at a verified temporary name; nothing in the Root changed yet */
+    for (i = 0; i < IA_NSAVED; i++) {
+        if (!listed[i]) continue;
+        if (ia_join(s, (int)sizeof s, d, ia_saved[i])) ia_die("path");
+        if (sy_copy(s, tmpn[i], i == 0 ? 0755 : 0644) || ia_sha(tmpn[i], h, &b) || !tx_eqz(h, msha[i]) || b != mbytes[i]) {
+            for (j = 0; j <= i; j++) (void)sy_unlink(tmpn[j]);
+            ia_refuse("rollback-copy-failed-root-unchanged", s);
+        }
+    }
+    /* phase 2: move each present Root file aside, put the backup file in its place */
+    for (i = 0; i < IA_NSAVED; i++) {
+        int fail = 0;
+        if (i == fault) fail = 1;
+        if (!fail && sy_exists(tgt[i]) == 1) { if (sy_rename(tgt[i], oldn[i])) fail = 1; else moved[i] = 1; }
+        if (!fail && listed[i]) { if (sy_rename(tmpn[i], tgt[i])) fail = 1; else placed[i] = 1; }
+        if (fail) {
+            int lost = 0;
+            for (j = i; j >= 0; j--) {
+                if (moved[j]) { if (sy_rename(oldn[j], tgt[j])) lost = 1; }
+                else if (placed[j]) { if (sy_unlink(tgt[j])) lost = 1; }
+            }
+            for (j = 0; j < IA_NSAVED; j++) if (listed[j] && !placed[j]) (void)sy_unlink(tmpn[j]);
+            if (lost) ia_die("rollback failed and the Root could not be put back; see .rollback-old.* in the Root");
+            ia_refuse("rollback-step-failed-root-unchanged", ia_saved[i]);
+        }
+    }
+    for (i = 0; i < IA_NSAVED; i++) if (moved[i]) (void)sy_unlink(oldn[i]);
+    if (ia_sha(tgt[0], h, &b) || !tx_eqz(h, shas[k - 1])) ia_die("restored Root differs from the backup");
+    if (ia_drop_backup(d, why, (int)sizeof why)) {
+        sy_printf("INSTALL_APE\tREFUSED\tbackup-not-removable\t%s\tindex-kept\n", why);
+        sy_eprintf("install-ape: rolled back, but the backup could not be removed: %s\n", why);
+        sy_exit(2);
+    }
+    ia_index_write(root, shas, k - 1);
+    sy_printf("INSTALL_APE\tROLLED_BACK\t%s\t%ld\tkept=%d\n", shas[k - 1], mbytes[0], k - 1);
+    return 0;
+}
+
+static int ia_release_gate(const char *root) {
+    char p[4400], rev[64]; size_t n = 0; char *b; long at;
+    if (ia_join(p, (int)sizeof p, root, IA_MARK)) ia_die("path");
+    if (sy_exists(p) != 1) { sy_printf("INSTALL_APE\tPUBLIC_ROOT\t%s\n", root); return 0; }
+    rev[0] = 0;
+    if ((b = cx_read(p, &n)) != 0) {
+        at = tx_find(b, (long)n, "rev=", 4);
+        if (at >= 0 && at + 44 <= (long)n) { mm_copy(rev, (long)sizeof rev, b + at, 44); rev[44] = 0; }
+        mm_free(b);
+    }
+    sy_printf("INSTALL_APE\tREFUSED\troot-candidate\t%s\tfix=install-ape --rollback or install the public APE\n", rev[0] ? rev : "rev=?");
+    return 1;
+}
+
+/* verify DIR as a sealed bg-candidate and install its APE in candidate mode */
+static int ia_install(const char *root, const char *ape, const char *want, int write);
+static int ia_candidate(const char *root, const char *dirarg, int write) {
+    static char dir[4096];
+    char p[4400], apep[4400], got[65], ver[160], have_s[32];
+    const char *rev; long l, have = 0, at = 0, off, len; size_t n = 0; char *b;
+    int found = 0;
+    char rfile[4400], rsha[80], rbytes[40];
+    if (sy_realpath(dirarg, dir, (int)sizeof dir) < 0) ia_refuse("candidate-dir-unreadable", dirarg);
+    l = tx_len(dir, (long)sizeof dir); rev = dir + l;
+    while (rev > dir && rev[-1] != '/') rev--;
+    if (!ia_hexn(rev, 40)) ia_refuse("candidate-dir-not-rev", dir);
+    if (ia_join(p, (int)sizeof p, dir, "chain-run.identity")) ia_die("path");
+    if (!(b = cx_read(p, &n))) ia_refuse("candidate-no-identity", p);
+    {   /* one whole line "rev=<rev>" (CR tolerated); "prev=<rev>" or "rev=<rev>x" is no match */
+        char pat[64]; long q = 0;
+        cx_fmt(pat, sizeof pat, "rev=%s", rev);
+        while (q < (long)n && !found) {
+            long e = q, le;
+            while (e < (long)n && b[e] != '\n') e++;
+            le = e > q && b[e - 1] == '\r' ? e - 1 : e;
+            if (le - q == 44 && tx_same(b + q, 44, pat, 44)) found = 1;
+            q = e + 1;
+        }
+        mm_free(b); }
+    if (!found) ia_refuse("candidate-identity-rev-mismatch", rev);
+    if (ia_join(p, (int)sizeof p, dir, "seal.tsv")) ia_die("path");
+    if (sy_exists(p) != 1) ia_refuse("candidate-not-sealed", p);
+    if (ia_join(p, (int)sizeof p, dir, "ape-final/ape-receipt.txt") || ia_join(apep, (int)sizeof apep, dir, "ape-final/unisacc-next.com")) ia_die("path");
+    if (!(b = cx_read(p, &n))) ia_refuse("candidate-no-ape-receipt", p);
+    found = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e - at > 17 && tx_same(b + at, 17, "unisacc-next.com\t", 17) &&
+            !tx_field(b + at, e - at, '\t', 1, &off, &len) && len < (long)sizeof rfile) {
+            mm_copy(rfile, (long)sizeof rfile, b + at + off, len); rfile[len] = 0;
+            rsha[0] = rbytes[0] = 0;
+            if (!tx_field(b + at, e - at, '\t', 2, &off, &len) && len == 68 && tx_same(b + at + off, 4, "sha=", 4)) { mm_copy(rsha, (long)sizeof rsha, b + at + off + 4, 64); rsha[64] = 0; }
+            if (!tx_field(b + at, e - at, '\t', 3, &off, &len) && len > 6 && len < 30 && tx_same(b + at + off, 6, "bytes=", 6)) { mm_copy(rbytes, (long)sizeof rbytes, b + at + off + 6, len - 6); rbytes[len - 6] = 0; }
+            found = 1;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    if (!found) ia_refuse("candidate-receipt-no-ape-row", p);
+    if (!tx_eqz(rfile, apep)) ia_refuse("candidate-receipt-path-mismatch", rfile);
+    if (ia_sha(apep, got, &have)) ia_refuse("cannot-read-ape", apep);
+    cx_fmt(have_s, sizeof have_s, "%ld", have);
+    if (!tx_eqz(got, rsha) || !tx_eqz(have_s, rbytes)) ia_refuse("candidate-receipt-sha-mismatch", got);
+    if (!ia_version_ok(apep, ver, (int)sizeof ver)) ia_refuse("ape-does-not-answer-version", apep);
+    {   const char *v = ver + 8; long vl = 0;
+        while (v[vl] && v[vl] != ' ' && v[vl] != '\t' && vl < 150) vl++;
+        mm_copy(g_cand_ver, (long)sizeof g_cand_ver, v, vl); g_cand_ver[vl] = 0; }
+    if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", root)) ia_die("path");
+    found = 0; at = 0;
+    if ((b = cx_read(p, &n)) != 0) {
+        long vl = tx_len(g_cand_ver, (long)sizeof g_cand_ver);
+        while (at < (long)n) {
+            long e = at;
+            while (e < (long)n && b[e] != '\n') e++;
+            if (!tx_field(b + at, e - at, '\t', 3, &off, &len) && len == vl && tx_same(b + at + off, len, g_cand_ver, vl)) found = 1;
+            at = e + 1;
+        }
+        mm_free(b);
+    }
+    if (!found) ia_refuse("candidate-version-not-in-candidate-list", g_cand_ver);
+    g_cand_rev = rev; g_cand_dir = dir;
+    return ia_install(root, apep, got, write);
+}
+
 /* install APE over ROOT/unisacc.com.  want = expected sha; write = do it.  Returns the exit code. */
 static int ia_install(const char *root, const char *ape, const char *want, int write) {
     char got[65], cur[65], com[4400], dev[4400], tmp[4400], rec[4400], rtmp[4400], line[4400], ver[160];
@@ -233,7 +557,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         ia_join(rec, (int)sizeof rec, root, "unisacc.com.ape.sha256")) ia_die("path");
     if (cx_fmt(tmp, sizeof tmp, "%s/.unisacc.com.install.%d", root, pid) || cx_fmt(rtmp, sizeof rtmp, "%s/.unisacc.com.ape.sha256.%d", root, pid)) ia_die("path");
     if (ia_sha(com, cur, &cb) == 0 && tx_eqz(cur, got)) {
-        if (write) { ia_sync_record(root, ape, got, bytes); ia_write_receipt(root, ape, got, bytes); }
+        if (write) { ia_sync_record(root, ape, got, bytes); ia_write_receipt(root, ape, got, bytes); ia_mark(root, got, bytes); }
         sy_printf("INSTALL_APE\tALREADY\t%s\t%ld\t%s\n", got, bytes, ver);
         return 0;
     }
@@ -257,6 +581,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         if (ia_join(bj, (int)sizeof bj, root, "unisacc.com.build.json") || ia_join(bp, (int)sizeof bp, root, "unisacc.com.build.json.split-prev")) ia_die("path");
         if (sy_exists(bj) == 1 && sy_exists(bp) != 1 && sy_copy(bj, bp, 0600)) ia_die("cannot keep the build record as .split-prev");
     }
+    if (g_cand_rev) ia_backup(root);
     if (sy_copy(ape, tmp, 0755)) { (void)sy_unlink(tmp); ia_die("cannot copy the ape beside unisacc.com"); }
     if (ia_sha(tmp, cur, &cb) || !tx_eqz(cur, got) || cb != bytes) { (void)sy_unlink(tmp); ia_refuse("copy-differs-from-source", tmp); }
     if (cx_fmt(line, sizeof line, "%s\t%ld\t%s\n", got, bytes, "unisacc.com")) { (void)sy_unlink(tmp); ia_die("record"); }
@@ -265,7 +590,8 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
     if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
     ia_sync_record(root, ape, got, bytes);
     ia_write_receipt(root, ape, got, bytes);
-    ia_emit_identity(root);
+    ia_mark(root, got, bytes);
+    if (g_cand_rev) sy_printf("INSTALL_APE\tIDENTITY_SKIP\tcandidate-not-public\n"); else ia_emit_identity(root);
     sy_printf("INSTALL_APE\tINSTALLED\t%s\t%ld\t%s\n", got, bytes, ver);
     return 0;
 }
@@ -294,19 +620,31 @@ static int ia_rollback(const char *root, int write) {
 
 int main(int argc, char **argv) {
     char root[4096];
-    int write = 0, rollback = 0, i;
+    int write = 0, rollback = 0, gate = 0, i;
+    const char *cand = 0;
     const char *pos[3];
     int np = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         if (tx_eqz(argv[i], "--write")) { write = 1; continue; }
-        if (tx_eqz(argv[i], "--rollback")) { rollback = 1; continue; }
-        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write] | ROOT --rollback [--write]");
+        if (tx_eqz(argv[i], "--rollback")) { if (rollback) ia_die("usage: one of --rollback | --rollback-split"); rollback = 1; continue; }
+        if (tx_eqz(argv[i], "--rollback-split")) { if (rollback) ia_die("usage: one of --rollback | --rollback-split"); rollback = 2; continue; }
+        if (tx_eqz(argv[i], "--release-gate")) { gate = 1; continue; }
+        if (tx_eqz(argv[i], "--candidate")) { if (cand || i + 1 >= argc) ia_die("usage: ROOT --candidate DIR [--write]"); cand = argv[++i]; continue; }
+        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write] | ROOT --candidate DIR [--write] | ROOT --rollback [--write] | ROOT --release-gate");
+    }
+    if (gate || cand) {
+        if (np != 1 || rollback || (gate && (cand || write))) ia_die("usage: ROOT --candidate DIR [--write] | ROOT --release-gate");
+        if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
+        return gate ? ia_release_gate(root) : ia_candidate(root, cand, write);
     }
     if (rollback) {
+        int r;
         if (np != 1) ia_die("usage: ROOT --rollback [--write]");
         if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
-        return ia_rollback(root, write);
+        if (rollback == 2) return ia_rollback(root, write);
+        if ((r = ia_rollback_backup(root, write)) >= 0) return r;
+        ia_refuse("no-candidate-backup", "没有候选备份 (ROOT/.unisacc-root-backups/index.tsv absent or empty; the split-era undo is --rollback-split)");
     }
     if (np != 3) ia_die("usage: ROOT APE SHA256 [--write] | ROOT --rollback [--write]");
     if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
