@@ -831,6 +831,7 @@ static int getchar(void) { return fgetc(stdin); }
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_vprintf
+static int _u_vfmt(char *__u_out, __u_word __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap);
 static int vprintf(const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
 }
