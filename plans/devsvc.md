@@ -563,6 +563,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 (5) 实现落点:`tools/devsvc.cx` 新增 `win state` 子命令与事件类型,钩子侧(宿主 Stop/Notification 钩子)只调用该子命令,不在钩子里写判断。
 (6) 估时:上报子命令加事件约 1 单位;心跳超时自发事件约 0.5 单位;wait-ledger 生成器加检查约 1 单位;钩子接线约 0.5 单位;合计约 3 单位,另需对拍夹具(四状态、缺 blocker 拒绝、心跳丢失)。
 (7) 未做:全部实现与实测;compacting 状态由宿主是否暴露压缩信号决定,未核。
+(8) 与 task.ack 的关系(2026-11-20,见"(C)(7) 编排者对接"):task.ack 是派工送达事件,由窗口 task pull 拉到合同时发出,只证明合同送达与摘要一致;window.state 是窗口状态心跳,证明窗口活着及在做什么。两者互补不替代:ack 之后窗口应上报 working 且 task 填该任务键;超过 ack 时限未拉取发 task.unacked,心跳超时发 heartbeat-lost,两类事件分别计送达率与心跳丢失率。
 
 ## 分布式演进(2026-11-20)
 
@@ -579,6 +580,36 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
 
 环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+
+起链前置教训(2026-11-20):0.0.86 首次起链因工作树 unisacc.com 符号链接被换成真实文件而缺 unisacc.com.build.json,在 preflight entry 被拒,损失约 5 分钟;chain-ready 应直接核 preflight entry 的 PASS,列入 0.0.87 S4/S6。
+
+### (C)(7) 编排者对接:B 为主加上报与拉取,最小切片
+
+项目所有者 2026-11-20 想法(原话):"我有个idea,不成熟但可能有机会,就是把devsvc从工具再进化成harness,可能接上类似我们rawagy-flow和omp-workflow + omp-flow等工作流机制,从而让编排者直接对接它(以后再考虑把它升级出编排者角色)"。
+
+(1) 对方形态(只读评估者结论):omp-workflow(~/repos/moltbaby/omp-workflow,TypeScript)状态大多是进程内单例与宿主钩子,没有稳定跨进程协议,持久化只有 agenda JSONL、wf-runs.jsonl 与 queue TSV;bin/flow 是 mapp flow 算子 CLI(MCP 离线后备),与 omp-workflow 的 flow 工具同名但是两套东西(推断,未核);bin/rawagy-flow 给 agy 原生 TUI 加 AGY_FLOW=1 与插件 agy-flow,挂 SessionStart 与 PreInvocation 钩子调 route.sh 分流 answer/research/direct/plan 四类,规划者是主会话,执行者是 swarm worker neon,验收用 gemini-decision-1 判分记 verify.tsv,信封走 bin/tmux-envelope send-keys。
+
+(2) 对应关系:devsvc 的 devtask(任务单带写域、验收命令、截止)、收尾验收、流图 id/after、截止、写互斥、提交门、prebuild-self、react 等价或更强;事件部分等价(omp 把事件派生成待办议程)。devsvc 缺:升级档位、agenda 自续、窗口状态机与 assignee 存在性、派工送达确认(双方都没有);证据台账语义不同(omp 记工具输出原文且在进程内,devsvc 记产物身份)。决策类型与守卫属模型侧,不进 devsvc。
+
+(3) 三种对接形态:A 协议级并存(约 3 单位,风险最高,不建议:omp 核心状态在进程内且格式无版本号,unisacc 不能依赖 bun/TypeScript,违 cx 铁律);B 概念采纳,用 cx 重实现需要的子集(约 8 到 12 单位,只取任务合同、窗口状态机、升级(flow 节点按档位重派)、证据(按身份引用));C 由 devsvc 驱动,窗口只做上报与拉取(约 4 单位,窗口经钩子调 devsvc win state 上报,devsvc 不往 tmux 注入,注入只作唤醒提示)。
+
+(4) 主调度决定:B 为主加 C 的上报与拉取,不选 A。
+
+(5) 最小可行切片(两周内,约 7.5 单位):cc 经 devsvc 派任务给 agy-flow 窗口,全程不读屏。
+- 接口:devtask task open 加 --lease-to WIN --ack-s 120;新增 devsvc win state WIN STATE [--task ID] [--blocker B],字段同"等待心跳事件设计"五字段;新增 devsvc task pull --win WIN(窗口拉到合同即记送达并发 task.ack 事件,合同带 sha256,窗口回报必须带同一摘要);
+- task done 沿用现有流程,通过后 flow 节点依次触发变异自检门与复核节点(复核派给另一个窗口,同样走 pull);
+- 超过 ack 时限没拉取发 task.unacked,心跳超过 10 分钟发 heartbeat-lost;
+- 接线:agy-flow 的 SessionStart 钩子调 pull,Stop 钩子调 win state,钩子只调 devsvc 子命令不写判断逻辑(改动在 moltbaby 仓侧,由其维护者改);
+- 先红后绿夹具 check-devsvc-lease.cx:红五种(没 pull 就 done 被拒;摘要不符被拒;waiting 不带 blocker 被拒;心跳丢失出事件;写域外有改动 done 返回 rc 1);绿:一个真实 agy 窗口走完 ack -> working -> done -> 复核全程,events.tsv 逐行对上;
+- 估单位:win state 1.5、lease 与 pull 2、超时事件 1、复核节点 1、夹具 1.5、钩子接线 0.5。
+
+(6) 编排者角色升级前置条件(只列不设计):租约队列与窗口状态总线实跑超一个版本,有送达率与心跳丢失率数据;升级档位与复核判据只看验收命令不看模型自评;合同签名或摘要防篡改有负控夹具;有真实模型路由与额度事实表;信封派工量降到零或接近零有统计;devsvc 截止自退与持锁在多实例下有检查;有可审计的决策留痕写在 prd_mempalace。
+
+(7) 风险:协议漂移(B 只吸收概念,风险低);两个运行时 done 语义分歧(只认 devsvc 的结果);tmux 注入不稳(合同不走注入,没 ack 发事件,不盲目重发);派工合同被篡改(合同存实例目录持锁写入,窗口回报带摘要,验收命令只从合同读,不接受窗口传来的命令);与信封共存(迁移期双轨,派工以 devtask 为准,信封只做通知,统计信封量逐步下降)。
+
+(8) 未核:agy 宿主是否有 Stop 类钩子、能否暴露压缩信号;agy-flow 的 route.sh 是否有现成状态出口;decision-model.ts 与 flow-graph.ts 正文、devsvc-core.cx 子命令全表未读。
+
+(9) 挂接:plans/v0.0.87.md S6(win state 先行,作为切片前置);plans/v0.0.88.md (C)(5)(本切片为第一刀)。
 
 ## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
 
