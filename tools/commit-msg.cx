@@ -1,0 +1,41 @@
+/* commit-msg.cx -- git commit-msg hook body: drop attribution lines (project owner 2026-11-20).
+ *   sh ./unisacc.com tools/commit-msg.cx -- MSGFILE     rewrite MSGFILE without Co-Authored-By:/Signed-off-by:/
+ *                                                       "Generated with [Claude Code]" lines (tools/cxlib/trailer.cx);
+ *                                                       rc 0, or rc 1 when nothing but attribution is left (git aborts)
+ *   sh ./unisacc.com tools/commit-msg.cx -- --install [GITDIR]   write GITDIR/hooks/commit-msg (default .git), a sh entry:
+ *                                                       exec sh ./unisacc.com tools/commit-msg.cx -- "$1"
+ *   sh ./unisacc.com tools/commit-msg.cx -- --check-installed [GITDIR]   rc 0 when that hook is present and current
+ * Checked by tools/check-commit-msg.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use cxlib.trailer
+#pragma unisa use mem.bytes
+static const char HOOK[] = "#!/bin/sh\n# unisacc commit-msg gate (tools/commit-msg.cx): commits carry no attribution lines.\nexec sh ./unisacc.com tools/commit-msg.cx -- \"$1\"\n";
+static int hookpath(char *p, int cap, int argc, char **argv) {
+    return cx_fmt(p, cap, "%s/hooks/commit-msg", argc > 2 ? argv[2] : ".git");
+}
+int main(int argc, char **argv) {
+    char p[4200]; unsigned char *b = 0; int64_t n = 0;
+    if (argc < 2) { fprintf(stderr, "commit-msg: usage: MSGFILE | --install [GITDIR] | --check-installed [GITDIR]\n"); return 2; }
+    if (!strcmp(argv[1], "--install") || !strcmp(argv[1], "--check-installed")) {
+        if (hookpath(p, sizeof p, argc, argv)) return 2;
+        int cur = sy_read_file(p, &b, &n, 1 << 16) == 0 && n == (int64_t)strlen(HOOK) && !memcmp(b, HOOK, (size_t)n);
+        if (b) free(b);
+        if (argv[1][2] == 'c') { printf("COMMIT_MSG_HOOK\t%s\t%s\n", p, cur ? "current" : "missing"); return cur ? 0 : 1; }
+        if (!cur && (sy_write_file(p, HOOK, (int64_t)strlen(HOOK), 0755) || sy_chmod(p, 0755))) { fprintf(stderr, "commit-msg: cannot write %s\n", p); return 3; }
+        printf("COMMIT_MSG_HOOK\t%s\t%s\n", p, cur ? "current" : "installed"); return 0;
+    }
+    if (sy_read_file(argv[1], &b, &n, 1 << 22) != 0) { fprintf(stderr, "commit-msg: cannot read %s\n", argv[1]); return 2; }
+    char *m = malloc((size_t)n + 1); if (!m) return 3;
+    mm_copy(m, (size_t)n + 1, b, n); m[n] = 0; free(b);
+    int k = tr_strip(m);
+    if (k && sy_write_file(argv[1], m, (int64_t)strlen(m), 0644)) { fprintf(stderr, "commit-msg: cannot write %s\n", argv[1]); return 3; }
+    {   const char *s = m; int body = 0;   /* lines starting with # are git comments */
+        while (*s) { const char *e = s; while (*e && *e != '\n') e++;
+            if (*s != '#') { const char *q = s; while (q < e && (*q == ' ' || *q == '\t' || *q == '\r')) q++; if (q < e) body = 1; }
+            s = *e ? e + 1 : e; }
+        free(m);
+        if (k) fprintf(stderr, "commit-msg: dropped %d attribution line(s)\n", k);
+        if (!body) { fprintf(stderr, "commit-msg: empty message after dropping attribution lines\n"); return 1; } }
+    return 0;
+}

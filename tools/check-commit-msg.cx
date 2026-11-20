@@ -1,0 +1,57 @@
+/* tools/check-commit-msg.cx -- attribution stripping (project owner 2026-11-20): the commit-msg hook (tools/commit-msg.cx) on a private temp git dir: install, real commit with attribution lines lands
+ * without them, a message of only attribution lines is refused and HEAD stays. The fixture commits run with
+ * --git-dir=TMP/.git --work-tree=<this checkout> so the hook finds ./unisacc.com and tools/ (index entries come from
+ * hash-object + update-index; nothing in the checkout is written). Last line CHECK_COMMIT_MSG ok=N failed=M. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+static int npass, nfail;
+/* formatting into a fixed buffer must not truncate silently: an overflow is a failed case */
+#define FMT(...) do { if (cx_fmt(__VA_ARGS__)) { ck(0, "fmt-overflow"); goto done; } } while (0)
+static char root[1024], gd[400], gdo[420], wto[1100];
+static void ck(int ok, const char *n) { printf("%s\tcommit-msg.%s\n", ok ? "PASS" : "FAIL", n); fflush(stdout); if (ok) npass++; else nfail++; }
+static int run(char **v, const char *cwd, char *out, int cap) {
+    np_result r = {0}; char why[300]; int rc;
+    if (np_run(v, cwd, 0, 50, &r, why, sizeof why)) { fprintf(stderr, "check-commit-msg: %s: %s\n", v[0], why); return -1; }
+    rc = r.rc;
+    if (out && cap > 0) { long n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (n > 0) mm_copy(out, (size_t)cap, r.out, n); out[n > 0 ? n : 0] = 0; }
+    if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r); return rc;
+}
+static int stage(const char *text) {
+    char *v[] = {"sh", "-c", "h=$(printf %s \"$2\" | git --git-dir=\"$1\" hash-object -w --stdin) && git --git-dir=\"$1\" update-index --add --cacheinfo \"100644,$h,zz-commit-msg-fixture.txt\"", "sh", gd, (char *)text, 0};
+    return run(v, root, 0, 0) == 0;
+}
+static int commit(const char *mf) {
+    char *v[] = {"git", gdo, wto, "-c", "user.name=f", "-c", "user.email=f@example.invalid", "commit", "-q", "-F", (char *)mf, 0};
+    return run(v, root, 0, 0);
+}
+int main(void) {
+    char td[300], p[600], com[1100], out[4096], h0[128], h1[128];
+    td[0] = 0;
+    if (!getcwd(root, sizeof root)) return 2;
+    if (cx_fmt(td, sizeof td, "%s/check-commit-msg-XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp") || !mkdtemp(td)) { td[0] = 0; ck(0, "fixture-create"); goto done; }
+    FMT(com, sizeof com, "%s/unisacc.com", root); FMT(gd, sizeof gd, "%s/.git", td);
+    FMT(gdo, sizeof gdo, "--git-dir=%s", gd); FMT(wto, sizeof wto, "--work-tree=%s", root);
+    {   char *v[] = {"git", "init", "-q", td, 0};
+        int ok = run(v, root, 0, 0) == 0 && stage("a\n");
+        ck(ok, "fixture-private-git-dir"); if (!ok) goto done; }
+    {   char *iv[] = {"sh", com, "tools/commit-msg.cx", "--", "--install", gd, 0}, *cv[] = {"sh", com, "tools/commit-msg.cx", "--", "--check-installed", gd, 0};
+        ck(run(iv, root, 0, 0) == 0 && run(cv, root, out, sizeof out) == 0 && strstr(out, "current"), "install-then-check-installed"); }
+    {   const char *m = "正文首行\n\n第二段\n\nCo-Authored-By: C <c@d>\nSigned-off-by: E <e@f>\n\nGenerated with [Claude Code](https://x)\n";
+        char *lv[] = {"git", gdo, "log", "-1", "--format=%B", 0};
+        FMT(p, sizeof p, "%s/m1", td);
+        int ok = sy_write_file(p, m, (int64_t)strlen(m), 0644) == 0 && commit(p) == 0 && run(lv, root, out, sizeof out) == 0;
+        ck(ok && !strcmp(out, "正文首行\n\n第二段\n\n"), "hook-real-commit-lands-without-attribution");
+        if (ok && strcmp(out, "正文首行\n\n第二段\n\n")) fprintf(stderr, "check-commit-msg: log body [%s]\n", out); }
+    {   char *hv[] = {"git", gdo, "rev-parse", "HEAD", 0}; const char *m = "Co-Authored-By: C <c@d>\n";
+        FMT(p, sizeof p, "%s/m2", td);
+        int ok = stage("b\n") && sy_write_file(p, m, (int64_t)strlen(m), 0644) == 0 && run(hv, root, h0, sizeof h0) == 0;
+        ok = ok && commit(p) != 0 && run(hv, root, h1, sizeof h1) == 0 && !strcmp(h0, h1);
+        ck(ok, "hook-only-attribution-refused-head-unchanged"); }
+done:
+    if (td[0]) { char *rv[] = {"rm", "-rf", td, 0}; run(rv, "/", 0, 0); }
+    printf("CHECK_COMMIT_MSG\tok=%d\tfailed=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}
