@@ -1,0 +1,217 @@
+/* tools/release-state.cx -- single-file release state machine for crash/session-restart recovery.
+ *
+ * Design (default file: release/state.tsv, overridable via --file PATH):
+ *   Schema:
+ *     # release-state-v1
+ *     version<TAB>stage<TAB>input_id<TAB>pid<TAB>evidence_path<TAB>updated_at<TAB>note
+ *   Valid stages (8 checkpoints):
+ *     slot -> chain-start -> chain-exit -> prerun-window -> freeze -> stage-a -> execute -> public
+ *   Semantics:
+ *     - One canonical active state row in the TSV; atomic write via sy_write_atomic so a killed session
+ *       never leaves a half-written state file.
+ *     - `show` probes `pid` (if > 0) with signal 0 (kill -0) and prints pid_alive=yes|no|na so a new
+ *       coordinator session immediately knows whether an in-flight chain/prerun/CI process is still alive.
+ *     - `check` validates schema, stage enum, non-empty required fields, and prints RELEASE_STATE_CHECK.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/release-state.cx -- init  [--file PATH] --version V --input ID [--pid N] [--evidence PATH] [--note TEXT]
+ *   sh ./unisacc.com tools/release-state.cx -- set   [--file PATH] --stage STAGE [--version V] [--input ID] [--pid N] [--evidence PATH] [--note TEXT]
+ *   sh ./unisacc.com tools/release-state.cx -- show  [--file PATH]
+ *   sh ./unisacc.com tools/release-state.cx -- check [--file PATH] */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define RS_PW 4400
+
+typedef struct {
+    char version[64];
+    char stage[32];
+    char input_id[128];
+    char pid[32];
+    char evidence[1024];
+    char updated_at[32];
+    char note[512];
+} RelState;
+
+static int rs_refuse(const char *why) {
+    fprintf(stderr, "RELEASE_STATE\tREFUSE\treason=%s\n", why);
+    return 2;
+}
+
+static int rs_clean_val(const char *s) {
+    if (!s || !*s) return 0;
+    for (const char *p = s; *p; p++) if (*p == '\t' || *p == '\n' || *p == '\r') return 0;
+    return 1;
+}
+
+static int rs_stage_valid(const char *st) {
+    static const char *stages[] = {
+        "slot", "chain-start", "chain-exit", "prerun-window",
+        "freeze", "stage-a", "execute", "public", 0
+    };
+    if (!st) return 0;
+    for (int i = 0; stages[i]; i++) if (tx_eqz(st, stages[i])) return 1;
+    return 0;
+}
+
+static int rs_pid_valid(const char *s) {
+    if (!s || !*s) return 0;
+    if (tx_eqz(s, "-")) return 1;
+    for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return 0;
+    return 1;
+}
+
+static int rs_read_state(const char *path, RelState *st) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 65536)) return -1;
+    memset(st, 0, sizeof *st);
+    int saw_hdr = 0, got_row = 0;
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le <= ls) continue;
+        if (le - ls == 18 && memcmp(b + ls, "# release-state-v1", 18) == 0) { saw_hdr = 1; continue; }
+        if (b[ls] == '#') continue;
+        if (le - ls >= 8 && memcmp(b + ls, "version\t", 8) == 0) continue;
+        if (got_row) { mm_free(b); return -2; }
+        const char *cols[8]; int64_t clens[8]; int nc = 0; int64_t p = ls;
+        while (nc < 8) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = (const char *)b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc != 7) { mm_free(b); return -3; }
+        if (clens[0] >= (int64_t)sizeof st->version || clens[1] >= (int64_t)sizeof st->stage ||
+            clens[2] >= (int64_t)sizeof st->input_id || clens[3] >= (int64_t)sizeof st->pid ||
+            clens[4] >= (int64_t)sizeof st->evidence || clens[5] >= (int64_t)sizeof st->updated_at ||
+            clens[6] >= (int64_t)sizeof st->note) { mm_free(b); return -4; }
+        mm_copy(st->version, sizeof st->version, cols[0], (size_t)clens[0]); st->version[clens[0]] = 0;
+        mm_copy(st->stage, sizeof st->stage, cols[1], (size_t)clens[1]); st->stage[clens[1]] = 0;
+        mm_copy(st->input_id, sizeof st->input_id, cols[2], (size_t)clens[2]); st->input_id[clens[2]] = 0;
+        mm_copy(st->pid, sizeof st->pid, cols[3], (size_t)clens[3]); st->pid[clens[3]] = 0;
+        mm_copy(st->evidence, sizeof st->evidence, cols[4], (size_t)clens[4]); st->evidence[clens[4]] = 0;
+        mm_copy(st->updated_at, sizeof st->updated_at, cols[5], (size_t)clens[5]); st->updated_at[clens[5]] = 0;
+        mm_copy(st->note, sizeof st->note, cols[6], (size_t)clens[6]); st->note[clens[6]] = 0;
+        got_row = 1;
+    }
+    mm_free(b);
+    if (!saw_hdr || !got_row) return -5;
+    if (!rs_stage_valid(st->stage) || !rs_pid_valid(st->pid) ||
+        !rs_clean_val(st->version) || !rs_clean_val(st->input_id) ||
+        !rs_clean_val(st->evidence) || !rs_clean_val(st->updated_at) || !rs_clean_val(st->note)) return -6;
+    return 0;
+}
+
+static int rs_write_state(const char *path, const RelState *st) {
+    char buf[4096];
+    if (cx_fmt(buf, sizeof buf,
+        "# release-state-v1\n"
+        "version\tstage\tinput_id\tpid\tevidence_path\tupdated_at\tnote\n"
+        "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+        st->version, st->stage, st->input_id, st->pid, st->evidence, st->updated_at, st->note))
+        return rs_refuse("format-bound");
+    if (sy_write_atomic(path, buf, (int64_t)strlen(buf), 0644))
+        return rs_refuse("write-atomic-failed");
+    return 0;
+}
+
+static const char *rs_pid_alive(const char *pid_s) {
+    if (!pid_s || tx_eqz(pid_s, "-") || tx_eqz(pid_s, "0")) return "na";
+    long pid = 0;
+    for (const char *p = pid_s; *p; p++) {
+        if (*p < '0' || *p > '9') return "na";
+        pid = pid * 10 + (*p - '0');
+    }
+    if (pid <= 0) return "na";
+    int rc = sy_signal((int)pid, 0);
+    return (rc == 0 || rc == -EPERM) ? "yes" : "no";
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return rs_refuse("usage: init|set|show|check");
+    const char *sub = argv[1];
+    const char *path = "release/state.tsv";
+    const char *ver = 0, *stage = 0, *inp = 0, *pid = 0, *ev = 0, *note = 0;
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--file") && i + 1 < argc) path = argv[++i];
+        else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+        else if (tx_eqz(argv[i], "--stage") && i + 1 < argc) stage = argv[++i];
+        else if (tx_eqz(argv[i], "--input") && i + 1 < argc) inp = argv[++i];
+        else if (tx_eqz(argv[i], "--pid") && i + 1 < argc) pid = argv[++i];
+        else if (tx_eqz(argv[i], "--evidence") && i + 1 < argc) ev = argv[++i];
+        else if (tx_eqz(argv[i], "--note") && i + 1 < argc) note = argv[++i];
+        else return rs_refuse("unknown-arg");
+    }
+
+    if (tx_eqz(sub, "init")) {
+        if (!ver || !inp) return rs_refuse("init-requires-version-and-input");
+        const char *st_s = stage ? stage : "slot";
+        const char *pid_s = pid ? pid : "-";
+        const char *ev_s = ev ? ev : "-";
+        const char *note_s = note ? note : "-";
+        if (!rs_stage_valid(st_s)) return rs_refuse("unknown-stage");
+        if (!rs_pid_valid(pid_s)) return rs_refuse("invalid-pid");
+        if (!rs_clean_val(ver) || !rs_clean_val(inp) || !rs_clean_val(ev_s) || !rs_clean_val(note_s))
+            return rs_refuse("invalid-field-chars");
+        RelState s;
+        memset(&s, 0, sizeof s);
+        cx_fmt(s.version, sizeof s.version, "%s", ver);
+        cx_fmt(s.stage, sizeof s.stage, "%s", st_s);
+        cx_fmt(s.input_id, sizeof s.input_id, "%s", inp);
+        cx_fmt(s.pid, sizeof s.pid, "%s", pid_s);
+        cx_fmt(s.evidence, sizeof s.evidence, "%s", ev_s);
+        cx_fmt(s.updated_at, sizeof s.updated_at, "%ld", (long)sy_wall_s());
+        cx_fmt(s.note, sizeof s.note, "%s", note_s);
+        if (rs_write_state(path, &s)) return 2;
+        printf("RELEASE_STATE\taction=init\tversion=%s\tstage=%s\tinput_id=%s\tpid=%s\tfile=%s\n",
+               s.version, s.stage, s.input_id, s.pid, path);
+        return 0;
+    }
+
+    if (tx_eqz(sub, "set")) {
+        if (!stage) return rs_refuse("set-requires-stage");
+        if (!rs_stage_valid(stage)) return rs_refuse("unknown-stage");
+        RelState s;
+        if (rs_read_state(path, &s)) return rs_refuse("read-existing-state");
+        cx_fmt(s.stage, sizeof s.stage, "%s", stage);
+        if (ver) { if (!rs_clean_val(ver)) return rs_refuse("invalid-version"); cx_fmt(s.version, sizeof s.version, "%s", ver); }
+        if (inp) { if (!rs_clean_val(inp)) return rs_refuse("invalid-input"); cx_fmt(s.input_id, sizeof s.input_id, "%s", inp); }
+        if (pid) { if (!rs_pid_valid(pid)) return rs_refuse("invalid-pid"); cx_fmt(s.pid, sizeof s.pid, "%s", pid); }
+        if (ev) { if (!rs_clean_val(ev)) return rs_refuse("invalid-evidence"); cx_fmt(s.evidence, sizeof s.evidence, "%s", ev); }
+        if (note) { if (!rs_clean_val(note)) return rs_refuse("invalid-note"); cx_fmt(s.note, sizeof s.note, "%s", note); }
+        cx_fmt(s.updated_at, sizeof s.updated_at, "%ld", (long)sy_wall_s());
+        if (rs_write_state(path, &s)) return 2;
+        printf("RELEASE_STATE\taction=set\tversion=%s\tstage=%s\tinput_id=%s\tpid=%s\tfile=%s\n",
+               s.version, s.stage, s.input_id, s.pid, path);
+        return 0;
+    }
+
+    if (tx_eqz(sub, "show")) {
+        RelState s;
+        if (rs_read_state(path, &s)) return rs_refuse("invalid-or-missing-state");
+        printf("RELEASE_STATE\tversion=%s\tstage=%s\tinput_id=%s\tpid=%s\tpid_alive=%s\tevidence=%s\tupdated_at=%s\tnote=%s\n",
+               s.version, s.stage, s.input_id, s.pid, rs_pid_alive(s.pid), s.evidence, s.updated_at, s.note);
+        return 0;
+    }
+
+    if (tx_eqz(sub, "check")) {
+        RelState s;
+        if (rs_read_state(path, &s)) return rs_refuse("state-check-failed");
+        printf("RELEASE_STATE_CHECK\tstatus=OK\tversion=%s\tstage=%s\tpid_alive=%s\n",
+               s.version, s.stage, rs_pid_alive(s.pid));
+        return 0;
+    }
+
+    return rs_refuse("unknown-subcommand");
+}

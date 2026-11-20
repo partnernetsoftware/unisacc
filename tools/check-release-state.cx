@@ -1,0 +1,117 @@
+/* tools/check-release-state.cx -- regression checks for tools/release-state.cx and disk-free gates
+ * (tools/chain-ready.cx 16-disk-free and tools/status.cx residue disk).
+ * Self-contained: passes in single-commit shallow cold layouts.
+ * Ends: CHECK_RELEASE_STATE<TAB>ok=N<TAB>failed=M<TAB>ms=T. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+#define CRS_PW 4400
+#define CRS_OUT 16384
+
+int main(void) {
+    long t0 = sy_now_ms();
+    char cwd[CRS_PW], work[CRS_PW], sf[CRS_PW], cmd[8192], out[CRS_OUT];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (cx_fmt(work, sizeof work, "%s/crs-%d", base_td, (int)getpid()) ||
+        cx_fmt(sf, sizeof sf, "%s/state.tsv", work)) return 2;
+    if (mkdir(work, 0700) != 0 && errno != EEXIST) return 2;
+
+    /* (1) init + walk all 8 checkpoints + show + check */
+    {
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- init --file '%s' --version 0.0.85 --input abc12345 --pid %d --evidence /tmp/ev --note open-slot",
+            cwd, cwd, sf, (int)getpid())) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "RELEASE_STATE\taction=init\tversion=0.0.85\tstage=slot\t"),
+           "release-state-init: creates slot checkpoint");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- show --file '%s'", cwd, cwd, sf)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "pid_alive=yes\t") && ckk_has(out, CRS_OUT, "stage=slot\t") &&
+           ckk_has(out, CRS_OUT, "evidence=/tmp/ev\t"),
+           "release-state-show-alive-pid: live PID reports pid_alive=yes and roundtrips fields");
+    }
+
+    {
+        static const char *stages[] = {
+            "chain-start", "chain-exit", "prerun-window", "freeze", "stage-a", "execute", "public", 0
+        };
+        int all_ok = 1;
+        for (int i = 0; stages[i]; i++) {
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- set --file '%s' --stage %s --pid 9999999 --note step-%d",
+                cwd, cwd, sf, stages[i], i)) return 2;
+            int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+            char want[96];
+            cx_fmt(want, sizeof want, "stage=%s\t", stages[i]);
+            if (rc != 0 || !ckk_has(out, CRS_OUT, want)) all_ok = 0;
+        }
+        ck(all_ok, "release-state-all-8-stages: slot through public checkpoints accepted");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- show --file '%s'", cwd, cwd, sf)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "stage=public\t") && ckk_has(out, CRS_OUT, "pid_alive=no\t"),
+           "release-state-dead-pid: non-existent PID reports pid_alive=no");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- check --file '%s'", cwd, cwd, sf)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "RELEASE_STATE_CHECK\tstatus=OK\tversion=0.0.85\tstage=public\t"),
+           "release-state-check-ok: valid state file passes check");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-state.cx' -- set --file '%s' --stage bogus-stage", cwd, cwd, sf)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CRS_OUT, "REFUSE\treason=unknown-stage"),
+           "release-state-refuses-unknown-stage: invalid stage name refused rc=2");
+    }
+
+    /* (2) chain-ready 16-disk-free gate: <8G blocks, 8..19G warns DISK_LOW, >=20G passes */
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 16-disk-free --disk-free-gb 5", cwd, cwd)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 1 && ckk_has(out, CRS_OUT, "16-disk-free\tFAIL\t") &&
+           ckk_has(out, CRS_OUT, "DISK_BLOCKED") && ckk_has(out, CRS_OUT, "READY\tno\t"),
+           "disk-gate-blocks-below-8g: <8G fails 16-disk-free with DISK_BLOCKED and READY=no");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 16-disk-free --disk-free-gb 15", cwd, cwd)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "16-disk-free\tPASS\t") &&
+           ckk_has(out, CRS_OUT, "DISK_LOW") && ckk_has(out, CRS_OUT, "READY\tyes\t"),
+           "disk-gate-warns-below-20g: 15G emits DISK_LOW warning and allows chain");
+    }
+
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --only 16-disk-free --disk-free-gb 28", cwd, cwd)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "16-disk-free\tPASS\t") &&
+           !ckk_has(out, CRS_OUT, "DISK_LOW") && ckk_has(out, CRS_OUT, "READY\tyes\t"),
+           "disk-gate-passes-20g-plus: 28G passes cleanly without DISK_LOW");
+    }
+
+    /* (3) status.cx residue section reports disk avail_gb */
+    {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/status.cx' -- --section residue --root '%s'", cwd, cwd, cwd)) return 2;
+        int rc = ckk_sh("check-release-state", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CRS_OUT, "avail_gb="),
+           "status-residue-reports-disk: tools/status.cx emits disk avail_gb");
+    }
+
+    { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+    printf("CHECK_RELEASE_STATE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
