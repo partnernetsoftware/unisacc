@@ -13,7 +13,8 @@
 - StereoCamera 持久双眼子对象与渲染 | G-struct 左右眼场景对象身份和层，G-pixel 两眼图及资源释放 | 眼记录刷新、M4 渲染器。
 - ~~UniformsGroup 统一缓冲布局 | G-struct r160 WebGL2 结构对照，包括 f32 值、矩阵列填充和混合宽度 | 组记录与 GPU 统一缓冲格式。~~ 9 项通过，矩阵列取错偏移反例转红。
 - UniformsGroup 组值复制与 GPU 绑定 | G-struct 深拷贝和释放，G-pixel 绑定、更新与读回 | 统一缓冲布局和 M4 GPU。
-- PropertyMixer | G-anim propertymixer-anim.cx：数值加权与加法、补足原值、按帧清零；四元数和非数值待补。补齐 constructor，运行独立金值及 r160 篡改门 | -
+- ~~PropertyMixer 布尔与字符串离散选择 | G-anim r160 权重平局、加法选择、按帧清零 | 数值混合器记录。~~ 7 项通过，阈值篡改转红。
+- PropertyMixer 四元数与构造接线 | G-anim r160 球面插值、加法组合、错误输入和帧复位 | Quaternion 和绑定记录。
 - ShapePath | G-struct shapepath-struct.cx 对照当前子路径、直线和两类贝塞尔端点、简单孔归组，样条追加与多级空间归属待补。补齐 splineThru，运行独立金值及 r160 篡改门 | -
 - AnimationUtils | G-anim animationutils-anim.cx：稳定时间顺序、分量行重排与非法位置拒绝；子片段和加法转换待补。补齐 convertArray,isTypedArray,flattenJSON,subclip,makeClipAdditive，运行独立金值及 r160 篡改门 | -
 - Raycaster | G-ray raycaster-camera-io.cx 与 raycast-mesh-io.cx：对照 r160 相机射线、静态三角面求交、面剔除与距离过滤；网格遍历、其他对象和排序待补。补齐 constructor,set，运行独立金值及 r160 篡改门 | -
