@@ -1,0 +1,308 @@
+/* tools/check-unitlink.cx -- F5 unit-object link equivalence check (v0.0.86 W2d + F5).
+ * Swaps the tree's include/{cx-flat.h,stdio.h,stdlib.h} into a temporary P3 package
+ * (dev-product --hdr-only) so -ftrim-libc stays active without -I, compiles three multi-module
+ * .cx scripts per-unit (-c -b lnx/x86_64 -funit -DRT_EXTERN), links them with the W2 runtime
+ * closure via cx/driver/objlink.cx (no objcopy), and asserts byte-for-byte equal stdout,
+ * stderr, and rc against whole-program -run.
+ * Also asserts negative controls: duplicate strong environ (rc=4) and undefined symbol (rc=5).
+ * Usage: sh ./unisacc.com tools/check-unitlink.cx
+ * Product under test: $UNISACC_COM, default ./unisacc.com.
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use driver.objlink
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.productpkg
+
+static char root[4096], work[4096], clo_path[4400], prod[4200], pkg_path[4200], cache_env[4400];
+static int npass, nfail;
+
+static void check(int ok, const char *name, const char *detail) {
+    printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "");
+    if (ok) npass++; else nfail++;
+}
+
+static void die(const char *m) {
+    fprintf(stderr, "check-unitlink: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void write_txt(const char *path, const char *s) {
+    if (cx_write(path, s, (size_t)tx_len(s, 1L << 20))) die(path);
+}
+
+static int run_cmd(char **av, const char *cwd, const char *e1, const char *e2, np_result *r) {
+    char why[512];
+    const char *env[5];
+    int k = 0;
+    if (cache_env[0]) env[k++] = cache_env;
+    if (e1) env[k++] = e1;
+    if (e2) env[k++] = e2;
+    env[k] = 0;
+    return np_run(av, cwd, env, 50, r, why, sizeof why);
+}
+
+static void prepare_hdr_pkg(void) {
+    size_t pn = 0;
+    char *pkg = pp_read_package(root, &pn);
+    if (!pkg || pn < 16 || memcmp(pkg + pn - 16, "UNIPKG1\n", 8)) die("pp_read_package");
+    unsigned long long packlen = 0;
+    for (int i = 0; i < 8; i++) packlen |= ((unsigned long long)(unsigned char)pkg[pn - 8 + i]) << (8 * i);
+    if (packlen == 0 || packlen + 16 > (unsigned long long)pn) { free(pkg); die("packlen"); }
+    char basep[4200], hdir[4200], tool[4200];
+    if (cx_fmt(basep, sizeof basep, "%s/base.pkg", work) ||
+        cx_fmt(hdir, sizeof hdir, "%s/hdr", work) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/dev-product.cx", root)) die("hdr paths");
+    if (cx_write(basep, pkg + (pn - 16 - (size_t)packlen), (size_t)packlen + 16)) { free(pkg); die("write base.pkg"); }
+    free(pkg);
+    char *av[] = { "sh", prod, tool, "--", "--tree", root, "--out", hdir, "--hdr-only", basep, 0 };
+    np_result r = {0};
+    int tr = run_cmd(av, root, 0, 0, &r);
+    int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "DEV_HDR\t") != 0;
+    if (!ok && r.err && r.errn) fprintf(stderr, "hdr-only err: %.*s\n", (int)(r.errn > 300 ? 300 : r.errn), r.err);
+    np_free(&r);
+    if (cx_fmt(pkg_path, sizeof pkg_path, "%s/pkg-hdr.bin", hdir)) die("pkg_path");
+    check(ok, "hdr-pkg-prepare", ok ? "pkg-hdr.bin" : "dev-product --hdr-only failed");
+    if (!ok) exit(1);
+}
+
+static int compile_unit(const char *src, const char *obj, const char *rt_flag, int use_new_hdr) {
+    char *av[14];
+    int k = 0;
+    np_result r = {0};
+    av[k++] = "sh"; av[k++] = prod;
+    if (use_new_hdr) { av[k++] = "--models"; av[k++] = pkg_path; }
+    av[k++] = "-c"; av[k++] = "-b"; av[k++] = "lnx/x86_64"; av[k++] = "-funit";
+    if (rt_flag) av[k++] = (char *)rt_flag;
+    av[k++] = (char *)src; av[k++] = "-o"; av[k++] = (char *)obj; av[k] = 0;
+    int tr = run_cmd(av, work, 0, 0, &r);
+    int bad = tr || r.rc != 0;
+    if (bad && r.err && r.errn) fprintf(stderr, "compile %s err: %.*s\n", src, (int)(r.errn > 300 ? 300 : r.errn), r.err);
+    np_free(&r);
+    return bad;
+}
+
+static int link_objs(int n, const char **objs, const char *exe, int *out_rc, char *errbuf, size_t errcap) {
+    unsigned char *img = 0;
+    long imgn = 0;
+    int rc = ol_link(n, objs, &img, &imgn);
+    if (out_rc) *out_rc = rc;
+    if (rc) {
+        const char *e = ol_error();
+        if (errbuf && errcap) {
+            size_t el = e ? (size_t)tx_len(e, (long)errcap - 1) : 0;
+            if (el) mm_copy(errbuf, errcap, e, el);
+            errbuf[el] = 0;
+        }
+        return rc;
+    }
+    if (sy_write_file(exe, img, (int64_t)imgn, 0755)) { free(img); die("write exe"); }
+    free(img);
+    return 0;
+}
+
+static int compare_run(const char *tag, const char *src, const char *exe, const char *extra_env, const char *arg1) {
+    char *wv[12]; int wk = 0;
+    wv[wk++] = "sh"; wv[wk++] = prod; wv[wk++] = "--models"; wv[wk++] = pkg_path; wv[wk++] = (char *)src;
+    if (arg1) { wv[wk++] = "--"; wv[wk++] = (char *)arg1; }
+    wv[wk] = 0;
+    char *lv[4]; int lk = 0;
+    lv[lk++] = (char *)exe;
+    if (arg1) lv[lk++] = (char *)arg1;
+    lv[lk] = 0;
+    np_result rw = {0}, rl = {0};
+    int tw = run_cmd(wv, work, extra_env, 0, &rw);
+    int tl = run_cmd(lv, work, extra_env, 0, &rl);
+    int ok = !tw && !tl && rw.rc == rl.rc &&
+             rw.outn == rl.outn && (!rw.outn || !memcmp(rw.out, rl.out, rw.outn)) &&
+             rw.errn == rl.errn && (!rw.errn || !memcmp(rw.err, rl.err, rw.errn));
+    char det[256];
+    cx_fmt(det, sizeof det, "rc=%d/%d out=%zu/%zu err=%zu/%zu", rw.rc, rl.rc, rw.outn, rl.outn, rw.errn, rl.errn);
+    check(ok, tag, det);
+    if (!ok) {
+        fprintf(stderr, "MISMATCH %s whole_out=[%.*s] link_out=[%.*s] whole_err=[%.*s] link_err=[%.*s]\n",
+                tag, (int)rw.outn, rw.out ? rw.out : "", (int)rl.outn, rl.out ? rl.out : "",
+                (int)rw.errn, rw.err ? rw.err : "", (int)rl.errn, rl.err ? rl.err : "");
+    }
+    np_free(&rw); np_free(&rl);
+    return ok;
+}
+
+static void build_closure(void) {
+    char csrc[4200];
+    if (cx_fmt(csrc, sizeof csrc, "%s/rtclosure-root.c", work) ||
+        cx_fmt(clo_path, sizeof clo_path, "%s/rtclosure.o", work)) die("closure paths");
+    write_txt(csrc,
+        "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+        "#include <ctype.h>\n#include <errno.h>\n#include <signal.h>\n#include <unistd.h>\n");
+    int bad = compile_unit(csrc, clo_path, "-DRT_UNIT", 1);
+    check(!bad, "closure-build", !bad ? clo_path : "closure compile failed");
+    if (bad) exit(1);
+}
+
+int main(int argc, char **argv) {
+    int part = 0;
+    if (argc == 3 && !strcmp(argv[1], "--part")) {
+        part = atoi(argv[2]);
+        if (part != 1 && part != 2) die("usage: [--part 1|2]");
+    } else if (argc != 1) die("usage: [--part 1|2]");
+    if (!getcwd(root, sizeof root)) die("getcwd");
+    const char *envp = sy_env("UNISACC_COM");
+    if (envp && envp[0]) {
+        if (!realpath(envp, prod)) die("UNISACC_COM realpath");
+    } else {
+        char def[4200];
+        if (cx_fmt(def, sizeof def, "%s/unisacc.com", root)) die("prod path");
+        if (!realpath(def, prod)) die("unisacc.com realpath");
+    }
+    const char *td = sy_tmpdir();
+    if (cx_fmt(work, sizeof work, "%s/check-unitlink-%d", td, (int)getpid())) die("work path");
+    if (sy_mkdir_all(work, 0700)) die("mkdir work");
+    if (cx_fmt(cache_env, sizeof cache_env, "UNISACC_CACHE_DIR=%s/cache", work)) die("cache_env");
+
+    char cxlink[4200], cxrootp[4200], cxsrc[4200];
+    if (cx_fmt(cxlink, sizeof cxlink, "%s/cx", work) ||
+        cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) ||
+        cx_fmt(cxrootp, sizeof cxrootp, "%s/cxroot.tsv", work)) die("cx paths");
+    if (symlink(cxsrc, cxlink)) die("symlink cx");
+    write_txt(cxrootp, "CXROOT1\nR\tsys\tcx/sys\nR\tmem\tcx/mem\nR\ttext\tcx/text\n");
+
+    prepare_hdr_pkg();
+    build_closure();
+
+    char ebuf[256];
+    if (part == 0 || part == 1) {
+    /* Negative 1 (before-guard control): strong duplicate environ must be refused rc=4 */
+    char dup_c[4200], dup_o[4200], dup_exe[4200];
+    cx_fmt(dup_c, sizeof dup_c, "%s/dup_env.c", work);
+    cx_fmt(dup_o, sizeof dup_o, "%s/dup_env.o", work);
+    cx_fmt(dup_exe, sizeof dup_exe, "%s/dup_env.exe", work);
+    write_txt(dup_c, "char **environ;\nint main(void){return environ!=0;}\n");
+    int dcomp = compile_unit(dup_c, dup_o, "-DRT_EXTERN", 1);
+    int drc = 0; ebuf[0] = 0;
+    const char *dobjs[2] = { clo_path, dup_o };
+    if (!dcomp) link_objs(2, dobjs, dup_exe, &drc, ebuf, sizeof ebuf);
+    check(!dcomp && drc == 4 && strstr(ebuf, "duplicate symbol environ") != 0, "neg-dup-environ-rc4", ebuf);
+
+    /* Negative 2: undefined symbol must be refused rc=5 */
+    char und_c[4200], und_o[4200], und_exe[4200];
+    cx_fmt(und_c, sizeof und_c, "%s/undef.cx", work);
+    cx_fmt(und_o, sizeof und_o, "%s/undef.o", work);
+    cx_fmt(und_exe, sizeof und_exe, "%s/undef.exe", work);
+    write_txt(und_c, "extern int missing_unitlink_sym(void);\nint main(void){return missing_unitlink_sym();}\n");
+    int ucomp = compile_unit(und_c, und_o, "-DRT_EXTERN", 1);
+    int urc = 0; ebuf[0] = 0;
+    const char *uobjs[2] = { clo_path, und_o };
+    if (!ucomp) link_objs(2, uobjs, und_exe, &urc, ebuf, sizeof ebuf);
+    check(!ucomp && urc == 5 && strstr(ebuf, "undefined symbol missing_unitlink_sym") != 0, "neg-undef-sym-rc5", ebuf);
+
+    /* Positive 1: gate experiment script (use sys.env sys.fs mem.heap, closure mem.bytes) */
+    char s1_cx[4200], s1_o[4200], s1_exe[4200], env_o[4200], fs_o[4200], heap_o[4200], bytes_o[4200];
+    cx_fmt(s1_cx, sizeof s1_cx, "%s/s1.cx", work);
+    cx_fmt(s1_o, sizeof s1_o, "%s/s1.o", work);
+    cx_fmt(s1_exe, sizeof s1_exe, "%s/s1.exe", work);
+    cx_fmt(env_o, sizeof env_o, "%s/env.o", work);
+    cx_fmt(fs_o, sizeof fs_o, "%s/fs.o", work);
+    cx_fmt(heap_o, sizeof heap_o, "%s/heap.o", work);
+    cx_fmt(bytes_o, sizeof bytes_o, "%s/bytes.o", work);
+    write_txt(s1_cx,
+        "#pragma unisa use sys.env\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *v = sy_env_or(\"UNITLINK_ENV\", \"none\");\n"
+        "    char *buf = (char *)mm_alloc(32);\n"
+        "    if (!buf) return 9;\n"
+        "    cx_fmt(buf, 32, \"h=%s argc=%d\", v, argc);\n"
+        "    printf(\"%s arg=%s\\n\", buf, argc > 1 ? argv[1] : \"-\");\n"
+        "    fprintf(stderr, \"s1-err:%s\\n\", v);\n"
+        "    mm_free(buf);\n"
+        "    return 3;\n"
+        "}\n");
+    int c1 = compile_unit("cx/sys/env.cx", env_o, "-DRT_EXTERN", 1) ||
+             compile_unit("cx/sys/fs.cx", fs_o, "-DRT_EXTERN", 1) ||
+             compile_unit("cx/mem/heap.cx", heap_o, "-DRT_EXTERN", 1) ||
+             compile_unit("cx/mem/bytes.cx", bytes_o, "-DRT_EXTERN", 1) ||
+             compile_unit(s1_cx, s1_o, "-DRT_EXTERN", 1);
+    const char *s1_objs[6] = { clo_path, env_o, fs_o, heap_o, bytes_o, s1_o };
+    int l1 = c1 ? -1 : link_objs(6, s1_objs, s1_exe, 0, ebuf, sizeof ebuf);
+    check(!c1 && l1 == 0, "pos1-link-env-fs-heap", l1 ? ebuf : "LINKED");
+    if (!c1 && l1 == 0) {
+        compare_run("pos1-run-default-env", s1_cx, s1_exe, 0, "alpha");
+        compare_run("pos1-run-set-env", s1_cx, s1_exe, "UNITLINK_ENV=yes", "beta");
+    }
+    }
+
+    if (part == 0 || part == 2) {
+    /* Positive 2: text.text + sys.sha multi-module script */
+    char s2_cx[4200], s2_o[4200], s2_exe[4200], text_o[4200], sha_o[4200];
+    cx_fmt(s2_cx, sizeof s2_cx, "%s/s2.cx", work);
+    cx_fmt(s2_o, sizeof s2_o, "%s/s2.o", work);
+    cx_fmt(s2_exe, sizeof s2_exe, "%s/s2.exe", work);
+    cx_fmt(text_o, sizeof text_o, "%s/text.o", work);
+    cx_fmt(sha_o, sizeof sha_o, "%s/sha.o", work);
+    write_txt(s2_cx,
+        "#pragma unisa use text.text\n"
+        "#pragma unisa use sys.sha\n"
+        "int main(void) {\n"
+        "    char hex[65];\n"
+        "    const char *msg = \"unitlink-sha-check\";\n"
+        "    long pos = tx_find(msg, tx_len(msg, 64), \"sha\", 3);\n"
+        "    sy_sha256_hex((const unsigned char *)msg, tx_len(msg, 64), hex);\n"
+        "    printf(\"pos=%ld sha=%.16s\\n\", pos, hex);\n"
+        "    fprintf(stderr, \"s2-err:ok\\n\");\n"
+        "    return 5;\n"
+        "}\n");
+    int c2 = compile_unit("cx/text/text.cx", text_o, "-DRT_EXTERN", 1) ||
+             compile_unit("cx/sys/sha.cx", sha_o, "-DRT_EXTERN", 1) ||
+             compile_unit(s2_cx, s2_o, "-DRT_EXTERN", 1);
+    const char *s2_objs[4] = { clo_path, text_o, sha_o, s2_o };
+    int l2 = c2 ? -1 : link_objs(4, s2_objs, s2_exe, 0, ebuf, sizeof ebuf);
+    check(!c2 && l2 == 0, "pos2-link-text-sha", l2 ? ebuf : "LINKED");
+    if (!c2 && l2 == 0) compare_run("pos2-run-text-sha", s2_cx, s2_exe, 0, 0);
+
+    /* Positive 3: sys.sig + custom user module sharing _unisa_sig* and errno */
+    char umod_cx[4200], umod_o[4200], s3_cx[4200], s3_o[4200], s3_exe[4200], sig_o[4200], smem_o[4200];
+    cx_fmt(umod_cx, sizeof umod_cx, "%s/umod.cx", work);
+    cx_fmt(umod_o, sizeof umod_o, "%s/umod.o", work);
+    cx_fmt(s3_cx, sizeof s3_cx, "%s/s3.cx", work);
+    cx_fmt(s3_o, sizeof s3_o, "%s/s3.o", work);
+    cx_fmt(s3_exe, sizeof s3_exe, "%s/s3.exe", work);
+    cx_fmt(sig_o, sizeof sig_o, "%s/sig.o", work);
+    cx_fmt(smem_o, sizeof smem_o, "%s/smem.o", work);
+    write_txt(umod_cx,
+        "#pragma unisa module umod\n"
+        "static int umod_hits;\n"
+        "static void umod_h(int s) { umod_hits += s; }\n"
+        "void umod_arm(void) { signal(10, umod_h); errno = 17; }\n"
+        "int umod_count(void) { return umod_hits; }\n");
+    write_txt(s3_cx,
+        "#pragma unisa use sys.sig\n"
+        "#pragma unisa use umod\n"
+        "int main(void) {\n"
+        "    umod_arm();\n"
+        "    int e = errno;\n"
+        "    raise(10);\n"
+        "    printf(\"hits=%d errno=%d\\n\", umod_count(), e);\n"
+        "    fprintf(stderr, \"s3-err:sig\\n\");\n"
+        "    return 7;\n"
+        "}\n");
+    int c3 = compile_unit("cx/sys/sig.cx", sig_o, "-DRT_EXTERN", 1) ||
+             compile_unit("cx/sys/mem.cx", smem_o, "-DRT_EXTERN", 1) ||
+             compile_unit(umod_cx, umod_o, "-DRT_EXTERN", 1) ||
+             compile_unit(s3_cx, s3_o, "-DRT_EXTERN", 1);
+    const char *s3_objs[5] = { clo_path, sig_o, smem_o, umod_o, s3_o };
+    int l3 = c3 ? -1 : link_objs(5, s3_objs, s3_exe, 0, ebuf, sizeof ebuf);
+    check(!c3 && l3 == 0, "pos3-link-sig-umod", l3 ? ebuf : "LINKED");
+    if (!c3 && l3 == 0) compare_run("pos3-run-sig-umod", s3_cx, s3_exe, 0, 0);
+    }
+
+    cx_rmtree(work);
+    printf("CHECK_UNITLINK\tpass=%d\tfail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}
