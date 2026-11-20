@@ -1,4 +1,28 @@
 // Table pointers are borrowed from the input until decoding ends.
+native function jpeg_quant_tables(body:i64,next:i64,meta:i64) i64 {
+  while(body<next) {
+    let id=ux_u8(body);
+    if(id>3 || body>next-65) { return 0-4; }
+    let j=0;
+    while(j<64) { if(ux_u8(body+1+j)==0) { return 0-4; } j=j+1; }
+    let saved=ux_u32_put(meta+4*id,body+1);
+    body=body+65;
+  }
+  return 0;
+}
+
+native function jpeg_huff_tables(body:i64,next:i64,meta:i64) i64 {
+  while(body<next) {
+    let id=ux_u8(body);
+    if(id/16>1 || id%16>3) { return 0-4; }
+    let table=jpeg_dht_end(body+1,next);
+    if(table<0) { return table; }
+    let saved=ux_u32_put(meta+16+(id/16*4+id%16)*4,body+1);
+    body=table;
+  }
+  return 0;
+}
+
 native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64) i64 {
   let i=0;
   while(i<12) { let clear=ux_u32_put(meta+4*i,0); i=i+1; }
@@ -21,23 +45,11 @@ native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64) i64 {
       component=ux_u8(body+6);
       quant=ux_u8(body+8);
     } else if(marker==219) {
-      while(body<next) {
-        let id=ux_u8(body);
-        if(id>3 || body>next-65) { return 0-4; }
-        let j=0;
-        while(j<64) { if(ux_u8(body+1+j)==0) { return 0-4; } j=j+1; }
-        let saved=ux_u32_put(meta+4*id,body+1);
-        body=body+65;
-      }
+      let tables=jpeg_quant_tables(body,next,meta);
+      if(tables<0) { return tables; }
     } else if(marker==196) {
-      while(body<next) {
-        let id=ux_u8(body);
-        if(id/16>1 || id%16>3) { return 0-4; }
-        let table=jpeg_dht_end(body+1,next);
-        if(table<0) { return table; }
-        let saved=ux_u32_put(meta+16+(id/16*4+id%16)*4,body+1);
-        body=table;
-      }
+      let tables=jpeg_huff_tables(body,next,meta);
+      if(tables<0) { return tables; }
     } else if(marker==218) {
       if(width!=8 || component<0 || ux_u8(body)!=1 || ux_u8(body+1)!=component ||
          ux_u8(body+3)!=0 || ux_u8(body+4)!=63 || ux_u8(body+5)!=0) { return 0-4; }
@@ -57,7 +69,7 @@ native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64) i64 {
   return 0-2;
 }
 
-native function jpeg_gray_block(reader:i64,quant:i64,dc:i64,ac:i64,previous:i64,coeff:i64) i64 {
+native function jpeg_baseline_block(reader:i64,quant:i64,dc:i64,ac:i64,previous:i64,coeff:i64) i64 {
   let zigzag=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
     35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
   let size=jpeg_huffman(reader,dc);
@@ -93,6 +105,17 @@ native function jpeg_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
   return bytes>0 && size>0 && a<b+size && b<a+bytes;
 }
 
+native function jpeg_finish_scan(reader:i64,end:i64) i64 {
+  let next=ux_u32(reader+JpegBits.next);
+  if(next>end-2 || ux_u8(next)!=255) { return 0-6; }
+  while(next<end && ux_u8(next)==255) { next=next+1; }
+  if(next!=end-1 || ux_u8(next)!=217) { return 0-6; }
+  let remainder=ux_u32(reader+JpegBits.remaining);
+  let pad=u32_shl(1,remainder);
+  if(remainder>0 && ux_u32(reader+JpegBits.byte)%pad!=pad-1) { return 0-6; }
+  return 0;
+}
+
 // Baseline 8-bit, one component, 1x1 sampling, without restart markers.
 // Decode into an exclusive workspace and publish RGBA only after EOI.
 native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
@@ -122,7 +145,7 @@ native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,sp
   while(y<height) {
     let x=0;
     while(x<width) {
-      let decoded=jpeg_gray_block(reader,ux_u32(meta),ux_u32(meta+4),ux_u32(meta+8),prediction,coeff);
+      let decoded=jpeg_baseline_block(reader,ux_u32(meta),ux_u32(meta+4),ux_u32(meta+8),prediction,coeff);
       if(decoded<0) { return decoded; }
       prediction=decoded-65536;
       let rendered=jpeg_idct_block(coeff,basis,work,block);
@@ -139,14 +162,8 @@ native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,sp
     }
     y=y+8;
   }
-  let next=ux_u32(reader+JpegBits.next);
-  let end=src+bytes;
-  if(next>end-2 || ux_u8(next)!=255) { return 0-6; }
-  while(next<end && ux_u8(next)==255) { next=next+1; }
-  if(next!=end-1 || ux_u8(next)!=217) { return 0-6; }
-  let remainder=ux_u32(reader+JpegBits.remaining);
-  let pad=u32_shl(1,remainder);
-  if(remainder>0 && ux_u32(reader+JpegBits.byte)%pad!=pad-1) { return 0-6; }
+  let complete=jpeg_finish_scan(reader,src+bytes);
+  if(complete<0) { return complete; }
   let i=0;
   while(i<width*height) {
     let value=ux_u8(gray+i);
