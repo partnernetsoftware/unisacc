@@ -1,0 +1,74 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+static int dispatcher_layout(const char *path) {
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&length,32768)) return 1;
+    const char *text=(const char *)raw;
+    const char header[]="struct EventDispatcher {\n";
+    const long start=tx_find(text,length,header,sizeof header-1);
+    const long finish=start<0?-1:tx_find(text+start,length-start,"\n}\n",3);
+    const int failed=finish<0 || sy_write_file(path,text+start,finish+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+static int expected(double *gold) {
+    const int formats[][4]={{1026,1014,24,0},{1026,1012,16,0},{1026,1015,32,0},{1027,1020,24,8}};
+    const double local[]={-1,-1,-1,-1,-1,-12,-3,-2,777,32,0,2,303,304,-1,-1,1,1,1};
+    int at=0;
+    for(int i=0;i<4;i++) {
+        const double common[]={2,1,formats[i][0],formats[i][1],1003,1003,0,0,1,
+            formats[i][2],formats[i][3],64,191,64,159,159,3,2,32,1};
+        for(int side=0;side<2;side++) {
+            for(int j=0;j<(int)(sizeof common/sizeof common[0]);j++) gold[at++]=common[j];
+        }
+        for(int j=0;j<(int)(sizeof local/sizeof local[0]);j++) gold[at++]=local[j];
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],abi[300],layout[300],wasm[300],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-depth-texture-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(layout,sizeof layout,"%s/event-layout.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/depth.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "depth-texture-r160.html?wasm=%s&mutate=%d",
+        cwd,wasm,mutate);
+    const char signature[]=
+        "import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "import host_depth_texture from \"uxe_depth_texture_v1\"(i64,i64,i64,i64,i64,i64,i64) i64;\n"
+        "export uxe_depth_probe(op:i64,which:i64,a:i64,b:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "record-copy.ujs",BASE "gpu-packet.ujs",
+        layout,BASE "eventdispatcher.ujs",BASE "depth-texture.ujs",FIX "depth-texture-probe.ujs","-o",wasm,0};
+    enum { count=236 };
+    double gold[count],actual[count]={0};
+    int failed=length<0 || length>=(int)sizeof url || expected(gold)!=count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600) || dispatcher_layout(layout);
+    if(!failed) {
+        char *out=0; size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("DEPTH_TEXTURE_COMPILE rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) if(actual[i]!=gold[i]) {
+        printf("DEPTH_TEXTURE case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_PIXEL DepthTexture cases=%d failed=%d\n",count,failed);
+    return failed;
+}

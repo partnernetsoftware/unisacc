@@ -1,0 +1,126 @@
+// A sampleable WebGL2 depth-only attachment. Object arguments use r160 enums.
+struct DepthTexture {
+  id: u32;
+  generation: u32;
+  width: u32;
+  height: u32;
+  format: u32;
+  type: u32;
+  magFilter: u32;
+  minFilter: u32;
+  flipY: u32;
+  generateMipmaps: u32;
+  compareFunction: u32;
+}
+
+native function depth_texture_span(at:i64,size:i64) i64 {
+  return at>=0 && at%4==0 && size>=0 && at<=6291456-size;
+}
+
+native function depth_texture_separate(a:i64,size:i64,b:i64,bytes:i64) i64 {
+  return size==0 || bytes==0 || a+size<=b || b+bytes<=a;
+}
+
+native function depth_texture_size(width:i64,height:i64) i64 {
+  return width>=1 && width<=2048 && height>=1 && height<=2048;
+}
+
+native function depth_texture_pair(format:i64,kind:i64) i64 {
+  return (format==1026 && (kind==1012 || kind==1014 || kind==1015)) ||
+    (format==1027 && kind==1020);
+}
+
+native function depth_texture_live(at:i64) i64 {
+  return depth_texture_span(at,DepthTexture.size) && ux_u32(at+DepthTexture.id)>=1 &&
+    ux_u32(at+DepthTexture.id)<=1024 && ux_u32(at+DepthTexture.generation)!=0 &&
+    depth_texture_size(ux_u32(at+DepthTexture.width),ux_u32(at+DepthTexture.height)) &&
+    depth_texture_pair(ux_u32(at+DepthTexture.format),ux_u32(at+DepthTexture.type));
+}
+
+native function DepthTexture_create(at:i64,id:i64,generation:i64,width:i64,height:i64,format:i64,kind:i64) i64 {
+  if(!depth_texture_span(at,DepthTexture.size) || ux_u32(at+DepthTexture.id)!=0 ||
+     id<1 || id>1024 || generation<1 || generation>4294967295 ||
+     !depth_texture_size(width,height)) { return 0-1; }
+  let selected=format;
+  if(selected==0) { selected=1026; }
+  let dataType=kind;
+  if(dataType==0) {
+    dataType=1014;
+    if(selected==1027) { dataType=1020; }
+  }
+  if(!depth_texture_pair(selected,dataType)) { return 0-1; }
+  let status=host_depth_texture(1,id,generation,width,height,selected,dataType);
+  if(status!=0) { return status; }
+  let a=ux_u32_put(at+DepthTexture.generation,generation);
+  let b=ux_u32_put(at+DepthTexture.width,width);
+  let c=ux_u32_put(at+DepthTexture.height,height);
+  let d=ux_u32_put(at+DepthTexture.format,selected);
+  let e=ux_u32_put(at+DepthTexture.type,dataType);
+  let f=ux_u32_put(at+DepthTexture.magFilter,1003);
+  let g=ux_u32_put(at+DepthTexture.minFilter,1003);
+  let h=ux_u32_put(at+DepthTexture.flipY,0);
+  let m=ux_u32_put(at+DepthTexture.generateMipmaps,0);
+  let cmp=ux_u32_put(at+DepthTexture.compareFunction,0);
+  let owned=ux_u32_put(at+DepthTexture.id,id);
+  return at;
+}
+
+native function DepthTexture_setSize(at:i64,width:i64,height:i64) i64 {
+  if(!depth_texture_live(at) || !depth_texture_size(width,height)) { return 0-1; }
+  let status=host_depth_texture(2,ux_u32(at+DepthTexture.id),ux_u32(at+DepthTexture.generation),width,height,
+    ux_u32(at+DepthTexture.format),ux_u32(at+DepthTexture.type));
+  if(status!=0) { return status; }
+  let w=ux_u32_put(at+DepthTexture.width,width);
+  let h=ux_u32_put(at+DepthTexture.height,height);
+  return at;
+}
+
+native function DepthTexture_bind(at:i64) i64 {
+  if(!depth_texture_live(at)) { return 0-1; }
+  return host_depth_texture(3,ux_u32(at+DepthTexture.id),ux_u32(at+DepthTexture.generation),0,0,0,0);
+}
+
+native function DepthTexture_readDepth8(at:i64,x:i64,y:i64) i64 {
+  if(!depth_texture_live(at) || x<0 || y<0 ||
+     x>=ux_u32(at+DepthTexture.width) || y>=ux_u32(at+DepthTexture.height)) { return 0-1; }
+  return host_depth_texture(4,ux_u32(at+DepthTexture.id),ux_u32(at+DepthTexture.generation),x,y,0,0);
+}
+
+native function depth_texture_watch(at:i64,dispatcher:i64,event:i64,out:i64,limit:i64) i64 {
+  if(!depth_texture_span(dispatcher,EventDispatcher.size) || event<0 || event>4294967295 ||
+     limit<0 || limit>786432 || !depth_texture_span(out,8+4*limit) ||
+     !depth_texture_separate(at,DepthTexture.size,dispatcher,EventDispatcher.size) ||
+     !depth_texture_separate(at,DepthTexture.size,out,8+4*limit) ||
+     !depth_texture_separate(dispatcher,EventDispatcher.size,out,8+4*limit)) { return 0-1; }
+  let rows=ux_u32(dispatcher+EventDispatcher.listeners);
+  let count=ux_u32(dispatcher+EventDispatcher.listenerCount);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  if(count>capacity || !depth_texture_span(rows,8*capacity) ||
+     !depth_texture_separate(rows,8*capacity,out,8+4*limit) ||
+     !depth_texture_separate(rows,8*capacity,at,DepthTexture.size)) { return 0-1; }
+  let matches=0;
+  let i=0;
+  while(i<count) {
+    if(ux_u32(rows+8*i)==event) { matches=matches+1; }
+    i=i+1;
+  }
+  if(matches>limit) { return 0-2; }
+  return matches;
+}
+
+// The record retains its public configuration. Only its live ownership ends.
+native function DepthTexture_dispose(at:i64,dispatcher:i64,event:i64,out:i64,limit:i64) i64 {
+  if(!depth_texture_live(at)) { return 0-1; }
+  if(dispatcher!=0) {
+    let ready=depth_texture_watch(at,dispatcher,event,out,limit);
+    if(ready<0) { return ready; }
+  }
+  let status=host_depth_texture(5,ux_u32(at+DepthTexture.id),ux_u32(at+DepthTexture.generation),0,0,0,0);
+  if(status!=0) { return status; }
+  let gone=ux_u32_put(at+DepthTexture.id,0);
+  let generation=ux_u32_put(at+DepthTexture.generation,0);
+  if(dispatcher!=0) {
+    let emitted=EventDispatcher_dispatchEvent(dispatcher,event,at,out,limit);
+  }
+  return 0;
+}
