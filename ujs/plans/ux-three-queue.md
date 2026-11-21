@@ -302,7 +302,7 @@
 - AxesHelper 对象树及资源回收 | 场景更新与释放后拒绝 | 已通过的正交 GPU 线。
 - BoxHelper 世界包围盒采集与 GPU | G-pixel 对象树边界和 12 边实际读回 | G-struct 世界盒线 15 项与篡改已通过。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
-- CameraHelper GPU 视锥 | G-pixel 五类颜色和相机物体变换 | G-struct 逆投影视锥 19 项与篡改已通过。
+- ~~CameraHelper 正交 GPU 视锥 | G-pixel 五类颜色、相机物体变换与释放 | 逆投影视锥及共享 GPU 线。~~ r160 1024 像素一致，错世界平移使 117 像素转红。
 - DirectionalLightHelper 渲染接线 | G-pixel 光框随目标更新 | G-struct 方向及颜色 14 项与篡改已通过。
 - GridHelper 渲染与资源回收 | G-pixel 分格随对象树变换，G-struct 验证释放后不能提交 | 分格及主轴颜色由 gridhelper-struct.cx 验证通过，依赖场景渲染列表。
 - HemisphereLightHelper 渲染接线 | G-pixel 两色和方向变化 | G-struct 天地分区 19 项与篡改已通过。
