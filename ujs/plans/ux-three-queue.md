@@ -7,7 +7,8 @@
 - ~~ImageUtils 解码图像源接线 | G-struct 与 G-io 对照 HTMLImageElement、ImageBitmap 的 URI 与不透明像素转换 | 浏览器资源描述与 Canvas 路径。~~ 线性十项、URI 七项通过，两种篡改转红，旧结构 14 项及编码 10 项通过。
 - ~~ImageUtils 半透明预乘与读回 | G-io HTMLImageElement 与 ImageBitmap 半透明像素 | 解码图像源接线。~~ 十项通过，直接转换导致绿色通道由 56 变为 55。
 - ~~ImageUtils 缺 Canvas 时的 URL 分支 | G-io 现有 URI、编码及无来源 | 解码图像源接线。~~ 八项通过，禁用 Canvas 仍走编码的反例转红。
-- ImageUtils 浏览器尺寸 | G-io 固有尺寸和显示尺寸不同时的缩放与序列化 | 解码图像源接线。
+- ~~ImageUtils 显示尺寸采样 | G-io 固有尺寸和显示尺寸不同时的缩放、预乘与边界 | 解码图像源接线。~~ Chrome r160 与独立金值 12 项通过，错取像素转红。
+- ImageUtils 显示尺寸产品接线 | G-io 重采样输出进入 URI 编码及序列化 | 显示尺寸采样。
 - ~~ShapeUtils 多孔输入边界校验 | G-struct 双孔、越界、相交和失败输出不变 | 已有多孔剖分。~~ 10 项通过，漏孔与外孔反例均转红。
 - ~~ShapeUtils 闭合重复点 | G-struct 尾点归一化与 r160 的面积、数量和紧凑索引对照 | 已有多孔剖分与边界校验。~~ 5 项通过，跳过归一化反例转红。
 - ~~ShapeUtils 双孔凹形对照 | G-struct U 形轮廓与双孔的面积、绕向及空洞 | 已有多孔剖分。~~ 4 项通过，漏掉右孔反例 12 对 18。

@@ -1,0 +1,66 @@
+native function image_display_read(src:i64,channel:i64) i64 {
+  let alpha=ux_u8(src+3);
+  if(channel==3) { return alpha; }
+  return (ux_u8(src+channel)*alpha+127)/255;
+}
+
+native function image_display_sample(out:i64,row0:i64,row1:i64,step:i64,tx:f64,ty:f64,bias:f64) i64 {
+  let channel=3;
+  let alpha=0;
+  while(channel>=0) {
+    let a=(1.0-tx)*image_display_read(row0,channel)+tx*image_display_read(row0+step,channel);
+    let b=(1.0-tx)*image_display_read(row1,channel)+tx*image_display_read(row1+step,channel);
+    let value=f64_floor_i64((1.0-ty)*a+ty*b+bias);
+    if(channel==3) { alpha=value; }
+    else if(alpha==0) { value=0; }
+    else { value=(255*value+alpha/2)/alpha; }
+    let saved=ux_u8_put(out+channel,value);
+    channel=channel-1;
+  }
+  return out;
+}
+
+// Display dimensions are supplied by the host. Use a pixel-center bilinear
+// filter and straight RGBA output after interpolation in premultiplied space.
+native function ImageUtils_displayRaster(image:i64,width:i64,height:i64,out:i64,capacity:i64) i64 {
+  if(image<0 || image%4!=0 || image>6291456-ImageResource.size || width<1 || width>4096 ||
+     height<1 || height>4096 || width*height>1048576 || capacity<width*height*4 ||
+     out<0 || out>6291456-capacity || image_source_overlap(image,ImageResource.size,out,capacity)) { return 0-1; }
+  let sourceWidth=ux_u32(image+ImageResource.width);
+  let sourceHeight=ux_u32(image+ImageResource.height);
+  let source=ux_u32(image+ImageResource.rgba);
+  let stride=ux_u32(image+ImageResource.rowBytes);
+  if(sourceWidth<1 || sourceWidth>4096 || sourceHeight<1 || sourceHeight>4096 || stride<sourceWidth*4 ||
+     source>6291456-sourceWidth*4 || sourceHeight-1>(6291456-source-sourceWidth*4)/stride ||
+     image_source_overlap(source,(sourceHeight-1)*stride+sourceWidth*4,out,capacity)) { return 0-1; }
+  let bias=0.0;
+  // Canvas uses round-to-nearest for this filtered downscale path.
+  if(width<=sourceWidth && height<=sourceHeight && (width<sourceWidth || height<sourceHeight)) { bias=0.5; }
+  let y=0;
+  while(y<height) {
+    let sy=(0.5+y)*(0.0+sourceHeight)/(0.0+height)-0.5;
+    if(sy<0.0) { sy=0.0; }
+    if(sy>0.0+sourceHeight-1.0) { sy=0.0+sourceHeight-1.0; }
+    let y0=f64_floor_i64(sy);
+    let y1=y0+1;
+    if(y1>=sourceHeight) { y1=y0; }
+    let ty=sy-y0;
+    let x=0;
+    while(x<width) {
+      let sx=(0.5+x)*(0.0+sourceWidth)/(0.0+width)-0.5;
+      if(sx<0.0) { sx=0.0; }
+      if(sx>0.0+sourceWidth-1.0) { sx=0.0+sourceWidth-1.0; }
+      let x0=f64_floor_i64(sx);
+      let tx=sx-x0;
+      let dst=out+(y*width+x)*4;
+      let row0=source+y0*stride+x0*4;
+      let row1=source+y1*stride+x0*4;
+      let step=4;
+      if(x0+1>=sourceWidth) { step=0; }
+      let painted=image_display_sample(dst,row0,row1,step,tx,ty,bias);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return width*height*4;
+}
