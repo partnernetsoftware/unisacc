@@ -26,6 +26,7 @@ static char git_dir[4500], object_env[4600], ape[4200], hook[4600];
 static const char *worker,*syncer;
 static char branch_key[65], session_base[4300], session_ref[160];
 static char committer[2][4400];
+static const char *merge_owner;
 static int deadline_hit;
 
 static int run_at(const char *cwd, char *const argv[], char *const env[], np_result *r) {
@@ -79,10 +80,47 @@ static int git_range(const char *up,const char *tip,int first_parent,commits *li
     np_free(&r);
     return ok ? 0 : -1;
 }
-static int owns(const char *up,const commits *owned,int first_parent) {
+static int audited_merge(const char *id, const char *mark, const np_result *log) {
+    size_t width = strlen(mark);
+    const char *limit = log->out ? log->out + log->outn : 0;
+    for (const char *line = log->out; line && line < limit;) {
+        const char *end = memchr(line, '\n', (size_t)(limit - line));
+        if (!end) break;
+        if ((size_t)(end - line) == 41 + width && line[40] == '\t' &&
+            !memcmp(line, id, 40) && !memcmp(line + 41, mark, width)) {
+            char parents[124];
+            char *v[] = {"git", "rev-list", "--parents", "--no-walk", (char *)id, 0};
+            return !exact(v, 0, parents, sizeof parents) && strlen(parents) == 122 &&
+                   parents[40] == ' ' && parents[81] == ' ';
+        }
+        line = end + 1;
+    }
+    return 0;
+}
+
+static int owns(const char *up,const commits *owned,int first_parent,char missing[41]) {
     commits actual;
-    return owned->n>0&&!git_range(up,owned->id[owned->n-1],first_parent,&actual)&&
-           actual.n==owned->n&&mm_same(actual.id,owned->id,(size_t)owned->n*41);
+    if (!owned->n || git_range(up, owned->id[owned->n - 1], first_parent, &actual)) return 0;
+    if (actual.n == owned->n && mm_same(actual.id, owned->id, (size_t)owned->n * 41)) return 1;
+    np_result log = {0};
+    char mark[350];
+    int have = 0, next = 0;
+    if (first_parent && merge_owner && !cx_fmt(mark, sizeof mark, "devsvc merge v1 %s %s", merge_owner, branch)) {
+        /* HEAD's reflog belongs to this worktree. History for an unrelated
+           branch or a distinct request owner cannot cover an implicit gap. */
+        char *v[] = {"git", "reflog", "show", "--format=%H%x09%gs", "--max-count=256", "HEAD", 0};
+        have = call(v, 0, &log) == 0;
+    }
+    for (int i = 0; i < actual.n; i++) {
+        if (next < owned->n && tx_eqz(actual.id[i], owned->id[next])) next++;
+        else if (!(have && audited_merge(actual.id[i], mark, &log))) {
+            mm_copy(missing, 41, actual.id[i], 41);
+            np_free(&log);
+            return 0;
+        }
+    }
+    np_free(&log);
+    return next == owned->n;
 }
 static int ancestor(const char *a,const char *b) {
     char *v[]={"git","merge-base","--is-ancestor",(char *)a,(char *)b,0};
@@ -642,8 +680,11 @@ static int run_push(void) {
         if(!is_new&&!ff&&refuse_nonfast_merge(&owned))break;
         /* Fast-forward merge ownership is its first-parent range. The merge
            itself authorizes its second-parent content. Replay remains linear. */
-        if(!is_new&&!owns(remote,&owned,ff)) {
-            puts("PUSH_REPLAY_REFUSE\treason=unowned-pending");
+        char missing[41] = "";
+        if(!is_new&&!owns(remote,&owned,ff,missing)) {
+            printf("PUSH_REPLAY_REFUSE\treason=unowned-pending\tcommit=%s\tnext=devsvc-git-merge-or-explicit-push\n",
+                   missing[0] ? missing : "-");
+            puts("PUSH_REPLAY_HINT\tcreate audited merges with devsvc git merge; for an existing reviewed range, use devsvc git push FULL_SHA... in first-parent order");
             break;
         }
         journal[0]=0;
@@ -686,15 +727,22 @@ static int run_push(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 6 || argc > OWN_MAX + 5 || sy_realpath(argv[1], root, sizeof root) < 0 ||
+    if (argc < 6 || argc > OWN_MAX + 7 || sy_realpath(argv[1], root, sizeof root) < 0 ||
         argv[2][0]!='/'||argv[3][0]!='/') return 2;
     worker=argv[2];syncer=argv[3];
     if (getenv("GIT_DIR")||getenv("GIT_WORK_TREE")||getenv("GIT_INDEX_FILE")||getenv("GIT_OBJECT_DIRECTORY"))
         return 2;
-    requested.n=argc-5;
+    int start = 5;
+    if (argc >= 8 && tx_eqz(argv[start], "--merge-owner")) {
+        if (strlen(argv[start + 1]) != 64 || strspn(argv[start + 1], "0123456789abcdef") != 64) return 2;
+        merge_owner = argv[start + 1];
+        start += 2;
+    }
+    requested.n=argc-start;
+    if (requested.n > OWN_MAX) return 2;
     for (int i = 0; i < requested.n; i++) {
-        if (!oid(argv[i + 5])) return 2;
-        mm_copy(requested.id[i],41,argv[i + 5],41);
+        if (!oid(argv[i + start])) return 2;
+        mm_copy(requested.id[i],41,argv[i + start],41);
     }
     char *end=0;
     int64_t now=sy_mono_ns();
