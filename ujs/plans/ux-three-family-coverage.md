@@ -21,8 +21,8 @@ BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 只支持线性 LDR 4
 
 ## 几何与材质尚需的类专有验证
 
-(1) EdgesGeometry 与 WireframeGeometry 的参数引用源几何。需验引用解析、缺资源拒绝和生成线段。PolyhedronGeometry 缺顶点数组、索引、半径及细分的参数往返。
+(1) EdgesGeometry 与 WireframeGeometry 的嵌套 PlaneGeometry 源已验，其他源类型和通用资源图仍待接。PolyhedronGeometry 的数组、半径和细分已验，专有复制与释放仍待补。
 
 (2) ShapeGeometry 与 ExtrudeGeometry 缺形状引用及孔洞恢复。ExtrudeGeometry 还需验倒角与曲线挤出。TubeGeometry 缺 Curve 类型和标架的重建。
 
-(3) MeshPhysicalMaterial 缺从实例导入导出专有字段，包括清漆、透射及法线参数。ShaderMaterial 与 RawShaderMaterial 缺着色器文本、uniform 类型及资源引用的 JSON 往返。
+(3) MeshPhysicalMaterial 的无贴图字段已验，贴图接线、GPU 透射、独立法线和间接光仍待补。ShaderMaterial 与 RawShaderMaterial 已验源码、GLSL 版本、标量和三维向量 uniform，其他 uniform、extensions 及运行时对象接线待补。
