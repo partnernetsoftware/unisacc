@@ -128,7 +128,9 @@ function runCommands(gl, commands, targets, packet) {
           const wraps = [gl.CLAMP_TO_EDGE, gl.REPEAT, gl.MIRRORED_REPEAT];
           previousTexture = gl.getParameter(cube ? gl.TEXTURE_BINDING_CUBE_MAP : gl.TEXTURE_BINDING_2D);
           gl.bindTexture(target, texture);
-          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR, gl.NEAREST_MIPMAP_NEAREST, gl.NEAREST_MIPMAP_LINEAR, gl.LINEAR_MIPMAP_NEAREST][min]);
+          const filters = [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR,
+            gl.NEAREST_MIPMAP_NEAREST, gl.NEAREST_MIPMAP_LINEAR, gl.LINEAR_MIPMAP_NEAREST];
+          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filters[min]);
           gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, min ? gl.LINEAR : gl.NEAREST);
           gl.texParameteri(target, gl.TEXTURE_WRAP_S, wraps[wrapS]);
           gl.texParameteri(target, gl.TEXTURE_WRAP_T, wraps[wrapT]);
