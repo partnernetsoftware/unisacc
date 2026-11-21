@@ -1,11 +1,17 @@
 /* tools/product-links.cx -- inventory and classify all symlinks inside the 7 product trees
    (cx, src, exec, seed, weights, include, kernel) into build/product-links.tsv.
-   Identity-soundness fact source (v0.0.90 source-packages-v3, design v2.9):
-     class 甲: declared under cx/ or src/, real_path outside the 7 product trees, and target is
-               either a .cx file or a directory whose keep()-filtered files are all .cx.
-     class 乙: declared under exec/seed/weights/include/kernel, or real_path inside product trees,
-               or out-of-tree target that is not .cx (e.g. .h/.c/.tsv/non-cx dir).
-   Usage: sh ./unisacc.com tools/product-links.cx -- --write|--check [--root DIR] */
+   Identity-soundness fact source (v0.0.90 source-packages-v3, design v2.9 / L.10-L.12):
+     Rule 1 (class 甲): declared under cx/ or src/, real_path outside the 7 product trees, and
+       target is either a .cx file or a directory whose keep()-filtered files are all .cx.
+       Inner symlinks inside such a directory that point back into the 7 product trees (e.g.
+       ext/sysx/sys -> cx/sys) are treated as neutral and NOT followed.
+     Rule 2 (class 乙): declared under exec/seed/weights/include/kernel, or real_path inside
+       product trees, or out-of-tree target that is not .cx (e.g. .h/.c/.tsv/non-cx dir).
+     Rule 3 (support override): a class 甲 target is excluded from source SID unless explicitly
+       listed in build/sid-support.tsv (--support FILE); when listed, reason records +support-override.
+     Rule 4 (multi-hop): every hop of a symlink chain is recorded in the hops column
+       (e.g. exec/c/cxlib/codec.cx -> tools/cxlib/codec.cx -> cx/runtime/codec.cx).
+   Usage: sh ./unisacc.com tools/product-links.cx -- --write|--check [--root DIR] [--support FILE] */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use text.fmt
@@ -16,13 +22,16 @@ typedef struct {
     char link[256];
     char target[256];
     char realp[256];
+    char hops[512];
     char cls[8];
-    char reason[48];
+    char reason[64];
 } PlRow;
 
 static PlRow pl_rows[256];
 static int pl_n;
 static char pl_root[512];
+static char pl_sup[128][256];
+static int pl_nsup;
 
 static int pl_in_tree(const char *rel) {
     return strncmp(rel, "cx/", 3) == 0 || strcmp(rel, "cx") == 0 ||
@@ -45,11 +54,55 @@ static int pl_is_keep_ext(const char *name) {
            pl_has_sfx(name, ".json") || pl_has_sfx(name, ".sh");
 }
 
-/* Resolve rel (relative to pl_root) by following symlinks iteratively up to 16 hops. */
-static int pl_resolve(const char *rel, char *out, int cap) {
+static int pl_load_support(const char *path, int required) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    long pos = 0;
+    pl_nsup = 0;
+    if (sy_read_file(path, &buf, &n, 1 << 20) != 0 || !buf) return required ? -1 : 0;
+    while (pos < (long)n && pl_nsup < 128) {
+        long ls = pos;
+        while (pos < (long)n && buf[pos] != '\n') pos++;
+        long ll = pos - ls;
+        if (pos < (long)n) pos++;
+        if (ll > 0 && buf[ls] != '#') {
+            long i = ls;
+            while (i < ls + ll && pl_nsup < 128) {
+                long f0 = i;
+                while (i < ls + ll && buf[i] != '\t' && buf[i] != '\r') i++;
+                long fl = i - f0;
+                if (fl > 0 && fl < 255 && memchr(buf + f0, '/', fl) != 0) {
+                    mm_copy(pl_sup[pl_nsup], 256, buf + f0, fl);
+                    pl_sup[pl_nsup][fl] = 0;
+                    pl_nsup++;
+                }
+                while (i < ls + ll && (buf[i] == '\t' || buf[i] == '\r')) i++;
+            }
+        }
+    }
+    return 0;
+}
+
+static int pl_in_support(const char *realp) {
+    int i;
+    for (i = 0; i < pl_nsup; i++) if (strcmp(pl_sup[i], realp) == 0) return 1;
+    return 0;
+}
+
+/* Resolve rel (relative to pl_root) by following symlinks iteratively up to 16 hops.
+   If hops_out is non-null, writes "rel -> hop1 -> hop2 ...". */
+static int pl_resolve(const char *rel, char *out, int cap, char *hops_out, int hcap) {
     char cur[512], full[1024], lbuf[512], joined[512], norm[512];
     int hop;
+    long hn = 0;
     cx_fmt(cur, (long)sizeof cur, "%s", rel);
+    if (hops_out && hcap > 0) {
+        long l = (long)strlen(cur);
+        if (l >= hcap) l = hcap - 1;
+        mm_copy(hops_out, hcap, cur, l);
+        hops_out[l] = 0;
+        hn = l;
+    }
     for (hop = 0; hop < 16; hop++) {
         sy_stat_t st;
         long rn;
@@ -75,25 +128,44 @@ static int pl_resolve(const char *rel, char *out, int cap) {
         }
         if (pt_normalize(norm, (long)sizeof norm, joined, (long)strlen(joined)) < 0) break;
         cx_fmt(cur, (long)sizeof cur, "%s", norm);
+        if (hops_out && hcap > 0) {
+            long nl = (long)strlen(cur);
+            if (hn + 4 + nl < hcap - 1) {
+                mm_copy(hops_out + hn, hcap - hn, " -> ", 4); hn += 4;
+                mm_copy(hops_out + hn, hcap - hn, cur, nl); hn += nl;
+                hops_out[hn] = 0;
+            }
+        }
     }
     if (cx_fmt(out, (long)cap, "%s", cur) != 0) return -1;
     return 0;
 }
 
-/* Scan directory full_dir (without following symlinks) to check if all keep()-filtered files are .cx. */
-static void pl_dir_cx_scan(const char *full_dir, int *n_cx, int *n_other) {
+/* Scan directory full_dir (rel_dir relative to pl_root) without following symlinks.
+   Inner symlinks pointing back into the 7 product trees are neutral and NOT followed. */
+static void pl_dir_cx_scan(const char *full_dir, const char *rel_dir, int *n_cx, int *n_other) {
     sy_dir_t it;
     if (sy_dir_open(&it, full_dir) != 0) return;
     while (sy_dir_next(&it) == 1) {
-        char sub[1024];
-        if (cx_fmt(sub, (long)sizeof sub, "%s/%s", full_dir, it.name) != 0) continue;
+        char sub_full[1024], sub_rel[512];
+        if (cx_fmt(sub_full, (long)sizeof sub_full, "%s/%s", full_dir, it.name) != 0) continue;
+        if (cx_fmt(sub_rel, (long)sizeof sub_rel, "%s/%s", rel_dir, it.name) != 0) continue;
         if (it.kind == 'd') {
-            pl_dir_cx_scan(sub, n_cx, n_other);
+            pl_dir_cx_scan(sub_full, sub_rel, n_cx, n_other);
         } else if (it.kind == 'f') {
             if (pl_is_keep_ext(it.name)) {
                 if (pl_has_sfx(it.name, ".cx")) (*n_cx)++;
                 else (*n_other)++;
             }
+        } else if (it.kind == 'l') {
+            char inner_real[512], inner_full[1024];
+            sy_stat_t ist;
+            if (pl_resolve(sub_rel, inner_real, (int)sizeof inner_real, 0, 0) != 0) { (*n_other)++; continue; }
+            /* Rule 1: inner symlink pointing back into product trees is neutral and never followed. */
+            if (pl_in_tree(inner_real)) continue;
+            cx_fmt(inner_full, (long)sizeof inner_full, "%s/%s", pl_root, inner_real);
+            if (sy_stat(inner_full, &ist) == 0 && ist.kind == 'f' && pl_has_sfx(inner_real, ".cx")) (*n_cx)++;
+            else (*n_other)++;
         }
     }
     sy_dir_close(&it);
@@ -114,6 +186,7 @@ static void pl_classify(PlRow *r) {
     {
         char full[1024];
         sy_stat_t st;
+        int sup = pl_in_support(r->realp);
         cx_fmt(full, (long)sizeof full, "%s/%s", pl_root, r->realp);
         if (sy_stat(full, &st) != 0) {
             cx_fmt(r->cls, (long)sizeof r->cls, "乙");
@@ -123,17 +196,17 @@ static void pl_classify(PlRow *r) {
         if (st.kind == 'f') {
             if (pl_has_sfx(r->realp, ".cx")) {
                 cx_fmt(r->cls, (long)sizeof r->cls, "甲");
-                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-cx-file");
+                cx_fmt(r->reason, (long)sizeof r->reason, sup ? "out-of-tree-cx-file+support-override" : "out-of-tree-cx-file");
             } else {
                 cx_fmt(r->cls, (long)sizeof r->cls, "乙");
                 cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-non-cx");
             }
         } else if (st.kind == 'd') {
             int n_cx = 0, n_other = 0;
-            pl_dir_cx_scan(full, &n_cx, &n_other);
+            pl_dir_cx_scan(full, r->realp, &n_cx, &n_other);
             if (n_cx > 0 && n_other == 0) {
                 cx_fmt(r->cls, (long)sizeof r->cls, "甲");
-                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-cx-dir");
+                cx_fmt(r->reason, (long)sizeof r->reason, sup ? "out-of-tree-cx-dir+support-override" : "out-of-tree-cx-dir");
             } else {
                 cx_fmt(r->cls, (long)sizeof r->cls, "乙");
                 cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-non-cx-dir");
@@ -164,7 +237,7 @@ static void pl_walk(const char *rel_dir) {
             rn = sy_readlink(full_l, r->target, (long)sizeof(r->target) - 1);
             if (rn < 0) rn = 0;
             r->target[rn] = 0;
-            pl_resolve(sub_rel, r->realp, (int)sizeof r->realp);
+            pl_resolve(sub_rel, r->realp, (int)sizeof r->realp, r->hops, (int)sizeof r->hops);
             pl_classify(r);
         }
     }
@@ -173,19 +246,26 @@ static void pl_walk(const char *rel_dir) {
 
 int main(int argc, char **argv) {
     static const char *trees[7] = {"cx", "src", "exec", "seed", "weights", "include", "kernel"};
-    int mode = 0, i, j, n_a = 0, n_b = 0;
+    int mode = 0, i, j, n_a = 0, n_b = 0, sup_explicit = 0;
     static char out[65536];
     long on = 0;
-    char tbl[1024];
+    char tbl[1024], sup_path[1024];
 
     cx_fmt(pl_root, (long)sizeof pl_root, ".");
+    sup_path[0] = 0;
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--write") == 0) mode = 1;
         else if (strcmp(argv[i], "--check") == 0) mode = 2;
         else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) cx_fmt(pl_root, (long)sizeof pl_root, "%s", argv[++i]);
-        else { printf("usage: product-links-gen --write|--check [--root DIR]\n"); return 2; }
+        else if (strcmp(argv[i], "--support") == 0 && i + 1 < argc) { cx_fmt(sup_path, (long)sizeof sup_path, "%s", argv[++i]); sup_explicit = 1; }
+        else { printf("usage: product-links --write|--check [--root DIR] [--support FILE]\n"); return 2; }
     }
-    if (!mode) { printf("usage: product-links-gen --write|--check [--root DIR]\n"); return 2; }
+    if (!mode) { printf("usage: product-links --write|--check [--root DIR] [--support FILE]\n"); return 2; }
+    if (!sup_path[0]) cx_fmt(sup_path, (long)sizeof sup_path, "%s/build/sid-support.tsv", pl_root);
+    if (pl_load_support(sup_path, sup_explicit) != 0) {
+        printf("PRODUCT_LINKS\tFAIL\tmissing-support\t%s\n", sup_path);
+        return 1;
+    }
 
     for (i = 0; i < 7; i++) pl_walk(trees[i]);
     for (i = 0; i < pl_n; i++) {
@@ -196,17 +276,20 @@ int main(int argc, char **argv) {
         }
     }
     {
-        const char *hdr = "# link_path\ttarget\treal_path\tclass\treason\n"
-                          "# Generated by tools/product-links.cx --write; v0.0.90 source-packages-v3 symlink classification fact source.\n";
+        const char *hdr = "# link_path\ttarget\treal_path\thops\tclass\treason\n"
+                          "# Generated by tools/product-links.cx --write; v0.0.90 source-packages-v3 symlink classification fact source.\n"
+                          "# Rule-1(L.10): 回指产品树的内层链接视为中性且不跟随(如 ext/sysx/sys -> cx/sys),故 ext/sysx 四条目录链接保持类甲。\n"
+                          "# Rule-2(L.11): 类甲目标不在源身份清单,除非 build/sid-support.tsv 有显式一行(记 +support-override,如 ext/textx/deflate.cx)。\n"
+                          "# Rule-3(L.12): 多跳链接在 hops 列逐跳记录(如 exec/c/cxlib/codec.cx -> tools/cxlib/codec.cx -> cx/runtime/codec.cx)。\n";
         long hl = (long)strlen(hdr);
         mm_copy(out, (long)sizeof out, hdr, hl);
         on = hl;
     }
     for (i = 0; i < pl_n; i++) {
-        char line[1024];
+        char line[1536];
         if (strcmp(pl_rows[i].cls, "甲") == 0) n_a++; else n_b++;
-        if (cx_fmt(line, (long)sizeof line, "%s\t%s\t%s\t%s\t%s\n",
-                   pl_rows[i].link, pl_rows[i].target, pl_rows[i].realp, pl_rows[i].cls, pl_rows[i].reason) == 0) {
+        if (cx_fmt(line, (long)sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\n",
+                   pl_rows[i].link, pl_rows[i].target, pl_rows[i].realp, pl_rows[i].hops, pl_rows[i].cls, pl_rows[i].reason) == 0) {
             long ll = (long)strlen(line);
             if (on + ll < (long)sizeof out - 1) { mm_copy(out + on, (long)sizeof out - on, line, ll); on += ll; }
         }
