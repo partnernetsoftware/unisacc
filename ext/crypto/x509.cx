@@ -23,6 +23,14 @@
    top of this still owns its own path rules and decides which roots it believes.  Nothing here ever says
    "trusted", because nothing here can know it.
 
+   Ownership: cs_x509 BORROWS, it never copies.  Every pointer in it (der, tbs, serial, issuer, subject, ec_point,
+   san, sigalg, sig) points into the buffer handed to cs_x509_parse, and rsa_n/rsa_e are views of it too; only the
+   scalar fields (version, times, flags, lengths) are values.  The buffer must stay unchanged and alive for as
+   long as the cs_x509 is used, and must not be reused for the next certificate: parse each certificate of a
+   chain into its own buffer, or an earlier certificate silently reads the later one's bytes (SAN, subject, key).
+   An unsupported EC curve parses (key_unsupported = 1) and cs_x509_verify_sig then returns -ENOSYS, so "cannot
+   verify" is distinguishable from "signature is wrong".
+
    Times are seconds since the 1970 epoch, computed from the calendar fields without a library call, so an
    expiry check is a comparison and not a timezone surprise. */
 
@@ -42,6 +50,7 @@ typedef struct {
 
     int is_rsa;                    /* subjectPublicKeyInfo algorithm */
     int is_ec256;
+    int key_unsupported;           /* SPKI names an EC curve other than P-256 (P-384, P-521, ...): parsed, not verifiable */
     cs_bn rsa_n, rsa_e;            /* when is_rsa */
     const unsigned char *ec_point; long ec_pointlen;  /* when is_ec256 */
 
@@ -139,7 +148,7 @@ static int cs_x509_spki(cs_x509 *c, cs_der *spki) {
         long curven;
         if (cs_der_oid(&alg, &curvep, &curven)) return -EINVAL;
         if (!cs_x509_oid_is(curvep, curven, cs_x509_oid_p256, (long)sizeof(cs_x509_oid_p256)))
-            return -ENOSYS;                                        /* P-384 and P-521 are not implemented */
+        { c->key_unsupported = 1; return 0; }                      /* P-384 and P-521: keep the certificate, refuse to verify with it */
         if (!cs_der_at_end(&alg)) return -EINVAL;
         if (cs_der_bits(spki, &c->ec_point, &c->ec_pointlen) || !cs_der_at_end(spki)) return -EINVAL;
         c->is_ec256 = 1;
@@ -203,7 +212,7 @@ int cs_x509_parse(const unsigned char *der, long len, cs_x509 *c) {
     if (!der || !c || len <= 0) return -EINVAL;
     c->der = der; c->derlen = len;
     c->version = 1;
-    c->is_rsa = 0; c->is_ec256 = 0;
+    c->is_rsa = 0; c->is_ec256 = 0; c->key_unsupported = 0;
     c->has_bc = 0; c->is_ca = 0;
     c->san = 0; c->sanlen = 0;
     in.p = der; in.n = len;
@@ -262,6 +271,7 @@ int cs_x509_ca(const cs_x509 *c) { return c && c->has_bc && c->is_ca; }
 int cs_x509_verify_sig(const cs_x509 *child, const cs_x509 *issuer) {
     unsigned char hash[32];
     if (!child || !issuer || !child->sig || child->siglen <= 0) return -EINVAL;
+    if (issuer->key_unsupported) return -ENOSYS;                  /* cannot verify with this curve: not "failed" */
     if (cs_x509_oid_is(child->sigalg, child->sigalglen, cs_x509_oid_sha256rsa,
                        (long)sizeof(cs_x509_oid_sha256rsa))) {
         if (!issuer->is_rsa) return -EINVAL;
