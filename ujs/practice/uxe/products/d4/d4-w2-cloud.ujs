@@ -1,0 +1,91 @@
+// Input is D4W2Puff ABI v1 (48 bytes per row). The output is nine counts
+// and nine f32 RGB triples, followed by xyz, scale, yaw, pitch, and roll
+// planes sized for capacity. Group order is light, shade and dust per stack.
+native function d4_w2_cloud_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && at<=6291456-bytes;
+}
+
+native function d4_w2_cloud_color(src:i64) i64 {
+  let i=0;
+  let tint=0;
+  let byte=1;
+  while(i<3) {
+    let value=ux_f32(src+28+i*4);
+    if(!(value>=0.0 && value<=1.0)) { return 0-1; }
+    tint=tint+byte*f64_floor_i64(value*255.0+0.5);
+    byte=byte*256;
+    i=i+1;
+  }
+  if(tint==241+233*256+213*65536) { return 0; }
+  if(tint==165+179*256+195*65536) { return 1; }
+  if(tint==214+220*256+225*65536) { return 2; }
+  return 0-1;
+}
+
+native function d4_w2_cloud_valid(src:i64) i64 {
+  if(!(ux_f32(src+12)>0.0) || ux_u32(src+40)>2 || ux_u32(src+44)>14) { return 0; }
+  let i=0;
+  while(i<7) {
+    let value=ux_f32(src+i*4);
+    if(value-value!=0.0) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function D4W2Smoke_cloud(output:i64,capacity:i64,input:i64,count:i64) i64 {
+  let bytes=144+capacity*28;
+  if(capacity<0 || capacity>45 || count<0 || count>capacity ||
+     !d4_w2_cloud_span(output,bytes) || !d4_w2_cloud_span(input,count*48) ||
+     (count>0 && output<input+count*48 && input<output+bytes)) { return 0-1; }
+  let counts=[0,0,0,0,0,0,0,0,0];
+  let offsets=[0,0,0,0,0,0,0,0,0];
+  let previous=0-1;
+  let i=0;
+  while(i<count) {
+    let src=input+i*48;
+    let tint=d4_w2_cloud_color(src);
+    let stack=ux_u32(src+40);
+    let key=stack*15+ux_u32(src+44);
+    if(tint<0 || !d4_w2_cloud_valid(src) || key<=previous) { return 0-2; }
+    let group=stack*3+tint;
+    counts[group]=counts[group]+1;
+    previous=key;
+    i=i+1;
+  }
+  let total=0;
+  let palettes=[241,233,213,165,179,195,214,220,225];
+  i=0;
+  while(i<9) {
+    offsets[i]=total;
+    total=total+counts[i];
+    let r=ux_f32_put(output+36+i*12,palettes[i%3*3]/255.0);
+    let g=ux_f32_put(output+40+i*12,palettes[i%3*3+1]/255.0);
+    let b=ux_f32_put(output+44+i*12,palettes[i%3*3+2]/255.0);
+    i=i+1;
+  }
+  let xyz=output+144;
+  let scalars=xyz+capacity*12;
+  i=0;
+  while(i<count) {
+    let src=input+i*48;
+    let group=ux_u32(src+40)*3+d4_w2_cloud_color(src);
+    let row=offsets[group];
+    offsets[group]=row+1;
+    let moved=uxe_copy_record(xyz+row*12,src,12);
+    let axis=0;
+    while(axis<4) {
+      let value=ux_u32_put(scalars+(axis*capacity+row)*4,ux_u32(src+12+axis*4));
+      axis=axis+1;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<9) {
+    let stored=ux_u32_put(output+i*4,counts[i]);
+    i=i+1;
+  }
+  return total;
+}
+
+return D4W2Smoke_cloud(output,capacity,input,count);

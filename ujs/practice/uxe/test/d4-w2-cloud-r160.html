@@ -1,0 +1,170 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D4 U2D 烟雾 GPU 验收</title>
+<canvas id="actual" width="160" height="96"></canvas>
+<canvas id="oracle" width="160" height="96"></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { REVISION } from "../../web/game/three.module.js";
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene,PerspectiveCamera } from "../scene.js";
+import { allMeshes } from "../meshes.js";
+import { leafMesh } from "./d3-foliage.js";
+
+const result=document.querySelector("#result"),query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+const width=160,height=96,base=2097152,capacity=45;
+const palettes=[[241,233,213],[165,179,195],[214,220,225]];
+const mesh=leafMesh(1),meshBase=allMeshes().length;
+const centers=[[-4.9,11.9,-.85],[.65,14.2,-3.1],[4.7,11.44,-1.5]];
+const poseAt=t=>[10,-.45,.25,t<=80?t*.024:t<=170?1.92-(t-80)*.024:-.24+(t-170)*.024];
+
+async function load(name) {
+  const url=query.get(name);
+  if(!url) throw new Error("验收缺少 Wasm 路径");
+  const response=await fetch(url);
+  if(!response.ok) throw new Error("无法读取 Wasm");
+  return (await WebAssembly.instantiate(await response.arrayBuffer())).instance.exports;
+}
+
+function viewport(id) {
+  const canvas=document.querySelector(id),scene=new Scene(),camera=new PerspectiveCamera(.68,.1,150);
+  scene.clearColor=[.48,.69,.79,1];
+  scene.fog.density=0;
+  scene.ambient={color:[1,1,1],intensity:.84};
+  camera.setEye(8,15,28);
+  camera.setTarget(0,13,0);
+  const clouds=Array.from({length:9},(_,i)=>{
+    const cloud=scene.instances("smoke-"+i,15,palettes[i%3].map(rgb=>rgb/255));
+    cloud.meshId=meshBase+Math.floor(i/3);
+    cloud.metalness=0;
+    cloud.roughness=.65;
+    cloud.toonLevels=3;
+    cloud.outlineExcluded=true;
+    cloud.count=0;
+    return cloud;
+  });
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes:[mesh,mesh,mesh]});
+  const gl=canvas.getContext("webgl");
+  function draw() {
+    renderer.render(scene,camera);
+    const pixels=new Uint8Array(width*height*4);
+    gl.readPixels(0,0,width,height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    if(gl.getError()!==gl.NO_ERROR) throw new Error("烟团 GPU 读回失败");
+    return pixels;
+  }
+  return {clouds,draw};
+}
+
+function oracle(clouds,tick,pose,births,stacks,flags) {
+  const counts=new Uint32Array(9);
+  for(let stack=0;stack<stacks;stack++) for(let j=0;j<15;j++) {
+    const tier=flags>=2?1:j%5===4?0:j%5===2?1:2;
+    const shade=tier===0?2:j%5===1||j%5===2?1:0;
+    let [x,y,z]=centers[stack];
+    let size=[.20,.48,.77][tier],yaw=0,pitch=0;
+    if(tick>=0) {
+      const ticks=(tick+8*j+37*stack)%120,age=ticks/120;
+      const atBirth=Math.max(0,tick-ticks);
+      const release=flags%2?pose[3]:(births.get(atBirth)??pose[3]);
+      const turn=j*2.4+stack*.61,spread=age*(tier===0?1.08:.56);
+      const fade=Math.min(1,age*9+.25,(1-age)*9);
+      x+=release+age*[-.90,1.60,3.15][stack]+Math.cos(turn)*spread;
+      y+=pose[1]+age*2.65+age*age*.82;
+      z+=pose[2]+age*.80+Math.sin(turn)*spread;
+      size*=((.75+.88*age)*fade);
+      yaw=turn+age*.7;
+      pitch=age*.20;
+    }
+    const group=stack*3+shade;
+    clouds[group].set(counts[group]++,x,y,z,size,yaw,pitch,0);
+  }
+  clouds.forEach((cloud,i)=>{ cloud.count=counts[i]; });
+  return counts;
+}
+
+function pixelsDifferent(a,b) {
+  let count=0;
+  for(let i=0;i<a.length;i+=4)
+    if(a[i]!==b[i] || a[i+1]!==b[i+1] || a[i+2]!==b[i+2] || a[i+3]!==b[i+3]) count++;
+  return count;
+}
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const [data,pack]=await Promise.all([load("data"),load("cloud")]);
+  const actual=viewport("#actual"),reference=viewport("#oracle");
+  const out=256,input=4096;
+  const pose=new Float64Array(data.memory.buffer,base+2048,4);
+  const source=new Uint8Array(data.memory.buffer,base+2304,capacity*48);
+  const inputBytes=new Uint8Array(pack.memory.buffer,base+input,source.length);
+  const inputWords=new Uint32Array(pack.memory.buffer,base+input,capacity*12);
+  const header=new Uint32Array(pack.memory.buffer,base+out,9);
+  const view=new Float32Array(pack.memory.buffer,base+out+144,capacity*7);
+  const packedWords=new Uint32Array(pack.memory.buffer,base+out,36+capacity*7);
+  for(let i=0;i<9;i++) actual.clouds[i].color=new Float32Array(pack.memory.buffer,base+out+36+i*12,3);
+  const birth=new Map();
+  if(data.uxe_d4_w2_smoke(0n,0n,2048n,0n,2304n,45n,3n,0n)!==0n) throw new Error("出生环拒绝");
+  const cases=[[-1,3,0],[0,3,0],[80,3,0],[121,3,0],[170,3,0],[241,3,0],[260,1,2],[260,0,0]];
+  let high=-1,rows=0,countDiff=0,recordDiff=0,pixelDiff=0,refused=0;
+  const images=[],sample=[];
+  for(const [index,[tick,stacks,flags]] of cases.entries()) {
+    while(high<tick) {
+      high++;
+      const step=poseAt(high);
+      pose.set(step);
+      if(data.uxe_d4_w2_smoke(1n,0n,2048n,BigInt(high),2304n,45n,3n,0n)!==0n) throw new Error("出生历史拒绝");
+      birth.set(high,step[3]);
+      birth.delete(high-121);
+    }
+    const frame=poseAt(Math.max(0,tick));
+    pose.set(frame);
+    let unread=0;
+    if(stacks) unread=Number(data.uxe_d4_w2_smoke(2n,0n,2048n,BigInt(tick),2304n,45n,BigInt(stacks),
+      BigInt(mutate && index===4?flags|1:flags)));
+    if(unread!==stacks*15) throw new Error("源烟团数非法");
+    inputBytes.set(source.subarray(0,unread*48));
+    const count=Number(pack.uxe_d4_w2_cloud(BigInt(out),45n,BigInt(input),BigInt(unread)));
+    if(count!==unread) countDiff++;
+    rows+=count;
+
+    const expected=oracle(reference.clouds,tick,frame,birth,stacks,flags);
+    let start=0;
+    for(let group=0;group<9;group++) {
+      const cloud=actual.clouds[group],ref=reference.clouds[group],end=start+header[group];
+      cloud.count=header[group];
+      cloud.xyz=view.subarray(start*3,end*3);
+      cloud.scale=view.subarray(capacity*3+start,capacity*3+end);
+      cloud.yaw=view.subarray(capacity*4+start,capacity*4+end);
+      cloud.pitch=view.subarray(capacity*5+start,capacity*5+end);
+      cloud.roll=view.subarray(capacity*6+start,capacity*6+end);
+      start=end;
+      if(header[group]!==expected[group]) countDiff++;
+      for(const field of ["xyz","scale","yaw","pitch","roll"]) {
+        const live=cloud.count*(field==="xyz"?3:1);
+        for(let j=0;j<live;j++) if(cloud[field][j]!==ref[field][j]) recordDiff++;
+      }
+    }
+    if(start!==count) countDiff++;
+    const image=actual.draw();
+    images.push(image);
+    pixelDiff+=pixelsDifferent(image,reference.draw());
+    if(index===0 || index===6) sample.push(...header.slice(0,3));
+    if(index===5) {
+      const saved=packedWords.slice();
+      const intact=()=>saved.every((word,i)=>word===packedWords[i]);
+      if(pack.uxe_d4_w2_cloud(BigInt(out),44n,BigInt(input),45n)===-1n && intact()) refused++;
+      if(pack.uxe_d4_w2_cloud(BigInt(input),45n,BigInt(input),45n)===-1n && intact()) refused++;
+      for(const [field,bad] of [[7,0],[11,13],[3,0]]) {
+        const at=44*12+field,previous=inputWords[at];
+        inputWords[at]=bad;
+        if(pack.uxe_d4_w2_cloud(BigInt(out),45n,BigInt(input),45n)===-2n && intact()) refused++;
+        inputWords[at]=previous;
+      }
+    }
+  }
+  const isVisible=Number(pixelsDifferent(images[0],images[7])>0);
+  const moving=Number(pixelsDifferent(images[0],images[4])>0);
+  result.textContent=JSON.stringify([cases.length,rows,cases.length*width*height,countDiff,recordDiff,pixelDiff,refused,isVisible,moving,...sample]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>

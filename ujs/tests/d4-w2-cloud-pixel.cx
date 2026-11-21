@@ -1,0 +1,49 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],data[300],cloud[300],url[690];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-d4-w2-cloud-",dir,sizeof dir)) return 2;
+    tx_snprintf(data,sizeof data,"%s/data.wasm",dir);
+    tx_snprintf(cloud,sizeof cloud,"%s/cloud.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/d4-w2-cloud-r160.html?data=file://%s&cloud=file://%s&mutate=%d",cwd,data,cloud,mutate);
+    char *a[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/products/d4/d4-w2-smoke-api.ujs",
+        "ujs/practice/uxe/base/f64-math.ujs","ujs/practice/uxe/products/d4/d4-w2-smoke.ujs","-o",data,0};
+    char *b[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/products/d4/d4-w2-cloud-api.ujs",
+        "ujs/practice/uxe/base/record-copy.ujs","ujs/practice/uxe/products/d4/d4-w2-cloud.ujs","-o",cloud,0};
+    char **commands[]={a,b};
+    const double gold[]={8,285,122880,0,0,0,5,1,1,6,6,3,9,6,0};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *out=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url;
+    for(int i=0;!failed && i<2;i++) {
+        const int rc=cx_runv_timeout(commands[i],12,&out,&bytes);
+        if(rc) { printf("D4_W2_CLOUD build=%d rc=%d %s\n",i,rc,out?out:""); failed=1; }
+        mm_free(out); out=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#result",actual,count,dir);
+        if(!failed) {
+            printf("D4_W2_CLOUD frames=%.0f records=%.0f pixels=%.0f count_diff=%.0f field_diff=%.0f pixel_diff=%.0f refusals=%.0f\n",
+                actual[0],actual[1],actual[2],actual[3],actual[4],actual[5],actual[6]);
+            for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+                printf("D4_W2_CLOUD field=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&out,&bytes)) failed=1;
+    mm_free(out);
+    printf("D4_W2_CLOUD failed=%d\n",failed);
+    return failed;
+}
