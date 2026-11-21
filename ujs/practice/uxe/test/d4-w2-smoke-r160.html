@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D4 U2D 烟雾出生位移验收</title>
+<pre id="result">pending</pre>
+<script type="module">
+const result=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+
+// The original U2D authored emitter records and animation formula.
+function reference(stack,j,tick,frame,births,flags) {
+  const [x,y,z]=[[-4.9,11.90,-.85],[.65,14.20,-3.1],[4.7,11.44,-1.5]][stack];
+  const tier=flags>=2?1:j%5===4?0:j%5===2?1:2;
+  const size=[.20,.48,.77][tier];
+  const color=tier===0?[214,220,225]:j%5===1||j%5===2?[165,179,195]:[241,233,213];
+  const rgb=color.map(value=>value/255);
+  if(tick<0) return [x,y,z,size,0,0,0,...rgb];
+  const ticks=(tick+8*j+37*stack)%120,age=ticks/120;
+  const release=flags%2===1?frame[3]:(births.get(Math.max(0,tick-ticks))??frame[3]);
+  const turn=j*2.4+stack*.61,spread=age*(tier===0?1.08:.56);
+  const fade=Math.min(1,age*9+.25,(1-age)*9);
+  return [x+release+age*[-.90,1.60,3.15][stack]+Math.cos(turn)*spread,
+    y+frame[1]+age*2.65+age*age*.82,z+frame[2]+age*.80+Math.sin(turn)*spread,
+    size*(.75+.88*age)*fade,turn+age*.7,age*.20,0,...rgb];
+}
+const atTick=tick=>[10,-.45,.25,
+  tick<=80?tick*.024:tick<=170?1.92-(tick-80)*.024:-.24+(tick-170)*.024];
+
+try {
+  const path=query.get("wasm");
+  if(!path) throw new Error("验收缺少 Wasm 路径");
+  const response=await fetch(path);
+  if(!response.ok) throw new Error("无法读取 Wasm");
+  const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());
+  const {memory,uxe_d4_w2_smoke}=instance.exports;
+  const base=2097152;
+  const values=new Float64Array(memory.buffer,base+2048,4);
+  const packed=new Float32Array(memory.buffer,base+2304,45*12);
+  const words=new Uint32Array(memory.buffer,base+2304,45*12);
+  const state=new Uint32Array(memory.buffer,base,121*4);
+  const births=new Map();
+  const emit=(tick,out=2304,capacity=45,stacks=3,flags=0)=>
+    uxe_d4_w2_smoke(2n,0n,2048n,BigInt(tick),BigInt(out),BigInt(capacity),BigInt(stacks),BigInt(flags));
+  state.fill(0xffffffff);
+  if(uxe_d4_w2_smoke(0n,0n,2048n,0n,2304n,45n,3n,0n)!==0n || state.some(value=>value!==0)) {
+    throw new Error("历史环复位失败");
+  }
+  const checks=[
+    [-1,3,0,false],[17,3,0,false],
+    [0,3,0,true],[17,3,0,true],[119,3,0,true],[120,3,0,true],[121,3,0,true],
+    [170,3,0,true],[241,3,0,true],[260,3,0,true],[260,3,1,true],[260,1,2,true],
+    [260,1,3,true],[0,3,0,false],
+  ];
+  let latest=-1,rows=0,fields=0,countDiff=0,idDiff=0,tailDiff=0;
+  const samples=[];
+  for(const [index,[tick,stacks,flags,advance]] of checks.entries()) {
+    while(advance && latest<tick) {
+      latest++;
+      const pose=atTick(latest);
+      values.set(pose);
+      if(uxe_d4_w2_smoke(1n,0n,2048n,BigInt(latest),2304n,45n,3n,0n)!==0n) throw new Error("历史写入失败");
+      births.set(latest,pose[3]);
+      births.delete(latest-121);
+    }
+    const pose=atTick(Math.max(0,tick));
+    if(index===13) pose[3]=8.25;
+    values.set(pose);
+    words.fill(0xfeedbeef);
+    const count=Number(emit(tick,2304,45,stacks,mutate && index===7?1:flags));
+    if(count!==stacks*15) countDiff++;
+    rows+=count;
+    for(let i=0;i<stacks*15;i++) {
+      const stack=Math.floor(i/15),slot=i%15;
+      reference(stack,slot,tick,pose,births,flags).forEach((expected,j)=>{
+        const actual=packed[i*12+j];
+        if(!Number.isFinite(actual) || Math.abs(actual-Math.fround(expected))>1e-6) fields++;
+      });
+      if(words[i*12+10]!==stack || words[i*12+11]!==slot) idDiff++;
+    }
+    if(words.subarray(stacks*15*12).some(value=>value!==0xfeedbeef)) tailDiff++;
+    samples.push([packed[0],packed[1],packed[2],packed[3],packed[5]]);
+  }
+
+  const before=words.slice(),historyBefore=state.slice();
+  const intact=()=>before.every((value,i)=>value===words[i]);
+  let refused=0;
+  for(const code of [emit(260,2304,44),emit(260,0),emit(260,2048),emit(260,2304,45,0),emit(260,2304,45,3,4)]) {
+    if(code===-1n && intact()) refused++;
+  }
+  const stale=uxe_d4_w2_smoke(1n,0n,2048n,18n,2304n,45n,3n,0n);
+  if(stale===-2n && historyBefore.every((value,i)=>value===state[i]) && intact()) refused++;
+  const poisoned=new Float64Array(memory.buffer,base+(240%121)*16,1);
+  const saved=poisoned[0];
+  poisoned[0]=Infinity;
+  if(emit(260)===-2n && intact()) refused++;
+  poisoned[0]=saved;
+
+  result.textContent=JSON.stringify([checks.length,rows,countDiff,fields,idDiff,tailDiff,refused,
+    ...samples[0].slice(0,4),samples[2][1],samples[2][3],samples[5][0],samples[6][0],samples[13][0]]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>

@@ -1,0 +1,137 @@
+// U2D smoke: release X follows the travel recorded at each puff's birth tick.
+// Actions 0/1/2 reset history, record current travel, or emit visible records.
+// History has 121 entries of (f64 travel, u32 tick+1, u32 reserved).
+// Frame is the first four f64 fields of D4Frame. Flags 1/2 select current
+// travel instead of history and one common puff size, respectively.
+// Tick -1 emits the undrifted authored puffs.
+struct D4W2Puff {
+  x: f32;
+  y: f32;
+  z: f32;
+  scale: f32;
+  yaw: f32;
+  pitch: f32;
+  roll: f32;
+  red: f32;
+  green: f32;
+  blue: f32;
+  stack: u32;
+  slot: u32;
+}
+
+native function d4_w2_span(at:i64,bytes:i64,align:i64) i64 {
+  return at>=0 && at%align==0 && at<=6291456-bytes;
+}
+
+native function d4_w2_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a<b+m && b<a+n;
+}
+
+native function d4_w2_number(value:f64) i64 {
+  return value>=0.0-9007199254740991.0 && value<=9007199254740991.0;
+}
+
+native function d4_w2_release(history:i64,tick:i64,travel:f64,flags:i64) f64 {
+  if(tick<0) { tick=0; }
+  let slot=history+(tick%121)*16;
+  if(flags%2==0 && ux_u32(slot+8)==tick+1) { return ux_f64(slot); }
+  return travel;
+}
+
+native function d4_w2_puff(at:i64,history:i64,frame:i64,tick:i64,stack:i64,slot:i64,flags:i64) i64 {
+  let positionsX=[4900,650,4700];
+  let positionsY=[11900,14200,11440];
+  let positionsZ=[850,3100,1500];
+  let x=positionsX[stack]/1000.0;
+  if(stack==0) { x=0.0-x; }
+  let y=positionsY[stack]/1000.0;
+  let z=0.0-positionsZ[stack]/1000.0;
+  let size=0.77;
+  let tier=2;
+  if(flags>=2 || slot%5==2) { tier=1; size=0.48; }
+  else if(slot%5==4) { tier=0; size=0.20; }
+  let yaw=0.0;
+  let pitch=0.0;
+  if(tick>=0) {
+    let ticks=(tick%120+8*slot+37*stack)%120;
+    let age=ticks/120.0;
+    let release=d4_w2_release(history,tick-ticks,ux_f64(frame+24),flags);
+    if(!d4_w2_number(release)) { return 0-1; }
+    let turn=slot*2.4+stack*0.61;
+    let spread=age*0.56;
+    if(tier==0) { spread=age*1.08; }
+    let fade=age*9.0+0.25;
+    if(fade>1.0) { fade=1.0; }
+    let tail=(1.0-age)*9.0;
+    if(tail<fade) { fade=tail; }
+    let winds=[90,160,315];
+    let wind=winds[stack]/100.0;
+    if(stack==0) { wind=0.0-wind; }
+    x=x+release+age*wind+ux_math_cos(turn)*spread;
+    y=y+ux_f64(frame+8)+age*2.65+age*age*0.82;
+    z=z+ux_f64(frame+16)+age*0.80+ux_math_sin(turn)*spread;
+    size=size*(0.75+0.88*age)*fade;
+    yaw=turn+age*0.7;
+    pitch=age*0.20;
+  }
+  let r=241; let g=233; let b=213;
+  if(tier==0) { r=214; g=220; b=225; }
+  else if(slot%5==1 || slot%5==2) { r=165; g=179; b=195; }
+  let px=ux_f32_put(at+D4W2Puff.x,x);
+  let py=ux_f32_put(at+D4W2Puff.y,y);
+  let pz=ux_f32_put(at+D4W2Puff.z,z);
+  let s=ux_f32_put(at+D4W2Puff.scale,size);
+  let a=ux_f32_put(at+D4W2Puff.yaw,yaw);
+  let b0=ux_f32_put(at+D4W2Puff.pitch,pitch);
+  let roll=ux_f32_put(at+D4W2Puff.roll,0.0);
+  let red=ux_f32_put(at+D4W2Puff.red,r/255.0);
+  let green=ux_f32_put(at+D4W2Puff.green,g/255.0);
+  let blue=ux_f32_put(at+D4W2Puff.blue,b/255.0);
+  let emitter=ux_u32_put(at+D4W2Puff.stack,stack);
+  let id=ux_u32_put(at+D4W2Puff.slot,slot);
+  return at;
+}
+
+native function D4W2Smoke_run(op:i64,history:i64,frame:i64,tick:i64,output:i64,capacity:i64,stacks:i64,flags:i64) i64 {
+  if(!d4_w2_span(history,1936,8) || op<0 || op>2) { return 0-1; }
+  if(op==0) {
+    let i=0;
+    while(i<1936) {
+      let cleared=ux_u32_put(history+i,0);
+      i=i+4;
+    }
+    return 0;
+  }
+  if(!d4_w2_span(frame,32,8) || d4_w2_overlap(frame,32,history,1936) || tick<0-1 || tick>4294967294) { return 0-1; }
+  let i=0;
+  while(i<32) {
+    if(!d4_w2_number(ux_f64(frame+i))) { return 0-1; }
+    i=i+8;
+  }
+  if(op==1) {
+    if(tick<0) { return 0-1; }
+    let cell=history+tick%121*16;
+    if(ux_u32(cell+8)>tick+1) { return 0-2; }
+    let travel=ux_f64_put(cell,ux_f64(frame+24));
+    let tag=ux_u32_put(cell+8,tick+1);
+    return 0;
+  }
+  if(stacks<1 || stacks>3 || flags<0 || flags>3 || capacity<stacks*15 || capacity>45 ||
+     !d4_w2_span(output,capacity*D4W2Puff.size,4) ||
+     d4_w2_overlap(output,capacity*D4W2Puff.size,history,1936) ||
+     d4_w2_overlap(output,capacity*D4W2Puff.size,frame,32)) { return 0-1; }
+  i=0;
+  while(tick>=0 && i<stacks*15) {
+    let age=(tick%120+8*(i%15)+37*(i/15))%120;
+    if(!d4_w2_number(d4_w2_release(history,tick-age,ux_f64(frame+24),flags))) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<stacks*15) {
+    let record=d4_w2_puff(output+i*D4W2Puff.size,history,frame,tick,i/15,i%15,flags);
+    i=i+1;
+  }
+  return i;
+}
+
+return D4W2Smoke_run(op,history,frame,tick,output,capacity,stacks,flags);
