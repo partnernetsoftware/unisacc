@@ -1,0 +1,158 @@
+#pragma unisa module isotime
+/* L1 textx/isotime: ISO 8601 date-time text for epoch milliseconds, matching JavaScript
+   Date.prototype.toISOString and the ISO subset of Date.parse (ES "Date Time String Format"), an
+   extension package (ext/textx, outside the compile closure). Pure integer arithmetic on the proleptic
+   Gregorian calendar, no libc, no allocation, no module state.
+     int tm_iso8601_ms(char *out, int cap, long long epoch_ms)
+   writes YYYY-MM-DDTHH:MM:SS.mmmZ. The year is 4 digits for 0..9999, else a sign and 6 digits
+   (+275760, -000001). Negative epochs floor (-1 ms is 1969-12-31T23:59:59.999Z). Returns the byte
+   count (24 or 27, no NUL counted; a NUL follows when cap allows it), -ERANGE when EPOCH_MS is outside
+   [-8.64e15, 8.64e15], -ENOSPC when cap is below the byte count or OUT is 0.
+     int tm_parse_iso8601(const char *s, long long *epoch_ms)
+   accepts exactly: YYYY | YYYY-MM | YYYY-MM-DD (all UTC), each optionally with a year of +YYYYYY or
+   -YYYYYY (-000000 is invalid), followed by THH:mm | THH:mm:ss | THH:mm:ss.s+ (one or more fraction
+   digits, those past the third are truncated) and then a mandatory zone Z, +HH:mm or -HH:mm. A time
+   with no zone is local time in JavaScript, so it returns -EINVAL here (no local zone in a pure
+   function); a bare zone after a date-only form is -EINVAL too. Fields are range checked strictly:
+   month 1..12, day 1..days in that month (2023-02-30 is -EINVAL), hour 0..23 (24:00:00.000 is the
+   only 24), minute and second 0..59, zone hour 0..23 and zone minute 0..59. Lower-case t and z, spaces
+   and trailing bytes are -EINVAL. The result must lie within +-8.64e15 ms. Returns 0 and stores
+   *EPOCH_MS, or -EINVAL (JavaScript NaN; *EPOCH_MS untouched). */
+
+#define TM_MAX 8640000000000000LL
+
+static long long tm_fdiv(long long a, long long b) {
+    long long q = a / b;
+    if ((a % b) != 0 && ((a < 0) != (b < 0))) q--;
+    return q;
+}
+
+static int tm_leap(long long y) {
+    if (y % 400 == 0) return 1;
+    if (y % 100 == 0) return 0;
+    return y % 4 == 0;
+}
+
+static int tm_dim(long long y, int m) {
+    static const int d[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (m == 2 && tm_leap(y)) return 29;
+    return d[m - 1];
+}
+
+/* days since 1970-01-01 of the civil date Y-M-D (M 1..12) */
+static long long tm_days(long long y, int m, int d) {
+    long long era, yoe, doy, doe;
+    if (m <= 2) y--;
+    era = tm_fdiv(y, 400);
+    yoe = y - era * 400;
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static int tm_put(char *o, int at, long long v, int n) {
+    int i;
+    for (i = n - 1; i >= 0; i--) { o[at + i] = (char)('0' + (int)(v % 10)); v /= 10; }
+    return at + n;
+}
+
+int tm_iso8601_ms(char *out, int cap, long long epoch_ms) {
+    long long days, rem, z, era, doe, yoe, y, doy, mp;
+    int m, d, n, at = 0, ext;
+    if (epoch_ms < -TM_MAX || epoch_ms > TM_MAX) return -ERANGE;
+    days = tm_fdiv(epoch_ms, 86400000LL);
+    rem = epoch_ms - days * 86400000LL;
+    z = days + 719468;
+    era = tm_fdiv(z, 146097);
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    m = (int)(mp < 10 ? mp + 3 : mp - 9);
+    if (m <= 2) y++;
+    ext = (y < 0 || y > 9999);
+    n = ext ? 27 : 24;
+    if (!out || cap < n) return -ENOSPC;
+    if (ext) {
+        out[at++] = y < 0 ? '-' : '+';
+        at = tm_put(out, at, y < 0 ? -y : y, 6);
+    } else at = tm_put(out, at, y, 4);
+    out[at++] = '-'; at = tm_put(out, at, m, 2);
+    out[at++] = '-'; at = tm_put(out, at, d, 2);
+    out[at++] = 'T'; at = tm_put(out, at, rem / 3600000, 2);
+    out[at++] = ':'; at = tm_put(out, at, rem / 60000 % 60, 2);
+    out[at++] = ':'; at = tm_put(out, at, rem / 1000 % 60, 2);
+    out[at++] = '.'; at = tm_put(out, at, rem % 1000, 3);
+    out[at++] = 'Z';
+    if (cap > n) out[n] = 0;
+    return n;
+}
+
+/* N decimal digits at S[*I...] into *V; 0 on success and *I advanced, else -1 */
+static int tm_dig(const char *s, int *i, int n, long long *v) {
+    int k; long long x = 0;
+    for (k = 0; k < n; k++) {
+        char c = s[*i + k];
+        if (c < '0' || c > '9') return -1;
+        x = x * 10 + (c - '0');
+    }
+    *v = x; *i += n;
+    return 0;
+}
+
+int tm_parse_iso8601(const char *s, long long *epoch_ms) {
+    int i = 0, mo = 1, d = 1, neg = 0, zs = 0;
+    long long y, v, hh = 0, mi = 0, ss = 0, ms = 0, off = 0, days, t;
+    if (!s || !epoch_ms) return -EINVAL;
+    if (s[0] == '+' || s[0] == '-') {
+        neg = s[0] == '-'; i = 1;
+        if (tm_dig(s, &i, 6, &y)) return -EINVAL;
+        if (neg) { if (y == 0) return -EINVAL; y = -y; }
+    } else if (tm_dig(s, &i, 4, &y)) return -EINVAL;
+    if (s[i] == '-') {
+        i++;
+        if (tm_dig(s, &i, 2, &v) || v < 1 || v > 12) return -EINVAL;
+        mo = (int)v;
+        if (s[i] == '-') {
+            i++;
+            if (tm_dig(s, &i, 2, &v) || v < 1 || v > tm_dim(y, mo)) return -EINVAL;
+            d = (int)v;
+        }
+    }
+    if (s[i] == 'T') {
+        i++;
+        if (tm_dig(s, &i, 2, &hh) || s[i] != ':') return -EINVAL;
+        i++;
+        if (tm_dig(s, &i, 2, &mi)) return -EINVAL;
+        if (s[i] == ':') {
+            i++;
+            if (tm_dig(s, &i, 2, &ss)) return -EINVAL;
+            if (s[i] == '.') {
+                int nd = 0; long long sc = 100;
+                i++;
+                while (s[i] >= '0' && s[i] <= '9') { if (nd < 3) { ms += (s[i] - '0') * sc; sc /= 10; } nd++; i++; }
+                if (nd == 0) return -EINVAL;
+            }
+        }
+        if (hh > 24 || mi > 59 || ss > 59) return -EINVAL;
+        if (hh == 24 && (mi || ss || ms)) return -EINVAL;
+        if (s[i] == 'Z') i++;
+        else if (s[i] == '+' || s[i] == '-') {
+            long long zh, zm;
+            zs = s[i] == '-' ? -1 : 1; i++;
+            if (tm_dig(s, &i, 2, &zh) || s[i] != ':') return -EINVAL;
+            i++;
+            if (tm_dig(s, &i, 2, &zm) || zh > 23 || zm > 59) return -EINVAL;
+            off = zs * (zh * 60 + zm) * 60000LL;
+        } else return -EINVAL;
+    }
+    if (s[i]) return -EINVAL;
+    days = tm_days(y, mo, d);
+    if (days > 120000000LL || days < -120000000LL) return -EINVAL;
+    t = days * 86400000LL + hh * 3600000LL + mi * 60000LL + ss * 1000LL + ms - off;
+    if (t < -TM_MAX || t > TM_MAX) return -EINVAL;
+    *epoch_ms = t;
+    return 0;
+}
