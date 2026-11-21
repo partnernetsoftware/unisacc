@@ -286,7 +286,8 @@
 - ~~调色与 FXAA 的 RGBA8 内核 | G-pixel 通道曲线、锯齿阶跃与采样方向 | 线性 RGBA8。~~ 真实 r160 ShaderPass 18 项通过，移除调色与 FXAA 分别转红。
 - ~~FXAA 与调色目标接线 | G-pixel WebGL2 目标到目标再到屏幕 | RGBA8 内核和 EffectComposer。~~ 18 项通过，复制代替 FXAA 时两个边缘样点转红。
 - ~~原生 GPU 目标复制 | G-pixel RGBA8 目标间直采样、状态恢复、拒绝及基座提供 GLSL | GPU 命令与调色目标。~~ 与 r160 33 项一致，错误源转红。
-- FXAA 与调色原生着色器 | G-pixel 从已建纹理直接运行实际 FXAA 和调色 | 原生 GPU 目标复制、GPU 命令。
+- ~~FXAA 原生着色器 | G-pixel GPU 目标直采样、r160 与 CPU 全帧同值 | 原生 GPU 目标采样。~~ 61 项通过，五组 700 字节一致，Copy 篡改使 19 字节不同。
+- 调色原生着色器 | G-pixel 已建纹理、色域与目标格式 | 原生 GPU 目标采样。
 - 调色 Pass 完整接线 | G-pixel 色域、曝光与目标格式 | M5 色彩输出、RGBA8 内核及 EffectComposer。
 - ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
 - ~~Axes、Grid、Box3 正交 GPU 线 | G-pixel 交错、平面与索引三种输入 | 共享场景投影。~~ 1024 像素与 r160 完全一致，轴色篡改三处转红。

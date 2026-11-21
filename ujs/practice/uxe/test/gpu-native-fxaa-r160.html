@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, NearestFilter, NoBlending, REVISION, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuNativeSample } from "../base/gpu-native-sample-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const addon = path => import(`file://${query.get("package")}/examples/jsm/${path}.js`);
+  const [{ EffectComposer }, { ShaderPass }, { CopyShader }, { FXAAShader }] = await Promise.all([
+    addon("postprocessing/EffectComposer"), addon("postprocessing/ShaderPass"),
+    addon("shaders/CopyShader"), addon("shaders/FXAAShader"),
+  ]);
+  const width = 7, height = 5, bytes = width * height * 4;
+  const picked = [24,25,24,24,24];
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  function screen(gl) {
+    const rgba = new Uint8Array(bytes);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    return rgba;
+  }
+  function word(rgba, i) {
+    return new DataView(rgba.buffer, rgba.byteOffset, rgba.byteLength).getUint32(i * 4, true);
+  }
+  function differences(a, b) {
+    let count = 0, peak = 0;
+    for (let i = 0; i < bytes; i++) {
+      const delta = Math.abs(a[i] - b[i]);
+      if (delta) count++;
+      peak = Math.max(peak, delta);
+    }
+    return [count, peak];
+  }
+  const { gl } = context();
+  const [binary, ...sources] = await Promise.all([
+    fetch(`file://${query.get("wasm")}`),
+    fetch("../base/gpu-native-copy.vert"),
+    fetch("../base/gpu-native-fxaa.frag"),
+    fetch("../base/gpu-native-copy.frag"),
+  ]);
+  let actual;
+  const native = createGpuNativeSample(gl, () => 1, () => actual.memory);
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, native.targets);
+  let reads = 0, uploads = 0, draws = 0;
+  function track(key, observe) {
+    const prior = gl[key];
+    gl[key] = function (...args) {
+      observe();
+      return prior.apply(gl, args);
+    };
+  }
+  track("readPixels", () => reads++);
+  track("texImage2D", () => uploads++);
+  track("drawArrays", () => draws++);
+  const copy = (...args) => {
+    const startRead = reads, startUpload = uploads;
+    const rc = native.copy(...args);
+    if (reads !== startRead || uploads !== startUpload) throw new Error("native sample transferred texels through the CPU");
+    return rc;
+  };
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(), {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+    uxe_gpu_target_v1: { host_gpu_native_copy: copy },
+  })).instance.exports;
+  const lengths = [];
+  for (const [i, response] of sources.entries()) {
+    if (!response.ok) throw new Error("missing base shader");
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (!data.length || data.length > 4096) throw new Error("invalid base shader length");
+    new Uint8Array(actual.memory.buffer, 2097152 + 10000 + 4500 * i, data.length).set(data);
+    lengths.push(BigInt(data.length));
+  }
+  const wasmPixels = at => new Uint8Array(actual.memory.buffer, 2097152 + at, bytes);
+  const fixtures = [
+    (x, y) => [20,40,60,y >= x ? 240 : 0],
+    (x, y) => [x >= 3 && y >= 3 ? 240 : 0,0,0,255],
+    (x, y) => [y >= x ? 50 : 0,0,0,255],
+    (x, y) => [y >= 3 ? 240 : 0,0,0,255],
+    (x, y) => [x >= 3 && y >= 2 ? 240 : 0,0,0,255],
+  ];
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(width, height, false);
+  function reference(pixel) {
+    const target = new WebGLRenderTarget(width, height, { minFilter: NearestFilter, magFilter: NearestFilter });
+    const composer = new EffectComposer(renderer, target);
+    const original = composer.readBuffer;
+    const data = [];
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) data.push(...pixel(x, y));
+    const texture = new DataTexture(Uint8Array.from(data), width, height);
+    texture.needsUpdate = true;
+    const input = new ShaderPass(CopyShader), fxaa = new ShaderPass(FXAAShader), present = new ShaderPass(CopyShader);
+    for (const pass of [input,fxaa,present]) pass.material.blending = NoBlending;
+    fxaa.uniforms.resolution.value.set(1 / width, 1 / height);
+    input.render(renderer, original, { texture });
+    composer.addPass(fxaa);
+    composer.addPass(present);
+    composer.render(0);
+    renderer.setRenderTarget(null);
+    const final = screen(ref.gl);
+    function read(target) {
+      const rgba = new Uint8Array(bytes);
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, rgba);
+      return rgba;
+    }
+    const frames = [read(original), read(target), final];
+    composer.dispose();
+    for (const pass of [input,fxaa,present]) pass.dispose();
+    texture.dispose();
+    return frames;
+  }
+  const cases = [];
+  for (const [pattern, pixel] of fixtures.entries()) {
+    const status = actual.uxe_native_fxaa(BigInt(pattern), BigInt(query.get("mode")), ...lengths);
+    if (status !== 0n) throw new Error(`native FXAA failed ${status} in pattern ${pattern}`);
+    const [refSource, refMiddle, refScreen] = reference(pixel);
+    const src = wasmPixels(7000), middle = wasmPixels(7200), cpu = wasmPixels(7400), shown = screen(gl);
+    cases.push(
+      word(middle, picked[pattern]), word(refMiddle, picked[pattern]),
+      ...differences(src, refSource), ...differences(middle, refMiddle), ...differences(shown, refScreen),
+      ...differences(cpu, refMiddle), ...differences(middle, cpu),
+    );
+  }
+  renderer.dispose();
+  output.textContent = JSON.stringify([...cases, draws]);
+} catch (error) {
+  output.textContent = `error:${error.message}`;
+}
+</script>
