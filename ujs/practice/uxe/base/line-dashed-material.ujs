@@ -1,0 +1,95 @@
+struct LineDashedMaterial {
+  scale: f32;
+  dashSize: f32;
+  gapSize: f32;
+  color: u32;
+}
+
+// Endpoints are already projected to normalized device coordinates. The
+// final field carries the original line distance at each endpoint.
+struct LineDashedVertex {
+  x: f32;
+  y: f32;
+  z: f32;
+  lineDistance: f32;
+}
+
+native function line_dash_params(scale:f64,dash:f64,gap:f64,color:i64) i64 {
+  return scale>=0.0 && scale<=65536.0 && dash>=0.0 && dash<=65536.0 &&
+    gap>=0.0 && gap<=65536.0 &&
+    (dash>=0.00000095367431640625 || gap>=0.00000095367431640625) &&
+    color>=0 && color<=16777215;
+}
+
+native function LineDashedMaterial_set(at:i64,scale:f64,dash:f64,gap:f64,color:i64) i64 {
+  if(at%4!=0 || !gpu_draw_range(at,LineDashedMaterial.size,0,0) ||
+     !line_dash_params(scale,dash,gap,color)) { return 0-1; }
+  let a=ux_f32_put(at+LineDashedMaterial.scale,scale);
+  let b=ux_f32_put(at+LineDashedMaterial.dashSize,dash);
+  let c=ux_f32_put(at+LineDashedMaterial.gapSize,gap);
+  let d=ux_u32_put(at+LineDashedMaterial.color,color);
+  return at;
+}
+
+native function LineDashedMaterial_init(at:i64) i64 {
+  return LineDashedMaterial_set(at,1.0,3.0,1.0,16777215);
+}
+
+native function line_dash_readable(at:i64,bytes:i64,packet:i64,capacity:i64,out:i64,outBytes:i64) i64 {
+  return gpu_draw_range(at,bytes,packet,capacity) && (at+bytes<=out || out+outBytes<=at);
+}
+
+native function line_dash_finite(value:f64) i64 {
+  return value-value==0.0;
+}
+
+// Submit a non-indexed list of line segments with screen-space interpolation.
+// The packet's four auxiliary vertex lanes carry distance, dash size,
+// period, and the packed 24-bit sRGB color used by the dashed shader pair.
+native function LineDashedMaterial_draw(packet:i64,capacity:i64,material:i64,vertices:i64,count:i64,out:i64,shader:i64) i64 {
+  if(gpu_packet_slot(packet,capacity,0)<0 || count<2 || count>2340 || count%2!=0 ||
+     material%4!=0 || vertices%4!=0 || out%4!=0 || shader%4!=0 ||
+     !gpu_draw_range(out,28*count,packet,capacity) ||
+     !line_dash_readable(material,LineDashedMaterial.size,packet,capacity,out,28*count) ||
+     !line_dash_readable(vertices,LineDashedVertex.size*count,packet,capacity,out,28*count) ||
+     !line_dash_readable(shader,GpuShaderSource.size,packet,capacity,out,28*count)) { return 0-1; }
+  let vertexShader=ux_u32(shader+GpuShaderSource.vertex);
+  let fragmentShader=ux_u32(shader+GpuShaderSource.fragment);
+  let vertexBytes=ux_u32(shader+GpuShaderSource.vertexBytes);
+  let fragmentBytes=ux_u32(shader+GpuShaderSource.fragmentBytes);
+  if(vertexBytes<1 || vertexBytes>4096 || fragmentBytes<1 || fragmentBytes>4096 ||
+     !line_dash_readable(vertexShader,vertexBytes,packet,capacity,out,28*count) ||
+     !line_dash_readable(fragmentShader,fragmentBytes,packet,capacity,out,28*count)) { return 0-1; }
+  let encodedBytes=24+(vertexBytes+3)/4*4+(fragmentBytes+3)/4*4+28*count;
+  let slot=gpu_packet_slot(packet,capacity,encodedBytes);
+  if(slot<0) { return slot; }
+  let scale=ux_f32(material+LineDashedMaterial.scale);
+  let dash=ux_f32(material+LineDashedMaterial.dashSize);
+  let gap=ux_f32(material+LineDashedMaterial.gapSize);
+  let color=ux_u32(material+LineDashedMaterial.color);
+  if(!line_dash_params(scale,dash,gap,color)) { return 0-2; }
+  let i=0;
+  while(i<count) {
+    let src=vertices+i*LineDashedVertex.size;
+    let distance=ux_f32(src+LineDashedVertex.lineDistance);
+    if(!line_dash_finite(ux_f32(src+LineDashedVertex.x)) ||
+       !line_dash_finite(ux_f32(src+LineDashedVertex.y)) ||
+       !line_dash_finite(ux_f32(src+LineDashedVertex.z)) ||
+       !(distance>=0.0 && distance<=65536.0)) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let src=vertices+i*LineDashedVertex.size;
+    let dst=out+i*28;
+    let x=ux_u32_put(dst,ux_u32(src+LineDashedVertex.x));
+    let y=ux_u32_put(dst+4,ux_u32(src+LineDashedVertex.y));
+    let z=ux_u32_put(dst+8,ux_u32(src+LineDashedVertex.z));
+    let phase=ux_f32_put(dst+12,scale*ux_f32(src+LineDashedVertex.lineDistance));
+    let visible=ux_f32_put(dst+16,dash);
+    let period=ux_f32_put(dst+20,dash+gap);
+    let tint=ux_f32_put(dst+24,0.0+color);
+    i=i+1;
+  }
+  return GpuPacket_drawPrimitive(packet,capacity,out,count,shader,2);
+}
