@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AudioContext as ThreeAudioContext, REVISION } from "../../web/game/three.module.js";
+import { bindAudioContext } from "../base/audio-context-host.js";
+
+const status=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const params=new URLSearchParams(location.search);
+  const request=new XMLHttpRequest();
+  request.open("GET",params.get("wasm"),false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);
+  const module=new WebAssembly.Module(bytes);
+  const instance=()=>new WebAssembly.Instance(module).exports.uxe_audio_context;
+  const command=instance();
+  let first,second;
+  const host=bindAudioContext((action,handle,value)=>{
+    if(params.has("mutate") && action===5n && second && handle===first) handle=second;
+    return command(action,handle,value);
+  });
+  const results=[];
+  first=host.open(44100);
+  const audio=host.context(first);
+  ThreeAudioContext.setContext(audio);
+  results.push(first,host.sampleRate(first),ThreeAudioContext.getContext().sampleRate);
+  results.push(ThreeAudioContext.getContext()===audio,host.open(48000),host.sampleRate(first+16777216n));
+  const pending=host.close(first);
+  results.push(host.sampleRate(first),host.open(48000),await pending,audio.state==="closed");
+  const oldRate=host.sampleRate(first);
+  second=host.open(48000);
+  const offline=new OfflineAudioContext(1,128,48000);
+  ThreeAudioContext.setContext(offline);
+  const rendered=await offline.startRendering();
+  results.push(oldRate,second,host.sampleRate(second),ThreeAudioContext.getContext().sampleRate,rendered.sampleRate);
+  results.push(host.sampleRate(first),await host.close(first),host.sampleRate(second),await host.close(second));
+  const defaultHandle=host.open();
+  results.push(host.sampleRate(defaultHandle)===BigInt(host.context(defaultHandle).sampleRate),await host.close(defaultHandle));
+
+  // Exercise failure recovery and late confirmations without forcing a
+  // browser-specific resource or hardware failure.
+  const state=instance();
+  const rejected=state(1n,0n,44100n);
+  results.push(state(2n,rejected,0n));
+  const retry=state(1n,0n,48000n);
+  results.push(state(2n,rejected,44100n),state(2n,retry,48000n));
+  results.push(state(3n,retry,0n),state(4n,retry,0n),state(5n,retry,0n));
+  status.textContent=JSON.stringify(results.map(Number));
+} catch(error) {
+  status.textContent=`error:${error.message}`;
+}
+</script>

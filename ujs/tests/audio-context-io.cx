@@ -1,0 +1,54 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use r160_wait
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int compile_context(const char *source,const char *wasm) {
+    unsigned char *module=0;
+    int64_t size=0;
+    if(sy_read_file("ujs/practice/uxe/base/audio-context.ujs",&module,&size,16384)) return 1;
+    char program[17000];
+    const int length=tx_snprintf(program,sizeof program,
+        "export uxe_audio_context(action:i64,handle:i64,value:i64) i64 version 1;\n"
+        "%s\nreturn AudioContext_command(0,action,handle,value);\n",module);
+    mm_free(module);
+    if(length<=0 || length>=(int)sizeof program || sy_write_file(source,program,length,0600)) return 1;
+    char *compile[]={"./ujs/ujs2wasm.com",(char*)source,"-o",(char*)wasm,0},*log=0;
+    size_t bytes=0;
+    const int rc=cx_runv_timeout(compile,6,&log,&bytes);
+    if(rc) printf("AUDIO_CONTEXT compile_rc=%d\n",rc);
+    mm_free(log);
+    return rc!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char cwd[390],dir[256],source[290],wasm[290],url[950];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-audio-context-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/audio-context-r160.html?wasm=%s%s",
+        cwd,wasm,mutate?"&mutate=1":"");
+    const double gold[]={16777217,44100,44100,1,-1,-1,-1,-1,1,1,-1,16777218,48000,48000,48000,
+        -1,-1,48000,1,1,1,0,-1,1,1,0,48000};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count];
+    int failed=length<=0 || length>=(int)sizeof url || compile_context(source,wasm) ||
+        r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(actual[i],gold[i],1e-9)) {
+            printf("G_IO AudioContext case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0},*log=0;
+    size_t bytes=0;
+    if(cx_runv_timeout(clean,4,&log,&bytes)) failed=1;
+    mm_free(log);
+    printf("G_IO AudioContext browser lifecycle cases=%d failed=%d\n",count,failed);
+    return failed;
+}

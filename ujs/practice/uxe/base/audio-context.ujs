@@ -1,0 +1,45 @@
+struct AudioContextSlot {
+  generation: u32;
+  phase: u32;
+  sampleRate: u32;
+}
+
+// Zeroed storage represents an unused slot. A handle stores ABI version
+// 1 in the high byte and a monotonically increasing 24-bit generation.
+// Actions request/confirm open (1/2), request/confirm close (3/4), read (5).
+// A host confirmation supplies the actual sample rate, or zero on failure.
+// Close confirmation supplies one on success or zero on failure.
+native function AudioContext_command(slot:i64,action:i64,handle:i64,value:i64) i64 {
+  if(slot<0 || slot%4!=0 || slot>6291456-AudioContextSlot.size || action<1 || action>5) { return 0-1; }
+  let phase=ux_u32(slot+AudioContextSlot.phase);
+  let generation=ux_u32(slot+AudioContextSlot.generation);
+  if(action==1) {
+    if(phase!=0 || handle!=0 || (value!=0 && (value<8000 || value>384000)) || generation>=16777215) { return 0-1; }
+    generation=generation+1;
+    let saved=ux_u32_put(slot+AudioContextSlot.generation,generation);
+    let opening=ux_u32_put(slot+AudioContextSlot.phase,1);
+    return 16777216+generation;
+  }
+  if(generation==0 || handle!=16777216+generation) { return 0-1; }
+  if(action==2 && phase==1) {
+    if(value==0) {
+      let released=ux_u32_put(slot+AudioContextSlot.phase,0);
+      return 0;
+    }
+    if(value<8000 || value>384000) { return 0-1; }
+    let rate=ux_u32_put(slot+AudioContextSlot.sampleRate,value);
+    let opened=ux_u32_put(slot+AudioContextSlot.phase,2);
+    return 1;
+  }
+  if(action==3 && phase==2) {
+    let closing=ux_u32_put(slot+AudioContextSlot.phase,3);
+    return 1;
+  }
+  if(action==4 && phase==3 && (value==0 || value==1)) {
+    if(value==1) { let clear=ux_u32_put(slot+AudioContextSlot.sampleRate,0); }
+    let next=ux_u32_put(slot+AudioContextSlot.phase,2*(1-value));
+    return value;
+  }
+  if(action==5 && phase==2) { return ux_u32(slot+AudioContextSlot.sampleRate); }
+  return 0-1;
+}
