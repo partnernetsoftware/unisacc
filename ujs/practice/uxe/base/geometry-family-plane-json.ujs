@@ -1,0 +1,50 @@
+native function plane_json_number(input:i64,end:i64,key:i64,size:i64) f64 {
+  let value=json_find_key(input,end,key,size);
+  if(value==0-2) { return 1.0; }
+  return json_read_number(value,end);
+}
+
+native function plane_json_overlap(begin:i64,end:i64,at:i64,bytes:i64) i64 {
+  return bytes>0 && begin<at+bytes && at<end;
+}
+
+// Read the canonical PlaneGeometry constructor fields from a JSON object.
+// The caller owns a GeometryBuffers record and a disjoint 38-byte scratch span.
+native function PlaneGeometry_fromJSON(plane:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(plane<0 || plane>6291456-GeometryBuffers.size || plane%4!=0 ||
+     input<0 || input>=end || end>6291456 || scratch<0 || scratch>6291456-38 ||
+     plane_json_overlap(input,end,scratch,38) ||
+     plane_json_overlap(input,end,plane,GeometryBuffers.size) ||
+     plane_json_overlap(scratch,scratch+38,plane,GeometryBuffers.size)) { return 0-1; }
+  let vertices=ux_u32(plane+GeometryBuffers.vertices);
+  let indices=ux_u32(plane+GeometryBuffers.indices);
+  let vertex_bytes=32*ux_u32(plane+GeometryBuffers.vertexCapacity);
+  let index_bytes=4*ux_u32(plane+GeometryBuffers.indexCapacity);
+  if(vertices>6291456 || vertices%4!=0 || vertex_bytes>6291456-vertices ||
+     indices>6291456 || indices%4!=0 || index_bytes>6291456-indices ||
+     plane_json_overlap(input,end,vertices,vertex_bytes) ||
+     plane_json_overlap(input,end,indices,index_bytes) ||
+     plane_json_overlap(scratch,scratch+38,vertices,vertex_bytes) ||
+     plane_json_overlap(scratch,scratch+38,indices,index_bytes)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-1; }
+
+  // width, height, widthSegments, heightSegments.
+  let keys=[119,105,100,116,104,104,101,105,103,104,116,
+            119,105,100,116,104,83,101,103,109,101,110,116,115,
+            104,101,105,103,104,116,83,101,103,109,101,110,116,115];
+  let i=0;
+  while(i<38) {
+    let key=ux_u8_put(scratch+i,keys[i]);
+    i=i+1;
+  }
+  let width=plane_json_number(input,end,scratch,5);
+  let height=plane_json_number(input,end,scratch+5,6);
+  let width_segments=plane_json_number(input,end,scratch+11,13);
+  let height_segments=plane_json_number(input,end,scratch+24,14);
+  if(width-width!=0.0 || height-height!=0.0 ||
+     !(width_segments>=1.0 && width_segments<262145.0) ||
+     !(height_segments>=1.0 && height_segments<262145.0)) { return 0-1; }
+  return PlaneGeometry_generate(plane,width,height,
+    f64_floor_i64(width_segments),f64_floor_i64(height_segments));
+}

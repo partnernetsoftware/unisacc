@@ -1,0 +1,67 @@
+#pragma unisa use g_geometry
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int fixture_bytes(char *source,int capacity,const char *text) {
+    int used=0;
+    for(int i=0;text[i];i++) {
+        int n=tx_snprintf(source+used,capacity-used,"%s%d",i?",":"",(int)(unsigned char)text[i]);
+        if(n<0 || n>=capacity-used) return -1;
+        used+=n;
+    }
+    return used;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"geometry-buffers","planegeometry","json-read","geometry-family-plane-json",0};
+    const char *fixtures[]={
+        "{}",
+        "{\"width\":\"4\"}",
+        "{\"widthSegments\":0}",
+        "{}x",
+        mutate?"{\"height\":2,\"width\":5,\"widthSegments\":2.5}":
+               "{\"height\":2,\"width\":4,\"widthSegments\":2.5}",
+    };
+    char bytes[5][200];
+    for(int i=0;i<5;i++) if(fixture_bytes(bytes[i],sizeof bytes[i],fixtures[i])<0) return 2;
+    char source[3200];
+    int used=0;
+    for(int i=0;i<5;i++) {
+        const int address=200000+i*64;
+        const int size=tx_len(fixtures[i],64);
+        const int written=tx_snprintf(source+used,sizeof source-used,
+            "let fixture%d=[%s];let cursor%d=0;"
+            "while(cursor%d<%d){let byte=ux_u8_put(%d+cursor%d,fixture%d[cursor%d]);"
+            "cursor%d=cursor%d+1;}"
+            "let start%d=%d;let end%d=%d;",
+            i,bytes[i],i,i,size,address,i,i,i,i,i,i,address,i,address+size);
+        if(written<0 || written>=(int)sizeof source-used) return 2;
+        used+=written;
+    }
+    int n=tx_snprintf(source+used,sizeof source-used,
+        "let mesh=GeometryBuffers_init(0,256,6,1024,12);"
+        "let empty=GeometryBuffers_init(64,2048,3,2304,6);"
+        "let sentinel=ux_f32_put(256,77.0);"
+        "if(PlaneGeometry_fromJSON(empty,start0,end0,201024)>=0) { return 0-1; }"
+        "if(PlaneGeometry_fromJSON(mesh,start0,end0,256)>=0) { return 0-1; }"
+        "if(PlaneGeometry_fromJSON(mesh,start1,end1,201024)>=0) { return 0-1; }"
+        "if(PlaneGeometry_fromJSON(mesh,start2,end2,201024)>=0) { return 0-1; }"
+        "if(PlaneGeometry_fromJSON(mesh,start3,end3,201024)>=0) { return 0-1; }"
+        "if(ux_u32(GeometryBuffers.vertexCount)!=0 || ux_u32(GeometryBuffers.indexCount)!=0 ||"
+        "ux_f32(256)!=77.0) { return 0-1; }"
+        "let initialized=PlaneGeometry_fromJSON(mesh,start0,end0,201024);"
+        "if(initialized<0 || ux_u32(GeometryBuffers.vertexCount)!=4 ||"
+        "ux_u32(GeometryBuffers.indexCount)!=6 || ux_f32(256)!=0.0-0.5) { return 0-1; }"
+        "return PlaneGeometry_fromJSON(mesh,start4,end4,201024);");
+    if(n<0 || n>=(int)sizeof source-used) return 2;
+    const double gold[]={
+        6,12,
+        -2, 1,0, 0,0,1, 0,1,  0, 1,0, 0,0,1, .5,1,  2, 1,0, 0,0,1, 1,1,
+        -2,-1,0, 0,0,1, 0,0,  0,-1,0, 0,0,1, .5,0,  2,-1,0, 0,0,1, 1,0,
+        0,3,1,3,4,1, 1,4,2,4,5,2,
+    };
+    return g_geometry_check("PlaneGeometry fromJSON","geometry-family-plane-json",modules,source,gold,
+        sizeof gold/sizeof gold[0],50);
+}

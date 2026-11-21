@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { PlaneGeometry, REVISION } from "./three.module.js";
+
+const result = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const request = new XMLHttpRequest();
+  request.open("GET", "probe.wasm", false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, char => char.charCodeAt(0) & 255);
+  const { exports } = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+  if (exports.uxe_geometry_probe() !== 0n) throw new Error("native plane JSON rejected");
+  const memory = 2097152;
+  const [vertices, , indices, , count, indexCount] = new Uint32Array(exports.memory.buffer, memory, 6);
+  if (count !== 6 || indexCount !== 12) throw new Error("wrong generated geometry size");
+  const actual = [count, indexCount,
+    ...new Float32Array(exports.memory.buffer, memory + vertices, count * 8),
+    ...new Uint32Array(exports.memory.buffer, memory + indices, indexCount)];
+
+  const defaults = PlaneGeometry.fromJSON({});
+  if (defaults.attributes.position.count !== 4 || defaults.index.count !== 6 ||
+      defaults.attributes.position.getX(0) !== -0.5) throw new Error("wrong plane defaults");
+  const geometry = PlaneGeometry.fromJSON(JSON.parse('{"height":2,"width":4,"widthSegments":2.5}'));
+  const { position, normal, uv } = geometry.attributes;
+  const reference = [position.count, geometry.index.count];
+  for (let i = 0; i < position.count; i++) {
+    reference.push(position.getX(i), position.getY(i), position.getZ(i),
+      normal.getX(i), normal.getY(i), normal.getZ(i), uv.getX(i), uv.getY(i));
+  }
+  reference.push(...geometry.index.array);
+  result.textContent = JSON.stringify([...actual, ...reference]);
+} catch (error) {
+  result.textContent = String(error);
+}
+</script>
