@@ -266,3 +266,99 @@ native function HelperLineObject_toJSON(node:i64,options:i64,dst:i64,end:i64,scr
   at=line_json_copy(at,end,mId,json_scan_string(mId,mEnd));
   return line_json_close(at,end);
 }
+
+native function line_json_sameString(a:i64,aEnd:i64,b:i64,bEnd:i64) i64 {
+  let lastA=json_scan_string(a,aEnd);
+  let lastB=json_scan_string(b,bEnd);
+  if(lastA<0 || lastB<0 || lastA-a!=lastB-b) { return 0; }
+  let i=0;
+  while(i<lastA-a) {
+    if(ux_u8(a+i)!=ux_u8(b+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Restore a leaf into an existing binding. Scratch receives the full matrix
+// before the node is changed so malformed input cannot publish a partial pose.
+native function HelperLineObject_fromJSON(node:i64,options:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(node,Object3D.size,4) ||
+     !helper_buffer_span(options,HelperLineJson.size,4) ||
+     input>=end || !helper_buffer_span(input,end-input,1) ||
+     !helper_buffer_span(scratch,160,8) ||
+     !helper_buffer_disjoint(scratch,160,input,end-input) ||
+     !helper_buffer_disjoint(scratch,160,node,Object3D.size) ||
+     !helper_buffer_disjoint(scratch,160,options,HelperLineJson.size) ||
+     !helper_buffer_disjoint(input,end-input,node,Object3D.size)) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  if(!helper_buffer_span(matrix,128,8) ||
+     !helper_buffer_disjoint(matrix,128,scratch,160) ||
+     !helper_buffer_disjoint(matrix,128,input,end-input) ||
+     !helper_buffer_disjoint(matrix,128,node,Object3D.size) ||
+     !helper_buffer_disjoint(matrix,128,options,HelperLineJson.size) ||
+     ux_u32(node+Object3D.firstChild)!=0) { return 0-1; }
+  let root=json_value_end(input,end);
+  if(root<0 || json_space(root,end)!=end) { return 0-1; }
+  let obj=LoaderJson_find(input,root,scratch,1701470831,29795,0,6);
+  if(obj<0 || ux_u8(obj)!=123) { return 0-1; }
+  let objEnd=json_value_end(obj,root);
+  if(objEnd<0) { return 0-1; }
+  let kind=ux_u32(options+HelperLineJson.kind);
+  let type=LoaderJson_find(obj,objEnd,scratch,1701869940,0,0,4);
+  let typeEnd=0-1;
+  if(kind==1) { typeEnd=line_json_grid(scratch,scratch+24); }
+  if(kind==2) { typeEnd=line_json_polar(scratch,scratch+24); }
+  if(kind==3) { typeEnd=line_json_axes(scratch,scratch+24); }
+  if(!line_json_sameString(type,objEnd,scratch,typeEnd)) { return 0-1; }
+  let g=ux_u32(options+HelperLineJson.geometry);
+  let gEnd=ux_u32(options+HelperLineJson.geometryEnd);
+  let m=ux_u32(options+HelperLineJson.material);
+  let mEnd=ux_u32(options+HelperLineJson.materialEnd);
+  if(!helper_buffer_span(g,gEnd-g,1) || !helper_buffer_span(m,mEnd-m,1) ||
+     !helper_buffer_disjoint(scratch,160,g,gEnd-g) ||
+     !helper_buffer_disjoint(scratch,160,m,mEnd-m) ||
+     !helper_buffer_disjoint(matrix,128,g,gEnd-g) || !helper_buffer_disjoint(matrix,128,m,mEnd-m) ||
+     !helper_buffer_disjoint(node,Object3D.size,g,gEnd-g) ||
+     !helper_buffer_disjoint(node,Object3D.size,m,mEnd-m)) { return 0-1; }
+  let gId=line_json_resource(g,gEnd,scratch,0);
+  let mId=line_json_resource(m,mEnd,scratch,1);
+  let gRef=LoaderJson_find(obj,objEnd,scratch,1836016999,2037544037,0,8);
+  let mRef=LoaderJson_find(obj,objEnd,scratch,1702125933,1818323314,0,8);
+  if(!line_json_sameString(gId,gEnd,gRef,objEnd) || !line_json_sameString(mId,mEnd,mRef,objEnd)) { return 0-1; }
+  let show=LoaderJson_find(obj,objEnd,scratch,1769171318,6646882,0,7);
+  let visible=1;
+  if(show>=0) {
+    let first=ux_u8(show);
+    if(first==102) { visible=0; }
+    else if(first!=116) { return 0-1; }
+  } else if(show!=0-2) { return 0-1; }
+  let layers=LoaderJson_find(obj,objEnd,scratch,1702453612,29554,0,6);
+  let value=json_read_number(layers,objEnd);
+  if(!(value>=0.0-2147483648.0 && value<=2147483647.0)) { return 0-1; }
+  let mask=f64_floor_i64(value);
+  if(value!=0.0+mask) { return 0-1; }
+  let mat=LoaderJson_find(obj,objEnd,scratch,1920229741,30825,0,6);
+  if(mat<0 || ux_u8(mat)!=91) { return 0-1; }
+  let at=json_space(mat+1,objEnd);
+  let i=0;
+  while(i<16) {
+    let component=json_read_number(at,objEnd);
+    if(component-component!=0.0) { return 0-1; }
+    let saved=ux_f64_put(scratch+32+i*8,component);
+    let close=json_value_end(at,objEnd);
+    at=json_space(close,objEnd);
+    if(at<0 || at>=objEnd) { return 0-1; }
+    if(i<15) {
+      if(ux_u8(at)!=44) { return 0-1; }
+      at=json_space(at+1,objEnd);
+    }
+    i=i+1;
+  }
+  if(ux_u8(at)!=93) { return 0-1; }
+  let pose=uxe_copy_record(matrix,scratch+32,128);
+  let shown=ux_u32_put(node+Object3D.visible,visible);
+  let mask32=u32_and(mask,4294967295);
+  let layer=ux_u32_put(node+Object3D.layerMask,mask32);
+  let dirty=ux_u32_put(node+Object3D.dirty,2);
+  return node;
+}
