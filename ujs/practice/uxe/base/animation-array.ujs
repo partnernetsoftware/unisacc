@@ -6,15 +6,17 @@ struct AnimationArrayView {
 
 // Kind 0 represents a numeric Array with f64 elements. Kinds 1..10
 // share the render buffer component tags; 11 represents DataView.
+// Kinds 12/13 are BigInt64Array/BigUint64Array. Kinds 14/15 retain the
+// signed/unsigned 64-bit BigInt domain after conversion to a plain Array.
 native function animation_array_width(kind:i64) i64 {
-  if(kind==0) { return 8; }
+  if(kind==0 || (kind>=12 && kind<=15)) { return 8; }
   return BufferAttribute_width(kind);
 }
 
 native function AnimationUtils_isTypedArray(view:i64) i64 {
   if(!animation_span(view,AnimationArrayView.size)) { return 0; }
   let kind=ux_u32(view+AnimationArrayView.kind);
-  if(kind<1 || kind>10) { return 0; }
+  if(kind<1 || kind==11 || kind>13) { return 0; }
   let width=animation_array_width(kind);
   let data=ux_u32(view+AnimationArrayView.data);
   let count=ux_u32(view+AnimationArrayView.count);
@@ -27,11 +29,18 @@ native function AnimationUtils_convertArray(view:i64,kind:i64,force:i64,out:i64,
   if(!animation_span(view,AnimationArrayView.size)) { return 0-2; }
   let sourceKind=ux_u32(view+AnimationArrayView.kind);
   let sourceWidth=animation_array_width(sourceKind);
+  if(kind>13) { return 0-2; }
+  let sourceBig=sourceKind>=12 && sourceKind<=15;
+  if(kind==0 && sourceBig) { kind=14+sourceKind%2; }
+  let targetBig=kind>=12 && kind<=15;
   let width=animation_array_width(kind);
   let source=ux_u32(view+AnimationArrayView.data);
   let count=ux_u32(view+AnimationArrayView.count);
   if(sourceWidth==0 || width==0 || source%sourceWidth!=0 || source>6291456 ||
      count>(6291456-source)/sourceWidth) { return 0-2; }
+  // A typed-array constructor checks content type even when its input is empty.
+  let sourceTyped=sourceKind>=1 && sourceKind<=13 && sourceKind!=11;
+  if(sourceBig!=targetBig && (count>0 || sourceTyped)) { return 0-2; }
   if(sourceKind==kind && force==0) { return view; }
   let size=count*width;
   if(!animation_span(out,AnimationArrayView.size) || capacity<0 || size>capacity ||
@@ -46,7 +55,8 @@ native function AnimationUtils_convertArray(view:i64,kind:i64,force:i64,out:i64,
       animation_overlap(work,8,view,AnimationArrayView.size) ||
       animation_overlap(work,8,out,AnimationArrayView.size) ||
       animation_overlap(work,8,source,count*sourceWidth))) { return 0-2; }
-  if(kind==sourceKind) { let copy=uxe_copy_record(data,source,size); }
+  // BigInt conversions preserve the modulo-2^64 bit pattern without f64 coercion.
+  if(kind==sourceKind || (sourceBig && targetBig)) { let copy=uxe_copy_record(data,source,size); }
   else {
     let read=sourceKind;
     let write=kind;

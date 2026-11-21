@@ -41,7 +41,8 @@
 - ~~AnimationUtils GLTF 三次标量与向量差量 | G-anim 三次参考采样、仅修改中间值、切线原样保留 | GLTF 三次插值。~~ 7 项通过，切换到末端参考反例转红。
 - ~~AnimationUtils GLTF 三次四元数差量 | G-anim 四元数乘法次序、归一化与切线保留 | 已有 GLTF 三次插值。~~ 7 项通过，错轴反例转红。
 - ~~AnimationUtils 数学类型展平 | G-anim Vector2、Vector3、Quaternion、前缀保留及末项容量原子拒绝 | JSON 数值行。~~ 八项通过，错末项使 33 变 0 转红。
-- AnimationUtils BigInt 类型视图 | G-anim 有符号和无符号转型及类型判定 | 数值数组转换。
+- ~~AnimationUtils 64 位 BigInt 类型视图 | G-anim 有符号和无符号转换、克隆、类型判定与非法混用 | 数值数组。~~ 24 项通过，经 f64 舍入反例转红。
+- AnimationUtils 任意精度与混合数组 | G-anim 超 64 位 BigInt 和混合元素保留 | 64 位 BigInt 视图。
 - ~~AnimationUtils GLTF 整片段接线 | G-anim 同名同类型匹配、混合三次与普通轨道 | 三次轨道数值和四元数差量。~~ 混合片段 7 项、普通片段 8 项通过，各自的参考帧反例转红。每套仅编一次，浏览器逐项新建实例。
 - ~~Raycaster 构造与设置 | G-ray 默认方向、近远、层和阈值，set 保留设置 | 射线布局。~~ 10 项通过，交换近远字段反例转红。
 - ~~Raycaster 索引三角网格缓冲拾取 | G-ray 远端裁剪、层过滤、稳定距离排序、越界拒绝 | 静态三角面拾取。~~ 9 项通过，读回最远命中的反例转红。
