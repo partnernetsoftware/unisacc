@@ -1,0 +1,441 @@
+/* tools/check-textx-json-build.cx -- ext/textx/json.cx builders: js_mk_obj/arr/str/num/bool/null, js_obj_set(n), js_arr_push.
+ *   sh ./unisacc.com tools/check-textx-json-build.cx [-- --cases equiv;own;leak;cap;e2e;mutc;mut1;mut2;mut3;muts]
+ *   equiv  50 fixed structures (nesting, empty containers, duplicate keys, unicode, numbers 0 -0 1e21 1e-7 ...): the tree
+ *          rebuilt through the builder API from the parsed tree emits (compact and pretty) the same bytes as the
+ *          parsed tree; duplicate keys stay, insertion order stays, js_mk_num(NaN/Inf) emits null
+ *   own    js_mk_str copies (the source buffer is scribbled after the call), a successful set/push hands CHILD to
+ *          the container (one js_free of the root frees all, a double free would abort), a refused set/push leaves
+ *          CHILD with the caller and the container unchanged (bad kind, null key, null child, self)
+ *   leak   40000 build+free rounds and 40000 refused-set+free rounds; resident memory (/proc/self/statm) may not
+ *          grow past 16 MiB; ENOMEM paths cannot be injected (mm_ has no fault hook): UNMEASURED
+ *   cap    object with 1000 keys, 100 nested arrays (128 emits, 130 refused by js_emit), string of 1 MiB
+ *   e2e    a 39 member object built by code; its js_emit_pretty bytes equal a hand-written expected text
+ *   mutc/mut1..3/muts  a private copy of json.cx with one line changed must fail the named case; mutc is the
+ *          unmutated control; mut1 swaps the last two members on set, mut2 borrows the string instead of copying,
+ *          mut3 overwrites a repeated key, muts stubs js_arr_push to -ENOSYS (the red run)
+ * Prints PASS/FAIL per case and CHECK_TEXTX_JSON_BUILD<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+#pragma unisa use textx.json
+
+#define OCAP 262144
+static unsigned char o1[OCAP + 8], o2[OCAP + 8], o3[OCAP + 8], o4[OCAP + 8];
+static char gen[OCAP];
+
+static void cp(void *d, const void *s, long n) { if (n > 0 && mm_copy(d, n, s, n)) exit(2); }
+
+/* the same tree again, built only through the builder API; 0 on any failure (nothing leaks) */
+static js_val *rebuild(const js_val *s) {
+    long i, n; js_val *r = 0, *c;
+    switch (js_kind(s)) {
+    case JS_NULL: return js_mk_null();
+    case JS_BOOL: return js_mk_bool(js_bool(s));
+    case JS_NUM: return js_mk_num(js_num(s));
+    case JS_STR: return js_mk_str(js_str(s), js_str_len(s));
+    case JS_ARR:
+        r = js_mk_arr();
+        n = js_len(s);
+        for (i = 0; r && i < n; i++) {
+            c = rebuild(js_at(s, i));
+            if (!c) { js_free(r); return 0; }
+            if (js_arr_push(r, c)) { js_free(c); js_free(r); return 0; }
+        }
+        return r;
+    case JS_OBJ:
+        r = js_mk_obj();
+        n = js_len(s);
+        for (i = 0; r && i < n; i++) {
+            const char *k = js_key(s, i); long kl = 0;
+            while (k[kl]) kl++;
+            c = rebuild(js_at(s, i));
+            if (!c) { js_free(r); return 0; }
+            if (js_obj_setn(r, k, kl, c)) { js_free(c); js_free(r); return 0; }
+        }
+        return r;
+    }
+    return 0;
+}
+/* 1 when the parsed and the rebuilt tree of TEXT emit the same bytes, compact and pretty */
+static int same_as_parse(const char *text, const char *name) {
+    char err[96]; js_val *p = js_parse(text, (long)strlen(text), err, sizeof err), *b; long a1, a2, p1, p2; int ok;
+    if (!p) { printf("  parse %s: %s\n", name, err); return 0; }
+    b = rebuild(p);
+    if (!b) { js_free(p); printf("  rebuild failed %s\n", name); return 0; }
+    a1 = js_emit(p, o1, OCAP); a2 = js_emit(b, o2, OCAP);
+    p1 = js_emit_pretty(p, o3, OCAP); p2 = js_emit_pretty(b, o4, OCAP);
+    ok = a1 > 0 && a1 == a2 && !memcmp(o1, o2, (size_t)a1) && p1 == p2 && p1 >= a1 && !memcmp(o3, o4, (size_t)p1);
+    if (!ok) printf("  differs %s\n", name);
+    js_free(p); js_free(b);
+    return ok;
+}
+static const char *fixed_texts[] = {
+    "null", "true", "false", "0", "-0", "1", "1e21", "1e-7", "123.456", "\"\"", "\"x\"", "[]", "{}", "[[]]", "[{}]", "{\"a\":{}}",
+    "[0,-0,1e21,1e-7,0.1,5e-324,1.7976931348623157e308,9007199254740992,100,-1.5e300]",
+    "{\"b\":1,\"a\":2,\"c\":3,\"10\":4,\"2\":5}",
+    "{\"a\":1,\"a\":2,\"a\":3}",
+    "{\"k\":[1,2],\"k\":{\"x\":null},\"k\":\"s\"}",
+    "[\"\\u00e9\\u4e2d\\ud83d\\ude00\",\"\\u0000\\u001f\\u007f\"]",
+    "{\"\\u00e9\":\"\\u4e2d\",\"\xF0\x9F\x98\x80\":\"\xE2\x80\xA8\"}",
+    "{\"q\\\"\\\\\":\"a\\nb\\tc\\r\\f\\b/\"}",
+    "[[[[[[[[[[1]]]]]]]]]]",
+    "{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":[1,{\"f\":[true,false,null]}]}}}}}",
+    "[{},[],{\"a\":[]},[{}],\"\",0]",
+    "{\"x\":\"x: y, z\",\"y\":[\"[\",\"]\",\"{\",\"}\",\",\"]}",
+    "[1.0,2.50,3e2,4E-2,-0.0,0e5]",
+    "{\"deep\":[[{\"k\":[[{\"j\":1}]]}]]}",
+    "  [ 1 , { \"a\" : [ ] , \"b\" : { } } ]  ",
+};
+static void group_equiv(void) {
+    long i, nfix = (long)(sizeof fixed_texts / sizeof fixed_texts[0]), cnt = 0, bad = 0;
+    char name[40]; js_val *x; long r;
+    for (i = 0; i < nfix; i++) { cx_fmt(name, sizeof name, "fixed-%ld", i); cnt++; if (!same_as_parse(fixed_texts[i], name)) bad++; }
+    for (i = 0; cnt < 50; i++) {   /* generated: arrays of numbers, nested objects with repeated keys */
+        long k, d = i % 12 + 1, w = 0;
+        static const char *num[] = { "0", "-0", "1e21", "1e-7", "123.456", "0.1", "-5e-324", "1e300" };
+        if (i % 2 == 0) {
+            gen[w++] = '[';
+            for (k = 0; k <= i; k++) { const char *t = num[(i + k) % 8]; long tl = (long)strlen(t); if (k) gen[w++] = ','; cp(gen + w, t, tl); w += tl; }
+            gen[w++] = ']';
+        } else {
+            for (k = 0; k < d; k++) { cp(gen + w, "{\"k\":1,\"k\":", 11); w += 11; }
+            cp(gen + w, "\"\\u00e9\"", 8); w += 8;
+            for (k = 0; k < d; k++) gen[w++] = '}';
+        }
+        gen[w] = 0;
+        cx_fmt(name, sizeof name, "gen-%ld", i); cnt++;
+        if (!same_as_parse(gen, name)) bad++;
+    }
+    printf("EQUIV\tstructures\tn=%ld\tbad=%ld\n", cnt, bad);
+    tk_ok(cnt == 50 && bad == 0, "equiv-50-structures");
+    /* duplicate keys are appended, not replaced; order is insertion order */
+    x = js_mk_obj();
+    tk_ok(x && js_obj_set(x, "a", js_mk_num(1)) == 0 && js_obj_set(x, "b", js_mk_num(2)) == 0 && js_obj_set(x, "a", js_mk_num(3)) == 0, "equiv-duplicate-keys-set");
+    r = js_emit(x, o1, OCAP);
+    tk_ok(r == 19 && !memcmp(o1, "{\"a\":1,\"b\":2,\"a\":3}", 19) && js_len(x) == 3, "equiv-duplicate-keys-kept-in-order");
+    js_free(x);
+    x = js_mk_arr();
+    {   unsigned long long nb = 0x7FF8000000000000ULL, ib = 0x7FF0000000000000ULL, zb = 0x8000000000000000ULL; double d1, d2, d3;
+        memcpy(&d1, &nb, 8); memcpy(&d2, &ib, 8); memcpy(&d3, &zb, 8);
+        js_arr_push(x, js_mk_num(d1)); js_arr_push(x, js_mk_num(d2)); js_arr_push(x, js_mk_num(d3)); }
+    r = js_emit(x, o1, OCAP);
+    tk_ok(r == 13 && !memcmp(o1, "[null,null,0]", 13), "equiv-nonfinite-null-negzero-0");
+    js_free(x);
+}
+
+/* free S; a string that borrowed its source (the mut2 mutation) is detached first so the check itself survives */
+static void own_free(js_val *s, const char *src) {
+    if (s && js_str(s) == src) s->s = 0;
+    js_free(s);
+}
+static void group_own(void) {
+    char *buf; js_val *s, *o, *a, *c; long r;
+    buf = (char *)mm_alloc(8);
+    cp(buf, "abc", 4);
+    s = js_mk_str(buf, 3);
+    memset(buf, 'X', 3);
+    r = s ? js_emit(s, o1, OCAP) : -1;
+    tk_ok(s && r == 5 && !memcmp(o1, "\"abc\"", 5) && js_str_len(s) == 3, "own-str-copied");
+    if (s && js_str(s) == buf) { own_free(s, buf); mm_free(buf); return; }   /* borrowed: later groups would free literals */
+    own_free(s, buf); mm_free(buf);
+    buf = "a\0b";
+    s = js_mk_str(buf, 3);
+    r = js_emit(s, o1, OCAP);
+    tk_ok(s && js_str_len(s) == 3 && r == 10 && !memcmp(o1, "\"a\\u0000b\"", 10), "own-str-embedded-nul");
+    own_free(s, buf);
+    buf = "hello";
+    s = js_mk_str(buf, -1);
+    tk_ok(s && js_str_len(s) == 5 && !strcmp(js_str(s), "hello"), "own-str-negative-n-is-strlen");
+    own_free(s, buf);
+    tk_ok(js_mk_str(0, 1) == 0, "own-str-null-source-refused");
+    /* success: the container owns CHILD, one free of the root frees all */
+    o = js_mk_obj(); a = js_mk_arr(); c = js_mk_str("v", 1);
+    tk_ok(js_arr_push(a, c) == 0 && js_obj_set(o, "list", a) == 0 && js_len(a) == 1 && js_get(o, "list") == a && js_at(a, 0) == c, "own-set-takes-child");
+    js_free(o);   /* freeing again below would abort (double free) */
+    tk_ok(1, "own-free-root-once");
+    /* refusal: child stays with the caller, container unchanged */
+    o = js_mk_obj(); a = js_mk_arr(); c = js_mk_num(1);
+    tk_ok(js_obj_set(a, "k", c) == -EINVAL && js_len(a) == 0, "own-refuse-set-on-array");
+    tk_ok(js_arr_push(o, c) == -EINVAL && js_len(o) == 0, "own-refuse-push-on-object");
+    tk_ok(js_obj_set(o, 0, c) == -EINVAL && js_obj_set(o, "k", 0) == -EINVAL && js_arr_push(a, 0) == -EINVAL, "own-refuse-null-key-or-child");
+    tk_ok(js_obj_set(0, "k", c) == -EINVAL && js_arr_push(0, c) == -EINVAL, "own-refuse-null-container");
+    tk_ok(js_arr_push(a, a) == -EINVAL && js_obj_set(o, "k", o) == -EINVAL && js_len(a) == 0 && js_len(o) == 0, "own-refuse-self");
+    tk_ok(js_obj_setn(o, "k", -1, c) == -EINVAL, "own-refuse-negative-keylen");
+    js_free(c);   /* still ours: freed exactly once here */
+    js_free(a); js_free(o);
+    tk_ok(1, "own-refused-child-freed-by-caller");
+    js_free(0);
+    tk_ok(js_mk_bool(5) && js_bool(a = js_mk_bool(5)) == 1, "own-bool-normalised");
+    js_free(a);
+}
+
+static long rss_pages(void) {
+    size_t n = 0; char *s = cx_read("/proc/self/statm", &n); long k = 0;
+    if (!s || n == 0) return -1;
+    while (k < (long)n && s[k] != ' ') k++;
+    return tx_strtol(s + k + 1, 0, 10);
+}
+static void group_leak(void) {
+    long i, j, r0, r1, r2; char big[600];
+    for (j = 0; j < 600; j++) big[j] = (char)('a' + j % 26);
+    for (i = 0; i < 300; i++) {   /* warm up the allocator */
+        js_val *o = js_mk_obj();
+        for (j = 0; j < 20; j++) js_obj_set(o, "key", js_mk_str(big, 599));
+        js_free(o);
+    }
+    r0 = rss_pages();
+    for (i = 0; i < 40000; i++) {
+        js_val *o = js_mk_obj(), *a = js_mk_arr();
+        for (j = 0; j < 12; j++) js_arr_push(a, js_mk_str(big, 599));
+        js_obj_set(o, "list", a);
+        for (j = 0; j < 12; j++) js_obj_set(o, "some key", js_mk_num((double)j));
+        js_free(o);
+    }
+    r1 = rss_pages();
+    for (i = 0; i < 40000; i++) {
+        js_val *a = js_mk_arr(), *c = js_mk_str(big, 599);
+        if (js_obj_set(a, "k", c) != -EINVAL) { tk_ok(0, "leak-refused-set"); return; }
+        js_free(c); js_free(a);
+    }
+    r2 = rss_pages();
+    printf("LEAK\trss_pages\t%ld\t%ld\t%ld\n", r0, r1, r2);
+    {   char *probe = (char *)mm_alloc(24 << 20); long r3;   /* the detector must see a 24 MiB block that is kept */
+        if (probe) memset(probe, 1, 24 << 20);
+        r3 = rss_pages();
+        tk_ok(probe && r3 - r2 > 4096, "leak-detector-sees-24MiB-control");
+        mm_free(probe); }
+    tk_ok(r0 > 0 && r1 - r0 < 4096, "leak-build-free-40000-rounds-under-16MiB");
+    tk_ok(r0 > 0 && r2 - r1 < 4096, "leak-refused-set-40000-rounds-under-16MiB");
+    printf("UNMEASURED\tleak\tENOMEM injection (mm_ has no fault hook)\n");
+}
+
+static void group_cap(void) {
+    long i, w, r; js_val *o, *cur, *a; char key[24], *s, *big; unsigned char *out; char err[96];
+    o = js_mk_obj();
+    for (i = 0; i < 1000; i++) { cx_fmt(key, sizeof key, "k%ld", i); if (js_obj_set(o, key, js_mk_num((double)i))) break; }
+    tk_ok(i == 1000 && js_len(o) == 1000, "cap-1000-keys-built");
+    r = js_emit(o, o1, OCAP);
+    for (w = 0, i = 0; i < 1000; i++) { cx_fmt(key, sizeof key, "%s\"k%ld\":%ld", i ? "," : "{", i, i); w += (long)strlen(key); }
+    tk_ok(r == w + 1 && o1[0] == '{' && o1[r - 1] == '}' && !strcmp(js_key(o, 999), "k999") && !strcmp(js_key(o, 0), "k0") && js_num(js_at(o, 500)) == 500.0, "cap-1000-keys-order-and-length");
+    {   a = js_parse((char *)o1, r, err, sizeof err);
+        r = a ? js_emit(a, o2, OCAP) : -1;
+        tk_ok(a && r == js_emit(o, o3, OCAP) && !memcmp(o2, o3, (size_t)r), "cap-1000-keys-reparse-same");
+        js_free(a); }
+    js_free(o);
+    for (w = 0; w < 2; w++) {
+        long depth = w ? 128 : 100;
+        cur = js_mk_num(1);
+        for (i = 0; i < depth; i++) { a = js_mk_arr(); if (!a || js_arr_push(a, cur)) { tk_ok(0, "cap-nest-build"); return; } cur = a; }
+        r = js_emit(cur, o1, OCAP);
+        tk_ok(r == 2 * depth + 1 && o1[0] == '[' && o1[depth] == '1' && o1[r - 1] == ']', w ? "cap-nest-128-emits" : "cap-nest-100-emits");
+        js_free(cur);
+    }
+    cur = js_mk_num(1);
+    for (i = 0; i < 130; i++) { a = js_mk_arr(); js_arr_push(a, cur); cur = a; }
+    tk_ok(js_emit(cur, o1, OCAP) == -EINVAL, "cap-nest-130-refused-by-emit");
+    js_free(cur);
+    big = (char *)mm_alloc(1048576 + 8);
+    out = (unsigned char *)mm_alloc(2 * 1048576 + 64);
+    if (!big || !out) { tk_ok(0, "cap-1mib-alloc"); return; }
+    for (i = 0; i < 1048576; i++) big[i] = (i % 1000 == 999) ? '"' : (char)('a' + i % 26);
+    s = (char *)js_mk_str(big, 1048576);
+    o = js_mk_obj();
+    tk_ok(s && js_str_len((js_val *)s) == 1048576 && js_obj_set(o, "s", (js_val *)s) == 0, "cap-1mib-string-built");
+    r = js_emit(o, out, 2 * 1048576 + 64);
+    /* expected: {"s":"..."} with 1048 quote marks escaped */
+    {   long q = 0, p = 6, bad = 0;
+        for (i = 0; i < 1048576; i++) q += big[i] == '"';
+        for (i = 0; i < 1048576 && !bad; i++) {
+            if (big[i] == '"') { if (out[p] != '\\' || out[p + 1] != '"') bad = 1; p += 2; }
+            else { if (out[p] != (unsigned char)big[i]) bad = 1; p++; }
+        }
+        tk_ok(r == 1048576 + q + 8 && !memcmp(out, "{\"s\":\"", 6) && !memcmp(out + r - 2, "\"}", 2) && !bad && p == r - 2, "cap-1mib-string-emit-exact");
+    }
+    js_free(o);
+    mm_free(big); mm_free(out);
+}
+
+#define NUMF(k, v) js_obj_set(o, k, js_mk_num(v))
+static void group_e2e(void) {
+    js_val *o = js_mk_obj(), *a, *t, *m; long r, n; char k[8], *want;
+    static const char exp1[] =
+        "{\n"
+        "  \"ok\": true,\n"
+        "  \"name\": \"resolve\",\n"
+        "  \"version\": \"1.2.3\",\n"
+        "  \"id\": 42,\n"
+        "  \"ratio\": 0.25,\n"
+        "  \"neg\": 0,\n"
+        "  \"big\": 1e+21,\n"
+        "  \"small\": 1e-7,\n"
+        "  \"note\": null,\n"
+        "  \"path\": \"/usr/lib/x\",\n"
+        "  \"quote\": \"say \\\"hi\\\"\\n\",\n"
+        "  \"uni\": \"\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80\",\n"
+        "  \"count\": 3,\n"
+        "  \"deps\": [\n"
+        "    \"a\",\n"
+        "    \"b\",\n"
+        "    \"c\"\n"
+        "  ],\n"
+        "  \"empty_arr\": [],\n"
+        "  \"empty_obj\": {},\n"
+        "  \"meta\": {\n"
+        "    \"k\": 1,\n"
+        "    \"k\": 2\n"
+        "  },\n"
+        "  \"targets\": [\n"
+        "    {\n"
+        "      \"n\": \"x\",\n"
+        "      \"ok\": false\n"
+        "    },\n"
+        "    {\n"
+        "      \"n\": \"y\",\n"
+        "      \"ok\": true\n"
+        "    }\n"
+        "  ],\n"
+        "  \"f19\": 19,\n  \"f20\": 20,\n  \"f21\": 21,\n  \"f22\": 22,\n  \"f23\": 23,\n  \"f24\": 24,\n  \"f25\": 25,\n"
+        "  \"f26\": 26,\n  \"f27\": 27,\n  \"f28\": 28,\n  \"f29\": 29,\n  \"f30\": 30,\n  \"f31\": 31,\n  \"f32\": 32,\n"
+        "  \"f33\": 33,\n  \"f34\": 34,\n  \"f35\": 35,\n  \"f36\": 36,\n  \"f37\": 37,\n  \"f38\": 38,\n  \"f39\": 39\n"
+        "}";
+    js_obj_set(o, "ok", js_mk_bool(1));
+    js_obj_set(o, "name", js_mk_str("resolve", -1));
+    js_obj_set(o, "version", js_mk_str("1.2.3", -1));
+    NUMF("id", 42);
+    NUMF("ratio", 0.25);
+    NUMF("neg", -0.0);
+    NUMF("big", 1e21);
+    NUMF("small", 1e-7);
+    js_obj_set(o, "note", js_mk_null());
+    js_obj_set(o, "path", js_mk_str("/usr/lib/x", -1));
+    js_obj_set(o, "quote", js_mk_str("say \"hi\"\n", -1));
+    js_obj_set(o, "uni", js_mk_str("\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x98\x80", -1));
+    NUMF("count", 3);
+    a = js_mk_arr();
+    js_arr_push(a, js_mk_str("a", 1)); js_arr_push(a, js_mk_str("b", 1)); js_arr_push(a, js_mk_str("c", 1));
+    js_obj_set(o, "deps", a);
+    js_obj_set(o, "empty_arr", js_mk_arr());
+    js_obj_set(o, "empty_obj", js_mk_obj());
+    m = js_mk_obj(); js_obj_set(m, "k", js_mk_num(1)); js_obj_set(m, "k", js_mk_num(2));
+    js_obj_set(o, "meta", m);
+    a = js_mk_arr();
+    t = js_mk_obj(); js_obj_set(t, "n", js_mk_str("x", 1)); js_obj_set(t, "ok", js_mk_bool(0)); js_arr_push(a, t);
+    t = js_mk_obj(); js_obj_set(t, "n", js_mk_str("y", 1)); js_obj_set(t, "ok", js_mk_bool(1)); js_arr_push(a, t);
+    js_obj_set(o, "targets", a);
+    for (n = 19; n <= 39; n++) { cx_fmt(k, sizeof k, "f%ld", n); NUMF(k, (double)n); }
+    want = (char *)exp1;
+    tk_ok(js_len(o) == 39, "e2e-39-members");
+    r = js_emit_pretty(o, o1, OCAP);
+    if (!tk_ok(r == (long)strlen(want) && !memcmp(o1, want, (size_t)r), "e2e-pretty-39-fields-bytes") && r >= 0) { o1[r] = 0; printf("  got  %s\n", (char *)o1); }
+    {   char err[96]; js_val *p = js_parse((char *)o1, r, err, sizeof err);
+        long r2 = p ? js_emit_pretty(p, o2, OCAP) : -1;
+        tk_ok(r2 == r && !memcmp(o1, o2, (size_t)r), "e2e-pretty-reparse-fixed-point");
+        js_free(p); }
+    js_free(o);
+}
+
+/* ---- mutation: private copy of the package source with one change ---- */
+static char work[4096], com[4400], root[4096];
+static long find_at(const char *h, long hn, const char *nd, long nn) {
+    long i;
+    for (i = 0; i + nn <= hn; i++) if (!strncmp(h + i, nd, (size_t)nn)) return i;
+    return -1;
+}
+static int put_mut(const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    if (find_at(src + at + 1, (long)n - at - 1, old, (long)ol) >= 0) { printf("mutation anchor not unique: %s\n", old); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    cp(dst, src, (long)k); cp(dst + k, nw, (long)nl); cp(dst + k + nl, src + k + ol, (long)(n - k - ol));
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+static int setup(const char *old, const char *nw) {
+    char lk[4400], p[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_mut("ext/textx/json.cx", old, nw)) return 0;
+    if (!put_mut("tools/check-textx-json-build.cx", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0;
+    src = cx_read(p, &n);
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {   /* each line; R rows other than textx get the r/ link prefix on DIR */
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 5 && !strncmp(src + i + 2, "textx", 5))) {
+            cp(dst + k, src + i, (long)(t2 + 1 - i)); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, (long)(e - t2 - 1)); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, (long)ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+static const char *ccases = "equiv;own;e2e";
+static int child(void) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", (char *)ccases, 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-textx-json-build.cx", work)) return -1;
+    { int rc = tk_run(av, 0, 55000); if (rc != 0 && rc != 1) printf("  child rc=%d\n%s\n", rc, tk_out()); return rc; }
+}
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-textx-json-build", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 0) {
+        if (setup("", "")) { rc = child(); tk_ok(rc == 0 && tk_has(tk_out(), "PASS\te2e-pretty-39-fields-bytes") && tk_has(tk_out(), "PASS\tequiv-50-structures"), "mut-control-unmutated-passes"); }
+        else tk_ok(0, "mut-control-setup");
+    }
+    if (part == 1) {
+        if (setup("o->klens[o->n] = kn;", "o->klens[o->n] = kn; if (o->n > 0) { js_val *t = o->items[o->n - 1]; char *tk = o->keys[o->n - 1]; long tl = o->klens[o->n - 1]; o->items[o->n - 1] = child; o->keys[o->n - 1] = k; o->klens[o->n - 1] = kn; o->items[o->n] = t; o->keys[o->n] = tk; o->klens[o->n] = tl; }")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\te2e-pretty-39-fields-bytes") && tk_has(tk_out(), "FAIL\tequiv-duplicate-keys-kept-in-order"), "mut-insertion-order-detected");
+        } else tk_ok(0, "mut-order-setup");
+    }
+    if (part == 2) {
+        ccases = "own";   /* the borrowed string would be freed twice by the other groups; own detaches it */
+        if (setup("    d = (char *)mm_alloc(n + 1);\n    if (!d) return 0;\n    if (n > 0 && mm_copy(d, n + 1, s, n)) { mm_free(d); return 0; }\n    d[n] = 0;\n", "    d = (char *)s;\n")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\town-str-copied"), "mut-borrowed-string-detected");
+        } else tk_ok(0, "mut-borrow-setup");
+    }
+    if (part == 3) {
+        if (setup("    k = (char *)mm_alloc(kn + 1);", "    { long q; for (q = 0; q < o->n; q++) if (o->klens[q] == kn && mm_same(o->keys[q], key, kn)) { js_free(o->items[q]); o->items[q] = child; return 0; } }\n    k = (char *)mm_alloc(kn + 1);")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tequiv-duplicate-keys-kept-in-order") && tk_has(tk_out(), "FAIL\te2e-pretty-39-fields-bytes"), "mut-duplicate-overwrite-detected");
+        } else tk_ok(0, "mut-dup-setup");
+    }
+    if (part == 4) {
+        if (setup("    a->items[a->n++] = child;\n    return 0;", "    return -ENOSYS;")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\te2e-pretty-39-fields-bytes"), "mut-stub-push-red-detected");
+        } else tk_ok(0, "mut-stub-setup");
+    }
+}
+
+int main(int argc, char **argv) {
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (tk_case("equiv")) group_equiv();
+    if (tk_case("own")) group_own();
+    if (tk_case("leak")) group_leak();
+    if (tk_case("cap")) group_cap();
+    if (tk_case("e2e")) group_e2e();
+    if (tk_case("mutc")) group_mut(0);
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    if (tk_case("muts")) group_mut(4);
+    return tk_end("CHECK_TEXTX_JSON_BUILD", 0);
+}

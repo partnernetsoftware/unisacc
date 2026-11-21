@@ -526,3 +526,85 @@ static long js_emit_run(const js_val *v, unsigned char *out, long cap, int ind) 
 }
 long js_emit(const js_val *v, unsigned char *out, long cap) { return js_emit_run(v, out, cap, 0); }
 long js_emit_pretty(const js_val *v, unsigned char *out, long cap) { return js_emit_run(v, out, cap, 2); }
+
+/* ---- builders (phase 2) ----
+   Build a tree in the program, then js_emit / js_emit_pretty it. The tree is the same shape js_parse makes,
+   so one js_free(root) frees all of it. Names carry mk_/obj_/arr_ because js_str, js_num and js_bool are
+   the accessors above.
+     js_mk_obj() js_mk_arr()       empty container, or 0 (no memory)
+     js_mk_str(s, n)               copy of the first N bytes of S (N < 0: strlen); embedded NUL kept; 0 on failure
+     js_mk_num(d) js_mk_bool(b) js_mk_null()   scalar leaf, or 0 (no memory); NaN/Inf are stored and emit as null
+     js_obj_set(o, key, child)     append member KEY (NUL-terminated, copied); js_obj_setn gives the key length
+     js_arr_push(a, child)         append element
+   Ownership: on success the container owns CHILD (free only the root; never free CHILD again, never put it
+   in a second container). On failure (-EINVAL: bad container kind, null key or child, child is the container
+   itself; -ENOMEM) CHILD stays with the caller and the container is unchanged. Members are kept in insertion
+   order and a repeated key is appended, not replaced, exactly as js_parse and js_emit treat duplicates. */
+static js_val *js_mk(int kind) {
+    js_val *v = (js_val *)mm_zalloc((long)sizeof(js_val));
+    if (v) v->kind = kind;
+    return v;
+}
+js_val *js_mk_obj(void) { return js_mk(JS_OBJ); }
+js_val *js_mk_arr(void) { return js_mk(JS_ARR); }
+js_val *js_mk_num(double d) { js_val *v = js_mk(JS_NUM); if (v) v->num = d; return v; }
+js_val *js_mk_bool(int b) { js_val *v = js_mk(JS_BOOL); if (v) v->b = b ? 1 : 0; return v; }
+js_val *js_mk_null(void) { return js_mk(JS_NULL); }
+js_val *js_mk_str(const char *s, long n) {
+    js_val *v; char *d;
+    if (!s) return 0;
+    if (n < 0) { n = 0; while (s[n]) n++; }
+    d = (char *)mm_alloc(n + 1);
+    if (!d) return 0;
+    if (n > 0 && mm_copy(d, n + 1, s, n)) { mm_free(d); return 0; }
+    d[n] = 0;
+    v = js_mk(JS_STR);
+    if (!v) { mm_free(d); return 0; }
+    v->s = d; v->slen = n;
+    return v;
+}
+static int js_room(js_val *c) {
+    long nc; js_val **ni; char **nk; long *nl;
+    if (c->n < c->cap) return 0;
+    nc = c->cap ? c->cap * 2 : 4;
+    ni = (js_val **)mm_grow(c->items, nc * (long)sizeof(js_val *));
+    if (!ni) return -ENOMEM;
+    c->items = ni;
+    if (c->kind == JS_OBJ) {
+        nk = (char **)mm_grow(c->keys, nc * (long)sizeof(char *));
+        if (!nk) return -ENOMEM;
+        c->keys = nk;
+        nl = (long *)mm_grow(c->klens, nc * (long)sizeof(long));
+        if (!nl) return -ENOMEM;
+        c->klens = nl;
+    }
+    c->cap = nc;
+    return 0;
+}
+int js_obj_setn(js_val *o, const char *key, long kn, js_val *child) {
+    char *k; int r;
+    if (!o || o->kind != JS_OBJ || !key || kn < 0 || !child || child == o) return -EINVAL;
+    k = (char *)mm_alloc(kn + 1);
+    if (!k) return -ENOMEM;
+    if (kn > 0 && mm_copy(k, kn + 1, key, kn)) { mm_free(k); return -EINVAL; }
+    k[kn] = 0;
+    r = js_room(o);
+    if (r) { mm_free(k); return r; }
+    o->items[o->n] = child; o->keys[o->n] = k; o->klens[o->n] = kn;
+    o->n++;
+    return 0;
+}
+int js_obj_set(js_val *o, const char *key, js_val *child) {
+    long kn = 0;
+    if (!key) return -EINVAL;
+    while (key[kn]) kn++;
+    return js_obj_setn(o, key, kn, child);
+}
+int js_arr_push(js_val *a, js_val *child) {
+    int r;
+    if (!a || a->kind != JS_ARR || !child || child == a) return -EINVAL;
+    r = js_room(a);
+    if (r) return r;
+    a->items[a->n++] = child;
+    return 0;
+}
