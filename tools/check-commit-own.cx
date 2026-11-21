@@ -248,6 +248,29 @@ static void case_s2(int part) {
         sh(script, out, sizeof out);
         {   const char *want = "RC=0\n2\n1\n0\n1\n1\n0\n1\nSUBDIR=1\nEND";
             ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "s2-registered-drops-redundant-whole"); }
+        if (part == 3 || part == 5) {
+            if (cx_fmt(script, sizeof script,
+                "cd %s/clone && " CO_MK CO_QUERY
+                "git checkout -q -- tests/batches.tsv build/table-index.tsv && "
+                "printf 'build/zzs2r-read.tsv\\tread table\\t\\t0\\n' >> build/table-index.tsv && "
+                "git add build/table-index.tsv && git commit -q --no-verify -m ti0 -- build/table-index.tsv && "
+                "mk zzs2rk; "
+                "grep -v '^build/zzs2r-read.tsv\t' build/table-index.tsv > build/table-index.tsv.tmp && "
+                "printf 'build/zzs2r-read.tsv\\tread table\\t\\t1\\nbuild/zzs2r-keyed.tsv\\tkeyed table\\t\\t0\\nbuild/zzs2foreign2.tsv\\tother\\t\\t0\\n' >> build/table-index.tsv.tmp && "
+                "mv build/table-index.tsv.tmp build/table-index.tsv && "
+                "printf '/* reader of build/zzs2r-read.tsv */\\nint main(void){return 0;}\\n' > tools/zzs2r-reader.cx && "
+                CO_RUN "-m regbad --registered zzs2rk --keyed build/table-index.tsv ZZNOKEY > rbad.out 2>&1; echo BADRC=$?; grep -c 'COMMIT_OWN_MISSING_KEY.path=build/table-index.tsv.key=ZZNOKEY' rbad.out; "
+                CO_RUN "-m regk --registered zzs2rk --whole tools/zzs2r-reader.cx --keyed build/table-index.tsv build/zzs2r-keyed.tsv > rk.out 2>&1; echo RC=$?; "
+                "git show HEAD:build/table-index.tsv | grep -c '^build/zzs2r-read.tsv\tread table\t\t1$'; "
+                "git show HEAD:build/table-index.tsv | grep -c '^build/zzs2r-keyed.tsv\t'; "
+                "git show HEAD:build/table-index.tsv | grep -c '^build/zzs2foreign2.tsv\t'; "
+                "grep -c '^build/zzs2foreign2.tsv\t' build/table-index.tsv; echo END",
+                base, 0, 0, 0, 0)) die("script");
+            sh(script, out, sizeof out);
+            {   const char *want = "BADRC=2\n1\nRC=0\n1\n1\n0\n1\nEND";
+                if (tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) < 0) sy_printf("GOT_RK\t%s\n", out);
+                ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "s2-registered-selects-reader-table-index-and-keyed-union"); }
+        }
     }
     }
     if (part == 3 || part == 4 || part == 6) {
