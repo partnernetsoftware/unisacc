@@ -206,6 +206,16 @@ static int flat_check(char *at) {
     return failed;
 }
 
+static const int scene_order[]={0,1,2,3,10,11,12,13,14,15,16,17,18};
+
+static int scene_contract(void) {
+    const int count=sizeof scene_order/sizeof scene_order[0];
+    printf("GPU_LINK_CONTRACT %d 198",count);
+    for(int i=0;i<count;i++) printf(" %d",scene_order[i]);
+    printf("\n");
+    return 0;
+}
+
 static int browser(const char *dir,int mutate) {
     char url[380],profile[360];
     tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,mutate?"?mutate":"");
@@ -217,12 +227,17 @@ static int browser(const char *dir,int mutate) {
     size_t bytes=0;
     int failed=timed("chrome",args,20,&out,&bytes);
     const char marker[]="<pre id=\"gpu\">[";
-    const char visits[]="<pre id=\"gpu-scenes\">[0,1,2,3,10,11,12,13,14,15,16,17,18]</pre>";
-    const char changed[]="<pre id=\"gpu-scenes\">[9,1,2,3,10,11,12,13,14,15,16,17,18]</pre>";
+    char visits[180];
+    int used=tx_snprintf(visits,sizeof visits,"<pre id=\"gpu-scenes\">[");
+    for(int i=0;i<(int)(sizeof scene_order/sizeof scene_order[0]);i++) {
+        int mode=mutate && i==0?9:scene_order[i];
+        used+=tx_snprintf(visits+used,sizeof visits-used,"%s%d",i?",":"",mode);
+    }
+    tx_snprintf(visits+used,sizeof visits-used,"]</pre>");
     const long at=out?section(out,bytes,marker,0):-1;
     if(!failed && at>=0) {
         failed=flat_check(out+at+sizeof marker-1);
-        if(section(out,bytes,mutate?changed:visits,0)<0) { printf("GPU_LINK visits mismatch\n"); failed++; }
+        if(section(out,bytes,visits,0)<0) { printf("GPU_LINK visits mismatch\n"); failed++; }
     } else {
         long detail=out?section(out,bytes,"<pre id=\"gpu\">",0):-1;
         printf("GPU_LINK browser detail=%.210s\n",detail>=0?out+detail:"");
@@ -233,6 +248,7 @@ static int browser(const char *dir,int mutate) {
 }
 
 int main(int argc,char **argv) {
+    if(argc==2 && tx_eqz(argv[1],"--scene-contract")) return scene_contract();
     const int prepare=(argc==2 || (argc==3 && tx_eqz(argv[2],"--check"))) && tx_eqz(argv[1],"--prepare");
     const int check=prepare && argc==3;
     const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");

@@ -1,0 +1,73 @@
+#pragma unisa use mem.heap
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+enum { MODE_CAP=158 };
+
+static int read_contract(const char *gate,int counts[MODE_CAP],int *nominal,int *values) {
+    char *out=0;
+    size_t size=0;
+    char *args[]={"cx",(char *)gate,"--","--scene-contract",0};
+    int rc=cx_runv_timeout(args,10,&out,&size);
+    const char label[]="GPU_LINK_CONTRACT ";
+    if(rc || !out || size<sizeof label || !tx_same(out,sizeof label-1,label,sizeof label-1)) {
+        printf("GPU_LINK_UNION contract failed gate=%s rc=%d\n",gate,rc);
+        mm_free(out);
+        return 1;
+    }
+    char *p=out+sizeof label-1,*end=0;
+    const long quantity=tx_strtol(p,&end,10);
+    if(end==p || quantity<1 || quantity>MODE_CAP || *end!=' ') {
+        mm_free(out);
+        return 1;
+    }
+    p=end+1;
+    const long size_check=tx_strtol(p,&end,10);
+    if(end==p || size_check<1 || size_check>1682 || *end!=' ') {
+        mm_free(out);
+        return 1;
+    }
+    p=end+1;
+    for(int i=0;i<quantity;i++) {
+        const long mode=tx_strtol(p,&end,10);
+        if(end==p || mode<0 || mode>=MODE_CAP || *end!=(i+1==quantity?'\n':' ')) {
+            mm_free(out);
+            return 1;
+        }
+        counts[mode]++;
+        p=end+1;
+    }
+    *nominal=(int)quantity;
+    *values=(int)size_check;
+    const int trailing=p!=out+size;
+    mm_free(out);
+    return trailing;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    int reference[MODE_CAP]={0}, visits[MODE_CAP]={0};
+    int nominal=0,expected=0,total=0;
+    int failed=read_contract("ujs/tests/gpu-packet-struct.cx",reference,&nominal,&expected) || nominal!=43 || expected!=1682;
+    const char *paths[]={
+        "ujs/tests/gpu-linked-flat-pixel.cx","ujs/tests/gpu-linked-material-pixel.cx",
+        "ujs/tests/gpu-linked-light-pixel.cx","ujs/tests/gpu-linked-tail-pixel.cx",0
+    };
+    for(int i=0;paths[i] && !failed;i++) {
+        int count=0,values=0;
+        failed=read_contract(paths[i],visits,&count,&values);
+        total+=values;
+    }
+    if(mutate) for(int i=0;i<MODE_CAP;i++) if(reference[i]==1) { visits[i]--; break; }
+    for(int mode=0;mode<MODE_CAP;mode++) {
+        // Extra negotiated IDs implement protocol rejection and resource checks.
+        if(reference[mode] && (reference[mode]!=1 || visits[mode]!=1)) {
+            printf("GPU_LINK_UNION scene=%d actual=%d expected=1 failed=1\n",mode,visits[mode]);
+            failed=1;
+        }
+    }
+    if(total!=expected) failed=1;
+    printf("GPU_LINK_UNION scenes=%d values=%d failed=%d\n",nominal,total,failed);
+    return failed;
+}
