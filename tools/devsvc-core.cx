@@ -2523,7 +2523,7 @@ static int mg_try(const char *rd, const char *ours, const char *theirs, char *tr
     static char ub[1 << 16]; char base[128], buf[512]; int n, i, k = 0, r;
     {   char *v[] = {"git", "-C", (char *)rd, "merge-base", (char *)ours, (char *)theirs, 0};
         if (runcap(v, base, sizeof base) != 0) F(base, sizeof base, "4b825dc642cb6eb9a060e54bf8d69288fbee4904"); else chomp(base); }
-    {   char *v[] = {"rm", "-f", mg_idx, 0}; (void)runcap(v, buf, sizeof buf); }
+    (void)sy_unlink(mg_idx);
     /* 私有索引从空开始:先 read-tree OURS 再 -m 会拿工作区 stat 校验(Entry not uptodate),空索引的三树合并不看工作区 */
     {   char *a[] = {"read-tree", "-m", "--aggressive", base, (char *)ours, (char *)theirs, 0};
         if (mg_git(rd, a, buf, sizeof buf) != 0) { F(why, wcap, "read-tree-3way"); return -1; } }
@@ -2571,12 +2571,11 @@ static int mg_sync(const char *rd, const char *old, const char *new_, const char
     return ok ? 0 : -1;
 }
 static int mg_setup(void) {
-    char buf[64];
     F(mg_tmp, sizeof mg_tmp, "/tmp/devsvc-merge-%d-%ld", (int)sy_pid(), sy_now_ms()); F(mg_idx, sizeof mg_idx, "%s/index", mg_tmp);
     if (ovf) return -1;
-    {   char *v[] = {"mkdir", "-p", mg_tmp, 0}; return runcap(v, buf, sizeof buf) == 0 ? 0 : -1; }
+    return sy_mkdir_all(mg_tmp, 0755) == 0 ? 0 : -1;
 }
-static void mg_teardown(void) { char buf[64]; char *v[] = {"rm", "-rf", mg_tmp, 0}; if (mg_tmp[0]) (void)runcap(v, buf, sizeof buf); }
+static void mg_teardown(void) { if (mg_tmp[0]) (void)sy_remove_all(mg_tmp); }
 /* 落地窗口锁 git-land:只覆盖 update-ref 加 gs_sync,合并计算不持锁。租期 60 秒,等待至多 MG_LOCK_WAIT_MS(3 秒),
    他人持有则按名拒绝(MERGE_LOCK_HELD 行加重试提示),rc 1;无实例时照跑不取锁(同 f/x/flow)。 */
 #define MG_LOCK "git-land"
@@ -3822,8 +3821,7 @@ static int jobs_gc(void) {
         F(d, sizeof d, "%s/%s", jd, s); F(rp, sizeof rp, "%s/rc", d);
         if (sy_stat(rp, &st)) continue;
         if (n > JOBS_KEEP || now - st.mtime > JOBS_AGE_S) {
-            char *rm[] = {"rm", "-rf", "--", d, 0}; char ro[8];
-            if (runcap(rm, ro, sizeof ro) == 0) del++;
+            if (sy_remove_all(d) == 0) del++;
         }
     }
     if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, n); ev_add("jobs.gc", m); }
@@ -3846,8 +3844,7 @@ static int flowdir_gc(void) {
         seen++;
         if (sy_lstat(s, &st) || st.kind != 'd' || st.uid != (long)sy_uid() || now - st.mtime < age) continue;
         if (runcap(pg, po, sizeof po) == 0) continue;   /* 有进程引用 */
-        {   char *rm[] = {"rm", "-rf", "--", s, 0}; char ro[8];
-            if (runcap(rm, ro, sizeof ro) == 0) del++; }
+        if (sy_remove_all(s) == 0) del++;
     }
     if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, seen); ev_add("flowdir.gc", m); }
     return del;

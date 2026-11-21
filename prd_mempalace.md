@@ -279,3 +279,5 @@ flowchart LR
 
 - 正则引擎第一期独立差分证据(2026-11-21,ccogw 独立对拍):`ext/textx/regex.cx`(已落库 `16749021a2`,批次 `textx-regex/-jsdiff/-mutc/-mut1..3`)在 bun 生成的 42 行夹具(24 match 加 18 replace)上实测 `40/40` 同、`0` 异、2 条为文档写明的拒绝(`u` 模式、非 `i` 标志);同夹具上 POSIX 正则 20 条差 9 条(最左最长、懒惰变贪婪、`[^]` 语义、按字节不按码元);后续 ccogw 将 `fleetparse` 迁至 `textx.regex`,详见 `build/owner-reqs.tsv` `R68`。
 - 性能候选池(`cx` 热启动随模块体量增长,2026-11-21 ccogw 阶梯实验,排 `0.0.90` 前评估):空程序 7.7 ms -> +JSON 14.8 ms -> +`lib.llmresolver` 17.5 ms -> +`lib.launchplan`(1156 行,仅多 `sys.proc` 一模块)26.5 ms(同命令 `bun` 18.0 ms),热启动随被 `use` 模块体量增约 8 ms/千行,与「带 `--` 热启动约 7 ms」预期不符;待 ccogw 给两个 `.cx` 最小复现后查 `rcident` 键、缓存命中后载入/重定位及是否每次重解析模块接口(详见 `plans/v0.0.94.md` 速度候选池)。
+- 候选清理(2026-11-21 父目录反推只读扫描,核心仓 0 差层缺陷,仅记录不自动删):`tools/cx-pipeline-stage.c:5`、`tools/cx0-e2.c:9,44` 指向已迁走的 `../exec/c/{run,core}.c`(死 C 源码,疑似可退役,须先查调用与批次再决定)。
+- 待认领(`apps/csih` 车道,2026-11-21 未查到在线维护者窗口,核心仓不动其文件):只读扫描实测 `apps/csih/probes/deepseek_proxy.cx:119`(`ups=2` 拼出 `apps/unisacc.com`,应为仓根 `unisacc.com`,差一层)、`apps/csih/probes/libc_cover.cx:38`(同)、`apps/csih/probes/deepseek_proxy.cx:27,114`(拼出 `apps/out` 差一层),均 `exists=0`;请 `csih` 维护者上线认领并按自己车道核实修改。
