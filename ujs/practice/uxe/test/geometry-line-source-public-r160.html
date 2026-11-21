@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BoxGeometry, EdgesGeometry, ObjectLoader, PlaneGeometry, REVISION, WireframeGeometry }
+  from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const maxError = (a, b) => a.length === b.length
+  ? a.reduce((error, value, i) => Math.max(error, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+
+function check(module, kind, mutate) {
+  const type = kind === 1 ? EdgesGeometry : WireframeGeometry;
+  const create = plane => kind === 1 ? new EdgesGeometry(plane, 1) : new WireframeGeometry(plane);
+  const plane = new PlaneGeometry(2, 2, 1.5, 1);
+  plane.uuid = "plane-1";
+  plane.name = "Original source";
+  const original = create(plane);
+  original.name = 'line "A"';
+  original.uuid = "line-1";
+  const planeJSON = plane.toJSON();
+  const reference = JSON.parse(JSON.stringify(original.toJSON()));
+  const inspect = (mode, input) => {
+    const api = new WebAssembly.Instance(module).exports;
+    const base = Number(api.uxe_line_geometry(0n, 0n, 0n));
+    const memory = new Uint8Array(api.memory.buffer, base, 60000);
+    const view = new DataView(api.memory.buffer, base, 60000);
+    memory.set(encoder.encode("line-1"), 992);
+    memory.set(encoder.encode('line "A"'), 1000);
+    const json = encoder.encode(JSON.stringify(input));
+    memory.set(json, 40000);
+    const status = Number(api.uxe_line_geometry(BigInt(mode), BigInt(kind), BigInt(json.length)));
+    if (mode >= 3) return status;
+    if (status <= 0) throw new Error("native JSON status " + status + " kind " + kind + " mode " + mode);
+    const count = view.getUint32(1040, true);
+    const index = view.getUint32(1044, true);
+    const points = Array.from({length: count * 3}, (_, i) =>
+      view.getFloat32(3100 + 32 * Math.floor(i / 3) + 4 * (i % 3), true));
+    return { json: JSON.parse(decoder.decode(memory.subarray(12000, 12000 + status))), points, count, index };
+  };
+
+  const generated = inspect(1, mutate ? {...planeJSON, width: 4} : planeJSON);
+  const restored = inspect(2, reference);
+  const loader = new ObjectLoader();
+  const nested = loader.parseGeometries([generated.json.geometry])["plane-1"];
+  const loaded = create(nested);
+  const ref = original.attributes.position.array;
+  const names = value => Number(value.type === reference.type && value.name === reference.name &&
+    value.uuid === reference.uuid && value.metadata.type === reference.metadata.type);
+  const source = value => Number(JSON.stringify(value.geometry) === JSON.stringify(reference.geometry));
+  const unsupported = inspect(3, {...reference, geometry: new BoxGeometry().toJSON()});
+  const invalid = inspect(4, {...reference, geometry: {...planeJSON, widthSegments: 0}});
+  const aliased = inspect(5, reference);
+  const alternate = inspect(2, kind === 1 ? {...reference, thresholdAngle: 0} : reference);
+  const alternateRef = kind === 1 ? new EdgesGeometry(plane, 0) : new WireframeGeometry(plane);
+  return [
+    names(generated.json), names(restored.json), source(generated.json), source(restored.json),
+    Number(typeof type.fromJSON === "undefined"),
+    Number(kind === 1 ? generated.json.thresholdAngle === reference.thresholdAngle : !("thresholdAngle" in generated.json)),
+    nested.parameters.width, nested.parameters.widthSegments, generated.count, restored.count, loaded.attributes.position.count,
+    generated.index, restored.index, generated.points[0], generated.points[1],
+    maxError(generated.points, ref), maxError(restored.points, ref), maxError(loaded.attributes.position.array, ref),
+    unsupported, invalid, aliased,
+    alternate.count, alternateRef.attributes.position.count,
+    Number(kind === 1 ? alternate.json.thresholdAngle === 0 : !("thresholdAngle" in alternate.json)),
+    maxError(alternate.points, alternateRef.attributes.position.array),
+  ];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const mutate = Boolean(Number(query.get("mutate")));
+  result.textContent = JSON.stringify([1,2].flatMap(kind => check(module, kind, mutate)));
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

@@ -1,0 +1,211 @@
+// Both line generators accept the same triangulated PlaneGeometry descriptor.
+struct LineGeometrySource {
+  kind: u32;
+  json: u32;
+  end: u32;
+  threshold: f64;
+}
+
+struct LineGeometryWorkspace {
+  source: u32;
+  output: u32;
+  scratch: u32;
+  edges: u32;
+  edgesBytes: u32;
+}
+
+struct LineGeometryIdentity {
+  uuid: u32;
+  uuidBytes: u32;
+  name: u32;
+  nameBytes: u32;
+}
+
+native function line_geometry_keys(at:i64) i64 {
+  let labels=[69,100,103,101,115,71,101,111,109,101,116,114,121,87,105,114,101,102,114,97,109,101,71,101,111,109,101,116,114,121,80,108,97,110,101,71,101,111,109,101,116,114,121,116,121,112,101,103,101,111,109,101,116,114,121,116,104,114,101,115,104,111,108,100,65,110,103,108,101];
+  let i=0;
+  while(i<69) {
+    let byte=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function line_geometry_string(at:i64,end:i64,label:i64,size:i64) i64 {
+  if(at<0 || json_scan_string(at,end)!=at+size+2) { return 0; }
+  let i=0;
+  while(i<size) {
+    if(ux_u8(at+1+i)!=ux_u8(label+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function line_geometry_disjoint(a:i64,ab:i64,b:i64,bb:i64) i64 {
+  return ab==0 || bb==0 || a+ab<=b || b+bb<=a;
+}
+
+native function line_geometry_span(at:i64,bytes:i64,align:i64) i64 {
+  return at>=0 && at%align==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function line_geometry_mesh(mesh:i64) i64 {
+  if(!line_geometry_span(mesh,GeometryBuffers.size,4)) { return 0; }
+  let v=ux_u32(mesh+GeometryBuffers.vertices);
+  let vb=32*ux_u32(mesh+GeometryBuffers.vertexCapacity);
+  let i=ux_u32(mesh+GeometryBuffers.indices);
+  let ib=4*ux_u32(mesh+GeometryBuffers.indexCapacity);
+  return line_geometry_span(v,vb,4) && line_geometry_span(i,ib,4) &&
+    line_geometry_disjoint(v,vb,i,ib) &&
+    line_geometry_disjoint(mesh,GeometryBuffers.size,v,vb) &&
+    line_geometry_disjoint(mesh,GeometryBuffers.size,i,ib);
+}
+
+native function line_geometry_outside(mesh:i64,at:i64,bytes:i64) i64 {
+  return line_geometry_disjoint(at,bytes,mesh,GeometryBuffers.size) &&
+    line_geometry_disjoint(at,bytes,ux_u32(mesh+GeometryBuffers.vertices),32*ux_u32(mesh+GeometryBuffers.vertexCapacity)) &&
+    line_geometry_disjoint(at,bytes,ux_u32(mesh+GeometryBuffers.indices),4*ux_u32(mesh+GeometryBuffers.indexCapacity));
+}
+
+native function line_geometry_inputs(at:i64,input:i64,end:i64,options:i64) i64 {
+  if(!line_geometry_span(at,LineGeometrySource.size,8) ||
+     !line_geometry_span(input,end-input,1) || end<=input ||
+     !line_geometry_span(options,LineGeometryWorkspace.size,4) ||
+     !line_geometry_disjoint(input,end-input,at,LineGeometrySource.size) ||
+     !line_geometry_disjoint(options,LineGeometryWorkspace.size,at,LineGeometrySource.size)) { return 0; }
+  let source=ux_u32(options+LineGeometryWorkspace.source);
+  let output=ux_u32(options+LineGeometryWorkspace.output);
+  let scratch=ux_u32(options+LineGeometryWorkspace.scratch);
+  let edges=ux_u32(options+LineGeometryWorkspace.edges);
+  let edgeBytes=ux_u32(options+LineGeometryWorkspace.edgesBytes);
+  if(!line_geometry_mesh(source) || !line_geometry_mesh(output) ||
+     !line_geometry_span(scratch,70,1) || !line_geometry_span(edges,edgeBytes,8) ||
+     !line_geometry_outside(source,output,GeometryBuffers.size) ||
+     !line_geometry_outside(source,ux_u32(output+GeometryBuffers.vertices),32*ux_u32(output+GeometryBuffers.vertexCapacity)) ||
+     !line_geometry_outside(source,ux_u32(output+GeometryBuffers.indices),4*ux_u32(output+GeometryBuffers.indexCapacity))) { return 0; }
+  let regions=[at,LineGeometrySource.size,input,end-input,options,LineGeometryWorkspace.size,scratch,70,edges,edgeBytes];
+  let i=0;
+  while(i<10) {
+    let addr=regions[i];
+    let size=regions[i+1];
+    if(!line_geometry_outside(source,addr,size) || !line_geometry_outside(output,addr,size)) { return 0; }
+    let j=i+2;
+    while(j<10) {
+      if(!line_geometry_disjoint(addr,size,regions[j],regions[j+1])) { return 0; }
+      j=j+2;
+    }
+    i=i+2;
+  }
+  return 1;
+}
+
+native function line_geometry_finite(source:i64,kind:i64) i64 {
+  let v=ux_u32(source+GeometryBuffers.vertices);
+  let count=ux_u32(source+GeometryBuffers.vertexCount);
+  let max=900719925474.0;
+  let i=0;
+  while(i<count) {
+    let x=ux_f32(v+32*i);
+    let y=ux_f32(v+32*i+4);
+    if(x-x!=0.0 || y-y!=0.0 || (kind==1 && (x<0.0-max || x>max || y<0.0-max || y>max))) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// kind 1 is EdgesGeometry, kind 2 is WireframeGeometry.
+// The caller keeps the PlaneGeometry descriptor's JSON bytes immutable.
+native function LineGeometry_create(at:i64,input:i64,end:i64,options:i64,kind:i64,threshold:f64) i64 {
+  if((kind!=1 && kind!=2) || !(threshold>=0.0 && threshold<=180.0) ||
+     !line_geometry_inputs(at,input,end,options)) { return 0-1; }
+  let scratch=ux_u32(options+LineGeometryWorkspace.scratch);
+  let keys=line_geometry_keys(scratch);
+  let sourceType=json_find_key(input,end,keys+43,4);
+  if(!line_geometry_string(sourceType,end,keys+30,13)) { return 0-1; }
+  let source=ux_u32(options+LineGeometryWorkspace.source);
+  let output=ux_u32(options+LineGeometryWorkspace.output);
+  let parsed=PlaneGeometry_fromJSON(source,input,end,scratch);
+  if(parsed<0) { return parsed; }
+  if(!line_geometry_finite(source,kind)) { return 0-1; }
+  let result=0-1;
+  if(kind==1) {
+    result=EdgesGeometry_generate(output,source,ux_u32(options+LineGeometryWorkspace.edges),
+      ux_u32(options+LineGeometryWorkspace.edgesBytes),threshold);
+  } else {
+    result=WireframeGeometry_generate(output,source,0,ux_u32(source+GeometryBuffers.indexCount));
+  }
+  if(result<0) { return result; }
+  let k=ux_u32_put(at+LineGeometrySource.kind,kind);
+  let json=ux_u32_put(at+LineGeometrySource.json,input);
+  let last=ux_u32_put(at+LineGeometrySource.end,end);
+  let angle=ux_f64_put(at+LineGeometrySource.threshold,threshold);
+  return at;
+}
+
+native function LineGeometry_fromJSON(at:i64,input:i64,end:i64,options:i64) i64 {
+  if(!line_geometry_inputs(at,input,end,options)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-1; }
+  let keys=line_geometry_keys(ux_u32(options+LineGeometryWorkspace.scratch));
+  let type=json_find_key(input,end,keys+43,4);
+  let kind=0;
+  if(line_geometry_string(type,end,keys,13)) { kind=1; }
+  else if(line_geometry_string(type,end,keys+13,17)) { kind=2; }
+  else { return 0-1; }
+  let geometry=json_find_key(input,end,keys+47,8);
+  let geometryEnd=json_value_end(geometry,end);
+  if(geometry<0 || geometryEnd<0 || ux_u8(geometry)!=123) { return 0-1; }
+  let threshold=1.0;
+  if(kind==1) {
+    let value=json_find_key(input,end,keys+55,14);
+    if(value!=0-2) { threshold=json_read_number(value,end); }
+  }
+  return LineGeometry_create(at,geometry,geometryEnd,options,kind,threshold);
+}
+
+native function LineGeometry_toJSON(at:i64,dst:i64,end:i64,identity:i64,scratch:i64) i64 {
+  if(!line_geometry_span(at,LineGeometrySource.size,8) ||
+     !line_geometry_span(dst,end-dst,1) || end<=dst ||
+     !line_geometry_span(identity,LineGeometryIdentity.size,4) ||
+     !line_geometry_span(scratch,1174,8) ||
+     !line_geometry_disjoint(at,LineGeometrySource.size,dst,end-dst) ||
+     !line_geometry_disjoint(at,LineGeometrySource.size,scratch,1174) ||
+     !line_geometry_disjoint(dst,end-dst,scratch,1174) ||
+     !line_geometry_disjoint(identity,LineGeometryIdentity.size,dst,end-dst) ||
+     !line_geometry_disjoint(identity,LineGeometryIdentity.size,scratch,1174)) { return 0-1; }
+  let src=ux_u32(at+LineGeometrySource.json);
+  let last=ux_u32(at+LineGeometrySource.end);
+  let kind=ux_u32(at+LineGeometrySource.kind);
+  let uuid=ux_u32(identity+LineGeometryIdentity.uuid);
+  let uuidBytes=ux_u32(identity+LineGeometryIdentity.uuidBytes);
+  let name=ux_u32(identity+LineGeometryIdentity.name);
+  let nameBytes=ux_u32(identity+LineGeometryIdentity.nameBytes);
+  if((kind!=1 && kind!=2) || !line_geometry_span(src,last-src,1) || last<=src ||
+     !line_geometry_span(uuid,uuidBytes,1) || uuidBytes==0 ||
+     !line_geometry_span(name,nameBytes,1) ||
+     !line_geometry_disjoint(src,last-src,dst,end-dst) ||
+     !line_geometry_disjoint(src,last-src,scratch,1174) ||
+     !line_geometry_disjoint(uuid,uuidBytes,scratch,1174) ||
+     !line_geometry_disjoint(name,nameBytes,scratch,1174) ||
+     !line_geometry_disjoint(uuid,uuidBytes,dst,end-dst) ||
+     !line_geometry_disjoint(name,nameBytes,dst,end-dst)) { return 0-1; }
+  let keys=line_geometry_keys(scratch+1104);
+  let label=keys;
+  let size=13;
+  if(kind==2) { label=keys+13; size=17; }
+  let p=geometry_parameter_header(dst,end,uuid,uuidBytes,label,size,name,nameBytes);
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,keys+47,8);
+  p=json_byte(p,end,58);
+  if(p<0 || last-src>end-p) { return 0-1; }
+  let i=src;
+  while(i<last) {
+    let byte=ux_u8_put(p+i-src,ux_u8(i));
+    i=i+1;
+  }
+  p=p+last-src;
+  if(kind==1) {
+    p=geometry_parameter_number(p,end,keys+55,14,ux_f64(at+LineGeometrySource.threshold),scratch);
+  }
+  return json_byte(p,end,125);
+}
