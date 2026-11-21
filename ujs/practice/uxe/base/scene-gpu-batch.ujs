@@ -51,10 +51,16 @@ native function SceneGpu_drawBatch(packet:i64,capacity:i64,batch:i64) i64 {
      !scene_render_readable(vertices,max*28,batch,SceneGpuBatch.size,draws,count*SceneDrawItem.size) ||
      scene_render_overlap(vertices,max*28,binds,count*SceneGpuBinding.size)) { return 0-1; }
   let i=0;
+  let transparent=0;
   while(i<count) {
-    if(!scene_gpu_stage_safe(draws+i*SceneDrawItem.size,binds+i*SceneGpuBinding.size,vertices,max*28,max)) { return 0-1; }
+    let item=draws+i*SceneDrawItem.size;
+    let pass=ux_u32(item+SceneDrawItem.pass);
+    if(pass>1 || pass<transparent || !scene_gpu_stage_safe(item,binds+i*SceneGpuBinding.size,vertices,max*28,max)) { return 0-1; }
+    transparent=pass;
     i=i+1;
   }
+  if(transparent && count>254-old_count) { return 0-1; }
+  transparent=0;
   i=0;
   while(i<count) {
     let item=draws+i*SceneDrawItem.size;
@@ -65,8 +71,14 @@ native function SceneGpu_drawBatch(packet:i64,capacity:i64,batch:i64) i64 {
     let shader=ux_u32(binding+SceneGpuBinding.shader);
     let result=0-2;
     if(geometry!=0 && material!=0 && geometry==ux_u32(item+SceneDrawItem.geometry) &&
-       material==ux_u32(item+SceneDrawItem.material) && ux_u32(item+SceneDrawItem.pass)==0) {
-      result=SceneDraw_gpuFlat(packet,capacity,item,stream,vertices,max,shader);
+       material==ux_u32(item+SceneDrawItem.material)) {
+      let pass=ux_u32(item+SceneDrawItem.pass);
+      result=0;
+      if(pass && !transparent) {
+        result=GpuPacket_state(packet,capacity,1,0,1);
+        transparent=1;
+      }
+      if(result>=0) { result=SceneDraw_gpuFlat(packet,capacity,item,stream,vertices,max,shader); }
     }
     if(result<0) {
       let bytes=ux_u32_put(packet+GpuPacket.bytes,old_bytes);
@@ -74,6 +86,11 @@ native function SceneGpu_drawBatch(packet:i64,capacity:i64,batch:i64) i64 {
       return result;
     }
     i=i+1;
+  }
+  if(transparent && GpuPacket_state(packet,capacity,1,1,0)<0) {
+    let bytes=ux_u32_put(packet+GpuPacket.bytes,old_bytes);
+    let commands=ux_u32_put(packet+GpuPacket.commands,old_count);
+    return 0-1;
   }
   return count;
 }
