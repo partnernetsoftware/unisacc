@@ -273,7 +273,7 @@
 - ~~TransformControls 世界轴平移与旋转 | G-ray 分量、吸附与四元数 | r160 插件。~~ 各十项及两个篡改通过。
 - ~~TransformControls 局部轴及父姿态 | G-ray 父旋转、单位主轴、局部吸附与四元数 | 世界轴切片。~~ 局部平移和旋转各十项通过，错走世界轴和取消吸附分别转红。
 - TransformControls 完整接线 | G-ray 选轴、缩放、非均匀父缩放和结束事件 | 局部轴切片、Mesh 拾取与输入 ABI。
-- MOUSE 与 TOUCH 常量 | G-ray 实际输入路由 | r160 枚举和路由表 13 项通过，MapControls 双指错绑转红。
+- ~~MOUSE 与 TOUCH 常量 | G-struct r160 全部十个枚举值及两项篡改，G-ray 实际输入路由 | 本地 r160 导出和生成器。~~ CDP 拖动、滚轮、双指通过，两组交换转红。
 
 ## M11 后处理、辅助与音频
 
