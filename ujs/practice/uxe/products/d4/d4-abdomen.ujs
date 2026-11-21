@@ -1,0 +1,82 @@
+// Record layout: column-major f32 matrix, f32 width/height/depth, mesh kind,
+// RGBA8 in byte order, and a zero reserved word. Kinds: box, barrel, round.
+// Box dimensions are local; barrel width is diameter and height is length.
+struct D4AbdomenPart {
+  m00: f32; m10: f32; m20: f32; m30: f32;
+  m01: f32; m11: f32; m21: f32; m31: f32;
+  m02: f32; m12: f32; m22: f32; m32: f32;
+  m03: f32; m13: f32; m23: f32; m33: f32;
+  width: f32; height: f32; depth: f32;
+  kind: u32; color: u32; reserved: u32;
+}
+
+native function d4_abdomen_matrix(out:i64,x:f64,y:f64,z:f64,scale:f64,pitchQuarterTurn:i64) i64 {
+  let i=0;
+  while(i<16) {
+    let value=0.0;
+    if(i==0) { value=scale; }
+    if(!pitchQuarterTurn && (i==5 || i==10)) { value=scale; }
+    if(pitchQuarterTurn && i==6) { value=scale; }
+    if(pitchQuarterTurn && i==9) { value=0.0-scale; }
+    if(i==12) { value=x; }
+    if(i==13) { value=y; }
+    if(i==14) { value=z; }
+    if(i==15) { value=1.0; }
+    let saved=ux_f32_put(out+i*4,value);
+    i=i+1;
+  }
+  return out;
+}
+
+native function d4_abdomen_mesh(at:i64,kind:i64,width:f64,height:f64,depth:f64,color:i64) i64 {
+  let w=ux_f32_put(at+D4AbdomenPart.width,width);
+  let h=ux_f32_put(at+D4AbdomenPart.height,height);
+  let d=ux_f32_put(at+D4AbdomenPart.depth,depth);
+  let k=ux_u32_put(at+D4AbdomenPart.kind,kind);
+  let c=ux_u32_put(at+D4AbdomenPart.color,color);
+  let r=ux_u32_put(at+D4AbdomenPart.reserved,0);
+  return at;
+}
+
+native function d4_abdomen_box(at:i64,body:i64,y:f64,z:f64,w:f64,h:f64,d:f64,color:i64) i64 {
+  let matrix=d4_abdomen_matrix(at,ux_f64(body),ux_f64(body+8)+y,ux_f64(body+16)+z,1.0,0);
+  return d4_abdomen_mesh(at,0,w,h,d,color);
+}
+
+// Body points at the first three f64 fields of D4Frame. This assembly is
+// added after town scaling in the original scene, so it follows translation.
+native function D4Abdomen_emit(output:i64,capacity:i64,body:i64) i64 {
+  let bytes=capacity*D4AbdomenPart.size;
+  if(capacity<9 || capacity>65536 || output<0 || output%4!=0 || output>6291456-bytes ||
+     body<0 || body%8!=0 || body>6291456-24 || (output<body+24 && body<output+bytes)) { return 0-1; }
+  let bx=ux_f64(body);
+  let by=ux_f64(body+8);
+  let bz=ux_f64(body+16);
+  if(bx-bx!=0.0 || by-by!=0.0 || bz-bz!=0.0 ||
+     bx<0.0-9007199254740991.0 || bx>9007199254740991.0 ||
+     by<0.0-9007199254740991.0 || by>9007199254740991.0 ||
+     bz<0.0-9007199254740991.0 || bz>9007199254740991.0) { return 0-1; }
+  let opaque=255*16777216;
+  let chassis=opaque+92*65536+74*256+61;
+  let steel=opaque+128*65536+124*256+107;
+  let pipe=opaque+61*65536+110*256+147;
+  let copper=opaque+70*65536+119*256+161;
+  let a=d4_abdomen_box(output,body,4.45,0.40,7.4,1.3,4.4,chassis);
+  let b=d4_abdomen_box(output+D4AbdomenPart.size,body,4.52,2.67,7.8,0.73,0.21,steel);
+  let c=d4_abdomen_box(output+2*D4AbdomenPart.size,body,4.19,2.84,7.5,0.12,0.19,pipe);
+  let i=0;
+  while(i<3) {
+    let bearing=output+(3+2*i)*D4AbdomenPart.size;
+    let hub=bearing+D4AbdomenPart.size;
+    let x=bx+(i-1)*2.5;
+    let y=by+4.57;
+    let barrelPose=d4_abdomen_matrix(bearing,x,y,bz+2.80,1.0,1);
+    let barrel=d4_abdomen_mesh(bearing,1,1.01,0.24,0.0,copper);
+    let axlePose=d4_abdomen_matrix(hub,x,y,bz+3.01,0.21,0);
+    let axle=d4_abdomen_mesh(hub,2,0.0,0.0,0.0,steel);
+    i=i+1;
+  }
+  return 9;
+}
+
+return D4Abdomen_emit(output,capacity,body);

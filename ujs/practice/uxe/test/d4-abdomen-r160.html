@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 腹部装配验收夹具</title>
+<pre id="result">pending</pre>
+<script type="module">
+import { gaitPose } from "./d4-gait.js";
+import { Matrix4, REVISION } from "../../web/game/three.module.js";
+
+const result=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+
+// Independent records from the old D4 belly construction.
+const parts=[
+  [0,[0,4.45,.40],[7.4,1.3,4.4],1,0,[61,74,92]],
+  [0,[0,4.52,2.67],[7.8,.73,.21],1,0,[107,124,128]],
+  [0,[0,4.19,2.84],[7.5,.12,.19],1,0,[147,110,61]],
+  ...[-2.5,0,2.5].flatMap(x=>[
+    [1,[x,4.57,2.80],[1.01,.24,0],1,Math.PI/2,[161,119,70]],
+    [2,[x,4.57,3.01],[0,0,0],.21,0,[107,124,128]],
+  ]),
+];
+
+async function exportsFrom(url) {
+  if(!url) throw new Error("验收缺少 Wasm 路径");
+  const response=await fetch(url);
+  if(!response.ok) throw new Error("读取 Wasm 失败");
+  return (await WebAssembly.instantiate(await response.arrayBuffer())).instance.exports;
+}
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const [gait,abdomen,legResponse]=await Promise.all(
+    [exportsFrom(query.get("gait")),exportsFrom(query.get("wasm")),fetch("./d4-legs.tsv")]);
+  if(!legResponse.ok) throw new Error("读取腿部事实失败");
+  const rest=(await legResponse.text()).trim().split("\n").slice(1).map(row=>{
+    const values=row.split("\t").slice(1).map(value=>Number(value)/1000);
+    return [values.slice(0,3),values.slice(3,6),values.slice(6,9)];
+  });
+
+  const base=2097152;
+  const frame=new Float64Array(gait.memory.buffer,base+384,3);
+  new Float64Array(gait.memory.buffer,base,36).set(rest.flat(2));
+  new Float64Array(gait.memory.buffer,base+320,8).set([10.8,3.4,14.4,0,6.2,0,720,730]);
+  const out=256,capacity=11,bodyAt=4096;
+  const actual=new Float32Array(abdomen.memory.buffer,base+out,capacity*22);
+  const words=new Uint32Array(abdomen.memory.buffer,base+out,capacity*22);
+  const body=new Float64Array(abdomen.memory.buffer,base+bodyAt,3);
+  const tags=["stand","walk","sliding-feet","frozen-body","three-air","long-leg"];
+  const cases=[[0,0],[.5,1],[4,1],[-.5,1],[16,1],[2.5,2],[2.5,3],[2.5,4],[.5,5]];
+  const args=[BigInt(out),BigInt(capacity),BigInt(bodyAt)];
+  let countDiff=0,matrixDiff=0,materialDiff=0,tailDiff=0,rows=0;
+  let front=[];
+  for(const [index,[phase,mode]] of cases.entries()) {
+    const step=gait.uxe_d4_frame(0n,384n,768n,320n,phase,BigInt(mode),0n);
+    if(step!==0n) throw new Error("D4 位姿拒绝");
+    body.set(frame);
+    if(mutate && index===1) body[2]=-body[2];
+    words.fill(0xfeedbeef);
+    const count=Number(abdomen.uxe_d4_abdomen(...args));
+    if(count<0 || count>capacity) throw new Error("腹部实例数非法");
+    const {offset}=gaitPose(rest,phase,tags[mode]);
+    const world=new Matrix4().makeTranslation(...offset);
+    if(count!==parts.length) countDiff++;
+    rows+=parts.length;
+    for(let i=0;i<Math.min(parts.length,count);i++) {
+      const [kind,position,sizes,scale,pitch,rgb]=parts[i];
+      const local=new Matrix4().makeTranslation(...position)
+        .multiply(new Matrix4().makeRotationX(pitch)).multiply(new Matrix4().makeScale(scale,scale,scale));
+      const expected=Float32Array.from([...world.clone().multiply(local).elements,...sizes]);
+      const at=i*22;
+      for(let field=0;field<expected.length;field++) {
+        const value=actual[at+field];
+        if(!Number.isFinite(value) || Math.abs(value-expected[field])>1e-6) matrixDiff++;
+      }
+      const color=rgb[0]+rgb[1]*256+rgb[2]*65536+255*16777216;
+      if(words[at+19]!==kind || words[at+20]!==color || words[at+21]!==0) materialDiff++;
+    }
+    if(words.subarray(count*22).some(value=>value!==0xfeedbeef)) tailDiff++;
+    if(!index) front=[actual[13],actual[14],actual[16],actual[17],actual[18],
+      actual[3*22+6],actual[3*22+9],actual[3*22+12],actual[3*22+16],actual[3*22+17],
+      words[3*22+20],actual[4*22],actual[8*22+12],actual[8*22+14]];
+  }
+
+  const before=words.slice();
+  const refuses=params=>abdomen.uxe_d4_abdomen(...params)===-1n &&
+    before.every((value,i)=>value===words[i]);
+  let failures=0;
+  for(const [index,value] of [[1,8n],[1,65537n],[0,257n],[0,4096n],[0,6291452n],[2,4097n]]) {
+    const rejected=args.slice();
+    rejected[index]=value;
+    if(refuses(rejected)) failures++;
+  }
+  const saved=body[1];
+  for(const value of [NaN,Infinity]) {
+    body[1]=value;
+    if(refuses(args)) failures++;
+  }
+  body[1]=saved;
+
+  result.textContent=JSON.stringify([cases.length,rows,countDiff,matrixDiff,materialDiff,tailDiff,failures,...front]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>
+</html>
