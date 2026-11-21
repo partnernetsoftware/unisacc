@@ -44,6 +44,14 @@
 - 每个 agent 的暂存改动在 `archive/plans/2026-11-01/HANDOFF.md` 登记所有权与状态，会话中断时他人可接。
 - 60 秒规则适用于测试与未知命令；**正规构造链（`source-job-wave`、`pc-wave`、`kernel-build`、`product-build`、`selfhost`）内部已逐作业 bound，允许一次调用跑完一个相位**，不再拆成几十次 harness 调用。
 
+## 6.1 冷测隔离 TMPDIR 与 CACHE（2026-11-22，R77 环境假红复盘）
+
+- 冷测必须同时隔离 `TMPDIR` 与 `UNISACC_CACHE_DIR`：只空 CACHE 而共用 `/tmp` 时，内容寻址的 `ua-cxif-*.h` 仍会落在共享临时目录，外部清扫可造成假红（`#include` 缺失）。
+- 每例（或每并行路）各自 `mkdir` 私有空 `TMPDIR` 与 CACHE，编译前写入环境变量，结束后可删。
+- 并行上限 2 路时，两路不得共享同一 `TMPDIR`/CACHE；入口去重后按路分派。
+- 记录墙钟 ms、rc、错误首行；失败复现命令须带同样的私有 `TMPDIR`+CACHE。
+- 对照证据：`$CLAUDE_JOB_DIR/tmp/csr/daily-cold-full.tsv`（0.0.88，未隔离 TMPDIR）vs `daily-cold-full-089-iso.tsv`（0.0.89，双隔离；115/2，仅 `stream-lower-domain`/`cx-host-run` 前向声明失败）。产品侧 `R72`（`ua-cxif` 按年龄清理）仍待 `0.0.90` 开版，本条是测试方法，不替代 R72。
+
 ## 7. 两周目标与指标
 
 1. 第 1 周：`table-lint.cx`、`sim.cx --cov` 落地并接入快车道；E2/E1 至少三张表生成器化（含 `--check`）；本文件规则写入 CLAUDE.md（已做）。
