@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AxesHelper, BufferGeometryLoader, MaterialLoader, REVISION }
+  from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const fields = material => [material.color.getHex(), Number(material.vertexColors), Number(material.toneMapped),
+  material.opacity, Number(material.transparent), Number(material.depthTest), Number(material.depthWrite)];
+const differences = (a, b) => a.reduce((mask, value, index) =>
+  mask + ((Math.abs(value - b[index]) > (index === 3 ? 1e-9 : 0)) ? 2 ** index : 0), 0);
+const error = (a, b) => a.length === b.length
+  ? a.reduce((maximum, value, index) => Math.max(maximum, Math.abs(value - b[index])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(binary);
+  const api = instance.exports;
+  const mutate = BigInt(query.get("mutate"));
+  const run = (mode, length = 0) => Number(api.uxe_axes_object(BigInt(mode), BigInt(length), mutate));
+  const memory = new Uint8Array(api.memory.buffer, run(0), 90000);
+  memory.set(encoder.encode("axes-g"), 944);
+  memory.set(encoder.encode("axes-m"), 952);
+  const send = obj => {
+    const bytes = encoder.encode(JSON.stringify(obj));
+    memory.set(bytes, 10000);
+    return bytes.length;
+  };
+  const decode = (start, length) => {
+    if (length <= 0) throw new Error("native JSON status " + length);
+    return JSON.parse(decoder.decode(memory.subarray(start, start + length)));
+  };
+
+  const axes = new AxesHelper(3);
+  axes.material.uuid = "axes-m";
+  axes.geometry.uuid = "axes-g";
+  const reference = axes.toJSON();
+  const materialLoader = new MaterialLoader();
+  const nativeMaterial = decode(40000, run(1));
+  const defaults = fields(materialLoader.parse(nativeMaterial));
+  const nativeGeometry = decode(30000, run(2));
+  const geometry = new BufferGeometryLoader().parse(nativeGeometry);
+  const geometryErrors = ["position", "color"].map(name =>
+    error(geometry.attributes[name].array, axes.geometry.attributes[name].array));
+
+  axes.material.color.setHex(0x2468ac);
+  axes.material.vertexColors = false;
+  axes.material.opacity = 0.375;
+  axes.material.transparent = true;
+  axes.material.depthTest = false;
+  const changed = axes.toJSON().materials[0];
+  const restored = fields(materialLoader.parse(decode(40000, run(3, send(changed)))));
+  const malformed = run(4, send({ ...changed, color: 255, vertexColors: 3 }));
+  const invalidBase = run(4, send({ ...changed, color: 255, opacity: "invalid" }));
+  const preserved = fields(materialLoader.parse(decode(40000, run(5))));
+  result.textContent = JSON.stringify([
+    Number(reference.object.material === nativeMaterial.uuid && nativeMaterial.type === "LineBasicMaterial"),
+    Number(reference.object.geometry === nativeGeometry.uuid && nativeGeometry.type === "BufferGeometry"),
+    ...defaults, differences(defaults, fields(materialLoader.parse(reference.materials[0]))),
+    ...geometryErrors, ...restored, differences(restored, fields(materialLoader.parse(changed))),
+    malformed, invalidBase, differences(preserved, restored),
+  ]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

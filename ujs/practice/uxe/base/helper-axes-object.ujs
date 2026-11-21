@@ -1,0 +1,124 @@
+struct AxesHelperObject {
+  axes: u32;
+  material: u32;
+  color: u32;
+  vertexColors: u32;
+}
+
+native function axes_object_separate_axes(at:i64,bytes:i64,axes:i64) i64 {
+  return axes_disjoint(at,bytes,axes,AxesHelper.size) &&
+    axes_disjoint(at,bytes,ux_u32(axes+AxesHelper.positions),72) &&
+    axes_disjoint(at,bytes,ux_u32(axes+AxesHelper.colors),72);
+}
+
+// The geometry and the new LineBasicMaterial live in separate caller-owned records.
+native function AxesHelperObject_bind(at:i64,axes:i64,material:i64,id:i64,dispatcher:i64) i64 {
+  if(!helper_buffer_span(at,AxesHelperObject.size,4) || !helper_buffer_span(axes,AxesHelper.size,4) ||
+     ux_u32(axes+AxesHelper.active)!=1 || ux_u32(axes+AxesHelper.count)!=6 ||
+     !material_span(material) || !helper_buffer_span(dispatcher,EventDispatcher.size,4) ||
+     !helper_buffer_span(ux_u32(axes+AxesHelper.positions),72,4) ||
+     !helper_buffer_span(ux_u32(axes+AxesHelper.colors),72,4) ||
+     !axes_object_separate_axes(at,AxesHelperObject.size,axes) ||
+     !axes_object_separate_axes(material,Material.size,axes) ||
+     !axes_object_separate_axes(dispatcher,EventDispatcher.size,axes) ||
+     !axes_disjoint(at,AxesHelperObject.size,material,Material.size) ||
+     !axes_disjoint(at,AxesHelperObject.size,dispatcher,EventDispatcher.size)) { return 0-1; }
+  let initialized=Material_init(material,id,11,dispatcher);
+  if(initialized<0) { return initialized; }
+  let tone=ux_u32_put(material+Material.toneMapped,0);
+  let a=ux_u32_put(at+AxesHelperObject.axes,axes);
+  let b=ux_u32_put(at+AxesHelperObject.material,material);
+  let c=ux_u32_put(at+AxesHelperObject.color,16777215);
+  let d=ux_u32_put(at+AxesHelperObject.vertexColors,1);
+  return at;
+}
+
+native function axes_object_material(at:i64) i64 {
+  if(!helper_buffer_span(at,AxesHelperObject.size,4)) { return 0-1; }
+  let material=ux_u32(at+AxesHelperObject.material);
+  if(!material_span(material) || ux_u32(material+Material.type)!=11 ||
+     ux_u32(material+Material.id)==0 ||
+     !axes_disjoint(at,AxesHelperObject.size,material,Material.size)) { return 0-1; }
+  return material;
+}
+
+native function axes_object_region(at:i64,region:i64,bytes:i64) i64 {
+  let axes=ux_u32(at+AxesHelperObject.axes);
+  let material=ux_u32(at+AxesHelperObject.material);
+  let dispatcher=ux_u32(material+Material.dispatcher);
+  return helper_buffer_span(axes,AxesHelper.size,4) &&
+    axes_object_separate_axes(region,bytes,axes) &&
+    axes_disjoint(region,bytes,at,AxesHelperObject.size) &&
+    axes_disjoint(region,bytes,material,Material.size) &&
+    axes_disjoint(region,bytes,dispatcher,EventDispatcher.size);
+}
+
+native function axes_object_word(at:i64,word:i64) i64 {
+  let low=ux_u32_put(at,word%4294967296);
+  return ux_u32_put(at+4,word/4294967296);
+}
+
+native function axes_object_type_bytes(at:i64) i64 {
+  let a=axes_object_word(at,7598523934101629260); // LineBasi
+  let b=axes_object_word(at+8,7019267274303425891); // cMateria
+  return ux_u8_put(at+16,108);
+}
+
+native function AxesHelperObject_materialToJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  let material=axes_object_material(at);
+  if(material<0 || !helper_buffer_span(dst,end-dst,1) || end-dst<8 ||
+     !helper_buffer_span(uuid,uuidBytes,1) || uuidBytes<1 ||
+     !helper_buffer_span(scratch,1128,8) ||
+     !axes_object_region(at,dst,end-dst) || !axes_object_region(at,scratch,1128) ||
+     !axes_disjoint(dst,end-dst,scratch,1128) ||
+     !axes_disjoint(dst,end-dst,uuid,uuidBytes) ||
+     !axes_disjoint(scratch,1128,uuid,uuidBytes)) { return 0-1; }
+  let type=scratch+1104;
+  let bytes=axes_object_type_bytes(type);
+  let key=axes_object_word(dst,4189021007512937083); // {"uuid":
+  let cursor=json_write_string(dst+8,end,uuid,uuidBytes);
+  if(cursor<0 || end-cursor<8) { return 0-1; }
+  let typeKey=axes_object_word(cursor,4189022137156379180); // ,"type":
+  cursor=json_write_string(cursor+8,end,type,17);
+  if(cursor<0) { return cursor; }
+  cursor=material_json_field(cursor,end,491495649123,0,0,10,0.0+ux_u32(at+AxesHelperObject.color),scratch);
+  if(cursor<0) { return cursor; }
+  if(ux_u32(at+AxesHelperObject.vertexColors)) {
+    cursor=material_json_field(cursor,end,8017384138790298998,1936879468,0,25,1.0,scratch);
+    if(cursor<0) { return cursor; }
+  }
+  cursor=Material_writeFields(cursor,end,material,scratch);
+  if(cursor<0) { return cursor; }
+  return json_byte(cursor,end,125);
+}
+
+native function AxesObject_materialFromJSON(at:i64,input:i64,end:i64,scratch:i64) i64 {
+  let material=axes_object_material(at);
+  if(material<0 || !helper_buffer_span(input,end-input,1) || input==end ||
+     !helper_buffer_span(scratch,240,8) || !axes_object_region(at,scratch,240) ||
+     !axes_object_region(at,input,end-input) || !axes_disjoint(input,end-input,scratch,240)) { return 0-1; }
+  let key=ux_u32_put(scratch,1701869940); // type
+  let type=json_find_key(input,end,scratch,4);
+  if(type<0 || json_scan_string(type,end)!=type+19) { return 0-1; }
+  let bytes=axes_object_type_bytes(scratch+216);
+  let i=0;
+  while(i<17) {
+    if(ux_u8(type+1+i)!=ux_u8(scratch+216+i)) { return 0-1; }
+    i=i+1;
+  }
+  let color=material_json_read(input,end,scratch,491495649123,0,0,10,16777215.0);
+  let vertex=material_json_read(input,end,scratch,8017384138790298998,1936879468,0,25,0.0);
+  if(!(color>=0.0 && color<=16777215.0) || (vertex!=0.0 && vertex!=1.0)) { return 0-1; }
+  let packed=f64_floor_i64(color);
+  if(color!=0.0+packed) { return 0-1; }
+  let decoded=Material_readFields(input,end,material,scratch);
+  if(decoded<0) { return decoded; }
+  let a=ux_u32_put(at+AxesHelperObject.color,packed);
+  let b=ux_u32_put(at+AxesHelperObject.vertexColors,vertex==1.0);
+  return at;
+}
+
+native function AxesHelperObject_geometryToJSON(at:i64,geo:i64,views:i64,dst:i64,end:i64,identity:i64,scratch:i64) i64 {
+  if(axes_object_material(at)<0) { return 0-1; }
+  return HelperGridGeometry_toJSON(ux_u32(at+AxesHelperObject.axes),3,geo,views,dst,end,identity,scratch);
+}
