@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Audio, AudioAnalyser, AudioContext, AudioListener, REVISION } from "../../web/game/three.module.js";
+import { bindAudioAnalyser } from "../base/audio-analyser-closure-host.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const sampleRate = 48000;
+const quantum = 2048;
+
+function throwsNamed(call, name) {
+  try { call(); } catch (error) { return error.name === name; }
+  return false;
+}
+
+async function exercise(make, size, product, mutate) {
+  const context = new OfflineAudioContext(1, 3 * quantum, sampleRate);
+  AudioContext.setContext(context);
+  const audio = new Audio(new AudioListener());
+  const source = audio.getOutput();
+  const input = context.createBuffer(1, 3 * quantum, sampleRate);
+  input.getChannelData(0).fill(.001);
+  audio.setBuffer(input).play();
+  const peer = context.createAnalyser();
+  peer.fftSize = 32;
+  peer.smoothingTimeConstant = 0;
+  source.connect(peer);
+  let attached = 0;
+  let detached = 0;
+  let connectedNode;
+  const connect = source.connect.bind(source);
+  const disconnect = source.disconnect.bind(source);
+  source.connect = (...args) => {
+    attached++;
+    connectedNode = args[0];
+    return connect(...args);
+  };
+  source.disconnect = (...args) => {
+    if (args.length === 1 && args[0] === connectedNode) detached++;
+    return disconnect(...args);
+  };
+
+  const invalid = throwsNamed(() => make(audio, 33), "IndexSizeError") && attached === 0;
+  const analysis = make(audio, size);
+  const providedSize = analysis.analyser.fftSize;
+  const smoothing = analysis.analyser.smoothingTimeConstant === .8;
+  const edge = attached === 1 && connectedNode === analysis.analyser;
+  const initialized = analysis.data.every(value => value === 0);
+  analysis.analyser.smoothingTimeConstant = 0;
+  if (mutate) disconnect(analysis.analyser);
+  const first = context.suspend(quantum / sampleRate);
+  const second = context.suspend(2 * quantum / sampleRate);
+  const rendered = context.startRendering();
+  await first;
+  const cached = analysis.getFrequencyData();
+  const same = cached === analysis.getFrequencyData() && cached === analysis.data;
+  const signal = [...cached.slice(0, 4)];
+  cached.fill(255);
+  const average = analysis.getAverageFrequency();
+  const refreshed = cached[0] === signal[0] && cached[3] === signal[3];
+  let lifecycle;
+  if (product) {
+    lifecycle = analysis.dispose() && !analysis.dispose() &&
+      throwsNamed(() => analysis.getFrequencyData(), "InvalidStateError") &&
+      throwsNamed(() => analysis.getAverageFrequency(), "InvalidStateError");
+  } else {
+    source.disconnect(analysis.analyser);
+    lifecycle = true;
+  }
+  await context.resume();
+  await second;
+  const detachedBins = new Uint8Array(analysis.analyser.frequencyBinCount);
+  analysis.analyser.getByteFrequencyData(detachedBins);
+  const peerBins = new Uint8Array(peer.frequencyBinCount);
+  peer.getByteFrequencyData(peerBins);
+  await context.resume();
+  const heard = Math.round((await rendered).getChannelData(0)[3 * quantum - 1] * 1e6);
+  return [invalid, providedSize, cached.length, smoothing, edge, initialized, same,
+    ...signal, average, refreshed, lifecycle, detached, detachedBins.every(value => value === 0), peerBins[0], heard].map(Number);
+}
+
+try {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const {instance: {exports: wasm}} = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (wasm.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const storage = {memory: wasm.memory, command: wasm.uxe_audio_analyser_closure, offset: 128, capacity: 1024};
+  const base = storage.command(0n, 128n, 1024n, 1024n);
+  const bytes = new Uint8Array(storage.memory.buffer, base, 1024);
+  bytes.fill(99);
+  const refused = storage.command(0n, 128n, 1024n, 1023n) === -1 && bytes.every(value => value === 99);
+  const reference = (audio, size) => new AudioAnalyser(audio, size);
+  const product = (audio, size) => bindAudioAnalyser(audio, storage, size);
+  output.textContent = JSON.stringify([
+    ...await exercise(reference, undefined, false, false),
+    ...await exercise(reference, 32, false, false),
+    Number(refused),
+    ...await exercise(product, undefined, true, query.has("mutate")),
+    ...await exercise(product, 32, true, false)
+  ]);
+} catch (error) { output.textContent = "error:" + error.message; }
+</script>
