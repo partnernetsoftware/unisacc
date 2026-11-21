@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 烟雾数据验收夹具</title>
+<pre id="result">pending</pre>
+<script type="module">
+import { loadScaleStudy } from "./uxe-u2b.js";
+
+const result=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+
+function reference(tick,offset,puffs,style) {
+  const origins=[[-4.9,10.8,-3.5],[.65,12.6,-3.85],[4.7,11.18,-2.65]];
+  const clusterX=[.30,1.26,1.70], clusterY=[1.12,1.20,.86];
+  return Array.from({length:puffs},(_,slot)=>{
+    const stack=slot%3, layer=Math.floor(slot/3), cluster=Math.floor(layer/3), lobe=layer%3;
+    const [ox,oy,oz]=origins[stack];
+    let x,y,z,size,yaw,tint;
+    if(style===0) {
+      yaw=stack*2.15+lobe*2.09;
+      const spread=.45+cluster*.30;
+      x=ox+cluster*clusterX[stack]+Math.cos(yaw)*spread;
+      y=oy+cluster*clusterY[stack]+Math.sin(yaw)*spread;
+      z=oz+cluster*.42+lobe*.19;
+      size=.67+cluster*.31+lobe*.12;
+      tint=lobe===2?[202,214,226]:[236,239,234];
+    } else {
+      [x,y,z]=[ox+layer*.39,oy+layer*.43,oz+layer*.06];
+      size=.24+layer*.053;
+      yaw=0;
+      tint=[236,239,234];
+    }
+    if(tick>=0n) {
+      const age=Number((tick+BigInt(slot*11))%120n)/120;
+      const fade=Math.min(1,age*12,(1-age)*8);
+      x+=offset[0]+age*2.3;
+      y+=offset[1]+age*1.65;
+      z+=offset[2]+age*.61;
+      yaw+=age*.7;
+      size*=((.64+age*.40)*fade);
+    }
+    const c=Math.cos(yaw)*size,s=Math.sin(yaw)*size;
+    return {
+      slot, size, rgb:Float32Array.from(tint,value=>value/255),
+      matrix:Float32Array.of(c,0,-s,0,0,size,0,0,s,0,c,0,x,y,z,1),
+    };
+  }).filter(puff=>puff.size>0);
+}
+
+try {
+  const wasmUrl=query.get("wasm");
+  if(!wasmUrl) throw new Error("验收缺少 Wasm 路径");
+  const [facts,response]=await Promise.all([loadScaleStudy("d4"),fetch(wasmUrl)]);
+  if(!response.ok) throw new Error("读取烟雾 Wasm 失败");
+  const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());
+  const {memory,uxe_d4_smoke}=instance.exports;
+  const puffs=facts[6], base=2097152, matAt=256, rgbAt=2048, idAt=2432, bodyAt=2560;
+  const matrix=new Float32Array(memory.buffer,base+matAt,puffs*16);
+  const colors=new Float32Array(memory.buffer,base+rgbAt,puffs*3);
+  const slots=new Uint32Array(memory.buffer,base+idAt,puffs);
+  const body=new Float64Array(memory.buffer,base+bodyAt,3);
+  const empty=[0,0,0], travel=[1.25,-.45,.625];
+  const cases=[
+    [-1n,travel,puffs,0],[-1n,travel,puffs,1],[0n,empty,puffs,0],
+    [1n,empty,puffs,0],[10n,empty,puffs,0],[60n,travel,puffs,0],
+    [105n,travel,puffs,0],[119n,empty,puffs,0],[120n,empty,puffs,0],
+    [121n,empty,puffs,0],[240n,empty,puffs,0],[109n,travel,puffs,0],
+    [9223372036854775807n,travel,puffs,0],[0n,travel,3,1],[0n,travel,0,0],
+  ];
+  const words=()=>[...new Uint32Array(memory.buffer,base+matAt,matrix.length),
+    ...new Uint32Array(memory.buffer,base+rgbAt,colors.length),...slots];
+  const parameters=(tick,count,style)=>[BigInt(matAt),BigInt(rgbAt),BigInt(idAt),BigInt(puffs),
+    BigInt(bodyAt),tick,BigInt(count),BigInt(style)];
+  const samples=[];
+  let sizeDiff=0,matrixDiff=0,tintDiff=0,slotDiff=0,tailDiff=0,referenceRows=0;
+  for(const [index,[tick,offset,count,style]] of cases.entries()) {
+    body.set(offset);
+    if(mutate && index===5) body[0]=0;
+    matrix.fill(NaN);
+    colors.fill(NaN);
+    slots.fill(0xffffffff);
+    const actual=Number(uxe_d4_smoke(...parameters(mutate && index===7?tick+1n:tick,count,style)));
+    const expected=reference(tick,offset,count,style);
+    if(actual<0 || actual>puffs) throw new Error("烟雾实例数非法");
+    referenceRows+=expected.length;
+    if(actual!==expected.length) sizeDiff++;
+    for(let row=0;row<Math.min(actual,expected.length);row++) {
+      const puff=expected[row];
+      if(slots[row]!==puff.slot) slotDiff++;
+      for(let field=0;field<16;field++) {
+        const value=matrix[row*16+field];
+        if(!Number.isFinite(value) || Math.abs(value-puff.matrix[field])>1e-6) matrixDiff++;
+      }
+      for(let field=0;field<3;field++) {
+        const value=colors[row*3+field];
+        if(!Number.isFinite(value) || Math.abs(value-puff.rgb[field])>1e-7) tintDiff++;
+      }
+    }
+    if(matrix.subarray(actual*16).some(value=>!Number.isNaN(value)) ||
+       colors.subarray(actual*3).some(value=>!Number.isNaN(value)) ||
+       slots.subarray(actual).some(value=>value!==0xffffffff)) tailDiff++;
+    samples.push({count:actual,slot0:slots[0],slot1:slots[1],x:matrix[12],y:matrix[13],z:matrix[14],
+      scale:matrix[5],shade:colors[6*3]});
+  }
+  body.set(travel);
+  const before=words();
+  const raw=parameters(0n,puffs,0);
+  let refusals=0;
+  for(const [index,value] of [[3,25n],[5,-2n],[6,28n],[7,2n],[0,257n],[0,2048n],[0,6291452n],[4,256n]]) {
+    const args=raw.slice();
+    args[index]=value;
+    const rc=uxe_d4_smoke(...args);
+    const after=words();
+    if(rc===-1n && before.every((word,i)=>word===after[i])) refusals++;
+  }
+  body[2]=Infinity;
+  const rejected=uxe_d4_smoke(...raw);
+  const after=words();
+  if(rejected===-1n && before.every((word,index)=>word===after[index])) refusals++;
+  body.set(travel);
+  const exact=raw.slice();
+  exact[3]=26n;
+  const exactCount=Number(uxe_d4_smoke(...exact));
+
+  result.textContent=JSON.stringify([puffs,cases.length,referenceRows,sizeDiff,matrixDiff,tintDiff,slotDiff,tailDiff,refusals,
+    samples[0].x,samples[0].y,samples[0].z,samples[0].scale,samples[0].shade,samples[1].x,samples[1].scale,
+    samples[2].count,samples[2].slot0,samples[3].scale,samples[5].x,samples[5].y,samples[5].z,samples[5].scale,
+    samples[7].scale,samples[8].slot0,samples[11].slot1,exactCount]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>
+</html>

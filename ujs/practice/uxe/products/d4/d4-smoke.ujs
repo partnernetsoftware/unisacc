@@ -1,0 +1,127 @@
+// Emit opaque smoke instances in source-slot order. Matrices and RGB triples
+// use the column-major f32 layout consumed by InstancedMesh. Slots identify
+// the original puff across compaction and reuse at the 120-tick boundary.
+// The body address is the first three f64 fields of D4Frame (world offset).
+// Tick -1 selects the authored still frame. Style 0 is clustered, 1 is thin.
+
+native function d4_smoke_span(at:i64,bytes:i64,align:i64) i64 {
+  return at>=0 && at%align==0 && at<=6291456-bytes;
+}
+
+native function d4_smoke_disjoint(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n==0 || m==0 || a+n<=b || b+m<=a;
+}
+
+native function d4_smoke_age(tick:i64,slot:i64) i64 {
+  return (tick%120+slot*11)%120;
+}
+
+native function d4_smoke_matrix(out:i64,x:f64,y:f64,z:f64,size:f64,yaw:f64) i64 {
+  let co=size*ux_math_cos(yaw);
+  let si=size*ux_math_sin(yaw);
+  let i=0;
+  while(i<16) {
+    let value=0.0;
+    if(i==0 || i==10) { value=co; }
+    if(i==2) { value=0.0-si; }
+    if(i==5) { value=size; }
+    if(i==8) { value=si; }
+    if(i==12) { value=x; }
+    if(i==13) { value=y; }
+    if(i==14) { value=z; }
+    if(i==15) { value=1.0; }
+    let saved=ux_f32_put(out+i*4,value);
+    i=i+1;
+  }
+  return out;
+}
+
+native function d4_smoke_puff(matrix:i64,color:i64,body:i64,tick:i64,slot:i64,style:i64) i64 {
+  let emitter=slot%3;
+  let layer=slot/3;
+  let lobe=layer%3;
+  let cluster=layer/3;
+  let originsX=[4900,650,4700];
+  let originsY=[10800,12600,11180];
+  let originsZ=[3500,3850,2650];
+  let offsetsX=[300,1260,1700];
+  let offsetsY=[1120,1200,860];
+  let x=originsX[emitter]/1000.0;
+  if(emitter==0) { x=0.0-x; }
+  let y=originsY[emitter]/1000.0;
+  let z=0.0-originsZ[emitter]/1000.0;
+  let size=0.24+layer*0.053;
+  let yaw=0.0;
+  let r=236.0;
+  let g=239.0;
+  let b=234.0;
+  if(style==0) {
+    yaw=emitter*2.15+lobe*2.09;
+    let spread=0.45+cluster*0.30;
+    x=x+cluster*(offsetsX[emitter]/1000.0)+ux_math_cos(yaw)*spread;
+    y=y+cluster*(offsetsY[emitter]/1000.0)+ux_math_sin(yaw)*spread;
+    z=z+cluster*0.42+lobe*0.19;
+    size=0.67+cluster*0.31+lobe*0.12;
+    if(lobe==2) { r=202.0; g=214.0; b=226.0; }
+  } else {
+    x=x+layer*0.39;
+    y=y+layer*0.43;
+    z=z+layer*0.06;
+  }
+  if(tick>=0) {
+    let age=d4_smoke_age(tick,slot)/120.0;
+    let fade=age*12.0;
+    if(fade>1.0) { fade=1.0; }
+    let tail=(1.0-age)*8.0;
+    if(tail<fade) { fade=tail; }
+    x=x+ux_f64(body)+age*2.3;
+    y=y+ux_f64(body+8)+age*1.65;
+    z=z+ux_f64(body+16)+age*0.61;
+    size=size*(0.64+age*0.40)*fade;
+    yaw=yaw+age*0.7;
+  }
+  let transform=d4_smoke_matrix(matrix,x,y,z,size,yaw);
+  let red=ux_f32_put(color,r/255.0);
+  let green=ux_f32_put(color+4,g/255.0);
+  let blue=ux_f32_put(color+8,b/255.0);
+  return transform;
+}
+
+native function D4Smoke_emit(matrices:i64,colors:i64,slots:i64,capacity:i64,
+    body:i64,tick:i64,puffs:i64,style:i64) i64 {
+  if(capacity<0 || capacity>98304 || tick<0-1 || puffs<0 || puffs>27 || style<0 || style>1 ||
+     !d4_smoke_span(body,24,8) || !d4_smoke_span(matrices,capacity*64,4) ||
+     !d4_smoke_span(colors,capacity*12,4) || !d4_smoke_span(slots,capacity*4,4) ||
+     !d4_smoke_disjoint(matrices,capacity*64,colors,capacity*12) ||
+     !d4_smoke_disjoint(matrices,capacity*64,slots,capacity*4) ||
+     !d4_smoke_disjoint(colors,capacity*12,slots,capacity*4) ||
+     !d4_smoke_disjoint(matrices,capacity*64,body,24) ||
+     !d4_smoke_disjoint(colors,capacity*12,body,24) ||
+     !d4_smoke_disjoint(slots,capacity*4,body,24)) { return 0-1; }
+  let axis=0;
+  while(axis<3) {
+    let value=ux_f64(body+axis*8);
+    if(value-value!=0.0 || ux_math_abs(value)>9007199254740991.0) { return 0-1; }
+    axis=axis+1;
+  }
+  let count=0;
+  let i=0;
+  while(i<puffs) {
+    if(tick<0 || d4_smoke_age(tick,i)!=0) { count=count+1; }
+    i=i+1;
+  }
+  if(count>capacity) { return 0-1; }
+  i=0;
+  let row=0;
+  while(i<puffs) {
+    if(tick<0 || d4_smoke_age(tick,i)!=0) {
+      let puff=d4_smoke_puff(matrices+row*64,colors+row*12,body,tick,i,style);
+      let id=ux_u32_put(slots+row*4,i);
+      row=row+1;
+    }
+    i=i+1;
+  }
+  return count;
+}
+
+return D4Smoke_emit(matrices,colors,slots,capacity,body,tick,puffs,style);
