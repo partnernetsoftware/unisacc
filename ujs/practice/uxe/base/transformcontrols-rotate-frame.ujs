@@ -1,0 +1,56 @@
+// World-space hit delta, object-to-camera offset, and parent/start
+// quaternions describe a drag around one principal axis. Camera offsets
+// also give the eye direction for perspective and centered ortho views.
+// Output packs the parent-local quaternion followed by the snapped angle.
+native function TransformControls_rotFrame(out:i64,start:i64,parent:i64,delta:i64,camera:i64,axis:i64,snap:f64,local:i64) i64 {
+  if(out<0 || out%8!=0 || out>6291456-40 || start<0 || start%8!=0 || start>6291456-32 ||
+     parent<0 || parent%8!=0 || parent>6291456-32 || !transform_vec3_valid(delta) ||
+     !transform_vec3_valid(camera) || (axis!=1 && axis!=2 && axis!=4) ||
+     snap<0.0 || snap-snap!=0.0 || local<0 || local>1) { return 0-1; }
+  let x=ux_f64(start); let y=ux_f64(start+8); let z=ux_f64(start+16); let w=ux_f64(start+24);
+  let px=ux_f64(parent); let py=ux_f64(parent+8); let pz=ux_f64(parent+16); let pw=ux_f64(parent+24);
+  let length=f64_sqrt(x*x+y*y+z*z+w*w);
+  let parentLength=f64_sqrt(px*px+py*py+pz*pz+pw*pw);
+  if(length<=0.0 || length-length!=0.0 || parentLength<=0.0 || parentLength-parentLength!=0.0) { return 0-1; }
+  x=x/length; y=y/length; z=z/length; w=w/length;
+  px=px/parentLength; py=py/parentLength; pz=pz/parentLength; pw=pw/parentLength;
+  let ax=0.0; let ay=0.0; let az=0.0;
+  if(axis==1) { ax=1.0; }
+  if(axis==2) { ay=1.0; }
+  if(axis==4) { az=1.0; }
+
+  let qx=0.0-px; let qy=0.0-py; let qz=0.0-pz; let qw=pw;
+  if(local==1) {
+    qx=pw*x+px*w+py*z-pz*y;
+    qy=pw*y-px*z+py*w+pz*x;
+    qz=pw*z+px*y-py*x+pz*w;
+    qw=pw*w-px*x-py*y-pz*z;
+  }
+  let dot=ax*qx+ay*qy+az*qz;
+  let rx=(2.0*qw*qw-1.0)*ax+2.0*(dot*qx+qw*(qy*az-qz*ay));
+  let ry=(2.0*qw*qw-1.0)*ay+2.0*(dot*qy+qw*(qz*ax-qx*az));
+  let rz=(2.0*qw*qw-1.0)*az+2.0*(dot*qz+qw*(qx*ay-qy*ax));
+  let wx=ax; let wy=ay; let wz=az;
+  if(local==1) { wx=rx; wy=ry; wz=rz; }
+  let cx=ux_f64(camera); let cy=ux_f64(camera+8); let cz=ux_f64(camera+16);
+  let distance=f64_sqrt(cx*cx+cy*cy+cz*cz);
+  let tx=wy*cz-wz*cy; let ty=wz*cx-wx*cz; let tz=wx*cy-wy*cx;
+  let tangent=f64_sqrt(tx*tx+ty*ty+tz*tz);
+  if(distance<=0.0 || distance-distance!=0.0 || tangent<=0.0) { return 0-1; }
+  let projection=(ux_f64(delta)*tx+ux_f64(delta+8)*ty+ux_f64(delta+16)*tz)/tangent;
+  let angle=transform_world_axis(0.0,0.0,0.0,projection*20.0/distance,snap);
+  if(angle-angle!=0.0 || angle<0.0-1000000000.0 || angle>1000000000.0) { return 0-1; }
+
+  // World drags premultiply around the axis expressed in parent space.
+  // Local drags postmultiply around the selected object-local axis.
+  let cross=1.0;
+  if(local==1) { rx=ax; ry=ay; rz=az; cross=0.0-1.0; }
+  let s=ux_math_sin(angle*0.5);
+  let c=ux_math_cos(angle*0.5);
+  let a=ux_f64_put(out,c*x+s*(rx*w+cross*(ry*z-rz*y)));
+  let b=ux_f64_put(out+8,c*y+s*(ry*w+cross*(rz*x-rx*z)));
+  let d=ux_f64_put(out+16,c*z+s*(rz*w+cross*(rx*y-ry*x)));
+  let e=ux_f64_put(out+24,c*w-s*(rx*x+ry*y+rz*z));
+  let f=ux_f64_put(out+32,angle);
+  return out;
+}
