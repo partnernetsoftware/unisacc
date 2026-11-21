@@ -1,0 +1,109 @@
+struct UniformsLibValue {
+  kind: u32;
+  propertyCount: u32;
+  c0: f64; c1: f64; c2: f64;
+  c3: f64; c4: f64; c5: f64;
+  c6: f64; c7: f64; c8: f64;
+}
+
+struct UniformsLibKind {
+  nullValue: u8;
+  number: u8;
+  color: u8;
+  matrix3: u8;
+  vector2: u8;
+  array: u8;
+}
+
+native function UniformsLib_count(group:i64) i64 {
+  return uniforms_group(group,2);
+}
+
+native function uniforms_index(group:i64,index:i64) i64 {
+  let count=UniformsLib_count(group);
+  if(index<0 || index>=count) { return 0-1; }
+  return uniforms_group(group,1)+index;
+}
+
+native function uniforms_write_name(out:i64,end:i64,name:i64) i64 {
+  let count=uniforms_name(name,0);
+  if(count<1 || out<0 || end<out || end>6291456 || count>end-out) { return 0-1; }
+  let i=0;
+  let word=0;
+  while(i<count) {
+    if(i%8==0) { word=uniforms_name(name,1+i/8); }
+    let saved=ux_u8_put(out+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return count;
+}
+
+native function UniformsLib_groupName(out:i64,end:i64,group:i64) i64 {
+  return uniforms_write_name(out,end,uniforms_group(group,0));
+}
+
+native function UniformsLib_key(out:i64,end:i64,group:i64,index:i64) i64 {
+  return uniforms_write_name(out,end,uniforms_row(uniforms_index(group,index),0));
+}
+
+native function UniformsLib_property(out:i64,end:i64,group:i64,index:i64,property:i64) i64 {
+  let row=uniforms_index(group,index);
+  if(property<0 || property>=uniforms_row(row,3)) { return 0-1; }
+  let name=uniforms_field(uniforms_row(row,2)+property);
+  return uniforms_write_name(out,end,name);
+}
+
+native function uniforms_name_equal(src:i64,count:i64,name:i64) i64 {
+  if(src<0 || count<1 || src>6291456-count || uniforms_name(name,0)!=count) { return 0; }
+  let i=0;
+  let word=0;
+  while(i<count) {
+    if(i%8==0) { word=uniforms_name(name,1+i/8); }
+    if(ux_u8(src+i)!=word%256) { return 0; }
+    word=word/256;
+    i=i+1;
+  }
+  return 1;
+}
+
+native function UniformsLib_findGroup(src:i64,count:i64) i64 {
+  let group=0;
+  while(group<UniformsLib_groupCount()) {
+    if(uniforms_name_equal(src,count,uniforms_group(group,0))!=0) { return group; }
+    group=group+1;
+  }
+  return 0-1;
+}
+
+native function UniformsLib_find(group:i64,src:i64,count:i64) i64 {
+  let index=0;
+  let rows=UniformsLib_count(group);
+  while(index<rows) {
+    let row=uniforms_index(group,index);
+    if(uniforms_name_equal(src,count,uniforms_row(row,0))!=0) { return index; }
+    index=index+1;
+  }
+  return 0-1;
+}
+
+// Fill one caller-owned default. A null map or empty array needs no backing
+// memory. Colors are linear RGB and Matrix3 components are column-major.
+native function UniformsLib_default(out:i64,group:i64,index:i64) i64 {
+  let row=uniforms_index(group,index);
+  if(out<0 || out>6291456-UniformsLibValue.size || out%8!=0 || row<0) { return 0-1; }
+  let kind=uniforms_row(row,1);
+  let tag=ux_u32_put(out+UniformsLibValue.kind,kind);
+  let properties=ux_u32_put(out+UniformsLibValue.propertyCount,uniforms_row(row,3));
+  let a=uniforms_arg(row,0);
+  let b=uniforms_arg(row,1);
+  let at=0;
+  while(at<9) {
+    let value=0.0;
+    if(at==0 || (kind==UniformsLibKind.color && at<3) || (kind==UniformsLibKind.matrix3 && at%4==0)) { value=a; }
+    if(kind==UniformsLibKind.vector2 && at==1) { value=b; }
+    let saved=ux_f64_put(out+UniformsLibValue.c0+at*8,value);
+    at=at+1;
+  }
+  return out;
+}
