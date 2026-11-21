@@ -4,7 +4,31 @@ native function image_source_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
 
 // HTMLImageElement, Canvas and ImageBitmap enter as decoded, straight RGBA
 // bytes. The result uses CSS Canvas clamped channel rounding.
-native function ImageUtils_sourceToLinear(image:i64,out:i64,capacity:i64) i64 {
+native function image_canvas_roundtrip(channel:i64,alpha:i64) i64 {
+  if(alpha==0) { return 0; }
+  let stored=(channel*alpha+127)/255;
+  return (stored*255+alpha/2)/alpha;
+}
+
+native function image_canvas_linear_row(out:i64,src:i64,bytes:i64) i64 {
+  let x=0;
+  while(x<bytes) {
+    let alpha=ux_u8(src+x+3);
+    let linearAlpha=image_linear_byte(alpha,1);
+    let k=0;
+    while(k<3) {
+      let drawn=image_canvas_roundtrip(ux_u8(src+x+k),alpha);
+      let result=image_canvas_roundtrip(image_linear_byte(drawn,1),linearAlpha);
+      let put=ux_u8_put(out+x+k,result);
+      k=k+1;
+    }
+    let put=ux_u8_put(out+x+3,linearAlpha);
+    x=x+4;
+  }
+  return out;
+}
+
+native function image_source_linear(image:i64,out:i64,capacity:i64,canvas:i64) i64 {
   if(image<0 || image%4!=0 || image>6291456-ImageResource.size ||
      out<0 || capacity<0 || out>6291456-capacity ||
      image_source_overlap(image,ImageResource.size,out,capacity)) { return 0-1; }
@@ -18,8 +42,18 @@ native function ImageUtils_sourceToLinear(image:i64,out:i64,capacity:i64) i64 {
      image_source_overlap(src,(height-1)*pitch+width*4,out,capacity)) { return 0-1; }
   let y=0;
   while(y<height) {
-    let row=ImageUtils_canvasToLinear(out+y*width*4,src+y*pitch,width*4);
+    if(canvas==1) {
+      let row=image_canvas_linear_row(out+y*width*4,src+y*pitch,width*4);
+    } else { let row=ImageUtils_canvasToLinear(out+y*width*4,src+y*pitch,width*4); }
     y=y+1;
   }
   return width*height*4;
+}
+
+native function ImageUtils_sourceToLinear(image:i64,out:i64,capacity:i64) i64 {
+  return image_source_linear(image,out,capacity,0);
+}
+
+native function ImageUtils_sourceCanvasLinear(image:i64,out:i64,capacity:i64) i64 {
+  return image_source_linear(image,out,capacity,1);
 }
