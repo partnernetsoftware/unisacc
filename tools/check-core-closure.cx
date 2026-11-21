@@ -1,0 +1,56 @@
+/* tools/check-core-closure.cx -- 检查 tools/core-closure.cx 与 build/core-closure.tsv(批次 core-closure)。
+ *   sh ./unisacc.com tools/check-core-closure.cx
+ * 断言:(1) 生成器 --check 对真表 SAME;(2) lnx-x86_64 计划单元 132 行、去符号链接别名后真实单元 99 个(边界审计稿数;
+ *   差额 33 为 src/ 与 cx/runtime 下指向 cx/ 的符号链接别名,不是另一套代码);(3) 其余五目标各一行 UNMEASURED;
+ *   (4) 无 ext/ 单元;(5) 变异:删一行、加一个假单元,生成器对其必须 DRIFT;(6) 六目标闭包差异单列(当前只有一个实测目标,差异为 0 且五目标未测)。
+ * 夹具写入 $TMPDIR(不写仓库);一次生成器调用同时比对三张表。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+static int fails;
+static void ok(int c,const char *m){ printf("%s\t%s\n",c?"PASS":"FAIL",m); if(!c) fails++; }
+static int has(const char *r,const char *real,int nr,char **seen){ for(int i=0;i<nr;i++) if(!strcmp(seen[i],real)) return 1; (void)r; return 0; }
+int main(void){
+  size_t n; char *t=cx_read("build/core-closure.tsv",&n); if(!t){ printf("FAIL\tread table\n"); return 1; }
+  char td[512];
+  if (cx_fmt(td, sizeof td, "%s/core-closure-check-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+  char *seen[400]; int ns=0,plan=0,unm=0,ext=0,nl=0;
+  char *c=strdup(t); char *lines[512];
+  for(char *p=c;*p;){ char *e=strchr(p,'\n'); if(!e) break; *e=0; if(*p!='#'){ lines[nl++]=p;
+      char *f[7]; int k=0; char *q=p; while(k<6){ f[k++]=q; char *tb=strchr(q,'\t'); if(!tb) break; *tb=0; q=tb+1; }
+      if(k==6){ if(!strcmp(f[0],"lnx-x86_64")){ plan++; if(!strncmp(f[2],"ext/",4)) ext++; if(!has(0,f[2],ns,seen)) seen[ns++]=f[2]; }
+        else if(!strcmp(f[1],"UNMEASURED")) unm++; } }
+    p=e+1; }
+  ok(plan==132,"lnx-x86_64 plan rows == 132");
+  ok(ns==99,"lnx-x86_64 distinct real units == 99 (audit)");
+  ok(unm==5,"five other targets UNMEASURED");
+  ok(ext==0,"no ext/ unit in closure");
+  printf("INFO\tcross-target closure diff: 0 measured pairs; lnx-arm64 osx-x86_64 osx-arm64 win-x86_64 win-arm64 UNMEASURED\n");
+  /* 变异:删第一数据行 / 加假单元 */
+  char m1[600], m2[600];
+  if (cx_fmt(m1, sizeof m1, "%s/cc-mut-del.tsv", td) || cx_fmt(m2, sizeof m2, "%s/cc-mut-add.tsv", td)) return 2;
+  char *dl=strstr(t,"\nlnx-x86_64\t"); if(!dl){ printf("FAIL\tfind row\n"); return 1; } dl++; char *de=strchr(dl,'\n')+1;
+  size_t pre = dl - t;
+  char *b1 = mm_alloc(n + 1);
+  if (!b1 || mm_copy(b1, n + 1, t, pre) || mm_copy(b1 + pre, n + 1 - pre, de, n - (de - t)) || cx_write(m1, b1, n - (de - dl))) return 2;
+  const char *fk="lnx-x86_64\tcx/runtime/fake_unit.cx\tcx/runtime/fake_unit.cx\tuse\t1\t1\n"; size_t fl=strlen(fk);
+  char *b2 = mm_alloc(n + fl + 1);
+  if (!b2 || mm_copy(b2, n + fl + 1, t, pre) || mm_copy(b2 + pre, n + fl + 1 - pre, fk, fl) ||
+      mm_copy(b2 + pre + fl, n + 1 - pre, dl, n - pre) || cx_write(m2, b2, n + fl)) return 2;
+  char *av[]={"sh","./unisacc.com","tools/core-closure.cx","--","--check","--table","build/core-closure.tsv","--table",m1,"--table",m2,0};
+  pr_result r; memset(&r,0,sizeof r); int tt=pr_run("core-closure",av,0,0,50,&r);
+  (void)sy_unlink(m1);
+  (void)sy_unlink(m2);
+  (void)sy_rmdir(td);
+  if(tt||!r.out){ printf("FAIL\tgenerator run (%s)\n",r.why); return 1; }
+  ok(strstr(r.out,"TABLE\tbuild/core-closure.tsv\tSAME")!=0,"real table SAME");
+  char k1[700], k2[700];
+  if (cx_fmt(k1, sizeof k1, "TABLE\t%s\tDRIFT", m1) || cx_fmt(k2, sizeof k2, "TABLE\t%s\tDRIFT", m2)) return 2;
+  ok(strstr(r.out,k1)!=0,"mutation delete-one-row reports DRIFT");
+  ok(strstr(r.out,k2)!=0,"mutation add-fake-unit reports DRIFT");
+  printf("%s\n",fails?"CORE_CLOSURE_CHECK_FAIL":"CORE_CLOSURE_CHECK_PASS"); return fails?1:0;
+}
