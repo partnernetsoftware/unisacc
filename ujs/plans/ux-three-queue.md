@@ -236,7 +236,8 @@
 - ~~GLTFLoader 局部变换 | G-io 节点 TRS、列主序矩阵、默认值与坏输入保留 | GLB JSON。~~ 真实 r160 加载器与独立金值十项通过，误取矩阵轴转红。
 - ~~GLTFLoader 节点父关系 | G-io 多层父关系、循环、多父、坏索引和原子发布 | 场景根节点。~~ 九项通过，错误父节点转红。
 - ~~GLTFLoader 局部 Matrix4 接线 | G-io TRS 合成与原矩阵复制 | 局部变换与 M1 Matrix4。~~ 八项通过，交换矩阵行列取值转红。
-- GLTFLoader 对象树与变换接线 | G-io 多层世界变换及节点发布 | 场景根节点、父关系、局部 Matrix4 及 Object3D。
+- ~~GLTFLoader 有序 Object3D 节点关系 | G-io 多层节点、作者顺序及原子失败 | 场景根节点与父关系。~~ 真实加载器七项通过，乱序转红。
+- GLTFLoader 对象树与变换接线 | G-io 将已读局部变换与节点关系组成场景，读回世界矩阵 | 有序 Object3D 节点关系、局部 Matrix4。
 - GLTFLoader 整景提交与失败回收 | G-io 完整模型、失败注入与资源代数 | 场景节点、GLTF 网格、纹理、蒙皮与动画。
 
 ## M10 拾取与控制
@@ -263,7 +264,8 @@
 - ~~PointerLockControls 真实浏览器锁定探针 | CDP 受信点击、锁定释放以及释放后忽略移动 | 事件与相对运动。~~ Chrome 实测通过，翻转原生锁确认转红。
 - PointerLockControls 正式宿主桥 | CDP 无权限拒绝、锁失效及部署入口 | 真实浏览器锁定探针。
 - ~~TransformControls 世界轴平移与旋转 | G-ray 分量、吸附与四元数 | r160 插件。~~ 各十项及两个篡改通过。
-- TransformControls 完整接线 | G-ray 选轴、局部坐标、缩放和结束事件 | 世界轴切片、Mesh 拾取与输入 ABI。
+- ~~TransformControls 局部轴及父姿态 | G-ray 父旋转、单位主轴、局部吸附与四元数 | 世界轴切片。~~ 局部平移和旋转各十项通过，错走世界轴和取消吸附分别转红。
+- TransformControls 完整接线 | G-ray 选轴、缩放、非均匀父缩放和结束事件 | 局部轴切片、Mesh 拾取与输入 ABI。
 - MOUSE 与 TOUCH 常量 | G-ray 实际输入路由 | r160 枚举和路由表 13 项通过，MapControls 双指错绑转红。
 
 ## M11 后处理、辅助与音频
@@ -280,10 +282,12 @@
 - ~~OutlinePass 边缘与遮挡颜色 | G-pixel 真 r160 中间纹理、深度掩模与颜色对照 | RGBA8 内核。~~ 17 项通过，遮挡边错用可见色转红。
 - OutlinePass 场景掩模与合成 | G-pixel 选择、遮挡、模糊、叠加及抹除 | 边缘内核、RenderPass、对象拾取。
 - ~~调色与 FXAA 的 RGBA8 内核 | G-pixel 通道曲线、锯齿阶跃与采样方向 | 线性 RGBA8。~~ 真实 r160 ShaderPass 18 项通过，移除调色与 FXAA 分别转红。
-- FXAA GPU 接线 | G-pixel 同目标格式读写与 EffectComposer 交换 | FXAA RGBA8 算法、EffectComposer。
+- ~~FXAA 与调色目标接线 | G-pixel WebGL2 目标到目标再到屏幕 | RGBA8 内核和 EffectComposer。~~ 18 项通过，复制代替 FXAA 时两个边缘样点转红。
+- FXAA GPU 原生目标采样 | G-pixel 原生纹理读写和大目标 | 读回重传切片及 GPU 命令。
 - 调色 Pass 完整接线 | G-pixel 色域、曝光与目标格式 | M5 色彩输出、RGBA8 内核及 EffectComposer。
 - ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
-- AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
+- ~~Axes、Grid、Box3 正交 GPU 线 | G-pixel 交错、平面与索引三种输入 | 共享场景投影。~~ 1024 像素与 r160 完全一致，轴色篡改三处转红。
+- AxesHelper 对象树及资源回收 | 场景更新与释放后拒绝 | 已通过的正交 GPU 线。
 - BoxHelper 世界包围盒采集与 GPU | G-pixel 对象树边界和 12 边实际读回 | G-struct 世界盒线 15 项与篡改已通过。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
 - CameraHelper GPU 视锥 | G-pixel 五类颜色和相机物体变换 | G-struct 逆投影视锥 19 项与篡改已通过。
@@ -296,11 +300,14 @@
 - SkeletonHelper 骨树与 GPU | G-pixel 骨树采集、位置与着色 | G-struct 骨边 17 项与篡改已通过。
 - SpotLightHelper 渲染接线 | G-pixel 射程、目标和锥角 | G-struct 锥角与目标 16 项及篡改已通过。
 - ~~Helper 固定几何生成 | G-struct 31 行事实表生成、--check 与篡改拒绝 | Plane、DirectionalLight、SpotLight。~~ 生成文件匹配，错件拒绝。
-- AudioContext | G-io 采样率、实例与关闭 | host PCM ABI。
-- AudioListener | G-io 监听姿态和主音量 | AudioContext、场景图。
+- ~~AudioContext 版本化主机桥 | G-io 采样率、实例、关闭和旧句柄 | host PCM ABI。~~ Chrome 与 r160 27 项通过，陈旧句柄篡改转红。
+- ~~AudioListener 世界位姿 | G-io Chrome AudioParam 的世界位置、朝向及上向 | AudioContext、场景图。~~ 十项通过，误读朝向轴转红。
+- AudioListener 主音量与滤镜 | G-io 增益自动化与滤镜解绑 | 世界位姿和播放主机。
 - ~~Audio 缓冲播放 | G-io 双声道 PCM、同采样率循环、稳态增益与停止 | AudioLoader。~~ Chrome 离线音频与独立金值 11 项通过，取消循环转红。
-- Audio 主机接线 | G-io 上下文输出、增益自动化、暂停与重采样 | AudioContext、缓冲播放。
-- PositionalAudio | G-io 双路声源、距离模型与定位 | Audio、AudioListener。
+- ~~Audio 双声道 PCM 主机接线 | G-io 两块连续采样、过期句柄与双声道 | AudioContext、缓冲播放。~~ Chrome 和 r160 30 项通过，交换声道转红。
+- Audio 播放完整接线 | G-io 产品宿主、增益自动化、暂停与重采样 | 双声道 PCM 主机接线。
+- ~~PositionalAudio 单声道声像 | G-io 等功率左右输出、三种距离律、离线读回 | Audio、AudioListener。~~ Chrome r160 九项通过，声道反转转红。
+- PositionalAudio 完整接线 | G-io 锥形衰减、方向变更、HRTF 和产品宿主 | 单声道声像。
 - ~~AudioAnalyser 时间窗 | G-io 离线脉冲窗、饱和、滚动与读回 | Audio。~~ 九项通过，错读时间窗相位转红。
 - ~~AudioAnalyser FFT 与平滑 | G-io Blackman 窗、频带、平滑及失败保留 | 时间窗与 Audio。~~ Chrome 离线 r160 和独立金值八项通过，交换邻近频带转红。
 - ~~AudioAnalyser 字节频带 | G-io 分贝量化、饱和和错误保留 | FFT 与平滑。~~ 九项通过，错取频带转红。
