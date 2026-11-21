@@ -123,7 +123,7 @@ native function interpolant_init(state:i64,view:i64,result:i64,kind:i64,timeKind
     result=state+InterpolantState.size;
   }
   let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,inputBytes);
-  if(stride<1 || kind<0 || kind>3 || (kind==3 && stride%4!=0)) { return 0-1; }
+  if(stride<1 || kind<0 || kind>4 || (kind==3 && stride%4!=0)) { return 0-1; }
   let v=ux_u32_put(state+InterpolantState.view,view);
   let k=ux_u32_put(state+InterpolantState.kind,kind+1);
   let r=ux_u32_put(state+InterpolantState.result,result);
@@ -148,6 +148,11 @@ native function interpolant_init(state:i64,view:i64,result:i64,kind:i64,timeKind
   return state;
 }
 
+// The base class copies boundary samples and has no interior interpolation.
+native function Interpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,4,9,9,9,AnimationSamples.size);
+}
+
 native function LinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
   return interpolant_init(state,view,result,0,9,9,9,AnimationSamples.size);
 }
@@ -161,7 +166,7 @@ native function QuatLinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
   return interpolant_init(state,view,result,3,9,9,9,AnimationSamples.size);
 }
 
-// Kinds 0, 1, 2 and 3 are Linear, Discrete, Cubic and QuaternionLinear.
+// Kinds 0 through 4 are Linear, Discrete, Cubic, QuaternionLinear and abstract base.
 native function Interpolant_initNumeric(state:i64,view:i64,result:i64,resultKind:i64,kind:i64) i64 {
   if(!animation_span(view,InterpolantNumericView.size)) { return 0-1; }
   return interpolant_init(state,view,result,kind,ux_u32(view+InterpolantNumericView.timeKind),
@@ -186,7 +191,7 @@ native function interpolant_settings_ok(state:i64,view:i64,result:i64,stride:i64
 native function interpolant_alive(state:i64) i64 {
   if(!animation_span(state,InterpolantState.size) || state%8!=0) { return 0; }
   let kind=ux_u32(state+InterpolantState.kind);
-  return kind>=1 && kind<=4;
+  return kind>=1 && kind<=5;
 }
 
 native function Interpolant_setSettings(state:i64,settings:i64) i64 {
@@ -339,6 +344,21 @@ native function interpolant_quaternion_flat(result:i64,lo:i64,hi:i64,t:f64,vw:i6
   return result;
 }
 
+native function Interpolant_copySampleValue(state:i64,index:i64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  let view=ux_u32(state+InterpolantState.view);
+  let result=ux_u32(state+InterpolantState.result);
+  let timeKind=ux_u32(state+InterpolantState.timeKind);
+  let valueKind=ux_u32(state+InterpolantState.valueKind);
+  let resultKind=ux_u32(state+InterpolantState.resultKind);
+  let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,ux_u32(state+InterpolantState.inputBytes));
+  if(stride<1 || index<0 || index>=ux_u32(view+AnimationSamples.count)) { return 0-1; }
+  let vw=interpolant_width(valueKind);
+  let rw=interpolant_width(resultKind);
+  let src=ux_u32(view+AnimationSamples.values)+index*stride*vw;
+  return interpolant_copy_row(result,src,stride,rw,vw);
+}
+
 native function Interpolant_evaluate(state:i64,t:f64) i64 {
   if(!interpolant_alive(state)) { return 0-1; }
   let kind=ux_u32(state+InterpolantState.kind)-1;
@@ -350,7 +370,7 @@ native function Interpolant_evaluate(state:i64,t:f64) i64 {
   let resultKind=ux_u32(state+InterpolantState.resultKind);
   let tw=interpolant_width(timeKind); let vw=interpolant_width(valueKind); let rw=interpolant_width(resultKind);
   let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,ux_u32(state+InterpolantState.inputBytes));
-  if(stride<1 || kind>3 || (kind==3 && stride%4!=0) ||
+  if(stride<1 || kind>4 || (kind==3 && stride%4!=0) ||
      !interpolant_settings_ok(state,view,result,stride,settings,resultKind)) { return 0-1; }
   let times=ux_u32(view+AnimationSamples.times);
   let values=ux_u32(view+AnimationSamples.values);
@@ -373,6 +393,7 @@ native function Interpolant_evaluate(state:i64,t:f64) i64 {
   if(upper==0) { lower=0; }
   let lo=values+lower*stride*vw;
   if(upper==0 || upper==count || kind==1) { return interpolant_copy_row(result,lo,stride,rw,vw); }
+  if(kind==4) { return 0-3; }
   let hi=lo+stride*vw;
   let t0=interpolant_read(times+lower*tw,tw);
   let p=(t-t0)/(interpolant_read(times+upper*tw,tw)-t0);
