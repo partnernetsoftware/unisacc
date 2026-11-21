@@ -1,0 +1,199 @@
+#pragma unisa module db
+#pragma unisa use sys.ffi
+#pragma unisa use mem.heap
+/* ext.sqlite: libsqlite3 through sys.ffi, an extension package (outside the compile closure).  No dock, no #include, no #if.
+   Handles are heap objects owned by the caller: sq_open -> sq_close, sq_prepare -> sq_finalize.
+   Returns: 0 or a positive value on success, negative SQ_E_* class on failure; sq_errcode(db) is the raw
+   sqlite extended code and sq_errmsg(db) a string borrowed from the connection (valid until the next
+   call on that connection).  Text handed to sq_bind_text is copied by sqlite (SQLITE_TRANSIENT), so the
+   caller may reuse its buffer at once.  sq_col_text is borrowed until the next sq_step/sq_reset/sq_finalize. */
+enum {
+    SQ_READONLY = 1, SQ_READWRITE = 2, SQ_CREATE = 4,
+    SQ_INT = 1, SQ_FLOAT = 2, SQ_TEXT = 3, SQ_BLOB = 4, SQ_NULL = 5,
+    SQ_E_NOLIB = -1,      /* libsqlite3 not loadable or a symbol missing */
+    SQ_E_OPEN = -2,       /* cannot open (missing file, permission, not a database) */
+    SQ_E_SQL = -3,        /* SQL text rejected (syntax, unknown table or column) */
+    SQ_E_CONSTRAINT = -4, /* UNIQUE / NOT NULL / CHECK / FK violated */
+    SQ_E_READONLY = -5,   /* write on a read-only connection */
+    SQ_E_BUSY = -6,       /* locked by another connection */
+    SQ_E_ARG = -7,        /* bad argument: null handle, bind index out of range, misuse */
+    SQ_E_NOMEM = -8,
+    SQ_E_OTHER = -9
+};
+enum { F_OPEN, F_CLOSE, F_PREP, F_STEP, F_RESET, F_CLEAR, F_FINAL, F_BTEXT, F_BI64, F_BNULL, F_CCOUNT,
+       F_CTYPE, F_CI64, F_CTEXT, F_CBYTES, F_CNAME, F_ERRMSG, F_XERR, F_CHANGES, F_ROWID, F_VERSION, F_N };
+
+typedef struct sq_db { void *h; int last; } sq_db;
+typedef struct sq_stmt { sq_db *db; void *h; } sq_stmt;
+
+static void *sq_lib;
+static void *sq_fn[F_N];
+
+static int sq_load(void) {
+    static const char *const names[F_N] = {
+        "sqlite3_open_v2", "sqlite3_close_v2", "sqlite3_prepare_v2", "sqlite3_step", "sqlite3_reset",
+        "sqlite3_clear_bindings", "sqlite3_finalize", "sqlite3_bind_text", "sqlite3_bind_int64",
+        "sqlite3_bind_null", "sqlite3_column_count", "sqlite3_column_type", "sqlite3_column_int64",
+        "sqlite3_column_text", "sqlite3_column_bytes", "sqlite3_column_name", "sqlite3_errmsg",
+        "sqlite3_extended_errcode", "sqlite3_changes", "sqlite3_last_insert_rowid", "sqlite3_libversion" };
+    static const char *const libs[4] = { "libsqlite3.so.0", "libsqlite3.dylib", "/usr/lib/libsqlite3.dylib", "sqlite3.dll" };
+    int i;
+    if (sq_lib) return 0;
+    i = 0;
+    while (i < 4 && !sq_lib) { sq_lib = sy_ffi_dlopen(libs[i], sy_ffi_now_global()); i = i + 1; }
+    if (!sq_lib) return SQ_E_NOLIB;
+    i = 0;
+    while (i < F_N) {
+        sq_fn[i] = sy_ffi_dlsym(sq_lib, names[i]);
+        if (!sq_fn[i]) { sq_lib = 0; return SQ_E_NOLIB; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* sig: one letter per argument: p pointer, i int, l 64-bit integer */
+static long sq_call(int f, int rk, const char *sig, long a0, long a1, long a2, long a3, long a4) {
+    int kinds[5], ai[5], n = 0;
+    void *vals[5];
+    long a[5], ret = 0;
+    a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3; a[4] = a4;
+    while (sig[n]) {
+        if (sig[n] == 'p') { kinds[n] = SY_FFI_POINTER; vals[n] = &a[n]; }
+        else if (sig[n] == 'l') { kinds[n] = SY_FFI_LONG; vals[n] = &a[n]; }
+        else { kinds[n] = SY_FFI_INT; ai[n] = (int)a[n]; vals[n] = &ai[n]; }
+        n = n + 1;
+    }
+    if (sy_ffi_call(sq_fn[f], rk, kinds, vals, n, n, &ret) != 0) return 21; /* as SQLITE_MISUSE */
+    if (rk == SY_FFI_INT) return (long)(int)ret;
+    return ret;
+}
+
+static int sq_class(int rc) {
+    int p = rc & 255;
+    if (p == 0) return 0;
+    if (p == 19) return SQ_E_CONSTRAINT;
+    if (p == 8) return SQ_E_READONLY;
+    if (p == 5 || p == 6) return SQ_E_BUSY;
+    if (p == 14 || p == 3 || p == 23 || p == 26) return SQ_E_OPEN;
+    if (p == 1) return SQ_E_SQL;
+    if (p == 7) return SQ_E_NOMEM;
+    if (p == 21 || p == 25) return SQ_E_ARG;
+    return SQ_E_OTHER;
+}
+
+static int sq_fail(sq_db *db) {
+    db->last = (int)sq_call(F_XERR, SY_FFI_INT, "p", (long)db->h, 0, 0, 0, 0);
+    return sq_class(db->last);
+}
+
+const char *sq_libversion(void) {
+    if (sq_load() != 0) return 0;
+    return (const char *)sq_call(F_VERSION, SY_FFI_POINTER, "", 0, 0, 0, 0, 0);
+}
+
+int sq_open(const char *path, int flags, sq_db **out) {
+    sq_db *db;
+    void *h = 0;
+    int rc;
+    if (!path || !out || !(flags & (SQ_READONLY | SQ_READWRITE)) || (flags & ~7)) return SQ_E_ARG;
+    *out = 0;
+    if (sq_load() != 0) return SQ_E_NOLIB;
+    db = (sq_db *)mm_zalloc(sizeof(sq_db));
+    if (!db) return SQ_E_NOMEM;
+    rc = (int)sq_call(F_OPEN, SY_FFI_INT, "ppip", (long)path, (long)&h, flags, 0, 0);
+    if (rc != 0) {
+        if (h) sq_call(F_CLOSE, SY_FFI_INT, "p", (long)h, 0, 0, 0, 0);
+        mm_free(db);
+        return sq_class(rc) == SQ_E_NOMEM ? SQ_E_NOMEM : SQ_E_OPEN;
+    }
+    db->h = h;
+    *out = db;
+    return 0;
+}
+
+int sq_close(sq_db *db) {
+    if (!db) return SQ_E_ARG;
+    sq_call(F_CLOSE, SY_FFI_INT, "p", (long)db->h, 0, 0, 0, 0);
+    mm_free(db);
+    return 0;
+}
+
+int sq_errcode(sq_db *db) { return db ? db->last : 0; }
+const char *sq_errmsg(sq_db *db) {
+    if (!db) return "sqlite: no connection";
+    return (const char *)sq_call(F_ERRMSG, SY_FFI_POINTER, "p", (long)db->h, 0, 0, 0, 0);
+}
+
+int sq_prepare(sq_db *db, const char *sql, sq_stmt **out) {
+    sq_stmt *st;
+    void *h = 0;
+    if (!db || !sql || !out) return SQ_E_ARG;
+    *out = 0;
+    if (sq_call(F_PREP, SY_FFI_INT, "ppipp", (long)db->h, (long)sql, -1, (long)&h, 0) != 0) return sq_fail(db);
+    if (!h) return SQ_E_SQL; /* empty statement */
+    st = (sq_stmt *)mm_zalloc(sizeof(sq_stmt));
+    if (!st) { sq_call(F_FINAL, SY_FFI_INT, "p", (long)h, 0, 0, 0, 0); return SQ_E_NOMEM; }
+    st->db = db;
+    st->h = h;
+    *out = st;
+    return 0;
+}
+
+int sq_finalize(sq_stmt *st) {
+    if (!st) return SQ_E_ARG;
+    sq_call(F_FINAL, SY_FFI_INT, "p", (long)st->h, 0, 0, 0, 0);
+    mm_free(st);
+    return 0;
+}
+
+/* index is 1-based, as in SQL '?' order */
+int sq_bind_text(sq_stmt *st, int idx, const char *s, long n) {
+    if (!st) return SQ_E_ARG;
+    if (!s) return sq_call(F_BNULL, SY_FFI_INT, "pi", (long)st->h, idx, 0, 0, 0) ? sq_fail(st->db) : 0;
+    return sq_call(F_BTEXT, SY_FFI_INT, "pipip", (long)st->h, idx, (long)s, n, -1) ? sq_fail(st->db) : 0;
+}
+int sq_bind_i64(sq_stmt *st, int idx, long v) {
+    if (!st) return SQ_E_ARG;
+    return sq_call(F_BI64, SY_FFI_INT, "pil", (long)st->h, idx, v, 0, 0) ? sq_fail(st->db) : 0;
+}
+int sq_bind_null(sq_stmt *st, int idx) {
+    if (!st) return SQ_E_ARG;
+    return sq_call(F_BNULL, SY_FFI_INT, "pi", (long)st->h, idx, 0, 0, 0) ? sq_fail(st->db) : 0;
+}
+
+/* 1: a row is ready; 0: done; negative: SQ_E_* */
+int sq_step(sq_stmt *st) {
+    int rc;
+    if (!st) return SQ_E_ARG;
+    rc = (int)sq_call(F_STEP, SY_FFI_INT, "p", (long)st->h, 0, 0, 0, 0);
+    if (rc == 100) return 1;
+    if (rc == 101) return 0;
+    return sq_fail(st->db);
+}
+
+/* rewind and drop bindings so the statement can be bound and run again */
+int sq_reset(sq_stmt *st) {
+    if (!st) return SQ_E_ARG;
+    sq_call(F_RESET, SY_FFI_INT, "p", (long)st->h, 0, 0, 0, 0);
+    sq_call(F_CLEAR, SY_FFI_INT, "p", (long)st->h, 0, 0, 0, 0);
+    return 0;
+}
+
+/* stmt.run: step to completion, reset; rows changed (>= 0) or SQ_E_* */
+long sq_run(sq_stmt *st) {
+    int rc;
+    long ch = 0;
+    if (!st) return SQ_E_ARG;
+    while ((rc = sq_step(st)) == 1) { }
+    if (rc == 0) ch = sq_call(F_CHANGES, SY_FFI_INT, "p", (long)st->db->h, 0, 0, 0, 0);
+    sq_reset(st); /* reset keeps the connection's error state, so sq_errcode/sq_errmsg stay valid */
+    return rc < 0 ? rc : ch;
+}
+
+long sq_last_rowid(sq_db *db) { return db ? sq_call(F_ROWID, SY_FFI_LONG, "p", (long)db->h, 0, 0, 0, 0) : 0; }
+int sq_col_count(sq_stmt *st) { return st ? (int)sq_call(F_CCOUNT, SY_FFI_INT, "p", (long)st->h, 0, 0, 0, 0) : 0; }
+int sq_col_type(sq_stmt *st, int c) { return st ? (int)sq_call(F_CTYPE, SY_FFI_INT, "pi", (long)st->h, c, 0, 0, 0) : SQ_NULL; }
+long sq_col_i64(sq_stmt *st, int c) { return st ? sq_call(F_CI64, SY_FFI_LONG, "pi", (long)st->h, c, 0, 0, 0) : 0; }
+const char *sq_col_text(sq_stmt *st, int c) { return st ? (const char *)sq_call(F_CTEXT, SY_FFI_POINTER, "pi", (long)st->h, c, 0, 0, 0) : 0; }
+long sq_col_len(sq_stmt *st, int c) { return st ? sq_call(F_CBYTES, SY_FFI_INT, "pi", (long)st->h, c, 0, 0, 0) : 0; }
+const char *sq_col_name(sq_stmt *st, int c) { return st ? (const char *)sq_call(F_CNAME, SY_FFI_POINTER, "pi", (long)st->h, c, 0, 0, 0) : 0; }

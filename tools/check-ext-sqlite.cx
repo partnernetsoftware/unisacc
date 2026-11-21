@@ -1,0 +1,274 @@
+/* tools/check-ext-sqlite.cx -- ext/sqlite/db.cx (sq_*): libsqlite3 through sys.ffi, an extension package (outside the compile closure).
+ *   sh ./unisacc.com tools/check-ext-sqlite.cx [-- --cases mem;file;mut1;mut2;mut3;nolib]
+ *   mem    :memory: database: open/prepare/bind/step/col, UNIQUE and NOT NULL -> SQ_E_CONSTRAINT with extended codes 2067/1299,
+ *          syntax and unknown-table errors -> SQ_E_SQL, bind out of range -> SQ_E_ARG, pragma_table_info counts, 64-bit values
+ *          (epoch ms, INT64 extremes), UTF-8 text and byte length, NULL columns, bound text copied (caller buffer reused after bind)
+ *   file   a database file under a private scratch dir: create/write, reopen read-only, write -> SQ_E_READONLY (raw 8),
+ *          missing file -> SQ_E_OPEN with a null handle
+ *   mut1-3 (control + constraint class; bound text borrowed past the bind call; read-only open widened to read-write): a private copy of
+ *          the package with one line mutated must make the mem/file groups fail; the unmutated copy must pass.
+ *   nolib  a private copy whose library names do not exist: sq_open returns SQ_E_NOLIB and the check prints SKIP-UNMEASURED, exit 3,
+ *          and never the CHECK_EXT_SQLITE line.
+ * Missing libsqlite3 (or sys.ffi) is never a PASS: line "SKIP-UNMEASURED<TAB>..." and exit 3.  Databases: :memory: and the scratch dir only.
+ * Prints PASS/FAIL per case and CHECK_EXT_SQLITE<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sqlite.db
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+
+static void ex(const char *what, long got, long want) {
+    if (!tk_ok(got == want, what)) sy_printf("  %s got=%ld want=%ld\n", what, got, want);
+}
+static int eq(const char *a, const char *b) {
+    int i = 0;
+    if (!a || !b) return 0;
+    while (a[i] && a[i] == b[i]) i = i + 1;
+    return a[i] == b[i];
+}
+
+static void write_shape(sq_db *db) {   /* INSERT/UPDATE one by one, existence SELECT, no transaction */
+    sq_stmt *st = 0, *ex1 = 0;
+    int i;
+    ex("prepare-create", sq_prepare(db, "CREATE TABLE obs(id INTEGER PRIMARY KEY, project TEXT NOT NULL, title TEXT, created_at_epoch INTEGER, uq TEXT UNIQUE)", &st), 0);
+    ex("run-create", sq_run(st), 0);
+    sq_finalize(st);
+    ex("prepare-insert", sq_prepare(db, "INSERT INTO obs(project,title,created_at_epoch,uq) VALUES(?,?,?,?)", &st), 0);
+    i = 0;
+    while (i < 5) {
+        char uq[4];
+        uq[0] = 'u'; uq[1] = (char)('0' + i); uq[2] = 0;
+        sq_bind_text(st, 1, (i % 2) ? "beta" : "alpha", -1);
+        sq_bind_text(st, 2, i == 2 ? 0 : "title", -1);
+        sq_bind_i64(st, 3, 1700000000000L + i * 5000000000L);
+        sq_bind_text(st, 4, uq, -1);
+        uq[1] = 'X';   /* buffer reuse after bind: sqlite must hold its own copy */
+        ex("insert-changes", sq_run(st), 1);
+        i = i + 1;
+    }
+    ex("last-rowid", sq_last_rowid(db), 5);
+    sq_bind_text(st, 1, "alpha", -1);
+    sq_bind_text(st, 4, "u0", -1);
+    ex("dup-insert-class", sq_run(st), SQ_E_CONSTRAINT);
+    ex("dup-insert-raw", sq_errcode(db), 2067);
+    ex("dup-msg-has-unique", tk_has(sq_errmsg(db), "UNIQUE"), 1);
+    sq_bind_null(st, 1);
+    ex("notnull-class", sq_run(st), SQ_E_CONSTRAINT);
+    ex("notnull-raw", sq_errcode(db), 1299);
+    ex("bind-out-of-range", sq_bind_i64(st, 9, 1), SQ_E_ARG);
+    sq_finalize(st);
+    ex("prepare-exists", sq_prepare(db, "SELECT uq FROM obs WHERE id = 1", &ex1), 0);
+    ex("bound-text-step", sq_step(ex1), 1);
+    ex("bound-text-copied", eq(sq_col_text(ex1, 0), "u0"), 1);
+    sq_finalize(ex1);
+    ex("prepare-exists2", sq_prepare(db, "SELECT 1 FROM obs WHERE uq = ? LIMIT 1", &ex1), 0);
+    sq_bind_text(ex1, 1, "u3", -1);
+    ex("exists-u3", sq_step(ex1), 1);
+    sq_reset(ex1);
+    sq_bind_text(ex1, 1, "zz", -1);
+    ex("exists-zz-done", sq_step(ex1), 0);
+    sq_finalize(ex1);
+    ex("prepare-update", sq_prepare(db, "UPDATE obs SET title = ? WHERE project = ?", &st), 0);
+    sq_bind_text(st, 1, "renamed-\xe4\xb8\xad", -1);
+    sq_bind_text(st, 2, "beta", -1);
+    ex("update-changes", sq_run(st), 2);
+    sq_finalize(st);
+    ex("syntax-error-class", sq_prepare(db, "SELEC 1", &st), SQ_E_SQL);
+    ex("syntax-stmt-null", st == 0, 1);
+    ex("syntax-msg", tk_has(sq_errmsg(db), "syntax"), 1);
+    ex("no-such-table-class", sq_prepare(db, "SELECT * FROM nosuch", &st), SQ_E_SQL);
+}
+
+static void read_shape(sq_db *db) {   /* read-only SELECTs */
+    sq_stmt *st = 0;
+    int n = 0;
+    ex("prepare-select", sq_prepare(db, "SELECT id, project, title, created_at_epoch FROM obs WHERE project = ? ORDER BY created_at_epoch DESC LIMIT ?", &st), 0);
+    sq_bind_text(st, 1, "alpha", -1);
+    sq_bind_i64(st, 2, 2);
+    ex("col-count", sq_col_count(st), 4);
+    while (sq_step(st) == 1) {
+        if (n == 0) { ex("first-id", sq_col_i64(st, 0), 5); ex("first-epoch-64bit", sq_col_i64(st, 3), 1720000000000L);
+                      ex("first-project", eq(sq_col_text(st, 1), "alpha"), 1); ex("first-title-type", sq_col_type(st, 2), SQ_TEXT); }
+        if (n == 1) { ex("second-id", sq_col_i64(st, 0), 3); ex("null-col-type", sq_col_type(st, 2), SQ_NULL);
+                      ex("null-text-ptr", sq_col_text(st, 2) == 0, 1); ex("null-col-i64", sq_col_i64(st, 2), 0); }
+        n = n + 1;
+    }
+    ex("rows", n, 2);
+    ex("col-name", eq(sq_col_name(st, 3), "created_at_epoch"), 1);
+    sq_finalize(st);
+    ex("prepare-beta", sq_prepare(db, "SELECT title FROM obs WHERE project = ? ORDER BY id LIMIT 1", &st), 0);
+    sq_bind_text(st, 1, "beta", -1);
+    ex("beta-step", sq_step(st), 1);
+    ex("utf8-text", eq(sq_col_text(st, 0), "renamed-\xe4\xb8\xad"), 1);
+    ex("utf8-len", sq_col_len(st, 0), 11);
+    sq_finalize(st);
+    ex("prepare-pragma", sq_prepare(db, "SELECT COUNT(*) FROM pragma_table_info('obs') WHERE name='title'", &st), 0);
+    ex("pragma-step", sq_step(st), 1);
+    ex("pragma-has-title", sq_col_i64(st, 0), 1);
+    sq_finalize(st);
+    ex("prepare-pragma2", sq_prepare(db, "SELECT COUNT(*) FROM pragma_table_info('obs') WHERE name='nosuch'", &st), 0);
+    ex("pragma2-step", sq_step(st), 1);
+    ex("pragma-no-nosuch", sq_col_i64(st, 0), 0);
+    sq_finalize(st);
+    ex("prepare-pragma3", sq_prepare(db, "SELECT COUNT(*) FROM pragma_table_info('obs')", &st), 0);
+    ex("pragma3-step", sq_step(st), 1);
+    ex("pragma-column-count", sq_col_i64(st, 0), 5);
+    sq_finalize(st);
+}
+
+static void i64_shape(sq_db *db) {
+    sq_stmt *st = 0;
+    ex("prepare-i64", sq_prepare(db, "SELECT ?, ?", &st), 0);
+    sq_bind_i64(st, 1, 9223372036854775807L);
+    sq_bind_i64(st, 2, -9223372036854775807L - 1);
+    ex("i64-step", sq_step(st), 1);
+    ex("i64-max", sq_col_i64(st, 0), 9223372036854775807L);
+    ex("i64-min", sq_col_i64(st, 1), -9223372036854775807L - 1);
+    ex("i64-type", sq_col_type(st, 0), SQ_INT);
+    sq_finalize(st);
+}
+
+static void group_mem(void) {
+    sq_db *db = 0;
+    ex("open-memory", sq_open(":memory:", SQ_READWRITE | SQ_CREATE, &db), 0);
+    write_shape(db);
+    read_shape(db);
+    i64_shape(db);
+    ex("close", sq_close(db), 0);
+    ex("open-bad-flags", sq_open(":memory:", 0, &db), SQ_E_ARG);
+    ex("open-null-path", sq_open(0, SQ_READONLY, &db), SQ_E_ARG);
+    ex("prepare-null-db", sq_prepare(0, "SELECT 1", 0), SQ_E_ARG);
+    ex("close-null", sq_close(0), SQ_E_ARG);
+}
+
+static void group_file(void) {
+    sq_db *db = 0;
+    sq_stmt *st = 0;
+    char dir[4096], p[4400], miss[4400];
+    if (tk_scratch("check-ext-sqlite", dir, sizeof dir) || cx_fmt(p, sizeof p, "%s/t.db", dir) || cx_fmt(miss, sizeof miss, "%s/none.db", dir)) { tk_ok(0, "file-scratch"); return; }
+    ex("open-file-rw", sq_open(p, SQ_READWRITE | SQ_CREATE, &db), 0);
+    write_shape(db);
+    sq_close(db);
+    db = 0;
+    ex("open-file-ro", sq_open(p, SQ_READONLY, &db), 0);
+    read_shape(db);
+    ex("ro-prepare-insert", sq_prepare(db, "INSERT INTO obs(project) VALUES('x')", &st), 0);
+    ex("readonly-write-class", sq_run(st), SQ_E_READONLY);
+    ex("readonly-write-raw", sq_errcode(db), 8);
+    sq_finalize(st);
+    sq_close(db);
+    db = (sq_db *)1;
+    ex("open-missing-ro", sq_open(miss, SQ_READONLY, &db), SQ_E_OPEN);
+    ex("missing-handle-null", db == 0, 1);
+    ex("missing-not-created", sy_exists(miss), 0);
+}
+
+/* ---- mutation: private copy of the package with one line changed ---- */
+static char work[4096], com[4400], root[4096];
+
+static long find_at(const char *h, long hn, const char *nd, long nn) {
+    long i;
+    for (i = 0; i + nn <= hn; i++) if (!strncmp(h + i, nd, (size_t)nn)) return i;
+    return -1;
+}
+static void cp(void *d, const void *s, long n) { if (n > 0 && mm_copy(d, n, s, n)) exit(2); }
+
+static int put_file(const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { sy_printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    cp(dst, src, k); cp(dst + k, nw, nl); cp(dst + k + nl, src + k + ol, n - k - ol);
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+
+static int setup(const char *old, const char *nw) {
+    char lk[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_file("ext/sqlite/db.cx", old, nw)) return 0;
+    if (!put_file("tools/check-ext-sqlite.cx", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    {   char p[4400]; if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0; src = cx_read(p, &n); }
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {   /* each line; R rows other than sqlite get the r/ link prefix on DIR */
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 6 && !strncmp(src + i + 2, "sqlite", 6))) {
+            cp(dst + k, src + i, t2 + 1 - i); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, e - t2 - 1); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+
+static int child(const char *cases) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", (char *)cases, 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-ext-sqlite.cx", work)) return -1;
+    return tk_run(av, 0, 55000);
+}
+
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-ext-sqlite-mut", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 1 && setup("", "")) {
+        rc = child("mem;file");
+        tk_ok(rc == 0, "mut-control-unmutated-passes");
+    } else if (part == 1) tk_ok(0, "mut-control-setup");
+    if (part == 1 && setup("if (p == 19) return SQ_E_CONSTRAINT;", "if (p == 19) return SQ_E_SQL;")) {
+        rc = child("mem");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tdup-insert-class"), "mut-constraint-class-misjudged-detected");
+    } else if (part == 1) tk_ok(0, "mut-class-setup");
+    if (part == 2 && setup("(long)s, n, -1)", "(long)s, n, 0)")) {   /* SQLITE_STATIC: sqlite keeps the caller's pointer */
+        rc = child("mem");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tbound-text-copied"), "mut-bound-text-borrowed-detected");
+    } else if (part == 2) tk_ok(0, "mut-borrow-setup");
+    if (part == 3 && setup("(long)&h, flags, 0, 0)", "(long)&h, flags == 1 ? 2 : flags, 0, 0)")) {
+        rc = child("file");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\treadonly-write-class"), "mut-readonly-write-allowed-detected");
+    } else if (part == 3) tk_ok(0, "mut-readonly-setup");
+}
+
+static void group_nolib(void) {
+    int rc;
+    if (tk_scratch("check-ext-sqlite-nolib", work, sizeof work)) { tk_ok(0, "nolib-scratch"); return; }
+    if (!setup("\"libsqlite3.so.0\", \"libsqlite3.dylib\", \"/usr/lib/libsqlite3.dylib\", \"sqlite3.dll\"",
+               "\"nolib-a.so\", \"nolib-b.dylib\", \"/nonexistent/nolib-c.dylib\", \"nolib-d.dll\"")) { tk_ok(0, "nolib-setup"); return; }
+    rc = child("mem;file");
+    tk_ok(rc == 3, "nolib-exit-3");
+    tk_ok(tk_has(tk_out(), "SKIP-UNMEASURED\tsq_open=SQ_E_NOLIB"), "nolib-skip-unmeasured-line");
+    tk_ok(!tk_has(tk_out(), "CHECK_EXT_SQLITE") && !tk_has(tk_out(), "PASS\t"), "nolib-no-pass");
+}
+
+int main(int argc, char **argv) {
+    sq_db *probe = 0;
+    int rc;
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    rc = sq_open(":memory:", SQ_READWRITE | SQ_CREATE, &probe);
+    if (rc == SQ_E_NOLIB) { sy_printf("SKIP-UNMEASURED\tsq_open=SQ_E_NOLIB\tlibsqlite3 or sys.ffi not loadable\n"); return 3; }
+    if (rc == 0) sq_close(probe);
+    if (tk_case("mem")) group_mem();
+    if (tk_case("file")) group_file();
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    if (tk_case("nolib")) group_nolib();
+    return tk_end("CHECK_EXT_SQLITE", 0);
+}
