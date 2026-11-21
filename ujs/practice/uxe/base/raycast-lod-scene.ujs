@@ -1,0 +1,110 @@
+struct RaySceneLODPlan {
+  arena: u32;
+  snapshot: u32;
+  count: u32;
+  lods: u32;
+  lodCount: u32;
+}
+
+native function ray_lod_readable(at:i64,bytes:i64,out:i64,size:i64,stage:i64,space:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes &&
+    !raycaster_overlap(at,bytes,out,size) && !raycaster_overlap(at,bytes,stage,space);
+}
+
+native function ray_lod_link(table:i64,count:i64,node:i64) i64 {
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    let entry=ux_u32(table+mid*4);
+    if(ux_u32(entry+LOD.node)<node) { lo=mid+1; }
+    else { hi=mid; }
+  }
+  if(lo==count) { return 0-1; }
+  let entry=ux_u32(table+lo*4);
+  if(ux_u32(entry+LOD.node)!=node) { return 0-1; }
+  return entry;
+}
+
+native function ray_lod_matrix_ok(arena:i64,node:i64,out:i64,size:i64,stage:i64,space:i64) i64 {
+  let object=Object3D_address(arena,node);
+  if(object<0) { return 0; }
+  let matrix=ux_u32(object+Object3D.worldMatrix);
+  return raycaster_span(matrix,128) && ray_lod_readable(matrix,128,out,size,stage,space);
+}
+
+// Replace each LOD's position in a full or shallow scene snapshot with
+// its direct selected mesh row. LOD addresses are sorted by node handle.
+// The original descendants remain in preorder.
+// Raycaster_intersectSceneMeshes consumes these rows directly and performs
+// one stable distance sort, so equal and duplicate hits are preserved.
+native function RayScene_mergeLOD(origin:i64,mask:i64,plan:i64,out:i64,capacity:i64,stage:i64,rows:i64) i64 {
+  if(!raycaster_span(origin,24) || mask<0 || mask>4294967295 ||
+     plan<0 || plan%4!=0 || plan>6291456-RaySceneLODPlan.size ||
+     out<0 || out%4!=0 || capacity<0 || capacity>65536 || rows<0 || rows>65536 ||
+     out>6291456-capacity*SceneSnapshotRow.size || stage<0 || stage%4!=0) { return 0-1; }
+  let arena=ux_u32(plan+RaySceneLODPlan.arena);
+  let snapshot=ux_u32(plan+RaySceneLODPlan.snapshot);
+  let count=ux_u32(plan+RaySceneLODPlan.count);
+  let table=ux_u32(plan+RaySceneLODPlan.lods);
+  let lods=ux_u32(plan+RaySceneLODPlan.lodCount);
+  let size=capacity*SceneSnapshotRow.size;
+  let space=count*SceneSnapshotRow.size;
+  if(count>rows || lods>65536 || stage>6291456-space || !raycaster_span(arena,8) ||
+     raycaster_overlap(out,size,stage,space) ||
+     !ray_lod_readable(origin,24,out,size,stage,space) ||
+     !ray_lod_readable(plan,RaySceneLODPlan.size,out,size,stage,space) ||
+     !ray_lod_readable(arena,8+ux_u32(arena)*424,out,size,stage,space) ||
+     !ray_lod_readable(snapshot,space,out,size,stage,space) ||
+     !ray_lod_readable(table,lods*4,out,size,stage,space)) { return 0-1; }
+
+  let previous=0;
+  let i=0;
+  while(i<lods) {
+    let lod=ux_u32(table+i*4);
+    if(!ray_lod_readable(lod,LOD.size,out,size,stage,space)) { return 0-1; }
+    let node=ux_u32(lod+LOD.node);
+    if(node<=previous || !ray_lod_matrix_ok(arena,node,out,size,stage,space)) { return 0-1; }
+    let levels=ux_u32(lod+LOD.levels);
+    let used=ux_u32(lod+LOD.count);
+    let maximum=ux_u32(lod+LOD.capacity);
+    if(used>maximum || levels%8!=0 ||
+       !ray_lod_readable(levels,maximum*LODLevel.size,out,size,stage,space)) { return 0-1; }
+    let j=0;
+    while(j<used) {
+      let child=ux_u32(levels+j*LODLevel.size+LODLevel.node);
+      if(!ray_lod_matrix_ok(arena,child,out,size,stage,space)) { return 0-1; }
+      j=j+1;
+    }
+    previous=node;
+    i=i+1;
+  }
+
+  let total=0;
+  i=0;
+  while(i<count) {
+    let row=snapshot+i*SceneSnapshotRow.size;
+    let matrix=ux_u32(row+SceneSnapshotRow.worldMatrix);
+    if(!raycaster_span(matrix,128) || !ray_lod_readable(matrix,128,out,size,stage,space)) { return 0-1; }
+    i=i+1;
+  }
+
+  i=0;
+  while(i<count) {
+    let row=snapshot+i*SceneSnapshotRow.size;
+    let target=stage+total*SceneSnapshotRow.size;
+    let lod=ray_lod_link(table,lods,ux_u32(row+SceneSnapshotRow.node));
+    if(lod<0) {
+      let copied=uxe_copy_record(target,row,SceneSnapshotRow.size);
+      total=total+1;
+    } else {
+      let selected=LOD_raycastSceneRow(origin,mask,arena,lod,target);
+      if(selected<0) { return selected; }
+      total=total+selected;
+    }
+    i=i+1;
+  }
+  if(total>capacity) { return 0-2; }
+  let published=uxe_copy_record(out,stage,total*SceneSnapshotRow.size);
+  return total;
+}
