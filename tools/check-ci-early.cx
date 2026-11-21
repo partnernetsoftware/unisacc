@@ -223,6 +223,110 @@ static int run_suite(const char *bin, const char *root, const char *tmp, const c
     return ok;
 }
 
+static int run_wf_lint_suite(const char *bin, const char *root, const char *tmp,
+                             const char *mut_flag, int quiet) {
+    char out[4096], wf_bad_mat[CK_PATH], wf_bad_gnu[CK_PATH], wf_good[CK_PATH];
+    int ok = 1, rc;
+    cx_fmt(wf_bad_mat, sizeof wf_bad_mat, "%s/wf-bad-matrix.yml", tmp);
+    cx_fmt(wf_bad_gnu, sizeof wf_bad_gnu, "%s/wf-bad-gnu.yml", tmp);
+    cx_fmt(wf_good, sizeof wf_good, "%s/wf-good.yml", tmp);
+
+    /* Red 1: matrix includes macos-15 and unguarded timeout 55 (0.0.88 real failure shape) */
+    {
+        static const char bad1[] =
+            "name: bad1\n"
+            "jobs:\n"
+            "  candidate:\n"
+            "    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - runner: macos-15\n"
+            "            os: osx\n"
+            "    steps:\n"
+            "      - name: Run L0 SURF probe (POSIX)\n"
+            "        if: matrix.os != 'win'\n"
+            "        run: |\n"
+            "          timeout 55 ./probe osx/arm64\n";
+        if (cx_write(wf_bad_mat, bad1, (size_t)strlen(bad1))) return 0;
+        char *v[] = {(char *)bin, "--lint-workflows", wf_bad_mat, (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 15, out, sizeof out);
+        int c = (rc == 1) && has_sub(out, "WF_MACOS_GNU\tFAIL\t") && has_sub(out, "cmd=timeout");
+        check(c, "wf-lint-red-macos-matrix-timeout", out, quiet);
+        if (!c) ok = 0;
+    }
+
+    /* Red 2: direct macos-15 job with sed -i, readlink -f, date -d, stat -c */
+    {
+        static const char bad2[] =
+            "name: bad2\n"
+            "jobs:\n"
+            "  mac:\n"
+            "    runs-on: macos-15\n"
+            "    steps:\n"
+            "      - name: GNU cmds\n"
+            "        run: |\n"
+            "          sed -i 's/a/b/' x\n"
+            "          readlink -f x\n"
+            "          date -d '2026-01-01'\n"
+            "          stat -c %s x\n";
+        if (cx_write(wf_bad_gnu, bad2, (size_t)strlen(bad2))) return 0;
+        char *v[] = {(char *)bin, "--lint-workflows", wf_bad_gnu, (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 15, out, sizeof out);
+        int c = (rc == 1) &&
+                has_sub(out, "cmd=sed -i") &&
+                has_sub(out, "cmd=readlink -f") &&
+                has_sub(out, "cmd=date -d") &&
+                has_sub(out, "cmd=stat -c") &&
+                has_sub(out, "violations=4");
+        check(c, "wf-lint-red-macos-gnu-4cmds", out, quiet);
+        if (!c) ok = 0;
+    }
+
+    /* Green 1: guarded with command -v timeout + Linux-only step with timeout */
+    {
+        static const char good1[] =
+            "name: good1\n"
+            "jobs:\n"
+            "  candidate:\n"
+            "    runs-on: ${{ matrix.runner }}\n"
+            "    strategy:\n"
+            "      matrix:\n"
+            "        include:\n"
+            "          - runner: macos-15\n"
+            "            os: osx\n"
+            "    steps:\n"
+            "      - name: Guarded\n"
+            "        timeout-minutes: 2\n"
+            "        run: |\n"
+            "          if command -v timeout >/dev/null 2>&1; then\n"
+            "            timeout 55 ./probe\n"
+            "          else\n"
+            "            ./probe\n"
+            "          fi\n"
+            "      - name: Linux only\n"
+            "        if: matrix.os == 'lnx'\n"
+            "        run: timeout 30 ./lnx-only\n";
+        if (cx_write(wf_good, good1, (size_t)strlen(good1))) return 0;
+        char *v[] = {(char *)bin, "--lint-workflows", wf_good, (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 15, out, sizeof out);
+        int c = (rc == 0) && has_sub(out, "WF_MACOS_GNU\tPASS\t") && has_sub(out, "violations=0");
+        check(c, "wf-lint-green-guarded-and-lnx-only", out, quiet);
+        if (!c) ok = 0;
+    }
+
+    /* Green 2: live .github/workflows in repo */
+    {
+        char *v[] = {(char *)bin, "--lint-workflows", (char *)mut_flag, 0};
+        rc = run_cmd(v, root, 15, out, sizeof out);
+        int c = (rc == 0) && has_sub(out, "WF_MACOS_GNU\tPASS\t") && has_sub(out, "violations=0");
+        check(c, "wf-lint-live-repo-workflows", out, quiet);
+        if (!c) ok = 0;
+    }
+
+    return ok;
+}
+
 int main(void) {
     char root[CK_PATH], tmp[CK_PATH], bin[CK_PATH], out[4096], head_rev[64], head_ver[32];
     if (sy_cwd(root, sizeof root) < 0) return 2;
@@ -249,8 +353,9 @@ int main(void) {
     if (rv_load("release/candidate.tsv", head_ver)) return 2;
 
     (void)run_suite(bin, root, tmp, head_rev, head_ver, 0, 0);
+    (void)run_wf_lint_suite(bin, root, tmp, 0, 0);
 
-    /* 3-mutant gate */
+    /* 3-mutant gate (ci-early core) */
     {
         static const char *muts[3] = {
             "--mutate-ignore-cell-fail",
@@ -270,6 +375,29 @@ int main(void) {
             }
         }
         sy_printf("MUTATION_GATE\tmutants=3\tkilled=%d\tsurvived=%d\tscore=%d/3(=%s)\tverdict=%s\n",
+                  killed, 3 - killed, killed, killed == 3 ? "1.00" : "0.00", killed == 3 ? "PASS" : "FAIL");
+    }
+
+    /* 3-mutant gate (workflow macOS GNU lint) */
+    {
+        static const char *wf_muts[3] = {
+            "--mutate-wf-skip-timeout",
+            "--mutate-wf-skip-sedi",
+            "--mutate-wf-skip-matrix"
+        };
+        int i, killed = 0;
+        for (i = 0; i < 3; i++) {
+            int survived = run_wf_lint_suite(bin, root, tmp, wf_muts[i], 1);
+            if (!survived) {
+                killed++;
+                passed++;
+                sy_printf("PASS\tmutant-killed:%s\n", wf_muts[i]);
+            } else {
+                failed++;
+                sy_printf("FAIL\tmutant-survived:%s\n", wf_muts[i]);
+            }
+        }
+        sy_printf("WF_LINT_MUTATION_GATE\tmutants=3\tkilled=%d\tsurvived=%d\tscore=%d/3(=%s)\tverdict=%s\n",
                   killed, 3 - killed, killed, killed == 3 ? "1.00" : "0.00", killed == 3 ? "PASS" : "FAIL");
     }
 

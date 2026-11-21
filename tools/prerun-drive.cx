@@ -1564,23 +1564,6 @@ static int pd_cmd_merge(const char *in_dir, const char *out_dir, const char *ver
         }
         mm_free(b);
     }
-    if (last_summary[0] && mp + strlen(last_summary) + 2 < cap) {
-        size_t sl = strlen(last_summary);
-        mm_copy(merged + mp, cap - mp, last_summary, sl);
-        mp += sl;
-        merged[mp++] = '\n';
-    }
-
-    char spath[PD_PW], efpath[PD_PW], eupath[PD_PW];
-    if (cx_fmt(spath, sizeof spath, "%s/strict-final.tsv", out_dir) ||
-        cx_fmt(efpath, sizeof efpath, "%s/expected-fail.draft.tsv", out_dir) ||
-        cx_fmt(eupath, sizeof eupath, "%s/expected-unmeasured.draft.tsv", out_dir)) {
-        mm_free(merged);
-        return pd_refuse("path-bound");
-    }
-    int wrc = sy_write_file(spath, merged, (int64_t)mp, 0644);
-    mm_free(merged);
-    if (wrc) return pd_refuse("write-strict-final");
 
     int n_pass = 0, n_fail = 0, n_unk = 0, n_sup = 0;
     static char ef_buf[65536], eu_buf[65536];
@@ -1607,6 +1590,51 @@ static int pd_cmd_merge(const char *in_dir, const char *out_dir, const char *ver
             if (eup + rl < sizeof eu_buf) { mm_copy(eu_buf + eup, sizeof eu_buf - eup, row, rl); eup += rl; }
         }
     }
+
+    if (last_summary[0]) {
+        char sum_tail[1024] = {0}, sum_line[1280] = {0};
+        size_t tp = 0;
+        const char *p = last_summary;
+        while (*p) {
+            const char *te = p;
+            while (*te && *te != '\t') te++;
+            size_t tl = (size_t)(te - p);
+            if (tl > 0 &&
+                !(tl == 7 && memcmp(p, "SUMMARY", 7) == 0) &&
+                !pd_starts(p, "batches=") &&
+                !pd_starts(p, "PASS=") &&
+                !pd_starts(p, "FAIL=") &&
+                !pd_starts(p, "UNKNOWN=") &&
+                !pd_starts(p, "INVALID=")) {
+                if (tp + tl + 2 < sizeof sum_tail) {
+                    sum_tail[tp++] = '\t';
+                    mm_copy(sum_tail + tp, sizeof sum_tail - tp, p, tl);
+                    tp += tl;
+                    sum_tail[tp] = 0;
+                }
+            }
+            p = *te ? te + 1 : te;
+        }
+        cx_fmt(sum_line, sizeof sum_line, "SUMMARY\tbatches=%d\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=0%s",
+               pd_nstates, n_pass, n_fail, n_unk, sum_tail);
+        size_t sl = strlen(sum_line);
+        if (mp + sl + 2 < cap) {
+            mm_copy(merged + mp, cap - mp, sum_line, sl);
+            mp += sl;
+            merged[mp++] = '\n';
+        }
+    }
+
+    char spath[PD_PW], efpath[PD_PW], eupath[PD_PW];
+    if (cx_fmt(spath, sizeof spath, "%s/strict-final.tsv", out_dir) ||
+        cx_fmt(efpath, sizeof efpath, "%s/expected-fail.draft.tsv", out_dir) ||
+        cx_fmt(eupath, sizeof eupath, "%s/expected-unmeasured.draft.tsv", out_dir)) {
+        mm_free(merged);
+        return pd_refuse("path-bound");
+    }
+    int wrc = sy_write_file(spath, merged, (int64_t)mp, 0644);
+    mm_free(merged);
+    if (wrc) return pd_refuse("write-strict-final");
     sy_write_file(efpath, ef_buf, (int64_t)efp, 0644);
     sy_write_file(eupath, eu_buf, (int64_t)eup, 0644);
 

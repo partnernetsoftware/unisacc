@@ -132,6 +132,7 @@ static char *co_product_path(void){if(!co_product[0]&&sy_realpath("unisacc.com",
 static const char *co_tmpdir(void) {
     static char dir[460];
     const char *td = sy_tmpdir();
+    if (strcmp(td, "/tmp") != 0) return td;
     if (dir[0]) return dir;
     char gdir[4096], h[65];
     char *gv[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
@@ -580,6 +581,10 @@ static int co_land(const char *msg, const char *basec, char *newfull, char *out,
         long begin=sy_now_ms();
         co_ref_rc=run(uv,out,cap);
         co_ref_ms=sy_now_ms()-begin;
+        if (co_ref_rc == 0) {
+            sy_printf("COMMIT_LANDED\tfull=%s\tbase=%s\n", newfull, basec);
+            fflush(stdout);
+        }
         return co_ref_rc != 0; }
 }
 /* HEAD moved and PATH differs there from the base this commit was built on: name the path and the commit */
@@ -1004,9 +1009,13 @@ static void co_manifest(const char *id, char *mpath, long mcap) {
     }
     mm_free(m);
 }
-/* 1 when LINE[0..n) is one of the manifest rows of registry table T */
+/* 1 when LINE[0..n) is one of the manifest rows of registry table T.  Under --new-tool a tools-compile-NNN shard
+   row of tests/batches.tsv also counts: register --tool adds one when the inventory crosses a multiple of 8, it has
+   no manifest, and the precommit toolsreg gate checks the shard count against the index inventory exactly. */
+static int co_nt_shard_row(const char *s, long n);
 static int co_isrow(int t, const char *s, long n) {
     long at = 0;
+    if (t == 0 && co_nt_shard_row(s, n)) return 1;
     while (at < co_regrown[t]) { long e = tx_chr(co_regrows[t] + at, co_regrown[t] - at, '\n');
         if (e == n && tx_same(co_regrows[t] + at, n, s, n)) return 1; at += e + 1; }
     return 0;
@@ -1162,6 +1171,18 @@ static int co_mergecont(int mcont, const char *msg, int np, const char **paths, 
         if (run(rv, par, sizeof par) != 0 || tx_len(par, sizeof par) < 122 || !tx_eqz(par + 82, mh)) {
             fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: COMMIT_MERGE_PARENTS: HEAD parents are not (old HEAD, %s): %s\n", mh, par); return 1; } }
     if (sy_exists(mp) == 1) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: COMMIT_MERGE_STATE: MERGE_HEAD still present after the commit\n"); return 1; }
+    {   char msha[44], sref[200], owner[65], mark[320];
+        const char *ow = getenv("DEVSVC_OWNER");
+        const char *src = (ow && ow[0] && strncmp(ow, "auto-", 5) && strncmp(ow, "flow-", 5)) ? ow : "auto";
+        char *sv[] = {"git", "symbolic-ref", "-q", "HEAD", 0};
+        tx_copy(msha, sizeof msha, par, 40); msha[40] = 0;
+        if (run(sv, sref, sizeof sref) == 0 && sref[0] &&
+            sy_sha256_hex(src, strlen(src), owner) == 0 &&
+            !cx_fmt(mark, sizeof mark, "devsvc merge v1 %s %s", owner, sref)) {
+            char *uv[] = {"git", "update-ref", "-m", mark, "HEAD", msha, msha, 0};
+            (void)run(uv, out, sizeof out);
+        }
+    }
     sy_printf("COMMIT_MERGE\tcommit=%.40s\tparents=2\tsecond=%s\n", par, mh);
     return 0;
 }
@@ -1220,8 +1241,118 @@ static int co_replay_index(int argc, char **argv) {
     printf("COMMIT_REPLAY\tfull=%s\tbase=%s\n", out, head);
     return 0;
 }
+/* --new-tool PATH (repeatable): the controlled path for "a new tools/NAME.cx, what it depends on and its
+   registration in ONE commit".  It is --whole PATH plus --keyed tests/tools-compile-sources.tsv PATH (pass --derive
+   or --derive-selected with it so derived tables are recomputed on the commit's own tree, where the new file is
+   tracked; it is not forced here because a cold derive can exceed its 55 s bound), and adds a gate on
+   the private index after derive and before reg-manifest and the hook:
+   (1) the index's tests/tools-compile-sources.tsv carries the row PATH;
+   (2) the index's tests/batches.tsv has at least one row whose CHECK (field 4) or source (field 9) is PATH;
+   (3) every such row that is not byte-for-byte a HEAD row is run by tools/register.cx --qualify-tree TREE ID on
+       exactly the tree being committed (single-commit cold layout, the register selftest unchanged) and must PASS.
+   Any miss refuses with COMMIT_OWN_FAIL<TAB>class=new-tool, nothing committed.  Nothing is relaxed: the rows still
+   have to exist (register --no-run writes them and validates the registry), the check really runs, and it runs on
+   the bytes of the commit instead of HEAD plus a work-tree overlay. */
+#define CO_NEWT 16
+static const char *co_newtool[CO_NEWT]; static int co_nnew;
+static int co_nt_field_is(const char *l, long ln, int f, const char *v) {
+    long o, n, vl = tx_len(v, 4096);
+    return !tx_field(l, ln, '\t', f, &o, &n) && n == vl && tx_same(l + o, n, v, vl);
+}
+static int co_nt_shard_min = -1, co_nt_shard_max = -1;
+static int co_nt_shard_row(const char *s, long n) {
+    if (co_nnew <= 0 || n <= 15 || !tx_prefix(s, n, "tools-compile-", 14)) return 0;
+    if (co_nt_shard_min < 0) {
+        static char hst[1 << 18];
+        char *hsv[] = {"git", "show", "HEAD:tests/tools-compile-sources.tsv", 0};
+        long hrows = 0, at = 0, hn = 0;
+        if (run(hsv, hst, sizeof hst) == 0) {
+            hn = tx_len(hst, sizeof hst);
+            while (at < hn) {
+                long e = tx_chr(hst + at, hn - at, '\n'), l = e < 0 ? hn - at : e;
+                if (l > 0) hrows++;
+                at += l + 1;
+            }
+        }
+        co_nt_shard_min = (int)((hrows + 7) / 8);
+        co_nt_shard_max = (int)((hrows + co_nnew + 7) / 8);
+    }
+    for (int j = co_nt_shard_min; j < co_nt_shard_max; j++) {
+        char r1[320], r2[320];
+        if (!cx_fmt(r1, sizeof r1, "tools-compile-%03d\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%d\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily", j, j) &&
+            n == tx_len(r1, sizeof r1) && tx_same(s, n, r1, n)) return 1;
+        if (!cx_fmt(r2, sizeof r2, "tools-compile-%03d\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%d\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tcommit", j, j) &&
+            n == tx_len(r2, sizeof r2) && tx_same(s, n, r2, n)) return 1;
+    }
+    return 0;
+}
+static int co_nt_id_seen(char ids[][200], int nid, const char *s, long n) {
+    for (int i = 0; i < nid; i++) {
+        if ((long)strlen(ids[i]) == n && memcmp(ids[i], s, (size_t)n) == 0) return 1;
+    }
+    return 0;
+}
+static int co_newtool_gate(void) {
+    static char bt[1 << 21], st[1 << 18], ro[16384], ids[64][200]; char tree[64];
+    char *bv[] = {"git", "show", ":tests/batches.tsv", 0};
+    char *sv[] = {"git", "show", ":tests/tools-compile-sources.tsv", 0}, *wv[] = {"git", "write-tree", 0};
+    int nid = 0, t, i, bad = 0; long bn, sn, at;
+    if (run(bv, bt, sizeof bt) != 0 || run(sv, st, sizeof st) != 0 || run(wv, tree, sizeof tree) != 0 || tx_len(tree, sizeof tree) != 40) {
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: cannot read tests/batches.tsv, tests/tools-compile-sources.tsv or the tree of the commit's index; nothing committed\n");
+        return 1; }
+    bn = tx_len(bt, sizeof bt); sn = tx_len(st, sizeof st);
+    for (t = 0; t < co_nnew; t++) {
+        const char *p = co_newtool[t]; int src = 0, own = 0;
+        for (at = 0; at < sn; ) { long e = tx_chr(st + at, sn - at, '\n'), l = e < 0 ? sn - at : e;
+            if (co_nt_field_is(st + at, l, 0, p)) src = 1;
+            at += l + 1; }
+        for (at = 0; at < bn; ) { long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e, o, n;
+            if (l > 0 && bt[at] != '#' && (co_nt_field_is(bt + at, l, 3, p) || co_nt_field_is(bt + at, l, 8, p))) {
+                own++;
+                if (!tx_field(bt + at, l, '\t', 0, &o, &n) && n > 0 && n < 200 && !co_nt_id_seen(ids, nid, bt + at + o, n)) {
+                    if (nid == 64) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: more than 64 new batch rows; nothing committed\n"); return 1; }
+                    tx_copy(ids[nid], sizeof ids[nid], bt + at + o, n); ids[nid][n] = 0; nid++;
+                }
+            }
+            at += l + 1; }
+        if (!src) { sy_printf("GATE\tnew-tool\t%s\tMISSING\ttests/tools-compile-sources.tsv row\n", p); bad++; }
+        if (!own) { sy_printf("GATE\tnew-tool\t%s\tMISSING\ttests/batches.tsv row with this CHECK or source\n", p); bad++; }
+    }
+    if (bad) {
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: %d registration row(s) missing from the commit's index (register the batch with tools/register.cx ... --no-run and the inventory with tools/register.cx --tool, then pass --registered ID); nothing committed\n", bad);
+        return 1; }
+    if (nid > 0) {
+        char *pv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--qualify-tree", "--prepare", 0};
+        g_bound_s = 55; (void)run(pv, ro, sizeof ro); g_bound_s = 30;
+    }
+    for (i = 0; i < nid; i++) {
+        char *qv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--qualify-tree", tree, ids[i], 0}; char want[300]; long t0 = sy_now_ms(); int rc;
+        if (cx_fmt(want, sizeof want, "REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=PASS\t", ids[i])) return 1;
+        g_bound_s = 58; rc = run(qv, ro, sizeof ro); g_bound_s = 30;
+        if (rc != 0 || tx_find(ro, tx_len(ro, sizeof ro), want, tx_len(want, sizeof want)) < 0) {
+            sy_printf("NEW_TOOL\tbatch=%s\ttree=%s\tqualify=REFUSE\trc=%d\tms=%ld\n", ids[i], tree, rc, sy_now_ms() - t0);
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: batch %s does not pass on the tree being committed; nothing committed\n%s\n", ids[i], ro);
+            return 1; }
+        sy_printf("NEW_TOOL\tbatch=%s\ttree=%s\tqualify=PASS\tms=%ld\n", ids[i], tree, sy_now_ms() - t0);
+    }
+    sy_printf("NEW_TOOL\ttools=%d\tnew_batches=%d\tgate=ok\n", co_nnew, nid);
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc > 1 && tx_eqz(argv[1], "--replay-index")) return co_replay_index(argc, argv);
+    {   /* --new-tool PATH: rewritten to --whole PATH --keyed tests/tools-compile-sources.tsv PATH (see co_newtool_gate) */
+        char **xv = (char **)mm_alloc(sizeof(char *) * (size_t)(argc * 5 + 8)); int xn = 0, i;
+        if (!xv) co_die("allocation", 0);
+        for (i = 0; i < argc; i++) {
+            if (i && tx_eqz(argv[i], "--new-tool")) {
+                if (i + 1 >= argc || argv[i + 1][0] == '-') co_die("usage", "--new-tool requires tools/NAME.cx");
+                if (co_nnew == CO_NEWT) co_die("too many --new-tool", 0);
+                co_newtool[co_nnew++] = argv[++i];
+                xv[xn++] = "--whole"; xv[xn++] = argv[i]; xv[xn++] = "--keyed"; xv[xn++] = "tests/tools-compile-sources.tsv"; xv[xn++] = argv[i];
+            } else xv[xn++] = argv[i];
+        }
+        xv[xn] = 0; argv = xv; argc = xn;
+    }
     int64_t replay_deadline = sy_mono_ns();
     if (replay_deadline >= 0) replay_deadline += 55000000000LL;
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0, mcont = 0;
@@ -1246,7 +1377,7 @@ int main(int argc, char **argv) {
             const char *s; msg = argv[a + 1];
             if (tr_strip(argv[a + 1])) { for (s = msg; *s == ' ' || *s == '\t' || *s == '\r' || *s == '\n'; s++) ; if (!*s) co_die("usage", "empty message after dropping attribution lines"); }
             a += 2; }
-        else if (tx_eqz(argv[a], "--registered")) {
+        else if (tx_eqz(argv[a], "--registered") || tx_eqz(argv[a], "--batch")) {
             a++;
             while (a < argc && argv[a][0] != '-') {
                 if (np == CO_MAX) co_die("too many paths", 0);
@@ -1516,6 +1647,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
             }
         }
         if (derive) co_phase("derive", 0);
+        if (co_nnew && co_newtool_gate()) { sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_pending_collect(); return 1; }
         if (nreg) co_phase("regm", 1);
         if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
             char *rv[12], ro[16384]; int n = 0, bad = 0, rrc, std = 0; long at = 0, rn;
@@ -1735,6 +1867,16 @@ again:  /* Retry against the same HEAD whose paths were compared. */
             }
         }
         co_pending_collect();
+        {   int need_pb = 0;
+            for (k = 0; k < np; k++) {
+                if (tx_eqz(path[k], "tools/devsvc-core.cx") || tx_eqz(path[k], "tools/devsvc.cx") ||
+                    tx_eqz(path[k], "tools/devsvc-repo.tsv") || tx_prefix(path[k], tx_len(path[k], 4000), "tools/cxlib/", 12)) {
+                    need_pb = 1; break;
+                }
+            }
+            if (need_pb)
+                sy_printf("COMMIT_OWN prebuild-self=1 run: CC=/usr/bin/cc sh ./unisacc.com tools/devsvc.cx -- prebuild-self\n");
+        }
         printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
         if (cas_skipped) printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tgates=skipped-by-disjoint-readset\tbase=%s\tfull=%s\n", newc, np, kept, lost, orig_basec, newfull);
         else printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tfull=%s\n", newc, np, kept, lost, newfull);

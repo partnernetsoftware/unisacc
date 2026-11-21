@@ -2,13 +2,32 @@
 #pragma unisa use mem.bytes
 /* L1 textx/chunked: HTTP Transfer-Encoding: chunked decoding (RFC 9112 7.1), an extension package
    (ext/textx, outside the compile closure). The caller owns the output buffer; no allocation.
+
+   One-shot:
      long dk_dechunk(const char *in, long inlen, unsigned char *out, long cap)
    decodes the whole chunked body IN[0..inlen) into OUT[0..cap) and returns the payload byte count
    (>= 0), or a negative errno: -ENOSPC the payload does not fit in cap, -EINVAL malformed framing
    (non-hex size, size over 15 digits, missing CRLF after a chunk, bad arguments), -EIO the input ends
-   before the terminating empty line. Chunk extensions (";name=value") are skipped, hex digits are
-   case-insensitive, a bare LF is accepted for CRLF, trailer fields after the 0-size chunk are
-   skipped. Bytes after the final empty line are not examined. Module state: none. */
+   before the terminating empty line. A chunk that does not fit or is cut off writes no byte.
+   It is a thin wrapper over dk_feed.
+
+   Incremental (no byte buffer: the state is phase, nd, remain):
+     dk_state s; dk_init(&s);
+     long r = dk_feed(&s, in, inlen, &consumed, out, cap, &outlen);
+   return: DK_NEED_IN (0) all input consumed, feed more; DK_END (1) the final empty line is consumed,
+   *consumed stops right after it; DK_NEED_OUT (2) output full with payload pending, drain OUT and call
+   again with the unconsumed input (cap 0 returns DK_NEED_OUT at the first payload byte); negative:
+   sticky stream error -EINVAL (every later call returns it, consuming and writing nothing). Bad
+   arguments also return -EINVAL but leave the state unchanged. There is no -ENOSPC in streaming
+   mode. dk_end(&s) is called when the input is really over: 0 complete, -EIO truncated, or the
+   sticky error. Chunk extensions (";name=value") are skipped, hex digits are case-insensitive, a
+   bare LF is accepted for CRLF, trailer fields after the 0-size chunk are skipped. Bytes after the
+   final empty line are not examined. Module state: none. */
+
+enum { DK_NEED_IN = 0, DK_END = 1, DK_NEED_OUT = 2, DK_STATE_BYTES = 32 };
+enum { DKP_SIZE = 0, DKP_EXT, DKP_SIZE_LF, DKP_DATA, DKP_DATA_END, DKP_DATA_LF,
+       DKP_TR_START, DKP_TR_LINE, DKP_TR_LF, DKP_DONE };
+typedef struct dk_state { long remain; long total; int phase; int nd; int err; int rsv; } dk_state;
 
 static int dk_hex(int c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -17,51 +36,112 @@ static int dk_hex(int c) {
     return -1;
 }
 
-/* the index after the line end at I, -EIO when it is cut off, -EINVAL when it is not CRLF or LF */
-static long dk_eol(const unsigned char *p, long n, long i) {
-    if (i >= n) return -EIO;
-    if (p[i] == '\r') {
-        if (i + 1 >= n) return -EIO;
-        return p[i + 1] == '\n' ? i + 2 : -EINVAL;
+int dk_init(dk_state *s) {
+    if (!s) return -EINVAL;
+    s->remain = 0; s->total = 0; s->phase = DKP_SIZE; s->nd = 0; s->err = 0; s->rsv = 0;
+    return 0;
+}
+
+int dk_done(const dk_state *s) { return s && s->phase == DKP_DONE; }
+
+long dk_end(const dk_state *s) {
+    if (!s) return -EINVAL;
+    if (s->err < 0) return s->err;
+    return s->phase == DKP_DONE ? 0 : -EIO;
+}
+
+long dk_feed(dk_state *s, const unsigned char *in, long inlen, long *consumed,
+             unsigned char *out, long cap, long *outlen) {
+    long i = 0, o = 0, n;
+    int c, v;
+    if (!s || !consumed || !outlen || inlen < 0 || cap < 0 || (inlen && !in) || (cap && !out)) return -EINVAL;
+    *consumed = 0; *outlen = 0;
+    if (s->err < 0) return s->err;
+    if (s->phase == DKP_DONE) return DK_END;
+    for (;;) {
+        if (s->phase == DKP_DATA) {
+            if (o >= cap) { *consumed = i; *outlen = o; return DK_NEED_OUT; }
+            if (i >= inlen) break;
+            n = s->remain;
+            if (n > inlen - i) n = inlen - i;
+            if (n > cap - o) n = cap - o;
+            if (mm_copy(out + o, cap - o, in + i, n)) { s->err = -EINVAL; goto fail; }
+            o += n; i += n; s->remain -= n; s->total += n;
+            if (s->remain == 0) s->phase = DKP_DATA_END;
+            continue;
+        }
+        if (i >= inlen) break;
+        c = in[i++];
+        switch (s->phase) {
+        case DKP_SIZE:
+            v = dk_hex(c);
+            if (v >= 0) {
+                if (++s->nd > 15) { s->err = -EINVAL; goto fail; }
+                s->remain = s->remain * 16 + v;
+            } else if (s->nd == 0) { s->err = -EINVAL; goto fail; }
+            else if (c == ';') s->phase = DKP_EXT;
+            else if (c == '\r') s->phase = DKP_SIZE_LF;
+            else if (c == '\n') s->phase = s->remain == 0 ? DKP_TR_START : DKP_DATA;
+            else { s->err = -EINVAL; goto fail; }
+            break;
+        case DKP_EXT:
+            if (c == '\r') s->phase = DKP_SIZE_LF;
+            else if (c == '\n') s->phase = s->remain == 0 ? DKP_TR_START : DKP_DATA;
+            break;
+        case DKP_SIZE_LF:
+            if (c != '\n') { s->err = -EINVAL; goto fail; }
+            s->phase = s->remain == 0 ? DKP_TR_START : DKP_DATA;
+            break;
+        case DKP_DATA_END:
+            if (c == '\r') s->phase = DKP_DATA_LF;
+            else if (c == '\n') { s->phase = DKP_SIZE; s->remain = 0; s->nd = 0; }
+            else { s->err = -EINVAL; goto fail; }
+            break;
+        case DKP_DATA_LF:
+            if (c != '\n') { s->err = -EINVAL; goto fail; }
+            s->phase = DKP_SIZE; s->remain = 0; s->nd = 0;
+            break;
+        case DKP_TR_START:   /* trailer field lines up to the empty line */
+            if (c == '\r') s->phase = DKP_TR_LF;
+            else if (c == '\n') s->phase = DKP_DONE;
+            else s->phase = DKP_TR_LINE;
+            break;
+        case DKP_TR_LINE:
+            if (c == '\n') s->phase = DKP_TR_START;
+            break;
+        case DKP_TR_LF:
+            if (c != '\n') { s->err = -EINVAL; goto fail; }
+            s->phase = DKP_DONE;
+            break;
+        default:
+            s->err = -EINVAL; goto fail;
+        }
+        if (s->phase == DKP_DONE) { *consumed = i; *outlen = o; return DK_END; }
     }
-    return p[i] == '\n' ? i + 1 : -EINVAL;
+    *consumed = i; *outlen = o;
+    return DK_NEED_IN;
+fail:
+    *consumed = i; *outlen = o;
+    return s->err;
 }
 
 long dk_dechunk(const char *in0, long inlen, unsigned char *out, long cap) {
     const unsigned char *in = (const unsigned char *)in0;
-    long i = 0, w = 0, size;
-    int nd, v;
+    dk_state s;
+    long i = 0, w = 0, c, o, r, k;
     if (inlen < 0 || cap < 0 || (inlen && !in) || (cap && !out)) return -EINVAL;
+    dk_init(&s);
     for (;;) {
-        size = 0; nd = 0;
-        while (i < inlen && (v = dk_hex(in[i])) >= 0) {
-            if (++nd > 15) return -EINVAL;
-            size = size * 16 + v;
-            i++;
-        }
-        if (i >= inlen) return -EIO;
-        if (nd == 0) return -EINVAL;
-        if (in[i] == ';') { while (i < inlen && in[i] != '\r' && in[i] != '\n') i++; }
-        i = dk_eol(in, inlen, i);
-        if (i < 0) return i;
-        if (size == 0) break;
-        if (size > cap - w) return -ENOSPC;
-        if (size > inlen - i) return -EIO;
-        if (mm_copy(out + w, cap - w, in + i, size)) return -EINVAL;
-        w += size; i += size;
-        i = dk_eol(in, inlen, i);
-        if (i < 0) return i;
+        r = dk_feed(&s, in + i, inlen - i, &c, out + w, 0, &o);   /* cap 0: parse up to the payload */
+        i += c;
+        if (r < 0) return r;
+        if (r == DK_END) return w;
+        if (r == DK_NEED_IN) return -EIO;
+        if (s.remain > cap - w) return -ENOSPC;
+        if (s.remain > inlen - i) return -EIO;
+        k = s.remain;
+        r = dk_feed(&s, in + i, k, &c, out + w, k, &o);   /* the whole chunk at once */
+        if (r < 0) return r;
+        i += c; w += o;
     }
-    for (;;) {   /* trailer fields up to the empty line */
-        if (i >= inlen) return -EIO;
-        if (in[i] == '\r' || in[i] == '\n') {
-            i = dk_eol(in, inlen, i);
-            if (i < 0) return i;
-            break;
-        }
-        while (i < inlen && in[i] != '\n') i++;
-        if (i >= inlen) return -EIO;
-        i++;
-    }
-    return w;
 }

@@ -2,6 +2,11 @@
  * --rev HEX --out ABS [--deadline-s 5400] [--max-resumes 3] [--max-attempts 4096]
  * [--candidate ABS_EXEC] [--watch ABS_EXEC] [--budget-raise LEDGER-ID] [-- child candidate options]
  * Overrides are native executables with the same argv protocol (also used by the fake fixture).
+ * --rev HEX --out ABS --repin candidate-chain|chain-watch|chain-run --reason TEXT
+ * replaces one session tool explicitly, without running work or changing budgets.
+ * Legacy sessions with an image but no pin need this step once for each image.
+ * An externally supplied candidate or watch is pinned too. Restore the original
+ * bytes to resume it, or start a fresh session to adopt a different executable.
  * Persisted deadline/retry/attempt budgets are shared by subsequent invocations, not reset.
  * Counters (chain-run.budget, format v2; an older budget is refused, start a new output dir):
  *   event                                                     attempts  kills  resumes  width
@@ -646,34 +651,119 @@ static int schedule(const char *rev,char **v,int target,int tail,int rehearse) {
         }
     }
 }
-/* The chain's own tools are read from the working checkout, which other work keeps editing. One
-   supervised run therefore builds chain-watch and candidate-chain once: the supervisor sets
-   UNISACC_CHAIN_TOOLS_EPOCH for its segments, the first segment builds each native and records
-   "epoch + sha256" beside it (NATIVE.pin), and every later segment of the same supervisor runs
-   that file after checking its bytes against the record; a mismatch is a blocker, never a silent
-   rebuild. A new supervisor (an explicit new start, e.g. after a tool fix) has a new epoch and
-   the tools are built and recorded again. Without a supervisor there is no epoch and each
-   invocation builds its tools as before. (chain-step is pinned per output by candidate-chain,
-   because the receipts name it as their producer.) */
-static int prepare_once(const char *phase,char **prepare,const char *native) {
-    char pin[4500],hash[65],text[400]; size_t en=0,pn=0,bn=0;
-    const char *given=sy_env("UNISACC_CHAIN_TOOLS_EPOCH");
-    if(!given||!given[0]) return run(phase,prepare,0);
-    en=strlen(given)+1; char *epoch=malloc(en+1);
-    if(!epoch||en>200||strchr(given,'\n')||cx_fmt(epoch,en+1,"%s\n",given)||cx_fmt(pin,sizeof pin,"%s.pin",native)) die("tool epoch record");
-    char *old=cx_read(pin,&pn);
-    if(old&&pn>en+11&&!memcmp(old,"epoch=",6)&&!memcmp(old+6,epoch,en)) {
-        char *bytes=cx_read(native,&bn);
-        int same=bytes&&!sy_sha256_hex(bytes,(long)bn,hash)&&!cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)&&pn==strlen(text)&&!memcmp(old,text,pn);
-        free(bytes); free(old); free(epoch);
-        return same?0:blocker(phase,"pinned-tool-changed",2);
+/* Pins belong to the session output, independently of the supervisor. Legacy
+   epoch records still attest their exact bytes and can be consumed as-is. */
+static int tool_pin_hash(const char *pin, char hash[65]) {
+    int exists = sy_exists(pin);
+    if (exists <= 0) return exists;
+    size_t n = 0;
+    char *text = cx_read(pin, &n);
+    if (!text) return -1;
+    char *row = text;
+    if (n > 6 && !memcmp(row, "epoch=", 6)) {
+        row = strchr(row, '\n');
+        if (row) row++;
     }
-    free(old);
-    int rc=run(phase,prepare,0); if(rc){free(epoch);return rc;}
-    char *bytes=cx_read(native,&bn);
-    if(!bytes||sy_sha256_hex(bytes,(long)bn,hash)||cx_fmt(text,sizeof text,"epoch=%snative_sha=%s\n",epoch,hash)||cx_write(pin,text,strlen(text))) die("tool pin record");
-    free(bytes); free(epoch); return 0;
+    int ok = row && n - (size_t)(row - text) == 76 && !memcmp(row, "native_sha=", 11) &&
+             strspn(row + 11, "0123456789abcdef") == 64 && row[75] == '\n';
+    if (ok && tx_copy(hash, 65, row + 11, 64)) ok = 0;
+    free(text);
+    return ok ? 1 : -1;
 }
+
+static int tool_native_hash(const char *native, char hash[65]) {
+    unsigned char *data = 0;
+    int64_t n = 0;
+    int rc = sy_read_file(native, &data, &n, 64L << 20);
+    if (!rc && (!n || sy_sha256_hex(data, n, hash))) rc = -EINVAL;
+    free(data);
+    return rc;
+}
+
+static int store_tool_pin(const char *pin, const char *hash, const char *source) {
+    char row[80], event[512];
+    if (cx_fmt(row, sizeof row, "native_sha=%s\n", hash) ||
+        sy_write_atomic(pin, row, strlen(row), 0644)) return 1;
+    if (cx_fmt(event, sizeof event, "TOOL_PIN\tsource=%s\tnative_sha=%s\n",
+               source ? source : "external", hash)) return 1;
+    append("chain-run.tsv", event);
+    return 0;
+}
+
+static int prepare_once(const char *phase, const char *source, const char *native, const char *override, int supervisor) {
+    char pin[4500], tmp[4500], saved[65], hash[65];
+    if (cx_fmt(pin, sizeof pin, "%s.pin", native) || cx_fmt(tmp, sizeof tmp, "%s.new", native)) die("tool pin path");
+    int pinned = tool_pin_hash(pin, saved);
+    const char *image = override ? override : native;
+    if (pinned < 0) return blocker(phase, "pinned-tool-invalid-record", 2);
+    if (pinned) {
+        if (tool_native_hash(image, hash) || strcmp(saved, hash)) return blocker(phase, "pinned-tool-changed", 2);
+        return 0;
+    }
+    if (override) {
+        if (tool_native_hash(image, hash) || store_tool_pin(pin, hash, 0)) return blocker(phase, "tool-pin-write", 2);
+        return 0;
+    }
+    if (sy_exists(native) != 0) return blocker(phase, "pinned-tool-missing-record", 2);
+    char *prepare[] = {"sh", "./unisacc.com", (char *)source, "-o", tmp, 0};
+    int rc;
+    if (supervisor) {
+        pr_result r;
+        int t = pr_run(phase, prepare, 0, 0, phase_bound, &r);
+        rc = t || r.rc || r.residue;
+        if (rc) pr_echo(&r);
+        pr_free(&r);
+        if (rc) return blocker(phase, "build-failed", 2);
+    } else rc = run(phase, prepare, 0);
+    if (rc) return rc;
+    if (tool_native_hash(tmp, hash) || sy_rename(tmp, native) || store_tool_pin(pin, hash, source))
+        return blocker(phase, "tool-pin-write", 2);
+    return 0;
+}
+
+/* An explicit recovery runs under both session locks, outside the budget.
+   The intent precedes publication; a partial replacement fails closed. */
+static int repin_tool(const char *rev, const char *tool, const char *reason) {
+    char native[4400], pin[4500], tmp[4500], record[4400], prefix[64], source[128];
+    char before[65] = "-", observed[65] = "-", after[65], log[1200];
+    if (!reason || strlen(reason) > 240 || strpbrk(reason, "\t\r\n") ||
+        strspn(reason, " \v\f") == strlen(reason)) die("repin reason");
+    int is_runner = !strcmp(tool, "chain-run"), is_watch = !strcmp(tool, "chain-watch");
+    if (!is_runner && !is_watch && strcmp(tool, "candidate-chain")) die("repin tool");
+    path(record, "chain-run.identity");
+    size_t n = 0;
+    char *identity = cx_read(record, &n);
+    if (cx_fmt(prefix, sizeof prefix, "rev=%s\n", rev) || !identity ||
+        n < strlen(prefix) || memcmp(identity, prefix, strlen(prefix))) die("repin session identity");
+    const char *binding = is_watch ? "\nwatch=source\n" : "\ncandidate=source\n";
+    int from_source = is_runner || strstr(identity, binding) != 0;
+    free(identity);
+    if (!from_source) return blocker("repin", "external-tool-session", 2);
+    if (heartbeat_live()) return blocker("repin", "live-owner", 2);
+    path(native, is_runner ? "chain-run-native" : is_watch ? "chain-run-watch" : "chain-run-candidate");
+    if (cx_fmt(pin, sizeof pin, "%s.pin", native) || cx_fmt(tmp, sizeof tmp, "%s.new", native) ||
+        cx_fmt(source, sizeof source, "tools/%s.cx", tool)) die("repin path");
+    if (sy_exists(pin) == 0 && sy_exists(native) == 0) return blocker("repin", "no-previous-pin-or-image", 2);
+    if (tool_pin_hash(pin, before) < 0 && cx_fmt(before, sizeof before, "invalid")) die("repin old pin");
+    if (tool_native_hash(native, observed) && cx_fmt(observed, sizeof observed, "-")) die("repin old image");
+    char *prepare[] = {"sh", "./unisacc.com", source, "-o", tmp, 0};
+    pr_result r;
+    int rc = pr_run("repin", prepare, 0, 0, phase_bound, &r);
+    if (rc || r.rc || r.residue) { pr_echo(&r); pr_free(&r); return blocker("repin", "build-failed", 2); }
+    pr_free(&r);
+    if (tool_native_hash(tmp, after)) return blocker("repin", "new-image-unreadable", 2);
+    long now = sy_wall_s();
+    if (cx_fmt(log, sizeof log, "TOOL_REPIN\tstatus=prepared\ttime=%ld\ttool=%s\tprior_sha=%s\tobserved_sha=%s\tnew_sha=%s\treason=%s\n",
+               now, tool, before, observed, after, reason)) die("repin receipt bound");
+    append("chain-run.tsv", log);
+    if (sy_rename(tmp, native) || store_tool_pin(pin, after, source)) return blocker("repin", "publish-failed", 2);
+    if (cx_fmt(log, sizeof log, "TOOL_REPIN\tstatus=landed\ttime=%ld\ttool=%s\tprior_sha=%s\tnew_sha=%s\treason=%s\n",
+               now, tool, before, after, reason)) die("repin receipt bound");
+    append("chain-run.tsv", log);
+    sy_printf("%s", log);
+    return 0;
+}
+
 /* Supervisor: one bounded segment child after another. It owns no chain state: the deadline,
    attempt, resume and segment budgets live in the child's persisted budget and stop the child
    itself (rc 3). The loop is finite (max_segments + 1) and each child is killed at its
@@ -681,15 +771,27 @@ static int prepare_once(const char *phase,char **prepare,const char *native) {
 static int supervise(int argc,char **argv,int sep,const char *runner) {
     char lock[4400],native[4400],row[600]; path(lock,"chain-supervise.lock"); int fd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(fd<0||sy_flock(fd,2|4)) die("supervisor already owns output");
-    {   char epoch[80];
+    {   char epoch[80], lbuf[1024];
+        const char *ow = sy_env("DEVSVC_OWNER");
+        if (!ow || !ow[0]) ow = "chain";
+        long now_s = sy_wall_s(), rel_s = now_s + 2100;
+        if (!cx_fmt(lbuf, sizeof lbuf, "pid=%d\tpgid=%d\towner=%s\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
+                    (int)getpid(), (int)sy_getpgid(0), ow, out, now_s, rel_s)) {
+            (void)ftruncate(fd, 0);
+            (void)lseek(fd, 0, 0);
+            (void)sy_write_all(fd, lbuf, (long)strlen(lbuf));
+        }
         if(cx_fmt(epoch,sizeof epoch,"%ld-%d",sy_now_ms(),(int)getpid())||sy_setenv("UNISACC_CHAIN_TOOLS_EPOCH",epoch,1)) die("tool epoch");
     }
     if(!runner) {
+        char child_lock[4400]; path(child_lock, "chain-run.lock");
+        int child_fd = sy_open(child_lock, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (child_fd < 0 || sy_flock(child_fd, 2 | 4)) die("runner already owns output");
         path(native,"chain-run-native");
-        char *prepare[]={"sh","./unisacc.com","tools/chain-run.cx","-o",native,0}; pr_result r;
-        int t=pr_run("prepare-runner",prepare,0,0,phase_bound,&r);
-        if(t||r.rc||r.residue){pr_echo(&r);pr_free(&r);append("chain-run.tsv","SUPERVISE\tBLOCKER\treason=prepare-runner\n");sy_printf("SUPERVISE\tBLOCKER\treason=prepare-runner\n");return 2;}
-        pr_free(&r); runner=native;
+        int rc = prepare_once("prepare-runner", "tools/chain-run.cx", native, 0, 1);
+        sy_close(child_fd);
+        if (rc) return rc;
+        runner=native;
     }
     char *v[160]; int k=0; v[k++]=(char*)runner;
     for(int i=1;i<argc;i++) {
@@ -732,6 +834,7 @@ int main(int argc,char **argv) {
         return fronts("gen1-osx-x86_64","fixture",fixture,5);
     }
     const char *rev=0,*candidate=0,*watch=0,*ctor=0,*objs=0,*pkg=0,*runner=0,*raise_id=0; int raised=0;
+    const char *repin = 0, *reason = 0;
     int rehearse=0, extra=argc, i, supervising=0, memo=1; long seconds=lim_int("deadline.s"), entered=sy_now_ms();
     for(i=1;i<argc;i++) {
         if(!strcmp(argv[i],"--")) { extra=i+1; break; }
@@ -743,6 +846,8 @@ int main(int argc,char **argv) {
         const char *a=argv[i],*b=argv[++i];
         if(!strcmp(a,"--rev")) rev=b;
         else if(!strcmp(a,"--out")) out=b;
+        else if(!strcmp(a,"--repin")) repin=b;
+        else if(!strcmp(a,"--reason")) reason=b;
         else if(!strcmp(a,"--candidate")) candidate=b;
         else if(!strcmp(a,"--watch")) watch=b;
         else if(!strcmp(a,"--deadline-s")) seconds=number(b);
@@ -759,6 +864,8 @@ int main(int argc,char **argv) {
         else die("unknown option");
     }
     if(!rev||strlen(rev)!=40||!out||out[0]!='/') die("--rev HEX40 --out ABS required");
+    if ((repin && (!reason || supervising || runner || candidate || watch || rehearse || segment_s || extra < argc)) ||
+        (reason && !repin)) die("repin options");
     ceiling=parallel; /* the requested width: recovery never goes above it */
     for(i=0;i<40;i++) if(!((rev[i]>='0'&&rev[i]<='9')||(rev[i]>='a'&&rev[i]<='f'))) die("revision hex");
     if(rehearse&&(!ctor||!objs||!pkg)) die("rehearse requires explicit prepared ctor, objects and pkg");
@@ -799,10 +906,17 @@ int main(int argc,char **argv) {
         }
         if((!watch||!candidate||(supervising&&!runner))&&segment_s<phase_bound) die("segment shorter than the native preparation bound");
     }
-    sy_mkdir(out,0755);
+    if (repin) {
+        char lock[4400];
+        if (sy_exists(out) != 1) die("repin output missing");
+        path(lock, "chain-supervise.lock");
+        int fd = sy_open(lock, O_RDWR | O_CREAT, 0644);
+        if (fd < 0 || sy_flock(fd, 2 | 4)) die("supervisor already owns output");
+    } else sy_mkdir(out,0755);
     if(supervising) return supervise(argc,argv,extra<argc||!strcmp(argv[argc-1],"--")?extra-1:argc,runner);
     char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");
+    if (repin) return repin_tool(rev, repin, reason);
     char identity[16000],p[4400];
     int used=snprintf(identity,sizeof identity,"rev=%s\nmode=%s\ncandidate=%s\nctor=%s\nobjects=%s\npkg=%s\n",rev,rehearse?"rehearse":"full",candidate?candidate:"source",ctor?ctor:"-",objs?objs:"-",pkg?pkg:"-");
     if(used<0||(size_t)used>=sizeof identity) die("identity bound");
@@ -875,12 +989,10 @@ int main(int argc,char **argv) {
     watch_argv[wi++]=(char*)out; watch_argv[wi]=0;
     if(heartbeat_live()) return blocker("heartbeat","live-owner",2);
     char native_watch[4400],native_candidate[4400]; int prep_rc;
-    if(!watch) {
-        path(native_watch,"chain-run-watch");
-        char *prepare[]={"sh","./unisacc.com","tools/chain-watch.cx","-o",native_watch,0};
-        if((prep_rc=prepare_once("prepare-watch",prepare,native_watch))) return prep_rc;
-        watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0;
-    }
+    path(native_watch,"chain-run-watch");
+    prep_rc = prepare_once("prepare-watch", "tools/chain-watch.cx", native_watch, watch, 0);
+    if (prep_rc) return prep_rc;
+    if (!watch) { watch_argv[0]=native_watch; watch_argv[1]=(char*)out; watch_argv[2]=0; }
     if(owed) {
         /* The previous segment ended between a retryable failure and its observation: settle the
            same accounting now, before any new work. */
@@ -888,11 +1000,11 @@ int main(int argc,char **argv) {
         if(settled==RC_SEGMENT) return segment_expired("owed-resume");
         if(settled) return settled;
     }
-    if(!candidate&&!(done("pack")&&(lookup("compare")<0||done("compare")))) {
+    if (!(done("pack") && (lookup("compare") < 0 || done("compare")))) {
         path(native_candidate,"chain-run-candidate");
-        char *prepare[]={"sh","./unisacc.com","tools/candidate-chain.cx","-o",native_candidate,0};
-        if((prep_rc=prepare_once("prepare-candidate",prepare,native_candidate))) return prep_rc;
-        candidate=native_candidate;
+        prep_rc = prepare_once("prepare-candidate", "tools/candidate-chain.cx", native_candidate, candidate, 0);
+        if (prep_rc) return prep_rc;
+        if (!candidate) candidate=native_candidate;
     }
     char *v[100]; int k=0;
     if(candidate) v[k++]=(char*)candidate;

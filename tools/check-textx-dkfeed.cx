@@ -1,0 +1,458 @@
+/* tools/check-textx-dkfeed.cx -- ext/textx/chunked.cx incremental decoding (dk_init, dk_feed, dk_done, dk_end)
+ *   sh ./unisacc.com tools/check-textx-dkfeed.cx [-- --cases fixture;diff;trunc;corrupt;sticky;mutc;mut1;mut2;mut3]
+ *   fixture  tests/fixtures/textx-chunked/chunk-vectors.tsv through dk_dechunk (value, cap, no-write rules)
+ *   diff     six drivers on fixture plus generated vectors, each compared with the one-shot result byte by byte:
+ *            D1 whole input, D2 one byte per call, D3 random slices 1..64 (3 fixed seeds), D4 output buffer 1,
+ *            D5 output buffer 7, D6 one input byte and output buffer 1
+ *   trunc    prefixes (all for small vectors, 64 sampled for large): same error code at every feed boundary
+ *   corrupt  one flipped bit (all positions for small vectors, 64 sampled for large): same code as one-shot
+ *   sticky   sticky error, DK_END is final, bad arguments leave the state alone, sizeof(dk_state) <= DK_STATE_BYTES
+ *   mutc     private copy of the package, no mutation: the feed groups must pass (control)
+ *   mut1-3   private copy with one line mutated: M3 half a hex size digit is lost across feeds, M4 the chunk
+ *            extension state is lost across feeds, M5 the trailer ends at its first line; fixture and diff
+ *            must fail in D2 (M3, M4) or in the trailer vectors (M5)
+ * Prints PASS/FAIL per case and CHECK_TEXTX_DKFEED<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+#pragma unisa use textx.chunked
+#pragma unisa use cxlib.muthelp
+
+#define MAXV 64
+#define POOL 65536
+#define RB 70000
+typedef struct vec {
+    char name[48];
+    long in_off, in_len, pl_off, pl_len, cap, exp, tail;
+} vec;
+static vec vs[MAXV];
+static int nv;
+static unsigned char pool[POOL];
+static long pool_n;
+static unsigned char rb[RB], ob[RB], one[RB], mb[POOL], canary_buf[16];
+static long used_last, viol;
+static unsigned long lcg;
+
+#define cp mh_copy
+#define find_at mh_find_at
+static unsigned long rnd(void) { lcg = lcg * 1103515245UL + 12345UL; return (lcg >> 16) & 0x7fffffffUL; }
+
+static long unesc(const char *s, long n, unsigned char *d) {
+    long i, k = 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) {
+            i++;
+            d[k++] = s[i] == 'r' ? '\r' : s[i] == 'n' ? '\n' : s[i] == 't' ? '\t' : (unsigned char)s[i];
+        } else d[k++] = (unsigned char)s[i];
+    }
+    return k;
+}
+static long parse_exp(const char *s, long n) {
+    long v = 0, i;
+    if (n == 3 && !strncmp(s, "EIO", 3)) return -EIO;
+    if (n == 6 && !strncmp(s, "ENOSPC", 6)) return -ENOSPC;
+    if (n == 6 && !strncmp(s, "EINVAL", 6)) return -EINVAL;
+    for (i = 0; i < n; i++) v = v * 10 + (s[i] - '0');
+    return v;
+}
+static vec *newvec(const char *name) {
+    vec *v = &vs[nv++];
+    memset(v, 0, sizeof *v);
+    { long nl = (long)strlen(name); if (nl >= (long)sizeof v->name) nl = (long)sizeof v->name - 1; cp(v->name, name, nl); v->name[nl] = 0; }
+    v->in_off = pool_n;
+    return v;
+}
+static void put(const char *s) { long n = (long)strlen(s); cp(pool + pool_n, s, n); pool_n += n; }
+static void putc_(int c) { pool[pool_n++] = (unsigned char)c; }
+static void fin_in(vec *v) { v->in_len = pool_n - v->in_off; v->pl_off = pool_n; }
+static void fin_pl(vec *v) { v->pl_len = pool_n - v->pl_off; v->exp = v->pl_len; v->cap = 1 << 16; }
+
+static int load_fixture(void) {
+    size_t n; long i, e, f[6], nf, k; char *src; const char *fp = "tests/fixtures/textx-chunked/chunk-vectors.tsv";
+    src = cx_read(fp, &n);
+    if (!src) return 0;
+    i = 0;
+    while (i < (long)n) {
+        e = i; nf = 0; f[0] = i;
+        while (e < (long)n && src[e] != '\n') { if (src[e] == '\t' && nf < 5) f[++nf] = e + 1; e++; }
+        if (src[i] != '#' && e > i && nf == 4 && nv < MAXV) {
+            char name[48]; vec *v;
+            long nl = f[1] - 1 - f[0]; if (nl > 47) nl = 47;
+            cp(name, src + f[0], nl); name[nl] = 0;
+            v = newvec(name);
+            v->cap = parse_exp(src + f[1], f[2] - 1 - f[1]);
+            pool_n += unesc(src + f[2], f[3] - 1 - f[2], pool + pool_n);
+            fin_in(v);
+            v->exp = parse_exp(src + f[3], f[4] - 1 - f[3]);
+            pool_n += unesc(src + f[4], e - f[4], pool + pool_n);
+            v->pl_len = pool_n - v->pl_off;
+        }
+        i = e + 1;
+    }
+    return nv > 0;
+}
+
+static void gen_vectors(void) {
+    vec *v; long i, k; int sz[4] = { 256, 26, 15, 1 };
+    char hx[24];
+    /* g-big: one 5000-byte chunk, size 1388 */
+    v = newvec("g-big-chunk"); put("1388\r\n");
+    for (i = 0; i < 5000; i++) putc_('a' + (int)(rnd() % 26));
+    put("\r\n0\r\n\r\n"); fin_in(v);
+    cp(pool + pool_n, pool + v->in_off + 6, 5000); pool_n += 5000; fin_pl(v);
+    /* g-mixed: sizes 100, 1A, 0F, 1 cycling */
+    v = newvec("g-mixed-sizes");
+    for (k = 0; k < 24; k++) {
+        const char *fm = sz[k & 3] == 256 ? "100" : sz[k & 3] == 26 ? "1A" : sz[k & 3] == 15 ? "0F" : "1";
+        put(fm); put("\r\n");
+        for (i = 0; i < sz[k & 3]; i++) putc_('A' + (int)((i + k) % 26));
+        put("\r\n");
+    }
+    put("0\r\n\r\n"); fin_in(v);
+    for (k = 0; k < 24; k++) for (i = 0; i < sz[k & 3]; i++) putc_('A' + (int)((i + k) % 26));
+    fin_pl(v);
+    /* g-long-ext-trailer: extension over 64 bytes, three trailer lines */
+    v = newvec("g-long-ext-trailer"); put("5;");
+    for (i = 0; i < 90; i++) putc_('e');
+    put("=v\r\nhello\r\n0;");
+    for (i = 0; i < 70; i++) putc_('x');
+    put("\r\nX-One: 1\r\nX-Two: ");
+    for (i = 0; i < 80; i++) putc_('t');
+    put("\r\nX-Three: 3\r\n\r\n"); fin_in(v); put("hello"); fin_pl(v);
+    /* g-tail: valid message followed by the next message, the stop point is checked */
+    v = newvec("g-trailing-bytes"); put("3\r\nabc\r\n0\r\nX: y\r\n\r\n");
+    k = pool_n - v->in_off; put("GET / HTTP/1.1\r\n\r\n"); fin_in(v); v->tail = v->in_len - k;
+    put("abc"); fin_pl(v);
+    (void)hx;
+}
+
+/* the driver: mode 1 whole, 2 byte, 3 random slices (seed), ocap output buffer; returns 1 (END), a negative code, RES in rb */
+static long drive(const unsigned char *in, long n, int mode, unsigned long seed, long ocap, long *rn) {
+    dk_state s; long pos = 0, w = 0, r, c, o, pe, step;
+    lcg = seed; used_last = 0;
+    dk_init(&s);
+    memset(canary_buf, 0x5A, sizeof canary_buf);
+    for (;;) {
+        step = mode == 1 ? n - pos : mode == 2 ? 1 : 1 + (long)(rnd() % 64);
+        pe = pos + step; if (pe > n) pe = n;
+        for (;;) {
+            ob[ocap] = 0x5A;
+            r = dk_feed(&s, in + pos, pe - pos, &c, ob, ocap, &o);
+            if (c < 0 || c > pe - pos || o < 0 || o > ocap || ob[ocap] != 0x5A) viol++;
+            if (r < 0 && r != -EINVAL) viol++;
+            if (o > 0) { if (w + o > RB) { viol++; o = 0; } cp(rb + w, ob, o); w += o; }
+            pos += c;
+            if (r == DK_NEED_OUT) { if (c == 0 && o == 0) { viol++; break; } continue; }
+            break;
+        }
+        *rn = w;
+        if (r < 0) return r;
+        if (r == DK_END) {
+            long c2 = -1, o2 = -1;
+            used_last = pos;
+            if (dk_feed(&s, in + pos, n - pos, &c2, ob, ocap, &o2) != DK_END || c2 != 0 || o2 != 0) viol++;
+            if (!dk_done(&s) || dk_end(&s) != 0) viol++;
+            return 1;
+        }
+        if (pos >= n) return dk_end(&s);
+    }
+}
+
+#define NDRV 8
+static const char *dname[NDRV] = { "D1-whole", "D2-byte", "D3-rand-s1", "D3-rand-s2", "D3-rand-s3", "D4-out1", "D5-out7", "D6-byte-out1" };
+static long run_drv(int d, const unsigned char *in, long n, long *rn) {
+    switch (d) {
+    case 0: return drive(in, n, 1, 1, RB - 8, rn);
+    case 1: return drive(in, n, 2, 1, RB - 8, rn);
+    case 2: return drive(in, n, 3, 11, RB - 8, rn);
+    case 3: return drive(in, n, 3, 222, RB - 8, rn);
+    case 4: return drive(in, n, 3, 3333, RB - 8, rn);
+    case 5: return drive(in, n, 1, 1, 1, rn);
+    case 6: return drive(in, n, 1, 1, 7, rn);
+    default: return drive(in, n, 2, 1, 1, rn);
+    }
+}
+
+static int dfail[NDRV];
+static void report_drivers(const char *grp) {
+    int d; char nm[80];
+    for (d = 0; d < NDRV; d++) { cx_fmt(nm, sizeof nm, "%s-%s", grp, dname[d]); tk_ok(dfail[d] == 0, nm); dfail[d] = 0; }
+    tk_ok(viol == 0, "feed-contract-consumed-outlen-canary");
+}
+
+static const unsigned char *vin(const vec *v) { return pool + v->in_off; }
+
+static void group_fixture(void) {
+    int i, bad = 0; long r, k;
+    for (i = 0; i < nv; i++) {
+        vec *v = &vs[i];
+        memset(ob, 0xAA, (size_t)v->cap + 128);
+        r = dk_dechunk((const char *)vin(v), v->in_len, ob, v->cap);
+        if (r != v->exp) { sy_printf("FAIL-detail\t%s one-shot rc=%ld want=%ld\n", v->name, r, v->exp); bad++; continue; }
+        if (r >= 0 && (r != v->pl_len || (r && memcmp(ob, pool + v->pl_off, (size_t)r)))) { sy_printf("FAIL-detail\t%s payload\n", v->name); bad++; }
+        if (r == -ENOSPC || !strcmp(v->name, "chunk-truncated-data"))
+            for (k = 0; k < v->cap; k++) if (ob[k] != 0xAA) { sy_printf("FAIL-detail\t%s wrote a byte\n", v->name); bad++; break; }
+        for (k = v->cap; k < v->cap + 128; k++) if (ob[k] != 0xAA) { sy_printf("FAIL-detail\t%s wrote past cap\n", v->name); bad++; break; }
+    }
+    tk_ok(bad == 0, "fixture-one-shot-values-cap-nowrite");
+}
+
+static void group_diff(void) {
+    int i, d; long r, rn;
+    for (i = 0; i < nv; i++) {
+        vec *v = &vs[i];
+        if (v->exp == -ENOSPC) continue;
+        for (d = 0; d < NDRV; d++) {
+            long want = v->exp >= 0 ? 1 : v->exp, exp_used = v->in_len - v->tail;
+            viol = 0;
+            r = run_drv(d, vin(v), v->in_len, &rn);
+            if (r != want || (want == 1 && (rn != v->pl_len || (rn && memcmp(rb, pool + v->pl_off, (size_t)rn)) || used_last != exp_used))) {
+                sy_printf("FAIL-detail\t%s %s r=%ld want=%ld out=%ld used=%ld\n", v->name, dname[d], r, want, rn, used_last);
+                dfail[d]++;
+            }
+            if (viol) dfail[d]++;
+        }
+    }
+    {   long vv = viol; viol = 0; report_drivers("diff"); (void)vv; }
+}
+
+static void cmp_all(const unsigned char *m, long n, const unsigned char *full, long fulln, int exact) {
+    long E, r, rn; int d;
+    E = dk_dechunk((const char *)m, n, one, RB - 8);
+    if (E == -ENOSPC) return;
+    for (d = 0; d < NDRV; d++) {
+        viol = 0;
+        r = run_drv(d, m, n, &rn);
+        if (E >= 0) {
+            if (r != 1 || rn != E || (E && memcmp(rb, one, (size_t)E))) dfail[d]++;
+        } else {
+            if (r != E) dfail[d]++;
+            else if (!exact && (rn > fulln || (rn && memcmp(rb, full, (size_t)rn)))) dfail[d]++;
+        }
+        if (viol) dfail[d]++;
+    }
+}
+
+static void group_trunc(void) {
+    int i; long L, cnt;
+    for (i = 0; i < nv; i++) {
+        vec *v = &vs[i];
+        if (v->exp < 0) continue;
+        if (v->in_len <= 160) { for (L = 0; L < v->in_len; L++) cmp_all(vin(v), L, pool + v->pl_off, v->pl_len, 0); }
+        else {
+            lcg = 77 + (unsigned long)i;
+            for (cnt = 0; cnt < 64; cnt++) { L = (long)(rnd() % (unsigned long)v->in_len); cmp_all(vin(v), L, pool + v->pl_off, v->pl_len, 0); }
+        }
+    }
+    viol = 0; report_drivers("trunc");
+}
+
+static void group_corrupt(void) {
+    int i; long p, cnt, n;
+    for (i = 0; i < nv; i++) {
+        vec *v = &vs[i];
+        if (v->exp < 0 || v->in_len > (long)sizeof mb) continue;
+        n = v->in_len;
+        if (n <= 160) {
+            for (p = 0; p < n; p++) { cp(mb, vin(v), n); mb[p] ^= (unsigned char)(1 << (p % 7)); cmp_all(mb, n, 0, 0, 1); }
+        } else {
+            lcg = 991 + (unsigned long)i;
+            for (cnt = 0; cnt < 64; cnt++) { p = (long)(rnd() % (unsigned long)n); cp(mb, vin(v), n); mb[p] ^= (unsigned char)(1 << (rnd() % 7)); cmp_all(mb, n, 0, 0, 1); }
+        }
+    }
+    viol = 0; report_drivers("corrupt");
+}
+
+static void group_sticky(void) {
+    dk_state s; long c, o, r; unsigned char b[8]; const unsigned char *bad = (const unsigned char *)"zz\r\n";
+    const unsigned char *ok = (const unsigned char *)"0\r\n\r\nXY";
+    tk_ok(sizeof(dk_state) <= DK_STATE_BYTES, "sizeof-dk-state-within-32");
+    dk_init(&s);
+    r = dk_feed(&s, bad, 4, &c, b, 8, &o);
+    tk_ok(r == -EINVAL, "sticky-first-error");
+    r = dk_feed(&s, ok, 5, &c, b, 8, &o);
+    tk_ok(r == -EINVAL && c == 0 && o == 0, "sticky-repeats-and-consumes-nothing");
+    tk_ok(dk_end(&s) == -EINVAL && !dk_done(&s), "sticky-end-reports-error");
+    dk_init(&s);
+    r = dk_feed(&s, ok, 7, &c, b, 8, &o);
+    tk_ok(r == DK_END && c == 5 && o == 0 && dk_done(&s) && dk_end(&s) == 0, "end-stops-before-trailing-bytes");
+    r = dk_feed(&s, ok, 7, &c, b, 8, &o);
+    tk_ok(r == DK_END && c == 0 && o == 0, "end-is-final");
+    dk_init(&s);
+    r = dk_feed(&s, ok, 2, &c, b, 8, &o);
+    tk_ok(r == DK_NEED_IN && c == 2 && dk_end(&s) == -EIO && !dk_done(&s), "need-in-then-end-gives-eio");
+    tk_ok(dk_feed(0, ok, 2, &c, b, 8, &o) == -EINVAL && dk_feed(&s, ok, -1, &c, b, 8, &o) == -EINVAL
+          && dk_feed(&s, ok, 2, 0, b, 8, &o) == -EINVAL && dk_feed(&s, 0, 2, &c, b, 8, &o) == -EINVAL, "bad-arguments-einval");
+    r = dk_feed(&s, ok + 2, 3, &c, b, 8, &o);
+    tk_ok(r == DK_END && dk_end(&s) == 0, "bad-arguments-leave-state-unchanged");
+    dk_init(&s);
+    r = dk_feed(&s, (const unsigned char *)"3\r\nabc\r\n0\r\n\r\n", 13, &c, b, 0, &o);
+    tk_ok(r == DK_NEED_OUT && c == 3 && o == 0, "cap-zero-stops-at-payload");
+    tk_ok(dk_init(0) == -EINVAL && dk_end(0) == -EINVAL && dk_done(0) == 0, "null-state-arguments");
+}
+
+/* ---- mutation: private copy of the packages with one line changed ---- */
+static char work[4096], com[4400], root[4096];
+static int put_mut(const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { sy_printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    cp(dst, src, k); cp(dst + k, nw, nl); cp(dst + k + nl, src + k + ol, n - k - ol);
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+static int setup(const char *old, const char *nw) {
+    char lk[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_mut("ext/textx/chunked.cx", old, nw)) return 0;
+    if (!put_mut("ext/textx/inflate.cx", "", "")) return 0;
+    if (!put_mut("ext/textx/deflate.cx", "", "")) return 0;
+    if (!put_mut("tools/check-textx-dkfeed.cx", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    {   char p[4400]; if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0; src = cx_read(p, &n); }
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 5 && !strncmp(src + i + 2, "textx", 5))) {
+            cp(dst + k, src + i, t2 + 1 - i); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, e - t2 - 1); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+/* ---- ccogw literal split-invariance property (112 assertions, source: moltbaby 1c5ccea4b) ---- */
+typedef struct {
+    const char *label;
+    const char *framed;
+    const char *payload;
+} LitFix;
+
+static const LitFix LIT_FIXTURES[] = {
+    { "two-chunks",      "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", "hello world" },
+    { "empty-body",      "0\r\n\r\n", "" },
+    { "single-chunk",    "a\r\n0123456789\r\n0\r\n\r\n", "0123456789" },
+    { "chunk-extension", "5;name=value\r\nhello\r\n0\r\n\r\n", "hello" },
+    { "uppercase-hex",   "A\r\n0123456789\r\n0\r\n\r\n", "0123456789" },
+    { 0, 0, 0 }
+};
+
+static long lit_feed_pieces(const char *framed, long n, long piece, unsigned char *out, long cap) {
+    dk_state s;
+    long at = 0, total = 0;
+    dk_init(&s);
+    while (at < n) {
+        long take = (n - at) < piece ? (n - at) : piece;
+        long consumed = 0, produced = 0;
+        long rc = dk_feed(&s, (const unsigned char *)framed + at, take,
+                          &consumed, out + total, cap - total, &produced);
+        total += produced;
+        at += consumed;
+        if (rc < 0) return -1;
+        if (rc == DK_END) break;
+        if (consumed == 0 && produced == 0) return -1;
+    }
+    return total;
+}
+
+static void group_split_lit(void) {
+    int i, count = 0;
+    for (i = 0; LIT_FIXTURES[i].label; i++) {
+        const char *framed = LIT_FIXTURES[i].framed;
+        const char *want = LIT_FIXTURES[i].payload;
+        long n = (long)strlen(framed);
+        long wantlen = (long)strlen(want);
+        long piece;
+        /* Proposition (b): one-shot dk_dechunk must match hand-written literal */
+        {
+            long onelen = dk_dechunk(framed, n, one, RB);
+            char name[96];
+            if (cx_fmt(name, sizeof name, "lit-%s.one-shot-matches-literal", LIT_FIXTURES[i].label)) exit(2);
+            tk_ok(onelen == wantlen && (wantlen == 0 || memcmp(one, want, (size_t)wantlen) == 0), name);
+            count++;
+        }
+        /* Proposition (a): dk_feed at every piece size 1..n+2 must match same literal */
+        for (piece = 1; piece <= n + 2; piece++) {
+            long gotlen = lit_feed_pieces(framed, n, piece, ob, RB);
+            char name[128];
+            if (cx_fmt(name, sizeof name, "lit-%s.piece-%ld", LIT_FIXTURES[i].label, piece)) exit(2);
+            tk_ok(gotlen == wantlen && (wantlen == 0 || memcmp(ob, want, (size_t)wantlen) == 0), name);
+            count++;
+        }
+    }
+    tk_ok(count == 112, "lit-split-invariance-112-count");
+}
+
+static int child(const char *cases) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", (char *)cases, 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-textx-dkfeed.cx", work)) return -1;
+    return tk_run(av, 0, 50000);
+}
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-textx-dkfeed", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 0) {
+        if (setup("", "")) { rc = child("fixture;diff;sticky;splitlit"); tk_ok(rc == 0, "mut-control-unmutated-passes"); }
+        else tk_ok(0, "mut-control-setup");
+    } else if (part == 1) {
+        if (setup("if (s->phase == DKP_DONE) return DK_END;", "if (s->phase == DKP_DONE) return DK_END; if (s->phase == DKP_SIZE && s->nd > 0) s->remain >>= 4;")) {
+            rc = child("fixture;diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tdiff-D2-byte"), "mut-m3-hex-digit-lost-across-feeds-detected");
+        } else tk_ok(0, "mut-m3-setup");
+    } else if (part == 2) {
+        if (setup("if (s->phase == DKP_DONE) return DK_END;", "if (s->phase == DKP_DONE) return DK_END; if (s->phase == DKP_EXT) s->phase = DKP_SIZE;")) {
+            rc = child("fixture;diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tdiff-D2-byte"), "mut-m4-extension-state-lost-detected");
+        } else tk_ok(0, "mut-m4-setup");
+    } else if (part == 3) {
+        if (setup("if (c == '\\n') s->phase = DKP_TR_START;", "if (c == '\\n') s->phase = DKP_DONE;")) {
+            rc = child("fixture;diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tdiff-D1-whole"), "mut-m5-trailer-ends-early-detected");
+        } else tk_ok(0, "mut-m5-setup");
+    } else if (part == 4) {
+        if (setup("if (s->remain == 0) s->phase = DKP_DATA_END;", "if (s->remain == 0) { if (o > 0) o--; s->phase = DKP_DATA_END; }")) {
+            rc = child("splitlit");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tlit-two-chunks.one-shot-matches-literal"), "mut-m6-symmetric-chunk-loss-killed-by-literal");
+        } else tk_ok(0, "mut-m6-setup");
+    }
+}
+
+int main(int argc, char **argv) {
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    lcg = 12345;
+    if (tk_case("fixture") || tk_case("diff") || tk_case("trunc") || tk_case("corrupt")) {
+        if (!load_fixture()) { tk_ok(0, "fixture-load"); return tk_end("CHECK_TEXTX_DKFEED", 0); }
+        gen_vectors();
+    }
+    if (tk_case("fixture")) group_fixture();
+    if (tk_case("diff")) group_diff();
+    if (tk_case("trunc")) group_trunc();
+    if (tk_case("corrupt")) group_corrupt();
+    if (tk_case("sticky")) group_sticky();
+    if (tk_case("splitlit")) group_split_lit();
+    if (tk_case("mutc")) group_mut(0);
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    if (tk_case("mut4")) group_mut(4);
+    return tk_end("CHECK_TEXTX_DKFEED", 0);
+}

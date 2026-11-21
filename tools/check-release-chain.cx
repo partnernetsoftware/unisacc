@@ -36,7 +36,7 @@ int main(int argc, char **argv) {
     ck(r.rc == 0 && has(&r, "CHAIN\tPRECHECK\tef-counts\t") && has(&r, "CHAIN\tCMD\t0a\tpack\t") && has(&r, "CHAIN\tCMD\t0b\twarm\t") &&
        has(&r, "CHAIN\tCMD\t1\tprep\t") && has(&r, "CHAIN\tCMD\t2\tstage-a\t") && has(&r, "CHAIN\tCMD\t3\tstage-commit\t") &&
        has(&r, "CHAIN\tCMD\t4\tstage-dry\t") && has(&r, "--strict release/evidence/v0.0.99-strict-2026-01-01.tsv") && has(&r, " --dry\n") &&
-       has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tCMD\t6\tpost-publish\t") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
+       has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tCMD\t6\tpost-publish\t") && has(&r, "mark-version-seq --version 0.0.99") && has(&r, "version-metrics-gen.cx -- --write-history") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
     ck(sy_exists(plan_state) == 0 && !has(&r, "CHAIN\tRUN\t"), "plan-runs-nothing");
     ck(has(&r, "CHAIN\tCMD\tP0\tprerun-plan\t") && has(&r, "--ids-file \"${PRERUN_IDS:?}\"") && has(&r, "--normal-jobs 4") &&
        has(&r, "CHAIN\tCMD\tP1\tprerun-start\t") && has(&r, "--resume --max-jobs 4 --keep-going") &&
@@ -272,6 +272,26 @@ int main(int argc, char **argv) {
         np_free(&r);
         char fixture[4400];
         if (cx_fmt(fixture, sizeof fixture, "%s/freeze", tmp) || sy_remove_all(fixture)) return 2;
+    }
+    /* (4b) mark-version-seq updates state atomically, is idempotent, and refuses missing versions */
+    {
+        char vseq[4400];
+        if (cx_fmt(vseq, sizeof vseq, "%s/version-seq.tsv", tmp)) return 2;
+        const char *seed_vs = "slot\tversion\tclass\tstate\tnote\n1\t0.0.98\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\told\n2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n";
+        if (cx_write(vseq, seed_vs, strlen(seed_vs))) return 2;
+        char *m1[] = {bin, "mark-version-seq", "--version", "0.0.99", "--table", vseq, 0};
+        r = actual(m1);
+        size_t rn = 0; char *rb = cx_read(vseq, &rn);
+        ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tUPDATED\tversion=0.0.99") && rb &&
+           strstr(rb, "2\t0.0.99\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tnow\n") != 0, "mark-version-seq-updates");
+        free(rb); np_free(&r);
+        r = actual(m1);
+        ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tALREADY_PUBLIC\tversion=0.0.99"), "mark-version-seq-idempotent");
+        np_free(&r);
+        char *m2[] = {bin, "mark-version-seq", "--version", "0.0.999", "--table", vseq, 0};
+        r = actual(m2);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0, "mark-version-seq-missing-refused");
+        np_free(&r);
     }
     /* (5) usage */
     char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};

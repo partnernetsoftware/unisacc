@@ -63,12 +63,65 @@ static const char *rk_script(const char *name, char *buf, long cap) {
     if (cx_fmt(buf, cap, "tests/%s.cx", name)) return 0;
     return buf;
 }
-static int judge(Rk *rk, const char *only, int *okp);
+
+static int rk_path_hits(const char *name, const char *p, long pl, int precommit_soft) {
+    long nl = tx_len(name, 64);
+    if (pl <= 0) return 0;
+    if ((pl == 17 && tx_same(p, 17, "tools/ratchets.cx", 17)) ||
+        (pl == 18 && tx_same(p, 18, "tools/precommit.cx", 18)) ||
+        (pl == 23 && tx_same(p, 23, "tools/precommit-flow.cx", 23)) ||
+        (pl == 25 && tx_same(p, 25, "tests/precommit-gates.tsv", 25))) return 1;
+    if (nl > 0 && tx_find(p, pl, name, nl) >= 0) return 1;
+    if (tx_eqz(name, "srcshape")) return tx_prefix(p, pl, "src/", 4);
+    if (tx_eqz(name, "coreapi")) return tx_prefix(p, pl, "cx/", 3) || tx_prefix(p, pl, "tools/symindex", 14);
+    if (tx_eqz(name, "notcovered")) return tx_prefix(p, pl, "exec/", 5);
+    if (tx_eqz(name, "dup-census")) return tx_prefix(p, pl, "tools/", 6);
+    if (tx_eqz(name, "aluiwidth") || tx_eqz(name, "net-deps"))
+        return tx_prefix(p, pl, "src/", 4) || tx_prefix(p, pl, "cx/", 3) ||
+               tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "seed/", 5) || tx_prefix(p, pl, "include/", 8);
+    if (tx_eqz(name, "outdep"))
+        return tx_prefix(p, pl, "tools/", 6) || tx_prefix(p, pl, "tests/", 6) || tx_prefix(p, pl, "src/", 4);
+    if (precommit_soft && (tx_eqz(name, "cxlibc") || tx_eqz(name, "cxraw")))
+        return !tx_prefix(p, pl, "tools/", 6) && !tx_prefix(p, pl, "tests/", 6);
+    return 1;
+}
+
+static int rk_affected(const char *name) {
+    const char *env = sy_env("UNISACC_RATCHETS_PATHS");
+    const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
+    int precommit_soft = (soft && soft[0] == '1');
+    if (!precommit_soft || !env || !env[0]) return 1;
+    long n = tx_len(env, 1 << 20), at = 0;
+    int any_path = 0;
+    while (at < n) {
+        long e = tx_chr(env + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && env[at + l - 1] == '\r') l--;
+        if (l > 0) {
+            any_path = 1;
+            if (rk_path_hits(name, env + at, l, precommit_soft)) return 1;
+        }
+        at += (e < 0 ? l : e + 1);
+    }
+    return any_path ? 0 : 1;
+}
+
+static char *rk_skip_msg(const char *name, long *out_n) {
+    char buf[160];
+    if (cx_fmt(buf, sizeof buf, "%s: ok: skipped (unaffected by staged paths)\n", name)) return 0;
+    long l = tx_len(buf, sizeof buf);
+    char *m = mm_alloc(l + 1);
+    if (!m) return 0;
+    for (long i = 0; i <= l; i++) m[i] = buf[i];
+    *out_n = l;
+    return m;
+}
+
+static int judge(Rk *rk, const char *only, int *okp, int *skipp);
 static void from_run(Rk *rk, const char *dir);
 
 int main(int argc, char **argv) {
     static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}};
-    const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0;
+    const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0, skipped = 0;
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
         if (!b) { fprintf(stderr, "ratchets: cannot read %s\n", argv[2]); return 2; }
@@ -81,18 +134,37 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 2 && tx_eqz(argv[1], "--plan")) {   /* PLAN<TAB>rk-NAME<TAB>argv...: the spawn line of each ratchet */
-        for (k = 0; k < NRK; k++) { char sb[64]; printf("PLAN\trk-%s\t./tools/bound\t55\tsh\t./unisacc.com\t%s\t--\t--check\n", rk[k].name, rk_script(rk[k].name, sb, sizeof sb)); }
+        for (k = 0; k < NRK; k++) {
+            char sb[64];
+            if (!rk_affected(rk[k].name)) continue;
+            printf("PLAN\trk-%s\t./tools/bound\t55\tsh\t./unisacc.com\t%s\t--\t--check\n", rk[k].name, rk_script(rk[k].name, sb, sizeof sb));
+        }
         return 0;
     }
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--from-run")) {   /* judge a flow run of the --plan nodes */
+        const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
+        int precommit_soft = (soft && soft[0] == '1');
         if (argc == 5) { if (!tx_eqz(argv[3], "--only")) return 2; only = argv[4]; }
         from_run(rk, argv[2]);
-        fail = judge(rk, only, &ok);
-        printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+        fail = judge(rk, only, &ok, &skipped);
+        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
+        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
         return fail ? 1 : 0;
     }
-    if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
-    else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --rows SAVED [--only PATH-PREFIX] | --plan | --from-run DIR [--only PATH-PREFIX]]\n"); return 2; }
+    if (argc >= 3 && tx_eqz(argv[1], "--affected")) {
+        char abuf[65536]; long ap = 0;
+        for (k = 2; k < argc; k++) {
+            long al = tx_len(argv[k], 4096);
+            if (ap + al + 2 < (long)sizeof abuf) {
+                for (long j = 0; j < al; j++) abuf[ap++] = argv[k][j];
+                abuf[ap++] = '\n';
+            }
+        }
+        abuf[ap] = 0;
+        sy_setenv("UNISACC_RATCHETS_PATHS", abuf, 1);
+        sy_setenv("UNISACC_RATCHETS_PRECOMMIT", "1", 1);
+    } else if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
+    else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --affected PATH... | --rows SAVED [--only PATH-PREFIX] | --plan | --from-run DIR [--only PATH-PREFIX]]\n"); return 2; }
     char lsf[4200]; int lsfd = -1, lspid; lsf[0] = 0;
     if (!sy_env("UNISACC_CX_LSFILES")) {   /* one tracked-.cx listing for the round; symindex (cxlibc, coreapi: 28 queries) reuses it; fall back to its own query when absent */
         char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}; char *lb; long ln;
@@ -104,7 +176,14 @@ int main(int argc, char **argv) {
         } else lsf[0] = 0;
     }
     for (k = 0; k < NRK; k++) {
-        char sb[64], *script = (char *)rk_script(rk[k].name, sb, sizeof sb);
+        char sb[64], *script;
+        if (!rk_affected(rk[k].name)) {
+            rk[k].pid = -2;
+            rk[k].rc = 0;
+            rk[k].out = rk_skip_msg(rk[k].name, &rk[k].n);
+            continue;
+        }
+        script = (char *)rk_script(rk[k].name, sb, sizeof sb);
         if (!script) return 2;
         {   char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", script, "--", "--check", 0};
             rk[k].pid = sy_spawn_pipe(v, 0, 0, &rk[k].ofd, 0);   /* stderr merged: the ratchets print their rows there */
@@ -113,22 +192,27 @@ int main(int argc, char **argv) {
     }
     for (k = 0; k < NRK; k++) {
         int ex = 0, code = 0, sig = 0;
+        if (rk[k].pid == -2) continue;
         slurp(rk[k].ofd, &rk[k].out, &rk[k].n);
         sy_close(rk[k].ofd);
         rk[k].rc = sy_wait_status(rk[k].pid, 0, &ex, &code, &sig) == rk[k].pid && ex ? code : -1;
     }
-    fail = judge(rk, only, &ok);
+    fail = judge(rk, only, &ok, &skipped);
     if (lsf[0]) sy_unlink(lsf);
-    printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+    {   const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
+        int precommit_soft = (soft && soft[0] == '1');
+        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
+        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+    }
     return fail ? 1 : 0;
 }
 
-/* the one judgement: per ratchet a RATCHET line plus its offending rows; returns fail, *okp = ok */
-static int judge(Rk *rk, const char *only, int *okp) {
-    int k, ok = 0, fail = 0;
+/* the one judgement: per ratchet a RATCHET line plus its offending rows; returns fail, *okp = ok, *skipp = skipped */
+static int judge(Rk *rk, const char *only, int *okp, int *skipp) {
+    int k, ok = 0, fail = 0, skipped = 0;
     for (k = 0; k < NRK; k++) {
         const char *o = rk[k].out ? rk[k].out : ""; long at = 0, summary = -1, sn = 0;
-        int isok;
+        int isok, isskip;
         while (at < rk[k].n) {   /* the summary is the line with " ok: " or " FAIL: " */
             long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;
             /* summary: "…: ok: …" / "…: FAIL: …" (the nine), or "…\tstatus=PASS|FAIL" (check-literal) */
@@ -138,7 +222,8 @@ static int judge(Rk *rk, const char *only, int *okp) {
         }
         isok = rk[k].rc == 0 && summary >= 0 &&
                (tx_find(o + summary, sn, ": ok: ", 6) >= 0 || tx_find(o + summary, sn, "status=PASS", 11) >= 0);
-        if (isok) ok++; else fail++;
+        isskip = isok && (rk[k].pid == -2 || tx_find(o + summary, sn, ": ok: skipped (", 15) >= 0);
+        if (isskip) skipped++; else if (isok) ok++; else fail++;
         printf("RATCHET\t%s\t%s\t%.*s\n", rk[k].name, isok ? "ok" : summary >= 0 ? "FAIL" : "ERROR", (int)(summary >= 0 ? sn : 0), summary >= 0 ? o + summary : "");
         at = 0;
         while (at < rk[k].n) {
@@ -148,6 +233,7 @@ static int judge(Rk *rk, const char *only, int *okp) {
         }
     }
     *okp = ok;
+    *skipp = skipped;
     return fail;
 }
 
@@ -177,6 +263,10 @@ static void from_run(Rk *rk, const char *dir) {
         if (!cx_fmt(p, sizeof p, "%s/out/%s.out", dir, id)) {
             char *b = (char *)cx_read(p, &bn);
             if (b) { char *g = mm_grow(b, bn + 1); if (g) { g[bn] = 0; rk[k].out = g; rk[k].n = (long)bn; } }
+        }
+        if (rk[k].rc == -1 && !rk[k].out && !rk_affected(rk[k].name)) {
+            rk[k].rc = 0;
+            rk[k].out = rk_skip_msg(rk[k].name, &rk[k].n);
         }
     }
 }

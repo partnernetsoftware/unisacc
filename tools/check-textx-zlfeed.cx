@@ -1,0 +1,684 @@
+/* tools/check-textx-zlfeed.cx -- ext/textx/inflate.cx incremental decoding (zl_init, zl_feed, zl_done, zl_end).
+ *   sh ./unisacc.com tools/check-textx-zlfeed.cx [-- --cases size;oracle;diff;trunc;corrupt;sticky;mutc;mut1;mut2;mut3;mut4;mut5]
+ *   size     sizeof(zl_state) == ZL_STATE_BYTES
+ *   oracle   proposition (b) correctness against independent known-answer vectors (hand-built or pre-generated
+ *            by external system gzip, never produced by textx.deflate/inflate):
+ *            3 stored (empty, short, cross-block), 3 fixed (empty, short, 2-block cross-boundary back-ref),
+ *            3 dynamic (raw greek, raw colors, gzip planets), plus dist > output_so_far malformed (-EINVAL)
+ *   diff     proposition (a) split invariance: 9 drivers (whole, 1B in, 7B in, rand 1..64 x3 seeds, 1B out,
+ *            7B out, 1B in + 1B out) match one-shot zl_inflate/zl_gunzip byte-for-byte on stored, fixed,
+ *            dynamic, >32 KiB window wrap long-distance match, trailing bytes, exact-cap, and gzip headers
+ *   trunc    truncated raw and gzip streams across drivers: zl_end == -EIO (or one-shot code), output is prefix
+ *   corrupt  malformed raw and gzip streams + bit flips: sticky error, matching error code
+ *   sticky   bad arguments leave state untouched, ZL_END is final, sticky error rejects further input
+ *   mutc     private copy of ext/textx without mutation: all feed groups must pass (control)
+ *   mut1-5   private copy with mutations: M1 window mask wrong, M2 bit buffer cleared across feeds,
+ *            M3 hold buffer cleared across feeds, M4 gzip running CRC reset across feeds,
+ *            M5 symmetric off-by-one output truncation in BOTH one-shot zl_raw and streaming zl_feed
+ *            (must be killed by proposition (b) oracle)
+ * Prints PASS/FAIL per case and CHECK_TEXTX_ZLFEED<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+#pragma unisa use textx.inflate
+#pragma unisa use textx.deflate
+#pragma unisa use cxlib.muthelp
+
+#define MAXIN 140000
+#define MAXOUT 76000
+
+static unsigned char orig[MAXOUT], comp[MAXIN], one_out[MAXOUT], feed_out[MAXOUT], tmp_in[MAXIN];
+static unsigned char small_buf[16];
+static unsigned long g_seed = 12345UL;
+static unsigned long d_lcg = 1UL;
+static zl_state g_st;
+
+#define cp mh_copy
+#define find_at mh_find_at
+static int zl_eq(const unsigned char *a, const unsigned char *b, long n) { return n == 0 || memcmp(a, b, (size_t)n) == 0; }
+#define same zl_eq
+static unsigned long drnd(void) {
+    d_lcg = d_lcg * 1103515245UL + 12345UL;
+    return (d_lcg >> 16) & 0x7FFFFFFFUL;
+}
+
+static void fill_data(long n, int kind) {
+    long i;
+    for (i = 0; i < n; i++) {
+        g_seed = g_seed * 6364136223846793005UL + 1442695040888963407UL;
+        if (kind == 0) orig[i] = (unsigned char)(g_seed >> 33);
+        else if (kind == 1) orig[i] = (unsigned char)("abcabcabd"[i % 9]);
+        else orig[i] = (unsigned char)('a' + (int)((i / 97) % 3));
+    }
+}
+
+/* 70000 bytes: 32000 random bytes followed by repeats from start so matches cross 32 KiB window wrap twice */
+static void fill_longdist(long n) {
+    long i;
+    unsigned long s = 987654321UL;
+    for (i = 0; i < 32000 && i < n; i++) {
+        s = s * 6364136223846793005UL + 1442695040888963407UL;
+        orig[i] = (unsigned char)(s >> 33);
+    }
+    for (; i < n; i++) orig[i] = orig[i - 32000];
+}
+
+/* Independent RFC 1951 fixed-Huffman bit-writer (never uses textx.deflate/inflate) */
+typedef struct bw_t { unsigned char *buf; long pos; unsigned int bb; int bc; } bw_t;
+static void bw_put(bw_t *w, unsigned int val, int nbits) {
+    w->bb |= (val & ((1U << nbits) - 1U)) << w->bc;
+    w->bc += nbits;
+    while (w->bc >= 8) { w->buf[w->pos++] = (unsigned char)(w->bb & 255U); w->bb >>= 8; w->bc -= 8; }
+}
+static unsigned int rev_bits(unsigned int v, int n) {
+    unsigned int r = 0; int i;
+    for (i = 0; i < n; i++) { r = (r << 1) | (v & 1U); v >>= 1; }
+    return r;
+}
+static void bw_fix_sym(bw_t *w, int sym) {
+    if (sym <= 143) bw_put(w, rev_bits((unsigned int)(0x30 + sym), 8), 8);
+    else if (sym <= 255) bw_put(w, rev_bits((unsigned int)(0x190 + (sym - 144)), 9), 9);
+    else if (sym <= 279) bw_put(w, rev_bits((unsigned int)(sym - 256), 7), 7);
+    else bw_put(w, rev_bits((unsigned int)(0xC0 + (sym - 280)), 8), 8);
+}
+
+/* Independent 2-block fixed DEFLATE stream:
+ * block 1 (BFINAL=0): 64 literals + 6 matches (len 28, dist 64)
+ * block 2 (BFINAL=1): 6 matches (len 28, dist 64) crossing block boundary => 400 bytes total */
+static long build_fixed_two_blocks(unsigned char *dst, unsigned char *exp_out, long *exp_len) {
+    bw_t w; int i, k; long n = 0;
+    w.buf = dst; w.pos = 0; w.bb = 0; w.bc = 0;
+    bw_put(&w, 0U, 1); /* BFINAL = 0 */
+    bw_put(&w, 1U, 2); /* BTYPE = 01 (fixed) */
+    for (i = 0; i < 64; i++) {
+        unsigned char c = (unsigned char)(32 + (i * 3) % 90);
+        bw_fix_sym(&w, (int)c);
+        exp_out[n++] = c;
+    }
+    /* sym 271 = base 27 + 2 extra bits (val 1 -> len 28); dcode 11 = base 49 + 4 extra bits (val 15 -> dist 64) */
+    for (k = 0; k < 6; k++) {
+        bw_fix_sym(&w, 271);
+        bw_put(&w, 1U, 2);
+        bw_put(&w, rev_bits(11U, 5), 5);
+        bw_put(&w, 15U, 4);
+        for (i = 0; i < 28; i++) { exp_out[n] = exp_out[n - 64]; n++; }
+    }
+    bw_fix_sym(&w, 256); /* EOB block 1 */
+    bw_put(&w, 1U, 1); /* BFINAL = 1 */
+    bw_put(&w, 1U, 2); /* BTYPE = 01 (fixed) */
+    for (k = 0; k < 6; k++) {
+        bw_fix_sym(&w, 271);
+        bw_put(&w, 1U, 2);
+        bw_put(&w, rev_bits(11U, 5), 5);
+        bw_put(&w, 15U, 4);
+        for (i = 0; i < 28; i++) { exp_out[n] = exp_out[n - 64]; n++; }
+    }
+    bw_fix_sym(&w, 256); /* EOB block 2 */
+    if (w.bc > 0) w.buf[w.pos++] = (unsigned char)(w.bb & 255U);
+    *exp_len = n;
+    return w.pos;
+}
+
+/* Independent malformed fixed block: emits "ab" (2 bytes), then back-ref len=3, dist=5 (> 2) */
+static long build_fixed_dist_too_far(unsigned char *dst) {
+    bw_t w;
+    w.buf = dst; w.pos = 0; w.bb = 0; w.bc = 0;
+    bw_put(&w, 1U, 1); /* BFINAL = 1 */
+    bw_put(&w, 1U, 2); /* BTYPE = 01 (fixed) */
+    bw_fix_sym(&w, 'a');
+    bw_fix_sym(&w, 'b');
+    bw_fix_sym(&w, 257);              /* len = 3, 0 extra bits */
+    bw_put(&w, rev_bits(4U, 5), 5);   /* dcode 4 = base 5, 1 extra bit */
+    bw_put(&w, 0U, 1);                /* dist = 5 > 2 */
+    bw_fix_sym(&w, 256);
+    if (w.bc > 0) w.buf[w.pos++] = (unsigned char)(w.bb & 255U);
+    return w.pos;
+}
+
+/* Pre-generated by external system `gzip -9 -n -c` (all 3 have BTYPE=2 dynamic Huffman block: byte[10]&7 == 5) */
+static const unsigned char gz_dyn_greek[] = {
+    0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x02,0x03,
+    0xc5,0x8d,0xd1,0x09,0x80,0x30,0x0c,0x44,0xff,0x9d,0xe2,0x26,0x70,0x01,0xa7,0x39,
+    0xb5,0xb4,0xc1,0xa6,0x0d,0xda,0x82,0x38,0xbd,0x29,0xb8,0x83,0x1f,0xf7,0xc8,0x71,
+    0xc9,0x85,0xd9,0x12,0xb1,0x86,0x46,0x44,0xaa,0x12,0x7b,0xc8,0x3e,0x07,0xbb,0x24,
+    0xd7,0x82,0x67,0x04,0x43,0x2d,0x0d,0x4a,0x75,0x1c,0x34,0x23,0x32,0x75,0xdd,0x09,
+    0xed,0x28,0x1d,0xb7,0xa0,0xaa,0x6c,0xa7,0x5f,0x98,0xe0,0x4c,0x15,0x97,0x44,0x2f,
+    0x6b,0xec,0xe8,0x5f,0x95,0x25,0xc1,0xe6,0x72,0xeb,0xcb,0x21,0x72,0x01,0xff,0x7b,
+    0x3e,0x4f,0x2f,0x12,0x0a,0x41,0x98,0xfa,0x00,0x00,0x00
+};
+static const char txt_dyn_greek[] =
+    "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega; "
+    "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.\n";
+
+static const unsigned char gz_dyn_colors[] = {
+    0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x02,0x03,
+    0xcd,0xcc,0xc1,0x0d,0x83,0x40,0x0c,0x44,0xd1,0x7b,0xaa,0x98,0xd4,0x91,0x6a,0x0c,
+    0x3b,0x32,0x56,0x8c,0x2d,0x39,0x0b,0xab,0xed,0x1e,0xd2,0x05,0xf7,0xff,0x7e,0xb1,
+    0x21,0x4b,0x42,0x89,0x49,0xf7,0x1c,0xd0,0x22,0x03,0x8b,0x1f,0x84,0x45,0x33,0x4d,
+    0x9c,0x96,0xce,0x8e,0x75,0x4a,0x60,0x17,0x65,0x74,0xc1,0x52,0x39,0xfe,0x95,0xac,
+    0x5f,0x8c,0xcd,0x3a,0x6f,0x27,0x13,0x3f,0xf3,0x93,0x05,0x4d,0x6f,0x1f,0xd4,0x23,
+    0xde,0xef,0xd7,0x05,0x3b,0x5c,0xfd,0xe4,0xe4,0x00,0x00,0x00
+};
+static const char txt_dyn_colors[] =
+    "red orange yellow green blue indigo violet cyan magenta brown black white gray silver gold; "
+    "red orange yellow green blue indigo violet cyan magenta brown black white gray silver gold; "
+    "red orange yellow green blue indigo violet!\n";
+
+static const unsigned char gz_dyn_planets[] = {
+    0x1f,0x8b,0x08,0x00,0x00,0x00,0x00,0x00,0x02,0x03,
+    0xc5,0xcc,0xc1,0x09,0x80,0x40,0x0c,0x44,0xd1,0xbb,0x55,0x8c,0x75,0x58,0x4d,0x90,
+    0x01,0x57,0xdc,0xb8,0x4c,0x12,0xc1,0xee,0xd5,0x2a,0xbc,0xff,0xf7,0x3b,0xb5,0x96,
+    0x6e,0x5c,0xf4,0x0a,0xd0,0x94,0x1b,0xba,0x29,0xb0,0xd7,0x68,0x49,0x21,0x2c,0x4b,
+    0x8e,0x92,0x7d,0x81,0x73,0x64,0x39,0x31,0x8e,0xca,0x13,0x2b,0xc5,0x17,0xa9,0xc5,
+    0x82,0xfe,0xef,0x68,0x9e,0x1e,0xa0,0x9d,0x03,0xf9,0xca,0x00,0x00,0x00
+};
+static const char txt_dyn_planets[] =
+    "mercury venus earth mars jupiter saturn uranus neptune pluto ceres eris; "
+    "mercury venus earth mars jupiter saturn uranus neptune pluto ceres eris; "
+    "mercury venus earth mars jupiter saturn uranus neptune!\n";
+
+/* run zl_feed with driver drv (9 drivers):
+ * 0=whole, 1=1B in, 2=7B in, 3..5=rand 1..64 (seeds 101,202,303), 6=1B out, 7=7B out, 8=1B in + 1B out. */
+static long run_driver(int mode, int drv, const unsigned char *in, long inlen,
+                       unsigned char *out, long maxout, long *out_n, long *in_used, long *end_rc, long *viol) {
+    long pos = 0, outp = 0, step, c, o, r = ZL_NEED_IN, cap_step, iter = 0;
+    unsigned char *ob;
+    *viol = 0;
+    if (zl_init(&g_st, mode) != 0) { *viol = 1; return -EINVAL; }
+    if (drv == 3) d_lcg = 101UL;
+    else if (drv == 4) d_lcg = 202UL;
+    else if (drv == 5) d_lcg = 303UL;
+    for (;;) {
+        if (++iter > 500000L) { *viol += 100; break; }
+        if (drv == 0 || drv == 6 || drv == 7) step = inlen - pos;
+        else if (drv == 1 || drv == 8) step = pos < inlen ? 1 : 0;
+        else if (drv == 2) { step = 7; if (step > inlen - pos) step = inlen - pos; }
+        else { step = (long)(drnd() % 64UL) + 1; if (step > inlen - pos) step = inlen - pos; }
+        if (drv == 6 || drv == 8) { cap_step = 1; ob = small_buf; ob[1] = 0xA5; }
+        else if (drv == 7) { cap_step = 7; ob = small_buf; ob[7] = 0xA5; }
+        else { cap_step = maxout - outp; ob = out + outp; if (cap_step < 0) cap_step = 0; }
+        c = -1; o = -1;
+        r = zl_feed(&g_st, in + pos, step, &c, ob, cap_step, &o);
+        if (c < 0 || c > step || o < 0 || o > cap_step) *viol += 1;
+        if ((drv == 6 || drv == 8) && ob[1] != 0xA5) *viol += 1;
+        if (drv == 7 && ob[7] != 0xA5) *viol += 1;
+        if (o > 0 && (drv == 6 || drv == 7 || drv == 8)) {
+            if (outp + o <= maxout) cp(out + outp, ob, o);
+            else *viol += 1;
+        }
+        outp += o;
+        pos += c;
+        if (r == ZL_END) {
+            long c2 = -1, o2 = -1, r2;
+            r2 = zl_feed(&g_st, in + pos, inlen - pos, &c2, small_buf, 8, &o2);
+            if (r2 != ZL_END || c2 != 0 || o2 != 0 || !zl_done(&g_st)) *viol += 1;
+            break;
+        }
+        if (r < 0) {
+            long c2 = -1, o2 = -1, r2;
+            r2 = zl_feed(&g_st, in + pos, inlen - pos, &c2, small_buf, 8, &o2);
+            if (r2 != r || c2 != 0 || o2 != 0) *viol += 1;
+            break;
+        }
+        if (r == ZL_NEED_OUT) {
+            if (o == 0 && cap_step > 0) *viol += 1;
+            continue;
+        }
+        if (c != step) *viol += 1;
+        if (pos >= inlen) break;
+    }
+    *out_n = outp;
+    *in_used = pos;
+    *end_rc = zl_end(&g_st);
+    return r;
+}
+
+/* Proposition (b): check BOTH one-shot and streaming (all 9 drivers) against independent known answer */
+static int check_oracle(const char *tag, int mode, const unsigned char *in, long inlen,
+                        const unsigned char *exp, long explen, long exp_used) {
+    int drv, ok = 1;
+    long one_n = -1, one_r;
+    memset(one_out, 0xDD, (size_t)(explen + 16 < MAXOUT ? explen + 16 : MAXOUT));
+    one_r = mode == ZL_GZIP ? zl_gunzip(one_out, MAXOUT, &one_n, in, inlen)
+                            : zl_inflate(one_out, MAXOUT, &one_n, in, inlen);
+    if (one_r != 0 || one_n != explen || !same(one_out, exp, explen)) ok = 0;
+    for (drv = 0; drv < 9; drv++) {
+        long fn = 0, fu = 0, erc = 0, viol = 0, r;
+        memset(feed_out, 0xCC, (size_t)(explen + 16 < MAXOUT ? explen + 16 : MAXOUT));
+        r = run_driver(mode, drv, in, inlen, feed_out, MAXOUT, &fn, &fu, &erc, &viol);
+        if (r != ZL_END || erc != 0 || viol != 0 || fn != explen || !same(feed_out, exp, explen)) ok = 0;
+        if (exp_used >= 0 && fu != exp_used) ok = 0;
+    }
+    tk_ok(ok, tag);
+    return ok;
+}
+
+/* Proposition (a): split invariance across all 9 drivers vs one-shot + exact-cap check */
+static int check_split(const char *tag, int mode, const unsigned char *in, long inlen,
+                       const unsigned char *exp, long explen, long exp_used) {
+    int drv, ok = 1;
+    long one_n = -1, one_r;
+    one_r = mode == ZL_GZIP ? zl_gunzip(one_out, MAXOUT, &one_n, in, inlen)
+                            : zl_inflate(one_out, MAXOUT, &one_n, in, inlen);
+    if (one_r != 0 || one_n != explen || !same(one_out, exp, explen)) {
+        tk_ok(0, tag);
+        return 0;
+    }
+    for (drv = 0; drv < 9; drv++) {
+        long fn = 0, fu = 0, erc = 0, viol = 0, r;
+        memset(feed_out, 0xCC, (size_t)(explen + 16 < MAXOUT ? explen + 16 : MAXOUT));
+        r = run_driver(mode, drv, in, inlen, feed_out, MAXOUT, &fn, &fu, &erc, &viol);
+        if (r != ZL_END || erc != 0 || viol != 0 || fn != one_n || !same(feed_out, one_out, one_n)) ok = 0;
+        if (exp_used >= 0 && fu != exp_used) ok = 0;
+    }
+    if (explen <= MAXOUT - 8) {
+        long c = 0, o = 0, r;
+        zl_init(&g_st, mode);
+        feed_out[explen] = 0x5A;
+        r = zl_feed(&g_st, in, inlen, &c, feed_out, explen, &o);
+        if (r != ZL_END || o != explen || feed_out[explen] != 0x5A || !same(feed_out, one_out, explen)) ok = 0;
+    }
+    tk_ok(ok, tag);
+    return ok;
+}
+
+static int check_err_all(int mode, const unsigned char *in, long inlen, long want_err) {
+    int drv;
+    long one_n = 0, one_r;
+    one_r = mode == ZL_GZIP ? zl_gunzip(one_out, MAXOUT, &one_n, in, inlen)
+                            : zl_inflate(one_out, MAXOUT, &one_n, in, inlen);
+    if (one_r != want_err) return 0;
+    for (drv = 0; drv < 9; drv++) {
+        long fn, fu, erc, viol, r;
+        r = run_driver(mode, drv, in, inlen, feed_out, MAXOUT, &fn, &fu, &erc, &viol);
+        if (viol != 0 || r == ZL_END || erc != want_err) return 0;
+    }
+    return 1;
+}
+
+static void group_size(void) {
+    sy_printf("INFO\tsizeof_zl_core=%ld\tsizeof_zl_state=%ld\tZL_STATE_BYTES=%ld\n",
+              (long)sizeof(zl_core), (long)sizeof(zl_state), (long)ZL_STATE_BYTES);
+    tk_ok((long)sizeof(zl_state) == (long)ZL_STATE_BYTES, "size-zl-state-exact");
+}
+
+static void group_oracle(void) {
+    long cn, explen;
+    /* 3 stored blocks: empty, short, cross-block boundary */
+    {   static const unsigned char st0[] = { 0x01, 0x00, 0x00, 0xFF, 0xFF };
+        check_oracle("oracle-stored-empty", ZL_RAW, st0, (long)sizeof st0, (const unsigned char *)"", 0, (long)sizeof st0); }
+    {   static const unsigned char st1[] = { 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
+        check_oracle("oracle-stored-abc", ZL_RAW, st1, (long)sizeof st1, (const unsigned char *)"abc", 3, (long)sizeof st1); }
+    {   static const unsigned char st2[] = {
+            0x00, 0x06, 0x00, 0xF9, 0xFF, 'h', 'e', 'l', 'l', 'o', ' ',
+            0x01, 0x06, 0x00, 0xF9, 0xFF, 'w', 'o', 'r', 'l', 'd', '!' };
+        check_oracle("oracle-stored-cross-block", ZL_RAW, st2, (long)sizeof st2, (const unsigned char *)"hello world!", 12, (long)sizeof st2); }
+    /* 3 fixed blocks: empty, short, 2-block cross-boundary with repeat distances */
+    {   static const unsigned char fx0[] = { 0x03, 0x00 };
+        check_oracle("oracle-fixed-empty", ZL_RAW, fx0, (long)sizeof fx0, (const unsigned char *)"", 0, 2); }
+    {   static const unsigned char fx1[] = { 0x4B, 0x4C, 0x4A, 0x06, 0x00 };
+        check_oracle("oracle-fixed-abc", ZL_RAW, fx1, (long)sizeof fx1, (const unsigned char *)"abc", 3, (long)sizeof fx1); }
+    cn = build_fixed_two_blocks(comp, orig, &explen);
+    check_oracle("oracle-fixed-cross-block-repeat", ZL_RAW, comp, cn, orig, explen, cn);
+    /* 3 dynamic blocks pre-generated by external system gzip (verify BTYPE=2 in stream) */
+    tk_ok((gz_dyn_greek[10] & 7) == 5 && (gz_dyn_colors[10] & 7) == 5 && (gz_dyn_planets[10] & 7) == 5,
+          "oracle-dyn-vectors-are-btype2");
+    check_oracle("oracle-dyn-raw-greek", ZL_RAW, gz_dyn_greek + 10, (long)sizeof(gz_dyn_greek) - 18,
+                 (const unsigned char *)txt_dyn_greek, (long)strlen(txt_dyn_greek), (long)sizeof(gz_dyn_greek) - 18);
+    check_oracle("oracle-dyn-raw-colors", ZL_RAW, gz_dyn_colors + 10, (long)sizeof(gz_dyn_colors) - 18,
+                 (const unsigned char *)txt_dyn_colors, (long)strlen(txt_dyn_colors), (long)sizeof(gz_dyn_colors) - 18);
+    check_oracle("oracle-dyn-gzip-planets", ZL_GZIP, gz_dyn_planets, (long)sizeof(gz_dyn_planets),
+                 (const unsigned char *)txt_dyn_planets, (long)strlen(txt_dyn_planets), (long)sizeof(gz_dyn_planets));
+    /* malformed: distance > output produced so far */
+    cn = build_fixed_dist_too_far(comp);
+    tk_ok(check_err_all(ZL_RAW, comp, cn, -EINVAL), "oracle-corrupt-dist-gt-out");
+}
+
+static void group_diff(void) {
+    long cn;
+    /* stored multi with trailing bytes */
+    {   static const unsigned char st2[] = {
+            0x00, 0x03, 0x00, 0xFC, 0xFF, 'f', 'o', 'o',
+            0x01, 0x03, 0x00, 0xFC, 0xFF, 'b', 'a', 'r',
+            0xDE, 0xAD };
+        check_split("raw-stored-multi-trailing", ZL_RAW, st2, (long)sizeof st2, (const unsigned char *)"foobar", 6, 16); }
+    /* dynamic blocks via dz_deflate */
+    {   static const long lens[7] = { 0, 5, 300, 5000, 20000, 40000, 65536 };
+        static const int kinds[7] = { 0, 1, 1, 2, 1, 2, 0 };
+        static const char *names[7] = { "raw-dyn-0", "raw-dyn-5", "raw-dyn-300", "raw-dyn-5000",
+                                        "raw-dyn-20k", "raw-dyn-40k", "raw-dyn-64k" };
+        int i;
+        for (i = 0; i < 7; i++) {
+            fill_data(lens[i], kinds[i]);
+            cn = dz_deflate(orig, lens[i], comp, MAXIN);
+            check_split(names[i], ZL_RAW, comp, cn, orig, lens[i], cn);
+        }
+    }
+    /* trailing bytes after raw dynamic */
+    fill_data(300, 1);
+    cn = dz_deflate(orig, 300, comp, MAXIN);
+    comp[cn] = 0x55; comp[cn + 1] = 0x66;
+    check_split("raw-dyn-trailing", ZL_RAW, comp, cn + 2, orig, 300, cn);
+    /* >32 KiB window wrap long-distance match */
+    fill_longdist(70000);
+    cn = dz_deflate(orig, 70000, comp, MAXIN);
+    check_split("raw-longdist-70k", ZL_RAW, comp, cn, orig, 70000, cn);
+    /* gzip plain */
+    {   static const long lens[5] = { 0, 10, 3000, 30000, 65536 };
+        static const int kinds[5] = { 0, 1, 1, 2, 0 };
+        static const char *names[5] = { "gzip-0", "gzip-10", "gzip-3000", "gzip-30k", "gzip-64k" };
+        int i;
+        for (i = 0; i < 5; i++) {
+            fill_data(lens[i], kinds[i]);
+            cn = dz_gzip(orig, lens[i], comp, MAXIN);
+            check_split(names[i], ZL_GZIP, comp, cn, orig, lens[i], cn);
+        }
+    }
+    /* gzip long-distance 70k */
+    fill_longdist(70000);
+    cn = dz_gzip(orig, 70000, comp, MAXIN);
+    check_split("gzip-longdist-70k", ZL_GZIP, comp, cn, orig, 70000, cn);
+    /* gzip FNAME + trailing bytes */
+    fill_data(3000, 1);
+    cn = dz_gzip(orig, 3000, comp, MAXIN);
+    cp(tmp_in, comp, 10); tmp_in[3] = 8;
+    cp(tmp_in + 10, "a.txt", 6);
+    cp(tmp_in + 16, comp + 10, cn - 10);
+    tmp_in[cn + 6] = 0x77; tmp_in[cn + 7] = 0x88;
+    check_split("gzip-fname-trailing", ZL_GZIP, tmp_in, cn + 8, orig, 3000, cn + 6);
+    /* gzip FEXTRA + FCOMMENT + FHCRC */
+    cp(tmp_in, comp, 10); tmp_in[3] = 4 | 16 | 2;
+    tmp_in[10] = 3; tmp_in[11] = 0; tmp_in[12] = 1; tmp_in[13] = 2; tmp_in[14] = 3;
+    cp(tmp_in + 15, "hi", 3);
+    tmp_in[18] = 0; tmp_in[19] = 0;
+    cp(tmp_in + 20, comp + 10, cn - 10);
+    check_split("gzip-extra-comment-hcrc", ZL_GZIP, tmp_in, cn + 10, orig, 3000, cn + 10);
+}
+
+static int check_trunc_case(int mode, const unsigned char *in, long cut, const unsigned char *full_exp, long full_len) {
+    long one_n = 0, one_r, fn, fu, erc, viol, r;
+    int drv;
+    one_r = mode == ZL_GZIP ? zl_gunzip(one_out, MAXOUT, &one_n, in, cut)
+                            : zl_inflate(one_out, MAXOUT, &one_n, in, cut);
+    if (one_r >= 0) return 0;
+    for (drv = 0; drv < 9; drv++) {
+        r = run_driver(mode, drv, in, cut, feed_out, MAXOUT, &fn, &fu, &erc, &viol);
+        if (viol != 0) return 0;
+        if (r == ZL_END) return 0;
+        if (erc != one_r) return 0;
+        if (fn > full_len || !same(feed_out, full_exp, fn)) return 0;
+    }
+    return 1;
+}
+
+static void group_trunc(void) {
+    long cn, i;
+    int ok;
+    fill_data(5000, 2);
+    cn = dz_deflate(orig, 5000, comp, MAXIN);
+    {   long cuts[6] = { 0, 1, 2, 10, cn / 2, cn - 1 };
+        ok = 1;
+        for (i = 0; i < 6; i++) if (!check_trunc_case(ZL_RAW, comp, cuts[i], orig, 5000)) ok = 0;
+        tk_ok(ok, "trunc-raw-dyn");
+    }
+    {   static const unsigned char st[] = { 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
+        ok = 1;
+        for (i = 0; i < (long)sizeof st; i++) if (!check_trunc_case(ZL_RAW, st, i, (const unsigned char *)"abc", 3)) ok = 0;
+        tk_ok(ok, "trunc-raw-stored-all");
+    }
+    fill_data(3000, 1);
+    cn = dz_gzip(orig, 3000, comp, MAXIN);
+    {   long cuts[7] = { 0, 5, 9, 12, cn / 2, cn - 8, cn - 1 };
+        ok = 1;
+        for (i = 0; i < 7; i++) if (!check_trunc_case(ZL_GZIP, comp, cuts[i], orig, 3000)) ok = 0;
+        tk_ok(ok, "trunc-gzip");
+    }
+    {   static const unsigned char b5[] = { 0x00, 0x00, 0x00, 0x00, 0x00 };
+        ok = check_trunc_case(ZL_GZIP, b5, 5, orig, 0);
+        tk_ok(ok, "trunc-gzip-5byte-bad-magic-eio");
+    }
+}
+
+static void group_corrupt(void) {
+    long cn, i;
+    int ok;
+    {   static const unsigned char bad_st[] = { 0x01, 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c' };
+        tk_ok(check_err_all(ZL_RAW, bad_st, (long)sizeof bad_st, -EINVAL), "corrupt-stored-nlen"); }
+    {   static const unsigned char bad_bt[] = { 0x07 };
+        tk_ok(check_err_all(ZL_RAW, bad_bt, (long)sizeof bad_bt, -EINVAL), "corrupt-reserved-btype"); }
+    fill_data(3000, 1);
+    cn = dz_gzip(orig, 3000, comp, MAXIN);
+    cp(tmp_in, comp, cn); tmp_in[1] = 0x8C;
+    tk_ok(check_err_all(ZL_GZIP, tmp_in, cn, -EINVAL), "corrupt-gzip-magic");
+    cp(tmp_in, comp, cn); tmp_in[3] = 0x80;
+    tk_ok(check_err_all(ZL_GZIP, tmp_in, cn, -EINVAL), "corrupt-gzip-reserved-flg");
+    cp(tmp_in, comp, cn); tmp_in[cn - 8] ^= 0x01;
+    tk_ok(check_err_all(ZL_GZIP, tmp_in, cn, -EINVAL), "corrupt-gzip-crc");
+    cp(tmp_in, comp, cn); tmp_in[cn - 4] ^= 0x01;
+    tk_ok(check_err_all(ZL_GZIP, tmp_in, cn, -EINVAL), "corrupt-gzip-isize");
+    fill_data(2000, 1);
+    cn = dz_deflate(orig, 2000, comp, MAXIN);
+    ok = 1;
+    for (i = 0; i < 16; i++) {
+        long pos = (i * 37) % cn;
+        long one_n = 0, one_r, fn, fu, erc, viol, r;
+        int drv;
+        cp(tmp_in, comp, cn);
+        tmp_in[pos] ^= (unsigned char)(1U << (unsigned int)(i & 7));
+        one_r = zl_inflate(one_out, MAXOUT, &one_n, tmp_in, cn);
+        for (drv = 0; drv < 9; drv++) {
+            r = run_driver(ZL_RAW, drv, tmp_in, cn, feed_out, MAXOUT, &fn, &fu, &erc, &viol);
+            if (viol != 0) ok = 0;
+            if (one_r == 0) {
+                if (r != ZL_END || erc != 0 || fn != one_n || !same(feed_out, one_out, one_n)) ok = 0;
+            } else {
+                if (erc != one_r) ok = 0;
+            }
+        }
+    }
+    tk_ok(ok, "corrupt-bitflips-match-oneshot");
+}
+
+static void group_sticky(void) {
+    long c, o, r;
+    static const unsigned char st[] = { 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
+    tk_ok(zl_init(0, ZL_RAW) == -EINVAL && zl_init(&g_st, 99) == -EINVAL, "sticky-bad-init");
+    tk_ok(zl_end(0) == -EINVAL && zl_done(0) == 0, "sticky-null-end-done");
+    zl_init(&g_st, ZL_RAW);
+    tk_ok(zl_feed(0, st, 1, &c, small_buf, 8, &o) == -EINVAL &&
+          zl_feed(&g_st, st, -1, &c, small_buf, 8, &o) == -EINVAL &&
+          zl_feed(&g_st, 0, 1, &c, small_buf, 8, &o) == -EINVAL &&
+          zl_feed(&g_st, st, 1, 0, small_buf, 8, &o) == -EINVAL &&
+          zl_feed(&g_st, st, 1, &c, 0, 8, &o) == -EINVAL &&
+          zl_feed(&g_st, st, 1, &c, small_buf, -1, &o) == -EINVAL &&
+          zl_feed(&g_st, st, 1, &c, small_buf, 8, 0) == -EINVAL, "sticky-bad-args-rejected");
+    r = zl_feed(&g_st, st, (long)sizeof st, &c, small_buf, 8, &o);
+    tk_ok(r == ZL_END && c == (long)sizeof st && o == 3 && same(small_buf, (const unsigned char *)"abc", 3) &&
+          zl_done(&g_st) == 1 && zl_end(&g_st) == 0, "sticky-state-intact-after-bad-args");
+}
+
+/* ---- ccogw system-gzip 46-byte member vector & piece=1..n+2 split invariance ----
+ * Attribution: ccogw (moltbaby/bin/lib/check-inflate-stream.cx, 77 assertions).
+ * System-gzip literal (echo "hello world hello world hello world" | gzip, with FNAME="plain.txt")
+ * plus raw deflate slice: independent of this library, kills symmetric off-by-one defects. */
+static void group_ccogw_sysgzip(void) {
+    static const unsigned char gz[46] = {
+        0x1f,0x8b,0x08,0x08,0xc0,0xab,0x01,0x6b,0x00,0x03,0x70,0x6c,0x61,0x69,0x6e,
+        0x2e,0x74,0x78,0x74,0x00,0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,
+        0x49,0x51,0xc8,0xc0,0xce,0xe6,0x02,0x00,0x69,0x2e,0x6b,0x6e,0x24,0x00,0x00,
+        0x00
+    };
+    static const unsigned char raw[18] = {
+        0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,0x49,0x51,0xc8,0xc0,0xce,
+        0xe6,0x02,0x00
+    };
+    static const char plain[] = "hello world hello world hello world\n";
+    long plain_len = (long)(sizeof plain - 1);
+    unsigned char out[256];
+    const unsigned char *vecs[2] = { gz, raw };
+    long vlens[2] = { 46, 18 };
+    int modes[2] = { ZL_GZIP, ZL_RAW };
+    const char *labels[2] = { "ccogw-gzip", "ccogw-raw" };
+    int k;
+    for (k = 0; k < 2; k++) {
+        long at = 0, total = 0, rc = 0;
+        if (zl_init(&g_st, modes[k]) == 0) {
+            while (at < vlens[k]) {
+                long c = 0, p = 0;
+                rc = zl_feed(&g_st, vecs[k] + at, vlens[k] - at, &c, out + total, (long)sizeof out - total, &p);
+                total += p; at += c;
+                if (rc < 0 || zl_done(&g_st) || (c == 0 && p == 0)) break;
+            }
+        } else rc = -1;
+        {
+            char nm1[64], nm2[64];
+            cx_fmt(nm1, sizeof nm1, "%s-vector-length", labels[k]);
+            cx_fmt(nm2, sizeof nm2, "%s-vector-content", labels[k]);
+            tk_ok(rc >= 0 && total == plain_len, nm1);
+            tk_ok(rc >= 0 && total == plain_len && same(out, (const unsigned char *)plain, plain_len), nm2);
+        }
+        {
+            long piece;
+            for (piece = 1; piece <= vlens[k] + 2; piece++) {
+                char nm[64];
+                long at2 = 0, tot2 = 0, r2 = 0;
+                if (zl_init(&g_st, modes[k]) == 0) {
+                    while (at2 < vlens[k]) {
+                        long take = vlens[k] - at2 < piece ? vlens[k] - at2 : piece;
+                        long c = 0, p = 0;
+                        r2 = zl_feed(&g_st, vecs[k] + at2, take, &c, out + tot2, (long)sizeof out - tot2, &p);
+                        tot2 += p; at2 += c;
+                        if (r2 < 0 || zl_done(&g_st) || (c == 0 && p == 0)) break;
+                    }
+                } else r2 = -1;
+                cx_fmt(nm, sizeof nm, "%s.piece-%ld", labels[k], piece);
+                tk_ok(r2 >= 0 && tot2 == plain_len && same(out, (const unsigned char *)plain, plain_len), nm);
+            }
+        }
+    }
+    {
+        long c = 0, p = 0, r;
+        tk_ok(zl_init(&g_st, ZL_GZIP) == 0, "ccogw-init-ok");
+        r = zl_feed(&g_st, gz, 23, &c, out, (long)sizeof out, &p);
+        tk_ok(r >= 0, "ccogw-partial-feed-accepted");
+        tk_ok(!zl_done(&g_st), "ccogw-partial-not-done");
+        tk_ok(zl_end(&g_st) != 0, "ccogw-partial-end-reports-unfinished");
+        tk_ok(zl_init(&g_st, 99) != 0, "ccogw-bad-mode-rejected");
+    }
+}
+
+/* ---- mutation: private copy of ext/textx with one or two lines changed ---- */
+static char work[4096], com[4400], root[4096];
+
+static int put_mut2(const char *rel, const char *old1, const char *nw1, const char *old2, const char *nw2) {
+    if (!mh_put_mut(root, work, rel, old1, nw1)) return 0;
+    if (!old2[0]) return 1;
+    return mh_put_mut(work, work, rel, old2, nw2);
+}
+
+static int setup_mut(const char *o1, const char *n1, const char *o2, const char *n2) {
+    char lk[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_mut2("ext/textx/inflate.cx", o1, n1, o2, n2)) return 0;
+    if (!put_mut2("ext/textx/deflate.cx", "", "", "", "")) return 0;
+    if (!put_mut2("ext/textx/chunked.cx", "", "", "", "")) return 0;
+    if (!put_mut2("tools/check-textx-zlfeed.cx", "", "", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    {   char p[4400]; if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0; src = cx_read(p, &n); }
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 5 && !strncmp(src + i + 2, "textx", 5))) {
+            cp(dst + k, src + i, (long)(t2 + 1 - i)); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, (long)(e - t2 - 1)); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, (long)ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+
+static int run_child(const char *cases) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", (char *)cases, 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-textx-zlfeed.cx", work)) return -1;
+    return tk_run(av, 0, 55000);
+}
+
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-textx-zlfeed", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 0) {
+        if (setup_mut("", "", "", "")) {
+            rc = run_child("size;oracle;ccogw;diff;trunc;corrupt;sticky");
+            tk_ok(rc == 0, "mut-control-unmutated-passes");
+        } else tk_ok(0, "mut-control-setup");
+    } else if (part == 1) {
+        /* M1: window wrap mask off by half */
+        if (setup_mut("s->win[(c->wpos - (unsigned int)c->pdist) & 32767U]",
+                      "s->win[(c->wpos - (unsigned int)c->pdist) & 16383U]", "", "")) {
+            rc = run_child("diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\traw-longdist-70k"), "mut1-window-wrap-detected");
+        } else tk_ok(0, "mut1-setup");
+    } else if (part == 2) {
+        /* M2: bit buffer cleared on every feed entry */
+        if (setup_mut("if (c->phase == ZLP_DONE) return ZL_END;",
+                      "if (c->phase == ZLP_DONE) return ZL_END; c->bb = 0; c->bc = 0;", "", "")) {
+            rc = run_child("diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\traw-dyn-300"), "mut2-bitbuf-cleared-detected");
+        } else tk_ok(0, "mut2-setup");
+    } else if (part == 3) {
+        /* M3: hold buffer cleared on every feed entry */
+        if (setup_mut("if (c->phase == ZLP_DONE) return ZL_END;",
+                      "if (c->phase == ZLP_DONE) return ZL_END; c->nhold = 0;", "", "")) {
+            rc = run_child("diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\traw-dyn-300"), "mut3-hold-cleared-detected");
+        } else tk_ok(0, "mut3-setup");
+    } else if (part == 4) {
+        /* M4: gzip running CRC reset on every feed entry */
+        if (setup_mut("if (c->phase == ZLP_DONE) return ZL_END;",
+                      "if (c->phase == ZLP_DONE) return ZL_END; c->crc = 0xFFFFFFFFU;", "", "")) {
+            rc = run_child("diff");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tgzip-3000"), "mut4-gzip-crc-reset-detected");
+        } else tk_ok(0, "mut4-setup");
+    } else if (part == 5) {
+        /* M5: symmetric off-by-one output drop in BOTH one-shot zl_raw and streaming zl_feed -> oracle & ccogw MUST fail */
+        if (setup_mut("if (outlen) *outlen = zl_n;",
+                      "if (outlen) *outlen = zl_n > 0 ? zl_n - 1 : 0;",
+                      "*outlen = o;",
+                      "*outlen = o > 0 ? o - 1 : 0;")) {
+            rc = run_child("oracle;ccogw");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\toracle-stored-abc") && tk_has(tk_out(), "FAIL\toracle-dyn-raw-greek") &&
+                  tk_has(tk_out(), "FAIL\tccogw-gzip-vector-content") && tk_has(tk_out(), "FAIL\tccogw-raw-vector-content"),
+                  "mut5-symmetric-drop-killed-by-oracle");
+        } else tk_ok(0, "mut5-setup");
+    }
+}
+
+int main(int argc, char **argv) {
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (tk_case("size")) group_size();
+    if (tk_case("oracle")) group_oracle();
+    if (tk_case("ccogw")) group_ccogw_sysgzip();
+    if (tk_case("diff")) group_diff();
+    if (tk_case("trunc")) group_trunc();
+    if (tk_case("corrupt")) group_corrupt();
+    if (tk_case("sticky")) group_sticky();
+    if (tk_case("mutc")) group_mut(0);
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    if (tk_case("mut4")) group_mut(4);
+    if (tk_case("mut5")) group_mut(5);
+    return tk_end("CHECK_TEXTX_ZLFEED", 0);
+}

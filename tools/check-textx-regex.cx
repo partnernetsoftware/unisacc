@@ -1,0 +1,679 @@
+/* tools/check-textx-regex.cx -- ext/textx/regex.cx: the bounded backtracking engine with JavaScript semantics.
+ *   sh ./unisacc.com tools/check-textx-regex.cx [-- --cases fixed;limit;jsdiff;mutc;mut1;mut2;mut3]
+ *   fixed   hand-written cases (expected values in BYTE offsets): every first-phase feature, the JavaScript
+ *           specifics (leftmost-first alternation, lazy quantifiers, capture reset per iteration, the empty
+ *           iteration rule that makes (a*)* and (a*)+ differ, "took no part" (-) against the empty string,
+ *           ASCII-only \b \w, the JavaScript \s set, 4-byte characters as two code units, RE_E_SPLIT only for a
+ *           reported boundary inside one, empty-match advance of re_next), buffer contracts with canaries,
+ *           the compile-time refusals with "offset N: reason", re_u16_of / re_u16_at, re_expand / re_replace
+ *   limit   (a+)+b on 28 a then c with 100000 steps is -ELOOP (twice the same), 8 a then c is 0, 28 a then b
+ *           is 1; a 256-byte work buffer gives -ENOSPC without touching the byte after it
+ *   jsdiff  tests/fixtures/textx-regex/regex-fixtures.tsv, made with JavaScript outside the repository (never
+ *           started here; sha256 4fd660e3ce7078cceba74e9272473beb4ac299be4ac6b044bdbf31b03f4deb1c is checked).
+ *           Section 1, 84 named rows: where TAB name TAB pattern TAB flags TAB subject-json TAB result-json.
+ *           Section 2 after the "RANDOM CORPUS" comment, 6000 rows: pattern-hex TAB flags TAB subject-hex TAB
+ *           result-json. result-json is "NOMATCH", {"index":N,"input":M,"groups":[[s,e],...,"-"]} (exec) or
+ *           {"all":[...]} (matchAll on a g pattern); positions are UTF-16 code units, "-" a group that took no
+ *           part. Each row is compiled and run (re_exec, or re_next for g) with all groups; every expected
+ *           boundary is turned into a byte offset with re_u16_at and compared, and re_u16_of of the engine's
+ *           offsets must give the fixture's numbers back. When an expected boundary lies inside a 4-byte
+ *           character the engine must return -EOVERFLOW for that match (a g row stops there). Zero differences
+ *           or FAIL; the first 10 differing rows are printed. Last line of the group:
+ *           JSDIFF<TAB>rows=<TAB>named=<TAB>random=<TAB>diffs=<TAB>matches=<TAB>split_rows=
+ *           How the fixture was made: a script run with a JavaScript runtime, seed 20261121 (mulberry32), took
+ *           the 18 regexes used by five scripts of the sibling repository, ran each against every named
+ *           subject (RegExp.prototype.exec, or String.prototype.matchAll for g) and against random subjects
+ *           over an alphabet with U+00E9 U+4E2D U+26A0 U+1F600 U+00AB U+00BB, brackets, digits, m s %, newline
+ *           and tab, recording index and group spans from the d flag indices; two runs are byte-identical.
+ *   mutc/mut1..3  a private copy of regex.cx with one line changed must fail named fixed cases: mutc the
+ *           unmutated control; mut1 lazy and greedy swapped; mut2 capture group numbering shifted (the open
+ *           SAVE goes to the next group's slot); mut3 alternation priority reversed
+ * Prints PASS/FAIL per case and CHECK_TEXTX_REGEX<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+#pragma unisa use textx.regex
+
+#define PCAP 65536
+#define WCAP 262144
+static int P[PCAP];
+static long W[WCAP];
+static char rb[4096], eb[160];
+
+/* a message into O[0..CAP); a truncated one is counted and fails the run (see main) */
+static int say_over;
+#define SAY(O, CAP, ...) do { int say_n = snprintf((O), (size_t)(CAP), __VA_ARGS__); if (say_n < 0 || say_n >= (int)(CAP)) say_over++; } while (0)
+
+static void cp(void *d, const void *s, long n) { if (n > 0 && mm_copy(d, n, s, n)) exit(2); }
+static const char *ename(long r) {
+    static char b[32];
+    if (r == -ELOOP) return "ELOOP";
+    if (r == -EOVERFLOW) return "EOVERFLOW";
+    if (r == -ENOSPC) return "ENOSPC";
+    if (r == -EINVAL) return "EINVAL";
+    if (r == -ENOSYS) return "ENOSYS";
+    if (r == -EILSEQ) return "EILSEQ";
+    SAY(b, sizeof b, "E%ld", r);
+    return b;
+}
+static long fmt_caps(char *o, long cap, long w, const long *caps, int n) {
+    int i;
+    for (i = 0; i < n; i++) {
+        if (i) w += snprintf(o + w, (size_t)(cap - w), ";");
+        if (caps[2 * i] < 0) w += snprintf(o + w, (size_t)(cap - w), "-");
+        else w += snprintf(o + w, (size_t)(cap - w), "%ld,%ld", caps[2 * i], caps[2 * i + 1]);
+        if (w > cap - 64) break;
+    }
+    return w;
+}
+/* compile PAT; 1 ok, else rb holds "C:<code> <err>" */
+static int comp(const char *pat, int fl) {
+    long n = re_compile(pat, (long)strlen(pat), fl, P, sizeof P, eb, sizeof eb);
+    if (n > 0) return 1;
+    SAY(rb, sizeof rb,"C:%s %s", ename(n), eb);
+    return 0;
+}
+static int said(int ok, const char *name, const char *want) {
+    if (!ok) printf("  %s: want [%s] got [%s]\n", name, want, rb);
+    return tk_ok(ok, name);
+}
+/* first match from START with all groups: "N", "s,e;s,e;-" or the error name */
+static int exs(const char *pat, int fl, const char *subj, long start, const char *want, const char *name) {
+    long caps[80]; int r, ng;
+    if (comp(pat, fl)) {
+        ng = re_ngroups(P);
+        r = re_exec(P, subj, (long)strlen(subj), start, caps, ng + 1, W, sizeof W, 0);
+        if (r == 0) SAY(rb, sizeof rb,"N");
+        else if (r < 0) SAY(rb, sizeof rb,"%s", ename(r));
+        else rb[fmt_caps(rb, sizeof rb, 0, caps, ng + 1)] = 0;
+    }
+    return said(!strcmp(rb, want), name, want);
+}
+static int ex(const char *pat, int fl, const char *subj, const char *want, const char *name) { return exs(pat, fl, subj, 0, want, name); }
+/* every match with re_next, joined with '|'; an error name ends the list */
+static int gl(const char *pat, int fl, const char *subj, const char *want, const char *name) {
+    long caps[80], pos = 0, w = 0; int r, ng, k;
+    if (comp(pat, fl)) {
+        ng = re_ngroups(P); rb[0] = 0;
+        for (k = 0; k < 200; k++) {
+            r = re_next(P, subj, (long)strlen(subj), &pos, caps, ng + 1, W, sizeof W, 0);
+            if (r == 0) break;
+            if (k) w += snprintf(rb + w, sizeof rb - (size_t)w, "|");
+            if (r < 0) { w += snprintf(rb + w, sizeof rb - (size_t)w, "%s", ename(r)); break; }
+            w = fmt_caps(rb, sizeof rb, w, caps, ng + 1);
+            if (w > (long)sizeof rb - 200) break;
+        }
+        if (!k) SAY(rb, sizeof rb,"N");
+    }
+    return said(!strcmp(rb, want), name, want);
+}
+/* a compile refusal: code and "offset N: ...sub..." */
+static int rj(const char *pat, int fl, long code, const char *sub, const char *name) {
+    long n = re_compile(pat, (long)strlen(pat), fl, P, sizeof P, eb, sizeof eb);
+    SAY(rb, sizeof rb,"%s %s", n > 0 ? "OK" : ename(n), eb);
+    return said(n == code && !strncmp(eb, "offset ", 7) && tk_has(eb, sub), name, sub);
+}
+static int rp(const char *pat, int fl, const char *subj, const char *tpl, int all, const char *want, const char *name) {
+    char out[512]; long n;
+    if (comp(pat, fl)) {
+        n = re_replace(P, subj, (long)strlen(subj), tpl, (long)strlen(tpl), all, out, sizeof out - 1, W, sizeof W, 0);
+        if (n < 0) SAY(rb, sizeof rb,"%s", ename(n));
+        else { out[n] = 0; SAY(rb, sizeof rb,"%s", out); }
+    }
+    return said(!strcmp(rb, want), name, want);
+}
+
+#define EMO "\xf0\x9f\x98\x80"
+#define ZH "\xe4\xb8\xad"
+#define WARN "\xe2\x9a\xa0"
+#define LINE_RE "^(\\S+)\\s+\\[([^\\]]+)\\]\\s+(BUSY|IDLE)\\b(.*)$"
+#define CJK "[\xe4\xb8\x80-\xe9\xbe\xa5]+"
+
+static void group_fixed(void) {
+    /* alternation, lazy and greedy */
+    ex("a|ab", 0, "ab", "0,1", "fixed-alt-leftmost-first");
+    ex("ab|a", 0, "ab", "0,2", "fixed-alt-first-branch-longer");
+    ex("x(?:a|ab)c", 0, "xabc", "0,4", "fixed-alt-backtracks-to-second");
+    ex("a+?", 0, "aaa", "0,1", "fixed-lazy-plus");
+    ex("a+", 0, "aaa", "0,3", "fixed-greedy-plus");
+    ex("a*?", 0, "aaa", "0,0", "fixed-lazy-star-empty");
+    ex("a??", 0, "a", "0,0", "fixed-lazy-opt-empty");
+    ex("a?", 0, "a", "0,1", "fixed-greedy-opt");
+    ex("a{1,2}?", 0, "aaa", "0,1", "fixed-lazy-brace");
+    ex("a{2,3}", 0, "aaaa", "0,3", "fixed-greedy-brace-max");
+    ex("a*?b", 0, "aab", "0,3", "fixed-lazy-star-extends");
+    ex("(a+?)(a*)", 0, "aaa", "0,3;0,1;1,3", "fixed-lazy-then-greedy-groups");
+    ex("\\{[^}]*?\\bctx\\s*(\\d+)%", RE_I, "{ctx79%}", "0,7;4,6", "fixed-ctxA");
+    ex("\\{[^}]*?\\bctx\\s*(\\d+)%", RE_I, "{ctx1% CTX22%}", "0,6;4,5", "fixed-ctxA-lazy-first");
+    /* captures: reset per iteration, empty iteration rule, took no part against empty */
+    ex("(a*)*", 0, "b", "0,0;-", "fixed-star-of-star-unset");
+    ex("(a*)+", 0, "b", "0,0;0,0", "fixed-plus-of-star-empty");
+    ex("(a*)?", 0, "b", "0,0;-", "fixed-opt-of-star-unset");
+    ex("(?:(a)|b)+", 0, "ab", "0,2;-", "fixed-capture-reset-in-loop");
+    ex("(?:(a)|(b))+", 0, "ab", "0,2;-;1,2", "fixed-capture-reset-two-groups");
+    ex("(a)|b", 0, "b", "0,1;-", "fixed-alt-group-unset");
+    ex("(a)|(b)", 0, "b", "0,1;-;0,1", "fixed-alt-second-group");
+    ex("(a)?b", 0, "b", "0,1;-", "fixed-opt-group-unset");
+    ex("()", 0, "x", "0,0;0,0", "fixed-empty-group-is-not-unset");
+    ex("(a|ab)(c|bcd)(d*)", 0, "abcd", "0,4;0,1;1,4;4,4", "fixed-spec-alt-example");
+    ex("(z)((a+)?(b+)?(c))*", 0, "zaacbbbcac", "0,10;0,1;8,10;8,9;-;9,10", "fixed-spec-repeat-example");
+    ex("(?:a)(b)(?:c)", 0, "abc", "0,3;1,2", "fixed-noncapture");
+    ex(LINE_RE, 0, "1:2 [bun] BUSY Streaming", "0,24;0,3;5,8;10,14;14,24", "fixed-line-re-groups");
+    ex(LINE_RE, 0, "1:2 [bun] BUSYx", "N", "fixed-line-re-wordb-before-letter");
+    ex(LINE_RE, 0, "1:2 [bun] IDLE" WARN, "0,17;0,3;5,8;10,14;14,17", "fixed-line-re-wordb-before-warn-sign");
+    ex(LINE_RE, 0, "1:2 [bun] IDLE" ZH, "0,17;0,3;5,8;10,14;14,17", "fixed-line-re-wordb-before-cjk");
+    /* word boundary, predefined classes */
+    ex("\\b", 0, ZH, "N", "fixed-wordb-not-at-cjk");
+    ex("a\\b", 0, "a" ZH, "0,1", "fixed-wordb-ascii-then-cjk");
+    ex("\\B", 0, ZH, "0,0", "fixed-nwordb-at-cjk");
+    ex("\\bfoo\\b", 0, "a foo b", "2,5", "fixed-wordb-word");
+    ex("\\bfoo\\b", 0, "afoo", "N", "fixed-wordb-inside-word");
+    ex("\\Boo", 0, "foo", "1,3", "fixed-nwordb-inside-word");
+    ex("\\d+", 0, "ab123c", "2,5", "fixed-d");
+    ex("\\D+", 0, "12ab3", "2,4", "fixed-D");
+    ex("\\w+", 0, "- a_1Z -", "2,6", "fixed-w");
+    ex("\\w", 0, "\xc3\xa9", "N", "fixed-w-ascii-only");
+    ex("\\W", 0, "\xc3\xa9", "0,2", "fixed-W-takes-non-ascii");
+    ex("\\s", 0, "a\xe3\x80\x80", "1,4", "fixed-s-ideographic-space");
+    ex("\\s", 0, "a\xc2\xa0", "1,3", "fixed-s-nbsp");
+    ex("\\s+", 0, "a \t\n\r\x0b\x0c" "b", "1,7", "fixed-s-ascii");
+    ex("\\S+", 0, " ab ", "1,3", "fixed-S");
+    ex("\\s", 0, "ab", "N", "fixed-s-none");
+    /* dot, classes */
+    ex(".", 0, "\n", "N", "fixed-dot-not-newline");
+    ex(".", 0, "\r\xe2\x80\xa8" "x", "4,5", "fixed-dot-not-cr-or-u2028");
+    ex(".", 0, ZH, "0,3", "fixed-dot-whole-bmp-char");
+    ex("[\\w.+-]+", 0, "a.b+c-d e", "0,7", "fixed-class-predef-and-tail-dash");
+    ex("[^\\s]+", 0, " ab ", "1,3", "fixed-class-negated-predef");
+    ex("[a\\-z]+", 0, "-az b", "0,3", "fixed-class-escaped-dash");
+    ex("[a-]+", 0, "-a", "0,2", "fixed-class-trailing-dash");
+    ex("[\\d-x]+", 0, "1-x", "0,3", "fixed-class-dash-after-predef-literal");
+    ex("[]", 0, "a", "N", "fixed-class-empty-never");
+    ex("[^]", 0, "\n", "0,1", "fixed-class-negated-empty-any");
+    ex("[\\]]", 0, "]", "0,1", "fixed-class-escaped-bracket");
+    ex("[\\b]", 0, "\x08", "0,1", "fixed-class-backspace");
+    ex("[^\\]]+", 0, "ab]c", "0,2", "fixed-class-negated-bracket");
+    ex("[a-c]+", 0, "xabcd", "1,4", "fixed-class-range");
+    ex("[^a-c]", 0, "abc", "N", "fixed-class-negated-range-none");
+    ex(CJK, 0, "\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c abc", "0,12", "fixed-class-cjk-range");
+    ex(CJK, 0, "only ascii", "N", "fixed-class-cjk-range-none");
+    ex("[\\D]", 0, ZH, "0,3", "fixed-class-complement-takes-cjk");
+    /* escapes, braces, anchors */
+    ex("\\x41\\u0042", 0, "AB", "0,2", "fixed-escape-hex");
+    ex("\\u4e2d", 0, "a" ZH, "1,4", "fixed-escape-u-bmp");
+    ex("a\\.b", 0, "a.b", "0,3", "fixed-escape-dot");
+    ex("a\\.b", 0, "axb", "N", "fixed-escape-dot-not-any");
+    ex("\\/\\-\\$\\^\\|\\?\\*\\+\\(\\)\\[\\]\\{\\}\\\\", 0, "/-$^|?*+()[]{}\\", "0,15", "fixed-escape-punctuation");
+    ex("\\t\\n\\r\\f\\v", 0, "\t\n\r\x0c\x0b", "0,5", "fixed-escape-control");
+    ex("a{", 0, "a{", "0,2", "fixed-brace-literal-open");
+    ex("a{,2}", 0, "a{,2}", "0,5", "fixed-brace-literal-no-min");
+    ex("a}]", 0, "a}]", "0,3", "fixed-brace-bracket-literal-close");
+    ex("a{2}", 0, "aaa", "0,2", "fixed-brace-exact");
+    ex("x{2,}", 0, "xxxx", "0,4", "fixed-brace-open");
+    ex("x{2,}", 0, "x", "N", "fixed-brace-open-too-few");
+    ex("\\d{4}", 0, "12345", "0,4", "fixed-brace-exact-class");
+    ex("a{0}b", 0, "ab", "1,2", "fixed-brace-zero");
+    ex("^a", 0, "ba", "N", "fixed-caret-only-at-start");
+    ex("a$", 0, "ab", "N", "fixed-dollar-only-at-end");
+    ex("^$", 0, "", "0,0", "fixed-empty-subject");
+    ex("$", 0, "ab", "2,2", "fixed-dollar-at-end");
+    ex("", 0, "ab", "0,0", "fixed-empty-pattern");
+    ex("^a$", 0, "a\n", "N", "fixed-dollar-no-multiline");
+    /* flag i */
+    ex("abc", RE_I, "xABC", "1,4", "fixed-i-literal");
+    ex("ABC", RE_I, "abc", "0,3", "fixed-i-pattern-upper");
+    ex("abc", 0, "ABC", "N", "fixed-no-i-case-sensitive");
+    ex("[a-c]+", RE_I, "AbC", "0,3", "fixed-i-class");
+    ex("[A-Z]", RE_I, "q", "0,1", "fixed-i-class-upper-range");
+    ex("[^a]", RE_I, "A", "N", "fixed-i-negated-class");
+    ex("[^a]", 0, "A", "0,1", "fixed-no-i-negated-class");
+    ex("k", RE_I, "\xe2\x84\xaa", "N", "fixed-i-kelvin-sign-not-folded");
+    /* 4-byte characters are two code units */
+    ex("^.$", 0, EMO, "N", "fixed-emoji-one-dot-no-match");
+    ex("^..$", 0, EMO, "0,4", "fixed-emoji-two-dots");
+    ex(".{2}", 0, EMO, "0,4", "fixed-emoji-brace-2");
+    ex("(.)", 0, EMO, "EOVERFLOW", "fixed-emoji-group-splits");
+    ex(".$", 0, EMO, "EOVERFLOW", "fixed-emoji-match-starts-inside");
+    ex("\\S+", 0, "a" EMO, "0,5", "fixed-emoji-S-plus-whole");
+    ex("(.*)$", 0, "a" EMO "b", "0,6;0,6", "fixed-emoji-inside-greedy-ok");
+    ex(EMO "+", 0, EMO, "0,4", "fixed-emoji-literal");
+    ex("a", 0, EMO "a", "4,5", "fixed-emoji-skipped-in-scan");
+    /* global iteration */
+    gl("", 0, "ab", "0,0|1,1|2,2", "fixed-next-empty-pattern-three");
+    gl("a*", 0, "baac", "0,0|1,3|3,3|4,4", "fixed-next-empty-advance");
+    gl("\\d+", 0, "a1b22c333", "1,2|3,5|6,9", "fixed-next-digits");
+    gl("x", 0, "abc", "N", "fixed-next-none");
+    gl("(a)|b", 0, "ab", "0,1;0,1|1,2;-", "fixed-next-groups-per-match");
+    gl("", 0, ZH, "0,0|3,3", "fixed-next-empty-advances-whole-bmp-char");
+    gl("", 0, EMO, "0,0|EOVERFLOW", "fixed-next-empty-then-inside-emoji");
+    gl("\\d", 0, "1" EMO "2", "0,1|5,6", "fixed-next-over-emoji");
+    gl("b*", 0, EMO "b", "0,0|EOVERFLOW", "fixed-next-half-step-like-js");
+    gl(CJK, 0, "\xe4\xbd\xa0\xe5\xa5\xbd abc \xe4\xb8\x96", "0,6|11,14", "fixed-next-cjk-segments");
+    {   /* buffers and arguments */
+        long caps[16], n, m, pos; int r, j; int pb[64]; long wb[40];
+        comp("(a)(b)?", 0);
+        tk_ok(re_ngroups(P) == 2, "fixed-ngroups");
+        tk_ok(re_exec(P, "xa", 2, 0, 0, 0, W, sizeof W, 0) == 1, "fixed-ncaps-zero");
+        caps[2] = 77; caps[3] = 77;
+        tk_ok(re_exec(P, "xa", 2, 0, caps, 1, W, sizeof W, 0) == 1 && caps[0] == 1 && caps[1] == 2 && caps[2] == 77 && caps[3] == 77, "fixed-ncaps-less-than-groups");
+        tk_ok(re_exec(P, "xa", 2, 0, caps, 5, W, sizeof W, 0) == 1 && caps[2] == 1 && caps[4] == -1 && caps[5] == -1 && caps[6] == -1 && caps[8] == -1, "fixed-ncaps-more-than-groups");
+        tk_ok(re_exec(P, "xa", 2, 2, caps, 1, W, sizeof W, 0) == 0, "fixed-start-at-len-no-match");
+        tk_ok(re_exec(P, "ab", 2, 3, caps, 1, W, sizeof W, 0) == -EINVAL && re_exec(P, "ab", 2, -1, caps, 1, W, sizeof W, 0) == -EINVAL, "fixed-start-out-of-range");
+        tk_ok(re_exec(P, ZH "a", 4, 1, caps, 1, W, sizeof W, 0) == -EINVAL, "fixed-start-inside-char");
+        tk_ok(re_exec(P, ZH "a", 4, 3, caps, 1, W, sizeof W, 0) == 1 && caps[0] == 3, "fixed-start-after-char");
+        tk_ok(re_exec(P, "\xff" "a", 2, 0, caps, 1, W, sizeof W, 0) == -EILSEQ, "fixed-malformed-utf8");
+        tk_ok(re_exec(P, "\xe4\xb8", 2, 0, caps, 1, W, sizeof W, 0) == -EILSEQ, "fixed-truncated-utf8");
+        tk_ok(re_exec("nonsense", "a", 1, 0, caps, 1, W, sizeof W, 0) == -EINVAL && re_ngroups("nonsense") == -EINVAL, "fixed-foreign-prog");
+        tk_ok(re_exec(P, "a", 1, 0, caps, 1, (char *)W + 1, 4096, 0) == 1 && caps[0] == 0 && caps[1] == 1, "fixed-work-any-alignment");
+        comp("$", 0);
+        tk_ok(re_exec(P, "ab", 2, 2, caps, 1, W, sizeof W, 0) == 1 && caps[0] == 2 && caps[1] == 2, "fixed-start-at-len-empty-match");
+        n = re_compile("(a|b)*c", 7, 0, P, sizeof P, 0, 0);
+        for (j = 0; j < 64; j++) pb[j] = 0x5a5a5a5a;
+        m = n > 0 && n < 240 ? re_compile("(a|b)*c", 7, 0, pb, n, 0, 0) : -1;
+        tk_ok(n > 0 && m == n && pb[n / 4] == 0x5a5a5a5a && !memcmp(pb, P, (size_t)n), "fixed-prog-cap-exact");
+        for (j = 0; j < 64; j++) pb[j] = 0x5a5a5a5a;
+        m = n > 4 ? re_compile("(a|b)*c", 7, 0, pb, n - 1, eb, sizeof eb) : 0;
+        tk_ok(m == -ENOSPC && pb[n / 4 - 1] == 0x5a5a5a5a && tk_has(eb, "offset "), "fixed-prog-cap-one-short");
+        tk_ok(re_compile("a", 1, 0, (char *)pb + 1, 200, 0, 0) == -EINVAL, "fixed-prog-misaligned");
+        {   char pat[300]; int k; long need;
+            for (k = 0; k < 99; k++) { pat[3 * k] = '\\'; pat[3 * k + 1] = 'S'; pat[3 * k + 2] = '*'; }
+            need = re_compile(pat, 297, 0, P, sizeof P, 0, 0);
+            tk_ok(need > 0 && need <= 64 + 64 * 297, "fixed-prog-bound-64-per-byte");
+        }
+        for (j = 0; j < 40; j++) wb[j] = 0x1122334455667788L;
+        comp("(a)(b)?", 0);
+        r = re_exec(P, "ab", 2, 0, caps, 3, wb, 0, 0);
+        tk_ok(r == -ENOSPC && wb[0] == 0x1122334455667788L, "fixed-work-zero-bytes");
+        pos = 0;
+        tk_ok(re_next(P, "ab", 2, 0, caps, 1, W, sizeof W, 0) == -EINVAL, "fixed-next-null-pos");
+        pos = 9;
+        tk_ok(re_next(P, "ab", 2, &pos, caps, 1, W, sizeof W, 0) == -EINVAL, "fixed-next-pos-out-of-range");
+        pos = 3;
+        tk_ok(re_next(P, "ab", 2, &pos, caps, 1, W, sizeof W, 0) == 0 && pos == 3, "fixed-next-finished-stays-finished");
+        pos = 0;
+        tk_ok(re_next(P, "xx", 2, &pos, caps, 1, W, sizeof W, 0) == 0 && pos == 3 && re_next(P, "xx", 2, &pos, caps, 1, W, sizeof W, 0) == 0, "fixed-next-no-match-ends-iteration");
+        pos = -3;
+        tk_ok(re_next(P, "ab", 2, &pos, caps, 1, W, sizeof W, 0) == -EINVAL, "fixed-next-bad-negative-mark");
+    }
+    /* refusals */
+    rj("(a)\\1", 0, -ENOSYS, "offset 3: backreference not supported", "fixed-refuse-backreference");
+    rj("\\k<n>", 0, -ENOSYS, "backreference not supported", "fixed-refuse-named-backreference");
+    rj("a(?=b)", 0, -ENOSYS, "offset 1: lookaround not supported", "fixed-refuse-lookahead");
+    rj("(?!b)", 0, -ENOSYS, "lookaround not supported", "fixed-refuse-negative-lookahead");
+    rj("(?<=b)a", 0, -ENOSYS, "lookaround not supported", "fixed-refuse-lookbehind");
+    rj("(?<!b)a", 0, -ENOSYS, "lookaround not supported", "fixed-refuse-negative-lookbehind");
+    rj("(?<n>a)", 0, -ENOSYS, "named group not supported", "fixed-refuse-named-group");
+    rj("\\p{L}", 0, -ENOSYS, "unicode mode not supported", "fixed-refuse-property");
+    rj("\\u{1F600}", 0, -ENOSYS, "unicode mode not supported", "fixed-refuse-u-brace");
+    rj("\xc3\xa9", RE_I, -ENOSYS, "i flag with non-ASCII pattern not supported", "fixed-refuse-i-non-ascii");
+    rj("[\\u00e9]", RE_I, -ENOSYS, "i flag with non-ASCII pattern not supported", "fixed-refuse-i-non-ascii-escape");
+    rj("a", RE_M, -ENOSYS, "offset 0: flags other than i not supported", "fixed-refuse-flag-m");
+    rj("a", RE_S, -ENOSYS, "flags other than i not supported", "fixed-refuse-flag-s");
+    rj("a", 64, -ENOSYS, "flags other than i not supported", "fixed-refuse-unknown-flag");
+    rj("\\a", 0, -ENOSYS, "legacy escape not supported", "fixed-refuse-letter-escape");
+    rj("\\07", 0, -ENOSYS, "legacy escape not supported", "fixed-refuse-octal");
+    rj("\\cA", 0, -ENOSYS, "legacy escape not supported", "fixed-refuse-control-escape");
+    rj("\\x4", 0, -ENOSYS, "legacy escape not supported", "fixed-refuse-short-hex");
+    rj("\\ud83d", 0, -ENOSYS, "surrogate escape not supported", "fixed-refuse-surrogate-escape");
+    rj("[" EMO "]", 0, -ENOSYS, "above U+FFFF in a class", "fixed-refuse-astral-in-class");
+    rj("a{1001}", 0, -ENOSYS, "repeat count over 1000", "fixed-refuse-big-repeat");
+    rj("(a", 0, -EINVAL, "offset 0: unterminated group", "fixed-syntax-open-group");
+    rj("a)", 0, -EINVAL, "offset 1: unmatched )", "fixed-syntax-close-group");
+    rj("*a", 0, -EINVAL, "offset 0: nothing to repeat", "fixed-syntax-leading-star");
+    rj("a**", 0, -EINVAL, "offset 2: nothing to repeat", "fixed-syntax-double-star");
+    rj("^*", 0, -EINVAL, "nothing to repeat", "fixed-syntax-quantified-anchor");
+    rj("{2}", 0, -EINVAL, "nothing to repeat", "fixed-syntax-leading-brace-quantifier");
+    rj("[a", 0, -EINVAL, "offset 0: unterminated character class", "fixed-syntax-open-class");
+    rj("a{2,1}", 0, -EINVAL, "numbers out of order", "fixed-syntax-brace-order");
+    rj("[z-a]", 0, -EINVAL, "range out of order", "fixed-syntax-class-order");
+    rj("a\\", 0, -EINVAL, "pattern ends with a backslash", "fixed-syntax-trailing-backslash");
+    rj("(?a)", 0, -EINVAL, "invalid group", "fixed-syntax-bad-group");
+    rj("\xff", 0, -EILSEQ, "malformed UTF-8 in pattern", "fixed-pattern-malformed-utf8");
+    {   /* UTF-16 conversion: a, U+4E2D, U+1F600, b = bytes 0 1 4 8 9, units 0 1 2 4 5 */
+        const char *s = "a" ZH EMO "b";
+        tk_ok(re_u16_of(s, 9, 9) == 5 && re_u16_of(s, 9, 0) == 0 && re_u16_of(s, 9, 1) == 1 && re_u16_of(s, 9, 4) == 2 && re_u16_of(s, 9, 8) == 4, "fixed-u16-of");
+        tk_ok(re_u16_of(s, 9, 2) == -EINVAL && re_u16_of(s, 9, 10) == -EINVAL && re_u16_of(s, 9, -1) == -EINVAL, "fixed-u16-of-bad-offset");
+        tk_ok(re_u16_of("\xff", 1, 1) == -EILSEQ, "fixed-u16-of-malformed");
+        tk_ok(re_u16_at(s, 9, 0) == 0 && re_u16_at(s, 9, 1) == 1 && re_u16_at(s, 9, 2) == 4 && re_u16_at(s, 9, 4) == 8 && re_u16_at(s, 9, 5) == 9, "fixed-u16-at");
+        tk_ok(re_u16_at(s, 9, 3) == -EOVERFLOW, "fixed-u16-at-inside-pair");
+        tk_ok(re_u16_at(s, 9, 6) == -EINVAL && re_u16_at(s, 9, -1) == -EINVAL, "fixed-u16-at-out-of-range");
+    }
+    /* replacement, like String.prototype.replace */
+    rp("b", 0, "abc", "[$&]", 0, "a[b]c", "fixed-replace-whole-match");
+    rp("(\\w+)=(\\w+)", 0, "k=v; x=y", "$2=$1", 1, "v=k; y=x", "fixed-replace-all-groups");
+    rp("(\\w+)=(\\w+)", 0, "k=v; x=y", "$2=$1", 0, "v=k; x=y", "fixed-replace-first-only");
+    rp("(token)=\\S+", 0, "token=abc rest", "$1=<REDACTED>", 1, "token=<REDACTED> rest", "fixed-replace-redact");
+    rp("(a)(b)=\\S+", RE_I, "x AB=secret y", "$1$2=<REDACTED>", 1, "x AB=<REDACTED> y", "fixed-replace-redact-two-groups");
+    rp("b", 0, "abc", "$$", 0, "a$c", "fixed-replace-dollar-dollar");
+    rp("b", 0, "abc", "$$1", 0, "a$1c", "fixed-replace-dollar-dollar-digit");
+    rp("(b)", 0, "abc", "$0", 0, "a$0c", "fixed-replace-dollar-zero-literal");
+    rp("(b)", 0, "abc", "$3", 0, "a$3c", "fixed-replace-missing-group-literal");
+    rp("(b)", 0, "abc", "$10", 0, "ab0c", "fixed-replace-two-digit-falls-back");
+    rp("(b)", 0, "abc", "$01", 0, "abc", "fixed-replace-zero-padded-group");
+    rp("(b)", 0, "abc", "$1$1", 0, "abbc", "fixed-replace-group-twice");
+    rp("(b)", 0, "abc", "$<n>", 0, "a$<n>c", "fixed-replace-named-literal");
+    rp("b", 0, "abc", "x$", 0, "ax$c", "fixed-replace-trailing-dollar");
+    rp("b", 0, "abc", "$x", 0, "a$xc", "fixed-replace-dollar-other-literal");
+    rp("b", 0, "abc", "$`|$'", 0, "aa|cc", "fixed-replace-prefix-suffix");
+    rp("(a)|b", 0, "b", "[$1]", 0, "[]", "fixed-replace-unset-group-empty");
+    rp("x*", 0, "ab", "-", 1, "-a-b-", "fixed-replace-all-empty-matches");
+    rp("s$", 0, "46s", "", 0, "46", "fixed-replace-strip-suffix");
+    rp("z", 0, "abc", "X", 1, "abc", "fixed-replace-no-match-copies");
+    rp(CJK, 0, "\xe4\xbd\xa0\xe5\xa5\xbd abc \xe4\xb8\x96", "<$&>", 1, "<\xe4\xbd\xa0\xe5\xa5\xbd> abc <\xe4\xb8\x96>", "fixed-replace-cjk");
+    {   char out[8]; long caps[4] = { 1, 2, -1, -1 };
+        comp("b", 0);
+        out[5] = 'Q';
+        tk_ok(re_replace(P, "abc", 3, "12345", 5, 0, out, 5, W, sizeof W, 0) == -ENOSPC && out[5] == 'Q', "fixed-replace-out-too-small");
+        tk_ok(re_replace(P, "abc", 3, "123", 3, 0, out, 5, W, sizeof W, 0) == 5 && !memcmp(out, "a123c", 5) && out[5] == 'Q', "fixed-replace-out-exact");
+        tk_ok(re_expand("<$1|$&>", 7, "abc", 3, caps, 1, out, 8) == 4 && !memcmp(out, "<|b>", 4), "fixed-expand-direct");
+        tk_ok(re_expand("$&$&$&$&$&", 10, "abc", 3, caps, 1, out, 4) == -ENOSPC, "fixed-expand-out-too-small");
+    }
+}
+
+/* ---- limit ---- */
+static void group_limit(void) {
+    char s[4100]; long caps[4]; long wb[40]; int r1, r2, j;
+    if (!comp("(a+)+b", 0)) { tk_ok(0, "limit-compile"); return; }
+    for (j = 0; j < 28; j++) s[j] = 'a';
+    s[28] = 'c';
+    r1 = re_exec(P, s, 29, 0, caps, 2, W, sizeof W, 100000);
+    r2 = re_exec(P, s, 29, 0, caps, 2, W, sizeof W, 100000);
+    tk_ok(r1 == -ELOOP && r2 == -ELOOP, "limit-nested-plus-eloop");
+    s[8] = 'c';
+    tk_ok(re_exec(P, s, 9, 0, caps, 2, W, sizeof W, 100000) == 0, "limit-nested-plus-8-no-match");
+    s[8] = 'a'; s[28] = 'b';
+    tk_ok(re_exec(P, s, 29, 0, caps, 2, W, sizeof W, 100000) == 1 && caps[0] == 0 && caps[1] == 29 && caps[2] == 0 && caps[3] == 28, "limit-nested-plus-28-match");
+    tk_ok(re_exec(P, s, 29, 0, caps, 2, W, sizeof W, 3) == -ELOOP, "limit-three-steps");
+    s[28] = 'c';
+    tk_ok(re_exec(P, s, 29, 0, caps, 2, W, sizeof W, 0) == -ELOOP, "limit-default-is-bounded");
+    if (!comp("(a|b)*c", 0)) { tk_ok(0, "limit-compile-2"); return; }
+    for (j = 0; j < 4000; j++) s[j] = 'a';
+    for (j = 0; j < 40; j++) wb[j] = 0x1122334455667788L;
+    r1 = re_exec(P, s, 4000, 0, caps, 2, wb, 256, 0);
+    if (r1 != -ENOSPC) printf("  work-256: got %d\n", r1);
+    tk_ok(r1 == -ENOSPC && wb[32] == 0x1122334455667788L && wb[39] == 0x1122334455667788L, "limit-work-256-bytes-enospc");
+    s[4000] = 'c';
+    tk_ok(re_exec(P, s, 4001, 0, caps, 2, W, sizeof W, 0) == 1 && caps[1] == 4001 && caps[2] == 3999, "limit-long-subject-no-c-recursion");
+}
+
+/* ---- jsdiff ---- */
+static long find_at(const char *h, long hn, const char *nd, long nn) {
+    long i;
+    for (i = 0; i + nn <= hn; i++) if (!strncmp(h + i, nd, (size_t)nn)) return i;
+    return -1;
+}
+static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
+static long unhex(const char *s, long n, char *o, long cap) {
+    long i;
+    if ((n & 1) || n / 2 >= cap) return -1;
+    for (i = 0; i < n; i += 2) { int a = hexv(s[i]), b = hexv(s[i + 1]); if (a < 0 || b < 0) return -1; o[i / 2] = (char)(a * 16 + b); }
+    o[n / 2] = 0;
+    return n / 2;
+}
+static long put_utf8(char *o, long w, long c) {
+    if (c < 0x80) o[w++] = (char)c;
+    else if (c < 0x800) { o[w++] = (char)(0xC0 | (c >> 6)); o[w++] = (char)(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { o[w++] = (char)(0xE0 | (c >> 12)); o[w++] = (char)(0x80 | ((c >> 6) & 0x3F)); o[w++] = (char)(0x80 | (c & 0x3F)); }
+    else { o[w++] = (char)(0xF0 | (c >> 18)); o[w++] = (char)(0x80 | ((c >> 12) & 0x3F)); o[w++] = (char)(0x80 | ((c >> 6) & 0x3F)); o[w++] = (char)(0x80 | (c & 0x3F)); }
+    return w;
+}
+static long hex4(const char *s) { long v = 0; int j; for (j = 0; j < 4; j++) { int h = hexv(s[j]); if (h < 0) return -1; v = v * 16 + h; } return v; }
+/* a JSON string literal s[0..n) to UTF-8 */
+static long unjson(const char *s, long n, char *o, long cap) {
+    long i = 1, w = 0, c, d;
+    if (n < 2 || s[0] != '"' || s[n - 1] != '"' || n * 2 >= cap) return -1;
+    while (i < n - 1) {
+        if (s[i] != '\\') { o[w++] = s[i++]; continue; }
+        if (i + 1 >= n - 1) return -1;
+        c = s[i + 1]; i += 2;
+        if (c == 'n') o[w++] = '\n'; else if (c == 't') o[w++] = '\t'; else if (c == 'r') o[w++] = '\r';
+        else if (c == 'b') o[w++] = 8; else if (c == 'f') o[w++] = 12;
+        else if (c == '"' || c == '\\' || c == '/') o[w++] = (char)c;
+        else if (c == 'u') {
+            if (i + 4 > n - 1 || (c = hex4(s + i)) < 0) return -1;
+            i += 4;
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                if (i + 6 > n - 1 || s[i] != '\\' || s[i + 1] != 'u' || (d = hex4(s + i + 2)) < 0xDC00 || d > 0xDFFF) return -1;
+                i += 6; c = 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00);
+            } else if (c >= 0xDC00 && c <= 0xDFFF) return -1;
+            w = put_utf8(o, w, c);
+        } else return -1;
+    }
+    o[w] = 0;
+    return w;
+}
+static const char *num(const char *p, const char *end, long *v) {
+    long x = 0; const char *q = p;
+    while (q < end && *q >= '0' && *q <= '9') { x = x * 10 + (*q - '0'); q++; }
+    if (q == p) return 0;
+    *v = x;
+    return q;
+}
+static const char *lit(const char *p, const char *end, const char *t) {
+    long n = (long)strlen(t);
+    if (!p || end - p < n || strncmp(p, t, (size_t)n)) return 0;
+    return p + n;
+}
+/* the next {"index":..} object at or after *pp: 1 parsed, 0 none, -1 malformed. exp holds unit offsets or -1 */
+static int next_match(const char **pp, const char *end, long *exp, int *ng, long *index, long *input) {
+    long at = find_at(*pp, end - *pp, "{\"index\":", 9); const char *p; int g = 0;
+    if (at < 0) return 0;
+    p = num(*pp + at + 9, end, index);
+    p = lit(p, end, ",\"input\":"); if (!p) return -1;
+    p = num(p, end, input); if (!p) return -1;
+    p = lit(p, end, ",\"groups\":["); if (!p) return -1;
+    for (;;) {
+        if (g > RE_MAXGROUPS || p >= end) return -1;
+        if (*p == '"') { p = lit(p, end, "\"-\""); if (!p) return -1; exp[2 * g] = -1; exp[2 * g + 1] = -1; }
+        else {
+            p = lit(p, end, "["); if (!p) return -1;
+            p = num(p, end, &exp[2 * g]); p = lit(p, end, ","); if (!p) return -1;
+            p = num(p, end, &exp[2 * g + 1]); p = lit(p, end, "]"); if (!p) return -1;
+        }
+        g++;
+        if (p < end && *p == ',') { p++; continue; }
+        p = lit(p, end, "]}"); if (!p) return -1;
+        break;
+    }
+    *ng = g; *pp = p;
+    return 1;
+}
+static long st_matches, st_split;
+/* the engine result R, CAPS against one expected match: 1 equal, 2 expected split and got it, 0 different */
+static int verdict(const char *subj, long sl, const long *exp, int ng, long index, int r, const long *caps, char *why, long wc) {
+    long b[2 * (RE_MAXGROUPS + 2)]; int j, split = 0;
+    if (index != exp[0]) { SAY(why, wc,"fixture index %ld is not group 0 start %ld", index, exp[0]); return 0; }
+    for (j = 0; j < 2 * ng; j++) {
+        b[j] = exp[j] < 0 ? -1 : re_u16_at(subj, sl, exp[j]);
+        if (b[j] == -EOVERFLOW) split = 1;
+        else if (b[j] < -1) { SAY(why, wc,"re_u16_at(%ld) = %s", exp[j], ename(b[j])); return 0; }
+    }
+    if (split) {
+        if (r == -EOVERFLOW) return 2;
+        SAY(why, wc,"expected -EOVERFLOW (boundary inside a 4-byte character), got %d", r);
+        return 0;
+    }
+    if (r != 1) { SAY(why, wc,"expected a match at byte %ld, got %s", b[0], r == 0 ? "no match" : ename(r)); return 0; }
+    for (j = 0; j < 2 * ng; j++) {
+        if (caps[j] != b[j]) { SAY(why, wc,"group %d %s: want byte %ld got %ld", j / 2, j & 1 ? "end" : "start", b[j], caps[j]); return 0; }
+        if (caps[j] >= 0 && re_u16_of(subj, sl, caps[j]) != exp[j]) { SAY(why, wc,"re_u16_of(%ld) is not %ld", caps[j], exp[j]); return 0; }
+    }
+    st_matches++;
+    return 1;
+}
+static int row(const char *pat, long pl, const char *fl, long fn, const char *subj, long sl, const char *res, long rl, char *why, long wc) {
+    long caps[2 * (RE_MAXGROUPS + 2)], exp[2 * (RE_MAXGROUPS + 2)], n, index = 0, input = 0, pos = 0, k;
+    int flags = 0, g = 0, ng, eg = 0, r, m, v, nomatch, isall; const char *p = res, *end = res + rl;
+    for (k = 0; k < fn; k++) { if (fl[k] == 'i') flags |= RE_I; else if (fl[k] == 'g') g = 1; else { SAY(why, wc,"flag %c", fl[k]); return 0; } }
+    n = re_compile(pat, pl, flags, P, sizeof P, eb, sizeof eb);
+    if (n <= 0) { SAY(why, wc,"compile %s %s", ename(n), eb); return 0; }
+    ng = re_ngroups(P);
+    nomatch = rl == 9 && !strncmp(res, "\"NOMATCH\"", 9);
+    isall = rl > 8 && !strncmp(res, "{\"all\":[", 8);
+    if (!nomatch && isall != g) { SAY(why, wc,"result form does not fit the g flag"); return 0; }
+    if (!g) {
+        r = re_exec(P, subj, sl, 0, caps, ng + 1, W, sizeof W, 0);
+        if (nomatch) { if (r != 0) SAY(why, wc,"expected no match, got %s at byte %ld", r == 1 ? "a match" : ename(r), r == 1 ? caps[0] : -1L); return r == 0; }
+        m = next_match(&p, end, exp, &eg, &index, &input);
+        if (m != 1 || eg != ng + 1) { SAY(why, wc,"fixture result unreadable or group count %d is not %d", eg, ng + 1); return 0; }
+        if (input != re_u16_of(subj, sl, sl)) { SAY(why, wc,"fixture input %ld is not the subject length in units", input); return 0; }
+        v = verdict(subj, sl, exp, eg, index, r, caps, why, wc);
+        if (v == 2) st_split++;
+        return v != 0;
+    }
+    for (k = 0; k < 4096; k++) {
+        m = nomatch ? 0 : next_match(&p, end, exp, &eg, &index, &input);
+        if (m < 0 || (m == 1 && eg != ng + 1)) { SAY(why, wc,"fixture result unreadable at match %ld", k); return 0; }
+        r = re_next(P, subj, sl, &pos, caps, ng + 1, W, sizeof W, 0);
+        if (m == 0) { if (r != 0) SAY(why, wc,"after %ld matches expected the end, got %s at byte %ld", k, r == 1 ? "a match" : ename(r), r == 1 ? caps[0] : -1L); return r == 0; }
+        if (input != re_u16_of(subj, sl, sl)) { SAY(why, wc,"fixture input %ld is not the subject length in units", input); return 0; }
+        v = verdict(subj, sl, exp, eg, index, r, caps, why, wc);
+        if (v == 0) { long l = (long)strlen(why); SAY(why + l, wc - l," (match %ld)", k); return 0; }
+        if (v == 2) { st_split++; return 1; }
+    }
+    SAY(why, wc,"more than 4096 matches");
+    return 0;
+}
+static void group_jsdiff(void) {
+    static const char *fp = "tests/fixtures/textx-regex/regex-fixtures.tsv";
+    static const char *want = "4fd660e3ce7078cceba74e9272473beb4ac299be4ac6b044bdbf31b03f4deb1c";
+    static char pb[8192], sb[8192]; char hex[65], why[400];
+    size_t n = 0, i; char *src; long named = 0, random = 0, bad = 0, shown = 0; int sec = 1;
+    st_matches = 0; st_split = 0;
+    if (sy_exists(fp) != 1) { printf("UNMEASURED\tjsdiff\tfixture absent: %s\n", fp); tk_ok(0, "jsdiff-fixture-present"); return; }
+    src = cx_read(fp, &n);
+    if (!src) { tk_ok(0, "jsdiff-fixture-read"); return; }
+    hex[0] = 0;
+    tk_ok(sy_sha256_hex(src, (long)n, hex) == 0 && !strcmp(hex, want), "jsdiff-fixture-sha256");
+    for (i = 0; i < n; ) {
+        size_t e = i, f[7], nf = 1, k; long pl, sl; int ok;
+        while (e < n && src[e] != '\n') e++;
+        if (e == i) { i = e + 1; continue; }
+        if (src[i] == '#') { if (find_at(src + i, (long)(e - i), "RANDOM CORPUS", 13) >= 0) sec = 2; i = e + 1; continue; }
+        f[0] = i;
+        for (k = i; k < e && nf < 6; k++) if (src[k] == '\t') f[nf++] = k + 1;
+        f[nf] = e + 1;
+        why[0] = 0; ok = 0;
+        if (sec == 1) {
+            named++;
+            if (nf != 6) SAY(why, sizeof why,"named row has %d fields, not 6", (int)nf);
+            else {
+                pl = (long)(f[3] - 1 - f[2]);
+                sl = unjson(src + f[4], (long)(f[5] - 1 - f[4]), sb, sizeof sb);
+                if (pl >= (long)sizeof pb || sl < 0) SAY(why, sizeof why,"subject is not a JSON string");
+                else { cp(pb, src + f[2], pl); pb[pl] = 0; ok = row(pb, pl, src + f[3], (long)(f[4] - 1 - f[3]), sb, sl, src + f[5], (long)(e - f[5]), why, sizeof why); }
+            }
+        } else {
+            random++;
+            if (nf != 4) SAY(why, sizeof why,"random row has %d fields, not 4", (int)nf);
+            else {
+                pl = unhex(src + f[0], (long)(f[1] - 1 - f[0]), pb, sizeof pb);
+                sl = unhex(src + f[2], (long)(f[3] - 1 - f[2]), sb, sizeof sb);
+                if (pl < 0 || sl < 0) SAY(why, sizeof why,"bad hex");
+                else ok = row(pb, pl, src + f[1], (long)(f[2] - 1 - f[1]), sb, sl, src + f[3], (long)(e - f[3]), why, sizeof why);
+            }
+        }
+        if (!ok) {
+            bad++;
+            if (shown < 10) { shown++; printf("DIFF\tsection=%d\t%s\n\t%.*s\n", sec, why, (int)(e - i > 700 ? 700 : e - i), src + i); }
+        }
+        i = e + 1;
+    }
+    tk_ok(named == 84, "jsdiff-named-84-rows");
+    tk_ok(random == 6000, "jsdiff-random-6000-rows");
+    tk_ok(bad == 0 && named + random == 6084, "jsdiff-zero-differences");
+    tk_ok(st_matches > 500, "jsdiff-has-matches");
+    printf("JSDIFF\trows=%ld\tnamed=%ld\trandom=%ld\tdiffs=%ld\tmatches=%ld\tsplit_rows=%ld\n", named + random, named, random, bad, st_matches, st_split);
+}
+
+/* ---- mutation: private copy of the package source with one change ---- */
+static char work[4096], com[4400], root[4096];
+static int put_mut(const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    if (find_at(src + at + 1, (long)n - at - 1, old, (long)ol) >= 0) { printf("mutation anchor not unique: %s\n", old); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    cp(dst, src, (long)k); cp(dst + k, nw, (long)nl); cp(dst + k + nl, src + k + ol, (long)(n - k - ol));
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+static int setup(const char *old, const char *nw) {
+    char lk[4400], p[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_mut("ext/textx/regex.cx", old, nw)) return 0;
+    if (!put_mut("tools/check-textx-regex.cx", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0;
+    src = cx_read(p, &n);
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {   /* each line; R rows other than textx get the r/ link prefix on DIR */
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 5 && !strncmp(src + i + 2, "textx", 5))) {
+            cp(dst + k, src + i, (long)(t2 + 1 - i)); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, (long)(e - t2 - 1)); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, (long)ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+static int child(void) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", "fixed", 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-textx-regex.cx", work)) return -1;
+    { int rc = tk_run(av, work, 55000); if (rc != 0 && rc != 1) printf("  child rc=%d\n%s\n", rc, tk_out()); return rc; }
+}
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-textx-regex", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 0) {
+        if (setup("", "")) { rc = child(); tk_ok(rc == 0 && tk_has(tk_out(), "PASS\tfixed-lazy-plus") && tk_has(tk_out(), "PASS\tfixed-line-re-groups") && tk_has(tk_out(), "PASS\tfixed-alt-leftmost-first") && tk_has(tk_out(), "CHECK_TEXTX_REGEX\tfailed=0"), "mut-control-unmutated-passes"); }
+        else tk_ok(0, "mut-control-setup");
+    }
+    if (part == 1) {
+        if (setup("greedy = 1; if (re_pk(st) == '?') { st->i++; greedy = 0; }", "greedy = 0; if (re_pk(st) == '?') { st->i++; greedy = 1; }")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tfixed-lazy-plus") && tk_has(tk_out(), "FAIL\tfixed-ctxA-lazy-first") && tk_has(tk_out(), "FAIL\tfixed-greedy-plus"), "mut-lazy-greedy-swapped-detected");
+        } else tk_ok(0, "mut-lazy-greedy-setup");
+    }
+    if (part == 2) {
+        if (setup("re_emit(st, RE_X_SAVE); re_emit(st, 2 * g);", "re_emit(st, RE_X_SAVE); re_emit(st, 2 * g + 2);")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tfixed-line-re-groups") && tk_has(tk_out(), "FAIL\tfixed-alt-second-group") && tk_has(tk_out(), "FAIL\tfixed-replace-redact"), "mut-group-numbering-shifted-detected");
+        } else tk_ok(0, "mut-group-numbering-setup");
+    }
+    if (part == 3) {
+        if (setup("re_split(st, s, 3, st->pc + 2 - s);", "re_split(st, s, st->pc + 2 - s, 3);")) {
+            rc = child(); tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tfixed-alt-leftmost-first") && tk_has(tk_out(), "FAIL\tfixed-spec-alt-example"), "mut-alternation-priority-reversed-detected");
+        } else tk_ok(0, "mut-alternation-priority-setup");
+    }
+}
+
+int main(int argc, char **argv) {
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (tk_case("fixed")) group_fixed();
+    if (tk_case("limit")) group_limit();
+    if (tk_case("jsdiff")) group_jsdiff();
+    if (tk_case("mutc")) group_mut(0);
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    if (say_over) tk_ok(0, "message-truncated");
+    return tk_end("CHECK_TEXTX_REGEX", 0);
+}
