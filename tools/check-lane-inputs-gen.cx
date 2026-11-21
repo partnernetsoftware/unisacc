@@ -11,6 +11,10 @@
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
@@ -109,29 +113,322 @@ static void rm_work(void) {
     np_free(&r);
 }
 
-static int prepare_tool(char *source, char *output) {
-    char *av[] = {"sh", prod, "-o", output, source, 0};
-    char why[512] = {0};
+static void prep_fail(const char *step, const char *sub, const char *reason, int rc, int timed_out, int residue, long ms, const char *why, const char *err, size_t errn) {
+    fprintf(stderr, "check-lane-inputs-gen: prepare_tool failed step=%s sub=%s reason=%s rc=%d timed_out=%d residue=%d ms=%ld\n",
+            step ? step : "-", sub ? sub : "-", reason ? reason : "-", rc, timed_out, residue, ms);
+    if (why && *why) fprintf(stderr, "check-lane-inputs-gen: why=%s\n", why);
+    if (err && errn) {
+        size_t n = errn > 600 ? 600 : errn;
+        fprintf(stderr, "check-lane-inputs-gen: stderr=%.*s\n", (int)n, err);
+    }
+}
+
+static int prep_cache_dir(char *out, size_t cap) {
+    const char *e = sy_env("UNISACC_LANE_PREP_CACHE");
+    if (e && *e) {
+        if (cx_fmt(out, cap, "%s", e)) return 1;
+        return sy_mkdir_all(out, 0700);
+    }
+    e = sy_env("UNISACC_CACHE_DIR");
+    if (e && *e) {
+        if (cx_fmt(out, cap, "%s/lane-prep", e)) return 1;
+        if (!sy_mkdir_all(out, 0700)) return 0;
+    }
+    e = sy_env("XDG_CACHE_HOME");
+    if (e && *e) {
+        if (cx_fmt(out, cap, "%s/unisacc/lane-prep", e)) return 1;
+        if (!sy_mkdir_all(out, 0700)) return 0;
+    }
+    e = sy_env("HOME");
+    if (e && *e) {
+        if (cx_fmt(out, cap, "%s/.cache/unisacc/lane-prep", e)) return 1;
+        if (!sy_mkdir_all(out, 0700)) return 0;
+    }
+    if (cx_fmt(out, cap, "%s/unisacc-lane-prep", sy_tmpdir())) return 1;
+    return sy_mkdir_all(out, 0700);
+}
+
+static int sha_file_hex(const char *path, char hex[65]) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return 1;
+    int rc = sy_sha256_hex(b, (long)n, hex);
+    free(b);
+    return rc;
+}
+
+static int tool_content_key(const char *source, char hex[65], char *why, size_t wcap) {
+    char phex[65], fhex[65];
+    if (sha_file_hex(prod, phex)) { cx_fmt(why, wcap, "read-prod-failed"); return 1; }
+    np_buf kb = {0};
+    np_puts(&kb, "lane-prep-v1\nprod=");
+    np_puts(&kb, phex);
+    np_puts(&kb, "\n");
+    size_t sl = strlen(source);
+    if (sl >= 3 && !strcmp(source + sl - 3, ".cx")) {
+        char *av[] = { "sh", prod, "-cx-plan", (char *)source, 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 15, &r, why, wcap);
+        if (tr || r.rc || !r.out || !r.outn) {
+            if (!*why) cx_fmt(why, wcap, "cx-plan-rc=%d", r.rc);
+            np_free(&r); free(kb.p); return 1;
+        }
+        char *cur = r.out, *end = r.out + r.outn;
+        while (cur < end) {
+            char *nl = (char *)memchr(cur, '\n', (size_t)(end - cur));
+            size_t len = nl ? (size_t)(nl - cur) : (size_t)(end - cur);
+            char *t1 = len ? (char *)memchr(cur, '\t', len) : 0;
+            if (t1) {
+                char *p = t1 + 1;
+                size_t rem = len - (size_t)(p - cur);
+                char *t2 = rem ? (char *)memchr(p, '\t', rem) : 0;
+                size_t pl = t2 ? (size_t)(t2 - p) : rem;
+                if (pl > 0 && pl < 4000) {
+                    char rel[4096], full[4400];
+                    mm_copy(rel, sizeof rel, p, (long)pl); rel[pl] = 0;
+                    if (rel[0] == '/') cx_fmt(full, sizeof full, "%s", rel);
+                    else cx_fmt(full, sizeof full, "%s/%s", root, rel);
+                    if (sha_file_hex(full, fhex)) {
+                        cx_fmt(why, wcap, "read-closure-failed:%s", rel);
+                        np_free(&r); free(kb.p); return 1;
+                    }
+                    np_puts(&kb, rel); np_puts(&kb, "\t"); np_puts(&kb, fhex); np_puts(&kb, "\n");
+                }
+            }
+            cur = nl ? nl + 1 : end;
+        }
+        np_free(&r);
+    } else {
+        if (sha_file_hex(source, fhex)) { cx_fmt(why, wcap, "read-source-failed"); return 1; }
+        np_puts(&kb, source); np_puts(&kb, "\t"); np_puts(&kb, fhex); np_puts(&kb, "\n");
+    }
+    int rc = sy_sha256_hex(kb.p, (long)kb.n, hex);
+    free(kb.p);
+    if (rc) { cx_fmt(why, wcap, "sha256-key-failed"); return 1; }
+    return 0;
+}
+
+static int try_cache_hit(const char *cbin, const char *csha, const char *output) {
+    size_t sn = 0, bn = 0;
+    char *sb = cx_read(csha, &sn);
+    if (!sb || sn < 64) { free(sb); return 0; }
+    char *bb = cx_read(cbin, &bn);
+    if (!bb || bn == 0) { free(sb); free(bb); return 0; }
+    char got[65];
+    int ok = !sy_sha256_hex(bb, (long)bn, got) && !memcmp(got, sb, 64);
+    free(sb);
+    if (!ok) { free(bb); return 0; }
+    if (output && *output) {
+        if (sy_write_atomic(output, bb, bn, 0755) != 0) { free(bb); return 0; }
+    }
+    free(bb);
+    return 1;
+}
+
+static int prepare_tool(const char *step, char *source, char *output) {
+    long t0 = sy_now_ms();
+    char cdir[4200], key[65], cbin[4400], csha[4400], clock[4400], why[512] = {0};
+    if (prep_cache_dir(cdir, sizeof cdir)) {
+        prep_fail(step, "cache-dir", "mkdir-failed", -1, 0, 0, sy_now_ms() - t0, cdir, 0, 0);
+        return 1;
+    }
+    if (tool_content_key(source, key, why, sizeof why)) {
+        prep_fail(step, "content-key", "key-failed", -1, 0, 0, sy_now_ms() - t0, why, 0, 0);
+        return 1;
+    }
+    if (cx_fmt(cbin, sizeof cbin, "%s/%s.bin", cdir, key) ||
+        cx_fmt(csha, sizeof csha, "%s/%s.sha", cdir, key) ||
+        cx_fmt(clock, sizeof clock, "%s/%s.lock", cdir, key)) {
+        prep_fail(step, "cache-path", "path-bound", -1, 0, 0, sy_now_ms() - t0, 0, 0, 0);
+        return 1;
+    }
+    if (try_cache_hit(cbin, csha, output)) {
+        printf("PREPARED\ttool=%s\tstate=hit\tkey=%.16s\tms=%ld\n", step, key, sy_now_ms() - t0);
+        return 0;
+    }
+    int lfd = sy_open(clock, O_RDWR | O_CREAT, 0600);
+    if (lfd < 0 || sy_flock(lfd, 2) != 0) {
+        if (lfd >= 0) sy_close(lfd);
+        prep_fail(step, "lock", "flock-failed", -1, 0, 0, sy_now_ms() - t0, clock, 0, 0);
+        return 1;
+    }
+    if (try_cache_hit(cbin, csha, output)) {
+        sy_flock(lfd, 8); sy_close(lfd);
+        printf("PREPARED\ttool=%s\tstate=hit-after-lock\tkey=%.16s\tms=%ld\n", step, key, sy_now_ms() - t0);
+        return 0;
+    }
+    char tmpout[4500];
+    if (cx_fmt(tmpout, sizeof tmpout, "%s/%s.tmp.%d", cdir, key, (int)getpid())) {
+        sy_flock(lfd, 8); sy_close(lfd);
+        prep_fail(step, "tmp-path", "path-bound", -1, 0, 0, sy_now_ms() - t0, 0, 0, 0);
+        return 1;
+    }
+    char *av[] = {"sh", prod, "-o", tmpout, source, 0};
     np_result r = {0};
-    int bad = np_run(av, root, 0, 15, &r, why, sizeof why) || r.rc || r.residue ||
-        access(output, X_OK) != 0;
+    int tr = np_run(av, root, 0, 15, &r, why, sizeof why);
+    int bad = tr || r.rc || r.timed_out || r.residue || access(tmpout, X_OK) != 0;
     if (bad) {
-        if (*why) fprintf(stderr, "%s\n", why);
-        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+        const char *reason = r.timed_out ? "timeout-15s" : tr ? "transport" : r.residue ? "residue" : r.rc ? "compile-rc" : "not-executable";
+        sy_unlink(tmpout);
+        sy_flock(lfd, 8); sy_close(lfd);
+        prep_fail(step, "compile", reason, r.rc, r.timed_out, r.residue, sy_now_ms() - t0, why, r.err, r.errn);
+        np_free(&r);
+        return 1;
     }
     np_free(&r);
-    return bad;
+    char bsha[65];
+    size_t bn = 0;
+    char *bb = cx_read(tmpout, &bn);
+    if (!bb || !bn || sy_sha256_hex(bb, (long)bn, bsha)) {
+        free(bb); sy_unlink(tmpout); sy_flock(lfd, 8); sy_close(lfd);
+        prep_fail(step, "publish", "hash-built-failed", -1, 0, 0, sy_now_ms() - t0, tmpout, 0, 0);
+        return 1;
+    }
+    if (sy_rename(tmpout, cbin) != 0 || sy_write_atomic(csha, bsha, 64, 0600) != 0) {
+        free(bb); sy_unlink(tmpout); sy_flock(lfd, 8); sy_close(lfd);
+        prep_fail(step, "publish", "cache-store-failed", -1, 0, 0, sy_now_ms() - t0, cbin, 0, 0);
+        return 1;
+    }
+    if (output && *output && sy_write_atomic(output, bb, bn, 0755) != 0) {
+        free(bb); sy_flock(lfd, 8); sy_close(lfd);
+        prep_fail(step, "copy-out", "write-output-failed", -1, 0, 0, sy_now_ms() - t0, output, 0, 0);
+        return 1;
+    }
+    free(bb);
+    sy_flock(lfd, 8); sy_close(lfd);
+    printf("PREPARED\ttool=%s\tstate=built\tkey=%.16s\tms=%ld\n", step, key, sy_now_ms() - t0);
+    return 0;
+}
+
+static int wait_child_ok(int pid) {
+    if (pid <= 0) return 0;
+    for (;;) {
+        int ex = 0, code = -1, sig = 0;
+        int r = sy_wait_status(pid, 0, &ex, &code, &sig);
+        if (r == -4) continue; /* EINTR */
+        return r > 0 && ex && code == 0;
+    }
+}
+
+static long read_fd_all(int fd, char *buf, long cap) {
+    long rn = 0;
+    if (fd < 0) { buf[0] = 0; return 0; }
+    while (rn + 1 < cap) {
+        long got = sy_read(fd, buf + rn, cap - 1 - rn);
+        if (got == -4) continue; /* EINTR */
+        if (got <= 0) break;
+        rn += got;
+    }
+    buf[rn] = 0;
+    sy_close(fd);
+    return rn;
+}
+
+static int run_selftest_conc(void) {
+    char cdir[4200], self_bin[4400], why[512] = {0};
+    int p = 0, f = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "lane-prep-conc-", cdir, (int)sizeof cdir) != 0) die("mkdtemp-conc");
+    if (cx_fmt(self_bin, sizeof self_bin, "%s/check-lane-inputs-gen.bin", cdir)) { sy_remove_all(cdir); die("self-path"); }
+    {
+        char self_src[4400];
+        cx_fmt(self_src, sizeof self_src, "%s/tools/check-lane-inputs-gen.cx", root);
+        char *av[] = { "sh", prod, "-o", self_bin, self_src, 0 };
+        np_result r = {0};
+        if (np_run(av, root, 0, 30, &r, why, sizeof why) || r.rc) {
+            np_free(&r); sy_remove_all(cdir); die("build-self-selftest");
+        }
+        np_free(&r);
+    }
+    if (sy_setenv("UNISACC_LANE_PREP_CACHE", cdir, 1)) { sy_remove_all(cdir); die("setenv-cache"); }
+
+    /* Test 1: cold cache + 8-way concurrent --warmup -> 0 REFUSE, 8/8 rc=0 */
+    {
+        int pids[8], fds[8], ok_rc = 0, built = 0, hit = 0;
+        for (int i = 0; i < 8; i++) {
+            char *av[] = { "timeout", "30", self_bin, "--warmup", 0 };
+            int out_fd = -1, err_fd = -1;
+            pids[i] = sy_spawn_pipe(av, root, 0, &out_fd, &err_fd);
+            fds[i] = out_fd;
+            if (err_fd >= 0) sy_close(err_fd);
+        }
+        for (int i = 0; i < 8; i++) {
+            char buf[2048];
+            read_fd_all(fds[i], buf, (long)sizeof buf);
+            if (wait_child_ok(pids[i])) ok_rc++;
+            if (strstr(buf, "state=built") != 0) built++;
+            if (strstr(buf, "state=hit") != 0) hit++;
+        }
+        int ok = (ok_rc == 8 && built >= 1 && hit >= 7);
+        printf("%s\tlane-prep.cold-8way-conc\tok_rc=%d/8 built=%d hit=%d\n", ok ? "PASS" : "FAIL", ok_rc, built, hit);
+        if (ok) p++; else f++;
+    }
+
+    /* Test 2: after serial warmup, 8-way concurrent --warmup -> 8/8 hit, 0 built */
+    {
+        int pids[8], fds[8], ok_rc = 0, built = 0, hit = 0;
+        for (int i = 0; i < 8; i++) {
+            char *av[] = { "timeout", "30", self_bin, "--warmup", 0 };
+            int out_fd = -1, err_fd = -1;
+            pids[i] = sy_spawn_pipe(av, root, 0, &out_fd, &err_fd);
+            fds[i] = out_fd;
+            if (err_fd >= 0) sy_close(err_fd);
+        }
+        for (int i = 0; i < 8; i++) {
+            char buf[2048];
+            read_fd_all(fds[i], buf, (long)sizeof buf);
+            if (wait_child_ok(pids[i])) ok_rc++;
+            if (strstr(buf, "state=built") != 0) built++;
+            if (strstr(buf, "state=hit") != 0) hit++;
+        }
+        int ok = (ok_rc == 8 && built == 0 && hit == 8);
+        printf("%s\tlane-prep.warm-8way-conc\tok_rc=%d/8 built=%d hit=%d\n", ok ? "PASS" : "FAIL", ok_rc, built, hit);
+        if (ok) p++; else f++;
+    }
+
+    /* Test 3: failure diagnostics unconditionally print step, sub, reason, ms */
+    {
+        char *av[] = { self_bin, "--warmup-bad", 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 20, &r, why, sizeof why);
+        int ok = !tr && r.rc != 0 && r.err &&
+                 strstr(r.err, "step=missing-tool") != 0 &&
+                 strstr(r.err, "sub=content-key") != 0 &&
+                 strstr(r.err, "reason=key-failed") != 0 &&
+                 strstr(r.err, "ms=") != 0;
+        printf("%s\tlane-prep.refuse-prints-diag\trc=%d\n", ok ? "PASS" : "FAIL", r.rc);
+        np_free(&r);
+        if (ok) p++; else f++;
+    }
+
+    sy_remove_all(cdir);
+    printf("LANE_PREP_SELFTEST\tpassed=%d\tfailed=%d\n", p, f);
+    return f ? 1 : 0;
 }
 
 int main(int argc, char **argv) {
-    int part = 0;
+    int part = 0, warmup = 0, selftest = 0, warmup_bad = 0;
     if (argc == 2 && !strcmp(argv[1], "--part1")) part = 1;
     else if (argc == 2 && !strcmp(argv[1], "--part2")) part = 2;
-    else if (argc != 1) die("usage: [--part1|--part2]");
+    else if (argc == 2 && !strcmp(argv[1], "--warmup")) warmup = 1;
+    else if (argc == 2 && !strcmp(argv[1], "--selftest-conc")) selftest = 1;
+    else if (argc == 2 && !strcmp(argv[1], "--warmup-bad")) warmup_bad = 1;
+    else if (argc != 1) die("usage: [--part1|--part2|--warmup|--selftest-conc]");
     if (!getcwd(root, sizeof root)) die("getcwd");
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
         cx_fmt(ident_src, sizeof ident_src, "%s/seed/ident.c", root) ||
         cx_fmt(pmq_src, sizeof pmq_src, "%s/tools/product-map-query.cx", root)) die("paths");
+    if (selftest) return run_selftest_conc();
+    if (warmup_bad) {
+        char missing[4300];
+        cx_fmt(missing, sizeof missing, "%s/tools/__nonexistent_lane_tool__.cx", root);
+        if (prepare_tool("missing-tool", missing, 0)) die("prepare identity tools");
+        return 0;
+    }
+    if (warmup) {
+        if (prepare_tool("ident", ident_src, 0) || prepare_tool("product-map-query", pmq_src, 0))
+            die("prepare identity tools");
+        return 0;
+    }
 
     /* Prepare isolated git-archive snapshot of HEAD */
     if (cx_fmt(work, sizeof work, "%s/lane-probes-%d", sy_tmpdir(), (int)getpid()) ||
@@ -139,7 +436,7 @@ int main(int argc, char **argv) {
     if (sy_mkdir_all(snap, 0700)) die("mkdir-snap");
     if (cx_fmt(ident_bin, sizeof ident_bin, "%s/ident", work) ||
         cx_fmt(pmq_bin, sizeof pmq_bin, "%s/product-map-query", work) ||
-        prepare_tool(ident_src, ident_bin) || prepare_tool(pmq_src, pmq_bin)) {
+        prepare_tool("ident", ident_src, ident_bin) || prepare_tool("product-map-query", pmq_src, pmq_bin)) {
         rm_work();
         die("prepare identity tools");
     }
