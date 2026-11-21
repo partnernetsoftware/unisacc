@@ -1547,12 +1547,13 @@ static int cmd_flow(const char *root, int argc, char **argv) {   /* flow run FIL
 }
 
 static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--timeout-ms N] [--cwd D] -- ARGV... */
-    AB b = {0, 0, 0}; int a = 0, k = 0, par = 0; long tm = FL_NODE_MS; const char *cwd = 0; char key[16], num[32];
+    AB b = {0, 0, 0}; int a = 0, k = 0, par = 0, light = 0; long tm = FL_NODE_MS; const char *cwd = 0; char key[16], num[32];
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "--")) { a++; break; }
         else if (!strcmp(argv[a], "--par") && a + 1 < argc) { long v = numarg(argv[++a]); if (v < 1 || v > 32) { fprintf(stderr, "devsvc: REFUSE --par wants 1..32\n"); return 2; } par = (int)v; }
         else if (!strcmp(argv[a], "--timeout-ms") && a + 1 < argc) { tm = numarg(argv[++a]); if (tm < 1 || tm > FL_NODE_MAX_MS) return 2; }
         else if (!strcmp(argv[a], "--cwd") && a + 1 < argc) cwd = argv[++a];
+        else if (!strcmp(argv[a], "--light")) light = 1;
         else if ((k = oc_opt(argc, argv, a))) { if (k < 0) return 2; a += k - 1; k = 0; }
         else if (argv[a][0] == '-' && argv[a][1]) { fprintf(stderr, "devsvc: REFUSE x: unknown or incomplete option %s\n%s\n", argv[a], X_USE); return 2; }
         else break;
@@ -1577,8 +1578,13 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--ti
         if (hit && (!al || strcmp(al, "1"))) { fprintf(stderr, "devsvc: REFUSE x git %s: dangerous on a shared checkout (set DEVSVC_ALLOW_DANGEROUS=1 to override)\n", hit); return 125; }
         if (hit) { char rq[200]; F(rq, sizeof rq, "emit\tx.dangerous\tgit %s pid=%d", hit, sy_pid()); request(root, rq, 0); }
     }
+    if (!strcmp(argv[a], "git")) light = 1;
+    for (int j = a; !light && j < argc && strcmp(argv[j], "--"); j++) {
+        if (!strcmp(argv[j], "tools/push-replay.cx") || !strcmp(argv[j], "tools/commit-own.cx") || !strcmp(argv[j], "tools/gitsync-run.cx")) light = 1;
+    }
     ab_add(&b, "x\texec\t-\t", 9);
     F(num, sizeof num, "%ld", tm); ab_kv(&b, "timeout_ms", num, strlen(num));
+    if (light) ab_kv(&b, "w", "0", 1);
     if (cwd) ab_kv(&b, "cwd", cwd, strlen(cwd));
     for (; a < argc; a++, k++) { F(key, sizeof key, "a%d", k); ab_kv(&b, key, argv[a], strlen(argv[a])); }
     ab_add(&b, "\n", 1);
@@ -2588,7 +2594,7 @@ static int git_push_owned(const char *root, const char *cwd, int count, char **c
     int n=0;
     int64_t start=sy_mono_ns();
     int scoped = carry_merge && merge_owner_key(scope);
-    if(count<1||count+15+2*scoped>=FL_MAX_ARGV||start<0)return 2;
+    if(count<1||count+16+2*scoped>=FL_MAX_ARGV||start<0)return 2;
     for(int i=0;i<count;i++)if(!git_full_oid(commits[i]))return 2;
     int64_t deadline=start+55000000000LL;
     push_prep_deadline=deadline;
@@ -2610,7 +2616,7 @@ static int git_push_owned(const char *root, const char *cwd, int count, char **c
     F(stop,sizeof stop,"%lld",(long long)deadline);
     F(prod,sizeof prod,"%s/%s",root,cfg.product);
     if(ovf)return 2;
-    args[n++]="--par";args[n++]="1";args[n++]="--timeout-ms";args[n++]=timeout;
+    args[n++]="--par";args[n++]="1";args[n++]="--light";args[n++]="--timeout-ms";args[n++]=timeout;
     if(cwd){args[n++]="--cwd";args[n++]=(char *)cwd;}
     args[n++]="--";args[n++]="sh";args[n++]=prod;args[n++]="tools/push-replay.cx";args[n++]="--";
     args[n++]=(char *)work;args[n++]=worker;args[n++]=sync;args[n++]=stop;

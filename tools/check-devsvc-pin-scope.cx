@@ -5,6 +5,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
+#pragma unisa use sys.time
 #pragma unisa use sysx.process
 #pragma unisa use text.fmt
 
@@ -73,7 +74,10 @@ static void init_repo(const char *repo, const char *state) {
     write_fixture(repo, "product",
         "#!/bin/sh\nrole=$(cat \"$1\") || exit 63\n"
         "if [ \"$2\" = -o ]; then\n"
-        "  case \"$role\" in READY-*) printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"%s\"\\n' \"$role\" > \"$3\" && chmod 700 \"$3\";; *) exit 61;; esac\n"
+        "  [ -z \"$PIN_SCOPE_NO_COMPILE\" ] || exit 62\n"
+        "  case \"$role\" in READY-*)\n"
+        "    printf '#!/bin/sh\\nif [ \"$1\" = x ]; then\\n  while [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done\\n  [ \"$1\" = -- ] && shift\\n  exec \"$@\"\\nfi\\nprintf \"%%s %%s\\\\n\" \"%s\" \"$*\"\\n' \"$role\" > \"$3\" && chmod 700 \"$3\";;\n"
+        "  *) exit 61;; esac\n"
         "else printf 'WORK_COPY %s\\n' \"$role\"; exit 42; fi\n");
     write_fixture(repo, "tools/worker", state);
     commit(repo, state);
@@ -191,6 +195,38 @@ int main(int argc, char **argv) {
     sy_unsetenv("DV_PIN_DIR");
     if (cx_fmt(record, sizeof record, "%s/%s/devsvc", explicit_cache, explicit_key)) return 2;
     checkpoint(prepared && sy_exists(record) == 1, "explicit-cache-writes-only-to-chosen-directory");
+    {
+        char subcmd[8192], stale_table[4096], stale_body[512], stale_pin[4096], memo_dir[4096];
+        np_result nr = {0};
+        long t0 = sy_now_ms(), dt;
+        int nrc, s_ok;
+        if (cx_fmt(memo_dir, sizeof memo_dir, "%s/memo", explicit_cache) ||
+            cx_fmt(subcmd, sizeof subcmd, "'%s' events emit phase ok && rm -rf '%s' && '%s' f read notes.md", launcher, memo_dir, launcher) ||
+            cx_fmt(stale_table, sizeof stale_table, "%s/stale-repo.tsv", scratch) ||
+            cx_fmt(stale_body, sizeof stale_body, "%s# stale outer commit table\n", repo_config) ||
+            sy_write_atomic(stale_table, stale_body, strlen(stale_body), 0600) ||
+            cx_fmt(stale_pin, sizeof stale_pin, "0000000000000000000000000000000000000000:%s", stale_table) ||
+            sy_setenv("DV_PIN_DIR", explicit_cache, 1) ||
+            sy_setenv("PIN_SCOPE_NO_COMPILE", "1", 1)) return 2;
+        char *xargs[] = {launcher, "x", "--par", "1", "--", "sh", "-c", subcmd, 0};
+        nrc = run(left, xargs, &nr);
+        dt = sy_now_ms() - t0;
+        if (nr.outn) fwrite(nr.out, 1, nr.outn, stdout);
+        checkpoint(nrc == 0 && dt < 5000 && nr.out &&
+                   strstr(nr.out, "READY-LEFT events emit phase ok") &&
+                   strstr(nr.out, "READY-LEFT f read notes.md") &&
+                   !strstr(nr.out, "WORK_COPY"),
+                   "nested-x-subcommands-hit-pinned-bin-without-cold-compile");
+        np_free(&nr);
+        if (sy_setenv("DEVSVC_REPO_TABLE", stale_table, 1) ||
+            sy_setenv("DEVSVC_REPO_TABLE_PIN", stale_pin, 1)) return 2;
+        s_ok = invocation(left, "events", "READY-LEFT events", 0);
+        sy_unsetenv("DEVSVC_REPO_TABLE");
+        sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
+        sy_unsetenv("PIN_SCOPE_NO_COMPILE");
+        sy_unsetenv("DV_PIN_DIR");
+        checkpoint(s_ok, "stale-pin-is-cleared-without-zeroing-headtab");
+    }
     checkpoint(invocation(right, "probe", "WORK_COPY FAIL-RIGHT", 0), "failed-build-cannot-borrow-from-another-repo");
     path(linked, sizeof linked, scratch, "linked");
     char *worktree[] = {"git", "worktree", "add", "--quiet", "--detach", linked, "HEAD", 0};

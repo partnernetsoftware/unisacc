@@ -503,6 +503,22 @@ static int fl_cancelled = 0;
 void fl_set_cancel(int (*fn)(void)) { fl_cancel_fn = fn; fl_cancelled = 0; }
 int fl_was_cancelled(void) { return fl_cancelled; }
 
+static int fl_is_light(const char *args) {
+    char b[256], key[16];
+    int i;
+    if (fl_arg(args, "w", 0, b, sizeof b) > 0) return !strcmp(b, "0");
+    if (fl_arg(args, "light", 0, b, sizeof b) > 0 && !strcmp(b, "1")) return 1;
+    if (fl_arg(args, "class", 0, b, sizeof b) > 0 && !strcmp(b, "light")) return 1;
+    if (fl_arg(args, "a0", 0, b, sizeof b) > 0 && !strcmp(b, "git")) return 1;
+    for (i = 1; i <= 4; i++) {
+        fl_say(key, sizeof key, "a%d", i);
+        if (fl_arg(args, key, 0, b, sizeof b) <= 0) break;
+        if (!strcmp(b, "--")) break;
+        if (!strcmp(b, "tools/push-replay.cx") || !strcmp(b, "tools/commit-own.cx") || !strcmp(b, "tools/gitsync-run.cx")) return 1;
+    }
+    return 0;
+}
+
 int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo, fl_sum *sum) {
     fl_ctx x; char p[2600]; int i, j, running = 0, left = f->count, r, held = 0, adm = fa_enabled(); long end;
     if (jobs < 1) jobs = 1;
@@ -572,7 +588,7 @@ int fl_run(fl_flow *f, const char *run_dir, int jobs, long deadline_ms, int echo
                 for (j = 0; j < f->count; j++) if (f->n[j].state == FL_RUNNING && !strcmp(f->n[j].lock, nd->lock)) break;
                 if (j < f->count) continue;
             }
-            if (adm && !strcmp(nd->op, "exec")) {   /* machine admission: w=N tokens or wait */
+            if (adm && !strcmp(nd->op, "exec") && !fl_is_light(nd->args)) {   /* machine admission: w=N tokens or wait (lightweight / git control exempt) */
                 char wb[16]; long w = fl_arg(nd->args, "w", 0, wb, sizeof wb) > 0 ? atol(wb) : 1;
                 nd->nslots = fa_acquire(w < 1 ? 1 : (int)w, nd->slots, 32);
                 if (!nd->nslots) { if (!nd->wait_t0) nd->wait_t0 = now; waiting = 1; continue; }

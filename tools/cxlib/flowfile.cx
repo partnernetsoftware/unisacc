@@ -633,8 +633,34 @@ static int ff_ctx_field(const unsigned char *b, long s, long e, char *dst, long 
     dst[k] = 0;
     return s < e ? -1 : 0;
 }
+static int ff_ctx_hosts_ok(const char *root, const char *host, char *miss, long mcap) {
+    long i = 0;
+    if (!host || !host[0]) { miss[0] = 0; ff_cat(miss, mcap, "empty-host"); return -1; }
+    if (tx_eqz(host, "-")) return 0;
+    while (host[i]) {
+        long s = i, e, colon = -1, pl, k;
+        char rel[1024], full[FF_PATH];
+        sy_stat_t st;
+        while (host[i] && host[i] != ',') {
+            if (host[i] == ':' && colon < 0) colon = i;
+            i++;
+        }
+        e = colon >= 0 ? colon : i;
+        pl = e - s;
+        if (host[i] == ',') i++;
+        if (pl <= 0 || pl >= (long)sizeof rel) { miss[0] = 0; ff_cat(miss, mcap, "bad-host"); return -1; }
+        for (k = 0; k < pl; k++) rel[k] = host[s + k];
+        rel[pl] = 0;
+        full[0] = 0; ff_cat(full, sizeof full, root); ff_cat(full, sizeof full, "/"); ff_cat(full, sizeof full, rel);
+        if (sy_stat(full, &st) != 0) {
+            miss[0] = 0; ff_cat(miss, mcap, rel);
+            return -2;
+        }
+    }
+    return 0;
+}
 int ff_ctx_lookup(const char *root, const char *rel, char *kind, char *cmd, long ccap, char *reason, long rcap) {
-    char tp[FF_PATH];
+    char tp[FF_PATH], chost[1024];
     unsigned char *b = 0;
     int64_t bn = 0;
     long i = 0, ls, le, f[8], nf, j;
@@ -655,10 +681,17 @@ int ff_ctx_lookup(const char *root, const char *rel, char *kind, char *cmd, long
             for (q = 0; q < pl && b[f[0] + q] == (unsigned char)rel[q]; q++) { }
             if (q != pl) continue;
         }
-        if (ff_ctx_field(b, f[1], f[2] - 1, kind, 32) || ff_ctx_field(b, f[3], f[4] - 1, cmd, ccap) || ff_ctx_field(b, f[4], f[5] - 1, reason, rcap)) found = -1;
+        if (ff_ctx_field(b, f[1], f[2] - 1, kind, 32) || ff_ctx_field(b, f[2], f[3] - 1, chost, sizeof chost) ||
+            ff_ctx_field(b, f[3], f[4] - 1, cmd, ccap) || ff_ctx_field(b, f[4], f[5] - 1, reason, rcap)) found = -1;
         else if (!tx_eqz(kind, "embedded-in") && !tx_eqz(kind, "fragment")) found = -1;
-        else if (!reason[0] || tx_eqz(reason, "-") || !cmd[0]) found = -1;
-        else found = 1;
+        else if (!reason[0] || tx_eqz(reason, "-") || !cmd[0] || !chost[0]) found = -1;
+        else {
+            char miss[512];
+            int hr = ff_ctx_hosts_ok(root, chost, miss, sizeof miss);
+            if (hr == -2) { reason[0] = 0; ff_cat(reason, rcap, miss); found = -2; }
+            else if (hr < 0) found = -1;
+            else found = 1;
+        }
     }
     mm_free(b);
     return found;
@@ -686,6 +719,7 @@ static int ff_ccheck(const char *args, const char *root, const char *target, con
     if (tx_len(target, FF_PATH) <= rl || target[rl] != '/') return 0;
     rel = target + rl + 1;
     ctx = ff_ctx_lookup(root, rel, ckind, ccmd, sizeof ccmd, creason, sizeof creason);
+    if (ctx == -2) return ff_fail(o, "ECTX", "refused-context: missing compile-context file in build/devsvc-compile-context.tsv:", creason);
     if (ctx < 0) return ff_fail(o, "ECTX", "refused-context: bad row in build/devsvc-compile-context.tsv for", rel);
     if (ctx == 1 && tx_eqz(ccmd, "-")) {
         o->ccnote = 3; o->ccmsg[0] = 0;
