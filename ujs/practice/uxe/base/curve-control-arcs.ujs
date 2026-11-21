@@ -1,0 +1,60 @@
+native function curve_control_arc_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a<b+m && b<a+n;
+}
+
+native function curve_control_arc_dimensions(curve:i64,cache:i64,sample:i64) i64 {
+  if(curve<0 || curve%4!=0 || curve>6291456-CurveControl.size ||
+     cache<0 || cache%4!=0 || cache>6291456-CurveArcCache.size ||
+     sample<0 || sample%8!=0 || sample>6291456-24 ||
+     curve_control_arc_overlap(curve,CurveControl.size,cache,CurveArcCache.size) ||
+     curve_control_arc_overlap(curve,CurveControl.size,sample,24) ||
+     curve_control_arc_overlap(cache,CurveArcCache.size,sample,24)) { return 0-1; }
+  let kind=ux_u32(curve+CurveControl.kind);
+  let divisions=ux_u32(curve+CurveControl.arcLengthDivisions);
+  let capacity=ux_u32(cache+CurveArcCache.capacity);
+  let table=ux_u32(cache+CurveArcCache.table);
+  if(kind>5 || divisions<1 || divisions>=capacity || table%8!=0 || table>6291456 ||
+     capacity>(6291456-table)/8 || curve_control_arc_overlap(table,8*capacity,curve,CurveControl.size) ||
+     curve_control_arc_overlap(table,8*capacity,cache,CurveArcCache.size) ||
+     curve_control_arc_overlap(table,8*capacity,sample,24)) { return 0-1; }
+  let points=ux_u32(curve+CurveControl.points);
+  let dims=2+kind%2;
+  let pointBytes=8*dims*(2+kind/2);
+  if(points%8!=0 || points>6291456-pointBytes ||
+     curve_control_arc_overlap(points,pointBytes,curve,CurveControl.size) ||
+     curve_control_arc_overlap(points,pointBytes,cache,CurveArcCache.size) ||
+     curve_control_arc_overlap(points,pointBytes,sample,24) ||
+     curve_control_arc_overlap(points,pointBytes,table,8*capacity)) { return 0-1; }
+  return dims;
+}
+
+function curve_control_arc_sample(env,...args) {
+  return CurveControl_getPoint(env[0],env[1],args[0]);
+}
+
+function CurveControl_getArcLengths(curve,...args) {
+  let cache=args[0];
+  let sample=args[1];
+  let dims=curve_control_arc_dimensions(curve,cache,sample);
+  let result=0-1;
+  if(dims>0) {
+    let evaluate=closure(curve_control_arc_sample,curve,sample);
+    let divisions=ux_u32(curve+CurveControl.arcLengthDivisions);
+    result=Curve_getCachedLengths(evaluate,cache,divisions,dims);
+  }
+  return result;
+}
+
+function CurveControl_updateArcLengths(curve,...args) {
+  let cache=args[0];
+  let sample=args[1];
+  let dims=curve_control_arc_dimensions(curve,cache,sample);
+  let result=0-1;
+  if(dims>0) {
+    let evaluate=closure(curve_control_arc_sample,curve,sample);
+    let divisions=ux_u32(curve+CurveControl.arcLengthDivisions);
+    result=Curve_updateArcLengths(evaluate,cache,divisions,dims);
+  }
+  return result;
+}
+
