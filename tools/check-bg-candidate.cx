@@ -284,6 +284,7 @@ static int preflight_git_fixture(void) {
         "rev-parse:--verify) case \"$4\" in refs/tags/*) printf '%s\\n' '" REV_A "';;"
         " *) printf '%.40s\\n' \"$4\";; esac;;\n"
         "diff:--no-ext-diff) test \"$5\" != '" REV_D "' || exit 2; exit 0;;\n"
+        "-C:*) if [ \"$3:$4\" = \"rev-parse:--abbrev-ref\" ]; then printf 'v0.0.1\\n'; else exec /usr/bin/git \"$@\"; fi;;\n"
         "*) exec /usr/bin/git \"$@\";;\n"
         "esac\n";
     return join(dir,work,"preflight-bin") || sy_mkdir(dir,0700) ||
@@ -320,6 +321,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (sy_mkdir(fxroot, 0755) || join(dir, fxroot, "build") || sy_mkdir(dir, 0755) || put(fxroot, "build/chain-phases.tsv", PLAN) ||
+        join(dir, fxroot, "release") || sy_mkdir(dir, 0755) || put(fxroot, "release/candidate.tsv", "tag\tversion\nv0.0.1\t0.0.1\n") ||
         put(fxroot, "unisacc.com", "fixture-ape\n") || put(fxroot, "unisacc.com.build.json", "{}\n") ||
         put(fxroot, "build/chain-phase-fallthrough.tsv", FALLTHROUGH) || sha_text("fake-ape", ape) ||
         preflight_git_fixture()) {
@@ -410,6 +412,12 @@ int main(int argc, char **argv) {
            lines("BG_CANDIDATE\tREFUSE-ITEM\t12p-preflight-entry", 0, 0, 0) == 0 && !present(bp, REV_D),
            "start-refuses-root-with-symlink-ape");
         cx_fmt(fxroot, sizeof fxroot, "%s", keep);
+        if (put(fxroot, "release/candidate.tsv", "tag\tversion\nv0.0.0\t0.0.0\n")) return 2;
+        rc = start(bp, REV_A, "ok", "30", "5");
+        ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1 &&
+           lines("BG_CANDIDATE\tREFUSE-ITEM\t11-version-slot\tFAIL\trc=2 REFUSE CHAIN_READY_VERSION_SLOT slot-version-differs-from-target 0.0.0 0.0.1", 0, 0, 0) == 1 &&
+           !present(bp, REV_A), "start-refuses-mismatched-version-slot");
+        if (put(fxroot, "release/candidate.tsv", "tag\tversion\nv0.0.1\t0.0.1\n")) return 2;
         {
             char pft[P];
             if (join(pft, work, "bad-preflight.tsv") ||
