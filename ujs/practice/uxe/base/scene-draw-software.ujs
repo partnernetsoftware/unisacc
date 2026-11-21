@@ -33,7 +33,29 @@ native function soft_draw_edge(weight:f64,dx:f64,dy:f64,area:f64) i64 {
   return y>0.0 || (y==0.0 && x<0.0);
 }
 
-native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,blend:i64) i64 {
+struct SceneRasterTexture {
+  rgba: u32;
+  width: u32;
+  height: u32;
+}
+
+native function soft_draw_texel(texture:i64,vertex:i64,a:f64,b:f64,c:f64) i64 {
+  let wa=a/ux_f32(vertex+20);
+  let wb=b/ux_f32(vertex+48);
+  let wc=c/ux_f32(vertex+76);
+  let sum=wa+wb+wc;
+  let u=(wa*ux_f32(vertex+12)+wb*ux_f32(vertex+40)+wc*ux_f32(vertex+68))/sum;
+  let v=(wa*ux_f32(vertex+16)+wb*ux_f32(vertex+44)+wc*ux_f32(vertex+72))/sum;
+  let w=ux_u32(texture+SceneRasterTexture.width);
+  let h=ux_u32(texture+SceneRasterTexture.height);
+  let x=0;
+  let y=0;
+  if(u>=1.0) { x=w-1; } else { if(u>0.0) { x=f64_floor_i64(u*w); } }
+  if(v>=1.0) { y=h-1; } else { if(v>0.0) { y=f64_floor_i64(v*h); } }
+  return ux_u32(ux_u32(texture+SceneRasterTexture.rgba)+(y*w+x)*4);
+}
+
+native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,blend:i64,texture:i64) i64 {
   let x0=(ux_f32(vertex)+1.0)*0.5*w;
   let x1=(ux_f32(vertex+28)+1.0)*0.5*w;
   let x2=(ux_f32(vertex+56)+1.0)*0.5*w;
@@ -66,7 +88,7 @@ native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,ble
       let b=((x0-x2)*(py-y2)-(y0-y2)*(px-x2))/area;
       let c=1.0-a-b;
       let covered=a>=0.0 && b>=0.0 && c>=0.0;
-      if(covered && blend) {
+      if(covered && (blend || texture>=0)) {
         covered=soft_draw_edge(a,x2-x1,y2-y1,area) &&
           soft_draw_edge(b,x0-x2,y0-y2,area) && soft_draw_edge(c,x1-x0,y1-y0,area);
       }
@@ -74,11 +96,13 @@ native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,ble
         let z=0.5+(a*near+b*mid+c*far)*0.5;
         let at=(y*w+x)*4;
         if(z>=0.0 && z<=1.0 && z<ux_f32(depth+at)) {
+          let shade=color;
+          if(texture>=0) { shade=soft_draw_texel(texture,vertex,a,b,c); }
           if(blend) {
-            let composed=SceneRaster_sourceOver(ux_u32(rgba+at),color);
+            let composed=SceneRaster_sourceOver(ux_u32(rgba+at),shade);
             let sample=ux_u32_put(rgba+at,composed);
           } else {
-            let sample=ux_u32_put(rgba+at,color);
+            let sample=ux_u32_put(rgba+at,shade);
             let stored=ux_f32_put(depth+at,z);
           }
           pixels=pixels+1;
@@ -93,7 +117,7 @@ native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,ble
 
 // Consume the same projected stream as SceneDraw_gpuFlat. Depth starts at
 // 1 and the target is top-down. Transparent draws test but preserve depth.
-native function SceneDraw_softwareColor(target:i64,vertices:i64,count:i64,blend:i64) i64 {
+native function scene_draw_software(target:i64,vertices:i64,count:i64,blend:i64,texture:i64) i64 {
   if(blend<0 || blend>1 || !scene_render_span(target,SceneRasterTarget.size,4) || count<3 || count>2340 || count%3!=0 ||
      !scene_render_span(vertices,count*28,4)) { return 0-1; }
   let rgba=ux_u32(target+SceneRasterTarget.rgba);
@@ -106,6 +130,15 @@ native function SceneDraw_softwareColor(target:i64,vertices:i64,count:i64,blend:
      scene_render_overlap(rgba,bytes,depth,bytes) ||
      !scene_render_readable(target,SceneRasterTarget.size,rgba,bytes,depth,bytes) ||
      !scene_render_readable(vertices,count*28,rgba,bytes,depth,bytes)) { return 0-1; }
+  if(texture>=0) {
+    if(!scene_render_span(texture,SceneRasterTexture.size,4) ||
+       !scene_render_readable(texture,SceneRasterTexture.size,rgba,bytes,depth,bytes)) { return 0-1; }
+    let tw=ux_u32(texture+SceneRasterTexture.width);
+    let th=ux_u32(texture+SceneRasterTexture.height);
+    let texels=ux_u32(texture+SceneRasterTexture.rgba);
+    if(tw<1 || th<1 || tw>4096 || th>4096 || !scene_render_span(texels,tw*th*4,4) ||
+       !scene_render_readable(texels,tw*th*4,rgba,bytes,depth,bytes)) { return 0-1; }
+  }
   let i=0;
   while(i<count) {
     let at=vertices+i*28;
@@ -115,21 +148,37 @@ native function SceneDraw_softwareColor(target:i64,vertices:i64,count:i64,blend:
       if(v-v!=0.0 || v<0.0-1048576.0 || v>1048576.0) { return 0-2; }
       j=j+1;
     }
-    let opacity=ux_f32(at+24);
-    if(opacity<0.0 || opacity>1.0 || (!blend && opacity!=1.0)) { return 0-2; }
-    let first=vertices+(i/3)*84;
-    if(ux_u32(first+12)!=ux_u32(at+12) || ux_u32(first+16)!=ux_u32(at+16) ||
-       ux_u32(first+20)!=ux_u32(at+20) || ux_u32(first+24)!=ux_u32(at+24)) { return 0-2; }
+    if(texture>=0) {
+      if(ux_f32(at+20)<0.000001) { return 0-2; }
+    } else {
+      let opacity=ux_f32(at+24);
+      if(opacity<0.0 || opacity>1.0 || (!blend && opacity!=1.0)) { return 0-2; }
+      let first=vertices+(i/3)*84;
+      if(ux_u32(first+12)!=ux_u32(at+12) || ux_u32(first+16)!=ux_u32(at+16) ||
+         ux_u32(first+20)!=ux_u32(at+20) || ux_u32(first+24)!=ux_u32(at+24)) { return 0-2; }
+    }
     i=i+1;
   }
   let pixels=0;
   i=0;
   while(i<count) {
-    let drawn=soft_draw_triangle(vertices+i*28,rgba,depth,w,h,blend);
+    let drawn=soft_draw_triangle(vertices+i*28,rgba,depth,w,h,blend,texture);
     pixels=pixels+drawn;
     i=i+3;
   }
   return pixels;
+}
+
+native function SceneDraw_softwareColor(target:i64,vertices:i64,count:i64,blend:i64) i64 {
+  return scene_draw_software(target,vertices,count,blend,0-1);
+}
+
+// Consume projected XYZ, UV and clip-space W in
+// the same 28-byte format as the shared GPU texture stream. Texel rows
+// begin at V=0. Filtering is nearest with clamped coordinates.
+native function SceneDraw_softwareTexture(target:i64,vertices:i64,count:i64,blend:i64,texture:i64) i64 {
+  if(texture<0) { return 0-1; }
+  return scene_draw_software(target,vertices,count,blend,texture);
 }
 
 native function SceneDraw_softwareFlat(target:i64,vertices:i64,count:i64) i64 {

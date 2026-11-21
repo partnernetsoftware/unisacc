@@ -1,0 +1,42 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","scene-snapshot-layout","render-list","scene-render-list","scene-draw-project",
+        "scene-rgba8-blend","scene-draw-software",0};
+    const char *setup=
+        "let target=0;let texture=32;let verts=64;let rgba=512;let depth=640;let texel=768;"
+        "let t=ux_u32_put(target+SceneRasterTarget.rgba,rgba);"
+        "let d=ux_u32_put(target+SceneRasterTarget.depth,depth);"
+        "let w=ux_u32_put(target+SceneRasterTarget.width,4);let h=ux_u32_put(target+SceneRasterTarget.height,4);"
+        "let r=ux_u32_put(texture+SceneRasterTexture.rgba,texel);"
+        "let tw=ux_u32_put(texture+SceneRasterTexture.width,2);let th=ux_u32_put(texture+SceneRasterTexture.height,1);"
+        "let left=ux_u32_put(texel,4278190335);let right=ux_u32_put(texel+4,2164195328);"
+        "let n=0;while(n<16){let color=ux_u32_put(rgba+4*n,4278190335);let z=ux_f32_put(depth+4*n,0.75);n=n+1;}"
+        "let x0=ux_f32_put(verts,0.0-1.0);let y0=ux_f32_put(verts+4,1.0);let a=ux_f32_put(verts+20,1.0);"
+        "let x1=ux_f32_put(verts+28,1.0);let y1=ux_f32_put(verts+32,1.0);"
+        "let u1=ux_f32_put(verts+40,1.0);let b=ux_f32_put(verts+48,0.25);"
+        "let x2=ux_f32_put(verts+56,0.0-1.0);let y2=ux_f32_put(verts+60,0.0-1.0);"
+        "let c=ux_f32_put(verts+76,1.0);";
+    #define TEXTURED "let hits=SceneDraw_softwareTexture(target,verts,3,1,texture);"
+    #define PIXEL "return 0.0+(ux_u8(rgba+4)==127 && ux_u8(rgba+6)==128);"
+    const char *cases[]={
+        TEXTURED "return 0.0+(hits>0 && ux_u32(rgba)==4278190335);",
+        TEXTURED PIXEL,
+        TEXTURED "return ux_f32(depth+4);",
+        "let opaque=SceneDraw_softwareTexture(target,verts,3,0,texture);"
+        "return 0.0+(opaque>0 && ux_f32(depth+4)==0.5 && ux_u32(rgba+4)==2164195328);",
+        "let invalid=ux_f32_put(verts+20,0.0);" TEXTURED
+        "return 0.0+(hits==0-2 && ux_f32(depth+4)==0.75 && ux_u32(rgba+4)==4278190335);",
+        "let overlap=ux_u32_put(texture+SceneRasterTexture.rgba,rgba);" TEXTURED
+        "return 0.0+(hits==0-1 && ux_u32(rgba+4)==4278190335);",
+    };
+    // At (1.5,0.5), barycentric u is 3/8. Correcting by W=1/4 on
+    // the right vertex gives 12/17, selecting the blue half-alpha texel.
+    const double gold[]={1,1,0.75,1,1,1};
+    return g_wasm_batch_page("G_PIXEL software perspective texture","scene-draw-soft-texture",
+        "ujs/practice/uxe/test/wasm-batch.html",modules,setup,cases,gold,6,mutate?1:-1,
+        "let affine=ux_f32_put(verts+48,1.0);" TEXTURED PIXEL);
+}
