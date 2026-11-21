@@ -1,0 +1,221 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+typedef struct {
+    sy_child_t process;
+    long deadline;
+    int request,at,size;
+    char stream[4096],reply[8192],session[120];
+} OrbitBrowser;
+
+static const char *reply_field(const char *reply,const char *field) {
+    const long bytes=tx_len(reply,8192), width=tx_len(field,128);
+    for(long offset=0;offset+width<=bytes;offset++) {
+        if(tx_prefix(reply+offset,bytes-offset,field,width)) return reply+offset;
+    }
+    return 0;
+}
+
+static int read_reply(OrbitBrowser *browser) {
+    for(int i=0;i<(int)sizeof browser->reply;i++) {
+        if(browser->at==browser->size) {
+            const long remain=browser->deadline-sy_now_ms();
+            if(remain<=0 || sy_readable(browser->process.out_fd,remain)<=0) return 0;
+            browser->size=sy_read(browser->process.out_fd,browser->stream,sizeof browser->stream);
+            browser->at=0;
+            if(browser->size<=0) return 0;
+        }
+        const char byte=browser->stream[browser->at++];
+        browser->reply[i]=byte;
+        if(!byte) return 1;
+    }
+    return 0;
+}
+
+static int cdp(OrbitBrowser *browser,const char *method,const char *params) {
+    const int id=++browser->request;
+    char packet[1600];
+    const int n=tx_snprintf(packet,sizeof packet,
+        "{\"id\":%d,\"method\":\"%s\",\"params\":%s%s}",id,method,params,browser->session);
+    if(n<=0 || n>=(int)sizeof packet || sy_write_all(browser->process.in_fd,packet,n+1)) return 0;
+    while(sy_now_ms()<browser->deadline && read_reply(browser)) {
+        const char *field=reply_field(browser->reply,"\"id\":");
+        if(field && tx_strtol(field+5,0,10)==id) return reply_field(browser->reply,"\"error\":")==0;
+    }
+    return 0;
+}
+
+static int read_id(const char *reply,const char *key,char out[97]) {
+    const char *field=reply_field(reply,key);
+    if(!field) return 0;
+    field+=tx_len(key,40);
+    for(int i=0;i<97;i++) {
+        if(field[i]=='"') { out[i]=0; return i>0; }
+        if(!field[i]) return 0;
+        out[i]=field[i];
+    }
+    return 0;
+}
+
+static int evaluate(OrbitBrowser *browser,const char *expression) {
+    char params[600];
+    tx_snprintf(params,sizeof params,"{\"expression\":\"%s\"}",expression);
+    if(!cdp(browser,"Runtime.evaluate",params)) return 0;
+    if(reply_field(browser->reply,"\"value\":\"fail:")) printf("ORBIT_BROWSER %s\n",browser->reply);
+    return 1;
+}
+
+static int wait_ready(OrbitBrowser *browser) {
+    for(int i=0;i<100 && sy_now_ms()<browser->deadline;i++) {
+        if(!evaluate(browser,"document.querySelector('#ready')?.textContent") ||
+           reply_field(browser->reply,"\"value\":\"fail:")) return 0;
+        if(reply_field(browser->reply,"\"value\":\"ready\"")) return 1;
+        sy_sleep_ms(50);
+    }
+    return 0;
+}
+
+static int mouse(OrbitBrowser *browser,const char *type,int x,int y,int held,const char *button,int wheel) {
+    char params[250];
+    tx_snprintf(params,sizeof params,
+        "{\"type\":\"%s\",\"x\":%d,\"y\":%d,\"button\":\"%s\",\"buttons\":%d,\"clickCount\":1,\"deltaX\":0,\"deltaY\":%d}",
+        type,x,y,button,held,wheel);
+    return cdp(browser,"Input.dispatchMouseEvent",params);
+}
+
+static int drag(OrbitBrowser *browser,int x,int y) {
+    return mouse(browser,"mousePressed",x,y,1,"left",0) &&
+        mouse(browser,"mouseMoved",x+10,y,1,"left",0) &&
+        mouse(browser,"mouseReleased",x+10,y,0,"left",0);
+}
+
+static int touch(OrbitBrowser *browser,const char *type,int x,int y,int count,int distance) {
+    char params[280],points[200];
+    if(count==0) points[0]=0;
+    else if(count==1) tx_snprintf(points,sizeof points,"{\"x\":%d,\"y\":%d,\"id\":7}",x,y);
+    else tx_snprintf(points,sizeof points,"{\"x\":%d,\"y\":%d,\"id\":7},{\"x\":%d,\"y\":%d,\"id\":8}",
+        x,y,x+distance,y);
+    tx_snprintf(params,sizeof params,"{\"type\":\"%s\",\"touchPoints\":[%s]}",type,points);
+    return cdp(browser,"Input.dispatchTouchEvent",params);
+}
+
+static int pinch(OrbitBrowser *browser,int x,int y) {
+    return touch(browser,"touchStart",x,y,1,0) &&
+        touch(browser,"touchStart",x,y,2,20) &&
+        touch(browser,"touchMove",x,y,2,40) &&
+        touch(browser,"touchEnd",x,y,0,0);
+}
+
+static int compare(OrbitBrowser *browser,const char *expression) {
+    return evaluate(browser,expression) && reply_field(browser->reply,"\"value\":\"pass\"");
+}
+
+static int exercise(OrbitBrowser *browser,const char *url) {
+    char params[1000],target[97],session[97];
+    tx_snprintf(params,sizeof params,"{\"url\":\"%s\"}",url);
+    if(!cdp(browser,"Target.createTarget",params) || !read_id(browser->reply,"\"targetId\":\"",target)) return 0;
+    tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
+    if(!cdp(browser,"Target.attachToTarget",params) || !read_id(browser->reply,"\"sessionId\":\"",session)) return 0;
+    tx_snprintf(browser->session,sizeof browser->session,",\"sessionId\":\"%s\"",session);
+    if(!cdp(browser,"Page.bringToFront","{}") || !wait_ready(browser)) return 0;
+    if(!drag(browser,36,36) || !drag(browser,276,36) ||
+       !compare(browser,"compareOrbit(0,'mouse',[-5.877852522924732,0,8.090169943749475,0,0,0])")) return 0;
+    if(!mouse(browser,"mouseWheel",36,36,0,"none",-100) || !mouse(browser,"mouseWheel",276,36,0,"none",-100) ||
+       !compare(browser,"compareOrbit(0,'wheel',[-5.583959896778495,0,7.685661446562001,0,0,0])")) return 0;
+    if(!drag(browser,36,180) || !drag(browser,276,180) ||
+       !compare(browser,"compareOrbit(1,'mouse',[-2,0,10,-2,0,0])")) return 0;
+    if(!pinch(browser,36,180) || !pinch(browser,276,180) ||
+       !compare(browser,"compareOrbit(1,'touch',[-4.938926261462366,0,4.045084971874737,-2,0,0])")) return 0;
+    return 1;
+}
+
+static int run_browser(const char *url,const char *dir) {
+    char profile[380];
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","orbit-pipe",
+        "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
+        "--force-device-scale-factor=1","--window-size=900,520","--remote-debugging-pipe",profile,"about:blank",0};
+    sy_spawn_t launch;
+    sy_exit_t ended;
+    OrbitBrowser browser={0};
+    sy_spawn_init(&launch);
+    launch.argv=argv; launch.in_fd=SY_STDIO_PIPE; launch.out_fd=SY_STDIO_PIPE;
+    launch.err_fd=SY_STDIO_NULL; launch.pgroup=-1; launch.deadline_ms=20000;
+    if(sy_proc_spawn(&launch,&browser.process)) return 1;
+    browser.deadline=sy_now_ms()+18000;
+    const int failed=!exercise(&browser,url);
+    if(failed) printf("ORBIT_BROWSER last CDP request=%d reply=%s\n",browser.request,browser.reply);
+    sy_close(browser.process.in_fd);
+    sy_close(browser.process.out_fd);
+    sy_proc_kill(&browser.process,9);
+    sy_proc_wait(&browser.process,&ended);
+    printf("G_RAY OrbitControls browser drag wheel pinch failed=%d\n",failed);
+    return failed;
+}
+
+static int build_probe(const char *source,const char *wasm) {
+    const char *modules[]={"f64-math","vector-scalar","orbitcontrols","orbitcontrols-pan",
+         "control-bindings","orbitcontrols-pinch","orbitcontrols-touch","orbitcontrols-mouse",0};
+    char program[32768]="export uxe_orbit_input(action:i64,id:i64,x:f64,y:f64,binding:i64) f64 version 1;\n";
+    int used=tx_len(program,sizeof program);
+    for(int i=0;modules[i];i++) {
+        char path[192]; unsigned char *body=0; int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&body,&size,sizeof program-used-2)) return 1;
+        const int n=tx_snprintf(program+used,sizeof program-used,"%s\n",body);
+        mm_free(body);
+        if(n<0 || n>=(int)sizeof program-used) return 1;
+        used+=n;
+    }
+    const char *entry=
+        "let c=256;let contacts=512;let mouse=640;let right=96;let up=128;\n"
+        "if(action==0){let eye=ux_f64_put(16,10.0);let r=ux_f64_put(right,1.0);let u=ux_f64_put(up+8,1.0);"
+        "  let init=OrbitControls_init(c,0,64,x);let a=OrbitControls_initTouch(contacts,id,right,up,90.0);"
+        "  return 0.0+OrbitControls_initMouse(mouse);}\n"
+        "if(action>=20){return ux_f64(c+(action-20)*8);}\n"
+        "let result=0;"
+        "if(action<10){result=OrbitControls_mousePerspective(c,contacts,mouse,action,id,x,y,binding);}"
+        "else{result=OrbitControls_touchPerspective(c,contacts,action-10,id,x,y);}"
+        "if(result>0 && (action==2 || action==4 || action==12)){"
+        "  let step=OrbitControls_step(c);let theta=ux_f64(c+OrbitControls.theta);let phi=ux_f64(c+OrbitControls.phi);"
+        "  let s=ux_math_sin(theta);let cs=ux_math_cos(theta);let cp=ux_math_cos(phi);"
+        "  let rx=ux_f64_put(right,cs);let rz=ux_f64_put(right+16,0.0-s);"
+        "  let ux=ux_f64_put(up,0.0-cp*s);let uy=ux_f64_put(up+8,ux_math_sin(phi));"
+        "  let uz=ux_f64_put(up+16,0.0-cp*cs);}"
+        "return result*1.0;\n";
+    const int n=tx_snprintf(program+used,sizeof program-used,"%s",entry);
+    if(n<0 || n>=(int)sizeof program-used || sy_write_file(source,program,used+n,0600)) return 1;
+    char *argv[]={"./ujs/ujs2wasm.com",(char*)source,"-o",(char*)wasm,0};
+    char *output=0; size_t length=0;
+    const int rc=cx_runv_timeout(argv,6,&output,&length);
+    if(rc) printf("ORBIT_BROWSER compile_rc=%d %s\n",rc,output?output:"");
+    mm_free(output);
+    return rc!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    for(int i=0;argv[1][i];i++) {
+        const char c=argv[1][i];
+        if(i>=180 || !((c>='A' && c<='Z') || (c>='a' && c<='z') ||
+            (c>='0' && c<='9') || c=='-' || c=='_' || c=='/' || c=='.')) return 2;
+    }
+    char cwd[390],dir[256],source[290],wasm[290],url[960];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-orbit-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/orbitcontrols-browser.html?package=%s&wasm=%s%s",
+        cwd,argv[1],wasm,mutate?"&mutate=1":"");
+    int failed=length<0 || length>=(int)sizeof url || build_probe(source,wasm) || run_browser(url,dir);
+    char *clean[]={"rm","-rf","--",dir,0},*output=0; size_t size=0;
+    if(cx_runv_timeout(clean,4,&output,&size)) failed=1;
+    mm_free(output);
+    return failed;
+}

@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; }
+  .view { position: absolute; width: 200px; height: 100px; touch-action: none; background: #ddd; }
+</style>
+<div class="view" id="wasm-orbit" style="left:16px;top:16px"></div>
+<div class="view" id="r160-orbit" style="left:256px;top:16px"></div>
+<div class="view" id="wasm-map" style="left:16px;top:160px"></div>
+<div class="view" id="r160-map" style="left:256px;top:160px"></div>
+<pre id="ready">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { REVISION, PerspectiveCamera } from "three";
+import { bindOrbitInput } from "../base/orbitcontrols-browser.js";
+
+const ready=document.querySelector("#ready");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const params=new URLSearchParams(location.search);
+  const addon=name=>import(`file://${params.get("package")}/examples/jsm/controls/${name}.js`);
+  const { OrbitControls }=await addon("OrbitControls");
+  const { MapControls }=await addon("MapControls");
+  const request=new XMLHttpRequest();
+  request.open("GET",params.get("wasm"),false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);
+  const module=new WebAssembly.Module(bytes);
+  const counts=[];
+  const trace=[];
+  const actual=[];
+  const reference=[];
+  const size=6;
+  for(const [map,name,Controls] of [[0,"orbit",OrbitControls],[1,"map",MapControls]]) {
+    const element=document.querySelector(`#wasm-${name}`);
+    const source=document.querySelector(`#r160-${name}`);
+    const camera=new PerspectiveCamera(90,2,0.1,100);
+    camera.position.z=10;
+    const controls=new Controls(camera,source);
+    const { exports: { uxe_orbit_input: call } }=new WebAssembly.Instance(module);
+    call(0n,BigInt(map),element.clientHeight,0,0n);
+    const commands=[];
+    trace.push(commands);
+    bindOrbitInput(element,(action,id,x,y,binding)=>{
+      if(params.has("mutate") && action===4n) y=-y;
+      const status=call(action,id,x,y,binding);
+      if(commands.length<20) commands.push([Number(action),Number(id),x,y,Number(binding),status]);
+      return status;
+    });
+    const observe=node=>{
+      const seen=new Set();
+      node.addEventListener("pointermove",event=>{
+        if(event.isTrusted && (event.buttons || event.pointerType==="touch")) seen.add(event.pointerType);
+      });
+      node.addEventListener("wheel",event=>{
+        if(event.isTrusted && event.defaultPrevented) seen.add("wheel");
+      });
+      return seen;
+    };
+    counts.push([observe(element),observe(source)]);
+    actual.push(()=>Array.from({length:size},(_,i)=>call(BigInt(20+i),0n,0,0,0n)));
+    reference.push(()=>[...camera.position.toArray(),...controls.target.toArray()]);
+  }
+  const near=(a,b)=>Number.isFinite(a) && Math.abs(a-b)<1e-8;
+  window.compareOrbit=(map,input,expected)=>{
+    const wasm=actual[map]();
+    const r160=reference[map]();
+    if(!counts[map].every(events=>events.has(input))) return `fail:missing trusted ${input}`;
+    for(let i=0;i<size;i++) {
+      if(!near(wasm[i],r160[i]) || (expected[i]!==null && !near(wasm[i],expected[i]))) {
+        return `fail:${map} ${input} axis=${i} wasm=${wasm[i]} r160=${r160[i]} gold=${expected[i]} input=${JSON.stringify(trace[map])}`;
+      }
+    }
+    return "pass";
+  };
+  ready.textContent="ready";
+} catch(error) {
+  ready.textContent=`fail:${error.message}`;
+}
+</script>
