@@ -1,0 +1,78 @@
+native function lh_object_mx_col(dst:i64,x:f64,y:f64,z:f64,i:i64) i64 {
+  let a=ux_f64_put(dst,x);
+  let b=ux_f64_put(dst+8,y);
+  let c=ux_f64_put(dst+16,z);
+  let d=ux_f64_put(dst+24,0.0+i);
+  return dst;
+}
+
+native function lh_object_mx_child(dst:i64,look:i64,sx:f64,sy:f64,sz:f64) i64 {
+  let x=ux_f64(look);
+  let y=ux_f64(look+8);
+  let z=ux_f64(look+16);
+  let horizontal=f64_sqrt(x*x+z*z);
+  if(!(horizontal>0.0) || z-z!=0.0 || y-y!=0.0 || sx-sx!=0.0 || sy-sy!=0.0 || sz-sz!=0.0) { return 0-1; }
+  let rx=z/horizontal;
+  let rz=0.0-x/horizontal;
+  let right=lh_object_mx_col(dst,rx*sx,0.0,rz*sx,0);
+  let up=lh_object_mx_col(dst+32,rz*y*sy,(rx*z-rz*x)*sy,(0.0-rx*y)*sy,0);
+  let forward=lh_object_mx_col(dst+64,x*sz,y*sz,z*sz,0);
+  return lh_object_mx_col(dst+96,0.0,0.0,0.0,1);
+}
+
+native function lh_object_mx_translation(src:i64) i64 {
+  let i=0;
+  while(i<16) {
+    let v=ux_f64(src+i*8);
+    if(v-v!=0.0) { return 0; }
+    if(i<12 || i==15) {
+      let expect=0;
+      if(i%5==0) { expect=1; }
+      if(v!=expect) { return 0; }
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Point can retain any finite live matrix. The child look vectors used by
+// the other legacy helper records are world-space, so this adapter accepts
+// translation-only roots there. The JSON writer also accepts local matrices
+// from callers capable of composing an arbitrary affine parent.
+native function LightHelperObject_snapshot(kind:i64,helper:i64,dst:i64) i64 {
+  let size=PointLightHelper.size;
+  let active=PointLightHelper.active;
+  let matrixSlot=PointLightHelper.matrix;
+  let bytes=128;
+  if(kind==2) {
+    size=SpotLightHelper.size; active=SpotLightHelper.active; matrixSlot=SpotLightHelper.matrix; bytes=256;
+  } else if(kind==3) {
+    size=HemisphereLightHelper.size; active=HemisphereLightHelper.active; matrixSlot=HemisphereLightHelper.matrix; bytes=256;
+  } else if(kind==4) {
+    size=DirectionalLightHelper.size; active=DirectionalLightHelper.active; matrixSlot=DirectionalLightHelper.matrix; bytes=384;
+  } else if(kind!=1) { return 0-1; }
+  if(!light_helper_span(helper,size,8) || !light_helper_span(dst,bytes,8) ||
+     !light_helper_disjoint(helper,size,dst,bytes) || ux_u32(helper+active)!=1) { return 0-1; }
+  let matrix=ux_u32(helper+matrixSlot);
+  if(!light_helper_span(matrix,128,8) || !light_helper_disjoint(dst,bytes,matrix,128) ||
+     (kind!=1 && !lh_object_mx_translation(matrix))) { return 0-1; }
+  let child=dst;
+  if(kind==2) {
+    let width=ux_f64(helper+SpotLightHelper.width);
+    child=lh_object_mx_child(dst+128,helper+SpotLightHelper.lookX,width,width,ux_f64(helper+SpotLightHelper.length));
+  } else if(kind==3) {
+    child=lh_object_mx_child(dst+128,helper+HemisphereLightHelper.lookX,1.0,1.0,1.0);
+  } else if(kind==4) {
+    let length=ux_f64(helper+DirectionalLightHelper.lineScaleZ);
+    if(length-length!=0.0) { return 0-1; }
+    child=lh_object_mx_child(dst+128,helper+DirectionalLightHelper.lookX,1.0,1.0,1.0);
+    if(child>=0) { child=lh_object_mx_child(dst+256,helper+DirectionalLightHelper.lookX,1.0,1.0,length); }
+  }
+  if(child<0) { return child; }
+  let i=0;
+  while(i<16) {
+    let copied=ux_f64_put(dst+i*8,ux_f64(matrix+i*8));
+    i=i+1;
+  }
+  return dst;
+}
