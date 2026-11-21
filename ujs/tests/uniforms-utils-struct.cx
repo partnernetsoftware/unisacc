@@ -1,0 +1,54 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int uniforms_utils_compile(const char *dir) {
+    char header[320],driver[320],wasm[320];
+    tx_snprintf(header,sizeof header,"%s/header.ujs",dir);
+    tx_snprintf(driver,sizeof driver,"%s/driver.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="export uxe_uniforms_utils(op:i64,a:i64,b:i64,c:i64,d:i64) i64 version 1;\n";
+    const char source[]=
+        "if(op==0){return ux_span(0,8192);}\n"
+        "if(op==1){return UniformsUtils_clone(a,b,c);}\n"
+        "if(op==2){return UniformsUtils_merge(a,b,c,d);}\n"
+        "return 0-1;\n";
+    if(sy_write_file(header,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",header,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/uniforms-utils.ujs",driver,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    if(rc) printf("UNIFORMS_UTILS_BUILD rc=%d output=%.*s\n",rc,(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-uniforms-utils-",dir,sizeof dir)) return 2;
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/uniforms-utils-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    const char *labels[]={"r160 texture","r160 numeric classes","r160 shallow arrays","r160 render target",
+        "r160 merge replacement","r160 key order","clone projection","merge projection","texture sharing",
+        "numeric independence","shallow array identity","capacity refusal","invalid late map refusal",
+        "alias refusal","refusal atomicity","empty merge"};
+    enum { count=sizeof labels/sizeof labels[0] };
+    double values[count]={0};
+    int failed=n<0 || n>=sizeof url || uniforms_utils_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(values[i]!=1.0) {
+            printf("UNIFORMS_UTILS case=%s actual=%.17g gold=1\n",labels[i],values[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT UniformsUtils clone and merge cases=%d failed=%d\n",count,failed);
+    return failed;
+}
