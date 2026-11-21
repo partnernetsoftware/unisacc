@@ -1,0 +1,79 @@
+struct ComposerNativeBinding {
+  id:u32;
+  shader:u32;
+}
+
+native function native_composer_shader(work:i64,bytes:i64,plan:i64,steps:i64,stepBytes:i64) i64 {
+  return work>=0 && bytes>0 && work<=6291456-bytes &&
+    !composer_alias(work,bytes,plan,ComposerPlan.size) &&
+    !composer_alias(work,bytes,steps,stepBytes);
+}
+
+native function native_composer_find(bindings:i64,count:i64,id:i64) i64 {
+  let first=0;
+  let last=count;
+  while(first<last) {
+    let middle=first+(last-first)/2;
+    let row=bindings+middle*ComposerNativeBinding.size;
+    let key=ux_u32(row+ComposerNativeBinding.id);
+    if(key==id) { return ux_u32(row+ComposerNativeBinding.shader); }
+    if(key<id) { first=middle+1; } else { last=middle; }
+  }
+  return 0-1;
+}
+
+// Bindings are sorted by increasing pass ID. Only enabled sampled passes
+// with needsSwap are supported. A submission error leaves the composer pair
+// unchanged; completed GPU writes remain in their destinations.
+native function EffectComposerGpu_runNative(composer:i64,plan:i64,steps:i64,capacity:i64,bindings:i64,bindingCount:i64,generation:i64) i64 {
+  if(!composer_live(composer) || ux_u32(composer+EffectComposer.epoch)>=4294967295 ||
+     generation<1 || generation>4294967295 || capacity<0 || capacity>1024 ||
+     bindingCount<0 || bindingCount>1024) { return 0-1; }
+  let stepBytes=capacity*ComposerStep.size;
+  let bindingBytes=bindingCount*ComposerNativeBinding.size;
+  if(!composer_span(plan,ComposerPlan.size) || !composer_span(steps,stepBytes) ||
+     !composer_span(bindings,bindingBytes) ||
+     composer_alias(bindings,bindingBytes,composer,EffectComposer.size) ||
+     composer_alias(bindings,bindingBytes,plan,ComposerPlan.size) ||
+     composer_alias(bindings,bindingBytes,steps,stepBytes)) { return 0-1; }
+  let i=0;
+  let previous=0;
+  while(i<bindingCount) {
+    let row=bindings+i*ComposerNativeBinding.size;
+    let id=ux_u32(row+ComposerNativeBinding.id);
+    let shader=ux_u32(row+ComposerNativeBinding.shader);
+    if(id<=previous || shader%4!=0 ||
+       !native_composer_shader(shader,GpuShaderSource.size,plan,steps,stepBytes)) { return 0-1; }
+    let vs=ux_u32(shader+GpuShaderSource.vertex);
+    let fs=ux_u32(shader+GpuShaderSource.fragment);
+    let vn=ux_u32(shader+GpuShaderSource.vertexBytes);
+    let fn=ux_u32(shader+GpuShaderSource.fragmentBytes);
+    if(vn>4096 || fn>4096 ||
+       !native_composer_shader(vs,vn,plan,steps,stepBytes) ||
+       !native_composer_shader(fs,fn,plan,steps,stepBytes)) { return 0-1; }
+    previous=id;
+    i=i+1;
+  }
+  let planned=EffectComposer_plan(composer,plan,steps,capacity);
+  if(planned<=0) { return planned; }
+  i=0;
+  while(i<planned) {
+    let step=steps+i*ComposerStep.size;
+    let id=ux_u32(step+ComposerStep.id);
+    let read=ux_u32(step+ComposerStep.read);
+    let write=ux_u32(step+ComposerStep.write);
+    if(ux_u32(step+ComposerStep.flags)!=3 || read>1024 || write>1024 ||
+       native_composer_find(bindings,bindingCount,id)<0) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<planned) {
+    let step=steps+i*ComposerStep.size;
+    let shader=native_composer_find(bindings,bindingCount,ux_u32(step+ComposerStep.id));
+    let status=NativeTargetCopy_step(step,generation,shader);
+    if(status!=0) { return status; }
+    i=i+1;
+  }
+  if(EffectComposer_commit(composer,plan)<0) { return 0-1; }
+  return planned;
+}
