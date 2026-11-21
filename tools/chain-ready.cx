@@ -188,9 +188,25 @@ static int j_derive_shard(const char *o, long n, int rc, const char *shard_gens,
 static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
     return j_derive_shard(o, n, rc, 0, ev, cap);
 }
+static int parse_ratchet_below(const char *o, long n, const char *tag) {
+    char l[240]; const char *p;
+    line_with(o, n, tag, l, sizeof l);
+    if (!l[0]) return 0;
+    p = strstr(l, "above baseline, ");
+    if (!p) return 0;
+    return atoi(p + 16);
+}
 static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
-    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) {
+        int raw_b = parse_ratchet_below(o, n, "cxraw: ok:");
+        int libc_b = parse_ratchet_below(o, n, "cxlibc: ok:");
+        if (raw_b > 5 || libc_b > 5)
+            cx_fmt(ev, (size_t)cap, "%s WARN ratchet-slack cxraw_below=%d cxlibc_below=%d (run: sh ./unisacc.com tests/cxraw.cx -- --write && sh ./unisacc.com tests/cxlibc.cx -- --write)", l, raw_b, libc_b);
+        else
+            cx_fmt(ev, (size_t)cap, "%s", l);
+        return 1;
+    }
     {   char d[160]; line_with(o, n, "\tFAIL\t", d, sizeof d);
         if (d[0]) cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %.120s", rc, l[0] ? l : "no RATCHETS line", d);
         else cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); }

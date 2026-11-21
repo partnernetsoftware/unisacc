@@ -535,6 +535,21 @@ static int supervise_cases(const char *plan) {
     sy_printf("CHECK_CHAIN_RUN_SUPERVISE\tfailed=%d\tevidence=%s\n",bad,base);
     return pin_rc ? pin_rc : bad ? 1 : 0;
 }
+static int pin_diagnostic(char *const args[], const char *expected) {
+    char *v[20] = {"sh", "-c", "exec \"$@\" 2>&1", "pin-diagnostic"};
+    int used = 4;
+    for (int i = 0; args[i]; i++) {
+        if (used == 19) return 0;
+        v[used++] = args[i];
+    }
+    v[used] = 0;
+    char *out = 0;
+    size_t n = 0, want = strlen(expected);
+    int rc = cx_runv_timeout(v, 20, &out, &n);
+    int match = rc == 2 && out && n == want && !memcmp(out, expected, want);
+    free(out);
+    return match;
+}
 static int pin_cases(const char *plan) {
     char p[4400], q[4400];
     int rc;
@@ -576,6 +591,13 @@ static int pin_cases(const char *plan) {
         free(first_image);
         ck(has(pin, first_row) && has(watch_pin, first_row) &&
            count(builds, "tools/chain-watch.cx\n") == 1, "first-pin-binds-both-native-images");
+        char watch_event[180], candidate_event[180];
+        if (cx_fmt(watch_event, sizeof watch_event, "TOOL_PIN\tsource=tools/chain-watch.cx\t%s", first_row) ||
+            cx_fmt(candidate_event, sizeof candidate_event, "TOOL_PIN\tsource=tools/candidate-chain.cx\t%s", first_row))
+            return 2;
+        file_of(p, "pin", "chain-run.tsv");
+        ck(count(p, "TOOL_PIN\t") == 2 && has(p, watch_event) && has(p, candidate_event),
+           "first-pin-receipts-name-tool-and-bind-image");
         put(dep, "changed source\n");
         rc = cx_runv_timeout(resume, 20, 0, 0);
         ck(rc == 7 && image_suffix(cand, "first source\n") &&
@@ -601,15 +623,24 @@ static int pin_cases(const char *plan) {
         ck(rc == 2 && has(p, "reason=pinned-tool-missing-record") &&
            count(builds, "tools/candidate-chain.cx\n") == 1, "image-without-pin-refused-before-build");
         if (cx_write(pin, pinned, pinned_n)) return 2;
+        size_t saved_watch_n = 0;
+        char *saved_watch = cx_read(watch_pin, &saved_watch_n);
+        if (!saved_watch) return 2;
+        put(watch_pin, "native_sha=truncated");
+        rc = cx_runv_timeout(start, 20, 0, 0);
+        ck(rc == 2 && has(p, "BLOCKER\tphase=prepare-watch\treason=pinned-tool-invalid-record") &&
+           count(builds, "tools/chain-watch.cx\n") == 1, "bad-watch-pin-names-watch-before-recompile");
+        if (cx_write(watch_pin, saved_watch, saved_watch_n)) return 2;
+        free(saved_watch);
 
         size_t pre_n = 0, post_n = 0, current_n = 0;
         char *before_refuse = cx_read(budget, &pre_n);
         char *no_reason[] = {runner, "--rev", rev, "--out", dir, "--repin", "candidate-chain", 0};
-        int missing_reason = cx_runv_timeout(no_reason, 20, 0, 0);
+        int bad_options = pin_diagnostic(no_reason, "chain-run: repin options\n");
         repair[8] = "";
         int empty_reason = cx_runv_timeout(repair, 20, 0, 0);
         repair[8] = "   ";
-        int white_reason = cx_runv_timeout(repair, 20, 0, 0);
+        int bad_reason = pin_diagnostic(repair, "chain-run: repin reason\n");
         repair[8] = "fixture dependency update";
         join(heartbeat, dir, "heartbeat.tsv");
         if (cx_fmt(live, sizeof live, "%ld\tsnap\t%d\t%ld\tstart\n", sy_wall_s(), sy_pid(), sy_getpgid(0))) return 2;
@@ -618,13 +649,13 @@ static int pin_cases(const char *plan) {
         if (sy_unlink(heartbeat)) return 2;
         ck(rc == 2 && has(p, "phase=repin\treason=live-owner"), "live-heartbeat-refuses-repin");
         char *after_refuse = cx_read(budget, &post_n), *current_pin = cx_read(pin, &current_n);
-        ck(missing_reason == 2 && empty_reason == 2 && white_reason == 2 &&
+        ck(bad_options && empty_reason == 2 && bad_reason &&
            before_refuse && after_refuse && pre_n == post_n && !memcmp(before_refuse, after_refuse, pre_n) &&
            current_pin && current_n == pinned_n && !memcmp(current_pin, pinned, pinned_n) &&
            count(p, "TOOL_REPIN\t") == 0, "absent-empty-and-blank-repin-reason-refused");
         free(before_refuse); free(after_refuse); free(current_pin); free(pinned);
         repair[2] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        ck(cx_runv_timeout(repair, 20, 0, 0) == 2, "repin-refuses-other-revision");
+        ck(pin_diagnostic(repair, "chain-run: repin session identity\n"), "repin-refuses-other-revision");
         repair[2] = rev;
         repair[6] = "chain-step";
         ck(cx_runv_timeout(repair, 20, 0, 0) == 2, "repin-refuses-unmanaged-tool");
@@ -638,7 +669,29 @@ static int pin_cases(const char *plan) {
         repair[4] = unprepared;
         rc = cx_runv_timeout(repair, 20, 0, 0);
         join(q, unprepared, "chain-run.tsv");
-        ck(rc == 2 && has(q, "reason=no-previous-pin-or-image"), "repin-needs-prior-image-or-pin");
+        ck(rc == 2 && has(q, "BLOCKER\tphase=repin\treason=no-previous-pin-or-image"),
+           "repin-needs-prior-image-or-pin");
+        char long_reason[242];
+        memset(long_reason, 'a', 241);
+        long_reason[241] = 0;
+        repair[8] = long_reason;
+        ck(pin_diagnostic(repair, "chain-run: repin reason\n"), "repin-rejects-reason-with-241-bytes");
+        long_reason[240] = 0;
+        ck(cx_runv_timeout(repair, 20, 0, 0) == 2 &&
+           count(q, "reason=no-previous-pin-or-image") == 2, "repin-accepts-reason-with-240-bytes");
+        repair[8] = "fixture dependency update";
+        char lock_path[4400];
+        join(lock_path, unprepared, "chain-supervise.lock");
+        int hold = sy_open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (hold < 0 || sy_flock(hold, 2 | 4)) return 2;
+        ck(pin_diagnostic(repair, "chain-run: supervisor already owns output\n") &&
+           count(q, "reason=no-previous-pin-or-image") == 2, "repin-respects-supervisor-lock");
+        sy_close(hold);
+        char missing[4400];
+        join(missing, base, "missing-repin-output");
+        repair[4] = missing;
+        ck(pin_diagnostic(repair, "chain-run: repin output missing\n") &&
+           sy_exists(missing) == 0, "repin-missing-output-does-not-create-session");
         char external[4400], external_pin[4400];
         join(external, base, "external-pin");
         join(external_pin, external, "chain-run-candidate.pin");
@@ -649,16 +702,29 @@ static int pin_cases(const char *plan) {
         ck(rc == 7 && sy_exists(external_pin) == 1 &&
            count(builds, "tools/candidate-chain.cx\n") == 1,
            "first-external-image-is-pinned-without-compilation");
+        size_t external_n = 0;
+        char *external_bytes = cx_read(self, &external_n);
+        char external_sha[65], external_event[180];
+        if (!external_bytes || sy_sha256_hex(external_bytes, external_n, external_sha) ||
+            cx_fmt(external_event, sizeof external_event,
+                   "TOOL_PIN\tsource=external\tnative_sha=%s\n", external_sha)) return 2;
+        free(external_bytes);
+        join(q, external, "chain-run.tsv");
+        ck(count(q, external_event) == 2 && count(q, "TOOL_PIN\t") == 2,
+           "external-pin-receipts-bind-both-images");
         repair[4] = external;
         rc = cx_runv_timeout(repair, 20, 0, 0);
         join(q, external, "chain-run.tsv");
-        ck(rc == 2 && has(q, "reason=external-tool-session"), "repin-refuses-external-image-session");
+        ck(rc == 2 && has(q, "BLOCKER\tphase=repin\treason=external-tool-session"),
+           "repin-refuses-external-image-session");
         repair[4] = dir;
         size_t cn = 0;
         char *cb = cx_read(cand, &cn), *changed = cb ? malloc(cn + 1) : 0;
         if (!changed || mm_copy(changed, (long)cn + 1, cb, (long)cn)) return 2;
         changed[cn] = '\n';
-        if (cx_write(cand, changed, cn + 1) || sy_chmod(cand, 0755)) return 2;
+        char observed_sha[65];
+        if (sy_sha256_hex(changed, cn + 1, observed_sha) ||
+            cx_write(cand, changed, cn + 1) || sy_chmod(cand, 0755)) return 2;
         rc = cx_runv_timeout(start, 20, 0, 0);
         file_of(p, "pin", "chain-run.tsv");
         ck(rc == 2 && has(p, "BLOCKER\tphase=prepare-candidate\treason=pinned-tool-changed"),
@@ -670,6 +736,22 @@ static int pin_cases(const char *plan) {
         ck(rc == 0 && before && after && bn == an && !memcmp(before, after, bn) &&
            image_suffix(cand, "changed source\n") && has(p, "TOOL_REPIN\t") && has(p, "reason=fixture dependency update"),
            "explicit-repin-logs-reason-and-preserves-budget");
+        size_t fresh_n = 0;
+        char *fresh = cx_read(cand, &fresh_n);
+        char fresh_sha[65], prepared[360], landed[260], landed_pin[80];
+        if (!fresh || sy_sha256_hex(fresh, fresh_n, fresh_sha) ||
+            cx_fmt(prepared, sizeof prepared,
+                   "tool=candidate-chain\tprior_sha=%s\tobserved_sha=%s\tnew_sha=%s\treason=fixture dependency update\n",
+                   first_sha, observed_sha, fresh_sha) ||
+            cx_fmt(landed, sizeof landed, "tool=candidate-chain\tprior_sha=%s\tnew_sha=%s\treason=fixture dependency update\n",
+                   first_sha, fresh_sha) ||
+            cx_fmt(landed_pin, sizeof landed_pin, "native_sha=%s\n", fresh_sha)) return 2;
+        free(fresh);
+        ck(count(p, "TOOL_REPIN\t") == 2 &&
+           before_in(p, "TOOL_REPIN\tstatus=prepared\t", prepared) &&
+           before_in(p, prepared, "TOOL_REPIN\tstatus=landed\t") &&
+           before_in(p, "TOOL_REPIN\tstatus=landed\t", landed) &&
+           has(pin, landed_pin), "repin-receipts-bind-intent-and-published-image");
         rc = cx_runv_timeout(resume, 20, 0, 0);
         ck(rc == 7 && count(builds, "tools/candidate-chain.cx\n") == 2 &&
            count(builds, "tools/chain-watch.cx\n") == 1, "resume-after-explicit-repin");
