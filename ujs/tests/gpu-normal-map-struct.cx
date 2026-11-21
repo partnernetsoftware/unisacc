@@ -1,0 +1,48 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int gpu_normal_map_compile(const char *dir) {
+    char layout[320],wasm[320];
+    tx_snprintf(layout,sizeof layout,"%s/probe-layout.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_normal_map(op:i64,mode:i64,rgba:i64,side:i64) i64 version 1;\n";
+    if(sy_write_file(layout,abi,sizeof abi-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",layout,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-normal-map-generated.ujs",
+        "ujs/practice/uxe/base/gpu-normal-map.ujs","ujs/practice/uxe/test/gpu-normal-map-probe.ujs","-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    if(rc) printf("NORMAL_MAP_BUILD rc=%d output=%.*s\n",rc,(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-normal-map-",dir,sizeof dir)) return 2;
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-normal-map-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    // Decoded texel is (153,103,203)/255. The matrices and scale produce
+    // (76.5,103,203), (-154.5,76.5,203) and (154.5,76.5,203) before normalization.
+    const double gold[]={168,182,235,255,54,164,225,255,201,164,225,255,
+        168,182,235,255,54,164,225,255,201,164,225,255,1,0,1,-1,-2,-3,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double values[count]={0};
+    int failed=n<0 || n>=sizeof url || gpu_normal_map_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
+    for(int i=0;!failed && i<count;i++) if(values[i]!=gold[i]) {
+        printf("NORMAL_MAP case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_PIXEL ObjectSpaceNormalMap and TangentSpaceNormalMap cases=%d failed=%d\n",count,failed);
+    return failed;
+}
