@@ -1,0 +1,276 @@
+struct LightSH {
+  c0: Color;
+  c1: Color;
+  c2: Color;
+  c3: Color;
+  c4: Color;
+  c5: Color;
+  c6: Color;
+  c7: Color;
+  c8: Color;
+}
+
+struct LightShadow {
+  fov: f64;
+  near: f64;
+  far: f64;
+  bias: f64;
+  normalBias: f64;
+  radius: f64;
+  mapWidth: f64;
+  mapHeight: f64;
+  focus: f64;
+}
+
+struct Light {
+  kind: u32;
+  arena: u32;
+  object: u32;
+  target: u32;
+  shadowMap: u32;
+  shadowMapPass: u32;
+  color: Color;
+  groundColor: Color;
+  intensity: f64;
+  distance: f64;
+  angle: f64;
+  penumbra: f64;
+  decay: f64;
+  width: f64;
+  height: f64;
+  shadow: LightShadow;
+  sh: LightSH;
+}
+
+// Records are caller-owned, initially zeroed, and separate from the arena.
+// A live record owns its object and, for directional and spot lights, its target.
+native function light_block(light:i64,bytes:i64) i64 {
+  return light>=0 && light<=6291456-bytes && light%8==0;
+}
+
+native function light_overlap(a:i64,a_size:i64,b:i64,b_size:i64) i64 {
+  return a<b+b_size && b<a+a_size;
+}
+
+native function light_arena_size(arena:i64) i64 {
+  if(light_block(arena,8)==0) { return 0; }
+  let count=ux_u32(arena);
+  if(count<1 || count>(6291448-arena)/424) { return 0; }
+  return 8+count*424;
+}
+
+native function Light_object(light:i64) i64 {
+  if(light_block(light,Light.size)==0) { return 0-1; }
+  let kind=ux_u32(light+Light.kind);
+  let arena=ux_u32(light+Light.arena);
+  let size=light_arena_size(arena);
+  if(kind<1 || kind>LightKind.size || size==0 || light_overlap(light,Light.size,arena,size)!=0) { return 0-1; }
+  let handle=ux_u32(light+Light.object);
+  if(Object3D_address(arena,handle)<0) { return 0-1; }
+  if(light_profile(kind,1)!=0 && Object3D_address(arena,ux_u32(light+Light.target))<0) { return 0-1; }
+  return handle;
+}
+
+native function light_ready(light:i64,arena:i64) i64 {
+  let size=light_arena_size(arena);
+  return light_block(light,Light.size)!=0 && size>0 && light_overlap(light,Light.size,arena,size)==0 &&
+    ux_u32(light+Light.kind)==0;
+}
+
+native function light_init_fields(light:i64,arena:i64,kind:i64,object:i64,target:i64,color:i64,intensity:f64) i64 {
+  let at=0;
+  while(at<Light.size) {
+    let clear=ux_u32_put(light+at,0);
+    at=at+4;
+  }
+  let k=ux_u32_put(light+Light.kind,kind);
+  let a=ux_u32_put(light+Light.arena,arena);
+  let o=ux_u32_put(light+Light.object,object);
+  let t=ux_u32_put(light+Light.target,target);
+  let hex=color;
+  if(kind==LightKind.LightProbe+1) { hex=16777215; }
+  let rgb=Color_setHex(light+Light.color,hex,1);
+  let ground=Color_setHex(light+Light.groundColor,16777215,1);
+  let strength=ux_f64_put(light+Light.intensity,intensity);
+  if(kind==LightKind.PointLight+1 || kind==LightKind.SpotLight+1) {
+    let decay=ux_f64_put(light+Light.decay,2.0);
+  }
+  if(kind==LightKind.SpotLight+1) {
+    let angle=ux_f64_put(light+Light.angle,1.0471975511965976);
+  }
+  if(kind==LightKind.RectAreaLight+1) {
+    let width=ux_f64_put(light+Light.width,10.0);
+    let height=ux_f64_put(light+Light.height,10.0);
+  }
+  let fov=light_profile(kind,2);
+  if(fov!=0) {
+    let cam=ux_f64_put(light+Light.shadow.fov,0.0+fov);
+    let near=ux_f64_put(light+Light.shadow.near,0.5);
+    let far=ux_f64_put(light+Light.shadow.far,500.0);
+    let radius=ux_f64_put(light+Light.shadow.radius,1.0);
+    let sw=ux_f64_put(light+Light.shadow.mapWidth,512.0);
+    let sh=ux_f64_put(light+Light.shadow.mapHeight,512.0);
+    let focus=ux_f64_put(light+Light.shadow.focus,1.0);
+  }
+  return light;
+}
+
+native function light_new(light:i64,arena:i64,kind:i64,color:i64,intensity:f64) i64 {
+  if(light_ready(light,arena)==0 || kind<1 || kind>LightKind.size || color<0 || color>16777215) { return 0-1; }
+  let has_target=light_profile(kind,1);
+  if(object_clone_room(arena,1+has_target)==0) { return 0-2; }
+  let object=Object3D_create(arena);
+  let target=0;
+  if(has_target!=0) { target=Object3D_create(arena); }
+  if(light_profile(kind,0)!=0) {
+    let at=Object3D_address(arena,object);
+    let up=ux_f64_put(ux_u32(at+Object3D.position)+8,1.0);
+    let updated=Object3D_updateMatrix(arena,object);
+  }
+  return light_init_fields(light,arena,kind,object,target,color,intensity);
+}
+
+native function light_pair_ready(dst:i64,arena:i64,src:i64) i64 {
+  let src_arena=ux_u32(src+Light.arena);
+  let dst_size=light_arena_size(arena);
+  let src_size=light_arena_size(src_arena);
+  return (dst==src || light_overlap(dst,Light.size,src,Light.size)==0) &&
+    light_overlap(dst,Light.size,src_arena,src_size)==0 &&
+    light_overlap(src,Light.size,arena,dst_size)==0 &&
+    (arena==src_arena || light_overlap(arena,dst_size,src_arena,src_size)==0);
+}
+
+native function light_copy_fields(dst:i64,src:i64) i64 {
+  let n=Light.size-Light.color;
+  let copied=uxe_copy_record(dst+Light.color,src+Light.color,n);
+  // r160 LightShadow.copy leaves normalBias at the constructor default.
+  let normal=ux_f64_put(dst+Light.shadow.normalBias,0.0);
+  return dst;
+}
+
+native function Light_copy(dst:i64,src:i64,recursive:i64) i64 {
+  let object=Light_object(src);
+  let out=Light_object(dst);
+  if(object<0 || out<0) { return 0-1; }
+  if(dst==src) { return dst; }
+  let arena=ux_u32(dst+Light.arena);
+  let src_arena=ux_u32(src+Light.arena);
+  let kind=ux_u32(src+Light.kind);
+  if(ux_u32(dst+Light.kind)!=kind || light_pair_ready(dst,arena,src)==0 ||
+      ux_u32(dst+Light.shadowMap)!=0 || ux_u32(dst+Light.shadowMapPass)!=0) { return 0-1; }
+  let deep=recursive;
+  if(kind==LightKind.DirectionalLight+1) { deep=1; }
+  let old_target=ux_u32(dst+Light.target);
+  let src_target=ux_u32(src+Light.target);
+  let forbidden=0;
+  if(arena==src_arena && deep!=0) { forbidden=out; }
+  let nodes=object_clone_count(src_arena,object,forbidden,deep);
+  if(nodes<0) { return nodes; }
+  let targets=0;
+  if(src_target!=0) {
+    let avoid=0;
+    if(arena==src_arena) { avoid=out; }
+    targets=object_clone_count(src_arena,src_target,avoid,1);
+    if(targets<0) { return targets; }
+  }
+  if(object_clone_room(arena,nodes-1+targets)==0) { return 0-2; }
+  let copy=Object3D_copy(arena,out,src_arena,object,deep);
+  if(copy<0) { return copy; }
+  if(targets!=0) {
+    let target=Object3D_clone(arena,src_arena,src_target,1);
+    let assigned=ux_u32_put(dst+Light.target,target);
+    let released=Object3D_destroy(arena,old_target);
+  }
+  return light_copy_fields(dst,src);
+}
+
+native function Light_clone(dst:i64,arena:i64,src:i64,recursive:i64) i64 {
+  let object=Light_object(src);
+  if(object<0 || light_ready(dst,arena)==0 || light_pair_ready(dst,arena,src)==0) { return 0-1; }
+  let src_arena=ux_u32(src+Light.arena);
+  let kind=ux_u32(src+Light.kind);
+  let deep=recursive;
+  if(kind==LightKind.DirectionalLight+1) { deep=1; }
+  let nodes=object_clone_count(src_arena,object,0,deep);
+  if(nodes<0) { return nodes; }
+  let src_target=ux_u32(src+Light.target);
+  let targets=0;
+  if(src_target!=0) {
+    targets=object_clone_count(src_arena,src_target,0,1);
+    if(targets<0) { return targets; }
+  }
+  if(object_clone_room(arena,nodes+targets)==0) { return 0-2; }
+  let root=Object3D_clone(arena,src_arena,object,deep);
+  if(root<0) { return root; }
+  let target=0;
+  if(targets!=0) { target=Object3D_clone(arena,src_arena,src_target,1); }
+  let state=light_init_fields(dst,arena,kind,root,target,0,0.0);
+  return light_copy_fields(dst,src);
+}
+
+native function light_power_scale(light:i64) f64 {
+  let kind=ux_u32(light+Light.kind);
+  if(kind==LightKind.PointLight+1) { return 12.566370614359172; }
+  if(kind==LightKind.SpotLight+1) { return 3.141592653589793; }
+  if(kind==LightKind.RectAreaLight+1) {
+    return ux_f64(light+Light.width)*ux_f64(light+Light.height)*3.141592653589793;
+  }
+  return 0.0;
+}
+
+native function Light_getPower(light:i64) f64 {
+  if(Light_object(light)<0) { return 0.0; }
+  return ux_f64(light+Light.intensity)*light_power_scale(light);
+}
+
+native function LightProbe_setCoefficient(light:i64,index:i64,r:f64,g:f64,b:f64) i64 {
+  if(Light_object(light)<0 || ux_u32(light+Light.kind)!=LightKind.LightProbe+1 || index<0 || index>=9) { return 0-1; }
+  return Color_setRGB(light+Light.sh+index*24,r,g,b);
+}
+
+native function Light_setShadowTargets(light:i64,map:i64,map_pass:i64) i64 {
+  if(Light_object(light)<0 || light_profile(ux_u32(light+Light.kind),2)==0 ||
+      map<0 || map>1024 || map_pass<0 || map_pass>1024 || (map!=0 && map==map_pass) ||
+      ux_u32(light+Light.shadowMap)!=0 || ux_u32(light+Light.shadowMapPass)!=0) { return 0-1; }
+  let a=ux_u32_put(light+Light.shadowMap,map);
+  let b=ux_u32_put(light+Light.shadowMapPass,map_pass);
+  return light;
+}
+
+// Append both renderer release commands or leave the packet and handles intact.
+native function Light_dispose(light:i64,packet:i64,capacity:i64) i64 {
+  if(Light_object(light)<0) { return 0-1; }
+  let map=ux_u32(light+Light.shadowMap);
+  let map_pass=ux_u32(light+Light.shadowMapPass);
+  let count=(map!=0)+(map_pass!=0);
+  if(count==0) { return light; }
+  let arena=ux_u32(light+Light.arena);
+  if(map>1024 || map_pass>1024 || gpu_packet_slot(packet,capacity,count*12)<0 ||
+      ux_u32(packet+GpuPacket.commands)>256-count || light_overlap(light,Light.size,packet,capacity)!=0 ||
+      light_overlap(arena,light_arena_size(arena),packet,capacity)!=0) { return 0-1; }
+  if(map!=0) { let gone=GpuTarget_dispose(packet,capacity,map); }
+  if(map_pass!=0) { let gone_pass=GpuTarget_dispose(packet,capacity,map_pass); }
+  let clear=ux_u32_put(light+Light.shadowMap,0);
+  let clear_pass=ux_u32_put(light+Light.shadowMapPass,0);
+  return light;
+}
+
+native function Light_setPower(light:i64,power:f64) i64 {
+  if(Light_object(light)<0) { return 0-1; }
+  let kind=ux_u32(light+Light.kind);
+  if(kind!=LightKind.PointLight+1 && kind!=LightKind.SpotLight+1 && kind!=LightKind.RectAreaLight+1) { return 0-1; }
+  let strength=ux_f64_put(light+Light.intensity,power/light_power_scale(light));
+  return light;
+}
+
+// Release the owned Object3D slots only after renderer resources are disposed.
+native function Light_release(light:i64) i64 {
+  let object=Light_object(light);
+  if(object<0 || ux_u32(light+Light.shadowMap)!=0 || ux_u32(light+Light.shadowMapPass)!=0) { return 0-1; }
+  let arena=ux_u32(light+Light.arena);
+  let target=ux_u32(light+Light.target);
+  if(target!=0) { let gone=Object3D_destroy(arena,target); }
+  let removed=Object3D_destroy(arena,object);
+  let clear=ux_u32_put(light+Light.kind,0);
+  return light;
+}

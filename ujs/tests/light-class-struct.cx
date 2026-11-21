@@ -1,0 +1,141 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int light_sample(const char *source,const char *wasm,char *program,int used,int capacity,
+        const char *statement,double *value) {
+    int size=tx_snprintf(program+used,capacity-used,"%s\n",statement);
+    if(size<0 || size>=capacity-used) return 1;
+    if(sy_write_file(source,program,used+size,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,"--run",0};
+    unsigned char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,6,(char **)&out,&bytes);
+    const char mark[]="\"value\":";
+    long at=!rc && out ? tx_find((const char *)out,bytes,mark,sizeof mark-1) : -1;
+    if(at<0) printf("G_LIGHT_SAMPLE compiler_rc=%d output=%.*s\n",rc,(int)bytes,out);
+    else {
+        char *next=0;
+        char *first=(char *)out+at+sizeof mark-1;
+        *value=tx_strtod(first,&next);
+        if(next==first || *next!=',') at=-1;
+    }
+    mm_free(out);
+    return at<0;
+}
+
+static int light_run(const char *const *modules,const char *setup,const char *const *cases,
+        const double *gold,int count,int mutate,const char *negative) {
+    char program[100000];
+    int used=0;
+    for(int i=0;modules[i];i++) {
+        char path[256];
+        unsigned char *data=0;
+        int64_t bytes=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        int rc=sy_read_file(path,&data,&bytes,sizeof program);
+        if(rc) { printf("G_LIGHT_SOURCE path=%s rc=%d\n",path,rc); return 2; }
+        const char *text=(const char *)data;
+        // Object3D lifecycle only needs Scene; the complete layout bundle
+        // would exceed the installed ujs compiler's 24-layout limit.
+        if(tx_eqz(modules[i],"object-layouts")) {
+            const char scene[]="struct Scene {\n";
+            long start=tx_find(text,bytes,scene,sizeof scene-1);
+            long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+            if(end<0) { mm_free(data); return 2; }
+            text+=start;
+            bytes=end+2;
+        }
+        int n=tx_snprintf(program+used,sizeof program-used,"%.*s\n",(int)bytes,text);
+        mm_free(data);
+        if(n<0 || n>=sizeof program-used) return 2;
+        used+=n;
+    }
+    int n=tx_snprintf(program+used,sizeof program-used,"%s\n",setup);
+    if(n<0 || n>=sizeof program-used) return 2;
+    used+=n;
+    char dir[256],source[300],wasm[300];
+    if(sy_mkdtemp("/tmp","ujs-light-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[20]={0};
+    int failed=g_math_reference("light-class",refs,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        double actual=0;
+        const char *statement=mutate && i==3?negative:cases[i];
+        if(light_sample(source,wasm,program,used,sizeof program,statement,&actual) ||
+           !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("G_LIGHT case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *out=0;
+    size_t bytes=0;
+    if(cx_runv_timeout(clean,5,&out,&bytes)) failed=1;
+    mm_free(out);
+    printf("G_STRUCT Light classes cases=%d failed=%d\n",count,failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","vector-scalar","color","matrix4","object3d-layout","object-layouts",
+        "object3d","object3d-lifecycle","record-copy","gpu-packet","gpu-target",
+        "light-classes-generated","light-class","light-classes-constructors","light-class-json",0};
+    const char *setup="let arena=Object3D_initArena(0,32);let dst=Object3D_initArena(16000,8);"
+        "let base=Light_new(21000,arena,16777215,1.0);let ambient=AmbientLight_new(21512,arena,16711680,1.5);"
+        "let hemi=HemisphereLight_new(22024,arena,65280,2.0);"
+        "let ground=Color_setHex(hemi+Light.groundColor,255,1);"
+        "let directional=DirectionalLight_new(22536,arena,16777215,3.0);"
+        "let point=PointLight_new(23048,arena,16777215,2.0);"
+        "let spot=SpotLight_new(23560,arena,16777215,4.0);"
+        "let rect=RectAreaLight_new(24072,arena,16777215,5.0);"
+        "let probe=LightProbe_new(24584,arena,0,6.0);"
+        "let coeff=LightProbe_setCoefficient(probe,8,1.0,2.0,3.0);"
+        "let target=ux_u32(spot+Light.target);let target_addr=Object3D_address(arena,target);"
+        "let target_y=ux_f64_put(ux_u32(target_addr+Object3D.position)+8,7.0);"
+        "let bias=ux_f64_put(spot+Light.shadow.bias,0.125);"
+        "let normal=ux_f64_put(spot+Light.shadow.normalBias,0.25);"
+        "let dist=ux_f64_put(spot+Light.distance,42.0);";
+    const char *cases[]={
+        "let json=Light_toJSON(27000,ambient);return ux_u32(json+LightJson.color)+ux_f64(base+Light.intensity);",
+        "let json=Light_toJSON(27000,hemi);let h=Object3D_address(arena,Light_object(hemi));"
+        "return ux_u32(json+LightJson.groundColor)+ux_f64(ux_u32(h+Object3D.localMatrix)+104);",
+        "let copy=Light_clone(25096,dst,spot,1);let copy_target=ux_u32(copy+Light.target);"
+        "let addr=Object3D_address(dst,copy_target);let previous=ux_f64(ux_u32(addr+Object3D.position)+8);"
+        "let changed=ux_f64_put(ux_u32(addr+Object3D.position)+8,9.0);"
+        "return previous*10.0+ux_f64(ux_u32(target_addr+Object3D.position)+8);",
+        "let fresh=SpotLight_new(25096,dst,0,1.0);let copy=Light_copy(fresh,spot,1);let json=Light_toJSON(27000,copy);"
+        "return ux_f64(json+LightJson.distance)+ux_f64(json+LightJson.shadow+LightShadowJson.bias)"
+        "+ux_f64(json+LightJson.shadow+LightShadowJson.normalBias);",
+        "let json=Light_toJSON(27000,directional);let h=Object3D_address(arena,Light_object(directional));"
+        "return ux_u8(json+LightJson.fields+LightJsonField.shadow)+ux_f64(ux_u32(h+Object3D.position)+8);",
+        "let json=Light_toJSON(27000,point);return Light_getPower(point)+ux_f64(json+LightJson.decay)"
+        "+ux_f64(json+LightJson.shadow+LightShadowJson.cameraFov);",
+        "let power=Light_setPower(rect,628.3185307179587);let json=Light_toJSON(27000,rect);"
+        "return ux_f64(json+LightJson.width)+ux_f64(json+LightJson.height)+ux_f64(json+LightJson.intensity);",
+        "let copy=Light_clone(25096,dst,probe,1);let change=LightProbe_setCoefficient(probe,8,9.0,9.0,9.0);"
+        "let json=Light_toJSON(27000,copy);return ux_u32(json+LightJson.kind)*10+ux_f64(json+LightJson.sh.c8.b);",
+        "let map=Light_setShadowTargets(spot,7,9);let pkt=GpuPacket_begin(30000,48,1);"
+        "let refuse=Light_dispose(spot,pkt,36);let gone=Light_dispose(spot,pkt,48);let again=Light_dispose(spot,pkt,48);"
+        "let node=Light_object(spot);let release=Light_release(spot);"
+        "return ux_u32(pkt+32)*10+ux_u32(pkt+44)+refuse+(Object3D_address(arena,node)<0);",
+        "let short=Object3D_initArena(31000,1);let failed=SpotLight_new(25500,short,0,1.0);"
+        "let missing=SpotLight_new(25608,short,0,1.0);let recovered=Object3D_create(short);"
+        "return failed*10+missing+(recovered>0);",
+        "let child=Object3D_create(arena);let attached=Object3D_add(arena,Light_object(directional),child);"
+        "let fresh=DirectionalLight_new(25096,dst,0,1.0);let copy=Light_copy(fresh,directional,0);"
+        "let addr=Object3D_address(dst,Light_object(copy));return ux_u32(addr+Object3D.firstChild)>0;"
+    };
+    const double gold[]={16711681,256,77,42.125,2,117.13274122871835,22,13,79,-11,1};
+    return light_run(modules,setup,cases,gold,sizeof gold/sizeof gold[0],mutate,
+        "let fresh=SpotLight_new(25096,dst,0,1.0);let copy=Light_copy(fresh,spot,1);"
+        "let corrupt=ux_f64_put(copy+Light.shadow.bias,0.0);let json=Light_toJSON(27000,copy);"
+        "return ux_f64(json+LightJson.distance)+ux_f64(json+LightJson.shadow+LightShadowJson.bias)"
+        "+ux_f64(json+LightJson.shadow+LightShadowJson.normalBias);");
+}
