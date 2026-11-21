@@ -171,6 +171,25 @@ int main(int argc, char **argv) {
     rc = dv("git", "commit", "-m", "TD", "--whole", "dvg-t.txt", "--derive", 0);
     ck(rc == 124 && has("COMMIT_STAGE_FAIL\tphase=derive\trc=124\tderived=incomplete") &&
        !has("COMMIT_STAGE\tphase=commit\t"), "derive-timeout-incomplete-no-commit-next-command");
+    /* (t2) 超时但 COMMIT_LANDED 已落 HEAD:devsvc 自动跑 gitsync-run 对齐共享索引并恢复 GIT_COMMIT rc=0 回执 */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        const char *landed_fake =
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use sys.proc\n"
+            "int main(void) {\n"
+            "    char *o = 0; size_t n = 0;\n"
+            "    char *v[] = {\"sh\", \"-c\", \"B=$(git rev-parse HEAD) && BL=$(git hash-object -w dvg-t.txt) && T=$({ git ls-tree HEAD; printf '100644 blob %s\\\\tdvg-t.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -p $B -m TL $T) && git update-ref HEAD $C $B && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $B\", 0};\n"
+            "    cx_runv_timeout(v, 10, &o, &n);\n"
+            "    if (o && n > 0) sy_write_all(1, o, (long)n);\n"
+            "    return 124;\n"
+            "}\n";
+        ck(wfile("tools/commit-own.cx", landed_fake) == 0, "landed-timeout-fixture-write");
+        rc = dv("git", "commit", "-m", "TL", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc == 0 && has("GIT_COMMIT_RECOVERED\tcommit=") && has("GIT_COMMIT\trc=0\tcommit=") &&
+           sh("git cat-file -e HEAD:dvg-t.txt && [ -z \"$(git status --porcelain -- dvg-t.txt)\" ]", fx) == 0,
+           "timeout-after-commit-landed-recovers-receipt-and-syncs-index");
+    }
     ck(!ovf && sh("git checkout -q -- tools/commit-own.cx", fx) == 0, "timeout-fixture-restore");
     }
     if (B) {
@@ -204,6 +223,66 @@ int main(int argc, char **argv) {
     ck(rc == 125 && has("REFUSE"), "refuse-git-C-stash");
     rc = dv("x", "--", "git", "push", "--force", 0, 0, 0);
     ck(rc == 125 && has("REFUSE"), "refuse-push-force");
+    rc = dv("x", "--", "git", "add", "dvg-a.txt", 0, 0, 0);
+    ck(rc == 125 && has("REFUSE x git add") && has("devsvc.cx -- git add"), "refuse-x-git-add");
+    rc = dv("x", "--", "git", "commit", "-m", "X", 0, 0);
+    ck(rc == 125 && has("REFUSE x git commit") && has("devsvc.cx -- git commit"), "refuse-x-git-commit");
+    rc = dv("x", "--", "git", "apply", "p.patch", 0, 0, 0);
+    ck(rc == 125 && has("REFUSE x git apply"), "refuse-x-git-apply");
+    rc = dv("x", "--", "git", "merge", "main", 0, 0, 0);
+    ck(rc == 125 && has("REFUSE x git merge") && has("devsvc.cx -- git merge"), "refuse-x-git-merge");
+    rc = dv("x", "--", "git", "push", "origin", "main", 0, 0);
+    ck(rc == 125 && has("REFUSE x git push") && has("devsvc.cx -- git push"), "refuse-x-git-push");
+
+    /* (d1b) 有界 git fetch 与扩充只读白名单(rev-parse/merge-base/rev-list/branch/archive/grep) */
+    rc = dv("git", "fetch", 0, 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_FETCH\trc=0\tremote=origin"), "git-fetch-origin-rc0");
+    rc = dv("git", "fetch", "origin", "main:main", 0, 0, 0, 0);
+    ck(rc == 2 && has("REFUSE git fetch"), "git-fetch-refuses-colon-refspec");
+    rc = dv("git", "rev-parse", "HEAD", 0, 0, 0, 0, 0);
+    ck(rc == 0 && strlen(out) >= 40, "git-ro-rev-parse");
+    rc = dv("git", "merge-base", "HEAD", "HEAD", 0, 0, 0, 0);
+    ck(rc == 0 && strlen(out) >= 40, "git-ro-merge-base");
+    rc = dv("git", "rev-list", "-n", "1", "HEAD", 0, 0, 0);
+    ck(rc == 0 && strlen(out) >= 40, "git-ro-rev-list");
+    rc = dv("git", "branch", "--show-current", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("main"), "git-ro-branch-show-current");
+    rc = dv("git", "branch", "-D", "main", 0, 0, 0, 0);
+    ck(rc == 2 && has("REFUSE git branch"), "git-branch-refuses-delete");
+    rc = dv("git", "branch", "new-br", 0, 0, 0, 0, 0);
+    ck(rc == 2 && has("REFUSE git branch"), "git-branch-refuses-create");
+    rc = dv("git", "grep", "-c", "main", "--", "tools/devsvc.cx", 0, 0);
+    ck(rc == 0 && strlen(out) > 0, "git-ro-grep");
+    rc = dv("git", "archive", "--format=tar", "HEAD", "tools/devsvc-repo.tsv", 0, 0, 0);
+    ck(rc == 0 && has("tools/devsvc-repo.tsv"), "git-ro-archive");
+
+    /* (d1c) 重作业准入窗口(chain-supervise.lock 按真实 PID 核):活链在途时重池只放行属主为该链的作业,其余具名拒绝 rc 75 并附预计放行时刻;轻量与 git 控制类照常;死 PID 锁不拦 */
+    if (!getenv("DVGIT_CORE_FROM")) {
+        char clk[256], cev[300], ltxt[256];
+        F(clk, sizeof clk, "%s/chain-supervise.lock", fx);
+        F(ltxt, sizeof ltxt, "pid=%d\tpgid=%d\towner=chain-v088\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
+          (int)sy_pid(), (int)sy_pid(), fx, sy_wall_s(), sy_wall_s() + 1800);
+        ck(wfile("chain-supervise.lock", ltxt) == 0, "chain-lock-live-write");
+        F(cev, sizeof cev, "DEVSVC_CHAIN_LOCK_FILE=%s", clk);
+        envv[1] = cev; envv[2] = 0;
+        rc = dv("x", "--par", "1", "--owner", "other-win", "--", "echo", "heavy-blocked");
+        ck(rc == 75 && has("DEVSVC_CHAIN_BUSY\tstatus=REFUSE\treason=active-release-chain\t") &&
+           has("\tchain_owner=chain-v088\tcaller_owner=other-win\trelease_at=") && has("\teta_s="),
+           "chain-busy-refuses-non-owner-heavy-rc75");
+        rc = dv("x", "--par", "1", "--owner", "chain-v088", "--", "echo", "heavy-owner-ok");
+        ck(rc == 0 && has("heavy-owner-ok"), "chain-busy-allows-chain-owner-heavy");
+        rc = dv("x", "--par", "1", "--light", "--owner", "other-win", "--", "echo", "light-other-ok");
+        ck(rc == 0 && has("light-other-ok"), "chain-busy-allows-light-non-owner");
+        rc = dv("git", "status", 0, 0, 0, 0, 0, 0);
+        ck(rc == 0 && has("GIT_STATUS\t"), "chain-busy-allows-git-control");
+        F(ltxt, sizeof ltxt, "pid=999999\tpgid=999999\towner=chain-v088\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
+          fx, sy_wall_s(), sy_wall_s() + 1800);
+        ck(wfile("chain-supervise.lock", ltxt) == 0, "chain-lock-dead-write");
+        rc = dv("x", "--par", "1", "--owner", "other-win", "--", "echo", "dead-chain-ok");
+        ck(rc == 0 && has("dead-chain-ok"), "chain-dead-pid-allows-non-owner-heavy");
+        envv[1] = 0;
+        (void)sh("rm -f chain-supervise.lock", fx);
+    }
 
     /* (d2) DCLI2:已启动的 git 动作保留真实 rc 与诊断,不贴 devsvc usage;只有参数解析错才贴 usage */
     ck(sh("printf 'ws \\n' > dvg-ws.txt && git add dvg-ws.txt", fx) == 0, "rc2-fixture");
@@ -440,6 +519,141 @@ int main(int argc, char **argv) {
     ck(rc == 0 && has("MERGE_AUTO\tbuild/tlib-packages.tsv\n") && has("GIT_MERGE\trc=0\tcommit=") && has("\tderive=tlx"), "tlib-conflict-auto-resolved-rc0");
     ck(sh("[ \"$(git show HEAD:build/tlib-packages.tsv)\" = \"$(printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa0\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.10\\tsc2\\tC')\" ]"
           " && [ -z \"$(git status --porcelain -uno)\" ] && git rev-parse -q --verify HEAD^2 >/dev/null", fx) == 0, "tlib-merge-each-pkg-max-version-ours-other-cols");
+    /* (g1) G1 合并收据:自动解决派生表冲突后的合并提交写 devsvc merge v1 reflog 收据 */
+    ck(sh("git push -q origin HEAD~1:main && git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
+       "g1-auto-resolved-merge-writes-v1-reflog");
+    /* (g2) G2 合并收据与续作:非派生冲突停在 MERGE_HEAD -> 人工解后 devsvc git merge --continue 与 devsvc git commit --merge-continue 均写收据,最后一次无参 devsvc git push 经 push-replay audited_merge 一次审计整条一父链全部 3 个合并提交 */
+    F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git checkout -q -b tlf-c1 && printf 'c1\\n' > tlf-m.txt && git add tlf-m.txt && git commit -q -m TLC1"
+                   " && git checkout -q \"$M\" && printf 'm1\\n' > tlf-m.txt && git add tlf-m.txt && git commit -q -m TLM1");
+    ck(!ovf && sh(c, fx) == 0, "g2-merge-continue-fixture-1");
+    rc = dv("git", "merge", "tlf-c1", 0, 0, 0, 0, 0);
+    ck(rc == 1 && has("MERGE_CONFLICT\ttlf-m.txt") && sh("test -e .git/MERGE_HEAD && printf 'resolved-1\\n' > tlf-m.txt && git add tlf-m.txt", fx) == 0,
+       "g2-non-derived-conflict-stops-with-merge-head");
+    rc = dv("git", "merge", "--continue", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && has("\tcontinued=1") &&
+       sh("! test -e .git/MERGE_HEAD && git rev-parse -q --verify HEAD^2 >/dev/null && [ \"$(git show HEAD:tlf-m.txt)\" = resolved-1 ] && "
+          "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
+       "g2-git-merge-continue-commits-and-writes-v1-reflog");
+    F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git checkout -q -b tlf-c2 && printf 'c2\\n' > tlf-m.txt && git commit -q -am TLC2"
+                   " && git checkout -q \"$M\" && printf 'm2\\n' > tlf-m.txt && git commit -q -am TLM2");
+    ck(!ovf && sh(c, fx) == 0, "g2-merge-continue-fixture-2");
+    rc = dv("git", "merge", "tlf-c2", 0, 0, 0, 0, 0);
+    ck(rc == 1 && sh("test -e .git/MERGE_HEAD && printf 'resolved-2\\n' > tlf-m.txt && git add tlf-m.txt", fx) == 0, "g2-resolve-and-stage-2");
+    rc = dv("git", "commit", "-m", "manual merge continue", "--merge-continue", 0, 0, 0);
+    ck(rc == 0 && has("GIT_COMMIT\trc=0\tcommit=") &&
+       sh("! test -e .git/MERGE_HEAD && git rev-parse -q --verify HEAD^2 >/dev/null && "
+          "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
+       "g2-git-commit-merge-continue-writes-v1-reflog");
+    if (!getenv("DVGIT_CORE_FROM")) {
+        const char *landed_fake =
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use sys.proc\n"
+            "int main(void) {\n"
+            "    char *o = 0; size_t n = 0;\n"
+            "    char *v[] = {\"sh\", \"-c\", \"B=$(git rev-parse HEAD) && BL=$(git hash-object -w tlf-m.txt) && T=$({ git ls-tree HEAD; printf '100644 blob %s\\\\ttlf-landed.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -p $B -m TL $T) && git update-ref HEAD $C $B && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $B\", 0};\n"
+            "    cx_runv_timeout(v, 10, &o, &n);\n"
+            "    if (o && n > 0) sy_write_all(1, o, (long)n);\n"
+            "    return 124;\n"
+            "}\n";
+        ck(wfile("tlf-landed.txt", "resolved-2\n") == 0 && wfile("tools/commit-own.cx", landed_fake) == 0, "f-landed-timeout-fixture-write");
+        rc = dv("git", "commit", "-m", "TL", "--whole", "tlf-landed.txt", 0, 0);
+        ck(rc == 0 && has("GIT_COMMIT_RECOVERED\tcommit=") && has("GIT_COMMIT\trc=0\tcommit=") &&
+           sh("git cat-file -e HEAD:tlf-landed.txt && [ -z \"$(git status --porcelain -- tlf-landed.txt)\" ]", fx) == 0,
+           "f-timeout-after-commit-landed-recovers-receipt-and-syncs-index");
+        (void)sh("git checkout -q -- tools/commit-own.cx", fx);
+
+        rc = dv("x", "--", "git", "add", "tlf-m.txt", 0, 0, 0);
+        ck(rc == 125 && has("REFUSE x git add"), "f-refuse-x-git-add");
+        rc = dv("git", "fetch", 0, 0, 0, 0, 0, 0);
+        ck(rc == 0 && has("GIT_FETCH\trc=0\tremote=origin"), "f-git-fetch-origin-rc0");
+        rc = dv("git", "rev-parse", "HEAD", 0, 0, 0, 0, 0);
+        ck(rc == 0 && strlen(out) >= 40, "f-git-ro-rev-parse");
+
+        {   char clk[256], cev[300], ltxt[256];
+            F(clk, sizeof clk, "%s/chain-supervise.lock", fx);
+            F(ltxt, sizeof ltxt, "pid=%d\tpgid=%d\towner=chain-v088\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
+              (int)sy_pid(), (int)sy_pid(), fx, sy_wall_s(), sy_wall_s() + 1800);
+            ck(wfile("chain-supervise.lock", ltxt) == 0, "f-chain-lock-live-write");
+            F(cev, sizeof cev, "DEVSVC_CHAIN_LOCK_FILE=%s", clk);
+            envv[1] = cev; envv[2] = 0;
+            rc = dv("x", "--par", "1", "--owner", "other-win", "--", "echo", "heavy-blocked");
+            ck(rc == 75 && has("DEVSVC_CHAIN_BUSY\tstatus=REFUSE\treason=active-release-chain\t"), "f-chain-busy-refuses-non-owner-heavy-rc75");
+            envv[1] = 0;
+            (void)sh("rm -f chain-supervise.lock", fx);
+        }
+
+        /* (g3) 守卫:共享检出 MERGE_HEAD 超过阈值(缺省 180 秒,DEVSVC_MERGE_WARN_AGE_S=0 测试)在 devsvc status 首行显示 MERGE_HEAD_WARN */
+        ck(sh("git rev-parse HEAD > .git/MERGE_HEAD", fx) == 0, "g3-merge-head-warn-fixture");
+        envv[1] = "DEVSVC_MERGE_WARN_AGE_S=0"; envv[2] = 0;
+        rc = dv("status", 0, 0, 0, 0, 0, 0, 0);
+        envv[1] = 0;
+        ck(rc == 0 && !strncmp(out, "MERGE_HEAD_WARN\tstatus=WARN\t", 28), "g3-status-first-line-warns-stale-merge-head");
+        (void)sh("rm -f .git/MERGE_HEAD", fx);
+
+        /* (g4) 甲:devsvc git merge BRANCH --worktree:共享检出有他人暂存时在 .claude/worktrees/merge-BRANCH 按四类规则处理冲突 */
+        F(c, sizeof c,
+          "M=$(git symbolic-ref --short HEAD) && mkdir -p plans build tests && "
+          "printf '# version\\n0.0.87\\tbase\\n' > build/version-seq.tsv && "
+          "printf '# plan\\nbase-line\\n' > plans/v0.0.88.md && "
+          "printf '# surface\\ns0\\n' > build/std-surface.tsv && "
+          "git add -f build/version-seq.tsv plans/v0.0.88.md build/std-surface.tsv && git commit -q -m WT0 && "
+          "git checkout -q -b tlf-wt1 && "
+          "printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.2.0\\tsa1\\tA\\np.b\\t0.2.5\\tsb2\\tB\\np.c\\t1.0.10\\tsc2\\tC\\n' > build/tlib-packages.tsv && "
+          "printf '# version\\n0.0.87\\tbase\\n0.0.89\\ttheirs\\n' > build/version-seq.tsv && "
+          "printf '# plan\\nbase-line\\ntheirs-doc-line\\n' > plans/v0.0.88.md && "
+          "git commit -q -am WT1B && "
+          "git checkout -q \"$M\" && "
+          "printf '# pkg\\tversion\\tapi_sha\\tnote\\np.a\\t0.1.9\\tsa0\\tA\\np.b\\t0.3.0\\tsb3\\tB\\np.c\\t1.0.10\\tsc2\\tC\\n' > build/tlib-packages.tsv && "
+          "printf '# version\\n0.0.87\\tbase\\n0.0.88\\tours\\n' > build/version-seq.tsv && "
+          "printf '# plan\\nbase-line\\nours-doc-line\\n' > plans/v0.0.88.md && "
+          "git commit -q -am WT1M && "
+          "printf 'foreign-staged\\n' > foreign.txt && git add foreign.txt");
+        ck(!ovf && sh(c, fx) == 0, "g4-worktree-auto-fixture");
+        rc = dv("git", "merge", "tlf-wt1", "--worktree", 0, 0, 0, 0);
+        ck(rc == 0 &&
+           has("MERGE_CLASS\tbuild/tlib-packages.tsv\tclass=generated\t") &&
+           has("MERGE_CLASS\tbuild/version-seq.tsv\tclass=registry\taction=union-sort\tstatus=resolved") &&
+           has("MERGE_CLASS\tplans/v0.0.88.md\tclass=doc\taction=union-both\tstatus=resolved") &&
+           has("GIT_MERGE\trc=0\tcommit="),
+           "g4-worktree-auto-resolves-generated-registry-doc-with-foreign-staged");
+        ck(sh("[ \"$(git show :foreign.txt)\" = foreign-staged ] && "
+              "git show HEAD:build/version-seq.tsv | grep -qx '0.0.88\tours' && "
+              "git show HEAD:build/version-seq.tsv | grep -qx '0.0.89\ttheirs' && "
+              "git show HEAD:plans/v0.0.88.md | grep -qx 'ours-doc-line' && "
+              "git show HEAD:plans/v0.0.88.md | grep -qx 'theirs-doc-line' && "
+              "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
+           "g4-worktree-merged-tree-and-reflog-verified");
+
+        /* (g5) 甲:含源表(build/std-surface.tsv)冲突时停在 .claude/worktrees/merge-tlf-wt2 -> 手合后 devsvc git merge --continue --cwd 回落 main */
+        F(c, sizeof c,
+          "git rm -q -f foreign.txt && M=$(git symbolic-ref --short HEAD) && "
+          "git checkout -q -b tlf-wt2 && printf '# surface\\ns-theirs\\n' > build/std-surface.tsv && "
+          "printf '# plan\\nwt2-theirs\\n' > plans/v0.0.88.md && git commit -q -am WT2B && "
+          "git checkout -q \"$M\" && printf '# surface\\ns-ours\\n' > build/std-surface.tsv && "
+          "printf '# plan\\nwt2-ours\\n' > plans/v0.0.88.md && git commit -q -am WT2M && "
+          "printf 'foreign2\\n' > foreign2.txt && git add foreign2.txt");
+        ck(!ovf && sh(c, fx) == 0, "g5-worktree-manual-fixture");
+        rc = dv("git", "merge", "tlf-wt2", "--worktree", 0, 0, 0, 0);
+        ck(rc == 1 &&
+           has("MERGE_CLASS\tplans/v0.0.88.md\tclass=doc\taction=union-both\tstatus=resolved") &&
+           has("MERGE_CLASS\tbuild/std-surface.tsv\tclass=source-table\taction=manual\tstatus=unresolved") &&
+           has("MERGE_WORKTREE\tpath=") && has("\tbranch=merge/tlf-wt2\t") &&
+           has("GIT_MERGE\trc=1\tconflicts=1\t"),
+           "g5-worktree-stops-on-source-table-in-private-worktree");
+        ck(sh("printf '# surface\\ns-hand-merged\\n' > .claude/worktrees/merge-tlf-wt2/build/std-surface.tsv && "
+              "git -C .claude/worktrees/merge-tlf-wt2 add build/std-surface.tsv", fx) == 0,
+           "g5-hand-resolve-source-table-in-worktree");
+        rc = dv("git", "merge", "--continue", "--cwd", ".claude/worktrees/merge-tlf-wt2", 0, 0, 0);
+        ck(rc == 0 && has("GIT_MERGE\trc=0\tcommit=") && has("\tcontinued=1\tfrom_worktree=") &&
+           sh("! test -d .claude/worktrees/merge-tlf-wt2 && "
+              "[ \"$(git show :foreign2.txt)\" = foreign2 ] && "
+              "git show HEAD:build/std-surface.tsv | grep -qx 's-hand-merged' && "
+              "git show HEAD:plans/v0.0.88.md | grep -qx 'wt2-ours' && "
+              "git show HEAD:plans/v0.0.88.md | grep -qx 'wt2-theirs' && "
+              "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
+           "g5-worktree-continue-lands-back-to-main-and-cleans-worktree");
+    }
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();
