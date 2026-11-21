@@ -27,7 +27,7 @@
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites tv_col tools/check-tsvx-read.cx` | `tools/check-tsvx-read.cx:54 tv_col(0, "id", 2)` |
 | 归档引用检查 | `sh ./unisacc.com tools/check-archive-refs.cx` | `ARCHIVE_REFS rows=157 live_references=3 failed=0` |
 
-- `--` 之后是传给脚本 `main` 的参数。日常不要先落盘再运行;落盘只用于格式、链接、平台、自举验证。
+- `--` 之后是传给脚本 `main` 的参数。**程序自己的参数必须放在 `--` 之后**,否则像 `cx file.cx -o OUT` 会把 `-o` 解析为编译器输出目标,程序本身收不到该参数且退出码 0 静默产出 ELF(甚至覆盖已有 `OUT`)。日常不要先落盘再运行;落盘只用于格式、链接、平台、自举验证。
 - `run-cache` 键在 `argv` 的 `--` 处截断(`cx/runtime/rcident.cx:187-191`):执行 `cx unit.cx -- A B` 时 `--` 之后的业务参数不进缓存键,热启动约 7 ms;若漏写 `--`,每个新 `argv` 都会改变缓存键并触发完整重编译(约 4.5 秒)。传参运行 `.cx` 脚本时务必带 `--`。
 - 受影响批次实跑:`tools/affected.cx -- --files F... --run [-j N]`(头注;本文只实测了 `--list-only`)。
 - 每条命令及其子进程上限 60 秒;超时用 `timeout 60` 包住。
@@ -302,6 +302,17 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 - `use ... as alias` 与 `export` 在当前产品上不可用(3.2)。
 - 仓外脚本需自备包根(3.3)。
 - 遇到缺口:保留最小默认运行复现,写进 [prd_mempalace.md](prd_mempalace.md) 的「阻塞与未验证」一节。库能力缺口记 `build/pkg-gaps.tsv`,协同决定与阻塞只写记忆宫殿。不因缺口退回 Python 或 shell 算法。
+
+### 5.3 常见陷阱
+
+- **程序参数漏写 `--`**: `cx file.cx -o OUT` 会让编译器吃掉 `-o OUT` 并静默退出 0 产出 ELF,程序收不到参数;凡给脚本传参一律写作 `sh ./unisacc.com file.cx -- -o OUT`。
+- **`snprintf` / `tx_snprintf` 返回值游标钳制**: `snprintf` 返回的是"需要写入多少字节"(不含 NUL),而不是"实际写了多少";若发生截断后直接 `off += n`,游标会越过缓冲区末尾导致后续 `cap - off` 下溢。累加游标必须钳制:
+  ```c
+  int n = tx_snprintf(buf + off, cap - off, "%s", s);
+  if (n < 0) n = 0;
+  if ((long)n >= cap - off) off = cap - 1; else off += n;
+  ```
+- **测试工具输出通道**: `tk_out()` 只包含子进程的 `stdout`,`stderr` 在 `tk_err()`,排查工具拒绝文案或诊断输出时须同时查 `tk_err()`。
 
 ## 6 三个从零写的例子(均实测)
 
