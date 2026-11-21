@@ -282,6 +282,7 @@
 - EffectComposer 调整目标与遮罩 | G-pixel 尺寸调整、旁路、遮罩及上下文恢复 | 双目标生命周期。
 - ~~RenderPass 读目标清屏 | G-pixel EffectComposer 计划、WebGL2 实际清屏、双目标读回 | EffectComposer、M4。~~ 16 项通过，篡改目标交换绿蓝像素使四项红。
 - ~~RenderPass 平面场景绘制 | G-pixel 读目标清屏、场景和错误绑定回滚 | 读目标清屏、共享 GPU 批次。~~ 24 项通过，背景色篡改转红。
+- ~~RenderPass 清深度顺序 | G-pixel 双目标深度、绑定次序和容量回滚 | RenderPass。~~ 24 项通过，交换绑定与清除顺序转红。
 - RenderPass 覆盖与复杂材质 | G-pixel 覆盖材质、深度和清屏状态恢复 | 平面场景绘制、共享渲染。
 - ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
 - UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。

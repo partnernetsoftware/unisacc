@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import {
+  BufferGeometry, Camera, Float32BufferAttribute, Mesh, MeshBasicMaterial, REVISION,
+  Scene, WebGLRenderer, WebGLRenderTarget
+} from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const root = query.get("package");
+  const { RenderPass } = await import("file://" + root + "/examples/jsm/postprocessing/RenderPass.js");
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 4;
+    const gl = canvas.getContext("webgl2");
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  const { gl } = context();
+  const [binary, ...resources] = await Promise.all([
+    fetch("file://" + query.get("wasm")), fetch("../base/gpu-flat.vert"), fetch("../base/gpu-flat.frag"),
+  ]);
+  let actual;
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, createGpuTargets(gl));
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(), {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+  })).instance.exports;
+  const lengths = [];
+  for (const [i, response] of resources.entries()) {
+    if (!response.ok) throw new Error("base shader missing");
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.length || bytes.length > 4096) throw new Error("invalid shader source");
+    new Uint8Array(actual.memory.buffer, 2097152 + 10000 + 4500 * i, bytes.length).set(bytes);
+    lengths.push(BigInt(bytes.length));
+  }
+  function endpoints(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return [view.getUint32(0, true), view.getUint32(12, true)];
+  }
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(4, 4, false);
+  renderer.autoClear = false;
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new Float32BufferAttribute([
+    -1,-1,0, 0,-1,0, 0,1,0, -1,-1,0, 0,1,0, -1,1,0,
+  ], 3));
+  const camera = new Camera();
+  function scene(z, color) {
+    const mesh = new Mesh(geometry, new MeshBasicMaterial({ color }));
+    mesh.position.z = z;
+    mesh.frustumCulled = false;
+    const scene = new Scene();
+    scene.add(mesh);
+    return scene;
+  }
+  const near = scene(-0.5, 0xff0000);
+  const far = scene(0.5, 0xffff00);
+  const checkOther = scene(0.5, 0xff00ff);
+  const pass = new RenderPass(far, camera);
+  pass.clear = false;
+  function reference(mode) {
+    const read = new WebGLRenderTarget(4, 4), other = new WebGLRenderTarget(4, 4);
+    for (const [target, color] of [[read,0x0000ff], [other,0x00ff00]]) {
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(color, 1);
+      renderer.clear(true, true, false);
+      renderer.render(near, camera);
+    }
+    renderer.setRenderTarget(mode < 2 ? read : other);
+    pass.clearDepth = mode !== 0;
+    pass.render(renderer, other, read);
+    renderer.setRenderTarget(other);
+    renderer.render(checkOther, camera);
+    const result = [];
+    for (const target of [read,other]) {
+      const rgba = new Uint8Array(16);
+      renderer.readRenderTargetPixels(target, 0, 0, 4, 1, rgba);
+      result.push(...endpoints(rgba));
+      target.dispose();
+    }
+    renderer.setRenderTarget(null);
+    return result;
+  }
+  const cases = [];
+  for (const mode of [0,1,2]) {
+    const status = actual.uxe_renderpass_depth(BigInt(mode), BigInt(query.get("mode")), ...lengths);
+    if (status !== 0n) throw new Error("RenderPass depth probe failed " + status);
+    for (const offset of [7000,7200]) {
+      const rgba = new Uint8Array(actual.memory.buffer, 2097152 + offset, 16);
+      cases.push(...endpoints(rgba));
+    }
+    cases.push(...reference(mode));
+  }
+  for (const value of [near,far,checkOther]) value.children[0].material.dispose();
+  geometry.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify(cases);
+} catch (error) {
+  output.textContent = "error:" + error.message;
+}
+</script>

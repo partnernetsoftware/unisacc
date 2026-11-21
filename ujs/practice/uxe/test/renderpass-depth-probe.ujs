@@ -1,0 +1,80 @@
+native function render_depth_mesh(packet:i64,z:f64,r:f64,g:f64,b:f64) i64 {
+  let xy=[0.0-1.0,0.0-1.0,0.0,0.0-1.0,0.0,1.0,0.0-1.0,0.0-1.0,0.0,1.0,0.0-1.0,1.0];
+  let i=0;
+  while(i<6) {
+    let at=6300+28*i;
+    let x=ux_f32_put(at,xy[i*2]);
+    let y=ux_f32_put(at+4,xy[i*2+1]);
+    let depth=ux_f32_put(at+8,z);
+    let red=ux_f32_put(at+12,r);
+    let green=ux_f32_put(at+16,g);
+    let blue=ux_f32_put(at+20,b);
+    let alpha=ux_f32_put(at+24,1.0);
+    i=i+1;
+  }
+  return GpuPacket_draw(packet,4096,6300,6,6200);
+}
+
+native function render_depth_read(packet:i64,id:i64,out:i64) i64 {
+  let read=5100;
+  let a=ux_u32_put(read+GpuTargetRead.id,id);
+  let b=ux_u32_put(read+GpuTargetRead.layer,0);
+  let c=ux_u32_put(read+GpuTargetRead.color,0);
+  let d=ux_u32_put(read+GpuTargetRead.x,0);
+  let e=ux_u32_put(read+GpuTargetRead.y,0);
+  let f=ux_u32_put(read+GpuTargetRead.width,4);
+  let g=ux_u32_put(read+GpuTargetRead.height,1);
+  let h=ux_u32_put(read+GpuTargetRead.output,out);
+  return GpuTarget_read(packet,4096,read);
+}
+
+if(mode<0 || mode>2 || mutate<0 || mutate>1) { return 0-1; }
+let va=ux_u32_put(6200+GpuShaderSource.vertex,10000);
+let vb=ux_u32_put(6200+GpuShaderSource.vertexBytes,vn);
+let fa=ux_u32_put(6200+GpuShaderSource.fragment,14500);
+let fb=ux_u32_put(6200+GpuShaderSource.fragmentBytes,fn);
+let composer=4200;
+let ownership=4300;
+let initialized=EffectComposer_init(composer,1,2,4360,1,4,4);
+let offscreen=EffectComposer_screen(composer,0);
+let added=EffectComposer_addPass(composer,10,1);
+let planned=EffectComposer_plan(composer,4400,4480,1);
+if(initialized<0 || offscreen<0 || added<0 || planned!=1) { return 0-2; }
+
+let small=GpuPacket_begin(5600,40,1);
+let refusal=RenderPass_beginDepth(small,40,4480,0,0,0.0,0,1);
+let invalid=RenderPass_beginDepth(small,40,4480,0,0,0.0,0,2);
+if(refusal!=0-1 || invalid!=0-1 || ux_u32(small+GpuPacket.bytes)!=GpuPacket.size ||
+   ux_u32(small+GpuPacket.commands)!=0) { return 0-3; }
+let owned=EffectComposerGpu_create(composer,ownership,0,4096,5000,1);
+if(owned!=0) { return owned; }
+let packet=GpuPacket_begin(0,4096,1);
+let state=GpuPacket_state(packet,4096,1,1,0);
+let bindRead=GpuTarget_bind(packet,4096,1,0);
+let view=GpuPacket_viewport(packet,4096,0,0,4,4);
+let blue=GpuPacket_clearBuffers(packet,4096,3,4294901760,1.0,0);
+let nearRead=render_depth_mesh(packet,0.0-0.5,1.0,0.0,0.0);
+let bindOther=GpuTarget_bind(packet,4096,2,0);
+let green=GpuPacket_clearBuffers(packet,4096,3,4278255360,1.0,0);
+let nearOther=render_depth_mesh(packet,0.0-0.5,1.0,0.0,0.0);
+if(state<0 || bindRead<0 || view<0 || blue<0 || nearRead<0 || bindOther<0 ||
+   green<0 || nearOther<0) { return 0-4; }
+if(mode<2) { let prior=GpuTarget_bind(packet,4096,1,0); }
+let clear=mode!=0;
+let prefix=0;
+if(mutate==1 && mode==2) {
+  prefix=RenderPass_beginDepth(packet,4096,4480,0,0,0.0,0,0);
+  let wrongOrder=GpuPacket_clearDepth(packet,4096,1.0);
+} else {
+  prefix=RenderPass_beginDepth(packet,4096,4480,0,0,0.0,0,clear);
+}
+let overlay=render_depth_mesh(packet,0.5,1.0,1.0,0.0);
+let other=GpuTarget_bind(packet,4096,2,0);
+let probe=render_depth_mesh(packet,0.5,1.0,0.0,1.0);
+let readA=render_depth_read(packet,1,7000);
+let readB=render_depth_read(packet,2,7200);
+if(prefix<0 || overlay<0 || other<0 || probe<0 || readA<0 || readB<0) { return 0-5; }
+let submitted=GpuPacket_submit(packet);
+if(submitted!=0) { return submitted; }
+if(EffectComposer_commit(composer,4400)<0) { return 0-6; }
+return EffectComposerGpu_release(ownership,0,4096,0);
