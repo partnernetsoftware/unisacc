@@ -129,6 +129,18 @@ static int run(char **argv, char *out, long cap) {
 static int co_via_devsvc;
 static char co_product[4400];
 static char *co_product_path(void){if(!co_product[0]&&sy_realpath("unisacc.com",co_product,sizeof co_product)<0)co_die("product path",0);return co_product;}
+static const char *co_tmpdir(void) {
+    static char dir[460];
+    const char *td = sy_tmpdir();
+    if (dir[0]) return dir;
+    char gdir[4096], h[65];
+    char *gv[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
+    if (run(gv, gdir, sizeof gdir) == 0 && gdir[0] && !sy_sha256_hex(gdir, strlen(gdir), h) &&
+        tx_snprintf(dir, sizeof dir, "%s/commit-own-%.16s", td, h) < (int)sizeof dir &&
+        (sy_mkdir(dir, 0700) == 0 || sy_exists(dir) == 1)) return dir;
+    dir[0] = 0;
+    return td;
+}
 static int co_tool(char **v, int n, const char *tool) {
     const char *sb = getenv("DEVSVC_SELF_BIN"), *force = getenv("UNISACC_COMMIT_OWN_RUN");
     co_via_devsvc = sb && sb[0] == '/' && sy_exists(sb) == 1 && !(force && force[0] == '1');
@@ -202,7 +214,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
         sy_stat_t st; const char *p; int w;
         co_part[k][0] = 0; co_foreign[k] = 0;
         if (!keys[k] || (sy_lstat(path[k], &st) == 0 && st.kind == 'l') || !sy_exists(path[k])) continue;
-        if (tx_snprintf(co_part[k], sizeof co_part[k], "%s/commit-own-%d-%d.part", sy_tmpdir(), sy_pid(), k) >= (int)sizeof co_part[k]) co_die("path", 0);
+        if (tx_snprintf(co_part[k], sizeof co_part[k], "%s/commit-own-%d-%d.part", co_tmpdir(), sy_pid(), k) >= (int)sizeof co_part[k]) co_die("path", 0);
         w = tx_snprintf(lst + ln, sizeof lst - (size_t)ln, "%s\t%s", co_part[k], path[k]);
         if (w < 0 || w >= (int)(sizeof lst - (size_t)ln)) co_die("keys too long", path[k]);
         ln += w;
@@ -220,7 +232,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
         lst[ln++] = '\n'; nb++;
     }
     if (!nb) return;
-    if (tx_snprintf(lpath, sizeof lpath, "%s/commit-own-%d.batch", sy_tmpdir(), sy_pid()) >= (int)sizeof lpath || cx_write(lpath, lst, (size_t)ln)) co_die("cannot write the own-diff batch list", 0);
+    if (tx_snprintf(lpath, sizeof lpath, "%s/commit-own-%d.batch", co_tmpdir(), sy_pid()) >= (int)sizeof lpath || cx_write(lpath, lst, (size_t)ln)) co_die("cannot write the own-diff batch list", 0);
     n = co_tool(ov, 0, "tools/own-diff.cx"); ov[n++] = "--field"; ov[n++] = "--batch"; ov[n++] = lpath; ov[n] = 0;
     rc = cx_runv_timeout(ov, 30, &o, &on);   /* 30 s for the whole batch (it was 30 s per table) */
     sy_unlink(lpath);
@@ -972,6 +984,20 @@ static void co_manifest(const char *id, char *mpath, long mcap) {
                             co_addkey(2, row + fs, fl); co_addkey(3, row + fs, fl);
                             if (b > 0) { co_addkey(2, row + fs + b, fl - b); co_addkey(3, row + fs + b, fl - b); }
                         } }
+                } else if (t == 1 && (fs = co_field(row, rl, 4, &fl)) >= 0 && fl > 1) {
+                    long p = 0;
+                    while (p < fl) {
+                        long s, wl, b;
+                        while (p < fl && (row[fs + p] == ' ' || row[fs + p] == ';')) p++;
+                        s = p;
+                        while (p < fl && row[fs + p] != ' ' && row[fs + p] != ';') p++;
+                        wl = p - s;
+                        if (wl > 1 && !(wl == 1 && row[fs + s] == '-')) {
+                            b = wl; while (b > 0 && row[fs + s + b - 1] != '/') b--;
+                            co_addkey(2, row + fs + s, wl); co_addkey(3, row + fs + s, wl);
+                            if (b > 0) { co_addkey(2, row + fs + s + b, wl - b); co_addkey(3, row + fs + s + b, wl - b); }
+                        }
+                    }
                 }
             }
         at += ln + (e >= 0);
@@ -1151,7 +1177,7 @@ static int co_replay_index(int argc, char **argv) {
         fprintf(stderr, "COMMIT_REPLAY_REFUSE\treason=private-base-required\n");
         return 2;
     }
-    char *dv[CO_MAX + 6] = {"sh", "-c", CO_DERIVE_SH, (char *)sy_tmpdir()};
+    char *dv[CO_MAX + 6] = {"sh", "-c", CO_DERIVE_SH, (char *)co_tmpdir()};
     char outputs[16384] = "";
     int n = 4, sep = 4, used = 0;
     for (; sep < argc && !tx_eqz(argv[sep],"--outputs"); sep++) dv[n++] = argv[sep];
@@ -1171,7 +1197,7 @@ static int co_replay_index(int argc, char **argv) {
         fprintf(stderr, "COMMIT_REPLAY_REFUSE\treason=derive-failed\trc=%d\n", rc);
         return 1;
     }
-    if (cx_fmt(gate_root, sizeof gate_root, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid())) return 2;
+    if (cx_fmt(gate_root, sizeof gate_root, "%s/commit-own-%d.root", co_tmpdir(), sy_pid())) return 2;
     char *gv[] = {"sh", "-c", CO_GATE_SH, gate_root, 0};
     rc = run(gv, out, sizeof out);
     if (out[0]) puts(out);
@@ -1247,12 +1273,29 @@ int main(int argc, char **argv) {
     }
     if (nreg) {
         int t;
+        for (k = 0; k < np; k++) {
+            int is_regt = 0; long pl = tx_len(path[k], 4096), b = pl;
+            for (t = 0; t < CO_REGT; t++) if (tx_eqz(path[k], CO_REG_TABLE[t])) { is_regt = 1; break; }
+            if (is_regt || pl <= 0) continue;
+            while (b > 0 && path[k][b - 1] != '/') b--;
+            co_addkey(2, path[k], pl); co_addkey(3, path[k], pl);
+            if (b > 0) { co_addkey(2, path[k] + b, pl - b); co_addkey(3, path[k] + b, pl - b); }
+        }
         for (t = 0; t < CO_REGT; t++) {
             if (!co_regkeys[t][0] || sy_exists(CO_REG_TABLE[t]) != 1) continue;
             /* a --whole/--keyed of a table this set owns is dropped, not refused (5 of the 20 failed devsvc commits
                were this refusal): the set's keyed rows are the narrower selection, other rows stay in the work tree */
             for (k = 0; k < np; k++) if (tx_eqz(path[k], CO_REG_TABLE[t])) {
                 int j;
+                if (keys[k] && keys[k][0]) {
+                    const char *kp = keys[k];
+                    while (*kp) {
+                        const char *ke = kp;
+                        while (*ke && *ke != ',') ke++;
+                        if (ke > kp) co_addkey(t, kp, (long)(ke - kp));
+                        kp = *ke ? ke + 1 : ke;
+                    }
+                }
                 sy_printf("NOTE\t%s\t--registered owns this table; its --keyed/--whole is dropped (only the registered set's rows are taken)\n", path[k]);
                 for (j = k; j + 1 < np; j++) { path[j] = path[j + 1]; keys[j] = keys[j + 1]; co_reg_of[j] = co_reg_of[j + 1]; }
                 np--; co_reg_of[np] = -1; k--;
@@ -1292,7 +1335,7 @@ int main(int argc, char **argv) {
             char lnk[4400]; long n = sy_readlink(path[k], lnk, sizeof lnk);
             if (n < 0 || n >= (long)sizeof lnk) co_die("readlink failed", path[k]);
             lnk[n] = 0;
-            if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.link", sy_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
+            if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.link", co_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
             {   int fd = sy_open(src, 2 | 64 | 512, 0600); if (fd < 0) co_die("link tmp", src);
                 if (sy_write_all(fd, lnk, n)) { sy_close(fd); co_die("link write", src); }
                 sy_close(fd);
@@ -1327,12 +1370,12 @@ int main(int argc, char **argv) {
         if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
     }
     t_pend = sy_now_ms() - t0 - t_sel;
-    co_reclaim_stale_locks(sy_tmpdir());
-    if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
+    co_reclaim_stale_locks(co_tmpdir());
+    if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", co_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64], basec[64], orig_basec[64], newfull[64] = "", groot[420]; int rc, cas_skipped = 0;
         char retry_base[64] = "";
         static char dout[32768];
-        if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
+        if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", co_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
         np0 = np;
 again:  /* Retry against the same HEAD whose paths were compared. */
         np = np0; nder = 0; dout[0] = 0; cas_skipped = 0;
@@ -1362,7 +1405,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
         if (derive) co_phase("derive", 1);
         if (derive) {   /* recompute the derived tables on the commit's own tree, into the private index */
             char *dv[CO_MAX + 8]; int n = 0, drc; long at = 0, dn; const char *cls = 0;
-            dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = derive_sel ? CO_DERIVE_SEL_SH : CO_DERIVE_SH; dv[n++] = (char *)sy_tmpdir();
+            dv[n++] = "sh"; dv[n++] = "-c"; dv[n++] = derive_sel ? CO_DERIVE_SEL_SH : CO_DERIVE_SH; dv[n++] = (char *)co_tmpdir();
             for (k = 0; k < np0; k++) dv[n++] = (char *)path[k];
             dv[n] = 0;
             g_bound_s = 55; tc0 = sy_now_ms();
@@ -1389,7 +1432,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
                     char *av[] = {"git", "merge-base", "--is-ancestor", rb, basec, 0};
                     char chkidx[420], chk_ri[64]; const char *ew = 0, *ep = 0; int same_in = 0, confl = 0;
                     if (run(av, out, sizeof out) != 0 ||
-                        tx_snprintf(chkidx, sizeof chkidx, "%s/commit-own-chk-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof chkidx) {
+                        tx_snprintf(chkidx, sizeof chkidx, "%s/commit-own-chk-%d.idx", co_tmpdir(), sy_pid()) >= (int)sizeof chkidx) {
                         mm_free(rec);
                         fprintf(stderr,"COMMIT_OWN_FAIL\tclass=derive-identity\ncommit-own: REFUSE stale or corrupt derive receipt; rerun --derive-prepare FILE on current inputs\n");
                         sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
@@ -1506,7 +1549,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
                    reuses them only when its own key is identical and reruns otherwise.  The record dies with this commit. */
                 char tr[64], th[64]; static char rec[20000]; char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "hash-object", "--", (char *)rtool, 0}; int rl = 0;
                 if (run(wv, tr, sizeof tr) == 0 && run(hv, th, sizeof th) == 0 && tx_len(tr, 64) == 40 && tx_len(th, 64) == 40 &&
-                    tx_snprintf(gatef, sizeof gatef, "%s/commit-own-%d.gate", sy_tmpdir(), sy_pid()) < (int)sizeof gatef &&
+                    tx_snprintf(gatef, sizeof gatef, "%s/commit-own-%d.gate", co_tmpdir(), sy_pid()) < (int)sizeof gatef &&
                     (rl = tx_snprintf(rec, sizeof rec, "KEY\ttree=%s\tgate=manifest\ttool=%s\targv=sh ./unisacc.com %s -- --check --index\nRC\t%d\n%s\n", tr, th, rtool, rrc, ro)) < (int)sizeof rec &&
                     cx_write(gatef, rec, (size_t)rl) == 0) sy_setenv("UNISACC_GATE_REUSE", gatef, 1);
                 else { sy_unsetenv("UNISACC_GATE_REUSE"); gatef[0] = 0; }
