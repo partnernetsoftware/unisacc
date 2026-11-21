@@ -1,0 +1,45 @@
+native function capsule_geometry_keys(at:i64) i64 {
+  let labels=[67,97,112,115,117,108,101,71,101,111,109,101,116,114,121,
+    114,97,100,105,117,115,108,101,110,103,116,104,
+    99,97,112,83,101,103,109,101,110,116,115,
+    114,97,100,105,97,108,83,101,103,109,101,110,116,115];
+  let i=0;
+  while(i<52) {
+    let byte=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function CapsuleGeometry_toJSON(capsule:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  if(geometry_primitive_ready(capsule,9)<0 ||
+     !geometry_primitive_json_io(capsule,dst,end,uuid,uuidBytes,scratch,52)) { return 0-1; }
+  let keys=capsule_geometry_keys(scratch+1104);
+  let p=geometry_primitive_json_head(capsule,dst,end,uuid,uuidBytes,keys,15);
+  p=geometry_parameter_number(p,end,keys+15,6,ux_f64(capsule+GeometryPrimitiveRecord.first),scratch);
+  p=geometry_parameter_number(p,end,keys+21,6,ux_f64(capsule+GeometryPrimitiveRecord.second),scratch);
+  p=geometry_parameter_number(p,end,keys+27,11,ux_f64(capsule+GeometryPrimitiveRecord.third),scratch);
+  p=geometry_parameter_number(p,end,keys+38,14,ux_f64(capsule+GeometryPrimitiveRecord.fourth),scratch);
+  return json_byte(p,end,125);
+}
+
+native function CapsuleGeometry_fromJSON(capsule:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,work:i64) i64 {
+  let space=CapsuleGeometryParameters.size+52;
+  if(scratch%8!=0 || end<=input ||
+     !geometry_primitive_raw(capsule,raw,arena,bytes,input,end-input) ||
+     !geometry_primitive_raw(capsule,raw,arena,bytes,scratch,space) ||
+     !geometry_public_disjoint(input,end-input,scratch,space) ||
+     !geometry_primitive_json_object(input,end)) { return 0-1; }
+  let keys=capsule_geometry_keys(scratch+CapsuleGeometryParameters.size);
+  let cap=geometry_primitive_json_number(input,end,keys+27,11,4.0);
+  let workspace=capsule_geometry_work_bytes(cap);
+  if(workspace<0 || work%8!=0 ||
+     !geometry_primitive_raw(capsule,raw,arena,bytes,work,workspace) ||
+     !geometry_public_disjoint(input,end-input,work,workspace) ||
+     !geometry_public_disjoint(scratch,space,work,workspace)) { return 0-1; }
+  let a=ux_f64_put(scratch+CapsuleGeometryParameters.radius,geometry_primitive_json_number(input,end,keys+15,6,1.0));
+  let b=ux_f64_put(scratch+CapsuleGeometryParameters.length,geometry_primitive_json_number(input,end,keys+21,6,1.0));
+  let c=ux_f64_put(scratch+CapsuleGeometryParameters.capSegments,cap);
+  let d=ux_f64_put(scratch+CapsuleGeometryParameters.radialSegments,geometry_primitive_json_number(input,end,keys+38,14,8.0));
+  return CapsuleGeometry_create(capsule,raw,arena,bytes,scratch,work);
+}

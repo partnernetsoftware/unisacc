@@ -1,0 +1,47 @@
+struct CapsuleGeometryParameters {
+  radius: f64;
+  length: f64;
+  capSegments: f64;
+  radialSegments: f64;
+}
+
+native function capsule_geometry_work_bytes(cap:f64) i64 {
+  if(!(cap>=1.0 && cap<=131071.0)) { return 0-1; }
+  let segments=f64_floor_i64(cap);
+  if(cap!=0.0+segments) { return 0-1; }
+  return (4*segments+2)*16;
+}
+
+native function CapsuleGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,work:i64) i64 {
+  if(params%8!=0 || work%8!=0 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,params,CapsuleGeometryParameters.size)) { return 0-1; }
+  let radius=ux_f64(params+CapsuleGeometryParameters.radius);
+  let length=ux_f64(params+CapsuleGeometryParameters.length);
+  let cap=ux_f64(params+CapsuleGeometryParameters.capSegments);
+  let radial=ux_f64(params+CapsuleGeometryParameters.radialSegments);
+  let workspace=capsule_geometry_work_bytes(cap);
+  let upper=length*0.5+radius;
+  let lower=length*0.5-radius;
+  // A zero radius collapses arcs to points in r160. The raw mesh retains the arc rows.
+  if(workspace<0 || radius==0.0 || upper-upper!=0.0 || lower-lower!=0.0 ||
+     !(radial>=1.0 && radial<262145.0) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,work,workspace) ||
+     !geometry_public_disjoint(params,CapsuleGeometryParameters.size,work,workspace)) { return 0-1; }
+  let generated=CapsuleGeometry_generate(raw,work,radius,length,f64_floor_i64(cap),f64_floor_i64(radial));
+  if(generated<0) { return generated; }
+  let installed=GeometryBuffers_asGeometry(raw,GeometryPrimitive_geometry(at),arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  return geometry_primitive_store(at,9,radius,length,cap,radial,0.0,0.0);
+}
+
+native function CapsuleGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return geometry_primitive_copy(dst,src,arena,bytes,9);
+}
+
+native function CapsuleGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return geometry_primitive_clone(dst,src,arena,bytes,9);
+}
+
+native function CapsuleGeometry_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  return geometry_primitive_dispose(at,event,out,limit,9);
+}

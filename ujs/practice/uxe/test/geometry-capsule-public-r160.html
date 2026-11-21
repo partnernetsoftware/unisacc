@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { REVISION, CapsuleGeometry } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const uuid = "cap-9", name = 'cap "A"';
+const collapsed = '{"length":0}', fractional = '{"capSegments":1.5}';
+const digest = bytes => bytes.reduce((hash, value) => (hash * 131 + value) % 16777213, 0);
+
+function surface(capsule) {
+  const p = capsule.parameters;
+  const { position, normal, uv } = capsule.attributes;
+  const rows = 4 * p.capSegments + 2;
+  const lower = rows / 2 - 1, upper = lower + 1;
+  const last = position.count - 1;
+  return [position.count, capsule.index.count, p.radius, p.length, p.capSegments, p.radialSegments,
+    position.getY(0), position.getY(rows - 1), position.getY(lower), position.getY(upper),
+    position.getZ(lower), normal.getY(0), capsule.index.getX(0), capsule.index.getX(1),
+    uv.getX(last), uv.getY(last)];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const params = new URLSearchParams(location.search);
+  const wasm = await (await fetch("file://" + params.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(wasm);
+  const api = instance.exports;
+  const base = Number(api.uxe_capsule_public(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 60000);
+  for (const [address, text] of [[6000, uuid], [6016, name], [5760, '{"radius":"bad"}'], [5800, "{}"],
+    [5824, collapsed], [5840, '{"radius":0}'], [5860, fractional], [5888, '{"radialSegments":0.5}']]) {
+    memory.set(encoder.encode(text), address);
+  }
+  const length = Number(api.uxe_capsule_public(1n, BigInt(params.get("mutate"))));
+  if (length <= 0) throw new Error("native capsule status " + length);
+  const raw = memory.subarray(4096, 4096 + length);
+  const parsed = JSON.parse(decoder.decode(raw));
+  if (parsed.type !== "CapsuleGeometry" || parsed.name !== name || parsed.uuid !== uuid || "data" in parsed) {
+    throw new Error("capsule parameter envelope");
+  }
+  const actual = new Float64Array(api.memory.buffer, base + 6160, 31);
+
+  const reference = new CapsuleGeometry(1.25, 2.5, 2, 4.5);
+  reference.uuid = uuid;
+  reference.name = name;
+  const doc = reference.toJSON();
+  const round = CapsuleGeometry.fromJSON(doc);
+  const restored = surface(round);
+  const defaults = CapsuleGeometry.fromJSON({});
+  const zeroLength = CapsuleGeometry.fromJSON(JSON.parse(collapsed));
+  const zeroRadius = CapsuleGeometry.fromJSON({ radius: 0 });
+  const halfCap = CapsuleGeometry.fromJSON(JSON.parse(fractional));
+  const [positionAt, normalAt, uvAt, indexAt, vertices, indices] =
+    new Uint32Array(api.memory.buffer, base + 7456, 6);
+  const near = (a, b) => a.length === b.length && a.every((value, i) => Math.abs(value - b[i]) <= 1e-6);
+  const sameCollapsedMesh = vertices === zeroLength.attributes.position.count && indices === zeroLength.index.count &&
+    near(new Float32Array(api.memory.buffer, base + positionAt, 3 * vertices), zeroLength.attributes.position.array) &&
+    near(new Float32Array(api.memory.buffer, base + normalAt, 3 * vertices), zeroLength.attributes.normal.array) &&
+    near(new Float32Array(api.memory.buffer, base + uvAt, 2 * vertices), zeroLength.attributes.uv.array) &&
+    near(new Uint16Array(api.memory.buffer, base + indexAt, indices), zeroLength.index.array);
+  const targetTrace = [], trace = [];
+  let correctTarget = true;
+  function listenerB() { trace.push(82); }
+  reference.addEventListener("dispose", function(event) {
+    correctTarget &&= event.target === reference && this === reference;
+    trace.push(41);
+    reference.removeEventListener("dispose", listenerB);
+  });
+  reference.addEventListener("dispose", listenerB);
+  round.addEventListener("dispose", () => targetTrace.push(61));
+  const copied = round.copy(reference);
+  const clone = reference.clone();
+  const a = reference.attributes.position, b = copied.attributes.position, c = clone.attributes.position;
+  const independent = Number(copied === round && a.array !== b.array && a.array !== c.array &&
+    b.array !== c.array && copied.parameters !== reference.parameters && clone.parameters !== reference.parameters);
+  reference.parameters.radius = 4;
+  reference.parameters.capSegments = 7;
+  a.setY(0, 9);
+  a.setY(9, 8);
+  reference.dispose();
+  const firstEvents = trace.splice(0);
+  reference.dispose();
+  const nextEvent = trace.shift();
+  copied.dispose();
+  clone.dispose();
+  result.textContent = JSON.stringify([digest(raw), ...actual,
+    digest(encoder.encode(JSON.stringify(doc))), ...restored,
+    defaults.attributes.position.count, defaults.index.count, independent,
+    copied.parameters.radius, clone.parameters.capSegments, b.getY(0), c.getY(9),
+    firstEvents[0] * 100 + firstEvents[1], Number(correctTarget), nextEvent,
+    targetTrace.shift(), trace.length, zeroLength.attributes.position.count, halfCap.attributes.position.count,
+    zeroRadius.attributes.position.count, Number(sameCollapsedMesh)]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
