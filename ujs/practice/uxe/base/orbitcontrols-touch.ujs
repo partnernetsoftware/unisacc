@@ -1,0 +1,117 @@
+struct OrbitTouchContact {
+  x: f64;
+  y: f64;
+  id: u32;
+  active: u32;
+}
+
+struct OrbitTouch {
+  first: OrbitTouchContact;
+  second: OrbitTouchContact;
+  fov: f64;
+  right: u32;
+  up: u32;
+  map: u32;
+  mode: u32;
+}
+
+native function orbit_touch_valid(contacts:i64) i64 {
+  return contacts>=0 && contacts%8==0 && contacts<=6291456-OrbitTouch.size;
+}
+
+native function OrbitControls_initTouch(contacts:i64,map:i64,right:i64,up:i64,fov:f64) i64 {
+  if(!orbit_touch_valid(contacts) || map<0 || map>1 || right<0 || up<0 || right%8!=0 || up%8!=0 ||
+     right>6291456-24 || up>6291456-24 || fov<=0.0 || fov>=180.0 || fov-fov!=0.0) { return 0-1; }
+  let a=ux_u32_put(contacts+OrbitTouch.first+OrbitTouchContact.active,0);
+  let b=ux_u32_put(contacts+OrbitTouch.second+OrbitTouchContact.active,0);
+  let c=ux_u32_put(contacts+OrbitTouch.mode,0);
+  let d=ux_u32_put(contacts+OrbitTouch.map,map);
+  let e=ux_u32_put(contacts+OrbitTouch.right,right);
+  let f=ux_u32_put(contacts+OrbitTouch.up,up);
+  let g=ux_f64_put(contacts+OrbitTouch.fov,fov);
+  return contacts;
+}
+
+native function orbit_touch_find(first:i64,second:i64,pointer:i64) i64 {
+  if(ux_u32(first+OrbitTouchContact.active)!=0 && ux_u32(first+OrbitTouchContact.id)==pointer) { return first; }
+  if(ux_u32(second+OrbitTouchContact.active)!=0 && ux_u32(second+OrbitTouchContact.id)==pointer) { return second; }
+  return 0-1;
+}
+
+native function orbit_touch_save(contact:i64,x:f64,y:f64) i64 {
+  let a=ux_f64_put(contact+OrbitTouchContact.x,x);
+  let b=ux_f64_put(contact+OrbitTouchContact.y,y);
+  return 1;
+}
+
+// Translate touch pointer events to perspective orbit deltas. The caller
+// keeps the bound camera columns current and calls OrbitControls_step for
+// successful moves. action 1 is down, 2 is move, 3 is up or cancel.
+native function OrbitControls_touchPerspective(control:i64,contacts:i64,action:i64,pointer:i64,x:f64,y:f64) i64 {
+  if(!orbit_valid(control) || !orbit_touch_valid(contacts) || action<1 || action>3 ||
+     pointer<0 || pointer>4294967295 || x-x!=0.0 || y-y!=0.0) { return 0-1; }
+  let first=contacts+OrbitTouch.first;
+  let second=contacts+OrbitTouch.second;
+  let count=ux_u32(first+OrbitTouchContact.active)+ux_u32(second+OrbitTouchContact.active);
+  let contact=orbit_touch_find(first,second,pointer);
+  let mode=ux_u32(contacts+OrbitTouch.mode);
+  if(action==1) {
+    if(contact>=0 || count==2 || (count==0 && ux_u32(control+OrbitControls.active)!=0)) { return 0; }
+    contact=first;
+    if(ux_u32(first+OrbitTouchContact.active)!=0) { contact=second; }
+    if(mode==1 || mode==4) { let stop=OrbitControls_pointer(control,3,0,x,y); }
+    let next=1+OrbitControls_touchBinding(ux_u32(contacts+OrbitTouch.map),count+1);
+    let other=first+second-contact;
+    let centerX=x;
+    let centerY=y;
+    if(count==1) {
+      centerX=x*0.5+ux_f64(other+OrbitTouchContact.x)*0.5;
+      centerY=y*0.5+ux_f64(other+OrbitTouchContact.y)*0.5;
+    }
+    if(next==1 || next==4) { let start=OrbitControls_pointer(control,1,0,centerX,centerY); }
+    let id=ux_u32_put(contact+OrbitTouchContact.id,pointer);
+    let active=ux_u32_put(contact+OrbitTouchContact.active,1);
+    let saved=ux_u32_put(contacts+OrbitTouch.mode,next);
+    return orbit_touch_save(contact,x,y);
+  }
+  if(contact<0) { return 0; }
+  if(action==3) {
+    if(mode==1 || mode==4) { let stop=OrbitControls_pointer(control,3,0,x,y); }
+    let inactive=ux_u32_put(contact+OrbitTouchContact.active,0);
+    let cleared=ux_u32_put(contacts+OrbitTouch.mode,0);
+    return 1;
+  }
+  if(mode==0) { let tracked=orbit_touch_save(contact,x,y); return 0; }
+  let oldX=ux_f64(contact+OrbitTouchContact.x);
+  let oldY=ux_f64(contact+OrbitTouchContact.y);
+  let centerX=x;
+  let centerY=y;
+  let dx=x-oldX;
+  let dy=y-oldY;
+  let pending=ux_f64(control+OrbitControls.zoomScale);
+  if(count==2) {
+    let other=first+second-contact;
+    let ox=ux_f64(other+OrbitTouchContact.x);
+    let oy=ux_f64(other+OrbitTouchContact.y);
+    let beforeX=oldX-ox;
+    let beforeY=oldY-oy;
+    let afterX=x-ox;
+    let afterY=y-oy;
+    let pinch=OrbitControls_pinch(control,f64_sqrt(beforeX*beforeX+beforeY*beforeY),
+      f64_sqrt(afterX*afterX+afterY*afterY));
+    if(pinch<0) { return pinch; }
+    centerX=x*0.5+ox*0.5;
+    centerY=y*0.5+oy*0.5;
+    dx=dx*0.5;
+    dy=dy*0.5;
+  }
+  let moved=0;
+  if(mode==1 || mode==4) {
+    moved=OrbitControls_pointer(control,2,0,centerX,centerY);
+  } else {
+    moved=OrbitControls_panPerspective(control,ux_u32(contacts+OrbitTouch.right),ux_u32(contacts+OrbitTouch.up),
+      mode==3,dx,dy,ux_f64(contacts+OrbitTouch.fov));
+  }
+  if(moved<0) { let restored=ux_f64_put(control+OrbitControls.zoomScale,pending); return moved; }
+  return orbit_touch_save(contact,x,y);
+}
