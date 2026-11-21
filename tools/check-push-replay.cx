@@ -445,6 +445,51 @@ static int tree_has(const char *root_,const char *rev,const char *path) {
     int ok=!run(root_,args,&r)&&r.outn==strlen(path)+1&&!memcmp(r.out,path,r.outn-1);
     np_free(&r);return ok;
 }
+static void merge_receipts(const char *svc) {
+    const char *names[] = {"audited-merge-carries-to-push", "raw-merge-refused-with-recovery",
+                           "audited-merge-does-not-cover-foreign-commit", "audited-merge-owner-separated"};
+    char *seed[] = {"git", "push", "-q", "origin", "HEAD:main", 0};
+    char *main_branch[] = {"git", "switch", "-q", "main", 0};
+    file(".git/hooks/pre-commit", "#!/bin/sh\n./tools/generate --check\n", 0700);
+    for (int i = 0; i < 4; i++) {
+        char side[32], file_name[32], old[41], local[41], received[41];
+        if (cx_fmt(side, sizeof side, "receipt-side-%d", i) ||
+            cx_fmt(file_name, sizeof file_name, "receipt-file-%d", i) ||
+            sy_setenv("DEVSVC_OWNER", "fixture-merge-owner", 1)) setup_error("receipt fixture identity");
+        char *make_side[] = {"git", "switch", "-q", "-c", side, 0};
+        check_setup(repo, make_side);
+        file(file_name, "side\n", 0644);
+        commit("side change");
+        check_setup(repo, main_branch);
+        file("main-ahead", side, 0644);
+        commit("main branch advances");
+        check_setup(repo, seed);
+        git_oid(repo, "HEAD", old);
+        if (i == 2) { file("unowned-merge-predecessor", "foreign\n", 0644); commit("unowned predecessor"); }
+        char *merge[] = {(char *)svc, "git", "merge", side, 0};
+        char *raw[] = {(char *)svc, "x", "--par", "1", "--", "git", "merge", "--no-ff", "--no-edit", side, 0};
+        check_setup(repo, i == 1 ? raw : merge);
+        if (i == 3 && sy_setenv("DEVSVC_OWNER", "different-window", 1)) setup_error("negative owner");
+        file("pushed-after-merge", side, 0644);
+        char *publish[] = {(char *)svc, "git", "commit", "--cwd", repo, "-m", "after merge",
+                           "--whole", "pushed-after-merge", "--push", 0};
+        np_result r = {0};
+        int rc = run(repo, publish, &r);
+        if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+        if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+        git_oid(repo, "HEAD", local);
+        git_oid(origin, "refs/heads/main", received);
+        if (i == 0)
+            expect(!rc && tx_eqz(local, received) && tree_has(origin, received, file_name), names[i]);
+        else {
+            expect(rc && tx_eqz(old, received) && !tx_eqz(old, local) && has(&r, "reason=unowned-pending") &&
+                   has(&r, "next=devsvc-git-merge-or-explicit-push"), names[i]);
+            char *back[] = {"git", "reset", "-q", "--hard", old, 0};
+            check_setup(repo, back);
+        }
+        np_free(&r);
+    }
+}
 static void merge_push(const char *svc) {
     char *seed[]={"git","push","-q","origin","HEAD:main",0};
     check_setup(repo,seed);
@@ -726,6 +771,7 @@ int main(int argc,char **argv) {
     int conflict=which&&tx_eqz(which,"--conflict");
     int receipt_only=which&&tx_eqz(which,"--receipt-only");
     int paired=receipt_only||(which&&tx_eqz(which,"--commit-push"));
+    int merge_receipt=which&&tx_eqz(which,"--merge-receipt");
     int output_guard=which&&tx_eqz(which,"--output-guard");
     int merged=which&&tx_eqz(which,"--merge");
     int tail=which&&tx_eqz(which,"--tail-race");
@@ -735,18 +781,19 @@ int main(int argc,char **argv) {
     int interrupted=which&&tx_eqz(which,"--recover-published");
     int empty=which&&tx_eqz(which,"--empty");
     int gc=which&&tx_eqz(which,"--gc");
-    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
+    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!merge_receipt&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
        ((orphan||deadline_case||interrupted)&&svc)||
        sy_realpath(root,source,sizeof source)<0)return 2;
     if(cx_fmt(product,sizeof product,"%s/unisacc.com",source))return 2;
     prepare();
-    if(paired||concurrent) {
+    if(paired||concurrent||merge_receipt) {
         isolate_cli();
         if(!svc)svc=native_cli();
         /* Background commit jobs must restart the same executable under test. */
         if(sy_setenv("DEVSVC_SELF_BIN",svc,1))setup_error("fixture CLI identity");
     }
     if(paired){commit_and_push(svc,receipt_only);return finish();}
+    if(merge_receipt){merge_receipts(svc);return finish();}
     if(!svc)native_images(cas||same||output_guard);
     if(!svc&&(!which||output_guard))reject_unplanned_output();
     if(output_guard)return finish();

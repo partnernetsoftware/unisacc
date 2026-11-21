@@ -2396,6 +2396,14 @@ static void pin_prepare_kick(const char *root) {
         sy_close(fds[0]); sy_close(fds[1]);
     }
 }
+/* Use the same stable request owner as the service. An automatic PID owner
+ * has no identity across commands and therefore grants no implicit scope. */
+static int merge_owner_key(char key[65]) {
+    const char *owner = auto_owner();
+    key[0] = 0;
+    return strncmp(owner, "auto-", 5) && sy_sha256_hex(owner, strlen(owner), key) == 0;
+}
+
 static int git_merge(const char *root, int argc, char **argv) {
     const char *br = 0, *d = root, *msg = 0; char rd[PW], top[PW], cur[200], buf[1 << 15], theirs[128], old[128], nw[128], tree[128], dm[600], why[PW + 32];
     int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0;
@@ -2451,7 +2459,10 @@ static int git_merge(const char *root, int argc, char **argv) {
         if (att == 0) {   /* 受控注入点,只供 tools/check-devsvc-git.cx 夹具:落地前把 HEAD 从 old 移到给定提交一次,验证比较并交换失败后的重放;正常运行不设此变量 */
             const char *mvh = getenv("DEVSVC_TEST_MERGE_MOVE_HEAD");
             if (mvh && *mvh) { char *v2[] = {"git", "-C", rd, "update-ref", "HEAD", (char *)mvh, old, 0}; (void)runcap(v2, buf, sizeof buf); } }
-        {   char *v[] = {"git", "-C", rd, "update-ref", "-m", "devsvc git merge", "HEAD", nw, old, 0};
+        {   char mark[320], owner[65];
+            const char *note = "devsvc git merge";
+            if (!ff && merge_owner_key(owner) && !cx_fmt(mark, sizeof mark, "devsvc merge v1 %s refs/heads/%s", owner, cur)) note = mark;
+            char *v[] = {"git", "-C", rd, "update-ref", "-m", (char *)note, "HEAD", nw, old, 0};
             if (runcap(v, buf, sizeof buf) == 0) break; }
         mg_unlock(root);
         printf("GIT_MERGE_RETRY\tattempt=%d\thead-moved-from=%s\n", att + 1, old);
@@ -2570,13 +2581,14 @@ static int git_landed_receipt(const char *log, int pushing, char sha[64]) {
     if(count!=1)sha[0]=0;
     return count==1;
 }
-static int git_push_owned(const char *root, const char *cwd, int count, char **commits) {
+static int git_push_owned(const char *root, const char *cwd, int count, char **commits, int carry_merge) {
     const char *work=cwd?cwd:root,*cache;
-    char worker[PW],sync[PW],prod[PW],timeout[20],stop[32],*args[FL_MAX_ARGV];
+    char worker[PW],sync[PW],prod[PW],timeout[20],stop[32],scope[65],*args[FL_MAX_ARGV];
     long ms;
     int n=0;
     int64_t start=sy_mono_ns();
-    if(count<1||count+15>=FL_MAX_ARGV||start<0)return 2;
+    int scoped = carry_merge && merge_owner_key(scope);
+    if(count<1||count+15+2*scoped>=FL_MAX_ARGV||start<0)return 2;
     for(int i=0;i<count;i++)if(!git_full_oid(commits[i]))return 2;
     int64_t deadline=start+55000000000LL;
     push_prep_deadline=deadline;
@@ -2602,6 +2614,7 @@ static int git_push_owned(const char *root, const char *cwd, int count, char **c
     if(cwd){args[n++]="--cwd";args[n++]=(char *)cwd;}
     args[n++]="--";args[n++]="sh";args[n++]=prod;args[n++]="tools/push-replay.cx";args[n++]="--";
     args[n++]=(char *)work;args[n++]=worker;args[n++]=sync;args[n++]=stop;
+    if (scoped) { args[n++] = "--merge-owner"; args[n++] = scope; }
     for(int i=0;i<count;i++)args[n++]=commits[i];
     args[n]=0;
     x_last_out[0]=0;
@@ -2641,7 +2654,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             else {git_argerr=1;return 2;}
         }
         if(!count){git_argerr=1;return 2;}
-        return git_push_owned(root,cwd,count,commits);
+        return git_push_owned(root,cwd,count,commits,0);
     }
     if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\tstripped=%d\n", git_strip_n); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
@@ -2713,7 +2726,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             char *commits[]={owned};
             if(!owned[0]){fprintf(stderr,"GIT_PUSH_REFUSE\treason=missing-commit-receipt\n");rc=1;}
             else {
-                rc=git_push_owned(root,cwd,1,commits);
+                rc=git_push_owned(root,cwd,1,commits,1);
                 pushed=git_landed_receipt(x_last_out,1,published);
                 if(!pushed&&rc)pushed=git_landed_receipt(x_last_out,2,published);
                 if(!pushed&&!rc)rc=1;
