@@ -1,0 +1,52 @@
+struct SceneDrawBackend {
+  kind: u32;
+  target: u32;
+  packetCapacity: u32;
+  shader: u32;
+}
+
+// The same scene, geometry, and camera records feed either backend.
+// Return 0 after successful draw preparation; callers submit GPU packets
+// or present software buffers separately through the host ABI.
+native function SceneDraw_flat(backend:i64,draw:i64,stream:i64,vertices:i64,capacity:i64) i64 {
+  if(!scene_render_span(backend,SceneDrawBackend.size,4) || capacity<3 || capacity>2340 ||
+     !scene_render_span(vertices,capacity*28,4) ||
+     scene_render_overlap(backend,SceneDrawBackend.size,vertices,capacity*28)) { return 0-1; }
+  let kind=ux_u32(backend+SceneDrawBackend.kind);
+  let target=ux_u32(backend+SceneDrawBackend.target);
+  if(kind==1) {
+    let packetCapacity=ux_u32(backend+SceneDrawBackend.packetCapacity);
+    let shader=ux_u32(backend+SceneDrawBackend.shader);
+    if(!gpu_draw_range(backend,SceneDrawBackend.size,target,packetCapacity)) { return 0-1; }
+    let packed=SceneDraw_gpuFlat(target,packetCapacity,draw,stream,vertices,capacity,shader);
+    if(packed<0) { return packed; }
+    return 0;
+  }
+  if(kind!=0 || !scene_render_span(target,SceneRasterTarget.size,4) ||
+     !scene_render_span(stream,SceneDrawStream.size,4) ||
+     scene_render_overlap(target,SceneRasterTarget.size,vertices,capacity*28)) { return 0-1; }
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  if(count<3 || count>capacity || count%3!=0) { return 0-1; }
+  let w=ux_u32(target+SceneRasterTarget.width);
+  let h=ux_u32(target+SceneRasterTarget.height);
+  if(w<1 || h<1 || w>4096 || h>4096 || w*h>1048576) { return 0-1; }
+  let bytes=w*h*4;
+  let rgba=ux_u32(target+SceneRasterTarget.rgba);
+  let depth=ux_u32(target+SceneRasterTarget.depth);
+  if(!scene_render_span(rgba,bytes,4) || !scene_render_span(depth,bytes,4) ||
+     !scene_render_readable(vertices,capacity*28,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(backend,SceneDrawBackend.size,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(draw,SceneDrawItem.size,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(stream,SceneDrawStream.size,rgba,bytes,depth,bytes) ||
+     !scene_render_span(draw,SceneDrawItem.size,4)) { return 0-1; }
+  let stride=ux_u32(stream+SceneDrawStream.stride);
+  if(!scene_render_readable(ux_u32(stream+SceneDrawStream.positions),(count-1)*stride+12,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(ux_u32(stream+SceneDrawStream.color),16,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(ux_u32(stream+SceneDrawStream.viewProjection),128,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(ux_u32(draw+SceneDrawItem.worldMatrix),128,rgba,bytes,depth,bytes)) { return 0-1; }
+  let ready=SceneDraw_projectPacked(draw,stream,vertices,capacity);
+  if(ready<0) { return ready; }
+  let pixels=SceneDraw_softwareFlat(target,vertices,ready);
+  if(pixels<0) { return pixels; }
+  return 0;
+}

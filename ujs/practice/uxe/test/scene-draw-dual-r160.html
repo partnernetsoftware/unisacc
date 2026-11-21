@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferGeometry, Float32BufferAttribute, Mesh, MeshBasicMaterial, Camera, REVISION, Scene, WebGLRenderer }
+  from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=16;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true});
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1);
+  const program=await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(program,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const base=2097152;
+  const heap=new DataView(wasm.memory.buffer,base);
+  for(const [index,kind,start] of [[0,"vert",6000],[1,"frag",7500]]) {
+    const bytes=new Uint8Array(await(await fetch(`../base/gpu-flat.${kind}`)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+start,bytes.length).set(bytes);
+    heap.setUint32(5000+8*index,start,true);
+    heap.setUint32(5004+8*index,bytes.length,true);
+  }
+  const status=Number(wasm.uxe_scene_dual(BigInt(query.get("mode"))));
+  if(status<0) throw new Error(`dual scene rejected ${status}`);
+  const renderer=new WebGLRenderer({preserveDrawingBuffer:true});
+  renderer.setSize(16,16);
+  const scene=new Scene();
+  const geometry=new BufferGeometry().setAttribute("position",new Float32BufferAttribute([
+    -0.25,-0.5,0,0.25,-0.5,0,0,0.5,0,
+  ],3));
+  const mesh=new Mesh(geometry,new MeshBasicMaterial({color:0x00ff00}));
+  mesh.position.x=0.55;
+  scene.add(mesh);
+  renderer.render(scene,new Camera());
+  function samples(context) {
+    const left=new Uint8Array(4);
+    const right=new Uint8Array(4);
+    context.readPixels(3,7,1,1,context.RGBA,context.UNSIGNED_BYTE,left);
+    context.readPixels(12,7,1,1,context.RGBA,context.UNSIGNED_BYTE,right);
+    return [...left,...right];
+  }
+  const pixels=[...samples(gl),...samples(renderer.getContext())];
+  for(const x of [3,12]) pixels.push(...new Uint8Array(wasm.memory.buffer,base+8192+(8*16+x)*4,4));
+  output.textContent=JSON.stringify(pixels);
+  geometry.dispose();
+  mesh.material.dispose();
+  renderer.dispose();
+} catch(error) { output.textContent=`error:${error.message}`; }
+</script>
