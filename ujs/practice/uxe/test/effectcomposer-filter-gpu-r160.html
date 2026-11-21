@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, NearestFilter, NoBlending, REVISION, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const root = query.get("package");
+  const addon = path => import(`file://${root}/examples/jsm/${path}.js`);
+  const [{ EffectComposer }, { ShaderPass }, { CopyShader }, { ColorCorrectionShader }, { FXAAShader }] =
+    await Promise.all([
+      addon("postprocessing/EffectComposer"), addon("postprocessing/ShaderPass"), addon("shaders/CopyShader"),
+      addon("shaders/ColorCorrectionShader"), addon("shaders/FXAAShader"),
+    ]);
+  const width = 7, height = 5, samples = [24,17,6];
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  function sample(view) {
+    return samples.map(i => view.getUint32(i * 4, true));
+  }
+  function screen(gl) {
+    const rgba = new Uint8Array(width * height * 4);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    return sample(new DataView(rgba.buffer));
+  }
+  const { gl } = context();
+  const [binary, vertex, fragment] = await Promise.all([
+    fetch(`file://${query.get("wasm")}`), fetch("../base/gpu-texture.vert"), fetch("../base/gpu-texture.frag"),
+  ]);
+  let actual;
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, createGpuTargets(gl));
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(),
+    { uxe_gpu_v1: { host_gpu_submit: submit } })).instance.exports;
+  const memory = new DataView(actual.memory.buffer, 2097152);
+  for (const [i, response] of [vertex, fragment].entries()) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!bytes.length || bytes.length > 512) throw new Error("invalid texture shader source");
+    const at = 6600 + 512 * i;
+    new Uint8Array(memory.buffer, memory.byteOffset + at, bytes.length).set(bytes);
+    memory.setUint32(6500 + 8 * i, at, true);
+    memory.setUint32(6504 + 8 * i, bytes.length, true);
+  }
+  const status = actual.uxe_filter_gpu(BigInt(query.get("mode")));
+  if (status !== 0n) throw new Error(`composer filter failed ${status}`);
+  const actualColor = sample(new DataView(memory.buffer, memory.byteOffset + 5888));
+  const actualSource = sample(new DataView(memory.buffer, memory.byteOffset + 6112));
+  const actualScreen = screen(gl);
+  const reference = context();
+  const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl });
+  renderer.setSize(width, height, false);
+  const renderTarget = new WebGLRenderTarget(width, height, { minFilter: NearestFilter, magFilter: NearestFilter });
+  const composer = new EffectComposer(renderer, renderTarget);
+  const pixels = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) pixels.push(y >= x ? 240 : 40,64,128,y >= x ? 240 : 80);
+  }
+  const data = new DataTexture(Uint8Array.from(pixels), width, height);
+  data.needsUpdate = true;
+  const copy = new ShaderPass(CopyShader);
+  const color = new ShaderPass(ColorCorrectionShader);
+  const fxaa = new ShaderPass(FXAAShader);
+  for (const pass of [copy,color,fxaa]) pass.material.blending = NoBlending;
+  fxaa.uniforms.resolution.value.set(1 / width, 1 / height);
+  const original = composer.readBuffer;
+  copy.render(renderer, original, { texture: data });
+  composer.addPass(color);
+  composer.addPass(fxaa);
+  composer.render(0);
+  renderer.setRenderTarget(null);
+  function read(target) {
+    const rgba = new Uint8Array(width * height * 4);
+    renderer.readRenderTargetPixels(target, 0, 0, width, height, rgba);
+    return sample(new DataView(rgba.buffer));
+  }
+  const refScreen = screen(reference.gl);
+  const referenceColor = read(renderTarget);
+  const referenceSource = read(original);
+  composer.dispose();
+  for (const pass of [copy,color,fxaa]) pass.dispose();
+  data.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify([
+    ...actualSource, ...actualColor, ...actualScreen,
+    ...referenceSource, ...referenceColor, ...refScreen,
+  ]);
+} catch (error) {
+  output.textContent = `error:${error.message}`;
+}
+</script>
