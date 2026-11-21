@@ -28,6 +28,9 @@ static char branch_key[65], session_base[4300], session_ref[160];
 static char committer[2][4400];
 static const char *merge_owner;
 static int deadline_hit;
+typedef struct { char from[41], to[41]; } range_pair;
+static range_pair explicit_ranges[16];
+static int nexplicit, from_receipt;
 
 static int run_at(const char *cwd, char *const argv[], char *const env[], np_result *r) {
     char why[512] = "";
@@ -98,10 +101,76 @@ static int audited_merge(const char *id, const char *mark, const np_result *log)
     return 0;
 }
 
+static int ancestor(const char *a,const char *b);
+static void mark_range_covered(const char *up, const char *out_buf, int actual_n,
+                               unsigned char *covered, const char *from, const char *to) {
+    int end_idx = -1, start_idx = -1;
+    for (int i = 0; i < actual_n; i++) {
+        if (tx_eqz(out_buf + (size_t)i * 41, to)) { end_idx = i; break; }
+    }
+    if (end_idx < 0) return;
+    if (tx_eqz(from, up)) start_idx = 0;
+    else {
+        for (int i = 0; i < end_idx; i++) {
+            if (tx_eqz(out_buf + (size_t)i * 41, from)) { start_idx = i + 1; break; }
+        }
+        if (start_idx < 0 && ancestor(from, up) == 1) start_idx = 0;
+    }
+    if (start_idx >= 0) {
+        for (int i = start_idx; i <= end_idx; i++) covered[i] = 1;
+    }
+}
+
 static int owns(const char *up,const commits *owned,int first_parent,char missing[41],int *legacy) {
-    commits actual;
-    if (!owned->n || git_range(up, owned->id[owned->n - 1], first_parent, &actual)) return 0;
-    if (actual.n == owned->n && mm_same(actual.id, owned->id, (size_t)owned->n * 41)) return 1;
+    if (!owned->n) return 0;
+    char range[90];
+    if (cx_fmt(range, sizeof range, "%s..%s", up, owned->id[owned->n - 1])) return 0;
+    char *args[] = {"git", "rev-list", "--reverse", "--topo-order", range, 0, 0};
+    if (first_parent) { args[4] = "--first-parent"; args[5] = range; }
+    np_result r = {0};
+    if (call(args, 0, &r) || !r.outn || r.outn % 41 != 0) { np_free(&r); return 0; }
+    int actual_n = (int)(r.outn / 41);
+    for (int i = 0; i < actual_n; i++) {
+        if (r.out[(size_t)i * 41 + 40] != '\n') { np_free(&r); return 0; }
+        r.out[(size_t)i * 41 + 40] = 0;
+        if (!oid(r.out + (size_t)i * 41)) { np_free(&r); return 0; }
+    }
+    if (!from_receipt && !nexplicit && actual_n == owned->n &&
+        mm_same(r.out, owned->id, (size_t)owned->n * 41)) {
+        np_free(&r);
+        return 1;
+    }
+    unsigned char *covered = mm_alloc((size_t)actual_n);
+    if (!covered) { np_free(&r); return 0; }
+    memset(covered, 0, (size_t)actual_n);
+    for (int k = 0; k < nexplicit; k++)
+        mark_range_covered(up, r.out, actual_n, covered, explicit_ranges[k].from, explicit_ranges[k].to);
+    if (first_parent && merge_owner) {
+        char ff_prefix[220];
+        if (!cx_fmt(ff_prefix, sizeof ff_prefix, "refs/devsvc/merge-ff/%s/%s/", branch_key, merge_owner)) {
+            char *fv[] = {"git", "for-each-ref", "--format=%(refname)%09%(objectname)", ff_prefix, 0};
+            np_result ffr = {0};
+            if (!call(fv, 0, &ffr) && ffr.out) {
+                size_t pfx_len = strlen(ff_prefix);
+                char *line = ffr.out, *end = ffr.out + ffr.outn;
+                while (line < end) {
+                    char *nl = memchr(line, '\n', (size_t)(end - line));
+                    char *tab = nl ? memchr(line, '\t', (size_t)(nl - line)) : 0;
+                    if (nl && tab && tab - line == (long)pfx_len + 40 && nl - tab == 41 &&
+                        !memcmp(line, ff_prefix, pfx_len)) {
+                        char ffold[41], ffnw[41];
+                        mm_copy(ffold, 41, line + pfx_len, 40); ffold[40] = 0;
+                        mm_copy(ffnw, 41, tab + 1, 40); ffnw[40] = 0;
+                        if (oid(ffold) && oid(ffnw))
+                            mark_range_covered(up, r.out, actual_n, covered, ffold, ffnw);
+                    }
+                    if (!nl) break;
+                    line = nl + 1;
+                }
+            }
+            np_free(&ffr);
+        }
+    }
     np_result log = {0};
     char mark[350];
     int have = 0, next = 0;
@@ -111,16 +180,26 @@ static int owns(const char *up,const commits *owned,int first_parent,char missin
         char *v[] = {"git", "reflog", "show", "--format=%H%x09%gs", "--max-count=256", "HEAD", 0};
         have = call(v, 0, &log) == 0;
     }
-    for (int i = 0; i < actual.n; i++) {
-        if (next < owned->n && tx_eqz(actual.id[i], owned->id[next])) next++;
-        else if (!(have && audited_merge(actual.id[i], mark, &log))) {
-            mm_copy(missing, 41, actual.id[i], 41);
-            *legacy = have && audited_merge(actual.id[i], "devsvc git merge", &log);
+    for (int i = 0; i < actual_n; i++) {
+        const char *cid = r.out + (size_t)i * 41;
+        int matched_owned = 0;
+        if (next < owned->n && tx_eqz(cid, owned->id[next])) {
+            next++;
+            if (!from_receipt) matched_owned = 1;
+        }
+        if (covered[i] || matched_owned) continue;
+        if (!(have && audited_merge(cid, mark, &log))) {
+            mm_copy(missing, 41, cid, 41);
+            *legacy = have && audited_merge(cid, "devsvc git merge", &log);
+            mm_free(covered);
             np_free(&log);
+            np_free(&r);
             return 0;
         }
     }
+    mm_free(covered);
     np_free(&log);
+    np_free(&r);
     return next == owned->n;
 }
 static int ancestor(const char *a,const char *b) {
@@ -731,19 +810,37 @@ static int run_push(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 6 || argc > OWN_MAX + 7 || sy_realpath(argv[1], root, sizeof root) < 0 ||
+    if (argc < 6 || sy_realpath(argv[1], root, sizeof root) < 0 ||
         argv[2][0]!='/'||argv[3][0]!='/') return 2;
     worker=argv[2];syncer=argv[3];
     if (getenv("GIT_DIR")||getenv("GIT_WORK_TREE")||getenv("GIT_INDEX_FILE")||getenv("GIT_OBJECT_DIRECTORY"))
         return 2;
     int start = 5;
-    if (argc >= 8 && tx_eqz(argv[start], "--merge-owner")) {
-        if (strlen(argv[start + 1]) != 64 || strspn(argv[start + 1], "0123456789abcdef") != 64) return 2;
-        merge_owner = argv[start + 1];
-        start += 2;
+    while (start < argc && argv[start][0] == '-') {
+        if (tx_eqz(argv[start], "--merge-owner") && start + 1 < argc) {
+            if (strlen(argv[start + 1]) != 64 || strspn(argv[start + 1], "0123456789abcdef") != 64) return 2;
+            merge_owner = argv[start + 1];
+            start += 2;
+        } else if (tx_eqz(argv[start], "--from-receipt")) {
+            from_receipt = 1;
+            start++;
+        } else if (tx_eqz(argv[start], "--range") && start + 1 < argc) {
+            const char *rg = argv[start + 1];
+            if (nexplicit >= 16 || strlen(rg) != 82 || rg[40] != '.' || rg[41] != '.') return 2;
+            mm_copy(explicit_ranges[nexplicit].from, 41, rg, 40); explicit_ranges[nexplicit].from[40] = 0;
+            mm_copy(explicit_ranges[nexplicit].to, 41, rg + 42, 40); explicit_ranges[nexplicit].to[40] = 0;
+            if (!oid(explicit_ranges[nexplicit].from) || !oid(explicit_ranges[nexplicit].to)) return 2;
+            nexplicit++;
+            start += 2;
+        } else return 2;
     }
     requested.n=argc-start;
-    if (requested.n > OWN_MAX) return 2;
+    if (requested.n < 1) return 2;
+    if (requested.n > OWN_MAX) {
+        fprintf(stderr, "PUSH_REPLAY_REFUSE\treason=too-many-commits\tcount=%d\tmax=%d\tnext=devsvc git push --range A..B\n",
+                requested.n, OWN_MAX);
+        return 2;
+    }
     for (int i = 0; i < requested.n; i++) {
         if (!oid(argv[i + start])) return 2;
         mm_copy(requested.id[i],41,argv[i + start],41);
