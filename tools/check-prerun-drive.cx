@@ -556,6 +556,73 @@ int main(void) {
                ckk_has(out, CPD_OUT, "MARKER=CANDIDATE_APE_MARKER_V088"),
                "prebuild-self-uses-candidate-and-qualify-layout-git: warms candidate APE inside qualify layout private .git");
         }
+
+        /* Early canary scheduling (ri-image-*, lane-key-probes in W0001 before heavy netregen) +
+         * first product-qualification FAIL stops immediately even under --keep-going */
+        {
+            char cids[CPD_PW], ctimes[CPD_PW], cplan[CPD_PW], cwin[CPD_PW], cmock[CPD_PW], cw2[CPD_PW];
+            const char *f_cids =
+                "light-warm\n"
+                "netregen-small-lnx-x86_64\n"
+                "normal-late\n"
+                "lane-key-probes\n"
+                "ri-image-single\n"
+                "ri-image-pem\n"
+                "ri-image-multi\n";
+            const char *f_ctimes =
+                "light-warm\t800\n"
+                "netregen-small-lnx-x86_64\t35000\n"
+                "normal-late\t4000\n"
+                "lane-key-probes\t3000\n"
+                "ri-image-single\t2000\n"
+                "ri-image-pem\t2000\n"
+                "ri-image-multi\t2000\n";
+            if (cx_fmt(cids, sizeof cids, "%s/can-ids.txt", work) ||
+                cx_fmt(ctimes, sizeof ctimes, "%s/can-times.tsv", work) ||
+                cx_fmt(cplan, sizeof cplan, "%s/can-plan", work) ||
+                cx_fmt(cwin, sizeof cwin, "%s/windows.tsv", cplan) ||
+                cx_fmt(cmock, sizeof cmock, "%s/can-mock.sh", work) ||
+                cx_fmt(cw2, sizeof cw2, "%s/strict-W0002.tsv", cplan) ||
+                cx_write(cids, f_cids, strlen(f_cids)) ||
+                cx_write(ctimes, f_ctimes, strlen(f_ctimes))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                cwd, cwd, cids, ctimes, cplan)) return 2;
+            int rc_cp = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            size_t cwn = 0;
+            char *cwb = (char *)cx_read(cwin, &cwn);
+            ck(rc_cp == 0 &&
+               rows_have(cwb, cwn, "W0000\t1\twarmup\t1\tlight-warm\n") &&
+               rows_have(cwb, cwn, "W0001\t2\tnormal\t4\tlane-key-probes,ri-image-single,ri-image-pem,ri-image-multi\n") &&
+               rows_have(cwb, cwn, "W0002\t1\theavy\t1\tnetregen-small-lnx-x86_64\n"),
+               "early-canary-before-heavy: schedules ri-image-* and lane-key-probes in W0001 ahead of heavy netregen");
+            free(cwb);
+
+            const char *cmock_s =
+                "#!/bin/sh\n"
+                "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+                "echo \"# devsvc qualify\" > \"$out\"\n"
+                "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+                "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+                "  if [ \"$id\" = ri-image-single ]; then\n"
+                "    printf 'ri-image-single\\tproduct-qualification\\tFAIL\\t2\\taaa\\t2000\\t1.0\\t0\\tcapture-ledger-write\\n' >> \"$out\"\n"
+                "  else\n"
+                "    printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+                "  fi\n"
+                "done\n"
+                "case \"$ids\" in *ri-image-single*) exit 1 ;; esac\n"
+                "exit 0\n";
+            if (cx_write(cmock, cmock_s, strlen(cmock_s))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-jobs 2 --max-retries 1 --keep-going",
+                cwd, cwd, work, cplan, cmock)) return 2;
+            int rc_cr = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc_cr == 1 &&
+               ckk_has(out, CPD_OUT, "PRERUN_PRODUCT_RED_STOP\tbatch=ri-image-single\tdomain=product-qualification\tstatus=FAIL\trc=2\t") &&
+               ckk_has(out, CPD_OUT, "PRERUN_STOP\tbatch=ri-image-single\t") &&
+               sy_exists(cw2) == 0,
+               "first-product-qualification-fail-stops-under-keep-going: halts at W0001 product FAIL without dispatching W0002");
+        }
     }
 
     {

@@ -52,7 +52,9 @@ typedef struct {
 
 typedef struct {
     char id[128];
+    char domain[64];
     char status[24];
+    int rc;
     char note[256];
     int seen;
     int had_fail;
@@ -89,6 +91,10 @@ static void pd_mkdirs(const char *dir) {
 static int pd_starts(const char *s, const char *pre) {
     size_t pl = strlen(pre);
     return strlen(s) >= pl && memcmp(s, pre, pl) == 0;
+}
+
+static int pd_is_early_canary_id(const char *id) {
+    return pd_starts(id, "ri-image-") || tx_eqz(id, "ri-route-refuse") || tx_eqz(id, "lane-key-probes");
 }
 
 static int pd_is_heavy_id(const char *id) {
@@ -406,7 +412,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         if (pd_has_times && warmup_n == 1) {
             int best = -1;
             for (i = 0; i < pd_nids; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].priority && pd_warmup_fits(i, 0)) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
                     if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
                 }
             }
@@ -424,7 +430,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
             }
         } else {
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].priority && pd_warmup_fits(i, cost)) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
                     cost += pd_ids[i].time_ms;
@@ -439,6 +445,21 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
             }
         }
         if (w->count > 0) { pd_nwins++; w_warmup = 1; }
+    }
+
+    /* 1b. Early product-qualification canaries (ri-image-*, ri-route-refuse, lane-key-probes):
+     *     pack immediately after W0000 warmup (before 70+ heavy netregen windows) so any product
+     *     or lane table regression fails within the first 2 minutes instead of after 45 minutes. */
+    {
+        static int can_rem[PD_MAX_IDS];
+        int ncan = 0;
+        for (i = 0; i < pd_nids; i++) {
+            if (!used[i] && !pd_ids[i].heavy && pd_is_early_canary_id(pd_ids[i].id)) {
+                can_rem[ncan++] = i;
+                used[i] = 1;
+            }
+        }
+        pd_pack_normal_group(can_rem, ncan, win_size, &w_normal);
     }
 
     /* 2. Priority batches first (tier 2 = explicit risk/non-PASS first, tier 1 = secondary platform priority;
@@ -627,6 +648,16 @@ static void pd_ingest_strict_buf(const char *b, int64_t n) {
         if (tx_eqz(st, "FAIL")) s->had_fail = 1;
         s->seen++;
         cx_fmt(s->status, sizeof s->status, "%s", st);
+        if (clens[1] > 0 && clens[1] < (int64_t)sizeof s->domain) {
+            mm_copy(s->domain, sizeof s->domain, cols[1], (size_t)clens[1]);
+            s->domain[clens[1]] = 0;
+        }
+        if (nc >= 4 && clens[3] > 0 && clens[3] < 12) {
+            char rcb[16];
+            mm_copy(rcb, sizeof rcb, cols[3], (size_t)clens[3]);
+            rcb[clens[3]] = 0;
+            s->rc = atoi(rcb);
+        }
         if (nc >= 9 && clens[8] > 0) {
             size_t nl = (size_t)(clens[8] < 250 ? clens[8] : 250);
             mm_copy(s->note, sizeof s->note, cols[8], nl);
@@ -825,9 +856,17 @@ static int pd_recover_serial(const char *root, const char *cand, const char *out
         }
         if (matched && (matched == 1 || pd_keep_going)) {
             if (sy_write_atomic(done, "SERIAL_DONE\n", 12, 0644)) return -1;
-            if (matched == 2)
+            if (matched == 2) {
+                if (tx_eqz(pd_states[0].domain, "product-qualification") && tx_eqz(pd_states[0].status, "FAIL")) {
+                    printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
+                           ids[i], pd_states[0].rc, tries, part, part, pd_states[0].raw_line);
+                    printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n",
+                           ids[i], tries, part, pd_states[0].raw_line);
+                    return 2;
+                }
                 printf("PRERUN_KEEP_GOING\tbatch=%s\tretries=%d\twindow=%s\traw=serial-recovery-%s\n",
                        ids[i], tries, part, pd_states[0].status);
+            }
         } else {
             printf("%s\tbatch=%s\twindow=%s\traw=serial-recovery-incomplete\n",
                    pd_keep_going ? "PRERUN_INCOMPLETE" : "PRERUN_STOP", ids[i], part);
@@ -1074,6 +1113,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 int result = pd_recover_serial(root, cand, out_dir, mock_runner, wid,
                                                win_ids, passed_flags, nwin, max_retries, resume);
                 if (result < 0) { mm_free(wb); return pd_refuse("serial-recovery-receipt-write"); }
+                if (result == 2) { mm_free(wb); return 1; }
                 if (result == 0) {
                     if (sy_write_atomic(donep, "SERIAL_DONE\n", 12, 0644)) {
                         mm_free(wb); return pd_refuse("serial-window-receipt-write");
@@ -1106,17 +1146,22 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
 
             unsigned char *ob = 0; int64_t on = 0;
-            int has_nonpass = 0;
+            int has_nonpass = 0, bad_rc = rc, bad_prod_fail = 0;
             char bad_id[128] = {0}, bad_raw[1024] = {0};
             pd_nstates = 0;
             if (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0) {
                 pd_ingest_strict_buf((const char *)ob, on);
                 for (int k = 0; k < pd_nstates; k++) {
                     if (!tx_eqz(pd_states[k].status, "PASS")) {
-                        has_nonpass = 1;
-                        cx_fmt(bad_id, sizeof bad_id, "%s", pd_states[k].id);
-                        cx_fmt(bad_raw, sizeof bad_raw, "%s", pd_states[k].raw_line);
-                        break;
+                        int is_pf = (tx_eqz(pd_states[k].domain, "product-qualification") && tx_eqz(pd_states[k].status, "FAIL"));
+                        if (!has_nonpass || (is_pf && !bad_prod_fail)) {
+                            has_nonpass = 1;
+                            bad_prod_fail = is_pf;
+                            bad_rc = pd_states[k].rc;
+                            cx_fmt(bad_id, sizeof bad_id, "%s", pd_states[k].id);
+                            cx_fmt(bad_raw, sizeof bad_raw, "%s", pd_states[k].raw_line);
+                        }
+                        if (bad_prod_fail) break;
                     }
                 }
                 mm_free(ob);
@@ -1153,6 +1198,13 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             if (ridx >= 0) retry_counts[ridx]++;
             int cnt = (ridx >= 0) ? retry_counts[ridx] : attempt;
             if (cnt >= max_retries) {
+                if (bad_prod_fail) {
+                    printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
+                           bad_id, bad_rc, cnt, wid, wid, bad_raw);
+                    printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n", bad_id, cnt, wid, bad_raw);
+                    mm_free(wb);
+                    return 1;
+                }
                 if (pd_keep_going) {
                     if (timed) {
                         int missing = 0;
