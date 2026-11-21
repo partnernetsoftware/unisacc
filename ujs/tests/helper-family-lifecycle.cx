@@ -1,0 +1,67 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+// Each case constructs one live Helper and calls its production disposal entry.
+// The r160 fixture counts one dispose event per resource reference.
+static const struct {
+    const char *type;
+    const char *setup;
+} helpers[]={
+    {"AxesHelper", "let init=AxesHelper_init(0,128,256,2.0);"},
+    {"BoxHelper", "let init=BoxHelper_init(0,128,256,384,16776960);"},
+    {"Box3Helper", "let init=Box3Helper_init(0,128,256,384);"},
+    {"CameraHelper",
+        "let a=ux_f64_put(1536,1.0);let b=ux_f64_put(1576,1.0);"
+        "let c=ux_f64_put(1616,1.0);let d=ux_f64_put(1656,1.0);"
+        "let init=CameraHelper_init(0,128,768,1408,1536);"},
+    {"DirectionalLightHelper",
+        "let a=ux_f64_put(512+96,3.0);let init=DirectionalLightHelper_init(0,128,256,384,512,2.0,640,0-1);"},
+    {"GridHelper", "let init=GridHelper_init(0,128,512,16,96,8.0,2);"},
+    {"PlaneHelper", "let init=PlaneHelper_init(0,128,256,4.0,16776960);"},
+    {"SkeletonHelper", "let init=SkeletonHelper_init(0,128,256,512,384,0);"},
+    {"SpotLightHelper",
+        "let a=ux_f64_put(1152+96,3.0);let init=SpotLightHelper_init(0,128,1024,1152,8.0,0.7853981633974483,1280,0-1);"},
+    {"HemisphereLightHelper",
+        "let a=ux_f64_put(1728+96,3.0);let b=GeometryBuffers_init(128,256,24,0,0);"
+        "let init=HemisphereLightHelper_init(0,128,1024,1344,1728,2.0,1856,0-1);"},
+    {"PointLightHelper", "let init=PointLightHelper_init(0,128,256,768,896,2.0,1024,0-1);"},
+    {"PolarGridHelper", "let init=PolarGridHelper_init(0,128,512,896,4.0,4,2,4);"},
+};
+
+static int run(const char *fixture,const char *const *modules,int first,int count,int mutate) {
+    enum { max_cases=5 };
+    char body[max_cases][640];
+    const char *cases[max_cases];
+    double gold[max_cases];
+    for(int i=0;i<count;i++) {
+        const char *type=helpers[first+i].type;
+        const int n=tx_snprintf(body[i],sizeof body[i],
+            "%slet before=ux_u32(%s.active);let status=%s_dispose(0);"
+            "let after=ux_u32(%s.active);let repeated=%s_dispose(0);"
+            "if(init!=0 || before!=1 || status!=0 || after!=0 || repeated!=0-1) { return 0.0; }"
+            "return 1.0;",helpers[first+i].setup,type,type,type,type);
+        if(n<0 || n>=(int)sizeof body[i]) return 2;
+        cases[i]=body[i];
+        gold[i]=1;
+    }
+    return g_wasm_batch_page(fixture,fixture,
+        "ujs/practice/uxe/test/wasm-batch.html",modules,"",cases,gold,count,mutate?0:-1,
+        "let init=AxesHelper_init(0,128,256,2.0);return 1.0-ux_u32(AxesHelper.active);");
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *basic[]={"helper-buffers","axeshelper","box3helper","boxhelper","camerahelper",0};
+    const char *lines[]={"f64-math","helper-buffers","helper-geometry","lighthelper-common",
+        "directionallighthelper","gridhelper","planehelper","skeletonhelper","spotlighthelper",0};
+    const char *curved[]={"f64-math","geometry-buffers","polyhedrongeometry","octahedrongeometry","spheregeometry",
+        "lighthelper-common","hemispherelighthelper","pointlighthelper","polargridhelper",0};
+    int failed=run("helper-family-lifecycle",basic,0,4,mutate);
+    if(mutate) return failed;
+    failed+=run("helper-family-lines",lines,4,5,0);
+    failed+=run("helper-family-curved",curved,9,3,0);
+    printf("HELPER_FAMILY_DISPOSE cases=%d failed=%d\n",(int)(sizeof helpers/sizeof helpers[0]),failed);
+    return failed!=0;
+}

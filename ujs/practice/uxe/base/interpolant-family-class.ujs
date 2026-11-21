@@ -32,8 +32,10 @@ struct InterpolantNumericView {
 
 // Match AnimationArrayView kinds: dense Number Array, Float32Array, Float64Array.
 native function interpolant_width(kind:i64) i64 {
-  if(kind==9) { return 4; }
   if(kind==0 || kind==10) { return 8; }
+  if(kind>=1 && kind<=3) { return 1; }
+  if(kind>=4 && kind<=5) { return 2; }
+  if(kind==6 || kind==7 || kind==9) { return 4; }
   return 0;
 }
 
@@ -41,14 +43,45 @@ native function interpolant_span(at:i64,count:i64,width:i64) i64 {
   return width>0 && at>=0 && at%width==0 && count>=0 && count<=(6291456-at)/width && at<=6291456;
 }
 
-native function interpolant_read(at:i64,width:i64) f64 {
-  if(width==4) { return ux_f32(at); }
-  return ux_f64(at);
+native function interpolant_read(at:i64,kind:i64) f64 {
+  if(kind==0 || kind==10) { return ux_f64(at); }
+  if(kind==9) { return ux_f32(at); }
+  if(kind==6) { return 0.0+ux_u32(at); }
+  if(kind==7) { return 0.0+ux_i32(at); }
+  if(kind==4 || kind==5) {
+    let word=ux_u16(at);
+    if(kind==5 && word>=32768) { word=word-65536; }
+    return 0.0+word;
+  }
+  let byte=ux_u8(at);
+  if(kind==2 && byte>=128) { byte=byte-256; }
+  return 0.0+byte;
 }
 
-native function interpolant_write(at:i64,width:i64,value:f64) i64 {
-  if(width==4) { return ux_f32_put(at,value); }
-  return ux_f64_put(at,value);
+native function interpolant_write(at:i64,kind:i64,value:f64) i64 {
+  if(kind==0 || kind==10) { return ux_f64_put(at,value); }
+  if(kind==9) { return ux_f32_put(at,value); }
+  if(kind==3) {
+    if(value!=value || value<=0.0) { return ux_u8_put(at,0); }
+    if(value>=255.0) { return ux_u8_put(at,255); }
+    let whole=f64_floor_i64(value);
+    let rest=value-whole;
+    if(rest>0.5 || (rest==0.5 && whole%2!=0)) { whole=whole+1; }
+    return ux_u8_put(at,whole);
+  }
+  let word=0;
+  let limit=1099511627776.0*17592186044416.0;
+  if(value==value && value<limit && value>0.0-limit) {
+    let magnitude=value;
+    let sign=1;
+    if(value<0.0) { magnitude=0.0-value; sign=0-1; }
+    let blocks=f64_floor_i64(magnitude/4294967296.0);
+    word=sign*f64_floor_i64(magnitude-blocks*4294967296.0);
+  }
+  if(word<0) { word=word+4294967296; }
+  if(kind<=2) { return ux_u8_put(at,word%256); }
+  if(kind<=5) { return ux_u16_put(at,word%65536); }
+  return ux_u32_put(at,word);
 }
 
 native function interpolant_numeric_shape(view:i64,timeKind:i64,valueKind:i64,inputBytes:i64) i64 {
@@ -75,10 +108,10 @@ native function InterpolantNumericView_init(view:i64,times:i64,values:i64,count:
      !interpolant_span(times,count,tw) || !interpolant_span(values,count*stride,vw) ||
      animation_overlap(view,bytes,times,count*tw) ||
      animation_overlap(view,bytes,values,count*stride*vw)) { return 0-1; }
-  let last=interpolant_read(times,tw);
+  let last=interpolant_read(times,timeKind);
   let i=0;
   while(i<count) {
-    let t=interpolant_read(times+i*tw,tw);
+    let t=interpolant_read(times+i*tw,timeKind);
     if(t-t!=0.0 || t<last) { return 0-2; }
     last=t; i=i+1;
   }
@@ -123,7 +156,7 @@ native function interpolant_init(state:i64,view:i64,result:i64,kind:i64,timeKind
     result=state+InterpolantState.size;
   }
   let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,inputBytes);
-  if(stride<1 || kind<0 || kind>3 || (kind==3 && stride%4!=0)) { return 0-1; }
+  if(stride<1 || kind<0 || kind>4 || (kind==3 && stride%4!=0)) { return 0-1; }
   let v=ux_u32_put(state+InterpolantState.view,view);
   let k=ux_u32_put(state+InterpolantState.kind,kind+1);
   let r=ux_u32_put(state+InterpolantState.result,result);
@@ -142,10 +175,15 @@ native function interpolant_init(state:i64,view:i64,result:i64,kind:i64,timeKind
   let bytes=stride*interpolant_width(valueKind);
   let i=0;
   while(i<bytes && (explicit==0 || result!=state+InterpolantState.size)) {
-    let clear=ux_u32_put(state+InterpolantState.size+i,0);
-    i=i+4;
+    let clear=ux_u8_put(state+InterpolantState.size+i,0);
+    i=i+1;
   }
   return state;
+}
+
+// The base class copies boundary samples and has no interior interpolation.
+native function Interpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,4,9,9,9,AnimationSamples.size);
 }
 
 native function LinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
@@ -161,7 +199,7 @@ native function QuatLinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
   return interpolant_init(state,view,result,3,9,9,9,AnimationSamples.size);
 }
 
-// Kinds 0, 1, 2 and 3 are Linear, Discrete, Cubic and QuaternionLinear.
+// Kinds 0 through 4 are Linear, Discrete, Cubic, QuaternionLinear and abstract base.
 native function Interpolant_initNumeric(state:i64,view:i64,result:i64,resultKind:i64,kind:i64) i64 {
   if(!animation_span(view,InterpolantNumericView.size)) { return 0-1; }
   return interpolant_init(state,view,result,kind,ux_u32(view+InterpolantNumericView.timeKind),
@@ -186,7 +224,7 @@ native function interpolant_settings_ok(state:i64,view:i64,result:i64,stride:i64
 native function interpolant_alive(state:i64) i64 {
   if(!animation_span(state,InterpolantState.size) || state%8!=0) { return 0; }
   let kind=ux_u32(state+InterpolantState.kind);
-  return kind>=1 && kind<=4;
+  return kind>=1 && kind<=5;
 }
 
 native function Interpolant_setSettings(state:i64,settings:i64) i64 {
@@ -233,27 +271,31 @@ native function Interpolant_setResult(state:i64,result:i64) i64 {
   return Interpolant_setResultKind(state,result,kind);
 }
 
-native function interpolant_copy_row(result:i64,row:i64,count:i64,rw:i64,vw:i64) i64 {
-  if(rw==vw) { return uxe_copy_record(result,row,count*vw); }
+native function interpolant_copy_row(result:i64,row:i64,count:i64,resultKind:i64,valueKind:i64) i64 {
+  let rw=interpolant_width(resultKind);
+  let vw=interpolant_width(valueKind);
+  if(resultKind==valueKind || (rw==8 && vw==8)) { return uxe_copy_record(result,row,count*vw); }
   let i=0;
   while(i<count) {
-    let saved=interpolant_write(result+i*rw,rw,interpolant_read(row+i*vw,vw));
+    let saved=interpolant_write(result+i*rw,resultKind,interpolant_read(row+i*vw,valueKind));
     i=i+1;
   }
   return result;
 }
 
-native function interpolant_upper(times:i64,count:i64,width:i64,t:f64) i64 {
+native function interpolant_upper(times:i64,count:i64,timeKind:i64,t:f64) i64 {
+  let width=interpolant_width(timeKind);
   let lo=0; let hi=count;
   while(lo<hi) {
     let mid=(lo+hi)/2;
-    if(t<interpolant_read(times+mid*width,width)) { hi=mid; }
+    if(t<interpolant_read(times+mid*width,timeKind)) { hi=mid; }
     else { lo=mid+1; }
   }
   return lo;
 }
 
-native function interpolant_cubic_seek(state:i64,times:i64,count:i64,upper:i64,settings:i64,tw:i64) i64 {
+native function interpolant_cubic_seek(state:i64,times:i64,count:i64,upper:i64,settings:i64,timeKind:i64) i64 {
+  let tw=interpolant_width(timeKind);
   let start=ux_u32(state+InterpolantState.defaultStart);
   let end=ux_u32(state+InterpolantState.defaultEnd);
   if(settings>=0) {
@@ -261,23 +303,23 @@ native function interpolant_cubic_seek(state:i64,times:i64,count:i64,upper:i64,s
     end=ux_u32(settings+InterpolantSettings.endingEnd);
   }
   let previous=upper-2; let next=upper+1;
-  let t0=interpolant_read(times+(upper-1)*tw,tw);
-  let t1=interpolant_read(times+upper*tw,tw);
+  let t0=interpolant_read(times+(upper-1)*tw,timeKind);
+  let t1=interpolant_read(times+upper*tw,timeKind);
   let past=t1; let future=t0;
-  if(previous>=0) { past=interpolant_read(times+previous*tw,tw); }
+  if(previous>=0) { past=interpolant_read(times+previous*tw,timeKind); }
   else {
     previous=upper;
     if(start==2401) { past=2.0*t0-t1; }
     if(start==2402) {
       previous=count-2;
-      past=t0+interpolant_read(times+previous*tw,tw)-interpolant_read(times+(previous+1)*tw,tw);
+      past=t0+interpolant_read(times+previous*tw,timeKind)-interpolant_read(times+(previous+1)*tw,timeKind);
     }
   }
-  if(next<count) { future=interpolant_read(times+next*tw,tw); }
+  if(next<count) { future=interpolant_read(times+next*tw,timeKind); }
   else {
     next=upper-1;
     if(end==2401) { next=upper; future=2.0*t1-t0; }
-    if(end==2402) { next=1; future=t1+interpolant_read(times+tw,tw)-interpolant_read(times,tw); }
+    if(end==2402) { next=1; future=t1+interpolant_read(times+tw,timeKind)-interpolant_read(times,timeKind); }
   }
   let half=(t1-t0)*0.5;
   let p=ux_u32_put(state+InterpolantState.previous,previous);
@@ -287,7 +329,9 @@ native function interpolant_cubic_seek(state:i64,times:i64,count:i64,upper:i64,s
   return upper;
 }
 
-native function interpolant_cubic_output(state:i64,values:i64,stride:i64,upper:i64,result:i64,p:f64,vw:i64,rw:i64) i64 {
+native function interpolant_cubic_output(state:i64,values:i64,stride:i64,upper:i64,result:i64,p:f64,valueKind:i64,resultKind:i64) i64 {
+  let vw=interpolant_width(valueKind);
+  let rw=interpolant_width(resultKind);
   let previous=ux_u32(state+InterpolantState.previous)*stride*vw;
   let next=ux_u32(state+InterpolantState.next)*stride*vw;
   let wp=ux_f64(state+InterpolantState.weightPrevious);
@@ -301,18 +345,20 @@ native function interpolant_cubic_output(state:i64,values:i64,stride:i64,upper:i
   let lane=0;
   while(lane<stride) {
     let at=values+lane*vw;
-    let cell=interpolant_write(result+lane*rw,rw,sP*interpolant_read(at+previous,vw)+s0*interpolant_read(at+offset,vw)+
-      s1*interpolant_read(at+offset+stride*vw,vw)+sN*interpolant_read(at+next,vw));
+    let cell=interpolant_write(result+lane*rw,resultKind,sP*interpolant_read(at+previous,valueKind)+s0*interpolant_read(at+offset,valueKind)+
+      s1*interpolant_read(at+offset+stride*vw,valueKind)+sN*interpolant_read(at+next,valueKind));
     lane=lane+1;
   }
   return result;
 }
 
-native function interpolant_quaternion_flat(result:i64,lo:i64,hi:i64,t:f64,vw:i64,rw:i64) i64 {
-  if(t==0.0) { return interpolant_copy_row(result,lo,4,rw,vw); }
-  if(t==1.0) { return interpolant_copy_row(result,hi,4,rw,vw); }
-  let x=interpolant_read(lo,vw); let y=interpolant_read(lo+vw,vw); let z=interpolant_read(lo+2*vw,vw); let w=interpolant_read(lo+3*vw,vw);
-  let a=interpolant_read(hi,vw); let b=interpolant_read(hi+vw,vw); let c=interpolant_read(hi+2*vw,vw); let d=interpolant_read(hi+3*vw,vw);
+native function interpolant_quaternion_flat(result:i64,lo:i64,hi:i64,t:f64,valueKind:i64,resultKind:i64) i64 {
+  let vw=interpolant_width(valueKind);
+  let rw=interpolant_width(resultKind);
+  if(t==0.0) { return interpolant_copy_row(result,lo,4,resultKind,valueKind); }
+  if(t==1.0) { return interpolant_copy_row(result,hi,4,resultKind,valueKind); }
+  let x=interpolant_read(lo,valueKind); let y=interpolant_read(lo+vw,valueKind); let z=interpolant_read(lo+2*vw,valueKind); let w=interpolant_read(lo+3*vw,valueKind);
+  let a=interpolant_read(hi,valueKind); let b=interpolant_read(hi+vw,valueKind); let c=interpolant_read(hi+2*vw,valueKind); let d=interpolant_read(hi+3*vw,valueKind);
   if(x!=a || y!=b || z!=c || w!=d) {
     let s=1.0-t;
     let cos=x*a+y*b+z*c+w*d;
@@ -332,11 +378,53 @@ native function interpolant_quaternion_flat(result:i64,lo:i64,hi:i64,t:f64,vw:i6
       x=x*length; y=y*length; z=z*length; w=w*length;
     }
   }
-  let u=interpolant_write(result,rw,x);
-  let v=interpolant_write(result+rw,rw,y);
-  let o=interpolant_write(result+2*rw,rw,z);
-  let p=interpolant_write(result+3*rw,rw,w);
+  let u=interpolant_write(result,resultKind,x);
+  let v=interpolant_write(result+rw,resultKind,y);
+  let o=interpolant_write(result+2*rw,resultKind,z);
+  let p=interpolant_write(result+3*rw,resultKind,w);
   return result;
+}
+
+native function Interpolant_copySampleValue(state:i64,index:i64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  let view=ux_u32(state+InterpolantState.view);
+  let result=ux_u32(state+InterpolantState.result);
+  let timeKind=ux_u32(state+InterpolantState.timeKind);
+  let valueKind=ux_u32(state+InterpolantState.valueKind);
+  let resultKind=ux_u32(state+InterpolantState.resultKind);
+  let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,ux_u32(state+InterpolantState.inputBytes));
+  if(stride<1 || index<0 || index>=ux_u32(view+AnimationSamples.count)) { return 0-1; }
+  let vw=interpolant_width(valueKind);
+  let src=ux_u32(view+AnimationSamples.values)+index*stride*vw;
+  return interpolant_copy_row(result,src,stride,resultKind,valueKind);
+}
+
+// Product-defined evaluators use the same interval and cache as built-in kinds.
+native function interpolant_locate(state:i64,times:i64,count:i64,timeKind:i64,t:f64) i64 {
+  let tw=interpolant_width(timeKind);
+  let cached=ux_u32(state+InterpolantState.cached);
+  if(cached>count) { return 0-1; }
+  let hit=0;
+  if(cached==0) { hit=t<interpolant_read(times,timeKind); }
+  else if(cached==count) { hit=!(t<interpolant_read(times+(count-1)*tw,timeKind)); }
+  else { hit=t>=interpolant_read(times+(cached-1)*tw,timeKind) && t<interpolant_read(times+cached*tw,timeKind); }
+  if(hit) { return cached*2; }
+  let upper=interpolant_upper(times,count,timeKind,t);
+  let saved=ux_u32_put(state+InterpolantState.cached,upper);
+  return upper*2+(upper>0 && upper<count);
+}
+
+// Returns twice the upper index plus a bit requesting intervalChanged_.
+// Upper indices zero and count denote boundary copies with no change callback.
+native function Interpolant_locate(state:i64,t:f64) i64 {
+  if(!interpolant_alive(state) || ux_u32(state+InterpolantState.kind)!=5) { return 0-1; }
+  let view=ux_u32(state+InterpolantState.view);
+  let timeKind=ux_u32(state+InterpolantState.timeKind);
+  let stride=interpolant_numeric_shape(view,timeKind,ux_u32(state+InterpolantState.valueKind),
+    ux_u32(state+InterpolantState.inputBytes));
+  if(stride<1) { return 0-1; }
+  return interpolant_locate(state,ux_u32(view+AnimationSamples.times),
+    ux_u32(view+AnimationSamples.count),timeKind,t);
 }
 
 native function Interpolant_evaluate(state:i64,t:f64) i64 {
@@ -350,42 +438,35 @@ native function Interpolant_evaluate(state:i64,t:f64) i64 {
   let resultKind=ux_u32(state+InterpolantState.resultKind);
   let tw=interpolant_width(timeKind); let vw=interpolant_width(valueKind); let rw=interpolant_width(resultKind);
   let stride=interpolant_storage(state,view,result,timeKind,valueKind,resultKind,ux_u32(state+InterpolantState.inputBytes));
-  if(stride<1 || kind>3 || (kind==3 && stride%4!=0) ||
+  if(stride<1 || kind>4 || (kind==3 && stride%4!=0) ||
      !interpolant_settings_ok(state,view,result,stride,settings,resultKind)) { return 0-1; }
   let times=ux_u32(view+AnimationSamples.times);
   let values=ux_u32(view+AnimationSamples.values);
   let count=ux_u32(view+AnimationSamples.count);
-  let cached=ux_u32(state+InterpolantState.cached);
-  if(cached>count) { return 0-1; }
-  let upper=cached;
-  let hit=0;
-  if(cached==0) { hit=t<interpolant_read(times,tw); }
-  else if(cached==count) { hit=!(t<interpolant_read(times+(count-1)*tw,tw)); }
-  else { hit=t>=interpolant_read(times+(cached-1)*tw,tw) && t<interpolant_read(times+cached*tw,tw); }
-  if(!hit) {
-    upper=interpolant_upper(times,count,tw,t);
-    if(kind==2 && upper>0 && upper<count) {
-      let changed=interpolant_cubic_seek(state,times,count,upper,settings,tw);
-    }
-    let saved=ux_u32_put(state+InterpolantState.cached,upper);
+  let located=interpolant_locate(state,times,count,timeKind,t);
+  if(located<0) { return located; }
+  let upper=located/2;
+  if(located%2 && kind==2) {
+    let changed=interpolant_cubic_seek(state,times,count,upper,settings,timeKind);
   }
   let lower=upper-1;
   if(upper==0) { lower=0; }
   let lo=values+lower*stride*vw;
-  if(upper==0 || upper==count || kind==1) { return interpolant_copy_row(result,lo,stride,rw,vw); }
+  if(upper==0 || upper==count || kind==1) { return interpolant_copy_row(result,lo,stride,resultKind,valueKind); }
+  if(kind==4) { return 0-3; }
   let hi=lo+stride*vw;
-  let t0=interpolant_read(times+lower*tw,tw);
-  let p=(t-t0)/(interpolant_read(times+upper*tw,tw)-t0);
-  if(kind==2) { return interpolant_cubic_output(state,values,stride,upper,result,p,vw,rw); }
+  let t0=interpolant_read(times+lower*tw,timeKind);
+  let p=(t-t0)/(interpolant_read(times+upper*tw,timeKind)-t0);
+  if(kind==2) { return interpolant_cubic_output(state,values,stride,upper,result,p,valueKind,resultKind); }
   let lane=0;
   while(lane<stride) {
     let at=lane*vw;
     if(kind==3) {
       // r160 writes at destination offset zero for every quaternion.
-      let cell=interpolant_quaternion_flat(result,lo+at,hi+at,p,vw,rw);
+      let cell=interpolant_quaternion_flat(result,lo+at,hi+at,p,valueKind,resultKind);
       lane=lane+4;
     } else {
-      let cell=interpolant_write(result+lane*rw,rw,interpolant_read(lo+at,vw)*(1.0-p)+interpolant_read(hi+at,vw)*p);
+      let cell=interpolant_write(result+lane*rw,resultKind,interpolant_read(lo+at,valueKind)*(1.0-p)+interpolant_read(hi+at,valueKind)*p);
       lane=lane+1;
     }
   }

@@ -1,0 +1,99 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char inventory[]="ujs/practice/uxe/three-inventory.tsv";
+static const char index_path[]="ujs/practice/uxe/base/geometry-family-evidence.tsv";
+
+static int contains(const char *path,const char *needle) {
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file(path,&raw,&length,160000)) return 0;
+    int found=tx_find((const char *)raw,length,needle,tx_len(needle,160))>=0;
+    mm_free(raw);
+    return found;
+}
+
+static int render_row(char *out,int cap,const char *name,int len,int lane) {
+    if(len<9 || len>48) return -1;
+    char leaf[49],source[160],test[160],oracle[160],symbol[80];
+    for(int i=0;i<len;i++) {
+        int c=name[i];
+        if(c>='A' && c<='Z') c+='a'-'A';
+        if(c<'a' || c>'z') return -1;
+        leaf[i]=(char)c;
+    }
+    leaf[len]=0;
+    tx_snprintf(source,sizeof source,"ujs/practice/uxe/base/%s.ujs",leaf);
+    tx_snprintf(test,sizeof test,"ujs/tests/%s-struct.cx",leaf);
+    tx_snprintf(oracle,sizeof oracle,"ujs/practice/uxe/test/%s-r160.html",leaf);
+    tx_snprintf(symbol,sizeof symbol,"%.*s_generate(",len,name);
+    if(!contains(source,symbol) || !contains(test,symbol) ||
+       !contains(test,lane=='C'?"g_geometry_check_with(":"g_geometry_check(") ||
+       !contains(oracle,"REVISION")) {
+        printf("GEOMETRY_FAMILY missing_evidence=%.*s\n",len,name);
+        return -1;
+    }
+    int n=tx_snprintf(out,cap,"%.*s\t%c\t%s\t%s\t%s\n",len,name,lane,source,test,oracle);
+    return n<0 || n>=cap?-1:n;
+}
+
+int main(int argc,char **argv) {
+    int write=argc==2 && tx_eqz(argv[1],"--write");
+    if(!write && !((argc==2 || argc==3) && tx_eqz(argv[1],"--check"))) return 2;
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file(inventory,&raw,&length,400000)) return 1;
+    char output[8400]="name\tlane\tsource\tstruct_and_shared_clone\tr160\n";
+    int used=tx_len(output,sizeof output),core=0,addons=0,failed=0;
+    const char *line=(const char *)raw;
+    const char *end=line+length;
+    while(line<end && !failed) {
+        const long width=tx_find(line,end-line,"\n",1);
+        if(width<0) { failed=1; break; }
+        const char *field[9];
+        int size[9];
+        const char *p=line;
+        for(int i=0;i<9;i++) {
+            long available=line+width-p;
+            long tab=available>=0?tx_find(p,available,"\t",1):-1;
+            if(i==8 && tab<0) tab=available;
+            if(tab<0) { failed=1; break; }
+            field[i]=p;
+            size[i]=(int)tab;
+            p+=tab+1;
+        }
+        line+=width+1;
+        if(failed || size[0]!=1 || (field[0][0]!='A' && field[0][0]!='C') ||
+           size[6]!=2 || !tx_same(field[6],2,"M3",2) ||
+           size[7]<8 || !tx_same(field[7],8,"generate",8) ||
+           (size[7]>8 && field[7][8]!=',') ||
+           size[8]<size[2]+9 || !tx_same(field[8],size[2],field[2],size[2]) ||
+           !tx_same(field[8]+size[2],9,"_generate",9) ||
+           (size[8]>size[2]+9 && field[8][size[2]+9]!=',')) continue;
+        int lane=field[0][0];
+        int added=render_row(output+used,sizeof output-used,field[2],size[2],lane);
+        if(added<0) { failed=1; break; }
+        used+=added;
+        if(lane=='A') core++;
+        else addons++;
+    }
+    mm_free(raw);
+    failed=failed || core!=21 || addons!=2 ||
+        !contains("ujs/tests/g_geometry.cx","GeometryBuffers_asGeometry(") ||
+        !contains("ujs/tests/g_geometry.cx","BufferGeometry_clone(") ||
+        !contains("ujs/practice/uxe/base/geometry-lifecycle.ujs","return BufferGeometry_copy(") ||
+        !contains("ujs/tests/geometry-json-struct.cx","BufferGeometry_toJSON(") ||
+        !contains("ujs/practice/uxe/test/geometry-json-load-linked-base.ujs","BufferGeometry_fromJSON(");
+    if(!failed && write) failed=sy_write_atomic(index_path,output,used,0644)!=0;
+    if(!failed && !write) {
+        unsigned char *previous=0;
+        int64_t bytes=0;
+        failed=sy_read_file(argc==3?argv[2]:index_path,&previous,&bytes,sizeof output) ||
+            !tx_same((const char *)previous,bytes,output,used);
+        mm_free(previous);
+    }
+    printf("GEOMETRY_FAMILY core=%d addons=%d failed=%d\n",core,addons,failed);
+    return failed;
+}

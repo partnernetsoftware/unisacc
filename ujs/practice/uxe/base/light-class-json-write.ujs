@@ -1,0 +1,144 @@
+native function light_wire_mask_has(kind:i64,key:i64) i64 {
+  if(kind<1 || kind>8) { return 0; }
+  let bit=1;
+  let i=1;
+  while(i<kind) { bit=bit*2; i=i+1; }
+  return light_wire_metadata(key,0)/bit%2;
+}
+
+native function light_wire_name(dst:i64,end:i64,key:i64) i64 {
+  let n=light_wire_word(key,0);
+  if(n<=0 || dst<0 || end>6291456 || n>end-dst) { return 0-1; }
+  let i=0;
+  let word=0;
+  while(i<n) {
+    if(i%8==0) { word=light_wire_word(key,1+i/8); }
+    let saved=ux_u8_put(dst+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return dst+n;
+}
+
+native function light_wire_quote(dst:i64,end:i64,key:i64) i64 {
+  let p=json_byte(dst,end,34);
+  p=light_wire_name(p,end,key);
+  return json_byte(p,end,34);
+}
+
+native function light_wire_property(dst:i64,end:i64,key:i64,comma:i64) i64 {
+  let p=dst;
+  if(comma!=0) { p=json_byte(p,end,44); }
+  p=light_wire_quote(p,end,key);
+  return json_byte(p,end,58);
+}
+
+native function light_wire_number(dst:i64,end:i64,key:i64,value:f64,comma:i64,scratch:i64) i64 {
+  let p=light_wire_property(dst,end,key,comma);
+  return json_write_f64(p,end,value,scratch);
+}
+
+native function light_wire_array(dst:i64,end:i64,src:i64,count:i64,scratch:i64) i64 {
+  let p=json_byte(dst,end,91);
+  let i=0;
+  while(p>=0 && i<count) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,ux_f64(src+i*8),scratch);
+    i=i+1;
+  }
+  return json_byte(p,end,93);
+}
+
+native function light_wire_shadow(dst:i64,end:i64,state:i64,kind:i64,scratch:i64) i64 {
+  let base=LightWireRoot.size;
+  let p=json_byte(dst,end,123);
+  p=light_wire_property(p,end,base+LightWireShadow.camera,0);
+  p=json_byte(p,end,123);
+  p=light_wire_property(p,end,LightWireRoot.type,0);
+  let camera=base+LightWireShadow.PerspectiveCamera;
+  if(kind==4) { camera=base+LightWireShadow.OrthographicCamera; }
+  p=light_wire_quote(p,end,camera);
+  let fov=ux_f64(state+LightJson.shadow.cameraFov);
+  if(kind==4) {
+    p=light_wire_number(p,end,base+LightWireShadow.left,0.0-5.0,1,scratch);
+    p=light_wire_number(p,end,base+LightWireShadow.right,5.0,1,scratch);
+    p=light_wire_number(p,end,base+LightWireShadow.top,5.0,1,scratch);
+    p=light_wire_number(p,end,base+LightWireShadow.bottom,0.0-5.0,1,scratch);
+  } else {
+    p=light_wire_number(p,end,base+LightWireShadow.fov,fov,1,scratch);
+    p=light_wire_number(p,end,base+LightWireShadow.aspect,1.0,1,scratch);
+  }
+  p=light_wire_number(p,end,base+LightWireShadow.near,ux_f64(state+LightJson.shadow.cameraNear),1,scratch);
+  p=light_wire_number(p,end,base+LightWireShadow.far,ux_f64(state+LightJson.shadow.cameraFar),1,scratch);
+  p=light_wire_number(p,end,base+LightWireShadow.zoom,1.0,1,scratch);
+  p=json_byte(p,end,125);
+  let bias=ux_f64(state+LightJson.shadow.bias);
+  let normal=ux_f64(state+LightJson.shadow.normalBias);
+  let radius=ux_f64(state+LightJson.shadow.radius);
+  if(bias!=0.0) { p=light_wire_number(p,end,base+LightWireShadow.bias,bias,1,scratch); }
+  if(normal!=0.0) { p=light_wire_number(p,end,base+LightWireShadow.normalBias,normal,1,scratch); }
+  if(radius!=1.0) { p=light_wire_number(p,end,base+LightWireShadow.radius,radius,1,scratch); }
+  if(ux_f64(state+LightJson.shadow.mapWidth)!=512.0 || ux_f64(state+LightJson.shadow.mapHeight)!=512.0) {
+    p=light_wire_property(p,end,base+LightWireShadow.mapSize,1);
+    p=light_wire_array(p,end,state+LightJson.shadow.mapWidth,2,scratch);
+  }
+  return json_byte(p,end,125);
+}
+
+native function light_wire_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+native function LightJson_write(out:i64,end:i64,state:i64,uuid:i64,uuid_bytes:i64,scratch:i64) i64 {
+  if(out<0 || end<=out || end>6291456 || state<0 || state>6291456-LightJson.size || state%8!=0 ||
+      uuid<0 || uuid>6291456 || uuid_bytes<0 || uuid_bytes>6291456-uuid ||
+      scratch<0 || scratch>6291456-1104 || scratch%8!=0 ||
+      light_wire_overlap(out,end-out,state,LightJson.size)!=0 ||
+      light_wire_overlap(out,end-out,uuid,uuid_bytes)!=0 || light_wire_overlap(out,end-out,scratch,1104)!=0 ||
+      light_wire_overlap(state,LightJson.size,scratch,1104)!=0 || light_wire_overlap(uuid,uuid_bytes,scratch,1104)!=0) { return 0-1; }
+  let kind=ux_u32(state+LightJson.kind);
+  let wire_kind=kind;
+  if(kind==8 || (kind==1 && ux_u8(state+LightJson.fields.sh)!=0)) { kind=8; wire_kind=1; }
+  if(kind<1 || kind>8 || ux_u32(state+LightJson.color)>16777215 || ux_u32(state+LightJson.groundColor)>16777215) { return 0-1; }
+  let p=json_byte(out,end,123);
+  p=light_wire_property(p,end,LightWireRoot.object,0);
+  p=json_byte(p,end,123);
+  p=light_wire_property(p,end,LightWireRoot.type,0);
+  p=light_wire_quote(p,end,LightWireRoot.size+LightWireShadow.size+wire_kind-1);
+  if(uuid_bytes!=0) {
+    p=light_wire_property(p,end,LightWireRoot.size+LightWireShadow.uuid,1);
+    p=json_write_string(p,end,uuid,uuid_bytes);
+  }
+  let key=LightWireRoot.color;
+  while(p>=0 && key<LightWireRoot.object) {
+    if(light_wire_mask_has(kind,key)!=0) {
+      let off=light_wire_metadata(key,2);
+      let format=light_wire_metadata(key,1);
+      if(format==1) {
+        let number=ux_u32(state+off);
+        if(key==LightWireRoot.layers && number>=2147483648) { number=number-4294967296; }
+        p=light_wire_number(p,end,key,0.0+number,1,scratch);
+      } else if(format==2) {
+        p=light_wire_number(p,end,key,ux_f64(state+off),1,scratch);
+      } else if(format==3) {
+        if(ux_u32(state+off)==0) {
+          p=light_wire_property(p,end,key,1);
+          p=json_byte(p,end,102);
+          p=json_byte(p,end,97);
+          p=json_byte(p,end,108);
+          p=json_byte(p,end,115);
+          p=json_byte(p,end,101);
+        }
+      } else if(format==4) {
+        p=light_wire_property(p,end,key,1);
+        p=light_wire_array(p,end,state+off,27,scratch);
+      } else if(format==5) {
+        p=light_wire_property(p,end,key,1);
+        p=light_wire_shadow(p,end,state,kind,scratch);
+      }
+    }
+    key=key+1;
+  }
+  p=json_byte(p,end,125);
+  return json_byte(p,end,125);
+}

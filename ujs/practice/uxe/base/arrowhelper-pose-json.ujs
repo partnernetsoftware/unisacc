@@ -1,0 +1,80 @@
+// Public pose projection: [quaternion, [line.scale.y, cone.position.y,
+// cone.scale.y, cone.scale.x]]. Cone x/z are represented by one scale.
+// Resource links and listener identities never cross this JSON boundary.
+native function ArrowHelper_poseToJSON(helper:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!arrow_life_span(helper,ArrowHelper.size,8) ||
+     ux_u32(helper+ArrowHelper.active)!=1 ||
+     !arrow_life_span(dst,end-dst,1) || !arrow_life_span(scratch,1104,8) ||
+     arrow_life_overlap(helper,ArrowHelper.size,dst,end-dst) ||
+     arrow_life_overlap(helper,ArrowHelper.size,scratch,1104) ||
+     arrow_life_overlap(dst,end-dst,scratch,1104)) { return 0-1; }
+  let link=0;
+  while(link<32) {
+    let dispatcher=ux_u32(helper+ArrowHelper.shaftGeometryDispatcher+link);
+    if(arrow_life_listener_count(dispatcher,0-1,dst,end-dst)<0 ||
+       arrow_life_listener_count(dispatcher,0-1,scratch,1104)<0) { return 0-1; }
+    link=link+8;
+  }
+  let i=0;
+  while(i<ArrowHelperPose.size) {
+    let value=ux_f64(helper+i);
+    if(value-value!=0.0) { return 0-1; }
+    i=i+8;
+  }
+  let cursor=json_byte(dst,end,91);
+  let row=0;
+  while(row<2) {
+    if(row!=0) { cursor=json_byte(cursor,end,44); }
+    cursor=json_byte(cursor,end,91);
+    let column=0;
+    while(column<4) {
+      if(column!=0) { cursor=json_byte(cursor,end,44); }
+      cursor=json_write_f64(cursor,end,ux_f64(helper+row*32+column*8),scratch);
+      column=column+1;
+    }
+    cursor=json_byte(cursor,end,93);
+    row=row+1;
+  }
+  return json_byte(cursor,end,93);
+}
+
+native function ArrowHelper_poseFromJSON(helper:i64,input:i64,end:i64) i64 {
+  if(!arrow_life_span(helper,ArrowHelper.size,8) ||
+     ux_u32(helper+ArrowHelper.active)!=1 ||
+     !arrow_life_span(input,end-input,1) || input>=end ||
+     arrow_life_overlap(helper,ArrowHelper.size,input,end-input)) { return 0-1; }
+  let cursor=json_space(input,end);
+  if(cursor>=end || ux_u8(cursor)!=91) { return 0-1; }
+  cursor=json_space(cursor+1,end);
+  let values=[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+  let row=0;
+  while(row<2) {
+    if(cursor>=end || ux_u8(cursor)!=91) { return 0-1; }
+    cursor=json_space(cursor+1,end);
+    let column=0;
+    while(column<4) {
+      if(cursor>=end) { return 0-1; }
+      let value=json_read_number(cursor,end);
+      if(value-value!=0.0) { return 0-1; }
+      values[row*4+column]=value;
+      cursor=json_space(json_scalar_end(cursor,end),end);
+      let delimiter=44;
+      if(column==3) { delimiter=93; }
+      if(cursor<0 || cursor>=end || ux_u8(cursor)!=delimiter) { return 0-1; }
+      cursor=json_space(cursor+1,end);
+      column=column+1;
+    }
+    let separator=44;
+    if(row==1) { separator=93; }
+    if(cursor>=end || ux_u8(cursor)!=separator) { return 0-1; }
+    cursor=json_space(cursor+1,end);
+    row=row+1;
+  }
+  if(cursor!=end) { return 0-1; }
+  let i=0;
+  while(i<8) {
+    let written=ux_f64_put(helper+i*8,values[i]);
+    i=i+1;
+  }
+  return helper;
+}

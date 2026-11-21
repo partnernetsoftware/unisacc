@@ -1,0 +1,82 @@
+#pragma unisa use g_math
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define CAMERA_ORTHO "{\"type\":\"OrthographicCamera\",\"left\":-5,\"right\":5,\"top\":5,\"bottom\":-5,\"near\":0.5,\"far\":500,\"zoom\":1}"
+#define CAMERA_POINT "{\"type\":\"PerspectiveCamera\",\"fov\":90,\"aspect\":1,\"near\":0.5,\"far\":500,\"zoom\":1}"
+#define CAMERA_SPOT "{\"type\":\"PerspectiveCamera\",\"fov\":50,\"aspect\":1,\"near\":0.5,\"far\":500,\"zoom\":1}"
+#define PROBE_SH "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3]"
+
+static double light_json_hash(const char *text) {
+    uint64_t hash=0;
+    for(int i=0;text[i];i++) hash=(hash*131+(unsigned char)text[i])%16777213;
+    return (double)hash;
+}
+
+static int light_json_program(char *out,int bytes,const char *input,int suffix) {
+    int used=tx_snprintf(out,bytes,"let data=[");
+    int len=tx_len(input,1024);
+    for(int i=0;i<len;i++) {
+        int n=tx_snprintf(out+used,bytes-used,"%s%d",i?",":"",(unsigned char)input[i]);
+        if(n<0 || n>=bytes-used) return 1;
+        used+=n;
+    }
+    int n=tx_snprintf(out+used,bytes-used,
+        "];let i=0;while(i<%d){let byte=ux_u8_put(128+i,data[i]);i=i+1;}"
+        "let read=LightJson_read(1024,128,128+%d,1536);",len,len);
+    if(n<0 || n>=bytes-used) return 1;
+    used+=n;
+    const char *body=
+        "if(read<0){return read;}"
+        "let end=LightJson_write(4096,16384,read,0,0,2048);"
+        "let parsed=LightJson_read(17000,4096,end,17512);if(parsed<0){return parsed;}"
+        "let n=LightJson_write(18000,30400,parsed,0,0,32000);if(n-18000!=end-4096){return 0-3;}"
+        "let hash=0;let pos=0;while(4096+pos<end){if(ux_u8(4096+pos)!=ux_u8(18000+pos)){return 0-3;}"
+        "hash=(hash*131+ux_u8(4096+pos))%16777213;pos=pos+1;}return hash;";
+    if(suffix==1) body="return read;";
+    if(suffix==2) body="return LightJson_write(4096,4100,read,0,0,2048);";
+    if(suffix==3) body="let change=ux_f64_put(read+LightJson.shadow.bias,0.0);"
+        "let end=LightJson_write(4096,16384,read,0,0,2048);let h=0;let p=4096;"
+        "while(p<end){h=(h*131+ux_u8(p))%16777213;p=p+1;}return h;";
+    n=tx_snprintf(out+used,bytes-used,"%s",body);
+    return n<0 || n>=bytes-used;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","vector-scalar","color","record-copy","json-bytes","json-read",
+        "light-classes-generated","light-class-json-layout","light-class-json-fields-generated",
+        "light-class-json-write","light-class-json-read",0};
+    const char *input[]={
+        "{\"object\":{\"intensity\":1.5,\"color\":16711680,\"type\":\"AmbientLight\",\"visible\":false,\"layers\":-2147483648}}",
+        "{\"color\":65280,\"groundColor\":255,\"intensity\":2,\"type\":\"HemisphereLight\"}",
+        "{\"type\":\"DirectionalLight\",\"intensity\":3,\"shadow\":{\"normalBias\":0.25,\"bias\":0.125,\"mapSize\":[128,256],\"camera\":" CAMERA_ORTHO "}}",
+        "{\"type\":\"PointLight\",\"intensity\":2,\"distance\":20,\"decay\":1,\"shadow\":{\"camera\":" CAMERA_POINT "}}",
+        "{\"type\":\"SpotLight\",\"angle\":0.5,\"penumbra\":0.25,\"distance\":42,\"intensity\":4,\"shadow\":{\"radius\":2,\"camera\":" CAMERA_SPOT "}}",
+        "{\"type\":\"RectAreaLight\",\"width\":4,\"height\":5,\"intensity\":2}",
+        "{\"type\":\"Light\",\"intensity\":6,\"sh\":" PROBE_SH "}",
+        "{\"type\":\"LightProbe\",\"sh\":[1,2,3]}",
+        "{\"type\":\"AmbientLight\"}"
+    };
+    const char *canonical[]={
+        "{\"object\":{\"type\":\"AmbientLight\",\"color\":16711680,\"intensity\":1.5,\"visible\":false,\"layers\":-2147483648}}",
+        "{\"object\":{\"type\":\"HemisphereLight\",\"color\":65280,\"intensity\":2,\"groundColor\":255,\"layers\":1}}",
+        "{\"object\":{\"type\":\"DirectionalLight\",\"color\":16777215,\"intensity\":3,\"shadow\":{\"camera\":" CAMERA_ORTHO ",\"bias\":0.125,\"normalBias\":0.25,\"mapSize\":[128,256]},\"layers\":1}}",
+        "{\"object\":{\"type\":\"PointLight\",\"color\":16777215,\"intensity\":2,\"distance\":20,\"decay\":1,\"shadow\":{\"camera\":" CAMERA_POINT "},\"layers\":1}}",
+        "{\"object\":{\"type\":\"SpotLight\",\"color\":16777215,\"intensity\":4,\"distance\":42,\"angle\":0.5,\"penumbra\":0.25,\"decay\":2,\"shadow\":{\"camera\":" CAMERA_SPOT ",\"radius\":2},\"layers\":1}}",
+        "{\"object\":{\"type\":\"RectAreaLight\",\"color\":16777215,\"intensity\":2,\"width\":4,\"height\":5,\"layers\":1}}",
+        "{\"object\":{\"type\":\"Light\",\"color\":16777215,\"intensity\":6,\"sh\":" PROBE_SH ",\"layers\":1}}"
+    };
+    enum { count=sizeof input/sizeof input[0] };
+    char programs[count][2600],negative[2600];
+    const char *cases[count];
+    double gold[count];
+    for(int i=0;i<count;i++) {
+        if(light_json_program(programs[i],sizeof programs[i],input[i],i>=7?i-6:0)) return 2;
+        cases[i]=programs[i];
+        gold[i]=i<7?light_json_hash(canonical[i]):-1;
+    }
+    if(light_json_program(negative,sizeof negative,input[2],3)) return 2;
+    return g_math_run("G_STRUCT Light JSON roundtrip","light-class-json",modules,"",cases,gold,count,mutate?2:-1,negative);
+}

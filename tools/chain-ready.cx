@@ -461,10 +461,24 @@ static void row(const char *item, const char *st, const char *ev, long ms) {
 }
 static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev, ms); }
 
-/* The last published slot in the tracked ledger names the comparison tag. */
+static int parse2_commit(const char *repo, const char *ref, char sha[41]) {
+    char object[256], why[160];
+    if (cx_fmt(object, sizeof object, "%s^{commit}", ref)) return 0;
+    char *av[] = {"git","rev-parse","--verify","--end-of-options",object,0};
+    np_result r = {0};
+    int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && !r.rc && !r.residue &&
+        r.out && r.outn == 41 && r.out[40] == '\n' && strspn(r.out, "0123456789abcdef") == 40;
+    if (ok) ok = !tx_copy(sha, 41, r.out, 40);
+    np_free(&r);
+    return ok;
+}
+
+/* The last published slot in the tracked ledger names the comparison tag.
+ * If a subsequent unpublished slot already has a git tag, refuse with version-seq-tag-drift. */
 static int parse2_release_tag(const char *repo, char tag[64]) {
     char *av[] = {"git","show","HEAD:build/version-seq.tsv",0};
-    char why[160];
+    char why[160], unpub[16][32];
+    int nunpub = 0;
     np_result r = {0};
     int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && !r.rc && !r.residue;
     if (ok) for (char *p = r.out; p && *p;) {
@@ -478,28 +492,29 @@ static int parse2_release_tag(const char *repo, char tag[64]) {
         if (note) {
             *class_name = 0;
             *note = 0;
-            if (!strcmp(state + 1, "已公开") &&
-                (!rv_valid(version + 1) || cx_fmt(tag, 64, "refs/tags/v%s", version + 1))) {
-                ok = 0;
-                break;
+            if (!strcmp(state + 1, "已公开")) {
+                if (!rv_valid(version + 1) || cx_fmt(tag, 64, "refs/tags/v%s", version + 1)) {
+                    ok = 0;
+                    break;
+                }
+                nunpub = 0;
+            } else if (tag[0] && rv_valid(version + 1) && nunpub < 16) {
+                cx_fmt(unpub[nunpub++], 32, "%s", version + 1);
             }
         }
         p = end;
     }
     np_free(&r);
+    if (ok && tag[0]) {
+        for (int i = 0; i < nunpub; i++) {
+            char utag[64], usha[41];
+            if (!cx_fmt(utag, sizeof utag, "refs/tags/v%s", unpub[i]) && parse2_commit(repo, utag, usha)) {
+                cx_fmt(tag, 64, "version-seq-tag-drift:v%s", unpub[i]);
+                return 0;
+            }
+        }
+    }
     return ok && tag[0];
-}
-
-static int parse2_commit(const char *repo, const char *ref, char sha[41]) {
-    char object[256], why[160];
-    if (cx_fmt(object, sizeof object, "%s^{commit}", ref)) return 0;
-    char *av[] = {"git","rev-parse","--verify","--end-of-options",object,0};
-    np_result r = {0};
-    int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && !r.rc && !r.residue &&
-        r.out && r.outn == 41 && r.out[40] == '\n' && strspn(r.out, "0123456789abcdef") == 40;
-    if (ok) ok = !tx_copy(sha, 41, r.out, 40);
-    np_free(&r);
-    return ok;
 }
 
 static int parse2_preflight(const char *repo, const char *rev, const char *tmp, char ev[640]) {
@@ -904,9 +919,17 @@ static int check_version_scope(const char *repo, const char *revarg, const char 
     lb = cx_read(lanep, &ln);
     if (lb && ln > 0) {
         base[0] = 0; tag[0] = 0;
-        if (since && since[0]) cx_fmt(base, sizeof base, "%s", since);
-        else if (parse2_release_tag(repo, tag) && parse2_commit(repo, tag, base)) { /* use last public tag */ }
-        else cx_fmt(base, sizeof base, "HEAD~1");
+        {
+            int tag_ok = parse2_release_tag(repo, tag);
+            if (!tag_ok && tx_prefix(tag, (long)tx_len(tag, sizeof tag), "version-seq-tag-drift", 21)) {
+                mm_free(lb);
+                cx_fmt(scope_ev, (size_t)cap, "READY=no %s version=%s", tag, ver);
+                return 0;
+            }
+            if (since && since[0]) cx_fmt(base, sizeof base, "%s", since);
+            else if (tag_ok && parse2_commit(repo, tag, base)) { /* use last public tag */ }
+            else cx_fmt(base, sizeof base, "HEAD~1");
+        }
         cx_fmt(tip, sizeof tip, "%s", revarg && revarg[0] ? revarg : "HEAD");
         {
             char *dv[] = {"git", "diff", "--name-only", base, tip, 0};

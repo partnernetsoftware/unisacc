@@ -501,6 +501,76 @@ static void group_sticky(void) {
           zl_done(&g_st) == 1 && zl_end(&g_st) == 0, "sticky-state-intact-after-bad-args");
 }
 
+/* ---- ccogw system-gzip 46-byte member vector & piece=1..n+2 split invariance ----
+ * Attribution: ccogw (moltbaby/bin/lib/check-inflate-stream.cx, 77 assertions).
+ * System-gzip literal (echo "hello world hello world hello world" | gzip, with FNAME="plain.txt")
+ * plus raw deflate slice: independent of this library, kills symmetric off-by-one defects. */
+static void group_ccogw_sysgzip(void) {
+    static const unsigned char gz[46] = {
+        0x1f,0x8b,0x08,0x08,0xc0,0xab,0x01,0x6b,0x00,0x03,0x70,0x6c,0x61,0x69,0x6e,
+        0x2e,0x74,0x78,0x74,0x00,0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,
+        0x49,0x51,0xc8,0xc0,0xce,0xe6,0x02,0x00,0x69,0x2e,0x6b,0x6e,0x24,0x00,0x00,
+        0x00
+    };
+    static const unsigned char raw[18] = {
+        0xcb,0x48,0xcd,0xc9,0xc9,0x57,0x28,0xcf,0x2f,0xca,0x49,0x51,0xc8,0xc0,0xce,
+        0xe6,0x02,0x00
+    };
+    static const char plain[] = "hello world hello world hello world\n";
+    long plain_len = (long)(sizeof plain - 1);
+    unsigned char out[256];
+    const unsigned char *vecs[2] = { gz, raw };
+    long vlens[2] = { 46, 18 };
+    int modes[2] = { ZL_GZIP, ZL_RAW };
+    const char *labels[2] = { "ccogw-gzip", "ccogw-raw" };
+    int k;
+    for (k = 0; k < 2; k++) {
+        long at = 0, total = 0, rc = 0;
+        if (zl_init(&g_st, modes[k]) == 0) {
+            while (at < vlens[k]) {
+                long c = 0, p = 0;
+                rc = zl_feed(&g_st, vecs[k] + at, vlens[k] - at, &c, out + total, (long)sizeof out - total, &p);
+                total += p; at += c;
+                if (rc < 0 || zl_done(&g_st) || (c == 0 && p == 0)) break;
+            }
+        } else rc = -1;
+        {
+            char nm1[64], nm2[64];
+            cx_fmt(nm1, sizeof nm1, "%s-vector-length", labels[k]);
+            cx_fmt(nm2, sizeof nm2, "%s-vector-content", labels[k]);
+            tk_ok(rc >= 0 && total == plain_len, nm1);
+            tk_ok(rc >= 0 && total == plain_len && same(out, (const unsigned char *)plain, plain_len), nm2);
+        }
+        {
+            long piece;
+            for (piece = 1; piece <= vlens[k] + 2; piece++) {
+                char nm[64];
+                long at2 = 0, tot2 = 0, r2 = 0;
+                if (zl_init(&g_st, modes[k]) == 0) {
+                    while (at2 < vlens[k]) {
+                        long take = vlens[k] - at2 < piece ? vlens[k] - at2 : piece;
+                        long c = 0, p = 0;
+                        r2 = zl_feed(&g_st, vecs[k] + at2, take, &c, out + tot2, (long)sizeof out - tot2, &p);
+                        tot2 += p; at2 += c;
+                        if (r2 < 0 || zl_done(&g_st) || (c == 0 && p == 0)) break;
+                    }
+                } else r2 = -1;
+                cx_fmt(nm, sizeof nm, "%s.piece-%ld", labels[k], piece);
+                tk_ok(r2 >= 0 && tot2 == plain_len && same(out, (const unsigned char *)plain, plain_len), nm);
+            }
+        }
+    }
+    {
+        long c = 0, p = 0, r;
+        tk_ok(zl_init(&g_st, ZL_GZIP) == 0, "ccogw-init-ok");
+        r = zl_feed(&g_st, gz, 23, &c, out, (long)sizeof out, &p);
+        tk_ok(r >= 0, "ccogw-partial-feed-accepted");
+        tk_ok(!zl_done(&g_st), "ccogw-partial-not-done");
+        tk_ok(zl_end(&g_st) != 0, "ccogw-partial-end-reports-unfinished");
+        tk_ok(zl_init(&g_st, 99) != 0, "ccogw-bad-mode-rejected");
+    }
+}
+
 /* ---- mutation: private copy of ext/textx with one or two lines changed ---- */
 static char work[4096], com[4400], root[4096];
 
@@ -548,7 +618,7 @@ static void group_mut(int part) {
     if (tk_scratch("check-textx-zlfeed", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
     if (part == 0) {
         if (setup_mut("", "", "", "")) {
-            rc = run_child("size;oracle;diff;trunc;corrupt;sticky");
+            rc = run_child("size;oracle;ccogw;diff;trunc;corrupt;sticky");
             tk_ok(rc == 0, "mut-control-unmutated-passes");
         } else tk_ok(0, "mut-control-setup");
     } else if (part == 1) {
@@ -580,13 +650,14 @@ static void group_mut(int part) {
             tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tgzip-3000"), "mut4-gzip-crc-reset-detected");
         } else tk_ok(0, "mut4-setup");
     } else if (part == 5) {
-        /* M5: symmetric off-by-one output drop in BOTH one-shot zl_raw and streaming zl_feed -> oracle MUST fail */
+        /* M5: symmetric off-by-one output drop in BOTH one-shot zl_raw and streaming zl_feed -> oracle & ccogw MUST fail */
         if (setup_mut("if (outlen) *outlen = zl_n;",
                       "if (outlen) *outlen = zl_n > 0 ? zl_n - 1 : 0;",
                       "*outlen = o;",
                       "*outlen = o > 0 ? o - 1 : 0;")) {
-            rc = run_child("oracle");
-            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\toracle-stored-abc") && tk_has(tk_out(), "FAIL\toracle-dyn-raw-greek"),
+            rc = run_child("oracle;ccogw");
+            tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\toracle-stored-abc") && tk_has(tk_out(), "FAIL\toracle-dyn-raw-greek") &&
+                  tk_has(tk_out(), "FAIL\tccogw-gzip-vector-content") && tk_has(tk_out(), "FAIL\tccogw-raw-vector-content"),
                   "mut5-symmetric-drop-killed-by-oracle");
         } else tk_ok(0, "mut5-setup");
     }
@@ -598,6 +669,7 @@ int main(int argc, char **argv) {
     if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
     if (tk_case("size")) group_size();
     if (tk_case("oracle")) group_oracle();
+    if (tk_case("ccogw")) group_ccogw_sysgzip();
     if (tk_case("diff")) group_diff();
     if (tk_case("trunc")) group_trunc();
     if (tk_case("corrupt")) group_corrupt();
