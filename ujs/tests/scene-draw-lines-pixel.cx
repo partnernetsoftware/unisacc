@@ -1,0 +1,57 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],url[690];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-scene-lines-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/lines.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/scene-draw-lines-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_scene_lines(mode:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/scene-snapshot-layout.ujs","ujs/practice/uxe/base/render-list.ujs",
+        "ujs/practice/uxe/base/scene-render-list.ujs","ujs/practice/uxe/base/scene-draw-project.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/scene-draw-lines.ujs",
+        "ujs/practice/uxe/base/axeshelper.ujs","ujs/practice/uxe/base/gridhelper.ujs",
+        "ujs/practice/uxe/base/box3helper.ujs","ujs/practice/uxe/test/scene-draw-lines-probe.ujs",
+        "-o",wasm,0};
+    const double gold[]={255,149,0,255,149,255,0,255,255,255,0,255,255,255,0,255,
+        0,255,255,255,255,0,255,255,0,0,0,255,0,0,0,255};
+    enum { channels=sizeof gold/sizeof gold[0], count=2*channels+1 };
+    double actual[count]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("G_PIXEL scene lines compiler_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        if(!failed) {
+            for(int i=0;i<2*channels;i++) {
+                if(actual[i]!=gold[i%channels]) {
+                    printf("G_PIXEL scene lines channel=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i%channels]);
+                    failed=1;
+                }
+            }
+            const double different=actual[2*channels];
+            printf("G_PIXEL scene lines framebuffer_pixels=1024 different=%.17g\n",different);
+            if(different!=0) failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("G_PIXEL scene lines channels=%d failed=%d\n",2*channels,failed);
+    return failed;
+}
