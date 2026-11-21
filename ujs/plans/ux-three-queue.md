@@ -300,7 +300,7 @@
 - ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
 - ~~Axes、Grid、Box3 正交 GPU 线 | G-pixel 交错、平面与索引三种输入 | 共享场景投影。~~ 1024 像素与 r160 完全一致，轴色篡改三处转红。
 - AxesHelper 对象树及资源回收 | 场景更新与释放后拒绝 | 已通过的正交 GPU 线。
-- BoxHelper 世界包围盒采集与 GPU | G-pixel 对象树边界和 12 边实际读回 | G-struct 世界盒线 15 项与篡改已通过。
+- ~~BoxHelper 世界包围盒与正交 GPU 线 | G-pixel 物体移动、12 边和释放后拒绝 | 世界盒线和共享 GPU 线。~~ 1024 像素与 r160 一致，漏更新使 98 像素转红。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
 - ~~CameraHelper 正交 GPU 视锥 | G-pixel 五类颜色、相机物体变换与释放 | 逆投影视锥及共享 GPU 线。~~ r160 1024 像素一致，错世界平移使 117 像素转红。
 - DirectionalLightHelper 渲染接线 | G-pixel 光框随目标更新 | G-struct 方向及颜色 14 项与篡改已通过。

@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BoxGeometry, BoxHelper, Camera, Mesh, MeshBasicMaterial, REVISION, Scene, WebGLRenderer }
+  from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const query=new URLSearchParams(location.search);
+  const width=32;
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=width;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true,antialias:false});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1,createGpuTargets(gl));
+  const program=await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(program,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const base=2097152;
+  const heap=new DataView(wasm.memory.buffer,base);
+  for(const [index,name,start] of [[0,"gpu-flat.vert",10600],[1,"gpu-line-srgb.frag",11000]]) {
+    const code=new Uint8Array(await (await fetch(`../base/${name}`)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+start,code.length).set(code);
+    heap.setUint32(10500+8*index,start,true);
+    heap.setUint32(10504+8*index,code.length,true);
+  }
+  const status=Number(wasm.uxe_box_lines(BigInt(query.get("mode"))));
+  if(status<0) throw new Error(`GPU submit rejected ${status}`);
+
+  const renderer=new WebGLRenderer({preserveDrawingBuffer:true,antialias:false});
+  renderer.setSize(width,width);
+  const scene=new Scene();
+  const view=new Camera();
+  view.projectionMatrix.set(0.5,0,0.125,0,0,0.5,0,0,0,0,0.125,0,0,0,0,1);
+  const object=new Mesh(new BoxGeometry(1,1,1),new MeshBasicMaterial());
+  object.position.set(-0.6875,0.8125,0);
+  const helper=new BoxHelper(object,0x3366cc);
+  object.position.x=0.8125;
+  helper.update();
+  helper.material.depthTest=false;
+  helper.material.depthWrite=false;
+  scene.add(helper);
+  renderer.render(scene,view);
+
+  function read(context) {
+    const image=new Uint8Array(width*width*4);
+    context.readPixels(0,0,width,width,context.RGBA,context.UNSIGNED_BYTE,image);
+    if(context.getError()!==context.NO_ERROR) throw new Error("readPixels failed");
+    return image;
+  }
+  const wasmImage=read(gl);
+  const referenceImage=read(renderer.getContext());
+  const probes=[[17,22],[27,22],[21,18],[21,22]];
+  function samples(image) {
+    return probes.flatMap(([x,y])=>[...image.subarray((y*width+x)*4,(y*width+x+1)*4)]);
+  }
+  let different=0;
+  for(let i=0;i<wasmImage.length;i+=4) {
+    if(wasmImage[i]!==referenceImage[i] || wasmImage[i+1]!==referenceImage[i+1] ||
+       wasmImage[i+2]!==referenceImage[i+2] || wasmImage[i+3]!==referenceImage[i+3]) different++;
+  }
+  output.textContent=JSON.stringify([...samples(wasmImage),...samples(referenceImage),different]);
+  helper.dispose();
+  object.geometry.dispose();
+  object.material.dispose();
+  renderer.dispose();
+} catch(error) { output.textContent=`error:${error.message}`; }
+</script>
