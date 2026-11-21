@@ -6,7 +6,7 @@
 
 | name | signature | analogue | errors | lnx | osx | win | status | note | stab | since | own | test |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| np_result | typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; } np_result; | Rust process::Output | none | impl | impl | unverified | exists | 现在 ext.sysx | incubating | 0.1.0 | none | - |
+| np_result | typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result; | Rust process::Output | none | impl | impl | unverified | exists | 现在 ext.sysx | incubating | 0.1.0 | none | - |
 | np_run | int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl); | Rust Command::output; Node execFile | -errno;ret:why | impl | impl | unverified | exists | 现在 ext.sysx;由 np_exec 取代 | incubating | 0.1.0 | none | - |
 | np_free | void np_free(np_result *r); | Rust drop(Output) | none | impl | impl | unverified | exists | 现在 ext.sysx | incubating | 0.1.0 | none | - |
 | np_exec | int np_exec(const sy_spawn_t *o, mg_buf *out, mg_buf *err, int64_t cap, sy_exit_t *st); | Rust Command::output; Node spawnSync 带 maxBuffer | -errno;-EMSGSIZE | impl | impl | impl:两路各一读线程不可用,改用 PeekNamedPipe 轮询 | exists | 带界捕获;err 为 0 时并入 out;任一路超过 cap 记 -EMSGSIZE 并杀子进程 | incubating | 0.1.0 | none | - |

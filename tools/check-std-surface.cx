@@ -39,6 +39,10 @@ static char api_pkg[64][64];
 static int napipkg;
 static char cap_name[SS_MAXCAP][48];
 static int ncaps;
+static int ffi_out, admit_sqlite;
+
+static const char *const ffi_names[] = { "sy_ffi_dlopen", "sy_ffi_dlsym", "sy_ffi_dlclose", "sy_ffi_dlerror",
+                                         "sy_ffi_default", "sy_ffi_now_global", "sy_ffi_call", "sy_ffi_last_error", 0 };
 
 static const char *const ss_pkgs[] = { "cx.sys", "cx.os", "cx.path", "cx.mem", "cx.text", "cx.stream",
                                        "ext.net", "ext.procx", "ext.textx", "ext.memx", "ext.crypto", "ext.tsvx", 0 };
@@ -242,6 +246,19 @@ static void load_table(const char *root) {
             if (span_is(f[0], "# out")) {
                 if (k != 3 || !f[1].n || !f[2].n) bad(line, "'# out' line is not ITEM and REASON", t + i, n);
                 else outs++;
+                if (k == 3 && span_is(f[1], "ptrace/dlopen/ffi")) {
+                    ffi_out++;
+                    if (!tx_contains(f[2].p, f[2].n, "sys.ffi", 7) || !tx_contains(f[2].p, f[2].n, "libffi", 6) ||
+                        !tx_contains(f[2].p, f[2].n, "具名", 6))
+                        bad(line, "ffi out line lacks sys.ffi, libffi and named-admission wording", f[2].p, f[2].n);
+                }
+            } else if (span_is(f[0], "# admit")) {
+                if (k == 3 && span_is(f[1], "ext.sqlite")) {
+                    admit_sqlite++;
+                    if (!tx_contains(f[2].p, f[2].n, "incubating", 10) || !tx_contains(f[2].p, f[2].n, "libffi", 6) ||
+                        !tx_contains(f[2].p, f[2].n, "libsqlite3", 10) || !tx_contains(f[2].p, f[2].n, "0.0.93", 6))
+                        bad(line, "ext.sqlite admit line lacks incubating, libffi, libsqlite3 or 0.0.93", f[2].p, f[2].n);
+                }
             } else if (span_is(f[0], "# cap")) {
                 /* Cap names may include '-' (e.g. posix-signal, mmap-exec). */
                 int cap_id = f[1].n > 0;
@@ -279,13 +296,36 @@ static void load_table(const char *root) {
         }
         i = e + 1;
     }
+    if (ffi_out != 1) bad(0, "need exactly one 'ptrace/dlopen/ffi' out line", "", 0);
+    if (admit_sqlite != 1) bad(0, "need exactly one '# admit ext.sqlite' line", "", 0);
     if (outs < 17) bad(0, "fewer than 17 '# out' lines", "", 0);
     if (ncaps < 12) bad(0, "fewer than 12 '# cap' lines", "", 0);
     if (!removed) bad(0, "missing '# removed' marker", "", 0);
 }
 
+/* sys.ffi admission: eight sy_ffi_* rows, cx.sys, status=new, stab incubating (never stable/pre), lnx needs
+   libffi, win refuse, sy_ffi_call errors states the -3 gap. */
+static void check_ffi_rows(void) {
+    int k;
+    for (k = 0; ffi_names[k]; k++) {
+        int r = -1, j;
+        for (j = 0; j < nrows; j++)
+            if (span_is(rows[j].f[1], ffi_names[k])) r = j;
+        if (r < 0) { bad(0, "missing sy_ffi row", ffi_names[k], tx_len(ffi_names[k], 64)); continue; }
+        if (!span_is(rows[r].f[0], "cx.sys")) bad(rows[r].line, "sy_ffi row pkg is not cx.sys", ffi_names[k], tx_len(ffi_names[k], 64));
+        if (!span_is(rows[r].f[8], "new")) bad(rows[r].line, "sy_ffi row status is not new", ffi_names[k], tx_len(ffi_names[k], 64));
+        if (!span_is(rows[r].f[10], "incubating")) bad(rows[r].line, "sy_ffi row stab is not incubating", ffi_names[k], tx_len(ffi_names[k], 64));
+        if (!tx_contains(rows[r].f[5].p, rows[r].f[5].n, "libffi", 6)) bad(rows[r].line, "sy_ffi lnx cell lacks libffi", ffi_names[k], tx_len(ffi_names[k], 64));
+        if (!(rows[r].f[7].n > 7 && tx_prefix(rows[r].f[7].p, rows[r].f[7].n, "refuse:", 7)))
+            bad(rows[r].line, "sy_ffi win cell is not refuse", ffi_names[k], tx_len(ffi_names[k], 64));
+        if (span_is(rows[r].f[1], "sy_ffi_call") && !tx_contains(rows[r].f[4].p, rows[r].f[4].n, "-3", 2))
+            bad(rows[r].line, "sy_ffi_call errors lacks the -3 gap", ffi_names[k], tx_len(ffi_names[k], 64));
+    }
+}
+
 static void check_rows(void) {
     int i, j;
+    check_ffi_rows();
     for (i = 0; i < nrows; i++) {
         ss_row *r = &rows[i];
         ss_span st = r->f[8];

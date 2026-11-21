@@ -16,7 +16,7 @@
 # out	popen-with-shell	不经 /bin/sh 或 cmd.exe 拼命令行;进程只收 argv 向量
 # out	FILE-stdio	不提供 FILE* 式 fopen/fgets/fprintf 缓冲流;用 fd + cx.stream reader/writer
 # out	windows-ACL	不读写 Windows ACL/安全描述符;mode 位在 win 只映射只读属性
-# out	ptrace/dlopen/ffi	sysx.trace、sys.dlcall、sys.ffi 不属核心面,仅构造工具可用
+# out	ptrace/dlopen/ffi	sysx.trace、sys.dlcall 不属核心面,仅构造工具可用;sys.ffi 属核心职责 host ABI 对接,仅 ext 包逐包具名准入,cx 包与产品闭包不得 use,宿主须有 libffi;lnx x86_64 已实现,lnx arm64 与 osx 未验证,win 具名拒绝
 # out	fs-watch	不做文件系统监视;各平台语义不一
 # out	calendar-tz	不做本地时区、时区库与日历运算;只有 UTC
 # out	regex-glob	正则、glob、通配留在 ext.*
@@ -35,6 +35,7 @@
 # cap	proc-tree	进程树遍历与杀灭
 # cap	memfd-exec	内存映像直接 exec
 # cap	flock	BSD flock 文件锁
+# admit	ext.sqlite	incubating 逐包准入:仅经 sys.ffi,外部依赖宿主 libffi 与 libsqlite3,缺库具名失败;完整准入随 0.0.93 核心库面二期
 # removed
 # removed	cx.stream	xs_reader_deadline	0.0.66 r2 removed the unimplemented deadline setter; no exported API remains.
 # removed	cx.stream	xs_writer_deadline	0.0.66 r2 removed the unimplemented deadline setter; no exported API remains.
@@ -122,7 +123,7 @@ cx.os	sy_getpgid	long sy_getpgid(int pid);	POSIX getpgid	-errno	impl	impl	refuse
 cx.os	sy_setsid	long sy_setsid(void);	POSIX setsid	-errno	impl	impl	refuse:ENOSYS cap=pgroup	exists	现在 sys.posix	pre	0.1.0	none	-
 cx.os	sy_killpg	int sy_killpg(int pgrp, int sig);	POSIX killpg	-errno	impl	impl	refuse:ENOSYS cap=pgroup	exists	现在 sys.posix	pre	0.1.0	none	-
 cx.os	sy_rlimit_as	long sy_rlimit_as(void);	POSIX getrlimit RLIMIT_AS	-errno;-EINVAL	impl:仅lnx/x86_64验证,arm64未验证	unverified	impl:恒 0,无地址空间上限	exists	现在 sys.posix;无上限记 0;posix.cx:227字面号97留0.0.88修	pre	0.1.0	none	cx-l0-sys(缺arm64/osx)
-ext.procx	np_result	typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; } np_result;	Rust process::Output	none	impl	impl	unverified	exists	现在 ext.sysx	incubating	0.1.0	none	-
+ext.procx	np_result	typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result;	Rust process::Output	none	impl	impl	unverified	exists	现在 ext.sysx	incubating	0.1.0	none	-
 ext.procx	np_run	int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl);	Rust Command::output; Node execFile	-errno;ret:why	impl	impl	unverified	exists	现在 ext.sysx;由 np_exec 取代	incubating	0.1.0	none	-
 ext.procx	np_free	void np_free(np_result *r);	Rust drop(Output)	none	impl	impl	unverified	exists	现在 ext.sysx	incubating	0.1.0	none	-
 ext.procx	np_exec	int np_exec(const sy_spawn_t *o, mg_buf *out, mg_buf *err, int64_t cap, sy_exit_t *st);	Rust Command::output; Node spawnSync 带 maxBuffer	-errno;-EMSGSIZE	impl	impl	impl:两路各一读线程不可用,改用 PeekNamedPipe 轮询	exists	带界捕获;err 为 0 时并入 out;任一路超过 cap 记 -EMSGSIZE 并杀子进程	incubating	0.1.0	none	-
@@ -448,6 +449,14 @@ cx.sys	sy_err_kind	int sy_err_kind(int e);	Rust io::Error::kind; Python OSError	
 cx.sys	sy_cap	int sy_cap(int cap);	QuickJS 能力表	0/1	impl	impl	impl	exists	能力查询,未知能力为 0	pre	0.1.0	none	cx-l0-sys-new
 cx.sys	sy_res_live	long sy_res_live(int kind);	Python ResourceWarning 计数	-EINVAL	impl	unverified	unverified	exists	cx/sys/reslive.cx;经 sy_res_note 登记且未注销的句柄数,不是进程级总数;kind 为 SY_RES_FD=1、SY_RES_PROC=2、SY_RES_MAP=3,其余 -EINVAL;不线程安全	pre	0.1.0	none	-
 cx.sys	sy_res_note	long sy_res_note(int kind, int delta);	Python ResourceWarning 计数	-EINVAL	impl	unverified	unverified	exists	cx/sys/reslive.cx;登记点,delta 只许 +1/-1,返回新计数;未知 kind、其它 delta、减到负数返回 -EINVAL 且值不变	pre	0.1.0	none	-
+cx.sys	sy_ffi_dlopen	void *sy_ffi_dlopen(const char *path, int mode);	dlopen(3)	null	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	open:handle close:sy_ffi_dlclose	-
+cx.sys	sy_ffi_dlsym	void *sy_ffi_dlsym(void *handle, const char *name);	dlsym(3)	null	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
+cx.sys	sy_ffi_dlclose	int sy_ffi_dlclose(void *handle);	dlclose(3)	ret:0 成功,非 0 失败	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
+cx.sys	sy_ffi_dlerror	const char *sy_ffi_dlerror(void);	dlerror(3)	null	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
+cx.sys	sy_ffi_default	void *sy_ffi_default(void);	RTLD_DEFAULT	none	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
+cx.sys	sy_ffi_now_global	int sy_ffi_now_global(void);	RTLD_NOW|RTLD_GLOBAL	none	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
+cx.sys	sy_ffi_call	int sy_ffi_call(void *fn, int ret_kind, int *kinds, void **vals, int n, int nfixed, void *ret);	libffi ffi_call	ret:0 成功,负数失败,参数错返回 -3 而非 -errno	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi;已知落差:失败返回 -3 不合 -errno 错误文法,改 -errno 属冻结文件 ffi.cx 的 A 类改动,另排	incubating	0.1.0	none	-
+cx.sys	sy_ffi_last_error	const char *sy_ffi_last_error(void);	libffi 通道最近错误文本	null	impl:需宿主 libffi;x86_64 已实现,arm64 未验证	unverified	refuse:ENOSYS 宿主 ffi 通道只到 macOS 与 Linux,现无 ffi 能力词	new	实现于 layer-api 排除单元 cx/sys/ffi.cx(no-object);仅 ext 包具名准入,cx 包与产品闭包不得 use;宿主须有 libffi	incubating	0.1.0	none	-
 # area ext-crypto
 ext.crypto	cs_aes_key	typedef struct { unsigned char rk[240]; int nr; int nk; } cs_aes_key;	无	none	impl	impl	impl	exists	-	incubating	0.1.0	none	cx-l0-crypto-aesgcm
 ext.crypto	cs_aes_init	int cs_aes_init(cs_aes_key *k, const unsigned char *key, long len);	无	-EINVAL	impl	impl	impl	exists	-	incubating	0.1.0	none	cx-l0-crypto-aesgcm
