@@ -272,7 +272,8 @@
 - RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
 - ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
 - UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。
-- OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
+- ~~OutlinePass 边缘与遮挡颜色 | G-pixel 真 r160 中间纹理、深度掩模与颜色对照 | RGBA8 内核。~~ 17 项通过，遮挡边错用可见色转红。
+- OutlinePass 场景掩模与合成 | G-pixel 选择、遮挡、模糊、叠加及抹除 | 边缘内核、RenderPass、对象拾取。
 - ~~调色与 FXAA 的 RGBA8 内核 | G-pixel 通道曲线、锯齿阶跃与采样方向 | 线性 RGBA8。~~ 真实 r160 ShaderPass 18 项通过，移除调色与 FXAA 分别转红。
 - FXAA GPU 接线 | G-pixel 同目标格式读写与 EffectComposer 交换 | FXAA RGBA8 算法、EffectComposer。
 - 调色 Pass 完整接线 | G-pixel 色域、曝光与目标格式 | M5 色彩输出、RGBA8 内核及 EffectComposer。

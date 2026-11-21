@@ -1,0 +1,38 @@
+// The already sampled mask is RGBA8: red is inverse coverage and green is occlusion.
+// Palette words hold linear RGB bytes, with red in the low byte.
+// Returns the pixel count, or -1 before writing for invalid input.
+native function OutlinePass_detectEdgesRGBA8(mask:i64,dst:i64,capacity:i64,width:i64,height:i64,visible:i64,hidden:i64) i64 {
+  if(width<1 || width>1572864 || height<1 || height>1572864 || width*height>1572864 ||
+     visible<0 || visible>16777215 || hidden<0 || hidden>16777215) { return 0-1; }
+  let pixels=width*height;
+  let bytes=pixels*4;
+  if(capacity<bytes || !post_span(mask,bytes) || !post_span(dst,capacity) ||
+     post_overlap(mask,bytes,dst,bytes)) { return 0-1; }
+  let row=width*4;
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let at=(y*width+x)*4;
+      let left=mask+at-4*(x>0);
+      let right=mask+at+4*(x+1<width);
+      let below=mask+at-row*(y>0);
+      let above=mask+at+row*(y+1<height);
+      let dx=ux_u8(right)-ux_u8(left);
+      let dy=ux_u8(above)-ux_u8(below);
+      let magnitude=0.5*f64_sqrt(0.0+dx*dx+dy*dy);
+      let palette=hidden;
+      // For an 8-bit mask, 1 - minGreen > 0.001 iff a neighbor is below 255.
+      if(ux_u8(left+1)<255 || ux_u8(right+1)<255 ||
+         ux_u8(below+1)<255 || ux_u8(above+1)<255) { palette=visible; }
+      let scale=magnitude/255.0;
+      let r=ux_u8_put(dst+at,post_rgba8((palette%256)*scale));
+      let g=ux_u8_put(dst+at+1,post_rgba8((palette/256%256)*scale));
+      let b=ux_u8_put(dst+at+2,post_rgba8((palette/65536)*scale));
+      let a=ux_u8_put(dst+at+3,post_rgba8(magnitude));
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return pixels;
+}

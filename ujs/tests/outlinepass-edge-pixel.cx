@@ -1,0 +1,56 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+#define SCENE "let fill=outline_scene(mask);let n=OutlinePass_detectEdgesRGBA8(mask,dst,192,8,6,20680,11806720);"
+#define MASK(green) \
+    "let fill=outline_mask(mask," #green ");let n=OutlinePass_detectEdgesRGBA8(mask,dst,36,3,3,20680,11806720);"
+#define RGBA(r,g,b,a) ((r)+256.0*(g)+65536.0*(b)+16777216.0*(a))
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"f64-math","postprocess-rgba8","outlinepass-edge",0};
+    const char *setup=
+        "native function outline_pixel(at:i64,r:i64,g:i64) i64 {"
+        "return ux_u32_put(at,r+256*g+4294901760);}"
+        "native function outline_scene(mask:i64) i64 {"
+        "let y=0;while(y<6){let x=0;while(x<8){let r=255;let g=255;"
+        "if(y>=2 && y<=3 && x>=2 && x<=5){r=0;if(x>=4){g=0;}}"
+        "let put=outline_pixel(mask+4*(y*8+x),r,g);x=x+1;}y=y+1;}return 0;}"
+        "native function outline_mask(mask:i64,g:i64) i64 {"
+        "let i=0;while(i<9){let put=outline_pixel(mask+i*4,110,255);i=i+1;}"
+        "let west=outline_pixel(mask+12,8,255);let center=outline_pixel(mask+16,110,0);"
+        "return outline_pixel(mask+20,200,g);}"
+        "let mask=0;let dst=512;";
+    const char *cases[]={
+        SCENE "return 0.0+ux_u32(dst+4*18);",
+        SCENE "return 0.0+ux_u32(dst+4*19);",
+        SCENE "return 0.0+ux_u32(dst+4*29);",
+        SCENE "return 0.0+ux_u32(dst+4*10);",
+        SCENE "return 0.0+ux_u32(dst+4*12);",
+        SCENE "return 0.0+ux_u32(dst+4*9);",
+        MASK(255) "return 0.0+ux_u32(dst+16);",
+        MASK(254) "return 0.0+ux_u32(dst+16);",
+        SCENE "return 0.0+n;",
+        "let fill=outline_pixel(mask,90,0);"
+        "let n=OutlinePass_detectEdgesRGBA8(mask,dst+1,4,1,1,20680,11806720);"
+        "return 0.0+ux_u8(dst+1)+256*ux_u8(dst+2)+65536*ux_u8(dst+3)+16777216*ux_u8(dst+4)+n;",
+        "let keep=ux_u32_put(dst,481);let n=OutlinePass_detectEdgesRGBA8(mask,dst,191,8,6,0,0);"
+        "return 0.0+ux_u32(dst)+1000*n;",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(mask,mask+1,192,8,6,0,0);",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(6291453,dst,4,1,1,0,0);",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(mask,6291450,7,1,1,0,0);",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(mask,dst,4,1,1,16777216,0);",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(mask,dst,4,1,1,0,0-1);",
+        "return 0.0+OutlinePass_detectEdgesRGBA8(mask,dst,4,1572864,2,0,0);",
+    };
+    const double gold[]={
+        RGBA(0,28,127,180),RGBA(100,40,0,128),RGBA(141,57,0,180),
+        RGBA(0,20,90,128),RGBA(100,40,0,128),0,RGBA(0,15,68,96),RGBA(75,30,0,96),48,
+        1,-519,-1,-1,-1,-1,-1,-1,
+    };
+    return g_wasm_batch_addon("G_PIXEL OutlinePass edges","outlinepass-edge",argv[1],modules,
+        setup,cases,gold,sizeof gold/sizeof gold[0],mutate?0:-1,
+        "let fill=outline_scene(mask);let n=OutlinePass_detectEdgesRGBA8(mask,dst,192,8,6,20680,20680);"
+        "return 0.0+ux_u32(dst+4*18);");
+}
