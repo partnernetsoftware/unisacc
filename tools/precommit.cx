@@ -441,13 +441,16 @@ static int in_root(const char *path, long pl, const char *rt, long rl) {
    layer-api/tlib-packages rows: cb95b01649 ff_ctx_lookup).  Cheap probe: tools/layer-api.cx --sha-only (one
    -cx-interface per unit, no manifest, no closure check; about 1 s hot for tools.cxlib).  A body-only change
    keeps the sha and passes.  Skipped in --plan/--from-run (no flow node yet) and when the tool is absent. */
+static char pc_orig_cwd[1024];
+
 static int tlib_api_gate(const char *root, const char *cp, char pkgs[][64], int npkg) {
     char lp[1200], *av[16], *rows; long rn, at; int i, k, blocked = 0;
     if (plan_dir || from_run || npkg <= 0) return 0;
     if (cx_fmt(lp, sizeof lp, "%s/tools/layer-api.cx", root)) return 0;
     if (sy_exists(lp) != 1) {   /* a fixture work tree without tools: the checkout's own, as tlib_frozen_gate does */
-        if (sy_exists("./tools/layer-api.cx") != 1) return 0;
-        tx_copy(lp, sizeof lp, "tools/layer-api.cx", 18);
+        if (pc_orig_cwd[0] && !cx_fmt(lp, sizeof lp, "%s/tools/layer-api.cx", pc_orig_cwd) && sy_exists(lp) == 1) { }
+        else if (sy_exists("./tools/layer-api.cx") == 1) tx_copy(lp, sizeof lp, "tools/layer-api.cx", 18);
+        else return 0;
     }
     for (i = 0; i < npkg; i++) {
         k = 0;
@@ -484,8 +487,9 @@ static void tlib_reserve_hint(const char *root, const char *cp, char pkgs[][64],
     if (plan_dir || from_run || npkg <= 0) return;
     if (cx_fmt(bp, sizeof bp, "%s/tools/bump.cx", root)) return;
     if (sy_exists(bp) != 1) {
-        if (sy_exists("./tools/bump.cx") != 1) return;
-        tx_copy(bp, sizeof bp, "tools/bump.cx", 13);
+        if (pc_orig_cwd[0] && !cx_fmt(bp, sizeof bp, "%s/tools/bump.cx", pc_orig_cwd) && sy_exists(bp) == 1) { }
+        else if (sy_exists("./tools/bump.cx") == 1) tx_copy(bp, sizeof bp, "tools/bump.cx", 13);
+        else return;
     }
     for (p = 0; p < npkg; p++) {
         k = 0; o = 0; n = 0;
@@ -521,12 +525,14 @@ static int tlib_frozen_gate(const char *names, long sn) {
         cx_fmt(cp, sizeof cp, "%s/unisacc.com", root)) return 0;
     if (sy_exists(tp) != 1) return 0;
     if (sy_exists(fp) != 1) {
-        if (sy_exists("./tools/check-tlib-frozen.cx") != 1) return 0;
-        tx_copy(fp, sizeof fp, "tools/check-tlib-frozen.cx", 26);
+        if (pc_orig_cwd[0] && !cx_fmt(fp, sizeof fp, "%s/tools/check-tlib-frozen.cx", pc_orig_cwd) && sy_exists(fp) == 1) { }
+        else if (sy_exists("./tools/check-tlib-frozen.cx") == 1) tx_copy(fp, sizeof fp, "tools/check-tlib-frozen.cx", 26);
+        else return 0;
     }
     if (sy_exists(cp) != 1) {
-        if (sy_exists("./unisacc.com") != 1) return 0;
-        tx_copy(cp, sizeof cp, "./unisacc.com", 13);
+        if (pc_orig_cwd[0] && !cx_fmt(cp, sizeof cp, "%s/unisacc.com", pc_orig_cwd) && sy_exists(cp) == 1) { }
+        else if (sy_exists("./unisacc.com") == 1) tx_copy(cp, sizeof cp, "./unisacc.com", 13);
+        else return 0;
     }
     t = (char *)cx_read(tp, &tn);
     if (!t) return 0;
@@ -1338,7 +1344,8 @@ static int precheck(int argc, char **argv) {
     "  GIT_DIR=\"$g\" GIT_INDEX_FILE=\"$si\" git checkout-index -a -f --prefix=\"$d/\" || { rm -rf \"$d\" \"$si\"; exit 1; }; " \
     "fi; " \
     "rm -f \"$si\"; " \
-    "for _f in unisacc.com unisacc.com.build.json .git .devsvc; do " \
+    "[ -e \"$d/.git\" ] || [ -L \"$d/.git\" ] || ln -s \"$g\" \"$d/.git\"; " \
+    "for _f in unisacc.com unisacc.com.build.json .devsvc; do " \
     "  [ ! -e \"$_f\" ] || [ -e \"$d/$_f\" ] || [ -L \"$d/$_f\" ] || ln -s \"$PWD/$_f\" \"$d/$_f\"; " \
     "done; " \
     "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
@@ -1356,29 +1363,23 @@ static void pc_emit_gate_fail(void) {
     const char *g = pc_blk_gate[0] ? pc_blk_gate : "precommit";
     const char *r = pc_blk_reason[0] ? pc_blk_reason : "blocked";
     sy_eprintf("PRECOMMIT_GATE_FAIL\tgate=%s\treason=%s\n", g, r);
-    if (tx_eqz(g, "ratchets")) {
+    if (tx_eqz(g, "ratchets") || tx_eqz(g, "lint")) {
         sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
-                   "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run: sh ./unisacc.com tools/ratchets.cx\n");
+                   "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run tools/ratchets.cx.\n");
+        if (tx_eqz(g, "lint"))
+            sy_eprintf("PRECOMMIT_HINT\tgate=lint\treason=%s\tnext=sh ./unisacc.com tools/cx-lint.cx -- <staged.cx>\n", r);
     } else if (tx_eqz(g, "tlib-frozen")) {
-        sy_eprintf("precommit: blocked by tlib-frozen (TLIB_API_STALE: package interface changed without version bump or layer-api manifest refresh).\n"
-                   "  next: sh ./unisacc.com tools/layer-api.cx -- --bump <pkg> && sh ./unisacc.com tools/derive.cx -- --write --only layer-api,iface-hash (or commit with --derive)\n");
+        sy_eprintf("PRECOMMIT_HINT\tgate=tlib-frozen\treason=%s\tnext=sh ./unisacc.com tools/layer-api.cx -- --bump <pkg> && sh ./unisacc.com tools/derive.cx -- --write --only layer-api,iface-hash (or commit with --derive)\n", r);
     } else if (tx_eqz(g, "derive")) {
-        sy_eprintf("precommit: blocked by derive (derived-table-drift: staged inputs changed without recomputing derived tables).\n"
-                   "  next: pass --derive to devsvc git commit, or run: sh ./unisacc.com tools/derive.cx -- --write --changed <paths>\n");
+        sy_eprintf("PRECOMMIT_HINT\tgate=derive\treason=%s\tnext=pass --derive to devsvc git commit, or run: sh ./unisacc.com tools/derive.cx -- --write --changed <paths>\n", r);
     } else if (tx_eqz(g, "new-tools") || tx_eqz(g, "toolsreg")) {
-        sy_eprintf("precommit: blocked by %s (new tool missing check-NAME.cx or registration).\n"
-                   "  next: register batch with tools/register.cx ... --no-run and inventory with tools/register.cx --tool tools/NAME.cx, then commit with --new-tool tools/NAME.cx --registered <batch-id>\n", g);
+        sy_eprintf("PRECOMMIT_HINT\tgate=%s\treason=%s\tnext=sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool tools/NAME.cx --batch <batch-id>\n", g, r);
     } else if (tx_eqz(g, "manifest") || tx_eqz(g, "tables")) {
-        sy_eprintf("precommit: blocked by %s (registration manifest and generated registry tables out of sync).\n"
-                   "  next: sh ./unisacc.com tools/tables-gen.cx -- --write and commit with --registered <batch-id>\n", g);
+        sy_eprintf("PRECOMMIT_HINT\tgate=%s\treason=%s\tnext=sh ./unisacc.com tools/tables-gen.cx -- --write and commit with --registered <batch-id>\n", g, r);
     } else if (tx_eqz(g, "conflict-markers")) {
-        sy_eprintf("precommit: blocked by conflict-markers (staged table or source contains unresolved merge conflict markers).\n"
-                   "  next: resolve conflict markers in the named files and re-stage before committing\n");
-    } else if (tx_eqz(g, "lint")) {
-        sy_eprintf("precommit: blocked by cx-lint (R2/R3/R4 findings in staged .cx files).\n"
-                   "  next: sh ./unisacc.com tools/cx-lint.cx -- <staged.cx>\n");
+        sy_eprintf("PRECOMMIT_HINT\tgate=conflict-markers\treason=%s\tnext=resolve merge conflict markers in the named files and re-stage before committing\n", r);
     } else {
-        sy_eprintf("precommit: blocked by gate=%s reason=%s; see the BLOCKED diagnostic line above for the exact command to run.\n", g, r);
+        sy_eprintf("PRECOMMIT_HINT\tgate=%s\treason=%s\tnext=see the BLOCKED diagnostic line above for the exact command to run\n", g, r);
     }
 }
 
@@ -1472,6 +1473,7 @@ static int isolate_staged_tree(void) {
         mm_copy(idxp, sizeof idxp, o + o2, (size_t)l2); idxp[l2] = 0;
     }
     mm_free(o);
+    (void)getcwd(pc_orig_cwd, sizeof pc_orig_cwd);
     if (chdir(pc_iso_dir) != 0) {
         sy_eprintf("precommit: isolate_staged_tree chdir failed\n");
         pc_iso_cleanup();
@@ -1495,7 +1497,7 @@ int main(int argc, char **argv) {
     if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
     {
         long csn = 0, ca = 0;
-        char *av_all[] = {"git", "diff", "--cached", "--name-only", "-z", 0};
+        char *av_all[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "-z", 0};
         char *cnames = slurp_run(av_all, &csn);
         if (cnames && csn > 0) {
             char *rpaths = mm_alloc((size_t)csn + 2);
@@ -1512,6 +1514,8 @@ int main(int argc, char **argv) {
                 rpaths[rp] = 0;
                 sy_setenv("UNISACC_RATCHETS_PATHS", rpaths, 1);
                 sy_setenv("UNISACC_RATCHETS_PRECOMMIT", "1", 1);
+                sy_setenv("UNISACC_LAYER_API_PATHS", rpaths, 1);
+                sy_setenv("UNISACC_LAYER_API_PRECOMMIT", "1", 1);
                 mm_free(rpaths);
             }
         }

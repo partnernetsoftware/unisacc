@@ -69,10 +69,10 @@ int main(int argc, char **argv) {
                 nm[i] = 0; unsetenv(nm); e = environ;
             } else e++;
         } }
-    {   /* 夹具路径按仓根哈希与组固定(不含 pid):使启动器自身按源路径取键的产品 -run 编译缓存跨次命中;开头与收尾都清空 */
+    {   /* 夹具路径按仓根哈希、组与 pid 隔离:避免同根同组并发两路互相 rm -rf;固定版本缓存在 $HOME 下仍跨次共享 */
         unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700];
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
-        F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
+        F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s-%d", hh & 0xffffffffULL, tag, (int)sy_pid()); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
         F(c0, sizeof c0, "rm -rf %s %s %s %s", fx, bare, pin, inst); if (!ovf) (void)sh(c0, 0); }
     F(e1, sizeof e1, "DV_PIN_DIR=%s", pin); F(e2, sizeof e2, "UNISACC_DEVSVC_DIR=%s", inst);
@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
     rc = dv("git", "grep", "-c", "main", "--", "tools/devsvc.cx", 0, 0);
     ck(rc == 0 && strlen(out) > 0, "git-ro-grep");
     rc = dv("git", "archive", "--format=tar", "HEAD", "tools/devsvc-repo.tsv", 0, 0, 0);
-    ck(rc == 0 && has("tools/devsvc-repo.tsv"), "git-ro-archive");
+    ck(rc == 0 && sh("UNISACC_DEVSVC_DIR=" " sh ./unisacc.com tools/devsvc.cx -- git archive --format=tar HEAD tools/devsvc-repo.tsv | tar -tf -", fx) == 0 && has("tools/devsvc-repo.tsv"), "git-ro-archive");
 
     /* (d1c) 重作业准入窗口(chain-supervise.lock 按真实 PID 核):活链在途时重池只放行属主为该链的作业,其余具名拒绝 rc 75 并附预计放行时刻;轻量与 git 控制类照常;死 PID 锁不拦 */
     if (!getenv("DVGIT_CORE_FROM")) {
@@ -265,20 +265,25 @@ int main(int argc, char **argv) {
         ck(wfile("chain-supervise.lock", ltxt) == 0, "chain-lock-live-write");
         F(cev, sizeof cev, "DEVSVC_CHAIN_LOCK_FILE=%s", clk);
         envv[1] = cev; envv[2] = 0;
-        rc = dv("x", "--par", "1", "--owner", "other-win", "--", "echo", "heavy-blocked");
+        rc = dv("x", "--owner", "other-win", "--", "echo", "heavy-blocked", 0, 0);
         ck(rc == 75 && has("DEVSVC_CHAIN_BUSY\tstatus=REFUSE\treason=active-release-chain\t") &&
            has("\tchain_owner=chain-v088\tcaller_owner=other-win\trelease_at=") && has("\teta_s="),
            "chain-busy-refuses-non-owner-heavy-rc75");
-        rc = dv("x", "--par", "1", "--owner", "chain-v088", "--", "echo", "heavy-owner-ok");
+        rc = dv("x", "--owner", "chain-v088", "--", "echo", "heavy-owner-ok", 0, 0);
         ck(rc == 0 && has("heavy-owner-ok"), "chain-busy-allows-chain-owner-heavy");
-        rc = dv("x", "--par", "1", "--light", "--owner", "other-win", "--", "echo", "light-other-ok");
+        rc = dv("x", "--light", "--owner", "other-win", "--", "echo", "light-other-ok", 0);
         ck(rc == 0 && has("light-other-ok"), "chain-busy-allows-light-non-owner");
         rc = dv("git", "status", 0, 0, 0, 0, 0, 0);
         ck(rc == 0 && has("GIT_STATUS\t"), "chain-busy-allows-git-control");
+        F(ltxt, sizeof ltxt, "pid=%d\tpgid=%d\towner=chain-v088\tcmd=chain-run-supervise\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
+          (int)sy_pid(), (int)sy_pid(), fx, sy_wall_s(), sy_wall_s() + 1800);
+        ck(wfile("chain-supervise.lock", ltxt) == 0, "chain-lock-pid-reused-write");
+        rc = dv("x", "--owner", "other-win", "--", "echo", "reused-pid-ok", 0, 0);
+        ck(rc == 0 && has("reused-pid-ok"), "chain-reused-pid-allows-non-owner-heavy");
         F(ltxt, sizeof ltxt, "pid=999999\tpgid=999999\towner=chain-v088\tout=%s\tstarted_s=%ld\trelease_at=%ld\n",
           fx, sy_wall_s(), sy_wall_s() + 1800);
         ck(wfile("chain-supervise.lock", ltxt) == 0, "chain-lock-dead-write");
-        rc = dv("x", "--par", "1", "--owner", "other-win", "--", "echo", "dead-chain-ok");
+        rc = dv("x", "--owner", "other-win", "--", "echo", "dead-chain-ok", 0, 0);
         ck(rc == 0 && has("dead-chain-ok"), "chain-dead-pid-allows-non-owner-heavy");
         envv[1] = 0;
         (void)sh("rm -f chain-supervise.lock", fx);
@@ -544,6 +549,8 @@ int main(int argc, char **argv) {
        sh("! test -e .git/MERGE_HEAD && git rev-parse -q --verify HEAD^2 >/dev/null && "
           "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
        "g2-git-commit-merge-continue-writes-v1-reflog");
+    rc = dv("git", "push", 0, 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_PUSH\trc=0\tcommit="), "g2-merge-receipts-allow-no-arg-push");
     if (!getenv("DVGIT_CORE_FROM")) {
         const char *landed_fake =
             "#pragma unisa use sys.fs\n"
@@ -551,15 +558,15 @@ int main(int argc, char **argv) {
             "#pragma unisa use sys.proc\n"
             "int main(void) {\n"
             "    char *o = 0; size_t n = 0;\n"
-            "    char *v[] = {\"sh\", \"-c\", \"B=$(git rev-parse HEAD) && BL=$(git hash-object -w tlf-m.txt) && T=$({ git ls-tree HEAD; printf '100644 blob %s\\\\ttlf-landed.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -p $B -m TL $T) && git update-ref HEAD $C $B && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $B\", 0};\n"
+            "    char *v[] = {\"sh\", \"-c\", \"S0=$(git rev-parse HEAD) && FB=$(printf 'foreign- mid\\\\n' | git hash-object -w --stdin) && FT=$({ git ls-tree $S0; printf '100644 blob %s\\\\tforeign-mid.txt\\\\n' $FB; } | git mktree) && F=$(git commit-tree -p $S0 -m FOREIGN_MID $FT) && git update-ref HEAD $F $S0 && printf 'foreign- mid\\\\n' > foreign-mid.txt && git update-index --add --cacheinfo 100644,$FB,foreign-mid.txt && BL=$(git hash-object -w tlf-landed.txt) && T=$({ git ls-tree $F; printf '100755 blob %s\\\\ttlf-landed.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -p $F -m TL $T) && git update-ref HEAD $C $F && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $F\", 0};\n"
             "    cx_runv_timeout(v, 10, &o, &n);\n"
             "    if (o && n > 0) sy_write_all(1, o, (long)n);\n"
             "    return 124;\n"
             "}\n";
-        ck(wfile("tlf-landed.txt", "resolved-2\n") == 0 && wfile("tools/commit-own.cx", landed_fake) == 0, "f-landed-timeout-fixture-write");
+        ck(wfile("tlf-landed.txt", "#!/bin/sh\necho resolved-2\n") == 0 && sh("chmod 755 tlf-landed.txt", fx) == 0 && wfile("tools/commit-own.cx", landed_fake) == 0, "f-landed-timeout-fixture-write");
         rc = dv("git", "commit", "-m", "TL", "--whole", "tlf-landed.txt", 0, 0);
         ck(rc == 0 && has("GIT_COMMIT_RECOVERED\tcommit=") && has("GIT_COMMIT\trc=0\tcommit=") &&
-           sh("git cat-file -e HEAD:tlf-landed.txt && [ -z \"$(git status --porcelain -- tlf-landed.txt)\" ]", fx) == 0,
+           sh("git cat-file -e HEAD:tlf-landed.txt && [ -z \"$(git status --porcelain -- tlf-landed.txt)\" ] && [ \"$(git ls-files -s -- tlf-landed.txt | cut -c1-6)\" = 100755 ]", fx) == 0,
            "f-timeout-after-commit-landed-recovers-receipt-and-syncs-index");
         (void)sh("git checkout -q -- tools/commit-own.cx", fx);
 

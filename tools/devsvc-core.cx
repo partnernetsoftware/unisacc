@@ -1449,6 +1449,8 @@ static int chain_lock_check_one(const char *lock_path, const char *root, int mat
     }
     int c_pid = 0;
     long rel_at = (long)st.mtime + 2100;
+    char want_cmd[64] = "";
+    if (match_root) { if (snprintf(want_cmd, sizeof want_cmd, "chain-run") >= (int)sizeof want_cmd) want_cmd[0] = 0; }
     if (snprintf(out_owner, ow_cap, "chain") >= (int)ow_cap) out_owner[0] = 0;
     unsigned char *lb = 0; int64_t ln = 0;
     if (sy_read_file(lock_path, &lb, &ln, 4096) == 0 && lb && ln > 0) {
@@ -1465,10 +1467,35 @@ static int chain_lock_check_one(const char *lock_path, const char *root, int mat
         }
         const char *r = strstr((char *)lb, "release_at=");
         if (r) rel_at = atol(r + 11);
+        const char *cm = strstr((char *)lb, "cmd=");
+        if (cm) {
+            cm += 4;
+            size_t k = 0;
+            while (cm[k] && cm[k] != '\t' && cm[k] != '\n' && cm[k] != '\r' && k + 1 < sizeof want_cmd) {
+                want_cmd[k] = cm[k]; k++;
+            }
+            want_cmd[k] = 0;
+        }
     }
     if (lb) free(lb);
+    if (rel_at > 0 && sy_wall_s() > rel_at) return 0;
     if (c_pid <= 0) c_pid = chain_proc_find_holder(dir_path);
     if (c_pid <= 1 || sy_signal(c_pid, 0) != 0) return 0;
+    if (want_cmd[0]) {
+        char cp[128], cmd[4096];
+        if (snprintf(cp, sizeof cp, "/proc/%d/cmdline", c_pid) < (int)sizeof cp) {
+            int fd = sy_open(cp, O_RDONLY, 0);
+            if (fd >= 0) {
+                long cn = sy_read(fd, cmd, sizeof cmd - 1);
+                sy_close(fd);
+                if (cn > 0) {
+                    for (long i = 0; i < cn; i++) if (cmd[i] == 0) cmd[i] = ' ';
+                    cmd[cn] = 0;
+                    if (!strstr(cmd, want_cmd)) return 0;
+                }
+            }
+        }
+    }
     *out_pid = c_pid;
     *out_rel = rel_at;
     return 1;
@@ -1744,10 +1771,26 @@ static int cmd_x(const char *root, int argc, char **argv) {   /* x --par N [--ti
         }
         if (g < argc) for (j = 0; bad[j]; j++) if (!strcmp(argv[g], bad[j])) hit = bad[j];
         if (g < argc) for (j = 0; must_svc[j]; j++) if (!strcmp(argv[g], must_svc[j])) svc_hit = must_svc[j];
+        if (svc_hit) {
+            if (!strcmp(svc_hit, "worktree") && g + 1 < argc && !strcmp(argv[g + 1], "list")) svc_hit = 0;
+            else if (!strcmp(svc_hit, "tag") && (g + 1 == argc || !strcmp(argv[g + 1], "-l") || !strcmp(argv[g + 1], "--list") || !strcmp(argv[g + 1], "-v") || !strcmp(argv[g + 1], "--verify") || !strncmp(argv[g + 1], "--contains", 10) || !strncmp(argv[g + 1], "--points-at", 11) || !strncmp(argv[g + 1], "--merged", 8) || !strncmp(argv[g + 1], "--no-merged", 11))) svc_hit = 0;
+            else if (!strcmp(svc_hit, "branch")) {
+                int ro_br = 1;
+                for (j = g + 1; j < argc; j++) {
+                    const char *ba = argv[j];
+                    if (!strcmp(ba, "-d") || !strcmp(ba, "-D") || !strcmp(ba, "--delete") || !strcmp(ba, "-m") || !strcmp(ba, "-M") || !strcmp(ba, "--move") || !strcmp(ba, "-c") || !strcmp(ba, "-C") || !strcmp(ba, "--copy") || !strcmp(ba, "-f") || !strcmp(ba, "--force") || !strncmp(ba, "--set-upstream", 14) || !strcmp(ba, "--unset-upstream") || !strcmp(ba, "--edit-description")) { ro_br = 0; break; }
+                    if (ba[0] != '-' && (j == g + 1 || (strcmp(argv[j - 1], "--contains") && strcmp(argv[j - 1], "--no-contains") && strcmp(argv[j - 1], "--merged") && strcmp(argv[j - 1], "--no-merged") && strcmp(argv[j - 1], "--points-at") && strcmp(argv[j - 1], "--format") && strcmp(argv[j - 1], "--sort") && strcmp(argv[j - 1], "-l") && strcmp(argv[j - 1], "--list")))) { ro_br = 0; break; }
+                }
+                if (ro_br) svc_hit = 0;
+            }
+        }
         if (g < argc && !strcmp(argv[g], "push")) for (j = g + 1; j < argc; j++) if (!strcmp(argv[j], "--force") || !strcmp(argv[j], "-f") || !strncmp(argv[j], "--force-with-lease", 18)) hit = "push --force";
         if (hit && (!al || strcmp(al, "1"))) { fprintf(stderr, "devsvc: REFUSE x git %s: dangerous on a shared checkout (set DEVSVC_ALLOW_DANGEROUS=1 to override)\n", hit); return 125; }
         if (svc_hit && (!al || strcmp(al, "1"))) {
-            fprintf(stderr, "devsvc: REFUSE x git %s: mutating or network git commands must not run via 'devsvc x'; use 'sh ./unisacc.com tools/devsvc.cx -- git %s' instead\n", svc_hit, svc_hit);
+            if (!strcmp(svc_hit, "add") || !strcmp(svc_hit, "commit") || !strcmp(svc_hit, "merge") || !strcmp(svc_hit, "push") || !strcmp(svc_hit, "pull") || !strcmp(svc_hit, "fetch") || !strcmp(svc_hit, "branch"))
+                fprintf(stderr, "devsvc: REFUSE x git %s: mutating or network git commands must not run via 'devsvc x'; use 'sh ./unisacc.com tools/devsvc.cx -- git %s' instead\n", svc_hit, svc_hit);
+            else
+                fprintf(stderr, "devsvc: REFUSE x git %s: mutating git commands must not run via 'devsvc x'; edit via 'devsvc f write/edit' and commit via 'sh ./unisacc.com tools/devsvc.cx -- git commit' (or set DEVSVC_ALLOW_DANGEROUS=1 for authorized release/worktree ops)\n", svc_hit);
             return 125;
         }
         if (hit) { char rq[200]; F(rq, sizeof rq, "emit\tx.dangerous\tgit %s pid=%d", hit, sy_pid()); request(root, rq, 0); }
@@ -2588,8 +2631,8 @@ static void pin_prepare_kick(const char *root) {
 /* Use the same stable request owner as the service. Automatic PID owners share
  * the local "auto" scope across consecutive CLI commands in the same checkout. */
 static int merge_owner_key(char key[65]) {
-    const char *owner = auto_owner();
-    const char *src = strncmp(owner, "auto-", 5) ? owner : "auto";
+    const char *owner = getenv("DEVSVC_OWNER");
+    const char *src = (owner && owner[0] && strncmp(owner, "auto-", 5) && strncmp(owner, "flow-", 5)) ? owner : "auto";
     key[0] = 0;
     return sy_sha256_hex(src, strlen(src), key) == 0;
 }
@@ -3258,6 +3301,72 @@ static int git_landed_receipt(const char *log, int pushing, char sha[64]) {
     if(count!=1)sha[0]=0;
     return count==1;
 }
+static void git_landed_base(const char *log, char base[64]) {
+    unsigned char *bytes = 0; int64_t size = 0;
+    base[0] = 0;
+    if (!log[0] || sy_read_file(log, &bytes, &size, 1 << 21) || !bytes) return;
+    const char *end = (char *)bytes + size;
+    for (const char *line = (char *)bytes; line < end;) {
+        const char *nl = memchr(line, '\n', (size_t)(end - line));
+        if (!nl) break;
+        if (nl - line > 14 && !memcmp(line, "COMMIT_LANDED\t", 14)) {
+            const char *b = strstr(line, "\tbase=");
+            if (b && b + 46 <= nl) {
+                char found[64];
+                mm_copy(found, 64, b + 6, 40); found[40] = 0;
+                if (git_full_oid(found)) mm_copy(base, 64, found, 41);
+            }
+        }
+        line = nl + 1;
+    }
+    free(bytes);
+}
+static int commit_was_timeout(int rc, const char *err_log, const char *out_log) {
+    if (rc == 124 || timing_timed_out) return 1;
+    unsigned char *b = 0; int64_t n = 0; int hit = 0;
+    if (err_log && err_log[0] && !sy_read_file(err_log, &b, &n, 1 << 20) && b) {
+        if (strstr((char *)b, "timed out") || strstr((char *)b, "WAIT_TIMEOUT") || strstr((char *)b, "TimeoutExpired")) hit = 1;
+        free(b); b = 0;
+    }
+    if (!hit && out_log && out_log[0] && !sy_read_file(out_log, &b, &n, 1 << 20) && b) {
+        if (strstr((char *)b, "WAIT_TIMEOUT")) hit = 1;
+        free(b);
+    }
+    return hit;
+}
+static void recover_landed_index(const char *wd, const char *base, const char *landed) {
+    static char dt[1 << 16];
+    char *dv[] = {"git", "-C", (char *)wd, "diff-tree", "--no-commit-id", "-r", (char *)base, (char *)landed, 0};
+    if (runcap(dv, dt, sizeof dt) != 0) return;
+    for (char *s = dt, *e; *s; s = e ? e + 1 : s + strlen(s)) {
+        e = strchr(s, '\n');
+        if (e) *e = 0;
+        if (s[0] != ':') continue;
+        char *tab = strchr(s, '\t');
+        if (!tab || !tab[1]) continue;
+        *tab = 0;
+        const char *path = tab + 1;
+        char o_mode[16] = "", n_mode[16] = "", o_sha[64] = "", n_sha[64] = "", st_ch[16] = "";
+        if (sscanf(s + 1, "%15s %15s %63s %63s %15s", o_mode, n_mode, o_sha, n_sha, st_ch) != 5) continue;
+        if (!strcmp(n_mode, "000000") || st_ch[0] == 'D') {
+            char fpath[PW], ubuf[256];
+            if (snprintf(fpath, sizeof fpath, "%s/%s", wd, path) < (int)sizeof fpath && sy_exists(fpath) == 0) {
+                char *uv[] = {"git", "-C", (char *)wd, "update-index", "--force-remove", "--", (char *)path, 0};
+                (void)runcap(uv, ubuf, sizeof ubuf);
+            }
+            continue;
+        }
+        if (!git_full_oid(n_sha)) continue;
+        char ws[128] = "", cinfo[PW + 80], ubuf[256];
+        char *hv[] = {"git", "-C", (char *)wd, "hash-object", "--no-filters", "--", (char *)path, 0};
+        if (runcap(hv, ws, sizeof ws) != 0) continue;
+        chomp(ws);
+        if (strcmp(ws, n_sha) != 0) continue;
+        if (snprintf(cinfo, sizeof cinfo, "%s,%s,%s", n_mode, n_sha, path) >= (int)sizeof cinfo) continue;
+        char *uv[] = {"git", "-C", (char *)wd, "update-index", "--add", "--cacheinfo", cinfo, 0};
+        (void)runcap(uv, ubuf, sizeof ubuf);
+    }
+}
 static int git_push_owned_ex(const char *root, const char *cwd, int count, char **commits,
                              int nranges, char ranges[][84], int from_receipt, int carry_merge) {
     const char *work=cwd?cwd:root,*cache;
@@ -3311,7 +3420,9 @@ static int cmd_git(const char *root, int argc, char **argv) {
     {   /* 只读子命令透传:不取锁,stdout 上限 GIT_RO_CAP 字节,超出打截断标记 */
         static const char *ro[] = {"log", "diff", "show", "status", "blame", "ls-files", "rev-parse", "merge-base", "rev-list", "branch", "archive", "grep", "ls-tree", "cat-file", "describe", "for-each-ref", "shortlog", 0};
         int j; for (j = 0; ro[j]; j++) if (!strcmp(argv[0], ro[j])) {
-            np_result r; char why[200]; long cap = 1 << 20, k;
+            np_result r; char why[200]; long cap = !strcmp(argv[0], "archive") ? (16 << 20) : (1 << 20), k;
+            const char *ce = getenv("DEVSVC_GIT_RO_CAP");
+            if (ce && atol(ce) >= 4096) cap = atol(ce);
             if (argc + 2 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git %s: too many arguments (max %d)\n", argv[0], FL_MAX_ARGV - 2); git_argerr = 1; return 2; }
             if (!strcmp(argv[0], "branch")) {
                 for (k = 1; k < argc; k++) {
@@ -3488,7 +3599,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
      * HEAD 被他人推进且本请求路径未变则整遍重放,变了则具名报冲突。路径不重叠的 commit 因此真并行;
      * 写域锁(need)照旧按路径取。提交后只把本请求路径同步进共享索引(撞 index.lock 重试 12 次)。push 在提交之后、不持任何提交锁。 */
     {   char *bv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(bv, sha0, sizeof sha0) == 0) chomp(sha0); else sha0[0] = 0; }
-    char owned[64]="",published[64]="";
+    char owned[64]="",published[64]="",landed_base[64]="";
     {   x_last_err[0] = 0; x_last_out[0]=0;
         if(sha0[0])dt_identity(sha0);
         int derives=flag(n,v,"--derive"), derived_done=0;char dp[PW],did[65];
@@ -3517,27 +3628,21 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }else rc = tool_locked_cwd(root, need, "tools/commit-own.cx", cwd, n, v);
         if(!derives || derived_done)dt_worker(x_last_err,flag(n,v,"--derive-selected"));
         git_landed_receipt(x_last_out,0,owned);
+        git_landed_base(x_last_out, landed_base);
+        const char *eff_base = landed_base[0] ? landed_base : sha0;
         if (rc != 0 && owned[0]) {
             int sy_cnt = 0, kp_cnt = 0;
+            int is_to = commit_was_timeout(rc, x_last_err, x_last_out);
             mg_root = root;
-            if (sha0[0] && strcmp(sha0, owned) != 0) {
-                char scmd[PW * 2 + 512], sbuf[512];
+            if (eff_base[0] && strcmp(eff_base, owned) != 0) {
                 const char *wd = cwd ? cwd : root;
-                (void)mg_sync(wd, sha0, owned, "GIT_COMMIT_SYNC", &sy_cnt, &kp_cnt);
-                if (!cx_fmt(scmd, sizeof scmd,
-                    "cd '%s' && for p in $(git diff-tree --no-commit-id -r --name-only '%s' '%s'); do "
-                    "if [ -f \"$p\" ]; then "
-                    "hs=$(git rev-parse '%s':\"$p\" 2>/dev/null) && ws=$(git hash-object \"$p\" 2>/dev/null) && "
-                    "if [ -n \"$hs\" ] && [ \"$hs\" = \"$ws\" ]; then git update-index --add --cacheinfo \"100644,$hs,$p\" >/dev/null 2>&1; fi; "
-                    "fi; done", wd, sha0, owned, owned)) {
-                    char *sv[] = {"sh", "-c", scmd, 0};
-                    (void)runcap(sv, sbuf, sizeof sbuf);
-                }
+                (void)mg_sync(wd, eff_base, owned, "GIT_COMMIT_SYNC", &sy_cnt, &kp_cnt);
+                recover_landed_index(wd, eff_base, owned);
             }
             printf("GIT_COMMIT_RECOVERED\tcommit=%s\tfrom=%s\tsynced=%d\tkept=%d\n",
-                   owned, sha0[0] ? sha0 : "-", sy_cnt, kp_cnt);
+                   owned, eff_base[0] ? eff_base : "-", sy_cnt, kp_cnt);
             fflush(stdout);
-            rc = 0;
+            if (is_to) rc = 0;
         }
         if (rc != 0) { err_tail(x_last_err, 20); commit_class_from(x_last_err); }   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行;类别记进完成事件 */
         commit_stale_locks_emit(root, x_last_err, auto_owner(), commit_req_val(0));
@@ -3553,7 +3658,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             }
         }
         if(pushing)dt_push(push_start,rc); }
-    commit_range_note(cwd ? cwd : root, sha0, owned);
+    commit_range_note(cwd ? cwd : root, (owned[0] && landed_base[0]) ? landed_base : sha0, owned);
     if (owned[0]) pin_prepare_kick(cwd ? cwd : root);
     F(sha,sizeof sha,"%s",published[0]?published:owned[0]?owned:"none");
     /* 本次没有提交收据时 commit=none。其他请求推进 HEAD 不属于本次。失败时在行尾加 reason=:
