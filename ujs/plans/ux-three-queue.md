@@ -51,7 +51,8 @@
 - QuaternionLinearInterpolant | G-anim quaternionlinearinterpolant-anim.cx：单四元数 f32 轨道、最短弧、反号等价和端点；多组分与区间缓存待补。补齐 constructor,interpolate_,getSettings_,copySampleValue_,intervalChanged_，运行独立金值及 r160 篡改门 | -
 - LoadingManager | G-io loadingmanager-io.cx：批次开始、进度、错误与完成顺序；URL 变换和处理器注册待补。补齐 constructor,resolveURL,setURLModifier,addHandler,removeHandler,getHandler，运行独立金值及 r160 篡改门 | -
 - PropertyBinding | G-anim propertybinding-anim.cx：根对象平移、缩放、旋转和分量视图及脏标记；命名节点和材料路径待补。补齐 constructor,create,sanitizeNodeName,parseTrackName,findNode,unbind，运行独立金值及 r160 篡改门 | -
-- InterleavedBuffer | G-struct InterleavedBuffer；interleavedbuffer-struct.cx 独立金值与 r160 JSON。按字节步幅构造并拷贝，上传范围与共享序列化待补。补齐 onUploadCallback,updateRange,addUpdateRange,clearUpdateRanges,copyAt,set,onUpload,toJSON，运行独立金值及 r160 篡改门 | -
+- ~~InterleavedBuffer 行复制、更新范围与共享 JSON 元数据 | G-struct r160 异型复制、更新范围、原始缓冲字与共享身份 | 交错缓冲基础。~~ 编辑 20 项、元数据 15 项通过，错行与拆分共享分别转红。
+- InterleavedBuffer 共享克隆与上传回调 | G-struct 同一底层缓冲的克隆身份、原生回调注册与上传后分发 | Wasm 更新范围和共享缓冲记录。
 - ~~LineCurve 与 Bezier 系弧长缓存 | G-struct 六类共用弧长表、缓存复用与刷新 | CurveControl 和 CurveArcCache。~~ 九项通过，漏刷新使长度从 8 变 4 转红。
 - LineCurve | G-struct linecurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getTangentAt,getPoints,getSpacedPoints,getLengths,updateArcLengths,getUtoTmapping,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - CubicBezierCurve | G-struct cubicbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -

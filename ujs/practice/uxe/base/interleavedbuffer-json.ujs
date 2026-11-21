@@ -1,0 +1,104 @@
+struct IBJsonRegistry {
+  rows: u32;
+  capacity: u32;
+  count: u32;
+  arena: u32;
+  next: u32;
+  end: u32;
+}
+
+struct IBJsonBacking {
+  id: u32;
+  source: u32;
+  bytes: u32;
+  words: u32;
+}
+
+struct IBJsonMeta {
+  uuid: u32;
+  buffer: u32;
+  componentType: u32;
+  stride: u32;
+}
+
+native function ib_json_areas(reg:i64,rows:i64,cap:i64,arena:i64,end:i64) i64 {
+  if(cap<0 || cap>65536 || end<arena || !ib_range(reg,IBJsonRegistry.size,4) ||
+     !ib_range(rows,cap*IBJsonBacking.size,4) || !ib_range(arena,end-arena,4) || end%4!=0) { return 0; }
+  return ib_disjoint(reg,IBJsonRegistry.size,rows,cap*IBJsonBacking.size) &&
+    ib_disjoint(reg,IBJsonRegistry.size,arena,end-arena) &&
+    ib_disjoint(rows,cap*IBJsonBacking.size,arena,end-arena);
+}
+
+native function InterleavedBuffer_initJSON(reg:i64,rows:i64,cap:i64,arena:i64,end:i64) i64 {
+  if(!ib_json_areas(reg,rows,cap,arena,end)) { return 0-1; }
+  let a=ux_u32_put(reg+IBJsonRegistry.rows,rows);
+  let b=ux_u32_put(reg+IBJsonRegistry.capacity,cap);
+  let c=ux_u32_put(reg+IBJsonRegistry.count,0);
+  let d=ux_u32_put(reg+IBJsonRegistry.arena,arena);
+  let e=ux_u32_put(reg+IBJsonRegistry.next,arena);
+  let f=ux_u32_put(reg+IBJsonRegistry.end,end);
+  return reg;
+}
+
+native function ib_json_readonly(at:i64,bytes:i64,reg:i64,rows:i64,tableBytes:i64,arena:i64,arenaBytes:i64) i64 {
+  return ib_disjoint(at,bytes,reg,IBJsonRegistry.size) &&
+    ib_disjoint(at,bytes,rows,tableBytes) && ib_disjoint(at,bytes,arena,arenaBytes);
+}
+
+// One owner span identifies each ArrayBuffer, even when views start at
+// different offsets. The registry assigns the shared ID and holds its first
+// raw u32 snapshot. The component tag selects the JSON type name.
+native function InterleavedBuffer_toJSON(buffer:i64,reg:i64,out:i64,uuid:i64,backing:i64,bytes:i64) i64 {
+  let viewBytes=ib_bytes(buffer);
+  if(viewBytes<0 || !ib_range(reg,IBJsonRegistry.size,4) || !ib_range(out,IBJsonMeta.size,4) ||
+     uuid<=0 || uuid>4294967295 || bytes%4!=0 ||
+     !ib_range(backing,bytes,4)) { return 0-1; }
+  let view=ux_u32(buffer+InterleavedBuffer.data);
+  if(view<backing || view+viewBytes>backing+bytes ||
+     !ib_disjoint(buffer,InterleavedBuffer.size,backing,bytes)) { return 0-1; }
+  let rows=ux_u32(reg+IBJsonRegistry.rows);
+  let cap=ux_u32(reg+IBJsonRegistry.capacity);
+  let count=ux_u32(reg+IBJsonRegistry.count);
+  let arena=ux_u32(reg+IBJsonRegistry.arena);
+  let next=ux_u32(reg+IBJsonRegistry.next);
+  let end=ux_u32(reg+IBJsonRegistry.end);
+  let tableBytes=cap*IBJsonBacking.size;
+  if(count>cap || next<arena || next>end || next%4!=0 || !ib_json_areas(reg,rows,cap,arena,end) ||
+     !ib_json_readonly(buffer,InterleavedBuffer.size,reg,rows,tableBytes,arena,end-arena) ||
+     !ib_json_readonly(backing,bytes,reg,rows,tableBytes,arena,end-arena) ||
+     !ib_json_readonly(out,IBJsonMeta.size,reg,rows,tableBytes,arena,end-arena) ||
+     !ib_disjoint(out,IBJsonMeta.size,buffer,InterleavedBuffer.size) ||
+     !ib_disjoint(out,IBJsonMeta.size,backing,bytes)) { return 0-1; }
+
+  let i=0;
+  let id=0;
+  while(i<count) {
+    let row=rows+i*IBJsonBacking.size;
+    let owner=ux_u32(row+IBJsonBacking.source);
+    let size=ux_u32(row+IBJsonBacking.bytes);
+    if(owner==backing) {
+      if(size!=bytes) { return 0-1; }
+      id=ux_u32(row+IBJsonBacking.id);
+    } else if(!ib_disjoint(owner,size,backing,bytes)) { return 0-1; }
+    i=i+1;
+  }
+  if(id==0) {
+    if(count==cap || bytes>end-next) { return 0-2; }
+    id=count+1;
+    let row=rows+count*IBJsonBacking.size;
+    let copy=BufferAttribute_copyBytes(next,backing,bytes);
+    let a=ux_u32_put(row+IBJsonBacking.id,id);
+    let b=ux_u32_put(row+IBJsonBacking.source,backing);
+    let c=ux_u32_put(row+IBJsonBacking.bytes,bytes);
+    let d=ux_u32_put(row+IBJsonBacking.words,next);
+    let e=ux_u32_put(reg+IBJsonRegistry.next,next+bytes);
+    let f=ux_u32_put(reg+IBJsonRegistry.count,count+1);
+  }
+  let type=ux_u32(buffer+InterleavedBuffer.componentType);
+  let stride=ux_u32(buffer+InterleavedBuffer.stride)/BufferAttribute_width(type);
+  let a=ux_u32_put(out+IBJsonMeta.uuid,uuid);
+  let b=ux_u32_put(out+IBJsonMeta.buffer,id);
+  let c=ux_u32_put(out+IBJsonMeta.componentType,type);
+  let d=ux_u32_put(out+IBJsonMeta.stride,stride);
+  return out;
+}

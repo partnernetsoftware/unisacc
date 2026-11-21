@@ -1,0 +1,90 @@
+native function ib_range(at:i64,bytes:i64,alignment:i64) i64 {
+  return at>=0 && at%alignment==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function ib_disjoint(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n==0 || m==0 || a+n<=b || b+m<=a;
+}
+
+native function ib_bytes(record:i64) i64 {
+  if(!ib_range(record,InterleavedBuffer.size,4)) { return 0-1; }
+  let width=BufferAttribute_width(ux_u32(record+InterleavedBuffer.componentType));
+  let stride=ux_u32(record+InterleavedBuffer.stride);
+  let count=ux_u32(record+InterleavedBuffer.count);
+  let at=ux_u32(record+InterleavedBuffer.data);
+  if(width<=0 || stride<=0 || stride>6291456 || stride%width!=0 || count>6291456/stride ||
+     !ib_range(at,count*stride,width) || !ib_disjoint(record,InterleavedBuffer.size,at,count*stride)) { return 0-1; }
+  return count*stride;
+}
+
+native function ib_transfer(dst:i64,dtype:i64,src:i64,stype:i64,count:i64,scratch:i64,snapshot:i64) i64 {
+  let dw=BufferAttribute_width(dtype);
+  let sw=BufferAttribute_width(stype);
+  if(count==0) { return 0; }
+  if(dtype==stype && snapshot) { return BufferAttribute_copyBytes(dst,src,count*dw); }
+  let overlap=!ib_disjoint(dst,count*dw,src,count*sw);
+  let staged=overlap && snapshot;
+  let bytes=staged*count*8+(dtype==8)*4;
+  if(bytes>0 && (!ib_range(scratch,bytes,8) ||
+     !ib_disjoint(scratch,bytes,dst,count*dw) || !ib_disjoint(scratch,bytes,src,count*sw))) { return 0-1; }
+  let input=src;
+  let kind=stype;
+  let width=sw;
+  let temp=scratch;
+  let i=0;
+  if(staged) {
+    while(i<count) {
+      let save=ux_f64_put(scratch+i*8,BufferAttribute_read(src+i*sw,stype));
+      i=i+1;
+    }
+    input=scratch;
+    kind=10;
+    width=8;
+    temp=scratch+count*8;
+  }
+  i=0;
+  while(i<count) {
+    let saved=BufferAttribute_write(dst+i*dw,dtype,BufferAttribute_read(input+i*width,kind),temp);
+    i=i+1;
+  }
+  return dst;
+}
+
+// The offset and count are components, while the base record stores a byte stride.
+// The optional scratch snapshots overlapping inputs of different types.
+native function InterleavedBuffer_set(dst:i64,offset:i64,src:i64,count:i64,stype:i64,scratch:i64) i64 {
+  let bytes=ib_bytes(dst);
+  if(bytes<0) { return 0-1; }
+  let dtype=ux_u32(dst+InterleavedBuffer.componentType);
+  let dw=BufferAttribute_width(dtype);
+  let sw=BufferAttribute_width(stype);
+  if(sw<=0 || offset<0 || offset>bytes/dw || count<0 || count>bytes/dw-offset ||
+     !ib_range(src,count*sw,sw)) { return 0-1; }
+  let at=ux_u32(dst+InterleavedBuffer.data)+offset*dw;
+  let need=(dtype!=stype && !ib_disjoint(at,count*dw,src,count*sw))*count*8+(dtype==8 && dtype!=stype)*4;
+  if(!ib_disjoint(scratch,need,dst,InterleavedBuffer.size)) { return 0-1; }
+  if(ib_transfer(at,dtype,src,stype,count,scratch,1)<0) { return 0-1; }
+  return dst;
+}
+
+// r160 copies destination-stride components in ascending order. A
+// shorter source stride can cross into the next source row if it exists.
+native function InterleavedBuffer_copyAt(dst:i64,row:i64,src:i64,sourceRow:i64,scratch:i64) i64 {
+  let dstBytes=ib_bytes(dst);
+  let srcBytes=ib_bytes(src);
+  if(dstBytes<0 || srcBytes<0 || row<0 || row>=ux_u32(dst+InterleavedBuffer.count) ||
+     sourceRow<0 || sourceRow>=ux_u32(src+InterleavedBuffer.count)) { return 0-1; }
+  let ds=ux_u32(dst+InterleavedBuffer.stride);
+  let ss=ux_u32(src+InterleavedBuffer.stride);
+  let dt=ux_u32(dst+InterleavedBuffer.componentType);
+  let st=ux_u32(src+InterleavedBuffer.componentType);
+  let count=ds/BufferAttribute_width(dt);
+  let need=(dt==8)*4;
+  if(count>(srcBytes-sourceRow*ss)/BufferAttribute_width(st) ||
+     !ib_disjoint(scratch,need,dst,InterleavedBuffer.size) ||
+     !ib_disjoint(scratch,need,src,InterleavedBuffer.size)) { return 0-1; }
+  let from=ux_u32(src+InterleavedBuffer.data)+sourceRow*ss;
+  let to=ux_u32(dst+InterleavedBuffer.data)+row*ds;
+  if(!ib_disjoint(to,ds,src,InterleavedBuffer.size) || ib_transfer(to,dt,from,st,count,scratch,0)<0) { return 0-1; }
+  return dst;
+}

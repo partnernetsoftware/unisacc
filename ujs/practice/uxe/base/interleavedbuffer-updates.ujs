@@ -1,0 +1,77 @@
+struct InterleavedUpdateRange {
+  start: u32;
+  count: u32;
+}
+
+struct InterleavedUpdateState {
+  buffer: u32;
+  ranges: u32;
+  count: u32;
+  capacity: u32;
+  legacyOffset: u32;
+  legacyCount: i32;
+}
+
+native function ib_update_bound(state:i64,buffer:i64,ranges:i64,capacity:i64) i64 {
+  let bytes=ib_bytes(buffer);
+  if(bytes<0 || capacity<0 || capacity>65536 ||
+     !ib_range(state,InterleavedUpdateState.size,4) || !ib_range(ranges,capacity*InterleavedUpdateRange.size,4)) { return 0; }
+  let start=ux_u32(buffer+InterleavedBuffer.data);
+  let rangeBytes=capacity*InterleavedUpdateRange.size;
+  return ib_disjoint(state,InterleavedUpdateState.size,ranges,rangeBytes) &&
+    ib_disjoint(state,InterleavedUpdateState.size,buffer,InterleavedBuffer.size) &&
+    ib_disjoint(state,InterleavedUpdateState.size,start,bytes) &&
+    ib_disjoint(ranges,rangeBytes,buffer,InterleavedBuffer.size) &&
+    ib_disjoint(ranges,rangeBytes,start,bytes);
+}
+
+native function InterleavedBuffer_initUpdates(state:i64,buffer:i64,ranges:i64,capacity:i64) i64 {
+  if(!ib_update_bound(state,buffer,ranges,capacity)) { return 0-1; }
+  let a=ux_u32_put(state+InterleavedUpdateState.buffer,buffer);
+  let b=ux_u32_put(state+InterleavedUpdateState.ranges,ranges);
+  let c=ux_u32_put(state+InterleavedUpdateState.count,0);
+  let d=ux_u32_put(state+InterleavedUpdateState.capacity,capacity);
+  let e=ux_u32_put(state+InterleavedUpdateState.legacyOffset,0);
+  let f=ux_i32_put(state+InterleavedUpdateState.legacyCount,0-1);
+  return state;
+}
+
+native function ib_update_valid(state:i64) i64 {
+  if(!ib_range(state,InterleavedUpdateState.size,4)) { return 0; }
+  let capacity=ux_u32(state+InterleavedUpdateState.capacity);
+  return ux_u32(state+InterleavedUpdateState.count)<=capacity &&
+    ib_update_bound(state,ux_u32(state+InterleavedUpdateState.buffer),ux_u32(state+InterleavedUpdateState.ranges),capacity);
+}
+
+native function ib_update_components(state:i64) i64 {
+  let buffer=ux_u32(state+InterleavedUpdateState.buffer);
+  return ib_bytes(buffer)/BufferAttribute_width(ux_u32(buffer+InterleavedBuffer.componentType));
+}
+
+native function InterleavedBuffer_addRange(state:i64,start:i64,count:i64) i64 {
+  if(!ib_update_valid(state) || start<0 || count<0) { return 0-1; }
+  let components=ib_update_components(state);
+  if(start>components || count>components-start) { return 0-1; }
+  let used=ux_u32(state+InterleavedUpdateState.count);
+  if(used>=ux_u32(state+InterleavedUpdateState.capacity)) { return 0-2; }
+  let row=ux_u32(state+InterleavedUpdateState.ranges)+used*InterleavedUpdateRange.size;
+  let a=ux_u32_put(row+InterleavedUpdateRange.start,start);
+  let b=ux_u32_put(row+InterleavedUpdateRange.count,count);
+  let c=ux_u32_put(state+InterleavedUpdateState.count,used+1);
+  return used+1;
+}
+
+native function InterleavedBuffer_clearRanges(state:i64) i64 {
+  if(!ib_update_valid(state)) { return 0-1; }
+  let cleared=ux_u32_put(state+InterleavedUpdateState.count,0);
+  return 0;
+}
+
+native function InterleavedBuffer_legacyRange(state:i64,offset:i64,count:i64) i64 {
+  if(!ib_update_valid(state) || offset<0 || count<0-1) { return 0-1; }
+  let components=ib_update_components(state);
+  if(offset>components || count>components-offset) { return 0-1; }
+  let a=ux_u32_put(state+InterleavedUpdateState.legacyOffset,offset);
+  let b=ux_i32_put(state+InterleavedUpdateState.legacyCount,count);
+  return state;
+}
