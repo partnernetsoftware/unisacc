@@ -1,0 +1,63 @@
+// Clone into a fresh initialized group with independent typed values. Use
+// copyValues for an existing destination whose listeners should be retained.
+native function UniformsGroup_cloneValues(dst:i64,src:i64,shape:i64,arena:i64,bytes:i64) i64 {
+  if(ug_clone_span(dst,UniformsGroup.size)==0 || ux_u32(dst+UniformsGroup.count)!=0 ||
+      ux_u32(dst+EventDispatcher.listenerCount)!=0) { return 0-1; }
+  return UniformsGroup_copyValues(dst,src,shape,arena,bytes);
+}
+
+native function ug_closure_readable(at:i64,bytes:i64,fields:i64,space:i64,out:i64,capacity:i64) i64 {
+  return ug_clone_span(at,bytes) && ug_clone_disjoint(at,bytes,fields,space) &&
+    ug_clone_disjoint(at,bytes,out,capacity);
+}
+
+// Read Uniform handles from a group and feed its supported scalar, vector
+// and matrix fields to the existing std140 packer. The shape encoding is the
+// same as copyValues: one list level, with -1 for an already flat group.
+native function UniformsGroup_packValues(group:i64,shape:i64,out:i64,capacity:i64,fields:i64,space:i64) i64 {
+  if(out%16!=0 || ug_clone_span(out,capacity)==0 || ug_clone_span(fields,space)==0 ||
+     ug_clone_disjoint(fields,space,out,capacity)==0 ||
+     ug_closure_readable(group,UniformsGroup.size,fields,space,out,capacity)==0) { return 0-1; }
+  let table=ux_u32(group+UniformsGroup.uniforms);
+  let count=ux_u32(group+UniformsGroup.count);
+  if(count>4096 || ug_closure_readable(table,4+count*4,fields,space,out,capacity)==0 || count>ux_u32(table) ||
+     (shape!=0-1 && ug_closure_readable(shape,count*4,fields,space,out,capacity)==0)) { return 0-1; }
+  let phase=0;
+  let total=0;
+  while(phase<2) {
+    total=0;
+    let i=0;
+    while(i<count) {
+      let entry=table+4+i*4;
+      let row=entry;
+      let length=1;
+      let nested=0;
+      if(shape!=0-1) { nested=ux_u32(shape+i*4); }
+      if(nested==4294967295) { length=0; }
+      else if(nested!=0) { row=ux_u32(entry); length=nested; }
+      if(length>4096-total || ug_closure_readable(row,length*4,fields,space,out,capacity)==0) { return 0-1; }
+      if(length>space/UniformField.size-total) { return 0-2; }
+      let j=0;
+      while(j<length) {
+        let uniform=ux_u32(row+j*4);
+        if(ug_closure_readable(uniform,Uniform.size,fields,space,out,capacity)==0) { return 0-1; }
+        let field=ux_u32(uniform+Uniform.value);
+        if(ug_closure_readable(field,UniformField.size,fields,space,out,capacity)==0) { return 0-1; }
+        let kind=ux_u32(field+UniformField.kind);
+        let source=ux_u32(field+UniformField.source);
+        if(uniform_std140_align(kind)==0 ||
+            ug_closure_readable(source,uniform_std140_source(kind),fields,space,out,capacity)==0) { return 0-1; }
+        if(phase!=0) {
+          let slot=fields+total*UniformField.size;
+          let format=ux_u32_put(slot+UniformField.kind,kind);
+          let pointer=ux_u32_put(slot+UniformField.source,source);
+        }
+        total=total+1;
+        j=j+1;
+      }
+      i=i+1;
+    }
+    phase=phase+1;
+  }
+  return UniformsGroup_packStd140(fields,total,out,capacity);
+}

@@ -1,0 +1,169 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { GLSL3, Matrix3, Mesh, OrthographicCamera, PlaneGeometry, RawShaderMaterial, REVISION,
+  Scene, Uniform, UniformsGroup, Vector4, WebGLRenderer, WebGLRenderTarget } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const options = { antialias: false, preserveDrawingBuffer: true };
+const basis = [.25, 0, 0, 0, .5, 0, 0, 0, .75];
+const vertexShader = "in vec3 position; void main() { gl_Position = vec4(position, 1.0); }";
+const fragmentShader = `precision highp float;
+  layout(std140) uniform CopyTest { vec4 first; mat3 basis; vec4 duplicate; float blue; };
+  out vec4 color;
+  void main() { color = vec4(first.x + basis[0][0], duplicate.y, blue, 1.0); }`;
+
+function context() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const gl = canvas.getContext("webgl2", options);
+  if (!gl) throw Error("WebGL2 unavailable");
+  return { canvas, gl };
+}
+
+function reference() {
+  const vector = new Uniform(new Vector4(.25, .5, .75, 1));
+  const matrix = new Uniform(new Matrix3().fromArray(basis));
+  const scalar = new Uniform(.75);
+  const nested = [matrix, vector], empty = [], temporary = [matrix, vector];
+  const source = new UniformsGroup().setName("CopyTest").setUsage(35048);
+  source.add(vector).add(nested).add(empty).add(scalar).add(temporary).remove(temporary).remove([matrix, vector]);
+  const topology = source.uniforms.length === 4 && source.uniforms[1] === nested && source.uniforms[2] === empty;
+  const copied = new UniformsGroup();
+  const sourceListener = () => {}, copyListener = () => {};
+  source.addEventListener("dispose", sourceListener);
+  copied.addEventListener("dispose", copyListener);
+  copied.copy(source);
+  const cloned = source.clone();
+  const shape = [copied, cloned].every(group => group.name === "CopyTest" && group.usage === 35048 &&
+    group.uniforms.length === 4 && group.uniforms[0] !== vector && group.uniforms[1] !== matrix &&
+    group.uniforms[2] !== vector && group.uniforms[2] !== group.uniforms[0] && group.uniforms[3] !== scalar);
+  const listeners = copied.hasEventListener("dispose", copyListener) &&
+    !copied.hasEventListener("dispose", sourceListener) && !cloned.hasEventListener("dispose", sourceListener);
+  vector.value.x = .75;
+  cloned.uniforms[2].value.y = .25;
+  const {canvas, gl} = context();
+  const renderer = new WebGLRenderer({ ...options, canvas, context: gl });
+  const target = new WebGLRenderTarget(1, 1);
+  const geometry = new PlaneGeometry(2, 2);
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 10);
+  camera.position.z = 1;
+  const scene = new Scene();
+  const materials = [copied, cloned].map((group, index) => {
+    // r160 tracks UBO binding by program and block index.
+    const material = new RawShaderMaterial({
+      glslVersion: GLSL3, vertexShader, fragmentShader, defines: { GROUP_DRAW: index }
+    });
+    material.uniformsGroups = [group];
+    return material;
+  });
+  const mesh = new Mesh(geometry, materials[0]);
+  scene.add(mesh);
+  renderer.setRenderTarget(target);
+  try {
+    const pixels = materials.flatMap(material => {
+      mesh.material = material;
+      renderer.render(scene, camera);
+      const pixel = new Uint8Array(4);
+      renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixel);
+      return [...pixel];
+    });
+    return [topology, shape, listeners, ...pixels].map(Number);
+  } finally {
+    renderer.setRenderTarget(null);
+    for (const group of [source, copied, cloned]) group.dispose();
+    for (const material of materials) material.dispose();
+    geometry.dispose();
+    target.dispose();
+    renderer.dispose();
+  }
+}
+
+function createUboDraw(gl) {
+  const program = gl.createProgram();
+  for (const [type, code] of [[gl.VERTEX_SHADER, vertexShader], [gl.FRAGMENT_SHADER, fragmentShader]]) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, "#version 300 es\n" + code);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(shader));
+    gl.attachShader(program, shader);
+    gl.deleteShader(shader);
+  }
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+  const position = gl.getAttribLocation(program, "position");
+  const triangle = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, triangle);
+  gl.bufferData(gl.ARRAY_BUFFER, Float32Array.of(-1,-1,0, 3,-1,0, -1,3,0), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 3, gl.FLOAT, false, 0, 0);
+  const block = gl.getUniformBlockIndex(program, "CopyTest");
+  if (block === gl.INVALID_INDEX) throw Error("UBO block missing");
+  const bytes = gl.getActiveUniformBlockParameter(program, block, gl.UNIFORM_BLOCK_DATA_SIZE);
+  if (bytes < 84 || bytes > 96) throw Error("UBO block size " + bytes);
+  gl.uniformBlockBinding(program, block, 0);
+  const uniform = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, uniform);
+  gl.bindBufferBase(gl.UNIFORM_BUFFER, 0, uniform);
+  gl.disable(gl.DITHER);
+  return bytes => {
+    gl.bufferData(gl.UNIFORM_BUFFER, bytes, gl.DYNAMIC_DRAW);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const pixel = new Uint8Array(4);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    if (gl.getError() !== gl.NO_ERROR) throw Error("UBO draw");
+    return [...pixel];
+  };
+}
+
+async function product() {
+  const {gl} = context();
+  const draw = createUboDraw(gl);
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const {instance: {exports: wasm}} = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (wasm.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const run = (op, a = 0, b = 0) => Number(wasm.uxe_uniformsgroup_closure(BigInt(op), BigInt(a), BigInt(b)));
+  const memory = new Uint8Array(wasm.memory.buffer, run(0), 8192);
+  const view = new DataView(memory.buffer, memory.byteOffset, memory.byteLength);
+  const get = offset => view.getUint32(offset, true);
+  const put = (offset, value) => view.setUint32(offset, value, true);
+  const float = offset => view.getFloat32(offset, true);
+  const floats = (offset, values) => values.forEach((value, i) => view.setFloat32(offset + i * 4, value, true));
+  floats(800, [.25,.5,.75,1]);
+  floats(832, basis);
+  floats(880, [.75]);
+  const topology = run(1) === 1;
+  if (run(2) !== 64 || run(3) !== 128) throw Error("Wasm copy or clone");
+  const fields = [0, 1].flatMap(group => [0, 1, 2, 3].map(i => get(run(5, group, i))));
+  const values = fields.map(field => get(field + 4));
+  const blocks = [64, 128].every(group => get(group + 16) === 4 && get(group + 20) === 35048 && get(group + 24) === 77);
+  const shape = blocks && new Set(fields).size === 8 && new Set(values).size === 8 &&
+    values.every(ptr => ptr >= 1024 && ptr < 2048);
+  const listeners = get(4) === 1 && get(68) === 1 && get(132) === 0 && get(708) === 91 && get(740) === 92;
+  const alreadyCloned = run(3);
+  memory.fill(91, 2048, 2176);
+  const short = run(4, 0, 95);
+  const alias = run(6);
+  const untouched = memory.slice(2048, 2176).every(value => value === 91);
+  floats(800, [.75]);
+  floats(values[6] + 4, [.25]);
+  const nestedSize = run(7);
+  const nested = float(2048) === .75 && float(2064) === .25 && float(2084) === .5 &&
+    float(2104) === .75 && float(2112) === .75 && float(2128) === .75 &&
+    [2076, 2092, 2108, 2132, 2136, 2140].every(offset => get(offset) === 0);
+  const pixels = [0, 1].flatMap(group => {
+    if (group === 1 && query.get("mutate") === "1") put(fields[4] + 4, 800);
+    if (run(4, group, 96) !== 96) throw Error("Wasm std140 pack");
+    return draw(memory.subarray(2048, 2144));
+  });
+  return [topology, shape, listeners, alreadyCloned, short, alias, untouched, nestedSize, nested, ...pixels].map(Number);
+}
+
+try {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  output.textContent = JSON.stringify([...reference(), ...await product()]);
+} catch (error) { output.textContent = "error:" + error.message; }
+</script>
