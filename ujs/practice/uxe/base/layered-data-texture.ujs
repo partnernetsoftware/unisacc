@@ -1,0 +1,70 @@
+// A borrowed, tightly packed R8 image. Rows and layers have no padding.
+struct LayeredDataTexture {
+  kind: u32;
+  data: u32;
+  width: u32;
+  height: u32;
+  depth: u32;
+}
+
+native function layered_tex_size(w:i64,h:i64,d:i64) i64 {
+  if(w<1 || w>2048 || h<1 || h>2048 || d<1 || d>2048) { return 0; }
+  return w*h*d;
+}
+
+native function layered_tex_span(at:i64,data:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && at<=6291456-LayeredDataTexture.size &&
+    bytes>0 && data>=0 && data<=6291456-bytes &&
+    (at+LayeredDataTexture.size<=data || data+bytes<=at);
+}
+
+native function layered_tex_create(at:i64,data:i64,bytes:i64,w:i64,h:i64,d:i64,kind:i64) i64 {
+  if(bytes!=layered_tex_size(w,h,d) || !layered_tex_span(at,data,bytes)) { return 0-1; }
+  let a=ux_u32_put(at+LayeredDataTexture.kind,kind);
+  let b=ux_u32_put(at+LayeredDataTexture.data,data);
+  let c=ux_u32_put(at+LayeredDataTexture.width,w);
+  let e=ux_u32_put(at+LayeredDataTexture.height,h);
+  let f=ux_u32_put(at+LayeredDataTexture.depth,d);
+  return at;
+}
+
+native function Data3DTexture_create(at:i64,data:i64,bytes:i64,w:i64,h:i64,d:i64) i64 {
+  return layered_tex_create(at,data,bytes,w,h,d,1);
+}
+
+native function DataArrayTexture_create(at:i64,data:i64,bytes:i64,w:i64,h:i64,d:i64) i64 {
+  return layered_tex_create(at,data,bytes,w,h,d,2);
+}
+
+native function layered_tex_validate(at:i64,x:i64,y:i64,kind:i64) i64 {
+  if(at<0 || at%4!=0 || at>6291456-LayeredDataTexture.size ||
+     ux_u32(at+LayeredDataTexture.kind)!=kind) { return 0; }
+  let w=ux_u32(at+LayeredDataTexture.width);
+  let h=ux_u32(at+LayeredDataTexture.height);
+  let d=ux_u32(at+LayeredDataTexture.depth);
+  return x>=0 && x<w && y>=0 && y<h &&
+    layered_tex_span(at,ux_u32(at+LayeredDataTexture.data),layered_tex_size(w,h,d));
+}
+
+// Integer x/y address texel centers. z256 is a layer-center coordinate
+// in units of 1/256 layer. Linear Z filtering clamps at both volume edges.
+native function Data3DTexture_sampleR8(at:i64,x:i64,y:i64,z256:i64) i64 {
+  if(!layered_tex_validate(at,x,y,1)) { return 0-1; }
+  let w=ux_u32(at+LayeredDataTexture.width);
+  let stride=w*ux_u32(at+LayeredDataTexture.height);
+  let last=ux_u32(at+LayeredDataTexture.depth)-1;
+  let p=ux_u32(at+LayeredDataTexture.data)+y*w+x;
+  if(z256<=0) { return ux_u8(p); }
+  if(z256>=256*last) { return ux_u8(p+last*stride); }
+  let offset=(z256/256)*stride;
+  let mix=z256%256;
+  return (ux_u8(p+offset)*(256-mix)+ux_u8(p+offset+stride)*mix+128)/256;
+}
+
+native function DataArrayTexture_sampleR8(at:i64,x:i64,y:i64,layer:i64) i64 {
+  if(!layered_tex_validate(at,x,y,2) || layer<0 ||
+     layer>=ux_u32(at+LayeredDataTexture.depth)) { return 0-1; }
+  let w=ux_u32(at+LayeredDataTexture.width);
+  let h=ux_u32(at+LayeredDataTexture.height);
+  return ux_u8(ux_u32(at+LayeredDataTexture.data)+(layer*h+y)*w+x);
+}

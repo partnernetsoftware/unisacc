@@ -1,0 +1,167 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Color, Matrix3, Matrix4, Quaternion, REVISION, Texture, UniformsUtils, Vector2, Vector3,
+  Vector4, WebGLRenderTarget } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const shared = { n: 7 };
+const texture = new Texture({ width: 2, height: 1 });
+texture.offset.set(0.25, 0.5);
+texture.repeat.set(2, 3);
+texture.rotation = 0.25;
+const target = new WebGLRenderTarget(2, 1);
+const source = {
+  scalar: { value: 1.25, enabled: false, label: "fog", absent: undefined },
+  vector: { value: new Vector3(1, 2, 3), points: [shared, 9], marker: shared },
+  transforms: { m3: new Matrix3().set(1, 2, 3, 4, 5, 6, 7, 8, 9), m4: new Matrix4().makeTranslation(3, 4, 5),
+    uv: new Vector2(4, 5), clip: new Vector4(1, 2, 3, 4), spin: new Quaternion(0.25, 0.5, 0.75, 1), tint: new Color(0.25, 0.5, 1) },
+  tex: { value: texture, target: target.texture }
+};
+const overlay = { vector: { value: new Vector3(7, 8, 9) }, end: { value: true } };
+
+const names = new Map();
+const handles = new Map();
+function intern(dict, value) {
+  if (!dict.has(value)) dict.set(value, dict.size + 1);
+  return dict.get(value);
+}
+const key = name => intern(names, name);
+const handle = value => intern(handles, value);
+
+function description(value) {
+  if (value === null) return { kind: 0, data: 0 };
+  if (typeof value === "number") return { kind: 1, numbers: [value] };
+  if (typeof value === "boolean") return { kind: 2, data: Number(value) };
+  if (typeof value === "string") return { kind: 3, data: handle(value) };
+  if (value === undefined) return { kind: 15, data: 0 };
+  if (Array.isArray(value)) return { kind: 5, refs: value.map(handle) };
+  if (value.isColor) return { kind: 6, numbers: value.toArray() };
+  if (value.isMatrix3) return { kind: 7, numbers: value.toArray() };
+  if (value.isMatrix4) return { kind: 8, numbers: value.toArray() };
+  if (value.isVector2) return { kind: 9, numbers: value.toArray() };
+  if (value.isVector3) return { kind: 10, numbers: value.toArray() };
+  if (value.isVector4) return { kind: 11, numbers: value.toArray() };
+  if (value.isQuaternion) return { kind: 12, numbers: value.toArray() };
+  if (value.isRenderTargetTexture) return { kind: 14, data: handle(value) };
+  if (value.isTexture) return { kind: 13, words: [handle(value.source), value.mapping, value.wrapS, value.wrapT,
+    value.minFilter, value.magFilter, handle(value.colorSpace), value.channel],
+    numbers: [value.offset.x, value.offset.y, value.repeat.x, value.repeat.y, value.rotation] };
+  return { kind: 4, data: handle(value) };
+}
+
+function expected(map) {
+  return Object.entries(map).map(([name, fields]) => [key(name), Object.entries(fields).map(([prop, value]) => [key(prop), description(value)])]);
+}
+
+function encode(view, at, map) {
+  const rows = expected(map);
+  const put = (offset, value) => view.setUint32(at + offset, value, true);
+  let cursor = 8 + 16 * rows.length;
+  put(0, rows.length);
+  for (let i = 0; i < rows.length; i++) {
+    const [name, fields] = rows[i];
+    put(8 + i * 16, name);
+    put(12 + i * 16, cursor);
+    put(16 + i * 16, fields.length);
+    put(20 + i * 16, 0);
+    const property = cursor;
+    cursor += 16 * fields.length;
+    fields.forEach(([prop, d], j) => {
+      const row = property + j * 16;
+      const length = (d.words?.length ?? 0) * 4 + (d.numbers?.length ?? 0) * 8 + (d.refs?.length ?? 0) * 8;
+      put(row, prop); put(row + 4, d.kind); put(row + 8, length ? cursor : d.data ?? 0); put(row + 12, length);
+      for (const word of d.words ?? []) { put(cursor, word); cursor += 4; }
+      for (const number of d.numbers ?? []) { view.setFloat64(at + cursor, number, true); cursor += 8; }
+      for (const ref of d.refs ?? []) { put(cursor, ref); put(cursor + 4, 0); cursor += 8; }
+    });
+  }
+  put(4, cursor);
+}
+
+function decode(view, at) {
+  const get = offset => view.getUint32(at + offset, true);
+  const rows = [];
+  for (let i = 0; i < get(0); i++) {
+    const start = 8 + i * 16;
+    const fields = [];
+    for (let j = 0; j < get(start + 8); j++) {
+      const property = get(start + 4) + j * 16;
+      const kind = get(property + 4), data = get(property + 8), length = get(property + 12);
+      const record = { kind };
+      let cursor = data;
+      if (kind === 13) {
+        record.words = Array.from({ length: 8 }, (_, index) => get(data + 4 * index));
+        cursor += 32;
+      }
+      if (kind >= 6 && kind <= 13 || kind === 1) {
+        record.numbers = [];
+        for (; cursor < data + length; cursor += 8) record.numbers.push(view.getFloat64(at + cursor, true));
+      } else if (kind === 5) {
+        record.refs = [];
+        for (; cursor < data + length; cursor += 8) record.refs.push(get(cursor));
+      } else record.data = data;
+      fields.push([get(property), record]);
+    }
+    rows.push([get(start), fields]);
+  }
+  return rows;
+}
+
+function offset(view, at, index, property) {
+  const fields = view.getUint32(at + 12 + 16 * index, true);
+  return at + view.getUint32(at + fields + 16 * property + 8, true);
+}
+
+async function test() {
+  if (REVISION !== "160") throw new Error("wrong three.js revision");
+  const clone = UniformsUtils.clone(source), merged = UniformsUtils.merge([source, overlay]);
+  const ref = [clone.tex.value.source === texture.source && clone.tex.value !== texture,
+    clone.vector.value !== source.vector.value && clone.transforms.m3 !== source.transforms.m3,
+    clone.vector.points !== source.vector.points && clone.vector.points[0] === shared && clone.vector.marker === shared,
+    clone.tex.target === null, merged.vector.value.x === 7 && !("marker" in merged.vector),
+    Object.keys(merged).join(",") === "scalar,vector,transforms,tex,end"];
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const { instance: { exports: e } } = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (e.uxe_abi_version() !== 1) throw new Error("probe ABI");
+  const run = (op, a = 0, b = 0, c = 0, d = 0) => Number(e.uxe_uniforms_utils(BigInt(op), BigInt(a), BigInt(b), BigInt(c), BigInt(d)));
+  const view = new DataView(e.memory.buffer, run(0), 8192);
+  encode(view, 512, source);
+  encode(view, 1536, overlay);
+  view.setUint32(320, 512, true);
+  view.setUint32(324, 1536, true);
+  if (run(1, 2304, 1024, 512) !== 2304 || run(2, 4096, 1024, 320, 2) !== 4096) throw new Error("clone/merge result");
+  if (query.get("mutate") === "1") {
+    const at = offset(view, 2304, 3, 0);
+    view.setUint32(at, view.getUint32(at, true) + 1, true);
+  }
+  const cloned = decode(view, 2304), combined = decode(view, 4096);
+  const exactClone = JSON.stringify(cloned) === JSON.stringify(expected(clone));
+  const exactMerge = JSON.stringify(combined) === JSON.stringify(expected(merged));
+
+  const originalTex = offset(view, 512, 3, 0), cloneTex = offset(view, 2304, 3, 0);
+  view.setFloat64(cloneTex + 32, 99, true);
+  const textureIndependent = view.getUint32(originalTex, true) === view.getUint32(cloneTex, true) &&
+    view.getFloat64(originalTex + 32, true) === 0.25 && cloneTex !== originalTex;
+  const originalVector = offset(view, 512, 1, 0), cloneVector = offset(view, 2304, 1, 0);
+  view.setFloat64(cloneVector, 99, true);
+  const valuesIndependent = view.getFloat64(originalVector, true) === 1 && cloneVector !== originalVector;
+  const originalArray = offset(view, 512, 1, 1), cloneArray = offset(view, 2304, 1, 1);
+  const arrayShallow = view.getUint32(cloneArray, true) === view.getUint32(originalArray, true) && cloneArray !== originalArray;
+  const refusedBuffer = new Uint8Array(view.buffer, view.byteOffset + 6144, 128);
+  refusedBuffer.fill(91);
+  const refusedSmall = run(1, 6144, 64, 512) === -2;
+  view.setUint32(1536 + 4, 4, true);
+  const refusedInvalid = run(2, 6144, 128, 320, 2) === -1;
+  const refusedAlias = run(1, 512, 1024, 512) === -1;
+  const untouched = refusedBuffer.every(byte => byte === 91);
+  const empty = run(2, 6144, 128, 320, 0) === 6144 && view.getUint32(6144, true) === 0 && view.getUint32(6148, true) === 8;
+  return [...ref, exactClone, exactMerge, textureIndependent, valuesIndependent, arrayShallow,
+    refusedSmall, refusedInvalid, refusedAlias, untouched, empty].map(Number);
+}
+
+try { output.textContent = JSON.stringify(await test()); }
+catch (error) { output.textContent = "error:" + error.message; }
+</script>

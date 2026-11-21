@@ -1,0 +1,211 @@
+struct ShaderChunk { count: u32; capacity: u32; }
+struct ShaderChunkEntry { name: u32; nameBytes: u32; text: u32; textBytes: u32; }
+struct ShaderChunkDiagnostic { code: i32; name: u32; nameBytes: u32; depth: u32; }
+struct ShaderChunkFrame { id: u32; cursor: u32; end: u32; lineStart: u32; }
+
+native function shader_chunk_range(at:i64,bytes:i64) i64 {
+  return at>=0 && bytes>=0 && at<=6291456 && bytes<=6291456-at;
+}
+
+native function shader_chunk_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+native function shader_chunk_name_byte(byte:i64) i64 {
+  return (byte>=65 && byte<=90) || (byte>=97 && byte<=122) || (byte>=48 && byte<=57) ||
+    byte==95 || byte==46 || byte==47;
+}
+
+native function shader_chunk_legal_name(name:i64,bytes:i64) i64 {
+  if(bytes<1 || shader_chunk_range(name,bytes)==0) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    if(shader_chunk_name_byte(ux_u8(name+i))==0) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function shader_chunk_table_size(table:i64) i64 {
+  if(table%4!=0 || shader_chunk_range(table,ShaderChunk.size)==0) { return 0; }
+  let count=ux_u32(table+ShaderChunk.count);
+  let capacity=ux_u32(table+ShaderChunk.capacity);
+  if(count>capacity || capacity>(6291456-table-ShaderChunk.size)/ShaderChunkEntry.size) { return 0; }
+  return ShaderChunk.size+capacity*ShaderChunkEntry.size;
+}
+
+native function ShaderChunk_init(table:i64,capacity:i64) i64 {
+  if(capacity<0 || table%4!=0 || shader_chunk_range(table,ShaderChunk.size)==0 ||
+      capacity>(6291456-table-ShaderChunk.size)/ShaderChunkEntry.size) { return 0-1; }
+  let count=ux_u32_put(table+ShaderChunk.count,0);
+  let room=ux_u32_put(table+ShaderChunk.capacity,capacity);
+  return table;
+}
+
+native function shader_chunk_find(table:i64,name:i64,bytes:i64) i64 {
+  let count=ux_u32(table+ShaderChunk.count);
+  let i=0;
+  while(i<count) {
+    let row=table+ShaderChunk.size+i*ShaderChunkEntry.size;
+    let size=ux_u32(row+ShaderChunkEntry.nameBytes);
+    if(size==bytes) {
+      let other=ux_u32(row+ShaderChunkEntry.name);
+      if(shader_chunk_range(other,bytes)!=0) {
+        let j=0;
+        while(j<bytes && ux_u8(other+j)==ux_u8(name+j)) { j=j+1; }
+        if(j==bytes) { return i; }
+      }
+    }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+// Names and texts are borrowed immutable spans. Registering the same name
+// replaces its text. Different parents can share the same registered chunk.
+native function ShaderChunk_register(table:i64,name:i64,name_bytes:i64,text:i64,text_bytes:i64) i64 {
+  let span=shader_chunk_table_size(table);
+  if(span==0 || shader_chunk_legal_name(name,name_bytes)==0 || shader_chunk_range(text,text_bytes)==0 ||
+      shader_chunk_overlap(table,span,name,name_bytes)!=0 || shader_chunk_overlap(table,span,text,text_bytes)!=0) { return 0-1; }
+  let count=ux_u32(table+ShaderChunk.count);
+  let id=shader_chunk_find(table,name,name_bytes);
+  if(id<0) {
+    if(count==ux_u32(table+ShaderChunk.capacity)) { return 0-4; }
+    id=count;
+    let added=ux_u32_put(table+ShaderChunk.count,count+1);
+  }
+  let row=table+ShaderChunk.size+id*ShaderChunkEntry.size;
+  let label=ux_u32_put(row+ShaderChunkEntry.name,name);
+  let label_size=ux_u32_put(row+ShaderChunkEntry.nameBytes,name_bytes);
+  let source=ux_u32_put(row+ShaderChunkEntry.text,text);
+  let source_size=ux_u32_put(row+ShaderChunkEntry.textBytes,text_bytes);
+  return id;
+}
+
+native function ShaderChunk_scratchBytes() i64 {
+  return ShaderChunkDiagnostic.size+33*ShaderChunkFrame.size;
+}
+
+native function shader_chunk_diagnostic(scratch:i64,code:i64,name:i64,bytes:i64,depth:i64) i64 {
+  let reason=ux_u32_put(scratch+ShaderChunkDiagnostic.code,code);
+  let start=ux_u32_put(scratch+ShaderChunkDiagnostic.name,name);
+  let length=ux_u32_put(scratch+ShaderChunkDiagnostic.nameBytes,bytes);
+  let stack=ux_u32_put(scratch+ShaderChunkDiagnostic.depth,depth);
+  return code;
+}
+
+native function shader_chunk_frame(frame:i64,id:i64,start:i64,end:i64) i64 {
+  let source=ux_u32_put(frame+ShaderChunkFrame.id,id);
+  let cursor=ux_u32_put(frame+ShaderChunkFrame.cursor,start);
+  let limit=ux_u32_put(frame+ShaderChunkFrame.end,end);
+  let line=ux_u32_put(frame+ShaderChunkFrame.lineStart,1);
+  return frame;
+}
+
+// The recognized prefix matches r160's directive form. The caller advances
+// past '>' only, preserving trailing text and the original line ending.
+native function shader_chunk_include(start:i64,end:i64) i64 {
+  let p=start;
+  while(p<end && (ux_u8(p)==32 || ux_u8(p)==9)) { p=p+1; }
+  if(end-p<11) { return 0-1; }
+  let prefix=[35,105,110,99,108,117,100,101];
+  let i=0;
+  while(i<8) {
+    if(ux_u8(p+i)!=prefix[i]) { return 0-1; }
+    i=i+1;
+  }
+  p=p+8;
+  if(ux_u8(p)!=32) { return 0-1; }
+  while(p<end && ux_u8(p)==32) { p=p+1; }
+  if(p>=end || ux_u8(p)!=60) { return 0-1; }
+  return p+1;
+}
+
+native function shader_chunk_walk(out:i64,capacity:i64,table:i64,src:i64,bytes:i64,scratch:i64,emit:i64) i64 {
+  let stack=scratch+ShaderChunkDiagnostic.size;
+  let root=shader_chunk_frame(stack,4294967295,src,src+bytes);
+  let depth=0;
+  let used=0;
+  let work=0;
+  while(depth>=0) {
+    let frame=stack+depth*ShaderChunkFrame.size;
+    let cursor=ux_u32(frame+ShaderChunkFrame.cursor);
+    let end=ux_u32(frame+ShaderChunkFrame.end);
+    if(cursor==end) { depth=depth-1; }
+    else {
+      let name=0-1;
+      let stop=0-1;
+      if(ux_u32(frame+ShaderChunkFrame.lineStart)!=0) {
+        name=shader_chunk_include(cursor,end);
+        if(name>=0) {
+          stop=name;
+          while(stop<end && shader_chunk_name_byte(ux_u8(stop))!=0) { stop=stop+1; }
+          if(stop==name || stop>=end || ux_u8(stop)!=62) { name=0-1; }
+        }
+      }
+      if(work>=6291456) { return shader_chunk_diagnostic(scratch,0-6,0,0,depth); }
+      if(name<0) {
+        if(used>=capacity) { return shader_chunk_diagnostic(scratch,0-4,0,0,depth); }
+        let c=ux_u8(cursor);
+        if(emit!=0) { let copy=uxe_copy_record(out+used,cursor,1); }
+        let line=ux_u32_put(frame+ShaderChunkFrame.lineStart,c==10 || c==13);
+        let next=ux_u32_put(frame+ShaderChunkFrame.cursor,cursor+1);
+        used=used+1;
+        work=work+1;
+      } else {
+        if(stop+1-cursor>6291456-work) { return shader_chunk_diagnostic(scratch,0-6,name,stop-name,depth); }
+        let selected=shader_chunk_find(table,name,stop-name);
+        if(selected<0) { return shader_chunk_diagnostic(scratch,0-2,name,stop-name,depth); }
+        let ancestor=1;
+        while(ancestor<=depth) {
+          if(ux_u32(stack+ancestor*ShaderChunkFrame.size+ShaderChunkFrame.id)==selected) {
+            return shader_chunk_diagnostic(scratch,0-3,name,stop-name,depth);
+          }
+          ancestor=ancestor+1;
+        }
+        if(depth==32) { return shader_chunk_diagnostic(scratch,0-5,name,stop-name,depth); }
+        let resume=ux_u32_put(frame+ShaderChunkFrame.cursor,stop+1);
+        let same_line=ux_u32_put(frame+ShaderChunkFrame.lineStart,0);
+        let row=table+ShaderChunk.size+selected*ShaderChunkEntry.size;
+        let text=ux_u32(row+ShaderChunkEntry.text);
+        let length=ux_u32(row+ShaderChunkEntry.textBytes);
+        depth=depth+1;
+        let push=shader_chunk_frame(stack+depth*ShaderChunkFrame.size,selected,text,text+length);
+        work=work+stop+1-cursor;
+      }
+    }
+  }
+  return used;
+}
+
+// Returns the byte length of the complete result. On refusal the output is
+// unchanged. Scratch begins with ShaderChunkDiagnostic; the diagnostic name
+// points into the original source or a registered chunk, when available.
+native function ShaderChunk_expand(out:i64,capacity:i64,table:i64,src:i64,bytes:i64,scratch:i64) i64 {
+  let storage=ShaderChunk_scratchBytes();
+  let span=shader_chunk_table_size(table);
+  if(span==0 || scratch%4!=0 || shader_chunk_range(scratch,storage)==0 ||
+      shader_chunk_range(out,capacity)==0 || shader_chunk_range(src,bytes)==0 ||
+      shader_chunk_overlap(out,capacity,table,span)!=0 || shader_chunk_overlap(out,capacity,src,bytes)!=0 ||
+      shader_chunk_overlap(scratch,storage,table,span)!=0 || shader_chunk_overlap(scratch,storage,src,bytes)!=0 ||
+      shader_chunk_overlap(scratch,storage,out,capacity)!=0) { return 0-1; }
+  let i=0;
+  let count=ux_u32(table+ShaderChunk.count);
+  while(i<count) {
+    let row=table+ShaderChunk.size+i*ShaderChunkEntry.size;
+    let name=ux_u32(row+ShaderChunkEntry.name);
+    let name_bytes=ux_u32(row+ShaderChunkEntry.nameBytes);
+    let text=ux_u32(row+ShaderChunkEntry.text);
+    let text_bytes=ux_u32(row+ShaderChunkEntry.textBytes);
+    if(shader_chunk_legal_name(name,name_bytes)==0 || shader_chunk_range(text,text_bytes)==0 ||
+        shader_chunk_overlap(out,capacity,name,name_bytes)!=0 || shader_chunk_overlap(out,capacity,text,text_bytes)!=0 ||
+        shader_chunk_overlap(scratch,storage,name,name_bytes)!=0 || shader_chunk_overlap(scratch,storage,text,text_bytes)!=0) {
+      return shader_chunk_diagnostic(scratch,0-1,0,0,0);
+    }
+    i=i+1;
+  }
+  let clear=shader_chunk_diagnostic(scratch,0,0,0,0);
+  let needed=shader_chunk_walk(out,capacity,table,src,bytes,scratch,0);
+  if(needed<0) { return needed; }
+  return shader_chunk_walk(out,capacity,table,src,bytes,scratch,1);
+}

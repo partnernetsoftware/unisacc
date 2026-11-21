@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { CubeReflectionMapping, CubeRefractionMapping, DataTexture, EquirectangularReflectionMapping,
+  EquirectangularRefractionMapping, LinearSRGBColorSpace, Mesh, MeshBasicMaterial, MixOperation, NearestFilter,
+  OrthographicCamera, PlaneGeometry, REVISION, Scene, WebGLRenderer, WebGLRenderTarget } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const width = 128, height = 64;
+const map = new Uint8Array(width * height * 4);
+const modes = [EquirectangularReflectionMapping, EquirectangularRefractionMapping];
+const normalX = [0.6, 0, 0.8], normalY = [0, 0.6, 0.8], normalLeft = [-0.6, 0, 0.8];
+const cases = [[0, normalX], [1, normalX], [0, normalY], [1, normalY], [0, normalLeft]];
+
+// Plateaus keep every selected direction away from the finite-resolution
+// cubemap's conversion footprint, including the high-latitude sample.
+for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+  const u = [18, 44, 78, 108].filter(edge => x >= edge).length;
+  const v = [14, 29, 46, 55].filter(edge => y >= edge).length;
+  map.set([20 + 40 * u, 15 + 50 * v, 41 + 7 * u + 9 * v, 255], (y * width + x) * 4);
+}
+
+function reference() {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("webgl2");
+  if (!context) throw Error("WebGL2 unavailable");
+  const renderer = new WebGLRenderer({ canvas, context, antialias: false });
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  const target = new WebGLRenderTarget(1, 1);
+  const texture = new DataTexture(map, width, height);
+  texture.minFilter = texture.magFilter = NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  const geometry = new PlaneGeometry(2, 2);
+  const normals = geometry.getAttribute("normal");
+  const material = new MeshBasicMaterial({envMap: texture, combine: MixOperation, reflectivity: 1,
+    refractionRatio: 0.5, toneMapped: false});
+  const scene = new Scene();
+  scene.add(new Mesh(geometry, material));
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 10);
+  camera.position.z = 1;
+  const faces = new Set();
+  const setTarget = renderer.setRenderTarget.bind(renderer);
+  renderer.setRenderTarget = (value, face, mip) => {
+    if (value?.isWebGLCubeRenderTarget && value.width === height / 2 && value.height === height / 2) faces.add(face);
+    return setTarget(value, face, mip);
+  };
+  renderer.setRenderTarget(target);
+  try {
+    const pixels = cases.flatMap(([mode, vector]) => {
+      texture.mapping = modes[mode];
+      material.needsUpdate = true;
+      for (let i = 0; i < normals.count; i++) normals.setXYZ(i, ...vector);
+      normals.needsUpdate = true;
+      renderer.render(scene, camera);
+      const pixel = new Uint8Array(4);
+      renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixel);
+      return [...pixel];
+    });
+    return [...pixels, Number([0, 1, 2, 3, 4, 5].every(face => faces.has(face)))];
+  } finally {
+    renderer.setRenderTarget(null);
+    material.dispose(); geometry.dispose(); texture.dispose(); target.dispose(); renderer.dispose();
+  }
+}
+
+async function product() {
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const { instance: { exports: e } } = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (e.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const run = (op, mode = 0, a = 0) => Number(e.uxe_equirectangular(BigInt(op), BigInt(mode), BigInt(a)));
+  const memory = new Uint8Array(e.memory.buffer, run(0), 65536);
+  const view = new DataView(memory.buffer, memory.byteOffset, memory.byteLength);
+  memory.set(map, 1024);
+  const vector = (offset, values) => values.forEach((value, i) => view.setFloat64(offset + 8 * i, value, true));
+  vector(64, [0, 0, -1]);
+  const pixels = [];
+  const faces = [];
+  for (let i = 0; i < cases.length; i++) {
+    const [index, normal] = cases[i];
+    vector(128, normal);
+    const mode = query.get("mutate") === "1" && i === 0 ? modes[1] : modes[index];
+    const sample = run(1, mode);
+    if (sample < 0) throw Error("sampling " + sample);
+    pixels.push(sample & 255, sample >>> 8 & 255, sample >>> 16 & 255, sample >>> 24);
+    faces.push(run(2, modes[index]));
+  }
+  vector(128, [1, 0, 0]);
+  const refused = run(1, modes[1], 1);
+  const unknown = run(1, 306);
+  vector(128, [0, 0, 0]);
+  const badNormal = run(1, modes[0]);
+  const constants = Number(run(4, 0) === modes[0] && run(4, 1) === modes[1]);
+  const mapped = Number(run(3, modes[0]) === CubeReflectionMapping && run(3, modes[1]) === CubeRefractionMapping);
+  return [...pixels, ...faces, refused, unknown, badNormal, constants, mapped];
+}
+
+try {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  output.textContent = JSON.stringify([...reference(), ...await product()]);
+} catch (error) { output.textContent = "error:" + error.message; }
+</script>

@@ -1,0 +1,242 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+
+const output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const count=(format)=>format===THREE.RedFormat || format===THREE.RedIntegerFormat?1:
+  format===THREE.RGFormat || format===THREE.RGIntegerFormat?2:4;
+const unorm=(format,type,data,transfer=0)=>({format,type,data,transfer,mode:0});
+const byte=(format)=>unorm(format,THREE.UnsignedByteType,new Uint8Array([64,120,200,255].slice(0,count(format))));
+const half=(format)=>unorm(format,THREE.HalfFloatType,new Uint16Array([0x3400,0x3900,0x3a00,0x3c00].slice(0,count(format))));
+const single=(format)=>unorm(format,THREE.FloatType,new Float32Array([.25,.625,.75,1].slice(0,count(format))));
+const integer=(format,internalFormat)=>({format,type:THREE.UnsignedShortType,transfer:0,mode:1,internalFormat,
+  component:count(format)-1,data:new Uint16Array([513,1025,2049,4097].slice(0,count(format)))});
+const depth=(format,type,depthValue)=>({format,type,transfer:0,mode:2,depthValue});
+const rows=[
+  byte(THREE.RGBAFormat),byte(THREE.RedFormat),byte(THREE.RGFormat),
+  unorm(THREE.RGBAFormat,THREE.UnsignedByteType,new Uint8Array([128,64,192,255]),1),
+  half(THREE.RedFormat),half(THREE.RGFormat),half(THREE.RGBAFormat),
+  single(THREE.RedFormat),single(THREE.RGFormat),single(THREE.RGBAFormat),
+  integer(THREE.RedIntegerFormat,undefined),integer(THREE.RGIntegerFormat,"RG16UI"),
+  integer(THREE.RGBAIntegerFormat,"RGBA16UI"),
+  unorm(THREE.RGBAFormat,THREE.UnsignedShort4444Type,new Uint16Array([0xf08f])),
+  unorm(THREE.RGBAFormat,THREE.UnsignedShort5551Type,new Uint16Array([0xfc01])),
+  depth(THREE.DepthFormat,THREE.UnsignedShortType,.25),
+  depth(THREE.DepthFormat,THREE.UnsignedIntType,.625),
+  depth(THREE.DepthFormat,THREE.FloatType,.75),
+  depth(THREE.DepthStencilFormat,THREE.UnsignedInt248Type,.125),
+];
+const normalFragment=`precision highp float;
+uniform highp sampler2D sourceImage;
+uniform int depthOnly;
+out vec4 color;
+void main() {
+  vec4 value=texelFetch(sourceImage,ivec2(0,0),0);
+  color=depthOnly==1?vec4(value.r,0.0,0.0,1.0):value;
+}`;
+const integerFragment=`precision highp float;
+precision highp int;
+uniform highp usampler2D sourceImage;
+uniform int component;
+out vec4 color;
+void main() {
+  uint value=texelFetch(sourceImage,ivec2(0,0),0)[component];
+  color=vec4(float(value & 255u),float(value >> 8u),0.0,255.0)/255.0;
+}`;
+const vertex=`void main() {
+  vec2 p=vec2(float((gl_VertexID << 1) & 2),float(gl_VertexID & 2));
+  gl_Position=vec4(2.0*p-1.0,0.0,1.0);
+}`;
+
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=1;
+  const gl=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  return {canvas,gl};
+}
+function sampled(row,pixel) {
+  if(row.mode===1) return pixel[0]+256*pixel[1];
+  return pixel[0]+256*pixel[1]+65536*pixel[2]+16777216*pixel[3];
+}
+function errors(gl,label) {
+  const code=gl.getError();
+  if(code!==gl.NO_ERROR) throw new Error(label+" WebGL error "+code);
+}
+function recorder(gl) {
+  const calls=new Map();
+  function wrap(name,record) {
+    const original=gl[name];
+    gl[name]=function(...args) {
+      if(args[0]===gl.TEXTURE_2D) {
+        const texture=gl.getParameter(gl.TEXTURE_BINDING_2D);
+        if(texture) calls.set(texture,{...calls.get(texture),...record(args)});
+      }
+      return original.apply(gl,args);
+    };
+  }
+  wrap("texStorage2D",args=>({internal:args[2]}));
+  wrap("texImage2D",args=>({internal:args[2],external:args[6],type:args[7]}));
+  wrap("texSubImage2D",args=>({external:args[6],type:args[7]}));
+  return calls;
+}
+
+function reference(rows) {
+  const {canvas,gl}=context();
+  const calls=recorder(gl);
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(1,1);
+  gl.disable(gl.DITHER);
+  const output=new THREE.WebGLRenderTarget(1,1,{depthBuffer:false});
+  const camera=new THREE.Camera(),scene=new THREE.Scene(),geometry=new THREE.PlaneGeometry(2,2);
+  const materials=[normalFragment,integerFragment].map(fragmentShader=>new THREE.RawShaderMaterial({
+    glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false,
+    uniforms:{sourceImage:{value:null},depthOnly:{value:0},component:{value:0}},
+    vertexShader:"in vec3 position;void main(){gl_Position=vec4(position.xy,0.0,1.0);}",fragmentShader,
+  }));
+  const mesh=new THREE.Mesh(geometry,materials[0]);
+  mesh.frustumCulled=false;
+  scene.add(mesh);
+  const result=[];
+  for(const row of rows) {
+    let texture,depthTarget;
+    if(row.mode===2) {
+      texture=new THREE.DepthTexture(1,1,row.type,undefined,undefined,undefined,undefined,undefined,undefined,row.format);
+      depthTarget=new THREE.WebGLRenderTarget(1,1,{depthTexture:texture,stencilBuffer:row.format===THREE.DepthStencilFormat});
+      renderer.setRenderTarget(depthTarget);
+      gl.depthMask(true);
+      gl.clearDepth(row.depthValue);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+    } else {
+      texture=new THREE.DataTexture(row.data,1,1,row.format,row.type);
+      if(row.internalFormat) texture.internalFormat=row.internalFormat;
+      if(row.transfer===1) texture.colorSpace=THREE.SRGBColorSpace;
+      texture.needsUpdate=true;
+    }
+    const material=materials[row.mode===1?1:0];
+    mesh.material=material;
+    material.uniforms.sourceImage.value=texture;
+    material.uniforms.depthOnly.value=Number(row.mode===2);
+    material.uniforms.component.value=row.component??0;
+    renderer.setRenderTarget(output);
+    renderer.render(scene,camera);
+    const pixel=new Uint8Array(4);
+    renderer.readRenderTargetPixels(output,0,0,1,1,pixel);
+    errors(gl,"r160 "+row.format+"/"+row.type);
+    const actual=calls.get(renderer.properties.get(texture).__webglTexture);
+    if(!actual || !actual.internal || (row.mode!==2 && (!actual.external || !actual.type))) {
+      throw new Error("missing r160 GL upload trace "+row.format+"/"+row.type);
+    }
+    result.push(actual.internal);
+    if(row.mode!==2) result.push(actual.external,actual.type);
+    result.push(sampled(row,pixel));
+    if(depthTarget) depthTarget.dispose();
+    else texture.dispose();
+  }
+  renderer.setRenderTarget(null);
+  geometry.dispose();
+  for(const material of materials) material.dispose();
+  output.dispose();
+  renderer.dispose();
+  return result;
+}
+
+function program(gl,fragment) {
+  const output=gl.createProgram();
+  for(const [stage,text] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment]]) {
+    const shader=gl.createShader(stage);
+    gl.shaderSource(shader,"#version 300 es\n"+text);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    gl.attachShader(output,shader);
+    gl.deleteShader(shader);
+  }
+  gl.linkProgram(output);
+  if(!gl.getProgramParameter(output,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(output));
+  return output;
+}
+
+function upload(gl,programs,row,app) {
+  const texture=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,texture);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+  gl.texImage2D(gl.TEXTURE_2D,0,app[0],1,1,0,app[1],app[2],row.data??null);
+  errors(gl,"product upload "+app.join("/"));
+  if(row.mode===2) {
+    const target=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,target);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,row.format===THREE.DepthStencilFormat?
+      gl.DEPTH_STENCIL_ATTACHMENT:gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,texture,0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error("product depth attachment");
+    gl.depthMask(true);
+    gl.clearDepth(row.depthValue);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    gl.deleteFramebuffer(target);
+  }
+  const shader=programs[row.mode===1?1:0];
+  gl.useProgram(shader);
+  gl.uniform1i(gl.getUniformLocation(shader,"sourceImage"),0);
+  if(row.mode!==1) gl.uniform1i(gl.getUniformLocation(shader,"depthOnly"),Number(row.mode===2));
+  else gl.uniform1i(gl.getUniformLocation(shader,"component"),row.component);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  const read=new Uint8Array(4);
+  gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,read);
+  errors(gl,"product sample "+app.join("/"));
+  gl.deleteTexture(texture);
+  return sampled(row,read);
+}
+
+async function product(rows) {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,format=0,type=0,srgb=0)=>Number(wasm.uxe_webgl_utils_probe(
+    BigInt(op),BigInt(format),BigInt(type),BigInt(srgb),BigInt(query.get("mutate"))));
+  const memory=new DataView(wasm.memory.buffer,run(0),256);
+  const {gl}=context();
+  gl.disable(gl.DITHER);
+  const programs=[program(gl,normalFragment),program(gl,integerFragment)];
+  const observed=[];
+  for(const row of rows) {
+    if(run(1,row.format,row.type,row.transfer)!==64) throw new Error("supported format refused");
+    const app=[0,4,8].map(offset=>memory.getUint32(64+offset,true));
+    observed.push(...app,upload(gl,programs,row,app));
+  }
+  for(const shader of programs) gl.deleteProgram(shader);
+  const rejected=[
+    ["ALIGNMENT",2,THREE.RGBAFormat,THREE.UnsignedByteType,0,-1],
+    ["TRANSFER_TOKEN",1,THREE.RGBAFormat,THREE.UnsignedByteType,2,-1],
+    ["UNSUPPORTED_FORMAT_TYPE",1,THREE.RGBAFormat,THREE.UnsignedShortType,0,-2],
+    ["INTEGER_FLOAT",1,THREE.RedIntegerFormat,THREE.FloatType,0,-2],
+    ["DEPTH_STENCIL_PAIR",1,THREE.DepthStencilFormat,THREE.UnsignedIntType,0,-2],
+    ["DEPTH_BYTE",1,THREE.DepthFormat,THREE.UnsignedByteType,0,-2],
+    ["SRGB_RED",1,THREE.RedFormat,THREE.UnsignedByteType,1,-2],
+    ["UNKNOWN_FORMAT",1,999999,THREE.UnsignedByteType,0,-2],
+    ["COMPRESSED_EXTENSION",1,THREE.RGBA_S3TC_DXT5_Format,THREE.UnsignedByteType,0,-3],
+    ["COMPRESSED_EXTENSION",1,THREE.RGBA_ASTC_4x4_Format,THREE.UnsignedByteType,0,-3],
+    ["LEGACY_WEBGL1",1,THREE.AlphaFormat,THREE.UnsignedByteType,0,-4],
+    ["LEGACY_WEBGL1",1,THREE.LuminanceAlphaFormat,THREE.UnsignedByteType,0,-4],
+  ];
+  for(const [name,op,format,type,srgb,gold] of rejected) {
+    for(const [index,value] of [777,778,779].entries()) memory.setUint32(64+4*index,value,true);
+    const code=run(op,format,type,srgb);
+    if(code!==gold) throw new Error(name+" refusal "+code);
+    observed.push(code,Number([777,778,779].every((value,index)=>memory.getUint32(64+4*index,true)===value)));
+  }
+  return observed;
+}
+
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...reference(rows),...await product(rows)]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

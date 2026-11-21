@@ -1,0 +1,103 @@
+// The inherited Material record starts at the object address. These fields
+// follow it and retain the precision of JavaScript's public numeric fields.
+struct LineDashedFields {
+  scale: f64;
+  dashSize: f64;
+  gapSize: f64;
+  color: u32;
+}
+
+native function LineDashedObject_size() i64 {
+  return Material.size+LineDashedFields.size;
+}
+
+native function line_dash_obj_valid(at:i64) i64 {
+  return at>=0 && at%8==0 && at<=6291456-LineDashedObject_size() &&
+    ux_u32(at+Material.id)>0 && ux_u32(at+Material.type)==12;
+}
+
+native function line_dash_obj_overlap(a:i64,aBytes:i64,b:i64,bBytes:i64) i64 {
+  return aBytes>0 && bBytes>0 && a<b+bBytes && b<a+aBytes;
+}
+
+native function line_dash_obj_dispatch(at:i64,dispatcher:i64) i64 {
+  if(dispatcher<0 || dispatcher%4!=0 || dispatcher>6291456-EventDispatcher.size ||
+     line_dash_obj_overlap(at,LineDashedObject_size(),dispatcher,EventDispatcher.size)) { return 0; }
+  let listeners=ux_u32(dispatcher+EventDispatcher.listeners);
+  let count=ux_u32(dispatcher+EventDispatcher.listenerCount);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  return listeners%4==0 && listeners<=6291456 && count<=capacity &&
+    capacity<=(6291456-listeners)/8 &&
+    !line_dash_obj_overlap(listeners,capacity*8,at,LineDashedObject_size()) &&
+    !line_dash_obj_overlap(listeners,capacity*8,dispatcher,EventDispatcher.size);
+}
+
+native function LineDashedObject_set(at:i64,scale:f64,dash:f64,gap:f64,color:i64) i64 {
+  if(!line_dash_obj_valid(at) || !line_dash_params(scale,dash,gap,color)) { return 0-1; }
+  let fields=at+Material.size;
+  let a=ux_f64_put(fields+LineDashedFields.scale,scale);
+  let b=ux_f64_put(fields+LineDashedFields.dashSize,dash);
+  let c=ux_f64_put(fields+LineDashedFields.gapSize,gap);
+  let d=ux_u32_put(fields+LineDashedFields.color,color);
+  return at;
+}
+
+native function LineDashedObject_init(at:i64,id:i64,dispatcher:i64) i64 {
+  if(at<0 || at%8!=0 || at>6291456-LineDashedObject_size() ||
+     !line_dash_obj_dispatch(at,dispatcher)) { return 0-1; }
+  let init=Material_init(at,id,12,dispatcher);
+  if(init<0) { return init; }
+  return LineDashedObject_set(at,1.0,3.0,1.0,16777215);
+}
+
+native function line_dash_fields_valid(at:i64) i64 {
+  let f=at+Material.size;
+  return line_dash_params(ux_f64(f+LineDashedFields.scale),ux_f64(f+LineDashedFields.dashSize),
+    ux_f64(f+LineDashedFields.gapSize),ux_u32(f+LineDashedFields.color));
+}
+
+native function LineDashedObject_copy(dst:i64,src:i64) i64 {
+  if(!line_dash_obj_valid(dst) || !line_dash_obj_valid(src) || !line_dash_fields_valid(src) ||
+     (dst!=src && line_dash_obj_overlap(dst,LineDashedObject_size(),src,LineDashedObject_size()))) { return 0-1; }
+  let copied=Material_copy(dst,src);
+  if(copied<0) { return copied; }
+  let f=src+Material.size;
+  return LineDashedObject_set(dst,ux_f64(f+LineDashedFields.scale),ux_f64(f+LineDashedFields.dashSize),
+    ux_f64(f+LineDashedFields.gapSize),ux_u32(f+LineDashedFields.color));
+}
+
+native function LineDashedObject_clone(dst:i64,src:i64,id:i64,dispatcher:i64) i64 {
+  if(!line_dash_obj_valid(src) || !line_dash_fields_valid(src) ||
+     ux_f64(src+Material.alphaTest)-ux_f64(src+Material.alphaTest)!=0.0 ||
+     dst<0 || dst>6291456-LineDashedObject_size() ||
+     line_dash_obj_overlap(dst,LineDashedObject_size(),src,LineDashedObject_size()) ||
+     id==ux_u32(src+Material.id) || !line_dash_obj_dispatch(src,dispatcher) ||
+     ux_u32(dispatcher+EventDispatcher.listenerCount)!=0) { return 0-1; }
+  let sourceDispatch=ux_u32(src+Material.dispatcher);
+  if(!line_dash_obj_dispatch(dst,sourceDispatch) ||
+     line_dash_obj_overlap(sourceDispatch,EventDispatcher.size,dispatcher,EventDispatcher.size)) { return 0-1; }
+  let sourceRows=ux_u32(sourceDispatch+EventDispatcher.listeners);
+  let sourceBytes=8*ux_u32(sourceDispatch+EventDispatcher.listenerCapacity);
+  let cloneRows=ux_u32(dispatcher+EventDispatcher.listeners);
+  let cloneBytes=8*ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  if(line_dash_obj_overlap(sourceRows,sourceBytes,cloneRows,cloneBytes) ||
+     line_dash_obj_overlap(sourceRows,sourceBytes,dispatcher,EventDispatcher.size) ||
+     line_dash_obj_overlap(sourceDispatch,EventDispatcher.size,cloneRows,cloneBytes)) { return 0-1; }
+  let fresh=LineDashedObject_init(dst,id,dispatcher);
+  if(fresh<0) { return fresh; }
+  return LineDashedObject_copy(fresh,src);
+}
+
+native function LineDashedObject_gpuParams(at:i64,out:i64) i64 {
+  if(!line_dash_obj_valid(at) || out<0 || out>6291456-LineDashedMaterial.size ||
+     line_dash_obj_overlap(out,LineDashedMaterial.size,at,LineDashedObject_size())) { return 0-1; }
+  let f=at+Material.size;
+  return LineDashedMaterial_set(out,ux_f64(f+LineDashedFields.scale),ux_f64(f+LineDashedFields.dashSize),
+    ux_f64(f+LineDashedFields.gapSize),ux_u32(f+LineDashedFields.color));
+}
+
+native function LineDashedObject_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  if(!line_dash_obj_valid(at) || event<0 || event>4294967295 || out<0 || out>6291456 ||
+     limit<0 || limit>1024 || line_dash_obj_overlap(out,8+limit*4,at,LineDashedObject_size())) { return 0-1; }
+  return Material_dispose(at,event,out,limit);
+}

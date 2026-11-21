@@ -1,0 +1,65 @@
+// These offsets, plus ten, are the tags in GeometryPrimitiveRecord.kind.
+struct SolidGeometryKind {
+  tetrahedron: u8;
+  octahedron: u8;
+  icosahedron: u8;
+  dodecahedron: u8;
+}
+
+struct SolidGeometryParameters {
+  radius: f64;
+  detail: f64;
+}
+
+native function SolidGeometry_workspace(kind:i64) i64 {
+  if(kind<10 || kind>=10+SolidGeometryKind.size) { return 0-1; }
+  let sizes=[248,344,632,1016];
+  return sizes[kind-10];
+}
+
+native function solid_geometry_kind(at:i64) i64 {
+  if(GeometryPrimitive_geometry(at)<0) { return 0-1; }
+  let kind=ux_u32(at+GeometryPrimitiveRecord.kind);
+  if(SolidGeometry_workspace(kind)<0) { return 0-1; }
+  return kind;
+}
+
+native function SolidGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,work:i64,kind:i64) i64 {
+  let space=SolidGeometry_workspace(kind);
+  if(space<0 || params%8!=0 || work%8!=0 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,params,SolidGeometryParameters.size) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,work,space) ||
+     !geometry_public_disjoint(params,SolidGeometryParameters.size,work,space)) { return 0-1; }
+  let radius=ux_f64(params+SolidGeometryParameters.radius);
+  let detail=ux_f64(params+SolidGeometryParameters.detail);
+  if(radius-radius!=0.0 || radius==0.0 || !(detail>=0.0 && detail<=255.0)) { return 0-1; }
+  let subdivisions=f64_floor_i64(detail);
+  if(detail!=0.0+subdivisions) { return 0-1; }
+  let generated=0-1;
+  if(kind==10+SolidGeometryKind.tetrahedron) { generated=TetrahedronGeometry_generate(raw,work,radius,subdivisions); }
+  else if(kind==10+SolidGeometryKind.octahedron) { generated=OctahedronGeometry_generate(raw,work,radius,subdivisions); }
+  else if(kind==10+SolidGeometryKind.icosahedron) { generated=IcosahedronGeometry_generate(raw,work,radius,subdivisions); }
+  else { generated=DodecahedronGeometry_generate(raw,work,radius,subdivisions); }
+  if(generated<0) { return generated; }
+  let installed=GeometryBuffers_asGeometry(raw,GeometryPrimitive_geometry(at),arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  return geometry_primitive_store(at,kind,radius,detail,0.0,0.0,0.0,0.0);
+}
+
+native function SolidGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  let kind=solid_geometry_kind(src);
+  if(kind<0) { return kind; }
+  return geometry_primitive_copy(dst,src,arena,bytes,kind);
+}
+
+native function SolidGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  let kind=solid_geometry_kind(src);
+  if(kind<0) { return kind; }
+  return geometry_primitive_clone(dst,src,arena,bytes,kind);
+}
+
+native function SolidGeometry_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  let kind=solid_geometry_kind(at);
+  if(kind<0) { return kind; }
+  return geometry_primitive_dispose(at,event,out,limit,kind);
+}

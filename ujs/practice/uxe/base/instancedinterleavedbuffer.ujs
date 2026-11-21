@@ -1,0 +1,91 @@
+struct InstancedInterleavedBuffer {
+  view: InterleavedBuffer;
+  meshPerAttribute: u32;
+}
+
+struct InstancedInterleavedJson {
+  buffer: IBJsonMeta;
+  isInstancedInterleavedBuffer: u32;
+  meshPerAttribute: u32;
+}
+
+native function InstancedInterleavedBuffer_new(dst:i64,data:i64,count:i64,stride:i64,kind:i64,repeat:i64) i64 {
+  if(!ib_range(dst,InstancedInterleavedBuffer.size,4) || repeat<1 || repeat>4294967295 ||
+     count<0 || stride<1 || data<0 || data>6291456 || count>(6291456-data)/stride ||
+     !ib_disjoint(dst,InstancedInterleavedBuffer.size,data,count*stride)) { return 0-1; }
+  let view=InterleavedBuffer_init(dst+InstancedInterleavedBuffer.view,data,count,stride,kind);
+  if(view<0) { return view; }
+  let stored=ux_u32_put(dst+InstancedInterleavedBuffer.meshPerAttribute,repeat);
+  return dst;
+}
+
+native function InstancedInterleavedBuffer_row(src:i64,instance:i64) i64 {
+  if(!ib_range(src,InstancedInterleavedBuffer.size,4) || instance<0) { return 0-1; }
+  let view=src+InstancedInterleavedBuffer.view;
+  let bytes=ib_bytes(view);
+  let repeats=ux_u32(src+InstancedInterleavedBuffer.meshPerAttribute);
+  if(bytes<0 || repeats==0) { return 0-1; }
+  let row=instance/repeats;
+  if(row>=ux_u32(view+InterleavedBuffer.count)) { return 0-2; }
+  return ux_u32(view+InterleavedBuffer.data)+row*ux_u32(view+InterleavedBuffer.stride);
+}
+
+native function InstancedInterleavedBuffer_copy(dst:i64,src:i64,data:i64,capacity:i64) i64 {
+  if(!ib_range(src,InstancedInterleavedBuffer.size,4) || !ib_range(dst,InstancedInterleavedBuffer.size,4)) { return 0-1; }
+  if(dst==src) { return dst; }
+  let view=src+InstancedInterleavedBuffer.view;
+  let bytes=ib_bytes(view);
+  let repeats=ux_u32(src+InstancedInterleavedBuffer.meshPerAttribute);
+  let backing=ux_u32(view+InterleavedBuffer.data);
+  if(bytes<0 || bytes>capacity || repeats==0 || !ib_range(data,bytes,4) ||
+     !ib_disjoint(dst,InstancedInterleavedBuffer.size,src,InstancedInterleavedBuffer.size) ||
+     !ib_disjoint(dst,InstancedInterleavedBuffer.size,backing,bytes) ||
+     !ib_disjoint(dst,InstancedInterleavedBuffer.size,data,bytes) ||
+     !ib_disjoint(src,InstancedInterleavedBuffer.size,data,bytes) ||
+     !ib_disjoint(backing,bytes,data,bytes)) { return 0-1; }
+  let copied=InterleavedBuffer_copy(dst+InstancedInterleavedBuffer.view,view,data,capacity);
+  if(copied<0) { return copied; }
+  let stored=ux_u32_put(dst+InstancedInterleavedBuffer.meshPerAttribute,repeats);
+  return dst;
+}
+
+native function InstancedInterleaved_clone(dst:i64,src:i64,reg:i64,owner:i64,bytes:i64) i64 {
+  if(!ib_range(src,InstancedInterleavedBuffer.size,4) || !ib_range(dst,InstancedInterleavedBuffer.size,4) ||
+     !ib_disjoint(dst,InstancedInterleavedBuffer.size,src,InstancedInterleavedBuffer.size) ||
+     !ib_range(reg,IBCloneRegistry.size,4)) { return 0-1; }
+  let repeats=ux_u32(src+InstancedInterleavedBuffer.meshPerAttribute);
+  let rows=ux_u32(reg+IBCloneRegistry.rows);
+  let table=ux_u32(reg+IBCloneRegistry.capacity)*IBCloneBacking.size;
+  let arena=ux_u32(reg+IBCloneRegistry.arena);
+  let range=ux_u32(reg+IBCloneRegistry.end)-arena;
+  let srcTail=src+InstancedInterleavedBuffer.meshPerAttribute;
+  let dstTail=dst+InstancedInterleavedBuffer.meshPerAttribute;
+  if(repeats==0 || !ib_disjoint(dst,InstancedInterleavedBuffer.size,owner,bytes) ||
+     !ib_disjoint(src,InstancedInterleavedBuffer.size,owner,bytes) ||
+     !ib_disjoint(srcTail,4,reg,IBCloneRegistry.size) || !ib_disjoint(dstTail,4,reg,IBCloneRegistry.size) ||
+     !ib_disjoint(srcTail,4,rows,table) || !ib_disjoint(dstTail,4,rows,table) ||
+     !ib_disjoint(srcTail,4,arena,range) || !ib_disjoint(dstTail,4,arena,range)) { return 0-1; }
+  let clone=InterleavedBuffer_cloneShared(dst+InstancedInterleavedBuffer.view,
+      src+InstancedInterleavedBuffer.view,reg,owner,bytes);
+  if(clone<0) { return clone; }
+  let stored=ux_u32_put(dst+InstancedInterleavedBuffer.meshPerAttribute,repeats);
+  return dst;
+}
+
+native function InstancedInterleaved_toJSON(src:i64,reg:i64,out:i64,uuid:i64,backing:i64,bytes:i64) i64 {
+  if(!ib_range(src,InstancedInterleavedBuffer.size,4) || !ib_range(out,InstancedInterleavedJson.size,4) ||
+     !ib_range(reg,IBJsonRegistry.size,4) || !ib_disjoint(out,InstancedInterleavedJson.size,src,InstancedInterleavedBuffer.size) ||
+     !ib_disjoint(out,InstancedInterleavedJson.size,backing,bytes)) { return 0-1; }
+  let rows=ux_u32(reg+IBJsonRegistry.rows);
+  let cap=ux_u32(reg+IBJsonRegistry.capacity);
+  let arena=ux_u32(reg+IBJsonRegistry.arena);
+  let end=ux_u32(reg+IBJsonRegistry.end);
+  let repeats=ux_u32(src+InstancedInterleavedBuffer.meshPerAttribute);
+  if(repeats==0 || !ib_json_readonly(out,InstancedInterleavedJson.size,reg,rows,cap*IBJsonBacking.size,arena,end-arena) ||
+     !ib_json_readonly(src,InstancedInterleavedBuffer.size,reg,rows,cap*IBJsonBacking.size,arena,end-arena)) { return 0-1; }
+  let data=InterleavedBuffer_toJSON(src+InstancedInterleavedBuffer.view,reg,out+InstancedInterleavedJson.buffer,uuid,backing,bytes);
+  if(data<0) { return data; }
+  let marker=ux_u32_put(out+InstancedInterleavedJson.isInstancedInterleavedBuffer,1);
+  let stored=ux_u32_put(out+InstancedInterleavedJson.meshPerAttribute,repeats);
+  return out;
+}

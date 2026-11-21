@@ -1,0 +1,164 @@
+struct RadialGeometryParameters {
+  radiusTop: f64;
+  radiusBottom: f64;
+  height: f64;
+  radialSegments: f64;
+  heightSegments: f64;
+  thetaStart: f64;
+  thetaLength: f64;
+  openEnded: u32;
+}
+
+struct RadialGeometryTail {
+  thetaLength: f64;
+  openEnded: u32;
+}
+
+native function RadialGeometry_size() i64 {
+  return GeometryPrimitive_size()+RadialGeometryTail.size;
+}
+
+native function radial_geometry_tail(at:i64) i64 {
+  return at+GeometryPrimitive_size();
+}
+
+native function RadialGeometry_geometry(at:i64) i64 {
+  if(!geometry_public_span(at,RadialGeometry_size())) { return 0-1; }
+  return GeometryPrimitive_geometry(at);
+}
+
+native function radial_geometry_ready(at:i64,kind:i64) i64 {
+  if(RadialGeometry_geometry(at)<0) { return 0-1; }
+  return geometry_primitive_ready(at,kind);
+}
+
+native function RadialGeometry_setName(at:i64,name:i64,bytes:i64) i64 {
+  if(RadialGeometry_geometry(at)<0) { return 0-1; }
+  let kind=ux_u32(at+GeometryPrimitiveRecord.kind);
+  if((kind!=3 && kind!=4) || !geometry_public_span(name,bytes) ||
+     !geometry_public_disjoint(at,RadialGeometry_size(),name,bytes)) { return 0-1; }
+  return GeometryPrimitive_setName(at,name,bytes);
+}
+
+native function radial_geometry_raw(at:i64,raw:i64,arena:i64,bytes:i64,aux:i64,auxBytes:i64) i64 {
+  if(RadialGeometry_geometry(at)<0 || !geometry_primitive_raw(at,raw,arena,bytes,aux,auxBytes)) { return 0; }
+  let tail=radial_geometry_tail(at);
+  let extra=RadialGeometryTail.size;
+  return geometry_public_disjoint(tail,extra,raw,GeometryBuffers.size) &&
+    geometry_public_disjoint(tail,extra,arena,bytes) && geometry_public_disjoint(tail,extra,aux,auxBytes) &&
+    geometry_public_disjoint(tail,extra,ux_u32(raw+GeometryBuffers.vertices),32*ux_u32(raw+GeometryBuffers.vertexCapacity)) &&
+    geometry_public_disjoint(tail,extra,ux_u32(raw+GeometryBuffers.indices),4*ux_u32(raw+GeometryBuffers.indexCapacity));
+}
+
+native function radial_geometry_row(at:i64,start:i64,count:i64,material:i64) i64 {
+  let s=ux_u32_put(at,start);
+  let n=ux_u32_put(at+4,count);
+  let m=ux_u32_put(at+8,material);
+  return at+12;
+}
+
+native function radial_geometry_groups(at:i64,radial:i64,rows:i64,top:f64,bottom:f64,open:i64) i64 {
+  let torso=6*radial*rows;
+  let cap=3*radial;
+  let start=torso;
+  let next=radial_geometry_row(at,0,torso,0);
+  if(open==0 && top>0.0) {
+    next=radial_geometry_row(next,start,cap,1);
+    start=start+cap;
+  }
+  if(open==0 && bottom>0.0) { next=radial_geometry_row(next,start,cap,2); }
+  return (next-at)/12;
+}
+
+native function radial_geometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,work:i64,kind:i64) i64 {
+  let workBytes=CylinderGeometry.size+36;
+  if(params%8!=0 || work%8!=0 ||
+     !radial_geometry_raw(at,raw,arena,bytes,params,RadialGeometryParameters.size) ||
+     !radial_geometry_raw(at,raw,arena,bytes,work,workBytes) ||
+     !geometry_public_disjoint(params,RadialGeometryParameters.size,work,workBytes)) { return 0-1; }
+  let top=0.0;
+  if(kind==3) { top=ux_f64(params+RadialGeometryParameters.radiusTop); }
+  let bottom=ux_f64(params+RadialGeometryParameters.radiusBottom);
+  let height=ux_f64(params+RadialGeometryParameters.height);
+  let sx=ux_f64(params+RadialGeometryParameters.radialSegments);
+  let sy=ux_f64(params+RadialGeometryParameters.heightSegments);
+  let start=ux_f64(params+RadialGeometryParameters.thetaStart);
+  let length=ux_f64(params+RadialGeometryParameters.thetaLength);
+  let open=ux_u32(params+RadialGeometryParameters.openEnded);
+  if(top-top!=0.0 || bottom-bottom!=0.0 || height-height!=0.0 ||
+     start-start!=0.0 || length-length!=0.0 || open>1 ||
+     !(sx>=1.0 && sx<262145.0) || !(sy>=1.0 && sy<262145.0)) { return 0-1; }
+  let radial=f64_floor_i64(sx);
+  let rows=f64_floor_i64(sy);
+  let config=CylinderGeometry_init(work,top,bottom,height,start,length,sx,sy,0.0+open);
+  let generated=cylinder_mesh(raw,config,top);
+  if(generated<0) { return generated; }
+  let groups=work+CylinderGeometry.size;
+  let count=radial_geometry_groups(groups,radial,rows,top,bottom,open);
+  let installed=GeometryBuffers_asGeometry(raw,RadialGeometry_geometry(at),arena,bytes,7,groups,count);
+  if(installed<0) { return installed; }
+  let tail=radial_geometry_tail(at);
+  let angle=ux_f64_put(tail+RadialGeometryTail.thetaLength,length);
+  let opened=ux_u32_put(tail+RadialGeometryTail.openEnded,open);
+  return geometry_primitive_store(at,kind,top,bottom,height,sx,sy,start);
+}
+
+native function radial_geometry_copy(dst:i64,src:i64,arena:i64,bytes:i64,kind:i64,clone:i64) i64 {
+  if(radial_geometry_ready(src,kind)<0 || RadialGeometry_geometry(dst)<0 ||
+     !geometry_public_span(arena,bytes)) { return 0-1; }
+  if(dst==src) {
+    if(clone!=0) { return 0-1; }
+    return dst;
+  }
+  let size=RadialGeometry_size();
+  let name=ux_u32(src+GeometryPrimitiveRecord.name);
+  let nameBytes=ux_u32(src+GeometryPrimitiveRecord.nameBytes);
+  if(!geometry_public_disjoint(dst,size,src,size) || !geometry_public_disjoint(dst,size,arena,bytes) ||
+     !geometry_public_disjoint(src,size,arena,bytes) ||
+     !geometry_public_disjoint(dst,size,name,nameBytes)) { return 0-1; }
+  let result=0-1;
+  if(clone!=0) { result=geometry_primitive_clone(dst,src,arena,bytes,kind); }
+  else { result=geometry_primitive_copy(dst,src,arena,bytes,kind); }
+  if(result<0) { return result; }
+  let copied=geometry_copy_bytes(radial_geometry_tail(dst),radial_geometry_tail(src),RadialGeometryTail.size);
+  return dst;
+}
+
+native function radial_geometry_dispose(at:i64,event:i64,out:i64,limit:i64,kind:i64) i64 {
+  if(radial_geometry_ready(at,kind)<0 ||
+     limit<0 || limit>1572862 || !geometry_public_span(out,8+4*limit) ||
+     !geometry_public_disjoint(at,RadialGeometry_size(),out,8+4*limit)) { return 0-1; }
+  return geometry_primitive_dispose(at,event,out,limit,kind);
+}
+
+native function CylinderGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,work:i64) i64 {
+  return radial_geometry_create(at,raw,arena,bytes,params,work,3);
+}
+
+native function ConeGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,work:i64) i64 {
+  return radial_geometry_create(at,raw,arena,bytes,params,work,4);
+}
+
+native function CylinderGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return radial_geometry_copy(dst,src,arena,bytes,3,0);
+}
+
+native function ConeGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return radial_geometry_copy(dst,src,arena,bytes,4,0);
+}
+
+native function CylinderGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return radial_geometry_copy(dst,src,arena,bytes,3,1);
+}
+
+native function ConeGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return radial_geometry_copy(dst,src,arena,bytes,4,1);
+}
+
+native function CylinderGeometry_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  return radial_geometry_dispose(at,event,out,limit,3);
+}
+
+native function ConeGeometry_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  return radial_geometry_dispose(at,event,out,limit,4);
+}

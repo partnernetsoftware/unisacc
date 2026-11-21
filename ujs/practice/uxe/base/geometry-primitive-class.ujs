@@ -1,0 +1,104 @@
+// A tagged parameter record followed by a caller-initialized BufferGeometry.
+// Names borrow immutable UTF-8; the caller owns all geometry tables and arenas.
+struct GeometryPrimitiveRecord {
+  kind: u32;
+  name: u32;
+  nameBytes: u32;
+  first: f64;
+  second: f64;
+  third: f64;
+  fourth: f64;
+  fifth: f64;
+  sixth: f64;
+}
+
+native function GeometryPrimitive_size() i64 {
+  return GeometryPrimitiveRecord.size+BufferGeometry.size;
+}
+
+native function GeometryPrimitive_geometry(at:i64) i64 {
+  if(at%8!=0 || !geometry_public_span(at,GeometryPrimitive_size())) { return 0-1; }
+  return at+GeometryPrimitiveRecord.size;
+}
+
+native function geometry_primitive_ready(at:i64,kind:i64) i64 {
+  let geo=GeometryPrimitive_geometry(at);
+  if(geo<0 || ux_u32(at+GeometryPrimitiveRecord.kind)!=kind) { return 0-1; }
+  return geo;
+}
+
+native function GeometryPrimitive_setName(at:i64,name:i64,bytes:i64) i64 {
+  if(GeometryPrimitive_geometry(at)<0 || ux_u32(at+GeometryPrimitiveRecord.kind)==0 ||
+     !geometry_public_span(name,bytes) ||
+     !geometry_public_disjoint(at,GeometryPrimitive_size(),name,bytes)) { return 0-1; }
+  let pointer=ux_u32_put(at+GeometryPrimitiveRecord.name,name);
+  let length=ux_u32_put(at+GeometryPrimitiveRecord.nameBytes,bytes);
+  return at;
+}
+
+native function geometry_primitive_raw(at:i64,raw:i64,arena:i64,bytes:i64,aux:i64,auxBytes:i64) i64 {
+  if(GeometryPrimitive_geometry(at)<0 || ux_u32(at+GeometryPrimitiveRecord.kind)!=0 ||
+     raw%4!=0 || !geometry_public_span(raw,GeometryBuffers.size) ||
+     arena%8!=0 || !geometry_public_span(arena,bytes) || !geometry_public_span(aux,auxBytes) ||
+     !geometry_public_disjoint(at,GeometryPrimitive_size(),raw,GeometryBuffers.size) ||
+     !geometry_public_disjoint(at,GeometryPrimitive_size(),arena,bytes) ||
+     !geometry_public_disjoint(at,GeometryPrimitive_size(),aux,auxBytes) ||
+     !geometry_public_disjoint(arena,bytes,raw,GeometryBuffers.size) ||
+     !geometry_public_disjoint(arena,bytes,aux,auxBytes) ||
+     !geometry_public_disjoint(raw,GeometryBuffers.size,aux,auxBytes)) { return 0; }
+  let vertices=ux_u32(raw+GeometryBuffers.vertices);
+  let indices=ux_u32(raw+GeometryBuffers.indices);
+  let vc=32*ux_u32(raw+GeometryBuffers.vertexCapacity);
+  let ic=4*ux_u32(raw+GeometryBuffers.indexCapacity);
+  return geometry_public_span(vertices,vc) && geometry_public_span(indices,ic) &&
+    geometry_public_disjoint(at,GeometryPrimitive_size(),vertices,vc) &&
+    geometry_public_disjoint(at,GeometryPrimitive_size(),indices,ic) &&
+    geometry_public_disjoint(arena,bytes,vertices,vc) && geometry_public_disjoint(arena,bytes,indices,ic) &&
+    geometry_public_disjoint(aux,auxBytes,vertices,vc) && geometry_public_disjoint(aux,auxBytes,indices,ic);
+}
+
+native function geometry_primitive_store(at:i64,kind:i64,p0:f64,p1:f64,p2:f64,p3:f64,p4:f64,p5:f64) i64 {
+  let a=ux_f64_put(at+GeometryPrimitiveRecord.first,p0);
+  let b=ux_f64_put(at+GeometryPrimitiveRecord.second,p1);
+  let c=ux_f64_put(at+GeometryPrimitiveRecord.third,p2);
+  let d=ux_f64_put(at+GeometryPrimitiveRecord.fourth,p3);
+  let e=ux_f64_put(at+GeometryPrimitiveRecord.fifth,p4);
+  let f=ux_f64_put(at+GeometryPrimitiveRecord.sixth,p5);
+  let name=ux_u32_put(at+GeometryPrimitiveRecord.name,0);
+  let length=ux_u32_put(at+GeometryPrimitiveRecord.nameBytes,0);
+  let tagged=ux_u32_put(at+GeometryPrimitiveRecord.kind,kind);
+  return at;
+}
+
+native function geometry_primitive_copy(dst:i64,src:i64,arena:i64,bytes:i64,kind:i64) i64 {
+  let source=geometry_primitive_ready(src,kind);
+  let target=GeometryPrimitive_geometry(dst);
+  if(source<0 || target<0) { return 0-1; }
+  if(dst==src) { return dst; }
+  let targetKind=ux_u32(dst+GeometryPrimitiveRecord.kind);
+  let name=ux_u32(src+GeometryPrimitiveRecord.name);
+  let nameBytes=ux_u32(src+GeometryPrimitiveRecord.nameBytes);
+  if((targetKind!=0 && targetKind!=kind) || !geometry_public_span(arena,bytes) ||
+     !geometry_public_disjoint(dst,GeometryPrimitive_size(),src,GeometryPrimitive_size()) ||
+     !geometry_public_disjoint(dst,GeometryPrimitive_size(),arena,bytes) ||
+     !geometry_public_disjoint(src,GeometryPrimitive_size(),arena,bytes) ||
+     !geometry_public_disjoint(dst,GeometryPrimitive_size(),name,nameBytes) ||
+     !geometry_public_disjoint(arena,bytes,name,nameBytes)) { return 0-1; }
+  let copied=BufferGeometry_copy(target,source,arena,bytes);
+  if(copied<0) { return copied; }
+  return geometry_copy_bytes(dst,src,GeometryPrimitiveRecord.size);
+}
+
+native function geometry_primitive_clone(dst:i64,src:i64,arena:i64,bytes:i64,kind:i64) i64 {
+  let target=GeometryPrimitive_geometry(dst);
+  if(target<0 || dst==src || ux_u32(dst+GeometryPrimitiveRecord.kind)!=0 ||
+     ux_u32(target+BufferGeometry.listenerCount)!=0) { return 0-1; }
+  return geometry_primitive_copy(dst,src,arena,bytes,kind);
+}
+
+native function geometry_primitive_dispose(at:i64,event:i64,out:i64,limit:i64,kind:i64) i64 {
+  let geo=geometry_primitive_ready(at,kind);
+  if(geo<0 || limit<0 || limit>1572862 ||
+     !geometry_public_disjoint(out,8+4*limit,at,GeometryPrimitive_size())) { return 0-1; }
+  return geometry_dispose_event(geo,at,event,out,limit);
+}

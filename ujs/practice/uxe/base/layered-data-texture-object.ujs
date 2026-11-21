@@ -1,0 +1,190 @@
+struct LayeredTextureObject {
+  id: u32;
+  kind: u32;
+  dispatcher: u32;
+  source: u32;
+  version: u32;
+  magFilter: u32;
+  minFilter: u32;
+  flipY: u32;
+  generateMipmaps: u32;
+  unpackAlignment: u32;
+  format: u32;
+  wrapS: u32;
+  wrapT: u32;
+  wrapR: u32;
+  premultiplyAlpha: u32;
+}
+
+native function layer_obj_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function layer_obj_split(a:i64,bytes:i64,b:i64,other:i64) i64 {
+  return bytes==0 || other==0 || a+bytes<=b || b+other<=a;
+}
+
+native function layer_obj_image(image:i64) i64 {
+  if(!layer_obj_span(image,LayeredDataTexture.size)) { return 0; }
+  let kind=ux_u32(image+LayeredDataTexture.kind);
+  return (kind==1 || kind==2) && layered_tex_validate(image,0,0,kind);
+}
+
+native function layer_obj_image_space(image:i64,at:i64,bytes:i64) i64 {
+  if(!layer_obj_image(image)) { return 0; }
+  let pixels=ux_u32(image+LayeredDataTexture.data);
+  let size=layered_tex_size(ux_u32(image+LayeredDataTexture.width),ux_u32(image+LayeredDataTexture.height),
+    ux_u32(image+LayeredDataTexture.depth));
+  return layer_obj_split(image,LayeredDataTexture.size,at,bytes) && layer_obj_split(pixels,size,at,bytes);
+}
+
+native function LayeredTextureSource_init(source:i64,image:i64) i64 {
+  if(!layer_obj_span(source,Source.size) || !layer_obj_image_space(image,source,Source.size)) { return 0-1; }
+  return Source_init(source,image);
+}
+
+native function layer_obj_source_space(src:i64,at:i64,bytes:i64) i64 {
+  if(!layer_obj_span(src,Source.size) || ux_u32(src+Source.dataReady)!=1 ||
+     !layer_obj_split(src,Source.size,at,bytes)) { return 0; }
+  let image=ux_u32(src+Source.data);
+  return layer_obj_image_space(image,src,Source.size) && layer_obj_image_space(image,at,bytes);
+}
+
+native function layer_obj_event_space(at:i64,bytes:i64,dispatch:i64,source:i64) i64 {
+  if(!layer_obj_span(dispatch,EventDispatcher.size) ||
+     !layer_obj_split(at,bytes,dispatch,EventDispatcher.size) ||
+     !layer_obj_source_space(source,dispatch,EventDispatcher.size)) { return 0; }
+  let rows=ux_u32(dispatch+EventDispatcher.listeners);
+  let count=ux_u32(dispatch+EventDispatcher.listenerCount);
+  let cap=ux_u32(dispatch+EventDispatcher.listenerCapacity);
+  return count<=cap && layer_obj_span(rows,cap*8) &&
+    layer_obj_split(rows,cap*8,dispatch,EventDispatcher.size) &&
+    layer_obj_split(rows,cap*8,at,bytes) && layer_obj_source_space(source,rows,cap*8);
+}
+
+native function LayeredTextureObject_init(at:i64,id:i64,kind:i64,source:i64,dispatch:i64) i64 {
+  if(!layer_obj_span(at,LayeredTextureObject.size) || id<1 || id>4294967295 ||
+     (kind!=1 && kind!=2) || !layer_obj_source_space(source,at,LayeredTextureObject.size) ||
+     !layer_obj_event_space(at,LayeredTextureObject.size,dispatch,source)) { return 0-1; }
+  let a=ux_u32_put(at+LayeredTextureObject.id,id);
+  let b=ux_u32_put(at+LayeredTextureObject.kind,kind);
+  let c=ux_u32_put(at+LayeredTextureObject.dispatcher,dispatch);
+  let d=ux_u32_put(at+LayeredTextureObject.source,source);
+  let e=ux_u32_put(at+LayeredTextureObject.version,0);
+  let f=ux_u32_put(at+LayeredTextureObject.magFilter,1003);
+  let g=ux_u32_put(at+LayeredTextureObject.minFilter,1003);
+  let h=ux_u32_put(at+LayeredTextureObject.flipY,0);
+  let i=ux_u32_put(at+LayeredTextureObject.generateMipmaps,0);
+  let j=ux_u32_put(at+LayeredTextureObject.unpackAlignment,1);
+  let k=ux_u32_put(at+LayeredTextureObject.format,1023);
+  let l=ux_u32_put(at+LayeredTextureObject.wrapS,1001);
+  let m=ux_u32_put(at+LayeredTextureObject.wrapT,1001);
+  let n=ux_u32_put(at+LayeredTextureObject.wrapR,1001);
+  let o=ux_u32_put(at+LayeredTextureObject.premultiplyAlpha,0);
+  return at;
+}
+
+native function layer_obj_valid(at:i64) i64 {
+  if(!layer_obj_span(at,LayeredTextureObject.size) || ux_u32(at+LayeredTextureObject.id)==0) { return 0; }
+  let kind=ux_u32(at+LayeredTextureObject.kind);
+  return (kind==1 || kind==2) &&
+    layer_obj_source_space(ux_u32(at+LayeredTextureObject.source),at,LayeredTextureObject.size);
+}
+
+native function LayeredTextureObject_image(at:i64) i64 {
+  if(!layer_obj_valid(at)) { return 0-1; }
+  return ux_u32(ux_u32(at+LayeredTextureObject.source)+Source.data);
+}
+
+native function LayeredTextureObject_unpack(at:i64,flip:i64,alignment:i64,mips:i64,alpha:i64) i64 {
+  if(!layer_obj_valid(at) || flip<0 || flip>1 || mips<0 || mips>1 || alpha<0 || alpha>1 ||
+     (alignment!=1 && alignment!=2 && alignment!=4 && alignment!=8)) { return 0-1; }
+  let a=ux_u32_put(at+LayeredTextureObject.flipY,flip);
+  let b=ux_u32_put(at+LayeredTextureObject.unpackAlignment,alignment);
+  let c=ux_u32_put(at+LayeredTextureObject.generateMipmaps,mips);
+  let d=ux_u32_put(at+LayeredTextureObject.premultiplyAlpha,alpha);
+  return at;
+}
+
+native function LayeredTextureObject_red(at:i64,mag:i64,min:i64) i64 {
+  if(!layer_obj_valid(at) || (mag!=1003 && mag!=1006) ||
+     (min!=1003 && min!=1006)) { return 0-1; }
+  let a=ux_u32_put(at+LayeredTextureObject.format,1028);
+  let b=ux_u32_put(at+LayeredTextureObject.magFilter,mag);
+  let c=ux_u32_put(at+LayeredTextureObject.minFilter,min);
+  return at;
+}
+
+native function LayeredTextureObject_update(at:i64) i64 {
+  if(!layer_obj_valid(at)) { return 0-1; }
+  let source=ux_u32(at+LayeredTextureObject.source);
+  let version=ux_u32(at+LayeredTextureObject.version);
+  if(ux_u32(source+Source.version)==4294967295 || version==4294967295) { return 0-2; }
+  let bump=ux_u32_put(at+LayeredTextureObject.version,version+1);
+  let update=Source_needsUpdate(source,1);
+  return at;
+}
+
+// Return the shared R8 image for an unpadded base-level upload.
+native function LayeredTextureObject_r8(at:i64) i64 {
+  let image=LayeredTextureObject_image(at);
+  if(image<0 || ux_u32(at+LayeredTextureObject.format)!=1028 ||
+     ux_u32(at+LayeredTextureObject.flipY)!=0 || ux_u32(at+LayeredTextureObject.generateMipmaps)!=0 ||
+     ux_u32(at+LayeredTextureObject.premultiplyAlpha)!=0 ||
+     ux_u32(at+LayeredTextureObject.unpackAlignment)!=1) { return 0-1; }
+  return image;
+}
+
+native function layer_obj_copy_fields(dst:i64,src:i64,version:i64,source:i64) i64 {
+  let from=LayeredTextureObject.magFilter;
+  let payload=uxe_copy_record(dst+from,src+from,LayeredTextureObject.wrapR-from);
+  let alpha=ux_u32_put(dst+LayeredTextureObject.premultiplyAlpha,ux_u32(src+LayeredTextureObject.premultiplyAlpha));
+  let a=ux_u32_put(dst+LayeredTextureObject.source,source);
+  let b=ux_u32_put(dst+LayeredTextureObject.version,version);
+  let update=Source_needsUpdate(source,1);
+  return dst;
+}
+
+native function LayeredTextureObject_copy(dst:i64,src:i64) i64 {
+  if(!layer_obj_valid(dst) || !layer_obj_valid(src) ||
+     (dst!=src && !layer_obj_split(dst,LayeredTextureObject.size,src,LayeredTextureObject.size))) { return 0-1; }
+  let source=ux_u32(src+LayeredTextureObject.source);
+  let dispatch=ux_u32(dst+LayeredTextureObject.dispatcher);
+  let version=ux_u32(dst+LayeredTextureObject.version);
+  if(!layer_obj_source_space(source,dst,LayeredTextureObject.size) ||
+     !layer_obj_event_space(dst,LayeredTextureObject.size,dispatch,source)) { return 0-1; }
+  if(ux_u32(source+Source.version)==4294967295 || version==4294967295) { return 0-2; }
+  return layer_obj_copy_fields(dst,src,version+1,source);
+}
+
+native function LayeredTextureObject_clone(dst:i64,src:i64,id:i64,dispatch:i64) i64 {
+  if(!layer_obj_valid(src) || id==ux_u32(src+LayeredTextureObject.id) ||
+     !layer_obj_split(dst,LayeredTextureObject.size,src,LayeredTextureObject.size)) { return 0-1; }
+  let source=ux_u32(src+LayeredTextureObject.source);
+  let original=ux_u32(src+LayeredTextureObject.dispatcher);
+  if(!layer_obj_event_space(src,LayeredTextureObject.size,dispatch,source) || dispatch==original ||
+     ux_u32(dispatch+EventDispatcher.listenerCount)!=0 ||
+     !layer_obj_event_space(dst,LayeredTextureObject.size,original,source)) { return 0-1; }
+  let rows=ux_u32(dispatch+EventDispatcher.listeners);
+  let cap=ux_u32(dispatch+EventDispatcher.listenerCapacity);
+  let oldRows=ux_u32(original+EventDispatcher.listeners);
+  let oldCap=ux_u32(original+EventDispatcher.listenerCapacity);
+  if(!layer_obj_split(dispatch,EventDispatcher.size,original,EventDispatcher.size) ||
+     !layer_obj_split(dispatch,EventDispatcher.size,oldRows,oldCap*8) ||
+     !layer_obj_split(rows,cap*8,original,EventDispatcher.size) ||
+     !layer_obj_split(rows,cap*8,oldRows,oldCap*8)) { return 0-1; }
+  if(ux_u32(source+Source.version)==4294967295) { return 0-2; }
+  let result=LayeredTextureObject_init(dst,id,ux_u32(src+LayeredTextureObject.kind),source,dispatch);
+  if(result<0) { return result; }
+  return layer_obj_copy_fields(dst,src,1,source);
+}
+
+native function LayeredTextureObject_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  if(!layer_obj_valid(at) || event<0 || event>4294967295 || limit<0 || limit>1024 ||
+     !layer_obj_span(out,8+limit*4) || !layer_obj_split(out,8+limit*4,at,LayeredTextureObject.size)) { return 0-1; }
+  let source=ux_u32(at+LayeredTextureObject.source);
+  let dispatch=ux_u32(at+LayeredTextureObject.dispatcher);
+  if(!layer_obj_source_space(source,out,8+limit*4) ||
+     !layer_obj_event_space(out,8+limit*4,dispatch,source)) { return 0-1; }
+  return EventDispatcher_dispatchEvent(dispatch,event,ux_u32(at+LayeredTextureObject.id),out,limit);
+}

@@ -1,0 +1,108 @@
+// The parameter record is followed by an initialized BufferGeometry. Its
+// attribute storage, the generation draft and event snapshots are caller-owned.
+struct PlaneGeometryRecord {
+  ready: u32;
+  name: u32;
+  nameBytes: u32;
+  width: f64;
+  height: f64;
+  widthSegments: f64;
+  heightSegments: f64;
+}
+
+native function PlaneGeometry_size() i64 {
+  return PlaneGeometryRecord.size+BufferGeometry.size;
+}
+
+native function PlaneGeometry_geometry(plane:i64) i64 {
+  if(plane%8!=0 || !geometry_public_span(plane,PlaneGeometry_size())) { return 0-1; }
+  return plane+PlaneGeometryRecord.size;
+}
+
+native function plane_geometry_ready(plane:i64) i64 {
+  let geo=PlaneGeometry_geometry(plane);
+  if(geo<0 || ux_u32(plane+PlaneGeometryRecord.ready)!=1) { return 0-1; }
+  return geo;
+}
+
+native function plane_geometry_store(plane:i64,width:f64,height:f64,gx:f64,gy:f64) i64 {
+  let w=ux_f64_put(plane+PlaneGeometryRecord.width,width);
+  let h=ux_f64_put(plane+PlaneGeometryRecord.height,height);
+  let x=ux_f64_put(plane+PlaneGeometryRecord.widthSegments,gx);
+  let y=ux_f64_put(plane+PlaneGeometryRecord.heightSegments,gy);
+  let ready=ux_u32_put(plane+PlaneGeometryRecord.ready,1);
+  return plane;
+}
+
+native function PlaneGeometry_setName(plane:i64,name:i64,bytes:i64) i64 {
+  if(plane_geometry_ready(plane)<0 || !geometry_public_span(name,bytes) ||
+     !geometry_public_disjoint(plane,PlaneGeometry_size(),name,bytes)) { return 0-1; }
+  let pointer=ux_u32_put(plane+PlaneGeometryRecord.name,name);
+  let size=ux_u32_put(plane+PlaneGeometryRecord.nameBytes,bytes);
+  return plane;
+}
+
+native function PlaneGeometry_create(plane:i64,raw:i64,arena:i64,bytes:i64,width:f64,height:f64,gx:f64,gy:f64) i64 {
+  let geo=PlaneGeometry_geometry(plane);
+  if(geo<0 || ux_u32(plane+PlaneGeometryRecord.ready)!=0 ||
+     raw%4!=0 || !geometry_public_span(raw,GeometryBuffers.size) ||
+     arena%8!=0 || !geometry_public_span(arena,bytes) ||
+     !geometry_public_disjoint(plane,PlaneGeometry_size(),arena,bytes) ||
+     !geometry_public_disjoint(plane,PlaneGeometry_size(),raw,GeometryBuffers.size) ||
+     !geometry_public_disjoint(arena,bytes,raw,GeometryBuffers.size) ||
+     width-width!=0.0 || height-height!=0.0 ||
+     !(gx>=1.0 && gx<262145.0) || !(gy>=1.0 && gy<262145.0)) { return 0-1; }
+  let vertices=ux_u32(raw+GeometryBuffers.vertices);
+  let indices=ux_u32(raw+GeometryBuffers.indices);
+  let vertexBytes=32*ux_u32(raw+GeometryBuffers.vertexCapacity);
+  let indexBytes=4*ux_u32(raw+GeometryBuffers.indexCapacity);
+  if(!geometry_public_span(vertices,vertexBytes) || !geometry_public_span(indices,indexBytes) ||
+     !geometry_public_disjoint(plane,PlaneGeometry_size(),vertices,vertexBytes) ||
+     !geometry_public_disjoint(plane,PlaneGeometry_size(),indices,indexBytes) ||
+     !geometry_public_disjoint(arena,bytes,vertices,vertexBytes) ||
+     !geometry_public_disjoint(arena,bytes,indices,indexBytes)) { return 0-1; }
+  let generated=PlaneGeometry_generate(raw,width,height,f64_floor_i64(gx),f64_floor_i64(gy));
+  if(generated<0) { return generated; }
+  let installed=GeometryBuffers_asGeometry(raw,geo,arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  let empty=ux_u32_put(plane+PlaneGeometryRecord.name,0);
+  let noName=ux_u32_put(plane+PlaneGeometryRecord.nameBytes,0);
+  return plane_geometry_store(plane,width,height,gx,gy);
+}
+
+native function PlaneGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  let source=plane_geometry_ready(src);
+  let target=PlaneGeometry_geometry(dst);
+  if(source<0 || target<0) { return 0-1; }
+  if(dst==src) { return dst; }
+  let name=ux_u32(src+PlaneGeometryRecord.name);
+  let nameBytes=ux_u32(src+PlaneGeometryRecord.nameBytes);
+  if(!geometry_public_disjoint(dst,PlaneGeometry_size(),src,PlaneGeometry_size()) ||
+     !geometry_public_span(arena,bytes) ||
+     !geometry_public_disjoint(dst,PlaneGeometry_size(),arena,bytes) ||
+     !geometry_public_disjoint(src,PlaneGeometry_size(),arena,bytes) ||
+     !geometry_public_disjoint(dst,PlaneGeometry_size(),name,nameBytes) ||
+     !geometry_public_disjoint(arena,bytes,name,nameBytes)) { return 0-1; }
+  let copied=BufferGeometry_copy(target,source,arena,bytes);
+  if(copied<0) { return copied; }
+  let pointer=ux_u32_put(dst+PlaneGeometryRecord.name,name);
+  let size=ux_u32_put(dst+PlaneGeometryRecord.nameBytes,nameBytes);
+  return plane_geometry_store(dst,ux_f64(src+PlaneGeometryRecord.width),
+    ux_f64(src+PlaneGeometryRecord.height),ux_f64(src+PlaneGeometryRecord.widthSegments),
+    ux_f64(src+PlaneGeometryRecord.heightSegments));
+}
+
+// The caller provides a fresh geometry descriptor and its reserved tables.
+native function PlaneGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  let target=PlaneGeometry_geometry(dst);
+  if(target<0 || dst==src || ux_u32(dst+PlaneGeometryRecord.ready)!=0 ||
+     ux_u32(target+BufferGeometry.listenerCount)!=0) { return 0-1; }
+  return PlaneGeometry_copy(dst,src,arena,bytes);
+}
+
+native function PlaneGeometry_dispose(plane:i64,event:i64,out:i64,limit:i64) i64 {
+  let geo=plane_geometry_ready(plane);
+  if(geo<0 || limit<0 || limit>1572862 ||
+     !geometry_public_disjoint(out,8+4*limit,plane,PlaneGeometry_size())) { return 0-1; }
+  return geometry_dispose_event(geo,plane,event,out,limit);
+}

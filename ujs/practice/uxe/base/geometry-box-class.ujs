@@ -1,0 +1,62 @@
+struct BoxGeometryParameters {
+  width: f64;
+  height: f64;
+  depth: f64;
+  widthSegments: f64;
+  heightSegments: f64;
+  depthSegments: f64;
+}
+
+native function box_geometry_groups(groups:i64,x:i64,y:i64,z:i64) i64 {
+  let start=0;
+  let face=0;
+  while(face<6) {
+    let count=6*y*z;
+    if(face>=2) { count=6*x*z; }
+    if(face>=4) { count=6*x*y; }
+    let p=groups+12*face;
+    let first=ux_u32_put(p,start);
+    let n=ux_u32_put(p+4,count);
+    let faceId=ux_u32_put(p+8,face);
+    start=start+count;
+    face=face+1;
+  }
+  return groups;
+}
+
+native function BoxGeometry_create(box:i64,raw:i64,arena:i64,bytes:i64,params:i64,groups:i64) i64 {
+  if(params%8!=0 || groups%4!=0 ||
+     !geometry_primitive_raw(box,raw,arena,bytes,params,BoxGeometryParameters.size) ||
+     !geometry_primitive_raw(box,raw,arena,bytes,groups,72) ||
+     !geometry_public_disjoint(params,BoxGeometryParameters.size,groups,72)) { return 0-1; }
+  let width=ux_f64(params+BoxGeometryParameters.width);
+  let height=ux_f64(params+BoxGeometryParameters.height);
+  let depth=ux_f64(params+BoxGeometryParameters.depth);
+  let sx=ux_f64(params+BoxGeometryParameters.widthSegments);
+  let sy=ux_f64(params+BoxGeometryParameters.heightSegments);
+  let sz=ux_f64(params+BoxGeometryParameters.depthSegments);
+  if(width-width!=0.0 || height-height!=0.0 || depth-depth!=0.0 ||
+     !(sx>=1.0 && sx<131073.0) || !(sy>=1.0 && sy<131073.0) ||
+     !(sz>=1.0 && sz<131073.0)) { return 0-1; }
+  let x=f64_floor_i64(sx);
+  let y=f64_floor_i64(sy);
+  let z=f64_floor_i64(sz);
+  let generated=BoxGeometry_generate(raw,width,height,depth,x,y,z);
+  if(generated<0) { return generated; }
+  let faces=box_geometry_groups(groups,x,y,z);
+  let installed=GeometryBuffers_asGeometry(raw,GeometryPrimitive_geometry(box),arena,bytes,7,faces,6);
+  if(installed<0) { return installed; }
+  return geometry_primitive_store(box,1,width,height,depth,sx,sy,sz);
+}
+
+native function BoxGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return geometry_primitive_copy(dst,src,arena,bytes,1);
+}
+
+native function BoxGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return geometry_primitive_clone(dst,src,arena,bytes,1);
+}
+
+native function BoxGeometry_dispose(box:i64,event:i64,out:i64,limit:i64) i64 {
+  return geometry_primitive_dispose(box,event,out,limit,1);
+}

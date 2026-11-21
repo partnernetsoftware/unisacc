@@ -37,24 +37,36 @@ static Plan b_plan(const char *name) {
     return (Plan){"丙","软件语义缺口","先确认正常使用入口；缺投影、格式、材质或状态分支时先实现再验"};
 }
 
-static Plan a_plan(const char *name) {
-    if(has(name,"Compressed"))
-        return (Plan){"丙","设备压缩纹理","需要格式上传与采样的实证，另核维度与 mip 规则"};
-    if(tx_eqz(name,"RenderTarget"))
-        return (Plan){"甲","目标对象","已有目标申请与读回；在公共类接线补 clone、resize、dispose"};
-    if(tx_eqz(name,"Interpolant"))
-        return (Plan){"甲","公共插值对象","已有实例存储和缓存；补公开基类、设置和虚方法约定"};
-    if(tx_eqz(name,"Light") || tx_eqz(name,"Material"))
-        return (Plan){"甲","公共对象","复用已存在的派生行为；补基类字段、复制、事件与序列化"};
-    if(tx_eqz(name,"DepthTexture") || tx_eqz(name,"FramebufferTexture"))
-        return (Plan){"甲","目标与纹理","复用 WebGL 深度目标和读回；补类身份与生命周期"};
-    if(tx_eqz(name,"VideoTexture") || tx_eqz(name,"createCanvasElement"))
-        return (Plan){"丙","浏览器宿主","需要媒体帧或真实 DOM 合同；边界修订前仍计缺"};
-    return (Plan){"丙","软件语义缺口","按 r160 补公开契约与产品 Wasm 可调用入口"};
+static int read_family(char *raw,int64_t bytes,Plan *plans,char **names,char **gates,int capacity) {
+    const char header[]="name\tgroup\tfamily\tgate\tbasis\n";
+    if(bytes<(int64_t)sizeof header || !tx_prefix(raw,bytes,header,sizeof header-1)) return -1;
+    int rows=0;
+    for(int64_t at=sizeof header-1;at<bytes;) {
+        char *column[5]={raw+at};
+        int count=1;
+        while(at<bytes && raw[at]!='\n') {
+            if(raw[at]=='\t') {
+                if(count==5) return -1;
+                raw[at]=0;
+                column[count++]=raw+at+1;
+            }
+            at++;
+        }
+        if(count!=5 || at==bytes || rows>=capacity) return -1;
+        raw[at++]=0;
+        for(int i=0;i<5;i++) if(!column[i][0]) return -1;
+        if(!tx_eqz(column[1],"甲") && !tx_eqz(column[1],"丙")) return -1;
+        for(int i=0;i<rows;i++) if(tx_eqz(names[i],column[0])) return -1;
+        names[rows]=column[0];
+        gates[rows]=column[3];
+        plans[rows++]=(Plan){column[1],column[2],column[4]};
+    }
+    return rows;
 }
 
 int main(int argc,char **argv) {
-    if(argc!=3 || (!tx_eqz(argv[1],"A") && !tx_eqz(argv[1],"B")) ||
+    const int mutation=argc==4 && tx_eqz(argv[1],"A") && tx_eqz(argv[2],"--check") && tx_eqz(argv[3],"--mutate");
+    if((argc!=3 && !mutation) || (!tx_eqz(argv[1],"A") && !tx_eqz(argv[1],"B")) ||
        (!tx_eqz(argv[2],"--write") && !tx_eqz(argv[2],"--check"))) return 2;
     unsigned char *inventory=0,*reference=0;
     int64_t bytes=0, refBytes=0;
@@ -65,9 +77,21 @@ int main(int argc,char **argv) {
     if(at<0) failed=1;
     const char *exports=failed?"":(const char *)reference+at+sizeof marker-1;
     static char output[65000];
-    int used=tx_snprintf(output,sizeof output,"lane\tname\tgroup\troute\tbasis\n");
+    int used=tx_snprintf(output,sizeof output,
+        argv[1][0]=='A'?"lane\tname\tgroup\troute\tbasis\tgate\n":"lane\tname\tgroup\troute\tbasis\n");
     int count[3]={0};
     char lane=argv[1][0];
+    unsigned char *family=0;
+    int64_t familyBytes=0;
+    Plan plans[64];
+    char *names[64],*gates[64];
+    int familyRows=0;
+    int mutated=0;
+    if(lane=='A') {
+        if(sy_read_file("ujs/plans/ux-three-a-family.tsv",&family,&familyBytes,18000)) failed=1;
+        else familyRows=read_family((char *)family,familyBytes,plans,names,gates,64);
+        if(familyRows<=0) failed=1;
+    }
     for(int64_t row=0;!failed && row<bytes;) {
         int64_t end=row;
         while(end<bytes && inventory[end]!='\n') end++;
@@ -87,13 +111,30 @@ int main(int argc,char **argv) {
                (exports[hit+keyBytes-1]!=',' && exports[hit+keyBytes-1]!=' ')) {
                 failed=1; break;
             }
-            Plan plan=lane=='B'?b_plan(name):a_plan(name);
+            Plan plan=b_plan(name);
+            const char *gate="";
+            if(lane=='A') {
+                int found=0;
+                for(int i=0;i<familyRows;i++) if(tx_eqz(names[i],name)) {
+                    plan=plans[i];
+                    gate=mutation && !mutated?"mutated":gates[i];
+                    mutated=mutation;
+                    found=1;
+                    break;
+                }
+                if(!found) { printf("UX_THREE_MISSING 未登记家族 %s\n",name); failed=1; break; }
+            }
             count[tx_eqz(plan.group,"甲")?0:tx_eqz(plan.group,"乙")?1:2]++;
-            int n=tx_snprintf(output+used,sizeof output-used,"%c\t%s\t%s\t%s\t%s\n",lane,name,plan.group,plan.route,plan.basis);
+            int n=tx_snprintf(output+used,sizeof output-used,"%c\t%s\t%s\t%s\t%s%s%s\n",
+                lane,name,plan.group,plan.route,plan.basis,lane=='A'?"\t":"",gate);
             if(n<=0 || n>=sizeof output-used) { failed=1; break; }
             used+=n;
         }
         row=end+1;
+    }
+    if(!failed && mutation && !mutated) {
+        printf("UX_THREE_MISSING 无缺项，不能篡改计划行\n");
+        failed=1;
     }
     char path[80];
     tx_snprintf(path,sizeof path,"ujs/plans/ux-three-%c-plan.tsv",lane=='A'?'a':'b');
@@ -107,5 +148,6 @@ int main(int argc,char **argv) {
     printf("UX_THREE_MISSING lane=%c A=%d B=%d C=%d total=%d failed=%d\n",lane,count[0],count[1],count[2],count[0]+count[1]+count[2],failed);
     mm_free(inventory);
     mm_free(reference);
+    mm_free(family);
     return failed;
 }

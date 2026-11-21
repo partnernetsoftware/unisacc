@@ -1,0 +1,32 @@
+#pragma unisa use g_math
+#pragma unisa use text.text
+
+static double channel(int mode,double base,int env) {
+    if(mode==0) return 0.5*base*(255+env);
+    if(mode==1) return (255*base+env)/2;
+    return 255*base+env/2.0;
+}
+
+static unsigned byte_value(double value) {
+    return value>=255?255:(unsigned)(value+0.5);
+}
+
+int main(int argc,char **argv) {
+    const int multiply=argc==2 && tx_eqz(argv[1],"--mutate-multiply");
+    const int mix=argc==2 && tx_eqz(argv[1],"--mutate-mix");
+    const int add=argc==2 && tx_eqz(argv[1],"--mutate-add");
+    if(argc!=1 && !multiply && !mix && !add) return 2;
+    const char *modules[]={"gpu-environment-combine-generated",0};
+    const char *setup="native function pixel(mode:i64) i64 {"
+        "let r=GpuEnv_combine(mode,0.25,128.0/255.0,0.5);"
+        "let g=GpuEnv_combine(mode,0.5,64.0/255.0,0.5);"
+        "let b=GpuEnv_combine(mode,0.625,192.0/255.0,0.5);"
+        "let blue=255;if(b<1.0){blue=f64_floor_i64(b*255.0+0.5);}"
+        "return f64_floor_i64(r*255.0+0.5)+256*f64_floor_i64(g*255.0+0.5)+65536*blue;}";
+    const char *cases[]={"return pixel(0);","return pixel(1);","return pixel(2);"};
+    double gold[3];
+    for(int i=0;i<3;i++)
+        gold[i]=byte_value(channel(i,0.25,128))+256*byte_value(channel(i,0.5,64))+65536*byte_value(channel(i,0.625,192));
+    return g_math_run("G_STRUCT GPU environment combine","gpu-environment-combine",modules,setup,cases,gold,3,
+        multiply?0:mix?1:add?2:-1,multiply?cases[1]:cases[0]);
+}

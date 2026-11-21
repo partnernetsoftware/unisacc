@@ -1,0 +1,83 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+enum { count=123 };
+
+static int expected(double *gold) {
+    const int volume[]={12,72,40,92,100,136,136,232,172,220};
+    const int array[]={72,24,100,112,124,184,232,172};
+    const int defaults[]={1003,1003,1,0,0};
+    const int dims[]={3,2,3};
+    const int format[]={0x8229,0x1903,0x1401};
+    const int target[]={0x806f,0x8c1a};
+    const int setup[]={32,64,96,96,40};
+    int at=0;
+    for(int i=0;i<5;i++) gold[at++]=setup[i];
+    for(int layer_type=0;layer_type<2;layer_type++) {
+        gold[at++]=layer_type+1;
+        gold[at++]=128;
+        for(int i=0;i<3;i++) gold[at++]=dims[i];
+        gold[at++]=target[layer_type];
+        for(int i=0;i<3;i++) gold[at++]=format[i];
+        const int *samples=layer_type?array:volume;
+        const int n=layer_type?8:10;
+        for(int i=0;i<n;i++) {
+            gold[at++]=samples[i];
+            gold[at++]=samples[i];
+        }
+    }
+    for(int i=0;i<15;i++) gold[at++]=-1;
+    gold[at++]=1;
+    for(int layer_type=0;layer_type<2;layer_type++) {
+        for(int i=0;i<5;i++) gold[at++]=defaults[i];
+        const int *samples=layer_type?array:volume;
+        const int n=layer_type?8:10;
+        for(int i=0;i<n;i++) gold[at++]=samples[i];
+        gold[at++]=target[layer_type];
+        gold[at++]=format[0];
+        for(int i=0;i<3;i++) gold[at++]=dims[i];
+        for(int i=0;i<3;i++) gold[at++]=dims[i];
+        gold[at++]=format[1];
+        gold[at++]=format[2];
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-layered-texture-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/layers.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "layered-data-texture-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char signature[]="export uxe_layered_tex_probe(op:i64,x:i64,y:i64,z:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "webgl-utils-format.ujs",BASE "webgl-utils-generated.ujs",
+        BASE "layered-data-texture.ujs",FIX "layered-data-texture-probe.ujs","-o",wasm,0};
+    double gold[count],actual[count]={0};
+    int failed=length<0 || length>=(int)sizeof url || expected(gold)!=count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("LAYERED_TEXTURE compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("LAYERED_TEXTURE case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_PIXEL Data3DTexture/DataArrayTexture cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

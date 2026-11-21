@@ -1,0 +1,116 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int uniforms_probe(const char *dir) {
+    char layout[320],source[320],wasm[320];
+    tx_snprintf(layout,sizeof layout,"%s/layout.ujs",dir);
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char header[]="export uxe_uniforms(op:i64,group:i64,row:i64,extra:i64) i64 version 1;\n";
+    const char probe[]=
+        "if(op==0){return ux_span(0,1024);}\n"
+        "if(op==1){return UniformsLib_groupCount();}\n"
+        "if(op==2){return UniformsLib_groupName(64,64+extra,group);}\n"
+        "if(op==3){return UniformsLib_count(group);}\n"
+        "if(op==4){return UniformsLib_key(64,96,group,row);}\n"
+        "if(op==5){return UniformsLib_property(64,96,group,row,extra);}\n"
+        "if(op==6){let value=UniformsLib_default(128,group,row);"
+        "if(value>=0 && extra!=0){let changed=ux_f64_put(value+UniformsLibValue.c0,0.9);}return value;}\n"
+        "if(op==7){return UniformsLib_default(256,group,row);}\n"
+        "if(op==8){return UniformsLib_findGroup(64,extra);}\n"
+        "if(op==9){return UniformsLib_find(group,64,extra);}\n"
+        "return 0-1;\n";
+    if(sy_write_file(layout,header,sizeof header-1,0600) || sy_write_file(source,probe,sizeof probe-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",layout,"ujs/practice/uxe/base/uniforms-lib-generated.ujs",
+        "ujs/practice/uxe/base/uniforms-lib.ujs",source,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    if(rc) printf("UNIFORMS_LIB_BUILD rc=%d output=%.*s\n",rc,(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+static int uniforms_browser(const char *dir,int mutate,double values[8]) {
+    char cwd[460],page[360],url[390],html[9600];
+    if(sy_cwd(cwd,sizeof cwd)) return 1;
+    tx_snprintf(page,sizeof page,"%s/reference.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s",page);
+    int n=tx_snprintf(html,sizeof html,
+        "<!doctype html><meta charset=utf-8><pre id=r160>pending</pre><script type=module>\n"
+        "import {UniformsLib,UniformsUtils,REVISION} from 'file://%s/ujs/practice/web/game/three.module.js';\n"
+        "const output=document.querySelector('#r160');const mutate=%d;"
+        "function projector(){let h=0;const push=v=>h=(h*131+v+16777213)%%16777213;"
+        "const name=s=>{push(s.length);for(const c of s)push(c.charCodeAt(0));};"
+        "const value=(kind,props,data)=>{push(kind);push(props.length);for(const p of props)name(p);"
+        "for(let i=0;i<9;i++)push(Math.floor((data[i]??0)*1000000+0.5));};"
+        "return {push,name,value,hash:()=>h};}"
+        "function reference(){const p=projector();const groups=Object.keys(UniformsLib);const records=[];p.push(groups.length);"
+        "for(const group of groups){const rows=Object.entries(UniformsLib[group]);p.name(group);p.push(rows.length);"
+        "for(const [key,entry] of rows){p.name(key);const v=entry.value;let kind=0,data=[];"
+        "if(typeof v==='number'){kind=1;data=[v];}"
+        "else if(v?.isColor){kind=2;data=v.toArray();}"
+        "else if(v?.isMatrix3){kind=3;data=v.toArray();}"
+        "else if(v?.isVector2){kind=4;data=v.toArray();}"
+        "else if(Array.isArray(v)&&v.length===0){kind=5;}"
+        "else if(v!==null)throw Error('unknown r160 default type');"
+        "const props=Object.keys(entry.properties??{});p.value(kind,props,data);records.push({group,key,kind,props,data});}}"
+        "const a=UniformsUtils.clone(UniformsLib.common),b=UniformsUtils.clone(UniformsLib.common);"
+        "a.mapTransform.value.elements[0]=7;"
+        "return {records,values:[p.hash(),b.mapTransform.value.elements[0],-1,100*groups.indexOf('envmap')+"
+        "10*Object.keys(UniformsLib.envmap).indexOf('refractionRatio')-1]};}"
+        "async function product(expected){const response=await fetch('probe.wasm');"
+        "const {instance:{exports:e}}=await WebAssembly.instantiate(await response.arrayBuffer());"
+        "if(e.uxe_abi_version()!==1)throw Error('Wasm ABI');const run=(op,g=0,r=0,x=0)=>Number(e.uxe_uniforms(BigInt(op),BigInt(g),BigInt(r),BigInt(x)));"
+        "const root=run(0);const mem=new Uint8Array(e.memory.buffer,root,1024);"
+        "const view=new DataView(mem.buffer,mem.byteOffset,mem.byteLength);const decoder=new TextDecoder();"
+        "const name=n=>{if(n<1||n>32)throw Error('bad name span');return decoder.decode(mem.slice(64,64+n));};"
+        "const p=projector();const groups=run(1);p.push(groups);let at=0;"
+        "for(let g=0;g<groups;g++){const group=name(run(2,g,0,32));const count=run(3,g);p.name(group);p.push(count);"
+        "for(let r=0;r<count;r++){const key=name(run(4,g,r));const address=run(6,g,r,mutate&&g===2&&r===4?1:0);"
+        "if(address!==128)throw Error('default status '+group+'.'+key);"
+        "const kind=view.getUint32(address,true),fields=view.getUint32(address+4,true);const props=[],data=[];"
+        "if(fields>32)throw Error('property bound');for(let i=0;i<fields;i++)props.push(name(run(5,g,r,i)));"
+        "for(let i=0;i<9;i++)data.push(view.getFloat64(address+8+i*8,true));"
+        "const ref=expected[at++];if(!ref||group!==ref.group||key!==ref.key||kind!==ref.kind||"
+        "JSON.stringify(props)!==JSON.stringify(ref.props))throw Error('metadata '+group+'.'+key);"
+        "if(data.some((v,i)=>!Number.isFinite(v)||Math.abs(v-(ref.data[i]??0))>1e-12)&&!(mutate&&g===2&&r===4))"
+        "throw Error('default '+group+'.'+key+' actual='+data[0]+' r160='+ref.data[0]);"
+        "p.name(key);p.value(kind,props,data);}}"
+        "if(at!==expected.length)throw Error('row count');"
+        "const a=run(6,0,3),b=run(7,0,3);view.setFloat64(a+8,7,true);const independent=view.getFloat64(b+8,true);"
+        "mem[64]=7;const rejected=run(2,0,0,1);const untouched=mem[64]===7?rejected:-2;"
+        "const group=run(8,0,0,run(2,2,0,32));const length=run(4,group,4);"
+        "const lookup=100*group+10*run(9,group,0,length)+run(9,group,0,length-1);"
+        "return [p.hash(),independent,untouched,lookup];}"
+        "try{if(REVISION!=='160')throw Error('wrong revision');const ref=reference();"
+        "output.textContent=JSON.stringify([...ref.values,...await product(ref.records)]);"
+        "}catch(error){output.textContent='error:'+error.message;}"
+        "</script>",cwd,mutate);
+    if(n<=0 || n>=sizeof html || sy_write_file(page,html,n,0600)) return 1;
+    return r160_wait_read(url,"#r160",values,8,dir);
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256];
+    if(sy_mkdtemp("/tmp","ujs-uniforms-lib-",dir,sizeof dir)) return 2;
+    double values[8]={0};
+    const double gold[]={11949429,1,-1,239};
+    int failed=uniforms_probe(dir) || uniforms_browser(dir,mutate,values);
+    for(int i=0;!failed && i<4;i++) {
+        if(values[i]!=gold[i] || values[4+i]!=gold[i]) {
+            printf("UNIFORMS_LIB case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,values[4+i],values[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT UniformsLib defaults groups=16 entries=78 fields=34 cases=4 failed=%d\n",failed);
+    return failed;
+}

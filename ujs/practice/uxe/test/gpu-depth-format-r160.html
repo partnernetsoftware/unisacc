@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {DepthFormat, DepthStencilFormat, DepthTexture, EqualStencilFunc, Mesh, MeshBasicMaterial,
+  OrthographicCamera, PlaneGeometry, REVISION, Scene, ShaderMaterial, UnsignedInt248Type, UnsignedShortType,
+  WebGLRenderTarget, WebGLRenderer} from "../../web/game/three.module.js";
+if(REVISION!=="160") throw new Error("three.js revision mismatch");
+const canvas=document.createElement("canvas");
+const gl=canvas.getContext("webgl2",{antialias:false});
+if(!gl) throw new Error("WebGL2 unavailable");
+const renderer=new WebGLRenderer({canvas,context:gl});
+renderer.autoClear=false;
+renderer.setSize(1,1);
+const camera=new OrthographicCamera(-1,1,1,-1,0.1,10);
+camera.position.z=1;
+const scene=new Scene();
+const quad=new Mesh(new PlaneGeometry(2,2));
+scene.add(quad);
+function target(format,type,value) {
+  const stencil=format===DepthStencilFormat;
+  const result=new WebGLRenderTarget(1,1,{stencilBuffer:stencil});
+  const texture=new DepthTexture(1,1,type);
+  texture.format=format;
+  result.depthTexture=texture;
+  renderer.setRenderTarget(result);
+  gl.depthMask(true);
+  gl.clearDepth(value);
+  gl.clearStencil(17);
+  gl.stencilMask(255);
+  gl.clear(gl.DEPTH_BUFFER_BIT|(stencil?gl.STENCIL_BUFFER_BIT:0));
+  if(gl.getError()!==gl.NO_ERROR) throw new Error("depth attachment");
+  return result;
+}
+const plain=target(DepthFormat,UnsignedShortType,.25);
+const packed=target(DepthStencilFormat,UnsignedInt248Type,.75);
+const color=new WebGLRenderTarget(1,1);
+const pixel=new Uint8Array(4);
+function sample(target) {
+  quad.material=new ShaderMaterial({
+    depthTest:false,
+    uniforms:{depthMap:{value:target.depthTexture}},
+    vertexShader:"void main(){gl_Position=vec4(position.xy,0.0,1.0);}",
+    fragmentShader:"uniform sampler2D depthMap; void main(){gl_FragColor=vec4(texture2D(depthMap,vec2(0.5)).r,0.0,0.0,1.0);}"
+  });
+  renderer.setRenderTarget(color);
+  renderer.render(scene,camera);
+  renderer.readRenderTargetPixels(color,0,0,1,1,pixel);
+  return pixel[0];
+}
+function stencil(ref) {
+  quad.material=new MeshBasicMaterial({depthTest:false,depthWrite:false,stencilWrite:true,
+    stencilFunc:EqualStencilFunc,stencilRef:ref});
+  renderer.setRenderTarget(packed);
+  renderer.setClearColor(0,1);
+  renderer.clear(true,false,false);
+  renderer.render(scene,camera);
+  renderer.readRenderTargetPixels(packed,0,0,1,1,pixel);
+  return Number(pixel[0]===255);
+}
+document.querySelector("#r160").textContent=JSON.stringify([
+  sample(plain),sample(packed),stencil(17),stencil(18),plain.stencilBuffer?0:-1
+]);
+</script>

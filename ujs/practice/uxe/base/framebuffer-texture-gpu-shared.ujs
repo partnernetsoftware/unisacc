@@ -1,0 +1,85 @@
+struct FramebufferGpuShared {
+  capture: FramebufferGpuTexture;
+  users: u32;
+}
+
+struct FramebufferGpuObject {
+  source: u32;
+  version: u32;
+}
+
+native function FramebufferGpuObject_source(at:i64) i64 {
+  if(!framebuffer_gpu_span(at,FramebufferGpuObject.size)) { return 0-1; }
+  let source=ux_u32(at+FramebufferGpuObject.source)-1;
+  if(!framebuffer_gpu_span(source,FramebufferGpuShared.size) ||
+     !render_target_separate(at,FramebufferGpuObject.size,source,FramebufferGpuShared.size) ||
+     ux_u32(source+FramebufferGpuShared.users)==0) { return 0-1; }
+  return source;
+}
+
+native function FramebufferGpuObject_init(at:i64,source:i64,width:i64,height:i64) i64 {
+  if(!framebuffer_gpu_span(at,FramebufferGpuObject.size) ||
+     !framebuffer_gpu_span(source,FramebufferGpuShared.size) ||
+     !render_target_separate(at,FramebufferGpuObject.size,source,FramebufferGpuShared.size) ||
+     !render_target_size(width,height) || ux_u32(at+FramebufferGpuObject.source)!=0 ||
+     ux_u32(source+FramebufferGpuShared.users)!=0 ||
+     ux_u32(source+FramebufferGpuTexture.handle)!=0) { return 0-1; }
+  let w=ux_u32_put(source+FramebufferGpuTexture.width,width);
+  let h=ux_u32_put(source+FramebufferGpuTexture.height,height);
+  let count=ux_u32_put(source+FramebufferGpuShared.users,1);
+  let version=ux_u32_put(at+FramebufferGpuObject.version,1);
+  let ref=ux_u32_put(at+FramebufferGpuObject.source,source+1);
+  return at;
+}
+
+native function framebuffer_gpu_release(source:i64) i64 {
+  let count=ux_u32(source+FramebufferGpuShared.users);
+  if(count==1 && ux_u32(source+FramebufferGpuTexture.handle)!=0) {
+    let released=FramebufferTexture_gpuDispose(source);
+    if(released!=0) { return released; }
+  }
+  let users=ux_u32_put(source+FramebufferGpuShared.users,count-1);
+  return 0;
+}
+
+native function FramebufferGpuObject_copy(dst:i64,src:i64) i64 {
+  let source=FramebufferGpuObject_source(src);
+  if(source<0 || !framebuffer_gpu_span(dst,FramebufferGpuObject.size)) { return 0-1; }
+  if(dst==src) { return dst; }
+  let version=ux_u32(dst+FramebufferGpuObject.version);
+  if(version==4294967295 ||
+     !render_target_separate(dst,FramebufferGpuObject.size,src,FramebufferGpuObject.size) ||
+     !render_target_separate(dst,FramebufferGpuObject.size,source,FramebufferGpuShared.size)) { return 0-1; }
+  let prior=FramebufferGpuObject_source(dst);
+  if(ux_u32(dst+FramebufferGpuObject.source)!=0 && prior<0) { return 0-1; }
+  if(prior!=source) {
+    let users=ux_u32(source+FramebufferGpuShared.users);
+    if(users==4294967295 ||
+       (prior>=0 && !render_target_separate(prior,FramebufferGpuShared.size,source,FramebufferGpuShared.size))) {
+      return 0-1;
+    }
+    if(prior>=0 && framebuffer_gpu_release(prior)!=0) { return 0-1; }
+    let retained=ux_u32_put(source+FramebufferGpuShared.users,users+1);
+    let ref=ux_u32_put(dst+FramebufferGpuObject.source,source+1);
+  }
+  let changed=ux_u32_put(dst+FramebufferGpuObject.version,version+1);
+  return dst;
+}
+
+native function FramebufferGpuObject_clone(dst:i64,src:i64) i64 {
+  if(!framebuffer_gpu_span(dst,FramebufferGpuObject.size) || dst==src ||
+     ux_u32(dst+FramebufferGpuObject.source)!=0 || ux_u32(dst+FramebufferGpuObject.version)!=0) { return 0-1; }
+  let cloned=FramebufferGpuObject_copy(dst,src);
+  if(cloned<0) { return cloned; }
+  let version=ux_u32_put(dst+FramebufferGpuObject.version,2);
+  return dst;
+}
+
+native function FramebufferGpuObject_dispose(at:i64) i64 {
+  let source=FramebufferGpuObject_source(at);
+  if(source<0) { return source; }
+  let disposed=framebuffer_gpu_release(source);
+  if(disposed!=0) { return disposed; }
+  let cleared=ux_u32_put(at+FramebufferGpuObject.source,0);
+  return 0;
+}

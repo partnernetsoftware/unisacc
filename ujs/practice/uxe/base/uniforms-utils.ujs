@@ -1,0 +1,223 @@
+// Maps own contiguous records. Uniform and property keys are positive interned
+// names; entry tables start after the header and all spans are map-relative.
+struct UniformsUtilsMap { count: u32; bytes: u32; }
+struct UniformsUtilsEntry { key: u32; properties: u32; count: u32; reserved: u32; }
+struct UniformsUtilsProperty { key: u32; kind: u32; data: u32; bytes: u32; }
+
+struct UniformsUtilsKind {
+  nullValue: u8;
+  number: u8;
+  boolean: u8;
+  string: u8;
+  reference: u8;
+  array: u8;
+  color: u8;
+  matrix3: u8;
+  matrix4: u8;
+  vector2: u8;
+  vector3: u8;
+  vector4: u8;
+  quaternion: u8;
+  texture: u8;
+  renderTexture: u8;
+  undefinedValue: u8;
+}
+
+// Texture wrapper state lives in the map; source identifies shared image data.
+// No renderer object or backing image is allocated by cloning this descriptor.
+struct UniformsUtilsTexture {
+  source: u32;
+  mapping: u32;
+  wrapS: u32;
+  wrapT: u32;
+  minFilter: u32;
+  magFilter: u32;
+  colorSpace: u32;
+  channel: u32;
+  offsetX: f64;
+  offsetY: f64;
+  repeatX: f64;
+  repeatY: f64;
+  rotation: f64;
+}
+
+native function uniforms_utils_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+native function uniforms_utils_size(kind:i64) i64 {
+  if(kind==UniformsUtilsKind.number) { return 8; }
+  if(kind==UniformsUtilsKind.vector2) { return 16; }
+  if(kind==UniformsUtilsKind.color || kind==UniformsUtilsKind.vector3) { return 24; }
+  if(kind==UniformsUtilsKind.vector4 || kind==UniformsUtilsKind.quaternion) { return 32; }
+  if(kind==UniformsUtilsKind.matrix3) { return 72; }
+  if(kind==UniformsUtilsKind.matrix4) { return 128; }
+  if(kind==UniformsUtilsKind.texture) { return UniformsUtilsTexture.size; }
+  return 0;
+}
+
+native function uniforms_utils_validate(map:i64,out:i64,capacity:i64) i64 {
+  if(map<0 || map%8!=0 || map>6291456-UniformsUtilsMap.size) { return 0-1; }
+  let bytes=ux_u32(map+UniformsUtilsMap.bytes);
+  let count=ux_u32(map+UniformsUtilsMap.count);
+  if(bytes<UniformsUtilsMap.size || bytes>6291456-map || count>(bytes-UniformsUtilsMap.size)/UniformsUtilsEntry.size ||
+      uniforms_utils_overlap(map,bytes,out,capacity)!=0) { return 0-1; }
+  let begin=UniformsUtilsMap.size+count*UniformsUtilsEntry.size;
+  let i=0;
+  while(i<count) {
+    let entry=map+UniformsUtilsMap.size+i*UniformsUtilsEntry.size;
+    let key=ux_u32(entry+UniformsUtilsEntry.key);
+    let props=ux_u32(entry+UniformsUtilsEntry.properties);
+    let fields=ux_u32(entry+UniformsUtilsEntry.count);
+    if(key==0 || props<begin || props>bytes || props%8!=0 || fields>(bytes-props)/UniformsUtilsProperty.size) { return 0-1; }
+    let previous=0;
+    while(previous<i) {
+      if(ux_u32(map+UniformsUtilsMap.size+previous*UniformsUtilsEntry.size+UniformsUtilsEntry.key)==key) { return 0-1; }
+      previous=previous+1;
+    }
+    let j=0;
+    while(j<fields) {
+      let property=map+props+j*UniformsUtilsProperty.size;
+      let name=ux_u32(property+UniformsUtilsProperty.key);
+      let kind=ux_u32(property+UniformsUtilsProperty.kind);
+      let data=ux_u32(property+UniformsUtilsProperty.data);
+      let length=ux_u32(property+UniformsUtilsProperty.bytes);
+      if(name==0 || kind>=UniformsUtilsKind.size) { return 0-1; }
+      let width=uniforms_utils_size(kind);
+      if(kind==UniformsUtilsKind.array) { width=length; }
+      if(length!=width || length%8!=0 || (length>0 && (data<begin || data%8!=0 || data>bytes-length))) { return 0-1; }
+      if(kind==UniformsUtilsKind.boolean && data>1) { return 0-1; }
+      if((kind==UniformsUtilsKind.nullValue || kind==UniformsUtilsKind.undefinedValue ||
+          (kind==UniformsUtilsKind.array && length==0)) && data!=0) { return 0-1; }
+      let k=0;
+      while(k<j) {
+        if(ux_u32(map+props+k*UniformsUtilsProperty.size+UniformsUtilsProperty.key)==name) { return 0-1; }
+        k=k+1;
+      }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return count;
+}
+
+native function uniforms_utils_source(inputs:i64,index:i64,single:i64) i64 {
+  if(single!=0) { return inputs; }
+  return ux_u32(inputs+index*4);
+}
+
+native function uniforms_utils_find(map:i64,key:i64) i64 {
+  let count=ux_u32(map+UniformsUtilsMap.count);
+  let i=0;
+  while(i<count) {
+    let entry=map+UniformsUtilsMap.size+i*UniformsUtilsEntry.size;
+    if(ux_u32(entry+UniformsUtilsEntry.key)==key) { return entry; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function uniforms_utils_copy_entry(out:i64,pos:i64,slot:i64,src_map:i64,src:i64,write:i64) i64 {
+  let fields=ux_u32(src+UniformsUtilsEntry.count);
+  let src_props=src_map+ux_u32(src+UniformsUtilsEntry.properties);
+  let cursor=pos+fields*UniformsUtilsProperty.size;
+  if(write!=0) {
+    let key=ux_u32_put(slot+UniformsUtilsEntry.key,ux_u32(src+UniformsUtilsEntry.key));
+    let fields_at=ux_u32_put(slot+UniformsUtilsEntry.properties,pos);
+    let count=ux_u32_put(slot+UniformsUtilsEntry.count,fields);
+    let reserved=ux_u32_put(slot+UniformsUtilsEntry.reserved,0);
+  }
+  let j=0;
+  while(j<fields) {
+    let old=src_props+j*UniformsUtilsProperty.size;
+    let kind=ux_u32(old+UniformsUtilsProperty.kind);
+    let length=ux_u32(old+UniformsUtilsProperty.bytes);
+    let data=ux_u32(old+UniformsUtilsProperty.data);
+    if(kind==UniformsUtilsKind.renderTexture) { kind=UniformsUtilsKind.nullValue; data=0; }
+    if(write!=0) {
+      let field=out+pos+j*UniformsUtilsProperty.size;
+      let key=ux_u32_put(field+UniformsUtilsProperty.key,ux_u32(old+UniformsUtilsProperty.key));
+      let tag=ux_u32_put(field+UniformsUtilsProperty.kind,kind);
+      let bytes=ux_u32_put(field+UniformsUtilsProperty.bytes,length);
+      if(length>0) {
+        let copied=uxe_copy_record(out+cursor,src_map+data,length);
+        data=cursor;
+      }
+      let value=ux_u32_put(field+UniformsUtilsProperty.data,data);
+    }
+    cursor=cursor+length;
+    j=j+1;
+  }
+  return cursor;
+}
+
+// Visit a key at its first occurrence but use the entry from the last map.
+// The sizing pass leaves destination bytes untouched, including on refusal.
+native function uniforms_utils_collect(out:i64,inputs:i64,maps:i64,single:i64,written:i64) i64 {
+  let write=written>=0;
+  let cursor=0;
+  if(write!=0) { cursor=UniformsUtilsMap.size+written*UniformsUtilsEntry.size; }
+  let output=0;
+  let m=0;
+  while(m<maps) {
+    let src=uniforms_utils_source(inputs,m,single);
+    let count=ux_u32(src+UniformsUtilsMap.count);
+    let i=0;
+    while(i<count) {
+      let entry=src+UniformsUtilsMap.size+i*UniformsUtilsEntry.size;
+      let key=ux_u32(entry+UniformsUtilsEntry.key);
+      let first=m;
+      let last=m;
+      let j=0;
+      while(j<maps) {
+        let candidate=uniforms_utils_source(inputs,j,single);
+        if(uniforms_utils_find(candidate,key)>=0) {
+          if(j<first) { first=j; }
+          if(j>last) { last=j; }
+        }
+        j=j+1;
+      }
+      if(first==m) {
+        let winner=uniforms_utils_source(inputs,last,single);
+        let value=uniforms_utils_find(winner,key);
+        let slot=out+UniformsUtilsMap.size+output*UniformsUtilsEntry.size;
+        cursor=uniforms_utils_copy_entry(out,cursor,slot,winner,value,write);
+        output=output+1;
+        if(cursor>6291456 || output>(6291456-UniformsUtilsMap.size)/UniformsUtilsEntry.size) { return 0-1; }
+      }
+      i=i+1;
+    }
+    m=m+1;
+  }
+  if(write!=0) { return cursor; }
+  return output*6291457+cursor;
+}
+
+native function uniforms_utils_apply(out:i64,capacity:i64,inputs:i64,maps:i64,single:i64) i64 {
+  if(out<0 || out%8!=0 || out>6291456 || capacity<UniformsUtilsMap.size || capacity>6291456-out) { return 0-1; }
+  if(single==0 && (inputs<0 || inputs%4!=0 || inputs>6291456 || maps<0 || maps>(6291456-inputs)/4 ||
+      uniforms_utils_overlap(out,capacity,inputs,maps*4)!=0)) { return 0-1; }
+  let m=0;
+  while(m<maps) {
+    let map=uniforms_utils_source(inputs,m,single);
+    if(uniforms_utils_validate(map,out,capacity)<0) { return 0-1; }
+    m=m+1;
+  }
+  let packed=uniforms_utils_collect(out,inputs,maps,single,0-1);
+  if(packed<0) { return packed; }
+  let count=packed/6291457;
+  let bytes=packed%6291457+UniformsUtilsMap.size+count*UniformsUtilsEntry.size;
+  if(bytes>capacity) { return 0-2; }
+  let used=uniforms_utils_collect(out,inputs,maps,single,count);
+  let saved=ux_u32_put(out+UniformsUtilsMap.count,count);
+  let size=ux_u32_put(out+UniformsUtilsMap.bytes,used);
+  return out;
+}
+
+native function UniformsUtils_clone(out:i64,capacity:i64,map:i64) i64 {
+  return uniforms_utils_apply(out,capacity,map,1,1);
+}
+
+native function UniformsUtils_merge(out:i64,capacity:i64,maps:i64,count:i64) i64 {
+  return uniforms_utils_apply(out,capacity,maps,count,0);
+}

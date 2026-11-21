@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AxesHelper, BufferGeometryLoader, Color, GridHelper, PolarGridHelper, REVISION }
+  from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const maxError = (a, b) => a.length === b.length
+  ? a.reduce((error, value, i) => Math.max(error, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+
+function compare(module, kind, mutate) {
+  const api = new WebAssembly.Instance(module).exports;
+  const base = Number(api.uxe_helper_grid_json(0n, 0n, 0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 90000);
+  const uuid = "grid-" + kind;
+  memory.set(encoder.encode(uuid), 984);
+  const run = (mode, length = 0) => Number(api.uxe_helper_grid_json(BigInt(mode), BigInt(kind),
+    BigInt(length), mutate));
+  const send = obj => {
+    const bytes = encoder.encode(JSON.stringify(obj));
+    memory.set(bytes, 10000);
+    return bytes.length;
+  };
+  const loader = new BufferGeometryLoader();
+  const decode = n => {
+    if (n <= 0) throw new Error("native JSON status " + n + " kind " + kind);
+    const json = JSON.parse(decoder.decode(memory.subarray(40000, 40000 + n)));
+    if (json.type !== "BufferGeometry" || json.uuid !== uuid) throw new Error("geometry identity");
+    return loader.parse(json);
+  };
+
+  const first = new Color().setRGB(0.25, 0, 0), second = new Color().setRGB(0.5, 0, 0);
+  const helper = kind === 1 ? new GridHelper(8, 2, first, second)
+    : kind === 2 ? new PolarGridHelper(4, 4, 1, 4, first, second) : new AxesHelper(3);
+  helper.geometry.uuid = uuid;
+  const doc = helper.toJSON();
+  const geometry = doc.geometries[0];
+  const generated = decode(run(1));
+  const imported = decode(run(2, send(geometry)));
+  const clone = decode(run(3));
+
+  const original = helper.geometry.attributes;
+  const gen = generated.attributes, imp = imported.attributes;
+  const originalErrors = [
+    maxError(gen.position.array, original.position.array),
+    maxError(gen.color.array, original.color.array),
+    maxError(imp.position.array, original.position.array),
+    maxError(imp.color.array, original.color.array),
+  ];
+  const referenceClone = helper.clone();
+  helper.geometry.attributes.position.setX(0, 17);
+  if (kind === 3) helper.setColors(new Color().setRGB(0.75, 0, 0), new Color(0), new Color(0));
+  const changed = clone.attributes;
+  const referenceChanged = referenceClone.geometry.attributes;
+  const missing = run(4, send({ type: "BufferGeometry", data: { attributes: {} } }));
+  const wrongType = {
+    ...geometry, data: { attributes: { ...geometry.data.attributes,
+      color: { ...geometry.data.attributes.color, type: "Uint16Array",
+        array: geometry.data.attributes.color.array.map(value => Math.round(value)) } } }
+  };
+  const wrong = run(4, send(wrongType));
+  const excluded = ["size", "divisions", "radius", "sectors", "rings"];
+  const noParameters = Number(excluded.every(key => !(key in doc.object) && !(key in geometry)));
+  const material = doc.materials[0];
+  const materialFlags = Number(material.type === "LineBasicMaterial" &&
+    material.vertexColors === true && material.toneMapped === false);
+  const sample = kind === 1 ? gen.position.getX(0) : kind === 2 ? gen.position.getZ(1) : gen.position.getX(1);
+  return [gen.position.count, sample, gen.color.getX(0), ...originalErrors,
+    maxError(changed.position.array, referenceChanged.position.array),
+    maxError(changed.color.array, referenceChanged.color.array),
+    changed.position.getX(0), changed.color.getX(0),
+    Number(missing === 1 && wrong === 1), noParameters, materialFlags];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const values = [1, 2, 3].flatMap(kind => compare(module, kind, BigInt(query.get("mutate"))));
+  result.textContent = JSON.stringify(values);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

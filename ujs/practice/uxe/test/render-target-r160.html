@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="render-target">pending</pre>
+<script type="module">
+import { NearestFilter, REVISION, WebGLRenderer, WebGLRenderTarget } from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const result = document.querySelector("#render-target");
+function openContext() {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 8;
+  const gl = canvas.getContext("webgl2", { alpha: true, antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error("WebGL2 unavailable");
+  return { canvas, gl };
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const request = new XMLHttpRequest();
+  request.open("GET", query.get("wasm"), false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes = Uint8Array.from(request.responseText, value => value.charCodeAt(0) & 255);
+  const context = openContext();
+  let instance;
+  const submit = createGpuSubmit(context.gl, () => instance.exports.memory, () => 1, createGpuTargets(context.gl));
+  instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { uxe_gpu_v1: { host_gpu_submit: submit } });
+  const status = Number(instance.exports.uxe_render_target(BigInt(query.get("mutate"))));
+  const actual = new Uint32Array(instance.exports.memory.buffer, 2097152 + 4096, 40);
+
+  const reference = openContext();
+  const renderer = new WebGLRenderer({ canvas: reference.canvas, context: reference.gl });
+  const source = new WebGLRenderTarget(4, 3, { minFilter: NearestFilter, magFilter: NearestFilter });
+  let resizeEvents = 0;
+  source.addEventListener("dispose", () => resizeEvents++);
+  source.viewport.set(1, 0, 3, 3);
+  source.scissor.set(1, 1, 2, 1);
+  source.scissorTest = true;
+  function pixels(target, color) {
+    renderer.setRenderTarget(target);
+    if (color !== undefined) {
+      renderer.setClearColor(color, 1);
+      renderer.clear();
+    }
+    const data = new Uint8Array(target.width * target.height * 4);
+    renderer.readRenderTargetPixels(target, 0, 0, target.width, target.height, data);
+    return new Uint32Array(data.buffer);
+  }
+  const before = pixels(source, 0xff0000);
+  const clone = source.clone();
+  let cloneDisposals = 0;
+  clone.addEventListener("dispose", () => cloneDisposals++);
+  const empty = pixels(clone);
+  const expected = [before[5], before[0], empty[5], clone.scissor.z, clone.viewport.z, Number(clone.depthBuffer)];
+  source.setSize(6, 2);
+  const resized = pixels(source, 0x00ff00);
+  expected.push(resized[11], source.viewport.z, clone.width);
+  const blue = pixels(clone, 0x0000ff);
+  clone.setSize(4, 3);
+  expected.push(blue[0], blue[5], pixels(clone)[5], clone.viewport.z, Number(clone.scissorTest));
+  const separate = Number(clone.texture !== source.texture && clone.texture.image !== source.texture.image);
+  const sameSizeEvents = cloneDisposals;
+  clone.copy(source);
+  const copied = [clone.width, clone.viewport.z, Number(clone.scissorTest), Number(clone.depthBuffer),
+    Number(clone.texture !== source.texture && clone.texture.image !== source.texture.image), cloneDisposals];
+  renderer.setRenderTarget(null);
+  clone.dispose();
+  source.dispose();
+  renderer.dispose();
+  expected.push(separate, resizeEvents, sameSizeEvents, cloneDisposals, ...copied);
+  result.textContent = JSON.stringify([status, ...actual, ...expected]);
+} catch (error) {
+  result.textContent = "error:" + String(error);
+}
+</script>

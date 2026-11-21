@@ -1,0 +1,122 @@
+let arena=0;
+let target_arena=8192;
+let source=16384;
+let copy=16896;
+let clone=17408;
+let restored=17920;
+let snapshot=18432;
+let packet=19000;
+if(op==0) {
+  if(a==0) { return ux_span(0,20000); }
+  if(a==1) { return snapshot; }
+  if(a==2) { return LightJson.size; }
+  return 0-1;
+}
+if(op==1) {
+  let src_arena=Object3D_initArena(arena,16);
+  let dst_arena=Object3D_initArena(target_arena,16);
+  let clear=ux_u32_put(source+Light.kind,0);
+  let clear_copy=ux_u32_put(copy+Light.kind,0);
+  let clear_clone=ux_u32_put(clone+Light.kind,0);
+  let clear_restored=ux_u32_put(restored+Light.kind,0);
+  let light=0-1;
+  if(a==2) { light=AmbientLight_new(source,arena,16711680,1.5); }
+  if(a==3) { light=HemisphereLight_new(source,arena,65280,2.0); }
+  if(a==4) { light=DirectionalLight_new(source,arena,16777215,3.0); }
+  if(a==5) { light=PointLight_new(source,arena,16777215,2.0); }
+  if(a==6) { light=SpotLight_new(source,arena,16777215,4.0); }
+  if(a==7) { light=RectAreaLight_new(source,arena,16777215,5.0); }
+  if(a==8) { light=LightProbe_new(source,arena,0,6.0); }
+  if(light<0) { return light; }
+  if(a==3) { let ground=Color_setHex(source+Light.groundColor,255,1); }
+  if(a==4) {
+    let bias=ux_f64_put(source+Light.shadow.bias,0.125);
+    let width=ux_f64_put(source+Light.shadow.mapWidth,128.0);
+  }
+  if(a==5) {
+    let decay=ux_f64_put(source+Light.decay,1.0);
+    let distance=ux_f64_put(source+Light.distance,20.0);
+  }
+  if(a==6) {
+    let angle=ux_f64_put(source+Light.angle,0.5);
+    let penumbra=ux_f64_put(source+Light.penumbra,0.25);
+    let distance=ux_f64_put(source+Light.distance,42.0);
+  }
+  if(a==7) {
+    let width=ux_f64_put(source+Light.width,4.0);
+    let height=ux_f64_put(source+Light.height,5.0);
+  }
+  if(a==8) { let coeff=LightProbe_setCoefficient(source,8,1.0,2.0,3.0); }
+  let root=Light_object(source);
+  let address=Object3D_address(arena,root);
+  let x=ux_f64_put(ux_u32(address+Object3D.position),3.0);
+  let visible=ux_u32_put(address+Object3D.visible,0);
+  let layer=ux_u32_put(address+Object3D.layerMask,8);
+  let child=Object3D_create(arena);
+  let added=Object3D_add(arena,root,child);
+  let target=ux_u32(source+Light.target);
+  if(target!=0) {
+    let at=Object3D_address(arena,target);
+    let y=ux_f64_put(ux_u32(at+Object3D.position)+8,7.0);
+  }
+  return added>0;
+}
+if(op==2) {
+  let kind=ux_u32(source+Light.kind);
+  if(light_new(copy,target_arena,kind,0,1.0)<0) { return 0-1; }
+  if(Light_copy(copy,source,1)<0 || Light_clone(clone,target_arena,source,1)<0) { return 0-2; }
+  return 1;
+}
+if(op==3) {
+  if(a<0 || a>3) { return 0-1; }
+  return Light_toJSON(snapshot,source+a*512);
+}
+if(op==4) {
+  let value=Light_fromJSON(restored,target_arena,snapshot);
+  if(value<0 || Light_object(restored)<=0 || ux_u32(restored+Light.kind)!=ux_u32(source+Light.kind)) { return 0-1; }
+  if((ux_u32(source+Light.target)==0)!=(ux_u32(restored+Light.target)==0)) { return 0-2; }
+  if(b!=0) { let corrupt=ux_f64_put(restored+Light.intensity,99.0); }
+  return 1;
+}
+if(op==5) {
+  if(a!=1 && a!=2) { return 0-1; }
+  let light=source+a*512;
+  let root=Object3D_address(target_arena,Light_object(light));
+  let address=Object3D_address(arena,Light_object(source));
+  if(root<0 || address<0) { return 0-1; }
+  let child=ux_u32(root+Object3D.firstChild);
+  if(Object3D_address(target_arena,child)<0 ||
+      Object3D_address(target_arena,child)==Object3D_address(arena,ux_u32(address+Object3D.firstChild)) ||
+      ux_f64(ux_u32(root+Object3D.position))!=3.0 || ux_u32(root+Object3D.visible)!=0 ||
+      ux_u32(root+Object3D.layerMask)!=8) { return 0-1; }
+  let target=ux_u32(source+Light.target);
+  let other=ux_u32(light+Light.target);
+  if(target==0) { return other==0; }
+  let src_target=Object3D_address(arena,target);
+  let dst_target=Object3D_address(target_arena,other);
+  if(src_target<0 || dst_target<0 || src_target==dst_target) { return 0-2; }
+  let before=ux_f64(ux_u32(dst_target+Object3D.position)+8);
+  let y=ux_f64_put(ux_u32(dst_target+Object3D.position)+8,11.0);
+  return before==7.0 && ux_f64(ux_u32(src_target+Object3D.position)+8)==7.0;
+}
+if(op==6) {
+  let ready=GpuPacket_begin(packet,48,1);
+  let has_shadow=light_profile(ux_u32(restored+Light.kind),2)!=0;
+  if(has_shadow!=0) {
+    let maps=Light_setShadowTargets(restored,7,9);
+    if(maps<0 || Light_release(restored)>=0 || Light_dispose(restored,packet,36)>=0 ||
+        ux_u32(packet+GpuPacket.commands)!=0 || ux_u32(restored+Light.shadowMap)!=7) { return 0-1; }
+  }
+  if(Light_dispose(restored,packet,48)<0 || Light_dispose(restored,packet,48)<0 ||
+      ux_u32(packet+GpuPacket.commands)!=has_shadow*2) { return 0-2; }
+  if(has_shadow!=0 && (ux_u32(packet+32)!=7 || ux_u32(packet+44)!=9)) { return 0-3; }
+  let handle=Light_object(restored);
+  let target=ux_u32(restored+Light.target);
+  if(Light_release(restored)<0 || Object3D_address(target_arena,handle)>=0 ||
+      (target!=0 && Object3D_address(target_arena,target)>=0) || Light_release(restored)>=0) { return 0-4; }
+  let original=Light_object(source);
+  if(Light_release(source)<0 || Light_release(copy)<0 || Light_release(clone)<0 ||
+      Object3D_address(arena,original)>=0) { return 0-5; }
+  return 1;
+}
+return 0-1;

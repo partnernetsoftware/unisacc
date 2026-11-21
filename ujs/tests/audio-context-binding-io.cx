@@ -1,0 +1,46 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char cwd[420],dir[256],abi[320],probe[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-audio-context-binding-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/audio-context-binding-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char imports[]="import host_context_identity from \"uxe_audio_context_binding_v1\"(i64,i64) i64;\n"
+        "export uxe_context_binding(op:i64,handle:i64) i64 version 1;\n";
+    const char handler[]="if(op==0){return AudioContext_getContext(0);}\nreturn AudioContext_setContext(0,handle);\n";
+    const double gold[]={1,1,1,1,1,0,1,1,48000,48000,-2,1,0,1,1,1,1,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=length<=0 || length>=sizeof url || sy_write_file(abi,imports,sizeof imports-1,0600) ||
+        sy_write_file(probe,handler,sizeof handler-1,0600);
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/audio-context-binding.ujs",probe,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) printf("AUDIO_CONTEXT_BINDING compile_rc=%d %s\n",rc,out?out:"");
+        failed=rc!=0;
+        mm_free(out);
+        out=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("AUDIO_CONTEXT_BINDING case=%d actual=%.0f gold=%.0f\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&out,&bytes)) failed++;
+    mm_free(out);
+    printf("G_IO AudioContext binding cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { REVISION, TorusKnotGeometry } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const uuid = "knot-8", name = 'knot "A"';
+const digest = bytes => bytes.reduce((hash, value) => (hash * 131 + value) % 16777213, 0);
+
+function surface(knot) {
+  const p = knot.parameters;
+  const { position, normal, uv } = knot.attributes;
+  const columns = Math.floor(p.radialSegments) + 1;
+  const opposite = (columns - 1) / 2;
+  const lastRow = position.count - columns;
+  const last = position.count - 1;
+  const point = i => [position.getX(i), position.getY(i), position.getZ(i)];
+  const average = (a, b) => a.map((n, i) => (n + b[i]) / 2);
+  const first = point(0);
+  const center = average(first, point(opposite));
+  const end = average(point(lastRow), point(lastRow + opposite));
+  const distance = first.reduce((total, n, i) => total + (n - center[i]) ** 2, 0);
+  const unit = normal.getX(0) ** 2 + normal.getY(0) ** 2 + normal.getZ(0) ** 2;
+  return [position.count, knot.index.count, p.radius, p.tube, p.tubularSegments, p.radialSegments, p.p, p.q,
+    center[0], center[1], end[0], end[1], distance, unit, uv.getX(last), uv.getY(last), knot.index.getX(0), end[2]];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const params = new URLSearchParams(location.search);
+  const wasm = await (await fetch("file://" + params.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(wasm);
+  const api = instance.exports;
+  const base = Number(api.uxe_torus_knot_public(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 100000);
+  for (const [address, text] of [[6000, uuid], [6016, name], [5760, '{"p":"bad"}'], [5800, "{}"],
+    [5824, '{"p":0}'], [5840, '{"radius":0}'], [5860, '{"radialSegments":0.5}']]) {
+    memory.set(encoder.encode(text), address);
+  }
+  const length = Number(api.uxe_torus_knot_public(1n, BigInt(params.get("mutate"))));
+  if (length <= 0) throw new Error("native torus knot status " + length);
+  const raw = memory.subarray(4096, 4096 + length);
+  const parsed = JSON.parse(decoder.decode(raw));
+  if (parsed.type !== "TorusKnotGeometry" || parsed.name !== name || parsed.uuid !== uuid || "data" in parsed) {
+    throw new Error("torus knot parameter envelope");
+  }
+  const actual = new Float64Array(api.memory.buffer, base + 6160, 33);
+
+  const reference = new TorusKnotGeometry(2, 0.5, 4.5, 4.5, 1.5, 0.5);
+  reference.uuid = uuid;
+  reference.name = name;
+  const doc = reference.toJSON();
+  const round = TorusKnotGeometry.fromJSON(doc);
+  const restored = surface(round);
+  const defaults = TorusKnotGeometry.fromJSON({});
+  const targetTrace = [], trace = [];
+  let correctTarget = true;
+  function listenerB() { trace.push(82); }
+  reference.addEventListener("dispose", function(event) {
+    correctTarget &&= event.target === reference && this === reference;
+    trace.push(41);
+    reference.removeEventListener("dispose", listenerB);
+  });
+  reference.addEventListener("dispose", listenerB);
+  round.addEventListener("dispose", () => targetTrace.push(61));
+  const copied = round.copy(reference);
+  const clone = reference.clone();
+  const a = reference.attributes.position, b = copied.attributes.position, c = clone.attributes.position;
+  const independent = Number(copied === round && a.array !== b.array && a.array !== c.array &&
+    b.array !== c.array && copied.parameters !== reference.parameters && clone.parameters !== reference.parameters);
+  reference.parameters.p = 5;
+  reference.parameters.q = 7;
+  a.setX(0, 9);
+  reference.dispose();
+  const firstEvents = trace.splice(0);
+  reference.dispose();
+  const nextEvent = trace.shift();
+  copied.dispose();
+  clone.dispose();
+  result.textContent = JSON.stringify([digest(raw), ...actual,
+    digest(encoder.encode(JSON.stringify(doc))), ...restored,
+    defaults.attributes.position.count, defaults.index.count, independent,
+    copied.parameters.p, clone.parameters.q, surface(copied)[12], surface(clone)[8],
+    firstEvents[0] * 100 + firstEvents[1], Number(correctTarget), nextEvent,
+    targetTrace.shift(), trace.length]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

@@ -1,0 +1,170 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+#define DRIVER "ujs/tests/geometry-cylinder-cone-public.cx"
+
+static const char *const sources[]={
+    FIX "geometry-cylinder-cone-public-base-layout.ujs",
+    BASE "object-layouts.ujs",BASE "f64-math.ujs",BASE "datautils.ujs",BASE "bufferattribute.ujs",
+    BASE "buffergeometry.ujs",BASE "eventdispatcher.ujs",BASE "geometry-buffers.ujs",
+    BASE "cylindergeometry.ujs",BASE "geometry-buffer-adapter.ujs",BASE "geometry-lifecycle.ujs",
+    BASE "geometry-public-layout.ujs",BASE "geometry-dispose.ujs",BASE "geometry-primitive-class.ujs",
+    BASE "geometry-radial-class.ujs",
+    BASE "json-read.ujs",BASE "json-bytes.ujs",BASE "object-json-tokens.ujs",BASE "geometry-parametric-json.ujs",
+    BASE "geometry-primitive-json.ujs",BASE "geometry-radial-parameter-json.ujs",
+    FIX "geometry-cylinder-cone-public-base.ujs",DRIVER,0,
+};
+
+static int compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("RADIAL_PUBLIC %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int select_layouts(const char *file) {
+    const char *names[]={"struct EventDispatcher {","struct BufferAttribute {","struct BufferGeometry {"};
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&bytes,20000)) return 1;
+    const char *text=(const char *)raw;
+    char selected[1536];
+    int used=0,failed=0;
+    for(int i=0;i<3;i++) {
+        const long start=tx_find(text,bytes,names[i],tx_len(names[i],50));
+        const long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+        if(end<0) { failed=1; break; }
+        const int written=tx_snprintf(selected+used,sizeof selected-used,"%.*s",(int)end+3,text+start);
+        if(written<0 || written>=(int)sizeof selected-used) { failed=1; break; }
+        used+=written;
+    }
+    mm_free(raw);
+    return failed || sy_write_file(file,selected,used,0600);
+}
+
+static int base_wasm(const char *wasm,int prepare,int check) {
+    const char *cache=sy_env("UXE_RADIAL_GEOMETRY_WASM_CACHE");
+    if(!cache || !cache[0]) {
+        printf("RADIAL_PUBLIC cache=missing env=UXE_RADIAL_GEOMETRY_WASM_CACHE\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    const int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<0 || n>=(int)sizeof record) return 2;
+    const int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("RADIAL_PUBLIC cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("RADIAL_PUBLIC cache=missing key=%s\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("RADIAL_PUBLIC cache=refused key=%s rc=%d\n",key,rc);
+        return 1;
+    }
+    char layouts[360];
+    const int size=tx_snprintf(layouts,sizeof layouts,"%s-layout.ujs",wasm);
+    if(size<0 || size>=(int)sizeof layouts || select_layouts(layouts)) return 1;
+    char *args[30]={"./ujs/ujs2wasm.com"};
+    int i=0;
+    while(sources[i] && !tx_eqz(sources[i],DRIVER)) {
+        args[i+1]=tx_eqz(sources[i],BASE "object-layouts.ujs")?layouts:(char *)sources[i];
+        i++;
+    }
+    args[i+1]="-o";
+    args[i+2]=(char *)wasm;
+    if(compile(args,"base_prepare",50)) return 1;
+    if(check) {
+        const int mismatch=wasm_test_cache_verify(wasm,sha);
+        printf("RADIAL_PUBLIC cache=rebuilt sha=%s failed=%d\n",sha,mismatch!=0);
+        return mismatch;
+    }
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+static unsigned json_hash(const char *json) {
+    unsigned hash=0;
+    for(int i=0;json[i];i++) hash=(hash*131u+(unsigned char)json[i])%16777213u;
+    return hash;
+}
+
+static int expected(double *gold) {
+    const char cylinder_json[]="{\"metadata\":{\"version\":4.6,\"type\":\"BufferGeometry\","
+        "\"generator\":\"BufferGeometry.toJSON\"},\"uuid\":\"mesh-2\",\"type\":\"CylinderGeometry\","
+        "\"name\":\"deck \\\"A\\\"\",\"radiusTop\":1.5,\"radiusBottom\":2.25,\"height\":4,"
+        "\"radialSegments\":4.5,\"heightSegments\":2.5,\"openEnded\":false,\"thetaStart\":0,\"thetaLength\":1.5}";
+    const char cone_json[]="{\"metadata\":{\"version\":4.6,\"type\":\"BufferGeometry\","
+        "\"generator\":\"BufferGeometry.toJSON\"},\"uuid\":\"mesh-2\",\"type\":\"ConeGeometry\","
+        "\"name\":\"deck \\\"A\\\"\",\"radius\":1.75,\"height\":3,\"radialSegments\":4.5,"
+        "\"heightSegments\":1.5,\"openEnded\":false,\"thetaStart\":0,\"thetaLength\":1.5}";
+    const double cylinder[]={1,1.5,4.5,1.5,0,2,33,72,1,5,3,4182,41,61,0,1,
+        json_hash(cylinder_json),33,72,1.5,3,0,1.5,0,1.5,15,48,1,1,1, 0,48,0,48,12,1,60,12,2};
+    const double cone[]={1,1.75,4.5,0,0,1.5,19,36,1,5,2,4182,41,61,0,1,
+        json_hash(cone_json),19,36,1.75,2,0,1.5,0,1.5,10,24,1,1,1, 0,24,0,24,12,2};
+    const double native[]={-1,-1,-1,-2,77,-1,-1};
+    int at=0;
+    for(int i=0;i<2;i++) {
+        const double *shape=i==0?cylinder:cone;
+        const int count=i==0?sizeof cylinder/sizeof cylinder[0]:sizeof cone/sizeof cone[0];
+        for(int side=0;side<2;side++) {
+            for(int n=0;n<count;n++) gold[at++]=shape[n];
+        }
+        for(int n=0;n<(int)(sizeof native/sizeof native[0]);n++) gold[at++]=native[n];
+    }
+    return at;
+}
+
+static int browser_check(const char *dir,const char *wasm,int mutate) {
+    char cwd[460],url[840],probe[320];
+    if(sy_cwd(cwd,sizeof cwd)) return 1;
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    const int n=tx_snprintf(url,sizeof url,"file://%s/" FIX "geometry-cylinder-cone-public-r160.html?dir=%s&mutate=%d",
+        cwd,dir,mutate);
+    char *args[]={"./ujs/ujs2wasm.com",FIX "geometry-cylinder-cone-public-probe.ujs","-o",probe,0};
+    enum { count=164 };
+    double gold[count],actual[count]={0};
+    if(expected(gold)!=count) return 1;
+    int failed=n<0 || n>=(int)sizeof url || base_wasm(wasm,0,0) ||
+        compile(args,"probe",6) || r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        const double delta=actual[i]-gold[i];
+        if(!(delta>=-1e-9 && delta<=1e-9)) {
+            printf("RADIAL_PUBLIC case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+            failed=1;
+        }
+    }
+    printf("G_STRUCT CylinderGeometry ConeGeometry public cases=%d failed=%d\n",count,failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    int mutate=0;
+    if(argc==2 && tx_eqz(argv[1],"--mutate")) mutate=1;
+    if(argc==2 && tx_eqz(argv[1],"--mutate-cone")) mutate=2;
+    if(argc!=1 && !check && !mutate && !(prepare && argc==2)) return 2;
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-cylinder-cone-public-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    int rc=prepare?base_wasm(wasm,1,check):browser_check(dir,wasm,mutate);
+    if(sy_remove_all(dir)) rc=1;
+    if(prepare) printf("RADIAL_PUBLIC prepare check=%d failed=%d\n",check,rc!=0);
+    return rc;
+}

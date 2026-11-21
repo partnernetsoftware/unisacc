@@ -1,0 +1,183 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+import {createGpuSubmit} from "../base/gpu-host-abi.js";
+import {createDepthTextureHost} from "../base/depth-texture-host.js";
+
+const output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const formats=[
+  [undefined,undefined],
+  [THREE.DepthFormat,THREE.UnsignedShortType],
+  [THREE.DepthFormat,THREE.FloatType],
+  [THREE.DepthStencilFormat,undefined],
+];
+const halves=[
+  -1,-1,-.5, 0,-1,-.5, -.5,1,-.5,
+  0,-1,.5, 1,-1,.5, .5,1,.5,
+];
+const behind=[-1,-1,.25, 3,-1,.25, -1,3,.25];
+const drawVertex="void main(){gl_Position=vec4(position,1.0);}";
+const drawFragment="void main(){gl_FragColor=vec4(1.0);}";
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=8;
+  const gl=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  return {canvas,gl};
+}
+function sampleReference(renderer,scene,camera,target,x,y) {
+  const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),new THREE.ShaderMaterial({
+    depthTest:false,depthWrite:false, uniforms:{
+      sourceDepth:{value:target.depthTexture},coordinate:{value:new THREE.Vector2((x+.5)/target.width,(y+.5)/target.height)},
+    },
+    vertexShader:"void main(){gl_Position=vec4(position.xy,0.0,1.0);}",
+    fragmentShader:"uniform sampler2D sourceDepth; uniform vec2 coordinate; void main(){gl_FragColor=vec4(texture2D(sourceDepth,coordinate).r,0.0,0.0,1.0);}",
+  }));
+  const color=new THREE.WebGLRenderTarget(1,1);
+  const pixel=new Uint8Array(4);
+  quad.frustumCulled=false;
+  scene.add(quad);
+  renderer.setRenderTarget(color);
+  renderer.render(scene,camera);
+  renderer.readRenderTargetPixels(color,0,0,1,1,pixel);
+  scene.remove(quad);
+  renderer.setRenderTarget(null);
+  quad.geometry.dispose();
+  quad.material.dispose();
+  color.dispose();
+  return pixel[0];
+}
+function reference(renderer,gl,format,type) {
+  const depth=new THREE.DepthTexture(2,1,type,undefined,undefined,undefined,undefined,undefined,undefined,format);
+  const stencil=depth.format===THREE.DepthStencilFormat;
+  const target=new THREE.WebGLRenderTarget(2,1,{depthTexture:depth,stencilBuffer:stencil});
+  const scene=new THREE.Scene(),camera=new THREE.Camera();
+  function draw(coords) {
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute("position",new THREE.Float32BufferAttribute(coords,3));
+    const triangle=new THREE.Mesh(geometry,new THREE.ShaderMaterial({vertexShader:drawVertex,fragmentShader:drawFragment}));
+    triangle.frustumCulled=false;
+    renderer.setRenderTarget(target);
+    scene.add(triangle);
+    renderer.render(scene,camera);
+    scene.remove(triangle);
+    geometry.dispose();
+    triangle.material.dispose();
+  }
+  const config=[depth.image.width,depth.image.height,depth.format,depth.type,
+    depth.magFilter,depth.minFilter,Number(depth.flipY),Number(depth.generateMipmaps),Number(depth.compareFunction===null)];
+  renderer.setRenderTarget(target);
+  const bits=[gl.getParameter(gl.DEPTH_BITS),gl.getParameter(gl.STENCIL_BITS)];
+  gl.depthMask(true);
+  gl.clearDepth(1);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  draw(halves);
+  const sample=(x,y=0)=>sampleReference(renderer,scene,camera,target,x,y);
+  const initial=[sample(0),sample(1)];
+  draw(behind);
+  const occluded=[sample(0),sample(1)];
+  target.setSize(2,1);
+  const same=sample(1);
+  target.setSize(3,2);
+  renderer.setRenderTarget(target);
+  gl.depthMask(true);
+  gl.clearDepth(.125);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+  const resized=sample(2,1);
+  const dimensions=[depth.image.width,depth.image.height];
+  let disposed=0;
+  depth.addEventListener("dispose",event=>{ disposed+=Number(event.target===depth); });
+  depth.dispose();
+  const events=disposed;
+  target.dispose();
+  return [...config,...bits,...initial,...occluded,same,...dimensions,resized,events];
+}
+
+async function product(gl) {
+  let instance;
+  const host=createDepthTextureHost(gl,()=>1);
+  const submit=createGpuSubmit(gl,()=>instance.exports.memory,()=>1);
+  try {
+    const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+    ({instance}=await WebAssembly.instantiate(binary,{
+      uxe_depth_texture_v1:host.imports,uxe_gpu_v1:{host_gpu_submit:submit},
+    }));
+    if(instance.exports.uxe_abi_version()!==1) throw new Error("depth texture ABI");
+    const call=(op,which=0,a=0,b=0)=>Number(instance.exports.uxe_depth_probe(BigInt(op),BigInt(which),BigInt(a),BigInt(b)));
+    const memory=new Uint8Array(instance.exports.memory.buffer,call(0),16384);
+    const view=new DataView(memory.buffer,memory.byteOffset,memory.byteLength);
+    const text=new TextEncoder();
+    const put=(at,value)=>{const raw=text.encode(value);memory.set(raw,at);return raw.length;};
+    view.setUint32(704,768,true);
+    view.setUint32(708,put(768,"attribute vec3 a_position;void main(){gl_Position=vec4(a_position,1.0);}"),true);
+    view.setUint32(712,1024,true);
+    view.setUint32(716,put(1024,"precision highp float;void main(){gl_FragColor=vec4(1.0);}"),true);
+    function vertices(at,coords) {
+      for(let i=0;i<coords.length;i+=3) {
+        for(let j=0;j<3;j++) view.setFloat32(at+4*j,coords[i+j],true);
+        for(let j=3;j<7;j++) view.setFloat32(at+4*j,1,true);
+        at+=28;
+      }
+    }
+    vertices(1280,halves);
+    vertices(1504,behind);
+    const results=[];
+    for(let which=0;which<formats.length;which++) {
+      const at=128+64*which;
+      if(call(1,which)!==at || call(8)!==1 || call(2,which)!==0) throw new Error("depth attachment draw "+which);
+      const config=Array.from({length:9},(_,field)=>call(6,which,field));
+      const bits=[gl.getParameter(gl.DEPTH_BITS),gl.getParameter(gl.STENCIL_BITS)];
+      const attachment=which===3?gl.DEPTH_STENCIL_ATTACHMENT:gl.DEPTH_ATTACHMENT;
+      const frame=()=>gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING);
+      const texture=()=>gl.getFramebufferAttachmentParameter(gl.DRAW_FRAMEBUFFER,attachment,gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+      const beforeFrame=frame(),beforeTexture=texture();
+      const swap=query.get("mutate")==="1" && which===0;
+      const sample=(x,y=0)=>call(4,which,x,y);
+      const initial=[sample(swap?1:0),sample(swap?0:1)];
+      if(call(3,which)!==0) throw new Error("depth occlusion draw");
+      const occluded=[sample(0),sample(1)];
+      if(call(5,which,2,1)!==at) throw new Error("same depth size");
+      const same=sample(1);
+      const invalid=call(5,which,0,1);
+      const outside=sample(2);
+      const rejected=Array.from({length:5},(_,field)=>call(10,which,field));
+      if(call(5,which,3,2)!==at || call(9,which)!==0) throw new Error("resized depth attachment");
+      const afterFrame=frame(),afterTexture=texture();
+      const replaced=Number(beforeFrame!==afterFrame && beforeTexture!==afterTexture &&
+        gl.isFramebuffer(afterFrame) && gl.isTexture(afterTexture) &&
+        !gl.isFramebuffer(beforeFrame) && !gl.isTexture(beforeTexture));
+      const resized=sample(2,1);
+      const dims=[call(6,which,0),call(6,which,1)];
+      view.setUint32(640,777,true);
+      const capacity=call(7,which,1),sentinel=view.getUint32(640,true);
+      const stillLive=sample(2,1);
+      const dispose=call(7,which,2);
+      const target=Number(view.getUint32(640,true)===at);
+      const count=view.getUint32(644,true);
+      const a=view.getUint32(648,true),b=view.getUint32(652,true);
+      const released=Number(frame()===null && !gl.isFramebuffer(afterFrame) && !gl.isTexture(afterTexture));
+      results.push([...config,...bits,...initial,...occluded,same,...dims,resized,target,
+        invalid,outside,...rejected,capacity,sentinel,stillLive,dispose,count,a,b,sample(0),call(7,which,2),call(6,which,9),
+        replaced,released]);
+    }
+    return results;
+  } finally { host.dispose(); }
+}
+
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  const device=context(),original=context();
+  const renderer=new THREE.WebGLRenderer({canvas:original.canvas,context:original.gl});
+  renderer.autoClear=false;
+  renderer.setSize(8,8);
+  const actual=await product(device.gl);
+  const values=formats.flatMap(([format,type],index)=>[...reference(renderer,original.gl,format,type),...actual[index]]);
+  renderer.dispose();
+  output.textContent=JSON.stringify(values);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

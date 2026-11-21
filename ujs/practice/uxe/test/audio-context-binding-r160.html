@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AudioContext as Reference, REVISION } from "../../web/game/three.module.js";
+import { createAudioContextRegistry } from "../base/audio-context-binding-host.js";
+if(REVISION!=="160") throw new Error("three.js revision mismatch");
+const query=new URLSearchParams(location.search);
+const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+const registry=createAudioContextRegistry();
+const wasm=(await WebAssembly.instantiate(binary,{uxe_audio_context_binding_v1:registry.imports})).instance.exports;
+const command=(op,value=0)=>Number(wasm.uxe_context_binding(BigInt(op),BigInt(value)));
+const first=command(0);
+const firstObject=registry.resolve(first);
+const refFirst=Reference.getContext();
+const observed=[Number(firstObject.sampleRate>=8000),Number(refFirst.sampleRate>=8000),
+  Number(first===command(0)),Number(refFirst===Reference.getContext())];
+
+const external=new OfflineAudioContext(1,64,48000);
+const handle=registry.register(external);
+observed.push(Number(registry.register(external)===handle),command(1,handle));
+Reference.setContext(external);
+observed.push(Number(registry.resolve(command(0))===external),Number(Reference.getContext()===external),
+  registry.resolve(command(0)).sampleRate,Reference.getContext().sampleRate);
+observed.push(command(1,300),Number(command(0)===handle));
+
+command(1,0);
+Reference.setContext(null);
+observed.push(command(0),Number(Reference.getContext()===null));
+
+const wrong=query.get("mutate")==="1";
+command(1,wrong?0:-1);
+Reference.setContext(undefined);
+const fresh=command(0);
+const refFresh=Reference.getContext();
+const freshObject=registry.resolve(fresh);
+observed.push(Number(fresh!==0 && fresh!==first && fresh!==handle),Number(refFresh!==refFirst && refFresh!==external));
+if(freshObject) await freshObject.close();
+await refFresh.close();
+observed.push(Number(freshObject?.state==="closed" && command(0)===fresh),
+  Number(refFresh.state==="closed" && Reference.getContext()===refFresh));
+await firstObject.close();
+await refFirst.close();
+document.querySelector("#r160").textContent=JSON.stringify(observed);
+</script>

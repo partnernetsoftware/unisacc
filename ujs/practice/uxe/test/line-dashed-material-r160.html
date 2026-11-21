@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+import {createGpuSubmit} from "../base/gpu-host-abi.js";
+import {createGpuTargets} from "../base/gpu-target-abi.js";
+
+const size=32,rows=[7,15,23],output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=size;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true,antialias:false});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  gl.disable(gl.DITHER);
+  return {canvas,gl};
+}
+function read(gl) {
+  const pix=new Uint8Array(size*size*4);
+  gl.readPixels(0,0,size,size,gl.RGBA,gl.UNSIGNED_BYTE,pix);
+  if(gl.getError()!==gl.NO_ERROR) throw new Error("readPixels failed");
+  return pix;
+}
+async function product() {
+  const {gl}=context();
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1,createGpuTargets(gl));
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(binary,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const base=2097152,heap=new DataView(wasm.memory.buffer,base);
+  for(const [index,extension,start] of [[0,"vert",10000],[1,"frag",14500]]) {
+    const shader=new Uint8Array(await (await fetch("../base/line-dashed-material."+extension)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+start,shader.length).set(shader);
+    heap.setUint32(8192+8*index,start,true);
+    heap.setUint32(8196+8*index,shader.length,true);
+  }
+  const result=Number(wasm.uxe_line_dashed(BigInt(query.get("mode"))));
+  if(result<0) throw new Error("dashed draw rejected "+result);
+  return read(gl);
+}
+function reference() {
+  const {canvas,gl}=context();
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(size,size);
+  renderer.setClearColor(0,1);
+  const camera=new THREE.Camera(),scene=new THREE.Scene();
+  camera.projectionMatrix.makeOrthographic(0,size,size,0,1,-1);
+  const setups=[
+    [2,30,rows[0],0,{}],
+    [5,27,rows[1],.25,{scale:1.5,dashSize:2,gapSize:3,color:0x3366cc}],
+    [8,24,rows[2],.25,{scale:.75,dashSize:2,gapSize:0,color:0x00ff00}],
+  ];
+  for(const [left,right,y,offset,params] of setups) {
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute("position",new THREE.Float32BufferAttribute([left,y+.5,0,right,y+.5,0],3));
+    const material=new THREE.LineDashedMaterial(params);
+    const line=new THREE.LineSegments(geometry,material);
+    line.frustumCulled=false;
+    line.computeLineDistances();
+    const distance=geometry.getAttribute("lineDistance");
+    for(let i=0;i<distance.count;i++) distance.setX(i,distance.getX(i)+offset);
+    scene.add(line);
+  }
+  renderer.render(scene,camera);
+  const pixels=read(gl);
+  for(const mesh of scene.children) {
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+  }
+  renderer.dispose();
+  return pixels;
+}
+function covered(image) {
+  const tested=[];
+  let outside=0;
+  for(let y=0;y<size;y++) for(let x=0;x<size;x++) {
+    const i=4*(y*size+x);
+    const rgb=65536*image[i]+256*image[i+1]+image[i+2];
+    if(rows.includes(y)) tested.push(rgb);
+    else if(rgb!==0) outside++;
+  }
+  return [...tested,outside];
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("Three.js revision");
+  const actual=await product(),oracle=reference();
+  let different=0,alpha=0;
+  for(let i=0;i<actual.length;i+=4) {
+    if(actual[i]!==oracle[i] || actual[i+1]!==oracle[i+1] || actual[i+2]!==oracle[i+2] ||
+       actual[i+3]!==oracle[i+3]) different++;
+    if(actual[i+3]!==255 || oracle[i+3]!==255) alpha++;
+  }
+  output.textContent=JSON.stringify([...covered(actual),...covered(oracle),different,alpha]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

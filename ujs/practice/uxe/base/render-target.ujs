@@ -1,0 +1,334 @@
+// A single RGBA8 2D attachment with optional DEPTH_COMPONENT16.
+struct RenderTarget {
+  id: u32;
+  generation: u32;
+  width: u32;
+  height: u32;
+  depthBuffer: u32;
+  viewportX: u32;
+  viewportY: u32;
+  viewportWidth: u32;
+  viewportHeight: u32;
+  scissorX: u32;
+  scissorY: u32;
+  scissorWidth: u32;
+  scissorHeight: u32;
+  scissorTest: u32;
+  disposeObserver: u32;
+}
+
+native function render_target_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function render_target_separate(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a+n<=b || b+m<=a;
+}
+
+native function render_target_size(width:i64,height:i64) i64 {
+  return width>=1 && width<=2048 && height>=1 && height<=2048;
+}
+
+native function render_target_id(id:i64) i64 {
+  return id>=1 && id<=1024;
+}
+
+native function render_target_live(target:i64) i64 {
+  return render_target_span(target,RenderTarget.size) &&
+    render_target_id(ux_u32(target+RenderTarget.id)) &&
+    ux_u32(target+RenderTarget.generation)!=0 && ux_u32(target+RenderTarget.depthBuffer)<=1 &&
+    render_target_size(ux_u32(target+RenderTarget.width),ux_u32(target+RenderTarget.height));
+}
+
+native function render_target_packet(target:i64,packet:i64,capacity:i64,need:i64) i64 {
+  return render_target_span(target,RenderTarget.size) && capacity>=need && capacity<=65536 &&
+    render_target_span(packet,capacity) && render_target_separate(target,RenderTarget.size,packet,capacity);
+}
+
+native function render_target_descriptor_span(target:i64,packet:i64,capacity:i64,descriptor:i64) i64 {
+  return render_target_span(descriptor,GpuTarget.size) &&
+    render_target_separate(descriptor,GpuTarget.size,target,RenderTarget.size) &&
+    render_target_separate(descriptor,GpuTarget.size,packet,capacity);
+}
+
+native function RenderTarget_prepareDescriptor(descriptor:i64,id:i64,width:i64,height:i64,depth:i64) i64 {
+  if(!render_target_span(descriptor,GpuTarget.size) || !render_target_id(id) ||
+     !render_target_size(width,height) || depth<0 || depth>1) { return 0-1; }
+  let kind=ux_u32_put(descriptor+GpuTarget.kind,0);
+  let key=ux_u32_put(descriptor+GpuTarget.id,id);
+  let w=ux_u32_put(descriptor+GpuTarget.width,width);
+  let h=ux_u32_put(descriptor+GpuTarget.height,height);
+  let l=ux_u32_put(descriptor+GpuTarget.layers,1);
+  let c=ux_u32_put(descriptor+GpuTarget.colors,1);
+  let d=ux_u32_put(descriptor+GpuTarget.depth,depth);
+  return descriptor;
+}
+
+native function render_target_rectangle(at:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  let a=ux_u32_put(at,x);
+  let b=ux_u32_put(at+4,y);
+  let c=ux_u32_put(at+8,width);
+  let d=ux_u32_put(at+12,height);
+  return at;
+}
+
+native function render_target_rect_valid(target:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  return x>=0 && y>=0 && width>=0 && height>=0 &&
+    x<=ux_u32(target+RenderTarget.width)-width &&
+    y<=ux_u32(target+RenderTarget.height)-height;
+}
+
+native function RenderTarget_setViewport(target:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  if(!render_target_live(target) || width<1 || height<1 ||
+     !render_target_rect_valid(target,x,y,width,height)) { return 0-1; }
+  let view=render_target_rectangle(target+RenderTarget.viewportX,x,y,width,height);
+  return target;
+}
+
+native function RenderTarget_setScissor(target:i64,on:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  if(!render_target_live(target) || on<0 || on>1 ||
+     !render_target_rect_valid(target,x,y,width,height)) { return 0-1; }
+  let clip=render_target_rectangle(target+RenderTarget.scissorX,x,y,width,height);
+  let active=ux_u32_put(target+RenderTarget.scissorTest,on);
+  return target;
+}
+
+native function render_target_reset_rects(target:i64,width:i64,height:i64) i64 {
+  let view=render_target_rectangle(target+RenderTarget.viewportX,0,0,width,height);
+  return render_target_rectangle(target+RenderTarget.scissorX,0,0,width,height);
+}
+
+struct RenderTargetDisposeObserver {
+  dispatcher: u32;
+  event: u32;
+  identity: u32;
+  output: u32;
+  capacity: u32;
+  sequence: u32;
+}
+
+// Validate the observer, the registry, and the complete snapshot footprint.
+native function render_target_event_space(observer:i64,at:i64,bytes:i64) i64 {
+  if(observer==0 || bytes==0) { return 1; }
+  if(!render_target_span(observer,RenderTargetDisposeObserver.size) ||
+     !render_target_separate(observer,RenderTargetDisposeObserver.size,at,bytes)) { return 0; }
+  let dispatcher=ux_u32(observer+RenderTargetDisposeObserver.dispatcher);
+  let output=ux_u32(observer+RenderTargetDisposeObserver.output);
+  let limit=ux_u32(observer+RenderTargetDisposeObserver.capacity);
+  if(limit>786432 || !render_target_span(dispatcher,EventDispatcher.size) ||
+     !render_target_span(output,8+4*limit) ||
+     !render_target_separate(dispatcher,EventDispatcher.size,at,bytes) ||
+     !render_target_separate(output,8+4*limit,at,bytes)) { return 0; }
+  let rows=ux_u32(dispatcher+EventDispatcher.listeners);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  return render_target_span(rows,capacity*8) &&
+    render_target_separate(rows,capacity*8,at,bytes);
+}
+
+native function render_target_event_count(observer:i64) i64 {
+  if(observer==0) { return 0; }
+  if(!render_target_span(observer,RenderTargetDisposeObserver.size)) { return 0-1; }
+  let dispatcher=ux_u32(observer+RenderTargetDisposeObserver.dispatcher);
+  let out=ux_u32(observer+RenderTargetDisposeObserver.output);
+  let limit=ux_u32(observer+RenderTargetDisposeObserver.capacity);
+  if(!render_target_span(dispatcher,EventDispatcher.size) || limit>786432 ||
+     !render_target_span(out,8+4*limit) ||
+     !render_target_separate(observer,RenderTargetDisposeObserver.size,dispatcher,EventDispatcher.size) ||
+     !render_target_separate(observer,RenderTargetDisposeObserver.size,out,8+4*limit) ||
+     !render_target_separate(dispatcher,EventDispatcher.size,out,8+4*limit)) { return 0-1; }
+  let rows=ux_u32(dispatcher+EventDispatcher.listeners);
+  let count=ux_u32(dispatcher+EventDispatcher.listenerCount);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  if(count>capacity || !render_target_span(rows,capacity*8) ||
+     !render_target_separate(rows,capacity*8,out,8+4*limit) ||
+     !render_target_separate(rows,capacity*8,observer,RenderTargetDisposeObserver.size)) { return 0-1; }
+  let event=ux_u32(observer+RenderTargetDisposeObserver.event);
+  let matches=0;
+  let i=0;
+  while(i<count) {
+    if(ux_u32(rows+i*8)==event) { matches=matches+1; }
+    i=i+1;
+  }
+  if(matches>limit) { return 0-2; }
+  return matches;
+}
+
+// Attach caller-owned snapshot storage, or detach it with a zero observer.
+native function RenderTarget_watchDispose(target:i64,observer:i64) i64 {
+  if(!render_target_live(target) || !render_target_event_space(observer,target,RenderTarget.size)) { return 0-1; }
+  let count=render_target_event_count(observer);
+  if(count<0) { return count; }
+  let watch=ux_u32_put(target+RenderTarget.disposeObserver,observer);
+  return target;
+}
+
+native function render_target_emit_dispose(observer:i64,count:i64) i64 {
+  if(observer==0) { return 0; }
+  let sent=EventDispatcher_dispatchEvent(ux_u32(observer+RenderTargetDisposeObserver.dispatcher),
+    ux_u32(observer+RenderTargetDisposeObserver.event),ux_u32(observer+RenderTargetDisposeObserver.identity),
+    ux_u32(observer+RenderTargetDisposeObserver.output),count);
+  let sequence=ux_u32(observer+RenderTargetDisposeObserver.sequence);
+  return ux_u32_put(observer+RenderTargetDisposeObserver.sequence,(sequence%4294967295)+1);
+}
+
+// All ownership mutations use a dedicated packet and await host status.
+native function RenderTarget_create(target:i64,packet:i64,capacity:i64,descriptor:i64,generation:i64) i64 {
+  if(!render_target_packet(target,packet,capacity,60) || !render_target_descriptor_span(target,packet,capacity,descriptor) ||
+     generation<1 || generation>4294967295 || ux_u32(target+RenderTarget.id)!=0 ||
+     ux_u32(descriptor+GpuTarget.kind)!=0 || ux_u32(descriptor+GpuTarget.layers)!=1 ||
+     ux_u32(descriptor+GpuTarget.colors)!=1 || ux_u32(descriptor+GpuTarget.depth)>1) { return 0-1; }
+  let id=ux_u32(descriptor+GpuTarget.id);
+  let width=ux_u32(descriptor+GpuTarget.width);
+  let height=ux_u32(descriptor+GpuTarget.height);
+  if(!render_target_id(id) || !render_target_size(width,height)) { return 0-1; }
+  let begin=GpuPacket_begin(packet,capacity,generation);
+  let created=GpuTarget_create(packet,capacity,descriptor);
+  let status=GpuPacket_submit(packet);
+  if(status!=0) { return status; }
+  let g=ux_u32_put(target+RenderTarget.generation,generation);
+  let w=ux_u32_put(target+RenderTarget.width,width);
+  let h=ux_u32_put(target+RenderTarget.height,height);
+  let d=ux_u32_put(target+RenderTarget.depthBuffer,ux_u32(descriptor+GpuTarget.depth));
+  let s=ux_u32_put(target+RenderTarget.scissorTest,0);
+  let full=render_target_reset_rects(target,width,height);
+  let watch=ux_u32_put(target+RenderTarget.disposeObserver,0);
+  let owned=ux_u32_put(target+RenderTarget.id,id);
+  return 0;
+}
+
+// Clone configuration and allocate a new, empty attachment.
+native function RenderTarget_clone(dst:i64,src:i64,packet:i64,capacity:i64,descriptor:i64,id:i64) i64 {
+  if(!render_target_live(src) || !render_target_id(id) || id==ux_u32(src+RenderTarget.id) ||
+     !render_target_packet(dst,packet,capacity,60) || !render_target_packet(src,packet,capacity,60) ||
+     !render_target_descriptor_span(dst,packet,capacity,descriptor) ||
+     !render_target_descriptor_span(src,packet,capacity,descriptor) ||
+     !render_target_separate(dst,RenderTarget.size,src,RenderTarget.size) ||
+     ux_u32(dst+RenderTarget.id)!=0) { return 0-1; }
+  let observer=ux_u32(src+RenderTarget.disposeObserver);
+  if(!render_target_event_space(observer,packet,capacity) ||
+     !render_target_event_space(observer,descriptor,GpuTarget.size) ||
+     !render_target_event_space(observer,dst,RenderTarget.size)) { return 0-1; }
+  let prepared=RenderTarget_prepareDescriptor(descriptor,id,ux_u32(src+RenderTarget.width),
+    ux_u32(src+RenderTarget.height),ux_u32(src+RenderTarget.depthBuffer));
+  let status=RenderTarget_create(dst,packet,capacity,descriptor,ux_u32(src+RenderTarget.generation));
+  if(status!=0) { return status; }
+  let copied=uxe_copy_record(dst+RenderTarget.viewportX,src+RenderTarget.viewportX,
+    RenderTarget.disposeObserver-RenderTarget.viewportX);
+  return 0;
+}
+
+// The caller validates spans and replacement IDs before calling this helper.
+native function render_target_replace(target:i64,packet:i64,capacity:i64,descriptor:i64,restore:i64) i64 {
+  let id=ux_u32(target+RenderTarget.id);
+  let begin=GpuPacket_begin(packet,capacity,ux_u32(target+RenderTarget.generation));
+  let rebind=GpuTarget_bind(packet,capacity,restore,0);
+  let created=GpuTarget_create(packet,capacity,descriptor);
+  let gone=GpuTarget_dispose(packet,capacity,id);
+  let status=GpuPacket_submit(packet);
+  if(status!=0) { return status; }
+  let owned=ux_u32_put(target+RenderTarget.id,ux_u32(descriptor+GpuTarget.id));
+  let w=ux_u32_put(target+RenderTarget.width,ux_u32(descriptor+GpuTarget.width));
+  let h=ux_u32_put(target+RenderTarget.height,ux_u32(descriptor+GpuTarget.height));
+  let d=ux_u32_put(target+RenderTarget.depthBuffer,ux_u32(descriptor+GpuTarget.depth));
+  return 0;
+}
+
+native function render_target_replace_ready(target:i64,packet:i64,capacity:i64,descriptor:i64,replacement:i64,restore:i64) i64 {
+  let id=ux_u32(target+RenderTarget.id);
+  let observer=ux_u32(target+RenderTarget.disposeObserver);
+  return render_target_packet(target,packet,capacity,88) &&
+    render_target_descriptor_span(target,packet,capacity,descriptor) &&
+    render_target_event_space(observer,target,RenderTarget.size) &&
+    render_target_event_space(observer,packet,capacity) &&
+    render_target_event_space(observer,descriptor,GpuTarget.size) &&
+    render_target_id(replacement) && replacement!=id && restore>=0 && restore<=1024 &&
+    restore!=replacement && restore!=id;
+}
+
+// Retain the destination observer and allocate independent GPU storage.
+// r160 copy has no public dispose event.
+native function RenderTarget_copy(dst:i64,src:i64,packet:i64,capacity:i64,descriptor:i64,replacement:i64,restore:i64) i64 {
+  if(!render_target_live(src) || !render_target_live(dst)) { return 0-1; }
+  if(dst==src) { return 0; }
+  let src_observer=ux_u32(src+RenderTarget.disposeObserver);
+  if(ux_u32(src+RenderTarget.generation)!=ux_u32(dst+RenderTarget.generation) ||
+     ux_u32(src+RenderTarget.id)==ux_u32(dst+RenderTarget.id) || replacement==ux_u32(src+RenderTarget.id) ||
+     !render_target_replace_ready(dst,packet,capacity,descriptor,replacement,restore) ||
+     !render_target_packet(src,packet,capacity,88) ||
+     !render_target_descriptor_span(src,packet,capacity,descriptor) ||
+     !render_target_separate(src,RenderTarget.size,dst,RenderTarget.size) ||
+     !render_target_event_space(src_observer,packet,capacity) ||
+     !render_target_event_space(src_observer,descriptor,GpuTarget.size) ||
+     !render_target_event_space(src_observer,dst,RenderTarget.size)) { return 0-1; }
+  let prepared=RenderTarget_prepareDescriptor(descriptor,replacement,ux_u32(src+RenderTarget.width),
+    ux_u32(src+RenderTarget.height),ux_u32(src+RenderTarget.depthBuffer));
+  let status=render_target_replace(dst,packet,capacity,descriptor,restore);
+  if(status!=0) { return status; }
+  let copied=uxe_copy_record(dst+RenderTarget.viewportX,src+RenderTarget.viewportX,
+    RenderTarget.disposeObserver-RenderTarget.viewportX);
+  return 0;
+}
+
+// Allocate first so an allocation failure cannot destroy the old target.
+// The caller reserves replacement and supplies the binding to restore.
+native function RenderTarget_setSize(target:i64,packet:i64,capacity:i64,descriptor:i64,width:i64,
+    height:i64,replacement:i64,restore:i64) i64 {
+  if(!render_target_live(target) || !render_target_size(width,height)) { return 0-1; }
+  if(width==ux_u32(target+RenderTarget.width) && height==ux_u32(target+RenderTarget.height)) {
+    let full=render_target_reset_rects(target,width,height);
+    return 0;
+  }
+  if(!render_target_replace_ready(target,packet,capacity,descriptor,replacement,restore)) { return 0-1; }
+  let observer=ux_u32(target+RenderTarget.disposeObserver);
+  if(!render_target_event_space(observer,target,RenderTarget.size)) { return 0-1; }
+  let count=render_target_event_count(observer);
+  if(count<0) { return count; }
+  let prepared=RenderTarget_prepareDescriptor(descriptor,replacement,width,height,ux_u32(target+RenderTarget.depthBuffer));
+  let status=render_target_replace(target,packet,capacity,descriptor,restore);
+  if(status!=0) { return status; }
+  let full=render_target_reset_rects(target,width,height);
+  let emitted=render_target_emit_dispose(observer,count);
+  return 0;
+}
+
+native function RenderTarget_dispose(target:i64,packet:i64,capacity:i64,restore:i64) i64 {
+  if(!render_target_live(target) || !render_target_packet(target,packet,capacity,52) ||
+     restore<0 || restore>1024 || restore==ux_u32(target+RenderTarget.id)) { return 0-1; }
+  let observer=ux_u32(target+RenderTarget.disposeObserver);
+  if(!render_target_event_space(observer,packet,capacity) ||
+     !render_target_event_space(observer,target,RenderTarget.size)) { return 0-1; }
+  let count=render_target_event_count(observer);
+  if(count<0) { return count; }
+  let begin=GpuPacket_begin(packet,capacity,ux_u32(target+RenderTarget.generation));
+  let rebind=GpuTarget_bind(packet,capacity,restore,0);
+  let gone=GpuTarget_dispose(packet,capacity,ux_u32(target+RenderTarget.id));
+  let status=GpuPacket_submit(packet);
+  if(status!=0) { return status; }
+  let cleared=ux_u32_put(target+RenderTarget.id,0);
+  let stamp=ux_u32_put(target+RenderTarget.generation,0);
+  let emitted=render_target_emit_dispose(observer,count);
+  let detached=ux_u32_put(target+RenderTarget.disposeObserver,0);
+  return 0;
+}
+
+// Append the stored framebuffer, viewport and scissor state to a draw packet.
+native function RenderTarget_bind(target:i64,packet:i64,capacity:i64) i64 {
+  if(!render_target_live(target) || !render_target_packet(target,packet,capacity,92) ||
+     !render_target_event_space(ux_u32(target+RenderTarget.disposeObserver),packet,capacity) ||
+     gpu_packet_slot(packet,capacity,68)<0 || ux_u32(packet+GpuPacket.commands)>253 ||
+     ux_u32(target+RenderTarget.generation)!=ux_u32(packet+GpuPacket.generation)) { return 0-1; }
+  let vx=ux_u32(target+RenderTarget.viewportX);
+  let vy=ux_u32(target+RenderTarget.viewportY);
+  let vw=ux_u32(target+RenderTarget.viewportWidth);
+  let vh=ux_u32(target+RenderTarget.viewportHeight);
+  let sx=ux_u32(target+RenderTarget.scissorX);
+  let sy=ux_u32(target+RenderTarget.scissorY);
+  let sw=ux_u32(target+RenderTarget.scissorWidth);
+  let sh=ux_u32(target+RenderTarget.scissorHeight);
+  let on=ux_u32(target+RenderTarget.scissorTest);
+  if(vw<1 || vh<1 || on>1 || !render_target_rect_valid(target,vx,vy,vw,vh) ||
+     !render_target_rect_valid(target,sx,sy,sw,sh)) { return 0-1; }
+  let bound=GpuTarget_bind(packet,capacity,ux_u32(target+RenderTarget.id),0);
+  let view=GpuPacket_viewport(packet,capacity,vx,vy,vw,vh);
+  return GpuPacket_scissor(packet,capacity,on,sx,sy,sw,sh);
+}

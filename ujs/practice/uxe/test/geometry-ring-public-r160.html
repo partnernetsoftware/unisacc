@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { REVISION, RingGeometry } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const uuid = "ring-7", name = 'rim "A"';
+const fractional = '{"thetaSegments":3.5}';
+const clamped = '{"thetaSegments":2.5,"phiSegments":0.5}';
+const digest = bytes => bytes.reduce((hash, value) => (hash * 131 + value) % 16777213, 0);
+
+function surface(ring) {
+  const p = ring.parameters;
+  const { position, normal, uv } = ring.attributes;
+  const last = position.count - 1;
+  return [position.count, ring.index.count, p.innerRadius, p.outerRadius, p.thetaSegments,
+    p.phiSegments, p.thetaStart, p.thetaLength, position.getX(0), position.getY(0),
+    position.getX(last), position.getY(last), normal.getZ(0), uv.getY(last), ring.index.getX(0)];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const params = new URLSearchParams(location.search);
+  const wasm = await (await fetch("file://" + params.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(wasm);
+  const api = instance.exports;
+  const base = Number(api.uxe_ring_public(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 50000);
+  memory.set(encoder.encode(uuid), 6000);
+  memory.set(encoder.encode(name), 6016);
+  memory.set(encoder.encode('{"innerRadius":"bad"}'), 5760);
+  memory.set(encoder.encode("{}"), 5800);
+  memory.set(encoder.encode(fractional), 5824);
+  memory.set(encoder.encode('{"outerRadius":0}'), 5848);
+  memory.set(encoder.encode(clamped), 5872);
+  const length = Number(api.uxe_ring_public(1n, BigInt(params.get("mutate"))));
+  if (length <= 0) throw new Error("native ring status " + length);
+  const raw = memory.subarray(4096, 4096 + length);
+  const parsed = JSON.parse(decoder.decode(raw));
+  if (parsed.type !== "RingGeometry" || parsed.name !== name || parsed.uuid !== uuid || "data" in parsed) {
+    throw new Error("ring parameter envelope");
+  }
+  const actual = new Float64Array(api.memory.buffer, base + 6160, 34);
+
+  const reference = new RingGeometry(1.25, 2.5, 4, 2, 0.5, 1.25);
+  reference.uuid = uuid;
+  reference.name = name;
+  const doc = reference.toJSON();
+  const round = RingGeometry.fromJSON(doc);
+  const restored = surface(round);
+  const defaults = RingGeometry.fromJSON({});
+  const minimum = RingGeometry.fromJSON(JSON.parse(clamped));
+  const fractionalMesh = RingGeometry.fromJSON(JSON.parse(fractional));
+  const targetTrace = [], trace = [];
+  let correctTarget = true;
+  function listenerB() { trace.push(82); }
+  reference.addEventListener("dispose", function(event) {
+    correctTarget &&= event.target === reference && this === reference;
+    trace.push(41);
+    reference.removeEventListener("dispose", listenerB);
+  });
+  reference.addEventListener("dispose", listenerB);
+  round.addEventListener("dispose", () => targetTrace.push(61));
+  const copied = round.copy(reference);
+  const clone = reference.clone();
+  const a = reference.attributes.position, b = copied.attributes.position, c = clone.attributes.position;
+  const independent = Number(copied === round && a.array !== b.array && a.array !== c.array &&
+    b.array !== c.array && copied.parameters !== reference.parameters && clone.parameters !== reference.parameters);
+  reference.parameters.thetaLength = 3;
+  reference.parameters.innerRadius = 7;
+  a.setX(0, 9);
+  a.setY(a.count - 1, 8);
+  reference.dispose();
+  const firstEvents = trace.splice(0);
+  reference.dispose();
+  const nextEvent = trace.shift();
+  copied.dispose();
+  clone.dispose();
+  result.textContent = JSON.stringify([digest(raw), ...actual,
+    digest(encoder.encode(JSON.stringify(doc))), ...restored,
+    defaults.attributes.position.count, defaults.index.count,
+    minimum.attributes.position.count, minimum.index.count,
+    minimum.parameters.thetaSegments, minimum.parameters.phiSegments, independent,
+    clone.parameters.thetaLength, copied.parameters.innerRadius, b.getY(b.count - 1), c.getX(0),
+    firstEvents[0] * 100 + firstEvents[1], Number(correctTarget), nextEvent,
+    targetTrace.shift(), trace.length, fractionalMesh.index.count]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

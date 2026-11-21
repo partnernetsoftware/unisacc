@@ -1,0 +1,181 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+
+const output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const bytes=new Uint8Array([
+  12,24,36,48,60,72,
+  76,88,100,112,124,136,
+  172,184,196,208,220,232,
+]);
+const volumeCases=[
+  [0,0,-128],[2,1,0],[1,0,64],[1,1,128],[2,0,256],
+  [0,1,320],[1,0,384],[2,1,512],[0,0,768],[1,1,513],
+];
+const arrayCases=[
+  [2,1,0],[1,0,0],[2,0,1],[0,1,1],[1,1,1],[1,0,2],[2,1,2],[0,0,2],
+];
+const screenVertex="in vec3 position;void main(){gl_Position=vec4(position.xy,0.0,1.0);}";
+const directVertex=`void main(){
+  vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  gl_Position=vec4(2.0*p-1.0,0.0,1.0);
+}`;
+function sampling(isArray) {
+  return `precision highp float;
+uniform highp ${isArray?"sampler2DArray":"sampler3D"} sourceImage;
+uniform vec3 coordinate;
+out vec4 color;
+void main(){color=vec4(texture(sourceImage,coordinate).r,0.0,0.0,1.0);}`;
+}
+function coordinates([x,y,z],isArray) {
+  return [(x+.5)/3,(y+.5)/2,isArray?z:(z/256+.5)/3];
+}
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=1;
+  const gl=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  gl.disable(gl.DITHER);
+  return {canvas,gl};
+}
+function checkGL(gl,label) {
+  const error=gl.getError();
+  if(error!==gl.NO_ERROR) throw new Error(label+" WebGL error "+error);
+}
+function refUploads(gl) {
+  const records=new Map();
+  for(const name of ["texStorage3D","texSubImage3D"]) {
+    const original=gl[name];
+    gl[name]=function(...args) {
+      const target=args[0],binding=target===gl.TEXTURE_3D?gl.TEXTURE_BINDING_3D:gl.TEXTURE_BINDING_2D_ARRAY;
+      const texture=gl.getParameter(binding);
+      const record=records.get(texture)??{};
+      if(name==="texStorage3D") record.storage=[target,args[2],args[3],args[4],args[5]];
+      else record.upload=[args[5],args[6],args[7],args[8],args[9]];
+      records.set(texture,record);
+      return original.apply(this,args);
+    };
+  }
+  return records;
+}
+function reference() {
+  const {canvas,gl}=context();
+  const records=refUploads(gl);
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(1,1);
+  const target=new THREE.WebGLRenderTarget(1,1,{depthBuffer:false});
+  renderer.setRenderTarget(target);
+  const geometry=new THREE.PlaneGeometry(2,2);
+  const scene=new THREE.Scene(),camera=new THREE.Camera(),pixel=new Uint8Array(4);
+  const result=[];
+  for(const isArray of [false,true]) {
+    const texture=isArray?new THREE.DataArrayTexture(bytes,3,2,3):new THREE.Data3DTexture(bytes,3,2,3);
+    result.push(texture.minFilter,texture.magFilter,texture.unpackAlignment,Number(texture.flipY),
+      Number(texture.generateMipmaps));
+    texture.format=THREE.RedFormat;
+    if(!isArray) texture.minFilter=texture.magFilter=THREE.LinearFilter;
+    texture.needsUpdate=true;
+    const coordinate=new THREE.Vector3();
+    const material=new THREE.RawShaderMaterial({
+      glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false,vertexShader:screenVertex,
+      fragmentShader:sampling(isArray),uniforms:{sourceImage:{value:texture},coordinate:{value:coordinate}},
+    });
+    const mesh=new THREE.Mesh(geometry,material);
+    mesh.frustumCulled=false;
+    scene.add(mesh);
+    for(const point of isArray?arrayCases:volumeCases) {
+      coordinate.set(...coordinates(point,isArray));
+      renderer.render(scene,camera);
+      renderer.readRenderTargetPixels(target,0,0,1,1,pixel);
+      checkGL(gl,"r160 sample");
+      result.push(pixel[0]);
+    }
+    const record=records.get(renderer.properties.get(texture).__webglTexture);
+    if(!record?.storage || !record.upload) throw new Error("r160 layered upload missing");
+    result.push(...record.storage,...record.upload);
+    scene.remove(mesh);
+    material.dispose();
+    texture.dispose();
+  }
+  renderer.setRenderTarget(null);
+  target.dispose();
+  geometry.dispose();
+  renderer.dispose();
+  return result;
+}
+function directProgram(gl,isArray) {
+  const program=gl.createProgram();
+  for(const [type,source] of [[gl.VERTEX_SHADER,directVertex],[gl.FRAGMENT_SHADER,sampling(isArray)]]) {
+    const shader=gl.createShader(type);
+    gl.shaderSource(shader,"#version 300 es\n"+source);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    gl.attachShader(program,shader);
+    gl.deleteShader(shader);
+  }
+  gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  return program;
+}
+async function product() {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,...p)=>Number(wasm.uxe_layered_tex_probe(BigInt(op),BigInt(p[0]??0),BigInt(p[1]??0),
+    BigInt(p[2]??0),BigInt(query.get("mutate"))));
+  const base=run(0);
+  const memory=new DataView(wasm.memory.buffer,base,256);
+  new Uint8Array(wasm.memory.buffer,base+128,20).set([...bytes,40,96]);
+  const result=[run(1),run(2),run(13),run(14,0,1,-999),run(14,0,0,999)];
+  const {gl}=context();
+  for(const isArray of [false,true]) {
+    const address=isArray?64:32;
+    const [kind,data,w,h,d]=[0,4,8,12,16].map(offset=>memory.getUint32(address+offset,true));
+    result.push(kind,data,w,h,d);
+    if(run(15)!==224) throw new Error("R8 format unavailable");
+    const format=[0,4,8].map(offset=>memory.getUint32(224+offset,true));
+    const target=isArray?gl.TEXTURE_2D_ARRAY:gl.TEXTURE_3D;
+    const texture=gl.createTexture(),filter=isArray?gl.NEAREST:gl.LINEAR;
+    gl.bindTexture(target,texture);
+    gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,filter);
+    gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,filter);
+    for(const axis of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R]) {
+      gl.texParameteri(target,axis,gl.CLAMP_TO_EDGE);
+    }
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+    gl.texImage3D(target,0,format[0],w,h,d,0,format[1],format[2],
+      new Uint8Array(wasm.memory.buffer,base+data,w*h*d));
+    checkGL(gl,"product upload");
+    result.push(target,...format);
+    const program=directProgram(gl,isArray);
+    gl.useProgram(program);
+    const coordinate=gl.getUniformLocation(program,"coordinate"),pixel=new Uint8Array(4);
+    for(const point of isArray?arrayCases:volumeCases) {
+      result.push(run(isArray?4:3,...point));
+      gl.uniform3f(coordinate,...coordinates(point,isArray));
+      gl.drawArrays(gl.TRIANGLES,0,3);
+      gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+      checkGL(gl,"product sample");
+      result.push(pixel[0]);
+    }
+    gl.deleteProgram(program);
+    gl.deleteTexture(texture);
+  }
+  const snapshot=()=>[...new Uint8Array(wasm.memory.buffer,base+32,64)].join(",");
+  const before=snapshot();
+  result.push(run(3,-1,0,0),run(3,3,0,0),run(3,0,2,0),
+    run(4,0,0,-1),run(4,0,0,3),run(4,0,-1,0),run(4,3,0,0));
+  for(const op of [5,6,7,8,9,10,11,12]) result.push(run(op));
+  result.push(Number(before===snapshot()));
+  return result;
+}
+
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...await product(),...reference()]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

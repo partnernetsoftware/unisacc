@@ -1,0 +1,71 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+// Keep the production dispatcher layout while omitting unrelated structs
+// from the generated umbrella file to fit the compiler's 24-layout limit.
+static int dispatcher_layout(const char *path) {
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file("ujs/practice/uxe/base/object-layouts.ujs",&raw,&length,32768)) return 1;
+    const char *text=(const char *)raw;
+    const char header[]="struct EventDispatcher {\n";
+    long start=tx_find(text,length,header,sizeof header-1);
+    long finish=start<0?-1:tx_find(text+start,length-start,"\n}\n",3);
+    int failed=finish<0 || sy_write_file(path,text+start,finish+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=0;
+    if(argc==2 && tx_eqz(argv[1],"--mutate")) mutate=1;
+    if(argc==2 && tx_eqz(argv[1],"--mutate-copy")) mutate=2;
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],layout[300],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-render-target-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/target.wasm",dir);
+    tx_snprintf(layout,sizeof layout,"%s/dispatcher-layout.ujs",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/render-target-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_render_target(mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-target.ujs",
+        layout,"ujs/practice/uxe/base/eventdispatcher.ujs",
+        "ujs/practice/uxe/base/render-target.ujs","ujs/practice/uxe/test/render-target-probe.ujs","-o",wasm,0};
+    const double red=4278190335.0,green=4278255360.0,blue=4294901760.0;
+    const double gold[]={
+        0,red,0,0,2,3,1,green,6,4,0,blue,blue,
+        1,1,1,1,1,4,1,
+        1,1,777,2,303,304,1,0,6,6,1,0,0,1,green,1,888,303,2,1,1,
+        red,0,0,2,3,1,green,6,4,0,blue,blue,4,1,1,2,0,1,
+        6,6,1,1,1,0,
+    };
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600) ||
+        dispatcher_layout(layout);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("G_PIXEL RenderTarget compile_rc=%d %s\n",rc,output?output:""); failed++; }
+        mm_free(output);
+        output=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#render-target",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("G_PIXEL RenderTarget case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed++;
+    mm_free(output);
+    printf("G_PIXEL RenderTarget cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

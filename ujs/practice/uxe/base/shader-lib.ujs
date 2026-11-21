@@ -1,0 +1,69 @@
+struct ShaderLibProgram { topology: u32; textured: u32; pointSize: u32; groupCount: u32; }
+
+native function shader_lib_range(at:i64,bytes:i64) i64 {
+  return at>=0 && at<=6291456 && bytes>=0 && bytes<=6291456-at;
+}
+
+native function ShaderLib_find(name:i64,bytes:i64) i64 {
+  if(bytes<=0 || bytes>8 || shader_lib_range(name,bytes)==0) { return 0-1; }
+  let program=0;
+  while(program<ShaderLib_count()) {
+    if(shader_lib_fact(program,0)==bytes) {
+      let word=shader_lib_fact(program,1);
+      let i=0;
+      while(i<bytes && ux_u8(name+i)==word%256) { word=word/256; i=i+1; }
+      if(i==bytes) { return program; }
+    }
+    program=program+1;
+  }
+  return 0-1;
+}
+
+native function ShaderLib_info(out:i64,program:i64) i64 {
+  let topology=shader_lib_fact(program,2);
+  if(topology<0 || out%4!=0 || shader_lib_range(out,ShaderLibProgram.size)==0) { return 0-1; }
+  let a=ux_u32_put(out+ShaderLibProgram.topology,topology);
+  let b=ux_u32_put(out+ShaderLibProgram.textured,shader_lib_fact(program,3));
+  let c=ux_u32_put(out+ShaderLibProgram.pointSize,shader_lib_fact(program,4));
+  let d=ux_u32_put(out+ShaderLibProgram.groupCount,shader_lib_fact(program,7));
+  return out;
+}
+
+native function ShaderLib_templateGroup(program:i64,index:i64) i64 {
+  if(index<0 || index>=shader_lib_fact(program,7)) { return 0-1; }
+  return shader_lib_group(program,index);
+}
+
+native function ShaderLib_templateDefault(out:i64,program:i64,group:i64,index:i64) i64 {
+  return UniformsLib_default(out,ShaderLib_templateGroup(program,group),index);
+}
+
+native function shader_lib_copy(out:i64,bytes:i64,program:i64,stage:i64) i64 {
+  let word=0;
+  let i=0;
+  while(i<bytes) {
+    if(i%8==0) { word=shader_lib_word(program,stage,i/8); }
+    let stored=ux_u8_put(out+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return out+bytes;
+}
+
+// Publish a GpuShaderSource referencing caller-owned program bytes. The
+// packet receives the current repository GLSL, not r160's renderer sources.
+native function ShaderLib_source(out:i64,buffer:i64,capacity:i64,program:i64) i64 {
+  let vertex_bytes=shader_lib_fact(program,5);
+  let fragment_bytes=shader_lib_fact(program,6);
+  let bytes=vertex_bytes+fragment_bytes;
+  if(vertex_bytes<=0 || fragment_bytes<=0 || bytes>capacity || out%4!=0 ||
+      shader_lib_range(out,GpuShaderSource.size)==0 || shader_lib_range(buffer,capacity)==0 ||
+      (out<buffer+bytes && buffer<out+GpuShaderSource.size)) { return 0-1; }
+  let fragment=shader_lib_copy(buffer,vertex_bytes,program,0);
+  let end=shader_lib_copy(fragment,fragment_bytes,program,1);
+  let v=ux_u32_put(out+GpuShaderSource.vertex,buffer);
+  let vs=ux_u32_put(out+GpuShaderSource.vertexBytes,vertex_bytes);
+  let f=ux_u32_put(out+GpuShaderSource.fragment,fragment);
+  let fs=ux_u32_put(out+GpuShaderSource.fragmentBytes,fragment_bytes);
+  return end-buffer;
+}

@@ -1,0 +1,96 @@
+struct SphereGeometryParameters {
+  radius: f64;
+  widthSegments: f64;
+  heightSegments: f64;
+  phiStart: f64;
+  phiLength: f64;
+  thetaStart: f64;
+  thetaLength: f64;
+}
+
+native function SphereGeometry_size() i64 {
+  return GeometryPrimitive_size()+8;
+}
+
+native function SphereGeometry_geometry(at:i64) i64 {
+  if(!geometry_public_span(at,SphereGeometry_size())) { return 0-1; }
+  return GeometryPrimitive_geometry(at);
+}
+
+native function SphereGeometry_setName(at:i64,name:i64,bytes:i64) i64 {
+  if(SphereGeometry_geometry(at)<0 || geometry_primitive_ready(at,5)<0 ||
+     !geometry_public_disjoint(at,SphereGeometry_size(),name,bytes)) { return 0-1; }
+  return GeometryPrimitive_setName(at,name,bytes);
+}
+
+native function sphere_geometry_raw(at:i64,raw:i64,arena:i64,bytes:i64,aux:i64,auxBytes:i64) i64 {
+  if(SphereGeometry_geometry(at)<0 || !geometry_primitive_raw(at,raw,arena,bytes,aux,auxBytes)) { return 0; }
+  let tail=at+GeometryPrimitive_size();
+  return geometry_public_disjoint(tail,8,raw,GeometryBuffers.size) &&
+    geometry_public_disjoint(tail,8,arena,bytes) &&
+    geometry_public_disjoint(tail,8,aux,auxBytes) &&
+    geometry_public_disjoint(tail,8,ux_u32(raw+GeometryBuffers.vertices),32*ux_u32(raw+GeometryBuffers.vertexCapacity)) &&
+    geometry_public_disjoint(tail,8,ux_u32(raw+GeometryBuffers.indices),4*ux_u32(raw+GeometryBuffers.indexCapacity));
+}
+
+native function SphereGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64) i64 {
+  if(params%8!=0 || !sphere_geometry_raw(at,raw,arena,bytes,params,SphereGeometryParameters.size)) { return 0-1; }
+  let radius=ux_f64(params+SphereGeometryParameters.radius);
+  let sx=ux_f64(params+SphereGeometryParameters.widthSegments);
+  let sy=ux_f64(params+SphereGeometryParameters.heightSegments);
+  let phi=ux_f64(params+SphereGeometryParameters.phiStart);
+  let phiLength=ux_f64(params+SphereGeometryParameters.phiLength);
+  let theta=ux_f64(params+SphereGeometryParameters.thetaStart);
+  let thetaLength=ux_f64(params+SphereGeometryParameters.thetaLength);
+  let phiEnd=phi+phiLength;
+  let thetaEnd=theta+thetaLength;
+  if(radius-radius!=0.0 || phiEnd-phiEnd!=0.0 || thetaEnd-thetaEnd!=0.0 ||
+     sx-sx!=0.0 || sy-sy!=0.0 || sx>=262145.0 || sy>=262145.0) { return 0-1; }
+  let longitude=3;
+  let latitude=2;
+  if(sx>=3.0) { longitude=f64_floor_i64(sx); }
+  if(sy>=2.0) { latitude=f64_floor_i64(sy); }
+  let generated=SphereGeometry_generate(raw,radius,longitude,latitude,phi,phiLength,theta,thetaLength);
+  if(generated<0) { return generated; }
+  let installed=GeometryBuffers_asGeometry(raw,SphereGeometry_geometry(at),arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  let tail=ux_f64_put(at+GeometryPrimitive_size(),thetaLength);
+  return geometry_primitive_store(at,5,radius,sx,sy,phi,phiLength,theta);
+}
+
+native function sphere_geometry_copy(dst:i64,src:i64,arena:i64,bytes:i64,clone:i64) i64 {
+  if(SphereGeometry_geometry(src)<0 || SphereGeometry_geometry(dst)<0 ||
+     geometry_primitive_ready(src,5)<0 || !geometry_public_span(arena,bytes)) { return 0-1; }
+  if(dst==src) {
+    if(clone!=0) { return 0-1; }
+    return dst;
+  }
+  let span=SphereGeometry_size();
+  let name=ux_u32(src+GeometryPrimitiveRecord.name);
+  let length=ux_u32(src+GeometryPrimitiveRecord.nameBytes);
+  if(!geometry_public_disjoint(dst,span,src,span) ||
+     !geometry_public_disjoint(dst,span,arena,bytes) ||
+     !geometry_public_disjoint(src,span,arena,bytes) ||
+     !geometry_public_disjoint(dst,span,name,length)) { return 0-1; }
+  let copied=0-1;
+  if(clone!=0) { copied=geometry_primitive_clone(dst,src,arena,bytes,5); }
+  else { copied=geometry_primitive_copy(dst,src,arena,bytes,5); }
+  if(copied<0) { return copied; }
+  let tail=geometry_copy_bytes(dst+GeometryPrimitive_size(),src+GeometryPrimitive_size(),8);
+  return dst;
+}
+
+native function SphereGeometry_copy(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return sphere_geometry_copy(dst,src,arena,bytes,0);
+}
+
+native function SphereGeometry_clone(dst:i64,src:i64,arena:i64,bytes:i64) i64 {
+  return sphere_geometry_copy(dst,src,arena,bytes,1);
+}
+
+native function SphereGeometry_dispose(at:i64,event:i64,out:i64,limit:i64) i64 {
+  if(SphereGeometry_geometry(at)<0 ||
+     limit<0 || limit>1572862 || !geometry_public_span(out,8+4*limit) ||
+     !geometry_public_disjoint(at,SphereGeometry_size(),out,8+4*limit)) { return 0-1; }
+  return geometry_primitive_dispose(at,event,out,limit,5);
+}

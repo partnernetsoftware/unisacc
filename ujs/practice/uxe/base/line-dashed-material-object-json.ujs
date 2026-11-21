@@ -1,0 +1,58 @@
+// This JSON packet includes the material type and the modeled public fields.
+native function line_dash_json_spans(at:i64,end:i64,obj:i64,scratch:i64) i64 {
+  return line_dash_obj_valid(obj) && at>=0 && end>at && end<=6291456 &&
+    scratch>=0 && scratch%8==0 && scratch<=6291456-1104 &&
+    !line_dash_obj_overlap(at,end-at,obj,LineDashedObject_size()) &&
+    !line_dash_obj_overlap(at,end-at,scratch,1104) &&
+    !line_dash_obj_overlap(scratch,1104,obj,LineDashedObject_size());
+}
+
+native function LineDashedObject_writeJSON(at:i64,end:i64,obj:i64,scratch:i64) i64 {
+  if(!line_dash_json_spans(at,end,obj,scratch) || !line_dash_fields_valid(obj) ||
+     end-at<28) { return 0-1; }
+  let prefix=[123,34,116,121,112,101,34,58,34,76,105,110,101,68,97,115,104,101,100,
+    77,97,116,101,114,105,97,108,34];
+  let i=0;
+  while(i<28) {
+    let byte=ux_u8_put(at+i,prefix[i]);
+    i=i+1;
+  }
+  let p=Material_writeFields(at+28,end,obj,scratch);
+  if(p<0) { return p; }
+  let f=obj+Material.size;
+  p=material_json_field(p,end,491495649123,0,0,10,0.0+ux_u32(f+LineDashedFields.color),scratch);
+  p=material_json_field(p,end,7312272751945015652,0,0,16,ux_f64(f+LineDashedFields.dashSize),scratch);
+  p=material_json_field(p,end,28563565437804903,0,0,14,ux_f64(f+LineDashedFields.gapSize),scratch);
+  p=material_json_field(p,end,435610018675,0,0,10,ux_f64(f+LineDashedFields.scale),scratch);
+  return json_byte(p,end,125);
+}
+
+native function line_dash_json_type(at:i64,end:i64,scratch:i64) i64 {
+  let key=ux_u32_put(scratch,1701869940);
+  let value=json_find_key(at,end,scratch,4);
+  if(value<0 || Json_decodeString(value,end,scratch,18)!=18) { return 0; }
+  let label=[76,105,110,101,68,97,115,104,101,100,77,97,116,101,114,105,97,108];
+  let i=0;
+  while(i<18) {
+    if(ux_u8(scratch+i)!=label[i]) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function LineDashedObject_readJSON(at:i64,end:i64,obj:i64,scratch:i64) i64 {
+  if(!line_dash_json_spans(at,end,obj,scratch)) { return 0-1; }
+  let start=json_space(at,end);
+  let finish=json_value_end(start,end);
+  if(finish<0 || json_space(finish,end)!=end || !line_dash_json_type(start,finish,scratch)) { return 0-1; }
+  let color=material_json_read(start,finish,scratch,491495649123,0,0,10,16777215.0);
+  let dash=material_json_read(start,finish,scratch,7312272751945015652,0,0,16,3.0);
+  let gap=material_json_read(start,finish,scratch,28563565437804903,0,0,14,1.0);
+  let scale=material_json_read(start,finish,scratch,435610018675,0,0,10,1.0);
+  if(!(color>=0.0 && color<=16777215.0)) { return 0-1; }
+  let packed=f64_floor_i64(color);
+  if(packed!=color || !line_dash_params(scale,dash,gap,packed)) { return 0-1; }
+  let applied=Material_readFields(start,finish,obj,scratch);
+  if(applied<0) { return applied; }
+  return LineDashedObject_set(obj,scale,dash,gap,packed);
+}

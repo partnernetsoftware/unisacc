@@ -1,0 +1,120 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferAttribute, BufferGeometry, Camera, CubeTexture, CubeUVReflectionMapping, DataTexture, LinearFilter,
+  Mesh, PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector2, Vector3, WebGLRenderer,
+  WebGLRenderTarget } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const cases = [
+  { dir: [1, 0, 0], rough: 0, plan: [0, 5, 5, 16, 16, 16, 16, 0] },
+  { dir: [-1, 0, 0], rough: 0, plan: [3, 5, 5, 16, 48, 16, 48, 0] },
+  { dir: [0, 1, 0], rough: 0, plan: [1, 5, 5, 48, 16, 48, 16, 0] },
+  { dir: [1, 0, 0], rough: 0.4, plan: [0, 2, 2, 104, 72, 104, 72, 0] },
+  { dir: [1, 0, 0], rough: 0.6, plan: [0, 0, 1, 200, 72, 152, 72, 0.5] },
+  { dir: [1, 0, 0], rough: 1, plan: [0, -2, -2, 296, 72, 296, 72, 0] },
+  { dir: [1, 0.4, -0.2], rough: 0, plan: [0, 5, 5, 13, 22, 13, 22, 0] },
+  { dir: [0, -1, 0], rough: 0, plan: [4, 5, 5, 48, 48, 48, 48, 0] },
+  { dir: [0, 0, 1], rough: 0, plan: [2, 5, 5, 80, 16, 80, 16, 0] },
+  { dir: [0, 0, -1], rough: 0, plan: [5, 5, 5, 80, 48, 80, 48, 0] },
+  { dir: [1, 0, 0], rough: 2 ** -2.25 / 1.16, plan: [0, 4, 5, 8, 72, 16, 16, 0.5] },
+];
+
+function atlas(renderer) {
+  const colors = [[255,0,0], [0,0,255], [0,255,0], [255,255,0], [255,0,255], [0,255,255]];
+  const faces = colors.map(color => {
+    const bytes = new Uint8Array(32 * 32 * 4);
+    for (let at = 0; at < bytes.length; at += 4) bytes.set([...color, 255], at);
+    return new DataTexture(bytes, 32, 32);
+  });
+  const texture = new CubeTexture(faces);
+  texture.minFilter = texture.magFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  const generator = new PMREMGenerator(renderer);
+  const target = generator.fromCubemap(texture);
+  return { target, dispose() { target.dispose(); generator.dispose(); texture.dispose(); faces.forEach(face => face.dispose()); } };
+}
+
+async function run() {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("webgl2", { antialias: false });
+  if (!context) throw Error("WebGL2 unavailable");
+  const renderer = new WebGLRenderer({ canvas, context });
+  const baked = atlas(renderer), target = baked.target;
+  const result = new WebGLRenderTarget(1, 1);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(Float32Array.of(-1,-1,0,3,-1,0,-1,3,0), 3));
+  const camera = new Camera();
+  const vertex = "attribute vec3 position;void main(){gl_Position=vec4(position,1.0);}";
+  const ref = new RawShaderMaterial({vertexShader: vertex,
+    defines: {ENVMAP_TYPE_CUBE_UV: 1, CUBEUV_MAX_MIP: "5.0", CUBEUV_TEXEL_WIDTH: 1 / target.width, CUBEUV_TEXEL_HEIGHT: 1 / target.height},
+    uniforms: {atlas: {value: target.texture}, direction: {value: new Vector3()}, rough: {value: 0}},
+    fragmentShader: "precision highp float;\n#include <cube_uv_reflection_fragment>\n" +
+      "uniform sampler2D atlas;uniform vec3 direction;uniform float rough;" +
+      "void main(){gl_FragColor=textureCubeUV(atlas,direction,rough);}"});
+  const actual = new RawShaderMaterial({vertexShader: vertex,
+    uniforms: {atlas: {value: target.texture}, first: {value: new Vector2()}, second: {value: new Vector2()}, blend: {value: 0}},
+    fragmentShader: "precision highp float;uniform sampler2D atlas;uniform vec2 first,second;uniform float blend;" +
+      "void main(){gl_FragColor=vec4(mix(texture2D(atlas,first).rgb,texture2D(atlas,second).rgb,blend),1.0);}"});
+  const mesh = new Mesh(geometry, ref);
+  mesh.frustumCulled = false;
+  const scene = new Scene();
+  scene.add(mesh);
+  const sample = material => {
+    mesh.material = material;
+    renderer.setRenderTarget(result);
+    renderer.render(scene, camera);
+    const pixel = new Uint8Array(4);
+    renderer.readRenderTargetPixels(result, 0, 0, 1, 1, pixel);
+    return [...pixel];
+  };
+  try {
+    const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+    const { instance: { exports: e } } = await WebAssembly.instantiate(await response.arrayBuffer());
+    if (e.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+    const call = (op, mip = 0, rough = 0) => Number(e.uxe_pmrem(BigInt(op), BigInt(mip), rough));
+    const view = new DataView(e.memory.buffer, call(0), 2048);
+    const mapping = Number(call(2) === CubeUVReflectionMapping && target.texture.mapping === CubeUVReflectionMapping);
+    const extent = Number(target.width === 336 && target.height === 128);
+    const setDirection = dir => dir.forEach((v, i) => view.setFloat64(64 + i * 8, v, true));
+    const refs = [], found = [], plans = [];
+    for (let i = 0; i < cases.length; i++) {
+      const { dir, rough, plan } = cases[i];
+      ref.uniforms.direction.value.set(...dir);
+      ref.uniforms.rough.value = rough;
+      refs.push(sample(ref));
+      setDirection(i === 0 && query.get("mutate") === "1" ? [-1, 0, 0] : dir);
+      const at = call(1, 5, rough);
+      if (at !== 128) throw Error("plan " + at);
+      const coordinates = Array.from({length: 5}, (_, j) => view.getFloat64(at + 24 + j * 8, true));
+      const fields = [view.getUint32(at, true), view.getInt32(at + 12, true), view.getInt32(at + 16, true), ...coordinates];
+      const width = view.getUint32(at + 4, true), height = view.getUint32(at + 8, true);
+      plans.push(Number(width === target.width && height === target.height &&
+        fields.every((value, j) => Number.isFinite(value) && Math.abs(value - plan[j]) < 1e-9)));
+      actual.uniforms.first.value.set(coordinates[0] / width, coordinates[1] / height);
+      actual.uniforms.second.value.set(coordinates[2] / width, coordinates[3] / height);
+      actual.uniforms.blend.value = coordinates[4];
+      found.push(sample(actual));
+    }
+    const matches = refs.map((pixel, i) => Number(pixel.every((value, j) => Math.abs(found[i][j] - value) <= 1)));
+    const blurred = Number(refs[0].some((value, i) => Math.abs(value - refs[5][i]) >= 16));
+    setDirection([0, 0, 0]);
+    const zero = call(1, 5, 0);
+    setDirection([1, 0, 0]);
+    const rough = call(1, 5, 1.1);
+    const mip = call(1, 3, 0);
+    return [mapping, extent, ...refs.slice(0,3).flat(), ...found.slice(0,3).flat(),
+      ...matches, ...plans, blurred, zero, rough, mip];
+  } finally {
+    renderer.setRenderTarget(null);
+    ref.dispose(); actual.dispose(); geometry.dispose(); result.dispose(); baked.dispose(); renderer.dispose();
+  }
+}
+
+try { output.textContent = JSON.stringify(await run()); }
+catch (error) { output.textContent = "error:" + error.message; }
+</script>
