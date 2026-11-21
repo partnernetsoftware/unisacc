@@ -1,0 +1,55 @@
+// UXE's shared instance renderer uses a lit uniform RGB per cloud. Partition
+// records into light and shade clouds in stable slot order before publishing.
+// Header: u32 lightCount and shadeCount, followed by two f32 RGB triples.
+// For capacity n, xyz starts at output+32, scale at output+32+12*n, yaw at
+// output+32+16*n. The caller owns separate 80*n bytes of scratch space.
+native function D4Smoke_cloud(output:i64,capacity:i64,work:i64,body:i64,tick:i64,puffs:i64,style:i64) i64 {
+  let bytes=32+capacity*20;
+  if(capacity<0 || capacity>27 || !d4_smoke_span(output,bytes,4) ||
+     !d4_smoke_span(work,capacity*80,4) || !d4_smoke_span(body,24,8) ||
+     !d4_smoke_disjoint(output,bytes,work,capacity*80) ||
+     !d4_smoke_disjoint(output,bytes,body,24)) { return 0-1; }
+  let colors=work+capacity*64;
+  let slots=work+capacity*76;
+  let count=D4Smoke_emit(work,colors,slots,capacity,body,tick,puffs,style);
+  if(count<0) { return count; }
+  let light=0;
+  let i=0;
+  while(i<count) {
+    let slot=ux_u32(slots+i*4);
+    if(style!=0 || slot/3%3!=2) { light=light+1; }
+    i=i+1;
+  }
+  let xyz=output+32;
+  let sizes=xyz+capacity*12;
+  let rotations=xyz+capacity*16;
+  let lightAt=0;
+  let shadeAt=light;
+  i=0;
+  while(i<count) {
+    let slot=ux_u32(slots+i*4);
+    let shaded=style==0 && slot/3%3==2;
+    let row=lightAt;
+    if(shaded) { row=shadeAt; shadeAt=shadeAt+1; }
+    else { lightAt=lightAt+1; }
+    let src=work+i*64;
+    let coord=xyz+row*12;
+    let angle=ux_math_atan2(ux_f32(src+32),ux_f32(src));
+    let x=ux_u32_put(coord,ux_u32(src+48));
+    let y=ux_u32_put(coord+4,ux_u32(src+52));
+    let z=ux_u32_put(coord+8,ux_u32(src+56));
+    let s=ux_u32_put(sizes+row*4,ux_u32(src+20));
+    let a=ux_f32_put(rotations+row*4,angle);
+    let c=colors+i*12;
+    let rgb=output+8+shaded*12;
+    let r=ux_u32_put(rgb,ux_u32(c));
+    let g=ux_u32_put(rgb+4,ux_u32(c+4));
+    let b=ux_u32_put(rgb+8,ux_u32(c+8));
+    i=i+1;
+  }
+  let lit=ux_u32_put(output,light);
+  let shadow=ux_u32_put(output+4,count-light);
+  return count;
+}
+
+return D4Smoke_cloud(output,capacity,work,body,tick,puffs,style);

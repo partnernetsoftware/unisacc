@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 烟雾 GPU 验收夹具</title>
+<canvas id="wasm" width="160" height="96"></canvas>
+<canvas id="reference" width="160" height="96"></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { allMeshes } from "../meshes.js";
+import { leafMesh } from "./d3-foliage.js";
+import { loadScaleStudy } from "./uxe-u2b.js";
+
+const result=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+const width=160,height=96;
+const mesh=leafMesh(1),meshId=allMeshes().length;
+
+function configure(canvas,scene) {
+  scene.clearColor=[.07,.11,.17,1];
+  scene.fog.density=0;
+  const camera=new PerspectiveCamera(.68,.1,150);
+  camera.setEye(8,14,29);
+  camera.setTarget(0,13,-2);
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes:[mesh]});
+  const gl=canvas.getContext("webgl");
+  return ()=>{
+    renderer.render(scene,camera);
+    const pixels=new Uint8Array(width*height*4);
+    gl.readPixels(0,0,width,height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    if(gl.getError()!==gl.NO_ERROR) throw new Error("D4 GPU 读回失败");
+    return pixels;
+  };
+}
+
+function cloud(scene,name,count,color) {
+  const instance=scene.instances(name,count,color.map(value=>value/255));
+  instance.meshId=meshId;
+  instance.metalness=0;
+  instance.roughness=.65;
+  instance.toonLevels=3;
+  instance.outlineExcluded=true;
+  return instance;
+}
+
+function legacy(clouds,tick,offset,count,style) {
+  const centers=[[-4.9,10.8,-3.5],[.65,12.6,-3.85],[4.7,11.18,-2.65]];
+  const visible=[0,0];
+  for(let slot=0;slot<count;slot++) {
+    const layer=Math.floor(slot/3),stack=slot%3;
+    const [ox,oy,oz]=centers[stack];
+    const cluster=Math.floor(layer/3),lobe=layer%3;
+    const shade=Number(style===0 && lobe===2);
+    let x=ox,y=oy,z=oz,yaw=0,size=.24+layer*.053;
+    if(style===0) {
+      yaw=stack*2.15+lobe*2.09;
+      const spread=.45+cluster*.30;
+      x+=cluster*[.30,1.26,1.70][stack]+Math.cos(yaw)*spread;
+      y+=cluster*[1.12,1.20,.86][stack]+Math.sin(yaw)*spread;
+      z+=cluster*.42+lobe*.19;
+      size=.67+cluster*.31+lobe*.12;
+    } else {
+      x+=layer*.39;
+      y+=layer*.43;
+      z+=layer*.06;
+    }
+    if(tick>=0) {
+      const age=((tick+slot*11)%120)/120;
+      if(age===0) continue;
+      x+=offset[0]+age*2.3;
+      y+=offset[1]+age*1.65;
+      z+=offset[2]+age*.61;
+      yaw+=age*.7;
+      size*=((.64+age*.40)*Math.min(1,age*12,(1-age)*8));
+    }
+    clouds[shade].set(visible[shade]++,x,y,z,size,yaw);
+  }
+  clouds[0].count=visible[0];
+  clouds[1].count=visible[1];
+  return visible[0]+visible[1];
+}
+
+function different(a,b,tolerance=0) {
+  let count=0;
+  for(let i=0;i<a.length;i+=4) {
+    if(Math.abs(a[i]-b[i])>tolerance || Math.abs(a[i+1]-b[i+1])>tolerance ||
+       Math.abs(a[i+2]-b[i+2])>tolerance || Math.abs(a[i+3]-b[i+3])>tolerance) count++;
+  }
+  return count;
+}
+
+try {
+  const wasmUrl=query.get("wasm");
+  if(!wasmUrl) throw new Error("验收缺少 Wasm 路径");
+  const [facts,response]=await Promise.all([loadScaleStudy("d4"),fetch(wasmUrl)]);
+  if(!response.ok) throw new Error("读取烟雾 Wasm 失败");
+  const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());
+  const {memory,uxe_d4_smoke_cloud}=instance.exports;
+  const n=facts[6],base=2097152,out=256,work=1024,body=4096;
+  const renderScene=new Scene(),referenceScene=new Scene();
+  const published=[cloud(renderScene,"D4 smoke",n,[0,0,0]),cloud(renderScene,"D4 shade",n,[0,0,0])];
+  const header=new Uint32Array(memory.buffer,base+out,2);
+  const packedXYZ=new Float32Array(memory.buffer,base+out+32,n*3);
+  const packedScale=new Float32Array(memory.buffer,base+out+32+12*n,n);
+  const packedYaw=new Float32Array(memory.buffer,base+out+32+16*n,n);
+  for(let i=0;i<2;i++) published[i].color=new Float32Array(memory.buffer,base+out+8+i*12,3);
+  const bodyBuffer=new Float64Array(memory.buffer,base+body,3);
+  const bytes=new Uint8Array(memory.buffer,base+out,32+n*20);
+  const referenceClouds=[cloud(referenceScene,"D4 smoke",n,[236,239,234]),cloud(referenceScene,"D4 shade",n,[202,214,226])];
+  const actualDraw=configure(document.querySelector("#wasm"),renderScene);
+  const referenceDraw=configure(document.querySelector("#reference"),referenceScene);
+  const home=[0,0,0],move=[1.25,-.45,.625];
+  const cases=[[-1,home,n,0],[0,home,n,0],[60,move,n,0],[119,home,n,0],[120,home,n,0],[0,move,3,1],[0,home,0,0]];
+  const seen=[];
+  let pixelDiff=0,oneStepDiff=0,countDiff=0,rows=0,refusals=0;
+  for(const [id,[tick,offset,puffs,style]] of cases.entries()) {
+    bodyBuffer.set(offset);
+    const args=[BigInt(out),BigInt(n),BigInt(work),BigInt(body),BigInt(tick),BigInt(puffs),BigInt(style)];
+    const count=Number(uxe_d4_smoke_cloud(...args));
+    if(count<0 || count>n) throw new Error("烟雾实例数非法");
+    let start=0;
+    for(let i=0;i<2;i++) {
+      const end=start+header[i];
+      published[i].xyz=packedXYZ.subarray(start*3,end*3);
+      published[i].scale=packedScale.subarray(start,end);
+      published[i].yaw=packedYaw.subarray(start,end);
+      published[i].count=mutate && id===2?0:header[i];
+      start=end;
+    }
+    const expected=legacy(referenceClouds,tick,offset,puffs,style);
+    rows+=expected;
+    if(start!==count || published[0].count!==referenceClouds[0].count ||
+       published[1].count!==referenceClouds[1].count) countDiff++;
+    const rendered=actualDraw(),oracle=referenceDraw();
+    pixelDiff+=different(rendered,oracle,1);
+    oneStepDiff+=different(rendered,oracle);
+    seen.push(rendered);
+    if(id===2) {
+      const before=bytes.slice();
+      for(const [field,value] of [[0,BigInt(work)],[1,2n],[5,28n]]) {
+        const invalid=args.slice();
+        invalid[field]=value;
+        if(uxe_d4_smoke_cloud(...invalid)===-1n && before.every((byte,i)=>byte===bytes[i])) refusals++;
+      }
+    }
+  }
+  const visible=Number(different(seen[0],seen[6])>0);
+  const motion=Number(different(seen[0],seen[2])>0);
+  const wrap=Number(different(seen[1],seen[4])===0);
+  result.textContent=JSON.stringify([cases.length,cases.length*width*height,rows,countDiff,pixelDiff,
+    oneStepDiff,refusals,visible,motion,wrap]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>
+</html>
