@@ -1,0 +1,74 @@
+struct InterleavedUploadState {
+  initialized: u32;
+  buffer: u32;
+  callback: u32;
+  ticket: u32;
+  pending: u32;
+  pendingVersion: u32;
+  uploaded: u32;
+  uploadedVersion: u32;
+}
+
+native function ib_upload_valid(state:i64,buffer:i64) i64 {
+  let bytes=ib_bytes(buffer);
+  if(bytes<0 || !ib_range(state,InterleavedUploadState.size,4) ||
+     !ib_disjoint(state,InterleavedUploadState.size,buffer,InterleavedBuffer.size)) { return 0; }
+  let data=ux_u32(buffer+InterleavedBuffer.data);
+  return ib_disjoint(state,InterleavedUploadState.size,data,bytes);
+}
+
+native function InterleavedBuffer_initUpload(state:i64,buffer:i64) i64 {
+  if(!ib_upload_valid(state,buffer) || ux_u32(state+InterleavedUploadState.initialized)!=0) { return 0-1; }
+  let a=ux_u32_put(state+InterleavedUploadState.buffer,buffer);
+  let b=ux_u32_put(state+InterleavedUploadState.callback,0);
+  let c=ux_u32_put(state+InterleavedUploadState.ticket,0);
+  let d=ux_u32_put(state+InterleavedUploadState.pending,0);
+  let e=ux_u32_put(state+InterleavedUploadState.pendingVersion,0);
+  let f=ux_u32_put(state+InterleavedUploadState.uploaded,0);
+  let g=ux_u32_put(state+InterleavedUploadState.uploadedVersion,0);
+  let h=ux_u32_put(state+InterleavedUploadState.initialized,1);
+  return state;
+}
+
+native function ib_upload_state(state:i64) i64 {
+  return ib_range(state,InterleavedUploadState.size,4) &&
+    ux_u32(state+InterleavedUploadState.initialized)==1 &&
+    ib_upload_valid(state,ux_u32(state+InterleavedUploadState.buffer));
+}
+
+// A zero callback token means the default no-op.
+native function InterleavedBuffer_onUpload(state:i64,callback:i64) i64 {
+  if(!ib_upload_state(state) || callback<0 || callback>4294967295) { return 0-1; }
+  let stored=ux_u32_put(state+InterleavedUploadState.callback,callback);
+  return state;
+}
+
+// Request an upload only for a new buffer or a newer buffer revision.
+native function InterleavedBuffer_beginUpload(state:i64) i64 {
+  if(!ib_upload_state(state)) { return 0-1; }
+  if(ux_u32(state+InterleavedUploadState.pending)!=0) { return 0-2; }
+  let buffer=ux_u32(state+InterleavedUploadState.buffer);
+  let version=ux_u32(buffer+InterleavedBuffer.version);
+  if(ux_u32(state+InterleavedUploadState.uploaded)!=0 &&
+     ux_u32(state+InterleavedUploadState.uploadedVersion)>=version) { return 0; }
+  let ticket=ux_u32(state+InterleavedUploadState.ticket);
+  if(ticket==4294967295) { return 0-1; }
+  let a=ux_u32_put(state+InterleavedUploadState.ticket,ticket+1);
+  let b=ux_u32_put(state+InterleavedUploadState.pending,1);
+  let c=ux_u32_put(state+InterleavedUploadState.pendingVersion,version);
+  return ticket+1;
+}
+
+// Only a successful completion publishes the captured revision and a
+// callback token. The host delivers that token after the transfer.
+native function InterleavedBuffer_finishUpload(state:i64,ticket:i64,success:i64) i64 {
+  if(!ib_upload_state(state) || (success!=0 && success!=1) || ticket<=0 ||
+     ux_u32(state+InterleavedUploadState.pending)!=1 ||
+     ticket!=ux_u32(state+InterleavedUploadState.ticket)) { return 0-1; }
+  let released=ux_u32_put(state+InterleavedUploadState.pending,0);
+  if(success==0) { return 0; }
+  let version=ux_u32(state+InterleavedUploadState.pendingVersion);
+  let a=ux_u32_put(state+InterleavedUploadState.uploadedVersion,version);
+  let b=ux_u32_put(state+InterleavedUploadState.uploaded,1);
+  return ux_u32(state+InterleavedUploadState.callback);
+}

@@ -1,0 +1,114 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferGeometry, Camera, InterleavedBuffer, InterleavedBufferAttribute, Mesh, MeshBasicMaterial,
+  REVISION, Scene, WebGLRenderer } from "../../web/game/three.module.js";
+const status=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const query=new URLSearchParams(location.search);
+  const original=[-0.5,-0.5,0,0.5,-0.5,0,0,0.5,0];
+  const reference=new InterleavedBuffer(new Float32Array(original),3);
+  const camera=new Camera();
+  const scene=new Scene();
+  const geometry=new BufferGeometry().setAttribute("position",new InterleavedBufferAttribute(reference,3,0));
+  const material=new MeshBasicMaterial();
+  scene.add(new Mesh(geometry,material));
+  const renderer=new WebGLRenderer({antialias:false});
+  renderer.setSize(16,16);
+  const oracle=[];
+  const refGL=renderer.getContext();
+  let referenceTransfers=0;
+  for(const name of ["bufferData","bufferSubData"]) {
+    const transfer=refGL[name].bind(refGL);
+    refGL[name]=(...args)=>{
+      const result=transfer(...args);
+      if(args.includes(reference.array)) referenceTransfers++;
+      return result;
+    };
+  }
+  const record=token=>function() {
+    oracle.push(token,referenceTransfers,Number(this===reference));
+  };
+  reference.onUpload(record(91));
+  renderer.render(scene,camera);
+  renderer.render(scene,camera);
+  const unchanged=oracle.length/3;
+  reference.onUpload(record(92));
+  renderer.render(scene,camera);
+  const replacement=oracle.length/3;
+  reference.array[0]=-0.25;
+  reference.needsUpdate=true;
+  renderer.render(scene,camera);
+  renderer.render(scene,camera);
+  const ref=[...oracle,unchanged,replacement,oracle.length/3];
+
+  const bytes=await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer();
+  const module=new WebAssembly.Module(bytes);
+  const instantiate=()=>new WebAssembly.Instance(module).exports;
+  const wasm=instantiate();
+  const command=(op,ticket=0n,flag=0n)=>wasm.uxe_interleaved_upload(BigInt(op),ticket,flag);
+  const canvas=document.createElement("canvas");
+  const gl=canvas.getContext("webgl2");
+  if(!gl) throw new Error("WebGL2 unavailable");
+  const gpu=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,gpu);
+  command(0);
+  const data=new Float32Array(wasm.memory.buffer,Number(command(6)),9);
+  const actual=[];
+  let transfers=0;
+  const handlers=new Map([[91n,()=>actual.push(91,transfers,1)],[92n,()=>actual.push(92,transfers,1)]]);
+  function upload() {
+    const ticket=command(2);
+    if(ticket===0n) return;
+    if(ticket<0n) throw new Error("upload request rejected");
+    if(transfers===0) gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
+    else gl.bufferSubData(gl.ARRAY_BUFFER,0,data);
+    const succeeded=gl.getError()===gl.NO_ERROR;
+    if(!succeeded) throw new Error("WebGL upload failed");
+    transfers++;
+    const accepted=query.has("mutate") && transfers===2 ? 0n : 1n;
+    const token=command(3,ticket,accepted);
+    if(token>0n) handlers.get(token)?.();
+  }
+  command(1,91n);
+  upload();
+  upload();
+  const unchangedActual=actual.length/3;
+  command(1,92n);
+  upload();
+  const replacementActual=actual.length/3;
+  command(5);
+  command(4);
+  upload();
+  if(!query.has("mutate")) upload();
+  const samples=new Float32Array(9);
+  gl.getBufferSubData(gl.ARRAY_BUFFER,0,samples);
+  const results=[...actual,unchangedActual,replacementActual,actual.length/3];
+  if(results.length!==ref.length) throw new Error(`callback count actual=${actual.length/3} r160=${oracle.length/3}`);
+  for(let i=0;i<ref.length;i++) {
+    if(results[i]!==ref[i]) throw new Error(`callback order case=${i} actual=${results[i]} r160=${ref[i]}`);
+  }
+  results.push(samples[0],transfers);
+
+  const local=instantiate().uxe_interleaved_upload;
+  const take=(op,ticket=0n,success=0n)=>local(BigInt(op),ticket,success);
+  take(0);
+  const first=take(2);
+  results.push(first,take(2),take(3,first+1n,1n),take(3,first,0n));
+  const retry=take(2);
+  take(1,99n);
+  take(4);
+  results.push(retry,take(3,retry,1n),take(3,retry,1n));
+  const next=take(2);
+  results.push(next,take(3,next,1n),take(2),take(0));
+  status.textContent=JSON.stringify(results.map(Number));
+  gl.deleteBuffer(gpu);
+  geometry.dispose();
+  material.dispose();
+  renderer.dispose();
+} catch(error) {
+  status.textContent=`error:${error.message}`;
+}
+</script>
