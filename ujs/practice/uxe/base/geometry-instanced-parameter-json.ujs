@@ -1,0 +1,155 @@
+// The existing u32 maximum represents r160's unlimited instance count.
+native function inst_geom_keys(at:i64) i64 {
+  let bytes=[116,121,112,101,73,110,115,116,97,110,99,101,100,66,117,102,102,101,114,71,101,111,109,101,116,114,121,105,110,115,116,97,110,99,101,67,111,117,110,116,105,115,73,110,115,116,97,110,99,101,100,66,117,102,102,101,114,71,101,111,109,101,116,114,121,100,97,116,97,97,116,116,114,105,98,117,116,101,115,105,110,116,101,114,108,101,97,118,101,100,66,117,102,102,101,114,115,109,111,114,112,104,65,116,116,114,105,98,117,116,101,115];
+  let i=0;
+  while(i<112) {
+    let write=ux_u8_put(at+i,bytes[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function inst_geom_suffix(at:i64,end:i64,count:i64,scratch:i64) i64 {
+  let keys=inst_geom_keys(scratch);
+  let p=json_byte(at,end,44);
+  p=json_write_string(p,end,keys+27,13);
+  p=json_byte(p,end,58);
+  if(p<0) { return p; }
+  if(count==4294967295) {
+    if(end-p<4) { return 0-1; }
+    let marker=ux_u32_put(p,1819047278); // null
+    p=p+4;
+  } else { p=json_write_f64(p,end,0.0+count,scratch+120); }
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,keys+40,25);
+  p=json_byte(p,end,58);
+  p=json_write_token(p,end,ObjectJsonToken.boolTrue);
+  return json_byte(p,end,125);
+}
+
+// The shared writer accepts standard BufferAttribute views. Reserve 1224
+// bytes of disjoint scratch for its number formatter and the class keys.
+native function InstancedGeometry_toJSON(geo:i64,dst:i64,end:i64,identity:i64,scratch:i64) i64 {
+  if(geo<0 || geo%4!=0 || geo>6291456-InstancedBufferGeometry.size ||
+     dst<0 || end<=dst || end>6291456 || scratch<0 || scratch%8!=0 || scratch>6291456-1224 ||
+     geometry_json_overlap(geo,InstancedBufferGeometry.size,dst,end-dst) ||
+     geometry_json_overlap(geo,InstancedBufferGeometry.size,scratch,1224) ||
+     geometry_json_overlap(dst,end-dst,scratch,1224)) { return 0-1; }
+  let cursor=BufferGeometry_toJSON(geo,dst,end,identity,scratch+120);
+  if(cursor<0) { return cursor; }
+  if(end-cursor<9) { return 0-1; }
+  let typeKey=ux_u32_put(scratch,1701869940); // type
+  let type=json_find_key(dst,cursor,scratch,4);
+  if(type<0) { return 0-1; }
+  let i=cursor-2;
+  while(i>type) {
+    let moved=ux_u8_put(i+9,ux_u8(i));
+    i=i-1;
+  }
+  let prefix=[73,110,115,116,97,110,99,101,100];
+  i=0;
+  while(i<9) {
+    let byte=ux_u8_put(type+1+i,prefix[i]);
+    i=i+1;
+  }
+  return inst_geom_suffix(cursor+8,end,ux_u32(geo+InstancedBufferGeometry.instanceCount),scratch);
+}
+
+native function inst_geom_containers(obj:i64,end:i64,scratch:i64,interleaved:i64) i64 {
+  let attribute=[105,115,73,110,115,116,97,110,99,101,100,66,117,102,102,101,114,65,116,116,114,105,98,117,116,101];
+  let backing=[105,115,73,110,115,116,97,110,99,101,100,73,110,116,101,114,108,101,97,118,101,100,66,117,102,102,101,114];
+  let keySize=26;
+  if(interleaved) { keySize=28; }
+  let i=0;
+  while(i<keySize) {
+    let byte=0;
+    if(interleaved) { byte=backing[i]; }
+    else { byte=attribute[i]; }
+    let stored=ux_u8_put(scratch+i,byte);
+    i=i+1;
+  }
+  let key=json_space(obj+1,end);
+  while(key>=0 && key<end && ux_u8(key)!=125) {
+    let colon=json_space(json_scan_string(key,end),end);
+    if(colon<0 || colon>=end || ux_u8(colon)!=58) { return 0; }
+    let value=json_space(colon+1,end);
+    let last=json_value_end(value,end);
+    if(last<0) { return 0; }
+    let flag=json_find_key(value,last,scratch,keySize);
+    if(flag!=0-2 && (flag<0 || ux_u8(flag)!=102)) { return 0; }
+    key=json_space(last,end);
+    if(key>=0 && key<end && ux_u8(key)==44) { key=json_space(key+1,end); }
+  }
+  return key>=0 && key<end;
+}
+
+native function inst_geom_standard_data(input:i64,end:i64,scratch:i64) i64 {
+  let data=json_find_key(input,end,scratch+65,4);
+  if(data<0) { return 0; }
+  let attrs=json_find_key(data,end,scratch+69,10);
+  let interleaved=json_find_key(data,end,scratch+79,18);
+  if(attrs<0 || ux_u8(attrs)!=123 ||
+     (interleaved!=0-2 && (interleaved<0 || ux_u8(interleaved)!=123)) ||
+     json_find_key(data,end,scratch+97,15)!=0-2) { return 0; }
+  if(!inst_geom_containers(attrs,end,scratch,0)) { return 0; }
+  return interleaved==0-2 || inst_geom_containers(interleaved,end,scratch,1);
+}
+
+native function inst_geom_load_scratch(geo:i64,input:i64,end:i64,options:i64) i64 {
+  let tail=geo+InstancedBufferGeometry.instanceCount;
+  let scratch=ux_u32(options+GeometryJsonLoad.scratch);
+  let names=ux_u32(options+GeometryJsonLoad.names);
+  let count=ux_u32(options+GeometryJsonLoad.nameCount);
+  let arena=ux_u32(options+GeometryJsonLoad.arena);
+  let limit=ux_u32(options+GeometryJsonLoad.arenaEnd);
+  let attrs=ux_u32(geo+BufferGeometry.attributes);
+  let groups=ux_u32(geo+BufferGeometry.groups);
+  if(scratch>6291456-120 || names>6291456 || names%4!=0 || count>(6291456-names)/12 ||
+     arena>limit || limit>6291456 || attrs>6291448 || attrs%4!=0 || groups>6291448 || groups%4!=0) { return 0-1; }
+  let attrCount=ux_u32(attrs+4);
+  let groupCount=ux_u32(groups+4);
+  if(attrCount>(6291448-attrs)/8 || groupCount>(6291448-groups)/12) { return 0-1; }
+  let ab=8+8*attrCount;
+  let gb=8+12*groupCount;
+  if(!geometry_json_writable(scratch,120,options,input,end-input) ||
+     !geometry_json_writable(tail,4,options,input,end-input) ||
+     geometry_json_overlap(geo,InstancedBufferGeometry.size,scratch,120) ||
+     geometry_json_overlap(tail,4,attrs,ab) ||
+     geometry_json_overlap(tail,4,groups,gb) ||
+     geometry_json_overlap(tail,4,arena,limit-arena) ||
+     geometry_json_overlap(scratch,120,attrs,ab) ||
+     geometry_json_overlap(scratch,120,groups,gb) ||
+     geometry_json_overlap(scratch,120,arena,limit-arena)) { return 0-1; }
+  return scratch;
+}
+
+// The generic record stores ordinary attributes. Reject input metadata for
+// instanced attributes, instanced interleaved buffers and morph attributes.
+native function InstancedGeometry_fromJSON(geo:i64,input:i64,end:i64,options:i64) i64 {
+  if(geo<0 || geo%4!=0 || geo>6291456-InstancedBufferGeometry.size ||
+     input<0 || end<=input || end>6291456 || options<0 || options%4!=0 ||
+     options>6291456-GeometryJsonLoad.size) { return 0-1; }
+  let scratch=inst_geom_load_scratch(geo,input,end,options);
+  if(scratch<0) { return scratch; }
+  let keys=inst_geom_keys(scratch);
+  let type=json_find_key(input,end,keys,4);
+  if(type<0 || json_scan_string(type,end)!=type+25) { return 0-1; }
+  let i=0;
+  while(i<23) {
+    if(ux_u8(type+1+i)!=ux_u8(keys+4+i)) { return 0-1; }
+    i=i+1;
+  }
+  let flag=json_find_key(input,end,keys+40,25);
+  if(flag<0 || ux_u8(flag)!=116) { return 0-1; }
+  let field=json_find_key(input,end,keys+27,13);
+  let count=4294967295;
+  if(field>=0 && ux_u8(field)!=110) {
+    count=LoaderJson_uint(field,end,0);
+    if(count<0 || count==4294967295) { return 0-1; }
+  } else if(field==0-1) { return 0-1; }
+  if(!inst_geom_standard_data(input,end,scratch)) { return 0-1; }
+  let loaded=BufferGeometry_fromJSON(geo,input,end,options);
+  if(loaded<0) { return loaded; }
+  let stored=ux_u32_put(geo+InstancedBufferGeometry.instanceCount,count);
+  return loaded;
+}

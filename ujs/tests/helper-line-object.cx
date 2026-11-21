@@ -26,10 +26,11 @@ int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     int boxes=(argc==2 || argc==3) && tx_eqz(argv[1],"--boxes");
     int camera=(argc==2 || argc==3) && tx_eqz(argv[1],"--camera");
-    int alternate=boxes || camera;
+    int skeleton=(argc==2 || argc==3) && tx_eqz(argv[1],"--skeleton");
+    int alternate=boxes || camera || skeleton;
     if(alternate && argc==3) mutate=tx_eqz(argv[2],"--mutate");
     if((argc==3 && (!alternate || !mutate)) || (argc==2 && !alternate && !mutate) || argc>3) return 2;
-    char dir[256],cwd[390],abi[300],wasm[300],event[300],attribute[300],grid[300],geo[300],object[300],math[300],url[850];
+    char dir[256],cwd[390],abi[300],wasm[300],event[300],attribute[300],grid[300],geo[300],object[300],axes[300],math[300],url[850];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-helper-line-object-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/helpers.wasm",dir);
@@ -38,9 +39,10 @@ int main(int argc,char **argv) {
     tx_snprintf(grid,sizeof grid,"%s/grid-json-output.ujs",dir);
     tx_snprintf(geo,sizeof geo,"%s/geometry-attributes.ujs",dir);
     tx_snprintf(object,sizeof object,"%s/object-arena.ujs",dir);
+    tx_snprintf(axes,sizeof axes,"%s/axes-material-writer.ujs",dir);
     tx_snprintf(math,sizeof math,"%s/trig.ujs",dir);
     int length=tx_snprintf(url,sizeof url,"file://%s/" TEST "helper-line-object-r160.html?wasm=%s&mutate=%d%s",
-        cwd,wasm,mutate,camera?"&camera=1":boxes?"&boxes=1":"");
+        cwd,wasm,mutate,skeleton?"&skeleton=1":camera?"&camera=1":boxes?"&boxes=1":"");
     const char entry[]="export uxe_helper_line_object(mode:i64,kind:i64,mutate:i64) i64 version 1;\n";
     char *grid_compile[]={"./ujs/ujs2wasm.com",abi,event,BASE "geometry-load-layout.ujs",
         grid,BASE "datautils.ujs",attribute,geo,BASE "helper-buffers.ujs",BASE "gridhelper.ujs",
@@ -48,15 +50,16 @@ int main(int argc,char **argv) {
         BASE "json-read.ujs",BASE "loader-json.ujs",BASE "json-bytes.ujs",BASE "geometry-json.ujs",object,
         BASE "eventdispatcher.ujs",BASE "record-copy.ujs",BASE "material-class.ujs",
         BASE "material-field-json.ujs",BASE "material-field-read.ujs",BASE "material-fields-generated.ujs",
-        BASE "material-set-values.ujs",BASE "helper-axes-object.ujs",BASE "object3d-layout.ujs",math,
+        BASE "material-set-values.ujs",axes,BASE "object3d-layout.ujs",math,
         BASE "helper-line-object.ujs",TEST "helper-line-object-probe.ujs",
         TEST "helper-line-object-probe-common.ujs","-o",wasm,0};
     char *box_compile[]={"./ujs/ujs2wasm.com",abi,event,BASE "geometry-load-layout.ujs",
         BASE "datautils.ujs",attribute,geo,BASE "helper-buffers.ujs",
-        camera?BASE "camerahelper.ujs":BASE "box3helper.ujs",camera?grid:BASE "boxhelper.ujs",
+        camera?BASE "camerahelper.ujs":skeleton?BASE "skeletonhelper.ujs":BASE "box3helper.ujs",
+        (camera || skeleton)?grid:BASE "boxhelper.ujs",
         BASE "axeshelper.ujs",BASE "object-json-tokens.ujs",BASE "json-read.ujs",BASE "loader-json.ujs",
         BASE "json-bytes.ujs",BASE "geometry-json.ujs",
-        camera?TEST "helper-camera-object-geometry.ujs":TEST "helper-box-object-geometry.ujs",
+        camera?TEST "helper-camera-object-geometry.ujs":skeleton?TEST "helper-skeleton-object-geometry.ujs":TEST "helper-box-object-geometry.ujs",
         BASE "eventdispatcher.ujs",BASE "record-copy.ujs",BASE "material-class.ujs",
         BASE "material-field-json.ujs",BASE "material-field-read.ujs",BASE "material-fields-generated.ujs",
         BASE "material-set-values.ujs",object,BASE "object3d-layout.ujs",math,
@@ -73,8 +76,11 @@ int main(int argc,char **argv) {
     const double camera_gold[]={
         1,1,1,1,1,1,1,1,-2147483642.0,8,-6,0,50,0,0,1,-1,-1,-1,1,1,
     };
-    int count=camera?21:boxes?42:63;
-    const double *expected=camera?camera_gold:boxes?boxes_gold:gold;
+    const double skeleton_gold[]={
+        1,1,1,1,1,1,1,1,-2147483641.0,9,-7,1,2,0,0,1,-1,-1,-1,1,1,
+    };
+    int count=skeleton?21:camera?21:boxes?42:63;
+    const double *expected=skeleton?skeleton_gold:camera?camera_gold:boxes?boxes_gold:gold;
     double actual[63]={0};
     char *log=0;
     size_t size=0;
@@ -86,9 +92,10 @@ int main(int argc,char **argv) {
         source_section(BASE "object3d.ujs",0,"native function Object3D_unlink(",math);
     if(!failed && alternate) {
         failed=source_section(BASE "helper-axes-object.ujs",0,"native function AxesHelperObject_geometryToJSON(",object) ||
-            (camera && sy_write_file(grid,"\n",1,0600));
+            ((camera || skeleton) && sy_write_file(grid,"\n",1,0600));
     } else if(!failed) {
-        failed=source_section(BASE "helper-family-grid-json.ujs",0,"native function helper_grid_geometry_data(",object) ||
+        failed=source_section(BASE "helper-axes-object.ujs",0,"native function AxesObject_materialFromJSON(",axes) ||
+            source_section(BASE "helper-family-grid-json.ujs",0,"native function helper_grid_geometry_data(",object) ||
             source_section(BASE "f64-math.ujs",0,"function ux_math_tan(",grid);
     }
     if(!failed) {
@@ -104,7 +111,7 @@ int main(int argc,char **argv) {
         int field=i%CASES;
         int match=field==13 || field==14 ? g_math_near(actual[i],expected[i],1e-6) : actual[i]==expected[i];
         if(!match) {
-            printf("G_STRUCT Helper Line root kind=%d case=%d actual=%.17g gold=%.17g\n",i/CASES+(camera?6:boxes?4:1),field,actual[i],expected[i]);
+            printf("G_STRUCT Helper Line root kind=%d case=%d actual=%.17g gold=%.17g\n",i/CASES+(skeleton?7:camera?6:boxes?4:1),field,actual[i],expected[i]);
             failed++;
         }
     }

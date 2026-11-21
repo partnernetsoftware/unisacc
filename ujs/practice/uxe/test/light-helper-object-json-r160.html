@@ -1,0 +1,204 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { DirectionalLight, DirectionalLightHelper, HemisphereLight, HemisphereLightHelper, ObjectLoader,
+  PointLight, PointLightHelper, REVISION, SpotLight, SpotLightHelper } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const encode = new TextEncoder();
+const decode = new TextDecoder();
+const color = 0x4488cc;
+const types = ["PointLightHelper", "SpotLightHelper", "HemisphereLightHelper", "DirectionalLightHelper"];
+const children = [[], ["LineSegments"], ["Mesh"], ["Line", "Line"]];
+const uid = n => "00000000-0000-4000-8000-" + n.toString(16).padStart(12, "0");
+const lightMatrix = (x,y,z) => [1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1];
+
+function nativeSnapshot(wasm, kind) {
+  const run = op => Number(wasm.uxe_light_helper_native(BigInt(op), BigInt(kind + 1)));
+  const bytes = new Uint8Array(wasm.memory.buffer, run(0), 20000);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  lightMatrix(...(kind === 0 ? [1,2,3] : [0,0,-2])).forEach((value,i) =>
+    view.setFloat64(16768 + 8 * i,value,true));
+  if (run(1) < 0) throw Error("native helper init kind " + kind);
+  if (kind === 3 && query.has("mutate")) run(3);
+  if (run(2) !== 128) throw Error("native helper snapshot kind " + kind);
+  const matrixLength = (children[kind].length + 1) * 128;
+  const matrices = bytes.slice(128, 128 + matrixLength);
+  const span = (offset,count) => Array.from({length:count}, (_,i) => view.getFloat32(offset + i * 4,true));
+  const geometry = kind === 1 ? [span(17408,222)] :
+    kind === 3 ? [span(17408,15),span(18432,6)] : [];
+  const disposed = run(4) === 0 && run(2) === -1;
+  return {matrices, geometry, disposed};
+}
+
+function reference(kind, edited = false) {
+  let helper;
+  const make = [
+    () => [new PointLight(color), (light) => new PointLightHelper(light, 2)],
+    () => [new SpotLight(color, 1, 4, Math.PI / 4), (light) => new SpotLightHelper(light)],
+    () => [new HemisphereLight(color, 0x112233), (light) => new HemisphereLightHelper(light, 2)],
+    () => [new DirectionalLight(color), (light) => new DirectionalLightHelper(light, 2)]
+  ];
+  const [light, construct] = make[kind]();
+  light.position.set(...(kind === 0 ? [1, 2, 3] : [0, 0, -2]));
+  helper = construct(light);
+  helper.updateMatrixWorld(true);
+  [helper, ...helper.children].forEach((node, index) => { node.uuid = uid(index + 1); });
+  const nodes = kind === 0 ? [helper] : helper.children;
+  nodes.forEach((node, index) => { node.geometry.uuid = uid(10 + index); });
+  nodes[0].material.uuid = uid(20);
+  if (edited) {
+    helper.matrix.elements[12] = kind + .375;
+    helper.layers.mask = kind % 2 ? -2147483639 : 9;
+    helper.visible = false;
+  }
+  try { return JSON.parse(JSON.stringify(helper)); }
+  finally { helper.dispose(); }
+}
+
+function buffer(uuid, positions) {
+  return {uuid, type: "BufferGeometry", data: {attributes: {position: {
+    itemSize: 3, type: "Float32Array", array: [...Float32Array.from(positions)], normalized: false
+  }}}};
+}
+
+function resources(kind, geometry) {
+  const first = uid(10), second = uid(11);
+  const geometries = [];
+  if (kind === 0) {
+    geometries.push({uuid:first, type:"SphereGeometry", radius:2, widthSegments:4, heightSegments:2,
+      phiStart:0, phiLength:2 * Math.PI, thetaStart:0, thetaLength:Math.PI});
+  } else if (kind === 1) {
+    geometries.push(buffer(first, geometry[0]));
+  } else if (kind === 2) {
+    geometries.push({uuid:first, type:"OctahedronGeometry", radius:2, detail:0});
+  } else {
+    geometries.push(buffer(first, geometry[0]));
+    geometries.push(buffer(second, geometry[1]));
+  }
+  const mesh = kind === 0 || kind === 2;
+  const material = {uuid:uid(20), type:mesh ? "MeshBasicMaterial" : "LineBasicMaterial",
+    color:kind === 2 ? 0xffffff : color, blendColor:0, toneMapped:false, fog:false};
+  if (mesh) Object.assign(material, {reflectivity:1, refractionRatio:.98, wireframe:true});
+  if (kind === 2) material.vertexColors = true;
+  return [geometries, material];
+}
+
+function product(wasm, kind, snapshot) {
+  const run = (op, finish) => Number(wasm.uxe_light_helper_object(BigInt(op), BigInt(kind + 1), BigInt(finish)));
+  const bytes = new Uint8Array(wasm.memory.buffer, run(0, 0), 16000);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  const [geometries, material] = resources(kind, snapshot.geometry);
+  view.setUint32(40,0,true);
+  bytes.set(snapshot.matrices, 128);
+  [1,2,3].forEach((id, index) => bytes.set(encode.encode(uid(id)), 640 + index * 36));
+  [10,11,20].forEach((id, index) => bytes.set(encode.encode(uid(id)), 768 + index * 36));
+  const put = (i, value) => view.setUint32(i * 4, value, true);
+  [128,640,768,840].forEach((value,i) => put(i,value));
+  for (const [i, offset, doc] of [[4,1024,geometries[0]],[6,4900,geometries[1]],[8,5600,material]]) {
+    if (!doc) continue;
+    const raw = encode.encode(JSON.stringify(doc));
+    bytes.set(raw, offset);
+    put(i,offset);
+    put(i + 1,raw.length);
+  }
+  const expected = run(1, 16000);
+  if (expected <= 8000) throw Error("root JSON write kind " + kind + " returned " + expected);
+  const document = JSON.parse(decode.decode(bytes.subarray(8000, expected)));
+  const bounded = run(1, expected - 1) === -1;
+  bytes.fill(93, 8000, 16000);
+  bytes[840 + 35] = 102;
+  const refusedId = run(1,16000) === -1 && bytes[8000] === 93;
+  bytes[840 + 35] = encode.encode(uid(20))[35];
+  return [document, Number(bounded), Number(refusedId)];
+}
+
+function roundtrip(wasm,kind) {
+  const run = (op, finish) => Number(wasm.uxe_light_helper_object(BigInt(op), BigInt(kind + 1), BigInt(finish)));
+  const bytes = new Uint8Array(wasm.memory.buffer,run(0,0),16000);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+  const ref = reference(kind,true);
+  const input = doc => {
+    const raw = encode.encode(" " + JSON.stringify(doc) + " ");
+    bytes.set(raw,8000);
+    const op = query.has("mutateRead") ? 3 : 2;
+    return run(op,8000 + raw.length);
+  };
+  view.setUint32(512 + 16,99,true);
+  view.setUint32(512 + 20,100,true);
+  const accepted = input(ref) === 512;
+  const retained = view.getUint32(528,true) === 99 && view.getUint32(532,true) === 100;
+  const state = () => Math.abs(view.getFloat64(896 + 96,true) - (kind + .375)) < 1e-12 &&
+    view.getInt32(512 + 40,true) === ref.object.layers &&
+    view.getUint32(512 + 36,true) === 0 && view.getUint32(512 + 44,true) === 2;
+  const restored = state();
+  const wrongId = structuredClone(ref);
+  wrongId.object.uuid = uid(99);
+  const refusedId = input(wrongId) === -1 && state();
+  const broken = structuredClone(ref);
+  broken.object.visible = true;
+  broken.object.layers = 4;
+  broken.object.matrix[0] = 7;
+  broken.object.matrix[15] = "invalid";
+  const refusedMatrix = input(broken) === -1 && state() && view.getFloat64(896,true) === 1;
+  const written = run(1,16000);
+  if (written <= 8000) throw Error("bound write refused kind " + kind);
+  const doc = JSON.parse(decode.decode(bytes.subarray(8000,written)));
+  const difference = compare(ref,doc,"$");
+  if (difference && !query.has("mutate") && !query.has("mutateRead")) throw Error("bound roundtrip " + types[kind] + " " + difference);
+  return [accepted && retained, restored, refusedId, refusedMatrix, !difference].map(Number);
+}
+
+function compare(ref, actual, path = "") {
+  if (typeof ref === "number") return typeof actual === "number" && Math.abs(ref - actual) < 1e-9 ? "" : path;
+  if (ref === null || typeof ref !== "object") return ref === actual ? "" : path;
+  if (actual === null || typeof actual !== "object") return path;
+  const keys = Object.keys(ref).sort();
+  if (keys.join() !== Object.keys(actual).sort().join()) return path + " keys " + Object.keys(actual);
+  for (const key of keys) {
+    const difference = compare(ref[key], actual[key], path + "." + key);
+    if (difference) return difference;
+  }
+  return "";
+}
+
+function facts(document, kind) {
+  const root = document.object;
+  const sub = root.children ?? [];
+  const matrixSizes = [root, ...sub].every(node =>
+    node.layers === 1 && node.matrix.length === 16 && node.up.join() === "0,1,0");
+  const owners = kind === 0 ? [root] : sub;
+  const resourceLinks = owners.every((node,i) => node.geometry === document.geometries[i].uuid &&
+    node.material === document.materials[0].uuid);
+  const parsed = new ObjectLoader().parse(document);
+  const resolved = kind === 0 || parsed.children.every((node,i) =>
+    node.geometry.uuid === document.geometries[i].uuid && node.material.uuid === document.materials[0].uuid);
+  return [root.type === types[kind], sub.map(node => node.type).join() === children[kind].join(),
+    matrixSizes, root.matrixAutoUpdate === false, Number(root.geometry !== undefined), Number(root.material !== undefined),
+    document.geometries.length, document.materials.length, resourceLinks, resolved,
+    root.matrix[14], kind === 3 ? sub[1].matrix[10] : 0].map(Number);
+}
+
+try {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const {instance:{exports:wasm}} = await WebAssembly.instantiate(await response.arrayBuffer());
+  const nativeResponse = await fetch("file://" + query.get("dir") + "/native.wasm");
+  const {instance:{exports:native}} = await WebAssembly.instantiate(await nativeResponse.arrayBuffer());
+  if (wasm.uxe_abi_version() !== 1 || native.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const answers = [];
+  const rebound = [];
+  for (let kind = 0; kind < 4; kind++) {
+    const ref = reference(kind);
+    const snapshot = nativeSnapshot(native,kind);
+    const [actual, bounded, refusedId] = product(wasm, kind, snapshot);
+    const difference = compare(ref, actual, "$");
+    if (difference && !query.has("mutate")) throw Error(types[kind] + " " + difference);
+    answers.push(...facts(ref,kind), ...facts(actual,kind), Number(!difference), bounded, refusedId, Number(snapshot.disposed));
+    rebound.push(...roundtrip(wasm,kind));
+  }
+  output.textContent = JSON.stringify([...answers,...rebound]);
+} catch (error) { output.textContent = "error:" + error.message; }
+</script>

@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const cases=[
+  {kind:10,type:"PointsMaterial",field:"size",value:7.5,fallback:1,color:0x3366cc},
+  {kind:11,type:"LineBasicMaterial",field:"linewidth",value:2.5,fallback:1,color:0x885022},
+  {kind:13,type:"SpriteMaterial",field:"rotation",value:-.5,fallback:0,color:0x33bb66},
+];
+function values(object,item) {
+  if(object.type!==item.type || object["is"+item.type]!==true) throw new Error("class identity");
+  return [object.color.getHex(),Number(object.fog),Number(object.sizeAttenuation??true),object[item.field],
+    Number(object.transparent),object.opacity,object.side];
+}
+function fields(json,item) {
+  if(json.type!==item.type || (json.fog!==undefined && typeof json.fog!=="boolean") ||
+     (json.sizeAttenuation!==undefined && typeof json.sizeAttenuation!=="boolean")) throw new Error("field types");
+  return [item.kind,json.color,json[item.field]??item.fallback,Number(json.sizeAttenuation??true),
+    Number(json.fog??true),Number(json.transparent??(item.kind===13)),json.opacity??1,json.side??0,
+    Number(Object.hasOwn(json,item.field)),Number(Object.hasOwn(json,"sizeAttenuation")),
+    Number(Object.hasOwn(json,"fog")),Number(Object.hasOwn(json,"transparent"))];
+}
+function reference(item) {
+  const Constructor=THREE[item.type],loader=new THREE.MaterialLoader();
+  const source=new Constructor(),result=values(source,item);
+  const options={color:item.color,fog:false,opacity:.5,side:2,transparent:true,[item.field]:item.value};
+  if(item.kind!==11) options.sizeAttenuation=false;
+  if(item.kind===11) { options.linecap="square"; options.linejoin="bevel"; }
+  source.setValues(options);
+  const json=source.toJSON(),parsed=loader.parse(json),copy=new Constructor().copy(parsed);
+  if(item.kind===11 && (Object.hasOwn(json,"linecap") || Object.hasOwn(json,"linejoin")))
+    throw new Error("unexpected line cap/join JSON");
+  const defaults=loader.parse({type:item.type});
+  result.push(...values(parsed,item),...fields(parsed.toJSON(),item),...values(copy,item),
+    ...values(loader.parse(parsed.toJSON()),item),...values(defaults,item),...fields(defaults.toJSON(),item),
+    ...values(loader.parse(parsed.toJSON()),item));
+  return {result,json};
+}
+function product(wasm,item,json) {
+  const run=(op,arg=0)=>Number(wasm.uxe_pls_json(BigInt(op),BigInt(item.kind),BigInt(arg),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,6144);
+  const data=new Uint8Array(wasm.memory.buffer,base,6144),encoder=new TextEncoder(),decoder=new TextDecoder();
+  if(run(1)!==0) throw new Error("native constructor");
+  const snap=(obj=0)=>{
+    const address=run(3,obj);
+    return Array.from({length:7},(_,i)=>heap.getFloat64(address+8*i,true));
+  };
+  const exportText=(obj=0)=>{
+    const end=run(4,obj);
+    if(end<=3072) throw new Error("JSON writer "+end);
+    return decoder.decode(data.subarray(3072,end));
+  };
+  const load=text=>{
+    const bytes=encoder.encode(text);
+    data.set(bytes,1024);
+    return run(2,bytes.length);
+  };
+  const result=snap();
+  if(load(JSON.stringify(json))!==512) throw new Error("r160 JSON import");
+  result.push(...snap());
+  const encoded=exportText(),projected=JSON.parse(encoded);
+  result.push(...fields(projected,item));
+  if(run(5)!==640 || exportText(1)!==encoded) throw new Error("native material copy");
+  result.push(...snap(1),...values(new THREE.MaterialLoader().parse(projected),item));
+  if(load(JSON.stringify({type:item.type}))!==512) throw new Error("default JSON import");
+  result.push(...snap(),...fields(JSON.parse(exportText()),item));
+  if(load(encoded)!==512) throw new Error("native JSON reload");
+  result.push(...snap());
+  for(const data of [{...json,type:"MeshBasicMaterial"},{...json,color:1.5},
+    {...json,fog:1},{...json,[item.field]:"wrong"}]) {
+    const previous=exportText();
+    result.push(load(JSON.stringify(data)),Number(previous===exportText()));
+  }
+  return result;
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const result=[];
+  for(const item of cases) {
+    const ref=reference(item);
+    result.push(...product(wasm,item,ref.json),...ref.result);
+  }
+  output.textContent=JSON.stringify(result);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

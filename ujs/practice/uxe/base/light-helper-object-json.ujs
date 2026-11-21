@@ -1,0 +1,350 @@
+// The object graph owns topology and UUID links. Geometry and material codecs
+// supply their resource documents through separate, bounded byte ranges.
+struct LightHelperObjectJson {
+  matrices: u32;
+  objectIds: u32;
+  geometryIds: u32;
+  materialId: u32;
+  geometries: u32;
+  geometryBytes: u32;
+  secondGeometry: u32;
+  secondGeometryBytes: u32;
+  material: u32;
+  materialBytes: u32;
+  rootState: u32;
+}
+
+native function lh_object_token(dst:i64,end:i64,key:i64) i64 {
+  let ends=[0,87,102,113,120,128,150,164,189,201,213,226,242,257,278,300,304,316,320];
+  let data=[27413442468343074,33251959903510900,9691573997761125,32688670581339194,22274156240662649,
+    12422782254410338,27428852710336290,22274156241514356,19196873393138274,22042267333129262,
+    31355216044260642,32481125887927661,30718346401626658,30506403003462753,9618928682279539,
+    9698119460217455,9680553313116730,28552639589526586,34165589239675426,12439024731124325,
+    33892937505008930,32970146215311906,13840860059411056,27423066281553964,32780021351936628,
+    28556934293509487,28555881975527970,28549297857831468,9618777406272116,27419012790247789,
+    29382395999953516,9691531198098537,32772496416594746,28508637452790092,31367226118729836,
+    20394190083542132,28508628813114469,32199646582630765,20394190083542117,29630130673445989,
+    31084746153092466,32765890655972449,21799353210135880,28550371180311397,32772479204681043,
+    435644091507];
+  let start=ends[key];
+  let finish=ends[key+1];
+  if(dst<0 || finish-start>end-dst) { return 0-1; }
+  let i=start;
+  while(i<finish) {
+    let word=data[i/7];
+    let slot=i%7;
+    while(slot>0) { word=word/256; slot=slot-1; }
+    let saved=ux_u8_put(dst+i-start,word%256);
+    i=i+1;
+  }
+  return dst+finish-start;
+}
+
+native function lh_object_span(at:i64,size:i64,alignment:i64) i64 {
+  return at>=0 && size>=0 && at%alignment==0 && at<=6291456-size;
+}
+
+native function lh_object_disjoint(at:i64,size:i64,other:i64,bytes:i64) i64 {
+  return size==0 || bytes==0 || at+size<=other || other+bytes<=at;
+}
+
+native function lh_object_copy(dst:i64,end:i64,src:i64,size:i64) i64 {
+  if(dst<0 || size>end-dst) { return 0-1; }
+  let i=0;
+  while(i<size) {
+    let saved=ux_u8_put(dst+i,ux_u8(src+i));
+    i=i+1;
+  }
+  return dst+size;
+}
+
+native function lh_object_uuid(at:i64) i64 {
+  let i=0;
+  while(i<36) {
+    let c=ux_u8(at+i);
+    if(i==8 || i==13 || i==18 || i==23) {
+      if(c!=45) { return 0; }
+    } else if(!(c>=48 && c<=57) && !(c>=97 && c<=102)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function lh_object_same_id(a:i64,b:i64) i64 {
+  let i=0;
+  while(i<36) {
+    if(ux_u8(a+i)!=ux_u8(b+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function lh_object_resource(at:i64,bytes:i64,id:i64,scratch:i64) i64 {
+  let end=at+bytes;
+  let root=json_space(at,end);
+  if(root>=end || ux_u8(root)!=123) { return 0; }
+  let finish=json_value_end(root,end);
+  if(finish<0 || json_space(finish,end)!=end) { return 0; }
+  let key=ux_u32_put(scratch,1684632949);
+  let value=json_find_key(root,finish,scratch,4);
+  return value>=0 && value+38<=finish && ux_u8(value)==34 && ux_u8(value+37)==34 &&
+    lh_object_same_id(value+1,id);
+}
+
+native function lh_object_word(at:i64,word:i64,bytes:i64) i64 {
+  let i=0;
+  while(i<bytes) {
+    let saved=ux_u8_put(at+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return at+bytes;
+}
+
+native function lh_object_root_flags(p:i64,end:i64,node:i64,scratch:i64) i64 {
+  // Root layers use Object3D's signed 32-bit wire mask.
+  let layers=1;
+  let visible=1;
+  if(node!=0) {
+    layers=ux_u32(node+Object3D.layerMask);
+    visible=ux_u32(node+Object3D.visible);
+  }
+  if(layers>=2147483648) { layers=layers-4294967296; }
+  let key=lh_object_word(scratch,8318823033706652204,8);
+  let suffix=lh_object_word(key,14882,2);
+  p=lh_object_copy(p,end,scratch,10);
+  p=json_write_f64(p,end,0.0+layers,scratch);
+  if(!visible) {
+    let name=lh_object_word(scratch,7809920648225366572,8);
+    let tail=lh_object_word(name,7310305785735160421,8);
+    p=lh_object_copy(p,end,scratch,16);
+  }
+  return p;
+}
+
+native function lh_object_node(dst:i64,end:i64,type:i64,id:i64,matrix:i64,geo:i64,material:i64,scratch:i64) i64 {
+  let p=json_byte(dst,end,123);
+  p=lh_object_token(p,end,3);
+  p=json_write_string(p,end,id,36);
+  p=lh_object_token(p,end,4);
+  p=json_byte(p,end,34);
+  p=lh_object_token(p,end,type);
+  p=json_byte(p,end,34);
+  if(type>=15) { p=lh_object_token(p,end,5); }
+  else {
+    let key=lh_object_word(scratch,8676592001282286124,8);
+    let suffix=lh_object_word(key,5978658,3);
+    p=lh_object_copy(p,end,scratch,11);
+  }
+  let i=0;
+  while(p>=0 && i<16) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,ux_f64(matrix+i*8),scratch);
+    i=i+1;
+  }
+  p=lh_object_token(p,end,6);
+  if(type<15) { p=lh_object_token(p,end,7); }
+  if(geo>=0) {
+    p=lh_object_token(p,end,8);
+    p=json_write_string(p,end,geo,36);
+  }
+  if(material>=0) {
+    p=lh_object_token(p,end,9);
+    p=json_write_string(p,end,material,36);
+  }
+  return p;
+}
+
+// Kind 1 point, 2 spot, 3 hemisphere, 4 directional. Matrices and object
+// UUIDs are in root, first child, second child order. Resources appear once,
+// and a directional helper's two children share the single material UUID.
+native function LightHelperObject_writeJSON(kind:i64,record:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(kind<1 || kind>4 || !lh_object_span(record,LightHelperObjectJson.size,4) ||
+     !lh_object_span(dst,end-dst,1) || end<=dst || !lh_object_span(scratch,1104,8) ||
+     !lh_object_disjoint(dst,end-dst,scratch,1104) ||
+     !lh_object_disjoint(record,LightHelperObjectJson.size,dst,end-dst) ||
+     !lh_object_disjoint(record,LightHelperObjectJson.size,scratch,1104)) { return 0-1; }
+  let nodes=1;
+  let geometryCount=1;
+  if(kind!=1) { nodes=2; }
+  if(kind==4) { nodes=3; geometryCount=2; }
+  let matrices=ux_u32(record+LightHelperObjectJson.matrices);
+  let ids=ux_u32(record+LightHelperObjectJson.objectIds);
+  let gids=ux_u32(record+LightHelperObjectJson.geometryIds);
+  let mid=ux_u32(record+LightHelperObjectJson.materialId);
+  let geometry=ux_u32(record+LightHelperObjectJson.geometries);
+  let geometryBytes=ux_u32(record+LightHelperObjectJson.geometryBytes);
+  let second=ux_u32(record+LightHelperObjectJson.secondGeometry);
+  let secondBytes=0;
+  if(kind==4) { secondBytes=ux_u32(record+LightHelperObjectJson.secondGeometryBytes); }
+  let material=ux_u32(record+LightHelperObjectJson.material);
+  let materialBytes=ux_u32(record+LightHelperObjectJson.materialBytes);
+  let node=ux_u32(record+LightHelperObjectJson.rootState);
+  let rootMatrix=matrices;
+  if(node!=0) {
+    if(!lh_object_span(node,Object3D.size,4) || !lh_object_disjoint(node,Object3D.size,dst,end-dst) ||
+       !lh_object_disjoint(node,Object3D.size,scratch,1104) || ux_u32(node+Object3D.visible)>1) { return 0-1; }
+    rootMatrix=ux_u32(node+Object3D.localMatrix);
+    if(!lh_object_span(rootMatrix,128,8) || !lh_object_disjoint(rootMatrix,128,dst,end-dst) ||
+       !lh_object_disjoint(rootMatrix,128,scratch,1104)) { return 0-1; }
+    let r=0;
+    while(r<16) {
+      let x=ux_f64(rootMatrix+r*8);
+      if(x-x!=0.0) { return 0-1; }
+      r=r+1;
+    }
+  }
+  let at=[matrices,ids,gids,mid,geometry,second,material];
+  let sizes=[nodes*128,nodes*36,geometryCount*36,36,geometryBytes,secondBytes,materialBytes];
+  let i=0;
+  while(i<7) {
+    if(!lh_object_span(at[i],sizes[i],1) || !lh_object_disjoint(at[i],sizes[i],dst,end-dst) ||
+       !lh_object_disjoint(at[i],sizes[i],scratch,1104)) { return 0-1; }
+    i=i+1;
+  }
+  if(matrices%8!=0 || !lh_object_uuid(mid) || !lh_object_uuid(gids) ||
+     (kind==4 && (!lh_object_uuid(gids+36) || lh_object_same_id(gids,gids+36)))) { return 0-1; }
+  i=0;
+  while(i<nodes) {
+    if(!lh_object_uuid(ids+i*36)) { return 0-1; }
+    let j=0;
+    while(j<i) {
+      if(lh_object_same_id(ids+i*36,ids+j*36)) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<nodes*16) {
+    let value=ux_f64(matrices+i*8);
+    if(value-value!=0.0) { return 0-1; }
+    i=i+1;
+  }
+  if(!lh_object_resource(geometry,geometryBytes,gids,scratch) ||
+     !lh_object_resource(material,materialBytes,mid,scratch) ||
+     (kind==4 && !lh_object_resource(second,secondBytes,gids+36,scratch))) { return 0-1; }
+  let p=json_byte(dst,end,123);
+  p=lh_object_token(p,end,0);
+  p=lh_object_copy(p,end,geometry,geometryBytes);
+  if(kind==4) {
+    p=json_byte(p,end,44);
+    p=lh_object_copy(p,end,second,secondBytes);
+  }
+  p=lh_object_token(p,end,1);
+  p=lh_object_copy(p,end,material,materialBytes);
+  p=lh_object_token(p,end,2);
+  let rootGeometry=0-1;
+  let rootMaterial=0-1;
+  if(kind==1) { rootGeometry=gids; }
+  if(kind==1 || kind==3) { rootMaterial=mid; }
+  p=lh_object_node(p,end,10+kind,ids,rootMatrix,rootGeometry,rootMaterial,scratch);
+  p=lh_object_root_flags(p,end,node,scratch);
+  if(nodes>1) {
+    p=lh_object_token(p,end,10);
+    let childType=15;
+    if(kind==2) { childType=16; }
+    if(kind==4) { childType=17; }
+    p=lh_object_node(p,end,childType,ids+36,matrices+128,gids,mid,scratch);
+    p=json_byte(p,end,125);
+    if(nodes==3) {
+      p=json_byte(p,end,44);
+      p=lh_object_node(p,end,17,ids+72,matrices+256,gids+36,mid,scratch);
+      p=json_byte(p,end,125);
+    }
+    p=json_byte(p,end,93);
+  }
+  p=json_byte(p,end,125);
+  return json_byte(p,end,125);
+}
+
+native function lh_object_property(at:i64,end:i64,scratch:i64,word:i64,bytes:i64) i64 {
+  let key=lh_object_word(scratch,word,bytes);
+  return json_find_key(at,end,scratch,bytes);
+}
+
+native function lh_object_read_matrix(mat:i64,end:i64,dst:i64) i64 {
+  if(mat<0 || ux_u8(mat)!=91) { return 0; }
+  let p=json_space(mat+1,end);
+  let i=0;
+  while(i<16) {
+    if(p<0 || p>=end) { return 0; }
+    let n=json_read_number(p,end);
+    if(n-n!=0.0) { return 0; }
+    let saved=ux_f64_put(dst+i*8,n);
+    p=json_space(json_scalar_end(p,end),end);
+    if(p<0 || p>=end) { return 0; }
+    if(i<15) {
+      if(ux_u8(p)!=44) { return 0; }
+      p=json_space(p+1,end);
+    }
+    i=i+1;
+  }
+  return ux_u8(p)==93;
+}
+
+// Restore the root into an already bound Object3D. The existing resources,
+// children and the live light association remain held by the caller.
+native function LightHelperObject_readJSON(kind:i64,node:i64,record:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(kind<1 || kind>4 || !lh_object_span(node,Object3D.size,4) ||
+     !lh_object_span(record,LightHelperObjectJson.size,4) ||
+     !lh_object_span(input,end-input,1) || end<=input || !lh_object_span(scratch,160,8)) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  let id=ux_u32(record+LightHelperObjectJson.objectIds);
+  if(!lh_object_span(matrix,128,8) || !lh_object_span(id,36,1) || !lh_object_uuid(id)) { return 0-1; }
+  let places=[node,record,input,scratch,matrix,id];
+  let sizes=[Object3D.size,LightHelperObjectJson.size,end-input,160,128,36];
+  let i=0;
+  while(i<6) {
+    let j=0;
+    while(j<i) {
+      if(!lh_object_disjoint(places[i],sizes[i],places[j],sizes[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let finish=json_value_end(input,end);
+  if(finish<0 || json_space(finish,end)!=end) { return 0-1; }
+  let obj=lh_object_property(input,finish,scratch,127970252055151,6);
+  if(obj<0 || ux_u8(obj)!=123) { return 0-1; }
+  let objEnd=json_value_end(obj,finish);
+  let uuid=lh_object_property(obj,objEnd,scratch,1684632949,4);
+  if(uuid<0 || json_scan_string(uuid,objEnd)!=uuid+38 || !lh_object_same_id(uuid+1,id)) { return 0-1; }
+  let type=lh_object_property(obj,objEnd,scratch,1701869940,4);
+  let nameEnd=lh_object_token(scratch,scratch+32,10+kind);
+  if(type<0 || json_scan_string(type,objEnd)!=type+2+nameEnd-scratch) { return 0-1; }
+  i=0;
+  while(i<nameEnd-scratch) {
+    if(ux_u8(type+1+i)!=ux_u8(scratch+i)) { return 0-1; }
+    i=i+1;
+  }
+  let key=lh_object_word(scratch,8449166770210890093,8);
+  let keyEnd=lh_object_word(key,7310575179138428788,8);
+  let auto=json_find_key(obj,objEnd,scratch,keyEnd-scratch);
+  if(auto<0 || ux_u8(auto)!=102 || json_scalar_end(auto,objEnd)!=auto+5) { return 0-1; }
+  let show=lh_object_property(obj,objEnd,scratch,28548142579542390,7);
+  let visible=1;
+  if(show!=0-2) {
+    if(show<0) { return 0-1; }
+    let first=ux_u8(show);
+    let close=json_scalar_end(show,objEnd);
+    if(first==102 && close==show+5) { visible=0; }
+    else if(first!=116 || close!=show+4) { return 0-1; }
+  }
+  let layers=lh_object_property(obj,objEnd,scratch,126935165919596,6);
+  let value=json_read_number(layers,objEnd);
+  if(!(value>=0.0-2147483648.0 && value<=2147483647.0)) { return 0-1; }
+  let mask=f64_floor_i64(value);
+  if(value!=0.0+mask) { return 0-1; }
+  if(mask<0) { mask=mask+4294967296; }
+  let mat=lh_object_property(obj,objEnd,scratch,132394287128941,6);
+  if(!lh_object_read_matrix(mat,objEnd,scratch+32)) { return 0-1; }
+  i=0;
+  while(i<16) {
+    let pose=ux_f64_put(matrix+i*8,ux_f64(scratch+32+i*8));
+    i=i+1;
+  }
+  let layer=ux_u32_put(node+Object3D.layerMask,mask);
+  let shown=ux_u32_put(node+Object3D.visible,visible);
+  let dirty=ux_u32_put(node+Object3D.dirty,2);
+  return node;
+}

@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { LatheGeometry, ObjectLoader, REVISION, Vector2 } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const maxError = (a, b) => a.length === b.length
+  ? a.reduce((error, value, i) => Math.max(error, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+const compare = (a, b) => ["position", "normal", "uv"].map(name =>
+  maxError(a.attributes[name].array, b.attributes[name].array))
+  .concat(maxError(a.index.array, b.index.array));
+const descriptor = geometry => [geometry.attributes.position.count, geometry.index.count,
+  geometry.attributes.position.getZ(1), geometry.index.getX(1)];
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(binary);
+  const api = instance.exports;
+  const mutate = BigInt(query.get("mutate"));
+  const run = (mode, length = 0) => Number(api.uxe_lathe_public(BigInt(mode), BigInt(length), mutate));
+  const base = run(0);
+  const memory = new Uint8Array(api.memory.buffer, base, 60000);
+  const view = new DataView(api.memory.buffer, base, 60000);
+  memory.set(encoder.encode("lathe"), 6000);
+  memory.set(encoder.encode('lat "A"'), 6016);
+  const send = obj => {
+    const bytes = encoder.encode(JSON.stringify(obj));
+    memory.set(bytes, 48000);
+    return bytes.length;
+  };
+  const loader = new ObjectLoader();
+  const decode = length => {
+    if (length <= 0) throw new Error("native JSON status " + length);
+    const doc = JSON.parse(decoder.decode(memory.subarray(4096, 4096 + length)));
+    const data = offset => view.getUint32(7000 + offset * 4, true);
+    const vertexCount = data(4), indexCount = data(5);
+    const position = new Float32Array(api.memory.buffer, base + data(0), vertexCount * 3).slice();
+    const normal = new Float32Array(api.memory.buffer, base + data(1), vertexCount * 3).slice();
+    const uv = new Float32Array(api.memory.buffer, base + data(2), vertexCount * 2).slice();
+    const index = new Uint16Array(api.memory.buffer, base + data(3), indexCount).slice();
+    return {doc, mesh: { attributes: { position: {array: position}, normal: {array: normal}, uv: {array: uv} },
+      index: {array: index} }, loaded: loader.parseGeometries([doc]).lathe};
+  };
+  const reference = new LatheGeometry([new Vector2(0, -1), new Vector2(1, 0), new Vector2(.5, 2)], 5.5, .25, 8);
+  reference.uuid = "lathe";
+  reference.name = 'lat "A"';
+  const expected = reference.toJSON();
+  const created = decode(run(1));
+  const restored = decode(run(2, send(expected)));
+  const defaults = decode(run(3, send({})));
+  const fallback = new LatheGeometry();
+  const bad = run(4, send({points: [{x:0, y:0}, {x:1}]}));
+  const over = run(5, send({points: [...expected.points, {x:0, y:3}]}));
+  const alias = run(6, send(expected));
+  const near = (a, b) => Math.abs(a - b) <= 4 * Number.EPSILON * Math.max(1, Math.abs(b));
+  const equalParams = (a, b) => Number(a.type === b.type && a.uuid === b.uuid && a.name === b.name &&
+    near(a.segments, b.segments) && near(a.phiStart, b.phiStart) && near(a.phiLength, b.phiLength) &&
+    a.points.length === b.points.length && a.points.every((p, i) => near(p.x, b.points[i].x) && near(p.y, b.points[i].y)));
+  result.textContent = JSON.stringify([
+    equalParams(created.doc, expected), equalParams(restored.doc, expected),
+    created.doc.points[1].x, restored.doc.points[1].x, defaults.doc.points[1].x,
+    created.doc.segments, created.doc.phiStart, created.doc.phiLength, defaults.doc.phiLength,
+    ...descriptor(created.loaded), ...descriptor(restored.loaded), ...descriptor(defaults.loaded),
+    ...compare(created.mesh, reference), ...compare(restored.mesh, reference),
+    ...compare(created.loaded, reference), ...compare(restored.loaded, reference),
+    ...compare(defaults.mesh, fallback), ...compare(defaults.loaded, fallback),
+    bad, over, alias,
+  ]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

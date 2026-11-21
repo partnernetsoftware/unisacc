@@ -1,0 +1,69 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+enum { shared=45, ref_offset=55, count=100 };
+static const double gold[shared]={
+    0,1,1,1,1, 0,-1,1,1,1,
+    0x3366bb,0,1,.5,0, 0x3366bb,0,1,.5,0,
+    0x3366bb,0,1,.5,0, 0x3366bb,0,1,.5,0, 0x3366bb,0,1,.5,0,
+    0,1,0,1,1, 0,-1,-1,1,1,
+};
+
+static int event_layout(const char *file) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&bytes,20000)) return 1;
+    const char *text=(const char *)raw;
+    const char anchor[]="struct EventDispatcher {";
+    const long start=tx_find(text,bytes,anchor,sizeof anchor-1);
+    const long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+    const int failed=end<0 || sy_write_file(file,text+start,end+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],layout[320],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-shadow-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(layout,sizeof layout,"%s/event.ujs",dir);
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/shadow.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "shadow-material-object-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char signature[]="export uxe_shadow_json(op:i64,arg:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,layout,BASE "record-copy.ujs",BASE "eventdispatcher.ujs",
+        BASE "material-class.ujs",BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "loaderutils.ujs",
+        BASE "json-string-decode.ujs",BASE "material-field-json.ujs",BASE "material-field-read.ujs",
+        BASE "material-fields-generated.ujs",BASE "material-set-values.ujs",BASE "shadow-material-object.ujs",
+        BASE "shadow-material-object-json.ujs",FIX "shadow-material-object-probe.ujs","-o",wasm,0};
+    double actual[count]={0};
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,signature,sizeof signature-1,0600) || event_layout(layout);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("SHADOW_JSON compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) {
+        const double want=i<shared?gold[i]:i<ref_offset?((i-shared)%2?1:-1):gold[i-ref_offset];
+        if(actual[i]!=want) {
+            printf("SHADOW_JSON case=%d actual=%.17g gold=%.17g\n",i,actual[i],want);
+            failed++;
+        }
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT ShadowMaterial JSON cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

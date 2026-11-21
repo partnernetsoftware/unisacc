@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const custom={color:0x3366bb,fog:false,opacity:.5,depthWrite:false};
+const partial={type:"ShadowMaterial",transparent:false};
+const defaults={type:"ShadowMaterial"};
+function values(material) {
+  if(material.type!=="ShadowMaterial" || !material.isShadowMaterial) throw new Error("shadow kind");
+  return [material.color.getHex(),Number(material.fog),Number(material.transparent),material.opacity,Number(material.depthWrite)];
+}
+function projection(json) {
+  if(json.type!=="ShadowMaterial" || !Number.isInteger(json.color)) throw new Error("shadow JSON kind");
+  for(const key of ["fog","transparent","depthWrite"])
+    if(Object.hasOwn(json,key) && typeof json[key]!=="boolean") throw new Error("shadow JSON flag "+key);
+  return [json.color,Number(json.fog??-1),Number(json.transparent??-1),json.opacity??1,Number(json.depthWrite??true)];
+}
+function reference() {
+  const loader=new THREE.MaterialLoader();
+  const plain=loader.parse(defaults),source=new THREE.ShadowMaterial(custom);
+  const raw=source.toJSON(),loaded=loader.parse(raw),encoded=loaded.toJSON();
+  const copy=new THREE.ShadowMaterial().copy(loaded),explicit=loader.parse(partial);
+  return {raw,observed:[...values(plain),...projection(plain.toJSON()),...values(loaded),...projection(encoded),
+    ...values(copy),...values(loader.parse(encoded)),...values(loader.parse(encoded)),
+    ...values(explicit),...projection(explicit.toJSON())]};
+}
+async function product(raw) {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const mode=BigInt(query.get("mode"));
+  const run=(op,arg=0)=>Number(wasm.uxe_shadow_json(BigInt(op),BigInt(arg),mode));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,6144);
+  const bytes=new Uint8Array(wasm.memory.buffer,base,6144),enc=new TextEncoder(),dec=new TextDecoder();
+  const load=text=>{
+    const input=enc.encode(text);
+    bytes.set(input,1024);
+    return run(2,input.length);
+  };
+  const snap=(obj=0)=>{
+    const at=run(3,obj);
+    return Array.from({length:5},(_,i)=>heap.getFloat64(at+8*i,true));
+  };
+  const write=(obj=0)=>{
+    const end=run(4,obj);
+    if(end<=3072) throw new Error("shadow JSON write");
+    return dec.decode(bytes.subarray(3072,end));
+  };
+  const loader=new THREE.MaterialLoader();
+  if(run(1)!==0) throw new Error("native constructor");
+  const result=[...snap(),...projection(JSON.parse(write()))];
+  if(load(JSON.stringify(raw))!==512) throw new Error("r160 JSON import");
+  const encoded=write(),json=JSON.parse(encoded);
+  result.push(...snap(),...projection(json));
+  if(run(5)!==640 || write(1)!==encoded) throw new Error("native copy");
+  result.push(...snap(1),...values(loader.parse(json)));
+  if(load(JSON.stringify(defaults))!==512 || load(encoded)!==512) throw new Error("own JSON import");
+  result.push(...snap());
+  if(load(JSON.stringify(partial))!==512) throw new Error("field defaults");
+  result.push(...snap(),...projection(JSON.parse(write())));
+  if(load(encoded)!==512) throw new Error("reload for negative cases");
+  for(const invalid of [
+    {...raw,fog:0,opacity:.25},{...raw,color:1.5,opacity:.25},{...raw,transparent:0,opacity:.25},
+    {...raw,depthWrite:1,opacity:.25},{...raw,type:"MeshBasicMaterial",opacity:.25},
+  ]) {
+    const before=write();
+    result.push(load(JSON.stringify(invalid)),Number(before===write()));
+  }
+  return result;
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision");
+  const ref=reference();
+  output.textContent=JSON.stringify([...await product(ref.raw),...ref.observed]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
