@@ -1,0 +1,207 @@
+/* tools/check-own-adoption.cx -- ratchet for the memory-safety adoption gates (plans/memory-safety.md section 2).
+ *
+ *   sh ./unisacc.com tools/check-own-adoption.cx        (from the repo root)
+ *
+ * Reads build/own-adoption.tsv (gate scope metric baseline dir note) and measures the live value of every row:
+ *   G3  tools/cx-own.cx --tracked over the scope's directories (double_free, use_after_free, leak, skipped;
+ *       functions and owners are reported only), and the row count of build/own-escapes.tsv.
+ *   G1  tracked .cx files with a line-start `#pragma unisa safe`, per domain.
+ *   PILOT_MIN / PILOT  the registered pilot units: each must be readable and give cx-own zero findings and
+ *       zero skips; their number must reach the minimum.
+ * Ratchet: dir=down means the live value may not rise, dir=up that it may not fall; a live value that is
+ * better than the baseline also fails (stale table: write the new number into the table in the same commit).
+ * Controls run every time: the judge on mirrored cases, and a planted leak fixture that must push the
+ * product5 leak count over its baseline.  OWN_ADOPTION_PLANT=FILE adds that file to the product5 scope (a
+ * manual red/green probe).  Pilot units only count when the pragma itself is not required yet: the pragma
+ * is implemented in the planner (cx/cx0/plan.cx, check-own-flow-product), the pilot sources do not carry it.
+ * Last line CHECK_OWN_ADOPTION<TAB>assertions=N<TAB>failed=M ...; rc 1 when M > 0, rc 2 on a read error. */
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int assertions, failed;
+static void ck(int ok, const char *what) { assertions++; if (!ok) { failed++; printf("FAIL\t%s\n", what); } }
+
+/* 0 equal, 1 worse than the baseline (raised for down, fell for up), 2 better (stale table) */
+static int judge(int dirc, long live, long base) {
+    if (live == base) return 0;
+    if (dirc == 'd') return live > base ? 1 : 2;
+    return live < base ? 1 : 2;
+}
+
+static const char *scope_dirs(const char *s) {
+    if (!strcmp(s, "product5")) return "src cx/core cx/runtime cx/compiler cx/driver";
+    if (!strcmp(s, "cx")) return "cx";
+    if (!strcmp(s, "ext")) return "ext";
+    return 0;
+}
+
+/* value of KEY in the CX_OWN summary line of O, -1 when absent */
+static long sumval(const char *o, const char *key) {
+    char pat[64];
+    const char *l = strstr(o, "CX_OWN\tfiles=");
+    const char *e, *k;
+    if (!l) return -1;
+    e = strchr(l, '\n');
+    if (cx_fmt(pat, sizeof pat, "\t%s=", key)) return -1;
+    k = strstr(l, pat);
+    if (!k || (e && k > e)) return -1;
+    return atol(k + strlen(pat));
+}
+
+/* owners from the CX_OWN_DETAIL line */
+static long detval(const char *o, const char *key) {
+    char pat[64];
+    const char *l = strstr(o, "CX_OWN_DETAIL\t");
+    const char *e, *k;
+    if (!l) return -1;
+    e = strchr(l, '\n');
+    if (cx_fmt(pat, sizeof pat, "\t%s=", key)) return -1;
+    k = strstr(l, pat);
+    if (!k || (e && k > e)) return -1;
+    return atol(k + strlen(pat));
+}
+
+static char *runout(const char *cmd) {
+    char *out = 0; size_t n = 0;
+    cx_run_timeout(cmd, 50, &out, &n);
+    return out;
+}
+
+static long own_metric(const char *o, const char *metric) {
+    if (!strcmp(metric, "owners")) return detval(o, "owners");
+    return sumval(o, metric);
+}
+
+static char *scope_out[4]; static const char *scope_name[4]; static int nscope;
+static char *plant_out;
+
+static char *scope_run(const char *scope) {
+    int i; char cmd[1024];
+    for (i = 0; i < nscope; i++) if (!strcmp(scope_name[i], scope)) return scope_out[i];
+    if (nscope >= 4) return 0;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --tracked %s 2>&1", scope_dirs(scope))) return 0;
+    scope_name[nscope] = scope; scope_out[nscope] = runout(cmd);
+    return scope_out[nscope++];
+}
+
+static const char *domain_of(const char *p) {
+    if (!strncmp(p, "cx/sys/", 7) || !strncmp(p, "cx/mem/", 7) || !strncmp(p, "cx/text/", 8) || !strncmp(p, "cx/core/", 8)) return "core";
+    if (!strncmp(p, "src/", 4) || !strncmp(p, "cx/", 3)) return "product_rest";
+    if (!strncmp(p, "ext/", 4)) return "ext";
+    if (!strncmp(p, "tools/", 6)) return "tools";
+    return "";
+}
+
+static long safe_units(const char *domain) {
+    static char *gout; static int have;
+    long c = 0; char *p;
+    if (!have) { gout = runout("git grep -l -E '^#pragma unisa safe' -- '*.cx' 2>/dev/null"); have = 1; }
+    if (!gout) return 0;
+    p = gout;
+    while (*p) {
+        char *e = strchr(p, '\n'); char save;
+        if (!e) e = p + strlen(p);
+        save = *e; *e = 0;
+        if (!strcmp(domain_of(p), domain)) c++;
+        *e = save; p = save ? e + 1 : e;
+    }
+    return c;
+}
+
+int main(void) {
+    char *tab; size_t tn = 0; char *p;
+    char pil[8192]; int npil = 0; long pilot_min = 0;
+    long b_leak = -1, l_funcs = 0, l_owners = 0, l_skip = 0, l_leak = 0, l_cxleak = 0, l_extleak = 0, l_esc = 0;
+    const char *plant = getenv("OWN_ADOPTION_PLANT");
+    pil[0] = 0;
+    tab = cx_read("build/own-adoption.tsv", &tn);
+    if (!tab) { fprintf(stderr, "check-own-adoption: cannot read build/own-adoption.tsv\n"); return 2; }
+    if (plant && *plant) {
+        char cmd[1024];
+        if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- %s 2>&1", plant)) return 2;
+        plant_out = runout(cmd);
+        if (!plant_out) return 2;
+    }
+    p = tab;
+    while (*p) {
+        char *e = strchr(p, '\n'); char *f[6]; int nf = 0, i; char *q;
+        if (!e) e = p + strlen(p);
+        { char save = *e; *e = 0;
+          q = p; f[nf++] = q;
+          while (nf < 6 && (q = strchr(q, '\t')) != 0) { *q++ = 0; f[nf++] = q; }
+          if (nf == 6 && strcmp(f[0], "gate")) {
+              const char *g = f[0], *scope = f[1], *metric = f[2];
+              long base = atol(f[3]); int dirc = !strcmp(f[4], "down") ? 'd' : !strcmp(f[4], "up") ? 'u' : 'i';
+              long live = -1; int v; char what[256];
+              if (!strcmp(g, "G3") && scope_dirs(scope)) {
+                  char *o = scope_run(scope);
+                  if (!o) { ck(0, "cx-own produced no output for a scope"); goto nextrow; }
+                  live = own_metric(o, metric);
+                  if (live < 0) { ck(0, "cx-own summary lacks a metric"); goto nextrow; }
+                  if (plant_out && !strcmp(scope, "product5")) { long pv = own_metric(plant_out, metric); if (pv > 0 && dirc == 'd') live += pv; }
+              } else if (!strcmp(g, "G3") && !strcmp(scope, "escapes")) {
+                  size_t en = 0; char *es = cx_read("build/own-escapes.tsv", &en); long rows = 0; char *w;
+                  if (!es) { ck(0, "build/own-escapes.tsv unreadable"); goto nextrow; }
+                  for (w = es; *w; w++) if (*w == '\n') rows++;
+                  live = rows - 1;
+              } else if (!strcmp(g, "G1")) {
+                  live = safe_units(scope);
+              } else if (!strcmp(g, "PILOT_MIN")) {
+                  pilot_min = base; goto nextrow;
+              } else if (!strcmp(g, "PILOT")) {
+                  size_t pn = strlen(metric);
+                  size_t pl = strlen(pil);
+                  if (pl + pn + 2 < sizeof pil) { cx_fmt(pil + pl, sizeof pil - pl, "%s ", metric); npil++; }
+                  goto nextrow;
+              } else { ck(0, "unknown gate row"); goto nextrow; }
+              if (dirc == 'i') { printf("OWN_ADOPTION\t%s\t%s\t%s\tlive=%ld\tbase=%ld\tinfo\n", g, scope, metric, live, base); }
+              else {
+                  v = judge(dirc, live, base);
+                  printf("OWN_ADOPTION\t%s\t%s\t%s\tlive=%ld\tbase=%ld\t%s\n", g, scope, metric, live, base, v == 0 ? "ok" : v == 1 ? "WORSE" : "STALE");
+                  cx_fmt(what, sizeof what, "%s %s %s: %s (live=%ld base=%ld)", g, scope, metric, v == 1 ? "worse than baseline" : "better than baseline, update the table", live, base);
+                  ck(v == 0, what);
+              }
+              if (!strcmp(scope, "product5")) {
+                  if (!strcmp(metric, "leak")) { l_leak = live; b_leak = base; }
+                  if (!strcmp(metric, "functions")) l_funcs = live;
+                  if (!strcmp(metric, "owners")) l_owners = live;
+                  if (!strcmp(metric, "skipped")) l_skip = live;
+              }
+              if (!strcmp(scope, "cx") && !strcmp(metric, "leak")) l_cxleak = live;
+              if (!strcmp(scope, "ext") && !strcmp(metric, "leak")) l_extleak = live;
+              if (!strcmp(scope, "escapes")) l_esc = live;
+          }
+        nextrow:
+          *e = save; p = save ? e + 1 : e; }
+        (void)i;
+    }
+    /* pilot units: registered count and cx-own cleanliness */
+    ck(npil >= pilot_min && pilot_min > 0, "pilot units registered reach the minimum");
+    if (npil) {
+        char cmd[9000]; char *o;
+        if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- --skips %s 2>&1", pil)) return 2;
+        o = runout(cmd);
+        ck(o != 0 && sumval(o, "files") == npil, "every pilot unit was analysed");
+        ck(o != 0 && sumval(o, "leak") == 0 && sumval(o, "double_free") == 0 && sumval(o, "use_after_free") == 0, "pilot units have no findings");
+        ck(o != 0 && sumval(o, "skipped") == 0, "pilot units have no skipped function");
+    }
+    /* controls: the judge, and a planted leak */
+    ck(judge('d', 3, 3) == 0 && judge('d', 4, 3) == 1 && judge('d', 2, 3) == 2, "control judge down");
+    ck(judge('u', 3, 3) == 0 && judge('u', 2, 3) == 1 && judge('u', 4, 3) == 2, "control judge up");
+    {
+        char dir[4400], fx[4500], cmd[4800], *o;
+        static const char *leakfx = "int leaky(int n) {\n    char *p = malloc(n);\n    if (n > 1) return 1;\n    free(p);\n    return 0;\n}\n";
+        if (cx_fmt(dir, sizeof dir, "%s/check-own-adoption-%d", sy_tmpdir(), sy_pid())) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s", dir) || cx_run_timeout(cmd, 50, 0, 0) != 0) return 2;
+        if (cx_fmt(fx, sizeof fx, "%s/leak.cx", dir) || cx_write(fx, leakfx, strlen(leakfx)) != 0) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cx-own.cx -- %s 2>&1", fx)) return 2;
+        o = runout(cmd);
+        ck(o != 0 && sumval(o, "leak") >= 1, "control planted leak is reported by cx-own");
+        ck(o != 0 && b_leak >= 0 && judge('d', b_leak + sumval(o, "leak"), b_leak) == 1, "control planted leak turns the G3 gate red");
+    }
+    printf("CHECK_OWN_ADOPTION\tassertions=%d\tfailed=%d\tproduct_functions=%ld\tproduct_owners=%ld\tproduct_skipped=%ld\tproduct_leak=%ld\tcx_leak=%ld\text_leak=%ld\tpublic_escapes=%ld\tpilots=%d\n",
+           assertions, failed, l_funcs, l_owners, l_skip, l_leak, l_cxleak, l_extleak, l_esc, npil);
+    return failed ? 1 : 0;
+}
