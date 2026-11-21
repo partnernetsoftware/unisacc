@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+import {createGpuSubmit} from "../base/gpu-host-abi.js";
+import {createGpuTargets} from "../base/gpu-target-abi.js";
+
+const size=32,output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const fields={scale:1.25,dashSize:2.75,gapSize:.625,color:0x3366cc,opacity:.25,alphaTest:.5,side:2};
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=size;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true,antialias:false});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  gl.disable(gl.DITHER);
+  return {canvas,gl};
+}
+function read(gl) {
+  const pixel=new Uint8Array(size*size*4);
+  gl.readPixels(0,0,size,size,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+  if(gl.getError()!==gl.NO_ERROR) throw new Error("dashed readPixels failed");
+  return pixel;
+}
+function materialValues(material,id) {
+  if(material.type!=="LineDashedMaterial" || !material.isLineDashedMaterial) throw new Error("material kind");
+  return [material.scale,material.dashSize,material.gapSize,material.color.getHex(),material.opacity,
+    material.alphaTest,material.side,material.version,id];
+}
+function reference() {
+  const source=new THREE.LineDashedMaterial(),destination=new THREE.LineDashedMaterial();
+  const values=materialValues(source,17);
+  const observed=[];
+  const watch=(object,id,token)=>object.addEventListener("dispose",event=>
+    observed.push(event.target===object && event.type==="dispose"?[id,token]:[-1,-1]));
+  watch(source,17,41);
+  watch(destination,19,43);
+  destination.needsUpdate=true;
+  destination.needsUpdate=true;
+  source.setValues(fields);
+  const before=destination.id;
+  destination.copy(source);
+  const clone=source.clone();
+  if(destination.id!==before || clone.id===source.id || clone.uuid===source.uuid ||
+     clone.color===source.color || destination.color===source.color) throw new Error("copy identity");
+  source.setValues({scale:2,dashSize:4,gapSize:2,color:0xff0000});
+  const json=clone.toJSON();
+  const loaded=new THREE.MaterialLoader().parse(JSON.parse(JSON.stringify(json)));
+  const loadedOther=new THREE.MaterialLoader().parse(json);
+  values.push(...materialValues(destination,19),...materialValues(clone,21),
+    ...materialValues(source,17),...materialValues(loaded,23),...materialValues(loadedOther,23));
+  const events=[];
+  const dispose=(object,id)=>{
+    const start=observed.length;
+    object.dispose();
+    events.push(observed.length-start,observed[start]?.[0]??id,observed[start]?.[1]??0);
+  };
+  dispose(source,17);
+  dispose(destination,19);
+  dispose(clone,21);
+  watch(clone,21,47);
+  dispose(clone,21);
+  dispose(clone,21);
+  const {canvas,gl}=context();
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(size,size);
+  renderer.setClearColor(0,1);
+  const geometry=new THREE.BufferGeometry();
+  geometry.setAttribute("position",new THREE.Float32BufferAttribute([2,15.5,0,30,15.5,0],3));
+  const line=new THREE.LineSegments(geometry,clone);
+  line.frustumCulled=false;
+  line.computeLineDistances();
+  const distances=geometry.getAttribute("lineDistance");
+  for(let i=0;i<2;i++) distances.setX(i,distances.getX(i)+.25);
+  // Compare color and dash geometry independently of inherited opacity/depth.
+  clone.opacity=1;
+  clone.alphaTest=0;
+  const scene=new THREE.Scene(),camera=new THREE.Camera();
+  camera.projectionMatrix.makeOrthographic(0,size,size,0,1,-1);
+  scene.add(line);
+  renderer.render(scene,camera);
+  const image=read(gl);
+  geometry.dispose();
+  renderer.dispose();
+  return {values,events,image,json};
+}
+async function product(referenceJSON) {
+  const {gl}=context();
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1,createGpuTargets(gl));
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(binary,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const run=(op,arg=0)=>Number(wasm.uxe_dash_object(BigInt(op),BigInt(arg),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base);
+  for(const [index,type,start] of [[0,"vert",30000],[1,"frag",35000]]) {
+    const code=new Uint8Array(await (await fetch("../base/line-dashed-material."+type)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+start,code.length).set(code);
+    heap.setUint32(8192+8*index,start,true);
+    heap.setUint32(8196+8*index,code.length,true);
+  }
+  const snapshot=id=>{
+    const at=run(3,id);
+    return Array.from({length:9},(_,i)=>heap.getFloat64(at+8*i,true));
+  };
+  if(run(1)!==0) throw new Error("init");
+  const values=snapshot(0);
+  if(run(2)!==1) throw new Error("copy and clone");
+  values.push(...snapshot(1),...snapshot(2),...snapshot(0));
+  const stop=run(4);
+  if(stop<=24000) throw new Error("field JSON write "+stop);
+  const uploaded=new Uint8Array(wasm.memory.buffer,base+24000,1400);
+  const parsed=JSON.parse(new TextDecoder().decode(uploaded.subarray(0,stop-24000)));
+  if(run(5,stop-24000)!==20384) throw new Error("own JSON parse");
+  values.push(...snapshot(3));
+  const load=text=>{
+    const bytes=new TextEncoder().encode(text);
+    uploaded.set(bytes);
+    return run(5,bytes.length);
+  };
+  if(load(JSON.stringify(referenceJSON))!==20384) throw new Error("r160 JSON parse");
+  values.push(...snapshot(3));
+  const refused=[];
+  for(const value of [
+    {...referenceJSON,opacity:.1,gapSize:-1},
+    {...referenceJSON,opacity:.1,color:1.5},
+    {...referenceJSON,opacity:.1,type:"LineBasicMaterial"},
+    {...referenceJSON,opacity:.1,scale:"1.25"},
+  ]) {
+    const previous=snapshot(3).join(",");
+    refused.push(load(JSON.stringify(value)),Number(previous===snapshot(3).join(",")));
+  }
+  for(let i=0;i<4;i++) {
+    const previous=snapshot(2).join(",");
+    refused.push(run(9,i),Number(previous===snapshot(2).join(",")));
+  }
+  const events=[];
+  const dispose=id=>{
+    const count=run(6,id);
+    events.push(count,heap.getUint32(28000,true),count?heap.getUint32(28008,true):0);
+  };
+  dispose(0);
+  dispose(1);
+  dispose(2);
+  if(run(7)!==22032) throw new Error("clone dispose listener");
+  dispose(2);
+  dispose(2);
+  const status=run(8);
+  if(status<0) throw new Error("GPU draw "+status);
+  const reverse=materialValues(new THREE.MaterialLoader().parse(parsed),23);
+  return {values,events,refused,reverse,image:read(gl)};
+}
+function row(image) {
+  return Array.from({length:size},(_,x)=>{
+    const at=4*(15*size+x);
+    return 65536*image[at]+256*image[at+1]+image[at+2];
+  });
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  const oracle=reference(),actual=await product(oracle.json);
+  let different=0,alpha=0;
+  for(let i=0;i<actual.image.length;i+=4) {
+    if(actual.image[i]!==oracle.image[i] || actual.image[i+1]!==oracle.image[i+1] ||
+       actual.image[i+2]!==oracle.image[i+2] || actual.image[i+3]!==oracle.image[i+3]) different++;
+    if(actual.image[i+3]!==255 || oracle.image[i+3]!==255) alpha++;
+  }
+  output.textContent=JSON.stringify([...actual.values,...actual.events,...oracle.values,...oracle.events,
+    ...actual.reverse,...actual.refused,...row(actual.image),...row(oracle.image),different,alpha]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
