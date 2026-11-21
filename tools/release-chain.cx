@@ -46,6 +46,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.time
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 
@@ -1169,12 +1170,226 @@ static int cmd_mark_version_seq(int argc, char **argv) {
     return 0;
 }
 
+static int path_inside_repo(const char *cand, const char *repo) {
+    char rabs[4096], cabs[4096], pdir[4096];
+    if (sy_realpath(repo, rabs, sizeof rabs) < 0) {
+        if (cx_fmt(rabs, sizeof rabs, "%s", repo)) return 1;
+    }
+    if (sy_realpath(cand, cabs, sizeof cabs) < 0) {
+        const char *sl = strrchr(cand, '/');
+        if (sl && sl > cand) {
+            size_t dl = (size_t)(sl - cand);
+            char tmpd[4096];
+            if (dl >= sizeof tmpd) return 1;
+            mm_copy(tmpd, sizeof tmpd, cand, dl); tmpd[dl] = 0;
+            if (sy_realpath(tmpd, pdir, sizeof pdir) == 0) {
+                if (cx_fmt(cabs, sizeof cabs, "%s/%s", pdir, sl + 1)) return 1;
+            } else if (cx_fmt(cabs, sizeof cabs, "%s", cand)) return 1;
+        } else if (cx_fmt(cabs, sizeof cabs, "%s", cand)) return 1;
+    }
+    size_t rl = strlen(rabs);
+    while (rl > 1 && rabs[rl - 1] == '/') rl--;
+    if (!strncmp(cabs, rabs, rl) && (cabs[rl] == 0 || cabs[rl] == '/')) return 1;
+    return 0;
+}
+
+static int verify_backup_manifest(const char *repo, const char *ver, const char *bdir_arg, char *why, size_t wcap) {
+    char mpath[4400];
+    if (bdir_arg && bdir_arg[0]) {
+        if (cx_fmt(mpath, sizeof mpath, "%s/backup-evidence.tsv", bdir_arg)) return 2;
+    } else if (!strcmp(repo, ".")) {
+        if (cx_fmt(mpath, sizeof mpath, "release/evidence/%s/backup-evidence.tsv", ver)) return 2;
+    } else {
+        if (cx_fmt(mpath, sizeof mpath, "%s/release/evidence/%s/backup-evidence.tsv", repo, ver)) return 2;
+    }
+    size_t mn = 0;
+    char *mb = cx_read(mpath, &mn);
+    if (!mb) {
+        cx_fmt(why, wcap, "missing-manifest path=%s", mpath);
+        return 2;
+    }
+    size_t pos = 0;
+    int count = 0;
+    while (pos < mn) {
+        size_t ls = pos;
+        while (pos < mn && mb[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < mn) pos++;
+        if (le == ls || mb[ls] == '#') continue;
+        size_t cs[5], ce[5];
+        int nc = 0;
+        size_t q = ls;
+        while (nc < 5 && q <= le) {
+            size_t s = q;
+            while (q < le && mb[q] != '\t') q++;
+            cs[nc] = s; ce[nc] = q; nc++;
+            q++;
+        }
+        if (nc < 4) {
+            free(mb);
+            cx_fmt(why, wcap, "malformed-manifest path=%s", mpath);
+            return 2;
+        }
+        char dst[4400], want_sha[80], got_sha[80];
+        size_t dl = ce[1] - cs[1], sl = ce[2] - cs[2];
+        if (dl == 0 || dl >= sizeof dst || sl != 64) {
+            free(mb);
+            cx_fmt(why, wcap, "malformed-row path=%s", mpath);
+            return 2;
+        }
+        mm_copy(dst, sizeof dst, mb + cs[1], dl); dst[dl] = 0;
+        mm_copy(want_sha, sizeof want_sha, mb + cs[2], sl); want_sha[sl] = 0;
+        if (path_inside_repo(dst, repo)) {
+            free(mb);
+            cx_fmt(why, wcap, "backup-inside-repo path=%s", dst);
+            return 2;
+        }
+        size_t fn = 0;
+        char *fb = cx_read(dst, &fn);
+        if (!fb) {
+            free(mb);
+            cx_fmt(why, wcap, "missing-backup-file path=%s", dst);
+            return 2;
+        }
+        cx_sha256_hex(fb, fn, got_sha);
+        free(fb);
+        if (strcmp(got_sha, want_sha) != 0) {
+            free(mb);
+            cx_fmt(why, wcap, "sha256-mismatch path=%s want=%s got=%s", dst, want_sha, got_sha);
+            return 2;
+        }
+        count++;
+    }
+    free(mb);
+    if (count != 7) {
+        cx_fmt(why, wcap, "incomplete-manifest files=%d want=7", count);
+        return 2;
+    }
+    return 0;
+}
+
+static int cmd_backup_evidence(int argc, char **argv) {
+    const char *ver = 0, *cdir = 0, *pdir = 0, *bdir = 0, *repo = ".";
+    int verify_only = 0;
+    for (int i = 0; i < argc; i++) {
+        const char *k = argv[i];
+        if (!strcmp(k, "--verify")) { verify_only = 1; continue; }
+        const char *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage("backup-evidence --version V [--chain-dir DIR --prerun-dir DIR --backup-dir DIR] [--repo DIR] [--verify]");
+        if (!strcmp(k, "--version")) ver = v;
+        else if (!strcmp(k, "--chain-dir")) cdir = v;
+        else if (!strcmp(k, "--prerun-dir")) pdir = v;
+        else if (!strcmp(k, "--backup-dir")) bdir = v;
+        else if (!strcmp(k, "--repo")) repo = v;
+        else usage("backup-evidence --version V [--chain-dir DIR --prerun-dir DIR --backup-dir DIR] [--repo DIR] [--verify]");
+        i++;
+    }
+    if (!ver || !ver[0]) usage("backup-evidence requires --version V");
+    if (verify_only) {
+        char why[512];
+        why[0] = 0;
+        if (verify_backup_manifest(repo, ver, bdir, why, sizeof why) != 0) {
+            fprintf(stderr, "REFUSE BACKUP_EVIDENCE %s\n", why);
+            return 2;
+        }
+        sy_printf("BACKUP_VERIFY\tPASS\tversion=%s\tfiles=7\trepo=%s\n", ver, repo);
+        return 0;
+    }
+    if (!cdir || !pdir || !bdir) usage("backup-evidence requires --chain-dir DIR --prerun-dir DIR --backup-dir DIR");
+    if (path_inside_repo(bdir, repo)) {
+        fprintf(stderr, "REFUSE BACKUP_EVIDENCE backup-inside-repo backup=%s repo=%s\n", bdir, repo);
+        return 2;
+    }
+    static const char * const cfiles[5] = {
+        "heartbeat.tsv", "chain-run.tsv", "exit.tsv", "bg.log", "ape-final/unisacc-next.com"
+    };
+    static const char * const pfiles[2] = {
+        "supervise.log", "strict-final.tsv"
+    };
+    for (int i = 0; i < 5; i++) {
+        char src[4400];
+        if (cx_fmt(src, sizeof src, "%s/%s", cdir, cfiles[i]) || sy_exists(src) != 1) {
+            fprintf(stderr, "REFUSE BACKUP_EVIDENCE missing-chain-artifact path=%s/%s\n", cdir, cfiles[i]);
+            return 2;
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        char src[4400];
+        if (cx_fmt(src, sizeof src, "%s/%s", pdir, pfiles[i]) || sy_exists(src) != 1) {
+            fprintf(stderr, "REFUSE BACKUP_EVIDENCE missing-prerun-artifact path=%s/%s\n", pdir, pfiles[i]);
+            return 2;
+        }
+    }
+    char d_cape[4400], d_pre[4400], babs[4096];
+    if (cx_fmt(d_cape, sizeof d_cape, "%s/chain/ape-final", bdir) ||
+        cx_fmt(d_pre, sizeof d_pre, "%s/prerun", bdir) ||
+        sy_mkdir_all(d_cape, 0700) != 0 ||
+        sy_mkdir_all(d_pre, 0700) != 0) {
+        fprintf(stderr, "REFUSE BACKUP_EVIDENCE mkdir-failed dir=%s\n", bdir);
+        return 2;
+    }
+    if (sy_realpath(bdir, babs, sizeof babs) < 0) {
+        if (cx_fmt(babs, sizeof babs, "%s", bdir)) return 2;
+    }
+    char manifest[32768];
+    size_t mlen = 0;
+    if (cx_fmt(manifest, sizeof manifest, "# role_rel\tbackup_path\tsha256\tbytes\n")) return 2;
+    mlen = strlen(manifest);
+    for (int i = 0; i < 7; i++) {
+        const char *rel = (i < 5) ? cfiles[i] : pfiles[i - 5];
+        const char *grp = (i < 5) ? "chain" : "prerun";
+        const char *sbase = (i < 5) ? cdir : pdir;
+        char src[4400], dst[4400], sha[80], row[9200];
+        if (cx_fmt(src, sizeof src, "%s/%s", sbase, rel) ||
+            cx_fmt(dst, sizeof dst, "%s/%s/%s", babs, grp, rel)) return 2;
+        size_t fn = 0;
+        char *fb = cx_read(src, &fn);
+        if (!fb) {
+            fprintf(stderr, "REFUSE BACKUP_EVIDENCE read-failed path=%s\n", src);
+            return 2;
+        }
+        cx_sha256_hex(fb, fn, sha);
+        int wrc = sy_write_atomic(dst, fb, fn, 0644);
+        free(fb);
+        if (wrc != 0) {
+            fprintf(stderr, "REFUSE BACKUP_EVIDENCE write-failed path=%s\n", dst);
+            return 2;
+        }
+        if (cx_fmt(row, sizeof row, "%s/%s\t%s\t%s\t%zu\n", grp, rel, dst, sha, fn)) return 2;
+        size_t rl = strlen(row);
+        if (mlen + rl + 1 >= sizeof manifest) return 2;
+        mm_copy(manifest + mlen, sizeof manifest - mlen, row, rl);
+        mlen += rl;
+        manifest[mlen] = 0;
+    }
+    char bm[4400], rm_dir[4400], rm[4400];
+    if (cx_fmt(bm, sizeof bm, "%s/backup-evidence.tsv", babs) ||
+        sy_write_atomic(bm, manifest, mlen, 0644) != 0) {
+        fprintf(stderr, "REFUSE BACKUP_EVIDENCE manifest-write-failed path=%s\n", bm);
+        return 2;
+    }
+    if (!strcmp(repo, ".")) {
+        if (cx_fmt(rm_dir, sizeof rm_dir, "release/evidence/%s", ver) ||
+            cx_fmt(rm, sizeof rm, "release/evidence/%s/backup-evidence.tsv", ver)) return 2;
+    } else {
+        if (cx_fmt(rm_dir, sizeof rm_dir, "%s/release/evidence/%s", repo, ver) ||
+            cx_fmt(rm, sizeof rm, "%s/release/evidence/%s/backup-evidence.tsv", repo, ver)) return 2;
+    }
+    if (sy_mkdir_all(rm_dir, 0755) != 0 || sy_write_atomic(rm, manifest, mlen, 0644) != 0) {
+        fprintf(stderr, "REFUSE BACKUP_EVIDENCE repo-manifest-write-failed path=%s\n", rm);
+        return 2;
+    }
+    sy_printf("BACKUP_EVIDENCE\tOK\tversion=%s\tfiles=7\tdir=%s\n", ver, babs);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "check-ef-counts")) return cmd_check_ef_counts(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "freeze-conflicts")) return cmd_freeze_conflicts(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "mark-version-seq")) return cmd_mark_version_seq(argc - 2, argv + 2);
-    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts|mark-version-seq");
+    if (argc >= 2 && !strcmp(argv[1], "backup-evidence")) return cmd_backup_evidence(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts|mark-version-seq|backup-evidence");
     planning = !strcmp(argv[1], "plan");
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
@@ -1205,6 +1420,16 @@ int main(int argc, char **argv) {
     char *s4[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "dry"), "--dry", 0};
     char *s5[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "exec"), 0};
     step(1, s1); step(2, s2); stage_commit(); step(4, s4);
+    if (!planning) {
+        char bwhy[512];
+        bwhy[0] = 0;
+        if (verify_backup_manifest(cwd, version, 0, bwhy, sizeof bwhy) != 0) {
+            sy_printf("CHAIN\tFAIL\t5\tbackup-evidence\t%s\n", bwhy);
+            next_line(5, "run backup-evidence before execute");
+            exit(1);
+        }
+        sy_printf("CHAIN\tPASS\t5\tbackup-evidence\tversion=%s\tfiles=7\n", version);
+    }
     /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
     show(5, s5);
     sy_printf("CHAIN\tSTOP\t5\texecute\tstart it as a long job: devsvc x --bg --par 1 -- <CMD above>, then devsvc wait; resume inside with --from-step\n");

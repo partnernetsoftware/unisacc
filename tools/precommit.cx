@@ -1076,14 +1076,19 @@ static int derive_gate(void) {
             mm_copy(nm, sizeof nm, db + at + o0, (size_t)l0); nm[l0] = 0;
             mm_copy(outl, sizeof outl, db + at + o4, (size_t)l4); outl[l4] = 0;
             if (!skip && !tx_eqz(nm, "tables-gen") && !dg_waived(wt, nm)) {
-                int ad_only = tx_eqz(nm, "table-index");
-                const char *srcz = ad_only ? adz : allz;
-                long srcn = ad_only ? adn : alln;
+                int is_tidx = tx_eqz(nm, "table-index");
+                const char *srcz = allz;
+                long srcn = alln;
                 long pa = 0;
                 int hit = 0;
                 while (srcz && pa < srcn) {
                     long pl = tx_len(srcz + pa, srcn - pa);
                     if (pl <= 0) break;
+                    if (is_tidx && ((pl >= 12 && tx_prefix(srcz + pa, pl, "tools/check-", 12)) ||
+                                    (pl == 17 && tx_same(srcz + pa, 17, "tests/batches.tsv", 17)))) {
+                        pa += pl + 1;
+                        continue;
+                    }
                     if (!dg_in_list(outl, srcz + pa, pl) && dg_matches_globs(db + at + o5, l5, srcz + pa, pl)) {
                         hit = 1;
                         break;
@@ -1158,16 +1163,37 @@ static int derive_gate(void) {
             da += l + 1;
         }
         if (!saw || !ok) {
-            int staged_any = 0;
+            int staged_any = 0, unstaged_wt = 0;
+            char unstaged_op[512];
             long oi = 0, ol = tx_len(outs[i], 512);
+            unstaged_op[0] = 0;
             while (oi < ol) {
                 long os;
                 while (oi < ol && outs[i][oi] == ' ') oi++;
                 os = oi;
                 while (oi < ol && outs[i][oi] != ' ') oi++;
-                if (oi > os && dg_path_in_z(allz, alln, outs[i] + os, oi - os)) staged_any = 1;
+                if (oi > os) {
+                    if (dg_path_in_z(allz, alln, outs[i] + os, oi - os)) staged_any = 1;
+                    if (!staged_any && pc_orig_cwd[0] && outs[i][oi - 1] != '/') {
+                        char op[512];
+                        char *uv[] = {"git", "--work-tree", pc_orig_cwd, "diff", "--name-only", "--", op, 0};
+                        long un = 0;
+                        char *uo;
+                        mm_copy(op, sizeof op, outs[i] + os, (size_t)(oi - os));
+                        op[oi - os] = 0;
+                        uo = slurp(uv, &un);
+                        if (uo && un > 0) {
+                            unstaged_wt = 1;
+                            mm_copy(unstaged_op, sizeof unstaged_op, op, (size_t)(oi - os) + 1);
+                        }
+                        if (uo) mm_free(uo);
+                    }
+                }
             }
-            if (saw && tx_eqz(st, "DRIFT")) {
+            if (saw && tx_eqz(st, "DRIFT") && unstaged_wt) {
+                sy_eprintf("precommit: BLOCKED derived-table-unstaged name=%s output=%s (recomputed in worktree but not staged in this commit; stage it with this commit)\n",
+                    names[i], unstaged_op);
+            } else if (saw && tx_eqz(st, "DRIFT")) {
                 sy_eprintf("precommit: BLOCKED derived-table-drift name=%s outputs=%s (%s; run: sh ./unisacc.com tools/derive.cx -- --write --only %s)\n",
                     names[i], outs[i], staged_any ? "staged output still drifts" : "missing from staged paths", names[i]);
             } else {
@@ -1348,12 +1374,15 @@ static int precheck(int argc, char **argv) {
     "fi; " \
     "rm -f \"$si\"; " \
     "[ -e \"$d/.git\" ] || [ -L \"$d/.git\" ] || ln -s \"$g\" \"$d/.git\"; " \
-    "for _f in unisacc.com unisacc.com.build.json .devsvc; do " \
-    "  [ ! -e \"$_f\" ] || [ -e \"$d/$_f\" ] || [ -L \"$d/$_f\" ] || ln -s \"$PWD/$_f\" \"$d/$_f\"; " \
+    "for _f in unisacc.com unisacc.com.build.json .devsvc cx ext cxroot.tsv tools tests/derive-gate-waivers.tsv; do " \
+    "  [ ! -e \"$_f\" ] && [ ! -L \"$_f\" ] || [ -e \"$d/$_f\" ] || [ -L \"$d/$_f\" ] || ln -s \"$PWD/$_f\" \"$d/$_f\"; " \
     "done; " \
+    "if [ -d tools ] && [ ! -L tools ] && [ -d \"$d/tools\" ] && [ ! -L \"$d/tools\" ]; then " \
+    "  for _tf in tools/*; do _bn=${_tf#tools/}; [ ! -L \"$_tf\" ] || [ -e \"$d/tools/$_bn\" ] || [ -L \"$d/tools/$_bn\" ] || ln -s \"$PWD/$_tf\" \"$d/tools/$_bn\"; done; " \
+    "fi; " \
     "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
 
-static char pc_iso_dir[1024];
+static char pc_iso_dir[1024], pc_orig_cwd[1024];
 static char pc_blk_gate[32], pc_blk_reason[48];
 
 static void pc_mark_block(const char *gate, const char *reason) {

@@ -132,7 +132,7 @@ int main(void) {
         if (cx_write(p, bat3, strlen(bat3))) cpd_abort("wb3");
         if (cx_fmt(p, sizeof p, "%s/tests/derive-gate-waivers.tsv", repo)) cpd_abort("wp");
         if (cx_write(p, "links\t2099-12-31\ttemporary-test-waiver\n", 38)) cpd_abort("ww1");
-        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5a");
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git checkout -q -- build/links.tsv && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5a");
         int rc_act = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
 
         if (cx_write(p, "links\t2020-01-01\texpired-test-waiver\n", 36)) cpd_abort("ww2");
@@ -249,8 +249,9 @@ int main(void) {
         if (cx_write(p, "int main(void){return 0;}\n", 26)) cpd_abort("r3w5");
 
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only table-index && git init -q && "
-            "git add .gitignore exec/facts/derive.tsv tests/batches.tsv build/links.tsv build/table-index.tsv tools/check-newreader.cx && "
+            "cd '%s' && git init -q && "
+            "git add .gitignore exec/facts/derive.tsv tests/batches.tsv build/links.tsv tools/check-newreader.cx && "
+            "sh ./unisacc.com tools/derive.cx -- --write --only table-index && git add build/table-index.tsv && "
             "git -c user.name=t -c user.email=t@t commit -q -m init", repo3)) cpd_abort("r3init");
         cpd_sh(cmd, out);
         if (cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", repo3)) cpd_abort("r3hp");
@@ -292,6 +293,22 @@ int main(void) {
 
         ck(no_pmap && rc_chk_ok == 0 && rd_blk_ok && rc_rd_ok == 0,
             "table-index-new-tool-real-commit: excludes ignored product-map.tsv; check- tool passes, reader tool blocks until recomputed");
+
+        /* (c) Modify existing tools/newreader.cx (M, not AD) dropping build/links.tsv reference -> must block until table-index recomputed & staged */
+        if (cx_fmt(p, sizeof p, "%s/tools/newreader.cx", repo3)) cpd_abort("r3m1");
+        if (cx_write(p, "/* no table ref now */\nint main(void){return 0;}\n", 49)) cpd_abort("r3wm1");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git add tools/newreader.cx && git -c user.name=t -c user.email=t@t commit -q -m mod-reader-stale", repo3)) cpd_abort("r3c4");
+        int rc_mod_blk = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int mod_blk_ok = (rc_mod_blk != 0 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=table-index"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && sh ./unisacc.com tools/derive.cx -- --write --only table-index && git add build/table-index.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m mod-reader-ok", repo3)) cpd_abort("r3c5");
+        int rc_mod_ok = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+
+        ck(mod_blk_ok && rc_mod_ok == 0,
+            "table-index-modified-tool-real-commit: modifying existing tool table references blocks until table-index recomputed");
     }
 
     {

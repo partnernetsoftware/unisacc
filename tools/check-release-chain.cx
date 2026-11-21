@@ -414,6 +414,89 @@ int main(int argc, char **argv) {
         np_free(&r);
         if (sy_remove_all(mrepo)) return 2;
     }
+    /* (4c) R71 backup-evidence pre-gate: copies 7 chain+prerun artifacts to out-of-repo backup with sha256 manifest, and refuses execute (step 5) when missing or tampered */
+    {
+        char btest[4400], brepo[4400], bchain[4400], bpre[4400], bdir[4400], binrepo[4400], bst[4400], bcmd[8192];
+        if (cx_fmt(btest, sizeof btest, "%s/bktest", tmp) ||
+            cx_fmt(brepo, sizeof brepo, "%s/bktest/repo", tmp) ||
+            cx_fmt(bchain, sizeof bchain, "%s/bktest/chain/1111111111111111111111111111111111111111", tmp) ||
+            cx_fmt(bpre, sizeof bpre, "%s/bktest/prerun", tmp) ||
+            cx_fmt(bdir, sizeof bdir, "%s/bktest/out-of-repo-backup", tmp) ||
+            cx_fmt(binrepo, sizeof binrepo, "%s/bktest/repo/in-repo-backup", tmp) ||
+            cx_fmt(bst, sizeof bst, "%s/bktest/state", tmp)) return 2;
+        if (cx_fmt(bcmd, sizeof bcmd,
+            "mkdir -p \"%s/release/evidence/0.0.99\" \"%s/stage/release/evidence/0.0.99\" \"%s/ape-final\" \"%s\" && "
+            "cd \"%s\" && git init -q -b main && git config user.email t@t && git config user.name t && ln -s \"%s\" unisacc.com && "
+            "printf 'cand\\n' > \"%s/stage/release/candidate.tsv\" && "
+            "printf 'rat\\n' > \"%s/stage/release/evidence/0.0.99/ratchets.txt\" && "
+            "printf 'ev\\n' > \"%s/stage/release/evidence/0.0.99/evidence-rows.tsv\" && "
+            "cp -r \"%s/stage/release/.\" \"%s/release/\" && "
+            "git add release && git commit -qm stage-a && "
+            "printf 'hb\\n' > \"%s/heartbeat.tsv\" && "
+            "printf 'cr\\n' > \"%s/chain-run.tsv\" && "
+            "printf 'bg\\n' > \"%s/bg.log\" && "
+            "printf 'ape\\n' > \"%s/ape-final/unisacc-next.com\" && "
+            "printf 'sup\\n' > \"%s/supervise.log\" && "
+            "printf 'st\\n' > \"%s/strict-final.tsv\" && "
+            "printf 'prep\\trc=0\\n' > \"%s/prep.done\" && "
+            "printf 'stage-a\\trc=0\\n' > \"%s/stage-a.done\" && "
+            "printf 'stage-dry\\trc=0\\n' > \"%s/stage-dry.done\"",
+            brepo, bst, bchain, bpre, brepo, driver,
+            bst, bst, bst, bst, brepo,
+            bchain, bchain, bchain, bchain, bpre, bpre, bst, bst, bst)) return 2;
+        char *bv0[] = {"sh", "-c", bcmd, 0};
+        r = actual(bv0); np_free(&r);
+
+        /* 1. Missing required chain artifact (exit.tsv) -> refused rc=2 */
+        char *bk_miss[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", bdir, "--repo", brepo, 0};
+        r = actual(bk_miss);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE BACKUP_EVIDENCE") != 0 && strstr(r.err, "missing-chain-artifact") != 0,
+           "backup-evidence-missing-artifact-refused");
+        np_free(&r);
+
+        /* Create exit.tsv; 2. Backup directory inside repo -> refused rc=2 */
+        char exitf[4500];
+        if (cx_fmt(exitf, sizeof exitf, "%s/exit.tsv", bchain) || cx_write(exitf, "rc=0\n", 5)) return 2;
+        char *bk_in[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", binrepo, "--repo", brepo, 0};
+        r = actual(bk_in);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE BACKUP_EVIDENCE") != 0 && strstr(r.err, "backup-inside-repo") != 0,
+           "backup-evidence-inside-repo-refused");
+        np_free(&r);
+
+        /* 3. release-chain run --from 5 before backup-evidence -> refused before READY_TO_EXECUTE */
+        if (cx_fmt(bcmd, sizeof bcmd, "cd \"%s\" && \"%s\" run --inputs \"%s\" --state \"%s\" --layout /nonexistent-layout --from 5",
+            brepo, bin, inputs, bst)) return 2;
+        r = actual(bv0);
+        ck(r.rc == 1 && has(&r, "CHAIN\tFAIL\t5\tbackup-evidence\t") && !has(&r, "READY_TO_EXECUTE"),
+           "run-from-5-refuses-missing-backup");
+        np_free(&r);
+
+        /* 4. Valid backup-evidence copies all 7 artifacts, writes sha256 manifest, and --verify passes */
+        r = actual(bk_miss);
+        char *bk_ver[] = {bin, "backup-evidence", "--verify", "--version", "0.0.99", "--repo", brepo, 0};
+        np_result rv = actual(bk_ver);
+        ck(r.rc == 0 && has(&r, "BACKUP_EVIDENCE\tOK\tversion=0.0.99\tfiles=7\t") &&
+           rv.rc == 0 && has(&rv, "BACKUP_VERIFY\tPASS\tversion=0.0.99\tfiles=7\t"),
+           "backup-evidence-copies-and-verifies-sha256");
+        np_free(&r); np_free(&rv);
+
+        /* 5. release-chain run --from 5 now passes backup gate and reaches READY_TO_EXECUTE */
+        r = actual(bv0);
+        ck(r.rc == 0 && has(&r, "CHAIN\tPASS\t5\tbackup-evidence\t") && has(&r, "CHAIN\tRESULT\tREADY_TO_EXECUTE\tversion=0.0.99"),
+           "run-from-5-passes-with-valid-backup");
+        np_free(&r);
+
+        /* 6. Tampering with backed-up file causes --verify and run --from 5 to refuse */
+        char tamp[4500];
+        if (cx_fmt(tamp, sizeof tamp, "%s/chain/chain-run.tsv", bdir) || cx_write(tamp, "tampered\n", 9)) return 2;
+        rv = actual(bk_ver);
+        r = actual(bv0);
+        ck(rv.rc == 2 && rv.err && strstr(rv.err, "sha256-mismatch") != 0 &&
+           r.rc == 1 && has(&r, "CHAIN\tFAIL\t5\tbackup-evidence\t"),
+           "backup-verify-tampered-file-refused");
+        np_free(&rv); np_free(&r);
+        if (sy_remove_all(btest)) return 2;
+    }
     /* (5) usage */
     char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};
     r = actual(bad); ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE CHAIN_USAGE"), "missing-state-refused"); np_free(&r);
