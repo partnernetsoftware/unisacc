@@ -1,0 +1,114 @@
+struct SceneRasterTarget {
+  rgba: u32;
+  depth: u32;
+  width: u32;
+  height: u32;
+}
+
+native function soft_draw_byte(value:f64) i64 {
+  if(value<=0.0) { return 0; }
+  if(value>=1.0) { return 255; }
+  return f64_floor_i64(value*255.0+0.5);
+}
+
+native function soft_draw_min(a:f64,b:f64,c:f64) f64 {
+  let v=a;
+  if(b<v) { v=b; }
+  if(c<v) { v=c; }
+  return v;
+}
+
+native function soft_draw_max(a:f64,b:f64,c:f64) f64 {
+  let v=a;
+  if(b>v) { v=b; }
+  if(c>v) { v=c; }
+  return v;
+}
+
+native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64) i64 {
+  let x0=(ux_f32(vertex)+1.0)*0.5*w;
+  let x1=(ux_f32(vertex+28)+1.0)*0.5*w;
+  let x2=(ux_f32(vertex+56)+1.0)*0.5*w;
+  let y0=(1.0-ux_f32(vertex+4))*0.5*h;
+  let y1=(1.0-ux_f32(vertex+32))*0.5*h;
+  let y2=(1.0-ux_f32(vertex+60))*0.5*h;
+  let area=(x1-x0)*(y2-y0)-(y1-y0)*(x2-x0);
+  if(area==0.0) { return 0; }
+  let left=f64_floor_i64(soft_draw_min(x0,x1,x2));
+  let right=f64_floor_i64(soft_draw_max(x0,x1,x2));
+  let top=f64_floor_i64(soft_draw_min(y0,y1,y2));
+  let bottom=f64_floor_i64(soft_draw_max(y0,y1,y2));
+  if(left<0) { left=0; }
+  if(top<0) { top=0; }
+  if(right>=w) { right=w-1; }
+  if(bottom>=h) { bottom=h-1; }
+  let near=ux_f32(vertex+8);
+  let mid=ux_f32(vertex+36);
+  let far=ux_f32(vertex+64);
+  let color=soft_draw_byte(ux_f32(vertex+12))+256*soft_draw_byte(ux_f32(vertex+16))+
+    65536*soft_draw_byte(ux_f32(vertex+20))+16777216*soft_draw_byte(ux_f32(vertex+24));
+  let y=top;
+  let pixels=0;
+  while(y<=bottom) {
+    let x=left;
+    while(x<=right) {
+      let px=0.5+x;
+      let py=0.5+y;
+      let a=((x2-x1)*(py-y1)-(y2-y1)*(px-x1))/area;
+      let b=((x0-x2)*(py-y2)-(y0-y2)*(px-x2))/area;
+      let c=1.0-a-b;
+      if(a>=0.0 && b>=0.0 && c>=0.0) {
+        let z=0.5+(a*near+b*mid+c*far)*0.5;
+        let at=(y*w+x)*4;
+        if(z>=0.0 && z<=1.0 && z<ux_f32(depth+at)) {
+          let sample=ux_u32_put(rgba+at,color);
+          let stored=ux_f32_put(depth+at,z);
+          pixels=pixels+1;
+        }
+      }
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return pixels;
+}
+
+// Consume the same projected stream as SceneDraw_gpuFlat. Depth starts at
+// 1 and the target is top-down; this first slice draws constant opaque color.
+native function SceneDraw_softwareFlat(target:i64,vertices:i64,count:i64) i64 {
+  if(!scene_render_span(target,SceneRasterTarget.size,4) || count<3 || count>2340 || count%3!=0 ||
+     !scene_render_span(vertices,count*28,4)) { return 0-1; }
+  let rgba=ux_u32(target+SceneRasterTarget.rgba);
+  let depth=ux_u32(target+SceneRasterTarget.depth);
+  let w=ux_u32(target+SceneRasterTarget.width);
+  let h=ux_u32(target+SceneRasterTarget.height);
+  let bytes=w*h*4;
+  if(w<1 || h<1 || w>4096 || h>4096 || w*h>1048576 ||
+     !scene_render_span(rgba,bytes,4) || !scene_render_span(depth,bytes,4) ||
+     scene_render_overlap(rgba,bytes,depth,bytes) ||
+     !scene_render_readable(target,SceneRasterTarget.size,rgba,bytes,depth,bytes) ||
+     !scene_render_readable(vertices,count*28,rgba,bytes,depth,bytes)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let at=vertices+i*28;
+    let j=0;
+    while(j<7) {
+      let v=ux_f32(at+j*4);
+      if(v-v!=0.0 || v<0.0-1048576.0 || v>1048576.0) { return 0-2; }
+      j=j+1;
+    }
+    if(ux_f32(at+24)!=1.0) { return 0-2; }
+    let first=vertices+(i/3)*84;
+    if(ux_u32(first+12)!=ux_u32(at+12) || ux_u32(first+16)!=ux_u32(at+16) ||
+       ux_u32(first+20)!=ux_u32(at+20)) { return 0-2; }
+    i=i+1;
+  }
+  let pixels=0;
+  i=0;
+  while(i<count) {
+    let drawn=soft_draw_triangle(vertices+i*28,rgba,depth,w,h);
+    pixels=pixels+drawn;
+    i=i+3;
+  }
+  return pixels;
+}
