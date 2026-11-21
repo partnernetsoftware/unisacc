@@ -112,9 +112,24 @@ static int item_snap_cache_types(const char *snap_base, const char *rev) {
     return bad ? 1 : 0;
 }
 
+static int pf_resolve_sha(const char *repo, const char *spec, char sha[41]) {
+    char *av[] = { "git", "rev-parse", "--verify", "--end-of-options", (char *)spec, 0 };
+    char why[160];
+    np_result r = {0};
+    int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && r.rc == 0 && !r.residue &&
+             r.out && r.outn >= 40 && strspn(r.out, "0123456789abcdef") >= 40;
+    if (ok) {
+        mm_copy(sha, 41, r.out, 40);
+        sha[40] = 0;
+    }
+    np_free(&r);
+    return ok;
+}
+
 static int pf_release_tag(const char *repo, char tag[64]) {
     char *av[] = { "git", "show", "HEAD:build/version-seq.tsv", 0 };
-    char why[160];
+    char why[160], unpub[16][32];
+    int nunpub = 0;
     np_result r = {0};
     tag[0] = 0;
     if (np_run(av, repo, 0, 4, &r, why, sizeof why) || r.rc != 0 || r.residue || !r.out) {
@@ -142,29 +157,29 @@ static int pf_release_tag(const char *repo, char tag[64]) {
             nc++;
             q++;
         }
-        if (nc >= 5 && clens[1] > 0 && clens[1] < 32 && clens[3] == 9 && memcmp(cols[3], "已公开", 9) == 0) {
+        if (nc >= 5 && clens[1] > 0 && clens[1] < 32) {
             char vbuf[32];
             mm_copy(vbuf, sizeof vbuf, cols[1], (size_t)clens[1]);
             vbuf[clens[1]] = 0;
-            cx_fmt(tag, 64, "refs/tags/v%s", vbuf);
+            if (clens[3] == 9 && memcmp(cols[3], "已公开", 9) == 0) {
+                cx_fmt(tag, 64, "refs/tags/v%s", vbuf);
+                nunpub = 0;
+            } else if (tag[0] != 0 && strcmp(vbuf, "version") != 0 && nunpub < 16) {
+                cx_fmt(unpub[nunpub++], 32, "%s", vbuf);
+            }
         }
     }
     np_free(&r);
-    return tag[0] != 0;
-}
-
-static int pf_resolve_sha(const char *repo, const char *spec, char sha[41]) {
-    char *av[] = { "git", "rev-parse", "--verify", "--end-of-options", (char *)spec, 0 };
-    char why[160];
-    np_result r = {0};
-    int ok = !np_run(av, repo, 0, 4, &r, why, sizeof why) && r.rc == 0 && !r.residue &&
-             r.out && r.outn >= 40 && strspn(r.out, "0123456789abcdef") >= 40;
-    if (ok) {
-        mm_copy(sha, 41, r.out, 40);
-        sha[40] = 0;
+    if (tag[0] != 0) {
+        for (int i = 0; i < nunpub; i++) {
+            char uspec[96], usha[41];
+            if (!cx_fmt(uspec, sizeof uspec, "refs/tags/v%s^{commit}", unpub[i]) && pf_resolve_sha(repo, uspec, usha)) {
+                cx_fmt(tag, 64, "version-seq-tag-drift:v%s", unpub[i]);
+                return 0;
+            }
+        }
     }
-    np_free(&r);
-    return ok;
+    return tag[0] != 0;
 }
 
 static void pf_extract_err(const char *err, long errn, char fbuf[256], char lbuf[32], char rbuf[256]) {
@@ -226,8 +241,9 @@ static int item_parse2_bind(const char *repo, const char *rev, int force_cold) {
         cx_fmt(tip_spec, sizeof tip_spec, "%s^{commit}", rev_arg) ||
         !pf_resolve_sha(repo, base_spec, base) ||
         !pf_resolve_sha(repo, tip_spec, tip)) {
-        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\trev=%s\tfile=build/version-seq.tsv\tline=1\tlocation=build/version-seq.tsv:1\treason=bad-revision-or-release-tag\tms=%ld\n",
-               rev_arg, sy_now_ms() - t0);
+        const char *reason = tx_prefix(tag, (long)tx_len(tag, 64), "version-seq-tag-drift", 21) ? tag : "bad-revision-or-release-tag";
+        printf("PREFLIGHT_ITEM\tparse2-bind\tFAIL\trev=%s\tfile=build/version-seq.tsv\tline=1\tlocation=build/version-seq.tsv:1\treason=%s\tms=%ld\n",
+               rev_arg, reason, sy_now_ms() - t0);
         return 1;
     }
 
