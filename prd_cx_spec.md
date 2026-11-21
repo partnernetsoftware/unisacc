@@ -79,7 +79,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 | cx-L1 机制 | `cx/core`、`cx/runtime` | 不能 |
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/` | 不能 |
 | cx-L3 工具、测试、应用 | `tools`、`tests`、`apps` | 允许 printf/fprintf 给人看(本机跑,不跨目标);其余仍应走 L0 |
-| 未定层 | `cx/cx0`、`cx/workspace`(AMB);`cx/path`、`cx/stream`、`cx/os` | 模块层待所有者定;新写代码按不能处理,现有文件以其文件头是否写 `dock` 与棘轮结果为准 |
+| 2026-11-21 定案(原未定层) | `cx/stream` 的 `item`、`pipe` 为 cx-L1;`cx/cx0` 为 cx-L2;`cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace` 为扩展应用库包(待迁往 `ext/`,`use` 名不变) | 都不能;`cx/cx0/plan.cx`、`cx/path`、`cx/os` 现有的 dock 与 `cx/workspace` 的裸 libc 是待整改现状,新写代码不得照此写。依据与实施版本见 [prd_cx.md](prd_cx.md)「两层.5a」;`tools/check-cx-layers.cx` 的层表尚未跟上 |
 | EXT 包层 | `ext/<包>/`(包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录) | 各包自述;产品层不得 `use` 到 ext |
 
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
@@ -113,22 +113,23 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 ### 3.4b 两层规则(核心库包与扩展应用库包)
 
-cx 按「编不编进 unisacc.com」分两层:核心库包编进去,只承担 cx 语言扩展支持、libc 对接、posix 封装、syscall 与 host ABI 对接;扩展应用库包不编进去,是未来库包市场里的包。为什么这样分、准入判据、依赖方向、现状落差与市场能力清单都在 [prd_cx.md](prd_cx.md)「两层设计」节,这里不重复,只列写 `.cx` 时要守的规则。两层是打包边界,不等同于 3.4 表里的 cx-L 层号。
+cx 按「编不编进 unisacc.com」分两层:核心库包编进去,只承担 cx 语言扩展支持、libc 对接、posix 封装、syscall 与 host ABI 对接;扩展应用库包不编进去,是未来库包市场里的包。为什么这样分、准入判据、依赖方向、现状落差与市场能力清单都在 [prd_cx.md](prd_cx.md)「两层设计」节,这里不重复,只列写 `.cx` 时要守的规则。两层是打包边界,不等同于 3.4 表里的 cx-L 层号。2026-11-21 定案:「编进」以编译闭包(`build/core-closure.tsv`)为准,输入类 A 只作门禁近似;一个单元不在任何目标的闭包里,就属于扩展应用库包,不论它现在放在哪个目录。
 
 | 你在写什么 | 能否 dock(`#include` 与裸 libc) | 可以 use 谁 | 不得 |
 |---|---|---|---|
 | 核心库包的对接单元(`cx/sys`、`cx/mem`、`cx/text` 下的实体文件) | 能,模块头写 `#pragma unisa dock`;平台差异只放这里的 `_os` 静态帮手或表 | 同层与更低处 | use 扩展应用库包;为产品自身不用的便利功能加文件(那属于扩展应用库包) |
 | 产品本体(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`) | 不能(登记在 `tests/cxraw-layers.tsv` 的例外路径除外,如 `src/host.cx`、`src/hostnative.cx`);只用 `sy_*`、`mm_*`、`tx_*` | 核心库包与同层、下层 | use `ext/` 与 `tools/cxlib`(`tools/check-cx-layers.cx` 第 4 条断言,即红) |
-| 扩展应用库包(`ext/<包>/`) | 需要系统能力时经核心库面取得,对接路径优先放进核心库包(条款 CX-Y-5);现有 `ext/sysx`、`ext/net`、`ext/memx/arena.cx` 持 dock 是现状,去留待定 | 核心库包的公开面、其它扩展应用库包(不得成环) | 被产品本体 use;use 产品内部环(`core.*`、`runtime.*`、`compiler.*`、`driver.*`、`cx0.*`;规划期拒绝未实现,先自觉遵守) |
+| 扩展应用库包(`ext/<包>/`,以及定案归此的 `cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace`) | 不能(2026-11-21 定案):不得 dock 宿主,须建在核心的 `sy_*`、`mm_*`、`tx_*` 上;缺的系统能力提给核心库包加。现存持 dock 的 ext 文件是过渡例外(20 个,到期 0.0.90,清单在 [prd_cx.md](prd_cx.md)「两层.5a」),新文件不得加入 | 核心库包的公开面、其它扩展应用库包(不得成环) | 被产品本体 use;use 产品内部环(`core.*`、`runtime.*`、`compiler.*`、`driver.*`、`cx0.*`;规划期拒绝未实现,先自觉遵守) |
 | 工具、测试、应用(`tools`、`tests`、`apps`) | 不写 dock;允许 printf/fprintf 给人看 | 核心库包、扩展应用库包、`cxlib.*`(应用不要 use `cxlib` 与产品内部环) | 无 |
 
 扩展应用库包怎么写、怎么被 use:
 
 - 位置与模块名:文件放 `ext/<包>/NAME.cx`,首行 `#pragma unisa module NAME`(NAME 等于文件 stem);不手写 `#include`。
 - 登记:在 `build/tlib-packages.tsv` 加包行(版本、roots、deps),接口清单由 `tools/layer-api.cx -- --write` 生成;带 `check-*.cx` 并登记批次。现状 `argx`、`fsx`、`testx` 尚无包行(2026-11-21 读表)。
-- 被 use 的写法:仓根 `cxroot.tsv` 有前缀的包直接按前缀写,如 `use sysx.poll`、`use crypto.sha256`、`use tsvx.read`;`net` 靠 `tools/net` 目录链接或自己包根加一行(3.2);`ext.memx`、`ext.textx` 目前经 `cx/` 下别名写成 `mem.arena`、`text.json` 等,`use` 名保持不变;仓外脚本见 3.3。
+- 被 use 的写法:仓根 `cxroot.tsv` 有前缀的包直接按前缀写,如 `use sysx.poll`、`use crypto.sha256`、`use tsvx.read`;`net` 靠 `tools/net` 目录链接或自己包根加一行(3.2);`ext.memx`、`ext.textx` 目前经 `cx/` 下别名写成 `mem.arena`、`text.json` 等,`use` 名保持不变;仓外脚本见 3.3。2026-11-21 定案(均未实施,实施前写法照旧,实施后写法也不变):arena 实体挪进 `cx/mem`、ext.memx 退役;`cx/sys` 下 fd、poll、tty、net、process、guard 的实体挪进 `cx/sys`;`cx/text` 下 json、build、deflate、num 四条别名删除,改由 `cxroot.tsv` 包根映射保持 `text.json` 等名字;`cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace` 迁往 `ext/` 后仍写 `path.path`、`os.utc`、`stream.rw`。
 - 改动成本:经别名进源身份的 20 个文件(`ext/sysx` 15、`ext/memx` 1、`ext/textx` 4)现在改一行仍按产品输入(输入类 A)对待,只能随版本分支;其余 ext 文件是输入类 B。身份收窄(0.0.90,规划,未实现)之后才都不再触发整链,详见 [prd_cx.md](prd_cx.md)「两层.5」「两层.6」。
-- 包的索引、锁定、分发、安装与签名目前都没有(规划,未实现),现状与缺口见 [prd_cx.md](prd_cx.md)「两层.7」。
+- 包的索引、锁定、分发、安装与签名目前都没有(规划,未实现),现状与缺口见 [prd_cx.md](prd_cx.md)「两层.7」;市场的包仓名为「unisa 库包仓」(2026-11-21 定案,规划,未实现),ext 纯包不随产品发行。
+- 包表规矩(2026-11-21 定案):cx.* 包行的 deps 不得出现 ext.*;对应检查未建,现存两处声明(cx.stream、cx.compile 对 ext.memx)待删,见 [prd_cx.md](prd_cx.md)「两层.5a」。
 
 ### 3.5 计划中语法(未实现,不可用)
 
