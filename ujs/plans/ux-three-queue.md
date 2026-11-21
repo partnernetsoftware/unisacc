@@ -261,7 +261,7 @@
 - ArrowHelper | G-struct 方向与长度 | 场景图及线与网格。
 - AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
 - BoxHelper | G-struct 对象世界边界 | Box3 与场景图。
-- Box3Helper | G-struct 外接框中心和尺度 | Box3。
+- Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
 - CameraHelper | G-struct 视锥与相机变换 | M3 相机。
 - DirectionalLightHelper | G-struct 光方向、颜色与更新 | M6 方向光。
 - GridHelper 渲染与资源回收 | G-pixel 分格随对象树变换，G-struct 验证释放后不能提交 | 分格及主轴颜色由 gridhelper-struct.cx 验证通过，依赖场景渲染列表。

@@ -1,0 +1,82 @@
+struct Box3Helper {
+  box: u32;
+  positions: u32;
+  indices: u32;
+  active: u32;
+}
+
+native function boxh_span(at:i64,bytes:i64,alignment:i64) i64 {
+  return at>=0 && at%alignment==0 && at<=6291456-bytes;
+}
+
+native function boxh_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a<b+m && b<a+n;
+}
+
+native function Box3Helper_init(helper:i64,box:i64,positions:i64,indices:i64) i64 {
+  if(!boxh_span(helper,16,4) || !boxh_span(box,48,8) ||
+     !boxh_span(positions,96,4) || !boxh_span(indices,48,2) ||
+     boxh_overlap(helper,16,box,48) || boxh_overlap(helper,16,positions,96) ||
+     boxh_overlap(helper,16,indices,48) || boxh_overlap(positions,96,indices,48) ||
+     boxh_overlap(box,48,positions,96) || boxh_overlap(box,48,indices,48)) { return 0-1; }
+  let i=0;
+  while(i<8) {
+    let x=1.0;
+    let y=1.0;
+    let z=1.0;
+    if(i%4==1 || i%4==2) { x=0.0-1.0; }
+    if(i%4>=2) { y=0.0-1.0; }
+    if(i>=4) { z=0.0-1.0; }
+    let a=ux_f32_put(positions+i*12,x);
+    let b=ux_f32_put(positions+i*12+4,y);
+    let c=ux_f32_put(positions+i*12+8,z);
+    let next=i/4*4+(i+1)%4;
+    let d=ux_u16_put(indices+i*4,i);
+    let e=ux_u16_put(indices+i*4+2,next);
+    i=i+1;
+  }
+  i=0;
+  while(i<4) {
+    let a=ux_u16_put(indices+32+i*4,i);
+    let b=ux_u16_put(indices+34+i*4,i+4);
+    i=i+1;
+  }
+  let a=ux_u32_put(helper+Box3Helper.box,box);
+  let b=ux_u32_put(helper+Box3Helper.positions,positions);
+  let c=ux_u32_put(helper+Box3Helper.indices,indices);
+  let d=ux_u32_put(helper+Box3Helper.active,1);
+  return helper;
+}
+
+// Return 0 for an empty box without modifying the existing pose.
+native function Box3Helper_pose(helper:i64,pose:i64) i64 {
+  if(!boxh_span(helper,16,4) || !boxh_span(pose,48,8) ||
+     ux_u32(helper+Box3Helper.active)!=1 || boxh_overlap(helper,16,pose,48)) { return 0-1; }
+  let box=ux_u32(helper+Box3Helper.box);
+  if(!boxh_span(box,48,8) || boxh_overlap(box,48,pose,48) ||
+     boxh_overlap(ux_u32(helper+Box3Helper.positions),96,pose,48) ||
+     boxh_overlap(ux_u32(helper+Box3Helper.indices),48,pose,48)) { return 0-1; }
+  let i=0;
+  while(i<24) {
+    let lo=ux_f64(box+i);
+    let hi=ux_f64(box+24+i);
+    if(hi<lo) { return 0; }
+    if(lo-lo!=0.0 || hi-hi!=0.0) { return 0-1; }
+    i=i+8;
+  }
+  i=0;
+  while(i<24) {
+    let lo=ux_f64(box+i)*0.5;
+    let hi=ux_f64(box+24+i)*0.5;
+    let a=ux_f64_put(pose+i,lo+hi);
+    let b=ux_f64_put(pose+24+i,hi-lo);
+    i=i+8;
+  }
+  return 1;
+}
+
+native function Box3Helper_dispose(helper:i64) i64 {
+  if(!boxh_span(helper,16,4) || ux_u32(helper+Box3Helper.active)!=1) { return 0-1; }
+  let a=ux_u32_put(helper+Box3Helper.active,0);
+  return 0;
+}
