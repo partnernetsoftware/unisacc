@@ -10,6 +10,7 @@
  * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC_CORE<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -36,6 +37,38 @@ static int run(char **v, const char *cwd, char *const *env) {
     return rc;
 }
 static int has(const char *s) { return strstr(out, s) != 0; }
+
+static void check_lock_budget(const char *cwd, const char *product, char *const *env, int prefix) {
+    char canonical[600], repo_sha[65], tag[16] = "";
+    if (sy_realpath(cwd, canonical, sizeof canonical) < 0 ||
+        sy_sha256_hex(canonical, strlen(canonical), repo_sha)) { ck(0, "lock-budget-root"); return; }
+    if (prefix && cx_fmt(tag, sizeof tag, "w%.8s:", repo_sha)) { ck(0, "lock-budget-prefix"); return; }
+    const int lengths[] = {63 - prefix, 64 - prefix, 65 - prefix, 60};
+    for (int i = 0; i < (prefix ? 4 : 3); i++) {
+        char name[70], file[740], table[740], row[1500], hash[65], event[110], label[80];
+        int n = lengths[i];
+        memset(name, 'a' + i, n); name[n] = 0;
+        if (cx_fmt(file, sizeof file, "%s/%s", canonical, name) ||
+            cx_fmt(table, sizeof table, "%s/lock-budget.tsv", canonical) ||
+            cx_fmt(row, sizeof row, "probe\tfile.write\t-\troot=%s;path=%s;content=isolated%%0A;expect_sha=absent\n", canonical, name) ||
+            cx_fmt(label, sizeof label, "lock-budget-prefix-%d-final-%d", prefix, prefix + n) ||
+            sy_sha256_hex(name, n, hash)) { ck(0, "lock-budget-setup"); return; }
+        if (prefix + n < 64) F(event, sizeof event, "\tlock.acquire\t%s%s\towner=", tag, name);
+        else F(event, sizeof event, "\tlock.acquire\t%ssha:%.16s\towner=", tag, hash);
+        char *v[] = {"sh", (char *)product, "tools/devsvc.cx", "--", "flow", table, "--txn", "--par", "1", "--owner", "lock-budget", 0};
+        int ok = !ovf && !sy_write_atomic(table, row, strlen(row), 0600) && run(v, cwd, env) == 0;
+        unsigned char *data = 0; int64_t size = 0;
+        ok = ok && !sy_read_file(file, &data, &size, 16) && size == 9 && !memcmp(data, "isolated\n", 9);
+        free(data);
+        if (ok) {
+            char *ev[] = {"sh", (char *)product, "tools/devsvc.cx", "--", "events", 0};
+            ok = run(ev, cwd, env) == 0 && has(event);
+        }
+        ck(ok, label);
+        sy_unlink(table);
+        if (sy_is_reg(file) == 1) sy_unlink(file);
+    }
+}
 
 /* 分组:a 冷构造与缓存、取消与后台作业;b 配置表、锁租约、坏工作副本;c 版本工作树、第二克隆、内容键退回。各组独立夹具、固定版本缓存与实例目录 */
 static int group(int g) {
@@ -200,6 +233,8 @@ static int group(int g) {
         if (rc != 0 || ovf || symlink(prod, lk)) { printf("FAIL\tdevsvc-core.fixture-worktree\n"); return 1; }
         {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wt-ok", 0}; rc = run(v, wt, envv); }
         ck(rc == 0 && has("wt-ok") && !has("repo table") && !has("using the working copy"), "worktree-call-works");
+        check_lock_budget(fx, rel_product, envv, 0);
+        check_lock_budget(wt, rel_product, envv, 10);
         /* (7a) 工作树取自己的 HEAD;HEAD 一动(新提交)即按新提交号重新钉死,不命中旧备忘;树内容相同则固定版本键不变 */
         {   char h1[48] = "", h2[48] = "", hp[900]; char *hv[] = {"git", "rev-parse", "HEAD", 0}; char *ls[] = {"ls", "-1", pin, 0}; char *q; int n0 = -1, n1 = -1, okm1, okm2;
             if (run(hv, wt, 0) == 0 && strlen(out) >= 40) { memcpy(h1, out, 40); h1[40] = 0; }
