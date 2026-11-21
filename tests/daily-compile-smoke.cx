@@ -1,0 +1,667 @@
+/* tests/daily-compile-smoke.cx -- actual product compiler smoke runner and shard generator for tier=daily unique tests/*.cx entries (R77).
+ *
+ * Usage:
+ *   sh ./unisacc.com tests/daily-compile-smoke.cx -- --write [--root DIR] [--timings FILE]
+ *   sh ./unisacc.com tests/daily-compile-smoke.cx -- --shard 1..15 [--root DIR] [--out DIR] [--compiler APE]
+ *   sh ./unisacc.com tests/daily-compile-smoke.cx -- --check [--root DIR] [--out DIR] [--compiler APE]
+ *
+ * Dual isolation (plans/dev-methodology-2026-10-28.md section 6.1):
+ *   Every compile child runs the actual product compiler with its own isolated TMPDIR and UNISACC_CACHE_DIR.
+ * Positive/negative controls (section 6.3):
+ *   --check constructs synthetic control units in an isolated temporary directory decoupled from the working tree.
+ */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define DCS_SHARDS 15
+#define DCS_SHARD_CAP 8
+#define DCS_MAX_ITEMS 512
+
+typedef struct {
+    int shard;
+    char entry[256];
+    char headers[32];
+    long est_ms;
+} DcsItem;
+
+static DcsItem g_items[DCS_MAX_ITEMS];
+static int g_nitems;
+static DcsItem g_expect[DCS_MAX_ITEMS];
+static int g_nexpect;
+
+static void dcs_die(const char *msg, const char *arg) {
+    fprintf(stderr, "daily-compile-smoke: REFUSE %s%s%s\n", msg, arg ? ": " : "", arg ? arg : "");
+    exit(2);
+}
+
+static void dcs_rm_tree(const char *dir) {
+    if (!dir || !dir[0] || tx_eqz(dir, "/")) return;
+    char *av[] = {"rm", "-rf", (char *)dir, 0};
+    np_result r = {0};
+    char why[256] = {0};
+    (void)np_run(av, "/", 0, 10, &r, why, sizeof why);
+    np_free(&r);
+}
+
+static int dcs_split_tsv(char *line, char **cols, int max_cols) {
+    int n = 0;
+    char *p = line;
+    cols[n++] = p;
+    while (*p) {
+        if (*p == '\t') {
+            *p = 0;
+            if (n < max_cols) cols[n++] = p + 1;
+        }
+        p++;
+    }
+    return n;
+}
+
+/* Collect unique (entry, headers) from tests/batches.tsv where:
+ *   implementation == IMPLEMENTED, mode == SOURCE, tier == daily,
+ *   entry starts with "tests/" and ends with ".cx",
+ *   excluding tests/daily-compile-smoke.cx itself. */
+static void dcs_collect_expected(const char *root) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root)) dcs_die("path-bound", "batches.tsv");
+    size_t n = 0;
+    char *buf = cx_read(p, &n);
+    if (!buf) dcs_die("cannot-read", p);
+    g_nexpect = 0;
+    size_t at = 0;
+    int row_no = 0;
+    while (at < n) {
+        size_t end = at;
+        while (end < n && buf[end] != '\n') end++;
+        row_no++;
+        if (end > at && buf[at] != '#') {
+            char line[4096];
+            size_t len = end - at;
+            if (len >= sizeof line) { free(buf); dcs_die("batch-line-bound", p); }
+            if (mm_copy(line, sizeof line, buf + at, len)) { free(buf); dcs_die("copy", p); }
+            line[len] = 0;
+            char *cols[16];
+            int nc = dcs_split_tsv(line, cols, 16);
+            if (row_no == 1 && nc >= 1 && tx_eqz(cols[0], "id")) { at = end + 1; continue; }
+            if (nc == 14 && tx_eqz(cols[1], "IMPLEMENTED") && tx_eqz(cols[4], "SOURCE") && tx_eqz(cols[13], "daily")) {
+                const char *entry = cols[8];
+                const char *headers = cols[12];
+                size_t el = strlen(entry);
+                if (el > 9 && !strncmp(entry, "tests/", 6) && !strcmp(entry + el - 3, ".cx") &&
+                    !tx_eqz(entry, "tests/daily-compile-smoke.cx")) {
+                    int dup = 0;
+                    for (int i = 0; i < g_nexpect; i++) {
+                        if (tx_eqz(g_expect[i].entry, entry) && tx_eqz(g_expect[i].headers, headers)) {
+                            dup = 1;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        if (g_nexpect >= DCS_MAX_ITEMS) { free(buf); dcs_die("too-many-daily-entries", entry); }
+                        g_expect[g_nexpect].shard = 0;
+                        if (cx_fmt(g_expect[g_nexpect].entry, sizeof g_expect[0].entry, "%s", entry) ||
+                            cx_fmt(g_expect[g_nexpect].headers, sizeof g_expect[0].headers, "%s", headers)) {
+                            free(buf);
+                            dcs_die("entry-field-bound", entry);
+                        }
+                        g_expect[g_nexpect].est_ms = 12000;
+                        g_nexpect++;
+                    }
+                }
+            }
+        }
+        at = end + 1;
+    }
+    free(buf);
+}
+
+static void dcs_apply_timings_file(const char *path) {
+    size_t n = 0;
+    char *buf = cx_read(path, &n);
+    if (!buf) return;
+    size_t at = 0;
+    while (at < n) {
+        size_t end = at;
+        while (end < n && buf[end] != '\n') end++;
+        if (end > at && buf[at] != '#') {
+            char line[2048];
+            size_t len = end - at;
+            if (len < sizeof line && !mm_copy(line, sizeof line, buf + at, len)) {
+                line[len] = 0;
+                char *cols[10];
+                int nc = dcs_split_tsv(line, cols, 10);
+                /* Supports both daily-compile-smoke.tsv (shard,entry,headers,est_ms)
+                 * and daily-cold-full-089-iso.tsv (entry,headers,batch_count,rc,ms,...) */
+                const char *entry = 0, *headers = 0, *ms_s = 0;
+                if (nc == 4 && !tx_eqz(cols[0], "shard")) {
+                    entry = cols[1]; headers = cols[2]; ms_s = cols[3];
+                } else if (nc >= 5 && !tx_eqz(cols[0], "entry")) {
+                    entry = cols[0]; headers = cols[1]; ms_s = cols[4];
+                }
+                if (entry && headers && ms_s) {
+                    long ms = atol(ms_s);
+                    if (ms > 0) {
+                        for (int i = 0; i < g_nexpect; i++) {
+                            if (tx_eqz(g_expect[i].entry, entry) && tx_eqz(g_expect[i].headers, headers)) {
+                                g_expect[i].est_ms = ms;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        at = end + 1;
+    }
+    free(buf);
+}
+
+static int dcs_load_table(const char *root, char *why, size_t why_cap) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/tests/daily-compile-smoke.tsv", root)) {
+        cx_fmt(why, why_cap, "path-bound");
+        return -1;
+    }
+    size_t n = 0;
+    char *buf = cx_read(p, &n);
+    if (!buf) {
+        cx_fmt(why, why_cap, "cannot-read:%s", p);
+        return -1;
+    }
+    g_nitems = 0;
+    size_t at = 0;
+    int line_no = 0;
+    while (at < n) {
+        size_t end = at;
+        while (end < n && buf[end] != '\n') end++;
+        line_no++;
+        if (end == at || buf[at] == '#') { at = end + 1; continue; }
+        char line[1024];
+        size_t len = end - at;
+        if (len >= sizeof line || mm_copy(line, sizeof line, buf + at, len)) {
+            free(buf);
+            cx_fmt(why, why_cap, "line-too-long:%d", line_no);
+            return -1;
+        }
+        line[len] = 0;
+        char *cols[6];
+        int nc = dcs_split_tsv(line, cols, 6);
+        if (line_no == 1 && nc == 4 && tx_eqz(cols[0], "shard") && tx_eqz(cols[1], "entry") &&
+            tx_eqz(cols[2], "headers") && tx_eqz(cols[3], "est_ms")) {
+            at = end + 1;
+            continue;
+        }
+        if (nc != 4) {
+            free(buf);
+            cx_fmt(why, why_cap, "bad-column-count:%d", line_no);
+            return -1;
+        }
+        char *eptr = 0;
+        long sh = strtol(cols[0], &eptr, 10);
+        if (!cols[0][0] || *eptr || sh < 1 || sh > DCS_SHARDS) {
+            free(buf);
+            cx_fmt(why, why_cap, "bad-shard:%d", line_no);
+            return -1;
+        }
+        long ms = strtol(cols[3], &eptr, 10);
+        if (!cols[3][0] || *eptr || ms <= 0 || ms > 300000) {
+            free(buf);
+            cx_fmt(why, why_cap, "bad-est-ms:%d", line_no);
+            return -1;
+        }
+        if (!tx_eqz(cols[2], "product") && !tx_eqz(cols[2], "tree")) {
+            free(buf);
+            cx_fmt(why, why_cap, "bad-headers:%d", line_no);
+            return -1;
+        }
+        if (g_nitems >= DCS_MAX_ITEMS) {
+            free(buf);
+            cx_fmt(why, why_cap, "too-many-rows");
+            return -1;
+        }
+        g_items[g_nitems].shard = (int)sh;
+        if (cx_fmt(g_items[g_nitems].entry, sizeof g_items[0].entry, "%s", cols[1]) ||
+            cx_fmt(g_items[g_nitems].headers, sizeof g_items[0].headers, "%s", cols[2])) {
+            free(buf);
+            cx_fmt(why, why_cap, "field-bound:%d", line_no);
+            return -1;
+        }
+        g_items[g_nitems].est_ms = ms;
+        g_nitems++;
+        at = end + 1;
+    }
+    free(buf);
+    if (g_nitems <= 0) {
+        cx_fmt(why, why_cap, "empty-table");
+        return -1;
+    }
+    return 0;
+}
+
+static int dcs_cmd_write(const char *root, const char *timings_file) {
+    char tbl_path[4400];
+    if (cx_fmt(tbl_path, sizeof tbl_path, "%s/tests/daily-compile-smoke.tsv", root)) dcs_die("path-bound", "table");
+    dcs_collect_expected(root);
+    if (sy_exists(tbl_path) == 1) dcs_apply_timings_file(tbl_path);
+    if (timings_file && timings_file[0]) dcs_apply_timings_file(timings_file);
+    if (g_nexpect > DCS_SHARDS * DCS_SHARD_CAP) dcs_die("entries-exceed-15x8-capacity", 0);
+
+    /* Sort descending by est_ms, tie-breaking by entry then headers */
+    int ord[DCS_MAX_ITEMS];
+    for (int i = 0; i < g_nexpect; i++) ord[i] = i;
+    for (int i = 1; i < g_nexpect; i++) {
+        int v = ord[i], j = i - 1;
+        while (j >= 0) {
+            int u = ord[j];
+            int swap = 0;
+            if (g_expect[u].est_ms < g_expect[v].est_ms) swap = 1;
+            else if (g_expect[u].est_ms == g_expect[v].est_ms) {
+                int c = strcmp(g_expect[u].entry, g_expect[v].entry);
+                if (c > 0 || (c == 0 && strcmp(g_expect[u].headers, g_expect[v].headers) > 0)) swap = 1;
+            }
+            if (!swap) break;
+            ord[j + 1] = ord[j];
+            j--;
+        }
+        ord[j + 1] = v;
+    }
+
+    long shard_ms[DCS_SHARDS + 1];
+    int shard_cnt[DCS_SHARDS + 1];
+    for (int s = 1; s <= DCS_SHARDS; s++) { shard_ms[s] = 0; shard_cnt[s] = 0; }
+
+    for (int i = 0; i < g_nexpect; i++) {
+        int idx = ord[i];
+        int best_s = -1;
+        for (int s = 1; s <= DCS_SHARDS; s++) {
+            if (shard_cnt[s] >= DCS_SHARD_CAP) continue;
+            if (best_s < 0 || shard_ms[s] < shard_ms[best_s] ||
+                (shard_ms[s] == shard_ms[best_s] && shard_cnt[s] < shard_cnt[best_s])) {
+                best_s = s;
+            }
+        }
+        if (best_s < 0) dcs_die("shard-assignment-failed", g_expect[idx].entry);
+        g_expect[idx].shard = best_s;
+        shard_ms[best_s] += g_expect[idx].est_ms;
+        shard_cnt[best_s]++;
+    }
+
+    FILE *f = fopen(tbl_path, "wb");
+    if (!f) dcs_die("cannot-write", tbl_path);
+    fprintf(f, "shard\tentry\theaders\test_ms\n");
+    for (int s = 1; s <= DCS_SHARDS; s++) {
+        for (int i = 0; i < g_nexpect; i++) {
+            if (g_expect[i].shard == s) {
+                fprintf(f, "%d\t%s\t%s\t%ld\n", s, g_expect[i].entry, g_expect[i].headers, g_expect[i].est_ms);
+            }
+        }
+    }
+    if (ferror(f) || fclose(f)) dcs_die("write-failed", tbl_path);
+
+    const char *cov_shards =
+        "coverage\tcontract.daily-compile-smoke\tcontract\tIMPLEMENTED_SEPARATE_BATCH\t"
+        "R77 tier=daily 117 个唯一 tests/*.cx 入口拆 15 个编译冒烟批次(每片最多 8 个入口,双隔离 TMPDIR+UNISACC_CACHE_DIR 并行 -c -funit 编译,兜底捕获未声明函数与模块接口漂移)\t"
+        "tests/daily-compile-smoke.cx + tests/daily-compile-smoke.tsv\n";
+    for (int s = 1; s <= DCS_SHARDS; s++) {
+        char mp[4400], mbuf[2048];
+        if (cx_fmt(mp, sizeof mp, "%s/tests/manifests/daily-compile-smoke-%02d.tsv", root, s) ||
+            cx_fmt(mbuf, sizeof mbuf,
+                   "batch\tdaily-compile-smoke-%02d\tIMPLEMENTED\tcontract\ttests/daily-compile-smoke.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/daily-compile-smoke.cx\t--shard;%d;--root;{root};--out;{out}\tcontract.daily-compile-smoke\trc0:DAILY_COMPILE_SMOKE\tproduct\tdaily\n"
+                   "%s"
+                   "packages\tbatch\tdaily-compile-smoke-%02d\tall\t-\t-\t-\t-\t-\t-\n",
+                   s, s, cov_shards, s) ||
+            cx_write(mp, mbuf, strlen(mbuf))) dcs_die("manifest-write-failed", mp);
+    }
+    {
+        char mp[4400], mbuf[2048];
+        if (cx_fmt(mp, sizeof mp, "%s/tests/manifests/check-daily-compile-smoke.tsv", root) ||
+            cx_fmt(mbuf, sizeof mbuf,
+                   "batch\tcheck-daily-compile-smoke\tIMPLEMENTED\tcontract\ttests/daily-compile-smoke.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/daily-compile-smoke.cx\t--check;--root;{root};--out;{out}\tcontract.check-daily-compile-smoke\trc0:CHECK_DAILY_COMPILE_SMOKE\tproduct\tcommit\n"
+                   "coverage\tcontract.check-daily-compile-smoke\tcontract\tIMPLEMENTED_SEPARATE_BATCH\t"
+                   "R77 daily-compile-smoke 分片表与 tests/batches.tsv 中 tier=daily 唯一 tests/*.cx 入口双射校验及双隔离正负控自检(未声明前向声明与模块接口漂移检出)\t"
+                   "tests/daily-compile-smoke.cx + tests/daily-compile-smoke.tsv\n"
+                   "packages\tbatch\tcheck-daily-compile-smoke\tall\t-\t-\t-\t-\t-\t-\n") ||
+            cx_write(mp, mbuf, strlen(mbuf))) dcs_die("manifest-write-failed", mp);
+    }
+
+    printf("DAILY_COMPILE_SMOKE_WRITE\tentries=%d\tshards=%d\ttable=%s\n", g_nexpect, DCS_SHARDS, tbl_path);
+    return 0;
+}
+
+static int dcs_is_native_elf(const char *p) {
+    unsigned char magic[4];
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    size_t n = fread(magic, 1, 4, f);
+    fclose(f);
+    return n == 4 && !memcmp(magic, "\177ELF", 4);
+}
+
+static int dcs_compile_one(const char *root, const char *compiler, int is_native,
+                           const char *work, int slot_id, const DcsItem *it) {
+    char slot[4400], tdir[4400], cdir[4400], obj[4400], res[4400], errf[4400];
+    char env_tmp[4500], env_cache[4500], inc_arg[4400], src_path[4400], why[1024] = {0};
+    if (cx_fmt(slot, sizeof slot, "%s/slot-%02d", work, slot_id) ||
+        cx_fmt(tdir, sizeof tdir, "%s/tmp", slot) ||
+        cx_fmt(cdir, sizeof cdir, "%s/cache", slot) ||
+        cx_fmt(obj, sizeof obj, "%s/out.o", slot) ||
+        cx_fmt(res, sizeof res, "%s/slot-%02d.result", work, slot_id) ||
+        cx_fmt(errf, sizeof errf, "%s/slot-%02d.stderr", work, slot_id) ||
+        cx_fmt(env_tmp, sizeof env_tmp, "TMPDIR=%s", tdir) ||
+        cx_fmt(env_cache, sizeof env_cache, "UNISACC_CACHE_DIR=%s", cdir) ||
+        cx_fmt(inc_arg, sizeof inc_arg, "-I%s/include", root)) return 2;
+    if (it->entry[0] == '/') {
+        if (cx_fmt(src_path, sizeof src_path, "%s", it->entry)) return 2;
+    } else {
+        if (cx_fmt(src_path, sizeof src_path, "%s/%s", root, it->entry)) return 2;
+    }
+    if (sy_mkdir(slot, 0700) || sy_mkdir(tdir, 0700) || sy_mkdir(cdir, 0700)) return 2;
+
+    char *adds[] = {env_tmp, env_cache, "UNISA_JOBS=1", 0};
+    char *av[16];
+    int an = 0;
+    if (!is_native) av[an++] = "sh";
+    av[an++] = (char *)compiler;
+    if (tx_eqz(it->headers, "tree")) av[an++] = inc_arg;
+    av[an++] = "-c";
+    av[an++] = "-funit";
+    av[an++] = "-b";
+    av[an++] = "lnx/x86_64";
+    av[an++] = src_path;
+    av[an++] = "-o";
+    av[an++] = obj;
+    av[an] = 0;
+
+    long t0 = sy_now_ms();
+    np_result r = {0};
+    int transport = np_run(av, root, adds, 40, &r, why, sizeof why);
+    long elapsed = sy_now_ms() - t0;
+
+    struct stat st;
+    int has_obj = !stat(obj, &st) && S_ISREG(st.st_mode) && st.st_size > 0;
+    int ok = !transport && r.rc == 0 && r.residue == 0 && has_obj;
+
+    if (!ok) {
+        FILE *ef = fopen(errf, "wb");
+        if (ef) {
+            if (r.err && r.errn) fwrite(r.err, 1, r.errn, ef);
+            if (transport) fprintf(ef, "\ntransport: %s\n", why);
+            fclose(ef);
+        }
+    }
+    FILE *rf = fopen(res, "wb");
+    if (rf) {
+        fprintf(rf, "%s\t%s\theaders=%s\trc=%d\ttransport=%d\tobject=%d\tresidue=%d\tms=%ld\n",
+                ok ? "PASS" : "FAIL", it->entry, it->headers, r.rc, transport, has_obj, r.residue, elapsed);
+        fclose(rf);
+    }
+    np_free(&r);
+    dcs_rm_tree(slot);
+    return ok ? 0 : 1;
+}
+
+static int dcs_cmd_shard(const char *root, const char *out_arg, const char *compiler, int shard) {
+    if (shard < 1 || shard > DCS_SHARDS) dcs_die("shard-out-of-range", 0);
+    char why[256] = {0};
+    if (dcs_load_table(root, why, sizeof why)) dcs_die("table-load", why);
+
+    DcsItem *sel[DCS_SHARD_CAP];
+    int nsel = 0;
+    for (int i = 0; i < g_nitems; i++) {
+        if (g_items[i].shard == shard) {
+            if (nsel >= DCS_SHARD_CAP) dcs_die("shard-exceeds-cap", 0);
+            sel[nsel++] = &g_items[i];
+        }
+    }
+    if (nsel == 0) dcs_die("empty-shard", 0);
+
+    char work[4400];
+    int clean_work = 0;
+    if (out_arg && out_arg[0]) {
+        if (cx_fmt(work, sizeof work, "%s", out_arg)) dcs_die("path-bound", "out");
+        (void)sy_mkdir(work, 0700);
+    } else {
+        if (cx_fmt(work, sizeof work, "%s/dcs-shard%02d-%d-%ld", sy_tmpdir(), shard, (int)sy_pid(), sy_now_ms()))
+            dcs_die("path-bound", "tmpdir");
+        if (sy_mkdir(work, 0700)) dcs_die("mkdir-work", work);
+        clean_work = 1;
+    }
+
+    int is_native = dcs_is_native_elf(compiler);
+    int pids[DCS_SHARD_CAP];
+    long t0 = sy_now_ms();
+    fflush(stdout);
+    fflush(stderr);
+    for (int i = 0; i < nsel; i++) {
+        int pid = fork();
+        if (pid < 0) dcs_die("fork-failed", sel[i]->entry);
+        if (pid == 0) _exit(dcs_compile_one(root, compiler, is_native, work, i, sel[i]));
+        pids[i] = pid;
+    }
+    int fail = 0, pass = 0;
+    for (int i = 0; i < nsel; i++) {
+        int st = 0, got;
+        do { got = waitpid(pids[i], &st, 0); } while (got < 0 && errno == EINTR);
+        if (got < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) fail++;
+    }
+    for (int i = 0; i < nsel; i++) {
+        char res[4400], errf[4400];
+        size_t rn = 0, en = 0;
+        if (!cx_fmt(res, sizeof res, "%s/slot-%02d.result", work, i)) {
+            char *rb = cx_read(res, &rn);
+            if (rb) {
+                if (rn >= 5 && !memcmp(rb, "PASS\t", 5)) pass++;
+                fwrite(rb, 1, rn, stdout);
+                free(rb);
+            } else {
+                printf("FAIL\t%s\tmissing-result\n", sel[i]->entry);
+            }
+        }
+        if (!cx_fmt(errf, sizeof errf, "%s/slot-%02d.stderr", work, i) && sy_exists(errf) == 1) {
+            char *eb = cx_read(errf, &en);
+            if (eb) {
+                if (en) fwrite(eb, 1, en, stderr);
+                free(eb);
+            }
+        }
+    }
+    if (pass + fail != nsel) fail = nsel - pass;
+    long elapsed = sy_now_ms() - t0;
+    if (clean_work) dcs_rm_tree(work);
+    printf("DAILY_COMPILE_SMOKE\tshard=%02d\ttotal=%d\tpass=%d\tfail=%d\tms=%ld\n",
+           shard, nsel, pass, fail, elapsed);
+    return fail ? 1 : 0;
+}
+
+static int dcs_has_bytes(const char *hay, size_t hn, const char *needle) {
+    size_t nn = strlen(needle);
+    if (!hay || hn < nn) return 0;
+    for (size_t j = 0; j + nn <= hn; j++) {
+        if (!memcmp(hay + j, needle, nn)) return 1;
+    }
+    return 0;
+}
+
+static int g_ck_ok, g_ck_fail;
+static void dcs_ck(int cond, const char *name) {
+    if (cond) {
+        g_ck_ok++;
+        printf("PASS\tdaily-compile-smoke.%s\n", name);
+    } else {
+        g_ck_fail++;
+        printf("FAIL\tdaily-compile-smoke.%s\n", name);
+    }
+}
+
+static int dcs_cmd_check(const char *root, const char *out_arg, const char *compiler) {
+    long t0 = sy_now_ms();
+    char why[256] = {0};
+    int tbl_ok = (dcs_load_table(root, why, sizeof why) == 0);
+    dcs_ck(tbl_ok, "table-loads-cleanly");
+    if (!tbl_ok) {
+        fprintf(stderr, "daily-compile-smoke: table load failed: %s\n", why);
+        printf("CHECK_DAILY_COMPILE_SMOKE\tok=%d\tfailed=%d\tms=%ld\n", g_ck_ok, g_ck_fail, sy_now_ms() - t0);
+        return 1;
+    }
+
+    dcs_collect_expected(root);
+    dcs_ck(g_nitems == g_nexpect, "table-row-count-matches-daily-tests-entries");
+
+    int shard_counts[DCS_SHARDS + 1];
+    for (int s = 1; s <= DCS_SHARDS; s++) shard_counts[s] = 0;
+    int dup_rows = 0, missing_rows = 0, extra_rows = 0;
+    for (int i = 0; i < g_nitems; i++) {
+        shard_counts[g_items[i].shard]++;
+        for (int j = 0; j < i; j++) {
+            if (tx_eqz(g_items[i].entry, g_items[j].entry) && tx_eqz(g_items[i].headers, g_items[j].headers))
+                dup_rows++;
+        }
+        int found = 0;
+        for (int j = 0; j < g_nexpect; j++) {
+            if (tx_eqz(g_items[i].entry, g_expect[j].entry) && tx_eqz(g_items[i].headers, g_expect[j].headers)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) extra_rows++;
+    }
+    for (int j = 0; j < g_nexpect; j++) {
+        int found = 0;
+        for (int i = 0; i < g_nitems; i++) {
+            if (tx_eqz(g_items[i].entry, g_expect[j].entry) && tx_eqz(g_items[i].headers, g_expect[j].headers)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) missing_rows++;
+    }
+    dcs_ck(dup_rows == 0 && missing_rows == 0 && extra_rows == 0, "table-bijection-with-daily-batches");
+
+    int shards_valid = 1;
+    for (int s = 1; s <= DCS_SHARDS; s++) {
+        if (shard_counts[s] < 1 || shard_counts[s] > DCS_SHARD_CAP) shards_valid = 0;
+    }
+    dcs_ck(shards_valid, "all-15-shards-nonempty-and-within-cap-8");
+
+    /* Check batch registration in tests/batches.tsv unless skipped during bootstrap registration */
+    const char *skip_reg = sy_env("UNISACC_SKIP_BATCH_REG_CHECK");
+    if (!skip_reg || !tx_eqz(skip_reg, "1")) {
+        char bp[4400];
+        size_t bn = 0;
+        if (!cx_fmt(bp, sizeof bp, "%s/tests/batches.tsv", root)) {
+            char *bb = cx_read(bp, &bn);
+            int seen_shards = 0;
+            if (bb) {
+                for (int s = 1; s <= DCS_SHARDS; s++) {
+                    char needle[64];
+                    cx_fmt(needle, sizeof needle, "\ndaily-compile-smoke-%02d\tIMPLEMENTED\t", s);
+                    if (dcs_has_bytes(bb, bn, needle)) seen_shards++;
+                }
+                free(bb);
+            }
+            dcs_ck(seen_shards == DCS_SHARDS, "all-15-shards-registered-in-batches-tsv");
+        }
+    }
+
+    /* Section 6.1 & 6.3: Independent positive & negative compile controls in an isolated private directory */
+    char work[4400];
+    int clean_work = 0;
+    if (out_arg && out_arg[0]) {
+        if (cx_fmt(work, sizeof work, "%s/check-fixtures", out_arg)) dcs_die("path-bound", "out");
+    } else {
+        if (cx_fmt(work, sizeof work, "%s/dcs-check-%d-%ld", sy_tmpdir(), (int)sy_pid(), sy_now_ms()))
+            dcs_die("path-bound", "tmpdir");
+        clean_work = 1;
+    }
+    (void)sy_mkdir_all(work, 0700);
+
+    char f_helper[4400], f_pos[4400], f_neg_undecl[4400], f_neg_drift[4400];
+    if (cx_fmt(f_helper, sizeof f_helper, "%s/helper.cx", work) ||
+        cx_fmt(f_pos, sizeof f_pos, "%s/pos.cx", work) ||
+        cx_fmt(f_neg_undecl, sizeof f_neg_undecl, "%s/neg_undecl.cx", work) ||
+        cx_fmt(f_neg_drift, sizeof f_neg_drift, "%s/neg_drift.cx", work)) dcs_die("path-bound", "fixtures");
+
+    const char *s_helper = "#pragma unisa module helper\nint helper_val(void) { return 7; }\n";
+    const char *s_pos = "#pragma unisa use helper\nstatic int local_fn(int x);\nint main(void) { return local_fn(helper_val()); }\nstatic int local_fn(int x) { return x - 7; }\n";
+    const char *s_neg_undecl = "#pragma unisa use helper\nint main(void) { return undeclared_fn(helper_val()); }\nstatic int undeclared_fn(int x) { return x; }\n";
+    const char *s_neg_drift = "#pragma unisa use helper\nint main(void) { return helper_drifted_api(); }\n";
+
+    if (cx_write(f_helper, s_helper, strlen(s_helper)) ||
+        cx_write(f_pos, s_pos, strlen(s_pos)) ||
+        cx_write(f_neg_undecl, s_neg_undecl, strlen(s_neg_undecl)) ||
+        cx_write(f_neg_drift, s_neg_drift, strlen(s_neg_drift))) dcs_die("fixture-write", work);
+
+    int is_native = dcs_is_native_elf(compiler);
+    DcsItem it_pos = {0, "", "product", 1000};
+    DcsItem it_neg1 = {0, "", "product", 1000};
+    DcsItem it_neg2 = {0, "", "product", 1000};
+    cx_fmt(it_pos.entry, sizeof it_pos.entry, "%s", f_pos);
+    cx_fmt(it_neg1.entry, sizeof it_neg1.entry, "%s", f_neg_undecl);
+    cx_fmt(it_neg2.entry, sizeof it_neg2.entry, "%s", f_neg_drift);
+
+    int rc_pos = dcs_compile_one(root, compiler, is_native, work, 0, &it_pos);
+    int rc_neg1 = dcs_compile_one(root, compiler, is_native, work, 1, &it_neg1);
+    int rc_neg2 = dcs_compile_one(root, compiler, is_native, work, 2, &it_neg2);
+
+    dcs_ck(rc_pos == 0, "positive-fixture-compiles-with-dual-isolation");
+
+    char err1[4400], err2[4400];
+    size_t en1 = 0, en2 = 0;
+    cx_fmt(err1, sizeof err1, "%s/slot-01.stderr", work);
+    cx_fmt(err2, sizeof err2, "%s/slot-02.stderr", work);
+    char *eb1 = cx_read(err1, &en1);
+    char *eb2 = cx_read(err2, &en2);
+    dcs_ck(rc_neg1 != 0 && eb1 && dcs_has_bytes(eb1, en1, "undeclared_fn"),
+           "negative-control-catches-missing-forward-declaration");
+    dcs_ck(rc_neg2 != 0 && eb2 && dcs_has_bytes(eb2, en2, "helper_drifted_api"),
+           "negative-control-catches-module-interface-drift");
+    free(eb1);
+    free(eb2);
+    if (clean_work) dcs_rm_tree(work);
+
+    long elapsed = sy_now_ms() - t0;
+    printf("CHECK_DAILY_COMPILE_SMOKE\tok=%d\tfailed=%d\tms=%ld\n", g_ck_ok, g_ck_fail, elapsed);
+    return g_ck_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root_arg = ".";
+    const char *out_arg = 0;
+    const char *compiler_arg = 0;
+    const char *timings_arg = 0;
+    int mode_write = 0, mode_check = 0, shard = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--write")) mode_write = 1;
+        else if (tx_eqz(argv[i], "--check")) mode_check = 1;
+        else if (tx_eqz(argv[i], "--shard") && i + 1 < argc) shard = atoi(argv[++i]);
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--compiler") && i + 1 < argc) compiler_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--timings") && i + 1 < argc) timings_arg = argv[++i];
+        else dcs_die("unknown-arg", argv[i]);
+    }
+
+    char root[4096], compiler[4400];
+    if (!realpath(root_arg, root)) dcs_die("invalid-root", root_arg);
+    if (compiler_arg && compiler_arg[0]) {
+        if (!realpath(compiler_arg, compiler)) dcs_die("invalid-compiler", compiler_arg);
+    } else {
+        if (cx_fmt(compiler, sizeof compiler, "%s/unisacc.com", root)) dcs_die("path-bound", "compiler");
+    }
+
+    if (mode_write + mode_check + (shard > 0 ? 1 : 0) != 1) {
+        dcs_die("usage", "--write | --check | --shard 1..15 [--root DIR] [--out DIR] [--compiler APE]");
+    }
+    if (mode_write) return dcs_cmd_write(root, timings_arg);
+    if (mode_check) return dcs_cmd_check(root, out_arg, compiler);
+    return dcs_cmd_shard(root, out_arg, compiler, shard);
+}

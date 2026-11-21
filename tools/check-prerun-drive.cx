@@ -61,9 +61,9 @@ int main(void) {
         cx_fmt(wp, sizeof wp, "%s/windows.tsv", pdir);
         char *wb = (char *)cx_read(wp, &wn);
         ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=421\t") &&
-           wb && tx_find(wb, (long)wn, "\tprebuild-self\t1\treal-commit\n", 27) >= 0 &&
-           tx_find(wb, (long)wn, "\twarmup\t4\t", 9) >= 0 &&
-           tx_find(wb, (long)wn, "\theavy\t1\treal-commit\n", 20) >= 0,
+           wb && tx_find(wb, (long)wn, "\tprebuild-self\t1\treal-commit\n", 29) >= 0 &&
+           tx_find(wb, (long)wn, "\twarmup\t4\t", 10) >= 0 &&
+           tx_find(wb, (long)wn, "\theavy\t1\treal-commit\n", 21) >= 0,
            "plan-421-windows: covers 421 ids with warmup, prebuild-self, heavy jobs=1, and 8..12 normal windows");
         free(wb);
     }
@@ -387,9 +387,11 @@ int main(void) {
             if(cx_fmt(many+used,sizeof many-used,"coverage-%d\n",i))return 2;
             used+=strlen(many+used);
         }
-        if(cx_write(ix,many,used)||cx_write(times,"coverage-0\t1000\n",16))return 2;
+        if(cx_write(ix,many,used)||cx_write(times,"coverage-0\t1000\n",16)||
+           cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --max-wins 512",cwd,cwd,ix,times,plan))return 2;
         rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
-        ck(rc==2&&ckk_has(out,CPD_OUT,"window-plan-did-not-cover-every-batch"),"plan-refuses-unrepresented-batches");
+        ck(rc==2&&ckk_has(out,CPD_OUT,"PRERUN_MAX_WINS_EXCEEDED\twindows=512\tmax_wins=512\tplanned=512\ttotal=514")&&
+           ckk_has(out,CPD_OUT,"window-plan-did-not-cover-every-batch"),"plan-refuses-unrepresented-batches");
 
         /* Default warmup with --times-file: picks 1 lightest batch into W0000 */
         {
@@ -573,7 +575,8 @@ int main(void) {
                 "lane-key-probes\n"
                 "ri-image-single\n"
                 "ri-image-pem\n"
-                "ri-image-multi\n";
+                "ri-image-multi\n"
+                "daily-compile-smoke-01\n";
             const char *f_ctimes =
                 "light-warm\t800\n"
                 "netregen-small-lnx-x86_64\t35000\n"
@@ -581,7 +584,8 @@ int main(void) {
                 "lane-key-probes\t3000\n"
                 "ri-image-single\t2000\n"
                 "ri-image-pem\t2000\n"
-                "ri-image-multi\t2000\n";
+                "ri-image-multi\t2000\n"
+                "daily-compile-smoke-01\t2000\n";
             if (cx_fmt(cids, sizeof cids, "%s/can-ids.txt", work) ||
                 cx_fmt(ctimes, sizeof ctimes, "%s/can-times.tsv", work) ||
                 cx_fmt(cplan, sizeof cplan, "%s/can-plan", work) ||
@@ -598,9 +602,9 @@ int main(void) {
             char *cwb = (char *)cx_read(cwin, &cwn);
             ck(rc_cp == 0 &&
                rows_have(cwb, cwn, "W0000\t1\twarmup\t1\tlight-warm\n") &&
-               rows_have(cwb, cwn, "W0001\t2\tnormal\t4\tlane-key-probes,ri-image-single,ri-image-pem,ri-image-multi\n") &&
+               rows_have(cwb, cwn, "W0001\t2\tnormal\t5\tlane-key-probes,ri-image-single,ri-image-pem,ri-image-multi,daily-compile-smoke-01\n") &&
                rows_have(cwb, cwn, "W0002\t1\theavy\t1\tnetregen-small-lnx-x86_64\n"),
-               "early-canary-before-heavy: schedules ri-image-* and lane-key-probes in W0001 ahead of heavy netregen");
+               "early-canary-before-heavy: schedules ri-image-*, lane-key-probes and daily-compile-smoke-* in W0001 ahead of heavy netregen");
             free(cwb);
 
             const char *cmock_s =
@@ -869,6 +873,58 @@ int main(void) {
         ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\t") &&
            ckk_has(out, CPD_OUT, "PRERUN_MERGE\twindows=") && ckk_has(out, CPD_OUT, "\tbatches=3\tPASS=3\t"),
            "run-and-merge-dir-from-prerun-env");
+    }
+
+    /* (13) R74: 799 batches with 355 unmeasured batches plan within PD_MAX_WINS=2048,
+     *      and --unmeasured-ms packs unmeasured batches conservatively within the 22s wave budget */
+    {
+        char ids799[CPD_PW], times444[CPD_PW], p799a[CPD_PW], p799b[CPD_PW], w799b[CPD_PW];
+        if (cx_fmt(ids799, sizeof ids799, "%s/ids799.txt", work) ||
+            cx_fmt(times444, sizeof times444, "%s/times444.tsv", work) ||
+            cx_fmt(p799a, sizeof p799a, "%s/plan799a", work) ||
+            cx_fmt(p799b, sizeof p799b, "%s/plan799b", work) ||
+            cx_fmt(w799b, sizeof w799b, "%s/plan799b/windows.tsv", work)) return 2;
+        char *ib = (char *)mm_alloc(32768), *tb = (char *)mm_alloc(32768);
+        size_t ip = 0, tp = 0;
+        for (int i = 0; i < 799; i++) {
+            char row[64];
+            cx_fmt(row, sizeof row, "b799-%03d\n", i);
+            mm_copy(ib + ip, 32768 - ip, row, strlen(row)); ip += strlen(row);
+            if (i < 444) {
+                cx_fmt(row, sizeof row, "b799-%03d\t14000\n", i);
+                mm_copy(tb + tp, 32768 - tp, row, strlen(row)); tp += strlen(row);
+            }
+        }
+        if (cx_write(ids799, ib, ip) || cx_write(times444, tb, tp)) return 2;
+        mm_free(ib); mm_free(tb);
+
+        /* 13a: default PD_MAX_WINS=2048 accommodates 799 batches (444 measured + 355 unmeasured = ~466 windows, or 550+ windows when measured are slower) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+            cwd, cwd, ids799, times444, p799a)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=799\t"),
+           "r74-plan-799-with-355-unmeasured-within-max-wins-2048");
+
+        /* 13b: with --unmeasured-ms 5500, 355 unmeasured batches are packed into normal windows (4 waves * 5500ms = 22000ms, 8 batches/window at jobs=2) instead of 355 1-batch long windows */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --unmeasured-ms 5500 --out '%s'",
+            cwd, cwd, ids799, times444, p799b)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        size_t wn = 0; char *wb = (char *)cx_read(w799b, &wn);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=799\t") &&
+           wb && tx_find(wb, (long)wn, "\tlong\t", 6) < 0 &&
+           tx_find(wb, (long)wn, "\t2\tnormal\t8\tb799-447,b799-448,b799-449,b799-450,b799-451,b799-452,b799-453,b799-454\n", 80) >= 0,
+           "r74-unmeasured-ms-packs-unmeasured-batches-within-22s-wave-budget");
+        free(wb);
+
+        /* 13c: out-of-range --unmeasured-ms (> 54000ms single-window limit) is refused by name */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --unmeasured-ms 60000 --out '%s'",
+            cwd, cwd, ids799, times444, p799b)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=invalid-unmeasured-ms"),
+           "r74-refuses-out-of-range-unmeasured-ms");
     }
 
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }

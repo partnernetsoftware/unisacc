@@ -44,6 +44,9 @@ static int g_versioned_gpu;
 static int g_need_ux;
 static int g_abi_imports;
 static const char *g_capacity;
+static const char unresolved_native_call[] = "unresolved native symbol";
+static char g_unresolved_name[64];
+static uint32_t g_unresolved_position;
 static uint32_t g_used, g_request, g_limit;
 
 static void capacity_error(const char *name, uint32_t used, uint32_t request, uint32_t limit) {
@@ -149,8 +152,16 @@ static void diagnostic_number(uint32_t *at, uint32_t n) {
 static void set_err(const char *m) {
   // The allocator starts at byte 64. Errors remain readable even at capacity.
   uint32_t at = 1;
-  diagnostic_text(&at, g_capacity ? g_capacity : m);
-  if (g_capacity) {
+  if (m == unresolved_native_call) {
+    // No emitted output is live after a parse failure.
+    diagnostic_text(&at, m);
+    diagnostic_text(&at, " at byte ");
+    diagnostic_number(&at, g_unresolved_position);
+    diagnostic_text(&at, ": ");
+    const char *name = g_unresolved_name;
+    while (*name && at < 127) g_heap[at++] = (uint8_t)*name++;
+  } else diagnostic_text(&at, g_capacity ? g_capacity : m);
+  if (m != unresolved_native_call && g_capacity) {
     diagnostic_text(&at, " used=");
     diagnostic_number(&at, g_used);
     diagnostic_text(&at, " need=");
@@ -1627,6 +1638,7 @@ static int pprim(Lex *L, Prog *P) {
       int i, fi, g;
       strncpy(nbuf, L->id, MAXN - 1); nbuf[MAXN - 1] = 0;
       fi = find_fn(P, nbuf);
+      uint32_t name_at = (uint32_t)(L->src - P->src) + L->tok_start;
       next(L);
       if (L->tok == T_LP) {
         int native = find_native(P, nbuf);
@@ -1649,6 +1661,17 @@ static int pprim(Lex *L, Prog *P) {
       }
       if (L->tok == T_DOT && (i = layout_find(P, nbuf)) >= 0)
         return layout_constant(L, P, i);
+      if (P->native_result && L->tok == T_LP) {
+        int n = 0;
+        while (nbuf[n] && n < (int)sizeof g_unresolved_name - 1) {
+          g_unresolved_name[n] = nbuf[n];
+          n++;
+        }
+        g_unresolved_name[n] = 0;
+        g_unresolved_position = name_at + 1;
+        P->err = unresolved_native_call;
+        return 0;
+      }
       g = glob(P, nbuf, 1); if (g < 0) return 0;
       if (L->tok == T_LS && P->gty[g] != TY_LIST && P->gty[g] != TY_DICT)
         P->gty[g] = TY_LIST;
