@@ -1,0 +1,3 @@
+#!/usr/bin/env -S unisacc -run
+#pragma unisa use text.fmt
+int main(void) { char b[16]; cx_fmt(b, sizeof b, "%d", 7); return b[0] == 55 ? 0 : 3; }
