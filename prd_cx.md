@@ -43,7 +43,7 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 - (2) 模块层 cx-L0..cx-L3 只管 `.cx` 源码的 `use` 方向(只能向下),定义在 `tools/check-cx-layers.cx` 头注,层表与规则在第 3 节;AMB 是该检查里的未定层,不是一个层号。
 - (3) 术语层 T1-T5 是另一套术语编号,不对应结构层,也不对应模块层。
 - (4) 四环 K/S/X/A 管接口承诺(谁对外承诺、谁可冻结),定义在 0.9 节;输入类 A/B/C 管改动走哪条车道,真源 `build/lane-inputs.tsv`;两者都不是层号。
-- (5) 打包边界(编不编进 unisacc.com,即核心层与扩展层之分)是独立的一条轴,不等同于以上任何一套层编号或四环:`ext/sysx`、`ext/memx`、`ext/textx` 因 `cx/` 下的符号链接(`cx/sys` 9、`cx/mem` 1、`cx/text` 4,另 `src` 与 `cx/driver`、`cx/runtime`、`cx/workspace` 下的 `sysx` 目录链接)经 `seed/ident.c` 的 source-packages-v2 进入源 SID 与 A 类输入,`ext/crypto` 等其余 ext 包不进;去别名归身份收窄版(改 `seed/ident.c`,不改 `use` 名),详见第 3 节末条。
+- (5) 打包边界(编不编进 unisacc.com,即核心层与扩展层之分)是独立的一条轴,不等同于以上任何一套层编号或四环:`ext/sysx`、`ext/memx`、`ext/textx` 因 `cx/` 下的符号链接(`cx/sys` 9、`cx/mem` 1、`cx/text` 4,另 `src` 与 `cx/driver`、`cx/runtime`、`cx/workspace` 下的 `sysx` 目录链接)经 `seed/ident.c` 的 source-packages-v2 进入源 SID 与 A 类输入,`ext/crypto` 等其余 ext 包不进;去别名归身份收窄版(改 `seed/ident.c`,不改 `use` 名),详见第 3 节末条;两层的设计理念、准入判据、依赖方向与市场愿景见下面「两层设计」节。
 
 待所有者定(本文不下结论,出处:2026-11-21 派单必读事实第 (6) 条):
 
@@ -52,6 +52,148 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 - (c) cx.path、cx.stream、`cx/os`、`cx/cx0`、`cx/workspace` 是否定层、定在哪一层。
 - (d) 「unisa 库包仓」的原意。
 - (e) ext 纯包(不经链接进源 SID 的 ext 包)是否随发行。
+
+## 两层. 两层设计:核心库包与扩展应用库包(项目所有者设计理念,2026-11-21)
+
+本节回答三件事:cx 为什么分两层、两层各管什么、往哪里走。分法出自项目所有者(2026-11-21 派单原话),本文只展开依据与现状,不改写成别的分类。
+
+### 两层.1 定义
+
+- (甲) 核心库包:编译在 unisacc.com 内部,只承担四类职责:cx 语言扩展支持、libc 对接、posix 封装、syscall 与 host ABI 对接。
+- (乙) 扩展应用库包:不进 unisacc.com 的编译。unisacc 未来要成为类似 bun、nodejs 那样的库包管理与市场,扩展应用库包就是这个市场里的包。
+
+这是「打包与编译边界」这一条轴。它不等同于模块层 cx-L0 到 cx-L3(源码 `use` 方向)、结构层 L0 loader 到 L4 runtime(产品五部分)、四环 K/S/X/A(接口承诺)、输入类 A/B/C(改动走哪条车道)中的任何一套;各套编号的定义出处见上面总表下第 (1) 至 (5) 句。同一个目录在几条轴上各有各的位置,例如 `ext/sysx` 目录上属 EXT 包层、四环属 X、现行输入类却是 A(原因见「两层.5」)。
+
+编进 unisacc.com 的还有产品本体(编译器 `cx/compiler`、驱动 `cx/driver`、运行期机制 `cx/runtime`、执行器 `cx/core` 与 `src/`,即总表里四环为 K 的内部包)。它们在打包边界上与核心库包同侧,但不是给别的包搭建用的库面,应用不得 use(0.9 节,规划期拒绝待实现)。
+
+### 两层.2 为什么这样分
+
+- (1) 核心每改一次都动产品输入身份并要求整链。现行规则下,源 SID 内任何文件变化都是输入类 A 改动,要重建候选、三代自举、六目标取证;0.0.85 链实测单次整链墙钟 1667 秒,其中三代自举 1050 秒(出处:`plans/reviews/2026-11-20-chain-incremental.md`,经 2026-11-21 边界审计稿转引,本次未重测)。所以核心必须小而稳:只收语言扩展、libc、posix、syscall 与 host ABI 这类需求不再变、别的包要在其上搭建的接口(与 0.1 节第 (4) 条同义)。
+- (2) 平台差异只能收在一处。六目标的差异放在核心的对接单元里,上层与扩展应用库包才能同面同签名(0.1 节第 (2) 条);对接面越小,跨目标要核的格子越少。
+- (3) 扩展应用库包放在核心之外,才能独立版本化、独立发布、按需安装,改它不触发 unisacc 整链。文件、进程树、网络、密码学、JSON、TSV 一类能力需求还在变,绑在核心里就等于让每次库改动都付整链的代价。
+- (4) 市场的前提是边界清楚。包要能脱离 unisacc.com 的编译单独存在,才谈得上索引、锁定、分发;核心对包承诺的只有库面与 ABI(见「两层.6」)。
+
+### 两层.3 准入判据(各一句,可检查)
+
+| 层 | 准入判据 | 现有可执行近似 | 现状 |
+|---|---|---|---|
+| 核心库包 | 该单元编进 unisacc.com,且职责属于四类之一(cx 语言扩展支持、libc 对接、posix 封装、syscall 与 host ABI 对接) | 编译闭包表 `build/core-closure.tsv`(`tools/core-closure.cx --write` 生成,`tools/check-core-closure.cx` 核):44 个根的 use 闭包,六目标各 99 个真实单元,其中真实路径在 `ext/` 下的为 0(2026-11-21 读表计数) | 「编进」以编译闭包还是以输入类 A 为准,待所有者定(总表下 (a));0.0.90 设计取编译闭包 |
+| 扩展应用库包 | 不在任何目标的编译闭包内,产品层(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)没有 use 边指向它,且在 `build/tlib-packages.tsv` 有包行(版本与 api_sha) | `tools/check-cx-layers.cx` 第 4 条断言(产品层 use 到 `ext/` 即红);`build/tlib-packages.tsv` 18 个包行 | `ext/` 下 9 个目录里 `argx`、`fsx`、`testx` 没有包行(2026-11-21 读表);尚无「职责属于四类」的机器检查 |
+
+判据的两个推论:
+
+- 需要 libc、posix、syscall 或 host ABI 的对接路径应放在核心库包,扩展应用库包经核心库面取得系统能力(条款 CX-Y-5 对 `ext/crypto` 已如此要求)。现状落差:`ext/sysx`(13 个文件)、`ext/net`(6 个文件)、`ext/memx/arena.cx` 的文件头写有 `#pragma unisa dock`(2026-11-21 `git grep -c 'unisa dock' -- ext`)。这些对接是下沉进核心还是保留授权,本文不裁定;强制手段是规划中的核心层强制第二步(`build/version-seq.tsv` 0.0.93 行,未实现)。
+- 纯计算而产品自身不用的库(JSON、deflate、字符串构造、arena、密码学、TSV)属于扩展应用库包,即使今天经别名出现在 `cx/` 目录下。
+
+### 两层.4 依赖方向
+
+规则:扩展应用库包可以依赖核心库包;核心库包与产品本体不得依赖扩展应用库包;扩展应用库包之间可以互相依赖,但不得成环。
+
+已守住的(证据):
+
+- 六目标编译闭包里没有 `ext/` 下的真实单元(`build/core-closure.tsv` 第 3 列,2026-11-21 计数 0)。
+- `src/` 与 `cx/` 下没有任何 `use` 指向经链接进来的 ext 模块(`mem.arena`、`text.json`、`text.build`、`text.deflate`、`text.num`、`sysx.*` 以及 `cx/sys` 下 9 个别名模块;2026-11-21 `git grep` 命中 0 行)。
+
+待修的反向依赖(现状与理念的落差,均未修):
+
+- (1) 包表声明层面:`build/tlib-packages.tsv:16`(cx.stream)与 `:20`(cx.compile)的 deps 列仍写 `ext.memx@0.1.0`。实际 use 边已不存在:`cx/stream` 三个单元 use 的是 `mem.grow`、`mem.slice`、`mem.bytes`,这三个实体现在 `cx/mem`(闭包表第 3 列为 `cx/mem/grow.cx`),不在 `ext/memx`(其下只剩 `arena.cx`)。待修动作:deps 列按 use 边重算(0.2 节改进排序 (D)),同表 `:13` 的 ext.memx 备注(仍写 grow、slice、arena)一并改正。逐条清单与修法见「两层.5a」。
+- (2) 名字与身份层面:`cx/` 下 14 个文件别名与 4 个 `sysx` 目录别名,使扩展实体以核心的名字(`mem.arena`、`text.json` 等)被 use,并进入源身份。见「两层.5」。
+- (3) 工具侧:tools.cxlib 依赖 ext.textx、ext.sysx、ext.tsvx(`build/tlib-packages.tsv:24`)。tools 不在产品内,这条边不违反上面的规则,仅如实列出。
+
+### 两层.5 现状对照:物理上在 ext、身份上在核心
+
+真源 `build/product-links.tsv`(`tools/product-links.cx --write` 生成):产品树共 38 条符号链接,类甲(目标在产品树之外)18 条,类乙(目标仍在产品树内)20 条。类甲 18 条如下:
+
+| 位置 | 条数 | 目标 | 涉及模块 |
+|---|---|---|---|
+| `cx/sys/*.cx` | 9 | `ext/sysx` 同名文件 | childdepth、fd、guard、net、poll、process、process_group、process_group_osx、tty |
+| `cx/mem/arena.cx` | 1 | `ext/memx/arena.cx` | arena |
+| `cx/text/*.cx` | 4 | `ext/textx` 同名文件 | json、build、deflate、num |
+| `src/sysx`、`cx/driver/sysx`、`cx/runtime/sysx`、`cx/workspace/sysx` | 4(目录) | `ext/sysx` | 整个 sysx 包 |
+
+后果(已核事实,细节与证据命令在第 3 节末条):现行 `source-packages-v2` 的 `seed/ident.c` 跟随这些链接,`ext/sysx` 15 个、`ext/memx` 1 个、`ext/textx` 4 个共 20 个 `.cx` 参与源 SID,在 `build/lane-inputs.tsv` 记 `A	sid-list-current`;其余 ext 文件 27 条记 `B	ext-non-sid`。也就是说,这 20 个文件不被编进 unisacc.com(闭包内 ext 为 0),改它一行却按核心改动对待。JSON 即其中一例:实体 `ext/textx/json.cx`,包登记为 ext.textx,`cx/text/json.cx` 只是别名;产品源码对它的 use 为 0。
+
+这是现状与理念的落差,不是设计。处理归属:
+
+- 身份收窄:0.0.90 身份类版(`build/version-seq.tsv` 0.0.90 行,状态「建议」;规划,未实现)。链接目标解出产品树的只记别名拓扑、不收目标内容。
+- 去别名:随身份收窄版及其后处理;`use` 名不变(改名波及仓内 113 处文件级使用与仓外调用方 `build/external-users.tsv`,2026-11-21 评审计数,未重数)。
+- 在此之前,对这 20 个文件的任何改动仍是输入类 A,只能随版本分支进整链。
+
+归属待所有者定(本文不裁定,对应总表下 (c)(d)(e);前五行的逐项证据与推荐落位见「两层.5a」):
+
+| 对象 | 现状事实 | 待定的问题 |
+|---|---|---|
+| cx.path(`cx/path`) | 纯计算,产品编译闭包内无此目录单元 | 属核心库包还是扩展应用库包;模块层 |
+| cx.stream(`cx/stream`) | `item`、`pipe` 在闭包内(产品在用),`rw` 不在 | 同上;职责不在四类之内 |
+| `cx/os`(cx.os 的 2 个文件) | 不在闭包内 | 同上 |
+| `cx/cx0`(cx.plan) | CX0 模块规划,属 cx 语言支持;不在 44 根的 use 闭包内 | 是否定层、归哪一侧 |
+| `cx/workspace` | 无 tlib 包行,不在闭包内 | 同上 |
+| 「unisa 库包仓」 | 仓内无此目录(2026-11-21 `ls`) | 原意是市场的包仓、仓外包,还是别的 |
+| ext 纯包是否随发行 | `ext/` 不随 APE 发布(prd.md 目录表 `ext/` 行);0.9 节 X 环写「源随发行」 | 两处说法取哪一个 |
+
+### 两层.5a 层次整理工作清单(2026-11-21 清点;全部未修)
+
+项目所有者 2026-11-21 明确:cx.* 依赖 ext.* 不能接受,要尽快全面修正。清点方法:包表 deps 列、`cx` 与 `src` 实体文件的全部 `use` 行(匹配一切能解析到 ext 的名字,含 `cx/sys`、`cx/mem`、`cx/text` 下别名与同目录裸名)、编译闭包表、`tools/check-cx-layers.cx` 实跑(`ext_bad=0 up=0`;该检查整体结论为 UNKNOWN not-a-pass,`failed=3 unres=7 amb=63`,不得据此记 PASS)。扫描用 git grep 只读串接,未写成 `.cx`(方法违例,如实记)。
+
+结论:源码 use 边 0 条,编译闭包内 ext 真实单元 0;反向只存在于包表声明与别名两个层面,共 9 项。修法三选一:甲 被依赖的件本质属核心四类职责,挪成核心实体文件;乙 改依赖,去掉对它的使用;丙 依赖方本身降为扩展应用库包。
+
+| 号 | 核心一侧(位置) | 被依赖的 ext | 核心 use 边 | 推荐修法 | 改源身份 | 改编译闭包 | 何时 |
+|---|---|---|---|---|---|---|---|
+| D1 | cx.stream,`build/tlib-packages.tsv:16` deps 列 | ext.memx@0.1.0 | 0 | 乙:删该声明,重跑 `tools/layer-api.cx -- --check` 与 `tools/check-tlib-frozen.cx`(是否动 api_sha 未核) | 否 | 否 | 0.0.88 |
+| D2 | cx.compile,同表 `:20` deps 列 | ext.memx@0.1.0 | 0 | 乙:同 D1 | 否 | 否 | 0.0.88 |
+| N1 | cx.mem,同表 `:8` 备注含 arena;`:13` ext.memx 备注仍列 grow、slice | ext.memx | 0 | 乙:备注改正 | 否 | 否 | 0.0.88 |
+| N2 | cx.text,同表 `:9` 备注含 num、build、deflate | ext.textx | 0 | 乙:备注只列 `cx/text` 实体 | 否 | 否 | 0.0.88 |
+| L1 | `cx/mem/arena.cx`(链接) | `ext/memx/arena.cx`(持 dock;`ar_new`、`ar_alloc`、`ar_dup`、`ar_drop`) | 0(使用者 tools 12、release 4、tests 1 个文件) | 甲:挪成 `cx/mem` 实体,ext.memx 退役(它只剩这一件);备选为 0.0.90 身份不跟随 | 是(链接变实体) | 否 | 0.0.88 可做(输入类 A)或 0.0.90 |
+| L2 | `cx/text` 下 json、build、deflate、num(4 条链接) | `ext/textx` 同名文件 | 0(使用者 text.json 8、text.build 17、text.deflate 16、text.num 69 个文件,其中 ujs 22、apps 27) | 乙:纯计算且产品不用,归扩展应用库包;`use` 名不变,由身份不跟随出树链接实现(删链接会断全部使用者) | 是(0.0.90 口径本身) | 否 | 0.0.90 |
+| L3 | `cx/sys` 下 fd、poll、tty、net、process、guard(6 条链接,有使用者) | `ext/sysx` 同名文件(均持 dock) | 0 | 待所有者定:甲(posix 与 syscall 封装属四类职责,实体挪进 `cx/sys`,`ext/sysx` 留回指别名)或乙(实体留 ext,0.0.90 身份不跟随) | 是 | 否 | 甲可在 0.0.88(输入类 A);乙在 0.0.90 |
+| L4 | `cx/sys` 下 childdepth、process_group、process_group_osx(3 条链接) | `ext/sysx` 同名文件 | 0(全仓无 `use sys.` 这三个名字) | 乙:删 3 条链接 | 是(别名拓扑变) | 否 | 0.0.88 可做(输入类 A) |
+| L5 | `src/sysx`、`cx/driver/sysx`、`cx/runtime/sysx`、`cx/workspace/sysx`(4 条目录链接) | ext.sysx 整包 | 0(`cx` 与 `src` 无 `use sysx.`) | 乙:删 4 条目录链接;须先对拍 APE 字节不变,并核 tests 是否以这些目录为根解析 sysx(未核) | 是(`ext/sysx` 不经文件别名的 6 个 `.cx` 退出源 SID) | 否 | 0.0.88 可做(输入类 A,须对拍);0.0.90 设计本已覆盖 |
+
+分期:
+
+- 0.0.88 内可做且不改源身份口径:D1、D2、N1、N2(包表,不在 `build/lane-inputs.tsv`),本文与 [prd_cx_spec.md](prd_cx_spec.md) 的层次文字,`tools/check-cx-layers.cx` 的层表补行(工具,输入类 C),以及给「cx.* 包表 deps 不得出现 ext.*」加一条检查(未建)。
+- 0.0.88 内可做但属输入类 A(改源身份,须随本版整链并对拍):L1 甲、L3 甲、L4、L5。
+- 必须进 0.0.90 身份类:L2,以及 L1、L3 若选不挪实体的做法。
+
+五处未定层的证据与推荐落位(推荐待所有者裁定,裁定前仍按「待定」处理;裸 libc 计数为正则粗扫,不是棘轮结果):
+
+| 目录 | use 了谁 | 谁 use 它(文件数) | dock | 裸 libc 或 syscall | 进编译闭包 | 输入类 | 推荐两层归属 | 推荐模块层 |
+|---|---|---|---|---|---|---|---|---|
+| `cx/path` | 无 | `ext/fsx` 1、tools 2 | 写了;头注自述不调 libc;含 `#ifdef _WIN32` | 粗扫 0 | 否 | A | 扩展应用库包(纯词法计算,产品不用) | 若留 cx 侧为 cx-L1 |
+| `cx/stream` 的 item、pipe | mem.grow、mem.slice、mem.bytes、text.text | `src/drivestream.cx`、`cx/compiler/routepipe.cx`、tests 1、tools 2 | 否 | 粗扫 0 | 是(六目标) | A | 核心一侧(产品本体机制,不是四类对接库面) | cx-L1 |
+| `cx/stream` 的 rw | mem.grow、mem.bytes、sys.fs、sys.proc、sys.time | tools 2 | 否 | 粗扫 0 | 否 | A | 扩展应用库包(按包表已有的 pipe、rw 两个 face 拆) | 若留 cx 侧为 cx-L1 |
+| `cx/os`(osx、utc) | sys.fs、sys.env、sys.time、sys.proc、mem.heap | tools 8、`ext/sysx` 1 | 两文件都写了;头注自述只建在 `sy_*` 上、无宿主调用 | 粗扫 0 | 否 | A | 扩展应用库包(便利函数,不对接宿主) | 若留 cx 侧为 cx-L1,并去掉不需要的 dock |
+| `cx/cx0` | mem.bytes、mem.heap、plan | tools 6 | `plan.cx` 写了;`bundle.cx` 没写 | `plan.cx` 有 malloc、fork、open、read、write、`__syscall6`;`bundle.cx` 有 strlen、strcmp | 否(闭包表只算 use 路径;`plan.cx` 经投影成 `src/cxmod.c` 进产品) | A | 核心一侧(cx 语言扩展支持:模块规划权威源) | cx-L2 |
+| `cx/workspace` | mem.bytes、mem.heap、sys.time | tests 2、tools 1 | 否 | `driver.cx` 有 strcmp、memcpy、printf、open、read、malloc、`__syscall6`(无 dock) | 否 | A | 扩展应用库包(工具侧;无 tlib 包行) | cx-L3(同第 8 节 54-9 的原建议) |
+
+### 两层.6 与 0.0.90「身份按编译闭包取」的关系
+
+0.0.90 设计(`plans/v0.0.90.md`;规划,未实现):源身份 source-packages-v3 的 `.cx` 部分只收 `build/core-closure.tsv` 列出的闭包单元,该表本身强制入身份;车道表 `build/lane-inputs.tsv` 由闭包表派生;加三条守门检查(闭包表新鲜、整链实际编译与读入的文件是身份清单的子集、闭包封闭)。
+
+对两层的意义:
+
+- 两层的边界第一次有可核对的对象。「核心」不再靠目录名约定,而是一张生成表加检查。
+- 身份收窄后,只改扩展应用库包(含今天经别名进身份的 20 个文件)或非闭包单元的改动,不再改变 unisacc 的源 SID 与 A 键,即扩展改动不再被当成产品输入改动。
+- 不等于免整链。要真正省下一趟整链,还须满足上一候选可只改版本槽提升、CI 对新字节重跑、预跑按变更选批三个条件,缺一则收益只到「身份上不再误触发」为止(设计稿 L.6,均未实现)。
+- 风险在漏触发:某文件实际影响 APE 字节却不在新身份里。所以第二条守门检查是该版的发布前提。
+
+### 两层.7 扩展应用库包的市场愿景(规划,未实现,不承诺日期)
+
+目标形态:unisacc 像 bun、nodejs 那样,既是运行与编译入口,又是库包的管理者;使用者拿到 unisacc.com 后,能发现、取得、锁定、校验并 use 扩展应用库包,不需要 unisacc 的源码仓。现在没有任何一项对仓外使用者成立:仓外脚本要 use 标准包,仍须在脚本目录放一条指向源码仓的符号链接和一份自己的 `cxroot.tsv`(prd_cx_spec.md 3.3 节);已登记的仓外调用方共 2 个(`build/external-users.tsv:2-3`),都以这种方式依赖源码仓的工作树。
+
+成为市场必须具备的能力、现状与缺口:
+
+| 能力 | 现状(已有什么) | 缺口(规划,未实现) |
+|---|---|---|
+| 包的发现与索引 | 仓内:`cxroot.tsv` 17 条前缀到目录的映射;`build/tlib-packages.tsv` 18 个包行;`build/layer-api/PKG.tsv` 逐包公开接口;`docs/cx/api/` 生成的接口文档;`tools/devsvc.cx -- tool-index` 只索引工具 | 没有面向包的索引或注册中心;`net`、`argx`、`fsx`、`memx`、`textx` 不在仓根 `cxroot.tsv`;0.9 节设想首形态是 git 仓里的索引 TSV |
+| 命名与版本 | 包名前缀 `cx.`、`ext.`、`tools.`;版本 X.Y.Z 加 api_sha(`build/tlib-packages.tsv:4`);变更类别由 `tools/layer-api.cx --write` 判 | `argx`、`fsx`、`testx` 无包行无版本;外部包的 owner.name 命名、前缀保留表未建;`use` 名与包名不一致(`text.json` 属 ext.textx) |
+| 依赖解析与锁定 | 包表 deps 列写 `PKG@最低版本`;`use` 由最近的 `cxroot.tsv` 按最长前缀解析(条款 CX-U-7) | 没有锁文件,没有版本选择算法;deps 列有声明而未用的边(「两层.4」待修 (1));0.9 节的 `cxlock.tsv` 与最小版本选择未实现,`tools/cxpkg.cx` 不存在(2026-11-21 `ls`) |
+| 分发与下载 | 无。`ext/` 不随产品发布;发布链与三代自举从源码冷编,不读 tlib(`build/tlib-packages.tsv:7`) | 整项缺失;0.9 节设想只取本地目录与钉提交号的 git 地址,编译期不联网,不发二进制包 |
+| 安装位置与加载 | 每次从磁盘源码编译;tlib 只是开发期预编加速;仓外靠符号链接加自写 `cxroot.tsv` | 没有约定的安装位置;已装产品在空目录 use 标准包不成立(0.9 节 T5,批次待建);0.9 节设想的 `cxpkg/owner/name/` 目录不存在 |
+| 完整性校验与签名 | api_sha 与冻结 sha(包表第 3、第 9 列),`tools/check-tlib-frozen.cx`;源身份由 `seed/ident.c` 计算 | 包树哈希、锁校验、篡改负控未实现(0.9 节 T6);签名没有任何设计 |
+| 兼容性声明与核心 ABI 承诺 | 核心库面事实表 `build/std-surface.tsv`;稳定判据 S1 至 S13 与 `build/tlib-policy.tsv`(0.5 节);`tools/stable-eval.cx` 文件已存在(本次未运行) | 核心六包均未到 1.0.0,面未封口(0.9 节 T1 至 T3);包声明所需核心最低版本的清单字段(0.9 节 `cxpkg.tsv` 的 S 字段)未实现;六目标同候选的面证据不存在(T8) |
+
+与 0.9 节的关系:0.9 节的 cxpkg 设计(清单、锁、最小版本选择、能力声明、门槛 T1 至 T13)是上表各项缺口的候选实现,其中一切仍是设计;本节只给出市场必须具备的能力与现状对照,不重复其细节,也不新增承诺。先后次序的依据:身份收窄(0.0.90,规划)先让边界可核对,核心库面封口(0.9 节 T1 至 T3)再让包有可依赖的承诺,其后才是索引、锁与分发。
 
 ## 0. cx 核心 PRD(定稿 2026-11-12)
 
@@ -64,7 +206,7 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 - (1) 上层(产品、工具、测试、应用)写系统程序只用 cx 核心面,不直接碰 libc 与平台 `#if`。
 - (2) 六目标(`lnx`、`osx`、`win` 乘 `x86_64`、`arm64`)同面同签名;做不到的返回 `-ENOSYS`,符号不消失。
 - (3) 面由事实表定义,变更由工具判类;何时稳定由工具判定,不由项目所有者或任何人裁量。
-- (4) 核心保持小:只收别的包要在其上搭建、且需求不再变的接口;其余进 `ext.*`。
+- (4) 核心保持小:只收别的包要在其上搭建、且需求不再变的接口;其余进 `ext.*`。为什么这样分、两层各自的准入判据与依赖方向见「两层设计」节。
 - 非目标:线程与事件循环、TLS/HTTP、时区、泛型容器、编译期所有权(CX-W-4 未落地,本面不声称内存安全)。
 
 ### 0.2 层与包
@@ -84,7 +226,7 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 对项目所有者假设「按 QuickJS 把 sys + os + net 做完整即够」的裁定:成立一半。系统调用高度的面确实可以很小;但 QuickJS 没有套接字,且它不需要 path、text、mem、stream 是因为 JS 自带,所以核心是 sys + os 加四个补位层,net 另从 Rust 与 Node 推导并先孵化。
 
 分工:给写 `.cx` 的人选包用的库包一览在 [prd_cx_spec.md](prd_cx_spec.md) 3.4a 节;本节只放设计取舍、现状核对与改进路线,不重复包清单。
-tlib 侧现状(2026-11-15 核,真源 `build/tlib-packages.tsv` 与 `build/layer-api/PKG.tsv`,本表只是面向用户的分层,包清单以真源为准):CXS-C4 拆包已完成,`cx.mem`、`cx.text`、`cx.sys`、`cx.os` 已从 `cx.base` 拆出,`cx.base` 只剩 `cx/core` 执行器与 `cx/owned.cx`;tlib 共 18 包,上表之外还有内部环 `cx.base`、`cx.plan`、`cx.runtime`、`cx.compile`、`cx.driver`,扩展 `ext.sysx`,工具侧 `tools.cxlib`;上表的 `ext.procx` 不是独立 tlib 包。`cx.stream` 仍依赖 `ext.memx`(未并入)。包边界与版本派生表审视(2026-11-15,1855 个 .cx 6255 条 use 实测,脚本 $CLAUDE_JOB_DIR/tmp/cxpkg/usegraph.cx):包间无环、无未声明边;deps 列 13 条声明未用(cx.compile 5 条途径未查);tools.cxlib 独大(netpack 一单元占扇入 49%,只 6 单元触 cx.runtime 却整包依赖);cx.sys/cx.os 同目录按文件拆包加 17 条软链;ext.memx/ext.textx 与 cx/mem、cx/text 同名文件待比对;一次接口变更约 6 条命令加 1 处手改、7 个以上文件。改进排序(均工具类不占槽,除注明):(A) 派生表一条命令闭环(layer-api --bump 回写 tlib-packages,derive 一次跑完,major 拒写)先做,落 v0.0.68;(B) tools.cxlib 按面拆约 4 包只改 roots;(C) 版本粒度下沉到 faces(cx.compile 部分待 R3 收尾);(D) deps 列由 use 边生成并核对;(E) ext.memx/textx 去重(库包源类,候选池);(F) cx.os 物理分目录消软链(依赖 D1b 与 0.0.70,排其后)。
+tlib 侧现状(2026-11-15 核,真源 `build/tlib-packages.tsv` 与 `build/layer-api/PKG.tsv`,本表只是面向用户的分层,包清单以真源为准):CXS-C4 拆包已完成,`cx.mem`、`cx.text`、`cx.sys`、`cx.os` 已从 `cx.base` 拆出,`cx.base` 只剩 `cx/core` 执行器与 `cx/owned.cx`;tlib 共 18 包,上表之外还有内部环 `cx.base`、`cx.plan`、`cx.runtime`、`cx.compile`、`cx.driver`,扩展 `ext.sysx`,工具侧 `tools.cxlib`;上表的 `ext.procx` 不是独立 tlib 包。`cx.stream` 仍依赖 `ext.memx`(未并入)。(2026-11-21 更正:只剩包表 deps 列的声明,`cx/stream` 实际 use 的 `mem.grow`、`mem.slice`、`mem.bytes` 实体已在 `cx/mem`,依据与待修动作见「两层设计」节「两层.4」。)包边界与版本派生表审视(2026-11-15,1855 个 .cx 6255 条 use 实测,脚本 $CLAUDE_JOB_DIR/tmp/cxpkg/usegraph.cx):包间无环、无未声明边;deps 列 13 条声明未用(cx.compile 5 条途径未查);tools.cxlib 独大(netpack 一单元占扇入 49%,只 6 单元触 cx.runtime 却整包依赖);cx.sys/cx.os 同目录按文件拆包加 17 条软链;ext.memx/ext.textx 与 cx/mem、cx/text 同名文件待比对;一次接口变更约 6 条命令加 1 处手改、7 个以上文件。改进排序(均工具类不占槽,除注明):(A) 派生表一条命令闭环(layer-api --bump 回写 tlib-packages,derive 一次跑完,major 拒写)先做,落 v0.0.68;(B) tools.cxlib 按面拆约 4 包只改 roots;(C) 版本粒度下沉到 faces(cx.compile 部分待 R3 收尾);(D) deps 列由 use 边生成并核对;(E) ext.memx/textx 去重(库包源类,候选池);(F) cx.os 物理分目录消软链(依赖 D1b 与 0.0.70,排其后)。
 最小核心的收敛原则(2026-11-16):语言核心只承担模块身份、显式依赖、接口可见性与宿主对接边界;内存基础区分字节表示、借用视图、拥有与分配,不把这些职责并为一个隐式运行时。共享缓冲表示放在 mem.buftype,mem.slice 只依赖该表示,mem.grow 依赖该表示与分配/字节原语。借用视图不得因读取缓冲字段而引入分配器。缓冲布局、公开函数签名、返回码和借用生命周期保持原合同;此拆分不提供编译期所有权。文件、进程、网络、缓存、模型执行与工具编排均属建立在核心之上的能力,不因当前一起链接而成为语言最小核心。首个落地切片为 mem.slice 去除对 mem.grow 的依赖,以 check-cx-slice 的栈缓冲消费者、模块计划、现有内存合同批次与引导编译器多单元编译验证。完整候选与跨平台资格独立记录,不由局部结果推导。
 
 
@@ -210,6 +352,8 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - (7) 三宿主:gcc_cx 与 clang_cx 下 15 个 L0 模块不能编译(第 7 节 A6),本核心面的稳定判据只对 unisacc.com 宿主求值,不声称宿主驱动下可用。
 
 ### 0.9 生态分环与外部包(2026-11-15 设计;未实现,不得记 PASS)
+
+本节的四环是接口承诺这条轴,不是打包边界;核心库包与扩展应用库包的两层定义、市场必须具备的能力与现状对照见「两层设计」节,本节的 cxpkg 设计是其中各项缺口的候选实现。
 
 - 四环:
   - K 内部环(cx.base、cx.plan、cx.runtime、cx.compile、cx.driver、tools.cxlib):编译器本体,不对外承诺,应用不得 use(规划期拒绝,待实现)。
