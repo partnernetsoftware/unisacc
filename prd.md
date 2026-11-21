@@ -63,6 +63,8 @@ G2的 `fp_call` 仍属于 `chainargv` 现有局部char指针数组、n++追加�
 
 G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_BUDGET_GEN` 后必须是行尾或TAB，不能用空格代替。真实批次验收同时核子进程rc、唯一标记和产品身份不变；负控的预期REFUSE日志完整保留，不据直接夹具rc0冒充批次PASS。
 
+固定执行体按 Git 公共目录隔离缓存。回退按工作树验证提交祖先、产品、配置与执行体摘要，执行体输入有未提交改动时不更新记录。私有试验用 `DV_PIN_DIR` 指定缓存目录。回归入口 `tools/check-devsvc-pin-scope.cx`。
+
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
 ## 1. unisacc.com 是什么

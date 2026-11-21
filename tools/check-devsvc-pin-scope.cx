@@ -1,0 +1,245 @@
+/* Regression for fallback provenance. Real Git commits, an isolated HOME and
+ * a compiler stub with a distinguishable failure make cache writes observable. */
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.fmt
+
+static char scratch[4096], product[4096], launcher[4096];
+static int ok, failed;
+static const char repo_config[] =
+    "product\tproduct\nself\ttools/worker\nlib\tliba\nlib\tlibb\nlib\tlibc\ncache_sub\t.cache/pin-scope\n";
+
+static int run(const char *cwd, char *const args[], np_result *result) {
+    char why[192];
+    if (np_run(args, cwd, 0, 18, result, why, sizeof why)) {
+        fprintf(stderr, "%s\n", why);
+        return 125;
+    }
+    return result->rc;
+}
+
+static void need(const char *cwd, char *const args[]) {
+    np_result r = {0};
+    if (run(cwd, args, &r)) {
+        fprintf(stderr, "FIXTURE_FAIL\tcommand=%s\t%s\n", args[0], r.err ? r.err : "");
+        exit(2);
+    }
+    np_free(&r);
+}
+
+static void path(char *out, size_t cap, const char *base, const char *name) {
+    if (cx_fmt(out, cap, "%s/%s", base, name)) exit(2);
+}
+
+static void write_fixture(const char *base, const char *name, const char *body) {
+    char out[4096];
+    path(out, sizeof out, base, name);
+    if (sy_write_atomic(out, body, strlen(body), 0600)) exit(2);
+}
+
+static void checkpoint(int pass, const char *label) {
+    printf("%s\t%s\n", pass ? "PASS" : "FAIL", label);
+    if (pass) ok++;
+    else failed++;
+}
+
+static void commit(const char *repo, const char *stamp) {
+    char *stage[] = {"git", "add", "-A", 0};
+    char *save[] = {"git", "-c", "user.name=Pin scope fixture",
+                   "-c", "user.email=pin-scope@example.invalid",
+                   "-c", "commit.gpgsign=false", "commit", "-qm", (char *)stamp, 0};
+    need(repo, stage);
+    need(repo, save);
+}
+
+static void init_repo(const char *repo, const char *state) {
+    char directory[4096];
+    char *init[] = {"git", "init", "-q", "-b", "main", 0};
+    if (sy_mkdir_all(repo, 0700)) exit(2);
+    need(repo, init);
+    const char *names[] = {"tools", "liba", "libb", "libc"};
+    for (int i = 0; i < 4; i++) {
+        path(directory, sizeof directory, repo, names[i]);
+        if (sy_mkdir_all(directory, 0700)) exit(2);
+        write_fixture(directory, "fixture", "fixture\n");
+    }
+    write_fixture(repo, "cxroot.tsv", "# fixture\n");
+    write_fixture(repo, "tools/devsvc-repo.tsv", repo_config);
+    write_fixture(repo, "notes.md", "committed notes\n");
+    write_fixture(repo, "product",
+        "#!/bin/sh\nrole=$(cat \"$1\") || exit 63\n"
+        "if [ \"$2\" = -o ]; then\n"
+        "  case \"$role\" in READY-*) printf '#!/bin/sh\\nprintf \"%%s\\\\n\" \"%s\"\\n' \"$role\" > \"$3\" && chmod 700 \"$3\";; *) exit 61;; esac\n"
+        "else printf 'WORK_COPY %s\\n' \"$role\"; exit 42; fi\n");
+    write_fixture(repo, "tools/worker", state);
+    commit(repo, state);
+}
+
+static int invocation(const char *repo, const char *action, const char *line, char key[21]) {
+    char *args[] = {launcher, (char *)action, 0};
+    np_result r = {0};
+    int rc = run(repo, args, &r);
+    int match = r.out && strstr(r.out, line);
+    if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+    if (key && match && r.outn >= 33 && !strncmp(r.out, "PREPARED\tkey=", 13))
+        match = !cx_fmt(key, 21, "%.20s", r.out + 13);
+    np_free(&r);
+    return match && rc == (!strncmp(line, "WORK_COPY ", 10) ? 42 : 0);
+}
+
+static void unrelated_head(const char *repo) {
+    char *tree[] = {"git", "-c", "user.name=Pin scope fixture",
+                   "-c", "user.email=pin-scope@example.invalid",
+                   "commit-tree", "HEAD^{tree}", "-m", "unrelated", 0};
+    np_result r = {0};
+    if (run(repo, tree, &r) || r.outn != 41) exit(2);
+    r.out[40] = 0;
+    char *move[] = {"git", "update-ref", "HEAD", r.out, 0};
+    need(repo, move);
+    np_free(&r);
+}
+
+static void read_head(const char *repo, char head[41]) {
+    char *args[] = {"git", "rev-parse", "HEAD", 0};
+    np_result r = {0};
+    if (run(repo, args, &r) || r.outn != 41 || cx_fmt(head, 41, "%.40s", r.out)) exit(2);
+    np_free(&r);
+}
+
+static void move_head(const char *repo, const char *head) {
+    char *args[] = {"git", "update-ref", "HEAD", (char *)head, 0};
+    need(repo, args);
+}
+
+static int publish_while_head_moves(const char *repo, const char *expected) {
+    char wrapper[4096], dir[4096], oldpath[4096], newpath[8192], moved[41];
+    const char *current = sy_env("PATH");
+    char *locate[] = {"sh", "-c", "command -v git", 0};
+    np_result r = {0};
+    if (!current || cx_fmt(oldpath, sizeof oldpath, "%s", current) ||
+        run(repo, locate, &r) || r.outn < 2 || r.out[0] != '/') exit(2);
+    r.out[r.outn - 1] = 0;
+    path(dir, sizeof dir, scratch, "wrappers");
+    if (sy_mkdir_all(dir, 0700)) exit(2);
+    path(wrapper, sizeof wrapper, dir, "git");
+    write_fixture(dir, "git",
+        "#!/bin/sh\ncase \"$*\" in *'status --porcelain=v1'*)\n"
+        "  \"$PIN_SCOPE_REAL_GIT\" \"$@\" || exit $?\n"
+        "  exec \"$PIN_SCOPE_REAL_GIT\" update-ref HEAD \"$PIN_SCOPE_MOVE_TO\";; esac\n"
+        "exec \"$PIN_SCOPE_REAL_GIT\" \"$@\"\n");
+    if (sy_chmod(wrapper, 0700) || cx_fmt(newpath, sizeof newpath, "%s:%s", dir, oldpath) ||
+        sy_setenv("PIN_SCOPE_REAL_GIT", r.out, 1) || sy_setenv("PIN_SCOPE_MOVE_TO", expected, 1) ||
+        sy_setenv("PATH", newpath, 1)) exit(2);
+    np_free(&r);
+    int ran = invocation(repo, "probe", "READY-MOVED", 0);
+    if (sy_setenv("PATH", oldpath, 1)) exit(2);
+    sy_unsetenv("PIN_SCOPE_REAL_GIT");
+    sy_unsetenv("PIN_SCOPE_MOVE_TO");
+    read_head(repo, moved);
+    int moved_as_expected = !strcmp(moved, expected);
+    if (!moved_as_expected) move_head(repo, expected);
+    write_fixture(repo, "tools/worker", "FAIL-LEFT");
+    return ran && moved_as_expected && invocation(repo, "probe", "READY-LEFT", 0);
+}
+
+int main(int argc, char **argv) {
+    char root[4096], home[4096], left[4096], right[4096], linked[4096], base[4096], key[21] = "";
+    char image[4096], seal[4096], backup[4096], failing[41], alternate[256];
+    char common[4096], record[4096], source[4096], hash[65], *envs[] = {
+        "DV_PIN_DIR", "DEVSVC_DEV", "DEVSVC_REPO_TABLE", "DEVSVC_REPO_TABLE_PIN",
+        "DEVSVC_SELF_BIN", "UNISACC_FLOW_ROOT", "UNISACC_FLOW_ROOT_JOB", 0
+    };
+    if (sy_cwd(root, sizeof root) < 0 || argc > 2 ||
+        sy_mkdtemp(sy_tmpdir(), "devsvc-pin-scope-", scratch, sizeof scratch)) return 2;
+    path(product, sizeof product, root, "unisacc.com");
+    path(launcher, sizeof launcher, scratch, "launcher");
+    if (argc == 2) {
+        if (sy_realpath(argv[1], source, sizeof source) < 0) return 2;
+    } else path(source, sizeof source, root, "tools/devsvc.cx");
+    char *compile[] = {"sh", product, "-o", launcher, source, 0};
+    need(root, compile);
+    for (int i = 0; envs[i]; i++) sy_unsetenv(envs[i]);
+    path(home, sizeof home, scratch, "home");
+    path(left, sizeof left, scratch, "left");
+    path(right, sizeof right, scratch, "right");
+    path(base, sizeof base, home, ".cache/pin-scope/pinned");
+    if (sy_mkdir_all(base, 0700) || sy_setenv("HOME", home, 1)) return 2;
+    write_fixture(base, "last-good", "sentinel");
+    init_repo(left, "READY-LEFT");
+    init_repo(right, "FAIL-RIGHT");
+    write_fixture(left, "notes.md", "uncommitted unrelated notes\n");
+
+    checkpoint(invocation(left, "prebuild-self", "PREPARED\tkey=", key), "committed-build-with-unrelated-dirty-file-prepared");
+    path(common, sizeof common, left, ".git");
+    if (sy_sha256_hex(common, strlen(common), hash) ||
+        cx_fmt(image, sizeof image, "%s/repos/%s/%s/devsvc", base, hash, key)) return 2;
+    checkpoint(sy_exists(image) == 1, "default-bin-is-scoped-to-git-common-dir");
+    unsigned char *bytes = 0;
+    int64_t size = 0;
+    path(record, sizeof record, base, "last-good");
+    int intact = !sy_read_file(record, &bytes, &size, 512) && size == 8 && !memcmp(bytes, "sentinel", 8);
+    free(bytes);
+    checkpoint(intact, "global-last-good-unchanged");
+    char explicit_cache[4096], explicit_key[21] = "";
+    path(explicit_cache, sizeof explicit_cache, scratch, "chosen-cache");
+    if (sy_setenv("DV_PIN_DIR", explicit_cache, 1)) return 2;
+    int prepared = invocation(left, "prebuild-self", "PREPARED\tkey=", explicit_key);
+    sy_unsetenv("DV_PIN_DIR");
+    if (cx_fmt(record, sizeof record, "%s/%s/devsvc", explicit_cache, explicit_key)) return 2;
+    checkpoint(prepared && sy_exists(record) == 1, "explicit-cache-writes-only-to-chosen-directory");
+    checkpoint(invocation(right, "probe", "WORK_COPY FAIL-RIGHT", 0), "failed-build-cannot-borrow-from-another-repo");
+    path(linked, sizeof linked, scratch, "linked");
+    char *worktree[] = {"git", "worktree", "add", "--quiet", "--detach", linked, "HEAD", 0};
+    need(left, worktree);
+    write_fixture(linked, "tools/worker", "FAIL-LINKED");
+    commit(linked, "linked worktree descendant");
+    checkpoint(invocation(linked, "probe", "WORK_COPY FAIL-LINKED", 0),
+        "failed-build-cannot-borrow-from-another-worktree");
+
+    write_fixture(left, "tools/worker", "READY-DIRTY");
+    commit(left, "dirty fixture base");
+    write_fixture(left, "tools/worker", "UNCOMMITTED-WORKER");
+    checkpoint(invocation(left, "probe", "READY-DIRTY", 0), "dirty-tree-can-run-pinned-commit");
+    write_fixture(left, "tools/worker", "FAIL-LEFT");
+    commit(left, "bad descendant");
+    checkpoint(invocation(left, "probe", "READY-LEFT", 0), "dirty-tree-never-promotes-and-ancestor-is-recoverable");
+    read_head(left, failing);
+    write_fixture(left, "tools/worker", "READY-MOVED");
+    commit(left, "HEAD moves during publication");
+    checkpoint(publish_while_head_moves(left, failing), "head-moved-before-publication-cannot-promote");
+    if (cx_fmt(alternate, sizeof alternate, "%s# changed config\n", repo_config)) return 2;
+    write_fixture(left, "tools/devsvc-repo.tsv", alternate);
+    commit(left, "changed configuration");
+    checkpoint(invocation(left, "probe", "WORK_COPY FAIL-LEFT", 0), "fallback-with-other-config-is-refused");
+    move_head(left, failing);
+    write_fixture(left, "tools/devsvc-repo.tsv", repo_config);
+    char product_file[4096], changed[4096];
+    unsigned char *prod_bytes = 0;
+    int64_t prod_size = 0;
+    path(product_file, sizeof product_file, left, "product");
+    if (sy_read_file(product_file, &prod_bytes, &prod_size, 700) ||
+        cx_fmt(changed, sizeof changed, "%.*s# product identity changed\n", (int)prod_size, prod_bytes)) return 2;
+    write_fixture(left, "product", changed);
+    checkpoint(invocation(left, "probe", "WORK_COPY FAIL-LEFT", 0), "fallback-with-other-product-is-refused");
+    if (sy_write_atomic(product_file, prod_bytes, prod_size, 0600)) return 2;
+    free(prod_bytes);
+
+    unrelated_head(left);
+    checkpoint(invocation(left, "probe", "WORK_COPY FAIL-LEFT", 0), "fallback-without-ancestor-is-refused");
+    move_head(left, failing);
+    if (cx_fmt(seal, sizeof seal, "%s.sha", image) || cx_fmt(backup, sizeof backup, "%s.seal", image)) return 2;
+    int picked = !sy_rename(seal, backup);
+    checkpoint(picked && invocation(left, "probe", "WORK_COPY FAIL-LEFT", 0), "fallback-without-seal-is-refused");
+    if (picked && sy_rename(backup, seal)) return 2;
+    const char altered[] = "#!/bin/sh\necho CORRUPTED\n";
+    if (picked && sy_write_atomic(image, altered, sizeof altered - 1, 0700)) return 2;
+    checkpoint(picked && invocation(left, "probe", "WORK_COPY FAIL-LEFT", 0), "fallback-with-altered-bytes-is-refused");
+    char *clean[] = {"rm", "-rf", scratch, 0};
+    need(root, clean);
+    printf("CHECK_DEVSVC_PIN_SCOPE\tok=%d\tfailed=%d\n", ok, failed);
+    return failed ? 1 : 0;
+}
