@@ -191,6 +191,27 @@ int cxm_stemof(char *p, char *out) {
     if (n - b >= 3 && p[n - 3] == '.' && p[n - 2] == 'c' && p[n - 1] == 'x') n = n - 3;
     return cxm_cpyn(out, p + b, n - b, CXM_NAMEW);
 }
+/* a cx unit: the .cx suffix, or a suffix other than .c .h .s .S .o .a and a first line that is a shebang holding
+   -run (a .c script with a shebang stays C).  The file is read here and again by cxm_load; a file that cannot be
+   read is not a cx unit.  Named outside the cxm_ family on purpose: the projection (tools/cx0-extract.cx) makes
+   every cxm_ function public in cx/compiler/cxmod.cx, and this helper is not part of that interface. */
+static int cxu_iscxunit(char *p) {
+    int n; int i; char *s;
+    if (cxm_iscxpath(p)) return 1;
+    n = cxm_len(p);
+    if (n >= 2 && p[n - 2] == '.' && (p[n - 1] == 'c' || p[n - 1] == 'h' || p[n - 1] == 's' || p[n - 1] == 'S' || p[n - 1] == 'o' || p[n - 1] == 'a')) return 0;
+    n = cxm_rd(p, cxm_src, CXM_SRCMAX);
+    if (n < 6) return 0;
+    s = cxm_src; i = 0;
+    if ((s[0] & 255) == 239 && (s[1] & 255) == 187 && (s[2] & 255) == 191) i = 3;
+    if (s[i] != '#' || s[i + 1] != '!') return 0;
+    i = i + 2;
+    while (i + 3 < n && s[i] != '\n') {
+        if (s[i] == '-' && s[i + 1] == 'r' && s[i + 2] == 'u' && s[i + 3] == 'n') return 1;
+        i = i + 1;
+    }
+    return 0;
+}
 /* a module's compile path, kept for the whole process: the driver's unit cache keys on the path string, and a
    second plan in the same process (the forwarding restart) must hand out the same strings */
 static char cxm_pool[65536]; static int cxm_npool;
@@ -517,7 +538,10 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     }
     if (v == cxm_n) {
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
-            cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm); return cxm_fail();
+            cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm);
+            k = 0; while (k < n && w[k] != '.') k = k + 1;
+            if (k == n) cxm_m("; the package table matches leading segments only: for a single-segment name add a whole-name row R<TAB>NAME<TAB>DIR to cxroot.tsv or use a two-segment prefix");
+            return cxm_fail();
         }
         if (cxm_n >= CXM_MAXU) { cxm_start(u, line); cxm_m("more than "); cxm_md(CXM_MAXU); cxm_m(" units in one program"); return cxm_fail(); }
         cxm_cpy(cxm_path[v], norm, CXM_PATHW); cxm_arg[v] = cxm_keep(norm);
@@ -2110,7 +2134,7 @@ int cxm_plan(char **paths, int n) {
         cxm_arg[u] = paths[u];
         if (cxm_norm(paths[u], cxm_path[u])) cxm_cpy(cxm_path[u], paths[u], CXM_PATHW);
         cxm_stemof(paths[u], cxm_stem[u]); cxm_cpy(cxm_name[u], cxm_stem[u], CXM_NAMEW);
-        cxm_iscx[u] = cxm_iscxpath(paths[u]); cxm_lib[u] = 0; cxm_nuse[u] = 0;
+        cxm_iscx[u] = cxu_iscxunit(paths[u]); cxm_lib[u] = 0; cxm_nuse[u] = 0;
         u = u + 1;
     }
     cxm_n = n;
