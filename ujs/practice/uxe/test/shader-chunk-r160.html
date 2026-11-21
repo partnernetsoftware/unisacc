@@ -1,0 +1,127 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Mesh, OrthographicCamera, PlaneGeometry, RawShaderMaterial, REVISION, Scene,
+  ShaderChunk, WebGLRenderer } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const vertex = "attribute vec3 position; void main(){ gl_Position=vec4(position.xy,0.0,1.0); }";
+const leaf = "v += 0.125;";
+const left = "#include <uxe/shared.glsl>\nv += 0.125;";
+const right = "#include <uxe/shared.glsl>\nv += 0.125;";
+const start = "precision highp float;\r\n// café\r\nvoid main() {\nfloat v=0.0;\n";
+const finish = "\ngl_FragColor=vec4(v,0.25,0.75,1.0);\n}\n";
+const fragment = start + "\t#include <uxe/left.glsl> // left\n#include  <uxe/right.glsl>" + finish;
+const missing = start + "#include <uxe_absent>" + finish;
+const cyclic = start + "#include <uxe_cycle_a>" + finish;
+const expected = start + "v += 0.125;\nv += 0.125; // left\nv += 0.125;\nv += 0.125;" + finish;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
+
+function drawFixture() {
+  const renderer = new WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
+  renderer.setSize(1, 1, false);
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 1;
+  const plane = new PlaneGeometry(2, 2);
+  return {
+    draw(shader) {
+      const scene = new Scene();
+      const material = new RawShaderMaterial({ vertexShader: vertex, fragmentShader: shader });
+      scene.add(new Mesh(plane, material));
+      try {
+        renderer.render(scene, camera);
+        const gl = renderer.getContext();
+        const pixel = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        return [...pixel];
+      } finally {
+        material.dispose();
+      }
+    },
+    dispose() { plane.dispose(); renderer.dispose(); }
+  };
+}
+
+function refusal(draw, source, judge) {
+  try { draw(source); } catch (error) { return Number(judge(error)); }
+  return 0;
+}
+
+async function test() {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const { instance: { exports: e } } = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (e.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const call = (op, a = 0, b = 0, c = 0, d = 0) => Number(e.uxe_shader_chunk(BigInt(op), BigInt(a), BigInt(b), BigInt(c), BigInt(d)));
+  const mem = new Uint8Array(e.memory.buffer, call(0), 8192);
+  const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
+  const put = (at, text) => { const bytes = encoder.encode(text); mem.set(bytes, at); return bytes.length; };
+  let at = 256;
+  function record(name, text) {
+    const start = at, nameSize = put(at, name);
+    at += nameSize;
+    const textSize = put(at, text);
+    const id = call(2, start, nameSize, at, textSize);
+    at += textSize;
+    if (at >= 1536) throw Error("fixture bounds");
+    return id;
+  }
+  const fixtures = [["uxe/shared.glsl", leaf], ["uxe/left.glsl", left], ["uxe/right.glsl", right],
+    ["uxe_cycle_a", "#include <uxe_cycle_b>"], ["uxe_cycle_b", "#include <uxe_cycle_a>"], ["uxe_empty", ""]];
+  if (call(1, fixtures.length) !== 0) throw Error("registry init");
+  const replaced = query.get("mutate") === "1";
+  fixtures.forEach(([name, text], i) => {
+    ShaderChunk[name] = text;
+    if (record(name, replaced && i === 0 ? "v += 0.250;" : text) !== i) throw Error("registration " + name);
+  });
+  const capacity = record("uxe_extra", "unused") === -4;
+  const invalid = record("uxe-bad", "unused") === -1;
+  const draw = drawFixture();
+  try {
+    const reference = draw.draw(fragment);
+    const rMissing = refusal(draw.draw, missing, error => error.message.includes("#include <uxe_absent>"));
+    const rCycle = refusal(draw.draw, cyclic, error => error instanceof RangeError);
+    const src = 1536, dst = 4096, scratch = 6000;
+    const expand = (text, room = 1400) => call(3, dst, room, src, put(src, text));
+    const size = expand(fragment);
+    if (size < 0) throw Error("expand " + size);
+    const resolved = decoder.decode(mem.slice(dst, dst + size));
+    const pixel = draw.draw(resolved);
+    const sameText = resolved === expected;
+    const clean = view.getInt32(scratch, true) === 0;
+    const sentinel = mem.subarray(dst, dst + 1400);
+    sentinel.fill(91);
+    const diagnostic = (code, name) => view.getInt32(scratch, true) === code &&
+      decoder.decode(mem.slice(view.getUint32(scratch + 4, true),
+        view.getUint32(scratch + 4, true) + view.getUint32(scratch + 8, true))) === name;
+    const absent = expand(missing) === -2 && diagnostic(-2, "uxe_absent");
+    const cycle = expand(cyclic) === -3 && diagnostic(-3, "uxe_cycle_a") && view.getUint32(scratch + 12, true) === 2;
+    const noRoom = expand(fragment, 12) === -4 && diagnostic(-4, "");
+    const unchanged = sentinel.every(byte => byte === 91);
+    const empty = expand("#include <uxe_empty>") === 0;
+    const untouched = "// #include <unknown>\n#include\t<unknown>\n#include <bad-name>";
+    const unchangedSize = expand(untouched);
+    const originalSyntax = unchangedSize >= 0 && decoder.decode(mem.slice(dst, dst + unchangedSize)) === untouched;
+    const replacedKey = record("uxe/shared.glsl", "X") === 0 && expand("#include <uxe/shared.glsl>\r\n") === 3 &&
+      decoder.decode(mem.slice(dst, dst + 3)) === "X\r\n";
+    if (call(1, 33) !== 0) throw Error("depth registry init");
+    at = 768;
+    for (let i = 0; i < 33; i++) {
+      if (record("d" + i, i === 32 ? "X" : "#include <d" + (i + 1) + ">") !== i) throw Error("depth registration " + i);
+    }
+    const depthLimit = expand("#include <d0>") === -5 && diagnostic(-5, "d32") && view.getUint32(scratch + 12, true) === 32;
+    return [...reference, rMissing, rCycle, ...pixel, sameText, clean, absent, cycle, noRoom, unchanged,
+      empty, originalSyntax, replacedKey, capacity, invalid, depthLimit].map(Number);
+  } finally {
+    draw.dispose();
+    for (const [name] of fixtures) delete ShaderChunk[name];
+  }
+}
+
+try { output.textContent = JSON.stringify(await test()); }
+catch (error) { output.textContent = "error:" + error.message; }
+</script>

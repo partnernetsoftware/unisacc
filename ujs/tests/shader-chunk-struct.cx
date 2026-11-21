@@ -1,0 +1,52 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int shader_chunk_compile(const char *dir) {
+    char header[320],driver[320],wasm[320];
+    tx_snprintf(header,sizeof header,"%s/header.ujs",dir);
+    tx_snprintf(driver,sizeof driver,"%s/driver.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="export uxe_shader_chunk(op:i64,a:i64,b:i64,c:i64,d:i64) i64 version 1;\n";
+    const char source[]=
+        "if(op==0){return ux_span(0,8192);}\n"
+        "if(op==1){return ShaderChunk_init(0,a);}\n"
+        "if(op==2){return ShaderChunk_register(0,a,b,c,d);}\n"
+        "if(op==3){return ShaderChunk_expand(a,b,0,c,d,6000);}\n"
+        "return 0-1;\n";
+    if(sy_write_file(header,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",header,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/shader-chunk.ujs",driver,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    if(rc) printf("SHADER_CHUNK_BUILD rc=%d output=%.*s\n",rc,(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-shader-chunk-",dir,sizeof dir)) return 2;
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/shader-chunk-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    const double gold[]={128,64,191,255,1,1,128,64,191,255,1,1,1,1,1,1,1,1,1,1,1,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double values[count]={0};
+    int failed=n<0 || n>=sizeof url || shader_chunk_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(values[i]!=gold[i]) {
+            printf("SHADER_CHUNK case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_PIXEL ShaderChunk nested expansion cases=%d failed=%d\n",count,failed);
+    return failed;
+}
