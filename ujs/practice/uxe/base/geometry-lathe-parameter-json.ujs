@@ -1,0 +1,119 @@
+// On import, the caller supplies durable storage for the decoded f64 pairs.
+struct LatheProfileStorage {
+  points: u32;
+  capacity: u32;
+}
+
+native function lathe_geometry_keys(at:i64) i64 {
+  let labels=[76,97,116,104,101,71,101,111,109,101,116,114,121,112,111,105,110,116,115,115,101,103,109,101,110,116,115,112,104,105,83,116,97,114,116,112,104,105,76,101,110,103,116,104,120,121];
+  let i=0;
+  while(i<46) {
+    let byte=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function lathe_geometry_write_points(at:i64,end:i64,points:i64,count:i64,keys:i64,scratch:i64) i64 {
+  let p=json_byte(at,end,44);
+  p=json_write_string(p,end,keys+13,6);
+  p=json_byte(p,end,58);
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    p=json_byte(p,end,123);
+    p=json_write_string(p,end,keys+44,1);
+    p=json_byte(p,end,58);
+    if(p<0) { return p; }
+    p=json_write_f64(p,end,ux_f64(points+16*i),scratch);
+    p=geometry_parameter_number(p,end,keys+45,1,ux_f64(points+16*i+8),scratch);
+    p=json_byte(p,end,125);
+    i=i+1;
+  }
+  return json_byte(p,end,93);
+}
+
+native function LatheGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  if(geometry_primitive_ready(at,14)<0 ||
+     !geometry_primitive_json_io(at,dst,end,uuid,uuidBytes,scratch,46)) { return 0-1; }
+  let points=f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.fourth));
+  let count=f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.fifth));
+  let size=count*16;
+  if(count<2 || count>393216 || points%8!=0 || !geometry_public_span(points,size) ||
+     !geometry_public_disjoint(points,size,dst,end-dst) ||
+     !geometry_public_disjoint(points,size,scratch,1150)) { return 0-1; }
+  let keys=lathe_geometry_keys(scratch+1104);
+  let p=geometry_primitive_json_head(at,dst,end,uuid,uuidBytes,keys,13);
+  p=lathe_geometry_write_points(p,end,points,count,keys,scratch);
+  p=geometry_parameter_number(p,end,keys+19,8,ux_f64(at+GeometryPrimitiveRecord.first),scratch);
+  p=geometry_parameter_number(p,end,keys+27,8,ux_f64(at+GeometryPrimitiveRecord.second),scratch);
+  p=geometry_parameter_number(p,end,keys+35,9,ux_f64(at+GeometryPrimitiveRecord.third),scratch);
+  return json_byte(p,end,125);
+}
+
+native function lathe_geometry_default_points(points:i64,capacity:i64) i64 {
+  if(capacity<3) { return 0-1; }
+  let a=ux_f64_put(points,0.0);
+  let b=ux_f64_put(points+8,0.0-0.5);
+  let c=ux_f64_put(points+16,0.5);
+  let d=ux_f64_put(points+24,0.0);
+  let e=ux_f64_put(points+32,0.0);
+  let f=ux_f64_put(points+40,0.5);
+  return 3;
+}
+
+native function lathe_geometry_read_points(input:i64,end:i64,points:i64,capacity:i64,keys:i64) i64 {
+  let array=json_find_key(input,end,keys+13,6);
+  if(array==0-2) { return lathe_geometry_default_points(points,capacity); }
+  if(array<0 || ux_u8(array)!=91) { return 0-1; }
+  let start=json_space(array+1,end);
+  let i=0;
+  while(start>=0 && start<end && i<capacity) {
+    if(ux_u8(start)!=123) { return 0-1; }
+    let next=json_value_end(start,end);
+    if(next<0) { return 0-1; }
+    let x=geometry_primitive_json_number(start,next,keys+44,1,0.0/0.0);
+    let y=geometry_primitive_json_number(start,next,keys+45,1,0.0/0.0);
+    if(x-x!=0.0 || y-y!=0.0) { return 0-1; }
+    let a=ux_f64_put(points+16*i,x);
+    let b=ux_f64_put(points+16*i+8,y);
+    i=i+1;
+    let separator=json_space(next,end);
+    if(separator<0 || separator>=end) { return 0-1; }
+    if(ux_u8(separator)==93) { return i; }
+    if(ux_u8(separator)!=44) { return 0-1; }
+    start=json_space(separator+1,end);
+  }
+  return 0-1;
+}
+
+native function LatheGeometry_fromJSON(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,storage:i64) i64 {
+  let space=LatheGeometryParameters.size+46;
+  if(scratch%8!=0 || storage%4!=0 || end<=input ||
+     !geometry_primitive_raw(at,raw,arena,bytes,input,end-input) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,scratch,space) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,storage,LatheProfileStorage.size) ||
+     !geometry_public_disjoint(input,end-input,scratch,space) ||
+     !geometry_public_disjoint(storage,LatheProfileStorage.size,scratch,space) ||
+     !geometry_primitive_json_object(input,end)) { return 0-1; }
+  let points=ux_u32(storage+LatheProfileStorage.points);
+  let capacity=ux_u32(storage+LatheProfileStorage.capacity);
+  let profile=capacity*16;
+  if(points%8!=0 || capacity<2 || capacity>393216 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,points,profile) ||
+     !geometry_public_disjoint(input,end-input,points,profile) ||
+     !geometry_public_disjoint(storage,LatheProfileStorage.size,points,profile) ||
+     !geometry_public_disjoint(scratch,space,points,profile)) { return 0-1; }
+  let keys=lathe_geometry_keys(scratch+LatheGeometryParameters.size);
+  let segments=geometry_primitive_json_number(input,end,keys+19,8,12.0);
+  let start=geometry_primitive_json_number(input,end,keys+27,8,0.0);
+  let length=geometry_primitive_json_number(input,end,keys+35,9,6.283185307179586);
+  if(!(segments>=1.0 && segments<262145.0) || start-start!=0.0 || length-length!=0.0) { return 0-1; }
+  let count=lathe_geometry_read_points(input,end,points,capacity,keys);
+  if(count<2) { return 0-1; }
+  let a=ux_f64_put(scratch+LatheGeometryParameters.segments,segments);
+  let b=ux_f64_put(scratch+LatheGeometryParameters.phiStart,start);
+  let c=ux_f64_put(scratch+LatheGeometryParameters.phiLength,length);
+  return LatheGeometry_create(at,raw,arena,bytes,points,count,scratch);
+}
