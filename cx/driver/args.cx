@@ -67,6 +67,7 @@
    code 4 when that size is still above 2147483647. A failed
    allocation leaves the previous block in place. */
 #pragma unisa module args
+#pragma unisa use sys.fs
 
 static void cxa_setwhy(char *why, long cap, const char *msg) {
     long i;
@@ -246,6 +247,28 @@ int cxa_cancel(unsigned char **block, long *length, const char *definition, char
     return 0;
 }
 
+static int cxa_is_cx(const char *path, long i) {
+    char buf[512];
+    int fd;
+    long k, j;
+    if (i >= 3 && path[i - 3] == '.' && path[i - 2] == 'c' && path[i - 1] == 'x') return 1;
+    if (i >= 2 && path[i - 2] == '.' && (path[i - 1] == 'c' || path[i - 1] == 'h' || path[i - 1] == 's' || path[i - 1] == 'S' || path[i - 1] == 'o' || path[i - 1] == 'a')) return 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    k = sy_read_once(fd, buf, 512);
+    sy_close(fd);
+    if (k < 6) return 0;
+    j = 0;
+    if ((buf[0] & 255) == 239 && (buf[1] & 255) == 187 && (buf[2] & 255) == 191) j = 3;
+    if (buf[j] != '#' || buf[j + 1] != '!') return 0;
+    j = j + 2;
+    while (j + 3 < k && buf[j] != '\n') {
+        if (buf[j] == '-' && buf[j + 1] == 'r' && buf[j + 2] == 'u' && buf[j + 3] == 'n') return 1;
+        j = j + 1;
+    }
+    return 0;
+}
+
 int cxa_includes(const char *path, const unsigned char *plain, long plain_n,
                  const unsigned char *withcx, long withcx_n, const unsigned char *unit, long unit_n,
                  const unsigned char **out, long *out_n, char *why, long whycap) {
@@ -267,7 +290,7 @@ int cxa_includes(const char *path, const unsigned char *plain, long plain_n,
             if (i == 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
             i = i + 1;
         }
-        cx = i >= 3 && path[i - 3] == '.' && path[i - 2] == 'c' && path[i - 1] == 'x';
+        cx = cxa_is_cx(path, i);
         if (cx) { pick = withcx; n = withcx_n; }
         else { pick = plain; n = plain_n; }
         if (n > 2147483647L) return cxa_fail(4, "resource too large", why, whycap);
