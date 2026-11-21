@@ -226,7 +226,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 
 | 函数 | use | 一行用法 | 页 |
 |---|---|---|---|
-| `sy_now_ms`、`sy_mono_ns`、`sy_sleep_ms` | sys.time | 计时用单调钟;不要忙等 | cx.os |
+| `sy_now_ms`、`sy_mono_ns`、`sy_sleep_ms` | sys.time | `sy_now_ms()` 是单调时钟、任意原点(0 起量),只能做差值计时,严禁持久化或跨进程比较;持久化/跨进程时间戳用 `sy_wall_s()`(毫秒取 `sy_wall_s()*1000`);不要忙等 | cx.os |
 | `sy_deadline_in`、`sy_deadline_left`、`sy_deadline_passed` | sys.time | `sy_deadline_t d = sy_deadline_in(ms)`,循环同时带次数上限 | cx.os |
 | `sy_utc_fmt`、`sy_utc_parse` | os.utc | UTC 文本与秒互转;不做时区 | cx.os |
 
