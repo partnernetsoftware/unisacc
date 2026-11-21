@@ -19,8 +19,8 @@
 | sy_read_full | int sy_read_full(int fd, void *buf, long n); | Rust Read::read_exact | -errno | impl | impl | unverified | exists | 现在 sys.fs | pre | 0.1.0 | none | - |
 | sy_write | long sy_write(int fd, const void *buf, long n); | QuickJS os.write; Rust Write::write | -errno | impl | impl | impl | exists | 一次写,可能部分写入;EINTR 内部重试 | pre | 0.1.0 | none | cx-l0-sys-new |
 | sy_write_all | int sy_write_all(int fd, const void *buf, long n); | Rust Write::write_all | -errno | impl | impl | unverified | exists | 现在 sys.fs | pre | 0.1.0 | none | - |
-| sy_pread | long sy_pread(int fd, void *buf, long n, int64_t off); | Rust FileExt::read_at; Node fs.read position | -errno | impl | impl | refuse:ENOSYS 本版未实现 | exists | - | pre | 0.1.0 | none | - |
-| sy_pwrite | long sy_pwrite(int fd, const void *buf, long n, int64_t off); | Rust FileExt::write_at; Node fs.write position | -errno | impl | impl | refuse:ENOSYS 本版未实现 | exists | - | pre | 0.1.0 | none | - |
+| sy_pread | long sy_pread(int fd, void *buf, long n, int64_t off); | Rust FileExt::read_at; Node fs.read position | -errno | impl:仅lnx/x86_64验证,arm64未验证 | unverified | refuse:ENOSYS 本版未实现 | exists | posix.cx:388字面号17留0.0.88修 | pre | 0.1.0 | none | cx-l0-sys(缺arm64/osx) |
+| sy_pwrite | long sy_pwrite(int fd, const void *buf, long n, int64_t off); | Rust FileExt::write_at; Node fs.write position | -errno | impl:仅lnx/x86_64验证,arm64未验证 | unverified | refuse:ENOSYS 本版未实现 | exists | posix.cx:394字面号18留0.0.88修 | pre | 0.1.0 | none | cx-l0-sys(缺arm64/osx) |
 | sy_lseek | long sy_lseek(int fd, long off, int whence); | QuickJS os.seek; Rust Seek::seek | -errno | impl | impl | unverified | exists | 现在 sys.fs;long 在 win 是 32 位,大偏移用 sy_seek64 | legacy | 0.1.0 | none | - |
 | sy_seek64 | int64_t sy_seek64(int fd, int64_t off, int whence); | Rust Seek::seek(u64) | -errno | impl | impl | impl:SetFilePointerEx | exists | - | pre | 0.1.0 | none | cx-l0-sys-new |
 | sy_close | int sy_close(int fd); | QuickJS os.close | -errno | impl | impl | unverified | exists | 现在 sys.fs | pre | 0.1.0 | none | - |
