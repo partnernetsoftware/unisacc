@@ -1,0 +1,127 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+
+const output=document.querySelector("#r160");
+const classes=[
+  THREE.Loader, THREE.FileLoader, THREE.ImageLoader, THREE.ImageBitmapLoader, THREE.TextureLoader,
+  THREE.DataTextureLoader, THREE.CubeTextureLoader, THREE.CompressedTextureLoader, THREE.AudioLoader,
+  THREE.MaterialLoader, THREE.AnimationLoader, THREE.ObjectLoader, THREE.BufferGeometryLoader,
+];
+const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
+
+function defaults(loader,manager) {
+  return loader.manager===manager && loader.path==="" && loader.resourcePath==="" &&
+    loader.crossOrigin==="anonymous" && loader.withCredentials===false &&
+    Object.keys(loader.requestHeader).length===0;
+}
+
+async function objectAsync(loader) {
+  const previous=globalThis.fetch;
+  const origin="https://loader-family.test/object/";
+  let requests=0, progress=0;
+  loader.setPath(origin);
+  globalThis.fetch=request=>{
+    if(!request.url.startsWith(origin) || request.credentials!=="include" ||
+      request.headers.get("X-Probe")!=="273") throw new Error("ObjectLoader request configuration");
+    requests++;
+    const type=request.url.endsWith("/bad")?"Geometry":"Object";
+    return Promise.resolve(new Response(JSON.stringify({
+      metadata:{type},
+      object:{type:"Scene",uuid:"loader-family-scene",name:"loader family"},
+    }),{status:200}));
+  };
+  try {
+    const object=await loader.loadAsync("ok",()=>{ progress++; });
+    const rejected=await loader.loadAsync("bad").then(()=>false,error=>error.message.includes("Can't load"));
+    if(!object.isScene || object.name!=="loader family" || !rejected || progress<1 || requests!==2) {
+      throw new Error("ObjectLoader async parse");
+    }
+  } finally {
+    globalThis.fetch=previous;
+  }
+}
+
+async function configuration(Class,manager) {
+  const loader=new Class(), twin=new Class(manager);
+  const first=defaults(loader,THREE.DefaultLoadingManager) && defaults(twin,manager) &&
+    loader instanceof THREE.Loader && twin instanceof Class && loader.requestHeader!==twin.requestHeader;
+  const headers={"X-Probe":"273"};
+  const second=loader.setPath("p/")===loader && loader.setResourcePath("r/")===loader &&
+    loader.setWithCredentials(true)===loader && loader.setCrossOrigin("C")===loader &&
+    loader.setRequestHeader(headers)===loader && loader.path==="p/" && loader.resourcePath==="r/" &&
+    loader.withCredentials && loader.crossOrigin==="C" && loader.requestHeader===headers;
+  const third=loader.setPath("")===loader && loader.setCrossOrigin("")===loader &&
+    loader.path==="" && loader.resourcePath==="r/" && loader.crossOrigin==="" && defaults(twin,manager);
+
+  if(Class===THREE.ObjectLoader) {
+    await objectAsync(loader);
+    return [first,second,third].map(Number);
+  }
+
+  // Exercise the inherited Promise adapter with a controlled load callback.
+  const success={}, failure=new Error("controlled failure");
+  let progress=0;
+  const onProgress=()=>{ progress++; };
+  loader.load=function(url,resolve,notify,reject) {
+    if(this!==loader || notify!==onProgress) throw new Error("load callback contract");
+    notify();
+    if(url==="ok") resolve(success);
+    else reject(failure);
+  };
+  if(await loader.loadAsync("ok",onProgress)!==success) throw new Error("loadAsync resolution");
+  const rejection=await loader.loadAsync("bad",onProgress).then(()=>null,error=>error);
+  if(rejection!==failure || progress!==2) throw new Error("loadAsync rejection or progress");
+  return [first,second,third].map(Number);
+}
+
+async function fileLifecycle() {
+  const events=[];
+  const manager=new THREE.LoadingManager(
+    ()=>events.push(4), ()=>events.push(2), ()=>events.push(3));
+  manager.onStart=()=>events.push(1);
+  const origin="https://loader-family.test";
+  const loader=new THREE.FileLoader(manager).setPath(origin+"/p/")
+    .setResourcePath("ignored/").setWithCredentials(true).setRequestHeader({"X-Probe":"273"});
+  const original=globalThis.fetch;
+  const requests=[];
+  globalThis.fetch=request=>{
+    requests.push(request);
+    return Promise.resolve(new Response(request.url.endsWith("/bad")?"missing":"A",
+      {status:request.url.endsWith("/bad")?404:200}));
+  };
+  try {
+    const pending=loader.loadAsync("a");
+    loader.setWithCredentials(false).setRequestHeader({});
+    const body=await pending;
+    await tick();
+    const first=events.splice(0);
+    const request=requests[0];
+    const path=new URL(request.url).pathname.slice(1);
+    const failed=await loader.loadAsync("bad").then(()=>false,()=>true);
+    await tick();
+    const errors=events.splice(0);
+    const next=await loader.loadAsync("next");
+    await tick();
+    return [path.length,path.charCodeAt(0),path.charCodeAt(1),path.charCodeAt(2),
+      Number(request.credentials==="include"), Number(request.headers.get("X-Probe")),
+      first[0],body.length,body.charCodeAt(0),first[2],errors[1],errors[2],
+      Number(failed && next==="A" && requests.length===3 && events.join(",")==="1,2,4")];
+  } finally {
+    globalThis.fetch=original;
+  }
+}
+
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  const manager=new THREE.LoadingManager();
+  const values=[];
+  for(const Class of classes) values.push(...await configuration(Class,manager));
+  values.push(...await fileLifecycle());
+  output.textContent=JSON.stringify(values);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

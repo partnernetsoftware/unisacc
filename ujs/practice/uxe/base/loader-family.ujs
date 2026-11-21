@@ -1,0 +1,180 @@
+// One configuration record per loader. Loader and FileLoader retain their
+// existing layouts and are placed after the family fields.
+struct LoaderFamily {
+  kind: u32;
+  crossOrigin: u32;
+  crossOriginBytes: u32;
+  requestHeader: u32;
+}
+
+struct LoaderFamilyRequest {
+  url: u32;
+  urlBytes: u32;
+  credentials: u32;
+  requestHeader: u32;
+}
+
+native function LoaderFamily_size() i64 {
+  return LoaderFamily.size+Loader.size+FileLoader.size;
+}
+
+native function loader_family_config(instance:i64) i64 {
+  return instance+LoaderFamily.size;
+}
+
+native function loader_family_file(instance:i64) i64 {
+  return loader_family_config(instance)+Loader.size;
+}
+
+native function loader_family_kind(instance:i64) i64 {
+  if(!loading_span(instance,LoaderFamily_size())) { return 0; }
+  let kind=ux_u32(instance+LoaderFamily.kind);
+  if(kind<1 || kind>13) { return 0; }
+  return kind;
+}
+
+native function loader_family_init(instance:i64,base:i64,manager:i64,kind:i64) i64 {
+  let bytes=LoaderFamily_size();
+  if(!loading_span(instance,bytes) || !loading_span(base,LoaderBase_size()) ||
+     !file_disjoint(instance,bytes,base,LoaderBase_size()) || kind<1 || kind>13 ||
+     ux_u32(instance+LoaderFamily.kind)!=0) { return 0-1; }
+  let selected=loader_base_manager(instance,bytes,base,manager);
+  if(selected<0) { return selected; }
+  let initialized=Loader_init(loader_family_config(instance),selected);
+  if(initialized<0) { return initialized; }
+  if(kind==2) {
+    let file=FileLoader_init(loader_family_file(instance),selected);
+    if(file<0) { return file; }
+  }
+  let o=ux_u32_put(instance+LoaderFamily.crossOrigin,0);
+  // UINT32_MAX denotes the inherited default "anonymous".
+  let n=ux_u32_put(instance+LoaderFamily.crossOriginBytes,4294967295);
+  let h=ux_u32_put(instance+LoaderFamily.requestHeader,0);
+  let k=ux_u32_put(instance+LoaderFamily.kind,kind);
+  return instance;
+}
+
+native function LoaderFamily_manager(instance:i64) i64 {
+  if(loader_family_kind(instance)==0) { return 0-1; }
+  return ux_u32(loader_family_config(instance)+Loader.manager);
+}
+
+native function loader_family_range(instance:i64,at:i64,bytes:i64) i64 {
+  if(bytes<0 || at<0 || at>6291456-bytes) { return 0; }
+  return file_disjoint(at,bytes,instance,LoaderFamily_size()) &&
+    file_disjoint(at,bytes,LoaderFamily_manager(instance),LoadingManager.size);
+}
+
+native function loader_family_set_path(instance:i64,at:i64,bytes:i64,resource:i64) i64 {
+  if(loader_family_kind(instance)==0 || !loader_family_range(instance,at,bytes)) { return 0-1; }
+  if(Loader_setPath(loader_family_config(instance),at,bytes,resource)<0) { return 0-1; }
+  return instance;
+}
+
+native function LoaderFamily_setPath(instance:i64,at:i64,bytes:i64) i64 {
+  return loader_family_set_path(instance,at,bytes,0);
+}
+
+native function LoaderFamily_setResourcePath(instance:i64,at:i64,bytes:i64) i64 {
+  return loader_family_set_path(instance,at,bytes,1);
+}
+
+native function LoaderFamily_setWithCredentials(instance:i64,enabled:i64) i64 {
+  if(loader_family_kind(instance)==0 ||
+     Loader_setWithCredentials(loader_family_config(instance),enabled)<0) { return 0-1; }
+  return instance;
+}
+
+native function LoaderFamily_setCrossOrigin(instance:i64,at:i64,bytes:i64) i64 {
+  if(loader_family_kind(instance)==0 || bytes>65535 || !loader_family_range(instance,at,bytes)) { return 0-1; }
+  let p=ux_u32_put(instance+LoaderFamily.crossOrigin,at);
+  let n=ux_u32_put(instance+LoaderFamily.crossOriginBytes,bytes);
+  return instance;
+}
+
+// The host owns the header dictionary. A zero handle denotes an empty default.
+native function LoaderFamily_setRequestHeader(instance:i64,handle:i64) i64 {
+  if(loader_family_kind(instance)==0 || handle<0 || handle>4294967295) { return 0-1; }
+  let h=ux_u32_put(instance+LoaderFamily.requestHeader,handle);
+  return instance;
+}
+
+native function loader_family_unborrowed(instance:i64,at:i64,bytes:i64) i64 {
+  let config=loader_family_config(instance);
+  let n=ux_u32(instance+LoaderFamily.crossOriginBytes);
+  if(n!=4294967295 && !file_disjoint(at,bytes,ux_u32(instance+LoaderFamily.crossOrigin),n)) { return 0; }
+  return file_disjoint(at,bytes,ux_u32(config+Loader.path),ux_u32(config+Loader.pathBytes)) &&
+    file_disjoint(at,bytes,ux_u32(config+Loader.resourcePath),ux_u32(config+Loader.resourcePathBytes));
+}
+
+// FileLoader's host resolves manager URL policy after this path concatenation.
+// Header and credential values for the pending request are captured here.
+native function LoaderFamily_beginFile(instance:i64,url:i64,bytes:i64,output:i64,capacity:i64,request:i64,events:i64) i64 {
+  if(loader_family_kind(instance)!=2 || !loading_span(request,LoaderFamilyRequest.size) ||
+     !loading_span(events,3*LoadingEvent.size) || bytes>65535 ||
+     !loader_family_range(instance,url,bytes) || !loader_family_range(instance,output,capacity) ||
+     !loader_family_range(instance,request,LoaderFamilyRequest.size) ||
+     !loader_family_range(instance,events,3*LoadingEvent.size)) { return 0-1; }
+  let config=loader_family_config(instance);
+  let path=ux_u32(config+Loader.path);
+  let pathBytes=ux_u32(config+Loader.pathBytes);
+  let length=pathBytes+bytes;
+  if(length>capacity || !loader_family_range(instance,path,pathBytes) ||
+     !loader_family_unborrowed(instance,output,length) ||
+     !loader_family_unborrowed(instance,request,LoaderFamilyRequest.size) ||
+     !loader_family_unborrowed(instance,events,3*LoadingEvent.size) ||
+     !file_disjoint(output,length,url,bytes) ||
+     !file_disjoint(request,LoaderFamilyRequest.size,url,bytes) ||
+     !file_disjoint(events,3*LoadingEvent.size,url,bytes) ||
+     !file_disjoint(output,length,request,LoaderFamilyRequest.size) ||
+     !file_disjoint(output,length,events,3*LoadingEvent.size) ||
+     !file_disjoint(request,LoaderFamilyRequest.size,events,3*LoadingEvent.size)) { return 0-1; }
+  let id=FileLoader_begin(loader_family_file(instance),events);
+  if(id<0) { return id; }
+  let i=0;
+  while(i<pathBytes) {
+    let put=ux_u8_put(output+i,ux_u8(path+i));
+    i=i+1;
+  }
+  let j=0;
+  while(j<bytes) {
+    let put=ux_u8_put(output+pathBytes+j,ux_u8(url+j));
+    j=j+1;
+  }
+  let o=ux_u32_put(request+LoaderFamilyRequest.url,output);
+  let n=ux_u32_put(request+LoaderFamilyRequest.urlBytes,length);
+  let c=ux_u32_put(request+LoaderFamilyRequest.credentials,ux_u32(config+Loader.credentials));
+  let h=ux_u32_put(request+LoaderFamilyRequest.requestHeader,ux_u32(instance+LoaderFamily.requestHeader));
+  return id;
+}
+
+native function LoaderFamily_receiveFile(instance:i64,id:i64,status:i64,bytes:i64,length:i64,events:i64) i64 {
+  if(loader_family_kind(instance)!=2 || !loader_family_range(instance,events,3*LoadingEvent.size) ||
+     !loader_family_unborrowed(instance,events,3*LoadingEvent.size) ||
+     ((status==200 || status==0) && !loader_family_range(instance,bytes,length))) { return 0-1; }
+  return FileLoader_receive(loader_family_file(instance),id,status,bytes,length,events);
+}
+
+native function loader_family_ready(instance:i64,id:i64) i64 {
+  if(loader_family_kind(instance)!=2) { return 0-1; }
+  let file=loader_family_file(instance);
+  if(ux_u32(file+FileLoader.generation)!=id || ux_u32(file+FileLoader.state)!=2) { return 0-1; }
+  return file;
+}
+
+native function LoaderFamily_fileBytes(instance:i64,id:i64) i64 {
+  let file=loader_family_ready(instance,id);
+  if(file<0) { return file; }
+  return ux_u32(file+FileLoader.bytes);
+}
+
+native function LoaderFamily_fileLength(instance:i64,id:i64) i64 {
+  let file=loader_family_ready(instance,id);
+  if(file<0) { return file; }
+  return ux_u32(file+FileLoader.length);
+}
+
+native function LoaderFamily_releaseFile(instance:i64,id:i64) i64 {
+  if(loader_family_kind(instance)!=2 || FileLoader_release(loader_family_file(instance),id)<0) { return 0-1; }
+  return instance;
+}
