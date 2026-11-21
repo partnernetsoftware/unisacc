@@ -90,7 +90,7 @@ static int rk_affected(const char *name) {
     const char *env = sy_env("UNISACC_RATCHETS_PATHS");
     const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
     int precommit_soft = (soft && soft[0] == '1');
-    if (!env || !env[0]) return 1;
+    if (!precommit_soft || !env || !env[0]) return 1;
     long n = tx_len(env, 1 << 20), at = 0;
     int any_path = 0;
     while (at < n) {
@@ -116,12 +116,12 @@ static char *rk_skip_msg(const char *name, long *out_n) {
     return m;
 }
 
-static int judge(Rk *rk, const char *only, int *okp);
+static int judge(Rk *rk, const char *only, int *okp, int *skipp);
 static void from_run(Rk *rk, const char *dir);
 
 int main(int argc, char **argv) {
     static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}};
-    const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0;
+    const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0, skipped = 0;
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
         if (!b) { fprintf(stderr, "ratchets: cannot read %s\n", argv[2]); return 2; }
@@ -142,10 +142,13 @@ int main(int argc, char **argv) {
         return 0;
     }
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--from-run")) {   /* judge a flow run of the --plan nodes */
+        const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
+        int precommit_soft = (soft && soft[0] == '1');
         if (argc == 5) { if (!tx_eqz(argv[3], "--only")) return 2; only = argv[4]; }
         from_run(rk, argv[2]);
-        fail = judge(rk, only, &ok);
-        printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+        fail = judge(rk, only, &ok, &skipped);
+        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
+        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
         return fail ? 1 : 0;
     }
     if (argc >= 3 && tx_eqz(argv[1], "--affected")) {
@@ -194,18 +197,22 @@ int main(int argc, char **argv) {
         sy_close(rk[k].ofd);
         rk[k].rc = sy_wait_status(rk[k].pid, 0, &ex, &code, &sig) == rk[k].pid && ex ? code : -1;
     }
-    fail = judge(rk, only, &ok);
+    fail = judge(rk, only, &ok, &skipped);
     if (lsf[0]) sy_unlink(lsf);
-    printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+    {   const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
+        int precommit_soft = (soft && soft[0] == '1');
+        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
+        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+    }
     return fail ? 1 : 0;
 }
 
-/* the one judgement: per ratchet a RATCHET line plus its offending rows; returns fail, *okp = ok */
-static int judge(Rk *rk, const char *only, int *okp) {
-    int k, ok = 0, fail = 0;
+/* the one judgement: per ratchet a RATCHET line plus its offending rows; returns fail, *okp = ok, *skipp = skipped */
+static int judge(Rk *rk, const char *only, int *okp, int *skipp) {
+    int k, ok = 0, fail = 0, skipped = 0;
     for (k = 0; k < NRK; k++) {
         const char *o = rk[k].out ? rk[k].out : ""; long at = 0, summary = -1, sn = 0;
-        int isok;
+        int isok, isskip;
         while (at < rk[k].n) {   /* the summary is the line with " ok: " or " FAIL: " */
             long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;
             /* summary: "…: ok: …" / "…: FAIL: …" (the nine), or "…\tstatus=PASS|FAIL" (check-literal) */
@@ -215,7 +222,8 @@ static int judge(Rk *rk, const char *only, int *okp) {
         }
         isok = rk[k].rc == 0 && summary >= 0 &&
                (tx_find(o + summary, sn, ": ok: ", 6) >= 0 || tx_find(o + summary, sn, "status=PASS", 11) >= 0);
-        if (isok) ok++; else fail++;
+        isskip = isok && (rk[k].pid == -2 || tx_find(o + summary, sn, ": ok: skipped (", 15) >= 0);
+        if (isskip) skipped++; else if (isok) ok++; else fail++;
         printf("RATCHET\t%s\t%s\t%.*s\n", rk[k].name, isok ? "ok" : summary >= 0 ? "FAIL" : "ERROR", (int)(summary >= 0 ? sn : 0), summary >= 0 ? o + summary : "");
         at = 0;
         while (at < rk[k].n) {
@@ -225,6 +233,7 @@ static int judge(Rk *rk, const char *only, int *okp) {
         }
     }
     *okp = ok;
+    *skipp = skipped;
     return fail;
 }
 
