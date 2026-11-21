@@ -785,17 +785,110 @@ static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
     return res_inputs;
 }
 
+static int has_publish_pass_row(const char *buf, size_t n) {
+    size_t pos = 0;
+    while (pos < n) {
+        size_t ls = pos;
+        while (pos < n && buf[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < n) pos++;
+        size_t ll = le - ls;
+        if (ll > 15 && !memcmp(buf + ls, "exec-5-publish\t", 15)) {
+            for (size_t i = ls + 14; i + 6 <= le; i++) {
+                if (!memcmp(buf + i, "\tPASS\t", 6)) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int verify_version_seq_readback(const char *table, const char *ver, char *last_pub, size_t lcap) {
+    size_t rn = 0;
+    char *rb = cx_read(table, &rn);
+    if (!rb) return 0;
+    const char *pub = "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80";
+    size_t pubn = 9, vn = strlen(ver), pos = 0;
+    int ver_pub = 0;
+    last_pub[0] = 0;
+    while (pos < rn) {
+        size_t ls = pos;
+        while (pos < rn && rb[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < rn) pos++;
+        size_t cs[6], ce[6];
+        int nc = 0;
+        size_t q = ls;
+        while (nc < 6 && q <= le) {
+            size_t s = q;
+            while (q < le && rb[q] != '\t') q++;
+            cs[nc] = s; ce[nc] = q; nc++;
+            q++;
+        }
+        if (nc >= 4 && ce[3] - cs[3] == pubn && !memcmp(rb + cs[3], pub, pubn)) {
+            size_t vl = ce[1] - cs[1];
+            if (vl > 0 && vl < lcap) {
+                mm_copy(last_pub, lcap, rb + cs[1], vl);
+                last_pub[vl] = 0;
+            }
+            if (vl == vn && !memcmp(rb + cs[1], ver, vn)) ver_pub = 1;
+        }
+    }
+    free(rb);
+    return ver_pub && !strcmp(last_pub, ver);
+}
+
 static int cmd_mark_version_seq(int argc, char **argv) {
-    const char *ver = 0, *table = "build/version-seq.tsv";
+    const char *ver = 0, *table = 0, *repo = ".", *index_arg = 0;
+    char table_buf[4400], index_buf[4400], tag_spec[128], why[256], last_pub[64];
     for (int i = 0; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
-        if (!v) usage("mark-version-seq --version V [--table PATH]");
+        if (!v) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
         if (!strcmp(k, "--version")) ver = v;
+        else if (!strcmp(k, "--repo")) repo = v;
         else if (!strcmp(k, "--table")) table = v;
-        else usage("mark-version-seq --version V [--table PATH]");
+        else if (!strcmp(k, "--index")) index_arg = v;
+        else usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
         i++;
     }
-    if (!ver || !ver[0]) usage("mark-version-seq --version V [--table PATH]");
+    if (!ver || !ver[0]) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
+    if (!table) {
+        if (!strcmp(repo, ".")) table = "build/version-seq.tsv";
+        else {
+            if (cx_fmt(table_buf, sizeof table_buf, "%s/build/version-seq.tsv", repo)) return 2;
+            table = table_buf;
+        }
+    }
+    const char *index_path = index_arg;
+    if (!index_path) {
+        if (!strcmp(repo, ".")) {
+            if (cx_fmt(index_buf, sizeof index_buf, "release/evidence/%s/INDEX.tsv", ver)) return 2;
+        } else {
+            if (cx_fmt(index_buf, sizeof index_buf, "%s/release/evidence/%s/INDEX.tsv", repo, ver)) return 2;
+        }
+        index_path = index_buf;
+    }
+    if (cx_fmt(tag_spec, sizeof tag_spec, "refs/tags/v%s^{commit}", ver)) return 2;
+    {
+        char *tv[] = {"git", "-C", (char *)repo, "rev-parse", "--verify", "--end-of-options", tag_spec, 0};
+        np_result tr = {0};
+        int tbad = np_run(tv, 0, 0, 10, &tr, why, sizeof why);
+        int tok = !tbad && tr.rc == 0 && !tr.residue && tr.out && tr.outn >= 40 && strspn(tr.out, "0123456789abcdef") >= 40;
+        np_free(&tr);
+        if (!tok) {
+            fprintf(stderr, "REFUSE VERSION_SEQ_MARK missing-tag version=%s tag=v%s repo=%s\n", ver, ver, repo);
+            return 2;
+        }
+    }
+    {
+        size_t in_n = 0;
+        char *in_b = cx_read(index_path, &in_n);
+        int iok = in_b && has_publish_pass_row(in_b, in_n);
+        if (in_b) free(in_b);
+        if (!iok) {
+            fprintf(stderr, "REFUSE VERSION_SEQ_MARK missing-publish-index version=%s index=%s\n", ver, index_path);
+            return 2;
+        }
+    }
     size_t n = 0;
     char *buf = cx_read(table, &n);
     if (!buf) {
@@ -849,18 +942,18 @@ static int cmd_mark_version_seq(int argc, char **argv) {
         fprintf(stderr, "REFUSE VERSION_SEQ_MARK version=%s hits=%d table=%s\n", ver, hits, table);
         return 2;
     }
-    if (!changed) {
-        free(out);
-        sy_printf("VERSION_SEQ_MARK\tALREADY_PUBLIC\tversion=%s\ttable=%s\n", ver, table);
-        return 0;
-    }
-    if (sy_write_atomic(table, out, opos, 0644) != 0) {
+    if (changed && sy_write_atomic(table, out, opos, 0644) != 0) {
         free(out);
         fprintf(stderr, "REFUSE VERSION_SEQ_MARK write-failed table=%s\n", table);
         return 2;
     }
     free(out);
-    sy_printf("VERSION_SEQ_MARK\tUPDATED\tversion=%s\ttable=%s\n", ver, table);
+    if (!verify_version_seq_readback(table, ver, last_pub, sizeof last_pub)) {
+        fprintf(stderr, "REFUSE VERSION_SEQ_MARK readback-verify-failed version=%s last_public=%s table=%s\n",
+                ver, last_pub[0] ? last_pub : "none", table);
+        return 2;
+    }
+    sy_printf("VERSION_SEQ_MARK\t%s\tversion=%s\ttable=%s\n", changed ? "UPDATED" : "ALREADY_PUBLIC", ver, table);
     return 0;
 }
 
