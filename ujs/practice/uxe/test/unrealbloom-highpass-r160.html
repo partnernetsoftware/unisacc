@@ -1,0 +1,68 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import {
+  DataTexture, DataUtils, NoBlending, REVISION, Vector2, WebGLRenderer, WebGLRenderTarget
+} from "three";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const root = new URLSearchParams(location.search).get("package");
+  const addon = path => import(`file://${root}/examples/jsm/${path}.js`);
+  const [{ UnrealBloomPass }, { ShaderPass }, { CopyShader }] = await Promise.all([
+    addon("postprocessing/UnrealBloomPass"), addon("postprocessing/ShaderPass"), addon("shaders/CopyShader"),
+  ]);
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("webgl2");
+  if (!context) throw new Error("WebGL2 required");
+  const renderer = new WebGLRenderer({ canvas, context });
+  function extract(width, height, data, threshold) {
+    const input = new DataTexture(Uint8Array.from(data), width, height);
+    input.needsUpdate = true;
+    const target = new WebGLRenderTarget(width, height, { depthBuffer: false });
+    const copy = new ShaderPass(CopyShader);
+    copy.material.blending = NoBlending;
+    const pass = new UnrealBloomPass(new Vector2(width, height), 1, 0, threshold);
+    try {
+      copy.render(renderer, target, { texture: input });
+      pass.render(renderer, null, target, 0, false);
+      const bright = pass.renderTargetBright;
+      const halves = new Uint16Array(bright.width * bright.height * 4);
+      renderer.readRenderTargetPixels(bright, 0, 0, bright.width, bright.height, halves);
+      const bytes = Uint8Array.from(halves, half => Math.round(255 * DataUtils.fromHalfFloat(half)));
+      const words = new DataView(bytes.buffer);
+      return Array.from({ length: halves.length / 4 }, (_, i) => words.getUint32(i * 4, true));
+    } finally {
+      pass.materialHighPassFilter.dispose();
+      pass.dispose();
+      copy.dispose();
+      target.dispose();
+      input.dispose();
+    }
+  }
+  const evenRow = [
+    126,126,126,180, 126,126,126,180, 128,128,128,160, 128,128,128,160,
+    132,132,132,30, 132,132,132,30, 0,255,0,124, 0,255,0,124,
+  ];
+  const even = extract(8, 2, [...evenRow, ...evenRow], 128 / 255 - .005);
+  const oddData = [];
+  for (let y = 0; y < 3; y++) {
+    for (let x = 0; x < 3; x++) {
+      const value = 32 * (1 + x + y);
+      oddData.push(value, value, value, 160);
+    }
+  }
+  const odd = extract(3, 3, oddData, .25);
+  const red = extract(1, 1, [255,0,0,124], .4);
+  renderer.dispose();
+  // The final seven values correspond to local buffer and input refusals.
+  output.textContent = JSON.stringify([
+    ...even, ...odd, odd.length, red[0] + red.length, -269,-1,-1,-1,-1,-1,-1,
+  ]);
+} catch (error) {
+  output.textContent = `error:${error.message}`;
+}
+</script>

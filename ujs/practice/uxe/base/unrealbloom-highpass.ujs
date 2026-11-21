@@ -1,0 +1,54 @@
+native function bloom_sample(src:i64,rowBytes:i64,at:i64,nextX:i64,nextY:i64,fx:f64,fy:f64) f64 {
+  let right=at+4*nextX;
+  let lower=rowBytes*nextY;
+  let top=ux_u8(src+at)*(1.0-fx)+ux_u8(src+right)*fx;
+  let bottom=ux_u8(src+at+lower)*(1.0-fx)+ux_u8(src+right+lower)*fx;
+  return top*(1.0-fy)+bottom*fy;
+}
+
+// Bright extraction for a linear RGBA8 source with row-major pixels.
+// The packed destination has dimensions ((width+1)/2, (height+1)/2).
+// Returns the number of output pixels, or -1 before writing for invalid input.
+native function UnrealBloom_highPassRGBA8(src:i64,dst:i64,capacity:i64,width:i64,height:i64,threshold:f64) i64 {
+  if(width<1 || width>1572864 || height<1 || height>1572864 ||
+     width*height>1572864 || !(threshold>=0.0 && threshold<=1.0)) { return 0-1; }
+  let srcBytes=width*height*4;
+  let outWidth=(width+1)/2;
+  let outHeight=(height+1)/2;
+  let pixels=outWidth*outHeight;
+  let outBytes=pixels*4;
+  if(capacity<outBytes || !post_span(src,srcBytes) || !post_span(dst,capacity) ||
+     post_overlap(src,srcBytes,dst,outBytes)) { return 0-1; }
+  let rowBytes=width*4;
+  let y=0;
+  while(y<outHeight) {
+    let sy=(y+0.5)*height/outHeight-0.5;
+    let y0=f64_floor_i64(sy);
+    let fy=sy-y0;
+    let ny=y0+1<height;
+    let x=0;
+    while(x<outWidth) {
+      let sx=(x+0.5)*width/outWidth-0.5;
+      let x0=f64_floor_i64(sx);
+      let fx=sx-x0;
+      let nx=x0+1<width;
+      let at=y0*rowBytes+x0*4;
+      let r=bloom_sample(src,rowBytes,at,nx,ny,fx,fy);
+      let g=bloom_sample(src,rowBytes,at+1,nx,ny,fx,fy);
+      let b=bloom_sample(src,rowBytes,at+2,nx,ny,fx,fy);
+      let t=((r*0.299+g*0.587+b*0.114)/255.0-threshold)*100.0;
+      let out=dst+4*(y*outWidth+x);
+      let weight=1.0;
+      if(t<=0.0) { weight=0.0; }
+      else if(t<1.0) { weight=t*t*(3.0-2.0*t); }
+      let a=bloom_sample(src,rowBytes,at+3,nx,ny,fx,fy);
+      let wr=ux_u8_put(out,post_rgba8(r*weight));
+      let wg=ux_u8_put(out+1,post_rgba8(g*weight));
+      let wb=ux_u8_put(out+2,post_rgba8(b*weight));
+      let wa=ux_u8_put(out+3,post_rgba8(a*weight));
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return pixels;
+}

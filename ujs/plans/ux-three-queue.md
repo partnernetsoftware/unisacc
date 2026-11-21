@@ -270,7 +270,8 @@
 - EffectComposer GPU 生命周期 | G-pixel 两目标复用、resize、旁路、遮罩与释放 | 调度计划、M4 RenderTarget。
 - ~~RenderPass 读目标清屏 | G-pixel EffectComposer 计划、WebGL2 实际清屏、双目标读回 | EffectComposer、M4。~~ 16 项通过，篡改目标交换绿蓝像素使四项红。
 - RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
-- UnrealBloomPass | G-pixel 阈值、羽化、多级混合 | RenderPass、EffectComposer。
+- ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
+- UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。
 - OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
 - ~~调色与 FXAA 的 RGBA8 内核 | G-pixel 通道曲线、锯齿阶跃与采样方向 | 线性 RGBA8。~~ 真实 r160 ShaderPass 18 项通过，移除调色与 FXAA 分别转红。
 - FXAA GPU 接线 | G-pixel 同目标格式读写与 EffectComposer 交换 | FXAA RGBA8 算法、EffectComposer。

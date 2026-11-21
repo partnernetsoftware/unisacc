@@ -1,0 +1,57 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+#define EVEN "let fill=bloom_even(src);"
+#define ODD "let fill=bloom_odd(src);"
+#define HIGH_EVEN "let n=UnrealBloom_highPassRGBA8(src,dst,16,8,2,128.0/255.0-0.005);"
+#define HIGH_ODD "let n=UnrealBloom_highPassRGBA8(src,dst,16,3,3,0.25);"
+#define RGBA(r,g,b,a) ((r)+256.0*(g)+65536.0*(b)+16777216.0*(a))
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"f64-math","postprocess-rgba8","unrealbloom-highpass",0};
+    const char *setup=
+        "native function bloom_store(at:i64,r:i64,g:i64,b:i64,a:i64) i64 {"
+        "return ux_u32_put(at,r+256*g+65536*b+16777216*a);}"
+        "native function bloom_even(src:i64) i64 {"
+        "let y=0;while(y<2){let x=0;while(x<8){let at=src+4*(y*8+x);"
+        "if(x<2){let write=bloom_store(at,126,126,126,180);}"
+        "else if(x<4){let write=bloom_store(at,128,128,128,160);}"
+        "else if(x<6){let write=bloom_store(at,132,132,132,30);}"
+        "else {let write=bloom_store(at,0,255,0,124);}x=x+1;}y=y+1;}return 0;}"
+        "native function bloom_odd(src:i64) i64 {"
+        "let y=0;while(y<3){let x=0;while(x<3){let c=32*(x+y+1);"
+        "let write=bloom_store(src+4*(y*3+x),c,c,c,160);x=x+1;}y=y+1;}return 0;}"
+        "let src=0;let dst=256;";
+    const char *cases[]={
+        EVEN HIGH_EVEN "return 0.0+ux_u32(dst);",
+        EVEN HIGH_EVEN "return 0.0+ux_u32(dst+4);",
+        EVEN HIGH_EVEN "return 0.0+ux_u32(dst+8);",
+        EVEN HIGH_EVEN "return 0.0+ux_u32(dst+12);",
+        ODD HIGH_ODD "return 0.0+ux_u32(dst);",
+        ODD HIGH_ODD "return 0.0+ux_u32(dst+4);",
+        ODD HIGH_ODD "return 0.0+ux_u32(dst+8);",
+        ODD HIGH_ODD "return 0.0+ux_u32(dst+12);",
+        ODD HIGH_ODD "return 0.0+n;",
+        "let fill=bloom_store(src,255,0,0,124);"
+        "let n=UnrealBloom_highPassRGBA8(src,dst+1,4,1,1,0.4);"
+        "return 0.0+ux_u8(dst+1)+256*ux_u8(dst+2)+65536*ux_u8(dst+3)+16777216*ux_u8(dst+4)+n;",
+        "let keep=ux_u32_put(dst,731);let n=UnrealBloom_highPassRGBA8(src,dst,15,8,2,0.25);"
+        "return 0.0+1000*n+ux_u32(dst);",
+        "return 0.0+UnrealBloom_highPassRGBA8(src,src+1,16,8,2,0.25);",
+        "return 0.0+UnrealBloom_highPassRGBA8(6291453,dst,4,1,1,0.25);",
+        "return 0.0+UnrealBloom_highPassRGBA8(src,6291450,7,1,1,0.25);",
+        "return 0.0+UnrealBloom_highPassRGBA8(src,dst,4,1,1,0.0/0.0);",
+        "return 0.0+UnrealBloom_highPassRGBA8(src,dst,16,0,2,0.25);",
+        "return 0.0+UnrealBloom_highPassRGBA8(src,dst,16,1572864,2,0.25);",
+    };
+    const double gold[]={
+        0,RGBA(64,64,64,80),RGBA(132,132,132,30),RGBA(0,255,0,124),
+        0,RGBA(96,96,96,160),RGBA(96,96,96,160),RGBA(144,144,144,160),4,
+        1,-269,-1,-1,-1,-1,-1,-1,
+    };
+    return g_wasm_batch_addon("G_PIXEL UnrealBloomPass high pass","unrealbloom-highpass",argv[1],modules,
+        setup,cases,gold,sizeof gold/sizeof gold[0],mutate?1:-1,EVEN
+        "let n=UnrealBloom_highPassRGBA8(src,dst,16,8,2,0.25);return 0.0+ux_u32(dst+4);");
+}
