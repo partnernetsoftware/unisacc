@@ -1,0 +1,198 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D4 私有腹部合成验收</title>
+<canvas id="wasm" width="160" height="96"></canvas>
+<canvas id="reference" width="160" height="96"></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { Matrix4, REVISION, Vector3 } from "../../web/game/three.module.js";
+import { buildTown,townLayout } from "./d4-town.js";
+import { loadScaleStudy } from "./uxe-u2b.js";
+import { gaitPose } from "./d4-gait.js";
+import { leafMesh } from "./d3-foliage.js";
+import { barrelMesh } from "./d4-framing.js";
+import { BOX_MESH,MESH_BOX,allMeshes } from "../meshes.js";
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene,PerspectiveCamera } from "../scene.js";
+
+const result=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const base=2097152, width=160,height=96;
+const shell=[
+  [0,4.45,.40,1,0,0,0,7.4,1.3,4.4,0,61,74,92,0],
+  [0,4.52,2.67,1,0,0,0,7.8,.73,.21,0,107,124,128,0],
+  [0,4.19,2.84,1,0,0,0,7.5,.12,.19,0,147,110,61,0],
+  ...[-2.5,0,2.5].flatMap(x=>[
+    [x,4.57,2.80,1,0,Math.PI/2,0,1.01,.24,0,0,161,119,70,1],
+    [x,4.57,3.01,.21,0,0,0,0,0,0,0,107,124,128,2],
+  ]),
+];
+
+async function wasm(name) {
+  const url=query.get(name);
+  if(!url) throw new Error("验收缺少 Wasm 路径");
+  const response=await fetch(url);
+  if(!response.ok) throw new Error("无法读取 Wasm");
+  return (await WebAssembly.instantiate(await response.arrayBuffer())).instance.exports;
+}
+
+function meshFor(row) {
+  if(row[14]===1) {
+    const barrel=barrelMesh(row[7],row[8]);
+    return {...barrel,vCount:barrel.positions.length/3};
+  }
+  if(row[14]===2) return leafMesh(1);
+  const box=allMeshes()[MESH_BOX],sizes=row.slice(7,10),angle=row[10];
+  const rt=new Matrix4().makeRotationZ(angle);
+  const rotate=(array,scale)=>Float32Array.from(
+    Array.from({length:array.length/3},(_,i)=>new Vector3(
+      array[i*3]*scale[0],array[i*3+1]*scale[1],array[i*3+2]*scale[2]
+    ).applyMatrix4(rt).toArray()).flat());
+  return {...box,positions:rotate(BOX_MESH,sizes),normals:rotate(box.normals,[1,1,1])};
+}
+
+function visual(canvas,models) {
+  if(models.some(mesh=>mesh.vCount!==mesh.positions.length/3)) throw new Error("网格顶点数非法");
+  const scene=new Scene(),camera=new PerspectiveCamera(.66,.1,150);
+  scene.fog.density=0;
+  const meshBase=allMeshes().length;
+  const clouds=models.map((_,i)=>{
+    const cloud=scene.instances("part-"+i,1,[1,1,1]);
+    cloud.meshId=meshBase+i;
+    cloud.metalness=0;
+    cloud.roughness=.65;
+    cloud.toonLevels=3;
+    return cloud;
+  });
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes:models});
+  const gl=canvas.getContext("webgl");
+  return (number,load,eye,target)=>{
+    for(let i=0;i<clouds.length;i++) {
+      const cloud=clouds[i],row=load(i);
+      cloud.count=Number(i<number);
+      cloud.xyz=row.subarray(0,3);
+      cloud.scale=row.subarray(3,4);
+      cloud.yaw=row.subarray(4,5);
+      cloud.pitch=row.subarray(5,6);
+      cloud.roll=row.subarray(6,7);
+      cloud.color=row.subarray(11,14);
+    }
+    camera.setEye(...eye);
+    camera.setTarget(...target);
+    renderer.render(scene,camera);
+    const pixels=new Uint8Array(width*height*4);
+    gl.readPixels(0,0,width,height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    if(gl.getError()!==gl.NO_ERROR) throw new Error("腹部 GPU 读回失败");
+    return pixels;
+  };
+}
+
+function pixelDifferences(a,b) {
+  let diff=0;
+  for(let i=0;i<a.length;i+=4)
+    if(a[i]!==b[i] || a[i+1]!==b[i+1] || a[i+2]!==b[i+2] || a[i+3]!==b[i+3]) diff++;
+  return diff;
+}
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const [abdomen,gear,combine,gait,layout,study,legsFile]=await Promise.all(
+    [wasm("abdomen"),wasm("gear"),wasm("merge"),wasm("gait"),townLayout(true),loadScaleStudy("d4"),fetch("./d4-legs.tsv")]);
+  if(!legsFile.ok) throw new Error("读取步态事实失败");
+  const rest=(await legsFile.text()).trim().split("\n").slice(1).map(row=>{
+    const n=row.split("\t").slice(1).map(value=>Number(value)/1000);
+    return [n.slice(0,3),n.slice(3,6),n.slice(6,9)];
+  });
+  const [kind,sx,sy,,sw,sh,sd]=layout.find(([name,,,,w])=>name==="gear" && w>=2);
+  const factor=study[0]/1000, deck=6.37,center=[sx+.45,sy+.19,4.45];
+  const pivot=[center[0],deck+(center[1]-deck)*factor,center[2]];
+  const wheel=[];
+  buildTown([[kind,...center,sw*.98,sh*.98,sd]],{
+    round:2,
+    block:(_,x,y,z,w,h,d,roll)=>wheel.push([x,deck+(y-deck)*factor,z,factor,0,0,0,w,h,d,roll,218,161,59,0]),
+    add:(_,mesh,x,y,z,s)=>wheel.push([x,deck+(y-deck)*factor,z,s*factor,0,0,0,0,0,0,0,218,161,59,mesh]),
+  });
+  const all=[...shell,...wheel];
+  if(all.length!==29) throw new Error("腹部参考部件数非法");
+  let draw=null;
+  const drawRef=visual(document.querySelector("#reference"),all.map(meshFor));
+
+  const frame=new Float64Array(gait.memory.buffer,base+384,4);
+  new Float64Array(gait.memory.buffer,base,36).set(rest.flat(2));
+  new Float64Array(gait.memory.buffer,base+320,8).set([10.8,3.4,14.4,0,6.2,0,720,730]);
+  const aBody=new Float64Array(abdomen.memory.buffer,base+4096,3);
+  const gBody=new Float64Array(gear.memory.buffer,base+4160,3);
+  const gEye=new Float64Array(gear.memory.buffer,base+4192,3);
+  new Float64Array(gear.memory.buffer,base+4096,6).set([sx,sy,sw,sd,deck,factor]);
+  const gOutput=new Float64Array(gear.memory.buffer,base+256,20*12);
+  const aBytes=new Uint8Array(abdomen.memory.buffer,base+256,9*88);
+  const gBytes=new Uint8Array(gear.memory.buffer,base+256,20*96);
+  const aInput=new Uint8Array(combine.memory.buffer,base+4096,aBytes.length);
+  const gInput=new Uint8Array(combine.memory.buffer,base+5000,gBytes.length);
+  const packed=new Float32Array(combine.memory.buffer,base+256,31*15);
+  const words=new Uint32Array(combine.memory.buffer,base+256,31*15);
+
+  const done=[];
+  let countDiff=0,fieldDiff=0,pixelDiff=0,tailDiff=0,rows=0;
+  const cases=[[0,false],[.5,false],[4,false],[-1,false],[38,true]];
+  for(const [index,[phase,tilted]] of cases.entries()) {
+    if(gait.uxe_d4_frame(0n,384n,768n,320n,phase,1n,0n)!==0n) throw new Error("步态拒绝");
+    aBody.set(frame.subarray(0,3));
+    gBody.set(frame.subarray(0,3));
+    const expected=gaitPose(rest,phase,"walk");
+    const eye=[11.3+expected.travel,6.5,21],target=[1.5+expected.travel,4.9,2];
+    gEye.set(eye);
+    if(abdomen.uxe_d4_abdomen(256n,9n,4096n)!==9n ||
+       gear.uxe_d4_main_gear(256n,20n,4096n,4160n,4192n,tilted?1n:0n)!==20n) throw new Error("组件拒绝");
+    if(query.get("mutate")==="1" && index===2) for(let i=0;i<20;i++) gOutput[i*12]+=2;
+    aInput.set(aBytes);
+    gInput.set(gBytes);
+    words.fill(0xfeedbeef);
+    const count=Number(combine.uxe_d4_belly_scene(256n,31n,4096n,5000n));
+    if(count!==29) countDiff++;
+    rows+=count;
+    const [gx,gy,gz]=pivot.map((value,i)=>value+expected.offset[i]);
+    const [dx,dy,dz]=eye.map((value,i)=>value-[gx,gy,gz][i]);
+    const yaw=Math.atan2(dx,Math.hypot(dy,dz))+(tilted?.74:0),pitch=-Math.atan2(dy,dz);
+    const m=new Matrix4().makeRotationX(pitch).multiply(new Matrix4().makeRotationY(yaw));
+    const reference=all.map((part,i)=>{
+      const row=part.slice();
+      if(i<9) for(let axis=0;axis<3;axis++) row[axis]+=expected.offset[axis];
+      else {
+        const local=new Vector3(...part.slice(0,3).map((value,axis)=>value-pivot[axis])).applyMatrix4(m);
+        row.splice(0,3,gx+local.x,gy+local.y,gz+local.z);
+        row[4]=yaw; row[5]=pitch;
+      }
+      for(let c=11;c<14;c++) row[c]/=255;
+      return Float32Array.from(row);
+    });
+    for(let i=0;i<29;i++) {
+      for(let j=0;j<14;j++) if(!Number.isFinite(packed[i*15+j]) ||
+        Math.abs(packed[i*15+j]-reference[i][j])>1e-6) fieldDiff++;
+      if(words[i*15+14]!==all[i][14]) fieldDiff++;
+    }
+    if(words.subarray(29*15).some(word=>word!==0xfeedbeef)) tailDiff++;
+    if(!draw) {
+      const models=Array.from({length:29},(_,i)=>meshFor([
+        ...packed.subarray(i*15,i*15+14),words[i*15+14],
+      ]));
+      draw=visual(document.querySelector("#wasm"),models);
+    }
+    const image=draw(count,i=>packed.subarray(i*15,(i+1)*15),eye,target);
+    pixelDiff+=pixelDifferences(image,drawRef(29,i=>reference[i],eye,target));
+    done.push(image);
+  }
+  const before=words.slice();
+  const intact=()=>before.every((word,i)=>word===words[i]);
+  let refused=0;
+  if(combine.uxe_d4_belly_scene(256n,28n,4096n,5000n)===-1n && intact()) refused++;
+  if(combine.uxe_d4_belly_scene(4096n,31n,4096n,5000n)===-1n && intact()) refused++;
+  new DataView(combine.memory.buffer,base+5000+19*96,96).setUint32(92,1,true);
+  if(combine.uxe_d4_belly_scene(256n,31n,4096n,5000n)===-2n && intact()) refused++;
+  new DataView(combine.memory.buffer,base+5000+19*96,96).setUint32(92,0,true);
+  new DataView(combine.memory.buffer,base+4096+8*88,88).setFloat32(4,1,true);
+  if(combine.uxe_d4_belly_scene(256n,31n,4096n,5000n)===-2n && intact()) refused++;
+  const moved=Number(pixelDifferences(done[0],done[4])>0);
+  result.textContent=JSON.stringify([cases.length,rows,cases.length*width*height,countDiff,fieldDiff,pixelDiff,tailDiff,refused,moved]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>
