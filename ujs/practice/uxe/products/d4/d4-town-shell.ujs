@@ -1,0 +1,82 @@
+// Dense town housing shell records, in the same millimetre coordinates as
+// d4-dense-town.tsv. The caller supplies only the three house kinds.
+struct D4House {
+  style: u32;
+  x: i32;
+  y: i32;
+  z: i32;
+  width: i32;
+  height: i32;
+  depth: i32;
+}
+
+struct D4TownBox {
+  x: f32;
+  y: f32;
+  z: f32;
+  width: f32;
+  height: f32;
+  depth: f32;
+  roll: f32;
+  material: u32;
+}
+
+native function d4_town_shell_box(dst:i64,x:f64,y:f64,z:f64,w:f64,h:f64,d:f64,material:i64) i64 {
+  let sx=ux_f32_put(dst+D4TownBox.x,x);
+  let sy=ux_f32_put(dst+D4TownBox.y,y);
+  let sz=ux_f32_put(dst+D4TownBox.z,z);
+  let sw=ux_f32_put(dst+D4TownBox.width,w);
+  let sh=ux_f32_put(dst+D4TownBox.height,h);
+  let sd=ux_f32_put(dst+D4TownBox.depth,d);
+  let sr=ux_f32_put(dst+D4TownBox.roll,0.0);
+  let sm=ux_u32_put(dst+D4TownBox.material,material);
+  return dst+D4TownBox.size;
+}
+
+native function d4_town_shell_house(dst:i64,src:i64,travel:f64,index:i64) i64 {
+  let x=ux_i32(src+D4House.x)*0.001+travel;
+  let y=ux_i32(src+D4House.y)*0.001;
+  let z=ux_i32(src+D4House.z)*0.001;
+  let w=ux_i32(src+D4House.width)*0.001;
+  let h=ux_i32(src+D4House.height)*0.001;
+  let d=ux_i32(src+D4House.depth)*0.001;
+  let body=0;
+  if(index%5==0) { body=1; }
+  let next=d4_town_shell_box(dst,x,y+h*0.5,z,w,h,d,body);
+  let roof=y+h;
+  if(ux_u32(src+D4House.style)==1) {
+    next=d4_town_shell_box(next,x,roof+0.12,z,w+0.14,0.24,d+0.13,2);
+    return d4_town_shell_box(next,x,roof+0.28,z,w+0.07,0.12,d+0.09,3);
+  }
+  let span=w*0.65;
+  let shift=w*0.27;
+  let right=d4_town_shell_box(next,x-shift,roof+0.13,z,span,0.10,d+0.18,3);
+  let end=d4_town_shell_box(right,x+shift,roof+0.13,z,span,0.10,d+0.18,3);
+  let slopeA=ux_f32_put(next+D4TownBox.roll,0.48);
+  let slopeB=ux_f32_put(right+D4TownBox.roll,0.0-0.48);
+  return end;
+}
+
+native function D4Town_shell(output:i64,capacity:i64,facts:i64,homes:i64,travel:f64) i64 {
+  if(homes<0 || homes>128 || capacity<homes*3 || capacity>384 ||
+     travel-travel!=0.0 || travel<0.0-4096.0 || travel>4096.0) { return 0-1; }
+  let sourceBytes=homes*D4House.size;
+  let targetBytes=homes*3*D4TownBox.size;
+  if(facts<0 || facts%4!=0 || facts>6291456-sourceBytes ||
+     output<0 || output%4!=0 || output>6291456-targetBytes ||
+     (homes>0 && facts<output+targetBytes && output<facts+sourceBytes)) { return 0-1; }
+  let i=0;
+  while(i<homes) {
+    let at=facts+i*D4House.size;
+    if(ux_u32(at+D4House.style)>2 || ux_i32(at+D4House.width)<1 ||
+       ux_i32(at+D4House.height)<1 || ux_i32(at+D4House.depth)<1) { return 0-2; }
+    i=i+1;
+  }
+  let next=output;
+  i=0;
+  while(i<homes) {
+    next=d4_town_shell_house(next,facts+i*D4House.size,travel,i);
+    i=i+1;
+  }
+  return homes*3;
+}
