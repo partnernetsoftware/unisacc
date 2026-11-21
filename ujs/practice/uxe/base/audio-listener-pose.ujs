@@ -1,0 +1,53 @@
+struct AudioListenerPose {
+  x: f64;
+  y: f64;
+  z: f64;
+  forwardX: f64;
+  forwardY: f64;
+  forwardZ: f64;
+  upX: f64;
+  upY: f64;
+  upZ: f64;
+}
+
+native function audio_listener_separate(src:i64,bytes:i64,out:i64,work:i64) i64 {
+  return audio_play_span(src,bytes,8) && !audio_play_overlap(src,bytes,out,AudioListenerPose.size) &&
+    !audio_play_overlap(src,bytes,work,80);
+}
+
+// Object3D supplies the matrix and its configurable up vector. As in r160,
+// scale is removed from listener orientation; up is the configured vector.
+native function AudioListener_worldPose(matrix:i64,up:i64,out:i64,work:i64) i64 {
+  if(!audio_play_span(out,AudioListenerPose.size,8) || !audio_play_span(work,80,8) ||
+     audio_play_overlap(out,AudioListenerPose.size,work,80) ||
+     !audio_listener_separate(matrix,128,out,work) || !audio_listener_separate(up,24,out,work)) { return 0-1; }
+  let i=0;
+  while(i<16) {
+    let value=ux_f64(matrix+i*8);
+    if(value-value!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  let ux=ux_f64(up);
+  let uy=ux_f64(up+8);
+  let uz=ux_f64(up+16);
+  if(ux-ux!=0.0 || uy-uy!=0.0 || uz-uz!=0.0) { return 0-2; }
+  let ready=Matrix4_decompose(matrix,work,work+24,work+56);
+  let qx=ux_f64(work+24);
+  let qy=ux_f64(work+32);
+  let qz=ux_f64(work+40);
+  let qw=ux_f64(work+48);
+  let fx=(0.0-2.0)*(qx*qz+qy*qw);
+  let fy=(0.0-2.0)*(qy*qz-qx*qw);
+  let fz=2.0*(qx*qx+qy*qy)-1.0;
+  if(fx-fx!=0.0 || fy-fy!=0.0 || fz-fz!=0.0) { return 0-2; }
+  let x=ux_f64_put(out+AudioListenerPose.x,ux_f64(work));
+  let y=ux_f64_put(out+AudioListenerPose.y,ux_f64(work+8));
+  let z=ux_f64_put(out+AudioListenerPose.z,ux_f64(work+16));
+  let a=ux_f64_put(out+AudioListenerPose.forwardX,fx);
+  let b=ux_f64_put(out+AudioListenerPose.forwardY,fy);
+  let c=ux_f64_put(out+AudioListenerPose.forwardZ,fz);
+  let d=ux_f64_put(out+AudioListenerPose.upX,ux);
+  let e=ux_f64_put(out+AudioListenerPose.upY,uy);
+  let f=ux_f64_put(out+AudioListenerPose.upZ,uz);
+  return out;
+}
