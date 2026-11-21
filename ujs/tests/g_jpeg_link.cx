@@ -20,7 +20,7 @@ static int jpeg_link_compile(char **args,const char *phase,int seconds) {
     return rc;
 }
 
-static int jpeg_link_base(const char *const *modules,const char *wasm,int check) {
+static int jpeg_link_base(const char *const *modules,const char *wasm,int prepare,int check) {
     static const char prelude[]="ujs/practice/uxe/test/jpeg-linked-base-layout.ujs";
     static const char entry[]="ujs/practice/uxe/test/jpeg-linked-base.ujs";
     const char *sources[20]={prelude};
@@ -42,25 +42,43 @@ static int jpeg_link_base(const char *const *modules,const char *wasm,int check)
 
     const char *cache=sy_env("UXE_JPEG_WASM_CACHE");
     char record[640],key[65],sha[65];
-    const int cached=cache && cache[0];
-    if(check && !cached) return 2;
-    if(cached) {
-        if(wasm_test_cache_key(sources,key)) return 1;
-        int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
-        if(len<0 || len>=(int)sizeof record) return 2;
-        int rc=wasm_test_cache_read(record,key,check?0:wasm,sha);
-        if(!rc && !check) {
-            printf("JPEG_LINK cache=hit key=%s sha=%s\n",key,sha);
-            return 0;
-        }
-        if(rc && (rc!=-ENOENT || check)) {
-            printf("JPEG_LINK cache=refused rc=%d key=%s\n",rc,key);
-            return 1;
-        }
+    if(!cache || !cache[0]) {
+        printf("JPEG_LINK 基座缓存缺失：先运行准备步骤并设置 UXE_JPEG_WASM_CACHE\n");
+        return 1;
     }
-    if(jpeg_link_compile(args,"base_prepare",20)) return 1;
-    if(check) return wasm_test_cache_verify(wasm,sha);
-    return cached?wasm_test_cache_write(cache,record,key,wasm):0;
+    if(wasm_test_cache_key(sources,key)) return 1;
+    int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(len<0 || len>=(int)sizeof record) return 2;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("JPEG_LINK cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("JPEG_LINK 基座缓存缺失：先运行准备步骤 key=%s\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("JPEG_LINK cache=refused rc=%d key=%s\n",rc,key);
+        return 1;
+    }
+    if(jpeg_link_compile(args,"base_prepare",50)) return 1;
+    if(check) {
+        int failed=wasm_test_cache_verify(wasm,sha);
+        printf("JPEG_LINK cache=rebuilt sha=%s failed=%d\n",sha,failed!=0);
+        return failed;
+    }
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+int g_jpeg_prepare(const char *const *modules,int check) {
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-jpeg-prepare-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    int rc=jpeg_link_base(modules,wasm,1,check);
+    printf("JPEG_LINK prepare check=%d failed=%d\n",check,rc!=0);
+    if(sy_remove_all(dir)) return 1;
+    return rc;
 }
 
 static void jpeg_link_put(unsigned char *dest,unsigned value) {
@@ -68,7 +86,7 @@ static void jpeg_link_put(unsigned char *dest,unsigned value) {
 }
 
 int g_jpeg_link(const char *const *modules,const unsigned char input[512],int rgb,int grid,int restart,
-        const double *gold,int count,int mode,int check) {
+        const double *gold,int count,int mode) {
     if(count!=14) {
         printf("JPEG_LINK coverage actual=%d expected=14 failed=1\n",count);
         return 1;
@@ -88,7 +106,7 @@ int g_jpeg_link(const char *const *modules,const unsigned char input[512],int rg
     jpeg_link_put(header+8,mode);
     char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/jpeg-linked-probe.ujs","-o",probe,0};
     double reference[14],actual[14];
-    int failed=jpeg_link_base(modules,base,check) || jpeg_link_compile(args,"probe",6) ||
+    int failed=jpeg_link_base(modules,base,0,0) || jpeg_link_compile(args,"probe",6) ||
         sy_write_file(blob,input,512,0600) || sy_write_file(layout,header,sizeof header,0600) ||
         sy_copy("ujs/practice/uxe/test/jpeg-linked-wasm.html",page,0600) ||
         r160_wait_ref("jpeg-progressive-color",reference,count,dir) ||
