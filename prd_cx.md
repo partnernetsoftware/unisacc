@@ -274,6 +274,9 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - cx 是参照 Rust 设计的模块化 C 方言：`#pragma unisa module / use`，新 `.cx` 不手写 `#include`，上层只用 cx-L0 的 `sy_*`、`mm_*`、`tx_*`。
 - 所有权与边界检查是**运行期**的（句柄、容量、`mm_copy` 类带界接口）。**没有**编译期借用检查，不声称 Rust 式静态内存安全。
 - 源码级所有权扫描 `tools/cx-own.cx` 只看函数内局部 owner（DOUBLE-FREE / USE-AFTER-FREE / LEAK，保守）；产品的所有权多在结构体字段与包装分配器里，文本分析覆盖不到。
+- 规划期所有权检查已在产品里(0.0.77、0.0.78 起):`#pragma unisa safe` 单元内拒绝释放后使用(E2)、重复释放(E2b)、公开函数转出未声明(E1,配 `#pragma unisa owns`),`#pragma unisa unsafe NAME` 为逃生口;三源规划器同实现。2026-11-21 已装 0.0.87 实测:`check-own-flow-product` 75/75(known_limit=10),`check-own-escape --product` 6/7 加 pending 1。**仓内采用为零**:src、cx、ext、tools 没有任何单元写 `safe`,没有任何 `owns` 声明,所以这项能力目前不约束任何产品源;E3(返回前未释放)与 `moves` 未实现。上一条"文本分析覆盖不到"仍成立。
+- 2026-11-21 基线(main 9f0c1d9a26):`cx-own` 对产品五目录(src、cx/core、cx/runtime、cx/compiler、cx/driver)1676 函数、局部 owner 60、跳过 12,报告为 LEAK 3(`src/drivestream.cx` ds_attr_in,真漏放,未修)、其余两类 0;cx/ 全树 2155 函数三类全 0;ext/ LEAK 1(`ext/textx/json.cx:164`,误报);公开函数经 return 转出 3 条与 `build/own-escapes.tsv` 一致;假设全树强制 safe 的被拒函数 0。11.7 第 (1) 段 2026-11-14 的数字(src DOUBLE-FREE 1 等)以本条为准更新,原表保留作历史。
+- 路线、采用门定义、分期与版本落点见 [plans/memory-safety.md](plans/memory-safety.md)(2026-11-21 编排;甲期与乙期为不占版本槽的工具期,丙期起才触产品输入)。借用检查(CX-W-4)仍未开工,在该路线的丁期。
 - CX0 只面向单线程 POSIX 调用者；Windows、任意线程并发未获资格。
 - 模块循环硬拒绝；跨模块错误只走返回值 `-errno`（CX-Y-4）。
 - 包里的 contract（模型 38）、ownership（模型 39）、symbols（模型 37）是库 / 宿主合同的协议模型，不是 cx 语言的所有权检查器。

@@ -1,0 +1,103 @@
+/* 简报乙参考展开式与对照检查: sh ./unisacc.com plans/prep/a1a-rows/ref-check.cx
+   只用 and or xor shl shr mul sub add 与比较;不含任何位扫描运算。对 b01 到 b10 样例复算输出,
+   取 sha256 与 tests/a1a/expect.tsv 的 gcc_out_sha256 列比对,并核返回码(note 列 gcc_run_rc)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use crypto.sha256
+#pragma unisa use text.text
+
+#pragma unisa use text.fmt
+#define sy_snprintf tx_snprintf
+#define xlen(s) tx_len((s), 4096)
+static int pre(const unsigned char *b, const char *p) { long k; for (k = 0; p[k]; k++) if (b[k] != (unsigned char)p[k]) return 0; return b[k] == '_'; }
+
+typedef unsigned int u32;
+typedef unsigned long long u64;
+
+static u32 pc32(u32 x) {
+    x = x - ((x >> 1) & 0x55555555u);
+    x = (x & 0x33333333u) + ((x >> 2) & 0x33333333u);
+    x = (x + (x >> 4)) & 0x0f0f0f0fu;
+    return (x * 0x01010101u) >> 24;
+}
+static u32 pc64(u64 x) {
+    x = x - ((x >> 1) & 0x5555555555555555ull);
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full;
+    return (u32)((x * 0x0101010101010101ull) >> 56);
+}
+static u32 smear32(u32 x) { x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; return x; }
+static u64 smear64(u64 x) { x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16; x |= x >> 32; return x; }
+static int clz32(u32 x) { return (int)(32u - pc32(smear32(x))); }       /* x==0 -> 32 */
+static int clz64(u64 x) { return (int)(64u - pc64(smear64(x))); }
+static int ctz32(u32 x) { return (int)pc32(((x & (0u - x)) - 1u)); }   /* x==0 -> 32 */
+static int ctz64(u64 x) { return (int)pc64(((x & (0ull - x)) - 1ull)); }
+static int ffs32(u32 x) { return x ? ctz32(x) + 1 : 0; }
+static int ffs64(u64 x) { return x ? ctz64(x) + 1 : 0; }
+static int par32(u32 x) { x ^= x >> 16; x ^= x >> 8; x ^= x >> 4; x ^= x >> 2; x ^= x >> 1; return (int)(x & 1u); }
+static int par64(u64 x) { x ^= x >> 32; return par32((u32)x); }
+static u32 bs16(u32 x) { return ((x & 0xffu) << 8) | ((x >> 8) & 0xffu); }
+static u32 bs32(u32 x) { return (x << 24) | ((x & 0xff00u) << 8) | ((x >> 8) & 0xff00u) | (x >> 24); }
+static u64 bs64(u64 x) { return ((u64)bs32((u32)x) << 32) | (u64)bs32((u32)(x >> 32)); }
+
+static int bad, npass, nfail;
+static char out[512];
+static char want[65], note[32];
+
+static int lookup(const char *name) {
+    unsigned char *buf = 0; long n = 0, i, ls; int found = 0;
+    if (sy_read_file("tests/a1a/expect.tsv", &buf, &n, 1 << 20) < 0) return 0;
+    for (ls = 0; ls < n; ls = i + 1) {
+        long c = 0, j; int col = 0;
+        for (i = ls; i < n && buf[i] != '\n'; i++) ;
+        if (pre(buf + ls, name)) {
+            for (j = ls; j < i; j++) {
+                if (buf[j] == '\t') { col++; c = 0; continue; }
+                if (col == 2 && c < 64) want[c++] = buf[j], want[c] = 0;
+                if (col == 5 && c < 31) note[c++] = buf[j], note[c] = 0;
+                if (col == 5 && c == 0) note[0] = 0;
+            }
+            found = 1; break;
+        }
+    }
+    return found;
+}
+
+static void judge(const char *name, int rc) {
+    char hex[65]; char exprc[16]; int ok;
+    want[0] = 0; note[0] = 0;
+    if (!lookup(name)) { sy_printf("FAIL\t%s\tno expect row\n", name); nfail++; return; }
+    cs_sha256_hex(out, (long)xlen(out), hex);
+    sy_snprintf(exprc, sizeof exprc, "gcc_run_rc=%d", rc);
+    ok = tx_eqz(hex, want) && tx_eqz(note, exprc);
+    sy_printf("%s\t%s\trc=%d\n", ok ? "PASS" : "FAIL", name, rc);
+    if (ok) npass++; else nfail++;
+}
+
+int main(void) {
+    u32 i; u64 s;
+    sy_snprintf(out, sizeof out, "%d %d %d\n%d %d\n", clz32(1u), clz64(1ul), clz64(1ull), clz32(0x80000000u), clz64(0x00F0000000000000ull));
+    judge("b01", clz32(255u));
+    sy_snprintf(out, sizeof out, "%d %d %d\n", ctz32(8u), ctz64(1ul << 40), ctz64(1ull << 63));
+    judge("b02", ctz32(0x100u));
+    sy_snprintf(out, sizeof out, "%d %d %d %d\n", (int)pc32(0xFFu), (int)pc64(~0ul), (int)pc64(0x5555555555555555ull), (int)pc32(0u));
+    judge("b03", (int)pc32(7u));
+    sy_snprintf(out, sizeof out, "%d %d %d\n", par32(7u), par64(3ul), par64(1ull << 50));
+    judge("b04", par32(1u));
+    sy_snprintf(out, sizeof out, "%04x %08x %016llx\n", bs16(0x1234u), bs32(0x11223344u), bs64(0x0102030405060708ull));
+    judge("b05", (int)bs32(0x01000000u));
+    sy_snprintf(out, sizeof out, "%d %d %d %d\n", ffs32(0), ffs32(8), ffs64(1l << 40), ffs64((u64)-1ll));
+    judge("b06", ffs32(0x10u));
+    sy_snprintf(out, sizeof out, "%u %u %u\n%d\n", 4u, 8u, 2u, (int)pc32((u32)-1));
+    judge("b07", 0);
+    sy_snprintf(out, sizeof out, "%u %d\n", pc32(0xF0u), ctz32(16u));
+    judge("b08", 0);
+    for (s = 0, i = 1; i < 2000; i++) s += (u64)(clz32(i) * 3 + ctz32(i) + (int)pc32(i) + (int)(bs32(i) >> 24));
+    sy_snprintf(out, sizeof out, "%llu\n", s);
+    judge("b09", (int)(s & 0x7f));
+    sy_snprintf(out, sizeof out, "%d %d\n", clz32(0u), clz32(1u));   /* b10 的 lz(0) 走守卫返回 32 */
+    sy_snprintf(out, sizeof out, "%d %d\n", 32, clz32(1u));
+    judge("b10", 0);
+    sy_printf("REF_BITS pass=%d fail=%d\n", npass, nfail);
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,67 @@
+/* tests/check-a1a-u0.cx -- A1a U0 pre-red contract check: unimplemented __builtin_* must be refused by name.
+ *
+ *   sh ./unisacc.com tests/check-a1a-u0.cx
+ *
+ * 0.0.87 baseline fact (tests/a1a/baseline-current.tsv): D2 implicit-function refusal already prevents silent
+ * UND __builtin_* objects (u_obj_und_builtin=0 across all 56 cases), but emits generic
+ * "call to undeclared function ... [-Wc99-implicit-function]" rather than a named unsupported-builtin refusal.
+ * U0 checks 6 non-A1a __builtin_* cases (c01..c06) plus 1 synthetic unknown __builtin_unisa_unknown_0() case:
+ * each must exit non-zero at -c, emit no UND __builtin_* object, and diagnose "not covered" or "builtin"
+ * (not generic "call to undeclared function").  Zero gcc invocations at runtime.
+ * Ends with A1A_U0<TAB>pass=P<TAB>fail=F; exits 0 iff fail == 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int passed, failed;
+
+static void ck(int ok, const char *name, const char *why) {
+    if (ok) passed++; else failed++;
+    sy_printf("%s\ta1a.u0.%s\t%s\n", ok ? "PASS" : "FAIL", name, why);
+}
+
+static void check_case(const char *dir, const char *name, const char *src) {
+    char obj[4200], why[256];
+    cx_fmt(obj, sizeof obj, "%s/%s.o", dir, name);
+    char *av[] = {"sh", "./unisacc.com", "-c", (char *)src, "-o", obj, 0}; /* lint:allow R1 runs installed product */
+    np_result r;
+    int sp = np_run(av, ".", 0, 15, &r, why, sizeof why);
+    int ok = 0;
+    const char *reason = "unimplemented-named-builtin-refusal";
+    if (sp != 0) {
+        reason = "runner-error";
+    } else if (r.rc == 0) {
+        reason = "accepted-unimplemented-builtin";
+    } else {
+        const char *msg = (r.err && r.errn > 0) ? r.err : (r.out ? r.out : "");
+        long ml = (long)(r.err && r.errn > 0 ? r.errn : (r.out ? r.outn : 0));
+        int has_named = (tx_find(msg, ml, "not covered", 11) >= 0 || tx_find(msg, ml, "unsupported builtin", 19) >= 0 || tx_find(msg, ml, "unimplemented builtin", 21) >= 0);
+        int is_generic = (tx_find(msg, ml, "call to undeclared function", 27) >= 0);
+        if (has_named && !is_generic) { ok = 1; reason = "named-builtin-refusal"; }
+        else if (is_generic) reason = "generic-undeclared-not-named-builtin";
+        else reason = "other-parse-error-not-named-builtin";
+    }
+    np_free(&r);
+    ck(ok, name, reason);
+}
+
+int main(void) {
+    char dir[4096], syn[4200];
+    if (cx_fmt(dir, sizeof dir, "%s/a1a-u0-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(dir)) return 2;
+    cx_fmt(syn, sizeof syn, "%s/u0_unknown_builtin.c", dir);
+    cx_write(syn, "int main(void){return __builtin_unisa_unknown_0(1);}\n", 53);
+
+    check_case(dir, "c01_constant_p_pos", "tests/a1a/cases/c01_constant_p_pos.c");
+    check_case(dir, "c02_constant_p_init", "tests/a1a/cases/c02_constant_p_init.c");
+    check_case(dir, "c03_choose_expr_pos", "tests/a1a/cases/c03_choose_expr_pos.c");
+    check_case(dir, "c04_choose_expr_nonconst_rej", "tests/a1a/cases/c04_choose_expr_nonconst_rej.c");
+    check_case(dir, "c05_types_compat_pos", "tests/a1a/cases/c05_types_compat_pos.c");
+    check_case(dir, "c06_types_compat_expr_rej", "tests/a1a/cases/c06_types_compat_expr_rej.c");
+    check_case(dir, "u0_unknown_builtin", syn);
+
+    cx_rmtree(dir);
+    sy_printf("A1A_U0\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

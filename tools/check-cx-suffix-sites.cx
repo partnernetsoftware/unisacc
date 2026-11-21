@@ -1,0 +1,51 @@
+/* tools/check-cx-suffix-sites.cx -- inventory of every code point that decides "is a cx unit" by the .cx path suffix
+   (consumer list for the planned cxm_iscxpath relaxation: suffix .cx, or no .c .h .s .S .o .a suffix plus a -run shebang).
+   Rule: git grep finds the suffix tests in cx/ and src/; the set must equal the 12 expected sites (11 suffix tests,
+   plus the cxm_iscxpath call at src/driveplan.cx that opens module scanning).  Any added or removed site is red,
+   so a relaxation that touches only the three module sources cannot pass.  Self-test: dropping one site from an
+   in-memory copy of the scan turns the check red.  Also guards tests/cxpath/ fixtures (4 classes, expectations only).
+   Last line: CX_SUFFIX_SITES=N PASS|FAIL. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+static int failed;
+static const char *fnd(const char *h, const char *n) { size_t k = strlen(n); for (; *h; h++) if (!strncmp(h, n, k)) return h; return 0; }
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\tcxsuffix.%s\n", ok ? "PASS" : "FAIL", n); }
+static const char *want[] = {
+    "cx/compiler/cxmod.cx:187:", "cx/compiler/cxmod.cx:191:", "cx/cx0/plan.cx:216:", "cx/cx0/plan.cx:220:",
+    "src/cxmod.c:161:", "src/cxmod.c:165:", "src/driveplan.cx:73:", "src/entrybind.cx:112:", "src/driveutil.cx:10:",
+    "cx/driver/args.cx:270:", "cx/driver/runsplit.cx:111:", "cx/cx0/bundle.cx:90:", 0 };
+static char *run(char **v) { char why[256]; np_result r = { 0 }; if (np_run(v, 0, 0, 20, &r, why, sizeof why) || r.rc > 1) return 0; return r.out ? r.out : ""; }
+/* number of wanted sites missing from scan plus number of scan lines not wanted; 0 means equal */
+static int diffsites(const char *scan) {
+    int bad = 0, n = 0;
+    for (int i = 0; want[i]; i++) if (!fnd(scan, want[i])) { bad++; printf("MISSING\t%s\n", want[i]); }
+    const char *p = scan;
+    while (*p) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        if (e > p) { n++; int hit = 0; for (int i = 0; want[i]; i++) if (!strncmp(p, want[i], strlen(want[i]))) hit = 1; if (!hit) { bad++; printf("EXTRA\t%.*s\n", (int)(e - p) > 90 ? 90 : (int)(e - p), p); } }
+        p = *e ? e + 1 : e;
+    }
+    return bad;
+}
+int main(void) {
+    char *g1[] = { "git", "grep", "-n", "-E", "'\\.' && .*== 'c' && .*== 'x'|\"\\.cx\"\\)", "--", "cx", "src", 0 };
+    char *g2[] = { "git", "grep", "-n", "cxm_iscxpath((char", "--", "src/driveplan.cx", 0 };
+    char *a = run(g1), *b = run(g2);
+    if (!a || !b) { printf("FAIL\tcxsuffix.scan\nCX_SUFFIX_SITES=0 FAIL\n"); return 1; }
+    size_t la = strlen(a), lb = strlen(b); char *all = malloc(la + lb + 2); mm_copy(all, la + lb + 2, a, la); mm_copy(all + la, lb + 2, b, lb); all[la + lb] = 0;
+    int sites = 0; for (const char *p = all; *p; p++) if (*p == '\n') sites++;
+    ck(diffsites(all) == 0, "sites-equal-table");
+    /* mutation: drop the runsplit line from the in-memory scan, must be red */
+    char *mut = malloc(la + lb + 2); size_t m = 0; const char *p = all;
+    while (*p) { const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p); if (!(e > p && !strncmp(p, "cx/driver/runsplit.cx:", 22))) { mm_copy(mut + m, la + lb + 2 - m, p, (size_t)(e - p) + (*e ? 1 : 0)); m += (size_t)(e - p) + (*e ? 1 : 0); } p = *e ? e + 1 : e; }
+    mut[m] = 0;
+    printf("MUTATION\tdropped line: cx/driver/runsplit.cx:111 from in-memory scan\n");
+    ck(diffsites(mut) != 0, "mutation-detected");
+    const char *fx[] = { "tests/cxpath/a_cx.cx", "tests/cxpath/b_noext_run", "tests/cxpath/c_shebang.c", "tests/cxpath/d_plain", "tests/cxpath/expect.tsv", 0 };
+    for (int i = 0; fx[i]; i++) { unsigned char *bb = 0; int64_t n = 0; ck(!sy_read_file(fx[i], &bb, &n, 4096) && n > 0, fx[i]); }
+    printf("CHECK_CX_SUFFIX_SITES\tsites=%d failed=%d\n", sites, failed);
+    printf("CX_SUFFIX_SITES=%d %s\n", sites, failed || sites != 12 ? "FAIL" : "PASS");
+    return failed || sites != 12;
+}

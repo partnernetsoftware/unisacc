@@ -1,0 +1,125 @@
+/* tests/check-a1a-u1.cx -- A1a U1 pre-red contract check: clz/ctz/popcount/parity/ffs (12 cases).
+ *
+ *   sh ./unisacc.com tests/check-a1a-u1.cx
+ *
+ * Positive cases (9): b01 b02 b03 b04 b06 b07 b08 b09 b10 -- compiled with installed product (-o), executed,
+ * stdout sha256 and exit code compared against frozen tests/a1a/expect.tsv (zero gcc calls at runtime).
+ * Negative cases (3): b11 b14 b15 -- must be refused at -c with a named diagnostic (not generic undeclared).
+ * Ends with A1A_U1<TAB>pass=P<TAB>fail=F; exits 0 iff fail == 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int passed, failed;
+static char *exp_buf;
+static long exp_n;
+
+static void ck(int ok, const char *name, const char *why) {
+    if (ok) passed++; else failed++;
+    sy_printf("%s\ta1a.u1.%s\t%s\n", ok ? "PASS" : "FAIL", name, why);
+}
+
+static int find_expect(const char *sample, char *sha_out, size_t scap, int *rc_out) {
+    long i = 0, sl = (long)tx_len(sample, 128);
+    while (i < exp_n) {
+        long a = i, b;
+        while (i < exp_n && exp_buf[i] != '\n') i++;
+        b = i; if (i < exp_n) i++;
+        long t1 = a; while (t1 < b && exp_buf[t1] != '\t') t1++;
+        if (t1 - a != sl || !tx_prefix(exp_buf + a, sl, sample, sl)) continue;
+        long t2 = t1 + 1; while (t2 < b && exp_buf[t2] != '\t') t2++;
+        long t3 = t2 + 1; while (t3 < b && exp_buf[t3] != '\t') t3++;
+        long t4 = t3 + 1; while (t4 < b && exp_buf[t4] != '\t') t4++;
+        long t5 = t4 + 1; while (t5 < b && exp_buf[t5] != '\t') t5++;
+        if (t3 <= t2 + 1 || t5 >= b) return 0;
+        cx_fmt(sha_out, scap, "%.*s", (int)(t3 - (t2 + 1)), exp_buf + t2 + 1);
+        long p = tx_find(exp_buf + t5 + 1, b - (t5 + 1), "gcc_run_rc=", 11);
+        if (p < 0) return 0;
+        long q = t5 + 1 + p + 11;
+        int neg = 0, val = 0;
+        if (q < b && exp_buf[q] == '-') { neg = 1; q++; }
+        while (q < b && exp_buf[q] >= '0' && exp_buf[q] <= '9') { val = val * 10 + (exp_buf[q] - '0'); q++; }
+        *rc_out = neg ? -val : val;
+        return 1;
+    }
+    return 0;
+}
+
+static void check_pos(const char *dir, const char *sample) {
+    char src[256], bin[4200], want_sha[80], got_sha[80], why[256];
+    int want_rc = -1;
+    if (!find_expect(sample, want_sha, sizeof want_sha, &want_rc)) { ck(0, sample, "expect-missing"); return; }
+    cx_fmt(src, sizeof src, "tests/a1a/cases/%s", sample);
+    cx_fmt(bin, sizeof bin, "%s/%s.bin", dir, sample);
+    char *cav[] = {"sh", "./unisacc.com", src, "-o", bin, 0}; /* lint:allow R1 compiles case with product */
+    np_result cr;
+    if (np_run(cav, ".", 0, 15, &cr, why, sizeof why) != 0 || cr.rc != 0) {
+        np_free(&cr);
+        ck(0, sample, "unimplemented-compile-fail");
+        return;
+    }
+    np_free(&cr);
+    char *rav[] = {bin, 0};
+    np_result rr;
+    if (np_run(rav, ".", 0, 10, &rr, why, sizeof why) != 0) {
+        np_free(&rr);
+        ck(0, sample, "run-error");
+        return;
+    }
+    cx_sha256_hex(rr.out ? rr.out : "", rr.outn, got_sha);
+    int ok = (rr.rc == want_rc && tx_eqz(got_sha, want_sha));
+    np_free(&rr);
+    ck(ok, sample, ok ? "match-expect" : "output-or-rc-mismatch");
+}
+
+static void check_rej(const char *dir, const char *sample) {
+    char src[256], obj[4200], why[256];
+    cx_fmt(src, sizeof src, "tests/a1a/cases/%s", sample);
+    cx_fmt(obj, sizeof obj, "%s/%s.o", dir, sample);
+    char *cav[] = {"sh", "./unisacc.com", "-c", src, "-o", obj, 0}; /* lint:allow R1 compiles case with product */
+    np_result cr;
+    int ok = 0;
+    const char *reason = "unimplemented-builtin-arg-check";
+    if (np_run(cav, ".", 0, 15, &cr, why, sizeof why) == 0 && cr.rc != 0) {
+        const char *msg = (cr.err && cr.errn > 0) ? cr.err : (cr.out ? cr.out : "");
+        long ml = (long)(cr.err && cr.errn > 0 ? cr.errn : (cr.out ? cr.outn : 0));
+        if (tx_find(msg, ml, "call to undeclared function", 27) < 0 &&
+            tx_find(msg, ml, "unknown identifier", 18) < 0) {
+            ok = 1;
+            reason = "named-reject";
+        }
+    }
+    np_free(&cr);
+    ck(ok, sample, reason);
+}
+
+int main(void) {
+    size_t en = 0;
+    exp_buf = cx_read("tests/a1a/expect.tsv", &en);
+    if (!exp_buf) return 2;
+    exp_n = (long)en;
+
+    char dir[4096];
+    if (cx_fmt(dir, sizeof dir, "%s/a1a-u1-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(dir)) { free(exp_buf); return 2; }
+
+    check_pos(dir, "b01_clz_pos.c");
+    check_pos(dir, "b02_ctz_pos.c");
+    check_pos(dir, "b03_popcount_pos.c");
+    check_pos(dir, "b04_parity_pos.c");
+    check_pos(dir, "b06_ffs_pos.c");
+    check_pos(dir, "b07_bits_types.c");
+    check_pos(dir, "b08_bits_const.c");
+    check_pos(dir, "b09_bits_loop.c");
+    check_pos(dir, "b10_clz_zero_edge.c");
+    check_rej(dir, "b11_bits_noarg_rej.c");
+    check_rej(dir, "b14_bits_struct_rej.c");
+    check_rej(dir, "b15_bits_addr_rej.c");
+
+    cx_rmtree(dir);
+    free(exp_buf);
+    sy_printf("A1A_U1\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

@@ -8,7 +8,7 @@
 
 | 类别 | 文件 |
 | --- | --- |
-| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md |
+| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md、memory-safety.md(2026-11-21,向 Rust 学习内存安全的分期路线与采用门) |
 | 现行版本计划 | v0.0.89.md(2026-11-20 顺延:核心层库面小件包与模块解析登记,原 0.0.88)、v0.0.88.md(2026-11-20 顺延:A1a 内建与符号,原 0.0.87)、v0.0.87.md(2026-11-20 重写:迭代速度专版,整版不排产品特性,证据 reviews/2026-11-20-fast-iteration.md)、v0.0.86.md(2026-11-20 骨架:改一行再跑,路线 A,见 roadmap-0.0.83-0.0.99.md 末节修订注 2026-11-20)、v0.0.85.md(2026-11-20 修订:前端诊断三期,P0 NO-GO)、v0.0.84.md(2026-11-20 已公开)、v0.0.83.md、v0.0.82.md(前几版保留) |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |

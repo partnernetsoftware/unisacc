@@ -538,6 +538,104 @@ static void merge_receipts(const char *svc) {
         np_free(&r);
     }
 }
+static void ff_range_push(const char *svc) {
+    char base[41], tip176[41], received[41], fi_path[4400], range_arg[120];
+    static char fi_buf[180 * 240], shas[176][41];
+    char *seed[] = {"git", "push", "-q", "origin", "HEAD:main", 0};
+    check_setup(repo, seed);
+    git_oid(repo, "HEAD", base);
+    size_t used = 0;
+    for (int i = 1; i <= 176; i++) {
+        char payload[64];
+        if (cx_fmt(payload, sizeof payload, "step-%d\n", i)) setup_error("fi payload");
+        size_t plen = strlen(payload);
+        if (i == 1) {
+            if (cx_fmt(fi_buf + used, sizeof fi_buf - used,
+                       "commit refs/heads/ff-side-176\ncommitter Push replay fixture <replay@example.invalid> %d +0000\ndata 8\nff-%03d\n\nfrom %s\nM 100644 inline ff-176.txt\ndata %zu\n%s\n",
+                       1700000000 + i, i, base, plen, payload)) setup_error("fi first");
+        } else {
+            if (cx_fmt(fi_buf + used, sizeof fi_buf - used,
+                       "commit refs/heads/ff-side-176\ncommitter Push replay fixture <replay@example.invalid> %d +0000\ndata 8\nff-%03d\n\nM 100644 inline ff-176.txt\ndata %zu\n%s\n",
+                       1700000000 + i, i, plen, payload)) setup_error("fi next");
+        }
+        used += strlen(fi_buf + used);
+    }
+    if (cx_fmt(fi_path, sizeof fi_path, "%s/fi-176.in", parent) ||
+        sy_write_atomic(fi_path, fi_buf, used, 0600)) setup_error("fi write");
+    char *fi_cmd[] = {"sh", "-c", "git fast-import --quiet < \"$1\"", "sh", fi_path, 0};
+    check_setup(repo, fi_cmd);
+    git_oid(repo, "refs/heads/ff-side-176", tip176);
+
+    /* (1) Unowned commit on HEAD is refused by no-arg devsvc git push */
+    file("unowned-ff-probe.txt", "raw\n", 0644);
+    commit("unowned raw");
+    char *noarg_push[] = {(char *)svc, "git", "push", 0};
+    np_result r = {0};
+    int rc = run(repo, noarg_push, &r);
+    expect(rc != 0 && has(&r, "reason=unowned-pending"), "noarg-push-refuses-unowned-head");
+    np_free(&r);
+    char *back_base[] = {"git", "reset", "-q", "--hard", base, 0};
+    check_setup(repo, back_base);
+
+    /* (2) Passing 176 individual FULL_SHAs gives named refusal without usage dump */
+    if (cx_fmt(range_arg, sizeof range_arg, "%s..%s", base, tip176)) setup_error("rev-list range");
+    char *revlist[] = {"git", "rev-list", "--reverse", "--first-parent", range_arg, 0};
+    if (run(repo, revlist, &r) || r.outn != 176 * 41) setup_error("rev-list 176");
+    char *many_argv[182];
+    many_argv[0] = (char *)svc;
+    many_argv[1] = "git";
+    many_argv[2] = "push";
+    for (int i = 0; i < 176; i++) {
+        mm_copy(shas[i], 41, r.out + i * 41, 40);
+        shas[i][40] = 0;
+        many_argv[3 + i] = shas[i];
+    }
+    many_argv[179] = 0;
+    np_free(&r);
+    rc = run(repo, many_argv, &r);
+    expect(rc == 2 && has(&r, "GIT_PUSH_REFUSE\treason=too-many-commits") && !has(&r, "usage: devsvc"),
+           "too-many-commits-named-refusal-no-usage");
+    np_free(&r);
+
+    /* (3) devsvc git merge fast-forward (176 commits) writes receipt; no-arg devsvc git push publishes all 176 */
+    char *ff_merge[] = {(char *)svc, "git", "merge", "ff-side-176", 0};
+    rc = run(repo, ff_merge, &r);
+    expect(rc == 0 && has(&r, "GIT_MERGE\trc=0\t") && has(&r, "\tff=1\t"), "ff-merge-176-commits-rc0");
+    np_free(&r);
+    rc = run(repo, noarg_push, &r);
+    git_oid(origin, "refs/heads/main", received);
+    expect(rc == 0 && has(&r, "GIT_PUSH\trc=0\t") && tx_eqz(tip176, received),
+           "noarg-push-after-ff-merge-publishes-176");
+    np_free(&r);
+
+    /* (4) Without merge receipt, --range A..B (with branch ref) publishes all 176 commits */
+    char *rewind_origin[] = {"git", "update-ref", "refs/heads/main", base, 0};
+    check_setup(origin, rewind_origin);
+    char *clear_ff_refs[] = {"sh", "-c", "for r in $(git for-each-ref --format='%(refname)' refs/devsvc/merge-ff/); do git update-ref -d \"$r\"; done", 0};
+    check_setup(repo, clear_ff_refs);
+    rc = run(repo, noarg_push, &r);
+    expect(rc != 0 && has(&r, "reason=unowned-pending"), "without-ff-receipt-noarg-push-refused");
+    np_free(&r);
+    if (cx_fmt(range_arg, sizeof range_arg, "%s..ff-side-176", base)) setup_error("range arg");
+    char *range_push[] = {(char *)svc, "git", "push", "--range", range_arg, 0};
+    rc = run(repo, range_push, &r);
+    git_oid(origin, "refs/heads/main", received);
+    expect(rc == 0 && has(&r, "GIT_PUSH\trc=0\t") && tx_eqz(tip176, received),
+           "range-push-with-branch-ref-publishes-176");
+    np_free(&r);
+
+    /* (5) Branch reference positional argument (devsvc git push main) publishes single owned commit */
+    file("branch-ref-single.txt", "ok\n", 0644);
+    commit("branch ref single");
+    char tip177[41];
+    git_oid(repo, "HEAD", tip177);
+    char *bref_push[] = {(char *)svc, "git", "push", "main", 0};
+    rc = run(repo, bref_push, &r);
+    git_oid(origin, "refs/heads/main", received);
+    expect(rc == 0 && has(&r, "GIT_PUSH\trc=0\t") && tx_eqz(tip177, received),
+           "branch-ref-arg-pushes-resolved-tip");
+    np_free(&r);
+}
 static void merge_push(const char *svc) {
     char *seed[]={"git","push","-q","origin","HEAD:main",0};
     check_setup(repo,seed);
@@ -821,6 +919,7 @@ int main(int argc,char **argv) {
     int paired=receipt_only||(which&&tx_eqz(which,"--commit-push"));
     int merge_receipt=which&&tx_eqz(which,"--merge-receipt");
     int legacy_receipt=which&&tx_eqz(which,"--legacy-merge-receipt");
+    int ff_range=which&&tx_eqz(which,"--ff-range");
     int output_guard=which&&tx_eqz(which,"--output-guard");
     int merged=which&&tx_eqz(which,"--merge");
     int tail=which&&tx_eqz(which,"--tail-race");
@@ -830,12 +929,12 @@ int main(int argc,char **argv) {
     int interrupted=which&&tx_eqz(which,"--recover-published");
     int empty=which&&tx_eqz(which,"--empty");
     int gc=which&&tx_eqz(which,"--gc");
-    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!merge_receipt&&!legacy_receipt&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
+    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!merge_receipt&&!legacy_receipt&&!ff_range&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
        ((orphan||deadline_case||interrupted)&&svc)||
        sy_realpath(root,source,sizeof source)<0)return 2;
     if(cx_fmt(product,sizeof product,"%s/unisacc.com",source))return 2;
     prepare();
-    if(paired||concurrent||merge_receipt||legacy_receipt) {
+    if(paired||concurrent||merge_receipt||legacy_receipt||ff_range) {
         isolate_cli();
         if(!svc)svc=native_cli();
         /* Background commit jobs must restart the same executable under test. */
@@ -844,6 +943,7 @@ int main(int argc,char **argv) {
     if(paired){commit_and_push(svc,receipt_only);return finish();}
     if(merge_receipt){merge_receipts(svc);return finish();}
     if(legacy_receipt){legacy_merge_hint(svc);return finish();}
+    if(ff_range){ff_range_push(svc);return finish();}
     if(!svc)native_images(cas||same||output_guard);
     if(!svc&&(!which||output_guard))reject_unplanned_output();
     if(output_guard)return finish();
