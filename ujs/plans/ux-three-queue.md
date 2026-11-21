@@ -220,7 +220,8 @@
 - ObjectLoader 两阶段整景 | G-io 读取内层资源定义、图像、纹理及多材质并统一发布 | 场景 UUID 链接、BufferGeometryLoader、MaterialLoader、图像加载。
 - ~~GLTFLoader 稀疏访问器 | G-io 零底阵列、交错底阵列、顺序、边界和失败保留 | GLB 密集访问器。~~ 14 项通过，补丁索引篡改转红，旧访问器和三角形各八项通过。现阶段对照本地 r160 Attribute。
 - ~~GLTFLoader 网格属性访问 | G-io 稀疏 UV、密集位置、归一化自定义属性及真实 r160 插件 | GLB 密集访问器、稀疏访问器。~~ 11 项和实际插件 18 项通过，替换 UV 分量反例转红。
-- GLTFLoader 图元整体装配 | G-io 图元模式、拓扑、全部属性数量、稀疏索引及发布 | 网格属性访问、GLB 图元。
+- ~~GLTFLoader 三角图元拓扑 | G-io 三角形列表、带和扇的绕序、隐式索引与原子失败 | GLB 图元。~~ 十项通过，奇数三角形首末下标交换反例转红。
+- GLTFLoader 图元整体装配 | G-io 拓扑消费、顶点属性数量、稀疏索引及发布 | 网格属性访问、三角图元拓扑。
 - ~~GLTFLoader 采样器及 r160 插件对照入口 | G-io 过滤、环绕、默认值及异常枚举 | 纹理资源与 GLB 容器。~~ 采样器十一项通过，错绑环绕反例转红。Chromium 真实 r160 插件采样器和稀疏访问器对照十二项通过。
 - ~~GLTFLoader 纹理 URI | G-io 相对路径、绝对路径、数据 URI、UTF-8 与资源 ABI | 图像加载与 LoaderUtils。~~ 11 项通过，错读 URL 字节 112 对 97 转红，LoaderUtils 五项与 UTF-8 九项通过。
 - GLTFLoader 材质与纹理 | G-io UV、颜色空间、内嵌与外部资源到 GPU 纹理 | GLTF 网格、图像加载、采样器、URI 与材质。

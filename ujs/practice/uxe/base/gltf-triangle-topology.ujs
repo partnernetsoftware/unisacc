@@ -1,0 +1,43 @@
+// Convert glTF triangle lists, strips, and fans to a packed U32 triangle
+// list. A zero index width requests the implicit sequential stream.
+native function gltf_topology_index(indices:i64,width:i64,i:i64) i64 {
+  if(width==0) { return i; }
+  let at=indices+i*width;
+  if(width==1) { return ux_u8(at); }
+  if(width==2) { return ux_u16(at); }
+  return ux_u32(at);
+}
+
+native function GltfLoader_triangles(mode:i64,vertices:i64,indices:i64,width:i64,count:i64,out:i64,capacity:i64) i64 {
+  if((mode!=4 && mode!=5 && mode!=6) || vertices<1 || vertices>1048576 ||
+     (width!=0 && width!=1 && width!=2 && width!=4) || count<3 || count>1048576 ||
+     (width==0 && count!=vertices) || (mode==4 && count%3!=0)) { return 0-1; }
+  let required=count;
+  if(mode!=4) { required=(count-2)*3; }
+  if(capacity<required || out<0 || out%4!=0 || out>6291456-required*4) { return 0-2; }
+  let bytes=count*width;
+  if(width!=0 && (indices<0 || indices%width!=0 || indices>6291456-bytes ||
+     (indices<out+required*4 && out<indices+bytes))) { return 0-2; }
+  let i=0;
+  while(i<count) {
+    if(gltf_topology_index(indices,width,i)>=vertices) { return 0-3; }
+    i=i+1;
+  }
+  i=0;
+  while(i<required/3) {
+    let a=i*3;
+    let b=a+1;
+    let c=a+2;
+    if(mode==5) {
+      a=i; b=i+1; c=i+2;
+      if(i%2==1) { a=i+2; b=i+1; c=i; }
+    }
+    if(mode==6) { a=0; b=i+1; c=i+2; }
+    let pos=out+i*12;
+    let x=ux_u32_put(pos,gltf_topology_index(indices,width,a));
+    let y=ux_u32_put(pos+4,gltf_topology_index(indices,width,b));
+    let z=ux_u32_put(pos+8,gltf_topology_index(indices,width,c));
+    i=i+1;
+  }
+  return required;
+}
