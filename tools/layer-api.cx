@@ -41,6 +41,7 @@
  * Exit: 0 ok, 1 a check failed, 2 usage or an unreadable input.
  * Check: tools/check-layer-api.cx. */
 #pragma unisa use cxlib.tlibpkg
+#pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
@@ -510,6 +511,55 @@ static int one_pkg(const char *name, int write) {
     return bad;
 }
 
+static int pkg_row_changed(const char *name, const char *cur_tab, long cur_n, const char *head_tab, long head_n) {
+    long nl = tx_len(name, 64), a = 0, b = 0, cl = -1, hl = -1;
+    const char *cs = 0, *hs = 0;
+    if (!cur_tab || !head_tab) return 1;
+    while (a < cur_n) {
+        long e = a, l;
+        while (e < cur_n && cur_tab[e] != '\n') e++;
+        l = e - a;
+        if (l > nl && tx_same(cur_tab + a, nl, name, nl) && cur_tab[a + nl] == '\t') { cs = cur_tab + a; cl = l; break; }
+        a = e + 1;
+    }
+    while (b < head_n) {
+        long e = b, l;
+        while (e < head_n && head_tab[e] != '\n') e++;
+        l = e - b;
+        if (l > nl && tx_same(head_tab + b, nl, name, nl) && head_tab[b + nl] == '\t') { hs = head_tab + b; hl = l; break; }
+        b = e + 1;
+    }
+    if (!cs || !hs || cl != hl) return 1;
+    return !tx_same(cs, cl, hs, hl);
+}
+
+static int pkg_affected_by_staged(const char *name, const char *staged, const char *cur_tab, long cur_n, const char *head_tab, long head_n) {
+    char why[512], mpath[256];
+    long sn, at = 0, mlen;
+    if (!staged || !staged[0]) return 1;
+    sn = tx_len(staged, 1 << 16);
+    if (tp_load(root, name, &pk, why, sizeof why)) return 1;
+    if (cx_fmt(mpath, sizeof mpath, "build/layer-api/%s.tsv", name)) return 1;
+    mlen = tx_len(mpath, sizeof mpath);
+    while (at < sn) {
+        long e = at, pl;
+        const char *p = staged + at;
+        while (e < sn && staged[e] != '\n') e++;
+        pl = e - at;
+        while (pl > 0 && p[pl - 1] == '\r') pl--;
+        if (pl > 0) {
+            if ((pl == 18 && tx_same(p, 18, "tools/layer-api.cx", 18)) ||
+                (pl == 22 && tx_same(p, 22, "tools/cxlib/tlibpkg.cx", 22))) return 1;
+            if (pkg_path(p, pl)) return 1;
+            if (pl == mlen && tx_same(p, pl, mpath, mlen)) return 1;
+            if (pl == 23 && tx_same(p, 23, "build/tlib-packages.tsv", 23) &&
+                pkg_row_changed(name, cur_tab, cur_n, head_tab, head_n)) return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *only = 0, *rarg = ".", *parg = 0;
     char *names;
@@ -552,24 +602,45 @@ int main(int argc, char **argv) {
     tx_copy(croot, sizeof croot, root, tx_len(root, TX_ZCAP));
     names = tp_names(root, &nn);
     if (!names) { sy_eprintf("layer-api: cannot read %s/build/tlib-packages.tsv\n", root); return 2; }
-    while (i < nn) {
-        char name[64];
-        e = i;
-        while (e < nn && names[e] != '\n') e++;
-        if (e > i && !tx_copy(name, sizeof name, names + i, e - i) && (!only || tx_eqz(only, name))) {
-            int r = write == 4 ? one_sha(name) : write == 2 ? one_freeze(name) : write == 3 ? one_bump(name) : one_pkg(name, write);
-            seen++;
-            if (r) {
-                long bl = tx_len(badl, sizeof badl), nl = tx_len(name, 64);
-                nbad++;
-                if (bl + nl + 2 < (long)sizeof badl) {
-                    if (bl) badl[bl++] = ',';
-                    tx_copy(badl + bl, sizeof badl - bl, name, nl);
-                }
-            }
-            if (r > rc) rc = r;
+    {
+        const char *staged = (write == 0 && !only) ? sy_env("UNISACC_RATCHETS_PATHS") : 0;
+        char *cur_tab = 0, *head_tab = 0;
+        size_t cur_n = 0, head_n = 0;
+        int pass;
+        if (staged && staged[0]) {
+            char *hv[] = {"git", "show", "HEAD:build/tlib-packages.tsv", 0};
+            cur_tab = cx_read("build/tlib-packages.tsv", &cur_n);
+            if (cx_runv_timeout(hv, 15, &head_tab, &head_n) != 0 && head_tab) { mm_free(head_tab); head_tab = 0; head_n = 0; }
         }
-        i = e + 1;
+        for (pass = 0; pass < 2; pass++) {
+            const char *eff_staged = (pass == 0) ? staged : 0;
+            i = 0;
+            while (i < nn) {
+                char name[64];
+                e = i;
+                while (e < nn && names[e] != '\n') e++;
+                if (e > i && !tx_copy(name, sizeof name, names + i, e - i) && (!only || tx_eqz(only, name))) {
+                    if (!eff_staged || !eff_staged[0] ||
+                        pkg_affected_by_staged(name, eff_staged, cur_tab, (long)cur_n, head_tab, (long)head_n)) {
+                        int r = write == 4 ? one_sha(name) : write == 2 ? one_freeze(name) : write == 3 ? one_bump(name) : one_pkg(name, write);
+                        seen++;
+                        if (r) {
+                            long bl = tx_len(badl, sizeof badl), nl = tx_len(name, 64);
+                            nbad++;
+                            if (bl + nl + 2 < (long)sizeof badl) {
+                                if (bl) badl[bl++] = ',';
+                                tx_copy(badl + bl, sizeof badl - bl, name, nl);
+                            }
+                        }
+                        if (r > rc) rc = r;
+                    }
+                }
+                i = e + 1;
+            }
+            if (seen > 0 || !staged || !staged[0]) break;
+        }
+        if (cur_tab) mm_free(cur_tab);
+        if (head_tab) mm_free(head_tab);
     }
     mm_free(names);
     if (!seen) { sy_eprintf("layer-api: no such package: %s\n", only ? only : "(table empty)"); return 2; }

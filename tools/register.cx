@@ -808,7 +808,9 @@ static void rg_mkdirs(const char *dir){
 /* NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE: run a newly registered batch inside a single-commit
    shallow tree (no git history, no CLAUDE_JOB_DIR, cold run/unit/prep caches) before accepting
    registration. Any failure rolls back the appended rows and emits a named REFUSE reason. */
-static int rg_qualify_layout_selftest(const char *root,const char *id,const char *check_src,const char *files,const char *batchbin,int use_dev,const char *devdir){
+/* treeish (40-hex tree or commit) set: the layout is exactly that tree -- no work-tree overlay, no live tables --
+   so the verdict is about the bytes a commit will carry (commit-own --new-tool passes its private index's tree). */
+static int rg_qualify_layout_selftest(const char *root,const char *id,const char *check_src,const char *files,const char *batchbin,int use_dev,const char *devdir,const char *treeish){
     char stage[4400],lay[4500],tar[4600],db[4500],dbarg[4600],gitlink[4600],out[4600],p[4600],src_abs[4600],ape[4096];
     char privtmp[4600],coldcache[4600],coldprep[4600],envtmp[4700],envcache[4700],envprep[4700],want[128];
     static char buf[1<<16];
@@ -818,37 +820,43 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
     if(sy_mkdir(lay,0700)){rg_clean_layout(stage);return 2;}
     rg_file(tar,sizeof tar,stage,"head.tar");
     {
-        char *ar[]={"./tools/bound","55","git","archive","-o",tar,"HEAD",0};
+        char *ar[]={"./tools/bound","55","git","archive","-o",tar,(char *)(treeish?treeish:"HEAD"),0};
         char *ex[]={"./tools/bound","55","tar","-xf",tar,"-C",lay,0};
         if(run(ar,buf,sizeof buf)||run(ex,buf,sizeof buf)||sy_unlink(tar)){rg_clean_layout(stage);return 2;}
     }
     /* Overlay the new batch source file and declared files (may be untracked/modified in worktree) plus live tables. */
-    if(check_src[0]!='/' && cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,check_src)==0 && cx_fmt(p,sizeof p,"%s/%s",lay,check_src)==0){
+    if(!treeish && check_src[0]!='/' && cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,check_src)==0 && cx_fmt(p,sizeof p,"%s/%s",lay,check_src)==0){
         char *sl=strrchr(p,'/');
         if(sl){*sl=0;rg_mkdirs(p);*sl='/';}
         sy_unlink(p);
         if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
     }
-    if(files && *files){
+    if(!treeish && files && *files){
         const char *q=files;
         while(*q){
-            while(*q==' '||*q=='\t')q++;
+            while(*q==' '||*q=='\t'||*q==';')q++;
             const char *s=q;
-            while(*q && *q!=' ' && *q!='\t')q++;
+            while(*q && *q!=' ' && *q!='\t' && *q!=';')q++;
             size_t fl=(size_t)(q-s);
             if(fl>0 && fl<1024 && s[0]!='/' && !(fl>=2 && s[0]=='.' && s[1]=='.')){
                 char rel[1024]; if(mm_copy(rel,sizeof rel,s,fl))continue; rel[fl]=0;
-                if(cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,rel)==0 && sy_lstat(src_abs,&st)==0 && st.kind=='f' &&
+                if(cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,rel)==0 && sy_lstat(src_abs,&st)==0 &&
                    cx_fmt(p,sizeof p,"%s/%s",lay,rel)==0){
                     char *sl=strrchr(p,'/');
                     if(sl){*sl=0;rg_mkdirs(p);*sl='/';}
-                    sy_unlink(p);
-                    if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
+                    if(st.kind=='f'){
+                        sy_unlink(p);
+                        if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
+                    }else if(st.kind=='d'||st.kind=='l'){
+                        char *cpv[]={"./tools/bound","20","cp","-a",src_abs,p,0};
+                        sy_unlink(p);
+                        if(run(cpv,buf,sizeof buf)){rg_clean_layout(stage);return 2;}
+                    }
                 }
             }
         }
     }
-    {
+    if(!treeish){
         char dst_b[4600],dst_c[4600];
         if(cx_fmt(dst_b,sizeof dst_b,"%s/tests/batches.tsv",lay)||cx_fmt(dst_c,sizeof dst_c,"%s/tests/coverage.tsv",lay)){rg_clean_layout(stage);return 2;}
         size_t lbn=0,lcn=0;char *lb=cx_read(rg_bpath(),&lbn),*lc=cx_read(rg_cpath(),&lcn);
@@ -1292,6 +1300,34 @@ int main(int argc, char **argv) {
         else rg_recover();
         rg_unlock(fd);return 0;
     }
+    /* --qualify-tree TREE ID...: the NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE on exactly TREE (40-hex tree or commit):
+       single-commit layout of that tree, cold caches, the same 55 s bound and PASS receipt.  Read-only on this
+       root: no table is written, nothing is registered.  An ID without a batch row in TREE refuses.  Last line
+       REGISTER_QUALIFY_TREE<TAB>tree=<TAB>ids=<TAB>bad=; exit 0 iff bad=0. */
+    if (argc >= 4 && tx_eqz(argv[1], "--qualify-tree")) {
+        static char qroot[4096], qcache[4400], qbin[4400], qwhy[512], qspec[96], qtab[1 << 21];
+        const char *tree = argv[2]; int qre = 0, bad = 0; size_t tl = strlen(tree), qn;
+        if (tl != 40) rg_die("--qualify-tree wants a 40-hex tree or commit id", tree);
+        for (size_t i = 0; i < tl; i++) if (!rg_ishex(tree[i])) rg_die("--qualify-tree wants a 40-hex tree or commit id", tree);
+        if (rg_root_missing()) return 2;
+        if (sy_realpath(".", qroot, sizeof qroot) < 0 || cx_fmt(qcache, sizeof qcache, "%s/unisacc-register-native", sy_tmpdir()) || cx_fmt(qspec, sizeof qspec, "%s:tests/batches.tsv", tree)) rg_die("prepare path", 0);
+        if (sy_mkdir(qcache, 0700) && sy_exists(qcache) != 1) rg_die("prepare directory", qcache);
+        if (rn_prepare(qroot, "tests/run-batch.cx", qcache, qbin, sizeof qbin, &qre, qwhy, sizeof qwhy)) rg_die(qwhy, 0);
+        {   char *sv[] = {"./tools/bound", "20", "git", "show", qspec, 0};
+            if (run(sv, qtab, sizeof qtab) != 0) rg_die("--qualify-tree: cannot read tests/batches.tsv of the tree", tree); }
+        qn = strlen(qtab);
+        for (int i = 3; i < argc; i++) {
+            const char *id = argv[i]; size_t il = strlen(id), at = 0; int have = 0;
+            if (!il || !clean(id)) rg_die("--qualify-tree: bad ID", id);
+            while (at < qn && !have) { size_t e = at; while (e < qn && qtab[e] != '\n') e++;
+                if (e - at > il && !memcmp(qtab + at, id, il) && qtab[at + il] == '\t') have = 1;
+                at = e + 1; }
+            if (!have) { printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=no-batch-row-in-tree\trc=-\tms=0\n", id); bad++; continue; }
+            if (rg_qualify_layout_selftest(qroot, id, "/", 0, qbin, 0, 0, tree) != 0) bad++;
+        }
+        printf("REGISTER_QUALIFY_TREE\ttree=%s\tids=%d\tbad=%d\n", tree, argc - 3, bad);
+        return bad ? 1 : 0;
+    }
     if (argc >= 2 && (tx_eqz(argv[1], "--tool") || tx_eqz(argv[1], "--pin-owner"))) {
         for(int trial=0;trial<3;trial++){int rc=rg_tool_mode(argc,argv);if(rc!=4)return rc;}
         rg_die("REFUSE registry-changed-three-times",0);
@@ -1391,7 +1427,7 @@ int main(int argc, char **argv) {
             okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
             if (!okrun) fputs(buf, stderr);
             if (okrun && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES") || force_layout)) {
-                if (rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir) != 0) okrun = 0;
+                if (rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) != 0) okrun = 0;
             }
         }
     }

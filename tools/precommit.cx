@@ -272,7 +272,7 @@ static int new_tools(void) {
         at += l + 1;
         if (!tx_suffix(p, l, ".cx", 3)) continue;
         for (j = 0; j < l; j++) if (p[j] == '/') slash = j + 1;
-        if (tx_prefix(p + slash, l - slash, "check-", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new check missing batch registration: %s\n",p);blocked++;} continue; }
+        if (tx_prefix(p + slash, l - slash, "check-", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID)\n",p,p);blocked++;} continue; }
         { char *lv[] = {"git", "ls-files", "-s", "--", (char *)p, 0}; long ln; char *ls = slurp(lv, &ln);
           if (ls && tx_prefix(ls, ln, "120000", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new symlink alias requires batch registration: %s\n",p);blocked++;} mm_free(ls); continue; } mm_free(ls); }
         if (cx_fmt(check, sizeof check, "tools/check-%s", p + slash) || cx_fmt(spec, sizeof spec, ":%s", check)) return 1;
@@ -284,7 +284,7 @@ static int new_tools(void) {
         }
         if (!blob || cn == 0) { sy_eprintf("precommit: new tool %s missing check-*.cx\n", p); blocked++; }
         else if (!registered(batches, bn, check)) {
-            sy_eprintf("precommit: new tool %s check missing batch registration: %s\n", p, check); blocked++;
+            sy_eprintf("precommit: new tool %s check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID --whole %s)\n", p, check, check, p); blocked++;
         }
         mm_free(blob);
     }
@@ -1353,9 +1353,84 @@ static void pc_mark_block(const char *gate, const char *reason) {
 }
 
 static void pc_emit_gate_fail(void) {
-    sy_eprintf("PRECOMMIT_GATE_FAIL\tgate=%s\treason=%s\n",
-               pc_blk_gate[0] ? pc_blk_gate : "precommit",
-               pc_blk_reason[0] ? pc_blk_reason : "blocked");
+    const char *g = pc_blk_gate[0] ? pc_blk_gate : "precommit";
+    const char *r = pc_blk_reason[0] ? pc_blk_reason : "blocked";
+    sy_eprintf("PRECOMMIT_GATE_FAIL\tgate=%s\treason=%s\n", g, r);
+    if (tx_eqz(g, "ratchets")) {
+        sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
+                   "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run: sh ./unisacc.com tools/ratchets.cx\n");
+    } else if (tx_eqz(g, "tlib-frozen")) {
+        sy_eprintf("precommit: blocked by tlib-frozen (TLIB_API_STALE: package interface changed without version bump or layer-api manifest refresh).\n"
+                   "  next: sh ./unisacc.com tools/layer-api.cx -- --bump <pkg> && sh ./unisacc.com tools/derive.cx -- --write --only layer-api,iface-hash (or commit with --derive)\n");
+    } else if (tx_eqz(g, "derive")) {
+        sy_eprintf("precommit: blocked by derive (derived-table-drift: staged inputs changed without recomputing derived tables).\n"
+                   "  next: pass --derive to devsvc git commit, or run: sh ./unisacc.com tools/derive.cx -- --write --changed <paths>\n");
+    } else if (tx_eqz(g, "new-tools") || tx_eqz(g, "toolsreg")) {
+        sy_eprintf("precommit: blocked by %s (new tool missing check-NAME.cx or registration).\n"
+                   "  next: register batch with tools/register.cx ... --no-run and inventory with tools/register.cx --tool tools/NAME.cx, then commit with --new-tool tools/NAME.cx --registered <batch-id>\n", g);
+    } else if (tx_eqz(g, "manifest") || tx_eqz(g, "tables")) {
+        sy_eprintf("precommit: blocked by %s (registration manifest and generated registry tables out of sync).\n"
+                   "  next: sh ./unisacc.com tools/tables-gen.cx -- --write and commit with --registered <batch-id>\n", g);
+    } else if (tx_eqz(g, "conflict-markers")) {
+        sy_eprintf("precommit: blocked by conflict-markers (staged table or source contains unresolved merge conflict markers).\n"
+                   "  next: resolve conflict markers in the named files and re-stage before committing\n");
+    } else if (tx_eqz(g, "lint")) {
+        sy_eprintf("precommit: blocked by cx-lint (R2/R3/R4 findings in staged .cx files).\n"
+                   "  next: sh ./unisacc.com tools/cx-lint.cx -- <staged.cx>\n");
+    } else {
+        sy_eprintf("precommit: blocked by gate=%s reason=%s; see the BLOCKED diagnostic line above for the exact command to run.\n", g, r);
+    }
+}
+
+static int is_table_or_source_path(const char *p, long n) {
+    if (n <= 0) return 0;
+    if (n >= 4 && tx_same(p + n - 4, 4, ".tsv", 4)) return 1;
+    if (n >= 3 && tx_same(p + n - 3, 3, ".cx", 3)) return 1;
+    if (n >= 2 && tx_same(p + n - 2, 2, ".c", 2)) return 1;
+    if (n >= 2 && tx_same(p + n - 2, 2, ".h", 2)) return 1;
+    if (n >= 3 && tx_same(p + n - 3, 3, ".sh", 3)) return 1;
+    return 0;
+}
+
+static int conflict_marker_gate(void) {
+    char *av[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", 0};
+    long sn = 0, at = 0; int bad = 0;
+    char *names;
+    if (plan_dir || from_run) return 0;
+    names = slurp_run(av, &sn);
+    if (!names) return 0;
+    while (at < sn) {
+        long nl = tx_len(names + at, sn - at);
+        if (nl <= 0) break;
+        if (nl < 4398 && is_table_or_source_path(names + at, nl)) {
+            char spec[4410]; long j, bn = 0, pos = 0, lno = 1; char *blob; char *sv[4];
+            spec[0] = ':'; for (j = 0; j < nl; j++) spec[j + 1] = names[at + j]; spec[nl + 1] = 0;
+            sv[0] = "git"; sv[1] = "show"; sv[2] = spec; sv[3] = 0;
+            blob = slurp_run(sv, &bn);
+            if (blob) {
+                while (pos < bn) {
+                    long e = tx_chr(blob + pos, bn - pos, '\n');
+                    long l = e < 0 ? bn - pos : e;
+                    long cl = (l > 0 && blob[pos + l - 1] == '\r') ? l - 1 : l;
+                    const char *ln = blob + pos;
+                    if ((cl >= 8 && tx_prefix(ln, cl, "<<<<" "<<< ", 8)) ||
+                        (cl == 7 && tx_same(ln, 7, "====" "===", 7)) ||
+                        (cl >= 8 && tx_prefix(ln, cl, ">>>>" ">>> ", 8))) {
+                        sy_eprintf("precommit: BLOCKED conflict-markers: %.*s:%ld has unresolved merge conflict marker '%.*s'\n",
+                                   (int)nl, names + at, lno, (int)(cl > 40 ? 40 : cl), ln);
+                        bad++;
+                        break;
+                    }
+                    pos += l + 1;
+                    lno++;
+                }
+                mm_free(blob);
+            }
+        }
+        at += nl + 1;
+    }
+    mm_free(names);
+    return bad;
 }
 
 static void pc_iso_cleanup(void) {
@@ -1418,6 +1493,30 @@ int main(int argc, char **argv) {
     else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();
     else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates]\n"); return 2; }
     if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
+    {
+        long csn = 0, ca = 0;
+        char *av_all[] = {"git", "diff", "--cached", "--name-only", "-z", 0};
+        char *cnames = slurp_run(av_all, &csn);
+        if (cnames && csn > 0) {
+            char *rpaths = mm_alloc((size_t)csn + 2);
+            if (rpaths) {
+                long rp = 0;
+                while (ca < csn) {
+                    long cl = tx_len(cnames + ca, csn - ca);
+                    if (cl <= 0) break;
+                    mm_copy(rpaths + rp, (size_t)(csn + 2 - rp), cnames + ca, (size_t)cl);
+                    rp += cl;
+                    rpaths[rp++] = '\n';
+                    ca += cl + 1;
+                }
+                rpaths[rp] = 0;
+                sy_setenv("UNISACC_RATCHETS_PATHS", rpaths, 1);
+                sy_setenv("UNISACC_RATCHETS_PRECOMMIT", "1", 1);
+                mm_free(rpaths);
+            }
+        }
+        if (cnames) mm_free(cnames);
+    }
     if (argc == 1) { int fr = flow_route(); if (fr >= 0) return fr; }
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
@@ -1467,8 +1566,10 @@ int main(int argc, char **argv) {
           }
       }
       mm_free(qn_names);
+      if (blocked > 0) pc_mark_block("manifest", "registration-manifest");
     }
     { /* 生成闸(S7):暂存区动了 tests/manifests 或三张登记表之一时,按索引核对清单行与表逐字一致(tables-gen --check --index) */
+      int b0_tab = blocked;
       long gn; char *gn_names = gate_diff("tables", &gn);
       if (!gn_names) { sy_eprintf("precommit: BLOCKED git diff --cached (tables read set) failed\n"); blocked++; }
       if (gn_names && gn > 0 && sy_exists("tools/tables-gen.cx") == 1) {
@@ -1484,10 +1585,12 @@ int main(int argc, char **argv) {
               mm_free(to);
           }
       }
+      if (blocked > b0_tab) pc_mark_block("tables", "tables-gen-drift");
       { /* 工具清单闸(toolsreg):暂存区新增、删除、改名或改类型 tools/**.cx(读集 toolsreg),或 tables 门命中
            (登记表或批次表被改)时,tests/tools-compile.cx --shards 按索引清单对拍 tests/tools-compile-sources.tsv 与
            tools-compile 分片批次;任何 REFUSE(漏登记的新工具、删了未除名的工具、片数与批次不符)即拒并逐行具名。
            夹具仓没有 tests/tools-compile.cx 时不跑。实测 0.2 s(热编译缓存)。 */
+        int b0_tr = blocked;
         long tn; char *tnames = gate_diff("toolsreg", &tn);
         if (!tnames) { sy_eprintf("precommit: BLOCKED git diff --cached (toolsreg read set) failed\n"); blocked++; }
         else if ((tn > 0 || (gn_names && gn > 0)) && !toolsreg_here()) {
@@ -1521,6 +1624,7 @@ int main(int argc, char **argv) {
             mm_free(ro);
         }
         mm_free(tnames);
+        if (blocked > b0_tr) pc_mark_block("toolsreg", "tools-compile-registry");
       }
       mm_free(gn_names);
     }
@@ -1560,6 +1664,7 @@ int main(int argc, char **argv) {
           }
       }
     }
+    { int b0 = blocked; blocked += conflict_marker_gate(); if (blocked > b0) pc_mark_block("conflict-markers", "merge-conflict-markers"); }
     { int b0 = blocked; blocked += freeze_gate(); if (blocked > b0) pc_mark_block("freeze", "freeze-window"); }
     { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
     { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
@@ -1574,10 +1679,10 @@ int main(int argc, char **argv) {
       if (cx_fmt(rp, sizeof rp, "%s%stools/ratchets.cx", wt ? wt : "", wt ? "/" : "")) { sy_eprintf("precommit: path too long\n"); return 1; }
       ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
       if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
-      if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); return blocked ? 1 : 0; } }
+      if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; } }
     cur_gate = "ratchets"; slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0; cur_gate = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
-    blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets");
+    { int b0 = blocked; blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets"); if (blocked > b0) pc_mark_block("ratchets", "ratchets-incomplete"); }
     for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." */
         long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s;
         const char *r = rows + at;
@@ -1606,8 +1711,6 @@ int main(int argc, char **argv) {
     sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked);
     if (blocked) {
         pc_emit_gate_fail();
-        sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
-                   "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run tools/ratchets.cx.\n");
     }
     return blocked ? 1 : 0;
 }
