@@ -10,7 +10,11 @@
    surrogate pairs) is decoded to UTF-8; strings are NUL-terminated copies (js_str_len
    gives the byte length, which may include embedded NUL from \u0000).
    Ownership: the caller owns the root and frees it once with js_free; children belong to
-   the root. Accessors take 0 safely and return 0 / JS_NONE on a miss. */
+   the root. Accessors take 0 safely and return 0 / JS_NONE on a miss.
+   Tree ownership contract: js_free(root) frees every node reachable from ROOT, including any node another tree
+   also points at. A tree must OWN all of its children: never attach a node that belongs to another tree (not
+   even a scalar leaf) without copying it. js_mk_str/js_mk_num/js_mk_bool/js_mk_null make cheap copies for this,
+   and js_clone(v) deep-copies a whole subtree (below, next to the builders). */
 enum { JS_NONE = 0, JS_NULL = 1, JS_BOOL = 2, JS_NUM = 3, JS_STR = 4, JS_ARR = 5, JS_OBJ = 6, JS_MAXDEPTH = 128 };
 typedef struct js_val {
     int kind;
@@ -607,4 +611,28 @@ int js_arr_push(js_val *a, js_val *child) {
     if (r) return r;
     a->items[a->n++] = child;
     return 0;
+}
+/* js_clone(v): deep copy of the whole tree V, or 0 (V is 0, or out of memory: everything allocated so far is
+   freed, nothing leaks). Object member order and repeated keys, array order, strings with embedded NUL (slen
+   bytes) and number bit patterns (-0, NaN payload) are kept. The clone shares no node and no byte with V:
+   free either tree first, then the other. Pair it with js_free. */
+js_val *js_clone(const js_val *v) {
+    js_val *r; long i;
+    if (!v) return 0;
+    r = js_mk(v->kind);
+    if (!r) return 0;
+    r->b = v->b; r->num = v->num;
+    if (v->s) {
+        r->s = (char *)mm_alloc(v->slen + 1);
+        if (!r->s || (v->slen > 0 && mm_copy(r->s, v->slen + 1, v->s, v->slen))) { js_free(r); return 0; }
+        r->s[v->slen] = 0; r->slen = v->slen;
+    }
+    for (i = 0; i < v->n; i++) {
+        js_val *c; int e;
+        c = js_clone(v->items[i]);
+        if (!c) { js_free(r); return 0; }
+        e = v->kind == JS_OBJ ? js_obj_setn(r, v->keys[i], v->klens[i], c) : js_arr_push(r, c);
+        if (e) { js_free(c); js_free(r); return 0; }
+    }
+    return r;
 }
