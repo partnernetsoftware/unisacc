@@ -1,0 +1,56 @@
+native function gltf_scene_array_count(array:i64,end:i64) i64 {
+  if(array<0 || array>=end || ux_u8(array)!=91) { return 0-1; }
+  let at=json_space(array+1,end);
+  if(at>=0 && at<end && ux_u8(at)==93) { return 0; }
+  let count=0;
+  while(at>=0 && at<end && count<65536) {
+    let next=json_space(json_value_end(at,end),end);
+    if(next<0 || next>=end) { return 0-1; }
+    count=count+1;
+    if(ux_u8(next)==93) { return count; }
+    if(ux_u8(next)!=44) { return 0-1; }
+    at=json_space(next+1,end);
+  }
+  return 0-1;
+}
+
+native function gltf_scene_copy_roots(roots:i64,end:i64,limit:i64,count:i64,out:i64,write:i64) i64 {
+  let at=json_space(roots+1,end);
+  let i=0;
+  while(i<count) {
+    let node=LoaderJson_uint(at,end,0-1);
+    if(node<0 || node>=limit) { return 0-3; }
+    if(write) { let put=ux_u32_put(out+i*4,node); }
+    at=json_space(json_space(json_value_end(at,end),end)+1,end);
+    i=i+1;
+  }
+  return count;
+}
+
+// Use index -1 for the asset default scene, falling back to scene zero.
+native function GltfLoader_sceneRoots(glb:i64,index:i64,out:i64,capacity:i64,key:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || index<0-1 || index>65535 ||
+     capacity<0 || capacity>65536 || out%4!=0 || !loading_span(out,capacity*4) ||
+     !loading_span(key,16) || !file_disjoint(glb,GlbResource.size,key,16) ||
+     !file_disjoint(glb,GlbResource.size,out,capacity*4) || !file_disjoint(key,16,out,capacity*4)) { return 0-1; }
+  let json=ux_u32(glb+GlbResource.json);
+  let bytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let binBytes=ux_u32(glb+GlbResource.binBytes);
+  if(!loading_span(json,bytes) || !loading_span(bin,binBytes) ||
+     !file_disjoint(json,bytes,out,capacity*4) || !file_disjoint(json,bytes,key,16) ||
+     !file_disjoint(bin,binBytes,out,capacity*4) || !file_disjoint(bin,binBytes,key,16)) { return 0-1; }
+  let end=json+bytes;
+  let scene=index;
+  if(scene<0) { scene=LoaderJson_uint(LoaderJson_find(json,end,key,1852138355,101,0,5),end,0); }
+  let selected=LoaderJson_item(LoaderJson_find(json,end,key,1852138355,29541,0,6),end,scene);
+  if(selected<0 || ux_u8(selected)!=123) { return 0-2; }
+  let roots=LoaderJson_find(selected,end,key,1701080942,115,0,5);
+  if(roots==0-2) { return 0; }
+  let count=gltf_scene_array_count(roots,end);
+  if(count==0) { return 0; }
+  if(count<0 || count>capacity) { return 0-3; }
+  let nodes=gltf_scene_array_count(LoaderJson_find(json,end,key,1701080942,115,0,5),end);
+  if(nodes<1 || gltf_scene_copy_roots(roots,end,nodes,count,out,0)<0) { return 0-3; }
+  return gltf_scene_copy_roots(roots,end,nodes,count,out,1);
+}
