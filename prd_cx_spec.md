@@ -28,6 +28,7 @@
 | 归档引用检查 | `sh ./unisacc.com tools/check-archive-refs.cx` | `ARCHIVE_REFS rows=157 live_references=3 failed=0` |
 
 - `--` 之后是传给脚本 `main` 的参数。日常不要先落盘再运行;落盘只用于格式、链接、平台、自举验证。
+- `run-cache` 键在 `argv` 的 `--` 处截断(`cx/runtime/rcident.cx:187-191`):执行 `cx unit.cx -- A B` 时 `--` 之后的业务参数不进缓存键,热启动约 7 ms;若漏写 `--`,每个新 `argv` 都会改变缓存键并触发完整重编译(约 4.5 秒)。传参运行 `.cx` 脚本时务必带 `--`。
 - 受影响批次实跑:`tools/affected.cx -- --files F... --run [-j N]`(头注;本文只实测了 `--list-only`)。
 - 每条命令及其子进程上限 60 秒;超时用 `timeout 60` 包住。
 
