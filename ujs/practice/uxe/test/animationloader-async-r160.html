@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {AnimationLoader,LoadingManager,REVISION} from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const path="data:application/json,";
+const good=last=>[
+  {name:"walk",fps:2,tracks:[
+    {name:".position[x]",type:"number",times:[0,4],values:[2,last],interpolation:2300},
+    {name:".visible",type:"bool",times:[0,2],values:[true,false]},
+  ]},
+  {name:"idle",duration:6,blendMode:2501,tracks:[
+    {name:".name",type:"string",times:[0,1],values:["first","A\nB"]},
+  ]},
+];
+const encoder=new TextEncoder(),decoder=new TextDecoder();
+const body=json=>encodeURIComponent(JSON.stringify(json));
+const syntax="%5B%7B";
+const malformed=[...good(12).slice(0,1),{name:"invalid",tracks:[
+  {name:".invalid",type:"nonsense",times:[0,1],values:[1,2]},
+]}];
+
+function referenceValues(clips) {
+  const [walk,idle]=clips,[number,boolean]=walk.tracks,[string]=idle.tracks;
+  const last=encoder.encode(string.values[1]);
+  return [clips.length,walk.name.charCodeAt(0),walk.duration,walk.tracks.length,
+    number.getInterpolation(),number.times[1],number.values[1],Number(boolean.values[0]),
+    Number(boolean.values[1]),idle.blendMode,idle.duration,last.length,last[1]];
+}
+async function reference() {
+  const manager=new LoadingManager(), loader=new AnimationLoader(manager).setPath(path);
+  const peer=new AnimationLoader(manager).setPath(path);
+  let errors=0,progress=0,lastLoaded=0,lastTotal=0;
+  manager.onError=()=>errors++;
+  manager.onProgress=(_,loaded,total)=>{progress++;lastLoaded=loaded;lastTotal=total;};
+  const [a,b]=await Promise.all([loader.loadAsync(body(good(10))),peer.loadAsync(body(good(11)))]);
+  const reject=promise=>promise.then(()=>0,()=>1);
+  const badSyntax=await reject(loader.loadAsync(syntax)),badClip=await reject(loader.loadAsync(body(malformed)));
+  const drained=new Promise(resolve=>{manager.onLoad=resolve;});
+  const next=await loader.loadAsync(body(good(14)));
+  await drained;
+  return [...referenceValues(a),referenceValues(b)[6],referenceValues(next)[6],badSyntax,badClip,
+    errors,progress,lastTotal,lastLoaded];
+}
+
+async function product() {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,which=0,a=0,b=0,c=0,d=0)=>Number(wasm.uxe_animation_async(
+    BigInt(op),BigInt(which),BigInt(a),BigInt(b),BigInt(c),BigInt(d)));
+  const base=run(0),bytes=new Uint8Array(wasm.memory.buffer,base,32768);
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const u=at=>view.getUint32(at,true), f=at=>view.getFloat32(at,true), d=at=>view.getFloat64(at,true);
+  const put=(at,text)=>{const raw=encoder.encode(text);bytes.set(raw,at);return raw.length;};
+  let progress=0;
+  function request(which,source) {
+    const id=run(3,which,5000,put(5000,source));
+    if(id<=0) throw new Error("async begin "+id);
+    const url=decoder.decode(bytes.subarray(u(3072),u(3072)+u(3076)));
+    if(url!==path+source) throw new Error("request URL");
+    const configured=Number(u(3080)===1 && u(3084)===77);
+    const at=6000+which*1400;
+    return {id,configured,at,
+      async receive(mutate=false) {
+        const response=await fetch(url);
+        const payload=new Uint8Array(await response.arrayBuffer());
+        if(mutate) {
+          const marker=decoder.decode(payload).indexOf('"fps":2');
+          if(marker<0) throw new Error("mutation marker");
+          payload[marker+6]=52;
+        }
+        bytes.set(payload,at);
+        const count=run(4,which,id,response.status,at,payload.length);
+        if(count>0 && u(3200)===2) progress++;
+        return count;
+      }};
+  }
+  function values(slot,count) {
+    const out=3904+slot*16,walk=u(out),idle=u(out+4),tracks=u(walk+8);
+    const number=u(tracks),boolean=u(tracks+4),string=u(u(idle+8));
+    const n=u(number+8),b=u(boolean+8),s=u(string+8);
+    const stringValues=u(s+4),last=u(stringValues+8);
+    return [count,bytes[u(walk)],d(walk+24),u(walk+12),u(number+12),
+      f(u(n)+4),f(u(n+4)+4),u(u(b+4)),u(u(b+4)+4),u(idle+16),
+      d(idle+24),u(stringValues+12),bytes[last+1]];
+  }
+  if(run(1)!==1 || run(2,0,512,put(512,path))!==128 ||
+    run(2,1,576,put(576,path))!==256 || run(7,0,1)!==128 || run(8,0,77)!==128)
+    throw new Error("animation family setup");
+  const main=request(0,body(good(10))), peer=request(1,body(good(11)));
+  const pre=run(5,0,main.id,2,0), duplicate=run(3,0,5000,1);
+  const peerEvents=await peer.receive();
+  const peerResult=run(5,1,peer.id,2,1);
+  if(peerResult!==2) throw new Error("peer parse "+peerResult);
+  const wrong=run(5,2,main.id,2,0);
+  const mainEvents=await main.receive(query.get("mode")==="1");
+  const overlap=run(9,0,main.id,main.at);
+  const mainResult=run(5,0,main.id,2,0);
+  if(mainResult!==2) throw new Error("main parse "+mainResult);
+  bytes.fill(0,main.at,main.at+500);
+  const primary=values(0,mainResult), concurrent=values(1,peerResult)[6];
+  const repeat=run(5,0,main.id,2,0), release=run(6,0,main.id);
+  const syntaxReq=request(0,syntax);
+  const stale=run(4,0,main.id,200,main.at,1);
+  const syntaxEv=await syntaxReq.receive();
+  const badSyntax=run(5,0,syntaxReq.id,2,2),syntaxKind=u(3500),syntaxId=u(3504);
+  const invalidReq=request(0,body(malformed));
+  await invalidReq.receive();
+  run(10,0,3);
+  const badClip=run(5,0,invalidReq.id,2,3),clipKind=u(3500),clipId=u(3504);
+  const unchanged=Number(u(3952)===173 && u(3956)===174 && values(0,mainResult).every((v,i)=>v===primary[i]));
+  const next=request(0,body(good(14)));
+  await next.receive();
+  const nextResult=run(5,0,next.id,2,4);
+  if(nextResult!==2) throw new Error("parse after error "+nextResult);
+  return [...primary,concurrent,values(4,nextResult)[6],Number(badSyntax<0),Number(badClip<0),
+    Number(syntaxKind===3)+Number(clipKind===3),progress,u(64),u(68),
+    pre,duplicate,wrong,overlap,stale,repeat,release,badSyntax,badClip,unchanged,
+    peerEvents,mainEvents,syntaxEv,next.id,main.configured,peer.configured,syntaxId,clipId,u(3500)];
+}
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...await reference(),...await product()]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

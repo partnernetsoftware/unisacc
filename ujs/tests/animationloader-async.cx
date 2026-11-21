@@ -1,0 +1,53 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+static const double gold[]={
+    2,119,2,2,2300,2,10,1,0,2501,6,3,10,11,14,1,1,2,5,5,5,
+    2,119,2,2,2300,2,10,1,0,2501,6,3,10,11,14,1,1,2,5,5,5,
+    -1,-1,-1,-1,-1,-1,-1,-2,-3,1,1,2,2,4,1,0,2,3,0,
+};
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-animation-async-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/async.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "animationloader-async-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char signature[]="export uxe_animation_async(op:i64,which:i64,a:i64,b:i64,c:i64,d:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "record-copy.ujs",BASE "loadingmanager.ujs",
+        BASE "defaultloadingmanager.ujs",BASE "loader.ujs",BASE "fileloader.ujs",BASE "loader-base.ujs",
+        BASE "loader-family.ujs",BASE "loader-family-classes.ujs",BASE "loaderutils.ujs",
+        BASE "json-read.ujs",BASE "json-bytes.ujs",BASE "json-string-decode.ujs",BASE "loader-json.ujs",
+        BASE "animation-view.ujs",BASE "keyframe-track.ujs",BASE "animationclip.ujs",BASE "animationloader.ujs",
+        BASE "animationloader-discrete.ujs",BASE "animationloader-batch.ujs",BASE "animationloader-async.ujs",
+        FIX "animationloader-async-probe.ujs","-o",wasm,0};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,signature,sizeof signature-1,0600);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,10,&out,&bytes);
+        if(rc) { printf("ANIMATION_ASYNC compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("ANIMATION_ASYNC case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_IO AnimationLoader async cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}
