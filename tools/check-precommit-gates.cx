@@ -18,7 +18,9 @@
  *        a marker row the real tool cannot print); a record with another tree is ignored and the gate reruns;
  *        commit-own --registered writes the record and the hook's precommit reuses it.
  * Last line CHECK_PRECOMMIT_GATES<TAB>failed=N; rc 1 when N > 0. */
+#pragma unisa use cxlib.flowexec
 #pragma unisa use cxlib.productpkg
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
 #pragma unisa use sys.env
@@ -106,10 +108,15 @@ static void ensure_self_bin(void) {
 
 static void setup(const char *group, int prepared) {
     static char c[8000], out[4096]; const char *home = sy_env("HOME");
+    char flkp[2560]; int lfd, li;
     ensure_self_bin();
     if (sy_cwd(root, sizeof root) || !home || !home[0]) die("cwd or HOME");
     if (cx_fmt(fx, sizeof fx, "%s/.cache/unisacc/check-precommit-gates/fx-%s", home, group) ||
-        cx_fmt(lockd, sizeof lockd, "%s.lock", fx) || cx_fmt(ready,sizeof ready,"%s.ready",fx)) die("path");
+        cx_fmt(lockd, sizeof lockd, "%s.lock", fx) || cx_fmt(ready,sizeof ready,"%s.ready",fx) ||
+        cx_fmt(flkp, sizeof flkp, "%s.flock", fx)) die("path");
+    if (!cx_fmt(c, sizeof c, "%s/.cache/unisacc/check-precommit-gates", home)) (void)sy_mkdir_all(c, 0755);
+    lfd = sy_open(flkp, 2 | 64, 0600);
+    if (lfd >= 0) for (li = 0; li < 600; li++) { if (sy_lockf(lfd, 1, 0) == 0) break; sy_sleep_ms(100); }
     if (cx_fmt(c, sizeof c, "mkdir -p %s/.cache/unisacc/check-precommit-gates && if mkdir %s 2>/dev/null; then echo $PPID > %s/pid; echo LOCK_OK; "
                             "elif kill -0 \"$(cat %s/pid 2>/dev/null)\" 2>/dev/null; then echo LOCK_HELD; else echo $PPID > %s/pid; echo LOCK_OK; fi", home, lockd, lockd, lockd, lockd)) die("script");
     sh(c, out, sizeof out, 0);
@@ -556,6 +563,69 @@ static void group_merge_disjoint(void) {
     ck(has(out, "CONT_RC=0\n") && has(out, "parents=2") && has(out, "DISJ_FINAL=v1-during-merge\n"), "merge-disjoint.merge-continue-two-parents-retains-disjoint");
 }
 
+static int run_flow_shards(const char *label, const char *const *shards, int nshards, int par, long t0) {
+    char rdir[512], ftsv[600], tsv[8192], why[512];
+    fl_flow fl; fl_sum sum;
+    int i, tlen = 0, r;
+    ensure_self_bin();
+    if (sy_cwd(root, sizeof root)) return 2;
+    if (cx_fmt(rdir, sizeof rdir, "%s/pcg-flow-%d-%ld", sy_tmpdir(), (int)sy_pid(), sy_now_ms()) ||
+        cx_fmt(ftsv, sizeof ftsv, "%s/flow.tsv", rdir) ||
+        sy_mkdir_all(rdir, 0700) != 0) return 2;
+    tlen = snprintf(tsv, sizeof tsv, "par %d\n", par);
+    for (i = 0; i < nshards; i++) {
+        int w = snprintf(tsv + tlen, sizeof tsv - (size_t)tlen,
+                         "s-%s\texec\t-\tcwd=%s;timeout_ms=55000;a0=sh;a1=./unisacc.com;a2=tools/check-precommit-gates.cx;a3=--;a4=--cases;a5=%s\n",
+                         shards[i], root, shards[i]);
+        if (w < 0 || (size_t)(tlen + w) >= sizeof tsv) { (void)sy_remove_all(rdir); return 2; }
+        tlen += w;
+    }
+    if (sy_write_atomic(ftsv, tsv, (size_t)tlen, 0600) != 0 ||
+        fl_load(ftsv, &fl, why, (int)sizeof why) != 0) {
+        (void)sy_remove_all(rdir);
+        return 2;
+    }
+    r = fl_run(&fl, rdir, par, 120000, 0, &sum);
+    for (i = 0; i < fl.count; i++) {
+        char op[640]; unsigned char *b = 0; int64_t n = 0;
+        int got_sum = 0, fail_i = 0;
+        if (!cx_fmt(op, sizeof op, "%s/%s/%s.out", rdir, "out", fl.n[i].id) &&
+            !sy_read_file(op, &b, &n, 1 << 20) && b) {
+            long at = 0;
+            while (at < n) {
+                long e = at;
+                while (e < n && b[e] != '\n') e++;
+                long l = e - at;
+                if (l >= 22 && !memcmp(b + at, "CHECK_PRECOMMIT_GATES\t", 22)) {
+                    char ln[256];
+                    long kl = l < 255 ? l : 255, k;
+                    for (k = 0; k < kl; k++) ln[k] = (char)b[at + k];
+                    ln[kl] = 0;
+                    const char *fp = strstr(ln, "\tfailed=");
+                    if (fp && sscanf(fp, "\tfailed=%d", &fail_i) == 1) {
+                        got_sum = 1;
+                        failed += fail_i;
+                    }
+                } else {
+                    sy_write_all(1, (const char *)(b + at), (long)(e < n ? l + 1 : l));
+                }
+                at = (e < n) ? e + 1 : n;
+            }
+            free(b);
+        }
+        if (!got_sum || (fl.n[i].state != FL_OK && fail_i == 0)) {
+            sy_printf("FAIL\tcheck-precommit-gates.shard-%s\tstate=%d\trc=%d\n", fl.n[i].id, fl.n[i].state, fl.n[i].rc);
+            failed++;
+        }
+    }
+    sy_printf("NOTE\tflow_shards\tnodes=%d\tok=%d\tfail=%d\twall_ms=%ld\n",
+              fl.count, sum.ok, sum.fail + sum.timeout + sum.skip, sum.wall_ms);
+    fl_free(&fl);
+    (void)sy_remove_all(rdir);
+    sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", label, failed, sy_now_ms() - t0);
+    return (failed || r != 0) ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && tx_eqz(argv[1], "--fixture-register-tool")) return pcg_fixture_register(argv[2]);
     if (argc == 4 && tx_eqz(argv[1], "--fixture-batch")) return pcg_fixture_batch(argv[2],argv[3]);
@@ -585,18 +655,34 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
         else if (tx_eqz(argv[a], "--prepared")) prepared=1;
-        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d | --bench before|after\n"); return 2; }
+        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|pc|all | --bench before|after]\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench",prepared); bench(bn); unlock(); return 0; }
-    if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc"))) {
-        if (tx_eqz(group, "tree-isolate") || tx_eqz(group, "pc")) group_tree_isolate();
-        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "pc")) group_stale_lock();
-        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "pc")) group_stale_lock_e2e();
-        if (tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc")) group_merge_disjoint();
+    if (!group || tx_eqz(group, "all")) {
+        static const char *const all_s[] = {"na", "reuse-verdict", "reuse-key", "reuse-commit", "toolsreg-a", "toolsreg-a2", "toolsreg-b", "toolsreg-c", "toolsreg-d", "tree-isolate", "stale-lock", "merge-disjoint"};
+        return run_flow_shards("all", all_s, 12, 4, t0);
+    }
+    if (tx_eqz(group, "pc")) {
+        static const char *const pc_s[] = {"tree-isolate", "stale-lock", "merge-disjoint"};
+        return run_flow_shards("pc", pc_s, 3, 3, t0);
+    }
+    if (!prepared && tx_eqz(group, "reuse")) {
+        static const char *const ru_s[] = {"reuse-verdict", "reuse-key", "reuse-commit"};
+        return run_flow_shards("reuse", ru_s, 3, 3, t0);
+    }
+    if (!prepared && tx_eqz(group, "toolsreg")) {
+        static const char *const tr_s[] = {"toolsreg-a", "toolsreg-a2", "toolsreg-b", "toolsreg-c", "toolsreg-d"};
+        return run_flow_shards("toolsreg", tr_s, 5, 5, t0);
+    }
+    if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint"))) {
+        if (tx_eqz(group, "tree-isolate")) group_tree_isolate();
+        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core")) group_stale_lock();
+        if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-e2e")) group_stale_lock_e2e();
+        if (tx_eqz(group, "merge-disjoint")) group_merge_disjoint();
         sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
         return failed ? 1 : 0;
     }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-key") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-a2") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|reuse-verdict|reuse-key|reuse-commit|toolsreg|toolsreg-a|toolsreg-a2|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|pc | --bench before|after\n"); return 2; }
+    if (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-key") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-a2") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d")) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|reuse|reuse-verdict|reuse-key|reuse-commit|toolsreg|toolsreg-a|toolsreg-a2|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|merge-disjoint|pc|all | --bench before|after]\n"); return 2; }
     setup(group,prepared);
     if (tx_eqz(group, "na")) group_na();
     else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);

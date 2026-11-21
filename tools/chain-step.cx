@@ -1124,12 +1124,41 @@ static int cs_fp_key_kind(const char *key) {
    cs_fp_stage_place checks it before any key is built (both lanes, every target), and
    cs_fp_stage_witness prints, when a removal is refused anyway, every ancestor's .git lstat
    and the cwd, so the refusal carries the repository it saw instead of only the verdict. */
+static int cs_fp_within(const char *a, const char *b) {
+    size_t n = strlen(b);
+    if (!n) return 0;
+    if (n == 1 && b[0] == '/') return a[0] == '/';
+    return !strncmp(a, b, n) && (a[n] == 0 || a[n] == '/');
+}
+/* Mirrors _unisa_sd_tmpshadow in include/unisa_safedel.h: a stray .git at or above a temp root
+   that holds START must not shadow scratch paths under it, while nested repos below still count. */
+static int cs_fp_tmpshadow(const char *start, const char *repo) {
+    const char *h = sy_env("HOME"), *t = sy_env("TMPDIR");
+    char home[4400], tmp[4400];
+    int i;
+    home[0] = 0;
+    if (h && h[0] && sy_realpath(h, home, sizeof home) < 0) home[0] = 0;
+    if (!t || !t[0]) t = "/tmp";
+    for (i = 0; i < 2; i++) {
+        const char *r = i ? "/tmp" : t;
+        if (r[0] != '/') continue;
+        if (sy_realpath(r, tmp, sizeof tmp) < 0) continue;
+        if (!strcmp(tmp, "/")) continue;
+        if (home[0] && cs_fp_within(home, tmp)) continue;
+        if (cs_fp_within(start, tmp) && cs_fp_within(tmp, repo)) return 1;
+    }
+    return 0;
+}
 static int cs_fp_repo_of(const char *start, char *repo, size_t cap) {
     char d[4400], g[4500], *s; struct stat st;
     if (start[0] != '/' || cx_fmt(d, sizeof d, "%s", start)) return -1;
     for (;;) {
         if (cx_fmt(g, sizeof g, "%s%s.git", d, d[1] ? "/" : "")) return -1;
-        if (lstat(g, &st) == 0) { if (cx_fmt(repo, cap, "%s", d)) return -1; return 1; }
+        if (lstat(g, &st) == 0) {
+            if (cs_fp_tmpshadow(start, d)) return 0;
+            if (cx_fmt(repo, cap, "%s", d)) return -1;
+            return 1;
+        }
         if (!d[1]) return 0;
         s = strrchr(d, '/');
         if (s == d) d[1] = 0; else *s = 0;

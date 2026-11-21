@@ -313,16 +313,89 @@ int main(int argc, char **argv) {
            rb && strstr(rb, "2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n") != 0, "mark-version-seq-missing-index-refused");
         free(rb); np_free(&r);
 
-        /* Preconditions satisfied: tag + INDEX exec-5-publish PASS -> updates and verifies readback */
+        /* Precondition 3 (M2): tag + exec-5-publish present, but git history lacks 'v0.0.99 Y2: public readback' commit -> refused */
         if (cx_write(idx99, seed_idx, strlen(seed_idx))) return 2;
         r = actual(m1);
         rb = cx_read(vseq, &rn);
-        ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tUPDATED\tversion=0.0.99") && rb &&
-           strstr(rb, "2\t0.0.99\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tnow\n") != 0, "mark-version-seq-updates");
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0 && strstr(r.err, "missing-y2-commit") != 0 &&
+           rb && strstr(rb, "2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n") != 0, "mark-version-seq-missing-y2-commit-refused");
         free(rb); np_free(&r);
+
+        /* Create Y2 commit in mrepo; Precondition 4 (M2): forged exec-7-Y2-done SHA in INDEX.tsv is refused */
+        if (cx_fmt(gcmd, sizeof gcmd, "cd \"%s\" && git commit --allow-empty -qm \"v0.0.99 Y2: public readback\"", mrepo)) return 2;
+        r = actual(gv); np_free(&r);
+        const char *forged_idx =
+            "step\tts\tstatus\trc\tdesc\n"
+            "exec-5-publish\t2026-11-21T00:00:00Z\tPASS\t0\tpublic release\n"
+            "exec-7-Y2-done\t2026-11-21T00:01:00Z\t-\t0000000000000000000000000000000000000000\tY2 committed; this row rides with the next commit\n";
+        if (cx_write(idx99, forged_idx, strlen(forged_idx))) return 2;
+        r = actual(m1);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0 && strstr(r.err, "y2-sha-mismatch") != 0,
+           "mark-version-seq-forged-y2-sha-refused");
+        np_free(&r);
+
+        /* Preconditions satisfied: tag + INDEX exec-5-publish + Y2 commit -> updates version-seq, backfills exec-7-Y2-done, appends post-publish PASS */
+        if (cx_write(idx99, seed_idx, strlen(seed_idx))) return 2;
+        r = actual(m1);
+        rb = cx_read(vseq, &rn);
+        size_t irn = 0; char *irb = cx_read(idx99, &irn);
+        ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tUPDATED\tversion=0.0.99") && rb &&
+           strstr(rb, "2\t0.0.99\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tnow\n") != 0 &&
+           irb && strstr(irb, "\nexec-7-Y2-done\t") != 0 && strstr(irb, "\npost-publish\t") != 0 &&
+           strstr(irb, "\tPASS\tbuild/version-seq.tsv\tversion=0.0.99 marked \xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80") != 0,
+           "mark-version-seq-updates-and-seals-index");
+        free(rb); free(irb); np_free(&r);
         r = actual(m1);
         ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tALREADY_PUBLIC\tversion=0.0.99"), "mark-version-seq-idempotent");
         np_free(&r);
+
+        /* Real 0.0.89 Y2 -> post-publish acceptance test: exact 0.0.89 INDEX.tsv rows + --commit atomic commit */
+        {
+            char m89[4400], vs89[4400], idxd89[4400], idx89[4400], cmd89[4800];
+            if (cx_fmt(m89, sizeof m89, "%s/mrepo89", tmp) ||
+                cx_fmt(vs89, sizeof vs89, "%s/mrepo89/build/version-seq.tsv", tmp) ||
+                cx_fmt(idxd89, sizeof idxd89, "%s/mrepo89/release/evidence/0.0.89", tmp) ||
+                cx_fmt(idx89, sizeof idx89, "%s/mrepo89/release/evidence/0.0.89/INDEX.tsv", tmp) ||
+                sy_mkdir_all(idxd89, 0700) ||
+                cx_fmt(cmd89, sizeof cmd89, "%s/mrepo89/build", tmp) || sy_mkdir_all(cmd89, 0700)) return 2;
+            const char *vs89_txt =
+                "slot\tversion\tclass\tstate\tnote\n"
+                "23\t0.0.88\tcx-L0\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\t2026-11-21 \xe5\x85\xac\xe5\xbc\x80\n"
+                "24\t0.0.89\tA1a \xe5\x86\x85\xe5\xbb\xba\xe6\xa0\xb8\xe5\xbf\x83(U0-U3)\t\xe5\xbb\xba\xe8\xae\xae\t\xe7\xbc\x96\xe6\x8e\x92\xe8\x80\x85 2026-11-21 \xe8\xa3\x81\xe5\xae\x9a; \xe8\xae\xa1\xe5\x88\x92 plans/v0.0.89.md\n";
+            const char *idx89_y2 =
+                "exec-4-Y1\t2026-11-22 02:34:48 +0800\t-\tdb00056f102b7794c377b7819011678e058d23f3\tcandidate ci_run_id, evidence, decision, notes, rollback\n"
+                "exec-4-Y1-frozen\t2026-11-22 02:34:48 +0800\t-\t70186331c381171d2d75227f8ca3fc42d96af389e2e651c03f8a054acd5f2328:fd4e65b23e779955b06fb88d7b30bfd6c4857400b75b60231b6112b39ed23a52\tsha256 of release/evidence.tsv:release/decision.txt at Y1; frozen until Y2\n"
+                "exec-5-publish\t2026-11-22 02:34:52 +0800\t-\tv0.0.89\tisDraft=false, Latest\n"
+                "exec-6-public-readback\t2026-11-22 02:35:10 +0800\tPASS\tpublic-readback.txt\tfresh download sha256 equals candidate, c47-1-readback rc 0\n"
+                "exec-7-Y2\t2026-11-22 02:35:11 +0800\t-\tpending\tevidence INDEX and decision recomputed equal; Y2 commit follows\n";
+            if (cx_write(vs89, vs89_txt, strlen(vs89_txt)) || cx_write(idx89, idx89_y2, strlen(idx89_y2))) return 2;
+            if (cx_fmt(cmd89, sizeof cmd89,
+                "cd \"%s\" && git init -q -b main && git config user.name fx && git config user.email fx@example.invalid && "
+                "git add . && git commit -qm \"0.0.89 stage-a\" && git tag v0.0.89 && "
+                "git commit --allow-empty -qm \"v0.0.89 Y2: public readback\"", m89)) return 2;
+            char *gv89[] = {"sh", "-c", cmd89, 0};
+            r = actual(gv89); np_free(&r);
+            char *mc89[] = {bin, "mark-version-seq", "--version", "0.0.89", "--repo", m89, "--commit", 0};
+            r = actual(mc89);
+            ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tUPDATED\tversion=0.0.89") &&
+               has(&r, "VERSION_SEQ_COMMIT\trc=0\tversion=0.0.89\ty2="), "mark-version-seq-0089-commit-lands");
+            np_free(&r);
+            if (cx_fmt(cmd89, sizeof cmd89,
+                "cd \"%s\" && test -z \"$(git status --porcelain)\" && "
+                "git log -1 --format=%%s | grep -q \"v0.0.89 post-publish\" && "
+                "git show HEAD:build/version-seq.tsv | grep -q \"^24\t0.0.89\t.*\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\t\" && "
+                "[ \"$(git show HEAD:release/evidence/0.0.89/INDEX.tsv | grep -c '^exec-7-Y2-done\t')\" = 1 ] && "
+                "[ \"$(git show HEAD:release/evidence/0.0.89/INDEX.tsv | grep -c '^post-publish\t.*\tPASS\tbuild/version-seq.tsv\t')\" = 1 ] && "
+                "echo M89_HEAD_OK=1", m89)) return 2;
+            r = actual(gv89);
+            ck(r.rc == 0 && has(&r, "M89_HEAD_OK=1\n"), "mark-version-seq-0089-head-clean-and-sealed");
+            np_free(&r);
+            /* Second run with --commit is idempotent (no duplicate INDEX rows, no empty commit failure) */
+            r = actual(mc89);
+            ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tALREADY_PUBLIC\tversion=0.0.89"), "mark-version-seq-0089-commit-idempotent");
+            np_free(&r);
+            if (sy_remove_all(m89)) return 2;
+        }
 
         /* Readback verification: if a later row in version-seq.tsv is already marked public, readback refuses */
         const char * disordered_vs = "slot\tversion\tclass\tstate\tnote\n1\t0.0.98\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\told\n2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n3\t0.1.0\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tlater\n";
@@ -333,6 +406,8 @@ int main(int argc, char **argv) {
         np_free(&r);
 
         if (cx_write(vseq, seed_vs, strlen(seed_vs))) return 2;
+        if (cx_fmt(gcmd, sizeof gcmd, "cd \"%s\" && git commit --allow-empty -qm \"v0.0.999 Y2: public readback\"", mrepo)) return 2;
+        r = actual(gv); np_free(&r);
         char *m2[] = {bin, "mark-version-seq", "--version", "0.0.999", "--repo", mrepo, "--table", vseq, 0};
         r = actual(m2);
         ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0, "mark-version-seq-missing-refused");

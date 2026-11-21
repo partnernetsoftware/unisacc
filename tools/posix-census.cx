@@ -44,15 +44,65 @@ static const char *const POSIX_SYMS[] = {
     0
 };
 
-static int is_excluded_tool(const char *rel) {
+static int is_check_tool(const char *rel) {
     const char *base;
+    long n = tx_len(rel, 1024);
+    if (n < 10 || !tx_prefix(rel, n, "tools/", 6) || !tx_same(rel + n - 3, 3, ".cx", 3)) return 0;
+    base = rel + 6;
+    for (long i = 6; i < n; i++) if (rel[i] == '/') base = rel + i + 1;
+    return tx_prefix(base, tx_len(base, 256), "check-", 6) ? 1 : 0;
+}
+
+static int is_excluded_tool(const char *rel) {
     long n = tx_len(rel, 1024);
     if (n < 10 || !tx_prefix(rel, n, "tools/", 6) || !tx_same(rel + n - 3, 3, ".cx", 3)) return 1;
     if (tx_eqz(rel, "tools/posix-census.cx")) return 1;
-    base = rel + 6;
-    for (long i = 6; i < n; i++) if (rel[i] == '/') base = rel + i + 1;
-    if (tx_prefix(base, tx_len(base, 256), "check-", 6)) return 1;
+    if (is_check_tool(rel)) return 1;
     return 0;
+}
+
+/* Rule for tools/check-*.cx: a fixed-fixture rm -rf (non-mkdtemp/non-pid /tmp path, .cache/unisacc/check-*,
+ * or hash-keyed %08llx/%016llx fixture without .tmp.%d) must hold a file lock (sy_lockf / sy_flock) in the same file. */
+static int check_unlocked_fixed_rm(const char *root, const char *rel) {
+    char full[4400];
+    size_t sz = 0;
+    char *b;
+    if (!is_check_tool(rel)) return 0;
+    if (tx_eqz(rel, "tools/check-posix-census.cx") ||
+        tx_eqz(rel, "tools/check-pack-srcdir.cx") ||
+        tx_eqz(rel, "tools/check-s9-verdict.cx")) return 0;
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel)) return 0;
+    sy_stat_t st;
+    if (sy_lstat(full, &st) != 0 || st.kind != 'f') return 0;
+    b = (char *)cx_read(full, &sz);
+    if (!b) return 0;
+    int has_rm = 0, has_lock = 0, has_dyn = 0, has_tmp = 0, has_cache_fx = 0, has_hash_fx = 0, has_tmp_pid_pub = 0;
+    long at = 0, n = (long)sz;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && b[at + l - 1] == '\r') l--;
+        long i = 0;
+        while (i < l && (b[at + i] == ' ' || b[at + i] == '\t')) i++;
+        if (i < l && b[at + i] != '*' && !(i + 1 < l && b[at + i] == '/' && (b[at + i + 1] == '/' || b[at + i + 1] == '*'))) {
+            const char *s = b + at + i;
+            long sl = l - i;
+            if (tx_find(s, sl, "rm -rf ", 7) >= 0 || (tx_find(s, sl, "\"rm\"", 4) >= 0 && tx_find(s, sl, "\"-rf\"", 5) >= 0)) has_rm = 1;
+            if (tx_find(s, sl, "sy_lockf", 8) >= 0 || tx_find(s, sl, "sy_flock", 8) >= 0 ||
+                tx_find(s, sl, "lockf(", 6) >= 0 || tx_find(s, sl, "flock(", 6) >= 0) has_lock = 1;
+            if (tx_find(s, sl, "mkdtemp", 7) >= 0 || tx_find(s, sl, "mktemp", 6) >= 0 ||
+                tx_find(s, sl, "fsx_scratch", 11) >= 0 || tx_find(s, sl, "sr_default", 10) >= 0 ||
+                tx_find(s, sl, "sy_pid", 6) >= 0 || tx_find(s, sl, "getpid", 6) >= 0 ||
+                tx_find(s, sl, "$$", 2) >= 0 || tx_find(s, sl, "sy_now_ms", 9) >= 0 || tx_find(s, sl, "sy_now_ns", 9) >= 0) has_dyn = 1;
+            if (tx_find(s, sl, "/tmp/", 5) >= 0) has_tmp = 1;
+            if (tx_find(s, sl, ".cache/unisacc/check-", 21) >= 0) has_cache_fx = 1;
+            if (tx_find(s, sl, "%08llx", 6) >= 0 || tx_find(s, sl, "%016llx", 7) >= 0) has_hash_fx = 1;
+            if (tx_find(s, sl, ".tmp.%d", 7) >= 0) has_tmp_pid_pub = 1;
+        }
+        at += (e < 0 ? l : e + 1);
+    }
+    mm_free(b);
+    if (!has_rm || has_lock) return 0;
+    return (has_cache_fx || (has_hash_fx && !has_tmp_pid_pub) || (has_tmp && !has_dyn)) ? 1 : 0;
 }
 
 static void scan_line(const char *s, long n, long *p_posix, long *p_proc, long *p_ext) {
@@ -226,6 +276,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     long at = 0, n = (long)ln;
+    int unlocked_rm = 0;
     while (at < n) {
         long e = tx_chr(lst + at, n - at, '\n'), l = e < 0 ? n - at : e;
         if (l > 0 && lst[at + l - 1] == '\r') l--;
@@ -234,6 +285,10 @@ int main(int argc, char **argv) {
             mm_copy(rel, sizeof rel, lst + at, (size_t)l);
             rel[l] = 0;
             scan_file(root, rel);
+            if (mode != 2 && check_unlocked_fixed_rm(root, rel)) {
+                unlocked_rm++;
+                sy_printf("posix-census: %s has unlocked fixed-fixture rm -rf (require mkdtemp or sy_lockf/sy_flock)\n", rel);
+            }
         }
         at += (e < 0 ? l : e + 1);
     }
@@ -248,7 +303,7 @@ int main(int argc, char **argv) {
     }
 
     long cur_tot = 0, base_tot = 0;
-    int over = 0, below = 0;
+    int over = unlocked_rm, below = 0;
     for (int i = 0; i < nbase; i++) base_tot += base_rows[i].total;
     for (int i = 0; i < ncur; i++) {
         PcRow *c = &cur_rows[i];

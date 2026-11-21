@@ -794,11 +794,198 @@ static int has_publish_pass_row(const char *buf, size_t n) {
         if (pos < n) pos++;
         size_t ll = le - ls;
         if (ll > 15 && !memcmp(buf + ls, "exec-5-publish\t", 15)) {
-            for (size_t i = ls + 14; i + 6 <= le; i++) {
-                if (!memcmp(buf + i, "\tPASS\t", 6)) return 1;
+            int has_dash = 0, has_pub = 0;
+            for (size_t i = ls + 14; i < le; i++) {
+                if (i + 6 <= le && !memcmp(buf + i, "\tPASS\t", 6)) return 1;
+                if (i + 3 <= le && !memcmp(buf + i, "\t-\t", 3)) has_dash = 1;
+                if (i + 13 <= le && !memcmp(buf + i, "isDraft=false", 13)) has_pub = 1;
+            }
+            if (has_dash && has_pub) return 1;
+        }
+    }
+    return 0;
+}
+
+static int find_y2_commit_sha(const char *repo, const char *ver, char y2_sha[64]) {
+    char grep_pat[128], why[256];
+    if (cx_fmt(grep_pat, sizeof grep_pat, "^v%s Y2: public readback$", ver)) return 0;
+    char *gv[] = {"git", "-C", (char *)repo, "log", "-1", "--format=%H", "--grep", grep_pat, "HEAD", 0};
+    np_result gr = {0};
+    int gbad = np_run(gv, 0, 0, 10, &gr, why, sizeof why);
+    int gok = !gbad && gr.rc == 0 && !gr.residue && gr.out && gr.outn >= 40 && strspn(gr.out, "0123456789abcdef") >= 40;
+    if (gok) {
+        mm_copy(y2_sha, 64, gr.out, 40);
+        y2_sha[40] = 0;
+    }
+    np_free(&gr);
+    return gok;
+}
+
+static int check_index_y2_row(const char *buf, size_t n, const char *y2_sha, int *has_y2_done, int *has_post_pub) {
+    size_t pos = 0, y2n = strlen(y2_sha);
+    *has_y2_done = 0;
+    *has_post_pub = 0;
+    while (pos < n) {
+        size_t ls = pos;
+        while (pos < n && buf[pos] != '\n') pos++;
+        size_t le = pos;
+        if (pos < n) pos++;
+        size_t cs[6], ce[6];
+        int nc = 0;
+        size_t q = ls;
+        while (nc < 6 && q <= le) {
+            size_t s = q;
+            while (q < le && buf[q] != '\t') q++;
+            cs[nc] = s; ce[nc] = q; nc++;
+            q++;
+        }
+        if (nc >= 4 && ce[0] - cs[0] == 14 && !memcmp(buf + cs[0], "exec-7-Y2-done", 14)) {
+            *has_y2_done = 1;
+            if (ce[3] - cs[3] != y2n || memcmp(buf + cs[3], y2_sha, y2n) != 0) return -1;
+        }
+        if (nc >= 4 && ce[0] - cs[0] == 12 && !memcmp(buf + cs[0], "post-publish", 12)) {
+            *has_post_pub = 1;
+        }
+    }
+    return 0;
+}
+
+static int seal_index_rows(const char *repo, const char *ver, const char *index_path, const char *y2_sha, int has_y2_done, int has_post_pub) {
+    if (has_y2_done && has_post_pub) return 0;
+    char ts[64], why[256], row1[256], row2[256];
+    if (cx_fmt(ts, sizeof ts, "now")) return 2;
+    {
+        char *tv[] = {"git", "-C", (char *)repo, "log", "-1", "--format=%ci", "HEAD", 0};
+        np_result tr = {0};
+        if (!np_run(tv, 0, 0, 10, &tr, why, sizeof why) && tr.rc == 0 && tr.out && tr.outn > 0) {
+            size_t tl = tr.outn;
+            while (tl > 0 && (tr.out[tl - 1] == '\n' || tr.out[tl - 1] == '\r')) tl--;
+            if (tl > 0 && tl < sizeof ts) {
+                mm_copy(ts, sizeof ts, tr.out, tl);
+                ts[tl] = 0;
+            }
+        }
+        np_free(&tr);
+    }
+    size_t in_n = 0;
+    char *in_b = cx_read(index_path, &in_n);
+    if (!in_b) return 2;
+    size_t cap = in_n + 600;
+    char *ni = malloc(cap);
+    if (!ni) { free(in_b); return 2; }
+    mm_copy(ni, cap, in_b, in_n);
+    free(in_b);
+    size_t npos = in_n;
+    if (npos > 0 && ni[npos - 1] != '\n') ni[npos++] = '\n';
+    if (!has_y2_done) {
+        if (cx_fmt(row1, sizeof row1, "exec-7-Y2-done\t%s\t-\t%s\tY2 committed; this row rides with the next commit\n", ts, y2_sha)) {
+            free(ni); return 2;
+        }
+        size_t r1n = strlen(row1);
+        mm_copy(ni + npos, cap - npos, row1, r1n);
+        npos += r1n;
+    }
+    if (!has_post_pub) {
+        if (cx_fmt(row2, sizeof row2, "post-publish\t%s\tPASS\tbuild/version-seq.tsv\tversion=%s marked \xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80 (Y2=%s)\n", ts, ver, y2_sha)) {
+            free(ni); return 2;
+        }
+        size_t r2n = strlen(row2);
+        mm_copy(ni + npos, cap - npos, row2, r2n);
+        npos += r2n;
+    }
+    int wrc = sy_write_atomic(index_path, ni, npos, 0644);
+    free(ni);
+    return wrc != 0 ? 2 : 0;
+}
+
+static int commit_version_seq_and_index(const char *repo, const char *ver, const char *y2_sha, int do_push) {
+    char p_vmg[4400], p_dm[4400], p_dv[4400], idx_rel[256], cmsg[256], why[256];
+    if (!driver[0] && sy_realpath("./unisacc.com", driver, sizeof driver) < 0) driver[0] = 0;
+    if (cx_fmt(p_vmg, sizeof p_vmg, "%s/tools/version-metrics-gen.cx", repo) ||
+        cx_fmt(p_dm, sizeof p_dm, "%s/tools/day-metrics.cx", repo) ||
+        cx_fmt(p_dv, sizeof p_dv, "%s/tools/devsvc.cx", repo) ||
+        cx_fmt(idx_rel, sizeof idx_rel, "release/evidence/%s/INDEX.tsv", ver) ||
+        cx_fmt(cmsg, sizeof cmsg, "v%s post-publish: mark version-seq public and seal INDEX", ver)) return 2;
+    if (driver[0] && sy_exists(p_vmg) == 1) {
+        char *v1[] = {"sh", driver, "tools/version-metrics-gen.cx", "--", "--write-history", 0};
+        char *v2[] = {"sh", driver, "tools/version-metrics-gen.cx", "--", "--write", 0};
+        np_result r = {0};
+        if (np_run(v1, repo, 0, 45, &r, why, sizeof why) || r.rc != 0) { np_free(&r); return 2; }
+        np_free(&r);
+        if (np_run(v2, repo, 0, 45, &r, why, sizeof why) || r.rc != 0) { np_free(&r); return 2; }
+        np_free(&r);
+    }
+    if (driver[0] && sy_exists(p_dm) == 1) {
+        char *v3[] = {"sh", driver, "tools/day-metrics.cx", "--", "--write", 0};
+        np_result r = {0};
+        if (np_run(v3, repo, 0, 45, &r, why, sizeof why) || r.rc != 0) { np_free(&r); return 2; }
+        np_free(&r);
+    }
+    const char *cand_paths[5] = {
+        "build/version-seq.tsv",
+        idx_rel,
+        "build/version-cadence-git.tsv",
+        "build/version-cadence.tsv",
+        "build/north-star.tsv"
+    };
+    const char *paths[6];
+    int np = 0;
+    for (int i = 0; i < 5; i++) {
+        char fp[4400];
+        if (!cx_fmt(fp, sizeof fp, "%s/%s", repo, cand_paths[i]) && sy_exists(fp) == 1) paths[np++] = cand_paths[i];
+    }
+    paths[np] = 0;
+    char *sv[16];
+    int sk = 0;
+    sv[sk++] = "git"; sv[sk++] = "-C"; sv[sk++] = (char *)repo; sv[sk++] = "status"; sv[sk++] = "--porcelain"; sv[sk++] = "--";
+    for (int i = 0; i < np; i++) sv[sk++] = (char *)paths[i];
+    sv[sk] = 0;
+    np_result sr = {0};
+    if (np_run(sv, 0, 0, 15, &sr, why, sizeof why) || sr.rc != 0) { np_free(&sr); return 2; }
+    int dirty = sr.outn > 0;
+    np_free(&sr);
+    if (dirty) {
+        if (driver[0] && sy_exists(p_dv) == 1) {
+            char *cv[24];
+            int ck = 0;
+            cv[ck++] = "sh"; cv[ck++] = driver; cv[ck++] = "tools/devsvc.cx"; cv[ck++] = "--";
+            cv[ck++] = "git"; cv[ck++] = "commit"; cv[ck++] = "-m"; cv[ck++] = cmsg;
+            if (do_push) cv[ck++] = "--push";
+            cv[ck++] = "--whole";
+            for (int i = 0; i < np; i++) cv[ck++] = (char *)paths[i];
+            cv[ck] = 0;
+            np_result cr = {0};
+            if (np_run(cv, repo, 0, 55, &cr, why, sizeof why) || cr.rc != 0) { np_free(&cr); return 2; }
+            np_free(&cr);
+        } else {
+            char *av[16];
+            int ak = 0;
+            av[ak++] = "git"; av[ak++] = "-C"; av[ak++] = (char *)repo; av[ak++] = "add"; av[ak++] = "--";
+            for (int i = 0; i < np; i++) av[ak++] = (char *)paths[i];
+            av[ak] = 0;
+            np_result ar = {0};
+            if (np_run(av, 0, 0, 15, &ar, why, sizeof why) || ar.rc != 0) { np_free(&ar); return 2; }
+            np_free(&ar);
+            char *cv[] = {"git", "-C", (char *)repo, "commit", "-qm", cmsg, 0};
+            np_result cr = {0};
+            if (np_run(cv, 0, 0, 15, &cr, why, sizeof why) || cr.rc != 0) { np_free(&cr); return 2; }
+            np_free(&cr);
+            if (do_push) {
+                char *pv[] = {"git", "-C", (char *)repo, "push", "-q", "origin", "HEAD:main", 0};
+                np_result pr = {0};
+                if (np_run(pv, 0, 0, 30, &pr, why, sizeof why) || pr.rc != 0) { np_free(&pr); return 2; }
+                np_free(&pr);
             }
         }
     }
+    char *hv[] = {"git", "-C", (char *)repo, "rev-parse", "HEAD", 0};
+    np_result hr = {0};
+    if (np_run(hv, 0, 0, 10, &hr, why, sizeof why) || hr.rc != 0 || !hr.out || hr.outn < 40) { np_free(&hr); return 2; }
+    char head_sha[64];
+    mm_copy(head_sha, sizeof head_sha, hr.out, 40);
+    head_sha[40] = 0;
+    np_free(&hr);
+    sy_printf("VERSION_SEQ_COMMIT\trc=0\tversion=%s\ty2=%s\tcommit=%s\n", ver, y2_sha, head_sha);
     return 0;
 }
 
@@ -839,18 +1026,22 @@ static int verify_version_seq_readback(const char *table, const char *ver, char 
 
 static int cmd_mark_version_seq(int argc, char **argv) {
     const char *ver = 0, *table = 0, *repo = ".", *index_arg = 0;
-    char table_buf[4400], index_buf[4400], tag_spec[128], why[256], last_pub[64];
+    int do_commit = 0, do_push = 0, has_y2_done = 0, has_post_pub = 0;
+    char table_buf[4400], index_buf[4400], tag_spec[128], why[256], last_pub[64], y2_sha[64];
     for (int i = 0; i < argc; i++) {
-        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
-        if (!v) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
+        const char *k = argv[i];
+        if (!strcmp(k, "--commit")) { do_commit = 1; continue; }
+        if (!strcmp(k, "--push")) { do_push = 1; continue; }
+        const char *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
         if (!strcmp(k, "--version")) ver = v;
         else if (!strcmp(k, "--repo")) repo = v;
         else if (!strcmp(k, "--table")) table = v;
         else if (!strcmp(k, "--index")) index_arg = v;
-        else usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
+        else usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
         i++;
     }
-    if (!ver || !ver[0]) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH]");
+    if (!ver || !ver[0]) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
     if (!table) {
         if (!strcmp(repo, ".")) table = "build/version-seq.tsv";
         else {
@@ -883,11 +1074,22 @@ static int cmd_mark_version_seq(int argc, char **argv) {
         size_t in_n = 0;
         char *in_b = cx_read(index_path, &in_n);
         int iok = in_b && has_publish_pass_row(in_b, in_n);
-        if (in_b) free(in_b);
         if (!iok) {
+            if (in_b) free(in_b);
             fprintf(stderr, "REFUSE VERSION_SEQ_MARK missing-publish-index version=%s index=%s\n", ver, index_path);
             return 2;
         }
+        if (!find_y2_commit_sha(repo, ver, y2_sha)) {
+            free(in_b);
+            fprintf(stderr, "REFUSE VERSION_SEQ_MARK missing-y2-commit version=%s repo=%s\n", ver, repo);
+            return 2;
+        }
+        if (check_index_y2_row(in_b, in_n, y2_sha, &has_y2_done, &has_post_pub) < 0) {
+            free(in_b);
+            fprintf(stderr, "REFUSE VERSION_SEQ_MARK y2-sha-mismatch version=%s y2=%s index=%s\n", ver, y2_sha, index_path);
+            return 2;
+        }
+        free(in_b);
     }
     size_t n = 0;
     char *buf = cx_read(table, &n);
@@ -953,7 +1155,17 @@ static int cmd_mark_version_seq(int argc, char **argv) {
                 ver, last_pub[0] ? last_pub : "none", table);
         return 2;
     }
+    if (seal_index_rows(repo, ver, index_path, y2_sha, has_y2_done, has_post_pub) != 0) {
+        fprintf(stderr, "REFUSE VERSION_SEQ_MARK index-seal-failed version=%s index=%s\n", ver, index_path);
+        return 2;
+    }
     sy_printf("VERSION_SEQ_MARK\t%s\tversion=%s\ttable=%s\n", changed ? "UPDATED" : "ALREADY_PUBLIC", ver, table);
+    if (do_commit) {
+        if (commit_version_seq_and_index(repo, ver, y2_sha, do_push) != 0) {
+            fprintf(stderr, "REFUSE VERSION_SEQ_MARK commit-failed version=%s repo=%s\n", ver, repo);
+            return 2;
+        }
+    }
     return 0;
 }
 
@@ -996,7 +1208,7 @@ int main(int argc, char **argv) {
     /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
     show(5, s5);
     sy_printf("CHAIN\tSTOP\t5\texecute\tstart it as a long job: devsvc x --bg --par 1 -- <CMD above>, then devsvc wait; resume inside with --from-step\n");
-    sy_printf("CHAIN\tCMD\t6\tpost-publish\tsh ./unisacc.com tools/release-chain.cx -- mark-version-seq --version %s && sh ./unisacc.com tools/version-metrics-gen.cx -- --write-history && sh ./unisacc.com tools/version-metrics-gen.cx -- --write && sh ./unisacc.com tools/day-metrics.cx -- --write && install verified APE to unisacc.com (verify sha256) && update prd_mempalace.md\n", version);
+    sy_printf("CHAIN\tCMD\t6\tpost-publish\tsh ./unisacc.com tools/release-chain.cx -- mark-version-seq --version %s --commit --push && sh ./unisacc.com tools/version-metrics-gen.cx -- --write-history && sh ./unisacc.com tools/version-metrics-gen.cx -- --write && sh ./unisacc.com tools/day-metrics.cx -- --write && install verified APE to unisacc.com (verify sha256) && update prd_mempalace.md\n", version);
     sy_printf("CHAIN\tRESULT\t%s\tversion=%s\n", planning ? "PLAN" : "READY_TO_EXECUTE", version);
     return 0;
 }

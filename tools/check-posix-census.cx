@@ -146,7 +146,43 @@ int main(void) {
       ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "2 hits (baseline 2); 0 above baseline, 0 below", 46) >= 0,
          "check-after-ratchet-down-is-exact"); }
 
-    /* 5. real repository --check passes */
+    /* 5. check-*.cx fixed-fixture rm -rf without sy_lockf/sy_flock fails --check and refuses --write */
+    wf("tools/check-badfx.cx",
+       "int main(void) {\n"
+       "    const char *fx = \"/tmp/fixed-badfx\";\n"
+       "    char *v[] = {\"rm\", \"-rf\", (char *)fx, 0};\n"
+       "    return v[0] != 0;\n"
+       "}\n");
+    { char *v[] = {"git", "-C", fx, "add", "tools/check-badfx.cx", 0}; if (run_cmd(v, out, sizeof out) != 0) return 2; }
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "posix-census: tools/check-badfx.cx has unlocked fixed-fixture rm -rf", 68) >= 0,
+         "unlocked-fixed-rm-rf-fails-check"); }
+    { char *v[] = {"sh", com, tool, "--", "--write", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1, "write-refuses-unlocked-fixed-rm-rf"); }
+
+    /* 5b. adding sy_lockf or using sy_mkdtemp in check-*.cx passes --check */
+    wf("tools/check-badfx.cx",
+       "int main(void) {\n"
+       "    int lfd = sy_open(\"/tmp/fixed-badfx.lock\", 66, 0600);\n"
+       "    (void)sy_lockf(lfd, 1, 0);\n"
+       "    char *v[] = {\"rm\", \"-rf\", \"/tmp/fixed-badfx\", 0};\n"
+       "    return v[0] != 0;\n"
+       "}\n");
+    wf("tools/check-mkd.cx",
+       "int main(void) {\n"
+       "    char d[256]; sy_mkdtemp(\"/tmp\", \"mkd-\", d, sizeof d);\n"
+       "    char *v[] = {\"rm\", \"-rf\", d, 0};\n"
+       "    return v[0] != 0;\n"
+       "}\n");
+    { char *v[] = {"git", "-C", fx, "add", "tools/check-badfx.cx", "tools/check-mkd.cx", 0}; if (run_cmd(v, out, sizeof out) != 0) return 2; }
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "0 above baseline", 16) >= 0,
+         "locked-or-mkdtemp-check-rm-rf-passes"); }
+
+    /* 6. real repository --check passes */
     { char *v[] = {"sh", com, tool, "--", "--check", "--root", root, 0};
       int rc = run_cmd(v, out, sizeof out);
       ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "posix-census: ok:", 17) >= 0 &&

@@ -9408,6 +9408,13 @@ static void _unisa_sd_env(struct unisa_safedel_env *e) {
 /* checks 1-2 on the resolved T; HOME gets the trash home (the repository or the temp root).  DEST: T is where a
    top-level symlink points, and only checks 1 and the repository rule apply (removing a link to /usr/bin/cc is fine) */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_sd_policy
+/* 1 when the repository R found above T lies at or above a temp root that holds T: a stray /tmp/.git must not make every
+   scratch path under /tmp 'inside a repository' (the search stops at the temp root); a repository below the temp root still counts */
+static int _unisa_sd_tmpshadow(const struct unisa_safedel_env *e, const char *t, const char *r) {
+    int i;
+    for (i = 0; i < 2; i++) if (e->tmp[i][0] && _unisa_sd_below(t, e->tmp[i]) && _unisa_sd_within(e->tmp[i], r)) return 1;
+    return 0;
+}
 static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path, const char *t, int dest, char *home, char *why, int whylen) {
     char r[SAFEDEL_PATHLEN], o[SAFEDEL_PATHLEN], x[SAFEDEL_PATHLEN];
     if (t[0] != '/' || t[1] == 0) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "resolves to /", "");
@@ -9415,7 +9422,7 @@ static int _unisa_sd_policy(const struct unisa_safedel_env *e, const char *path,
     if (_unisa_sd_within(e->cwd, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the cwd or an ancestor of it: ", t);
     if (e->cwdrepo[0] && _unisa_sd_within(e->cwdrepo, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is the repository root or an ancestor of it: ", t);
     if (_unisa_sd_ingit(t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "lies inside a .git directory: ", t);
-    if (_unisa_sd_repo(t, r)) {
+    if (_unisa_sd_repo(t, r) && !_unisa_sd_tmpshadow(e, t, r)) {
         if (!strcmp(r, t)) return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "is a repository root (it has a .git entry): ", t);
         if (_unisa_sd_join(o, r, "out") || _unisa_sd_join(x, r, ".trash") || (!_unisa_sd_below(t, o) && !_unisa_sd_below(t, x)))
             return _unisa_sd_say(why, whylen, SAFEDEL_REFUSED, path, "lies in a repository outside its out/ and .trash/: ", t);
