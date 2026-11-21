@@ -133,7 +133,29 @@ static void group_a(void) {
     if (cx_fmt(b, sizeof b, "x\texec\t-\ta0=touch;a1=%s\n", pj("held-ran"))) die("f");   /* absolute: a wrong start must not land in the repo */
     r = run_flow("held", b, 2, 600, &s, &ev);
     ck(n == 2 && r == 1 && s.skip == 1 && has(ev, "REFUSE admission-timeout waited_ms=") && sy_exists(pj("held-ran")) == 0 && s.admit_wait_ms >= 500, "admission-timeout-held");
-    free(ev); ev = 0; fa_release(sl, n);
+    free(ev); ev = 0;
+    /* lightweight exec nodes (w=0 or light=1) and devsvc git control operations start immediately even when the heavy pool is full */
+    if (cx_fmt(b, sizeof b, "l1\texec\t-\ta0=touch;a1=%s;w=0\nl2\texec\t-\ta0=touch;a1=%s;light=1\n", pj("light-w0"), pj("light-flag"))) die("f");
+    r = run_flow("lightfull", b, 2, 600, &s, &ev);
+    ck(n == 2 && r == 0 && s.ok == 2 && s.skip == 0 && s.peak_tokens == 0 && s.admit_wait_ms == 0 &&
+       sy_exists(pj("light-w0")) == 1 && sy_exists(pj("light-flag")) == 1, "light-exec-runs-when-heavy-pool-full");
+    free(ev); ev = 0;
+    if (cx_fmt(b, sizeof b, "lt\texec\t-\ta0=touch;a1=%s;w=0\nhv\texec\t-\ta0=touch;a1=%s\n", pj("mix-light"), pj("mix-heavy"))) die("f");
+    r = run_flow("lightmix", b, 2, 600, &s, &ev);
+    ck(n == 2 && r == 1 && s.ok == 1 && s.skip == 1 && s.peak_tokens == 0 &&
+       sy_exists(pj("mix-light")) == 1 && sy_exists(pj("mix-heavy")) == 0 && has(ev, "REFUSE admission-timeout"),
+       "mixed-heavy-blocked-light-runs-when-pool-full");
+    free(ev); ev = 0;
+    if (cx_fmt(b, sizeof b, "gf\texec\t-\ta0=git;a1=rev-parse;a2=--git-dir\npr\texec\t-\ta0=sh;a1=unisacc.com;a2=tools/push-replay.cx;a3=--help\n")) die("f");
+    {
+        /* verify fl_is_light admits git control nodes (a0=git and tools/push-replay.cx) immediately even when heavy pool is 100% occupied */
+        if (cx_fmt(b, sizeof b, "gf\texec\t-\ta0=git;a1=rev-parse;a2=--git-dir\npr\texec\t-\ta0=true;a1=unisacc.com;a2=tools/push-replay.cx\n")) die("f");
+        r = run_flow("gitctrl", b, 2, 600, &s, &ev);
+        ck(n == 2 && r == 0 && s.ok == 2 && s.skip == 0 && s.peak_tokens == 0 && s.admit_wait_ms == 0,
+           "devsvc-git-control-exempt-when-heavy-pool-full");
+        free(ev); ev = 0;
+    }
+    fa_release(sl, n);
     pool(8, 1L << 20, "0.5");
     r = run_flow("nomem", "x\texec\t-\ta0=true\n", 2, 400, &s, &ev);
     ck(r == 1 && s.skip == 1 && has(ev, "REFUSE admission-timeout"), "admission-timeout-no-memory");
