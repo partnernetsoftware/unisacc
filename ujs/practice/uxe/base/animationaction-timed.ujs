@@ -1,0 +1,128 @@
+// Timed control extends the existing AnimationAction at the same address.
+// The caller supplies global mixer time and signed mixer delta for each tick.
+struct AnimationActionControl {
+  startTime: f64;
+  weight: f64;
+  effectiveWeight: f64;
+  fadeStart: f32;
+  fadeEnd: f32;
+  fadeFrom: f32;
+  fadeTo: f32;
+  interpolated: f32;
+  scheduled: u32;
+  fading: u32;
+}
+
+native function action_control_at(action:i64) i64 {
+  if(action%8!=0 || !animation_span(action,AnimationAction.size+AnimationActionControl.size)) { return 0-1; }
+  return action+AnimationAction.size;
+}
+
+native function AnimationAction_initTimed(action:i64,duration:f64,loop:i64,repeats:i64,clamp:i64) i64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0 || AnimationAction_init(action,duration,loop,repeats,clamp)<0) { return 0-1; }
+  let start=ux_f64_put(ctrl+AnimationActionControl.startTime,0.0);
+  let weight=ux_f64_put(ctrl+AnimationActionControl.weight,1.0);
+  let effective=ux_f64_put(ctrl+AnimationActionControl.effectiveWeight,1.0);
+  let armed=ux_u32_put(ctrl+AnimationActionControl.scheduled,0);
+  let fading=ux_u32_put(ctrl+AnimationActionControl.fading,0);
+  return action;
+}
+
+native function AnimationAction_startAt(action:i64,time:f64) i64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0 || time-time!=0.0) { return 0-1; }
+  let stamp=ux_f64_put(ctrl+AnimationActionControl.startTime,time);
+  let scheduled=ux_u32_put(ctrl+AnimationActionControl.scheduled,1);
+  return action;
+}
+
+native function AnimationAction_stopFading(action:i64) i64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0) { return 0-1; }
+  let weight=ux_u32_put(ctrl+AnimationActionControl.fading,0);
+  return action;
+}
+
+native function AnimationAction_setWeight(action:i64,weight:f64) i64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0 || weight-weight!=0.0) { return 0-1; }
+  let base=ux_f64_put(ctrl+AnimationActionControl.weight,weight);
+  let effective=0.0;
+  if(ux_u32(action+AnimationAction.enabled)!=0) { effective=weight; }
+  let updated=ux_f64_put(ctrl+AnimationActionControl.effectiveWeight,effective);
+  return AnimationAction_stopFading(action);
+}
+
+native function AnimationAction_getWeight(action:i64) f64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0) { return 0.0/0.0; }
+  return ux_f64(ctrl+AnimationActionControl.effectiveWeight);
+}
+
+native function AnimationAction_scheduleFade(action:i64,now:f64,duration:f64,fadeIn:i64) i64 {
+  let ctrl=action_control_at(action);
+  let finish=now+duration;
+  let bound=3402823466385288.0*1000000000000.0*100000000000.0;
+  if(ctrl<0 || duration<0.0 || duration-duration!=0.0 ||
+     !(now>=0.0-bound && finish<=bound) || (fadeIn!=0 && fadeIn!=1)) { return 0-1; }
+  let a=ux_f32_put(ctrl+AnimationActionControl.fadeStart,now);
+  let b=ux_f32_put(ctrl+AnimationActionControl.fadeEnd,finish);
+  let c=ux_f32_put(ctrl+AnimationActionControl.fadeFrom,1.0-fadeIn);
+  let d=ux_f32_put(ctrl+AnimationActionControl.fadeTo,0.0+fadeIn);
+  let enabled=ux_u32_put(ctrl+AnimationActionControl.fading,1);
+  return action;
+}
+
+native function AnimationAction_fadeIn(action:i64,now:f64,duration:f64) i64 {
+  return AnimationAction_scheduleFade(action,now,duration,1);
+}
+
+native function AnimationAction_fadeOut(action:i64,now:f64,duration:f64) i64 {
+  return AnimationAction_scheduleFade(action,now,duration,0);
+}
+
+native function action_control_weight(action:i64,ctrl:i64,time:f64) i64 {
+  let weight=0.0;
+  if(ux_u32(action+AnimationAction.enabled)!=0) {
+    weight=ux_f64(ctrl+AnimationActionControl.weight);
+    if(ux_u32(ctrl+AnimationActionControl.fading)!=0) {
+      let t0=ux_f32(ctrl+AnimationActionControl.fadeStart);
+      let t1=ux_f32(ctrl+AnimationActionControl.fadeEnd);
+      let a=ux_f32(ctrl+AnimationActionControl.fadeFrom);
+      let b=ux_f32(ctrl+AnimationActionControl.fadeTo);
+      let factor=b;
+      if(time<t0) { factor=a; }
+      else if(time<t1) { factor=a+(b-a)*(time-t0)/(t1-t0); }
+      let rounded=ux_f32_put(ctrl+AnimationActionControl.interpolated,factor);
+      weight=weight*ux_f32(ctrl+AnimationActionControl.interpolated);
+      if(time>t1) {
+        let done=ux_u32_put(ctrl+AnimationActionControl.fading,0);
+        if(b==0.0) { let disabled=ux_u32_put(action+AnimationAction.enabled,0); }
+      }
+    }
+  }
+  let updated=ux_f64_put(ctrl+AnimationActionControl.effectiveWeight,weight);
+  return action;
+}
+
+native function AnimationAction_tickTimed(action:i64,time:f64,delta:f64) i64 {
+  let ctrl=action_control_at(action);
+  if(ctrl<0 || time-time!=0.0 || delta-delta!=0.0) { return 0-1; }
+  if(ux_u32(action+AnimationAction.enabled)==0) { return action_control_weight(action,ctrl,time); }
+  let start=ux_u32(ctrl+AnimationActionControl.scheduled);
+  let elapsed=delta;
+  if(start!=0) {
+    let passed=time-ux_f64(ctrl+AnimationActionControl.startTime);
+    if(delta==0.0 || (delta>0.0 && passed<0.0) || (delta<0.0 && passed>0.0)) {
+      elapsed=0.0;
+      start=0;
+    } else {
+      elapsed=passed;
+    }
+  }
+  let advanced=AnimationAction_step(action,elapsed);
+  if(advanced<0) { return advanced; }
+  if(start!=0) { let consumed=ux_u32_put(ctrl+AnimationActionControl.scheduled,0); }
+  return action_control_weight(action,ctrl,time);
+}
