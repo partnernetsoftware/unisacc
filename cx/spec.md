@@ -123,7 +123,7 @@ RFC 2119：本文「必须 / 不得 / 应当 / 可以」= MUST / MUST NOT / SHOU
 | **CX-U-4** | `NAME` 的点号是子目录。解析起点是使用方文件所在目录：先找 `<使用方目录>/<NAME 点换斜杠>.cx`；该文件不存在时按 **CX-U-7** 查包根。 |
 | **CX-U-5** | 间接可见不得给原型：A `use` mid、mid `use` text.fmt，A 调用 `tx_snprintf` 必须视为未声明。用到哪个模块就必须直接 `use` 那个模块。 |
 | **CX-U-6** | 现行编译把被 `use` 的函数体编进当前 `-funit` 对象。每模块只进一只对象、消费者只留未定义引用，是已裁定未落地的构造合同，见 **CX-W-1**。 |
-| **CX-U-7** | 包根：从使用方文件所在目录逐级向上，最近一个含 `cxroot.tsv` 的目录是包根（相对路径以 `../` 向上，至多 64 级）。文件首行 `CXROOT1`，其后每行 `R<TAB>PREFIX<TAB>DIR`（`#` 行与空行为注释）；`PREFIX` 是模块名，`DIR` 相对包根，不得以 `/` 开头或结尾，不得含空段、`.`、`..` 或 TAB。与 `NAME` 前导段相等的最长 `PREFIX` 把 `NAME` 映射到 `DIR/<其余段点换斜杠>.cx`。最近的包根单独决定：其行都不覆盖 `NAME` 时不再向上找，报旁边路径缺失；覆盖了但文件缺失时报包根路径缺失。首行不符、畸形行、`PREFIX` 重复一律具名拒绝，不跳行。旁边文件存在时总是旁边优先。实现：`cx/cx0/plan.cx` `cxm_rootfind`（权威）、`cx/compiler/cxmod.cx`（产品）、工具侧 `tools/cxlib/cxroot.cx`；仓根 `cxroot.tsv`。 |
+| **CX-U-7** | 包根：从使用方文件所在目录逐级向上，最近一个含 `cxroot.tsv` 的目录是包根（相对路径以 `../` 向上，至多 64 级）。文件首行 `CXROOT1`，其后每行 `R<TAB>PREFIX<TAB>DIR`（`#` 行与空行为注释）；`PREFIX` 是模块名，`DIR` 相对包根，不得以 `/` 开头或结尾，不得含空段、`.`、`..` 或 TAB。与 `NAME` 完整相等或前导段相等的最长 `PREFIX` 胜出：完整相等时映射到 `DIR.cx`，前导段相等时映射到 `DIR/<其余段点换斜杠>.cx`。最近的包根单独决定：其行都不覆盖 `NAME` 时不再向上找，报旁边路径缺失；覆盖了但文件缺失时报包根路径缺失。首行不符、畸形行、`PREFIX` 重复一律具名拒绝，不跳行。旁边文件存在时总是旁边优先。实现：`cx/cx0/plan.cx` `cxm_rootfind`（权威）、`cx/compiler/cxmod.cx`（产品）、工具侧 `tools/cxlib/cxroot.cx`；仓根 `cxroot.tsv`。 |
 
 验收锁定：`tests/cx-namespace.cx`（含别名消解与符号级过滤）。
 

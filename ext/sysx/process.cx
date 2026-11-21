@@ -2,9 +2,9 @@
  * Do not import this facade together with cxlib.netpack: module re-export
  * and merging identical public facade symbols are not implemented. */
 #pragma unisa module process
-#pragma unisa dock
 #pragma unisa use sysx.processcore
 #pragma unisa use sysx.reaper
+#pragma unisa use sys.posix
 void np_free(np_result *r) { pc_free(r); }
 int np_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl) { return pc_run(argv,cwd,envadd,secs,res,why,wl,0); }
 
@@ -15,19 +15,15 @@ int sy_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *re
 int sy_child_subreaper(void) { return rp_subreaper(); }
 
 /* Online CPU count for a caller choosing a default parallelism (0 cores make every default job count wrong).
-   /sys is the portable-of-Linux source here; -1 elsewhere, so the caller can pick its own fallback. */
-static int np_ncpu_os(void) {
-#if defined(__linux__)
-    DIR *d = opendir("/sys/devices/system/cpu");
-    struct dirent *e; int n = 0;
-    if (!d) return -1;
-    while ((e = readdir(d)) != 0) {
-        if (!strncmp(e->d_name, "cpu", 3) && e->d_name[3] >= '0' && e->d_name[3] <= '9') n++;
+   /sys is the portable-of-Linux source here; -1 elsewhere (the directory is absent, or sy_dir_open is -ENOSYS),
+   so the caller can pick its own fallback. No platform #if: absence of the path is the platform answer. */
+int sy_ncpu(void) {
+    sy_dir_t d;
+    int n = 0, r;
+    if (sy_dir_open(&d, "/sys/devices/system/cpu") != 0) return -1;
+    while ((r = sy_dir_next(&d)) == 1) {
+        if (d.name_n > 3 && d.name[0] == 'c' && d.name[1] == 'p' && d.name[2] == 'u' && d.name[3] >= '0' && d.name[3] <= '9') n++;
     }
-    closedir(d);
+    sy_dir_close(&d);
     return n > 0 ? n : -1;
-#else
-    return -1;
-#endif
 }
-int sy_ncpu(void) { return np_ncpu_os(); }

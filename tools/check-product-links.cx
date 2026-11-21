@@ -1,0 +1,145 @@
+/* tools/check-product-links.cx -- verify build/product-links.tsv matches repo symlinks,
+   and unit-test class 甲/乙 rules, L.10-L.12 exceptions (neutral back-link without following cycle,
+   sid-support override, multi-hop recording) + mutations.
+   Identity-soundness premise (v0.0.90 source-packages-v3, design v2.9 / L.10-L.12):
+   build/product-links.tsv is the fact source for ident-v3 symlink handling. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int pl_pass, pl_fail;
+static void pl_ck(int ok, const char *name) {
+    printf("%s\tproduct-links.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) pl_pass++; else pl_fail++;
+}
+
+static int run_gen(const char *mode, const char *root, const char *sup, char *out, int cap) {
+    char *av_repo[] = { "timeout", "30", "sh", "unisacc.com", "tools/product-links.cx", "--", (char *)mode, 0 };
+    char *av_root[] = { "timeout", "30", "sh", "unisacc.com", "tools/product-links.cx", "--", (char *)mode, "--root", (char *)root, 0 };
+    char *av_sup[]  = { "timeout", "30", "sh", "unisacc.com", "tools/product-links.cx", "--", (char *)mode, "--root", (char *)root, "--support", (char *)sup, 0 };
+    int cut = 0;
+    return sy_run(sup ? av_sup : (root ? av_root : av_repo), out, cap - 1, &cut);
+}
+
+int main(void) {
+    static char out[4096];
+    char dir[128], p[256], tbl[256], supf[256];
+    int rc;
+
+    /* 1. Repo check + verify codec.cx two-hop and remaining class-A links (cx/text/{json,build,deflate,num}.cx) */
+    rc = run_gen("--check", 0, 0, out, (int)sizeof out);
+    pl_ck(rc == 0 && strstr(out, "PRODUCT_LINKS\tCHECK\ttotal=24\tclass_a=4\tclass_b=20") != 0, "repo-links-match");
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        int ok_repo = (sy_read_file("build/product-links.tsv", &tb, &tn, 65535) == 0 && tb != 0) &&
+            strstr((char *)tb, "exec/c/cxlib/codec.cx\t../../../tools/cxlib/codec.cx\tcx/runtime/codec.cx\texec/c/cxlib/codec.cx -> tools/cxlib/codec.cx -> cx/runtime/codec.cx\t乙\tnon-cx-src-tree") != 0 &&
+            strstr((char *)tb, "cx/text/json.cx\t../../ext/textx/json.cx\text/textx/json.cx\tcx/text/json.cx -> ext/textx/json.cx\t甲\tout-of-tree-cx-file") != 0 &&
+            strstr((char *)tb, "src/sysx\t") == 0;
+        pl_ck(ok_repo, "repo-codec-two-hops-and-class-a-only-textx");
+    }
+
+    /* 2. Private fixture: rules, back-link cycle neutrality, support override, multi-hop + mutations */
+    if (sy_mkdtemp("/tmp", "chk-pl-", dir, (int)sizeof dir) != 0) return 2;
+    cx_fmt(p, (long)sizeof p, "%s/cx", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/cx/sub", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/exec", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/ext", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/ext/pkg", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/tools", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/build", dir); sy_mkdir(p, 0755);
+
+    cx_fmt(p, (long)sizeof p, "%s/ext/a.cx", dir); sy_write_file(p, "/* cx */\n", 9, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/ext/b.h", dir); sy_write_file(p, "/* hdr */\n", 10, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/ext/pkg/ok.cx", dir); sy_write_file(p, "/* pkg */\n", 10, 0644);
+    /* Non-.cx file inside cx/sub to verify back-link ext/pkg/back -> cx/sub is NOT followed */
+    cx_fmt(p, (long)sizeof p, "%s/cx/sub/keep.h", dir); sy_write_file(p, "/* h */\n", 8, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/cx/sub/end.cx", dir); sy_write_file(p, "/* end */\n", 10, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/ext/pkg/back", dir); sy_symlink("../../cx/sub", p);
+
+    /* Multi-hop: exec/two.cx -> ../tools/mid.cx -> ../cx/sub/end.cx */
+    cx_fmt(p, (long)sizeof p, "%s/tools/mid.cx", dir); sy_symlink("../cx/sub/end.cx", p);
+    cx_fmt(p, (long)sizeof p, "%s/exec/two.cx", dir); sy_symlink("../tools/mid.cx", p);
+
+    cx_fmt(p, (long)sizeof p, "%s/cx/a.cx", dir); sy_symlink("../ext/a.cx", p);
+    cx_fmt(p, (long)sizeof p, "%s/cx/b.h", dir); sy_symlink("../ext/b.h", p);
+    cx_fmt(p, (long)sizeof p, "%s/cx/pkg", dir); sy_symlink("../ext/pkg", p);
+
+    cx_fmt(tbl, (long)sizeof tbl, "%s/build/product-links.tsv", dir);
+    cx_fmt(supf, (long)sizeof supf, "%s/build/sid-support.tsv", dir);
+
+    /* Rule 1 (back-link neutral, cycle not followed) + Rule 3 (two-hop) + base class A/B */
+    rc = run_gen("--write", dir, 0, out, (int)sizeof out);
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        int read_ok = (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb != 0);
+        int rules_ok = read_ok &&
+            strstr((char *)tb, "cx/a.cx\t../ext/a.cx\text/a.cx\tcx/a.cx -> ext/a.cx\t甲\tout-of-tree-cx-file") != 0 &&
+            strstr((char *)tb, "cx/b.h\t../ext/b.h\text/b.h\tcx/b.h -> ext/b.h\t乙\tout-of-tree-non-cx") != 0 &&
+            strstr((char *)tb, "cx/pkg\t../ext/pkg\text/pkg\tcx/pkg -> ext/pkg\t甲\tout-of-tree-cx-dir") != 0 &&
+            strstr((char *)tb, "exec/two.cx\t../tools/mid.cx\tcx/sub/end.cx\texec/two.cx -> tools/mid.cx -> cx/sub/end.cx\t乙\tnon-cx-src-tree") != 0;
+        pl_ck(rc == 0 && rules_ok, "fixture-rules-backlink-neutral-and-two-hops");
+    }
+    rc = run_gen("--check", dir, 0, out, (int)sizeof out);
+    pl_ck(rc == 0 && strstr(out, "PRODUCT_LINKS\tCHECK\ttotal=4\tclass_a=2\tclass_b=2") != 0, "fixture-green-check");
+
+    /* Mutation 1 (Rule 1 negative): out-of-tree non-.cx inner link inside ext/pkg must demote cx/pkg to 乙 */
+    cx_fmt(p, (long)sizeof p, "%s/ext/pkg/bad.h", dir); sy_symlink("../b.h", p);
+    rc = run_gen("--check", dir, 0, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF\ttotal=4\tclass_a=1\tclass_b=3") != 0, "mut1-inner-out-of-tree-non-cx-demotes-to-b");
+    sy_unlink(p);
+
+    /* Rule 2 (support override) + Mutation 2 (removing support row must fail check) */
+    {
+        const char *sup_txt = "# kind\tpath\ntool-bytes\text/a.cx\n";
+        sy_write_file(supf, sup_txt, (long)strlen(sup_txt), 0644);
+        rc = run_gen("--write", dir, supf, out, (int)sizeof out);
+        {
+            unsigned char *tb = 0; int64_t tn = 0;
+            int has_ov = (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb != 0) &&
+                strstr((char *)tb, "cx/a.cx\t../ext/a.cx\text/a.cx\tcx/a.cx -> ext/a.cx\t甲\tout-of-tree-cx-file+support-override") != 0;
+            pl_ck(rc == 0 && has_ov, "rule2-support-override-recorded");
+        }
+        rc = run_gen("--check", dir, supf, out, (int)sizeof out);
+        pl_ck(rc == 0, "rule2-support-override-check-green");
+        /* Clear support file -> check against table with +support-override must fail */
+        sy_write_file(supf, "# kind\tpath\n", 12, 0644);
+        rc = run_gen("--check", dir, supf, out, (int)sizeof out);
+        pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut2-missing-support-row-fails");
+        sy_unlink(supf);
+    }
+
+    /* Reset fixture table without support override */
+    run_gen("--write", dir, 0, out, (int)sizeof out);
+
+    /* Mutation 3: add unregistered symlink -> must FAIL */
+    cx_fmt(p, (long)sizeof p, "%s/cx/new.cx", dir); sy_symlink("../ext/a.cx", p);
+    rc = run_gen("--check", dir, 0, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut3-unregistered-link-fails");
+    sy_unlink(p);
+
+    /* Mutation 4: tamper two-hop chain into single-hop in table -> must FAIL */
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        if (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb) {
+            const char *old_h = "exec/two.cx -> tools/mid.cx -> cx/sub/end.cx";
+            const char *new_h = "exec/two.cx -> cx/sub/end.cx";
+            char *hit = strstr((char *)tb, old_h);
+            if (hit) {
+                char mod[4096];
+                long pre = hit - (char *)tb, ol = (long)strlen(old_h), nl = (long)strlen(new_h);
+                mm_copy(mod, (long)sizeof mod, tb, pre);
+                mm_copy(mod + pre, (long)sizeof mod - pre, new_h, nl);
+                mm_copy(mod + pre + nl, (long)sizeof mod - pre - nl, hit + ol, (long)tn - pre - ol);
+                sy_write_file(tbl, mod, pre + nl + ((long)tn - pre - ol), 0644);
+            }
+        }
+    }
+    rc = run_gen("--check", dir, 0, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut4-tampered-hops-fails");
+
+    sy_remove_all(dir);
+    printf("CHECK_PRODUCT_LINKS\tpassed=%d\tfailed=%d\n", pl_pass, pl_fail);
+    return pl_fail ? 1 : 0;
+}

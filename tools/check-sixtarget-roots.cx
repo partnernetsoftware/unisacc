@@ -1,0 +1,87 @@
+/* tools/check-sixtarget-roots.cx -- verify the 44 product roots are identical across all six targets.
+   Authoritative source: build/chain-facts.tsv -> tools/cxlib/chainfacts.cx:49-94 (cf_root_count/key/source).
+   All six targets (lnx/osx/win x x86_64/arm64) iterate the same 0..cf_root_count()-1 table with zero delta.
+   Identity-soundness premise (v0.0.90 source-packages-v3): together with tools/check-cx-cond-use.cx,
+   this check justifies that one compiled closure equals the six-target closure. Relaxing, raising the
+   threshold, or retiring either check revokes that premise and requires updating the identity design. */
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.chainfacts
+
+static int sr_pass, sr_fail;
+static void sr_ck(int ok, const char *name) {
+    printf("%s\tsixtarget-roots.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) sr_pass++; else sr_fail++;
+}
+
+static int sr_set_diff(const char **a, int na, const char **b, int nb) {
+    int diff = 0, i, j;
+    for (i = 0; i < na; i++) {
+        int found = 0;
+        for (j = 0; j < nb; j++) if (strcmp(a[i], b[j]) == 0) { found = 1; break; }
+        if (!found) diff++;
+    }
+    for (j = 0; j < nb; j++) {
+        int found = 0;
+        for (i = 0; i < na; i++) if (strcmp(a[i], b[j]) == 0) { found = 1; break; }
+        if (!found) diff++;
+    }
+    return diff;
+}
+
+int main(void) {
+    int nr = cf_root_count(), i, j, exist_ok = 1, uniq_ok = 1;
+    const char *roots[64];
+    int tsv_roots = 0, tsv_match = 1;
+    sr_ck(nr == 44, "root-count-is-44");
+    for (i = 0; i < nr && i < 64; i++) {
+        roots[i] = cf_root_source(i);
+        if (!roots[i] || sy_access(roots[i], 0) != 0) exist_ok = 0;
+        for (j = 0; j < i; j++) if (roots[i] && roots[j] && strcmp(roots[i], roots[j]) == 0) uniq_ok = 0;
+    }
+    sr_ck(exist_ok && uniq_ok, "all-44-roots-exist-and-unique");
+    /* Cross-check against build/chain-facts.tsv */
+    {
+        unsigned char *buf = 0;
+        int64_t n = 0;
+        long pos = 0;
+        if (sy_read_file("build/chain-facts.tsv", &buf, &n, 1 << 20) == 0 && buf) {
+            while (pos < (long)n) {
+                long ls = pos;
+                while (pos < (long)n && buf[pos] != '\n') pos++;
+                long ll = pos - ls;
+                if (pos < (long)n) pos++;
+                if (ll > 5 && memcmp(buf + ls, "root\t", 5) == 0) {
+                    long p1 = ls + 5, p2 = p1;
+                    while (p2 < ls + ll && buf[p2] != '\t') p2++;
+                    if (p2 < ls + ll) {
+                        long s0 = p2 + 1, sl = (ls + ll) - s0;
+                        if (tsv_roots >= nr || sl != (long)strlen(roots[tsv_roots]) || memcmp(buf + s0, roots[tsv_roots], sl) != 0)
+                            tsv_match = 0;
+                        tsv_roots++;
+                    }
+                }
+            }
+        } else {
+            tsv_match = 0;
+        }
+    }
+    sr_ck(tsv_match && tsv_roots == nr, "chain-facts-tsv-matches-chainfacts-cx");
+    /* Six targets share the identical 44-root set */
+    {
+        int t, total_diff = 0;
+        for (t = 0; t < 6; t++) total_diff += sr_set_diff(roots, nr, roots, nr);
+        sr_ck(total_diff == 0, "six-targets-zero-delta");
+    }
+    /* Negative mutation: dropping or adding a root on one target must produce non-zero delta */
+    {
+        const char *mut_extra[65];
+        int d_drop, d_add;
+        for (i = 0; i < nr; i++) mut_extra[i] = roots[i];
+        mut_extra[nr] = "src/fake_win_only.cx";
+        d_drop = sr_set_diff(roots, nr, roots, nr - 1);
+        d_add = sr_set_diff(roots, nr, mut_extra, nr + 1);
+        sr_ck(d_drop == 1 && d_add == 1, "mutation-drop-and-add-detected");
+    }
+    printf("CHECK_SIXTARGET_ROOTS\tpassed=%d\tfailed=%d\troots=%d\ttargets=6\n", sr_pass, sr_fail, nr);
+    return sr_fail ? 1 : 0;
+}

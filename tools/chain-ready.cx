@@ -72,7 +72,7 @@
 #pragma unisa use sys.posix
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
-#define MAXJ 32
+#define MAXJ 64
 #define NEWMSG_N 3
 #define CHAIN_PASS_BASELINE 137
 
@@ -352,7 +352,7 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "extract")) return j_extract(o, n, rc, ev, cap);
     if (tx_eqz(kind, "chain")) return j_chain(o, n, rc, ev, cap);
     if (tx_eqz(kind, "chain-shards")) return j_chain_shards_text(o, n, rc, ev, cap);
-    if (tx_eqz(kind, "affected")) return j_affected(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "affected") || tx_prefix(kind, (long)tx_len(kind, 64), "affected:", 9)) return j_affected(o, n, rc, ev, cap);
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
     if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
     if (tx_eqz(kind, "genall")) return j_genall(o, n, rc, ev, cap);
@@ -1097,11 +1097,52 @@ int main(int argc, char **argv) {
                 }
             }
             if (npath > 0) {
-                int c = 0, y;
-                J[nj].argv[c++] = "./tools/bound"; J[nj].argv[c++] = "80"; J[nj].argv[c++] = "sh"; J[nj].argv[c++] = UC;
-                J[nj].argv[c++] = "tools/affected.cx"; J[nj].argv[c++] = "--"; J[nj].argv[c++] = "--files";
-                for (y = 0; y < npath && c < 20; y++) J[nj].argv[c++] = paths[y];
-                J[nj].argv[c++] = "--run"; J[nj].argv[c] = 0; J[nj].name = "6-affected"; items[nj] = "affected"; prios[nj] = 5; nj++;
+                /* List affected batch IDs first, then shard into <=4 batches per 60s job (never relax bound). */
+                Job lg; int c = 0, y;
+                static char aff_ids[128][128]; int naff = 0;
+                lg.argv[c++] = "./tools/bound"; lg.argv[c++] = "30"; lg.argv[c++] = "sh"; lg.argv[c++] = UC;
+                lg.argv[c++] = "tools/affected.cx"; lg.argv[c++] = "--"; lg.argv[c++] = "--files";
+                for (y = 0; y < npath && c < 20; y++) lg.argv[c++] = paths[y];
+                lg.argv[c++] = "--list-only"; lg.argv[c] = 0; lg.name = "6-affected-list";
+                start(&lg); finish(&lg);
+                if (lg.state == 3 || lg.rc != 0) {
+                    char ev[320];
+                    cx_fmt(ev, sizeof ev, "rc=%d affected --list-only failed", lg.state == 3 ? -1 : lg.rc);
+                    row("6-affected", "FAIL", ev, lg.ms);
+                } else {
+                    long at = 0;
+                    while (lg.out && at < lg.n && naff < 128) {
+                        long e = tx_chr(lg.out + at, lg.n - at, '\n'), ln = e < 0 ? lg.n - at : e;
+                        if (ln > 9 && tx_prefix(lg.out + at, ln, "AFFECTED\t", 9)) {
+                            const char *p = lg.out + at + 9;
+                            long rem = ln - 9;
+                            long tab = tx_chr(p, rem, '\t');
+                            long idl = tab >= 0 ? tab : rem;
+                            if (idl > 0 && idl < 127) {
+                                mm_copy(aff_ids[naff], 128, p, (size_t)idl);
+                                aff_ids[naff][idl] = 0;
+                                naff++;
+                            }
+                        }
+                        at += ln + 1;
+                    }
+                    if (naff == 0) {
+                        row("6-affected", "PASS", "0 affected batches for changed .cx files", lg.ms);
+                    } else {
+                        int s = 0, per = 4;
+                        while (s < naff && nj < MAXJ) {
+                            int end = s + per < naff ? s + per : naff;
+                            int ac = 0, j;
+                            J[nj].argv[ac++] = "./tools/bound"; J[nj].argv[ac++] = "60"; J[nj].argv[ac++] = "sh"; J[nj].argv[ac++] = UC;
+                            J[nj].argv[ac++] = "tools/affected.cx"; J[nj].argv[ac++] = "--"; J[nj].argv[ac++] = "--ids";
+                            for (j = s; j < end && ac < 20; j++) J[nj].argv[ac++] = aff_ids[j];
+                            J[nj].argv[ac++] = "--run"; J[nj].argv[ac] = 0;
+                            J[nj].name = "6-affected"; items[nj] = "affected:shard"; prios[nj] = 5; nj++;
+                            s = end;
+                        }
+                    }
+                }
+                if (lg.out) free(lg.out);
             } else { row("6-affected", "PASS", "no changed .cx files (dirty tree and --since range)", 0); }
         }
     }
@@ -1188,11 +1229,11 @@ int main(int argc, char **argv) {
             }
         }
     }
-    {   char ev[640], rev_ev[640], der_pass_ev[640], der_fail_ev[640];
-        int ok, rev_ok = -1, der_ok = 1, der_cnt = 0;
-        long rev_ms = 0, der_ms = 0, dfn = 0;
+    {   char ev[640], rev_ev[640], der_pass_ev[640], der_fail_ev[640], aff_pass_ev[640], aff_fail_ev[640];
+        int ok, rev_ok = -1, der_ok = 1, der_cnt = 0, aff_ok = 1, aff_cnt = 0;
+        long rev_ms = 0, der_ms = 0, dfn = 0, aff_ms = 0, afn = 0;
         const char *ch_names[8], *ch_outs[8]; long ch_lens[8], ch_ms = 0; int ch_rcs[8], ch_cnt = 0;
-        der_pass_ev[0] = 0; der_fail_ev[0] = 0;
+        der_pass_ev[0] = 0; der_fail_ev[0] = 0; aff_pass_ev[0] = 0; aff_fail_ev[0] = 0;
         for (k = 0; k < nj; k++) {
             long il = (long)tx_len(items[k], 256);
             if (il > 6 && tx_prefix(items[k], il, "chain:", 6)) {
@@ -1240,6 +1281,30 @@ int main(int argc, char **argv) {
                     else cx_fmt(merged, sizeof merged, "shards=%d %s", der_cnt, der_fail_ev);
                     row_judged("2a-derive", der_ok, merged, der_ms);
                     der_cnt = 0; der_ok = 1; der_ms = 0; dfn = 0;
+                }
+                continue;
+            }
+            if (il > 9 && tx_prefix(items[k], il, "affected:", 9)) {
+                aff_cnt++;
+                if (J[k].ms > aff_ms) aff_ms = J[k].ms;
+                if (!ok) {
+                    char one[320]; long ol;
+                    aff_ok = 0;
+                    cx_fmt(one, sizeof one, "%s[shard%d] %s", afn ? "; " : "", aff_cnt, ev);
+                    ol = (long)tx_len(one, sizeof one);
+                    if (afn + ol < (long)sizeof aff_fail_ev - 1) {
+                        mm_copy(aff_fail_ev + afn, sizeof aff_fail_ev - (size_t)afn, one, (size_t)ol + 1);
+                        afn += ol;
+                    }
+                } else if (!aff_pass_ev[0]) {
+                    put_ev(aff_pass_ev, sizeof aff_pass_ev, ev);
+                }
+                if (k + 1 >= nj || tx_len(items[k + 1], 256) <= 9 || !tx_prefix(items[k + 1], (long)tx_len(items[k + 1], 256), "affected:", 9)) {
+                    char merged[700];
+                    if (aff_ok) cx_fmt(merged, sizeof merged, "shards=%d/%d (%s)", aff_cnt, aff_cnt, aff_pass_ev);
+                    else cx_fmt(merged, sizeof merged, "shards=%d %s", aff_cnt, aff_fail_ev);
+                    row_judged("6-affected", aff_ok, merged, aff_ms);
+                    aff_cnt = 0; aff_ok = 1; aff_ms = 0; afn = 0;
                 }
                 continue;
             }

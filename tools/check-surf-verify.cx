@@ -1,0 +1,57 @@
+/* tools/check-surf-verify.cx -- verify tools/surf-verify.cx green, missing-ok red, and known-red waiver. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+
+static int sv_pass, sv_fail;
+static void sv_ck(int ok, const char *name) {
+    printf("%s\tsurf-verify.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) sv_pass++; else sv_fail++;
+}
+
+int main(void) {
+    char dir[128], sf[192], rc_ok[192], rc_bad[192], kr_empty[192], kr_one[192];
+    static char out[4096];
+    int cut = 0, rc;
+    if (sy_mkdtemp("/tmp", "chk-sv-", dir, (int)sizeof(dir)) != 0) return 2;
+    cx_fmt(sf, (long)sizeof sf, "%s/surface.tsv", dir);
+    cx_fmt(rc_ok, (long)sizeof rc_ok, "%s/ok.tsv", dir);
+    cx_fmt(rc_bad, (long)sizeof rc_bad, "%s/bad.tsv", dir);
+    cx_fmt(kr_empty, (long)sizeof kr_empty, "%s/kr-empty.tsv", dir);
+    cx_fmt(kr_one, (long)sizeof kr_one, "%s/kr-one.tsv", dir);
+
+    {
+        const char *s = "# pkg\tname\tsig\tana\terr\tlnx\tosx\twin\tstatus\tnote\tstab\tsince\town\ttest\n"
+                        "cx.sys\tsy_pread\tlong sy_pread();\t-\t-\timpl\trefuse\trefuse\texists\t-\tstable\t0.1.0\tnone\t-\n";
+        const char *r1 = "SURF\tcx.sys\tsy_pread\tlnx/x86_64\tok\n"
+                         "SURF\tcx.sys\tsy_pread\tlnx/arm64\tok\n";
+        const char *r2 = "SURF\tcx.sys\tsy_pread\tlnx/x86_64\tok\n"
+                         "SURF\tcx.sys\tsy_pread\tlnx/arm64\tfail\n";
+        const char *k0 = "# pkg\tname\ttarget\texpires_ver\n";
+        const char *k1 = "# pkg\tname\ttarget\texpires_ver\ncx.sys\tsy_pread\tlnx/arm64\t0.0.88\n";
+        sy_write_file(sf, s, (long)strlen(s), 0644);
+        sy_write_file(rc_ok, r1, (long)strlen(r1), 0644);
+        sy_write_file(rc_bad, r2, (long)strlen(r2), 0644);
+        sy_write_file(kr_empty, k0, (long)strlen(k0), 0644);
+        sy_write_file(kr_one, k1, (long)strlen(k1), 0644);
+    }
+    {
+        char *av[] = { "timeout", "30", "sh", "unisacc.com", "tools/surf-verify.cx", "--", "--receipts", rc_ok, "--surface", sf, "--known-red", kr_empty, "--only-probed", 0 };
+        rc = sy_run(av, out, (int)sizeof(out) - 1, &cut);
+        sv_ck(rc == 0 && strstr(out, "unexpected=0") != 0, "all-ok-passes");
+    }
+    {
+        char *av[] = { "timeout", "30", "sh", "unisacc.com", "tools/surf-verify.cx", "--", "--receipts", rc_bad, "--surface", sf, "--known-red", kr_empty, "--only-probed", 0 };
+        rc = sy_run(av, out, (int)sizeof(out) - 1, &cut);
+        sv_ck(rc != 0 && strstr(out, "UNEXPECTED_RED") != 0, "arm64-fail-without-waiver-fails");
+    }
+    {
+        char *av[] = { "timeout", "30", "sh", "unisacc.com", "tools/surf-verify.cx", "--", "--receipts", rc_bad, "--surface", sf, "--known-red", kr_one, "--only-probed", 0 };
+        rc = sy_run(av, out, (int)sizeof(out) - 1, &cut);
+        sv_ck(rc == 0 && strstr(out, "known_red=1") != 0 && strstr(out, "unexpected=0") != 0, "arm64-fail-with-waiver-passes");
+    }
+    sy_remove_all(dir);
+    printf("CHECK_SURF_VERIFY\tpassed=%d\tfailed=%d\n", sv_pass, sv_fail);
+    return sv_fail ? 1 : 0;
+}

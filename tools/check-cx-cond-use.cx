@@ -1,0 +1,143 @@
+/* tools/check-cx-cond-use.cx -- verify no #pragma unisa use appears inside #if/#ifdef/#ifndef blocks under cx/ and src/.
+   Identity-soundness premise (v0.0.90 source-packages-v3): together with tools/check-sixtarget-roots.cx,
+   this check justifies that one compiled closure equals the six-target closure. Relaxing, raising the
+   threshold, or retiring either check revokes that premise and requires updating the identity design. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+
+static int cu_pass, cu_fail, cu_files, cu_repo_hits;
+
+static void cu_ck(int ok, const char *name) {
+    printf("%s\tcx-cond-use.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) cu_pass++; else cu_fail++;
+}
+
+static int cu_is_ws(char c) { return c == ' ' || c == '\t' || c == '\r'; }
+
+/* Scan buffer (len n) handling backslash-newline continuations, // and block comments,
+   and string/char literals. Returns count of #pragma unisa use directives at cond_depth > 0. */
+static int cu_scan_buf(const char *s, long n, const char *path, int report) {
+    int depth = 0, hits = 0, line = 1;
+    int in_blk = 0, in_str = 0, in_chr = 0;
+    long i = 0;
+    static char lbuf[8192];
+    while (i < n) {
+        int ln = 0, start_line = line;
+        while (i < n) {
+            char c = s[i];
+            if (in_blk) {
+                if (c == '\n') { line++; i++; break; }
+                if (c == '*' && i + 1 < n && s[i + 1] == '/') { in_blk = 0; i += 2; if (ln < 8190) lbuf[ln++] = ' '; continue; }
+                i++; continue;
+            }
+            if (in_str) {
+                if (c == '\\' && i + 1 < n) { if (s[i + 1] == '\n') line++; i += 2; continue; }
+                if (c == '"') in_str = 0;
+                if (c == '\n') { in_str = 0; line++; i++; break; }
+                i++; continue;
+            }
+            if (in_chr) {
+                if (c == '\\' && i + 1 < n) { if (s[i + 1] == '\n') line++; i += 2; continue; }
+                if (c == '\'') in_chr = 0;
+                if (c == '\n') { in_chr = 0; line++; i++; break; }
+                i++; continue;
+            }
+            /* Backslash-newline line splicing */
+            if (c == '\\' && i + 1 < n && s[i + 1] == '\n') { line++; i += 2; continue; }
+            if (c == '\\' && i + 2 < n && s[i + 1] == '\r' && s[i + 2] == '\n') { line++; i += 3; continue; }
+            /* Comments */
+            if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+                i += 2;
+                while (i < n && s[i] != '\n') i++;
+                if (i < n && s[i] == '\n') { line++; i++; }
+                break;
+            }
+            if (c == '/' && i + 1 < n && s[i + 1] == '*') { in_blk = 1; i += 2; if (ln < 8190) lbuf[ln++] = ' '; continue; }
+            if (c == '"') { in_str = 1; if (ln < 8190) lbuf[ln++] = c; i++; continue; }
+            if (c == '\'') { in_chr = 1; if (ln < 8190) lbuf[ln++] = c; i++; continue; }
+            if (c == '\n') { line++; i++; break; }
+            if (ln < 8190) lbuf[ln++] = c;
+            i++;
+        }
+        lbuf[ln] = 0;
+        {
+            int p = 0;
+            while (p < ln && cu_is_ws(lbuf[p])) p++;
+            if (p < ln && lbuf[p] == '#') {
+                p++;
+                while (p < ln && cu_is_ws(lbuf[p])) p++;
+                if ((strncmp(lbuf + p, "if", 2) == 0 && (lbuf[p + 2] == ' ' || lbuf[p + 2] == '\t' || lbuf[p + 2] == '(')) ||
+                    (strncmp(lbuf + p, "ifdef", 5) == 0 && (lbuf[p + 5] == ' ' || lbuf[p + 5] == '\t')) ||
+                    (strncmp(lbuf + p, "ifndef", 6) == 0 && (lbuf[p + 6] == ' ' || lbuf[p + 6] == '\t'))) {
+                    depth++;
+                } else if (strncmp(lbuf + p, "endif", 5) == 0 && (lbuf[p + 5] == 0 || cu_is_ws(lbuf[p + 5]))) {
+                    if (depth > 0) depth--;
+                } else if (strncmp(lbuf + p, "pragma", 6) == 0 && cu_is_ws(lbuf[p + 6])) {
+                    p += 6;
+                    while (p < ln && cu_is_ws(lbuf[p])) p++;
+                    if (strncmp(lbuf + p, "unisa", 5) == 0 && cu_is_ws(lbuf[p + 5])) {
+                        p += 5;
+                        while (p < ln && cu_is_ws(lbuf[p])) p++;
+                        if (strncmp(lbuf + p, "use", 3) == 0 && (cu_is_ws(lbuf[p + 3]) || lbuf[p + 3] == 0)) {
+                            if (depth > 0) {
+                                hits++;
+                                if (report) printf("HIT\t%s:%d\tdepth=%d\n", path, start_line, depth);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return hits;
+}
+
+static void cu_walk(const char *dir) {
+    sy_dir_t it;
+    int rc;
+    if (sy_dir_open(&it, dir) != 0) return;
+    while ((rc = sy_dir_next(&it)) == 1) {
+        char sub[512];
+        if (cx_fmt(sub, (long)sizeof sub, "%s/%s", dir, it.name) != 0) continue;
+        if (it.kind == 'd') {
+            cu_walk(sub);
+        } else if (it.kind == 'f') {
+            long nl = it.name_n;
+            if (nl > 3 && strcmp(it.name + nl - 3, ".cx") == 0) {
+                unsigned char *buf = 0;
+                int64_t n = 0;
+                if (sy_read_file(sub, &buf, &n, 4 << 20) == 0 && buf) {
+                    cu_files++;
+                    cu_repo_hits += cu_scan_buf((const char *)buf, (long)n, sub, 1);
+                }
+            }
+        }
+    }
+    sy_dir_close(&it);
+}
+
+int main(void) {
+    cu_walk("cx");
+    cu_walk("src");
+    cu_ck(cu_files > 100 && cu_repo_hits == 0, "repo-cx-src-zero-cond-use");
+    {
+        const char *f1 = "#ifdef __linux__\n#pragma unisa use sys.fs\n#endif\n";
+        cu_ck(cu_scan_buf(f1, (long)strlen(f1), "f1", 0) == 1, "fixture-cond-use-fails");
+    }
+    {
+        const char *f2 = "#if 1\n#pragma \\\n  unisa use sys.fs\n#endif\n";
+        cu_ck(cu_scan_buf(f2, (long)strlen(f2), "f2", 0) == 1, "fixture-multiline-cond-use-fails");
+    }
+    {
+        const char *f3 = "/* #if 1\n#pragma unisa use sys.fs\n*/\n// #ifdef X\n#pragma unisa use sys.fs\n";
+        cu_ck(cu_scan_buf(f3, (long)strlen(f3), "f3", 0) == 0, "fixture-comment-fake-ignored");
+    }
+    {
+        const char *f4 = "#ifdef X\nint a;\n#endif\n#pragma unisa use sys.fs\n";
+        cu_ck(cu_scan_buf(f4, (long)strlen(f4), "f4", 0) == 0, "fixture-nested-endif-restores");
+    }
+    printf("CHECK_CX_COND_USE\tpassed=%d\tfailed=%d\tfiles=%d\thits=%d\n",
+           cu_pass, cu_fail, cu_files, cu_repo_hits);
+    return cu_fail ? 1 : 0;
+}

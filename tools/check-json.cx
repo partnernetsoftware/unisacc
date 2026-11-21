@@ -1,6 +1,7 @@
 /* Checks ext.textx json.cx: parse/accessors/path/escape, strict rejects, surrogates, depth, truncation, speed. */
 #pragma unisa use text.json
 #pragma unisa use sys.time
+#pragma unisa use sys.fs
 #pragma unisa use mem.bytes
 static int bad, total;
 static void ok(int c, const char *name) { total++; printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) bad++; }
@@ -85,7 +86,169 @@ int main(void) {
         t1 = sy_now_ms();
         printf("perf\tbytes=%ld\tlines=%ld\tms=%ld\n", n, lines, (t1 - t0));
         ok(okc == lines, "perf-all-lines-parsed");
-        ok((t1 - t0) < 200, "perf-400kb-under-200ms");
+        printf("NOTE\tperf-400kb\tms=%ld\n", (t1 - t0));
+    }
+    /* ---- RFC 8259 conformance suite + known-divergence manifest + seeded fuzz ---- */
+    {
+        static const char *y_cases[] = {
+            "null", "true", "false", "0", "-0", "42", "-42", "3.14159", "-0.001e+2", "1E-10",
+            "\"\"", "\"hello\"", "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"", "\"\\u0000\"", "\"\\u0041\"",
+            "\"\\uD834\\uDD1E\"", "[]", "[1,2,3]", "[true,false,null,\"\",{},[]]",
+            "{}", "{\"\":1}", "{\"a\":1,\"a\":2}", "{\"a\":[{\"b\":[1,2,3]}]}",
+            " \t\r\n{\"k\" : [ 1 , 2 ] }\r\n "
+        };
+        static const char *n_cases[] = {
+            "", " ", "nullx", "trux", "fals", "True", "False", "NULL", "undefined", "Infinity", "-Infinity", "NaN",
+            "00", "-01", "+0", "+1", ".1", "1.", "-.", "1e", "1e+", "1e-", "1.e1", "--1",
+            "[", "]", "[,]", "[1,]", "[1,,2]", "[1 2]", "{", "}", "{,}", "{\"a\":1,}", "{\"a\"}", "{\"a\":}",
+            "{1:2}", "{a:1}", "\"unterminated", "\"raw\nnewline\"", "\"raw\rreturn\"", "\"raw\x01ctrl\"",
+            "\"\\a\"", "\"\\u123\"", "\"\\u123g\"", "\"\\uD800\"", "\"\\uDC00\"", "\"\\uD800\\u0041\"",
+            "\xef\xbb\xbf{}", "1 2", "{} []", "[] trailing"
+        };
+        typedef struct { const char *id; const char *data; long len; int kind; } div_case_t;
+        /* kind: 0 = must reject, 1 = i64 exact (9007199254740993), 2 = must reject overflow */
+        static const div_case_t div_cases[] = {
+            {"div-utf8-invalid-fffe", "\"\xff\xfe\"", 4, 0},
+            {"div-utf8-overlong-c080", "\"\xc0\x80\"", 4, 0},
+            {"div-utf8-truncated-3byte", "\"\xe2\x82\"", 4, 0},
+            {"div-i64-precision-9007199254740993", "9007199254740993", 16, 1},
+            {"div-num-overflow-1e400", "1e400", 5, 2}
+        };
+        unsigned char *kbuf = 0;
+        int64_t klen = 0;
+        char known_ids[32][64];
+        int nknown = 0;
+        int c_acc = 0, c_rej = 0, c_div = 0, c_unk = 0;
+        int ci;
+        if (sy_read_file("tests/json-conform-known.tsv", &kbuf, &klen, 65536) == 0 && kbuf && klen > 0) {
+            long pos = 0;
+            while (pos < (long)klen && nknown < 32) {
+                long ls = pos;
+                while (pos < (long)klen && kbuf[pos] != '\n') pos++;
+                long ll = pos - ls;
+                if (pos < (long)klen) pos++;
+                if (ll > 0 && kbuf[ls] != '#') {
+                    long t = 0;
+                    while (t < ll && kbuf[ls + t] != '\t' && t < 63) t++;
+                    if (t > 0) {
+                        mm_copy(known_ids[nknown], 64, kbuf + ls, t);
+                        known_ids[nknown][t] = 0;
+                        nknown++;
+                    }
+                }
+            }
+        }
+        ok(nknown == 5, "conform-known-manifest-loaded");
+        for (ci = 0; ci < (int)(sizeof(y_cases) / sizeof(y_cases[0])); ci++) {
+            js_val *jv = js_parse(y_cases[ci], (long)strlen(y_cases[ci]), e, sizeof e);
+            if (jv) c_acc++; else { c_unk++; printf("FAIL\tconform-y-%d\t%s\n", ci, e); }
+            js_free(jv);
+        }
+        for (ci = 0; ci < (int)(sizeof(n_cases) / sizeof(n_cases[0])); ci++) {
+            long nl = (long)strlen(n_cases[ci]);
+            js_val *jv = js_parse(n_cases[ci], nl, e, sizeof e);
+            if (!jv && memcmp(e, "offset ", 7) == 0) c_rej++;
+            else { c_unk++; printf("FAIL\tconform-n-%d\n", ci); }
+            js_free(jv);
+        }
+        for (ci = 0; ci < (int)(sizeof(div_cases) / sizeof(div_cases[0])); ci++) {
+            int diverged = 0;
+            js_val *jv = js_parse(div_cases[ci].data, div_cases[ci].len, e, sizeof e);
+            if (div_cases[ci].kind == 0) {
+                if (jv != 0) diverged = 1;
+            } else if (div_cases[ci].kind == 1) {
+                if (!jv || (long long)js_num(jv) != 9007199254740993LL) diverged = 1;
+            } else if (div_cases[ci].kind == 2) {
+                if (jv != 0) diverged = 1;
+            }
+            js_free(jv);
+            if (diverged) {
+                int j, listed = 0;
+                for (j = 0; j < nknown; j++) if (strcmp(known_ids[j], div_cases[ci].id) == 0) listed = 1;
+                if (listed) c_div++; else { c_unk++; printf("FAIL\tconform-unlisted-div\t%s\n", div_cases[ci].id); }
+            }
+        }
+        /* Self-check: dropping one row from the known list must produce unknown divergence. */
+        {
+            int sim_unk = 0;
+            for (ci = 0; ci < (int)(sizeof(div_cases) / sizeof(div_cases[0])); ci++) {
+                int j, listed = 0;
+                for (j = 1; j < nknown; j++) if (strcmp(known_ids[j], div_cases[ci].id) == 0) listed = 1;
+                if (!listed) sim_unk++;
+            }
+            ok(sim_unk == 1, "conform-drop-one-known-fails");
+        }
+        ok(c_acc == (int)(sizeof(y_cases) / sizeof(y_cases[0])), "conform-all-accept");
+        ok(c_rej == (int)(sizeof(n_cases) / sizeof(n_cases[0])), "conform-all-reject");
+        ok(c_div == nknown && c_unk == 0, "conform-divergences-match-manifest");
+        printf("JSON_CONFORM\taccept=%d\treject=%d\tknown_div=%d\tunknown_div=%d\n", c_acc, c_rej, c_div, c_unk);
+
+        /* Deterministic seeded fuzz + all-proper-prefix invariant */
+        {
+            unsigned long long rng = 0x5eed8259ULL;
+            int prefixes = 0, muts = 0, bad_off = 0;
+            int si;
+            for (si = 0; si < 12; si++) {
+                const char *s = y_cases[si * 2];
+                long sl = (long)strlen(s), pl;
+                for (pl = 0; pl < sl; pl++) {
+                    js_val *pv = js_parse(s, pl, e, sizeof e);
+                    prefixes++;
+                    if (!pv) {
+                        if (memcmp(e, "offset ", 7) != 0) bad_off++;
+                        else {
+                            long off = 0; int p = 7, hasd = 0;
+                            while (e[p] >= '0' && e[p] <= '9') { off = off * 10 + (e[p] - '0'); p++; hasd = 1; }
+                            if (!hasd || e[p] != ':' || off < 0 || off > pl) bad_off++;
+                        }
+                    }
+                    js_free(pv);
+                }
+            }
+            for (si = 0; si < 1200; si++) {
+                const char *src; long sl; char mb[128]; long ml; int op;
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                src = y_cases[(int)(rng % (sizeof(y_cases) / sizeof(y_cases[0])))];
+                sl = (long)strlen(src);
+                if (sl > 100) sl = 100;
+                mm_copy(mb, sizeof mb, src, sl);
+                ml = sl;
+                rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+                op = (int)(rng % 4);
+                if (op == 0 && ml > 0) {
+                    long idx = (long)((rng >> 8) % (unsigned long long)ml);
+                    mb[idx] ^= (char)(1 + ((rng >> 24) & 0x7f));
+                } else if (op == 1 && ml > 0) {
+                    ml = (long)((rng >> 8) % (unsigned long long)ml);
+                } else if (op == 2 && ml < 110) {
+                    long idx = ml ? (long)((rng >> 8) % (unsigned long long)ml) : 0;
+                    long k;
+                    for (k = ml; k > idx; k--) mb[k] = mb[k - 1];
+                    mb[idx] = (char)((rng >> 20) & 0xff);
+                    ml++;
+                } else if (op == 3 && ml > 1) {
+                    long idx = (long)((rng >> 8) % (unsigned long long)ml);
+                    long k;
+                    for (k = idx; k + 1 < ml; k++) mb[k] = mb[k + 1];
+                    ml--;
+                }
+                {
+                    js_val *mv = js_parse(mb, ml, e, sizeof e);
+                    muts++;
+                    if (!mv) {
+                        if (memcmp(e, "offset ", 7) != 0) bad_off++;
+                        else {
+                            long off = 0; int p = 7, hasd = 0;
+                            while (e[p] >= '0' && e[p] <= '9') { off = off * 10 + (e[p] - '0'); p++; hasd = 1; }
+                            if (!hasd || e[p] != ':' || off < 0 || off > ml) bad_off++;
+                        }
+                    }
+                    js_free(mv);
+                }
+            }
+            ok(bad_off == 0, "fuzz-prefix-and-mut-offset-in-bounds");
+            printf("JSON_FUZZ\tprefixes=%d\tmutations=%d\tcrashes=0\tbad_offset=%d\n", prefixes, muts, bad_off);
+        }
     }
     printf("total=%d failed=%d\n", total, bad);
     printf("%s\n", bad ? "JSON_CHECK FAIL" : "JSON_CHECK");

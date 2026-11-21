@@ -1,0 +1,82 @@
+/* tools/check-train-tool-modes.cx -- verify build/train-tool-modes.tsv freshness and
+   test the I2c 'zero unpinned chain-build/byte-modifying raw-run' gate (red/green + 4 mutations). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+
+static int tm_pass, tm_fail;
+static void tm_ck(int ok, const char *name) {
+    printf("%s\ttrain-tool-modes.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) tm_pass++; else tm_fail++;
+}
+
+static int run_tm(const char *flag, const char *arg, char *out, int cap) {
+    char *av1[] = { "timeout", "30", "sh", "unisacc.com", "tools/train-tool-modes.cx", "--", (char *)flag, 0 };
+    char *av2[] = { "timeout", "30", "sh", "unisacc.com", "tools/train-tool-modes.cx", "--", (char *)flag, (char *)arg, 0 };
+    int cut = 0;
+    return sy_run(arg ? av2 : av1, out, cap - 1, &cut);
+}
+
+int main(void) {
+    static char out[8192];
+    char dir[128], f_ok[256], f_mut1[256], f_mut2[256], f_mut3[256], f_mut4[256];
+    int rc;
+
+    /* 1. Repo table matches live orchestrator call sites */
+    rc = run_tm("--check", 0, out, (int)sizeof out);
+    tm_ck(rc == 0 && strstr(out, "TRAIN_MODES\tCHECK\trows=25\traw_run=12\tknown_gaps=3") != 0, "repo-table-matches-sources");
+
+    /* 2. Repo table passes updated zero-raw gate (chain-build=0 violations, 3 known gaps in 0.0.90 baseline) */
+    rc = run_tm("--assert-zero-raw", "build/train-tool-modes.tsv", out, (int)sizeof out);
+    tm_ck(rc == 0 && strstr(out, "TRAIN_MODES_ZERO_RAW\trows=25\traw_violations=0\tknown_gaps=3\tunknown_gaps=0\tsid_tool_bytes=3\torchestration=9\tsupervisor=1\tstatus=PASS") != 0, "repo-passes-updated-gate");
+
+    /* 3. Private fixtures: clean table passes, and 4 mutations fail */
+    if (sy_mkdtemp("/tmp", "chk-tm-", dir, (int)sizeof dir) != 0) return 2;
+    cx_fmt(f_ok, (long)sizeof f_ok, "%s/ok.tsv", dir);
+    cx_fmt(f_mut1, (long)sizeof f_mut1, "%s/mut1.tsv", dir);
+    cx_fmt(f_mut2, (long)sizeof f_mut2, "%s/mut2.tsv", dir);
+    cx_fmt(f_mut3, (long)sizeof f_mut3, "%s/mut3.tsv", dir);
+    cx_fmt(f_mut4, (long)sizeof f_mut4, "%s/mut4.tsv", dir);
+
+    {
+        const char *s_ok = "# scope\ttool\tcategory\tmode\trun_root\tcall_site\tpin_check_site\tresume_recheck\tbasis\n"
+                           "chain\ttools/chain-step.cx\tchain-build\tnative-pin\tlive-worktree\tc:1\tc:2\tyes\tok\n"
+                           "release\ttools/version-inject.cx\tsid-tool-bytes\tworktree-raw-run\tlive-worktree\tr:1\t-\tno\tsid\n"
+                           "release\ttools/release-decide.cx\trelease-orchestration\tworktree-raw-run\tlive-worktree\tr:2\t-\tno\torc\n"
+                           "chain\ttools/source-job-wave.cx\tgap\tnative-unpinned\tsnapshot\tc:3\t-\tno\tgap\n";
+        /* Mutation 1: flip chain-build tool to worktree-raw-run -> must FAIL */
+        const char *s_m1 = "# scope\ttool\tcategory\tmode\trun_root\tcall_site\tpin_check_site\tresume_recheck\tbasis\n"
+                           "chain\ttools/chain-step.cx\tchain-build\tworktree-raw-run\tlive-worktree\tc:1\t-\tno\tbad\n";
+        /* Mutation 2: add unknown tool under gap category (not in 0.0.90 baseline) -> must FAIL */
+        const char *s_m2 = "# scope\ttool\tcategory\tmode\trun_root\tcall_site\tpin_check_site\tresume_recheck\tbasis\n"
+                           "chain\ttools/new-gap.cx\tgap\tnative-unpinned\tlive-worktree\tc:9\t-\tno\tbad\n";
+        /* Mutation 3: unknown category with worktree-raw-run -> must FAIL */
+        const char *s_m3 = "# scope\ttool\tcategory\tmode\trun_root\tcall_site\tpin_check_site\tresume_recheck\tbasis\n"
+                           "release\ttools/new-raw.cx\tother\tworktree-raw-run\tlive-worktree\tr:9\t-\tno\tbad\n";
+        sy_write_file(f_ok, s_ok, (long)strlen(s_ok), 0644);
+        sy_write_file(f_mut1, s_m1, (long)strlen(s_m1), 0644);
+        sy_write_file(f_mut2, s_m2, (long)strlen(s_m2), 0644);
+        sy_write_file(f_mut3, s_m3, (long)strlen(s_m3), 0644);
+    }
+
+    rc = run_tm("--assert-zero-raw", f_ok, out, (int)sizeof out);
+    tm_ck(rc == 0 && strstr(out, "raw_violations=0\tknown_gaps=1\tunknown_gaps=0") != 0 && strstr(out, "status=PASS") != 0, "fixture-clean-passes");
+
+    rc = run_tm("--assert-zero-raw", f_mut1, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "RAW_RUN_VIOLATION") != 0 && strstr(out, "raw_violations=1") != 0, "mut1-chain-build-raw-fails");
+
+    rc = run_tm("--assert-zero-raw", f_mut2, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "GAP_BASELINE_VIOLATION") != 0 && strstr(out, "unknown_gaps=1") != 0, "mut2-unknown-gap-fails");
+
+    rc = run_tm("--assert-zero-raw", f_mut3, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "RAW_RUN_VIOLATION\tunknown-category") != 0 && strstr(out, "raw_violations=1") != 0, "mut3-unknown-category-fails");
+
+    /* Mutation 4: missing table file -> must FAIL */
+    rc = run_tm("--assert-zero-raw", f_mut4, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "TRAIN_MODES\tFAIL\tmissing") != 0, "mut4-missing-table-fails");
+
+    sy_remove_all(dir);
+    printf("CHECK_TRAIN_TOOL_MODES\tpassed=%d\tfailed=%d\n", tm_pass, tm_fail);
+    return tm_fail ? 1 : 0;
+}

@@ -1,0 +1,41 @@
+/* Checks sy_gid and sy_egid of cx/sys/env.cx against sy_uid behaviour and /proc/self/status:
+     sh ./unisacc.com tools/check-cx-sys-ids.cx
+   Prints PASS/FAIL lines and CX_SYS_IDS<TAB>ok=N<TAB>failed=N; exit 1 on any FAIL. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tids.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+
+/* The first two numbers after Gid are the real and effective IDs. */
+static int proc_gids(long *real, long *effective) {
+    unsigned char *text = 0;
+    int64_t n = 0;
+    char *end = 0;
+    if (sy_read_file("/proc/self/status", &text, &n, 65536)) return 0;
+    long at = tx_find((char *)text, n, "\nGid:", 5);
+    int ok = at >= 0 && !tx_strtol_r((char *)text + at + 5, &end, 10, real) &&
+             !tx_strtol_r(end, 0, 10, effective);
+    mm_free(text);
+    return ok;
+}
+
+int main(void) {
+    long g = sy_gid(), e = sy_egid();
+    long real = -1, effective = -1;
+    int measured = proc_gids(&real, &effective);
+    ck(g >= 0, "gid_nonneg");
+    ck(e >= 0, "egid_nonneg");
+    ck(sy_uid() >= 0 && sy_euid() >= 0, "uid_same_class");
+    ck(measured && g == real, "gid_matches_proc");
+    ck(measured && e == effective, "egid_matches_proc");
+    ck(measured && (g == e) == (real == effective), "gid_pair_matches_proc");
+    printf("CX_SYS_IDS\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

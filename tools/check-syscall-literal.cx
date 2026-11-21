@@ -27,35 +27,38 @@ static int run_tool(const char *root, const char *base, char *out, int cap) {
 int main(void) {
     char out[8192], tmp[256], dir[320], dst[360], base[360];
     int rc = run_tool(".", "tests/syscall-literal.tsv", out, sizeof out);
-    ck(rc == 0 && strstr(out, "SYSCALL_LITERAL\thits=4\tknown=4\tunknown=0\tbaseline=4\n") != 0, "repo-matches-4-known");
+    ck(rc == 0 && strstr(out, "SYSCALL_LITERAL\thits=0\tknown=0\tunknown=0\tbaseline=0\n") != 0, "repo-zero-unguarded-literals");
 
     (void)cx_fmt(tmp, sizeof tmp, "/tmp/ck-scl-%d", (int)sy_pid());
     (void)cx_fmt(dir, sizeof dir, "%s/cx/sys", tmp);
-    (void)cx_fmt(dst, sizeof dst, "%s/cx/sys/posix.cx", tmp);
+    (void)cx_fmt(dst, sizeof dst, "%s/cx/sys/legacy.cx", tmp);
     (void)cx_fmt(base, sizeof base, "%s/base.tsv", tmp);
     sy_mkdir_all(dir, 0700);
     { char extd[320]; (void)cx_fmt(extd, sizeof extd, "%s/ext", tmp); sy_mkdir_all(extd, 0700); }
-    size_t pn = 0;
-    char *posix = cx_read("cx/sys/posix.cx", &pn);
-    if (!posix) { fprintf(stderr, "cannot read cx/sys/posix.cx\n"); return 2; }
-    sy_write_atomic(dst, posix, pn, 0644);
+    const char *legacy_src =
+        "static long sc3(long num, long a) { return __syscall6(_UNISA_SC(num), a, 0, 0, 0, 0); }\n"
+        "long f1(void) { return __syscall6(_UNISA_SC(97), 9, 0, 0, 0, 0); }\n"
+        "long f2(void) { return sc3(280, 0); }\n"
+        "long f3(void) { return sc3(17, 0); }\n"
+        "long f4(void) { return sc3(18, 0); }\n";
+    sy_write_atomic(dst, legacy_src, strlen(legacy_src), 0644);
     sy_write_atomic(base, "# empty\n", 8, 0644);
 
-    /* Red: empty baseline must flag all 4 posix.cx hits */
+    /* Red: empty baseline must flag all 4 legacy hits */
     rc = run_tool(tmp, base, out, sizeof out);
-    ck(rc == 1 && strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t227\t_UNISA_SC(97)\n") &&
-       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t382\tsyp_sc3_os(280)\n") &&
-       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t388\tsyp_sc3_os(17)\n") &&
-       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t394\tsyp_sc3_os(18)\n") &&
+    ck(rc == 1 && strstr(out, "UNEXPECTED\tcx/sys/legacy.cx\t2\t_UNISA_SC(97)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/legacy.cx\t3\tsc3(280)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/legacy.cx\t4\tsc3(17)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/legacy.cx\t5\tsc3(18)\n") &&
        strstr(out, "SYSCALL_LITERAL\thits=4\tknown=0\tunknown=4\tbaseline=0\n"), "fixture-red-without-baseline");
 
     /* Green: baseline with 4 known items passes */
     const char *b4 =
         "# path\tline\ttoken\texpires_ver\n"
-        "cx/sys/posix.cx\t227\t_UNISA_SC(97)\t0.0.88\n"
-        "cx/sys/posix.cx\t382\tsyp_sc3_os(280)\t0.0.88\n"
-        "cx/sys/posix.cx\t388\tsyp_sc3_os(17)\t0.0.88\n"
-        "cx/sys/posix.cx\t394\tsyp_sc3_os(18)\t0.0.88\n";
+        "cx/sys/legacy.cx\t2\t_UNISA_SC(97)\t0.0.88\n"
+        "cx/sys/legacy.cx\t3\tsc3(280)\t0.0.88\n"
+        "cx/sys/legacy.cx\t4\tsc3(17)\t0.0.88\n"
+        "cx/sys/legacy.cx\t5\tsc3(18)\t0.0.88\n";
     sy_write_atomic(base, b4, strlen(b4), 0644);
     rc = run_tool(tmp, base, out, sizeof out);
     ck(rc == 0 && strstr(out, "SYSCALL_LITERAL\thits=4\tknown=4\tunknown=0\tbaseline=4\n"), "fixture-green-with-baseline");
@@ -84,7 +87,6 @@ int main(void) {
       ck(rc == 0 && strstr(out, "unknown=0"), "mut3-arch-guarded-passes");
       sy_unlink(m3); }
 
-    free(posix);
     { char *rm[] = {"rm", "-rf", tmp, 0}; char *o = 0; size_t on = 0; (void)cx_runv_timeout(rm, 10, &o, &on); if (o) free(o); }
     printf("CHECK_SYSCALL_LITERAL\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;

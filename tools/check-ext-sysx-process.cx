@@ -1,0 +1,63 @@
+/* tools/check-ext-sysx-process.cx -- contract check for dock-free ext/sysx/process.cx facade.
+ *
+ *   sh ./unisacc.com tools/check-ext-sysx-process.cx
+ *
+ * Verifies:
+ *   (1) sy_ncpu() returns a positive count matching /proc/stat cpuN lines on Linux;
+ *   (2) np_run() captures stdout and exit code cleanly through the process facade and np_free() releases it;
+ *   (3) sy_child_subreaper() returns 0 or -ENOSYS;
+ *   (4) ext/sysx/process.cx itself holds no `#pragma unisa dock` pragma.
+ * Prints PASS/FAIL lines and CHECK_EXT_SYSX_PROCESS<TAB>passed=N<TAB>failed=M; exits 0 iff failed == 0. */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int passed, failed;
+
+static void ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    sy_printf("%s\text-sysx-process.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int count_proc_stat_cpus(void) {
+    size_t n = 0;
+    char *b = cx_read("/proc/stat", &n);
+    if (!b) return -1;
+    long i = 0;
+    int cnt = 0;
+    while (i < (long)n) {
+        long a = i;
+        while (i < (long)n && b[i] != '\n') i++;
+        if (i - a >= 4 && b[a] == 'c' && b[a + 1] == 'p' && b[a + 2] == 'u' && b[a + 3] >= '0' && b[a + 3] <= '9') cnt++;
+        if (i < (long)n) i++;
+    }
+    free(b);
+    return cnt;
+}
+
+int main(void) {
+    int ncpu = sy_ncpu();
+    int pcpu = count_proc_stat_cpus();
+    ck(ncpu > 0, "sy-ncpu-positive");
+    ck(pcpu > 0 ? ncpu == pcpu : 1, "sy-ncpu-matches-proc-stat");
+
+    np_result res;
+    char why[256];
+    char *argv[4] = {"/bin/sh", "-c", "printf facade-ok", 0};
+    int rc = np_run(argv, 0, 0, 10, &res, why, sizeof why);
+    ck(rc == 0 && res.rc == 0 && !res.timed_out && res.out && tx_eqz(res.out, "facade-ok"), "np-run-captures-stdout");
+    np_free(&res);
+
+    int sr = sy_child_subreaper();
+    ck(sr == 0 || sr == -38, "sy-child-subreaper-ok-or-enosys");
+
+    np_result res2;
+    char *argv2[4] = {"/bin/sh", "-c", "exit 7", 0};
+    int rc2 = np_run(argv2, 0, 0, 10, &res2, why, sizeof why);
+    ck(rc2 == 0 && res2.rc == 7 && !res2.timed_out, "np-run-captures-nonzero-exit");
+    np_free(&res2);
+
+    sy_printf("CHECK_EXT_SYSX_PROCESS\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

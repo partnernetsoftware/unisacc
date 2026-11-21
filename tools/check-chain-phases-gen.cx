@@ -44,9 +44,48 @@ static int sh(const char *cmd, char *out, int cap) {
     return rc;
 }
 
-/* Input-identity sidecar lint: rows match the phase table's ids in order; inputs non-empty ("-" only
- * alone); each token is phase:ID / src:GLOB / table:PATH; phase:ID names an existing phase with a
- * smaller order (so no self reference and no cycle). Returns 0 ok, else a short reason. */
+/* Check that the source declarations include whole, comma-delimited tokens. */
+static int has_input(const char *start, const char *end, const char *want) {
+    size_t n = strlen(want);
+    while (start < end) {
+        const char *comma = memchr(start, ',', (size_t)(end - start));
+        const char *last = comma ? comma : end;
+        if ((size_t)(last - start) == n && !memcmp(start, want, n)) return 1;
+        if (!comma) break;
+        start = comma + 1;
+    }
+    return 0;
+}
+
+static int family_inputs(const char *text, const char *family, const char *need, int expected) {
+    if (!text) return 0;
+    size_t len = strlen(family);
+    int hits = 0, bare = 0;
+    for (const char *line = text; *line;) {
+        const char *end = strchr(line, '\n');
+        if (!end) return 0;
+        const char *tab = memchr(line, '\t', (size_t)(end - line));
+        if (tab && (size_t)(tab - line) >= len && !memcmp(line, family, len) &&
+            (line[len] == '\t' || line[len] == '-')) {
+            if (!has_input(tab + 1, end, need) || !has_input(tab + 1, end, "src:tools/**")) return 0;
+            if (line[len] == '\t') {
+                if (!has_input(tab + 1, end, "src:cx/**")) return 0;
+                bare++;
+            }
+            hits++;
+        }
+        line = end + 1;
+    }
+    return hits == expected && bare == 1;
+}
+
+static int ctx_inputs(const char *text) {
+    const char *row = text ? strstr(text, "\nctx\t") : 0;
+    if (!row) return 0;
+    const char *end = strchr(row + 1, '\n');
+    return end && has_input(row + 5, end, "src:exec/**") && has_input(row + 5, end, "src:cx/**");
+}
+
 static const char *inputs_lint(const char *in_text) {
     static char ids[600][80]; int nid = 0;
     size_t tbn = 0; char *tbl_text = cx_read("build/chain-phases.tsv", &tbn);
@@ -220,7 +259,12 @@ int main(int argc, char **argv) {
     ck(rc == 0 && a && b && an > 0 && an == bn && !memcmp(a, b, an), "write-twice");
     ck(tree && b && tn == bn && !memcmp(tree, b, tn), "write-equals-tree");
     /* The limit comes from the generator's own output (the single source), not a literal: the snap row's timeout column. */
-    {char want[160],*snap=b?strstr(b,"\n0\tsnap\touter\t"):0;int lim=snap?atoi(snap+14):0;
+    {char want[160], id[80], dir[80];
+     int order = -1, lim = 0;
+     const char *row = b;
+     while (row && *row == '#') { row = strchr(row, '\n'); if (row) row++; }
+     if (!row || sscanf(row, "%d\t%79s\t%79s\t%d", &order, id, dir, &lim) != 4 ||
+         order || strcmp(id, "snap") || strcmp(dir, "outer")) lim = 0;
      SP(want,sizeof want,"g3-lnx-arm64-closure-prepare\tg3-lnx-arm64\t%d\tg2-lnx-x86_64,g2-lnx-arm64\tg3-lnx-arm64\t4\t-\t-\t-\n",lim);
      ck(lim>0 && tree && strstr(tree,"\tdeps\tlane\tparallelism\tresidue_policy\tresidue_record\tresidue_paths\n") && strstr(tree,want), "dependency-and-parallelism-facts");
      /* C1: the closure-class phases of the two lnx targets are parallel by table. In each of g2 and g3,
@@ -311,7 +355,18 @@ int main(int argc, char **argv) {
 
     {char factpath[3000];size_t z;char *facts;
      SP(factpath,sizeof factpath,"%s/build/chain-facts.tsv",fix);facts=cx_read(factpath,&z);
-     char *change=facts?strstr(facts,"src/unisacc.cx"):0;
+     char *change = 0;
+     const char root_source[] = "src/unisacc.cx";
+     for (char *row = facts; row && *row;) {
+         char *end = strchr(row, '\n');
+         if (!end) break;
+         if (end - row > 5 && !memcmp(row, "root\t", 5)) {
+             char *path = memchr(row + 5, '\t', (size_t)(end - row - 5));
+             if (path && end - path == sizeof root_source &&
+                 !memcmp(path + 1, root_source, sizeof root_source - 1)) { change = path + 1; break; }
+         }
+         row = end + 1;
+     }
      if(change){change[4]='v';if(cx_write(factpath,facts,z))return 2;
        ck(sh(cmd,out,sizeof out)==1&&strstr(out,"chain-phases-gen: DIFF construction facts"),"neg-fact-list-drift");
        change[4]='u';if(cx_write(factpath,facts,z))return 2;
@@ -367,6 +422,9 @@ int main(int argc, char **argv) {
     /* DSG-RUN1: input-identity sidecar. The checked-in sidecar passes the lint; seeded defects are rejected. */
     {   size_t sn = 0; char *side = cx_read("build/chain-phase-inputs.tsv", &sn);
         ck(side && tree && !inputs_lint(side), "inputs-lint-tree");
+        ck(family_inputs(side, "jobs-tool", "src:seed/**", cf_tool_count() * 2 + 1), "tool-inputs-include-seed");
+        ck(family_inputs(side, "jobs-gen", "src:exec/**", cf_net_count() * 2 + 1), "generator-inputs-include-exec");
+        ck(ctx_inputs(side), "ctx-inputs-include-exec");
         int rej = 0, tries = 0;
         if (side && tree) {
             /* each mutation: replace the inputs of the 'snap' row (first data row) with a bad value */

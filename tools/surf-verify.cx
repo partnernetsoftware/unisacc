@@ -1,0 +1,134 @@
+/* tools/surf-verify.cx -- verify collected SURF receipts against build/std-surface.tsv
+ * and tests/surf-known-red.tsv (known-red baseline expiring in 0.0.88).
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/surf-verify.cx -- --surface FILE --receipts FILE [--known-red FILE] [--only-probed]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use cxlib.surf
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+typedef struct { char pkg[48]; char name[96]; char target[24]; char exp[32]; } KnownRed;
+static KnownRed kreds[128];
+static int nkred;
+
+static int load_known_red(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    char *p = b, *end = b + n;
+    while (p < end) {
+        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll > 0 && p[0] != '#' && nkred < 128) {
+            char buf[256];
+            if (ll < sizeof buf && !mm_copy(buf, sizeof buf, p, (long)ll)) {
+                buf[ll] = 0;
+                char *f[4]; int nf = 0; f[nf++] = buf;
+                for (char *q = buf; *q && nf < 4; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+                if (nf >= 3) {
+                    KnownRed *k = &kreds[nkred++];
+                    (void)cx_fmt(k->pkg, sizeof k->pkg, "%s", f[0]);
+                    (void)cx_fmt(k->name, sizeof k->name, "%s", f[1]);
+                    (void)cx_fmt(k->target, sizeof k->target, "%s", f[2]);
+                    (void)cx_fmt(k->exp, sizeof k->exp, "%s", nf >= 4 ? f[3] : "-");
+                }
+            }
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(b);
+    return 0;
+}
+
+static int is_known_red(const char *pkg, const char *name, const char *target) {
+    for (int i = 0; i < nkred; i++) {
+        if (!strcmp(kreds[i].pkg, pkg) && !strcmp(kreds[i].name, name) && !strcmp(kreds[i].target, target))
+            return 1;
+    }
+    return 0;
+}
+
+static int set_has_name(const surf_set_t *set, const char *pkg, const char *name) {
+    for (int i = 0; i < set->n; i++)
+        if (!strcmp(set->rows[i].pkg, pkg) && !strcmp(set->rows[i].name, name)) return 1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *surf_path = "build/std-surface.tsv";
+    const char *rec_path = 0;
+    const char *kred_path = "tests/surf-known-red.tsv";
+    int only_probed = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--surface") && i + 1 < argc) surf_path = argv[++i];
+        else if (!strcmp(argv[i], "--receipts") && i + 1 < argc) rec_path = argv[++i];
+        else if (!strcmp(argv[i], "--known-red") && i + 1 < argc) kred_path = argv[++i];
+        else if (!strcmp(argv[i], "--only-probed")) only_probed = 1;
+        else { fprintf(stderr, "usage: surf-verify --receipts FILE [--surface FILE] [--known-red FILE] [--only-probed]\n"); return 2; }
+    }
+    if (!rec_path) { fprintf(stderr, "surf-verify: --receipts required\n"); return 2; }
+    if (kred_path && sy_exists(kred_path) == 1 && load_known_red(kred_path) != 0) return 2;
+
+    size_t rn = 0, sn = 0;
+    char *rb = cx_read(rec_path, &rn);
+    char *sb = cx_read(surf_path, &sn);
+    if (!rb || !sb) { fprintf(stderr, "surf-verify: cannot read inputs\n"); free(rb); free(sb); return 2; }
+
+    surf_set_t set;
+    if (surf_parse_text(rb, rn, &set) != 0) { fprintf(stderr, "surf-verify: malformed SURF receipts\n"); free(rb); free(sb); return 2; }
+
+    int checked = 0, known_red = 0, unexpected = 0;
+    char *p = sb, *end = sb + sn;
+    while (p < end) {
+        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll > 0 && p[0] != '#') {
+            char line[2048];
+            if (ll < sizeof line && !mm_copy(line, sizeof line, p, (long)ll)) {
+                line[ll] = 0;
+                char pkg[48] = "", name[96] = "";
+                char *t1 = strchr(line, '\t');
+                if (t1) {
+                    size_t l1 = (size_t)(t1 - line);
+                    if (l1 < sizeof pkg && !mm_copy(pkg, sizeof pkg, line, (long)l1)) pkg[l1] = 0;
+                    char *t2 = strchr(t1 + 1, '\t');
+                    if (t2) {
+                        size_t l2 = (size_t)(t2 - (t1 + 1));
+                        if (l2 < sizeof name && !mm_copy(name, sizeof name, t1 + 1, (long)l2)) name[l2] = 0;
+                    }
+                }
+                if (!only_probed || set_has_name(&set, pkg, name)) {
+                    char diag[1024];
+                    int f = surf_check_surface_row(line, &set, diag, sizeof diag);
+                    if (f >= 0) checked++;
+                    if (f > 0) {
+                        char *dp = diag;
+                        while (*dp) {
+                            char *dn = strchr(dp, '\n');
+                            if (dn) *dn = 0;
+                            char *df[6]; int dnf = 0; df[dnf++] = dp;
+                            for (char *q = dp; *q && dnf < 6; q++) if (*q == '\t') { *q = 0; df[dnf++] = q + 1; }
+                            if (dnf >= 4 && is_known_red(df[1], df[2], df[3])) {
+                                known_red++;
+                                printf("KNOWN_RED\t%s\t%s\t%s\t%s\n", df[0], df[1], df[2], df[3]);
+                            } else if (dnf >= 4) {
+                                unexpected++;
+                                printf("UNEXPECTED_RED\t%s\t%s\t%s\t%s\n", df[0], df[1], df[2], df[3]);
+                            }
+                            if (!dn) break;
+                            dp = dn + 1;
+                        }
+                    }
+                }
+            }
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(rb); free(sb);
+    printf("SURF_VERIFY\treceipts=%d\tchecked=%d\tknown_red=%d\tunexpected=%d\n", set.n, checked, known_red, unexpected);
+    return unexpected ? 1 : 0;
+}
