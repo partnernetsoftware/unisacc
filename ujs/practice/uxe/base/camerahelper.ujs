@@ -1,0 +1,150 @@
+struct CameraHelper {
+  positions: u32;
+  colors: u32;
+  matrix: u32;
+  positionVersion: u32;
+  colorVersion: u32;
+  count: u32;
+  active: u32;
+}
+
+// The point IDs are p, c, t, n1..n4, f1..f4, u1..u3, cf1..cf4, cn1..cn4.
+native function camera_helper_project(positions:i64,inv:i64,write:i64) i64 {
+  let points=[3,4,4,6,6,5,5,3,7,8,8,10,10,9,9,7,3,7,4,8,5,9,6,10,0,3,0,4,0,5,0,6,
+    11,12,12,13,13,11,1,2,0,1,18,19,20,21,14,15,16,17];
+  let clipX=[10,10,10,0,20,0,20,0,20,0,20,17,3,10,0,20,10,10,0,20,10,10];
+  let clipY=[10,10,10,0,0,20,20,0,0,20,20,21,21,30,10,10,0,20,10,10,0,20];
+  let i=0;
+  while(i<50) {
+    let id=points[i];
+    let dx=0.0;
+    let dy=0.0;
+    let dz=0.0;
+    if(id!=0) {
+      let x=(clipX[id]-10)*0.1;
+      let y=(clipY[id]-10)*0.1;
+      let z=0.0-1.0;
+      if(id==2 || (id>=7 && id<=10) || (id>=14 && id<=17)) { z=1.0; }
+      let w=ux_f64(inv+24)*x+ux_f64(inv+56)*y+ux_f64(inv+88)*z+ux_f64(inv+120);
+      if(w==0.0 || w-w!=0.0) { return 0-1; }
+      dx=(ux_f64(inv)*x+ux_f64(inv+32)*y+ux_f64(inv+64)*z+ux_f64(inv+96))/w;
+      dy=(ux_f64(inv+8)*x+ux_f64(inv+40)*y+ux_f64(inv+72)*z+ux_f64(inv+104))/w;
+      dz=(ux_f64(inv+16)*x+ux_f64(inv+48)*y+ux_f64(inv+80)*z+ux_f64(inv+112))/w;
+      if(!helper_f32_fits(dx) || !helper_f32_fits(dy) || !helper_f32_fits(dz)) { return 0-1; }
+    }
+    if(write) {
+      let a=ux_f32_put(positions+i*12,dx);
+      let b=ux_f32_put(positions+i*12+4,dy);
+      let c=ux_f32_put(positions+i*12+8,dz);
+    }
+    i=i+1;
+  }
+  return positions;
+}
+
+native function camera_helper_colors(colors:i64,palette:i64) i64 {
+  let i=0;
+  while(i<50) {
+    let role=0;
+    if(i>=24) { role=1; }
+    if(i>=32) { role=2; }
+    if(i>=38) { role=3; }
+    if(i>=40) { role=4; }
+    let r=0.0;
+    let g=0.0;
+    let b=0.0;
+    if(palette>=0) {
+      r=ux_f32(palette+role*12);
+      g=ux_f32(palette+role*12+4);
+      b=ux_f32(palette+role*12+8);
+    } else if(role==0) {
+      r=1.0; g=0.4019777798219466;
+    } else if(role==1) {
+      r=1.0;
+    } else if(role==2) {
+      g=0.4019777798219466; b=1.0;
+    } else if(role==3) {
+      r=1.0; g=1.0; b=1.0;
+    } else {
+      r=0.033104766565152086; g=r; b=r;
+    }
+    let a=ux_f32_put(colors+i*12,r);
+    let c=ux_f32_put(colors+i*12+4,g);
+    let d=ux_f32_put(colors+i*12+8,b);
+    i=i+1;
+  }
+  return colors;
+}
+
+native function CameraHelper_init(helper:i64,positions:i64,colors:i64,world:i64,inv:i64) i64 {
+  if(!helper_buffer_span(helper,CameraHelper.size,4) || !helper_buffer_span(positions,600,4) ||
+     !helper_buffer_span(colors,600,4) || !helper_buffer_span(world,128,8) ||
+     !helper_buffer_span(inv,128,8) ||
+     !helper_buffer_disjoint(helper,CameraHelper.size,positions,600) ||
+     !helper_buffer_disjoint(helper,CameraHelper.size,colors,600) ||
+     !helper_buffer_disjoint(helper,CameraHelper.size,world,128) ||
+     !helper_buffer_disjoint(helper,CameraHelper.size,inv,128) ||
+     !helper_buffer_disjoint(positions,600,colors,600) ||
+     !helper_buffer_disjoint(positions,600,world,128) || !helper_buffer_disjoint(positions,600,inv,128) ||
+     !helper_buffer_disjoint(colors,600,world,128) || !helper_buffer_disjoint(colors,600,inv,128) ||
+     camera_helper_project(positions,inv,0)<0) { return 0-1; }
+  let p=ux_u32_put(helper+CameraHelper.positions,positions);
+  let c=ux_u32_put(helper+CameraHelper.colors,colors);
+  let w=ux_u32_put(helper+CameraHelper.matrix,world);
+  let pv=ux_u32_put(helper+CameraHelper.positionVersion,1);
+  let cv=ux_u32_put(helper+CameraHelper.colorVersion,1);
+  let n=ux_u32_put(helper+CameraHelper.count,50);
+  let a=ux_u32_put(helper+CameraHelper.active,1);
+  let coords=camera_helper_project(positions,inv,1);
+  let shades=camera_helper_colors(colors,0-1);
+  return helper;
+}
+
+// The caller supplies the refreshed inverse of the camera projection.
+native function CameraHelper_update(helper:i64,inv:i64) i64 {
+  if(!helper_buffer_span(helper,CameraHelper.size,4) || ux_u32(helper+CameraHelper.active)!=1 ||
+     !helper_buffer_span(inv,128,8)) { return 0-1; }
+  let positions=ux_u32(helper+CameraHelper.positions);
+  let colors=ux_u32(helper+CameraHelper.colors);
+  let world=ux_u32(helper+CameraHelper.matrix);
+  let version=ux_u32(helper+CameraHelper.positionVersion);
+  if(!helper_buffer_span(positions,600,4) ||
+     !helper_buffer_disjoint(positions,600,helper,CameraHelper.size) ||
+     !helper_buffer_disjoint(positions,600,colors,600) ||
+     !helper_buffer_disjoint(positions,600,world,128) ||
+     !helper_buffer_disjoint(positions,600,inv,128) ||
+     !helper_buffer_disjoint(helper,CameraHelper.size,inv,128) ||
+     version==4294967295 || camera_helper_project(positions,inv,0)<0) { return 0-1; }
+  let p=camera_helper_project(positions,inv,1);
+  let v=ux_u32_put(helper+CameraHelper.positionVersion,version+1);
+  return helper;
+}
+
+// Five consecutive linear RGB triples: frustum, cone, up, target, cross.
+native function CameraHelper_setColors(helper:i64,palette:i64) i64 {
+  if(!helper_buffer_span(helper,CameraHelper.size,4) || ux_u32(helper+CameraHelper.active)!=1 ||
+     !helper_buffer_span(palette,60,4)) { return 0-1; }
+  let colors=ux_u32(helper+CameraHelper.colors);
+  let positions=ux_u32(helper+CameraHelper.positions);
+  let world=ux_u32(helper+CameraHelper.matrix);
+  let version=ux_u32(helper+CameraHelper.colorVersion);
+  if(!helper_buffer_span(colors,600,4) || version==4294967295 ||
+     !helper_buffer_disjoint(colors,600,palette,60) || !helper_buffer_disjoint(colors,600,positions,600) ||
+     !helper_buffer_disjoint(colors,600,world,128) ||
+     !helper_buffer_disjoint(colors,600,helper,CameraHelper.size)) { return 0-1; }
+  let i=0;
+  while(i<15) {
+    if(!helper_f32_fits(ux_f32(palette+i*4))) { return 0-1; }
+    i=i+1;
+  }
+  let shades=camera_helper_colors(colors,palette);
+  let v=ux_u32_put(helper+CameraHelper.colorVersion,version+1);
+  return helper;
+}
+
+native function CameraHelper_dispose(helper:i64) i64 {
+  if(!helper_buffer_span(helper,CameraHelper.size,4) ||
+     ux_u32(helper+CameraHelper.active)!=1) { return 0-1; }
+  let a=ux_u32_put(helper+CameraHelper.active,0);
+  return 0;
+}
