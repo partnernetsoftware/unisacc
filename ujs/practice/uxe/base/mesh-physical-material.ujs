@@ -1,0 +1,34 @@
+struct MeshPhysicalMaterial {
+  clearcoat: f32;
+  clearcoatRoughness: f32;
+}
+
+native function mesh_phys_unit(value:f64) i64 {
+  return value>=0.0 && value<=1.0;
+}
+
+native function MeshPhysicalMaterial_coat(at:i64,amount:f64,roughness:f64) i64 {
+  if(at<0 || at%4!=0 || at>6291456-MeshPhysicalMaterial.size ||
+     !mesh_phys_unit(amount) || !mesh_phys_unit(roughness)) { return 0-1; }
+  let a=ux_f32_put(at+MeshPhysicalMaterial.clearcoat,amount);
+  let b=ux_f32_put(at+MeshPhysicalMaterial.clearcoatRoughness,roughness);
+  return at;
+}
+
+// One linear channel of the r160 direct dielectric response. The base and
+// coat share the same normal. Dot products are saturated by the caller.
+native function MeshPhysicalMaterial_direct(at:i64,base:f64,roughness:f64,nl:f64,nv:f64,nh:f64,vh:f64,light:f64) f64 {
+  if(at<0 || at%4!=0 || at>6291456-MeshPhysicalMaterial.size ||
+     !mesh_phys_unit(base) || !mesh_phys_unit(roughness) ||
+     !mesh_phys_unit(nl) || !mesh_phys_unit(nv) || !mesh_phys_unit(nh) ||
+     !mesh_phys_unit(vh) || !(light>=0.0 && light<=65536.0)) { return 0.0-1.0; }
+  let coat=ux_f32(at+MeshPhysicalMaterial.clearcoat);
+  let coatRoughness=ux_f32(at+MeshPhysicalMaterial.clearcoatRoughness);
+  if(!mesh_phys_unit(coat) || !mesh_phys_unit(coatRoughness)) { return 0.0-1.0; }
+  let diffuse=GpuMaterial_lambertDiffuse(base,nl,light);
+  let reflected=GpuMaterial_ggxSpecular(0.04,nl,nv,nh,vh,roughness,light);
+  if(coat==0.0) { return diffuse+reflected; }
+  let fresnel=0.04+0.96*ux_math_pow(2.0,(-5.55473*nv-6.98316)*nv);
+  let clear=GpuMaterial_ggxSpecular(0.04,nl,nv,nh,vh,coatRoughness,light);
+  return (diffuse+reflected)*(1.0-coat*fresnel)+coat*clear;
+}

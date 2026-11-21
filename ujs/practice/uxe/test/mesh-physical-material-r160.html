@@ -1,0 +1,98 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+import {createGpuSubmit} from "../base/gpu-host-abi.js";
+import {createGpuTargets} from "../base/gpu-target-abi.js";
+
+const size=32,output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=size;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true,antialias:false});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  gl.disable(gl.DITHER);
+  return {canvas,gl};
+}
+function read(gl) {
+  const image=new Uint8Array(size*size*4);
+  gl.readPixels(0,0,size,size,gl.RGBA,gl.UNSIGNED_BYTE,image);
+  if(gl.getError()!==gl.NO_ERROR) throw new Error("readPixels failed");
+  return image;
+}
+async function product() {
+  const {gl}=context();
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1,createGpuTargets(gl));
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  wasm=(await WebAssembly.instantiate(binary,{uxe_gpu_v1:{host_gpu_submit:submit}})).instance.exports;
+  const base=2097152,heap=new DataView(wasm.memory.buffer,base);
+  for(const [index,path,start] of [[0,"gpu-flat.vert",12000],[1,"gpu-line-srgb.frag",16500]]) {
+    const shader=new Uint8Array(await (await fetch("../base/"+path)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+start,shader.length).set(shader);
+    heap.setUint32(8192+8*index,start,true);
+    heap.setUint32(8196+8*index,shader.length,true);
+  }
+  const status=Number(wasm.uxe_mesh_physical(BigInt(query.get("mode"))));
+  if(status<0) throw new Error("physical draw rejected "+status);
+  return read(gl);
+}
+function reference() {
+  const {canvas,gl}=context();
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(size,size);
+  renderer.setClearColor(0,1);
+  renderer.toneMapping=THREE.NoToneMapping;
+  const camera=new THREE.OrthographicCamera(0,size,size,0,0.1,10);
+  camera.position.z=2;
+  const scene=new THREE.Scene(),sun=new THREE.DirectionalLight(0xffffff,2);
+  sun.position.set(0,0,1);
+  scene.add(sun);
+  const tiles=[];
+  for(const [row,normalZ] of [1,.96,.8,1].entries()) for(const [col,clearcoat] of [0,.5,1].entries()) {
+    const geometry=new THREE.PlaneGeometry(8,6);
+    const normals=geometry.getAttribute("normal");
+    for(let i=0;i<normals.count;i++) normals.setXYZ(i,Math.sqrt(1-normalZ*normalZ),0,normalZ);
+    const color=new THREE.Color().setRGB(.1,.04,.02,THREE.LinearSRGBColorSpace);
+    const material=new THREE.MeshPhysicalMaterial({
+      color,roughness:.55,metalness:0,ior:1.5,clearcoat,
+      clearcoatRoughness:row===3?.7:.35,
+    });
+    const tile=new THREE.Mesh(geometry,material);
+    tile.position.set(6+10*col,4+8*row,0);
+    tiles.push(tile);
+    scene.add(tile);
+  }
+  renderer.render(scene,camera);
+  const pixels=read(gl);
+  for(const tile of tiles) {
+    tile.geometry.dispose();
+    tile.material.dispose();
+  }
+  renderer.dispose();
+  return pixels;
+}
+function collect(image) {
+  const values=[];
+  for(let row=0;row<4;row++) for(let col=0;col<3;col++) {
+    const i=4*((4+8*row)*size+6+10*col);
+    values.push(...image.subarray(i,i+4));
+  }
+  return values;
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("Three.js revision");
+  const actual=await product(),oracle=reference();
+  let different=0,alpha=0;
+  for(let i=0;i<actual.length;i+=4) {
+    if(actual[i]!==oracle[i] || actual[i+1]!==oracle[i+1] || actual[i+2]!==oracle[i+2] ||
+       actual[i+3]!==oracle[i+3]) different++;
+    if(actual[i+3]!==255 || oracle[i+3]!==255) alpha++;
+  }
+  output.textContent=JSON.stringify([...collect(actual),...collect(oracle),different,alpha]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
