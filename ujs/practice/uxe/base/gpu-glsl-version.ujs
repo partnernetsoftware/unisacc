@@ -1,0 +1,60 @@
+native function gpu_glsl_version_range(at:i64,bytes:i64) i64 {
+  return at>=0 && at<=6291456 && bytes>=0 && bytes<=6291456-at;
+}
+
+native function gpu_glsl_version_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+// Write the public version token (100 or 300 es) as bytes without a terminator.
+native function GpuGlslVersion_token(out:i64,capacity:i64,version:i64) i64 {
+  let bytes=gpu_glsl_version_fact(version,0);
+  if(bytes<=0 || bytes>capacity || gpu_glsl_version_range(out,capacity)==0) { return 0-1; }
+  let word=gpu_glsl_version_fact(version,1);
+  let i=0;
+  while(i<bytes) {
+    let stored=ux_u8_put(out+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return bytes;
+}
+
+native function gpu_glsl_version_stage(out:i64,version:i64,source:i64,bytes:i64) i64 {
+  let directive=[35,118,101,114,115,105,111,110,32];
+  let i=0;
+  while(i<9) { let saved=ux_u8_put(out+i,directive[i]); i=i+1; }
+  let token=GpuGlslVersion_token(out+9,gpu_glsl_version_fact(version,0),version);
+  let line=ux_u8_put(out+9+token,10);
+  let copied=uxe_copy_record(out+10+token,source,bytes);
+  return 10+token+bytes;
+}
+
+// Stage strings are preserved byte for byte after the version line. Both
+// output lengths include it, ready for the shader source packet consumer.
+native function GpuGlslVersion_source(out:i64,buffer:i64,capacity:i64,version:i64,input:i64) i64 {
+  let token=gpu_glsl_version_fact(version,0);
+  let descriptor=GpuShaderSource.size;
+  if(token<=0 || token>8 || input%4!=0 || out%4!=0 ||
+      gpu_glsl_version_range(input,descriptor)==0 || gpu_glsl_version_range(out,descriptor)==0 ||
+      gpu_glsl_version_range(buffer,capacity)==0 || gpu_glsl_version_overlap(input,descriptor,out,descriptor)!=0) { return 0-1; }
+  let vertex=ux_u32(input+GpuShaderSource.vertex);
+  let vertex_bytes=ux_u32(input+GpuShaderSource.vertexBytes);
+  let fragment=ux_u32(input+GpuShaderSource.fragment);
+  let fragment_bytes=ux_u32(input+GpuShaderSource.fragmentBytes);
+  let prefix=10+token;
+  let needed=vertex_bytes+fragment_bytes+2*prefix;
+  if(vertex_bytes<1 || fragment_bytes<1 || gpu_glsl_version_range(vertex,vertex_bytes)==0 ||
+      gpu_glsl_version_range(fragment,fragment_bytes)==0 ||
+      gpu_glsl_version_overlap(buffer,needed,input,descriptor)!=0 || gpu_glsl_version_overlap(buffer,needed,out,descriptor)!=0 ||
+      gpu_glsl_version_overlap(buffer,needed,vertex,vertex_bytes)!=0 || gpu_glsl_version_overlap(buffer,needed,fragment,fragment_bytes)!=0 ||
+      gpu_glsl_version_overlap(out,descriptor,vertex,vertex_bytes)!=0 || gpu_glsl_version_overlap(out,descriptor,fragment,fragment_bytes)!=0) { return 0-1; }
+  if(needed>capacity) { return 0-2; }
+  let a=gpu_glsl_version_stage(buffer,version,vertex,vertex_bytes);
+  let b=gpu_glsl_version_stage(buffer+a,version,fragment,fragment_bytes);
+  let base=ux_u32_put(out+GpuShaderSource.vertex,buffer);
+  let first=ux_u32_put(out+GpuShaderSource.vertexBytes,a);
+  let next=ux_u32_put(out+GpuShaderSource.fragment,buffer+a);
+  let second=ux_u32_put(out+GpuShaderSource.fragmentBytes,b);
+  return needed;
+}
