@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferGeometry, Camera, Float32BufferAttribute, Mesh, MeshBasicMaterial, REVISION,
+  Scene, WebGLRenderer } from "../../web/game/three.module.js";
+const result = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const renderer = new WebGLRenderer({ antialias:false });
+  renderer.setSize(16,16);
+  const refgl = renderer.getContext();
+  if (!renderer.capabilities.isWebGL2) throw new Error("r160 WebGL2");
+  const attribute = new Float32BufferAttribute([-.5,-.5,0,.5,-.5,0,0,.5,0],3);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position",attribute);
+  const material = new MeshBasicMaterial(),scene = new Scene(),camera = new Camera();
+  scene.add(new Mesh(geometry,material));
+  let refBuffer;
+  const reference = [];
+  for (const name of ["bufferData","bufferSubData"]) {
+    const transfer = refgl[name].bind(refgl);
+    refgl[name] = (...args) => {
+      transfer(...args);
+      const allocate = name === "bufferData";
+      if (args[allocate?1:2] !== attribute.array) return;
+      refBuffer = refgl.getParameter(refgl.ARRAY_BUFFER_BINDING);
+      reference.push(allocate ? -1 : args[1], allocate ? args[1].byteLength :
+        (args.length >= 5 ? args[4]*attribute.array.BYTES_PER_ELEMENT : args[2].byteLength));
+    };
+  }
+  attribute.onUpload(function () { reference.push(99,this===attribute?7:0); });
+  const draw=()=>renderer.render(scene,camera);
+  const read=(gl,buffer)=>{
+    const values = new Float32Array(4);
+    gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
+    gl.getBufferSubData(gl.ARRAY_BUFFER,0,values);
+    if (gl.getError() !== gl.NO_ERROR) throw new Error("buffer readback");
+    return [...values];
+  };
+  draw();
+  draw();
+  attribute.array[0]=-.25;
+  attribute.array[1]=.25;
+  attribute.array[3]=.125;
+  attribute.addUpdateRange(1,1);
+  attribute.updateRange.offset=0;
+  attribute.updateRange.count=1;
+  attribute.needsUpdate=true;
+  draw();
+  const firstRef=read(refgl,refBuffer);
+  if (attribute.updateRanges.length!==0 || attribute.updateRange.count!==-1) throw new Error("r160 did not clear ranges");
+  attribute.needsUpdate=true;
+  draw();
+  const lastRef=read(refgl,refBuffer);
+  geometry.dispose(); material.dispose(); renderer.dispose();
+
+  const gl=document.createElement("canvas").getContext("webgl2");
+  if (!gl) throw new Error("independent WebGL2");
+  const buffer=gl.createBuffer(), actual=[];
+  let wasm;
+  const imports={
+    host_ba_transfer(ptr,length,dst,usage,allocate) {
+      const bytes=new Uint8Array(wasm.memory.buffer,Number(ptr),Number(length));
+      gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
+      if (allocate===1n) gl.bufferData(gl.ARRAY_BUFFER,bytes,Number(usage));
+      else gl.bufferSubData(gl.ARRAY_BUFFER,Number(dst),bytes);
+      if (gl.getError()!==gl.NO_ERROR) return 0n;
+      actual.push(allocate===1n?-1:Number(dst),Number(length));
+      return 1n;
+    },
+    host_ba_callback(token,receiver) {
+      actual.push(99,receiver===0n?Number(token):0);
+      return 1n;
+    },
+  };
+  const bytes=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(bytes),{uxe_ba_v1:imports}).exports;
+  const go=(op,arg=0)=>Number(wasm.uxe_ba_probe(BigInt(op),BigInt(arg)));
+  const lifecycle=[go(0),go(1),go(1),go(2,query.has("mutate")?1:0),go(1),go(4)];
+  const first=read(gl,buffer);
+  lifecycle.push(go(3),go(1));
+  const last=read(gl,buffer);
+  gl.deleteBuffer(buffer);
+  for (const [label,a,b] of [["trace",actual,reference],["partial",first,firstRef],["full",last,lastRef]]) {
+    if (a.length!==b.length || a.some((value,i)=>value!==b[i])) throw new Error(label+" actual="+a+" r160="+b);
+  }
+  result.textContent=JSON.stringify([...lifecycle,...actual,...first,...last]);
+} catch (error) { result.textContent="error:"+error.message; }
+</script>

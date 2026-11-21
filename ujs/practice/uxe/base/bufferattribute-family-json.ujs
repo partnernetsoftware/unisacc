@@ -1,0 +1,50 @@
+native function baf_json_dst(state:i64,attr:i64,name:i64,nameBytes:i64,at:i64,size:i64) i64 {
+  let data=ux_u32(attr+BufferAttribute.data);
+  let ranges=ux_u32(state+BufferAttributeFamilyState.ranges);
+  let rangeBytes=8+16*ux_u32(state+BufferAttributeFamilyState.capacity);
+  return baf_span(at,size) && baf_disjoint(at,size,state,BufferAttributeFamilyState.size) &&
+    baf_disjoint(at,size,attr,BufferAttribute.size) && baf_disjoint(at,size,ranges,rangeBytes) &&
+    baf_disjoint(at,size,data,baf_attribute_bytes(attr)) && baf_disjoint(at,size,name,nameBytes);
+}
+
+native function Attribute_toJSON(state:i64,dst:i64,end:i64,scratch:i64) i64 {
+  let attr=baf_state(state);
+  if(attr<0 || end<=dst || scratch%8!=0) { return 0-1; }
+  let name=ux_u32(state+BufferAttributeFamilyState.name);
+  let nameBytes=ux_u32(state+BufferAttributeFamilyState.nameBytes);
+  if(!baf_span(name,nameBytes) ||
+     !baf_json_dst(state,attr,name,nameBytes,dst,end-dst) ||
+     !baf_json_dst(state,attr,name,nameBytes,scratch,1104) ||
+     !baf_disjoint(dst,end-dst,scratch,1104)) { return 0-1; }
+  let kind=ux_u32(attr+BufferAttribute.componentType);
+  let width=BufferAttribute_width(kind);
+  let components=ux_u32(attr+BufferAttribute.itemSize);
+  let values=components*ux_u32(attr+BufferAttribute.count);
+  let data=ux_u32(attr+BufferAttribute.data);
+  let p=json_write_token(dst,end,ObjectJsonToken.itemSize);
+  p=json_write_f64(p,end,0.0+components,scratch);
+  p=json_write_token(p,end,ObjectJsonToken.typedField);
+  p=json_write_token(p,end,Attribute_arrayType(kind));
+  p=json_write_token(p,end,ObjectJsonToken.values);
+  let i=0;
+  while(p>=0 && i<values) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,json_typed_value(data+i*width,kind),scratch);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  p=json_write_token(p,end,ObjectJsonToken.normalized);
+  let truth=ObjectJsonToken.boolFalse;
+  if(ux_u32(attr+BufferAttribute.normalized)!=0) { truth=ObjectJsonToken.boolTrue; }
+  p=json_write_token(p,end,truth);
+  if(nameBytes!=0) {
+    p=json_write_token(p,end,ObjectJsonToken.nameField);
+    p=json_write_string(p,end,name,nameBytes);
+  }
+  let usage=ux_u32(attr+BufferAttribute.usage);
+  if(usage!=35044) {
+    p=json_write_token(p,end,ObjectJsonToken.usage);
+    p=json_write_f64(p,end,0.0+usage,scratch);
+  }
+  return json_byte(p,end,125);
+}

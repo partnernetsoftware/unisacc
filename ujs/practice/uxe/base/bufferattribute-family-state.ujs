@@ -1,0 +1,141 @@
+struct BufferAttributeFamilyState {
+  marker: u32;
+  attribute: u32;
+  ranges: u32;
+  capacity: u32;
+  rangeCount: u32;
+  callback: u32;
+  legacyOffset: f64;
+  legacyCount: f64;
+  name: u32;
+  nameBytes: u32;
+}
+
+native function baf_span(at:i64,size:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456 && size<=6291456-at;
+}
+
+native function baf_disjoint(at:i64,size:i64,other:i64,otherSize:i64) i64 {
+  return size==0 || otherSize==0 || at+size<=other || other+otherSize<=at;
+}
+
+native function baf_attribute_bytes(attribute:i64) i64 {
+  if(!baf_span(attribute,BufferAttribute.size) || attribute%4!=0) { return 0-1; }
+  let kind=ux_u32(attribute+BufferAttribute.componentType);
+  let width=BufferAttribute_width(kind);
+  let size=ux_u32(attribute+BufferAttribute.itemSize);
+  let count=ux_u32(attribute+BufferAttribute.count);
+  let stride=ux_u32(attribute+BufferAttribute.stride);
+  let data=ux_u32(attribute+BufferAttribute.data);
+  if(width<=0 || size<=0 || size>6291456/width || stride!=size*width ||
+     data%width!=0 || !baf_span(data,0) || count>(6291456-data)/stride ||
+     !baf_disjoint(attribute,BufferAttribute.size,data,count*stride)) { return 0-1; }
+  return count*stride;
+}
+
+// The scalar data and update-range rows remain in caller-owned storage.
+native function Attribute_init(state:i64,attribute:i64,data:i64,count:i64,size:i64,
+  kind:i64,normalized:i64,ranges:i64) i64 {
+  if(!baf_span(state,BufferAttributeFamilyState.size) || state%8!=0 ||
+     !baf_span(attribute,BufferAttribute.size) || attribute%4!=0 ||
+     !baf_span(ranges,8) || ranges%8!=0) { return 0-1; }
+  let capacity=ux_u32(ranges);
+  let rows=ranges+8;
+  let width=BufferAttribute_width(kind);
+  if(width<=0 || size<=0 || size>6291456/width || count<0 || !baf_span(data,0) ||
+     count>(6291456-data)/(size*width) || capacity>(6291456-rows)/16) { return 0-1; }
+  let rangeBytes=8+16*capacity;
+  let dataBytes=count*size*width;
+  if(!baf_disjoint(state,BufferAttributeFamilyState.size,attribute,BufferAttribute.size) ||
+     !baf_disjoint(state,BufferAttributeFamilyState.size,data,dataBytes) ||
+     !baf_disjoint(state,BufferAttributeFamilyState.size,ranges,rangeBytes) ||
+     !baf_disjoint(attribute,BufferAttribute.size,data,dataBytes) ||
+     !baf_disjoint(attribute,BufferAttribute.size,ranges,rangeBytes) ||
+     !baf_disjoint(data,dataBytes,ranges,rangeBytes)) { return 0-1; }
+  let attr=BufferAttribute_init(attribute,data,count,size,kind,normalized);
+  if(attr<0) { return attr; }
+  let a=ux_u32_put(state+BufferAttributeFamilyState.attribute,attribute);
+  let b=ux_u32_put(state+BufferAttributeFamilyState.ranges,ranges);
+  let c=ux_u32_put(state+BufferAttributeFamilyState.capacity,capacity);
+  let d=ux_u32_put(state+BufferAttributeFamilyState.rangeCount,0);
+  let e=ux_u32_put(state+BufferAttributeFamilyState.callback,0);
+  let f=ux_f64_put(state+BufferAttributeFamilyState.legacyOffset,0.0);
+  let g=ux_f64_put(state+BufferAttributeFamilyState.legacyCount,0.0-1.0);
+  let h=ux_u32_put(state+BufferAttributeFamilyState.name,0);
+  let i=ux_u32_put(state+BufferAttributeFamilyState.nameBytes,0);
+  let ready=ux_u32_put(state+BufferAttributeFamilyState.marker,1111574105);
+  return attribute;
+}
+
+native function baf_state(state:i64) i64 {
+  if(!baf_span(state,BufferAttributeFamilyState.size) || state%8!=0 ||
+     ux_u32(state+BufferAttributeFamilyState.marker)!=1111574105) { return 0-1; }
+  let attribute=ux_u32(state+BufferAttributeFamilyState.attribute);
+  let ranges=ux_u32(state+BufferAttributeFamilyState.ranges);
+  let capacity=ux_u32(state+BufferAttributeFamilyState.capacity);
+  let bytes=baf_attribute_bytes(attribute);
+  if(bytes<0 || ranges%8!=0 || !baf_span(ranges,8+16*capacity) ||
+     ux_u32(state+BufferAttributeFamilyState.rangeCount)>capacity ||
+     !baf_disjoint(state,BufferAttributeFamilyState.size,attribute,BufferAttribute.size) ||
+     !baf_disjoint(state,BufferAttributeFamilyState.size,ranges,8+16*capacity) ||
+     !baf_disjoint(attribute,BufferAttribute.size,ranges,8+16*capacity)) { return 0-1; }
+  let data=ux_u32(attribute+BufferAttribute.data);
+  if(!baf_disjoint(state,BufferAttributeFamilyState.size,data,bytes) ||
+     !baf_disjoint(ranges,8+16*capacity,data,bytes)) { return 0-1; }
+  return attribute;
+}
+
+native function Attribute_addUpdateRange(state:i64,start:f64,count:f64) i64 {
+  if(baf_state(state)<0) { return 0-1; }
+  let length=ux_u32(state+BufferAttributeFamilyState.rangeCount);
+  if(length>=ux_u32(state+BufferAttributeFamilyState.capacity)) { return 0-1; }
+  let row=ux_u32(state+BufferAttributeFamilyState.ranges)+8+16*length;
+  let a=ux_f64_put(row,start);
+  let b=ux_f64_put(row+8,count);
+  let appended=ux_u32_put(state+BufferAttributeFamilyState.rangeCount,length+1);
+  return 0;
+}
+
+native function Attribute_clearUpdateRanges(state:i64) i64 {
+  if(baf_state(state)<0) { return 0-1; }
+  let clear=ux_u32_put(state+BufferAttributeFamilyState.rangeCount,0);
+  return 0;
+}
+
+native function Attribute_updateRange(state:i64,axis:i64) f64 {
+  if(baf_state(state)<0 || axis<0 || axis>1) { return 0.0/0.0; }
+  return ux_f64(state+BufferAttributeFamilyState.legacyOffset+8*axis);
+}
+
+native function Attribute_setUpdateRange(state:i64,offset:f64,count:f64) i64 {
+  if(baf_state(state)<0) { return 0-1; }
+  let a=ux_f64_put(state+BufferAttributeFamilyState.legacyOffset,offset);
+  let b=ux_f64_put(state+BufferAttributeFamilyState.legacyCount,count);
+  return 0;
+}
+
+native function Attribute_onUpload(state:i64,token:i64) i64 {
+  let attr=baf_state(state);
+  if(attr<0 || token<0 || token>4294967295) { return 0-1; }
+  let stored=ux_u32_put(state+BufferAttributeFamilyState.callback,token);
+  return attr;
+}
+
+// A zero token is the r160 no-op. The consumer supplies the callback body.
+function Attribute_onUploadCallback(callback,...args) {
+  let state=f64_floor_i64(args[0]*1.0);
+  let attr=baf_state(state);
+  if(attr<0) { return 0-1; }
+  let token=ux_u32(state+BufferAttributeFamilyState.callback);
+  if(token!=0) { let fired=callback(attr,token); }
+  return 0;
+}
+
+native function Attribute_setName(state:i64,name:i64,size:i64) i64 {
+  let attr=baf_state(state);
+  if(attr<0 || !baf_span(name,size) ||
+     !baf_disjoint(state,BufferAttributeFamilyState.size,name,size)) { return 0-1; }
+  let a=ux_u32_put(state+BufferAttributeFamilyState.name,name);
+  let b=ux_u32_put(state+BufferAttributeFamilyState.nameBytes,size);
+  return attr;
+}

@@ -1,0 +1,77 @@
+struct AttributeGpuUpload {
+  transferred: u32;
+  version: u32;
+  bytes: u32;
+  busy: u32;
+}
+
+native function ba_upload_range(start:f64,count:f64,total:i64) i64 {
+  if(!(start>=0.0 && count>=1.0 && start+count<=total*1.0)) { return 0; }
+  let offset=f64_floor_i64(start);
+  let length=f64_floor_i64(count);
+  return start==offset*1.0 && count==length*1.0;
+}
+
+native function ba_upload_part(data:i64,width:i64,start:f64,count:f64,usage:i64) i64 {
+  let offset=f64_floor_i64(start)*width;
+  let bytes=f64_floor_i64(count)*width;
+  return host_ba_transfer(ux_span(data+offset,bytes),bytes,offset,usage,0);
+}
+
+// One replica belongs to one GPU resource. Only completed transfers
+// publish the version, consume ranges, and deliver the callback.
+native function Attribute_renderUpload(replica:i64,state:i64) i64 {
+  let attr=baf_state(state);
+  if(attr<0 || replica%4!=0 || !baf_span(replica,AttributeGpuUpload.size) ||
+     !baf_json_dst(state,attr,0,0,replica,AttributeGpuUpload.size) ||
+     ux_u32(replica+AttributeGpuUpload.busy)!=0) { return 0-1; }
+  let version=ux_u32(attr+BufferAttribute.version);
+  let allocation=ux_u32(replica+AttributeGpuUpload.transferred)==0;
+  let bytes=baf_attribute_bytes(attr);
+  if(!allocation) {
+    if(bytes!=ux_u32(replica+AttributeGpuUpload.bytes)) { return 0-1; }
+    if(version<=ux_u32(replica+AttributeGpuUpload.version)) { return 0; }
+  }
+  let data=ux_u32(attr+BufferAttribute.data);
+  let usage=ux_u32(attr+BufferAttribute.usage);
+  let width=BufferAttribute_width(ux_u32(attr+BufferAttribute.componentType));
+  let total=bytes/width;
+  let count=ux_u32(state+BufferAttributeFamilyState.rangeCount);
+  let first=ux_u32(state+BufferAttributeFamilyState.ranges)+8;
+  let offset=ux_f64(state+BufferAttributeFamilyState.legacyOffset);
+  let old=ux_f64(state+BufferAttributeFamilyState.legacyCount);
+  if(!allocation) {
+    if(old!=0.0-1.0 && !ba_upload_range(offset,old,total)) { return 0-1; }
+    let i=0;
+    while(i<count) {
+      let row=first+16*i;
+      if(!ba_upload_range(ux_f64(row),ux_f64(row+8),total)) { return 0-1; }
+      i=i+1;
+    }
+  }
+  let inFlight=ux_u32_put(replica+AttributeGpuUpload.busy,1);
+  let ok=1;
+  if(allocation || (count==0 && old==0.0-1.0)) {
+    ok=host_ba_transfer(ux_span(data,bytes),bytes,0,usage,allocation);
+  } else {
+    let i=0;
+    while(i<count && ok==1) {
+      let row=first+16*i;
+      ok=ba_upload_part(data,width,ux_f64(row),ux_f64(row+8),usage);
+      i=i+1;
+    }
+    if(ok==1 && old!=0.0-1.0) { ok=ba_upload_part(data,width,offset,old,usage); }
+  }
+  let complete=ux_u32_put(replica+AttributeGpuUpload.busy,0);
+  if(ok!=1) { return 0-2; }
+  if(!allocation) {
+    let a=ux_u32_put(state+BufferAttributeFamilyState.rangeCount,0);
+    let b=ux_f64_put(state+BufferAttributeFamilyState.legacyCount,0.0-1.0);
+  }
+  let a=ux_u32_put(replica+AttributeGpuUpload.transferred,1);
+  let b=ux_u32_put(replica+AttributeGpuUpload.bytes,bytes);
+  let c=ux_u32_put(replica+AttributeGpuUpload.version,version);
+  let token=ux_u32(state+BufferAttributeFamilyState.callback);
+  if(token!=0) { let delivered=host_ba_callback(token,attr); }
+  return 1;
+}

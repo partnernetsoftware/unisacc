@@ -1,0 +1,68 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[260],cwd[420],abi[320],body[320],wasm[320],url[900];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","baf-render-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(body,sizeof body,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int n=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/bufferattribute-family-render-upload-r160.html?wasm=%s%s",
+        cwd,wasm,mutate?"&mutate=1":"");
+    const char contract[]=
+        "import host_ba_transfer from \"uxe_ba_v1\"(i64,i64,i64,i64,i64) i64;\n"
+        "import host_ba_callback from \"uxe_ba_v1\"(i64,i64) i64;\n"
+        "export uxe_ba_probe(op:i64,arg:i64) i64 version 1;\n";
+    const char entry[]=
+        "if(op==0){let cap=ux_u32_put(256,2);let attr=Float32BufferAttribute_new(64,0,512,3,3,0,256);"
+        "let a=ux_f32_put(512,0.0-0.5);let b=ux_f32_put(516,0.0-0.5);"
+        "let c=ux_f32_put(524,0.5);let d=ux_f32_put(528,0.0-0.5);let e=ux_f32_put(540,0.5);"
+        "return Attribute_onUpload(64,7)==attr;}"
+        "if(op==1){return Attribute_renderUpload(128,64);}"
+        "if(op==2){let a=ux_f32_put(512,0.0-0.25);let b=ux_f32_put(516,0.25);let c=ux_f32_put(524,0.125);"
+        "if(arg==1){let wrong=Attribute_addUpdateRange(64,2.0,1.0);}"
+        "else{let good=Attribute_addUpdateRange(64,1.0,1.0);}let old=Attribute_setUpdateRange(64,0.0,1.0);"
+        "let version=BufferAttribute_needsUpdate(0,1);return ux_u32(BufferAttribute.version);}"
+        "if(op==3){let version=BufferAttribute_needsUpdate(0,1);return ux_u32(BufferAttribute.version);}"
+        "if(op==4){return ux_u32(64+BufferAttributeFamilyState.rangeCount)==0 && Attribute_updateRange(64,1)==0.0-1.0;}"
+        "return 0-1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/geometry-load-layout.ujs",
+        "ujs/practice/uxe/base/object-json-tokens.ujs","ujs/practice/uxe/base/datautils.ujs",
+        "ujs/practice/uxe/base/json-bytes.ujs","ujs/practice/uxe/base/bufferattribute.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-state.ujs","ujs/practice/uxe/base/bufferattribute-family-classes.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-json.ujs","ujs/practice/uxe/base/bufferattribute-family-render-upload.ujs",
+        body,"-o",wasm,0};
+    const double gold[]={1,1,0,1,1,1,2,1,-1,36,99,7,4,4,0,4,99,7,0,36,99,7,
+        -0.25,0.25,0,0.5,-0.25,0.25,0,0.125};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=n<=0 || n>=(int)sizeof url || sy_write_file(abi,contract,sizeof contract-1,0600) ||
+        sy_write_file(body,entry,sizeof entry-1,0600);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("BUFFER_ATTRIBUTE_GPU compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            if(actual[i]!=gold[i]) {
+                printf("BUFFER_ATTRIBUTE_GPU cell=%d actual=%g gold=%g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT Float32BufferAttribute WebGL2 update lifecycle cases=%d failed=%d\n",count,failed);
+    return failed;
+}

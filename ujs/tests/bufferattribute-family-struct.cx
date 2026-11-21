@@ -1,0 +1,96 @@
+#pragma unisa use g_math
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static const char base_init[]="let capacity=ux_u32_put(256,2);"
+    "let attr=Attribute_init(64,0,512,2,2,9,0,256);";
+static const char legacy[]="let legacy=Attribute_setUpdateRange(64,0.0-2.5,1.75);";
+static const char ranges[]="let a=Attribute_addUpdateRange(64,3.0,2.0);"
+    "let b=Attribute_addUpdateRange(64,0.5,0.0-1.0);";
+static const char setup[]=
+    "function tap(env,...args){"
+    " if(env[0]==64 && args[0]==0 && args[1]==7) {let r=ux_u32_put(408,ux_u32(408)+7);}"
+    " return 0;}let notify=closure(tap,64);";
+static const char json_hash[]="let end=Attribute_toJSON(64,1024,1900,2048);"
+    "if(end<0){return 0.0-1.0;} let p=1024;let h=0;"
+    "while(p<end){h=(h*131+ux_u8(p))%16777213;p=p+1;}return h*1.0;";
+static const char *classes[]={
+    "BufferAttribute","Uint8BufferAttribute","Int8BufferAttribute","Uint8ClampedBufferAttribute",
+    "Uint16BufferAttribute","Int16BufferAttribute","Uint32BufferAttribute","Int32BufferAttribute",
+    "Float16BufferAttribute","Float32BufferAttribute","Float64BufferAttribute",
+};
+static const char *arrays[]={
+    "Float32Array","Uint8Array","Int8Array","Uint8ClampedArray","Uint16Array","Int16Array",
+    "Uint32Array","Int32Array","Uint16Array","Float32Array","Float64Array",
+};
+enum { cells=16 };
+static int build_json(char *out,int capacity,int kind,int mutate) {
+    const int half=kind==8;
+    const int width[]={4,1,1,1,2,2,4,4,2,4,8};
+    const int raw[]={15360,49152,0,32768};
+    const char *write=width[kind]==1?"ux_u8_put":width[kind]==2?"ux_u16_put":
+        kind==0||kind==9?"ux_f32_put":kind==10?"ux_f64_put":"ux_u32_put";
+    const char *suffix=kind==0||kind>=9?".0":"";
+    int n=0;
+    for(int i=0;i<4;i++)
+        n+=tx_snprintf(out+n,capacity-n,"let data%d=%s(%d,%d%s);",
+            i,write,512+i*width[kind],half&&!mutate?raw[i]:i+1,suffix);
+    if(kind==0) n+=tx_snprintf(out+n,capacity-n,"%s",base_init);
+    else n+=tx_snprintf(out+n,capacity-n,
+        "let capacity=ux_u32_put(256,2);let attr=%s_new(64,0,512,2,2,%d,256);",classes[kind],kind%2);
+    if(kind!=0 && kind!=10)
+        n+=tx_snprintf(out+n,capacity-n,"let p0=ux_u32_put(416,577200500);let named=Attribute_setName(64,416,4);");
+    if(kind%2) n+=tx_snprintf(out+n,capacity-n,"let usage=BufferAttribute_setUsage(attr,35048);");
+    n+=tx_snprintf(out+n,capacity-n,"%s",json_hash);
+    return n<0 || n>=capacity;
+}
+
+static double json_gold(int kind) {
+    char text[350];
+    const char *values=kind==8?"15360,49152,0,32768":"1,2,3,4";
+    const int n=tx_snprintf(text,sizeof text,
+        "{\"itemSize\":2,\"type\":\"%s\",\"array\":[%s],\"normalized\":%s%s%s}",
+        arrays[kind],values,kind%2?"true":"false",kind==0||kind==10?"":",\"name\":\"tag\\\"\"",
+        kind%2?",\"usage\":35048":"");
+    uint64_t hash=0;
+    for(int i=0;i<n;i++) hash=(hash*131+(unsigned char)text[i])%16777213;
+    return (double)hash;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int kind=mutate?8:-1;
+    const int state=argc==2 && tx_eqz(argv[1],"--state");
+    if(argc==3 && tx_eqz(argv[1],"--kind")) {
+        char *end=0;
+        const long selected=tx_strtol(argv[2],&end,10);
+        if(end!=argv[2] && *end==0 && selected>=0 && selected<=10) kind=selected;
+    }
+    if(kind<0 && !state) return 2;
+    const char *modules[]={"geometry-load-layout","object-json-tokens","datautils","json-bytes",
+        "bufferattribute","bufferattribute-family-state","bufferattribute-family-classes","bufferattribute-family-json",0};
+    char text[cells][1800],wrong[1800];
+    const char *cases[cells];
+    double gold[cells]={1,1,1,1,7};
+    for(int i=0;i<cells;i++) cases[i]=text[i];
+    tx_snprintf(text[0],sizeof text[0],"%sreturn 0.0+(Attribute_updateRange(64,0)==0.0 && "
+        "Attribute_updateRange(64,1)==0.0-1.0 && ux_u32(64+BufferAttributeFamilyState.rangeCount)==0);",base_init);
+    tx_snprintf(text[1],sizeof text[1],"%s%slet overdue=Attribute_addUpdateRange(64,8.0,9.0);"
+        "return 0.0+(overdue<0 && ux_u32(64+BufferAttributeFamilyState.rangeCount)==2 && "
+        "ux_f64(264)==3.0 && ux_f64(272)==2.0 && ux_f64(280)==0.5 && ux_f64(288)==0.0-1.0);",base_init,ranges);
+    tx_snprintf(text[2],sizeof text[2],"%s%s%slet clear=Attribute_clearUpdateRanges(64);"
+        "return 0.0+(clear==0 && ux_u32(64+BufferAttributeFamilyState.rangeCount)==0 && "
+        "Attribute_updateRange(64,0)==0.0-2.5 && Attribute_updateRange(64,1)==1.75);",base_init,legacy,ranges);
+    tx_snprintf(text[3],sizeof text[3],"%slet a=Attribute_onUploadCallback(notify,64);"
+        "let lr=Attribute_onUpload(64,7);return 0.0+(a==0 && lr==attr && ux_u32(408)==0);",base_init);
+    tx_snprintf(text[4],sizeof text[4],"%slet a=Attribute_onUpload(64,7);"
+        "let b=Attribute_onUploadCallback(notify,64);return ux_u32(408)*1.0;",base_init);
+    for(int i=0;i<=10;i++) {
+        if(build_json(text[5+i],sizeof text[0],i,0)) return 2;
+        gold[5+i]=json_gold(i);
+    }
+    if(mutate && build_json(wrong,sizeof wrong,8,1)) return 2;
+    return g_math_run_range("G_STRUCT BufferAttribute scalar family","bufferattribute-family",modules,setup,
+        cases,gold,cells,state?0:5+kind,state?5:6+kind,mutate?13:-1,mutate?wrong:0);
+}
