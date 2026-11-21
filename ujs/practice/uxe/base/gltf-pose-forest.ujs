@@ -1,0 +1,49 @@
+// Apply authored local transforms to resolved Object3D nodes. All matrices
+// are prepared and checked before publishing to the live arena.
+native function GltfLoader_poseForest(arena:i64,handles:i64,records:i64,count:i64,work:i64,space:i64) i64 {
+  if(count<1 || count>256 || arena<0 || arena%8!=0 || arena>6291448 ||
+     handles%4!=0 || records%8!=0 || work%8!=0 || space<count*128 ||
+     !loading_span(handles,count*4) || !loading_span(records,count*136) || !loading_span(work,space) ||
+     !file_disjoint(work,space,handles,count*4) || !file_disjoint(work,space,records,count*136)) { return 0-1; }
+  let slots=ux_u32(arena);
+  let arenaBytes=8+slots*424;
+  if(count>slots || arena>6291456-arenaBytes || !file_disjoint(arena,arenaBytes,handles,count*4) ||
+     !file_disjoint(arena,arenaBytes,records,count*136) || !file_disjoint(arena,arenaBytes,work,space)) { return 0-1; }
+  let previous=0;
+  let i=0;
+  while(i<count) {
+    let handle=ux_u32(handles+i*4);
+    let node=Object3D_address(arena,handle);
+    let record=records+i*136;
+    let matrix=work+i*128;
+    if(node<0 || handle<=previous || GltfLoader_transformMatrix(record,matrix)<0 ||
+       ux_u32(node+Object3D.localMatrix)!=node+88 || ux_u32(node+Object3D.position)!=node+344 ||
+       ux_u32(node+Object3D.quaternion)!=node+368 || ux_u32(node+Object3D.scale)!=node+400) { return 0-2; }
+    if(ux_f64(matrix+24)!=0.0 || ux_f64(matrix+56)!=0.0 ||
+       ux_f64(matrix+88)!=0.0 || ux_f64(matrix+120)!=1.0) { return 0-2; }
+    let j=0;
+    while(j<16) {
+      let value=ux_f64(matrix+j*8);
+      if(value-value!=0.0) { return 0-2; }
+      j=j+1;
+    }
+    previous=handle;
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let node=Object3D_address(arena,ux_u32(handles+i*4));
+    let record=records+i*136;
+    let matrix=work+i*128;
+    let local=uxe_copy_record(node+88,matrix,128);
+    if(ux_u32(record)==0) {
+      let pose=uxe_copy_record(node+344,record+8,80);
+    } else if(Matrix4_columnLengthSq(matrix)>0.0 &&
+              Matrix4_columnLengthSq(matrix+32)>0.0 && Matrix4_columnLengthSq(matrix+64)>0.0) {
+      let pose=Matrix4_decompose(matrix,node+344,node+368,node+400);
+    }
+    let dirty=ux_u32_put(node+Object3D.dirty,2);
+    i=i+1;
+  }
+  return count;
+}

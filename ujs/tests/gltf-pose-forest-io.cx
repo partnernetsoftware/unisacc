@@ -1,0 +1,36 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d","record-copy",
+        "loadingmanager","fileloader","gltf-transform-matrix","gltf-pose-forest",0};
+    const char *setup="let arena=0;let handles=2048;let records=2304;let work=2816;"
+        "let init=Object3D_initArena(arena,3);"
+        "let root=Object3D_create(arena);let child=Object3D_create(arena);let leaf=Object3D_create(arena);"
+        "let link=Object3D_add(arena,root,child);let next=Object3D_add(arena,child,leaf);"
+        "let r=ux_u32_put(handles,root);let c=ux_u32_put(handles+4,child);let l=ux_u32_put(handles+8,leaf);"
+        "let p0=records;let p1=records+136;let p2=records+272;"
+        "let x=ux_f64_put(p0+8,2.0);let w=ux_f64_put(p0+56,1.0);let z=ux_f64_put(p2+24,4.0);"
+        "let nextW=ux_f64_put(p2+56,1.0);let i=0;"
+        "while(i<3){let a=ux_f64_put(p0+64+i*8,1.0);let b=ux_f64_put(p2+64+i*8,1.0);i=i+1;}"
+        "let matrix=ux_u32_put(p1,1);i=0;while(i<4){let a=ux_f64_put(p1+8+i*40,1.0);i=i+1;}"
+        "let y=ux_f64_put(p1+112,3.0);"
+        "let leafAt=Object3D_address(arena,leaf);let world=ux_u32(leafAt+Object3D.worldMatrix);"
+        "let rootAt=Object3D_address(arena,root);let local=ux_u32(rootAt+Object3D.localMatrix);";
+    #define APPLY "let done=GltfLoader_poseForest(arena,handles,records,3,work,384);"
+    #define WORLD "let updated=Object3D_updateMatrixWorld(arena,root,1);"
+    const char *cases[]={
+        APPLY "return 0.0+done;",
+        APPLY WORLD "return ux_f64(world+96);",
+        APPLY WORLD "return ux_f64(world+104);",
+        APPLY WORLD "return ux_f64(world+112);",
+        APPLY "return ux_f64(ux_u32(leafAt+Object3D.position)+16);",
+        "let bad=ux_u32_put(p2,2);" APPLY "return 0.0+(done==0-2 && ux_f64(local+96)==0.0);",
+        "return 0.0+GltfLoader_poseForest(arena,handles,records,3,work,383);",
+    };
+    const double gold[]={3,2,3,4,4,1,-1};
+    return g_wasm_batch_addon("G_IO GLTF Object3D world poses","gltf-pose-forest",argv[1],modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,APPLY "return ux_f64(local+104);");
+}
