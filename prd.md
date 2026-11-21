@@ -614,7 +614,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
-| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
+| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；目录不在源 SID 根集，但 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx`、`ext/textx`（4 个 `.cx`）经目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `src/cx` 下 `sysx` 目录链接）参与现行源 SID（`source-packages-v2` `realpath` 跟随，`ext/crypto` 与其余 `ext/` 包不参与；2026-11-21 实测，`seed/ident.c list-current` 与 `tools/lane-inputs-gen.cx:208-275`） |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
@@ -624,12 +624,12 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
+| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 根目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv 与 tools/ 13 个支撑文件；`ext/sysx`、`ext/memx`、`ext/textx` 经符号链接参与现行源 SID，见 [prd_cx.md](prd_cx.md) §3），其余目录不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
 
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
 
-- 源 SID 规则：`seed/ident.c` 的 `list-current` 计入目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下少量支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 本身不在源 SID，`ext/memx`、`ext/textx` 经 `cx/mem`、`cx/text` 符号链接参与。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/`，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
+- 源 SID 规则：`seed/ident.c` 的 `list-current`（`source-packages-v2`）根目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下 13 个支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 目录不在根集，但 `collect()` 经 `realpath` 跟随目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `sysx` 目录链接），故 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx` 与 `ext/textx`（4 个 `.cx`）实际参与现行源 SID，`ext/crypto` 与其余 `ext/` 包不参与（2026-11-21 实测；归类规则见 `tools/lane-inputs-gen.cx:208-275`）。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/` 及上述经链接进入 `build/lane-inputs.tsv` A 类的 `ext/` 路径，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
 - 补充路径：`.github/`（CI 工作流 candidate-native、ci、candidate-raw-export、admission-capsule、defender-scan、macos-sign、windows-signing，集成者所有）；`scripts/`（信任包 / Authenticode 检查脚本）；`skills/unisacc-cx`（技能）；`iterate/`（早期构造器，仅 typekw.tsv 进源 SID，移动会改产品面）；根文件 `cxroot.tsv`（cx 根登记）、`Makefile`（薄入口）、`ape-receipt.txt`（APE 回执）。
 - 被 git 忽略的本地残留：`out/`（产物、日志、候选；交接单写 `out/<窗口>-handoff-*.md`，不入库）、`unisacc.com`（已装产品）、`unisacc-dev`（安装回滚脚本）、`*.split-prev`、`tmp/`、`node_modules/`。
 
