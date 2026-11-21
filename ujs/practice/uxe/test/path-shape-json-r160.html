@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Path, Shape, SplineCurve, Vector2, REVISION } from "../../web/game/three.module.js";
+const result = document.querySelector("#r160");
+const enc = new TextEncoder(), dec = new TextDecoder();
+const flatten = path => path.getPoints(3).flatMap(p => [p.x,p.y]);
+const error = (a,b) => a.length === b.length
+  ? a.reduce((e,value,i) => Math.max(e,Math.abs(value-b[i])),0) : 1000 + Math.abs(a.length-b.length);
+
+try {
+  if (REVISION !== "160") throw Error("revision");
+  const query = new URLSearchParams(location.search);
+  const module = await WebAssembly.compile(await (await fetch("file://" + query.get("wasm"))).arrayBuffer());
+  const mutate = Boolean(Number(query.get("mutate")));
+  const check = kind => {
+    const src = kind === 1 ? new Path() : new Shape();
+    src.moveTo(0,0);
+    src.lineTo(2,0);
+    src.quadraticCurveTo(3,1,2,2);
+    src.bezierCurveTo(1,3,-1,1,0,0);
+    src.autoClose = true;
+    src.arcLengthDivisions = 23;
+    src.moveTo(2,3);
+    if (kind === 2) {
+      src.uuid = "aaaa0000-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const hole = new Path([new Vector2(.25,.25), new Vector2(.5,.25), new Vector2(.25,.5)]);
+      src.holes.push(hole);
+    }
+    const expected = src.toJSON();
+    const inspect = (mode,input) => {
+      const api = new WebAssembly.Instance(module).exports;
+      const base = Number(api.uxe_path_shape_json(0n,0n,0n));
+      const mem = new Uint8Array(api.memory.buffer,base,60000), view = new DataView(mem.buffer,base,60000);
+      const bytes = enc.encode(JSON.stringify(input));
+      mem.set(bytes,40000);
+      const status = Number(api.uxe_path_shape_json(BigInt(mode),BigInt(kind),BigInt(bytes.length)));
+      if (mode === 2) return status;
+      if (status <= 0) throw Error("native status " + status);
+      return {doc:JSON.parse(dec.decode(mem.subarray(16000,16000+status))),
+        points: new Float64Array(mem.buffer,base+12000,2*view.getUint32(7168,true)).slice(),
+        hole: new Float64Array(mem.buffer,base+14000,2*view.getUint32(7172,true)).slice()};
+    };
+    const native = inspect(1,mutate ? {...expected,currentPoint:[5,3]} : expected);
+    const loaded = (kind === 1 ? new Path() : new Shape()).fromJSON(native.doc);
+    const badCurve = new SplineCurve([new Vector2(0,0),new Vector2(1,1)]).toJSON();
+    const alternate = kind === 1 ? {...expected,curves:[...expected.curves,badCurve]}
+      : {...expected,holes:[{...expected.holes[0],curves:[badCurve]}]};
+    return [
+      Number(loaded.type===src.type), Number(loaded.autoClose===src.autoClose),
+      loaded.arcLengthDivisions, loaded.curves.length, loaded.currentPoint.x, loaded.currentPoint.y,
+      Number(loaded.currentPoint.equals(src.currentPoint)),
+      error(native.points,flatten(src)),error(flatten(loaded),flatten(src)),
+      kind===1 ? native.hole.length : error(native.hole,flatten(src.holes[0])),
+      Number(kind===1 ? !("holes" in native.doc) : loaded.uuid===src.uuid && loaded.holes.length===1),
+      inspect(2,alternate),
+    ];
+  };
+  result.textContent = JSON.stringify([1,2].flatMap(check));
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

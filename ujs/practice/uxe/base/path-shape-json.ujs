@@ -1,0 +1,278 @@
+// Per-path CurvePath metadata does not live in the segment record.
+struct PathJsonMeta {
+  divisions: u32;
+  autoClose: u32;
+}
+
+// Shape stores native Path pointers in its existing hole table. The caller
+// supplies one metadata row per path (outer first), plus 36 UUID bytes.
+struct ShapeJsonIdentity {
+  metadata: u32;
+  uuid: u32;
+}
+
+native function path_json_keys(at:i64) i64 {
+  let b=[109,101,116,97,100,97,116,97,97,114,99,76,101,110,103,116,104,68,105,118,105,115,105,111,110,115,97,117,116,111,67,108,111,115,101,99,117,114,118,101,115,99,117,114,114,101,110,116,80,111,105,110,116,116,121,112,101,117,117,105,100,104,111,108,101,115,80,97,116,104,83,104,97,112,101];
+  let i=0;
+  while(i<75) {
+    let byte=ux_u8_put(at+i,b[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function path_json_path_space(path:i64,meta:i64,scratch:i64,input:i64,bytes:i64) i64 {
+  if(!sg_json_span(path,Path.size,8) || !sg_json_span(meta,PathJsonMeta.size,4) ||
+     !sg_json_span(scratch,1280,8) || !sg_json_span(input,bytes,1)) { return 0; }
+  let segments=ux_u32(path+Path.segments);
+  let space=72*ux_u32(path+Path.capacity);
+  if(!sg_json_span(segments,space,8)) { return 0; }
+  let regions=[path,Path.size,segments,space,meta,PathJsonMeta.size,scratch,1280,input,bytes];
+  let i=0;
+  while(i<10) {
+    let j=i+2;
+    while(j<10) {
+      if(!sg_json_pair(regions[i],regions[i+1],regions[j],regions[j+1])) { return 0; }
+      j=j+2;
+    }
+    i=i+2;
+  }
+  return 1;
+}
+
+native function path_json_type(at:i64,end:i64,keys:i64,shape:i64) i64 {
+  let type=json_find_key(at,end,keys+53,4);
+  if(type<0) { return 0; }
+  let label=keys+66;
+  let bytes=4;
+  if(shape) { label=keys+70; bytes=5; }
+  return json_scan_string(type,end)==type+bytes+2 && sg_same_bytes(type+1,label,bytes);
+}
+
+native function path_json_read(path:i64,meta:i64,at:i64,end:i64,scratch:i64,shape:i64,apply:i64) i64 {
+  let keys=path_json_keys(scratch+1104);
+  if(!path_json_type(at,end,keys,shape)) { return 0-1; }
+  let divisions=LoaderJson_uint(json_find_key(at,end,keys+8,18),end,0);
+  let flag=json_find_key(at,end,keys+26,9);
+  let current=json_find_key(at,end,keys+41,12);
+  let curves=json_find_key(at,end,keys+35,6);
+  if(divisions<1 || flag<0 || (ux_u8(flag)!=116 && ux_u8(flag)!=102) ||
+     curves<0 || ux_u8(curves)!=91 || !sg_read_xy(current,end,scratch+1248)) { return 0-1; }
+  let c=json_space(curves+1,end);
+  let n=0;
+  let x=ux_f64(scratch+1248);
+  let y=ux_f64(scratch+1256);
+  let sx=x;
+  let sy=y;
+  while(c>=0 && c<end && ux_u8(c)!=93) {
+    if(n>=ux_u32(path+Path.capacity) || ux_u8(c)!=123) { return 0-1; }
+    let next=sg_value_end(c,end);
+    let curve=CurveControl_fromJSON(scratch+256,scratch+272,c,next,scratch);
+    if(curve<0 || ux_u32(curve+CurveControl.arcLengthDivisions)!=200) { return 0-1; }
+    let kind=ux_u32(curve+CurveControl.kind);
+    if(kind%2!=0 || kind>4) { return 0-1; }
+    let amount=(kind/2+2)*16;
+    let i=0;
+    while(i<amount) {
+      let value=ux_f64(scratch+272+i);
+      if(value-value!=0.0) { return 0-1; }
+      i=i+8;
+    }
+    if(n==0) {
+      sx=ux_f64(scratch+272);
+      sy=ux_f64(scratch+280);
+    }
+    if(apply) {
+      let row=ux_u32(path+Path.segments)+72*n;
+      let k=ux_u32_put(row,kind/2+1);
+      let copied=uxe_copy_record(row+8,scratch+272,amount);
+    }
+    n=n+1;
+    c=json_space(next,end);
+    if(c<0 || c>=end) { return 0-1; }
+    if(ux_u8(c)==44) { c=json_space(c+1,end); }
+    else if(ux_u8(c)!=93) { return 0-1; }
+  }
+  if(c<0 || c>=end) { return 0-1; }
+  if(apply) {
+    let m=ux_u32_put(meta+PathJsonMeta.divisions,divisions);
+    let f=ux_u32_put(meta+PathJsonMeta.autoClose,ux_u8(flag)==116);
+    let count=ux_u32_put(path+Path.count,n);
+    let start=ux_f64_put(path+Path.startX,sx);
+    let top=ux_f64_put(path+Path.startY,sy);
+    let endX=ux_f64_put(path+Path.x,x);
+    let endY=ux_f64_put(path+Path.y,y);
+  }
+  return path;
+}
+
+native function Path_fromJSON(path:i64,meta:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(end<=input || !path_json_path_space(path,meta,scratch,input,end-input)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end || path_json_read(path,meta,input,last,scratch,0,0)<0) { return 0-1; }
+  return path_json_read(path,meta,input,last,scratch,0,1);
+}
+
+// Writes the inherited Path fields, leaving the end object delimiter to the caller.
+native function path_json_write(path:i64,meta:i64,p:i64,end:i64,scratch:i64,shape:i64) i64 {
+  let divisions=ux_u32(meta+PathJsonMeta.divisions);
+  let close=ux_u32(meta+PathJsonMeta.autoClose);
+  let n=ux_u32(path+Path.count);
+  if(divisions<1 || close>1 || n>ux_u32(path+Path.capacity)) { return 0-1; }
+  let header=ObjectJsonToken.size+ObjectJsonType.size+CurveJsonToken.header;
+  p=json_write_token(p,end,header);
+  p=json_write_f64(p,end,0.0+divisions,scratch);
+  p=json_write_token(p,end,ObjectJsonToken.typedField);
+  let keys=path_json_keys(scratch+1104);
+  let label=keys+66;
+  let bytes=4;
+  if(shape) { label=keys+70; bytes=5; }
+  p=json_write_string(p,end,label,bytes);
+  // ,"autoClose":
+  p=sg_word(p,end,7801201525512020524,8);
+  p=sg_word(p,end,249685177199,5);
+  let token=ObjectJsonToken.boolFalse;
+  if(close) { token=ObjectJsonToken.boolTrue; }
+  p=json_write_token(p,end,token);
+  // ,"curves":[
+  p=sg_word(p,end,8315182520977269292,8);
+  p=sg_word(p,end,5978658,3);
+  let i=0;
+  while(i<n && p>=0) {
+    let row=ux_u32(path+Path.segments)+72*i;
+    let kind=ux_u32(row);
+    if(kind<1 || kind>3) { return 0-1; }
+    let control=CurveControl_init(scratch+1200,row+8,2*(kind-1),200);
+    if(control<0) { return control; }
+    if(i>0) { p=json_byte(p,end,44); }
+    if(p<0) { return p; }
+    p=CurveControl_toJSON(control,p,end,scratch);
+    i=i+1;
+  }
+  // ],"currentPoint":
+  p=sg_word(p,end,7310030993675660381,8);
+  p=sg_word(p,end,2482730693706151022,8);
+  p=sg_word(p,end,58,1);
+  return sg_write_xy(p,end,path+Path.x,scratch);
+}
+
+native function Path_toJSON(path:i64,meta:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(end<=dst || !path_json_path_space(path,meta,scratch,dst,end-dst)) { return 0-1; }
+  let p=path_json_write(path,meta,dst,end,scratch,0);
+  return json_byte(p,end,125);
+}
+
+native function shape_json_path(shape:i64,i:i64) i64 {
+  if(i==0) { return ux_u32(shape+Shape.contour); }
+  return ux_u32(ux_u32(shape+Shape.holes)+4*(i-1));
+}
+
+native function shape_json_space(shape:i64,identity:i64,io:i64,bytes:i64,scratch:i64) i64 {
+  if(!sg_json_span(shape,Shape.size,4) || !sg_json_span(identity,ShapeJsonIdentity.size,4)) { return 0; }
+  let count=ux_u32(shape+Shape.count);
+  let holes=ux_u32(shape+Shape.holes);
+  let metadata=ux_u32(identity+ShapeJsonIdentity.metadata);
+  let uuid=ux_u32(identity+ShapeJsonIdentity.uuid);
+  let capacity=ux_u32(shape+Shape.capacity);
+  if(count>4 || count>capacity || !sg_json_span(holes,capacity*4,4) ||
+     !sg_json_span(metadata,(count+1)*PathJsonMeta.size,4) || !sg_json_span(uuid,36,1)) { return 0; }
+  let fixed=[shape,Shape.size,holes,capacity*4,identity,ShapeJsonIdentity.size,metadata,(count+1)*PathJsonMeta.size,uuid,36,io,bytes,scratch,1280];
+  let i=0;
+  while(i<14) {
+    let j=i+2;
+    while(j<14) {
+      if(!sg_json_pair(fixed[i],fixed[i+1],fixed[j],fixed[j+1])) { return 0; }
+      j=j+2;
+    }
+    i=i+2;
+  }
+  i=0;
+  while(i<=count) {
+    let path=shape_json_path(shape,i);
+    if(!path_json_path_space(path,metadata+i*PathJsonMeta.size,scratch,io,bytes)) { return 0; }
+    let data=ux_u32(path+Path.segments);
+    let span=72*ux_u32(path+Path.capacity);
+    let j=0;
+    while(j<10) {
+      if(!sg_json_pair(path,Path.size,fixed[j],fixed[j+1]) ||
+         !sg_json_pair(data,span,fixed[j],fixed[j+1])) { return 0; }
+      j=j+2;
+    }
+    j=0;
+    while(j<i) {
+      let prior=shape_json_path(shape,j);
+      let priorData=ux_u32(prior+Path.segments);
+      let priorSpan=72*ux_u32(prior+Path.capacity);
+      if(!sg_json_pair(path,Path.size,prior,Path.size) || !sg_json_pair(path,Path.size,priorData,priorSpan) ||
+         !sg_json_pair(data,span,prior,Path.size) || !sg_json_pair(data,span,priorData,priorSpan)) { return 0; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function shape_json_load(shape:i64,metadata:i64,input:i64,end:i64,scratch:i64,apply:i64) i64 {
+  let keys=path_json_keys(scratch+1104);
+  let holes=json_find_key(input,end,keys+61,5);
+  if(holes<0 || ux_u8(holes)!=91 || path_json_read(shape_json_path(shape,0),metadata,input,end,scratch,1,apply)<0) {
+    return 0-1;
+  }
+  let p=json_space(holes+1,end);
+  let i=0;
+  let n=ux_u32(shape+Shape.count);
+  while(i<n) {
+    let next=sg_value_end(p,end);
+    if(next<0 || path_json_read(shape_json_path(shape,i+1),metadata+(i+1)*PathJsonMeta.size,p,next,scratch,0,apply)<0) {
+      return 0-1;
+    }
+    p=json_space(next,end);
+    i=i+1;
+    if(i<n) {
+      if(p<0 || p>=end || ux_u8(p)!=44) { return 0-1; }
+      p=json_space(p+1,end);
+    }
+  }
+  if(p<0 || p>=end || ux_u8(p)!=93) { return 0-1; }
+  return shape;
+}
+
+// Shape hole records and their capacity are provisioned before loading.
+native function Shape_fromJSON(shape:i64,identity:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(end<=input || !shape_json_space(shape,identity,input,end-input,scratch)) { return 0-1; }
+  let doc=json_value_end(input,end);
+  if(doc<0 || json_space(doc,end)!=end) { return 0-1; }
+  let keys=path_json_keys(scratch+1104);
+  let id=json_find_key(input,doc,keys+57,4);
+  if(id<0 || json_scan_string(id,doc)!=id+38 || !sg_uuid(id+1)) { return 0-1; }
+  let meta=ux_u32(identity+ShapeJsonIdentity.metadata);
+  if(shape_json_load(shape,meta,input,doc,scratch,0)<0 ||
+     shape_json_load(shape,meta,input,doc,scratch,1)<0) { return 0-1; }
+  let saved=uxe_copy_record(ux_u32(identity+ShapeJsonIdentity.uuid),id+1,36);
+  return shape;
+}
+
+native function Shape_toJSON(shape:i64,identity:i64,p:i64,end:i64,scratch:i64) i64 {
+  if(end<=p || !shape_json_space(shape,identity,p,end-p,scratch)) { return 0-1; }
+  let uuid=ux_u32(identity+ShapeJsonIdentity.uuid);
+  if(!sg_uuid(uuid)) { return 0-1; }
+  let meta=ux_u32(identity+ShapeJsonIdentity.metadata);
+  p=path_json_write(shape_json_path(shape,0),meta,p,end,scratch,1);
+  // ,"uuid":
+  p=sg_word(p,end,4189021007512937004,8);
+  p=json_write_string(p,end,uuid,36);
+  // ,"holes":[
+  p=sg_word(p,end,2482439336011244076,8);
+  p=sg_word(p,end,23354,2);
+  let i=0;
+  let n=ux_u32(shape+Shape.count);
+  while(i<n && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    if(p<0) { return p; }
+    p=path_json_write(shape_json_path(shape,i+1),meta+(i+1)*PathJsonMeta.size,p,end,scratch,0);
+    p=json_byte(p,end,125);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  return json_byte(p,end,125);
+}
