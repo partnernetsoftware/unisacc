@@ -1,0 +1,79 @@
+struct SceneGpuBinding {
+  geometry: u32;
+  material: u32;
+  stream: u32;
+  shader: u32;
+}
+
+struct SceneGpuBatch {
+  draws: u32;
+  bindings: u32;
+  count: u32;
+  vertices: u32;
+  vertexCapacity: u32;
+}
+
+native function scene_gpu_stage_safe(item:i64,binding:i64,vertices:i64,size:i64,max:i64) i64 {
+  let stream=ux_u32(binding+SceneGpuBinding.stream);
+  let shader=ux_u32(binding+SceneGpuBinding.shader);
+  if(!scene_render_span(stream,SceneDrawStream.size,4) || !scene_render_span(shader,GpuShaderSource.size,4) ||
+     scene_render_overlap(vertices,size,stream,SceneDrawStream.size) ||
+     scene_render_overlap(vertices,size,shader,GpuShaderSource.size)) { return 0; }
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  let stride=ux_u32(stream+SceneDrawStream.stride);
+  if(count<3 || count>max || stride<12 || stride>6291456 ||
+     scene_render_overlap(vertices,size,ux_u32(stream+SceneDrawStream.positions),(count-1)*stride+12) ||
+     scene_render_overlap(vertices,size,ux_u32(stream+SceneDrawStream.color),16) ||
+     scene_render_overlap(vertices,size,ux_u32(stream+SceneDrawStream.viewProjection),128) ||
+     scene_render_overlap(vertices,size,ux_u32(item+SceneDrawItem.worldMatrix),128) ||
+     scene_render_overlap(vertices,size,ux_u32(shader+GpuShaderSource.vertex),ux_u32(shader+GpuShaderSource.vertexBytes)) ||
+     scene_render_overlap(vertices,size,ux_u32(shader+GpuShaderSource.fragment),ux_u32(shader+GpuShaderSource.fragmentBytes))) { return 0; }
+  return 1;
+}
+
+// Bindings are parallel to the sorted SceneDrawItem array. Roll back the
+// published packet header on any rejected item. Bytes after the published
+// length are reusable space, including partially staged commands.
+native function SceneGpu_drawBatch(packet:i64,capacity:i64,batch:i64) i64 {
+  if(!gpu_draw_range(batch,SceneGpuBatch.size,packet,capacity) || batch%4!=0 ||
+     gpu_packet_slot(packet,capacity,0)<0) { return 0-1; }
+  let draws=ux_u32(batch+SceneGpuBatch.draws);
+  let binds=ux_u32(batch+SceneGpuBatch.bindings);
+  let count=ux_u32(batch+SceneGpuBatch.count);
+  let vertices=ux_u32(batch+SceneGpuBatch.vertices);
+  let max=ux_u32(batch+SceneGpuBatch.vertexCapacity);
+  let old_count=ux_u32(packet+GpuPacket.commands);
+  let old_bytes=ux_u32(packet+GpuPacket.bytes);
+  if(count>256-old_count || draws%4!=0 || binds%4!=0 || max<3 || max>2340 ||
+     !gpu_draw_range(draws,count*SceneDrawItem.size,packet,capacity) ||
+     !gpu_draw_range(binds,count*SceneGpuBinding.size,packet,capacity) ||
+     !gpu_draw_range(vertices,max*28,packet,capacity) ||
+     !scene_render_readable(vertices,max*28,batch,SceneGpuBatch.size,draws,count*SceneDrawItem.size) ||
+     scene_render_overlap(vertices,max*28,binds,count*SceneGpuBinding.size)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    if(!scene_gpu_stage_safe(draws+i*SceneDrawItem.size,binds+i*SceneGpuBinding.size,vertices,max*28,max)) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let item=draws+i*SceneDrawItem.size;
+    let binding=binds+i*SceneGpuBinding.size;
+    let geometry=ux_u32(binding+SceneGpuBinding.geometry);
+    let material=ux_u32(binding+SceneGpuBinding.material);
+    let stream=ux_u32(binding+SceneGpuBinding.stream);
+    let shader=ux_u32(binding+SceneGpuBinding.shader);
+    let result=0-2;
+    if(geometry!=0 && material!=0 && geometry==ux_u32(item+SceneDrawItem.geometry) &&
+       material==ux_u32(item+SceneDrawItem.material) && ux_u32(item+SceneDrawItem.pass)==0) {
+      result=SceneDraw_gpuFlat(packet,capacity,item,stream,vertices,max,shader);
+    }
+    if(result<0) {
+      let bytes=ux_u32_put(packet+GpuPacket.bytes,old_bytes);
+      let commands=ux_u32_put(packet+GpuPacket.commands,old_count);
+      return result;
+    }
+    i=i+1;
+  }
+  return count;
+}
