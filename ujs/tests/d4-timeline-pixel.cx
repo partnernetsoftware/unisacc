@@ -1,0 +1,112 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define D4 "ujs/practice/uxe/products/d4/"
+#define UX "ujs/practice/uxe/"
+static const char renderer[]=UX "renderer-webgl.js";
+static const char pinnedShader[]="800a05ca00a23d1333a81241b36f7e415f35fc1daef9ecdcb665763ea531ec43";
+static const char *inputs[]={
+    D4 "build.cx",D4 "d4-api.ujs",D4 "d4-frame.ujs",
+    D4 "d4-abdomen-api.ujs",D4 "d4-abdomen.ujs",D4 "d4-main-gear-api.ujs",D4 "d4-main-gear.ujs",
+    D4 "d4-belly-scene-api.ujs",D4 "d4-belly-scene.ujs",D4 "d4-w2-smoke-api.ujs",D4 "d4-w2-smoke.ujs",
+    D4 "d4-w2-cloud-api.ujs",D4 "d4-w2-cloud.ujs",UX "base/f64-math.ujs",UX "base/record-copy.ujs",
+    renderer,UX "scene.js",UX "math.js",UX "meshes.js",UX "font5x7.js",
+    UX "test/d4-timeline-r160.html",UX "test/d4-framing.js",UX "test/d4-gait.js",
+    UX "test/d4-town.js",UX "test/d4-town.tsv",UX "test/d4-dense-town.tsv",UX "test/d4-legs.tsv",
+    UX "test/d3-foliage.js",UX "test/uxe-u2b.js",UX "test/uxe-u2b.tsv",
+    "ujs/practice/web/game/three.module.js","ujs/ujs2wasm.com",
+};
+enum { sourceCount=sizeof inputs/sizeof inputs[0], modules=6 };
+
+static int digest(const char *path,char hash[65]) {
+    unsigned char *data=0;
+    int64_t bytes=0;
+    if(sy_read_file(path,&data,&bytes,1<<24)) return 1;
+    const int rc=sy_sha256_hex(data,(long)bytes,hash);
+    mm_free(data);
+    return rc;
+}
+
+static int snapshot(char aggregate[65]) {
+    char packed[sourceCount*64],hash[65];
+    for(int i=0;i<sourceCount;i++) {
+        if(digest(inputs[i],hash)) {
+            printf("D4_TIMELINE source_read=%s\n",inputs[i]);
+            return 1;
+        }
+        for(int j=0;j<64;j++) packed[i*64+j]=hash[j];
+    }
+    return sy_sha256_hex(packed,sizeof packed,aggregate);
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char before[65],after[65],shader[65];
+    if(snapshot(before) || digest(renderer,shader) || !tx_eqz(shader,pinnedShader)) {
+        printf("D4_TIMELINE source_or_shader_identity_failed\n");
+        return 1;
+    }
+    char dir[256],cwd[390],manifest[300],wasm[modules][300],url[690],rows[4096];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-d4-timeline-",dir,sizeof dir)) return 2;
+    tx_snprintf(manifest,sizeof manifest,"%s/artifacts.tsv",dir);
+    const char *names[]={"gait","abdomen","gear","belly","history","cloud"};
+    for(int i=0;i<modules;i++) tx_snprintf(wasm[i],sizeof wasm[i],"%s/%s.wasm",dir,names[i]);
+    const int n=tx_snprintf(url,sizeof url,
+        "file://%s/" UX "test/d4-timeline-r160.html?manifest=file://%s&mutate=%d",cwd,manifest,mutate);
+    char *gait[]={"cx",D4 "build.cx","--",wasm[0],0};
+    char *abdomen[]={"./ujs/ujs2wasm.com",D4 "d4-abdomen-api.ujs",D4 "d4-abdomen.ujs","-o",wasm[1],0};
+    char *gear[]={"./ujs/ujs2wasm.com",D4 "d4-main-gear-api.ujs",
+        UX "base/f64-math.ujs",D4 "d4-main-gear.ujs","-o",wasm[2],0};
+    char *belly[]={"./ujs/ujs2wasm.com",D4 "d4-belly-scene-api.ujs",
+        UX "base/record-copy.ujs",D4 "d4-belly-scene.ujs","-o",wasm[3],0};
+    char *history[]={"./ujs/ujs2wasm.com",D4 "d4-w2-smoke-api.ujs",
+        UX "base/f64-math.ujs",D4 "d4-w2-smoke.ujs","-o",wasm[4],0};
+    char *cloud[]={"./ujs/ujs2wasm.com",D4 "d4-w2-cloud-api.ujs",
+        UX "base/record-copy.ujs",D4 "d4-w2-cloud.ujs","-o",wasm[5],0};
+    char **commands[]={gait,abdomen,gear,belly,history,cloud};
+    int used=tx_snprintf(rows,sizeof rows,"shader\tfile://%s/%s\t%s\n",cwd,renderer,shader);
+    int failed=n<0 || n>=(int)sizeof url || used<0 || used>=(int)sizeof rows;
+    char *out=0;
+    size_t bytes=0;
+    for(int i=0;!failed && i<modules;i++) {
+        const int rc=cx_runv_timeout(commands[i],10,&out,&bytes);
+        if(rc) { printf("D4_TIMELINE compile=%s rc=%d %s\n",names[i],rc,out?out:""); failed=1; }
+        mm_free(out); out=0;
+        char hash[65];
+        if(!failed && digest(wasm[i],hash)) failed=1;
+        if(!failed) {
+            const int added=tx_snprintf(rows+used,sizeof rows-used,"%s\tfile://%s\t%s\n",names[i],wasm[i],hash);
+            if(added<0 || added>=(int)sizeof rows-used) failed=1;
+            else used+=added;
+        }
+    }
+    const double gold[]={6,444,92160,0,0,0,0,228,444,1,1,1};
+    enum { fields=sizeof gold/sizeof gold[0] };
+    double actual[fields]={0};
+    if(!failed) failed=sy_write_file(manifest,rows,used,0600)!=0;
+    if(!failed) {
+        failed=r160_wait_read(url,"#result",actual,fields,dir);
+        if(!failed) {
+            printf("D4_TIMELINE frames=%.0f instances=%.0f pixels=%.0f field_diff=%.0f pixel_diff=%.0f group_diff=%.0f pose_diff=%.0f gpu_draws=%.0f submitted=%.0f shader=%.0f\n",
+                actual[0],actual[1],actual[2],actual[3],actual[4],actual[5],actual[6],actual[7],actual[8],actual[9]);
+            for(int i=0;i<fields;i++) if(actual[i]!=gold[i]) {
+                printf("D4_TIMELINE field=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    const int stable=!snapshot(after) && tx_eqz(before,after);
+    if(!stable) failed=1;
+    printf("D4_TIMELINE sources=%d source_sha=%s shader_sha=%s stable=%d\n",sourceCount,before,shader,stable);
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&out,&bytes)) failed=1;
+    mm_free(out);
+    printf("D4_TIMELINE failed=%d\n",failed);
+    return failed;
+}

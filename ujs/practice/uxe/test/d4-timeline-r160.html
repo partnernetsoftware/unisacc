@@ -1,0 +1,277 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>D4 私有合成时间轴验收</title>
+<canvas id="actual" width="160" height="96"></canvas>
+<canvas id="reference" width="160" height="96"></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { Matrix4,REVISION,Vector3 } from "../../web/game/three.module.js";
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { BOX_MESH,MESH_BOX,allMeshes } from "../meshes.js";
+import { Scene,PerspectiveCamera } from "../scene.js";
+import { barrelMesh } from "./d4-framing.js";
+import { gaitPose } from "./d4-gait.js";
+import { leafMesh } from "./d3-foliage.js";
+import { buildTown,townLayout } from "./d4-town.js";
+import { loadScaleStudy } from "./uxe-u2b.js";
+
+const result=document.querySelector("#result"),query=new URLSearchParams(location.search);
+const base=2097152,width=160,height=96,fov=2*Math.atan(360/730);
+const pigments=[[241,233,213],[165,179,195],[214,220,225]];
+const stacks=[[-4.9,11.90,-.85],[.65,14.20,-3.1],[4.7,11.44,-1.5]];
+const phaseAt=tick=>tick<=80?tick*.2:tick<=121?16:tick<=170?16-(tick-121)*.2:6.2+(tick-170)*.2;
+const shell=[
+  [0,4.45,.40,1,0,0,0,7.4,1.3,4.4,0,61,74,92,0],
+  [0,4.52,2.67,1,0,0,0,7.8,.73,.21,0,107,124,128,0],
+  [0,4.19,2.84,1,0,0,0,7.5,.12,.19,0,147,110,61,0],
+  ...[-2.5,0,2.5].flatMap(x=>[
+    [x,4.57,2.80,1,0,Math.PI/2,0,1.01,.24,0,0,161,119,70,1],
+    [x,4.57,3.01,.21,0,0,0,0,0,0,0,107,124,128,2],
+  ]),
+];
+
+async function checked(response,hash) {
+  if(!response.ok) throw new Error("无法读取验收产物");
+  const bytes=await response.arrayBuffer();
+  const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",bytes));
+  if(Array.from(digest,x=>x.toString(16).padStart(2,"0")).join("")!==hash) throw new Error("验收产物身份不符");
+  return bytes;
+}
+async function artifacts() {
+  const response=await fetch(query.get("manifest"));
+  if(!response.ok) throw new Error("验收清单读取失败");
+  const records=(await response.text()).trim().split("\n").map(row=>row.split("\t"));
+  const names=["shader","gait","abdomen","gear","belly","history","cloud"];
+  if(records.length!==names.length || records.some((r,i)=>r.length!==3 || r[0]!==names[i] ||
+      !/^[a-f0-9]{64}$/.test(r[2]))) throw new Error("验收清单格式错误");
+  return Object.fromEntries(await Promise.all(records.map(async ([name,url,hash])=>{
+    const bytes=await checked(await fetch(url),hash);
+    return [name,name==="shader"?hash:(await WebAssembly.instantiate(bytes)).instance.exports];
+  })));
+}
+function shape(row) {
+  if(row[14]===2) return leafMesh(1);
+  if(row[14]===1) {
+    const barrel=barrelMesh(row[7],row[8]);
+    return {...barrel,vCount:barrel.positions.length/3};
+  }
+  const box=allMeshes()[MESH_BOX],dimensions=row.slice(7,10),rotate=new Matrix4().makeRotationZ(row[10]);
+  const spin=(src,scale)=>Float32Array.from(Array.from({length:src.length/3},(_,i)=>new Vector3(
+    src[i*3]*scale[0],src[i*3+1]*scale[1],src[i*3+2]*scale[2]).applyMatrix4(rotate).toArray()).flat());
+  return {...box,positions:spin(BOX_MESH,dimensions),normals:spin(box.normals,[1,1,1])};
+}
+function watch(gl) {
+  const counts={vertex:0,fragment:0,draws:0,instances:0};
+  const shaderSource=gl.shaderSource.bind(gl);
+  gl.shaderSource=(shader,source)=>{
+    const stage=gl.getShaderParameter(shader,gl.SHADER_TYPE);
+    if(stage===gl.VERTEX_SHADER && source.includes("attribute vec3 aInst") &&
+       source.includes("rotYXZ(lp, aYaw, aPitch, aRoll)")) counts.vertex++;
+    if(stage===gl.FRAGMENT_SHADER && source.includes("uToonLevels") &&
+       source.includes("gl_FragColor")) counts.fragment++;
+    shaderSource(shader,source);
+  };
+  const getExtension=gl.getExtension.bind(gl);
+  const instanced=getExtension("ANGLE_instanced_arrays");
+  if(!instanced) throw new Error("缺少共享实例渲染接口");
+  const draw=instanced.drawArraysInstancedANGLE.bind(instanced);
+  instanced.drawArraysInstancedANGLE=(mode,first,vertices,instances)=>{
+    if(mode!==gl.TRIANGLES || vertices<3 || instances<1) throw new Error("实例调用尺寸非法");
+    counts.draws++;
+    counts.instances+=instances;
+    draw(mode,first,vertices,instances);
+  };
+  gl.getExtension=name=>name==="ANGLE_instanced_arrays"?instanced:getExtension(name);
+  return counts;
+}
+function viewport(id,parts,audited=false) {
+  const canvas=document.querySelector(id),scene=new Scene(),camera=new PerspectiveCamera(fov,.1,150);
+  scene.clearColor=[.48,.69,.79,1];
+  scene.fog.density=0;
+  scene.ambient={color:[1,1,1],intensity:.84};
+  const meshBase=allMeshes().length;
+  const smokeMesh=leafMesh(1);
+  const meshes=[...parts.map(shape),smokeMesh,smokeMesh,smokeMesh];
+  const clouds=Array.from({length:38},(_,i)=>{
+    const cloud=scene.instances("part-"+i,i<29?1:15,[1,1,1]);
+    cloud.meshId=meshBase+(i<29?i:29+Math.floor((i-29)/3));
+    cloud.metalness=0;
+    cloud.roughness=.65;
+    cloud.toonLevels=3;
+    cloud.outlineExcluded=i>=29;
+    cloud.count=0;
+    return cloud;
+  });
+  const gl=canvas.getContext("webgl",{antialias:false,preserveDrawingBuffer:true,powerPreference:"high-performance"});
+  if(!gl || meshes.some(m=>m.vCount!==m.positions.length/3)) throw new Error("GPU 场景构造失败");
+  const evidence=audited?watch(gl):null;
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes:meshes});
+  return {
+    clouds,evidence,
+    draw(eye,target,fovy) {
+      camera.setEye(...eye);
+      camera.setTarget(...target);
+      camera.fovy=fovy;
+      renderer.render(scene,camera);
+      const bits=new Uint8Array(width*height*4);
+      gl.readPixels(0,0,width,height,gl.RGBA,gl.UNSIGNED_BYTE,bits);
+      if(gl.getError()!==gl.NO_ERROR) throw new Error("合成场景 GPU 读回失败");
+      return bits;
+    },
+  };
+}
+function bindPart(cloud,row) {
+  cloud.count=1;
+  cloud.xyz=row.subarray(0,3);
+  cloud.scale=row.subarray(3,4);
+  cloud.yaw=row.subarray(4,5);
+  cloud.pitch=row.subarray(5,6);
+  cloud.roll=row.subarray(6,7);
+  cloud.color=row.subarray(11,14);
+}
+function partReference(parts,pivot,pose,eye) {
+  const [gx,gy,gz]=pivot.map((v,i)=>v+pose.offset[i]);
+  const [dx,dy,dz]=eye.map((value,i)=>value-[gx,gy,gz][i]);
+  const yaw=Math.atan2(dx,Math.hypot(dy,dz)),pitch=-Math.atan2(dy,dz);
+  const rotation=new Matrix4().makeRotationX(pitch).multiply(new Matrix4().makeRotationY(yaw));
+  return parts.map((part,i)=>{
+    const row=part.slice();
+    if(i<9) for(let j=0;j<3;j++) row[j]+=pose.offset[j];
+    else {
+      const p=new Vector3(...part.slice(0,3).map((v,j)=>v-pivot[j])).applyMatrix4(rotation);
+      row.splice(0,3,gx+p.x,gy+p.y,gz+p.z);
+      row[4]=yaw; row[5]=pitch;
+    }
+    for(let j=11;j<14;j++) row[j]/=255;
+    return Float32Array.from(row);
+  });
+}
+function smokeReference(clouds,tick,pose,births) {
+  const counts=new Uint32Array(9);
+  for(const [stack,[x,y,z]] of stacks.entries()) for(let j=0;j<15;j++) {
+    const tier=j%5===4?0:j%5===2?1:2;
+    const shade=tier===0?2:j%5===1||j%5===2?1:0;
+    const group=stack*3+shade,age=((tick+8*j+37*stack)%120)/120;
+    const born=Math.max(0,tick-(tick+8*j+37*stack)%120),release=births.get(born)??pose.travel;
+    const turn=j*2.4+stack*.61,spread=age*(tier===0?1.08:.56);
+    const fade=Math.min(1,age*9+.25,(1-age)*9);
+    const cloud=clouds[29+group];
+    cloud.color=pigments[shade].map(rgb=>rgb/255);
+    cloud.set(counts[group]++,x+release+age*[-.90,1.60,3.15][stack]+Math.cos(turn)*spread,
+      y+pose.offset[1]+age*2.65+age*age*.82,z+pose.offset[2]+age*.80+Math.sin(turn)*spread,
+      [.20,.48,.77][tier]*((.75+.88*age)*fade),turn+age*.7,age*.20,0);
+  }
+  counts.forEach((n,i)=>{clouds[29+i].count=n;});
+  return counts;
+}
+function diff(a,b) {
+  let n=0;
+  for(let i=0;i<a.length;i+=4) if(a[i]!==b[i]||a[i+1]!==b[i+1]||a[i+2]!==b[i+2]||a[i+3]!==b[i+3]) n++;
+  return n;
+}
+function view(module,offset,type,count) { return new type(module.memory.buffer,base+offset,count); }
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const [{gait,abdomen,gear,belly,history,cloud,shader},study,town,legFile]=await Promise.all(
+    [artifacts(),loadScaleStudy("d4"),townLayout(true),fetch("./d4-legs.tsv")]);
+  if(!legFile.ok) throw new Error("步态事实读取失败");
+  const rest=(await legFile.text()).trim().split("\n").slice(1).map(row=>{
+    const n=row.split("\t").slice(1).map(value=>Number(value)/1000);
+    return [n.slice(0,3),n.slice(3,6),n.slice(6,9)];
+  });
+  const [kind,sx,sy,,sw,sh,sd]=town.find(([name,,,,w])=>name==="gear"&&w>=2);
+  const factor=study[0]/1000, deck=6.37, center=[sx+.45,sy+.19,4.45];
+  const pivot=[center[0],deck+(center[1]-deck)*factor,center[2]];
+  const pieces=shell.slice();
+  buildTown([[kind,...center,sw*.98,sh*.98,sd]],{
+    round:2,
+    block:(_,x,y,z,w,h,d,roll)=>pieces.push([x,deck+(y-deck)*factor,z,factor,0,0,0,w,h,d,roll,218,161,59,0]),
+    add:(_,mesh,x,y,z,s)=>pieces.push([x,deck+(y-deck)*factor,z,s*factor,0,0,0,0,0,0,0,218,161,59,mesh]),
+  });
+  if(pieces.length!==29) throw new Error("合成腹部部件数非法");
+  const ref=viewport("#reference",pieces);
+  let actual=null;
+  view(gait,0,Float64Array,36).set(rest.flat(2));
+  view(gait,320,Float64Array,8).set([11.3,9,27,.5,9,0,720,730]);
+  view(gear,4096,Float64Array,6).set([sx,sy,sw,sd,deck,factor]);
+  const pose=view(gait,384,Float64Array,11);
+  const motion=view(history,2048,Float64Array,4);
+  const abInput=view(abdomen,4096,Float64Array,3), gearInput=view(gear,4160,Float64Array,3);
+  const eyeInput=view(gear,4192,Float64Array,3);
+  const aBytes=view(abdomen,256,Uint8Array,9*88), bBytes=view(gear,256,Uint8Array,20*96);
+  const mergeA=view(belly,4096,Uint8Array,aBytes.length),mergeB=view(belly,5000,Uint8Array,bBytes.length);
+  const partsF=view(belly,256,Float32Array,29*15),partsU=view(belly,256,Uint32Array,29*15);
+  const puffBytes=view(history,2304,Uint8Array,45*48),cloudInput=view(cloud,4096,Uint8Array,puffBytes.length);
+  const head=view(cloud,256,Uint32Array,9), smoke=view(cloud,400,Float32Array,45*7);
+  const counts=new Map();
+  if(history.uxe_d4_w2_smoke(0n,0n,2048n,0n,2304n,45n,3n,0n)!==0n) throw new Error("历史环复位失败");
+
+  const ticks=[0,40,80,121,170,241],images=[];
+  let step=-1,rows=0,pixelDiff=0,fieldDiff=0,groups=0,poseDiff=0;
+  const mutate=query.get("mutate")==="1";
+  for(const tick of ticks) {
+    while(step<tick) {
+      step++;
+      const phase=phaseAt(step);
+      if(gait.uxe_d4_frame(0n,384n,768n,320n,phase,1n,0n)!==0n) throw new Error("步态拒绝");
+      motion.set(pose.subarray(0,4));
+      if(history.uxe_d4_w2_smoke(1n,0n,2048n,BigInt(step),2304n,45n,3n,0n)!==0n) throw new Error("出生历史拒绝");
+      counts.set(step,gaitPose(rest,phase,"walk").travel);
+      counts.delete(step-121);
+    }
+    const gold=gaitPose(rest,phaseAt(tick),"walk");
+    const refEye=[11.3+gold.travel,9,27],refTarget=[.5+gold.travel,9,0];
+    [...gold.offset,gold.travel,...refEye,...refTarget,fov].forEach((v,i)=>{if(Math.abs(pose[i]-v)>1e-9) poseDiff++;});
+    abInput.set(pose.subarray(0,3));
+    gearInput.set(pose.subarray(0,3));
+    eyeInput.set(pose.subarray(4,7));
+    if(abdomen.uxe_d4_abdomen(256n,9n,4096n)!==9n ||
+       gear.uxe_d4_main_gear(256n,20n,4096n,4160n,4192n,0n)!==20n) throw new Error("腹部组件拒绝");
+    mergeA.set(aBytes);
+    mergeB.set(bBytes);
+    const bodyCount=belly.uxe_d4_belly_scene(256n,29n,4096n,5000n);
+    const puffCount=history.uxe_d4_w2_smoke(2n,0n,2048n,BigInt(tick),2304n,45n,3n,mutate&&tick===170?1n:0n);
+    cloudInput.set(puffBytes);
+    const smokeCount=cloud.uxe_d4_w2_cloud(256n,45n,4096n,puffCount);
+    if(bodyCount!==29n || smokeCount!==45n) throw new Error("合成实例数非法");
+    rows+=Number(bodyCount+smokeCount);
+
+    if(!actual) {
+      const shapes=Array.from({length:29},(_,i)=>[...partsF.subarray(i*15,i*15+14),partsU[i*15+14]]);
+      actual=viewport("#actual",shapes,true);
+      for(let i=0;i<9;i++) actual.clouds[29+i].color=view(cloud,292+i*12,Float32Array,3);
+    }
+    const expected=partReference(pieces,pivot,gold,refEye);
+    for(let i=0;i<29;i++) {
+      const row=partsF.subarray(i*15,(i+1)*15);
+      bindPart(actual.clouds[i],row);
+      bindPart(ref.clouds[i],expected[i]);
+      for(let j=0;j<14;j++) if(Math.abs(row[j]-expected[i][j])>1e-6) fieldDiff++;
+      if(partsU[i*15+14]!==pieces[i][14]) fieldDiff++;
+    }
+    const expectedGroups=smokeReference(ref.clouds,tick,gold,counts);
+    let start=0;
+    for(let i=0;i<9;i++) {
+      const cell=actual.clouds[29+i],end=start+head[i],oracle=ref.clouds[29+i];
+      cell.count=head[i];
+      cell.xyz=smoke.subarray(start*3,end*3);
+      for(const [j,field] of ["scale","yaw","pitch","roll"].entries()) {
+        cell[field]=smoke.subarray((3+j)*45+start,(3+j)*45+end);
+      }
+      if(head[i]!==expectedGroups[i]) groups++;
+      for(const field of ["xyz","scale","yaw","pitch","roll"])
+        for(let j=0,n=cell.count*(field==="xyz"?3:1);j<n;j++)
+          if(Math.abs(cell[field][j]-oracle[field][j])>1e-6) fieldDiff++;
+      start=end;
+    }
+    if(start!==45) groups++;
+    const image=actual.draw(pose.subarray(4,7),pose.subarray(7,10),pose[10]);
+    images.push(image);
+    pixelDiff+=diff(image,ref.draw(refEye,refTarget,fov));
+  }
+  const {vertex,fragment,draws,instances}=actual.evidence;
+  result.textContent=JSON.stringify([ticks.length,rows,ticks.length*width*height,fieldDiff,pixelDiff,
+    groups,poseDiff,draws,instances,Number(vertex>0&&fragment>0),Number(diff(images[0],images[5])>0),Number(shader.length===64)]);
+} catch(error) { result.textContent="error:"+error.message; }
+</script>
