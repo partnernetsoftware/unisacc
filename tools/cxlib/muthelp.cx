@@ -1,0 +1,55 @@
+/* Shared helpers for mutation checks: bounded copy, literal search by offset, and writing a one-anchor
+ * mutated copy of a source file into a scratch tree. Stateless: the caller passes its root and work dirs. */
+#pragma unisa module muthelp
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+/* Copy N bytes (N > 0) into D whose capacity is exactly N; a refusal ends the process with rc 2. */
+void mh_copy(void *d, const void *s, long n) { if (n > 0 && mm_copy(d, n, s, n)) exit(2); }
+/* Offset of the first occurrence of ND (NN bytes) in H (HN bytes), or -1. */
+long mh_find_at(const char *h, long hn, const char *nd, long nn) {
+    long i;
+    for (i = 0; i + nn <= hn; i++) if (!memcmp(h + i, nd, (size_t)nn)) return i;
+    return -1;
+}
+/* Write REL of ROOT into WORK with the unique literal OLD replaced by NW; empty OLD writes an unchanged copy.
+ * Returns 1 on success, 0 when the file is unreadable, the anchor is missing or not unique, or the write fails. */
+int mh_put_mut(const char *root, const char *work, const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = mh_find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    if (mh_find_at(src + at + 1, (long)n - at - 1, old, (long)ol) >= 0) { printf("mutation anchor not unique: %s\n", old); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    mh_copy(dst, src, (long)k); mh_copy(dst + k, nw, (long)nl); mh_copy(dst + k + nl, src + k + ol, (long)(n - k - ol));
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+/* Fixture helpers shared by the generator checks: write BODY to DIR/REL, create the directory DIR/REL (0700),
+ * and count the lines of the N-byte text T that equal ROW exactly. */
+void mh_put(const char *dir, const char *rel, const char *body) {
+    char p[500];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    cx_write(p, body, tx_len(body, 100000));
+}
+void mh_mkdir(const char *dir, const char *rel) { char p[500]; cx_fmt(p, sizeof p, "%s/%s", dir, rel); mkdir(p, 0700); }
+int mh_rowcount(const char *t, long n, const char *row) {
+    long rl = tx_len(row, 1000), i = 0; int c = 0;
+    while (i < n) {
+        long e = i;
+        while (e < n && t[e] != '\n') e++;
+        if (e - i == rl && mm_same(t + i, row, rl)) c++;
+        i = e + 1;
+    }
+    return c;
+}
