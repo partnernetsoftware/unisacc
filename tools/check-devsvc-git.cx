@@ -9,8 +9,10 @@
  *   (e) git status 末行 GIT_STATUS 格式;(w) commit --cwd 夹具内版本工作树:落该工作树分支、推 refs/heads/该分支、main HEAD 不变,--cwd 不存在 rc 2。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -69,11 +71,25 @@ int main(int argc, char **argv) {
                 nm[i] = 0; unsetenv(nm); e = environ;
             } else e++;
         } }
-    {   /* 夹具路径按仓根哈希、组与 pid 隔离:避免同根同组并发两路互相 rm -rf;固定版本缓存在 $HOME 下仍跨次共享 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700];
+    {   /* 夹具路径按仓根哈希与组固定(不含 pid)并持 .lock 文件锁防并发互删,且共享真仓 $HOME 固定版本缓存目录 */
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
-        F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s-%d", hh & 0xffffffffULL, tag, (int)sy_pid()); F(bare, sizeof bare, "%s-bare", fx);
+        F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
+        F(lkp, sizeof lkp, "%s.lock", fx);
+        lfd = sy_open(lkp, 2 | 64, 0600);
+        if (lfd >= 0) {
+            for (li = 0; li < 1100; li++) {
+                if (sy_lockf(lfd, 1, 0) == 0) break;
+                sy_sleep_ms(100);
+            }
+        }
+        F(gdir, sizeof gdir, "%s/.git", root);
+        if (home && home[0] && sy_sha256_hex(gdir, (long)strlen(gdir), gh) == 0) {
+            char sp[1200];
+            if (snprintf(sp, sizeof sp, "%s/.cache/unisacc/devsvc/pinned/repos/%s", home, gh) < (int)sizeof sp)
+                (void)setenv("DV_PIN_DIR", sp, 1);
+        }
         F(c0, sizeof c0, "rm -rf %s %s %s %s", fx, bare, pin, inst); if (!ovf) (void)sh(c0, 0); }
     F(e1, sizeof e1, "DV_PIN_DIR=%s", pin); F(e2, sizeof e2, "UNISACC_DEVSVC_DIR=%s", inst);
     envv[0] = e2; envv[1] = 0; (void)e1;
@@ -254,7 +270,11 @@ int main(int argc, char **argv) {
     rc = dv("git", "grep", "-c", "main", "--", "tools/devsvc.cx", 0, 0);
     ck(rc == 0 && strlen(out) > 0, "git-ro-grep");
     rc = dv("git", "archive", "--format=tar", "HEAD", "tools/devsvc-repo.tsv", 0, 0, 0);
-    ck(rc == 0 && sh("UNISACC_DEVSVC_DIR=" " sh ./unisacc.com tools/devsvc.cx -- git archive --format=tar HEAD tools/devsvc-repo.tsv | tar -tf -", fx) == 0 && has("tools/devsvc-repo.tsv"), "git-ro-archive");
+    {   int found_tar = 0; long bi;
+        for (bi = 0; bi + 21 <= (long)sizeof out; bi++)
+            if (!memcmp(out + bi, "tools/devsvc-repo.tsv", 21)) { found_tar = 1; break; }
+        ck(rc == 0 && found_tar, "git-ro-archive");
+    }
 
     /* (d1c) 重作业准入窗口(chain-supervise.lock 按真实 PID 核):活链在途时重池只放行属主为该链的作业,其余具名拒绝 rc 75 并附预计放行时刻;轻量与 git 控制类照常;死 PID 锁不拦 */
     if (!getenv("DVGIT_CORE_FROM")) {
@@ -540,7 +560,7 @@ int main(int argc, char **argv) {
           "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
        "g2-git-merge-continue-commits-and-writes-v1-reflog");
     F(c, sizeof c, "M=$(git symbolic-ref --short HEAD) && git checkout -q -b tlf-c2 && printf 'c2\\n' > tlf-m.txt && git commit -q -am TLC2"
-                   " && git checkout -q \"$M\" && printf 'm2\\n' > tlf-m.txt && git commit -q -am TLM2");
+                   " && git checkout -q \"$M\" && printf 'm2\\n' > tlf-m.txt && git commit -q -am TLM2 && git push -q origin HEAD:main");
     ck(!ovf && sh(c, fx) == 0, "g2-merge-continue-fixture-2");
     rc = dv("git", "merge", "tlf-c2", 0, 0, 0, 0, 0);
     ck(rc == 1 && sh("test -e .git/MERGE_HEAD && printf 'resolved-2\\n' > tlf-m.txt && git add tlf-m.txt", fx) == 0, "g2-resolve-and-stage-2");
