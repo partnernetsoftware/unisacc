@@ -1,0 +1,103 @@
+// Class lifecycle keeps the destination's control vectors, including shared
+// caller-owned vector addresses. A clone creates its own four available vector slots.
+native function curve_family_live(instance:i64) i64 {
+  let kind=curve_family_kind(instance);
+  if(kind<0 || ux_u32(instance+CurveControl.points)!=curve_family_flat(instance) ||
+     ux_u32(instance+CurveControl.arcLengthDivisions)==0) { return 0-1; }
+  let dims=2+kind%2;
+  let i=0;
+  while(i<2+kind/2) {
+    let at=curve_family_ref(instance,i);
+    if(!curve_family_area(at,8*dims) ||
+       (at!=curve_family_local(instance,i) &&
+        curve_control_arc_overlap(at,8*dims,instance,curve_family_bytes()))) { return 0-1; }
+    i=i+1;
+  }
+  return kind;
+}
+
+native function curve_family_write_vector(dst:i64,src:i64,dims:i64) i64 {
+  let x=ux_f64(src);
+  let y=ux_f64(src+8);
+  let z=0.0;
+  if(dims==3) { z=ux_f64(src+16); }
+  let a=ux_f64_put(dst,x);
+  let b=ux_f64_put(dst+8,y);
+  if(dims==3) { let c=ux_f64_put(dst+16,z); }
+  return dst;
+}
+
+native function CurveFamily_copy(dst:i64,src:i64) i64 {
+  let kind=curve_family_live(src);
+  if(kind<0 || curve_family_live(dst)!=kind) { return 0-1; }
+  if(dst==src) { return dst; }
+  if(curve_control_arc_overlap(dst,curve_family_bytes(),src,curve_family_bytes())) { return 0-1; }
+  let dims=2+kind%2;
+  let count=2+kind/2;
+  let i=0;
+  while(i<count) {
+    let a=curve_family_ref(dst,i);
+    let b=curve_family_ref(src,i);
+    if(curve_control_arc_overlap(a,8*dims,src,curve_family_bytes()) ||
+       curve_control_arc_overlap(b,8*dims,dst,curve_family_bytes())) { return 0-1; }
+    i=i+1;
+  }
+  let n=ux_u32_put(dst+CurveControl.arcLengthDivisions,ux_u32(src+CurveControl.arcLengthDivisions));
+  i=0;
+  while(i<count) {
+    let copied=curve_family_write_vector(curve_family_ref(dst,i),curve_family_ref(src,i),dims);
+    i=i+1;
+  }
+  return dst;
+}
+
+native function CurveFamily_clone(dst:i64,src:i64) i64 {
+  let kind=curve_family_live(src);
+  if(kind<0 || !curve_family_writable(src,dst,curve_family_bytes())) { return 0-1; }
+  let created=CurveFamily_init(dst,kind,0-1,0-1,0-1,0-1);
+  if(created<0) { return created; }
+  return CurveFamily_copy(created,src);
+}
+
+// JSON spans may be byte-aligned. The caller-owned spans cannot overlap
+// the descriptor, any referenced vector, or each other.
+native function curve_family_json_span(instance:i64,at:i64,end:i64) i64 {
+  if(at<0 || end<=at || end>6291456 ||
+     curve_control_arc_overlap(at,end-at,instance,curve_family_bytes())) { return 0; }
+  let kind=curve_family_kind(instance);
+  let dims=2+kind%2;
+  let i=0;
+  while(i<2+kind/2) {
+    let ref=curve_family_ref(instance,i);
+    if(curve_control_arc_overlap(at,end-at,ref,8*dims)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function CurveFamily_toJSON(instance:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(curve_family_live(instance)<0 || !curve_family_json_span(instance,dst,end) ||
+     !curve_family_writable(instance,scratch,1104) ||
+     curve_control_arc_overlap(dst,end-dst,scratch,1104)) { return 0-1; }
+  let ctrl=curve_family_sync(instance);
+  return CurveControl_toJSON(ctrl,dst,end,scratch);
+}
+
+// The first 216 scratch bytes belong to the shared parser. The remainder
+// stages the decoded control record and coordinates until validation succeeds.
+native function CurveFamily_fromJSON(instance:i64,input:i64,end:i64,scratch:i64) i64 {
+  let kind=curve_family_live(instance);
+  if(kind<0 || !curve_family_json_span(instance,input,end) ||
+     !curve_family_writable(instance,scratch,328) ||
+     curve_control_arc_overlap(input,end-input,scratch,328)) { return 0-1; }
+  let decoded=CurveControl_fromJSON(scratch+216,scratch+232,input,end,scratch);
+  if(decoded<0 || ux_u32(decoded+CurveControl.kind)!=kind) { return 0-1; }
+  let n=ux_u32_put(instance+CurveControl.arcLengthDivisions,ux_u32(decoded+CurveControl.arcLengthDivisions));
+  let dims=2+kind%2;
+  let i=0;
+  while(i<2+kind/2) {
+    let copied=curve_family_write_vector(curve_family_ref(instance,i),scratch+232+8*dims*i,dims);
+    i=i+1;
+  }
+  return instance;
+}

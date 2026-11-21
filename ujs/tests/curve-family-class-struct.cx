@@ -1,0 +1,77 @@
+#pragma unisa use g_math
+#pragma unisa use text.text
+#pragma unisa use text.num
+
+#define LINE "let v=ux_f64_put(1056,8.0);let shape=LineCurveClass_init(0,1024,1056);" \
+    "let defaults=LineCurveClass_init(256,0-1,0-1);"
+#define QUAD2 "let v=ux_f64_put(1088,8.0);let shape=QuadraticBezierCurveClass_init(0,1024,1056,1088);" \
+    "let defaults=QuadraticBezierCurveClass_init(256,0-1,0-1,0-1);"
+#define QUAD3 "let v=ux_f64_put(1088,8.0);let shape=QuadraticBezierCurve3Class_init(0,1024,1056,1088);" \
+    "let defaults=QuadraticBezierCurve3Class_init(256,0-1,0-1,0-1);"
+#define CUBIC2 "let v=ux_f64_put(1120,8.0);let shape=CubicBezierCurveClass_init(0,1024,1056,1088,1120);" \
+    "let defaults=CubicBezierCurveClass_init(256,0-1,0-1,0-1,0-1);"
+#define CUBIC3 "let v=ux_f64_put(1120,8.0);let shape=CubicBezierCurve3Class_init(0,1024,1056,1088,1120);" \
+    "let defaults=CubicBezierCurve3Class_init(256,0-1,0-1,0-1,0-1);"
+#define CONSTRUCT "return 0.0+(shape!=0 || ux_u32(shape+CurveControl.arcLengthDivisions)!=200 || " \
+    "curve_family_ref(shape,0)!=1024 || curve_family_ref(defaults,0)==curve_family_ref(defaults,1));"
+#define TABLE(FIRST,MID,THIRD) "let set=ux_u32_put(shape+CurveControl.arcLengthDivisions,4);let table=2048;" \
+    "let a=ux_f64_put(table+8," FIRST ");let b=ux_f64_put(table+16," MID ");" \
+    "let c=ux_f64_put(table+24," THIRD ");let d=ux_f64_put(table+32,8.0);"
+#define LINE_TABLE TABLE("2.0","4.0","6.0")
+#define QUAD_TABLE TABLE("0.5","2.0","4.5")
+#define CUBIC_TABLE TABLE("0.125","1.0","3.375")
+#define MAPPING(U) "let point=CurveFamily_getPointAt(shape,832,table," U ");" \
+    "let expected=8.0*" U ";if(ux_f64(point)!=expected){return 2.0;}" \
+    "return 0.0+(point<0)+4*(CurveFamily_getUtoTmapping(shape,table," U ",0.0)!=0.5)+" \
+    "8*(CurveFamily_getUtoTmapping(shape,table,0.0,8.0*" U ")!=0.5)+16*(Curve_getLength(table,4)!=8.0);"
+#define POINTS(DIM,U) "let a=CurveFamily_points(shape,8192,4,768,table,0);" \
+    "let b=CurveFamily_points(shape,8448,f64_floor_i64(1.0/" U "),768,table,1);" \
+    "return 0.0+(a!=5)+2*(b!=f64_floor_i64(1.0/" U ")+1)+4*(ux_f64(8192+16*" DIM ")!=8.0*" U ")+8*(ux_f64(8448+8*" DIM ")!=8.0*" U ");"
+#define TANGENTS(U) "let direct=CurveFamily_tangent(shape,864,768,0.5,table,0);" \
+    "let tangent=CurveFamily_tangent(shape,896,768," U ",table,1);" \
+    "return 0.0+(direct<0 || tangent<0 || !(ux_math_abs(ux_f64(direct)-1.0)<=0.000000000001) || !(ux_math_abs(ux_f64(tangent)-1.0)<=0.000000000001));"
+#define PREP_FRAME "let frames=CurveFamily_computeFrenetFrames(shape,9216,2,0,table,768,9728);"
+#define FRAME2 PREP_FRAME "return 0.0+(frames<0 || !(ux_f64(frames+72)>0.0) || ux_f64(frames+88)==ux_f64(frames+88) || " \
+    "ux_f64(frames+96)==ux_f64(frames+96) || ux_f64(frames+128)==ux_f64(frames+128));"
+#define FRAME3 PREP_FRAME "return 0.0+(frames<0 || ux_f64(frames+72)!=1.0 || ux_f64(frames+112)!=0.0-1.0 || ux_f64(frames+128)!=1.0);"
+#define CACHE(POS) "let steps=ux_u32_put(shape+CurveControl.arcLengthDivisions,4);let cache=CurveArcCache_init(640,2048,201);" \
+    "let table=CurveFamily_getArcLengths(shape,cache,768,0);" \
+    "let moved=ux_f64_put(" POS ",16.0);let live=CurveFamily_getPoint(shape,832,1.0);" \
+    "if(live<0 || ux_f64(live)!=16.0 || table<0 || Curve_getLength(table,4)!=8.0) { return 1.0; }" \
+    "let refreshed=CurveFamily_getArcLengths(shape,cache,768,1);" \
+    "return 0.0+(refreshed<0 || Curve_getLength(refreshed,4)!=16.0);"
+#define CASES(INIT,TAB,DIM,U,FRAME,POS) INIT CONSTRUCT, INIT TAB MAPPING(U), INIT TAB POINTS(DIM,U), \
+    INIT TAB TANGENTS(U), INIT TAB FRAME, INIT CACHE(POS)
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int row=-1,group=-1;
+    if(argc==3 && tx_eqz(argv[1],"--case")) {
+        char *end=0;
+        const long selected=tx_strtol(argv[2],&end,10);
+        if(end!=argv[2] && *end==0 && selected>=0 && selected<30) row=selected;
+    }
+    if(argc==3 && tx_eqz(argv[1],"--class")) {
+        char *end=0;
+        const long selected=tx_strtol(argv[2],&end,10);
+        if(end!=argv[2] && *end==0 && selected>=0 && selected<5) group=selected;
+    }
+    if(argc!=1 && !mutate && row<0 && group<0) return 2;
+    const char *modules[]={"object-layouts","object-json-tokens","f64-math","json-bytes","json-read","record-copy",
+        "curve-line","curve-bezier","curve-control","curve","curve-control-arcs","geometry-frames","curve-frames",
+        "curve-family-adapter","curve-family-frames","curve-family-classes",0};
+    const char *cases[]={
+        CASES(LINE,LINE_TABLE,"2","0.5",FRAME2,"1056"),
+        CASES(QUAD2,QUAD_TABLE,"2","0.25",FRAME2,"1088"),
+        CASES(QUAD3,QUAD_TABLE,"3","0.25",FRAME3,"1088"),
+        CASES(CUBIC2,CUBIC_TABLE,"2","0.125",FRAME2,"1120"),
+        CASES(CUBIC3,CUBIC_TABLE,"3","0.125",FRAME3,"1120"),
+    };
+    const double gold[30]={0};
+    const char *wrong="let v=ux_f64_put(1120,8.0);let shape=CubicBezierCurve3Class_init(0,1120,1056,1088,1024);"
+        "let defaults=CubicBezierCurve3Class_init(256,0-1,0-1,0-1,0-1);" CONSTRUCT;
+    if(mutate) row=24;
+    return g_math_run_range("G_STRUCT Curve family class","curve-family-class",modules,"",
+        cases,gold,30,group>=0?group*6:row<0?0:row,
+        group>=0?(group+1)*6:row<0?30:row+1,mutate?24:-1,wrong);
+}

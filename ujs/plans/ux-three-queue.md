@@ -68,7 +68,7 @@
 - ~~InterleavedBuffer GPU 副本上传生命周期 | G-struct 双 WebGL2 上下文成功后回调、失败重试和释放重建 | 共享克隆、上传确认。~~ r160 38 项通过，错用第二上下文的回调记数为 2 对 4。
 - InterleavedBuffer 产品共享渲染器回调和分数行数 | G-struct 实际产品上传与 r160 分数行数边界 | GPU 副本生命周期。
 - ~~LineCurve 与 Bezier 系弧长缓存 | G-struct 六类共用弧长表、缓存复用与刷新 | CurveControl 和 CurveArcCache。~~ 九项通过，漏刷新使长度从 8 变 4 转红。
-- LineCurve | G-struct linecurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getTangentAt,getPoints,getSpacedPoints,getLengths,updateArcLengths,getUtoTmapping,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
+- ~~LineCurve | G-struct 类级构造、弧长缓存、采样、开闭标架与生命周期 | 生成的 CurveFamily 构造器。~~ 通过 r160 与独立金值对照，反向控制点和坏 JSON 转红。
 - CubicBezierCurve | G-struct cubicbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - CubicBezierCurve3 | G-struct cubicbeziercurve3-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - QuadraticBezierCurve | G-struct quadraticbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -

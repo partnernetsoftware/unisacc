@@ -1,0 +1,203 @@
+// Layout: CurveControl at 0, four u32 references at 12, four local
+// vec3 slots at 32, then packed control coordinates at 128.
+native function curve_family_bytes() i64 { return 224; }
+
+native function curve_family_flat(instance:i64) i64 { return instance+128; }
+
+native function curve_family_area(ptr:i64,bytes:i64) i64 {
+  return ptr>=0 && ptr%8==0 && ptr<=6291456-bytes;
+}
+
+native function curve_family_local(instance:i64,slot:i64) i64 {
+  return instance+32+24*slot;
+}
+
+native function curve_family_ref(instance:i64,slot:i64) i64 {
+  return ux_u32(instance+CurveControl.size+4*slot);
+}
+
+native function curve_family_kind(instance:i64) i64 {
+  if(!curve_family_area(instance,curve_family_bytes())) { return 0-1; }
+  let kind=ux_u32(instance+CurveControl.kind);
+  if(kind==1 || kind>5) { return 0-1; }
+  return kind;
+}
+
+// Explicit vector records remain caller-owned. Each omitted vector is independent.
+native function CurveFamily_init(instance:i64,kind:i64,a:i64,b:i64,c:i64,d:i64) i64 {
+  if(!curve_family_area(instance,curve_family_bytes()) || kind<0 || kind==1 || kind>5) { return 0-1; }
+  let refs=[a,b,c,d];
+  let count=2+kind/2;
+  let dims=2+kind%2;
+  let i=0;
+  while(i<count) {
+    let at=refs[i];
+    if(at!=0-1 && (!curve_family_area(at,8*dims) ||
+       curve_control_arc_overlap(at,8*dims,instance,curve_family_bytes()))) { return 0-1; }
+    i=i+1;
+  }
+  let ctrl=CurveControl_init(instance,curve_family_flat(instance),kind,200);
+  if(ctrl<0) { return ctrl; }
+  i=0;
+  while(i<count) {
+    let at=refs[i];
+    if(at==0-1) { at=frame_put(curve_family_local(instance,i),0.0,0.0,0.0); }
+    let linked=ux_u32_put(instance+CurveControl.size+4*i,at);
+    i=i+1;
+  }
+  return instance;
+}
+
+native function curve_family_writable(instance:i64,out:i64,bytes:i64) i64 {
+  let kind=curve_family_kind(instance);
+  if(kind<0 || !curve_family_area(out,bytes) ||
+     curve_control_arc_overlap(instance,curve_family_bytes(),out,bytes)) { return 0; }
+  let count=2+kind/2;
+  let stride=8*(2+kind%2);
+  let i=0;
+  while(i<count) {
+    let at=curve_family_ref(instance,i);
+    if(!curve_family_area(at,stride) || curve_control_arc_overlap(at,stride,out,bytes)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function curve_family_sync(instance:i64) i64 {
+  let dims=2+ux_u32(instance+CurveControl.kind)%2;
+  let count=2+ux_u32(instance+CurveControl.kind)/2;
+  let dst=curve_family_flat(instance);
+  let i=0;
+  while(i<count) {
+    let src=curve_family_ref(instance,i);
+    let at=dst+i*8*dims;
+    let x=ux_f64_put(at,ux_f64(src));
+    let y=ux_f64_put(at+8,ux_f64(src+8));
+    if(dims==3) { let z=ux_f64_put(at+16,ux_f64(src+16)); }
+    i=i+1;
+  }
+  return instance;
+}
+
+native function CurveFamily_getPoint(instance:i64,out:i64,t:f64) i64 {
+  let kind=curve_family_kind(instance);
+  if(kind<0 || !curve_family_writable(instance,out,8*(2+kind%2))) { return 0-1; }
+  let ctrl=curve_family_sync(instance);
+  return CurveControl_getPoint(ctrl,out,t);
+}
+
+function CurveFamily_getArcLengths(receiver,...args) {
+  let instance=f64_floor_i64(receiver*1.0);
+  let cache=f64_floor_i64(args[0]*1.0);
+  let sample=f64_floor_i64(args[1]*1.0);
+  let refresh=f64_floor_i64(args[2]*1.0);
+  let result=0-1;
+  if(curve_family_writable(instance,cache,CurveArcCache.size) &&
+     curve_family_writable(instance,sample,24) &&
+     !curve_control_arc_overlap(cache,CurveArcCache.size,sample,24)) {
+    let table=ux_u32(cache+CurveArcCache.table);
+    let capacity=ux_u32(cache+CurveArcCache.capacity);
+    if(capacity>=2 && capacity<=786432 && curve_family_writable(instance,table,8*capacity)) {
+      let ctrl=curve_family_sync(instance);
+      if(refresh==0) { result=CurveControl_getArcLengths(ctrl,cache,sample); }
+      else { result=CurveControl_updateArcLengths(ctrl,cache,sample); }
+    }
+  }
+  return result;
+}
+
+// r160 returns the first exact midpoint encountered on a repeated length.
+native function CurveFamily_getUtoTmapping(instance:i64,table:i64,u:f64,distance:f64) f64 {
+  if(curve_family_kind(instance)<0) { return 0.0/0.0; }
+  let divisions=ux_u32(instance+CurveControl.arcLengthDivisions);
+  if(divisions<=0 || divisions>=786432 || !curve_family_writable(instance,table,8*(divisions+1))) { return 0.0/0.0; }
+  if(distance!=distance) { distance=0.0; }
+  let target=distance;
+  if(target==0.0) { target=u*ux_f64(table+8*divisions); }
+  let low=0;
+  let high=divisions;
+  while(low<=high) {
+    let mid=(low+high)/2;
+    let value=ux_f64(table+mid*8);
+    if(value==target) { return mid*1.0/divisions; }
+    if(value<target) { low=mid+1; }
+    else { high=mid-1; }
+  }
+  return Curve_getUtoTdistance(table,divisions,u,distance);
+}
+
+native function CurveFamily_getPointAt(instance:i64,out:i64,table:i64,u:f64) i64 {
+  if(curve_family_kind(instance)==0) { return CurveFamily_getPoint(instance,out,u); }
+  let t=CurveFamily_getUtoTmapping(instance,table,u,0.0);
+  return CurveFamily_getPoint(instance,out,t);
+}
+
+function CurveFamily_points(receiver,...args) {
+  let instance=f64_floor_i64(receiver*1.0);
+  let out=f64_floor_i64(args[0]*1.0);
+  let count=f64_floor_i64(args[1]*1.0);
+  let sample=f64_floor_i64(args[2]*1.0);
+  let table=f64_floor_i64(args[3]*1.0);
+  let spaced=f64_floor_i64(args[4]*1.0);
+  let kind=curve_family_kind(instance);
+  let result=0-1;
+  if(kind>=0 && count==0 && curve_family_writable(instance,out,8*(2+kind%2))) {
+    if(CurveFamily_getPoint(instance,out,0.0/0.0)>=0) { result=1; }
+  }
+  if(kind>=0 && count>0 && count<393216) {
+    let dims=2+kind%2;
+    let bytes=8*dims*(count+1);
+    if(curve_family_writable(instance,out,bytes) && curve_family_writable(instance,sample,24) &&
+       !curve_control_arc_overlap(out,bytes,sample,24)) {
+      let ctrl=curve_family_sync(instance);
+      let eval=closure(curve_control_arc_sample,ctrl,sample);
+      if(spaced==0 || kind==0) { result=Curve_getPoints(eval,out,count,dims); }
+      else {
+        let steps=ux_u32(instance+CurveControl.arcLengthDivisions);
+        if(steps>0 && steps<786432 && curve_family_writable(instance,table,8*(steps+1)) &&
+           !curve_control_arc_overlap(sample,24,table,8*(steps+1))) {
+          result=Curve_getSpacedPoints(eval,out,count,dims,table,steps);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+native function CurveFamily_tangent(instance:i64,out:i64,sample:i64,u:f64,table:i64,mapped:i64) i64 {
+  let kind=curve_family_kind(instance);
+  if(kind<0) { return 0-1; }
+  let dims=2+kind%2;
+  if(!curve_family_writable(instance,out,8*dims) || !curve_family_writable(instance,sample,24) ||
+     curve_control_arc_overlap(out,8*dims,sample,24)) { return 0-1; }
+  let ctrl=curve_family_sync(instance);
+  if(kind==0) { return curve_line_tangent(out,curve_family_flat(instance),dims); }
+  let t=u;
+  if(mapped!=0) {
+    let steps=ux_u32(instance+CurveControl.arcLengthDivisions);
+    if(steps<=0 || steps>=786432 || !curve_family_writable(instance,table,8*(steps+1)) ||
+       curve_control_arc_overlap(table,8*(steps+1),out,8*dims) ||
+       curve_control_arc_overlap(table,8*(steps+1),sample,24)) { return 0-1; }
+    t=CurveFamily_getUtoTmapping(instance,table,u,0.0);
+  }
+  let low=t-0.0001;
+  let high=t+0.0001;
+  if(low<0.0) { low=0.0; }
+  if(high>1.0) { high=1.0; }
+  let a=CurveControl_getPoint(ctrl,sample,low);
+  let ax=ux_f64(a);
+  let ay=ux_f64(a+8);
+  let az=0.0;
+  if(dims==3) { az=ux_f64(a+16); }
+  let b=CurveControl_getPoint(ctrl,sample,high);
+  let x=ux_f64(b)-ax;
+  let y=ux_f64(b+8)-ay;
+  let z=0.0;
+  if(dims==3) { z=ux_f64(b+16)-az; }
+  let length=f64_sqrt(x*x+y*y+z*z);
+  if(length==0.0 || length!=length) { length=1.0; }
+  let px=ux_f64_put(out,x/length);
+  let py=ux_f64_put(out+8,y/length);
+  if(dims==3) { let pz=ux_f64_put(out+16,z/length); }
+  return out;
+}

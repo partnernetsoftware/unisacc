@@ -1,0 +1,156 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+#define READ_REFS "let first=ux_f64_put(1024,1.0);let first_y=ux_f64_put(1032,2.0);let first_z=ux_f64_put(1040,3.0);" \
+    "let second=ux_f64_put(1056,4.0);let second_y=ux_f64_put(1064,5.0);let second_z=ux_f64_put(1072,6.0);" \
+    "let third=ux_f64_put(1088,7.0);let third_y=ux_f64_put(1096,8.0);let third_z=ux_f64_put(1104,9.0);" \
+    "let fourth=ux_f64_put(1120,10.0);let fourth_y=ux_f64_put(1128,11.0);let fourth_z=ux_f64_put(1136,12.0);"
+#define LAYOUT(CLASS,TAIL,DEFAULTS) \
+    "let shape=" CLASS "Class_init(0,1024,1056" TAIL ");" \
+    "let receiver=" CLASS "Class_init(256,1152,0-1" DEFAULTS ");" \
+    "let divisions=ux_u32_put(shape+CurveControl.arcLengthDivisions,17);"
+#define LINE LAYOUT("LineCurve","","")
+#define QUAD2 LAYOUT("QuadraticBezierCurve",",1088",",0-1")
+#define QUAD3 LAYOUT("QuadraticBezierCurve3",",1088",",0-1")
+#define CUBIC2 LAYOUT("CubicBezierCurve",",1088,1120",",0-1,0-1")
+#define CUBIC3 LAYOUT("CubicBezierCurve3",",1088,1120",",0-1,0-1")
+#define COPY "let copied=CurveFamily_copy(receiver,shape);" \
+    "return 0.0+(copied==receiver && curve_family_ref(receiver,0)==1152 && ux_f64(1152)==1.0 && " \
+    "ux_f64(1160)==2.0 && ux_u32(receiver+CurveControl.arcLengthDivisions)==17);"
+#define CLONE "let cloned=CurveFamily_clone(512,shape);" \
+    "let changed=ux_f64_put(curve_family_ref(cloned,0),99.0);" \
+    "return 0.0+(cloned==512 && curve_family_ref(cloned,0)!=1024 && ux_f64(1024)==1.0 && " \
+    "ux_u32(cloned+CurveControl.arcLengthDivisions)==17);"
+#define SERIALIZE "let end=CurveFamily_toJSON(shape,2049,3500,4096);"
+#define HASH SERIALIZE "let p=2049;let h=0;while(p<end){h=(h*131+ux_u8(p))%16777213;p=p+1;}return h*1.0;"
+#define RESTORE(LAST) "let restored=CurveFamily_fromJSON(receiver,2049,end,5712);" \
+    "let at=CurveFamily_getPoint(receiver,704,1.0);" \
+    "return 0.0+(restored==receiver && curve_family_ref(restored,0)==1152 && ux_f64(1152)==1.0 && " \
+    "ux_f64(1160)==2.0 && ux_u32(receiver+CurveControl.arcLengthDivisions)==17 && ux_f64(at)==" LAST ");"
+#define CASES(INIT) INIT COPY, INIT CLONE, INIT HASH
+
+static int json_input(char expected[480],const char *class_name,int dimensions,int points) {
+    int n=tx_snprintf(expected,480,
+        "{\"metadata\":{\"version\":4.6,\"type\":\"Curve\",\"generator\":\"Curve.toJSON\"},"
+        "\"arcLengthDivisions\":17,\"type\":\"%s\"",class_name);
+    for(int i=0;i<points;i++) {
+        n+=tx_snprintf(expected+n,480-n,",\"v%d\":[%d,%d",i+(points==2),3*i+1,3*i+2);
+        if(dimensions==3) n+=tx_snprintf(expected+n,480-n,",%d",3*i+3);
+        expected[n++]=']';
+    }
+    expected[n++]='}';
+    return n;
+}
+
+static double json_gold(const char *json,int size) {
+    uint64_t hash=0;
+    for(int i=0;i<size;i++) hash=(hash*131+(unsigned char)json[i])%16777213;
+    return (double)hash;
+}
+
+static int restore_source(char *out,int capacity,const char *init,const char *json,int size,int broken) {
+    if(size<=0 || size>256) return 1;
+    int n=tx_snprintf(out,capacity,"%slet data=[",init);
+    for(int i=0;i<size;i++) n+=tx_snprintf(out+n,capacity-n,"%s%d",i?",":"",broken&&i==size-1?93:(unsigned char)json[i]);
+    n+=tx_snprintf(out+n,capacity-n,
+        "];let index=0;while(index<%d){let ord=ux_u8_put(2049+index,data[index]);index=index+1;}let end=2049+%d;",
+        size,size);
+    return n<0 || n>=capacity;
+}
+
+static int life_library(char *library,int capacity) {
+    const struct { const char *module,*stop; } inputs[]={
+        {"curve-control-layout",0},{"object-json-tokens",0},{"json-bytes",0},{"json-read",0},
+        {"record-copy",0},{"curve-line","native function curve_line_length("},{"curve-bezier",0},
+        {"curve-control",0},{"curve-control-arcs","native function curve_control_arc_dimensions("},
+        {"geometry-frames","native function frame_combine("},
+        {"curve-family-adapter","function CurveFamily_getArcLengths("},
+        {"curve-family-classes",0},{"curve-family-lifecycle",0}
+    };
+    int used=0;
+    for(int i=0;i<(int)(sizeof inputs/sizeof inputs[0]);i++) {
+        char path[180];
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",inputs[i].module);
+        unsigned char *raw=0;
+        int64_t bytes=0;
+        if(sy_read_file(path,&raw,&bytes,40000)) return 1;
+        long end=bytes;
+        if(inputs[i].stop) end=tx_find((const char *)raw,bytes,inputs[i].stop,tx_len(inputs[i].stop,140));
+        if(end<=0 || end>=capacity-used-1) {
+            printf("CURVE_LIFECYCLE source boundary missing %s\n",path);
+            mm_free(raw);
+            return 1;
+        }
+        used+=tx_snprintf(library+used,capacity-used,"%.*s\n",(int)end,raw);
+        mm_free(raw);
+    }
+    return 0;
+}
+
+static int life_run(const char *const *cases,const double *gold,int group,int mutate,const char *wrong) {
+    char library[76000];
+    if(life_library(library,sizeof library)) return 2;
+    char dir[260],source[320],wasm[320];
+    if(sy_mkdtemp("/tmp","curve-life-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double refs[20]={0};
+    int failed=g_math_reference("curve-family-lifecycle",refs,20,dir);
+    const int first=mutate?3:group*4, limit=mutate?4:(group+1)*4;
+    for(int i=first;!failed && i<limit;i++) {
+        double actual=0;
+        if(g_math_sample(source,wasm,library,READ_REFS,mutate?wrong:cases[i],&actual) ||
+            !g_math_near(actual,gold[i],1e-9) || !g_math_near(refs[i],gold[i],1e-9)) {
+            printf("G_STRUCT Curve family lifecycle case=%d actual=%.17g r160=%.17g gold=%.17g\n",
+                i,actual,refs[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT Curve family lifecycle cases=%d failed=%d\n",limit-first,failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    int group=-1;
+    if(argc==3 && tx_eqz(argv[1],"--class")) {
+        char *end=0;
+        long value=tx_strtol(argv[2],&end,10);
+        if(end!=argv[2] && *end==0 && value>=0 && value<5) group=value;
+    }
+    if(!mutate && group<0) return 2;
+    static const struct { const char *name,*init,*restore; int dims,points; } classes[]={
+        {"LineCurve",LINE,RESTORE("4.0"),2,2},
+        {"QuadraticBezierCurve",QUAD2,RESTORE("7.0"),2,3},
+        {"QuadraticBezierCurve3",QUAD3,RESTORE("7.0"),3,3},
+        {"CubicBezierCurve",CUBIC2,RESTORE("10.0"),2,4},
+        {"CubicBezierCurve3",CUBIC3,RESTORE("10.0"),3,4},
+    };
+    char restores[5][2800],wrong[2800];
+    const char *cases[]={
+        CASES(LINE),restores[0], CASES(QUAD2),restores[1], CASES(QUAD3),restores[2],
+        CASES(CUBIC2),restores[3], CASES(CUBIC3),restores[4]
+    };
+    double gold[20];
+    for(int i=0;i<5;i++) {
+        char json[480];
+        const int size=json_input(json,classes[i].name,classes[i].dims,classes[i].points);
+        if(restore_source(restores[i],2200,classes[i].init,json,size,0)) return 2;
+        int n=tx_len(restores[i],2200);
+        if(tx_snprintf(restores[i]+n,sizeof restores[i]-n,"%s",classes[i].restore)>=(int)sizeof restores[i]-n) return 2;
+        gold[4*i]=1; gold[4*i+1]=1; gold[4*i+2]=json_gold(json,size); gold[4*i+3]=1;
+        if(mutate && i==0) {
+            if(restore_source(wrong,2200,classes[i].init,json,size,1)) return 2;
+            n=tx_len(wrong,2200);
+            if(tx_snprintf(wrong+n,sizeof wrong-n,
+                "return 0.0+(CurveFamily_fromJSON(receiver,2049,end,5712)==receiver);")>=(int)sizeof wrong-n) return 2;
+        }
+    }
+    return life_run(cases,gold,group,mutate,wrong);
+}

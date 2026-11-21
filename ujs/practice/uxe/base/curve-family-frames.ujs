@@ -1,0 +1,68 @@
+function CurveFamily_computeFrenetFrames(receiver,...args) {
+  let instance=f64_floor_i64(receiver*1.0);
+  let out=f64_floor_i64(args[0]*1.0);
+  let segments=f64_floor_i64(args[1]*1.0);
+  let closed=f64_floor_i64(args[2]*1.0);
+  let table=f64_floor_i64(args[3]*1.0);
+  let sample=f64_floor_i64(args[4]*1.0);
+  let work=f64_floor_i64(args[5]*1.0);
+  let kind=curve_family_kind(instance);
+  let steps=0;
+  if(kind>=0) { steps=ux_u32(instance+CurveControl.arcLengthDivisions); }
+  let result=0-1;
+  if(kind>=0 && steps>0 && steps<786432 && segments>=0 && segments<87381) {
+    let bytes=72*(segments+1);
+    let tableBytes=8*(steps+1);
+    if(curve_family_writable(instance,out,bytes) && curve_family_writable(instance,sample,24) &&
+       curve_family_writable(instance,work,120) && curve_family_writable(instance,table,tableBytes) &&
+       !curve_control_arc_overlap(out,bytes,sample,24) && !curve_control_arc_overlap(out,bytes,work,120) &&
+       !curve_control_arc_overlap(out,bytes,table,tableBytes) && !curve_control_arc_overlap(sample,24,work,120) &&
+       !curve_control_arc_overlap(sample,24,table,tableBytes) && !curve_control_arc_overlap(work,120,table,tableBytes)) {
+      let ctrl=curve_family_sync(instance);
+      let eval=closure(curve_control_arc_sample,ctrl,sample);
+      if(kind%2==1 && segments>0) { result=Curve_computeFrenetFrames(eval,out,segments,table,steps,work,closed); }
+      else { result=out; }
+      if(result>=0) {
+        let i=0;
+        let invalid=0.0/0.0;
+        while(i<=segments) {
+          let row=out+72*i;
+          let t=CurveFamily_getUtoTmapping(instance,table,i*1.0/segments,0.0);
+          if(kind%2==1) {
+            if(segments==0) {
+              let a=frame_put(row,invalid,invalid,invalid);
+              let b=frame_put(row+24,invalid,invalid,invalid);
+              let c=frame_put(row+48,invalid,invalid,invalid);
+            } else { let tangent=Curve_getTangent(eval,row*1.0,3.0,t); }
+          } else {
+            // The inherited implementation asks for a Vector3 tangent. The
+            // missing Vector2 z propagates to every normal and binormal.
+            let x=0.0;
+            let y=0.0;
+            if(kind==0) {
+              let points=curve_family_flat(instance);
+              x=ux_f64(points+16)-ux_f64(points);
+              y=ux_f64(points+24)-ux_f64(points+8);
+            } else {
+              let low=t-0.0001;
+              let high=t+0.0001;
+              if(low<0.0) { low=0.0; }
+              if(high>1.0) { high=1.0; }
+              let a=eval(low);
+              let ax=ux_f64(a);
+              let ay=ux_f64(a+8);
+              let b=eval(high);
+              x=ux_f64(b)-ax;
+              y=ux_f64(b+8)-ay;
+            }
+            let tan=frame_put(row,x,y,invalid);
+            let nor=frame_put(row+24,invalid,invalid,invalid);
+            let bin=frame_put(row+48,invalid,invalid,invalid);
+          }
+          i=i+1;
+        }
+      }
+    }
+  }
+  return result;
+}

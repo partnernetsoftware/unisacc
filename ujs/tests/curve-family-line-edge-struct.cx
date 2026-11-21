@@ -1,0 +1,53 @@
+#pragma unisa use g_math
+#pragma unisa use text.text
+
+#define TABLE "let cache=CurveArcCache_init(640,2048,201);let table=CurveFamily_getArcLengths(line,cache,768,0);"
+#define FRAME_TABLE "let table=2048;let index=1;while(index<=5){let v=ux_f64_put(table+8*index,index*1.0);index=index+1;}"
+#define FRAME(CLOSED) \
+    "let frames=CurveFamily_computeFrenetFrames(line,9216,2," CLOSED ",table,768,9728);" \
+    "if(frames<0){return 0.0;}let i=0;let good=1;" \
+    "while(i<3){let row=frames+72*i;let z=ux_f64(row+16);" \
+    "good=good && ux_f64(row)==3.0 && ux_f64(row+8)==4.0 && z!=z;" \
+    "let j=3;while(j<9){let val=ux_f64(row+8*j);good=good && val!=val;j=j+1;}i=i+1;}" \
+    "return good*1.0;"
+#define ZERO(SPACED) "let count=CurveFamily_points(line,9216,0,768,0," SPACED ");let xval=ux_f64(9216);let yval=ux_f64(9224);" \
+    "return 0.0+(count==1 && xval!=xval && yval!=yval);"
+#define ALIASES "let aliases=LineCurveClass_init(512,1056,1024);let copied=CurveFamily_copy(aliases,line);"
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    const int frames=argc==2 && tx_eqz(argv[1],"--frames");
+    const int sampling=argc==2 && tx_eqz(argv[1],"--sampling");
+    const int aliases=argc==2 && tx_eqz(argv[1],"--aliases");
+    if(!mutate && !frames && !sampling && !aliases) return 2;
+    const char *modules[]={"curve-control-layout","object-json-tokens","f64-math","json-bytes","json-read",
+        "record-copy","curve-line","curve-bezier","curve-control","curve","curve-control-arcs","geometry-frames","curve-frames",
+        "curve-family-adapter","curve-family-frames","curve-family-classes","curve-family-lifecycle",0};
+    const char *setup="let x=ux_f64_put(1024,1.0);let y=ux_f64_put(1032,2.0);"
+        "let a=ux_f64_put(1056,4.0);let b=ux_f64_put(1064,6.0);"
+        "let line=LineCurveClass_init(0,1024,1056);let steps=ux_u32_put(line+CurveControl.arcLengthDivisions,5);"
+        "let flat=LineCurveClass_init(256,1024,1024);let flatsteps=ux_u32_put(flat+CurveControl.arcLengthDivisions,5);";
+    const char *cases[]={
+        "let at=CurveFamily_getPointAt(line,832,0,0.0-1.0);return ux_f64(at);",
+        "let tangent=CurveFamily_tangent(line,864,768,0.25,0,1);return ux_f64(tangent+8);",
+        TABLE "return CurveFamily_getUtoTmapping(line,table,0.0,3.0);",
+        FRAME_TABLE FRAME("0"),
+        FRAME_TABLE FRAME("1"),
+        ZERO("0"),
+        ZERO("1"),
+        "let cache=CurveArcCache_init(640,2048,201);let table=CurveFamily_getArcLengths(flat,cache,768,0);"
+            "return CurveFamily_getUtoTmapping(flat,table,0.9,0.0);",
+        "let at=CurveFamily_tangent(flat,864,768,0.0,0,0);return ux_f64(at);",
+        ALIASES "return 0.0+(copied==aliases && curve_family_ref(aliases,0)==1056 && curve_family_ref(aliases,1)==1024);",
+        ALIASES "return ux_f64(1024);",
+        ALIASES "return ux_f64(1056);",
+    };
+    const double gold[]={-2,0.8,0.6,1,1,1,1,0.4,0,1,1,1};
+    const int first=frames||mutate?3:sampling?0:9;
+    const int limit=mutate?4:frames?5:sampling?3:12;
+    const char *wrong=FRAME_TABLE "let move=ux_f64_put(1056,9.0);" FRAME("0");
+    if(sampling) {
+        return g_math_run_range("G_STRUCT LineCurve sampling edge","curve-family-line-edge",modules,setup,cases,gold,12,0,3,-1,0) ||
+            g_math_run_range("G_STRUCT LineCurve zero divisions","curve-family-line-edge",modules,setup,cases,gold,12,5,9,-1,0);
+    }
+    return g_math_run_range("G_STRUCT LineCurve class edge","curve-family-line-edge",modules,setup,cases,gold,12,first,limit,mutate?3:-1,wrong);
+}
