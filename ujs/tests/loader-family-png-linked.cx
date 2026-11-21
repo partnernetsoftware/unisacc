@@ -1,0 +1,127 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.deflate
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+static const char *const sources[]={
+    FIX "loader-family-png-base-layout.ujs",
+    BASE "record-copy.ujs",BASE "loadingmanager.ujs",BASE "defaultloadingmanager.ujs",
+    BASE "loader.ujs",BASE "fileloader.ujs",BASE "loader-base.ujs",BASE "loader-family.ujs",
+    BASE "loader-family-classes.ujs",BASE "png-header.ujs",BASE "png-scanlines.ujs",
+    BASE "png-bits.ujs",BASE "png-huffman.ujs",BASE "png-fixed.ujs",BASE "png-stored.ujs",
+    BASE "image-layout.ujs",BASE "image-file.ujs",BASE "imageloader.ujs",BASE "loader-family-image-png.ujs",
+    FIX "loader-family-png-base.ujs",0,
+};
+
+static int compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("PNG_LOADER_LINK %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int base_wasm(const char *wasm,int prepare,int check) {
+    const char *cache=sy_env("UXE_PNG_LOADER_WASM_CACHE");
+    if(!cache || !cache[0]) {
+        printf("PNG_LOADER_LINK cache=missing env=UXE_PNG_LOADER_WASM_CACHE\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    const int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<0 || n>=(int)sizeof record) return 2;
+    const int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("PNG_LOADER_LINK cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("PNG_LOADER_LINK cache=missing key=%s\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("PNG_LOADER_LINK cache=refused key=%s rc=%d\n",key,rc);
+        return 1;
+    }
+    char *args[26]={"./ujs/ujs2wasm.com"};
+    int i=0;
+    while(sources[i]) { args[i+1]=(char *)sources[i]; i++; }
+    args[i+1]="-o";
+    args[i+2]=(char *)wasm;
+    if(compile(args,"base_prepare",50)) return 1;
+    if(check) {
+        const int mismatch=wasm_test_cache_verify(wasm,sha);
+        printf("PNG_LOADER_LINK cache=rebuilt sha=%s failed=%d\n",sha,mismatch!=0);
+        return mismatch;
+    }
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+static void big_endian(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+static int fixture(const char *out,const char *invalid) {
+    // One opaque pixel with four distinguishable channel positions.
+    unsigned char png[73]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,
+        0,0,0,0,0,0,0,16,73,68,65,84,120,1,1,5,0,250,255,0,255,0,128,255};
+    big_endian(png+29,dz_crc32(0,png+12,17));
+    unsigned a=1,b=0;
+    for(int i=48;i<53;i++) { a+=png[i]; b+=a; }
+    big_endian(png+53,(b<<16)+a);
+    big_endian(png+57,dz_crc32(0,png+37,20));
+    big_endian(png+65,0x49454e44u);
+    big_endian(png+69,dz_crc32(0,png+65,4));
+    if(sy_write_file(out,png,sizeof png,0600)) return 1;
+    png[0]=0;
+    return sy_write_file(invalid,png,sizeof png,0600)!=0;
+}
+
+static int browser_check(const char *dir,const char *wasm,int mutate) {
+    char cwd[460],url[840],probe[320],image[320],bad[320];
+    if(sy_cwd(cwd,sizeof cwd)) return 1;
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(image,sizeof image,"%s/image.png",dir);
+    tx_snprintf(bad,sizeof bad,"%s/bad.png",dir);
+    const int n=tx_snprintf(url,sizeof url,"file://%s/" FIX "loader-family-png-linked-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    char *args[]={"./ujs/ujs2wasm.com",FIX "loader-family-png-probe.ujs","-o",probe,0};
+    const double gold[]={1,1,255,0,128,255,1, 1,-1,2,-1,1536,1,1,4,255,0,128,255,-1,2,-1,-2,1,255,3,1536};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=n<0 || n>=(int)sizeof url || base_wasm(wasm,0,0) ||
+        compile(args,"probe",6) || fixture(image,bad) || r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) if(actual[i]!=gold[i]) {
+        printf("PNG_LOADER_LINK case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed=1;
+    }
+    printf("G_IO ImageLoader async PNG linked cases=%d failed=%d\n",count,failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !check && !mutate && !(prepare && argc==2)) return 2;
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-png-loader-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    int rc=prepare?base_wasm(wasm,1,check):browser_check(dir,wasm,mutate);
+    if(sy_remove_all(dir)) rc=1;
+    if(prepare) printf("PNG_LOADER_LINK prepare check=%d failed=%d\n",check,rc!=0);
+    return rc;
+}
