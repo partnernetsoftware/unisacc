@@ -37,6 +37,12 @@ int main(int argc, char **argv) {
        has(&r, "CHAIN\tCMD\t4\tstage-dry\t") && has(&r, "--strict release/evidence/v0.0.99-strict-2026-01-01.tsv") && has(&r, " --dry\n") &&
        has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tCMD\t6\tpost-publish\t") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
     ck(sy_exists(plan_state) == 0 && !has(&r, "CHAIN\tRUN\t"), "plan-runs-nothing");
+    ck(has(&r, "CHAIN\tCMD\tP0\tprerun-plan\t") && has(&r, "--normal-jobs 4") &&
+       has(&r, "CHAIN\tCMD\tP1\tprerun-start\t") && has(&r, "--resume --max-jobs 4 --keep-going") &&
+       has(&r, "for attempt in 1 2; do") && has(&r, "&& exit 0; done; exit 1") &&
+       has(&r, "supervise.log") && has(&r, "PRERUN_RUN status=DONE") &&
+       has(&r, "CHAIN\tCMD\tP2\tprerun-merge\t") && has(&r, "CHAIN\tCMD\tP3\tprerun-archive\t") &&
+       has(&r, "--repo . --version '0.0.99'"), "plan-prints-prerun-reentry-merge-and-archive");
     ck(has(&r, "CHAIN\tWARN\twarm\t"), "plan-warns-missing-warm");
     np_free(&r);
     /* (1b) unregistered UNISACC_* var: warned in plan, refused rc=1 in run; allowlisted var accepted */
@@ -177,13 +183,20 @@ int main(int argc, char **argv) {
             "printf '%s/pre0/warm-fake.tsv\\n' > \"$T/st/warm.done\" && "
             "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo WDONE=$?; "
             "grep -q 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo RESOLVED_OK=1; "
+            "rm -f \"$T/st/inputs-resolved.tsv\"; "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout --from 2; "
+            "grep -qx 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo FROM2_WARM=1; "
+            "rm -f \"$T/st/inputs-resolved.tsv\"; "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout --from 3; "
+            "grep -qx 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo FROM3_WARM=1; "
             "rm -rf \"$T\"",
-            tmp, tmp, tmp, bin, tmp, bin, tmp, bin, tmp);
+            tmp, tmp, tmp, bin, tmp, bin, tmp, bin, tmp, bin, tmp, bin, tmp);
         char *vp[] = {"sh", "-c", cmd, 0};
         r = actual(vp);
         ck(has(&r, "PBOTH=0\n") && has(&r, "CHAIN\tSKIP\t0a\tpack\tprovided-in-inputs\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n"), "plan-skips-provided-pack-and-warm");
         ck(has(&r, "NWRC=1\n") && has(&r, "CHAIN\tRUN\t0b\twarm\t") && has(&r, "CHAIN\tFAIL\t0b\twarm\t"), "run-executes-split-warm-step-before-prep");
         ck(has(&r, "WDONE=1\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tdone\n") && has(&r, "RESOLVED_OK=1\n"), "run-skips-done-warm-and-injects-resolved-inputs");
+        ck(has(&r, "FROM2_WARM=1\n") && has(&r, "FROM3_WARM=1\n"), "resume-after-prep-restores-warm-input");
         np_free(&r);
 
         cx_fmt(cmd, sizeof cmd,

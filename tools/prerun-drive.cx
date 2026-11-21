@@ -1,12 +1,15 @@
 /* tools/prerun-drive.cx -- bounded window-granularity qualification prerun driver and offline replay verifier.
  * Subcommands:
  *   plan   --ids-file FILE --out DIR [--win-size 8..12] [--heavy-file FILE] [--warmup N]
+ *          [--times-file FILE --normal-jobs 1..16] [--priority-file FILE]
  *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--max-retries 2]
  *          (--load-cap N is still accepted but ignored with a PRERUN_DEPRECATED line: load gates retired 2026-11-20)
  *   merge  --in-dir DIR --out DIR [--version VER] [--skip-name FILE]
+ *   archive --in-dir RUN_DIR --repo DIR --version V  (after the supervisor closes its log)
  *   g1-dry --root DIR --strict FILE --expected-fail FILE --expected-unmeasured FILE --out DIR [--version VER]
  *   replay --ids-file FILE --evidence-dir DIR --out DIR [--expected-strict FILE] [--expected-g1dry FILE]
- * Never edits batch result lines; stops after max-retries (default 2) on any repeating non-PASS batch. */
+ * Batch result lines are kept verbatim. Timed windows can recover missing
+ * evidence in single-batch runs, each with its own deadline. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
@@ -19,12 +22,20 @@
 #define PD_PW 4400
 #define PD_MAX_IDS 2048
 #define PD_MAX_WINS 512
-#define PD_MAX_FILES 256
+#define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
+#define PD_CHILD_SECONDS 58
+/* Outer wrapper/harness overhead was not measured in the historical run.
+ * Reserve four seconds before the outer cutoff, including setup and jitter. */
+#define PD_WINDOW_RESERVE_MS 4000
+#define PD_BATCH_WINDOW_MS (PD_CHILD_SECONDS * 1000 - PD_WINDOW_RESERVE_MS)
+#define PD_TIMED_BUDGET_MS 22000
+#define PD_TIMED_HEADER "# prerun-drive windows\n# timing=wave-v1 jobs="
 
 typedef struct {
     char id[128];
     int heavy;
     int priority;
+    int measured;
     long time_ms;
 } PdBatch;
 
@@ -164,6 +175,7 @@ static int pd_find_id(const char *id, size_t len) {
 static int pd_load_times_file(const char *path) {
     unsigned char *b = 0; int64_t n = 0;
     if (sy_read_file(path, &b, &n, 16 << 20)) return -1;
+    int measured = 0;
     int64_t pos = 0;
     while (pos < n) {
         int64_t ls = pos;
@@ -195,16 +207,23 @@ static int pd_load_times_file(const char *path) {
         if (id_col && ms_col) {
             int idx = pd_find_id(id_col, (size_t)id_len);
             if (idx >= 0) {
-                char nbuf[24];
-                mm_copy(nbuf, sizeof nbuf, ms_col, (size_t)ms_len);
-                nbuf[ms_len] = 0;
-                long v = atol(nbuf);
+                long v = PD_BATCH_WINDOW_MS + 1;
+                if (ms_len <= 5) {
+                    char nbuf[6];
+                    mm_copy(nbuf, sizeof nbuf, ms_col, (size_t)ms_len);
+                    nbuf[ms_len] = 0;
+                    v = atol(nbuf);
+                }
                 if (v < 500) v = 500;
-                pd_ids[idx].time_ms = v;
+                if (!pd_ids[idx].measured || v > pd_ids[idx].time_ms)
+                    pd_ids[idx].time_ms = v;
+                pd_ids[idx].measured = 1;
+                measured++;
             }
         }
     }
     mm_free(b);
+    if (measured == 0) return -1;
     pd_has_times = 1;
     return 0;
 }
@@ -315,47 +334,57 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         }
         rem[j + 1] = v;
     }
-    static int packed[PD_MAX_IDS];
-    for (int i = 0; i < nrem; i++) packed[i] = 0;
-    int left = nrem;
-    const long budget_ms = 45000;
-    while (left > 0 && pd_nwins < PD_MAX_WINS) {
+    int pos = 0;
+    while (pos < nrem && pd_nwins < PD_MAX_WINS) {
         PdWin *w = &pd_wins[pd_nwins];
         cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
         w->jobs = pd_normal_jobs;
         cx_fmt(w->phase, sizeof w->phase, "normal");
         w->count = 0;
-        long sum_ms = 0;
-        int first = -1;
-        for (int i = 0; i < nrem; i++) if (!packed[i]) { first = i; break; }
-        if (first < 0) break;
-        w->idxs[w->count++] = rem[first];
-        packed[first] = 1;
-        left--;
-        sum_ms += pd_ids[rem[first]].time_ms;
-        while (w->count < win_size && left > 0) {
-            int pick = -1;
-            for (int j = first + 1; j < nrem; j++) {
-                if (!packed[j] && sum_ms + pd_ids[rem[j]].time_ms <= budget_ms) { pick = j; break; }
-            }
-            if (pick < 0) break;
-            w->idxs[w->count++] = rem[pick];
-            packed[pick] = 1;
-            left--;
-            sum_ms += pd_ids[rem[pick]].time_ms;
+        if (pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS || !pd_ids[rem[pos]].measured) {
+            /* An isolated or missing sample cannot establish parallel wall time. */
+            cx_fmt(w->phase, sizeof w->phase, "long");
+            w->idxs[w->count++] = rem[pos++];
+            w->jobs = 1;
+            pd_nwins++;
+            continue;
         }
+        long cost = 0;
+        /* dvqualify preserves --ids order and barriers every --segment-batches jobs. */
+        while (pos < nrem && w->count < win_size &&
+               cost + pd_ids[rem[pos]].time_ms <= PD_TIMED_BUDGET_MS) {
+            cost += pd_ids[rem[pos]].time_ms;
+            for (int lane = 0; lane < w->jobs && pos < nrem && w->count < win_size &&
+                 pd_ids[rem[pos]].measured; lane++)
+                w->idxs[w->count++] = rem[pos++];
+        }
+        if (!w->count) return;
         pd_nwins++;
         (*w_normal)++;
     }
+}
+
+static int pd_warmup_fits(int i, long cost) {
+    return !pd_has_times || (pd_ids[i].measured &&
+        cost + pd_ids[i].time_ms <= PD_TIMED_BUDGET_MS);
 }
 
 static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     int used[PD_MAX_IDS];
     int i, w_warmup = 0, w_heavy = 0, w_normal = 0, has_rc = -1;
     if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
+    if (pd_normal_jobs < 1 || pd_normal_jobs > 16) return pd_refuse("normal-jobs-must-be-1-to-16");
     if (pd_nids <= 0) return pd_refuse("empty-ids-file");
     for (i = 0; i < pd_nids; i++) {
         used[i] = 0;
+        if (pd_has_times) {
+            if (!pd_ids[i].measured) pd_ids[i].time_ms = PD_TIMED_BUDGET_MS;
+            if (pd_ids[i].time_ms > PD_BATCH_WINDOW_MS) {
+                fprintf(stderr, "PRERUN_SPLIT_REQUIRED\tbatch=%s\testimate_ms=%ld\tlimit_ms=%d\n",
+                    pd_ids[i].id, pd_ids[i].time_ms, PD_BATCH_WINDOW_MS);
+                return pd_refuse("batch-exceeds-single-window-estimate");
+            }
+        }
         if (tx_eqz(pd_ids[i].id, "real-commit")) has_rc = i;
     }
     pd_nwins = 0;
@@ -367,16 +396,19 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         w->jobs = 1;
         cx_fmt(w->phase, sizeof w->phase, "warmup");
         w->count = 0;
+        long cost = 0;
         for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-            if (!pd_ids[i].heavy && !pd_ids[i].priority) {
+            if (!pd_ids[i].heavy && !pd_ids[i].priority && pd_warmup_fits(i, cost)) {
                 w->idxs[w->count++] = i;
                 used[i] = 1;
+                cost += pd_ids[i].time_ms;
             }
         }
         for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-            if (!used[i] && !pd_ids[i].heavy) {
+            if (!used[i] && !pd_ids[i].heavy && pd_warmup_fits(i, cost)) {
                 w->idxs[w->count++] = i;
                 used[i] = 1;
+                cost += pd_ids[i].time_ms;
             }
         }
         if (w->count > 0) { pd_nwins++; w_warmup = 1; }
@@ -470,6 +502,19 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         pd_pack_normal_group(rem, nrem, win_size, &w_normal);
     }
 
+    int planned = 0;
+    long estimated = 0, max_window = 0;
+    for (int wi = 0; wi < pd_nwins; wi++) {
+        PdWin *w = &pd_wins[wi];
+        if (tx_eqz(w->phase, "prebuild-self")) continue;
+        planned += w->count;
+        long wall = 0;
+        for (int k = 0; k < w->count; k += w->jobs)
+            wall += pd_ids[w->idxs[k]].time_ms;
+        if (wall > max_window) max_window = wall;
+        estimated += wall;
+    }
+    if (planned != pd_nids) return pd_refuse("window-plan-did-not-cover-every-batch");
     pd_mkdirs(out_dir);
     char wpath[PD_PW];
     if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir)) return pd_refuse("path-bound");
@@ -478,6 +523,12 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     if (!buf) return pd_refuse("oom");
     size_t bp = 0;
     const char *hdr = "# prerun-drive windows\nwindow\tjobs\tphase\tcount\tids\n";
+    char timed_hdr[160];
+    if (pd_has_times) {
+        if (cx_fmt(timed_hdr, sizeof timed_hdr, PD_TIMED_HEADER "%d budget_ms=%d\nwindow\tjobs\tphase\tcount\tids\n",
+                   pd_normal_jobs, PD_TIMED_BUDGET_MS)) { mm_free(buf); return pd_refuse("timed-header-bound"); }
+        hdr = timed_hdr;
+    }
     size_t hl = strlen(hdr);
     mm_copy(buf + bp, cap - bp, hdr, hl); bp += hl;
     for (int wi = 0; wi < pd_nwins; wi++) {
@@ -501,6 +552,9 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     if (wrc) return pd_refuse("write-windows");
     printf("PRERUN_PLAN\ttotal=%d\twindows=%d\twarmup=%d\theavy=%d\tnormal=%d\tout=%s\n",
            pd_nids, pd_nwins, w_warmup, w_heavy, w_normal, wpath);
+    if (pd_has_times)
+        printf("PRERUN_ESTIMATE\twave_ms=%ld\tmax_window_ms=%ld\tbudget_ms=%d\tscope=batch-timing-only\touter_overhead=UNMEASURED\treserve_ms=%d\n",
+               estimated, max_window, PD_TIMED_BUDGET_MS, PD_WINDOW_RESERVE_MS);
     return 0;
 }
 
@@ -687,13 +741,88 @@ static void pd_prepend_saved(const char *outp, const char *saved_hdr, const char
     mm_free(comb);
 }
 
+static int pd_window_attempt(const char *root, const char *cand, const char *mock_runner,
+                             const char *wid, const char *phase, const char *ids,
+                             const char *outp, int jobs, int attempt) {
+    char size[12], seq[12], why[256];
+    if (cx_fmt(size, sizeof size, "%d", jobs) || cx_fmt(seq, sizeof seq, "%d", attempt)) return 2;
+    char *real[] = {"sh", "./unisacc.com", "tools/dvqualify.cx", "--", ".",
+                    "--candidate", (char *)cand, "--ids", (char *)ids, "--out", (char *)outp,
+                    "--jobs", size, "--segment-batches", size, 0};
+    char *mock[] = {"sh", (char *)mock_runner, "window", (char *)wid, size,
+                    (char *)ids, (char *)outp, seq, 0};
+    np_result r = {0};
+    long started = sy_now_ms();
+    int tr = np_run(mock_runner ? mock : real, root, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
+    int rc = tr ? 124 : r.rc;
+    np_free(&r);
+    printf("PRERUN_WINDOW\twindow=%s\tphase=%s\tattempt=%d\tjobs=%d\trc=%d\twall_ms=%ld\n",
+           wid, phase, attempt, jobs, rc, sy_now_ms() - started);
+    fflush(stdout);
+    return rc;
+}
+
+static int pd_batch_receipt(const char *path, const char *id, int rc) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 4 << 20)) return 0;
+    pd_nstates = 0;
+    pd_ingest_strict_buf((const char *)buf, n);
+    mm_free(buf);
+    if (pd_nstates != 1 || !tx_eqz(pd_states[0].id, id)) return 0;
+    if (tx_eqz(pd_states[0].status, "PASS")) return rc == 0 ? 1 : 0;
+    return tx_eqz(pd_states[0].status, "FAIL") || tx_eqz(pd_states[0].status, "UNKNOWN") ? 2 : 0;
+}
+
+/* Keep the original wave and its completed rows. Recovery receipts sort
+ * after that wave and each finished child can be reused by --resume. */
+static int pd_recover_serial(const char *root, const char *cand, const char *out_dir,
+                             const char *mock_runner, const char *wid, char ids[][128],
+                             const int *passed, int count, int max_retries, int resume) {
+    int incomplete = 0;
+    for (int i = 0; i < count; i++) {
+        if (passed[i]) continue;
+        char part[48], outp[PD_PW], done[PD_PW];
+        if (cx_fmt(part, sizeof part, "%s.z%02d", wid, i + 1) ||
+            cx_fmt(outp, sizeof outp, "%s/strict-%s.tsv", out_dir, part) ||
+            cx_fmt(done, sizeof done, "%s/done.%s", out_dir, part)) return -1;
+        if (resume && sy_exists(done) == 1 && pd_batch_receipt(outp, ids[i], 0)) continue;
+        int matched = 0, tries = 0;
+        for (int attempt = 1; attempt <= max_retries; attempt++) {
+            tries = attempt;
+            sy_unlink(outp);
+            int rc = pd_window_attempt(root, cand, mock_runner, part, "serial-recovery",
+                                       ids[i], outp, 1, attempt);
+            matched = pd_batch_receipt(outp, ids[i], rc);
+            if (matched == 1) break;
+        }
+        if (matched && (matched == 1 || pd_keep_going)) {
+            if (sy_write_atomic(done, "SERIAL_DONE\n", 12, 0644)) return -1;
+            if (matched == 2)
+                printf("PRERUN_KEEP_GOING\tbatch=%s\tretries=%d\twindow=%s\traw=serial-recovery-%s\n",
+                       ids[i], tries, part, pd_states[0].status);
+        } else {
+            printf("%s\tbatch=%s\twindow=%s\traw=serial-recovery-incomplete\n",
+                   pd_keep_going ? "PRERUN_INCOMPLETE" : "PRERUN_STOP", ids[i], part);
+            incomplete++;
+            if (!pd_keep_going) break;
+        }
+    }
+    return incomplete != 0;
+}
+
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
     char wpath[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
     if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir) || sy_read_file(wpath, &wb, &wn, 4 << 20))
         return pd_refuse("read-windows-tsv");
+    int timed = tx_prefix((char *)wb, wn, PD_TIMED_HEADER, sizeof PD_TIMED_HEADER - 1);
+    if (timed && atoi((char *)wb + sizeof PD_TIMED_HEADER - 1) > max_jobs) {
+        mm_free(wb);
+        return pd_refuse("timed-plan-exceeds-max-jobs");
+    }
     int64_t pos = 0;
-    int ran = 0, skipped = 0;
+    int ran = 0, skipped = 0, incomplete = 0;
     int retry_counts[PD_MAX_IDS];
     char retry_ids[PD_MAX_IDS][128];
     int nretry = 0;
@@ -719,8 +848,9 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         mm_copy(phase, sizeof phase, cols[2], (size_t)clens[2]); phase[clens[2]] = 0;
         mm_copy(ids, sizeof ids, cols[4], (size_t)clens[4]); ids[clens[4]] = 0;
         int jobs = 1;
-        if (clens[1] > 0 && cols[1][0] >= '1' && cols[1][0] <= '8') jobs = cols[1][0] - '0';
-        if (tx_eqz(phase, "normal") && jobs > 1) jobs = max_jobs;
+        if (clens[1] > 0 && clens[1] <= 2) jobs = atoi(cols[1]);
+        if (jobs < 1 || jobs > 16) { mm_free(wb); return pd_refuse("invalid-window-jobs"); }
+        if (!timed && tx_eqz(phase, "normal") && jobs > 1) jobs = max_jobs;
         else if (jobs > max_jobs) jobs = max_jobs;
         if (cx_fmt(donep, sizeof donep, "%s/done.%s", out_dir, wid) ||
             cx_fmt(outp, sizeof outp, "%s/strict-%s.tsv", out_dir, wid)) { mm_free(wb); return pd_refuse("path-bound"); }
@@ -739,9 +869,13 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/devsvc.cx -- prebuild-self", root);
             }
             char *av[] = {"sh", "-c", cmd, 0};
-            int tr = np_run(av, root, 0, 58, &r, why, sizeof why);
+            long started = sy_now_ms();
+            int tr = np_run(av, root, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
             int rc = tr ? 124 : r.rc;
             np_free(&r);
+            printf("PRERUN_WINDOW\twindow=%s\tphase=%s\tattempt=%d\tjobs=%d\trc=%d\twall_ms=%ld\n",
+                   wid, phase, 1, jobs, rc, sy_now_ms() - started);
+            fflush(stdout);
             if (rc != 0) {
                 if (pd_keep_going) {
                     char dline[128];
@@ -795,36 +929,53 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
         }
 
+        char serialp[PD_PW];
+        if (cx_fmt(serialp, sizeof serialp, "%s/serial.%s", out_dir, wid)) {
+            mm_free(wb); return pd_refuse("serial-path-bound");
+        }
+        int serial = timed && resume && sy_exists(serialp) == 1;
         int attempt = 0;
         for (;;) {
+            if (serial) {
+                int result = pd_recover_serial(root, cand, out_dir, mock_runner, wid,
+                                               win_ids, passed_flags, nwin, max_retries, resume);
+                if (result < 0) { mm_free(wb); return pd_refuse("serial-recovery-receipt-write"); }
+                if (result == 0) {
+                    if (sy_write_atomic(donep, "SERIAL_DONE\n", 12, 0644)) {
+                        mm_free(wb); return pd_refuse("serial-window-receipt-write");
+                    }
+                    ran++;
+                } else {
+                    incomplete++;
+                    if (!pd_keep_going) { mm_free(wb); return 1; }
+                }
+                break;
+            }
             attempt++;
             size_t prev_saved_len = saved_len;
             sy_unlink(outp);
-            char cmd[8192], why[256];
-            np_result r = {0};
             const char *run_ids = rem_ids[0] ? rem_ids : ids;
-            if (mock_runner) {
-                cx_fmt(cmd, sizeof cmd, "sh '%s' window '%s' %d '%s' '%s' %d", mock_runner, wid, jobs, run_ids, outp, attempt);
-            } else {
-                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/dvqualify.cx -- . --candidate '%s' --ids '%s' --out '%s' --jobs %d --segment-batches %d",
-                       root, cand, run_ids, outp, jobs, jobs);
-            }
-            char *av[] = {"sh", "-c", cmd, 0};
-            int tr = np_run(av, root, 0, 58, &r, why, sizeof why);
-            int rc = tr ? 124 : r.rc;
-            np_free(&r);
+            int rc = pd_window_attempt(root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
 
             if (prev_saved_len > 0) {
                 pd_prepend_saved(outp, saved_hdr, saved_rows, prev_saved_len);
             }
             pd_harvest_passed(outp, ids, saved_hdr, sizeof saved_hdr, saved_rows, sizeof saved_rows, &saved_len,
                               passed_flags, win_ids, nwin, rem_ids, sizeof rem_ids);
+            if (timed && rc == 124 && jobs > 1 && rem_ids[0]) {
+                if (sy_write_atomic(serialp, "jobs=1\n", 7, 0644)) {
+                    mm_free(wb); return pd_refuse("serial-recovery-marker-write");
+                }
+                printf("PRERUN_RECOVER\twindow=%s\tfrom_jobs=%d\tto_jobs=1\tremaining=%s\n", wid, jobs, rem_ids);
+                serial = 1;
+                continue;
+            }
 
             unsigned char *ob = 0; int64_t on = 0;
             int has_nonpass = 0;
             char bad_id[128] = {0}, bad_raw[1024] = {0};
+            pd_nstates = 0;
             if (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0) {
-                pd_nstates = 0;
                 pd_ingest_strict_buf((const char *)ob, on);
                 for (int k = 0; k < pd_nstates; k++) {
                     if (!tx_eqz(pd_states[k].status, "PASS")) {
@@ -869,15 +1020,20 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             int cnt = (ridx >= 0) ? retry_counts[ridx] : attempt;
             if (cnt >= max_retries) {
                 if (pd_keep_going) {
-                    if (rc == 124 && rem_ids[0] && !mock_runner) {
+                    if (timed) {
+                        int missing = 0;
+                        for (int i = 0; i < nwin; i++) {
+                            int state = pd_state_find(win_ids[i]);
+                            if (state >= 0 && pd_states[state].seen) continue;
+                            printf("PRERUN_INCOMPLETE\tbatch=%s\twindow=%s\traw=timed-window-missing-evidence rc=%d\n",
+                                   win_ids[i], wid, rc);
+                            missing = 1;
+                        }
+                        if (missing) { incomplete++; break; }
+                    } else if (rc == 124 && rem_ids[0] && !mock_runner) {
                         size_t prev_sl = saved_len;
                         sy_unlink(outp);
-                        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/dvqualify.cx -- . --candidate '%s' --ids '%s' --out '%s' --jobs %d --segment-batches %d",
-                               root, cand, rem_ids, outp, max_jobs, max_jobs);
-                        char *rv2[] = {"sh", "-c", cmd, 0};
-                        np_result r2 = {0};
-                        np_run(rv2, root, 0, 280, &r2, why, sizeof why);
-                        np_free(&r2);
+                        pd_window_attempt(root, cand, 0, wid, phase, rem_ids, outp, max_jobs, attempt + 1);
                         if (prev_sl > 0) pd_prepend_saved(outp, saved_hdr, saved_rows, prev_sl);
                     }
                     char dline[256];
@@ -891,10 +1047,15 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 mm_free(wb);
                 return 1;
             }
-            jobs = 1;
+            if (!timed) jobs = 1;
         }
     }
     mm_free(wb);
+    if (incomplete) {
+        printf("PRERUN_RUN\tstatus=INCOMPLETE\tran=%d\tskipped=%d\tmissing_windows=%d\tout=%s\n",
+               ran, skipped, incomplete, out_dir);
+        return 1;
+    }
     printf("PRERUN_RUN\tstatus=DONE\tran=%d\tskipped=%d\tout=%s\n", ran, skipped, out_dir);
     return 0;
 }
@@ -903,15 +1064,102 @@ static int pd_cmp_str(const char *a, const char *b) {
     return strcmp(a, b);
 }
 
+static int pd_archive_version(const char *ver) {
+    int dots = 0, digits = 0;
+    if (strlen(ver) >= 32) return 0;
+    for (const char *p = ver; *p; p++) {
+        if (*p >= '0' && *p <= '9') digits++;
+        else if (*p == '.' && digits) { dots++; digits = 0; }
+        else return 0;
+    }
+    return dots == 2 && digits > 0;
+}
+
+static int pd_cmd_archive(const char *in, const char *repo, const char *ver) {
+    char dir[PD_PW], src[PD_PW], dest[2][PD_PW];
+    const char *names[] = {"windows.tsv", "supervise.log"};
+    unsigned char *bytes[2] = {0};
+    int64_t size[2] = {0};
+    const char *error = 0;
+    int redacted = 0;
+    if (!pd_archive_version(ver)) return pd_refuse("archive-invalid-version");
+    if (cx_fmt(dir, sizeof dir, "%s/release/evidence/%s", repo, ver))
+        return pd_refuse("archive-path-bound");
+    for (int i = 0; i < 2; i++) {
+        if (cx_fmt(src, sizeof src, "%s/%s", in, names[i]) ||
+            cx_fmt(dest[i], sizeof dest[i], "%s/prerun-%s", dir, names[i])) {
+            error = "archive-path-bound";
+            break;
+        }
+        if (sy_read_file(src, &bytes[i], &size[i], 16 << 20) || size[i] <= 0) {
+            error = i ? "archive-read-supervise-log" : "archive-read-windows";
+            break;
+        }
+    }
+    if (!error) {
+        /* Keep the window table verbatim. Replace this account's home prefix in the log. */
+        char *log = (char *)bytes[1];
+        const char *home = sy_env("HOME");
+        long nh = home && home[0] == '/' ? (long)strlen(home) : 0;
+        long read = 0, write = 0;
+        while (read < size[1]) {
+            if (nh > 1 && read + nh < size[1] && log[read + nh] == '/' &&
+                !memcmp(log + read, home, (size_t)nh)) {
+                log[write++] = '~';
+                read += nh;
+                redacted++;
+            } else log[write++] = log[read++];
+        }
+        size[1] = write;
+        if (tx_find(log, write, "/" "home/", 6) >= 0 ||
+            tx_find((const char *)bytes[0], size[0], "/" "home/", 6) >= 0)
+            error = "archive-unresolved-home-path";
+    }
+    if (!error) {
+        if (sy_mkdir_all(dir, 0755)) error = "archive-create-directory";
+        sy_stat_t st;
+        for (int i = 0; !error && i < 2; i++) {
+            int rc = sy_lstat(dest[i], &st);
+            if (rc == 0) error = "archive-destination-exists";
+            else if (rc != -ENOENT) error = "archive-destination-stat";
+        }
+    }
+    if (!error) {
+        char staging[PD_PW], paths[2][PD_PW];
+        int installed = 0;
+        if (sy_mkdtemp(dir, ".prerun-archive-", staging, sizeof staging)) error = "archive-stage-directory";
+        else {
+            for (int i = 0; !error && i < 2; i++) {
+                if (cx_fmt(paths[i], sizeof paths[i], "%s/%s", staging, names[i]) ||
+                    sy_write_atomic(paths[i], bytes[i], size[i], 0644)) error = "archive-stage-write";
+            }
+            for (int i = 0; !error && i < 2; i++) {
+                int rc = sy_link(paths[i], dest[i]);
+                if (rc) error = rc == -EEXIST ? "archive-destination-exists" : "archive-install";
+                else installed++;
+            }
+            if (error && installed && sy_unlink(dest[0])) error = "archive-rollback-failed";
+            if (sy_remove_all(staging) && !error) error = "archive-stage-cleanup";
+        }
+    }
+    mm_free(bytes[0]);
+    mm_free(bytes[1]);
+    if (error) return pd_refuse(error);
+    printf("PRERUN_ARCHIVE\tversion=%s\twindows_bytes=%lld\tlog_bytes=%lld\thome_paths_redacted=%d\n",
+        ver, (long long)size[0], (long long)size[1], redacted);
+    return 0;
+}
+
 static int pd_cmd_merge(const char *in_dir, const char *out_dir, const char *ver) {
     sy_dir_t d;
     static char files[PD_MAX_FILES][256];
     int nf = 0;
     if (sy_dir_open(&d, in_dir) != 0) return pd_refuse("open-in-dir");
-    while (sy_dir_next(&d) == 1 && nf < PD_MAX_FILES) {
+    while (sy_dir_next(&d) == 1) {
         if (pd_starts(d.name, "strict-") && d.name_n > 11 &&
             memcmp(d.name + d.name_n - 4, ".tsv", 4) == 0 &&
             !tx_eqz(d.name, "strict-final.tsv")) {
+            if (nf == PD_MAX_FILES) { sy_dir_close(&d); return pd_refuse("too-many-strict-window-files"); }
             cx_fmt(files[nf], sizeof files[nf], "%s", d.name);
             nf++;
         }
@@ -1137,7 +1385,7 @@ static int pd_cmd_g1_dry(const char *root, const char *cand_tsv, const char *str
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) return pd_refuse("usage: plan|run|merge|replay");
+    if (argc < 2) return pd_refuse("usage: plan|run|merge|archive|replay");
     const char *sub = argv[1];
     if (tx_eqz(sub, "plan")) {
         const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0;
@@ -1176,6 +1424,7 @@ int main(int argc, char **argv) {
             else return pd_refuse("unknown-run-arg");
         }
         if (!out_d || (!cand && !mock_r)) return pd_refuse("run-requires-out-and-candidate");
+        if (max_ret < 1 || max_ret > 3) return pd_refuse("invalid-max-retries");
         return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, mock_r);
     }
     if (tx_eqz(sub, "merge")) {
@@ -1188,6 +1437,17 @@ int main(int argc, char **argv) {
         }
         if (!in_d || !out_d) return pd_refuse("merge-requires-in-dir-and-out");
         return pd_cmd_merge(in_d, out_d, ver);
+    }
+    if (tx_eqz(sub, "archive")) {
+        const char *in = 0, *repo = ".", *ver = 0;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--in-dir") && i + 1 < argc) in = argv[++i];
+            else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+            else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+            else return pd_refuse("unknown-archive-arg");
+        }
+        if (!in || !ver) return pd_refuse("archive-requires-in-dir-and-version");
+        return pd_cmd_archive(in, repo, ver);
     }
     if (tx_eqz(sub, "g1-dry")) {
         const char *root = ".", *cand_t = 0, *strict_f = 0, *ef_f = 0, *eu_f = 0, *out_d = 0, *ver = "0.0.84";

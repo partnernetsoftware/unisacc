@@ -8,6 +8,8 @@
  *   sh ./unisacc.com tools/release-chain.cx -- check-ef-counts --expected-fail FILE [--batches FILE] [--strict FILE]
  *
  * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
+ *   P0/P1/P2 plan-only: after chain DONE, plan the timed prerun, start the bounded
+ *                  run in the version worktree, then archive its closed log.
  *   0a pack        release-run --pack ... into STATE/pack (skipped when inputs already sets pack=)
  *   0b warm        release-exec --warm <pack>/candidate.tsv --layout L --out STATE/warm (skipped when inputs sets warm=)
  *   1 prep         release-flow prep --inputs RESOLVED --out STATE/prep [--decisions D]
@@ -70,6 +72,33 @@ static void show(int n, char **v) {
     sy_printf("CHAIN\tCMD\t%d\t%s\t", n, names[n]);
     for (int i = 0; v[i]; i++) sy_printf("%s%s", i ? " " : "", v[i]);
     sy_printf("\n");
+}
+static void show_prerun_version(void) {
+    sy_printf("'");
+    for (const char *p = version; *p; p++) {
+        if (*p == '\'') sy_printf("'\\''");
+        else sy_printf("%c", *p);
+    }
+    sy_printf("'\n");
+}
+static void show_prerun(void) {
+    sy_printf("CHAIN\tINPUT\tprerun\tfrom the version worktree after chain DONE, set absolute PRERUN_APE, PRERUN_IDS, PRERUN_TIMES, PRERUN_PRIORITY and persistent PRERUN_DIR\n");
+    sy_printf("CHAIN\tCMD\tP0\tprerun-plan\tsh ./unisacc.com tools/prerun-drive.cx -- plan "
+              "--ids-file \"${PRERUN_IDS:?}\" --times-file \"${PRERUN_TIMES:?}\" "
+              "--priority-file \"${PRERUN_PRIORITY:?}\" --out \"${PRERUN_DIR:?}\" --normal-jobs 4\n");
+    sy_printf("CHAIN\tCMD\tP1\tprerun-start\tnohup timeout -k 10s 3600s sh -c '"
+              "for attempt in 1 2; do "
+              "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate \"$1\" --out \"$2\" "
+              "--resume --max-jobs 4 --keep-going && exit 0; "
+              "done; exit 1' sh \"${PRERUN_APE:?}\" \"${PRERUN_DIR:?}\" "
+              ">> \"${PRERUN_DIR:?}/supervise.log\" 2>&1 &\n");
+    sy_printf("CHAIN\tINPUT\tprerun-merge\twhen P1 has finished with PRERUN_RUN status=DONE\n");
+    sy_printf("CHAIN\tCMD\tP2\tprerun-merge\tsh ./unisacc.com tools/prerun-drive.cx -- merge "
+              "--in-dir \"${PRERUN_DIR:?}\" --out \"${PRERUN_DIR:?}\" --version ");
+    show_prerun_version();
+    sy_printf("CHAIN\tCMD\tP3\tprerun-archive\tsh ./unisacc.com tools/prerun-drive.cx -- archive "
+              "--in-dir \"${PRERUN_DIR:?}\" --repo . --version ");
+    show_prerun_version();
 }
 static void next_line(int n, const char *what) {
     sy_printf("NEXT\t%d\t%s; then: release-chain run --inputs %s --state %s --layout %s%s%s%s --from %d\n",
@@ -580,7 +609,7 @@ static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
         sy_printf("CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n");
     } else if (planning) {
         sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, cand_path, layout, warm_dst);
-    } else if (*pack_dir_out && from <= 1) {
+    } else if (*pack_dir_out) {
         if (sy_exists(m0b) == 1) {
             size_t mn = 0; char *mb = cx_read(m0b, &mn);
             if (mb && mn > 0) {
@@ -590,7 +619,7 @@ static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
             }
             free(mb);
             sy_printf("CHAIN\tSKIP\t0b\twarm\tdone\n");
-        } else {
+        } else if (from <= 1) {
             char *wcand = cat2(*pack_dir_out, "candidate.tsv");
             char *wv[] = {"sh", driver, "tools/release-exec.cx", "--", "--warm", wcand, "--layout", (char *)layout, "--out", warm_dst, 0};
             sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, wcand, layout, warm_dst);
@@ -671,6 +700,7 @@ int main(int argc, char **argv) {
     char *prep = cat2(state, "prep"), *stage = cat2(state, "stage"), strict[300];
     if (cx_fmt(strict, sizeof strict, "release/evidence/v%s-strict-%s.tsv", version, date)) usage("strict path");
     check_preconditions();
+    if (planning) show_prerun();
     if (planning)
         sy_printf("CHAIN\tPRECHECK\tef-counts\tsh %s tools/release-chain.cx -- check-ef-counts --expected-fail release/evidence/%s/expected-fail.tsv --strict %s\n", driver, version, strict);
     char *pk_dir = 0, *wm_file = 0;
