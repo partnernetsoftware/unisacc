@@ -35,7 +35,7 @@
 #define PCG_RUN "pcg_run(){ tool=$1; shift; if [ -n \"${DEVSVC_SELF_BIN:-}\" ] && [ -x \"$DEVSVC_SELF_BIN\" ]; then \"$DEVSVC_SELF_BIN\" run --local --quiet \"$tool\" -- \"$@\"; else sh ./unisacc.com \"$tool\" -- \"$@\"; fi; }; "
 
 static int failed;
-static char root[2048], fx[2400], lockd[2500], ready[2500];
+static char root[2048], fx[2400], lockd[2500], ready[2500], out[16384];
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-precommit-gates.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-precommit-gates.%s\n", name); } }
 static void unlock(void) { char p[2600]; if (!lockd[0]) return; if (!cx_fmt(p, sizeof p, "%s/pid", lockd)) sy_unlink(p); sy_rmdir(lockd); }
 static void die(const char *s) { sy_eprintf("check-precommit-gates: REFUSE %s\n", s); unlock(); exit(2); }
@@ -47,7 +47,7 @@ static int sh(const char *script, char *out, int cap, int infx) {
     if (cx_fmt(full, sizeof full, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE; %s%s%s { %s\n} 2>&1", infx ? "cd " : "", infx ? fx : "", infx ? " &&" : "", script)) die("script too long");
     av[2] = full;
     rc = cx_runv_timeout(av, 50, &o, &on);
-    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); out[m] = 0; }
+    if (cap > 0) { size_t m = o ? on : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) tx_copy(out, cap, o, (long)m); else cx_fmt(out, (size_t)cap, "%s", o ? o : ""); out[m] = 0; }
     if (o) mm_free(o);
     return rc;
 }
@@ -88,8 +88,25 @@ static void consume_ready(void) {
     if(bad)die("fixture material identity");
 }
 
+static void ensure_self_bin(void) {
+    const char *cur = sy_env("DEVSVC_SELF_BIN");
+    char out[1024], key[21], cmd[1024];
+    if (cur && cur[0] == '/' && sy_exists(cur) == 1) return;
+    if (sh("sh ./unisacc.com tools/devsvc.cx -- prebuild-self", out, sizeof out, 0) ||
+        strncmp(out, "PREPARED\tkey=", 13) ||
+        cx_fmt(key, sizeof key, "%.20s", out + 13) ||
+        strspn(key, "0123456789abcdef") != 20) return;
+    if (cx_fmt(cmd, sizeof cmd,
+        "if [ -n \"${DV_PIN_DIR:-}\" ] && [ -x \"$DV_PIN_DIR/%s/devsvc\" ]; then printf '%%s' \"$DV_PIN_DIR/%s/devsvc\"; "
+        "else for p in \"$HOME/.cache/unisacc/devsvc/pinned/repos\"/*/%s/devsvc; do [ -x \"$p\" ] && { printf '%%s' \"$p\"; break; }; done; fi",
+        key, key, key)) return;
+    if (!sh(cmd, out, sizeof out, 0) && out[0] == '/' && sy_exists(out) == 1)
+        (void)sy_setenv("DEVSVC_SELF_BIN", out, 1);
+}
+
 static void setup(const char *group, int prepared) {
     static char c[8000], out[4096]; const char *home = sy_env("HOME");
+    ensure_self_bin();
     if (sy_cwd(root, sizeof root) || !home || !home[0]) die("cwd or HOME");
     if (cx_fmt(fx, sizeof fx, "%s/.cache/unisacc/check-precommit-gates/fx-%s", home, group) ||
         cx_fmt(lockd, sizeof lockd, "%s.lock", fx) || cx_fmt(ready,sizeof ready,"%s.ready",fx)) die("path");
@@ -159,33 +176,42 @@ static void group_reuse(int part) {
     static char out[16384];
     const char *stage=PCG_MK "mk zzg1 && git add tests/manifests/zzg1.tsv";
     if(sh(stage,out,sizeof out,1)) { sy_eprintf("%s\n",out); die("reuse fixture manifest"); }
-    if(part!=2) {
-    sh(PCG_RUN "TR=$(git write-tree); H=$(git hash-object -- tools/reg-manifest.cx); A='sh ./unisacc.com tools/reg-manifest.cx -- --check --index';"
-       " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' \"$TR\" \"$H\" \"$A\" > reuse-ok.txt;"
-       " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' 0000000000000000000000000000000000000000 \"$H\" \"$A\" > reuse-bad.txt;"
-       " ( pcg_run tools/precommit.cx > dn.out 2>&1; echo $? > dn.rc ) & ( pcg_run tools/precommit-base.cx > db.out 2>&1; echo $? > db.rc ) &"
-       " ( UNISACC_GATE_REUSE=$PWD/reuse-ok.txt pcg_run tools/precommit.cx > e.out 2>&1; echo $? > e.rc ) &"
-       " ( UNISACC_GATE_REUSE=$PWD/reuse-bad.txt pcg_run tools/precommit.cx > f.out 2>&1; echo $? > f.rc ) & wait;"
-       " for x in dn db e f; do grep BLOCKED $x.out | sort > $x.blk; done;"
-       " echo DRC=$(cat dn.rc)/$(cat db.rc); echo ERC=$(cat e.rc); echo FRC=$(cat f.rc); cmp -s dn.blk db.blk && echo D_SAME; cmp -s f.blk dn.blk && echo F_SAME;"
-       " echo DREAL=$(grep -c 'registration manifest.*zzg1' dn.blk); echo EREAL=$(grep -c 'registration manifest.*zzg1' e.blk); echo EFAKE=$(grep -c 'registration manifest MISSING" T "zzfake' e.blk);"
-       " echo FFAKE=$(grep -c zzfake f.out); echo EMSG=$(grep -c 'gate manifest reused' e.out); echo FMSG=$(grep -c 'gate manifest reuse: key mismatch, rerun' f.out);"
+    if(part==0 || part==1) {
+    sh(PCG_RUN
+       " ( pcg_run tools/precommit.cx > dn.out 2>&1; echo $? > dn.rc ) & ( pcg_run tools/precommit-base.cx > db.out 2>&1; echo $? > db.rc ) & wait;"
+       " for x in dn db; do grep BLOCKED $x.out | sort > $x.blk; done;"
+       " echo DRC=$(cat dn.rc)/$(cat db.rc); cmp -s dn.blk db.blk && echo D_SAME;"
+       " echo DREAL=$(grep -c 'registration manifest.*zzg1' dn.blk);"
        " echo \"DL=$(grep '^PRECOMMIT" T "' dn.out)\"; echo \"BL=$(grep '^PRECOMMIT" T "' db.out)\"; grep '^PRECOMMIT_GATES' dn.out", out, sizeof out, 1);
     ck(has(out, "DRC=1/1\n") && has(out, "D_SAME\n") && !has(out, "DREAL=0\n") && has(out, "DREAL=") && has(out, "PRECOMMIT_GATES\tnot_affected=4\tna=cx,runlist,facts,ledger\tsource=table\n"), "reuse.manifest-verdict-as-base");
     {   const char *a = tx_find(out, tx_len(out, sizeof out), "DL=", 3) >= 0 ? out + tx_find(out, tx_len(out, sizeof out), "DL=", 3) + 3 : "", *b = tx_find(out, tx_len(out, sizeof out), "BL=", 3) >= 0 ? out + tx_find(out, tx_len(out, sizeof out), "BL=", 3) + 3 : "x";
         long al = tx_chr(a, tx_len(a, 400), '\n'), bl = tx_chr(b, tx_len(b, 400), '\n');
         ck(al > 10 && al == bl && tx_same(a, al, b, bl), "reuse.manifest-line-as-base"); }
+    if (failed) sy_printf("%s\n", out);
+    }
+    if(part==1)return;
+    if(part==0 || part==3) {
+    sh(PCG_RUN "TR=$(git write-tree); H=$(git hash-object -- tools/reg-manifest.cx); A='sh ./unisacc.com tools/reg-manifest.cx -- --check --index';"
+       " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' \"$TR\" \"$H\" \"$A\" > reuse-ok.txt;"
+       " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' 0000000000000000000000000000000000000000 \"$H\" \"$A\" > reuse-bad.txt;"
+       " ( pcg_run tools/precommit.cx > dn.out 2>&1; echo $? > dn.rc ) &"
+       " ( UNISACC_GATE_REUSE=$PWD/reuse-ok.txt pcg_run tools/precommit.cx > e.out 2>&1; echo $? > e.rc ) &"
+       " ( UNISACC_GATE_REUSE=$PWD/reuse-bad.txt pcg_run tools/precommit.cx > f.out 2>&1; echo $? > f.rc ) & wait;"
+       " for x in dn e f; do grep BLOCKED $x.out | sort > $x.blk; done;"
+       " echo ERC=$(cat e.rc); echo FRC=$(cat f.rc); cmp -s f.blk dn.blk && echo F_SAME;"
+       " echo EREAL=$(grep -c 'registration manifest.*zzg1' e.blk); echo EFAKE=$(grep -c 'registration manifest MISSING" T "zzfake' e.blk);"
+       " echo FFAKE=$(grep -c zzfake f.out); echo EMSG=$(grep -c 'gate manifest reused' e.out); echo FMSG=$(grep -c 'gate manifest reuse: key mismatch, rerun' f.out)", out, sizeof out, 1);
     ck(has(out, "ERC=1\n") && has(out, "EMSG=1\n") && has(out, "EFAKE=1\n") && has(out, "EREAL=0\n"), "reuse.matching-key-judges-record-without-rerun");
     ck(has(out, "FRC=1\n") && has(out, "FMSG=1\n") && has(out, "FFAKE=0\n") && has(out, "F_SAME\n"), "reuse.other-tree-reruns");
     if (failed) sy_printf("%s\n", out);
     }
-    if(part==1)return;
+    if(part==3)return;
     /* end to end: commit-own --registered runs reg-manifest once, the hook's precommit reuses it */
     /* since 8b61e66fe1 commit-own runs the hook with a private gate root as cwd and removes that root afterwards,
        so the hook's stderr goes to an absolute path in the fixture, not to a cwd-relative hook.err; and the hook's
        gates see only the private index, so the batch's check source is committed with its set (--whole), as a real
        registration must (the runlist gate refuses metadata-schema missing-implemented-source otherwise) */
-    sh(PCG_RUN "git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
+    sh(PCG_RUN "git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nif [ -n \"${DEVSVC_SELF_BIN:-}\" ] && [ -x \"$DEVSVC_SELF_BIN\" ]; then exec \"$DEVSVC_SELF_BIN\" run --local --quiet tools/precommit.cx 2>>%s/hook.err; fi\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
        " extra=$(cat fixture-zzg1.out) && "
        " pcg_run tools/commit-own.cx -m zzg1 --registered zzg1 $extra --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
        " echo HREUSED=$(grep -c 'gate manifest reused' hook.err); echo SUBJ=$(git log -1 --format=%s); ls \"${TMPDIR:-/tmp}\"/commit-own-*.gate 2>/dev/null | wc -l | tr '\\n' ' '; echo leftover", out, sizeof out, 1);
@@ -204,17 +230,17 @@ static void group_reuse(int part) {
  * their steps see the same index as in the whole run. */
 static void group_toolsreg(int part) {
     static char out[16384], sa[2000], sr[1000], sb[2000];
-    const char *pc = "sh ./unisacc.com tools/precommit.cx > p.out 2>&1; echo";
+    const char *pc = "pcg_run tools/precommit.cx > p.out 2>&1; echo";
     const char *preb = "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2; printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv;"
                        " git add tools/zzt.cx tests/tools-compile-sources.tsv;";
-    char c[4000];
+    char c[4600];
     if (cx_fmt(sa, sizeof sa,
        "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2;"
        " git add tools/zzt.cx; %s ARC=$?; echo AMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);"
        " echo AHINT=$(grep -c 'tools/register.cx -- --tool tools/NAME.cx' p.out);"
-       " cp tools/zzt.cx zzt.keep; sh ./unisacc.com tests/tools-compile.cx -- --register . \"$PWD/tools/zzt.cx\" > tc.out 2>&1; echo TRC=$?;"
+       " cp tools/zzt.cx zzt.keep; pcg_run tests/tools-compile.cx --register . \"$PWD/tools/zzt.cx\" > tc.out 2>&1; echo TRC=$?;"
        " echo TMSG=$(grep -c 'REFUSE --register would overwrite existing.*tools/register.cx -- --tool' tc.out); cmp -s tools/zzt.cx zzt.keep && echo TKEEP=1;"
-       " sh ./unisacc.com tests/tools-compile.cx -- --register . \"$PWD/tools/zzt.cx\" --force > tc.out 2>&1; echo FRC=$?; cmp -s tools/zzt.cx zzt.keep && echo FKEEP=1; rm -f zzt.keep tc.out;",
+       " pcg_run tests/tools-compile.cx --register . \"$PWD/tools/zzt.cx\" --force > tc.out 2>&1; echo FRC=$?; cmp -s tools/zzt.cx zzt.keep && echo FKEEP=1; rm -f zzt.keep tc.out;",
        pc)) die("script");
     if (cx_fmt(sr, sizeof sr,
        " git add tests/tools-compile-sources.tsv; %s BRC=$?; echo BMSG=$(grep -c 'BLOCKED tools' p.out); grep '^PRECOMMIT_GATES' p.out | sed 's/^/B_/';",
@@ -223,7 +249,17 @@ static void group_toolsreg(int part) {
        " git commit -qm zzt --no-verify; git rm -q tools/zzt.cx; %s CRC=$?; echo CMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE removed" T "tools/zzt.cx' p.out);"
        " grep -v '^tools/zzt.cx' tests/tools-compile-sources.tsv > tcs.tmp; mv tcs.tmp tests/tools-compile-sources.tsv; git add tests/tools-compile-sources.tsv; %s DRC=$?; echo DMSG=$(grep -c 'BLOCKED tools' p.out)",
        pc, pc)) die("script");
-    if (cx_fmt(c, sizeof c, "%s%s%s", part >= 2 ? preb : sa, part == 0 || part == 2 ? sr : "", part == 0 || part == 3 ? sb : "")) die("script");
+    if (part == 4) {
+        if (cx_fmt(c, sizeof c, PCG_RUN
+            "printf 'int main(void) { return 0; }\\n' > tools/zzt.cx; rm -f r1 r2; git add tools/zzt.cx;"
+            " printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);",
+            pc)) die("script");
+        sh(c, out, sizeof out, 1);
+        ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
+        if (failed) sy_printf("%s\n", out);
+        return;
+    }
+    if (cx_fmt(c, sizeof c, PCG_RUN "%s%s%s", part >= 2 ? preb : sa, part == 0 || part == 2 ? sr : "", part == 0 || part == 3 ? sb : "")) die("script");
     sh(c, out, sizeof out, 1);
     if (part == 0 || part == 1) {
         ck(has(out, "ARC=1\n") && has(out, "AMSG=1\n"), "toolsreg.added-unregistered-refused-by-name");
@@ -231,7 +267,7 @@ static void group_toolsreg(int part) {
         ck(has(out, "TRC=2\n") && has(out, "TMSG=1\n") && has(out, "TKEEP=1\n"), "toolsreg.tools-compile-register-refuses-existing-source");
         ck(has(out, "FRC=2\n") && has(out, "FKEEP=1\n"), "toolsreg.tools-compile-register-force-refuses-non-registry");
         if (failed) sy_printf("%s\n", out);
-        if (part == 1) {
+        if (part == 0) {
             if (cx_fmt(c, sizeof c, "printf 'tools/zzt.cx" T "regular\\n' >> tests/tools-compile-sources.tsv; %s URC=$?; echo UMSG=$(grep -c 'BLOCKED tools-compile registry REFUSE added" T "tools/zzt.cx' p.out);", pc)) die("script");
             sh(c, out, sizeof out, 1);
             ck(has(out, "URC=1\n") && has(out, "UMSG=1\n"), "toolsreg.unstaged-registry-row-judged-by-index");
@@ -556,15 +592,16 @@ int main(int argc, char **argv) {
         sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
         return failed ? 1 : 0;
     }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|reuse-verdict|reuse-commit|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|pc | --bench before|after\n"); return 2; }
+    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-key") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-a2") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|reuse-verdict|reuse-key|reuse-commit|toolsreg|toolsreg-a|toolsreg-a2|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|pc | --bench before|after\n"); return 2; }
     setup(group,prepared);
     if (tx_eqz(group, "na")) group_na();
     else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);
     else if (tx_eqz(group, "toolsreg-a")) group_toolsreg(1);
+    else if (tx_eqz(group, "toolsreg-a2")) group_toolsreg(4);
     else if (tx_eqz(group, "toolsreg-b")) group_toolsreg(2);
     else if (tx_eqz(group, "toolsreg-c")) group_toolsreg(3);
     else if (tx_eqz(group, "toolsreg-d")) group_toolsreg_d();
-    else group_reuse(tx_eqz(group,"reuse-verdict")?1:tx_eqz(group,"reuse-commit")?2:0);
+    else group_reuse(tx_eqz(group,"reuse-verdict")?1:tx_eqz(group,"reuse-commit")?2:tx_eqz(group,"reuse-key")?3:0);
     unlock();
     sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;
