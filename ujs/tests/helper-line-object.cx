@@ -24,7 +24,9 @@ static int source_section(const char *source,const char *start,const char *stop,
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int boxes=(argc==2 || argc==3) && tx_eqz(argv[1],"--boxes");
+    if(boxes && argc==3) mutate=tx_eqz(argv[2],"--mutate");
+    if((argc==3 && (!boxes || !mutate)) || (argc==2 && !boxes && !mutate) || argc>3) return 2;
     char dir[256],cwd[390],abi[300],wasm[300],event[300],attribute[300],grid[300],geo[300],object[300],math[300],url[850];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-helper-line-object-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
@@ -35,23 +37,38 @@ int main(int argc,char **argv) {
     tx_snprintf(geo,sizeof geo,"%s/geometry-attributes.ujs",dir);
     tx_snprintf(object,sizeof object,"%s/object-arena.ujs",dir);
     tx_snprintf(math,sizeof math,"%s/trig.ujs",dir);
-    int length=tx_snprintf(url,sizeof url,"file://%s/" TEST "helper-line-object-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    int length=tx_snprintf(url,sizeof url,"file://%s/" TEST "helper-line-object-r160.html?wasm=%s&mutate=%d%s",
+        cwd,wasm,mutate,boxes?"&boxes=1":"");
     const char entry[]="export uxe_helper_line_object(mode:i64,kind:i64,mutate:i64) i64 version 1;\n";
-    char *compile[]={"./ujs/ujs2wasm.com",abi,event,BASE "geometry-load-layout.ujs",
-        math,BASE "datautils.ujs",attribute,geo,
-        BASE "helper-buffers.ujs",BASE "gridhelper.ujs",BASE "polargridhelper.ujs",BASE "axeshelper.ujs",
-        BASE "object-json-tokens.ujs",BASE "json-read.ujs",BASE "loader-json.ujs",BASE "json-bytes.ujs",BASE "geometry-json.ujs",grid,
+    char *grid_compile[]={"./ujs/ujs2wasm.com",abi,event,BASE "geometry-load-layout.ujs",
+        grid,BASE "datautils.ujs",attribute,geo,BASE "helper-buffers.ujs",BASE "gridhelper.ujs",
+        BASE "polargridhelper.ujs",BASE "axeshelper.ujs",BASE "object-json-tokens.ujs",
+        BASE "json-read.ujs",BASE "loader-json.ujs",BASE "json-bytes.ujs",BASE "geometry-json.ujs",object,
         BASE "eventdispatcher.ujs",BASE "record-copy.ujs",BASE "material-class.ujs",
         BASE "material-field-json.ujs",BASE "material-field-read.ujs",BASE "material-fields-generated.ujs",
-        BASE "material-set-values.ujs",BASE "helper-axes-object.ujs",BASE "object3d-layout.ujs",object,
-        BASE "helper-line-object.ujs",TEST "helper-line-object-probe.ujs","-o",wasm,0};
+        BASE "material-set-values.ujs",BASE "helper-axes-object.ujs",BASE "object3d-layout.ujs",math,
+        BASE "helper-line-object.ujs",TEST "helper-line-object-probe.ujs",
+        TEST "helper-line-object-probe-common.ujs","-o",wasm,0};
+    char *box_compile[]={"./ujs/ujs2wasm.com",abi,event,BASE "geometry-load-layout.ujs",
+        BASE "box3helper.ujs",BASE "datautils.ujs",attribute,geo,BASE "helper-buffers.ujs",BASE "boxhelper.ujs",
+        BASE "axeshelper.ujs",BASE "object-json-tokens.ujs",BASE "json-read.ujs",BASE "loader-json.ujs",
+        BASE "json-bytes.ujs",BASE "geometry-json.ujs",TEST "helper-box-object-geometry.ujs",
+        BASE "eventdispatcher.ujs",BASE "record-copy.ujs",BASE "material-class.ujs",
+        BASE "material-field-json.ujs",BASE "material-field-read.ujs",BASE "material-fields-generated.ujs",
+        BASE "material-set-values.ujs",object,BASE "object3d-layout.ujs",math,
+        BASE "helper-line-object.ujs",TEST "helper-line-object-probe-common.ujs","-o",wasm,0};
     const double gold[]={
         1,1,1,1,1,1,1,1,-2147483647.0,3,-1,1,12,0,0,1,-1,-1,-1,1,1,
         1,1,1,1,1,1,1,1,-2147483646.0,4,-2,0,16,0,0,1,-1,-1,-1,1,1,
         1,1,1,1,1,1,1,1,-2147483645.0,5,-3,1,6,0,0,1,-1,-1,-1,1,1,
     };
-    enum { count=sizeof gold/sizeof gold[0] };
-    double actual[count]={0};
+    const double boxes_gold[]={
+        1,1,1,1,1,1,1,1,-2147483644.0,6,-4,0,8,0,0,1,-1,-1,-1,1,1,
+        1,1,1,1,1,1,1,1,-2147483643.0,7,-5,1,8,0,0,1,-1,-1,-1,1,1,
+    };
+    int count=boxes?42:63;
+    const double *expected=boxes?boxes_gold:gold;
+    double actual[63]={0};
     char *log=0;
     size_t size=0;
     // The extracted functions and layout are direct prefixes of their production sources.
@@ -59,11 +76,17 @@ int main(int argc,char **argv) {
         source_section(BASE "object-layouts.ujs","struct EventDispatcher {","\n}\n",event) ||
         source_section(BASE "bufferattribute.ujs",0,"native function BufferAttribute_index(",attribute) ||
         source_section(BASE "buffergeometry.ujs",0,"native function BufferGeometry_addGroup(",geo) ||
-        source_section(BASE "helper-family-grid-json.ujs",0,"native function helper_grid_geometry_data(",grid) ||
-        source_section(BASE "object3d.ujs",0,"native function Object3D_unlink(",object) ||
-        source_section(BASE "f64-math.ujs",0,"function ux_math_tan(",math);
+        source_section(BASE "object3d.ujs",0,"native function Object3D_unlink(",math);
+    if(!failed && boxes) {
+        failed=source_section(BASE "helper-axes-object.ujs",0,"native function AxesHelperObject_geometryToJSON(",object);
+    } else if(!failed) {
+        failed=source_section(BASE "helper-family-grid-json.ujs",0,"native function helper_grid_geometry_data(",object) ||
+            source_section(BASE "f64-math.ujs",0,"function ux_math_tan(",grid);
+    }
     if(!failed) {
-        int rc=cx_runv_timeout(compile,25,&log,&size);
+        char **selected=grid_compile;
+        if(boxes) selected=box_compile;
+        int rc=cx_runv_timeout(selected,25,&log,&size);
         if(rc) { printf("G_STRUCT Helper Line root compile_rc=%d %s\n",rc,log?log:""); failed=1; }
         mm_free(log);
         log=0;
@@ -71,9 +94,9 @@ int main(int argc,char **argv) {
     if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
     if(!failed) for(int i=0;i<count;i++) {
         int field=i%CASES;
-        int match=field==13 || field==14 ? g_math_near(actual[i],gold[i],1e-6) : actual[i]==gold[i];
+        int match=field==13 || field==14 ? g_math_near(actual[i],expected[i],1e-6) : actual[i]==expected[i];
         if(!match) {
-            printf("G_STRUCT Helper Line root kind=%d case=%d actual=%.17g gold=%.17g\n",i/CASES+1,field,actual[i],gold[i]);
+            printf("G_STRUCT Helper Line root kind=%d case=%d actual=%.17g gold=%.17g\n",i/CASES+(boxes?4:1),field,actual[i],expected[i]);
             failed++;
         }
     }
