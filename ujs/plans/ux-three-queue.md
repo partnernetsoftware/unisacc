@@ -286,7 +286,8 @@
 - SpotLightHelper | G-struct 锥角和目标位置 | M6 聚光。
 - AudioContext | G-io 采样率、实例与关闭 | host PCM ABI。
 - AudioListener | G-io 监听姿态和主音量 | AudioContext、场景图。
-- Audio | G-io PCM 缓冲、播放、循环、音量及停播 | AudioContext、AudioLoader。
+- ~~Audio 缓冲播放 | G-io 双声道 PCM、同采样率循环、稳态增益与停止 | AudioLoader。~~ Chrome 离线音频与独立金值 11 项通过，取消循环转红。
+- Audio 主机接线 | G-io 上下文输出、增益自动化、暂停与重采样 | AudioContext、缓冲播放。
 - PositionalAudio | G-io 双路声源、距离模型与定位 | Audio、AudioListener。
 - AudioAnalyser | G-io 脉冲窗、频带和停止后的读回 | Audio。
 - 音频跨场景生命周期 | G-io 混音、解绑、切换和释放 | Audio、PositionalAudio、AudioAnalyser。

@@ -1,0 +1,106 @@
+struct AudioBufferPlayback {
+  resource: u32;
+  frame: u32;
+  playing: u32;
+  loop: u32;
+  loopStart: u32;
+  loopEnd: u32;
+  gain: f64;
+}
+
+native function audio_play_span(at:i64,bytes:i64,alignment:i64) i64 {
+  return at>=0 && at%alignment==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function audio_play_overlap(at:i64,bytes:i64,other:i64,size:i64) i64 {
+  return bytes>0 && size>0 && at<other+size && other<at+bytes;
+}
+
+native function audio_play_resource(resource:i64) i64 {
+  if(!audio_play_span(resource,AudioResource.size,4)) { return 0-1; }
+  let frames=ux_u32(resource+AudioResource.frames);
+  let channels=ux_u32(resource+AudioResource.channels);
+  let pcm=ux_u32(resource+AudioResource.pcm);
+  let rate=ux_u32(resource+AudioResource.sampleRate);
+  if((channels!=1 && channels!=2) || frames<1 || rate<8000 || rate>192000 ||
+     !audio_play_span(pcm,frames*channels*4,4) || audio_play_overlap(resource,AudioResource.size,pcm,frames*channels*4)) { return 0-1; }
+  return frames;
+}
+
+native function Audio_setBuffer(state:i64,resource:i64) i64 {
+  let frames=audio_play_resource(resource);
+  if(frames<1 || !audio_play_span(state,AudioBufferPlayback.size,8)) { return 0-1; }
+  let pcm=ux_u32(resource+AudioResource.pcm);
+  let channels=ux_u32(resource+AudioResource.channels);
+  if(audio_play_overlap(state,AudioBufferPlayback.size,resource,AudioResource.size) ||
+     audio_play_overlap(state,AudioBufferPlayback.size,pcm,frames*channels*4)) { return 0-1; }
+  let a=ux_u32_put(state+AudioBufferPlayback.resource,resource);
+  let b=ux_u32_put(state+AudioBufferPlayback.frame,0);
+  let c=ux_u32_put(state+AudioBufferPlayback.playing,0);
+  let d=ux_u32_put(state+AudioBufferPlayback.loop,0);
+  let e=ux_u32_put(state+AudioBufferPlayback.loopStart,0);
+  let f=ux_u32_put(state+AudioBufferPlayback.loopEnd,frames);
+  let g=ux_f64_put(state+AudioBufferPlayback.gain,1.0);
+  return state;
+}
+
+native function Audio_playBuffer(state:i64,frame:i64,loop:i64,start:i64,end:i64,gain:f64) i64 {
+  if(!audio_play_span(state,AudioBufferPlayback.size,8) || frame<0 ||
+     (loop!=0 && loop!=1) || gain-gain!=0.0 || ux_u32(state+AudioBufferPlayback.playing)!=0) { return 0-1; }
+  let frames=audio_play_resource(ux_u32(state+AudioBufferPlayback.resource));
+  if(frames<1 || frame>=frames || start<0 || end<=start || end>frames) { return 0-1; }
+  let a=ux_u32_put(state+AudioBufferPlayback.frame,frame);
+  let b=ux_u32_put(state+AudioBufferPlayback.playing,1);
+  let c=ux_u32_put(state+AudioBufferPlayback.loop,loop);
+  let d=ux_u32_put(state+AudioBufferPlayback.loopStart,start);
+  let e=ux_u32_put(state+AudioBufferPlayback.loopEnd,end);
+  let f=ux_f64_put(state+AudioBufferPlayback.gain,gain);
+  return state;
+}
+
+native function Audio_stopBuffer(state:i64) i64 {
+  if(!audio_play_span(state,AudioBufferPlayback.size,8)) { return 0-1; }
+  let saved=ux_u32_put(state+AudioBufferPlayback.playing,0);
+  let reset=ux_u32_put(state+AudioBufferPlayback.frame,0);
+  return state;
+}
+
+// The output is interleaved f32 at the original sample rate. This unit
+// handles integral source frames; the sink and resampling are separate.
+native function Audio_renderBuffer(state:i64,out:i64,count:i64) i64 {
+  if(!audio_play_span(state,AudioBufferPlayback.size,8) || count<0 || count>48000) { return 0-1; }
+  let resource=ux_u32(state+AudioBufferPlayback.resource);
+  let frames=audio_play_resource(resource);
+  if(frames<1) { return 0-1; }
+  let pcm=ux_u32(resource+AudioResource.pcm);
+  let channels=ux_u32(resource+AudioResource.channels);
+  let bytes=count*channels*4;
+  if(!audio_play_span(out,bytes,4) || audio_play_overlap(out,bytes,state,AudioBufferPlayback.size) ||
+     audio_play_overlap(out,bytes,resource,AudioResource.size) ||
+     audio_play_overlap(out,bytes,pcm,frames*channels*4)) { return 0-1; }
+  let frame=ux_u32(state+AudioBufferPlayback.frame);
+  let playing=ux_u32(state+AudioBufferPlayback.playing);
+  let loop=ux_u32(state+AudioBufferPlayback.loop);
+  let start=ux_u32(state+AudioBufferPlayback.loopStart);
+  let end=ux_u32(state+AudioBufferPlayback.loopEnd);
+  let gain=ux_f64(state+AudioBufferPlayback.gain);
+  if(frame>frames || playing>1 || loop>1 || end<=start || end>frames || gain-gain!=0.0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    if(loop==1 && frame>=end) { frame=start+(frame-start)%(end-start); }
+    if(frame>=frames) { playing=0; }
+    let c=0;
+    while(c<channels) {
+      let sample=0.0;
+      if(playing) { sample=ux_f32(pcm+(frame*channels+c)*4)*gain; }
+      let put=ux_f32_put(out+(i*channels+c)*4,sample);
+      c=c+1;
+    }
+    if(playing) { frame=frame+1; }
+    i=i+1;
+  }
+  if(loop==0 && frame==frames) { playing=0; }
+  let advanced=ux_u32_put(state+AudioBufferPlayback.frame,frame);
+  let live=ux_u32_put(state+AudioBufferPlayback.playing,playing);
+  return count;
+}
