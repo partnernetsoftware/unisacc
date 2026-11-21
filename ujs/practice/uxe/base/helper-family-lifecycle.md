@@ -8,7 +8,11 @@
 
 `ArrowHelper_poseToJSON` 与 `ArrowHelper_poseFromJSON` 往返实际活动实例的姿态。格式是两组数组，第一组为根四元数的 `x,y,z,w`，第二组为轴线的 `scale.y`、锥体的 `position.y`、锥体的 `scale.y` 及锥体共用的 `scale.x/z`。输入畸形时保持姿态原状，正常导入保留资源引用。验收入口为 `sh ./unisacc.com ujs/tests/arrowhelper-pose-json.cx --`，用 `--mutate` 检查锥宽与锥高互换的反例。
 
-Arrow 姿态数组只覆盖现有原生姿态字段。完整对象 JSON，包括根位置、名称、可见性、图层、任意子树与资源身份，仍待接入 `Object3D`。网格公共字段往返与渲染释放仍待完成，其余十类的复制与克隆同样未覆盖。
+Arrow 姿态数组只覆盖现有原生姿态字段。完整对象 JSON，包括根位置、名称、可见性、图层、任意子树与资源身份，仍待接入 `Object3D`。网格公共字段往返与渲染释放仍待完成。
+
+`AxesHelper` 的复制品与克隆品共享位置、颜色及颜色版本字。若调用方回收或重新初始化原版本字存储，须先退役所有引用它的记录。`BoxHelper` 复制源物体绑定并共享位置、索引、位置版本、包围球和材质颜色。共享几何状态所在的原存储同样须保留至所有引用退役。`Box3Helper` 复制到已初始化记录时保留目标的 Box3 绑定，克隆共享几何但初始无 Box3。调用方可用 `Box3Helper_bindBox` 重新绑定。三类共用验收 `sh ./unisacc.com ujs/tests/helper-family-shared-geometry.cx --`。追加 `--mutate` 会错误替换复制目标的 Box3 绑定。
+
+r160 实测 CameraHelper、SkeletonHelper 与四种灯光 Helper 的无参克隆抛出 `TypeError`。这些类的已初始化对象之间仍可复制。DirectionalLightHelper、HemisphereLightHelper、SpotLightHelper 和 PlaneHelper 的默认复制会追加子节点，原生固定布局尚未覆盖。其余七类原生复制与克隆仍待补。
 
 独立验收入口为 `sh ./unisacc.com ujs/tests/arrowhelper-lifecycle.cx --` 和 `sh ./unisacc.com ujs/tests/helper-family-grid-lifecycle.cx --`。分别追加 `--mutate` 可复现错误释放事件和遗漏源几何修改。
 

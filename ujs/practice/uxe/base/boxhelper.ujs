@@ -10,6 +10,7 @@ struct BoxHelper {
   centerY: f64;
   centerZ: f64;
   radius: f64;
+  geometryState: u32;
 }
 
 // Bounds are a caller-owned world-space Box3 refreshed from the source object.
@@ -29,6 +30,20 @@ native function box_helper_bounds(box:i64) i64 {
   return 1;
 }
 
+// One shared block preserves the Line material tint, geometry version and sphere.
+native function BoxHelper_geometryState(helper:i64) i64 {
+  if(!boxh_span(helper,BoxHelper.size,8) || ux_u32(helper+BoxHelper.active)!=1) { return 0-1; }
+  let geometry=ux_u32(helper+BoxHelper.geometryState);
+  if(!boxh_span(geometry,40,8)) { return 0-1; }
+  return geometry;
+}
+
+native function BoxHelper_getPositionVersion(helper:i64) i64 {
+  let geometry=BoxHelper_geometryState(helper);
+  if(geometry<0) { return 0-1; }
+  return ux_u32(geometry+4);
+}
+
 native function BoxHelper_update(helper:i64) i64 {
   if(!boxh_span(helper,BoxHelper.size,8) || ux_u32(helper+BoxHelper.active)!=1) { return 0-1; }
   let box=ux_u32(helper+BoxHelper.box);
@@ -36,10 +51,13 @@ native function BoxHelper_update(helper:i64) i64 {
   if(state!=1) { return state; }
   let xyz=ux_u32(helper+BoxHelper.positions);
   let idx=ux_u32(helper+BoxHelper.indices);
-  let version=ux_u32(helper+BoxHelper.positionVersion);
-  if(!boxh_span(xyz,96,4) || !boxh_span(idx,48,2) || version==4294967295 ||
+  let geometry=BoxHelper_geometryState(helper);
+  if(geometry<0 || !boxh_span(xyz,96,4) || !boxh_span(idx,48,2) ||
      boxh_overlap(helper,BoxHelper.size,xyz,96) || boxh_overlap(xyz,96,box,48) ||
-     boxh_overlap(xyz,96,idx,48)) { return 0-1; }
+     boxh_overlap(xyz,96,idx,48) || boxh_overlap(geometry,40,xyz,96) ||
+     boxh_overlap(geometry,40,idx,48) || boxh_overlap(geometry,40,box,48)) { return 0-1; }
+  let version=ux_u32(geometry+4);
+  if(version==4294967295) { return 0-1; }
   let i=0;
   while(i<8) {
     let x=box+24;
@@ -56,11 +74,11 @@ native function BoxHelper_update(helper:i64) i64 {
   let lx=ux_f32(xyz+72); let ly=ux_f32(xyz+76); let lz=ux_f32(xyz+80);
   let hx=ux_f32(xyz); let hy=ux_f32(xyz+4); let hz=ux_f32(xyz+8);
   let dx=(hx-lx)*0.5; let dy=(hy-ly)*0.5; let dz=(hz-lz)*0.5;
-  let a=ux_f64_put(helper+BoxHelper.centerX,(hx+lx)*0.5);
-  let b=ux_f64_put(helper+BoxHelper.centerY,(hy+ly)*0.5);
-  let c=ux_f64_put(helper+BoxHelper.centerZ,(hz+lz)*0.5);
-  let r=ux_f64_put(helper+BoxHelper.radius,f64_sqrt(dx*dx+dy*dy+dz*dz));
-  let v=ux_u32_put(helper+BoxHelper.positionVersion,version+1);
+  let a=ux_f64_put(geometry+8,(hx+lx)*0.5);
+  let b=ux_f64_put(geometry+16,(hy+ly)*0.5);
+  let c=ux_f64_put(geometry+24,(hz+lz)*0.5);
+  let r=ux_f64_put(geometry+32,f64_sqrt(dx*dx+dy*dy+dz*dz));
+  let v=ux_u32_put(geometry+4,version+1);
   return 1;
 }
 
@@ -78,12 +96,40 @@ native function BoxHelper_init(helper:i64,box:i64,positions:i64,indices:i64,hex:
   }
   let c=ux_u32_put(helper+BoxHelper.color,hex);
   let v=ux_u32_put(helper+BoxHelper.positionVersion,0);
+  let state=ux_u32_put(helper+BoxHelper.geometryState,helper+BoxHelper.color);
   let x=ux_f64_put(helper+BoxHelper.centerX,0.0);
   let y=ux_f64_put(helper+BoxHelper.centerY,0.0);
   let z=ux_f64_put(helper+BoxHelper.centerZ,0.0);
   let r=ux_f64_put(helper+BoxHelper.radius,0.0-1.0);
   let updated=BoxHelper_update(helper);
   return helper;
+}
+
+// Copy the bound object and Line resources; retain a separate helper lifetime.
+native function BoxHelper_copy(dst:i64,src:i64) i64 {
+  let geometry=BoxHelper_geometryState(src);
+  if(geometry<0 || !boxh_span(dst,BoxHelper.size,8)) { return 0-1; }
+  if(dst==src) { return dst; }
+  let box=ux_u32(src+BoxHelper.box);
+  let positions=ux_u32(src+BoxHelper.positions);
+  let indices=ux_u32(src+BoxHelper.indices);
+  let color=ux_u32(geometry);
+  if(!boxh_span(box,48,8) || !boxh_span(positions,96,4) || !boxh_span(indices,48,2) ||
+     color>16777215 || boxh_overlap(dst,BoxHelper.size,src,BoxHelper.size) ||
+     boxh_overlap(dst,BoxHelper.size,box,48) || boxh_overlap(dst,BoxHelper.size,positions,96) ||
+     boxh_overlap(dst,BoxHelper.size,indices,48) ||
+     (geometry!=dst+BoxHelper.color && boxh_overlap(dst,BoxHelper.size,geometry,40))) { return 0-1; }
+  let b=ux_u32_put(dst+BoxHelper.box,box);
+  let p=ux_u32_put(dst+BoxHelper.positions,positions);
+  let i=ux_u32_put(dst+BoxHelper.indices,indices);
+  let shared=ux_u32_put(dst+BoxHelper.geometryState,geometry);
+  let active=ux_u32_put(dst+BoxHelper.active,1);
+  return dst;
+}
+
+native function BoxHelper_clone(dst:i64,src:i64) i64 {
+  if(dst==src) { return 0-1; }
+  return BoxHelper_copy(dst,src);
 }
 
 native function BoxHelper_dispose(helper:i64) i64 {
