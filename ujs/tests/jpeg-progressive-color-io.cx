@@ -1,5 +1,4 @@
-#pragma unisa use g_wasm_batch
-#pragma unisa use text.fmt
+#pragma unisa use g_jpeg_link
 #pragma unisa use text.text
 
 static void append(unsigned char *file,int *size,const unsigned char *bytes,int count) {
@@ -64,47 +63,18 @@ static int build(unsigned char *file,int sampled,int *rst) {
 int main(int argc,char **argv) {
     const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     const int mutate_loader=argc==2 && tx_eqz(argv[1],"--mutate-loader");
-    if(argc!=1 && !mutate && !mutate_loader) return 2;
+    const int mutate_coverage=argc==2 && tx_eqz(argv[1],"--mutate-coverage");
+    const int check=argc==2 && tx_eqz(argv[1],"--check");
+    if(argc!=1 && !mutate && !mutate_loader && !mutate_coverage && !check) return 2;
     const char *modules[]={"f64-math","jpeg-header","jpeg-entropy","jpeg-idct","jpeg-gray","jpeg-color",
         "jpeg-progressive","jpeg-progressive-gray","jpeg-progressive-color",
         "record-copy","loadingmanager","fileloader","image-layout","image-file","imageloader-jpeg",0};
-    unsigned char image[230];
-    char setup[2400];
-    int used=0;
-    int rst=0;
-    for(int v=0;v<2;v++) {
-        int size=build(image,v,&rst);
-        used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;let bytes%d=[",v,size,v);
-        for(int i=0;i<size;i++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",i?",":"",image[i]);
-        used+=tx_snprintf(setup+used,sizeof setup-used,"];let i%d=0;while(i%d<n%d){let a=ux_u8_put(%d+i%d,bytes%d[i%d]);i%d=i%d+1;}",
-            v,v,v,v*256,v,v,v,v,v);
-    }
-    tx_snprintf(setup+used,sizeof setup-used,"let restart=%d;"
-        "let manager=LoadingManager_init(768);let file=FileLoader_init(800,manager);let id=FileLoader_begin(file,832);",256+rst);
-    #define RGB "let result=JpegDecode_progressiveColor(0,n0,1024,4,4096,8192);"
-    #define GRID "let result=JpegDecode_progressiveColor(256,n1,1024,1156,4096,12288);"
-    #define RECEIVE "let received=FileLoader_receive(file,id,200,256,n1,832);"
-    #define LOAD "let image=ImageLoader_decodeJpeg(file,896,1024,1156,4096,12288);"
-    const char *cases[]={
-        RGB "return 0.0+result;",
-        RGB "return 0.0+ux_u8(1024);",
-        RGB "return 0.0+ux_u8(1025);",
-        RGB "return 0.0+ux_u8(1026);",
-        GRID "return 0.0+result;",
-        GRID "return 0.0+ux_u8(1026+15*4);",
-        GRID "return 0.0+ux_u8(1026+16*17*4);",
-        GRID "return 0.0+ux_u8(1024+288*4);",
-        "let bad=ux_u8_put(restart,210);" GRID "return 0.0+result;",
-        "let guard=ux_u8_put(1024,79);let bad=ux_u8_put(restart,210);" GRID "return 0.0+ux_u8(1024);",
-        "return 0.0+JpegDecode_progressiveColor(256,n1,1024,1156,4096,2048);",
-        RECEIVE LOAD "if(image<0){return 0.0+image;}return 0.0+ux_u32(image+ImageResource.rowBytes);",
-        RECEIVE LOAD "if(image<0){return 0.0+image;}return 0.0+ux_u8(1024+288*4);",
-        "let guard=ux_u32_put(896+ImageResource.height,77);let keep=ux_u8_put(1024,11);"
-        "let bad=ux_u8_put(restart,210);" RECEIVE LOAD
-        "return 0.0+ux_u32(896+ImageResource.height)*256+ux_u8(1024);"
-    };
+    unsigned char input[512]={0};
+    int restart=0;
+    const int rgb=build(input,0,&restart);
+    const int grid=build(input+256,1,&restart);
     const double gold[]={4,83,140,185,1156,171,142,129,-6,79,-1,68,129,19723};
-    return g_wasm_batch("G_IO JpegProgressiveColor","jpeg-progressive-color",modules,setup,cases,gold,
-        sizeof gold/sizeof gold[0],mutate_loader?11:mutate?7:-1,
-        mutate_loader?RECEIVE LOAD "return 0.0+ux_u32(image+ImageResource.width);":GRID "return 0.0+ux_u8(1024+287*4);");
+    const int count=sizeof gold/sizeof gold[0];
+    return g_jpeg_link(modules,input,rgb,grid,256+restart,gold,count-mutate_coverage,
+        mutate_loader?2:mutate?1:0,check);
 }

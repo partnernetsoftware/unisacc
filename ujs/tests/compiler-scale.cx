@@ -1,0 +1,44 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+int main(void) {
+    static char source[45000];
+    const int sizes[]={5120,10240,20480,40960};
+    char dir[128];
+    if(sy_mkdtemp("/tmp","ujs-compiler-scale-",dir,sizeof dir)) return 2;
+    int failed=0;
+    for(int k=0;k<4;k++) {
+        int used=0, count=0;
+        const int target=sizes[k];
+        while(used+700+32*(count+1)<target) {
+            used+=tx_snprintf(source+used,sizeof source-used,"native function calc%d(x:i64) i64 { let result=x;",count);
+            for(int row=0;row<18;row++) {
+                used+=tx_snprintf(source+used,sizeof source-used,"result=(result+%d)%%65521;",count+row+1);
+            }
+            used+=tx_snprintf(source+used,sizeof source-used,"return result;}\n");
+            count++;
+        }
+        used+=tx_snprintf(source+used,sizeof source-used,"let result=0;\n");
+        for(int i=0;i<count;i++) {
+            used+=tx_snprintf(source+used,sizeof source-used,"result=calc%d(result);\n",i);
+        }
+        used+=tx_snprintf(source+used,sizeof source-used,"return result;\n");
+        if(used>target) return 2;
+        while(used<target) source[used++]=' ';
+        char path[160],wasm[160],*output=0;
+        size_t length=0;
+        tx_snprintf(path,sizeof path,"%s/%d.ujs",dir,target);
+        tx_snprintf(wasm,sizeof wasm,"%s/%d.wasm",dir,target);
+        if(sy_write_file(path,source,used,0600)) return 2;
+        char *args[]={"./ujs/ujs2wasm.com",path,"-o",wasm,0};
+        long start=sy_now_ms();
+        int rc=cx_runv_timeout(args,8,&output,&length);
+        printf("CURVE source=%d functions=%d compile_ms=%ld rc=%d %.*s\n",
+          used,count,sy_now_ms()-start,rc,(int)length,output?output:"");
+        mm_free(output);
+        if(rc) failed=1;
+    }
+    return failed;
+}

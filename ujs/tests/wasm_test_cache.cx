@@ -1,0 +1,73 @@
+#pragma unisa module wasm_test_cache
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.sha
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int wasmc_hash_file(const char *path,char sha[65]) {
+    unsigned char *bytes=0;
+    int64_t size=0;
+    int rc=sy_read_file(path,&bytes,&size,16*1024*1024);
+    if(!rc) rc=sy_sha256_any_hex(bytes,size,sha);
+    mm_free(bytes);
+    return rc;
+}
+
+int wasm_test_cache_key(const char *const *sources,char sha[65]) {
+    const char *compiler[]={"ujs/ujs2wasm.com","ujs/ujs.com","ujs/weights/nets/lex.net.tsv","ujs/weights/nets/parse.net.tsv",0};
+    char input[4608];
+    int used=tx_snprintf(input,sizeof input,"uxe-linked-base-v1\n");
+    for(int group=0;group<2;group++) {
+        const char *const *paths=group==0?compiler:sources;
+        for(int i=0;paths[i];i++) {
+            char file[65];
+            if(wasmc_hash_file(paths[i],file) || used<0 || used+66>=(int)sizeof input) return 1;
+            used+=tx_snprintf(input+used,sizeof input-used,"%s\n",file);
+        }
+    }
+    return sy_sha256_any_hex(input,used,sha);
+}
+
+int wasm_test_cache_read(const char *path,const char *key,const char *output,char sha[65]) {
+    unsigned char *record=0;
+    int64_t size=0;
+    int rc=sy_read_file(path,&record,&size,4*1024*1024+130);
+    if(!rc && (size<138 || record[64]!='\n' || record[129]!='\n' ||
+        !tx_same((const char *)record,64,key,64) ||
+        sy_sha256_any_hex(record+130,size-130,sha) ||
+        !tx_same((const char *)record+65,64,sha,64))) rc=1;
+    if(!rc && output) rc=sy_write_file(output,record+130,size-130,0600);
+    mm_free(record);
+    return rc;
+}
+
+int wasm_test_cache_write(const char *dir,const char *path,const char *key,const char *wasm) {
+    unsigned char *bytes=0;
+    int64_t size=0;
+    if(sy_read_file(wasm,&bytes,&size,4*1024*1024)) return 1;
+    unsigned char *record=mm_alloc(size+131);
+    char sha[65],stage[512],temp[544];
+    int rc=1;
+    if(record && !sy_sha256_any_hex(bytes,size,sha)) {
+        tx_snprintf((char *)record,131,"%s\n%s\n",key,sha);
+        mm_copy(record+130,size,bytes,size);
+        if(!sy_mkdtemp(dir,".uxe-base-",stage,sizeof stage)) {
+            int n=tx_snprintf(temp,sizeof temp,"%s/record",stage);
+            if(n>0 && n<(int)sizeof temp) {
+                rc=sy_write_file(temp,record,size+130,0600) || sy_rename(temp,path);
+                if(rc) sy_unlink(temp);
+            }
+            sy_rmdir(stage);
+        }
+    }
+    mm_free(record);
+    mm_free(bytes);
+    return rc;
+}
+
+int wasm_test_cache_verify(const char *wasm,const char *expected) {
+    char sha[65];
+    return wasmc_hash_file(wasm,sha) || !tx_same(sha,64,expected,64);
+}

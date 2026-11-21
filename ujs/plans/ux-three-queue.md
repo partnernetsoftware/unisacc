@@ -4,7 +4,7 @@
 
 ## 合入候选阻塞
 
-- BLOCKED 五个现有编译门 | 全套实跑 393 项，补齐 r160 夹具并隔离复验后 388 项通过。剩余 BufferGeometryLoader、BufferGeometry fromJSON、JPEG Color444、渐进灰度和渐进彩色的编译子进程在既有六秒界退出 124。证据目录 `/tmp/devsvc-flow-21665839376-3659026`、`/tmp/devsvc-flow-21665853824-3661983`、`/tmp/devsvc-flow-21665892803-3670401`、`/tmp/devsvc-flow-21665904536-3672361`、`/tmp/devsvc-flow-21665916516-3673815`。独立计时夹具的同一 BufferGeometryLoader 输入输出逐字节相同，Wasm 为 38153 字节，原工具 5422 ms、同源 Linux ELF 5637 ms，见 `/tmp/devsvc-flow-21666146588-3709489`。该测量未记入验收。需缩减编译成本并保留时限与断言。
+- BLOCKED 五个现有编译门 | 全套实跑 393 项，补齐 r160 夹具并隔离复验后 388 项通过。剩余 BufferGeometryLoader、BufferGeometry fromJSON、JPEG Color444、渐进灰度和渐进彩色的编译子进程在既有六秒界退出 124。证据目录 `/tmp/devsvc-flow-21665839376-3659026`、`/tmp/devsvc-flow-21665853824-3661983`、`/tmp/devsvc-flow-21665892803-3670401`、`/tmp/devsvc-flow-21665904536-3672361`、`/tmp/devsvc-flow-21665916516-3673815`。独立计时夹具的同一 BufferGeometryLoader 输入输出逐字节相同，Wasm 为 38153 字节，原工具 5422 ms、同源 Linux ELF 5637 ms，见 `/tmp/devsvc-flow-21666146588-3709489`。该测量未记入验收。规模曲线采样 938、1664、3352、7330 毫秒。渐进彩色 JPEG 已拆为 C6 缓存基座和消费者，缓存命中消费者编译 81 毫秒，14 项通过，颜色、加载器、缺例及破坏缓存反例均非零。其它历史超时门仍需同尖端复验，六秒界保持。
 
 ## A 栏燃尽
 

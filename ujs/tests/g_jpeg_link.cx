@@ -1,0 +1,105 @@
+#pragma unisa module g_jpeg_link
+#pragma unisa use wasm_test_cache
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+
+static int jpeg_link_compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("JPEG_LINK %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && size && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int jpeg_link_base(const char *const *modules,const char *wasm,int check) {
+    static const char prelude[]="ujs/practice/uxe/test/jpeg-linked-base-layout.ujs";
+    static const char entry[]="ujs/practice/uxe/test/jpeg-linked-base.ujs";
+    const char *sources[20]={prelude};
+    char paths[16][220];
+    char *args[24]={"./ujs/ujs2wasm.com",(char *)prelude};
+    int n=0;
+    while(modules[n]) {
+        if(n>=16) return 2;
+        tx_snprintf(paths[n],sizeof paths[n],"ujs/practice/uxe/base/%s.ujs",modules[n]);
+        sources[n+1]=paths[n];
+        args[n+2]=paths[n];
+        n++;
+    }
+    sources[n+1]=entry;
+    args[n+2]=(char *)entry;
+    args[n+3]="-o";
+    args[n+4]=(char *)wasm;
+    args[n+5]=0;
+
+    const char *cache=sy_env("UXE_JPEG_WASM_CACHE");
+    char record[640],key[65],sha[65];
+    const int cached=cache && cache[0];
+    if(check && !cached) return 2;
+    if(cached) {
+        if(wasm_test_cache_key(sources,key)) return 1;
+        int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+        if(len<0 || len>=(int)sizeof record) return 2;
+        int rc=wasm_test_cache_read(record,key,check?0:wasm,sha);
+        if(!rc && !check) {
+            printf("JPEG_LINK cache=hit key=%s sha=%s\n",key,sha);
+            return 0;
+        }
+        if(rc && (rc!=-ENOENT || check)) {
+            printf("JPEG_LINK cache=refused rc=%d key=%s\n",rc,key);
+            return 1;
+        }
+    }
+    if(jpeg_link_compile(args,"base_prepare",20)) return 1;
+    if(check) return wasm_test_cache_verify(wasm,sha);
+    return cached?wasm_test_cache_write(cache,record,key,wasm):0;
+}
+
+static void jpeg_link_put(unsigned char *dest,unsigned value) {
+    for(int i=0;i<4;i++) dest[i]=(unsigned char)(value>>(8*i));
+}
+
+int g_jpeg_link(const char *const *modules,const unsigned char input[512],int rgb,int grid,int restart,
+        const double *gold,int count,int mode,int check) {
+    if(count!=14) {
+        printf("JPEG_LINK coverage actual=%d expected=14 failed=1\n",count);
+        return 1;
+    }
+    if(rgb<1 || rgb>256 || grid<1 || grid>256 || restart<256 || restart>=256+grid) return 2;
+    char dir[256],base[320],probe[320],page[320],blob[320],layout[320],url[360];
+    if(sy_mkdtemp("/tmp","uxe-jpeg-link-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    tx_snprintf(blob,sizeof blob,"%s/input.bin",dir);
+    tx_snprintf(layout,sizeof layout,"%s/layout.bin",dir);
+    tx_snprintf(url,sizeof url,"file://%s",page);
+    unsigned char header[12];
+    jpeg_link_put(header,rgb+65536u*grid);
+    jpeg_link_put(header+4,restart);
+    jpeg_link_put(header+8,mode);
+    char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/jpeg-linked-probe.ujs","-o",probe,0};
+    double reference[14],actual[14];
+    int failed=jpeg_link_base(modules,base,check) || jpeg_link_compile(args,"probe",6) ||
+        sy_write_file(blob,input,512,0600) || sy_write_file(layout,header,sizeof header,0600) ||
+        sy_copy("ujs/practice/uxe/test/jpeg-linked-wasm.html",page,0600) ||
+        r160_wait_ref("jpeg-progressive-color",reference,count,dir) ||
+        r160_wait_read(url,"#wasm-cases",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(reference[i],gold[i],1e-9) || !g_math_near(actual[i],gold[i],1e-9)) {
+            printf("JPEG_LINK case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+            failed=1;
+        }
+    }
+    printf("G_IO JpegProgressiveColor linked cases=%d failed=%d\n",count,failed);
+    if(sy_remove_all(dir)) failed=1;
+    return failed;
+}
