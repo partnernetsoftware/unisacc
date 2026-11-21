@@ -39,4 +39,4 @@ A 栏甲为 RenderTarget、Interpolant、Light、Material、DepthTexture 和 Fra
 
 生成器提供 `--check`，逐字节比对三个产物。篡改自测在独立临时目录更改一项枚举映射、删一项别名或交换两项模式，分别要求生成物漂移或语义门非零退出。金值取自独立 .cx 或 r160 实读，测试不能用被测映射生成期望。硬件门另绑定设备、扩展、驱动与测试图样的身份。缺设备时记录缺口，具名拒绝只作为诊断证据。
 
-缺项计划由 `cx ujs/tools-ux/plan-three-missing.cx -- B --write` 与 `cx ujs/tools-ux/plan-three-missing.cx -- A --write` 重算，改用 `--check` 比对表。语义验收生成器按上面的设计另行实现。
+缺项计划由 `cx ujs/tools-ux/plan-three-missing.cx -- B --write` 与 `cx ujs/tools-ux/plan-three-missing.cx -- A --write` 重算，改用 `--check` 比对表。A 栏由 `ux-three-a-family.tsv` 指定家族、前置和计划验收门，缺项未登记或事实表重复时生成器拒绝。`A --check --mutate` 改动计划验收门，预期差异转红。计划门待实现，当前缺项保持原状态。
