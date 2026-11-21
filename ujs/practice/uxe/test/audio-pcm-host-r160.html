@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Audio, AudioContext as ThreeAudioContext, AudioListener, REVISION } from "../../web/game/three.module.js";
+import { bindAudioContext } from "../base/audio-context-host.js";
+import { bindAudioPCM } from "../base/audio-pcm-host.js";
+
+const status=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const params=new URLSearchParams(location.search);
+  const request=new XMLHttpRequest();
+  request.open("GET",params.get("wasm"),false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);
+  const { exports: wasm }=new WebAssembly.Instance(new WebAssembly.Module(bytes));
+  const command=(action,handle=0n,value=0n)=>wasm.uxe_audio_pcm(action,handle,value);
+  const host=bindAudioContext(command);
+  const playback=new OfflineAudioContext(2,128,48000);
+  const lookup=handle=>host.context(handle);
+  const pcm=bindAudioPCM(wasm.memory,handle=>lookup(handle) && playback);
+  const browser=bindAudioPCM(wasm.memory,lookup);
+  const prior=host.open(48000);
+  const results=[await host.close(prior)];
+  const live=host.open(48000);
+  const point=command(8n,0n,32n);
+  command(6n);
+  const first=command(7n,0n,2n);
+  const real=browser.buffer(live,point,first,2n,44100n);
+  results.push(first,real.numberOfChannels,real.length,real.sampleRate);
+  results.push(real.getChannelData(0)[0],real.getChannelData(1)[1]);
+  results.push(pcm.write(prior,point,first,2n,48000n));
+  results.push(pcm.write(live+16777216n,point,first,2n,48000n));
+  results.push(pcm.write(live,point+1n,first,2n,48000n));
+  results.push(pcm.write(live,BigInt(wasm.memory.buffer.byteLength-4),first,2n,48000n));
+  results.push(pcm.write(live,point,first,0n,48000n));
+  results.push(pcm.write(live,point,first,2n,1000n));
+  results.push(pcm.write(live,point,first,2n,48000n));
+  const next=command(7n,0n,4n);
+  results.push(pcm.write(live,point,next,2n,48000n));
+  new DataView(wasm.memory.buffer).setFloat32(Number(point),NaN,true);
+  results.push(pcm.write(live,point,1n,2n,48000n));
+  const actual=await playback.startRendering();
+
+  const refContext=new OfflineAudioContext(2,128,48000);
+  ThreeAudioContext.setContext(refContext);
+  const refAudio=new Audio(new AudioListener());
+  const reference=refContext.createBuffer(2,4,48000);
+  reference.copyToChannel(new Float32Array([0.25,0.5,0.75,1]),0);
+  reference.copyToChannel(new Float32Array([-0.125,-0.25,-0.5,-1]),1);
+  refAudio.getOutput().gain.value=0.5;
+  refAudio.setBuffer(reference).play();
+  const expected=await refContext.startRendering();
+  for(let channel=0;channel<2;channel++) {
+    const values=actual.getChannelData(channel);
+    const oracle=expected.getChannelData(channel);
+    for(let i=0;i<6;i++) {
+      if(Math.abs(values[i]-oracle[i])>1e-7) throw new Error(`r160 mismatch channel=${channel} frame=${i} actual=${values[i]} expected=${oracle[i]} bridge=${results}`);
+      results.push(values[i]);
+    }
+  }
+  results.push(await host.close(live),browser.write(live,point,1n,2n,48000n));
+  status.textContent=JSON.stringify(results.map(Number));
+} catch(error) {
+  status.textContent=`error:${error.message}`;
+}
+</script>

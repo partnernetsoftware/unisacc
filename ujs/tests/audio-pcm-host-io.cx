@@ -1,0 +1,72 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use r160_wait
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int compile_probe(const char *source,const char *wasm,int mutate) {
+    const char *modules[]={"loadingmanager","fileloader","audioloader","audio-buffer-playback","audio-context",0};
+    char program[60000]="export uxe_audio_pcm(action:i64,handle:i64,value:i64) i64 version 1;\n";
+    int used=tx_len(program,sizeof program);
+    for(int i=0;modules[i];i++) {
+        char path[192]; unsigned char *body=0; int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&body,&size,sizeof program-used-2)) return 1;
+        const int n=tx_snprintf(program+used,sizeof program-used,"%s\n",body);
+        mm_free(body);
+        if(n<0 || n>=(int)sizeof program-used) return 1;
+        used+=n;
+    }
+    const int length=tx_snprintf(program+used,sizeof program-used,
+        "if(action<6){return AudioContext_command(768,action,handle,value);}"
+        "let resource=0;let pcm=128;let state=256;let out=512;"
+        "if(action==8){return ux_span(out,value);}"
+        "if(action==7){let count=Audio_renderBuffer(state,out,value);%s return count;}"
+        "let a=ux_u32_put(resource+AudioResource.pcm,pcm);let b=ux_u32_put(resource+AudioResource.frames,4);"
+        "let c=ux_u32_put(resource+AudioResource.channels,2);let d=ux_u32_put(resource+AudioResource.sampleRate,48000);"
+        "let e=ux_f32_put(pcm,0.25);let f=ux_f32_put(pcm+8,0.5);"
+        "let g=ux_f32_put(pcm+16,0.75);let h=ux_f32_put(pcm+24,1.0);"
+        "let j=ux_f32_put(pcm+4,0.0-0.125);let k=ux_f32_put(pcm+12,0.0-0.25);"
+        "let l=ux_f32_put(pcm+20,0.0-0.5);let m=ux_f32_put(pcm+28,0.0-1.0);"
+        "let ready=Audio_setBuffer(state,resource);"
+        "return Audio_playBuffer(state,0,0,0,4,0.5);\n",
+        mutate?"let i=0;while(i<count){let at=out+i*8;let sample=ux_f32(at);"
+        "let left=ux_f32_put(at,ux_f32(at+4));let right=ux_f32_put(at+4,sample);i=i+1;}":"");
+    if(length<=0 || length>=(int)sizeof program-used || sy_write_file(source,program,used+length,0600)) return 1;
+    char *compile[]={"./ujs/ujs2wasm.com",(char*)source,"-o",(char*)wasm,0},*log=0;
+    size_t bytes=0;
+    const int rc=cx_runv_timeout(compile,6,&log,&bytes);
+    if(rc) printf("AUDIO_PCM_HOST compile_rc=%d\n",rc);
+    mm_free(log);
+    return rc!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char cwd[390],dir[256],source[290],wasm[290],url[950];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-pcm-host-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/audio-pcm-host-r160.html?wasm=%s",cwd,wasm);
+    const double gold[]={1,2,2,2,44100,0.125,-0.125,-1,-1,-1,-1,-1,-1,2,4,-1,
+        0.125,0.25,0.375,0.5,0,0,-0.0625,-0.125,-0.25,-0.5,0,0,1,-1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count];
+    int failed=length<=0 || length>=(int)sizeof url || compile_probe(source,wasm,mutate) ||
+        r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(actual[i],gold[i],1e-9)) {
+            printf("G_IO Audio PCM host case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0},*log=0;
+    size_t bytes=0;
+    if(cx_runv_timeout(clean,4,&log,&bytes)) failed=1;
+    mm_free(log);
+    printf("G_IO Audio PCM host stereo render cases=%d failed=%d\n",count,failed);
+    return failed;
+}
