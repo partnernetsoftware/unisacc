@@ -69,10 +69,10 @@
 - InterleavedBuffer 产品共享渲染器回调和分数行数 | G-struct 实际产品上传与 r160 分数行数边界 | GPU 副本生命周期。
 - ~~LineCurve 与 Bezier 系弧长缓存 | G-struct 六类共用弧长表、缓存复用与刷新 | CurveControl 和 CurveArcCache。~~ 九项通过，漏刷新使长度从 8 变 4 转红。
 - ~~LineCurve | G-struct 类级构造、弧长缓存、采样、开闭标架与生命周期 | 生成的 CurveFamily 构造器。~~ 通过 r160 与独立金值对照，反向控制点和坏 JSON 转红。
-- CubicBezierCurve | G-struct cubicbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
-- CubicBezierCurve3 | G-struct cubicbeziercurve3-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
-- QuadraticBezierCurve | G-struct quadraticbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
-- QuadraticBezierCurve3 | G-struct quadraticbeziercurve3-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
+- ~~CubicBezierCurve | G-struct 类级构造、弧长缓存、采样、开闭标架和生命周期 | 生成的 CurveFamily 构造器。~~ 基础 6 项、生命周期 4 项和非轴向开闭标架 54 通道通过，标架变异转红。
+- ~~CubicBezierCurve3 | G-struct 类级构造、弧长缓存、采样、开闭标架和生命周期 | 生成的 CurveFamily 构造器。~~ 基础 6 项、生命周期 4 项和非轴向开闭标架 54 通道通过，标架变异转红。
+- ~~QuadraticBezierCurve | G-struct 类级构造、弧长缓存、采样、开闭标架和生命周期 | 生成的 CurveFamily 构造器。~~ 基础 6 项、生命周期 4 项和非轴向开闭标架 54 通道通过，标架变异转红。
+- ~~QuadraticBezierCurve3 | G-struct 类级构造、弧长缓存、采样、开闭标架和生命周期 | 生成的 CurveFamily 构造器。~~ 基础 6 项、生命周期 4 项和非轴向开闭标架 54 通道通过，标架变异转红。
 - AnimationMixer | G-anim animationmixer-anim.cx：多个动作调度同一根数值属性、失败帧回退与停止恢复原值；多属性、解绑和淡入淡出待补。补齐 constructor,clipAction,existingAction,setTime,getRoot,uncacheClip,uncacheRoot,uncacheAction,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - BufferAttribute | G-struct bufferattribute-struct.cx 与 bufferattribute-transforms-struct.cx 独立金值和 r160 JSON。上传回调、更新区间与序列化待补。补齐 onUploadCallback,updateRange,addUpdateRange,clearUpdateRanges,getX,setX,getY,setY,getZ,setZ,getW,setW,setXY,setXYZ,setXYZW,onUpload,toJSON，运行独立金值及 r160 篡改门 | -
 - Path | G-struct path-struct.cx、path-lifecycle-struct.cx 与 shapepath-spline-struct.cx；补齐 setFromPoints,arc,absarc,ellipse,absellipse,toJSON,fromJSON,add,getPoint,getLength,updateArcLengths,getCurveLengths,getSpacedPoints,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | Curve 与路径分段。
