@@ -1,0 +1,74 @@
+/* tools/check-train-tool-modes.cx -- verify build/train-tool-modes.tsv freshness and
+   test the I2c 'zero worktree-raw-run train tools' gate (red/green + 3 mutations). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+
+static int tm_pass, tm_fail;
+static void tm_ck(int ok, const char *name) {
+    printf("%s\ttrain-tool-modes.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) tm_pass++; else tm_fail++;
+}
+
+static int run_tm(const char *flag, const char *arg, char *out, int cap) {
+    char *av1[] = { "timeout", "30", "sh", "unisacc.com", "tools/train-tool-modes.cx", "--", (char *)flag, 0 };
+    char *av2[] = { "timeout", "30", "sh", "unisacc.com", "tools/train-tool-modes.cx", "--", (char *)flag, (char *)arg, 0 };
+    int cut = 0;
+    return sy_run(arg ? av2 : av1, out, cap - 1, &cut);
+}
+
+int main(void) {
+    static char out[8192];
+    char dir[128], f_ok[256], f_mut1[256], f_mut2[256], f_mut3[256];
+    int rc;
+
+    /* 1. Repo table matches live orchestrator call sites */
+    rc = run_tm("--check", 0, out, (int)sizeof out);
+    tm_ck(rc == 0 && strstr(out, "TRAIN_MODES\tCHECK\trows=25") != 0, "repo-table-matches-sources");
+
+    /* 2. Report current repo zero-raw audit honestly (currently non-zero: 12 worktree-raw-run entries) */
+    rc = run_tm("--assert-zero-raw", "build/train-tool-modes.tsv", out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "TRAIN_MODES_ZERO_RAW\trows=25\traw_run=12\tstatus=FAIL") != 0, "repo-honestly-detects-12-raw-runs");
+
+    /* 3. Private fixtures: clean zero-raw passes, and 3 mutations fail */
+    if (sy_mkdtemp("/tmp", "chk-tm-", dir, (int)sizeof dir) != 0) return 2;
+    cx_fmt(f_ok, (long)sizeof f_ok, "%s/ok.tsv", dir);
+    cx_fmt(f_mut1, (long)sizeof f_mut1, "%s/mut1.tsv", dir);
+    cx_fmt(f_mut2, (long)sizeof f_mut2, "%s/mut2.tsv", dir);
+    cx_fmt(f_mut3, (long)sizeof f_mut3, "%s/mut3.tsv", dir);
+
+    {
+        const char *s_ok = "# scope\ttool\tmode\tcall_site\tpin_check_site\tresume_recheck\n"
+                           "chain\ttools/chain-step.cx\tnative-pin\tc:1\tc:2\tyes\n"
+                           "chain\ttools/entry-build.cx\tsrc-tree-pin\tc:3\tc:4\tyes\n";
+        /* Mutation 1: flip one pinned tool to worktree-raw-run -> must FAIL */
+        const char *s_m1 = "# scope\ttool\tmode\tcall_site\tpin_check_site\tresume_recheck\n"
+                           "chain\ttools/chain-step.cx\tworktree-raw-run\tc:1\t-\tno\n"
+                           "chain\ttools/entry-build.cx\tsrc-tree-pin\tc:3\tc:4\tyes\n";
+        /* Mutation 2: append an unpinned raw-run tool -> must FAIL */
+        const char *s_m2 = "# scope\ttool\tmode\tcall_site\tpin_check_site\tresume_recheck\n"
+                           "chain\ttools/chain-step.cx\tnative-pin\tc:1\tc:2\tyes\n"
+                           "release\ttools/new-raw.cx\tworktree-raw-run\tr:9\t-\tno\n";
+        sy_write_file(f_ok, s_ok, (long)strlen(s_ok), 0644);
+        sy_write_file(f_mut1, s_m1, (long)strlen(s_m1), 0644);
+        sy_write_file(f_mut2, s_m2, (long)strlen(s_m2), 0644);
+    }
+
+    rc = run_tm("--assert-zero-raw", f_ok, out, (int)sizeof out);
+    tm_ck(rc == 0 && strstr(out, "TRAIN_MODES_ZERO_RAW\trows=2\traw_run=0\tstatus=PASS") != 0, "fixture-zero-raw-passes");
+
+    rc = run_tm("--assert-zero-raw", f_mut1, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "RAW_RUN_VIOLATION") != 0 && strstr(out, "raw_run=1\tstatus=FAIL") != 0, "mut1-flipped-to-raw-fails");
+
+    rc = run_tm("--assert-zero-raw", f_mut2, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "tools/new-raw.cx") != 0 && strstr(out, "raw_run=1\tstatus=FAIL") != 0, "mut2-added-raw-tool-fails");
+
+    /* Mutation 3: missing table file -> must FAIL */
+    rc = run_tm("--assert-zero-raw", f_mut3, out, (int)sizeof out);
+    tm_ck(rc != 0 && strstr(out, "TRAIN_MODES\tFAIL\tmissing") != 0, "mut3-missing-table-fails");
+
+    sy_remove_all(dir);
+    printf("CHECK_TRAIN_TOOL_MODES\tpassed=%d\tfailed=%d\n", tm_pass, tm_fail);
+    return tm_fail ? 1 : 0;
+}

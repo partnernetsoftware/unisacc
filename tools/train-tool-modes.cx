@@ -1,0 +1,169 @@
+/* tools/train-tool-modes.cx -- generate and check build/train-tool-modes.tsv (I2c in-session freeze audit).
+   Verifies every audited call site still exists in the train orchestrators, emits the canonical table,
+   and provides --assert-zero-raw [TABLE] to fail whenever any train tool runs directly from worktree source
+   without a pin (mode=worktree-raw-run).
+   Usage:
+     sh ./unisacc.com tools/train-tool-modes.cx -- --write [--root DIR]
+     sh ./unisacc.com tools/train-tool-modes.cx -- --check [--root DIR]
+     sh ./unisacc.com tools/train-tool-modes.cx -- --assert-zero-raw [FILE] */
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+typedef struct {
+    const char *scope;
+    const char *tool;
+    const char *mode;
+    const char *call_site;
+    const char *pin_site;
+    const char *resume_check;
+    const char *src_file;
+    const char *needle;
+} TmSpec;
+
+static const TmSpec tm_specs[] = {
+    /* candidate-chain.cx: native-pin (6) */
+    {"chain", "tools/chain-step.cx", "native-pin", "tools/candidate-chain.cx:567", "tools/candidate-chain.cx:311-343", "yes(per-process-first:native_sha+out)", "tools/candidate-chain.cx", "step_pin(root, secs);"},
+    {"chain", "tools/whole-front.cx", "native-pin", "tools/candidate-chain.cx:203", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tools/candidate-chain.cx", "\"whole-front\""},
+    {"chain", "tools/preflight.cx", "native-pin", "tools/candidate-chain.cx:239", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tools/candidate-chain.cx", "\"preflight\""},
+    {"chain", "tools/release-build.cx", "native-pin", "tools/candidate-chain.cx:2414", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tools/candidate-chain.cx", "\"release-build\""},
+    {"chain", "tools/release-ape.cx", "native-pin", "tools/candidate-chain.cx:3539", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tools/candidate-chain.cx", "\"release-ape\""},
+    {"chain", "tools/chain-pace.cx", "native-pin", "tools/candidate-chain.cx:2644", "tools/candidate-chain.cx:348-390", "yes(soft-fallback:pin_soft=1)", "tools/candidate-chain.cx", "\"chain-pace\""},
+    /* candidate-chain.cx: src-tree-pin (3) */
+    {"chain", "tools/entry-build.cx", "src-tree-pin", "tools/candidate-chain.cx:538", "tools/candidate-chain.cx:392-540", "yes(per-process-first:per-file-sha)", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"entry-build\""},
+    {"chain", "tools/kernel-route.cx", "src-tree-pin", "tools/candidate-chain.cx:551", "tools/candidate-chain.cx:542-555", "yes(per-process-first:per-file-sha)", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"kernel-route\""},
+    {"chain", "tools/asm-source.cx", "src-tree-pin", "tools/candidate-chain.cx:551", "tools/candidate-chain.cx:542-555", "yes(per-process-first:per-file-sha)", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"asm-source\""},
+    /* candidate-chain.cx & chain-run.cx: native-pin-opt / native-unpinned (4) */
+    {"chain", "tools/source-job-wave.cx", "native-unpinned", "tools/candidate-chain.cx:1787", "-", "no(elf-built-in-ctx-no-sha-check)", "tools/candidate-chain.cx", "source-job-wave-O2.elf"},
+    {"chain-run", "tools/chain-watch.cx", "native-pin-opt", "tools/chain-run.cx:880", "tools/chain-run.cx:658-676", "conditional(only-when-UNISACC_CHAIN_TOOLS_EPOCH)", "tools/chain-run.cx", "prepare_once(\"prepare-watch\""},
+    {"chain-run", "tools/candidate-chain.cx", "native-pin-opt", "tools/chain-run.cx:893", "tools/chain-run.cx:658-676", "conditional(only-when-UNISACC_CHAIN_TOOLS_EPOCH)", "tools/chain-run.cx", "prepare_once(\"prepare-candidate\""},
+    {"chain-run", "tools/chain-run.cx", "native-unpinned", "tools/chain-run.cx:689", "-", "no(supervise-self-build-no-sha-check)", "tools/chain-run.cx", "\"tools/chain-run.cx\",\"-o\",native"},
+    /* worktree-raw-run: chain + release train (11) */
+    {"chain", "tools/ape-pack.cx", "worktree-raw-run", "tools/release-ape.cx:121", "-", "no(raw-worktree-run-in-pack)", "tools/release-ape.cx", "\"tools/ape-pack.cx\""},
+    {"chain", "tools/net-deps.cx", "worktree-raw-run", "tools/candidate-chain.cx:1811", "-", "no(raw-worktree-run-on-touch)", "tools/candidate-chain.cx", "/tools/net-deps.cx"},
+    {"release", "tools/prerun-drive.cx", "worktree-raw-run", "tools/release-chain.cx:87", "-", "no(raw-worktree-run)", "tools/release-chain.cx", "tools/prerun-drive.cx"},
+    {"release", "tools/release-run.cx", "worktree-raw-run", "tools/release-chain.cx:694", "-", "no(raw-worktree-run)", "tools/release-chain.cx", "\"tools/release-run.cx\""},
+    {"release", "tools/release-layout.cx", "worktree-raw-run", "tools/release-run.cx:113", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-layout.cx\""},
+    {"release", "tools/release-dispatch.cx", "worktree-raw-run", "tools/release-run.cx:123", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-dispatch.cx\""},
+    {"release", "tools/release-decide.cx", "worktree-raw-run", "tools/release-run.cx:130", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-decide.cx\""},
+    {"release", "tools/release-ape.cx", "worktree-raw-run", "tools/release-run.cx:448", "-", "no(raw-worktree-run-in-release-pack)", "tools/release-run.cx", "\"tools/release-ape.cx\""},
+    {"release", "tools/version-inject.cx", "worktree-raw-run", "tools/release-run.cx:464", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/version-inject.cx\""},
+    {"release", "tools/release-exec.cx", "worktree-raw-run", "tools/release-run.cx:751", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-exec.cx\""},
+    {"release", "tools/release-prep.cx", "worktree-raw-run", "tools/release-run.cx:758", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-prep.cx\""},
+    {"release", "tools/release-packcheck.cx", "worktree-raw-run", "tools/release-run.cx:810", "-", "no(raw-worktree-run)", "tools/release-run.cx", "\"tools/release-packcheck.cx\""}
+};
+
+static int verify_anchors(const char *root) {
+    int i, n = (int)(sizeof(tm_specs) / sizeof(tm_specs[0])), bad = 0;
+    for (i = 0; i < n; i++) {
+        char p[512];
+        unsigned char *b = 0;
+        int64_t bn = 0;
+        cx_fmt(p, (long)sizeof p, "%s/%s", root, tm_specs[i].src_file);
+        if (sy_read_file(p, &b, &bn, 4 << 20) != 0 || !b) {
+            printf("TRAIN_MODES\tANCHOR_MISSING_FILE\t%s\n", p);
+            bad++;
+            continue;
+        }
+        if (strstr((char *)b, tm_specs[i].needle) == 0) {
+            printf("TRAIN_MODES\tANCHOR_STALE\t%s\t%s\n", tm_specs[i].call_site, tm_specs[i].needle);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+static int assert_zero_raw(const char *tbl_path) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pos = 0;
+    int rows = 0, raw = 0;
+    if (sy_read_file(tbl_path, &b, &n, 1 << 20) != 0 || !b) {
+        printf("TRAIN_MODES\tFAIL\tmissing\t%s\n", tbl_path);
+        return 1;
+    }
+    while (pos < (long)n) {
+        long ls = pos;
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        long ll = pos - ls;
+        if (pos < (long)n) pos++;
+        if (ll > 0 && b[ls] != '#') {
+            char line[1024];
+            long cl = ll < 1023 ? ll : 1023;
+            mm_copy(line, (long)sizeof line, b + ls, cl);
+            line[cl] = 0;
+            rows++;
+            if (strstr(line, "\tworktree-raw-run\t") != 0) {
+                raw++;
+                printf("RAW_RUN_VIOLATION\t%s\n", line);
+            }
+        }
+    }
+    printf("TRAIN_MODES_ZERO_RAW\trows=%d\traw_run=%d\tstatus=%s\n", rows, raw, raw == 0 ? "PASS" : "FAIL");
+    return raw == 0 ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    int mode = 0, i, n = (int)(sizeof(tm_specs) / sizeof(tm_specs[0])), n_raw = 0;
+    char root[512], tbl[1024];
+    static char out[65536];
+    long on = 0;
+
+    cx_fmt(root, (long)sizeof root, ".");
+    tbl[0] = 0;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--write") == 0) mode = 1;
+        else if (strcmp(argv[i], "--check") == 0) mode = 2;
+        else if (strcmp(argv[i], "--assert-zero-raw") == 0) {
+            mode = 3;
+            if (i + 1 < argc && argv[i + 1][0] != '-') cx_fmt(tbl, (long)sizeof tbl, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) cx_fmt(root, (long)sizeof root, "%s", argv[++i]);
+        else { printf("usage: train-tool-modes --write|--check [--root DIR] | --assert-zero-raw [FILE]\n"); return 2; }
+    }
+    if (!mode) { printf("usage: train-tool-modes --write|--check [--root DIR] | --assert-zero-raw [FILE]\n"); return 2; }
+    if (mode == 3) {
+        if (!tbl[0]) cx_fmt(tbl, (long)sizeof tbl, "%s/build/train-tool-modes.tsv", root);
+        return assert_zero_raw(tbl);
+    }
+
+    if (verify_anchors(root) != 0) return 1;
+    {
+        const char *hdr = "# scope\ttool\tmode\tcall_site\tpin_check_site\tresume_recheck\n"
+                          "# Generated by tools/train-tool-modes.cx --write; I2c in-session tool freeze audit (v0.0.90 L.13).\n"
+                          "# modes: native-pin | src-tree-pin | native-pin-opt | native-unpinned | worktree-raw-run\n";
+        long hl = (long)strlen(hdr);
+        mm_copy(out, (long)sizeof out, hdr, hl);
+        on = hl;
+    }
+    for (i = 0; i < n; i++) {
+        char line[1024];
+        if (strcmp(tm_specs[i].mode, "worktree-raw-run") == 0) n_raw++;
+        if (cx_fmt(line, (long)sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\n",
+                   tm_specs[i].scope, tm_specs[i].tool, tm_specs[i].mode,
+                   tm_specs[i].call_site, tm_specs[i].pin_site, tm_specs[i].resume_check) == 0) {
+            long ll = (long)strlen(line);
+            if (on + ll < (long)sizeof out - 1) { mm_copy(out + on, (long)sizeof out - on, line, ll); on += ll; }
+        }
+    }
+    out[on] = 0;
+    cx_fmt(tbl, (long)sizeof tbl, "%s/build/train-tool-modes.tsv", root);
+    if (mode == 1) {
+        if (sy_write_file(tbl, out, on, 0644) != 0) { printf("TRAIN_MODES\tFAIL\twrite\n"); return 1; }
+        printf("TRAIN_MODES\tWROTE\trows=%d\traw_run=%d\n", n, n_raw);
+        return 0;
+    } else {
+        unsigned char *cur = 0;
+        int64_t cn = 0;
+        if (sy_read_file(tbl, &cur, &cn, 65535) != 0 || !cur) {
+            printf("TRAIN_MODES\tFAIL\tmissing\t%s\n", tbl);
+            return 1;
+        }
+        if ((long)cn != on || memcmp(cur, out, on) != 0) {
+            printf("TRAIN_MODES\tDIFF\trows=%d\traw_run=%d\n", n, n_raw);
+            return 1;
+        }
+        printf("TRAIN_MODES\tCHECK\trows=%d\traw_run=%d\n", n, n_raw);
+        return 0;
+    }
+}
