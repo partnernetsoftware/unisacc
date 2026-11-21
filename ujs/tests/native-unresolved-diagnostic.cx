@@ -1,0 +1,54 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int check(char *host,char *source,char *wasm,int status,const char *diagnostic) {
+    char *args[]={"sh","-c","exec \"$@\" 2>&1","ujs-diagnostic",host,source,"-o",wasm,0};
+    char *output=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,6,&output,&bytes);
+    int matched=!diagnostic || (output && tx_contains(output,bytes,diagnostic,tx_len(diagnostic,256)));
+    int failed=rc!=status || !matched || (!!sy_exists(wasm)!=(status==0));
+    printf("NATIVE_DIAGNOSTIC rc=%d failed=%d %.*s\n",rc,failed,(int)bytes,output?output:"");
+    mm_free(output);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],host[320],good[320],bad[320],wasm[3][320],expected[160];
+    char fixture[]="ujs/practice/uxe/test/native-undefined-local-repro.ujs";
+    const char symbol[]="missing_utf8_width";
+    const char valid[]="native function call(value:i64) i64 { let answer=value+1; return answer; }\nreturn 0.0+call(3);\n";
+    const char illegal[]="native function call(value:i64) i64 { leaked=value; return value; }\nreturn 0.0+call(3);\n";
+    unsigned char *source=0;
+    int64_t size=0;
+    if(sy_read_file(fixture,&source,&size,4096)) return 2;
+    long index=tx_find((const char *)source,size,symbol,sizeof symbol-1);
+    mm_free(source);
+    if(index<0 || sy_mkdtemp("/tmp","uxe-native-diagnostic-",dir,sizeof dir)) return 2;
+    tx_snprintf(host,sizeof host,"%s/ujs",dir);
+    tx_snprintf(good,sizeof good,"%s/good.ujs",dir);
+    tx_snprintf(bad,sizeof bad,"%s/bad.ujs",dir);
+    for(int i=0;i<3;i++) tx_snprintf(wasm[i],sizeof wasm[i],"%s/%d.wasm",dir,i);
+    tx_snprintf(expected,sizeof expected,"unresolved native symbol at byte %ld: %s",index+1+mutate,symbol);
+    char *build[]={"cx","-DUJS_HOST","ujs/product/ujs_main.cx","ujs/product/host1_vm.cx",
+        "ujs/seed/stage0/compiler_min.cx","-o",host,0};
+    char *output=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(build,40,&output,&bytes);
+    int failed=rc!=0 || sy_write_file(good,valid,sizeof valid-1,0600) || sy_write_file(bad,illegal,sizeof illegal-1,0600);
+    if(rc) printf("NATIVE_DIAGNOSTIC build_rc=%d %.*s\n",rc,(int)bytes,output?output:"");
+    mm_free(output);
+    if(!failed) {
+        failed+=check(host,fixture,wasm[0],1,expected);
+        failed+=check(host,good,wasm[1],0,0);
+        failed+=check(host,bad,wasm[2],1,"native function requires an explicit local");
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("CHECK_NATIVE_DIAGNOSTIC cases=3 failed=%d\n",failed);
+    return failed!=0;
+}
