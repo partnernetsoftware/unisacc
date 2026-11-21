@@ -259,7 +259,7 @@
 - FXAA | G-pixel 锯齿阶跃、采样方向及对照 | EffectComposer。
 - 调色 Pass | G-pixel 色域、曝光与目标格式 | M5 色彩输出和 EffectComposer。
 - ArrowHelper | G-struct 方向与长度 | 场景图及线与网格。
-- AxesHelper | G-struct 轴序和颜色 | 场景图与线。
+- AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
 - BoxHelper | G-struct 对象世界边界 | Box3 与场景图。
 - Box3Helper | G-struct 外接框中心和尺度 | Box3。
 - CameraHelper | G-struct 视锥与相机变换 | M3 相机。
