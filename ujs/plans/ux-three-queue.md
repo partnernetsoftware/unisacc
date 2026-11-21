@@ -302,7 +302,8 @@
 - ~~Helper 固定几何生成 | G-struct 31 行事实表生成、--check 与篡改拒绝 | Plane、DirectionalLight、SpotLight。~~ 生成文件匹配，错件拒绝。
 - ~~AudioContext 版本化主机桥 | G-io 采样率、实例、关闭和旧句柄 | host PCM ABI。~~ Chrome 与 r160 27 项通过，陈旧句柄篡改转红。
 - ~~AudioListener 世界位姿 | G-io Chrome AudioParam 的世界位置、朝向及上向 | AudioContext、场景图。~~ 十项通过，误读朝向轴转红。
-- AudioListener 主音量与滤镜 | G-io 增益自动化与滤镜解绑 | 世界位姿和播放主机。
+- ~~AudioListener 主音量自动化 | G-io 10 毫秒时间常数、重定向连续性与虚拟时序 | 世界位姿和播放主机。~~ Chrome 离线六项通过，错取时间转红。
+- AudioListener 滤镜与产品混音 | G-io 解绑、重接与页面切换 | 主音量自动化与 AudioBuffer。
 - ~~Audio 缓冲播放 | G-io 双声道 PCM、同采样率循环、稳态增益与停止 | AudioLoader。~~ Chrome 离线音频与独立金值 11 项通过，取消循环转红。
 - ~~Audio 双声道 PCM 主机接线 | G-io 两块连续采样、过期句柄与双声道 | AudioContext、缓冲播放。~~ Chrome 和 r160 30 项通过，交换声道转红。
 - Audio 播放完整接线 | G-io 产品宿主、增益自动化、暂停与重采样 | 双声道 PCM 主机接线。
