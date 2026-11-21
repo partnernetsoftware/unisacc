@@ -1,0 +1,46 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],url[720];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-context-recovery-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/recovery.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/gpu-context-recovery-browser.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_gpu_recovery(mode:i64,stamp:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-target.ujs",
+        "ujs/practice/uxe/test/gpu-context-recovery-probe.ujs","-o",wasm,0};
+    const double gold[]={
+        1,1,0,4294901760,0,1,-6,1,1,2,-3,-12,
+        0,4278190335,4278255360,0,1,-3,1,0,4278190335,0,0,-6,
+    };
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("G_PIXEL GPU context compiler_rc=%d %s\n",rc,output?output:""); failed++; }
+        mm_free(output); output=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#recovery",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("G_PIXEL GPU context case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed++;
+    mm_free(output);
+    printf("G_PIXEL GPU context recovery cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

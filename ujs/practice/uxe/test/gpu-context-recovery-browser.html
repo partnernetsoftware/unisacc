@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="recovery">pending</pre>
+<script type="module">
+import { createGpuContext } from "../base/gpu-context-abi.js";
+
+const result = document.querySelector("#recovery");
+try {
+  const query = new URLSearchParams(location.search);
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 4;
+  document.body.append(canvas);
+  const gl = canvas.getContext("webgl2");
+  if (!gl) throw new Error("WebGL2 required");
+  const ext = gl.getExtension("WEBGL_lose_context");
+  if (!ext) throw new Error("WEBGL_lose_context required");
+  const frames = [];
+  const createFramebuffer = gl.createFramebuffer;
+  gl.createFramebuffer = function () {
+    const frame = createFramebuffer.call(gl);
+    frames.push(frame);
+    return frame;
+  };
+  function nextEvent(type) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        canvas.removeEventListener(type, receive);
+        reject(new Error(`timed out waiting for ${type}`));
+      }, 3500);
+      function receive(event) {
+        clearTimeout(timeout);
+        resolve(event);
+      }
+      canvas.addEventListener(type, receive, { once: true });
+    });
+  }
+  let wasm;
+  const gpu = createGpuContext(gl, () => wasm.memory);
+  const sources = await Promise.all([
+    fetch(`file://${query.get("wasm")}`),
+    fetch("../base/gpu-flat.vert"),
+    fetch("../base/gpu-flat.frag"),
+  ]);
+  const module = await WebAssembly.compile(await sources[0].arrayBuffer());
+  wasm = new WebAssembly.Instance(module, { uxe_gpu_v1: { host_gpu_submit: gpu.submit } }).exports;
+  const memory = new DataView(wasm.memory.buffer, 2097152);
+  for (let i = 0; i < 2; i++) {
+    const start = 5500 + 512 * i;
+    const bytes = new Uint8Array(await sources[i + 1].arrayBuffer());
+    if (!bytes.length || bytes.length > 512) throw new Error("invalid shader source length");
+    new Uint8Array(memory.buffer, memory.byteOffset + start, bytes.length).set(bytes);
+    memory.setUint32(5000 + 8 * i, start, true);
+    memory.setUint32(5004 + 8 * i, bytes.length, true);
+  }
+  const run = (mode, stamp = gpu.generation) => Number(wasm.uxe_gpu_recovery(BigInt(mode), BigInt(stamp)));
+  const word = at => memory.getUint32(at, true);
+  const initialGeneration = gpu.generation;
+  const output = [initialGeneration, Number(gpu.ready), run(0), word(8000)];
+  const replay = new Uint8Array(memory.buffer, memory.byteOffset + 2048, word(2048 + 8));
+  const savedReplay = replay.slice();
+  const lost = nextEvent("webglcontextlost");
+  ext.loseContext();
+  const event = await lost;
+  output.push(Number(gpu.ready), Number(event.defaultPrevented), run(1), gpu.generation);
+  const restored = nextEvent("webglcontextrestored");
+  setTimeout(() => ext.restoreContext(), 0);
+  await restored;
+  output.push(Number(gpu.ready), gpu.generation, run(1), run(2));
+  const stamp = query.get("mutate") === "1" ? initialGeneration : gpu.generation;
+  output.push(
+    run(3, stamp), word(8120), word(8160), Number(gl.isFramebuffer(frames[0])),
+    Number(frames.length === 2 && frames[0] !== frames[1] && gl.isFramebuffer(frames[1])),
+    run(1), Number(savedReplay.every((byte, i) => byte === replay[i])),
+    run(4), word(8220), gl.getError(),
+  );
+  gpu.detach();
+  output.push(Number(gpu.ready), run(1));
+  result.textContent = JSON.stringify(output);
+} catch (error) {
+  result.textContent = `error:${error.message}`;
+}
+</script>
