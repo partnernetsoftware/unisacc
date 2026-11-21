@@ -1,0 +1,726 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use dv.procid
+#pragma unisa use sysx.reaper
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+/* devsvc git push: pin the authorized tip and replay onto a fetched branch in
+   a private Git directory. A rejected replay leaves the shared ref and index. */
+#define OWN_MAX 64
+#define RECOVERY_SCAN 129
+#define PUBLISHED_ALIASES 64
+typedef struct { char id[OWN_MAX][41]; int n; } commits;
+static char root[4096], branch[256], scratch[4400], idx[4600];
+static char *index_env[2];
+static commits requested;
+static int64_t end_ns, cleanup_ns;
+static char git_dir[4500], object_env[4600], ape[4200], hook[4600];
+static const char *worker,*syncer;
+static char branch_key[65], session_base[4300], session_ref[160];
+static char committer[2][4400];
+static int deadline_hit;
+
+static int run_at(const char *cwd, char *const argv[], char *const env[], np_result *r) {
+    char why[512] = "";
+    int64_t now = sy_mono_ns();
+    if (now < 0) return -1;
+    int left = (int)((end_ns - now) / 1000000000LL);
+    if (left <= 0) { deadline_hit=1; return -1; }
+    if (np_run(argv, cwd, env, left, r, why, sizeof why) || r->residue) {
+        if(r->timed_out||r->residue||r->rc==124)deadline_hit=1;
+        fprintf(stderr, "PUSH_REPLAY_CHILD\tname=%s\treason=%s\n", argv[0], why);
+        return -1;
+    }
+    if(r->rc==124)deadline_hit=1;
+    return r->rc;
+}
+static int call(char *const argv[], char *const env[], np_result *r) {
+    return run_at(root, argv, env, r);
+}
+
+static int exact(char *const argv[], char *const env[], char *out, size_t cap) {
+    np_result r = {0};
+    int rc = call(argv, env, &r);
+    if (rc || !r.outn || r.out[r.outn - 1] != '\n' || r.outn > cap) {
+        if (rc && r.errn) fwrite(r.err, 1, r.errn, stderr);
+        np_free(&r);
+        return -1;
+    }
+    mm_copy(out, cap, r.out, r.outn - 1);
+    out[r.outn - 1] = 0;
+    np_free(&r);
+    return 0;
+}
+
+static int oid(const char *s) {
+    return strlen(s) == 40 && strspn(s, "0123456789abcdef") == 40;
+}
+
+static int git_range(const char *up,const char *tip,int first_parent,commits *list) {
+    char range[90];
+    if (cx_fmt(range, sizeof range, "%s..%s", up, tip)) return -1;
+    char *args[] = {"git", "rev-list", "--reverse", "--topo-order", range, 0, 0};
+    if(first_parent){args[4]="--first-parent";args[5]=range;}
+    np_result r = {0};
+    int ok=!call(args,0,&r)&&r.outn%41==0&&r.outn<=OWN_MAX*41;
+    list->n=ok?(int)(r.outn/41):0;
+    for(int i=0;ok&&i<list->n;i++) {
+        mm_copy(list->id[i],41,r.out+i*41,40);list->id[i][40]=0;
+        ok=r.out[i*41+40]=='\n'&&oid(list->id[i]);
+    }
+    np_free(&r);
+    return ok ? 0 : -1;
+}
+static int owns(const char *up,const commits *owned,int first_parent) {
+    commits actual;
+    return owned->n>0&&!git_range(up,owned->id[owned->n-1],first_parent,&actual)&&
+           actual.n==owned->n&&mm_same(actual.id,owned->id,(size_t)owned->n*41);
+}
+static int ancestor(const char *a,const char *b) {
+    char *v[]={"git","merge-base","--is-ancestor",(char *)a,(char *)b,0};
+    np_result r={0};int rc=call(v,0,&r);np_free(&r);
+    return rc==0?1:rc==1?0:-1;
+}
+static int read_ref(const char *ref,char sha[64]) {
+    char *v[]={"git","rev-parse","-q","--verify",(char *)ref,0};
+    np_result r={0};int rc=call(v,0,&r);sha[0]=0;
+    if(!rc) {
+        if(r.outn!=41||r.out[40]!='\n')rc=-1;
+        else {mm_copy(sha,64,r.out,40);sha[40]=0;if(!oid(sha))rc=-1;}
+    }
+    np_free(&r);
+    return rc==0?1:rc==1?0:-1;
+}
+static int delete_ref(const char *ref,const char *expected) {
+    char *v[]={"git","update-ref","-d",(char *)ref,(char *)expected,0};
+    np_result r={0};int rc=call(v,0,&r);np_free(&r);return rc;
+}
+static int remove_tree(const char *path) {
+    char *v[]={"rm","-rf","--",(char *)path,0};
+    np_result r={0};int rc=call(v,0,&r);np_free(&r);return rc;
+}
+static int dead_job(const char *job) {
+    char tag[100];
+    if (strncmp(job, "job-", 4) || !job[4] || strlen(job + 4) >= sizeof tag ||
+        strspn(job + 4, "0123456789-") != strlen(job + 4)) return -1;
+    if (cx_fmt(tag, sizeof tag, "%s", job + 4)) return -1;
+    for (char *p = tag; *p; p++) if (*p == '-') *p = ':';
+    pi_id_t owner;
+    if (pi_parse_tag_ex(tag,&owner) || !owner.pid || !owner.ticks || !owner.btime || !owner.ns_ino) return -1;
+    return !pi_alive_ex(&owner,0,0);
+}
+
+static int setup_session(void) {
+    char common[4200],token[104],tag[100];
+    char *where[]={"git","rev-parse","--path-format=absolute","--git-common-dir",0};
+    if(exact(where,0,common,sizeof common)||
+       sy_sha256_hex(branch,strlen(branch),branch_key)||
+       cx_fmt(session_base,sizeof session_base,"%s/devsvc-push",common)||
+       sy_mkdir_all(session_base,0700))return 2;
+    pi_self_tag(0,tag,sizeof tag);
+    pi_id_t self;
+    if(pi_parse_tag_ex(tag,&self)||!self.pid||!self.ticks||!self.btime||!self.ns_ino)return 2;
+    for(char *p=tag;*p;p++)if(*p==':')*p='-';
+    if(cx_fmt(token,sizeof token,"job-%s",tag)||
+       cx_fmt(scratch,sizeof scratch,"%s/%s",session_base,token)||
+       cx_fmt(session_ref,sizeof session_ref,"refs/devsvc/push-replay/%s",token)||
+       sy_mkdir(scratch,0700))return 2;
+    sy_dir_t d;
+    if(sy_dir_open(&d,session_base))return 2;
+    for(int seen=0;seen<128&&sy_dir_next(&d)==1;seen++) {
+        if(d.kind!='d'||tx_eqz(d.name,token)||dead_job(d.name)!=1)continue;
+        char ref[160], sha[64], path[4500];
+        if(cx_fmt(ref,sizeof ref,"refs/devsvc/push-replay/%s",d.name)||
+           cx_fmt(path,sizeof path,"%s/%s",session_base,d.name))continue;
+        int found=read_ref(ref,sha);
+        if(found<0||(found&&delete_ref(ref,sha))||remove_tree(path))continue;
+        printf("PUSH_REPLAY_RECOVERED\tjob=%s\n",d.name);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int alias_ref(const char *id,char ref[160]) {
+    return cx_fmt(ref,160,"refs/devsvc/push-alias/%s/%s",branch_key,id);
+}
+static int resolve_owned(const char *remote,int new_branch,commits *owned,char latest[64]) {
+    char local[64];
+    if(read_ref(branch,local)!=1)return 2;
+    owned->n=0;
+    for(int i=0;i<requested.n;i++){
+        char id[64],prior[64],ref[160];
+        mm_copy(id,sizeof id,requested.id[i],41);
+        int depth=0;
+        for(;depth<OWN_MAX;depth++){
+            if(alias_ref(id,ref))return 2;
+            int found=read_ref(ref,prior);
+            if(found<0)return 2;
+            if(!found)break;
+            if(tx_eqz(prior,id))return 2;
+            mm_copy(id,sizeof id,prior,41);
+        }
+        if(depth==OWN_MAX||(depth&&ancestor(id,local)!=1&&ancestor(id,remote)!=1)) {
+            fprintf(stderr,"PUSH_REPLAY_REFUSE\treason=invalid-local-alias\tcommit=%s\n",requested.id[i]);
+            return 2;
+        }
+        if(!depth&&ancestor(id,local)!=1&&ancestor(id,remote)!=1) {
+            fprintf(stderr,"PUSH_REPLAY_REFUSE\treason=stale-receipt\tcommit=%s\tnext=use-current-commit\n",id);
+            return 2;
+        }
+        mm_copy(latest,64,id,41);
+        if(!new_branch&&!owned->n&&ancestor(id,remote)==1)continue;
+        mm_copy(owned->id[owned->n++],41,id,41);
+    }
+    return 0;
+}
+
+static int derived_path(const char *map, const char *path) {
+    size_t pn=strlen(path);
+    for(const char *p=map;p&&*p;){
+        const char *nl=strchr(p,'\n');if(!nl)nl=p+strlen(p);
+        const char *col=p;
+        if(*p!='#') {
+            for(int i=0;i<4&&col<nl;i++) {
+                const char *tab=memchr(col,'\t',(size_t)(nl-col));
+                col=tab?tab+1:nl;
+            }
+            while(col<nl&&*col!='\t'){
+                const char *end=col;
+                while(end<nl&&*end!=' '&&*end!='\t')end++;
+                size_t n=(size_t)(end-col);
+                if(n&&n<=pn&&!memcmp(col,path,n)&&
+                   (n==pn||(col[n-1]=='/'&&!strchr(path+n,'/'))))return 1;
+                col=end;while(col<nl&&*col==' ')col++;
+            }
+        }
+        p=*nl?nl+1:nl;
+    }
+    return 0;
+}
+
+/* Generated paths use the fetched branch version before derive runs. Preserve
+   the source path set from the actual commit, including deletions. */
+static int take_upstream_outputs(const char *onto, const char *parent, const char *selected,
+                                 np_result *paths, char **inputs, char **outputs) {
+    char spec[96];np_result map={0};
+    if(cx_fmt(spec,sizeof spec,"%s:exec/facts/derive.tsv",onto))return 2;
+    char *read[] = {"git","show",spec,0};
+    char *list[]={"git","diff-tree","--no-commit-id","-r","--name-only","--no-renames","-z",(char *)parent,(char *)selected,0};
+    int ni=0, no=0;
+    int rc=call(read,0,&map)||!map.out||call(list,0,paths);
+    for(char *p=paths->out;!rc&&p&&p<paths->out+paths->outn;){
+        char *end=memchr(p,0,(size_t)(paths->out+paths->outn-p));
+        if(!end||p==end||strpbrk(p," \r\n\t*?[")||p[0]=='-'||ni+no>=OWN_MAX){rc=2;break;}
+        int conflict=0;
+        if(derived_path(map.out,p)) {
+            char *lookup[]={"git","--literal-pathspecs","ls-files","--unmerged","--",p,0};
+            np_result r={0};
+            rc=call(lookup,index_env,&r);conflict=r.outn!=0;np_free(&r);
+        }
+        if(!rc&&conflict){
+            char *restore[]={"git","--literal-pathspecs","restore","--source",(char *)onto,"--staged","--",p,0};
+            np_result r={0};rc=call(restore,index_env,&r);np_free(&r);
+            if(!rc) {
+                outputs[no++]=p;
+                printf("PUSH_REPLAY_DERIVED\tpath=%s\tstate=REGENERATE_REQUIRED\n",p);
+            }
+        } else if(!rc)inputs[ni++]=p;
+        p=end+1;
+    }
+    inputs[ni]=0; outputs[no]=0;
+    np_free(&map);
+    if (rc) fprintf(stderr,"PUSH_REPLAY_REFUSE\treason=derive-path-set\n");
+    return rc ? 2 : 0;
+}
+
+static int landed_receipt(const np_result *r, const char *onto, char out[41]) {
+    const char *line=r->out, *end=line?line+r->outn:0;
+    int found=0;
+    while(line&&line<end) {
+        const char *nl=memchr(line,'\n',(size_t)(end-line));
+        if(!nl)break;
+        const char prefix[]="COMMIT_REPLAY\tfull=";
+        int pn=sizeof prefix-1;
+        if(nl-line==pn+86&&!memcmp(line,prefix,pn)&&
+           !memcmp(line+pn+40,"\tbase=",6)&&!memcmp(line+pn+46,onto,40)) {
+            if(found++)return 0;
+            mm_copy(out,41,line+pn,40);out[40]=0;
+        }
+        line=nl+1;
+    }
+    return found==1&&oid(out);
+}
+
+/* Keep a scratch Git directory and put only new Git objects in the real
+   object store. The shared HEAD, real index and working files are untouched. */
+static int setup_replay(void) {
+    char objects[4400], hp[4400], destination[4600], product[4400], ident[4200];
+    char *op[]={"git","rev-parse","--path-format=absolute","--git-path","objects",0};
+    char *hook_path[]={"git","rev-parse","--path-format=absolute","--git-path","hooks/pre-commit",0};
+    char *who[]={"git","var","GIT_COMMITTER_IDENT",0};
+    if(exact(op,0,objects,sizeof objects)||exact(hook_path,0,hp,sizeof hp)||exact(who,0,ident,sizeof ident)||
+       cx_fmt(object_env,sizeof object_env,"GIT_OBJECT_DIRECTORY=%s",objects)||
+       cx_fmt(git_dir,sizeof git_dir,"%s/.git",scratch)||
+       cx_fmt(destination,sizeof destination,"%s/hooks",git_dir)||
+       cx_fmt(hook,sizeof hook,"%s/pre-commit",destination)||
+       cx_fmt(ape,sizeof ape,"%s/unisacc.com",root)||
+       cx_fmt(product,sizeof product,"%s/unisacc.com",scratch))return 2;
+    char *name_end=strrchr(ident,'<'),*email_end=name_end?strchr(name_end,'>'):0;
+    if(!name_end||name_end<=ident||name_end[-1]!=' '||!email_end||email_end<=name_end+1)return 2;
+    name_end[-1]=0;*email_end=0;
+    if(cx_fmt(committer[0],sizeof committer[0],"GIT_COMMITTER_NAME=%s",ident)||
+       cx_fmt(committer[1],sizeof committer[1],"GIT_COMMITTER_EMAIL=%s",name_end+1))return 2;
+    np_result r={0};
+    char *init[]={"git","init","--quiet","--template=",0};
+    int rc=run_at(scratch,init,0,&r);
+    np_free(&r);
+    if(rc||sy_symlink(ape,product)||sy_mkdir_all(destination,0700))return 2;
+    int exists=sy_exists(hp);
+    if(exists<0)return 2;
+    if(!exists)return 0;
+    rc=sy_access(hp,X_OK);
+    if(rc==-EACCES)return 0;  /* Match the ordinary commit hook policy. */
+    if(rc)return 2;
+    unsigned char *bytes=0;int64_t size=0;
+    rc=sy_read_file(hp,&bytes,&size,65536)||!bytes||sy_write_atomic(hook,bytes,size,0700);
+    if(bytes)mm_free(bytes);
+    return rc?2:0;
+}
+
+static int build_commit(const char *onto,const char *selected,char **inputs,char **outputs,char out[41]) {
+    char git_assignment[4600], wt_assignment[4600], ident[3][4600], head[4500];
+    if(!inputs[0]){puts("PUSH_REPLAY_REFUSE\treason=no-source-input");return 2;}
+    if(!git_dir[0]&&setup_replay())return 2;
+    if(cx_fmt(git_assignment,sizeof git_assignment,"GIT_DIR=%s",git_dir)||
+       cx_fmt(wt_assignment,sizeof wt_assignment,"GIT_WORK_TREE=%s",scratch)||
+       cx_fmt(head,sizeof head,"%s/HEAD",git_dir))return 2;
+    char parent_line[42];
+    if(cx_fmt(parent_line,sizeof parent_line,"%s\n",onto)||sy_write_atomic(head,parent_line,41,0600))return 2;
+    char *body[]={"git","show","-s","--format=format:%an%x00%ae%x00%aI%x00%B",(char *)selected,0};
+    np_result original={0},result={0};
+    int rc=call(body,0,&original);
+    char *field=original.out;
+    const char *keys[]={"GIT_AUTHOR_NAME","GIT_AUTHOR_EMAIL","GIT_AUTHOR_DATE"};
+    for(int j=0;!rc&&j<3;j++) {
+        const char *end=original.out?original.out+original.outn:0;
+        char *nul=field&&field<end?memchr(field,0,(size_t)(end-field)):0;
+        if(!nul||field==nul||cx_fmt(ident[j],sizeof ident[j],"%s=%s",keys[j],field))rc=2;
+        else field=nul+1;
+    }
+    if(!rc&&(!field||!*field||original.outn>65536))rc=2;
+    if(!rc) {
+        char *env[]={git_assignment,wt_assignment,object_env,index_env[0],ident[0],ident[1],ident[2],
+                     committer[0],committer[1],0};
+        char *av[2*OWN_MAX+8]={(char *)worker,"--replay-index",(char *)onto,field};
+        int n=4;
+        for(int j=0;inputs[j];j++)av[n++]=inputs[j];
+        av[n++]="--outputs";
+        for(int j=0;outputs[j];j++)av[n++]=outputs[j];
+        av[n]=0;
+        rc=run_at(scratch,av,env,&result);
+        if(result.outn)fwrite(result.out,1,result.outn,stdout);
+        if(result.errn)fwrite(result.err,1,result.errn,stderr);
+        if(!rc&&!landed_receipt(&result,onto,out))rc=2;
+    }
+    np_free(&result);np_free(&original);
+    return rc?1:0;
+}
+
+static int merge_text(const char *path, const char modes[3][7], const char blobs[3][41]) {
+    char files[3][4550], cache[4750], hash[64];
+    for(int i=0;i<3;i++) {
+        if(strncmp(modes[i],"100",3)||!oid(blobs[i]))return 1;
+        if(cx_fmt(files[i],sizeof files[i],"%s/stage-%d",scratch,i))return 2;
+        char *blob[]={"git","cat-file","blob",(char *)blobs[i],0};
+        np_result r={0};
+        int rc=call(blob,0,&r)||r.outn>(16u<<20)||sy_write_atomic(files[i],r.out,r.outn,0600);
+        np_free(&r);
+        if(rc)return 2;
+    }
+    char *merge[]={"git","merge-file","-q","--",files[1],files[0],files[2],0};
+    np_result r={0};
+    int rc=call(merge,0,&r);
+    np_free(&r);
+    if(rc)return rc<0?2:1;
+    char *store[]={"git","hash-object","-w","--",files[1],0};
+    if(exact(store,0,hash,sizeof hash)||!oid(hash))return 2;
+    const char *mode=strcmp(modes[1],modes[0])?modes[1]:modes[2];
+    if(cx_fmt(cache,sizeof cache,"%s,%s,%s",mode,hash,path))return 2;
+    char *add[]={"git","update-index","--cacheinfo",cache,0};
+    rc=call(add,index_env,&r);np_free(&r);
+    return rc?2:0;
+}
+
+static int resolve_sources(np_result *unmerged) {
+    char *row=unmerged->out,*end=row?row+unmerged->outn:0;
+    int status=0;
+    while(row&&row<end) {
+        char *nul=memchr(row,0,(size_t)(end-row));
+        if(!nul||nul-row<51||row[6]!=' '||row[47]!=' '||row[49]!='\t')return 2;
+        const char *path=row+50;
+        char modes[3][7]={{0}},blobs[3][41]={{0}};
+        while(row<end) {
+            nul=memchr(row,0,(size_t)(end-row));
+            if(!nul||nul-row<51||row[6]!=' '||row[47]!=' '||row[49]!='\t')return 2;
+            if(!tx_eqz(path,row+50))break;
+            int stage=row[48]-'1';
+            if(stage<0||stage>=3||modes[stage][0])return 2;
+            mm_copy(modes[stage],sizeof modes[stage],row,6);
+            mm_copy(blobs[stage],sizeof blobs[stage],row+7,40);
+            row=nul+1;
+        }
+        int rc=merge_text(path,modes,blobs);
+        if(rc==2)return 2;
+        if(rc==1){printf("PUSH_REPLAY_CONFLICT\tpath=%s\n",path);status=1;}
+    }
+    return status;
+}
+
+static int prepare(const char *up,const commits *owned,commits *next) {
+    const char *onto = up;
+    next->n=owned->n;
+    for (int i = 0; i < owned->n; i++) {
+        char parent[96];
+        char *item=(char *)owned->id[i];
+        char *parents[] = {"git", "rev-list", "--parents", "-n", "1", item, 0};
+        if (exact(parents, 0, parent, sizeof parent) || strlen(parent) != 81 || parent[40] != ' ' ||
+            !oid(parent + 41) || (i && strcmp(parent + 41, owned->id[i - 1]))) {
+            printf("PUSH_REPLAY_REFUSE\treason=nonlinear-replay\tcommit=%s\n",item);
+            return 2;
+        }
+        int removed = sy_unlink(idx);
+        if (removed && removed != -ENOENT) return 2;
+        char *read[] = {"git", "read-tree", "-m", "--aggressive", parent + 41, (char *)onto, item, 0};
+        np_result r = {0};
+        int rc = call(read, index_env, &r);
+        np_free(&r);
+        if (rc) return 2;
+        np_result paths={0};
+        char *inputs[OWN_MAX+1], *outputs[OWN_MAX+1];
+        if(take_upstream_outputs(onto,parent+41,item,&paths,inputs,outputs)){np_free(&paths);return 2;}
+        char *unmerged[] = {"git", "ls-files", "-u", "-z", 0};
+        if (call(unmerged, index_env, &r)) { np_free(&r); np_free(&paths); return 2; }
+        rc=resolve_sources(&r);
+        np_free(&r);
+        if(rc){np_free(&paths);return rc;}
+        rc=build_commit(onto,item,inputs,outputs,next->id[i]);
+        np_free(&paths);
+        if(rc)return 2;
+        onto = next->id[i];
+    }
+    return 0;
+}
+
+static int ref_command(const char *file,const char *text) {
+    if(sy_write_atomic(file,text,strlen(text),0600))return 2;
+    char *cmd[]={"sh","-c","exec git update-ref --stdin < \"$1\"","sh",(char *)file,0};
+    np_result r={0};int rc=call(cmd,0,&r);
+    if(rc&&r.errn)fwrite(r.err,1,r.errn,stderr);
+    np_free(&r);return rc;
+}
+static int reconcile(const char *original,const char *published,const char *journal) {
+    for(int attempt=0;attempt<3;attempt++) {
+        char local[64],target[64],file[4550],update[16000],ref[160];
+        if(read_ref(branch,local)!=1)break;
+        if(ancestor(published,local)==1) {
+            delete_ref(journal,published);
+            return 0;
+        }
+        commits tail,rebased;
+        if(ancestor(original,local)!=1||git_range(original,local,1,&tail)||
+           (tail.n&&!tx_eqz(tail.id[tail.n-1],local)))break;
+        if(prepare(published,&tail,&rebased))break;
+        mm_copy(target,sizeof target,tail.n?rebased.id[rebased.n-1]:published,41);
+        if(cx_fmt(file,sizeof file,"%s/ref-transaction",scratch)||
+           cx_fmt(update,sizeof update,"start\nupdate %s %s %s\n",branch,target,local))break;
+        size_t used=strlen(update);
+        for(int i=-1;i<tail.n;i++){
+            const char *old=i<0?original:tail.id[i],*newer=i<0?published:rebased.id[i];
+            if(tx_eqz(old,newer))continue;
+            if(alias_ref(old,ref)||cx_fmt(update+used,sizeof update-used,"create %s %s\n",ref,newer))return 2;
+            used=strlen(update);
+        }
+        if(cx_fmt(update+used,sizeof update-used,"prepare\ncommit\n"))break;
+        if(ref_command(file,update)) {
+            char latest[64];
+            if(read_ref(branch,latest)!=1||tx_eqz(local,latest))break;
+            printf("PUSH_REPLAY_LOCAL_RETRY\told=%s\tcurrent=%s\tattempt=%d\n",local,latest,attempt+1);
+            sy_sleep_ms(29u+((unsigned)sy_mono_ns()^(unsigned)sy_pid())%173u);
+            continue;
+        }
+        char here[256];
+        char *sym[]={"git","symbolic-ref","-q","HEAD",0};
+        if(exact(sym,0,here,sizeof here)||!tx_eqz(branch,here))break;
+        np_result r={0};
+        char *sync[]={(char *)syncer,root,local,target,0};
+        int rc=call(sync,0,&r);
+        if(r.outn)fwrite(r.out,1,r.outn,stdout);
+        if(r.errn)fwrite(r.err,1,r.errn,stderr);
+        np_free(&r);
+        if(rc) {
+            printf("PUSH_REPLAY_REFUSE\treason=local-sync-failed\tremote_commit=%s\tlocal_commit=%s\n",published,target);
+            return 1;
+        }
+        delete_ref(journal,published);
+        printf("PUSH_REPLAY_RECONCILED\tremote=%s\tlocal=%s\ttail=%d\n",published,target,tail.n);
+        return 0;
+    }
+    printf("PUSH_REPLAY_REFUSE\treason=local-ref-moved\tremote_commit=%s\trecovery_ref=%s\n",published,journal);
+    return 1;
+}
+
+static int journal_ref(const char *original,const char *published,char out[360]) {
+    const char *job=strrchr(session_ref,'/')+1;
+    return cx_fmt(out,360,"refs/devsvc/push-recovery/%s/%s/%s/%s",branch_key,original,published,job);
+}
+static int remember(const char *ref,const char *value) {
+    char old[64];int found=read_ref(ref,old);
+    if(found!=0)return found==1&&tx_eqz(old,value)?0:1;
+    char *v[]={"git","update-ref",(char *)ref,(char *)value,"0000000000000000000000000000000000000000",0};
+    np_result r={0};int rc=call(v,0,&r);np_free(&r);
+    return rc&&!(read_ref(ref,old)==1&&tx_eqz(old,value));
+}
+static int recover_remote(const char *remote) {
+    char prefix[160], count[32];
+    if(cx_fmt(prefix,sizeof prefix,"refs/devsvc/push-recovery/%s/",branch_key)||
+       cx_fmt(count,sizeof count,"--count=%d",RECOVERY_SCAN))return 2;
+    char *v[]={"git","for-each-ref",count,"--format=%(refname)%09%(objectname)",prefix,0};
+    np_result r={0};int rc=call(v,0,&r);
+    if(rc){np_free(&r);puts("PUSH_REPLAY_REFUSE\treason=recovery-scan");return 2;}
+    char *line=r.out,*end=line?line+r.outn:0;
+    size_t pn=strlen(prefix);
+    int rows=0,retired=0;
+    while(line&&line<end) {
+        char *nl=memchr(line,'\n',(size_t)(end-line));
+        char *tab=nl?memchr(line,'\t',(size_t)(nl-line)):0;
+        if(!tab||nl-tab!=41||tab-line<=(long)pn+86||line[pn+40]!='/'||
+           memcmp(line+pn+81,"/job-",5)||
+           memcmp(line,prefix,pn)||memcmp(line+pn+41,tab+1,40)){rc=2;break;}
+        rows++;
+        *tab=0;*nl=0;line[pn+40]=0;
+        char original[41];mm_copy(original,sizeof original,line+pn,41);
+        line[pn+40]='/';
+        const char *result=tab+1;
+        int dead=dead_job(line+pn+82);
+        if(!oid(original)||!oid(result)||dead<0){rc=2;break;}
+        int known=ancestor(result,remote);
+        if(known<0||(known&&reconcile(original,result,line))){rc=1;break;}
+        if(!known&&dead&&!delete_ref(line,result))retired++;
+        line=nl+1;
+    }
+    np_free(&r);
+    if(retired)printf("PUSH_REPLAY_RETIRED\trecovery=%d\n",retired);
+    if(rc==2)puts("PUSH_REPLAY_REFUSE\treason=invalid-recovery-record");
+    if(!rc&&rows==RECOVERY_SCAN){
+        printf("PUSH_REPLAY_REFUSE\treason=recovery-limit\tscanned=%d\tretired=%d\n",rows,retired);
+        rc=1;
+    }
+    return rc;
+}
+
+/* Unpublished tail aliases stay live. Keep recent published receipts for
+   idempotent retry, and reject unreachable receipts after retirement. */
+static int prune_published_aliases(const char *remote) {
+    char prefix[160], merged[64], count[32];
+    if(cx_fmt(prefix,sizeof prefix,"refs/devsvc/push-alias/%s/",branch_key)||
+       cx_fmt(merged,sizeof merged,"--merged=%s",remote)||
+       cx_fmt(count,sizeof count,"--count=%d",RECOVERY_SCAN))return 2;
+    char *v[]={"git","for-each-ref",count,merged,"--sort=-committerdate",
+        "--format=%(refname)%09%(objectname)",prefix,0};
+    np_result r={0};
+    int rc=call(v,0,&r),rows=0,retired=0;
+    size_t pn=strlen(prefix);
+    char *p=r.out,*end=p?p+r.outn:0;
+    while(!rc&&p&&p<end) {
+        char *nl=memchr(p,'\n',(size_t)(end-p));
+        char *tab=nl?memchr(p,'\t',(size_t)(nl-p)):0;
+        if(!tab||tab-p!=(long)pn+40||nl-tab!=41||memcmp(p,prefix,pn)){rc=2;break;}
+        *tab=0;*nl=0;
+        if(!oid(p+pn)||!oid(tab+1)){rc=2;break;}
+        if(++rows>PUBLISHED_ALIASES&&!delete_ref(p,tab+1))retired++;
+        p=nl+1;
+    }
+    np_free(&r);
+    if(retired)printf("PUSH_REPLAY_RETIRED\taliases=%d\n",retired);
+    if(rc)puts("PUSH_REPLAY_REFUSE\treason=alias-scan");
+    return rc;
+}
+
+static int send_tip(const char *tip, int *race) {
+    char spec[340];
+    if (cx_fmt(spec, sizeof spec, "%s:%s", tip, branch)) return 2;
+    char *push[] = {"git", "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no", "origin", spec, 0};
+    char *env[] = {"LC_ALL=C", 0};
+    np_result r = {0};
+    int rc = call(push, env, &r);
+    *race = rc && r.out && (strstr(r.out, "\t[rejected] (non-fast-forward)") ||
+                            strstr(r.out, "\t[rejected] (fetch first)") ||
+                            strstr(r.out, "\t[remote rejected] (failed to update ref)"));
+    if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+    if (rc && !*race && r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return rc;
+}
+
+static int fetch_tip(const char *ref,const char *spec,char remote[64],int *new_branch) {
+    np_result r={0};
+    char *fetch[]={"git","fetch","--no-tags","--no-write-fetch-head","--no-recurse-submodules","--refmap=","origin",(char *)spec,0};
+    int rc=call(fetch,0,&r);
+    *new_branch=0;
+    if(rc) {
+        np_result query={0};
+        char *check[]={"git","ls-remote","--exit-code","origin",branch,0};
+        if(call(check,0,&query)==2) {
+            char fallback[300];
+            if(!cx_fmt(fallback,sizeof fallback,"HEAD:%s",ref)) {
+                np_free(&r);
+                fetch[7]=fallback;
+                rc=call(fetch,0,&r);
+                *new_branch=!rc;
+            }
+        }
+        np_free(&query);
+    }
+    if(rc&&r.errn)fwrite(r.err,1,r.errn,stderr);
+    np_free(&r);
+    char *rev[]={"git","rev-parse","--verify",(char *)ref,0};
+    return rc||exact(rev,0,remote,64)||!oid(remote);
+}
+static int refuse_nonfast_merge(const commits *owned) {
+    char *v[OWN_MAX+6]={"git","rev-list","--no-walk","--min-parents=2"};
+    int n=4;
+    for(int i=0;i<owned->n;i++)v[n++]=(char *)owned->id[i];
+    v[n]=0;
+    np_result r={0};
+    int rc=call(v,0,&r);
+    if(!rc&&r.outn) {
+        printf("PUSH_REPLAY_REFUSE\treason=non-fast-forward-merge\tcommit=%.40s\tnext=sync-then-merge\n",r.out);
+        rc=1;
+    }
+    np_free(&r);
+    return rc;
+}
+
+static int run_push(void) {
+    char spec[520],remote[64]="",current[64]="",original[64],journal[360];
+    unsigned pid = (unsigned)sy_pid();
+    if(cx_fmt(spec,sizeof spec,"%s:%s",branch,session_ref))return 2;
+    int status=1,attempt=0;
+    for (; attempt < 3; attempt++) {
+        if (attempt) {
+            unsigned spread = 31u + (pid ^ (unsigned)sy_now_ms()) % 151u;
+            sy_sleep_ms(spread);
+        }
+        int is_new=0;
+        if(fetch_tip(session_ref,spec,remote,&is_new)){
+            puts("PUSH_REPLAY_REFUSE\treason=fetch");
+            break;
+        }
+        if(!is_new&&(recover_remote(remote)||prune_published_aliases(remote)))break;
+        commits owned,rebased;
+        if(resolve_owned(remote,is_new,&owned,current))break;
+        if(!owned.n){status=0;break;}
+        mm_copy(original,sizeof original,owned.id[owned.n-1],41);
+        int ff=ancestor(remote,original),present=ancestor(original,remote);
+        if(ff<0||present<0)break;
+        if(!is_new&&!ff&&refuse_nonfast_merge(&owned))break;
+        /* Fast-forward merge ownership is its first-parent range. The merge
+           itself authorizes its second-parent content. Replay remains linear. */
+        if(!(is_new&&present)&&!owns(remote,&owned,ff)) {
+            puts("PUSH_REPLAY_REFUSE\treason=unowned-pending");
+            break;
+        }
+        journal[0]=0;
+        if(!is_new&&!ff) {
+            if(prepare(remote,&owned,&rebased))break;
+            mm_copy(current,sizeof current,rebased.id[rebased.n-1],41);
+            if(journal_ref(original,current,journal)||remember(journal,current)) {
+                puts("PUSH_REPLAY_REFUSE\treason=recovery-record");
+                break;
+            }
+            printf("PUSH_REPLAY_PLAN\tbase=%s\told=%s\tnew=%s\tattempt=%d\n", remote, original, current, attempt + 1);
+        } else mm_copy(current,sizeof current,original,41);
+        int race=0;
+        int rc=tx_eqz(current,remote)&&!is_new?0:send_tip(current,&race);
+        if(!rc) {
+            status=journal[0]?reconcile(original,current,journal):0;
+            if(status)printf("PUSH_REPLAY_PUBLISHED\tcommit=%s\n",current);
+            break;
+        }
+        if(race&&journal[0])delete_ref(journal,current);
+        if(!race) {
+            if(journal[0]&&!deadline_hit) {
+                char after[64];
+                int absent=0;
+                if(!fetch_tip(session_ref,spec,after,&absent)) {
+                    int landed=absent?0:ancestor(current,after);
+                    if(landed>0){
+                        status=reconcile(original,current,journal);
+                        if(status)printf("PUSH_REPLAY_PUBLISHED\tcommit=%s\n",current);
+                    }else if(!landed)delete_ref(journal,current);
+                }
+            }
+            break;
+        }
+    }
+    if(attempt==3)puts("PUSH_REPLAY_REFUSE\treason=remote-races\tattempts=3");
+    if(status&&deadline_hit)puts("PUSH_REPLAY_REFUSE\treason=deadline");
+    if (!status) printf("GIT_PUSH\trc=0\tcommit=%s\tattempts=%d\n", current, attempt + 1);
+    return status;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 6 || argc > OWN_MAX + 5 || sy_realpath(argv[1], root, sizeof root) < 0 ||
+        argv[2][0]!='/'||argv[3][0]!='/') return 2;
+    worker=argv[2];syncer=argv[3];
+    if (getenv("GIT_DIR")||getenv("GIT_WORK_TREE")||getenv("GIT_INDEX_FILE")||getenv("GIT_OBJECT_DIRECTORY"))
+        return 2;
+    requested.n=argc-5;
+    for (int i = 0; i < requested.n; i++) {
+        if (!oid(argv[i + 5])) return 2;
+        mm_copy(requested.id[i],41,argv[i + 5],41);
+    }
+    char *end=0;
+    int64_t now=sy_mono_ns();
+    cleanup_ns=strtoll(argv[4],&end,10);
+    if(now<0||!end||*end||cleanup_ns<=now||cleanup_ns-now>55000000000LL)return 2;
+    end_ns=cleanup_ns-4000000000LL;
+    /* This worker owns only the Git and gate processes it launches. Adopt any
+       escaped grandchildren so the existing process reaper can collect them. */
+    if(rp_subreaper()) {
+        puts("PUSH_REPLAY_REFUSE\treason=descendant-ownership");
+        return 2;
+    }
+    char *read_branch[] = {"git", "symbolic-ref", "-q", "HEAD", 0};
+    char *read_top[] = {"git", "rev-parse", "--show-toplevel", 0};
+    char top[4096];
+    if (exact(read_branch, 0, branch, sizeof branch) ||
+        strncmp(branch,"refs/heads/",11)||exact(read_top,0,top,sizeof top)||!tx_eqz(root,top))return 2;
+    char *verify[]={"git","cat-file","-t",requested.id[requested.n-1],0};char kind[32];
+    if (exact(verify,0,kind,sizeof kind)||!tx_eqz(kind,"commit")) {
+        puts("PUSH_REPLAY_REFUSE\treason=owned-commit-not-found");
+        return 1;
+    }
+    if(setup_session()||cx_fmt(idx,sizeof idx,"%s/index",scratch)) {
+        if(deadline_hit)puts("PUSH_REPLAY_REFUSE\treason=deadline");
+        return 2;
+    }
+    char index_assignment[4700];
+    if (cx_fmt(index_assignment, sizeof index_assignment, "GIT_INDEX_FILE=%s", idx)) return 2;
+    index_env[0] = index_assignment;
+    int rc=run_push();
+    end_ns=cleanup_ns;
+    char checked[64];
+    int found=read_ref(session_ref,checked);
+    if(found<0||(found&&delete_ref(session_ref,checked))||remove_tree(scratch))
+        fprintf(stderr,"PUSH_REPLAY_NOTE\tcleanup=%s\n",scratch);
+    return rc;
+}

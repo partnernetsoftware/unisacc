@@ -32,9 +32,10 @@
 #define PCG_BASE_CO "b94d1a83a2"    /* tools/commit-own.cx before the reuse record */
 #define T "\t"
 #define PCG_MK "mk(){ sh \"$COMMIT_GATE_FIXTURE_PRODUCT\" \"$COMMIT_GATE_FIXTURE_SOURCE\" -- --fixture-batch \"$1\" precommit > \"fixture-$1.out\"; }; "
+#define PCG_RUN "pcg_run(){ tool=$1; shift; if [ -n \"${DEVSVC_SELF_BIN:-}\" ] && [ -x \"$DEVSVC_SELF_BIN\" ]; then \"$DEVSVC_SELF_BIN\" run --local --quiet \"$tool\" -- \"$@\"; else sh ./unisacc.com \"$tool\" -- \"$@\"; fi; }; "
 
 static int failed;
-static char root[2048], fx[2400], lockd[2500];
+static char root[2048], fx[2400], lockd[2500], ready[2500];
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-precommit-gates.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-precommit-gates.%s\n", name); } }
 static void unlock(void) { char p[2600]; if (!lockd[0]) return; if (!cx_fmt(p, sizeof p, "%s/pid", lockd)) sy_unlink(p); sy_rmdir(lockd); }
 static void die(const char *s) { sy_eprintf("check-precommit-gates: REFUSE %s\n", s); unlock(); exit(2); }
@@ -69,15 +70,37 @@ static int pcg_fixture_batch(const char *id,const char *family) {
 }
 
 
-static void setup(const char *group) {
+static int fixture_stamp(char *out, int cap) {
+    char source[2048], tree[128];
+    const char *inputs="git rev-parse HEAD && git hash-object -- unisacc.com tools/precommit.cx tools/commit-own.cx tools/check-precommit-gates.cx tests/precommit-gates.tsv tests/tools-compile.cx";
+    if(sh(inputs,source,sizeof source,0)||
+       sh("git diff --quiet HEAD -- && git rev-parse HEAD",tree,sizeof tree,1))return 1;
+    return cx_fmt(out,cap,"pcg-ready-v1\n%s%s",source,tree);
+}
+
+static void consume_ready(void) {
+    char stamp[2400];
+    unsigned char *saved=0;
+    int64_t n=0;
+    int bad=fixture_stamp(stamp,sizeof stamp)||sy_read_file(ready,&saved,&n,sizeof stamp)||
+       n!=(int64_t)strlen(stamp)||memcmp(saved,stamp,(size_t)n)||sy_unlink(ready);
+    free(saved);
+    if(bad)die("fixture material identity");
+}
+
+static void setup(const char *group, int prepared) {
     static char c[8000], out[4096]; const char *home = sy_env("HOME");
     if (sy_cwd(root, sizeof root) || !home || !home[0]) die("cwd or HOME");
-    if (cx_fmt(fx, sizeof fx, "%s/.cache/unisacc/check-precommit-gates/fx-%s", home, group) || cx_fmt(lockd, sizeof lockd, "%s.lock", fx)) die("path");
+    if (cx_fmt(fx, sizeof fx, "%s/.cache/unisacc/check-precommit-gates/fx-%s", home, group) ||
+        cx_fmt(lockd, sizeof lockd, "%s.lock", fx) || cx_fmt(ready,sizeof ready,"%s.ready",fx)) die("path");
     if (cx_fmt(c, sizeof c, "mkdir -p %s/.cache/unisacc/check-precommit-gates && if mkdir %s 2>/dev/null; then echo $PPID > %s/pid; echo LOCK_OK; "
                             "elif kill -0 \"$(cat %s/pid 2>/dev/null)\" 2>/dev/null; then echo LOCK_HELD; else echo $PPID > %s/pid; echo LOCK_OK; fi", home, lockd, lockd, lockd, lockd)) die("script");
     sh(c, out, sizeof out, 0);
     if (!has(out, "LOCK_OK")) { lockd[0] = 0; die("another check-precommit-gates run holds the fixture lock"); }
-    if (cx_fmt(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s && cp %s/tools/precommit.cx %s/tools/commit-own.cx %s/tools/"
+    if(prepared)consume_ready();
+    else {
+    if(sy_exists(ready)==1&&sy_unlink(ready))die("fixture readiness cleanup");
+    if (cx_fmt(c, sizeof c, PCG_RUN "rm -rf %s && mkdir -p %s && git -C %s archive HEAD | tar -x -C %s && cp %s/tools/precommit.cx %s/tools/commit-own.cx %s/tools/check-precommit-gates.cx %s/tools/"
                             " && cp %s/tests/precommit-gates.tsv %s/tests/tools-compile.cx %s/tests/"
                             " && test -s %s/tests/fixtures/precommit-gates/precommit-base-" PCG_BASE ".cx.txt"
                             " && test -s %s/tests/fixtures/precommit-gates/commit-own-base-" PCG_BASE_CO ".cx.txt"
@@ -89,14 +112,18 @@ static void setup(const char *group) {
                                register any shard the fixture inventory now needs, with the exact tools-compile batch contract */
                             " && n=$(grep -c . tests/tools-compile-sources.tsv) && i=$(grep -c '^tools-compile-' tests/batches.tsv) && while [ $i -lt $(( (n + 7) / 8 )) ]; do"
                             " printf 'tools-compile-%%03d" T "IMPLEMENTED" T "contract" T "tests/tools-compile.cx" T "SOURCE" T "lnx/x86_64" T "55" T "-" T "tests/tools-compile.cx" T "{root};{out};%%d" T "tools.compile-all" T "rc0:TOOLS_COMPILE" T "product" T "commit\\n' $i $i >> tests/batches.tsv; i=$((i + 1)); done"
-                            " && git add -A && sh ./unisacc.com tools/tool-index.cx -- --tables && git add build/table-index.tsv && git commit -qm base && echo SETUP_OK",
-               fx, fx, root, fx, root, root, fx, root, root, fx, root, root, root, fx, root, fx, fx, root)) die("script");
-    sh(c, out, sizeof out, 0);
-    if (!has(out, "SETUP_OK")) { sy_eprintf("%s\n", out); die("fixture setup"); }
-    if (cx_fmt(c, sizeof c, "cp %s/tools/check-precommit-gates.cx %s/tools/", root, fx) || sh(c, out, sizeof out, 0)) die("fixture helper copy");
+                            " && git add -A && echo SETUP_INDEX_BEGIN && pcg_run tools/tool-index.cx --tables && git add build/table-index.tsv && git commit -qm base && echo SETUP_OK",
+               fx, fx, root, fx, root, root, root, fx, root, root, fx, root, root, root, fx, root, fx, fx, root)) die("script");
+    int setup_rc=sh(c, out, sizeof out, 0);
+    if (!has(out, "SETUP_OK")) {
+        sy_eprintf("PCG_SETUP\trc=%d\tstage=%s\n%s\n",setup_rc,
+            has(out,"SETUP_INDEX_BEGIN")?"table-index-or-base-commit":"export-or-bootstrap",out);
+        die(setup_rc==124?"fixture setup deadline":"fixture setup");
+    }
     { char marker[4096];const char *text="UNISACC_GATE_FIXTURE_V1\n";
       if(cx_fmt(marker,sizeof marker,"%s/.commit-gate-fixture",fx)||
          sy_write_atomic(marker,text,strlen(text),0600))die("fixture-marker-write"); }
+    }
     { char source[4096],product[4096];
       if(cx_fmt(source,sizeof source,"%s/tools/fixture-gate-tool.cx",root)||
          cx_fmt(product,sizeof product,"%s/unisacc.com",root)||
@@ -128,14 +155,17 @@ static void group_na(void) {
     if (failed) sy_printf("%s\n", out);
 }
 
-static void group_reuse(void) {
+static void group_reuse(int part) {
     static char out[16384];
-    sh(PCG_MK "mk zzg1; git add tests/manifests/zzg1.tsv; TR=$(git write-tree); H=$(git hash-object -- tools/reg-manifest.cx); A='sh ./unisacc.com tools/reg-manifest.cx -- --check --index';"
+    const char *stage=PCG_MK "mk zzg1 && git add tests/manifests/zzg1.tsv";
+    if(sh(stage,out,sizeof out,1)) { sy_eprintf("%s\n",out); die("reuse fixture manifest"); }
+    if(part!=2) {
+    sh(PCG_RUN "TR=$(git write-tree); H=$(git hash-object -- tools/reg-manifest.cx); A='sh ./unisacc.com tools/reg-manifest.cx -- --check --index';"
        " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' \"$TR\" \"$H\" \"$A\" > reuse-ok.txt;"
        " printf 'KEY" T "tree=%s" T "gate=manifest" T "tool=%s" T "argv=%s\\nRC" T "1\\nMISSING" T "zzfake" T "reuse-marker\\n' 0000000000000000000000000000000000000000 \"$H\" \"$A\" > reuse-bad.txt;"
-       " ( sh ./unisacc.com tools/precommit.cx > dn.out 2>&1; echo $? > dn.rc ) & ( sh ./unisacc.com tools/precommit-base.cx > db.out 2>&1; echo $? > db.rc ) &"
-       " ( UNISACC_GATE_REUSE=$PWD/reuse-ok.txt sh ./unisacc.com tools/precommit.cx > e.out 2>&1; echo $? > e.rc ) &"
-       " ( UNISACC_GATE_REUSE=$PWD/reuse-bad.txt sh ./unisacc.com tools/precommit.cx > f.out 2>&1; echo $? > f.rc ) & wait;"
+       " ( pcg_run tools/precommit.cx > dn.out 2>&1; echo $? > dn.rc ) & ( pcg_run tools/precommit-base.cx > db.out 2>&1; echo $? > db.rc ) &"
+       " ( UNISACC_GATE_REUSE=$PWD/reuse-ok.txt pcg_run tools/precommit.cx > e.out 2>&1; echo $? > e.rc ) &"
+       " ( UNISACC_GATE_REUSE=$PWD/reuse-bad.txt pcg_run tools/precommit.cx > f.out 2>&1; echo $? > f.rc ) & wait;"
        " for x in dn db e f; do grep BLOCKED $x.out | sort > $x.blk; done;"
        " echo DRC=$(cat dn.rc)/$(cat db.rc); echo ERC=$(cat e.rc); echo FRC=$(cat f.rc); cmp -s dn.blk db.blk && echo D_SAME; cmp -s f.blk dn.blk && echo F_SAME;"
        " echo DREAL=$(grep -c 'registration manifest.*zzg1' dn.blk); echo EREAL=$(grep -c 'registration manifest.*zzg1' e.blk); echo EFAKE=$(grep -c 'registration manifest MISSING" T "zzfake' e.blk);"
@@ -148,14 +178,16 @@ static void group_reuse(void) {
     ck(has(out, "ERC=1\n") && has(out, "EMSG=1\n") && has(out, "EFAKE=1\n") && has(out, "EREAL=0\n"), "reuse.matching-key-judges-record-without-rerun");
     ck(has(out, "FRC=1\n") && has(out, "FMSG=1\n") && has(out, "FFAKE=0\n") && has(out, "F_SAME\n"), "reuse.other-tree-reruns");
     if (failed) sy_printf("%s\n", out);
+    }
+    if(part==1)return;
     /* end to end: commit-own --registered runs reg-manifest once, the hook's precommit reuses it */
     /* since 8b61e66fe1 commit-own runs the hook with a private gate root as cwd and removes that root afterwards,
        so the hook's stderr goes to an absolute path in the fixture, not to a cwd-relative hook.err; and the hook's
        gates see only the private index, so the batch's check source is committed with its set (--whole), as a real
        registration must (the runlist gate refuses metadata-schema missing-implemented-source otherwise) */
-    sh("git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
+    sh(PCG_RUN "git rm -q --cached tests/manifests/zzg1.tsv; printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx 2>>%s/hook.err\\n' \"$PWD\" > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit;"
        " extra=$(cat fixture-zzg1.out) && "
-       " sh ./unisacc.com tools/commit-own.cx -- -m zzg1 --registered zzg1 $extra --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
+       " pcg_run tools/commit-own.cx -m zzg1 --registered zzg1 $extra --whole tools/check-zzg1.cx --whole tests/tools-compile-sources.tsv > co.out 2>&1; echo CORC=$?; grep -c '^COMMIT_OWN_PHASE' co.out | tr '\\n' ' '; echo phase;"
        " echo HREUSED=$(grep -c 'gate manifest reused' hook.err); echo SUBJ=$(git log -1 --format=%s); ls \"${TMPDIR:-/tmp}\"/commit-own-*.gate 2>/dev/null | wc -l | tr '\\n' ' '; echo leftover", out, sizeof out, 1);
     ck(has(out, "CORC=0\n") && has(out, "SUBJ=zzg1\n") && has(out, "HREUSED=1\n"), "reuse.commit-own-record-reused-by-hook");
     if (failed) sy_printf("%s\n", out);
@@ -392,19 +424,34 @@ static void group_stale_lock(void) {
 }
 
 /* T9 (U6 end-to-end): devsvc git commit reclaims stale .git/index.lock and emits commit.stale_lock into events.tsv */
+static void prepared_devsvc(char *path,int cap) {
+    const char *pin=sy_env("DV_PIN_DIR");
+    char receipt[256], key[21];
+    path[0]=0;
+    if(!pin||pin[0]!='/')return;
+    if(sh("git diff --quiet HEAD -- tools/devsvc-core.cx tools/devsvc-repo.tsv cxroot.tsv cx ext tools/dv tools/cxlib && "
+          "sh ./unisacc.com tools/devsvc.cx -- prebuild-self",receipt,sizeof receipt,0)||
+       strncmp(receipt,"PREPARED\tkey=",13)||
+       cx_fmt(key,sizeof key,"%.20s",receipt+13)||
+       strspn(key,"0123456789abcdef")!=20)return;
+    if(cx_fmt(path,cap,"%s/%s/devsvc",pin,key)||sy_exists(path)!=1)path[0]=0;
+}
+
 static void group_stale_lock_e2e(void) {
     char out[16384], cmd[4096], root[2048], tmp[256];
+    char prepared[4096];
     if (sy_realpath(".", root, sizeof root) < 0) { ck(0, "stale-lock.e2e-realpath"); return; }
     if (cx_fmt(tmp, sizeof tmp, "%s/pc-slke-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms() % 100000L)) { ck(0, "stale-lock.e2e-tmp"); return; }
+    prepared_devsvc(prepared,sizeof prepared);
     cx_fmt(cmd, sizeof cmd,
-        "R='%s'; T='%s'; C=\"${UNISACC_CACHE_DIR:-$HOME/.cache/unisacc}\"; mkdir -p \"$T/dvh/inst\" \"$T/repo/tools\" && "
+        "R='%s'; T='%s'; PREP='%s'; C=\"${UNISACC_CACHE_DIR:-$HOME/.cache/unisacc}\"; mkdir -p \"$T/dvh/inst\" \"$T/repo/tools\" && "
         "git -C \"$T/repo\" init -q && git -C \"$T/repo\" config user.email t@t && git -C \"$T/repo\" config user.name t && "
         "ln -sf \"$R/unisacc.com\" \"$T/repo/unisacc.com\" && ln -sf \"$R/cxroot.tsv\" \"$T/repo/cxroot.tsv\" && ln -sf \"$R/cx\" \"$T/repo/cx\" && ln -sf \"$R/ext\" \"$T/repo/ext\" && "
         "for f in devsvc.cx devsvc-core.cx devsvc-repo.tsv commit-own.cx cxlib dv; do ln -sf \"$R/tools/$f\" \"$T/repo/tools/$f\"; done && "
         "printf 'int ok(void){return 0;}\\n' > \"$T/repo/a.cx\" && git -C \"$T/repo\" add a.cx && git -C \"$T/repo\" commit -q -m init && "
         "printf 'int ok(void){return 2;}\\n' > \"$T/repo/a.cx\" && "
         "printf '#!/bin/sh\\nexit 0\\n' > \"$T/repo/.git/hooks/pre-commit\" && chmod +x \"$T/repo/.git/hooks/pre-commit\" && "
-        "sh \"$R/unisacc.com\" -o \"$T/dv.bin\" \"$R/tools/devsvc-core.cx\" && "
+        "{ if [ -n \"$PREP\" ]; then ln -s \"$PREP\" \"$T/dv.bin\"; else sh \"$R/unisacc.com\" -o \"$T/dv.bin\" \"$R/tools/devsvc-core.cx\"; fi; } && "
         ": > \"$T/repo/.git/index.lock\" && touch -d '-2 min' \"$T/repo/.git/index.lock\" && "
         "(cd \"$T/repo\" || exit 2; "
         "UNISACC_DEVSVC_DIR=\"$T/dvh/inst\" UNISACC_CACHE_DIR=\"$C\" DEVSVC_NO_AUTO_PIN=1 "
@@ -416,12 +463,14 @@ static void group_stale_lock_e2e(void) {
         "EVF=\"$T/dvh/inst/events.tsv\"; "
         "grep 'commit.stale_lock' \"$EVF\" 2>/dev/null || true; "
         "sh \"$R/unisacc.com\" \"$R/tools/devsvc-usage.cx\" -- --commit-fail-only --hours 1 --events \"$EVF\" 2>&1 || true; "
+        "cat \"$T/o9\" 2>/dev/null || true; "
         "rm -rf \"$T\"",
-        root, tmp);
-    sh(cmd, out, sizeof out, 0);
-    ck(has(out, "T9RC=0\n") && has(out, "\tcommit.stale_lock\t") && has(out, "reason=index-lock-expired") &&
-       has(out, "STALE_LOCK\treason=index-lock-expired\tcount=1\n") && has(out, "STALE_LOCK_TOTAL\tcount=1\n"),
-       "stale-lock.devsvc-emits-stale-lock-event");
+        root, tmp, prepared);
+    int rc=sh(cmd, out, sizeof out, 0);
+    int ok=has(out, "T9RC=0\n") && has(out, "\tcommit.stale_lock\t") && has(out, "reason=index-lock-expired") &&
+       has(out, "STALE_LOCK\treason=index-lock-expired\tcount=1\n") && has(out, "STALE_LOCK_TOTAL\tcount=1\n");
+    ck(ok,"stale-lock.devsvc-emits-stale-lock-event");
+    if(!ok)sy_eprintf("PCG_STALE_LOCK_FIXTURE\trc=%d\n%s\n",rc,out);
 }
 
 /* U4: while MERGE_HEAD is present, disjoint path commits succeed (preserving MERGE_HEAD),
@@ -472,23 +521,33 @@ int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--fixture-batch")) return pcg_fixture_batch(argv[2],argv[3]);
     if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
         if (strspn(argv[2], "abcdefghijklmnopqrstuvwxyz-") != strlen(argv[2])) return 2;
+        if(tx_eqz(argv[3],"layout")){
+            char stamp[2400];
+            setup(argv[2],0);
+            if(fixture_stamp(stamp,sizeof stamp)||sy_write_atomic(ready,stamp,strlen(stamp),0600))
+                die("fixture readiness seal");
+            sy_printf("PREPARED\tfixture=%s\ttool=layout\tno-test-result\n",argv[2]);
+            unlock();
+            return 0;
+        }
         const char *command = tx_eqz(argv[3], "register") ?
             "sh ./unisacc.com tools/register.cx -- --tool tools/commit-own-base.cx" :
             tx_eqz(argv[3], "packages") ? "sh ./unisacc.com tools/batch-packages-gen.cx -- --write" : 0;
         if (!command) return 2;
-        setup(argv[2]);
+        setup(argv[2],0);
         char output[16384]; int prepared_rc = sh(command, output, sizeof output, 1);
         if (prepared_rc) sy_eprintf("%s", output);
         else sy_printf("PREPARED\tfixture=%s\ttool=%s\tno-test-result\n", argv[2], argv[3]);
         unlock(); return prepared_rc;
     }
-    const char *group = 0, *bn = 0; int a; long t0 = sy_now_ms();
+    const char *group = 0, *bn = 0; int a, prepared=0; long t0 = sy_now_ms();
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
+        else if (tx_eqz(argv[a], "--prepared")) prepared=1;
         else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d | --bench before|after\n"); return 2; }
     }
-    if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench"); bench(bn); unlock(); return 0; }
+    if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench",prepared); bench(bn); unlock(); return 0; }
     if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint") || tx_eqz(group, "pc"))) {
         if (tx_eqz(group, "tree-isolate") || tx_eqz(group, "pc")) group_tree_isolate();
         if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "pc")) group_stale_lock();
@@ -497,15 +556,15 @@ int main(int argc, char **argv) {
         sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
         return failed ? 1 : 0;
     }
-    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|pc | --bench before|after\n"); return 2; }
-    setup(group);
+    if (!group || (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d"))) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx -- --cases na|reuse|reuse-verdict|reuse-commit|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|pc | --bench before|after\n"); return 2; }
+    setup(group,prepared);
     if (tx_eqz(group, "na")) group_na();
     else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);
     else if (tx_eqz(group, "toolsreg-a")) group_toolsreg(1);
     else if (tx_eqz(group, "toolsreg-b")) group_toolsreg(2);
     else if (tx_eqz(group, "toolsreg-c")) group_toolsreg(3);
     else if (tx_eqz(group, "toolsreg-d")) group_toolsreg_d();
-    else group_reuse();
+    else group_reuse(tx_eqz(group,"reuse-verdict")?1:tx_eqz(group,"reuse-commit")?2:0);
     unlock();
     sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;

@@ -1,0 +1,790 @@
+/* Build a disposable origin and run the real devsvc push command against it. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use dv.procid
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int failed;
+static char origin[4200], repo[4200], parent[4096], source[4096], product[4200];
+static char push_image[4300], commit_image[4300], sync_image[4300], cli_image[4300];
+
+static void expect(int ok,const char *name) {
+    printf("%s\t%s\n",ok?"PASS":"FAIL",name);
+    if(!ok)failed++;
+}
+static void setup_error(const char *what) {
+    fprintf(stderr,"CHECK_PUSH_REPLAY_REFUSE\t%s\n",what);
+    exit(2);
+}
+static int run(const char *cwd,char **args,np_result *r) {
+    char why[256]="";
+    if(np_run(args,cwd,0,52,r,why,sizeof why)||r->residue) {
+        fprintf(stderr,"CHECK_PUSH_REPLAY_CHILD\t%s\t%s\n",args[0],why);
+        return 2;
+    }
+    return r->rc;
+}
+static void check_setup(const char *cwd,char **args) {
+    np_result r={0};
+    if(run(cwd,args,&r)) {
+        if(r.errn)fwrite(r.err,1,r.errn,stderr);
+        setup_error(args[0]);
+    }
+    np_free(&r);
+}
+static void file(const char *rel,const char *body,int mode) {
+    char path[4400];
+    if(cx_fmt(path,sizeof path,"%s/%s",repo,rel)||sy_write_atomic(path,body,strlen(body),mode))setup_error(rel);
+}
+static void git_oid(const char *cwd,const char *rev,char out[41]) {
+    char *args[]={"git","rev-parse",(char *)rev,0};
+    np_result r={0};
+    if(run(cwd,args,&r)||r.outn!=41||r.out[40]!='\n')setup_error(rev);
+    mm_copy(out,41,r.out,40);out[40]=0;np_free(&r);
+}
+static void commit(const char *msg) {
+    char *add[]={"git","add","-A",0};
+    char *make[]={"git","commit","-qm",(char *)msg,0};
+    check_setup(repo,add);
+    check_setup(repo,make);
+}
+static void prepare(void) {
+    if(sy_mkdtemp(sy_tmpdir(),"check-push-replay-",parent,sizeof parent)||
+       cx_fmt(repo,sizeof repo,"%s/repo",parent)||cx_fmt(origin,sizeof origin,"%s/origin",parent))setup_error("scratch");
+    char *ir[]={"git","init","-q","-b","main",repo,0};
+    char *io[]={"git","init","-q","--bare","-b","main",origin,0};
+    check_setup(parent,ir);check_setup(parent,io);
+    char *name[]={"git","config","user.name","Push replay fixture",0};
+    char *email[]={"git","config","user.email","replay@example.invalid",0};
+    char *remote[]={"git","remote","add","origin",origin,0};
+    check_setup(repo,name);check_setup(repo,email);check_setup(repo,remote);
+    char cx[4200], ext[4200], root[4200], dst[4200], ape[4200], tool_dst[4300];
+    if(cx_fmt(cx,sizeof cx,"%s/cx",source)||cx_fmt(ext,sizeof ext,"%s/ext",source)||
+       cx_fmt(root,sizeof root,"%s/cxroot.tsv",source)||
+       cx_fmt(dst,sizeof dst,"%s/exec/facts",repo)||sy_mkdir_all(dst,0700)||
+       cx_fmt(tool_dst,sizeof tool_dst,"%s/tools",repo)||sy_mkdir_all(tool_dst,0700)||
+       cx_fmt(ape,sizeof ape,"%s/unisacc.com",repo)||sy_symlink(product,ape))setup_error("layout");
+    char *copy[]={"cp","-RH","--",cx,ext,root,repo,0};
+    check_setup(repo,copy);
+    const char *files[]={"commit-own.cx","gitsync-run.cx","push-replay.cx","derive.cx","bound","bound.c","devsvc-repo.tsv","cxlib","dv",0};
+    char names[9][4400],*pick[15]={"cp","-RH","--"};
+    int n=3;
+    for(int i=0;files[i];i++) {
+        if(cx_fmt(names[i],sizeof names[i],"%s/tools/%s",source,files[i]))setup_error("tool path");
+        pick[n++]=names[i];
+    }
+    pick[n++]=tool_dst;pick[n]=0;
+    check_setup(repo,pick);
+    file(".gitignore","unisacc.com\n",0644);
+    file("tools/generate",
+         "#!/bin/sh\ncase \"$1\" in\n--write) cat left.txt right.txt > generated.txt;;\n"
+         "--check) cat left.txt right.txt | cmp -s - generated.txt;;\nesac\n",0755);
+    file("exec/facts/derive.tsv",
+         "derived\ttools/generate\tsh tools/generate --check\tsh tools/generate --write\tgenerated.txt\tleft.txt right.txt\t1\t5\n",0644);
+    file("left.txt","old-left\n",0644);file("right.txt","old-right\n",0644);
+    file("generated.txt","old-left\nold-right\n",0644);
+    commit("base");
+}
+static int show_generated(const char *cwd,const char *rev,const char *expected) {
+    char spec[128];
+    if(cx_fmt(spec,sizeof spec,"%s:generated.txt",rev))return 0;
+    char *show[]={"git","show",spec,0};
+    np_result r={0};
+    int ok=!run(cwd,show,&r)&&r.outn==strlen(expected)&&!memcmp(r.out,expected,r.outn);
+    np_free(&r);return ok;
+}
+static int has(const np_result *r,const char *s) {
+    return (r->out&&strstr(r->out,s))||(r->err&&strstr(r->err,s));
+}
+static void native_images(int cas) {
+    const char *codes[]={"tools/commit-own.cx","tools/push-replay.cx","tools/gitsync-run.cx"};
+    char *bins[]={commit_image,push_image,sync_image};
+    sy_child_t tasks[3];
+    int n=cas?1:3;
+    for(int i=0;i<n;i++){
+        if(cx_fmt(bins[i],4300,"%s/native-%d",parent,i))setup_error("native path");
+        sy_spawn_t o;
+        char *av[]={"sh",product,"-o",bins[i],(char *)codes[i],0};
+        sy_spawn_init(&o);o.argv=av;o.cwd=repo;o.pgroup=-1;o.deadline_ms=28000;
+        if(sy_proc_spawn(&o,&tasks[i]))setup_error("native spawn");
+    }
+    for(int i=0;i<n;i++){
+        sy_exit_t st;
+        if(sy_proc_wait(&tasks[i],&st)||sy_exit_code(&st))setup_error(codes[i]);
+    }
+}
+static int pinned_cli(void) {
+    const char *pin=sy_env("DV_PIN_DIR");
+    if(!pin||!*pin)return 0;
+    char *diff[]={"git","diff","--quiet","HEAD","--","tools/devsvc-core.cx","tools/devsvc-repo.tsv",
+        "cxroot.tsv","cx","ext","tools/dv","tools/cxlib",0};
+    np_result r={0};
+    int rc=run(source,diff,&r);
+    np_free(&r);
+    if(rc)return 0;
+    char *start[]={"sh",product,"tools/devsvc.cx","--","prebuild-self",0};
+    if(run(source,start,&r)||r.outn<33||strncmp(r.out,"PREPARED\tkey=",13)) {
+        np_free(&r);
+        return 0;
+    }
+    char key[21];
+    int ok=!cx_fmt(key,sizeof key,"%.20s",r.out+13)&&strspn(key,"0123456789abcdef")==20&&
+        !cx_fmt(cli_image,sizeof cli_image,"%s/%s/devsvc",pin,key)&&sy_exists(cli_image)==1;
+    np_free(&r);
+    return ok;
+}
+
+static void isolate_cli(void) {
+    char native[4300], instance[4300];
+    if(cx_fmt(native,sizeof native,"%s/native-cache",parent)||
+       cx_fmt(instance,sizeof instance,"%s/instance",parent))setup_error("private CLI paths");
+    if((!sy_env("DEVSVC_NATIVE_DIR")&&sy_setenv("DEVSVC_NATIVE_DIR",native,1))||
+       sy_setenv("UNISACC_DEVSVC_DIR",instance,1))setup_error("private CLI environment");
+}
+
+static const char *native_cli(void) {
+    if(cx_fmt(cli_image,sizeof cli_image,"%s/devsvc",parent))setup_error("native CLI path");
+    /* The ambient launcher can prepare content-keyed tools. The CLI under
+       test is always built from the working source, including mutations. */
+    const char *preparer=sy_env("DEVSVC_SELF_BIN");
+    const char *tools[]={"tools/commit-own.cx","tools/push-replay.cx","tools/gitsync-run.cx"};
+    sy_child_t helpers[3];
+    int count=0;
+    if(preparer&&preparer[0]&&sy_exists(preparer)==1) {
+        for(int i=0;i<3;i++){
+            char *cmd[]={(char *)preparer,"run","--local","--quiet",(char *)tools[i],"--","--help",0};
+            sy_spawn_t o;
+            sy_spawn_init(&o);o.argv=cmd;o.cwd=repo;o.pgroup=-1;o.deadline_ms=25000;
+            o.out_fd=SY_STDIO_NULL;o.err_fd=SY_STDIO_NULL;
+            if(sy_proc_spawn(&o,&helpers[count]))break;
+            count++;
+        }
+    }
+    if(!pinned_cli()){
+        char *v[]={"sh",product,"-o",cli_image,"tools/devsvc-core.cx",0};
+        check_setup(source,v);
+    }
+    for(int i=0;i<count;i++){
+        sy_exit_t st;
+        if(sy_proc_wait(&helpers[i],&st))setup_error("private helper waiting");
+    }
+    return cli_image;
+}
+static void push_args(char **args,const char *svc,const char *cwd,char *id,char deadline[32]) {
+    if(svc){
+        args[0]=(char *)svc;args[1]="git";args[2]="push";args[3]=id;args[4]=0;
+        return;
+    }
+    int64_t now=sy_mono_ns();
+    if(now<0||cx_fmt(deadline,32,"%lld",(long long)(now+45000000000LL)))setup_error("push deadline");
+    args[0]=push_image;args[1]=(char *)cwd;args[2]=commit_image;args[3]=sync_image;args[4]=deadline;args[5]=id;args[6]=0;
+}
+static void make_client(char *dest,int cap,int i) {
+    if(cx_fmt(dest,cap,"%s/client-%d",parent,i))setup_error("client");
+    char *clone[]={"git","clone","-q","--",origin,dest,0};
+    check_setup(parent,clone);
+    char path[4500];
+    if(cx_fmt(path,sizeof path,"%s/unisacc.com",dest)||sy_symlink(product,path))setup_error("client product");
+    if(cx_fmt(path,sizeof path,"%s/foreign",dest)||sy_write_atomic(path,"foreign\n",8,0600))setup_error("client foreign");
+}
+static void fleet(const char *svc) {
+    char clients[2][4300], commits[2][41], item[64], path[4500], before[41], after[41];
+    char *send[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,send);
+    git_oid(origin,"refs/heads/main",before);
+    for(int i=0;i<2;i++)make_client(clients[i],sizeof clients[i],i);
+    int successes=0;
+    for(int round=0;round<3;round++) {
+        sy_child_t tasks[2];
+        for(int i=0;i<2;i++) {
+            if(cx_fmt(item,sizeof item,"worker-%d-note-%d",i,round)||
+               cx_fmt(path,sizeof path,"%s/%s",clients[i],item)||
+               sy_write_atomic(path,"request\n",8,0600))setup_error("fleet input");
+            char *add[]={"git","add","--",item,0};
+            char *commit[]={"git","commit","-qm",item,"--",item,0};
+            check_setup(clients[i],add);check_setup(clients[i],commit);
+            git_oid(clients[i],"HEAD",commits[i]);
+        }
+        for(int i=0;i<2;i++) {
+            sy_spawn_t o;
+            char *push[7],deadline[32];
+            push_args(push,svc,clients[i],commits[i],deadline);
+            sy_spawn_init(&o);o.argv=push;o.cwd=clients[i];o.deadline_ms=48000;o.pgroup=-1;
+            fflush(stdout);
+            if(sy_proc_spawn(&o,&tasks[i]))setup_error("fleet spawn");
+        }
+        for(int i=0;i<2;i++){
+            sy_exit_t st;
+            int rc=sy_proc_wait(&tasks[i],&st);
+            if(!rc)rc=sy_exit_code(&st);
+            printf("C5_PUSH\tround=%d\twriter=%d\trc=%d\n",round+1,i+1,rc);
+            successes+=rc==0;
+        }
+    }
+    git_oid(origin,"refs/heads/main",after);
+    char range[88];
+    if(cx_fmt(range,sizeof range,"%s..%s",before,after))setup_error("fleet range");
+    char *count[]={"git","rev-list","--count",range,0};
+    np_result r={0};
+    expect(!run(origin,count,&r)&&r.out&&tx_eqz(r.out,"6\n"),"remote-has-all-six-commits");np_free(&r);
+    for(int i=0;i<2;i++){
+        if(cx_fmt(path,sizeof path,"%s/foreign",clients[i]))setup_error("foreign path");
+        size_t size=0;char *data=cx_read(path,&size);
+        expect(data&&size==8&&!memcmp(data,"foreign\n",8),"foreign-file-preserved");
+        free(data);
+    }
+    expect(successes==6,"six-push-requests");
+    printf("CASE\tC5\timpl=real\tok=%d/6\n",successes);
+}
+static void cas_fleet(const char *worker) {
+    char before[41],after[41],paths[8][32],range[88];
+    sy_child_t children[8];
+    git_oid(repo,"HEAD",before);
+    file(".git/hooks/pre-commit","#!/bin/sh\nsleep 0.2\n./tools/generate --check\n",0700);
+    for(int i=0;i<8;i++){
+        if(cx_fmt(paths[i],sizeof paths[i],"cas-writer-%d",i))setup_error("cas path");
+        file(paths[i],"local change\n",0644);
+    }
+    for(int i=0;i<8;i++){
+        sy_spawn_t o;
+        char *av[]={(char *)worker,"-m",paths[i],"--whole",paths[i],0};
+        sy_spawn_init(&o);o.argv=av;o.cwd=repo;o.pgroup=-1;o.deadline_ms=48000;
+        fflush(stdout);
+        if(sy_proc_spawn(&o,&children[i]))setup_error("cas spawn");
+    }
+    int ok=0;
+    for(int i=0;i<8;i++){
+        sy_exit_t st;int rc=sy_proc_wait(&children[i],&st);
+        if(!rc)rc=sy_exit_code(&st);
+        printf("C1_COMMIT\twriter=%d\trc=%d\n",i+1,rc);
+        ok+=rc==0;
+    }
+    git_oid(repo,"HEAD",after);
+    if(cx_fmt(range,sizeof range,"%s..%s",before,after))setup_error("cas range");
+    char *count[]={"git","rev-list","--count",range,0};
+    np_result r={0};
+    expect(!run(repo,count,&r)&&r.out&&tx_eqz(r.out,"8\n"),"cas-preserves-all-eight-commits");
+    np_free(&r);
+    expect(ok==8,"eight-path-commits");
+    printf("CASE\tC1\timpl=real\tok=%d/8\n",ok);
+}
+static int same_path_receipt(const char *log, long size) {
+    for (long at = 0; log && at < size; ) {
+        long end = tx_chr(log + at, size - at, '\n');
+        long len = end < 0 ? size - at : end;
+        long off, width;
+        if (tx_prefix(log + at, len, "COMMIT_OWN_CONFLICT\t", 20) &&
+            !tx_field(log + at, len, '\t', 1, &off, &width) &&
+            tx_same(log + at + off, width, "path=same-source", 16) &&
+            !tx_field(log + at, len, '\t', 2, &off, &width) &&
+            width > 3 && tx_prefix(log + at + off, width, "by=", 3)) return 1;
+        at += len + 1;
+    }
+    return 0;
+}
+
+static void same_path(const char *worker) {
+    file("same-source","common selected source\n",0644);
+    file(".git/hooks/pre-commit","#!/bin/sh\nsleep 0.5\n./tools/generate --check\n",0700);
+    sy_child_t tasks[2];
+    char capture[2][4500];
+    for(int i=0;i<2;i++) {
+        if(cx_fmt(capture[i],sizeof capture[i],"%s/same-%d.log",parent,i))setup_error("same path log");
+        int fd=sy_open(capture[i],O_CREAT|O_WRONLY|O_TRUNC,0600);
+        if(fd<0)setup_error("same path log");
+        char *av[]={(char *)worker,"-m",i?"second":"first","--whole","same-source",0};
+        sy_spawn_t o;
+        sy_spawn_init(&o);o.argv=av;o.cwd=repo;o.out_fd=fd;o.err_fd=fd;o.pgroup=-1;o.deadline_ms=10000;
+        if(sy_proc_spawn(&o,&tasks[i]))setup_error("same path spawn");
+        sy_close(fd);
+    }
+    int ok=0,named=0;
+    for(int i=0;i<2;i++) {
+        sy_exit_t st;int rc=sy_proc_wait(&tasks[i],&st);
+        if(!rc)rc=sy_exit_code(&st);
+        size_t n=0;char *b=cx_read(capture[i],&n);
+        if(b&&n)fwrite(b,1,n,stdout);
+        ok+=rc==0;
+        named+=rc!=0&&same_path_receipt(b,(long)n);
+        free(b);
+    }
+    expect(ok==1&&named==1,"concurrent-same-source-commit-conflict-named");
+    char *count[]={"git","rev-list","--count","HEAD",0};
+    np_result r={0};
+    expect(!run(repo,count,&r)&&r.out&&tx_eqz(r.out,"2\n"),"same-source-only-one-commit");
+    np_free(&r);
+}
+static int finish(void) {
+    printf("CHECK_PUSH_REPLAY\tfailed=%d\tfixture=%s\n",failed,parent);
+    if(!failed){
+        char *clean[]={"rm","-rf","--",parent,0};
+        check_setup(source,clean);
+    }
+    return failed?1:0;
+}
+static void check_landed_receipt(const char *svc, const np_result *launch) {
+    char job[80], log[4500], local[41], landed[108], full[48];
+    long off,width;
+    if(!launch->out||!tx_prefix(launch->out,launch->outn,"JOB\t",4)||
+       tx_field(launch->out,launch->outn,'\t',1,&off,&width)||
+       width<=0||width>=(long)sizeof job||tx_copy(job,sizeof job,launch->out+off,width)||
+       strspn(job,"0123456789-")!=strlen(job)||
+       cx_fmt(log,sizeof log,"%s/instance/jobs/%s/out",parent,job))setup_error("commit job identity");
+    char *wait[]={(char *)svc,"wait",job,"--timeout-ms","18000","--tail","30",0};
+    np_result r={0};
+    int rc=run(repo,wait,&r);
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    git_oid(repo,"HEAD",local);
+    unsigned char *bytes=0;int64_t size=0;
+    if(cx_fmt(landed,sizeof landed,"GIT_COMMIT\trc=0\tcommit=%s\tpushed=0",local)||
+       cx_fmt(full,sizeof full,"\tfull=%s\n",local)||
+       sy_read_file(log,&bytes,&size,1<<20)||!bytes||
+       tx_find((char *)bytes,size,full,strlen(full))<0)setup_error("commit worker did not land its source");
+    free(bytes);
+    expect(!rc&&has(&r,landed),"successful-commit-reports-its-own-full-oid");
+    np_free(&r);
+}
+
+static void commit_and_push(const char *svc, int receipt_only) {
+    char pushed[41], local[41];
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};
+    check_setup(repo,seed);
+    file("one-request","own\n",0644);file("another-request","foreign\n",0644);
+    file(".git/hooks/pre-commit",
+         "#!/bin/sh\n./tools/generate --check || exit 1\nprintf 'REPLAY_FIXTURE_HOOK rc=0\\n'\n",0700);
+    char *args[]={(char *)svc,"git","commit","--cwd",repo,"-m","one request","--whole","one-request",receipt_only?"--bg":"--push",0};
+    np_result r={0};int rc=run(repo,args,&r);
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    if(receipt_only) {
+        if(rc)setup_error("commit job refused");
+        check_landed_receipt(svc,&r);
+        np_free(&r);
+        return;
+    }
+    git_oid(origin,"refs/heads/main",pushed);git_oid(repo,"HEAD",local);
+    expect(!rc&&has(&r,"GIT_COMMIT\trc=0")&&has(&r,"pushed=1")&&tx_eqz(pushed,local),"commit-receipt-drives-push");
+    char receipt[64];
+    if(cx_fmt(receipt,sizeof receipt,"\tfull=%s\n",pushed))setup_error("commit-receipt-format");
+    expect(has(&r,receipt),"full-sha-from-commit-own-reaches-push");
+    np_free(&r);
+    char *tree[]={"git","ls-tree","--name-only","HEAD","--","one-request","another-request",0};
+    expect(!run(origin,tree,&r)&&r.out&&tx_eqz(r.out,"one-request\n"),"push-publishes-only-committed-path");
+    np_free(&r);
+
+    char hook[4900], moved[41], other[41];
+    char *advance[]={"git","commit-tree","HEAD^{tree}","-p",local,"-m","another window",0};
+    if(run(repo,advance,&r)||r.outn!=41||cx_fmt(other,sizeof other,"%.40s",r.out))setup_error("other-commit");
+    np_free(&r);
+    if(cx_fmt(hook,sizeof hook,
+        "#!/bin/sh\ngit --git-dir='%s/.git' update-ref refs/heads/main %s %s || exit 2\nexit 1\n",
+        repo,other,local))setup_error("other-commit-hook");
+    file(".git/hooks/pre-commit",hook,0700);
+    char *reject[]={(char *)svc,"git","commit","--cwd",repo,"-m","blocked request","--whole","another-request","--push",0};
+    rc=run(repo,reject,&r);
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    git_oid(repo,"HEAD",moved);git_oid(origin,"refs/heads/main",pushed);
+    expect(rc==1&&tx_eqz(other,moved)&&tx_eqz(local,pushed)&&has(&r,"GIT_COMMIT\trc=1\tcommit=none\tpushed=0")&&
+        has(&r,"reason=blocked")&&!has(&r,"reason=push-failed"),"blocked-gate-never-claims-the-other-window-commit");
+    np_free(&r);
+
+    char unrelated[4300], shim[4400];
+    if(cx_fmt(unrelated,sizeof unrelated,"%s/unrelated",parent)||
+       cx_fmt(shim,sizeof shim,"%s/unisacc.com",unrelated))setup_error("cross-repo-path");
+    char *init[]={"git","init","-q","-b","main",unrelated,0};
+    check_setup(parent,init);
+    char *copy[]={"ln","-s",product,shim,0};
+    check_setup(parent,copy);
+    char *leak[]={(char *)svc,"git","commit","--cwd",unrelated,"-m","wrong instance","--whole","witness",0};
+    rc=run(repo,leak,&r);
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    expect(rc==2&&has(&r,"GIT_COMMIT_REFUSE\treason=foreign-worktree")&&!has(&r,"JOB\t")&&
+        !has(&r,"GIT_COMMIT\trc=")&&!has(&r,"REPORT\tcmd=git.commit"),"unrelated-repository-refused-before-job-or-event");
+    np_free(&r);
+}
+static int push_one(const char *svc,char *id,np_result *out) {
+    char *args[7],deadline[32];
+    push_args(args,svc,repo,id,deadline);
+    int rc=run(repo,args,out);
+    if(out->outn)fwrite(out->out,1,out->outn,stdout);
+    if(out->errn)fwrite(out->err,1,out->errn,stderr);
+    return rc;
+}
+
+static void reject_unplanned_output(void) {
+    char index[4300], env[4350], base[41], after[41];
+    if(cx_fmt(index,sizeof index,"%s/replay-index",parent)||
+       cx_fmt(env,sizeof env,"GIT_INDEX_FILE=%s",index)) setup_error("replay index path");
+    git_oid(repo,"HEAD",base);
+    char *detach[]={"git","switch","-q","--detach",base,0};
+    char *copy[]={"cp",".git/index",index,0};
+    check_setup(repo,detach);check_setup(repo,copy);
+    char *argv[]={"env",env,commit_image,"--replay-index",base,"unplanned output","left.txt",
+        "--outputs","generated.txt","unplanned.txt",0};
+    np_result r={0};
+    int rc=run(repo,argv,&r);
+    git_oid(repo,"HEAD",after);
+    expect(rc==1&&tx_eqz(base,after)&&has(&r,"REPLAY_OUTPUT_UNPLANNED\tunplanned.txt"),
+        "second-replay-output-needs-its-own-plan");
+    np_free(&r);
+    char *restore[]={"git","switch","-q","main",0};
+    check_setup(repo,restore);
+}
+static int tree_has(const char *root_,const char *rev,const char *path) {
+    char *args[]={"git","ls-tree","--name-only",(char *)rev,"--",(char *)path,0};
+    np_result r={0};
+    int ok=!run(root_,args,&r)&&r.outn==strlen(path)+1&&!memcmp(r.out,path,r.outn-1);
+    np_free(&r);return ok;
+}
+static void merge_push(const char *svc) {
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};
+    check_setup(repo,seed);
+    char base[41],up[41];
+    git_oid(repo,"HEAD",base);
+    file("remote-before-merge","upstream\n",0644);commit("upstream before merge");
+    git_oid(repo,"HEAD",up);
+    check_setup(repo,seed);
+    char *reset[]={"git","reset","--hard",base,0};
+    check_setup(repo,reset);
+    char *side[]={"git","switch","-q","-c","fixture-side",0};
+    char *main[]={"git","switch","-q","main",0};
+    char *merge[]={"git","merge","-q","--no-ff","-m","integrate side","fixture-side",0};
+    check_setup(repo,side);file("side-content","side\n",0644);commit("side");
+    check_setup(repo,main);check_setup(repo,merge);
+    char selected[41],received[41];git_oid(repo,"HEAD",selected);
+    np_result r={0};int rc=push_one(svc,selected,&r);
+    git_oid(origin,"refs/heads/main",received);
+    expect(rc&&tx_eqz(up,received)&&has(&r,"reason=non-fast-forward-merge")&&
+           has(&r,"next=sync-then-merge"),"divergent-merge-names-sync-before-merging");
+    np_free(&r);
+    char *restore[]={"git","update-ref","refs/heads/main",base,up,0};
+    check_setup(origin,restore);
+    rc=push_one(svc,selected,&r);
+    git_oid(origin,"refs/heads/main",received);
+    expect(!rc&&tx_eqz(selected,received)&&!has(&r,"PUSH_REPLAY_PLAN"),"authorized-merge-fast-forward");
+    expect(tree_has(origin,"HEAD","side-content"),"merge-second-parent-content-preserved");
+    np_free(&r);
+}
+
+static int counted_refs(const char *scope) {
+    char *v[]={"git","for-each-ref","--format=%(refname)",(char *)scope,0};
+    np_result r={0};int n=0;
+    if(run(repo,v,&r))setup_error("fixture refs");
+    for(size_t i=0;i<r.outn;i++)if(r.out[i]=='\n')n++;
+    np_free(&r);return n;
+}
+
+static void recovery_gc(const char *svc) {
+    char base[41],up[41],owned[41],key[65],rows[56000],pending[180],tip[41],tag[100];
+    git_oid(repo,"HEAD",base);
+    file("published-x","up\n",0644);commit("published X");git_oid(repo,"HEAD",up);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    char *reset[]={"git","reset","--hard",base,0};check_setup(repo,reset);
+    file("owned-y","local\n",0644);commit("owned Y");git_oid(repo,"HEAD",owned);
+    file(".git/hooks/pre-push","#!/bin/sh\nexit 1\n",0700);
+    np_result r={0};
+    int rejected=push_one(svc,owned,&r);np_free(&r);
+    rejected=rejected&&push_one(svc,owned,&r);np_free(&r);
+    expect(rejected&&counted_refs("refs/devsvc/push-recovery")==0,
+        "confirmed-rejected-push-does-not-leave-journal");
+
+    const char *branch_name="refs/heads/main";
+    pi_id_t self;
+    pi_self_tag(0,tag,sizeof tag);
+    if(sy_sha256_hex(branch_name,strlen(branch_name),key)||pi_parse_tag_ex(tag,&self)||
+       !self.btime||!self.ns_ino)setup_error("recovery fixture identity");
+    size_t used=0;
+    for(int i=0;i<130;i++){
+        if(cx_fmt(rows+used,sizeof rows-used,"create refs/devsvc/push-recovery/%s/%s/%s/job-%d-1-%llu-%llu %s\n",
+            key,owned,owned,40000000+i,self.btime,self.ns_ino,owned))setup_error("recovery rows");
+        used=strlen(rows);
+    }
+    for(int i=0;i<65;i++){
+        if(cx_fmt(rows+used,sizeof rows-used,"create refs/devsvc/push-alias/%s/%040d %s\n",key,i+1,up))
+            setup_error("alias rows");
+        used=strlen(rows);
+    }
+    if(cx_fmt(pending,sizeof pending,"refs/devsvc/push-alias/%s/%040d",key,999)||
+       cx_fmt(rows+used,sizeof rows-used,"create %s %s\n",pending,owned))setup_error("pending alias");
+    file("ref-fixture.in",rows,0600);
+    char *batch[]={"sh","-c","git update-ref --stdin < ref-fixture.in",0};check_setup(repo,batch);
+    rejected=push_one(svc,owned,&r);
+    expect(rejected&&has(&r,"reason=recovery-limit\tscanned=129\tretired=129")&&
+        counted_refs("refs/devsvc/push-recovery")==1,"recovery-limit-is-named-and-retires-dead-records");
+    np_free(&r);
+    rejected=push_one(svc,owned,&r);
+    git_oid(repo,pending,tip);
+    expect(rejected&&counted_refs("refs/devsvc/push-recovery")==0&&
+        has(&r,"PUSH_REPLAY_RETIRED\taliases=1")&&counted_refs("refs/devsvc/push-alias")==65&&
+        tx_eqz(owned,tip),"published-aliases-pruned-unpublished-alias-kept");
+    np_free(&r);
+    char hook_path[4500];
+    if(cx_fmt(hook_path,sizeof hook_path,"%s/.git/hooks/pre-push",repo)||sy_unlink(hook_path))
+        setup_error("remove rejection hook");
+    int rc=push_one(svc,owned,&r);
+    expect(!rc&&tree_has(origin,"HEAD","owned-y"),"next-push-after-gc-publishes");
+    np_free(&r);
+    char retired[180];
+    if(cx_fmt(retired,sizeof retired,"refs/devsvc/push-alias/%s/%s",key,owned))
+        setup_error("retired alias");
+    char *drop[]={"git","update-ref","-d",retired,0};
+    check_setup(repo,drop);
+    rc=push_one(svc,owned,&r);
+    expect(rc&&has(&r,"reason=stale-receipt")&&counted_refs("refs/devsvc/push-recovery")==0,
+           "retired-receipt-cannot-replay");
+    np_free(&r);
+}
+static void tail_push(const char *svc) {
+    char base[41],a[41],b[41],c[41],up[41],published[41],after[41],hook_text[12000];
+    git_oid(repo,"HEAD",base);
+    file("upstream-x","up\n",0644);commit("upstream");git_oid(repo,"HEAD",up);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    char *reset[]={"git","reset","--hard",base,0};check_setup(repo,reset);
+    file("owned-a","a\n",0644);commit("owned A");git_oid(repo,"HEAD",a);
+    file("pending-b","b\n",0644);commit("pending B");git_oid(repo,"HEAD",b);
+    file("racing-c","c\n",0644);commit("racing C");git_oid(repo,"HEAD",c);
+    reset[3]=b;check_setup(repo,reset);
+    if(cx_fmt(hook_text,sizeof hook_text,
+        "#!/bin/sh\n"
+        "if git diff --cached --name-only -- pending-b | grep -qx pending-b; then\n"
+        "env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY git -C '%s' update-ref refs/heads/main %s %s 2>/dev/null || :\n"
+        "fi\n"
+        "./tools/generate --check\n",repo,c,b))setup_error("tail hook");
+    file(".git/hooks/pre-commit",hook_text,0700);
+    file("foreign","untouched\n",0644);
+    np_result r={0};int rc=push_one(svc,a,&r);
+    git_oid(origin,"refs/heads/main",published);
+    expect(!rc&&has(&r,"PUSH_REPLAY_LOCAL_RETRY")&&has(&r,"tail=2"),"racing-local-ref-retried-with-old-value");
+    expect(tree_has(repo,"HEAD","racing-c")&&tree_has(repo,"HEAD","pending-b"),"unpublished-b-and-c-preserved");
+    expect(tree_has(origin,"HEAD","owned-a")&&!tree_has(origin,"HEAD","pending-b")&&
+           !tree_has(origin,"HEAD","racing-c"),"first-push-publishes-only-a");
+    np_free(&r);
+    rc=push_one(svc,b,&r);
+    git_oid(origin,"HEAD",after);
+    char range[88];if(cx_fmt(range,sizeof range,"%s..%s",up,after))setup_error("tail range");
+    char *log[]={"git","log","--reverse","--format=%s",range,0};
+    np_result chain={0};int lr=run(origin,log,&chain);
+    expect(!rc&&!lr&&chain.out&&tx_eqz(chain.out,"owned A\npending B\n")&&
+           strcmp(after,published)&&!tree_has(origin,"HEAD","racing-c"),"old-b-receipt-pushes-b-without-repeating-a");
+    np_free(&chain);np_free(&r);
+    expect(tree_has(repo,"HEAD","racing-c"),"c-stays-local-after-b-push");
+}
+static void remote_races(const char *svc) {
+    char moving[4][41],filename[64],hook_path[4500],hook_text[13000],owned[41],local[41],remote[41];
+    git_oid(repo,"HEAD",moving[0]);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    for(int i=1;i<=3;i++) {
+        if(cx_fmt(filename,sizeof filename,"remote-race-%d",i))setup_error("race path");
+        file(filename,"upstream\n",0644);commit(filename);git_oid(repo,"HEAD",moving[i]);
+    }
+    char *seeds[]={"git","push","-q","origin","HEAD:refs/heads/race-seeds",0};check_setup(repo,seeds);
+    char *reset[]={"git","reset","--hard",moving[0],0};check_setup(repo,reset);
+    file("owned","mine\n",0644);commit("mine");git_oid(repo,"HEAD",owned);
+    if(cx_fmt(hook_path,sizeof hook_path,"%s/hooks/pre-receive",origin)||
+       cx_fmt(hook_text,sizeof hook_text,
+          "#!/bin/sh\nread -r old new ref\ncase \"$old\" in\n"
+          "%s) next=%s;;\n%s) next=%s;;\n%s) next=%s;;\n*) exit 1;;\nesac\n"
+          "exec env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git update-ref refs/heads/main \"$next\" \"$old\"\n",
+          moving[0],moving[1],moving[1],moving[2],moving[2],moving[3])||
+       sy_write_atomic(hook_path,hook_text,strlen(hook_text),0700))setup_error("race hook");
+    np_result r={0};int rc=push_one(svc,owned,&r);
+    git_oid(repo,"HEAD",local);git_oid(origin,"HEAD",remote);
+    expect(rc&&has(&r,"reason=remote-races\tattempts=3"),"three-remote-moves-exhaust-bound");
+    expect(tx_eqz(owned,local)&&tx_eqz(remote,moving[3])&&!tree_has(origin,"HEAD","owned"),
+           "race-exhaustion-keeps-local-and-remote-work");
+    np_free(&r);
+}
+static int kill_marked_push(char *id,const char *marker) {
+    char log[4500],deadline[32],*args[7];
+    if(cx_fmt(log,sizeof log,"%s/interrupted.log",parent))setup_error("crash output");
+    int fd=sy_open(log,O_CREAT|O_WRONLY|O_TRUNC,0600);
+    if(fd<0)setup_error("crash capture");
+    push_args(args,0,repo,id,deadline);
+    sy_spawn_t o;sy_child_t child;sy_exit_t st;
+    sy_spawn_init(&o);o.argv=args;o.cwd=repo;o.out_fd=fd;o.err_fd=fd;o.pgroup=-1;o.deadline_ms=16000;
+    if(sy_proc_spawn(&o,&child))setup_error("crash spawn");
+    sy_close(fd);
+    for(int i=0;i<250&&sy_exists(marker)==0;i++)sy_sleep_ms(40);
+    int ready=sy_exists(marker)==1;
+    int killed=sy_proc_kill(&child,9);
+    if(sy_proc_wait(&child,&st))setup_error("crash wait");
+    return ready&&!killed&&st.sig==9;
+}
+static void recover_published(void) {
+    char base[41],up[41],a[41],b[41],remote[41],local[41],marker[4500],hook[4500],text[5000];
+    git_oid(repo,"HEAD",base);
+    file("upstream","up\n",0644);commit("upstream");git_oid(repo,"HEAD",up);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    char *reset[]={"git","reset","--hard",base,0};check_setup(repo,reset);
+    file("owned-a","a\n",0644);commit("owned A");git_oid(repo,"HEAD",a);
+    file("pending-b","b\n",0644);commit("pending B");git_oid(repo,"HEAD",b);
+    if(cx_fmt(marker,sizeof marker,"%s/published",parent)||
+       cx_fmt(hook,sizeof hook,"%s/hooks/post-receive",origin)||
+       cx_fmt(text,sizeof text,"#!/bin/sh\nprintf 'published\\n' > '%s'\nsleep 2\n",marker)||
+       sy_write_atomic(hook,text,strlen(text),0700))setup_error("crash hook");
+    int killed=kill_marked_push(a,marker);
+    git_oid(origin,"HEAD",remote);git_oid(repo,"HEAD",local);
+    expect(killed&&strcmp(remote,up)&&tx_eqz(local,b)&&tree_has(origin,"HEAD","owned-a")&&
+           !tree_has(origin,"HEAD","pending-b"),"remote-published-before-local-ack");
+    if(sy_unlink(hook))setup_error("crash clear hook");
+    np_result r={0};int rc=push_one(0,b,&r);
+    expect(!rc&&has(&r,"PUSH_REPLAY_RECOVERED")&&has(&r,"PUSH_REPLAY_RECONCILED")&&
+           tree_has(origin,"HEAD","pending-b"),"interrupted-publication-recovered-by-old-b-receipt");
+    np_free(&r);
+    char *log[]={"git","log","-2","--reverse","--format=%s",0};
+    expect(!run(origin,log,&r)&&r.out&&tx_eqz(r.out,"owned A\npending B\n"),
+           "crash-recovery-does-not-repeat-a");
+    np_free(&r);
+}
+static void orphan_cleanup(int deadline_case) {
+    char id[41],hold[4500],args_deadline[32],data[5500],head[41];
+    git_oid(repo,"HEAD",id);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    file("owned","own\n",0644);commit("one");git_oid(repo,"HEAD",id);
+    if(cx_fmt(hold,sizeof hold,"%s/at-push",parent)||
+       cx_fmt(data,sizeof data,"#!/bin/sh\nprintf 'ready\\n' > '%s'\nsleep %d\nexit 8\n",hold,deadline_case?8:2))setup_error("orphan setup");
+    file(".git/hooks/pre-push",data,0700);
+    char *args[7];push_args(args,0,repo,id,args_deadline);
+    if(deadline_case) {
+        if(cx_fmt(args_deadline,sizeof args_deadline,"%lld",(long long)(sy_mono_ns()+7200000000LL)))setup_error("deadline fixture");
+        np_result r={0};int rc=run(repo,args,&r);
+        if(r.outn)fwrite(r.out,1,r.outn,stdout);
+        if(r.errn)fwrite(r.err,1,r.errn,stderr);
+        expect(rc&&has(&r,"PUSH_REPLAY_REFUSE\treason=deadline"),"deadline-refusal-names-cause");
+        np_free(&r);
+        git_oid(origin,"HEAD",head);
+        expect(!tx_eqz(id,head),"deadline-keeps-remote-ref");
+        return;
+    }
+    expect(kill_marked_push(id,hold),"sigkill-after-fetch");
+    char hook_path[4500];
+    if(cx_fmt(hook_path,sizeof hook_path,"%s/.git/hooks/pre-push",repo)||sy_unlink(hook_path))setup_error("orphan retry hook");
+    np_result r={0};int rc=push_one(0,id,&r);
+    expect(!rc&&has(&r,"PUSH_REPLAY_RECOVERED"),"dead-writer-material-reaped");
+    np_free(&r);
+    char *refs[]={"git","for-each-ref","refs/devsvc/push-replay/",0};
+    expect(!run(repo,refs,&r)&&r.outn==0,"no-temporary-refs-remain");np_free(&r);
+    if(cx_fmt(hook_path,sizeof hook_path,"%s/.git/devsvc-push",repo))setup_error("orphan directory");
+    sy_dir_t it;
+    int open=sy_dir_open(&it,hook_path);
+    int remaining=open?-1:sy_dir_next(&it);
+    if(!open)sy_dir_close(&it);
+    expect(remaining==0,"no-work-directory-remains");
+    git_oid(origin,"HEAD",head);expect(tx_eqz(id,head),"recovered-run-published");
+}
+static void empty_replay(const char *svc) {
+    char base[41],up[41],local[41],tip[41],after[41];
+    git_oid(repo,"HEAD",base);
+    file("same-bytes","identical\n",0644);commit("remote copy");git_oid(repo,"HEAD",up);
+    char *seed[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,seed);
+    char *reset[]={"git","reset","--hard",base,0};check_setup(repo,reset);
+    file("same-bytes","identical\n",0644);commit("local copy");git_oid(repo,"HEAD",local);
+    np_result r={0};int rc=push_one(svc,local,&r);
+    git_oid(origin,"HEAD",tip);git_oid(repo,"HEAD",after);
+    expect(!rc&&tx_eqz(tip,up)&&tx_eqz(after,up)&&has(&r,"COMMIT_REPLAY_IDENTICAL"),
+           "identical-replay-does-not-create-empty-commit");
+    np_free(&r);
+}
+int main(int argc,char **argv) {
+    const char *svc=0,*which=0,*root=".";
+    if(argc==2)which=argv[1];
+    else if(argc>=3&&argc<=4&&argv[2][0]=='/'){root=argv[1];svc=argv[2];if(argc==4)which=argv[3];}
+    else if(argc!=1)return 2;
+    int cas=which&&tx_eqz(which,"--cas");
+    int same=which&&tx_eqz(which,"--same-path");
+    int concurrent=which&&tx_eqz(which,"--fleet");
+    int conflict=which&&tx_eqz(which,"--conflict");
+    int receipt_only=which&&tx_eqz(which,"--receipt-only");
+    int paired=receipt_only||(which&&tx_eqz(which,"--commit-push"));
+    int output_guard=which&&tx_eqz(which,"--output-guard");
+    int merged=which&&tx_eqz(which,"--merge");
+    int tail=which&&tx_eqz(which,"--tail-race");
+    int races=which&&tx_eqz(which,"--remote-races");
+    int orphan=which&&tx_eqz(which,"--orphan");
+    int deadline_case=which&&tx_eqz(which,"--deadline");
+    int interrupted=which&&tx_eqz(which,"--recover-published");
+    int empty=which&&tx_eqz(which,"--empty");
+    int gc=which&&tx_eqz(which,"--gc");
+    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
+       ((orphan||deadline_case||interrupted)&&svc)||
+       sy_realpath(root,source,sizeof source)<0)return 2;
+    if(cx_fmt(product,sizeof product,"%s/unisacc.com",source))return 2;
+    prepare();
+    if(paired||concurrent) {
+        isolate_cli();
+        if(!svc)svc=native_cli();
+        /* Background commit jobs must restart the same executable under test. */
+        if(sy_setenv("DEVSVC_SELF_BIN",svc,1))setup_error("fixture CLI identity");
+    }
+    if(paired){commit_and_push(svc,receipt_only);return finish();}
+    if(!svc)native_images(cas||same||output_guard);
+    if(!svc&&(!which||output_guard))reject_unplanned_output();
+    if(output_guard)return finish();
+    if(merged){merge_push(svc);return finish();}
+    if(tail){tail_push(svc);return finish();}
+    if(races){remote_races(svc);return finish();}
+    if(orphan||deadline_case){orphan_cleanup(deadline_case);return finish();}
+    if(interrupted){recover_published();return finish();}
+    if(empty){empty_replay(svc);return finish();}
+    if(gc){recovery_gc(svc);return finish();}
+    if(same){same_path(svc?svc:commit_image);return finish();}
+    if(concurrent) {
+        fleet(svc);
+        return finish();
+    }
+    if(cas){
+        cas_fleet(svc?svc:commit_image);
+        return finish();
+    }
+    char base[41], up[41], mine[41], after[41], local[41];
+    git_oid(repo,"HEAD",base);
+    if(conflict) {
+        file("left.txt","up-left\n",0644);file("generated.txt","up-left\nold-right\n",0644);
+    } else {
+        file("right.txt","up-right\n",0644);file("generated.txt","old-left\nup-right\n",0644);
+    }
+    commit("upstream");git_oid(repo,"HEAD",up);
+    char *send[]={"git","push","-q","origin","HEAD:main",0};check_setup(repo,send);
+    char *reset[]={"git","reset","--hard",base,0};check_setup(repo,reset);
+    file("left.txt","own-left\n",0644);file("generated.txt","own-left\nold-right\n",0644);
+    commit("owned");git_oid(repo,"HEAD",mine);
+    file(".git/hooks/pre-commit",
+         "#!/bin/sh\n./tools/generate --check || exit 1\nprintf 'REPLAY_FIXTURE_HOOK rc=0\\n'\n",0700);
+    char *av[7],deadline[32];
+    push_args(av,svc,repo,mine,deadline);
+    np_result r={0};int rc=run(repo,av,&r);
+    if(r.outn)fwrite(r.out,1,r.outn,stdout);
+    if(r.errn)fwrite(r.err,1,r.errn,stderr);
+    if(conflict) {
+        git_oid(origin,"refs/heads/main",after);git_oid(repo,"HEAD",local);
+        expect(rc&&has(&r,"PUSH_REPLAY_CONFLICT\tpath=left.txt"),"source-conflict-named");
+        expect(tx_eqz(after,up)&&tx_eqz(local,mine),"source-conflict-keeps-both-refs");
+        np_free(&r);return finish();
+    }
+    expect(!rc&&has(&r,"PUSH_REPLAY_PLAN"),"non-fast-forward-replayed");
+    expect(!rc&&has(&r,"REPLAY_FIXTURE_HOOK rc=0"),"tentative-tree-tested-by-hook");
+    np_free(&r);
+    git_oid(origin,"refs/heads/main",after);git_oid(repo,"HEAD",local);
+    expect(!strcmp(after,local)&&strcmp(after,up)&&strcmp(after,mine),"remote-and-local-point-at-replay");
+    expect(show_generated(origin,after,"own-left\nup-right\n"),"generated-from-both-inputs");
+    if(!failed) {
+        file("unowned.txt","unowned\n",0644);commit("unowned");
+        file("owned.txt","owned\n",0644);commit("owned next");
+        git_oid(repo,"HEAD",mine);
+        push_args(av,svc,repo,mine,deadline);
+        rc=run(repo,av,&r);
+        git_oid(origin,"refs/heads/main",local);
+        expect(rc&&has(&r,"reason=unowned-pending")&&!strcmp(after,local),"unowned-ancestor-refused");
+        np_free(&r);
+    }
+    return finish();
+}

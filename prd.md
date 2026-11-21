@@ -63,6 +63,9 @@ G2的 `fp_call` 仍属于 `chainargv` 现有局部char指针数组、n++追加�
 
 G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_BUDGET_GEN` 后必须是行尾或TAB，不能用空格代替。真实批次验收同时核子进程rc、唯一标记和产品身份不变；负控的预期REFUSE日志完整保留，不据直接夹具rc0冒充批次PASS。
 
+推送本次提交用 `devsvc git commit --push`，或用 `devsvc git push FULL_SHA...` 显式给出本窗口的提交。快进直接推送，遇远端先行时只重放获授权的单父提交并在私有索引重算派生物。检查入口 `tools/check-push-replay.cx`。
+
+
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
 ## 1. unisacc.com 是什么
