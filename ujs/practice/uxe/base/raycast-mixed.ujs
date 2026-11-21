@@ -1,0 +1,90 @@
+struct RayMixedBlock {
+  kind: u32;
+  node: u32;
+  hits: u32;
+  count: u32;
+}
+
+struct RayMixedHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  kind: u32;
+  node: u32;
+  index: u32;
+  source: u32;
+}
+
+native function ray_mixed_stride(kind:i64) i64 {
+  if(kind==1) { return RayMeshHit.size; }
+  if(kind==2) { return RayPointsHit.size; }
+  return 0;
+}
+
+// Blocks are in object traversal order. Kind 1 is Mesh, kind 2 Points.
+// The source address borrows the native hit, including its type-specific
+// fields. Keep those buffers intact while using the merged result.
+native function Raycaster_mergeHitBlocks(blocks:i64,count:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(count<0 || count>65536 || capacity<0 || capacity>65536 ||
+     !raycaster_span(blocks,count*RayMixedBlock.size) || !raycaster_span(work,space)) { return 0-1; }
+  let total=0;
+  let i=0;
+  while(i<count) {
+    let block=blocks+i*RayMixedBlock.size;
+    let entries=ux_u32(block+RayMixedBlock.count);
+    let stride=ray_mixed_stride(ux_u32(block+RayMixedBlock.kind));
+    if(stride==0 || ux_u32(block+RayMixedBlock.node)==0 || entries>65536-total ||
+       !raycaster_span(ux_u32(block+RayMixedBlock.hits),entries*stride)) { return 0-1; }
+    total=total+entries;
+    i=i+1;
+  }
+  if(total>capacity) { return 0-2; }
+  let bytes=total*RayMixedHit.size;
+  if(space<bytes*2 || !raycaster_span(out,bytes) ||
+     raycaster_overlap(out,bytes,work,space) ||
+     raycaster_overlap(out,bytes,blocks,count*RayMixedBlock.size) ||
+     raycaster_overlap(work,space,blocks,count*RayMixedBlock.size)) { return 0-1; }
+
+  i=0;
+  while(i<count) {
+    let block=blocks+i*RayMixedBlock.size;
+    let source=ux_u32(block+RayMixedBlock.hits);
+    let entries=ux_u32(block+RayMixedBlock.count);
+    let stride=ray_mixed_stride(ux_u32(block+RayMixedBlock.kind));
+    if(raycaster_overlap(out,bytes,source,entries*stride) ||
+       raycaster_overlap(work,space,source,entries*stride)) { return 0-1; }
+    i=i+1;
+  }
+
+  let at=0;
+  i=0;
+  while(i<count) {
+    let block=blocks+i*RayMixedBlock.size;
+    let source=ux_u32(block+RayMixedBlock.hits);
+    let entries=ux_u32(block+RayMixedBlock.count);
+    let kind=ux_u32(block+RayMixedBlock.kind);
+    let node=ux_u32(block+RayMixedBlock.node);
+    let stride=ray_mixed_stride(kind);
+    let indexOffset=RayMeshHit.face;
+    if(kind==2) { indexOffset=RayPointsHit.index; }
+    let j=0;
+    while(j<entries) {
+      let src=source+j*stride;
+      let distance=ux_f64(src+RayMixedHit.distance);
+      if(distance<0.0 || distance-distance!=0.0) { return 0-1; }
+      let dst=work+at*RayMixedHit.size;
+      let copied=uxe_copy_record(dst,src,32);
+      let a=ux_u32_put(dst+RayMixedHit.kind,kind);
+      let b=ux_u32_put(dst+RayMixedHit.node,node);
+      let c=ux_u32_put(dst+RayMixedHit.index,ux_u32(src+indexOffset));
+      let d=ux_u32_put(dst+RayMixedHit.source,src);
+      at=at+1;
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let sorted=ray_sort_hits(work,work+bytes,total,RayMixedHit.size,RayMixedHit.distance);
+  let published=uxe_copy_record(out,work,bytes);
+  return sorted;
+}
