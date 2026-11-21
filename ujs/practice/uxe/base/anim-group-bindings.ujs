@@ -1,0 +1,204 @@
+struct AnimGroupSubscriptions {
+  group:u32;
+  views:u32;
+  capacity:u32;
+  count:u32;
+}
+
+struct AnimGroupBindingView {
+  path:u32;
+  rows:u32;
+  count:u32;
+  next:u32;
+}
+
+struct AnimGroupBindingCell {
+  object:u32;
+  active:u32;
+  identity:u32;
+}
+
+native function anim_sub_area(table:i64,group:i64,views:i64,max:i64,at:i64,bytes:i64) i64 {
+  return animation_span(at,bytes) &&
+    !animation_overlap(at,bytes,table,AnimGroupSubscriptions.size) &&
+    !animation_overlap(at,bytes,group,AnimationObjectGroup.size) &&
+    !animation_overlap(at,bytes,views,max*4) &&
+    !animation_overlap(at,bytes,ux_u32(group+AnimationObjectGroup.entries),
+      ux_u32(group+AnimationObjectGroup.capacity)*8);
+}
+
+native function AnimGroup_subsInit(table:i64,group:i64,views:i64,capacity:i64) i64 {
+  if(!anim_group_valid(group) || capacity<1 || capacity>1024 ||
+     !animation_span(table,AnimGroupSubscriptions.size) ||
+     !animation_span(views,capacity*4) ||
+     animation_overlap(table,AnimGroupSubscriptions.size,views,capacity*4) ||
+     animation_overlap(table,AnimGroupSubscriptions.size,group,AnimationObjectGroup.size) ||
+     !anim_sub_area(table,group,views,0,views,capacity*4) ||
+     animation_overlap(table,AnimGroupSubscriptions.size,ux_u32(group+AnimationObjectGroup.entries),
+       ux_u32(group+AnimationObjectGroup.capacity)*8)) { return 0-1; }
+  let a=ux_u32_put(table+AnimGroupSubscriptions.group,group);
+  let b=ux_u32_put(table+AnimGroupSubscriptions.views,views);
+  let c=ux_u32_put(table+AnimGroupSubscriptions.capacity,capacity);
+  let d=ux_u32_put(table+AnimGroupSubscriptions.count,0);
+  return table;
+}
+
+native function anim_sub_valid(table:i64) i64 {
+  if(!animation_span(table,AnimGroupSubscriptions.size)) { return 0; }
+  let group=ux_u32(table+AnimGroupSubscriptions.group);
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let max=ux_u32(table+AnimGroupSubscriptions.capacity);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  if(max<1 || max>1024 || count>max || !anim_group_valid(group) ||
+     !anim_sub_area(table,group,views,0,views,max*4)) { return 0; }
+  let capacity=ux_u32(group+AnimationObjectGroup.capacity);
+  let i=0;
+  while(i<count) {
+    let view=ux_u32(views+i*4);
+    if(!anim_sub_area(table,group,views,max,view,AnimGroupBindingView.size) ||
+       ux_u32(view+AnimGroupBindingView.path)==0 ||
+       ux_u32(view+AnimGroupBindingView.count)>capacity) { return 0; }
+    let rows=ux_u32(view+AnimGroupBindingView.rows);
+    if(!anim_sub_area(table,group,views,max,rows,capacity*AnimGroupBindingCell.size) ||
+       animation_overlap(view,AnimGroupBindingView.size,rows,capacity*AnimGroupBindingCell.size)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function anim_sub_find(views:i64,count:i64,path:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let view=ux_u32(views+i*4);
+    if(ux_u32(view+AnimGroupBindingView.path)==path) { return i; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function anim_cell_set(cell:i64,object:i64,active:i64,identity:i64) i64 {
+  let a=ux_u32_put(cell+AnimGroupBindingCell.object,object);
+  let b=ux_u32_put(cell+AnimGroupBindingCell.active,active);
+  return ux_u32_put(cell+AnimGroupBindingCell.identity,identity);
+}
+
+// Paths are canonical nonzero IDs. The caller owns each fresh zeroed view
+// and its cell buffer with one slot per possible group entry.
+native function AnimGroup_subscribe(table:i64,path:i64,view:i64,rows:i64) i64 {
+  if(!anim_sub_valid(table) || path<1 || path>4294967295) { return 0-1; }
+  let group=ux_u32(table+AnimGroupSubscriptions.group);
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let max=ux_u32(table+AnimGroupSubscriptions.capacity);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  let index=anim_sub_find(views,count,path);
+  if(index>=0) { return ux_u32(views+index*4); }
+  if(count==max) { return 0-2; }
+  let size=ux_u32(group+AnimationObjectGroup.capacity)*AnimGroupBindingCell.size;
+  if(view==0 || !anim_sub_area(table,group,views,max,view,AnimGroupBindingView.size) ||
+     !anim_sub_area(table,group,views,max,rows,size) ||
+     animation_overlap(view,AnimGroupBindingView.size,rows,size) ||
+     ux_u32(view+AnimGroupBindingView.path)!=0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let other=ux_u32(views+i*4);
+    let cells=ux_u32(other+AnimGroupBindingView.rows);
+    if(animation_overlap(view,AnimGroupBindingView.size,other,AnimGroupBindingView.size) ||
+       animation_overlap(view,AnimGroupBindingView.size,cells,size) ||
+       animation_overlap(rows,size,other,AnimGroupBindingView.size) ||
+       animation_overlap(rows,size,cells,size)) { return 0-1; }
+    i=i+1;
+  }
+  let total=ux_u32(group+AnimationObjectGroup.total);
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  let next=1;
+  i=0;
+  while(i<total) {
+    let active=ux_u32(entries+i*8+4);
+    let cell=anim_cell_set(rows+i*AnimGroupBindingCell.size,ux_u32(entries+i*8),active,next*active);
+    next=next+active;
+    i=i+1;
+  }
+  let a=ux_u32_put(view+AnimGroupBindingView.path,path);
+  let b=ux_u32_put(view+AnimGroupBindingView.rows,rows);
+  let c=ux_u32_put(view+AnimGroupBindingView.count,total);
+  let d=ux_u32_put(view+AnimGroupBindingView.next,next);
+  let e=ux_u32_put(views+count*4,view);
+  let f=ux_u32_put(table+AnimGroupSubscriptions.count,count+1);
+  return view;
+}
+
+// Detaches a path; the previously returned view and cells stop changing.
+native function AnimGroup_unsubscribe(table:i64,path:i64) i64 {
+  if(!anim_sub_valid(table) || path<1 || path>4294967295) { return 0-1; }
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  let i=anim_sub_find(views,count,path);
+  if(i<0) { return 0; }
+  let view=ux_u32(views+i*4);
+  let last=ux_u32_put(views+i*4,ux_u32(views+(count-1)*4));
+  let saved=ux_u32_put(table+AnimGroupSubscriptions.count,count-1);
+  return view;
+}
+
+native function AnimGroup_bindingCell(view:i64,object:i64) i64 {
+  if(!animation_span(view,AnimGroupBindingView.size) || ux_u32(view+AnimGroupBindingView.path)==0) { return 0-1; }
+  let rows=ux_u32(view+AnimGroupBindingView.rows);
+  let total=ux_u32(view+AnimGroupBindingView.count);
+  if(total>65536 || !animation_span(rows,total*AnimGroupBindingCell.size)) { return 0-1; }
+  let i=0;
+  while(i<total) {
+    let cell=rows+i*AnimGroupBindingCell.size;
+    if(ux_u32(cell+AnimGroupBindingCell.object)==object) { return cell; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+// Groups with live subscriptions use this membership entry point.
+native function AnimGroup_updateBindings(table:i64,object:i64,op:i64) i64 {
+  if(!anim_sub_valid(table) || object<1 || object>4294967295 || op<0 || op>2) { return 0-1; }
+  let group=ux_u32(table+AnimGroupSubscriptions.group);
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  let total=ux_u32(group+AnimationObjectGroup.total);
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  let index=anim_group_find(entries,total,object);
+  if(index<0 && op!=0) { return group; }
+  let slot=index;
+  if(slot<0) { slot=total; }
+  let i=0;
+  while(i<count) {
+    let view=ux_u32(views+i*4);
+    let rows=ux_u32(view+AnimGroupBindingView.rows);
+    let next=ux_u32(view+AnimGroupBindingView.next);
+    let cell=rows+slot*AnimGroupBindingCell.size;
+    if(ux_u32(view+AnimGroupBindingView.count)!=total ||
+       (index>=0 && ux_u32(cell+AnimGroupBindingCell.object)!=object) ||
+       (op==0 && (index<0 || ux_u32(cell+AnimGroupBindingCell.identity)==0) && next>=4294967295)) { return 0-1; }
+    i=i+1;
+  }
+  let changed=AnimationObjectGroup_update(group,object,op);
+  if(changed<0) { return changed; }
+  i=0;
+  while(i<count) {
+    let view=ux_u32(views+i*4);
+    let rows=ux_u32(view+AnimGroupBindingView.rows);
+    let cell=rows+slot*AnimGroupBindingCell.size;
+    if(op==2) {
+      let tail=rows+(total-1)*AnimGroupBindingCell.size;
+      let moved=anim_cell_set(cell,ux_u32(tail+AnimGroupBindingCell.object),
+        ux_u32(tail+AnimGroupBindingCell.active),ux_u32(tail+AnimGroupBindingCell.identity));
+    } else {
+      let id=0;
+      if(index>=0) { id=ux_u32(cell+AnimGroupBindingCell.identity); }
+      if(op==0 && id==0) {
+        id=ux_u32(view+AnimGroupBindingView.next);
+        let next=ux_u32_put(view+AnimGroupBindingView.next,id+1);
+      }
+      let saved=anim_cell_set(cell,object,op==0,id);
+    }
+    let size=ux_u32_put(view+AnimGroupBindingView.count,ux_u32(group+AnimationObjectGroup.total));
+    i=i+1;
+  }
+  return group;
+}

@@ -43,7 +43,8 @@
 - ~~Raycaster 构造与设置 | G-ray 默认方向、近远、层和阈值，set 保留设置 | 射线布局。~~ 10 项通过，交换近远字段反例转红。
 - ~~Raycaster 索引三角网格缓冲拾取 | G-ray 远端裁剪、层过滤、稳定距离排序、越界拒绝 | 静态三角面拾取。~~ 9 项通过，读回最远命中的反例转红。
 - Raycaster 场景遍历与排序 | G-ray 递归、层、近远、面索引、UV 和排序 | 对象树与静态三角面拾取。
-- AnimationObjectGroup | G-anim animationobjectgroup-anim.cx：成员加入、停用、复用与逐出；绑定订阅和多对象属性写入待补。补齐 constructor,subscribe_,unsubscribe_，运行独立金值及 r160 篡改门 | -
+- ~~AnimationObjectGroup 路径订阅生命周期 | G-struct 订阅、停用、恢复、逐出和解除订阅 | 已有成员生命周期。~~ 48 项通过，停用误作逐出转红。重订阅时 r160 的旧路径索引与本地清除行为分别断言。
+- AnimationObjectGroup 多对象绑定写回 | G-anim 实际属性与 Mixer 调度 | 路径订阅生命周期。
 - CubicInterpolant | G-anim cubicinterpolant-anim.cx：两端自然、零斜率、环绕三种设置与越界夹取；区间缓存和通用缓冲类型待补。补齐 constructor,intervalChanged_,interpolate_,getSettings_,copySampleValue_，运行独立金值及 r160 篡改门 | -
 - DiscreteInterpolant | G-anim discreteinterpolant-anim.cx：连续 f32 视图、重复时刻、倒向查询与区间夹取；非数值样本和缓存待补。补齐 constructor,interpolate_,getSettings_,copySampleValue_,intervalChanged_，运行独立金值及 r160 篡改门 | -
 - LinearInterpolant | G-anim linearinterpolant-anim.cx：连续 f32 多通道线性插值、重复时刻、倒向查询与端点；可复用区间缓存待补。补齐 constructor,interpolate_,getSettings_,copySampleValue_,intervalChanged_，运行独立金值及 r160 篡改门 | -
