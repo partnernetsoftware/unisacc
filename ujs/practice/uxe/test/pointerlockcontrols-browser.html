@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<button id="capture" style="position:absolute;left:10px;top:10px;width:120px;height:50px">锁定指针</button>
+<pre id="result">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { PerspectiveCamera, REVISION, Vector3 } from "three";
+
+const area=document.querySelector("#capture");
+const result=document.querySelector("#result");
+const params=new URLSearchParams(location.search);
+const fail=reason=>{ result.textContent=`fail:${reason}`; };
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const { PointerLockControls }=await import(`file://${params.get("package")}/examples/jsm/controls/PointerLockControls.js`);
+  const camera=new PerspectiveCamera();
+  const controls=new PointerLockControls(camera,area);
+  const request=new XMLHttpRequest();
+  request.open("GET",params.get("wasm"),false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);
+  const { exports: wasm }=new WebAssembly.Instance(new WebAssembly.Module(bytes));
+  const call=(action,x=0,y=0)=>wasm.uxe_pointer_lock_event(BigInt(action),x,y);
+  const sendMotion=()=>document.dispatchEvent(new MouseEvent("mousemove",{movementX:100,movementY:-50}));
+  const readDirection=()=>controls.getDirection(new Vector3()).x;
+  const near=(a,b)=>Math.abs(a-b)<1e-9;
+  let locks=0,unlocks=0,changes=0,confirmed=0;
+  controls.addEventListener("lock",()=>locks++);
+  controls.addEventListener("unlock",()=>unlocks++);
+  controls.addEventListener("change",()=>changes++);
+  document.addEventListener("mousemove",event=>{
+    if(event.isTrusted) event.stopImmediatePropagation();
+  },true);
+  document.addEventListener("mousemove",event=>call(2,event.movementX,event.movementY));
+  document.addEventListener("pointerlockerror",()=>fail("browser pointerlockerror"));
+  document.addEventListener("pointerlockchange",event=>{
+    if(!event.isTrusted || result.textContent.startsWith("fail:")) return;
+    const locked=document.pointerLockElement===area;
+    call(1,params.has("mutate")?Number(!locked):Number(locked));
+    if(locked) {
+      if(confirmed!==0 || locks!==1 || !controls.isLocked || call(3)!==1) {
+        fail("lock confirmation mismatch");
+        controls.unlock();
+        return;
+      }
+      confirmed=1;
+      sendMotion();
+      if(changes!==1 || call(5)!==1 || !near(call(6),readDirection()) || !near(readDirection(),0.19767681165408388)) {
+        fail("locked motion mismatch");
+      }
+      controls.unlock();
+      return;
+    }
+    sendMotion();
+    if(confirmed!==1 || unlocks!==1 || controls.isLocked || call(4)!==1 ||
+       changes!==1 || call(5)!==1 || !near(call(6),readDirection())) {
+      fail("unlock confirmation mismatch");
+      return;
+    }
+    controls.dispose();
+    result.textContent="pass";
+  });
+  call(0);
+  sendMotion();
+  if(changes!==0 || call(5)!==0 || !near(call(6),0)) throw new Error("unlocked motion was applied");
+  area.addEventListener("click",event=>{
+    if(event.isTrusted && navigator.userActivation.isActive) controls.lock();
+    else fail("click has no transient activation");
+  },{once:true});
+  result.textContent="ready";
+} catch(error) {
+  fail(error.message);
+}
+</script>

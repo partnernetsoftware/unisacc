@@ -259,7 +259,8 @@
 - ~~OrbitControls 与 MapControls 透视触控路由 | G-ray 单双指、取消与指针归属 | 平移、旋转及捏合。~~ 十项通过，忽略触控移动转红。
 - OrbitControls 与 MapControls 宿主接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏和约束 | 透视触控路由与输入 ABI。
 - ~~PointerLockControls 事件与相对运动 | G-ray r160 事件、俯仰限制、相对位移及锁定退出 | 输入 ABI。~~ 12 项通过，反向鼠标事件使朝向 X 变号，反例转红。
-- PointerLockControls 实浏览器锁定接线 | CDP 锁定、退出与无权限事件 | 事件与相对运动、宿主锁定 ABI。
+- ~~PointerLockControls 真实浏览器锁定探针 | CDP 受信点击、锁定释放以及释放后忽略移动 | 事件与相对运动。~~ Chrome 实测通过，翻转原生锁确认转红。
+- PointerLockControls 正式宿主桥 | CDP 无权限拒绝、锁失效及部署入口 | 真实浏览器锁定探针。
 - TransformControls | G-ray 选轴、吸附、坐标模式与结束事件 | Mesh 拾取与输入 ABI。
 - MOUSE 与 TOUCH 常量 | G-ray 实际输入路由 | r160 枚举和路由表 13 项通过，MapControls 双指错绑转红。
 

@@ -1,0 +1,181 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+typedef struct {
+    sy_child_t child;
+    long deadline;
+    int next,offset,size;
+    char stream[4096],reply[8192],session[112];
+} LockBrowser;
+
+static const char *reply_field(const char *reply,const char *field) {
+    const long bytes=tx_len(reply,8192), width=tx_len(field,128);
+    for(long offset=0;offset+width<=bytes;offset++) {
+        if(tx_prefix(reply+offset,bytes-offset,field,width)) return reply+offset;
+    }
+    return 0;
+}
+
+static int browser_reply(LockBrowser *browser) {
+    for(int i=0;i<(int)sizeof browser->reply;i++) {
+        if(browser->offset==browser->size) {
+            long remain=browser->deadline-sy_now_ms();
+            if(remain<=0 || sy_readable(browser->child.out_fd,remain)<=0) return 0;
+            browser->size=sy_read(browser->child.out_fd,browser->stream,sizeof browser->stream);
+            browser->offset=0;
+            if(browser->size<=0) return 0;
+        }
+        char byte=browser->stream[browser->offset++];
+        browser->reply[i]=byte;
+        if(byte==0) return 1;
+    }
+    return 0;
+}
+
+static int browser_call(LockBrowser *browser,const char *method,const char *params) {
+    char message[1600];
+    const int id=++browser->next;
+    const int bytes=tx_snprintf(message,sizeof message,
+        "{\"id\":%d,\"method\":\"%s\",\"params\":%s%s}",id,method,params,browser->session);
+    if(bytes<=0 || bytes>=(int)sizeof message || sy_write_all(browser->child.in_fd,message,bytes+1)) return 0;
+    while(sy_now_ms()<browser->deadline && browser_reply(browser)) {
+        const char *key=reply_field(browser->reply,"\"id\":");
+        if(key && tx_strtol(key+5,0,10)==id) return reply_field(browser->reply,"\"error\":")==0;
+    }
+    return 0;
+}
+
+static int browser_id(const char *reply,const char *field,char *out) {
+    const char *id=reply_field(reply,field);
+    if(!id) return 0;
+    id+=tx_len(field,50);
+    int length=0;
+    while(id[length] && id[length]!='"' && length<96) length++;
+    if(!length || id[length]!='"') return 0;
+    for(int i=0;i<length;i++) out[i]=id[i];
+    out[length]=0;
+    return 1;
+}
+
+static int wait_result(LockBrowser *browser,const char *word) {
+    const char *params="{\"expression\":\"document.querySelector('#result')?.textContent\"}";
+    char expected[40];
+    tx_snprintf(expected,sizeof expected,"\"value\":\"%s\"",word);
+    for(int i=0;i<100 && sy_now_ms()<browser->deadline;i++) {
+        if(!browser_call(browser,"Runtime.evaluate",params)) return 0;
+        if(reply_field(browser->reply,expected)) return 1;
+        if(reply_field(browser->reply,"\"value\":\"fail:")) {
+            printf("POINTERLOCK_BROWSER %s\n",browser->reply);
+            return 0;
+        }
+        sy_sleep_ms(50);
+    }
+    return 0;
+}
+
+static int run_browser(const char *url,const char *dir) {
+    char profile[380],params[1000],target[97],session[97];
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","pointerlock-pipe",
+        "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
+        "--remote-debugging-pipe",profile,"about:blank",0};
+    sy_spawn_t launch;
+    sy_exit_t ended;
+    LockBrowser browser={0};
+    sy_spawn_init(&launch);
+    launch.argv=argv; launch.in_fd=SY_STDIO_PIPE; launch.out_fd=SY_STDIO_PIPE;
+    launch.err_fd=SY_STDIO_NULL; launch.pgroup=-1; launch.deadline_ms=13000;
+    if(sy_proc_spawn(&launch,&browser.child)) return 1;
+    browser.deadline=sy_now_ms()+12000;
+    const char *stage="open fixture";
+    int passed=0;
+    tx_snprintf(params,sizeof params,"{\"url\":\"%s\"}",url);
+    if(!browser_call(&browser,"Target.createTarget",params) ||
+       !browser_id(browser.reply,"\"targetId\":\"",target)) goto done;
+    stage="attach";
+    tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
+    if(!browser_call(&browser,"Target.attachToTarget",params) ||
+       !browser_id(browser.reply,"\"sessionId\":\"",session)) goto done;
+    tx_snprintf(browser.session,sizeof browser.session,",\"sessionId\":\"%s\"",session);
+    stage="fixture readiness";
+    if(!browser_call(&browser,"Page.bringToFront","{}") || !wait_result(&browser,"ready")) goto done;
+    stage="trusted click";
+    if(!browser_call(&browser,"Input.dispatchMouseEvent",
+        "{\"type\":\"mousePressed\",\"x\":30,\"y\":30,\"button\":\"left\",\"clickCount\":1,\"buttons\":1}") ||
+       !browser_call(&browser,"Input.dispatchMouseEvent",
+        "{\"type\":\"mouseReleased\",\"x\":30,\"y\":30,\"button\":\"left\",\"clickCount\":1}")) goto done;
+    stage="lock and unlock assertions";
+    passed=wait_result(&browser,"pass");
+done:
+    sy_close(browser.child.in_fd);
+    sy_close(browser.child.out_fd);
+    sy_proc_kill(&browser.child,9);
+    sy_proc_wait(&browser.child,&ended);
+    printf("G_RAY PointerLockControls trusted capture stage=%s failed=%d\n",stage,!passed);
+    return !passed;
+}
+
+static int build_wasm(const char *source,const char *wasm) {
+    const char *modules[]={"f64-math","vector-scalar","pointerlockcontrols",0};
+    char program[22000]="export uxe_pointer_lock_event(action:i64,x:f64,y:f64) f64 version 1;\n";
+    int used=tx_len(program,sizeof program);
+    for(int i=0;modules[i];i++) {
+        char path[192];
+        unsigned char *body=0;
+        int64_t size=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        if(sy_read_file(path,&body,&size,sizeof program-used-2)) return 1;
+        int wrote=tx_snprintf(program+used,sizeof program-used,"%s\n",body);
+        mm_free(body);
+        if(wrote<0 || wrote>=(int)sizeof program-used) return 1;
+        used+=wrote;
+    }
+    int tail=tx_snprintf(program+used,sizeof program-used,
+        "let c=256;let direction=512;"
+        "if(action==0){return 0.0+PointerLockControls_init(c,0.0,0.0,0.0);}"
+        "if(action==1){return 0.0+PointerLockControls_hostState(c,f64_floor_i64(x));}"
+        "if(action==2){return 0.0+PointerLockControls_pointer(c,x,y);}"
+        "if(action==3){return 0.0+ux_u32(c+PointerLockControls.lockEvents);}"
+        "if(action==4){return 0.0+ux_u32(c+PointerLockControls.unlockEvents);}"
+        "if(action==5){return 0.0+ux_u32(c+PointerLockControls.changeEvents);}"
+        "let view=PointerLockControls_direction(c,direction);return ux_f64(direction);\n");
+    if(tail<0 || tail>=(int)sizeof program-used || sy_write_file(source,program,used+tail,0600)) return 1;
+    char *output=0;
+    size_t size=0;
+    char *argv[]={"./ujs/ujs2wasm.com",(char*)source,"-o",(char*)wasm,0};
+    int rc=cx_runv_timeout(argv,6,&output,&size);
+    if(rc) printf("POINTERLOCK_BROWSER compile_rc=%d %s\n",rc,output?output:"");
+    mm_free(output);
+    return rc!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *package=argv[1];
+    if(package[0]!='/') return 2;
+    for(int i=0;package[i];i++) {
+        char byte=package[i];
+        if(i>=180 || !((byte>='A' && byte<='Z') || (byte>='a' && byte<='z') ||
+           (byte>='0' && byte<='9') || byte=='-' || byte=='_' || byte=='/' || byte=='.')) return 2;
+    }
+    char cwd[390],dir[256],source[290],wasm[290],url[960];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-pointerlock-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    int length=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/pointerlockcontrols-browser.html?package=%s&wasm=%s%s",
+        cwd,package,wasm,mutate?"&mutate=1":"");
+    int failed=length<0 || length>=(int)sizeof url || build_wasm(source,wasm) || run_browser(url,dir);
+    char *clean[]={"rm","-rf","--",dir,0};
+    char *output=0;
+    size_t size=0;
+    if(cx_runv_timeout(clean,4,&output,&size)) failed=1;
+    mm_free(output);
+    return failed;
+}
