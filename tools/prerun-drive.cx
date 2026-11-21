@@ -14,6 +14,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
 #pragma unisa use sys.time
+#pragma unisa use sys.sha
 #pragma unisa use sysx.process
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -21,6 +22,7 @@
 
 #define PD_PW 4400
 #define PD_MAX_IDS 2048
+#define PD_PREP_MAXB 1024
 #define PD_MAX_WINS 512
 #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
 #define PD_CHILD_SECONDS 58
@@ -50,7 +52,9 @@ typedef struct {
 
 typedef struct {
     char id[128];
+    char domain[64];
     char status[24];
+    int rc;
     char note[256];
     int seen;
     int had_fail;
@@ -87,6 +91,10 @@ static void pd_mkdirs(const char *dir) {
 static int pd_starts(const char *s, const char *pre) {
     size_t pl = strlen(pre);
     return strlen(s) >= pl && memcmp(s, pre, pl) == 0;
+}
+
+static int pd_is_early_canary_id(const char *id) {
+    return pd_starts(id, "ri-image-") || tx_eqz(id, "ri-route-refuse") || tx_eqz(id, "lane-key-probes");
 }
 
 static int pd_is_heavy_id(const char *id) {
@@ -375,6 +383,10 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
     if (pd_normal_jobs < 1 || pd_normal_jobs > 16) return pd_refuse("normal-jobs-must-be-1-to-16");
     if (pd_nids <= 0) return pd_refuse("empty-ids-file");
+    if (pd_nids >= PD_PREP_MAXB) {
+        fprintf(stderr, "PRERUN_MAXB_EXCEEDED\tbatches=%d\tmaxb=%d\n", pd_nids, PD_PREP_MAXB);
+        return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
+    }
     for (i = 0; i < pd_nids; i++) {
         used[i] = 0;
         if (pd_has_times) {
@@ -397,21 +409,57 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         cx_fmt(w->phase, sizeof w->phase, "warmup");
         w->count = 0;
         long cost = 0;
-        for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-            if (!pd_ids[i].heavy && !pd_ids[i].priority && pd_warmup_fits(i, cost)) {
-                w->idxs[w->count++] = i;
-                used[i] = 1;
-                cost += pd_ids[i].time_ms;
+        if (pd_has_times && warmup_n == 1) {
+            int best = -1;
+            for (i = 0; i < pd_nids; i++) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
+                    if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
+                }
             }
-        }
-        for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-            if (!used[i] && !pd_ids[i].heavy && pd_warmup_fits(i, cost)) {
-                w->idxs[w->count++] = i;
-                used[i] = 1;
-                cost += pd_ids[i].time_ms;
+            if (best < 0) {
+                for (i = 0; i < pd_nids; i++) {
+                    if (!pd_ids[i].heavy && pd_warmup_fits(i, 0)) {
+                        if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
+                    }
+                }
+            }
+            if (best >= 0) {
+                w->idxs[w->count++] = best;
+                used[best] = 1;
+                cost += pd_ids[best].time_ms;
+            }
+        } else {
+            for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
+                    w->idxs[w->count++] = i;
+                    used[i] = 1;
+                    cost += pd_ids[i].time_ms;
+                }
+            }
+            for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
+                if (!used[i] && !pd_ids[i].heavy && pd_warmup_fits(i, cost)) {
+                    w->idxs[w->count++] = i;
+                    used[i] = 1;
+                    cost += pd_ids[i].time_ms;
+                }
             }
         }
         if (w->count > 0) { pd_nwins++; w_warmup = 1; }
+    }
+
+    /* 1b. Early product-qualification canaries (ri-image-*, ri-route-refuse, lane-key-probes):
+     *     pack immediately after W0000 warmup (before 70+ heavy netregen windows) so any product
+     *     or lane table regression fails within the first 2 minutes instead of after 45 minutes. */
+    {
+        static int can_rem[PD_MAX_IDS];
+        int ncan = 0;
+        for (i = 0; i < pd_nids; i++) {
+            if (!used[i] && !pd_ids[i].heavy && pd_is_early_canary_id(pd_ids[i].id)) {
+                can_rem[ncan++] = i;
+                used[i] = 1;
+            }
+        }
+        pd_pack_normal_group(can_rem, ncan, win_size, &w_normal);
     }
 
     /* 2. Priority batches first (tier 2 = explicit risk/non-PASS first, tier 1 = secondary platform priority;
@@ -600,6 +648,16 @@ static void pd_ingest_strict_buf(const char *b, int64_t n) {
         if (tx_eqz(st, "FAIL")) s->had_fail = 1;
         s->seen++;
         cx_fmt(s->status, sizeof s->status, "%s", st);
+        if (clens[1] > 0 && clens[1] < (int64_t)sizeof s->domain) {
+            mm_copy(s->domain, sizeof s->domain, cols[1], (size_t)clens[1]);
+            s->domain[clens[1]] = 0;
+        }
+        if (nc >= 4 && clens[3] > 0 && clens[3] < 12) {
+            char rcb[16];
+            mm_copy(rcb, sizeof rcb, cols[3], (size_t)clens[3]);
+            rcb[clens[3]] = 0;
+            s->rc = atoi(rcb);
+        }
         if (nc >= 9 && clens[8] > 0) {
             size_t nl = (size_t)(clens[8] < 250 ? clens[8] : 250);
             mm_copy(s->note, sizeof s->note, cols[8], nl);
@@ -798,9 +856,17 @@ static int pd_recover_serial(const char *root, const char *cand, const char *out
         }
         if (matched && (matched == 1 || pd_keep_going)) {
             if (sy_write_atomic(done, "SERIAL_DONE\n", 12, 0644)) return -1;
-            if (matched == 2)
+            if (matched == 2) {
+                if (tx_eqz(pd_states[0].domain, "product-qualification") && tx_eqz(pd_states[0].status, "FAIL")) {
+                    printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
+                           ids[i], pd_states[0].rc, tries, part, part, pd_states[0].raw_line);
+                    printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n",
+                           ids[i], tries, part, pd_states[0].raw_line);
+                    return 2;
+                }
                 printf("PRERUN_KEEP_GOING\tbatch=%s\tretries=%d\twindow=%s\traw=serial-recovery-%s\n",
                        ids[i], tries, part, pd_states[0].status);
+            }
         } else {
             printf("%s\tbatch=%s\twindow=%s\traw=serial-recovery-incomplete\n",
                    pd_keep_going ? "PRERUN_INCOMPLETE" : "PRERUN_STOP", ids[i], part);
@@ -809,6 +875,75 @@ static int pd_recover_serial(const char *root, const char *cand, const char *out
         }
     }
     return incomplete != 0;
+}
+
+static int pd_prebuild_layout(const char *root, const char *cand, char *lay_out, size_t cap) {
+    if (!cand || !cand[0] || tx_eqz(cand, "-")) return -1;
+    unsigned char *cb = 0; int64_t cn = 0;
+    char sha[65], head[64], why[256];
+    if (sy_read_file(cand, &cb, &cn, 256L << 20) || !cb || sy_sha256_hex(cb, cn, sha)) {
+        if (cb) mm_free(cb);
+        return -1;
+    }
+    mm_free(cb);
+    np_result gr = {0};
+    char *gv[] = {"git", "-C", (char *)root, "rev-parse", "HEAD", 0};
+    if (np_run(gv, 0, 0, 10, &gr, why, sizeof why) || gr.rc || gr.outn < 40) {
+        np_free(&gr);
+        return -1;
+    }
+    for (int i = 0; i < 40; i++) {
+        char c = gr.out[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { np_free(&gr); return -1; }
+        head[i] = c;
+    }
+    head[40] = 0;
+    np_free(&gr);
+    const char *td = sy_env("TMPDIR");
+    if (!td || !*td) td = "/tmp";
+    char cache[PD_PW], receipt[PD_PW], gitp[PD_PW], comp[PD_PW];
+    if (cx_fmt(cache, sizeof cache, "%s/unisacc-qualify-%s-%s", td, sha, head) ||
+        cx_fmt(receipt, sizeof receipt, "%s/ready", cache)) return -1;
+    unsigned char *rb = 0; int64_t rn = 0;
+    if (sy_read_file(receipt, &rb, &rn, 256) == 0 && rb && rn > 41) {
+        char *tab = (char *)memchr(rb, '\t', (size_t)rn);
+        if (tab && (tab - (char *)rb) > 5 && memcmp(rb, "tree-", 5) == 0) {
+            char rec[64];
+            size_t rl = (size_t)(tab - (char *)rb);
+            if (rl < sizeof rec && !mm_copy(rec, sizeof rec, rb, rl)) {
+                rec[rl] = 0;
+                sy_stat_t st1, st2;
+                if (!cx_fmt(lay_out, cap, "%s/%s", cache, rec) &&
+                    !cx_fmt(gitp, sizeof gitp, "%s/.git", lay_out) &&
+                    !cx_fmt(comp, sizeof comp, "%s/unisacc.com", lay_out) &&
+                    sy_lstat(gitp, &st1) == 0 && sy_lstat(comp, &st2) == 0 && st2.kind == 'f') {
+                    mm_free(rb);
+                    return 0;
+                }
+            }
+        }
+    }
+    if (rb) mm_free(rb);
+    pd_mkdirs(cache);
+    if (sy_mkdtemp(cache, "tree-", lay_out, cap)) return -1;
+    const char *base_name = strrchr(lay_out, '/');
+    base_name = base_name ? base_name + 1 : lay_out;
+    char scmd[8192];
+    if (cx_fmt(scmd, sizeof scmd,
+        "git -C '%s' archive --format=tar HEAD | tar -x -C '%s' && "
+        "cp '%s' '%s/unisacc.com' && chmod 0755 '%s/unisacc.com' && "
+        "git -C '%s' init -q && "
+        "git -C '%s' add -Af -- . ':(exclude)unisacc.com' && "
+        "git -C '%s' -c user.name=devsvc-qualify -c user.email=qualify@localhost -c commit.gpgsign=false commit -q -m 'devsvc qualify layout' && "
+        "printf '%%s\\t%%s\\n' '%s' \"$(git -C '%s' rev-parse 'HEAD^{tree}')\" > '%s'",
+        root, lay_out, cand, lay_out, lay_out, lay_out, lay_out, lay_out,
+        base_name, lay_out, receipt)) return -1;
+    char *sv[] = {"sh", "-c", scmd, 0};
+    np_result sr = {0};
+    int tr = np_run(sv, root, 0, 50, &sr, why, sizeof why);
+    int ok = (!tr && sr.rc == 0);
+    np_free(&sr);
+    return ok ? 0 : -1;
 }
 
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
@@ -820,6 +955,39 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     if (timed && atoi((char *)wb + sizeof PD_TIMED_HEADER - 1) > max_jobs) {
         mm_free(wb);
         return pd_refuse("timed-plan-exceeds-max-jobs");
+    }
+    {
+        int64_t cpos = 0;
+        int planned_batches = 0;
+        while (cpos < wn) {
+            int64_t ls = cpos;
+            while (cpos < wn && wb[cpos] != '\n') cpos++;
+            int64_t le = cpos;
+            if (cpos < wn) cpos++;
+            if (le > ls && wb[le - 1] == '\r') le--;
+            if (le <= ls || wb[ls] == '#' || (le - ls >= 7 && memcmp(wb + ls, "window\t", 7) == 0)) continue;
+            const char *cols[8]; int64_t clens[8]; int nc = 0; int64_t p = ls;
+            while (nc < 8) {
+                int64_t cs = p;
+                while (p < le && wb[p] != '\t') p++;
+                cols[nc] = (const char *)wb + cs; clens[nc] = p - cs; nc++;
+                if (p >= le) break;
+                p++;
+            }
+            if (nc < 5) continue;
+            if (clens[2] == 13 && memcmp(cols[2], "prebuild-self", 13) == 0) continue;
+            char cbuf[16];
+            if (clens[3] > 0 && clens[3] < 15 && !mm_copy(cbuf, sizeof cbuf, cols[3], (size_t)clens[3])) {
+                cbuf[clens[3]] = 0;
+                int cval = atoi(cbuf);
+                if (cval > 0) planned_batches += cval;
+            }
+        }
+        if (planned_batches >= PD_PREP_MAXB) {
+            fprintf(stderr, "PRERUN_MAXB_EXCEEDED\tbatches=%d\tmaxb=%d\n", planned_batches, PD_PREP_MAXB);
+            mm_free(wb);
+            return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
+        }
     }
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
@@ -861,16 +1029,21 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         }
         (void)load_cap;   /* load gates retired 2026-11-20: --max-jobs is the fixed bound, load1 never lowers it */
         if (tx_eqz(phase, "prebuild-self")) {
-            char cmd[8192], why[256];
+            char cmd[8192], why[256], lay_dir[PD_PW];
+            const char *run_cwd = root;
             np_result r = {0};
+            long started = sy_now_ms();
             if (mock_runner) {
                 cx_fmt(cmd, sizeof cmd, "sh '%s' prebuild-self '%s' '%s'", mock_runner, wid, outp);
+            } else if (pd_prebuild_layout(root, cand, lay_dir, sizeof lay_dir) == 0) {
+                run_cwd = lay_dir;
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/devsvc.cx -- prebuild-self", lay_dir);
             } else {
-                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/devsvc.cx -- prebuild-self", root);
+                const char *use_cand = (cand && cand[0] && !tx_eqz(cand, "-")) ? cand : "./unisacc.com";
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/devsvc.cx -- prebuild-self", root, use_cand);
             }
             char *av[] = {"sh", "-c", cmd, 0};
-            long started = sy_now_ms();
-            int tr = np_run(av, root, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
+            int tr = np_run(av, run_cwd, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
             int rc = tr ? 124 : r.rc;
             np_free(&r);
             printf("PRERUN_WINDOW\twindow=%s\tphase=%s\tattempt=%d\tjobs=%d\trc=%d\twall_ms=%ld\n",
@@ -940,6 +1113,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 int result = pd_recover_serial(root, cand, out_dir, mock_runner, wid,
                                                win_ids, passed_flags, nwin, max_retries, resume);
                 if (result < 0) { mm_free(wb); return pd_refuse("serial-recovery-receipt-write"); }
+                if (result == 2) { mm_free(wb); return 1; }
                 if (result == 0) {
                     if (sy_write_atomic(donep, "SERIAL_DONE\n", 12, 0644)) {
                         mm_free(wb); return pd_refuse("serial-window-receipt-write");
@@ -972,17 +1146,22 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
 
             unsigned char *ob = 0; int64_t on = 0;
-            int has_nonpass = 0;
+            int has_nonpass = 0, bad_rc = rc, bad_prod_fail = 0;
             char bad_id[128] = {0}, bad_raw[1024] = {0};
             pd_nstates = 0;
             if (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0) {
                 pd_ingest_strict_buf((const char *)ob, on);
                 for (int k = 0; k < pd_nstates; k++) {
                     if (!tx_eqz(pd_states[k].status, "PASS")) {
-                        has_nonpass = 1;
-                        cx_fmt(bad_id, sizeof bad_id, "%s", pd_states[k].id);
-                        cx_fmt(bad_raw, sizeof bad_raw, "%s", pd_states[k].raw_line);
-                        break;
+                        int is_pf = (tx_eqz(pd_states[k].domain, "product-qualification") && tx_eqz(pd_states[k].status, "FAIL"));
+                        if (!has_nonpass || (is_pf && !bad_prod_fail)) {
+                            has_nonpass = 1;
+                            bad_prod_fail = is_pf;
+                            bad_rc = pd_states[k].rc;
+                            cx_fmt(bad_id, sizeof bad_id, "%s", pd_states[k].id);
+                            cx_fmt(bad_raw, sizeof bad_raw, "%s", pd_states[k].raw_line);
+                        }
+                        if (bad_prod_fail) break;
                     }
                 }
                 mm_free(ob);
@@ -1019,6 +1198,13 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             if (ridx >= 0) retry_counts[ridx]++;
             int cnt = (ridx >= 0) ? retry_counts[ridx] : attempt;
             if (cnt >= max_retries) {
+                if (bad_prod_fail) {
+                    printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
+                           bad_id, bad_rc, cnt, wid, wid, bad_raw);
+                    printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n", bad_id, cnt, wid, bad_raw);
+                    mm_free(wb);
+                    return 1;
+                }
                 if (pd_keep_going) {
                     if (timed) {
                         int missing = 0;
@@ -1389,7 +1575,7 @@ int main(int argc, char **argv) {
     const char *sub = argv[1];
     if (tx_eqz(sub, "plan")) {
         const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0;
-        int win_sz = 10, warmup = 4;
+        int win_sz = 10, warmup = -1;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
             else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
@@ -1401,11 +1587,12 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
             else return pd_refuse("unknown-plan-arg");
         }
-        if (!ids_f || !out_d) return pd_refuse("plan-requires-ids-file-and-out");
+        if (!ids_f || !ids_f[0] || !out_d || !out_d[0]) return pd_refuse("plan-requires-ids-file-and-out");
         if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
         if (pd_load_ids(ids_f)) return pd_refuse("read-ids-file");
         if (times_f && pd_load_times_file(times_f)) return pd_refuse("read-times-file");
         if (prio_f && pd_load_priority_file(prio_f)) return pd_refuse("read-priority-file");
+        if (warmup < 0) warmup = pd_has_times ? 1 : 4;
         return pd_build_plan(win_sz, warmup, out_d);
     }
     if (tx_eqz(sub, "run")) {

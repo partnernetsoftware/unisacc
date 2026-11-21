@@ -1,0 +1,67 @@
+#pragma unisa module chunked
+#pragma unisa use mem.bytes
+/* L1 textx/chunked: HTTP Transfer-Encoding: chunked decoding (RFC 9112 7.1), an extension package
+   (ext/textx, outside the compile closure). The caller owns the output buffer; no allocation.
+     long dk_dechunk(const char *in, long inlen, unsigned char *out, long cap)
+   decodes the whole chunked body IN[0..inlen) into OUT[0..cap) and returns the payload byte count
+   (>= 0), or a negative errno: -ENOSPC the payload does not fit in cap, -EINVAL malformed framing
+   (non-hex size, size over 15 digits, missing CRLF after a chunk, bad arguments), -EIO the input ends
+   before the terminating empty line. Chunk extensions (";name=value") are skipped, hex digits are
+   case-insensitive, a bare LF is accepted for CRLF, trailer fields after the 0-size chunk are
+   skipped. Bytes after the final empty line are not examined. Module state: none. */
+
+static int dk_hex(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* the index after the line end at I, -EIO when it is cut off, -EINVAL when it is not CRLF or LF */
+static long dk_eol(const unsigned char *p, long n, long i) {
+    if (i >= n) return -EIO;
+    if (p[i] == '\r') {
+        if (i + 1 >= n) return -EIO;
+        return p[i + 1] == '\n' ? i + 2 : -EINVAL;
+    }
+    return p[i] == '\n' ? i + 1 : -EINVAL;
+}
+
+long dk_dechunk(const char *in0, long inlen, unsigned char *out, long cap) {
+    const unsigned char *in = (const unsigned char *)in0;
+    long i = 0, w = 0, size;
+    int nd, v;
+    if (inlen < 0 || cap < 0 || (inlen && !in) || (cap && !out)) return -EINVAL;
+    for (;;) {
+        size = 0; nd = 0;
+        while (i < inlen && (v = dk_hex(in[i])) >= 0) {
+            if (++nd > 15) return -EINVAL;
+            size = size * 16 + v;
+            i++;
+        }
+        if (i >= inlen) return -EIO;
+        if (nd == 0) return -EINVAL;
+        if (in[i] == ';') { while (i < inlen && in[i] != '\r' && in[i] != '\n') i++; }
+        i = dk_eol(in, inlen, i);
+        if (i < 0) return i;
+        if (size == 0) break;
+        if (size > cap - w) return -ENOSPC;
+        if (size > inlen - i) return -EIO;
+        if (mm_copy(out + w, cap - w, in + i, size)) return -EINVAL;
+        w += size; i += size;
+        i = dk_eol(in, inlen, i);
+        if (i < 0) return i;
+    }
+    for (;;) {   /* trailer fields up to the empty line */
+        if (i >= inlen) return -EIO;
+        if (in[i] == '\r' || in[i] == '\n') {
+            i = dk_eol(in, inlen, i);
+            if (i < 0) return i;
+            break;
+        }
+        while (i < inlen && in[i] != '\n') i++;
+        if (i >= inlen) return -EIO;
+        i++;
+    }
+    return w;
+}

@@ -10,7 +10,11 @@
    surrogate pairs) is decoded to UTF-8; strings are NUL-terminated copies (js_str_len
    gives the byte length, which may include embedded NUL from \u0000).
    Ownership: the caller owns the root and frees it once with js_free; children belong to
-   the root. Accessors take 0 safely and return 0 / JS_NONE on a miss. */
+   the root. Accessors take 0 safely and return 0 / JS_NONE on a miss.
+   Tree ownership contract: js_free(root) frees every node reachable from ROOT, including any node another tree
+   also points at. A tree must OWN all of its children: never attach a node that belongs to another tree (not
+   even a scalar leaf) without copying it. js_mk_str/js_mk_num/js_mk_bool/js_mk_null make cheap copies for this,
+   and js_clone(v) deep-copies a whole subtree (below, next to the builders). */
 enum { JS_NONE = 0, JS_NULL = 1, JS_BOOL = 2, JS_NUM = 3, JS_STR = 4, JS_ARR = 5, JS_OBJ = 6, JS_MAXDEPTH = 128 };
 typedef struct js_val {
     int kind;
@@ -333,4 +337,302 @@ int js_esc(char *dst, long cap, const char *s, long n, long *outlen) {
     dst[w] = 0;
     if (outlen) *outlen = w;
     return fit;
+}
+/* ---- serializer: js_emit (compact, one line) and js_emit_pretty (2-space indent) ----
+     long js_emit(const js_val *v, unsigned char *out, long cap)
+     long js_emit_pretty(const js_val *v, unsigned char *out, long cap)
+   write V as JSON text into OUT[0..cap) and return the byte count (no NUL is written), or a
+   negative errno: -ENOSPC the text does not fit (OUT holds a prefix, nothing past cap is
+   touched), -EINVAL bad arguments or nesting over JS_MAXDEPTH. The caller owns OUT; no
+   allocation; module state: none. The text is meant to equal JavaScript JSON.stringify(v)
+   and JSON.stringify(v, null, 2) byte for byte:
+   - object members in stored (insertion) order; duplicate keys are all written (a JS
+     object could not hold them); a 0 child or JS_NONE is written as null;
+   - strings: \" \\ \b \f \n \r \t, other bytes <= 0x1f as \u00xx (lower-case hex), 0x7f and
+     every byte >= 0x80 unchanged (UTF-8 passes through; '/' is not escaped). js_parse never
+     yields a lone surrogate; a hand-built string that carries one as the three bytes
+     ED A0..BF 80..BF is written as \udxxx like JS does. Other malformed UTF-8 is copied as is;
+   - numbers follow Number.prototype.toString: the shortest decimal digits that read back to
+     the same double (exact big-integer digit generation, no table, no libc), integers
+     without a point, -0 as 0, plain decimal while 1e-7 < |x| < 1e21 and d[.ddd]e+N / e-N
+     outside it; NaN and the infinities are written as null;
+   - pretty: one member per line, ": " after a key, empty containers stay {} and [], no
+     trailing newline. */
+enum { JS_EXP_HI = 21, JS_EXP_LO = -6, JS_BIGW = 36 };
+typedef struct { unsigned char *o; long cap; long w; int over; int bad; } js_wr;
+typedef struct { unsigned int d[JS_BIGW]; } js_big;
+
+static void js_wc(js_wr *w, int c) {
+    if (w->w < w->cap) w->o[w->w++] = (unsigned char)c; else w->over = 1;
+}
+static void js_wz(js_wr *w, const char *s) { while (*s) js_wc(w, *s++); }
+static void jb_set(js_big *a, unsigned long long v) {
+    int i;
+    for (i = 0; i < JS_BIGW; i++) a->d[i] = 0;
+    a->d[0] = (unsigned int)(v & 0xFFFFFFFFULL); a->d[1] = (unsigned int)(v >> 32);
+}
+static void jb_shl(js_big *a, int n) {
+    int ws = n / 32, bs = n % 32, i;
+    for (i = JS_BIGW - 1; i >= 0; i--) {
+        unsigned long long x = 0;
+        if (i - ws >= 0) x = (unsigned long long)a->d[i - ws] << bs;
+        if (bs && i - ws - 1 >= 0) x |= (unsigned long long)a->d[i - ws - 1] >> (32 - bs);
+        a->d[i] = (unsigned int)(x & 0xFFFFFFFFULL);
+    }
+}
+static void jb_mul10(js_big *a) {
+    unsigned long long c = 0; int i;
+    for (i = 0; i < JS_BIGW; i++) { c += (unsigned long long)a->d[i] * 10ULL; a->d[i] = (unsigned int)(c & 0xFFFFFFFFULL); c >>= 32; }
+}
+static void jb_add(js_big *a, const js_big *b) {
+    unsigned long long c = 0; int i;
+    for (i = 0; i < JS_BIGW; i++) { c += (unsigned long long)a->d[i] + b->d[i]; a->d[i] = (unsigned int)(c & 0xFFFFFFFFULL); c >>= 32; }
+}
+/* A -= B, A >= B */
+static void jb_sub(js_big *a, const js_big *b) {
+    unsigned long long br = 0; int i;
+    for (i = 0; i < JS_BIGW; i++) {
+        unsigned long long x = (unsigned long long)a->d[i], y = (unsigned long long)b->d[i] + br;
+        if (x >= y) { a->d[i] = (unsigned int)(x - y); br = 0; }
+        else { a->d[i] = (unsigned int)((x + 0x100000000ULL - y) & 0xFFFFFFFFULL); br = 1; }
+    }
+}
+static int jb_cmp(const js_big *a, const js_big *b) {
+    int i;
+    for (i = JS_BIGW - 1; i >= 0; i--) if (a->d[i] != b->d[i]) return a->d[i] < b->d[i] ? -1 : 1;
+    return 0;
+}
+/* Shortest digits of the positive finite double with raw BITS (sign cleared, not zero):
+   DG gets N digits (N <= 17, returned), *PK the decimal point position, value = 0.DG * 10^*PK.
+   Free-format algorithm of Steele-White / Burger-Dybvig on exact integers: value = r/s, the
+   half-gaps to the neighbours are mm/s below and mp/s above; the boundaries belong to the
+   interval when the significand is even (round-half-even reads them back). */
+static int js_shortest(unsigned long long bits, char *dg, int *pk) {
+    unsigned long long f = bits & 0xFFFFFFFFFFFFFULL;
+    int be = (int)(bits >> 52), e, even, lowb, k = 0, n = 0;
+    js_big r, s, mp, mm, t;
+    if (be) { f |= 1ULL << 52; e = be - 1075; } else e = -1074;
+    even = !(f & 1ULL);
+    lowb = be > 1 && f == (1ULL << 52);   /* the gap below a power of two is half the gap above */
+    jb_set(&r, f); jb_set(&s, 1); jb_set(&mp, 1); jb_set(&mm, 1);
+    if (e >= 0) { jb_shl(&r, e + 1 + lowb); jb_shl(&s, 1 + lowb); jb_shl(&mm, e); jb_shl(&mp, e + lowb); }
+    else { jb_shl(&r, 1 + lowb); jb_shl(&s, 1 - e + lowb); jb_shl(&mp, lowb); }
+    for (;;) {
+        int c;
+        t = r; jb_add(&t, &mp); c = jb_cmp(&t, &s);
+        if (even ? c >= 0 : c > 0) { jb_mul10(&s); k++; } else break;
+    }
+    for (;;) {
+        int c;
+        t = r; jb_add(&t, &mp); jb_mul10(&t); c = jb_cmp(&t, &s);
+        if (even ? c < 0 : c <= 0) { jb_mul10(&r); jb_mul10(&mp); jb_mul10(&mm); k--; } else break;
+    }
+    for (;;) {
+        int d = 0, lo, hi, c;
+        jb_mul10(&r); jb_mul10(&mp); jb_mul10(&mm);
+        while (jb_cmp(&r, &s) >= 0) { jb_sub(&r, &s); d++; }
+        c = jb_cmp(&r, &mm); lo = even ? c <= 0 : c < 0;
+        t = r; jb_add(&t, &mp); c = jb_cmp(&t, &s); hi = even ? c >= 0 : c > 0;
+        if (!lo && !hi && n < 20) { dg[n++] = (char)('0' + d); continue; }
+        if (lo && hi) { t = r; jb_shl(&t, 1); c = jb_cmp(&t, &s); if (c > 0 || (c == 0 && (d & 1))) d++; }
+        else if (hi) d++;
+        dg[n++] = (char)('0' + d);
+        break;
+    }
+    *pk = k;
+    return n;
+}
+static void js_wnum(js_wr *w, double v) {
+    unsigned long long bits = 0; char dg[24]; int n, k, i, neg;
+    if (mm_copy(&bits, 8, &v, 8)) { w->bad = 1; return; }
+    neg = (int)(bits >> 63); bits &= 0x7FFFFFFFFFFFFFFFULL;
+    if ((bits >> 52) == 0x7FF) { js_wz(w, "null"); return; }
+    if (neg && bits != 0) js_wc(w, '-');
+    if (bits == 0) { js_wc(w, '0'); return; }
+    n = js_shortest(bits, dg, &k);
+    if (n <= k && k <= JS_EXP_HI) {
+        for (i = 0; i < n; i++) js_wc(w, dg[i]);
+        for (i = n; i < k; i++) js_wc(w, '0');
+    } else if (0 < k && k <= JS_EXP_HI) {
+        for (i = 0; i < k; i++) js_wc(w, dg[i]);
+        js_wc(w, '.');
+        for (i = k; i < n; i++) js_wc(w, dg[i]);
+    } else if (JS_EXP_LO < k && k <= 0) {
+        js_wz(w, "0.");
+        for (i = k; i < 0; i++) js_wc(w, '0');
+        for (i = 0; i < n; i++) js_wc(w, dg[i]);
+    } else {
+        int x = k - 1; char eb[8]; int en = 0;
+        js_wc(w, dg[0]);
+        if (n > 1) { js_wc(w, '.'); for (i = 1; i < n; i++) js_wc(w, dg[i]); }
+        js_wc(w, 'e'); js_wc(w, x < 0 ? '-' : '+');
+        if (x < 0) x = -x;
+        do { eb[en++] = (char)('0' + x % 10); x /= 10; } while (x);
+        while (en > 0) js_wc(w, eb[--en]);
+    }
+}
+static void js_wstring(js_wr *w, const char *s, long n) {
+    static const char hx[] = "0123456789abcdef";
+    long i;
+    js_wc(w, '"');
+    for (i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"' || c == '\\') { js_wc(w, '\\'); js_wc(w, c); }
+        else if (c == '\b') js_wz(w, "\\b");
+        else if (c == '\f') js_wz(w, "\\f");
+        else if (c == '\n') js_wz(w, "\\n");
+        else if (c == '\r') js_wz(w, "\\r");
+        else if (c == '\t') js_wz(w, "\\t");
+        else if (c <= 0x1f) { js_wz(w, "\\u00"); js_wc(w, hx[c >> 4]); js_wc(w, hx[c & 15]); }
+        else if (c == 0xED && i + 2 < n && ((unsigned char)s[i + 1] & 0xE0) == 0xA0 && ((unsigned char)s[i + 2] & 0xC0) == 0x80) {
+            unsigned u = 0xD000u | (((unsigned)(unsigned char)s[i + 1] & 0x3Fu) << 6) | ((unsigned)(unsigned char)s[i + 2] & 0x3Fu);
+            js_wz(w, "\\u"); js_wc(w, hx[(u >> 12) & 15]); js_wc(w, hx[(u >> 8) & 15]); js_wc(w, hx[(u >> 4) & 15]); js_wc(w, hx[u & 15]);
+            i += 2;
+        } else js_wc(w, c);
+    }
+    js_wc(w, '"');
+}
+static void js_wnl(js_wr *w, int ind, int lvl) {
+    long k;
+    if (!ind) return;
+    js_wc(w, '\n');
+    for (k = (long)ind * lvl; k > 0; k--) js_wc(w, ' ');
+}
+static void js_wval(js_wr *w, const js_val *v, int ind, int lvl) {
+    long i; int obj;
+    if (w->over || w->bad) return;
+    if (!v || v->kind == JS_NONE || v->kind == JS_NULL) { js_wz(w, "null"); return; }
+    if (v->kind == JS_BOOL) { js_wz(w, v->b ? "true" : "false"); return; }
+    if (v->kind == JS_NUM) { js_wnum(w, v->num); return; }
+    if (v->kind == JS_STR) { js_wstring(w, v->s, v->s ? v->slen : 0); return; }
+    if (v->kind != JS_ARR && v->kind != JS_OBJ) { w->bad = 1; return; }
+    obj = v->kind == JS_OBJ;
+    if (v->n <= 0) { js_wz(w, obj ? "{}" : "[]"); return; }
+    if (lvl >= JS_MAXDEPTH || !v->items || (obj && (!v->keys || !v->klens))) { w->bad = 1; return; }
+    js_wc(w, obj ? '{' : '[');
+    for (i = 0; i < v->n && !w->over && !w->bad; i++) {
+        if (i) js_wc(w, ',');
+        js_wnl(w, ind, lvl + 1);
+        if (obj) { js_wstring(w, v->keys[i], v->keys[i] ? v->klens[i] : 0); js_wc(w, ':'); if (ind) js_wc(w, ' '); }
+        js_wval(w, v->items[i], ind, lvl + 1);
+    }
+    js_wnl(w, ind, lvl);
+    js_wc(w, obj ? '}' : ']');
+}
+static long js_emit_run(const js_val *v, unsigned char *out, long cap, int ind) {
+    js_wr w;
+    if (!v || cap < 0 || (cap && !out)) return -EINVAL;
+    w.o = out; w.cap = cap; w.w = 0; w.over = 0; w.bad = 0;
+    js_wval(&w, v, ind, 0);
+    if (w.bad) return -EINVAL;
+    if (w.over) return -ENOSPC;
+    return w.w;
+}
+long js_emit(const js_val *v, unsigned char *out, long cap) { return js_emit_run(v, out, cap, 0); }
+long js_emit_pretty(const js_val *v, unsigned char *out, long cap) { return js_emit_run(v, out, cap, 2); }
+
+/* ---- builders (phase 2) ----
+   Build a tree in the program, then js_emit / js_emit_pretty it. The tree is the same shape js_parse makes,
+   so one js_free(root) frees all of it. Names carry mk_/obj_/arr_ because js_str, js_num and js_bool are
+   the accessors above.
+     js_mk_obj() js_mk_arr()       empty container, or 0 (no memory)
+     js_mk_str(s, n)               copy of the first N bytes of S (N < 0: strlen); embedded NUL kept; 0 on failure
+     js_mk_num(d) js_mk_bool(b) js_mk_null()   scalar leaf, or 0 (no memory); NaN/Inf are stored and emit as null
+     js_obj_set(o, key, child)     append member KEY (NUL-terminated, copied); js_obj_setn gives the key length
+     js_arr_push(a, child)         append element
+   Ownership: on success the container owns CHILD (free only the root; never free CHILD again, never put it
+   in a second container). On failure (-EINVAL: bad container kind, null key or child, child is the container
+   itself; -ENOMEM) CHILD stays with the caller and the container is unchanged. Members are kept in insertion
+   order and a repeated key is appended, not replaced, exactly as js_parse and js_emit treat duplicates. */
+static js_val *js_mk(int kind) {
+    js_val *v = (js_val *)mm_zalloc((long)sizeof(js_val));
+    if (v) v->kind = kind;
+    return v;
+}
+js_val *js_mk_obj(void) { return js_mk(JS_OBJ); }
+js_val *js_mk_arr(void) { return js_mk(JS_ARR); }
+js_val *js_mk_num(double d) { js_val *v = js_mk(JS_NUM); if (v) v->num = d; return v; }
+js_val *js_mk_bool(int b) { js_val *v = js_mk(JS_BOOL); if (v) v->b = b ? 1 : 0; return v; }
+js_val *js_mk_null(void) { return js_mk(JS_NULL); }
+js_val *js_mk_str(const char *s, long n) {
+    js_val *v; char *d;
+    if (!s) return 0;
+    if (n < 0) { n = 0; while (s[n]) n++; }
+    d = (char *)mm_alloc(n + 1);
+    if (!d) return 0;
+    if (n > 0 && mm_copy(d, n + 1, s, n)) { mm_free(d); return 0; }
+    d[n] = 0;
+    v = js_mk(JS_STR);
+    if (!v) { mm_free(d); return 0; }
+    v->s = d; v->slen = n;
+    return v;
+}
+static int js_room(js_val *c) {
+    long nc; js_val **ni; char **nk; long *nl;
+    if (c->n < c->cap) return 0;
+    nc = c->cap ? c->cap * 2 : 4;
+    ni = (js_val **)mm_grow(c->items, nc * (long)sizeof(js_val *));
+    if (!ni) return -ENOMEM;
+    c->items = ni;
+    if (c->kind == JS_OBJ) {
+        nk = (char **)mm_grow(c->keys, nc * (long)sizeof(char *));
+        if (!nk) return -ENOMEM;
+        c->keys = nk;
+        nl = (long *)mm_grow(c->klens, nc * (long)sizeof(long));
+        if (!nl) return -ENOMEM;
+        c->klens = nl;
+    }
+    c->cap = nc;
+    return 0;
+}
+int js_obj_setn(js_val *o, const char *key, long kn, js_val *child) {
+    char *k; int r;
+    if (!o || o->kind != JS_OBJ || !key || kn < 0 || !child || child == o) return -EINVAL;
+    k = (char *)mm_alloc(kn + 1);
+    if (!k) return -ENOMEM;
+    if (kn > 0 && mm_copy(k, kn + 1, key, kn)) { mm_free(k); return -EINVAL; }
+    k[kn] = 0;
+    r = js_room(o);
+    if (r) { mm_free(k); return r; }
+    o->items[o->n] = child; o->keys[o->n] = k; o->klens[o->n] = kn;
+    o->n++;
+    return 0;
+}
+int js_obj_set(js_val *o, const char *key, js_val *child) {
+    long kn = 0;
+    if (!key) return -EINVAL;
+    while (key[kn]) kn++;
+    return js_obj_setn(o, key, kn, child);
+}
+int js_arr_push(js_val *a, js_val *child) {
+    int r;
+    if (!a || a->kind != JS_ARR || !child || child == a) return -EINVAL;
+    r = js_room(a);
+    if (r) return r;
+    a->items[a->n++] = child;
+    return 0;
+}
+/* js_clone(v): deep copy of the whole tree V, or 0 (V is 0, or out of memory: everything allocated so far is
+   freed, nothing leaks). Object member order and repeated keys, array order, strings with embedded NUL (slen
+   bytes) and number bit patterns (-0, NaN payload) are kept. The clone shares no node and no byte with V:
+   free either tree first, then the other. Pair it with js_free. */
+js_val *js_clone(const js_val *v) {
+    js_val *r; long i;
+    if (!v) return 0;
+    r = js_mk(v->kind);
+    if (!r) return 0;
+    r->b = v->b; r->num = v->num;
+    if (v->s) {
+        r->s = (char *)mm_alloc(v->slen + 1);
+        if (!r->s || (v->slen > 0 && mm_copy(r->s, v->slen + 1, v->s, v->slen))) { js_free(r); return 0; }
+        r->s[v->slen] = 0; r->slen = v->slen;
+    }
+    for (i = 0; i < v->n; i++) {
+        js_val *c; int e;
+        c = js_clone(v->items[i]);
+        if (!c) { js_free(r); return 0; }
+        e = v->kind == JS_OBJ ? js_obj_setn(r, v->keys[i], v->klens[i], c) : js_arr_push(r, c);
+        if (e) { js_free(c); js_free(r); return 0; }
+    }
+    return r;
 }

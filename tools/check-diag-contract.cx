@@ -1,0 +1,156 @@
+/* tools/check-diag-contract.cx -- diagnostic contract check: each fixture of tests/diag-contract.tsv is compiled once
+   with the installed product (sh ./unisacc.com FIXTURE, cwd tests/diagfx, serial, 50 s bound each) and must
+   (1) exit non-zero, (2) print FIXTURE:LINE (next char not a digit) on stderr, (3) print the named substring,
+   (4) have no stderr line starting with the bare "reject:".
+   Table: GROUP FIXTURE LINE SUBSTR STATUS EXPIRY (TAB; '#' comments).  STATUS is PASS or KNOWN-GAP (EXPIRY 0.0.N).
+   A group is a gap when any of its rows is KNOWN-GAP.  Verdicts per row: PASS row must meet the contract; a
+   KNOWN-GAP row that now meets it is PROMOTE (fail: turn it into PASS, the ratchet only goes down); any other
+   status is a hard fail.  Ratchet: the number of KNOWN-GAP groups must not exceed DC_GAP_BASELINE (15, 实测 18 组中 3 组过).
+   Modes: (none) lint + selftest + live; --selftest; --live; --table PATH; --mutate no-ratchet|no-rc|flip-reject.
+   Selftest runs synthetic cases normally and under each mutation and requires the mutation to be detected.
+   Prints CHECK_DIAG_CONTRACT<TAB>failed=N. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use cxlib.procrun
+
+#define DC_GAP_BASELINE 15
+#define MAXR 128
+static char *gr[MAXR], *fx[MAXR], *ln[MAXR], *sb[MAXR], *st[MAXR], *ex[MAXR];
+static int nr, failed, mut_ratchet, mut_rc, mut_flip;
+
+static void bad(const char *what, const char *why) { printf("FAIL\t%s\t%s\n", what, why); failed++; }
+
+static int split(char *line, char **f, int max) {
+    int n = 0; f[n++] = line;
+    for (; *line; line++) if (*line == '\t') { *line = 0; if (n < max) f[n++] = line + 1; }
+    return n;
+}
+
+/* returns 0 ok, else a reason */
+static const char *lint_row(const char *g, const char *f, const char *l, const char *s, const char *t, const char *e) {
+    const char *p;
+    if (!g[0] || !f[0] || !s[0]) return "empty group, fixture or substring";
+    if (!l[0]) return "line expectation missing";
+    for (p = l; *p; p++) if (*p < '0' || *p > '9') return "line is not a number";
+    if (atoi(l) < 1) return "line must be >= 1";
+    if (strcmp(t, "PASS") && strcmp(t, "KNOWN-GAP")) return "status must be PASS or KNOWN-GAP";
+    if (!strcmp(t, "KNOWN-GAP") && strncmp(e, "0.0.", 4)) return "KNOWN-GAP needs an expiry version 0.0.N";
+    return 0;
+}
+
+static const char *has_at(const char *h, const char *nd) { long q = tx_find(h, (long)strlen(h), nd, (long)strlen(nd)); return q < 0 ? 0 : h + q; }
+#define PRODNAME "unisacc" ".com"
+/* the contract: 1 when met */
+static int judge(int mutflip, int mutrc, int rc, const char *err, const char *fixture, const char *line, const char *sub) {
+    char key[300]; const char *p; int ok_rc, ok_loc = 0, ok_sub, bare = 0;
+    ok_rc = rc != 0;
+    if (mutrc) ok_rc = 1;
+    if (cx_fmt(key, sizeof key, "%s:%s", fixture, line)) return 0;
+    for (p = err; (p = has_at(p, key)) != 0; p++) { char c = p[strlen(key)]; if (c < '0' || c > '9') { ok_loc = 1; break; } }
+    ok_sub = has_at(err, sub) != 0;
+    for (p = err; *p; ) {
+        if (!strncmp(p, "reject:", 7)) bare = 1;
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    if (mutflip) bare = !bare;
+    return ok_rc && ok_loc && ok_sub && !bare;
+}
+
+static int ratchet_ok(int mutr, int gaps) { return mutr ? 1 : gaps <= DC_GAP_BASELINE; }
+
+static void selftest(void) {
+    const char *good = "f.cx:3:5: error: argument count\n  x\n";
+    const char *bare = "reject: argument count\nf.cx:3:5: error: argument count\n";
+    int d = 0, k;
+    /* normal behavior */
+    if (!judge(0, 0, 1, good, "f.cx", "3", "argument count")) bad("selftest", "good output rejected");
+    if (judge(0, 0, 1, good, "f.cx", "4", "argument count")) bad("selftest", "negative control line: wrong line accepted");
+    else { printf("DETECTED\tneg-line-expectation\n"); d++; }
+    if (judge(0, 0, 1, good, "f.cx", "3", "other text")) bad("selftest", "negative control text: wrong substring accepted");
+    else { printf("DETECTED\tneg-text-expectation\n"); d++; }
+    if (!lint_row("c1", "f.cx", "", "x", "PASS", "-")) bad("selftest", "empty line expectation passed lint");
+    else { printf("DETECTED\tneg-line-removed-lint\n"); d++; }
+    if (judge(0, 0, 1, "f.cx:31:1: error: argument count\n", "f.cx", "3", "argument count")) bad("selftest", "line prefix 31 accepted for 3");
+    /* mutations must change the verdict */
+    k = ratchet_ok(0, DC_GAP_BASELINE + 1) != ratchet_ok(1, DC_GAP_BASELINE + 1);
+    if (!k) bad("selftest", "mutation no-ratchet not detected"); else { printf("DETECTED\tmut-no-ratchet\n"); d++; }
+    k = judge(0, 0, 0, good, "f.cx", "3", "argument count") != judge(0, 1, 0, good, "f.cx", "3", "argument count");
+    if (!k) bad("selftest", "mutation no-rc not detected"); else { printf("DETECTED\tmut-no-rc\n"); d++; }
+    k = judge(0, 0, 1, bare, "f.cx", "3", "argument count") != judge(1, 0, 1, bare, "f.cx", "3", "argument count")
+        || judge(0, 0, 1, good, "f.cx", "3", "argument count") != judge(1, 0, 1, good, "f.cx", "3", "argument count");
+    if (!k) bad("selftest", "mutation flip-reject not detected"); else { printf("DETECTED\tmut-flip-reject\n"); d++; }
+    printf("SELFTEST\tdetected=%d\n", d);
+}
+
+int main(int argc, char **argv) {
+    const char *table = "tests/diag-contract.tsv"; int a, doself = 1, dolive = 1, i, gaps = 0, nrows_pass = 0;
+    char *buf = 0; int64_t n = 0; char *p, cwd[2048], fxdir[2200], prod[2200];
+    char *seen[MAXR]; int nseen = 0;
+    for (a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--selftest")) dolive = 0;
+        else if (!strcmp(argv[a], "--live")) doself = 0;
+        else if (!strcmp(argv[a], "--table") && a + 1 < argc) table = argv[++a];
+        else if (!strcmp(argv[a], "--mutate") && a + 1 < argc) {
+            a++;
+            if (!strcmp(argv[a], "no-ratchet")) mut_ratchet = 1;
+            else if (!strcmp(argv[a], "no-rc")) mut_rc = 1;
+            else if (!strcmp(argv[a], "flip-reject")) mut_flip = 1;
+            else { fprintf(stderr, "unknown mutation %s\n", argv[a]); return 2; }
+        } else { fprintf(stderr, "usage: check-diag-contract [--selftest|--live] [--table P] [--mutate M]\n"); return 2; }
+    }
+    if (doself) selftest();
+    if (sy_read_file(table, (unsigned char **)&buf, &n, 1 << 20)) { bad("table", "cannot read"); printf("CHECK_DIAG_CONTRACT\tfailed=%d\n", failed); return 1; }
+    buf = realloc(buf, (size_t)n + 1); buf[n] = 0;
+    for (p = buf; *p && nr < MAXR; ) {
+        char *e = p, *f[8]; int k;
+        while (*e && *e != '\n') e++;
+        if (*e) *e++ = 0;
+        if (*p && *p != '#') {
+            k = split(p, f, 8);
+            if (k != 6) bad(p, "row needs 6 TAB fields");
+            else {
+                const char *w = lint_row(f[0], f[1], f[2], f[3], f[4], f[5]);
+                if (w) bad(f[1], w);
+                else { gr[nr] = f[0]; fx[nr] = f[1]; ln[nr] = f[2]; sb[nr] = f[3]; st[nr] = f[4]; ex[nr] = f[5]; nr++; }
+            }
+        }
+        p = e;
+    }
+    if (!getcwd(cwd, sizeof cwd)) { bad("cwd", "getcwd"); return 1; }
+    if (cx_fmt(fxdir, sizeof fxdir, "%s/tests/diagfx", cwd)) return 2;
+    if (cx_fmt(prod, sizeof prod, "%s/%s", cwd, PRODNAME)) return 2;
+    /* groups and gap count */
+    for (i = 0; i < nr; i++) {
+        int j, dup = 0;
+        for (j = 0; j < nseen; j++) if (!strcmp(seen[j], gr[i])) dup = 1;
+        if (!dup && nseen < MAXR) { seen[nseen++] = gr[i]; }
+    }
+    for (i = 0; i < nseen; i++) {
+        int j, gap = 0;
+        for (j = 0; j < nr; j++) if (!strcmp(gr[j], seen[i]) && !strcmp(st[j], "KNOWN-GAP")) gap = 1;
+        gaps += gap;
+    }
+    if (dolive) {
+        for (i = 0; i < nr; i++) {
+            pr_result r; char *av[4]; int t, met;
+            av[0] = "sh"; av[1] = prod; av[2] = fx[i]; av[3] = 0;
+            t = pr_run(fx[i], av, fxdir, 0, 50, &r);
+            if (t != 0) { bad(fx[i], r.why); pr_free(&r); continue; }
+            met = judge(mut_flip, mut_rc, r.rc, r.err ? r.err : "", fx[i], ln[i], sb[i]);
+            if (!strcmp(st[i], "PASS")) {
+                if (met) { printf("PASS\t%s\t%s\n", gr[i], fx[i]); nrows_pass++; }
+                else bad(fx[i], "PASS row does not meet the contract");
+            } else {
+                if (met) bad(fx[i], "PROMOTE: KNOWN-GAP row now meets the contract, change it to PASS");
+                else printf("KNOWN-GAP\t%s\t%s\texpiry=%s\trc=%d\n", gr[i], fx[i], ex[i], r.rc);
+            }
+            pr_free(&r);
+        }
+    }
+    printf("GROUPS\ttotal=%d\tgap=%d\tbaseline=%d\n", nseen, gaps, DC_GAP_BASELINE);
+    if (!ratchet_ok(mut_ratchet, gaps)) bad("ratchet", "KNOWN-GAP groups exceed the baseline");
+    printf("CHECK_DIAG_CONTRACT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

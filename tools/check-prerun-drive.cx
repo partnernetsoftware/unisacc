@@ -385,6 +385,244 @@ int main(void) {
         if(cx_write(ix,many,used)||cx_write(times,"coverage-0\t1000\n",16))return 2;
         rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
         ck(rc==2&&ckk_has(out,CPD_OUT,"window-plan-did-not-cover-every-batch"),"plan-refuses-unrepresented-batches");
+
+        /* Default warmup with --times-file: picks 1 lightest batch into W0000 */
+        {
+            char wids[CPD_PW], wtimes[CPD_PW], wplan[CPD_PW], wwin[CPD_PW];
+            const char *f_ids = "heavy-first\nmid-second\nlightest-third\n";
+            const char *f_times = "heavy-first\t20000\nmid-second\t12000\nlightest-third\t900\n";
+            if (cx_fmt(wids, sizeof wids, "%s/w1-ids.txt", work) ||
+                cx_fmt(wtimes, sizeof wtimes, "%s/w1-times.tsv", work) ||
+                cx_fmt(wplan, sizeof wplan, "%s/w1-plan", work) ||
+                cx_fmt(wwin, sizeof wwin, "%s/windows.tsv", wplan) ||
+                cx_write(wids, f_ids, strlen(f_ids)) ||
+                cx_write(wtimes, f_times, strlen(f_times)) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                       cwd, cwd, wids, wtimes, wplan)) return 2;
+            int rc_w1 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            size_t w1n = 0;
+            char *w1b = (char *)cx_read(wwin, &w1n);
+            ck(rc_w1 == 0 && rows_have(w1b, w1n, "W0000\t1\twarmup\t1\tlightest-third\n"),
+               "timed-default-warmup-single-lightest: default warmup with times-file places 1 lightest batch in W0000");
+            free(w1b);
+        }
+
+        /* S3: missing/empty --ids-file and nb >= release-prep MAXB(1024) refused before start */
+        {
+            char s3dir[CPD_PW], s3w[CPD_PW], s3ids[CPD_PW], out_1023[CPD_OUT], out_1024[CPD_OUT], out_1767[CPD_OUT], out_run[CPD_OUT];
+            if (cx_fmt(s3dir, sizeof s3dir, "%s/s3-missing", work) ||
+                cx_fmt(s3w, sizeof s3w, "%s/windows.tsv", s3dir) ||
+                cx_fmt(s3ids, sizeof s3ids, "%s/s3-ids.txt", work)) return 2;
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --out '%s'", cwd, cwd, s3dir)) return 2;
+            int rc_no_ids = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            int has_no_ids = ckk_has(out, CPD_OUT, "plan-requires-ids-file");
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '' --out '%s'", cwd, cwd, s3dir)) return 2;
+            int rc_empty_arg = ckk_sh("check-prerun-drive", cmd, out_1023, sizeof out_1023);
+            ck(rc_no_ids == 2 && has_no_ids && rc_empty_arg == 2 && ckk_has(out_1023, CPD_OUT, "plan-requires-ids-file") && sy_exists(s3w) == 0,
+               "plan-refuses-missing-or-empty-ids-file");
+
+            char *big = (char *)mm_alloc(32768);
+            if (!big) return 2;
+            size_t bp2 = 0;
+            for (int i = 0; i < 1023; i++) {
+                char row[32]; cx_fmt(row, sizeof row, "b-%04d\n", i);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir, sizeof s3dir, "%s/s3-1023", work) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir)) return 2;
+            int rc_1023 = ckk_sh("check-prerun-drive", cmd, out_1023, sizeof out_1023);
+            ck(rc_1023 == 0 && ckk_has(out_1023, CPD_OUT, "PRERUN_PLAN\ttotal=1023\t"),
+               "plan-allows-1023-below-maxb");
+
+            {
+                char row[32]; cx_fmt(row, sizeof row, "b-1023\n");
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir, sizeof s3dir, "%s/s3-1024", work) ||
+                cx_fmt(s3w, sizeof s3w, "%s/windows.tsv", s3dir) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir)) return 2;
+            int rc_1024 = ckk_sh("check-prerun-drive", cmd, out_1024, sizeof out_1024);
+
+            for (int i = 1024; i < 1767; i++) {
+                char row[32]; cx_fmt(row, sizeof row, "b-%04d\n", i);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            char s3dir1767[CPD_PW], s3w1767[CPD_PW];
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir1767, sizeof s3dir1767, "%s/s3-1767", work) ||
+                cx_fmt(s3w1767, sizeof s3w1767, "%s/windows.tsv", s3dir1767) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir1767)) return 2;
+            int rc_1767 = ckk_sh("check-prerun-drive", cmd, out_1767, sizeof out_1767);
+            ck(rc_1024 == 2 && ckk_has(out_1024, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1024\tmaxb=1024") &&
+               ckk_has(out_1024, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(s3w) == 0 &&
+               rc_1767 == 2 && ckk_has(out_1767, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1767\tmaxb=1024") &&
+               ckk_has(out_1767, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(s3w1767) == 0,
+               "plan-refuses-1024-at-maxb-and-1767-before-writing-windows");
+
+            /* Also verify run refuses a pre-existing windows.tsv with >= 1024 batches before starting W0000 */
+            char r1024[CPD_PW], rw1024[CPD_PW], rs0[CPD_PW];
+            if (cx_fmt(r1024, sizeof r1024, "%s/s3-run1024", work) || sy_mkdir_all(r1024, 0700) ||
+                cx_fmt(rw1024, sizeof rw1024, "%s/windows.tsv", r1024) ||
+                cx_fmt(rs0, sizeof rs0, "%s/strict-W0000.tsv", r1024)) return 2;
+            bp2 = 0;
+            const char *wh = "# prerun-drive windows\nwindow\tjobs\tphase\tcount\tids\n";
+            mm_copy(big, 32768, wh, strlen(wh)); bp2 = strlen(wh);
+            for (int w = 0; w < 128; w++) {
+                char row[160];
+                cx_fmt(row, sizeof row, "W%04d\t2\tnormal\t8\tb%d_0,b%d_1,b%d_2,b%d_3,b%d_4,b%d_5,b%d_6,b%d_7\n", w, w, w, w, w, w, w, w, w);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(rw1024, big, bp2) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s'", cwd, cwd, work, r1024, mock)) return 2;
+            int rc_run1024 = ckk_sh("check-prerun-drive", cmd, out_run, sizeof out_run);
+            ck(rc_run1024 == 2 && ckk_has(out_run, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1024\tmaxb=1024") &&
+               ckk_has(out_run, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(rs0) == 0,
+               "run-refuses-windows-tsv-at-maxb-before-start");
+            mm_free(big);
+        }
+
+        /* prebuild-self in a git repo warms candidate APE inside qualify layout's private .git, never root/unisacc.com */
+        {
+            char groot[CPD_PW], gwrong[CPD_PW], gcand[CPD_PW], gdir[CPD_PW], gids[CPD_PW], grec[CPD_PW], gtmp[CPD_PW];
+            if (cx_fmt(groot, sizeof groot, "%s/groot", work) ||
+                cx_fmt(gwrong, sizeof gwrong, "%s/groot/unisacc.com", work) ||
+                cx_fmt(gcand, sizeof gcand, "%s/cand-ape.com", work) ||
+                cx_fmt(gdir, sizeof gdir, "%s/gplan", work) ||
+                cx_fmt(gids, sizeof gids, "%s/gids.txt", work) ||
+                cx_fmt(grec, sizeof grec, "%s/prebuild-receipt.txt", work) ||
+                cx_fmt(gtmp, sizeof gtmp, "%s/gtmp", work)) return 2;
+            if (sy_mkdir_all(groot, 0700) || sy_mkdir_all(gtmp, 0700)) return 2;
+            /* root/unisacc.com is the old installed product and must NEVER be invoked for prebuild-self when --candidate is gcand */
+            const char *gwrong_s =
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *\"tools/devsvc.cx -- prebuild-self\"*) exit 99 ;;\n"
+                "  *\"tools/dvqualify.cx\"*)\n"
+                "    out=''\n"
+                "    while [ $# -gt 0 ]; do\n"
+                "      if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n"
+                "      shift\n"
+                "    done\n"
+                "    echo \"# devsvc qualify\" > \"$out\"\n"
+                "    printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+                "    printf 'real-commit\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+                "    exit 0 ;;\n"
+                "esac\n"
+                "exit 99\n";
+            if (cx_write(gwrong, gwrong_s, strlen(gwrong_s))) return 2;
+            char cand_script[2048];
+            if (cx_fmt(cand_script, sizeof cand_script,
+                "#!/bin/sh\n"
+                "# CANDIDATE_APE_MARKER_V088\n"
+                "case \"$*\" in\n"
+                "  *\"tools/devsvc.cx -- prebuild-self\"*)\n"
+                "    gdir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null)\n"
+                "    printf 'PWD=%%s\\nGITDIR=%%s\\nMARKER=' \"$(pwd)\" \"$gdir\" > '%s'\n"
+                "    grep -o 'CANDIDATE_APE_MARKER_V088' ./unisacc.com >> '%s'\n"
+                "    exit 0 ;;\n"
+                "  *\"tools/dvqualify.cx\"*)\n"
+                "    out=''\n"
+                "    while [ $# -gt 0 ]; do\n"
+                "      if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n"
+                "      shift\n"
+                "    done\n"
+                "    echo \"# devsvc qualify\" > \"$out\"\n"
+                "    printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+                "    printf 'real-commit\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+                "    exit 0 ;;\n"
+                "esac\n"
+                "exit 1\n", grec, grec)) return 2;
+            if (cx_write(gcand, cand_script, strlen(cand_script)) ||
+                cx_write(gids, "real-commit\n", 12)) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && mkdir -p tools && echo ok > tools/stub.txt && "
+                "git init -q && git config user.name t && git config user.email t@t && git config commit.gpgsign false && "
+                "git add tools/stub.txt && git commit -qm init", groot)) return 2;
+            if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --warmup 0",
+                cwd, cwd, gids, gdir)) return 2;
+            if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "TMPDIR='%s' sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --candidate '%s' --out '%s' && cat '%s'",
+                gtmp, cwd, cwd, groot, gcand, gdir, grec)) return 2;
+            int rc_gp = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc_gp == 0 &&
+               ckk_has(out, CPD_OUT, "/unisacc-qualify-") &&
+               ckk_has(out, CPD_OUT, "/tree-") &&
+               ckk_has(out, CPD_OUT, "/.git\n") &&
+               ckk_has(out, CPD_OUT, "MARKER=CANDIDATE_APE_MARKER_V088"),
+               "prebuild-self-uses-candidate-and-qualify-layout-git: warms candidate APE inside qualify layout private .git");
+        }
+
+        /* Early canary scheduling (ri-image-*, lane-key-probes in W0001 before heavy netregen) +
+         * first product-qualification FAIL stops immediately even under --keep-going */
+        {
+            char cids[CPD_PW], ctimes[CPD_PW], cplan[CPD_PW], cwin[CPD_PW], cmock[CPD_PW], cw2[CPD_PW];
+            const char *f_cids =
+                "light-warm\n"
+                "netregen-small-lnx-x86_64\n"
+                "normal-late\n"
+                "lane-key-probes\n"
+                "ri-image-single\n"
+                "ri-image-pem\n"
+                "ri-image-multi\n";
+            const char *f_ctimes =
+                "light-warm\t800\n"
+                "netregen-small-lnx-x86_64\t35000\n"
+                "normal-late\t4000\n"
+                "lane-key-probes\t3000\n"
+                "ri-image-single\t2000\n"
+                "ri-image-pem\t2000\n"
+                "ri-image-multi\t2000\n";
+            if (cx_fmt(cids, sizeof cids, "%s/can-ids.txt", work) ||
+                cx_fmt(ctimes, sizeof ctimes, "%s/can-times.tsv", work) ||
+                cx_fmt(cplan, sizeof cplan, "%s/can-plan", work) ||
+                cx_fmt(cwin, sizeof cwin, "%s/windows.tsv", cplan) ||
+                cx_fmt(cmock, sizeof cmock, "%s/can-mock.sh", work) ||
+                cx_fmt(cw2, sizeof cw2, "%s/strict-W0002.tsv", cplan) ||
+                cx_write(cids, f_cids, strlen(f_cids)) ||
+                cx_write(ctimes, f_ctimes, strlen(f_ctimes))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                cwd, cwd, cids, ctimes, cplan)) return 2;
+            int rc_cp = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            size_t cwn = 0;
+            char *cwb = (char *)cx_read(cwin, &cwn);
+            ck(rc_cp == 0 &&
+               rows_have(cwb, cwn, "W0000\t1\twarmup\t1\tlight-warm\n") &&
+               rows_have(cwb, cwn, "W0001\t2\tnormal\t4\tlane-key-probes,ri-image-single,ri-image-pem,ri-image-multi\n") &&
+               rows_have(cwb, cwn, "W0002\t1\theavy\t1\tnetregen-small-lnx-x86_64\n"),
+               "early-canary-before-heavy: schedules ri-image-* and lane-key-probes in W0001 ahead of heavy netregen");
+            free(cwb);
+
+            const char *cmock_s =
+                "#!/bin/sh\n"
+                "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+                "echo \"# devsvc qualify\" > \"$out\"\n"
+                "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+                "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+                "  if [ \"$id\" = ri-image-single ]; then\n"
+                "    printf 'ri-image-single\\tproduct-qualification\\tFAIL\\t2\\taaa\\t2000\\t1.0\\t0\\tcapture-ledger-write\\n' >> \"$out\"\n"
+                "  else\n"
+                "    printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+                "  fi\n"
+                "done\n"
+                "case \"$ids\" in *ri-image-single*) exit 1 ;; esac\n"
+                "exit 0\n";
+            if (cx_write(cmock, cmock_s, strlen(cmock_s))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-jobs 2 --max-retries 1 --keep-going",
+                cwd, cwd, work, cplan, cmock)) return 2;
+            int rc_cr = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc_cr == 1 &&
+               ckk_has(out, CPD_OUT, "PRERUN_PRODUCT_RED_STOP\tbatch=ri-image-single\tdomain=product-qualification\tstatus=FAIL\trc=2\t") &&
+               ckk_has(out, CPD_OUT, "PRERUN_STOP\tbatch=ri-image-single\t") &&
+               sy_exists(cw2) == 0,
+               "first-product-qualification-fail-stops-under-keep-going: halts at W0001 product FAIL without dispatching W0002");
+        }
     }
 
     {

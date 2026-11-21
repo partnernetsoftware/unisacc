@@ -1,0 +1,275 @@
+/* tools/check-textx-http.cx -- ext/textx/chunked.cx (dk_dechunk) and ext/textx/inflate.cx (zl_inflate, zl_gunzip).
+ *   sh ./unisacc.com tools/check-textx-http.cx [-- --cases chunk;inflate;gzip;mut1;mut2;mut3]
+ *   chunk    single and multiple chunks, chunk extension, upper-case hex, trailer, bare LF, truncation (-EIO),
+ *            small cap (-ENOSPC), malformed (-EINVAL)
+ *   inflate  dz_deflate then zl_inflate: empty, short, repeated, random 64 KiB, cap equal / one short with a
+ *            canary past cap, truncated stream, trailing bytes ignored; hand-built stored and fixed blocks
+ *   gzip     dz_gzip then zl_gunzip, FNAME header, FEXTRA/FCOMMENT/FHCRC, CRC error, ISIZE error, truncation
+ *   mut1-3   (control + chunk extension; cap; CRC) a private copy of the packages with one line mutated (chunk extension ignored, cap not checked,
+ *            CRC not checked) must make the chunk/inflate/gzip groups fail; the unmutated copy must pass.
+ * Prints PASS/FAIL per case and CHECK_TEXTX_HTTP<TAB>failed=N; exit 0 only when N is 0. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use testx.check
+#pragma unisa use textx.chunked
+#pragma unisa use textx.inflate
+#pragma unisa use textx.deflate
+
+#define BIG 70000
+static void cp(void *d, const void *s, long n) { if (n > 0 && mm_copy(d, n, s, n)) exit(2); }
+static long find_at(const char *h, long hn, const char *nd, long nn) {
+    long i;
+    for (i = 0; i + nn <= hn; i++) if (!strncmp(h + i, nd, (size_t)nn)) return i;
+    return -1;
+}
+static unsigned char orig[BIG], comp[BIG * 2], back[BIG + 64];
+
+static long dk(const char *s, unsigned char *o, long cap) { return dk_dechunk(s, (long)strlen(s), o, cap); }
+static int same(const unsigned char *a, const unsigned char *b, long n) { return n == 0 || memcmp(a, b, (size_t)n) == 0; }
+
+static void group_chunk(void) {
+    unsigned char o[64]; long r;
+    r = dk("5\r\nhello\r\n0\r\n\r\n", o, 64);
+    tk_ok(r == 5 && same(o, (const unsigned char *)"hello", 5), "chunk-single");
+    r = dk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", o, 64);
+    tk_ok(r == 11 && same(o, (const unsigned char *)"hello world", 11), "chunk-multi");
+    r = dk("5;name=val\r\nhello\r\n0;last\r\n\r\n", o, 64);
+    tk_ok(r == 5 && same(o, (const unsigned char *)"hello", 5), "chunk-extension");
+    r = dk("A\r\n0123456789\r\n0\r\n\r\n", o, 64);
+    tk_ok(r == 10 && same(o, (const unsigned char *)"0123456789", 10), "chunk-upper-hex");
+    r = dk("a\r\n0123456789\r\n0\r\n\r\n", o, 64);
+    tk_ok(r == 10, "chunk-lower-hex");
+    r = dk("3\r\nabc\r\n0\r\nX-Sum: 1\r\nX-B: 2\r\n\r\n", o, 64);
+    tk_ok(r == 3 && same(o, (const unsigned char *)"abc", 3), "chunk-trailer");
+    r = dk("3\nabc\n0\n\n", o, 64);
+    tk_ok(r == 3, "chunk-bare-lf");
+    r = dk("0\r\n\r\n", o, 64);
+    tk_ok(r == 0, "chunk-empty-body");
+    r = dk("5\r\nhel", o, 64);
+    tk_ok(r == -EIO, "chunk-truncated-data");
+    r = dk("5\r\nhello\r\n0\r\n", o, 64);
+    tk_ok(r == -EIO, "chunk-truncated-trailer");
+    r = dk("5\r\nhello\r\n", o, 64);
+    tk_ok(r == -EIO, "chunk-no-last-chunk");
+    r = dk("", o, 64);
+    tk_ok(r == -EIO, "chunk-empty-input");
+    r = dk("5\r\nhello\r\n0\r\n\r\n", o, 4);
+    tk_ok(r == -ENOSPC, "chunk-cap-small");
+    r = dk("5\r\nhello\r\n0\r\n\r\n", o, 5);
+    tk_ok(r == 5, "chunk-cap-exact");
+    r = dk("zz\r\nhello\r\n0\r\n\r\n", o, 64);
+    tk_ok(r == -EINVAL, "chunk-bad-hex");
+    r = dk("5\r\nhelloXX0\r\n\r\n", o, 64);
+    tk_ok(r == -EINVAL, "chunk-missing-crlf");
+    r = dk("11111111111111111\r\n", o, 64);
+    tk_ok(r == -EINVAL, "chunk-size-too-long");
+}
+
+static unsigned long seed = 12345;
+static void fill(long n, int kind) {
+    long i;
+    for (i = 0; i < n; i++) {
+        seed = seed * 6364136223846793005UL + 1442695040888963407UL;
+        orig[i] = kind == 0 ? (unsigned char)(seed >> 33) : (kind == 1 ? (unsigned char)("abcabcabd"[i % 9]) : (unsigned char)('a' + (i / 97) % 3));
+    }
+}
+
+/* round trip of N bytes of KIND with gzip or raw deflate; returns 1 on success */
+static int rt(long n, int kind, int gz) {
+    long cn, got = -1, r;
+    fill(n, kind);
+    cn = gz ? dz_gzip(orig, n, comp, sizeof comp) : dz_deflate(orig, n, comp, sizeof comp);
+    if (cn <= 0) return 0;
+    memset(back, 0xEE, sizeof back);
+    r = gz ? zl_gunzip(back, BIG, &got, comp, cn) : zl_inflate(back, BIG, &got, comp, cn);
+    return r == 0 && got == n && same(back, orig, n);
+}
+
+/* decode with CAP and verify the canary byte after cap is untouched */
+static long capcase(long n, long cap, int gz, long *got) {
+    long cn, r;
+    fill(n, 1);
+    cn = gz ? dz_gzip(orig, n, comp, sizeof comp) : dz_deflate(orig, n, comp, sizeof comp);
+    memset(back, 0xEE, sizeof back);
+    r = gz ? zl_gunzip(back, cap, got, comp, cn) : zl_inflate(back, cap, got, comp, cn);
+    if (back[cap] != 0xEE) return -9999;
+    return r;
+}
+
+static void group_inflate(void) {
+    long got = -1, r, cn;
+    tk_ok(rt(0, 0, 0), "inflate-empty");
+    tk_ok(rt(5, 1, 0), "inflate-short");
+    tk_ok(rt(20000, 1, 0), "inflate-repeated");
+    tk_ok(rt(40000, 2, 0), "inflate-text-like");
+    tk_ok(rt(65536, 0, 0), "inflate-random-64k");
+    r = capcase(5000, 5000, 0, &got);
+    tk_ok(r == 0 && got == 5000, "inflate-cap-exact");
+    r = capcase(5000, 4999, 0, &got);
+    tk_ok(r == -ENOSPC, "inflate-cap-short-by-one");
+    r = capcase(5000, 100, 0, &got);
+    tk_ok(r == -ENOSPC && got <= 100, "inflate-cap-small");
+    r = capcase(5000, 0, 0, &got);
+    tk_ok(r == -ENOSPC, "inflate-cap-zero");
+    fill(65536, 0);
+    cn = dz_deflate(orig, 65536, comp, sizeof comp);
+    r = zl_inflate(back, BIG, &got, comp, cn / 2);
+    tk_ok(r == -EIO, "inflate-truncated-half");
+    r = zl_inflate(back, BIG, &got, comp, cn - 1);
+    tk_ok(r == -EIO || r == -EINVAL, "inflate-truncated-last-byte");
+    r = zl_inflate(back, BIG, &got, comp, 0);
+    tk_ok(r == -EIO, "inflate-empty-input");
+    fill(300, 1);
+    cn = dz_deflate(orig, 300, comp, sizeof comp);
+    comp[cn] = 0x55; comp[cn + 1] = 0x66;
+    r = zl_inflate(back, BIG, &got, comp, cn + 2);
+    tk_ok(r == 0 && got == 300, "inflate-trailing-bytes-ignored");
+    {   static const unsigned char st[] = { 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
+        r = zl_inflate(back, 16, &got, st, sizeof st);
+        tk_ok(r == 0 && got == 3 && same(back, (const unsigned char *)"abc", 3), "inflate-stored-block");
+        r = zl_inflate(back, 2, &got, st, sizeof st);
+        tk_ok(r == -ENOSPC, "inflate-stored-cap");
+        { static const unsigned char bad[] = { 0x01, 0x03, 0x00, 0x00, 0x00, 'a', 'b', 'c' };
+          r = zl_inflate(back, 16, &got, bad, sizeof bad);
+          tk_ok(r == -EINVAL, "inflate-stored-bad-nlen"); } }
+    {   static const unsigned char fx[] = { 0x4B, 0x4C, 0x4A, 0x06, 0x00 };   /* fixed block "abc" */
+        r = zl_inflate(back, 16, &got, fx, sizeof fx);
+        tk_ok(r == 0 && got == 3 && same(back, (const unsigned char *)"abc", 3), "inflate-fixed-block");
+        { static const unsigned char rv[] = { 0x07 };   /* block type 3 */
+          r = zl_inflate(back, 16, &got, rv, sizeof rv);
+          tk_ok(r == -EINVAL, "inflate-reserved-type"); } }
+}
+
+static void group_gzip(void) {
+    long got = -1, r, cn, i;
+    unsigned char *g2 = back;
+    static unsigned char z[BIG * 2];
+    tk_ok(rt(0, 0, 1), "gzip-empty");
+    tk_ok(rt(10, 1, 1), "gzip-short");
+    tk_ok(rt(30000, 1, 1), "gzip-repeated");
+    tk_ok(rt(65536, 0, 1), "gzip-random-64k");
+    r = capcase(5000, 5000, 1, &got);
+    tk_ok(r == 0 && got == 5000, "gzip-cap-exact");
+    r = capcase(5000, 4999, 1, &got);
+    tk_ok(r == -ENOSPC, "gzip-cap-short-by-one");
+    fill(3000, 1);
+    cn = dz_gzip(orig, 3000, comp, sizeof comp);
+    /* FNAME: flag 8 and "a.txt\0" after the 10-byte header */
+    cp(z, comp, 10); z[3] = 8;
+    cp(z + 10, "a.txt", 6);
+    cp(z + 16, comp + 10, (size_t)(cn - 10));
+    r = zl_gunzip(g2, BIG, &got, z, cn + 6);
+    tk_ok(r == 0 && got == 3000 && same(g2, orig, 3000), "gzip-fname");
+    /* FEXTRA + FCOMMENT + FHCRC */
+    cp(z, comp, 10); z[3] = 4 | 16 | 2;
+    z[10] = 3; z[11] = 0; z[12] = 1; z[13] = 2; z[14] = 3;
+    cp(z + 15, "hi", 3);
+    z[18] = 0; z[19] = 0;
+    cp(z + 20, comp + 10, (size_t)(cn - 10));
+    r = zl_gunzip(g2, BIG, &got, z, cn + 10);
+    tk_ok(r == 0 && got == 3000, "gzip-extra-comment-hcrc");
+    cp(z, comp, (size_t)cn); z[cn - 8] ^= 0x01;
+    r = zl_gunzip(g2, BIG, &got, z, cn);
+    tk_ok(r == -EINVAL, "gzip-crc-error");
+    cp(z, comp, (size_t)cn); z[cn - 4] ^= 0x01;
+    r = zl_gunzip(g2, BIG, &got, z, cn);
+    tk_ok(r == -EINVAL, "gzip-isize-error");
+    for (i = 0; i < 5; i++) {
+        long cut[5] = { 5, 12, cn / 2, cn - 8, cn - 1 };
+        r = zl_gunzip(g2, BIG, &got, comp, cut[i]);
+        tk_ok(r == -EIO, i == 0 ? "gzip-truncated-header" : i == 1 ? "gzip-truncated-early" : i == 2 ? "gzip-truncated-half" : i == 3 ? "gzip-no-trailer" : "gzip-short-trailer");
+    }
+    cp(z, comp, (size_t)cn); z[1] = 0x8C;
+    r = zl_gunzip(g2, BIG, &got, z, cn);
+    tk_ok(r == -EINVAL, "gzip-bad-magic");
+}
+
+/* ---- mutation: private copy of the packages with one line changed ---- */
+static char work[4096], com[4400], root[4096];
+
+static int put_mut(const char *rel, const char *old, const char *nw) {
+    char path[4400]; size_t n, k, ol = strlen(old), nl = strlen(nw); char *src, *dst; long at;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 0;
+    src = cx_read(path, &n);
+    if (!src) return 0;
+    if (!old[0]) return tk_write(work, rel, src) == 0;
+    at = find_at(src, (long)n, old, (long)ol);
+    if (at < 0) { sy_printf("mutation anchor missing: %s in %s\n", old, rel); return 0; }
+    dst = mm_alloc((long)(n + nl + 8));
+    if (!dst) return 0;
+    k = (size_t)at;
+    cp(dst, src, k); cp(dst + k, nw, nl); cp(dst + k + nl, src + k + ol, n - k - ol);
+    dst[n - ol + nl] = 0;
+    return tk_write(work, rel, dst) == 0;
+}
+
+static int setup(const char *chunk_old, const char *chunk_new, const char *inf_old, const char *inf_new) {
+    char lk[4400]; char *src, *dst; size_t n, i, k = 0, ln;
+    if (!put_mut("ext/textx/chunked.cx", chunk_old, chunk_new)) return 0;
+    if (!put_mut("ext/textx/inflate.cx", inf_old, inf_new)) return 0;
+    if (!put_mut("ext/textx/deflate.cx", "", "")) return 0;
+    if (!put_mut("tools/check-textx-http.cx", "", "")) return 0;
+    if (cx_fmt(lk, sizeof lk, "%s/r", work)) return 0;
+    if (sy_exists(lk) != 1 && sy_symlink(root, lk)) return 0;
+    {   char p[4400]; if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return 0; src = cx_read(p, &n); }
+    if (!src || !(dst = mm_alloc((long)n * 2 + 64))) return 0;
+    i = 0;
+    while (i < n) {   /* each line; R rows other than textx get the r/ link prefix on DIR */
+        size_t e = i, t1 = 0, t2 = 0;
+        while (e < n && src[e] != '\n') { if (src[e] == '\t') { if (!t1) t1 = e; else if (!t2) t2 = e; } e++; }
+        ln = e - i;
+        if (ln > 2 && src[i] == 'R' && src[i + 1] == '\t' && t2 && !(t2 - (i + 2) == 5 && !strncmp(src + i + 2, "textx", 5))) {
+            cp(dst + k, src + i, t2 + 1 - i); k += t2 + 1 - i;
+            dst[k++] = 'r'; dst[k++] = '/';
+            cp(dst + k, src + t2 + 1, e - t2 - 1); k += e - t2 - 1;
+        } else { cp(dst + k, src + i, ln); k += ln; }
+        if (e < n) dst[k++] = '\n';
+        i = e + 1;
+    }
+    dst[k] = 0;
+    return tk_write(work, "cxroot.tsv", dst) == 0;
+}
+
+static int child(const char *cases) {
+    char probe[4400]; char *av[] = { "sh", com, probe, "--", "--cases", (char *)cases, 0 };
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-textx-http.cx", work)) return -1;
+    return tk_run(av, 0, 55000);
+}
+
+static void group_mut(int part) {
+    int rc;
+    if (tk_scratch("check-textx-http", work, sizeof work)) { tk_ok(0, "mut-scratch"); return; }
+    if (part == 1 && setup("", "", "", "")) {
+        rc = child("chunk;inflate;gzip");
+        tk_ok(rc == 0, "mut-control-unmutated-passes");
+    } else if (part == 1) tk_ok(0, "mut-control-setup");
+    if (part == 1 && setup("in[i] == ';'", "0", "", "")) {
+        rc = child("chunk");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tchunk-extension"), "mut-chunk-extension-ignored-detected");
+    } else if (part == 1) tk_ok(0, "mut-chunk-setup");
+    if (part == 2 && setup("", "", "zl_n + (n) <= zl_cap", "zl_n + (n) <= zl_cap + 100000")) {
+        rc = child("inflate");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tinflate-cap"), "mut-inflate-cap-unchecked-detected");
+    } else if (part == 2) tk_ok(0, "mut-cap-setup");
+    if (part == 3 && setup("", "", "if (got != want) return -EINVAL;", "")) {
+        rc = child("gzip");
+        tk_ok(rc == 1 && tk_has(tk_out(), "FAIL\tgzip-crc-error"), "mut-gzip-crc-unchecked-detected");
+    } else if (part == 3) tk_ok(0, "mut-crc-setup");
+}
+
+int main(int argc, char **argv) {
+    tk_begin("");
+    tk_cases_init(argc, argv);
+    if (sy_cwd(root, sizeof root) < 0 || cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (tk_case("chunk")) group_chunk();
+    if (tk_case("inflate")) group_inflate();
+    if (tk_case("gzip")) group_gzip();
+    if (tk_case("mut1")) group_mut(1);
+    if (tk_case("mut2")) group_mut(2);
+    if (tk_case("mut3")) group_mut(3);
+    return tk_end("CHECK_TEXTX_HTTP", 0);
+}
