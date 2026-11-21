@@ -82,7 +82,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
 - 产品代码(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)严格只用 `sy_*`、`mm_*`、`tx_*`,不写平台 `#if`(`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__`)和 `__syscallN`(CX-Y-2、CX-Y-3)。平台差异只放 L0 的 `_os` 静态帮手或表。
 - 错误码只走返回值:L0 失败返回 `-errno`,不靠全局 `errno` 跨模块传递(CX-Y-4)。
-- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build 写 `use text.build`。
+- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build/json 写 `use text.build`/`use text.json`。`use` 写法保持不变;身份上的去别名迁移(使 `ext/textx` 四文件与 `cx/mem/arena.cx` 不再进源 SID,归 B 类轻车道)归身份收窄版(见 [plans/v0.0.89.md](plans/v0.0.89.md) 及后续版本计划)。
 
 ### 3.4a 库包一览(怎么选包)
 
@@ -96,7 +96,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 | cx.os | `sys.fs`、`sys.proc`、`sys.env`、`sys.time`、`os.utc` | 文件系统、进程、环境、时间与截止 | 135 | 全部 |
 | cx.path | `path.path` | 纯词法路径,posix 与 win | 27 | 全部 |
 | cx.stream | `stream.item`、`stream.pipe`、`stream.rw` | 带回执的有界字节管道与读写句柄 | 32 | 全部 |
-| ext.memx、ext.textx | `mem.arena`、`text.build`、`text.deflate`、`text.num` | arena、字符串构造、deflate | 5、27 | 工具、测试、应用 |
+| ext.memx、ext.textx | `mem.arena`、`text.build`、`text.deflate`、`text.num`、`text.json` | arena、字符串构造、deflate、数字、JSON 解析 | 5、44 | 工具、测试、应用 |
 | ext.sysx | `sysx.process`、`sysx.poll`、`sysx.tty` 等 | 进程树、回收、poll、tty、跟踪 | 32 | 工具、测试、应用 |
 | ext.net | `net.addr`、`net.tcp`、`net.udp`、`net.unix`、`net.resolve`、`net.sock` | 地址、TCP、UDP、Unix 域,带截止收发 | 37 | 工具、测试、应用 |
 | ext.crypto | `crypto.sha256`、`crypto.gcm`、`crypto.x25519` 等 | 纯 cx 密码学与 TLS 1.3 记录层 | 132 | 工具、测试、应用 |
@@ -270,7 +270,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 
 ### 5.2 已知限制(如实)
 
-- 没有 JSON 解析与序列化库:只能手工拼装与手工扫描。
+- 有 JSON 解析(`use text.json`,包 `ext.textx`,接口见 `build/layer-api/ext.textx.tsv`),没有 JSON 序列化(见 `build/pkg-gaps.tsv`,写出暂用 `text.build` 加 `js_esc` 手拼;与 `build/std-surface.tsv` 一致)。
 - 没有 HTTP 客户端与服务端、没有 TLS 高层接口、没有 URL 解析(表头 `out TLS/HTTP/URL`);`ext.crypto` 只有 TLS 1.3 记录层等底层件。
 - 没有正则:只有子串查找、分隔迭代与修剪。
 - 没有线程与事件循环;没有泛型容器,只有 `mm_vec_*` 与字符串键 `mm_map_*`。
