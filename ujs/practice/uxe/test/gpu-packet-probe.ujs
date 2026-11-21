@@ -57,6 +57,26 @@ native function probe_render_state(packet:i64,capacity:i64,mode:i64) i64 {
   return GpuPacket_setRenderState(packet,capacity,state);
 }
 
+function probe_tone_callback(context,...addresses) {
+  let gain=0.5;
+  if(context[0]>=154) { gain=0.8; }
+  let out=addresses[0];
+  let input=addresses[1];
+  let red=ux_f64_put(out,ux_f64(input)*gain);
+  let green=ux_f64_put(out+8,ux_f64(input+8)*gain);
+  let blue=ux_f64_put(out+16,ux_f64(input+16)*gain);
+  return out;
+}
+
+native function probe_custom_material(out:i64,mode:i64,r:f64,g:f64,b:f64,exposure:f64) i64 {
+  let red=ux_f64_put(8448,r);
+  let green=ux_f64_put(8456,g);
+  let blue=ux_f64_put(8464,b);
+  let inputExposure=ux_f64_put(8472,exposure);
+  let callback=closure(probe_tone_callback,mode);
+  return GpuMaterial_toneCustom(callback,out,8448);
+}
+
 native function probe_basic(packet:i64,capacity:i64,mode:i64) i64 {
   let viewport=GpuPacket_viewport(packet,capacity,0,0,16,16);
   let clip=GpuPacket_scissor(packet,capacity,0,0,0,16,16);
@@ -125,9 +145,11 @@ native function probe_basic(packet:i64,capacity:i64,mode:i64) i64 {
   }
   if(mode>=150 && mode<=157) {
     let exposure=2.0;
-    let gain=0.5;
-    if(mode>=154) { exposure=0.5; gain=0.8; }
-    let mapped=GpuMaterial_toneRgb(8400,3+(mode-150)%4,red,green,blue,exposure,gain);
+    if(mode>=154) { exposure=0.5; }
+    let mapping=3+(mode-150)%4;
+    let mapped=0-1;
+    if(mapping==5) { mapped=probe_custom_material(8400,mode,red,green,blue,exposure); }
+    else { mapped=GpuMaterial_toneRgb(8400,mapping,red,green,blue,exposure,1.0); }
     if(mapped<0) { return mapped; }
     red=ux_f64(mapped);
     green=ux_f64(mapped+8);
