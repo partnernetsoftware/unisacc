@@ -359,6 +359,33 @@ native function Interpolant_copySampleValue(state:i64,index:i64) i64 {
   return interpolant_copy_row(result,src,stride,rw,vw);
 }
 
+// Product-defined evaluators use the same interval and cache as built-in kinds.
+native function interpolant_locate(state:i64,times:i64,count:i64,tw:i64,t:f64) i64 {
+  let cached=ux_u32(state+InterpolantState.cached);
+  if(cached>count) { return 0-1; }
+  let hit=0;
+  if(cached==0) { hit=t<interpolant_read(times,tw); }
+  else if(cached==count) { hit=!(t<interpolant_read(times+(count-1)*tw,tw)); }
+  else { hit=t>=interpolant_read(times+(cached-1)*tw,tw) && t<interpolant_read(times+cached*tw,tw); }
+  if(hit) { return cached*2; }
+  let upper=interpolant_upper(times,count,tw,t);
+  let saved=ux_u32_put(state+InterpolantState.cached,upper);
+  return upper*2+(upper>0 && upper<count);
+}
+
+// Returns twice the upper index plus a bit requesting intervalChanged_.
+// Upper indices zero and count denote boundary copies with no change callback.
+native function Interpolant_locate(state:i64,t:f64) i64 {
+  if(!interpolant_alive(state) || ux_u32(state+InterpolantState.kind)!=5) { return 0-1; }
+  let view=ux_u32(state+InterpolantState.view);
+  let timeKind=ux_u32(state+InterpolantState.timeKind);
+  let stride=interpolant_numeric_shape(view,timeKind,ux_u32(state+InterpolantState.valueKind),
+    ux_u32(state+InterpolantState.inputBytes));
+  if(stride<1) { return 0-1; }
+  return interpolant_locate(state,ux_u32(view+AnimationSamples.times),
+    ux_u32(view+AnimationSamples.count),interpolant_width(timeKind),t);
+}
+
 native function Interpolant_evaluate(state:i64,t:f64) i64 {
   if(!interpolant_alive(state)) { return 0-1; }
   let kind=ux_u32(state+InterpolantState.kind)-1;
@@ -375,19 +402,11 @@ native function Interpolant_evaluate(state:i64,t:f64) i64 {
   let times=ux_u32(view+AnimationSamples.times);
   let values=ux_u32(view+AnimationSamples.values);
   let count=ux_u32(view+AnimationSamples.count);
-  let cached=ux_u32(state+InterpolantState.cached);
-  if(cached>count) { return 0-1; }
-  let upper=cached;
-  let hit=0;
-  if(cached==0) { hit=t<interpolant_read(times,tw); }
-  else if(cached==count) { hit=!(t<interpolant_read(times+(count-1)*tw,tw)); }
-  else { hit=t>=interpolant_read(times+(cached-1)*tw,tw) && t<interpolant_read(times+cached*tw,tw); }
-  if(!hit) {
-    upper=interpolant_upper(times,count,tw,t);
-    if(kind==2 && upper>0 && upper<count) {
-      let changed=interpolant_cubic_seek(state,times,count,upper,settings,tw);
-    }
-    let saved=ux_u32_put(state+InterpolantState.cached,upper);
+  let located=interpolant_locate(state,times,count,tw,t);
+  if(located<0) { return located; }
+  let upper=located/2;
+  if(located%2 && kind==2) {
+    let changed=interpolant_cubic_seek(state,times,count,upper,settings,tw);
   }
   let lower=upper-1;
   if(upper==0) { lower=0; }
