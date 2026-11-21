@@ -1,6 +1,6 @@
 # 速度项前置重排(rev4 草稿,2026-11-19,未入仓,未评审)
 
-读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、plans/v0.0.82.md、plans/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:plans/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
+读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、plans/v0.0.82.md、plans/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
 
 ## A 一句结论
 
@@ -194,4 +194,4 @@ R2 第二半先在独立开关下双跑证明读集与执行证据等价，再�
 
 ## 未完成与未核实
 
-(1) plans/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 未通读;nn 节点的依赖只按 D 表的顺序依据处理。(2) roadmap-0.0.83-0.0.99.md 末尾 POSIX 与 asm 节只读到 (1) 与 (4) 两条的截断文本,0.0.86 到 0.0.88 的信号、原子、pthread 安排未纳入 C 表。(3) 0.0.87 之后的逐版容量未重算。(4) 0.0.82 当前是否已冻结、S3、S4、S0 原型、qualification-state 是否已落库,未核。(5) 所有"每版省分钟"都是估计,只有 B 节上方表格里的数字是本次实跑得到的。
+(1) archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 未通读;nn 节点的依赖只按 D 表的顺序依据处理。(2) roadmap-0.0.83-0.0.99.md 末尾 POSIX 与 asm 节只读到 (1) 与 (4) 两条的截断文本,0.0.86 到 0.0.88 的信号、原子、pthread 安排未纳入 C 表。(3) 0.0.87 之后的逐版容量未重算。(4) 0.0.82 当前是否已冻结、S3、S4、S0 原型、qualification-state 是否已落库,未核。(5) 所有"每版省分钟"都是估计,只有 B 节上方表格里的数字是本次实跑得到的。
