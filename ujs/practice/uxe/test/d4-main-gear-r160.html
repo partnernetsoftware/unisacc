@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 主齿轮位姿验收夹具</title>
+<pre id="result">pending</pre>
+<script type="module">
+import { buildTown, townLayout } from "./d4-town.js";
+import { gaitPose } from "./d4-gait.js";
+import { loadScaleStudy } from "./uxe-u2b.js";
+import { Matrix4, REVISION, Vector3 } from "../../web/game/three.module.js";
+
+const status=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const wasmUrl=query.get("wasm");
+  if(!wasmUrl) throw new Error("验收缺少 Wasm 路径");
+  const [town,study,legsResponse,wasmResponse]=await Promise.all(
+    [townLayout(true),loadScaleStudy("d4"),fetch("./d4-legs.tsv"),fetch(wasmUrl)]);
+  if(!legsResponse.ok || !wasmResponse.ok) throw new Error("读取 D4 验收输入失败");
+  const {instance}=await WebAssembly.instantiate(await wasmResponse.arrayBuffer());
+  const {memory,uxe_d4_main_gear}=instance.exports;
+
+  const hero=town.filter(([kind,,,,width])=>kind==="gear" && width>=2);
+  if(hero.length!==1) throw new Error("主齿轮事实不唯一");
+  const [kind,x,y,,width,height,depth]=hero[0];
+  const factor=study[0]/1000,deck=6.37,center=[x+.45,y+.19,4.45];
+  const pivot=[center[0],deck+(center[1]-deck)*factor,center[2]];
+  const original=[];
+  const round=Symbol("旧轮毂");
+  const built=buildTown([[kind,...center,width*.98,height*.98,depth]],{
+    round,
+    block:(color,px,py,pz,w,h,d,roll=0)=>{
+      if(color!=="gearGold") throw new Error("旧齿轮材质不符");
+      original.push({point:[px,py,pz],scale:1,w,h,d,roll,kind:0});
+    },
+    add:(color,id,px,py,pz,scale)=>{
+      if(color!=="gearGold" || id!==round) throw new Error("旧轮毂不符");
+      original.push({point:[px,py,pz],scale,w:0,h:0,d:0,roll:0,kind:1});
+    }
+  });
+  if(built.gears!==1) throw new Error("旧主齿轮未生成");
+  for(const item of original) {
+    item.point[1]=deck+(item.point[1]-deck)*factor;
+    item.scale*=factor;
+  }
+  const unit=(await legsResponse.text()).trim().split("\n").slice(1).map(row=>{
+    const values=row.split("\t").slice(1).map(value=>Number(value)/1000);
+    return [values.slice(0,3),values.slice(3,6),values.slice(6,9)];
+  });
+
+  function reference(body,eye,tilted) {
+    const [gx,gy,gz]=pivot.map((value,i)=>value+body[i]);
+    const [dx,dy,dz]=[eye[0]-gx,eye[1]-gy,eye[2]-gz];
+    const yaw=Math.atan2(dx,Math.hypot(dy,dz))+(tilted?.74:0);
+    const pitch=-Math.atan2(dy,dz);
+    const rotation=new Matrix4().makeRotationX(pitch).multiply(new Matrix4().makeRotationY(yaw));
+    return original.map(item=>{
+      const local=item.point.map((value,i)=>value-pivot[i]);
+      const point=new Vector3(...local).applyMatrix4(rotation);
+      return [gx+point.x,gy+point.y,gz+point.z,item.scale,yaw,pitch,0,
+        item.w,item.h,item.d,item.roll,item.kind];
+    });
+  }
+
+  const base=2097152,out=256,capacity=22,factsAt=4096,bodyAt=4160,eyeAt=4192;
+  const output=new Float64Array(memory.buffer,base+out,capacity*12);
+  const outputWords=new Uint32Array(memory.buffer,base+out,capacity*24);
+  const factsData=new Float64Array(memory.buffer,base+factsAt,6);
+  const bodyData=new Float64Array(memory.buffer,base+bodyAt,3);
+  const eyeData=new Float64Array(memory.buffer,base+eyeAt,3);
+  factsData.set([x,y,width,depth,deck,factor]);
+  const home=[0,0,0];
+  const cases=[[home,[pivot[0],pivot[1],pivot[2]+10],false],
+    [home,[pivot[0],pivot[1],pivot[2]-10],false]];
+  for(const phase of [0,.5,4,38,-40]) {
+    const pose=gaitPose(unit,phase,"walk");
+    const progress=Math.min(1,Math.abs(pose.travel)/4);
+    const wide=progress*progress*(3-2*progress);
+    cases.push([pose.offset,[14.4+pose.travel+3*wide,12+.8*wide,19.2+15*wide],phase===38]);
+  }
+  cases.push([home,pivot,false]);
+
+  const raw=[BigInt(out),BigInt(capacity),BigInt(factsAt),BigInt(bodyAt),BigInt(eyeAt),0n];
+  const argsFor=tilted=>[...raw.slice(0,5),tilted?1n:0n];
+  let matrixDiff=0,kindDiff=0,tailDiff=0,countDiff=0,rows=0;
+  let front=[];
+  for(const [index,[body,eye,tilted]] of cases.entries()) {
+    bodyData.set(body);
+    eyeData.set(eye);
+    outputWords.fill(0xfeedbeef);
+    const count=Number(uxe_d4_main_gear(...argsFor(mutate && index===4?!tilted:tilted)));
+    const expected=reference(body,eye,tilted);
+    if(count<0 || count>capacity) throw new Error("主齿轮可见数非法");
+    if(count!==expected.length) countDiff++;
+    rows+=expected.length;
+    for(let row=0;row<Math.min(count,expected.length);row++) {
+      for(let field=0;field<11;field++) {
+        const actual=output[row*12+field],value=expected[row][field];
+        if(!Number.isFinite(actual) || Math.abs(actual-value)>1e-9) matrixDiff++;
+      }
+      if(outputWords[row*24+22]!==expected[row][11] || outputWords[row*24+23]!==0) kindDiff++;
+    }
+    if(outputWords.subarray(count*24).some(value=>value!==0xfeedbeef)) tailDiff++;
+    if(index===0) front=[output[0],output[1],output[2],output[3],output[7],output[8],output[9],
+      output[4*12+1],output[17*12+10],output[19*12+2],output[19*12+3],outputWords[19*24+22]];
+  }
+
+  const before=outputWords.slice();
+  const denied=args=>uxe_d4_main_gear(...args)===-1n && before.every((value,i)=>value===outputWords[i]);
+  let refusals=0;
+  for(const [index,value] of [[1,19n],[1,65537n],[0,257n],[0,4096n],[0,4160n],[0,4192n],[5,2n]]) {
+    const args=raw.slice();
+    args[index]=value;
+    if(denied(args)) refusals++;
+  }
+  for(const [buffer,index,value] of [[eyeData,2,NaN],[factsData,2,0],[factsData,5,0],[bodyData,1,Infinity]]) {
+    const saved=buffer[index];
+    buffer[index]=value;
+    if(denied(raw)) refusals++;
+    buffer[index]=saved;
+  }
+
+  status.textContent=JSON.stringify([cases.length,rows,countDiff,matrixDiff,kindDiff,tailDiff,refusals,...front]);
+} catch(error) { status.textContent="error:"+error.message; }
+</script>
+</html>

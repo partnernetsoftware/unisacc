@@ -1,0 +1,125 @@
+struct D4GearFacts {
+  x: f64;
+  y: f64;
+  width: f64;
+  depth: f64;
+  deckY: f64;
+  townScale: f64;
+}
+
+struct D4GearPart {
+  x: f64;
+  y: f64;
+  z: f64;
+  scale: f64;
+  yaw: f64;
+  pitch: f64;
+  roll: f64;
+  width: f64;
+  height: f64;
+  depth: f64;
+  meshRoll: f64;
+  kind: u32;
+  reserved: u32;
+}
+
+native function d4_gear_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%8==0 && at<=6291456-bytes;
+}
+
+native function d4_gear_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a<b+m && b<a+n;
+}
+
+native function d4_gear_values(at:i64,bytes:i64) i64 {
+  let i=0;
+  while(i<bytes) {
+    let value=ux_f64(at+i);
+    if(value-value!=0.0 || ux_math_abs(value)>1048576.0) { return 0; }
+    i=i+8;
+  }
+  return 1;
+}
+
+// U2D's forward main gear. The gear row supplies center x/y and width/depth;
+// coordinates are in world units, including the deck plane and town ratio.
+// Body is the first three f64 fields of D4Frame, eye the active camera eye.
+// Kind 0 is a box with meshRoll baked into its local mesh; kind 1 is the hub.
+native function D4Gear_main(output:i64,capacity:i64,facts:i64,body:i64,eye:i64,tilted:i64) i64 {
+  let bytes=capacity*D4GearPart.size;
+  if(capacity<20 || capacity>65536 || tilted<0 || tilted>1 ||
+     !d4_gear_span(output,bytes) || !d4_gear_span(facts,D4GearFacts.size) ||
+     !d4_gear_span(body,24) || !d4_gear_span(eye,24) ||
+     d4_gear_overlap(output,bytes,facts,D4GearFacts.size) ||
+     d4_gear_overlap(output,bytes,body,24) || d4_gear_overlap(output,bytes,eye,24) ||
+     !d4_gear_values(facts,D4GearFacts.size) || !d4_gear_values(body,24) ||
+     !d4_gear_values(eye,24)) { return 0-1; }
+  let width=ux_f64(facts+D4GearFacts.width)*0.98;
+  let depth=ux_f64(facts+D4GearFacts.depth);
+  let townScale=ux_f64(facts+D4GearFacts.townScale);
+  if(width<=0.0 || depth<=0.0 || townScale<=0.0) { return 0-1; }
+  let deck=ux_f64(facts+D4GearFacts.deckY);
+  let px=ux_f64(facts+D4GearFacts.x)+0.45+ux_f64(body);
+  let py=deck+(ux_f64(facts+D4GearFacts.y)+0.19-deck)*townScale+ux_f64(body+8);
+  let pz=4.45+ux_f64(body+16);
+  let dx=ux_f64(eye)-px;
+  let dy=ux_f64(eye+8)-py;
+  let dz=ux_f64(eye+16)-pz;
+  let yaw=ux_math_atan2(dx,ux_math_hypot(dy,dz));
+  if(tilted) { yaw=yaw+0.74; }
+  let pitch=0.0-ux_math_atan2(dy,dz);
+  let cy=ux_math_cos(yaw);
+  let sy=ux_math_sin(yaw);
+  let cp=ux_math_cos(pitch);
+  let sp=ux_math_sin(pitch);
+  let radius=width*0.5;
+  let shape=width/2.06;
+  let i=0;
+  while(i<20) {
+    let lx=0.0;
+    let ly=0.0;
+    let lz=0.0;
+    let partScale=townScale;
+    let meshRoll=0.0;
+    let w=0.0;
+    let h=0.0;
+    let d=0.0;
+    let kind=0;
+    if(i<16) {
+      meshRoll=i*6.283185307179586/16.0;
+      lx=ux_math_cos(meshRoll)*radius*0.81;
+      ly=ux_math_sin(meshRoll)*radius*0.81*townScale;
+      w=0.40*shape;
+      h=0.30*shape;
+      d=depth;
+    } else if(i<19) {
+      meshRoll=(i-16)*3.141592653589793/3.0;
+      w=1.52*shape;
+      h=0.19*shape;
+      d=depth*0.85;
+    } else {
+      kind=1;
+      lz=0.15*shape;
+      partScale=0.30*shape*townScale;
+    }
+    let localDepth=lz*cy-lx*sy;
+    let at=output+i*D4GearPart.size;
+    let x=ux_f64_put(at+D4GearPart.x,px+lx*cy+lz*sy);
+    let y=ux_f64_put(at+D4GearPart.y,py+ly*cp-localDepth*sp);
+    let z=ux_f64_put(at+D4GearPart.z,pz+ly*sp+localDepth*cp);
+    let s=ux_f64_put(at+D4GearPart.scale,partScale);
+    let a=ux_f64_put(at+D4GearPart.yaw,yaw);
+    let b=ux_f64_put(at+D4GearPart.pitch,pitch);
+    let roll=ux_f64_put(at+D4GearPart.roll,0.0);
+    let dw=ux_f64_put(at+D4GearPart.width,w);
+    let dh=ux_f64_put(at+D4GearPart.height,h);
+    let dd=ux_f64_put(at+D4GearPart.depth,d);
+    let mr=ux_f64_put(at+D4GearPart.meshRoll,meshRoll);
+    let meshKind=ux_u32_put(at+D4GearPart.kind,kind);
+    let reserved=ux_u32_put(at+D4GearPart.reserved,0);
+    i=i+1;
+  }
+  return 20;
+}
+
+return D4Gear_main(output,capacity,facts,body,eye,tilted);
