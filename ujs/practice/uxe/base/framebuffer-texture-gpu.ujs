@@ -1,0 +1,170 @@
+// A framebuffer capture owns a texture-table handle and borrows RGBA8 bytes.
+struct FramebufferGpuTexture {
+  table: u32;
+  handle: u32;
+  rgba: u32;
+  width: u32;
+  height: u32;
+}
+
+struct FramebufferGpuWork {
+  rgba: u32;
+  rgbaCapacity: u32;
+  packetCapacity: u32;
+  read: GpuTargetRead;
+  source: GpuTextureSource;
+}
+
+native function framebuffer_gpu_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function framebuffer_gpu_table(table:i64) i64 {
+  let slots=gpu_texture_capacity(table);
+  if(slots==0) { return 0-1; }
+  return GpuTextureTable.size+slots*GpuTextureSlot.size;
+}
+
+native function framebuffer_gpu_unused(table:i64,at:i64,bytes:i64) i64 {
+  let capacity=gpu_texture_capacity(table);
+  let i=0;
+  while(i<capacity) {
+    let slot=table+GpuTextureTable.size+i*GpuTextureSlot.size;
+    if(ux_u32(slot+GpuTextureSlot.version)!=0) {
+      let source=slot+GpuTextureSlot.source;
+      if(!gpu_texture_source_valid(source)) { return 0; }
+      let pixels=ux_u32(source+GpuTextureSource.rgba);
+      let width=ux_u32(source+GpuTextureSource.width);
+      let height=ux_u32(source+GpuTextureSource.height);
+      if(!render_target_separate(at,bytes,pixels,width*height*4)) { return 0; }
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function framebuffer_gpu_spans(texture:i64,table:i64,target:i64,work:i64,width:i64,height:i64) i64 {
+  if(!framebuffer_gpu_span(texture,FramebufferGpuTexture.size) ||
+     !render_target_live(target) || !framebuffer_gpu_span(work,FramebufferGpuWork.size) ||
+     !render_target_size(width,height)) { return 0-1; }
+  let tableBytes=framebuffer_gpu_table(table);
+  let capacity=ux_u32(work+FramebufferGpuWork.packetCapacity);
+  let rgba=ux_u32(work+FramebufferGpuWork.rgba);
+  let rgbaCapacity=ux_u32(work+FramebufferGpuWork.rgbaCapacity);
+  let bytes=width*height*4;
+  let workBytes=FramebufferGpuWork.size+capacity;
+  if(tableBytes<0 || capacity<64 || capacity>65536 ||
+     rgbaCapacity<bytes || !framebuffer_gpu_span(rgba,rgbaCapacity) ||
+     !framebuffer_gpu_span(work,workBytes)) { return 0-1; }
+  if(!render_target_separate(texture,FramebufferGpuTexture.size,target,RenderTarget.size) ||
+     !render_target_separate(texture,FramebufferGpuTexture.size,table,tableBytes) ||
+     !render_target_separate(texture,FramebufferGpuTexture.size,work,workBytes) ||
+     !render_target_separate(texture,FramebufferGpuTexture.size,rgba,rgbaCapacity) ||
+     !render_target_separate(target,RenderTarget.size,table,tableBytes) ||
+     !render_target_separate(target,RenderTarget.size,work,workBytes) ||
+     !render_target_separate(target,RenderTarget.size,rgba,rgbaCapacity) ||
+     !render_target_separate(table,tableBytes,work,workBytes) ||
+     !render_target_separate(table,tableBytes,rgba,rgbaCapacity) ||
+     !render_target_separate(work,workBytes,rgba,rgbaCapacity) ||
+     !framebuffer_gpu_unused(table,texture,FramebufferGpuTexture.size) ||
+     !framebuffer_gpu_unused(table,work,workBytes) ||
+     !framebuffer_gpu_unused(table,rgba,rgbaCapacity)) { return 0-3; }
+  let observer=ux_u32(target+RenderTarget.disposeObserver);
+  if(!render_target_event_space(observer,texture,FramebufferGpuTexture.size) ||
+     !render_target_event_space(observer,table,tableBytes) ||
+     !render_target_event_space(observer,work,workBytes) ||
+     !render_target_event_space(observer,rgba,rgbaCapacity)) { return 0-3; }
+  return 0;
+}
+
+native function framebuffer_gpu_snapshot(target:i64,work:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  if(!render_target_rect_valid(target,x,y,width,height)) { return 0-2; }
+  let read=work+FramebufferGpuWork.read;
+  let rgba=ux_u32(work+FramebufferGpuWork.rgba);
+  let id=ux_u32_put(read+GpuTargetRead.id,ux_u32(target+RenderTarget.id));
+  let layer=ux_u32_put(read+GpuTargetRead.layer,0);
+  let color=ux_u32_put(read+GpuTargetRead.color,0);
+  let left=ux_u32_put(read+GpuTargetRead.x,x);
+  let bottom=ux_u32_put(read+GpuTargetRead.y,y);
+  let w=ux_u32_put(read+GpuTargetRead.width,width);
+  let h=ux_u32_put(read+GpuTargetRead.height,height);
+  let out=ux_u32_put(read+GpuTargetRead.output,rgba);
+  let packet=work+FramebufferGpuWork.size;
+  let capacity=ux_u32(work+FramebufferGpuWork.packetCapacity);
+  let started=GpuPacket_begin(packet,capacity,ux_u32(target+RenderTarget.generation));
+  if(started<0) { return started; }
+  let recorded=GpuTarget_read(packet,capacity,read);
+  if(recorded<0) { return recorded; }
+  let status=GpuPacket_submit(packet);
+  if(status!=0) { return status; }
+  let source=work+FramebufferGpuWork.source;
+  let sw=ux_u32_put(source+GpuTextureSource.width,width);
+  let sh=ux_u32_put(source+GpuTextureSource.height,height);
+  let filter=ux_u32_put(source+GpuTextureSource.filter,0);
+  let wrapS=ux_u32_put(source+GpuTextureSource.wrapS,0);
+  let wrapT=ux_u32_put(source+GpuTextureSource.wrapT,0);
+  let pixels=ux_u32_put(source+GpuTextureSource.rgba,rgba);
+  return source;
+}
+
+native function FramebufferTexture_gpuCapture(texture:i64,table:i64,target:i64,work:i64,x:i64,y:i64,width:i64,height:i64) i64 {
+  let range=framebuffer_gpu_spans(texture,table,target,work,width,height);
+  if(range<0) { return range; }
+  if(ux_u32(texture+FramebufferGpuTexture.handle)!=0) { return 0-1; }
+  let source=framebuffer_gpu_snapshot(target,work,x,y,width,height);
+  if(source<0) { return source; }
+  let handle=GpuTextureTable_create(table,source);
+  if(handle<0) { return handle; }
+  let owner=ux_u32_put(texture+FramebufferGpuTexture.table,table);
+  let w=ux_u32_put(texture+FramebufferGpuTexture.width,width);
+  let h=ux_u32_put(texture+FramebufferGpuTexture.height,height);
+  let rgba=ux_u32_put(texture+FramebufferGpuTexture.rgba,ux_u32(work+FramebufferGpuWork.rgba));
+  let current=ux_u32_put(texture+FramebufferGpuTexture.handle,handle);
+  return handle;
+}
+
+native function FramebufferTexture_gpuVersion(texture:i64) i64 {
+  if(!framebuffer_gpu_span(texture,FramebufferGpuTexture.size)) { return 0-1; }
+  let table=ux_u32(texture+FramebufferGpuTexture.table);
+  let size=framebuffer_gpu_table(table);
+  if(size<0 || !render_target_separate(texture,FramebufferGpuTexture.size,table,size)) { return 0-1; }
+  return GpuTextureTable_version(table,ux_u32(texture+FramebufferGpuTexture.handle));
+}
+
+native function FramebufferTexture_gpuUpdate(texture:i64,target:i64,work:i64,x:i64,y:i64,expected:i64) i64 {
+  let version=FramebufferTexture_gpuVersion(texture);
+  if(version<0) { return version; }
+  if(version!=expected || version==4294967295) { return 0-4; }
+  let table=ux_u32(texture+FramebufferGpuTexture.table);
+  let width=ux_u32(texture+FramebufferGpuTexture.width);
+  let height=ux_u32(texture+FramebufferGpuTexture.height);
+  let range=framebuffer_gpu_spans(texture,table,target,work,width,height);
+  if(range<0) { return range; }
+  let rgba=ux_u32(work+FramebufferGpuWork.rgba);
+  let source=framebuffer_gpu_snapshot(target,work,x,y,width,height);
+  if(source<0) { return source; }
+  let updated=GpuTextureTable_update(table,ux_u32(texture+FramebufferGpuTexture.handle),expected,source);
+  if(updated<0) { return updated; }
+  let pixels=ux_u32_put(texture+FramebufferGpuTexture.rgba,rgba);
+  return updated;
+}
+
+native function FramebufferTexture_gpuDraw(texture:i64,packet:i64,capacity:i64,vertices:i64,count:i64,shader:i64) i64 {
+  if(FramebufferTexture_gpuVersion(texture)<0) { return 0-1; }
+  let table=ux_u32(texture+FramebufferGpuTexture.table);
+  let tableBytes=framebuffer_gpu_table(table);
+  if(tableBytes<0 || capacity>65536 ||
+     !framebuffer_gpu_span(packet,capacity) ||
+     !render_target_separate(texture,FramebufferGpuTexture.size,packet,capacity) ||
+     !render_target_separate(table,tableBytes,packet,capacity) ||
+     !framebuffer_gpu_unused(table,packet,capacity)) { return 0-1; }
+  return GpuTextureTable_draw(table,ux_u32(texture+FramebufferGpuTexture.handle),packet,capacity,vertices,count,shader);
+}
+
+native function FramebufferTexture_gpuDispose(texture:i64) i64 {
+  if(FramebufferTexture_gpuVersion(texture)<0) { return 0-1; }
+  let disposed=GpuTextureTable_dispose(ux_u32(texture+FramebufferGpuTexture.table),ux_u32(texture+FramebufferGpuTexture.handle));
+  if(disposed!=0) { return disposed; }
+  let gone=ux_u32_put(texture+FramebufferGpuTexture.handle,0);
+  return 0;
+}

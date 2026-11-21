@@ -1,0 +1,146 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+#define DRIVER "ujs/tests/framebuffer-texture-gpu-pixel.cx"
+
+static const char *const sources[]={
+    FIX "framebuffer-texture-gpu-base-layout.ujs",BASE "record-copy.ujs",
+    BASE "gpu-packet.ujs",BASE "gpu-target.ujs",BASE "object-layouts.ujs",BASE "eventdispatcher.ujs",
+    BASE "render-target.ujs",BASE "gpu-texture-table.ujs",BASE "framebuffer-texture-gpu.ujs",
+    BASE "framebuffer-texture-gpu-shared.ujs",
+    FIX "framebuffer-texture-gpu-base.ujs",DRIVER,0,
+};
+
+static int dispatcher_layout(const char *path) {
+    unsigned char *raw=0;
+    int64_t length=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&length,32768)) return 1;
+    const char *text=(const char *)raw;
+    const char header[]="struct EventDispatcher {\n";
+    const long start=tx_find(text,length,header,sizeof header-1);
+    const long finish=start<0?-1:tx_find(text+start,length-start,"\n}\n",3);
+    const int failed=finish<0 || sy_write_file(path,text+start,finish+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+static int compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("FRAMEBUFFER_GPU %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int base_wasm(const char *dir,const char *wasm,int prepare,int check) {
+    const char *cache=sy_env("UXE_FRAMEBUFFER_TEXTURE_WASM_CACHE");
+    if(!cache || !cache[0]) {
+        printf("FRAMEBUFFER_GPU cache=missing env=UXE_FRAMEBUFFER_TEXTURE_WASM_CACHE\n");
+        return 1;
+    }
+    char key[65],sha[65],record[640],layout[320];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    const int length=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(length<0 || length>=(int)sizeof record) return 2;
+    const int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("FRAMEBUFFER_GPU cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("FRAMEBUFFER_GPU cache=missing key=%s\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("FRAMEBUFFER_GPU cache=refused key=%s rc=%d\n",key,rc);
+        return 1;
+    }
+    tx_snprintf(layout,sizeof layout,"%s/dispatcher-layout.ujs",dir);
+    if(dispatcher_layout(layout)) return 1;
+    char *args[18]={"./ujs/ujs2wasm.com"};
+    int i=0;
+    while(sources[i] && !tx_eqz(sources[i],DRIVER)) {
+        args[i+1]=tx_eqz(sources[i],BASE "object-layouts.ujs")?layout:(char *)sources[i];
+        i++;
+    }
+    args[i+1]="-o";
+    args[i+2]=(char *)wasm;
+    if(compile(args,"base_prepare",50)) return 1;
+    if(check) {
+        const int mismatch=wasm_test_cache_verify(wasm,sha);
+        printf("FRAMEBUFFER_GPU cache=rebuilt sha=%s failed=%d\n",sha,mismatch!=0);
+        return mismatch;
+    }
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+static double rgba(int r,int g,int b) {
+    return 4278190080.0+r+256*g+65536*b;
+}
+
+static int expected(double *gold) {
+    const double before[]={rgba(60,30,40),rgba(70,30,50),rgba(100,40,40),rgba(110,40,50)};
+    const double after[]={rgba(140,30,40),rgba(150,30,50),rgba(180,40,40),rgba(190,40,50)};
+    const double config[]={2,2,1003,1003,0,1};
+    const double ref_share[]={1,2,2,1,1,1};
+    const double share[]={1,3,0,2,2,-1,1,0,1,0,0};
+    const double owned[]={65537,1,-2,-4,-3,-12,-2,-1,-3,777,1,2,65537,0,-1,-1,-1,-1,0,
+        131073,1,-1,0,1,0,0,0};
+    int at=0;
+    for(int side=0;side<2;side++) {
+        for(int i=0;i<(int)(sizeof config/sizeof config[0]);i++) gold[at++]=config[i];
+        for(int frame=0;frame<4;frame++) {
+            const double *pixels=frame<2?before:after;
+            for(int i=0;i<4;i++) gold[at++]=pixels[i];
+        }
+        if(side==0) for(int i=0;i<(int)(sizeof ref_share/sizeof ref_share[0]);i++) gold[at++]=ref_share[i];
+    }
+    for(int i=0;i<(int)(sizeof owned/sizeof owned[0]);i++) gold[at++]=owned[i];
+    for(int i=0;i<(int)(sizeof share/sizeof share[0]);i++) gold[at++]=share[i];
+    return at;
+}
+
+static int browser_check(const char *dir,const char *wasm,int mutate) {
+    char cwd[420],probe[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd)) return 1;
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/" FIX "framebuffer-texture-gpu-r160.html?dir=%s&mutate=%d",cwd,dir,mutate);
+    char *args[]={"./ujs/ujs2wasm.com",FIX "framebuffer-texture-gpu-probe.ujs","-o",probe,0};
+    enum { count=88 };
+    double gold[count],actual[count]={0};
+    int failed=length<0 || length>=(int)sizeof url || expected(gold)!=count ||
+        base_wasm(dir,wasm,0,0) || compile(args,"probe",6) || r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) if(actual[i]!=gold[i]) {
+        printf("FRAMEBUFFER_GPU case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed=1;
+    }
+    printf("G_PIXEL FramebufferTexture GPU cases=%d failed=%d\n",count,failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !check && !mutate && !(prepare && argc==2)) return 2;
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-framebuffer-gpu-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    int rc=prepare?base_wasm(dir,wasm,1,check):browser_check(dir,wasm,mutate);
+    if(sy_remove_all(dir)) rc=1;
+    if(prepare) printf("FRAMEBUFFER_GPU prepare check=%d failed=%d\n",check,rc!=0);
+    return rc;
+}
