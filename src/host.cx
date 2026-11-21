@@ -6,6 +6,7 @@
 #pragma unisa use sys.hostid
 #pragma unisa use sys.runlaunch
 #pragma unisa use sys.env
+#pragma unisa use compiler.cxscratch
 /* Host file and clock. Inherited fds stay open for the user image. */
 
 void hs_why(char *why, int cap, const char *msg) {
@@ -434,22 +435,13 @@ int hs_forward_exec(const unsigned char *image, long n, char **argv) {
 /* cxmod's injected file callbacks. rd: byte count, -1 only for ENOENT,
    -2 when the buffer fills, -3 for any other open/read/close failure.
    wr replaces the destination by rename so a reader never sees a prefix. */
+static int hs_cxm_lease = -2;
 int hs_cxm_rd(char *path, char *buf, int cap) {
-    int fd;
-    int n;
-    int bad;
-    struct stat st;
-    ssize_t z;
-    int sy_open_read(const char *);
+    int fd, n = 0, bad = 0; struct stat st; ssize_t z; int sy_open_read(const char *);
     if (!path || !buf || cap <= 0) return -3;
     fd = sy_open_read(path);
     if (fd < 0) return fd == -ENOENT ? -1 : -3;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode)) {
-        close(fd);
-        return -3;
-    }
-    n = 0;
-    bad = 0;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode)) { close(fd); return -3; }
     while (n < cap) {
         z = read(fd, buf + n, (size_t)(cap - n));
         if (z < 0 && errno == EINTR) continue;
@@ -457,10 +449,9 @@ int hs_cxm_rd(char *path, char *buf, int cap) {
         if (z == 0) break;
         n = n + (int)z;
     }
-    if (close(fd)) bad = 1;
-    if (bad) return -3;
-    if (n >= cap) return -2;
-    return n;
+    (void)((!bad && n < cap) && (cxscratch_hit(hs_cxm_lease, fd, path), 1));
+    bad |= close(fd) != 0;
+    return bad ? -3 : n >= cap ? -2 : n;
 }
 
 int hs_cxm_wr(char *path, char *buf, int n) {
@@ -521,5 +512,10 @@ int hs_cxm_tmpdir(char *dst, int cap) {
     }
     if (td[i]) return 1;
     dst[i] = 0;
+    (void)((hs_cxm_lease == -2) && (hs_cxm_lease = cxscratch_begin(td)));
+    if (hs_cxm_lease == -EAGAIN) {
+        static const char busy[] = "unisacc: model driver: scratch lease busy\n";
+        (void)hs_cxm_say(2, (char *)busy, sizeof busy - 1); return 1;
+    }
     return 0;
 }

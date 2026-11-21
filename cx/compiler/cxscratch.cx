@@ -1,0 +1,107 @@
+#pragma unisa module cxscratch
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+/* The driver and CX0 use the same directory inode as their advisory lease.
+   Only an exclusive lease can prune; readers hold a shared lease until
+   process exit. No persistent lock file or PID-based eviction is needed. */
+enum { CXS_AGE_S = 86400, CXS_REFRESH_S = 3600, CXS_SCAN_MS = 8, CXS_SCAN_LIMIT = 32768 };
+enum { CXS_SHARED = 1, CXS_EXCLUSIVE = 2, CXS_NOWAIT = 4 };
+
+static int cxs_cache_name(const char *leaf, int include_staging) {
+    static const char header[] = "ua-cxif-";
+    static const char body[] = "ua-bodysrc-";
+    const char *p, *suffix;
+    if (tx_prefixz(leaf,header,sizeof header-1)) { p=leaf+sizeof header-1; suffix=".h"; }
+    else if (tx_prefixz(leaf,body,sizeof body-1)) { p=leaf+sizeof body-1; suffix=".cx"; }
+    else return 0;
+    for (int i=0;i<16;i++,p++) {
+        char c=*p;
+        if (!((c>='0'&&c<='9') || (c>='a'&&c<='f'))) return 0;
+    }
+    long n=tx_len(suffix,4);
+    if (!tx_prefixz(p,suffix,n)) return 0;
+    p+=n;
+    if (!*p) return 1;
+    if (!include_staging || *p++!='.') return 0;
+    /* Host rename staging uses a decimal PID; CX0 no-replace staging
+       uses a six-character mkstemp suffix. */
+    long len=tx_len(p,11);
+    if (len<1 || len>10) return 0;
+    int digits=1;
+    for (long i=0;i<len;i++) {
+        char c=p[i];
+        if (c>='0'&&c<='9') continue;
+        digits=0;
+        if (!((c>='a'&&c<='z') || (c>='A'&&c<='Z'))) return 0;
+    }
+    return digits || len==6;
+}
+
+static void cxs_prune(const char *dir, int fd, const sy_stat_t *locked, long now) {
+    sy_dir_t d;
+    if (now<=CXS_AGE_S || sy_dir_open(&d,dir)) return;
+    long deadline=sy_now_ms()+CXS_SCAN_MS;
+    for (int seen=0;seen<CXS_SCAN_LIMIT;seen++) {
+        if ((seen&63)==0 && sy_now_ms()>=deadline) break;
+        if (sy_dir_next(&d)<=0) break;
+        if (d.kind!='f' || !cxs_cache_name(d.name,1)) continue;
+        char path[1024];
+        sy_stat_t st, root;
+        if (cx_fmt(path,sizeof path,"%s/%s",dir,d.name) || sy_lstat(path,&st) ||
+            st.kind!='f' || st.uid!=(long)sy_uid() || st.mtime>=now-CXS_AGE_S) continue;
+        if (sy_stat(dir,&root) || root.dev!=locked->dev || root.ino!=locked->ino) break;
+        (void)sy_unlinkat(fd,d.name,0);
+    }
+    sy_dir_close(&d);
+}
+
+/* Best effort on filesystems without directory locks. Never prune unless
+   the directory is owned by the caller or is sticky, and group/world write
+   access is protected by the sticky bit. */
+int cxscratch_begin(const char *dir) {
+    char real[512];
+    if (!dir || sy_realpath(dir,real,sizeof real)<0) return -1;
+    int fd=sy_open_read(real);
+    if (fd<0) return -1;
+    sy_stat_t st;
+    if (sy_fstat(fd,&st) || st.kind!='d' || sy_fd_cloexec(fd,1)) {
+        sy_close(fd);return -1;
+    }
+    if ((st.mode&01000) || (st.uid==(long)sy_uid() && !(st.mode&0022))) {
+        if (!sy_flock(fd,CXS_EXCLUSIVE|CXS_NOWAIT)) cxs_prune(real,fd,&st,sy_wall_s());
+    }
+    for (int i=0;i<250;i++) {
+        int rc=sy_flock(fd,CXS_SHARED|CXS_NOWAIT);
+        if (!rc) return fd;
+        if (rc!=-EAGAIN && rc!=-EINTR) { sy_close(fd);return -1; }
+        sy_sleep_ms(2);
+    }
+    sy_close(fd);
+    return -EAGAIN;
+}
+
+/* A successful cache read renews its age at most once per hour. Check the
+   opened inode and its path before refreshing its mtime. */
+void cxscratch_hit(int lease, int fd, const char *path) {
+    if (lease<0 || !path) return;
+    long len=tx_rchr(path,tx_len(path,512),'/');
+    if (len<1 || !cxs_cache_name(path+len+1,0)) return;
+    sy_stat_t root, locked, opened, current;
+    long now=sy_wall_s();
+    if (now<=CXS_REFRESH_S || sy_fstat(fd,&opened) || opened.kind!='f' ||
+        opened.uid!=(long)sy_uid() || opened.mtime>=now-CXS_REFRESH_S) return;
+    char parent[512], real[512];
+    for(long i=0;i<len;i++)parent[i]=path[i];
+    parent[len]=0;
+    if (sy_realpath(parent,real,sizeof real)<0) return;
+    if (sy_stat(real,&root) || sy_fstat(lease,&locked) || root.dev!=locked.dev || root.ino!=locked.ino ||
+        (!(root.mode&01000) && (root.uid!=(long)sy_uid() || (root.mode&0022))) ||
+        sy_lstat(path,&current) ||
+        current.dev!=opened.dev || current.ino!=opened.ino) return;
+    (void)sy_set_mtime(path,now);
+}
