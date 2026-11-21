@@ -257,20 +257,24 @@
 - ~~OrbitControls 正交缩放 | G-ray 居中滚轮、投影矩阵及缩放边界 | 旋转与滚轮。~~ 七项通过，透视半径误作正交缩放转红。
 - ~~OrbitControls 双指捏合 | G-ray 比例、连续样本及范围限制 | 透视缩放。~~ 八项通过，反转捏合从半径 5 变为 20 转红。
 - ~~OrbitControls 与 MapControls 透视触控路由 | G-ray 单双指、取消与指针归属 | 平移、旋转及捏合。~~ 十项通过，忽略触控移动转红。
-- OrbitControls 与 MapControls 宿主接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏和约束 | 透视触控路由与输入 ABI。
+- ~~OrbitControls 与 MapControls 受信输入桥 | G-ray 真时钟 CDP 拖动、平移、捏合和滚轮 | 透视触控路由与输入 ABI。~~ 四场景通过，翻转滚轮转红。
+- OrbitControls 与 MapControls 正式页面接线 | G-ray 部署入口、光标缩放及更多设备组合 | 已通过的受信输入桥。
 - ~~PointerLockControls 事件与相对运动 | G-ray r160 事件、俯仰限制、相对位移及锁定退出 | 输入 ABI。~~ 12 项通过，反向鼠标事件使朝向 X 变号，反例转红。
 - ~~PointerLockControls 真实浏览器锁定探针 | CDP 受信点击、锁定释放以及释放后忽略移动 | 事件与相对运动。~~ Chrome 实测通过，翻转原生锁确认转红。
 - PointerLockControls 正式宿主桥 | CDP 无权限拒绝、锁失效及部署入口 | 真实浏览器锁定探针。
-- TransformControls | G-ray 选轴、吸附、坐标模式与结束事件 | Mesh 拾取与输入 ABI。
+- ~~TransformControls 世界轴平移与旋转 | G-ray 分量、吸附与四元数 | r160 插件。~~ 各十项及两个篡改通过。
+- TransformControls 完整接线 | G-ray 选轴、局部坐标、缩放和结束事件 | 世界轴切片、Mesh 拾取与输入 ABI。
 - MOUSE 与 TOUCH 常量 | G-ray 实际输入路由 | r160 枚举和路由表 13 项通过，MapControls 双指错绑转红。
 
 ## M11 后处理、辅助与音频
 
 - ~~EffectComposer 开启的 Pass 顺序与双目标计划 | G-struct 实际 r160 调度、交换及最后一步输出 | M4 RenderTarget。~~ 12 项通过，交换读写反例转红。
 - ~~EffectComposer 插入和移除 Pass | G-struct 顺序、负下标、计划失效与容量 | Pass 调度。~~ 九项通过，错取最后一个 Pass 转红。
-- EffectComposer GPU 生命周期 | G-pixel 两目标复用、resize、旁路、遮罩与释放 | 调度计划、M4 RenderTarget。
+- ~~EffectComposer GPU 双目标生命周期 | G-pixel 创建、读写交换、回到外部目标、分配回滚与释放 | 调度计划、M4 RenderTarget。~~ 34 项通过，互换角色转红。
+- EffectComposer 调整目标与遮罩 | G-pixel 尺寸调整、旁路、遮罩及上下文恢复 | 双目标生命周期。
 - ~~RenderPass 读目标清屏 | G-pixel EffectComposer 计划、WebGL2 实际清屏、双目标读回 | EffectComposer、M4。~~ 16 项通过，篡改目标交换绿蓝像素使四项红。
-- RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
+- ~~RenderPass 平面场景绘制 | G-pixel 读目标清屏、场景和错误绑定回滚 | 读目标清屏、共享 GPU 批次。~~ 24 项通过，背景色篡改转红。
+- RenderPass 覆盖与复杂材质 | G-pixel 覆盖材质、深度和清屏状态恢复 | 平面场景绘制、共享渲染。
 - ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
 - UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。
 - ~~OutlinePass 边缘与遮挡颜色 | G-pixel 真 r160 中间纹理、深度掩模与颜色对照 | RGBA8 内核。~~ 17 项通过，遮挡边错用可见色转红。
@@ -280,16 +284,16 @@
 - 调色 Pass 完整接线 | G-pixel 色域、曝光与目标格式 | M5 色彩输出、RGBA8 内核及 EffectComposer。
 - ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
 - AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
-- BoxHelper | G-struct 对象世界边界 | Box3 与场景图。
+- BoxHelper 世界包围盒采集与 GPU | G-pixel 对象树边界和 12 边实际读回 | G-struct 世界盒线 15 项与篡改已通过。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
-- CameraHelper | G-struct 视锥与相机变换 | M3 相机。
+- CameraHelper GPU 视锥 | G-pixel 五类颜色和相机物体变换 | G-struct 逆投影视锥 19 项与篡改已通过。
 - DirectionalLightHelper 渲染接线 | G-pixel 光框随目标更新 | G-struct 方向及颜色 14 项与篡改已通过。
 - GridHelper 渲染与资源回收 | G-pixel 分格随对象树变换，G-struct 验证释放后不能提交 | 分格及主轴颜色由 gridhelper-struct.cx 验证通过，依赖场景渲染列表。
 - HemisphereLightHelper 渲染接线 | G-pixel 两色和方向变化 | G-struct 天地分区 19 项与篡改已通过。
 - PlaneHelper 父节点与渲染 | G-pixel 线、面和世界矩阵 | G-struct 默认上方向与平面 15 项及篡改已通过。
 - PointLightHelper 渲染接线 | G-pixel 球线随灯位置与颜色变化 | G-struct 球框和颜色 12 项及篡改已通过。
 - PolarGridHelper 渲染接线 | G-pixel 圆环和辐条随对象变换 | G-struct 圆环与辐条 16 项及篡改已通过。
-- SkeletonHelper | G-struct 骨连接与位姿 | M7 骨骼。
+- SkeletonHelper 骨树与 GPU | G-pixel 骨树采集、位置与着色 | G-struct 骨边 17 项与篡改已通过。
 - SpotLightHelper 渲染接线 | G-pixel 射程、目标和锥角 | G-struct 锥角与目标 16 项及篡改已通过。
 - ~~Helper 固定几何生成 | G-struct 31 行事实表生成、--check 与篡改拒绝 | Plane、DirectionalLight、SpotLight。~~ 生成文件匹配，错件拒绝。
 - AudioContext | G-io 采样率、实例与关闭 | host PCM ABI。
@@ -314,7 +318,8 @@
 - 共享场景消费接口 | G-struct 双路径的变换、可见性、排序与资源计数一致 | 共享绘制清单、GPU 资源。
 - ~~共享场景软件平面绘制 | G-pixel 同源顶点、深度和像素读回 | 共享顶点投影。~~ 六项通过，GPU 16 项回归通过，镜像世界位置反例转红。
 - 软件渲染接线 | G-pixel 纹理采样、混合与排序 | 共享软件平面绘制、共享场景消费接口。
-- GPU 上下文恢复 | G-pixel 实际上下文恢复、旧资源代数拒绝和同机位回读 | 共享场景消费接口、M4 GPU。
+- ~~GPU 上下文恢复控制器 | G-pixel 真实丢失恢复、旧包拒绝、同 ID 目标重建和像素 | M4 GPU。~~ 24 项通过，重用旧代数转红。
+- GPU 上下文恢复自动重建 | G-pixel 产品资源重建、两种后端和部署入口 | 上下文恢复控制器与共享场景。
 - D1 私有迁移 | CDP 实键、战斗及 PCM 终值、开场和三航向对照 | 双路径、音频。
 - D2 私有迁移 | CDP 操舵、三航点、桥宽、岸线和标题倒影 | 双路径。
 - D3 私有迁移 | CDP 拖动滚轮触屏、三位置、停绘反例 | 双路径。
