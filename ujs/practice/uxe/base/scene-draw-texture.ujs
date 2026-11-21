@@ -1,0 +1,55 @@
+struct SceneTextureDraw {
+  stream: u32;
+  uv: u32;
+  uvStride: u32;
+  texture: u32;
+  shader: u32;
+}
+
+// This packet packs post-divide positions, so use affine projections for UV
+// interpolation. Perspective needs homogeneous vertex transport.
+native function SceneDraw_gpuTexture(packet:i64,capacity:i64,draw:i64,binding:i64,vertices:i64,max:i64) i64 {
+  if(gpu_packet_slot(packet,capacity,0)<0 || max<3 || max>2340 ||
+     !gpu_draw_range(binding,SceneTextureDraw.size,packet,capacity) || binding%4!=0 ||
+     !gpu_draw_range(vertices,max*28,packet,capacity) || vertices%4!=0 ||
+     scene_render_overlap(binding,SceneTextureDraw.size,vertices,max*28)) { return 0-1; }
+  let stream=ux_u32(binding+SceneTextureDraw.stream);
+  let uv=ux_u32(binding+SceneTextureDraw.uv);
+  let stride=ux_u32(binding+SceneTextureDraw.uvStride);
+  let texture=ux_u32(binding+SceneTextureDraw.texture);
+  let shader=ux_u32(binding+SceneTextureDraw.shader);
+  if(!scene_render_span(stream,SceneDrawStream.size,4) ||
+     !gpu_draw_range(texture,GpuTextureSource.size,packet,capacity) || texture%4!=0 ||
+     !gpu_draw_range(shader,GpuShaderSource.size,packet,capacity) || shader%4!=0) { return 0-1; }
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  let projection=ux_u32(stream+SceneDrawStream.viewProjection);
+  if(count<3 || count>max || count%3!=0 || stride<8 || stride%4!=0 ||
+     !scene_render_span(projection,128,8) || !scene_render_span(uv,(count-1)*stride+8,4) ||
+     !scene_render_readable(uv,(count-1)*stride+8,vertices,max*28,packet,capacity) ||
+     !scene_render_readable(texture,GpuTextureSource.size,vertices,max*28,packet,capacity) ||
+     !scene_render_readable(shader,GpuShaderSource.size,vertices,max*28,packet,capacity)) { return 0-1; }
+  if(ux_f64(projection+24)!=0.0 || ux_f64(projection+56)!=0.0 || ux_f64(projection+88)!=0.0) { return 0-2; }
+  let width=ux_u32(texture+GpuTextureSource.width);
+  let height=ux_u32(texture+GpuTextureSource.height);
+  if(width<1 || width>4096 || height<1 || height>4096 ||
+     !scene_render_readable(ux_u32(texture+GpuTextureSource.rgba),width*height*4,vertices,max*28,packet,capacity) ||
+     !scene_render_readable(ux_u32(shader+GpuShaderSource.vertex),ux_u32(shader+GpuShaderSource.vertexBytes),vertices,max*28,packet,capacity) ||
+     !scene_render_readable(ux_u32(shader+GpuShaderSource.fragment),ux_u32(shader+GpuShaderSource.fragmentBytes),vertices,max*28,packet,capacity)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let u=ux_f32(uv+i*stride);
+    let v=ux_f32(uv+i*stride+4);
+    if(u-u!=0.0 || v-v!=0.0) { return 0-2; }
+    i=i+1;
+  }
+  let built=SceneDraw_projectPacked(draw,stream,vertices,max);
+  if(built<0) { return built; }
+  i=0;
+  while(i<built) {
+    let savedU=ux_u32_put(vertices+28*i+12,ux_u32(uv+i*stride));
+    let savedV=ux_u32_put(vertices+28*i+16,ux_u32(uv+i*stride+4));
+    i=i+1;
+  }
+  return GpuPacket_drawTexture(packet,capacity,vertices,built,shader,texture);
+}
+
