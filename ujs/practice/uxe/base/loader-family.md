@@ -6,6 +6,14 @@ copy、clone、toJSON 和 dispose 不是这些 r160 Loader 实例的方法。构
 
 调用各类的构造入口（例如 FileLoader_family）时预留并清零 LoaderFamily_size() 字节。manager 为 -1 时选择同基座默认管理器。路径、资源路径和跨域配置借用调用者的字节区。跨域长度的全一值表示默认 anonymous，零长表示显式空字符串。请求头是宿主拥有的字典句柄，零值表示该实例的空字典。宿主需在相关配置和请求生命周期内保留借用数据。
 
-FileLoader 请求把 path 和 URL 字节拼接到调用者的缓冲区，并保存凭据和请求头句柄。宿主据此解析管理器 URL 策略并投递响应。成功后由当前代号读取响应地址和长度，使用完毕再释放。资源路径和跨域字段保留为配置，但不参与 r160 FileLoader 的 Fetch 请求。其余派生类的具体请求转发、宿主句柄解析、缓存以及解码接线属于各自的加载入口。
+FileLoader 请求把 path 和 URL 字节拼接到调用者的缓冲区，并保存凭据和请求头句柄。宿主据此解析管理器 URL 策略并投递响应。成功后由当前代号读取响应地址和长度，使用完毕再释放。资源路径和跨域字段保留为配置，但不参与 r160 FileLoader 的 Fetch 请求。
 
-验证入口为 `sh ./unisacc.com ujs/tests/loader-family-check.cx --`。
+具体解析器共用 LoaderFamily_beginAsync 和 LoaderFamily_receiveAsync。宿主用请求描述发起异步操作，把响应的状态和借用字节按同一代号交回。管理器事件记录传输的完成及错误。解析成功或失败由对应解码入口的返回值交给调用者。只有完成传输的当前代号可进入解析，解码入口在实际调用解析器后即释放响应。解析前的地址拒绝保留响应，调用者可换用正确缓冲区重试，或用 LoaderFamily_releaseAsync 明确释放。
+
+当前解析接线覆盖 AudioLoader 的 WAV 和 MaterialLoader 的基础材质 JSON。类专用入口复用既有解析范围，调用者负责提供输出和暂存区。其他派生类继续使用各自既有解码或解析入口。DataTextureLoader 与 CompressedTextureLoader 的 r160 载入依赖派生类提供数据解析器，CubeTextureLoader 需要六个图像请求的聚合。
+
+验证命令如下。
+
+(1) `sh ./unisacc.com ujs/tests/loader-family-check.cx --` 核对 13 类共同配置和 FileLoader 生命周期。
+
+(2) `sh ./unisacc.com -I ujs/tests ujs/tests/loader-family-async.cx --` 对拍 r160 成功、错误、并发和重试，并校验独立金值。加 `--mutate` 将材质透明度读回替换成粗糙度，预期第 7 项失败。
