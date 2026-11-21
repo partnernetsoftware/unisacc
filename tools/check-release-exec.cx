@@ -156,18 +156,22 @@ static int fake_unisacc(int argc, char **argv) {
     if (argc < 4) return 3;
     /* N4 fixture run cache: keyed by the tool path exactly as passed (as the product keys it) */
     if (argc >= 6 && tx_eqz(argv[4], "--") && (tx_eqz(argv[5], "warm") || tx_eqz(argv[5], "--list-steps"))) {
-        char key[4400]; long i, n = tlen(argv[3]); int existed;
+        char key[4400]; long i, n = tlen(argv[3]); int existed, uncached;
         if (n > 4000) return 3;
         for (i = 0; i < n; i++) key[i] = argv[3][i] == '/' ? '_' : argv[3][i];
         key[n] = 0;
         cx_fmt(q, sizeof q, "%s/fakecache/%s", fdir, key);
         existed = sy_exists(q) == 1;
-        { char nc[4400]; char *skip; int uncached; cx_fmt(nc, sizeof nc, "%s/nocache", fdir);
+        { char nc[4400]; char *skip; cx_fmt(nc, sizeof nc, "%s/nocache", fdir);
           skip = slurp(nc); uncached = skip && tx_eqz(skip, argv[3]); free(skip);
           if (!existed && !uncached && cx_write(q, "compiled\n", 9)) return 3; }
         if (sy_env("UNISACC_RR_TIME")) {
             if (existed) sy_eprintf("RR_TIME\tlookup_hit=2\tns=1\n");
-            else sy_eprintf("RR_TIME\tlookup_hit=0\tns=1\nRR_TIME\toutput\tkind=exec-prepare\tbytes=1\tns=1\n");
+            else if (uncached) {
+                char near[4400]; cx_fmt(near, sizeof near, "%s/warm-near-prefix", fdir);
+                sy_eprintf("RR_TIME\toutput\tkind=%s\tbytes=1\tns=1\n",
+                           sy_exists(near) == 1 ? "exec-prepaXX" : "exec-prepare");
+            } else sy_eprintf("RR_TIME\tlookup_hit=0\tns=1\nRR_TIME\toutput\tkind=exec-prepare\tbytes=1\tns=1\n");
         }
         if (tx_eqz(argv[5], "--list-steps")) { sy_printf("metadata\nzip-members\n"); return 0; }
         return 2;
@@ -557,6 +561,15 @@ static void part_a(void) {
     fixture(99, 0, 0, 1);
     rc = rx("--dry", 0, 0, 0); c = calls();
     ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tDRY_GATES_OK"), "D1.dry-ok");
+    {
+        static const char header[] = "item\ttime\tverdict\tpath_or_ref\tnote\n";
+        char index[4400]; size_t n = 0;
+        cx_fmt(index, sizeof index, "%s/xout/INDEX.tsv", td);
+        char *bytes = cx_read(index, &n);
+        ck(bytes && n >= sizeof header - 1 && !memcmp(bytes, header, sizeof header - 1) &&
+           !memchr(bytes, 0, n), "D1.dry-index-header-no-nul");
+        free(bytes);
+    }
     ck(has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tRATCHETS\tPASS") && has(out, "GATE\t1\tAPE_VERSION\tPASS") && has(out, "GATE\t2\tASSETS\tPASS"), "D1.g1-g2-pass");
     ck(has(out, "CMD\t2\tDRY\tgh -R example/fixture release create v0.0.99 --draft --title 0.0.99 --target 1111111111111111111111111111111111111111") &&
        has(out, "CMD\t3\tDRY\tgh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99") &&
@@ -821,6 +834,11 @@ static void part_w(void) {
     cx_fmt(p, sizeof p, "%s/xout/warm-%s.tsv", td, k2);
     ck(rc == 2 && has(out, "WARM\tTARGET\ttools/release-layout.cx\tMISS\tafter-cold") && has(out, "release-exec: REFUSE RELEASE_EXEC_GATE_WARM 1 target(s) not served from the run cache") &&
        sy_exists(p) == 0, "N4.uncached-compile-refused-no-receipt");
+    put(td, "warm-near-prefix", "1");
+    rc = rxw();
+    ck(rc == 2 && has(out, "WARM\tTARGET\ttools/release-layout.cx\tNOT_PREPARED\tafter-cold"),
+       "N4.lookalike-prepare-marker-is-not-prepared");
+    cx_fmt(p, sizeof p, "%s/warm-near-prefix", td); rmrf(p);
     cx_fmt(p, sizeof p, "%s/nocache", td); rmrf(p);
 }
 static void part_c(void) {
