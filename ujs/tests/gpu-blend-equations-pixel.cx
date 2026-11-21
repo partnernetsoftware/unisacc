@@ -1,0 +1,73 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int equation(int tag,int channel,int alpha) {
+    const int source[]={51,153,102}, destination[]={179,77,128};
+    const int s=source[channel], d=destination[channel];
+    if(tag==103) return s<d?s:d;
+    if(tag==104) return s>d?s:d;
+    const int src=s*alpha, dst=d*173;
+    const int sum=tag==100?src+dst:tag==101?src-dst:dst-src;
+    if(sum<=0) return 0;
+    if(sum>=255*255) return 255;
+    return (sum+127)/255;
+}
+
+static int differs(double value,int expected) {
+    return value!=value || value<expected-1 || value>expected+1;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char prelude[]=
+        "import host_gpu_submit from \"uxe_gpu_v1\" (i64,i64) i64;\n"
+        "export uxe_blend_equation(value:i64,variant:i64) i64 version 1;\n";
+    char dir[220],abi[260],wasm[260],cwd[400],url[760],*out=0;
+    size_t size=0;
+    if(sy_mkdtemp("/tmp","uxe-blend-equations-",dir,sizeof dir) || sy_cwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/fixture.wasm",dir);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-blend-equations-r160.html?wasm=%s&mutate=%d",
+        cwd,wasm,mutate);
+    int failed=sy_write_file(abi,prelude,sizeof prelude-1,0600)!=0;
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-state.ujs",
+        "ujs/practice/uxe/base/gpu-blend-equations-generated.ujs",
+        "ujs/practice/uxe/test/gpu-blend-equations-probe.ujs","-o",wasm,0};
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&out,&size);
+        if(rc) printf("GPU_BLEND_EQUATIONS compile_rc=%d %.*s\n",rc,(int)size,out?out:"");
+        failed=rc!=0;
+        mm_free(out);
+        out=0;
+    }
+    enum { factors=5, variants=2, channels=3, values=factors*variants*channels*2 };
+    double pixels[values]={0};
+    if(!failed && r160_wait_read(url,"#r160",pixels,values,dir)) {
+        printf("GPU_BLEND_EQUATIONS browser_read_failed\n");
+        failed=1;
+    }
+    int checked=0;
+    if(!failed) for(int v=0;v<variants;v++) for(int k=0;k<factors;k++) for(int c=0;c<channels;c++) {
+        const int base=(v*factors+k)*channels*2;
+        const int expected=equation(100+k,c,v?111:64);
+        const double actual=pixels[base+c], reference=pixels[base+channels+c];
+        if(differs(actual,expected) || differs(reference,expected) ||
+           actual-reference>1.0 || reference-actual>1.0) {
+            printf("GPU_BLEND_EQUATIONS tag=%d variant=%d channel=%d actual=%.3f r160=%.3f gold=%d\n",
+                100+k,v,c,actual,reference,expected);
+            failed++;
+        }
+        checked++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&out,&size)) failed++;
+    mm_free(out);
+    printf("GPU_BLEND_EQUATIONS factors=%d samples=%d channels=%d failed=%d\n",factors,variants,checked,failed);
+    return failed!=0;
+}
