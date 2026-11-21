@@ -12,6 +12,8 @@
  *   所以一次接口变更的修复就是 git add 包源后一条 derive.cx -- --write;破坏性变更被 layer-api 拒写,本轮全部还原,rc 2);
  *   outputs 以空格分隔,末尾带 / 的是目录(只管其下一层文件);inputs_glob 以空格分隔,* 匹配任意字符(含 /);
  *   bound_s 为 - 时取 30。每个子进程都经 ./tools/bound bound_s 启动。
+ * --prepare-native: compile the selected native generators into the runner cache without running them.
+ * Native preparation and generator execution have separate deadlines. The manifest bounds execution.
  * --check   只读。order 相同的行并发(最多 4 路),order 小的先跑。生成器 rc 0 记 OK,1 记 DRIFT,142(bound 超时)记 TIMEOUT,其它记 REFUSED。
  * --write   按 order 串行。先快照该行登记的 outputs,生成器非 0 就把本轮已写的全部还原(原本不存在的文件删掉)并 rc 2,其后的行记 NOTRUN;
  *           write_argv 为 - 的行改跑 check_argv,有漂移记 NEEDS_BUMP。只碰清单登记的 outputs。
@@ -29,6 +31,7 @@
  *   新增或删除 tools/ 下文件时加 --index。全量 --check 留给慢车道与 CI。
  * Check: tools/check-derive.cx. */
 #pragma unisa use cxlib.globspan
+#pragma unisa use cxlib.runnerprep
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -159,8 +162,46 @@ static int load(const char *mf) {
     return 0;
 }
 
+static int native_generator(Row *r) {
+    return tx_eqz(r->gen, "tools/chain-phases-gen.cx");
+}
+
+static int prepare_generator(Row *r, char *bin, size_t cap, char *why, size_t whycap) {
+    char root[4400], cache[4400];
+    const char *given = sy_env("UNISACC_DERIVE_NATIVE_CACHE");
+    if (sy_realpath(".", root, sizeof root) < 0 ||
+        (given && *given ? cx_fmt(cache, sizeof cache, "%s", given) :
+         cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir()))) {
+        tx_snprintf(why, whycap, "native-generator-path");
+        return 1;
+    }
+    int rc = sy_mkdir(cache, 0700);
+    if (rc < 0 && rc != -EEXIST) {
+        tx_snprintf(why, whycap, "native-generator-cache rc=%d", rc);
+        return 1;
+    }
+    return rn_prepare(root, r->gen, cache, bin, cap, 0, why, whycap);
+}
+
+static int prepare_selected(void) {
+    int prepared = 0;
+    for (int i = 0; i < nr; i++) {
+        Row *r = &rows[ord[i]];
+        char bin[4400], why[512];
+        if (!r->sel || !native_generator(r)) continue;
+        if (prepare_generator(r, bin, sizeof bin, why, sizeof why)) {
+            sy_printf("DERIVE_PREPARE_REFUSE\t%s\t%s\n", r->name, why);
+            return 2;
+        }
+        prepared++;
+    }
+    sy_printf("DERIVE_PREPARE\tprepared=%d\tno-test-result\n", prepared);
+    return 0;
+}
+
 static int start(Row *r, const char *argv_s) {
     static char buf[600], num[16]; char *v[MAXTOK + 4]; int c = 0; long k = 0, n = tx_len(argv_s, 500);
+    char native[4400], why[512];
     if (!strncmp(argv_s, "query-only ", 11)) { argv_s += 11; n -= 11; }
     mm_copy(buf, sizeof buf, argv_s, n); buf[n] = 0;
     cx_fmt(num, sizeof num, "%d", r->bound);
@@ -172,8 +213,20 @@ static int start(Row *r, const char *argv_s) {
         while (k < n && buf[k] != ' ') k++;
         if (k < n) buf[k++] = 0;
     }
-    v[c] = 0;
     r->cap = 1 << 14; r->out = mm_alloc(r->cap); r->n = 0; r->done = 0; r->rc = -1;
+    if (c >= 6 && native_generator(r) && tx_eqz(v[2], "sh") &&
+        tx_eqz(v[3], "./unisacc.com") && tx_eqz(v[4], r->gen) && tx_eqz(v[5], "--")) {
+        if (prepare_generator(r, native, sizeof native, why, sizeof why)) {
+            r->done = 1; r->rc = 127; r->ms = 0;
+            if (r->out && !cx_fmt(r->out, r->cap, "native-prepare: %s", why))
+                r->n = tx_len(r->out, r->cap);
+            return 1;
+        }
+        v[2] = native;
+        for (int i = 6; i < c; i++) v[i - 3] = v[i];
+        c -= 3;
+    }
+    v[c] = 0;
     r->t0 = sy_now_ms();
     r->pid = sy_spawn_pipe(v, 0, 0, &r->fd, 0);
     if (r->pid < 0 || !r->out) { r->done = 1; r->rc = 127; r->ms = 0; return 1; }
@@ -435,9 +488,10 @@ static void touched_print(void) {
     for (i = 0; i < nr; i++) if (rows[ord[i]].sel) { sy_printf("%s%s", first ? "" : ",", rows[ord[i]].name); first = 0; }
     sy_printf("%s\n", first ? "-" : "");
 }
-static int usage(void) { sy_printf("usage: derive.cx -- --check|--write [--only NAME,...] [--changed PATH...] [--index] [--manifest FILE] [--full] [--input-facts FILE] [--cache-dir DIR] [--touched FILE] [--plan]\n"); return 2; }
+static int usage(void) { sy_printf("usage: derive.cx -- --check|--write [--only NAME,...] [--changed PATH...] [--index] [--manifest FILE] [--full] [--input-facts FILE] [--cache-dir DIR] [--touched FILE] [--plan|--prepare-native]\n"); return 2; }
 
 int main(int argc, char **argv) {
+    int prepare_only = 0;
     const char *mf = "exec/facts/derive.tsv", *only = 0; char **changed = 0; int nchanged = 0, has_changed = 0, index = 0, mode = 0;
     int a, i, rc, plan = 0; const char *fromrun = 0, *touched = 0; long t0 = sy_now_ms();
     for (a = 1; a < argc; a++) {
@@ -447,6 +501,7 @@ int main(int argc, char **argv) {
         else if (seq(argv[a], "--input-facts") && a + 1 < argc) input_facts = argv[++a];
         else if (seq(argv[a], "--write")) mode = 2;
         else if (seq(argv[a], "--plan")) plan = 1;
+        else if (seq(argv[a], "--prepare-native")) prepare_only = 1;
         else if (seq(argv[a], "--touched") && a + 1 < argc) touched = argv[++a];
         else if (seq(argv[a], "--from-run") && a + 1 < argc) fromrun = argv[++a];
         else if (seq(argv[a], "--index")) index = 1;
@@ -501,6 +556,10 @@ int main(int argc, char **argv) {
         if (touched_load(touched)) { sy_printf("REFUSE\ttouched\tunreadable-or-bad-line\t%s\n", touched); return 2; }
         touched_select();
         touched_print();
+    }
+    if (prepare_only) {
+        if (plan || fromrun) return usage();
+        return prepare_selected();
     }
     if (plan) return print_plan(mode);
     if (fromrun) {
