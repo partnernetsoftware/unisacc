@@ -1,0 +1,78 @@
+struct SceneDrawStream {
+  positions: u32;
+  vertexCount: u32;
+  stride: u32;
+  color: u32;
+  viewProjection: u32;
+}
+
+native function draw_project_component(matrix:i64,row:i64,x:f64,y:f64,z:f64,w:f64) f64 {
+  let at=matrix+row*8;
+  return ux_f64(at)*x+ux_f64(at+32)*y+ux_f64(at+64)*z+ux_f64(at+96)*w;
+}
+
+native function draw_project_vertex(position:i64,world:i64,projection:i64,out:i64,write:i64) i64 {
+  let x=ux_f32(position);
+  let y=ux_f32(position+4);
+  let z=ux_f32(position+8);
+  let wx=draw_project_component(world,0,x,y,z,1.0);
+  let wy=draw_project_component(world,1,x,y,z,1.0);
+  let wz=draw_project_component(world,2,x,y,z,1.0);
+  let w=draw_project_component(projection,3,wx,wy,wz,1.0);
+  if(w<=0.0 || w-w!=0.0) { return 0-2; }
+  let axis=0;
+  while(axis<3) {
+    let value=draw_project_component(projection,axis,wx,wy,wz,1.0)/w;
+    if(value-value!=0.0 || value<0.0-1048576.0 || value>1048576.0) { return 0-2; }
+    if(write) { let a=ux_f32_put(out+axis*4,value); }
+    axis=axis+1;
+  }
+  return 0;
+}
+
+// Produce position and constant RGBA in GPU packet vertex format. Nonpositive
+// homogeneous W requires a clip-capable consumer and produces no output.
+native function SceneDraw_projectPacked(draw:i64,stream:i64,out:i64,capacity:i64) i64 {
+  if(!scene_render_span(draw,SceneDrawItem.size,4) || !scene_render_span(stream,SceneDrawStream.size,4) ||
+     capacity<0 || capacity>2340 || !scene_render_span(out,capacity*28,4) ||
+     scene_render_overlap(draw,SceneDrawItem.size,out,capacity*28) ||
+     scene_render_overlap(stream,SceneDrawStream.size,out,capacity*28)) { return 0-1; }
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  let start=ux_u32(stream+SceneDrawStream.positions);
+  let stride=ux_u32(stream+SceneDrawStream.stride);
+  let rgba=ux_u32(stream+SceneDrawStream.color);
+  let world=ux_u32(draw+SceneDrawItem.worldMatrix);
+  let projection=ux_u32(stream+SceneDrawStream.viewProjection);
+  if(count<1 || count>capacity || stride<12 || stride%4!=0 ||
+     !scene_render_span(start,(count-1)*stride+12,4) || !scene_render_span(world,128,8) ||
+     !scene_render_span(projection,128,8) || !scene_render_span(rgba,16,4) ||
+     scene_render_overlap(start,(count-1)*stride+12,out,capacity*28) ||
+     scene_render_overlap(world,128,out,capacity*28) ||
+     scene_render_overlap(projection,128,out,capacity*28) ||
+     scene_render_overlap(rgba,16,out,capacity*28)) { return 0-1; }
+  if(ux_f64(world+24)!=0.0 || ux_f64(world+56)!=0.0 ||
+     ux_f64(world+88)!=0.0 || ux_f64(world+120)!=1.0) { return 0-2; }
+  let channel=0;
+  while(channel<4) {
+    let value=ux_f32(rgba+channel*4);
+    if(value-value!=0.0) { return 0-2; }
+    channel=channel+1;
+  }
+  let i=0;
+  while(i<count) {
+    if(draw_project_vertex(start+i*stride,world,projection,0,0)<0) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let at=out+i*28;
+    let saved=draw_project_vertex(start+i*stride,world,projection,at,1);
+    channel=0;
+    while(channel<4) {
+      let color=ux_u32_put(at+12+channel*4,ux_u32(rgba+channel*4));
+      channel=channel+1;
+    }
+    i=i+1;
+  }
+  return count;
+}
