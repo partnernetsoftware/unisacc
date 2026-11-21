@@ -1,0 +1,265 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const bytes=new Uint8Array([12,24,36,48,60,72,76,88,100,112,124,136,172,184,196,208,220,232]);
+const spare=new Uint8Array(18).fill(33);
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=1;
+  const gl=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  gl.disable(gl.DITHER);
+  return {canvas,gl};
+}
+function fragment(kind) {
+  return `precision highp float;
+uniform highp ${kind===1?"sampler3D":"sampler2DArray"} image;
+out vec4 pixel;
+void main(){pixel=vec4(texture(image,vec3(1.0/6.0,0.25,${kind===1?"1.0/3.0":"1.0"})).r,0.0,0.0,1.0);}`;
+}
+function check(gl,label) {
+  const code=gl.getError();
+  if(code!==gl.NO_ERROR) throw new Error(label+" WebGL error "+code);
+}
+function jsonValues(json) {
+  for(const name of ["flipY","generateMipmaps","premultiplyAlpha"])
+    if(typeof json[name]!=="boolean") throw new Error("JSON boolean "+name);
+  return [Number(json.image==="source-r"),...json.wrap,Number(!Object.hasOwn(json,"wrapR")),
+    Number(json.colorSpace===""),json.mapping,json.channel,json.format,json.type,json.minFilter,json.magFilter,
+    json.anisotropy,Number(json.flipY),Number(json.generateMipmaps),Number(json.premultiplyAlpha),json.unpackAlignment];
+}
+function reference(kind) {
+  const Texture=kind===1?THREE.Data3DTexture:THREE.DataArrayTexture;
+  const source=new Texture(bytes.slice(),3,2,3),dst=new Texture(spare.slice(),3,2,3);
+  if("layerUpdates" in source || "addLayerUpdate" in source) throw new Error("unexpected r160 layer update API");
+  source.source.uuid="source-r";
+  const observed=[];
+  const watch=(object,id,token)=>object.addEventListener("dispose",event=>
+    observed.push(event.target===object && event.type==="dispose"?[id,token]:[-1,-1]));
+  watch(source,17,41);
+  watch(dst,19,43);
+  const values=(object,id)=>{
+    if(kind===1?!object.isData3DTexture:!object.isDataArrayTexture) throw new Error("texture kind");
+    return [id,kind,object.magFilter,object.minFilter,Number(object.flipY),Number(object.generateMipmaps),
+      object.unpackAlignment,object.format,object.wrapR,Number(object.premultiplyAlpha),
+      object.version,object.source.version,Number(object.source===source.source)];
+  };
+  const result=values(source,17);
+  source.format=THREE.RedFormat;
+  source.magFilter=source.minFilter=kind===1?THREE.LinearFilter:THREE.NearestFilter;
+  source.wrapR=THREE.RepeatWrapping;
+  dst.wrapR=THREE.MirroredRepeatWrapping;
+  source.needsUpdate=true;
+  const savedId=dst.id,oldSource=dst.source;
+  dst.copy(source);
+  const clone=source.clone();
+  if(dst.id!==savedId || clone.id===source.id || clone.uuid===source.uuid || dst.source===oldSource ||
+     clone.image!==source.image || dst.image!==source.image) throw new Error("source identity");
+  dst.image.data[6]=80+20*kind;
+  dst.needsUpdate=true;
+  source.flipY=true;
+  source.unpackAlignment=4;
+  source.generateMipmaps=true;
+  source.premultiplyAlpha=true;
+  result.push(...values(source,17),...values(dst,19),...values(clone,21));
+  result.push(...jsonValues(source.toJSON()),...jsonValues(clone.toJSON()));
+  const dispose=(obj,id)=>{
+    const start=observed.length;
+    obj.dispose();
+    result.push(observed.length-start,observed[start]?.[0]??id,observed[start]?.[1]??0);
+  };
+  dispose(source,17);
+  dispose(dst,19);
+  dispose(clone,21);
+  watch(clone,21,47);
+  dispose(clone,21);
+  dispose(clone,21);
+  const {canvas,gl}=context();
+  const renderer=new THREE.WebGLRenderer({canvas,context:gl});
+  renderer.setSize(1,1);
+  const scene=new THREE.Scene(),camera=new THREE.Camera(),geometry=new THREE.PlaneGeometry(2,2);
+  const material=new THREE.RawShaderMaterial({
+    glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false,
+    uniforms:{image:{value:dst}},
+    vertexShader:"in vec3 position;void main(){gl_Position=vec4(position.xy,0.0,1.0);}",
+    fragmentShader:fragment(kind),
+  });
+  const mesh=new THREE.Mesh(geometry,material);
+  mesh.frustumCulled=false;
+  scene.add(mesh);
+  const target=new THREE.WebGLRenderTarget(1,1,{depthBuffer:false}),pixel=new Uint8Array(4);
+  for(const texture of [dst,clone]) {
+    material.uniforms.image.value=texture;
+    renderer.setRenderTarget(target);
+    renderer.render(scene,camera);
+    renderer.readRenderTargetPixels(target,0,0,1,1,pixel);
+    check(gl,"r160 layered sample");
+    result.push(pixel[0]);
+  }
+  renderer.setRenderTarget(null);
+  for(const texture of [dst,clone]) texture.dispose();
+  material.dispose();
+  geometry.dispose();
+  target.dispose();
+  renderer.dispose();
+  source.wrapS=THREE.RepeatWrapping;
+  source.wrapT=THREE.MirroredRepeatWrapping;
+  return {result,profiles:[source.toJSON(),clone.toJSON()]};
+}
+function program(gl,kind) {
+  const vertex=`void main(){
+    vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+    gl_Position=vec4(2.0*p-1.0,0.0,1.0);
+  }`;
+  const program=gl.createProgram();
+  for(const [type,source] of [[gl.VERTEX_SHADER,vertex],[gl.FRAGMENT_SHADER,fragment(kind)]]) {
+    const shader=gl.createShader(type);
+    gl.shaderSource(shader,"#version 300 es\n"+source);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    gl.attachShader(program,shader);
+    gl.deleteShader(shader);
+  }
+  gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  return program;
+}
+function product(wasm,kind) {
+  const run=(op,arg=0)=>Number(wasm.uxe_layer_object(BigInt(op),BigInt(kind),BigInt(arg),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,8192);
+  const data=new Uint8Array(wasm.memory.buffer,base,8192),pixels=4096+kind*128;
+  data.set(bytes,pixels);
+  data.set(spare,pixels+32);
+  data.set(new TextEncoder().encode("source-rsource-x"),5000);
+  if(run(1)!==0) throw new Error("init");
+  const snap=(id)=>{
+    const at=run(2,id);
+    return Array.from({length:13},(_,i)=>heap.getUint32(at+4*i,true));
+  };
+  const result=snap(0);
+  if(run(3)!==0) throw new Error("copy and clone");
+  result.push(...snap(0),...snap(1),...snap(2));
+  for(const id of [0,2]) {
+    const stop=run(4,id);
+    if(stop<=5100) throw new Error("texture JSON "+stop);
+    result.push(...jsonValues(JSON.parse(new TextDecoder().decode(data.subarray(5100,stop)))));
+  }
+  const dispose=(id)=>{
+    const count=run(5,id);
+    result.push(count,heap.getUint32(6400,true),count?heap.getUint32(6408,true):0);
+  };
+  dispose(0);
+  dispose(1);
+  dispose(2);
+  if(run(6)!==512+kind*512+240) throw new Error("add clone listener");
+  dispose(2);
+  dispose(2);
+  if(run(9)!==6480) throw new Error("R8 format unavailable");
+  const format=[0,4,8].map(offset=>heap.getUint32(6480+offset,true));
+  const {gl}=context(),shader=program(gl,kind),target=kind===1?gl.TEXTURE_3D:gl.TEXTURE_2D_ARRAY;
+  gl.useProgram(shader);
+  gl.uniform1i(gl.getUniformLocation(shader,"image"),0);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT,1);
+  for(const id of [1,2]) {
+    const properties=snap(id),at=run(8,id);
+    if(at<0) throw new Error("R8 view unavailable");
+    const [offset,w,h,d]=[4,8,12,16].map(member=>heap.getUint32(at+member,true));
+    const texture=gl.createTexture(),filter=properties[2]===1006?gl.LINEAR:gl.NEAREST;
+    gl.bindTexture(target,texture);
+    gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,filter);
+    gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,filter);
+    for(const axis of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R])
+      gl.texParameteri(target,axis,gl.CLAMP_TO_EDGE);
+    gl.texImage3D(target,0,format[0],w,h,d,0,format[1],format[2],data.subarray(offset,offset+w*h*d));
+    check(gl,"product layered upload");
+    const pixel=new Uint8Array(4);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+    check(gl,"product layered sample");
+    result.push(run(7,id),pixel[0]);
+    gl.deleteTexture(texture);
+  }
+  gl.deleteProgram(shader);
+  for(const op of [8,10,11,12]) {
+    const before=[...snap(0),...snap(2),data[pixels]].join(",");
+    result.push(run(op),Number(before===[...snap(0),...snap(2),data[pixels]].join(",")));
+  }
+  return result;
+}
+function importCheck(wasm,kind,profiles) {
+  const run=(op,arg=0)=>Number(wasm.uxe_layer_object(BigInt(op),BigInt(kind),BigInt(arg),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,8192);
+  const data=new Uint8Array(wasm.memory.buffer,base,8192);
+  const decoder=new TextDecoder(),encoder=new TextEncoder(),loaded=864+kind*512;
+  const source=4096+kind*128;
+  const snap=()=>{
+    const at=run(2,3);
+    return Array.from({length:13},(_,i)=>heap.getUint32(at+4*i,true));
+  };
+  const exported=()=>{
+    const end=run(4,3);
+    if(end<=5100) throw new Error("loaded JSON export");
+    return decoder.decode(data.subarray(5100,end));
+  };
+  const load=text=>{
+    const bytes=encoder.encode(text);
+    data.set(bytes,6840);
+    try { return run(14,bytes.length); }
+    catch(error) { throw new Error("field import "+text.slice(0,90)+" "+error.stack); }
+  };
+  if(run(13)!==loaded) throw new Error("load target init");
+  const result=[];
+  for(const profile of [...profiles,{}]) {
+    result.push(Number(load(JSON.stringify(profile))===loaded));
+    const text=exported();
+    result.push(...jsonValues(JSON.parse(text)),...snap());
+    result.push(Number(load(text)===loaded),Number(text===exported()));
+  }
+  // Keep a nondefault state so any partial failed write is visible.
+  if(load(JSON.stringify(profiles[0]))!==loaded) throw new Error("reload import fixture");
+  const invalid=[
+    {...profiles[0],image:"unbound-source"},
+    {...profiles[0],image:12},
+    {...profiles[0],wrap:[1001]},
+    {...profiles[0],wrap:[1000,1001,1002]},
+    {...profiles[0],wrap:[1000,1001.25]},
+    {...profiles[0],format:1024},
+    {...profiles[0],minFilter:1003.25},
+    {...profiles[0],flipY:1},
+    {...profiles[0],unpackAlignment:3},
+    {...profiles[0],colorSpace:"srgb"},
+    {...profiles[0],mapping:301},
+  ].map(value=>JSON.stringify(value));
+  invalid.push(JSON.stringify(profiles[0])+"false","[]",
+    '{"image":"source-r","\\u0069mage":"unbound-source"}');
+  const stable=()=>JSON.stringify([exported(),snap(),data[source+6]]);
+  for(const text of invalid) {
+    const before=stable();
+    result.push(load(text),Number(before===stable()));
+  }
+  const repeated=JSON.stringify(profiles[0]);
+  let accepted=0;
+  for(let i=0;i<256;i++) accepted+=Number(load(repeated)===loaded);
+  result.push(accepted);
+  return result;
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision mismatch");
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const result=[];
+  const imports=[];
+  for(const kind of [1,2]) {
+    const ref=reference(kind);
+    result.push(...product(wasm,kind),...ref.result);
+    imports.push(...importCheck(wasm,kind,ref.profiles));
+  }
+  result.push(...imports);
+  output.textContent=JSON.stringify(result);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

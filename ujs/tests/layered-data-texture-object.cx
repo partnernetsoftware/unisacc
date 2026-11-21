@@ -1,0 +1,133 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+enum { existing_count=424, import_count=250, count=existing_count+import_count };
+
+static int select_layouts(const char *file) {
+    const char *names[]={"struct EventDispatcher {","struct Source {"};
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&bytes,20000)) return 1;
+    const char *text=(const char *)raw;
+    char selected[512];
+    int used=0,failed=0;
+    for(int i=0;i<2;i++) {
+        const long start=tx_find(text,bytes,names[i],tx_len(names[i],30));
+        const long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+        if(end<0) { failed=1; break; }
+        const int written=tx_snprintf(selected+used,sizeof selected-used,"%.*s",(int)end+3,text+start);
+        if(written<0 || written>=(int)sizeof selected-used) { failed=1; break; }
+        used+=written;
+    }
+    mm_free(raw);
+    return failed || sy_write_file(file,selected,used,0600);
+}
+
+static int expected_existing(double *gold) {
+    const int events[]={1,17,41, 1,19,43, 0,21,0, 1,21,47, 1,21,47};
+    int at=0;
+    for(int kind=1;kind<=2;kind++) {
+        const int f=kind==1?1006:1003;
+        const int pixel=kind==1?56:120;
+        const int states[][13]={
+            {17,kind,1003,1003,0,0,1,1023,1001,0,0,0,1},
+            {17,kind,f,f,1,1,4,1028,1000,1,1,4,1},
+            {19,kind,f,f,0,0,1,1028,1002,0,2,4,1},
+            {21,kind,f,f,0,0,1,1028,1001,0,1,4,1},
+        };
+        const int json[][16]={
+            {1,1001,1001,1,1,300,0,1028,1009,f,f,1,1,1,1,4},
+            {1,1001,1001,1,1,300,0,1028,1009,f,f,1,0,0,0,1},
+        };
+        for(int side=0;side<2;side++) {
+            for(int state=0;state<4;state++) for(int i=0;i<13;i++) gold[at++]=states[state][i];
+            for(int obj=0;obj<2;obj++) for(int i=0;i<16;i++) gold[at++]=json[obj][i];
+            for(int i=0;i<15;i++) gold[at++]=events[i];
+            for(int i=0;i<(side==0?4:2);i++) gold[at++]=pixel;
+            if(side==0) for(int i=0;i<4;i++) {
+                gold[at++]=-1;
+                gold[at++]=1;
+            }
+        }
+    }
+    return at;
+}
+
+static int expected_import(double *gold) {
+    int at=0;
+    for(int kind=1;kind<=2;kind++) {
+        const int f=kind==1?1006:1003;
+        const int states[][13]={
+            {25,kind,f,f,1,1,4,1028,1002,1,0,4,1},
+            {25,kind,f,f,0,0,1,1028,1002,0,0,4,1},
+            {25,kind,1003,1003,0,0,1,1023,1002,0,0,4,1},
+        };
+        const int json[][16]={
+            {1,1000,1002,1,1,300,0,1028,1009,f,f,1,1,1,1,4},
+            {1,1001,1001,1,1,300,0,1028,1009,f,f,1,0,0,0,1},
+            {1,1001,1001,1,1,300,0,1023,1009,1003,1003,1,0,0,0,1},
+        };
+        for(int obj=0;obj<3;obj++) {
+            gold[at++]=1;
+            for(int i=0;i<16;i++) gold[at++]=json[obj][i];
+            for(int i=0;i<13;i++) gold[at++]=states[obj][i];
+            gold[at++]=1;
+            gold[at++]=1;
+        }
+        for(int i=0;i<14;i++) {
+            gold[at++]=-1;
+            gold[at++]=1;
+        }
+        gold[at++]=256;
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    int mutate=0;
+    if(argc==2 && tx_eqz(argv[1],"--mutate")) mutate=1;
+    if(argc==2 && tx_eqz(argv[1],"--mutate-import")) mutate=2;
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],layout[320],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-layer-object-",dir,sizeof dir)) return 2;
+    tx_snprintf(layout,sizeof layout,"%s/layout.ujs",dir);
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/layers.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "layered-data-texture-object-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char signature[]="export uxe_layer_object(op:i64,kind:i64,arg:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,layout,BASE "record-copy.ujs",BASE "source.ujs",BASE "eventdispatcher.ujs",
+        BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "loaderutils.ujs",BASE "json-string-decode.ujs",
+        BASE "material-field-json.ujs",
+        BASE "webgl-utils-format.ujs",BASE "webgl-utils-generated.ujs",
+        BASE "layered-data-texture.ujs",BASE "layered-data-texture-object.ujs",BASE "layered-data-texture-object-json.ujs",
+        BASE "layered-data-texture-object-read.ujs",
+        FIX "layered-data-texture-object-probe.ujs","-o",wasm,0};
+    double gold[count],actual[count]={0};
+    int failed=length<=0 || length>=(int)sizeof url || expected_existing(gold)!=existing_count ||
+        expected_import(gold+existing_count)!=import_count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600) || select_layouts(layout);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("LAYER_OBJECT compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("LAYER_OBJECT case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT Data3DTexture/DataArrayTexture public cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

@@ -1,0 +1,192 @@
+// This traversal uses the scalar and string scanner with a scratch-backed
+// grammar stack. Repeated imports keep runtime heap usage constant.
+native function layer_json_value(at:i64,end:i64,stack:i64) i64 {
+  let top=ux_u8_put(stack,4);
+  let depth=0;
+  let p=at;
+  while(p>=0) {
+    let state=ux_u8(stack+depth);
+    if(depth==0 && state==0) { return p; }
+    p=json_space(p,end);
+    if(p<0 || p>=end) { return 0-1; }
+    let byte=ux_u8(p);
+    if(((state==1 || state==5) && byte==125) ||
+       ((state==6 || state==8) && byte==93)) {
+      depth=depth-1;
+      p=p+1;
+    } else if(state==1 || state==2) {
+      p=json_scan_string(p,end);
+      let next=ux_u8_put(stack+depth,3);
+    } else if(state==3) {
+      if(byte!=58) { return 0-1; }
+      let next=ux_u8_put(stack+depth,4);
+      p=p+1;
+    } else if(state==5 || state==8) {
+      if(byte!=44) { return 0-1; }
+      let next=2;
+      if(state==8) { next=7; }
+      let set=ux_u8_put(stack+depth,next);
+      p=p+1;
+    } else {
+      let next=0;
+      if(depth>0 && state==4) { next=5; }
+      if(depth>0 && state!=4) { next=8; }
+      let set=ux_u8_put(stack+depth,next);
+      if(byte==123 || byte==91) {
+        if(depth==15) { return 0-1; }
+        depth=depth+1;
+        next=1;
+        if(byte==91) { next=6; }
+        let push=ux_u8_put(stack+depth,next);
+        p=p+1;
+      } else if(byte==34) { p=json_scan_string(p,end); }
+      else { p=json_scalar_end(p,end); }
+    }
+  }
+  return 0-1;
+}
+
+native function layer_json_word(at:i64,bytes:i64) i64 {
+  let word=0;
+  while(bytes>0) {
+    bytes=bytes-1;
+    word=word*256+ux_u8(at+bytes);
+  }
+  return word;
+}
+
+// Slot addresses form the field projection used by the JSON writer.
+native function layer_json_slot(at:i64,bytes:i64) i64 {
+  let count=bytes;
+  if(count>8) { count=8; }
+  let first=layer_json_word(at,count);
+  let tail=layer_json_word(at+count,bytes-count);
+  if(bytes==5 && first==435526135145) { return 0; } // image
+  if(bytes==4 && first==1885434487) { return 4; } // wrap
+  if(bytes==10 && first==7021203570031357795 && tail==25955) { return 8; } // colorSpace
+  if(bytes==7 && first==29113321738232173) { return 12; } // mapping
+  if(bytes==7 && first==30510822457436259) { return 16; } // channel
+  if(bytes==4 && first==1701869940) { return 20; } // type
+  if(bytes==10 && first==8030609107581496929 && tail==31088) { return 24; } // anisotropy
+  if(bytes==6 && first==127961796865894) { return 28; } // format
+  if(bytes==9 && first==7310587294538164589 && tail==114) { return 32; } // minFilter
+  if(bytes==9 && first==7310587294537703789 && tail==114) { return 36; } // magFilter
+  if(bytes==5 && first==384138046566) { return 40; } // flipY
+  if(bytes==15 && first==7310575239085057383 && tail==32493186071947597) { return 44; } // generateMipmaps
+  if(bytes==16 && first==7598817722883207792 && tail==7018983629514173552) { return 48; } // premultiplyAlpha
+  if(bytes==15 && first==7800634104163102325 && tail==32772479205140329) { return 52; } // unpackAlignment
+  return 0-1;
+}
+
+native function layer_json_index(at:i64,end:i64,scratch:i64) i64 {
+  let i=0;
+  while(i<56) {
+    let clear=ux_u32_put(scratch+i,0);
+    i=i+4;
+  }
+  let p=json_space(at,end);
+  if(p>=end || ux_u8(p)!=123) { return 0-1; }
+  p=json_space(p+1,end);
+  if(p<end && ux_u8(p)==125) { return json_space(p+1,end)==end; }
+  while(p>=0 && p<end) {
+    let keyEnd=json_scan_string(p,end);
+    if(keyEnd<0) { return 0-1; }
+    let bytes=Json_decodeString(p,keyEnd,scratch+80,16);
+    if(bytes<0 && bytes!=0-3) { return 0-1; }
+    let colon=json_space(keyEnd,end);
+    if(colon<0 || colon>=end || ux_u8(colon)!=58) { return 0-1; }
+    let value=json_space(colon+1,end);
+    let next=layer_json_value(value,end,scratch+56);
+    if(next<0) { return 0-1; }
+    if(bytes>=0) {
+      let slot=layer_json_slot(scratch+80,bytes);
+      if(slot>=0) { let save=ux_u32_put(scratch+slot,value); }
+    }
+    p=json_space(next,end);
+    if(p<0 || p>=end) { return 0-1; }
+    if(ux_u8(p)==125) { return json_space(p+1,end)==end; }
+    if(ux_u8(p)!=44) { return 0-1; }
+    p=json_space(p+1,end);
+  }
+  return 0-1;
+}
+
+native function layer_json_wrap(pair:i64,end:i64) i64 {
+  if(pair==0) { return 1001*2048+1001; }
+  if(ux_u8(pair)!=91) { return 0-1; }
+  let first=json_space(pair+1,end);
+  let comma=json_space(json_scalar_end(first,end),end);
+  if(comma<0 || comma>=end || ux_u8(comma)!=44) { return 0-1; }
+  let second=json_space(comma+1,end);
+  let close=json_space(json_scalar_end(second,end),end);
+  if(close<0 || close>=end || ux_u8(close)!=93) { return 0-1; }
+  let s=json_read_number(first,end);
+  let t=json_read_number(second,end);
+  if((s!=1000.0 && s!=1001.0 && s!=1002.0) ||
+     (t!=1000.0 && t!=1001.0 && t!=1002.0)) { return 0-1; }
+  return f64_floor_i64(s)*2048+f64_floor_i64(t);
+}
+
+native function layer_json_number(value:i64,end:i64,fallback:f64) f64 {
+  if(value==0) { return fallback; }
+  return json_read_number(value,end);
+}
+
+native function layer_json_flag(value:i64) i64 {
+  if(value==0 || ux_u8(value)==102) { return 0; }
+  if(ux_u8(value)==116) { return 1; }
+  return 0-1;
+}
+
+native function layer_json_image(image:i64,end:i64,uuid:i64,bytes:i64,decode:i64) i64 {
+  if(image==0) { return 1; }
+  if(Json_decodeString(image,end,decode,bytes)!=bytes) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(decode+i)!=ux_u8(uuid+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Source, identity, version and events remain owned by the caller.
+native function LayeredTextureObject_readJSON(at:i64,begin:i64,end:i64,uuid:i64,bytes:i64,scratch:i64) i64 {
+  if(!layer_obj_valid(at) || begin<0 || end<=begin || end>6291456 ||
+     bytes<1 || bytes>1024 || uuid<0 || uuid>6291456-bytes ||
+     !layer_obj_span(scratch,1104) || scratch%8!=0 ||
+     !layer_obj_split(at,LayeredTextureObject.size,begin,end-begin) ||
+     !layer_obj_split(at,LayeredTextureObject.size,scratch,1104) ||
+     !layer_obj_split(at,LayeredTextureObject.size,uuid,bytes) ||
+     !layer_obj_split(begin,end-begin,scratch,1104) ||
+     !layer_obj_split(uuid,bytes,scratch,1104)) { return 0-1; }
+  let source=ux_u32(at+LayeredTextureObject.source);
+  let dispatcher=ux_u32(at+LayeredTextureObject.dispatcher);
+  if(!layer_obj_source_space(source,scratch,1104) ||
+     !layer_obj_event_space(scratch,1104,dispatcher,source) ||
+     layer_json_index(begin,end,scratch)!=1 ||
+     !layer_json_image(ux_u32(scratch),end,uuid,bytes,scratch+80)) { return 0-1; }
+  let space=ux_u32(scratch+8);
+  if(space!=0 && Json_stringBytes(space,end)!=0) { return 0-1; }
+  let mapping=layer_json_number(ux_u32(scratch+12),end,300.0);
+  let channel=layer_json_number(ux_u32(scratch+16),end,0.0);
+  let kind=layer_json_number(ux_u32(scratch+20),end,1009.0);
+  let anisotropy=layer_json_number(ux_u32(scratch+24),end,1.0);
+  let format=layer_json_number(ux_u32(scratch+28),end,1023.0);
+  let min=layer_json_number(ux_u32(scratch+32),end,1003.0);
+  let mag=layer_json_number(ux_u32(scratch+36),end,1003.0);
+  let flip=layer_json_flag(ux_u32(scratch+40));
+  let mips=layer_json_flag(ux_u32(scratch+44));
+  let alpha=layer_json_flag(ux_u32(scratch+48));
+  let alignment=layer_json_number(ux_u32(scratch+52),end,1.0);
+  let wrap=layer_json_wrap(ux_u32(scratch+4),end);
+  if(mapping!=300.0 || channel!=0.0 || kind!=1009.0 || anisotropy!=1.0 ||
+     (format!=1023.0 && format!=1028.0) || (min!=1003.0 && min!=1006.0) ||
+     (mag!=1003.0 && mag!=1006.0) || flip<0 || mips<0 || alpha<0 ||
+     (alignment!=1.0 && alignment!=2.0 && alignment!=4.0 && alignment!=8.0) || wrap<0) { return 0-1; }
+  let a=ux_u32_put(at+LayeredTextureObject.format,f64_floor_i64(format));
+  let b=ux_u32_put(at+LayeredTextureObject.minFilter,f64_floor_i64(min));
+  let c=ux_u32_put(at+LayeredTextureObject.magFilter,f64_floor_i64(mag));
+  let d=ux_u32_put(at+LayeredTextureObject.wrapS,wrap/2048);
+  let e=ux_u32_put(at+LayeredTextureObject.wrapT,wrap%2048);
+  return LayeredTextureObject_unpack(at,flip,f64_floor_i64(alignment),mips,alpha);
+}
