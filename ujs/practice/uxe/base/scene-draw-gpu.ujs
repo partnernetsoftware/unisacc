@@ -1,0 +1,30 @@
+// Encode one unindexed flat triangle draw from the shared scene list.
+// The scratch vertex stream is disposable; packet counters advance only
+// when projection and GPU command packing both succeed.
+native function SceneDraw_gpuFlat(packet:i64,capacity:i64,draw:i64,stream:i64,vertices:i64,maxVertices:i64,shader:i64) i64 {
+  if(packet<0 || packet%4!=0 || capacity<GpuPacket.size || capacity>65536 || packet>6291456-capacity ||
+     draw%4!=0 || stream%4!=0 || maxVertices<3 || maxVertices>2340 ||
+     !gpu_draw_range(draw,SceneDrawItem.size,packet,capacity) ||
+     !gpu_draw_range(stream,SceneDrawStream.size,packet,capacity) ||
+     !gpu_draw_range(vertices,maxVertices*28,packet,capacity) ||
+     !gpu_draw_range(shader,GpuShaderSource.size,packet,capacity) ||
+     scene_render_overlap(vertices,maxVertices*28,shader,GpuShaderSource.size)) { return 0-1; }
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  let stride=ux_u32(stream+SceneDrawStream.stride);
+  if(count<3 || count>maxVertices || count%3!=0 ||
+     !gpu_draw_range(ux_u32(stream+SceneDrawStream.positions),(count-1)*stride+12,packet,capacity) ||
+     !gpu_draw_range(ux_u32(stream+SceneDrawStream.color),16,packet,capacity) ||
+     !gpu_draw_range(ux_u32(stream+SceneDrawStream.viewProjection),128,packet,capacity) ||
+     !gpu_draw_range(ux_u32(draw+SceneDrawItem.worldMatrix),128,packet,capacity)) { return 0-1; }
+  let vs=ux_u32(shader+GpuShaderSource.vertex);
+  let vn=ux_u32(shader+GpuShaderSource.vertexBytes);
+  let fs=ux_u32(shader+GpuShaderSource.fragment);
+  let fn=ux_u32(shader+GpuShaderSource.fragmentBytes);
+  if(vn<1 || vn>4096 || fn<1 || fn>4096 ||
+     !gpu_draw_range(vs,vn,packet,capacity) || !gpu_draw_range(fs,fn,packet,capacity) ||
+     scene_render_overlap(vertices,maxVertices*28,vs,vn) ||
+     scene_render_overlap(vertices,maxVertices*28,fs,fn)) { return 0-1; }
+  let built=SceneDraw_projectPacked(draw,stream,vertices,maxVertices);
+  if(built<0) { return built; }
+  return GpuPacket_draw(packet,capacity,vertices,built,shader);
+}
