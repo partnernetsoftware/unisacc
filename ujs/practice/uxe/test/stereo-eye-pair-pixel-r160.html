@@ -1,0 +1,169 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Stereo 双眼像素验收</title>
+<pre id="result">pending</pre>
+<script type="module">
+import { BufferGeometry,Float32BufferAttribute,Mesh,MeshBasicMaterial,PerspectiveCamera,
+  REVISION,Scene,StereoCamera,WebGLRenderer } from "../../web/game/three.module.js";
+
+const output=document.querySelector("#result"),query=new URLSearchParams(location.search),size=32;
+const meshes=[
+  {layer:0, rgb:[0,1,0], color:0x00ff00, xyz:[-.82,-1.56,-4,.83,-1.56,-4,.07,-.39,-4]},
+  {layer:1, rgb:[1,0,0], color:0xff0000, xyz:[-1.64,.22,-4,-.38,.22,-4,-.98,1.52,-4]},
+  {layer:2, rgb:[0,0,1], color:0x0000ff, xyz:[.42,.20,-4,1.68,.20,-4,1.02,1.49,-4]},
+];
+function canvas() {
+  const el=document.createElement("canvas");
+  el.width=el.height=size;
+  return el;
+}
+function pixels(gl) {
+  const array=new Uint8Array(size*size*4);
+  gl.readPixels(0,0,size,size,gl.RGBA,gl.UNSIGNED_BYTE,array);
+  if(gl.getError()!==gl.NO_ERROR) throw new Error("双眼像素读回失败");
+  return array;
+}
+function fixtureRenderer() {
+  const gl=canvas().getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("缺少 WebGL2");
+  function compile(type,text) {
+    const shader=gl.createShader(type);
+    gl.shaderSource(shader,text);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+    return shader;
+  }
+  const v=compile(gl.VERTEX_SHADER,"#version 300 es\nin vec3 position;uniform mat4 vp;void main(){gl_Position=vp*vec4(position,1.0);}");
+  const f=compile(gl.FRAGMENT_SHADER,"#version 300 es\nprecision highp float;uniform vec3 tint;out vec4 color;void main(){color=vec4(tint,1.0);}");
+  const program=gl.createProgram();
+  gl.attachShader(program,v); gl.attachShader(program,f); gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  gl.detachShader(program,v); gl.detachShader(program,f);
+  gl.deleteShader(v); gl.deleteShader(f);
+  const vao=gl.createVertexArray(),vertex=gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER,vertex);
+  gl.bufferData(gl.ARRAY_BUFFER,Float32Array.from(meshes.flatMap(mesh=>mesh.xyz)),gl.STATIC_DRAW);
+  const position=gl.getAttribLocation(program,"position");
+  gl.vertexAttribPointer(position,3,gl.FLOAT,false,0,0);
+  gl.enableVertexAttribArray(position);
+  const matrix=gl.getUniformLocation(program,"vp"),color=gl.getUniformLocation(program,"tint");
+  gl.viewport(0,0,size,size);
+  return {
+    draw(view,mask) {
+      gl.clearColor(0,0,0,1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      if(mask) {
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(matrix,false,Float32Array.from(view));
+        meshes.forEach((mesh,i)=>{
+          if(mask & (1<<mesh.layer)) {
+            gl.uniform3fv(color,mesh.rgb);
+            gl.drawArrays(gl.TRIANGLES,i*3,3);
+          }
+        });
+      }
+      return pixels(gl);
+    },
+    release() {
+      gl.useProgram(null);
+      gl.bindVertexArray(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER,null);
+      gl.deleteProgram(program);
+      gl.deleteVertexArray(vao);
+      gl.deleteBuffer(vertex);
+      return Number(!gl.isProgram(program) && !gl.isVertexArray(vao) && !gl.isBuffer(vertex));
+    },
+  };
+}
+function referenceRenderer() {
+  const scene=new Scene(),renderer=new WebGLRenderer({canvas:canvas(),antialias:false,preserveDrawingBuffer:true});
+  renderer.setClearColor(0x000000,1);
+  renderer.setSize(size,size,false);
+  const mono=new PerspectiveCamera(90,1,1,11);
+  mono.focus=10;
+  mono.updateMatrixWorld();
+  const stereo=new StereoCamera();
+  stereo.eyeSep=1;
+  stereo.update(mono);
+  const eyes=[stereo.cameraL,stereo.cameraR];
+  for(const eye of eyes) {
+    eye.matrixWorldAutoUpdate=false;
+    eye.matrixWorldInverse.copy(eye.matrixWorld).invert();
+    eye.projectionMatrixInverse.copy(eye.projectionMatrix).invert();
+  }
+  let releases=0;
+  const objects=meshes.map(mesh=>{
+    const geometry=new BufferGeometry().setAttribute("position",new Float32BufferAttribute(mesh.xyz,3));
+    const material=new MeshBasicMaterial({color:mesh.color,toneMapped:false});
+    for(const resource of [geometry,material]) resource.addEventListener("dispose",()=>releases++);
+    const object=new Mesh(geometry,material);
+    object.layers.set(mesh.layer);
+    scene.add(object);
+    return object;
+  });
+  return {
+    draw(i) {
+      renderer.render(scene,eyes[i]);
+      return pixels(renderer.getContext());
+    },
+    clear() {
+      for(const object of objects) {
+        scene.remove(object);
+        object.geometry.dispose();
+        object.material.dispose();
+      }
+      return releases;
+    },
+    release() { renderer.dispose(); },
+  };
+}
+function diff(a,b) {
+  let count=0;
+  for(let i=0;i<a.length;i+=4) if(a[i]!==b[i]||a[i+1]!==b[i+1]||a[i+2]!==b[i+2]||a[i+3]!==b[i+3]) count++;
+  return count;
+}
+function chroma(array) {
+  let r=0,g=0,b=0,gx=0;
+  for(let i=0;i<array.length;i+=4) {
+    if(array[i]) r++;
+    if(array[i+1]) { g++; gx+=i/4%size; }
+    if(array[i+2]) b++;
+  }
+  return {r,g,b,gx};
+}
+const black=array=>array.every((value,i)=>value===(i%4===3?255:0));
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const url=query.get("wasm");
+  if(!url) throw new Error("验收缺少 Wasm 路径");
+  const response=await fetch(url);
+  if(!response.ok) throw new Error("无法读取 Stereo Wasm");
+  const {instance}=await WebAssembly.instantiate(await response.arrayBuffer());
+  const {memory,uxe_stereo_pair_render}=instance.exports;
+  if(uxe_stereo_pair_render(query.get("mutate")==="1"?1n:0n)!==0n) throw new Error("双眼快照初始化失败");
+  const base=2097152,regions=[7680,8000];
+  const views=regions.map(at=>new Float64Array(memory.buffer,base+at,16));
+  const layers=regions.map(at=>new Uint32Array(memory.buffer,base+at+128,2));
+  const snapshots=regions.map(at=>new Uint8Array(memory.buffer,base+at,136));
+  const actual=fixtureRenderer(),oracle=referenceRenderer();
+  const left=actual.draw(views[0],layers[0][0]),right=actual.draw(views[1],layers[1][0]);
+  const before=diff(left,oracle.draw(0))+diff(right,oracle.draw(1));
+  const l=chroma(left),r=chroma(right);
+  const saved=snapshots.map(bytes=>bytes.slice());
+  const released=Number(uxe_stereo_pair_render(2n)===0n);
+  const statuses=[uxe_stereo_pair_render(3n),uxe_stereo_pair_render(4n)];
+  const unchanged=Number(saved.every((array,i)=>array.every((value,j)=>value===snapshots[i][j])));
+  const blank=views.map((view,i)=>actual.draw(view,statuses[i]<0n?0:layers[i][0]));
+  const events=oracle.clear();
+  const after=diff(blank[0],oracle.draw(0))+diff(blank[1],oracle.draw(1));
+  const gpuReleased=actual.release();
+  oracle.release();
+  output.textContent=JSON.stringify([
+    size*size*4,before,after,layers[0][0],layers[1][0],layers[0][1]+layers[1][1],
+    Number(l.r>0&&l.g>0&&l.b===0),Number(r.b>0&&r.g>0&&r.r===0),Number(l.g&&r.g&&l.gx*r.g>r.gx*l.g),
+    released,Number(statuses.every(status=>status===-1n)),unchanged,Number(blank.every(black)),gpuReleased,events,
+  ]);
+} catch(error) { output.textContent="error:"+error.message; }
+</script>

@@ -1,0 +1,27 @@
+// The render snapshot stores a column-major f64 view-projection matrix,
+// the scene layer mask and a reserved zero word.
+native function StereoCamera_eyeRender(pair:i64,eye:i64,dst:i64) i64 {
+  let record=StereoCamera_pairEye(pair,eye);
+  if(record<0 || dst<0 || dst%8!=0 || dst>6291456-136) { return 0-1; }
+  let stereo=ux_u32(pair+StereoEyePair.stereo);
+  let arena=ux_u32(pair+StereoEyePair.arena);
+  let eyes=ux_u32(pair+StereoEyePair.records);
+  let span=stereo_pair_ranges(pair,stereo,arena,eyes);
+  if(span<0 || Camera_blocksOverlap(dst,136,pair,StereoEyePair.size) ||
+     Camera_blocksOverlap(dst,136,eyes,1408) || Camera_blocksOverlap(dst,136,arena,span) ||
+     Camera_blocksOverlap(dst,136,stereo,StereoCamera.size)) { return 0-1; }
+  let i=0;
+  while(i<4) {
+    let src=ux_u32(stereo+StereoCamera.leftProjection+i*4);
+    if(Camera_blocksOverlap(dst,136,src,128)) { return 0-1; }
+    i=i+1;
+  }
+  let node=Object3D_address(arena,StereoCamera_pairNode(pair,eye));
+  if(node<0 || !stereo_pair_node_ready(node)) { return 0-1; }
+  let camera=ux_u32(record+StereoEyeRecord.camera);
+  let combined=Matrix4_multiplyMatrices(dst,
+    ux_u32(camera+Camera.projectionMatrix),ux_u32(camera+Camera.matrixWorldInverse));
+  let layers=ux_u32_put(dst+128,ux_u32(node+Object3D.layerMask));
+  let reserved=ux_u32_put(dst+132,0);
+  return dst;
+}
