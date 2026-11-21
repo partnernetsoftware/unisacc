@@ -1,0 +1,685 @@
+#pragma unisa module regex
+#pragma unisa use mem.bytes
+/* L1 textx/regex: a bounded backtracking regular expression engine with JavaScript (no u flag) semantics,
+   an extension package (ext/textx, outside the compile closure). No allocation, no module state (re-entrant),
+   no libc; the caller owns the program buffer, the capture array and the work buffer (the backtrack stack lives
+   in the work buffer, the matcher does not recurse in C).
+
+   Supported: literals and punctuation escapes, \t \n \v \f \r \0 \xHH \uHHHH (BMP, not a surrogate), '.',
+   classes and negated classes (ranges, non-ASCII BMP ranges, \d \w \s \D \W \S inside, \b = backspace inside),
+   \d \w \s \D \W \S, ^ $ \b \B, quantifiers * + ? {n} {n,} {n,m} greedy and lazy, capture groups, (?:),
+   alternation, flag RE_I (ASCII folding). A '{' that does not start a valid quantifier, ']' and '}' are literals
+   (ECMAScript Annex B).
+   Refused at compile time with RE_E_UNSUP and "offset N: reason": backreferences, lookaround, named groups,
+   \p \P \u{..}, RE_I with a non-ASCII pattern character, letter identity escapes, \cX, legacy octal, a character
+   above U+FFFF or a surrogate escape inside a class, repeat counts over RE_MAXREP, more than RE_MAXGROUPS
+   groups, group nesting over 64, every flag other than RE_I.
+
+   Offsets: matching runs over the UTF-16 code units decoded lazily from the UTF-8 subject, like JavaScript:
+   a BMP character is one unit ('.' takes all of it), a 4-byte character is two units ('.' takes half).
+   Results are BYTE offsets. When a reported boundary (group 0, or one of the first ncaps groups) lies between
+   the two units of a 4-byte character the call returns RE_E_SPLIT; the match decision itself is always the
+   JavaScript one. \d \w \b are ASCII only; \s is the JavaScript white space set (it includes U+3000, U+00A0,
+   U+FEFF, U+2028 ...). Malformed UTF-8 met while matching gives RE_E_UTF8.
+
+   long re_compile(pat, patlen, flags, prog, cap, err, errcap)
+       compiles into prog[0..cap) (int aligned); returns the bytes used (> 0) or a negative code; on failure
+       err (may be 0) receives "offset N: reason". cap >= 64 + 64 * patlen always suffices.
+   int re_ngroups(prog)            capture groups (group 0 not counted) or RE_E_SYNTAX for a foreign buffer
+   int re_exec(prog, subj, len, start, caps, ncaps, work, workcap, steps_limit)
+       finds the first match at or after byte offset start (a character boundary). caps[2i], caps[2i+1] are the
+       [from, to) byte offsets of group i, both -1 for a group that took no part (which is not the empty string);
+       only the first ncaps groups are written. work[0..workcap) (any alignment) is scratch; suggested size
+       4096 + 256 * len bytes, RE_E_PROG (-ENOSPC) when it is too small. steps_limit <= 0 means
+       RE_STEPS_DEFAULT; there is no unlimited setting; the count runs over all start positions of the call.
+       Returns 1 match, 0 no match, or negative: RE_E_STEPS (-ELOOP) step limit, RE_E_PROG, RE_E_UTF8,
+       RE_E_SPLIT, RE_E_SYNTAX bad arguments. caps is undefined on failure.
+   int re_next(prog, subj, len, &pos, caps, ncaps, work, workcap, steps_limit)
+       global iteration (the JavaScript g flag): *pos is the cursor, 0 before the first call. After a match it is
+       the match end; after an empty match it advances one code unit as JavaScript does: to the next character,
+       to len + 1 at the end of the subject (the next call returns 0), or, in front of a 4-byte character, to the
+       NEGATIVE mark -(byte offset of that character) - 2 meaning "between its two units". Treat a negative
+       cursor as opaque and pass it back. After 0 the cursor is len + 1.
+   long re_u16_of(s, n, byteoff)   UTF-16 units in s[0..byteoff) (JavaScript .index / .length); RE_E_UTF8
+       malformed, RE_E_SYNTAX when byteoff is outside [0, n] or inside a character
+   long re_u16_at(s, n, u16idx)    byte offset of a unit index; RE_E_SPLIT inside a 4-byte character,
+       RE_E_SYNTAX out of range
+   long re_expand(tpl, tlen, subj, len, caps, ngroups, out, cap)
+       expands a replacement template for one match like String.prototype.replace: $$ $& $` $' $1..$9 $01..$99
+       (two digits when that group exists, else one digit, else literal); a group that took no part gives
+       nothing; any other '$' is literal ($0, $<name>, a trailing '$'). caps holds 2 * (ngroups + 1) entries.
+       Returns the bytes written or RE_E_PROG.
+   long re_replace(prog, subj, len, tpl, tlen, all, out, cap, work, workcap, steps_limit)
+       subj with the first match (all = 0) or every match (all != 0, g semantics of re_next) replaced by the
+       expanded template; returns the bytes written to out[0..cap) or a negative code. */
+
+enum { RE_I = 1, RE_M = 2, RE_S = 4, RE_MAXGROUPS = 32, RE_MAXREP = 1000, RE_STEPS_DEFAULT = 1000000 };
+enum { RE_E_SYNTAX = -EINVAL, RE_E_UNSUP = -ENOSYS, RE_E_PROG = -ENOSPC, RE_E_STEPS = -ELOOP,
+       RE_E_UTF8 = -EILSEQ, RE_E_SPLIT = -EOVERFLOW };
+
+enum { RE_X_MAGIC = 0x52453031, RE_X_HDR = 5, RE_X_MAXDEPTH = 64 };
+enum { RE_X_CHAR = 1, RE_X_ANY, RE_X_CLASS, RE_X_BOL, RE_X_EOL, RE_X_WB, RE_X_NWB, RE_X_SPLIT, RE_X_JMP,
+       RE_X_SAVE, RE_X_RINIT, RE_X_RTEST, RE_X_RBODY, RE_X_REND, RE_X_MATCH };
+enum { RE_K_CHAR = 0, RE_K_SET = 1, RE_K_WB = 2, RE_K_NWB = 3 };
+
+typedef struct re_cs {
+    const unsigned char *p; long n, i;
+    int *c; long cap, pc;
+    int ngroups, nloops, flags, depth, ec;
+    long eoff; const char *emsg;
+} re_cs;
+
+static const int re_td[] = { 48, 57 };
+static const int re_tw[] = { 48, 57, 65, 90, 95, 95, 97, 122 };
+static const int re_ts[] = { 9, 13, 32, 32, 0xA0, 0xA0, 0x1680, 0x1680, 0x2000, 0x200A, 0x2028, 0x2029,
+                             0x202F, 0x202F, 0x205F, 0x205F, 0x3000, 0x3000, 0xFEFF, 0xFEFF };
+
+/* one code point at s[i..n): its byte length (1..4) with *cp set, or 0 when malformed or cut off */
+static int re_dec(const unsigned char *s, long n, long i, long *cp) {
+    int b = s[i], c1, c2, c3; long v;
+    if (b < 0x80) { *cp = b; return 1; }
+    if (b < 0xC2) return 0;
+    if (b < 0xE0) {
+        if (i + 1 >= n) return 0;
+        c1 = s[i + 1];
+        if ((c1 & 0xC0) != 0x80) return 0;
+        *cp = ((long)(b & 0x1F) << 6) | (c1 & 0x3F);
+        return 2;
+    }
+    if (b < 0xF0) {
+        if (i + 2 >= n) return 0;
+        c1 = s[i + 1]; c2 = s[i + 2];
+        if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80) return 0;
+        v = ((long)(b & 0x0F) << 12) | ((long)(c1 & 0x3F) << 6) | (c2 & 0x3F);
+        if (v < 0x800 || (v >= 0xD800 && v <= 0xDFFF)) return 0;
+        *cp = v;
+        return 3;
+    }
+    if (b < 0xF5) {
+        if (i + 3 >= n) return 0;
+        c1 = s[i + 1]; c2 = s[i + 2]; c3 = s[i + 3];
+        if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) return 0;
+        v = ((long)(b & 0x07) << 18) | ((long)(c1 & 0x3F) << 12) | ((long)(c2 & 0x3F) << 6) | (c3 & 0x3F);
+        if (v < 0x10000 || v > 0x10FFFF) return 0;
+        *cp = v;
+        return 4;
+    }
+    return 0;
+}
+
+/* ---- compiler ---- */
+static int re_fail(re_cs *st, int ec, long off, const char *msg) {
+    if (!st->ec) { st->ec = ec; st->eoff = off; st->emsg = msg; }
+    return -1;
+}
+static int re_emit(re_cs *st, long v) {
+    if (st->ec) return -1;
+    if (st->pc >= st->cap) return re_fail(st, RE_E_PROG, st->i, "program buffer too small");
+    st->c[st->pc++] = (int)v;
+    return 0;
+}
+static int re_ins(re_cs *st, long at, long k) {
+    long j;
+    if (st->ec) return -1;
+    if (st->pc + k > st->cap) return re_fail(st, RE_E_PROG, st->i, "program buffer too small");
+    for (j = st->pc - 1; j >= at; j--) st->c[j + k] = st->c[j];
+    st->pc += k;
+    return 0;
+}
+static int re_pk(const re_cs *st) { return st->i < st->n ? st->p[st->i] : -1; }
+static int re_hex(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static int re_isw(long c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '_' || (c >= 'a' && c <= 'z'); }
+
+/* the ranges of \d \w \s, or the complement for the upper-case letter */
+static int re_ranges(re_cs *st, int k) {
+    const int *t = re_ts; int n = 10, j; long lo = 0;
+    if (k == 'd' || k == 'D') { t = re_td; n = 1; }
+    else if (k == 'w' || k == 'W') { t = re_tw; n = 4; }
+    if (k >= 'a') {
+        for (j = 0; j < n; j++) { re_emit(st, t[2 * j]); re_emit(st, t[2 * j + 1]); }
+    } else {
+        for (j = 0; j < n; j++) {
+            if (t[2 * j] > lo) { re_emit(st, lo); re_emit(st, t[2 * j] - 1); }
+            lo = t[2 * j + 1] + 1;
+        }
+        if (lo <= 0xFFFF) { re_emit(st, lo); re_emit(st, 0xFFFF); }
+    }
+    return st->ec ? -1 : 0;
+}
+
+/* an escape; st->i is just past the backslash. Returns RE_K_* with *v the character or the set letter. */
+static int re_esc(re_cs *st, int incls, long *v) {
+    long o = st->i - 1, cp = 0; int c, k, j, h;
+    if (st->i >= st->n) return re_fail(st, RE_E_SYNTAX, o, "pattern ends with a backslash");
+    c = st->p[st->i];
+    if (c >= 0x80) {
+        k = re_dec(st->p, st->n, st->i, &cp);
+        if (!k) return re_fail(st, RE_E_UTF8, st->i, "malformed UTF-8 in pattern");
+        st->i += k; *v = cp;
+        return RE_K_CHAR;
+    }
+    st->i++;
+    switch (c) {
+    case 'd': case 'w': case 's': case 'D': case 'W': case 'S': *v = c; return RE_K_SET;
+    case 'b': if (incls) { *v = 8; return RE_K_CHAR; } return RE_K_WB;
+    case 'B': if (incls) return re_fail(st, RE_E_UNSUP, o, "legacy escape not supported"); return RE_K_NWB;
+    case 't': *v = 9; return RE_K_CHAR;
+    case 'n': *v = 10; return RE_K_CHAR;
+    case 'v': *v = 11; return RE_K_CHAR;
+    case 'f': *v = 12; return RE_K_CHAR;
+    case 'r': *v = 13; return RE_K_CHAR;
+    case '0':
+        if (re_pk(st) >= '0' && re_pk(st) <= '9') return re_fail(st, RE_E_UNSUP, o, "legacy escape not supported");
+        *v = 0; return RE_K_CHAR;
+    case 'x': case 'u':
+        k = c == 'x' ? 2 : 4;
+        if (c == 'u' && re_pk(st) == '{') return re_fail(st, RE_E_UNSUP, o, "unicode mode not supported");
+        for (j = 0; j < k; j++) {
+            if (st->i >= st->n || (h = re_hex(st->p[st->i])) < 0) return re_fail(st, RE_E_UNSUP, o, "legacy escape not supported");
+            cp = cp * 16 + h; st->i++;
+        }
+        if (cp >= 0xD800 && cp <= 0xDFFF) return re_fail(st, RE_E_UNSUP, o, "surrogate escape not supported");
+        *v = cp; return RE_K_CHAR;
+    case 'p': case 'P': return re_fail(st, RE_E_UNSUP, o, "unicode mode not supported");
+    case 'k': return re_fail(st, RE_E_UNSUP, o, "backreference not supported");
+    default: break;
+    }
+    if (c >= '1' && c <= '9') return re_fail(st, RE_E_UNSUP, o, "backreference not supported");
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return re_fail(st, RE_E_UNSUP, o, "legacy escape not supported");
+    *v = c;
+    return RE_K_CHAR;
+}
+
+/* one literal character or escape at st->i (class member or atom) */
+static int re_item(re_cs *st, int incls, long *v) {
+    long o = st->i, cp = 0; int k;
+    if (st->p[st->i] == '\\') { st->i++; k = re_esc(st, incls, v); }
+    else {
+        k = re_dec(st->p, st->n, st->i, &cp);
+        if (!k) return re_fail(st, RE_E_UTF8, st->i, "malformed UTF-8 in pattern");
+        st->i += k; *v = cp; k = RE_K_CHAR;
+    }
+    if (k != RE_K_CHAR) return k;
+    if (*v >= 0x80 && (st->flags & RE_I)) return re_fail(st, RE_E_UNSUP, o, "i flag with non-ASCII pattern not supported");
+    if (*v >= 0x10000 && incls) return re_fail(st, RE_E_UNSUP, o, "character above U+FFFF in a class not supported");
+    return RE_K_CHAR;
+}
+
+static int re_class(re_cs *st) {   /* st->i is just past '[' */
+    long o = st->i - 1, at = st->pc, lo = 0, hi = 0, sv; int k, neg = 0;
+    if (re_pk(st) == '^') { neg = 1; st->i++; }
+    re_emit(st, RE_X_CLASS); re_emit(st, neg); re_emit(st, 0);
+    for (;;) {
+        if (st->ec) return -1;
+        if (st->i >= st->n) return re_fail(st, RE_E_SYNTAX, o, "unterminated character class");
+        if (st->p[st->i] == ']') { st->i++; break; }
+        k = re_item(st, 1, &lo);
+        if (k < 0) return -1;
+        if (k == RE_K_SET) { re_ranges(st, (int)lo); continue; }
+        if (re_pk(st) == '-' && st->i + 1 < st->n && st->p[st->i + 1] != ']') {
+            sv = st->i; st->i++;
+            k = re_item(st, 1, &hi);
+            if (k < 0) return -1;
+            if (k == RE_K_SET) { re_emit(st, lo); re_emit(st, lo); re_emit(st, '-'); re_emit(st, '-'); re_ranges(st, (int)hi); continue; }
+            if (hi < lo) return re_fail(st, RE_E_SYNTAX, sv, "character class range out of order");
+            re_emit(st, lo); re_emit(st, hi);
+            continue;
+        }
+        re_emit(st, lo); re_emit(st, lo);
+    }
+    if (st->ec) return -1;
+    st->c[at + 2] = (int)((st->pc - at - 3) / 2);
+    return 0;
+}
+
+/* a quantifier at st->i: 1 parsed (*mn, *mx with -1 for no upper bound), 0 none there, -1 error */
+static int re_quant(re_cs *st, long *mn, long *mx) {
+    int c = re_pk(st); long j, a = 0, b;
+    if (c == '*') { st->i++; *mn = 0; *mx = -1; return 1; }
+    if (c == '+') { st->i++; *mn = 1; *mx = -1; return 1; }
+    if (c == '?') { st->i++; *mn = 0; *mx = 1; return 1; }
+    if (c != '{') return 0;
+    j = st->i + 1;
+    if (j >= st->n || st->p[j] < '0' || st->p[j] > '9') return 0;
+    while (j < st->n && st->p[j] >= '0' && st->p[j] <= '9') { if (a < 1000000) a = a * 10 + (st->p[j] - '0'); j++; }
+    b = a;
+    if (j < st->n && st->p[j] == ',') {
+        j++; b = -1;
+        if (j < st->n && st->p[j] >= '0' && st->p[j] <= '9') {
+            b = 0;
+            while (j < st->n && st->p[j] >= '0' && st->p[j] <= '9') { if (b < 1000000) b = b * 10 + (st->p[j] - '0'); j++; }
+        }
+    }
+    if (j >= st->n || st->p[j] != '}') return 0;
+    if (a > RE_MAXREP || b > RE_MAXREP) return re_fail(st, RE_E_UNSUP, st->i, "repeat count over 1000 not supported");
+    if (b >= 0 && b < a) return re_fail(st, RE_E_SYNTAX, st->i, "numbers out of order in quantifier");
+    st->i = j + 1; *mn = a; *mx = b;
+    return 1;
+}
+
+static int re_alt(re_cs *st);
+
+static int re_term(re_cs *st) {
+    long a = st->pc, o = st->i, v = 0, mn = 0, mx = 0, e, sv;
+    int c = st->p[st->i], c2, k, g = 0, glo = st->ngroups + 1, greedy, lp;
+    switch (c) {
+    case '^': st->i++; return re_emit(st, RE_X_BOL);
+    case '$': st->i++; return re_emit(st, RE_X_EOL);
+    case '*': case '+': case '?': return re_fail(st, RE_E_SYNTAX, o, "nothing to repeat");
+    case '(':
+        st->i++;
+        if (++st->depth > RE_X_MAXDEPTH) return re_fail(st, RE_E_UNSUP, o, "group nesting too deep");
+        if (re_pk(st) == '?') {
+            c2 = st->i + 1 < st->n ? st->p[st->i + 1] : -1;
+            if (c2 == ':') st->i += 2;
+            else if (c2 == '=' || c2 == '!') return re_fail(st, RE_E_UNSUP, o, "lookaround not supported");
+            else if (c2 == '<') {
+                c2 = st->i + 2 < st->n ? st->p[st->i + 2] : -1;
+                if (c2 == '=' || c2 == '!') return re_fail(st, RE_E_UNSUP, o, "lookaround not supported");
+                return re_fail(st, RE_E_UNSUP, o, "named group not supported");
+            } else return re_fail(st, RE_E_SYNTAX, o, "invalid group");
+        } else {
+            if (st->ngroups >= RE_MAXGROUPS) return re_fail(st, RE_E_UNSUP, o, "too many capture groups");
+            g = ++st->ngroups;
+            re_emit(st, RE_X_SAVE); re_emit(st, 2 * g);
+        }
+        if (re_alt(st)) return -1;
+        if (re_pk(st) != ')') return re_fail(st, RE_E_SYNTAX, o, "unterminated group");
+        st->i++; st->depth--;
+        if (g) { re_emit(st, RE_X_SAVE); re_emit(st, 2 * g + 1); }
+        break;
+    case '[':
+        st->i++;
+        if (re_class(st)) return -1;
+        break;
+    case '.': st->i++; re_emit(st, RE_X_ANY); break;
+    default:
+        if (c == '{') {
+            sv = st->i; k = re_quant(st, &mn, &mx);
+            if (k < 0) return -1;
+            if (k > 0) return re_fail(st, RE_E_SYNTAX, o, "nothing to repeat");
+            st->i = sv;
+        }
+        k = re_item(st, 0, &v);
+        if (k < 0) return -1;
+        if (k == RE_K_WB) return re_emit(st, RE_X_WB);
+        if (k == RE_K_NWB) return re_emit(st, RE_X_NWB);
+        if (k == RE_K_SET) {
+            re_emit(st, RE_X_CLASS); re_emit(st, 0); re_emit(st, 0);
+            if (re_ranges(st, (int)v)) return -1;
+            st->c[a + 2] = (int)((st->pc - a - 3) / 2);
+        } else if (v >= 0x10000) {   /* two code units; a quantifier binds to the second one, as in JavaScript */
+            re_emit(st, RE_X_CHAR); re_emit(st, 0xD800 + ((v - 0x10000) >> 10));
+            a = st->pc;
+            re_emit(st, RE_X_CHAR); re_emit(st, 0xDC00 + ((v - 0x10000) & 0x3FF));
+        } else {
+            if ((st->flags & RE_I) && v >= 'A' && v <= 'Z') v += 32;
+            re_emit(st, RE_X_CHAR); re_emit(st, v);
+        }
+        break;
+    }
+    if (st->ec) return -1;
+    k = re_quant(st, &mn, &mx);
+    if (k <= 0) return k;
+    greedy = 1; if (re_pk(st) == '?') { st->i++; greedy = 0; }
+    lp = st->nloops++;
+    if (re_ins(st, a, 12)) return -1;
+    st->c[a] = RE_X_RINIT; st->c[a + 1] = lp;
+    st->c[a + 2] = RE_X_RTEST; st->c[a + 3] = lp; st->c[a + 4] = (int)mn; st->c[a + 5] = (int)mx; st->c[a + 6] = greedy;
+    st->c[a + 7] = (int)(st->pc + 4 - (a + 2));
+    st->c[a + 8] = RE_X_RBODY; st->c[a + 9] = lp; st->c[a + 10] = glo; st->c[a + 11] = st->ngroups + 1;
+    e = st->pc;
+    re_emit(st, RE_X_REND); re_emit(st, lp); re_emit(st, mn); re_emit(st, a + 2 - e);
+    return st->ec ? -1 : 0;
+}
+
+static int re_seq(re_cs *st) {
+    while (!st->ec && st->i < st->n && st->p[st->i] != '|' && st->p[st->i] != ')') if (re_term(st)) return -1;
+    return st->ec ? -1 : 0;
+}
+
+/* alternation: SPLIT first,second in front of each branch but the last; first is tried first */
+static void re_split(re_cs *st, long s, long first, long second) {
+    st->c[s] = RE_X_SPLIT; st->c[s + 1] = (int)first; st->c[s + 2] = (int)second;
+}
+static int re_alt(re_cs *st) {
+    long s = st->pc, chain = -1, nx;
+    if (re_seq(st)) return -1;
+    while (re_pk(st) == '|') {
+        st->i++;
+        if (re_ins(st, s, 3)) return -1;
+        re_split(st, s, 3, st->pc + 2 - s);
+        re_emit(st, RE_X_JMP); re_emit(st, chain);
+        if (st->ec) return -1;
+        chain = st->pc - 1;
+        s = st->pc;
+        if (re_seq(st)) return -1;
+    }
+    while (chain >= 0) { nx = st->c[chain]; st->c[chain] = (int)(st->pc - (chain - 1)); chain = nx; }
+    return 0;
+}
+
+static void re_seterr(char *err, long cap, long off, const char *msg) {
+    char d[24]; long w = 0, j, nd = 0; const char *pre = "offset ";
+    if (!err || cap <= 0) return;
+    for (j = 0; pre[j] && w + 1 < cap; j++) err[w++] = pre[j];
+    if (off < 0) off = 0;
+    do { d[nd++] = (char)('0' + off % 10); off /= 10; } while (off && nd < 20);
+    while (nd && w + 1 < cap) err[w++] = d[--nd];
+    if (w + 1 < cap) err[w++] = ':';
+    if (w + 1 < cap) err[w++] = ' ';
+    for (j = 0; msg[j] && w + 1 < cap; j++) err[w++] = msg[j];
+    err[w] = 0;
+}
+
+long re_compile(const char *pat, long patlen, int flags, void *prog, long cap, char *err, long errcap) {
+    re_cs st;
+    if (err && errcap > 0) err[0] = 0;
+    if (patlen < 0 || (patlen && !pat) || !prog || cap < 0 || ((unsigned long)prog & (sizeof(int) - 1))) {
+        re_seterr(err, errcap, 0, "bad arguments");
+        return RE_E_SYNTAX;
+    }
+    st.p = (const unsigned char *)pat; st.n = patlen; st.i = 0;
+    st.c = (int *)prog; st.cap = cap / (long)sizeof(int); st.pc = RE_X_HDR;
+    st.ngroups = 0; st.nloops = 0; st.flags = flags; st.depth = 0; st.ec = 0; st.eoff = 0; st.emsg = "";
+    if (flags & ~RE_I) re_fail(&st, RE_E_UNSUP, 0, "flags other than i not supported");
+    else if (st.cap < RE_X_HDR + 1) re_fail(&st, RE_E_PROG, 0, "program buffer too small");
+    else {
+        re_alt(&st);
+        if (!st.ec && st.i < st.n) re_fail(&st, RE_E_SYNTAX, st.i, "unmatched )");
+        re_emit(&st, RE_X_MATCH);
+    }
+    if (st.ec) { re_seterr(err, errcap, st.eoff, st.emsg); return st.ec; }
+    st.c[0] = RE_X_MAGIC; st.c[1] = (int)st.pc; st.c[2] = st.ngroups; st.c[3] = flags; st.c[4] = st.nloops;
+    return st.pc * (long)sizeof(int);
+}
+
+static const int *re_prog(const void *prog) {
+    const int *c = (const int *)prog;
+    if (!c || ((unsigned long)prog & (sizeof(int) - 1)) || c[0] != RE_X_MAGIC) return 0;
+    return c;
+}
+
+int re_ngroups(const void *prog) {
+    const int *c = re_prog(prog);
+    return c ? c[2] : RE_E_SYNTAX;
+}
+
+/* ---- matcher ---- */
+/* Positions are 2 * byte offset + half; half = 1 is between the two code units of a 4-byte character.
+   The code unit at pos with *np the position after it; -1 at the end, -2 malformed. */
+static long re_unit(const unsigned char *s, long n, long pos, long *np) {
+    long b = pos >> 1, cp = 0; int k;
+    if (b >= n) return -1;
+    k = re_dec(s, n, b, &cp);
+    if (!k) return -2;
+    if (pos & 1) {
+        if (k != 4) return -2;
+        *np = 2 * (b + 4);
+        return 0xDC00 + ((cp - 0x10000) & 0x3FF);
+    }
+    if (k == 4) { *np = pos + 1; return 0xD800 + ((cp - 0x10000) >> 10); }
+    *np = 2 * (b + k);
+    return cp;
+}
+static int re_wbefore(const unsigned char *s, long pos) {
+    long b = pos >> 1;
+    if ((pos & 1) || b == 0) return 0;
+    return re_isw(s[b - 1]);
+}
+static int re_wat(const unsigned char *s, long n, long pos) {
+    long b = pos >> 1;
+    if ((pos & 1) || b >= n) return 0;
+    return re_isw(s[b]);
+}
+static int re_in(const int *r, int nr, long u) {
+    int j;
+    for (j = 0; j < nr; j++) if (u >= r[2 * j] && u <= r[2 * j + 1]) return 1;
+    return 0;
+}
+
+#define RE_PUSH(A, B) { if (kn >= kc) return RE_E_PROG; K[2 * kn] = (A); K[2 * kn + 1] = (B); kn++; }
+
+/* S: state (capture slots for ng + 2 groups, then loop counters, then loop start positions), then the
+   backtrack stack of pairs: (pc >= 0, position) is a choice point, (-(slot + 1), old value) an undo record. */
+static int re_run(const int *c, const unsigned char *s, long n, long sp, long *S, long wl, long limit) {
+    int ng = c[2], ic = c[3] & RE_I, nl = c[4], hit;
+    long ncs = 2 * (ng + 2), nst = ncs + 2 * (long)nl, kc = (wl - nst) / 2, kn, pc, pos, np = 0, u, steps = 0, j, v, slot, cnt;
+    long *K = S + nst;
+    if (wl < nst) return RE_E_PROG;
+    for (;;) {
+        for (j = 0; j < nst; j++) S[j] = -1;
+        S[0] = sp; kn = 0; pc = RE_X_HDR; pos = sp;
+        for (;;) {
+            if (++steps > limit) return RE_E_STEPS;
+            switch (c[pc]) {
+            case RE_X_CHAR:
+                u = re_unit(s, n, pos, &np);
+                if (u == -2) return RE_E_UTF8;
+                v = c[pc + 1];
+                if (u == v || (ic && u >= 'A' && u <= 'Z' && u + 32 == v)) { pos = np; pc += 2; continue; }
+                break;
+            case RE_X_ANY:
+                u = re_unit(s, n, pos, &np);
+                if (u == -2) return RE_E_UTF8;
+                if (u < 0 || u == 10 || u == 13 || u == 0x2028 || u == 0x2029) break;
+                pos = np; pc++;
+                continue;
+            case RE_X_CLASS:
+                u = re_unit(s, n, pos, &np);
+                if (u == -2) return RE_E_UTF8;
+                if (u < 0) break;
+                hit = re_in(c + pc + 3, c[pc + 2], u);
+                if (!hit && ic) {
+                    if (u >= 'A' && u <= 'Z') hit = re_in(c + pc + 3, c[pc + 2], u + 32);
+                    else if (u >= 'a' && u <= 'z') hit = re_in(c + pc + 3, c[pc + 2], u - 32);
+                }
+                if (hit == c[pc + 1]) break;
+                pos = np; pc += 3 + 2 * c[pc + 2];
+                continue;
+            case RE_X_BOL: if (pos != 0) break; pc++; continue;
+            case RE_X_EOL: if (pos != 2 * n) break; pc++; continue;
+            case RE_X_WB: case RE_X_NWB:
+                hit = re_wbefore(s, pos) != re_wat(s, n, pos);
+                if (hit != (c[pc] == RE_X_WB)) break;
+                pc++;
+                continue;
+            case RE_X_SPLIT: RE_PUSH(pc + c[pc + 2], pos); pc += c[pc + 1]; continue;
+            case RE_X_JMP: pc += c[pc + 1]; continue;
+            case RE_X_SAVE:
+                slot = c[pc + 1];
+                RE_PUSH(-(slot + 1), S[slot]);
+                S[slot] = pos; pc += 2;
+                continue;
+            case RE_X_RINIT:
+                slot = ncs + c[pc + 1];
+                RE_PUSH(-(slot + 1), S[slot]);
+                S[slot] = 0; pc += 2;
+                continue;
+            case RE_X_RTEST:   /* lp min max greedy exit */
+                cnt = S[ncs + c[pc + 1]];
+                if (c[pc + 3] >= 0 && cnt >= c[pc + 3]) { pc += c[pc + 5]; continue; }
+                if (cnt < c[pc + 2]) { pc += 6; continue; }
+                if (c[pc + 4]) { RE_PUSH(pc + c[pc + 5], pos); pc += 6; }
+                else { RE_PUSH(pc + 6, pos); pc += c[pc + 5]; }
+                continue;
+            case RE_X_RBODY:   /* lp glo ghi: a new iteration starts; the groups inside become "took no part" */
+                slot = ncs + nl + c[pc + 1];
+                RE_PUSH(-(slot + 1), S[slot]);
+                S[slot] = pos;
+                for (j = 2 * (long)c[pc + 2]; j < 2 * (long)c[pc + 3]; j++) if (S[j] != -1) { RE_PUSH(-(j + 1), S[j]); S[j] = -1; }
+                pc += 4;
+                continue;
+            case RE_X_REND:    /* lp min back: an empty iteration past the minimum is refused */
+                slot = ncs + c[pc + 1];
+                cnt = S[slot];
+                if (cnt >= c[pc + 2] && pos == S[slot + nl]) break;
+                RE_PUSH(-(slot + 1), cnt);
+                S[slot] = cnt + 1; pc += c[pc + 3];
+                continue;
+            case RE_X_MATCH: S[1] = pos; return 1;
+            default: return RE_E_SYNTAX;
+            }
+            for (;;) {   /* backtrack */
+                if (!kn) goto next;
+                kn--;
+                if (K[2 * kn] < 0) S[-K[2 * kn] - 1] = K[2 * kn + 1];
+                else { pc = K[2 * kn]; pos = K[2 * kn + 1]; break; }
+            }
+        }
+    next:
+        if (sp >= 2 * n) return 0;
+        u = re_unit(s, n, sp, &np);
+        if (u == -2) return RE_E_UTF8;
+        sp = np;
+    }
+}
+
+static int re_fill(const long *S, long *caps, int ncaps, int ng) {
+    int i;
+    if ((S[0] & 1) || (S[1] & 1)) return RE_E_SPLIT;
+    for (i = 0; i < ncaps; i++) {
+        if (i > ng || S[2 * i] < 0 || S[2 * i + 1] < 0) { caps[2 * i] = -1; caps[2 * i + 1] = -1; continue; }
+        if ((S[2 * i] & 1) || (S[2 * i + 1] & 1)) return RE_E_SPLIT;
+        caps[2 * i] = S[2 * i] >> 1; caps[2 * i + 1] = S[2 * i + 1] >> 1;
+    }
+    return 1;
+}
+
+/* the first long-aligned address in work[0..*cap), with *cap reduced by the bytes skipped */
+static long *re_walign(void *work, long *cap) {
+    long skip = (long)((sizeof(long) - ((unsigned long)work & (sizeof(long) - 1))) & (sizeof(long) - 1));
+    if (skip > *cap) skip = *cap;
+    *cap -= skip;
+    return (long *)((char *)work + skip);
+}
+
+/* the shared body of re_exec and re_next; sp is an internal position */
+static int re_go(const void *prog, const char *subj, long len, long sp, long *caps, int ncaps,
+                 void *work, long workcap, long steps_limit) {
+    const int *c = re_prog(prog); int r; long *S;
+    if (!c || len < 0 || (len && !subj) || ncaps < 0 || (ncaps && !caps) || !work || workcap < 0) return RE_E_SYNTAX;
+    S = re_walign(work, &workcap);
+    if (steps_limit <= 0) steps_limit = RE_STEPS_DEFAULT;
+    r = re_run(c, (const unsigned char *)subj, len, sp, S, workcap / (long)sizeof(long), steps_limit);
+    if (r != 1) return r;
+    return re_fill(S, caps, ncaps, c[2]);
+}
+
+int re_exec(const void *prog, const char *subj, long len, long start,
+            long *caps, int ncaps, void *work, long workcap, long steps_limit) {
+    if (len < 0 || (len && !subj) || start < 0 || start > len) return RE_E_SYNTAX;
+    if (start < len && ((unsigned char)subj[start] & 0xC0) == 0x80) return RE_E_SYNTAX;
+    return re_go(prog, subj, len, 2 * start, caps, ncaps, work, workcap, steps_limit);
+}
+
+int re_next(const void *prog, const char *subj, long len, long *pos,
+            long *caps, int ncaps, void *work, long workcap, long steps_limit) {
+    long p, sp, e, np = 0, u, wc = workcap; int r; const long *S = work ? re_walign(work, &wc) : 0;
+    if (!pos || len < 0 || (len && !subj)) return RE_E_SYNTAX;
+    p = *pos;
+    if (p > len + 1) return RE_E_SYNTAX;
+    if (p == len + 1) return 0;
+    if (p < 0) {
+        p = -p - 2;
+        if (p < 0 || p + 4 > len || ((unsigned char)subj[p] & 0xF8) != 0xF0) return RE_E_SYNTAX;
+        sp = 2 * p + 1;
+    } else {
+        if (p < len && ((unsigned char)subj[p] & 0xC0) == 0x80) return RE_E_SYNTAX;
+        sp = 2 * p;
+    }
+    r = re_go(prog, subj, len, sp, caps, ncaps, work, workcap, steps_limit);
+    if (r == 0) *pos = len + 1;
+    if (r != 1) return r;
+    e = S[1];
+    if (e != S[0]) { *pos = e >> 1; return 1; }
+    if (e >= 2 * len) { *pos = len + 1; return 1; }
+    u = re_unit((const unsigned char *)subj, len, e, &np);
+    if (u == -2) return RE_E_UTF8;
+    *pos = (np & 1) ? -(e >> 1) - 2 : np >> 1;
+    return 1;
+}
+
+/* ---- UTF-16 conversion ---- */
+long re_u16_of(const char *s, long n, long byteoff) {
+    long i = 0, u = 0, cp = 0; int k;
+    if (n < 0 || (n && !s) || byteoff < 0 || byteoff > n) return RE_E_SYNTAX;
+    while (i < byteoff) {
+        k = re_dec((const unsigned char *)s, n, i, &cp);
+        if (!k) return RE_E_UTF8;
+        i += k; u += k == 4 ? 2 : 1;
+    }
+    return i == byteoff ? u : RE_E_SYNTAX;
+}
+
+long re_u16_at(const char *s, long n, long u16idx) {
+    long i = 0, u = 0, cp = 0; int k;
+    if (n < 0 || (n && !s) || u16idx < 0) return RE_E_SYNTAX;
+    while (u < u16idx) {
+        if (i >= n) return RE_E_SYNTAX;
+        k = re_dec((const unsigned char *)s, n, i, &cp);
+        if (!k) return RE_E_UTF8;
+        i += k; u += k == 4 ? 2 : 1;
+    }
+    return u == u16idx ? i : RE_E_SPLIT;
+}
+
+/* ---- replacement ---- */
+static long re_put(char *out, long cap, long w, const char *s, long n) {
+    long j;
+    if (w < 0) return w;
+    if (n < 0 || n > cap - w) return RE_E_PROG;
+    for (j = 0; j < n; j++) out[w + j] = s[j];
+    return w + n;
+}
+
+long re_expand(const char *tpl, long tlen, const char *subj, long len, const long *caps, int ngroups,
+               char *out, long cap) {
+    long i = 0, w = 0; int c, g, g2, d;
+    if (tlen < 0 || (tlen && !tpl) || len < 0 || !caps || ngroups < 0 || cap < 0 || (cap && !out)) return RE_E_SYNTAX;
+    if (caps[0] < 0 || caps[1] < caps[0] || caps[1] > len) return RE_E_SYNTAX;
+    while (i < tlen && w >= 0) {
+        if (tpl[i] != '$' || i + 1 >= tlen) { w = re_put(out, cap, w, tpl + i, 1); i++; continue; }
+        c = tpl[i + 1];
+        if (c == '$') { w = re_put(out, cap, w, "$", 1); i += 2; }
+        else if (c == '&') { w = re_put(out, cap, w, subj + caps[0], caps[1] - caps[0]); i += 2; }
+        else if (c == '`') { w = re_put(out, cap, w, subj, caps[0]); i += 2; }
+        else if (c == '\'') { w = re_put(out, cap, w, subj + caps[1], len - caps[1]); i += 2; }
+        else if (c >= '0' && c <= '9') {
+            g = c - '0'; d = 1;
+            if (i + 2 < tlen && tpl[i + 2] >= '0' && tpl[i + 2] <= '9') {
+                g2 = g * 10 + (tpl[i + 2] - '0');
+                if (g2 >= 1 && g2 <= ngroups) { g = g2; d = 2; }
+            }
+            if (g >= 1 && g <= ngroups) {
+                if (caps[2 * g] >= 0) w = re_put(out, cap, w, subj + caps[2 * g], caps[2 * g + 1] - caps[2 * g]);
+                i += 1 + d;
+            } else { w = re_put(out, cap, w, "$", 1); i++; }
+        } else { w = re_put(out, cap, w, "$", 1); i++; }
+    }
+    return w;
+}
+
+long re_replace(const void *prog, const char *subj, long len, const char *tpl, long tlen, int all,
+                char *out, long cap, void *work, long workcap, long steps_limit) {
+    long caps[2 * (RE_MAXGROUPS + 1)]; long pos = 0, last = 0, w = 0, e; int r, ng = re_ngroups(prog);
+    if (ng < 0) return ng;
+    if (ng > RE_MAXGROUPS || cap < 0 || (cap && !out)) return RE_E_SYNTAX;
+    for (;;) {
+        r = re_next(prog, subj, len, &pos, caps, ng + 1, work, workcap, steps_limit);
+        if (r < 0) return r;
+        if (!r) break;
+        w = re_put(out, cap, w, subj + last, caps[0] - last);
+        if (w < 0) return w;
+        e = re_expand(tpl, tlen, subj, len, caps, ng, out + w, cap - w);
+        if (e < 0) return e;
+        w += e; last = caps[1];
+        if (!all) break;
+    }
+    return re_put(out, cap, w, subj + last, len - last);
+}
