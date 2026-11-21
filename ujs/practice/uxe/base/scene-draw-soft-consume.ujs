@@ -1,0 +1,164 @@
+native function scene_soft_input(at:i64,size:i64,stage:i64,space:i64,rgba:i64,depth:i64,bytes:i64,stats:i64) i64 {
+  return !scene_render_overlap(at,size,stage,space) &&
+    scene_render_readable(at,size,rgba,bytes,depth,bytes) &&
+    !scene_render_overlap(at,size,stats,SceneConsumeStats.size);
+}
+
+native function scene_soft_tex_draw(target:i64,draw:i64,binding:i64,source:i64,vertices:i64,max:i64,tex:i64,blend:i64) i64 {
+  let stream=ux_u32(binding+SceneTextureDraw.stream);
+  let count=SceneDraw_projectPacked(draw,stream,vertices,max);
+  if(count<0) { return count; }
+  let world=ux_u32(draw+SceneDrawItem.worldMatrix);
+  let projection=ux_u32(stream+SceneDrawStream.viewProjection);
+  let positions=ux_u32(stream+SceneDrawStream.positions);
+  let stride=ux_u32(stream+SceneDrawStream.stride);
+  let uv=ux_u32(binding+SceneTextureDraw.uv);
+  let uvStride=ux_u32(binding+SceneTextureDraw.uvStride);
+  if(uvStride<8 || uvStride%4!=0 || uv%4!=0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let p=positions+i*stride;
+    let x=ux_f32(p);
+    let y=ux_f32(p+4);
+    let z=ux_f32(p+8);
+    let wx=draw_project_component(world,0,x,y,z,1.0);
+    let wy=draw_project_component(world,1,x,y,z,1.0);
+    let wz=draw_project_component(world,2,x,y,z,1.0);
+    let weight=draw_project_component(projection,3,wx,wy,wz,1.0);
+    if(weight<0.000001 || weight>1048576.0) { return 0-2; }
+    let v=vertices+i*28;
+    let a=ux_u32_put(v+12,ux_u32(uv+i*uvStride));
+    let b=ux_u32_put(v+16,ux_u32(uv+i*uvStride+4));
+    let c=ux_f32_put(v+20,weight);
+    i=i+1;
+  }
+  let a=ux_u32_put(tex+SceneRasterTexture.rgba,ux_u32(source+GpuTextureSource.rgba));
+  let b=ux_u32_put(tex+SceneRasterTexture.width,ux_u32(source+GpuTextureSource.width));
+  let c=ux_u32_put(tex+SceneRasterTexture.height,ux_u32(source+GpuTextureSource.height));
+  return SceneDraw_softwareTexture(target,vertices,count,blend,tex);
+}
+
+// The caller supplies a disjoint 32 + width*height*8 byte transaction
+// buffer. Target color/depth and stats publish only after every draw passes.
+native function SceneSoftware_consume(target:i64,plan:i64,stats:i64,stage:i64,space:i64) i64 {
+  if(!scene_render_span(target,SceneRasterTarget.size,4) || !scene_render_span(plan,SceneConsumePlan.size,4) ||
+     !scene_render_span(stats,SceneConsumeStats.size,4)) { return 0-1; }
+  let w=ux_u32(target+SceneRasterTarget.width);
+  let h=ux_u32(target+SceneRasterTarget.height);
+  if(w<1 || h<1 || w>4096 || h>4096 || w*h>1048576) { return 0-1; }
+  let bytes=w*h*4;
+  let used=32+bytes*2;
+  let rgba=ux_u32(target+SceneRasterTarget.rgba);
+  let depth=ux_u32(target+SceneRasterTarget.depth);
+  if(space<used || !scene_render_span(stage,used,4) || !scene_render_span(rgba,bytes,4) ||
+     !scene_render_span(depth,bytes,4) || scene_render_overlap(rgba,bytes,depth,bytes) ||
+     !scene_render_readable(stage,used,rgba,bytes,depth,bytes) ||
+     (scene_render_overlap(stats,SceneConsumeStats.size,stage,used) ||
+      !scene_render_readable(stats,SceneConsumeStats.size,rgba,bytes,depth,bytes)) ||
+     !scene_soft_input(target,SceneRasterTarget.size,stage,used,rgba,depth,bytes,stats) ||
+     !scene_soft_input(plan,SceneConsumePlan.size,stage,used,rgba,depth,bytes,stats)) { return 0-1; }
+  let draws=ux_u32(plan+SceneConsumePlan.draws);
+  let count=ux_u32(plan+SceneConsumePlan.count);
+  let rows=ux_u32(plan+SceneConsumePlan.bindings);
+  let total=ux_u32(plan+SceneConsumePlan.bindingCount);
+  let vertices=ux_u32(plan+SceneConsumePlan.vertices);
+  let max=ux_u32(plan+SceneConsumePlan.vertexCapacity);
+  let vbytes=max*28;
+  if(count>256 || total>256 || max<3 || max>2340 || !scene_render_span(draws,count*SceneDrawItem.size,4) ||
+     !scene_render_span(rows,total*SceneConsumeBinding.size,4) || !scene_render_span(vertices,vbytes,4) ||
+     !scene_render_readable(vertices,vbytes,plan,SceneConsumePlan.size,target,SceneRasterTarget.size) ||
+     !scene_render_readable(vertices,vbytes,draws,count*SceneDrawItem.size,rows,total*SceneConsumeBinding.size) ||
+     !scene_soft_input(draws,count*SceneDrawItem.size,stage,used,rgba,depth,bytes,stats) ||
+     !scene_soft_input(rows,total*SceneConsumeBinding.size,stage,used,rgba,depth,bytes,stats) ||
+     !scene_soft_input(vertices,vbytes,stage,used,rgba,depth,bytes,stats)) { return 0-1; }
+  let prevG=0;
+  let prevM=0;
+  let i=0;
+  while(i<total) {
+    let row=rows+i*SceneConsumeBinding.size;
+    let g=ux_u32(row+SceneConsumeBinding.geometry);
+    let m=ux_u32(row+SceneConsumeBinding.material);
+    if(g==0 || m==0 || g<prevG || (g==prevG && m<=prevM)) { return 0-1; }
+    prevG=g;
+    prevM=m;
+    i=i+1;
+  }
+
+  let pass=0;
+  let triangles=0;
+  let geometries=0;
+  let materials=0;
+  let textures=0;
+  let textureDraws=0;
+  i=0;
+  while(i<count) {
+    let draw=draws+i*SceneDrawItem.size;
+    let next=ux_u32(draw+SceneDrawItem.pass);
+    let binding=scene_consume_find(draw,rows,total);
+    if(binding<0 || (next!=0 && next!=2) || next<pass) { return 0-2; }
+    let source=scene_consume_ready(draw,binding,stage,used,plan,stats);
+    if(source<0 || scene_consume_ready(draw,binding,rgba,bytes,plan,stats)<0 ||
+       scene_consume_ready(draw,binding,depth,bytes,plan,stats)<0) { return 0-1; }
+    if(source>0 && (ux_u32(source+GpuTextureSource.filter)!=0 ||
+       ux_u32(source+GpuTextureSource.wrapS)!=0 || ux_u32(source+GpuTextureSource.wrapT)!=0)) { return 0-2; }
+    pass=next;
+    let stream=ux_u32(binding+SceneConsumeBinding.stream);
+    triangles=triangles+ux_u32(stream+SceneDrawStream.vertexCount)/3;
+    let g=1;
+    let m=1;
+    let t=source>0;
+    if(t) { textureDraws=textureDraws+1; }
+    let j=0;
+    while(j<i && (g || m || t)) {
+      let prior=draws+j*SceneDrawItem.size;
+      if(ux_u32(draw+SceneDrawItem.geometry)==ux_u32(prior+SceneDrawItem.geometry)) { g=0; }
+      if(ux_u32(draw+SceneDrawItem.material)==ux_u32(prior+SceneDrawItem.material)) { m=0; }
+      if(t) {
+        let at=scene_consume_find(prior,rows,total);
+        let link=ux_u32(at+SceneConsumeBinding.textured);
+        if(link!=0 && ux_u32(link+SceneTextureDraw.texture)==source) { t=0; }
+      }
+      j=j+1;
+    }
+    geometries=geometries+g;
+    materials=materials+m;
+    textures=textures+t;
+    i=i+1;
+  }
+
+  let readColor=uxe_copy_record(stage+32,rgba,bytes);
+  let readDepth=uxe_copy_record(stage+32+bytes,depth,bytes);
+  let sr=ux_u32_put(stage+SceneRasterTarget.rgba,stage+32);
+  let sd=ux_u32_put(stage+SceneRasterTarget.depth,stage+32+bytes);
+  let sw=ux_u32_put(stage+SceneRasterTarget.width,w);
+  let sh=ux_u32_put(stage+SceneRasterTarget.height,h);
+  let tex=stage+16;
+  i=0;
+  while(i<count) {
+    let draw=draws+i*SceneDrawItem.size;
+    let binding=scene_consume_find(draw,rows,total);
+    let blend=ux_u32(draw+SceneDrawItem.pass)==2;
+    let texture=ux_u32(binding+SceneConsumeBinding.textured);
+    let result=0;
+    if(texture==0) {
+      let projected=SceneDraw_projectPacked(draw,ux_u32(binding+SceneConsumeBinding.stream),vertices,max);
+      if(projected<0) { return projected; }
+      result=SceneDraw_softwareColor(stage,vertices,projected,blend);
+    } else {
+      let source=ux_u32(texture+SceneTextureDraw.texture);
+      result=scene_soft_tex_draw(stage,draw,texture,source,vertices,max,tex,blend);
+    }
+    if(result<0) { return result; }
+    i=i+1;
+  }
+  let savedColor=uxe_copy_record(rgba,stage+32,bytes);
+  let savedDepth=uxe_copy_record(depth,stage+32+bytes,bytes);
+  let a=ux_u32_put(stats+SceneConsumeStats.draws,count);
+  let b=ux_u32_put(stats+SceneConsumeStats.triangles,triangles);
+  let c=ux_u32_put(stats+SceneConsumeStats.geometries,geometries);
+  let d=ux_u32_put(stats+SceneConsumeStats.materials,materials);
+  let e=ux_u32_put(stats+SceneConsumeStats.textures,textures);
+  let f=ux_u32_put(stats+SceneConsumeStats.textureDraws,textureDraws);
+  let g=ux_u32_put(stats+SceneConsumeStats.commands,count);
+  return count;
+}

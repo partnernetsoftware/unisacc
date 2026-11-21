@@ -1,0 +1,70 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],abi[300],program[300],wasm[300],url[800];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-scene-consume-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(program,sizeof program,"%s/integrated.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/consume.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/scene-draw-soft-consume-r160.html?wasm=%s%s",cwd,wasm,mutate?"&mutate=1":"");
+    const char signature[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_scene_consume(mode:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/scene-snapshot-layout.ujs","ujs/practice/uxe/base/render-list.ujs",
+        "ujs/practice/uxe/base/scene-render-list.ujs","ujs/practice/uxe/base/scene-draw-project.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/scene-draw-gpu.ujs",
+        "ujs/practice/uxe/base/scene-gpu-batch.ujs","ujs/practice/uxe/base/scene-draw-texture.ujs",
+        "ujs/practice/uxe/base/scene-draw-consume.ujs","ujs/practice/uxe/base/scene-rgba8-blend.ujs",
+        "ujs/practice/uxe/base/scene-draw-software.ujs","ujs/practice/uxe/base/scene-draw-soft-consume.ujs",
+        "ujs/practice/uxe/test/scene-draw-soft-consume-probe.ujs",program,
+        "-o",wasm,0};
+    const double gold[]={4,4,2,3,1,2,6, 4,4,2,3,1,2,4, 1,1,101,102,104,103,.75,1,1,
+        128,64,64,255,0,0,128,255,0,0,0,255,
+        128,64,64,255,0,0,128,255,0,0,0,255,
+        128,64,64,255,0,0,128,255,0,0,0,255};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0; size_t bytes=0;
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,signature,sizeof signature-1,0600);
+    if(!failed) {
+        unsigned char *body=0;
+        int64_t n=0;
+        const char marker[]="return GpuPacket_submit(packet);";
+        const char tail[]="let soft=scene_soft_probe(plan,colors,stats,mode==2);"
+            "if(soft<0){return soft;}return GpuPacket_submit(packet);\n";
+        failed=sy_read_file("ujs/practice/uxe/test/scene-draw-consume-probe.ujs",&body,&n,16384);
+        long cut=failed?-1:tx_find((const char *)body,n,marker,sizeof marker-1);
+        char composed[17000];
+        int len=cut<0?-1:tx_snprintf(composed,sizeof composed,"%.*s%s",(int)cut,body,tail);
+        failed=cut<0 || len<=0 || len>=(int)sizeof composed || sy_write_file(program,composed,len,0600);
+        mm_free(body);
+    }
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,12,&output,&bytes);
+        if(rc) { printf("SCENE_SOFT_CONSUME compile_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            const int tolerance=i>=23 && (i-23)%4!=3?1:0;
+            if(actual[i]<gold[i]-tolerance || actual[i]>gold[i]+tolerance) {
+                printf("SCENE_SOFT_CONSUME case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("G_PIXEL SceneDraw matching GPU and software consumer cases=%d failed=%d\n",count,failed);
+    return failed;
+}

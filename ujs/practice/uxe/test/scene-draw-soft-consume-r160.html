@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferGeometry, Camera, Color, DataTexture, Float32BufferAttribute, LinearSRGBColorSpace,
+  Mesh, MeshBasicMaterial, NearestFilter, REVISION, Scene, WebGLRenderer } from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=16;
+  const gl=canvas.getContext("webgl2",{alpha:false,preserveDrawingBuffer:true});
+  if(!gl) throw new Error("WebGL2 unavailable");
+  let wasm;
+  const submit=createGpuSubmit(gl,()=>wasm.memory,()=>1);
+  const program=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(program),{uxe_gpu_v1:{host_gpu_submit:submit}}).exports;
+  const base=Number(wasm.uxe_scene_consume(9n));
+  const heap=new DataView(wasm.memory.buffer,base,22000);
+  const shaderPaths=["gpu-flat.vert","gpu-flat.frag","gpu-scene-texture.vert","gpu-texture.frag"];
+  for(const [index,path] of shaderPaths.entries()) {
+    const at=12000+index*1000;
+    const code=new Uint8Array(await (await fetch("../base/"+path)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,base+at,code.length).set(code);
+    heap.setUint32(10752+index*8,at,true);
+    heap.setUint32(10756+index*8,code.length,true);
+  }
+  const submitted=Number(wasm.uxe_scene_consume(query.has("mutate")?2n:0n));
+  if(submitted<0) throw new Error("GPU consume rc="+submitted);
+
+  const scene=new Scene();
+  scene.background=new Color(0x000000);
+  const camera=new Camera();
+  const geometry=new BufferGeometry()
+    .setAttribute("position",new Float32BufferAttribute([-.35,-.5,0,.35,-.5,0,0,.5,0],3))
+    .setAttribute("uv",new Float32BufferAttribute([0,0,0,0,0,0],2));
+  const another=geometry.clone();
+  const tex=new DataTexture(new Uint8Array([0,0,255,128]),1,1);
+  tex.minFilter=tex.magFilter=NearestFilter;
+  tex.needsUpdate=true;
+  const green=new MeshBasicMaterial({color:0x00ff00});
+  const red=new MeshBasicMaterial({color:0xff0000,opacity:.5,transparent:true,depthWrite:false});
+  const blue=new MeshBasicMaterial({map:tex,transparent:true,depthWrite:false});
+  const order=[], materials=new Set();
+  for(const [id,m,g,x,z] of [[103,red,geometry,0,-.25],[101,green,geometry,0,.5],
+    [102,blue,geometry,0,.25],[104,blue,another,-.65,.25],[105,red,geometry,0,-.25]]) {
+    const mesh=new Mesh(g,m);
+    mesh.position.set(x,0,z);
+    mesh.frustumCulled=false;
+    if(id===105) mesh.layers.set(1);
+    mesh.onBeforeRender=()=>{ order.push(id); materials.add(m); };
+    scene.add(mesh);
+  }
+  const renderer=new WebGLRenderer({alpha:false,antialias:false,preserveDrawingBuffer:true});
+  renderer.outputColorSpace=LinearSRGBColorSpace;
+  renderer.setSize(16,16);
+  renderer.render(scene,camera);
+  function pixels(context) {
+    const all=[];
+    for(const x of [8,2,14]) {
+      const rgba=new Uint8Array(4);
+      context.readPixels(x,6,1,1,context.RGBA,context.UNSIGNED_BYTE,rgba);
+      all.push(...rgba);
+    }
+    return all;
+  }
+  const actual=pixels(gl), expected=pixels(renderer.getContext());
+  for(let i=0;i<actual.length;i++) {
+    if(Math.abs(actual[i]-expected[i])>1)
+      throw new Error("pixel case="+i+" GPU="+actual[i]+" r160="+expected[i]);
+  }
+  const stats=Array.from({length:7},(_,i)=>heap.getUint32(8592+4*i,true));
+  const measured=[renderer.info.render.calls,renderer.info.render.triangles,renderer.info.memory.geometries,
+    materials.size,renderer.info.memory.textures,order.filter(id=>id===102 || id===104).length];
+  for(let i=0;i<measured.length;i++) {
+    if(measured[i]!==stats[i]) throw new Error("resource count case="+i+" GPU="+stats[i]+" r160="+measured[i]);
+  }
+  const sorted=Array.from({length:4},(_,i)=>heap.getUint32(8448+i*20,true));
+  if(sorted.join()!==order.join()) throw new Error("draw order GPU="+sorted+" r160="+order);
+  const cpu=[];
+  for(const x of [8,2,14]) {
+    const at=16512+4*(9*16+x);
+    for(let k=0;k<4;k++) cpu.push(heap.getUint8(at+k));
+  }
+  for(let i=0;i<cpu.length;i++) {
+    if(Math.abs(cpu[i]-expected[i])>1)
+      throw new Error("software pixel case="+i+" CPU="+cpu[i]+" r160="+expected[i]+" GPU="+actual[i]);
+  }
+  const softwareStats=Array.from({length:7},(_,i)=>heap.getUint32(16032+4*i,true));
+  const depth=[8,2,14].map(x=>heap.getFloat32(17664+4*(9*16+x),true));
+  output.textContent=JSON.stringify([...stats,...softwareStats,heap.getUint32(11680,true),
+    heap.getUint32(16064,true),...sorted,...depth,...actual,...cpu,...expected]);
+  for(const r of [tex,geometry,another,green,red,blue,renderer]) r.dispose();
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
