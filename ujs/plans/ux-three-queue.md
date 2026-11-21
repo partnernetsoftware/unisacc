@@ -213,6 +213,7 @@
 - BLOCKED BufferGeometry JSON 综合门复验 | G-struct 保留现有十项读回、拒绝与往返 | 通用几何 JSON。最后一次绿见 `/tmp/devsvc-flow-21639295782-3081993/out/x.out`，后续原版与提取公共调用的版本均遇六秒编译超时，证据 `/tmp/devsvc-flow-21641404134-3393208/out/x.out` 与 `/tmp/devsvc-flow-21641490635-3402938/out/x.out`。原门与时限保持。
 - ~~MaterialLoader 基础与标准材质纹理表 | G-io 四类贴图 UUID、共享纹理和坏类型 | M5 材质和纹理。~~ 11 项通过，透明贴图错绑反例转红，原八项通过。
 - ~~MaterialLoader 材质类型分派 | G-io 17 个构造类型、未知类型拒绝 | 基础材质解析。~~ 18 项通过，Toon 类型误读为数值参数反例转红，旧材质与纹理门通过。
+- ~~MaterialLoader 通用管线状态 | G-io 深度、侧面、颜色写入、alpha 阈值与失败保留 | 材质类型分派。~~ 十项通过，深度函数误读为侧面转红。
 - MaterialLoader 专属参数和贴图 | G-io 类型专属渲染状态、均匀量与其余贴图 | 材质类型分派与纹理表。
 - ~~ObjectLoader 嵌套 Scene 与 Group | G-io 多层树、同级顺序、世界变换及失败清空草稿 | Scene、Object3D。~~ 10 项通过，子节点世界 X 从 7 篡改为 8 转红，旧六项通过。
 - ~~ObjectLoader 序列化矩阵 | G-io r160 toJSON、矩阵分解、固定局部矩阵与世界值 | 嵌套树与 Matrix4。~~ 八项通过，拿局部矩阵替换世界矩阵反例从 13 变为 4。
