@@ -231,7 +231,7 @@ static void case_s2(int part) {
             "grep -c 'COMMIT_OWN_FAIL.class=head-moved' r8.out; git log --format=%s -1; git show HEAD:zz-race.txt; echo; echo END",
             "RC=1\n1\nzzrace8\nother\nEND", "s2-head-moved-same-path-not-retried");
     return; }
-    if (part != 5) {
+    if (part == 3 || part == 4 || part == 5) {
     {   char out[8192], script[6000];
         if (cx_fmt(script, sizeof script,
             "cd %s/clone && " CO_MK CO_QUERY "mk zzs2r; printf 'zzs2foreign\\tother\\n' >> tests/batches.tsv; "
@@ -242,6 +242,8 @@ static void case_s2(int part) {
         {   const char *want = "RC=0\n1\n1\n0\n1\nEND";
             ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "s2-registered-drops-redundant-whole"); }
     }
+    }
+    if (part == 3 || part == 4 || part == 6) {
     s2_want("mkdir -p zzhk_cas1 && printf '#!/bin/sh\\n# tools/precommit.cx\\necho g >> .git/zzcas1.cnt\\n[ -e .git/zzcas1_r ] && exit 0\\n: > .git/zzcas1_r\\n"
             "b=$(printf other | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc1.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc1.idx git update-index --add --cacheinfo 100644,$b,zz-cas-other.txt && t=$(GIT_INDEX_FILE=.git/zzc1.idx git write-tree) && "
@@ -266,6 +268,9 @@ static void case_s2(int part) {
             "printf 'int cas_k(void){return 0;}\\n' > tools/zz-cas-kx.cx; printf 'kernel/zz-cas-k.bin\\n' > .git/zzcas2_path; rm -f .git/zzcas2.cnt .git/zzcas2_r; "
             "UNISACC_COMMIT_CAS_REBASE=1 " CO_HK("zzhk_cas2") CO_RUN "-m c2d --whole tools/zz-cas-kx.cx > c2d.out 2>&1; echo D=$?/$(grep -c skipped-by-disjoint-readset c2d.out)/$(wc -l < .git/zzcas2.cnt | tr -d ' '); echo END",
             "A=0/0/2\nB=0/0/2\nC=0/0/2\nD=0/0/2\nEND", "s2-cas-intersect-reruns-gate");
+    }
+    if (part == 6) return;
+    if (part == 3 || part == 4 || part == 7) {
     s2_want("mkdir -p zzhk_cas3 && printf '#!/bin/sh\\n# tools/precommit.cx\\n[ -e .git/zzcas3_r ] && exit 0\\n: > .git/zzcas3_r\\n"
             "b=$(printf theirs | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc3.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc3.idx git update-index --add --cacheinfo 100644,$b,zz-cas-same.txt && t=$(GIT_INDEX_FILE=.git/zzc3.idx git write-tree) && "
@@ -290,7 +295,7 @@ static void case_s2(int part) {
             "echo C2=$?/$(grep -c skipped-by-disjoint-readset cas4b.out)/$(wc -l < .git/zzcas4.cnt | tr -d ' '); git show HEAD:zz-cas-o3.txt; git show HEAD:zz-cas-m5.cx; echo END",
             "C1=0/2/1\nzz-cas-o1.txt\n/* cas4 */\nm4\nC2=0/0/2\nzz-cas-o3.txt\nint cas5(void){return 0;}\nEND", "s2-cas-multi-advance-keeps-other");
     }
-    if (part == 4) return;
+    if (part == 4 || part == 7) return;
     s2_want("mkdir -p zzhk_cas5 && printf '#!/bin/sh\\necho g >> .git/zzcas5.cnt\\n[ -e .git/zzcas5_r ] && exit 0\\n: > .git/zzcas5_r\\n"
             "P=$(cat .git/zzcas5_p); b=$(printf o4 | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc5.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc5.idx git update-index --add --cacheinfo 100644,$b,\"$P\" && t=$(GIT_INDEX_FILE=.git/zzc5.idx git write-tree) && "
@@ -438,10 +443,27 @@ static const char *co_group(int argc, char **argv) {
 static int co_has(const char *g, const char *a, const char *b) {
     return !g || !strcmp(g, a) || (b && !strcmp(g, b));
 }
+static void ensure_self_bin(void) {
+    const char *cur = sy_env("DEVSVC_SELF_BIN");
+    char out[1024], key[21], cmd[1024];
+    if (cur && cur[0] == '/' && sy_exists(cur) == 1) return;
+    if (sh("sh ./unisacc.com tools/devsvc.cx -- prebuild-self", out, sizeof out) ||
+        strncmp(out, "PREPARED\tkey=", 13) ||
+        cx_fmt(key, sizeof key, "%.20s", out + 13) ||
+        strspn(key, "0123456789abcdef") != 20) return;
+    if (cx_fmt(cmd, sizeof cmd,
+        "if [ -n \"${DV_PIN_DIR:-}\" ] && [ -x \"$DV_PIN_DIR/%s/devsvc\" ]; then printf '%%s' \"$DV_PIN_DIR/%s/devsvc\"; "
+        "else for p in \"$HOME/.cache/unisacc/devsvc/pinned/repos\"/*/%s/devsvc; do [ -x \"$p\" ] && { printf '%%s' \"$p\"; break; }; done; fi",
+        key, key, key)) return;
+    if (!sh(cmd, out, sizeof out) && out[0] == '/' && sy_exists(out) == 1)
+        (void)sy_setenv("DEVSVC_SELF_BIN", out, 1);
+}
+
 int main(int argc, char **argv) {
     char out[8192];
     const char *g = co_group(argc, argv);
     char prep[2048], clone[4400];
+    ensure_self_bin();
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
     if (cx_fmt(prep, sizeof prep, "rm -rf %s && mkdir -p %s && git clone -q --local . %s && "
            "cp tools/commit-own.cx tools/own-diff.cx tools/on-change.cx tools/check-precommit-gates.cx %s/tools/ && "
@@ -483,6 +505,8 @@ int main(int argc, char **argv) {
     if (co_has(g, "s2", 0)) { case_s2(0); case_s2(1); case_s2(2); }
     if (co_has(g, "s2b", 0)) case_s2(3);
     if (g && tx_eqz(g, "s2b-core")) case_s2(4);
+    if (g && tx_eqz(g, "s2b-cas1")) case_s2(6);
+    if (g && tx_eqz(g, "s2b-cas2")) case_s2(7);
     if (g && tx_eqz(g, "s2b-tail")) case_s2(5);
     if (co_has(g, "derive-tool", 0)) case_derive(0);
     if (co_has(g, "derive-reg-prep", 0)) case_derive(3);
