@@ -1,0 +1,116 @@
+struct LineCurve3Record {
+  v1: u32;
+  v2: u32;
+  arcLengthDivisions: u32;
+  pad: u32;
+  default1x: f64;
+  default1y: f64;
+  default1z: f64;
+  default2x: f64;
+  default2y: f64;
+  default2z: f64;
+}
+
+native function lc3_area(ptr:i64,bytes:i64) i64 {
+  return ptr>=0 && ptr<=6291456-bytes && ptr%8==0;
+}
+
+native function lc3_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a<b+m && b<a+n;
+}
+
+native function lc3_writable(dst:i64,bytes:i64,line:i64) i64 {
+  if(!lc3_area(dst,bytes) || !lc3_area(line,LineCurve3Record.size)) { return 0; }
+  let first=ux_u32(line+LineCurve3Record.v1);
+  let last=ux_u32(line+LineCurve3Record.v2);
+  return lc3_area(first,24) && lc3_area(last,24) &&
+    !lc3_overlap(dst,bytes,line,LineCurve3Record.size) &&
+    !lc3_overlap(dst,bytes,first,24) && !lc3_overlap(dst,bytes,last,24);
+}
+
+// Explicit endpoints stay caller-owned. -1 selects separate embedded vectors.
+native function LineCurve3_init(line:i64,v1:i64,v2:i64) i64 {
+  if(!lc3_area(line,LineCurve3Record.size) ||
+     (v1!=0-1 && (!lc3_area(v1,24) || lc3_overlap(line,LineCurve3Record.size,v1,24))) ||
+     (v2!=0-1 && (!lc3_area(v2,24) || lc3_overlap(line,LineCurve3Record.size,v2,24)))) { return 0-1; }
+  if(v1==0-1) { v1=frame_put(line+LineCurve3Record.default1x,0.0,0.0,0.0); }
+  if(v2==0-1) { v2=frame_put(line+LineCurve3Record.default2x,0.0,0.0,0.0); }
+  let a=ux_u32_put(line+LineCurve3Record.v1,v1);
+  let b=ux_u32_put(line+LineCurve3Record.v2,v2);
+  let c=ux_u32_put(line+LineCurve3Record.arcLengthDivisions,200);
+  return line;
+}
+
+native function LineCurve3_sample(dst:i64,line:i64,t:f64) i64 {
+  if(!lc3_writable(dst,24,line)) { return 0-1; }
+  let first=ux_u32(line+LineCurve3Record.v1);
+  let last=ux_u32(line+LineCurve3Record.v2);
+  if(t==1.0) { return frame_put(dst,ux_f64(last),ux_f64(last+8),ux_f64(last+16)); }
+  let x=ux_f64(first);
+  let y=ux_f64(first+8);
+  let z=ux_f64(first+16);
+  return frame_put(dst,x+(ux_f64(last)-x)*t,y+(ux_f64(last+8)-y)*t,z+(ux_f64(last+16)-z)*t);
+}
+
+function lc3_sample_arc(env,...args) {
+  return LineCurve3_sample(env[0],env[1],args[0]);
+}
+
+function LineCurve3_getArcLengths(line,...args) {
+  let cache=f64_floor_i64(args[0]*1.0);
+  let sample=f64_floor_i64(args[1]*1.0);
+  let refresh=args[2];
+  let result=0-1;
+  if(lc3_writable(sample,24,f64_floor_i64(line*1.0)) && lc3_writable(cache,CurveArcCache.size,f64_floor_i64(line*1.0)) &&
+     !lc3_overlap(cache,CurveArcCache.size,sample,24)) {
+    let divisions=ux_u32(f64_floor_i64(line*1.0)+LineCurve3Record.arcLengthDivisions);
+    let table=ux_u32(cache+CurveArcCache.table);
+    let capacity=ux_u32(cache+CurveArcCache.capacity);
+    if(divisions>0 && divisions<capacity && capacity<=786432 &&
+       lc3_writable(table,8*capacity,f64_floor_i64(line*1.0)) &&
+       !lc3_overlap(table,8*capacity,cache,CurveArcCache.size) &&
+       !lc3_overlap(table,8*capacity,sample,24)) {
+      let evaluate=closure(lc3_sample_arc,sample,line);
+      if(refresh==0) { result=Curve_getCachedLengths(evaluate,cache,divisions,3); }
+      else { result=Curve_updateArcLengths(evaluate,cache,divisions,3); }
+    }
+  }
+  return result;
+}
+
+// The caller provides the table returned by LineCurve3_getArcLengths.
+native function LineCurve3_getUtoTmapping(line:i64,table:i64,u:f64,distance:f64) f64 {
+  if(!lc3_area(line,LineCurve3Record.size)) { return 0.0/0.0; }
+  let divisions=ux_u32(line+LineCurve3Record.arcLengthDivisions);
+  if(divisions<=0 || divisions>=786432 || !lc3_writable(table,8*(divisions+1),line)) { return 0.0/0.0; }
+  if(distance!=distance) { distance=0.0; }
+  if(distance==0.0 && ux_f64(table+divisions*8)==0.0 && u-u==0.0) {
+    // r160 returns the first searched midpoint on an all-zero table.
+    return (divisions/2)*1.0/divisions;
+  }
+  return Curve_getUtoTdistance(table,divisions,u,distance);
+}
+
+// Each output row is tangent, normal, binormal (three f64 channels each).
+native function LineCurve3_computeFrenetFrames(out:i64,line:i64,segments:i64,closed:i64,work:i64) i64 {
+  if(segments<0 || segments>=87381 || !lc3_writable(out,72*(segments+1),line) ||
+     !lc3_writable(work,48,line) || lc3_overlap(out,72*(segments+1),work,48)) { return 0-1; }
+  let first=ux_u32(line+LineCurve3Record.v1);
+  let last=ux_u32(line+LineCurve3Record.v2);
+  let delta=frame_combine(out,last,first,0.0-1.0);
+  let tangent=frame_normalize(delta);
+  let normal=curve_initial_normal(out+24,tangent,work,work+24);
+  let binormal=frame_cross(out+48,tangent,normal);
+  let twist=0.0;
+  if(closed==1 && segments>0) { twist=curve_frame_angle(curve_frame_dot(normal,normal))/segments; }
+  let i=1;
+  while(i<=segments) {
+    let row=out+i*72;
+    let t=frame_put(row,ux_f64(tangent),ux_f64(tangent+8),ux_f64(tangent+16));
+    let n=frame_put(row+24,ux_f64(normal),ux_f64(normal+8),ux_f64(normal+16));
+    if(twist!=0.0) { let rotated=curve_frame_rotate(n,n,tangent,twist*i); }
+    let b=frame_cross(row+48,t,n);
+    i=i+1;
+  }
+  return out;
+}
