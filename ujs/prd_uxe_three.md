@@ -259,9 +259,11 @@ JPEG 基座与探针改走 C6 版本化链接。两块 JPEG 由 .cx 构造，Chr
 
 JPEG Color444 门用 `UXE_JPEG_COLOR_WASM_CACHE` 选择缓存，调用 `cx ujs/tests/jpeg-color-io.cx -- --prepare` 后运行无参数功能门。独立准备冷编译 6153 毫秒，节点总耗时 14492 毫秒。缓存命中探针编译为 40 毫秒，十三项真实 Chrome 与 r160 对照通过。`-- --prepare --check` 复验哈希。空缓存及解码和加载器篡改各具名非零。
 
+渐进灰度 JPEG 门设置 `UXE_JPEG_GRAY_WASM_CACHE`，准备与摘要验证参数相同。冷基座编译 6172 毫秒，独立节点耗时 15070 毫秒。缓存命中探针编译 31 毫秒，十三项通过且两个旧篡改分别失败。PNG 编码和存储块门仅隔离复验，两项都通过，沿用原门。
+
 Geometry JSON 门使用同样的准备与功能节点。设置 `UXE_GEOMETRY_WASM_CACHE` 后运行 `cx ujs/tests/geometry-json-load-struct.cx -- --prepare`，再运行无参数功能门。准备冷编译实测 6343 毫秒，消费者编译 41 毫秒，六秒界保留。Chrome 用十套独立实例对照 r160 与原金值。准备校验加 `-- --prepare --check` 重编比对缓存摘要。缺失缓存具名退出。
 
-已分离的门共用一个 flow 入口。先创建私有缓存目录，选择 `jpeg`、`geometry`、`gpu-flat`、`gpu-material`、`gpu-light`、`gpu-tail`，或用 `all` 并行准备全部基座。准备节点的总预算为 55 秒，成功后才开始功能门。
+已分离的门共用一个 flow 入口。先创建私有缓存目录，选择 `jpeg`、`jpeg-color`、`jpeg-gray`、`geometry`、`gpu-flat`、`gpu-material`、`gpu-light`、`gpu-tail`，或用 `all` 并行准备全部基座。准备节点的总预算为 55 秒，成功后才开始功能门。
 
 ```sh
 cx ujs/tools-ux/linked-wasm-flow.cx -- /tmp/uxe-linked-cache jpeg | cx tools/devsvc.cx -- flow - --par 2

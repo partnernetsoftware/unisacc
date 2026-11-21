@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="wasm-cases">pending</pre>
+<script type="module">
+const status = document.querySelector("#wasm-cases");
+try {
+  const read = async name => new Uint8Array(await (await fetch(name)).arrayBuffer());
+  const [baseBytes, probeBytes, input] = await Promise.all([
+    read("base.wasm"), read("probe.wasm"), read("input.bin")
+  ]);
+  const [baseModule, probeModule] = await Promise.all([
+    WebAssembly.compile(baseBytes), WebAssembly.compile(probeBytes)
+  ]);
+  const query = new URLSearchParams(location.search);
+  const mode = query.get("mode");
+  const first = BigInt(query.get("first"));
+  const second = BigInt(query.get("second"));
+  if (input.length !== 512) throw new Error("invalid fixture size");
+  const actual = [];
+  for (let index = 0; index < 13; index++) {
+    const base = await WebAssembly.instantiate(baseModule);
+    const dispatch = base.exports.uxe_jpeg_gray_dispatch;
+    if (base.exports.uxe_abi_version() !== 1 || dispatch(0n,0n,0n) !== 1n ||
+        dispatch(0n,2n,0n) !== 13n || BigInt(input.length) > dispatch(0n,1n,0n)) {
+      throw new Error("JPEG ProgressiveGray base ABI mismatch");
+    }
+    const probe = await WebAssembly.instantiate(probeModule,{
+      uxe_jpeg_gray_v1: {uxe_jpeg_gray_dispatch: dispatch}
+    });
+    if (probe.exports.uxe_abi_version() !== 1 || base.exports.memory === probe.exports.memory) {
+      throw new Error("JPEG ProgressiveGray probe ABI mismatch");
+    }
+    for (let offset = 0; offset < input.length; offset++) {
+      if (dispatch(1n,BigInt(offset),BigInt(input[offset])) !== 1n) throw new Error("fixture write failed");
+    }
+    if (dispatch(2n,first,second) !== 1n) throw new Error("fixture length failed");
+    const selector = mode === "1" && index === 1 ? 33 : mode === "2" && index === 11 ? 75 : index;
+    actual.push(probe.exports.uxe_evaluate_case(BigInt(selector)));
+  }
+  status.textContent = JSON.stringify(actual);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>
