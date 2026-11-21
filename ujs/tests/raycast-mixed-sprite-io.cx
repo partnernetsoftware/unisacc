@@ -1,0 +1,65 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","f64-math","vector-scalar","vector3","ray","triangle","raycast-memory",
+        "raycaster-state","raycast-affine","raycast-hit-sort","raycast-vertices","raycast-points",
+        "raycast-mesh","raycast-buffer","raycast-sprite","raycast-mixed","raycast-mixed-sprite",0};
+    const char *setup=
+        "let ray=0;let mesh=128;let points=192;let sprite=256;let world=384;let spriteWorld=512;let scale=640;"
+        "let mp=704;let pp=768;let mh=1024;let sh=1152;let ph=1280;let blocks=1536;let rows=1792;let work=2304;"
+        "let init=Raycaster_default(ray);let ox=ux_f64_put(ray+RaycasterState.ox,0.25);"
+        "let scaleSet=Vector3_set(scale,1.0,1.0,1.0);let i=0;"
+        "while(i<16){let x=ux_f64_put(world+i*8,(i%5==0)*1.0);"
+        "let y=ux_f64_put(spriteWorld+i*8,(i%5==0)*1.0);i=i+1;}"
+        "let at=ux_f64_put(spriteWorld+112,0.0-3.0);"
+        "let m0=ux_u32_put(mesh+RayMeshBuffer.positions,mp);let m1=ux_u32_put(mesh+RayMeshBuffer.vertexCount,3);"
+        "let m2=ux_u32_put(mesh+RayMeshBuffer.positionStride,12);let m3=ux_u32_put(mesh+RayMeshBuffer.faceCount,1);"
+        "let m4=ux_u32_put(mesh+RayMeshBuffer.matrixWorld,world);let m5=ux_u32_put(mesh+RayMeshBuffer.layerMask,1);"
+        "let x0=ux_f32_put(mp,0.0-1.0);let y0=ux_f32_put(mp+4,0.0-1.0);let z0=ux_f32_put(mp+8,0.0-3.0);"
+        "let x1=ux_f32_put(mp+12,1.0);let y1=ux_f32_put(mp+16,0.0-1.0);let z1=ux_f32_put(mp+20,0.0-3.0);"
+        "let y2=ux_f32_put(mp+28,1.0);let z2=ux_f32_put(mp+32,0.0-3.0);"
+        "let p0=ux_u32_put(points+RayPointsBuffer.positions,pp);let p1=ux_u32_put(points+RayPointsBuffer.count,2);"
+        "let p2=ux_u32_put(points+RayPointsBuffer.stride,12);let p3=ux_u32_put(points+RayPointsBuffer.drawCount,2);"
+        "let p4=ux_u32_put(points+RayPointsBuffer.world,world);let p5=ux_u32_put(points+RayPointsBuffer.scale,scale);"
+        "let p6=ux_u32_put(points+RayPointsBuffer.layerMask,1);"
+        "let q0=ux_f32_put(pp,0.5);let qz=ux_f32_put(pp+8,0.0-3.0);let zz=ux_f32_put(pp+20,0.0-1.0);"
+        "let s0=ux_u32_put(sprite+RaySpriteQuery.world,spriteWorld);let s1=ux_u32_put(sprite+RaySpriteQuery.view,world);"
+        "let s2=ux_u32_put(sprite+RaySpriteQuery.layerMask,1);let s3=ux_f64_put(sprite+RaySpriteQuery.centerX,0.5);"
+        "let s4=ux_f64_put(sprite+RaySpriteQuery.centerY,0.5);";
+    #define PICK "let mn=Raycaster_intersectMeshBuffer(ray,mesh,mh,1,work,512);" \
+        "let sn=Raycaster_intersectSprite(ray,sprite,sh);" \
+        "let pn=Raycaster_intersectPointsBuffer(ray,points,ph,2,work,512);" \
+        "let x=ux_u32_put(blocks+RayMixedBlock.kind,1);let y=ux_u32_put(blocks+RayMixedBlock.node,11);" \
+        "let z=ux_u32_put(blocks+RayMixedBlock.hits,mh);let count=ux_u32_put(blocks+RayMixedBlock.count,mn);" \
+        "let box=blocks+RayMixedBlock.size;let a=ux_u32_put(box+RayMixedBlock.kind,2);" \
+        "let b=ux_u32_put(box+RayMixedBlock.node,13);let c=ux_u32_put(box+RayMixedBlock.hits,ph);" \
+        "let d=ux_u32_put(box+RayMixedBlock.count,pn);"
+    #define MERGE "let m=Raycaster_mergeHitBlocks(blocks,1,rows,1,work,512);" \
+        "let stamp=0;if(sn==1){stamp=Raycaster_stageSpriteHit(12,sh,rows+m*RayMixedHit.size);}" \
+        "let p=Raycaster_mergeHitBlocks(box,1,rows+(m+stamp)*RayMixedHit.size,2,work,512);" \
+        "let hits=Raycaster_sortMixedRows(rows,m+p+stamp,work,512);"
+    #define NODE(N) "return 0.0+ux_u32(rows+" #N "*RayMixedHit.size+RayMixedHit.node);"
+    const char *cases[]={
+        PICK MERGE "return 0.0+hits;", PICK MERGE NODE(0), PICK MERGE NODE(1), PICK MERGE NODE(2), PICK MERGE NODE(3),
+        PICK MERGE "return ux_f64(rows+2*RayMixedHit.size+RayMixedHit.distance);",
+        PICK MERGE "let source=ux_u32(rows+2*RayMixedHit.size+RayMixedHit.source);return ux_f64(source+RaySpriteHit.u);",
+        PICK MERGE "let source=ux_u32(rows+2*RayMixedHit.size+RayMixedHit.source);return ux_f64(source+RaySpriteHit.v);",
+        PICK MERGE "return 0.0+ux_u32(rows+2*RayMixedHit.size+RayMixedHit.kind);",
+        PICK MERGE "return 0.0+ux_u32(rows+2*RayMixedHit.size+RayMixedHit.index);",
+        "let filter=ux_u32_put(sprite+RaySpriteQuery.layerMask,2);" PICK MERGE "return 0.0+hits;",
+        PICK "return 0.0+Raycaster_stageSpriteHit(12,sh,sh);",
+        PICK "let staged=Raycaster_stageSpriteHit(12,sh,rows);"
+          "return 0.0+Raycaster_sortMixedRows(rows,1,sh,512);",
+    };
+    const double gold[]={4,13,11,12,13,3,0.75,0.5,3,4294967295.0,3,-1,-1};
+    return g_wasm_batch_page("G_RAY mixed Sprite results","raycast-mixed-sprite",
+        "ujs/practice/uxe/test/wasm-batch.html",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?3:-1,PICK
+        "let first=Raycaster_stageSpriteHit(12,sh,rows);"
+        "let m=Raycaster_mergeHitBlocks(blocks,1,rows+RayMixedHit.size,1,work,512);"
+        "let p=Raycaster_mergeHitBlocks(box,1,rows+2*RayMixedHit.size,2,work,512);"
+        "let hits=Raycaster_sortMixedRows(rows,1+m+p,work,512);" NODE(2));
+}
