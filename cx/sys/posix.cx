@@ -14,7 +14,9 @@
    the same on every target; only the numbers below differ. */
 
 /* syp_dents: getdents64 on Linux, getdirentries64 on macOS (different record layouts, see sy_dir_names). */
-#if defined(__APPLE__)
+#if defined(__APPLE__) && defined(__aarch64__)
+#define SYP_NUM(name) (sn_osx_arm64_##name##_hi * 65536L + sn_osx_arm64_##name##_lo)
+#elif defined(__APPLE__) && defined(__x86_64__)
 #define SYP_NUM(name) (sn_osx_x86_64_##name##_hi * 65536L + sn_osx_x86_64_##name##_lo)
 #elif defined(__linux__) && defined(__aarch64__)
 #define SYP_NUM(name) (sn_lnx_arm64_##name##_hi * 65536L + sn_lnx_arm64_##name##_lo)
@@ -31,7 +33,11 @@ static const long syp_ok = SYP_NUM(syp_ok), syp_setsid = SYP_NUM(syp_setsid),
     syp_dents = SYP_NUM(syp_dents), syp_mac = SYP_NUM(syp_mac),
     syp_at_removedir = SYP_NUM(syp_at_removedir), syp_tiocgpgrp = SYP_NUM(syp_tiocgpgrp),
     syp_tiocspgrp = SYP_NUM(syp_tiocspgrp), syp_at_fdcwd = SYP_NUM(syp_at_fdcwd);
-static const long syp_setpgid = SYP_NUM(sy_setpgid);
+static const long syp_setpgid = SYP_NUM(sy_setpgid),
+    syp_pread = SYP_NUM(syp_pread), syp_pwrite = SYP_NUM(syp_pwrite),
+    syp_utimensat = SYP_NUM(syp_utimensat), syp_prlimit64 = SYP_NUM(syp_prlimit64),
+    syp_getrlimit = SYP_NUM(syp_getrlimit), syp_setrlimit = SYP_NUM(syp_setrlimit),
+    syp_rlim_as = SYP_NUM(syp_rlim_as), syp_rlim_nofile = SYP_NUM(syp_rlim_nofile);
 #undef SYP_NUM
 
 /* __syscall6 returns -errno on failure on every target (the carried headers
@@ -215,25 +221,66 @@ int sy_lockf(int fd, int write, int wait) { return syp_lockf_os(fd, write ? 1 : 
 
 int sy_unlockf(int fd) { return syp_lockf_os(fd, 2, 0); }
 
-/* Current RLIMIT_AS soft limit in bytes, or -1 when it is unlimited, unknown,
-   or the platform has no address-space limit (Windows). getrlimit is the
-   Linux x86_64 syscall class 97; _UNISA_SC maps it per platform. */
-static long syp_rlimit_as_os(void) {
-#if defined(_WIN32)
+/* Generic POSIX resource limits (rlimit).
+   Syscall numbers and resource IDs come from exec/facts/sys-syscalls.tsv via sys.sysnums
+   (prlimit64 on Linux x86_64/arm64, getrlimit/setrlimit on macOS; -ENOSYS on Windows). */
+typedef struct {
+    unsigned long long cur;
+    unsigned long long max;
+} sy_rlimit_t;
+
+enum {
+    SY_RLIM_CPU = 0,
+    SY_RLIM_FSIZE = 1,
+    SY_RLIM_DATA = 2,
+    SY_RLIM_STACK = 3,
+    SY_RLIM_CORE = 4,
+    SY_RLIM_AS = 5,
+    SY_RLIM_NOFILE = 6
+};
+
+static long syp_rlim_res(int res) {
+    if (res >= SY_RLIM_CPU && res <= SY_RLIM_CORE) return (long)res;
+    if (res == SY_RLIM_AS) return syp_rlim_as;
+    if (res == SY_RLIM_NOFILE) return syp_rlim_nofile;
     return -1;
-#else
-    struct { unsigned long cur, max; } rl = {0, 0};
-    long rc;
-    rc = (long)__syscall6(_UNISA_SC(97), 9, (long)&rl, 0, 0, 0);   /* getrlimit, RLIMIT_AS */
-    if (rc < 0) return -1;
-    if (rl.cur == ~0UL) return -1;                                  /* RLIM_INFINITY */
-    if (rl.cur > 0x7FFFFFFFFFFFL) return -1;
-    return (long)rl.cur;
-#endif
 }
 
+int sy_getrlimit(int res, sy_rlimit_t *out) {
+    long r, rc;
+    if (!out) return -EINVAL;
+    r = syp_rlim_res(res);
+    if (r < 0) return -EINVAL;
+    if (!syp_ok) return -ENOSYS;
+    if (syp_prlimit64) rc = syp(syp_prlimit64, 0, r, 0, (long)out, 0);
+    else if (syp_getrlimit) rc = syp(syp_getrlimit, r, (long)out, 0, 0, 0);
+    else return -ENOSYS;
+    return rc < 0 ? (int)rc : 0;
+}
+
+int sy_setrlimit(int res, const sy_rlimit_t *lim) {
+    long r, rc;
+    if (!lim) return -EINVAL;
+    r = syp_rlim_res(res);
+    if (r < 0) return -EINVAL;
+    if (!syp_ok) return -ENOSYS;
+    if (syp_prlimit64) rc = syp(syp_prlimit64, 0, r, (long)lim, 0, 0);
+    else if (syp_setrlimit) rc = syp(syp_setrlimit, r, (long)lim, 0, 0, 0);
+    else return -ENOSYS;
+    return rc < 0 ? (int)rc : 0;
+}
+
+/* Current RLIMIT_AS soft limit in bytes, -1 when unlimited (or no address-space limit
+   on Windows), or negative -errno on syscall failure. */
 long sy_rlimit_as(void) {
-    return syp_rlimit_as_os();
+    sy_rlimit_t rl;
+    int rc;
+    if (!syp_ok) return -1;
+    rl.cur = 0; rl.max = 0;
+    rc = sy_getrlimit(SY_RLIM_AS, &rl);
+    if (rc < 0) return (long)rc;
+    if (rl.cur == ~0ULL || rl.cur > 0x7FFFFFFFFFFFULL) return -1;
+    return (long)rl.cur;
 }
 
 /* ---- W3: directory iterator with kinds, remove_all, link, utimes, pread/pwrite
@@ -299,7 +346,6 @@ int sy_dir_next(sy_dir_t *d) {
         ty = syp_mac ? r[20] : r[18];
         if (syp_mac) len = r[18] | (r[19] << 8);
         else { len = 0; while (at + 19 + len < syp_ds[i].len && at + 19 + len < at + reclen && name[len]) len++; }
-        ty = syp_mac ? r[20] : r[18];
         if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')) continue;
         if (len > 255) return -ENAMETOOLONG;
         if (mm_copy(d->name, (long)sizeof d->name, name, len)) return -ENAMETOOLONG;
@@ -365,31 +411,25 @@ int sy_link(const char *from, const char *to) {
 }
 
 /* Set PATH's access and modification times (seconds + nanoseconds; follows symbolic links).
-   0, or -errno; -EINVAL for ns outside 0..999999999; -ENOSYS on Windows. */
-static long syp_sc3_os(long num, long a, long b, long c, long d) {
-#ifdef _WIN32
-    (void)num; (void)a; (void)b; (void)c; (void)d;
-    return -ENOSYS;
-#else
-    return __syscall6(_UNISA_SC(num), a, b, c, d, 0);
-#endif
-}
-
+   0, or -errno; -EINVAL for ns outside 0..999999999; -ENOSYS on Windows or targets without utimensat. */
 int sy_utimes(const char *path, long atime_s, long atime_ns, long mtime_s, long mtime_ns) {
     long ts[4];
     if (!path || !path[0] || atime_ns < 0 || atime_ns > 999999999L || mtime_ns < 0 || mtime_ns > 999999999L) return -EINVAL;
+    if (!syp_utimensat) return -ENOSYS;
     ts[0] = atime_s; ts[1] = atime_ns; ts[2] = mtime_s; ts[3] = mtime_ns;
-    return (int)syp_sc3_os(280, sy_at_fdcwd(), (long)path, (long)ts, 0);
+    return (int)syp(syp_utimensat, sy_at_fdcwd(), (long)path, (long)ts, 0, 0);
 }
 
 /* read at byte offset OFF without moving the file position.  Bytes read (0 at end), or -errno. */
 long sy_pread(int fd, void *buf, long n, int64_t off) {
     if (!buf || n < 0 || off < 0) return -EINVAL;
-    return syp_sc3_os(17, fd, (long)buf, n, (long)off);
+    if (!syp_pread) return -ENOSYS;
+    return syp(syp_pread, fd, (long)buf, n, (long)off, 0);
 }
 
 /* write at byte offset OFF without moving the file position.  Bytes written, or -errno. */
 long sy_pwrite(int fd, const void *buf, long n, int64_t off) {
     if (!buf || n < 0 || off < 0) return -EINVAL;
-    return syp_sc3_os(18, fd, (long)buf, n, (long)off);
+    if (!syp_pwrite) return -ENOSYS;
+    return syp(syp_pwrite, fd, (long)buf, n, (long)off, 0);
 }
