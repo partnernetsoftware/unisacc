@@ -89,7 +89,7 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
     },
   };
 
-  function copy(stamp, read, write, shader) {
+  function render(stamp, read, write, shader, additive) {
     if (gl.isContextLost()) return -6n;
     if (stamp !== BigInt(currentGeneration())) return -3n;
     if (read < 1n || read > 1024n || write < 0n || write > 1024n || read === write) return -1n;
@@ -99,7 +99,8 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
       { kind: 0, width: gl.drawingBufferWidth, height: gl.drawingBufferHeight } :
       descriptors.get(Number(write));
     if (source?.kind !== 0 || output?.kind !== 0 ||
-        source.width !== output.width || source.height !== output.height) return -12n;
+        output.width < 1 || output.height < 1 ||
+        (!additive && (source.width !== output.width || source.height !== output.height))) return -12n;
     const sources = readShaders(memory, shader);
     if (!sources) return -1n;
     const program = copyProgram(gl, ...sources);
@@ -113,6 +114,8 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
     const viewport = gl.getParameter(gl.VIEWPORT);
     const colorMask = gl.getParameter(gl.COLOR_WRITEMASK);
     const activeUnit = gl.getParameter(gl.ACTIVE_TEXTURE);
+    const blendState = additive ? [gl.BLEND_EQUATION_RGB, gl.BLEND_EQUATION_ALPHA, gl.BLEND_SRC_RGB,
+      gl.BLEND_DST_RGB, gl.BLEND_SRC_ALPHA, gl.BLEND_DST_ALPHA].map(value => gl.getParameter(value)) : null;
     const toggles = [gl.BLEND, gl.DEPTH_TEST, gl.STENCIL_TEST, gl.CULL_FACE, gl.SCISSOR_TEST,
       gl.RASTERIZER_DISCARD, gl.SAMPLE_ALPHA_TO_COVERAGE, gl.SAMPLE_COVERAGE, gl.DITHER];
     const enabled = toggles.map(state => gl.isEnabled(state));
@@ -125,6 +128,11 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
         gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
       if (!texture || base.execute(10, [Number(write), 0]) !== 0n) return -14n;
       for (const state of toggles) gl.disable(state);
+      if (additive) {
+        gl.enable(gl.BLEND);
+        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE, gl.SRC_ALPHA, gl.ONE);
+      }
       gl.colorMask(true, true, true, true);
       gl.viewport(0, 0, output.width, output.height);
       gl.useProgram(program);
@@ -140,6 +148,10 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
       gl.useProgram(previousProgram);
       gl.viewport(...viewport);
       gl.colorMask(...colorMask);
+      if (blendState) {
+        gl.blendEquationSeparate(blendState[0], blendState[1]);
+        gl.blendFuncSeparate(blendState[2], blendState[3], blendState[4], blendState[5]);
+      }
       for (const [i, state] of toggles.entries()) {
         if (enabled[i]) gl.enable(state);
         else gl.disable(state);
@@ -148,5 +160,9 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
       gl.deleteProgram(program);
     }
   }
-  return { targets, copy };
+  return {
+    targets,
+    copy: (stamp, read, write, shader) => render(stamp, read, write, shader, false),
+    add: (stamp, read, write, shader) => render(stamp, read, write, shader, true),
+  };
 }

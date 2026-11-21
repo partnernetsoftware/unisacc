@@ -1,0 +1,22 @@
+native function bloom_screen_shader(shader:i64) i64 {
+  if(!composer_span(shader,GpuShaderSource.size)) { return 0; }
+  let vs=ux_u32(shader+GpuShaderSource.vertex);
+  let fs=ux_u32(shader+GpuShaderSource.fragment);
+  let vn=ux_u32(shader+GpuShaderSource.vertexBytes);
+  let fn=ux_u32(shader+GpuShaderSource.fragmentBytes);
+  return vn>0 && vn<=4096 && fn>0 && fn<=4096 && vs<=6291456-vn && fs<=6291456-fn;
+}
+
+// The original is drawn first, then an independently sized bloom target is
+// sampled and added. The caller commits the non-swapping plan on success.
+native function UnrealBloom_gpuScreen(step:i64,bloom:i64,generation:i64,originalShader:i64,bloomShader:i64) i64 {
+  if(!composer_span(step,ComposerStep.size) || generation<1 || generation>4294967295 ||
+     bloom<1 || bloom>1024 || !bloom_screen_shader(originalShader) ||
+     !bloom_screen_shader(bloomShader)) { return 0-1; }
+  let read=ux_u32(step+ComposerStep.read);
+  if(read<1 || read>1024 || read==bloom || ux_u32(step+ComposerStep.flags)!=1 ||
+     ux_u32(step+ComposerStep.screen)!=1) { return 0-1; }
+  let seeded=host_gpu_native_copy(generation,read,0,originalShader);
+  if(seeded!=0) { return seeded; }
+  return host_gpu_native_add(generation,bloom,0,bloomShader);
+}
