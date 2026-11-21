@@ -1,0 +1,117 @@
+#pragma unisa module g_jpeg_color_link
+#pragma unisa use wasm_test_cache
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+
+static int jpeg_color_compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("JPEG_COLOR_LINK %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && size && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int jpeg_color_base(const char *wasm,int prepare,int check) {
+    const char *sources[]={
+        "ujs/practice/uxe/test/jpeg-color-linked-base-layout.ujs",
+        "ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/jpeg-header.ujs",
+        "ujs/practice/uxe/base/jpeg-entropy.ujs",
+        "ujs/practice/uxe/base/jpeg-idct.ujs",
+        "ujs/practice/uxe/base/jpeg-gray.ujs",
+        "ujs/practice/uxe/base/jpeg-color.ujs",
+        "ujs/practice/uxe/base/jpeg-progressive.ujs",
+        "ujs/practice/uxe/base/jpeg-progressive-gray.ujs",
+        "ujs/practice/uxe/base/jpeg-progressive-color.ujs",
+        "ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/loadingmanager.ujs",
+        "ujs/practice/uxe/base/fileloader.ujs",
+        "ujs/practice/uxe/base/image-layout.ujs",
+        "ujs/practice/uxe/base/image-file.ujs",
+        "ujs/practice/uxe/base/imageloader-jpeg.ujs",
+        "ujs/practice/uxe/test/jpeg-color-linked-base.ujs",0
+    };
+    const char *cache=sy_env("UXE_JPEG_COLOR_WASM_CACHE");
+    if(!cache || !cache[0]) {
+        printf("JPEG_COLOR_LINK cache=missing env=UXE_JPEG_COLOR_WASM_CACHE 基座缓存缺失：先运行准备步骤 --prepare\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(sources,key)) {
+        printf("JPEG_COLOR_LINK cache=key_error\n");
+        return 1;
+    }
+    int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(len<0 || len>=(int)sizeof record) return 2;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("JPEG_COLOR_LINK cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("JPEG_COLOR_LINK cache=missing key=%s 基座缓存缺失：先运行准备步骤 --prepare\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("JPEG_COLOR_LINK cache=refused rc=%d key=%s\n",rc,key);
+        return 1;
+    }
+    char *args[21]={"./ujs/ujs2wasm.com"};
+    int n=0;
+    while(sources[n]) { args[n+1]=(char *)sources[n]; n++; }
+    args[n+1]="-o";
+    args[n+2]=(char *)wasm;
+    if(jpeg_color_compile(args,"base_prepare",50)) return 1;
+    if(check) return wasm_test_cache_verify(wasm,sha);
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+int g_jpeg_color_prepare(int check) {
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-jpeg-color-prepare-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    const long start=sy_now_ms();
+    int rc=jpeg_color_base(wasm,1,check);
+    if(sy_remove_all(dir)) rc=1;
+    printf("JPEG_COLOR_LINK prepare check=%d ms=%ld failed=%d\n",check,sy_now_ms()-start,rc!=0);
+    return rc;
+}
+
+int g_jpeg_color_link(const unsigned char *input,int input_size,const double *gold,int count,int mode) {
+    if(count!=13 || input_size<83 || input_size>160) {
+        printf("JPEG_COLOR_LINK fixture cases=%d bytes=%d failed=1\n",count,input_size);
+        return 1;
+    }
+    char dir[256],base[320],probe[320],page[320],blob[320],url[360];
+    if(sy_mkdtemp("/tmp","uxe-jpeg-color-link-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    tx_snprintf(blob,sizeof blob,"%s/input.bin",dir);
+    tx_snprintf(url,sizeof url,"file://%s?mode=%d",page,mode);
+    char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/jpeg-color-linked-probe.ujs","-o",probe,0};
+    double reference[13],actual[13];
+    int failed=jpeg_color_base(base,0,0) || jpeg_color_compile(args,"probe",6) ||
+        sy_write_file(blob,input,input_size,0600) ||
+        sy_copy("ujs/practice/uxe/test/jpeg-color-linked-wasm.html",page,0600) ||
+        r160_wait_ref("jpeg-color",reference,count,dir) ||
+        r160_wait_read(url,"#wasm-cases",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(reference[i],gold[i],1e-9) || !g_math_near(actual[i],gold[i],1e-9)) {
+            printf("JPEG_COLOR_LINK case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_IO JpegColor444 linked cases=%d failed=%d\n",count,failed);
+    return failed;
+}
