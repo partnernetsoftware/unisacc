@@ -36,4 +36,32 @@
 - 全套 s9 尚未运行, 整体裁决保持 `NOT_QUALIFIED`;
 - `U4`(asm 标签)已拆为独立版本 `0.0.90`;
 - 2 个无生产者批(`cx-booter-ape`、`tools-default-regression`)在严格预跑中为 `UNKNOWN(no-producer)`;
-- `tests/stream-lower-domain.cx`(`daily` 批 `stream-lower-domain-format`)存在历史未声明函数 `rt_tail` 缺陷(实测 `0.0.88` 公开 Root 同挂, 非 `0.0.89` 回归), 以及 `prerun-drive` 799 批撞顶 `PD_MAX_WINS=512`(已记 `R74` 排 `0.0.90` 前修复)。
+- `tests/stream-lower-domain.cx`(`daily` 批 `stream-lower-domain-format`)存在历史未声明函数 `rt_tail` 缺陷(实测 `0.0.88` 公开 Root 同挂, 非 `0.0.89` 回归), 以及 `prerun-drive` 799 批撞顶 `PD_MAX_WINS=512`(已记 `R74` 排 `0.0.90` 前修复);
+- `tier=daily` 批 818 个中 490 个自 `v0.0.86` 起未被冷编, 全量冷编扫 117 个唯一入口(383 批)在 `0.0.88` 产品下 115 通过 2 失败(`stream-lower-domain`、`cx-host-run`, 均为测试源码缺前向声明, 发布后修);
+- 本机严格预跑只在 `lnx/x86_64` 执行; `osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 与 `lnx/arm64` 原生仅由 `ci-early` 六格冒烟子集覆盖, 未跑全量(第 4 步全量覆盖为 `UNKNOWN`)。
+
+## A1a 语言行为差异
+
+- `__builtin_trap`: 采取零地址写触发 `SIGSEGV`, 退出码为 139 而非 `SIGILL`(退出码 132);
+- `__builtin_bswap{16,32,64}`: 常量表达式位置(`case` 标签、枚举值、数组维度、静态初值等)不可用, 仅支持运行期求值;
+- 常量位置浮点实参: 内建函数在常量表达式位置传入浮点实参时直接被拒(GCC 接受并作浮点转整折叠);
+- `__builtin_clz(0)` 与 `__builtin_ctz(0)`: 输入 0 时常量折叠与运行期统一得目标位宽值(32 或 64);
+- 取内建函数地址: 对 `__builtin_*` 取地址的拒绝文案与 GCC 不同, 但同为编译期拒绝(`b15`);
+- `__builtin_unreachable` 后 `-Wall` 告警: 非 `void` 函数在 `__builtin_unreachable()` 后无显式 `return` 时, 开启 `-Wall` 仍有缺 `return` 告警现象;
+- 跨平台验证范围: `osx` 与 `win` 目标仅 `ci-early` 六格原生冒烟覆盖, 未跑全量批次。
+
+## 回滚办法
+
+- 候选级(未公开前): 保持草稿 release(`v0.0.89`)私有不公开; 若需换候选重跑 CI, 执行 `sh ./unisacc.com tools/release-chain.cx -- retry-ci --version 0.0.89 --run-id <RUN_ID> --evidence-dir release/evidence/0.0.89 --candidate release/candidate.tsv` 归档失败 CI 证据并删除陈旧草稿; 本机若已按候选模式试装 Root, 执行 `sh ./unisacc.com tools/install-ape.cx -- . --rollback --write` 恢复 `.unisacc-root-backups` 中的 `0.0.88` 备份并核 `--version` 为 `unisacc 0.0.88`。
+- 公开后(适用窗口: `0.0.89` 公开后至下一版本公开并完成读回, 回退目标 `0.0.88` 公开 APE `0e028e7de8dc1c4a5e6a5b3120e137daf8b2d3a8b3068d5af7f971a3c3a46854`, 详见 `release/evidence/0.0.89/rollback.txt`):
+  - (1) 前置与 release 撤回: 保留 `0.0.88` 公开资产与 `release/evidence/0.0.89/` 全部回执; 先将 `v0.0.89` 转回草稿并把 `Latest` 移回 `v0.0.88`, 随后读回 `isDraft`、`tagName`、资产及 `Latest`:
+    `gh -R partnernetsoftware/unisacc release edit v0.0.89 --draft=true`
+    `gh -R partnernetsoftware/unisacc release edit v0.0.88 --latest`
+    `gh -R partnernetsoftware/unisacc release view v0.0.89 --json tagName,isDraft,assets`
+    `gh -R partnernetsoftware/unisacc release view v0.0.88 --json tagName,isDraft,assets`
+    `gh api repos/partnernetsoftware/unisacc/releases/latest --jq .tag_name`
+    若确需删除 release 与 tag(前置: `Latest` 已切回 `v0.0.88` 且确认无外部引用): 执行 `gh -R partnernetsoftware/unisacc release delete v0.0.89 --yes` 与 `git push origin :refs/tags/v0.0.89 && git tag -d v0.0.89`。
+  - (2) 共享 `main` 发布记录前向撤销: 从新到旧执行 `git revert --no-edit 57de2b4ddd`(Y2)、`git revert --no-edit db00056f10`(Y1)、`git revert --no-edit aaf5e424b2`(X) 并 `git push origin HEAD:main`, 不回退冻结后他人代码, 禁止 `stash`/`reset`/`clean`/`checkout`。
+  - (3) 本机装机回退: 有备份槽时执行 `sh ./unisacc.com tools/install-ape.cx -- . --rollback --write`; 无备份槽时下载 `0.0.88` 公开 `unisacc.com` 核对 `sha256=0e028e7de8dc1c4a5e6a5b3120e137daf8b2d3a8b3068d5af7f971a3c3a46854` 后执行 `sh ./unisacc.com tools/install-ape.cx -- . <APE_PATH> 0e028e7de8dc1c4a5e6a5b3120e137daf8b2d3a8b3068d5af7f971a3c3a46854 --write`, 随后核验 `sh ./unisacc.com --version` 输出 `unisacc 0.0.88`。
+
+本说明首版缺项,已于 2026-11-22 追加
