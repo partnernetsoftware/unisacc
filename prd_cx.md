@@ -16,6 +16,43 @@ gcc / clang 产物是普通 C 产物，「not a checked .cx build」（gcc_cx.cx
 
 取数口径：2026-11-11，HEAD `6a4fa1fa6f` 私有克隆，已装 0.0.52 APE（sha `1bffabba…`）；每个数后写命令；「未测」即本次没有命令证据。
 
+## 总表. cx 核心库包总表(实测 2026-11-21)
+
+本表是 cx 侧目录、包名、模块层、四环归属与规模的唯一汇总处;本文其余各节与 [prd_cx_spec.md](prd_cx_spec.md) 的层表、包表只留各自必需的列并指回本表。版本不抄:见真源 `build/tlib-packages.tsv`(版本、依赖、包根)。文件数与字节为 2026-11-21 在 v0.0.88 工作树的实测,真源命令:`git ls-files -s cx/DIR`(模式 100644 记实体,120000 记符号链接)加 `wc -c`;只计 `.cx`,链接不计入实体数与字节。
+
+| 目录 | 包名 | 模块层 | 四环 | 实体 .cx 文件数 / 字节 | 链到 ext 的 .cx | 备注 |
+|---|---|---|---|---|---|---|
+| `cx/sys` | cx.sys(其中 21 个文件)、cx.os(其中 7 个文件) | cx-L0 | S | 28 / 204,304 | 9 个 -> `ext/sysx`(归 ext.sysx) | 两个包的源同在一个目录,按 `build/tlib-packages.tsv` 的 roots 逐文件划分;连链接共 37 项 |
+| `cx/os` | cx.os(另 2 个文件) | 待定 | S | 2 / 9,576 | 无 | 模块层待所有者定 |
+| `cx/mem` | cx.mem | cx-L0 | S | 7 / 27,110 | 1 个(`arena.cx`)-> `ext/memx`(归 ext.memx) | 连链接共 8 项 |
+| `cx/text` | cx.text | cx-L0 | S | 7 / 28,505 | 4 个(`json`、`build`、`deflate`、`num`)-> `ext/textx`(归 ext.textx) | 连链接共 11 项 |
+| `cx/path` | cx.path | 待定 | S | 1 / 15,002 | 无 | 模块层待所有者定 |
+| `cx/stream` | cx.stream | 待定 | S | 3 / 30,559 | 无 | 依赖 cx.sys、cx.os;模块层待所有者定 |
+| `cx/core`(另 `cx/owned.cx`) | cx.base | cx-L1 | K | 9 / 40,496 | 无 | 执行器;内部包 |
+| `cx/runtime` | cx.runtime | cx-L1 | K | 顶层 56 / 306,102;含 `image`、`net`、`stream` 子目录 87 / 314,704 | 无(另有 1 个 `.cx` 链接与 `sysx` 目录链接,见表下第 (5) 句) | 运行库 |
+| `cx/compiler` | cx.compile | cx-L2 | K | 顶层 47 / 455,133;含子目录 78 / 463,735 | 无 | 编译器;子结构见第 3 节 |
+| `cx/driver` | cx.driver | cx-L2 | K | 13 / 150,123 | 无(另有 `sysx` 目录链接) | 驱动 |
+| `cx/cx0` | cx.plan | AMB(未定层) | K | 顶层 2 / 137,964;含子目录 12 / 143,623 | 无 | CX0 模块规划;是否定层待所有者定 |
+| `cx/workspace` | 无 tlib 包行 | AMB(未定层) | 未列入四环 | 1 / 25,611 | 无(另有 `sysx` 目录链接) | 是否定层待所有者定 |
+| `tools/cxlib` | tools.cxlib | cx-L3(随 `tools`) | K | 本表未计 | 本表未计 | 工具侧库,只给 tools、tests |
+| `ext/<包>` | ext.memx、ext.textx、ext.sysx、ext.net、ext.crypto、ext.tsvx | EXT 包层(无层号) | X | 本表未计,以 `ext/` 目录实测为准 | 不适用 | 产品层不得 use;与源 SID 的关系见第 (5) 句 |
+
+表下说明(各一句,互不等同):
+
+- (1) 结构层 L0-L4 指产品五部分(L0 loader、L1 base 六片、L2 program、L3 nets、L4 runtime),定义在 [prd.md](prd.md) 3.1 节,与本表的模块层不是同一套编号。
+- (2) 模块层 cx-L0..cx-L3 只管 `.cx` 源码的 `use` 方向(只能向下),定义在 `tools/check-cx-layers.cx` 头注,层表与规则在第 3 节;AMB 是该检查里的未定层,不是一个层号。
+- (3) 术语层 T1-T5 是另一套术语编号,不对应结构层,也不对应模块层。
+- (4) 四环 K/S/X/A 管接口承诺(谁对外承诺、谁可冻结),定义在 0.9 节;输入类 A/B/C 管改动走哪条车道,真源 `build/lane-inputs.tsv`;两者都不是层号。
+- (5) 打包边界(编不编进 unisacc.com,即核心层与扩展层之分)是独立的一条轴,不等同于以上任何一套层编号或四环:`ext/sysx`、`ext/memx`、`ext/textx` 因 `cx/` 下的符号链接(`cx/sys` 9、`cx/mem` 1、`cx/text` 4,另 `src` 与 `cx/driver`、`cx/runtime`、`cx/workspace` 下的 `sysx` 目录链接)经 `seed/ident.c` 的 source-packages-v2 进入源 SID 与 A 类输入,`ext/crypto` 等其余 ext 包不进;去别名归身份收窄版(改 `seed/ident.c`,不改 `use` 名),详见第 3 节末条。
+
+待所有者定(本文不下结论,出处:2026-11-21 派单必读事实第 (6) 条):
+
+- (a) 「核心层」以编译闭包还是以输入类 A 为判据。
+- (b) 所有者所说「L0 至 L5」指哪一套编号(仓内三套编号均无 L5)。
+- (c) cx.path、cx.stream、`cx/os`、`cx/cx0`、`cx/workspace` 是否定层、定在哪一层。
+- (d) 「unisa 库包仓」的原意。
+- (e) ext 纯包(不经链接进源 SID 的 ext 包)是否随发行。
+
 ## 0. cx 核心 PRD(定稿 2026-11-12)
 
 本节是 cx 核心库面(`cx.*` 与 `ext.*`)的需求定稿。逐区设计与依据在 [docs/cx/design-core.md](docs/cx/design-core.md),稳定性与版本策略在 [docs/cx/stability.md](docs/cx/stability.md),四份参照调研在 `docs/cx/ref-rust.md`、`ref-node.md`、`ref-quickjs.md`、`ref-cpython.md`。第 1 节起是 cx 侧结构(CX0 流、网模块、包层、路线),与本节并行有效,节号不变。
@@ -250,16 +287,17 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | 汇编文本 | `asmtext.cx` | `as` / `view` 子命令 |
 | 骨架 | `net/` 20、`stream/` 7、`image/` 4 | 见 §2 |
 
-**模块层（cx-L0..cx-L3）与 EXT**（定义在 `tools/check-cx-layers.cx` 头注；字节为 `git ls-files` + `stat` 实测）：
+**模块层（cx-L0..cx-L3）与 EXT**（定义在 `tools/check-cx-layers.cx` 头注；文件数、字节、包名与四环归属不在此重复，见本文开头「cx 核心库包总表」，原 2026-11-11 的数字已撤）：
 
-| 层 | 目录 | 文件 / 字节 | 进源 SID |
-|---|---|---|---|
-| cx-L0 宿主对接 | `cx/sys`、`cx/mem`、`cx/text` | 27 / 141,992；6 / 20,987；7 / 34,117 | 是 |
-| cx-L1 机制 | `cx/core`、`cx/runtime` | 11 / 47,409；90 / 271,130 | 是 |
-| cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/`（25 个 .cx 203,081 B） | 14 / 100,918；78 / 397,580 | 是 |
-| cx-L3 工具、测试、应用 | `tools`（733 个 .cx）、`tests`、`apps` | 未逐项计 | 否（tools 仅 10 个支撑文件进 SID） |
-| AMB（未定层） | `cx/cx0`、`cx/workspace` | 7 / 101,017；6 / 49,394 | 是 |
-| EXT 包层 | `ext/`（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录） | 以真源目录实测为准 | 否（目录不在根集）；但 `ext/sysx`、`ext/memx`、`ext/textx` 经目录/文件符号链接参与现行源 SID（2026-11-21 实测，见下） |
+| 层 | 目录 | 进源 SID |
+|---|---|---|
+| cx-L0 宿主对接 | `cx/sys`、`cx/mem`、`cx/text` | 是 |
+| cx-L1 机制 | `cx/core`、`cx/runtime` | 是 |
+| cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/` | 是 |
+| cx-L3 工具、测试、应用 | `tools`、`tests`、`apps` | 否（tools 仅少量支撑文件进 SID，清单见下文 SID 条） |
+| AMB（未定层） | `cx/cx0`、`cx/workspace` | 是 |
+| 模块层待定 | `cx/path`、`cx/stream`、`cx/os` | 是（在 `cx` 根下） |
+| EXT 包层 | `ext/`（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录） | 否（目录不在根集）；但 `ext/sysx`、`ext/memx`、`ext/textx` 经目录/文件符号链接参与现行源 SID（2026-11-21 实测，见下） |
 
 规则与入口：
 - `use` 的包根由仓根 `cxroot.tsv`（CXROOT1，13 条 R 行）按最长前缀映射（条款 CX-U-7）。
@@ -714,16 +752,7 @@ cx = C99 受检查子集 + `#pragma unisa` 配置(`cx/spec.md` CX-L、CX-G)。�
 
 ### A2 包层与层向规则
 
-规模(实测,`git ls-files` 加 `.cx` 行数):
-
-| 层 | 目录 | 文件 / .cx 行 |
-|---|---|---|
-| L0 | `cx/sys` `cx/mem` `cx/text` | 27/3499、6/488、7/807 |
-| L1 | `cx/core` `cx/runtime` | 11/634、90/6683 |
-| L2 | `cx/driver` `cx/compiler`(及 `src/`) | 14/2381、78/8686 |
-| AMB | `cx/cx0` `cx/workspace` | 7/1434、6/102 |
-| EXT | `ext/sysx` `ext/memx` `ext/textx` `ext/crypto` `ext/tsvx` | 13/1258、5/488、5/610、15/3432、3/72 |
-| 工具库 | `tools/cxlib` | 44/7814 |
+规模与层归属:见本文开头「cx 核心库包总表」与第 3 节层表;本节原有的 2026-11-11 文件数与行数快照已撤,不再在此重复。本节的 L0、L1、L2 均指模块层 cx-L0..cx-L2。
 
 层向由 `tools/check-cx-layers.cx` 审计(5 条永久断言:编号层上行边拒绝;未解析只许白名单 ENOENT;边分区求和;产品层不得 use `ext/`;核心模块集按 `tests/cx-module-freeze.tsv` 冻结,只缩不扩)。注意:`cx/cx0`、`cx/workspace` 在该检查里是 AMB(无层号),AMB/EXT/OUT 边只报 UNKNOWN 不算通过;符号链接入口不在审计域(`tools/check-cx-layers.cx:8-14` 头注)。`src/` 下有 7 个指向 `cx/`、`ext/` 的目录软链(compiler core driver runtime sys sysx text),同一文件两个词法身份。
 
@@ -942,7 +971,7 @@ h0.cx 冷跑同法:e2 112.8、e3 99.3、e1 26.6、lower 12.9、prune 10.8、elf 
 
 ### 9.1 分层与层向规则
 来源 plans/cx-layers.md「层」「只有底层能用 include」「三个检查表」。已核对:cx/sys、cx/mem(arena bytes grow heap map slice vec)、cx/text(build codec conv deflate edit fmt iter num text utf8) 目录存在;build/layer-api/cx.sys.tsv 等为包面登记。
-- 层就是目录:cx/sys、cx/mem、cx/text 整体是 L0(宿主对接,可 include 与直调 libc/POSIX);cx/core、cx/runtime 是 L1;cx/driver、cx/compiler、src/ 是 L2;tools、tests、apps 是 L3。
+- 层就是目录:目录到模块层的归属只在本文开头「cx 核心库包总表」与第 3 节层表维护,此处不重复;本节的 L0 至 L3 均指模块层 cx-L0..cx-L3,不是结构层 L0-L4。cx-L0(宿主对接)可 include 与直调 libc/POSIX,其余层不可。
 - 上层不写 `#include`、不直调 libc/POSIX(走 sy_* mm_* tx_*)、不写平台 `#if` 与 `__syscallN`;跨模块错误只返回 `-errno`(spec CX-Y-1..4,cx/spec.md)。产品代码严格按此;tools/tests 脚本输出允许 printf(见 9.3 判据)。
 - 许可表现状:原文的两张目录白名单(tests/cxraw-layers.tsv、tests/cxinclude-boundary.tsv)现仍在库中,但 tests/cxraw.cx、cxlibc.cx、cxplatform.cx、cxinclude.cx 已改为先读文件内 dock 声明(核对:这四个文件的注释均写 "Per plans/cx-dock-pragma.md");以 9.3 为准,原文"只看 TSV"已过时。
 - 棘轮扫描面:`git ls-files` 下 `*.cx`、`cx/**/*.c|.h|.c.in`,排除 archive;src/、exec/、tools/ 的宿主 C 不在分层叙事内。一次跑 `tools/ratchets.cx`。

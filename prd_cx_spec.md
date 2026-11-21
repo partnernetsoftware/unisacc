@@ -71,12 +71,15 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 ### 3.4 层与层向
 
+本表只留写 `.cx` 必需的规则(谁能 dock、谁能调 libc)。目录对应的包名、四环、文件数与字节见 [prd_cx.md](prd_cx.md) 开头的「cx 核心库包总表」;这里的 cx-L0..cx-L3 是模块层,不等同于结构层 L0-L4、术语层 T1-T5、四环 K/S/X/A,也不等同于打包边界。
+
 | 层 | 目录 | 能否碰 libc/POSIX 与 #include |
 |---|---|---|
 | cx-L0 宿主对接 | `cx/sys`、`cx/mem`、`cx/text` | 能,且只有这里能(模块头写 `dock`) |
 | cx-L1 机制 | `cx/core`、`cx/runtime` | 不能 |
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/` | 不能 |
 | cx-L3 工具、测试、应用 | `tools`、`tests`、`apps` | 允许 printf/fprintf 给人看(本机跑,不跨目标);其余仍应走 L0 |
+| 未定层 | `cx/cx0`、`cx/workspace`(AMB);`cx/path`、`cx/stream`、`cx/os` | 模块层待所有者定;新写代码按不能处理,现有文件以其文件头是否写 `dock` 与棘轮结果为准 |
 | EXT 包层 | `ext/<包>/`(包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录) | 各包自述;产品层不得 `use` 到 ext |
 
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
@@ -86,7 +89,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 ### 3.4a 库包一览(怎么选包)
 
-真源 `build/tlib-packages.tsv`(版本、依赖、包根)与 `build/layer-api/PKG.tsv`(公开接口);本表是给写 `.cx` 的人选包用的摘要,数字为 2026-11-15 main 的接口数,以真源为准。设计取舍、审视结论与路线在 [prd_cx.md](prd_cx.md) 0.2 节。
+真源 `build/tlib-packages.tsv`(版本、依赖、包根)与 `build/layer-api/PKG.tsv`(公开接口);本表是给写 `.cx` 的人选包用的摘要,只留 use 写法、用途与谁可用,包清单与 [prd_cx.md](prd_cx.md) 开头的「cx 核心库包总表」一致,目录、模块层、四环与规模以总表为准。接口数为 2026-11-15 main 的快照,以真源为准。设计取舍、审视结论与路线在 [prd_cx.md](prd_cx.md) 0.2 节。
 
 | 包 | use 写法 | 用途 | 接口数 | 谁可用 |
 |---|---|---|---|---|

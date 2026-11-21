@@ -41,7 +41,7 @@
 
 现状与目标的差距(事实,来自 `build/tlib-packages.tsv`):
 
-- (1) tlib 侧没有 `cx.sys`、`cx.os`、`cx.mem`、`cx.text` 这四个包,它们合在 `cx.base` 里,且 `cx.base` 还装着 `cx/core`(执行器)与 `cx/owned.cx`。稳定性按 tlib 包声明,所以声明前必须拆包:`cx.sys`、`cx.os`、`cx.mem`、`cx.text` 各成一包,`cx/core` 与 `cx/owned.cx` 归入不对外承诺的内部包。
+- (1) (2026-11-21 更正)tlib 侧已拆出 `cx.sys`、`cx.os`、`cx.mem`、`cx.text` 四个包(见 `build/tlib-packages.tsv`),`cx.base` 现只含 `cx/core`(执行器)与 `cx/owned.cx`,是不对外承诺的内部包。本条原文所写「四包合在 `cx.base` 里、声明前必须拆包」已完成,不再是差距;目录与包的对应见 [prd_cx.md](../../prd_cx.md) 开头的 cx 核心库包总表。
 - (2) `cx.stream` 现依赖 `ext.memx@0.1.0`(`xs_item` 含 `mg_buf`,`xs_read_line` 收 `mg_buf`)。核心包不得依赖孵化包,所以 `mg_*` 与 `ms_*` 并入 `cx.mem`。这两族的所有权合同已是规格条款(CX-O-1 至 CX-O-5,CX-A-2 称 grow 即 `Vec<u8>`、slice 即 `&[u8]`),满足 D8 的「别人要在其上搭建且需求不再变」。从 P5.8 的事实判据。
 - (3) 函数名前缀按领域(`sy_`、`tx_`、`mm_`、`mg_`、`ms_`、`pt_`、`xs_`),不按包。迁包只改归属,不改函数名与签名(表头已写明)。因此拒 N6(9) 的「升入核心时换名并留别名」:换的只有模块路径,旧 `use` 路径留别名。
 
