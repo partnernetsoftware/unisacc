@@ -412,25 +412,42 @@ static int read_facts(const char *path,unsigned char **data,int addon) {
             if(at==f[i] || *at!=sep) return 1;
             *at++=0;
         }
-        Row *r=addon?add(f[0],'C'):find_row(f[0]);
-        int offset=addon?0:1;
-        if(!r || r->annotated || !good_milestone(f[2+offset]) || !good_priority(f[3+offset])) return 1;
-        // Add-on membership is separate from any optional implementation evidence.
-        r->annotated=!addon;
-        r->category=f[1+offset];
-        r->milestone=f[2+offset];
-        r->priority=f[3+offset];
         if(addon) {
-            if(!ends(f[4],".js") || !contains(f[4],"/")) return 1;
+            Row *r=add(f[0],'C');
+            if(!r || r->annotated || !good_milestone(f[2]) || !good_priority(f[3]) ||
+               !ends(f[4],".js") || !contains(f[4],"/")) return 1;
+            // Add-on membership is separate from implementation evidence.
+            r->category=f[1];
+            r->milestone=f[2];
+            r->priority=f[3];
             r->evidence=f[4];
-        } else {
-            if(!one_of(f[1],"|缺|部分|不适用|已有|")) return 1;
+            continue;
+        }
+        if(!good_milestone(f[3]) || !good_priority(f[4]) ||
+           !one_of(f[1],"|缺|部分|不适用|已有|")) return 1;
+        // A family fact supplies the same contract to each named export.
+        // Every member is independently resolved and checked for evidence.
+        char *name=f[0];
+        for(;;) {
+            char *end=name;
+            while(identifier(*end)) end++;
+            if(end==name || (*end && *end!=',')) return 1;
+            int more=*end==',';
+            *end=0;
+            Row *r=find_row(name);
+            if(!r || r->annotated) return 1;
+            r->category=f[2];
+            r->milestone=f[3];
+            r->priority=f[4];
             if(tx_eqz(f[1],"已有") && !capability_evidence(r,f[5],f[6])) return 1;
             if(tx_eqz(f[1],"不适用") &&
                !one_of(r->name,"|WebGL1Renderer|WebGPUCoordinateSystem|")) return 1;
+            r->annotated=1;
             r->state=f[1];
             r->methods=f[5];
             r->evidence=f[6];
+            if(!more) break;
+            name=end+1;
         }
     }
     return 0;

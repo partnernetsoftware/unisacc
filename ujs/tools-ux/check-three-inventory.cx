@@ -26,7 +26,7 @@ static int run_check(const char *unisacc,const char *generator,int expected,int 
     int rc=cx_runv_timeout(cmd,12,&out,&n);
     int ok=rc==expected && out && includes(out,n,expected?"failed=1":"rows=446 failed=0");
     if(!expected && baseline) {
-        const char *a="lane=A total=215 eligible=214 ready=37 partial=155 excluded=1 percent=17.29";
+        const char *a="lane=A total=215 eligible=214 ready=42 partial=150 excluded=1 percent=19.63";
         const char *b="lane=B total=201 eligible=200 ready=37 partial=6 excluded=1 percent=18.50";
         const char *c="lane=C total=30 eligible=30 ready=0 partial=13";
         ok=ok && includes(out,n,a) && includes(out,n,b) && includes(out,n,c) &&
@@ -42,6 +42,19 @@ static int flip(const char *path) {
     if(sy_read_file(path,&raw,&size,4000000) || size<2) { mm_free(raw); return 1; }
     raw[0]^=1;
     int rc=sy_write_file(path,raw,size,0600)!=0;
+    mm_free(raw);
+    return rc;
+}
+
+static int mutate_family(void) {
+    static const char names[]="QuadraticBezierCurve,QuadraticBezierCurve3,CubicBezierCurve,CubicBezierCurve3\t";
+    unsigned char *raw=0;
+    int64_t size=0;
+    if(sy_read_file(facts,&raw,&size,64000)) return 1;
+    long offset=tx_find((const char *)raw,size,names,sizeof names-1);
+    if(offset<0) { mm_free(raw); return 1; }
+    raw[offset+sizeof names-3]='X';
+    int rc=sy_write_file(facts,raw,size,0600)!=0;
     mm_free(raw);
     return rc;
 }
@@ -110,7 +123,12 @@ static int install(const char *cwd,const char *root) {
         "ujs/practice/uxe/base/loader-base.ujs","ujs/tests/loader-base-io.cx",
         "ujs/practice/uxe/test/loader-base-r160.html","ujs/practice/uxe/base/linecurve3-class.ujs",
         "ujs/practice/uxe/base/linecurve3-lifecycle.ujs","ujs/tests/linecurve3-lifecycle-struct.cx",
-        "ujs/practice/uxe/test/linecurve3-lifecycle-r160.html"};
+        "ujs/practice/uxe/test/linecurve3-lifecycle-r160.html",
+        "ujs/practice/uxe/base/curve-family-classes.ujs","ujs/practice/uxe/base/curve-family-lifecycle.ujs",
+        "ujs/tests/curve-family-class-struct.cx","ujs/tests/curve-family-line-edge-struct.cx",
+        "ujs/tests/curve-family-lifecycle-struct.cx","ujs/tests/curve-family-bezier-frames-struct.cx",
+        "ujs/practice/uxe/test/curve-family-line-edge-r160.html","ujs/practice/uxe/test/curve-family-lifecycle-r160.html",
+        "ujs/practice/uxe/test/curve-family-bezier-frames-r160.html"};
     const char *links[]={"cx","ext","cxroot.tsv"};
     char from[1024],to[1024];
     for(int i=0;i<(int)(sizeof dirs/sizeof dirs[0]);i++) {
@@ -136,6 +154,9 @@ int main(void) {
     tx_snprintf(generator,sizeof generator,"%s/ujs/tools-ux/gen-three-inventory.cx",cwd);
     if(!install(cwd,root) && !sy_chdir(root)) {
         check(run_check(unisacc,generator,0,1),"独立统计");
+        check(!mutate_family() && run_check(unisacc,generator,1,0),"家族中未知的导出名拒绝");
+        tx_snprintf(original,sizeof original,"%s/%s",cwd,facts);
+        check(!sy_copy(original,facts,0600) && run_check(unisacc,generator,0,1),"家族事实恢复");
         check(!flip(inventory) && run_check(unisacc,generator,1,0),"磁盘表篡改");
         tx_snprintf(original,sizeof original,"%s/%s",cwd,inventory);
         check(!sy_copy(original,inventory,0600) && run_check(unisacc,generator,0,1),"表恢复");
@@ -165,5 +186,5 @@ int main(void) {
     if(cx_runv_timeout(clean,5,&out,&n)) failed++;
     mm_free(out);
     printf("CHECK_THREE_INVENTORY asserts=%d failed=%d\n",asserts,failed);
-    return failed || asserts!=12;
+    return failed || asserts!=14;
 }
