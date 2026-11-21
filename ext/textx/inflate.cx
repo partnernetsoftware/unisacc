@@ -192,7 +192,7 @@ long zl_inflate(unsigned char *out, long cap, long *outlen, const unsigned char 
     return zl_raw(out, cap, outlen, in, inlen, 0);
 }
 
-static unsigned long zl_crc32(const unsigned char *p, long n) {
+static void zl_crc_init(void) {
     unsigned long c;
     long i;
     int k;
@@ -204,9 +204,22 @@ static unsigned long zl_crc32(const unsigned char *p, long n) {
         }
         zl_crcok = 1;
     }
+}
+
+static unsigned long zl_crc32(const unsigned char *p, long n) {
+    unsigned long c;
+    long i;
+    zl_crc_init();
     c = 0xFFFFFFFFUL;
     for (i = 0; i < n; i++) c = zl_crct[(c ^ p[i]) & 255] ^ (c >> 8);
     return c ^ 0xFFFFFFFFUL;
+}
+
+static unsigned int zl_crc_upd(unsigned int c, const unsigned char *p, long n) {
+    long i;
+    zl_crc_init();
+    for (i = 0; i < n; i++) c = (unsigned int)zl_crct[(c ^ (unsigned int)p[i]) & 255U] ^ (c >> 8);
+    return c;
 }
 
 long zl_gunzip(unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen) {
@@ -238,4 +251,521 @@ long zl_gunzip(unsigned char *out, long cap, long *outlen, const unsigned char *
     if (got != want) return -EINVAL;
     if ((unsigned long)n != size) return -EINVAL;
     return 0;
+}
+
+/* ---- Incremental streaming decoder (raw DEFLATE and single-member gzip) ----
+   Reentrant per zl_state, zero allocation, no libc.
+     zl_state s; zl_init(&s, ZL_RAW or ZL_GZIP);
+     long r = zl_feed(&s, in, inlen, &consumed, out, cap, &outlen);
+   Return: ZL_NEED_IN (0), ZL_END (1), ZL_NEED_OUT (2), or negative sticky error (-EINVAL).
+   zl_end(&s) returns 0 if complete, -EIO if truncated, or the sticky error.
+   Multi-member gzip concatenation is not supported. */
+
+enum {
+    ZL_NEED_IN = 0,
+    ZL_END = 1,
+    ZL_NEED_OUT = 2,
+    ZL_RAW = 0,
+    ZL_GZIP = 1,
+    ZL_WINDOW = 32768,
+    ZL_STATE_BYTES = 36864
+};
+
+enum {
+    ZLP_BLOCK = 0,
+    ZLP_ST_LEN,
+    ZLP_ST_COPY,
+    ZLP_DYN_HDR,
+    ZLP_DYN_CL,
+    ZLP_DYN_LENS,
+    ZLP_CODES,
+    ZLP_EMIT,
+    ZLP_G_HDR,
+    ZLP_G_XLEN,
+    ZLP_G_XSKIP,
+    ZLP_G_NAME,
+    ZLP_G_COMMENT,
+    ZLP_G_HCRC,
+    ZLP_G_TRAILER,
+    ZLP_DONE
+};
+
+typedef struct zl_core {
+    long total;
+    unsigned int bb;
+    unsigned int wpos;
+    unsigned int crc;
+    unsigned int isize;
+    int phase;
+    int mode;
+    int last;
+    int err;
+    int bc;
+    int nhold;
+    int slen;
+    int nlen;
+    int ndist;
+    int ncode;
+    int idx;
+    int plen;
+    int pdist;
+    int plit;
+    int gflg;
+    int gcnt;
+    int gxlen;
+    unsigned short cnt[48];
+    unsigned short sym[864];
+    unsigned char lengths[320];
+    unsigned char hold[8];
+    unsigned char gbuf[10];
+    unsigned char pad[2];
+} zl_core;
+
+typedef struct zl_state {
+    zl_core c;
+    unsigned char win[ZL_WINDOW];
+    unsigned char rsv[1840];
+} zl_state;
+
+typedef struct zl_src {
+    zl_core *c;
+    const unsigned char *in;
+    long inlen;
+    long at;
+    int hpos;
+    int is_short;
+} zl_src;
+
+static int zlf_byte(zl_src *s) {
+    if (s->hpos < s->c->nhold) return (int)s->c->hold[s->hpos++];
+    if (s->at < s->inlen) return (int)s->in[s->at++];
+    s->is_short = 1;
+    return 0;
+}
+
+static int zlf_bits(zl_src *s, int need) {
+    unsigned int val = s->c->bb;
+    int bc = s->c->bc;
+    while (bc < need) {
+        int b = zlf_byte(s);
+        if (s->is_short) return 0;
+        val |= (unsigned int)b << bc;
+        bc += 8;
+    }
+    s->c->bb = val >> need;
+    s->c->bc = bc - need;
+    return (int)(val & ((1U << need) - 1U));
+}
+
+static int zlf_decode(zl_src *s, int h) {
+    zl_core *c = s->c;
+    int code = 0, first = 0, index = 0, len, count;
+    for (len = 1; len <= 15; len++) {
+        code |= zlf_bits(s, 1);
+        if (s->is_short) return -1;
+        count = (int)c->cnt[h * 16 + len];
+        if (code - count < first) return (int)c->sym[h * 288 + index + (code - first)];
+        index += count; first += count; first <<= 1; code <<= 1;
+    }
+    return -1;
+}
+
+static int zlf_build(zl_core *c, int h, const unsigned char *length, int n) {
+    int offs[16], len, s, left;
+    for (len = 0; len <= 15; len++) c->cnt[h * 16 + len] = 0;
+    for (s = 0; s < n; s++) c->cnt[h * 16 + (int)length[s]]++;
+    if ((int)c->cnt[h * 16] == n) return 0;
+    left = 1;
+    for (len = 1; len <= 15; len++) {
+        left <<= 1;
+        left -= (int)c->cnt[h * 16 + len];
+        if (left < 0) return left;
+    }
+    offs[1] = 0;
+    for (len = 1; len < 15; len++) offs[len + 1] = offs[len] + (int)c->cnt[h * 16 + len];
+    for (s = 0; s < n; s++) if (length[s]) c->sym[h * 288 + offs[(int)length[s]]++] = (unsigned short)s;
+    return left;
+}
+
+static void zlf_build_fixed(zl_core *c) {
+    int s;
+    for (s = 0; s < 144; s++) c->lengths[s] = 8;
+    for (; s < 256; s++) c->lengths[s] = 9;
+    for (; s < 280; s++) c->lengths[s] = 7;
+    for (; s < 288; s++) c->lengths[s] = 8;
+    zlf_build(c, 0, c->lengths, 288);
+    for (s = 0; s < 30; s++) c->lengths[s] = 5;
+    zlf_build(c, 1, c->lengths, 30);
+}
+
+static void zlf_rollback(zl_src *s, unsigned int s_bb, int s_bc, int s_hpos, long s_at) {
+    zl_core *c = s->c;
+    int k = 0;
+    c->bb = s_bb;
+    c->bc = s_bc;
+    s->hpos = s_hpos;
+    s->at = s_at;
+    while (s->hpos < c->nhold && k < 8) c->hold[k++] = c->hold[s->hpos++];
+    while (s->at < s->inlen && k < 8) c->hold[k++] = s->in[s->at++];
+    c->nhold = k;
+    s->hpos = 0;
+}
+
+static void zlf_compact_hold(zl_src *s) {
+    zl_core *c = s->c;
+    if (s->hpos > 0) {
+        int rem = c->nhold - s->hpos;
+        int j;
+        for (j = 0; j < rem; j++) c->hold[j] = c->hold[s->hpos + j];
+        c->nhold = rem;
+        s->hpos = 0;
+    }
+}
+
+static int zlf_gnext(int flg, int from_phase) {
+    if (from_phase < ZLP_G_XLEN && (flg & 4)) return ZLP_G_XLEN;
+    if (from_phase < ZLP_G_NAME && (flg & 8)) return ZLP_G_NAME;
+    if (from_phase < ZLP_G_COMMENT && (flg & 16)) return ZLP_G_COMMENT;
+    if (from_phase < ZLP_G_HCRC && (flg & 2)) return ZLP_G_HCRC;
+    return ZLP_BLOCK;
+}
+
+static void zlf_end_block(zl_core *c) {
+    if (c->last) {
+        if (c->mode == ZL_GZIP) {
+            c->bb = 0; c->bc = 0;
+            c->gcnt = 0;
+            c->phase = ZLP_G_TRAILER;
+        } else {
+            c->phase = ZLP_DONE;
+        }
+    } else {
+        c->phase = ZLP_BLOCK;
+    }
+}
+
+int zl_init(zl_state *s, int mode) {
+    unsigned char *p;
+    long i, n;
+    if (!s || (mode != ZL_RAW && mode != ZL_GZIP)) return -EINVAL;
+    p = (unsigned char *)&s->c;
+    n = (long)sizeof(s->c);
+    for (i = 0; i < n; i++) p[i] = 0;
+    s->c.mode = mode;
+    s->c.phase = mode == ZL_GZIP ? ZLP_G_HDR : ZLP_BLOCK;
+    s->c.crc = 0xFFFFFFFFU;
+    return 0;
+}
+
+int zl_done(const zl_state *s) { return s && s->c.phase == ZLP_DONE; }
+
+long zl_end(const zl_state *s) {
+    if (!s) return -EINVAL;
+    if (s->c.err < 0) return s->c.err;
+    return s->c.phase == ZLP_DONE ? 0 : -EIO;
+}
+
+long zl_feed(zl_state *s, const unsigned char *in, long inlen, long *consumed,
+             unsigned char *out, long cap, long *outlen) {
+    zl_core *c;
+    zl_src src;
+    long o = 0, crc_at = 0;
+    int ret = ZL_NEED_IN;
+    if (!s || !consumed || !outlen || inlen < 0 || cap < 0 || (inlen && !in) || (cap && !out)) return -EINVAL;
+    *consumed = 0; *outlen = 0;
+    c = &s->c;
+    if (c->err < 0) return c->err;
+    if (c->phase == ZLP_DONE) return ZL_END;
+    src.c = c; src.in = in; src.inlen = inlen; src.at = 0; src.hpos = 0; src.is_short = 0;
+
+    for (;;) {
+        unsigned int s_bb;
+        int s_bc, s_hpos;
+        long s_at;
+
+        switch (c->phase) {
+        case ZLP_G_HDR:
+            while (c->gcnt < 10) {
+                int b;
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                c->gbuf[c->gcnt++] = (unsigned char)b;
+            }
+            if (c->gbuf[0] != 0x1F || c->gbuf[1] != 0x8B || c->gbuf[2] != 8) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->gflg = (int)c->gbuf[3];
+            if (c->gflg & 0xE0) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->gcnt = 0;
+            c->phase = zlf_gnext(c->gflg, ZLP_G_HDR);
+            break;
+
+        case ZLP_G_XLEN:
+            while (c->gcnt < 2) {
+                int b;
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                c->gbuf[c->gcnt++] = (unsigned char)b;
+            }
+            c->gxlen = (int)c->gbuf[0] | ((int)c->gbuf[1] << 8);
+            c->gcnt = 0;
+            c->phase = c->gxlen > 0 ? ZLP_G_XSKIP : zlf_gnext(c->gflg, ZLP_G_XSKIP);
+            break;
+
+        case ZLP_G_XSKIP:
+            while (c->gxlen > 0) {
+                src.is_short = 0;
+                (void)zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                c->gxlen--;
+            }
+            c->phase = zlf_gnext(c->gflg, ZLP_G_XSKIP);
+            break;
+
+        case ZLP_G_NAME:
+            for (;;) {
+                int b;
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                if (b == 0) { c->phase = zlf_gnext(c->gflg, ZLP_G_NAME); break; }
+            }
+            break;
+
+        case ZLP_G_COMMENT:
+            for (;;) {
+                int b;
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                if (b == 0) { c->phase = zlf_gnext(c->gflg, ZLP_G_COMMENT); break; }
+            }
+            break;
+
+        case ZLP_G_HCRC:
+            while (c->gcnt < 2) {
+                src.is_short = 0;
+                (void)zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                c->gcnt++;
+            }
+            c->gcnt = 0;
+            c->phase = ZLP_BLOCK;
+            break;
+
+        case ZLP_BLOCK: {
+            int last, type;
+            s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+            last = zlf_bits(&src, 1);
+            type = zlf_bits(&src, 2);
+            if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+            c->last = last;
+            if (type == 0) { c->bb = 0; c->bc = 0; c->phase = ZLP_ST_LEN; }
+            else if (type == 1) { zlf_build_fixed(c); c->phase = ZLP_CODES; }
+            else if (type == 2) { c->phase = ZLP_DYN_HDR; }
+            else { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            break;
+        }
+
+        case ZLP_ST_LEN: {
+            int b0, b1, b2, b3, len, nlen;
+            s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+            b0 = zlf_byte(&src); b1 = zlf_byte(&src); b2 = zlf_byte(&src); b3 = zlf_byte(&src);
+            if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+            len = b0 | (b1 << 8);
+            nlen = b2 | (b3 << 8);
+            if (len != (~nlen & 0xFFFF)) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->slen = len;
+            if (c->slen == 0) {
+                zlf_end_block(c);
+                if (c->phase == ZLP_DONE) { ret = ZL_END; goto finish; }
+            } else {
+                c->phase = ZLP_ST_COPY;
+            }
+            break;
+        }
+
+        case ZLP_ST_COPY:
+            while (c->slen > 0) {
+                int b;
+                if (o >= cap) { ret = ZL_NEED_OUT; goto finish; }
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                out[o++] = (unsigned char)b;
+                s->win[c->wpos & 32767U] = (unsigned char)b;
+                c->wpos = (c->wpos + 1U) & 32767U;
+                c->total++;
+                c->slen--;
+            }
+            zlf_end_block(c);
+            if (c->phase == ZLP_DONE) { ret = ZL_END; goto finish; }
+            break;
+
+        case ZLP_DYN_HDR: {
+            int nlen, ndist, ncode;
+            s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+            nlen = zlf_bits(&src, 5) + 257;
+            ndist = zlf_bits(&src, 5) + 1;
+            ncode = zlf_bits(&src, 4) + 4;
+            if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+            if (nlen > 286 || ndist > 30) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->nlen = nlen; c->ndist = ndist; c->ncode = ncode; c->idx = 0;
+            c->phase = ZLP_DYN_CL;
+            break;
+        }
+
+        case ZLP_DYN_CL:
+            while (c->idx < c->ncode) {
+                int v;
+                s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+                v = zlf_bits(&src, 3);
+                if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                c->lengths[zl_corder[c->idx++]] = (unsigned char)v;
+            }
+            for (; c->idx < 19; c->idx++) c->lengths[zl_corder[c->idx]] = 0;
+            if (zlf_build(c, 2, c->lengths, 19) != 0) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->idx = 0;
+            c->phase = ZLP_DYN_LENS;
+            break;
+
+        case ZLP_DYN_LENS: {
+            int err;
+            while (c->idx < c->nlen + c->ndist) {
+                int sym, len = 0, rep;
+                s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+                sym = zlf_decode(&src, 2);
+                if (sym < 0) {
+                    if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                    c->err = -EINVAL; ret = -EINVAL; goto finish;
+                }
+                if (sym < 16) { c->lengths[c->idx++] = (unsigned char)sym; continue; }
+                if (sym == 16) {
+                    if (c->idx == 0) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+                    len = (int)c->lengths[c->idx - 1];
+                    rep = 3 + zlf_bits(&src, 2);
+                } else if (sym == 17) {
+                    rep = 3 + zlf_bits(&src, 3);
+                } else {
+                    rep = 11 + zlf_bits(&src, 7);
+                }
+                if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                if (c->idx + rep > c->nlen + c->ndist) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+                while (rep-- > 0) c->lengths[c->idx++] = (unsigned char)len;
+            }
+            if (c->lengths[256] == 0) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            err = zlf_build(c, 0, c->lengths, c->nlen);
+            if (err && (err < 0 || c->nlen != (int)c->cnt[0] + (int)c->cnt[1])) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            err = zlf_build(c, 1, c->lengths + c->nlen, c->ndist);
+            if (err && (err < 0 || c->ndist != (int)c->cnt[16] + (int)c->cnt[17])) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->phase = ZLP_CODES;
+            break;
+        }
+
+        case ZLP_CODES: {
+            int sym, len, ds, dist;
+            s_bb = c->bb; s_bc = c->bc; s_hpos = src.hpos; s_at = src.at; src.is_short = 0;
+            sym = zlf_decode(&src, 0);
+            if (sym < 0) {
+                if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                c->err = -EINVAL; ret = -EINVAL; goto finish;
+            }
+            if (sym < 256) {
+                if (o < cap) {
+                    out[o++] = (unsigned char)sym;
+                    s->win[c->wpos & 32767U] = (unsigned char)sym;
+                    c->wpos = (c->wpos + 1U) & 32767U;
+                    c->total++;
+                } else {
+                    c->plit = sym; c->plen = 1; c->pdist = 0; c->phase = ZLP_EMIT;
+                    ret = ZL_NEED_OUT; goto finish;
+                }
+            } else if (sym == 256) {
+                zlf_end_block(c);
+                if (c->phase == ZLP_DONE) { ret = ZL_END; goto finish; }
+            } else {
+                sym -= 257;
+                if (sym >= 29) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+                len = (int)zl_lbase[sym] + zlf_bits(&src, (int)zl_lext[sym]);
+                if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                ds = zlf_decode(&src, 1);
+                if (ds < 0) {
+                    if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                    c->err = -EINVAL; ret = -EINVAL; goto finish;
+                }
+                if (ds >= 30) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+                dist = (int)zl_dbase[ds] + zlf_bits(&src, (int)zl_dext[ds]);
+                if (src.is_short) { zlf_rollback(&src, s_bb, s_bc, s_hpos, s_at); ret = ZL_NEED_IN; goto finish; }
+                if ((long)dist > c->total) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+                c->plen = len; c->pdist = dist; c->phase = ZLP_EMIT;
+            }
+            break;
+        }
+
+        case ZLP_EMIT:
+            if (c->pdist == 0) {
+                if (o >= cap) { ret = ZL_NEED_OUT; goto finish; }
+                out[o++] = (unsigned char)c->plit;
+                s->win[c->wpos & 32767U] = (unsigned char)c->plit;
+                c->wpos = (c->wpos + 1U) & 32767U;
+                c->total++;
+                c->plen = 0;
+                c->phase = ZLP_CODES;
+            } else {
+                while (c->plen > 0) {
+                    unsigned char b;
+                    if (o >= cap) { ret = ZL_NEED_OUT; goto finish; }
+                    b = s->win[(c->wpos - (unsigned int)c->pdist) & 32767U];
+                    out[o++] = b;
+                    s->win[c->wpos & 32767U] = b;
+                    c->wpos = (c->wpos + 1U) & 32767U;
+                    c->total++;
+                    c->plen--;
+                }
+                c->phase = ZLP_CODES;
+            }
+            break;
+
+        case ZLP_G_TRAILER: {
+            unsigned int want, size, got;
+            while (c->gcnt < 8) {
+                int b;
+                src.is_short = 0;
+                b = zlf_byte(&src);
+                if (src.is_short) { ret = ZL_NEED_IN; goto finish; }
+                c->gbuf[c->gcnt++] = (unsigned char)b;
+            }
+            if (o > crc_at) {
+                c->crc = zl_crc_upd(c->crc, out + crc_at, o - crc_at);
+                c->isize += (unsigned int)(o - crc_at);
+                crc_at = o;
+            }
+            want = (unsigned int)c->gbuf[0] | ((unsigned int)c->gbuf[1] << 8) |
+                   ((unsigned int)c->gbuf[2] << 16) | ((unsigned int)c->gbuf[3] << 24);
+            size = (unsigned int)c->gbuf[4] | ((unsigned int)c->gbuf[5] << 8) |
+                   ((unsigned int)c->gbuf[6] << 16) | ((unsigned int)c->gbuf[7] << 24);
+            got = c->crc ^ 0xFFFFFFFFU;
+            if (got != want) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            if (c->isize != size) { c->err = -EINVAL; ret = -EINVAL; goto finish; }
+            c->phase = ZLP_DONE;
+            ret = ZL_END;
+            goto finish;
+        }
+
+        default:
+            c->err = -EINVAL;
+            ret = -EINVAL;
+            goto finish;
+        }
+    }
+
+finish:
+    zlf_compact_hold(&src);
+    if (c->mode == ZL_GZIP && o > crc_at) {
+        c->crc = zl_crc_upd(c->crc, out + crc_at, o - crc_at);
+        c->isize += (unsigned int)(o - crc_at);
+    }
+    *consumed = src.at;
+    *outlen = o;
+    return ret;
 }
