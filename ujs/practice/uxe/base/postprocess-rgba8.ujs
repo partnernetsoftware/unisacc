@@ -1,0 +1,189 @@
+struct ColorCorrectionSettings {
+  powR:f64;
+  powG:f64;
+  powB:f64;
+  mulR:f64;
+  mulG:f64;
+  mulB:f64;
+  addR:f64;
+  addG:f64;
+  addB:f64;
+}
+
+native function post_span(offset:i64,bytes:i64) i64 {
+  return offset>=0 && bytes>0 && offset<=6291456-bytes;
+}
+
+native function post_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return a<b+bn && b<a+an;
+}
+
+native function post_rgba8(color:f64) i64 {
+  if(color<=0.0) { return 0; }
+  if(color>=255.0) { return 255; }
+  return f64_floor_i64(color+0.5);
+}
+
+// Applies the r160 RGB operation to linear RGBA8. Exact in-place use is
+// supported. All settings are finite: power (0,16], gain [0,16], bias [0,1].
+// Returns the pixel count, or -1 before writing for invalid arguments.
+native function ColorCorrection_applyRGBA8(src:i64,dst:i64,pixels:i64,settings:i64) i64 {
+  if(pixels<1 || pixels>1572864) { return 0-1; }
+  let bytes=pixels*4;
+  if(!post_span(src,bytes) || !post_span(dst,bytes) ||
+     settings%8!=0 || !post_span(settings,ColorCorrectionSettings.size) ||
+     (src!=dst && post_overlap(src,bytes,dst,bytes)) ||
+     post_overlap(settings,ColorCorrectionSettings.size,dst,bytes)) { return 0-1; }
+  let channel=0;
+  while(channel<3) {
+    let power=ux_f64(settings+ColorCorrectionSettings.powR+channel*8);
+    let gain=ux_f64(settings+ColorCorrectionSettings.mulR+channel*8);
+    let bias=ux_f64(settings+ColorCorrectionSettings.addR+channel*8);
+    if(!(power>0.0 && power<=16.0) || !(gain>=0.0 && gain<=16.0) ||
+       !(bias>=0.0 && bias<=1.0)) { return 0-1; }
+    channel=channel+1;
+  }
+  let offset=0;
+  while(offset<bytes) {
+    channel=0;
+    while(channel<3) {
+      let power=ux_f64(settings+ColorCorrectionSettings.powR+channel*8);
+      let gain=ux_f64(settings+ColorCorrectionSettings.mulR+channel*8);
+      let bias=ux_f64(settings+ColorCorrectionSettings.addR+channel*8);
+      let base=ux_u8(src+offset+channel)/255.0+bias;
+      let stored=ux_u8_put(dst+offset+channel,post_rgba8(255.0*gain*ux_math_pow(base,power)));
+      channel=channel+1;
+    }
+    let alpha=ux_u8_put(dst+offset+3,ux_u8(src+offset+3));
+    offset=offset+4;
+  }
+  return pixels;
+}
+
+// The edge rule follows the FXAA shader bundled with three.js r160.
+// Copyright (c) 2014-2015, NVIDIA CORPORATION. All rights reserved.
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+// * Redistributions of source code must retain the above copyright notice,
+//   this list of conditions and the following disclaimer.
+// * Redistributions in binary form must reproduce the above copyright notice,
+//   this list of conditions and the following disclaimer in the documentation
+//   and/or other materials provided with the distribution.
+// * Neither the name of NVIDIA CORPORATION nor the names of its contributors
+//   may be used to endorse or promote products derived from this software
+//   without specific prior written permission.
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ''AS IS'' AND ANY EXPRESS
+// OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+// OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+// IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY
+// DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+// (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+// LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+// ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+// THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+native function fxaa_sample(src:i64,width:i64,height:i64,x:i64,y:i64) i64 {
+  if(x<0) { x=0; }
+  if(y<0) { y=0; }
+  if(x>=width) { x=width-1; }
+  if(y>=height) { y=height-1; }
+  return src+4*(y*width+x);
+}
+
+native function fxaa_contrast(a:i64,b:i64) i64 {
+  let largest=0;
+  let channel=0;
+  while(channel<4) {
+    let difference=ux_u8(a+channel)-ux_u8(b+channel);
+    if(difference<0) { difference=0-difference; }
+    if(difference>largest) { largest=difference; }
+    channel=channel+1;
+  }
+  return largest;
+}
+
+native function fxaa_mix(dst:i64,center:i64,edge:i64,weight:f64) i64 {
+  let channel=0;
+  while(channel<4) {
+    let value=ux_u8(center+channel)*(1.0-weight)+ux_u8(edge+channel)*weight;
+    let saved=ux_u8_put(dst+channel,post_rgba8(value));
+    channel=channel+1;
+  }
+  return 0;
+}
+
+native function fxaa_pixel(src:i64,dst:i64,width:i64,height:i64,x:i64,y:i64) i64 {
+  let center=fxaa_sample(src,width,height,x,y);
+  let north=fxaa_sample(src,width,height,x,y-1);
+  let south=fxaa_sample(src,width,height,x,y+1);
+  let east=fxaa_sample(src,width,height,x+1,y);
+  let west=fxaa_sample(src,width,height,x-1,y);
+  let cn=fxaa_contrast(center,north);
+  let cs=fxaa_contrast(center,south);
+  let ce=fxaa_contrast(center,east);
+  let cw=fxaa_contrast(center,west);
+  if(cn<51 && cs<51 && ce<51 && cw<51) { return fxaa_mix(dst,center,center,0.0); }
+  let tilt=cn+cs-ce-cw;
+  if(tilt>=0-15 && tilt<=15) {
+    let dx=0-1;
+    let dy=0-1;
+    if(ce>cw) { dx=1; }
+    if(cs>cn) { dy=1; }
+    let across=fxaa_sample(src,width,height,x+dx,y-dy);
+    let along=fxaa_sample(src,width,height,x-dx,y+dy);
+    tilt=fxaa_contrast(center,along)-fxaa_contrast(center,across);
+    if(tilt>=0-15 && tilt<=15) {
+      let channel=0;
+      while(channel<4) {
+        let neighbors=ux_u8(north+channel)+ux_u8(south+channel)+ux_u8(east+channel)+ux_u8(west+channel);
+        let value=(6*ux_u8(center+channel)+neighbors)/10.0;
+        let saved=ux_u8_put(dst+channel,post_rgba8(value));
+        channel=channel+1;
+      }
+      return 0;
+    }
+  }
+  let tx=0;
+  let ty=1;
+  let edge=east;
+  if(cw>ce) { edge=west; }
+  if(tilt>0) {
+    tx=1;
+    ty=0;
+    edge=south;
+    if(cn>cs) { edge=north; }
+  }
+  let step=1;
+  let distance=0;
+  while(step<=5) {
+    distance=distance+step;
+    let a=fxaa_sample(src,width,height,x+tx*distance,y+ty*distance);
+    let b=fxaa_sample(src,width,height,x-tx*distance,y-ty*distance);
+    if(fxaa_contrast(a,center)>fxaa_contrast(a,edge) || fxaa_contrast(b,center)>fxaa_contrast(b,edge)) {
+      let weight=(1.0-f64_sqrt((step-1)/4.0))*0.5;
+      return fxaa_mix(dst,center,edge,weight);
+    }
+    step=step+1;
+  }
+  return fxaa_mix(dst,center,center,0.0);
+}
+
+// Full-frame pixel centers at resolution=(1/width,1/height), clamp-to-edge.
+// The source and destination must be disjoint because the filter reads neighbors.
+// Returns the pixel count, or -1 before writing for invalid arguments.
+native function FXAA_applyRGBA8(src:i64,dst:i64,width:i64,height:i64) i64 {
+  if(width<1 || width>1572864 || height<1 || height>1572864 || width*height>1572864) { return 0-1; }
+  let bytes=width*height*4;
+  if(!post_span(src,bytes) || !post_span(dst,bytes) || post_overlap(src,bytes,dst,bytes)) { return 0-1; }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let done=fxaa_pixel(src,dst+4*(y*width+x),width,height,x,y);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return width*height;
+}

@@ -271,8 +271,9 @@
 - RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
 - UnrealBloomPass | G-pixel 阈值、羽化、多级混合 | RenderPass、EffectComposer。
 - OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
-- FXAA | G-pixel 锯齿阶跃、采样方向及对照 | EffectComposer。
-- 调色 Pass | G-pixel 色域、曝光与目标格式 | M5 色彩输出和 EffectComposer。
+- ~~调色与 FXAA 的 RGBA8 内核 | G-pixel 通道曲线、锯齿阶跃与采样方向 | 线性 RGBA8。~~ 真实 r160 ShaderPass 18 项通过，移除调色与 FXAA 分别转红。
+- FXAA GPU 接线 | G-pixel 同目标格式读写与 EffectComposer 交换 | FXAA RGBA8 算法、EffectComposer。
+- 调色 Pass 完整接线 | G-pixel 色域、曝光与目标格式 | M5 色彩输出、RGBA8 内核及 EffectComposer。
 - ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
 - AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
 - BoxHelper | G-struct 对象世界边界 | Box3 与场景图。

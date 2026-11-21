@@ -1,0 +1,73 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+#define COLOR_SETTINGS_DEFAULT \
+    "let pr=ux_f64_put(settings,2.0);let pg=ux_f64_put(settings+8,2.0);let pb=ux_f64_put(settings+16,2.0);" \
+    "let mr=ux_f64_put(settings+24,1.0);let mg=ux_f64_put(settings+32,1.0);let mb=ux_f64_put(settings+40,1.0);"
+#define COLOR_SETTINGS_CUSTOM \
+    "let pr=ux_f64_put(settings,2.0);let pg=ux_f64_put(settings+8,1.0);let pb=ux_f64_put(settings+16,0.5);" \
+    "let mr=ux_f64_put(settings+24,1.0);let mg=ux_f64_put(settings+32,0.5);let mb=ux_f64_put(settings+40,2.0);" \
+    "let ar=ux_f64_put(settings+48,0.1);let ag=ux_f64_put(settings+56,0.2);"
+#define COLOR_DEFAULT_INPUT "let in0=ux_u32_put(src,637501504);"
+#define COLOR_CUSTOM_INPUT \
+    "let in0=ux_u32_put(src,2070174528);let in1=ux_u32_put(src+4,688914688);"
+#define FXAA(mode) \
+    "let prepared=pass_fill(src," #mode ");let written=FXAA_applyRGBA8(src,dst,7,5);"
+#define RGBA(r,g,b,a) ((r)+256.0*(g)+65536.0*(b)+16777216.0*(a))
+
+int main(int argc,char **argv) {
+    const int mutate_fxaa=argc==3 && tx_eqz(argv[2],"--mutate");
+    const int mutate_color=argc==3 && tx_eqz(argv[2],"--mutate-color");
+    if(argc!=2 && !mutate_fxaa && !mutate_color) return 2;
+    const char *modules[]={"f64-math","postprocess-rgba8",0};
+    const char *setup=
+        "native function pass_fill(src:i64,kind:i64) i64 {"
+        "let y=0;while(y<5){let x=0;while(x<7){let r=0;let g=0;let b=0;let a=255;"
+        "if(kind==0){r=20;g=40;b=60;a=0;if(y>=x){a=240;}}"
+        "if(kind==1 && y>=3 && x>=3){r=240;}"
+        "if(kind==2 && y>=x){r=50;}"
+        "if(kind==3 && y>=3){r=240;}"
+        "if(kind==4 && x>=3 && y>=2){r=240;}"
+        "let at=src+4*(y*7+x);let saved=ux_u32_put(at,r+256*g+65536*b+16777216*a);x=x+1;}y=y+1;}return 0;}"
+        "let src=0;let dst=256;let settings=512;";
+    const char *cases[]={
+        COLOR_SETTINGS_DEFAULT COLOR_DEFAULT_INPUT
+        "let n=ColorCorrection_applyRGBA8(src,dst,1,settings);return 0.0+ux_u32(dst);",
+        COLOR_SETTINGS_CUSTOM COLOR_CUSTOM_INPUT
+        "let n=ColorCorrection_applyRGBA8(src,dst,2,settings);return 0.0+ux_u32(dst);",
+        COLOR_SETTINGS_CUSTOM COLOR_CUSTOM_INPUT
+        "let n=ColorCorrection_applyRGBA8(src,src,2,settings);return 0.0+ux_u32(src+4);",
+        FXAA(0) "return 0.0+ux_u32(dst+4*24);",
+        FXAA(0) "return 0.0+ux_u32(dst+4*17);",
+        FXAA(0) "return 0.0+ux_u32(dst+4*6);",
+        FXAA(1) "return 0.0+ux_u32(dst+4*25);",
+        FXAA(1) "return 0.0+ux_u32(dst+4*27);",
+        FXAA(2) "return 0.0+ux_u32(dst+4*24);",
+        FXAA(3) "return 0.0+ux_u32(dst+4*24);",
+        FXAA(4) "return 0.0+ux_u32(dst+4*24);",
+        FXAA(1) "return 0.0+written;",
+        COLOR_SETTINGS_CUSTOM COLOR_CUSTOM_INPUT
+        "return 0.0+ColorCorrection_applyRGBA8(src,dst,2,settings);",
+        COLOR_SETTINGS_CUSTOM COLOR_CUSTOM_INPUT
+        "return 0.0+ColorCorrection_applyRGBA8(src,src+1,2,settings);",
+        COLOR_SETTINGS_CUSTOM COLOR_CUSTOM_INPUT
+        "let bad=ux_f64_put(settings+56,0.0/0.0);let keep=ux_u32_put(dst,713);"
+        "let n=ColorCorrection_applyRGBA8(src,dst,2,settings);return 0.0+ux_u32(dst)+1000*n;",
+        "return 0.0+FXAA_applyRGBA8(src,src+1,7,5);",
+        "return 0.0+FXAA_applyRGBA8(src,dst,1572864,2);",
+        "return 0.0+FXAA_applyRGBA8(6291453,dst,1,1);",
+    };
+    const double gold[]={
+        RGBA(16,64,255,37),RGBA(31,71,255,123),RGBA(3,26,128,41),
+        RGBA(20,40,60,192),RGBA(20,40,60,48),RGBA(20,40,60,0),
+        RGBA(180,0,0,255),RGBA(205,0,0,255),RGBA(50,0,0,255),
+        RGBA(240,0,0,255),RGBA(180,0,0,255),
+        35,2,-1,-287,-1,-1,-1,
+    };
+    const int mutant_case=mutate_color?1:mutate_fxaa?6:-1;
+    const char *mutant=mutate_color?
+        COLOR_CUSTOM_INPUT "return 0.0+ux_u32(src);":
+        "let prepared=pass_fill(src,1);return 0.0+ux_u32(src+4*25);";
+    return g_wasm_batch_addon("G_PIXEL ColorCorrection FXAA RGBA8","postprocess-rgba8",argv[1],modules,
+        setup,cases,gold,sizeof gold/sizeof gold[0],mutant_case,mutant);
+}
