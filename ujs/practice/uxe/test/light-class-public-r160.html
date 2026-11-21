@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <pre id="r160">pending</pre>
 <script type="module">
-import { AmbientLight, DirectionalLight, HemisphereLight, LightProbe, Object3D, ObjectLoader,
+import { AmbientLight, DirectionalLight, HemisphereLight, Light, LightProbe, Object3D, ObjectLoader,
   PointLight, RectAreaLight, REVISION, SpotLight } from "../../web/game/three.module.js";
 
 const output = document.querySelector("#r160");
@@ -15,7 +15,7 @@ directional.shadow.bias = 0.125;
 directional.shadow.mapSize.x = 128;
 const probeSource = new LightProbe(undefined, 6);
 probeSource.sh.coefficients[8].set(1, 2, 3);
-const sources = [new AmbientLight(0xff0000, 1.5), new HemisphereLight(0x00ff00, 0x0000ff, 2),
+const sources = [new Light(0x336699, 1.25), new AmbientLight(0xff0000, 1.5), new HemisphereLight(0x00ff00, 0x0000ff, 2),
   directional, new PointLight(0xffffff, 2, 20, 1), new SpotLight(0xffffff, 4, 42, 0.5, 0.25),
   new RectAreaLight(0xffffff, 5, 4, 5), probeSource];
 
@@ -52,7 +52,11 @@ function reference(source) {
   // r160 emits the inherited type Light, while its loader has a dedicated
   // LightProbe branch. UXE recognizes the legacy representation using sh.
   if (source.isLightProbe) wire.object.type = "LightProbe";
-  const restored = new ObjectLoader().parse(wire);
+  const parsed = new ObjectLoader().parse(wire);
+  // The r160 loader dispatches concrete light subclasses only.
+  const restored = source.constructor === Light
+    ? Object3D.prototype.copy.call(new Light(wire.object.color, wire.object.intensity), parsed, true)
+    : parsed;
   if (restored.constructor !== source.constructor || Boolean(restored.target) !== Boolean(source.target)) return {code: -5, state};
   if (projection(restored.toJSON().object) !== state) return {code: -7, state};
 
@@ -111,7 +115,7 @@ async function product(refs) {
     return wire.slice(text, text + bytes);
   }
   return refs.map((ref, index) => {
-    if (obj(1, index + 2) !== 1 || obj(2) !== 1) return -1;
+    if (obj(1, index + 1) !== 1 || obj(2) !== 1) return -1;
     if (obj(5, 1) !== 1 || obj(5, 2) !== 1) return -2;
     const original = snapshot(0);
     if (!equal(original, snapshot(1)) || !equal(original, snapshot(2))) return -3;
@@ -124,7 +128,7 @@ async function product(refs) {
     wire.set(encoded, text);
     if (json(2, encoded.length) !== state) return -6;
     owner.set(wire.subarray(state, state + size), offset);
-    if (obj(4, 0, Number(mutate && index === 0)) !== 1) return -6;
+    if (obj(4, 0, Number(mutate && index <= 1)) !== 1) return -6;
     const roundtrip = encode(snapshot(3));
     if (obj(6) !== 1) return -9;
     return equal(encoded, roundtrip) ? 1 : -7;
