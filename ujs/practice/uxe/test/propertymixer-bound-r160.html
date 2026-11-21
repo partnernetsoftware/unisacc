@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Object3D, PropertyBinding, PropertyMixer, REVISION } from "../../web/game/three.module.js";
+if(REVISION!=="160") throw new Error("three.js revision mismatch");
+
+function factory(binding,type,lanes) {
+  const mixer=new PropertyMixer(binding,type,lanes);
+  mixer.saveOriginalState();
+  const put=(value,weight,frame=0,add=false)=>{
+    value.forEach((item,i)=>{ mixer.buffer[i]=item; });
+    if(add) mixer.accumulateAdditive(weight);
+    else mixer.accumulate(frame,weight);
+  };
+  return [mixer,put];
+}
+function numeric(action) {
+  const root=new Object3D();
+  root.position.set(1,2,3);
+  const [mixer,put]=factory(new PropertyBinding(root,".position[y]"),"number",1);
+  return action(root,mixer,put);
+}
+function nodeQuaternion(action) {
+  const root=new Object3D();
+  const [mixer,put]=factory(new PropertyBinding(root,".quaternion"),"quaternion",4);
+  return action(root,mixer,put);
+}
+function values(initial,type,action) {
+  let target=initial.slice();
+  const binding={
+    getValue(buffer,offset) { target.forEach((value,i)=>{ buffer[offset+i]=value; }); },
+    setValue(buffer,offset) { target=Array.from(buffer.slice(offset,offset+initial.length)); },
+  };
+  const [mixer,put]=factory(binding,type,initial.length);
+  return action(mixer,put,()=>target);
+}
+const q=[0,0,Math.SQRT1_2,Math.SQRT1_2];
+const numericResults=[
+  -1,
+  numeric((root,m,put)=>{put([10],.25);m.apply(0);return root.position.y;}),
+  numeric((root,m,put)=>{put([10],.25);m.apply(0);root.updateMatrixWorld();return root.matrixWorld.elements[13];}),
+  numeric((root,m,put)=>{put([10],.25);m.apply(0);m.restoreOriginalState();return root.position.y;}),
+  numeric((root,m,put)=>{put([10],.25);m.apply(0);root.matrixWorldNeedsUpdate=false;put([10],.25,1);m.apply(1);return Number(root.matrixWorldNeedsUpdate);}),
+  numeric((root,m,put)=>{put([10],.25);m.apply(0);root.position.y=99;put([10],.25,1);m.apply(1);return root.position.y;}),
+  numeric((root,m,put)=>{put([10],1);root.position.y=9;m.saveOriginalState();root.position.y=6;m.restoreOriginalState();return root.position.y;}),
+  numeric((root,m,put)=>{put([10],.25);m.restoreOriginalState();m.apply(0);return root.position.y;}),
+  numeric((root,m,put)=>{put([10],.25,0,true);m.apply(0);return root.position.y;}),
+];
+const results=[
+  ...numericResults,
+  values([0,0,0,1],"quaternion",(m,put,get)=>{put(q,.5);m.apply(0);return get()[2];}),
+  values([0,0,0,1],"quaternion",(m,put,get)=>{put(q,1);m.apply(0);m.restoreOriginalState();return get()[3];}),
+  values([0,0,0,1],"quaternion",(m,put,get)=>{put(q,.5,0,true);m.apply(0);return get()[2];}),
+  values([false,true],"bool",(m,put,get)=>{put([true,false],.5);m.apply(0);return Number(get()[0]);}),
+  values([false,true],"bool",(m,put,get)=>{put([true,false],.75);m.apply(0);return Number(get()[0]);}),
+  values([false,true],"bool",(m,put,get)=>{put([true,false],.75);m.apply(0);m.restoreOriginalState();return Number(get()[1]);}),
+  -2,
+  values(["idle"],"string",(m,put,get)=>{put(["run"],1);m.apply(0);return get()[0]==="run"?4294967295:1;}),
+  values(["idle"],"string",(m,put,get)=>{put(["run"],1);m.apply(0);m.restoreOriginalState();return get()[0]==="idle"?1:4294967295;}),
+  -1,.25,-1,-1,-2,-1,
+  nodeQuaternion((root,m,put)=>{put(q,.5);m.apply(0);return root.quaternion.z;}),
+  nodeQuaternion((root,m,put)=>{put(q,1);m.apply(0);m.restoreOriginalState();return root.quaternion.w;}),
+];
+document.querySelector("#r160").textContent=JSON.stringify(results);
+</script>

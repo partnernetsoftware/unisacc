@@ -1,0 +1,194 @@
+// This adapter keeps the previous committed value behind the four mixer rows.
+// Types: 0 numeric, 1 quaternion, 2 boolean, 3 string handle.
+// Routes: 0 Object3D PropertyBinding, 1 contiguous f64 or u32 property cells.
+struct BoundPropertyMixer {
+  mixer: u32;
+  rows: u32;
+  target: u32;
+  lanes: u32;
+  kind: u32;
+  route: u32;
+  saved: u32;
+}
+
+native function pm_bound_regions(link:i64,mixer:i64,rows:i64,target:i64,lanes:i64,kind:i64,route:i64) i64 {
+  if(lanes<1 || lanes>64 || kind<0 || kind>3 || (kind==1 && lanes!=4) ||
+     route<0 || route>1 || (route==0 && kind>1) ||
+     link%4!=0 || mixer%8!=0 || rows%8!=0 || !animation_span(link,BoundPropertyMixer.size) ||
+     !animation_span(mixer,PropertyMixer.size) || !animation_span(rows,lanes*40) ||
+     animation_overlap(link,BoundPropertyMixer.size,mixer,PropertyMixer.size) ||
+     animation_overlap(link,BoundPropertyMixer.size,rows,lanes*40) ||
+     animation_overlap(mixer,PropertyMixer.size,rows,lanes*40)) { return 0-1; }
+  let bytes=lanes*8;
+  let align=8;
+  if(kind>=2) { bytes=lanes*4; align=4; }
+  if(route==0) { bytes=PropertyBinding.size; align=4; }
+  if(target%align!=0 || !animation_span(target,bytes) ||
+     animation_overlap(target,bytes,link,BoundPropertyMixer.size) ||
+     animation_overlap(target,bytes,mixer,PropertyMixer.size) ||
+     animation_overlap(target,bytes,rows,lanes*40)) { return 0-1; }
+  if(route==0) {
+    let arena=ux_u32(target+PropertyBinding.arena);
+    let space=bind_arena_bytes(arena);
+    if(space<0 || ux_u32(target+PropertyBinding.lanes)!=lanes ||
+       Object3D_address(arena,ux_u32(target+PropertyBinding.handle))<0 ||
+       animation_overlap(target,bytes,arena,space) ||
+       animation_overlap(link,BoundPropertyMixer.size,arena,space) ||
+       animation_overlap(mixer,PropertyMixer.size,arena,space) ||
+       animation_overlap(rows,lanes*40,arena,space)) { return 0-1; }
+    let field=ux_u32(target+PropertyBinding.field);
+    let first=ux_u32(target+PropertyBinding.first);
+    let width=3;
+    if(field==Object3D.quaternion) { width=4; }
+    if((field!=Object3D.position && field!=Object3D.scale && field!=Object3D.quaternion) ||
+       first+lanes>width) { return 0-1; }
+  }
+  return lanes;
+}
+
+native function pm_bound_check(link:i64,saved:i64) i64 {
+  if(link%4!=0 || !animation_span(link,BoundPropertyMixer.size)) { return 0-1; }
+  let mixer=ux_u32(link+BoundPropertyMixer.mixer);
+  let rows=ux_u32(link+BoundPropertyMixer.rows);
+  let lanes=ux_u32(link+BoundPropertyMixer.lanes);
+  let target=ux_u32(link+BoundPropertyMixer.target);
+  let kind=ux_u32(link+BoundPropertyMixer.kind);
+  let route=ux_u32(link+BoundPropertyMixer.route);
+  if(pm_bound_regions(link,mixer,rows,target,lanes,kind,route)<0) { return 0-1; }
+  if(saved && (ux_u32(link+BoundPropertyMixer.saved)!=1 || property_mixer_lanes(mixer)!=lanes ||
+     ux_u32(mixer+PropertyMixer.rows)!=rows)) { return 0-1; }
+  return lanes;
+}
+
+native function pm_bound_external(link:i64,buffer:i64,bytes:i64) i64 {
+  let mixer=ux_u32(link+BoundPropertyMixer.mixer);
+  let rows=ux_u32(link+BoundPropertyMixer.rows);
+  let lanes=ux_u32(link+BoundPropertyMixer.lanes);
+  let target=ux_u32(link+BoundPropertyMixer.target);
+  let kind=ux_u32(link+BoundPropertyMixer.kind);
+  let route=ux_u32(link+BoundPropertyMixer.route);
+  if(buffer%8!=0 || !animation_span(buffer,bytes) ||
+     animation_overlap(buffer,bytes,link,BoundPropertyMixer.size) ||
+     animation_overlap(buffer,bytes,mixer,PropertyMixer.size) ||
+     animation_overlap(buffer,bytes,rows,lanes*40)) { return 0; }
+  if(route==0) {
+    let arena=ux_u32(target+PropertyBinding.arena);
+    return !animation_overlap(buffer,bytes,target,PropertyBinding.size) &&
+      !animation_overlap(buffer,bytes,arena,bind_arena_bytes(arena));
+  }
+  let targetBytes=lanes*8;
+  if(kind>=2) { targetBytes=lanes*4; }
+  return !animation_overlap(buffer,bytes,target,targetBytes);
+}
+
+native function pm_bound_transfer(link:i64,buffer:i64,write:i64) i64 {
+  let target=ux_u32(link+BoundPropertyMixer.target);
+  if(ux_u32(link+BoundPropertyMixer.route)==0) { return PropertyBinding_transfer(target,buffer,write); }
+  let lanes=ux_u32(link+BoundPropertyMixer.lanes);
+  if(ux_u32(link+BoundPropertyMixer.kind)<2) {
+    if(write) { let copied=uxe_copy_record(target,buffer,lanes*8); }
+    else { let copied=uxe_copy_record(buffer,target,lanes*8); }
+    return lanes;
+  }
+  let i=0;
+  while(i<lanes) {
+    if(write) { let changed=ux_u32_put(target+i*4,f64_floor_i64(ux_f64(buffer+i*8))); }
+    else { let read=ux_f64_put(buffer+i*8,0.0+ux_u32(target+i*4)); }
+    i=i+1;
+  }
+  return lanes;
+}
+
+native function pm_bound_bools(buffer:i64,lanes:i64) i64 {
+  let i=0;
+  while(i<lanes) {
+    let v=ux_f64(buffer+i*8);
+    if(v!=0.0 && v!=1.0) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function PropertyMixer_construct(link:i64,mixer:i64,rows:i64,target:i64,lanes:i64,kind:i64,route:i64) i64 {
+  if(pm_bound_regions(link,mixer,rows,target,lanes,kind,route)<0) { return 0-1; }
+  let m=ux_u32_put(link+BoundPropertyMixer.mixer,mixer);
+  let r=ux_u32_put(link+BoundPropertyMixer.rows,rows);
+  let t=ux_u32_put(link+BoundPropertyMixer.target,target);
+  let l=ux_u32_put(link+BoundPropertyMixer.lanes,lanes);
+  let k=ux_u32_put(link+BoundPropertyMixer.kind,kind);
+  let b=ux_u32_put(link+BoundPropertyMixer.route,route);
+  let s=ux_u32_put(link+BoundPropertyMixer.saved,0);
+  return link;
+}
+
+native function PropertyMixer_saveBound(link:i64,scratch:i64) i64 {
+  let lanes=pm_bound_check(link,0);
+  if(lanes<0 || !pm_bound_external(link,scratch,lanes*8)) { return 0-1; }
+  let read=pm_bound_transfer(link,scratch,0);
+  if(read!=lanes) { return 0-1; }
+  let kind=ux_u32(link+BoundPropertyMixer.kind);
+  if(kind==2 && !pm_bound_bools(scratch,lanes)) { return 0-2; }
+  let mixer=ux_u32(link+BoundPropertyMixer.mixer);
+  let rows=ux_u32(link+BoundPropertyMixer.rows);
+  let ready=0-1;
+  if(kind==1) { ready=PropertyMixer_quaternionInit(mixer,rows,scratch); }
+  else { ready=PropertyMixer_init(mixer,rows,scratch,lanes); }
+  if(ready<0) { return ready; }
+  let last=uxe_copy_record(rows+lanes*32,rows,lanes*8);
+  let s=ux_u32_put(link+BoundPropertyMixer.saved,1);
+  return link;
+}
+
+native function PropertyMixer_addBound(link:i64,incoming:i64,weight:f64,blend:i64,work:i64) i64 {
+  let lanes=pm_bound_check(link,1);
+  if(lanes<0 || !pm_bound_external(link,incoming,lanes*8)) { return 0-1; }
+  let mixer=ux_u32(link+BoundPropertyMixer.mixer);
+  let kind=ux_u32(link+BoundPropertyMixer.kind);
+  if(kind==1) {
+    if(blend==2501 && weight>0.0 && !pm_bound_external(link,work,32)) { return 0-1; }
+    return PropertyMixer_quaternionAdd(mixer,incoming,weight,blend,work);
+  }
+  if(kind==0) { return PropertyMixer_accumulate(mixer,incoming,weight,blend); }
+  if(kind==2 && !pm_bound_bools(incoming,lanes)) { return 0-2; }
+  return PropertyMixer_select(mixer,incoming,weight,blend);
+}
+
+native function PropertyMixer_applyBound(link:i64) i64 {
+  let lanes=pm_bound_check(link,1);
+  if(lanes<0) { return 0-1; }
+  let mixer=ux_u32(link+BoundPropertyMixer.mixer);
+  let kind=ux_u32(link+BoundPropertyMixer.kind);
+  let rows=ux_u32(link+BoundPropertyMixer.rows);
+  let weight=ux_f64(mixer+PropertyMixer.weight);
+  let add=ux_f64(mixer+PropertyMixer.addWeight);
+  let output=0-1;
+  if(kind==0) { output=PropertyMixer_apply(mixer); }
+  else if(kind==1) { output=PropertyMixer_quaternionApply(mixer); }
+  else { output=PropertyMixer_applySelection(mixer); }
+  if(output<0) { return output; }
+  let last=rows+lanes*32;
+  let changed=0;
+  let i=0;
+  while(i<lanes) {
+    let value=ux_f64(output+i*8);
+    if(value-value!=0.0) {
+      let a=ux_f64_put(mixer+PropertyMixer.weight,weight);
+      let b=ux_f64_put(mixer+PropertyMixer.addWeight,add);
+      return 0-2;
+    }
+    if(value!=ux_f64(last+i*8)) { changed=1; }
+    i=i+1;
+  }
+  if(changed) {
+    let written=pm_bound_transfer(link,output,1);
+    if(written!=lanes) { return 0-1; }
+    let updated=uxe_copy_record(last,output,lanes*8);
+  }
+  return changed;
+}
+
+native function PropertyMixer_restoreBound(link:i64) i64 {
+  let lanes=pm_bound_check(link,1);
+  if(lanes<0) { return 0-1; }
+  return pm_bound_transfer(link,ux_u32(link+BoundPropertyMixer.rows),1);
+}

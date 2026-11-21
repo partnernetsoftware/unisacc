@@ -19,7 +19,7 @@
 - UniformsGroup 组值复制与 GPU 绑定 | G-struct 深拷贝和释放，G-pixel 绑定、更新与读回 | 统一缓冲布局和 M4 GPU。
 - ~~PropertyMixer 布尔与字符串离散选择 | G-anim r160 权重平局、加法选择、按帧清零 | 数值混合器记录。~~ 7 项通过，阈值篡改转红。
 - ~~PropertyMixer 四元数混合 | G-anim r160 球面插值、加法组合、错误输入和帧复位 | Quaternion 和混合器记录。~~ 7 项通过，反转加法组合顺序后转红。
-- PropertyMixer 构造与绑定接线 | G-anim 统一构造分派、写回及恢复原值 | 数值、选择与四元数混合器，PropertyBinding。
+- ~~PropertyMixer 构造与绑定接线 | G-anim 统一构造分派、写回及恢复原值 | 数值、选择与四元数混合器，PropertyBinding。~~ 26 例通过，省略恢复使值从 2 变 4 转红。AnimationMixer 多属性调度单列。
 - ~~ShapePath 与 Path 的样条追加 | G-struct 采样分辨率、端点衔接、克隆和容量 | 已有路径分段。~~ 7 项通过，采样坐标错位反例转红。
 - ~~ShapePath 全反向轮廓回退 | G-struct 全部反向时保留轮廓顺序并转为独立实体 | Path 采样。~~ 5 项通过，错取轮廓反例转红。
 - ~~ShapePath 多轮廓孔洞归属 | G-struct r160 多外环、错序、重叠歧义与绕向对照 | Path 采样与 Shape 孔数组。~~ 5 项通过，孔归属篡改转红。
