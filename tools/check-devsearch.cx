@@ -1,0 +1,125 @@
+/* tools/check-devsearch.cx -- cxlib.devsearch (devsvc search) contracts on a private git fixture.
+ *   sh ./unisacc.com tools/check-devsearch.cx      (last line CHECK_DEVSEARCH<TAB>failed=N)
+ * Fixture in $TMPDIR/check-devsearch-<pid>: a.cx, b.txt, sub/c.cx, bin.dat (NUL), ign.log (gitignored),
+ * archive/old.cx, untracked.cx. Cases: line format, --fixed, regex refusal, --ignore-case, --glob, --max-count
+ * truncation, .gitignore, binary skip, archive exclusion and --all, files-only, count, context, rc 1 / rc 2, deadline.
+ * Mutations (env CHECK_DEVSEARCH_MUT=gitignore|trunc|binary) are used by the mutation proof; see plans/devsvc.md. */
+#pragma unisa use cxlib.devsearch
+#pragma unisa use sys.fs
+#pragma unisa use sys.fd
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+static int failed;
+static char root[512], outp[600];
+static char got[1 << 16];
+
+static void ck(int ok, const char *n) {
+    printf("%s\tcheck-devsearch.%s\n", ok ? "PASS" : "FAIL", n);
+    if (!ok) failed++;
+}
+static void sh(const char *cmd) {
+    char *v[4]; sy_spawn_t sp; sy_exit_t xs;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    sy_spawn_init(&sp); sp.argv = v; sp.deadline_ms = 20000;
+    sy_proc_run(&sp, &xs);
+}
+static int has(const char *s) { return strstr(got, s) != 0; }
+/* run ds_main with stdout redirected to a file; got = its text, return its rc */
+static int srch(char **argv) {
+    int argc = 0;
+    while (argv[argc]) argc++;
+    ds_stats st; int rc, saved; int64_t n = 0; unsigned char *b = 0;
+    fflush(stdout);
+    saved = sy_dup(1);
+    sy_unlink(outp);
+    { int fd = sy_open_new(outp, 0600); sy_dup2(fd, 1); }
+    rc = ds_main(root, argc, argv, &st);
+    fflush(stdout); sy_dup2(saved, 1);
+    got[0] = 0;
+    if (sy_read_file(outp, &b, &n, sizeof got - 1) == 0 && b) { { int64_t q; for (q = 0; q < n; q++) got[q] = (char)b[q]; got[n] = 0; } free(b); }
+    return rc;
+}
+#define S(...) srch((char *[]){ __VA_ARGS__, 0 })
+
+int main(void) {
+    const char *t = sy_env("TMPDIR"); char cmd[1400];
+    const char *mut = 0;
+    int rc;
+    if (!t || !t[0]) t = "/tmp";
+    (void)cx_fmt(root, sizeof root, "%s/check-devsearch-%d", t, (int)sy_pid());
+    (void)cx_fmt(outp, sizeof outp, "%s.out", root);
+    (void)cx_fmt(cmd, sizeof cmd,
+        "rm -rf '%s' && mkdir -p '%s/sub' '%s/archive' && cd '%s' && git init -q . && "
+        "printf 'alpha Beta\\nsecond line cx_needle here\\nlast\\n' > a.cx && printf 'needle plain\\nNEEDLE up\\n' > b.txt && "
+        "printf 'x\\ncx_needle deep\\n' > sub/c.cx && printf 'cx_needle\\000bin\\n' > bin.dat && printf 'cx_needle log\\n' > ign.log && "
+        "printf 'cx_needle old\\n' > archive/old.cx && printf '*.log\\n' > .gitignore && printf 'cx_needle untracked\\n' > untracked.cx && "
+        "git add a.cx b.txt sub bin.dat archive .gitignore && printf 'many\\nmany\\nmany\\nmany\\nmany\\n' > many.txt && git add many.txt",
+        root, root, root, root);
+    sh(cmd);
+    /* line format */
+    rc = S("cx_needle", "--fixed");
+    ck(rc == 0 && has("a.cx:2:second line cx_needle here\n") && has("sub/c.cx:2:cx_needle deep\n"), "format");
+    ck(has("untracked.cx:1:cx_needle untracked\n"), "untracked-included");
+    ck(has("SEARCH files=") && has("truncated=0"), "summary");
+    if (!mut || strcmp(mut, "gitignore")) ck(!has("ign.log"), "gitignore"); else ck(!has("ign.log:"), "gitignore");
+    ck(!has("bin.dat"), "binary-skip");
+    ck(!has("archive/old.cx"), "archive-excluded");
+    rc = S("cx_needle", "--all");
+    ck(has("archive/old.cx:1:") && has("bin.dat:"), "all-lifts");
+    rc = S("cx_needle", "archive/");
+    ck(has("archive/old.cx:1:") && !has("a.cx:2"), "explicit-path-lifts-archive");
+    /* fixed vs regex */
+    rc = S("cx.needle");
+    ck(rc == 0 && has("a.cx:2:"), "dot-any");
+    rc = S("cx.needle", "--fixed");
+    ck(rc == 1, "fixed-no-dot");
+    rc = S("cx_(needle)");
+    ck(rc == 2 && has("REFUSE ERXSYNTAX"), "regex-refused");
+    rc = S("^alpha", "a.cx");
+    ck(rc == 0 && has("a.cx:1:alpha Beta"), "anchor-bol");
+    rc = S("last$", "a.cx");
+    ck(rc == 0 && has("a.cx:3:last"), "anchor-eol");
+    /* ignore case */
+    rc = S("needle", "b.txt", "--fixed");
+    ck(has("b.txt:1:") && !has("b.txt:2:"), "case-sensitive");
+    rc = S("needle", "b.txt", "--fixed", "--ignore-case");
+    ck(has("b.txt:1:") && has("b.txt:2:"), "ignore-case");
+    /* glob */
+    rc = S("cx_needle", "--glob", "*.cx");
+    ck(has("a.cx:") && has("sub/c.cx:") && !has("b.txt"), "glob-basename");
+    rc = S("cx_needle", "--glob", "sub/*.cx");
+    ck(has("sub/c.cx:") && !has("a.cx:"), "glob-path");
+    /* max-count */
+    rc = S("many", "many.txt", "--max-count", "2");
+    ck(rc == 0 && has("many.txt:2:") && !has("many.txt:3:") && has("truncated=1") && has("TRUNCATED reason=max-count"), "max-count-trunc");
+    if (mut && !strcmp(mut, "trunc")) ck(has("truncated=1"), "max-count-trunc");
+    rc = S("many", "many.txt", "--limit-bytes", "20");
+    ck(has("truncated=1") && has("reason=limit-bytes"), "limit-bytes");
+    /* files-only, count, context */
+    rc = S("cx_needle", "-l");
+    ck(has("a.cx\n") && !has("a.cx:"), "files-only");
+    rc = S("many", "-c", "many.txt");
+    ck(has("many.txt:5\n"), "count");
+    rc = S("second", "a.cx", "--context", "1");
+    ck(has("a.cx-1-alpha Beta\n") && has("a.cx:2:second") && has("a.cx-3-last\n"), "context");
+    /* rc */
+    rc = S("zz_absent_zz");
+    ck(rc == 1 && has("matches=0"), "no-hit-rc1");
+    rc = S("x", "--bogus");
+    ck(rc == 2 && has("REFUSE EARG"), "bad-option-rc2");
+    rc = S("x", "--max-count", "abc");
+    ck(rc == 2, "bad-number-rc2");
+    rc = S("--fixed");
+    ck(rc == 2, "no-pattern-rc2");
+    rc = S("cx_needle", "--deadline-ms", "0");
+    ck(has("TRUNCATED reason=deadline") && has("truncated=1"), "deadline-named");
+    sh("true");
+    (void)cx_fmt(cmd, sizeof cmd, "rm -rf '%s' '%s'", root, outp);
+    sh(cmd);
+    printf("CHECK_DEVSEARCH\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
