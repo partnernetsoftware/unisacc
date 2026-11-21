@@ -282,14 +282,15 @@
 - BoxHelper | G-struct 对象世界边界 | Box3 与场景图。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
 - CameraHelper | G-struct 视锥与相机变换 | M3 相机。
-- DirectionalLightHelper | G-struct 光方向、颜色与更新 | M6 方向光。
+- DirectionalLightHelper 渲染接线 | G-pixel 光框随目标更新 | G-struct 方向及颜色 14 项与篡改已通过。
 - GridHelper 渲染与资源回收 | G-pixel 分格随对象树变换，G-struct 验证释放后不能提交 | 分格及主轴颜色由 gridhelper-struct.cx 验证通过，依赖场景渲染列表。
-- HemisphereLightHelper | G-struct 天地两色与方向 | M6 半球光。
-- PlaneHelper | G-struct 法线、位置与尺度 | Plane。
-- PointLightHelper | G-struct 光源位置与颜色 | M6 点光。
-- PolarGridHelper | G-struct 圆环和辐条 | 线族。
+- HemisphereLightHelper 渲染接线 | G-pixel 两色和方向变化 | G-struct 天地分区 19 项与篡改已通过。
+- PlaneHelper 父节点与渲染 | G-pixel 线、面和世界矩阵 | G-struct 默认上方向与平面 15 项及篡改已通过。
+- PointLightHelper 渲染接线 | G-pixel 球线随灯位置与颜色变化 | G-struct 球框和颜色 12 项及篡改已通过。
+- PolarGridHelper 渲染接线 | G-pixel 圆环和辐条随对象变换 | G-struct 圆环与辐条 16 项及篡改已通过。
 - SkeletonHelper | G-struct 骨连接与位姿 | M7 骨骼。
-- SpotLightHelper | G-struct 锥角和目标位置 | M6 聚光。
+- SpotLightHelper 渲染接线 | G-pixel 射程、目标和锥角 | G-struct 锥角与目标 16 项及篡改已通过。
+- ~~Helper 固定几何生成 | G-struct 31 行事实表生成、--check 与篡改拒绝 | Plane、DirectionalLight、SpotLight。~~ 生成文件匹配，错件拒绝。
 - AudioContext | G-io 采样率、实例与关闭 | host PCM ABI。
 - AudioListener | G-io 监听姿态和主音量 | AudioContext、场景图。
 - ~~Audio 缓冲播放 | G-io 双声道 PCM、同采样率循环、稳态增益与停止 | AudioLoader。~~ Chrome 离线音频与独立金值 11 项通过，取消循环转红。
