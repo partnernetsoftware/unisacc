@@ -25,10 +25,10 @@ function readDraw(packet, at, span, faces, limit, primitive) {
   if (faces) {
     const [width, height, min, wrapS, wrapT] = [0, 4, 8, 12, 16].map(n => word(end + n));
     const bytes = width * height * 4 * faces;
-    if (!width || !height || width > limit || height > limit || min > 2 || wrapS > 2 || wrapT > 2 ||
+    if (!width || !height || width > limit || height > limit || min > 5 || wrapS > 2 || wrapT > 2 ||
         (faces === 6 && width !== height) || end + 20 + bytes !== span) return null;
     const nonPower = (width & (width - 1)) || (height & (height - 1));
-    if (nonPower && (min === 2 || wrapS || wrapT)) return null;
+    if (nonPower && (min >= 2 || wrapS || wrapT)) return null;
     texture = { width, height, min, wrapS, wrapT, faces,
       bytes: new Uint8Array(packet.buffer, packet.byteOffset + at + end + 20, bytes) };
   }
@@ -128,7 +128,9 @@ function runCommands(gl, commands, targets, packet) {
           const wraps = [gl.CLAMP_TO_EDGE, gl.REPEAT, gl.MIRRORED_REPEAT];
           previousTexture = gl.getParameter(cube ? gl.TEXTURE_BINDING_CUBE_MAP : gl.TEXTURE_BINDING_2D);
           gl.bindTexture(target, texture);
-          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR][min]);
+          const filters = [gl.NEAREST, gl.LINEAR, gl.LINEAR_MIPMAP_LINEAR,
+            gl.NEAREST_MIPMAP_NEAREST, gl.NEAREST_MIPMAP_LINEAR, gl.LINEAR_MIPMAP_NEAREST];
+          gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, filters[min]);
           gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, min ? gl.LINEAR : gl.NEAREST);
           gl.texParameteri(target, gl.TEXTURE_WRAP_S, wraps[wrapS]);
           gl.texParameteri(target, gl.TEXTURE_WRAP_T, wraps[wrapT]);
@@ -138,7 +140,7 @@ function runCommands(gl, commands, targets, packet) {
             const image = bytes.subarray(i * faceBytes, (i + 1) * faceBytes);
             gl.texImage2D(face, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, image);
           }
-          if (min === 2) gl.generateMipmap(target);
+          if (min >= 2) gl.generateMipmap(target);
           gl.uniform1i(gl.getUniformLocation(program, "u_texture"), gl.getParameter(gl.ACTIVE_TEXTURE) - gl.TEXTURE0);
         }
         gl.bindBuffer(gl.ARRAY_BUFFER, buffer);

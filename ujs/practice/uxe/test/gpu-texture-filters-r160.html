@@ -1,0 +1,97 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {
+  DataTexture, REVISION, WebGLRenderer, Scene, OrthographicCamera, RawShaderMaterial, GLSL3, Mesh, PlaneGeometry, Vector3, NoColorSpace
+} from "../../web/game/three.module.js";
+import * as Three from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const path=query.get("wasm");
+  if(!path) throw new Error("missing Wasm path");
+  const names=(await (await fetch("./gpu-texture-filters-generated.tsv")).text()).trim().split("\n").slice(1).map(row=>row.split("\t"));
+  const options={alpha:true,antialias:false,premultipliedAlpha:false,preserveDrawingBuffer:true};
+  function context() {
+    const canvas=document.createElement("canvas");
+    canvas.width=canvas.height=4;
+    const gl=canvas.getContext("webgl2",options);
+    if(!gl) throw new Error("WebGL2 unavailable");
+    gl.disable(gl.DITHER);
+    return gl;
+  }
+
+  const gpu=context();
+  let wasm;
+  const submit=createGpuSubmit(gpu,()=>wasm.memory,()=>1);
+  const bytes=await (await fetch(path.startsWith("file:")?path:"file://"+path)).arrayBuffer();
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(bytes),{uxe_gpu_v1:{host_gpu_submit:submit}}).exports;
+  const memoryBase=2097152;
+  const memory=new DataView(wasm.memory.buffer,memoryBase);
+  const vertex="#version 300 es\nin vec3 a_position; in vec4 a_color; out vec3 sampleAt; void main(){sampleAt=a_color.xyz;gl_Position=vec4(a_position,1.0);}";
+  const fragment="#version 300 es\nprecision highp float; in vec3 sampleAt; uniform sampler2D u_texture; out vec4 color; void main(){color=textureLod(u_texture,sampleAt.xy,sampleAt.z);}";
+  for(const [index,kind,at] of [[0,"vert",5120],[1,"frag",6144]]) {
+    const source=new TextEncoder().encode((kind==="vert"?vertex:fragment));
+    new Uint8Array(wasm.memory.buffer,memoryBase+at,source.length).set(source);
+    memory.setUint32(4864+index*8,at,true);
+    memory.setUint32(4868+index*8,source.length,true);
+  }
+
+
+
+  const texels=new Uint8Array(64);
+  for(let i=0;i<16;i++) {
+    texels[4*i]=16+16*(i%4)+32*Math.floor(i/4);
+    texels[4*i+3]=255;
+  }
+  const renderer=new WebGLRenderer({canvas:document.createElement("canvas"),antialias:false});
+  renderer.setSize(4,4,false);
+  const ref=renderer.getContext();
+  ref.disable(ref.DITHER);
+  const texture=new DataTexture(texels,4,4);
+  texture.colorSpace=NoColorSpace;
+  const sampleAt=new Vector3();
+  const material=new RawShaderMaterial({glslVersion:GLSL3,
+    uniforms:{u_texture:{value:texture},sampleAt:{value:sampleAt}},
+    vertexShader:"in vec3 position; void main(){gl_Position=vec4(position,1.0);}",
+    fragmentShader:fragment.split("\n").slice(1).join("\n").replace("in vec3 sampleAt","uniform vec3 sampleAt")});
+  const geometry=new PlaneGeometry(2,2);
+  const scene=new Scene();
+  scene.add(new Mesh(geometry,material));
+  const camera=new OrthographicCamera(-1,1,1,-1);
+  const result=[];
+  const pixel=new Uint8Array(4);
+  function read(gl) {
+    gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+    if(gl.getError()!==gl.NO_ERROR || pixel[3]!==255) throw new Error("invalid filter pixel");
+    return pixel[0];
+  }
+  for(const [sample,lod] of [-1,0.75,1.375].entries()) for(const [name,tag] of names) {
+    const filter=Three[name];
+    if(filter!==Number(tag)) throw new Error("r160 filter identity "+name);
+    const selected=query.get("mutate")==="1" && filter===Three.LinearMipmapLinearFilter?
+      Three.NearestMipmapNearestFilter:filter;
+    const rc=wasm.uxe_texture_filter(BigInt(selected),BigInt(sample));
+    if(rc<0n) throw new Error("texture filter packet failed "+rc);
+    result.push(read(gpu));
+    texture.minFilter=filter;
+    texture.magFilter=filter===Three.NearestFilter?Three.NearestFilter:Three.LinearFilter;
+    texture.generateMipmaps=filter!==Three.NearestFilter && filter!==Three.LinearFilter;
+    texture.needsUpdate=true;
+    sampleAt.set(0.31,0.32,lod);
+    renderer.render(scene,camera);
+    result.push(read(ref));
+  }
+  geometry.dispose();
+  material.dispose();
+  texture.dispose();
+  renderer.dispose();
+  output.textContent=JSON.stringify(result);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

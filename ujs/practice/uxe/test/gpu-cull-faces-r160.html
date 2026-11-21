@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {
+  CullFaceNone, CullFaceBack, CullFaceFront, CullFaceFrontBack,
+  MeshBasicMaterial, NoBlending, REVISION, WebGLRenderer
+} from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const path=query.get("wasm");
+  if(!path) throw new Error("missing Wasm path");
+  const modes=[CullFaceNone,CullFaceBack,CullFaceFront,CullFaceFrontBack];
+  const options={alpha:true,antialias:false,premultipliedAlpha:false,preserveDrawingBuffer:true};
+  function context() {
+    const canvas=document.createElement("canvas");
+    canvas.width=canvas.height=4;
+    const gl=canvas.getContext("webgl2",options);
+    if(!gl) throw new Error("WebGL2 unavailable");
+    gl.disable(gl.DITHER);
+    return gl;
+  }
+
+  const gpu=context();
+  let wasm;
+  const submit=createGpuSubmit(gpu,()=>wasm.memory,()=>1);
+  const bytes=await (await fetch(path.startsWith("file:")?path:"file://"+path)).arrayBuffer();
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(bytes),{uxe_gpu_v1:{host_gpu_submit:submit}}).exports;
+  const memoryBase=2097152;
+  const memory=new DataView(wasm.memory.buffer,memoryBase);
+  for(const [index,kind,at] of [[0,"vert",5120],[1,"frag",6144]]) {
+    const source=new Uint8Array(await (await fetch("../base/gpu-flat."+kind)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,memoryBase+at,source.length).set(source);
+    memory.setUint32(4864+index*8,at,true);
+    memory.setUint32(4868+index*8,source.length,true);
+  }
+
+  const reference=context();
+  const renderer=new WebGLRenderer({canvas:reference.canvas,context:reference,...options});
+  renderer.setSize(4,4,false);
+  reference.disable(reference.DITHER);
+  const material=new MeshBasicMaterial({blending:NoBlending,depthTest:false,depthWrite:false});
+  function compile(type,text) {
+    const shader=reference.createShader(type);
+    reference.shaderSource(shader,text);
+    reference.compileShader(shader);
+    if(!reference.getShaderParameter(shader,reference.COMPILE_STATUS))
+      throw new Error(reference.getShaderInfoLog(shader));
+    return shader;
+  }
+  const vs=compile(reference.VERTEX_SHADER,"#version 300 es\nuniform float z; uniform bool reverse; void main() {\n"+
+    "int a=reverse?2:1; int b=reverse?1:2; float x=gl_VertexID==a?3.0:-1.0; float y=gl_VertexID==b?3.0:-1.0; gl_Position=vec4(x,y,z,1.0); }");
+  const fs=compile(reference.FRAGMENT_SHADER,"#version 300 es\nprecision highp float;\n"+
+    "uniform vec4 baseColor; out vec4 color; void main(){ color=baseColor; }");
+  const program=reference.createProgram();
+  reference.attachShader(program,vs);
+  reference.attachShader(program,fs);
+  reference.linkProgram(program);
+  if(!reference.getProgramParameter(program,reference.LINK_STATUS))
+    throw new Error(reference.getProgramInfoLog(program));
+  reference.useProgram(program);
+  const color=reference.getUniformLocation(program,"baseColor");
+  const z=reference.getUniformLocation(program,"z");
+  const pixel=new Uint8Array(4);
+  function green(gl) {
+    gl.readPixels(1,1,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+    if(gl.getError()!==gl.NO_ERROR || pixel[0]+pixel[1]!==255 || pixel[2]!==0)
+      throw new Error("invalid cull pixel "+pixel);
+    return pixel[1];
+  }
+  const result=[];
+  reference.uniform1f(z,0);
+  reference.uniform4f(color,0,1,0,1);
+  const reverse=reference.getUniformLocation(program,"reverse");
+  renderer.state.setMaterial(material,false);
+  for(let winding=0;winding<2;winding++) for(const [index,mode] of modes.entries()) {
+    if(mode!==index) throw new Error("r160 cull numbering");
+    const selected=query.get("mutate")==="1" && mode===CullFaceFrontBack?CullFaceNone:mode;
+    const rc=wasm.uxe_cull_face(BigInt(selected),BigInt(winding));
+    if(rc<0n) throw new Error("cull packet failed "+rc);
+    result.push(green(gpu));
+    renderer.state.setCullFace(mode);
+    reference.uniform1i(reverse,winding);
+    reference.clearColor(1,0,0,1);
+    reference.clear(reference.COLOR_BUFFER_BIT);
+    reference.drawArrays(reference.TRIANGLES,0,3);
+    result.push(green(reference));
+  }
+  output.textContent=JSON.stringify(result);
+  reference.deleteProgram(program);
+  reference.deleteShader(vs);
+  reference.deleteShader(fs);
+  material.dispose();
+  renderer.dispose();
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

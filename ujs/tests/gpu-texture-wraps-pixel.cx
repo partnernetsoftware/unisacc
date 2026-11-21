@@ -1,0 +1,61 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int texel(int mode,int sample) {
+    const int high=sample%2;
+    const int outer=mode==0?(high?3:0):mode==1?(high?1:2):(high?2:1);
+    return 10+13*(sample<2?4+outer:4*outer+1);
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char prelude[]=
+        "import host_gpu_submit from \"uxe_gpu_v1\" (i64,i64) i64;\n"
+        "export uxe_texture_wrap(value:i64,variant:i64) i64 version 1;\n";
+    char dir[220],abi[260],wasm[260],cwd[400],url[760],*out=0;
+    size_t size=0;
+    if(sy_mkdtemp("/tmp","uxe-texture-wraps-",dir,sizeof dir) || sy_cwd(cwd,sizeof cwd)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/fixture.wasm",dir);
+    tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-texture-wraps-r160.html?wasm=%s&mutate=%d",
+        cwd,wasm,mutate);
+    int failed=sy_write_file(abi,prelude,sizeof prelude-1,0600)!=0;
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-state.ujs",
+        "ujs/practice/uxe/base/gpu-texture-wraps-generated.ujs",
+        "ujs/practice/uxe/test/gpu-texture-wraps-probe.ujs","-o",wasm,0};
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&out,&size);
+        if(rc) printf("GPU_TEXTURE_WRAPS compile_rc=%d %.*s\n",rc,(int)size,out?out:"");
+        failed=rc!=0;
+        mm_free(out);
+        out=0;
+    }
+    enum { functions=3, variants=4, values=functions*variants*2 };
+    double pixels[values]={0};
+    if(!failed && r160_wait_read(url,"#r160",pixels,values,dir)) {
+        printf("GPU_TEXTURE_WRAPS browser_read_failed\n");
+        failed=1;
+    }
+    int checked=0;
+    if(!failed) for(int v=0;v<variants;v++) for(int tag=0;tag<functions;tag++) {
+        const int expected=texel(tag,v);
+        const int offset=(v*functions+tag)*2;
+        if(pixels[offset]!=expected || pixels[offset+1]!=expected) {
+            printf("GPU_TEXTURE_WRAPS tag=%d sample=%d actual=%.0f r160=%.0f gold=%d\n",
+                tag,v,pixels[offset],pixels[offset+1],expected);
+            failed++;
+        }
+        checked++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&out,&size)) failed++;
+    mm_free(out);
+    printf("GPU_TEXTURE_WRAPS modes=%d variants=%d pixels=%d failed=%d\n",functions,variants,checked,failed);
+    return failed!=0;
+}

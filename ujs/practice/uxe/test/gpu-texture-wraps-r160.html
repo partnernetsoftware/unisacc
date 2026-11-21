@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {
+  ClampToEdgeWrapping, RepeatWrapping, MirroredRepeatWrapping, DataTexture, Vector2, REVISION
+} from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const path=query.get("wasm");
+  if(!path) throw new Error("missing Wasm path");
+  const modes=[ClampToEdgeWrapping,RepeatWrapping,MirroredRepeatWrapping];
+  const options={alpha:true,antialias:false,premultipliedAlpha:false,preserveDrawingBuffer:true};
+  function context() {
+    const canvas=document.createElement("canvas");
+    canvas.width=canvas.height=4;
+    const gl=canvas.getContext("webgl2",options);
+    if(!gl) throw new Error("WebGL2 unavailable");
+    gl.disable(gl.DITHER);
+    return gl;
+  }
+
+  const gpu=context();
+  let wasm;
+  const submit=createGpuSubmit(gpu,()=>wasm.memory,()=>1);
+  const bytes=await (await fetch(path.startsWith("file:")?path:"file://"+path)).arrayBuffer();
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(bytes),{uxe_gpu_v1:{host_gpu_submit:submit}}).exports;
+  const memoryBase=2097152;
+  const memory=new DataView(wasm.memory.buffer,memoryBase);
+  for(const [index,kind,at] of [[0,"vert",5120],[1,"frag",6144]]) {
+    const source=new Uint8Array(await (await fetch("../base/gpu-texture."+kind)).arrayBuffer());
+    new Uint8Array(wasm.memory.buffer,memoryBase+at,source.length).set(source);
+    memory.setUint32(4864+index*8,at,true);
+    memory.setUint32(4868+index*8,source.length,true);
+  }
+
+
+  const texels=new Uint8Array(64);
+  for(let i=0;i<16;i++) {
+    texels[4*i]=10+13*i;
+    texels[4*i+3]=255;
+  }
+  const texture=new DataTexture(texels,4,4);
+  const points=[[-0.375,0.375],[1.375,0.375],[0.375,-0.375],[0.375,1.375]];
+  const result=[];
+  const pixel=new Uint8Array(4);
+  for(const [i,[u,v]] of points.entries()) for(const mode of modes) {
+    const selected=query.get("mutate")==="1" && mode===MirroredRepeatWrapping?RepeatWrapping:mode;
+    const rc=wasm.uxe_texture_wrap(BigInt(selected),BigInt(i));
+    if(rc<0n) throw new Error("texture wrap packet failed "+rc);
+    gpu.readPixels(1,1,1,1,gpu.RGBA,gpu.UNSIGNED_BYTE,pixel);
+    if(gpu.getError()!==gpu.NO_ERROR || pixel[3]!==255) throw new Error("invalid texture pixel");
+    texture.wrapS=texture.wrapT=mode;
+    const uv=texture.transformUv(new Vector2(u,v));
+    const x=Math.min(3,Math.floor(4*uv.x)),y=Math.min(3,Math.floor(4*uv.y));
+    result.push(pixel[0],texels[(y*4+x)*4]);
+  }
+  texture.dispose();
+  output.textContent=JSON.stringify(result);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
