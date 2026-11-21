@@ -1,0 +1,87 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AxesHelper, Color, GridHelper, ObjectLoader, PolarGridHelper, REVISION }
+  from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const listError = (a, b) => a.length === b.length
+  ? a.reduce((maximum, value, i) => Math.max(maximum, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+const sameFields = (a, b) => Number(a.uuid === b.uuid && a.name === b.name && a.visible === b.visible &&
+  a.layers.mask === b.layers.mask && a.up.equals(b.up) && a.matrix.equals(b.matrix));
+
+function compare(module, kind, mutate) {
+  const api = new WebAssembly.Instance(module).exports;
+  const run = mode => Number(api.uxe_helper_line_object(BigInt(mode), BigInt(kind), mutate));
+  const memory = new Uint8Array(api.memory.buffer, run(0), 90000);
+  const geometryId = "geom-" + kind;
+  const materialId = "matr-" + kind;
+  const objectId = "root-" + kind;
+  const name = 'Line "\n' + kind;
+  memory.set(encoder.encode(geometryId), 944);
+  memory.set(encoder.encode(materialId), 952);
+  memory.set(encoder.encode(objectId), 960);
+  memory.set(encoder.encode(name), 968);
+  const decode = length => {
+    if (length <= 0) throw new Error("native JSON status " + length + " kind " + kind);
+    return JSON.parse(decoder.decode(memory.subarray(50000, 50000 + length)));
+  };
+  const standard = decode(run(1));
+  const compatible = decode(run(2));
+  const first = new Color().setRGB(0.25, 0, 0), second = new Color().setRGB(0.5, 0, 0);
+  const helper = kind === 1 ? new GridHelper(8, 2, first, second)
+    : kind === 2 ? new PolarGridHelper(4, 4, 1, 4, first, second) : new AxesHelper(3);
+  helper.uuid = objectId;
+  helper.geometry.uuid = geometryId;
+  helper.material.uuid = materialId;
+  helper.name = name;
+  helper.visible = Boolean(kind % 2);
+  helper.layers.mask = (0x80000000 + kind) | 0;
+  helper.position.set(2 + kind, -kind, 0);
+  helper.updateMatrix();
+  const reference = helper.toJSON();
+  const loader = new ObjectLoader();
+  const referenceRoot = loader.parse(reference);
+  const preserved = loader.parse(standard);
+  const drawable = loader.parse(compatible);
+  const native = standard.object;
+  const expected = reference.object;
+  const references = Number(native.geometry === expected.geometry && native.material === expected.material &&
+    native.geometry === standard.geometries[0].uuid && native.material === standard.materials[0].uuid &&
+    drawable.geometry?.uuid === native.geometry && drawable.material?.uuid === native.material);
+  const geometry = drawable.geometry?.attributes;
+  const source = helper.geometry.attributes;
+  const material = drawable.material;
+  return [
+    Number(native.type === expected.type && compatible.object.type === "LineSegments"),
+    Number(preserved.type === referenceRoot.type && preserved.type === "Object3D" &&
+      preserved.geometry === undefined && referenceRoot.geometry === undefined),
+    Number(drawable.isLineSegments === true), Number(native.layers === expected.layers),
+    sameFields(preserved, referenceRoot), sameFields(drawable, referenceRoot), references,
+    Number(standard.metadata.type === reference.metadata.type &&
+      standard.metadata.version === reference.metadata.version &&
+      standard.metadata.generator === reference.metadata.generator),
+    native.layers, native.matrix[12], native.matrix[13], Number(drawable.visible),
+    geometry?.position.count ?? -1,
+    geometry ? listError(geometry.position.array, source.position.array) : 1000,
+    geometry ? listError(geometry.color.array, source.color.array) : 1000,
+    Number(material?.type === helper.material.type && material.color.getHex() === helper.material.color.getHex() &&
+      material.vertexColors === helper.material.vertexColors && material.toneMapped === helper.material.toneMapped),
+    run(3), run(4), run(5),
+  ];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const values = [1, 2, 3].flatMap(kind => compare(module, kind, BigInt(query.get("mutate"))));
+  result.textContent = JSON.stringify(values);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
