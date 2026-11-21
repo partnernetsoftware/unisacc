@@ -1193,6 +1193,20 @@ static int path_inside_repo(const char *cand, const char *repo) {
     return 0;
 }
 
+static int path_inside_cache(const char *cand) {
+    if (!cand) return 0;
+    if (strstr(cand, "/.cache/") != 0) return 1;
+    size_t n = strlen(cand);
+    if (n >= 7 && !strcmp(cand + n - 7, "/.cache")) return 1;
+    char cabs[4096];
+    if (sy_realpath(cand, cabs, sizeof cabs) == 0) {
+        if (strstr(cabs, "/.cache/") != 0) return 1;
+        size_t cn = strlen(cabs);
+        if (cn >= 7 && !strcmp(cabs + cn - 7, "/.cache")) return 1;
+    }
+    return 0;
+}
+
 static int verify_backup_manifest(const char *repo, const char *ver, const char *bdir_arg, char *why, size_t wcap) {
     char mpath[4400];
     if (bdir_arg && bdir_arg[0]) {
@@ -1242,6 +1256,11 @@ static int verify_backup_manifest(const char *repo, const char *ver, const char 
         if (path_inside_repo(dst, repo)) {
             free(mb);
             cx_fmt(why, wcap, "backup-inside-repo path=%s", dst);
+            return 2;
+        }
+        if (path_inside_cache(dst)) {
+            free(mb);
+            cx_fmt(why, wcap, "backup-inside-cache path=%s", dst);
             return 2;
         }
         size_t fn = 0;
@@ -1295,9 +1314,20 @@ static int cmd_backup_evidence(int argc, char **argv) {
         sy_printf("BACKUP_VERIFY\tPASS\tversion=%s\tfiles=7\trepo=%s\n", ver, repo);
         return 0;
     }
-    if (!cdir || !pdir || !bdir) usage("backup-evidence requires --chain-dir DIR --prerun-dir DIR --backup-dir DIR");
+    if (!cdir || !pdir) usage("backup-evidence requires --chain-dir DIR --prerun-dir DIR [--backup-dir DIR]");
+    char def_bdir[4400];
+    if (!bdir || !bdir[0]) {
+        const char *hm = sy_env("HOME");
+        if (!hm || !hm[0] || cx_fmt(def_bdir, sizeof def_bdir, "%s/.unisacc-release-evidence-backups/%s", hm, ver))
+            usage("backup-evidence default --backup-dir requires HOME");
+        bdir = def_bdir;
+    }
     if (path_inside_repo(bdir, repo)) {
         fprintf(stderr, "REFUSE BACKUP_EVIDENCE backup-inside-repo backup=%s repo=%s\n", bdir, repo);
+        return 2;
+    }
+    if (path_inside_cache(bdir)) {
+        fprintf(stderr, "REFUSE BACKUP_EVIDENCE backup-inside-cache backup=%s\n", bdir);
         return 2;
     }
     static const char * const cfiles[5] = {
