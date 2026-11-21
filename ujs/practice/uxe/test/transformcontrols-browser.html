@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; }
+  .view { position: absolute; width: 256px; height: 256px; top: 16px; touch-action: none; background: #ddd; }
+</style>
+<div class="view" id="control" style="left:16px"></div>
+<div class="view" id="reference" style="left:320px"></div>
+<pre id="ready">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { Group, OrthographicCamera, REVISION } from "three";
+import { bindTransformXInput } from "../base/transformcontrols-browser.js";
+
+const ready=document.querySelector("#ready");
+try {
+  if(REVISION!=="160") throw new Error("Three.js revision");
+  const params=new URLSearchParams(location.search);
+  const root=params.get("package");
+  const { TransformControls }=await import(`file://${root}/examples/jsm/controls/TransformControls.js`);
+  const request=new XMLHttpRequest();
+  request.open("GET",params.get("wasm"),false);
+  request.overrideMimeType("text/plain; charset=x-user-defined");
+  request.send();
+  const bytes=Uint8Array.from(request.responseText,c=>c.charCodeAt(0)&255);
+  const { exports: { uxe_transform_x: call } }=new WebAssembly.Instance(new WebAssembly.Module(bytes));
+  const target=document.querySelector("#control");
+  const reference=document.querySelector("#reference");
+  const trace=[];
+  bindTransformXInput(target,(action,id,x,y)=>{
+    const result=call(action,id,x,y);
+    if(trace.length<24) trace.push([Number(action),x,y,result]);
+    return result;
+  });
+  if(call(10n,0n,0,0)<0) throw new Error("Wasm X input initialization");
+  const hits=new Map();
+  for(const node of [target,reference]) {
+    const events=new Map();
+    hits.set(node,events);
+    for(const name of ["pointerdown","pointermove","pointerup"]) {
+      node.addEventListener(name,event=>{ if(event.isTrusted) events.set(name,[event.clientX,event.clientY]); });
+    }
+  }
+  const scene=new Group();
+  const object=new Group();
+  scene.add(object);
+  const camera=new OrthographicCamera(-4,4,4,-4,0.1,100);
+  camera.position.z=10;
+  camera.updateMatrixWorld();
+  const controls=new TransformControls(camera,reference);
+  controls.attach(object);
+  controls.showY=false;
+  controls.showZ=false;
+  controls.setTranslationSnap(0.25);
+  scene.add(controls);
+  scene.updateMatrixWorld();
+  const changes={ starts:0,moves:0,ends:0 };
+  controls.addEventListener("mouseDown",()=>changes.starts++);
+  controls.addEventListener("objectChange",()=>{ changes.moves++; scene.updateMatrixWorld(); });
+  controls.addEventListener("mouseUp",()=>changes.ends++);
+
+  window.compareTransform=(side,expected,event,x,y)=>{
+    const actual=Array.from({length:6},(_,i)=>call(BigInt(20+i),0n,0,0));
+    const oracle=[object.position.x,Number(controls.dragging),Number(controls.axis==="X"),
+      changes.starts,changes.moves,changes.ends];
+    const delivered=hits.get(side===0 ? target : reference).get(event);
+    if(!delivered || delivered[0]!==x || delivered[1]!==y) return "pending";
+    for(let i=0;i<actual.length;i++) {
+      if(Math.abs((side===0 ? actual : oracle)[i]-expected[i])>1e-9) {
+        return `fail:field=${i} wasm=${actual} r160=${oracle} axis=${controls.axis} gold=${expected} route=${JSON.stringify(trace)}`;
+      }
+    }
+    return "pass";
+  };
+  ready.textContent="ready";
+} catch(error) {
+  ready.textContent=`fail:${error.message}`;
+}
+</script>
