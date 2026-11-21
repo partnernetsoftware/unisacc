@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { AmbientLight, DirectionalLight, HemisphereLight, LightProbe, Object3D, ObjectLoader,
+  PointLight, RectAreaLight, REVISION, SpotLight } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const dir = "file://" + query.get("dir") + "/";
+const mutate = query.get("mutate") === "1";
+
+const directional = new DirectionalLight(0xffffff, 3);
+directional.shadow.bias = 0.125;
+directional.shadow.mapSize.x = 128;
+const probeSource = new LightProbe(undefined, 6);
+probeSource.sh.coefficients[8].set(1, 2, 3);
+const sources = [new AmbientLight(0xff0000, 1.5), new HemisphereLight(0x00ff00, 0x0000ff, 2),
+  directional, new PointLight(0xffffff, 2, 20, 1), new SpotLight(0xffffff, 4, 42, 0.5, 0.25),
+  new RectAreaLight(0xffffff, 5, 4, 5), probeSource];
+
+function projection(value) {
+  const fields = [value.type, value.color, value.intensity, value.visible, value.layers,
+    value.groundColor, value.distance, value.angle, value.penumbra, value.decay, value.width, value.height, value.sh];
+  if (value.shadow) {
+    const { bias, normalBias, radius, mapSize, camera: { type, fov, near, far } } = value.shadow;
+    fields.push(bias, normalBias, radius, mapSize, type, fov, near, far);
+  }
+  return JSON.stringify(fields);
+}
+
+function reference(source) {
+  source.position.x = 3;
+  source.visible = false;
+  source.layers.set(3);
+  source.add(new Object3D());
+  if (source.target) source.target.position.y = 7;
+  const state = projection(source.toJSON().object);
+
+  for (const result of [new source.constructor().copy(source, true), source.clone(true)]) {
+    if (result.position.x !== 3 || result.layers.mask !== 8 || result.visible ||
+        result.children.length !== 1 || result.children[0] === source.children[0]) return {code: -1, state};
+    if (source.target) {
+      if (!result.target || result.target === source.target || result.target.position.y !== 7) return {code: -2, state};
+      result.target.position.y = 11;
+      if (source.target.position.y !== 7) return {code: -2, state};
+    }
+    if (projection(result.toJSON().object) !== state) return {code: -3, state};
+  }
+
+  const wire = JSON.parse(JSON.stringify(source.toJSON()));
+  // r160 emits the inherited type Light, while its loader has a dedicated
+  // LightProbe branch. UXE recognizes the legacy representation using sh.
+  if (source.isLightProbe) wire.object.type = "LightProbe";
+  const restored = new ObjectLoader().parse(wire);
+  if (restored.constructor !== source.constructor || Boolean(restored.target) !== Boolean(source.target)) return {code: -5, state};
+  if (projection(restored.toJSON().object) !== state) return {code: -7, state};
+
+  const disposed = [];
+  if (restored.shadow) {
+    restored.shadow.map = { dispose() { disposed.push(7); } };
+    restored.shadow.mapPass = { dispose() { disposed.push(9); } };
+  }
+  restored.dispose();
+  const accepted = restored.shadow ? disposed.join(",") === "7,9" : disposed.length === 0;
+  return {code: accepted ? 1 : -9, state};
+}
+
+async function wasm(name) {
+  const response = await fetch(dir + name + ".wasm");
+  if (!response.ok) throw new Error("missing module " + name);
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+
+function equal(a, b) {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+async function product(refs) {
+  const [objectModule, codecModule, probeModule] = await Promise.all([wasm("object"), wasm("codec"), wasm("probe")]);
+  const imports = WebAssembly.Module.imports(probeModule);
+  const names = imports.map(x => x.module + "." + x.name + "." + x.kind).sort();
+  const expected = ["uxe_light_codec_v1.uxe_light_json_dispatch.function", "uxe_light_object_v1.uxe_light_dispatch.function"];
+  if (JSON.stringify(names) !== JSON.stringify(expected)) throw new Error("probe import ABI");
+  const object = (await WebAssembly.instantiate(objectModule)).exports;
+  const codec = (await WebAssembly.instantiate(codecModule)).exports;
+  const probe = (await WebAssembly.instantiate(probeModule, {
+    uxe_light_object_v1: {uxe_light_dispatch: object.uxe_light_dispatch},
+    uxe_light_codec_v1: {uxe_light_json_dispatch: codec.uxe_light_json_dispatch},
+  })).exports;
+  if ([object, codec, probe].some(part => part.uxe_abi_version() !== 1) ||
+      new Set([object.memory, codec.memory, probe.memory]).size !== 3) throw new Error("module ABI or memory alias");
+  const call = (side, op, a = 0, b = 0) => Number(probe.uxe_light_probe(BigInt(side), BigInt(op), BigInt(a), BigInt(b)));
+  const obj = (op, a, b) => call(0, op, a, b);
+  const json = (op, a, b) => call(1, op, a, b);
+  const owner = new Uint8Array(object.memory.buffer, obj(0, 0), 20000);
+  const wire = new Uint8Array(codec.memory.buffer, json(0, 0), 16384);
+  const offset = obj(0, 1), state = json(0, 1), size = obj(0, 2), text = json(0, 3), limit = json(0, 4);
+  if (size <= 0 || size !== json(0, 2) || offset < 0 || offset + size > owner.length ||
+      state < 0 || state + size > wire.length || text < state + size || text + limit > wire.length) throw new Error("linked buffers ABI");
+  const decoder = new TextDecoder();
+
+  function snapshot(which) {
+    if (obj(3, which) !== offset) throw new Error("snapshot " + which);
+    return owner.slice(offset, offset + size);
+  }
+  function encode(values) {
+    wire.set(values, state);
+    const bytes = json(1);
+    if (bytes <= 0 || bytes > limit) throw new Error("encode");
+    return wire.slice(text, text + bytes);
+  }
+  return refs.map((ref, index) => {
+    if (obj(1, index + 2) !== 1 || obj(2) !== 1) return -1;
+    if (obj(5, 1) !== 1 || obj(5, 2) !== 1) return -2;
+    const original = snapshot(0);
+    if (!equal(original, snapshot(1)) || !equal(original, snapshot(2))) return -3;
+    const encoded = encode(original);
+    if (projection(JSON.parse(decoder.decode(encoded)).object) !== ref.state) return -4;
+    // First refuse malformed bytes without publishing a replacement snapshot.
+    wire.set(encoded, text);
+    wire[text + encoded.length - 1] = 93;
+    if (json(2, encoded.length) >= 0 || !equal(original, wire.slice(state, state + size))) return -5;
+    wire.set(encoded, text);
+    if (json(2, encoded.length) !== state) return -6;
+    owner.set(wire.subarray(state, state + size), offset);
+    if (obj(4, 0, Number(mutate && index === 0)) !== 1) return -6;
+    const roundtrip = encode(snapshot(3));
+    if (obj(6) !== 1) return -9;
+    return equal(encoded, roundtrip) ? 1 : -7;
+  });
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const refs = sources.map(reference);
+  output.textContent = JSON.stringify([...refs.map(x => x.code), ...await product(refs)]);
+} catch (error) {
+  output.textContent = "error:" + error.message;
+}
+</script>

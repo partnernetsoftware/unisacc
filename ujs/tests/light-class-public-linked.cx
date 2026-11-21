@@ -1,0 +1,212 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+#define DRIVER "ujs/tests/light-class-public-linked.cx"
+
+static const char *const object_sources[]={
+    FIX "light-class-public-base-layout.ujs",BASE "f64-math.ujs",BASE "views.ujs",BASE "vector-scalar.ujs",
+    BASE "color.ujs",BASE "matrix4.ujs",BASE "object3d-layout.ujs",BASE "object-layouts.ujs",BASE "object3d.ujs",
+    BASE "object3d-lifecycle.ujs",BASE "record-copy.ujs",BASE "gpu-packet.ujs",BASE "gpu-target.ujs",
+    BASE "light-classes-generated.ujs",BASE "light-class-json-layout.ujs",BASE "light-class.ujs",
+    BASE "light-classes-constructors.ujs",BASE "light-class-json.ujs",BASE "light-class-json-runtime.ujs",
+    FIX "light-class-public-base.ujs",DRIVER,0
+};
+
+static const char *const codec_sources[]={
+    FIX "light-class-public-codec-layout.ujs",BASE "f64-math.ujs",BASE "views.ujs",BASE "vector-scalar.ujs",
+    BASE "color.ujs",BASE "record-copy.ujs",BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "light-classes-generated.ujs",
+    BASE "light-class-json-layout.ujs",BASE "light-class-json-fields-generated.ujs",BASE "light-class-json-write.ujs",
+    BASE "light-class-json-read.ujs",FIX "light-class-public-codec.ujs",DRIVER,0
+};
+
+static int light_link_compile(char **args,const char *phase,int timeout) {
+    char *out=0;
+    size_t bytes=0;
+    long start=sy_now_ms();
+    int rc=cx_runv_timeout(args,timeout,&out,&bytes);
+    printf("LIGHT_PUBLIC_LINK phase=%s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+static int light_id_byte(int c) {
+    return (c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || c=='_';
+}
+
+static int light_token(const char *text,int end,int *cursor) {
+    int at=*cursor;
+    while(at<end) {
+        if(text[at]==' ' || text[at]=='\t' || text[at]=='\r' || text[at]=='\n') { at++; continue; }
+        if(at+1<end && text[at]=='/' && text[at+1]=='/') {
+            while(at<end && text[at]!='\n') at++;
+            continue;
+        }
+        if(at+1<end && text[at]=='/' && text[at+1]=='*') {
+            at+=2;
+            while(at+1<end && (text[at]!='*' || text[at+1]!='/')) at++;
+            if(at+1>=end) { *cursor=-1; return -1; }
+            at+=2;
+            continue;
+        }
+        break;
+    }
+    *cursor=at;
+    if(at>=end) return -1;
+    int from=at++;
+    if(light_id_byte(text[from])) {
+        while(at<end && light_id_byte(text[at])) at++;
+    } else if(text[from]=='"' || text[from]=='\'') {
+        while(at<end && text[at]!=text[from]) {
+            if(text[at]=='\\' && at+1<end) at++;
+            at++;
+        }
+        if(at==end) { *cursor=-1; return -1; }
+        at++;
+    }
+    *cursor=at;
+    return from;
+}
+
+static int light_link_select(char *out,int room,const char *text,int bytes,const char *const *names) {
+    int expected=0;
+    while(names[expected]) expected++;
+    int cursor=0,used=0,found=0;
+    for(;;) {
+        int first=light_token(text,bytes,&cursor);
+        if(first<0) break;
+        int declaration=first;
+        if(tx_same(text+first,cursor-first,"native",6)) declaration=light_token(text,bytes,&cursor);
+        if(declaration<0 || (!tx_same(text+declaration,cursor-declaration,"function",8) &&
+            !tx_same(text+declaration,cursor-declaration,"struct",6))) return -1;
+        int ident=light_token(text,bytes,&cursor);
+        if(ident<0 || !light_id_byte(text[ident])) return -1;
+        int selected=0;
+        for(int i=0;i<expected;i++) {
+            if(tx_same(text+ident,cursor-ident,names[i],tx_len(names[i],128))) selected=1;
+        }
+        int token=0;
+        do { token=light_token(text,bytes,&cursor); } while(token>=0 && text[token]!='{');
+        if(token<0) return -1;
+        int depth=1;
+        while(depth>0 && (token=light_token(text,bytes,&cursor))>=0) {
+            depth+=(text[token]=='{')-(text[token]=='}');
+        }
+        if(depth!=0) return -1;
+        if(!selected) continue;
+        int n=tx_snprintf(out+used,room-used,"%.*s\n",cursor-first,text+first);
+        if(n<0 || n>=room-used) return -1;
+        used+=n;
+        found++;
+    }
+    return cursor==bytes && found==expected?used:-1;
+}
+
+// The installed compiler accepts at most 24 layouts and 100000 source bytes.
+// Carry only the unchanged Object3D and packet definitions used by the
+// object module. Disposal writes a packet for inspection without a GPU host.
+static int light_link_assemble(const char *const *sources,const char *file) {
+    const char *scene[]={"Scene",0};
+    const char *object[]={"Object3D_initArena","Object3D_address","Object3D_create","Object3D_unlink",
+        "Object3D_add","Object3D_clear","Object3D_destroy","Object3D_traverseNext","Object3D_updateMatrix",0};
+    const char *matrix[]={"Matrix4_set","Matrix4_composeValues","Matrix4_compose",0};
+    const char *packet[]={"GpuPacket","GpuPacket_begin","gpu_packet_slot","gpu_packet_publish",0};
+    const char *target[]={"GpuTarget_dispose",0};
+    char program[100000];
+    int used=0;
+    for(int i=0;sources[i] && !tx_eqz(sources[i],DRIVER);i++) {
+        unsigned char *data=0;
+        int64_t bytes=0;
+        if(sy_read_file(sources[i],&data,&bytes,sizeof program)) return 1;
+        const char *text=(const char *)data;
+        int n=0;
+        const char *const *selected=0;
+        if(tx_eqz(sources[i],BASE "object-layouts.ujs")) selected=scene;
+        else if(tx_eqz(sources[i],BASE "object3d.ujs")) selected=object;
+        else if(tx_eqz(sources[i],BASE "matrix4.ujs")) selected=matrix;
+        else if(tx_eqz(sources[i],BASE "gpu-packet.ujs")) selected=packet;
+        else if(tx_eqz(sources[i],BASE "gpu-target.ujs")) selected=target;
+        if(selected) n=light_link_select(program+used,sizeof program-used,text,bytes,selected);
+        else n=tx_snprintf(program+used,sizeof program-used,"%.*s\n",(int)bytes,text);
+        mm_free(data);
+        if(n<0 || n>=sizeof program-used) {
+            printf("LIGHT_PUBLIC_LINK assemble=%s used=%d span=%d\n",sources[i],used,n);
+            return 1;
+        }
+        used+=n;
+    }
+    return sy_write_file(file,program,used,0600);
+}
+
+static int light_link_base(const char *const *sources,const char *wasm,const char *source,const char *phase,int prepare,int check) {
+    const char *cache=sy_env("UXE_LIGHT_WASM_CACHE");
+    if(!cache || cache[0]!='/') {
+        printf("LIGHT_PUBLIC_LINK cache=missing env=UXE_LIGHT_WASM_CACHE\n");
+        return 1;
+    }
+    char key[65],sha[65],record[640];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<0 || n>=(int)sizeof record) return 2;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("LIGHT_PUBLIC_LINK part=%s cache=hit key=%s sha=%s\n",phase,key,sha);
+        return 0;
+    }
+    if((rc==-ENOENT && (!prepare || check)) || (rc && rc!=-ENOENT)) {
+        printf("LIGHT_PUBLIC_LINK part=%s cache=%s key=%s rc=%d\n",phase,rc==-ENOENT?"missing":"refused",key,rc);
+        return 1;
+    }
+    if(light_link_assemble(sources,source)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,0};
+    if(light_link_compile(args,phase,20)) return 1;
+    if(check) return wasm_test_cache_verify(wasm,sha);
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+static int light_link_browser(const char *dir,int mutate) {
+    char cwd[460],url[900],probe[320];
+    if(sy_cwd(cwd,sizeof cwd)) return 1;
+    int n=tx_snprintf(url,sizeof url,"file://%s/" FIX "light-class-public-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    if(n<0 || n>=(int)sizeof url) return 1;
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    char *args[]={"./ujs/ujs2wasm.com",FIX "light-class-public-probe.ujs","-o",probe,0};
+    double actual[14]={0};
+    int failed=light_link_compile(args,"probe",6) || r160_wait_read(url,"#r160",actual,14,dir);
+    for(int i=0;!failed && i<7;i++) {
+        if(actual[i]!=1 || actual[7+i]!=1) {
+            printf("LIGHT_PUBLIC_LINK class=%d actual=%.17g r160=%.17g gold=1\n",i+2,actual[7+i],actual[i]);
+            failed=1;
+        }
+    }
+    printf("G_STRUCT Light public object linked classes=7 failed=%d\n",failed);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !check && !mutate && !(prepare && argc==2)) return 2;
+    char dir[256],object[320],codec[320],source[320];
+    if(sy_mkdtemp("/tmp","uxe-light-public-",dir,sizeof dir)) return 2;
+    tx_snprintf(object,sizeof object,"%s/object.wasm",dir);
+    tx_snprintf(codec,sizeof codec,"%s/codec.wasm",dir);
+    tx_snprintf(source,sizeof source,"%s/part.ujs",dir);
+    int failed=light_link_base(object_sources,object,source,"object",prepare,check) ||
+        light_link_base(codec_sources,codec,source,"codec",prepare,check);
+    if(!failed && !prepare) failed=light_link_browser(dir,mutate);
+    if(sy_remove_all(dir)) failed=1;
+    if(prepare) printf("LIGHT_PUBLIC_LINK prepare=%d check=%d failed=%d\n",prepare,check,failed);
+    return failed;
+}
