@@ -131,9 +131,44 @@ static int ia_join(char *out, int cap, const char *a, const char *b) { return cx
 /* A candidate record unisacc.com.build.json beside the APE whose product_digest equals the APE sha256 describes
    exactly this APE: it replaces the root record as a whole (commit and sources_sha256 follow). Otherwise the
    three-field sync below runs and RECORD_STALE is printed, since commit/sources_sha256 are then not refreshed. */
-static int ia_cand_record(const char *ape, const char *sha, char **out, size_t *outn) {
+static char *ia_patch_record(const char *b, size_t n, const char *sha, long bytes, const char *commit, size_t *outn) {
+    long at = 0, w = 0;
+    char *o = mm_alloc((long)n + 256);
+    if (!o) return 0;
+    while (at < (long)n) {
+        long e = at, l;
+        while (e < (long)n && b[e] != '\n') e++;
+        l = e - at + (e < (long)n ? 1 : 0);
+        if (l > 18 && tx_find(b + at, l, "\"product_kind\":", 15) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"product_kind\": \"ape1\"%s\n", comma ? "," : "")) { mm_free(o); return 0; }
+            w += tx_len(o + w, 256);
+        } else if (l > 18 && tx_find(b + at, l, "\"product_digest\":", 17) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"product_digest\": \"%s\"%s\n", sha, comma ? "," : "")) { mm_free(o); return 0; }
+            w += tx_len(o + w, 256);
+        } else if (l > 8 && tx_find(b + at, l, "\"bytes\":", 8) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"bytes\": %ld%s\n", bytes, comma ? "," : "")) { mm_free(o); return 0; }
+            w += tx_len(o + w, 256);
+        } else if (commit && commit[0] && l > 10 && tx_find(b + at, l, "\"commit\":", 9) >= 0) {
+            int comma = tx_find(b + at, l, ",", 1) >= 0;
+            if (cx_fmt(o + w, 256, "  \"commit\": \"%s\"%s\n", commit, comma ? "," : "")) { mm_free(o); return 0; }
+            w += tx_len(o + w, 256);
+        } else {
+            mm_copy(o + w, (long)n + 256 - w, b + at, l);
+            w += l;
+        }
+        at += l;
+    }
+    o[w] = 0;
+    *outn = (size_t)w;
+    return o;
+}
+
+static int ia_cand_record(const char *ape, const char *sha, long bytes, const char *root_b, size_t root_n, char **out, size_t *outn) {
     char dir[4400], cp[4400], pat[128];
-    size_t n = 0, k;
+    size_t n = 0;
     char *b;
     long at, l = tx_len(ape, (long)sizeof dir), s;
     if (l <= 0 || l >= (long)sizeof dir) return 0;
@@ -141,21 +176,65 @@ static int ia_cand_record(const char *ape, const char *sha, char **out, size_t *
     for (s = l; s > 0 && dir[s - 1] != '/'; s--) ;
     if (s == 0) { dir[0] = '.'; dir[1] = 0; } else dir[s - 1 ? s - 1 : 1] = 0;
     if (ia_join(cp, (int)sizeof cp, dir, "unisacc.com.build.json")) return 0;
-    if (sy_exists(cp) != 1) return 0;
-    b = cx_read(cp, &n);
-    if (!b) return 0;
-    if (cx_fmt(pat, sizeof pat, "\"product_digest\": \"%s\"", sha)) { mm_free(b); return 0; }
-    at = tx_find(b, (long)n, pat, tx_len(pat, (long)sizeof pat));
-    (void)k;
-    if (at < 0) { mm_free(b); return 0; }
-    *out = b; *outn = n;
-    return 1;
+    if (sy_exists(cp) == 1) {
+        b = cx_read(cp, &n);
+        if (!b) return 0;
+        if (cx_fmt(pat, sizeof pat, "\"product_digest\": \"%s\"", sha)) { mm_free(b); return 0; }
+        at = tx_find(b, (long)n, pat, tx_len(pat, (long)sizeof pat));
+        if (at < 0) { mm_free(b); return 0; }
+        *out = b; *outn = n;
+        return 1;
+    }
+    {   static const char *const bjs[2] = {"../layout/unisacc.com.build.json", "../unisacc.com.build.json"};
+        int i;
+        for (i = 0; i < 2; i++) {
+            if (!ia_join(cp, (int)sizeof cp, dir, bjs[i]) && sy_exists(cp) == 1 && (b = cx_read(cp, &n))) {
+                if (tx_find(b, (long)n, "\"commit\": \"", 11) >= 0) {
+                    char *patched = ia_patch_record(b, n, sha, bytes, 0, outn);
+                    mm_free(b);
+                    if (patched) { *out = patched; return 1; }
+                    return 0;
+                }
+                mm_free(b);
+            }
+        }
+    }
+    if (root_b && root_n > 0) {
+        static const char *const ids[2] = {"../chain-run.identity", "chain-run.identity"};
+        int i;
+        for (i = 0; i < 2; i++) {
+            if (!ia_join(cp, (int)sizeof cp, dir, ids[i]) && sy_exists(cp) == 1 && (b = cx_read(cp, &n))) {
+                long pos = 0;
+                while (pos < (long)n) {
+                    long e = pos;
+                    while (e < (long)n && b[e] != '\n') e++;
+                    if (e - pos == 44 && tx_same(b + pos, 4, "rev=", 4)) {
+                        char rev[41]; int j, ok = 1;
+                        for (j = 0; j < 40; j++) {
+                            char c = b[pos + 4 + j];
+                            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) ok = 0;
+                            rev[j] = c;
+                        }
+                        rev[40] = 0;
+                        if (ok) {
+                            char *patched = ia_patch_record(root_b, root_n, sha, bytes, rev, outn);
+                            mm_free(b);
+                            if (patched) { *out = patched; return 1; }
+                            return 0;
+                        }
+                    }
+                    pos = e + 1;
+                }
+                mm_free(b);
+            }
+        }
+    }
+    return 0;
 }
 
 static void ia_sync_record(const char *root, const char *ape, const char *sha, long bytes) {
     char path[4400], tmp[4400], *b, *o;
-    size_t n = 0;
-    long at = 0, w = 0;
+    size_t n = 0, wn = 0;
     int fd;
     sy_stat_t st;
     if (ia_join(path, (int)sizeof path, root, "unisacc.com.build.json") || cx_fmt(tmp, sizeof tmp, "%s.%d", path, sy_pid())) ia_die("path");
@@ -167,7 +246,7 @@ static void ia_sync_record(const char *root, const char *ape, const char *sha, l
     b = cx_read(path, &n);
     if (!b) ia_die("cannot read the build record");
     {   char *cb = 0; size_t cn = 0;
-        if (ia_cand_record(ape, sha, &cb, &cn)) {
+        if (ia_cand_record(ape, sha, bytes, b, n, &cb, &cn)) {
             if (cn == n && tx_same(b, (long)n, cb, (long)cn)) { mm_free(b); mm_free(cb); return; }
             if (cx_write(tmp, cb, cn)) { (void)sy_unlink(tmp); mm_free(b); mm_free(cb); ia_die("cannot write the build record"); }
             if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); mm_free(b); mm_free(cb); ia_die("cannot rename the build record"); }
@@ -177,32 +256,10 @@ static void ia_sync_record(const char *root, const char *ape, const char *sha, l
         }
         sy_printf("INSTALL_APE\tRECORD_STALE\t%s\n", path);
     }
-    o = mm_alloc((long)n + 256);
+    o = ia_patch_record(b, n, sha, bytes, 0, &wn);
     if (!o) { mm_free(b); ia_die("memory"); }
-    while (at < (long)n) {
-        long e = at, l;
-        while (e < (long)n && b[e] != '\n') e++;
-        l = e - at + (e < (long)n ? 1 : 0);
-        if (l > 18 && tx_find(b + at, l, "\"product_kind\":", 15) >= 0) {
-            int comma = tx_find(b + at, l, ",", 1) >= 0;
-            if (cx_fmt(o + w, 256, "  \"product_kind\": \"ape1\"%s\n", comma ? "," : "")) ia_die("record format");
-            w += tx_len(o + w, 256);
-        } else if (l > 18 && tx_find(b + at, l, "\"product_digest\":", 17) >= 0) {
-            int comma = tx_find(b + at, l, ",", 1) >= 0;
-            if (cx_fmt(o + w, 256, "  \"product_digest\": \"%s\"%s\n", sha, comma ? "," : "")) ia_die("record format");
-            w += tx_len(o + w, 256);
-        } else if (l > 8 && tx_find(b + at, l, "\"bytes\":", 8) >= 0) {
-            int comma = tx_find(b + at, l, ",", 1) >= 0;
-            if (cx_fmt(o + w, 256, "  \"bytes\": %ld%s\n", bytes, comma ? "," : "")) ia_die("record format");
-            w += tx_len(o + w, 256);
-        } else {
-            mm_copy(o + w, (long)n + 256 - w, b + at, l);
-            w += l;
-        }
-        at += l;
-    }
-    if (w == (long)n && tx_same(b, (long)n, o, w)) { mm_free(b); mm_free(o); return; }
-    if (cx_write(tmp, o, (size_t)w)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot write the build record"); }
+    if (wn == n && tx_same(b, (long)n, o, (long)wn)) { mm_free(b); mm_free(o); return; }
+    if (cx_write(tmp, o, wn)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot write the build record"); }
     if (sy_rename(tmp, path)) { (void)sy_unlink(tmp); mm_free(b); mm_free(o); ia_die("cannot rename the build record"); }
     mm_free(b);
     mm_free(o);

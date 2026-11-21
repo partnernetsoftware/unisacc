@@ -153,7 +153,7 @@ static int state_load(void) {
 }
 
 /* ---- package ---- */
-typedef struct { char *body; size_t n; long nm, at[MAXM], len[MAXM], codec[MAXM]; } Pkg;
+typedef struct { char *body; size_t n; long nm, ns, at[MAXM], len[MAXM], codec[MAXM]; } Pkg;
 static void pkg_parse(Pkg *p, char *f, size_t fn) {
     long ver, nm, ns, nr, i; size_t at = 0; unsigned long long ext = 0; char *e;
     if (fn < 16 || memcmp(f + fn - 16, "UNIPKG1\n", 8)) refuse("package-footer", 0);
@@ -162,7 +162,7 @@ static void pkg_parse(Pkg *p, char *f, size_t fn) {
     p->body = f + fn - 16 - (size_t)ext; p->n = (size_t)ext;
     if (sscanf(p->body, "P %ld %ld %ld %ld", &ver, &nm, &ns, &nr) != 4 || (ver != 3 && ver != 4) || nm <= 0 || nm > MAXM || ns <= 0) refuse("package-header", 0);
     for (i = 0; i <= ns; i++) { e = memchr(p->body + at, '\n', p->n - at); if (!e) refuse("package-routes", 0); at = (size_t)(e - p->body) + 1; }
-    p->nm = nm;
+    p->nm = nm; p->ns = ns;
     for (i = 0; i < nm; i++) {
         long cl, raw, codec; unsigned long crc;
         e = memchr(p->body + at, '\n', p->n - at);
@@ -172,6 +172,68 @@ static void pkg_parse(Pkg *p, char *f, size_t fn) {
         if ((size_t)(p->at[i] + p->len[i]) > p->n) refuse("package-model-extent", 0);
         at += (size_t)p->len[i];
     }
+}
+static int pkg_route_idx(const Pkg *p, const char *id) {
+    static const struct { const char *id, *route, *name; } RMAP[] = {
+        {"warnpp-shared", "lnx/x86_64/unit", "e2"},
+        {"warnlex", "lnx/x86_64/unit", "e1"},
+        {"lnx-arm64-elf", "lnx/arm64/memory", "elf"},
+        {"shared-e2", "lnx/x86_64/pp", "e2"},
+        {"errorparse", "lnx/x86_64/tape/O0", "e3"},
+        {"tapecheck", "lnx/x86_64/tape/O0", "tapecheck"},
+        {"shared-o1", "lnx/x86_64/tape/O1", "e4"},
+        {"shared-e4", "lnx/x86_64/tape/O2", "e4"},
+        {"shared-prune", "lnx/x86_64/image/O0", "prune"},
+        {"lnx-arm64-lower", "lnx/arm64/image/O0", "lower"},
+        {"object-lower-arm64", "lnx/arm64/object/O0", "lower"},
+        {"object-enc-arm64", "lnx/arm64/object/O0", "elf"},
+        {"lnx-x86_64-elf", "lnx/x86_64/memory", "elf"},
+        {"lnx-x86_64-lower", "lnx/x86_64/image/O0", "lower"},
+        {"object-lower-x86_64", "lnx/x86_64/object/O0", "lower"},
+        {"object-enc-x86_64", "lnx/x86_64/object/O0", "elf"},
+        {"osx-arm64-elf", "osx/arm64/memory", "macho"},
+        {"osx-arm64-lower", "osx/arm64/image/O0", "lower"},
+        {"object-lower-osx-arm64", "osx/arm64/object/O0", "lower"},
+        {"object-enc-osx-arm64", "osx/arm64/object/O0", "macho"},
+        {"osx-x86_64-elf", "osx/x86_64/memory", "macho"},
+        {"osx-x86_64-lower", "osx/x86_64/image/O0", "lower"},
+        {"object-lower-osx-x86_64", "osx/x86_64/object/O0", "lower"},
+        {"object-enc-osx-x86_64", "osx/x86_64/object/O0", "macho"},
+        {"win-arm64-elf", "win/arm64/memory", "pe"},
+        {"win-arm64-lower", "win/arm64/image/O0", "lower"},
+        {"object-lower-win-arm64", "win/arm64/object/O0", "lower"},
+        {"object-enc-win-arm64", "win/arm64/object/O0", "pe"},
+        {"win-x86_64-elf", "win/x86_64/memory", "pe"},
+        {"win-x86_64-lower", "win/x86_64/image/O0", "lower"},
+        {"object-lower-win-x86_64", "win/x86_64/object/O0", "lower"},
+        {"object-enc-win-x86_64", "win/x86_64/object/O0", "pe"},
+        {"tokenpp", "tokens", "tokenpp"},
+        {"tokenlex", "tokens", "tokenlex"},
+        {"warnparse", "lnx/x86_64/warn/tape/O0", "e3"},
+        {"warnunits", "lnx/x86_64/multi/tape/O0", "units"},
+        {"shared-nativeabi", "lnx/x86_64/nativeabi", "nativeabi"},
+        {"hostsymbols", "host-symbols", "symbols"},
+        {"librarycontract", "library-contract", "contract"},
+        {"librarypartition", "library-selection", "ownership"},
+        {0, 0, 0}
+    };
+    const char *want_route = 0, *want_name = 0;
+    int k; long i; size_t at = 0; char *e;
+    for (k = 0; RMAP[k].id; k++) if (!strcmp(RMAP[k].id, id)) { want_route = RMAP[k].route; want_name = RMAP[k].name; break; }
+    if (!want_route || !want_name) return -1;
+    e = memchr(p->body, '\n', p->n);
+    if (!e) return -1;
+    at = (size_t)(e - p->body) + 1;
+    for (i = 0; i < p->ns; i++) {
+        char rt[96], nm[64], inb[64], outb[64]; long mi = -1;
+        e = memchr(p->body + at, '\n', p->n - at);
+        if (!e) break;
+        if (sscanf(p->body + at, "D %95s %63s %63s %63s %ld", rt, nm, inb, outb, &mi) == 5 &&
+            !strcmp(rt, want_route) && !strcmp(nm, want_name) && mi >= 0 && mi < p->nm)
+            return (int)mi;
+        at = (size_t)(e - p->body) + 1;
+    }
+    return -1;
 }
 /* text net -> the compressed M record exactly as release packs it (netwire + dz_deflate + CRC32) */
 static char *mrec(const char *net, size_t nn, int codec, size_t *on) {
@@ -367,7 +429,7 @@ static int build(Job *j) {
     if (cx_fmt(lc, sizeof lc, "%s.lint", j->cache)) return 1;
     unlink(res); unlink(net); unlink(log);
     for (i = 0; i < 4; i++) j->ms[i] = -1;
-    for (at = 0; at < 4 && !rc; at++) {
+    for (at = 0; at < (j->base ? 2 : 4) && !rc; at++) {
         k = 0;
         if (at == 0) { av[k++] = g; av[k++] = r->stage; av[k++] = json; for (i = 0; i < r->nf; i++) av[k++] = r->flags[i]; }
         else if (at == 1) { step_out = lo; av[k++] = lint; av[k++] = json; }
@@ -399,7 +461,12 @@ static int build(Job *j) {
         unlink(llog);
     }
     unlink(json); unlink(tbl);
-    if (!rc) { copyfile(lo, lc, 0600); copyfile(net, j->cache, 0600); { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } }
+    if (!rc) {
+        copyfile(lo, lc, 0600);
+        if (j->base) wr(j->cache, "B\n", 2, 0600);
+        else copyfile(net, j->cache, 0600);
+        { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); }
+    }
     if (cx_fmt(line, sizeof line, "%s\t%ld\t%ld\t%ld\t%ld\n", j->status, j->ms[0], j->ms[1], j->ms[2], j->ms[3])) return 1;
     cx_write(res, line, strlen(line));
     return rc ? 1 : 0;
@@ -622,10 +689,18 @@ static void reload(const char *fp, int report) {
         else if (!seedch) { cpy(bctor, PW, wctor, PW); cpy(bkey, 65, wkey, 65); }
         else if (ensure_ctor(base, bctor, bkey, why, sizeof why)) { for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) { if (cx_fmt(recs[k].why, 96, "baseline-%s", why)) refuse("text-too-long", 0); } naff = -1; }
     }
-    {   char *ix; size_t ixn;
+    {   FILE *f;
         if (cx_fmt(rel, PW, "idx-%.16s.tsv", A.sha)) refuse("path-too-long", 0);
         pj(idxp, cdir, rel);
-        if ((ix = cx_read(idxp, &ixn))) { char *s = ix, *l; while ((l = strchr(s, '\n'))) { char id[64]; int v; *l = 0; if (sscanf(s, "%63[^\t]\t%d", id, &v) == 2) for (k = 0; k < nrec; k++) if (!strcmp(recs[k].id, id)) recs[k].idx = v; s = l + 1; } free(ix); }
+        f = fopen(idxp, "w");
+        for (k = 0; k < nrec; k++) {
+            recs[k].idx = pkg_route_idx(&inst, recs[k].id);
+            if (f && recs[k].idx >= 0) {
+                char line[96];
+                if (!cx_fmt(line, sizeof line, "%s\t%d\n", recs[k].id, recs[k].idx)) fputs(line, f);
+            }
+        }
+        if (f) fclose(f);
     }
     jobs = calloc((size_t)(2 * MAXR), sizeof(Job)); if (!jobs) refuse("allocation", 0);
     pj(p, cdir, "m"); mkp(p);
@@ -636,67 +711,86 @@ static void reload(const char *fp, int report) {
         if (shm[0] && mkq(shm)) shm[0] = 0;
     }
     if (naff > 0) for (k = 0; k < nrec; k++) if (recs[k].affected && recs[k].native) {
-        int b;
-        for (b = 0; b < 2; b++) {
-            Job *j; np_buf kb = {0}; char kh[65]; int f;
-            j = &jobs[nj++]; j->rec = k; j->base = b;
-            np_puts(&kb, recs[k].id); for (f = 0; f < recs[k].nf; f++) { np_puts(&kb, "|"); np_puts(&kb, recs[k].flags[f]); }
-            np_puts(&kb, "|"); np_puts(&kb, b ? bkey : wkey); np_puts(&kb, "|"); np_puts(&kb, b ? A.commit : rdig[k]); np_puts(&kb, b ? "|base" : "|wt");
-            hash(kb.p, kb.n, kh); free(kb.p);
-            if (cx_fmt(rel, PW, "m/%s.net", kh)) refuse("path-too-long", 0);
-            pj(j->cache, cdir, rel);
-            if (cx_fmt(rel, PW, "work/%s-%s", recs[k].id, b ? "base" : "wt")) refuse("path-too-long", 0);
-            pj(j->dir, sess, rel);
-            { if (cx_fmt(j->tree, PW, "%s", b ? base : wt)) refuse("text-too-long", 0); } { if (cx_fmt(j->ctor, PW, "%s", b ? bctor : wctor)) refuse("text-too-long", 0); }
-            { char lcp[PW + 8]; if (cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) || !isfile(lcp)) unlink(j->cache); }
-            /* baseline nets (installed revision's tree: the key fixes every input) are shared between bundles and
-               survive --close, like the constructors; worktree nets stay in the bundle.  CXDEV_CACHE=- turns it off. */
-            j->shared[0] = 0;
-            if (b && shm[0] && !cx_fmt(rel, PW, "%s.net", kh)) {
-                char sl[PW + 8], lcp[PW + 8];
-                pj(j->shared, shm, rel);
-                if (!isfile(j->cache) && !cx_fmt(sl, sizeof sl, "%s.lint", j->shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) && isfile(j->shared) && isfile(sl)) { copyfile(sl, lcp, 0600); copyfile(j->shared, j->cache, 0600); j->shared[0] = 0; nshared++; }
-            }
-            if (isfile(j->cache)) { j->cached = 1; { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } for (f = 0; f < 4; f++) j->ms[f] = 0; }
-        }
+        Job *j; np_buf kb = {0}; char kh[65]; int f;
+        j = &jobs[nj++]; j->rec = k; j->base = 0;
+        np_puts(&kb, recs[k].id); for (f = 0; f < recs[k].nf; f++) { np_puts(&kb, "|"); np_puts(&kb, recs[k].flags[f]); }
+        np_puts(&kb, "|"); np_puts(&kb, wkey); np_puts(&kb, "|"); np_puts(&kb, rdig[k]); np_puts(&kb, "|wt");
+        hash(kb.p, kb.n, kh); free(kb.p);
+        if (cx_fmt(rel, PW, "m/%s.net", kh)) refuse("path-too-long", 0);
+        pj(j->cache, cdir, rel);
+        if (cx_fmt(rel, PW, "work/%s-wt", recs[k].id)) refuse("path-too-long", 0);
+        pj(j->dir, sess, rel);
+        { if (cx_fmt(j->tree, PW, "%s", wt)) refuse("text-too-long", 0); } { if (cx_fmt(j->ctor, PW, "%s", wctor)) refuse("text-too-long", 0); }
+        { char lcp[PW + 8]; if (cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) || !isfile(lcp)) unlink(j->cache); }
+        j->shared[0] = 0;
+        if (isfile(j->cache)) { j->cached = 1; { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } for (f = 0; f < 4; f++) j->ms[f] = 0; }
     }
-    if (report && nshared) fprintf(stderr, "CXDEV_SHARED\tbaseline_nets=%d\n", nshared);
     run_jobs(jobs, nj, par);
-    /* locate, then collect the new M records */
-    /* Locate the unchanged baseline before encoding the edited recipe in its installed format. */
-    for (int pass=0;pass<2;pass++) for (i = 0; i < nj; i++) {
-        if (jobs[i].base != (pass==0)) continue;
-        Rec *r = &recs[jobs[i].rec]; char *net, *m; size_t nn, mn; long x;
+    /* Only when a worktree recipe's table-lint output contains an ERROR line do we need the baseline lint record
+       (lightweight genp -> table-lint, or shared cache) to check whether the ERROR already existed in installed tables. */
+    {   int wnj = nj;
+        for (i = 0; i < wnj; i++) {
+            char wl2[PW + 8], *ws = 0, *s, *l; size_t wn = 0; int has_err = 0;
+            if (strcmp(jobs[i].status, "ok") || cx_fmt(wl2, sizeof wl2, "%s.lint", jobs[i].cache) || !(ws = cx_read(wl2, &wn))) continue;
+            for (s = ws; (l = strchr(s, 10)); s = l + 1) if (!strncmp(s, "ERROR\t", 6)) { has_err = 1; break; }
+            free(ws);
+            if (has_err) {
+                int r_idx = jobs[i].rec, f;
+                Job *j = &jobs[nj++]; np_buf kb = {0}; char kh[65];
+                j->rec = r_idx; j->base = 1;
+                np_puts(&kb, recs[r_idx].id); for (f = 0; f < recs[r_idx].nf; f++) { np_puts(&kb, "|"); np_puts(&kb, recs[r_idx].flags[f]); }
+                np_puts(&kb, "|"); np_puts(&kb, bkey); np_puts(&kb, "|"); np_puts(&kb, A.commit); np_puts(&kb, "|base");
+                hash(kb.p, kb.n, kh); free(kb.p);
+                if (cx_fmt(rel, PW, "m/%s.net", kh)) refuse("path-too-long", 0);
+                pj(j->cache, cdir, rel);
+                if (cx_fmt(rel, PW, "work/%s-base", recs[r_idx].id)) refuse("path-too-long", 0);
+                pj(j->dir, sess, rel);
+                { if (cx_fmt(j->tree, PW, "%s", base)) refuse("text-too-long", 0); } { if (cx_fmt(j->ctor, PW, "%s", bctor)) refuse("text-too-long", 0); }
+                { char lcp[PW + 8]; if (cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) || !isfile(lcp)) unlink(j->cache); }
+                j->shared[0] = 0;
+                if (shm[0] && !cx_fmt(rel, PW, "%s.net", kh)) {
+                    char sl[PW + 8], lcp[PW + 8];
+                    pj(j->shared, shm, rel);
+                    if (!isfile(j->cache) && !cx_fmt(sl, sizeof sl, "%s.lint", j->shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", j->cache) && isfile(j->shared) && isfile(sl)) { copyfile(sl, lcp, 0600); copyfile(j->shared, j->cache, 0600); j->shared[0] = 0; nshared++; }
+                }
+                if (isfile(j->cache)) { j->cached = 1; { if (cx_fmt(j->status, sizeof j->status, "ok")) refuse("text-too-long", 0); } for (f = 0; f < 4; f++) j->ms[f] = 0; }
+            }
+        }
+        if (report && nshared) fprintf(stderr, "CXDEV_SHARED\tbaseline_nets=%d\n", nshared);
+        if (nj > wnj) run_jobs(jobs + wnj, nj - wnj, par);
+    }
+    for (i = 0; i < nj; i++) {
+        Rec *r = &recs[jobs[i].rec]; char *net, *m; size_t nn, mn;
         for (t = 0; t < 4; t++) if (jobs[i].ms[t] > 0) sum[t] += jobs[i].ms[t];
         if (!jobs[i].cached) nbuilt++;
         if (!jobs[i].cached && jobs[i].shared[0] && !strcmp(jobs[i].status, "ok")) { char sl[PW + 8], lcp[PW + 8]; if (!cx_fmt(sl, sizeof sl, "%s.lint", jobs[i].shared) && !cx_fmt(lcp, sizeof lcp, "%s.lint", jobs[i].cache)) { copyfile(lcp, sl, 0600); copyfile(jobs[i].cache, jobs[i].shared, 0600); } }
-        if (strcmp(jobs[i].status, "ok")) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "%s%s", jobs[i].base ? "baseline-" : "", jobs[i].status)) refuse("text-too-long", 0); } continue; }
-        if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, (!jobs[i].base && r->idx>=0 && r->idx<inst.nm) ? inst.codec[r->idx] : 1, &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
         if (jobs[i].base) {
-            for (x = 0; x < inst.nm; x++) if ((size_t)inst.len[x] == mn && !memcmp(inst.body + inst.at[x], m, mn)) break;
-            if (x == inst.nm) {
-                free(m); m=mrec(net,nn,0,&mn);
-                if (!m) refuse("raw-model-encode",r->id);
-                for (x=0;x<inst.nm;x++) if (!inst.codec[x] && (size_t)inst.len[x]==mn && !memcmp(inst.body+inst.at[x],m,mn)) break;
+            if (strcmp(jobs[i].status, "ok") && !r->why[0]) { if (cx_fmt(r->why, 96, "baseline-%s", jobs[i].status)) refuse("text-too-long", 0); }
+            continue;
+        }
+        if (strcmp(jobs[i].status, "ok")) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "%s", jobs[i].status)) refuse("text-too-long", 0); } continue; }
+        if (r->idx < 0 || r->idx >= inst.nm) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "recipe-not-located")) refuse("text-too-long", 0); } continue; }
+        if (!(net = cx_read(jobs[i].cache, &nn)) || !(m = mrec(net, nn, inst.codec[r->idx], &mn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "net-encode-failed")) refuse("text-too-long", 0); } free(net); continue; }
+        free(net);
+        {   /* lint gate, relative to the installed tables: an ERROR line the installed delta does not have stops the swap */
+            char wl2[PW + 8], bl2[PW + 8], *ws = 0, *bs = 0, *s, *l; size_t wn = 0, bn = 0; int b2, has_err = 0;
+            if (cx_fmt(wl2, sizeof wl2, "%s.lint", jobs[i].cache) || !(ws = cx_read(wl2, &wn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-baseline-missing")) refuse("text-too-long", 0); } free(m); continue; }
+            for (s = ws; (l = strchr(s, 10)); s = l + 1) if (!strncmp(s, "ERROR\t", 6)) { has_err = 1; break; }
+            if (has_err) {
+                for (b2 = 0; b2 < nj; b2++) if (jobs[b2].base && jobs[b2].rec == jobs[i].rec) break;
+                if (b2 == nj || strcmp(jobs[b2].status, "ok") || cx_fmt(bl2, sizeof bl2, "%s.lint", jobs[b2].cache) || !(bs = cx_read(bl2, &bn))) {
+                    if (!r->why[0]) { if (cx_fmt(r->why, 96, (b2 < nj && strcmp(jobs[b2].status, "ok")) ? "baseline-build-failed" : "lint-baseline-missing")) refuse("text-too-long", 0); }
+                    free(ws); free(m); continue;
+                }
+                for (s = ws; (l = strchr(s, 10)); s = l + 1) {
+                    size_t ll = (size_t)(l - s) + 1, hp; int found = 0;
+                    if (strncmp(s, "ERROR\t", 6)) continue;
+                    for (hp = 0; !found && hp + ll <= bn; ) { char *he = memchr(bs + hp, 10, bn - hp); if (!he) break; if ((size_t)(he - (bs + hp)) + 1 == ll && !memcmp(bs + hp, s, ll)) found = 1; hp = (size_t)(he - bs) + 1; }
+                    if (!found) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-error:new-ERROR-not-in-installed-tables")) refuse("text-too-long", 0); } if (report) { fputs("CXDEV_LINT\t", stderr); fwrite(s, 1, ll, stderr); } break; }
+                }
             }
-            free(net);
-            if (x < inst.nm) { char line[96]; FILE *f = fopen(idxp, "a"); r->idx = (int)x; if (f) { { if (cx_fmt(line, sizeof line, "%s\t%ld\n", r->id, x)) refuse("text-too-long", 0); } fputs(line, f); fclose(f); } }
-            else if (!r->why[0]) { if (cx_fmt(r->why, 96, "recipe-not-located")) refuse("text-too-long", 0); }
-            free(m);
-        } else {
-            free(net);
-            /* lint gate, relative to the installed tables: an ERROR line the installed delta does not have stops the swap */
-            char wl2[PW + 8], bl2[PW + 8], *ws, *bs, *s, *l; size_t wn, bn; int b2;
-            for (b2 = 0; b2 < nj; b2++) if (jobs[b2].base && jobs[b2].rec == jobs[i].rec) break;
-            if (b2 == nj || cx_fmt(wl2, sizeof wl2, "%s.lint", jobs[i].cache) || cx_fmt(bl2, sizeof bl2, "%s.lint", jobs[b2].cache) || !(ws = cx_read(wl2, &wn)) || !(bs = cx_read(bl2, &bn))) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-baseline-missing")) refuse("text-too-long", 0); } free(m); continue; }
-            for (s = ws; (l = strchr(s, 10)); s = l + 1) {
-                size_t ll = (size_t)(l - s) + 1, hp; int found = 0;
-                if (strncmp(s, "ERROR\t", 6)) continue;
-                for (hp = 0; !found && hp + ll <= bn; ) { char *he = memchr(bs + hp, 10, bn - hp); if (!he) break; if ((size_t)(he - (bs + hp)) + 1 == ll && !memcmp(bs + hp, s, ll)) found = 1; hp = (size_t)(he - bs) + 1; }
-                if (!found) { if (!r->why[0]) { if (cx_fmt(r->why, 96, "lint-error:new-ERROR-not-in-installed-tables")) refuse("text-too-long", 0); } if (report) { fputs("CXDEV_LINT\t", stderr); fwrite(s, 1, ll, stderr); } break; }
-            }
-            if (!r->why[0] && report && wn > 24 && !strncmp(ws, "ERROR\tlint-not-loadable\t", 24)) { char *e = memchr(ws, 10, wn); fprintf(stderr, "CXDEV_LINT_NA\trecipe=%s\tmodel=local\tsame-on-installed-tables\treason=", r->id); fwrite(ws + 24, 1, e ? (size_t)(e - ws) - 24 : 0, stderr); fputc(10, stderr); }
-            free(ws); free(bs);
+            if (!r->why[0] && report && wn > 24 && !strncmp(ws, "ERROR\tlint-not-loadable\t", 24)) { char *e2 = memchr(ws, 10, wn); fprintf(stderr, "CXDEV_LINT_NA\trecipe=%s\tmodel=local\tsame-on-installed-tables\treason=", r->id); fwrite(ws + 24, 1, e2 ? (size_t)(e2 - ws) - 24 : 0, stderr); fputc(10, stderr); }
+            free(ws); if (bs) free(bs);
             if (r->why[0]) { free(m); continue; }
             r->m = m; r->mn = mn;
         }
