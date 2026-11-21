@@ -1401,6 +1401,12 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                ran, skipped, incomplete, out_dir);
         return 1;
     }
+    {
+        char rdp[PD_PW], rdb[256];
+        if (!cx_fmt(rdp, sizeof rdp, "%s/run.done", out_dir) &&
+            !cx_fmt(rdb, sizeof rdb, "status\tDONE\nran\t%d\nskipped\t%d\n", ran, skipped))
+            sy_write_file(rdp, rdb, (int64_t)strlen(rdb), 0644);
+    }
     printf("PRERUN_RUN\tstatus=DONE\tran=%d\tskipped=%d\tout=%s\n", ran, skipped, out_dir);
     return 0;
 }
@@ -1757,9 +1763,461 @@ static int pd_cmd_g1_dry(const char *root, const char *cand_tsv, const char *str
     }
 }
 
+static int pd_env_lookup(const char *dir, const char *key, char *val, size_t vcap) {
+    char p[PD_PW];
+    unsigned char *b = 0; int64_t n = 0;
+    val[0] = 0;
+    if (!dir || !dir[0] || cx_fmt(p, sizeof p, "%s/prerun-env.tsv", dir) || sy_read_file(p, &b, &n, 1 << 20)) return 0;
+    size_t kl = strlen(key);
+    int64_t pos = 0;
+    int found = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if ((size_t)(le - ls) > kl + 1 && !memcmp(b + ls, key, kl) && b[ls + (int64_t)kl] == '\t') {
+            size_t vl = (size_t)(le - (ls + (int64_t)kl + 1));
+            if (vl > 0 && vl < vcap) {
+                mm_copy(val, vcap, (const char *)b + ls + kl + 1, vl);
+                val[vl] = 0;
+                found = 1;
+            }
+            break;
+        }
+    }
+    mm_free(b);
+    return found;
+}
+
+static int pd_has_run_done(const char *dir) {
+    char p[PD_PW];
+    unsigned char *b = 0; int64_t n = 0;
+    if (!dir || !dir[0] || cx_fmt(p, sizeof p, "%s/run.done", dir) || sy_read_file(p, &b, &n, 65536)) return 0;
+    int ok = (tx_find((const char *)b, (long)n, "status\tDONE\n", 12) >= 0);
+    mm_free(b);
+    return ok;
+}
+
+typedef struct {
+    char id[96];
+    unsigned char planned;
+    unsigned char foreign;
+} PdBMeta;
+
+static PdBMeta pd_bmeta[4096];
+static int pd_nbmeta = 0;
+static char pd_pq_ids[2048][96];
+static int pd_npq = 0;
+static char pd_split_p[64][96];
+static int pd_nsplit_p = 0;
+
+static int pd_is_split_p(const char *id, size_t len) {
+    for (int i = 0; i < pd_nsplit_p; i++) {
+        if (strlen(pd_split_p[i]) == len && !memcmp(pd_split_p[i], id, len)) return 1;
+    }
+    return 0;
+}
+
+static PdBMeta *pd_find_bmeta(const char *id, size_t len) {
+    for (int i = 0; i < pd_nbmeta; i++) {
+        if (strlen(pd_bmeta[i].id) == len && !memcmp(pd_bmeta[i].id, id, len)) return &pd_bmeta[i];
+    }
+    return 0;
+}
+
+static int pd_in_pq(const char *id) {
+    for (int i = 0; i < pd_npq; i++) if (tx_eqz(pd_pq_ids[i], id)) return 1;
+    return 0;
+}
+
+static void pd_load_repo_batch_meta(const char *root) {
+    char p[PD_PW];
+    unsigned char *b = 0; int64_t n = 0;
+    pd_nbmeta = 0; pd_npq = 0; pd_nsplit_p = 0;
+    if (!cx_fmt(p, sizeof p, "%s/tests/split-parents.tsv", root) && !sy_read_file(p, &b, &n, 1 << 20)) {
+        int64_t pos = 0;
+        while (pos < n && pd_nsplit_p < 64) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le <= ls || b[ls] == '#') continue;
+            int64_t te = ls;
+            while (te < le && b[te] != '\t') te++;
+            size_t l = (size_t)(te - ls);
+            if (l > 0 && l < 95 && !(l == 6 && !memcmp(b + ls, "parent", 6))) {
+                mm_copy(pd_split_p[pd_nsplit_p], 96, (const char *)b + ls, l);
+                pd_split_p[pd_nsplit_p][l] = 0;
+                pd_nsplit_p++;
+            }
+        }
+        mm_free(b); b = 0; n = 0;
+    }
+    if (!cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) && !sy_read_file(p, &b, &n, 8 << 20)) {
+        int64_t pos = 0;
+        while (pos < n && pd_nbmeta < 4096) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le > ls && b[le - 1] == '\r') le--;
+            if (le <= ls || b[ls] == '#') continue;
+            const char *c[16]; int64_t cl[16]; int nc = 0; int64_t q = ls;
+            while (nc < 16) {
+                int64_t cs = q;
+                while (q < le && b[q] != '\t') q++;
+                c[nc] = (const char *)b + cs; cl[nc] = q - cs; nc++;
+                if (q >= le) break;
+                q++;
+            }
+            if (nc >= 6 && cl[0] > 0 && cl[0] < 95 && !(cl[0] == 2 && !memcmp(c[0], "id", 2))) {
+                PdBMeta *m = &pd_bmeta[pd_nbmeta++];
+                mm_copy(m->id, 96, c[0], (size_t)cl[0]);
+                m->id[cl[0]] = 0;
+                m->planned = !(cl[1] == 11 && !memcmp(c[1], "IMPLEMENTED", 11));
+                m->foreign = !((cl[5] == 10 && !memcmp(c[5], "lnx/x86_64", 10)) ||
+                               (cl[5] == 3 && !memcmp(c[5], "any", 3)));
+            }
+        }
+        mm_free(b); b = 0; n = 0;
+    }
+    if (cx_fmt(p, sizeof p, "%s/tests/batch-domain-index.tsv", root) || sy_read_file(p, &b, &n, 8 << 20)) {
+        char qp[PD_PW], qc[PD_PW], why[256];
+        if (sy_realpath("./unisacc.com", qp, sizeof qp) == 0 &&
+            !cx_fmt(qc, sizeof qc, "%s/tools/derived-query.cx", root) &&
+            sy_exists(qp) == 1 && sy_exists(qc) == 1) {
+            char *qv[] = {"sh", qp, qc, "--", "batch-domains", "--root", (char *)root, "--path", 0};
+            np_result qr = {0};
+            if (!np_run(qv, root, 0, 30, &qr, why, sizeof why) && qr.rc == 0 && qr.out && qr.outn > 0) {
+                size_t ql = (size_t)qr.outn;
+                while (ql > 0 && (qr.out[ql - 1] == '\n' || qr.out[ql - 1] == '\r')) ql--;
+                if (ql > 0 && ql < sizeof p) {
+                    mm_copy(p, sizeof p, qr.out, ql);
+                    p[ql] = 0;
+                    sy_read_file(p, &b, &n, 8 << 20);
+                }
+            }
+            np_free(&qr);
+        }
+    }
+    if (b && n > 0) {
+        int64_t pos = 0;
+        while (pos < n && pd_npq < 2048) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le > ls && b[le - 1] == '\r') le--;
+            if (le <= ls || b[ls] == '#') continue;
+            const char *c[4]; int64_t cl[4]; int nc = 0; int64_t q = ls;
+            while (nc < 4) {
+                int64_t cs = q;
+                while (q < le && b[q] != '\t') q++;
+                c[nc] = (const char *)b + cs; cl[nc] = q - cs; nc++;
+                if (q >= le) break;
+                q++;
+            }
+            if (nc >= 2 && cl[0] > 0 && cl[0] < 95 &&
+                !(cl[0] == 2 && !memcmp(c[0], "id", 2)) &&
+                cl[1] == 21 && !memcmp(c[1], "product-qualification", 21) &&
+                !pd_is_split_p(c[0], (size_t)cl[0])) {
+                char id[96];
+                mm_copy(id, 96, c[0], (size_t)cl[0]);
+                id[cl[0]] = 0;
+                if (!pd_in_pq(id)) {
+                    cx_fmt(pd_pq_ids[pd_npq++], 96, "%s", id);
+                }
+            }
+        }
+        mm_free(b);
+    }
+}
+
+static void pd_find_latest_strict(const char *root, const char *cur_ver, char *out_path, size_t cap) {
+    char evd[PD_PW], cur_pfx[64], best[256] = {0};
+    out_path[0] = 0;
+    if (cx_fmt(evd, sizeof evd, "%s/release/evidence", root) ||
+        cx_fmt(cur_pfx, sizeof cur_pfx, "v%s-strict-", cur_ver ? cur_ver : "")) return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, evd) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        if (pd_starts(d.name, "v0.") && strstr(d.name, "-strict-") != 0 &&
+            d.name_n > 12 && !memcmp(d.name + d.name_n - 4, ".tsv", 4) &&
+            !pd_starts(d.name, cur_pfx)) {
+            if (!best[0] || strcmp(d.name, best) > 0) {
+                cx_fmt(best, sizeof best, "%s", d.name);
+            }
+        }
+    }
+    sy_dir_close(&d);
+    if (best[0]) cx_fmt(out_path, cap, "%s/%s", evd, best);
+}
+
+static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, const char *ver_arg,
+                          const char *out_arg, const char *ids_arg, const char *times_arg,
+                          const char *prio_arg, const char *heavy_f, int win_sz, int warmup) {
+    char root[PD_PW], cdir[PD_PW], idp[PD_PW], ape_path[PD_PW], out_dir[PD_PW];
+    char head_rev[64] = {0}, chain_rev[64] = {0}, ape_sha[65] = {0}, ver[64] = {0}, why[256] = {0};
+    if (!from_chain_dir || !from_chain_dir[0]) return pd_refuse("prepare-requires-from-chain-dir");
+    if (root_arg && root_arg[0]) {
+        if (sy_realpath(root_arg, root, sizeof root) < 0) cx_fmt(root, sizeof root, "%s", root_arg);
+    } else {
+        if (sy_realpath(".", root, sizeof root) < 0) cx_fmt(root, sizeof root, ".");
+    }
+    {
+        char *gv[] = {"git", "-C", root, "rev-parse", "HEAD", 0};
+        np_result gr = {0};
+        if (np_run(gv, 0, 0, 10, &gr, why, sizeof why) || gr.rc != 0 || !gr.out || gr.outn < 40) {
+            np_free(&gr);
+            return pd_refuse("git-rev-parse-head");
+        }
+        mm_copy(head_rev, sizeof head_rev, gr.out, 40);
+        head_rev[40] = 0;
+        np_free(&gr);
+    }
+    if (!cx_fmt(idp, sizeof idp, "%s/chain-run.identity", from_chain_dir) && sy_exists(idp) == 1) {
+        cx_fmt(cdir, sizeof cdir, "%s", from_chain_dir);
+    } else if (!cx_fmt(idp, sizeof idp, "%s/%s/chain-run.identity", from_chain_dir, head_rev) && sy_exists(idp) == 1) {
+        cx_fmt(cdir, sizeof cdir, "%s/%s", from_chain_dir, head_rev);
+    } else {
+        cdir[0] = 0;
+        sy_dir_t d;
+        if (sy_dir_open(&d, from_chain_dir) == 0) {
+            while (sy_dir_next(&d) == 1) {
+                if (d.name[0] == '.') continue;
+                if (!cx_fmt(idp, sizeof idp, "%s/%s/chain-run.identity", from_chain_dir, d.name) && sy_exists(idp) == 1) {
+                    cx_fmt(cdir, sizeof cdir, "%s/%s", from_chain_dir, d.name);
+                    break;
+                }
+            }
+            sy_dir_close(&d);
+        }
+        if (!cdir[0] || cx_fmt(idp, sizeof idp, "%s/chain-run.identity", cdir))
+            return pd_refuse("missing-chain-run-identity");
+    }
+    {
+        unsigned char *ib = 0; int64_t in = 0;
+        if (sy_read_file(idp, &ib, &in, 65536)) return pd_refuse("read-chain-run-identity");
+        int64_t pos = 0;
+        while (pos < in) {
+            int64_t ls = pos;
+            while (pos < in && ib[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < in) pos++;
+            if (le > ls && ib[le - 1] == '\r') le--;
+            if (le - ls > 4 && !memcmp(ib + ls, "rev=", 4)) {
+                size_t rl = (size_t)(le - (ls + 4));
+                if (rl < sizeof chain_rev) {
+                    mm_copy(chain_rev, sizeof chain_rev, (const char *)ib + ls + 4, rl);
+                    chain_rev[rl] = 0;
+                }
+            }
+        }
+        mm_free(ib);
+    }
+    if (strlen(chain_rev) != 40) return pd_refuse("invalid-chain-rev");
+    if (strcmp(chain_rev, head_rev) != 0) return pd_refuse("candidate-rev-mismatch");
+    if (cx_fmt(ape_path, sizeof ape_path, "%s/ape-final/unisacc-next.com", cdir) || sy_exists(ape_path) != 1)
+        return pd_refuse("missing-candidate-ape");
+    {
+        unsigned char *ab = 0; int64_t an = 0;
+        if (sy_read_file(ape_path, &ab, &an, 256 << 20) || sy_sha256_hex(ab, an, ape_sha)) {
+            if (ab) mm_free(ab);
+            return pd_refuse("hash-candidate-ape");
+        }
+        mm_free(ab);
+    }
+    if (ver_arg && ver_arg[0]) {
+        cx_fmt(ver, sizeof ver, "%s", ver_arg);
+    } else {
+        char *vv[] = {"sh", ape_path, "--version", 0};
+        np_result vr = {0};
+        if (!np_run(vv, 0, 0, 15, &vr, why, sizeof why) && vr.rc == 0 && vr.out && vr.outn > 8) {
+            const char *p = vr.out;
+            if (!strncmp(p, "unisacc ", 8)) p += 8;
+            size_t vl = 0;
+            while (p[vl] && p[vl] != '\n' && p[vl] != '\r' && p[vl] != ' ' && vl + 1 < sizeof ver) {
+                ver[vl] = p[vl]; vl++;
+            }
+            ver[vl] = 0;
+        }
+        np_free(&vr);
+    }
+    if (!pd_archive_version(ver)) return pd_refuse("prepare-invalid-version");
+    if (out_arg && out_arg[0]) {
+        cx_fmt(out_dir, sizeof out_dir, "%s", out_arg);
+    } else {
+        const char *td = sy_tmpdir();
+        const char *btd = (td && td[0] == '/') ? td : "/tmp";
+        if (cx_fmt(out_dir, sizeof out_dir, "%s/unisacc-session-v%s-prerun-%.10s", btd, ver, chain_rev))
+            return pd_refuse("out-dir-bound");
+    }
+    pd_mkdirs(out_dir);
+
+    pd_load_repo_batch_meta(root);
+    char latest_strict[PD_PW] = {0}, ids_path[PD_PW] = {0}, times_path[PD_PW] = {0}, prio_path[PD_PW] = {0};
+    pd_find_latest_strict(root, ver, latest_strict, sizeof latest_strict);
+
+    if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
+    if (ids_arg && ids_arg[0]) {
+        cx_fmt(ids_path, sizeof ids_path, "%s", ids_arg);
+        if (pd_load_ids(ids_path)) return pd_refuse("read-ids-file");
+    } else {
+        if (cx_fmt(ids_path, sizeof ids_path, "%s/ids.txt", out_dir)) return pd_refuse("ids-path-bound");
+        if (latest_strict[0] && pd_load_ids(latest_strict) == 0 && pd_nids > 0) {
+            size_t cap = 65536, bp = 0;
+            char *ibuf = (char *)mm_alloc(cap);
+            if (!ibuf) return pd_refuse("oom");
+            for (int i = 0; i < pd_nids; i++) {
+                const char *id = pd_ids[i].id;
+                size_t l = strlen(id);
+                if (pd_is_split_p(id, l)) continue;
+                PdBMeta *m = pd_find_bmeta(id, l);
+                if (m && (m->planned || m->foreign)) continue;
+                if (bp + l + 2 < cap) {
+                    mm_copy(ibuf + bp, cap - bp, id, l);
+                    bp += l;
+                    ibuf[bp++] = '\n';
+                }
+            }
+            sy_write_file(ids_path, ibuf, (int64_t)bp, 0644);
+            mm_free(ibuf);
+        } else {
+            size_t cap = 65536, bp = 0;
+            char *ibuf = (char *)mm_alloc(cap);
+            if (!ibuf) return pd_refuse("oom");
+            for (int i = 0; i < pd_npq; i++) {
+                const char *id = pd_pq_ids[i];
+                size_t l = strlen(id);
+                PdBMeta *m = pd_find_bmeta(id, l);
+                if (m && (m->planned || m->foreign)) continue;
+                if (bp + l + 2 < cap) {
+                    mm_copy(ibuf + bp, cap - bp, id, l);
+                    bp += l;
+                    ibuf[bp++] = '\n';
+                }
+            }
+            sy_write_file(ids_path, ibuf, (int64_t)bp, 0644);
+            mm_free(ibuf);
+        }
+        if (pd_load_ids(ids_path) || pd_nids <= 0) return pd_refuse("empty-prepared-ids");
+    }
+
+    int bad_planned = 0, bad_foreign = 0;
+    for (int i = 0; i < pd_nids; i++) {
+        PdBMeta *m = pd_find_bmeta(pd_ids[i].id, strlen(pd_ids[i].id));
+        if (m) {
+            if (m->planned) bad_planned++;
+            if (m->foreign) bad_foreign++;
+        }
+    }
+    if (bad_planned > 0 || bad_foreign > 0)
+        return pd_refuse("ids-contains-planned-or-foreign-platform");
+
+    int excl_total = 0, excl_planned = 0, excl_foreign = 0, excl_stale = 0, extra_non_pq = 0;
+    for (int i = 0; i < pd_npq; i++) {
+        const char *id = pd_pq_ids[i];
+        size_t l = strlen(id);
+        if (pd_find_id(id, l) < 0) {
+            excl_total++;
+            PdBMeta *m = pd_find_bmeta(id, l);
+            if (m && m->planned) excl_planned++;
+            else if (m && m->foreign) excl_foreign++;
+            else excl_stale++;
+        }
+    }
+    for (int i = 0; i < pd_nids; i++) {
+        if (!pd_in_pq(pd_ids[i].id)) extra_non_pq++;
+    }
+
+    if (times_arg && times_arg[0]) {
+        cx_fmt(times_path, sizeof times_path, "%s", times_arg);
+    } else {
+        const char *hm = sy_env("HOME");
+        if (hm && hm[0] == '/' && !cx_fmt(times_path, sizeof times_path, "%s/.cache/unisacc/batch-times.tsv", hm) && sy_exists(times_path) == 1) {
+            /* use home cache */
+        } else if (!cx_fmt(times_path, sizeof times_path, "%s/build/phase-times.tsv", root) && sy_exists(times_path) == 1) {
+            /* use repo build/phase-times.tsv */
+        } else {
+            times_path[0] = 0;
+        }
+    }
+    if (times_path[0]) (void)pd_load_times_file(times_path);
+
+    if (prio_arg && prio_arg[0]) {
+        cx_fmt(prio_path, sizeof prio_path, "%s", prio_arg);
+    } else if (latest_strict[0]) {
+        cx_fmt(prio_path, sizeof prio_path, "%s", latest_strict);
+    } else if (!cx_fmt(prio_path, sizeof prio_path, "%s/tests/commit-tier-selection.tsv", root) && sy_exists(prio_path) == 1) {
+        /* use commit-tier-selection.tsv */
+    } else {
+        prio_path[0] = 0;
+    }
+    if (prio_path[0]) (void)pd_load_priority_file(prio_path);
+
+    if (warmup < 0) warmup = pd_has_times ? 1 : 4;
+    if (pd_build_plan(win_sz, warmup, out_dir)) return 2;
+
+    char envp[PD_PW], envb[8192];
+    if (cx_fmt(envp, sizeof envp, "%s/prerun-env.tsv", out_dir) ||
+        cx_fmt(envb, sizeof envb,
+            "version\t%s\n"
+            "root\t%s\n"
+            "chain_dir\t%s\n"
+            "rev\t%s\n"
+            "candidate\t%s\n"
+            "ape_sha256\t%s\n"
+            "ids_file\t%s\n"
+            "times_file\t%s\n"
+            "priority_file\t%s\n"
+            "prerun_dir\t%s\n"
+            "ids_count\t%d\n"
+            "dvqualify_list_count\t%d\n"
+            "excluded_total\t%d\n"
+            "excluded_planned\t%d\n"
+            "excluded_foreign_platform\t%d\n"
+            "excluded_stale\t%d\n"
+            "extra_non_pq\t%d\n"
+            "normal_jobs\t%d\n"
+            "total_windows\t%d\n",
+            ver, root, cdir, chain_rev, ape_path, ape_sha,
+            ids_path, times_path[0] ? times_path : "-", prio_path[0] ? prio_path : "-",
+            out_dir, pd_nids, pd_npq, excl_total, excl_planned, excl_foreign, excl_stale,
+            extra_non_pq, pd_normal_jobs, pd_nwins))
+        return pd_refuse("prerun-env-fmt");
+    if (sy_write_file(envp, envb, (int64_t)strlen(envb), 0644))
+        return pd_refuse("write-prerun-env");
+
+    printf("PRERUN_PREPARE\tversion=%s\trev=%s\tape_sha256=%s\tids=%d\tdvqualify_list=%d\texcluded_planned=%d\texcluded_foreign_platform=%d\texcluded_stale=%d\twindows=%d\tout=%s\n",
+           ver, chain_rev, ape_sha, pd_nids, pd_npq, excl_planned, excl_foreign, excl_stale, pd_nwins, out_dir);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) return pd_refuse("usage: plan|run|merge|archive|replay");
+    if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay");
     const char *sub = argv[1];
+    if (tx_eqz(sub, "prepare")) {
+        const char *chain_d = 0, *root_d = 0, *ver = 0, *out_d = 0, *ids_f = 0, *times_f = 0, *prio_f = 0, *heavy_f = 0;
+        int win_sz = 10, warmup = -1;
+        pd_normal_jobs = 4;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--from-chain-dir") && i + 1 < argc) chain_d = argv[++i];
+            else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_d = argv[++i];
+            else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
+            else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
+            else if (tx_eqz(argv[i], "--times-file") && i + 1 < argc) times_f = argv[++i];
+            else if (tx_eqz(argv[i], "--priority-file") && i + 1 < argc) prio_f = argv[++i];
+            else if (tx_eqz(argv[i], "--heavy-file") && i + 1 < argc) heavy_f = argv[++i];
+            else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
+            else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
+            else return pd_refuse("unknown-prepare-arg");
+        }
+        return pd_cmd_prepare(chain_d, root_d, ver, out_d, ids_f, times_f, prio_f, heavy_f, win_sz, warmup);
+    }
     if (tx_eqz(sub, "plan")) {
         const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0;
         int win_sz = 10, warmup = -1;
@@ -1783,43 +2241,62 @@ int main(int argc, char **argv) {
         return pd_build_plan(win_sz, warmup, out_d);
     }
     if (tx_eqz(sub, "run")) {
-        const char *root = ".", *cand = 0, *out_d = 0, *mock_r = 0;
-        int resume = 0, max_j = 2, load_cap = 6, max_ret = 2;
+        const char *root = 0, *cand = 0, *out_d = 0, *mock_r = 0;
+        char env_root[PD_PW] = {0}, env_cand[PD_PW] = {0}, env_jobs[32] = {0};
+        int resume = 0, max_j = 2, has_max_j = 0, load_cap = 6, max_ret = 2;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
             else if (tx_eqz(argv[i], "--candidate") && i + 1 < argc) cand = argv[++i];
-            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
             else if (tx_eqz(argv[i], "--resume")) resume = 1;
-            else if (tx_eqz(argv[i], "--max-jobs") && i + 1 < argc) max_j = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--max-jobs") && i + 1 < argc) { max_j = atoi(argv[++i]); has_max_j = 1; }
             else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) { load_cap = atoi(argv[++i]); fprintf(stderr, "PRERUN_DEPRECATED\t--load-cap\tignored: load gates retired 2026-11-20, use --max-jobs\n"); }
             else if (tx_eqz(argv[i], "--max-retries") && i + 1 < argc) max_ret = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--keep-going")) pd_keep_going = 1;
             else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
             else return pd_refuse("unknown-run-arg");
         }
+        if (out_d) {
+            if (!root && pd_env_lookup(out_d, "root", env_root, sizeof env_root)) root = env_root;
+            if (!cand && pd_env_lookup(out_d, "candidate", env_cand, sizeof env_cand)) cand = env_cand;
+            if (!has_max_j && pd_env_lookup(out_d, "normal_jobs", env_jobs, sizeof env_jobs) && atoi(env_jobs) > 0)
+                max_j = atoi(env_jobs);
+        }
+        if (!root) root = ".";
         if (!out_d || (!cand && !mock_r)) return pd_refuse("run-requires-out-and-candidate");
         if (max_ret < 1 || max_ret > 3) return pd_refuse("invalid-max-retries");
         return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, mock_r);
     }
     if (tx_eqz(sub, "merge")) {
         const char *in_d = 0, *out_d = 0, *ver = 0;
+        char env_ver[64] = {0};
+        int used_dir = 0;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--in-dir") && i + 1 < argc) in_d = argv[++i];
             else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--dir") && i + 1 < argc) { in_d = argv[++i]; out_d = in_d; used_dir = 1; }
             else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
             else return pd_refuse("unknown-merge-arg");
         }
         if (!in_d || !out_d) return pd_refuse("merge-requires-in-dir-and-out");
+        if (!ver && pd_env_lookup(in_d, "version", env_ver, sizeof env_ver)) ver = env_ver;
+        if ((used_dir || env_ver[0]) && !pd_has_run_done(in_d)) return pd_refuse("run-not-done");
         return pd_cmd_merge(in_d, out_d, ver);
     }
     if (tx_eqz(sub, "archive")) {
-        const char *in = 0, *repo = ".", *ver = 0;
+        const char *in = 0, *repo = 0, *ver = 0;
+        char env_ver[64] = {0}, env_root[PD_PW] = {0};
         for (int i = 2; i < argc; i++) {
-            if (tx_eqz(argv[i], "--in-dir") && i + 1 < argc) in = argv[++i];
+            if ((tx_eqz(argv[i], "--in-dir") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) in = argv[++i];
             else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
             else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
             else return pd_refuse("unknown-archive-arg");
         }
+        if (in) {
+            if (!ver && pd_env_lookup(in, "version", env_ver, sizeof env_ver)) ver = env_ver;
+            if (!repo && pd_env_lookup(in, "root", env_root, sizeof env_root)) repo = env_root;
+        }
+        if (!repo) repo = ".";
         if (!in || !ver) return pd_refuse("archive-requires-in-dir-and-version");
         return pd_cmd_archive(in, repo, ver);
     }

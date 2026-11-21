@@ -1,18 +1,25 @@
 /* Checks tools/s9-profile.cx: sh ./unisacc.com tools/check-s9-profile.cx   (from the repo root)
-   Builds fixture RUN dirs under /tmp/s9-profile-check/ (ignored dir) and checks the SUMMARY line:
+   Builds fixture RUN dirs under a private mkdtemp (sy_tmpdir()/s9-profile-XXXXXX), not a fixed
+   /tmp/s9-profile-check tree (that collided across concurrent release-train sessions). Checks the
+   SUMMARY line:
    (a) two done slices (30 s and 20 s, overlapping 10 s, wave 15 s and 5 s): slices=2 done=2 batches=3 exclusive=1,
        fixed_mean_s=15.0, conc_peak=2, top batch is the 12 s one
    (b) one done and one RUNNING slice: running=1, done=1
    (c) an empty run directory (no plan.tsv): exit 2
    Prints PASS/FAIL lines and CHECK_S9_PROFILE<TAB>checks=N<TAB>failed=N. */
 #pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 
 static int failed, checks;
+static char g_base[512];
 static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\ts9-profile.%s\n", ok ? "PASS" : "FAIL", name); }
 
 static void put(const char *dir, const char *rel, const char *body) {
-    char p[512];
+    char p[768];
     FILE *f;
     int n = snprintf(p, sizeof p, "%s/%s", dir, rel);
     if (n < 0 || n >= (int)sizeof p) return;
@@ -35,13 +42,23 @@ static int has(const char *o, const char *s) {
 
 int main(void) {
     static char o[16384];
-    char *mk[] = {"mkdir", "-p", "/tmp/s9-profile-check/a/s9-run/slice-0-0", "/tmp/s9-profile-check/a/s9-run/slice-0-1",
-                  "/tmp/s9-profile-check/b/s9-run/slice-0-0", "/tmp/s9-profile-check/b/s9-run/slice-0-1",
-                  "/tmp/s9-profile-check/c/s9-run", 0};
+    char a0[640], a1[640], b0[640], b1[640], c0[640], da[640], db[640], dc[640];
     int rc;
-    sy_run(mk, o, sizeof o, 0);
+    if (sy_mkdtemp(sy_tmpdir(), "s9-profile-", g_base, (int)sizeof g_base) != 0) {
+        fprintf(stderr, "check-s9-profile: mkdtemp failed\n");
+        return 2;
+    }
+    if (cx_fmt(da, sizeof da, "%s/a/s9-run", g_base) || cx_fmt(db, sizeof db, "%s/b/s9-run", g_base)
+        || cx_fmt(dc, sizeof dc, "%s/c/s9-run", g_base)
+        || cx_fmt(a0, sizeof a0, "%s/a/s9-run/slice-0-0", g_base)
+        || cx_fmt(a1, sizeof a1, "%s/a/s9-run/slice-0-1", g_base)
+        || cx_fmt(b0, sizeof b0, "%s/b/s9-run/slice-0-0", g_base)
+        || cx_fmt(b1, sizeof b1, "%s/b/s9-run/slice-0-1", g_base)
+        || cx_fmt(c0, sizeof c0, "%s/c/s9-run", g_base)) { (void)sy_remove_all(g_base); return 2; }
+    (void)sy_mkdir_all(a0, 0700); (void)sy_mkdir_all(a1, 0700);
+    (void)sy_mkdir_all(b0, 0700); (void)sy_mkdir_all(b1, 0700); (void)sy_mkdir_all(c0, 0700);
     {
-        const char *d = "/tmp/s9-profile-check/a/s9-run";
+        const char *d = da;
         put(d, "plan.tsv", "slice-0-0\t0\t0\tx,y\nslice-0-1\t0\t1\tz\n");
         put(d, "slice-0-0.start", "1\t1\t1\th\t100000000000\n");
         put(d, "slice-0-0.done", "100000000000\t130000000000\t0\th\n");
@@ -59,7 +76,7 @@ int main(void) {
         ck(has(o, "TOPBATCH\t1\tx\t12.0_s"), "a.top");
     }
     {
-        const char *d = "/tmp/s9-profile-check/b/s9-run";
+        const char *d = db;
         put(d, "plan.tsv", "slice-0-0\t0\t0\tx\nslice-0-1\t0\t0\ty\n");
         put(d, "slice-0-0.start", "1\t1\t1\th\t100000000000\n");
         put(d, "slice-0-0.done", "100000000000\t130000000000\t0\th\n");
@@ -70,9 +87,10 @@ int main(void) {
         ck(has(o, "done=1\trunning=1"), "b.summary");
     }
     {
-        rc = prof("/tmp/s9-profile-check/c/s9-run", o, sizeof o);
+        rc = prof(dc, o, sizeof o);
         ck(rc == 2, "c.empty-rc2");
     }
+    (void)sy_remove_all(g_base);
     printf("CHECK_S9_PROFILE\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed != 0;
 }

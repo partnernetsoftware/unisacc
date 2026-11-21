@@ -79,6 +79,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.flowexec
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.devsearch
 #pragma unisa use dv.timing
 #pragma unisa use dv.nativestat
@@ -1572,8 +1573,15 @@ static int chain_admission_gate(const char *root, const char *caller_ow, const f
 /* text 非空即内联节点表(写进 RUN/flow.tsv)。xmode:单条 exec,把节点 stdout/stderr 原样转出,返回节点退出码。 */
 static int flow_go(const char *root, const char *file, const char *text, const char *rdir_in, int jobs, long dl, int cat, long wait_ms, int xmode) {
     static fl_flow f; fl_sum s = {0}; char why[1024], rdir[PW], p[PW + 300], nm[64], xst[16] = "?", xms[24] = "0"; int i, r, nl; unsigned char *eb = 0; int64_t en = 0; AB sums = {0, 0, 0};
-    if (rdir_in) F(rdir, sizeof rdir, "%s", rdir_in); else F(rdir, sizeof rdir, "%s/devsvc-flow-%ld-%d", sy_tmpdir(), sy_now_ms(), sy_pid());
-    if (ovf || sy_mkdir_all(rdir, 0755)) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable\n", rdir); return 2; }
+    if (rdir_in) {
+        F(rdir, sizeof rdir, "%s", rdir_in);
+        if (ovf || sy_mkdir_all(rdir, 0755)) { fprintf(stderr, "devsvc: REFUSE run dir %s unusable\n", rdir); return 2; }
+    } else {
+        char id[64];
+        if (cx_fmt(id, sizeof id, "devsvc-flow-%d-", sy_pid()) || sr_scratch(id, rdir, sizeof rdir)) {
+            fprintf(stderr, "devsvc: REFUSE flow scratch dir\n"); return 2;
+        }
+    }
     if (text) {
         F(p, sizeof p, "%s/flow.tsv", rdir);
         if (sy_write_atomic(p, text, strlen(text), 0644)) { fprintf(stderr, "devsvc: REFUSE cannot write %s\n", p); return 2; }
@@ -3827,12 +3835,13 @@ static int jobs_gc(void) {
     if (del) { char m[64]; F(m, sizeof m, "deleted=%d\tseen=%d", del, n); ev_add("jobs.gc", m); }
     return del;
 }
-/* flow 运行目录回收(同一空闲巡检):只删 TMPDIR 下名为 devsvc-flow- 前缀、是目录(不跟符号链接)、owner 是当前用户、
+/* flow 运行目录回收(同一空闲巡检):只删 TMPDIR 下的 flow 会话或旧 devsvc-flow- 目录，不跟符号链接，owner 是当前用户，
    mtime 超过 $DEVSVC_FLOWDIR_GC_AGE_S(缺省 7200 s)且 pgrep 命令行不含该路径的目录;每次最多 200 个,记 flowdir.gc 事件 */
 #define FLOWDIR_GC_MAX 200
+static const char flow_session_prefix[] = "unisacc-session-devsvc-flow-";
 static int flowdir_gc(void) {
     static char lst[1 << 18]; char *s, *e; int del = 0, seen = 0; long now = sy_wall_s(), age = 7200; const char *ae = getenv("DEVSVC_FLOWDIR_GC_AGE_S");
-    char tmp[PW]; char *v[] = {"find", tmp, "-maxdepth", "1", "-name", "devsvc-flow-*", "-type", "d", 0};
+    char tmp[PW]; char *v[] = {"find", tmp, "-maxdepth", "1", "(", "-name", "unisacc-session-devsvc-flow-*", "-o", "-name", "devsvc-flow-*", ")", "-type", "d", 0};
     if (ae && *ae && atol(ae) >= 0) age = atol(ae);
     { const char *gd = getenv("DEVSVC_FLOWDIR_GC_DIR"); F(tmp, sizeof tmp, "%s", gd && *gd ? gd : sy_tmpdir()); }   /* 覆盖目录仅供检查用 */
     if (runcap(v, lst, sizeof lst) < 0) return 0;
@@ -3840,9 +3849,16 @@ static int flowdir_gc(void) {
         sy_stat_t st; char *pg[] = {"pgrep", "-f", "--", s, 0}; char po[64]; const char *base;
         e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s);
         base = strrchr(s, '/'); base = base ? base + 1 : s;
-        if (strncmp(base, "devsvc-flow-", 12) || strstr(s, "..")) continue;
+        int session = !strncmp(base, flow_session_prefix, sizeof flow_session_prefix - 1);
+        if ((!session && strncmp(base, "devsvc-flow-", sizeof "devsvc-flow-" - 1)) || strstr(s, "..")) continue;
         seen++;
         if (sy_lstat(s, &st) || st.kind != 'd' || st.uid != (long)sy_uid() || now - st.mtime < age) continue;
+        if (session) {
+            const char *p = base + sizeof flow_session_prefix - 1;
+            char *end;
+            long pid = strtol(p, &end, 10);
+            if (p == end || *end != '-' || pid < 2 || pid > 2147483647 || sy_signal((int)pid, 0) != -ESRCH) continue;
+        }
         if (runcap(pg, po, sizeof po) == 0) continue;   /* 有进程引用 */
         if (sy_remove_all(s) == 0) del++;
     }

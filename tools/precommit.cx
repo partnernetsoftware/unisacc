@@ -15,6 +15,7 @@
  * handed to tools/precommit-flow.cx, everything else is judged serially here (see flow_route);
  * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict. */
 #pragma unisa use cxlib.globspan
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -412,7 +413,7 @@ static int freeze_gate(void) {
 }
 
 /* 子进程闸(0.0.50 L):对本次 staged 的 .cx 索引内容跑 tools/cx-lint.cx。R2(R2-timeout/R2-sep,缺 -- 分隔或无界的
- * 子进程调用)有发现即 blocked;R1(第二真相源)只打印不拦。索引 blob 写到 sy_tmpdir()/precommit-lint-PID/<原路径>,
+ * 子进程调用)有发现即 blocked;R1(第二真相源)只打印不拦。索引 blob 写到独占临时会话下的原路径,
  * 保留目录结构让 cx-lint 的 tests/ 判定仍成立。cwd 下没有 ./unisacc.com 或 tools/cx-lint.cx(夹具仓)时跳过,打印 lint=absent。 */
 /* tlib 版本化门(0.0.58 A2):暂存区若含 build/tlib-packages.tsv 任一包 roots 下的 .cx,调用
  * tools/check-tlib-frozen.cx -- --fast ROOT PKG... 只算受影响包的 content sha。当前分级为
@@ -592,13 +593,14 @@ static int mkdirs(char *path) {   /* 逐级建目录;已存在视为成功 */
 }
 static int lint_gate(const char *names, long sn, int *absent) {
     char dir[1200], **paths; long at, np = 0, i; int blocked = 0;
+    int private_lint = !plan_dir && !from_run;
     *absent = 0;
     if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/cx-lint.cx") != 1) { *absent = 1; return 0; }
     if (plan_dir || from_run) {   /* plan stages the blobs into DIR/lintdir; from-run reuses the same paths */
         if (cx_fmt(dir, sizeof dir, "%s/lintdir", plan_dir ? plan_dir : from_run) || (sy_mkdir(dir, 0700) && sy_exists(dir) != 1)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
-    } else if (cx_fmt(dir, sizeof dir, "%s/precommit-lint-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(dir, 0700)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    } else if (sr_scratch("precommit-lint-", dir, sizeof dir)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
     paths = mm_alloc((size_t)(sn + 8) * sizeof *paths);
-    if (!paths) return 1;
+    if (!paths) { if (private_lint) (void)sy_remove_all(dir); return 1; }
     for (at = 0; at < sn; ) {
         long nl = tx_len(names + at, sn - at), bn; char spec[4410], *blob, *p; char *sv[] = {"git", "show", spec, 0}; int fd;
         if (nl <= 0) break;
@@ -617,8 +619,8 @@ static int lint_gate(const char *names, long sn, int *absent) {
     }
     if (np) {
         char **lv = mm_alloc((size_t)(np + 8) * sizeof *lv); long rn, k; char *rows; int j;
-        if (!lv) return 1;
-        for (j = 0; j < 2; j++) {   /* 第一遍 R2+R3+R4 --strict(拦),第二遍 R1(只报告) */
+        if (!lv) blocked++;
+        for (j = 0; lv && j < 2; j++) {   /* 第一遍 R2+R3+R4 --strict(拦),第二遍 R1(只报告) */
             k = 0; lv[k++] = "sh"; lv[k++] = "./unisacc.com"; lv[k++] = "tools/cx-lint.cx"; lv[k++] = "--";
             lv[k++] = "--rules"; lv[k++] = j ? "R1" : "R2,R3,R4"; if (!j) lv[k++] = "--strict";
             for (i = 0; i < np; i++) lv[k++] = paths[i];
@@ -640,8 +642,9 @@ static int lint_gate(const char *names, long sn, int *absent) {
         }
         mm_free(lv);
     }
-    for (i = 0; i < np; i++) { if (!plan_dir) sy_unlink(paths[i]); mm_free(paths[i]); }   /* 文件清掉;空目录留给 tmp 清理(不递归删) */
+    for (i = 0; i < np; i++) { if (from_run) sy_unlink(paths[i]); mm_free(paths[i]); }
     mm_free(paths);
+    if (private_lint && sy_remove_all(dir)) sy_eprintf("precommit: lint scratch cleanup failed %s\n", dir);
     return blocked;
 }
 

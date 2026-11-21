@@ -7,11 +7,14 @@
  * pair: the set of <a id="..."> anchors of README.md and README_zh.md must be equal, and every relative
  *   link target (file part of ](...)) in either must exist next to the README.
  * term: no .md under ROOT may contain the retired title (the Chinese word for "master/owner", U+4E3B U+4EBA).
- *   Skipped: .git, out, archive (frozen snapshots) and docs/history (historical quotes, see
- *   docs/history/terminology-note.md).  Real violations outside those are held by an expiring baseline
- *   (BASELINE below, due DOC-1 sweep, 2026-12-01): a file not in the baseline fails, an expired baseline
- *   fails, a baseline file that became clean is reported STALE and fails (shrink the list).
- * Fixtures run in a temp dir: an inconsistent README pair and a file with the term must be reported. */
+ *   Skipped (find -prune): .git, out, archive (frozen snapshots), .trash, .claude/worktrees (version
+ *   worktrees are not the shared checkout), .claude/jobs-local-* (private agent scratch under .claude/).
+ *   Also skipped in the walk: docs/history (historical quotes, see docs/history/terminology-note.md).
+ *   Real violations outside those are held by an expiring baseline (BASELINE below, due DOC-1 sweep,
+ *   2026-12-01): a file not in the baseline fails, an expired baseline fails, a baseline file that
+ *   became clean is reported STALE and fails (shrink the list).
+ * Fixtures run in a temp dir: an inconsistent README pair and a file with the term must be reported;
+ *   planted term under .claude/worktrees/ and .claude/jobs-local-* dirs must not be reported. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
@@ -118,27 +121,38 @@ static int in_baseline(const char *rel) { int i; for (i = 0; BASELINE[i]; i++) i
 static int check_term(const char *root, int use_baseline) {
     static char out[1 << 20];
     static const char *seen[MAXF];
-    char *av[24], pr[2048], pa[2048], pb[2048], pc[2048], pd[2048];
-    int bad = 0, i, nseen = 0;
+    char pr[2048], pa[2048], pb[2048], pc[2048], pd[2048], pe[2048], pf[2048];
+    char *av2[40];
+    int bad = 0, i, nseen = 0, ai = 0;
     char *line;
     size_t rl = strlen(root);
+    pr_result r;
     cx_fmt(pr, sizeof pr, "%s", root);
     cx_fmt(pa, sizeof pa, "%s/.git", root);
     cx_fmt(pb, sizeof pb, "%s/out", root);   /* out-ok: scan exclusion, read only */
     cx_fmt(pc, sizeof pc, "%s/archive", root);
-    av[0] = "find"; av[1] = pr; av[2] = "("; av[3] = "-path"; av[4] = pa; av[5] = "-o"; av[6] = "-path"; av[7] = pb;
     cx_fmt(pd, sizeof pd, "%s/.trash", root);
-    av[8] = "-o"; av[9] = "-path"; av[10] = pc; av[11] = "-o"; av[12] = "-path"; av[13] = pd; av[14] = ")";
-    av[15] = "-prune"; av[16] = "-o"; av[17] = "-name"; av[18] = 0;
-    {
-        char *av2[28];
-        for (i = 0; i < 18; i++) av2[i] = av[i];
-        av2[18] = "*.md"; av2[19] = "-type"; av2[20] = "f"; av2[21] = "-print"; av2[22] = 0;
-        pr_result r;
-        if (pr_run("doc-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= (long)sizeof out) { printf("TERM_FIND_FAILED\n"); return 1; }
-        mm_copy(out, sizeof out, r.out, r.outn); out[r.outn] = 0;
-        pr_free(&r);
-    }
+    cx_fmt(pe, sizeof pe, "%s/.claude/worktrees", root);
+    cx_fmt(pf, sizeof pf, "%s/.claude/jobs-local-*", root);
+    /* find ROOT ( paths... ) -prune -o -name *.md -type f -print */
+    av2[ai++] = "find"; av2[ai++] = pr;
+    av2[ai++] = "(";
+    av2[ai++] = "-path"; av2[ai++] = pa;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pb;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pc;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pd;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pe;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pf;
+    av2[ai++] = ")";
+    av2[ai++] = "-prune";
+    av2[ai++] = "-o";
+    av2[ai++] = "-name"; av2[ai++] = "*.md";
+    av2[ai++] = "-type"; av2[ai++] = "f";
+    av2[ai++] = "-print";
+    av2[ai] = 0;
+    if (pr_run("doc-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= (long)sizeof out) { printf("TERM_FIND_FAILED\n"); return 1; }
+    mm_copy(out, sizeof out, r.out, r.outn); out[r.outn] = 0;
+    pr_free(&r);
     for (line = strtok(out, "\n"); line; line = strtok(0, "\n")) {
         const char *rel = line + rl + 1;
         long n;
@@ -185,6 +199,23 @@ static int selftest(void) {
     wr(d2, "a.md", t);
     wr(d2, "b.md", "clean\n");
     if (check_term(d2, 0) != 1) { printf("FIXTURE_FAIL\tterm-not-reported\n"); fails++; }
+    /* Plant retired term under ignored agent/worktree paths; must stay silent. */
+    {
+        char wt[2048], jl[2048];
+        char *mk[] = { "mkdir", "-p", 0, 0, 0 };
+        pr_result r;
+        cx_fmt(wt, sizeof wt, "%s/.claude/worktrees/v0.0.99", d2);
+        cx_fmt(jl, sizeof jl, "%s/.claude/jobs-local-csr", d2);
+        mk[2] = wt; mk[3] = jl;
+        if (pr_run("doc-mkdir-ign", mk, 0, 0, 10, &r) < 0 || r.rc != 0) {
+            printf("FIXTURE_FAIL\tignored-mkdir\n"); fails++;
+        } else {
+            pr_free(&r);
+            wr(wt, "poison.md", t);
+            wr(jl, "poison.md", t);
+            if (check_term(d2, 0) != 1) { printf("FIXTURE_FAIL\tignored-paths-leaked\n"); fails++; }
+        }
+    }
     {
         char *rm[] = { "rm", "-rf", d, d2, 0 };
         pr_result r;
