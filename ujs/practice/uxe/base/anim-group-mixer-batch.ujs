@@ -1,0 +1,157 @@
+struct GroupMixerBatch {
+  routes: u32;
+  count: u32;
+  backup: u32;
+  backupBytes: u32;
+}
+
+native function group_batch_span(batch:i64,routes:i64,routeBytes:i64,backup:i64,bytes:i64,at:i64,size:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456-size &&
+    !animation_overlap(batch,GroupMixerBatch.size,at,size) &&
+    !animation_overlap(routes,routeBytes,at,size) &&
+    !animation_overlap(backup,bytes,at,size);
+}
+
+// Routes own disjoint private single-binding mixer state. Snapshot the entire
+// workspace so a late track failure leaves all mixer times and actions intact.
+native function group_batch_validate(batch:i64,owner:i64) i64 {
+  if(!animation_span(batch,GroupMixerBatch.size)) { return 0-1; }
+  let routes=ux_u32(batch+GroupMixerBatch.routes);
+  let count=ux_u32(batch+GroupMixerBatch.count);
+  let backup=ux_u32(batch+GroupMixerBatch.backup);
+  let bytes=ux_u32(batch+GroupMixerBatch.backupBytes);
+  let routeBytes=count*GroupMixerRoute.size;
+  if(count<1 || count>32 || !animation_span(routes,routeBytes) || !animation_span(backup,bytes) ||
+     animation_overlap(batch,GroupMixerBatch.size,routes,routeBytes) ||
+     animation_overlap(batch,GroupMixerBatch.size,backup,bytes) ||
+     animation_overlap(routes,routeBytes,backup,bytes)) { return 0-1; }
+  let table=ux_u32(routes+GroupMixerRoute.table);
+  let arena=ux_u32(routes+GroupMixerRoute.arena);
+  let arenaBytes=bind_arena_bytes(arena);
+  if(arenaBytes<0 || !group_batch_span(batch,routes,routeBytes,backup,bytes,arena,arenaBytes) ||
+     !group_mixer_no_sub_alias(table,batch,GroupMixerBatch.size) ||
+     !group_mixer_no_sub_alias(table,routes,routeBytes) || !group_mixer_no_sub_alias(table,backup,bytes)) { return 0-1; }
+  if(owner>=0 && (!group_batch_span(batch,routes,routeBytes,backup,bytes,owner,AnimationMixer.size) ||
+     animation_overlap(owner,AnimationMixer.size,arena,arenaBytes) ||
+     !group_mixer_no_sub_alias(table,owner,AnimationMixer.size))) { return 0-1; }
+  let used=0;
+  let i=0;
+  while(i<count) {
+    let route=routes+i*GroupMixerRoute.size;
+    let base=ux_u32(route+GroupMixerRoute.workspace);
+    let size=ux_u32(route+GroupMixerRoute.workspaceBytes);
+    let path=ux_u32(route+GroupMixerRoute.path);
+    let pathBytes=ux_u32(route+GroupMixerRoute.pathBytes);
+    let binding=ux_u32(route+GroupMixerRoute.binding);
+    if(ux_u32(route+GroupMixerRoute.table)!=table || ux_u32(route+GroupMixerRoute.arena)!=arena ||
+       size==0 || size>bytes-used || !group_batch_span(batch,routes,routeBytes,backup,bytes,base,size) ||
+       !group_batch_span(batch,routes,routeBytes,backup,bytes,path,pathBytes) ||
+       !group_batch_span(batch,routes,routeBytes,backup,bytes,binding,PropertyBinding.size)) { return 0-1; }
+    if(owner>=0 && (animation_overlap(owner,AnimationMixer.size,base,size) ||
+       animation_overlap(owner,AnimationMixer.size,path,pathBytes) ||
+       animation_overlap(owner,AnimationMixer.size,binding,PropertyBinding.size))) { return 0-1; }
+    let j=0;
+    while(j<count) {
+      if(i!=j) {
+        let other=routes+j*GroupMixerRoute.size;
+        let otherBase=ux_u32(other+GroupMixerRoute.workspace);
+        let otherSize=ux_u32(other+GroupMixerRoute.workspaceBytes);
+        let otherPath=ux_u32(other+GroupMixerRoute.path);
+        let otherPathBytes=ux_u32(other+GroupMixerRoute.pathBytes);
+        let otherBinding=ux_u32(other+GroupMixerRoute.binding);
+        if(ux_u32(route+GroupMixerRoute.pathID)==ux_u32(other+GroupMixerRoute.pathID) ||
+           animation_overlap(base,size,otherBase,otherSize) ||
+           animation_overlap(base,size,otherPath,otherPathBytes) ||
+           animation_overlap(base,size,otherBinding,PropertyBinding.size) ||
+           animation_overlap(binding,PropertyBinding.size,otherPath,otherPathBytes) ||
+           animation_overlap(binding,PropertyBinding.size,otherBinding,PropertyBinding.size)) { return 0-1; }
+      }
+      j=j+1;
+    }
+    used=used+size;
+    i=i+1;
+  }
+  return count;
+}
+
+native function group_batch_copy(routes:i64,count:i64,backup:i64,restore:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let route=routes+i*GroupMixerRoute.size;
+    let base=ux_u32(route+GroupMixerRoute.workspace);
+    let size=ux_u32(route+GroupMixerRoute.workspaceBytes);
+    if(restore) { let saved=uxe_copy_record(base,backup,size); }
+    else { let saved=uxe_copy_record(backup,base,size); }
+    backup=backup+size;
+    i=i+1;
+  }
+  return count;
+}
+
+// Mode 0 advances time. Mode 1 stops actions and restores the captured originals.
+native function group_mixer_batch_step(batch:i64,dt:f64,stop:i64,owner:i64) i64 {
+  if(stop!=0 && stop!=1) { return 0-1; }
+  let count=group_batch_validate(batch,owner);
+  if(count<0) { return count; }
+  let routes=ux_u32(batch+GroupMixerBatch.routes);
+  let backup=ux_u32(batch+GroupMixerBatch.backup);
+  let i=0;
+  while(i<count) {
+    if(group_mixer_prepare(routes+i*GroupMixerRoute.size,stop)<0) { return 0-1; }
+    i=i+1;
+  }
+  let saved=group_batch_copy(routes,count,backup,0);
+  i=0;
+  while(i<count) {
+    let route=routes+i*GroupMixerRoute.size;
+    let mixer=ux_u32(route+GroupMixerRoute.mixer);
+    let result=0-1;
+    if(stop) { result=mixer_stop_object(mixer); }
+    else { result=mixer_update_object(mixer,dt); }
+    if(result<0) {
+      let restored=group_batch_copy(routes,count,backup,1);
+      return result;
+    }
+    i=i+1;
+  }
+  // No group target has been touched. Check every destination once more
+  // against the staged frame before committing any property.
+  i=0;
+  while(i<count) {
+    if(group_mixer_prepare(routes+i*GroupMixerRoute.size,stop)<0) {
+      let restored=group_batch_copy(routes,count,backup,1);
+      return 0-1;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let route=routes+i*GroupMixerRoute.size;
+    let mixer=ux_u32(route+GroupMixerRoute.mixer);
+    let property=ux_u32(mixer+AnimationMixer.property);
+    let lanes=property_mixer_lanes(property);
+    let original=ux_u32(property+PropertyMixer.rows);
+    let base=ux_u32(route+GroupMixerRoute.workspace);
+    let out=original+lanes*24;
+    let old=backup+out-base;
+    let changed=0;
+    let lane=0;
+    while(lane<lanes) {
+      if(ux_f64(out+lane*8)!=ux_f64(old+lane*8)) { changed=1; }
+      lane=lane+1;
+    }
+    if(stop) {
+      let published=group_mixer_publish(route,original,lanes);
+      let synced=uxe_copy_record(out,original,lanes*8);
+    } else if(changed) {
+      let published=group_mixer_publish(route,out,lanes);
+    }
+    backup=backup+ux_u32(route+GroupMixerRoute.workspaceBytes);
+    i=i+1;
+  }
+  return count;
+}
+
+native function AnimationMixer_groupBatch(batch:i64,dt:f64,stop:i64) i64 {
+  return group_mixer_batch_step(batch,dt,stop,0-1);
+}

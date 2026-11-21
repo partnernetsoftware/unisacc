@@ -1,0 +1,144 @@
+#pragma unisa use g_math
+#pragma unisa use wasm_test_cache
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use r160_wait
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int module_lines(char *program,int used,int capacity,const char *path) {
+    unsigned char *body=0;
+    int64_t size=0;
+    if(sy_read_file(path,&body,&size,100000)) return -1;
+    for(long p=0;p<size;) {
+        long end=p;
+        while(end<size && body[end]!='\n') end++;
+        while(p<end && (body[p]==' ' || body[p]=='\t')) p++;
+        if(p<end && !tx_prefix((const char*)body+p,end-p,"//",2)) {
+            int quote=0;
+            for(long i=p;i<end;i++) {
+                int ch=body[i];
+                if(ch=='"' && (i==p || body[i-1]!='\\')) quote=!quote;
+                if(!quote && (ch==' ' || ch=='\t') && i>p && i+1<end) {
+                    int before=body[i-1],after=body[i+1];
+                    int afterLogical=i+2<end && (after=='&' || after=='|') && body[i+2]==after;
+                    int beforeLogical=i>=p+2 && (before=='&' || before=='|') && body[i-2]==before;
+                    if(before=='(' || before==',' || before=='[' || before=='{' ||
+                       after==')' || after==',' || after==';' || after=='{' || after=='}' ||
+                       afterLogical || beforeLogical || before==':' || after==':' ||
+                       before=='=' || after=='=' || before=='+' || after=='+' ||
+                       before=='>' || after=='>' || before=='<' || after=='<' ||
+                       after=='(' || after=='[' || before==';' || before=='}') continue;
+                }
+                if(used>=capacity-1) { mm_free(body); return -1; }
+                program[used++]=ch;
+            }
+            if(used>=capacity) { mm_free(body); return -1; }
+            program[used++]='\n';
+        }
+        p=end+1;
+    }
+    mm_free(body);
+    return used;
+}
+
+static int batch_compile(const char *source,const char *wasm,int limit,const char *phase) {
+    char *log=0;
+    size_t bytes=0;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,0};
+    const long start=sy_now_ms();
+    int rc=cx_runv_timeout(args,limit,&log,&bytes);
+    printf("GROUP_MIXER_BATCH %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && log) printf("%.*s\n",(int)bytes,log);
+    mm_free(log);
+    return rc;
+}
+
+static int batch_base(const char *source,const char *wasm,int prepare,int check) {
+    const char *modules[]={"f64-math","views","matrix4","object3d-layout","object3d","animation-view",
+        "discreteinterpolant","linearinterpolant","cubicinterpolant","keyframe-track","numberkeyframetrack",
+        "animationaction","propertybinding","propertymixer","record-copy","animationmixer",
+        "animationobjectgroup","anim-group-bindings","anim-group-property-write","anim-group-mixer","anim-group-mixer-batch","anim-group-mixer-api",0};
+    char paths[23][256];
+    const char *inputs[26]={"ujs/practice/uxe/test/anim-group-mixer-batch-layout.ujs"};
+    int count=0;
+    while(modules[count]) {
+        tx_snprintf(paths[count],sizeof paths[count],"ujs/practice/uxe/base/%s.ujs",modules[count]);
+        inputs[count+1]=paths[count];
+        count++;
+    }
+    inputs[count+1]="ujs/practice/uxe/test/anim-group-mixer-batch-probe.ujs";
+    inputs[count+2]="ujs/tests/anim-group-mixer-batch-anim.cx";
+    inputs[count+3]=0;
+    const char *cache=sy_env("UXE_GROUP_MIXER_WASM_CACHE");
+    if(!cache || !cache[0]) {
+        printf("GROUP_MIXER_BATCH cache=missing env=UXE_GROUP_MIXER_WASM_CACHE 基座缓存缺失：先运行准备步骤 --prepare\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(inputs,key)) return 1;
+    int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<0 || n>=(int)sizeof record) return 1;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("GROUP_MIXER_BATCH cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("GROUP_MIXER_BATCH cache=missing key=%s 基座缓存缺失：先运行准备步骤 --prepare\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) return 1;
+    char program[100001];
+    int used=0;
+    for(int i=0;i<count+2 && used>=0;i++) used=module_lines(program,used,sizeof program,inputs[i]);
+    if(used<0 || sy_write_file(source,program,used,0600)) {
+        printf("GROUP_MIXER_BATCH source packing failed used=%d\n",used);
+        return 1;
+    }
+    if(batch_compile(source,wasm,50,"base_prepare")) return 1;
+    if(check) return wasm_test_cache_verify(wasm,sha);
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    const int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    if(argc!=1 && !mutate && !(prepare && (argc==2 || check))) return 2;
+    const double gold[]={20,20,4,4,30,20,5,4,35,35,5.5,5.5,35,5.5,10,2,
+        0.875,-1,12,5,0,0,-1,12,5,0,0,0,0,20,-1,10};
+    enum { count=sizeof gold/sizeof gold[0], oracle_count=17 };
+    char dir[256],source[300],base[300],wasm[300],html[300],url[390];
+    if(sy_mkdtemp("/tmp","uxe-group-mixer-batch-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/base.ujs",dir);
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(html,sizeof html,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s?count=%d&mutate=%d",html,count,mutate);
+    int failed=batch_base(source,base,prepare,check);
+    if(prepare) {
+        if(sy_remove_all(dir)) failed=1;
+        printf("GROUP_MIXER_BATCH prepare check=%d failed=%d\n",check,failed!=0);
+        return failed;
+    }
+    if(!failed) failed=
+        batch_compile("ujs/practice/uxe/test/anim-group-mixer-batch-consumer.ujs",wasm,6,"probe") ||
+        sy_copy("ujs/practice/uxe/test/anim-group-mixer-batch-wasm.html",html,0600);
+    double reference[oracle_count],actual[count];
+    if(!failed) failed=r160_wait_ref("anim-group-mixer-batch",reference,oracle_count,dir);
+    if(!failed) failed=r160_wait_read(url,"#wasm-cases",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(actual[i],gold[i],1e-9) ||
+           (i<oracle_count && !g_math_near(reference[i],gold[i],1e-9))) {
+            printf("GROUP_MIXER_BATCH case=%d actual=%.17g expected=%.17g\n",i,actual[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_ANIM group Mixer batch cases=%d r160=%d failed=%d\n",count,oracle_count,failed);
+    return failed;
+}
