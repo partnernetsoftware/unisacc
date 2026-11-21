@@ -146,8 +146,10 @@ static int group(int g) {
         ck(has("WAIT_RC=0"), "wait-gets-rc");
         ck(has("EVENT_GOT"), "events-wait-job-done");
         ck(has("LOCK_HELD") && has("FLOW_RC=0") && has("LOCK_FREED"), "bg-lock-released"); }
+    }
+    if (g == 'e') {
     /* (2d) <bin>.stat O(1) 缓存与篡改失败/重编负控(racy-2s 封存、坏 .stat 回退重写、修改二进制强制失效重建) */
-    {   char sc[1600];
+    {   char sc[1600]; int ok1;
         F(sc, sizeof sc,
           "D='sh ./unisacc.com tools/devsvc.cx'; "
           "$D -- x --par 1 -- echo stat-warm; "
@@ -156,11 +158,16 @@ static int group(int g) {
           "grep -q '^dvbin1\t[0-9]' \"$B.stat\" && echo STAT_SEALED; "
           "printf 'dvbin1\\tbad\\n' > \"$B.stat\"; "
           "$D -- x --par 1 -- echo stat-bad-ok; "
-          "grep -q '^dvbin1\t[0-9]' \"$B.stat\" && echo STAT_REWRITTEN; "
+          "grep -q '^dvbin1\t[0-9]' \"$B.stat\" && echo STAT_REWRITTEN", pin);
+        { char *v[] = {"sh", "-c", sc, 0}; rc = run(v, fx, envv); }
+        ok1 = !ovf && rc == 0 && has("STAT_SEALED") && has("STAT_REWRITTEN");
+        F(sc, sizeof sc,
+          "D='sh ./unisacc.com tools/devsvc.cx'; "
+          "B=$(ls %s/*/devsvc 2>/dev/null | head -1); "
           "cp \"$B\" \"$B.tamper\" && chmod u+w \"$B.tamper\" && printf X >> \"$B.tamper\" && mv -f \"$B.tamper\" \"$B\"; "
           "$D -- x --par 1 -- echo bin-tamper-rebuilt 2>&1; $D -- stop >/dev/null 2>&1 || true", pin);
-        char *v[] = {"sh", "-c", sc, 0}; rc = run(v, fx, envv);
-        ck(!ovf && rc == 0 && has("STAT_SEALED") && has("STAT_REWRITTEN") && has("does not match its sha, rebuilding") && has("bin-tamper-rebuilt"), "stat-cache-hit-and-tamper-rebuilds"); }
+        { char *v[] = {"sh", "-c", sc, 0}; rc = run(v, fx, envv); }
+        ck(ok1 && !ovf && rc == 0 && has("does not match its sha, rebuilding") && has("bin-tamper-rebuilt"), "stat-cache-hit-and-tamper-rebuilds"); }
     }
     if (g == 'b') {
     /* (5) 工作区配置表加未知行与坏行(删掉必需键):普通调用用 HEAD 版表不受影响,--dev 才读到并拒绝 */
@@ -266,15 +273,33 @@ static int group(int g) {
         {   int okr = rc == 0 && has("wc2-ok"); NWC(k2);
             ck(okr && ms < 3000 && k2 == k1, "wc-fallback-second-root-hits-under-3s"); }
         printf("NOTE\twc-second-root-first-call-ms\t%ld\n", ms);
-        {   char p[400]; const char *add = "\n/* wc content change */\n"; int fd; F(p, sizeof p, "%s/tools/devsvc-core.cx", w2);
+#undef NWC
+        {   char *v[] = {"rm", "-rf", w1, w2, 0}; (void)run(v, 0, 0); } }
+    }
+    if (g == 'f') {
+    /* (9b) 改工作副本服务源内容后换键重编(从 d 拆出,避免单批 2 次完整冷编加第 2 根启动器冷编撞 55 秒) */
+    {   char w1[200], c[1600]; int k0 = -1, k1 = -1, k2 = -1; char *q;
+        char *ls[] = {"ls", "-1", pin, 0}; char *mk[] = {"mkdir", "-p", pin, 0};
+        if (run(mk, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-pin-dir\n"); return 1; }
+        F(w1, sizeof w1, "%s-w1", fx);
+        {   char *sv[] = {"sh", "-c", c, 0};
+            F(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s archive HEAD -- cxroot.tsv cx ext tools/cxlib tools/dv tools/net tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv"
+                           " | tar -x -C %s && cd %s && git init -q && ln -s %s unisacc.com", w1, w1, fx, w1, w1, prod);
+            if (ovf || run(sv, 0, 0) != 0) { printf("FAIL\tdevsvc-core.fixture-wc1\n"); return 1; } }
+#define NWC2(dst) do { dst = -1; if (run(ls, 0, 0) == 0) for (dst = 0, q = out; (q = strstr(q, "wc-")); q += 3) dst++; } while (0)
+        NWC2(k0);
+        {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc1-ok", 0}; rc = run(v, w1, envv); }
+        {   int ok1 = rc == 0 && has("wc1-ok"); NWC2(k1);
+            ck(ok1 && k1 == k0 + 1, "wc-fallback-d2-initial-key"); }
+        {   char p[400]; const char *add = "\n/* wc content change */\n"; int fd; F(p, sizeof p, "%s/tools/devsvc-core.cx", w1);
             fd = ovf ? -1 : open(p, O_WRONLY | O_APPEND);
             if (fd < 0 || write(fd, add, strlen(add)) != (long)strlen(add)) { printf("FAIL\tdevsvc-core.fixture-wc-change\n"); return 1; }
             close(fd); }
-        {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc3-ok", 0}; rc = run(v, w2, envv); }
-        {   int okr = rc == 0 && has("wc3-ok"); NWC(k0);
-            ck(okr && k0 == k2 + 1, "wc-fallback-source-change-rebuilds"); }
-#undef NWC
-        {   char *v[] = {"rm", "-rf", w1, w2, 0}; (void)run(v, 0, 0); } }
+        {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "wc3-ok", 0}; rc = run(v, w1, envv); }
+        {   int okr = rc == 0 && has("wc3-ok"); NWC2(k2);
+            ck(okr && k2 == k1 + 1, "wc-fallback-source-change-rebuilds"); }
+#undef NWC2
+        {   char *v[] = {"rm", "-rf", w1, 0}; (void)run(v, 0, 0); } }
     }
     if (g == 'b') {
     /* (3) 夹具工作副本的核心改成语法错,普通调用仍成功 */
@@ -298,7 +323,7 @@ static int group(int g) {
 }
 
 int main(int argc, char **argv) {
-    const char *sel = "abcd"; const char *p; int rc = 0;
+    const char *sel = "abcdef"; const char *p; int rc = 0;
     {   /* 剥掉调用方环境里的 DEVSVC_*(如 flow 或 shell 里的 DEVSVC_OWNER 与服务句柄),夹具子进程不继承 */
         extern char **environ; char **e; char nm[80]; int i;
         for (e = environ; e && *e; ) {
@@ -307,10 +332,14 @@ int main(int argc, char **argv) {
                 nm[i] = 0; unsetenv(nm); e = environ;
             } else e++;
         } }
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) sel = argv[2];
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d]\n"); return 2; }
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) {
+        if (!strcmp(argv[2], "d1")) sel = "d";
+        else if (!strcmp(argv[2], "d2")) sel = "f";
+        else sel = argv[2];
+    }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f]\n"); return 2; }
     for (p = sel; *p; p++) {
-        if (*p != 'a' && *p != 'b' && *p != 'c' && *p != 'd') { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d]\n"); return 2; }
+        if (*p != 'a' && *p != 'b' && *p != 'c' && *p != 'd' && *p != 'e' && *p != 'f') { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f]\n"); return 2; }
         { int r = group(*p); if (r > rc) rc = r; }
     }
     printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);
