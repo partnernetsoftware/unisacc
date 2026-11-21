@@ -1356,6 +1356,33 @@ static void step_publish(void) {
 
 /* ---- step 6: readback ------------------------------------------------------------------------- */
 static void warm_note(void);
+static int home_nm_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+static long home_prefix_at(const char *s, long n, long i) {
+    const char *h0 = "/ho" "me/", *u0 = "/Us" "ers/", *hm = sy_env("HOME");
+    const char *px[2] = {h0, u0};
+    long hl = hm ? tlen(hm) : 0, k, j;
+    if (i > 0 && home_nm_ch(s[i - 1])) return 0;
+    if (hl > 1 && i + hl < n && tx_same(s + i, hl, hm, hl) && s[i + hl] == '/') return hl + 1;
+    for (k = 0; k < 2; k++) {
+        long pl = tlen(px[k]);
+        if (i + pl < n && tx_same(s + i, pl, px[k], pl)) {
+            j = i + pl;
+            while (j < n && home_nm_ch(s[j])) j++;
+            if (j > i + pl && j < n && s[j] == '/') return j + 1 - i;
+        }
+    }
+    return 0;
+}
+static void scrub_home_put(np_buf *b, const char *s, long n) {
+    long i = 0;
+    while (i < n) {
+        long h = home_prefix_at(s, n, i);
+        if (h > 0) { np_puts(b, "~/"); i += h; }
+        else { np_put(b, s + i, 1); i++; }
+    }
+}
 static void step_readback(void) {
     char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
     char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
@@ -1424,7 +1451,7 @@ static void step_readback(void) {
     }
     { long n; char *t = slurp(p, &n); np_buf b = {0}; now_text();
       cx_fmt(o, sizeof o, "# c47-1-readback (public) %s via release-exec; rc=%d\n", timebuf, rc);
-      np_puts(&b, o); if (t) np_put(&b, t, (size_t)n);
+      np_puts(&b, o); if (t) scrub_home_put(&b, t, n);
       cx_fmt(o, sizeof o, "READBACK_SHA %s %s\n", cand.name[0], hex); np_puts(&b, o);
       if (cx_write(p, b.p, b.n)) die("readback evidence write");
       free(b.p); free(t); }
