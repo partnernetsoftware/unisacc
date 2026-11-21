@@ -28,7 +28,7 @@
  * untouched; prints COMMIT_OWN_DRY<TAB>rc=N.  --help: the usage, exit 0.  A --whole/--keyed of a table that
  * --registered owns is dropped with a NOTE (the set's keyed rows are taken).  When git reports that HEAD moved
  * under the commit and none of the commit's paths changed in the new HEAD, the private index is rebuilt there and
- * the whole pass (gates included) replayed, at most 3 times; a path that did change there is named on stderr
+ * the whole pass (gates included) replayed with jitter within the original 55-second replay window; a path that did change there is named on stderr
  * (COMMIT_OWN_CONFLICT<TAB>path=..<TAB>by=..) and the class stays head-moved.  The pre-commit hook is not run by git commit:
  * the private index is checked out under TMP/commit-own-PID.root and the hook runs with that root as cwd and work
  * tree, so every gate reads the tree being committed, never the shared index or the shared work tree; the commit
@@ -38,7 +38,7 @@
  * tools/own-diff.cx --batch process; own-diff, reg-manifest and on-change run through DEVSVC_SELF_BIN run --local
  * (content-keyed native images) when devsvc launched this tool, because the product's -run cache is keyed by path and
  * is cold in every new root; the pending hint asks on-change for --derive-only.  See co_tool and co_owndiff.
- * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
+ * Prints COMMIT_OWN<TAB>commit=SHORT<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U<TAB>full=SHA. Exit 0, 1 when git refuses or
  * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage.
  * --derive (off by default): the derived tables the commit's paths feed are recomputed on the commit's own tree and
  * go into the same commit.  The private index is checked out under TMP/commit-own-dN.root (four flock slots, the
@@ -59,6 +59,7 @@
  * sets plus the outputs -> inputs closure inside derive.cx), one --write --touched, and --check --only NAME for EVERY
  * selected table (not only the ones a --write wrote), so a cache-identical row is still checked. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
 #pragma unisa use sys.time
@@ -70,6 +71,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.sha
 #pragma unisa use cxlib.trailer
+#pragma unisa use dv.procid
 
 #define CO_MAX 64
 
@@ -95,10 +97,18 @@ static void co_phase(const char *name, int begin) {
 
 /* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
 static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
+static int64_t co_replay_end;
 static int run(char **argv, char *out, long cap) {
     char *o = 0; size_t on = 0; long n; int code;
-    code = cx_runv_timeout(argv, (int)g_bound_s, &o, &on);   /* bound in seconds; stdout captured, stderr inherited */
+    int bound = (int)g_bound_s;
     out[0] = 0;
+    if (co_replay_end) {
+        int64_t now = sy_mono_ns();
+        if (now < 0 || co_replay_end - now < 1000000000LL) return -1;
+        int seconds = (int)((co_replay_end - now) / 1000000000LL);
+        if (seconds < bound) bound = seconds;
+    }
+    code = cx_runv_timeout(argv, bound, &o, &on);
     if (code < 0) { if (o) mm_free(o); return -1; }
     n = o ? (long)on : 0;
     if (n > cap - 1) n = cap - 1;
@@ -229,7 +239,15 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     if (got != nb) co_die("own-diff failed", "the batch did not report every keyed path");
 }
 
-#define CO_REPLAY 3   /* replays when HEAD moved under the commit and none of its paths changed there */
+static int co_replay_wait(int64_t deadline, int attempt) {
+    int64_t now = sy_mono_ns();
+    if (now < 0 || deadline - now <= 1000000000LL) return 0;
+    unsigned spread = 29u + (unsigned)((uint64_t)now ^ (unsigned)sy_pid() ^ (unsigned)attempt * 2654435761u) % 173u;
+    if (deadline - now <= (1000LL + spread) * 1000000LL) return 0;
+    sy_sleep_ms(spread);
+    co_replay_end = deadline;
+    return 1;
+}
 /* $0 = the private gate root (TMP/commit-own-PID.root).  The tree of the private index (archive/ left out: 5400
    files no gate reads) is checked out there; top-level entries git does not track (unisacc.com, out/, archive)
    are symlinked from the shared checkout (.git too: hooks that keep state under a relative .git/ path still work).  The pre-commit hook git would run (core.hooksPath honoured) then runs
@@ -242,6 +260,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
 #define CO_SLOT_SYNC \
     "_co_sync(){ " \
     "_r=$1 _g=$2 _pw=$3 _m=${1%.root}.meta _si=${1%.root}.idx _nt=$(git write-tree) || return 1; " \
+    "for _lk in \"$_si.lock\" \"$_si.next.lock\"; do if [ -e \"$_lk\" ]; then printf 'COMMIT_OWN_STALE_LOCK\\tpath=%s\\treason=slot-flock-held\\n' \"$_lk\" >&2; rm -f \"$_lk\"; fi; done; " \
     "_oi=$GIT_INDEX_FILE _ok=0 _ot= _og= _op=; " \
     "if [ -d \"$_r\" ] && [ -f \"$_m\" ] && [ -f \"$_si\" ]; then " \
     "{ IFS= read -r _og; IFS= read -r _op; IFS= read -r _ot; } <\"$_m\"; " \
@@ -276,7 +295,7 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "else rm -f \"$_si.next\"; fi; " \
     "fi; fi; fi; fi; fi; " \
     "if [ \"$_ok\" != 1 ]; then " \
-    "rm -rf \"$_r\" \"$_m\" \"$_si\" \"$_si.next\" && mkdir -p \"$_r\" || return 1; " \
+    "rm -rf \"$_r\" \"$_m\" \"$_si\" \"$_si.next\" \"$_si.lock\" \"$_si.next.lock\" && mkdir -p \"$_r\" || return 1; " \
     "GIT_INDEX_FILE=\"$_si\" git read-tree \"$_nt\" && " \
     "GIT_INDEX_FILE=\"$_si\" git ls-files -z -- . ':(exclude)archive' | GIT_INDEX_FILE=\"$_si\" git checkout-index -f -z --stdin --prefix=\"$_r/\" && " \
     "GIT_DIR=\"$_g\" GIT_WORK_TREE=\"$_r\" GIT_INDEX_FILE=\"$_si\" git -C \"$_r\" update-index -q --refresh && " \
@@ -289,15 +308,17 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; " \
     "case \"$h\" in /*) ;; *) h=\"$PWD/$h\" ;; esac; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) GIT_INDEX_FILE=\"$PWD/$GIT_INDEX_FILE\"; export GIT_INDEX_FILE ;; esac; " \
-    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; _slot=0; " \
+    "g=$(git rev-parse --absolute-git-dir) || exit 1; r=; _slot=0; _ow=; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3 4 5 6 7; do c=\"${0%/*}/commit-own-s$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 9>>\"$c.lock\"; if flock -n 9; then r=\"$c.root\"; _slot=1; _ow=\"$c.owner\"; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 9>&-; r=\"$0\"; }; " \
-    "case \"$r\" in */commit-own-*.root) ;; *) echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
+    "if [ -n \"$_ow\" ]; then _bt=0; if [ -r /proc/stat ]; then while read -r _k _v _; do [ \"$_k\" = btime ] && { _bt=\"$_v\"; break; }; done </proc/stat; fi; printf 'pid=%s\\tbtime=%s\\tdeadline_s=%s\\n' \"$$\" \"$_bt\" \"$(($(date +%s)+180))\" >\"$_ow\"; fi; " \
+    "case \"$r\" in */commit-own-*.root) ;; *) [ -z \"$_ow\" ] || rm -f \"$_ow\"; echo 'commit-own: bad private gate root'; exit 1 ;; esac; " \
     CO_SLOT_SYNC \
-    "_co_sync \"$r\" \"$g\" \"$PWD\" || { rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
-    "( cd \"$r\" && UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; " \
-    "if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; exit $rc"
+    "_co_sync \"$r\" \"$g\" \"$PWD\" || { [ -z \"$_ow\" ] || rm -f \"$_ow\"; rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; echo 'commit-own: cannot check the private index out for the gates'; exit 1; }; " \
+    "( cd \"$r\" && UNISACC_PRECOMMIT_IN_TREE=1 UNISACC_DEVMETA_DIR=\"$r/.devsvc\" GIT_DIR=\"$g\" GIT_WORK_TREE=\"$r\" \"$h\" ) 9>&- 2>&1; rc=$?; " \
+    "[ -z \"$_ow\" ] || rm -f \"$_ow\"; " \
+    "if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; else rm -rf \"$r/.devsvc\"; fi; exit $rc"
 /* --derive: $0 = TMP, "$@" = the commit's paths, GIT_INDEX_FILE = the private index (absolute).  See the header.
    Last line CO_DERIVE<TAB>rc=N<TAB>stage=plan|write|add|check|ok|setup; DERIVED<TAB>PATH per derived file and
    derive.cx's own DERIVE lines before it.  The root is kept per flock slot (fd 8 not inherited); fallback PID roots are removed.  The changed
@@ -317,12 +338,13 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "sh ./unisacc.com tools/derive.cx -- --write $m --touched \"$o.t\" 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
     CO_DERIVE_ADD "if [ -n \"$m\" ]; then ws=$sel; else ws=; fi; " CO_DERIVE_CHECK
 #define CO_DERIVE_SETUP \
-    "fin(){ [ -z \"$r\" ] || { cd /; rm -rf \"$r.out\".*; if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\"; else rm -rf \"$r/.devsvc\"; fi; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; _slot=0; " \
+    "fin(){ [ -z \"$_ow\" ] || rm -f \"$_ow\"; [ -z \"$r\" ] || { cd /; rm -rf \"$r.out\".*; if [ \"$_slot\" != 1 ]; then rm -rf \"$r\" \"${r%.root}.meta\" \"${r%.root}.idx\" \"${r%.root}.idx.lock\"; else rm -rf \"$r/.devsvc\"; fi; }; printf 'CO_DERIVE\\trc=%s\\tstage=%s\\n' \"$1\" \"$2\"; exit \"$1\"; }; r=; _slot=0; _ow=; " \
     "case \"$GIT_INDEX_FILE\" in /*) ;; *) fin 2 setup ;; esac; " \
     "g=$(git rev-parse --absolute-git-dir) || fin 2 setup; " \
     "if command -v flock >/dev/null 2>&1; then for s in 0 1 2 3; do c=\"$0/commit-own-d$s\"; " \
-    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; _slot=1; break; fi; done; fi; " \
+    "( : >>\"$c.lock\" ) 2>/dev/null || break; exec 8>>\"$c.lock\"; if flock -n 8; then r=\"$c.root\"; _slot=1; _ow=\"$c.owner\"; break; fi; done; fi; " \
     "[ -n \"$r\" ] || { exec 8>&-; r=\"$0/commit-own-d$$.root\"; }; " \
+    "if [ -n \"$_ow\" ]; then _bt=0; if [ -r /proc/stat ]; then while read -r _k _v _; do [ \"$_k\" = btime ] && { _bt=\"$_v\"; break; }; done </proc/stat; fi; printf 'pid=%s\\tbtime=%s\\tdeadline_s=%s\\n' \"$$\" \"$_bt\" \"$(($(date +%s)+180))\" >\"$_ow\"; fi; " \
     CO_SLOT_SYNC \
     "_co_sync \"$r\" \"$g\" \"$PWD\" || fin 2 setup; " \
     "[ -f \"$r/tools/derive.cx\" ] || fin 2 setup; " \
@@ -333,6 +355,10 @@ static void co_owndiff(const char **path, const char **keys, int np) {
 #define CO_DERIVE_CHANGED \
     "for i in 1 2 3 4 5 6; do po=$(sh ./unisacc.com tools/derive.cx -- --write --plan $m --changed $cs 8>&- | while IFS='\t' read -r a b c d e; do [ \"$a\" = PLAN ] && echo \"$e\"; done) || fin 2 plan; " \
     "nc=$(printf '%s\\n' $cs $po | sort -u | tr '\\n' ' '); [ \"$nc\" = \"$cs\" ] && break; cs=$nc; done; " \
+    "for p in $UNISACC_REPLAY_OUTPUTS; do ok=0; for oplan in $po; do " \
+    "[ \"$p\" != \"$oplan\" ] || { ok=1; break; }; " \
+    "case \"$oplan\" in */) case \"$p\" in \"$oplan\"*) ok=1; break ;; esac ;; esac; done; " \
+    "[ $ok = 1 ] || { printf 'REPLAY_OUTPUT_UNPLANNED\\t%s\\n' \"$p\"; fin 2 plan; }; done; " \
     "bt=$(git write-tree) || fin 2 setup; " \
     "sh ./unisacc.com tools/derive.cx -- --write $m --changed $cs 8>&- >\"$o.w1\"; w=$?; cat \"$o.w1\"; [ $w = 0 ] || fin $w write; " \
     CO_DERIVE_ADD \
@@ -349,6 +375,126 @@ static void co_owndiff(const char **path, const char **keys, int np) {
     "for x in $ws; do grep '^DERIVE\t' \"$o.c.$x\" | grep -v '\tSKIPPED\t'; done; [ $w = 0 ] || fin $w check; " \
     "for p in $n; do printf 'DERIVED\\t%s\\n' \"$p\"; done; fin 0 ok"
 static int run(char **argv, char *out, long cap);
+
+/* Reclaim stale commit-own slot index locks (TMP/commit-own-s0..7.idx.lock, d0..3.idx.lock, *.idx.next.lock)
+ * whose holder is gone, from an older host boot (btime mismatch), past deadline, or unheld on slot .lock.
+ * Never removes a lock whose live holder matches current btime and is within deadline. */
+static int co_slot_flock_free(const char *slot_lock) {
+    char *fv[] = { "sh", "-c", "command -v flock >/dev/null 2>&1 || exit 0; exec 9>>\"$1\" && flock -n 9", "co-flock", (char *)slot_lock, 0 };
+    char out[64];
+    return run(fv, out, sizeof out) == 0;
+}
+
+static void co_reclaim_one_slot(const char *base) {
+    char lk1[512], lk2[512], owp[512], slk[512];
+    if (tx_snprintf(lk1, sizeof lk1, "%s.idx.lock", base) >= (int)sizeof lk1 ||
+        tx_snprintf(lk2, sizeof lk2, "%s.idx.next.lock", base) >= (int)sizeof lk2 ||
+        tx_snprintf(owp, sizeof owp, "%s.owner", base) >= (int)sizeof owp ||
+        tx_snprintf(slk, sizeof slk, "%s.lock", base) >= (int)sizeof slk) return;
+    int has1 = (sy_exists(lk1) == 1), has2 = (sy_exists(lk2) == 1);
+    if (!has1 && !has2) return;
+
+    const char *reason = 0;
+    unsigned char *ob = 0;
+    int64_t on = 0;
+    if (sy_read_file(owp, &ob, &on, 512) == 0 && ob && on > 0) {
+        char t[512];
+        size_t cp = (size_t)on < sizeof t - 1 ? (size_t)on : sizeof t - 1;
+        mm_copy(t, sizeof t, ob, cp); t[cp] = 0;
+        mm_free(ob);
+        int pid = 0;
+        unsigned long long bt = 0ULL;
+        long dl = 0;
+        long p_pos = tx_find(t, (long)cp, "pid=", 4);
+        if (p_pos >= 0) pid = atoi(t + p_pos + 4);
+        long b_pos = tx_find(t, (long)cp, "btime=", 6);
+        if (b_pos >= 0) {
+            const char *s = t + b_pos + 6;
+            while (*s >= '0' && *s <= '9') { bt = bt * 10ULL + (unsigned long long)(*s - '0'); s++; }
+        }
+        long d_pos = tx_find(t, (long)cp, "deadline_s=", 11);
+        if (d_pos >= 0) dl = atol(t + d_pos + 11);
+
+        unsigned long long cur_bt = pi_host_btime();
+        long now_s = sy_wall_s();
+        if (bt > 0ULL && cur_bt > 0ULL && bt != cur_bt) reason = "btime-mismatch";
+        else if (dl > 0 && now_s > dl) reason = "expired";
+        else if (pid > 0 && sy_signal(pid, 0) == -ESRCH) reason = "holder-dead";
+        else return; /* active holder */
+    } else {
+        if (ob) mm_free(ob);
+        if (co_slot_flock_free(slk)) reason = "no-holder";
+        else return; /* active flock holder */
+    }
+
+    if (has1 && sy_unlink(lk1) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=%s\n", lk1, reason);
+    if (has2 && sy_unlink(lk2) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=%s\n", lk2, reason);
+    (void)sy_unlink(owp);
+}
+
+/* U6: return 1 if any live git process has cwd inside worktree WT (live-lock negative control). */
+static int co_active_git_in_cwd(const char *wt) {
+    sy_dir_t d;
+    long wlen = tx_len(wt, 4096);
+    int me = (int)sy_pid(), found = 0;
+    if (!wlen || sy_dir_open(&d, "/proc") != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        int pid = 0;
+        long i;
+        if (d.name_n <= 0 || d.name_n > 12) continue;
+        for (i = 0; i < (long)d.name_n; i++) {
+            if (d.name[i] < '0' || d.name[i] > '9') { pid = -1; break; }
+            pid = pid * 10 + (d.name[i] - '0');
+        }
+        if (pid <= 0 || pid == me) continue;
+        char cp[64], lp[64], cwd[4096], cb[64];
+        if (tx_snprintf(cp, sizeof cp, "/proc/%d/comm", pid) >= (int)sizeof cp) continue;
+        int cfd = sy_open(cp, O_RDONLY, 0);
+        if (cfd < 0) continue;
+        long cn = sy_read(cfd, cb, sizeof cb - 1);
+        sy_close(cfd);
+        if (cn <= 0) continue;
+        while (cn > 0 && (cb[cn - 1] == '\n' || cb[cn - 1] == '\r')) cn--;
+        if (!(cn == 3 && cb[0] == 'g' && cb[1] == 'i' && cb[2] == 't')) continue;
+        if (tx_snprintf(lp, sizeof lp, "/proc/%d/cwd", pid) >= (int)sizeof lp) continue;
+        long rn = sy_readlink(lp, cwd, (long)sizeof cwd - 1);
+        if (rn <= 0) continue;
+        cwd[rn] = 0;
+        if (rn >= wlen && !memcmp(cwd, wt, (size_t)wlen) && (rn == wlen || cwd[wlen] == '/')) { found = 1; break; }
+    }
+    sy_dir_close(&d);
+    return found;
+}
+
+/* U6: reclaim stale .git/index.lock when mtime > 60 s and no live git process has cwd in this worktree. */
+static void co_reclaim_git_index_lock(void) {
+    char gdir[4096], wt[4096], lk[4200];
+    char *gv[] = {"git", "rev-parse", "--absolute-git-dir", 0};
+    char *wv[] = {"git", "rev-parse", "--show-toplevel", 0};
+    sy_stat_t st;
+    if (run(gv, gdir, sizeof gdir) != 0 || !gdir[0]) return;
+    if (run(wv, wt, sizeof wt) != 0 || !wt[0]) return;
+    if (tx_snprintf(lk, sizeof lk, "%s/index.lock", gdir) >= (int)sizeof lk) return;
+    if (sy_stat(lk, &st) != 0) return;
+    long now_s = sy_wall_s();
+    if (now_s - (long)st.mtime < 60L) return;
+    if (co_active_git_in_cwd(wt)) return;
+    if (sy_unlink(lk) == 0) fprintf(stderr, "COMMIT_OWN_STALE_LOCK\tpath=%s\treason=index-lock-expired\n", lk);
+}
+
+static void co_reclaim_stale_locks(const char *tdir) {
+    char base[480];
+    if (!tdir || !tdir[0]) return;
+    for (int s = 0; s < 8; s++) {
+        if (tx_snprintf(base, sizeof base, "%s/commit-own-s%d", tdir, s) < (int)sizeof base)
+            co_reclaim_one_slot(base);
+    }
+    for (int d = 0; d < 4; d++) {
+        if (tx_snprintf(base, sizeof base, "%s/commit-own-d%d", tdir, d) < (int)sizeof base)
+            co_reclaim_one_slot(base);
+    }
+    co_reclaim_git_index_lock();
+}
 /* --derive, after the commit: the shared work-tree copy of PATH gets only the recomputed lines (see the header for
    the count rule).  OLDB = the HEAD blob ("" = new file), NEWB = the committed blob.  0 written or nothing to do. */
 typedef struct { const char *p; long n; } CoLn;
@@ -441,6 +587,11 @@ static void entry(const char *tree, const char *path, char *blob, char *mode) {
     if (tx_len(out, sizeof out) < 50) return;
     tx_copy(mode, 8, out, 6);
     if (tree) tx_copy(blob, 41, out + 12, 40); else tx_copy(blob, 41, out + 7, 40);
+}
+static int co_entry_same(const char *before, const char *after, const char *path) {
+    char out[160];
+    char *v[] = {"git", "--literal-pathspecs", "diff", "--quiet", "--no-renames", (char *)before, (char *)after, "--", (char *)path, 0};
+    return run(v, out, sizeof out) == 0;
 }
 
 static int co_build_idx(const char *idx, const char *basec, const char **path, int np, const char *link, const char *del, char blob[][64], char *out, long ocap, const char **err_why, const char **err_path) {
@@ -911,20 +1062,65 @@ static void co_pending_collect(void) {
     }
 }
 
-/* A merge in progress (MERGE_HEAD present): the private-index path below would build a one-parent commit and drop
-   the merged side.  Without --merge-continue refuse by name (COMMIT_MERGE_IN_PROGRESS, exit 2, nothing committed).
-   With --merge-continue: require MERGE_HEAD and no unmerged entry (git ls-files -u empty), take no paths, then hand
-   the staged merge result to a plain `git commit -q -m MSG` (tree = the shared index, parents = HEAD and MERGE_HEAD,
-   the pre-commit hook runs, git clears MERGE_HEAD/MERGE_MSG/MERGE_MODE) and verify both parents afterwards.
-   -1 when neither applies: the default path continues byte for byte unchanged. */
-static int co_mergecont(int mcont, const char *msg, int np, int dry) {
+static int co_path_in_lines(const char *buf, const char *p) {
+    if (!buf || !buf[0] || !p || !p[0]) return 0;
+    size_t pl = strlen(p);
+    const char *s = buf;
+    while (*s) {
+        const char *nl = strchr(s, '\n');
+        size_t len = nl ? (size_t)(nl - s) : strlen(s);
+        while (len > 0 && s[len - 1] == '\r') len--;
+        /* For `git ls-files -u`, path follows the TAB character; for `git diff --name-only`, full line is path. */
+        const char *tb = (const char *)memchr(s, '\t', len);
+        const char *entry = tb ? tb + 1 : s;
+        size_t elen = tb ? len - (size_t)(tb - s) - 1 : len;
+        if (elen == pl && memcmp(entry, p, pl) == 0) return 1;
+        s = nl ? nl + 1 : s + strlen(s);
+    }
+    return 0;
+}
+
+/* A merge in progress (MERGE_HEAD present):
+ * - Without --merge-continue: compute the merge touch set (git diff --name-only HEAD MERGE_HEAD plus
+ *   unmerged entries from git ls-files -u). When all requested paths are disjoint from the touch set,
+ *   allow the path commit to proceed via private index + CAS update-ref + cacheinfo sync (preserving MERGE_HEAD).
+ *   When any requested path intersects the touch set (or np == 0 / git fails), refuse by name
+ *   (COMMIT_MERGE_IN_PROGRESS, exit 2, nothing committed).
+ * - With --merge-continue: require MERGE_HEAD and no unmerged entry, take no paths, run plain git commit
+ *   (two parents: HEAD and MERGE_HEAD) and verify both parents afterwards. */
+static int co_mergecont(int mcont, const char *msg, int np, const char **paths, int dry) {
     char mp[4400], mh[64], out[8192], par[200];
     char *pv[] = {"git", "rev-parse", "--git-path", "MERGE_HEAD", 0}, *hv[] = {"git", "rev-parse", "-q", "--verify", "MERGE_HEAD", 0};
     if (run(pv, mp, sizeof mp) != 0 || !mp[0]) { if (!mcont) return -1; co_die("setup", "git rev-parse --git-path MERGE_HEAD failed"); }
     if (sy_exists(mp) != 1) {
         if (!mcont) return -1;
         fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_NONE: --merge-continue needs a merge in progress (no MERGE_HEAD; nothing committed)\n"); return 2; }
-    if (!mcont) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present; a path commit would drop the second parent. Resolve, stage, then: devsvc git commit -m MSG --merge-continue (nothing committed)\n"); return 2; }
+    if (!mcont) {
+        if (np <= 0 || !paths) {
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present and no paths given (nothing committed)\n"); return 2;
+        }
+        char *dv[] = {"git", "diff", "--name-only", "HEAD", "MERGE_HEAD", 0};
+        char *uv[] = {"git", "ls-files", "-u", 0};
+        char *dbuf = (char *)mm_alloc(262144), *ubuf = (char *)mm_alloc(262144);
+        int rc1 = dbuf ? run(dv, dbuf, 262144) : -1;
+        int rc2 = ubuf ? run(uv, ubuf, 262144) : -1;
+        if (rc1 != 0 || rc2 != 0) {
+            if (dbuf) mm_free(dbuf);
+            if (ubuf) mm_free(ubuf);
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: MERGE_HEAD is present and touch set unreadable (nothing committed)\n");
+            return 2;
+        }
+        for (int i = 0; i < np; i++) {
+            if (co_path_in_lines(dbuf, paths[i]) || co_path_in_lines(ubuf, paths[i])) {
+                fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_IN_PROGRESS: path=%s intersects MERGE_HEAD touch set. Resolve, stage, then: devsvc git commit -m MSG --merge-continue (nothing committed)\n", paths[i]);
+                mm_free(dbuf); mm_free(ubuf);
+                return 2;
+            }
+        }
+        mm_free(dbuf); mm_free(ubuf);
+        sy_printf("COMMIT_MERGE_DISJOINT\tpaths=%d\tallowed=1\n", np);
+        return -1;
+    }
     if (np) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_PATHS: --merge-continue commits the whole staged merge result and takes no --whole/--keyed/--registered (nothing committed)\n"); return 2; }
     {   char *uv[] = {"git", "ls-files", "-u", 0};
         if (run(uv, out, sizeof out) != 0) co_die("setup", "git ls-files -u failed");
@@ -943,7 +1139,65 @@ static int co_mergecont(int mcont, const char *msg, int np, int dry) {
     sy_printf("COMMIT_MERGE\tcommit=%.40s\tparents=2\tsecond=%s\n", par, mh);
     return 0;
 }
+/* Used by devsvc push against a detached private Git directory. Read the
+   proposed tree from its index and leave all refs and work trees alone. */
+static int co_replay_index(int argc, char **argv) {
+    char head[64], ref[64], gate_root[420], tree[64], out[32768];
+    const char *idx = getenv("GIT_INDEX_FILE");
+    char *hv[] = {"git", "rev-parse", "HEAD", 0};
+    char *sym[] = {"git", "symbolic-ref", "-q", "HEAD", 0};
+    if (argc < 6 || argc > CO_MAX + 5 || !idx || idx[0] != '/' ||
+        run(sym, ref, sizeof ref) != 1 || run(hv, head, sizeof head) || !tx_eqz(head, argv[2])) {
+        fprintf(stderr, "COMMIT_REPLAY_REFUSE\treason=private-base-required\n");
+        return 2;
+    }
+    char *dv[CO_MAX + 6] = {"sh", "-c", CO_DERIVE_SH, (char *)sy_tmpdir()};
+    char outputs[16384] = "";
+    int n = 4, sep = 4, used = 0;
+    for (; sep < argc && !tx_eqz(argv[sep],"--outputs"); sep++) dv[n++] = argv[sep];
+    if (sep < 5 || sep == argc) return 2;
+    for (int k=sep+1;k<argc;k++) {
+        int len=snprintf(outputs+used,sizeof outputs-used,"%s\n",argv[k]);
+        if(len<0||(size_t)len>=sizeof outputs-(size_t)used)return 2;
+        used+=len;
+    }
+    if(sy_setenv("UNISACC_REPLAY_OUTPUTS",outputs,1))return 2;
+    dv[n] = 0;
+    g_bound_s = 55;
+    int rc = run(dv, out, sizeof out);
+    sy_unsetenv("UNISACC_REPLAY_OUTPUTS");
+    if (out[0]) puts(out);
+    if (rc) {
+        fprintf(stderr, "COMMIT_REPLAY_REFUSE\treason=derive-failed\trc=%d\n", rc);
+        return 1;
+    }
+    if (cx_fmt(gate_root, sizeof gate_root, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid())) return 2;
+    char *gv[] = {"sh", "-c", CO_GATE_SH, gate_root, 0};
+    rc = run(gv, out, sizeof out);
+    if (out[0]) puts(out);
+    if (rc) {
+        fprintf(stderr, "COMMIT_REPLAY_REFUSE\treason=precommit\trc=%d\n", rc);
+        return 1;
+    }
+    char *wv[] = {"git", "write-tree", 0};
+    if (run(wv, tree, sizeof tree) || strlen(tree) != 40) return 2;
+    char base_tree[64];
+    char *bv[] = {"git", "rev-parse", "HEAD^{tree}", 0};
+    if (run(bv, base_tree, sizeof base_tree) || strlen(base_tree) != 40) return 2;
+    if (tx_eqz(tree, base_tree)) {
+        printf("COMMIT_REPLAY_IDENTICAL\tbase=%s\n", head);
+        printf("COMMIT_REPLAY\tfull=%s\tbase=%s\n", head, head);
+        return 0;
+    }
+    char *cv[] = {"git", "commit-tree", tree, "-p", head, "-m", argv[3], 0};
+    if (run(cv, out, sizeof out) || strlen(out) != 40) return 2;
+    printf("COMMIT_REPLAY\tfull=%s\tbase=%s\n", out, head);
+    return 0;
+}
 int main(int argc, char **argv) {
+    if (argc > 1 && tx_eqz(argv[1], "--replay-index")) return co_replay_index(argc, argv);
+    int64_t replay_deadline = sy_mono_ns();
+    if (replay_deadline >= 0) replay_deadline += 55000000000LL;
     const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0, mcont = 0;
     int dry = 0, att = 0, derive = 0, derive_sel = 0, np0 = 0, nder = 0; long t_der = 0;
     const char *prepare = 0, *receipt = 0, *receipt_id = 0;
@@ -1008,7 +1262,7 @@ int main(int argc, char **argv) {
         }
     }
     if (mcont && !msg) co_die("usage", "--merge-continue needs -m MSG");
-    if (msg) { int mr = co_mergecont(mcont, msg, np, dry); if (mr >= 0) return mr; }
+    if (msg) { int mr = co_mergecont(mcont, msg, np, path, dry); if (mr >= 0) return mr; }
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
     for (k = 0; k < np; k++) if (keys[k] && co_reg_of[k] < 0) co_ukey_check(path[k], keys[k]);
@@ -1073,14 +1327,22 @@ int main(int argc, char **argv) {
         if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
     }
     t_pend = sy_now_ms() - t0 - t_sel;
+    co_reclaim_stale_locks(sy_tmpdir());
     if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
     {   char old[CO_MAX][48], newc[64], basec[64], orig_basec[64], newfull[64] = "", groot[420]; int rc, cas_skipped = 0;
+        char retry_base[64] = "";
         static char dout[32768];
         if (tx_snprintf(groot, sizeof groot, "%s/commit-own-%d.root", sy_tmpdir(), sy_pid()) >= (int)sizeof groot) co_die("path", 0);
         np0 = np;
-again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
+again:  /* Retry against the same HEAD whose paths were compared. */
         np = np0; nder = 0; dout[0] = 0; cas_skipped = 0;
-        {   char *v[] = {"git", "rev-parse", "HEAD", 0}; if (run(v, basec, sizeof basec) != 0 || tx_len(basec, sizeof basec) != 40) co_die("git rev-parse HEAD failed", 0); }
+        if (retry_base[0]) {
+            mm_copy(basec, sizeof basec, retry_base, 41);
+            retry_base[0] = 0;
+        } else {
+            char *v[] = {"git", "rev-parse", "HEAD", 0};
+            if (run(v, basec, sizeof basec) != 0 || tx_len(basec, sizeof basec) != 40) co_die("git rev-parse HEAD failed", 0);
+        }
         tx_copy(orig_basec, sizeof orig_basec, basec, 40); orig_basec[40] = 0;
         for (k = 0; k < np; k++) { char m[8]; entry(basec, path[k], old[k], m); }
         {   const char *ew = 0, *ep = 0;
@@ -1144,8 +1406,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                         sy_unsetenv("GIT_INDEX_FILE");sy_unlink(idx);co_pending_collect();return 1;
                     }
                     for (k = 0; k < np0; k++) {
-                        char rbb[48], rbm[8]; entry(rb, path[k], rbb, rbm);
-                        if (!tx_eqz(rbb, old[k])) { co_conflict(path[k], rb); confl = 1; }
+                        if (!co_entry_same(rb, basec, path[k])) { co_conflict(path[k], rb); confl = 1; }
                     }
                     if (confl) {
                         mm_free(rec);
@@ -1277,18 +1538,17 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
                 gate_rc = rc;
                 co_ref_ms = 0; co_ref_rc = -1;
                 if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
-                while (rc != 0 && att < CO_REPLAY && tx_find(out, tx_len(out, sizeof out), "cannot lock ref 'HEAD'", 22) >= 0) {
+                while (rc != 0 && tx_find(out, tx_len(out, sizeof out), "cannot lock ref 'HEAD'", 22) >= 0 &&
+                       co_replay_wait(replay_deadline, att)) {
                     char new_head[64]; int own_same = 1, all_same = 1;
                     char *hv[] = {"git", "rev-parse", "HEAD", 0};
                     if (run(hv, new_head, sizeof new_head) != 0 || tx_len(new_head, sizeof new_head) != 40) break;
                     for (k = 0; k < np0; k++) {
-                        char nb[48], nm[8]; entry(new_head, path[k], nb, nm);
-                        if (!tx_eqz(nb, old[k])) { own_same = 0; all_same = 0; break; }
+                        if (!co_entry_same(basec, new_head, path[k])) { own_same = 0; all_same = 0; break; }
                     }
                     if (!own_same) break;
                     for (k = np0; k < np; k++) {
-                        char nb[48], nm[8]; entry(new_head, path[k], nb, nm);
-                        if (!tx_eqz(nb, old[k])) { all_same = 0; break; }
+                        if (!co_entry_same(basec, new_head, path[k])) { all_same = 0; break; }
                     }
                     if (all_same && co_cas_rebase_on() && co_gates_disjoint(orig_basec, new_head, path, np, del, nreg, old) &&
                         (!derive || co_derive_disjoint(orig_basec, new_head, dout, path, np0, dpath, nder))) {
@@ -1321,6 +1581,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             g_bound_s = 30; }
         sy_unsetenv("GIT_INDEX_FILE");
         sy_unlink(idx);
+        co_replay_end = 0;
         if (gatef[0]) { sy_unsetenv("UNISACC_GATE_REUSE"); sy_unlink(gatef); gatef[0] = 0; }
         {   long on = tx_len(out, sizeof out);
             if (dry) fcls = tx_find(out, on, "precommit", 9) >= 0 ? "precommit" : "git-or-hook";
@@ -1337,10 +1598,21 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
             sy_printf("COMMIT_OWN_DRY\trc=%d\tpaths=%d\tforeign_kept=%d\tnothing committed, the shared index is untouched\n", rc, np, kept);
             return rc ? 1 : 0;
         }
-        if (rc != 0 && att < CO_REPLAY && tx_eqz(fcls, "head-moved")) {   /* another agent's commit landed between read-tree and the ref update */
+        if (rc != 0 && tx_eqz(fcls, "head-moved")) {
+            char *rev[] = {"git", "rev-parse", "HEAD", 0};
+            if(replay_deadline>0)co_replay_end=replay_deadline;
+            int captured = !run(rev, retry_base, sizeof retry_base) && tx_len(retry_base, sizeof retry_base) == 40;
             int same = 1;
-            for (k = 0; k < np0; k++) { char nb[48], nm[8]; entry("HEAD", path[k], nb, nm); if (!tx_eqz(nb, old[k])) { same = 0; co_conflict(path[k], basec); } }   /* derived files are recomputed on the new HEAD */
-            if (same) { att++; sy_printf("NOTE\tHEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once\n"); goto again; }
+            for (k = 0; captured && k < np0; k++) {
+                if (!co_entry_same(basec, retry_base, path[k])) { same = 0; co_conflict(path[k], basec); }
+            }
+            if (captured && same && co_replay_wait(replay_deadline, att)) {
+                att++;
+                sy_printf("COMMIT_OWN_REPLAY\tattempt=%d\tstate=HEAD moved\n", att);
+                goto again;
+            }
+            co_replay_end=0;
+            if (!captured || same) fcls = "replay-deadline";
         }
         if (rc != 0) {   /* last line: the first non-empty line of git's merged output is the reason */
             char *s = out, *e; while (*s == '\n' || *s == ' ') s++;
@@ -1358,6 +1630,7 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         for (k = 0; k < np0; k++) {   /* a commit path that derive also rewrote (blob differs from the work tree) */
             int j; for (j = 0; j < nder; j++) if (tx_eqz(path[k], dpath[j])) { char ob[48], om[8]; entry(basec, path[k], ob, om); co_merge(path[k], ob, blob[k]); }
         }
+        co_reclaim_git_index_lock();
         for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
             char ib[48], im[8], info[200];
             entry(0, path[k], ib, im);
@@ -1420,8 +1693,8 @@ again:  /* second pass only when HEAD moved under the commit and none of this co
         }
         co_pending_collect();
         printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
-        if (cas_skipped) printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tgates=skipped-by-disjoint-readset\tbase=%s\n", newc, np, kept, lost, orig_basec);
-        else printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
+        if (cas_skipped) printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tgates=skipped-by-disjoint-readset\tbase=%s\tfull=%s\n", newc, np, kept, lost, orig_basec, newfull);
+        else printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\tfull=%s\n", newc, np, kept, lost, newfull);
         if (lost) {   /* committed, but the shared index does not show the committed state for these paths: loud, with the remedy */
             fprintf(stderr, "COMMIT_OWN_FAIL\tclass=index-unsynced\n");
             fprintf(stderr, "commit-own: commit %s LANDED, but %d shared index entr%s could not be synced (COMMIT_OWN_INDEX_UNSYNCED lines above name each path); "

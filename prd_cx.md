@@ -259,7 +259,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/`（25 个 .cx 203,081 B） | 14 / 100,918；78 / 397,580 | 是 |
 | cx-L3 工具、测试、应用 | `tools`（733 个 .cx）、`tests`、`apps` | 未逐项计 | 否（tools 仅 10 个支撑文件进 SID） |
 | AMB（未定层） | `cx/cx0`、`cx/workspace` | 7 / 101,017；6 / 49,394 | 是 |
-| EXT 包层 | `ext/sysx`、`memx`、`textx`、`crypto`、`tsvx` | 13 / 56,844；5 / 18,680；5 / 24,403；15 / 157,845；3 / 5,851 | 否；memx、textx 经 `cx/mem`、`cx/text` 里的符号链接间接参与 |
+| EXT 包层 | `ext/`（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录） | 以真源目录实测为准 | 否（目录不在根集）；但 `ext/sysx`、`ext/memx`、`ext/textx` 经目录/文件符号链接参与现行源 SID（2026-11-21 实测，见下） |
 
 规则与入口：
 - `use` 的包根由仓根 `cxroot.tsv`（CXROOT1，13 条 R 行）按最长前缀映射（条款 CX-U-7）。
@@ -267,7 +267,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 - core 模块冻结表 `tests/cx-module-freeze.tsv` 26 行，只许减；导出面棘轮 `tests/coreapi.cx`。
 - 三个只降不升的棘轮：`tests/cxinclude.cx`（禁新 `#include`）、`tests/cxlibc.cx`（上层禁裸 libc）、`tests/cxraw.cx`。
 - `src/` 下有 7 个目录符号链接（compiler、core、driver、runtime、sys、sysx、text；`git ls-files -s src` 的 120000 项）。
-- 源 SID 与 ext 的已核事实（2026-11-08 更正，自 prd.md §5 迁入，本次未重核）：`ext/` 目录本身不在 `seed/ident.c` 的目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 10 文件，共 1586 文件），但 `cx/mem`、`cx/text` 里有 8 个符号链接指向 `ext/memx`、`ext/textx`（反向亦有互指），`ident` 跟随文件链接，故这两个 ext 目录的内容经链接参与源 SID；`ext/sysx`、`ext/crypto` 不参与。`ext/` 不随 APE 发布（产品二进制无其符号）。W3 判定 `arena`、`slice`、`grow`、`num`、`build`、`fmt`、`deflate` 七模块产品链路引用为 0、归 ext、原路径留别名，当前状态即该终态；`memx/textx` 经别名使用（`use mem.*`/`use text.*`，`use text.fmt` 169 处），不是孤儿。`sysx`/`crypto` 由 75/14 个检查守住。风险：互指符号链接让同一文件有两个身份、Windows 无符号链接不安全；冻结路径须含 `ext/memx ext/textx`（已补）。待办（原定 0.0.49，未做）：把真身 / 别名收敛为单向并去掉互指。内部包接口摘要见 [build/std-surface.tsv](build/std-surface.tsv)。原文说「`cxroot.tsv` 只映射 sysx、crypto」已过期：现表 13 条 R 行，ext 侧映射 sysx、crypto、tsvx。
+- 源 SID 与 ext 的已核事实（2026-11-21 实测更正，取代原 2026-11-08 记述；证据命令：`sh ./unisacc.com seed/ident.c -- . list-current`、私有副本改一行对拍及 `tools/lane-inputs-gen.cx:208-275`）：`ext/` 目录本身不在 `seed/ident.c` 根目录集内（`exec src kernel include weights seed cx` + `iterate/kernel/typekw.tsv` + `tools/` 13 个支撑文件），但现行默认 `source-packages-v2` 的 `collect()`（`seed/ident.c:201-239`）先 `realpath()` 再 `stat()`，会跟随目录符号链接（`src/sysx`、`cx/driver/sysx`、`cx/runtime/sysx`、`cx/workspace/sysx -> ext/sysx`）与文件符号链接（`cx/sys/` 9 个 -> `ext/sysx/`、`cx/mem/arena.cx` 1 个 -> `ext/memx/`、`cx/text/` 4 个 -> `ext/textx/`），因此 `ext/sysx/*.cx`（15 个）、`ext/memx/arena.cx`（1 个）与 `ext/textx/*.cx`（4 个）共 20 个文件均实际参与现行源 SID（2026-11-21 私有副本改一行实测 `ext/sysx/fd.cx`、`ext/sysx/exec.cx`、`ext/memx/arena.cx`、`ext/textx/build.cx` 均改变 `current` SID），在 `build/lane-inputs.tsv` 标为 `A	sid-list-current`；`ext/crypto`（实测改一行 `current` SID 不变）与其余 `ext/` 包（`argx`、`fsx/fs.cx`、`net`、`testx`、`tsvx/*.cx`）不参与源 SID，标为 `B	ext-non-sid`（另有 5 条 `ext/` 非源/链接项由 `tools/candidate-trigger-inputs.tsv:8` 归入 `A	model-tree`）。`ext/` 不随 APE 独立发布，但上述经链接进入 `src/`、`cx/` 闭包的符号参与源 SID 与 A 类判定。风险：符号链接导致同一文件双身份、Windows 无符号链接不安全。内部包接口摘要见 [build/std-surface.tsv](build/std-surface.tsv)。原文说「`cxroot.tsv` 只映射 sysx、crypto」已过期：现表 13 条 R 行，ext 侧映射 sysx、crypto、tsvx。
 
 ## 4. 语言与运行期所有权：现状与未声称的性质
 

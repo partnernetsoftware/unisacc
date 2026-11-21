@@ -1,0 +1,352 @@
+/* tools/syscall-literal.cx -- scan cx/ and ext/ for unguarded literal syscall numbers.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/syscall-literal.cx -- [--root DIR] [--baseline FILE] [--list]
+ *
+ * Flags literal syscall numbers passed to __syscall0..6(...) or _UNISA_SC(...) (directly or via
+ * file-local wrapper helpers whose body calls __syscallN(_UNISA_SC(param), ...)) when not guarded
+ * by an architecture/OS preprocessor branch (__x86_64__, __aarch64__, __arm64__, __APPLE__, __linux__).
+ * Known legacy items are recorded in tests/syscall-literal.tsv with an expiry version; any hit not
+ * in the baseline exits 1.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+typedef struct { char path[256]; int line; char token[96]; char exp[32]; int matched; } BaseRow;
+typedef struct { char name[64]; char param[64]; } Wrapper;
+
+static BaseRow base_rows[256];
+static int nbase;
+static int opt_list;
+static int nhits, nknown, nunknown;
+
+static int scl_id0(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static int scl_id(int c) { return scl_id0(c) || (c >= '0' && c <= '9'); }
+static int scl_dig(int c) { return c >= '0' && c <= '9'; }
+static int scl_hex(int c) { return scl_dig(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+static int load_baseline(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    char *p = b, *end = b + n;
+    while (p < end) {
+        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+        size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
+        if (len > 0 && p[0] != '#' && nbase < 256) {
+            char buf[512];
+            if (len < sizeof buf && !mm_copy(buf, sizeof buf, p, (long)len)) {
+                buf[len] = 0;
+                char *f[4]; int nf = 0;
+                f[nf++] = buf;
+                for (char *q = buf; *q && nf < 4; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+                if (nf >= 3) {
+                    BaseRow *r = &base_rows[nbase++];
+                    (void)cx_fmt(r->path, sizeof r->path, "%s", f[0]);
+                    r->line = atoi(f[1]);
+                    (void)cx_fmt(r->token, sizeof r->token, "%s", f[2]);
+                    (void)cx_fmt(r->exp, sizeof r->exp, "%s", nf >= 4 ? f[3] : "-");
+                    r->matched = 0;
+                }
+            }
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(b);
+    return 0;
+}
+
+static int has_arch_macro(const char *s, size_t n) {
+    static const char *const keys[] = {"__x86_64__", "__aarch64__", "__arm64__", "__APPLE__", "__linux__", 0};
+    for (int i = 0; keys[i]; i++) {
+        size_t kl = strlen(keys[i]);
+        for (size_t j = 0; j + kl <= n; j++) {
+            if (!memcmp(s + j, keys[i], kl)) return 1;
+        }
+    }
+    return 0;
+}
+
+static int parse_num_lit(const char *s, size_t n, size_t *pos, char *out, int cap) {
+    size_t i = *pos;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || !scl_dig((unsigned char)s[i])) return 0;
+    size_t start = i;
+    if (s[i] == '0' && i + 1 < n && (s[i + 1] == 'x' || s[i + 1] == 'X')) {
+        i += 2;
+        if (i >= n || !scl_hex((unsigned char)s[i])) return 0;
+        while (i < n && scl_hex((unsigned char)s[i])) i++;
+    } else {
+        while (i < n && scl_dig((unsigned char)s[i])) i++;
+    }
+    while (i < n && (s[i] == 'u' || s[i] == 'U' || s[i] == 'l' || s[i] == 'L')) i++;
+    size_t m = i - start;
+    if (m == 0 || (int)m >= cap) return 0;
+    if (mm_copy(out, (long)cap, s + start, (long)m)) return 0;
+    out[m] = 0;
+    *pos = i;
+    return 1;
+}
+
+static void record_hit(const char *rel, int line, const char *tok) {
+    nhits++;
+    for (int i = 0; i < nbase; i++) {
+        if (!strcmp(base_rows[i].path, rel) && base_rows[i].line == line && !strcmp(base_rows[i].token, tok)) {
+            base_rows[i].matched = 1;
+            nknown++;
+            if (opt_list) printf("KNOWN\t%s\t%d\t%s\texpires=%s\n", rel, line, tok, base_rows[i].exp);
+            return;
+        }
+    }
+    nunknown++;
+    printf("UNEXPECTED\t%s\t%d\t%s\n", rel, line, tok);
+}
+
+/* Strip comments/strings into a same-line-count buffer for clean scanning. */
+static char *strip_code(const char *src, size_t n) {
+    char *out = (char *)malloc(n + 1);
+    if (!out) return 0;
+    int in_blk = 0, in_str = 0, in_chr = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = src[i];
+        if (in_blk) {
+            if (c == '*' && i + 1 < n && src[i + 1] == '/') { out[i] = ' '; out[++i] = ' '; in_blk = 0; }
+            else out[i] = (c == '\n') ? '\n' : ' ';
+        } else if (in_str) {
+            if (c == '\\' && i + 1 < n) { out[i] = ' '; out[++i] = (src[i] == '\n') ? '\n' : ' '; }
+            else if (c == '"') { out[i] = '"'; in_str = 0; }
+            else out[i] = (c == '\n') ? '\n' : ' ';
+        } else if (in_chr) {
+            if (c == '\\' && i + 1 < n) { out[i] = ' '; out[++i] = (src[i] == '\n') ? '\n' : ' '; }
+            else if (c == '\'') { out[i] = '\''; in_chr = 0; }
+            else out[i] = (c == '\n') ? '\n' : ' ';
+        } else {
+            if (c == '/' && i + 1 < n && src[i + 1] == '*') { out[i] = ' '; out[++i] = ' '; in_blk = 1; }
+            else if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+                while (i < n && src[i] != '\n') out[i++] = ' ';
+                if (i < n) out[i] = '\n';
+            } else if (c == '"') { out[i] = '"'; in_str = 1; }
+            else if (c == '\'') { out[i] = '\''; in_chr = 1; }
+            else out[i] = c;
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
+static void find_wrappers(const char *code, size_t n, Wrapper *ws, int *nw) {
+    /* Detect file-local static helpers: `static ... NAME(TYPE PARAM, ...)` whose body contains
+       `__syscallN(_UNISA_SC(PARAM)` or `__syscallN(PARAM` without an arch guard. */
+    *nw = 0;
+    int stack[64]; int sp = 0;
+    int brace = 0;
+    char cur_fn[64] = "", cur_param[64] = "";
+    int fn_unguarded = 0;
+    size_t i = 0;
+    while (i < n) {
+        size_t ls = i;
+        while (i < n && code[i] != '\n') i++;
+        size_t ll = i - ls;
+        if (i < n) i++;
+        const char *ln = code + ls;
+        size_t k = 0;
+        while (k < ll && (ln[k] == ' ' || ln[k] == '\t')) k++;
+        if (k < ll && ln[k] == '#') {
+            k++;
+            while (k < ll && (ln[k] == ' ' || ln[k] == '\t')) k++;
+            if (k + 2 <= ll && !memcmp(ln + k, "if", 2)) {
+                if (sp < 64) stack[sp++] = has_arch_macro(ln + k, ll - k);
+            } else if (k + 4 <= ll && !memcmp(ln + k, "elif", 4)) {
+                if (sp > 0) stack[sp - 1] = has_arch_macro(ln + k, ll - k);
+            } else if (k + 5 <= ll && !memcmp(ln + k, "endif", 5)) {
+                if (sp > 0) sp--;
+            }
+            continue;
+        }
+        int guarded = 0;
+        for (int s = 0; s < sp; s++) if (stack[s]) { guarded = 1; break; }
+        if (brace == 0 && ll > 10 && strstr(ln, "static ") == ln) {
+            const char *lp = (const char *)memchr(ln, '(', ll);
+            const char *lb = (const char *)memchr(ln, '{', ll);
+            if (lp && lb && lp < lb) {
+                const char *ne = lp;
+                while (ne > ln && (ne[-1] == ' ' || ne[-1] == '\t')) ne--;
+                const char *ns = ne;
+                while (ns > ln && scl_id((unsigned char)ns[-1])) ns--;
+                size_t nl2 = (size_t)(ne - ns);
+                if (nl2 > 0 && nl2 < 63 && !mm_copy(cur_fn, sizeof cur_fn, ns, (long)nl2)) {
+                    cur_fn[nl2] = 0;
+                    /* Extract first parameter name before ',' or ')' */
+                    const char *p1 = lp + 1, *pe = p1;
+                    while (pe < lb && *pe != ',' && *pe != ')') pe++;
+                    while (pe > p1 && (pe[-1] == ' ' || pe[-1] == '\t')) pe--;
+                    const char *ps = pe;
+                    while (ps > p1 && scl_id((unsigned char)ps[-1])) ps--;
+                    size_t pl = (size_t)(pe - ps);
+                    if (pl > 0 && pl < 63 && !mm_copy(cur_param, sizeof cur_param, ps, (long)pl)) cur_param[pl] = 0;
+                    else cur_param[0] = 0;
+                    fn_unguarded = 0;
+                }
+            }
+        }
+        int opened = 0;
+        for (size_t j = 0; j < ll; j++) if (ln[j] == '{') { brace++; opened = 1; }
+        if ((brace > 0 || opened) && cur_fn[0] && cur_param[0] && !guarded) {
+            char pat1[96], pat2[96];
+            (void)cx_fmt(pat1, sizeof pat1, "_UNISA_SC(%s)", cur_param);
+            (void)cx_fmt(pat2, sizeof pat2, "(%s,", cur_param);
+            char tmp[1024];
+            size_t cl = ll < sizeof tmp - 1 ? ll : sizeof tmp - 1;
+            if (!mm_copy(tmp, sizeof tmp, ln, (long)cl)) {
+                tmp[cl] = 0;
+                if (strstr(tmp, "__syscall") && (strstr(tmp, pat1) || strstr(tmp, pat2)))
+                    fn_unguarded = 1;
+            }
+        }
+        for (size_t j = 0; j < ll; j++) {
+            if (ln[j] == '}') {
+                if (brace > 0) brace--;
+                if (brace == 0) {
+                    if (cur_fn[0] && fn_unguarded && *nw < 32) {
+                        (void)cx_fmt(ws[*nw].name, sizeof ws[0].name, "%s", cur_fn);
+                        (void)cx_fmt(ws[*nw].param, sizeof ws[0].param, "%s", cur_param);
+                        (*nw)++;
+                    }
+                    cur_fn[0] = 0; cur_param[0] = 0; fn_unguarded = 0;
+                }
+            }
+        }
+    }
+}
+
+static void scan_file(const char *full, const char *rel) {
+    size_t n = 0;
+    char *raw = cx_read(full, &n);
+    if (!raw) return;
+    char *code = strip_code(raw, n);
+    free(raw);
+    if (!code) return;
+
+    Wrapper ws[32]; int nw = 0;
+    find_wrappers(code, n, ws, &nw);
+
+    int stack[64]; int sp = 0;
+    int line = 1;
+    size_t i = 0;
+    while (i < n) {
+        size_t ls = i;
+        while (i < n && code[i] != '\n') i++;
+        size_t ll = i - ls;
+        if (i < n) i++;
+        const char *ln = code + ls;
+        size_t k = 0;
+        while (k < ll && (ln[k] == ' ' || ln[k] == '\t')) k++;
+        if (k < ll && ln[k] == '#') {
+            k++;
+            while (k < ll && (ln[k] == ' ' || ln[k] == '\t')) k++;
+            if (k + 2 <= ll && !memcmp(ln + k, "if", 2)) {
+                if (sp < 64) stack[sp++] = has_arch_macro(ln + k, ll - k);
+            } else if (k + 4 <= ll && !memcmp(ln + k, "elif", 4)) {
+                if (sp > 0) stack[sp - 1] = has_arch_macro(ln + k, ll - k);
+            } else if (k + 5 <= ll && !memcmp(ln + k, "endif", 5)) {
+                if (sp > 0) sp--;
+            }
+            line++;
+            continue;
+        }
+        int guarded = 0;
+        for (int s = 0; s < sp; s++) if (stack[s]) { guarded = 1; break; }
+        if (!guarded) {
+            /* Check __syscall[0-6](...) */
+            for (size_t j = 0; j + 11 <= ll; j++) {
+                if (!memcmp(ln + j, "__syscall", 9) && ln[j + 9] >= '0' && ln[j + 9] <= '6' &&
+                    (j == 0 || !scl_id((unsigned char)ln[j - 1]))) {
+                    size_t q = j + 10;
+                    while (q < ll && (ln[q] == ' ' || ln[q] == '\t')) q++;
+                    if (q < ll && ln[q] == '(') {
+                        q++;
+                        while (q < ll && (ln[q] == ' ' || ln[q] == '\t')) q++;
+                        char num[48], tok[96];
+                        if (q + 10 <= ll && !memcmp(ln + q, "_UNISA_SC(", 10)) {
+                            size_t q2 = q + 10;
+                            if (parse_num_lit(ln, ll, &q2, num, sizeof num)) {
+                                (void)cx_fmt(tok, sizeof tok, "_UNISA_SC(%s)", num);
+                                record_hit(rel, line, tok);
+                            }
+                        } else if (parse_num_lit(ln, ll, &q, num, sizeof num)) {
+                            (void)cx_fmt(tok, sizeof tok, "__syscall%c(%s)", ln[j + 9], num);
+                            record_hit(rel, line, tok);
+                        }
+                    }
+                }
+            }
+            /* Check wrapper calls */
+            for (int w = 0; w < nw; w++) {
+                size_t wl = strlen(ws[w].name);
+                for (size_t j = 0; j + wl + 2 <= ll; j++) {
+                    if (!memcmp(ln + j, ws[w].name, wl) && (j == 0 || !scl_id((unsigned char)ln[j - 1]))) {
+                        size_t q = j + wl;
+                        while (q < ll && (ln[q] == ' ' || ln[q] == '\t')) q++;
+                        if (q < ll && ln[q] == '(') {
+                            q++;
+                            char num[48], tok[96];
+                            if (parse_num_lit(ln, ll, &q, num, sizeof num)) {
+                                (void)cx_fmt(tok, sizeof tok, "%s(%s)", ws[w].name, num);
+                                record_hit(rel, line, tok);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        line++;
+    }
+    free(code);
+}
+
+static void walk_dir(const char *root, const char *rel, int depth) {
+    if (depth > 32) return;
+    char full[4400];
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel)) return;
+    sy_stat_t st;
+    if (sy_lstat(full, &st) != 0) return;
+    if (st.kind == 'l') return; /* skip symlinks to avoid double-counting */
+    if (st.kind == 'f') {
+        size_t rl = strlen(rel);
+        if (rl > 3 && !strcmp(rel + rl - 3, ".cx")) scan_file(full, rel);
+        return;
+    }
+    if (st.kind != 'd') return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, full) != 0) return;
+    int next;
+    while ((next = sy_dir_next(&d)) == 1) {
+        if (!strcmp(d.name, ".") || !strcmp(d.name, "..")) continue;
+        char sub[4400];
+        if (!cx_fmt(sub, sizeof sub, "%s/%s", rel, d.name)) walk_dir(root, sub, depth + 1);
+    }
+    sy_dir_close(&d);
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    const char *base_opt = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (!strcmp(argv[i], "--baseline") && i + 1 < argc) base_opt = argv[++i];
+        else if (!strcmp(argv[i], "--list")) opt_list = 1;
+        else { fprintf(stderr, "usage: syscall-literal [--root DIR] [--baseline FILE] [--list]\n"); return 2; }
+    }
+    char bp[4400];
+    if (base_opt) (void)cx_fmt(bp, sizeof bp, "%s", base_opt);
+    else (void)cx_fmt(bp, sizeof bp, "%s/tests/syscall-literal.tsv", root);
+    if (load_baseline(bp) != 0) { fprintf(stderr, "syscall-literal: cannot read baseline %s\n", bp); return 2; }
+    walk_dir(root, "cx", 0);
+    walk_dir(root, "ext", 0);
+    printf("SYSCALL_LITERAL\thits=%d\tknown=%d\tunknown=%d\tbaseline=%d\n", nhits, nknown, nunknown, nbase);
+    return nunknown ? 1 : 0;
+}

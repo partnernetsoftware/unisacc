@@ -8,14 +8,14 @@
 
 | 类别 | 文件 |
 | --- | --- |
-| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、changes-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md |
+| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md |
 | 现行版本计划 | v0.0.89.md(2026-11-20 顺延:核心层库面小件包与模块解析登记,原 0.0.88)、v0.0.88.md(2026-11-20 顺延:A1a 内建与符号,原 0.0.87)、v0.0.87.md(2026-11-20 重写:迭代速度专版,整版不排产品特性,证据 reviews/2026-11-20-fast-iteration.md)、v0.0.86.md(2026-11-20 骨架:改一行再跑,路线 A,见 roadmap-0.0.83-0.0.99.md 末节修订注 2026-11-20)、v0.0.85.md(2026-11-20 修订:前端诊断三期,P0 NO-GO)、v0.0.84.md(2026-11-20 已公开)、v0.0.83.md、v0.0.82.md(前几版保留) |
-| 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、product-refactor-plan.md、q11-merge-rehearsal.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
+| 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
 | 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction、layer-lanes、core-ext-matrix、fast-iteration);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
-| 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md、v0.0.79.md、v0.0.80.md、roadmap-v0.0.80-v0.0.89.md(build/version-seq.tsv 引用,state-gen 读取) |
+| 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md(tools/tests/cx 引用) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
-| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv) |
+| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
 
 说明:`release/notes-*.md` 与 `release/evidence/` 下的历史发布说明及证据正文保持原文不改,其中提及的旧 `plans/<file>` 路径对应下表中的 `archive/plans/<file>`。
 
@@ -46,7 +46,7 @@
 | [archive/plans/identity-inventory-2026-11-02.md](../archive/plans/identity-inventory-2026-11-02.md) | 已归档 | plans/root-identity.md | 2026-11-02 身份指纹机制盘点 |
 | [archive/plans/identity-unify-2026-11-02.md](../archive/plans/identity-unify-2026-11-02.md) | 已归档 | plans/root-identity.md | 2026-11-02 身份机制收敛草案 |
 | [archive/plans/interface-versioning-design.md](../archive/plans/interface-versioning-design.md) | 已归档 | v0.0.59+ | I2 接口版本化 7 阶段摘要设计 |
-| [archive/plans/local-loader-2026-11-16.md](../archive/plans/local-loader-2026-11-16.md) | 已归档 | plans/product-refactor-plan.md | 0.0.69 本机快速加载器落地方案 |
+| [archive/plans/local-loader-2026-11-16.md](../archive/plans/local-loader-2026-11-16.md) | 已归档 | archive/plans-2026-11/product-refactor-plan.md | 0.0.69 本机快速加载器落地方案 |
 | [archive/plans/local-product-0.0.71.md](../archive/plans/local-product-0.0.71.md) | 已归档 | v0.0.78+ | 0.0.71 本地混合候选测量记录 |
 | [archive/plans/m4-flownet-cx-module.md](../archive/plans/m4-flownet-cx-module.md) | 已归档 | tools/cxlib/flow*.cx | m4 流网范式 cx 模块早期需求 |
 | [plans/m7-material-spec.md](m7-material-spec.md) | 现行 | - | M7 材料规范(11-17 仍在维护) |
@@ -60,8 +60,8 @@
 | [archive/plans/patches/x1-runcache-key-v2.patch](../archive/plans/patches/x1-runcache-key-v2.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v2(0 活引用) |
 | [archive/plans/patches/x1-runcache-key.patch](../archive/plans/patches/x1-runcache-key.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v1(0 活引用) |
 | [archive/plans/perf-bottlenecks-2026-10-30.md](../archive/plans/perf-bottlenecks-2026-10-30.md) | 已归档 | plans/v0.0.73-speed-tracker.tsv | 2026-10-30 编译提速瓶颈地图 |
-| [plans/product-refactor-plan.md](product-refactor-plan.md) | 现行 | - | unisacc 产品整体结构小型重构计划(cc 指定保留) |
-| [plans/q11-merge-rehearsal.md](q11-merge-rehearsal.md) | 现行 | - | Q-11 合并预演与冻结流水线(cc 指定保留) |
+| [archive/plans-2026-11/product-refactor-plan.md](../archive/plans-2026-11/product-refactor-plan.md) | 已归档 | 已公开(0.0.79-0.0.81) | unisacc 产品整体结构小型重构计划 |
+| [archive/plans-2026-11/q11-merge-rehearsal.md](../archive/plans-2026-11/q11-merge-rehearsal.md) | 已归档 | 已公开 | Q-11 合并预演与冻结流水线 |
 | [archive/plans/rc1-gates-2026-11-06.md](../archive/plans/rc1-gates-2026-11-06.md) | 已归档 | v0.0.48+ | 0.0.44-rc1 发布门槛(tests 矩阵 20 处引用) |
 | [plans/release-0.0.43.md](release-0.0.43.md) | 留:被 release-board 工具读取 | v0.0.48+ | 0.0.43 发布计划(注:tools/release-board.cx 读此路径) |
 | [archive/plans/release-gates-0.0.68.md](../archive/plans/release-gates-0.0.68.md) | 已归档 | v0.0.78+ | 0.0.68 发布核对记录 |
@@ -72,7 +72,7 @@
 | [archive/plans/release-notes-0.0.67.md](../archive/plans/release-notes-0.0.67.md) | 已归档 | release/notes-0.0.67.md | 0.0.67 发布说明草稿 |
 | [archive/plans/release-notes-0.0.68.md](../archive/plans/release-notes-0.0.68.md) | 已归档 | release/notes-0.0.68.md | 0.0.68 发布说明草稿 |
 | [archive/plans/release-speedup-plan.md](../archive/plans/release-speedup-plan.md) | 已归档 | plans/v0.0.73-speed-tracker.tsv | 0.0.68-0.0.69 发布提速计划 |
-| [plans/roadmap-v0.0.80-v0.0.89.md](roadmap-v0.0.80-v0.0.89.md) | 被取代 | roadmap-rev3 | 0.0.80 到 0.0.89 路线图修订版 2(保留作历史对照,现行见 roadmap-rev3) |
+| [archive/plans-2026-11/roadmap-v0.0.80-v0.0.89.md](../archive/plans-2026-11/roadmap-v0.0.80-v0.0.89.md) | 已归档 | roadmap-rev3 | 0.0.80 到 0.0.89 路线图修订版 2 |
 | [plans/roadmap-rev3.md](roadmap-rev3.md) | 现行 | - | 路线图修订版 3(2026-11-19,fable 加我裁定):0.0.81 实际交付、速度专项 S0 到 S7、发布节奏裁决 |
 | [plans/roadmap-0.0.83-0.0.99.md](roadmap-0.0.83-0.0.99.md) | 现行 | - | 0.0.83 到 0.0.99 容量模型与逐版编排,及 0.0.100 汇编级精修阶段入口准则(估计值,每 3 版重估);汇编支持基本需求见修订注 2026-11-20 |
 | [plans/v0.0.82.md](v0.0.82.md) | 现行 | - | 0.0.82 详细计划(前端诊断二期、ref 判据替换、速度专项首批) |
@@ -83,7 +83,7 @@
 | [plans/v0.0.89.md](v0.0.89.md) | 现行 | - | 0.0.89 骨架(2026-11-20 顺延,原 0.0.88):核心层库面小件包(L0 进程一族、sy_syscall6、熵源、mtime 纳秒)与模块解析登记(testx argx fsx 三包、仓外脚本包根);证据 reviews/2026-11-20-core-ext-matrix.md;信号定时器待定 |
 | [plans/v0.0.85.md](v0.0.85.md) | 现行 | - | 0.0.85 前端诊断三期计划(2026-11-20 修订):c-negative 53/9 -> 62/0 不再续期、拒绝带 文件:行:列、-Werror 升级与隐式内建误报;P0 NO-GO,固定前缀预制归档附录 B;planned=11,槽到公开目标 300 分钟 |
 | [plans/v0.0.84.md](v0.0.84.md) | 现行 | - | 0.0.84 冷启动第一块计划:模型装载与前端网 E3 与 E2 固定工作量削减,产物字节不变(2026-11-20 已公开;四道表 6/9 完成,6 项计划外,F2 S2 Q2 未做;附录保留 cdx 网级推理剖面与候选项) |
-| [plans/changes-rev3.md](changes-rev3.md) | 现行 | - | 修订版 3 相对旧版的差异清单与三个最危险假设 |
+| [archive/plans-2026-11/changes-rev3.md](../archive/plans-2026-11/changes-rev3.md) | 已归档 | roadmap-0.0.83-0.0.99 | 修订版 3 相对旧版的差异清单与三个最危险假设 |
 | [plans/nn-migration-rev3.md](nn-migration-rev3.md) | 现行 | - | 启动器与六片逻辑迁移 NN 的现状、分版本路线、决策门(与 slice-nn-migration.md 旧表互补) |
 | [plans/speed-first-rev4.md](speed-first-rev4.md) | 现行 | - | 速度项前置重排(四类速度 P/B/V/D、R0 到 R3、总口径为槽到公开总墙钟、吞吐度量,fable 2026-11-19)与 0.0.82 到 0.0.86 速度道逐版清单 |
 | [plans/q-p-design.md](q-p-design.md) | 现行 | - | Q-P 产品资格口径草案:整域分母的五类资格状态与发布门 |
@@ -118,10 +118,10 @@
 | [archive/plans/v0.0.77-p5-registry-rows.txt](../archive/plans/v0.0.77-p5-registry-rows.txt) | 已归档 | v0.0.77+ | 0.0.77 P5 登记行草稿(0 引用) |
 | [archive/plans/v0.0.77.md](../archive/plans/v0.0.77.md) | 已归档 | v0.0.78 | 0.0.77 版本计划(内存安全乙期一段) |
 | [plans/v0.0.78.md](v0.0.78.md) | 历史,留原位 | 已公开 | 0.0.78 版本计划(build/version-seq.tsv 引用,不移动) |
-| [plans/v0.0.79.md](v0.0.79.md) | 历史,留原位 | 已公开 | 0.0.79 版本计划(build/version-seq.tsv 引用,不移动) |
+| [archive/plans-2026-11/v0.0.79.md](../archive/plans-2026-11/v0.0.79.md) | 已归档 | 已公开 | 0.0.79 版本计划 |
 | [archive/plans-pre082/v0.0.80-f1-design.md](../archive/plans-pre082/v0.0.80-f1-design.md) | 已归档 | v0.0.80 已公开 | 0.0.80 F1 对象产出合同设计单 |
-| [plans/v0.0.81.md](v0.0.81.md) | 现行 | - | 0.0.81 版本计划(前两版保留,changes-rev3 与 roadmap-rev3 引用) |
-| [plans/v0.0.80.md](v0.0.80.md) | 历史,留原位 | 已公开 | 0.0.80 版本计划(build/version-seq.tsv 引用,不移动) |
+| [archive/plans-2026-11/v0.0.81.md](../archive/plans-2026-11/v0.0.81.md) | 已归档 | 已公开 | 0.0.81 版本计划 |
+| [archive/plans-2026-11/v0.0.80.md](../archive/plans-2026-11/v0.0.80.md) | 已归档 | 已公开 | 0.0.80 版本计划 |
 | [archive/plans/win-arm64-fixedpoint.md](../archive/plans/win-arm64-fixedpoint.md) | 已归档 | v0.0.48+ | win/arm64 逐片固定点 c46-3 实证历史 |
 
 ## 作废决定

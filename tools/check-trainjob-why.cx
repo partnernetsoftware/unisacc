@@ -283,6 +283,33 @@ int main(void) {
        "case11-missing-dir-unlocated", out);
     ck(run_why("unknown-subcmd", out, sizeof out) == 2, "case12-bad-subcmd-refused", out);
 
+    /* Case 13: fail_to_restart_min metric (baseline 9.9 min, target 5.0 min) and chain10 chain-env refusal */
+    {
+        char d10[1200], d10b[1200];
+        cx_fmt(d10, sizeof d10, "%s/c10/rev10a", fx_root);
+        cx_fmt(d10b, sizeof d10b, "%s/c10/rev10b", fx_root);
+        mk_dir(d10);
+        mk_dir(d10b);
+        wr_file(d10, "owner.tsv", "OWNER\t1795200000\trev10a\tguard=10\tpid=11\tpgid=11\tdeadline_s=5400\tchain=source\n");
+        wr_file(d10, "exit.tsv", "EXIT\t1795200010\tpid=11\trc=2\twhy=exited\n");
+        wr_file(d10, "chain-run.tsv",
+            "ATTEMPT\t1\tphase=snap\trc=2\tresidue=0\tbound=90\tmemo=on\n"
+            "BLOCKER\tphase=snap\treason=first-failure\trc=2\tattempts=1\tresumes=0\n");
+        wr_file(d10, "chain-run-1.stderr",
+            "candidate-chain: REFUSE chain-env UNISACC_INTEGRATOR 未登记的 UNISACC_* 变量默认拒绝\n");
+        /* Before restart: fail_to_restart_min=UNMEASURED */
+        cx_fmt(arg, sizeof arg, "why --dir %s", d10);
+        ck(run_why(arg, out, sizeof out) == 0 &&
+           has(out, "why=candidate-chain: REFUSE chain-env UNISACC_INTEGRATOR") &&
+           has(out, "\tfail_to_restart_min=UNMEASURED\tbaseline_min=9.9\ttarget_min=5.0"),
+           "case13-chain-env-unmeasured-before-restart", out);
+        /* Restart 180s later (3.00 min <= 5.0 min target) */
+        wr_file(d10b, "owner.tsv", "OWNER\t1795200190\trev10b\tguard=20\tpid=21\tpgid=21\tdeadline_s=5400\tchain=source\n");
+        ck(run_why(arg, out, sizeof out) == 0 &&
+           has(out, "\tfail_to_restart_min=3.00\tbaseline_min=9.9\ttarget_min=5.0"),
+           "case14-fail-to-restart-min-measured", out);
+    }
+
     cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx_root);
     ckk_sh("CHECK_TRAINJOB_WHY", rmcmd, out, sizeof out);
 

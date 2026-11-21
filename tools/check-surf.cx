@@ -1,0 +1,88 @@
+/* tools/check-surf.cx -- self-check for tools/cxlib/surf.cx (red->green + 3 mutations). */
+#pragma unisa use cxlib.surf
+#pragma unisa use text.fmt
+
+static int passed, failed;
+static void ck(int ok, const char *name) {
+    printf("%s\tsurf.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) passed++; else failed++;
+}
+
+static void add_row(char *buf, int cap, const char *pkg, const char *name, const char *t, const char *st) {
+    char line[256];
+    if (surf_format_row(line, sizeof line, pkg, name, t, st) == 0) {
+        size_t cur = strlen(buf), add = strlen(line);
+        if (cur + add + 1 < (size_t)cap) {
+            for (size_t i = 0; i <= add; i++) buf[cur + i] = line[i];
+        }
+    }
+}
+
+int main(void) {
+    static const char *const all6[6] = {
+        "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+    };
+    const char *row_all_impl =
+        "cx.sys\tsy_read\tlong sy_read(int fd, void *buf, long n);\tPOSIX\t-errno\timpl\timpl\timpl\texists\t-\tpre\t0.1.0\tnone\tcx-l0-sys";
+    const char *row_win_refuse =
+        "cx.sys\tsy_pread\tlong sy_pread(int fd, void *buf, long n, int64_t off);\tPOSIX\t-errno\timpl\tunverified\trefuse:ENOSYS\texists\t-\tpre\t0.1.0\tnone\tcx-l0-sys";
+
+    char text[4096], diag[1024];
+    surf_set_t set;
+
+    /* 1. Format + parse roundtrip across 6 targets */
+    text[0] = 0;
+    for (int i = 0; i < 6; i++) add_row(text, sizeof text, "cx.sys", "sy_read", all6[i], "ok");
+    int prc = surf_parse_text(text, strlen(text), &set);
+    ck(prc == 0 && set.n == 6 && !strcmp(set.rows[1].target, "lnx/arm64") && !strcmp(set.rows[1].status, "ok"), "format-and-parse-roundtrip");
+
+    /* 2. All 6 targets ok -> pass */
+    int f = surf_check_surface_row(row_all_impl, &set, diag, sizeof diag);
+    ck(f == 0 && diag[0] == 0, "six-targets-all-ok-passes");
+
+    /* 3. Red->Green (Mutation 1): missing lnx/arm64 is named and fails, adding it back turns green */
+    text[0] = 0;
+    for (int i = 0; i < 6; i++) if (strcmp(all6[i], "lnx/arm64") != 0) add_row(text, sizeof text, "cx.sys", "sy_read", all6[i], "ok");
+    prc = surf_parse_text(text, strlen(text), &set);
+    f = surf_check_surface_row(row_all_impl, &set, diag, sizeof diag);
+    int red_ok = (prc == 0 && f == 1 && strstr(diag, "MISSING_OK\tcx.sys\tsy_read\tlnx/arm64\n") != 0);
+    add_row(text, sizeof text, "cx.sys", "sy_read", "lnx/arm64", "ok");
+    prc = surf_parse_text(text, strlen(text), &set);
+    f = surf_check_surface_row(row_all_impl, &set, diag, sizeof diag);
+    ck(red_ok && prc == 0 && f == 0, "mut1-missing-lnx-arm64-red-then-green");
+
+    /* 4. Mutation 2: refuse cell paired with ok receipt -> contradiction */
+    text[0] = 0;
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "lnx/x86_64", "ok");
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "lnx/arm64", "ok");
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "win/x86_64", "ok");
+    prc = surf_parse_text(text, strlen(text), &set);
+    f = surf_check_surface_row(row_win_refuse, &set, diag, sizeof diag);
+    ck(prc == 0 && f == 1 && strstr(diag, "CONTRADICT_REFUSE_OK\tcx.sys\tsy_pread\twin/x86_64\n") != 0, "mut2-refuse-with-ok-contradiction");
+
+    /* 5. Mutation 3: impl cell with fail receipt -> fails and names target */
+    text[0] = 0;
+    for (int i = 0; i < 6; i++) add_row(text, sizeof text, "cx.sys", "sy_read", all6[i], !strcmp(all6[i], "osx/arm64") ? "fail" : "ok");
+    prc = surf_parse_text(text, strlen(text), &set);
+    f = surf_check_surface_row(row_all_impl, &set, diag, sizeof diag);
+    ck(prc == 0 && f == 1 && strstr(diag, "BAD_STATUS\tcx.sys\tsy_read\tosx/arm64\tfail\n") != 0, "mut3-impl-with-fail-receipt");
+
+    /* 6. Unverified osx + refuse win with refuse receipt + impl lnx with 2 ok receipts -> passes */
+    text[0] = 0;
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "lnx/x86_64", "ok");
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "lnx/arm64", "ok");
+    add_row(text, sizeof text, "cx.sys", "sy_pread", "win/x86_64", "refuse");
+    prc = surf_parse_text(text, strlen(text), &set);
+    f = surf_check_surface_row(row_win_refuse, &set, diag, sizeof diag);
+    ck(prc == 0 && f == 0, "unverified-and-refuse-accepted");
+
+    /* 7. Malformed status rejected on both format and parse */
+    { char bad[128];
+      int frc = surf_format_row(bad, sizeof bad, "cx.sys", "sy_read", "lnx/x86_64", "unknown");
+      const char *bad_txt = "SURF\tcx.sys\tsy_read\tlnx/x86_64\tunknown\n";
+      int prc2 = surf_parse_text(bad_txt, strlen(bad_txt), &set);
+      ck(frc < 0 && prc2 < 0, "malformed-status-rejected"); }
+
+    printf("CHECK_SURF\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

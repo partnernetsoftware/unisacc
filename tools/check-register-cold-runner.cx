@@ -1,0 +1,137 @@
+/* check-register-cold-runner: register.cx's cold-shard gate (rg_cold_shard) must
+ *   (1) prepare tests/run-batch.cx through cxlib.runnerprep from the cold layout's own tree (rn_prepare(lay,...)),
+ *       so a changed runner or library source changes the identity and is rebuilt (identity behaviour itself:
+ *       tools/check-runnerprep.cx changed-source-changes-identity);
+ *   (2) do so before the clock starts, and run the prepared image, not `sh ./unisacc.com tests/run-batch.cx --`;
+ *   (3) keep the batch run with UNISACC_RUN_CACHE=0 and UNISACC_UNIT_CACHE=0;
+ *   (4) keep the gate literal elapsed>33000 unchanged;
+ *   (5) layout shared tables (cold layout and qualify-layout selftest) skip rows another window is still
+ *       writing (row absent from the layout's base copy and naming a path missing from the layout), keep
+ *       new rows whose sources exist, and keep base (staged/committed) rows even when their source is
+ *       missing, so the runner still refuses that real error. Fixture runs `register.cx -- --layout-rows`.
+ * The source anchors of (1)-(5) are facts in tests/register-cold-anchors.tsv (one row = one assertion); the
+ * register source the fixture runs is the PATH of the table's first row.
+ * Usage: sh ./unisacc.com tools/check-register-cold-runner.cx -- [ANCHOR_TABLE]   (default tests/register-cold-anchors.tsv) */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.chainargv
+
+static int fails;
+static void ck(int c, const char *name) { printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) fails++; }
+static char dir[4096];
+static void put(const char *rel, const char *s) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel) || cx_write(p, s, (size_t)tx_len(s, 8192))) { printf("FAIL\tfixture write %s\n", rel); exit(2); }
+}
+static int has(const char *s, long n, const char *w) { return s && tx_find(s, n, w, tx_len(w, 512)) >= 0; }
+
+static void fixture(const char *src) {
+    char lay[4400], tests[4400], tools[4400], prop[4400], *o = 0; size_t n = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "check-reg-rows-", dir, sizeof dir)) { printf("FAIL\tfixture mkdtemp\n"); fails++; return; }
+    if (cx_fmt(lay, sizeof lay, "%s/lay", dir) || cx_fmt(tests, sizeof tests, "%s/lay/tests", dir) ||
+        cx_fmt(tools, sizeof tools, "%s/lay/tools", dir) || cx_fmt(prop, sizeof prop, "%s/proposed.tsv", dir) ||
+        sy_mkdir(lay, 0700) || sy_mkdir(tests, 0700) || sy_mkdir(tools, 0700)) { printf("FAIL\tfixture dirs\n"); fails++; return; }
+    put("lay/tools/a.cx", "int main(void){return 0;}\n");
+    /* base copy (index/HEAD): row-a (source present), row-c (staged row whose source is missing: a real error) */
+    put("lay/tests/batches.tsv", "id\tsource\nrow-a\ttools/a.cx\nrow-c\ttools/missing-staged.cx\n");
+    /* proposed live table: plus row-b (other window, untracked source) and row-d (new row, source present) */
+    put("proposed.tsv", "id\tsource\nrow-a\ttools/a.cx\nrow-c\ttools/missing-staged.cx\nrow-b\ttools/untracked-other.cx\nrow-d\ttools/a.cx\n");
+    char *v[] = {"sh", "./unisacc.com", (char *)src, "--", "--layout-rows", lay, "tests/batches.tsv", prop, 0};
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    ck(rc == 0, "layout-rows fixture runs");
+    ck(has(o, (long)n, "\nrow-a\ttools/a.cx\n"), "base row with present source kept");
+    ck(has(o, (long)n, "\nrow-c\ttools/missing-staged.cx\n"), "staged row with missing source kept (runner still refuses it)");
+    ck(has(o, (long)n, "\nrow-d\ttools/a.cx\n"), "new row with present source kept");
+    ck(!has(o, (long)n, "\nrow-b\t"), "other window's unstaged row with untracked source skipped");
+    ck(has(o, (long)n, "REGISTER_LAYOUT_SKIP\ttable=tests/batches.tsv\trow=row-b"), "skipped row is named");
+    free(o);
+    char why[600]; unisa_safedel(dir, SAFEDEL_PURGE | SAFEDEL_RECURSIVE, 1000, why, sizeof why);
+}
+
+/* One fact row: NAME KIND PATH SCOPE ANCHOR ANCHOR2 (TAB separated). The source text is located by the
+   table's PATH and SCOPE, so every anchor is a fact of the table, not a literal of this program. */
+static char *field(char **cur) {
+    char *s = *cur, *t = s;
+    while (*t && *t != '\t' && *t != '\n') t++;
+    if (*t == '\t') { *t = 0; *cur = t + 1; } else { if (*t) *t = 0; *cur = t; }
+    return s;
+}
+static char regpath[1024];
+
+/* Match PAT against token range TOKS[lo..hi] using ca_token_text/ca_token_kind (token provenance). */
+static int tok_find(void *toks, int lo, int hi, const char *pat) {
+    int i, k;
+    if (!toks || !pat || !pat[0]) return -1;
+    for (i = lo; i <= hi; i++) {
+        const char *p = pat;
+        for (k = i; k <= hi && *p; k++) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            const char *tt = ca_token_text(toks, k);
+            int tk = ca_token_kind(toks, k);
+            size_t tl = strlen(tt);
+            if (tk == 2) {
+                if (*p != '"' || strncmp(p + 1, tt, tl) != 0 || p[1 + tl] != '"') break;
+                p += tl + 2;
+            } else if (tk == 3) {
+                if (*p != '\'' || strncmp(p + 1, tt, tl) != 0 || p[1 + tl] != '\'') break;
+                p += tl + 2;
+            } else {
+                if (strncmp(p, tt, tl) != 0) break;
+                p += tl;
+            }
+            while (*p == ' ' || *p == '\t') p++;
+        }
+        if (!*p) return i;
+    }
+    return -1;
+}
+
+static int fact_row(char *line) {
+    char *cur = line, *name = field(&cur), *kind = field(&cur), *path = field(&cur), *scope = field(&cur), *a1 = field(&cur), *a2 = field(&cur);
+    size_t n = 0; char *b; void *toks; int lo = 0, hi = -1, i1, i2, ok = 0;
+    if (!*name || !*kind || !*path || !*a1) { printf("FAIL\tfact row malformed: %s\n", name); fails++; return 0; }
+    if (!regpath[0] && cx_fmt(regpath, sizeof regpath, "%s", path)) return 0;
+    b = cx_read(path, &n);
+    if (!b) { printf("FAIL\t%s (read %s)\n", name, path); fails++; return 1; }
+    toks = ca_tokens(b);
+    free(b);
+    if (!toks) { printf("FAIL\t%s (tokenize %s)\n", name, path); fails++; return 1; }
+    hi = ca_token_count(toks) - 1;
+    if (scope[0] && !(scope[0] == '-' && !scope[1])) {
+        if (!ca_function(toks, scope, &lo, &hi)) {
+            printf("FAIL\t%s (scope %s not found)\n", name, scope);
+            fails++; ca_tokens_free(toks); return 1;
+        }
+    }
+    i1 = tok_find(toks, lo, hi, a1);
+    i2 = *a2 && !(a2[0] == '-' && !a2[1]) ? tok_find(toks, lo, hi, a2) : -1;
+    if (tx_eqz(kind, "has") || tx_eqz(kind, "file")) ok = i1 >= 0;
+    else if (tx_eqz(kind, "absent")) ok = i1 < 0;
+    else if (tx_eqz(kind, "before")) ok = i1 >= 0 && i2 >= 0 && i1 < i2;
+    else { printf("FAIL\t%s (unknown kind %s)\n", name, kind); fails++; ca_tokens_free(toks); return 1; }
+    ck(ok, name);
+    ca_tokens_free(toks);
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *table = argc > 1 ? argv[1] : "tests/register-cold-anchors.tsv";
+    size_t len = 0; char *t = cx_read(table, &len), *p, *nl; int rows = 0;
+    if (!t) { printf("FAIL\tread %s\n", table); return 2; }
+    for (p = t; p && *p; p = nl) {
+        nl = strchr(p, '\n'); if (nl) *nl++ = 0;
+        if (!*p || *p == '#') continue;
+        rows += fact_row(p);
+    }
+    ck(rows >= 9, "anchor fact table has at least 9 rows");
+    if (regpath[0]) fixture(regpath); else ck(0, "register source named by the fact table");
+    free(t);
+    printf("CHECK_REGISTER_COLD_RUNNER\tfailed=%d\n", fails);
+    return fails ? 1 : 0;
+}

@@ -45,7 +45,7 @@
 | sy_dir_open | int sy_dir_open(sy_dir_t *d, const char *path); | Rust fs::read_dir; Node fs.opendir | -errno | impl:getdents64 | impl:getdirentries64 | refuse:ENOSYS 本版未实现 | exists | - | pre | 0.1.0 | open:dir close:sy_dir_close | - |
 | sy_dir_next | int sy_dir_next(sy_dir_t *d); | Rust ReadDir::next; Node Dir.read | -errno;ret:1-item-0-end;-ENAMETOOLONG | impl | impl | refuse:ENOSYS 本版未实现 | exists | 跳过 . 和 ..;类型未知时补一次 lstat;顺序不保证;名字超 255 记 -ENAMETOOLONG | pre | 0.1.0 | none | - |
 | sy_dir_close | int sy_dir_close(sy_dir_t *d); | Node Dir.close | -errno;-EBADF | impl | impl | refuse:ENOSYS 本版未实现 | exists | 重复关闭 -EBADF | pre | 0.1.0 | none | - |
-| sy_utimes | int sy_utimes(const char *path, long atime_s, long atime_ns, long mtime_s, long mtime_ns); | QuickJS os.utimes; Node fs.utimes | -errno | impl:utimensat | impl:utimensat | refuse:ENOSYS 本版未实现 | exists | pending E4 | pre | 0.1.0 | none | - |
+| sy_utimes | int sy_utimes(const char *path, long atime_s, long atime_ns, long mtime_s, long mtime_ns); | QuickJS os.utimes; Node fs.utimes | -errno | impl:utimensat(仅lnx/x86_64验证,arm64未验证) | unverified | refuse:ENOSYS 本版未实现 | exists | pending E4;posix.cx:382字面号280留0.0.88修 | pre | 0.1.0 | none | cx-l0-sys(缺arm64/osx) |
 | sy_set_mtime | int sy_set_mtime(const char *path, long sec); | Rust File::set_modified | -errno | impl | impl | impl:SetFileTime,缺入口时 -ENOSYS | exists | 现在 sys.time | legacy | 0.1.0 | none | - |
 | sy_read_file | int sy_read_file(const char *path, unsigned char **out, int64_t *n, int64_t max); | Rust fs::read; QuickJS std.loadFile; Node fs.readFile | -errno;-EFBIG;-ENOMEM | impl | impl | impl | exists | *out 由 mm_free 释放,末尾多放一个 0 不计入 n;超过 max 记 -EFBIG;分配失败 -ENOMEM | pre | 0.1.0 | none | - |
 | sy_write_file | int sy_write_file(const char *path, const void *buf, int64_t n, int mode); | Rust fs::write; Node fs.writeFile | -errno | impl | impl | impl | exists | 截断重写,不保证原子 | pre | 0.1.0 | none | - |
@@ -87,7 +87,7 @@
 | sy_getpgid | long sy_getpgid(int pid); | POSIX getpgid | -errno | impl | impl | refuse:ENOSYS cap=pgroup | exists | 现在 sys.posix | pre | 0.1.0 | none | - |
 | sy_setsid | long sy_setsid(void); | POSIX setsid | -errno | impl | impl | refuse:ENOSYS cap=pgroup | exists | 现在 sys.posix | pre | 0.1.0 | none | - |
 | sy_killpg | int sy_killpg(int pgrp, int sig); | POSIX killpg | -errno | impl | impl | refuse:ENOSYS cap=pgroup | exists | 现在 sys.posix | pre | 0.1.0 | none | - |
-| sy_rlimit_as | long sy_rlimit_as(void); | POSIX getrlimit RLIMIT_AS | -errno;-EINVAL | impl | impl | impl:恒 0,无地址空间上限 | exists | 现在 sys.posix;无上限记 0 | pre | 0.1.0 | none | - |
+| sy_rlimit_as | long sy_rlimit_as(void); | POSIX getrlimit RLIMIT_AS | -errno;-EINVAL | impl:仅lnx/x86_64验证,arm64未验证 | unverified | impl:恒 0,无地址空间上限 | exists | 现在 sys.posix;无上限记 0;posix.cx:227字面号97留0.0.88修 | pre | 0.1.0 | none | cx-l0-sys(缺arm64/osx) |
 | sy_env | const char *sy_env(const char *name); | QuickJS std.getenv; Rust env::var; Node process.env | null | impl | impl | impl | exists | 0 表未设 | pre | 0.1.0 | none | - |
 | sy_env_or | const char *sy_env_or(const char *name, const char *fallback); | Rust env::var().unwrap_or | none | impl | impl | impl | exists | - | pre | 0.1.0 | none | - |
 | sy_env_vec | char **sy_env_vec(void); | QuickJS std.getenviron; Rust env::vars | none | impl | impl | impl | exists | - | pre | 0.1.0 | none | - |

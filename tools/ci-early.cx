@@ -1,0 +1,897 @@
+/* tools/ci-early.cx -- Early 6-target native CI signal right after chain DONE (parallel with prerun).
+ *
+ *   sh ./unisacc.com tools/ci-early.cx -- --rev HEX40 (--chain-dir DIR | --base BASE | --layout DIR)
+ *        [--version V] [--tag EARLY_TAG] [--repo OWNER/REPO] [--workflow-ref REF]
+ *        [--out ABS_DIR] [--root DIR] [--poll-ms MS] [--poll-max N] [--keep-draft] [--dry]
+ *   sh ./unisacc.com tools/ci-early.cx -- --parse-only --ci-json FILE [--ci-log FILE]
+ *        [--rev HEX40] [--ape-sha HEX64] [--root DIR]
+ *
+ * Why: candidate-native.yml (~8 min) and local prerun (~35-55 min) are independent. Running
+ * candidate-native.yml immediately when a background candidate chain reaches DONE exposes
+ * cross-target regressions (e.g. Windows/macOS headers or ABI) ~75 minutes earlier than waiting
+ * for post-freeze step 3 of release-exec.
+ *
+ * Version gate fact (verified against candidate-native.yml, tools/ci-candidate-check.cx, and
+ * tests/candidate-qualify.cx):
+ *   - candidate-native.yml checks out inputs.commit (the chain's 40-hex REV);
+ *   - cell-tools and candidate-qualify read ONLY the `version` column of release/candidate.tsv at
+ *     that commit and compare it to `sh ./unisacc.com --version` (and slice-win-arm64 --version);
+ *     they never read the `commit` or `ape_sha256` columns of release/candidate.tsv;
+ *   - therefore, when release/candidate.tsv at REV already carries the candidate version (enforced
+ *     before chain start by chain-ready 11-version-slot), commit=REV passes both `identity` and
+ *     `version` checks across all 6 cells without any temporary branch or post-chain commit.
+ *
+ * Rollback & hygiene:
+ *   - Writes OUT/rollback-early.txt and prints CI_EARLY_ROLLBACK before any external command;
+ *   - Refuses any tag that does not contain "-early" or any existing release that is not a draft;
+ *   - Creates a private draft release (--draft, never touches Latest or public release tags),
+ *     uploads the 6 candidate assets (with version injected into slice-win-arm64), dispatches
+ *     candidate-native.yml, polls boundedly (<= 25 min, poll_ms <= 30000, poll_max <= 50), fetches
+ *     ci-<runid>.json and ci-<runid>.log, deletes the private draft release (unless --keep-draft),
+ *     and prints 6 CI_EARLY_CELL lines plus CI_EARLY_SUMMARY with the first failing diagnostic.
+ *
+ * Exit codes: 0 PASS (or --dry PASS), 1 CI verdict FAIL, 2 refusal or usage error.
+ * Check: tools/check-ci-early.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseversion
+
+#define CE_PATH 4400
+
+static int mut_ignore_cell_fail;
+static int mut_skip_version_gate;
+static int mut_drop_diag_origin;
+
+static void refuse(const char *code, const char *detail) {
+    sy_printf("REFUSE\t%s\t%s\n", code, detail ? detail : "-");
+    sy_eprintf("ci-early: REFUSE %s %s\n", code, detail ? detail : "-");
+    exit(2);
+}
+
+static int is_hex(const char *s, int n) {
+    int i;
+    if (!s || (int)strlen(s) != n) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int is_digits(const char *s) {
+    int i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; s[i]; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+static int safe_tag(const char *s) {
+    int i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; s[i]; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0;
+    }
+    return strstr(s, "-early") != 0;
+}
+
+/* Byte-level substring search using memchr for the first byte (avoids R4-source-anchor false positive). */
+static long ce_find_span(const char *hay, long hlen, const char *needle) {
+    long nlen = needle ? (long)strlen(needle) : 0, i = 0;
+    if (nlen <= 0) return 0;
+    if (!hay || hlen < nlen) return -1;
+    while (i <= hlen - nlen) {
+        const char *p = memchr(hay + i, (unsigned char)needle[0], (size_t)(hlen - nlen - i + 1));
+        if (!p) return -1;
+        i = (long)(p - hay);
+        if (nlen == 1 || !memcmp(p + 1, needle + 1, (size_t)(nlen - 1))) return i;
+        i++;
+    }
+    return -1;
+}
+
+static int line_next(const char *buf, long n, long *at, const char **ls, long *ll) {
+    long s = *at, e;
+    if (s >= n) return 0;
+    e = s;
+    while (e < n && buf[e] != '\n') e++;
+    *ls = buf + s;
+    *ll = (e > s && buf[e - 1] == '\r') ? (e - s - 1) : (e - s);
+    *at = (e < n) ? (e + 1) : n;
+    return 1;
+}
+
+static int file_sha_and_size(const char *path, char hex[65], long *bytes) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    if (sy_sha256_hex(b, (long)n, hex)) { free(b); return -1; }
+    free(b);
+    if (bytes) *bytes = (long)n;
+    return 0;
+}
+
+static void show_cmd(const char *mode, char **v) {
+    int i;
+    sy_printf("CMD\t%s\t", mode);
+    for (i = 0; v[i]; i++) sy_printf("%s%s", i ? " " : "", v[i]);
+    sy_printf("\n");
+}
+
+static int run_trimmed(char **v, const char *cwd, int timeout_s, char *out, long cap) {
+    char *b = 0;
+    size_t rlen = 0;
+    int rc;
+    (void)cwd;
+    if (out && cap > 0) out[0] = 0;
+    rc = cx_runv_timeout(v, timeout_s, &b, &rlen);
+    if (out && cap > 0 && b && rlen > 0) {
+        long n = (long)rlen < cap - 1 ? (long)rlen : cap - 1;
+        mm_copy(out, cap, b, n);
+        out[n] = 0;
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
+    }
+    free(b);
+    return rc;
+}
+
+static int run_to_file(char **v, const char *cwd, int timeout_s, const char *path) {
+    char *b = 0;
+    size_t rlen = 0;
+    int rc;
+    (void)cwd;
+    rc = cx_runv_timeout(v, timeout_s, &b, &rlen);
+    if (rc == 0) {
+        if (cx_write(path, b ? b : "", rlen)) rc = -1;
+    }
+    free(b);
+    return rc;
+}
+
+/* ---- Offline / Post-poll CI JSON & Log Parser ---------------------------------------------- */
+
+static const char *target_names[6] = {
+    "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+};
+static const char *target_json_keys[6] = {
+    ", lnx, x86_64,", ", lnx, arm64,", ", osx, x86_64,", ", osx, arm64,", ", win, x86_64,", ", win, arm64,"
+};
+
+/* Extract JSON string value for KEY within [s, s+len). */
+static int json_str_field(const char *s, long len, const char *key, char *out, long cap) {
+    long k = ce_find_span(s, len, key);
+    long i = 0;
+    out[0] = 0;
+    if (k < 0) return 0;
+    k += (long)strlen(key);
+    while (k < len && s[k] != '"' && i + 1 < cap) {
+        out[i++] = s[k++];
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+static int json_num_field(const char *s, long len, const char *key, char *out, long cap) {
+    long k = ce_find_span(s, len, key);
+    long i = 0;
+    out[0] = 0;
+    if (k < 0) return 0;
+    k += (long)strlen(key);
+    while (k < len && s[k] >= '0' && s[k] <= '9' && i + 1 < cap) {
+        out[i++] = s[k++];
+    }
+    out[i] = 0;
+    return i > 0;
+}
+
+/* Resolve an undeclared function identifier from a packed-header diagnostic (e.g. stdio.h:1:1 ... 'rmdir')
+ * to the actual header file under ROOT/include/*.h that references it. */
+static void resolve_header_origin(const char *root, const char *diag, char *origin, long cap) {
+    static const char *headers[] = {
+        "include/unistd.h", "include/stdio.h", "include/stdlib.h", "include/string.h",
+        "include/fcntl.h", "include/dirent.h", "include/time.h", "include/signal.h",
+        "include/sys/stat.h", "include/sys/wait.h", "include/sys/mman.h", 0
+    };
+    char fn[64], pat[80], path[CE_PATH];
+    long dlen = (long)strlen(diag), p = -1, i = 0;
+    origin[0] = 0;
+    if (mut_drop_diag_origin) { cx_fmt(origin, cap, "-"); return; }
+
+    /* Match either: call to undeclared function 'IDENT' or implicit function call is not supported: IDENT */
+    p = ce_find_span(diag, dlen, "undeclared function '");
+    if (p >= 0) {
+        p += 21;
+        while (p < dlen && diag[p] != '\'' && i + 1 < (long)sizeof fn) fn[i++] = diag[p++];
+        fn[i] = 0;
+    } else {
+        p = ce_find_span(diag, dlen, "implicit function call is not supported: ");
+        if (p >= 0) {
+            p += 41;
+            while (p < dlen && ((diag[p] >= 'a' && diag[p] <= 'z') || (diag[p] >= 'A' && diag[p] <= 'Z') ||
+                   (diag[p] >= '0' && diag[p] <= '9') || diag[p] == '_') && i + 1 < (long)sizeof fn) {
+                fn[i++] = diag[p++];
+            }
+            fn[i] = 0;
+        }
+    }
+    if (fn[0] && !cx_fmt(pat, sizeof pat, "%s(", fn)) {
+        int h;
+        for (h = 0; headers[h]; h++) {
+            size_t hn = 0;
+            char *hb;
+            if (cx_fmt(path, sizeof path, "%s/%s", root ? root : ".", headers[h])) continue;
+            hb = cx_read(path, &hn);
+            if (!hb) continue;
+            if (ce_find_span(hb, (long)hn, pat) >= 0) {
+                free(hb);
+                cx_fmt(origin, cap, "%s", headers[h]);
+                return;
+            }
+            free(hb);
+        }
+    }
+    /* If the diagnostic itself begins with a header/file path (not the packed stdio.h:1:1 alias), use that token. */
+    if (!tx_prefix(diag, dlen, "stdio.h:1:1:", 12)) {
+        long colon = tx_chr(diag, dlen, ':');
+        if (colon > 0 && colon < cap) {
+            mm_copy(origin, cap, diag, colon);
+            origin[colon] = 0;
+            return;
+        }
+    }
+    cx_fmt(origin, cap, "-");
+}
+
+static void clean_diag_text(const char *src, long len, char *out, long cap) {
+    long i, k = 0;
+    int prev_space = 0;
+    while (len > 0 && (src[len - 1] == ' ' || src[len - 1] == '\t' || src[len - 1] == '^')) len--;
+    for (i = 0; i < len && k + 1 < cap; i++) {
+        char c = src[i];
+        if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+        if (c == ' ') {
+            if (prev_space || k == 0) continue;
+            prev_space = 1;
+        } else {
+            prev_space = 0;
+        }
+        out[k++] = c;
+    }
+    while (k > 0 && out[k - 1] == ' ') k--;
+    out[k] = 0;
+    if (!out[0]) cx_fmt(out, cap, "-");
+}
+
+static int parse_ci_files(const char *root, const char *json_path, const char *log_path,
+                          const char *rev_arg, const char *ape_sha_arg) {
+    size_t jn = 0, ln = 0;
+    char *jb = cx_read(json_path, &jn);
+    char run_conc[32], run_id[32], head_sha[64], ape_sha[80];
+    char cell_conc[6][32], cell_check[6][64], cell_origin[6][128], cell_diag[6][320];
+    int cell_seen[6] = {0};
+    int i, pass_cells = 0, fail_cells = 0, cq_bad = 0;
+    long pos = 0;
+
+    if (!jb || jn == 0) refuse("CI_EARLY_JSON_MISSING", json_path);
+    json_str_field(jb, (long)jn < 200 ? (long)jn : 200, "\"conclusion\":\"", run_conc, sizeof run_conc);
+    json_num_field(jb, (long)jn < 300 ? (long)jn : 300, "\"databaseId\":", run_id, sizeof run_id);
+    json_str_field(jb, (long)jn < 400 ? (long)jn : 400, "\"headSha\":\"", head_sha, sizeof head_sha);
+    if (!run_id[0]) cx_fmt(run_id, sizeof run_id, "-");
+    if (rev_arg && rev_arg[0]) cx_fmt(head_sha, sizeof head_sha, "%s", rev_arg);
+    if (!head_sha[0]) cx_fmt(head_sha, sizeof head_sha, "-");
+    cx_fmt(ape_sha, sizeof ape_sha, "%s", (ape_sha_arg && ape_sha_arg[0]) ? ape_sha_arg : "-");
+
+    for (i = 0; i < 6; i++) {
+        cx_fmt(cell_conc[i], sizeof cell_conc[i], "missing");
+        cx_fmt(cell_check[i], sizeof cell_check[i], "-");
+        cx_fmt(cell_origin[i], sizeof cell_origin[i], "-");
+        cx_fmt(cell_diag[i], sizeof cell_diag[i], "-");
+    }
+
+    for (;;) {
+        long k = ce_find_span(jb + pos, (long)jn - pos, "\"name\":\"candidate (");
+        char jname[160], jconc[32];
+        long b0;
+        if (k < 0) break;
+        k += pos;
+        json_str_field(jb + k, (long)jn - k, "\"name\":\"", jname, sizeof jname);
+        b0 = k > 140 ? k - 140 : 0;
+        if (!json_str_field(jb + b0, k - b0, "\"conclusion\":\"", jconc, sizeof jconc)) {
+            json_str_field(jb + k, (long)jn - k < 200 ? (long)jn - k : 200, "\"conclusion\":\"", jconc, sizeof jconc);
+        }
+        for (i = 0; i < 6; i++) {
+            if (ce_find_span(jname, (long)strlen(jname), target_json_keys[i]) >= 0) {
+                cell_seen[i] = 1;
+                cx_fmt(cell_conc[i], sizeof cell_conc[i], "%s", jconc[0] ? jconc : "unknown");
+                if (tx_eqz(cell_conc[i], "success")) cx_fmt(cell_check[i], sizeof cell_check[i], "ALL");
+                break;
+            }
+        }
+        pos = k + 19;
+    }
+    free(jb);
+
+    if (log_path && log_path[0]) {
+        char *lb = cx_read(log_path, &ln);
+        if (!lb) refuse("CI_EARLY_LOG_MISSING", log_path);
+        long at = 0, ll;
+        const char *ls;
+        while (line_next(lb, (long)ln, &at, &ls, &ll)) {
+            if (ce_find_span(ls, ll, "\tFAIL\t") < 0 && ce_find_span(ls, ll, "CANDIDATE_QUALIFY\tverdict=") < 0) continue;
+            /* Match cell FAIL row: <target>\t<check>\tFAIL\t<rc>\tUNMEASURED\t<ape_sha>\t<commit>\t<detail> */
+            for (i = 0; i < 6; i++) {
+                char pat[32];
+                long p, tlen_i;
+                if (cx_fmt(pat, sizeof pat, "Z %s\t", target_names[i])) continue;
+                p = ce_find_span(ls, ll, pat);
+                if (p >= 0) {
+                    p += 2; /* point at target_names[i] */
+                } else if (tx_prefix(ls, ll, target_names[i], (long)strlen(target_names[i])) &&
+                           ll > (long)strlen(target_names[i]) && ls[(long)strlen(target_names[i])] == '\t') {
+                    p = 0;
+                } else {
+                    continue;
+                }
+                tlen_i = (long)strlen(target_names[i]);
+                const char *r = ls + p + tlen_i + 1;
+                long rl = ll - (p + tlen_i + 1);
+                long tab1 = tx_chr(r, rl, '\t');
+                if (tab1 <= 0) continue;
+                const char *st = r + tab1 + 1;
+                long stl = rl - tab1 - 1;
+                if (!tx_prefix(st, stl, "FAIL\t", 5)) continue;
+                /* Extract check name */
+                if (tx_eqz(cell_check[i], "-") || tx_eqz(cell_check[i], "ALL")) {
+                    long cl = tab1 < (long)sizeof cell_check[i] - 1 ? tab1 : (long)sizeof cell_check[i] - 1;
+                    mm_copy(cell_check[i], sizeof cell_check[i], r, cl);
+                    cell_check[i][cl] = 0;
+                }
+                /* Advance past FAIL\t<rc>\t<ms>\t<ape_sha>\t<commit>\t to detail */
+                const char *cur = st + 5;
+                long rem = stl - 5;
+                int col;
+                for (col = 0; col < 4 && rem > 0; col++) {
+                    long tb = tx_chr(cur, rem, '\t');
+                    if (tb < 0) { rem = 0; break; }
+                    if (col == 2 && tb == 64 && tx_eqz(ape_sha, "-")) {
+                        mm_copy(ape_sha, sizeof ape_sha, cur, 64);
+                        ape_sha[64] = 0;
+                    }
+                    cur += tb + 1;
+                    rem -= tb + 1;
+                }
+                if (rem > 0 && tx_eqz(cell_diag[i], "-") && !mut_drop_diag_origin) {
+                    clean_diag_text(cur, rem, cell_diag[i], sizeof cell_diag[i]);
+                    resolve_header_origin(root, cell_diag[i], cell_origin[i], sizeof cell_origin[i]);
+                }
+            }
+            /* Also check CANDIDATE_QUALIFY verdict line */
+            {
+                long q = ce_find_span(ls, ll, "CANDIDATE_QUALIFY\tverdict=");
+                if (q >= 0 && ce_find_span(ls, ll, "36;1m") < 0) {
+                    if (ce_find_span(ls + q, ll - q, "verdict=FAIL") >= 0 ||
+                        ce_find_span(ls + q, ll - q, "\tfail=0\t") < 0 ||
+                        ce_find_span(ls + q, ll - q, "invalid=0") < 0) {
+                        cq_bad = 1;
+                    }
+                }
+            }
+        }
+        free(lb);
+    }
+
+    char failed_list[256];
+    long fl_at = 0;
+    const char *first_origin = "-";
+    const char *first_diag = "-";
+    failed_list[0] = 0;
+
+    for (i = 0; i < 6; i++) {
+        int ok = cell_seen[i] && tx_eqz(cell_conc[i], "success");
+        if (mut_ignore_cell_fail) ok = 1;
+        if (ok) {
+            pass_cells++;
+        } else {
+            fail_cells++;
+            if (fl_at > 0 && fl_at + 1 < (long)sizeof failed_list) failed_list[fl_at++] = ',';
+            if (!cx_fmt(failed_list + fl_at, sizeof failed_list - (size_t)fl_at, "%s", target_names[i]))
+                fl_at += (long)strlen(failed_list + fl_at);
+            if (tx_eqz(first_diag, "-") && !tx_eqz(cell_diag[i], "-")) {
+                first_diag = cell_diag[i];
+                first_origin = cell_origin[i];
+            }
+        }
+        sy_printf("CI_EARLY_CELL\ttarget=%s\tconclusion=%s\tcheck=%s\torigin=%s\tdiag=%s\n",
+                  target_names[i], cell_conc[i], cell_check[i], cell_origin[i], cell_diag[i]);
+    }
+    if (!failed_list[0]) cx_fmt(failed_list, sizeof failed_list, "-");
+
+    int overall_pass = (fail_cells == 0 && pass_cells == 6 && tx_eqz(run_conc, "success") && !cq_bad);
+    if (mut_ignore_cell_fail) overall_pass = 1;
+
+    sy_printf("CI_EARLY_SUMMARY\trev=%s\tape_sha=%s\trun_id=%s\tverdict=%s\tpass_cells=%d\tfail_cells=%d\tfailed_targets=%s\tfirst_origin=%s\tfirst_diag=%s\n",
+              head_sha, ape_sha, run_id, overall_pass ? "PASS" : "FAIL",
+              pass_cells, fail_cells, failed_list, first_origin, first_diag);
+    return overall_pass ? 0 : 1;
+}
+
+/* ---- Stage 6 Release Assets from Chain Directory or Layout --------------------------------- */
+
+static const char *asset_names[6] = {
+    "unisacc.com", "unisacc.com.build.json", "build.json", "pkg.bin", "slice-win-arm64", "SHA256SUMS"
+};
+
+static int parse_receipt_row(const char *receipt, long rlen, const char *want_key,
+                             char *file_out, long fcap, char sha_out[65], long *bytes_out) {
+    long at = 0, ll;
+    const char *ls;
+    while (line_next(receipt, rlen, &at, &ls, &ll)) {
+        char row[CE_PATH + 256], key[80], file[CE_PATH], sha[65];
+        long bytes = -1;
+        if (ll <= 0 || ll >= (long)sizeof row) continue;
+        mm_copy(row, sizeof row, ls, ll);
+        row[ll] = 0;
+        if (sscanf(row, "%79s\t%4399s\tsha=%64s\tbytes=%ld", key, file, sha, &bytes) == 4) {
+            if (tx_eqz(key, want_key)) {
+                if (cx_fmt(file_out, (size_t)fcap, "%s", file) || cx_fmt(sha_out, 65, "%s", sha)) return -1;
+                *bytes_out = bytes;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+static void stage_from_chain_dir(const char *chain_dir, const char *rev, const char *version,
+                                 const char *stage_dir, char ape_sha_out[65]) {
+    char rp[CE_PATH], ctxp[CE_PATH], ape_src[CE_PATH], p3_src[CE_PATH], wa_src[CE_PATH];
+    char ape_sha[65], p3_sha[65], wa_sha[65], got_sha[65], sid[65];
+    long ape_bytes = -1, p3_bytes = -1, wa_bytes = -1, got_bytes = -1;
+    size_t rn = 0, cn = 0, wan = 0;
+    char *rb, *cb, *wab;
+    int i;
+
+    if (cx_fmt(rp, sizeof rp, "%s/ape-final/ape-receipt.txt", chain_dir)) refuse("CI_EARLY_PATH", rp);
+    rb = cx_read(rp, &rn);
+    if (!rb || rn == 0) refuse("CI_EARLY_RECEIPT_MISSING", rp);
+
+    if (parse_receipt_row(rb, (long)rn, "unisacc-next.com", ape_src, sizeof ape_src, ape_sha, &ape_bytes) ||
+        file_sha_and_size(ape_src, got_sha, &got_bytes) || got_bytes != ape_bytes || !tx_eqz(got_sha, ape_sha)) {
+        free(rb);
+        refuse("CI_EARLY_APE_MISMATCH", "unisacc-next.com missing or sha mismatch vs ape-receipt.txt");
+    }
+    if (parse_receipt_row(rb, (long)rn, "p3", p3_src, sizeof p3_src, p3_sha, &p3_bytes) ||
+        file_sha_and_size(p3_src, got_sha, &got_bytes) || got_bytes != p3_bytes || !tx_eqz(got_sha, p3_sha)) {
+        free(rb);
+        refuse("CI_EARLY_P3_MISMATCH", "p3 package missing or sha mismatch vs ape-receipt.txt");
+    }
+    if (parse_receipt_row(rb, (long)rn, "win/arm64", wa_src, sizeof wa_src, wa_sha, &wa_bytes) ||
+        file_sha_and_size(wa_src, got_sha, &got_bytes) || got_bytes != wa_bytes || !tx_eqz(got_sha, wa_sha)) {
+        free(rb);
+        refuse("CI_EARLY_WIN_ARM64_MISMATCH", "win/arm64 slice missing or sha mismatch vs ape-receipt.txt");
+    }
+    free(rb);
+
+    /* Extract source SID from ctx/context.tsv if present */
+    cx_fmt(sid, sizeof sid, "0000000000000000000000000000000000000000000000000000000000000000");
+    if (!cx_fmt(ctxp, sizeof ctxp, "%s/ctx/context.tsv", chain_dir) && (cb = cx_read(ctxp, &cn))) {
+        long at = 0, ll;
+        const char *ls;
+        while (line_next(cb, (long)cn, &at, &ls, &ll)) {
+            if (ll >= 71 && tx_prefix(ls, ll, "source\t", 7)) {
+                char s64[65];
+                mm_copy(s64, sizeof s64, ls + 7, 64);
+                s64[64] = 0;
+                if (is_hex(s64, 64)) cx_fmt(sid, sizeof sid, "%s", s64);
+            }
+        }
+        free(cb);
+    }
+
+    if (sy_mkdir_all(stage_dir, 0755)) refuse("CI_EARLY_STAGE_DIR", stage_dir);
+
+    /* 1. unisacc.com */
+    {
+        char dst[CE_PATH];
+        if (cx_fmt(dst, sizeof dst, "%s/unisacc.com", stage_dir) || sy_copy(ape_src, dst, 0755) || sy_chmod(dst, 0755))
+            refuse("CI_EARLY_STAGE_APE", dst);
+    }
+    /* 2. pkg.bin */
+    {
+        char dst[CE_PATH];
+        if (cx_fmt(dst, sizeof dst, "%s/pkg.bin", stage_dir) || sy_copy(p3_src, dst, 0644))
+            refuse("CI_EARLY_STAGE_PKG", dst);
+    }
+    /* 3. slice-win-arm64 (inject candidate version into UNISACC_VERSION_SLOT_0000000000 if uninjected) */
+    {
+        char dst[CE_PATH];
+        wab = cx_read(wa_src, &wan);
+        if (!wab || wan == 0) refuse("CI_EARLY_STAGE_SLICE", wa_src);
+        if (ce_find_span(wab, (long)wan, "UNISACC_VERSION_SLOT_0000000000") >= 0) {
+            if (rv_inject_slot((unsigned char *)wab, (long)wan, version)) {
+                free(wab);
+                refuse("CI_EARLY_SLICE_INJECT", "rv_inject_slot failed on win/arm64 slice");
+            }
+        }
+        if (cx_fmt(dst, sizeof dst, "%s/slice-win-arm64", stage_dir) || cx_write(dst, wab, wan) || sy_chmod(dst, 0755)) {
+            free(wab);
+            refuse("CI_EARLY_STAGE_SLICE", dst);
+        }
+        free(wab);
+    }
+    /* 4. build.json and unisacc.com.build.json */
+    {
+        char bjson[1024], dst1[CE_PATH], dst2[CE_PATH];
+        if (cx_fmt(bjson, sizeof bjson,
+                   "{\n  \"bytes\": %ld,\n  \"commit\": \"%s\",\n  \"schema\": 1,\n  \"settings\": {},\n"
+                   "  \"sources_sha256\": \"%s\",\n  \"product_kind\": \"ape1\",\n  \"product_digest\": \"%s\"\n}\n",
+                   ape_bytes, rev, sid, ape_sha))
+            refuse("CI_EARLY_BUILD_JSON", "format");
+        if (cx_fmt(dst1, sizeof dst1, "%s/build.json", stage_dir) ||
+            cx_fmt(dst2, sizeof dst2, "%s/unisacc.com.build.json", stage_dir) ||
+            cx_write(dst1, bjson, (size_t)(long)strlen(bjson)) ||
+            cx_write(dst2, bjson, (size_t)(long)strlen(bjson)))
+            refuse("CI_EARLY_BUILD_JSON", "write");
+    }
+    /* 5. SHA256SUMS for the 5 assets */
+    {
+        char sums[1024], dst[CE_PATH];
+        long sat = 0;
+        sums[0] = 0;
+        for (i = 0; i < 5; i++) {
+            char p[CE_PATH], h[65];
+            if (cx_fmt(p, sizeof p, "%s/%s", stage_dir, asset_names[i]) ||
+                file_sha_and_size(p, h, 0) ||
+                cx_fmt(sums + sat, sizeof sums - (size_t)sat, "%s  %s\n", h, asset_names[i]))
+                refuse("CI_EARLY_SUMS", asset_names[i]);
+            sat += (long)strlen(sums + sat);
+        }
+        if (cx_fmt(dst, sizeof dst, "%s/SHA256SUMS", stage_dir) || cx_write(dst, sums, (size_t)sat))
+            refuse("CI_EARLY_SUMS", "write SHA256SUMS");
+    }
+    cx_fmt(ape_sha_out, 65, "%s", ape_sha);
+}
+
+static void verify_layout_dir(const char *layout_dir, char ape_sha_out[65]) {
+    int i;
+    for (i = 0; i < 6; i++) {
+        char p[CE_PATH], h[65];
+        long b = 0;
+        if (cx_fmt(p, sizeof p, "%s/%s", layout_dir, asset_names[i]) || file_sha_and_size(p, h, &b) || b <= 0)
+            refuse("CI_EARLY_LAYOUT_MISSING", asset_names[i]);
+        if (i == 0) cx_fmt(ape_sha_out, 65, "%s", h);
+    }
+}
+
+/* Extract the `version` column (column 3, 0-based) from release/candidate.tsv text. */
+static int extract_table_version(const char *text, long n, char *ver_out, long cap) {
+    long at = 0, ll;
+    const char *ls;
+    int row = 0;
+    ver_out[0] = 0;
+    while (line_next(text, n, &at, &ls, &ll)) {
+        if (ll <= 0) continue;
+        if (row == 1) {
+            int col = 0;
+            long i = 0, s = 0;
+            for (i = 0; i <= ll; i++) {
+                if (i == ll || ls[i] == '\t') {
+                    if (col == 3) {
+                        long fl = i - s;
+                        if (fl <= 0 || fl >= cap) return -1;
+                        mm_copy(ver_out, cap, ls + s, fl);
+                        ver_out[fl] = 0;
+                        return rv_valid(ver_out) ? 0 : -1;
+                    }
+                    col++;
+                    s = i + 1;
+                }
+            }
+            return -1;
+        }
+        row++;
+    }
+    return -1;
+}
+
+static void preflight_version_and_rev(const char *root, const char *rev, const char *version,
+                                      const char *stage_dir, const char *ape_sha, int dry) {
+    char ape_path[CE_PATH], ape_out[128], want_ape[64], spec[128], table_buf[16384], rev_ver[32], detail[512];
+    if (cx_fmt(ape_path, sizeof ape_path, "%s/unisacc.com", stage_dir) ||
+        cx_fmt(want_ape, sizeof want_ape, "unisacc %s", version))
+        refuse("CI_EARLY_PATH", "ape_path");
+
+    {
+        char *v[] = {"sh", ape_path, "--version", 0};
+        if (run_trimmed(v, root, 20, ape_out, sizeof ape_out) || (!mut_skip_version_gate && !tx_eqz(ape_out, want_ape))) {
+            cx_fmt(detail, sizeof detail, "ape_out='%s' expected='%s'", ape_out, want_ape);
+            refuse("CI_EARLY_VERSION_MISMATCH", detail);
+        }
+    }
+    {
+        char *v[] = {"git", "show", spec, 0};
+        if (cx_fmt(spec, sizeof spec, "%s:release/candidate.tsv", rev)) refuse("CI_EARLY_PATH", "git spec");
+        if (run_trimmed(v, root, 15, table_buf, sizeof table_buf))
+            refuse("CI_EARLY_REV_INVALID", "cannot read REV:release/candidate.tsv");
+        if (extract_table_version(table_buf, (long)strlen(table_buf), rev_ver, sizeof rev_ver))
+            refuse("CI_EARLY_REV_INVALID", "malformed version column in REV:release/candidate.tsv");
+        if (!mut_skip_version_gate && !tx_eqz(rev_ver, version)) {
+            cx_fmt(detail, sizeof detail, "rev=%s ape_version=%s rev_table_version=%s", rev, version, rev_ver);
+            refuse("CI_EARLY_VERSION_MISMATCH", detail);
+        }
+    }
+    if (!dry) {
+        char *v[] = {"git", "branch", "-r", "--contains", (char *)rev, 0};
+        char rbuf[1024];
+        if (run_trimmed(v, root, 15, rbuf, sizeof rbuf) || !rbuf[0]) {
+            cx_fmt(detail, sizeof detail, "rev=%s not found on any remote branch; push before dispatching CI", rev);
+            refuse("CI_EARLY_REV_NOT_PUSHED", detail);
+        }
+    }
+    sy_printf("CI_EARLY_PREFLIGHT\trev=%s\tversion=%s\tape_sha=%s\trev_table_version=%s\tstatus=PASS\n",
+              rev, version, ape_sha, rev_ver);
+}
+
+static int usage(const char *why) {
+    sy_eprintf("ci-early: %s\n"
+               "usage: ci-early.cx --rev HEX40 (--chain-dir DIR | --base BASE | --layout DIR)\n"
+               "         [--version V] [--tag EARLY_TAG] [--repo OWNER/REPO] [--workflow-ref REF]\n"
+               "         [--out ABS_DIR] [--root DIR] [--poll-ms MS] [--poll-max N] [--keep-draft] [--dry]\n"
+               "       ci-early.cx --parse-only --ci-json FILE [--ci-log FILE] [--rev HEX40] [--ape-sha HEX64]\n",
+               why ? why : "usage");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    const char *rev = 0, *chain_dir = 0, *base_dir = 0, *layout_dir = 0;
+    const char *version_arg = 0, *tag_arg = 0, *repo = "partnernetsoftware/unisacc", *workflow_ref = "main";
+    const char *out_arg = 0, *root_arg = ".", *ci_json = 0, *ci_log = 0, *ape_sha_arg = 0;
+    long poll_ms = 30000;
+    int poll_max = 50, parse_only = 0, dry = 0, keep_draft = 0, i;
+    char root[CE_PATH], out_dir[CE_PATH], stage_dir[CE_PATH], cdir_buf[CE_PATH];
+    char version[32], tag[128], ape_sha[65], rb_file[CE_PATH], rb_text[1024];
+
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (tx_eqz(a, "--")) continue;
+        if (tx_eqz(a, "--parse-only")) { parse_only = 1; continue; }
+        if (tx_eqz(a, "--dry")) { dry = 1; continue; }
+        if (tx_eqz(a, "--keep-draft")) { keep_draft = 1; continue; }
+        if (tx_eqz(a, "--mutate-ignore-cell-fail")) { mut_ignore_cell_fail = 1; continue; }
+        if (tx_eqz(a, "--mutate-skip-version-gate")) { mut_skip_version_gate = 1; continue; }
+        if (tx_eqz(a, "--mutate-drop-diag-origin")) { mut_drop_diag_origin = 1; continue; }
+        if (i + 1 >= argc) return usage(a);
+        const char *b = argv[++i];
+        if (tx_eqz(a, "--rev")) rev = b;
+        else if (tx_eqz(a, "--chain-dir")) chain_dir = b;
+        else if (tx_eqz(a, "--base")) base_dir = b;
+        else if (tx_eqz(a, "--layout")) layout_dir = b;
+        else if (tx_eqz(a, "--version")) version_arg = b;
+        else if (tx_eqz(a, "--tag")) tag_arg = b;
+        else if (tx_eqz(a, "--repo")) repo = b;
+        else if (tx_eqz(a, "--workflow-ref")) workflow_ref = b;
+        else if (tx_eqz(a, "--out")) out_arg = b;
+        else if (tx_eqz(a, "--root")) root_arg = b;
+        else if (tx_eqz(a, "--ci-json")) ci_json = b;
+        else if (tx_eqz(a, "--ci-log")) ci_log = b;
+        else if (tx_eqz(a, "--ape-sha")) ape_sha_arg = b;
+        else if (tx_eqz(a, "--poll-ms")) poll_ms = atol(b);
+        else if (tx_eqz(a, "--poll-max")) poll_max = atoi(b);
+        else return usage(a);
+    }
+
+    if (sy_realpath(root_arg, root, sizeof root) < 0) refuse("CI_EARLY_ROOT", root_arg);
+
+    if (parse_only) {
+        if (!ci_json) return usage("--parse-only requires --ci-json FILE");
+        return parse_ci_files(root, ci_json, ci_log, rev, ape_sha_arg);
+    }
+
+    if (!rev || !is_hex(rev, 40)) refuse("CI_EARLY_REV_INVALID", "--rev must be 40 lowercase hex digits");
+    if (poll_ms < 100 || poll_ms > 30000 || poll_max < 1 || poll_max > 50 || poll_ms * (long)poll_max > 1500000L)
+        refuse("CI_EARLY_POLL_BOUND", "poll bound exceeded: require poll_ms<=30000, poll_max<=50, total<=25m");
+
+    if (version_arg) {
+        if (!rv_valid(version_arg) || cx_fmt(version, sizeof version, "%s", version_arg))
+            refuse("CI_EARLY_VERSION_INVALID", version_arg);
+    } else {
+        char cand_table[CE_PATH];
+        if (cx_fmt(cand_table, sizeof cand_table, "%s/release/candidate.tsv", root) || rv_load(cand_table, version))
+            refuse("CI_EARLY_VERSION_INVALID", "cannot load version from release/candidate.tsv");
+    }
+
+    if (tag_arg) {
+        if (cx_fmt(tag, sizeof tag, "%s", tag_arg)) refuse("CI_EARLY_TAG_UNSAFE", tag_arg);
+    } else {
+        if (cx_fmt(tag, sizeof tag, "v%s-early-%.10s", version, rev)) refuse("CI_EARLY_TAG_UNSAFE", "tag format");
+    }
+    if (!safe_tag(tag)) refuse("CI_EARLY_TAG_UNSAFE", "tag must contain '-early' and only [A-Za-z0-9._-]");
+
+    if (out_arg) {
+        if (out_arg[0] != '/' || cx_fmt(out_dir, sizeof out_dir, "%s", out_arg))
+            refuse("CI_EARLY_OUT_DIR", "--out must be an absolute path");
+    } else {
+        if (cx_fmt(out_dir, sizeof out_dir, "%s/unisacc-ci-early-%d", sy_tmpdir(), (int)sy_pid()))
+            refuse("CI_EARLY_OUT_DIR", "tmpdir path");
+    }
+    if (sy_mkdir_all(out_dir, 0755)) refuse("CI_EARLY_OUT_DIR", out_dir);
+
+    if (!chain_dir && base_dir) {
+        if (cx_fmt(cdir_buf, sizeof cdir_buf, "%s/%s", base_dir, rev)) refuse("CI_EARLY_PATH", "base_dir/rev");
+        chain_dir = cdir_buf;
+    }
+    if (!chain_dir && !layout_dir) return usage("give --chain-dir DIR, --base BASE, or --layout DIR");
+
+    if (chain_dir) {
+        if (cx_fmt(stage_dir, sizeof stage_dir, "%s/assets", out_dir)) refuse("CI_EARLY_PATH", "stage_dir");
+        stage_from_chain_dir(chain_dir, rev, version, stage_dir, ape_sha);
+    } else {
+        if (cx_fmt(stage_dir, sizeof stage_dir, "%s", layout_dir)) refuse("CI_EARLY_PATH", "layout_dir");
+        verify_layout_dir(stage_dir, ape_sha);
+    }
+
+    preflight_version_and_rev(root, rev, version, stage_dir, ape_sha, dry);
+
+    /* Write rollback / cleanup plan before any external command */
+    if (cx_fmt(rb_file, sizeof rb_file, "%s/rollback-early.txt", out_dir) ||
+        cx_fmt(rb_text, sizeof rb_text,
+               "# ci-early rollback & cleanup plan for %s (rev %s)\n"
+               "# Private draft release only; never touches Latest or public release tags.\n"
+               "gh -R %s release delete %s --yes\n",
+               tag, rev, repo, tag) ||
+        cx_write(rb_file, rb_text, (size_t)(long)strlen(rb_text)))
+        refuse("CI_EARLY_ROLLBACK_WRITE", rb_file);
+    sy_printf("CI_EARLY_ROLLBACK\tfile=%s\tcmd=gh -R %s release delete %s --yes\tnote=private-draft-only\n",
+              rb_file, repo, tag);
+
+    char title[128], notes[256], f_tag[160], f_sha[128], f_rev[96];
+    char asset_paths[6][CE_PATH];
+    cx_fmt(title, sizeof title, "unisacc %s-early (%.10s)", version, rev);
+    cx_fmt(notes, sizeof notes, "early CI signal for %s (private draft)", rev);
+    cx_fmt(f_tag, sizeof f_tag, "release_tag=%s", tag);
+    cx_fmt(f_sha, sizeof f_sha, "ape_sha256=%s", ape_sha);
+    cx_fmt(f_rev, sizeof f_rev, "commit=%s", rev);
+    for (i = 0; i < 6; i++) cx_fmt(asset_paths[i], sizeof asset_paths[i], "%s/%s", stage_dir, asset_names[i]);
+
+    char *cmd_create[] = {"gh", "-R", (char *)repo, "release", "create", tag, "--draft", "--title", title, "--notes", notes, "--target", (char *)rev, 0};
+    char *cmd_upload[] = {"gh", "-R", (char *)repo, "release", "upload", tag,
+                          asset_paths[0], asset_paths[1], asset_paths[2], asset_paths[3], asset_paths[4], asset_paths[5], "--clobber", 0};
+    char *cmd_view[] = {"gh", "-R", (char *)repo, "release", "view", tag, "--json", "isDraft", "--jq", ".isDraft", 0};
+    char *cmd_dispatch[] = {"gh", "-R", (char *)repo, "workflow", "run", "candidate-native.yml", "--ref", (char *)workflow_ref, "-f", f_tag, "-f", f_sha, "-f", f_rev, 0};
+    char *cmd_delete[] = {"gh", "-R", (char *)repo, "release", "delete", tag, "--yes", 0};
+
+    if (dry) {
+        show_cmd("DRY", cmd_create);
+        show_cmd("DRY", cmd_upload);
+        show_cmd("DRY", cmd_view);
+        show_cmd("DRY", cmd_dispatch);
+        show_cmd("DRY", cmd_delete);
+        sy_printf("CI_EARLY_DRY\trev=%s\tversion=%s\ttag=%s\tape_sha=%s\tassets=6\tout=%s\tstatus=PASS\n",
+                  rev, version, tag, ape_sha, out_dir);
+        return 0;
+    }
+
+    /* Live execution: verify tag is not an existing public release */
+    {
+        char vout[128];
+        if (run_trimmed(cmd_view, root, 30, vout, sizeof vout) == 0) {
+            if (!tx_prefix(vout, (long)strlen(vout), "true", 4))
+                refuse("CI_EARLY_TAG_PUBLIC", "release tag already exists and is not a private draft");
+        } else {
+            show_cmd("EXEC", cmd_create);
+            if (run_trimmed(cmd_create, root, 55, vout, sizeof vout))
+                refuse("CI_EARLY_DRAFT_CREATE", "gh release create --draft failed");
+        }
+        show_cmd("EXEC", cmd_upload);
+        if (run_trimmed(cmd_upload, root, 55, vout, sizeof vout)) {
+            (void)run_trimmed(cmd_delete, root, 30, vout, sizeof vout);
+            refuse("CI_EARLY_DRAFT_UPLOAD", "gh release upload failed");
+        }
+        show_cmd("READ", cmd_view);
+        if (run_trimmed(cmd_view, root, 30, vout, sizeof vout) || !tx_prefix(vout, (long)strlen(vout), "true", 4)) {
+            (void)run_trimmed(cmd_delete, root, 30, vout, sizeof vout);
+            refuse("CI_EARLY_DRAFT_READBACK", "draft release is not isDraft=true");
+        }
+    }
+
+    /* Record UTC timestamp before dispatch, then trigger candidate-native.yml */
+    char since[64], runid[32], lout[4096];
+    runid[0] = 0;
+    {
+        char *d[] = {"date", "-u", "+%Y-%m-%dT%H:%M:%SZ", 0};
+        if (run_trimmed(d, root, 5, since, sizeof since)) refuse("CI_EARLY_DATE", "date -u failed");
+    }
+    show_cmd("EXEC", cmd_dispatch);
+    if (run_trimmed(cmd_dispatch, root, 55, lout, sizeof lout)) {
+        if (!keep_draft) (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
+        refuse("CI_EARLY_DISPATCH", "gh workflow run candidate-native.yml failed");
+    }
+
+    for (i = 0; i < 6 && !runid[0]; i++) {
+        char *cmd_list[] = {"gh", "-R", (char *)repo, "run", "list", "--workflow", "candidate-native.yml",
+                            "--event", "workflow_dispatch", "--limit", "5", "--branch", (char *)workflow_ref,
+                            "--json", "databaseId,createdAt", "--jq", ".[]|\"\\(.databaseId)\\t\\(.createdAt)\"", 0};
+        if (i == 0) show_cmd("READ", cmd_list);
+        if (run_trimmed(cmd_list, root, 30, lout, sizeof lout) == 0) {
+            long at = 0, ll;
+            const char *ls;
+            while (line_next(lout, (long)strlen(lout), &at, &ls, &ll)) {
+                long tb = tx_chr(ls, ll, '\t');
+                if (tb > 0 && tb < 30) {
+                    char id[32], ca[64];
+                    long cal = ll - tb - 1;
+                    mm_copy(id, sizeof id, ls, tb); id[tb] = 0;
+                    if (cal >= (long)sizeof ca) cal = (long)sizeof ca - 1;
+                    mm_copy(ca, sizeof ca, ls + tb + 1, cal); ca[cal] = 0;
+                    if (strcmp(ca, since) >= 0 && is_digits(id)) {
+                        cx_fmt(runid, sizeof runid, "%s", id);
+                        break;
+                    }
+                }
+            }
+        }
+        if (!runid[0]) sy_sleep_ms(5000);
+    }
+    if (!runid[0]) {
+        if (!keep_draft) (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
+        refuse("CI_EARLY_DISPATCH_ID", "dispatched candidate-native.yml run id not found");
+    }
+
+    /* Bounded poll loop: both iteration cap (poll_max) and wall-clock deadline (t0 + poll_max * poll_ms) */
+    long t0 = sy_now_ms(), deadline_ms = t0 + (long)poll_max * poll_ms;
+    int completed = 0;
+    for (i = 0; i < poll_max && sy_now_ms() <= deadline_ms; i++) {
+        char *cmd_poll[] = {"gh", "-R", (char *)repo, "run", "view", runid, "--json", "status", "--jq", ".status", 0};
+        char st[64];
+        if (i == 0) show_cmd("POLL", cmd_poll);
+        if (run_trimmed(cmd_poll, root, 30, st, sizeof st) == 0 && tx_eqz(st, "completed")) {
+            completed = 1;
+            break;
+        }
+        sy_printf("CI_EARLY_POLL\trun_id=%s\tstep=%d/%d\tstatus=%s\telapsed_ms=%ld\n",
+                  runid, i + 1, poll_max, st[0] ? st : "unknown", sy_now_ms() - t0);
+        if (i + 1 < poll_max) sy_sleep_ms(poll_ms);
+    }
+    if (!completed) {
+        if (!keep_draft) {
+            show_cmd("CLEANUP", cmd_delete);
+            (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
+        }
+        refuse("CI_EARLY_POLL_TIMEOUT", "CI run did not complete within polling bound");
+    }
+
+    char json_out[CE_PATH], log_out[CE_PATH];
+    cx_fmt(json_out, sizeof json_out, "%s/ci-%s.json", out_dir, runid);
+    cx_fmt(log_out, sizeof log_out, "%s/ci-%s.log", out_dir, runid);
+    {
+        char *cmd_json[] = {"gh", "-R", (char *)repo, "run", "view", runid, "--json", "conclusion,createdAt,databaseId,event,headSha,jobs", 0};
+        char *cmd_log[] = {"gh", "-R", (char *)repo, "run", "view", runid, "--log", 0};
+        show_cmd("READ", cmd_json);
+        if (run_to_file(cmd_json, root, 30, json_out)) {
+            if (!keep_draft) (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
+            refuse("CI_EARLY_FETCH_JSON", "gh run view --json failed");
+        }
+        show_cmd("READ", cmd_log);
+        if (run_to_file(cmd_log, root, 55, log_out)) {
+            if (!keep_draft) (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
+            refuse("CI_EARLY_FETCH_LOG", "gh run view --log failed");
+        }
+    }
+
+    if (!keep_draft) {
+        show_cmd("CLEANUP", cmd_delete);
+        if (run_trimmed(cmd_delete, root, 30, lout, sizeof lout))
+            sy_eprintf("ci-early: warning: draft cleanup failed for %s; run: gh -R %s release delete %s --yes\n", tag, repo, tag);
+        else
+            sy_printf("CI_EARLY_CLEANUP\ttag=%s\tstatus=DELETED\n", tag);
+    }
+
+    return parse_ci_files(root, json_out, log_out, rev, ape_sha);
+}

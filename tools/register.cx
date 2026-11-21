@@ -689,6 +689,54 @@ static int rg_sync_publish(const char *sources,size_t sn,const char *batch,size_
 #endif
     rg_retire();printf("REGISTER_SYNC\tstatus=PUBLISHED\tchanged_tables=%d\tchanged_manifests=%d\n",changed,count);return 0;
 }
+/* Shared-table rows another window is still writing (unstaged rows whose source files are untracked)
+   must not decide this layout: a row of the proposed table that is absent from the layout's own base
+   copy (index tree or HEAD) and names a repository path missing from the layout is skipped and named.
+   Rows present in the base copy are kept verbatim, so a staged or committed row whose source is
+   missing still reaches the runner and is refused there (missing-implemented-source). */
+static int rg_path_token(const char *s,size_t n){
+    static const char *ext[]={".cx",".c",".h",".S",".tsv",".md",".sh",0};
+    if(n<4||s[0]=='/'||!memchr(s,'/',n))return 0;
+    for(size_t i=0;i+1<n;i++)if(s[i]=='.'&&s[i+1]=='.')return 0;
+    for(int e=0;ext[e];e++){size_t el=strlen(ext[e]);if(n>el&&!memcmp(s+n-el,ext[e],el))return 1;}
+    return 0;
+}
+static int rg_line_missing_path(const char *lay,const char *s,size_t n){
+    size_t i=0;
+    while(i<n){
+        while(i<n&&(s[i]=='\t'||s[i]==' '||s[i]==';'))i++;
+        size_t b=i;while(i<n&&s[i]!='\t'&&s[i]!=' '&&s[i]!=';')i++;
+        if(i>b&&i-b<1024&&rg_path_token(s+b,i-b)){
+            char rel[1024],p[5600];sy_stat_t st;
+            if(mm_copy(rel,sizeof rel,s+b,i-b))return 0;rel[i-b]=0;
+            if(cx_fmt(p,sizeof p,"%s/%s",lay,rel))return 0;
+            if(sy_lstat(p,&st)==-ENOENT)return 1;
+        }
+    }
+    return 0;
+}
+static char *rg_layout_rows(const char *lay,const char *rel,const char *bytes,size_t n,size_t *outn){
+    char p[5600];size_t bn=0;char *base=0,*out=malloc(n+1);if(!out)return 0;
+    if(!cx_fmt(p,sizeof p,"%s/%s",lay,rel)){sy_stat_t st;if(sy_lstat(p,&st)==0&&st.kind=='f')base=cx_read(p,&bn);}
+    size_t used=0,i=0;
+    while(i<n){
+        size_t b=i;while(i<n&&bytes[i]!='\n')i++;size_t len=i-b;if(i<n)i++;
+        int keep=1;
+        if(len&&bytes[b]!='#'&&rg_line_missing_path(lay,bytes+b,len)){
+            keep=0;
+            if(base)for(size_t k=0;k+len<=bn;k++){
+                if((k==0||base[k-1]=='\n')&&!memcmp(base+k,bytes+b,len)&&(k+len==bn||base[k+len]=='\n')){keep=1;break;}
+            }
+            if(!keep){printf("REGISTER_LAYOUT_SKIP\ttable=%s\trow=",rel);fwrite(bytes+b,1,len,stdout);fputc('\n',stdout);}
+        }
+        if(keep){if(mm_copy(out+used,n+1-used,bytes+b,i-b)){free(base);free(out);return 0;}used+=i-b;}
+    }
+    free(base);*outn=used;return out;
+}
+static int rg_layout_table(const char *lay,const char *rel,const char *bytes,size_t n){
+    size_t on=0;char p[5600];char *f=rg_layout_rows(lay,rel,bytes,n,&on);int rc=!f||cx_fmt(p,sizeof p,"%s/%s",lay,rel)||sy_write_atomic(p,f,on,0644);
+    free(f);return rc;
+}
 /* A cold layout contains the complete tracked source tree and fresh compiler intermediates. */
 static int rg_clean_layout(const char *private_dir){
     char why[600];int rc=unisa_safedel(private_dir,SAFEDEL_PURGE|SAFEDEL_RECURSIVE,100000,why,sizeof why);
@@ -713,9 +761,10 @@ static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const c
     rg_file(p,sizeof p,lay,"tests");if(sy_lstat(p,&st)||st.kind!='d')return 2;
     for(int i=0;i<4;i++){
         char testdir[4500],live[4500];size_t n;rg_file(testdir,sizeof testdir,lay,"tests");
-        rg_file(p,sizeof p,testdir,rg_names[i]);rg_file(live,sizeof live,rg_tdir(),rg_names[i]);
+        char rel[64];rg_file(live,sizeof live,rg_tdir(),rg_names[i]);
+        if(cx_fmt(rel,sizeof rel,"tests/%s",rg_names[i]))return 2;
         char *extra=i==3?rg_read_regular(live,&n):0;
-        int rc=sy_write_atomic(p,i==0?sources:i==1?batch:i==2?coverage:extra,i==0?sn:i==1?bn:i==2?cn:n,0644);free(extra);if(rc)return 2;
+        int rc=rg_layout_table(lay,rel,i==0?sources:i==1?batch:i==2?coverage:extra,i==0?sn:i==1?bn:i==2?cn:n);free(extra);if(rc)return 2;
     }
     char db[4500],dbarg[4600],gitlink[4500];rg_file(db,sizeof db,stage,"cold-git-objects");
     if(cx_fmt(dbarg,sizeof dbarg,"--separate-git-dir=%s",db))return 2;
@@ -727,9 +776,19 @@ static int rg_cold_shard(const char *stage,const char *sources,size_t sn,const c
     if(cx_fmt(id,sizeof id,"tools-compile-%03d",shard)||cx_fmt(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\t",id))return 2;
     char temp[4600],privtmp[4500];rg_file(privtmp,sizeof privtmp,lay,"out/cold-tmp");
     if(sy_mkdir(privtmp,0700)||cx_fmt(temp,sizeof temp,"TMPDIR=%s",privtmp))return 2;
-    char *trial[]={"./tools/bound","55","env","-C",lay,"-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","UNISACC_TABLES",temp,"UNISACC_BATCH_TIMES=off","UNISACC_RUN_CACHE=0","UNISACC_UNIT_CACHE=0","sh","./unisacc.com","tests/run-batch.cx","--",lay,out,id,0};
+    /* The runner is test infrastructure, not the shard under test: build it from this layout's own
+       sources before the clock (cxlib.runnerprep, reused only when the layout's use-closure identity and
+       the image sha both match), so 33000 ms measures the batch, not a cold compile of tests/run-batch.cx
+       (measured 19-25 s of the old 37-47 s wall). The batch itself still runs with run/unit caches off. */
+    char rcache[4500],rbin[4400],rwhy[512];int rreused=0;
+    if(cx_fmt(rcache,sizeof rcache,"%s/unisacc-register-native",sy_tmpdir()))return 2;
+    if(sy_mkdir(rcache,0700) && sy_exists(rcache)!=1)return 2;
+    char *trial[]={"./tools/bound","55","env","-C",lay,"-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","UNISACC_TABLES",temp,"UNISACC_BATCH_TIMES=off","UNISACC_RUN_CACHE=0","UNISACC_UNIT_CACHE=0",rbin,lay,out,id,0};
     rg_file(gitlink,sizeof gitlink,lay,".git");
     if(run(init,buf,sizeof buf)||run(add,buf,sizeof buf)||run(commit,buf,sizeof buf)){sy_unlink(gitlink);return 2;}
+    if(rn_prepare(lay,"tests/run-batch.cx",rcache,rbin,sizeof rbin,&rreused,rwhy,sizeof rwhy)){
+        sy_unlink(gitlink);fprintf(stderr,"REFUSE cold-runner-prepare id=%s %s\n",id,rwhy);return 2;}
+    printf("REGISTER_COLD_RUNNER\tid=%s\tsource=tests/run-batch.cx\treused=%d\tuntimed=prep-only\n",id,rreused);
     long start=sy_now_ms();int rc=run(trial,buf,sizeof buf);long elapsed=sy_now_ms()-start;
     if(sy_unlink(gitlink)||rg_clean_layout(db))return 2;
     char timing[128];if(cx_fmt(timing,sizeof timing,"BATCH_TIMING\tid=%s\t",id))return 2;
@@ -792,8 +851,10 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
     {
         char dst_b[4600],dst_c[4600];
         if(cx_fmt(dst_b,sizeof dst_b,"%s/tests/batches.tsv",lay)||cx_fmt(dst_c,sizeof dst_c,"%s/tests/coverage.tsv",lay)){rg_clean_layout(stage);return 2;}
-        sy_unlink(dst_b);sy_unlink(dst_c);
-        if(sy_copy(rg_bpath(),dst_b,0644)||sy_copy(rg_cpath(),dst_c,0644)){rg_clean_layout(stage);return 2;}
+        size_t lbn=0,lcn=0;char *lb=cx_read(rg_bpath(),&lbn),*lc=cx_read(rg_cpath(),&lcn);
+        int trc=!lb||!lc||rg_layout_table(lay,"tests/batches.tsv",lb,lbn)||rg_layout_table(lay,"tests/coverage.tsv",lc,lcn);
+        free(lb);free(lc);(void)dst_b;(void)dst_c;
+        if(trc){rg_clean_layout(stage);return 2;}
     }
     rg_file(p,sizeof p,lay,"unisacc.com");
     if(!realpath("./unisacc.com",ape)||sy_lstat(p,&st)!=-ENOENT||sy_copy(ape,p,0755)){rg_clean_layout(stage);return 2;}
@@ -1214,6 +1275,13 @@ static int rg_tool_mode(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    /* --layout-rows LAYDIR REL PROPOSED: print the rows of PROPOSED a layout keeps (fixture entry for
+       tools/check-register-cold-runner.cx; reads only, writes nothing). */
+    if(argc==5 && tx_eqz(argv[1],"--layout-rows")){
+        size_t pn=0,on=0;char *pb=cx_read(argv[4],&pn);if(!pb){fprintf(stderr,"register: layout-rows read %s\n",argv[4]);return 2;}
+        char *o=rg_layout_rows(argv[2],argv[3],pb,pn,&on);if(!o)return 2;
+        fwrite(o,1,on,stdout);free(o);free(pb);return 0;
+    }
     if(argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--recover")){
         int fd=rg_try_lock(rg_lock_ms());if(fd<0)rg_die("recovery-lock-timeout",rg_lockpath());
         rg_report_retired();

@@ -6,7 +6,7 @@
 #pragma unisa use cxlib.sessionroot
 static int passed,failed;
 static void ck(int ok,const char *id){printf("%s\t%s\n",ok?"PASS":"FAIL",id);if(ok)passed++;else failed++;}
-static char tmp[4096],bin[4400];
+static char tmp[4096],bin[4400],driver_path[4096];
 static np_result actual(char **v){
     np_result r={0};char why[512];if(np_run(v,0,0,30,&r,why,sizeof why)){fprintf(stderr,"check-release-flow: %s\n",why);exit(2);}return r;
 }
@@ -58,6 +58,15 @@ static void historical_case(int newer){
     expand(path(fixtures,newer?"82-decisions.tsv":"81-decisions.tsv"),approval,dir);
     char *cmd[]={bin,"replay-machine","--inputs",input,"--out",dir,"--decisions",approval,0};r=actual(cmd);
     ck(!r.rc&&r.out&&strstr(r.out,newer?"files=19":"files=13"),newer?"archived-stage-a-082":"archived-stage-a-081");np_free(&r);
+    if(newer){
+        /* a stage written after the home-path scrub: archived evidence with "~/" must replay equal */
+        char *packout=path(ev,"cache-manager.tsv");size_t pn=0;char *raw=cx_read(packout,&pn);
+        char hp[8];if(cx_fmt(hp,sizeof hp,"/%s/","home"))exit(2);   /* built at run time: no absolute path literal */
+        int had=raw&&strstr(raw,hp)!=0;free(raw);
+        char *scrub[]={"sh",driver_path,"tools/scrub-home-paths.cx","--","--write",packout,0};np_result s=actual(scrub);np_free(&s);
+        char *after=cx_read(packout,&pn);int clean=after&&!strstr(after,hp);free(after);
+        r=actual(cmd);ck(had&&clean&&!r.rc&&r.out&&strstr(r.out,"files=19"),"scrubbed-stage-replays-082");np_free(&r);
+    }
     char *failtable=path(ev,"expected-fail.tsv");char *rows=cx_read(failtable,&n);
     char *line=rows?strchr(rows,'\n'):0,*count=line?strchr(line+1,'\t'):0;
     if(!count||count[1]<'0'||count[1]>'9')exit(2);
@@ -68,7 +77,7 @@ int main(int argc,char **argv){
     char base[4096];sy_stat_t st;
     if(sr_default("release-flow",base,sizeof base)||(sy_mkdir(base,0700)&&(sy_lstat(base,&st)||st.kind!='d'||st.uid!=sy_uid()||st.mode!=0700))||
        sy_mkdtemp(base,"check",tmp,sizeof tmp)||cx_fmt(bin,sizeof bin,"%s/tool",tmp))return 2;
-    char driver[4096];if(sy_realpath("./unisacc.com",driver,sizeof driver)<0)return 2;
+    char driver[4096];if(sy_realpath("./unisacc.com",driver,sizeof driver)<0||cx_fmt(driver_path,sizeof driver_path,"%s",driver))return 2;
     char *build[]={"sh",driver,"tools/release-flow.cx","-o",bin,0};
     if(argc==2){if(sy_realpath(argv[1],bin,sizeof bin)<0)return 2;}
     else{np_result b=actual(build);if(b.rc){fprintf(stderr,"%s",b.err?b.err:"");return 2;}np_free(&b);}

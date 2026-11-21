@@ -8,13 +8,16 @@
  * 断言:(a) 未过期单 TASK_LEFT left_s=600 used_s=600 且只打一次;(b) 过期单 TASK_OVERDUE over_s=300 used_s=900;
  *   (c) 已完成单不打;(d) 他人单不打;(e) 属主为前缀名不打;(f) 无 DEVSVC_OWNER 不打;(g) 非 flow 族子命令不打;
  *   (h) 退出码不变(f 无参仍 rc 2,config 仍 rc 0);(i) 时钟行不进 stdout。末行 CHECK_DEVSVC_REMAIN<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use cxlib.devtask
+#pragma unisa use cxlib.netpack
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
-#pragma unisa use sysx.process
+#pragma unisa use sys.sha
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use text.build
 
 #define F(dst, cap, ...) do { if (snprintf(dst, cap, __VA_ARGS__) < 0) fputs("", stderr); } while (0)
 static int nfail;
@@ -36,17 +39,63 @@ static int sh(const char *cmd) { char *v[] = {"sh", "-c", (char *)cmd, 0}; retur
 static int has(const char *s) { return strstr(err, s) != 0; }
 static int count(const char *s) { int n = 0; const char *p = err; while ((p = strstr(p, s)) != 0) { n++; p++; } return n; }
 static int wfile(const char *rel, const char *txt) { char p[400]; F(p, sizeof p, "%s/%s", fx, rel); return sy_write_atomic(p, (char *)txt, strlen(txt), 0644); }
+static int file_has(const char *path, const char *sub) {
+    unsigned char *b = 0; int64_t n = 0; int ok = 0;
+    if (!sy_read_file(path, &b, &n, 1 << 20) && b) {
+        long sl = (long)strlen(sub), i;
+        for (i = 0; i + sl <= n; i++) if (!memcmp(b + i, sub, (size_t)sl)) { ok = 1; break; }
+    }
+    if (b) free(b);
+    return ok;
+}
+static int evpath_hits(const char *repo, const char *ev_target) {
+    DwTask t; sb *in_b = sb_new(), *out_b = sb_new(), *for_b = sb_new();
+    int nin = 0, nout = 0, nfor = 0, rc; char why[256], osha[65], row[512];
+    memset(&t, 0, sizeof t);
+    F(t.write, sizeof t.write, "in");
+    F(t.root, sizeof t.root, "%s", repo);
+    F(t.owner, sizeof t.owner, "me");
+    t.opened = 100;
+    (void)sy_sha256_hex("out\n", 4, osha);
+    F(row, sizeof row, "EV\t99\t200\tf.write\towner=me\tpath=other.txt\tsha=%s\n", osha);
+    (void)sy_append_file(ev_target, row, strlen(row), 0600);
+    rc = dw_diff(&t, in_b, out_b, for_b, &nin, &nout, &nfor, why, sizeof why);
+    sb_free(in_b); sb_free(out_b); sb_free(for_b);
+    return rc == 0 && nout == 1 && nfor == 0;
+}
 #define WO(id, owner, opened, deadline, done) "id\t" id "\ntitle\tt\nwrite\ttools/x.cx\nroot\t/r\nowner\t" owner "\nopened\t" opened "\ndeadline\t" deadline "\ndone\t" done "\naccept\ttrue\n"
 int main(void) {
-    char c[900], env[400]; int rc;
+    char c[2048], env[400], root[1024], repo[240], fhome[240], phome[240], ppin[240], dvcore[240], dvlaunch[240], rreal[240], hex[65], chash[65], lhash[65];
+    char ev_priv[320], ev_pin[320], ev_shared[360], wrel[200];
+    unsigned char *cb = 0; int64_t cn = 0; int rc;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (sy_read_file("tools/devsvc-core.cx", &cb, &cn, 1 << 22) || !cb || sy_sha256_hex(cb, (long)cn, chash)) return 2;
+    free(cb); cb = 0; chash[16] = 0;
+    if (sy_read_file("tools/devsvc.cx", &cb, &cn, 1 << 22) || !cb || sy_sha256_hex(cb, (long)cn, lhash)) return 2;
+    free(cb); cb = 0; lhash[16] = 0;
     F(fx, sizeof fx, "/tmp/dvrck-%d", sy_pid());
-    F(c, sizeof c, "mkdir -p %s/work", fx);
-    if (sh(c) != 0) { printf("FAIL\tdevsvc-remain.fixture\n"); return 1; }
+    F(repo, sizeof repo, "%s/repo", fx);
+    F(fhome, sizeof fhome, "%s/fhome", fx);
+    F(phome, sizeof phome, "%s/phome", fx);
+    F(ppin, sizeof ppin, "%s/ppin", fx);
+    F(dvcore, sizeof dvcore, "/tmp/dvrck-core-%s", chash);
+    F(dvlaunch, sizeof dvlaunch, "/tmp/dvrck-launch-%s", lhash);
+    F(c, sizeof c,
+      "mkdir -p %s/work %s/tools %s/in %s %s %s && cd %s && git init -q -b main && "
+      "printf 'a\\n' > in/a.txt && cp %s/tools/devsvc-repo.tsv tools/devsvc-repo.tsv && "
+      "printf '#!/bin/sh\\ncase \"$1\" in\\n  *tools/commit-own.cx)\\n    printf \"COMMIT_OWN_FAIL\\\\tclass=precommit\\\\nXCOMMIT_OWN_FAIL\\\\tclass=wrong\\\\nPRECOMMIT_GATE_FAIL\\\\tgate=precommit\\\\treason=blocked\\\\n\" >&2\\n    exit 1;;\\n  *tools/devsvc-core.cx)\\n    shift; [ \"$1\" = \"--\" ] && shift; exec %s \"$@\";;\\nesac\\nexec sh %s/unisacc.com \"$@\"\\n' > unisacc.com && "
+      "chmod +x unisacc.com && git add . && git -c user.name=t -c user.email=t@t commit -qm init && "
+      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc-core.cx && mv -f %s.%d %s; }; } && "
+      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc.cx && mv -f %s.%d %s; }; }",
+      fx, repo, repo, fhome, phome, ppin, repo, root, dvcore, root,
+      dvcore, root, dvcore, sy_pid(), root, dvcore, sy_pid(), dvcore,
+      dvlaunch, root, dvlaunch, sy_pid(), root, dvlaunch, sy_pid(), dvlaunch);
+    if (sh(c) != 0) { printf("FAIL\tdevsvc-remain.fixture\nNOTE\tlast-stderr\t%.500s\n", err); return 1; }
     if (wfile("work/index.tsv", "a\nb\nc\nd\nzz\na\n") || wfile("work/a.tsv", WO("a", "me", "400", "1600", "0")) || wfile("work/b.tsv", WO("b", "me", "100", "700", "0"))
         || wfile("work/c.tsv", WO("c", "me", "100", "1600", "900")) || wfile("work/d.tsv", WO("d", "other", "400", "1600", "0"))) { printf("FAIL\tdevsvc-remain.fixture-write\n"); return 1; }
-    F(env, sizeof env, "UNISACC_DEVSVC_DIR=%s DEVTASK_NOW=1000", fx);
+    F(env, sizeof env, "cd %s && UNISACC_DEVSVC_DIR=%s DEVTASK_NOW=1000", repo, fx);
 
-    F(c, sizeof c, "%s DEVSVC_OWNER=me sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    F(c, sizeof c, "%s DEVSVC_OWNER=me %s --dev f", env, dvlaunch); rc = sh(c);
     ck(rc == 2, "rc-kept-usage");
     ck(has("TASK_LEFT\tid=a\tleft_s=600\tused_s=600\n"), "left");
     ck(count("id=a\t") == 1, "left-once");
@@ -56,18 +105,106 @@ int main(void) {
     ck(!has("id=zz"), "missing-file-silent");
     ck(!strstr(out, "TASK_"), "not-on-stdout");
 
-    F(c, sizeof c, "%s DEVSVC_OWNER=m sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    F(c, sizeof c, "%s DEVSVC_OWNER=m %s --dev f", env, dvlaunch); rc = sh(c);
     ck(rc == 2 && !has("TASK_"), "prefix-owner-silent");
 
-    F(c, sizeof c, "%s DEVSVC_OWNER=other sh ./unisacc.com tools/devsvc.cx -- flow", env); rc = sh(c);
+    F(c, sizeof c, "%s DEVSVC_OWNER=other %s --dev flow", env, dvlaunch); rc = sh(c);
     ck(rc != 0 && has("TASK_LEFT\tid=d\tleft_s=600\tused_s=600\n") && !has("id=a\t"), "flow-other-owner-own-order");
 
-    F(c, sizeof c, "%s env -u DEVSVC_OWNER sh ./unisacc.com tools/devsvc.cx -- f", env); rc = sh(c);
+    F(c, sizeof c, "%s env -u DEVSVC_OWNER %s --dev f", env, dvlaunch); rc = sh(c);
     ck(rc == 2 && !has("TASK_"), "no-owner-silent");
 
-    F(c, sizeof c, "%s DEVSVC_OWNER=me sh ./unisacc.com tools/devsvc.cx -- config", env); rc = sh(c);
+    F(c, sizeof c, "%s DEVSVC_OWNER=me %s --dev config", env, dvlaunch); rc = sh(c);
     ck(rc == 0, "rc-kept-config");
     ck(!has("TASK_") && strstr(out, "DEVSVC_CONFIG") != 0, "non-flow-subcommand-silent");
+
+    /* 多进程私有 DEVSVC_HOME / DV_PIN_DIR 实例事件隔离与 commit_class_from 双等号回归(绝不触全局 pinned) */
+    {
+        ck(sy_exists(dvcore) == 1 && sy_exists(dvlaunch) == 1, "iso-fixture-build");
+        if (sy_realpath(repo, rreal, sizeof rreal) < 0) F(rreal, sizeof rreal, "%s", repo);
+        (void)sy_sha256_hex(rreal, strlen(rreal), hex);
+        hex[16] = 0;
+        F(ev_priv, sizeof ev_priv, "%s/%s/events.tsv", phome, hex);
+        F(ev_pin, sizeof ev_pin, "%s/%s/events.tsv", ppin, hex);
+        F(ev_shared, sizeof ev_shared, "%s/.cache/unisacc/devsvc/%s/events.tsv", fhome, hex);
+
+        /* (1) 多进程并发:4 个子进程只设 DEVSVC_HOME(unset UNISACC_DEVSVC_DIR 与 DV_PIN_DIR),事件全落 phome/<hex16>/events.tsv,不落 fhome/.cache */
+        F(c, sizeof c,
+          "cd %s && for i in 1 2 3 4; do "
+          "(env -u UNISACC_DEVSVC_DIR -u DV_PIN_DIR -u DEVSVC_FG_CWD -u DEVSVC_FG_TOP -u DEVSVC_FG_COMMON "
+          "HOME=%s DEVSVC_HOME=%s DEVSVC_SELF_BIN=%s DEVSVC_DEV=1 %s events emit priv.iso worker=$i) & "
+          "done; wait",
+          repo, fhome, phome, dvcore, dvcore);
+        rc = sh(c);
+        ck(rc == 0 && sy_exists(ev_priv) == 1 &&
+           file_has(ev_priv, "priv.iso\tworker=1") && file_has(ev_priv, "priv.iso\tworker=2") &&
+           file_has(ev_priv, "priv.iso\tworker=3") && file_has(ev_priv, "priv.iso\tworker=4"),
+           "priv-home-multiprocess-events-landed");
+        ck(sy_exists(ev_shared) == 0, "priv-home-never-pollutes-shared-home");
+
+        /* (2) 多进程并发被门拒绝的 git commit:验证 commit_class_from 偏移 22 产出 class=precommit 而非 class==precommit 双等号或 class=wrong */
+        F(c, sizeof c,
+          "cd %s && for i in 1 2; do "
+          "(env -u UNISACC_DEVSVC_DIR -u DV_PIN_DIR -u DEVSVC_FG_CWD -u DEVSVC_FG_TOP -u DEVSVC_FG_COMMON "
+          "HOME=%s DEVSVC_HOME=%s DEVSVC_SELF_BIN=%s DEVSVC_DEV=1 %s git commit -m block$i --whole in/a.txt >/dev/null 2>&1) & "
+          "done; wait; "
+          "env -u UNISACC_DEVSVC_DIR -u DV_PIN_DIR HOME=%s DEVSVC_HOME=%s DEVSVC_SELF_BIN=%s %s stop >/dev/null 2>&1 || true",
+          repo, fhome, phome, dvcore, dvcore, fhome, phome, dvcore, dvcore);
+        (void)sh(c);
+        ck(file_has(ev_priv, "\tclass=precommit\t") &&
+           !file_has(ev_priv, "class==precommit") && !file_has(ev_priv, "\tclass=wrong\t"),
+           "commit-class-no-double-equals");
+
+        /* (3) DEVSVC_HOME 为空且设 DV_PIN_DIR(未设 UNISACC_DEVSVC_DIR)时:事件跟随 DV_PIN_DIR/<hex16>/events.tsv,不落共享 HOME */
+        F(c, sizeof c,
+          "cd %s && env -u UNISACC_DEVSVC_DIR -u DEVSVC_FG_CWD -u DEVSVC_FG_TOP -u DEVSVC_FG_COMMON "
+          "HOME=%s DEVSVC_HOME= DV_PIN_DIR=%s DEVSVC_SELF_BIN=%s DEVSVC_DEV=1 %s events emit pin.iso worker=p1 && "
+          "env -u UNISACC_DEVSVC_DIR HOME=%s DEVSVC_HOME= DV_PIN_DIR=%s DEVSVC_SELF_BIN=%s %s stop >/dev/null 2>&1 || true",
+          repo, fhome, ppin, dvcore, dvcore, fhome, ppin, dvcore, dvcore);
+        rc = sh(c);
+        ck(rc == 0 && sy_exists(ev_pin) == 1 && file_has(ev_pin, "pin.iso\tworker=p1") && sy_exists(ev_shared) == 0,
+           "pin-dir-fallback-events-landed");
+
+        /* (4) dw_evpath (cxlib.devtask) 在 DEVSVC_HOME、DV_PIN_DIR 与默认 HOME(剥离 /.git)下的路径一致性 */
+        F(c, sizeof c, "printf 'out\\n' > %s/other.txt && mkdir -p %s/%s %s/%s %s/.cache/unisacc/devsvc/%s",
+          repo, phome, hex, ppin, hex, fhome, hex);
+        (void)sh(c);
+        unsetenv("DEVTASK_EVENTS"); unsetenv("UNISACC_DEVSVC_DIR");
+        setenv("HOME", fhome, 1); setenv("DEVSVC_HOME", phome, 1); unsetenv("DV_PIN_DIR");
+        ck(evpath_hits(repo, ev_priv), "devtask-evpath-follows-devsvc-home");
+        setenv("DEVSVC_HOME", "", 1); setenv("DV_PIN_DIR", ppin, 1);
+        ck(evpath_hits(repo, ev_pin), "devtask-evpath-follows-dv-pin-dir");
+        unsetenv("DEVSVC_HOME"); unsetenv("DV_PIN_DIR");
+        ck(evpath_hits(repo, ev_shared), "devtask-evpath-strips-dotgit-in-home");
+
+        /* (5) task_left (tools/devsvc.cx) 在 DEVSVC_HOME、DV_PIN_DIR 与默认 HOME(剥离 /.git)下的工单时钟 */
+        F(c, sizeof c, "mkdir -p %s/%s/work %s/%s/work %s/.cache/unisacc/devsvc/%s/work", phome, hex, ppin, hex, fhome, hex);
+        (void)sh(c);
+        F(wrel, sizeof wrel, "phome/%s/work/index.tsv", hex); (void)wfile(wrel, "h1\n");
+        F(wrel, sizeof wrel, "phome/%s/work/h1.tsv", hex); (void)wfile(wrel, WO("h1", "me", "400", "1600", "0"));
+        F(wrel, sizeof wrel, "ppin/%s/work/index.tsv", hex); (void)wfile(wrel, "p1\n");
+        F(wrel, sizeof wrel, "ppin/%s/work/p1.tsv", hex); (void)wfile(wrel, WO("p1", "me", "500", "1500", "0"));
+        F(wrel, sizeof wrel, "fhome/.cache/unisacc/devsvc/%s/work/index.tsv", hex); (void)wfile(wrel, "s1\n");
+        F(wrel, sizeof wrel, "fhome/.cache/unisacc/devsvc/%s/work/s1.tsv", hex); (void)wfile(wrel, WO("s1", "me", "600", "1400", "0"));
+
+        F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR -u DV_PIN_DIR HOME=%s DEVSVC_HOME=%s DEVSVC_OWNER=me DEVTASK_NOW=1000 %s --dev f",
+          repo, fhome, phome, dvlaunch);
+        rc = sh(c);
+        ck(rc == 2 && has("TASK_LEFT\tid=h1\tleft_s=600\tused_s=600\n"), "task-left-follows-devsvc-home");
+
+        F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR HOME=%s DEVSVC_HOME= DV_PIN_DIR=%s DEVSVC_OWNER=me DEVTASK_NOW=1000 %s --dev f",
+          repo, fhome, ppin, dvlaunch);
+        rc = sh(c);
+        ck(rc == 2 && has("TASK_LEFT\tid=p1\tleft_s=500\tused_s=500\n"), "task-left-follows-dv-pin-dir");
+
+        F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR -u DEVSVC_HOME -u DV_PIN_DIR HOME=%s GIT_DIR=%s/.git DEVSVC_OWNER=me DEVTASK_NOW=1000 %s --dev f",
+          repo, fhome, repo, dvlaunch);
+        rc = sh(c);
+        ck(rc == 2 && has("TASK_LEFT\tid=s1\tleft_s=400\tused_s=400\n"), "task-left-strips-dotgit-in-home");
+        F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR -u DEVSVC_HOME -u DV_PIN_DIR HOME=%s DEVSVC_SELF_BIN=%s %s stop >/dev/null 2>&1 || true",
+          repo, fhome, dvcore, dvcore);
+        (void)sh(c);
+    }
 
     F(c, sizeof c, "rm -rf %s", fx); (void)sh(c);
     printf("CHECK_DEVSVC_REMAIN\tfailed=%d\n", nfail);

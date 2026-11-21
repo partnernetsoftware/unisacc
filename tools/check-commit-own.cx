@@ -137,6 +137,7 @@ static void case_multikey(void) {
    stays out (and stays in the work tree), and reg-manifest --check --index -- the precommit gate's verdict --
    reports nothing for them.  Then a foreign row whose field equals a new id (zzrb1) is refused, nothing committed. */
 #define CO_MK "mk(){ sh \"$COMMIT_GATE_FIXTURE_PRODUCT\" \"$COMMIT_GATE_FIXTURE_SOURCE\" -- --fixture-batch \"$1\" commit-own > \"fixture-$1.out\"; }; "
+#define CO_QUERY "query(){ tool=$1; shift; if [ -n \"${DEVSVC_SELF_BIN:-}\" ] && [ -x \"$DEVSVC_SELF_BIN\" ]; then \"$DEVSVC_SELF_BIN\" run --local --quiet \"$tool\" -- \"$@\"; else sh ./unisacc.com tools/devsvc.cx -- run --local --quiet \"$tool\" -- \"$@\"; fi; }; "
 /* --registered ID...: the registration unit of one set (one manifest plus its coverage and packages rows) is
    committed in one call: the set's rows reach HEAD, a foreign row appended by someone else stays out and stays
    in the work tree, and reg-manifest --check --index -- the precommit gate's verdict -- reports nothing for it.
@@ -148,15 +149,20 @@ static void case_registered(int which) {
     if (cx_fmt(name, sizeof name, "registered-set-%d", which) ||
         cx_fmt(want, sizeof want, "RC=0\n1\nHEADROWS\n1\n1\n1\n1\nFOREIGN\n0\n1\nGATE\n0\nEND")) die("path");
     if (cx_fmt(script, sizeof script,
-        "cd %s/clone && id=zzra%d; " CO_MK "mk $id; printf 'zzforeign'$id'\\tother\\n' >> tests/batches.tsv; "
-        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m reg$id --registered $id > reg.out 2>&1; echo RC=$?; grep -c '^REGISTERED' reg.out; "
-        "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c \"^$id\"; git show HEAD:tests/coverage.tsv | grep -c \"^interfaces.$id\"; "
-        "git show HEAD:tests/batches.tsv > head-registry.tsv && sh ./unisacc.com tools/batch-packages-gen.cx -- --query --registry head-registry.tsv --row \"$id\" | grep -c \"$id\"; git ls-tree --name-only HEAD tests/manifests/ | grep -c \"$id\"; "
+        "cd %s/clone && id=zzra%d; " CO_MK CO_QUERY "mk $id; printf 'zzforeign'$id'\\tother\\n' >> tests/batches.tsv; "
+        "query tools/commit-own.cx -m reg$id --registered $id > reg.out 2>&1; echo RC=$?; grep -c '^REGISTERED' reg.out; "
+        "git show HEAD:tests/batches.tsv > head-registry.tsv || exit 2; "
+        "query tools/batch-packages-gen.cx --query --registry head-registry.tsv --row \"$id\" > pkg-fact.out & PQ=$!; "
+        "query tools/reg-manifest.cx --check --index > verify-reg.out & RQ=$!; "
+        "wait \"$PQ\"; PR=$?; wait \"$RQ\"; RR=$?; [ \"$PR:$RR\" = 0:0 ] || { echo REGISTER_QUERY_RC=$PR:$RR; exit 2; }; "
+        "echo HEADROWS; grep -c \"^$id\" head-registry.tsv; git show HEAD:tests/coverage.tsv | grep -c \"^interfaces.$id\"; "
+        "grep -c \"$id\" pkg-fact.out; git ls-tree --name-only HEAD tests/manifests/ | grep -c \"$id\"; "
         "echo FOREIGN; git show HEAD:tests/batches.tsv | grep -c zzforeign$id; grep -c zzforeign$id tests/batches.tsv; "
-        "echo GATE; sh ./unisacc.com tools/reg-manifest.cx -- --check --index | grep -c \"$id\"; echo END",
+        "echo GATE; grep -c \"$id\" verify-reg.out; echo END",
         base, which, 0, 0, 0)) die("script");
-    sh(script, out, sizeof out);
+    int rc=sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, name);
+    if(rc)sy_eprintf("REGISTER_FIXTURE rc=%d\n%s\n",rc,out);
 }
 
 /* The refusal half on its own: an added registry line that is not a manifest row (a whole-field match on someone
@@ -164,8 +170,8 @@ static void case_registered(int which) {
 static void case_registered_refuse(void) {
     char out[8192], script[4096];
     if (cx_fmt(script, sizeof script,
-        "cd %s/clone && " CO_MK "mk zzrb1; printf 'zzother\\tsee\\tzzrb1\\n' >> tests/batches.tsv; "
-        "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m misfire --registered zzrb1 > mf.out 2>&1; echo RC=$?; grep -c 'not a manifest row' mf.out; "
+        "cd %s/clone && " CO_MK CO_QUERY "mk zzrb1; printf 'zzother\\tsee\\tzzrb1\\n' >> tests/batches.tsv; "
+        "query tools/commit-own.cx -m misfire --registered zzrb1 > mf.out 2>&1; echo RC=$?; grep -c 'not a manifest row' mf.out; "
         "echo HEADROWS; git show HEAD:tests/batches.tsv | grep -c zzrb1; echo END", base, 0, 0, 0, 0)) die("script");
     sh(script, out, sizeof out);
     {   const char *want = "RC=1\n1\nHEADROWS\n0\nEND";
@@ -177,10 +183,10 @@ static void case_registered_refuse(void) {
    the commit (another agent committed meanwhile) is retried once on the new HEAD when none of the commit's paths
    changed there; a --whole/--keyed of a table --registered owns is dropped with a NOTE instead of refusing. */
 #define CO_HK(dir) "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$PWD/" dir " "
-#define CO_RUN "sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- "
+#define CO_RUN "query tools/commit-own.cx "
 static void s2_want(const char *script_tail, const char *want, const char *name) {
     char out[8192], script[6000];
-    if (cx_fmt(script, sizeof script, "cd %s/clone && %s", base, script_tail)) die("script");
+    if (cx_fmt(script, sizeof script, "cd %s/clone && " CO_QUERY "%s", base, script_tail)) die("script");
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) >= 0, name);
     if (tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) < 0) sy_printf("GOT\t%s\n", out);   /* the evidence of a FAIL */
@@ -225,9 +231,10 @@ static void case_s2(int part) {
             "grep -c 'COMMIT_OWN_FAIL.class=head-moved' r8.out; git log --format=%s -1; git show HEAD:zz-race.txt; echo; echo END",
             "RC=1\n1\nzzrace8\nother\nEND", "s2-head-moved-same-path-not-retried");
     return; }
+    if (part == 3 || part == 4 || part == 5) {
     {   char out[8192], script[6000];
         if (cx_fmt(script, sizeof script,
-            "cd %s/clone && " CO_MK "mk zzs2r; printf 'zzs2foreign\\tother\\n' >> tests/batches.tsv; "
+            "cd %s/clone && " CO_MK CO_QUERY "mk zzs2r; printf 'zzs2foreign\\tother\\n' >> tests/batches.tsv; "
             CO_RUN "-m regw --registered zzs2r --whole tests/batches.tsv > rw.out 2>&1; echo RC=$?; grep -c 'its --keyed/--whole is dropped' rw.out; "
             "git show HEAD:tests/batches.tsv | grep -c '^zzs2r'; git show HEAD:tests/batches.tsv | grep -c zzs2foreign; grep -c zzs2foreign tests/batches.tsv; echo END",
             base, 0, 0, 0, 0)) die("script");
@@ -235,6 +242,8 @@ static void case_s2(int part) {
         {   const char *want = "RC=0\n1\n1\n0\n1\nEND";
             ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 256)) >= 0, "s2-registered-drops-redundant-whole"); }
     }
+    }
+    if (part == 3 || part == 4 || part == 6) {
     s2_want("mkdir -p zzhk_cas1 && printf '#!/bin/sh\\n# tools/precommit.cx\\necho g >> .git/zzcas1.cnt\\n[ -e .git/zzcas1_r ] && exit 0\\n: > .git/zzcas1_r\\n"
             "b=$(printf other | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc1.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc1.idx git update-index --add --cacheinfo 100644,$b,zz-cas-other.txt && t=$(GIT_INDEX_FILE=.git/zzc1.idx git write-tree) && "
@@ -243,7 +252,7 @@ static void case_s2(int part) {
             "grep -c '^COMMIT_CAS_REBASE' casdef.out; wc -l < .git/zzcas1.cnt | tr -d ' '; "
             "printf 'm\\n' > zz-cas-mine.txt; rm -f .git/zzcas1.cnt .git/zzcas1_r; H0=$(git rev-parse HEAD); UNISACC_COMMIT_CAS_REBASE=1 " CO_HK("zzhk_cas1") CO_RUN "-m cas1 --whole zz-cas-mine.txt > cas1.out 2>&1; echo RC=$?; "
             "grep -c \"^COMMIT_TIMING.*gates=skipped-by-disjoint-readset[[:space:]]base=$H0[[:space:]]\" cas1.out; grep -c 'gates_rc=' cas1.out; "
-            "grep -c \"^COMMIT_OWN.*gates=skipped-by-disjoint-readset[[:space:]]base=$H0$\" cas1.out; wc -l < .git/zzcas1.cnt | tr -d ' '; git show HEAD:zz-cas-mine.txt; echo END",
+            "HF=$(git rev-parse HEAD); grep -c \"^COMMIT_OWN.*gates=skipped-by-disjoint-readset[[:space:]]base=$H0[[:space:]]full=$HF$\" cas1.out; wc -l < .git/zzcas1.cnt | tr -d ' '; git show HEAD:zz-cas-mine.txt; echo END",
             "DEFRC=0\n0\n2\nRC=0\n1\n0\n1\n1\nm\nEND", "s2-cas-disjoint-skips-gate");
     s2_want("mkdir -p zzhk_cas2 include kernel && printf '#!/bin/sh\\n# tools/precommit.cx\\necho g >> .git/zzcas2.cnt\\n[ -e .git/zzcas2_r ] && exit 0\\n: > .git/zzcas2_r\\n"
             "TP=$(cat .git/zzcas2_path); git cat-file -p \"HEAD:$TP\" > .git/zzc2.b 2>/dev/null || : > .git/zzc2.b; "
@@ -259,6 +268,9 @@ static void case_s2(int part) {
             "printf 'int cas_k(void){return 0;}\\n' > tools/zz-cas-kx.cx; printf 'kernel/zz-cas-k.bin\\n' > .git/zzcas2_path; rm -f .git/zzcas2.cnt .git/zzcas2_r; "
             "UNISACC_COMMIT_CAS_REBASE=1 " CO_HK("zzhk_cas2") CO_RUN "-m c2d --whole tools/zz-cas-kx.cx > c2d.out 2>&1; echo D=$?/$(grep -c skipped-by-disjoint-readset c2d.out)/$(wc -l < .git/zzcas2.cnt | tr -d ' '); echo END",
             "A=0/0/2\nB=0/0/2\nC=0/0/2\nD=0/0/2\nEND", "s2-cas-intersect-reruns-gate");
+    }
+    if (part == 6) return;
+    if (part == 3 || part == 4 || part == 7) {
     s2_want("mkdir -p zzhk_cas3 && printf '#!/bin/sh\\n# tools/precommit.cx\\n[ -e .git/zzcas3_r ] && exit 0\\n: > .git/zzcas3_r\\n"
             "b=$(printf theirs | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc3.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc3.idx git update-index --add --cacheinfo 100644,$b,zz-cas-same.txt && t=$(GIT_INDEX_FILE=.git/zzc3.idx git write-tree) && "
@@ -282,6 +294,8 @@ static void case_s2(int part) {
             "UNISACC_COMMIT_CAS_REBASE=1 " CO_HK("zzhk_cas4") CO_RUN "-m cas4b --whole zz-cas-m5.cx > cas4b.out 2>&1; "
             "echo C2=$?/$(grep -c skipped-by-disjoint-readset cas4b.out)/$(wc -l < .git/zzcas4.cnt | tr -d ' '); git show HEAD:zz-cas-o3.txt; git show HEAD:zz-cas-m5.cx; echo END",
             "C1=0/2/1\nzz-cas-o1.txt\n/* cas4 */\nm4\nC2=0/0/2\nzz-cas-o3.txt\nint cas5(void){return 0;}\nEND", "s2-cas-multi-advance-keeps-other");
+    }
+    if (part == 4 || part == 7) return;
     s2_want("mkdir -p zzhk_cas5 && printf '#!/bin/sh\\necho g >> .git/zzcas5.cnt\\n[ -e .git/zzcas5_r ] && exit 0\\n: > .git/zzcas5_r\\n"
             "P=$(cat .git/zzcas5_p); b=$(printf o4 | git hash-object -w --stdin) && GIT_INDEX_FILE=.git/zzc5.idx git read-tree HEAD && "
             "GIT_INDEX_FILE=.git/zzc5.idx git update-index --add --cacheinfo 100644,$b,\"$P\" && t=$(GIT_INDEX_FILE=.git/zzc5.idx git write-tree) && "
@@ -347,12 +361,14 @@ static void case_derive(int part) {
     s2_want(CO_DR_SETUP "H0=$(git rev-parse HEAD); " CO_RUN "-m dr --registered zzdr $extra --whole tools/check-zzdr.cx --whole tests/tools-compile-sources.tsv --derive --dry-run > dp.out 2>&1; echo RC=$?; "
             "grep -c 'COMMIT_OWN_DERIVE.rc=0.stage=ok' dp.out; grep -c '^DERIVED.build/links.tsv' dp.out; grep -c '^DERIVED.build/batch-packages.tsv' dp.out; "
             "[ \"$H0\" = \"$(git rev-parse HEAD)\" ] && echo SAMEHEAD; echo END",
-            "RC=0\n1\n1\n0\nSAMEHEAD\nEND", "derive-registered-dry-run-derives-commits-nothing");
+            "RC=0\n1\n0\n0\nSAMEHEAD\nEND", "derive-registered-dry-run-derives-commits-nothing");
     if (part == 1)
     s2_want(CO_DR_SETUP CO_RUN "-m dr --registered zzdr $extra --whole tools/check-zzdr.cx --whole tests/tools-compile-sources.tsv --derive > dr.out 2>&1; echo RC=$?; "
-            "echo HEAD; git show HEAD:build/links.tsv | grep -c zzdr; git show HEAD:tests/batches.tsv > head-registry.tsv && sh ./unisacc.com tools/batch-packages-gen.cx -- --query --registry head-registry.tsv --row zzdr | grep -c zzdr; "
-            "git show --name-only --format= HEAD | grep -c '^build/links.tsv'; git ls-tree HEAD build/batch-packages.tsv | wc -l; echo END",
-            "RC=0\nHEAD\n1\n1\n1\n0\nEND", "derive-registered-links-and-packages-same-commit");
+            "echo HEAD; sh ./unisacc.com tools/derived-query.cx -- links 2>/dev/null | grep -q zzdr && echo 1 || echo 0; "
+            "sh ./unisacc.com tools/derived-query.cx -- links --check >/dev/null 2>&1 && echo 1 || echo 0; "
+            "git show HEAD:tests/batches.tsv > head-registry.tsv && sh ./unisacc.com tools/batch-packages-gen.cx -- --query --registry head-registry.tsv --row zzdr | grep -c zzdr; "
+            "git ls-tree HEAD build/links.tsv | wc -l; git ls-tree HEAD build/batch-packages.tsv | wc -l; echo END",
+            "RC=0\nHEAD\n1\n1\n1\n0\n0\nEND", "derive-registered-links-and-packages-same-commit");
     if (part == 2) {
     s2_want("printf '/* tools/zz-do.cx -- zz no-derive tool */\\nint main(void){return 0;}\\n' > tools/zz-do.cx; "
             CO_RUN "-m do --whole tools/zz-do.cx > do.out 2>&1; echo RC=$?; grep -c COMMIT_OWN_DERIVE do.out; "
@@ -398,7 +414,7 @@ static void case_derive(int part) {
 static void bench_one(const char *name, const char *setup, const char *args) {
     char out[8192], script[6000]; long t0; 
     if (cx_fmt(script, sizeof script,
-        "cd %s/clone && %s mkdir -p zzbhooks && printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx\\n' > zzbhooks/pre-commit && chmod +x zzbhooks/pre-commit; "
+        "cd %s/clone && " CO_QUERY "%s mkdir -p zzbhooks && printf '#!/bin/sh\\nexec sh ./unisacc.com tools/precommit.cx\\n' > zzbhooks/pre-commit && chmod +x zzbhooks/pre-commit; "
         CO_MK "%s " CO_HK("zzbhooks") CO_RUN "%s > bench.out 2>&1; echo RC=$?; tail -3 bench.out", base,
         sy_env("CO_BENCH_BASE") ? "git show HEAD:tools/commit-own.cx > tools/commit-own.cx;" : "", setup, args, 0, 0)) die("script");
     t0 = sy_now_ms();
@@ -427,10 +443,27 @@ static const char *co_group(int argc, char **argv) {
 static int co_has(const char *g, const char *a, const char *b) {
     return !g || !strcmp(g, a) || (b && !strcmp(g, b));
 }
+static void ensure_self_bin(void) {
+    const char *cur = sy_env("DEVSVC_SELF_BIN");
+    char out[1024], key[21], cmd[1024];
+    if (cur && cur[0] == '/' && sy_exists(cur) == 1) return;
+    if (sh("sh ./unisacc.com tools/devsvc.cx -- prebuild-self", out, sizeof out) ||
+        strncmp(out, "PREPARED\tkey=", 13) ||
+        cx_fmt(key, sizeof key, "%.20s", out + 13) ||
+        strspn(key, "0123456789abcdef") != 20) return;
+    if (cx_fmt(cmd, sizeof cmd,
+        "if [ -n \"${DV_PIN_DIR:-}\" ] && [ -x \"$DV_PIN_DIR/%s/devsvc\" ]; then printf '%%s' \"$DV_PIN_DIR/%s/devsvc\"; "
+        "else for p in \"$HOME/.cache/unisacc/devsvc/pinned/repos\"/*/%s/devsvc; do [ -x \"$p\" ] && { printf '%%s' \"$p\"; break; }; done; fi",
+        key, key, key)) return;
+    if (!sh(cmd, out, sizeof out) && out[0] == '/' && sy_exists(out) == 1)
+        (void)sy_setenv("DEVSVC_SELF_BIN", out, 1);
+}
+
 int main(int argc, char **argv) {
     char out[8192];
     const char *g = co_group(argc, argv);
     char prep[2048], clone[4400];
+    ensure_self_bin();
     if (cx_fmt(base, sizeof base, "%s/check-commit-own-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(clone, sizeof clone, "%s/clone", base)) die("path");
     if (cx_fmt(prep, sizeof prep, "rm -rf %s && mkdir -p %s && git clone -q --local . %s && "
            "cp tools/commit-own.cx tools/own-diff.cx tools/on-change.cx tools/check-precommit-gates.cx %s/tools/ && "
@@ -471,6 +504,10 @@ int main(int argc, char **argv) {
     if (g && !strncmp(g, "bench-", 6)) bench(g[6] - 0x30);
     if (co_has(g, "s2", 0)) { case_s2(0); case_s2(1); case_s2(2); }
     if (co_has(g, "s2b", 0)) case_s2(3);
+    if (g && tx_eqz(g, "s2b-core")) case_s2(4);
+    if (g && tx_eqz(g, "s2b-cas1")) case_s2(6);
+    if (g && tx_eqz(g, "s2b-cas2")) case_s2(7);
+    if (g && tx_eqz(g, "s2b-tail")) case_s2(5);
     if (co_has(g, "derive-tool", 0)) case_derive(0);
     if (co_has(g, "derive-reg-prep", 0)) case_derive(3);
     if (co_has(g, "derive-reg", 0)) case_derive(1);

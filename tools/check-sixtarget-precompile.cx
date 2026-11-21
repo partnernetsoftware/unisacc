@@ -6,6 +6,7 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.ckrun
@@ -14,6 +15,50 @@ static int passed = 0, failed = 0;
 static void st_ck(int ok, const char *name) {
     if (ok) passed++; else failed++;
     printf("%s\tsixtarget.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static void patch_unistd_fixture(const char *dir, int add_fwd) {
+    char up[512];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (tx_snprintf(up, sizeof up, "%s/include/unistd.h", dir) <= 0) return;
+    if (sy_read_file(up, &b, &n, 1 << 20) != 0 || !b || n <= 0) {
+        if (b) mm_free(b);
+        return;
+    }
+    const char *fwd_blk =
+        "#if defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_rmdir)\n"
+        "static int rmdir(const char *__u_p); /* unlinkat's _WIN32 branch calls it; the body sits further down */\n"
+        "#endif\n";
+    const char *anchor = "#if !__UNISA_FTRIM_LIBC || __UN_unlinkat\n";
+    long fpos = tx_find((const char *)b, (long)n, "static int rmdir(const char *__u_p);", 36);
+    if (add_fwd && fpos < 0) {
+        long apos = tx_find((const char *)b, (long)n, anchor, (long)strlen(anchor));
+        if (apos >= 0) {
+            size_t fl = strlen(fwd_blk);
+            char *nb = (char *)mm_alloc((size_t)n + fl + 8);
+            if (nb) {
+                mm_copy(nb, (size_t)n + fl + 8, b, (size_t)apos);
+                mm_copy(nb + apos, (size_t)n + fl + 8 - (size_t)apos, fwd_blk, fl);
+                mm_copy(nb + apos + fl, (size_t)n + 8 - (size_t)apos, (const char *)b + apos, (size_t)(n - apos));
+                sy_write_file(up, nb, n + (int64_t)fl, 0600);
+                mm_free(nb);
+            }
+        }
+    } else if (!add_fwd && fpos >= 0) {
+        long bpos = tx_find((const char *)b, (long)n, fwd_blk, (long)strlen(fwd_blk));
+        if (bpos >= 0) {
+            size_t fl = strlen(fwd_blk);
+            char *nb = (char *)mm_alloc((size_t)n + 8);
+            if (nb) {
+                mm_copy(nb, (size_t)n + 8, b, (size_t)bpos);
+                mm_copy(nb + bpos, (size_t)n + 8 - (size_t)bpos, (const char *)b + bpos + fl, (size_t)(n - bpos - (long)fl));
+                sy_write_file(up, nb, n - (int64_t)fl, 0600);
+                mm_free(nb);
+            }
+        }
+    }
+    mm_free(b);
 }
 
 int main(void) {
@@ -203,6 +248,57 @@ int main(void) {
     int rc_ce = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
     st_ck(rc_ce == 1 && ckk_has(out, sizeof out, "plan-empty-or-failed") && ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
        "chain-units-empty-refused");
+
+    /* 9. Headers mode (SIXTARGET-M4-NO-UNTRIMMED-HEADER-SCAN):
+     *    - missing include/ under --root refused with rc 2
+     *    - 0.0.86 2c9dbac43e header tree (git archive when present, else exact unistd.h fixture) fails naming unistd.h:119 and rmdir
+     *    - 0.0.86 38feea2ad3 header tree passes with 0 undeclared hits */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode headers --root %s --compiler %s/unisacc.com", stbin, tmp, root);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "cannot prepare headers scan"),
+       "headers-missing-include-refused");
+    {
+        char h2c9[320], h38f[320];
+        tx_snprintf(h2c9, sizeof h2c9, "%s/hdr-2c9", tmp);
+        tx_snprintf(h38f, sizeof h38f, "%s/hdr-38f", tmp);
+        sy_mkdir_all(h2c9, 0700);
+        sy_mkdir_all(h38f, 0700);
+        tx_snprintf(cmd, sizeof cmd,
+            "if git rev-parse --verify 2c9dbac43e^{commit} >/dev/null 2>&1 && git rev-parse --verify 38feea2ad3^{commit} >/dev/null 2>&1; then "
+            "(git archive 2c9dbac43e include | tar -x -C '%s') & "
+            "(git archive 38feea2ad3 include | tar -x -C '%s') & wait; "
+            "else cp -R '%s/include' '%s/include' && cp -R '%s/include' '%s/include'; fi",
+            h2c9, h38f, root, h2c9, root, h38f);
+        ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+        patch_unistd_fixture(h2c9, 0);
+        patch_unistd_fixture(h38f, 1);
+
+        char out2[4096], out3[4096], f2[340], f3[340];
+        tx_snprintf(f2, sizeof f2, "%s/h2.out", tmp);
+        tx_snprintf(f3, sizeof f3, "%s/h3.out", tmp);
+        tx_snprintf(cmd, sizeof cmd,
+            "(%s --mode headers --root '%s' --compiler '%s/unisacc.com' --target win/x86_64 >'%s' 2>&1; printf 'RC2=%%d\\n' $? >>'%s') & "
+            "(%s --mode headers --root '%s' --compiler '%s/unisacc.com' --target win/x86_64 >'%s' 2>&1; printf 'RC3=%%d\\n' $? >>'%s') & wait",
+            stbin, h2c9, root, f2, f2, stbin, h38f, root, f3, f3);
+        ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+        unsigned char *b2 = 0, *b3 = 0; int64_t n2 = 0, n3 = 0;
+        memset(out2, 0, sizeof out2); memset(out3, 0, sizeof out3);
+        if (sy_read_file(f2, &b2, &n2, 65536) == 0 && b2) { mm_copy(out2, sizeof out2 - 1, b2, (size_t)(n2 < 4095 ? n2 : 4095)); mm_free(b2); }
+        if (sy_read_file(f3, &b3, &n3, 65536) == 0 && b3) { mm_copy(out3, sizeof out3 - 1, b3, (size_t)(n3 < 4095 ? n3 : 4095)); mm_free(b3); }
+
+        st_ck(ckk_has(out2, sizeof out2, "RC2=1\n") &&
+           ckk_has(out2, sizeof out2, "SIXTARGET_FAIL\ttarget=win/x86_64\tunit=include/unistd.h\t") &&
+           ckk_has(out2, sizeof out2, "unistd.h:119:") &&
+           ckk_has(out2, sizeof out2, "rmdir") &&
+           ckk_has(out2, sizeof out2, "SIXTARGET_SUMMARY\tmode=headers\ttargets=1\tchecked=1\tfailed=1\t") &&
+           ckk_has(out2, sizeof out2, "\tverdict=FAIL\n"),
+           "headers-2c9dbac43e-red-names-unistd-119-rmdir");
+
+        st_ck(ckk_has(out3, sizeof out3, "RC3=0\n") &&
+           ckk_has(out3, sizeof out3, "SIXTARGET_OK\ttarget=win/x86_64\tunit=include/cx.h,include/*.h,include/sys/*.h\t") &&
+           ckk_has(out3, sizeof out3, "SIXTARGET_SUMMARY\tmode=headers\ttargets=1\tchecked=1\tfailed=0\t") &&
+           ckk_has(out3, sizeof out3, "\tverdict=PASS\n"),
+           "headers-38feea2ad3-green-zero-undeclared");
+    }
 
     /* Cleanup */
     tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);

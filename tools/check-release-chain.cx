@@ -1,0 +1,284 @@
+/* Contract: checks tools/release-chain.cx (freeze to public as one resumable command) offline:
+ * plan lists the five steps without side effects; a failing step names itself and prints the resume
+ * command; done steps are skipped on resume while the stage commit is re-verified against HEAD;
+ * usage errors refuse with rc 2. Layer: interfaces. Output: CHECK_RELEASE_CHAIN. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use cxlib.sessionroot
+static int passed, failed;
+static void ck(int ok, const char *id) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", id); if (ok) passed++; else failed++; }
+static char tmp[4096], bin[4400];
+static np_result actual(char **v) {
+    np_result r = {0}; char why[512];
+    if (np_run(v, 0, 0, 50, &r, why, sizeof why)) { fprintf(stderr, "check-release-chain: %s\n", why); exit(2); }
+    return r;
+}
+static int has(np_result *r, const char *s) { return r->out && strstr(r->out, s); }
+int main(int argc, char **argv) {
+    char base[4096]; sy_stat_t st;
+    if (sr_default("release-chain", base, sizeof base) || (sy_mkdir(base, 0700) && (sy_lstat(base, &st) || st.kind != 'd' || st.uid != sy_uid() || st.mode != 0700)) ||
+        sy_mkdtemp(base, "check", tmp, sizeof tmp) || cx_fmt(bin, sizeof bin, "%s/tool", tmp)) return 2;
+    char driver[4096]; if (sy_realpath("./unisacc.com", driver, sizeof driver) < 0) return 2;
+    char *build[] = {"sh", driver, "tools/release-chain.cx", "-o", bin, 0};
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { np_result b = actual(build); if (b.rc) { fprintf(stderr, "%s", b.err ? b.err : ""); return 2; } np_free(&b); }
+    char inputs[4400], seg[4400], row[9200], state[4400], plan_state[4400];
+    if (cx_fmt(inputs, sizeof inputs, "%s/inputs", tmp) || cx_fmt(seg, sizeof seg, "%s/seg", tmp) ||
+        cx_fmt(state, sizeof state, "%s/state", tmp) || cx_fmt(plan_state, sizeof plan_state, "%s/plan-state", tmp) ||
+        cx_write(seg, "x\n", 2) ||
+        cx_fmt(row, sizeof row, "version\t0.0.99\ndate\t2026-01-01\nfreeze\t%s\nsegment\tinvalid\t%s\n", "0000000000000000000000000000000000000000", seg) ||
+        cx_write(inputs, row, strlen(row))) return 2;
+    /* (1) plan: five steps + post-publish + precheck warnings, no state written */
+    char *plan[] = {bin, "plan", "--inputs", inputs, "--state", plan_state, "--layout", "/nonexistent-layout", 0};
+    np_result r = actual(plan);
+    ck(r.rc == 0 && has(&r, "CHAIN\tPRECHECK\tef-counts\t") && has(&r, "CHAIN\tCMD\t0a\tpack\t") && has(&r, "CHAIN\tCMD\t0b\twarm\t") &&
+       has(&r, "CHAIN\tCMD\t1\tprep\t") && has(&r, "CHAIN\tCMD\t2\tstage-a\t") && has(&r, "CHAIN\tCMD\t3\tstage-commit\t") &&
+       has(&r, "CHAIN\tCMD\t4\tstage-dry\t") && has(&r, "--strict release/evidence/v0.0.99-strict-2026-01-01.tsv") && has(&r, " --dry\n") &&
+       has(&r, "CHAIN\tCMD\t5\texecute\t") && has(&r, "CHAIN\tCMD\t6\tpost-publish\t") && has(&r, "CHAIN\tRESULT\tPLAN\tversion=0.0.99"), "plan-lists-five-steps");
+    ck(sy_exists(plan_state) == 0 && !has(&r, "CHAIN\tRUN\t"), "plan-runs-nothing");
+    ck(has(&r, "CHAIN\tCMD\tP0\tprerun-plan\t") && has(&r, "--normal-jobs 4") &&
+       has(&r, "CHAIN\tCMD\tP1\tprerun-start\t") && has(&r, "--resume --max-jobs 4 --keep-going") &&
+       has(&r, "for attempt in 1 2; do") && has(&r, "&& exit 0; done; exit 1") &&
+       has(&r, "supervise.log") && has(&r, "PRERUN_RUN status=DONE") &&
+       has(&r, "CHAIN\tCMD\tP2\tprerun-merge\t") && has(&r, "CHAIN\tCMD\tP3\tprerun-archive\t") &&
+       has(&r, "--repo . --version '0.0.99'"), "plan-prints-prerun-reentry-merge-and-archive");
+    ck(has(&r, "CHAIN\tWARN\twarm\t"), "plan-warns-missing-warm");
+    np_free(&r);
+    /* (1b) unregistered UNISACC_* var: warned in plan, refused rc=1 in run; allowlisted var accepted */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd, "UNISACC_STRAY_TEST=1 %s plan --inputs %s --state %s --layout /nonexistent-layout", bin, inputs, plan_state);
+        char *vp[] = {"sh", "-c", cmd, 0};
+        r = actual(vp);
+        ck(r.rc == 0 && has(&r, "CHAIN\tWARN\tenv\tunregistered UNISACC_* var=UNISACC_STRAY_TEST"), "plan-warns-unregistered-env");
+        np_free(&r);
+        cx_fmt(cmd, sizeof cmd, "UNISACC_STRAY_TEST=1 %s run --inputs %s --state %s --layout /nonexistent-layout", bin, inputs, state);
+        char *vr[] = {"sh", "-c", cmd, 0};
+        r = actual(vr);
+        ck(r.rc == 1 && has(&r, "CHAIN\tFAIL\t0\tenv-check\tunregistered UNISACC_* var=UNISACC_STRAY_TEST"), "run-refuses-unregistered-env");
+        np_free(&r);
+        cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELP=1 %s run --inputs %s --state %s --layout /nonexistent-layout", bin, inputs, state);
+        char *vpfx[] = {"sh", "-c", cmd, 0};
+        r = actual(vpfx);
+        ck(r.rc == 1 && has(&r, "CHAIN\tFAIL\t0\tenv-check\tunregistered UNISACC_* var=UNISACC_IDENT_HELP"), "run-refuses-prefix-match-env");
+        np_free(&r);
+        cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER=/bin/true UNISACC_DEVSVC_DIR=/tmp/x %s plan --inputs %s --state %s --layout /nonexistent-layout", bin, inputs, plan_state);
+        char *va[] = {"sh", "-c", cmd, 0};
+        r = actual(va);
+        ck(r.rc == 0 && !has(&r, "CHAIN\tWARN\tenv\t") && !has(&r, "CHAIN\tWARN\tident-helper\t"), "plan-allows-registered-env");
+        np_free(&r);
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_IDENT_HELPER %s plan --inputs %s --state %s --layout /nonexistent-layout", bin, inputs, plan_state);
+        char *vi[] = {"sh", "-c", cmd, 0};
+        r = actual(vi);
+        ck(r.rc == 0 && has(&r, "CHAIN\tWARN\tident-helper\tUNISACC_IDENT_HELPER unset"), "plan-warns-unset-ident-helper");
+        np_free(&r);
+    }
+    /* (2) a failing first step names itself, prints the child refusal and the resume command */
+    char *run[] = {bin, "run", "--inputs", inputs, "--state", state, "--layout", "/nonexistent-layout", 0, 0, 0};
+    r = actual(run);
+    ck(r.rc == 1 && has(&r, "CHAIN\tFAIL\t1\tprep\trc=2") && has(&r, "SEGMENT_IDENTITY") && has(&r, "NEXT\t1\t") && has(&r, " --from 1\n") &&
+       !has(&r, "CHAIN\tRUN\t2\t"), "failed-step-named-with-resume");
+    char marker[4500]; if (cx_fmt(marker, sizeof marker, "%s/prep.done", state)) return 2;
+    ck(sy_exists(marker) == 0, "failed-step-not-marked-done");
+    np_free(&r);
+    /* (3) resume: done steps below --from are skipped, the stage commit is re-verified against HEAD */
+    char m2[4500]; if (cx_fmt(m2, sizeof m2, "%s/stage-a.done", state) || cx_write(marker, "prep\trc=0\n", 10) || cx_write(m2, "stage-a\trc=0\n", 13)) return 2;
+    run[8] = "--from"; run[9] = "3";
+    r = actual(run);
+    ck(r.rc == 1 && has(&r, "CHAIN\tSKIP\t1\tprep\tdone") && has(&r, "CHAIN\tSKIP\t2\tstage-a\tdone") &&
+       has(&r, "CHAIN\tFAIL\t3\tstage-commit\tHEAD lacks the stage bytes of release/candidate.tsv") && has(&r, " --from 3\n") &&
+       !has(&r, "CHAIN\tCMD\t4\t"), "resume-skips-done-and-reverifies-stage");
+    np_free(&r);
+    /* (4) --from 1 reruns a step even when marked done */
+    run[9] = "1";
+    r = actual(run);
+    ck(r.rc == 1 && !has(&r, "CHAIN\tSKIP\t1\t") && has(&r, "CHAIN\tFAIL\t1\tprep\t"), "from-reruns-marked-step");
+    np_free(&r);
+    /* (4b) step 3 X_PUSHED check: committed to HEAD but not pushed to origin/main -> FAIL X_PUSHED; pushed -> PASS step 3 */
+    {
+        char cmd1[9200], cmd2[4096];
+        cx_fmt(cmd1, sizeof cmd1,
+            "T=%s/xpush; mkdir -p \"$T/repo/release/evidence/0.0.99\" \"$T/st/stage/release/evidence/0.0.99\" && "
+            "git init -q --bare \"$T/origin.git\" && git init -q -b main \"$T/repo\" && "
+            "git -C \"$T/repo\" config user.email t@t && git -C \"$T/repo\" config user.name t && "
+            "git -C \"$T/repo\" remote add origin \"$T/origin.git\" && "
+            "ln -s %s \"$T/repo/unisacc.com\" && "
+            "printf 'init\\n' > \"$T/repo/README\" && git -C \"$T/repo\" add README && git -C \"$T/repo\" commit -qm init && "
+            "git -C \"$T/repo\" push -q origin HEAD:main && "
+            "printf 'cand\\n' > \"$T/st/stage/release/candidate.tsv\" && "
+            "printf 'rat\\n' > \"$T/st/stage/release/evidence/0.0.99/ratchets.txt\" && "
+            "printf 'ev\\n' > \"$T/st/stage/release/evidence/0.0.99/evidence-rows.tsv\" && "
+            "cp -r \"$T/st/stage/release/.\" \"$T/repo/release/\" && "
+            "git -C \"$T/repo\" add release && git -C \"$T/repo\" commit -qm stage-a && "
+            "printf 'prep\\trc=0\\n' > \"$T/st/prep.done\" && printf 'stage-a\\trc=0\\n' > \"$T/st/stage-a.done\" && "
+            "(cd \"$T/repo\" && %s run --inputs %s --state \"$T/st\" --layout /nonexistent-layout --from 3; echo RC1=$?)",
+            tmp, driver, bin, inputs);
+        char *vx1[] = {"sh", "-c", cmd1, 0};
+        r = actual(vx1);
+        ck(has(&r, "CHAIN\tFAIL\t3\tstage-commit\tHEAD not pushed to origin/main (X_PUSHED)") && !has(&r, "CHAIN\tPASS\t3\t") && has(&r, "RC1=1\n"), "stage-commit-refuses-unpushed-x");
+        np_free(&r);
+        cx_fmt(cmd2, sizeof cmd2,
+            "T=%s/xpush; git -C \"$T/repo\" push -q origin HEAD:main && "
+            "(cd \"$T/repo\" && %s run --inputs %s --state \"$T/st\" --layout /nonexistent-layout --from 3; echo RC2=$?); "
+            "rm -rf \"$T\"",
+            tmp, bin, inputs);
+        char *vx2[] = {"sh", "-c", cmd2, 0};
+        r = actual(vx2);
+        ck(has(&r, "CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv (X_PUSHED ok)") && !has(&r, "X_PUSHED)"), "stage-commit-passes-after-push");
+        np_free(&r);
+    }
+    /* (5b) retry-ci: dry mode, real recovery with fake gh + fake evidence, idempotent rerun, non-draft refusal, bad run-id */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/rci; mkdir -p \"$T/ev\" && "
+            "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\n"
+            "o/r\\tv0.0.99\\tabc\\t0.0.99\\tw.yml\\tv0.0.99\\t44772879607\\tu.com\\n' > \"$T/cand.tsv\" && "
+            "printf 'j\\n' > \"$T/ev/ci-44772879607.json\" && printf 'l\\n' > \"$T/ev/ci-44772879607.log\" && "
+            "printf 'd\\n' > \"$T/ev/draft-readback.txt\" && "
+            "printf 'prefreeze-strict\\tt\\tPASS\\ts\\tn\\nexec-1-X-commit\\tt\\t-\\tx\\tn\\nexec-2-draft-readback\\tt\\tPASS\\td\\tn\\nexec-3-ci\\tt\\tFAIL\\t44772879607\\tn\\n' > \"$T/ev/INDEX.tsv\" && "
+            "printf '#!/bin/sh\\necho \"$*\" >> \"%s/rci/gh.log\"\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = view ]; then [ -f \"%s/rci/deleted\" ] && exit 1; printf \"{\\\\\"isDraft\\\\\":true}\\\\n\"; exit 0; fi\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = delete ]; then : > \"%s/rci/deleted\"; exit 0; fi\\nexit 2\\n' > \"$T/gh-draft.sh\" && chmod +x \"$T/gh-draft.sh\" && "
+            "printf '#!/bin/sh\\necho \"$*\" >> \"%s/rci/gh-pub.log\"\\n"
+            "if [ \"$1\" = release ] && [ \"$2\" = view ]; then printf \"{\\\\\"isDraft\\\\\":false}\\\\n\"; exit 0; fi\\nexit 2\\n' > \"$T/gh-pub.sh\" && chmod +x \"$T/gh-pub.sh\" && "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\" --dry; echo DRYRC=$?; "
+            "grep -q '44772879607' \"$T/cand.tsv\" && echo DRY_KEPT=1; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\"; echo RUNRC=$?; "
+            "grep -q '\t0\tu.com' \"$T/cand.tsv\" && echo CAND_ZERO=1; "
+            "test -f \"$T/ev/ci-failed-44772879607.json\" && test -f \"$T/ev/ci-failed-44772879607.log\" && test -f \"$T/ev/draft-readback-failed-44772879607.txt\" && test -f \"$T/ev/index-failed-44772879607.tsv\" && test -f \"$T/ev/retry-ci-rollback-44772879607.txt\" && echo FILES_OK=1; "
+            "! grep -q '^exec-' \"$T/ev/INDEX.tsv\" && grep -q '^prefreeze-strict' \"$T/ev/INDEX.tsv\" && echo IDX_OK=1; "
+            "grep -q 'release delete v0.0.99 --yes' \"$T/gh.log\" && ! grep -q 'cleanup-tag' \"$T/gh.log\" && echo GH_OK=1; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\"; echo IDEMRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 44772879607 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-pub.sh\"; echo PUBRC=$?; "
+            "! grep -q 'delete' \"$T/gh-pub.log\" && echo PUB_SAFE=1; "
+            "%s retry-ci --version 0.0.99 --run-id abc --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" 2>&1; echo BADIDRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" --gh \"$T/gh-draft.sh\" --dry; echo ONE_DIGIT_RC=$?; "
+            "%s retry-ci --version 0.0.99 --evidence-dir \"$T/ev\" --candidate \"$T/cand.tsv\" 2>&1; echo NOIDRC=$?; "
+            "%s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/missing.tsv\" 2>&1; echo MISSCANDRC=$?; "
+            "printf 'repo\\tci_run_id\\n' > \"$T/hdr-only.tsv\"; %s retry-ci --version 0.0.99 --run-id 7 --evidence-dir \"$T/ev\" --candidate \"$T/hdr-only.tsv\" 2>&1; echo HDRONLYRC=$?; "
+            "rm -rf \"$T\"",
+            tmp, tmp, tmp, tmp, tmp, bin, bin, bin, bin, bin, bin, bin, bin, bin);
+        char *vr[] = {"sh", "-c", cmd, 0};
+        r = actual(vr);
+        ck(has(&r, "DRYRC=0\n") && has(&r, "DRY_KEPT=1\n") && has(&r, "RETRY_CI\tDRAFT\tdry\twould-delete-draft"), "retry-ci-dry-no-mutation");
+        ck(has(&r, "RUNRC=0\n") && has(&r, "CAND_ZERO=1\n") && has(&r, "FILES_OK=1\n") && has(&r, "IDX_OK=1\n") && has(&r, "GH_OK=1\n") && has(&r, "RETRY_CI\tDRAFT\tdeleted\ttag=v0.0.99\ttag_kept=1\n"), "retry-ci-recovers-and-archives");
+        ck(has(&r, "IDEMRC=0\n") && has(&r, "RETRY_CI\tCANDIDATE\tskip\tci_run_id=0\n") && has(&r, "RETRY_CI\tINDEX\tskip\tno exec-1..3 rows\n") && has(&r, "RETRY_CI\tDRAFT\tskip\tabsent\t"), "retry-ci-idempotent-rerun");
+        ck(has(&r, "PUBRC=1\n") && has(&r, "REFUSE non-draft release v0.0.99\n") && has(&r, "PUB_SAFE=1\n"), "retry-ci-refuses-published-release");
+        ck(has(&r, "BADIDRC=2\n") && has(&r, "ONE_DIGIT_RC=0\n") && has(&r, "NOIDRC=2\n") &&
+           has(&r, "MISSCANDRC=2\n") && has(&r, "candidate unreadable") &&
+           has(&r, "HDRONLYRC=2\n") && has(&r, "candidate needs header + data row"), "retry-ci-bad-run-id-rc2");
+        np_free(&r);
+    }
+    /* (5c) steps 0a/0b split + idempotency + check-ef-counts positive & negative controls */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/pre0; mkdir -p \"$T/st\" \"$T/pk\" && "
+            "printf 'version\\t0.0.99\\ndate\\t2026-01-01\\npack\\t%s/pre0/pk\\nwarm\\t%s/pre0/w.tsv\\n' > \"$T/in-both.tsv\" && "
+            "%s plan --inputs \"$T/in-both.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo PBOTH=$?; "
+            "printf 'version\\t0.0.99\\ndate\\t2026-01-01\\npack\\t%s/pre0/pk\\n' > \"$T/in-nowarm.tsv\" && "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo NWRC=$?; "
+            "printf '%s/pre0/warm-fake.tsv\\n' > \"$T/st/warm.done\" && "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout; echo WDONE=$?; "
+            "grep -q 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo RESOLVED_OK=1; "
+            "rm -f \"$T/st/inputs-resolved.tsv\"; "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout --from 2; "
+            "grep -qx 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo FROM2_WARM=1; "
+            "rm -f \"$T/st/inputs-resolved.tsv\"; "
+            "%s run --inputs \"$T/in-nowarm.tsv\" --state \"$T/st\" --layout /nonexistent-layout --from 3; "
+            "grep -qx 'warm\t%s/pre0/warm-fake.tsv' \"$T/st/inputs-resolved.tsv\" && echo FROM3_WARM=1; "
+            "rm -rf \"$T\"",
+            tmp, tmp, tmp, bin, tmp, bin, tmp, bin, tmp, bin, tmp, bin, tmp);
+        char *vp[] = {"sh", "-c", cmd, 0};
+        r = actual(vp);
+        ck(has(&r, "PBOTH=0\n") && has(&r, "CHAIN\tSKIP\t0a\tpack\tprovided-in-inputs\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n"), "plan-skips-provided-pack-and-warm");
+        ck(has(&r, "NWRC=1\n") && has(&r, "CHAIN\tRUN\t0b\twarm\t") && has(&r, "CHAIN\tFAIL\t0b\twarm\t"), "run-executes-split-warm-step-before-prep");
+        ck(has(&r, "WDONE=1\n") && has(&r, "CHAIN\tSKIP\t0b\twarm\tdone\n") && has(&r, "RESOLVED_OK=1\n"), "run-skips-done-warm-and-injects-resolved-inputs");
+        ck(has(&r, "FROM2_WARM=1\n") && has(&r, "FROM3_WARM=1\n"), "resume-after-prep-restores-warm-input");
+        np_free(&r);
+
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/efc; mkdir -p \"$T\" && "
+            "%s check-ef-counts --expected-fail release/evidence/0.0.86/expected-fail.tsv --strict release/evidence/v0.0.86-strict-2026-11-20.tsv; echo REAL86=$?; "
+            "printf 'int main(void){printf(\"FOO_BAR_COUNT\\tpass=%%d\\tfail=%%d\\n\",10,3);}\\n' > \"$T/foo-ok.cx\" && "
+            "printf 'int main(void){return 1;}\\n' > \"$T/foo-bad.cx\" && "
+            "printf 'foo-bar\\tIMPLEMENTED\\tinterfaces\\t%s/efc/foo-ok.cx\\nfoo-miss\\tIMPLEMENTED\\tinterfaces\\t%s/efc/foo-bad.cx\\n' > \"$T/batches.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nfoo-bar\\t10/3\\tok\\n' > \"$T/ef-ok.tsv\" && "
+            "printf 'FOO_BAR_COUNT\\tpass=10\\tfail=3\\n' > \"$T/st-ok.tsv\" && "
+            "printf 'RAW\\tBATCH_RUN\\tid=foo-bar\\tstatus=FAIL\\tcount=10/3\\n' > \"$T/st-raw.tsv\" && "
+            "printf 'FOO_BAR_COUNT\\tpass=10\\tfail=4\\n' > \"$T/st-bad.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nfoo-miss\\t10/3\\tno-line\\n' > \"$T/ef-nosrc.tsv\" && "
+            "printf 'batch\\texpected\\treason\\nno-such-batch\\t1/1\\tmissing\\n' > \"$T/ef-nobat.tsv\" && "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-ok.tsv\"; echo EFOK=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-raw.tsv\"; echo EFRAW=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-ok.tsv\" --batches \"$T/batches.tsv\" --strict \"$T/st-bad.tsv\"; echo EFMIS=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-nosrc.tsv\" --batches \"$T/batches.tsv\"; echo EFNOSRC=$?; "
+            "%s check-ef-counts --expected-fail \"$T/ef-nobat.tsv\" --batches \"$T/batches.tsv\"; echo EFNOBAT=$?; "
+            "rm -rf \"$T\"",
+            tmp, bin, tmp, tmp, bin, bin, bin, bin, bin);
+        char *ve[] = {"sh", "-c", cmd, 0};
+        r = actual(ve);
+        ck(has(&r, "REAL86=0\n") && has(&r, "EF_COUNT\tPASS\tenv-semantics\tmarker=ENV_SEMANTICS_COUNT\texpected=84/2\t"), "ef-counts-real-0.0.86-pass");
+        ck(has(&r, "EFOK=0\n") && has(&r, "EFRAW=0\n") && has(&r, "EF_COUNT\tPASS\tfoo-bar\tmarker=FOO_BAR_COUNT\texpected=10/3\t"), "ef-counts-marker-pass");
+        ck(has(&r, "EFMIS=1\n") && has(&r, "EF_COUNT\tFAIL\tfoo-bar\tcount-mismatch\twant=10/3\tgot=10/4\n"), "ef-counts-mismatch-refused");
+        ck(has(&r, "EFNOSRC=1\n") && has(&r, "EF_COUNT\tFAIL\tfoo-miss\tmissing-count-line-in-source\t"), "ef-counts-missing-source-marker-refused");
+        ck(has(&r, "EFNOBAT=1\n") && has(&r, "EF_COUNT\tFAIL\tno-such-batch\tmissing-batch-in-registry\n"), "ef-counts-missing-batch-refused");
+        np_free(&r);
+    }
+    /* Freeze conflict policy: retire one query-only table, keep the rest staged as conflicts. */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/freeze; git init -q -b fixture \"$T\" && cd \"$T\" && "
+            "git config user.name fixture && git config user.email freeze@example.invalid && "
+            "mkdir -p build exec/facts && "
+            "printf '# ignore\\n' > .gitignore && "
+            "printf 'doc-links\\tgen\\tcheck\\tquery-only gen\\tbuild/doc-links.tsv\\tinputs\\t1\\t3\\n"
+                   "links\\tgen\\tcheck\\tquery-only gen\\tbuild/links.tsv\\tinputs\\t1\\t3\\n"
+                   "index\\tgen\\tcheck\\tgen --write\\tbuild/table-index.tsv\\tinputs\\t1\\t3\\n' > exec/facts/derive.tsv && "
+            "printf 'base\\n' > build/doc-links.tsv && cp build/doc-links.tsv build/links.tsv && "
+            "cp build/doc-links.tsv build/table-index.tsv && cp build/doc-links.tsv source.c && "
+            "git add . && git commit -qm base && git branch side && "
+            "printf 'main\\n' > build/doc-links.tsv && cp build/doc-links.tsv build/links.tsv && "
+            "cp build/doc-links.tsv build/table-index.tsv && cp build/doc-links.tsv source.c && "
+            "git commit -qam ours && B=$(git rev-parse HEAD) && git switch -q side && "
+            "git rm -q build/doc-links.tsv build/links.tsv && "
+            "printf '/build/doc-links.tsv\\n' >> .gitignore && printf 'side\\n' > source.c && cp source.c build/table-index.tsv && "
+            "git commit -qam theirs && I=$(git rev-parse HEAD) && git switch -q fixture || exit 2; "
+            "git merge --no-ff --no-commit side; [ \"$?\" = 1 ] || exit 2; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$I\"; echo FPLAN=$?; "
+            "test -n \"$(git ls-files -u -- build/doc-links.tsv)\" && echo PLAN_KEPT=1; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$B\" --apply; echo FWRONG=$?; "
+            "test -n \"$(git ls-files -u -- build/doc-links.tsv)\" && echo WRONG_KEPT=1; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$I\" --apply; echo FAPPLY=$?; "
+            "test -z \"$(git ls-files -u -- build/doc-links.tsv)\" && grep -qx main build/doc-links.tsv && echo RETIRED=1; "
+            "test -n \"$(git ls-files -u -- build/links.tsv)\" && "
+            "test -n \"$(git ls-files -u -- build/table-index.tsv)\" && "
+            "test -n \"$(git ls-files -u -- source.c)\" && echo OTHER_KEPT=1",
+            tmp, bin, bin, bin);
+        char *fv[] = {"sh", "-c", cmd, 0};
+        r = actual(fv);
+        ck(has(&r, "FPLAN=1\n") && has(&r, "PLAN_KEPT=1\n") &&
+           has(&r, "path=build/doc-links.tsv\taction=retire-index") &&
+           has(&r, "path=build/table-index.tsv\taction=regenerate\tproducer=index") &&
+           has(&r, "path=source.c\taction=manual"), "freeze-plan-classifies-without-moving-index");
+        ck(has(&r, "FWRONG=2\n") && has(&r, "WRONG_KEPT=1\n") && r.err &&
+           strstr(r.err, "merge-identity-mismatch"), "freeze-apply-refuses-wrong-incoming-identity");
+        ck(has(&r, "FAPPLY=1\n") && has(&r, "RETIRED=1\n") && has(&r, "OTHER_KEPT=1\n") &&
+           has(&r, "path=build/links.tsv\taction=manual"), "freeze-apply-only-removes-proven-retired-index-path");
+        np_free(&r);
+        char fixture[4400];
+        if (cx_fmt(fixture, sizeof fixture, "%s/freeze", tmp) || sy_remove_all(fixture)) return 2;
+    }
+    /* (5) usage */
+    char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};
+    r = actual(bad); ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE CHAIN_USAGE"), "missing-state-refused"); np_free(&r);
+    char *rel[] = {bin, "run", "--inputs", inputs, "--state", "relative", "--layout", "/x", 0};
+    r = actual(rel); ck(r.rc == 2, "relative-state-refused"); np_free(&r);
+    if (cx_rmtree(tmp)) return 2;
+    printf("CHECK_RELEASE_CHAIN\tpass=%d\tfail=%d\n", passed, failed);
+    return failed != 0;
+}

@@ -1,0 +1,829 @@
+/* release-chain -- freeze-merge commit to public release as one resumable command.
+ *
+ *   sh ./unisacc.com tools/release-chain.cx -- run --inputs FILE --state ABS_DIR --layout DIR
+ *        [--decisions FILE] [--from N]
+ *   sh ./unisacc.com tools/release-chain.cx -- plan --inputs FILE --state ABS_DIR --layout DIR [--decisions FILE]
+ *   sh ./unisacc.com tools/release-chain.cx -- retry-ci --version V --run-id ID --evidence-dir DIR
+ *        --candidate FILE [--tag TAG] [--gh BIN] [--dry]
+ *   sh ./unisacc.com tools/release-chain.cx -- check-ef-counts --expected-fail FILE [--batches FILE] [--strict FILE]
+ *   sh ./unisacc.com tools/release-chain.cx -- freeze-conflicts --base SHA --incoming SHA [--apply]
+ *
+ * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
+ *   P0/P1/P2 plan-only: after chain DONE, plan the timed prerun, start the bounded
+ *                  run in the version worktree, then archive its closed log.
+ *   0a pack        release-run --pack ... into STATE/pack (skipped when inputs already sets pack=)
+ *   0b warm        release-exec --warm <pack>/candidate.tsv --layout L --out STATE/warm (skipped when inputs sets warm=)
+ *   1 prep         release-flow prep --inputs RESOLVED --out STATE/prep [--decisions D]
+ *   2 stage-a      release-flow stage-a --inputs F --prep STATE/prep --out STATE/stage [--decisions D]
+ *                  (the stage carries ratchets.txt, evidence-rows.tsv and rollback.txt from prep;
+ *                  release-flow scrubs home paths from every evidence file)
+ *   3 stage-commit operator commit and push of STATE/stage into origin/main (never done by this tool):
+ *                  verified every run: release/candidate.tsv, release/evidence/V/ratchets.txt and
+ *                  evidence-rows.tsv in HEAD must equal the stage bytes, and when refs/remotes/origin/main
+ *                  exists, HEAD must be an ancestor of origin/main (X_PUSHED)
+ *   4 stage-dry    release-exec --execute release/candidate.tsv --layout L --strict S --dry on the
+ *                  committed tree (the freeze-time dry run does not count)
+ *   5 execute      release-exec --execute ... is printed, never run here (it polls CI up to 25 min):
+ *                  start it with devsvc x --bg; release-exec's own steps resume with --from-step.
+ *                  On failed CI redo: clear stale ci_run_id, rename ci-<id>.* to ci-failed-<id>.*,
+ *                  delete stale draft release, resolve X_INDEX_CONFLICT before re-running execute.
+ *   6 post-publish printed only (never auto-run): version-metrics-gen --write, day-metrics --write,
+ *                  install verified APE to local unisacc.com (verify sha256), update prd_mempalace.md.
+ * Pre-checks:
+ *   - Unregistered UNISACC_* env vars: warned in plan, refused (rc 1) in run before step 1.
+ *   - UNISACC_IDENT_HELPER: warned in plan when inputs lacks pack= (required before release-run --pack).
+ *   - warm= receipt: warned in plan when absent (running pack+warm together inside prep risks 55 s timeout).
+ *   - expected-fail counts: checks carrying known failures emit a <NAME>_COUNT summary line (e.g.
+ *     ENV_SEMANTICS_COUNT) matching release/evidence/V/expected-fail.tsv pass/fail counts.
+ * State: STATE/NAME.done holds the receipt of a finished step; steps below --from that are done
+ * are skipped, step 3 is re-verified every run. A failed step prints CHAIN FAIL N NAME rc=R and a
+ * NEXT line with the resume command (release-chain run ... --from N).
+ * rc 0 chain done or stopped before execute, 1 a step failed, 2 usage.
+ * Check: tools/check-release-chain.cx. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static const char *inputs, *state, *layout, *decisions, *version, *date;
+static int execute, from = 1, planning;
+static char driver[4096], cwd[4096];
+static const char *names[] = {"", "prep", "stage-a", "stage-commit", "stage-dry", "execute"};
+
+static void usage(const char *why) { sy_eprintf("release-chain: REFUSE CHAIN_USAGE %s\n", why); exit(2); }
+static char *cat2(const char *a, const char *b) {
+    size_t n = strlen(a) + strlen(b) + 2; char *p = malloc(n);
+    if (!p || cx_fmt(p, n, "%s/%s", a, b)) usage("path");
+    return p;
+}
+static char *input_value(const char *key) {
+    size_t n = 0; char *s = cx_read(inputs, &n), *line, *cur = s; size_t k = strlen(key);
+    if (!s) usage("inputs unreadable");
+    while (cur && *cur) {
+        line = cur; cur = strchr(cur, '\n'); if (cur) *cur++ = 0;
+        if (!strncmp(line, key, k) && line[k] == '\t') return strdup(line + k + 1);
+    }
+    return 0;
+}
+static void show(int n, char **v) {
+    sy_printf("CHAIN\tCMD\t%d\t%s\t", n, names[n]);
+    for (int i = 0; v[i]; i++) sy_printf("%s%s", i ? " " : "", v[i]);
+    sy_printf("\n");
+}
+static void show_prerun_version(void) {
+    sy_printf("'");
+    for (const char *p = version; *p; p++) {
+        if (*p == '\'') sy_printf("'\\''");
+        else sy_printf("%c", *p);
+    }
+    sy_printf("'\n");
+}
+static void show_prerun(void) {
+    sy_printf("CHAIN\tINPUT\tprerun\tfrom the version worktree after chain DONE, set absolute PRERUN_APE, PRERUN_IDS, PRERUN_TIMES, PRERUN_PRIORITY and persistent PRERUN_DIR\n");
+    sy_printf("CHAIN\tCMD\tP0\tprerun-plan\tsh ./unisacc.com tools/prerun-drive.cx -- plan "
+              "--ids-file \"${PRERUN_IDS:?}\" --times-file \"${PRERUN_TIMES:?}\" "
+              "--priority-file \"${PRERUN_PRIORITY:?}\" --out \"${PRERUN_DIR:?}\" --normal-jobs 4\n");
+    sy_printf("CHAIN\tCMD\tP1\tprerun-start\tnohup timeout -k 10s 3600s sh -c '"
+              "for attempt in 1 2; do "
+              "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate \"$1\" --out \"$2\" "
+              "--resume --max-jobs 4 --keep-going && exit 0; "
+              "done; exit 1' sh \"${PRERUN_APE:?}\" \"${PRERUN_DIR:?}\" "
+              ">> \"${PRERUN_DIR:?}/supervise.log\" 2>&1 &\n");
+    sy_printf("CHAIN\tINPUT\tprerun-merge\twhen P1 has finished with PRERUN_RUN status=DONE\n");
+    sy_printf("CHAIN\tCMD\tP2\tprerun-merge\tsh ./unisacc.com tools/prerun-drive.cx -- merge "
+              "--in-dir \"${PRERUN_DIR:?}\" --out \"${PRERUN_DIR:?}\" --version ");
+    show_prerun_version();
+    sy_printf("CHAIN\tCMD\tP3\tprerun-archive\tsh ./unisacc.com tools/prerun-drive.cx -- archive "
+              "--in-dir \"${PRERUN_DIR:?}\" --repo . --version ");
+    show_prerun_version();
+}
+static void next_line(int n, const char *what) {
+    sy_printf("NEXT\t%d\t%s; then: release-chain run --inputs %s --state %s --layout %s%s%s%s --from %d\n",
+              n, what, inputs, state, layout, decisions ? " --decisions " : "", decisions ? decisions : "", execute ? " --execute" : "", n);
+}
+static char *marker(int n) {
+    char *p = cat2(state, names[n]); size_t k = strlen(p) + 6; char *m = malloc(k);
+    if (!m || cx_fmt(m, k, "%s.done", p)) usage("state path");
+    free(p); return m;
+}
+static void step(int n, char **v) {
+    show(n, v);
+    if (planning) return;
+    char *m = marker(n);
+    if (n < from && sy_exists(m) == 1) { sy_printf("CHAIN\tSKIP\t%d\t%s\tdone\n", n, names[n]); free(m); return; }
+    np_result r = {0}; char why[256] = {0};
+    long t0 = sy_now_ms();
+    int bad = np_run(v, cwd, 0, 55, &r, why, sizeof why);
+    sy_printf("CHAIN\tRUN\t%d\t%s\trc=%d\tms=%ld\n", n, names[n], r.rc, sy_now_ms() - t0);
+    if (bad || r.rc || r.residue || r.timed_out) {
+        sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+        sy_printf("CHAIN\tFAIL\t%d\t%s\trc=%d\t%s\n", n, names[n], r.rc, r.timed_out ? "timeout 55 s: split this step" : why);
+        next_line(n, "fix the refusal above");
+        exit(1);
+    }
+    char receipt[128]; if (cx_fmt(receipt, sizeof receipt, "%s\trc=0\n", names[n]) || cx_write(m, receipt, strlen(receipt))) usage("state write");
+    free(m); np_free(&r);
+}
+/* step 3: the operator committed the stage; HEAD must carry exactly the stage bytes */
+static int same_in_head(const char *rel) {
+    char spec[600]; if (cx_fmt(spec, sizeof spec, "HEAD:%s", rel)) return 0;
+    char *v[] = {"git", "show", spec, 0}; np_result r = {0}; char why[128];
+    if (np_run(v, cwd, 0, 30, &r, why, sizeof why) || r.rc) { np_free(&r); return 0; }
+    size_t n = 0; char *s = cx_read(cat2(cat2(state, "stage"), rel), &n);
+    int same = s && n == r.outn && !memcmp(s, r.out, n);
+    free(s); np_free(&r); return same;
+}
+extern char **environ;
+
+static int allowed_unisacc_env(const char *k, size_t kl) {
+    static const char *ok[] = {
+        "UNISACC_IDENT_HELPER", "UNISACC_CACHE_DIR", "UNISACC_PREP_CACHE",
+        "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR", "UNISACC_BATCH_TIMES",
+        "UNISACC_COMMIT_OWN_RUN", 0
+    };
+    for (int i = 0; ok[i]; i++) if (strlen(ok[i]) == kl && !memcmp(k, ok[i], kl)) return 1;
+    return 0;
+}
+static void check_preconditions(void) {
+    if (environ) {
+        for (char **ep = environ; *ep; ep++) {
+            if (!strncmp(*ep, "UNISACC_", 8)) {
+                const char *eq = strchr(*ep, '=');
+                size_t kl = eq ? (size_t)(eq - *ep) : strlen(*ep);
+                if (!allowed_unisacc_env(*ep, kl)) {
+                    if (planning) sy_printf("CHAIN\tWARN\tenv\tunregistered UNISACC_* var=%.*s (unset before chain/release)\n", (int)kl, *ep);
+                    else {
+                        sy_printf("CHAIN\tFAIL\t0\tenv-check\tunregistered UNISACC_* var=%.*s (unset before chain/release)\n", (int)kl, *ep);
+                        exit(1);
+                    }
+                }
+            }
+        }
+    }
+    if (planning) {
+        char *pk = input_value("pack");
+        char *wm = input_value("warm");
+        const char *ih = sy_env("UNISACC_IDENT_HELPER");
+        if (!pk && (!ih || !ih[0]))
+            sy_printf("CHAIN\tWARN\tident-helper\tUNISACC_IDENT_HELPER unset (required before pack)\n");
+        if (!wm)
+            sy_printf("CHAIN\tWARN\twarm\tinputs lacks warm= receipt; prep will run pack+warm in one 55s step (run release-exec --warm separately first)\n");
+        free(pk); free(wm);
+    }
+}
+static int head_pushed_to_origin_main(void) {
+    char *chk[] = {"git", "rev-parse", "--verify", "-q", "refs/remotes/origin/main", 0};
+    np_result r = {0}; char why[128];
+    if (np_run(chk, cwd, 0, 15, &r, why, sizeof why) || r.rc) { np_free(&r); return 1; } /* offline repo without origin/main */
+    np_free(&r);
+    char *anc[] = {"git", "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main", 0};
+    int bad = np_run(anc, cwd, 0, 15, &r, why, sizeof why);
+    int ok = (!bad && r.rc == 0);
+    np_free(&r);
+    return ok;
+}
+static void stage_commit(void) {
+    char a[300], b[300];
+    if (cx_fmt(a, sizeof a, "release/evidence/%s/ratchets.txt", version) || cx_fmt(b, sizeof b, "release/evidence/%s/evidence-rows.tsv", version)) usage("version");
+    const char *rels[] = {"release/candidate.tsv", a, b, 0};
+    sy_printf("CHAIN\tCMD\t3\tstage-commit\tcopy %s/stage/release into the checkout, commit and push to origin/main (devsvc git commit --whole ... --push)\n", state);
+    if (planning) return;
+    for (int i = 0; rels[i]; i++) if (!same_in_head(rels[i])) {
+        sy_printf("CHAIN\tFAIL\t3\tstage-commit\tHEAD lacks the stage bytes of %s\n", rels[i]);
+        next_line(3, "commit and push the stage directory");
+        exit(1);
+    }
+    if (!head_pushed_to_origin_main()) {
+        sy_printf("CHAIN\tFAIL\t3\tstage-commit\tHEAD not pushed to origin/main (X_PUSHED)\n");
+        next_line(3, "push stage-a commit to origin/main");
+        exit(1);
+    }
+    sy_printf("CHAIN\tPASS\t3\tstage-commit\tHEAD carries candidate.tsv, ratchets.txt, evidence-rows.tsv (X_PUSHED ok)\n");
+}
+/* ---- retry-ci: idempotent recovery after a failed CI run without rewriting main history or deleting tags ---- */
+static int is_digits(const char *s) {
+    if (!s || !s[0]) return 0;
+    for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return 0;
+    return 1;
+}
+
+static int freeze_git(char **argv, np_result *r) {
+    char why[128];
+    return np_run(argv, cwd, 0, 3, r, why, sizeof why) || r->rc || r->timed_out || r->residue;
+}
+
+static int freeze_matches(const char *ref, const char *sha) {
+    char *v[] = {"git", "rev-parse", "--verify", (char *)ref, 0};
+    np_result r = {0};
+    int ok = !freeze_git(v, &r) && r.outn == 41 && r.out[40] == '\n' && !memcmp(r.out, sha, 40);
+    np_free(&r);
+    return ok;
+}
+
+static int freeze_policy(const np_result *rules, const char *path, char producer[80]) {
+    size_t pn = strlen(path);
+    const char *p = rules->out, *end = p + rules->outn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', end - p);
+        if (!nl) nl = end;
+        const char *f[6] = {p};
+        int n = 1;
+        while (n < 6) {
+            const char *tab = memchr(f[n - 1], '\t', nl - f[n - 1]);
+            if (!tab) break;
+            f[n++] = tab + 1;
+        }
+        if (n == 6 && p[0] != '#' && f[5] - f[4] == (long)pn + 1 && !memcmp(f[4], path, pn) &&
+            f[1] - p > 1 && f[1] - p <= 80) {
+            if (cx_fmt(producer, 80, "%.*s", (int)(f[1] - p - 1), p)) return 0;
+            return f[4] - f[3] > 11 && !memcmp(f[3], "query-only ", 11) ? 2 : 1;
+        }
+        p = nl < end ? nl + 1 : end;
+    }
+    return 0;
+}
+
+static int freeze_is_retired(const char *incoming, const np_result *ignore, const char *path) {
+    const char *retired[] = {"build/doc-links.tsv", "build/links.tsv", "tests/batch-domain-index.tsv", 0};
+    int known = 0;
+    for (int i = 0; retired[i]; i++) if (!strcmp(retired[i], path)) known = 1;
+    if (!known) return 0;
+    char line[128];
+    if (cx_fmt(line, sizeof line, "\n/%s\n", path) ||
+        tx_find(ignore->out, ignore->outn, line, strlen(line)) < 0) return 0;
+    char *v[] = {"git", "ls-tree", "--name-only", (char *)incoming, "--", (char *)path, 0};
+    np_result r = {0};
+    int absent = !freeze_git(v, &r) && r.outn == 0;
+    np_free(&r);
+    return absent;
+}
+
+static int cmd_freeze_conflicts(int argc, char **argv) {
+    const char *base = 0, *incoming = 0;
+    int apply = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--apply")) apply = 1;
+        else if (!strcmp(argv[i], "--base") && i + 1 < argc) base = argv[++i];
+        else if (!strcmp(argv[i], "--incoming") && i + 1 < argc) incoming = argv[++i];
+        else usage("freeze-conflicts --base SHA --incoming SHA [--apply]");
+    }
+    if (!base || !incoming || strlen(base) != 40 || strlen(incoming) != 40 ||
+        strspn(base, "0123456789abcdef") != 40 || strspn(incoming, "0123456789abcdef") != 40 ||
+        sy_cwd(cwd, sizeof cwd) < 0 || !freeze_matches("HEAD", base) || !freeze_matches("MERGE_HEAD", incoming))
+        usage("freeze-conflicts merge-identity-mismatch");
+    char factspec[100], ignorespec[100];
+    if (cx_fmt(factspec, sizeof factspec, "%s:exec/facts/derive.tsv", incoming) ||
+        cx_fmt(ignorespec, sizeof ignorespec, "%s:.gitignore", incoming)) usage("freeze-conflicts policy-ref");
+    char *dv[] = {"git", "show", factspec, 0};
+    char *iv[] = {"git", "show", ignorespec, 0};
+    char *cv[] = {"git", "diff", "--name-only", "--diff-filter=U", "-z", "--", 0};
+    np_result rules = {0}, ignore = {0}, conflicts = {0};
+    if (freeze_git(dv, &rules) || freeze_git(iv, &ignore) || freeze_git(cv, &conflicts))
+        usage("freeze-conflicts read-incoming-policy-or-index");
+    char *drop[8] = {"git", "update-index", "--force-remove", "--", 0};
+    int n = 4, manual = 0, regenerate = 0;
+    long start = sy_now_ms();
+    for (size_t off = 0; off < conflicts.outn;) {
+        char *path = conflicts.out + off;
+        char *end = memchr(path, 0, conflicts.outn - off);
+        if (!end) usage("freeze-conflicts malformed-index-list");
+        off = (size_t)(end - conflicts.out) + 1;
+        char producer[80];
+        int kind = freeze_policy(&rules, path, producer);
+        if (kind == 2 && freeze_is_retired(incoming, &ignore, path)) {
+            if (n == 7) usage("freeze-conflicts too-many-retired-paths");
+            drop[n++] = path;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=retire-index\tproducer=%s\n", path, producer);
+        } else if (kind == 1) {
+            regenerate++;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=regenerate\tproducer=%s\n", path, producer);
+        } else {
+            manual++;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=manual\n", strpbrk(path, "\t\r\n") ? "(control-bytes)" : path);
+        }
+    }
+    if (apply && n > 4) {
+        np_result r = {0};
+        if (!freeze_matches("HEAD", base) || !freeze_matches("MERGE_HEAD", incoming) || freeze_git(drop, &r))
+            usage("freeze-conflicts index-update-refused");
+        np_free(&r);
+    }
+    np_free(&conflicts); np_free(&rules); np_free(&ignore);
+    sy_printf("FREEZE_CONFLICT_SUMMARY\tretired=%d\tregenerate=%d\tmanual=%d\tapplied=%d\tms=%ld\n",
+              n - 4, regenerate, manual, apply, sy_now_ms() - start);
+    return manual || regenerate ? 1 : 0;
+}
+static int retry_reset_candidate(const char *candp, int dry) {
+    size_t n = 0; char *s = cx_read(candp, &n);
+    if (!s || !n) usage("candidate unreadable");
+    char *nl = strchr(s, '\n');
+    if (!nl || !nl[1]) { free(s); usage("candidate needs header + data row"); }
+    /* Find ci_run_id column index in header */
+    int ci_col = -1, col = 0;
+    for (char *p = s; p < nl; ) {
+        char *t = memchr(p, '\t', (size_t)(nl - p));
+        size_t len = t ? (size_t)(t - p) : (size_t)(nl - p);
+        if (len == 9 && !memcmp(p, "ci_run_id", 9)) { ci_col = col; break; }
+        if (!t) break;
+        p = t + 1; col++;
+    }
+    if (ci_col < 0) { free(s); usage("candidate missing ci_run_id column"); }
+    /* Locate ci_run_id field in row 2 */
+    char *row = nl + 1, *rend = strchr(row, '\n');
+    if (!rend) rend = s + n;
+    char *fp = row, *fe = rend; col = 0;
+    while (col < ci_col && fp < rend) {
+        char *t = memchr(fp, '\t', (size_t)(rend - fp));
+        if (!t) { free(s); usage("candidate row too few columns"); }
+        fp = t + 1; col++;
+    }
+    char *nt = memchr(fp, '\t', (size_t)(rend - fp));
+    if (nt) fe = nt;
+    size_t fl = (size_t)(fe - fp);
+    if (fl == 1 && fp[0] == '0') {
+        sy_printf("RETRY_CI\tCANDIDATE\tskip\tci_run_id=0\n");
+        free(s); return 0;
+    }
+    if (dry) {
+        sy_printf("RETRY_CI\tCANDIDATE\tdry\told=%.*s\tnew=0\n", (int)fl, fp);
+        free(s); return 0;
+    }
+    size_t outn = n - fl + 1;
+    char *out = malloc(outn + 1);
+    if (!out) { free(s); usage("oom"); }
+    size_t pref = (size_t)(fp - s), suff = n - (size_t)(fe - s);
+    mm_copy(out, outn + 1, s, pref);
+    out[pref] = '0';
+    mm_copy(out + pref + 1, outn - pref, fe, suff);
+    out[outn] = 0;
+    if (sy_write_atomic(candp, out, outn, 0644) != 0) { free(out); free(s); usage("candidate write"); }
+    sy_printf("RETRY_CI\tCANDIDATE\treset\told=%.*s\tnew=0\n", (int)fl, fp);
+    free(out); free(s);
+    return 0;
+}
+static void retry_archive_pair(const char *evdir, const char *src_leaf, const char *dst_leaf, int dry) {
+    char *sp = cat2(evdir, src_leaf), *dp = cat2(evdir, dst_leaf);
+    int hs = (sy_exists(sp) == 1), hd = (sy_exists(dp) == 1);
+    if (hs && !hd) {
+        if (dry) sy_printf("RETRY_CI\tARCHIVE\tdry\t%s -> %s\n", src_leaf, dst_leaf);
+        else if (sy_rename(sp, dp) != 0) { free(sp); free(dp); usage("archive rename failed"); }
+        else sy_printf("RETRY_CI\tARCHIVE\trenamed\t%s -> %s\n", src_leaf, dst_leaf);
+    } else if (!hs && hd) {
+        sy_printf("RETRY_CI\tARCHIVE\tskip\talready=%s\n", dst_leaf);
+    } else if (hs && hd) {
+        sy_printf("RETRY_CI\tARCHIVE\tskip\tboth-exist=%s\n", dst_leaf);
+    } else {
+        sy_printf("RETRY_CI\tARCHIVE\tabsent\t%s\n", src_leaf);
+    }
+    free(sp); free(dp);
+}
+static void retry_clean_index(const char *evdir, const char *run_id, int dry) {
+    char *idxp = cat2(evdir, "INDEX.tsv");
+    if (sy_exists(idxp) != 1) { sy_printf("RETRY_CI\tINDEX\tabsent\tINDEX.tsv\n"); free(idxp); return; }
+    size_t n = 0; char *s = cx_read(idxp, &n);
+    if (!s) { free(idxp); usage("INDEX.tsv unreadable"); }
+    char *kept = malloc(n + 2), *rem = malloc(n + 2);
+    if (!kept || !rem) { free(s); free(idxp); usage("oom"); }
+    size_t kn = 0, rn = 0; int removed = 0;
+    char *p = s, *end = s + n;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p + 1) : (size_t)(end - p);
+        int is_exec13 = (!strncmp(p, "exec-1-", 7) || !strncmp(p, "exec-2-", 7) || !strncmp(p, "exec-3-", 7));
+        if (is_exec13) { mm_copy(rem + rn, n + 2 - rn, p, ll); rn += ll; removed++; }
+        else { mm_copy(kept + kn, n + 2 - kn, p, ll); kn += ll; }
+        p += ll;
+    }
+    if (removed == 0) {
+        sy_printf("RETRY_CI\tINDEX\tskip\tno exec-1..3 rows\n");
+    } else if (dry) {
+        sy_printf("RETRY_CI\tINDEX\tdry\tremoved=%d\n", removed);
+    } else {
+        char bkleaf[96]; cx_fmt(bkleaf, sizeof bkleaf, "index-failed-%s.tsv", run_id);
+        char *bkp = cat2(evdir, bkleaf);
+        if (sy_write_atomic(bkp, rem, rn, 0644) != 0 || sy_write_atomic(idxp, kept, kn, 0644) != 0) {
+            free(bkp); free(kept); free(rem); free(s); free(idxp); usage("INDEX.tsv write failed");
+        }
+        sy_printf("RETRY_CI\tINDEX\tcleaned\tremoved=%d\tbackup=%s\n", removed, bkleaf);
+        free(bkp);
+    }
+    free(kept); free(rem); free(s); free(idxp);
+}
+static int cmd_retry_ci(int argc, char **argv) {
+    const char *ver = 0, *run_id = 0, *evdir = 0, *cand = 0, *tag = 0, *gh = "gh";
+    int dry = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--dry")) { dry = 1; continue; }
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--version")) ver = v;
+        else if (!strcmp(k, "--run-id")) run_id = v;
+        else if (!strcmp(k, "--evidence-dir")) evdir = v;
+        else if (!strcmp(k, "--candidate")) cand = v;
+        else if (!strcmp(k, "--tag")) tag = v;
+        else if (!strcmp(k, "--gh")) gh = v;
+        else usage(k);
+        i++;
+    }
+    if (!ver || !is_digits(run_id) || !evdir || !cand) usage("retry-ci needs --version V --run-id DIGITS --evidence-dir DIR --candidate FILE");
+    char tagbuf[64];
+    if (!tag) { if (cx_fmt(tagbuf, sizeof tagbuf, "v%s", ver)) usage("tag"); tag = tagbuf; }
+    if (sy_cwd(cwd, sizeof cwd) < 0) usage("cwd");
+
+    /* (a) Preserve old stage-a commit on main (never rewrite history) */
+    sy_printf("RETRY_CI\tKEEP_HISTORY\tok\told stage-a commit preserved on main\n");
+
+    /* (b) Reset candidate ci_run_id back to 0 */
+    retry_reset_candidate(cand, dry);
+
+    /* (c) Archive failed CI logs and draft readback (preserve as evidence) */
+    char s1[96], d1[96], s2[96], d2[96], d3[96];
+    cx_fmt(s1, sizeof s1, "ci-%s.json", run_id); cx_fmt(d1, sizeof d1, "ci-failed-%s.json", run_id);
+    cx_fmt(s2, sizeof s2, "ci-%s.log", run_id);  cx_fmt(d2, sizeof d2, "ci-failed-%s.log", run_id);
+    cx_fmt(d3, sizeof d3, "draft-readback-failed-%s.txt", run_id);
+    retry_archive_pair(evdir, s1, d1, dry);
+    retry_archive_pair(evdir, s2, d2, dry);
+    retry_archive_pair(evdir, "draft-readback.txt", d3, dry);
+
+    /* (d) Clean old exec-1..3 rows from INDEX.tsv with backup */
+    retry_clean_index(evdir, run_id, dry);
+
+    /* (e) Write rollback note before deleting draft release (only if isDraft=true; never delete tag) */
+    char rbleaf[96], rbtxt[512];
+    cx_fmt(rbleaf, sizeof rbleaf, "retry-ci-rollback-%s.txt", run_id);
+    char *rbp = cat2(evdir, rbleaf);
+    cx_fmt(rbtxt, sizeof rbtxt,
+           "# retry-ci rollback note\nversion=%s\ntag=%s\nfailed_run_id=%s\n"
+           "action=delete-draft-release-only (tag preserved; old main commit preserved; evidence archived as ci-failed-%s.*)\n"
+           "rollback=re-create draft via release-exec --execute after stage-a\n",
+           ver, tag, run_id, run_id);
+    if (!dry) {
+        if (sy_write_atomic(rbp, rbtxt, strlen(rbtxt), 0644) != 0) { free(rbp); usage("rollback note write"); }
+        sy_printf("RETRY_CI\tROLLBACK_NOTE\twritten\t%s\n", rbleaf);
+    } else {
+        sy_printf("RETRY_CI\tROLLBACK_NOTE\tdry\t%s\n", rbleaf);
+    }
+    free(rbp);
+
+    char *viewv[] = {(char *)gh, "release", "view", (char *)tag, "--json", "isDraft", 0};
+    np_result r = {0}; char why[128];
+    int vbad = np_run(viewv, cwd, 0, 30, &r, why, sizeof why);
+    if (vbad || r.rc != 0) {
+        sy_printf("RETRY_CI\tDRAFT\tskip\tabsent\ttag=%s\n", tag);
+        np_free(&r);
+    } else if (r.out && strstr(r.out, "\"isDraft\":false")) {
+        sy_printf("RETRY_CI\tFAIL\tdraft\tREFUSE non-draft release %s\n", tag);
+        np_free(&r);
+        return 1;
+    } else if (!r.out || !strstr(r.out, "\"isDraft\":true")) {
+        sy_printf("RETRY_CI\tFAIL\tdraft\tREFUSE unrecognized gh release view output for %s\n", tag);
+        np_free(&r);
+        return 1;
+    } else {
+        np_free(&r);
+        if (dry) {
+            sy_printf("RETRY_CI\tDRAFT\tdry\twould-delete-draft\ttag=%s\n", tag);
+        } else {
+            char *delv[] = {(char *)gh, "release", "delete", (char *)tag, "--yes", 0};
+            if (np_run(delv, cwd, 0, 30, &r, why, sizeof why) || r.rc != 0) {
+                sy_printf("RETRY_CI\tFAIL\tdraft\tgh release delete failed rc=%d\n", r.rc);
+                np_free(&r);
+                return 1;
+            }
+            np_free(&r);
+            sy_printf("RETRY_CI\tDRAFT\tdeleted\ttag=%s\ttag_kept=1\n", tag);
+        }
+    }
+
+    /* (f) Print resume commands */
+    sy_printf("RETRY_CI\tNEXT\tre-run release-chain run --inputs ... --state ... --layout ... (prep, stage-a, stage-commit --push, stage-dry), then execute\n");
+    sy_printf("RETRY_CI\tRESULT\tOK\tversion=%s\trun_id=%s\tdry=%d\n", ver, run_id, dry);
+    return 0;
+}
+
+/* ---- check-ef-counts: validate <NAME>_COUNT convention in source & strict evidence against expected-fail.tsv ---- */
+static void ef_make_marker(const char *batch, char *dst, size_t cap) {
+    size_t i = 0;
+    for (const char *p = batch; *p && i + 7 < cap; p++) {
+        char c = *p;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        else if (c == '-') c = '_';
+        dst[i++] = c;
+    }
+    mm_copy(dst + i, cap - i, "_COUNT", 7);
+}
+static int ef_parse_pf(const char *s, int *pass, int *fail) {
+    const char *sl = strchr(s, '/');
+    if (!sl || sl == s || !sl[1]) return 0;
+    for (const char *p = s; p < sl; p++) if (*p < '0' || *p > '9') return 0;
+    for (const char *p = sl + 1; *p; p++) if (*p < '0' || *p > '9') return 0;
+    *pass = atoi(s);
+    *fail = atoi(sl + 1);
+    return 1;
+}
+static int ef_find_batch_src(const char *reg, size_t regn, const char *batch, char *src, size_t cap) {
+    size_t bl = strlen(batch);
+    const char *p = reg, *end = reg + regn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (ll > bl && !memcmp(p, batch, bl) && p[bl] == '\t') {
+            /* Column 3 (0-based) is the check source path */
+            const char *q = p; int col = 0;
+            while (col < 3 && q < p + ll) {
+                const char *t = memchr(q, '\t', (size_t)(p + ll - q));
+                if (!t) return 0;
+                q = t + 1; col++;
+            }
+            const char *t = memchr(q, '\t', (size_t)(p + ll - q));
+            size_t sl = t ? (size_t)(t - q) : (size_t)(p + ll - q);
+            if (sl > 0 && sl < cap) { mm_copy(src, cap, q, sl); src[sl] = 0; return 1; }
+            return 0;
+        }
+        p = nl ? nl + 1 : end;
+    }
+    return 0;
+}
+static int ef_find_strict_pf(const char *st, size_t stn, const char *batch, const char *marker, int *ap, int *af) {
+    /* Scan from start and keep the LAST matching row (window-folded semantics) */
+    int found = 0;
+    size_t ml = strlen(marker), bl = strlen(batch);
+    char idpat[160];
+    cx_fmt(idpat, sizeof idpat, "\tid=%s\t", batch);
+    const char *p = st, *end = st + stn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char line[1024];
+        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+        mm_copy(line, sizeof line, p, cp); line[cp] = 0;
+        const char *mp = strstr(line, marker);
+        if (mp && (mp == line || mp[-1] == '\t') && (mp[ml] == '\t' || mp[ml] == ' ')) {
+            const char *pp = strstr(mp, "pass="), *fp = strstr(mp, "fail=");
+            if (pp && fp) { *ap = atoi(pp + 5); *af = atoi(fp + 5); found = 1; }
+        } else if ((!strncmp(line, batch, bl) && line[bl] == '\t') || (!strncmp(line, "RAW\tBATCH_RUN\t", 14) && strstr(line, idpat))) {
+            const char *cp2 = strstr(line, "count=");
+            if (cp2) {
+                char tok[32]; size_t k = 0;
+                for (const char *q = cp2 + 6; *q && *q != '\t' && *q != ' ' && k + 1 < sizeof tok; q++) tok[k++] = *q;
+                tok[k] = 0;
+                int p2 = 0, f2 = 0;
+                if (ef_parse_pf(tok, &p2, &f2)) { *ap = p2; *af = f2; found = 1; }
+            }
+        }
+        (void)bl;
+        p = nl ? nl + 1 : end;
+    }
+    return found;
+}
+static int cmd_check_ef_counts(int argc, char **argv) {
+    const char *efp = 0, *batp = "tests/batches.tsv", *strictp = 0;
+    for (int i = 0; i < argc; i++) {
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--expected-fail")) efp = v;
+        else if (!strcmp(k, "--batches")) batp = v;
+        else if (!strcmp(k, "--strict")) strictp = v;
+        else usage(k);
+        i++;
+    }
+    if (!efp) usage("check-ef-counts needs --expected-fail FILE [--batches FILE] [--strict FILE]");
+    size_t efn = 0, regn = 0, stn = 0;
+    char *ef = cx_read(efp, &efn);
+    if (!ef) usage("expected-fail file unreadable");
+    char *reg = cx_read(batp, &regn);
+    if (!reg) { free(ef); usage("batches file unreadable"); }
+    char *st = 0;
+    if (strictp) {
+        st = cx_read(strictp, &stn);
+        if (!st) { free(ef); free(reg); usage("strict file unreadable"); }
+    }
+    int checked = 0, bad = 0;
+    char *p = ef, *end = ef + efn;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char line[1024];
+        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+        mm_copy(line, sizeof line, p, cp); line[cp] = 0;
+        if (cp > 0 && line[cp - 1] == '\r') line[--cp] = 0;
+        if (line[0] && line[0] != '#' && strncmp(line, "batch\t", 6) != 0) {
+            char *t1 = strchr(line, '\t');
+            if (t1) {
+                *t1 = 0;
+                char *exp = t1 + 1, *t2 = strchr(exp, '\t');
+                if (t2) *t2 = 0;
+                int wp = 0, wf = 0;
+                if (!ef_parse_pf(exp, &wp, &wf)) {
+                    sy_printf("EF_COUNT\tSKIP\t%s\tnon-pf=%s\n", line, exp);
+                } else {
+                    checked++;
+                    char src[256], marker[96];
+                    ef_make_marker(line, marker, sizeof marker);
+                    if (!ef_find_batch_src(reg, regn, line, src, sizeof src)) {
+                        sy_printf("EF_COUNT\tFAIL\t%s\tmissing-batch-in-registry\n", line);
+                        bad++;
+                    } else {
+                        size_t srcn = 0;
+                        char *srcb = cx_read(src, &srcn);
+                        if (!srcb) {
+                            sy_printf("EF_COUNT\tFAIL\t%s\tunreadable-source\tsrc=%s\n", line, src);
+                            bad++;
+                        } else if (!strstr(srcb, marker) || !strstr(srcb, "pass=") || !strstr(srcb, "fail=")) {
+                            sy_printf("EF_COUNT\tFAIL\t%s\tmissing-count-line-in-source\tsrc=%s\twant=%s\n", line, src, marker);
+                            bad++;
+                            free(srcb);
+                        } else {
+                            free(srcb);
+                            if (st) {
+                                int ap = -1, af = -1;
+                                if (!ef_find_strict_pf(st, stn, line, marker, &ap, &af)) {
+                                    sy_printf("EF_COUNT\tFAIL\t%s\tmissing-count-in-strict\twant=%d/%d\n", line, wp, wf);
+                                    bad++;
+                                } else if (ap != wp || af != wf) {
+                                    sy_printf("EF_COUNT\tFAIL\t%s\tcount-mismatch\twant=%d/%d\tgot=%d/%d\n", line, wp, wf, ap, af);
+                                    bad++;
+                                } else {
+                                    sy_printf("EF_COUNT\tPASS\t%s\tmarker=%s\texpected=%d/%d\tsrc=%s\n", line, marker, wp, wf, src);
+                                }
+                            } else {
+                                sy_printf("EF_COUNT\tPASS\t%s\tmarker=%s\texpected=%d/%d\tsrc=%s\n", line, marker, wp, wf, src);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(ef); free(reg); if (st) free(st);
+    sy_printf("EF_COUNT_SUMMARY\tchecked=%d\tfailed=%d\n", checked, bad);
+    return bad ? 1 : 0;
+}
+
+/* ---- steps 0a (pack) & 0b (warm): split out of prep so prep never exceeds 55 s ---- */
+static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
+    char *pk = input_value("pack"), *pklog = input_value("pack-log"), *wm = input_value("warm");
+    char *pack_dst = cat2(state, "pack"), *warm_dst = cat2(state, "warm");
+    char *cand_path = cat2(pk ? pk : pack_dst, "candidate.tsv");
+    char *m0a = cat2(state, "pack.done"), *m0b = cat2(state, "warm.done");
+    int wrote_resolved = 0;
+    *pack_dir_out = pk; *warm_file_out = wm;
+
+    /* 0a pack */
+    if (pk) {
+        sy_printf("CHAIN\tSKIP\t0a\tpack\tprovided-in-inputs\n");
+    } else {
+        char *slot = input_value("slot"), *sdir = input_value("source-dir"), *cout = input_value("chain-out");
+        char *snap = input_value("snapshot"), *frz = input_value("freeze"), *cx64 = input_value("cm-x64"), *ca64 = input_value("cm-arm64");
+        int has_pack_args = (slot && sdir && cout && snap && frz && cx64 && ca64);
+        if (planning) {
+            sy_printf("CHAIN\tCMD\t0a\tpack\tsh %s tools/release-run.cx -- --pack %s %s %s %s --chain-out %s --snap %s --commit %s --cm-sha %s %s\n",
+                      driver, cwd, slot ? slot : "<slot>", sdir ? sdir : "<source-dir>", pack_dst,
+                      cout ? cout : "<chain-out>", snap ? snap : "<snapshot>", frz ? frz : "<freeze>",
+                      cx64 ? cx64 : "<cm-x64>", ca64 ? ca64 : "<cm-arm64>");
+        } else if (has_pack_args) {
+            if (from > 0 && sy_exists(m0a) == 1) {
+                sy_printf("CHAIN\tSKIP\t0a\tpack\tdone\n");
+                *pack_dir_out = pack_dst; wrote_resolved = 1;
+            } else {
+                char *pv[] = {"sh", driver, "tools/release-run.cx", "--", "--pack", cwd, slot, sdir, pack_dst,
+                              "--chain-out", cout, "--snap", snap, "--commit", frz, "--cm-sha", cx64, ca64, 0};
+                sy_printf("CHAIN\tCMD\t0a\tpack\tsh %s tools/release-run.cx -- --pack %s %s %s %s ...\n", driver, cwd, slot, sdir, pack_dst);
+                np_result r = {0}; char why[256] = {0}; long t0 = sy_now_ms();
+                int bad = np_run(pv, cwd, 0, 55, &r, why, sizeof why);
+                sy_printf("CHAIN\tRUN\t0a\tpack\trc=%d\tms=%ld\n", r.rc, sy_now_ms() - t0);
+                if (bad || r.rc || r.residue || r.timed_out) {
+                    sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+                    sy_printf("CHAIN\tFAIL\t0a\tpack\trc=%d\t%s\n", r.rc, r.timed_out ? "timeout 55 s" : why);
+                    exit(1);
+                }
+                char *plog = cat2(pack_dst, "stage-a-pack.out");
+                if (r.out && cx_write(plog, r.out, r.outn)) usage("pack-log write");
+                if (cx_write(m0a, "pack\trc=0\n", 10)) usage("state write");
+                free(plog); np_free(&r);
+                *pack_dir_out = pack_dst; wrote_resolved = 1;
+            }
+        }
+        free(slot); free(sdir); free(cout); free(snap); free(frz); free(cx64); free(ca64);
+    }
+
+    /* 0b warm */
+    if (wm) {
+        sy_printf("CHAIN\tSKIP\t0b\twarm\tprovided-in-inputs\n");
+    } else if (planning) {
+        sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, cand_path, layout, warm_dst);
+    } else if (*pack_dir_out) {
+        if (sy_exists(m0b) == 1) {
+            size_t mn = 0; char *mb = cx_read(m0b, &mn);
+            if (mb && mn > 0) {
+                char *nl = strchr(mb, '\n'); if (nl) *nl = 0;
+                *warm_file_out = strdup(mb);
+                wrote_resolved = 1;
+            }
+            free(mb);
+            sy_printf("CHAIN\tSKIP\t0b\twarm\tdone\n");
+        } else if (from <= 1) {
+            char *wcand = cat2(*pack_dir_out, "candidate.tsv");
+            char *wv[] = {"sh", driver, "tools/release-exec.cx", "--", "--warm", wcand, "--layout", (char *)layout, "--out", warm_dst, 0};
+            sy_printf("CHAIN\tCMD\t0b\twarm\tsh %s tools/release-exec.cx -- --warm %s --layout %s --out %s\n", driver, wcand, layout, warm_dst);
+            np_result r = {0}; char why[256] = {0}; long t0 = sy_now_ms();
+            int bad = np_run(wv, cwd, 0, 55, &r, why, sizeof why);
+            sy_printf("CHAIN\tRUN\t0b\twarm\trc=%d\tms=%ld\n", r.rc, sy_now_ms() - t0);
+            const char *kp = r.out ? strstr(r.out, "WARM\tRESULT\tREADY\tkey=") : 0;
+            if (bad || r.rc || r.residue || r.timed_out || !kp) {
+                sy_printf("%s%s", r.out ? r.out : "", r.err ? r.err : "");
+                sy_printf("CHAIN\tFAIL\t0b\twarm\trc=%d\t%s\n", r.rc, r.timed_out ? "timeout 55 s" : (kp ? why : "missing WARM READY key"));
+                free(wcand); np_free(&r);
+                exit(1);
+            }
+            char key[80]; size_t kl = 0;
+            for (const char *q = kp + 22; *q && *q != '\t' && *q != '\n' && kl + 1 < sizeof key; q++) key[kl++] = *q;
+            key[kl] = 0;
+            char wleaf[128]; cx_fmt(wleaf, sizeof wleaf, "warm-%s.tsv", key);
+            char *wfull = cat2(warm_dst, wleaf);
+            char mrec[4500]; cx_fmt(mrec, sizeof mrec, "%s\n", wfull);
+            if (cx_write(m0b, mrec, strlen(mrec))) usage("state write");
+            *warm_file_out = wfull; wrote_resolved = 1;
+            free(wcand); np_free(&r);
+        }
+    }
+
+    const char *res_inputs = inputs;
+    if (!planning && wrote_resolved) {
+        size_t in_n = 0; char *in_b = cx_read(inputs, &in_n);
+        if (!in_b) usage("inputs unreadable");
+        char *rf = cat2(state, "inputs-resolved.tsv");
+        char extra[4096]; size_t en = 0; extra[0] = 0;
+        if (!pk && *pack_dir_out) {
+            char *plog = pklog ? pklog : cat2(*pack_dir_out, "stage-a-pack.out");
+            cx_fmt(extra + en, sizeof extra - en, "pack\t%s\npack-log\t%s\n", *pack_dir_out, plog);
+            en = strlen(extra);
+            if (!pklog) free(plog);
+        }
+        if (!wm && *warm_file_out) {
+            cx_fmt(extra + en, sizeof extra - en, "warm\t%s\n", *warm_file_out);
+            en = strlen(extra);
+        }
+        size_t tn = in_n + 1 + en;
+        char *buf = malloc(tn + 1);
+        if (!buf) usage("oom");
+        mm_copy(buf, tn + 1, in_b, in_n);
+        size_t pos = in_n;
+        if (pos > 0 && buf[pos - 1] != '\n') buf[pos++] = '\n';
+        mm_copy(buf + pos, tn + 1 - pos, extra, en); pos += en;
+        buf[pos] = 0;
+        if (sy_write_atomic(rf, buf, pos, 0644) != 0) usage("inputs-resolved write");
+        free(buf); free(in_b);
+        res_inputs = rf;
+    }
+    free(pklog); free(cand_path); free(m0a); free(m0b);
+    return res_inputs;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "check-ef-counts")) return cmd_check_ef_counts(argc - 2, argv + 2);
+    if (argc >= 2 && !strcmp(argv[1], "freeze-conflicts")) return cmd_freeze_conflicts(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts");
+    planning = !strcmp(argv[1], "plan");
+    for (int i = 2; i < argc; i++) {
+        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!v) usage(k);
+        if (!strcmp(k, "--inputs")) inputs = v;
+        else if (!strcmp(k, "--state")) state = v;
+        else if (!strcmp(k, "--layout")) layout = v;
+        else if (!strcmp(k, "--decisions")) decisions = v;
+        else if (!strcmp(k, "--from")) { from = atoi(v); if (from < 0 || from > 5) usage("--from 0..5"); }
+        else usage(k);
+        i++;
+    }
+    if (!inputs || !state || !layout || state[0] != '/') usage("--inputs FILE --state ABS_DIR --layout DIR");
+    if (sy_cwd(cwd, sizeof cwd) < 0 || sy_realpath("./unisacc.com", driver, sizeof driver) < 0) usage("run from the repo root");
+    if (!(version = input_value("version")) || !(date = input_value("date"))) usage("inputs need version and date");
+    if (!planning && sy_mkdir_all(state, 0700)) usage("state dir");
+    char *prep = cat2(state, "prep"), *stage = cat2(state, "stage"), strict[300];
+    if (cx_fmt(strict, sizeof strict, "release/evidence/v%s-strict-%s.tsv", version, date)) usage("strict path");
+    check_preconditions();
+    if (planning) show_prerun();
+    if (planning)
+        sy_printf("CHAIN\tPRECHECK\tef-counts\tsh %s tools/release-chain.cx -- check-ef-counts --expected-fail release/evidence/%s/expected-fail.tsv --strict %s\n", driver, version, strict);
+    char *pk_dir = 0, *wm_file = 0;
+    const char *eff_inputs = run_pre_steps(&pk_dir, &wm_file);
+    char *s1[] = {"sh", driver, "tools/release-flow.cx", "--", "prep", "--inputs", (char *)eff_inputs, "--out", prep, 0, 0, 0};
+    char *s2[] = {"sh", driver, "tools/release-flow.cx", "--", "stage-a", "--inputs", (char *)eff_inputs, "--prep", prep, "--out", stage, 0, 0, 0};
+    if (decisions) { s1[9] = "--decisions"; s1[10] = (char *)decisions; s2[11] = "--decisions"; s2[12] = (char *)decisions; }
+    char *s4[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "dry"), "--dry", 0};
+    char *s5[] = {"sh", driver, "tools/release-exec.cx", "--", "--execute", "release/candidate.tsv", "--layout", (char *)layout, "--strict", strict, "--out", cat2(state, "exec"), 0};
+    step(1, s1); step(2, s2); stage_commit(); step(4, s4);
+    /* release-exec --execute polls CI for up to 25 min: it is never a bounded child here */
+    show(5, s5);
+    sy_printf("CHAIN\tSTOP\t5\texecute\tstart it as a long job: devsvc x --bg --par 1 -- <CMD above>, then devsvc wait; resume inside with --from-step\n");
+    sy_printf("CHAIN\tCMD\t6\tpost-publish\tsh ./unisacc.com tools/version-metrics-gen.cx -- --write && sh ./unisacc.com tools/day-metrics.cx -- --write && install verified APE to unisacc.com (verify sha256) && update prd_mempalace.md\n");
+    sy_printf("CHAIN\tRESULT\t%s\tversion=%s\n", planning ? "PLAN" : "READY_TO_EXECUTE", version);
+    return 0;
+}

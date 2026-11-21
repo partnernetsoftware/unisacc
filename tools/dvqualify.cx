@@ -138,7 +138,23 @@ static void add(const char *id) {
 /* Walk a TSV under ROOT; call fn(col0, col1) for each data row. */
 static int each_row(const char *rel, void (*fn)(char *, char *, void *), void *ud) {
     char p[4300]; unsigned char *b = 0; int64_t n = 0;
-    if (cx_fmt(p, sizeof p, "%s/%s", root, rel) || sy_read_file(p, &b, &n, 64L << 20) || !b) return 1;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 1;
+    if (sy_read_file(p, &b, &n, 64L << 20) || !b) {
+        if (!strcmp(rel, "tests/batch-domain-index.tsv")) {
+            char qp[4300], qc[4300];
+            if (!cx_fmt(qp, sizeof qp, "%s/unisacc.com", root) && !cx_fmt(qc, sizeof qc, "%s/tools/derived-query.cx", root) &&
+                sy_exists(qp) == 1 && sy_exists(qc) == 1) {
+                char *qv[] = { "sh", qp, qc, "--", "batch-domains", "--root", root, "--path", 0 };
+                char *qo = 0; size_t qn = 0;
+                if (cx_runv_timeout(qv, 45, &qo, &qn) == 0 && qo && qn > 0) {
+                    while (qn > 0 && (qo[qn - 1] == '\n' || qo[qn - 1] == '\r')) qo[--qn] = 0;
+                    if (qn > 0) (void)sy_read_file(qo, &b, &n, 64L << 20);
+                }
+                if (qo) free(qo);
+            }
+        }
+        if (!b) return 1;
+    }
     char *s = (char *)b, *end = s + n;
     while (s < end) {
         char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;

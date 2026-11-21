@@ -1,0 +1,463 @@
+/* tools/commit-own.cx -- commit only your own files and your own lines of shared files, in a shared checkout.
+ *
+ *   sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...
+ *
+ * --whole PATH: the working-tree file as it is.  --keyed PATH KEYS: only the lines of PATH you changed, i.e.
+ * the changed lines that contain one of the comma-separated KEYs (tools/own-diff.cx --emit); lines other agents
+ * appended or removed in the working tree stay out of the commit and stay in the working tree.
+ * The commit is built in a private index (out/commit-own-PID.idx: read-tree HEAD, the blobs above), so other
+ * agents' staged entries in the shared index are neither committed nor dropped.  Afterwards each committed
+ * path's entry in the shared index is moved to the new blob when it still held the old HEAD blob (nobody had
+ * staged that path) or a blob the path had in one of its last 50 commits (a stale, already-committed version --
+ * leaving it would let a later plain `git commit` put the old file back); an entry that already is the new blob
+ * 收尾: 绝不 git read-tree HEAD 覆盖默认索引。只对刚提交路径补 cacheinfo。
+ * 然后 git diff --cached --name-only: 空则 CACHED_QUIET; 含非本批路径则 NOTE 保留(负控:不吞别人暂存)。
+ * --registered ID...: the registration set of each batch ID as one unit: tests/manifests/ID.tsv whole, and in
+ * tests/batches.tsv / tests/coverage.tsv / build/batch-packages.tsv the keyed lines (batch id, the manifest's
+ * coverage id; whole fields).  build/links.tsv, build/tool-index.tsv and build/table-index.tsv are keyed too
+ * (batch id, tool and check path and their basenames) and taken only when that yields a change.  Every selected
+ * changed line prints SELECT<TAB>PATH<TAB>+|-LINE.  An added line of the three registry tables that is not
+ * byte-for-byte a manifest row (a whole-field match on someone else's row) refuses with exit 1, nothing committed.
+ * Before the commit, tools/reg-manifest.cx --check --index runs against the private index -- the same verdict the
+ * precommit registration-manifest gate takes -- and any MISSING/MISMATCH line refuses with exit 1.
+ * --dry-run: everything up to and including the pre-commit hook on the private index, no commit, the shared index
+ * untouched; prints COMMIT_OWN_DRY<TAB>rc=N.  --help: the usage, exit 0.  A --whole/--keyed of a table that
+ * --registered owns is dropped with a NOTE (the set's keyed rows are taken).  When git reports that HEAD moved
+ * under the commit and none of the commit's paths changed in the new HEAD, the private index is rebuilt there and
+ * the commit retried once.  Every run prints COMMIT_OWN_PHASE (select/pending/regm/commit ms, attempts); every
+ * refusal prints COMMIT_OWN_FAIL<TAB>class=... on stderr one line before its reason.
+ * Prints COMMIT_OWN<TAB>commit=SHA<TAB>paths=N<TAB>foreign_kept=M<TAB>index_unsynced=U.  Exit 0, 1 when git refuses or
+ * the shared index could not be synced (U > 0: retried 12 times against index.lock), 2 on usage. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.io
+#pragma unisa use sys.poll
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+#define CO_MAX 64
+
+/* every refusal names its class on stderr (COMMIT_OWN_FAIL<TAB>class=...) one line before the reason, so the
+   devsvc event history can be classified without reading prose: args, setup, registered-foreign-row,
+   reg-manifest, precommit, head-moved, index-lock, nothing-to-commit, git-or-hook */
+static void co_die(const char *a, const char *b) {
+    fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", (tx_eqz(a, "usage") || tx_eqz(a, "no such file") || tx_eqz(a, "no registration manifest")) ? "args" : "setup");
+    fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
+#define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--dry-run]"
+#define CO_PHASE "COMMIT_OWN_PHASE\tselect_ms=%ld\tpending_ms=%ld\tregm_ms=%ld\tcommit_ms=%ld\tattempts=%d\n"
+
+/* run ARGV; its stdout (trimmed of the final newline) into OUT; the exit code or -1 */
+static long g_bound_s = 30;   /* 30 s for plain git calls; the git commit call (runs the precommit hook) raises it */
+static int run(char **argv, char *out, long cap) {
+    char *o = 0; size_t on = 0; long n; int code;
+    code = cx_runv_timeout(argv, (int)g_bound_s, &o, &on);   /* bound in seconds; stdout captured, stderr inherited */
+    out[0] = 0;
+    if (code < 0) { if (o) mm_free(o); return -1; }
+    n = o ? (long)on : 0;
+    if (n > cap - 1) n = cap - 1;
+    if (n > 0) tx_copy(out, (size_t)cap, o, n);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r')) n--;
+    out[n] = 0;
+    if (o) mm_free(o);
+    return code;
+}
+
+/* the blob of PATH at TREE ("HEAD") or in the shared index (tree 0), and its mode; "" when absent */
+static void entry(const char *tree, const char *path, char *blob, char *mode) {
+    char out[8192];
+    blob[0] = 0; mode[0] = 0;
+    if (tree) { char *v[] = {"git", "ls-tree", (char *)tree, "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
+    else { char *v[] = {"git", "ls-files", "-s", "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
+    /* ls-tree: "MODE blob SHA\tPATH"; ls-files -s: "MODE SHA STAGE\tPATH" */
+    if (tx_len(out, sizeof out) < 50) return;
+    tx_copy(mode, 8, out, 6);
+    if (tree) tx_copy(blob, 41, out + 12, 40); else tx_copy(blob, 41, out + 7, 40);
+}
+
+/* 1 when BLOB is PATH's content in one of the last 50 commits that touched it: an already-committed version left
+   in the shared index (e.g. a `git add` before an earlier commit-own), not anyone's unique staged work */
+static int committed_before(const char *path, const char *blob) {
+    char out[8192], b[48], m[8]; long at = 0, n;
+    char *v[] = {"git", "log", "-n", "50", "--format=%H", "--", (char *)path, 0};
+    if (run(v, out, sizeof out) != 0) return 0;
+    n = tx_len(out, sizeof out);
+    while (at + 40 <= n) {
+        char sha[41]; tx_copy(sha, sizeof sha, out + at, 40);
+        entry(sha, path, b, m);
+        if (b[0] && tx_eqz(b, blob)) return 1;
+        at += 41;
+    }
+    return 0;
+}
+
+/* --registered: the three registry tables (manifest kinds), then the three derived tables keyed by name */
+#define CO_REGT 6
+static const char *CO_REG_TABLE[CO_REGT] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv",
+                                            "build/links.tsv", "build/tool-index.tsv", "build/table-index.tsv"};
+static const char *CO_REG_KIND[3] = {"batch", "coverage", "packages"};
+static char co_regkeys[CO_REGT][4096];   /* comma-separated keys per table */
+static char *co_regrows[3];              /* manifest rows per registry table, '\n'-joined (each row once) */
+static long co_regrown[3];
+static int co_reg_of[CO_MAX];            /* table index of path k, -1 when not a --registered table */
+static char co_manpath[CO_MAX][300];
+
+static void co_addkey(int t, const char *s, long n) {
+    long have = tx_len(co_regkeys[t], sizeof co_regkeys[t]);
+    if (n <= 0) return;
+    if (have + n + 2 >= (long)sizeof co_regkeys[t]) co_die("too many --registered keys", CO_REG_TABLE[t]);
+    if (have) co_regkeys[t][have++] = ',';
+    tx_copy(co_regkeys[t] + have, sizeof co_regkeys[t] - have, s, n);
+    co_regkeys[t][have + n] = 0;
+}
+static void co_addrow(int t, const char *s, long n) {
+    char *g = mm_alloc(co_regrown[t] + n + 2);
+    if (!g) co_die("out of memory", 0);
+    if (co_regrown[t]) tx_copy(g, co_regrown[t] + 1, co_regrows[t], co_regrown[t]);
+    tx_copy(g + co_regrown[t], n + 1, s, n); g[co_regrown[t] + n] = '\n'; g[co_regrown[t] + n + 1] = 0;
+    if (co_regrows[t]) mm_free(co_regrows[t]);
+    co_regrows[t] = g; co_regrown[t] += n + 1;
+}
+/* field F (0-based) of the TAB line S[0..n) */
+static long co_field(const char *s, long n, int f, long *len) {
+    long i = 0, st = 0; int c = 0;
+    for (;; i++) {
+        if (i == n || s[i] == '\t') { if (c == f) { *len = i - st; return st; } c++; st = i + 1; if (i == n) break; }
+    }
+    *len = 0; return -1;
+}
+/* read tests/manifests/ID.tsv: keys for the six tables, the rows for the three registry tables */
+static void co_manifest(const char *id, char *mpath, long mcap) {
+    size_t n = 0; char *m; long at = 0;
+    if (cx_fmt(mpath, mcap, "tests/manifests/%s.tsv", id)) co_die("manifest path", id);
+    m = (char *)cx_read(mpath, &n);
+    if (!m) co_die("no registration manifest", mpath);
+    co_addkey(0, id, tx_len(id, 256)); co_addkey(2, id, tx_len(id, 256));
+    co_addkey(3, id, tx_len(id, 256)); co_addkey(4, id, tx_len(id, 256));
+    while (at < (long)n) {
+        long e = tx_chr(m + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, tab = tx_chr(m + at, ln, '\t'); int t;
+        for (t = 0; t < 3 && tab > 0; t++)
+            if (tab == tx_len(CO_REG_KIND[t], 16) && tx_same(m + at, tab, CO_REG_KIND[t], tab)) {
+                const char *row = m + at + tab + 1; long rl = ln - tab - 1, fl, fs;
+                co_addrow(t, row, rl);
+                if (t == 0) {
+                    if ((fs = co_field(row, rl, 10, &fl)) >= 0 && fl > 1) co_addkey(1, row + fs, fl);
+                    {   int f; for (f = 3; f <= 8; f += 5) if ((fs = co_field(row, rl, f, &fl)) >= 0 && fl > 1) {
+                            long b = fl; while (b > 0 && row[fs + b - 1] != '/') b--;
+                            co_addkey(3, row + fs, fl); co_addkey(4, row + fs, fl); co_addkey(5, row + fs, fl);
+                            if (b > 0) { co_addkey(3, row + fs + b, fl - b); co_addkey(4, row + fs + b, fl - b); }
+                        } }
+                }
+            }
+        at += ln + (e >= 0);
+    }
+    mm_free(m);
+}
+/* 1 when LINE[0..n) is one of the manifest rows of registry table T */
+static int co_isrow(int t, const char *s, long n) {
+    long at = 0;
+    while (at < co_regrown[t]) { long e = tx_chr(co_regrows[t] + at, co_regrown[t] - at, '\n');
+        if (e == n && tx_same(co_regrows[t] + at, n, s, n)) return 1; at += e + 1; }
+    return 0;
+}
+/* list the changed lines of SRC (the emitted file) vs HEAD:PATH as SELECT lines; for a registry table (T < 3)
+   an added line that is not a manifest row is counted and returned (the caller refuses the commit) */
+static int co_select(const char *path, const char *src, int t, int *changed) {
+    char spec[400], *h = 0; size_t hn = 0, wn = 0; char *w; char *hv[] = {"git", "show", spec, 0};
+    long at, nh = 0, i, from = 0; long *hs, *hl; char *used; int bad = 0;
+    *changed = 0;
+    if (cx_fmt(spec, sizeof spec, "HEAD:%s", path)) co_die("path", path);
+    if (cx_runv_timeout(hv, 30, &h, &hn) != 0) { if (h) mm_free(h); h = 0; hn = 0; }
+    w = (char *)cx_read(src, &wn);
+    if (!w) co_die("cannot read the selection", src);
+    for (at = 0; at < (long)hn; ) { long e = tx_chr(h + at, (long)hn - at, '\n'); nh++; if (e < 0) break; at += e + 1; }
+    hs = mm_alloc((nh + 1) * (long)sizeof(long)); hl = mm_alloc((nh + 1) * (long)sizeof(long)); used = mm_alloc(nh + 1);
+    if (!hs || !hl || !used) co_die("out of memory", 0);
+    for (at = 0, i = 0; at < (long)hn && i < nh; i++) { long e = tx_chr(h + at, (long)hn - at, '\n'), ln = e < 0 ? (long)hn - at : e; hs[i] = at; hl[i] = ln; used[i] = 0; at += ln + 1; }
+    for (at = 0; at < (long)wn; ) {
+        long e = tx_chr(w + at, (long)wn - at, '\n'), ln = e < 0 ? (long)wn - at : e, j, hit = -1;
+        for (j = 0; j < nh; j++) {   /* scan from just after the last hit: unchanged lines are in order */
+            long q = (from + j) % nh;
+            if (!used[q] && hl[q] == ln && tx_same(h + hs[q], ln, w + at, ln)) { hit = q; break; }
+        }
+        if (hit >= 0) { used[hit] = 1; from = hit + 1 < nh ? hit + 1 : 0; }
+        else {
+            int ok = t >= 3 || co_isrow(t, w + at, ln);
+            sy_printf("SELECT\t%s\t+%.*s%s\n", path, (int)ln, w + at, ok ? "" : "\t<- not a manifest row");
+            (*changed)++; if (!ok) bad++;
+        }
+        if (e < 0) break; at += e + 1;
+    }
+    for (i = 0; i < nh; i++) if (!used[i]) { sy_printf("SELECT\t%s\t-%.*s\n", path, (int)hl[i], h + hs[i]); (*changed)++; }
+    mm_free(hs); mm_free(hl); mm_free(used); mm_free(w); if (h) mm_free(h);
+    return bad;
+}
+
+/* the pending-derived hint: tools/on-change.cx --dry-run is started before the commit and read when the commit is
+   over (run in line it was 5.2 s of a 19 s commit).  Read-only; never blocks, never changes the exit code; a
+   failed start or a 30 s overrun is skipped silently (the child is killed and reaped). */
+static int co_pend_pid = -1, co_pend_fd = -1;
+static void co_pending_collect(void) {
+    static char oc[16384]; char seen[1024]; long no = 0, at = 0, r, deadline = sy_now_ms() + 30000; int ex = 0, code = 0, sig = 0;
+    if (co_pend_pid < 0) return;
+    for (;;) {
+        sy_pollfd_t pf; long left = deadline - sy_now_ms();
+        pf.fd = co_pend_fd; pf.events = SY_POLLIN; pf.revents = 0;
+        if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(co_pend_fd); sy_kill(co_pend_pid); sy_wait_status(co_pend_pid, 0, &ex, &code, &sig); co_pend_pid = -1; return; }
+        r = sy_read(co_pend_fd, oc + no, (long)sizeof oc - 1 - no);
+        if (r <= 0) break;
+        no += r;
+        if (no + 1 >= (long)sizeof oc) break;
+    }
+    sy_close(co_pend_fd);
+    sy_wait_status(co_pend_pid, 0, &ex, &code, &sig); co_pend_pid = -1;
+    oc[no] = 0; seen[0] = 0;
+    while (at < no) {
+        long e = tx_chr(oc + at, no - at, '\n'), ln = e < 0 ? no - at : e, p = tx_find(oc + at, ln, " pending=", 9);
+        if (p >= 0) {
+            long s = at + p + 9, q = s;
+            while (q < at + ln && oc[q] != ' ') q++;
+            while (s < q) {
+                long c = s, w; char item[128];
+                while (c < q && oc[c] != ',') c++;
+                w = c - s;
+                if (w > 0 && !(w == 1 && oc[s] == '-') && w < (long)sizeof item) {
+                    char key[136];
+                    tx_copy(item, sizeof item, oc + s, w); item[w] = 0;
+                    if (tx_snprintf(key, sizeof key, ",%s,", item) < (int)sizeof key && tx_find(seen, tx_len(seen, sizeof seen), key, tx_len(key, 136)) < 0) {
+                        long sl = tx_len(seen, sizeof seen);
+                        if (sl + w + 2 < (long)sizeof seen) tx_snprintf(seen + sl, sizeof seen - sl, "%s", key);
+                        sy_printf("COMMIT_OWN pending-derived=%s run: sh ./unisacc.com tools/derive.cx -- --write --only %s\n", item, item);
+                    }
+                }
+                s = c + 1;
+            }
+        }
+        at += ln + (e >= 0);
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *msg = 0, *path[CO_MAX], *keys[CO_MAX]; int np = 0, k, a = 1, kept = 0, lost = 0, nreg = 0, refused = 0;
+    int dry = 0, att = 0; long t0 = sy_now_ms(), t_sel = 0, t_pend = 0, t_regm = 0, t_commit = 0, tc0; const char *fcls = "git-or-hook";
+    char idx[400], blob[CO_MAX][64], out[8192], root[4096];
+    char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
+    char skip[CO_MAX];   /* 1 when a --registered derived table yields no change: left out of the commit */
+    for (k = 0; k < CO_MAX; k++) { co_reg_of[k] = -1; skip[k] = 0; }
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
+        else if (tx_eqz(argv[a], "--dry-run")) { dry = 1; a++; }   /* everything up to and including the pre-commit hook, on the private index; no commit */
+        else if (tx_eqz(argv[a], "-m") && a + 1 < argc) { msg = argv[a + 1]; a += 2; }
+        else if (tx_eqz(argv[a], "--registered")) {
+            a++;
+            while (a < argc && argv[a][0] != '-') {
+                if (np == CO_MAX) co_die("too many paths", 0);
+                co_manifest(argv[a], co_manpath[np], sizeof co_manpath[np]);
+                path[np] = co_manpath[np]; keys[np] = 0; np++; nreg++; a++;
+            }
+        }
+        else if (tx_eqz(argv[a], "--whole")) {
+            a++;
+            while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; np++; a++; }
+        } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
+            if (np == CO_MAX) co_die("too many paths", 0);
+            path[np] = argv[a + 1]; keys[np] = argv[a + 2]; np++; a += 3;
+        } else co_die("usage", CO_USAGE);
+    }
+    if (nreg) {
+        int t;
+        for (t = 0; t < CO_REGT; t++) {
+            if (!co_regkeys[t][0] || sy_exists(CO_REG_TABLE[t]) != 1) continue;
+            /* a --whole/--keyed of a table this set owns is dropped, not refused (5 of the 20 failed devsvc commits
+               were this refusal): the set's keyed rows are the narrower selection, other rows stay in the work tree */
+            for (k = 0; k < np; k++) if (tx_eqz(path[k], CO_REG_TABLE[t])) {
+                int j;
+                sy_printf("NOTE\t%s\t--registered owns this table; its --keyed/--whole is dropped (only the registered set's rows are taken)\n", path[k]);
+                for (j = k; j + 1 < np; j++) { path[j] = path[j + 1]; keys[j] = keys[j + 1]; co_reg_of[j] = co_reg_of[j + 1]; }
+                np--; co_reg_of[np] = -1; k--;
+            }
+            if (np == CO_MAX) co_die("too many paths", 0);
+            path[np] = CO_REG_TABLE[t]; keys[np] = co_regkeys[t]; co_reg_of[np] = t; np++;
+        }
+    }
+    if (!msg || !np) co_die("usage", "-m MSG and at least one path");
+    if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
+    for (k = 0; k < np; k++) {
+        char src[4400]; sy_stat_t st;
+        link[k] = 0;
+        if (sy_lstat(path[k], &st) == 0 && st.kind == 'l') link[k] = 1;
+        if (!sy_exists(path[k])) co_die("no such file", path[k]);
+        if (keys[k]) {   /* own-diff --emit writes the base with only the KEYed changes */
+            char *ov[64], kc[1024], *p = kc; int n = 0;
+            if (tx_copy(kc, sizeof kc, keys[k], tx_len(keys[k], 1000))) co_die("keys too long", keys[k]);
+            if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.part", sy_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
+            ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/own-diff.cx"; ov[n++] = "--"; ov[n++] = "--field"; ov[n++] = "--emit"; ov[n++] = src; ov[n++] = (char *)path[k];
+            while (*p && n < 62) { ov[n++] = p; while (*p && *p != ',') p++; if (*p) *p++ = 0; }
+            ov[n] = 0;
+            if (run(ov, out, sizeof out) < 0) co_die("own-diff failed", path[k]);
+            {   long f = 0, at = tx_find(out, tx_len(out, sizeof out), "foreign=", 8); if (at >= 0) f = strtol(out + at + 8, 0, 10); kept += (int)f; }
+            if (co_reg_of[k] >= 0) {
+                int changed = 0;
+                refused += co_select(path[k], src, co_reg_of[k], &changed);
+                if (!changed) skip[k] = 1;   /* nothing of this set in the table: leave it out of the commit */
+            }
+        } else tx_copy(src, sizeof src, path[k], tx_len(path[k], 4300));
+        if (link[k]) {   /* a symlink commits as 120000 with the target string as the blob */
+            char lnk[4400]; long n = sy_readlink(path[k], lnk, sizeof lnk);
+            if (n < 0 || n >= (long)sizeof lnk) co_die("readlink failed", path[k]);
+            lnk[n] = 0;
+            if (tx_snprintf(src, sizeof src, "%s/commit-own-%d-%d.link", sy_tmpdir(), sy_pid(), k) >= (int)sizeof src) co_die("path", 0);
+            {   int fd = sy_open(src, 2 | 64 | 512, 0600); if (fd < 0) co_die("link tmp", src);
+                if (sy_write_all(fd, lnk, n)) { sy_close(fd); co_die("link write", src); }
+                sy_close(fd);
+            }
+        }
+        {   char *hv[] = {"git", "hash-object", "-w", "--", src, 0};
+            if (run(hv, blob[k], sizeof blob[k]) != 0 || tx_len(blob[k], 64) != 40) co_die("git hash-object failed", src);
+        }
+        if (keys[k] || link[k]) sy_unlink(src);
+    }
+    t_sel = sy_now_ms() - t0;
+    if (refused) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=registered-foreign-row\n");
+    if (refused) { fprintf(stderr, "commit-own: REFUSE --registered: %d selected line(s) are not manifest rows (a whole-field key matched someone else's row); nothing committed\n", refused); return 1; }
+    if (nreg) {   /* drop the tables with nothing of this set */
+        int w = 0;
+        for (k = 0; k < np; k++) if (!skip[k]) {
+            path[w] = path[k]; keys[w] = keys[k]; link[w] = link[k]; co_reg_of[w] = co_reg_of[k];
+            tx_copy(blob[w], sizeof blob[w], blob[k], 40); blob[w][40] = 0; w++;
+        }
+        np = w;
+    }
+    {   /* 提示:on-change --dry-run 的 pending= 项(只读,不写、不阻断、不改 rc);失败或超时静默跳过 */
+        char *ov[CO_MAX + 8]; int n = 0;
+        ov[n++] = "sh"; ov[n++] = "./unisacc.com"; ov[n++] = "tools/on-change.cx"; ov[n++] = "--"; ov[n++] = "--dry-run";
+        for (k = 0; k < np; k++) ov[n++] = (char *)path[k];
+        ov[n] = 0;
+        if (sy_exists("tools/on-change.cx") == 1) { co_pend_pid = sy_spawn_pipe(ov, 0, 0, &co_pend_fd, 0); if (co_pend_pid < 0) co_pend_pid = -1; }
+    }
+    t_pend = sy_now_ms() - t0 - t_sel;
+    if (tx_snprintf(idx, sizeof idx, "%s/commit-own-%d.idx", sy_tmpdir(), sy_pid()) >= (int)sizeof idx) co_die("path", 0);
+    {   char old[CO_MAX][48], newc[64]; int rc;
+again:  /* second pass only when HEAD moved under the commit and none of this commit's paths changed there */
+        for (k = 0; k < np; k++) { char m[8]; entry("HEAD", path[k], old[k], m); }
+        sy_setenv("GIT_INDEX_FILE", idx, 1);
+        {   char *v[] = {"git", "read-tree", "HEAD", 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git read-tree failed", 0); } }
+        for (k = 0; k < np; k++) {
+            char info[200], hb[48], hm[8];
+            entry("HEAD", path[k], hb, hm);
+            if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (hm[0] ? hm : "100644"), blob[k], path[k]) >= (int)sizeof info) co_die("path too long", path[k]);
+            {   char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; if (run(v, out, sizeof out) != 0) { sy_unsetenv("GIT_INDEX_FILE"); co_die("git update-index failed", path[k]); } }
+        }
+        if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
+            char *rv[8], ro[16384]; int n = 0, bad = 0; long at = 0, rn;
+            const char *tool = getenv("UNISACC_REGM_TOOL");
+            char rnat[4400]; rnat[0] = 0;
+            {   const char *dir = getenv("UNISACC_COMMIT_OWN_NATIVES");
+                if (dir && *dir && !cx_fmt(rnat, sizeof rnat, "%s/reg-manifest", dir) && sy_exists(rnat) != 1) rnat[0] = 0; }
+            if (rnat[0] && !(tool && tool[0])) rv[n++] = rnat;
+            else { rv[n++] = "sh"; rv[n++] = "./unisacc.com"; rv[n++] = (char *)((tool && tool[0]) ? tool : "tools/reg-manifest.cx"); rv[n++] = "--"; }
+            rv[n++] = "--check"; rv[n++] = "--index"; rv[n] = 0;
+            g_bound_s = 60; tc0 = sy_now_ms();
+            if (run(rv, ro, sizeof ro) < 0) bad = -1;
+            g_bound_s = 30; t_regm += sy_now_ms() - tc0;
+            rn = tx_len(ro, sizeof ro);
+            while (bad >= 0 && at < rn) { long e = tx_chr(ro + at, rn - at, '\n'), l = e < 0 ? rn - at : e;
+                if (tx_prefix(ro + at, l, "MISSING\t", 8) || tx_prefix(ro + at, l, "MISMATCH\t", 9)) { sy_printf("GATE\t%.*s\n", (int)l, ro + at); bad++; }
+                at += l + 1; }
+            if (bad) {
+                sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx);
+                co_pending_collect();
+                fprintf(stderr, "COMMIT_OWN_FAIL\tclass=reg-manifest\n");
+                fprintf(stderr, "commit-own: REFUSE --registered: reg-manifest --check --index %s on the commit's index; nothing committed\n", bad < 0 ? "did not run" : "reports MISSING/MISMATCH");
+                return 1;
+            }
+            sy_printf("REGISTERED\tsets=%d\tgate=reg-manifest-ok\n", nreg);
+        }
+        {   /* git's stderr (hook output, "nothing to commit", identity errors) merged into OUT so the refusal names the cause */
+            char *v[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
+            g_bound_s = 150;   /* the precommit hook alone took 32 s at load 26 (a 30 s bound killed two commits); verdict must not depend on a quiet machine */
+            tc0 = sy_now_ms();
+            if (dry) {   /* the hook git would run (core.hooksPath honoured), on the private index; absent hook = pass */
+                char *dv[] = {"sh", "-c", "h=$(git rev-parse --git-path hooks/pre-commit) || exit 1; [ -x \"$h\" ] || exit 0; exec \"$h\" 2>&1", 0};
+                rc = run(dv, out, sizeof out);
+            } else rc = run(v, out, sizeof out);
+            t_commit += sy_now_ms() - tc0;
+            g_bound_s = 30; }
+        sy_unsetenv("GIT_INDEX_FILE");
+        sy_unlink(idx);
+        {   long on = tx_len(out, sizeof out);
+            if (dry) fcls = tx_find(out, on, "precommit", 9) >= 0 ? "precommit" : "git-or-hook";
+            else if (tx_find(out, on, "cannot lock ref 'HEAD'", 22) >= 0) fcls = "head-moved";
+            else if (tx_find(out, on, "index.lock", 10) >= 0) fcls = "index-lock";
+            else if (tx_find(out, on, "nothing to commit", 17) >= 0 || tx_find(out, on, "nothing added to commit", 23) >= 0) fcls = "nothing-to-commit";
+            else if (tx_find(out, on, "precommit", 9) >= 0 || tx_find(out, on, "PRECOMMIT", 9) >= 0) fcls = "precommit";
+            else fcls = "git-or-hook"; }
+        if (dry) {
+            co_pending_collect();
+            if (out[0]) fprintf(stderr, "%s\n", out);
+            if (rc != 0) fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", fcls);
+            sy_printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
+            sy_printf("COMMIT_OWN_DRY\trc=%d\tpaths=%d\tforeign_kept=%d\tnothing committed, the shared index is untouched\n", rc, np, kept);
+            return rc ? 1 : 0;
+        }
+        if (rc != 0 && att == 0 && tx_eqz(fcls, "head-moved")) {   /* another agent's commit landed between read-tree and the ref update */
+            int same = 1;
+            for (k = 0; k < np; k++) { char nb[48], nm[8]; entry("HEAD", path[k], nb, nm); if (!tx_eqz(nb, old[k])) same = 0; }
+            if (same) { att = 1; sy_printf("NOTE\tHEAD moved under the commit and none of its paths changed there; private index rebuilt on the new HEAD, retrying once\n"); goto again; }
+        }
+        if (rc != 0) {   /* last line: the first non-empty line of git's merged output is the reason */
+            char *s = out, *e; while (*s == '\n' || *s == ' ') s++;
+            co_pending_collect();
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", fcls);
+            fprintf(stderr, CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
+            e = strchr(s, '\n');
+            if (e && e[1]) fprintf(stderr, "%s\n", out);
+            if (e) *e = 0;
+            fprintf(stderr, "commit-own: git commit refused (rc %d): %s\n", rc, *s ? s : "(git printed nothing)");
+            return 1; }
+        {   char *v[] = {"git", "rev-parse", "--short=10", "HEAD", 0}; if (run(v, newc, sizeof newc) != 0) newc[0] = 0; }
+        for (k = 0; k < np; k++) {   /* the shared index: move the entry only where nobody had staged the path */
+            char ib[48], im[8], info[200];
+            entry(0, path[k], ib, im);
+            if (ib[0] && tx_eqz(ib, blob[k])) continue;   /* already the committed blob */
+            if (!ib[0] || tx_eqz(ib, old[k]) || committed_before(path[k], ib)) {
+                if (tx_snprintf(info, sizeof info, "%s,%s,%s", link[k] ? "120000" : (im[0] ? im : "100644"), blob[k], path[k]) >= (int)sizeof info) continue;
+                /* git update-index fails when another git process holds .git/index.lock (an agent's git status
+                   refreshes the index): retry, then check the entry really is the committed blob.  Ignoring the
+                   failure left new files staged as deletions (penoff, macbyt: the last paths of a batch). */
+                {   int tries, good = 0;
+                    for (tries = 0; tries < 12 && !good; tries++) {
+                        char *v[] = {"git", "update-index", "--add", "--cacheinfo", info, 0}; char nb[48], nm[8];
+                        if (tries) sy_sleep_ms(150 + 100 * tries);
+                        run(v, out, sizeof out);
+                        entry(0, path[k], nb, nm);
+                        good = nb[0] && tx_eqz(nb, blob[k]);
+                    }
+                    if (!good) { sy_printf("NOTE\t%s\tthe shared index could not be updated after 12 tries (index.lock?); run: git update-index --add --cacheinfo %s\n", path[k], info); lost++; }
+                }
+            } else printf("NOTE\t%s\tthe shared index has someone's staged version; left as it is\n", path[k]);
+        }
+        {   char *v[] = {"git", "diff", "--cached", "--name-only", 0};
+            if (run(v, out, sizeof out) == 0) {
+                if (!out[0]) sy_printf("CACHED_QUIET\n");
+                else {
+                    long at = 0, nout = tx_len(out, sizeof out); int alien = 0;
+                    while (at < nout) {
+                        long e = tx_chr(out + at, nout - at, '\n'), ln = e < 0 ? nout - at : e; int mine = 0;
+                        for (k = 0; k < np; k++) if (ln == tx_len(path[k], 4000) && tx_same(out + at, ln, path[k], ln)) mine = 1;
+                        if (!mine && ln > 0) { alien++; sy_printf("NOTE\tcached-foreign\t%.*s\n", (int)ln, out + at); }
+                        at += ln + (e >= 0);
+                    }
+                    if (!alien) sy_printf("CACHED_QUIET\n");
+                }
+            }
+        }
+        co_pending_collect();
+        printf(CO_PHASE, t_sel, t_pend, t_regm, t_commit, att + 1);
+        printf("COMMIT_OWN\tcommit=%s\tpaths=%d\tforeign_kept=%d\tindex_unsynced=%d\n", newc, np, kept, lost);
+        if (lost) return 1;   /* committed, but the shared index still shows these paths as staged deletions */
+    }
+    return 0;
+}

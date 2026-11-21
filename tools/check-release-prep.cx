@@ -45,12 +45,20 @@ static int runv(char **v, int secs, int *rc) {
 }
 static int frozen_pick(void) {
     np_result r = {0}; char why[300]; char *v1[] = {"git", "cat-file", "-e", T_COMMIT "^{commit}", 0}; char *v2[] = {"git", "rev-parse", "HEAD", 0}; long k;
-    if (!np_run(v1, root, 0, 20, &r, why, sizeof why) && r.rc == 0) { np_free(&r); return cx_fmt(fc, sizeof fc, "%s", T_COMMIT); }
-    np_free(&r);
+    if (!np_run(v1, root, 0, 20, &r, why, sizeof why) && r.rc == 0) {
+        np_free(&r);
+        /* 0.0.86+ Root (D2 implicit-function refusal) rejects historical 0.0.74 tests/cxraw.cx; probe compatibility before picking T_COMMIT. */
+        char probe[512];
+        if (!cx_fmt(probe, sizeof probe, "git show " T_COMMIT ":tests/cxraw.cx > %s/probe-cxraw.cx && sh ./unisacc.com -c %s/probe-cxraw.cx -o %s/probe-cxraw.o >/dev/null 2>&1", tmp, tmp, tmp)) {
+            char *vp[] = {"sh", "-c", probe, 0};
+            if (!np_run(vp, root, 0, 20, &r, why, sizeof why) && r.rc == 0) { np_free(&r); return cx_fmt(fc, sizeof fc, "%s", T_COMMIT); }
+            np_free(&r);
+        }
+    } else np_free(&r);
     if (np_run(v2, root, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 40) { np_free(&r); return 1; }
     for (k = 0; k < 40; k++) fc[k] = r.out[k];
     fc[40] = 0; np_free(&r);
-    printf("NOTE\tfrozen-commit\t%s\tno history for %s: layout HEAD stands in\n", fc, T_COMMIT);
+    printf("NOTE\tfrozen-commit\t%s\t%s unavailable or incompatible with current Root: layout HEAD stands in\n", fc, T_COMMIT);
     return 0;
 }
 static char *rd(const char *dir, const char *rel) { char p[4500]; size_t n; if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 0; return cx_read(p, &n); }
@@ -74,8 +82,17 @@ static int count_lines(const char *t, const char *prefix) { int n = 0; long pl =
     while (p && *p) { if (!strncmp(p, prefix, (size_t)pl)) n++; p = strchr(p, '\n'); if (p) p++; } return n; }
 static int tabs_on_line(const char *t, const char *prefix) { const char *p = t; long pl = (long)strlen(prefix);
     while (p && *p) { if (!strncmp(p, prefix, (size_t)pl)) { int n = 0; for (; *p && *p != '\n'; p++) if (*p == '\t') n++; return n; } p = strchr(p, '\n'); if (p) p++; } return -1; }
-/* every QUALIFIED is the tail of NOT_QUALIFIED */
-static int only_not_qualified(const char *t) { const char *p = t; while ((p = strstr(p, "QUALIFIED"))) { if (p - t < 4 || strncmp(p - 4, "NOT_", 4)) return 0; p++; } return 1; }
+/* every QUALIFIED is the tail of NOT_QUALIFIED or UNQUALIFIED (e.g. build/pkg-gaps.tsv UNQUALIFIED gap ids) */
+static int only_not_qualified(const char *t) {
+    const char *p = t;
+    while ((p = strstr(p, "QUALIFIED"))) {
+        int is_not = (p - t >= 4 && !strncmp(p - 4, "NOT_", 4));
+        int is_un = (p - t >= 2 && !strncmp(p - 2, "UN", 2));
+        if (!is_not && !is_un) return 0;
+        p++;
+    }
+    return 1;
+}
 /* copy of the real strict evidence with one replacement */
 static int variant(const char *name, const char *from, const char *to, char *path, long cap) {
     char *s = rd(root, T_STRICT), *at; np_buf b = {0}; int bad;
@@ -180,8 +197,10 @@ int main(int argc, char **argv) {
       free(g); free(w); }
 ratchets:
     if (part != 3) { char *g = rd(d1, "ratchets.txt"), *w = rd(root, "release/evidence/0.0.74/ratchets.txt");
+      int gn = g ? count_lines(g, "RATCHET\t") : 0, wn = w ? count_lines(w, "RATCHET\t") : 0;
+      char want_ok[64]; cx_fmt(want_ok, sizeof want_ok, "\nRATCHETS\tok=%d\tfail=0\t", gn);
       check("ratchets-source-frozen-commit", g && !strncmp(g, ratfc, 86) && strlen(ratfc) == 86);
-      check("ratchets-same-rows-as-committed", has(g, "\nRATCHETS\tok=15\tfail=0\t") && count_lines(g, "RATCHET\t") == count_lines(w, "RATCHET\t") && count_lines(g, "RATCHET\t") == 15 && has(w, "RATCHETS\tok=15\tfail=0"));
+      check("ratchets-same-rows-as-committed", g && w && gn >= 15 && has(g, want_ok) && has(w, "RATCHETS\tok=15\tfail=0") && (!strcmp(fc, T_COMMIT) ? gn == wn : gn >= wn));
       free(g); free(w); }
     if (part == 4) goto done;
     { char *g = rd(d1, "evidence-rows.tsv"); int ok = g != 0, i;
@@ -208,6 +227,16 @@ negatives:
     if (variant("strict-newfail.tsv", "pp-negative\tproduct-qualification\tPASS\t0", "pp-negative\tproduct-qualification\tFAIL\t1", s_new, sizeof s_new)) return 2;
     { char *g; check("new-fail-rc1", prep(d4, s_new, rat1, lay, &rc) && rc == 1 && has(out, "PREP\tNEW_FAIL\tpp-negative\t10/0") && has(out, "new_fail=1"));
       g = rd(d4, "expected-fail.tsv"); check("new-fail-not-admitted", has(g, "\n# NEW\tpp-negative\t") && !has(g, "\npp-negative\t") && has(g, "\nc-negative\t53/9\t")); free(g); }
+    /* (4b) window-concatenated evidence: a later window reruns pp-negative to PASS; folded by batch */
+    { char *base = rd(root, T_STRICT), *fl = rd(tmp, "strict-newfail.tsv"), *row, *raw, *re, *rr, p[4500]; np_buf b = {0}; int bad = 1;
+      if (base && fl && (row = strstr(base, "\npp-negative\t")) && (raw = strstr(base, "\nRAW\tBATCH_RUN\tid=pp-negative\t")) && (re = strchr(row + 1, '\n')) && (rr = strchr(raw + 1, '\n'))) {
+          np_puts(&b, fl); np_put(&b, row + 1, (size_t)(re - row)); np_put(&b, raw + 1, (size_t)(rr - raw));
+          bad = cx_fmt(p, sizeof p, "%s/strict-rerun.tsv", tmp) || sy_write_file(p, b.p, b.n, 0644);
+      }
+      if (bad) return 2;
+      { char d7[4400]; cx_fmt(d7, sizeof d7, "%s/n-rerun", tmp);
+        check("rerun-window-folded-by-batch", prep(d7, p, rat1, lay, &rc) && rc == 0 && has(out, "batches=30\tpass=29\tfail=1\tuncovered=0\tnew_fail=0") && !has(out, "PREP\tNEW_FAIL\tpp-negative")); }
+      free(base); free(fl); free(b.p); }
     if (variant("strict-count.tsv", "count=53/9", "count=52/10", s_cnt, sizeof s_cnt)) return 2;
     { char *g; check("changed-fail-count-rc1", prep(d5, s_cnt, rat1, lay, &rc) && rc == 1 && has(out, "PREP\tNEW_FAIL\tc-negative\t52/10"));
       g = rd(d5, "expected-fail.tsv"); check("changed-fail-count-not-admitted", has(g, "\n# NEW\tc-negative\t52/10\t") && !has(g, "\nc-negative\t")); free(g); }

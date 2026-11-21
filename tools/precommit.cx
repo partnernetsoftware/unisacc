@@ -1320,6 +1320,96 @@ static int precheck(int argc, char **argv) {
     return blocked ? 1 : 0;
 }
 
+/* Evaluate the commit gate strictly against the COMPLETE staged tree (git write-tree -> private index
+ * git read-tree + git checkout-index -a -f, with NO path exclusion such as archive/),
+ * never reading unstaged dirty edits from other windows in a shared worktree (U0 / DEVSVC-GATE-READS-SHARED-WORKTREE).
+ * Prepares an isolated full checkout of git write-tree, chdirs into it, sets GIT_DIR/GIT_WORK_TREE/UNISACC_PRECOMMIT_IN_TREE=1,
+ * and registers cleanup on exit. Returns 0 on success (or skipped if already isolated), -1 on setup failure. */
+#define PC_ISOLATE_SETUP_SH \
+    "g=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 1; " \
+    "idx=''; if [ -n \"$GIT_INDEX_FILE\" ]; then case \"$GIT_INDEX_FILE\" in /*) idx=\"$GIT_INDEX_FILE\" ;; *) idx=\"$PWD/$GIT_INDEX_FILE\" ;; esac; fi; " \
+    "d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-tree.XXXXXX\") || exit 1; " \
+    "si=\"$d.idx\"; src=\"${idx:-$g/index}\"; " \
+    "if [ -f \"$src\" ]; then cp \"$src\" \"$si\" && t=$(GIT_DIR=\"$g\" GIT_INDEX_FILE=\"$si\" git write-tree 2>/dev/null) || { rm -rf \"$d\" \"$si\"; exit 1; }; " \
+    "else t=$(GIT_DIR=\"$g\" git write-tree 2>/dev/null) || { rm -rf \"$d\" \"$si\"; exit 1; }; fi; " \
+    "if [ \"$t\" != \"4b825dc642cb6eb9a060e54bf8d69288fbee4904\" ]; then " \
+    "  rm -f \"$si\"; " \
+    "  GIT_DIR=\"$g\" GIT_INDEX_FILE=\"$si\" git read-tree \"$t\" && " \
+    "  GIT_DIR=\"$g\" GIT_INDEX_FILE=\"$si\" git checkout-index -a -f --prefix=\"$d/\" || { rm -rf \"$d\" \"$si\"; exit 1; }; " \
+    "fi; " \
+    "rm -f \"$si\"; " \
+    "for _f in unisacc.com unisacc.com.build.json .git .devsvc; do " \
+    "  [ ! -e \"$_f\" ] || [ -e \"$d/$_f\" ] || [ -L \"$d/$_f\" ] || ln -s \"$PWD/$_f\" \"$d/$_f\"; " \
+    "done; " \
+    "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
+
+static char pc_iso_dir[1024];
+static char pc_blk_gate[32], pc_blk_reason[48];
+
+static void pc_mark_block(const char *gate, const char *reason) {
+    if (pc_blk_gate[0]) return;
+    if (gate && gate[0]) (void)cx_fmt(pc_blk_gate, sizeof pc_blk_gate, "%s", gate);
+    if (reason && reason[0]) (void)cx_fmt(pc_blk_reason, sizeof pc_blk_reason, "%s", reason);
+}
+
+static void pc_emit_gate_fail(void) {
+    sy_eprintf("PRECOMMIT_GATE_FAIL\tgate=%s\treason=%s\n",
+               pc_blk_gate[0] ? pc_blk_gate : "precommit",
+               pc_blk_reason[0] ? pc_blk_reason : "blocked");
+}
+
+static void pc_iso_cleanup(void) {
+    if (!pc_iso_dir[0]) return;
+    char *rv[] = { "rm", "-rf", pc_iso_dir, 0 };
+    long rn = 0;
+    (void)chdir("/");
+    char *o = slurp_run(rv, &rn);
+    if (o) mm_free(o);
+    pc_iso_dir[0] = 0;
+}
+
+static int isolate_staged_tree(void) {
+    const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
+    const char *no_iso  = sy_env("UNISACC_PRECOMMIT_NO_ISOLATE");
+    const char *devmeta = sy_env("UNISACC_DEVMETA_DIR");
+    if ((in_tree && in_tree[0] == '1') || (no_iso && no_iso[0] == '1') || (devmeta && devmeta[0])) return 0;
+    char *iv[] = { "/bin/sh", "-c", PC_ISOLATE_SETUP_SH, 0 };
+    long on = 0;
+    char *o = slurp_run(iv, &on);
+    if (!o || on <= 0) {
+        if (o) mm_free(o);
+        sy_eprintf("precommit: isolate_staged_tree failed (git write-tree/archive)\n");
+        return -1;
+    }
+    while (on > 0 && (o[on - 1] == '\n' || o[on - 1] == '\r')) o[--on] = 0;
+    long o0, l0, o1, l1, o2, l2;
+    if (tx_field(o, on, '\t', 0, &o0, &l0) || tx_field(o, on, '\t', 1, &o1, &l1) ||
+        l0 <= 0 || l0 >= (long)sizeof pc_iso_dir || l1 <= 0 || l1 >= 1024) {
+        mm_free(o);
+        sy_eprintf("precommit: isolate_staged_tree malformed output\n");
+        return -1;
+    }
+    char gdir[1024], idxp[1024];
+    mm_copy(pc_iso_dir, sizeof pc_iso_dir, o + o0, (size_t)l0); pc_iso_dir[l0] = 0;
+    mm_copy(gdir, sizeof gdir, o + o1, (size_t)l1); gdir[l1] = 0;
+    idxp[0] = 0;
+    if (!tx_field(o, on, '\t', 2, &o2, &l2) && l2 > 0 && l2 < (long)sizeof idxp) {
+        mm_copy(idxp, sizeof idxp, o + o2, (size_t)l2); idxp[l2] = 0;
+    }
+    mm_free(o);
+    if (chdir(pc_iso_dir) != 0) {
+        sy_eprintf("precommit: isolate_staged_tree chdir failed\n");
+        pc_iso_cleanup();
+        return -1;
+    }
+    sy_setenv("GIT_DIR", gdir, 1);
+    sy_setenv("GIT_WORK_TREE", pc_iso_dir, 1);
+    sy_setenv("UNISACC_PRECOMMIT_IN_TREE", "1", 1);
+    if (idxp[0]) sy_setenv("GIT_INDEX_FILE", idxp, 1);
+    atexit(pc_iso_cleanup);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
@@ -1327,6 +1417,7 @@ int main(int argc, char **argv) {
     else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
     else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();
     else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates]\n"); return 2; }
+    if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
     if (argc == 1) { int fr = flow_route(); if (fr >= 0) return fr; }
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
@@ -1469,14 +1560,14 @@ int main(int argc, char **argv) {
           }
       }
     }
-    blocked += freeze_gate();
-    blocked += ledger_gate();
-    blocked += derive_gate();
+    { int b0 = blocked; blocked += freeze_gate(); if (blocked > b0) pc_mark_block("freeze", "freeze-window"); }
+    { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
+    { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
     if (!plan_dir) gt_line();
-    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); return blocked ? 1 : 0; }
-    blocked += new_tools();
-    blocked += tlib_frozen_gate(names, sn);
-    blocked += lint_gate(names, sn, &lint_absent);
+    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
+    { int b0 = blocked; blocked += new_tools(); if (blocked > b0) pc_mark_block("new-tools", "missing-check"); }
+    { int b0 = blocked; blocked += tlib_frozen_gate(names, sn); if (blocked > b0) pc_mark_block("tlib-frozen", "tlib-bump"); }
+    { int b0 = blocked; blocked += lint_gate(names, sn, &lint_absent); if (blocked > b0) pc_mark_block("lint", "cx-lint"); }
     if (lint_absent) sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
     /* 不再因「只改 tools/tests」而短路:cxtrunc/cxapis/outdep 本来就面向 tools/tests(fable 咨询 2026-11-08)。 */
     { char rp[1200]; const char *wt = sy_env("GIT_WORK_TREE"); int ex;   /* 工作树里有没有棘轮:夹具仓(GIT_WORK_TREE)无则跳过 */
@@ -1503,6 +1594,7 @@ int main(int argc, char **argv) {
                     int toolish = tx_prefix(names + a2, nl, "tools/", 6) || tx_prefix(names + a2, nl, "tests/", 6);
                     if (!toolish || !soft) {
                         sy_eprintf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1); blocked++;
+                        pc_mark_block("ratchets", "ratchet-over");
                     }
                     break;
                 }
@@ -1512,7 +1604,10 @@ int main(int argc, char **argv) {
         at += l + 1;
     }
     sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked);
-    if (blocked) sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
-                            "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run tools/ratchets.cx.\n");
+    if (blocked) {
+        pc_emit_gate_fail();
+        sy_eprintf("precommit: this commit takes cx files over a ratchet (traditional C back in). Use cx/sys, cx/mem, cx/text\n"
+                   "  (sy_*/mm_*/tx_*), put platform differences in L0 or tables, and see prd.md 能力速查; run tools/ratchets.cx.\n");
+    }
     return blocked ? 1 : 0;
 }

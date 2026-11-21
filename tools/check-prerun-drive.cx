@@ -21,6 +21,10 @@
 #define CPD_PW 4400
 #define CPD_OUT 32768
 
+static int rows_have(const char *rows, long n, const char *want) {
+    return rows && tx_find(rows, n, want, strlen(want)) >= 0;
+}
+
 int main(void) {
     long t0 = sy_now_ms();
     char cwd[CPD_PW], work[CPD_PW], cmd[8192], out[CPD_OUT];
@@ -163,6 +167,267 @@ int main(void) {
            "merge-and-replay-exact: verbatim merge, drafts, and G1 dry counts match");
         free(efb);
         free(eub);
+    }
+
+    /* (5) the estimate sums the longest batch in each ordered wave. */
+    {
+        char tids[CPD_PW], tfile[CPD_PW], pfile[CPD_PW], tpdir[CPD_PW];
+        if (cx_fmt(tids, sizeof tids, "%s/tids.txt", work) ||
+            cx_fmt(tfile, sizeof tfile, "%s/times.tsv", work) ||
+            cx_fmt(pfile, sizeof pfile, "%s/prio.tsv", work) ||
+            cx_fmt(tpdir, sizeof tpdir, "%s/plan-tp", work)) return 2;
+        const char *s_tids = "w1\nw2\nb1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\nb10\n";
+        const char *s_tfile =
+            "w1\t7000\n"
+            "w2\t8000\n"
+            "1700000001\tb1\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000002\tb2\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000003\tb3\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000004\tb4\tPASS\t20000\t19500\tfallback\t1.0\trun-batch\n"
+            "1700000005\tb5\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000006\tb6\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000007\tb7\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000008\tb8\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
+            "1700000009\tb9\tFAIL\t15000\t14500\tfallback\t1.0\trun-batch\n"
+            "1700000010\tb10\tFAIL\t18000\t17500\tfallback\t1.0\trun-batch\n";
+        const char *s_pfile =
+            "b1\tdom\tPASS\t0\taaa\t20000\t1.0\t0\t-\n"
+            "b9\tdom\tFAIL\t1\taaa\t15000\t1.0\t0\terr\n"
+            "b10\tdom\tUNKNOWN\t124\taaa\t18000\t1.0\t0\ttimeout\n";
+        if (cx_write(tids, s_tids, strlen(s_tids)) ||
+            cx_write(tfile, s_tfile, strlen(s_tfile)) ||
+            cx_write(pfile, s_pfile, strlen(s_pfile))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, tids, tfile, pfile, tpdir)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char wp[CPD_PW]; size_t wn = 0;
+        cx_fmt(wp, sizeof wp, "%s/windows.tsv", tpdir);
+        char *wb = (char *)cx_read(wp, &wn);
+        /* A 20 s wave cannot share a window with a 3 s tail at a 22 s budget. */
+        int prior = ck_failures();
+        ck(rc == 0 && wb &&
+           tx_find(wb, (long)wn, "W0000\t1\twarmup\t2\tw1,w2\n", 23) >= 0 &&
+           tx_find(wb, (long)wn, "W0001\t2\tnormal\t2\tb10,b9\n", 24) >= 0 &&
+           rows_have(wb, wn, "W0002\t2\tnormal\t2\tb1,b2\n") &&
+           rows_have(wb, wn, "W0003\t2\tnormal\t2\tb3,b4\n") &&
+           rows_have(wb, wn, "W0004\t2\tnormal\t4\tb5,b6,b7,b8\n") &&
+           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=12\twindows=5\t"),
+           "plan-times-and-priority: priority stays first and normal waves fit the 22s budget");
+        if (ck_failures() != prior && wb) printf("PLAN_DETAIL\n%.*s", (int)wn, wb);
+        free(wb);
+    }
+
+    /* (6) outer window timeout preserves already-completed PASS batches on disk and only retries remaining batches */
+    {
+        char tdir[CPD_PW], tmock[CPD_PW], tids2[CPD_PW];
+        if (cx_fmt(tdir, sizeof tdir, "%s/timeout-keep", work) ||
+            cx_fmt(tmock, sizeof tmock, "%s/tmock.sh", work) ||
+            cx_fmt(tids2, sizeof tids2, "%s/tids2.txt", work)) return 2;
+        if (cx_write(tids2, "p1\np2\np3\np4\n", 12)) return 2;
+        const char *tms =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5; att=$6\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "if [ \"$att\" = 1 ]; then\n"
+            "  printf 'p1\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "  printf 'RAW\\tBATCH_RUN\\tid=p1\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "  printf 'p2\\tproduct-qualification\\tPASS\\t0\\taaa\\t60\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "  printf 'RAW\\tBATCH_RUN\\tid=p2\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "  exit 124\n"
+            "fi\n"
+            "if [ \"$ids\" != \"p3,p4\" ]; then\n"
+            "  printf 'UNEXPECTED_IDS\\tproduct-qualification\\tFAIL\\t1\\taaa\\t10\\t1.0\\t0\\tgot=%s\\n' \"$ids\" >> \"$out\"\n"
+            "  exit 1\n"
+            "fi\n"
+            "printf 'p3\\tproduct-qualification\\tPASS\\t0\\taaa\\t70\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "printf 'RAW\\tBATCH_RUN\\tid=p3\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "printf 'p4\\tproduct-qualification\\tPASS\\t0\\taaa\\t80\\t1.0\\t0\\t-\\n' >> \"$out\"\n"
+            "printf 'RAW\\tBATCH_RUN\\tid=p4\\tstatus=PASS\\trc=0\\tcandidate=aaa\\n' >> \"$out\"\n"
+            "exit 0\n";
+        if (cx_write(tmock, tms, strlen(tms))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 0",
+            cwd, cwd, tids2, tdir)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+            cwd, cwd, cwd, tdir, tmock)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char sp[CPD_PW]; size_t sn = 0;
+        cx_fmt(sp, sizeof sp, "%s/strict-W0000.tsv", tdir);
+        char *sb = (char *)cx_read(sp, &sn);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=1\t") &&
+           sb && tx_find(sb, (long)sn, "p1\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p2\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p3\tproduct-qualification\tPASS\t", 30) >= 0 &&
+           tx_find(sb, (long)sn, "p4\tproduct-qualification\tPASS\t", 30) >= 0,
+           "run-window-timeout-preserves-completed-batches: keeps p1,p2 on disk after rc=124 and retries only p3,p4");
+        free(sb);
+    }
+
+    /* (7) prebuild-self window: invokes devsvc prebuild-self, and --keep-going writes done marker and continues past rc=2 instead of stopping */
+    {
+        char pbdir[CPD_PW], pbroot[CPD_PW], pbcom[CPD_PW], pbids[CPD_PW], out2[CPD_OUT];
+        if (cx_fmt(pbdir, sizeof pbdir, "%s/pb-keep", work) ||
+            cx_fmt(pbroot, sizeof pbroot, "%s/pbroot", work) ||
+            cx_fmt(pbcom, sizeof pbcom, "%s/pbroot/unisacc.com", work) ||
+            cx_fmt(pbids, sizeof pbids, "%s/pbids.txt", work)) return 2;
+        if (mkdir(pbroot, 0700) != 0 && errno != EEXIST) return 2;
+        if (cx_write(pbids, "alpha\nbeta\nreal-commit\n", 23)) return 2;
+        const char *pb_launcher =
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *\"tools/devsvc.cx -- prebuild-self\"*) exit 2 ;;\n"
+            "  *\"tools/check-real-commit.cx\"*) exit 99 ;;\n"
+            "  *\"tools/dvqualify.cx\"*)\n"
+            "    out=''; ids=''\n"
+            "    while [ $# -gt 0 ]; do\n"
+            "      if [ \"$1\" = \"--out\" ]; then out=\"$2\"; shift 2; continue; fi\n"
+            "      if [ \"$1\" = \"--ids\" ]; then ids=\"$2\"; shift 2; continue; fi\n"
+            "      shift\n"
+            "    done\n"
+            "    echo \"# devsvc qualify\" > \"$out\"\n"
+            "    printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "    for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "      printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "    done\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "exit 1\n";
+        if (cx_write(pbcom, pb_launcher, strlen(pb_launcher))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, pbids, pbdir)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        /* Without --keep-going: stops at W0001 prebuild-self rc=2 (proving tools/devsvc.cx -- prebuild-self was called, not check-real-commit which exits 99) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --candidate '%s' --out '%s'",
+            cwd, cwd, pbroot, pbcom, pbdir)) return 2;
+        int rc_stop = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        int ok_stop = (rc_stop == 1 && ckk_has(out, CPD_OUT, "PRERUN_STOP\twindow=W0001\tphase=prebuild-self\trc=2"));
+        /* With --keep-going (and --resume): writes done.W0001 marker, emits PRERUN_KEEP_GOING, and completes W0002 real-commit */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --candidate '%s' --out '%s' --resume --keep-going",
+            cwd, cwd, pbroot, pbcom, pbdir)) return 2;
+        int rc_kg = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        int rc_res = ckk_sh("check-prerun-drive", cmd, out2, sizeof out2);
+        ck(ok_stop && rc_kg == 0 && rc_res == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_KEEP_GOING\tbatch=prebuild-self\tretries=1\twindow=W0001\traw=prebuild-self rc=2") &&
+           ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=2\tskipped=1\t") &&
+           ckk_has(out2, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=0\tskipped=3\t"),
+           "prebuild-self-devsvc-and-keep-going: calls devsvc prebuild-self and under --keep-going writes done marker and continues past rc=2");
+    }
+
+    {
+        char ix[CPD_PW], times[CPD_PW], plan[CPD_PW], log[CPD_PW], windows[CPD_PW], archived[CPD_PW];
+        const char *fixture_ids = "cold-a\ncold-b\nlong\nlong-b\nlong-c\nunknown-cost\n";
+        const char *fixture_times = "cold-a\t12000\ncold-b\t12000\nlong\t42000\nlong-b\t41000\nlong-c\t37000\nlong\t500\n";
+        const char *log_text = "PRERUN_SUPERVISE_DONE\trun_rc=0\tmerge_rc=0\n";
+        if (cx_fmt(ix,sizeof ix,"%s/budget-ids",work) || cx_fmt(times,sizeof times,"%s/budget-times",work) ||
+            cx_fmt(plan,sizeof plan,"%s/budget",work) || cx_fmt(log,sizeof log,"%s/supervise.log",plan) ||
+            cx_fmt(windows,sizeof windows,"%s/windows.tsv",plan) ||
+            cx_fmt(archived,sizeof archived,"%s/release/evidence/0.0.87/prerun-supervise.log",work))return 2;
+        if (cx_write(ix,fixture_ids,strlen(fixture_ids)) || cx_write(times,fixture_times,strlen(fixture_times)))return 2;
+        if (cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --warmup 2",cwd,cwd,ix,times,plan))return 2;
+        int rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        size_t n=0;
+        char *w=(char *)cx_read(windows,&n);
+        ck(rc==0&&rows_have(w,n,"W0000\t1\twarmup\t1\tcold-a\n"),"timed-warmup-fits-serial-budget");
+        ck(rc==0&&rows_have(w,n,"W0001\t1\tlong\t1\tlong\n")&&
+           rows_have(w,n,"W0002\t1\tlong\t1\tlong-b\n")&&
+           rows_have(w,n,"W0003\t1\tlong\t1\tlong-c\n")&&
+           rows_have(w,n,"W0005\t2\tnormal\t1\tcold-b\n"),"long-batches-use-exclusive-windows-and-keep-max-observation");
+        ck(rc==0&&rows_have(w,n,"W0004\t1\tlong\t1\tunknown-cost\n")&&
+           ckk_has(out,CPD_OUT,"wave_ms=166000\tmax_window_ms=42000"),"unknown-cost-reserves-a-full-window");
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner missing --max-jobs 1",cwd,cwd,work,plan))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==2&&ckk_has(out,CPD_OUT,"reason=timed-plan-exceeds-max-jobs"),"timed-run-rejects-width-below-the-plan");
+        const char *missing = "#!/bin/sh\nexit 124\n";
+        char mock[CPD_PW], done[CPD_PW];
+        if(cx_fmt(mock,sizeof mock,"%s/missing.sh",work)||cx_fmt(done,sizeof done,"%s/done.W0000",plan)||
+           cx_write(mock,missing,strlen(missing)))return 2;
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --keep-going",cwd,cwd,work,plan,mock))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==1&&ckk_has(out,CPD_OUT,"wall_ms=")&&ckk_has(out,CPD_OUT,"raw=timed-window-missing-evidence rc=124")&&sy_exists(done)==0,
+           "timed-timeout-logs-attempt-and-leaves-unfinished-window-resumable");
+        if(cx_write(log,log_text,strlen(log_text)))return 2;
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- archive --in-dir '%s' --repo '%s' --version 0.0.87",cwd,cwd,plan,work))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        size_t ln=0,wn=0;
+        char *l=(char *)cx_read(archived,&ln);
+        if(cx_fmt(archived,sizeof archived,"%s/release/evidence/0.0.87/prerun-windows.tsv",work))return 2;
+        char *a=(char *)cx_read(archived,&wn);
+        ck(rc==0&&l&&tx_same(l,ln,log_text,strlen(log_text))&&w&&a&&tx_same(w,n,a,wn),"archive-preserves-window-plan-and-supervisor-log");
+        free(l);free(a);free(w);
+        if(cx_write(log,"changed\n",8))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        if(cx_fmt(archived,sizeof archived,"%s/release/evidence/0.0.87/prerun-supervise.log",work))return 2;
+        l=(char *)cx_read(archived,&ln);
+        ck(rc==2&&ckk_has(out,CPD_OUT,"archive-destination-exists")&&l&&
+           tx_same(l,ln,log_text,strlen(log_text)),"archive-refuses-overwrite-and-preserves-evidence");
+        free(l);
+        const char *other_home="root=/" "home/prerun-test-other/source\n";
+        if(cx_write(log,other_home,strlen(other_home))||
+           cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- archive --in-dir '%s' --repo '%s' --version 0.0.88",cwd,cwd,plan,work))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==2&&ckk_has(out,CPD_OUT,"archive-unresolved-home-path"),"archive-refuses-foreign-personal-path");
+
+        if(cx_write(times,"",0)||cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",cwd,cwd,ix,times,plan))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==2&&ckk_has(out,CPD_OUT,"read-times-file"),"plan-refuses-empty-timings-file");
+        char many[10000]; size_t used=0;
+        for(int i=0;i<514;i++) {
+            if(cx_fmt(many+used,sizeof many-used,"coverage-%d\n",i))return 2;
+            used+=strlen(many+used);
+        }
+        if(cx_write(ix,many,used)||cx_write(times,"coverage-0\t1000\n",16))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==2&&ckk_has(out,CPD_OUT,"window-plan-did-not-cover-every-batch"),"plan-refuses-unrepresented-batches");
+    }
+
+    {
+        char plan[CPD_PW], windows[CPD_PW], mock[CPD_PW], allow[CPD_PW], merged[CPD_PW];
+        const char *layout =
+            "# prerun-drive windows\n# timing=wave-v1 jobs=2 budget_ms=22000\n"
+            "window\tjobs\tphase\tcount\tids\n"
+            "W0000\t2\tnormal\t4\tp1,p2,p3,p4\n"
+            "W0001\t1\tlong\t1\tlater\n";
+        const char *script =
+            "#!/bin/sh\n"
+            "if [ \"$3\" = 2 ]; then printf 'p1\\tdom\\tPASS\\t0\\taaa\\t5\\n' > \"$5\"; exit 124; fi\n"
+            "if [ \"$4\" = p3 ] && [ ! -f allow-serial ]; then exit 124; fi\n"
+            "if [ \"$4\" = p4 ]; then printf 'p4\\tdom\\tFAIL\\t1\\taaa\\t7\\n' > \"$5\"; exit 1; fi\n"
+            "printf '%s\\tdom\\tPASS\\t0\\taaa\\t6\\n' \"$4\" > \"$5\"\n";
+        if(cx_fmt(plan,sizeof plan,"%s/recovery",work)||sy_mkdir_all(plan,0700)||
+           cx_fmt(windows,sizeof windows,"%s/windows.tsv",plan)||cx_write(windows,layout,strlen(layout))||
+           cx_fmt(mock,sizeof mock,"%s/recover.sh",work)||cx_write(mock,script,strlen(script))||
+           cx_fmt(allow,sizeof allow,"%s/allow-serial",work)||
+           cx_fmt(merged,sizeof merged,"%s/strict-final.tsv",plan))return 2;
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --resume --max-retries 1 --keep-going",cwd,cwd,work,plan,mock))return 2;
+        int rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==1&&ckk_has(out,CPD_OUT,"from_jobs=2\tto_jobs=1\tremaining=p2,p3,p4")&&
+           ckk_has(out,CPD_OUT,"PRERUN_INCOMPLETE\tbatch=p3\twindow=W0000.z03")&&
+           ckk_has(out,CPD_OUT,"PRERUN_KEEP_GOING\tbatch=p4\tretries=1\twindow=W0000.z04\traw=serial-recovery-FAIL")&&
+           !ckk_has(out,CPD_OUT,"PRERUN_STOP\t")&&
+           ckk_has(out,CPD_OUT,"window=W0000.z02\tphase=serial-recovery\tattempt=1\tjobs=1\trc=0")&&
+           ckk_has(out,CPD_OUT,"window=W0001\tphase=long\tattempt=1\tjobs=1\trc=0")&&
+           ckk_has(out,CPD_OUT,"PRERUN_RUN\tstatus=INCOMPLETE\tran=1\tskipped=0\tmissing_windows=1"),
+           "parallel-timeout-splits-remaining-and-runs-later-windows");
+        if(cx_write(allow,"ok\n",3))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        ck(rc==0&&ckk_has(out,CPD_OUT,"window=W0000.z03\tphase=serial-recovery\tattempt=1\tjobs=1\trc=0")&&
+           !ckk_has(out,CPD_OUT,"window=W0000.z02\tphase=serial-recovery")&&
+           ckk_has(out,CPD_OUT,"PRERUN_RUN\tstatus=DONE\tran=1\tskipped=1"),
+           "resume-only-runs-unfinished-serial-child");
+        if(cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- merge --in-dir '%s' --out '%s'",cwd,cwd,plan,plan))return 2;
+        rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
+        size_t mn=0; char *m=(char *)cx_read(merged,&mn);
+        ck(rc==0&&ckk_has(out,CPD_OUT,"batches=5\tPASS=4\tFAIL=1\tUNKNOWN=0")&&
+           rows_have(m,mn,"p1\tdom\tPASS\t0\taaa\t5\n")&&rows_have(m,mn,"p3\tdom\tPASS\t0\taaa\t6\n"),
+           "merge-preserves-original-and-recovered-batch-rows");
+        free(m);
     }
 
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }

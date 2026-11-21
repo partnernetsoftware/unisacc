@@ -47,6 +47,10 @@
  *                  release-run --pack refuse that Root as a baseline.
  *  18-parse2-gen   compare candidate --rev (or HEAD) with the last published tag.
  *                  Changed exec/parse2 or seed/gen.c requires a successful host seed-gen parse2 --locations.
+ *  19-chain-preflight  run tools/chain-preflight.cx --strict on all nodes in tools/flows/chain-preflight.tsv
+ *                  (or --preflight-table FILE), plus three version-scope mechanical checks on plans/v<V>.md:
+ *                  planned_units is a positive integer, a_class is a single unique label, and hand-modified
+ *                  lane-A files (build/lane-inputs.tsv lane A, excluding exec/ and kernel/) <= a_files_cap.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -66,10 +70,11 @@
 #pragma unisa use sys.posix
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
-#define MAXJ 12
+#define MAXJ 32
 #define NEWMSG_N 3
+#define CHAIN_PASS_BASELINE 137
 
-typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long n; int rc; long t0, ms; int state; } Job;
+typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long n, cap; int rc; long t0, ms; int state; } Job;
 
 static const char *newmsg[NEWMSG_N] = {"bad symbol name", "does not export", "undeclared function"};
 
@@ -103,21 +108,91 @@ static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
     put_ev(ev, cap, "no uncommitted or untracked paths under src cx ext exec/facts"); return 1;
 }
 static int j_branch(const char *o, long n, char *ev, int cap) {
-    if (n >= 4 && tx_prefix(o, n, "main", 4) && (n == 4 || o[4] == '\n')) { put_ev(ev, cap, "branch main"); return 1; }
-    cx_fmt(ev, (size_t)cap, "branch is not main: %.40s", n > 0 ? o : "(none)"); return 0;
+    long l = n;
+    while (l > 0 && (o[l - 1] == '\n' || o[l - 1] == '\r')) l--;
+    if (l == 4 && tx_prefix(o, l, "main", 4)) { put_ev(ev, cap, "branch main"); return 1; }
+    if (l > 5 && tx_prefix(o, l, "v0.0.", 5)) {
+        long i = 5;
+        while (i < l && o[i] >= '0' && o[i] <= '9') i++;
+        if (i == l) { cx_fmt(ev, (size_t)cap, "branch %.*s", (int)l, o); return 1; }
+    }
+    cx_fmt(ev, (size_t)cap, "branch is not main or v0.0.NN: %.40s", n > 0 ? o : "(none)"); return 0;
+}
+static int j_derive_shard(const char *o, long n, int rc, const char *shard_gens, char *ev, int cap) {
+    char l[160], failed_gens[256]; long fgn = 0, at = 0;
+    failed_gens[0] = 0;
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 7 && tx_prefix(o + at, ln, "DERIVE\t", 7)) {
+            const char *gn = o + at + 7;
+            long rem = ln - 7, t1 = tx_chr(gn, rem, '\t');
+            if (t1 > 0 && t1 < 64) {
+                const char *st = gn + t1 + 1;
+                long srem = rem - t1 - 1, t2 = tx_chr(st, srem, '\t');
+                long sl = t2 < 0 ? srem : t2;
+                if (sl > 0 && sl < 32 && !(sl == 2 && tx_prefix(st, sl, "OK", 2)) && !(sl == 7 && tx_prefix(st, sl, "SKIPPED", 7))) {
+                    char one[120]; long ol;
+                    cx_fmt(one, sizeof one, "%s%.*s(%.*s)", fgn ? "," : "", (int)t1, gn, (int)sl, st);
+                    ol = (long)tx_len(one, sizeof one);
+                    if (fgn + ol < (long)sizeof failed_gens - 1) {
+                        mm_copy(failed_gens + fgn, sizeof failed_gens - (size_t)fgn, one, (size_t)ol + 1);
+                        fgn += ol;
+                    }
+                }
+            }
+        }
+        at += (e < 0 ? n - at : e + 1);
+    }
+    line_with(o, n, "DERIVE_SUMMARY", l, sizeof l);
+    if (!l[0]) {
+        if (!fgn && shard_gens && shard_gens[0]) {
+            long slen = (long)tx_len(shard_gens, 512), p = 0;
+            while (p < slen) {
+                long c = tx_chr(shard_gens + p, slen - p, ','), gl = c < 0 ? slen - p : c;
+                if (gl > 0 && gl < 64) {
+                    char pat[96];
+                    cx_fmt(pat, sizeof pat, "DERIVE\t%.*s\tOK\t", (int)gl, shard_gens + p);
+                    if (!has(o, n, pat)) {
+                        char one[120]; long ol;
+                        cx_fmt(one, sizeof one, "%s%.*s(%s)", fgn ? "," : "", (int)gl, shard_gens + p, rc == 142 ? "TIMEOUT" : "INCOMPLETE");
+                        ol = (long)tx_len(one, sizeof one);
+                        if (fgn + ol < (long)sizeof failed_gens - 1) {
+                            mm_copy(failed_gens + fgn, sizeof failed_gens - (size_t)fgn, one, (size_t)ol + 1);
+                            fgn += ol;
+                        }
+                    }
+                }
+                p += (c < 0 ? slen - p : c + 1);
+            }
+        }
+        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d failed_generator=%s", rc, failed_gens);
+        else cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d", rc);
+        return 0;
+    }
+    if (rc == 0 && !fgn && has(l, (long)tx_len(l, 200), "drift=0") && has(l, (long)tx_len(l, 200), "refused=0")) {
+        cx_fmt(ev, (size_t)cap, "%s", l);
+        return 1;
+    }
+    {   char d[160];
+        line_with(o, n, "\tDRIFT\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tREFUSED\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tTIMEOUT\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tNEEDS_BUMP\t", d, sizeof d);
+        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "failed_generator=%s %.60s; first: %.90s", failed_gens, l, d);
+        else cx_fmt(ev, (size_t)cap, "%.60s; first: %.90s", l, d);
+    }
+    return 0;
 }
 static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
-    char l[160]; line_with(o, n, "DERIVE_SUMMARY", l, sizeof l);
-    if (!l[0]) { cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d", rc); return 0; }
-    if (rc == 0 && has(l, (long)tx_len(l, 200), "drift=0") && has(l, (long)tx_len(l, 200), "refused=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
-    {   char d[160]; line_with(o, n, "\tDRIFT\t", d, sizeof d); if (!d[0]) line_with(o, n, "\tREFUSED\t", d, sizeof d);
-        cx_fmt(ev, (size_t)cap, "%.60s; first: %.90s", l, d); }
-    return 0;
+    return j_derive_shard(o, n, rc, 0, ev, cap);
 }
 static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
-    if (rc == 0 && has(l, (long)tx_len(l, 200), "ok=13") && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
-    cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); return 0;
+    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) { cx_fmt(ev, (size_t)cap, "%s", l); return 1; }
+    {   char d[160]; line_with(o, n, "\tFAIL\t", d, sizeof d);
+        if (d[0]) cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %.120s", rc, l[0] ? l : "no RATCHETS line", d);
+        else cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); }
+    return 0;
 }
 static int j_tri(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "CXMOD_TRI\t", l, sizeof l);
@@ -130,18 +205,87 @@ static int j_extract(const char *o, long n, int rc, char *ev, int cap) {
     line_with(o, n, "CX0_EXTRACT", l, sizeof l);
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no CX0_EXTRACT line"); return 0;
 }
-static int j_chain(const char *o, long n, int rc, char *ev, int cap) {
-    char l[160]; long at = 0, nfail = 0, npass = 0;
+static void j_chain_count(const char *o, long n, long *npass_out, long *nfail_out, char *first_fail, int fcap) {
+    long at = 0, nfail = 0, npass = 0;
     while (at < n) {
         long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
-        if (tx_prefix(o + at, ln, "FAIL\t", 5)) { if (!nfail) { long k = ln < 140 ? ln : 140; mm_copy(l, sizeof l, o + at, (size_t)k); l[k] = 0; } nfail++; }
-        else if (tx_prefix(o + at, ln, "PASS\t", 5)) npass++;
-        at += ln + 1;
+        if (tx_prefix(o + at, ln, "FAIL\t", 5)) {
+            if (!nfail && first_fail && !first_fail[0]) {
+                long k = ln < fcap - 1 ? ln : fcap - 1;
+                mm_copy(first_fail, (size_t)fcap, o + at, (size_t)k); first_fail[k] = 0;
+            }
+            nfail++;
+        } else if (tx_prefix(o + at, ln, "PASS\t", 5)) npass++;
+        at += (e < 0 ? n - at : e + 1);
     }
+    *npass_out = npass; *nfail_out = nfail;
+}
+static int j_chain(const char *o, long n, int rc, char *ev, int cap) {
+    char l[160]; long nfail = 0, npass = 0;
+    l[0] = 0;
+    j_chain_count(o, n, &npass, &nfail, l, sizeof l);
     if (rc == 0 && nfail == 0 && npass > 0) { cx_fmt(ev, (size_t)cap, "rc=0 pass=%ld fail=0", npass); return 1; }
     if (nfail) cx_fmt(ev, (size_t)cap, "rc=%d pass=%ld fail=%ld first: %s", rc, npass, nfail, l);
     else cx_fmt(ev, (size_t)cap, "rc=%d pass=%ld, no FAIL row", rc, npass);
     return 0;
+}
+static int j_chain_agg(int nshards, const char **snames, const char **outs, const long *lens, const int *rcs, char *ev, int cap) {
+    long tot_pass = 0, tot_fail = 0; int i, bad = 0, bad_rc = 0;
+    char bad_desc[320], shard_desc[240], first_fail[160];
+    long bdn = 0, sdn = 0;
+    bad_desc[0] = 0; shard_desc[0] = 0; first_fail[0] = 0;
+    for (i = 0; i < nshards; i++) {
+        long spass = 0, sfail = 0, ol;
+        char one[120];
+        j_chain_count(outs[i] ? outs[i] : "", lens[i], &spass, &sfail, first_fail, sizeof first_fail);
+        tot_pass += spass; tot_fail += sfail;
+        cx_fmt(one, sizeof one, "%s%s=%ld", sdn ? "," : "", snames[i], spass);
+        ol = (long)tx_len(one, sizeof one);
+        if (sdn + ol < (long)sizeof shard_desc - 1) { mm_copy(shard_desc + sdn, sizeof shard_desc - (size_t)sdn, one, (size_t)ol + 1); sdn += ol; }
+        if (rcs[i] != 0 || sfail > 0 || spass == 0) {
+            bad++;
+            if (!bad_rc && rcs[i]) bad_rc = rcs[i];
+            cx_fmt(one, sizeof one, "%s%s(rc=%d%s,pass=%ld,fail=%ld)", bdn ? "," : "", snames[i], rcs[i], rcs[i] == 142 ? ",timeout" : "", spass, sfail);
+            ol = (long)tx_len(one, sizeof one);
+            if (bdn + ol < (long)sizeof bad_desc - 1) { mm_copy(bad_desc + bdn, sizeof bad_desc - (size_t)bdn, one, (size_t)ol + 1); bdn += ol; }
+        }
+    }
+    if (bad == 0 && tot_fail == 0) {
+        if (tot_pass < CHAIN_PASS_BASELINE) {
+            cx_fmt(ev, (size_t)cap, "rc=0 pass=%ld fail=0 (<%d baseline: assertion count regressed; %s)", tot_pass, CHAIN_PASS_BASELINE, shard_desc);
+            return 0;
+        }
+        cx_fmt(ev, (size_t)cap, "rc=0 pass=%ld fail=0 (baseline=%d shards=%d: %s)", tot_pass, CHAIN_PASS_BASELINE, nshards, shard_desc);
+        return 1;
+    }
+    cx_fmt(ev, (size_t)cap, "rc=%d pass=%ld fail=%ld failed_shard=%s%s%s", bad_rc ? bad_rc : 1, tot_pass, tot_fail, bad_desc, first_fail[0] ? " first: " : "", first_fail);
+    return 0;
+}
+static int j_chain_shards_text(const char *o, long n, int rc, char *ev, int cap) {
+    char names_buf[8][32]; const char *snames[8], *outs[8]; long lens[8]; int rcs[8], ns = 0;
+    long at = 0, cur_start = -1;
+    while (at < n) {
+        long e = tx_chr(o + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 6 && tx_prefix(o + at, ln, "SHARD\t", 6) && ns < 8) {
+            const char *p = o + at + 6; long rem = ln - 6, t1 = tx_chr(p, rem, '\t');
+            if (cur_start >= 0 && ns > 0) lens[ns - 1] = (at - cur_start);
+            if (t1 > 0 && t1 < 31) {
+                int64_t rv = rc;
+                mm_copy(names_buf[ns], sizeof names_buf[ns], p, (size_t)t1); names_buf[ns][t1] = 0;
+                if (rem - t1 - 1 > 3 && tx_prefix(p + t1 + 1, rem - t1 - 1, "rc=", 3)) {
+                    tx_to_i64(p + t1 + 4, rem - t1 - 4, 10, &rv);
+                }
+                snames[ns] = names_buf[ns]; rcs[ns] = (int)rv;
+                cur_start = at + (e < 0 ? n - at : e + 1);
+                outs[ns] = o + cur_start; lens[ns] = 0;
+                ns++;
+            }
+        }
+        at += (e < 0 ? n - at : e + 1);
+    }
+    if (cur_start >= 0 && ns > 0) lens[ns - 1] = n - cur_start;
+    if (ns == 0) { snames[0] = "all"; outs[0] = o; lens[0] = n; rcs[0] = rc; ns = 1; }
+    return j_chain_agg(ns, snames, outs, lens, rcs, ev, cap);
 }
 static int j_affected(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "FAIL", l, sizeof l);
@@ -196,13 +340,16 @@ static int j_p1file(const char *o, long n) {
 }
 
 static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev, int cap) {
+    long kl = (long)tx_len(kind, 256);
     if (tx_eqz(kind, "rev")) return j_rev(o, n, rc, ev, cap);
     if (tx_eqz(kind, "branch")) return j_branch(o, n, ev, cap);
-    if (tx_eqz(kind, "derive")) return j_derive(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "derive") || tx_eqz(kind, "derive2")) return j_derive(o, n, rc, ev, cap);
+    if (kl > 7 && tx_prefix(kind, kl, "derive:", 7)) return j_derive_shard(o, n, rc, kind + 7, ev, cap);
     if (tx_eqz(kind, "ratchets")) return j_ratchets(o, n, rc, ev, cap);
     if (tx_eqz(kind, "tri")) return j_tri(o, n, rc, ev, cap);
     if (tx_eqz(kind, "extract")) return j_extract(o, n, rc, ev, cap);
     if (tx_eqz(kind, "chain")) return j_chain(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "chain-shards")) return j_chain_shards_text(o, n, rc, ev, cap);
     if (tx_eqz(kind, "affected")) return j_affected(o, n, rc, ev, cap);
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
     if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
@@ -225,18 +372,62 @@ static void slurp(int fd, char **buf, long *n) {
 static int start(Job *j) {
     long deadline_ms = 0; (void)deadline_ms;   /* the deadline lives in the ./tools/bound argv prefix */
     j->t0 = sy_now_ms();
+    j->out = 0; j->n = 0; j->cap = 0; j->rc = -1;
     /* every argv here starts with ./tools/bound SECONDS: the child is bound-limited */
     j->pid = sy_spawn_pipe(j->argv, 0, 0, &j->ofd, 0);   /* stderr merged into the pipe */
-    j->state = j->pid > 0 ? 1 : 3;
-    return j->pid > 0 ? 0 : -1;
+    if (j->pid > 0) {
+        j->cap = 1 << 16;
+        j->out = mm_alloc(j->cap);
+        if (j->out) j->out[0] = 0;
+        j->state = 1;
+        return 0;
+    }
+    j->state = 3;
+    return -1;
 }
 static void finish(Job *j) {
     int ex = 0, code = 0, sig = 0;
     if (j->state == 1) {
-        slurp(j->ofd, &j->out, &j->n); sy_close(j->ofd);
+        long r;
+        if (!j->out) { j->cap = 1 << 16; j->out = mm_alloc(j->cap); j->n = 0; }
+        while (j->out && (r = sy_read(j->ofd, j->out + j->n, j->cap - 1 - j->n)) > 0) {
+            j->n += r;
+            if (j->n + 1 >= j->cap) { char *g = mm_grow(j->out, j->cap * 2); if (!g) break; j->out = g; j->cap *= 2; }
+        }
+        if (j->out) j->out[j->n] = 0;
+        sy_close(j->ofd);
         j->rc = sy_wait_status(j->pid, 0, &ex, &code, &sig) == j->pid && ex ? code : -1;
     } else { j->out = 0; j->n = 0; j->rc = -1; }
     j->ms = sy_now_ms() - j->t0; j->state = 2;
+}
+static int calc_max_running(int *ncores_out, int *load1_out) {
+    size_t n = 0; char *b; long at = 0; int ncores = 0, load1 = 0, max_r;
+    const char *env = getenv("UNISACC_CHAIN_READY_JOBS");
+    b = cx_read("/proc/cpuinfo", &n);
+    while (b && at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
+        if (ln > 9 && tx_prefix(b + at, ln, "processor", 9) && (b[at + 9] == '\t' || b[at + 9] == ' ' || b[at + 9] == ':')) ncores++;
+        at += (e < 0 ? (long)n - at : e + 1);
+    }
+    if (b) mm_free(b);
+    if (ncores < 1) ncores = 8;
+    b = cx_read("/proc/loadavg", &n);
+    if (b && n > 0) {
+        long i = 0; int v = 0;
+        while (i < (long)n && b[i] >= '0' && b[i] <= '9') { v = v * 10 + (b[i] - '0'); i++; }
+        load1 = v;
+    }
+    if (b) mm_free(b);
+    if (ncores_out) *ncores_out = ncores;
+    if (load1_out) *load1_out = load1;
+    if (env && env[0]) {
+        int64_t ev = 0;
+        if (!tx_to_i64(env, (long)tx_len(env, 16), 10, &ev) && ev >= 1 && ev <= MAXJ) return (int)ev;
+    }
+    if (load1 >= ncores) max_r = 4;
+    else if (load1 >= ncores / 2) max_r = 5;
+    else max_r = 6;
+    return max_r;
 }
 static void argv_set(Job *j, const char *name, int bound, ...) {
     (void)bound; j->name = name;
@@ -573,8 +764,204 @@ static void root_items(const char *repo, const char *root, const char *revarg, c
     }
 }
 
+static int is_pos_int_str(const char *s, long n, long *val) {
+    long i, v = 0;
+    if (n <= 0 || n > 9) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    if (v <= 0) return 0;
+    *val = v;
+    return 1;
+}
+
+static int lane_a_file(const char *lbuf, long llen, const char *path, long plen) {
+    long at = 0;
+    if (!lbuf || llen <= 0 || plen <= 0) return 0;
+    if (tx_prefix(path, plen, "exec/", 5) || tx_prefix(path, plen, "kernel/", 7)) return 0;
+    while (at < llen) {
+        long e = tx_chr(lbuf + at, llen - at, '\n'), ln = e < 0 ? llen - at : e;
+        if (ln > 0 && lbuf[at + ln - 1] == '\r') ln--;
+        if (ln > plen + 2 && lbuf[at] != '#' &&
+            tx_same(lbuf + at, plen, path, plen) &&
+            lbuf[at + plen] == '\t' && lbuf[at + plen + 1] == 'A' &&
+            (ln == plen + 2 || lbuf[at + plen + 2] == '\t')) {
+            return 1;
+        }
+        at += (e < 0 ? llen - at : e + 1);
+    }
+    return 0;
+}
+
+static int check_version_scope(const char *repo, const char *revarg, const char *since, const char *tver, char *scope_ev, int cap) {
+    char ver[64], planp[4400], lanep[4400], aclass[128], why[160], tag[64], base[64], tip[64];
+    size_t pn = 0, ln = 0;
+    char *pb = 0, *lb = 0;
+    long at = 0, punits = -1, afcap = -1;
+    int seen_pu = 0, seen_ac = 0, seen_cap = 0, a_count = 0;
+    ver[0] = 0; aclass[0] = 0; scope_ev[0] = 0;
+    if (tver && tver[0]) {
+        const char *v = (tver[0] == 'v') ? tver + 1 : tver;
+        cx_fmt(ver, sizeof ver, "%s", v);
+    } else {
+        char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
+        np_result r = {0};
+        if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out && r.outn > 5) {
+            long l = (long)r.outn;
+            while (l > 0 && (r.out[l - 1] == '\n' || r.out[l - 1] == '\r')) l--;
+            if (l > 5 && tx_prefix(r.out, l, "v0.0.", 5)) {
+                long k = 0, i;
+                for (i = 1; i < l && (r.out[i] == '.' || (r.out[i] >= '0' && r.out[i] <= '9')) && k < 63; i++) ver[k++] = r.out[i];
+                ver[k] = 0;
+            }
+        }
+        np_free(&r);
+    }
+    if (!ver[0]) return 1;
+    cx_fmt(planp, sizeof planp, "%s/plans/v%s.md", repo, ver);
+    if (sy_exists(planp) != 1) {
+        if (tver && tver[0]) {
+            cx_fmt(scope_ev, (size_t)cap, "READY=no version-plan-missing version=%s path=%s", ver, planp);
+            return 0;
+        }
+        return 1;
+    }
+    pb = cx_read(planp, &pn);
+    if (!pb) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no version-plan-unreadable path=%s", planp);
+        return 0;
+    }
+    while (at < (long)pn) {
+        long e = tx_chr(pb + at, (long)pn - at, '\n'), l = e < 0 ? (long)pn - at : e;
+        const char *line = pb + at;
+        if (l > 0 && line[l - 1] == '\r') l--;
+        if (tx_prefix(line, l, "planned_units=", 14)) {
+            const char *v = line + 14; long vl = l - 14;
+            seen_pu++;
+            if (!is_pos_int_str(v, vl, &punits)) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no planned-units-not-number version=%s planned_units=%.*s", ver, (int)vl, v);
+                mm_free(pb); return 0;
+            }
+        } else if (tx_prefix(line, l, "a_class=", 8)) {
+            const char *v = line + 8; long vl = l - 8, i;
+            while (vl > 0 && (*v == ' ' || *v == '\t')) { v++; vl--; }
+            while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+            seen_ac++;
+            if (vl <= 0 || vl >= (long)sizeof aclass || seen_ac > 1) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=%.*s count=%d", ver, (int)vl, v, seen_ac);
+                mm_free(pb); return 0;
+            }
+            for (i = 0; i < vl; i++) {
+                if (v[i] == ',' || v[i] == ';' || v[i] == '/' || v[i] == '+') {
+                    cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=%.*s", ver, (int)vl, v);
+                    mm_free(pb); return 0;
+                }
+            }
+            mm_copy(aclass, sizeof aclass, v, (size_t)vl); aclass[vl] = 0;
+        } else if (tx_prefix(line, l, "a_files_cap=", 12)) {
+            const char *v = line + 12; long vl = l - 12;
+            seen_cap++;
+            if (!is_pos_int_str(v, vl, &afcap)) {
+                cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-cap-invalid version=%s a_files_cap=%.*s", ver, (int)vl, v);
+                mm_free(pb); return 0;
+            }
+        }
+        at += (e < 0 ? (long)pn - at : e + 1);
+    }
+    mm_free(pb);
+    if (!seen_pu || punits <= 0) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no planned-units-not-number version=%s planned_units=missing", ver);
+        return 0;
+    }
+    if (!seen_ac || !aclass[0]) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-class-not-unique version=%s a_class=missing", ver);
+        return 0;
+    }
+    if (!seen_cap || afcap <= 0) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-cap-invalid version=%s a_files_cap=missing", ver);
+        return 0;
+    }
+    cx_fmt(lanep, sizeof lanep, "%s/build/lane-inputs.tsv", repo);
+    lb = cx_read(lanep, &ln);
+    if (lb && ln > 0) {
+        base[0] = 0; tag[0] = 0;
+        if (since && since[0]) cx_fmt(base, sizeof base, "%s", since);
+        else if (parse2_release_tag(repo, tag) && parse2_commit(repo, tag, base)) { /* use last public tag */ }
+        else cx_fmt(base, sizeof base, "HEAD~1");
+        cx_fmt(tip, sizeof tip, "%s", revarg && revarg[0] ? revarg : "HEAD");
+        {
+            char *dv[] = {"git", "diff", "--name-only", base, tip, 0};
+            np_result r = {0};
+            if (!np_run(dv, repo, 0, 10, &r, why, sizeof why) && !r.rc && r.out) {
+                long p = 0, rn = (long)r.outn;
+                while (p < rn) {
+                    long e = tx_chr(r.out + p, rn - p, '\n'), l = e < 0 ? rn - p : e;
+                    if (l > 0 && r.out[p + l - 1] == '\r') l--;
+                    if (l > 0 && lane_a_file(lb, (long)ln, r.out + p, l)) a_count++;
+                    p += (e < 0 ? rn - p : e + 1);
+                }
+            }
+            np_free(&r);
+        }
+        mm_free(lb);
+    }
+    if (a_count > afcap) {
+        cx_fmt(scope_ev, (size_t)cap, "READY=no a-files-over-cap version=%s a_files=%d cap=%ld a_class=%s", ver, a_count, afcap, aclass);
+        return 0;
+    }
+    cx_fmt(scope_ev, (size_t)cap, "scope version=%s planned_units=%ld a_class=%s a_files=%d/%ld", ver, punits, aclass, a_count, afcap);
+    return 1;
+}
+
+/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; total gate <=180s */
+static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, char *ev, int cap) {
+    char *v[18]; int k = 0, fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, node_timeout_bounded = 1;
+    char *out = 0; long n = 0, at = 0;
+    char fail_item[240], sum_line[240], scope_ev[320];
+    (void)node_timeout_bounded;
+    fail_item[0] = 0; sum_line[0] = 0; scope_ev[0] = 0;
+    v[k++] = "sh"; v[k++] = UC; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
+    v[k++] = "--strict"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--repo"; v[k++] = (char *)repo;
+    v[k++] = "--rev"; v[k++] = (char *)(revarg && revarg[0] ? revarg : "HEAD");
+    if (pftable && pftable[0]) { v[k++] = "--table"; v[k++] = (char *)pftable; }
+    v[k] = 0;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid <= 0 || fd < 0) {
+        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight-not-started");
+        return 0;
+    }
+    slurp(fd, &out, &n); sy_close(fd);
+    sy_wait_status(pid, 0, &ex, &code, &sig);
+    while (out && at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16)) {
+            if (tx_find(out + at, ln, "\tverdict=PASS\t", 14) >= 0) pass = 1;
+            line_with(out + at, ln, "CHAIN_PREFLIGHT", sum_line, sizeof sum_line);
+        }
+        if (!fail_item[0] && tx_prefix(out + at, ln, "PREFLIGHT_ITEM\t", 15) && tx_find(out + at, ln, "\tFAIL\t", 6) >= 0) {
+            line_with(out + at, ln, "PREFLIGHT_ITEM", fail_item, sizeof fail_item);
+        }
+        at += (e < 0 ? n - at : e + 1);
+    }
+    if (out) mm_free(out);
+    if (!pass || !ex || code != 0) {
+        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight rc=%d %s%s%s",
+               ex ? code : -1, sum_line[0] ? sum_line : "no CHAIN_PREFLIGHT line",
+               fail_item[0] ? "; first: " : "", fail_item);
+        return 0;
+    }
+    if (!check_version_scope(repo, revarg, since, tver, scope_ev, sizeof scope_ev)) {
+        cx_fmt(ev, (size_t)cap, "%s", scope_ev);
+        return 0;
+    }
+    cx_fmt(ev, (size_t)cap, "%s%s%s", sum_line[0] ? sum_line : "CHAIN_PREFLIGHT verdict=PASS",
+           scope_ev[0] ? "; " : "", scope_ev);
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0;
+    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0;
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
     if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
@@ -594,49 +981,100 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
         else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
+        else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
         else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) { int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++; }
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
+        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
     }
-    static Job J[MAXJ]; static char *items[MAXJ]; int nj = 0, k;
-    char tmpd[300], outd[340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
+    static Job J[MAXJ]; static char *items[MAXJ]; static int prios[MAXJ]; int nj = 0, k;
+    char tmpd[300], outd[5][340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
     tmpd[0] = 0; chfiles[0] = 0; changed[0] = 0;
     if (sy_mkdtemp(sy_tmpdir(), "chain-ready-", tmpd, sizeof tmpd) == 0) have_tmp = 1;
-    cx_fmt(outd, sizeof outd, "%s/out", tmpd); cx_fmt(cached, sizeof cached, "%s/cache", tmpd);
+    for (k = 0; k < 5; k++) cx_fmt(outd[k], sizeof outd[k], "%s/out%d", tmpd, k + 1);
+    cx_fmt(cached, sizeof cached, "%s/unisacc-cr-prep-cache", sy_tmpdir());
+    {
+        char tp[380], gp[380];
+        cx_fmt(tp, sizeof tp, "%s/.native_tool.path", cached);
+        cx_fmt(gp, sizeof gp, "%s/.native_gen.path", cached);
+        (void)sy_unlink(tp); (void)sy_unlink(gp);
+    }
     (void)argv_set; (void)changed;
 
 #define WANT(nm) (!only || tx_prefix(nm, (long)tx_len(nm, 64), only, (long)tx_len(only, 64)))
-    /* job table: slot order is the report order */
-    static char *g_status[] = {"./tools/bound", "20", "git", "-C", 0, "status", "--short", "--", "src", "cx", "ext", "exec/facts", 0};
-    static char *g_branch[] = {"./tools/bound", "20", "git", "-C", 0, "rev-parse", "--abbrev-ref", "HEAD", 0};
-    static char *g_derive[] = {"./tools/bound", "80", "sh", UC, "tools/derive.cx", "--", "--check", 0};
+    /* job table: slot order is the report order; prios[] orders launch so heavy shards start first */
+    static char *g_status[] = {"./tools/bound", "20", "git", "--no-optional-locks", "-C", 0, "status", "--short", "--", "src", "cx", "ext", "exec/facts", 0};
+    static char *g_branch[] = {"./tools/bound", "20", "git", "--no-optional-locks", "-C", 0, "rev-parse", "--abbrev-ref", "HEAD", 0};
+    static char *g_derive1[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "tables-gen,layer-api,iface-hash,st-gap", 0};
+    static char *g_derive2[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "chain-phases", 0};
+    static char *g_derive3[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "batch-packages-gen", 0};
+    static char *g_derive4[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "batch-domains,links,libc-decls,cx0-three-source", 0};
+    static char *g_derive5[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "product-map", 0};
+    static char *g_derive6[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "doc-links,tool-index,table-index", 0};
     static char *g_rat[] = {"./tools/bound", "60", "sh", UC, "tools/ratchets.cx", 0};
     static char *g_tri[] = {"./tools/bound", "60", "sh", UC, "tools/check-cxmod-tri.cx", 0};
     static char *g_ext[] = {"./tools/bound", "55", "sh", UC, "tools/cx0-extract.cx", "--", "--check", 0};
-    static char *g_chain[] = {"./tools/bound", "80", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, 0};
+    static char *g_chain1[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "core-a", 0};
+    static char *g_chain2[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "core-b", 0};
+    static char *g_chain3[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "core-c", 0};
+    static char *g_chain4[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "objects", 0};
+    static char *g_chain5[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "watch", 0};
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
     static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
-    static char **tab[] = {g_status, g_branch, g_derive, g_rat, g_tri, g_ext, g_chain, g_pg, g_slot, g_genall};
-    static const char *nm[] = {"1-rev", "1-branch", "2a-derive", "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract", "5-candidate-chain", "8-inflight", "11-version-slot", "15-gen-all"};
-    static const char *kd[] = {"rev", "branch", "derive", "ratchets", "tri", "extract", "chain", "inflight", "slot", "genall"};
-    g_status[4] = (char *)repo; g_branch[4] = (char *)repo; g_pg[4] = (char *)pat;
-    g_chain[6] = outd; g_chain[7] = cached;
+    static char **tab[] = {
+        g_status, g_branch,
+        g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6,
+        g_rat, g_tri, g_ext,
+        g_chain1, g_chain2, g_chain3, g_chain4, g_chain5,
+        g_pg, g_slot, g_genall
+    };
+    static const char *nm[] = {
+        "1-rev", "1-branch",
+        "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6",
+        "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract",
+        "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
+        "8-inflight", "11-version-slot", "15-gen-all"
+    };
+    static const char *kd[] = {
+        "rev", "branch",
+        "derive:tables-gen,layer-api,iface-hash,st-gap",
+        "derive:chain-phases",
+        "derive:batch-packages-gen",
+        "derive:batch-domains,links,libc-decls,cx0-three-source",
+        "derive:product-map",
+        "derive:doc-links,tool-index,table-index",
+        "ratchets", "tri", "extract",
+        "chain:core-a", "chain:core-b", "chain:core-c", "chain:objects", "chain:watch",
+        "inflight", "slot", "genall"
+    };
+    static const int pr[] = {
+        9, 9,
+        2, 1, 2, 1, 0, 2,
+        5, 4, 6,
+        3, 3, 3, 3, 2,
+        8, 7, 4
+    };
+    g_status[5] = (char *)repo; g_branch[5] = (char *)repo; g_pg[4] = (char *)pat;
+    g_chain1[6] = outd[0]; g_chain1[7] = cached;
+    g_chain2[6] = outd[1]; g_chain2[7] = cached;
+    g_chain3[6] = outd[2]; g_chain3[7] = cached;
+    g_chain4[6] = outd[3]; g_chain4[7] = cached;
+    g_chain5[6] = outd[4]; g_chain5[7] = cached;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
-    for (k = 0; k < 10; k++) {
-        int c, i;
-        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev"))) continue;
-        if (k == 6 && !have_tmp) continue;
+    for (k = 0; k < 19; k++) {
+        int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15);
+        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain"))) continue;
+        if (is_ch && !have_tmp) continue;
         for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
-        J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; (void)i;
+        J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; prios[nj] = pr[k];
         nj++;
     }
     /* item 6: changed .cx files (dirty, and --since REV..HEAD), each handed to affected --files */
     {   int want6 = WANT("6-affected");
         if (want6) {
-            char *gv[8]; Job g[2]; int gi, ng = 0, npath = 0; char *paths[200]; char *tb[2] = {0, 0}; long tl[2] = {0, 0};
-            gv[0] = "./tools/bound"; gv[1] = "20"; gv[2] = "git"; gv[3] = "-C"; gv[4] = (char *)repo; gv[5] = "status"; gv[6] = "--short"; gv[7] = 0;
-            { int x; for (x = 0; x < 8; x++) g[0].argv[x] = gv[x]; start(&g[0]); finish(&g[0]); tb[0] = g[0].out; tl[0] = g[0].n; ng = 1; }
+            char *gv[9]; Job g[2]; int gi, ng = 0, npath = 0; char *paths[200]; char *tb[2] = {0, 0}; long tl[2] = {0, 0};
+            gv[0] = "./tools/bound"; gv[1] = "20"; gv[2] = "git"; gv[3] = "--no-optional-locks"; gv[4] = "-C"; gv[5] = (char *)repo; gv[6] = "status"; gv[7] = "--short"; gv[8] = 0;
+            { int x; for (x = 0; x < 9; x++) g[0].argv[x] = gv[x]; start(&g[0]); finish(&g[0]); tb[0] = g[0].out; tl[0] = g[0].n; ng = 1; }
             if (since) {
                 char *dv[] = {"./tools/bound", "20", "git", "-C", (char *)repo, "diff", "--name-only", 0, 0};
                 char rng[200]; int x; cx_fmt(rng, sizeof rng, "%s..HEAD", since); dv[7] = rng;
@@ -661,30 +1099,146 @@ int main(int argc, char **argv) {
                 J[nj].argv[c++] = "./tools/bound"; J[nj].argv[c++] = "80"; J[nj].argv[c++] = "sh"; J[nj].argv[c++] = UC;
                 J[nj].argv[c++] = "tools/affected.cx"; J[nj].argv[c++] = "--"; J[nj].argv[c++] = "--files";
                 for (y = 0; y < npath && c < 20; y++) J[nj].argv[c++] = paths[y];
-                J[nj].argv[c++] = "--run"; J[nj].argv[c] = 0; J[nj].name = "6-affected"; items[nj] = "affected"; nj++;
+                J[nj].argv[c++] = "--run"; J[nj].argv[c] = 0; J[nj].name = "6-affected"; items[nj] = "affected"; prios[nj] = 5; nj++;
             } else { row("6-affected", "PASS", "no changed .cx files (dirty tree and --since range)", 0); }
         }
     }
-    /* run: at most four at a time, collect in slot order */
-    {   int started = 0, done = 0, running = 0;
-        for (k = 0; k < nj; k++) J[k].state = 0;
-        while (done < nj) {
-            while (started < nj && running < 4) {
-                if (start(&J[started]) == 0) running++; else { J[started].ms = 0; J[started].out = 0; J[started].n = 0; J[started].rc = -1; done++; }
-                started++;
+    /* run: concurrency scaled by CPU cores and degraded under high load; sy_poll event-driven completion */
+    {   int done = 0, running = 0, running_der = 0, ncores = 0, load1 = 0;
+        int max_running = calc_max_running(&ncores, &load1);
+        int ord[MAXJ], i, j;
+        for (k = 0; k < nj; k++) { J[k].state = 0; ord[k] = k; }
+        for (i = 1; i < nj; i++) {
+            int cur = ord[i];
+            for (j = i - 1; j >= 0 && prios[ord[j]] > prios[cur]; j--) ord[j + 1] = ord[j];
+            ord[j + 1] = cur;
+        }
+        /* Pre-start up to 4 non-chain shards (e.g. 2a-derive) while preparing candidate-chain & chain-phases-gen materials
+         * under independent bounds, so the 5 candidate-chain test shards never pay cold compile time inside their 60s window. */
+        if (WANT("5-candidate-chain") && have_tmp) {
+            Job pg[2]; int pi;
+            char *pv0[] = {"./tools/bound", "45", "sh", UC, "tools/check-candidate-chain.cx", "--", "--prepare", cached, "tool", 0};
+            char *pv1[] = {"./tools/bound", "45", "sh", UC, "tools/check-candidate-chain.cx", "--", "--prepare", cached, "generator", 0};
+            for (i = 0; i < nj && running + 2 < max_running; i++) {
+                int idx = ord[i];
+                if (J[idx].state != 0 || prios[idx] >= 2) continue;
+                if (tx_prefix(items[idx], (long)tx_len(items[idx], 256), "derive:", 7) && running_der >= 4) continue;
+                if (start(&J[idx]) == 0) {
+                    running++;
+                    if (tx_prefix(items[idx], (long)tx_len(items[idx], 256), "derive:", 7)) running_der++;
+                } else { J[idx].ms = 0; J[idx].out = 0; J[idx].n = 0; J[idx].rc = -1; done++; }
             }
-            for (k = 0; k < nj; k++) if (J[k].state == 1) { finish(&J[k]); running--; done++; break; }
+            (void)sy_mkdir(cached, 0700);
+            for (pi = 0; pv0[pi]; pi++) pg[0].argv[pi] = pv0[pi];
+            pg[0].argv[pi] = 0;
+            for (pi = 0; pv1[pi]; pi++) pg[1].argv[pi] = pv1[pi];
+            pg[1].argv[pi] = 0;
+            start(&pg[0]); start(&pg[1]);
+            finish(&pg[0]); finish(&pg[1]);
+            if (pg[0].out) mm_free(pg[0].out);
+            if (pg[1].out) mm_free(pg[1].out);
+        }
+        while (done < nj) {
+            for (i = 0; i < nj && running < max_running; i++) {
+                int idx = ord[i], is_d;
+                if (J[idx].state != 0) continue;
+                is_d = tx_prefix(items[idx], (long)tx_len(items[idx], 256), "derive:", 7);
+                if (is_d && running_der >= 4) continue;
+                if (start(&J[idx]) == 0) {
+                    running++;
+                    if (is_d) running_der++;
+                } else { J[idx].ms = 0; J[idx].out = 0; J[idx].n = 0; J[idx].rc = -1; done++; }
+            }
+            if (running > 0) {
+                sy_pollfd_t pf[MAXJ]; int pl[MAXJ], np = 0, pr;
+                for (k = 0; k < nj; k++) {
+                    if (J[k].state == 1) {
+                        pf[np].fd = J[k].ofd; pf[np].events = SY_POLLIN; pf[np].revents = 0;
+                        pl[np++] = k;
+                    }
+                }
+                pr = np ? sy_poll(pf, np, 500) : 0;
+                for (i = 0; i < np; i++) {
+                    if (pr < 0 || (pf[i].revents & (SY_POLLIN | SY_POLLHUP | SY_POLLERR | SY_POLLNVAL))) {
+                        Job *jb = &J[pl[i]];
+                        long r = 0;
+                        if (jb->out && jb->n + 1 >= jb->cap) {
+                            char *g = mm_grow(jb->out, jb->cap * 2);
+                            if (g) { jb->out = g; jb->cap *= 2; }
+                        }
+                        if (jb->out && jb->n + 1 < jb->cap) r = sy_read(jb->ofd, jb->out + jb->n, jb->cap - 1 - jb->n);
+                        if (r > 0) {
+                            jb->n += r;
+                            jb->out[jb->n] = 0;
+                        } else {
+                            int ex = 0, code = 0, sig = 0;
+                            if (jb->out) jb->out[jb->n] = 0;
+                            sy_close(jb->ofd);
+                            jb->rc = sy_wait_status(jb->pid, 0, &ex, &code, &sig) == jb->pid && ex ? code : -1;
+                            jb->ms = sy_now_ms() - jb->t0;
+                            jb->state = 2;
+                            running--;
+                            if (tx_prefix(items[pl[i]], (long)tx_len(items[pl[i]], 256), "derive:", 7)) running_der--;
+                            done++;
+                        }
+                    }
+                }
+            }
         }
     }
-    {   char ev[640]; int ok;
-        char rev_ev[640]; int rev_ok = -1; long rev_ms = 0;
+    {   char ev[640], rev_ev[640], der_pass_ev[640], der_fail_ev[640];
+        int ok, rev_ok = -1, der_ok = 1, der_cnt = 0;
+        long rev_ms = 0, der_ms = 0, dfn = 0;
+        const char *ch_names[8], *ch_outs[8]; long ch_lens[8], ch_ms = 0; int ch_rcs[8], ch_cnt = 0;
+        der_pass_ev[0] = 0; der_fail_ev[0] = 0;
         for (k = 0; k < nj; k++) {
+            long il = (long)tx_len(items[k], 256);
+            if (il > 6 && tx_prefix(items[k], il, "chain:", 6)) {
+                if (ch_cnt < 8) {
+                    ch_names[ch_cnt] = items[k] + 6;
+                    ch_outs[ch_cnt] = J[k].out ? J[k].out : "";
+                    ch_lens[ch_cnt] = J[k].n;
+                    ch_rcs[ch_cnt] = J[k].state == 3 ? -1 : J[k].rc;
+                    if (J[k].ms > ch_ms) ch_ms = J[k].ms;
+                    ch_cnt++;
+                }
+                if (k + 1 >= nj || tx_len(items[k + 1], 256) <= 6 || !tx_prefix(items[k + 1], (long)tx_len(items[k + 1], 256), "chain:", 6)) {
+                    ok = j_chain_agg(ch_cnt, ch_names, ch_outs, ch_lens, ch_rcs, ev, sizeof ev);
+                    row_judged("5-candidate-chain", ok, ev, ch_ms);
+                    ch_cnt = 0; ch_ms = 0;
+                }
+                continue;
+            }
             ok = judge_kind(items[k], J[k].out ? J[k].out : "", J[k].n, J[k].rc, ev, sizeof ev);
             if (J[k].state == 3) { ok = 0; cx_fmt(ev, sizeof ev, "cannot start child"); }
             if (tx_eqz(items[k], "rev")) { rev_ok = ok; put_ev(rev_ev, sizeof rev_ev, ev); rev_ms = J[k].ms; continue; }
             if (tx_eqz(items[k], "branch")) {
                 int bok = ok;   /* merged row 1-rev: status and branch */
                 if (rev_ok >= 0) { char both[700]; cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev); row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms); }
+                continue;
+            }
+            if (il > 7 && tx_prefix(items[k], il, "derive:", 7)) {
+                der_cnt++;
+                if (J[k].ms > der_ms) der_ms = J[k].ms;
+                if (!ok) {
+                    char one[320]; long ol;
+                    der_ok = 0;
+                    cx_fmt(one, sizeof one, "%s[shard%d] %s", dfn ? "; " : "", der_cnt, ev);
+                    ol = (long)tx_len(one, sizeof one);
+                    if (dfn + ol < (long)sizeof der_fail_ev - 1) {
+                        mm_copy(der_fail_ev + dfn, sizeof der_fail_ev - (size_t)dfn, one, (size_t)ol + 1);
+                        dfn += ol;
+                    }
+                } else if (!der_pass_ev[0]) {
+                    put_ev(der_pass_ev, sizeof der_pass_ev, ev);
+                }
+                if (k + 1 >= nj || tx_len(items[k + 1], 256) <= 7 || !tx_prefix(items[k + 1], (long)tx_len(items[k + 1], 256), "derive:", 7)) {
+                    char merged[700];
+                    if (der_ok) cx_fmt(merged, sizeof merged, "shards=%d/%d drift=0 refused=0 (%s)", der_cnt, der_cnt, der_pass_ev);
+                    else cx_fmt(merged, sizeof merged, "shards=%d %s", der_cnt, der_fail_ev);
+                    row_judged("2a-derive", der_ok, merged, der_ms);
+                    der_cnt = 0; der_ok = 1; der_ms = 0; dfn = 0;
+                }
                 continue;
             }
             row_judged(J[k].name, ok, ev, J[k].ms);
@@ -728,6 +1282,12 @@ int main(int argc, char **argv) {
         int ok = parse2_preflight(repo, revarg, made ? private_tree : 0, ev);
         if (made) (void)sy_remove_all(private_tree);
         row_judged("18-parse2-gen", ok, ev, sy_now_ms() - t0);
+    }
+    if (WANT("19-chain-preflight")) {
+        char ev[640];
+        long t0 = sy_now_ms();
+        int ok = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, ev, sizeof ev);
+        row_judged("19-chain-preflight", ok, ev, sy_now_ms() - t0);
     }
     /* 17-root-public (0.0.87 S4): a Root installed from an unpublished candidate is fine for a chain and for
        development, but not for a release step; listed here, never counted as a failure. */

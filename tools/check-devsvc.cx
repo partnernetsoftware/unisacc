@@ -116,14 +116,14 @@ int main(int argc, char **argv) {
     char stray[400];
     /* --cases a:配置/锁/事件/git/status/重启/ttl/idle;--cases b:run 缓存(夹具仓);缺省两组都跑。批次 devsvc 跑 a,devsvc-run 跑 b */
     /* b 拆两组(各自起停实例):b1 事件落盘与只读 git;b2 run 原生缓存。--cases b 等于 b1+b2 */
-    int A1 = 1, A2 = 1, A3 = 1, B1 = 1, B2 = 1, B3 = 1, A;   /* b3:cx-dev 事件预建的自动拉起(批次 devsvc-cxdev-kick) */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strstr(cs, "a1") || strstr(cs, "a2") || strstr(cs, "a3"), ha = strchr(cs, 'a') != 0;
+    int A1 = 1, A2 = 1, A3 = 1, A4 = 1, B1 = 1, B2 = 1, B3 = 1, A;   /* b3:cx-dev 事件预建的自动拉起(批次 devsvc-cxdev-kick) */
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) { const char *cs = argv[2]; int dg = strstr(cs, "a1") || strstr(cs, "a2") || strstr(cs, "a3") || strstr(cs, "a4"), ha = strchr(cs, 'a') != 0;
         int db = strstr(cs, "b1") || strstr(cs, "b2") || strstr(cs, "b3"), hb = strchr(cs, 'b') != 0;
-        A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3"));
+        A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3")); A4 = ha && (!dg || strstr(cs, "a4"));
         B1 = hb && (!db || strstr(cs, "b1")); B2 = hb && (!db || strstr(cs, "b2")); B3 = hb && (!db || strstr(cs, "b3")); }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|b|b1|b2|b3|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|a4|b|b1|b2|b3|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
-    A = A1 || A2 || A3;
+    A = A1 || A2 || A3 || A4;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     (void)unsetenv("DEVSVC_SELF_BIN");   /* 在 devsvc x 内跑时不继承固定版本执行体:本检查测的是 self 所指的工作副本 */
     (void)unsetenv("UNISACC_FLOW_ROOT"); /* 同理不继承 devsvc x 注入的写根:否则夹具仓里的 f write 会按该写根落到真实检出 */
@@ -560,10 +560,10 @@ int main(int argc, char **argv) {
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
     }
     if (B1 || B2 || B3) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
-    if (A3) {
+    if (A3 || A4) {
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a3-start");
 
-    /* 内容键:两个不同路径的克隆共用同内容构造(键不含根);改闭包内文件即失效;用 __FILE__ 的工具键里保留根,输出路径跟随各自克隆 */
+    /* 内容键:a3 测两克隆共用同内容构造与闭包改动失效;a4 测含 __FILE__ 的工具键里保留根,输出路径跟随各自克隆 */
     {   char c1[200], c2[200], p[300], *q; const char *ks = "int main(int argc, char **argv) { (void)argv; printf(\"ckey n=%d\\n\", argc); return 7; }\n";
         const char *ks2 = "int main(int argc, char **argv) { (void)argv; printf(\"ckey2 n=%d\\n\", argc); return 7; }\n";
         const char *fs = "int main(void) { printf(\"file=%s\\n\", __FILE__); return 7; }\n"; int i, rs; long pm;
@@ -572,8 +572,9 @@ int main(int argc, char **argv) {
             char *d = i ? c2 : c1; char *v[] = {"git", "clone", "-q", fx, d, 0};
             ck(cap2(v, 0, out2, sizeof out2) == 0, i ? "ckey-clone2" : "ckey-clone1");
             F(p, sizeof p, "%s/%s", d, c_product); { char *l[] = {"ln", "-sf", prod, p, 0}; (void)cap2(l, 0, out2, sizeof out2); }
-            F(p, sizeof p, "%s/ckey.cx", d); ck(sy_write_atomic(p, ks, strlen(ks), 0644) == 0, "ckey-tool-written");
-            F(p, sizeof p, "%s/fref.cx", d); ck(sy_write_atomic(p, fs, strlen(fs), 0644) == 0, "ckey-fref-written"); }
+            if (A3) { F(p, sizeof p, "%s/ckey.cx", d); ck(sy_write_atomic(p, ks, strlen(ks), 0644) == 0, "ckey-tool-written"); }
+            if (A4) { F(p, sizeof p, "%s/fref.cx", d); ck(sy_write_atomic(p, fs, strlen(fs), 0644) == 0, "ckey-fref-written"); } }
+        if (A3) {
         { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c1, out, sizeof out, v); }
         ck(rs == 7 && has("ckey n=2\n") && strstr(runline(), "cache=miss"), "ckey-clone1-first-builds");
         { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c2, out, sizeof out, v); }
@@ -582,10 +583,13 @@ int main(int argc, char **argv) {
         F(p, sizeof p, "%s/ckey.cx", c2); ck(sy_write_atomic(p, ks2, strlen(ks2), 0644) == 0, "ckey-closure-edit-written");
         { char *v[] = {"run", "--local", "ckey.cx", "x", 0}; rs = dvat(c2, out, sizeof out, v); }
         ck(rs == 7 && has("ckey2 n=2\n") && strstr(runline(), "cache=miss"), "ckey-closure-edit-misses");
+        }
+        if (A4) {
         { char *v[] = {"run", "--local", "fref.cx", 0}; rs = dvat(c1, out, sizeof out, v); }
         F(p, sizeof p, "file=%s/fref.cx\n", c1); ck(rs == 7 && has(p), "ckey-fileref-clone1-own-path");
         { char *v[] = {"run", "--local", "fref.cx", 0}; rs = dvat(c2, out, sizeof out, v); }
         F(p, sizeof p, "file=%s/fref.cx\n", c2); ck(rs == 7 && has(p) && !strstr(out, c1) && strstr(runline(), "cache=miss"), "ckey-fileref-clone2-rebuilds-own-path");
+        }
         { char *rm[] = {"rm", "-rf", c1, c2, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "ckey-clones-cleanup"); } }
 
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "a3-stop");

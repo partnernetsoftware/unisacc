@@ -1,0 +1,195 @@
+/* tools/check-day-metrics.cx -- 检查 tools/day-metrics.cx:造假事件流/整链日志/预跑日志/INDEX/portfolio/分支,
+ * 断言每项北极星指标数值、UNMEASURED 不编数、--write/--check 幂等与漂移拒绝、未知参数 rc=2。
+ *
+ *   sh ./unisacc.com tools/check-day-metrics.cx
+ *
+ * 末行 CHECK_DAY_METRICS<TAB>failed=N; 有 FAIL 则 rc 1。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+static int failed;
+static char out[65536];
+
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-day-metrics.%s\n", name);
+    else {
+        failed++;
+        sy_printf("FAIL\tcheck-day-metrics.%s\n", name);
+        sy_printf("NOTE\tlast-output\t%.600s\n", out);
+    }
+}
+
+static int has(const char *needle) {
+    return strstr(out, needle) != 0;
+}
+
+static int run_cmd(char **av) {
+    char *o = 0;
+    size_t on = 0;
+    int rc = cx_runv_timeout(av, 30, &o, &on);
+    size_t m = o ? on : 0;
+    if (m >= sizeof out) m = sizeof out - 1;
+    if (m) mm_copy(out, sizeof out, o, m);
+    out[m] = 0;
+    if (o) mm_free(o);
+    return rc;
+}
+
+static int wfile(const char *dir, const char *rel, const char *txt) {
+    char p[1024];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return -1;
+    return sy_write_atomic(p, txt, strlen(txt), 0644);
+}
+
+int main(void) {
+    char fx[256], c[1024], ev[512], pf[512], cad[512], idx[512], cm[512], pr[512], br[512], outp[512];
+    if (cx_fmt(fx, sizeof fx, "%s/chk-dm-%d-%ld", sy_tmpdir(), (int)sy_pid(), sy_now_ms() % 100000L)) return 2;
+    if (cx_fmt(c, sizeof c, "mkdir -p %s/prerun %s/chains", fx, fx)) return 2;
+    { char *v[] = {"sh", "-c", c, 0}; if (run_cmd(v) != 0) return 2; }
+
+    /* Fixture 1: fake events.tsv (6 in-window commits: 2 ok, 4 fail incl. 2x derive; 1 old commit excluded; 2 stale locks) */
+    wfile(fx, "events.tsv",
+          "EV\t1\t1795009000000\tgit.commit\towner=a\trc=0\tclass=ok\tgate=-\treason=ok\n"
+          "EV\t2\t1795009100000\tgit.commit\towner=a\trc=0\tclass=ok\tgate=-\treason=ok\n"
+          "EV\t3\t1795009200000\tgit.commit\towner=a\trc=1\tclass=precommit\tgate=derive\treason=drift\n"
+          "EV\t9\t1795009250000\tgit.commit\towner=a\trc=1\tclass=precommit\tgate=derive\treason=drift\n"
+          "EV\t4\t1795009300000\tgit.commit\towner=b\trc=1\tclass=precommit\tgate=doc-links\treason=broken\n"
+          "EV\t5\t1795009400000\tgit.commit\towner=c\trc=2\tclass==args\tgate=-\treason=args\n"
+          "EV\t6\t1794900000000\tgit.commit\towner=old\trc=1\tclass=precommit\tgate=old-gate\treason=old\n"
+          "EV\t7\t1795009500000\tcommit.stale_lock\towner=a\tpid=10\tpath=/r/.git/index.lock\treason=index-lock-expired\treq=r1\n"
+          "EV\t8\t1795009600000\tcommit.stale_lock\towner=b\tpid=11\tpath=/tmp/s0.idx.lock\treason=no-holder\treq=r2\n");
+
+    /* Fixture 2: fake chain runs (4 starts, 3 fails, restart gaps = 5.0, 15.0, 10.0 min -> median = 10.0) */
+    wfile(fx, "chains/r1.tsv", "LIMITS\t1795000000\tn=1\nSUPERVISE\t1795000600\titeration=1\trc=1\n");
+    wfile(fx, "chains/r2.tsv", "LIMITS\t1795000900\tn=1\nSUPERVISE\t1795001200\titeration=1\trc=2\n");
+    wfile(fx, "chains/r3.tsv", "LIMITS\t1795002100\tn=1\nSUPERVISE\t1795002400\titeration=1\trc=1\n");
+    wfile(fx, "chains/r4.tsv", "LIMITS\t1795003000\tn=1\nSUPERVISE\t1795003600\titeration=2\trc=0\n");
+    cx_fmt(c, sizeof c, "%s/chains/r1.tsv\n%s/chains/r2.tsv\n%s/chains/r3.tsv\n%s/chains/r4.tsv\n", fx, fx, fx, fx);
+    wfile(fx, "chain-runs.txt", c);
+
+    /* Fixture 3: fake prerun supervise.log (45.0 min total, first red at 1.5 min = 90s) */
+    wfile(fx, "prerun/supervise.log",
+          "PRERUN_SUPERVISE_START\tts=1795010000\tmax_jobs=4\n"
+          "PRERUN_KEEP_GOING\tbatch=env-semantics\tretries=2\twindow=W0002\tts=1795010090\traw=env-semantics\tproduct\tFAIL\t1\n"
+          "PRERUN_SUPERVISE_DONE\tts=1795012700\trun_rc=0\n");
+
+    /* Fixture 4: fake cadence + INDEX (2026-11-20 11:00 -> 2026-11-21 03:30:00 = 990 min) */
+    wfile(fx, "cadence.tsv", "# version\tstate\tslot_open\n0.0.86\tOPEN\t2026-11-20 11:00\n");
+    wfile(fx, "INDEX.tsv", "exec-5-publish\t2026-11-21 03:30:00 +0800\t-\tv0.0.86\tLatest\n");
+
+    /* Fixture 5: fake portfolio (3 active + 1 queued + 1 done = 4 inflight) */
+    wfile(fx, "portfolio.tsv",
+          "# header\nid\tline\towner\tstate\treason\tkill\n"
+          "A\tl1\tu\tactive\tr\tk\nB\tl2\tu\tactive\tr\tk\nC\tl3\tu\tactive\tr\tk\n"
+          "D\tl4\tu\tqueued\tr\tk\nE\tl5\tu\tdone\tr\tk\n");
+
+    /* Fixture 6: fake branches (3 allowed + 2 stray) */
+    wfile(fx, "branches.txt", "main\nv0.0.87\nujs\nfeat-temp\nwip/test\n");
+
+    cx_fmt(ev, sizeof ev, "%s/events.tsv", fx);
+    cx_fmt(pf, sizeof pf, "%s/portfolio.tsv", fx);
+    cx_fmt(cad, sizeof cad, "%s/cadence.tsv", fx);
+    cx_fmt(idx, sizeof idx, "%s/INDEX.tsv", fx);
+    cx_fmt(cm, sizeof cm, "%s/chain-runs.txt", fx);
+    cx_fmt(pr, sizeof pr, "%s/prerun", fx);
+    cx_fmt(br, sizeof br, "%s/branches.txt", fx);
+    cx_fmt(outp, sizeof outp, "%s/north-star.out.tsv", fx);
+
+    /* (1) Full fake computation in --print mode */
+    {
+        char *v[] = {
+            "sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--print",
+            "--events", ev, "--hours", "1", "--now", "1795010000",
+            "--portfolio", pf, "--cadence", cad, "--index", idx, "--version", "0.0.86",
+            "--chain-runs", cm, "--prerun-dir", pr, "--branches-file", br,
+            "--measured-at", "2026-11-21T04:00", 0
+        };
+        int rc = run_cmd(v);
+        ck(rc == 0 && has("commit_fail_rate\t66.7\t%"), "commit-fail-rate-66pct");
+        ck(has("COMMIT_FAIL_GATE\tgate=derive\tcount=2\n") &&
+           has("COMMIT_FAIL_GATE\tgate=doc-links\tcount=1\n") &&
+           has("COMMIT_FAIL_GATE\tgate=args\tcount=1\n") &&
+           !has("gate=old-gate"), "commit-fail-per-gate-and-window");
+        ck(has("STALE_LOCK\treason=index-lock-expired\tcount=1\n") &&
+           has("STALE_LOCK\treason=no-holder\tcount=1\n") &&
+           has("STALE_LOCK_TOTAL\tcount=2\n"), "stale-lock-breakdown");
+        ck(has("slot_to_public\t990\tmin"), "slot-to-public-990min");
+        ck(!has("chain_fail_starts\t") && has("failed_chain_starts\t3\t次"), "failed-chain-starts-3-no-duplicate");
+        ck(has("fail_to_restart_median\t10.0\tmin"), "fail-to-restart-median-10min");
+        ck(has("prerun_minutes\t45.0\tmin"), "prerun-minutes-45min");
+        ck(has("first_red_minutes\t1.5\tmin"), "first-red-minutes-1.5min");
+        ck(has("inflight_lines\t4\t条"), "inflight-lines-4");
+        ck(has("stray_branches\t2\t条"), "stray-branches-2");
+        ck(has("tool_change_verify\tUNMEASURED\tmin"), "unmeasured-preserved-not-fabricated");
+    }
+
+    /* (2) Empty events & missing index -> UNMEASURED (never fabricated) */
+    {
+        char ev0[512];
+        wfile(fx, "empty.tsv", "");
+        cx_fmt(ev0, sizeof ev0, "%s/empty.tsv", fx);
+        char *v[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--print", "--events", ev0, "--index", ev0, 0};
+        int rc = run_cmd(v);
+        ck(rc == 0 && has("commit_fail_rate\tUNMEASURED\t%") && has("slot_to_public\tUNMEASURED\tmin"), "empty-sources-yield-unmeasured");
+    }
+
+    /* (3) --write then --check passes; tampering output causes --check DRIFT rc=1 */
+    {
+        char *vw[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--write", "--out", outp, 0};
+        int rw = run_cmd(vw);
+        char *vc[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--check", "--out", outp, 0};
+        int rc1 = run_cmd(vc);
+        ck(rw == 0 && rc1 == 0 && has("result=OK\n"), "write-then-check-ok");
+        wfile(fx, "north-star.out.tsv", "tampered\n");
+        int rc2 = run_cmd(vc);
+        ck(rc2 == 1 && has("result=DRIFT\n") && has("DIFF\t"), "tampered-table-check-drift");
+    }
+
+    /* (4) Repo build/north-star.tsv matches --check */
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--check", 0};
+        int rc = run_cmd(v);
+        ck(rc == 0 && has("result=OK\n"), "repo-north-star-check-ok");
+    }
+
+    /* (5) Unknown argument and missing facts table refused with exact message rc=2 */
+    {
+        char *v[] = {"sh", "-c", "sh ./unisacc.com tools/day-metrics.cx -- --bogus-flag 2>&1", 0};
+        int rc = run_cmd(v);
+        ck(rc == 2 && has("REFUSE unknown or incomplete argument"), "bad-arg-rc2");
+        char *v2[] = {"sh", "-c", "sh ./unisacc.com tools/day-metrics.cx -- --facts /nonexistent/dm-facts.tsv 2>&1", 0};
+        int rc2 = run_cmd(v2);
+        ck(rc2 == 2 && has("REFUSE cannot read facts table"), "missing-facts-rc2");
+    }
+
+    /* (6) Invalid timestamp chars rejected -> UNMEASURED; live-branches works; partial facts table safe */
+    {
+        char f1[512];
+        char *v1[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--print",
+                      "--slot-open", "2026-11-1/ 11:00", "--index", idx, 0};
+        int rc1 = run_cmd(v1);
+        ck(rc1 == 0 && has("slot_to_public\tUNMEASURED\tmin"), "bad-timestamp-char-unmeasured");
+        char *v2[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--print", "--live-branches", 0};
+        int rc2 = run_cmd(v2);
+        ck(rc2 == 0 && has("stray_branches\t") && has("DAY_METRICS\tmode=print"), "live-branches-ok");
+        wfile(fx, "one-fact.tsv", "metric\tbaseline\tunit\tsource\tmeasured_at\ttarget_0087\tfalsify_if\nproduct_share\t30.4\t%\ts\t2026-11-20T21:00\t45\tf\n");
+        cx_fmt(f1, sizeof f1, "%s/one-fact.tsv", fx);
+        char *v3[] = {"sh", "./unisacc.com", "tools/day-metrics.cx", "--", "--print", "--facts", f1, "--portfolio", pf, "--events", ev, "--hours", "1", "--now", "1795010000", 0};
+        int rc3 = run_cmd(v3);
+        ck(rc3 == 0 && has("DAY_METRICS\tmode=print\trows=1"), "partial-facts-missing-row-safe");
+    }
+
+    if (!cx_fmt(c, sizeof c, "rm -rf %s", fx)) {
+        char *v[] = {"sh", "-c", c, 0};
+        (void)run_cmd(v);
+    }
+    sy_printf("CHECK_DAY_METRICS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -24,6 +24,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.surfline
+#pragma unisa use os.utc
 
 enum { CS_MAXPKG = 48, CS_NAME = 64, CS_COLS = 14, CS_MAXCAP = 32 };
 
@@ -48,6 +49,18 @@ static int split(const char *p, long n, cs_span *out, int max) {
         }
     return k;
 }
+
+static int next_fields(const char *t, size_t n, long *at, cs_span *f, int cap) {
+    while (*at < (long)n) {
+        long at0 = *at, end = at0;
+        while (end < (long)n && t[end] != '\n') end++;
+        *at = end + 1;
+        if (t[at0] != '#' && end > at0) return split(t + at0, end - at0, f, cap);
+    }
+    return 0;
+}
+
+static int same_field(cs_span a, cs_span b) { return tx_same(a.p, a.n, b.p, b.n); }
 
 static void add_pkg(cs_span s) {
     int i;
@@ -278,6 +291,104 @@ static int row_in_pkg(const char *t, size_t tn, const char *pkg, const char *nam
     return 0;
 }
 
+/* Static contradictions take precedence over optional execution evidence. */
+static int surface_export_drift(const char *root, const char *ss, size_t sn,
+                                const char *pkg, int *missing, int *changed) {
+    char path[128];
+    size_t n = 0;
+    if (strspn(pkg, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != strlen(pkg) ||
+        tx_snprintf(path, sizeof path, "build/layer-api/%s.tsv", pkg) >= sizeof path) return -1;
+    char *api = load(root, path, &n);
+    if (!api) return -1;
+    cs_span a[4], f[CS_COLS];
+    long ai = 0, si;
+    int k, rc = 0, exports = 0;
+    *missing = *changed = 0;
+    while ((k = next_fields(api, n, &ai, a, 4))) {
+        if (k != 4 || !a[0].n || !a[1].n) { rc = -1; break; }
+        if (memchr(a[0].p, ':', a[0].n)) continue; /* Function names, as in check-std-surface. */
+        exports++;
+        si = 0;
+        while ((k = next_fields(ss, sn, &si, f, CS_COLS)) &&
+               !(k == CS_COLS && span_is(f[0], pkg) && same_field(f[1], a[0]))) {}
+        if (!k) (*missing)++;
+    }
+    si = 0;
+    while (!rc && (k = next_fields(ss, sn, &si, f, CS_COLS))) {
+        if (k != CS_COLS || !span_is(f[0], pkg) || !span_is(f[8], "exists")) continue;
+        ai = 0;
+        while ((k = next_fields(api, n, &ai, a, 4)) &&
+               !(k == 4 && same_field(f[1], a[0]) && same_field(f[2], a[1]))) {}
+        if (!k) (*changed)++;
+    }
+    free(api);
+    return rc || !exports ? -1 : 0;
+}
+
+static int missing_test_bindings(const char *ss, size_t sn, const char *bt, size_t bn, const char *pkg) {
+    long si = 0, bi;
+    cs_span f[CS_COLS], b[2];
+    int k, missing = 0;
+    while ((k = next_fields(ss, sn, &si, f, CS_COLS))) {
+        if (k != CS_COLS || !span_is(f[0], pkg)) continue;
+        bi = 0;
+        while ((k = next_fields(bt, bn, &bi, b, 2)) &&
+               !(k >= 2 && span_is(b[1], "IMPLEMENTED") && same_field(f[13], b[0]))) {}
+        if (!k) missing++;
+    }
+    return missing;
+}
+
+static int public_day(const char *root, cs_span version, cs_span note, int64_t *day) {
+    const char *prefix = "# c47-1-readback (public) ";
+    char path[160], tag[60];
+    size_t size = 0;
+    if (version.n < 5 || version.n > 20 || !tx_prefix(version.p, version.n, "0.0.", 4)) return 0;
+    for (long i = 4; i < version.n; i++) if (version.p[i] < '0' || version.p[i] > '9') return 0;
+    tx_snprintf(path, sizeof path, "release/evidence/%.*s/public-readback.txt", (int)version.n, version.p);
+    tx_snprintf(tag, sizeof tag, "\"tagName\":\"v%.*s\"", (int)version.n, version.p);
+    char *text = load(root, path, &size);
+    if (!text) return 0;
+    const long len = strlen(prefix);
+    const char *publication = "公开 ";
+    long pn = strlen(publication);
+    int ok = note.n >= pn + 10 && tx_prefix(note.p, note.n, publication, pn) &&
+             size > len + 36 && tx_prefix(text, size, prefix, len) &&
+             tx_same(note.p + pn, 10, text + len, 10) &&
+             tx_same(text + len + 19, 6, " +0800", 6) &&
+             strstr(text, "via release-exec; rc=0\n") &&
+             strstr(text, "\"isDraft\":false") && strstr(text, tag) &&
+             strstr(text, "\nREADBACK_STEP metadata PASS\n") &&
+             strstr(text, "\nREADBACK_STEP tag PASS\n") &&
+             !sy_utc_parse(text + len, 10, day);
+    free(text);
+    return ok;
+}
+
+/* Confirm the publication dates against the public readbacks. In the same
+ * timezone, a span of at most 29 calendar days is strictly below 30 days. */
+static int public_history_too_short(const char *root) {
+    size_t n = 0;
+    char *seq = load(root, "build/version-seq.tsv", &n);
+    long at = 0;
+    cs_span f[5], last[3], notes[3];
+    int k, count = 0;
+    while ((k = next_fields(seq, n, &at, f, 5))) {
+        if (k != 5 || !span_is(f[3], "已公开")) continue;
+        last[count % 3] = f[1];
+        notes[count % 3] = f[4];
+        count++;
+    }
+    int64_t day[3];
+    int ok = count >= 3;
+    for (int j = 0; ok && j < 3; j++) {
+        int i = (count - 3 + j) % 3;
+        ok = public_day(root, last[i], notes[i], day + j);
+    }
+    free(seq);
+    return ok && day[0] <= day[1] && day[1] <= day[2] && day[2] - day[0] < 30LL * 86400;
+}
+
 /* SURF evidence for (pkg, clause): -1 none (UNKNOWN), 0 all ok, 1 FAIL (a FAIL line, malformed line, bad result,
  * or a named row that is not a row of the package in std-surface).  why gets the reason. */
 static int evidence(const char *ev, size_t en, const char *ss, size_t ssn, const char *pkg, const char *clause,
@@ -321,6 +432,7 @@ int main(int argc, char **argv) {
     char *ev = "";
     size_t evn = 0;
     size_t ssn = 0, pkn = 0, pon = 0, lgn = 0;
+    size_t btn = 0;
     {   int w = 1, r;
         for (r = 1; r < argc; r++) {
             if (tx_same(argv[r], tx_len(argv[r], 16), "--evidence", 10) && r + 1 < argc) { evdir = argv[r + 1]; r++; }
@@ -333,6 +445,7 @@ int main(int argc, char **argv) {
     char *pk = load(root, "build/tlib-packages.tsv", &pkn);
     char *po = load(root, "build/tlib-policy.tsv", &pon);
     char *lg = load(root, "build/stable-review.tsv", &lgn);
+    char *bt = load(root, "tests/batches.tsv", &btn);
     int i, ready_all = 1;
     if (!ss || !pk) {
         sy_eprintf("stable-eval: cannot read build/std-surface.tsv or build/tlib-packages.tsv under %s\n", root);
@@ -370,12 +483,18 @@ int main(int argc, char **argv) {
         }
     }
     load_surface_meta(ss, ssn);
+    int history_short = public_history_too_short(root);
     for (i = 0; i < npkgs; i++) {
         const char *pkg = pkgs[i];
         int rows, newc, unv, errbad, capbad, ownbad, nd = 0, ok = 0, fail = 0, unk = 0, du;
         char why[160];
         scan_surface(ss, ssn, pkg, &rows, &newc, &unv, &errbad, &capbad, &ownbad);
-        crit_ev(pkg, "S1", ev, evn, ss, ssn, "needs check-std-surface and layer-api output; not run here", &ok, &fail, &unk);
+        int omitted, signatures;
+        if (surface_v2 && surface_export_drift(root, ss, ssn, pkg, &omitted, &signatures) == 0 &&
+            (omitted || signatures)) {
+            tx_snprintf(why, sizeof why, "%d exports without surface rows, %d surface rows with missing or changed signatures", omitted, signatures);
+            crit(pkg, "S1", "FAIL", why); fail++;
+        } else crit_ev(pkg, "S1", ev, evn, ss, ssn, "needs check-std-surface and layer-api output; not run here", &ok, &fail, &unk);
         if (!rows) { crit(pkg, "S2", "UNKNOWN", "package has no row in std-surface (not in the target layout)"); unk++; }
         else if (newc) { tx_snprintf(why, sizeof why, "%d of %d rows are status=new", newc, rows); crit(pkg, "S2", "FAIL", why); fail++; }
         else { tx_snprintf(why, sizeof why, "%d rows, none new", rows); crit(pkg, "S2", "ok", why); ok++; }
@@ -390,9 +509,15 @@ int main(int argc, char **argv) {
         else if (!rows) { crit(pkg, "S5", "UNKNOWN", "package has no row in std-surface"); unk++; }
         else if (capbad) { tx_snprintf(why, sizeof why, "%d refuse:ENOSYS cap=NAME cells use unknown NAME", capbad); crit(pkg, "S5", "FAIL", why); fail++; }
         else { crit(pkg, "S5", "ok", "cap names are in the # cap vocabulary"); ok++; }
-        crit_ev(pkg, "S6", ev, evn, ss, ssn, "test evidence is not read here", &ok, &fail, &unk);
+        int unbound = surface_v2 && bt ? missing_test_bindings(ss, ssn, bt, btn, pkg) : 0;
+        if (unbound) {
+            tx_snprintf(why, sizeof why, "%d surface rows without an implemented batch binding", unbound);
+            crit(pkg, "S6", "FAIL", why); fail++;
+        } else crit_ev(pkg, "S6", ev, evn, ss, ssn, "needs per-function success, error and refusal receipts", &ok, &fail, &unk);
         crit_ev(pkg, "S7", ev, evn, ss, ssn, "six-target CI evidence is not read here", &ok, &fail, &unk);
-        crit_ev(pkg, "S8", ev, evn, ss, ssn, "needs 3 public tags and 30 days; not computed here", &ok, &fail, &unk);
+        if (history_short) {
+            crit(pkg, "S8", "FAIL", "recent public readbacks span fewer than 30 days"); fail++;
+        } else crit_ev(pkg, "S8", ev, evn, ss, ssn, "needs 3 public tags across 30 days with unchanged API and surface", &ok, &fail, &unk);
         crit_ev(pkg, "S9", ev, evn, ss, ssn, "consumer and libc-migration counts are not computed here", &ok, &fail, &unk);
         du = deps_unstable(pk, pkn, po, pon, pkg, &nd);
         if (du < 0) { crit(pkg, "S10", "UNKNOWN", "not a package of build/tlib-packages.tsv"); unk++; }

@@ -71,7 +71,10 @@ static long bg_lim(const char *id, int max) {
     return (long)v;
 }
 static long bg_slack_s;
+static long bg_first_check_s = 120;
+static int bg_wait_first_phase = 0;
 static int reactor_owned;
+static const char *preflight_table;
 
 typedef struct {
     char rev[41], dir[BG_PATH];
@@ -311,11 +314,68 @@ static void seal(const char *dir, int pid) {
     join(tmp, dir, "seal.tsv.new");
     if (!cx_write(tmp, text, (size_t)at)) (void)sy_rename(tmp, p);
 }
+/* Self-check first phase state within 2 minutes (120 s by default) of chain start:
+ * returns 0 when first phase is DONE, 1 when failed (writes BLOCKER to chain-run.tsv if missing and prints it),
+ * or -1 while still in flight. */
+static int first_phase_selfcheck(const char *dir, const char *rev, long elapsed_ms, int exited_rc, int timed_out) {
+    size_t ckn = 0, crn = 0;
+    char row[512];
+    char *cr = slurp(dir, "chain-run.tsv", &crn);
+    if (cr) {
+        if (last_row(cr, "BLOCKER\t", row, sizeof row) || last_row(cr, "SUPERVISE\tBLOCKER\t", row, sizeof row)) {
+            int brc = exited_rc ? exited_rc : 2;
+            const char *rp = strstr(row, "\trc=");
+            if (rp) brc = atoi(rp + 4);
+            free(cr);
+            sy_printf("%s\n", row);
+            sy_printf("BG_CANDIDATE\tFIRST_PHASE_CHECK\trev=%s\tverdict=FAIL\tphase=snap\trc=%d\telapsed_ms=%ld\n",
+                      rev, brc, elapsed_ms);
+            return 1;
+        }
+        const char *s = cr;
+        while (s && *s) {
+            const char *e = strchr(s, '\n');
+            if (!strncmp(s, "ATTEMPT\t", 8)) {
+                const char *rp = strstr(s, "\trc=");
+                if (rp && (!e || rp < e)) {
+                    int arc = atoi(rp + 4);
+                    if (arc != 0 && arc != 75 && arc != 77) {
+                        exited_rc = arc;
+                        break;
+                    }
+                }
+            }
+            s = e ? e + 1 : 0;
+        }
+        free(cr);
+    }
+
+    if (exited_rc != 0 || timed_out) {
+        int frc = exited_rc != 0 ? exited_rc : 124;
+        const char *why = timed_out ? "first-phase-timeout" : "first-phase-selfcheck-failed";
+        if (!cx_fmt(row, sizeof row, "BLOCKER\tphase=snap\treason=%s\trc=%d\telapsed_ms=%ld\n", why, frc, elapsed_ms)) {
+            append_row(dir, "chain-run.tsv", row);
+            sy_printf("%s", row);
+        }
+        sy_printf("BG_CANDIDATE\tFIRST_PHASE_CHECK\trev=%s\tverdict=FAIL\tphase=snap\trc=%d\telapsed_ms=%ld\n",
+                  rev, frc, elapsed_ms);
+        return 1;
+    }
+
+    char *ck = slurp(dir, "checkpoint.tsv", &ckn);
+    if (ck && last_row(ck, "DONE\t", row, sizeof row)) {
+        free(ck);
+        return 0;
+    }
+    if (ck) free(ck);
+    return -1;
+}
+
 /* The guard: session leader, owns the chain's process group, never returns. */
 static void guard(int report, char **v, const char *dir, const char *rev, long deadline_s, int override) {
     char p[BG_PATH], row[600];
-    int gate[2], log, null, pid, exited = 0, code = 0, sig = 0, rc = -1, w = 0;
-    long hard_s = deadline_s + bg_slack_s, end, i, turns;
+    int gate[2], log, null, pid, exited = 0, code = 0, sig = 0, rc = -1, w = 0, fp_checked = 0;
+    long hard_s = deadline_s + bg_slack_s, start_ms, first_ms = bg_first_check_s * 1000, end, i, turns;
     const char *why = "exited";
     (void)sy_setsid();
     if (reactor_owned && rp_subreaper()) _exit(2);
@@ -347,7 +407,8 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
     close(report);
     if (write(gate[1], "g", 1) != 1) { kill(-pid, SIGKILL); _exit(2); }
     close(gate[1]);
-    end = sy_now_ms() + hard_s * 1000;
+    start_ms = sy_now_ms();
+    end = start_ms + hard_s * 1000;
     turns = hard_s * 4 + 16;
     int cancelled = 0, residue = 0;
     char cancel_path[BG_PATH];
@@ -355,6 +416,9 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
     for (i = 0; i < turns; i++) {
         w = sy_wait_status(pid, 1, &exited, &code, &sig);
         if (w == pid || w < 0 || sy_now_ms() >= end) break;
+        if (!fp_checked && (sy_now_ms() - start_ms) <= first_ms) {
+            if (first_phase_selfcheck(dir, rev, sy_now_ms() - start_ms, 0, 0) >= 0) fp_checked = 1;
+        }
         if (reactor_owned && sy_exists(cancel_path) == 1) {
             /* Only the owning guard signals its still-unreaped child. */
             char report_text[512];
@@ -379,6 +443,10 @@ static void guard(int report, char **v, const char *dir, const char *rev, long d
     if (!cancelled && kill(-pid, 0) == 0) { /* the chain left members of its group behind: not a clean end */
         kill(-pid, SIGKILL);
         if (rc == 0) { rc = 123; why = "residue-killed"; }
+    }
+    if (!fp_checked && rc != 0 && (sy_now_ms() - start_ms) <= first_ms) {
+        (void)first_phase_selfcheck(dir, rev, sy_now_ms() - start_ms, rc, 0);
+        fp_checked = 1;
     }
     if (cx_fmt(row, sizeof row, "EXIT\t%ld\tpid=%d\trc=%d\twhy=%s\n", sy_wall_s(), pid, rc, why)) _exit(2);
     append_row(dir, "exit.tsv", row);
@@ -420,6 +488,35 @@ static int start_preflight(const char *only, const char *rev) {
     }
     return 0;
 }
+/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; total gate <=180s */
+static int start_chain_preflight(const char *rev) {
+    char *v[16]; int k = 0, node_timeout_bounded = 1;
+    (void)node_timeout_bounded;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
+    v[k++] = "--strict"; v[k++] = "--root"; v[k++] = root; v[k++] = "--repo"; v[k++] = root;
+    v[k++] = "--rev"; v[k++] = (char *)rev;
+    if (preflight_table) { v[k++] = "--table"; v[k++] = (char *)preflight_table; }
+    v[k] = 0;
+    char out[16384]; long n = 0, r, at = 0; int fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0 || fd < 0) { sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-preflight-not-started\troot=%s\n", root); return 1; }
+    while (n < (long)sizeof out - 1 && (r = sy_read(fd, out + n, sizeof out - 1 - (size_t)n)) > 0) n += r;
+    out[n] = 0; sy_close(fd);
+    sy_wait_status(pid, 0, &ex, &code, &sig);
+    while (at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16) && tx_find(out + at, ln, "\tverdict=PASS\t", 14) >= 0) pass = 1;
+        if (tx_prefix(out + at, ln, "PREFLIGHT_ITEM\t", 15) && tx_find(out + at, ln, "\tFAIL\t", 6) >= 0)
+            sy_printf("BG_CANDIDATE\tREFUSE-ITEM\t%.*s\n", (int)ln, out + at);
+        at += ln + 1;
+    }
+    if (!pass || !ex || code != 0) {
+        sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-preflight\troot=%s\trev=%s\trc=%d\tfix: sh ./unisacc.com tools/chain-preflight.cx -- --strict --root %s --rev %s\n",
+                  root, rev, ex ? code : -1, root, rev);
+        return 1;
+    }
+    return 0;
+}
 static int cmd_start(const char *rev, const char *chain, long deadline_s, long segment_s, long segments, char **extra, int nextra) {
     static char names[BG_MAXC][41];
     static Cand c;
@@ -429,6 +526,7 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
     if (!rev) die("start needs --rev HEX40", 0);
     if (chain && chain[0] != '/') die("--chain must be an absolute executable", chain);
     if (start_preflight("12", 0) || start_preflight("18", rev)) return 1;
+    if ((!chain || preflight_table) && start_chain_preflight(rev)) return 1;
     if (!chain) {
         char p[BG_PATH];
         join(p, root, "unisacc.com");
@@ -497,6 +595,26 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
     }
     sy_printf("BG_CANDIDATE\tSTARTED\trev=%s\tguard=%d\tpid=%d\tpgid=%d\tdeadline_s=%ld\thard_s=%ld\tout=%s\n", rev, ids[0], ids[1], ids[2],
               deadline_s, deadline_s + bg_slack_s, dir);
+    if (bg_wait_first_phase) {
+        long t0 = sy_now_ms(), limit_ms = bg_first_check_s * 1000;
+        int steps = (int)(bg_first_check_s * 10);
+        for (i = 0; i <= steps; i++) {
+            long el = sy_now_ms() - t0;
+            load(&c, rev);
+            int fpc = first_phase_selfcheck(dir, rev, el, (c.has_exit && c.rc != 0) ? c.rc : 0, 0);
+            if (fpc == 0 || (c.has_exit && c.rc == 0)) {
+                sy_printf("BG_CANDIDATE\tFIRST_PHASE_CHECK\trev=%s\tverdict=PASS\tphase=%s\telapsed_ms=%ld\n",
+                          rev, c.last[0] ? c.last : "snap", el);
+                return 0;
+            }
+            if (fpc == 1) return 1;
+            if (el >= limit_ms) break;
+            (void)sy_sleep_ms(100);
+        }
+        load(&c, rev);
+        (void)first_phase_selfcheck(dir, rev, sy_now_ms() - t0, (c.has_exit && c.rc != 0) ? c.rc : 124, 1);
+        return 1;
+    }
     return 0;
 }
 
@@ -686,11 +804,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--root")) root_arg = b;
         else if (!strcmp(a, "--base")) base_arg = b;
         else if (!strcmp(a, "--chain")) chain = b;
+        else if (!strcmp(a, "--preflight-table")) preflight_table = b;
         else if (!strcmp(a, "--trash")) trash = b;
         else if (!strcmp(a, "--deadline-s")) deadline_s = number(b, 1, bg_lim("bg.deadline", 1), a);
         else if (!strcmp(a, "--segment-s")) segment_s = number(b, 1, bg_lim("segment", 1), a);
         else if (!strcmp(a, "--max-segments")) segments = number(b, 1, bg_lim("bg.segments", 1), a);
         else if (!strcmp(a, "--slack-s")) bg_slack_s = number(b, 1, bg_lim("bg.slack", 1), a);
+        else if (!strcmp(a, "--first-check-s") && !strcmp(cmd, "start")) { bg_first_check_s = number(b, 1, 120, a); bg_wait_first_phase = 1; }
         else if (!strcmp(a, "--keep")) keep = number(b, 0, BG_MAXC, a);
         else return usage();
     }

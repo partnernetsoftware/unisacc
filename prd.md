@@ -63,6 +63,8 @@ G2的 `fp_call` 仍属于 `chainargv` 现有局部char指针数组、n++追加�
 
 G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_BUDGET_GEN` 后必须是行尾或TAB，不能用空格代替。真实批次验收同时核子进程rc、唯一标记和产品身份不变；负控的预期REFUSE日志完整保留，不据直接夹具rc0冒充批次PASS。
 
+推送本次提交用 `devsvc git commit --push`，或用 `devsvc git push FULL_SHA...` 显式给出本窗口的提交。快进直接推送，遇远端先行时只重放获授权的单父提交并在私有索引重算派生物。检查入口 `tools/check-push-replay.cx`。
+
 固定执行体按 Git 公共目录隔离缓存。回退按工作树验证提交祖先、产品、配置与执行体摘要，执行体输入有未提交改动时不更新记录。私有试验用 `DV_PIN_DIR` 指定缓存目录。回归入口 `tools/check-devsvc-pin-scope.cx`。
 
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
@@ -161,6 +163,8 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 发布单一条带门命令(候选就绪 -> 公开读回,X/草稿/CI/Y1/公开/读回/Y2 七步) | `sh ./unisacc.com tools/release-run.cx -- --execute release/candidate.tsv --layout DIR [--from-step N] [--dry]`(实现 `tools/release-exec.cx`);检查 `tools/check-release-exec.cx`(批 `release-run-exec-gates`、`release-run-exec-run`) | 门 STRICT/EXPECTED_FAIL/CANDIDATE_SHA/APE_VERSION/RATCHETS/X_PUSHED/ASSETS/DRAFT_READBACK/CI_SUCCESS/CI_VERDICT/Y1_PUSHED/PUBLIC_SHA/READBACK/DECISION,失败具名 RELEASE_EXEC_GATE_<名>;公开后失败自动转回草稿并把 Latest 移回上一版,不删 tag/release;期望失败集 release/evidence/V/expected-fail.tsv;--dry 零 gh 调用,外部状态门读已入仓证据,无证据记 DEFERRED |
 | 发布执行前主线祖先门与读回预热(v0.0.77 N3/N4) | N3 内置于 `tools/release-exec.cx` 的 X/Y1/Y2 前;N4 `sh ./unisacc.com tools/release-exec.cx -- --warm release/candidate.tsv --layout DIR [--out DIR]`;检查 `tools/check-release-exec.cx`(批 `release-run-exec-run`) | N3:git fetch 后 origin/main 须为 HEAD 祖先;否则拒 RELEASE_EXEC_GATE_MAIN_ADVANCED(带两端提交号与 --from-step 续跑提示);不自动合并、不回滚公开态;无 origin/main 拒 MAIN_UNKNOWN。N4:用检出产品在同一工作树按读回同一路径形式预编 c47-1-readback、chain-step、release-ape、check-run-comm、release-layout;再核第二次调用命中运行缓存;回执 OUT/warm-KEY.tsv(键=根路径+入口与闭包文件 sha256+检出产品 sha256+候选 sha256);回执不符拒 WARM_RECEIPT;只缓存编译产物不缓存结论;候选 APE 侧编译未预热(下载路径每次新建) |
 | 发布前置草稿(B4,冻结前后一条命令出 expected-fail/ratchets/notes/rollback/evidence 行草稿) | `sh ./unisacc.com tools/release-run.cx -- --prepare VERSION --layout DIR [--out DIR] [--strict F] [--commit C] [--ratchets F]`(实现 `tools/release-prep.cx`;`--tail-plan COMMIT APE VERSION` 只打印链尾反应五步);检查 `tools/check-release-prep.cx`(批 `release-prep` 正控回放 0.0.74、`release-prep-neg` 负控) | 只读已入仓事实与真实产物,草稿写 $TMPDIR 私有目录不改仓;新增或失败数变化的 FAIL 写成 `# NEW` 注释行不放行(rc 1);ratchets 在冻结提交的 git archive 树上现跑(SOURCE frozen-commit),他源拒绝;notes 固定 NOT_QUALIFIED |
+| 冻结到公开一条命令(v0.0.87,prep -> stage-a -> 入库复核 -> 入库树 dry -> execute 命令) | `sh ./unisacc.com tools/release-chain.cx -- plan|run --inputs F --state ABS --layout DIR [--decisions F] [--from N]`;检查 `tools/check-release-chain.cx`(批 `release-chain`) | 每步一个子进程上限 55 秒;失败打印 CHAIN FAIL 步号 步名 rc 与 NEXT 续跑命令(--from N);完成步记 STATE/NAME.done 续跑跳过,第 3 步每次复核 HEAD 中 candidate.tsv、ratchets.txt、evidence-rows.tsv 与阶段产物逐字节同;第 5 步只打印 release-exec --execute 命令(须 devsvc x --bg),从不执行;配套:release-exec Y1 记 evidence.tsv/decision.txt 哈希于 INDEX 行 exec-4-Y1-frozen,Y2 前被改拒 DECISION 点名不回滚;release-flow 阶段 A 证据经 scrub-home-paths 脱敏;release-prep 逐窗拼接证据按批折叠 |
+| 整链 DONE 后早期六目标 CI 信号(v0.0.87,与预跑并行提前约 75 分钟暴露跨目标缺陷) | `sh ./unisacc.com tools/ci-early.cx -- --rev HEX40 (--chain-dir DIR \| --base BASE \| --layout DIR) [--version V] [--tag vV-early-REV10] [--out ABS] [--dry]` ；离线解析 `--parse-only --ci-json F [--ci-log F]`；检查 `tools/check-ci-early.cx`(批 `ci-early`) | 前置核对 APE `--version` 与 `REV:release/candidate.tsv` 的 version 列一致(起链前由 11-version-slot 预置,故 commit=REV 直接通过 candidate-native 的 identity 与 version 检查,无需临时分支);从 ape-receipt.txt 暂存 6 资产并对 slice-win-arm64 注入版本槽;先行写出 rollback-early.txt;建带 `-early` 私有草稿 release(isDraft=true,isLatest=false,拒非 -early 或公开 tag)、上传资产、dispatch candidate-native.yml、有界轮询(<=25 分钟,50x30s)、拉取 json/log 后自动删除私有草稿;输出 6 行 CI_EARLY_CELL 与 CI_EARLY_SUMMARY(点名失败格、反查 include/ 头文件来源与首条编译诊断) |
 | s9 aggregate 产物映射为 evidence 第 4 行 verdict(只读;缺失/不全/commit 档/批数不符一律 UNKNOWN,有 FAIL 记 FAIL) | `sh ./unisacc.com tools/s9-verdict.cx -- RUN [--batches tests/batches.tsv]`；检查 `tools/check-s9-verdict.cx`（批 `s9-verdict`） | 输出 `4<TAB>PASS|FAIL|UNKNOWN<TAB>RUN/aggregate.out`，原因在 stderr `S9_VERDICT reason=` |
 | 两树逐批证据覆盖判定(COVERED/MUST_RERUN,表按行键,不是 PASS 记录) | `sh ./unisacc.com tools/evidence-cover.cx -- --a REF_OR_DIR --b REF_OR_DIR`；检查 `tools/check-evidence-cover.cx`（批 `evidence-cover`） | 闭包取 B 树 affected --list-only；算不出一律 MUST_RERUN unknown；末行 EVIDENCE_COVER covered/must_rerun |
 | 测子进程 CPU 毫秒(不依赖墙钟/负载) | `sh ./unisacc.com tools/cpu-meter.cx -- CMD ARGS...`；检查 `tools/check-cpu-meter.cx`（批 `cpu-meter`） | 输出 `CPU_METER<TAB>cpu_ms<TAB>wall_ms<TAB>rc`；读 /proc/self/stat cutime+cstime 差（仅 Linux，USER_HZ=100，精度 10 ms）；缺命令输出 CPU_METER_ERROR 退 127；L0 缺 rusage 包装见 pkg-gaps CPU-METER-RUSAGE |
@@ -307,6 +311,8 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 
 | 动作 | 现成用法 | 说明 |
 |---|---|---|
+| 按批耗时装预跑窗 | `sh ./unisacc.com tools/release-chain.cx -- plan --inputs FILE --state ABS_DIR --layout DIR` 打印 P0 至 P3 命令。检查批 `check-prerun-drive` | 普通与预热窗估计预算 22 秒，慢批与无历史耗时批各自单跑。并行窗超时后，未完成批转单跑并可续接。监督步骤有界重入，完成后合并证据并归档窗口表与日志至 `release/evidence/V/prerun-*`，已有归档时拒绝覆盖。 |
+| syscall 字面号检查 | `sh ./unisacc.com tools/syscall-literal.cx -- [--root DIR] [--baseline FILE] [--list]`；基线 `tests/syscall-literal.tsv`；检查 `tools/check-syscall-literal.cx`（批 `syscall-literal`） | 扫描 `cx/` 与 `ext/` 下未分架构保护的 `__syscallN`/`_UNISA_SC` 及文件内包装字面号；基线登记 4 项已知 `cx/sys/posix.cx`（到期 0.0.88），新增即红 |
 | 发布后清理与证据归档（0.0.58 T8） | `sh ./unisacc.com tools/release-sweep.cx -- --manifest FILE --trash DIR --out-manifest OUT.tsv [--latest VER] [--archive-dir DIR] [--refs FILE...] [--dry-run\|--apply]`；检查 `tools/check-release-sweep.cx`（批次 `release-sweep`） | 按清单执行 move/archive/keep：只 mv 到 `~/cc-work/trash` 不删，拒绝 `/tmp`；保留最近一版冻结克隆（`r057`）与链输出（`chain057`/`release-snap-*`）及 `--refs` 引用路径；`<=1MiB` 证据小表复制到 `evidence-archive/<版本>/`；`pgrep` 与 `/proc` 排除自身跳过占用目录（`SKIPPED_BUSY`）；写出前后字节清单 TSV 并汇总 `RELEASE_SWEEP` |
 | 发布后缓存与临时目录大扫除计划(只读) | `sh ./unisacc.com tools/sweep-plan.cx -- [--tmp D] [--home D] [--repo D] [--job-dir D] [--chain-root P] [--keep-bootstrap V] [--min-age-s N] [--ref P]`；检查 `tools/check-sweep-plan.cx`（批次 `sweep-plan`） | 输出 TSV(类别、路径、字节、最老/最新 mtime、IN_USE、DELETE/KEEP/ASK、理由)与末行 SUMMARY 可回收字节；覆盖 /tmp 的 unisacc-*、ua-*、e3cache、`~/.cache/unisacc`(chains/snap 等)、本作业 tmp、仓内 out/ 与被忽略的 build/；KEEP 名单(borrowed-cm、ident-helper、最新 bootstrap、release*、在途链根、/proc 里有存活进程引用者)，不足 `--min-age-s`(默认 3600)的项为 ASK；每条 DELETE 带回滚句；不删任何文件 |
 | 发布隔离演练与六片导出 | `tools/release-oneshot.cx -- --dry-run CANDIDATE LAYOUT NEW_STATE`、`--resume STATE`；`--pack APE NEW_DIR`、`--check-pack APE DIR` | 现算SHA后规划X、先草稿后带release_tag的CI、数字裁决证据；仅PLANNED与UNKNOWN，不触网。六片附同P4/尾并逐字节核；win/x86取APE外层PE。两独立夹具批次，不授发布资格 |
@@ -610,7 +616,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
-| `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
+| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；目录不在源 SID 根集，但 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx`、`ext/textx`（4 个 `.cx`）经目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `src/cx` 下 `sysx` 目录链接）参与现行源 SID（`source-packages-v2` `realpath` 跟随，`ext/crypto` 与其余 `ext/` 包不参与；2026-11-21 实测，`seed/ident.c list-current` 与 `tools/lane-inputs-gen.cx:208-275`） |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
@@ -620,12 +626,12 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `adapter/`、`m4/`、`flownet/` | 流×网范式的适配/m4/通用流水线 |
 | `out/` | 临时产物（gitignore，日志/候选/材料/会话）；交接单约定写 `out/<窗口>-handoff-*.md`，不入库 |
 | `kernel/` | 生成物（禁止手改；权重由 gold 构造） |
-| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv），其余目录均不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
+| `archive/agentwork-retire-2026-11/`、`release/`、`archive/agentwork-retire-2026-11/roles/`、`skills/`、`bench/`、`scripts/`、`examples/`、`iterate/` | 源 SID 根目录集为 exec src kernel include weights seed cx（+ iterate/kernel/typekw.tsv 与 tools/ 13 个支撑文件；`ext/sysx`、`ext/memx`、`ext/textx` 经符号链接参与现行源 SID，见 [prd_cx.md](prd_cx.md) §3），其余目录不进源 SID；历史看板与账（archive/agentwork-retire-2026-11/：items/ledger/dag/workflow）与现行构建登记（build/：units/freeze/phase-times/pkg-gaps，管理表不是产品事实表）、发布（release/candidate.tsv、SHA256SUMS.template）、代理角色、技能、基准、脚本、示例、迭代记录；完整地图见 [§8.1](#repo-map)；§8.1 并入自原仓库目录地图（已归档 archive/docs-2026-11e） |
 
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
 
-- 源 SID 规则：`seed/ident.c` 的 `list-current` 计入目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下少量支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 本身不在源 SID，`ext/memx`、`ext/textx` 经 `cx/mem`、`cx/text` 符号链接参与。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/`，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
+- 源 SID 规则：`seed/ident.c` 的 `list-current`（`source-packages-v2`）根目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下 13 个支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 目录不在根集，但 `collect()` 经 `realpath` 跟随目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `sysx` 目录链接），故 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx` 与 `ext/textx`（4 个 `.cx`）实际参与现行源 SID，`ext/crypto` 与其余 `ext/` 包不参与（2026-11-21 实测；归类规则见 `tools/lane-inputs-gen.cx:208-275`）。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/` 及上述经链接进入 `build/lane-inputs.tsv` A 类的 `ext/` 路径，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
 - 补充路径：`.github/`（CI 工作流 candidate-native、ci、candidate-raw-export、admission-capsule、defender-scan、macos-sign、windows-signing，集成者所有）；`scripts/`（信任包 / Authenticode 检查脚本）；`skills/unisacc-cx`（技能）；`iterate/`（早期构造器，仅 typekw.tsv 进源 SID，移动会改产品面）；根文件 `cxroot.tsv`（cx 根登记）、`Makefile`（薄入口）、`ape-receipt.txt`（APE 回执）。
 - 被 git 忽略的本地残留：`out/`（产物、日志、候选；交接单写 `out/<窗口>-handoff-*.md`，不入库）、`unisacc.com`（已装产品）、`unisacc-dev`（安装回滚脚本）、`*.split-prev`、`tmp/`、`node_modules/`。
 
@@ -677,7 +683,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | E3 冻结到公开 | 0.0.57 实测 190.6 分钟;0.0.63 未同口径测(UNMEASURED) | 不超过 120 分钟,人工介入不多于 2 次 | 不超过 60 分钟,人工介入 0 | 不超过 30 分钟,按固定节拍发车 | 发布说明的冻结与公开时间差 |
 | E4 能用清单(真实程序在已装产品上编译、运行、输出与预期一致的个数) | 清单未建(UNMEASURED);`examples/apps` 现有 18 个源未成批验收 | 清单建表并测出首个基线(只读数,不设门) | 30 个里过 25 个,且 s9 daily 档跑通一次 | 50 个里过 45 个,其中至少 5 个是仓外第三方 C 程序、至少 5 个是用 `.cx` 写的常驻工具 | 待建:清单表加一个批次(0.0.65 周期内随工具提交,不占版本槽) |
 
-版本表(一版一类产品输入大改;验收未实跑不记 PASS;预期值为推算的已标出):
+版本表(0.0.65 至 0.0.80 历史记录;现行版本序以 build/version-seq.tsv 为准,各版内容与验收见对应 plans/v0.0.NN.md;一版一类产品输入大改;验收未实跑不记 PASS;预期值为推算的已标出):
 
 | 版本 | 一类大改 | 终点线贡献 | 首个任务 | 验收命令 |
 |---|---|---|---|---|

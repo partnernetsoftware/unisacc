@@ -1,0 +1,38 @@
+/* tools/check-stray-link-watch.cx -- checks tools/stray-link-watch.cx --once in a private mkdtemp fixture:
+ * (1) ROOT/cx/cx and ROOT/.claude/worktrees/w/tools/tools (symbolic links) are reported and removed;
+ * (2) ROOT/cx/other (a link not named after its directory) and ROOT/tests/tests (a real directory) stay;
+ * (3) the event log carries the link target, lstat mtime and a ps snapshot; (4) bad usage is refused rc 2.
+ * Ends: CHECK_STRAY_LINK_WATCH<TAB>ok=N<TAB>failed=M. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+int main(void) {
+    char td[600], cmd[4000], out[16384], p[700];
+    sy_stat_t st;
+    if (cx_fmt(td, sizeof td, "%s/slw-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && mkdir -p cx tests/tests .claude/worktrees/w/tools && ln -s \"$PWD/cx\" cx/cx && "
+               "ln -s elsewhere cx/other && ln -sn x .claude/worktrees/w/tools/tools", td)) return 2;
+    if (ckk_sh("check-stray-link-watch", cmd, out, sizeof out) != 0) return 2;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/stray-link-watch.cx -- --once --root '%s' --log '%s/ev.log'", td, td)) return 2;
+    int rc = ckk_sh("check-stray-link-watch", cmd, out, sizeof out);
+    ck(rc == 0 && ckk_has(out, sizeof out, "events=2\tremoved=2"), "once-reports-two-events");
+    if (cx_fmt(p, sizeof p, "%s/cx/cx", td)) return 2;
+    ck(sy_lstat(p, &st) == -ENOENT, "cx-cx-link-removed");
+    if (cx_fmt(p, sizeof p, "%s/.claude/worktrees/w/tools/tools", td)) return 2;
+    ck(sy_lstat(p, &st) == -ENOENT, "worktree-tools-tools-link-removed");
+    if (cx_fmt(p, sizeof p, "%s/cx/other", td)) return 2;
+    ck(sy_lstat(p, &st) == 0 && st.kind == 'l', "unrelated-link-kept");
+    if (cx_fmt(p, sizeof p, "%s/tests/tests", td)) return 2;
+    ck(sy_lstat(p, &st) == 0 && st.kind == 'd', "real-directory-kept");
+    if (cx_fmt(cmd, sizeof cmd, "grep -c 'target=%s/cx lstat_mtime=' '%s/ev.log'; grep -c 'PID *PPID' '%s/ev.log'", td, td, td)) return 2;
+    ckk_sh("check-stray-link-watch", cmd, out, sizeof out);
+    ck(ckk_has(out, sizeof out, "1\n2"), "log-has-target-mtime-and-ps-snapshot");
+    rc = ckk_sh("check-stray-link-watch", "sh ./unisacc.com tools/stray-link-watch.cx -- --daemon 0", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "REFUSE"), "bad-deadline-refused");
+    { char *rmv[] = {"rm", "-rf", td, 0}; (void)ck_run(rmv, out, sizeof out); }
+    printf("CHECK_STRAY_LINK_WATCH\tok=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

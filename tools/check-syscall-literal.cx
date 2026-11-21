@@ -1,0 +1,91 @@
+/* tools/check-syscall-literal.cx -- red->green fixture + 3 mutations for tools/syscall-literal.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+static int passed, failed;
+static void ck(int ok, const char *name) {
+    printf("%s\tsyscall-literal.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) passed++; else failed++;
+}
+
+static int run_tool(const char *root, const char *base, char *out, int cap) {
+    char *av[] = {"sh", "./unisacc.com", "tools/syscall-literal.cx", "--", "--root", (char *)root, "--baseline", (char *)base, 0};
+    char *o = 0; size_t on = 0;
+    int rc = cx_runv_timeout(av, 30, &o, &on);
+    if (out && cap > 0) {
+        size_t m = o ? on : 0;
+        if (m >= (size_t)cap) m = (size_t)cap - 1;
+        if (m && !mm_copy(out, (long)cap, o, (long)m)) out[m] = 0;
+        else out[0] = 0;
+    }
+    if (o) free(o);
+    return rc;
+}
+
+int main(void) {
+    char out[8192], tmp[256], dir[320], dst[360], base[360];
+    int rc = run_tool(".", "tests/syscall-literal.tsv", out, sizeof out);
+    ck(rc == 0 && strstr(out, "SYSCALL_LITERAL\thits=4\tknown=4\tunknown=0\tbaseline=4\n") != 0, "repo-matches-4-known");
+
+    (void)cx_fmt(tmp, sizeof tmp, "/tmp/ck-scl-%d", (int)sy_pid());
+    (void)cx_fmt(dir, sizeof dir, "%s/cx/sys", tmp);
+    (void)cx_fmt(dst, sizeof dst, "%s/cx/sys/posix.cx", tmp);
+    (void)cx_fmt(base, sizeof base, "%s/base.tsv", tmp);
+    sy_mkdir_all(dir, 0700);
+    { char extd[320]; (void)cx_fmt(extd, sizeof extd, "%s/ext", tmp); sy_mkdir_all(extd, 0700); }
+    size_t pn = 0;
+    char *posix = cx_read("cx/sys/posix.cx", &pn);
+    if (!posix) { fprintf(stderr, "cannot read cx/sys/posix.cx\n"); return 2; }
+    sy_write_atomic(dst, posix, pn, 0644);
+    sy_write_atomic(base, "# empty\n", 8, 0644);
+
+    /* Red: empty baseline must flag all 4 posix.cx hits */
+    rc = run_tool(tmp, base, out, sizeof out);
+    ck(rc == 1 && strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t227\t_UNISA_SC(97)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t382\tsyp_sc3_os(280)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t388\tsyp_sc3_os(17)\n") &&
+       strstr(out, "UNEXPECTED\tcx/sys/posix.cx\t394\tsyp_sc3_os(18)\n") &&
+       strstr(out, "SYSCALL_LITERAL\thits=4\tknown=0\tunknown=4\tbaseline=0\n"), "fixture-red-without-baseline");
+
+    /* Green: baseline with 4 known items passes */
+    const char *b4 =
+        "# path\tline\ttoken\texpires_ver\n"
+        "cx/sys/posix.cx\t227\t_UNISA_SC(97)\t0.0.88\n"
+        "cx/sys/posix.cx\t382\tsyp_sc3_os(280)\t0.0.88\n"
+        "cx/sys/posix.cx\t388\tsyp_sc3_os(17)\t0.0.88\n"
+        "cx/sys/posix.cx\t394\tsyp_sc3_os(18)\t0.0.88\n";
+    sy_write_atomic(base, b4, strlen(b4), 0644);
+    rc = run_tool(tmp, base, out, sizeof out);
+    ck(rc == 0 && strstr(out, "SYSCALL_LITERAL\thits=4\tknown=4\tunknown=0\tbaseline=4\n"), "fixture-green-with-baseline");
+
+    /* Mutation 1: unguarded direct __syscall6(_UNISA_SC(99), ...) fails */
+    { char m1[360]; (void)cx_fmt(m1, sizeof m1, "%s/ext/mut1.cx", tmp);
+      const char *s1 = "long f(void){ return __syscall6(_UNISA_SC(99),0,0,0,0,0); }\n";
+      sy_write_atomic(m1, s1, strlen(s1), 0644);
+      rc = run_tool(tmp, base, out, sizeof out);
+      ck(rc == 1 && strstr(out, "UNEXPECTED\text/mut1.cx\t1\t_UNISA_SC(99)\n") && strstr(out, "unknown=1"), "mut1-unguarded-direct-fails");
+      sy_unlink(m1); }
+
+    /* Mutation 2: unguarded wrapper call fails */
+    { char m2[360]; (void)cx_fmt(m2, sizeof m2, "%s/ext/mut2.cx", tmp);
+      const char *s2 = "static long w_os(long n, long a){ return __syscall6(_UNISA_SC(n),a,0,0,0,0); }\nlong g(void){ return w_os(77,0); }\n";
+      sy_write_atomic(m2, s2, strlen(s2), 0644);
+      rc = run_tool(tmp, base, out, sizeof out);
+      ck(rc == 1 && strstr(out, "UNEXPECTED\text/mut2.cx\t2\tw_os(77)\n") && strstr(out, "unknown=1"), "mut2-unguarded-wrapper-fails");
+      sy_unlink(m2); }
+
+    /* Mutation 3: arch-guarded literal does not trigger false positive */
+    { char m3[360]; (void)cx_fmt(m3, sizeof m3, "%s/ext/mut3.cx", tmp);
+      const char *s3 = "long h(void){\n#if defined(__linux__) && defined(__x86_64__)\nreturn __syscall6(99,0,0,0,0,0);\n#else\nreturn -38;\n#endif\n}\n";
+      sy_write_atomic(m3, s3, strlen(s3), 0644);
+      rc = run_tool(tmp, base, out, sizeof out);
+      ck(rc == 0 && strstr(out, "unknown=0"), "mut3-arch-guarded-passes");
+      sy_unlink(m3); }
+
+    free(posix);
+    { char *rm[] = {"rm", "-rf", tmp, 0}; char *o = 0; size_t on = 0; (void)cx_runv_timeout(rm, 10, &o, &on); if (o) free(o); }
+    printf("CHECK_SYSCALL_LITERAL\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

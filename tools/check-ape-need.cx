@@ -92,8 +92,45 @@ static void ck_pack_cases(const char *kind, const char *pack, const char *cache)
     np_free(&r);
 }
 
+static void ck_rel_cache_cases(const char *kind, const char *pack, const char *work) {
+    char cwd1[4400], cwd2[4400], home1[4400], hcache[4450], xroot[4400], xcache[4450], tmp2[4400], bad1[4400], bad2[4400], label[128], why[1024];
+    np_result r;
+    struct stat st;
+    if (snprintf(cwd1, sizeof cwd1, "%s/cwd-xdg-%s", work, kind) >= (int)sizeof cwd1 ||
+        snprintf(cwd2, sizeof cwd2, "%s/cwd-home-%s", work, kind) >= (int)sizeof cwd2 ||
+        snprintf(home1, sizeof home1, "%s/home-%s", work, kind) >= (int)sizeof home1 ||
+        snprintf(hcache, sizeof hcache, "%s/home-%s/.cache/unisacc", work, kind) >= (int)sizeof hcache ||
+        snprintf(xroot, sizeof xroot, "%s/xdg-%s", work, kind) >= (int)sizeof xroot ||
+        snprintf(xcache, sizeof xcache, "%s/xdg-%s/unisacc", work, kind) >= (int)sizeof xcache ||
+        snprintf(tmp2, sizeof tmp2, "%s/tmp-%s", work, kind) >= (int)sizeof tmp2 ||
+        snprintf(bad1, sizeof bad1, "%s/xdgrel", cwd1) >= (int)sizeof bad1 ||
+        snprintf(bad2, sizeof bad2, "%s/homerel", cwd2) >= (int)sizeof bad2) ck_die("rel path");
+    if (mkdir(cwd1, 0700) || mkdir(cwd2, 0700) || mkdir(home1, 0700) || mkdir(xroot, 0700) || mkdir(tmp2, 0700)) ck_die("rel mkdir");
+    {
+        char *av[] = {"sh", "-c", "HOME=\"$1\" XDG_CACHE_HOME=xdgrel exec sh \"$0\"", (char *)pack, home1, 0};
+        if (np_run(av, cwd1, 0, 30, &r, why, sizeof why)) ck_die(why);
+        if (snprintf(label, sizeof label, "A5.%s.rel-xdg-uses-abs-home-no-cwd-dir", kind) >= (int)sizeof label) ck_die("label");
+        ck(r.rc == 7 && lstat(bad1, &st) != 0 && lstat(hcache, &st) == 0 && S_ISDIR(st.st_mode), label);
+        np_free(&r);
+    }
+    {
+        char *av[] = {"sh", "-c", "unset XDG_CACHE_HOME; TMPDIR=\"$1\" HOME=homerel exec sh \"$0\"", (char *)pack, tmp2, 0};
+        if (np_run(av, cwd2, 0, 30, &r, why, sizeof why)) ck_die(why);
+        if (snprintf(label, sizeof label, "A6.%s.rel-home-isolated-no-cwd-dir", kind) >= (int)sizeof label) ck_die("label");
+        ck(r.rc == 7 && lstat(bad2, &st) != 0 && rmdir(tmp2) == 0, label);
+        np_free(&r);
+    }
+    {
+        char *av[] = {"sh", "-c", "HOME=homerel XDG_CACHE_HOME=\"$1\" exec sh \"$0\"", (char *)pack, xroot, 0};
+        if (np_run(av, cwd2, 0, 30, &r, why, sizeof why)) ck_die(why);
+        if (snprintf(label, sizeof label, "A7.%s.abs-xdg-uses-xdg", kind) >= (int)sizeof label) ck_die("label");
+        ck(r.rc == 7 && lstat(xcache, &st) == 0 && S_ISDIR(st.st_mode), label);
+        np_free(&r);
+    }
+}
+
 int main(int argc, char **argv) {
-    char work[4096], src[4400], elf[4400], pe[4400], dummy[4400], managed[4400], plain[4400], cache[4400];
+    char work[4096], src[4400], elf[4400], pe[4400], dummy[4400], managed[4400], plain[4400], noneed[4400], cache[4400];
     (void)argv;
     if (argc != 1) ck_die("usage: no arguments (repo root)");
     if (!getcwd(ck_root, sizeof ck_root)) ck_die("getcwd");
@@ -101,7 +138,8 @@ int main(int argc, char **argv) {
     if (mkdir(work, 0700)) ck_die("work directory must be new");
     ck_path(src, sizeof src, work, "seven.c"); ck_path(elf, sizeof elf, work, "seven"); ck_path(pe, sizeof pe, work, "seven.exe");
     ck_path(dummy, sizeof dummy, work, "dummy.bin"); ck_path(managed, sizeof managed, work, "managed.com");
-    ck_path(plain, sizeof plain, work, "plain.com"); ck_path(cache, sizeof cache, work, "cache");
+    ck_path(plain, sizeof plain, work, "plain.com"); ck_path(noneed, sizeof noneed, work, "noneed.com");
+    ck_path(cache, sizeof cache, work, "cache");
     if (cx_write(src, "int main(void){return 7;}\n", 26)) ck_die("write seven.c");
     if (cx_write(dummy, "dummy\n", 6)) ck_die("write dummy.bin");
     if (mkdir(cache, 0700)) ck_die("cache directory");
@@ -120,8 +158,15 @@ int main(int argc, char **argv) {
                       "--need", "53248", "--deflate", plain, pe, elf, dummy, dummy, dummy, 0};
         ck_build(av, "A0d.pack-plain-head");
     }
+    {   char *av[] = {"sh", "./unisacc.com", "tools/ape-pack.cx", "--", "--tool", "unisacc",
+                      "--deflate", noneed, pe, elf, dummy, dummy, dummy, 0};
+        ck_build(av, "A0e.pack-noneed-head");
+    }
     ck_pack_cases("managed", managed, cache);
     ck_pack_cases("plain", plain, cache);
+    ck_rel_cache_cases("managed", managed, work);
+    ck_rel_cache_cases("plain", plain, work);
+    ck_rel_cache_cases("noneed", noneed, work);
 
     if (sy_remove_all(work)) fprintf(stderr, "note\twork directory not removed: %s\n", work);
     printf("CHECK_APE_NEED\tassertions=%d\tfailed=%d\n", ck_assertions(), ck_failures());

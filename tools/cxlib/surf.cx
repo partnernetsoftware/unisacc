@@ -1,0 +1,158 @@
+#pragma unisa module surf
+/* tools/cxlib/surf.cx -- SURF receipt format (4-column: pkg, name, target, status) and
+ * build/std-surface.tsv row verification helper.
+ *
+ * Wire format:
+ *   SURF<TAB>pkg<TAB>name<TAB>target<TAB>status\n
+ *   target in { lnx/x86_64, lnx/arm64, osx/x86_64, osx/arm64, win/x86_64, win/arm64 }
+ *   status in { ok, fail, refuse }
+ */
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+enum { SURF_MAX_ROWS = 512 };
+
+typedef struct {
+    char pkg[48];
+    char name[96];
+    char target[24];
+    char status[16];
+} surf_row_t;
+
+typedef struct {
+    surf_row_t rows[SURF_MAX_ROWS];
+    int n;
+} surf_set_t;
+
+static int surf_target_ok(const char *t) {
+    return t && (!strcmp(t, "lnx/x86_64") || !strcmp(t, "lnx/arm64") ||
+                 !strcmp(t, "osx/x86_64") || !strcmp(t, "osx/arm64") ||
+                 !strcmp(t, "win/x86_64") || !strcmp(t, "win/arm64"));
+}
+
+static int surf_status_ok(const char *s) {
+    return s && (!strcmp(s, "ok") || !strcmp(s, "fail") || !strcmp(s, "refuse"));
+}
+
+static int surf_token_clean(const char *s) {
+    if (!s || !s[0]) return 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == '\t' || *p == '\n' || *p == '\r') return 0;
+    }
+    return 1;
+}
+
+int surf_format_row(char *out, int cap, const char *pkg, const char *name, const char *target, const char *status) {
+    if (!out || cap <= 0 || !surf_token_clean(pkg) || !surf_token_clean(name) ||
+        !surf_target_ok(target) || !surf_status_ok(status)) return -1;
+    return cx_fmt(out, (size_t)cap, "SURF\t%s\t%s\t%s\t%s\n", pkg, name, target, status) ? -1 : 0;
+}
+
+int surf_parse_text(const char *text, size_t len, surf_set_t *set) {
+    if (!set) return -1;
+    set->n = 0;
+    if (!text || len == 0) return 0;
+    const char *p = text, *end = text + len;
+    while (p < end) {
+        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll >= 5 && !memcmp(p, "SURF\t", 5)) {
+            char buf[512];
+            if (ll >= sizeof buf || mm_copy(buf, sizeof buf, p, (long)ll)) return -1;
+            buf[ll] = 0;
+            char *f[6]; int nf = 0;
+            f[nf++] = buf;
+            for (char *q = buf; *q && nf < 6; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+            if (nf != 5 || !surf_token_clean(f[1]) || !surf_token_clean(f[2]) ||
+                !surf_target_ok(f[3]) || !surf_status_ok(f[4])) return -1;
+            if (set->n >= SURF_MAX_ROWS) return -1;
+            surf_row_t *r = &set->rows[set->n++];
+            if (cx_fmt(r->pkg, sizeof r->pkg, "%s", f[1]) ||
+                cx_fmt(r->name, sizeof r->name, "%s", f[2]) ||
+                cx_fmt(r->target, sizeof r->target, "%s", f[3]) ||
+                cx_fmt(r->status, sizeof r->status, "%s", f[4])) return -1;
+        }
+        p = nl ? nl + 1 : end;
+    }
+    return 0;
+}
+
+static const char *surf_find_status(const surf_set_t *set, const char *pkg, const char *name, const char *target) {
+    const char *found = 0;
+    if (!set) return 0;
+    for (int i = 0; i < set->n; i++) {
+        if (!strcmp(set->rows[i].pkg, pkg) && !strcmp(set->rows[i].name, name) && !strcmp(set->rows[i].target, target))
+            found = set->rows[i].status;
+    }
+    return found;
+}
+
+static void surf_append_diag(char *diag, int cap, const char *line) {
+    if (!diag || cap <= 0 || !line) return;
+    size_t cur = strlen(diag);
+    size_t add = strlen(line);
+    if (cur + add + 1 < (size_t)cap) {
+        (void)mm_copy(diag + cur, (long)((size_t)cap - cur), line, (long)add);
+        diag[cur + add] = 0;
+    }
+}
+
+static int surf_cell_is_impl(const char *cell) {
+    return cell && (!strcmp(cell, "impl") || !strncmp(cell, "impl:", 5));
+}
+
+static int surf_cell_is_refuse(const char *cell) {
+    return cell && !strncmp(cell, "refuse:", 7);
+}
+
+/* Verify one build/std-surface.tsv data row (14 TAB-separated columns) against SET.
+ * Returns number of failures (0 = pass, -1 = malformed row). */
+int surf_check_surface_row(const char *row_line, const surf_set_t *set, char *diag, int diag_cap) {
+    if (diag && diag_cap > 0) diag[0] = 0;
+    if (!row_line || !set) return -1;
+    size_t len = strlen(row_line);
+    while (len > 0 && (row_line[len - 1] == '\n' || row_line[len - 1] == '\r')) len--;
+    char buf[2048];
+    if (len == 0 || len >= sizeof buf || mm_copy(buf, sizeof buf, row_line, (long)len)) return -1;
+    buf[len] = 0;
+    char *f[16]; int nf = 0;
+    f[nf++] = buf;
+    for (char *q = buf; *q && nf < 16; q++) if (*q == '\t') { *q = 0; f[nf++] = q + 1; }
+    if (nf < 14) return -1;
+    const char *pkg = f[0], *name = f[1];
+    static const char *const tgts[3][2] = {
+        { "lnx/x86_64", "lnx/arm64" },
+        { "osx/x86_64", "osx/arm64" },
+        { "win/x86_64", "win/arm64" }
+    };
+    int fails = 0;
+    for (int os = 0; os < 3; os++) {
+        const char *cell = f[5 + os];
+        int want_impl = surf_cell_is_impl(cell);
+        int want_refuse = surf_cell_is_refuse(cell);
+        for (int a = 0; a < 2; a++) {
+            const char *t = tgts[os][a];
+            const char *st = surf_find_status(set, pkg, name, t);
+            char msg[256];
+            if (want_impl) {
+                if (!st) {
+                    fails++;
+                    if (!cx_fmt(msg, sizeof msg, "MISSING_OK\t%s\t%s\t%s\n", pkg, name, t))
+                        surf_append_diag(diag, diag_cap, msg);
+                } else if (strcmp(st, "ok") != 0) {
+                    fails++;
+                    if (!cx_fmt(msg, sizeof msg, "BAD_STATUS\t%s\t%s\t%s\t%s\n", pkg, name, t, st))
+                        surf_append_diag(diag, diag_cap, msg);
+                }
+            } else if (want_refuse) {
+                if (st && !strcmp(st, "ok")) {
+                    fails++;
+                    if (!cx_fmt(msg, sizeof msg, "CONTRADICT_REFUSE_OK\t%s\t%s\t%s\n", pkg, name, t))
+                        surf_append_diag(diag, diag_cap, msg);
+                }
+            }
+        }
+    }
+    return fails;
+}

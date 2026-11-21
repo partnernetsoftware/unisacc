@@ -24,6 +24,7 @@ typedef struct {
 
 static const TjRule tj_rules[] = {
     { 1, "REFUSE preflight:" },
+    { 1, "REFUSE chain-env" },
     { 1, "REFUSE root-epoch-" },
     { 1, "clone-push target mismatch" },
     { 1, "REFUSE template SHA !=" },
@@ -210,6 +211,113 @@ static int parse_chain_tsv(const char *dir, char *phase_out, size_t phase_cap, i
     return 1;
 }
 
+static void scan_dir_timestamps(const char *cdir, long *first_start_s, long *last_start_s, long *fail_end_s, long *intra_gap_s) {
+    char p[2048];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    *first_start_s = 0;
+    *last_start_s = 0;
+    *fail_end_s = 0;
+    *intra_gap_s = -1;
+
+    /* 1. Scan exit.tsv and bg.log for failed EXIT rows (rc != 0) */
+    static const char *efiles[2] = { "exit.tsv", "bg.log" };
+    for (int f = 0; f < 2; f++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", cdir, efiles[f]) || sy_read_file(p, &b, &n, 2 << 20) || !b || n <= 0) {
+            if (b) mm_free(b);
+            b = 0;
+            continue;
+        }
+        int64_t pos = 0;
+        while (pos < n) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le > ls && b[le - 1] == '\r') le--;
+            long len = (long)(le - ls);
+            const char *line = (const char *)b + ls;
+            if (len > 5 && memcmp(line, "EXIT\t", 5) == 0) {
+                long ts = atol(line + 5);
+                long rp = tx_find(line, len, "\trc=", 4);
+                int rc = (rp >= 0) ? atoi(line + rp + 4) : 0;
+                if (ts > 0 && rc != 0) *fail_end_s = ts;
+            }
+        }
+        mm_free(b);
+        b = 0;
+    }
+
+    /* 2. Scan owner.tsv for OWNER timestamps */
+    if (!cx_fmt(p, sizeof p, "%s/owner.tsv", cdir) && sy_read_file(p, &b, &n, 1 << 20) == 0 && b && n > 0) {
+        int64_t pos = 0;
+        while (pos < n) {
+            int64_t ls = pos;
+            while (pos < n && b[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < n) pos++;
+            if (le > ls && b[le - 1] == '\r') le--;
+            long len = (long)(le - ls);
+            const char *line = (const char *)b + ls;
+            if (len > 6 && memcmp(line, "OWNER\t", 6) == 0) {
+                long ts = atol(line + 6);
+                if (ts > 0) {
+                    if (*first_start_s == 0) *first_start_s = ts;
+                    *last_start_s = ts;
+                    if (*fail_end_s > 0 && ts >= *fail_end_s) {
+                        long g = ts - *fail_end_s;
+                        if (*intra_gap_s < 0 || g < *intra_gap_s) *intra_gap_s = g;
+                    }
+                }
+            }
+        }
+        mm_free(b);
+    }
+}
+
+static void calc_fail_to_restart_min(const char *rdir, char *out, size_t cap) {
+    cx_fmt(out, cap, "UNMEASURED");
+    if (!rdir || !rdir[0]) return;
+    long my_first = 0, my_last = 0, my_fail = 0, my_intra = -1;
+    scan_dir_timestamps(rdir, &my_first, &my_last, &my_fail, &my_intra);
+    long best_gap_s = my_intra;
+
+    char base[2048];
+    long dl = (long)strlen(rdir);
+    while (dl > 1 && rdir[dl - 1] == '/') dl--;
+    long slash = -1;
+    for (long k = dl - 1; k >= 0; k--) {
+        if (rdir[k] == '/') { slash = k; break; }
+    }
+    if (slash > 0 && (size_t)slash < sizeof base) {
+        mm_copy(base, sizeof base, rdir, (size_t)slash);
+        base[slash] = 0;
+        sy_dir_t d;
+        if (sy_dir_open(&d, base) == 0) {
+            while (sy_dir_next(&d) == 1) {
+                if (d.name[0] == '.') continue;
+                char sdir[2400];
+                if (cx_fmt(sdir, sizeof sdir, "%s/%s", base, d.name)) continue;
+                long sf = 0, sl = 0, sfail = 0, sintra = -1;
+                scan_dir_timestamps(sdir, &sf, &sl, &sfail, &sintra);
+                if (my_fail > 0 && sf >= my_fail) {
+                    long g = sf - my_fail;
+                    if (best_gap_s < 0 || g < best_gap_s) best_gap_s = g;
+                }
+                if (my_first > 0 && sfail > 0 && sfail <= my_first && !tx_eqz(sdir, rdir)) {
+                    long g = my_first - sfail;
+                    if (best_gap_s < 0 || g < best_gap_s) best_gap_s = g;
+                }
+            }
+            sy_dir_close(&d);
+        }
+    }
+    if (best_gap_s >= 0) {
+        long centi = (best_gap_s * 100L + 30L) / 60L;
+        cx_fmt(out, cap, "%ld.%02ld", centi / 100L, centi % 100L);
+    }
+}
+
 static int cmd_why(int argc, char **argv) {
     const char *dir = 0;
     for (int i = 2; i < argc; i++) {
@@ -225,10 +333,13 @@ static int cmd_why(int argc, char **argv) {
         return 2;
     }
 
+    char ftr[64];
+    calc_fail_to_restart_min(dir, ftr, sizeof ftr);
+
     char phase[128] = "-";
     int att = 0, rc = 0;
     if (!parse_chain_tsv(dir, phase, sizeof phase, &att, &rc)) {
-        printf("TRAINJOB_WHY\tphase=-\tattempt=0\trc=0\thops=0\tlog=-\twhy=unlocated\n");
+        printf("TRAINJOB_WHY\tphase=-\tattempt=0\trc=0\thops=0\tlog=-\twhy=unlocated\tfail_to_restart_min=%s\tbaseline_min=9.9\ttarget_min=5.0\n", ftr);
         return 0;
     }
 
@@ -237,17 +348,17 @@ static int cmd_why(int argc, char **argv) {
     cx_fmt(logp, sizeof logp, "%s", sfile);
 
     if (scan_file_hop(sfile, 1, why, sizeof why, ptr, sizeof ptr)) {
-        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=1\tlog=%s\twhy=%s\n",
-               phase, att, rc, logp, why);
+        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=1\tlog=%s\twhy=%s\tfail_to_restart_min=%s\tbaseline_min=9.9\ttarget_min=5.0\n",
+               phase, att, rc, logp, why, ftr);
         return 0;
     }
     if (ptr[0] && scan_hop2_dir(ptr, logp, sizeof logp, why, sizeof why)) {
-        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=2\tlog=%s\twhy=%s\n",
-               phase, att, rc, logp, why);
+        printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=2\tlog=%s\twhy=%s\tfail_to_restart_min=%s\tbaseline_min=9.9\ttarget_min=5.0\n",
+               phase, att, rc, logp, why, ftr);
         return 0;
     }
-    printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=0\tlog=%s\twhy=unlocated\n",
-           phase, att, rc, logp);
+    printf("TRAINJOB_WHY\tphase=%s\tattempt=%d\trc=%d\thops=0\tlog=%s\twhy=unlocated\tfail_to_restart_min=%s\tbaseline_min=9.9\ttarget_min=5.0\n",
+           phase, att, rc, logp, ftr);
     return 0;
 }
 
@@ -743,12 +854,13 @@ static void print_job_status(const char *id, const char *jdir, long now_s, int m
     if (jr_read_meta(jdir, &m) != JR_OK) return;
     int st = reconcile_job(jdir, &m, now_s, min_lost_gap_s);
     int pid = read_job_pid(jdir);
-    char rdir[2400], phase[128] = "-";
+    char rdir[2400], phase[128] = "-", ftr[64] = "UNMEASURED";
     if (!cx_fmt(rdir, sizeof rdir, "%s/%s", m.base, m.input)) {
         last_chain_phase(rdir, phase, sizeof phase);
+        calc_fail_to_restart_min(rdir, ftr, sizeof ftr);
     }
-    printf("TRAINJOB_STATUS\tid=%s\tkind=%s\tstate=%s\tinput=%s\tpid=%d\tpgid=%d\tphase=%s\tbase=%s\n",
-           id, m.kind, jr_state_name(st), m.input, pid, m.pgid, phase, m.base);
+    printf("TRAINJOB_STATUS\tid=%s\tkind=%s\tstate=%s\tinput=%s\tpid=%d\tpgid=%d\tphase=%s\tbase=%s\tfail_to_restart_min=%s\tbaseline_min=9.9\ttarget_min=5.0\n",
+           id, m.kind, jr_state_name(st), m.input, pid, m.pgid, phase, m.base, ftr);
 }
 
 static int cmd_status(int argc, char **argv) {

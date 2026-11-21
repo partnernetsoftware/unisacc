@@ -1,18 +1,16 @@
-/* tools/derived-query.cx -- 按内容身份查询派生表(先做 tool-index):缺失或身份不符就现算,命中直接给出,读者拿到的内容恒与当前源树一致。
+/* tools/derived-query.cx -- 按内容身份查询派生表(tool-index, links, doc-links, batch-domains):
+ *   缺失或身份不符就现算,命中直接给出,读者拿到的内容恒与当前源树一致。
  *
- *   sh ./unisacc.com tools/derived-query.cx -- tool-index [--root DIR] [--cache DIR] [--timeout-ms N] [--sha] [--key]
- *   sh ./unisacc.com tools/devsvc.cx -- tool-index [同上选项]        (devsvc 转本工具,用缓存的原生执行体)
+ *   sh ./unisacc.com tools/derived-query.cx -- (tool-index|links|doc-links|batch-domains) [--root DIR] [--cache DIR] [--timeout-ms N] [--sha] [--key] [--check]
+ *   sh ./unisacc.com tools/devsvc.cx -- tool-index [同上选项]
  *
- * 身份(key):sha256 of 清单 "v1 tool-index\n" + 对 ROOT/tools/ 与 ROOT/tools/cxlib/ 的每个目录项(按名排序)一行 "路径\t内容sha256\n"
- *   (读不了的项记 "-"),再加 tests/batches.tsv 一行。读集是 tools/tool-index.cx build_tools 读集的超集(它只读这两处),多算只会多失效,不会误命中。
- * 缓存:DIR(缺省 $HOME/.cache/unisacc/derived)/tool-index/<key>.tsv 与 <key>.sha(正文 sha256)。命中时重算正文 sha 与 .sha 比对,
- *   不符即判损坏:删掉两个文件、记 CORRUPT 后现算,不把损坏内容交给读者。
- *   清单末行另记当前目录下实际执行的生成器 tools/tool-index.cx 的内容 sha(须在仓根运行)。
- * 现算:sh ./unisacc.com tools/tool-index.cx -- --root ROOT --emit-tools TMP,有截止(缺省 55000 ms,上限 58000),超时 rc 124;
- *   现算后重算 key,与现算前不同(源树在途被改)则不入缓存,照常输出并在结果行记 unstable=1,rc 3(读者应重查)。
+ * 缓存:DIR(缺省 $HOME/.cache/unisacc/derived)/<NAME>/<key>.tsv 与 <key>.sha(正文 sha256)。命中时重算正文 sha 与 .sha 比对,
+ *   不符即判损坏:删掉两个文件、记 recovered 后现算,不把损坏内容交给读者。
+ * 现算后重算 key,与现算前不同(源树在途被改)则不入缓存,照常输出并在结果行记 unstable=1,rc 3(读者应重查)。
+ * --check: 独立再跑一次生成器并与缓存/首次产出逐字节对拍(确定性校验),一致打 DQ_CHECK<TAB><NAME><TAB>OK, 不一致打 MISMATCH rc 1。
  * 输出:正文到 stdout(--sha 只打正文 sha256,--key 只打 key);结果行到 stderr:
- *   DQ  tool-index  hit|miss|recovered  key=K  sha=S  bytes=N  ms=T [unstable=1]
- * 退出码:0 成功;2 参数错;3 源树在途变化;4 现算失败;124 现算超时。 */
+ *   DQ  <NAME>  hit|miss|recovered  key=K  sha=S  bytes=N  ms=T [unstable=1]
+ * 退出码:0 成功;1 check 不一致;2 参数错;3 源树在途变化;4 现算失败;124 现算超时。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -62,33 +60,139 @@ static void sort_names(void) {
     }
 }
 
+static int append_hash_line(char *man, long *ml, const char *label, const char *path) {
+    char hex[65]; char *b = 0; long n = 0;
+    if (sy_read_file(path, &b, &n, FILEMAX) == 0) {
+        if (sy_sha256_hex(b, n, hex)) { mm_free(b); return -1; }
+        mm_free(b);
+    } else cx_fmt(hex, sizeof hex, "-");
+    if (*ml + (long)strlen(label) + 70 >= MANCAP) return -1;
+    if (cx_fmt(man + *ml, MANCAP - *ml, "%s\t%s\n", label, hex)) return -1;
+    *ml += (long)strlen(man + *ml);
+    return 0;
+}
+
+static int valid_what(const char *w) {
+    return w && (seq(w, "tool-index") || seq(w, "links") || seq(w, "doc-links") || seq(w, "batch-domains"));
+}
+
 /* 身份:清单的 sha256 */
-static int make_key(const char *root, char key[65]) {
+static int make_key(const char *what, const char *root, char key[65]) {
     char *man = mm_alloc(MANCAP); long ml = 0; int i;
     if (!man) return -1;
     for (i = 0; i < nn; i++) mm_free(nm[i]);
     nn = 0;
-    if (list_dir(root, "tools") || list_dir(root, "tools/cxlib")) { mm_free(man); return -1; }
-    sort_names();
-    {   int k = cx_fmt(man, MANCAP, "v1 tool-index\n"); if (k) { mm_free(man); return -1; } ml = (long)strlen(man); }
-    for (i = 0; i <= nn + 1; i++) {   /* 末两行:tests/batches.tsv 与实际执行的生成器 ./tools/tool-index.cx(--root 指向别处时它不在清单里) */
-        const char *rel = i < nn ? nm[i] : i == nn ? "tests/batches.tsv" : "generator\ttools/tool-index.cx";
-        char p[1024], hex[65]; char *b = 0; long n = 0;
-        if (i == nn + 1 ? cx_fmt(p, sizeof p, "tools/tool-index.cx") : cx_fmt(p, sizeof p, "%s/%s", root, rel)) { mm_free(man); return -1; }
-        if (sy_read_file(p, &b, &n, FILEMAX) == 0) { if (sy_sha256_hex(b, n, hex)) { mm_free(b); mm_free(man); return -1; } mm_free(b); }
-        else cx_fmt(hex, sizeof hex, "-");
-        if (ml + (long)strlen(rel) + 70 >= MANCAP) { mm_free(man); return -1; }
-        if (cx_fmt(man + ml, MANCAP - ml, "%s\t%s\n", rel, hex)) { mm_free(man); return -1; }
+    if (cx_fmt(man, MANCAP, "v1 %s\n", what)) { mm_free(man); return -1; }
+    ml = (long)strlen(man);
+
+    if (seq(what, "tool-index")) {
+        if (list_dir(root, "tools") || list_dir(root, "tools/cxlib")) { mm_free(man); return -1; }
+        sort_names();
+        for (i = 0; i < nn; i++) {
+            char p[1024];
+            if (cx_fmt(p, sizeof p, "%s/%s", root, nm[i]) || append_hash_line(man, &ml, nm[i], p)) { mm_free(man); return -1; }
+        }
+        {
+            char p[1024];
+            if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) || append_hash_line(man, &ml, "tests/batches.tsv", p)) { mm_free(man); return -1; }
+            if (append_hash_line(man, &ml, "generator\ttools/tool-index.cx", "tools/tool-index.cx")) { mm_free(man); return -1; }
+        }
+    } else if (seq(what, "links")) {
+        char p1[1024], p2[1024];
+        if (cx_fmt(p1, sizeof p1, "%s/exec/facts/derive.tsv", root) ||
+            cx_fmt(p2, sizeof p2, "%s/tests/batches.tsv", root) ||
+            append_hash_line(man, &ml, "exec/facts/derive.tsv", p1) ||
+            append_hash_line(man, &ml, "tests/batches.tsv", p2) ||
+            append_hash_line(man, &ml, "generator\ttools/links-gen.cx", "tools/links-gen.cx")) { mm_free(man); return -1; }
+    } else if (seq(what, "batch-domains")) {
+        (void)list_dir(root, "tools");
+        (void)list_dir(root, "tests");
+        (void)list_dir(root, "cx");
+        sort_names();
+        for (i = 0; i < nn; i++) {
+            char p[1024];
+            if (cx_fmt(p, sizeof p, "%s/%s", root, nm[i]) || append_hash_line(man, &ml, nm[i], p)) { mm_free(man); return -1; }
+        }
+        {
+            char p1[1024], p2[1024], p3[1024];
+            if (cx_fmt(p1, sizeof p1, "%s/tests/batches.tsv", root) ||
+                cx_fmt(p2, sizeof p2, "%s/tests/batch-domains.tsv", root) ||
+                cx_fmt(p3, sizeof p3, "%s/tests/batch-domain-rules.tsv", root) ||
+                append_hash_line(man, &ml, "tests/batches.tsv", p1) ||
+                append_hash_line(man, &ml, "tests/batch-domains.tsv", p2) ||
+                append_hash_line(man, &ml, "tests/batch-domain-rules.tsv", p3) ||
+                append_hash_line(man, &ml, "generator\ttools/batch-domains-gen.cx", "tools/batch-domains-gen.cx")) { mm_free(man); return -1; }
+        }
+    } else if (seq(what, "doc-links")) {
+        char *fv[] = { "git", "-C", (char *)root, "ls-files", 0 };
+        char *lo = 0; size_t ln = 0;
+        int grc = cx_runv_timeout(fv, 15, &lo, &ln);
+        if (grc != 0 || !lo) { if (lo) mm_free(lo); mm_free(man); return -1; }
+        char lhex[65];
+        if (sy_sha256_hex(lo, (long)ln, lhex) || ml + 90 >= MANCAP ||
+            cx_fmt(man + ml, MANCAP - ml, "ls-files\t%s\n", lhex)) { mm_free(lo); mm_free(man); return -1; }
         ml += (long)strlen(man + ml);
-    }
+        size_t pos = 0;
+        while (pos < ln) {
+            size_t ls = pos;
+            while (pos < ln && lo[pos] != '\n') pos++;
+            size_t le = pos;
+            if (pos < ln) pos++;
+            size_t fl = le - ls;
+            if (fl >= 3 && memcmp(lo + le - 3, ".md", 3) == 0) {
+                char rel[1024], fp[1400];
+                if (fl < sizeof rel) {
+                    mm_copy(rel, sizeof rel, lo + ls, fl); rel[fl] = 0;
+                    if (strncmp(rel, "archive/", 8) != 0 && strncmp(rel, "docs/sweep/", 11) != 0 &&
+                        strncmp(rel, "ujs/", 4) != 0 && strncmp(rel, "apps/csih/", 10) != 0 &&
+                        strncmp(rel, "tools/doc-links/fixture/", 24) != 0) {
+                        if (cx_fmt(fp, sizeof fp, "%s/%s", root, rel) || append_hash_line(man, &ml, rel, fp)) {
+                            mm_free(lo); mm_free(man); return -1;
+                        }
+                    }
+                }
+            }
+        }
+        mm_free(lo);
+        {
+            char bp[1024];
+            if (cx_fmt(bp, sizeof bp, "%s/tools/doc-links-baseline.tsv", root) ||
+                append_hash_line(man, &ml, "tools/doc-links-baseline.tsv", bp) ||
+                append_hash_line(man, &ml, "generator\ttools/doc-links-gen.cx", "tools/doc-links-gen.cx") ||
+                append_hash_line(man, &ml, "generator\ttools/cxlib/doclink.cx", "tools/cxlib/doclink.cx")) {
+                mm_free(man); return -1;
+            }
+        }
+    } else { mm_free(man); return -1; }
+
     i = sy_sha256_hex(man, ml, key);
     mm_free(man);
     return i ? -1 : 0;
 }
 
+static int run_producer(const char *what, const char *root, const char *out_path, long tmo, int *timed_out_out, int *rc_out) {
+    sy_spawn_t o; sy_exit_t st; char *v[14]; int k = 0;
+    v[k++] = "sh"; v[k++] = query_product;
+    if (seq(what, "tool-index")) {
+        v[k++] = "tools/tool-index.cx"; v[k++] = "--"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--emit-tools"; v[k++] = (char *)out_path;
+    } else if (seq(what, "links")) {
+        v[k++] = "tools/links-gen.cx"; v[k++] = "--"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--emit"; v[k++] = (char *)out_path;
+    } else if (seq(what, "batch-domains")) {
+        v[k++] = "tools/batch-domains-gen.cx"; v[k++] = "--"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--emit"; v[k++] = (char *)out_path;
+    } else if (seq(what, "doc-links")) {
+        v[k++] = "tools/doc-links-gen.cx"; v[k++] = "--"; v[k++] = "--write"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--table"; v[k++] = (char *)out_path;
+    } else return -1;
+    v[k] = 0;
+    sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = tmo; o.out_fd = 2;
+    int r = sy_proc_run(&o, &st);
+    *timed_out_out = (!r && st.timed_out) ? 1 : 0;
+    *rc_out = r ? r : sy_exit_code(&st);
+    return (r || st.timed_out || sy_exit_code(&st) != 0) ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     if(sy_realpath("unisacc.com",query_product,sizeof query_product)<0)return 4;
-    const char *root = ".", *cache = 0, *what = 0; long tmo = 55000, t0 = sy_now_ms(); int a, only_sha = 0, only_key = 0, check = 0;
+    const char *root = ".", *cache = 0, *what = 0; long tmo = 55000, t0 = sy_now_ms(); int a, only_sha = 0, only_key = 0, only_path = 0, check = 0;
     char key[65], key2[65], dir[1024], tsv[1100], shf[1100], tmp[1100], hex[65], want[80];
     char *b = 0; long n = 0; const char *state = "miss"; int unstable = 0;
     for (a = 1; a < argc; a++) {
@@ -98,16 +202,17 @@ int main(int argc, char **argv) {
         else if (seq(argv[a], "--check")) check = 1;
         else if (seq(argv[a], "--sha")) only_sha = 1;
         else if (seq(argv[a], "--key")) only_key = 1;
+        else if (seq(argv[a], "--path")) only_path = 1;
         else if (!what && argv[a][0] != '-') what = argv[a];
         else what = "?";
     }
-    if (!what || !seq(what, "tool-index") || tmo <= 0 || tmo > 58000 || (check && (only_sha || only_key))) {
-        fprintf(stderr, "usage: derived-query.cx -- tool-index [--root DIR] [--cache DIR] [--timeout-ms N<=58000] [--sha] [--key]\n");
+    if (!valid_what(what) || tmo <= 0 || tmo > 58000 || (check && (only_sha || only_key || only_path))) {
+        fprintf(stderr, "usage: derived-query.cx -- (tool-index|links|doc-links|batch-domains) [--root DIR] [--cache DIR] [--timeout-ms N<=58000] [--sha] [--key] [--path] [--check]\n");
         return 2;
     }
-    if (cache) { if (cx_fmt(dir, sizeof dir, "%s/tool-index", cache)) return 2; }
-    else { const char *h = sy_env("HOME"); if (!h || cx_fmt(dir, sizeof dir, "%s/.cache/unisacc/derived/tool-index", h)) return 2; }
-    if (make_key(root, key)) { fprintf(stderr, "DQ\ttool-index\tfail\twhy=key (cannot read %s/tools)\n", root); return 4; }
+    if (cache) { if (cx_fmt(dir, sizeof dir, "%s/%s", cache, what)) return 2; }
+    else { const char *h = sy_env("HOME"); if (!h || cx_fmt(dir, sizeof dir, "%s/.cache/unisacc/derived/%s", h, what)) return 2; }
+    if (make_key(what, root, key)) { fprintf(stderr, "DQ\t%s\tfail\twhy=key (cannot read inputs under %s)\n", what, root); return 4; }
     if (only_key) { printf("%s\n", key); return 0; }
     if (cx_fmt(tsv, sizeof tsv, "%s/%s.tsv", dir, key) || cx_fmt(shf, sizeof shf, "%s/%s.sha", dir, key)) return 2;
     if (sy_read_file(tsv, &b, &n, FILEMAX) == 0) {
@@ -120,20 +225,17 @@ int main(int argc, char **argv) {
         else { mm_free(b); b = 0; sy_unlink(tsv); sy_unlink(shf); state = "recovered"; }
     }
     if (!b) {
-        sy_spawn_t o; sy_exit_t st; char rootarg[1100]; char *v[12]; int r;
-        if (sy_mkdir_all(dir, 0755) < 0) { fprintf(stderr, "DQ\ttool-index\tfail\twhy=mkdir %s\n", dir); return 4; }
-        if (cx_fmt(tmp, sizeof tmp, "%s/.tmp-%ld-%ld", dir, (long)getpid(), sy_now_ms()) || cx_fmt(rootarg, sizeof rootarg, "tools/tool-index.cx")) return 2;
-        v[0] = "sh"; v[1] = query_product; v[2] = rootarg; v[3] = "--"; v[4] = "--root"; v[5] = (char *)root; v[6] = "--emit-tools"; v[7] = tmp; v[8] = 0;
-        sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = tmo; o.out_fd = 2;
-        r = sy_proc_run(&o, &st);
-        if (r || st.timed_out || sy_exit_code(&st) != 0) {
+        int to = 0, grc = 0;
+        if (sy_mkdir_all(dir, 0755) < 0) { fprintf(stderr, "DQ\t%s\tfail\twhy=mkdir %s\n", what, dir); return 4; }
+        if (cx_fmt(tmp, sizeof tmp, "%s/.tmp-%ld-%ld", dir, (long)getpid(), sy_now_ms())) return 2;
+        if (run_producer(what, root, tmp, tmo, &to, &grc) != 0) {
             sy_unlink(tmp);
-            fprintf(stderr, "DQ\ttool-index\tfail\twhy=%s\trc=%d\n", r ? "spawn" : st.timed_out ? "timeout" : "generator", r ? r : sy_exit_code(&st));
-            return !r && st.timed_out ? 124 : 4;
+            fprintf(stderr, "DQ\t%s\tfail\twhy=%s\trc=%d\n", what, to ? "timeout" : "generator", grc);
+            return to ? 124 : 4;
         }
-        if (sy_read_file(tmp, &b, &n, FILEMAX)) { sy_unlink(tmp); fprintf(stderr, "DQ\ttool-index\tfail\twhy=read-emit\n"); return 4; }
+        if (sy_read_file(tmp, &b, &n, FILEMAX)) { sy_unlink(tmp); fprintf(stderr, "DQ\t%s\tfail\twhy=read-emit\n", what); return 4; }
         if (sy_sha256_hex(b, n, hex)) { sy_unlink(tmp); return 4; }
-        if (make_key(root, key2) || !seq(key, key2)) { unstable = 1; sy_unlink(tmp); }
+        if (make_key(what, root, key2) || !seq(key, key2)) { unstable = 1; sy_unlink(tmp); }
         else {
             if (cx_fmt(want, sizeof want, "%s\n", hex) || sy_write_atomic(shf, want, 65, 0644) || sy_rename(tmp, tsv)) {
                 sy_unlink(tmp); sy_unlink(shf); sy_unlink(tsv);   /* 不留半套缓存 */
@@ -142,22 +244,22 @@ int main(int argc, char **argv) {
     } else if (sy_sha256_hex(b, n, hex)) return 4;
     /* A check always invokes the producer independently, including cache hits. */
     if (check) {
-        char fresh[1100];sy_spawn_t opts;sy_exit_t done;char *actual=0;long an=0;
-        if(cx_fmt(fresh,sizeof fresh,"%s/.verify-%ld-%ld",dir,(long)getpid(),sy_now_ms()))return 2;
-        char *v[]={"sh",query_product,"tools/tool-index.cx","--","--root",(char*)root,"--emit-tools",fresh,0};
-        sy_spawn_init(&opts);opts.argv=v;opts.pgroup=-1;opts.deadline_ms=tmo;opts.out_fd=2;
-        int r=sy_proc_run(&opts,&done);
-        if(r||done.timed_out||sy_exit_code(&done)||sy_read_file(fresh,&actual,&an,FILEMAX)){sy_unlink(fresh);return !r&&done.timed_out?124:4;}
-        sy_unlink(fresh);int same=an==n&&mm_same(b,actual,n);mm_free(actual);
-        if(!same){fprintf(stderr,"DQ_CHECK\ttool-index\tMISMATCH\n");mm_free(b);return 1;}
+        char fresh[1100]; char *actual = 0; long an = 0; int to = 0, grc = 0;
+        if (cx_fmt(fresh, sizeof fresh, "%s/.verify-%ld-%ld", dir, (long)getpid(), sy_now_ms())) return 2;
+        if (run_producer(what, root, fresh, tmo, &to, &grc) != 0 || sy_read_file(fresh, &actual, &an, FILEMAX)) {
+            sy_unlink(fresh); return to ? 124 : 4;
+        }
+        sy_unlink(fresh); int same = (an == n && mm_same(b, actual, n)); mm_free(actual);
+        if (!same) { fprintf(stderr, "DQ_CHECK\t%s\tMISMATCH\n", what); mm_free(b); return 1; }
     }
     /* Hits must also be rejected if the source changed while loading the body. */
-    if(make_key(root,key2)||!seq(key,key2))unstable=1;
-    if (check) printf("DQ_CHECK\ttool-index\tOK\tsha=%s\n",hex);
+    if (make_key(what, root, key2) || !seq(key, key2)) unstable = 1;
+    if (check) printf("DQ_CHECK\t%s\tOK\tsha=%s\n", what, hex);
+    else if (only_path) printf("%s\n", tsv);
     else if (only_sha) printf("%s\n", hex);
     else fwrite(b, 1, (size_t)n, stdout);
     fflush(stdout);
-    fprintf(stderr, "DQ\ttool-index\t%s\tkey=%.16s\tsha=%s\tbytes=%ld\tms=%ld%s\n", state, key, hex, n, sy_now_ms() - t0, unstable ? "\tunstable=1" : "");
+    fprintf(stderr, "DQ\t%s\t%s\tkey=%.16s\tsha=%s\tbytes=%ld\tms=%ld%s\n", what, state, key, hex, n, sy_now_ms() - t0, unstable ? "\tunstable=1" : "");
     mm_free(b);
     return unstable ? 3 : 0;
 }
