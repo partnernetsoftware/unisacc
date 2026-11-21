@@ -2,7 +2,9 @@
 <meta charset="utf-8">
 <pre id="r160">pending</pre>
 <script type="module">
-import { DataTexture, DepthFormat, CubeReflectionMapping, RGBAFormat, UnsignedByteType, UVMapping, Vector2, REVISION } from "../../web/game/three.module.js";
+import { DataTexture, DepthFormat, CubeReflectionMapping, RGBAFormat, RGFormat, RedFormat, UnsignedByteType,
+  UVMapping, Vector2, REVISION, WebGLRenderer, WebGLRenderTarget, PlaneGeometry,
+  Mesh, MeshBasicMaterial, Scene, OrthographicCamera, LinearSRGBColorSpace } from "../../web/game/three.module.js";
 if (REVISION !== "160") throw new Error("three.js revision mismatch");
 const texture = new DataTexture(new Uint8Array([12,34,56,78,89,67,45,23]), 2, 1, RGBAFormat, UnsignedByteType);
 texture.offset.set(0.5,0);
@@ -20,5 +22,28 @@ const mapped = sample(uv(UVMapping));
 const reflection = sample(uv(CubeReflectionMapping));
 // The packed RGBA reader rejects the separate depth format.
 texture.format=DepthFormat;
-document.querySelector("#r160").textContent=JSON.stringify([raw,mapped,reflection,texture.format!==RGBAFormat?-2:0]);
+const canvas=document.createElement("canvas");
+const context=canvas.getContext("webgl2",{antialias:false});
+if(!context) throw new Error("WebGL2 unavailable");
+const renderer=new WebGLRenderer({canvas,context});
+renderer.outputColorSpace=LinearSRGBColorSpace;
+renderer.setSize(2,1);
+const target=new WebGLRenderTarget(2,1);
+renderer.setRenderTarget(target);
+const camera=new OrthographicCamera(-1,1,0.5,-0.5,0.1,10);
+camera.position.z=1;
+const scene=new Scene();
+const material=new MeshBasicMaterial({toneMapped:false});
+scene.add(new Mesh(new PlaneGeometry(2,1),material));
+function channelSample(format,array) {
+  material.map=new DataTexture(new Uint8Array(array),2,1,format,UnsignedByteType);
+  material.map.needsUpdate=true;
+  material.needsUpdate=true;
+  renderer.render(scene,camera);
+  const pixel=new Uint8Array(4);
+  renderer.readRenderTargetPixels(target,1,0,1,1,pixel);
+  return pixel.reduceRight((word,byte)=>word*256+byte,0);
+}
+document.querySelector("#r160").textContent=JSON.stringify([raw,mapped,reflection,
+  texture.format!==RGBAFormat?-2:0,channelSample(RedFormat,[12,34]),channelSample(RGFormat,[12,34,56,78])]);
 </script>
