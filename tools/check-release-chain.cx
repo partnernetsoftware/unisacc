@@ -4,6 +4,7 @@
  * usage errors refuse with rc 2. Layer: interfaces. Output: CHECK_RELEASE_CHAIN. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.env
 #pragma unisa use cxlib.sessionroot
 static int passed, failed;
@@ -226,6 +227,51 @@ int main(int argc, char **argv) {
         ck(has(&r, "EFNOSRC=1\n") && has(&r, "EF_COUNT\tFAIL\tfoo-miss\tmissing-count-line-in-source\t"), "ef-counts-missing-source-marker-refused");
         ck(has(&r, "EFNOBAT=1\n") && has(&r, "EF_COUNT\tFAIL\tno-such-batch\tmissing-batch-in-registry\n"), "ef-counts-missing-batch-refused");
         np_free(&r);
+    }
+    /* Freeze conflict policy: retire one query-only table, keep the rest staged as conflicts. */
+    {
+        char cmd[9200];
+        cx_fmt(cmd, sizeof cmd,
+            "T=%s/freeze; git init -q -b fixture \"$T\" && cd \"$T\" && "
+            "git config user.name fixture && git config user.email freeze@example.invalid && "
+            "mkdir -p build exec/facts && "
+            "printf '# ignore\\n' > .gitignore && "
+            "printf 'doc-links\\tgen\\tcheck\\tquery-only gen\\tbuild/doc-links.tsv\\tinputs\\t1\\t3\\n"
+                   "links\\tgen\\tcheck\\tquery-only gen\\tbuild/links.tsv\\tinputs\\t1\\t3\\n"
+                   "index\\tgen\\tcheck\\tgen --write\\tbuild/table-index.tsv\\tinputs\\t1\\t3\\n' > exec/facts/derive.tsv && "
+            "printf 'base\\n' > build/doc-links.tsv && cp build/doc-links.tsv build/links.tsv && "
+            "cp build/doc-links.tsv build/table-index.tsv && cp build/doc-links.tsv source.c && "
+            "git add . && git commit -qm base && git branch side && "
+            "printf 'main\\n' > build/doc-links.tsv && cp build/doc-links.tsv build/links.tsv && "
+            "cp build/doc-links.tsv build/table-index.tsv && cp build/doc-links.tsv source.c && "
+            "git commit -qam ours && B=$(git rev-parse HEAD) && git switch -q side && "
+            "git rm -q build/doc-links.tsv build/links.tsv && "
+            "printf '/build/doc-links.tsv\\n' >> .gitignore && printf 'side\\n' > source.c && cp source.c build/table-index.tsv && "
+            "git commit -qam theirs && I=$(git rev-parse HEAD) && git switch -q fixture || exit 2; "
+            "git merge --no-ff --no-commit side; [ \"$?\" = 1 ] || exit 2; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$I\"; echo FPLAN=$?; "
+            "test -n \"$(git ls-files -u -- build/doc-links.tsv)\" && echo PLAN_KEPT=1; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$B\" --apply; echo FWRONG=$?; "
+            "test -n \"$(git ls-files -u -- build/doc-links.tsv)\" && echo WRONG_KEPT=1; "
+            "%s freeze-conflicts --base \"$B\" --incoming \"$I\" --apply; echo FAPPLY=$?; "
+            "test -z \"$(git ls-files -u -- build/doc-links.tsv)\" && grep -qx main build/doc-links.tsv && echo RETIRED=1; "
+            "test -n \"$(git ls-files -u -- build/links.tsv)\" && "
+            "test -n \"$(git ls-files -u -- build/table-index.tsv)\" && "
+            "test -n \"$(git ls-files -u -- source.c)\" && echo OTHER_KEPT=1",
+            tmp, bin, bin, bin);
+        char *fv[] = {"sh", "-c", cmd, 0};
+        r = actual(fv);
+        ck(has(&r, "FPLAN=1\n") && has(&r, "PLAN_KEPT=1\n") &&
+           has(&r, "path=build/doc-links.tsv\taction=retire-index") &&
+           has(&r, "path=build/table-index.tsv\taction=regenerate\tproducer=index") &&
+           has(&r, "path=source.c\taction=manual"), "freeze-plan-classifies-without-moving-index");
+        ck(has(&r, "FWRONG=2\n") && has(&r, "WRONG_KEPT=1\n") && r.err &&
+           strstr(r.err, "merge-identity-mismatch"), "freeze-apply-refuses-wrong-incoming-identity");
+        ck(has(&r, "FAPPLY=1\n") && has(&r, "RETIRED=1\n") && has(&r, "OTHER_KEPT=1\n") &&
+           has(&r, "path=build/links.tsv\taction=manual"), "freeze-apply-only-removes-proven-retired-index-path");
+        np_free(&r);
+        char fixture[4400];
+        if (cx_fmt(fixture, sizeof fixture, "%s/freeze", tmp) || sy_remove_all(fixture)) return 2;
     }
     /* (5) usage */
     char *bad[] = {bin, "run", "--inputs", inputs, "--layout", "/x", 0};

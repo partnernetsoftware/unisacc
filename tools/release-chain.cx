@@ -6,6 +6,7 @@
  *   sh ./unisacc.com tools/release-chain.cx -- retry-ci --version V --run-id ID --evidence-dir DIR
  *        --candidate FILE [--tag TAG] [--gh BIN] [--dry]
  *   sh ./unisacc.com tools/release-chain.cx -- check-ef-counts --expected-fail FILE [--batches FILE] [--strict FILE]
+ *   sh ./unisacc.com tools/release-chain.cx -- freeze-conflicts --base SHA --incoming SHA [--apply]
  *
  * Steps (each one child, each bounded at 55 s; a step over that must be split, not extended):
  *   P0/P1/P2 plan-only: after chain DONE, plan the timed prerun, start the bounded
@@ -208,6 +209,113 @@ static int is_digits(const char *s) {
     if (!s || !s[0]) return 0;
     for (const char *p = s; *p; p++) if (*p < '0' || *p > '9') return 0;
     return 1;
+}
+
+static int freeze_git(char **argv, np_result *r) {
+    char why[128];
+    return np_run(argv, cwd, 0, 3, r, why, sizeof why) || r->rc || r->timed_out || r->residue;
+}
+
+static int freeze_matches(const char *ref, const char *sha) {
+    char *v[] = {"git", "rev-parse", "--verify", (char *)ref, 0};
+    np_result r = {0};
+    int ok = !freeze_git(v, &r) && r.outn == 41 && r.out[40] == '\n' && !memcmp(r.out, sha, 40);
+    np_free(&r);
+    return ok;
+}
+
+static int freeze_policy(const np_result *rules, const char *path, char producer[80]) {
+    size_t pn = strlen(path);
+    const char *p = rules->out, *end = p + rules->outn;
+    while (p < end) {
+        const char *nl = memchr(p, '\n', end - p);
+        if (!nl) nl = end;
+        const char *f[6] = {p};
+        int n = 1;
+        while (n < 6) {
+            const char *tab = memchr(f[n - 1], '\t', nl - f[n - 1]);
+            if (!tab) break;
+            f[n++] = tab + 1;
+        }
+        if (n == 6 && p[0] != '#' && f[5] - f[4] == (long)pn + 1 && !memcmp(f[4], path, pn) &&
+            f[1] - p > 1 && f[1] - p <= 80) {
+            if (cx_fmt(producer, 80, "%.*s", (int)(f[1] - p - 1), p)) return 0;
+            return f[4] - f[3] > 11 && !memcmp(f[3], "query-only ", 11) ? 2 : 1;
+        }
+        p = nl < end ? nl + 1 : end;
+    }
+    return 0;
+}
+
+static int freeze_is_retired(const char *incoming, const np_result *ignore, const char *path) {
+    const char *retired[] = {"build/doc-links.tsv", "build/links.tsv", "tests/batch-domain-index.tsv", 0};
+    int known = 0;
+    for (int i = 0; retired[i]; i++) if (!strcmp(retired[i], path)) known = 1;
+    if (!known) return 0;
+    char line[128];
+    if (cx_fmt(line, sizeof line, "\n/%s\n", path) ||
+        tx_find(ignore->out, ignore->outn, line, strlen(line)) < 0) return 0;
+    char *v[] = {"git", "ls-tree", "--name-only", (char *)incoming, "--", (char *)path, 0};
+    np_result r = {0};
+    int absent = !freeze_git(v, &r) && r.outn == 0;
+    np_free(&r);
+    return absent;
+}
+
+static int cmd_freeze_conflicts(int argc, char **argv) {
+    const char *base = 0, *incoming = 0;
+    int apply = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--apply")) apply = 1;
+        else if (!strcmp(argv[i], "--base") && i + 1 < argc) base = argv[++i];
+        else if (!strcmp(argv[i], "--incoming") && i + 1 < argc) incoming = argv[++i];
+        else usage("freeze-conflicts --base SHA --incoming SHA [--apply]");
+    }
+    if (!base || !incoming || strlen(base) != 40 || strlen(incoming) != 40 ||
+        strspn(base, "0123456789abcdef") != 40 || strspn(incoming, "0123456789abcdef") != 40 ||
+        sy_cwd(cwd, sizeof cwd) < 0 || !freeze_matches("HEAD", base) || !freeze_matches("MERGE_HEAD", incoming))
+        usage("freeze-conflicts merge-identity-mismatch");
+    char factspec[100], ignorespec[100];
+    if (cx_fmt(factspec, sizeof factspec, "%s:exec/facts/derive.tsv", incoming) ||
+        cx_fmt(ignorespec, sizeof ignorespec, "%s:.gitignore", incoming)) usage("freeze-conflicts policy-ref");
+    char *dv[] = {"git", "show", factspec, 0};
+    char *iv[] = {"git", "show", ignorespec, 0};
+    char *cv[] = {"git", "diff", "--name-only", "--diff-filter=U", "-z", "--", 0};
+    np_result rules = {0}, ignore = {0}, conflicts = {0};
+    if (freeze_git(dv, &rules) || freeze_git(iv, &ignore) || freeze_git(cv, &conflicts))
+        usage("freeze-conflicts read-incoming-policy-or-index");
+    char *drop[8] = {"git", "update-index", "--force-remove", "--", 0};
+    int n = 4, manual = 0, regenerate = 0;
+    long start = sy_now_ms();
+    for (size_t off = 0; off < conflicts.outn;) {
+        char *path = conflicts.out + off;
+        char *end = memchr(path, 0, conflicts.outn - off);
+        if (!end) usage("freeze-conflicts malformed-index-list");
+        off = (size_t)(end - conflicts.out) + 1;
+        char producer[80];
+        int kind = freeze_policy(&rules, path, producer);
+        if (kind == 2 && freeze_is_retired(incoming, &ignore, path)) {
+            if (n == 7) usage("freeze-conflicts too-many-retired-paths");
+            drop[n++] = path;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=retire-index\tproducer=%s\n", path, producer);
+        } else if (kind == 1) {
+            regenerate++;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=regenerate\tproducer=%s\n", path, producer);
+        } else {
+            manual++;
+            sy_printf("FREEZE_CONFLICT\tpath=%s\taction=manual\n", strpbrk(path, "\t\r\n") ? "(control-bytes)" : path);
+        }
+    }
+    if (apply && n > 4) {
+        np_result r = {0};
+        if (!freeze_matches("HEAD", base) || !freeze_matches("MERGE_HEAD", incoming) || freeze_git(drop, &r))
+            usage("freeze-conflicts index-update-refused");
+        np_free(&r);
+    }
+    np_free(&conflicts); np_free(&rules); np_free(&ignore);
+    sy_printf("FREEZE_CONFLICT_SUMMARY\tretired=%d\tregenerate=%d\tmanual=%d\tapplied=%d\tms=%ld\n",
+              n - 4, regenerate, manual, apply, sy_now_ms() - start);
+    return manual || regenerate ? 1 : 0;
 }
 static int retry_reset_candidate(const char *candp, int dry) {
     size_t n = 0; char *s = cx_read(candp, &n);
@@ -680,7 +788,8 @@ static const char *run_pre_steps(char **pack_dir_out, char **warm_file_out) {
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "check-ef-counts")) return cmd_check_ef_counts(argc - 2, argv + 2);
-    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts");
+    if (argc >= 2 && !strcmp(argv[1], "freeze-conflicts")) return cmd_freeze_conflicts(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts");
     planning = !strcmp(argv[1], "plan");
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
