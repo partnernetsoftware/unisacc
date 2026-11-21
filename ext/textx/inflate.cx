@@ -1,0 +1,241 @@
+#pragma unisa module inflate
+/* L1 textx/inflate: DEFLATE (RFC 1951) and gzip (RFC 1952) decoding into a caller-owned buffer of
+   unknown final size, an extension package (ext/textx, outside the compile closure). cx/runtime/codec.cx
+   keeps its puff kernel static and exact-length; this is a small independent decoder (canonical Huffman,
+   puff-style), so the core is untouched. No allocation, no libc.
+     long zl_inflate(unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen)
+     long zl_gunzip (unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen)
+   Both decode up to CAP bytes; *OUTLEN receives the bytes produced (also on failure, when OUTLEN is not 0).
+   Result: 0 success; -ENOSPC the output would exceed cap; -EIO the stream or gzip member ends early;
+   -EINVAL corrupt data (bad block, code, distance, gzip magic or method, CRC32 or ISIZE mismatch, bad
+   arguments). zl_inflate ignores bytes after the final block. zl_gunzip parses the 10-byte header and the
+   FEXTRA, FNAME, FCOMMENT and FHCRC fields, inflates, then checks the 8-byte trailer (CRC32, size mod 2^32).
+   Module state is private and static: not reentrant. */
+
+#define ZL_ROOM(n) (zl_n + (n) <= zl_cap)
+
+static const unsigned char *zl_in;
+static long zl_inlen, zl_at;
+static long zl_bb;
+static int zl_bc, zl_short;
+static unsigned char *zl_out;
+static long zl_cap, zl_n;
+static int zl_cnt[48];          /* 3 tables x 16: 0 literal/length, 1 distance, 2 code length */
+static int zl_sym[864];         /* 3 tables x 288 */
+static unsigned long zl_crct[256];
+static int zl_crcok;
+
+static const unsigned short zl_lbase[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const unsigned char zl_lext[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+static const unsigned short zl_dbase[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const unsigned char zl_dext[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+static const unsigned char zl_corder[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+
+static int zl_bits(int need) {
+    long val = zl_bb;
+    while (zl_bc < need) {
+        if (zl_at >= zl_inlen) { zl_short = 1; return 0; }
+        val |= (long)zl_in[zl_at++] << zl_bc;
+        zl_bc += 8;
+    }
+    zl_bb = val >> need;
+    zl_bc -= need;
+    return (int)(val & ((1L << need) - 1));
+}
+
+/* canonical decode with table H; -1 on an invalid code or when the input ends */
+static int zl_decode(int h) {
+    int code = 0, first = 0, index = 0, len, count;
+    for (len = 1; len <= 15; len++) {
+        code |= zl_bits(1);
+        if (zl_short) return -1;
+        count = zl_cnt[h * 16 + len];
+        if (code - count < first) return zl_sym[h * 288 + index + (code - first)];
+        index += count; first += count; first <<= 1; code <<= 1;
+    }
+    return -1;
+}
+
+/* build table H from N code lengths: 0 complete, >0 incomplete, <0 over-subscribed */
+static int zl_build(int h, const unsigned char *length, int n) {
+    int offs[16], len, s, left;
+    for (len = 0; len <= 15; len++) zl_cnt[h * 16 + len] = 0;
+    for (s = 0; s < n; s++) zl_cnt[h * 16 + length[s]]++;
+    if (zl_cnt[h * 16] == n) return 0;
+    left = 1;
+    for (len = 1; len <= 15; len++) {
+        left <<= 1;
+        left -= zl_cnt[h * 16 + len];
+        if (left < 0) return left;
+    }
+    offs[1] = 0;
+    for (len = 1; len < 15; len++) offs[len + 1] = offs[len] + zl_cnt[h * 16 + len];
+    for (s = 0; s < n; s++) if (length[s]) zl_sym[h * 288 + offs[length[s]]++] = s;
+    return left;
+}
+
+static int zl_stored(void) {
+    long len, nlen;
+    zl_bb = 0; zl_bc = 0;
+    if (zl_at + 4 > zl_inlen) return -EIO;
+    len = zl_in[zl_at] | (zl_in[zl_at + 1] << 8);
+    nlen = zl_in[zl_at + 2] | (zl_in[zl_at + 3] << 8);
+    if (len != (~nlen & 0xFFFF)) return -EINVAL;
+    zl_at += 4;
+    if (!ZL_ROOM(len)) return -ENOSPC;
+    if (zl_at + len > zl_inlen) return -EIO;
+    while (len-- > 0) zl_out[zl_n++] = zl_in[zl_at++];
+    return 0;
+}
+
+static int zl_codes(void) {
+    int sym, len, ds;
+    long dist;
+    for (;;) {
+        sym = zl_decode(0);
+        if (sym < 0) return zl_short ? -EIO : -EINVAL;
+        if (sym < 256) {
+            if (!ZL_ROOM(1)) return -ENOSPC;
+            zl_out[zl_n++] = (unsigned char)sym;
+        } else if (sym == 256) {
+            return 0;
+        } else {
+            sym -= 257;
+            if (sym >= 29) return -EINVAL;
+            len = zl_lbase[sym] + zl_bits(zl_lext[sym]);
+            ds = zl_decode(1);
+            if (ds < 0) return zl_short ? -EIO : -EINVAL;
+            if (ds >= 30) return -EINVAL;
+            dist = zl_dbase[ds] + zl_bits(zl_dext[ds]);
+            if (zl_short) return -EIO;
+            if (dist > zl_n) return -EINVAL;
+            if (!ZL_ROOM(len)) return -ENOSPC;
+            while (len-- > 0) { zl_out[zl_n] = zl_out[zl_n - dist]; zl_n++; }
+        }
+    }
+}
+
+static int zl_fixed(void) {
+    unsigned char lengths[320];
+    int s;
+    for (s = 0; s < 144; s++) lengths[s] = 8;
+    for (; s < 256; s++) lengths[s] = 9;
+    for (; s < 280; s++) lengths[s] = 7;
+    for (; s < 288; s++) lengths[s] = 8;
+    zl_build(0, lengths, 288);
+    for (s = 0; s < 30; s++) lengths[s] = 5;
+    zl_build(1, lengths, 30);
+    return zl_codes();
+}
+
+static int zl_dynamic(void) {
+    unsigned char lengths[320];
+    int nlen, ndist, ncode, idx, err, sym, len, s;
+    nlen = zl_bits(5) + 257;
+    ndist = zl_bits(5) + 1;
+    ncode = zl_bits(4) + 4;
+    if (zl_short) return -EIO;
+    if (nlen > 286 || ndist > 30) return -EINVAL;
+    for (idx = 0; idx < 19; idx++) lengths[zl_corder[idx]] = idx < ncode ? (unsigned char)zl_bits(3) : 0;
+    if (zl_short) return -EIO;
+    if (zl_build(2, lengths, 19) != 0) return -EINVAL;
+    idx = 0;
+    while (idx < nlen + ndist) {
+        sym = zl_decode(2);
+        if (sym < 0) return zl_short ? -EIO : -EINVAL;
+        if (sym < 16) { lengths[idx++] = (unsigned char)sym; continue; }
+        len = 0;
+        if (sym == 16) {
+            if (idx == 0) return -EINVAL;
+            len = lengths[idx - 1];
+            sym = 3 + zl_bits(2);
+        } else if (sym == 17) sym = 3 + zl_bits(3);
+        else sym = 11 + zl_bits(7);
+        if (zl_short) return -EIO;
+        if (idx + sym > nlen + ndist) return -EINVAL;
+        while (sym-- > 0) lengths[idx++] = (unsigned char)len;
+    }
+    if (lengths[256] == 0) return -EINVAL;
+    err = zl_build(0, lengths, nlen);
+    if (err && (err < 0 || nlen != zl_cnt[0] + zl_cnt[1])) return -EINVAL;
+    err = zl_build(1, lengths + nlen, ndist);
+    if (err && (err < 0 || ndist != zl_cnt[16] + zl_cnt[17])) return -EINVAL;
+    s = zl_codes();
+    return s;
+}
+
+/* raw DEFLATE core; *USED = input bytes consumed */
+static long zl_raw(unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen, long *used) {
+    int last, type, err;
+    if (outlen) *outlen = 0;
+    if (used) *used = 0;
+    if (cap < 0 || inlen < 0 || (cap && !out) || (inlen && !in)) return -EINVAL;
+    zl_in = in; zl_inlen = inlen; zl_at = 0; zl_bb = 0; zl_bc = 0; zl_short = 0;
+    zl_out = out; zl_cap = cap; zl_n = 0;
+    do {
+        last = zl_bits(1);
+        type = zl_bits(2);
+        if (zl_short) { err = -EIO; break; }
+        err = type == 0 ? zl_stored() : (type == 1 ? zl_fixed() : (type == 2 ? zl_dynamic() : -EINVAL));
+        if (err) break;
+    } while (!last);
+    if (outlen) *outlen = zl_n;
+    if (used) *used = zl_at;
+    return err;
+}
+
+long zl_inflate(unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen) {
+    return zl_raw(out, cap, outlen, in, inlen, 0);
+}
+
+static unsigned long zl_crc32(const unsigned char *p, long n) {
+    unsigned long c;
+    long i;
+    int k;
+    if (!zl_crcok) {
+        for (i = 0; i < 256; i++) {
+            c = (unsigned long)i;
+            for (k = 0; k < 8; k++) c = (c & 1) ? (c >> 1) ^ 0xEDB88320UL : c >> 1;
+            zl_crct[i] = c;
+        }
+        zl_crcok = 1;
+    }
+    c = 0xFFFFFFFFUL;
+    for (i = 0; i < n; i++) c = zl_crct[(c ^ p[i]) & 255] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFUL;
+}
+
+long zl_gunzip(unsigned char *out, long cap, long *outlen, const unsigned char *in, long inlen) {
+    long at = 10, used, n, rc, flg, xl;
+    unsigned long got, want, size;
+    if (outlen) *outlen = 0;
+    if (inlen < 0 || (inlen && !in)) return -EINVAL;
+    if (inlen < 10) return -EIO;
+    if (in[0] != 0x1F || in[1] != 0x8B || in[2] != 8) return -EINVAL;
+    flg = in[3];
+    if (flg & 0xE0) return -EINVAL;
+    if (flg & 4) {
+        if (at + 2 > inlen) return -EIO;
+        xl = in[at] | (in[at + 1] << 8);
+        at += 2 + xl;
+        if (at > inlen) return -EIO;
+    }
+    if (flg & 8) { while (at < inlen && in[at]) at++; if (at >= inlen) return -EIO; at++; }
+    if (flg & 16) { while (at < inlen && in[at]) at++; if (at >= inlen) return -EIO; at++; }
+    if (flg & 2) { at += 2; if (at > inlen) return -EIO; }
+    rc = zl_raw(out, cap, &n, in + at, inlen - at, &used);
+    if (outlen) *outlen = n;
+    if (rc) return rc;
+    at += used;
+    if (at + 8 > inlen) return -EIO;
+    want = (unsigned long)in[at] | ((unsigned long)in[at + 1] << 8) | ((unsigned long)in[at + 2] << 16) | ((unsigned long)in[at + 3] << 24);
+    size = (unsigned long)in[at + 4] | ((unsigned long)in[at + 5] << 8) | ((unsigned long)in[at + 6] << 16) | ((unsigned long)in[at + 7] << 24);
+    got = zl_crc32(out, n);
+    if (got != want) return -EINVAL;
+    if ((unsigned long)n != size) return -EINVAL;
+    return 0;
+}
