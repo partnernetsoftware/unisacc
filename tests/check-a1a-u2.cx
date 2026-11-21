@@ -1,0 +1,83 @@
+/* tests/check-a1a-u2.cx -- A1a U2 pre-red contract check: __builtin_bswap16/32/64 (1 case: b05).
+ *
+ *   sh ./unisacc.com tests/check-a1a-u2.cx
+ *
+ * Compiles tests/a1a/cases/b05_bswap_pos.c with installed product, executes it, and checks stdout sha256
+ * and exit code against frozen tests/a1a/expect.tsv (zero gcc calls at runtime).
+ * Ends with A1A_U2<TAB>pass=P<TAB>fail=F; exits 0 iff fail == 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+
+static int passed, failed;
+
+static void ck(int ok, const char *name, const char *why) {
+    if (ok) passed++; else failed++;
+    sy_printf("%s\ta1a.u2.%s\t%s\n", ok ? "PASS" : "FAIL", name, why);
+}
+
+static int find_expect(const char *eb, long en, const char *sample, char *sha_out, size_t scap, int *rc_out) {
+    long i = 0, sl = (long)tx_len(sample, 128);
+    while (i < en) {
+        long a = i, b;
+        while (i < en && eb[i] != '\n') i++;
+        b = i; if (i < en) i++;
+        long t1 = a; while (t1 < b && eb[t1] != '\t') t1++;
+        if (t1 - a != sl || !tx_prefix(eb + a, sl, sample, sl)) continue;
+        long t2 = t1 + 1; while (t2 < b && eb[t2] != '\t') t2++;
+        long t3 = t2 + 1; while (t3 < b && eb[t3] != '\t') t3++;
+        long t4 = t3 + 1; while (t4 < b && eb[t4] != '\t') t4++;
+        long t5 = t4 + 1; while (t5 < b && eb[t5] != '\t') t5++;
+        if (t3 <= t2 + 1 || t5 >= b) return 0;
+        cx_fmt(sha_out, scap, "%.*s", (int)(t3 - (t2 + 1)), eb + t2 + 1);
+        long p = tx_find(eb + t5 + 1, b - (t5 + 1), "gcc_run_rc=", 11);
+        if (p < 0) return 0;
+        long q = t5 + 1 + p + 11;
+        int neg = 0, val = 0;
+        if (q < b && eb[q] == '-') { neg = 1; q++; }
+        while (q < b && eb[q] >= '0' && eb[q] <= '9') { val = val * 10 + (eb[q] - '0'); q++; }
+        *rc_out = neg ? -val : val;
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    size_t en = 0;
+    char *eb = cx_read("tests/a1a/expect.tsv", &en);
+    if (!eb) return 2;
+    char dir[4096], bin[4200], want_sha[80], got_sha[80], why[256];
+    int want_rc = -1;
+    if (cx_fmt(dir, sizeof dir, "%s/a1a-u2-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(dir)) { free(eb); return 2; }
+    if (!find_expect(eb, (long)en, "b05_bswap_pos.c", want_sha, sizeof want_sha, &want_rc)) {
+        ck(0, "b05_bswap_pos.c", "expect-missing");
+    } else {
+        cx_fmt(bin, sizeof bin, "%s/b05.bin", dir);
+        char *cav[] = {"sh", "./unisacc.com", "tests/a1a/cases/b05_bswap_pos.c", "-o", bin, 0}; /* lint:allow R1 compiles case with product */
+        np_result cr;
+        if (np_run(cav, ".", 0, 15, &cr, why, sizeof why) != 0 || cr.rc != 0) {
+            np_free(&cr);
+            ck(0, "b05_bswap_pos.c", "unimplemented-compile-fail");
+        } else {
+            np_free(&cr);
+            char *rav[] = {bin, 0};
+            np_result rr;
+            if (np_run(rav, ".", 0, 10, &rr, why, sizeof why) != 0) {
+                np_free(&rr);
+                ck(0, "b05_bswap_pos.c", "run-error");
+            } else {
+                cx_sha256_hex(rr.out ? rr.out : "", rr.outn, got_sha);
+                int ok = (rr.rc == want_rc && tx_eqz(got_sha, want_sha));
+                np_free(&rr);
+                ck(ok, "b05_bswap_pos.c", ok ? "match-expect" : "output-or-rc-mismatch");
+            }
+        }
+    }
+    cx_rmtree(dir);
+    free(eb);
+    sy_printf("A1A_U2\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
