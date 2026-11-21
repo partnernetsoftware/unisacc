@@ -170,6 +170,7 @@ cxmod 三源归一现状(事实来源:`tools/check-cxmod-tri.cx` 头注释与提
 - 权威源:`cx/cx0/plan.cx`(`CX0_COMPAT_BODY`,函数 `cx0_plan`)。`src/cxmod.c` 由 `cx0-extract` 从 plan.cx 逆投影生成,`--check` 判 EXACT(最近记录 bytes=73271),不手改。`cx/compiler/cxmod.cx`(`cxm_plan`)手工对齐。
 - `sh ./unisacc.com tools/check-cxmod-tri.cx`:同一批夹具经 plan.cx 与产品 cxmod.cx 真跑,比 rc 与拒绝文案;C 源随 plan.cx 计,不另编译;已知分叉输出具名 GAP,不记 PASS 也不记 FAIL。
 - `sh ./unisacc.com tools/cx0-diff.cx [-- --check|--pair A B|--out|--verify]`:三对源的 hunk 差异按六类归 (a)(b)(c)(d)(e)(f)(t);(e)(f) 为语义分叉(cxm_checkcalls 一族、上限 CXM_MAXU),其余为宿主差异;`--check` 断言无「其他」块;差异表 `build/cx0-three-source-diff.tsv`。设计背景见 prd_cx.md 10.5。
+- cx0 投影区命名规则(2026-11-21):`tools/cx0-extract.cx:31` 在从 `cx/cx0/plan.cx` 向 `cx/compiler/cxmod.cx` 投影时,会把行首 `static int cxm_*` 的 `static` 剥掉使其成为 `cx.compile` 的公开接口(触发 `TLIB_API_STALE` 要求 bump `cx.compile` 版本)。因此在 `cx/cx0/plan.cx` 的投影区内新增模块私有静态帮手时,一律用 `cxu_` 前缀(`static int cxu_*`),不得用 `cxm_` 前缀,除非确需导出为 `cx.compile` 公开接口。
 
 cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-cx-streamown.cx`,批次 `cx-streamown`):
 
