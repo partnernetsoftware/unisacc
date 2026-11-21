@@ -12,7 +12,7 @@
 
 ## 地图
 
-当前:0.0.87 已公开(冻结 F a7cd95024a,APE f6cb0143,Root 已升级),下一版 0.0.88(plans/v0.0.88.md,分支 v0.0.88 开发中)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
+当前:0.0.88 已公开(冻结 F 3038dc3e73,源构造 89debcb544,APE 0e028e7d,CI 44902485264,Root 已升级),下一版 0.0.89(plans/v0.0.89.md,分支 v0.0.89 开发中)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
 
 ```mermaid
 flowchart LR
@@ -72,6 +72,7 @@ flowchart LR
 
 ## 决定(别人必须遵守)
 
+- 0.0.88 已公开置 Latest 且 Root 已升级(2026-11-21 20:18 +0800,长期授权执行):决定:v0.0.88 已完成 release-exec 七步公开发布并置 Latest,本机 Root 已升级为 0.0.88 公开 APE;输入与终态身份:发布提交 X=60c5a4dba3826219a8b5ee26b42289e88ef9813f(main 相对 X 仅多 candidate-native.yml 的 macOS timeout 守卫修复 0090ca3614,产品输入零变化)、冻结提交 F=3038dc3e73afd983a41f94dbd11997e6c01f9888、源构造 89debcb544(SID e07fa5731199613a936e15c663368d0c4696491de092e0ced69e086f105f32f2,main 相对候选差 north-star-facts.tsv 与 ext/textx/json.cx 两文件且不进 build/core-closure.tsv)、APE 0e028e7de8dc1c4a5e6a5b3120e137daf8b2d3a8b3068d5af7f971a3c3a46854、严格证据 440/0/2(release/evidence/v0.0.88-strict-2026-11-21.tsv)、六格原生 CI run_id=44902485264(QUALIFIED 42/42 PASS,supersedes 44901447460)、Y1=0d63ceccd94fdad06aed8a54e212183488b664b7、公开读回 c47-1-readback PASS、Y2=4cbf2a5a535de6d8f520ae898edaaa2272e25749、证据索引 release/evidence/0.0.88/INDEX.tsv 与 artifacts-provenance.tsv。撤回与回滚办法(详见 release/evidence/0.0.88/rollback.txt,不删 tag 与 release、不 force push):(1) `gh -R partnernetsoftware/unisacc release edit v0.0.88 --draft=true` 且 `gh -R partnernetsoftware/unisacc release edit v0.0.87 --latest` 并读回核实 Latest=v0.0.87;(2) 在共享 main 前向撤销 `git revert --no-edit Y2 Y1 X` 并推 main;(3) 恢复本机 Root:从已验证备份 `~/.unisacc-root-backups/0.0.87-public/`(unisacc.com sha256=f6cb014376d7d4944c9a3f7a9252d156f7f32c08a2c0d5beb22f7098ae19e30e)经 `tools/install-ape.cx` 写回并核 `--version=unisacc 0.0.87`。
 - 所有者需求不得静默砍掉(项目所有者 2026-11-21 指出,编排者 cc 决定):决定:砍掉或顺延所有者提出的需求,必须在本文件决定区记一行(需求、原排期、新排期或砍掉、理由、日期),并在给所有者的回复里写明;只写在路线图"不做"行或风险节里不算告知。依据:内存安全线(plans/cx-modules.md CX4,2026-10-23)在 plans/roadmap-0.0.83-0.0.99.md:122 被列为该砍、在 plans/v0.0.85.md:59 与 :231 写进不做,本文件无任何记录。证据入口:plans/memory-safety.md 第 0 节。回滚:无(流程规则)。
 - 向 Rust 学习内存安全路线已重新编排(编排者 cc 2026-11-21):决定:路线权威为 plans/memory-safety.md(五期、六项采用门指标、基线);首期甲(采用门入表、棘轮、非产品单元试点)即日起作快车道工具,不占版本槽;乙期同为工具期;首个触产品输入的丙一期条件并入 0.0.95(K2 同类随行,入口门不过则不并入),丙二期起在 0.0.102 之后新增版号。门不过不占槽。回滚:恢复 roadmap-0.0.83-0.0.99.md:122 修订注之前的口径并在此记一行。
 - 0.0.87 首链起跑记账(2026-11-21 09:48:53 +0800,start 纪元 1795225733):决定:起 0.0.87 首链 REV=ee595061e7d24ccebd034e22769b66e41d5e2c46,输出目录 /tmp/unisacc-session-v087-chain1/ee595061e7d24ccebd034e22769b66e41d5e2c46,截止 deadline_s=5400(hard_s=6000),环境仅设 UNISACC_IDENT_HELPER=~/.cache/unisacc/ident-helper/identity-helper-real5,显式 cache-manager d34bee6c/0aae3fbc,真实句柄 guard=767840 pid=767841 pgid=767841。回滚:kill -TERM -767841 并移走输出目录。
