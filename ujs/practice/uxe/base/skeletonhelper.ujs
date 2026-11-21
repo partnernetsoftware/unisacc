@@ -1,0 +1,113 @@
+struct SkeletonHelper {
+  positions: u32;
+  colors: u32;
+  pairs: u32;
+  count: u32;
+  matrix: u32;
+  positionVersion: u32;
+  active: u32;
+}
+
+// Each entry addresses a child or parent world matrix in segment order.
+native function skeleton_helper_points(positions:i64,pairs:i64,count:i64,inv:i64,write:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let bone=ux_u32(pairs+i*4);
+    if(!helper_buffer_span(bone,128,8) || !helper_buffer_disjoint(positions,count*12,bone,128)) { return 0-1; }
+    if(inv>=0) {
+      let x=ux_f64(bone+96);
+      let y=ux_f64(bone+104);
+      let z=ux_f64(bone+112);
+      let px=ux_f64(inv)*x+ux_f64(inv+32)*y+ux_f64(inv+64)*z+ux_f64(inv+96);
+      let py=ux_f64(inv+8)*x+ux_f64(inv+40)*y+ux_f64(inv+72)*z+ux_f64(inv+104);
+      let pz=ux_f64(inv+16)*x+ux_f64(inv+48)*y+ux_f64(inv+80)*z+ux_f64(inv+112);
+      if(!helper_f32_fits(px) || !helper_f32_fits(py) || !helper_f32_fits(pz)) { return 0-1; }
+      if(write) {
+        let a=ux_f32_put(positions+i*12,px);
+        let b=ux_f32_put(positions+i*12+4,py);
+        let c=ux_f32_put(positions+i*12+8,pz);
+      }
+    }
+    i=i+1;
+  }
+  return positions;
+}
+
+// Pairs are the bone-to-bone edges in caller traversal order, child first.
+native function SkeletonHelper_init(helper:i64,positions:i64,colors:i64,root:i64,pairs:i64,edges:i64) i64 {
+  if(edges<0 || edges>262144 || !helper_buffer_span(helper,SkeletonHelper.size,4) ||
+     !helper_buffer_span(root,128,8)) { return 0-1; }
+  let count=edges*2;
+  let bytes=count*12;
+  let pairBytes=count*4;
+  if(!helper_buffer_span(positions,bytes,4) || !helper_buffer_span(colors,bytes,4) ||
+     !helper_buffer_span(pairs,pairBytes,4) ||
+     !helper_buffer_disjoint(helper,SkeletonHelper.size,positions,bytes) ||
+     !helper_buffer_disjoint(helper,SkeletonHelper.size,colors,bytes) ||
+     !helper_buffer_disjoint(helper,SkeletonHelper.size,root,128) ||
+     !helper_buffer_disjoint(helper,SkeletonHelper.size,pairs,pairBytes) ||
+     !helper_buffer_disjoint(positions,bytes,colors,bytes) ||
+     !helper_buffer_disjoint(positions,bytes,root,128) ||
+     !helper_buffer_disjoint(positions,bytes,pairs,pairBytes) ||
+     !helper_buffer_disjoint(colors,bytes,root,128) ||
+     !helper_buffer_disjoint(colors,bytes,pairs,pairBytes) ||
+     skeleton_helper_points(positions,pairs,count,0-1,0)<0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let bone=ux_u32(pairs+i*4);
+    if(!helper_buffer_disjoint(colors,bytes,bone,128) ||
+       !helper_buffer_disjoint(helper,SkeletonHelper.size,bone,128)) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let dst=i*12;
+    let a=ux_f32_put(positions+dst,0.0);
+    let b=ux_f32_put(positions+dst+4,0.0);
+    let c=ux_f32_put(positions+dst+8,0.0);
+    let r=ux_f32_put(colors+dst,0.0);
+    let g=ux_f32_put(colors+dst+4,0.0+i%2);
+    let bl=ux_f32_put(colors+dst+8,1.0-i%2);
+    i=i+1;
+  }
+  let p=ux_u32_put(helper+SkeletonHelper.positions,positions);
+  let c=ux_u32_put(helper+SkeletonHelper.colors,colors);
+  let m=ux_u32_put(helper+SkeletonHelper.matrix,root);
+  let l=ux_u32_put(helper+SkeletonHelper.pairs,pairs);
+  let n=ux_u32_put(helper+SkeletonHelper.count,count);
+  let v=ux_u32_put(helper+SkeletonHelper.positionVersion,0);
+  let a=ux_u32_put(helper+SkeletonHelper.active,1);
+  return helper;
+}
+
+// rootInverse is the caller's refreshed inverse of the root world matrix.
+native function SkeletonHelper_update(helper:i64,rootInverse:i64) i64 {
+  if(!helper_buffer_span(helper,SkeletonHelper.size,4) || ux_u32(helper+SkeletonHelper.active)!=1 ||
+     !helper_buffer_span(rootInverse,128,8)) { return 0-1; }
+  let positions=ux_u32(helper+SkeletonHelper.positions);
+  let colors=ux_u32(helper+SkeletonHelper.colors);
+  let pairs=ux_u32(helper+SkeletonHelper.pairs);
+  let root=ux_u32(helper+SkeletonHelper.matrix);
+  let count=ux_u32(helper+SkeletonHelper.count);
+  let version=ux_u32(helper+SkeletonHelper.positionVersion);
+  let bytes=count*12;
+  let pairBytes=count*4;
+  if(count>524288 || count%2!=0 || version==4294967295 ||
+     !helper_buffer_span(positions,bytes,4) || !helper_buffer_span(pairs,pairBytes,4) ||
+     !helper_buffer_disjoint(positions,bytes,helper,SkeletonHelper.size) ||
+     !helper_buffer_disjoint(positions,bytes,colors,bytes) || !helper_buffer_disjoint(positions,bytes,root,128) ||
+     !helper_buffer_disjoint(positions,bytes,rootInverse,128) ||
+     !helper_buffer_disjoint(positions,bytes,pairs,pairBytes) ||
+     !helper_buffer_disjoint(helper,SkeletonHelper.size,rootInverse,128) ||
+     skeleton_helper_points(positions,pairs,count,rootInverse,0)<0) { return 0-1; }
+  let p=skeleton_helper_points(positions,pairs,count,rootInverse,1);
+  let v=ux_u32_put(helper+SkeletonHelper.positionVersion,version+1);
+  return helper;
+}
+
+native function SkeletonHelper_dispose(helper:i64) i64 {
+  if(!helper_buffer_span(helper,SkeletonHelper.size,4) ||
+     ux_u32(helper+SkeletonHelper.active)!=1) { return 0-1; }
+  let a=ux_u32_put(helper+SkeletonHelper.active,0);
+  return 0;
+}
