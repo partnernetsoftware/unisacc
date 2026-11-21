@@ -1,0 +1,86 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { REVISION, SphereGeometry } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const uuid = "sphere-5", name = 'orb "ice"';
+const bad = '{"radius":"bad"}';
+const minimum = '{"widthSegments":0.5,"heightSegments":-1}';
+const digest = bytes => bytes.reduce((hash, value) => (hash * 131 + value) % 16777213, 0);
+
+function surface(sphere) {
+  const p = sphere.parameters;
+  const { position, normal, uv } = sphere.attributes;
+  return [position.count, sphere.index.count, p.radius, p.widthSegments, p.heightSegments,
+    p.phiStart, p.phiLength, p.thetaStart, p.thetaLength, position.getY(0), position.getZ(0),
+    normal.getY(0), uv.getX(uv.count - 1), sphere.index.getX(0),
+    position.getY(position.count - 1), position.getZ(position.count - 1)];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const params = new URLSearchParams(location.search);
+  const wasm = await (await fetch("file://" + params.get("wasm"))).arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(wasm);
+  const api = instance.exports;
+  const base = Number(api.uxe_sphere_public(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 100000);
+  memory.set(encoder.encode(uuid), 6000);
+  memory.set(encoder.encode(name), 6016);
+  memory.set(encoder.encode(bad), 5760);
+  memory.set(encoder.encode("{}"), 5800);
+  memory.set(encoder.encode(minimum), 5840);
+  const length = Number(api.uxe_sphere_public(1n, BigInt(params.get("mutate"))));
+  if (length <= 0) throw new Error("native sphere status " + length);
+  const raw = memory.subarray(4096, 4096 + length);
+  const parsed = JSON.parse(decoder.decode(raw));
+  if (parsed.type !== "SphereGeometry" || parsed.name !== name || parsed.uuid !== uuid || "data" in parsed) {
+    throw new Error("sphere parameter envelope");
+  }
+  const actual = new Float64Array(api.memory.buffer, base + 6160, 35);
+
+  const reference = new SphereGeometry(2.5, 4.5, 2.5, 0.5, 1.5, 0.25, 1.25);
+  reference.uuid = uuid;
+  reference.name = name;
+  const doc = reference.toJSON();
+  const round = SphereGeometry.fromJSON(doc);
+  const defaults = SphereGeometry.fromJSON({});
+  const clamped = SphereGeometry.fromJSON(JSON.parse(minimum));
+  const targetTrace = [], trace = [];
+  let correctTarget = true;
+  function listenerB() { trace.push(82); }
+  reference.addEventListener("dispose", function(event) {
+    correctTarget &&= event.target === reference && this === reference;
+    trace.push(41);
+    reference.removeEventListener("dispose", listenerB);
+  });
+  reference.addEventListener("dispose", listenerB);
+  round.addEventListener("dispose", () => targetTrace.push(61));
+  const copied = round.copy(reference);
+  const clone = reference.clone();
+  const a = reference.attributes.position, b = copied.attributes.position, c = clone.attributes.position;
+  const independent = Number(copied === round && a.array !== b.array && a.array !== c.array &&
+    b.array !== c.array && copied.parameters !== reference.parameters && clone.parameters !== reference.parameters);
+  reference.parameters.thetaLength = 3;
+  a.setY(0, 9);
+  reference.dispose();
+  const firstEvents = trace.splice(0);
+  reference.dispose();
+  const nextEvent = trace.shift();
+  copied.dispose();
+  clone.dispose();
+  result.textContent = JSON.stringify([digest(raw), ...actual,
+    digest(encoder.encode(JSON.stringify(doc))), ...surface(round),
+    defaults.attributes.position.count, defaults.index.count,
+    clamped.attributes.position.count, clamped.index.count,
+    clamped.parameters.widthSegments, clamped.parameters.heightSegments, independent,
+    copied.parameters.thetaLength, clone.parameters.thetaLength, b.getY(0), c.getY(0),
+    firstEvents[0] * 100 + firstEvents[1], Number(correctTarget), nextEvent,
+    targetTrace.shift(), trace.length]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
