@@ -241,7 +241,8 @@
 - LOD 场景分派 | G-ray 选定对象的面命中与层过滤 | Mesh 场景拾取及 LOD 拾取目标。
 - ~~SkinnedMesh 拾取 | G-ray 骨骼变形后命中和面索引 | Mesh 拾取与 M7 蒙皮。~~ 八项通过，跳过骨骼位移从命中变为未命中，旧蒙皮与两种绑定各五项通过。
 - ~~OrbitControls 透视旋转与滚轮 | G-ray r160 插件事件、阻尼、缩放及指针归属 | 输入 ABI、相机。~~ 11 项通过，反向拖动从 -10 变为 10 转红。
-- OrbitControls 完整输入接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏、正交和约束 | 透视旋转与滚轮、输入 ABI。
+- ~~OrbitControls 透视与正交平移 | G-ray 屏幕和地平模式、视口比例及阻尼 | 透视旋转与滚轮。~~ 九项通过，误把屏幕模式当作地平模式时 Y 由 4 变为 0。
+- OrbitControls 完整输入接线 | G-ray 真时钟 CDP 拖动、平移、捏合、触屏、正交缩放和约束 | 平移、旋转与滚轮、输入 ABI。
 - MapControls | G-ray 旋转和平移映射 | OrbitControls。
 - ~~PointerLockControls 事件与相对运动 | G-ray r160 事件、俯仰限制、相对位移及锁定退出 | 输入 ABI。~~ 12 项通过，反向鼠标事件使朝向 X 变号，反例转红。
 - PointerLockControls 实浏览器锁定接线 | CDP 锁定、退出与无权限事件 | 事件与相对运动、宿主锁定 ABI。
