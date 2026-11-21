@@ -1,0 +1,49 @@
+struct AudioSpectrumCache {
+  frame: u32;
+  window: u32;
+  magnitudes: u32;
+  valid: u32;
+}
+
+native function AudioAnalyser_resetSpectrum(cache:i64) i64 {
+  if(!audio_play_span(cache,AudioSpectrumCache.size,4)) { return 0-1; }
+  let saved=ux_u32_put(cache+AudioSpectrumCache.valid,0);
+  return cache;
+}
+
+// The frame argument is an audio render stamp, shared by all readers of
+// one render quantum. One frame can consume smoothing only once.
+native function AudioAnalyser_spectrumFrame(state:i64,cache:i64,history:i64,work:i64,space:i64,frame:i64,smoothing:f64) i64 {
+  if(frame<0 || frame>4294967295 || !audio_window_live(state) ||
+     !audio_play_span(cache,AudioSpectrumCache.size,4)) { return 0-1; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  if(audio_play_overlap(cache,AudioSpectrumCache.size,state,AudioAnalyserWindow.size) ||
+     audio_play_overlap(cache,AudioSpectrumCache.size,samples,size*4) ||
+     audio_play_overlap(cache,AudioSpectrumCache.size,history,size*4) ||
+     audio_play_overlap(cache,AudioSpectrumCache.size,work,size*16)) { return 0-1; }
+  if(ux_u32(cache+AudioSpectrumCache.valid)!=0) {
+    let savedFrame=ux_u32(cache+AudioSpectrumCache.frame);
+    if(ux_u32(cache+AudioSpectrumCache.window)!=state ||
+       ux_u32(cache+AudioSpectrumCache.magnitudes)!=history || frame<savedFrame) { return 0-2; }
+    if(frame==savedFrame) { return 0; }
+  }
+  let count=AudioAnalyser_spectrum(state,history,work,space,smoothing);
+  if(count<0) { return count; }
+  let a=ux_u32_put(cache+AudioSpectrumCache.frame,frame);
+  let b=ux_u32_put(cache+AudioSpectrumCache.window,state);
+  let c=ux_u32_put(cache+AudioSpectrumCache.magnitudes,history);
+  let d=ux_u32_put(cache+AudioSpectrumCache.valid,1);
+  return count;
+}
+
+native function AudioAnalyser_averageFrequency(out:i64,bins:i64) f64 {
+  if(bins<16 || bins>16384 || !audio_window_size(bins*2) || !audio_play_span(out,bins,1)) { return 0.0-1.0; }
+  let total=0;
+  let i=0;
+  while(i<bins) {
+    total=total+ux_u8(out+i);
+    i=i+1;
+  }
+  return (0.0+total)/(0.0+bins);
+}
