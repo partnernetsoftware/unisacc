@@ -200,6 +200,10 @@ static int capability_contains(const char *path,const char *first,const char *se
     return ok;
 }
 
+static int scalar_attribute(const char *name) {
+    return one_of(name,"|BufferAttribute|Uint8BufferAttribute|Int8BufferAttribute|Uint8ClampedBufferAttribute|Uint16BufferAttribute|Int16BufferAttribute|Uint32BufferAttribute|Int32BufferAttribute|Float16BufferAttribute|Float32BufferAttribute|Float64BufferAttribute|");
+}
+
 static int capability_evidence(const Row *r, const char *methods, const char *evidence) {
     char stem[100], path[220], proof[145];
     unsigned char *source_bytes=0,*extra=0;
@@ -689,6 +693,18 @@ static int capability_evidence(const Row *r, const char *methods, const char *ev
             capability_contains("ujs/tests/propertymixer-bound-anim.cx","G_ANIM PropertyMixer bound","--mutate") &&
             capability_contains("ujs/practice/uxe/test/propertymixer-bound-r160.html","new PropertyMixer(","restoreOriginalState()");
     }
+    if(r->lane=='A' && scalar_attribute(r->name)) {
+        const char *test="ujs/tests/bufferattribute-json-linked.cx";
+        tx_snprintf(proof,sizeof proof,"function %s_new(",r->name);
+        return starts(evidence,"G-struct bufferattribute-json-linked.cx") &&
+            contains(methods,"toJSON,fromJSON") &&
+            (tx_eqz(r->name,"BufferAttribute") ||
+             capability_contains("ujs/practice/uxe/base/bufferattribute-family-classes.ujs",proof,"Attribute_init(")) &&
+            capability_contains("ujs/practice/uxe/base/bufferattribute-family-json.ujs","function Attribute_toJSON(","json_typed_value(") &&
+            capability_contains("ujs/practice/uxe/base/bufferattribute-family-json-read.ujs","function Attribute_fromJSON(","geometry_json_load_view(") &&
+            capability_contains(test,"--mutate","r160_wait_ref(") &&
+            capability_contains("ujs/practice/uxe/test/bufferattribute-json-linked-base.ujs","Attribute_fromJSON(","Attribute_toJSON(decoded,");
+    }
     if(r->lane=='A' && tx_eqz(r->name,"PlaneHelper")) {
         const char *fields="ujs/practice/uxe/base/helper-family-plane-fields.ujs";
         return starts(evidence,"G-struct helper-family-plane-fields.cx") &&
@@ -953,7 +969,20 @@ static int method_mapping(const Row *r,char *out,int cap) {
         const char *end=at;
         while(identifier(*end)) end++;
         if(end==at || (*end && *end!=',')) return 1;
-        int n=tx_snprintf(out+used,cap-used,"%s%s_%.*s",used?",":"",r->name,(int)(end-at),at);
+        const char *prefix=r->name;
+        if(r->lane=='A' && scalar_attribute(r->name)) {
+            if(tx_same(at,end-at,"toJSON",6) || tx_same(at,end-at,"fromJSON",8)) prefix="Attribute";
+            else if(!tx_same(at,end-at,"init",4)) prefix="BufferAttribute";
+            else if(!tx_eqz(r->name,"BufferAttribute")) {
+                int n=tx_snprintf(out+used,cap-used,"%s%s_new",used?",":"",r->name);
+                if(n<1 || n>=cap-used) return 1;
+                used+=n;
+                if(!*end) return 0;
+                at=end+1;
+                continue;
+            }
+        }
+        int n=tx_snprintf(out+used,cap-used,"%s%s_%.*s",used?",":"",prefix,(int)(end-at),at);
         if(n<1 || n>=cap-used) return 1;
         used+=n;
         if(!*end) return 0;

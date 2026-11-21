@@ -1,0 +1,136 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int attribute_compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&size);
+    printf("ATTRIBUTE_JSON_LINK %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && size && out) printf("%.*s",(int)size,out);
+    mm_free(out);
+    return rc;
+}
+
+static int attribute_base(const char *wasm,int prepare,int check) {
+    const char *sources[]={
+        "ujs/practice/uxe/test/bufferattribute-json-linked-abi.ujs",
+        "ujs/practice/uxe/base/geometry-load-layout.ujs",
+        "ujs/practice/uxe/base/object-json-tokens.ujs",
+        "ujs/practice/uxe/base/datautils.ujs",
+        "ujs/practice/uxe/base/json-bytes.ujs",
+        "ujs/practice/uxe/base/bufferattribute.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-state.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-classes.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-json.ujs",
+        "ujs/practice/uxe/base/json-read.ujs",
+        "ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/loaderutils.ujs",
+        "ujs/practice/uxe/base/json-string-decode.ujs",
+        "ujs/practice/uxe/base/loader-json.ujs",
+        "ujs/practice/uxe/base/geometry-json-load.ujs",
+        "ujs/practice/uxe/base/bufferattribute-family-json-read.ujs",
+        "ujs/practice/uxe/test/bufferattribute-json-linked-base.ujs",
+        0
+    };
+    const char *cache=sy_env("UXE_ATTRIBUTE_JSON_CACHE");
+    if(!cache || !cache[0]) {
+        printf("ATTRIBUTE_JSON_LINK cache=missing env=UXE_ATTRIBUTE_JSON_CACHE 基座缓存缺失：先运行准备步骤 --prepare\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(sources,key)) {
+        printf("ATTRIBUTE_JSON_LINK cache=key_error\n");
+        return 1;
+    }
+    int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(len<0 || len>=(int)sizeof record) return 2;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("ATTRIBUTE_JSON_LINK cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("ATTRIBUTE_JSON_LINK cache=missing key=%s 基座缓存缺失：先运行准备步骤 --prepare\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("ATTRIBUTE_JSON_LINK cache=refused rc=%d key=%s\n",rc,key);
+        return 1;
+    }
+    char *args[24]={"./ujs/ujs2wasm.com"};
+    int n=0;
+    while(sources[n]) { args[n+1]=(char *)sources[n]; n++; }
+    args[n+1]="-o";
+    args[n+2]=(char *)wasm;
+    if(attribute_compile(args,"base_prepare",50)) return 1;
+    if(check) return wasm_test_cache_verify(wasm,sha);
+    return wasm_test_cache_write(cache,record,key,wasm);
+}
+
+static int g_attribute_prepare(int check) {
+    char dir[256],wasm[320];
+    if(sy_mkdtemp("/tmp","uxe-attribute-prepare-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    const long start=sy_now_ms();
+    int rc=attribute_base(wasm,1,check);
+    if(sy_remove_all(dir)) rc=1;
+    printf("ATTRIBUTE_JSON_LINK prepare check=%d ms=%ld failed=%d\n",check,sy_now_ms()-start,rc!=0);
+    return rc;
+}
+
+static const char *arrays[]={
+    "Float32Array","Uint8Array","Int8Array","Uint8ClampedArray","Uint16Array","Int16Array",
+    "Uint32Array","Int32Array","Uint16Array","Float32Array","Float64Array",
+};
+static double json_gold(int kind) {
+    char text[350];
+    const char *values=kind==8?"15360,49152,0,32768":"1,2,3,4";
+    const int n=tx_snprintf(text,sizeof text,
+        "{\"itemSize\":2,\"type\":\"%s\",\"array\":[%s],\"normalized\":%s%s%s}",
+        arrays[kind],values,kind%2?"true":"false",kind==0||kind==10?"":",\"name\":\"tag\\\"\"",
+        kind%2?",\"usage\":35048":"");
+    uint64_t hash=0;
+    for(int i=0;i<n;i++) hash=(hash*131+(unsigned char)text[i])%16777213;
+    return (double)hash;
+}
+
+int main(int argc,char **argv) {
+    if(argc>1 && tx_eqz(argv[1],"--prepare")) {
+        if(argc==2) return g_attribute_prepare(0);
+        if(argc==3 && tx_eqz(argv[2],"--check")) return g_attribute_prepare(1);
+        return 2;
+    }
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],base[320],probe[320],page[320],url[360];
+    if(sy_mkdtemp("/tmp","uxe-attribute-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":"");
+    const char *fixture="ujs/practice/uxe/test/bufferattribute-json-linked-wasm.html";
+    char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/bufferattribute-json-linked-probe.ujs","-o",probe,0};
+    double ref[16],actual[11];
+    int failed=attribute_base(base,0,0) || attribute_compile(args,"probe",6) ||
+        sy_copy(fixture,page,0600) || r160_wait_ref("bufferattribute-family",ref,16,dir) ||
+        r160_wait_read(url,"#wasm-cases",actual,11,dir);
+    if(!failed) for(int i=0;i<11;i++) {
+        double gold=json_gold(i);
+        if(actual[i]!=gold || ref[i+5]!=gold) {
+            printf("ATTRIBUTE_JSON_LINK kind=%d actual=%g r160=%g gold=%g\n",i,actual[i],ref[i+5],gold);
+            failed++;
+        }
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT BufferAttribute class JSON linked cases=11 failed=%d\n",failed);
+    return failed!=0;
+}

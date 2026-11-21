@@ -1,0 +1,35 @@
+// The destination arena is caller-owned scratch until this returns a state.
+native function Attribute_fromJSON(input:i64,end:i64,arena:i64,limit:i64,scratch:i64,kind:i64) i64 {
+  if(kind<1 || kind>10 || arena%8!=0 || limit-arena<352 ||
+     !baf_span(arena,limit-arena) || end<=input || !baf_span(input,end-input) ||
+     !baf_span(scratch,120) || !baf_disjoint(input,end-input,arena,limit-arena) ||
+     !baf_disjoint(scratch,120,arena,limit-arena) || !baf_disjoint(scratch,120,input,end-input)) { return 0-1; }
+  let root=json_space(input,end);
+  let close=json_value_end(root,end);
+  if(root<0 || ux_u8(root)!=123 || close<0 || json_space(close,end)!=end) { return 0-1; }
+  let ranges=arena+BufferAttributeFamilyState.size;
+  let name=ranges+8;
+  let view=name+256;
+  let nameField=geometry_json_field(root,close,scratch,ObjectJsonToken.nameField,2,4);
+  let nameBytes=0;
+  if(nameField>=0) {
+    nameBytes=Json_decodeString(nameField,close,name,256);
+    if(nameBytes<0) { return 0-1; }
+  }
+  let after=geometry_json_load_view(root,close,scratch,view,limit,0);
+  if(after<0) { return 0-1; }
+  let storageKind=kind;
+  if(kind==8) { storageKind=4; }
+  if(ux_u32(view+BufferAttribute.componentType)!=storageKind) { return 0-1; }
+  let usage=ux_u32(view+BufferAttribute.usage);
+  let count=ux_u32(view+BufferAttribute.count);
+  let size=ux_u32(view+BufferAttribute.itemSize);
+  let normalized=ux_u32(view+BufferAttribute.normalized);
+  let zero=ux_u32_put(ranges,0);
+  let attr=Attribute_init(arena,view,view+BufferAttribute.size,count,size,kind,normalized,ranges);
+  if(attr<0) { return 0-1; }
+  let mode=BufferAttribute_setUsage(attr,usage);
+  let named=Attribute_setName(arena,name,nameBytes);
+  if(mode<0 || named<0) { return 0-1; }
+  return arena;
+}
