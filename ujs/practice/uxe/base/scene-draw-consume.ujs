@@ -1,0 +1,204 @@
+struct SceneConsumePlan {
+  draws: u32;
+  count: u32;
+  bindings: u32;
+  bindingCount: u32;
+  vertices: u32;
+  vertexCapacity: u32;
+}
+
+struct SceneConsumeBinding {
+  geometry: u32;
+  material: u32;
+  stream: u32;
+  shader: u32;
+  textured: u32;
+}
+
+struct SceneConsumeStats {
+  draws: u32;
+  triangles: u32;
+  geometries: u32;
+  materials: u32;
+  textures: u32;
+  textureDraws: u32;
+  commands: u32;
+}
+
+native function scene_consume_find(draw:i64,rows:i64,count:i64) i64 {
+  let geometry=ux_u32(draw+SceneDrawItem.geometry);
+  let material=ux_u32(draw+SceneDrawItem.material);
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    let row=rows+mid*SceneConsumeBinding.size;
+    let g=ux_u32(row+SceneConsumeBinding.geometry);
+    let m=ux_u32(row+SceneConsumeBinding.material);
+    if(g<geometry || (g==geometry && m<material)) { lo=mid+1; }
+    else { hi=mid; }
+  }
+  if(lo>=count) { return 0-1; }
+  let row=rows+lo*SceneConsumeBinding.size;
+  if(ux_u32(row+SceneConsumeBinding.geometry)!=geometry ||
+     ux_u32(row+SceneConsumeBinding.material)!=material) { return 0-1; }
+  return row;
+}
+
+native function scene_consume_input(at:i64,bytes:i64,packet:i64,cap:i64,plan:i64,stats:i64) i64 {
+  let vertices=ux_u32(plan+SceneConsumePlan.vertices);
+  let max=ux_u32(plan+SceneConsumePlan.vertexCapacity);
+  return gpu_draw_range(at,bytes,packet,cap) &&
+    scene_render_readable(at,bytes,vertices,max*28,stats,SceneConsumeStats.size);
+}
+
+native function scene_consume_texture(binding:i64,vertices:i64,size:i64,packet:i64,cap:i64,stats:i64) i64 {
+  let texture=ux_u32(binding+SceneConsumeBinding.textured);
+  if(texture==0) { return 0; }
+  if(!gpu_draw_range(texture,SceneTextureDraw.size,packet,cap) || texture%4!=0 ||
+     !scene_render_readable(texture,SceneTextureDraw.size,vertices,size,stats,SceneConsumeStats.size) ||
+     ux_u32(texture+SceneTextureDraw.stream)!=ux_u32(binding+SceneConsumeBinding.stream) ||
+     ux_u32(texture+SceneTextureDraw.shader)!=ux_u32(binding+SceneConsumeBinding.shader)) { return 0-1; }
+  let source=ux_u32(texture+SceneTextureDraw.texture);
+  if(source==0 || !gpu_draw_range(source,GpuTextureSource.size,packet,cap) ||
+     !scene_render_readable(source,GpuTextureSource.size,vertices,size,stats,SceneConsumeStats.size)) { return 0-1; }
+  let w=ux_u32(source+GpuTextureSource.width);
+  let h=ux_u32(source+GpuTextureSource.height);
+  let stream=ux_u32(binding+SceneConsumeBinding.stream);
+  let count=ux_u32(stream+SceneDrawStream.vertexCount);
+  let start=ux_u32(texture+SceneTextureDraw.uv);
+  let uvBytes=(count-1)*ux_u32(texture+SceneTextureDraw.uvStride)+8;
+  let rgba=ux_u32(source+GpuTextureSource.rgba);
+  if(w==0 || h==0 || w>4096 || h>4096 || !gpu_draw_range(rgba,w*h*4,packet,cap) ||
+     !gpu_draw_range(start,uvBytes,packet,cap) ||
+     !scene_render_readable(start,uvBytes,vertices,size,stats,SceneConsumeStats.size) ||
+     !scene_render_readable(rgba,w*h*4,vertices,size,stats,SceneConsumeStats.size)) { return 0-1; }
+  return source;
+}
+
+native function scene_consume_ready(draw:i64,binding:i64,packet:i64,cap:i64,plan:i64,stats:i64) i64 {
+  let stream=ux_u32(binding+SceneConsumeBinding.stream);
+  let shader=ux_u32(binding+SceneConsumeBinding.shader);
+  let vertices=ux_u32(plan+SceneConsumePlan.vertices);
+  let max=ux_u32(plan+SceneConsumePlan.vertexCapacity);
+  if(!scene_gpu_stage_safe(draw,binding,vertices,max*28,max) ||
+     !scene_consume_input(stream,SceneDrawStream.size,packet,cap,plan,stats) ||
+     !scene_consume_input(shader,GpuShaderSource.size,packet,cap,plan,stats)) { return 0-1; }
+  let length=(ux_u32(stream+SceneDrawStream.vertexCount)-1)*ux_u32(stream+SceneDrawStream.stride)+12;
+  if(!scene_consume_input(ux_u32(stream+SceneDrawStream.positions),length,packet,cap,plan,stats) ||
+     !scene_consume_input(ux_u32(stream+SceneDrawStream.color),16,packet,cap,plan,stats) ||
+     !scene_consume_input(ux_u32(stream+SceneDrawStream.viewProjection),128,packet,cap,plan,stats) ||
+     !scene_consume_input(ux_u32(draw+SceneDrawItem.worldMatrix),128,packet,cap,plan,stats) ||
+     !scene_consume_input(ux_u32(shader+GpuShaderSource.vertex),ux_u32(shader+GpuShaderSource.vertexBytes),packet,cap,plan,stats) ||
+     !scene_consume_input(ux_u32(shader+GpuShaderSource.fragment),ux_u32(shader+GpuShaderSource.fragmentBytes),packet,cap,plan,stats)) { return 0-1; }
+  return scene_consume_texture(binding,vertices,max*28,packet,cap,stats);
+}
+
+// Consume Scene_renderList rows in order. Bindings are sorted and unique by
+// geometry/material. Pass 0 is opaque, pass 2 is source-over transparent;
+// transmissive pass 1 requires a different producer/consumer contract.
+native function SceneGpu_consume(packet:i64,cap:i64,plan:i64,stats:i64) i64 {
+  if(gpu_packet_slot(packet,cap,0)<0 || !scene_render_span(plan,SceneConsumePlan.size,4) ||
+     !scene_render_span(stats,SceneConsumeStats.size,4) || !gpu_draw_range(stats,SceneConsumeStats.size,packet,cap)) { return 0-1; }
+  let draws=ux_u32(plan+SceneConsumePlan.draws);
+  let count=ux_u32(plan+SceneConsumePlan.count);
+  let rows=ux_u32(plan+SceneConsumePlan.bindings);
+  let total=ux_u32(plan+SceneConsumePlan.bindingCount);
+  let vertices=ux_u32(plan+SceneConsumePlan.vertices);
+  let max=ux_u32(plan+SceneConsumePlan.vertexCapacity);
+  let oldCount=ux_u32(packet+GpuPacket.commands);
+  let oldBytes=ux_u32(packet+GpuPacket.bytes);
+  if(count>256-oldCount || total>256 || max<3 || max>2340 || draws%4!=0 || rows%4!=0 || vertices%4!=0 ||
+     !gpu_draw_range(vertices,max*28,packet,cap) ||
+     scene_render_overlap(vertices,max*28,stats,SceneConsumeStats.size) ||
+     !scene_consume_input(plan,SceneConsumePlan.size,packet,cap,plan,stats) ||
+     !scene_consume_input(draws,count*SceneDrawItem.size,packet,cap,plan,stats) ||
+     !scene_consume_input(rows,total*SceneConsumeBinding.size,packet,cap,plan,stats)) { return 0-1; }
+  let prevG=0;
+  let prevM=0;
+  let i=0;
+  while(i<total) {
+    let row=rows+i*SceneConsumeBinding.size;
+    let g=ux_u32(row+SceneConsumeBinding.geometry);
+    let m=ux_u32(row+SceneConsumeBinding.material);
+    if(g==0 || m==0 || g<prevG || (g==prevG && m<=prevM)) { return 0-1; }
+    prevG=g;
+    prevM=m;
+    i=i+1;
+  }
+
+  let transparent=0;
+  let triangles=0;
+  let geometries=0;
+  let materials=0;
+  let textures=0;
+  let textureDraws=0;
+  i=0;
+  while(i<count) {
+    let draw=draws+i*SceneDrawItem.size;
+    let pass=ux_u32(draw+SceneDrawItem.pass);
+    let binding=scene_consume_find(draw,rows,total);
+    if(binding<0 || (pass!=0 && pass!=2) || pass<transparent) { return 0-2; }
+    let texture=scene_consume_ready(draw,binding,packet,cap,plan,stats);
+    if(texture<0) { return texture; }
+    transparent=pass;
+    let stream=ux_u32(binding+SceneConsumeBinding.stream);
+    triangles=triangles+ux_u32(stream+SceneDrawStream.vertexCount)/3;
+    let newG=1;
+    let newM=1;
+    let newT=texture>0;
+    if(newT) { textureDraws=textureDraws+1; }
+    let j=0;
+    while(j<i && (newG || newM || newT)) {
+      let prior=draws+j*SceneDrawItem.size;
+      if(ux_u32(prior+SceneDrawItem.geometry)==ux_u32(draw+SceneDrawItem.geometry)) { newG=0; }
+      if(ux_u32(prior+SceneDrawItem.material)==ux_u32(draw+SceneDrawItem.material)) { newM=0; }
+      if(newT) {
+        let before=scene_consume_find(prior,rows,total);
+        let used=ux_u32(before+SceneConsumeBinding.textured);
+        if(used!=0 && ux_u32(used+SceneTextureDraw.texture)==texture) { newT=0; }
+      }
+      j=j+1;
+    }
+    geometries=geometries+newG;
+    materials=materials+newM;
+    textures=textures+newT;
+    i=i+1;
+  }
+  if(transparent && count>254-oldCount) { return 0-1; }
+
+  let dirty=0;
+  let rc=0;
+  i=0;
+  while(i<count && rc>=0) {
+    let draw=draws+i*SceneDrawItem.size;
+    let binding=scene_consume_find(draw,rows,total);
+    let texture=ux_u32(binding+SceneConsumeBinding.textured);
+    if(!dirty && ux_u32(draw+SceneDrawItem.pass)==2) {
+      rc=GpuPacket_state(packet,cap,1,0,1);
+      dirty=1;
+    }
+    if(rc>=0 && texture==0) {
+      rc=SceneDraw_gpuFlat(packet,cap,draw,ux_u32(binding+SceneConsumeBinding.stream),
+        vertices,max,ux_u32(binding+SceneConsumeBinding.shader));
+    }
+    if(rc>=0 && texture!=0) {
+      rc=SceneDraw_gpuTexturePerspective(packet,cap,draw,texture,vertices,max);
+    }
+    i=i+1;
+  }
+  if(rc>=0 && dirty) { rc=GpuPacket_state(packet,cap,1,1,0); }
+  if(rc<0) {
+    let b=ux_u32_put(packet+GpuPacket.bytes,oldBytes);
+    let n=ux_u32_put(packet+GpuPacket.commands,oldCount);
+    return rc;
+  }
+  let a=ux_u32_put(stats+SceneConsumeStats.draws,count);
+  let b=ux_u32_put(stats+SceneConsumeStats.triangles,triangles);
+  let c=ux_u32_put(stats+SceneConsumeStats.geometries,geometries);
+  let d=ux_u32_put(stats+SceneConsumeStats.materials,materials);
+  let e=ux_u32_put(stats+SceneConsumeStats.textures,textures);
+  let f=ux_u32_put(stats+SceneConsumeStats.textureDraws,textureDraws);
+  let g=ux_u32_put(stats+SceneConsumeStats.commands,ux_u32(packet+GpuPacket.commands)-oldCount);
+  return count;
+}
