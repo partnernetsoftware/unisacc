@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="wasm-cases">pending</pre>
+<script type="module">
+const status = document.querySelector("#wasm-cases");
+try {
+  const read = async name => new Uint8Array(await (await fetch(name)).arrayBuffer());
+  const [baseBytes, probeBytes, input] = await Promise.all([
+    read("base.wasm"), read("probe.wasm"), read("input.bin")
+  ]);
+  const [baseModule, probeModule] = await Promise.all([
+    WebAssembly.compile(baseBytes), WebAssembly.compile(probeBytes)
+  ]);
+  const mutate = new URLSearchParams(location.search).has("mutate");
+  const actual = [];
+  for (let index = 0; index < 10; index++) {
+    const base = await WebAssembly.instantiate(baseModule);
+    const dispatch = base.exports.uxe_geometry_json_dispatch;
+    if (dispatch(0n,0n,0n) !== 1 || dispatch(0n,2n,0n) !== 10 ||
+        input.length < 1 || input.length > dispatch(0n,1n,0n)) throw new Error("geometry ABI mismatch");
+    const probe = await WebAssembly.instantiate(probeModule,{
+      uxe_geometry_json_v1: {uxe_geometry_json_dispatch: dispatch}
+    });
+    if (base.exports.uxe_abi_version() !== 1 || probe.exports.uxe_abi_version() !== 1) {
+      throw new Error("geometry ABI version mismatch");
+    }
+    if (base.exports.memory === probe.exports.memory) throw new Error("shared Wasm memory");
+    for (let offset = 0; offset < input.length; offset++) {
+      if (dispatch(1n,BigInt(offset),BigInt(input[offset])) !== 1) throw new Error("fixture write failed");
+    }
+    if (dispatch(2n,BigInt(input.length),0n) !== 1) throw new Error("fixture length failed");
+    actual.push(probe.exports.uxe_evaluate_case(BigInt(mutate && index === 1 ? 33 : index)));
+  }
+  status.textContent = JSON.stringify(actual);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>
