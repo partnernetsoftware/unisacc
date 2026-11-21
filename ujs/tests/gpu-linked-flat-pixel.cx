@@ -1,0 +1,262 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static const char layout[]="ujs/practice/uxe/test/gpu-linked-flat-layout.ujs";
+static const char probe[]="ujs/practice/uxe/test/gpu-linked-flat-probe.ujs";
+static const char old_probe[]="ujs/practice/uxe/test/gpu-packet-probe.ujs";
+static const char old_page[]="ujs/practice/uxe/test/gpu-packet-r160.html";
+static const char linked_page[]="ujs/practice/uxe/test/gpu-linked-flat-browser.js";
+static const char vert[]="ujs/practice/uxe/base/gpu-flat.vert";
+static const char frag[]="ujs/practice/uxe/base/gpu-flat.frag";
+static const char record_copy[]="ujs/practice/uxe/base/record-copy.ujs";
+static const char packet[]="ujs/practice/uxe/base/gpu-packet.ujs";
+static const char geometry[]="ujs/practice/uxe/base/geometry-buffers.ujs";
+static const char box[]="ujs/practice/uxe/base/boxgeometry.ujs";
+
+static int timed(const char *phase,char **args,int seconds,char **out,size_t *bytes) {
+    const int64_t start=sy_mono_ns();
+    const int rc=cx_runv_timeout(args,seconds,out,bytes);
+    printf("GPU_LINK phase=%s ms=%ld rc=%d\n",phase,(long)((sy_mono_ns()-start)/1000000),rc);
+    return rc;
+}
+
+static long section(const char *data,long size,const char *marker,long from) {
+    if(from<0 || from>=size) return -1;
+    const long offset=tx_find(data+from,size-from,marker,tx_len(marker,200));
+    return offset<0?-1:from+offset;
+}
+
+static int shader_words(char *program,int capacity,int used,const char *path,const char *name,int address) {
+    unsigned char *input=0;
+    int64_t size=0;
+    if(sy_read_file(path,&input,&size,300) || size<1 || used<0 || capacity-used<size*4+360) {
+        mm_free(input);
+        return -1;
+    }
+    const int words=(size+3)/4;
+    used+=tx_snprintf(program+used,capacity-used,"let %s=[",name);
+    for(int i=0;i<words;i++) {
+        unsigned word=0;
+        for(int byte=0;byte<4;byte++) {
+            const int at=i*4+byte;
+            if(at<size) word|=(unsigned)input[at]<<(byte*8);
+        }
+        used+=tx_snprintf(program+used,capacity-used,"%s%u",i?",":"",word);
+    }
+    used+=tx_snprintf(program+used,capacity-used,
+        "];let i=0;while(i<%d){let b=ux_u32_put(%d+4*i,%s[i]);i=i+1;}"
+        "let p=ux_u32_put(shader+GpuShaderSource.%s,%d);let n=ux_u32_put(shader+GpuShaderSource.%sBytes,%ld);",
+        words,address,name,name,address,name,(long)size);
+    mm_free(input);
+    return used;
+}
+
+static int build_base_source(const char *source) {
+    unsigned char *bytes=0;
+    int64_t size=0;
+    if(sy_read_file(old_probe,&bytes,&size,32000)) return 1;
+    const char *text=(const char *)bytes;
+    const long helpers=section(text,size,"native function probe_render_state(",0);
+    const long begin=section(text,size,"let capacity=2048;",helpers);
+    const long dispatch=section(text,size,"if(mode>=150 && mode<=157)",begin);
+    const long flat=section(text,size,"let viewport_x=0;",dispatch);
+    if(helpers<=0 || begin<=helpers || dispatch<=begin || flat<=dispatch) {
+        mm_free(bytes);
+        printf("GPU_LINK source slice markers missing\n");
+        return 1;
+    }
+    char program[16000];
+    int used=tx_snprintf(program,sizeof program,"%.*s\nnative function probe_shader_sources(shader:i64) i64 {",
+        (int)helpers,text);
+    used=shader_words(program,sizeof program,used,vert,"vertex",6500);
+    if(used>=0) used=shader_words(program,sizeof program,used,frag,"fragment",6800);
+    if(used>=0 && used<(int)sizeof program) {
+        used+=tx_snprintf(program+used,sizeof program-used,
+            "return shader;}\n"
+            "if(op==0 && value==0) { return 1; }\n"
+            "if(op!=1 || value<0 || value>18 || (value>3 && value<9)) { return 0-1; }\n"
+            "let mode=value;\n%.*s%.*s",
+            (int)(dispatch-begin),text+begin,(int)(size-flat),text+flat);
+    }
+    mm_free(bytes);
+    return used<0 || used>=(int)sizeof program || sy_write_file(source,program,used,0600);
+}
+
+static int load_base(const char *dir,const char *base,int prepare,int check) {
+    const char *cache=sy_env("UXE_GPU_LINK_CACHE");
+    if(!cache || cache[0]!='/') {
+        printf("GPU_LINK 基座缓存缺失：先运行准备步骤并设置 UXE_GPU_LINK_CACHE\n");
+        return 1;
+    }
+    const char *sources[]={layout,record_copy,packet,geometry,box,old_probe,vert,frag,
+        "ujs/tests/gpu-linked-flat-pixel.cx",0};
+    char key[65],sha[65],stored[540];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    const int path=tx_snprintf(stored,sizeof stored,"%s/%s.bin",cache,key);
+    if(path<0 || path>=(int)sizeof stored) return 1;
+    const int rc=wasm_test_cache_read(stored,key,prepare?0:base,sha);
+    if(!rc && !check) {
+        printf("GPU_LINK base cache hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc && rc!=-ENOENT) {
+        printf("GPU_LINK base cache rejected rc=%d key=%s\n",rc,key);
+        return 1;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("GPU_LINK 基座缓存缺失：先运行准备步骤 key=%s\n",key);
+        return 1;
+    }
+    char source[360];
+    tx_snprintf(source,sizeof source,"%s/base.ujs",dir);
+    if(build_base_source(source)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)layout,(char *)record_copy,(char *)packet,
+        (char *)geometry,(char *)box,source,"-o",(char *)base,0};
+    char *out=0;
+    size_t bytes=0;
+    const int failed=timed("base_prepare",args,30,&out,&bytes);
+    if(failed && out) printf("%.*s\n",(int)bytes,out);
+    mm_free(out);
+    if(failed) return 1;
+    if(check) {
+        const int drift=wasm_test_cache_verify(base,sha);
+        printf("GPU_LINK cache=rebuilt sha=%s failed=%d\n",sha,drift!=0);
+        return drift;
+    }
+    const int saved=wasm_test_cache_write(cache,stored,key,base);
+    printf("GPU_LINK prepared key=%s failed=%d\n",key,saved!=0);
+    return saved;
+}
+
+static int build_browser(const char *path) {
+    unsigned char *source=0,*loader=0;
+    int64_t bytes=0,loaderBytes=0;
+    if(sy_read_file(old_page,&source,&bytes,80000) || sy_read_file(linked_page,&loader,&loaderBytes,9000)) {
+        mm_free(source); mm_free(loader); return 1;
+    }
+    const char *text=(const char *)source;
+    const long prelude=section(text,bytes,"\ntry {\n",0);
+    const long actual=section(text,bytes,"  for (const mode of [mutate ? 9n : 0n, 1n, 2n, 3n]) {",prelude);
+    const long actualEnd=section(text,bytes,"  const stateStatus =",actual);
+    const long ref=section(text,bytes,"  const reference = [];\n",actualEnd);
+    const long refEnd=section(text,bytes,"  const { state } = renderer;",ref);
+    int failed=1;
+    if(prelude>0 && actual>prelude && actualEnd>actual && ref>actualEnd && refEnd>ref) {
+        char page[24000];
+        const int length=tx_snprintf(page,sizeof page,
+            "%.*s\n%.*s%.*s%.*s"
+            "  renderer.dispose();\n"
+            "  document.querySelector('#gpu-scenes').textContent = JSON.stringify(visits);\n"
+            "  result.textContent = JSON.stringify([...status, ...actual, ...reference]);\n"
+            "} catch (error) { result.textContent = String(error); }\n</script>\n",
+            (int)prelude,text,(int)loaderBytes,loader,(int)(actualEnd-actual),text+actual,
+            (int)(refEnd-ref),text+ref);
+        failed=length<0 || length>=(int)sizeof page || sy_write_file(path,page,length,0600);
+    } else printf("GPU_LINK browser slice markers missing\n");
+    mm_free(source); mm_free(loader);
+    return failed;
+}
+
+static int copy_at(const char *dir,const char *file,const char *source) {
+    char path[340];
+    const int length=tx_snprintf(path,sizeof path,"%s/%s",dir,file);
+    return length<0 || length>=(int)sizeof path || sy_copy(source,path,0600);
+}
+
+static int flat_check(char *at) {
+    const int status[]={0,0,0,0,-2,-3,-1,-5,-4,-7,-1,-4,-1,0,0,16,16,0};
+    const int tri[]={1,0,1,0,0},cube[]={1,0,1,0,1};
+    int failed=0;
+    for(int i=0;i<198;i++) {
+        char *end=0;
+        const double value=tx_strtod(at,&end);
+        if(end==at || *end!=(i==197?']':',')) {
+            printf("GPU_LINK malformed cell=%d\n",i);
+            return failed+1;
+        }
+        int expected=0,tolerance=0;
+        if(i<18) expected=status[i];
+        else {
+            int pixel=i-18;
+            if(pixel>=100) pixel-=100;
+            int scene=pixel/20;
+            if(scene==4) scene=3;
+            const int point=(pixel%20)/4,channel=pixel%4;
+            int rgba[4]={0,0,0,255};
+            if(scene==1) rgba[1]=cube[point]*255;
+            else if(scene==3) {
+                rgba[0]=tri[point]*128; rgba[2]=255-tri[point]*128; rgba[3]=255-tri[point]*64;
+            } else rgba[0]=tri[point]*255;
+            expected=rgba[channel];
+            tolerance=scene==3?1:0;
+        }
+        if(!(value>=expected-tolerance && value<=expected+tolerance)) {
+            printf("GPU_LINK cell=%d actual=%.4g expected=%d tolerance=%d\n",i,value,expected,tolerance);
+            failed++;
+        }
+        at=end+1;
+    }
+    return failed;
+}
+
+static int browser(const char *dir,int mutate) {
+    char url[380],profile[360];
+    tx_snprintf(url,sizeof url,"file://%s/probe.html%s",dir,mutate?"?mutate":"");
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    char *args[]={"google-chrome","--headless=new","--no-first-run","--disable-background-networking",
+        "--allow-file-access-from-files","--enable-unsafe-swiftshader","--use-angle=swiftshader",
+        "--virtual-time-budget=7000","--dump-dom",profile,url,0};
+    char *out=0;
+    size_t bytes=0;
+    int failed=timed("chrome",args,20,&out,&bytes);
+    const char marker[]="<pre id=\"gpu\">[";
+    const char visits[]="<pre id=\"gpu-scenes\">[0,1,2,3,10,11,12,13,14,15,16,17,18]</pre>";
+    const char changed[]="<pre id=\"gpu-scenes\">[9,1,2,3,10,11,12,13,14,15,16,17,18]</pre>";
+    const long at=out?section(out,bytes,marker,0):-1;
+    if(!failed && at>=0) {
+        failed=flat_check(out+at+sizeof marker-1);
+        if(section(out,bytes,mutate?changed:visits,0)<0) { printf("GPU_LINK visits mismatch\n"); failed++; }
+    } else {
+        long detail=out?section(out,bytes,"<pre id=\"gpu\">",0):-1;
+        printf("GPU_LINK browser detail=%.210s\n",detail>=0?out+detail:"");
+        failed=1;
+    }
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int prepare=(argc==2 || (argc==3 && tx_eqz(argv[2],"--check"))) && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3;
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !prepare && !mutate) return 2;
+    char dir[256],base[350],wasm[350],page[350];
+    if(sy_mkdtemp("/tmp","uxe-gpu-linked-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    int failed=load_base(dir,base,prepare,check);
+    if(!failed && !prepare) {
+        char *compile[]={"./ujs/ujs2wasm.com",(char *)probe,"-o",wasm,0};
+        char *out=0;
+        size_t bytes=0;
+        failed=timed("probe",compile,6,&out,&bytes);
+        if(failed && out) printf("%.*s\n",(int)bytes,out);
+        mm_free(out);
+        failed=failed || build_browser(page) ||
+            copy_at(dir,"gpu-host-abi.js","ujs/practice/uxe/base/gpu-host-abi.js") ||
+            copy_at(dir,"gpu-state-abi.js","ujs/practice/uxe/base/gpu-state-abi.js") ||
+            copy_at(dir,"three.module.js","ujs/practice/web/game/three.module.js");
+        if(!failed) failed=browser(dir,mutate);
+        printf("G_PIXEL GPU_LINK flat scenes=5 values=198 failed=%d\n",failed);
+    }
+    if(sy_remove_all(dir)) return 1;
+    return failed!=0;
+}

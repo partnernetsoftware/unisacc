@@ -138,7 +138,7 @@ export uxe_frame(now:i64) i64 version 1;
 
 ## 5 开发计划(给 cdx2 的逐里程碑任务)
 
-GPU 主门通过 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx` 运行。旧合并输入在编译阶段 10203 毫秒退出 124。最小 GPU 包基座探针编译为 678 毫秒，Chrome 新配置打开空页为 504 毫秒。拆分后冷编译的管线与图元、材质与纹理、逐片元光照三个输入分别为 4025、6650、3722 毫秒，Chrome 含像素读回为 5682 毫秒。单片编译仍限 10 秒，Chrome 仍限 20 秒。三个测试模块各自持有 Wasm 线性内存，沿原顺序提交至同一 WebGL 上下文，汇总仍检查 43 个场景的并集和原有 1682 个返回值。用 `-- --scene-omit-mutate` 验证缺少场景 111 时汇总失败。产品基座的单模块合同沿用本节下文。
+43 场景 GPU 主门仍通过 `cx ujs/tests/gpu-packet-struct.cx` 运行。C6 独立探针已覆盖场景 0、1、2、3、17 及原协议拒绝测试，198 项沿用原坐标及 r160 预期。GPU 宿主闭包固定绑定基座内存，消费者的内存独立。设置 `UXE_GPU_LINK_CACHE`，用 `cx ujs/tests/gpu-linked-flat-pixel.cx -- --prepare` 准备。热编译小探针已实测 30 毫秒，界限为六秒，Chrome 仍用 20 秒界。准备校验执行 `-- --prepare --check`，显式重编比对缓存基座摘要，功能门空缓存时具名退出。其余 38 个场景仍由原 GPU 主门完整验收。旧合并输入在编译阶段 10203 毫秒退出 124。最小 GPU 包基座探针编译为 678 毫秒，Chrome 新配置打开空页为 504 毫秒。拆分后冷编译的管线与图元、材质与纹理、逐片元光照三个输入分别为 4025、6650、3722 毫秒，Chrome 含像素读回为 5682 毫秒。单片编译仍限 10 秒，Chrome 仍限 20 秒。三个测试模块各自持有 Wasm 线性内存，沿原顺序提交至同一 WebGL 上下文，汇总仍检查 43 个场景的并集和原有 1682 个返回值。用 `-- --scene-omit-mutate` 验证缺少场景 111 时汇总失败。产品基座的单模块合同沿用本节下文。
 
 重复运行可让 devsvc 的子命令通过 `env UXE_GPU_WASM_CACHE=/tmp/自己的已创建目录` 传入私有缓存目录。缓存键包含编译器和入口、声明、着色器生成物及所有源文件的有序内容哈希。命中仍校验载荷 SHA-256，并重新运行 Chrome 与全部断言。显式 `-- --check` 重编三个模块，对比各自缓存包哈希后执行同一门。截断记录会在进入 Chrome 前具名失败。GPU 探针的原生调用共用线性内存，当前的版本化模块 ABI 不支持跨实例传递这些地址，因此缓存三份编译产物，各模块内的场景复用同一实例。
 
@@ -259,7 +259,7 @@ JPEG 基座与探针改走 C6 版本化链接。两块 JPEG 由 .cx 构造，Chr
 
 Geometry JSON 门使用同样的准备与功能节点。设置 `UXE_GEOMETRY_WASM_CACHE` 后运行 `cx ujs/tests/geometry-json-load-struct.cx -- --prepare`，再运行无参数功能门。准备冷编译实测 6343 毫秒，消费者编译 41 毫秒，六秒界保留。Chrome 用十套独立实例对照 r160 与原金值。准备校验加 `-- --prepare --check` 重编比对缓存摘要。缺失缓存具名退出。
 
-两个门可用同一个 flow 入口。先创建私有缓存目录，把下例末尾的 `jpeg` 换成 `geometry` 即可选择几何门。prepare 成功后才开始功能门。
+已分离的门共用一个 flow 入口。先创建私有缓存目录，选择 `jpeg`、`geometry` 或 `gpu-flat`。准备节点的总预算为 55 秒，成功后才开始功能门。
 
 ```sh
 cx ujs/tools-ux/linked-wasm-flow.cx -- /tmp/uxe-linked-cache jpeg | cx tools/devsvc.cx -- flow - --par 2
