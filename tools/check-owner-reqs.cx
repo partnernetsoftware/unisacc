@@ -1,0 +1,81 @@
+/* tools/check-owner-reqs.cx -- guards build/owner-reqs.tsv (owner requirement ledger, 11 tab columns:
+   id need origin date state slot evidence history told_owner kind verify).
+   Rules: (1) legal format: 11 columns, unique ids, state in DONE SCHED CUT DEFER LOST REDEF, kind in O S S+O S+P;
+   (2) SCHED row with a slot: the slot must exist as column 2 of version-seq (read from `git show
+   origin/v0.0.88:build/version-seq.tsv`, the authoritative copy; main's file is the fallback if git fails);
+   a SCHED row slot "-" is counted as schedgap, a ratchet;
+   (3) CUT/DEFER/REDEF with empty told_owner is UNTOLD, a ratchet against build/owner-reqs-baseline.tsv
+   (keys untold, schedgap): the count may only fall, a rise is red; lowering must be done by telling the owner
+   and filling told_owner, never by editing state.
+   Self-tests on in-memory fixtures: one new untold DEFER row turns red, plus 3 mutants (bad state, SCHED slot
+   not in version-seq, wrong column count) each rejected.  Prints CHECK_OWNER_REQS<TAB>failed=N. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+static int failed;
+static const char *fnd(const char *h, const char *n) { size_t k = strlen(n); for (; *h; h++) if (!strncmp(h, n, k)) return h; return 0; }
+static void ck(int ok, const char *n) { if (!ok) failed++; printf("%s\towner-reqs.%s\n", ok ? "PASS" : "FAIL", n); }
+static int inlist(const char *s, int l, const char *list) { char w[32]; if (l > 20) return 0; cx_fmt(w, sizeof w, " %.*s ", l, s); return fnd(list, w) != 0; }
+static int hasslot(const char *vs, const char *slot) { char w[64]; cx_fmt(w, sizeof w, "\t%s\t", slot); const char *p = vs; while ((p = fnd(p, w))) { const char *q = p; while (q > vs && q[-1] != '\n') q--; int tabs = 0; for (const char *c = q; c < p; c++) if (*c == '\t') tabs++; if (tabs == 0) return 1; p++; } return 0; }
+/* returns number of format/slot errors; fills untold and schedgap */
+static int validate(const char *tab, const char *vs, int *untold, int *schedgap, int quiet) {
+    int errs = 0, line = 0; *untold = 0; *schedgap = 0; char ids[8192] = " ";
+    const char *p = tab;
+    while (*p) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        line++; const char *f[12]; int l[12], n = 0; const char *s = p;
+        f[0] = s; for (const char *c = p; c <= e; c++) if (c == e || *c == '\t') { if (n < 12) { f[n] = s; l[n] = (int)(c - s); } n++; s = c + 1; }
+        if (line > 1 && e > p) {
+            if (n != 11) { errs++; if (!quiet) printf("ERR\tline %d: %d columns\n", line, n); }
+            else {
+                char id[40]; cx_fmt(id, sizeof id, " %.*s ", l[0] < 30 ? l[0] : 30, f[0]);
+                if (l[0] == 0 || fnd(ids, id)) { errs++; if (!quiet) printf("ERR\tline %d: id empty or dup\n", line); }
+                else if (strlen(ids) + strlen(id) < sizeof ids - 1) mm_copy(ids + strlen(ids), sizeof ids - strlen(ids), id + 1, strlen(id));
+                if (!inlist(f[4], l[4], " DONE SCHED CUT DEFER LOST REDEF ")) { errs++; if (!quiet) printf("ERR\tline %d: bad state\n", line); }
+                if (!inlist(f[9], l[9], " O S S+O S+P ")) { errs++; if (!quiet) printf("ERR\tline %d: bad kind\n", line); }
+                int st = l[4] == 3 && !strncmp(f[4], "CUT", 3), sd = l[4] == 5 && !strncmp(f[4], "DEFER", 5), sr = l[4] == 5 && !strncmp(f[4], "REDEF", 5);
+                if ((st || sd || sr) && l[8] == 0) (*untold)++;
+                if (l[4] == 5 && !strncmp(f[4], "SCHED", 5)) {
+                    char sl[64]; cx_fmt(sl, sizeof sl, "%.*s", l[5] < 60 ? l[5] : 60, f[5]);
+                    if (!strcmp(sl, "-") || !*sl) (*schedgap)++;
+                    else if (!hasslot(vs, sl)) { errs++; if (!quiet) printf("ERR\tline %d: SCHED slot %s not in version-seq\n", line, sl); }
+                }
+            }
+        }
+        p = *e ? e + 1 : e;
+    }
+    return errs;
+}
+static char *slurp(const char *path) { unsigned char *b = 0; int64_t n = 0; if (sy_read_file(path, &b, &n, 1 << 20)) return 0; char *s = malloc((size_t)n + 1); mm_copy(s, (size_t)n + 1, b, (size_t)n); s[n] = 0; return s; }
+static int base(const char *t, const char *k) { char w[40]; cx_fmt(w, sizeof w, "%s\t", k); const char *p = fnd(t, w); while (p && p != t && p[-1] != '\n') p = fnd(p + 1, w); return p ? atoi(p + strlen(w)) : -1; }
+int main(void) {
+    char why[512]; np_result r = { 0 }; char *vs; char *tab = slurp("build/owner-reqs.tsv"), *bl = slurp("build/owner-reqs-baseline.tsv");
+    char *v[] = { "git", "show", "origin/v0.0.88:build/version-seq.tsv", 0 };
+    if (!tab || !bl) { printf("FAIL\towner-reqs.read\nCHECK_OWNER_REQS\tfailed=1\n"); return 1; }
+    int viaGit = !np_run(v, 0, 0, 20, &r, why, sizeof why) && r.rc == 0 && r.out && fnd(r.out, "0.0.88");
+    vs = viaGit ? r.out : slurp("build/version-seq.tsv");
+    printf("INFO\tversion-seq source: %s\n", viaGit ? "git show origin/v0.0.88" : "main file (fallback)");
+    if (!vs) { printf("FAIL\towner-reqs.version-seq\nCHECK_OWNER_REQS\tfailed=1\n"); return 1; }
+    int u, g, errs = validate(tab, vs, &u, &g, 0), bu = base(bl, "untold"), bg = base(bl, "schedgap");
+    printf("UNTOLD\t%d\tbaseline=%d\tschedgap=%d\tbaseline=%d\n", u, bu, g, bg);
+    ck(errs == 0, "format-and-slots");
+    ck(bu >= 0 && u <= bu, "untold-ratchet");
+    ck(bg >= 0 && g <= bg, "schedgap-ratchet");
+    if (u < bu || g < bg) printf("NOTE\tcount fell: lower build/owner-reqs-baseline.tsv\n");
+    /* red: one new untold DEFER row */
+    size_t tl = strlen(tab); char *m = malloc(tl + 400);
+    cx_fmt(m, tl + 400, "%s%sRZZ\tneed\tx:1\t2026-11-21\tDEFER\t-\te\th\t\tO\tv\n", tab, tl && tab[tl - 1] == '\n' ? "" : "\n");
+    int u2, g2, e2 = validate(m, vs, &u2, &g2, 1);
+    ck(e2 == 0 && u2 == u + 1 && u2 > bu, "red-new-untold-defer");
+    cx_fmt(m, tl + 400, "%s%sRZZ\tneed\tx:1\t2026-11-21\tDEFER\t-\te\th\t2026-11-21 mail\tO\tv\n", tab, tl && tab[tl - 1] == '\n' ? "" : "\n");
+    e2 = validate(m, vs, &u2, &g2, 1); ck(e2 == 0 && u2 == u, "green-told-defer-not-counted");
+    cx_fmt(m, tl + 400, "%s%sRZZ\tneed\tx:1\t2026-11-21\tBOGUS\t-\te\th\t\tO\tv\n", tab, tl && tab[tl - 1] == '\n' ? "" : "\n");
+    ck(validate(m, vs, &u2, &g2, 1) > 0, "mutant-bad-state");
+    cx_fmt(m, tl + 400, "%s%sRZZ\tneed\tx:1\t2026-11-21\tSCHED\t9.9.9\te\th\t\tO\tv\n", tab, tl && tab[tl - 1] == '\n' ? "" : "\n");
+    ck(validate(m, vs, &u2, &g2, 1) > 0, "mutant-sched-slot-missing");
+    cx_fmt(m, tl + 400, "%s%sRZZ\tneed\tx:1\t2026-11-21\tDONE\t-\te\th\tO\tv\n", tab, tl && tab[tl - 1] == '\n' ? "" : "\n");
+    ck(validate(m, vs, &u2, &g2, 1) > 0, "mutant-column-count");
+    printf("CHECK_OWNER_REQS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

@@ -67,6 +67,7 @@ flowchart LR
   V71 --> T71 --> Q
   V71 --> S71 --> Q
     ITER["迭代速度方法学:五条元原则与收口标准<br/>prd_paradigm.md 第 9 节、prd_iteration.md"]
+    OREQ["所有者需求台账:状态、证据、告知记录,未告知断点只降不升<br/>build/owner-reqs.tsv、tools/check-owner-reqs.cx"]
 ```
 
 ## 决定(别人必须遵守)
