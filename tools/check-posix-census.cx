@@ -1,0 +1,159 @@
+/* tools/check-posix-census.cx -- self-checks for tools/posix-census.cx (R67 Phase 0 ratchet).
+ *
+ *   sh ./unisacc.com tools/check-posix-census.cx
+ *
+ * Tests in an isolated git fixture plus real repository --check:
+ *   1. --init writes build/posix-census-baseline.tsv with exact posix/proc/ext_fs columns;
+ *   2. --check passes on unmodified fixture and ignores sy_* calls, comments, and check-*.cx files;
+ *   3. adding a direct POSIX call (fork/getenv), a "/proc/" literal, or an external "rm"/"mkdir" fails --check
+ *      and is refused by --write;
+ *   4. removing a direct POSIX call passes --check with 1 below and --write ratchets the baseline down;
+ *   5. real repository --check passes (0 above baseline).
+ * Last line: CHECK_POSIX_CENSUS<TAB>ok=N<TAB>failed=0 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int ok_cnt, fail_cnt;
+static char root[4096], fx[4096], com[4400], tool[4400];
+
+static void ck(int cond, const char *name) {
+    if (cond) { ok_cnt++; sy_printf("PASS\t%s\n", name); }
+    else { fail_cnt++; sy_printf("FAIL\t%s\n", name); }
+}
+
+static int run_cmd(char **av, char *out, long cap) {
+    char *o = 0; size_t on = 0;
+    int rc = cx_runv_timeout(av, 25, &o, &on);
+    out[0] = 0;
+    if (o && on > 0) {
+        long n = (long)on < cap - 1 ? (long)on : cap - 1;
+        for (long i = 0; i < n; i++) out[i] = o[i];
+        out[n] = 0;
+    }
+    if (o) mm_free(o);
+    return rc;
+}
+
+static int rm_rf(const char *path) {
+    sy_stat_t st;
+    if (sy_lstat(path, &st) != 0) return 0;
+    if (st.kind != 'd') return sy_unlink(path);
+    sy_dir_t d;
+    if (sy_dir_open(&d, path) == 0) {
+        while (sy_dir_next(&d) == 1) {
+            char child[4400];
+            if (!cx_fmt(child, sizeof child, "%s/%s", path, d.name)) (void)rm_rf(child);
+        }
+        sy_dir_close(&d);
+    }
+    return sy_rmdir(path);
+}
+
+static void wf(const char *rel, const char *body) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", fx, rel)) exit(2);
+    if (sy_write_atomic(p, body, (size_t)tx_len(body, 65536), 0644) != 0) exit(2);
+}
+
+int main(void) {
+    char out[16384], p[4400];
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/posix-census.cx", root) ||
+        sy_mkdtemp(sy_tmpdir(), "check-posix-census-", fx, sizeof fx)) return 2;
+
+    if (cx_fmt(p, sizeof p, "%s/tools", fx) || sy_mkdir(p, 0700) ||
+        cx_fmt(p, sizeof p, "%s/build", fx) || sy_mkdir(p, 0700)) return 2;
+
+    { char *v[] = {"git", "-C", fx, "init", "-q", 0}; if (run_cmd(v, out, sizeof out) != 0) return 2; }
+    wf("tools/a.cx",
+       "/* comment with fork() and \"/proc/self\" and \"rm\" */\n"
+       "int f(void) {\n"
+       "    const char *e = getenv(\"X\");\n"
+       "    int fd = sy_open(\"/proc/stat\", 0, 0);\n"
+       "    char *v[] = {\"rm\", \"-rf\", \"/tmp/x\", 0};\n"
+       "    return fd + (e != 0) + (v[0] != 0);\n"
+       "}\n");
+    wf("tools/clean.cx",
+       "int g(void) { return sy_open(\"x\", 0, 0) + sy_mkdir_all(\"y\", 0755); }\n");
+    wf("tools/check-a.cx",
+       "int main(void) { int p = fork(); return p; }\n");
+    { char *v[] = {"git", "-C", fx, "add", ".", 0}; if (run_cmd(v, out, sizeof out) != 0) return 2; }
+
+    /* 1. --init creates baseline */
+    { char *v[] = {"sh", com, tool, "--", "--init", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "wrote build/posix-census-baseline.tsv: 2 units, 3 hits (1 rows)", 63) >= 0,
+         "init-writes-baseline-ignoring-check-and-sy"); }
+
+    /* 2. --check passes on matching baseline */
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "posix-census: ok: 2 units, 3 hits (baseline 3); 0 above baseline, 0 below", 73) >= 0,
+         "check-passes-at-baseline"); }
+
+    /* 3a. adding direct POSIX call in clean.cx fails --check and refuses --write */
+    wf("tools/clean.cx",
+       "int g(void) { int pid = fork(); return pid; }\n");
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "posix-census: tools/clean.cx has 1 hits (posix=1 proc=0 ext_fs=0), baseline 0", 77) >= 0,
+         "added-posix-call-fails-check"); }
+    { char *v[] = {"sh", com, tool, "--", "--write", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1, "write-refuses-increase"); }
+
+    /* 3b. adding /proc/ literal fails --check */
+    wf("tools/clean.cx",
+       "int g(void) { return sy_exists(\"/proc/loadavg\"); }\n");
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "posix-census: tools/clean.cx has 1 hits (posix=0 proc=1 ext_fs=0), baseline 0", 77) >= 0,
+         "added-proc-literal-fails-check"); }
+
+    /* 3c. adding external mkdir -p literal fails --check */
+    wf("tools/clean.cx",
+       "int g(void) { char *v[] = {\"mkdir\", \"-p\", \"/tmp/z\", 0}; return v[0] != 0; }\n");
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "posix-census: tools/clean.cx has 1 hits (posix=0 proc=0 ext_fs=1), baseline 0", 77) >= 0,
+         "added-ext-fs-cmd-fails-check"); }
+
+    /* 4. reducing hits in tools/a.cx reports 1 below and --write ratchets down */
+    wf("tools/clean.cx",
+       "int g(void) { return sy_open(\"x\", 0, 0); }\n");
+    wf("tools/a.cx",
+       "int f(void) {\n"
+       "    const char *e = getenv(\"X\");\n"
+       "    int fd = sy_open(\"/proc/stat\", 0, 0);\n"
+       "    return fd + (e != 0);\n"
+       "}\n");
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "0 above baseline, 1 below", 25) >= 0,
+         "reduced-hit-reports-below"); }
+    { char *v[] = {"sh", com, tool, "--", "--write", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "2 units, 2 hits (1 rows)", 24) >= 0,
+         "write-ratchets-down"); }
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", fx, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "2 hits (baseline 2); 0 above baseline, 0 below", 46) >= 0,
+         "check-after-ratchet-down-is-exact"); }
+
+    /* 5. real repository --check passes */
+    { char *v[] = {"sh", com, tool, "--", "--check", "--root", root, 0};
+      int rc = run_cmd(v, out, sizeof out);
+      ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "posix-census: ok:", 17) >= 0 &&
+         tx_find(out, tx_len(out, sizeof out), "; 0 above baseline,", 19) >= 0,
+         "real-repo-check-passes"); }
+
+    (void)rm_rf(fx);
+    sy_printf("CHECK_POSIX_CENSUS\tok=%d\tfailed=%d\n", ok_cnt, fail_cnt);
+    return fail_cnt ? 1 : 0;
+}

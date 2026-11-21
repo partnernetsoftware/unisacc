@@ -1,0 +1,311 @@
+/* tools/posix-census.cx -- R67 Phase 0 ratchet: direct POSIX/libc calls, /proc paths, and external rm/mkdir in tools/.
+ *
+ *   sh ./unisacc.com tools/posix-census.cx [-- --check | --write | --init] [--root DIR]
+ *
+ * Scans tracked tools/**.cx (excluding tools/check-*.cx and tools/posix-census.cx) for:
+ *   1. posix_call: direct POSIX/libc calls bypassing cx/sys (fork, execv*, waitpid, pipe, dup2, fcntl,
+ *      open, close, read, write, lseek, ftruncate, opendir, readdir, closedir, mkdir, rmdir, unlink,
+ *      rename, lstat, stat, chmod, access, chdir, getcwd, realpath, symlink, readlink, kill, getpid,
+ *      getpgid, setpgid, setsid, getenv, setenv, unsetenv, fopen, fclose, fgets, fread, fwrite).
+ *   2. proc_path: hardcoded Linux "/proc/" string literals.
+ *   3. ext_fs_cmd: external process argv or shell literals invoking "rm" / "mkdir" ("rm", "mkdir", "rm -rf", "mkdir -p").
+ *
+ * Compares per-file counts against build/posix-census-baseline.tsv (only goes down).
+ * Summary line: "posix-census: ok: ..." or "posix-census: FAIL: ...", exit 1 on FAIL. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define PC_BASE "build/posix-census-baseline.tsv"
+#define PC_MAXF 2048
+
+typedef struct {
+    char path[256];
+    long total, posix_call, proc_path, ext_fs;
+} PcRow;
+
+static PcRow cur_rows[PC_MAXF], base_rows[PC_MAXF];
+static int ncur, nbase;
+
+static int id_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static const char *const POSIX_SYMS[] = {
+    "fork", "execv", "execvp", "execve", "waitpid", "pipe", "dup2", "fcntl",
+    "open", "close", "read", "write", "lseek", "ftruncate",
+    "opendir", "readdir", "closedir", "mkdir", "rmdir", "unlink", "rename",
+    "lstat", "stat", "chmod", "access", "chdir", "getcwd", "realpath",
+    "symlink", "readlink", "kill", "getpid", "getpgid", "setpgid", "setsid",
+    "getenv", "setenv", "unsetenv", "fopen", "fclose", "fgets", "fread", "fwrite",
+    0
+};
+
+static int is_excluded_tool(const char *rel) {
+    const char *base;
+    long n = tx_len(rel, 1024);
+    if (n < 10 || !tx_prefix(rel, n, "tools/", 6) || !tx_same(rel + n - 3, 3, ".cx", 3)) return 1;
+    if (tx_eqz(rel, "tools/posix-census.cx")) return 1;
+    base = rel + 6;
+    for (long i = 6; i < n; i++) if (rel[i] == '/') base = rel + i + 1;
+    if (tx_prefix(base, tx_len(base, 256), "check-", 6)) return 1;
+    return 0;
+}
+
+static void scan_line(const char *s, long n, long *p_posix, long *p_proc, long *p_ext) {
+    long i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (i >= n || s[i] == '*' || (i + 1 < n && s[i] == '/' && (s[i + 1] == '/' || s[i + 1] == '*'))) return;
+
+    if (tx_find(s + i, n - i, "\"/proc/", 7) >= 0) (*p_proc)++;
+    if (tx_find(s + i, n - i, "\"rm\"", 4) >= 0 ||
+        tx_find(s + i, n - i, "\"mkdir\"", 7) >= 0 ||
+        tx_find(s + i, n - i, "rm -rf ", 7) >= 0 ||
+        tx_find(s + i, n - i, "mkdir -p ", 9) >= 0) (*p_ext)++;
+
+    /* Strip string and char literals before scanning C identifier calls */
+    char code[4096];
+    long cl = 0, k = i;
+    int in_str = 0, in_chr = 0;
+    while (k < n && cl + 2 < (long)sizeof code) {
+        char c = s[k];
+        if (!in_str && !in_chr && c == '/' && k + 1 < n && (s[k + 1] == '/' || s[k + 1] == '*')) break;
+        if (in_str) {
+            if (c == '\\' && k + 1 < n) { k += 2; continue; }
+            if (c == '"') in_str = 0;
+            k++; continue;
+        }
+        if (in_chr) {
+            if (c == '\\' && k + 1 < n) { k += 2; continue; }
+            if (c == '\'') in_chr = 0;
+            k++; continue;
+        }
+        if (c == '"') { in_str = 1; code[cl++] = ' '; k++; continue; }
+        if (c == '\'') { in_chr = 1; code[cl++] = ' '; k++; continue; }
+        code[cl++] = c;
+        k++;
+    }
+    code[cl] = 0;
+
+    for (long p = 0; p < cl; ) {
+        if (!id_ch(code[p]) || (code[p] >= '0' && code[p] <= '9')) { p++; continue; }
+        long st = p;
+        while (p < cl && id_ch(code[p])) p++;
+        long len = p - st;
+        /* Ignore member access (.foo or ->foo) */
+        if (st > 0 && (code[st - 1] == '.' || (st > 1 && code[st - 2] == '-' && code[st - 1] == '>'))) continue;
+        long q = p;
+        while (q < cl && (code[q] == ' ' || code[q] == '\t')) q++;
+        if (q >= cl || code[q] != '(') continue;
+        /* Ignore function definitions/declarations preceded by type keywords on the same line */
+        if (st >= 5 && (tx_find(code, st, "static ", 7) >= 0 || tx_find(code, st, "int ", 4) >= 0 || tx_find(code, st, "void ", 5) >= 0 || tx_find(code, st, "char ", 5) >= 0 || tx_find(code, st, "long ", 5) >= 0)) {
+            long b = st;
+            while (b > 0 && (code[b - 1] == ' ' || code[b - 1] == '\t' || code[b - 1] == '*')) b--;
+            long w = b;
+            while (w > 0 && id_ch(code[w - 1])) w--;
+            if (b > w) {
+                long kwl = b - w;
+                if ((kwl == 3 && tx_same(code + w, 3, "int", 3)) ||
+                    (kwl == 4 && (tx_same(code + w, 4, "void", 4) || tx_same(code + w, 4, "char", 4) || tx_same(code + w, 4, "long", 4))))
+                    continue;
+            }
+        }
+        for (int m = 0; POSIX_SYMS[m]; m++) {
+            long sl = tx_len(POSIX_SYMS[m], 32);
+            if (len == sl && tx_same(code + st, len, POSIX_SYMS[m], sl)) {
+                (*p_posix)++;
+                break;
+            }
+        }
+    }
+}
+
+static void scan_file(const char *root, const char *rel) {
+    char full[4400];
+    size_t sz = 0;
+    char *b;
+    if (is_excluded_tool(rel) || ncur >= PC_MAXF) return;
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel)) return;
+    sy_stat_t st;
+    if (sy_lstat(full, &st) != 0 || st.kind != 'f') return;
+    b = (char *)cx_read(full, &sz);
+    if (!b) return;
+    long pos_c = 0, proc_c = 0, ext_c = 0, at = 0, n = (long)sz;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && b[at + l - 1] == '\r') l--;
+        scan_line(b + at, l, &pos_c, &proc_c, &ext_c);
+        at += (e < 0 ? l : e + 1);
+    }
+    mm_free(b);
+    long tot = pos_c + proc_c + ext_c;
+    PcRow *r = &cur_rows[ncur++];
+    cx_fmt(r->path, sizeof r->path, "%s", rel);
+    r->total = tot;
+    r->posix_call = pos_c;
+    r->proc_path = proc_c;
+    r->ext_fs = ext_c;
+}
+
+static void sort_rows(PcRow *arr, int n) {
+    for (int i = 1; i < n; i++) {
+        PcRow key = arr[i];
+        int j = i - 1;
+        while (j >= 0 && tx_cmp(arr[j].path, tx_len(arr[j].path, 256), key.path, tx_len(key.path, 256)) > 0) {
+            arr[j + 1] = arr[j];
+            j--;
+        }
+        arr[j + 1] = key;
+    }
+}
+
+static PcRow *find_row(PcRow *arr, int n, const char *path) {
+    for (int i = 0; i < n; i++) if (tx_eqz(arr[i].path, path)) return &arr[i];
+    return 0;
+}
+
+static long parse_num(const char *s, long n) {
+    long v = 0;
+    for (long i = 0; i < n && s[i] >= '0' && s[i] <= '9'; i++) v = v * 10 + (s[i] - '0');
+    return v;
+}
+
+static int load_baseline(const char *bpath) {
+    size_t sz = 0;
+    char *b = (char *)cx_read(bpath, &sz);
+    if (!b) return -1;
+    long at = 0, n = (long)sz;
+    nbase = 0;
+    while (at < n && nbase < PC_MAXF) {
+        long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && b[at + l - 1] == '\r') l--;
+        if (l > 0 && b[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3, o4, l4;
+            if (!tx_field(b + at, l, '\t', 0, &o0, &l0) &&
+                !tx_field(b + at, l, '\t', 1, &o1, &l1) &&
+                !tx_field(b + at, l, '\t', 2, &o2, &l2) &&
+                !tx_field(b + at, l, '\t', 3, &o3, &l3) &&
+                !tx_field(b + at, l, '\t', 4, &o4, &l4) && l0 > 0 && l0 < 255) {
+                PcRow *r = &base_rows[nbase++];
+                mm_copy(r->path, sizeof r->path, b + at + o0, (size_t)l0);
+                r->path[l0] = 0;
+                r->total = parse_num(b + at + o1, l1);
+                r->posix_call = parse_num(b + at + o2, l2);
+                r->proc_path = parse_num(b + at + o3, l3);
+                r->ext_fs = parse_num(b + at + o4, l4);
+            }
+        }
+        at += (e < 0 ? l : e + 1);
+    }
+    mm_free(b);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    int mode = 0; /* 0=check, 1=write, 2=init */
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) mode = 0;
+        else if (tx_eqz(argv[i], "--write")) mode = 1;
+        else if (tx_eqz(argv[i], "--init")) mode = 2;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else {
+            sy_eprintf("usage: tools/posix-census.cx [--check | --write | --init] [--root DIR]\n");
+            return 2;
+        }
+    }
+
+    char *gv[] = {"git", "-C", (char *)root, "ls-files", "--", "tools/*.cx", "tools/**/*.cx", 0};
+    char *lst = 0; size_t ln = 0;
+    if (cx_runv_timeout(gv, 20, &lst, &ln) != 0 || !lst) {
+        if (lst) mm_free(lst);
+        sy_eprintf("posix-census: git ls-files failed in %s\n", root);
+        return 2;
+    }
+    long at = 0, n = (long)ln;
+    while (at < n) {
+        long e = tx_chr(lst + at, n - at, '\n'), l = e < 0 ? n - at : e;
+        if (l > 0 && lst[at + l - 1] == '\r') l--;
+        if (l > 0 && l < 255) {
+            char rel[256];
+            mm_copy(rel, sizeof rel, lst + at, (size_t)l);
+            rel[l] = 0;
+            scan_file(root, rel);
+        }
+        at += (e < 0 ? l : e + 1);
+    }
+    mm_free(lst);
+    sort_rows(cur_rows, ncur);
+
+    char bpath[4400];
+    if (cx_fmt(bpath, sizeof bpath, "%s/%s", root, PC_BASE)) return 2;
+    if (mode != 2 && load_baseline(bpath) != 0) {
+        sy_printf("posix-census: FAIL: cannot read %s\n", bpath);
+        return 1;
+    }
+
+    long cur_tot = 0, base_tot = 0;
+    int over = 0, below = 0;
+    for (int i = 0; i < nbase; i++) base_tot += base_rows[i].total;
+    for (int i = 0; i < ncur; i++) {
+        PcRow *c = &cur_rows[i];
+        PcRow *b = find_row(base_rows, nbase, c->path);
+        long bt = b ? b->total : 0, bp = b ? b->posix_call : 0, bpr = b ? b->proc_path : 0, be = b ? b->ext_fs : 0;
+        cur_tot += c->total;
+        if (mode != 2) {
+            if (c->total > bt || c->posix_call > bp || c->proc_path > bpr || c->ext_fs > be) {
+                over++;
+                sy_printf("posix-census: %s has %ld hits (posix=%ld proc=%ld ext_fs=%ld), baseline %ld (posix=%ld proc=%ld ext_fs=%ld)\n",
+                          c->path, c->total, c->posix_call, c->proc_path, c->ext_fs, bt, bp, bpr, be);
+            } else if (c->total < bt || c->posix_call < bp || c->proc_path < bpr || c->ext_fs < be) {
+                below++;
+            }
+        }
+    }
+    if (mode != 2) {
+        for (int i = 0; i < nbase; i++) {
+            if (!find_row(cur_rows, ncur, base_rows[i].path)) below++;
+        }
+    }
+
+    if (mode == 1 && over > 0) {
+        sy_eprintf("posix-census: REFUSE --write: %d file(s) exceed baseline (counts only go down)\n", over);
+        return 1;
+    }
+    if (mode == 1 || mode == 2) {
+        char *out = (char *)mm_alloc(262144);
+        if (!out) return 2;
+        long used = 0;
+        int w = cx_fmt(out, 262144, "# posix-census baseline: FILE<TAB>TOTAL<TAB>POSIX_CALL<TAB>PROC_PATH<TAB>EXT_FS_CMD (only goes down; tools/posix-census.cx --write)\n");
+        if (w) { mm_free(out); return 2; }
+        used = tx_len(out, 262144);
+        int written_rows = 0;
+        for (int i = 0; i < ncur; i++) {
+            PcRow *c = &cur_rows[i];
+            if (c->total <= 0) continue;
+            char line[512];
+            if (cx_fmt(line, sizeof line, "%s\t%ld\t%ld\t%ld\t%ld\n", c->path, c->total, c->posix_call, c->proc_path, c->ext_fs)) { mm_free(out); return 2; }
+            long ll = tx_len(line, sizeof line);
+            if (used + ll + 1 >= 262144) { mm_free(out); return 2; }
+            mm_copy(out + used, (size_t)(262144 - used), line, (size_t)ll);
+            used += ll;
+            out[used] = 0;
+            written_rows++;
+        }
+        if (sy_write_atomic(bpath, out, (size_t)used, 0644) != 0) {
+            mm_free(out);
+            sy_eprintf("posix-census: cannot write %s\n", bpath);
+            return 2;
+        }
+        mm_free(out);
+        sy_printf("posix-census: wrote %s: %d units, %ld hits (%d rows)\n", PC_BASE, ncur, cur_tot, written_rows);
+        return 0;
+    }
+
+    sy_printf("posix-census: %s: %d units, %ld hits (baseline %ld); %d above baseline, %d below (--write ratchets down)\n",
+              over ? "FAIL" : "ok", ncur, cur_tot, base_tot, over, below);
+    return over ? 1 : 0;
+}
