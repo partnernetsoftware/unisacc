@@ -1,0 +1,81 @@
+struct BloomAdditiveDraw {
+  step:u32;
+  rgba:u32;
+  width:u32;
+  height:u32;
+  destinationWidth:u32;
+  destinationHeight:u32;
+  shader:u32;
+}
+
+native function bloom_add_input(at:i64,bytes:i64,packet:i64,capacity:i64,work:i64) i64 {
+  return gpu_draw_range(at,bytes,packet,capacity) && !composer_alias(at,bytes,work,200);
+}
+
+// Adds a linear RGBA8 bloom texture to the offscreen RenderPass read target.
+// Produces an in-place, non-swapping blend. The caller owns 200 scratch bytes.
+native function UnrealBloom_gpuAdd(packet:i64,capacity:i64,draw:i64,work:i64) i64 {
+  if(gpu_packet_slot(packet,capacity,0)<0 || !composer_span(work,200) ||
+     !gpu_draw_range(work,200,packet,capacity) || !composer_span(draw,BloomAdditiveDraw.size) ||
+     !bloom_add_input(draw,BloomAdditiveDraw.size,packet,capacity,work)) { return 0-1; }
+  let step=ux_u32(draw+BloomAdditiveDraw.step);
+  let shader=ux_u32(draw+BloomAdditiveDraw.shader);
+  let rgba=ux_u32(draw+BloomAdditiveDraw.rgba);
+  let width=ux_u32(draw+BloomAdditiveDraw.width);
+  let height=ux_u32(draw+BloomAdditiveDraw.height);
+  let dstWidth=ux_u32(draw+BloomAdditiveDraw.destinationWidth);
+  let dstHeight=ux_u32(draw+BloomAdditiveDraw.destinationHeight);
+  if(width<1 || width>2048 || height<1 || height>2048 || dstWidth<1 || dstWidth>2048 ||
+     dstHeight<1 || dstHeight>2048 || !composer_span(step,ComposerStep.size) ||
+     !bloom_add_input(step,ComposerStep.size,packet,capacity,work) ||
+     !composer_span(shader,GpuShaderSource.size) ||
+     !bloom_add_input(shader,GpuShaderSource.size,packet,capacity,work) ||
+     !bloom_add_input(rgba,width*height*4,packet,capacity,work)) { return 0-1; }
+  let target=ux_u32(step+ComposerStep.read);
+  if(target<1 || target>1024 || ux_u32(step+ComposerStep.flags)!=1 ||
+     ux_u32(step+ComposerStep.screen)!=0) { return 0-1; }
+  let vs=ux_u32(shader+GpuShaderSource.vertex);
+  let fs=ux_u32(shader+GpuShaderSource.fragment);
+  let vn=ux_u32(shader+GpuShaderSource.vertexBytes);
+  let fn=ux_u32(shader+GpuShaderSource.fragmentBytes);
+  if(vn<1 || vn>4096 || fn<1 || fn>4096 ||
+     !bloom_add_input(vs,vn,packet,capacity,work) || !bloom_add_input(fs,fn,packet,capacity,work)) { return 0-1; }
+  let total=296+(vn+3)/4*4+(fn+3)/4*4+width*height*4;
+  let before=ux_u32(packet+GpuPacket.bytes);
+  let commands=ux_u32(packet+GpuPacket.commands);
+  if(commands>251 || gpu_packet_slot(packet,capacity,total)<0) { return 0-1; }
+
+  let texture=work;
+  let a=ux_u32_put(texture+GpuTextureSource.width,width);
+  let b=ux_u32_put(texture+GpuTextureSource.height,height);
+  let c=ux_u32_put(texture+GpuTextureSource.filter,1);
+  let d=ux_u32_put(texture+GpuTextureSource.wrapS,0);
+  let e=ux_u32_put(texture+GpuTextureSource.wrapT,0);
+  let f=ux_u32_put(texture+GpuTextureSource.rgba,rgba);
+  let state=work+24;
+  let words=[8,0,5,100,100,204,201,204,201,0,0,0,255,255,7680,7680,7680,0,0,0,0,0,15];
+  let i=0;
+  while(i<23) {
+    let put=ux_u32_put(state+4*i,words[i]);
+    i=i+1;
+  }
+  let vertices=work+116;
+  let triangle=[0.0-1.0,0.0-1.0,0.0,0.0,0.0,0.0,1.0,3.0,0.0-1.0,0.0,2.0,0.0,0.0,1.0,
+    0.0-1.0,3.0,0.0,0.0,2.0,0.0,1.0];
+  i=0;
+  while(i<21) {
+    let put=ux_f32_put(vertices+4*i,triangle[i]);
+    i=i+1;
+  }
+  let bound=GpuTarget_bind(packet,capacity,target,0);
+  let view=GpuPacket_viewport(packet,capacity,0,0,dstWidth,dstHeight);
+  let clip=GpuPacket_scissor(packet,capacity,0,0,0,0,0);
+  let blend=GpuPacket_setRenderState(packet,capacity,state);
+  let drawn=GpuPacket_drawTexture(packet,capacity,vertices,3,shader,texture);
+  if(bound<0 || view<0 || clip<0 || blend<0 || drawn<0) {
+    let length=ux_u32_put(packet+GpuPacket.bytes,before);
+    let count=ux_u32_put(packet+GpuPacket.commands,commands);
+    return 0-1;
+  }
+  return drawn;
+}

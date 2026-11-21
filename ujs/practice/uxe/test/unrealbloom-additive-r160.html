@@ -1,0 +1,93 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, LinearFilter, NoBlending, REVISION, Vector2, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const addon = path => import("file://" + query.get("package") + "/examples/jsm/" + path + ".js");
+  const [{ UnrealBloomPass }, { ShaderPass }, { CopyShader }] = await Promise.all([
+    addon("postprocessing/UnrealBloomPass"), addon("postprocessing/ShaderPass"), addon("shaders/CopyShader"),
+  ]);
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 4;
+    canvas.height = 2;
+    const gl = canvas.getContext("webgl2");
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  const { gl } = context();
+  let actual;
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, createGpuTargets(gl));
+  const [binary, ...resources] = await Promise.all([
+    fetch("file://" + query.get("wasm")), fetch("../base/gpu-texture.vert"), fetch("../base/gpu-texture.frag"),
+  ]);
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(), {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+  })).instance.exports;
+  const lengths = [];
+  for (const [i, response] of resources.entries()) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!response.ok || !bytes.length || bytes.length > 4096) throw new Error("invalid base texture shader");
+    new Uint8Array(actual.memory.buffer, 2097152 + 10000 + 4500 * i, bytes.length).set(bytes);
+    lengths.push(BigInt(bytes.length));
+  }
+  const status = actual.uxe_bloom_add(BigInt(query.get("mode")), ...lengths);
+  if (status !== 0n) throw new Error("Bloom additive probe failed " + status);
+  function words(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return Array.from({ length: 8 }, (_, i) => view.getUint32(i * 4, true));
+  }
+  const actualRead = words(new Uint8Array(actual.memory.buffer, 2097152 + 7000, 32));
+  const actualSpare = words(new Uint8Array(actual.memory.buffer, 2097152 + 7200, 32));
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(4, 2, false);
+  renderer.autoClear = false;
+  const bloom = new UnrealBloomPass(new Vector2(4, 2), 1, 0, 0);
+  const read = new WebGLRenderTarget(4, 2);
+  const spare = new WebGLRenderTarget(4, 2);
+  renderer.setRenderTarget(spare);
+  renderer.setClearColor(0x0000ff, 1);
+  renderer.clear();
+  const seed = new ShaderPass(CopyShader);
+  seed.material.blending = NoBlending;
+  const originalData = [];
+  for (let i = 0; i < 4; i++) originalData.push(40,80,120,64);
+  for (let i = 0; i < 4; i++) originalData.push(220,225,230,245);
+  const original = new DataTexture(Uint8Array.from(originalData), 4, 2);
+  original.needsUpdate = true;
+  seed.render(renderer, read, { texture: original });
+  const overlay = new DataTexture(Uint8Array.from([124,40,20,0,164,80,36,128]), 2, 1);
+  overlay.minFilter = overlay.magFilter = LinearFilter;
+  overlay.needsUpdate = true;
+  bloom.copyUniforms.tDiffuse.value = overlay;
+  bloom.fsQuad.material = bloom.blendMaterial;
+  renderer.setRenderTarget(read);
+  bloom.fsQuad.render(renderer);
+  function pixels(target) {
+    const rgba = new Uint8Array(32);
+    renderer.readRenderTargetPixels(target, 0, 0, 4, 2, rgba);
+    return words(rgba);
+  }
+  const expectedRead = pixels(read), expectedSpare = pixels(spare);
+  seed.dispose();
+  original.dispose();
+  overlay.dispose();
+  read.dispose();
+  spare.dispose();
+  bloom.materialHighPassFilter.dispose();
+  bloom.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify([...actualRead, ...actualSpare, ...expectedRead, ...expectedSpare]);
+} catch (error) {
+  output.textContent = "error:" + error.message;
+}
+</script>

@@ -293,6 +293,7 @@
 - ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
 - ~~UnrealBloomPass 原生横纵模糊 | G-pixel 半径 3 与 5、交换轴、原生目标 | Composer 路由与亮部提取。~~ 25 项通过，RGBA8 全帧与 r160 一致，换轴转红。
 - ~~UnrealBloomPass 五级 CPU 合成 | G-pixel 五级双线性、半径、色调与强度 | 横纵模糊。~~ 36 项通过，四组 256 字节与 r160 一致，错半径转红。
+- ~~UnrealBloomPass 硬件加回读目标 | G-pixel 实际双目标、加性因子、透明和容量回滚 | 五级 Bloom 合成及 GPU 目标。~~ 32 项通过，误用 ONE 令读目标 8 像素转红。
 - UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。
 - ~~OutlinePass 边缘与遮挡颜色 | G-pixel 真 r160 中间纹理、深度掩模与颜色对照 | RGBA8 内核。~~ 17 项通过，遮挡边错用可见色转红。
 - OutlinePass 场景掩模与合成 | G-pixel 选择、遮挡、模糊、叠加及抹除 | 边缘内核、RenderPass、对象拾取。
