@@ -1,0 +1,183 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+enum { frame_width=9, frame_rows=3, variant_width=frame_width*frame_rows, oracle_width=4*2*variant_width };
+typedef struct { double x,y,z; } Vec;
+static const Vec quadratic[]={{0,0,0},{2,1,0},{3,4,2}};
+static const Vec cubic[]={{0,0,0},{2,1,0},{2,2,2},{3,4,1}};
+static const struct { const char *name; const Vec *points; int degree,dims; } classes[]={
+    {"QuadraticBezierCurve",quadratic,2,2},{"QuadraticBezierCurve3",quadratic,2,3},
+    {"CubicBezierCurve",cubic,3,2},{"CubicBezierCurve3",cubic,3,3}
+};
+
+static double root(double n) {
+    if(n<=0) return 0;
+    double r=n<1?1:n;
+    for(int i=0;i<45;i++) r=(r+n/r)*0.5;
+    return r;
+}
+
+static Vec scale(Vec v,double k) { return (Vec){v.x*k,v.y*k,v.z*k}; }
+static Vec add(Vec a,Vec b) { return (Vec){a.x+b.x,a.y+b.y,a.z+b.z}; }
+static double dot(Vec a,Vec b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
+static Vec cross(Vec a,Vec b) {
+    return (Vec){a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
+}
+
+static Vec unit(Vec v) {
+    const double length=root(dot(v,v));
+    return length>0?scale(v,1/length):v;
+}
+
+static Vec rotate(Vec v,Vec guide,double cosine,double sine) {
+    return add(add(scale(v,cosine),scale(cross(guide,v),sine)),scale(guide,dot(guide,v)*(1-cosine)));
+}
+
+static Vec evaluate(const Vec *points,int degree,double t) {
+    Vec work[4];
+    for(int i=0;i<=degree;i++) work[i]=points[i];
+    for(int width=degree;width>0;width--)
+        for(int i=0;i<width;i++) work[i]=add(scale(work[i],1-t),scale(work[i+1],t));
+    return work[0];
+}
+
+static Vec sampled_tangent(const Vec *points,int degree,double t) {
+    const double before=t<0.0001?0:t-0.0001,after=t>0.9999?1:t+0.0001;
+    return add(evaluate(points,degree,after),scale(evaluate(points,degree,before),-1));
+}
+
+static void pack(double *row,Vec tangent,Vec normal,Vec binormal) {
+    row[0]=tangent.x; row[1]=tangent.y; row[2]=tangent.z;
+    row[3]=normal.x; row[4]=normal.y; row[5]=normal.z;
+    row[6]=binormal.x; row[7]=binormal.y; row[8]=binormal.z;
+}
+
+// A single arc division maps u to t. De Casteljau and Rodrigues give
+// independent expectations for the three rows and both seam options.
+static void expected(int ci,int closed,double out[variant_width]) {
+    const int dims=classes[ci].dims,degree=classes[ci].degree;
+    const Vec *points=classes[ci].points;
+    Vec tangents[frame_rows],normals[frame_rows];
+    for(int i=0;i<frame_rows;i++) tangents[i]=sampled_tangent(points,degree,i/2.0);
+    if(dims==2) {
+        const Vec invalid={-999,-999,-999};
+        for(int i=0;i<frame_rows;i++) {
+            tangents[i].z=-999;
+            pack(out+frame_width*i,tangents[i],invalid,invalid);
+        }
+        return;
+    }
+    for(int i=0;i<frame_rows;i++) tangents[i]=unit(tangents[i]);
+    const Vec t=tangents[0];
+    const double x=t.x<0?-t.x:t.x,y=t.y<0?-t.y:t.y,z=t.z<0?-t.z:t.z;
+    const Vec guide=z<=x && z<=y?(Vec){0,0,1}:y<=x?(Vec){0,1,0}:(Vec){1,0,0};
+    normals[0]=cross(t,unit(cross(t,guide)));
+    for(int i=1;i<frame_rows;i++) {
+        const Vec axis=cross(tangents[i-1],tangents[i]);
+        normals[i]=rotate(normals[i-1],unit(axis),dot(tangents[i-1],tangents[i]),root(dot(axis,axis)));
+    }
+    if(closed) {
+        const Vec ends=cross(normals[0],normals[2]);
+        const double twist=dot(normals[0],normals[2]),sign=dot(t,ends)>0?-1:1;
+        normals[1]=rotate(normals[1],tangents[1],root((1+twist)/2),sign*root((1-twist)/2));
+        normals[2]=rotate(normals[2],tangents[2],twist,sign*root(1-twist*twist));
+    }
+    for(int i=0;i<frame_rows;i++) pack(out+frame_width*i,tangents[i],normals[i],cross(tangents[i],normals[i]));
+}
+
+static int assembly(char *library,int capacity) {
+    const char *modules[]={"curve-control-layout","object-json-tokens","f64-math","json-bytes","json-read",
+        "record-copy","curve-line","curve-bezier","curve-control","curve","curve-control-arcs","geometry-frames",
+        "curve-frames","curve-family-adapter","curve-family-frames","curve-family-classes",0};
+    int used=0;
+    for(int i=0;modules[i];i++) {
+        char path[180];
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",modules[i]);
+        unsigned char *bytes=0;
+        int64_t n=0;
+        if(sy_read_file(path,&bytes,&n,40000)) return 1;
+        if(n>=capacity-used-1) { mm_free(bytes); return 1; }
+        used+=tx_snprintf(library+used,capacity-used,"%.*s\n",(int)n,bytes);
+        mm_free(bytes);
+    }
+    return 0;
+}
+
+static int emit(char *out,int capacity,int ci,int closed,int mutate,const double *values) {
+    const Vec *points=classes[ci].points;
+    const int degree=classes[ci].degree,dims=classes[ci].dims;
+    int n=0;
+    for(int i=1;i<=degree;i++) {
+        const int at=1024+32*i;
+        Vec point=points[i];
+        if(mutate && ci!=3 && i==1) point.y+=2;
+        n+=tx_snprintf(out+n,capacity-n,"let x%d=ux_f64_put(%d,%d.0);let y%d=ux_f64_put(%d,%d.0);",
+            i,at,(int)point.x,i,at+8,(int)point.y);
+        if(dims==3) n+=tx_snprintf(out+n,capacity-n,"let z%d=ux_f64_put(%d,%d.0);",i,at+16,(int)point.z);
+    }
+    n+=tx_snprintf(out+n,capacity-n,
+        "let shape=%sClass_init(0,1024,1056,1088%s);let set=ux_u32_put(shape+CurveControl.arcLengthDivisions,1);"
+        "let frames=CurveFamily_computeFrenetFrames(shape,9216,2,%d,2048,768,9728);"
+        "if(frames<0){return 100.0;} let gold=[",
+        classes[ci].name,degree==3?",1120":"",closed);
+    for(int i=0;i<variant_width;i++) {
+        const double value=values[i]==-999?0:values[i];
+        n+=tx_snprintf(out+n,capacity-n,"%s%s%.17f",i?",":"",value<0?"0.0-":"",value<0?-value:value);
+    }
+    n+=tx_snprintf(out+n,capacity-n,
+        "];let i=0;while(i<27){let actual=ux_f64(frames+8*i);let want=gold[i];"
+        "if(%d==2 && i%%9>=2){if(actual==actual){return 1.0+i;}}"
+        "else{if(!(actual-want<=0.000000001 && want-actual<=0.000000001)){return 1.0+i;}}"
+        "i=i+1;}return 0.0;",dims);
+    return n<0 || n>=capacity;
+}
+
+int main(int argc,char **argv) {
+    const int all_closed_mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    const int class_mutate=argc==3 && tx_eqz(argv[1],"--mutate-class");
+    const int mutate=all_closed_mutate || class_mutate;
+    int ci=all_closed_mutate?3:-1;
+    if(argc==3 && (tx_eqz(argv[1],"--class") || class_mutate)) {
+        char *end=0;
+        const long row=tx_strtol(argv[2],&end,10);
+        if(end!=argv[2] && *end==0 && row>=0 && row<4) ci=row;
+    }
+    if(ci<0) return 2;
+    char library[79000],dir[260],source[320],wasm[320];
+    if(assembly(library,sizeof library) || sy_mkdtemp("/tmp","curve-bezier-frames-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    double reference[oracle_width],gold[variant_width];
+    int failed=g_math_reference("curve-family-bezier-frames",reference,oracle_width,dir);
+    const Vec endpoint=classes[ci].points[classes[ci].degree];
+    const double length=root(endpoint.x*endpoint.x+endpoint.y*endpoint.y+(classes[ci].dims==3?endpoint.z*endpoint.z:0));
+    for(int closed=mutate?1:0;closed<=1 && !failed;closed++) {
+        expected(ci,closed,gold);
+        for(int cell=0;cell<variant_width;cell++) {
+            const double actual=reference[(2*ci+closed)*variant_width+cell];
+            if(!g_math_near(actual,gold[cell],1e-9)) {
+                printf("G_STRUCT %s frames closed=%d r160 cell=%d actual=%.17g gold=%.17g\n",
+                    classes[ci].name,closed,cell,actual,gold[cell]);
+                failed=1;
+            }
+        }
+        if(!failed) {
+            char setup[160],statement[3600];
+            tx_snprintf(setup,sizeof setup,"let length=ux_f64_put(2056,%.17f);",length);
+            double error=0;
+            if(emit(statement,sizeof statement,ci,mutate && ci==3?0:closed,mutate,gold) ||
+               g_math_sample(source,wasm,library,setup,statement,&error) || error!=0) {
+                printf("G_STRUCT %s frames closed=%d wasm mismatch=%g\n",classes[ci].name,closed,error);
+                failed=1;
+            }
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT %s nonaxis Bezier frames cases=%d failed=%d\n",classes[ci].name,mutate?1:2,failed);
+    return failed;
+}
