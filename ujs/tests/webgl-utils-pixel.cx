@@ -1,0 +1,77 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+static double rgba(int r,int g,int b) {
+    return 4278190080.0+r+256*g+65536*b;
+}
+
+static int expected(double *gold) {
+    const double rows[][4]={
+        {0x8058,0x1908,0x1401,rgba(64,120,200)}, {0x8229,0x1903,0x1401,rgba(64,0,0)},
+        {0x822b,0x8227,0x1401,rgba(64,120,0)}, {0x8c43,0x1908,0x1401,rgba(55,13,134)},
+        {0x822d,0x1903,0x140b,rgba(64,0,0)}, {0x822f,0x8227,0x140b,rgba(64,159,0)},
+        {0x881a,0x1908,0x140b,rgba(64,159,191)}, {0x822e,0x1903,0x1406,rgba(64,0,0)},
+        {0x8230,0x8227,0x1406,rgba(64,159,0)}, {0x8814,0x1908,0x1406,rgba(64,159,191)},
+        {0x8234,0x8d94,0x1403,513}, {0x823a,0x8228,0x1403,1025}, {0x8d76,0x8d99,0x1403,4097},
+        {0x8056,0x1908,0x8033,rgba(255,0,136)}, {0x8057,0x1908,0x8034,rgba(255,132,0)},
+        {0x81a5,0x1902,0x1403,rgba(64,0,0)}, {0x81a6,0x1902,0x1405,rgba(159,0,0)},
+        {0x8cac,0x1902,0x1406,rgba(191,0,0)}, {0x88f0,0x84f9,0x84fa,rgba(32,0,0)},
+    };
+    const int refusal[]={-1,-1,-2,-2,-2,-2,-2,-2,-3,-3,-4,-4};
+    int at=0;
+    for(int side=0;side<2;side++) for(int i=0;i<19;i++) {
+        gold[at++]=rows[i][0];
+        if(side==1 || i<15) {
+            gold[at++]=rows[i][1];
+            gold[at++]=rows[i][2];
+        }
+        gold[at++]=rows[i][3];
+    }
+    for(int i=0;i<(int)(sizeof refusal/sizeof refusal[0]);i++) {
+        gold[at++]=refusal[i];
+        gold[at++]=1;
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-webgl-utils-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/formats.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "webgl-utils-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char signature[]=
+        "export uxe_webgl_utils_probe(op:i64,format:i64,kindValue:i64,srgb:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "webgl-utils-format.ujs",
+        BASE "webgl-utils-generated.ujs",FIX "webgl-utils-probe.ujs","-o",wasm,0};
+    enum { count=168 };
+    double gold[count],actual[count]={0};
+    int failed=length<0 || length>=(int)sizeof url || expected(gold)!=count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("WEBGL_UTILS compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("WEBGL_UTILS case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(!failed) printf("WEBGL_UTILS rejected INVALID_ARGUMENT UNSUPPORTED_COMBINATION COMPRESSED_EXTENSION LEGACY_WEBGL1\n");
+    if(sy_remove_all(dir)) failed++;
+    printf("G_PIXEL WebGLUtils cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}
