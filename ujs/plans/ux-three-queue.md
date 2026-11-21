@@ -54,7 +54,8 @@
 - PropertyBinding | G-anim propertybinding-anim.cx：根对象平移、缩放、旋转和分量视图及脏标记；命名节点和材料路径待补。补齐 constructor,create,sanitizeNodeName,parseTrackName,findNode,unbind，运行独立金值及 r160 篡改门 | -
 - ~~InterleavedBuffer 行复制、更新范围与共享 JSON 元数据 | G-struct r160 异型复制、更新范围、原始缓冲字与共享身份 | 交错缓冲基础。~~ 编辑 20 项、元数据 15 项通过，错行与拆分共享分别转红。
 - ~~InterleavedBuffer Wasm 上传登记及确认 | G-struct 真实 WebGL2 初传、更新、失败重试和回调顺序 | 更新范围。~~ 22 项通过，丢第二次确认使回调次数由 2 变 1 转红。
-- InterleavedBuffer 共享克隆与产品渲染器回调 | G-struct 同一底层缓冲的克隆身份与实际产品使用 | 共享缓冲记录和上传确认。
+- ~~InterleavedBuffer 共享克隆 | G-struct 克隆身份、别名、类型和视图顺序 | 共享缓冲记录。~~ 19 项通过，拆开注册表转红。
+- InterleavedBuffer 产品渲染器回调和分数行数 | G-struct 实际产品上传与 r160 分数行数边界 | 共享克隆、上传确认。
 - ~~LineCurve 与 Bezier 系弧长缓存 | G-struct 六类共用弧长表、缓存复用与刷新 | CurveControl 和 CurveArcCache。~~ 九项通过，漏刷新使长度从 8 变 4 转红。
 - LineCurve | G-struct linecurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getTangentAt,getPoints,getSpacedPoints,getLengths,updateArcLengths,getUtoTmapping,computeFrenetFrames，运行独立金值及 r160 篡改门 | -
 - CubicBezierCurve | G-struct cubicbeziercurve-struct.cx 与 curve-control-struct.cx 独立金值和 r160 对照。共享控制点记录覆盖复制、采样与 JSON 往返。完整弧长与组合曲线接口仍为部分。补齐 constructor,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames，运行独立金值及 r160 篡改门 | -

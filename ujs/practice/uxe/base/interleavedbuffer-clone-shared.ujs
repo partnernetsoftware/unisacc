@@ -1,0 +1,102 @@
+struct IBCloneRegistry {
+  rows: u32;
+  capacity: u32;
+  count: u32;
+  arena: u32;
+  next: u32;
+  end: u32;
+}
+
+struct IBCloneBacking {
+  owner: u32;
+  ownerBytes: u32;
+  clone: u32;
+  cloneBytes: u32;
+}
+
+native function ib_clone_areas(reg:i64,table:i64,cap:i64,arena:i64,end:i64) i64 {
+  if(cap<0 || cap>65536 || end<arena || !ib_range(reg,IBCloneRegistry.size,4) ||
+     !ib_range(table,cap*IBCloneBacking.size,4) || !ib_range(arena,end-arena,8)) { return 0; }
+  return ib_disjoint(reg,IBCloneRegistry.size,table,cap*IBCloneBacking.size) &&
+    ib_disjoint(reg,IBCloneRegistry.size,arena,end-arena) &&
+    ib_disjoint(table,cap*IBCloneBacking.size,arena,end-arena);
+}
+
+native function InterleavedBuffer_initClone(reg:i64,table:i64,cap:i64,arena:i64,end:i64) i64 {
+  if(!ib_clone_areas(reg,table,cap,arena,end)) { return 0-1; }
+  let a=ux_u32_put(reg+IBCloneRegistry.rows,table);
+  let b=ux_u32_put(reg+IBCloneRegistry.capacity,cap);
+  let c=ux_u32_put(reg+IBCloneRegistry.count,0);
+  let d=ux_u32_put(reg+IBCloneRegistry.arena,arena);
+  let e=ux_u32_put(reg+IBCloneRegistry.next,arena);
+  let f=ux_u32_put(reg+IBCloneRegistry.end,end);
+  return reg;
+}
+
+native function ib_clone_record_safe(record:i64,reg:i64,rows:i64,bytes:i64,arena:i64,space:i64) i64 {
+  return ib_range(record,InterleavedBuffer.size,4) &&
+    ib_disjoint(record,InterleavedBuffer.size,reg,IBCloneRegistry.size) &&
+    ib_disjoint(record,InterleavedBuffer.size,rows,bytes) &&
+    ib_disjoint(record,InterleavedBuffer.size,arena,space);
+}
+
+// The first view of a backing span contributes array.slice(0). Later
+// clones in this registry make a fresh typed view over that same copy,
+// beginning at zero, even when their original view began at an offset.
+native function InterleavedBuffer_cloneShared(dst:i64,src:i64,reg:i64,owner:i64,ownerBytes:i64) i64 {
+  let bytes=ib_bytes(src);
+  if(bytes<0 || !ib_range(reg,IBCloneRegistry.size,4) ||
+     !ib_range(owner,ownerBytes,1) || !ib_disjoint(dst,InterleavedBuffer.size,src,InterleavedBuffer.size) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,owner,ownerBytes) ||
+     !ib_disjoint(src,InterleavedBuffer.size,owner,ownerBytes)) { return 0-1; }
+  let input=ux_u32(src+InterleavedBuffer.data);
+  if(input<owner || input+bytes>owner+ownerBytes) { return 0-1; }
+  let rows=ux_u32(reg+IBCloneRegistry.rows);
+  let cap=ux_u32(reg+IBCloneRegistry.capacity);
+  let count=ux_u32(reg+IBCloneRegistry.count);
+  let arena=ux_u32(reg+IBCloneRegistry.arena);
+  let next=ux_u32(reg+IBCloneRegistry.next);
+  let end=ux_u32(reg+IBCloneRegistry.end);
+  let tableBytes=cap*IBCloneBacking.size;
+  if(count>cap || next<arena || next>end || !ib_clone_areas(reg,rows,cap,arena,end) ||
+     !ib_clone_record_safe(src,reg,rows,tableBytes,arena,end-arena) ||
+     !ib_clone_record_safe(dst,reg,rows,tableBytes,arena,end-arena) ||
+     !ib_disjoint(owner,ownerBytes,rows,tableBytes) ||
+     !ib_disjoint(owner,ownerBytes,reg,IBCloneRegistry.size) ||
+     (!ib_disjoint(owner,ownerBytes,arena,end-arena) && (owner<arena || owner+ownerBytes>next))) { return 0-1; }
+  let at=0-1;
+  let clonedBytes=bytes;
+  let i=0;
+  while(i<count) {
+    let row=rows+i*IBCloneBacking.size;
+    let key=ux_u32(row+IBCloneBacking.owner);
+    let length=ux_u32(row+IBCloneBacking.ownerBytes);
+    if(key==owner) {
+      if(length!=ownerBytes) { return 0-1; }
+      at=ux_u32(row+IBCloneBacking.clone);
+      clonedBytes=ux_u32(row+IBCloneBacking.cloneBytes);
+      if(at<arena || at%8!=0 || at>next-clonedBytes) { return 0-1; }
+    } else if(!ib_disjoint(key,length,owner,ownerBytes)) { return 0-1; }
+    i=i+1;
+  }
+  let stride=ux_u32(src+InterleavedBuffer.stride);
+  let kind=ux_u32(src+InterleavedBuffer.componentType);
+  // The base ABI stores an integral row count rather than a JS fraction.
+  if(clonedBytes%stride!=0) { return 0-1; }
+  if(at<0) {
+    at=(next+7)/8*8;
+    let reserve=clonedBytes;
+    if(reserve==0) { reserve=8; }
+    if(count==cap || at>end-reserve) { return 0-2; }
+    let data=BufferAttribute_copyBytes(at,input,clonedBytes);
+    let row=rows+count*IBCloneBacking.size;
+    let a=ux_u32_put(row+IBCloneBacking.owner,owner);
+    let b=ux_u32_put(row+IBCloneBacking.ownerBytes,ownerBytes);
+    let c=ux_u32_put(row+IBCloneBacking.clone,at);
+    let d=ux_u32_put(row+IBCloneBacking.cloneBytes,clonedBytes);
+    let e=ux_u32_put(reg+IBCloneRegistry.next,at+reserve);
+    let f=ux_u32_put(reg+IBCloneRegistry.count,count+1);
+  }
+  let cloned=InterleavedBuffer_init(dst,at,clonedBytes/stride,stride,kind);
+  return InterleavedBuffer_setUsage(cloned,ux_u32(src+InterleavedBuffer.usage));
+}
