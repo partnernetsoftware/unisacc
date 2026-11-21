@@ -1,0 +1,98 @@
+/* tools/check-cx-no-ext-deps.cx -- assert no cx.* package in build/tlib-packages.tsv declares an ext.* dep.
+   Usage:
+     sh ./unisacc.com tools/check-cx-no-ext-deps.cx                 (checks repo table + 3 fixture mutations)
+     sh ./unisacc.com tools/check-cx-no-ext-deps.cx -- --table FILE (checks only FILE, rc=0 if 0 violations) */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int ck_pass, ck_fail;
+static void ck(int ok, const char *name) {
+    printf("%s\tcx-no-ext-deps.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) ck_pass++; else ck_fail++;
+}
+
+static int check_table(const char *path, int quiet) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pos = 0;
+    int rows = 0, bad = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) != 0 || !b) {
+        if (!quiet) printf("CX_NO_EXT_DEPS\tERROR\tmissing\t%s\n", path);
+        return -1;
+    }
+    while (pos < (long)n) {
+        long ls = pos;
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        long ll = pos - ls;
+        if (pos < (long)n) pos++;
+        if (ll <= 0 || b[ls] == '#') continue;
+        char line[2048];
+        long cl = ll < 2047 ? ll : 2047;
+        mm_copy(line, (long)sizeof line, b + ls, cl);
+        line[cl] = 0;
+        char *cols[12];
+        int nc = 0;
+        char *p = line;
+        while (nc < 12) {
+            cols[nc++] = p;
+            char *t = strchr(p, '\t');
+            if (!t) break;
+            *t = 0;
+            p = t + 1;
+        }
+        if (nc < 6) continue;
+        rows++;
+        if (strncmp(cols[0], "cx.", 3) != 0) continue;
+        char *dp = cols[5];
+        if (!dp[0] || strcmp(dp, "-") == 0) continue;
+        while (*dp) {
+            char *sc = strchr(dp, ';');
+            if (sc) *sc = 0;
+            if (strncmp(dp, "ext.", 4) == 0) {
+                bad++;
+                if (!quiet) printf("CX_EXT_DEP_VIOLATION\t%s\t%s\n", cols[0], dp);
+            }
+            if (!sc) break;
+            dp = sc + 1;
+        }
+    }
+    if (!quiet) printf("CX_NO_EXT_DEPS\trows=%d\tviolations=%d\n", rows, bad);
+    return bad;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--table") == 0) {
+        int bad = check_table(argv[2], 0);
+        return bad == 0 ? 0 : 1;
+    }
+    if (argc != 1) {
+        printf("usage: check-cx-no-ext-deps [--table FILE]\n");
+        return 2;
+    }
+    int r = check_table("build/tlib-packages.tsv", 0);
+    ck(r == 0, "repo-table-zero-cx-ext-deps");
+
+    char dir[128], f_ok[256], f_m1[256], f_m2[256];
+    if (sy_mkdtemp("/tmp", "chk-cxnoext-", dir, (int)sizeof dir) != 0) return 2;
+    cx_fmt(f_ok, (long)sizeof f_ok, "%s/ok.tsv", dir);
+    cx_fmt(f_m1, (long)sizeof f_m1, "%s/m1.tsv", dir);
+    cx_fmt(f_m2, (long)sizeof f_m2, "%s/m2.tsv", dir);
+    {
+        const char *s_ok = "cx.stream\t0.1.2\t0\tcx/stream\t-\tcx.sys@0.1.0;cx.mem@0.1.0\tnote\n"
+                           "ext.sysx\t0.1.9\t0\text/sysx\t-\tcx.sys@0.1.0;ext.memx@0.1.0\tnote\n";
+        const char *s_m1 = "cx.stream\t0.1.2\t0\tcx/stream\t-\tcx.sys@0.1.0;ext.memx@0.1.0\tnote\n";
+        const char *s_m2 = "cx.sys\t0.1.16\t0\tcx/sys\t-\text.sysx@0.1.0\tnote\n";
+        sy_write_file(f_ok, s_ok, (long)strlen(s_ok), 0644);
+        sy_write_file(f_m1, s_m1, (long)strlen(s_m1), 0644);
+        sy_write_file(f_m2, s_m2, (long)strlen(s_m2), 0644);
+    }
+    ck(check_table(f_ok, 1) == 0, "fixture-clean-passes");
+    ck(check_table(f_m1, 1) == 1, "mut1-cx-stream-ext-dep-fails");
+    ck(check_table(f_m2, 1) == 1, "mut2-cx-sys-ext-dep-fails");
+    sy_remove_all(dir);
+
+    printf("CHECK_CX_NO_EXT_DEPS\tpassed=%d\tfailed=%d\n", ck_pass, ck_fail);
+    return ck_fail ? 1 : 0;
+}
