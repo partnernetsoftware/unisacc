@@ -334,6 +334,7 @@
 - ~~AudioAnalyser FFT 与平滑 | G-io Blackman 窗、频带、平滑及失败保留 | 时间窗与 Audio。~~ Chrome 离线 r160 和独立金值八项通过，交换邻近频带转红。
 - ~~AudioAnalyser 字节频带 | G-io 分贝量化、饱和和错误保留 | FFT 与平滑。~~ 九项通过，错取频带转红。
 - ~~AudioAnalyser 分析帧缓存与平均频率 | G-io 同帧不重复平滑、跨帧更新和均值 | FFT 与字节频带。~~ 八项通过，同帧误当下一帧转红。
+- ~~AudioAnalyser 交错播放下混 | G-io Wasm 立体声播放、r160 离线上下文及环缓冲 | 时间窗和 PCM。~~ 六项通过，误当单声道使首样点由 128 变 255 转红。
 - AudioAnalyser 宿主生命周期 | G-io 混音接线与停播后的窗口读回 | 音频主机输出。
 - 音频跨场景生命周期 | G-io 混音、解绑、切换和释放 | Audio、PositionalAudio、AudioAnalyser。
 

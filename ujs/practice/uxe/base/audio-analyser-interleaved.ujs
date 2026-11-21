@@ -1,0 +1,24 @@
+// Route an interleaved playback block into the analyser's mono window.
+// Web Audio's stereo speaker interpretation uses 0.5 * (L + R).
+native function AudioAnalyser_pushInterleaved(state:i64,pcm:i64,frames:i64,channels:i64) i64 {
+  if(frames<0 || frames>48000 || (channels!=1 && channels!=2)) { return 0-1; }
+  if(channels==1) { return AudioAnalyser_pushWindow(state,pcm,frames); }
+  if(!audio_window_live(state) || !audio_play_span(pcm,frames*8,4) ||
+     audio_play_overlap(state,AudioAnalyserWindow.size,pcm,frames*8)) { return 0-1; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  if(audio_play_overlap(samples,size*4,pcm,frames*8)) { return 0-1; }
+  let cursor=ux_u32(state+AudioAnalyserWindow.cursor);
+  let i=0;
+  if(frames>size) { i=frames-size; cursor=(cursor+i)%size; }
+  while(i<frames) {
+    let left=ux_f32(pcm+i*8);
+    let right=ux_f32(pcm+i*8+4);
+    let saved=ux_f32_put(samples+cursor*4,0.5*(left+right));
+    cursor=(cursor+1)%size;
+    i=i+1;
+  }
+  let published=ux_u32_put(state+AudioAnalyserWindow.cursor,cursor);
+  return frames;
+}
+
