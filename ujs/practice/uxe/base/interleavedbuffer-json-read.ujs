@@ -1,0 +1,131 @@
+native function ib_json_read_bind(dst:i64,data:i64,bytes:i64,kind:i64,slots:i64) i64 {
+  let width=BufferAttribute_width(kind);
+  if(width<=0 || slots<1 || slots>6291456/width ||
+     !ib_range(dst,InterleavedBuffer.size,4) || !ib_range(data,bytes,width) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,data,bytes)) { return 0-1; }
+  let stride=slots*width;
+  if(bytes%stride!=0) { return 0-3; }
+  return InterleavedBuffer_init(dst,data,bytes/stride,stride,kind);
+}
+
+// Rehydrate the existing native JSON projection. Views referencing the same
+// registry ID borrow the same whole ArrayBuffer snapshot.
+native function InterleavedBuffer_fromJSON(dst:i64,reg:i64,meta:i64) i64 {
+  if(!ib_range(reg,IBJsonRegistry.size,4) || !ib_range(meta,IBJsonMeta.size,4) ||
+     !ib_range(dst,InterleavedBuffer.size,4) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,meta,IBJsonMeta.size)) { return 0-1; }
+  let rows=ux_u32(reg+IBJsonRegistry.rows);
+  let cap=ux_u32(reg+IBJsonRegistry.capacity);
+  let count=ux_u32(reg+IBJsonRegistry.count);
+  let arena=ux_u32(reg+IBJsonRegistry.arena);
+  let next=ux_u32(reg+IBJsonRegistry.next);
+  let end=ux_u32(reg+IBJsonRegistry.end);
+  let table=cap*IBJsonBacking.size;
+  if(count>cap || next<arena || next>end || next%4!=0 ||
+     !ib_json_areas(reg,rows,cap,arena,end) ||
+     !ib_json_readonly(meta,IBJsonMeta.size,reg,rows,table,arena,end-arena) ||
+     !ib_json_readonly(dst,InterleavedBuffer.size,reg,rows,table,arena,end-arena)) { return 0-1; }
+  let id=ux_u32(meta+IBJsonMeta.buffer);
+  if(id<1 || id>count || ux_u32(meta+IBJsonMeta.uuid)==0) { return 0-2; }
+  let row=rows+(id-1)*IBJsonBacking.size;
+  let data=ux_u32(row+IBJsonBacking.words);
+  let bytes=ux_u32(row+IBJsonBacking.bytes);
+  if(ux_u32(row+IBJsonBacking.id)!=id || data<arena || data>next || data%4!=0 ||
+     bytes%4!=0 || bytes>next-data) { return 0-1; }
+  return ib_json_read_bind(dst,data,bytes,ux_u32(meta+IBJsonMeta.componentType),
+    ux_u32(meta+IBJsonMeta.stride));
+}
+
+native function ib_json_words_pass(at:i64,end:i64,dst:i64,capacity:i64,commit:i64) i64 {
+  let p=json_space(at,end);
+  if(p<0 || p>=end || ux_u8(p)!=91) { return 0-1; }
+  p=json_space(p+1,end);
+  if(p<end && ux_u8(p)==93) {
+    if(json_space(p+1,end)==end) { return 0; }
+    return 0-1;
+  }
+  let used=0;
+  while(p>=0 && p<end) {
+    let value=LoaderJson_uint(p,end,0-1);
+    if(value<0) { return 0-1; }
+    if(used>capacity-4) { return 0-2; }
+    if(commit) { let saved=ux_u32_put(dst+used,value); }
+    used=used+4;
+    p=json_space(json_scalar_end(p,end),end);
+    if(p<0 || p>=end) { return 0-1; }
+    if(ux_u8(p)==93) {
+      if(json_space(p+1,end)==end) { return used; }
+      return 0-1;
+    }
+    if(ux_u8(p)!=44) { return 0-1; }
+    p=json_space(p+1,end);
+  }
+  return 0-1;
+}
+
+// Decode one entry of r160's arrayBuffers dictionary into caller storage.
+// The caller decodes each UUID once and binds all descriptors to that storage.
+native function InterleavedBuffer_readWords(dst:i64,capacity:i64,at:i64,end:i64) i64 {
+  if(at<0 || end<=at || end>6291456 ||
+     !ib_range(dst,capacity,4) || !ib_disjoint(dst,capacity,at,end-at)) { return 0-1; }
+  let ready=ib_json_words_pass(at,end,dst,capacity,0);
+  if(ready<0) { return ready; }
+  return ib_json_words_pass(at,end,dst,capacity,1);
+}
+
+native function ib_json_read_type(at:i64,end:i64,scratch:i64) i64 {
+  let size=Json_decodeString(at,end,scratch,18);
+  if(size<1) { return 0-1; }
+  let tokens=[ObjectJsonType.uint8,ObjectJsonType.int8,ObjectJsonType.uint8Clamped,
+    ObjectJsonType.uint16,ObjectJsonType.int16,ObjectJsonType.uint32,ObjectJsonType.int32,
+    ObjectJsonType.float32,ObjectJsonType.float64];
+  let i=0;
+  while(i<9) {
+    let token=json_write_token(scratch+24,scratch+48,ObjectJsonToken.size+tokens[i]);
+    let match=token-scratch==size+26;
+    let j=0;
+    while(match && j<size) {
+      match=ux_u8(scratch+j)==ux_u8(scratch+25+j);
+      j=j+1;
+    }
+    if(match) {
+      if(i>=7) { return i+2; }
+      return i+1;
+    }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function ib_json_read_owner(at:i64,end:i64,key:i64,bytes:i64,scratch:i64) i64 {
+  if(Json_decodeString(at,end,scratch,bytes)!=bytes) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(key+i)!=ux_u8(scratch+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Bind a textual r160 descriptor and its externally resolved ArrayBuffer.
+native function InterleavedBuffer_readJSON(dst:i64,at:i64,end:i64,data:i64,bytes:i64,owner:i64,ownerBytes:i64,scratch:i64) i64 {
+  if(at<0 || end<=at || end>6291456 || bytes%4!=0 || ownerBytes<1 || ownerBytes>128 ||
+     !ib_range(dst,InterleavedBuffer.size,4) || !ib_range(data,bytes,4) ||
+     !ib_range(owner,ownerBytes,1) || !ib_range(scratch,128,4) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,at,end-at) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,owner,ownerBytes) ||
+     !ib_disjoint(dst,InterleavedBuffer.size,scratch,128) ||
+     !ib_disjoint(scratch,128,at,end-at) || !ib_disjoint(scratch,128,data,bytes) ||
+     !ib_disjoint(scratch,128,owner,ownerBytes)) { return 0-1; }
+  let start=json_space(at,end);
+  let stop=json_value_end(start,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let uuid=LoaderJson_find(start,stop,scratch,1684632949,0,0,4);
+  if(uuid<0 || Json_stringBytes(uuid,stop)<=0) { return 0-2; }
+  let key=LoaderJson_find(start,stop,scratch,1717990754,29285,0,6);
+  if(key<0 || !ib_json_read_owner(key,stop,owner,ownerBytes,scratch)) { return 0-2; }
+  let type=LoaderJson_find(start,stop,scratch,1701869940,0,0,4);
+  let stride=LoaderJson_uint(LoaderJson_find(start,stop,scratch,1769108595,25956,0,6),stop,0);
+  if(type<0) { return 0-2; }
+  return ib_json_read_bind(dst,data,bytes,ib_json_read_type(type,stop,scratch),stride);
+}

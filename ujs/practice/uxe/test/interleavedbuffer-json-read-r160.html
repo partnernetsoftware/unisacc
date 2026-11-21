@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const names=["position","shared","other","clamped","double"];
+const ids=["view-a","view-b","view-c","view-clamped","view-double"];
+function reference() {
+  const owner=new Float32Array([1,-2,3,4,5,6]),other=owner.slice();
+  owner.buffer._uuid="array000";
+  other.buffer._uuid="array001";
+  const views=[
+    new THREE.InterleavedBuffer(owner,3),
+    new THREE.InterleavedBuffer(new Float32Array(owner.buffer,12,3),1),
+    new THREE.InterleavedBuffer(other,2),
+    new THREE.InterleavedBuffer(new Uint8ClampedArray(owner.buffer),2),
+    new THREE.InterleavedBuffer(new Float64Array(owner.buffer),1),
+  ];
+  const geo=new THREE.BufferGeometry();
+  for(let i=0;i<views.length;i++) {
+    views[i].uuid=ids[i];
+    geo.setAttribute(names[i],new THREE.InterleavedBufferAttribute(views[i],1,0,false));
+  }
+  const json=JSON.parse(JSON.stringify(geo.toJSON()));
+  const restored=new THREE.BufferGeometryLoader().parse(json);
+  const values=names.map(name=>restored.getAttribute(name).data);
+  for(let i=0;i<values.length;i++) if(values[i].uuid!==ids[i]) throw new Error("r160 restored uuid");
+  const fields=v=>[v.count,v.stride*v.array.BYTES_PER_ELEMENT,
+    v.array instanceof Float32Array?9:v.array instanceof Float64Array?10:v.array instanceof Uint8ClampedArray?3:-1];
+  const result=[];
+  for(const v of values.slice(0,3))
+    result.push(...fields(v),v.usage,v.version,v.array[0],v.array.at(-1));
+  const [first,second,third]=values;
+  result.push(Number(first.array.buffer===second.array.buffer),Number(first.array.buffer!==third.array.buffer));
+  first.array[0]=7;
+  result.push(second.array[0],third.array[0]);
+  const types=values.slice(3).flatMap(fields);
+  return {result,types,data:json.data};
+}
+async function product(data) {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,id=0,bytes=0)=>Number(wasm.uxe_ib_json_read(
+    BigInt(op),BigInt(id),BigInt(bytes),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,4608);
+  const memory=new Uint8Array(wasm.memory.buffer,base,4608),encoder=new TextEncoder();
+  const paste=(text,at)=>{const bytes=encoder.encode(text);memory.set(bytes,at);return bytes.length;};
+  const doubles=(addr,n)=>Array.from({length:n},(_,i)=>heap.getFloat64(addr+8*i,true));
+  const uints=(addr,n)=>Array.from({length:n},(_,i)=>heap.getUint32(addr+4*i,true));
+  const state=(start)=>{
+    const values=[];
+    for(let i=0;i<3;i++) values.push(...doubles(run(2,start+i),7));
+    return [...values,...doubles(run(5,start),4)];
+  };
+  if(run(1)!==0) throw new Error("native JSON projection import");
+  const packed=state(0);
+  const textLoad=(descriptor,id,key=descriptor.buffer)=>{
+    paste(key,1900);
+    return run(4,id,paste(JSON.stringify(descriptor),2048));
+  };
+  const wordsLoad=(words,id)=>run(3,id,paste(JSON.stringify(words),2048));
+  if(wordsLoad(data.arrayBuffers.array000,0)!==24 || wordsLoad(data.arrayBuffers.array001,1)!==24)
+    throw new Error("native uint32 words");
+  for(let i=0;i<ids.length;i++) {
+    const id=3+i;
+    if(textLoad(data.interleavedBuffers[ids[i]],id)!==384+32*id) throw new Error("native JSON text view "+id);
+  }
+  const text=state(3);
+  const types=[...uints(run(8,6),3),...uints(run(8,7),3)];
+  const refusal=[];
+  for(let i=0;i<5;i++) {
+    const at=i===4?288:768;
+    const before=uints(at,6).join(",");
+    refusal.push(run(6,i),Number(before===uints(at,6).join(",")));
+  }
+  const desc=data.interleavedBuffers[ids[0]];
+  for(const [edit,key] of [
+    [{...desc,buffer:"wrong000"},"array000"],
+    [{...desc,uuid:""},"array000"],
+    [{...desc,type:"Float16Array"},"array000"],
+    [{...desc,stride:7},"array000"],
+    [{...desc,stride:"3"},"array000"],
+  ]) {
+    const before=uints(576,6).join(",");
+    refusal.push(textLoad(edit,6,key),Number(before===uints(576,6).join(",")));
+  }
+  for(const [i,raw] of ["[1,-1]","[1,4294967296]","[1,2.5]","[1,]","[1]false","[1,2]","[]"].entries()) {
+    heap.setUint32(1400,173,true);
+    heap.setUint32(1404,174,true);
+    const before=uints(1400,4).join(",");
+    refusal.push(run(7,i,paste(raw,2048)),Number(before===uints(1400,4).join(",")));
+  }
+  return {packed,text,types,refusal};
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision");
+  const ref=reference(),actual=await product(ref.data);
+  output.textContent=JSON.stringify([...actual.packed,...actual.text,...ref.result,
+    ...actual.types,...ref.types,...actual.refusal]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
