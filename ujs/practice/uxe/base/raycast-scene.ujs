@@ -1,0 +1,160 @@
+struct RaySceneQuery {
+  snapshot: u32;
+  count: u32;
+  meshes: u32;
+  meshCount: u32;
+}
+
+struct RaySceneMeshRow {
+  node: u32;
+  mesh: u32;
+  uv: u32;
+  uvStride: u32;
+}
+
+struct RaySceneHit {
+  x: f64;
+  y: f64;
+  z: f64;
+  distance: f64;
+  face: u32;
+  node: u32;
+  u: f64;
+  v: f64;
+  hasUV: u32;
+}
+
+native function ray_scene_link(table:i64,count:i64,node:i64) i64 {
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    let candidate=ux_u32(table+mid*RaySceneMeshRow.size+RaySceneMeshRow.node);
+    if(candidate<node) { lo=mid+1; }
+    else { hi=mid; }
+  }
+  let row=table+lo*RaySceneMeshRow.size;
+  if(lo==count || ux_u32(row+RaySceneMeshRow.node)!=node) { return 0-1; }
+  return row;
+}
+
+native function ray_scene_inputs(row:i64,scene:i64,out:i64,size:i64,work:i64,space:i64) i64 {
+  let mesh=ux_u32(row+RaySceneMeshRow.mesh);
+  let vertices=ux_u32(mesh+RayMeshBuffer.vertexCount);
+  let pos=ux_u32(mesh+RayMeshBuffer.positions);
+  let stride=ux_u32(mesh+RayMeshBuffer.positionStride);
+  let indices=ux_u32(mesh+RayMeshBuffer.indices);
+  let index_size=ux_u32(mesh+RayMeshBuffer.faceCount)*3*ux_u32(mesh+RayMeshBuffer.indexBytes);
+  let matrix=ux_u32(scene+SceneSnapshotRow.worldMatrix);
+  let uv=ux_u32(row+RaySceneMeshRow.uv);
+  let uv_stride=ux_u32(row+RaySceneMeshRow.uvStride);
+  if(vertices<1 || vertices>65536 || !raycaster_span(matrix,128) ||
+     !ray_instance_readonly(mesh,RayMeshBuffer.size,out,size,work,space) ||
+     !ray_instance_readonly(matrix,128,out,size,work,space) ||
+     !ray_instance_readonly(pos,(vertices-1)*stride+12,out,size,work,space) ||
+     !ray_instance_readonly(indices,index_size,out,size,work,space)) { return 0; }
+  return uv_stride==0 || ray_instance_readonly(uv,(vertices-1)*uv_stride+8,out,size,work,space);
+}
+
+// Consume Scene_snapshot mode 0 for recursive picking or mode 2 for the
+// root only. Layer masks are per node and hidden nodes remain eligible.
+native function Raycaster_intersectSceneMeshes(state:i64,query:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!raycaster_span(state,RaycasterState.size) || !raycaster_span(query,RaySceneQuery.size) ||
+     !raycaster_span(work,space) || capacity<0) { return 0-1; }
+  let snapshot=ux_u32(query+RaySceneQuery.snapshot);
+  let count=ux_u32(query+RaySceneQuery.count);
+  let table=ux_u32(query+RaySceneQuery.meshes);
+  let rows=ux_u32(query+RaySceneQuery.meshCount);
+  if(count>65536 || rows>65536 || snapshot%4!=0 || table%4!=0 ||
+     snapshot>6291456-count*SceneSnapshotRow.size || table>6291456-rows*RaySceneMeshRow.size) { return 0-1; }
+  let i=0;
+  let previous=0;
+  while(i<rows) {
+    let node=ux_u32(table+i*RaySceneMeshRow.size+RaySceneMeshRow.node);
+    if(node<=previous) { return 0-1; }
+    previous=node;
+    i=i+1;
+  }
+  let mask=ux_u32(state+RaycasterState.layerMask);
+  let max_faces=0;
+  let faces_total=0;
+  i=0;
+  while(i<count) {
+    let scene=snapshot+i*SceneSnapshotRow.size;
+    let row=ray_scene_link(table,rows,ux_u32(scene+SceneSnapshotRow.node));
+    if(row>=0 && u32_and(mask,ux_u32(scene+SceneSnapshotRow.layerMask))!=0) {
+      let mesh=ux_u32(row+RaySceneMeshRow.mesh);
+      if(!raycaster_span(mesh,RayMeshBuffer.size)) { return 0-1; }
+      let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+      if(faces>65536-faces_total) { return 0-1; }
+      if(faces>max_faces) { max_faces=faces; }
+      faces_total=faces_total+faces;
+    }
+    i=i+1;
+  }
+  if(faces_total==0) { return 0; }
+  let size=faces_total*RaySceneHit.size;
+  let temporary=max_faces*RayMeshHit.size;
+  if(capacity<faces_total || !raycaster_span(out,size) || space<440+temporary*2+size*2 ||
+     raycaster_overlap(out,size,work,space) ||
+     !ray_instance_readonly(state,RaycasterState.size,out,size,work,space) ||
+     !ray_instance_readonly(query,RaySceneQuery.size,out,size,work,space) ||
+     !ray_instance_readonly(snapshot,count*SceneSnapshotRow.size,out,size,work,space) ||
+     !ray_instance_readonly(table,rows*RaySceneMeshRow.size,out,size,work,space)) { return 0-1; }
+  i=0;
+  while(i<count) {
+    let scene=snapshot+i*SceneSnapshotRow.size;
+    let row=ray_scene_link(table,rows,ux_u32(scene+SceneSnapshotRow.node));
+    if(row>=0 && u32_and(mask,ux_u32(scene+SceneSnapshotRow.layerMask))!=0 &&
+       !ray_scene_inputs(row,scene,out,size,work,space)) { return 0-1; }
+    i=i+1;
+  }
+  let uv_scratch=work+40;
+  let uv_out=work+184;
+  let hits=work+200;
+  let nested=hits+temporary;
+  let staged=nested+240+temporary;
+  let sort=staged+size;
+  let total=0;
+  i=0;
+  while(i<count) {
+    let scene=snapshot+i*SceneSnapshotRow.size;
+    let node=ux_u32(scene+SceneSnapshotRow.node);
+    let layer=ux_u32(scene+SceneSnapshotRow.layerMask);
+    let row=ray_scene_link(table,rows,node);
+    if(row>=0 && u32_and(mask,layer)!=0) {
+      let mesh=ux_u32(row+RaySceneMeshRow.mesh);
+      let faces=ux_u32(mesh+RayMeshBuffer.faceCount);
+      let copy=uxe_copy_record(work,mesh,RayMeshBuffer.size);
+      let a=ux_u32_put(work+RayMeshBuffer.matrixWorld,ux_u32(scene+SceneSnapshotRow.worldMatrix));
+      let b=ux_u32_put(work+RayMeshBuffer.layerMask,layer);
+      let found=Raycaster_intersectMeshBuffer(state,work,hits,faces,nested,240+temporary);
+      if(found<0) { return found; }
+      let uv=ux_u32(row+RaySceneMeshRow.uv);
+      let stride=ux_u32(row+RaySceneMeshRow.uvStride);
+      let j=0;
+      while(j<found) {
+        let hit=hits+j*RayMeshHit.size;
+        let target=staged+total*RaySceneHit.size;
+        let cell=uxe_copy_record(target,hit,RayMeshHit.size);
+        let id=ux_u32_put(target+RaySceneHit.node,node);
+        let text=ux_u32_put(target+RaySceneHit.hasUV,stride!=0);
+        let u=0.0;
+        let v=0.0;
+        if(stride!=0) {
+          if(Raycaster_meshHitUV(work,hit,uv,stride,uv_out,uv_scratch)<0) { return 0-2; }
+          u=ux_f64(uv_out);
+          v=ux_f64(uv_out+8);
+        }
+        let x=ux_f64_put(target+RaySceneHit.u,u);
+        let y=ux_f64_put(target+RaySceneHit.v,v);
+        total=total+1;
+        j=j+1;
+      }
+    }
+    i=i+1;
+  }
+  let sorted=ray_sort_hits(staged,sort,total,RaySceneHit.size,RaySceneHit.distance);
+  let published=uxe_copy_record(out,staged,total*RaySceneHit.size);
+  return sorted;
+}

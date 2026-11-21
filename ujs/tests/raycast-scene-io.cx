@@ -1,0 +1,51 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","vector-scalar","vector3","ray","triangle","raycast-memory","raycaster-state",
+        "raycast-mesh","raycast-hit-sort","raycast-buffer","raycast-instances","raycast-mesh-uv",
+        "scene-snapshot-layout","raycast-scene",0};
+    const char *setup=
+        "let state=0;let query=128;let table=192;let snapshot=256;let mesh=384;let world_far=512;let world_near=640;"
+        "let positions=800;let uv=864;let out=1024;let work=1280;"
+        "let ray=Raycaster_default(state);let sx=ux_f64_put(state+RaycasterState.ox,0.25);"
+        "let a=ux_u32_put(query+RaySceneQuery.snapshot,snapshot);let b=ux_u32_put(query+RaySceneQuery.count,4);"
+        "let c=ux_u32_put(query+RaySceneQuery.meshes,table);let d=ux_u32_put(query+RaySceneQuery.meshCount,2);"
+        "let i=0;while(i<4){let at=snapshot+i*SceneSnapshotRow.size;"
+        "let node=ux_u32_put(at+SceneSnapshotRow.node,i+1);"
+        "let layer=ux_u32_put(at+SceneSnapshotRow.layerMask,2-(i>=2));i=i+1;}"
+        "let sr=snapshot+2*SceneSnapshotRow.size;let nr=snapshot+3*SceneSnapshotRow.size;"
+        "let s=ux_u32_put(sr+SceneSnapshotRow.worldMatrix,world_far);let n=ux_u32_put(nr+SceneSnapshotRow.worldMatrix,world_near);"
+        "let a0=ux_u32_put(table+RaySceneMeshRow.node,3);let a1=ux_u32_put(table+RaySceneMeshRow.mesh,mesh);"
+        "let a2=ux_u32_put(table+RaySceneMeshRow.uv,uv);let a3=ux_u32_put(table+RaySceneMeshRow.uvStride,8);"
+        "let next=table+RaySceneMeshRow.size;"
+        "let b0=ux_u32_put(next+RaySceneMeshRow.node,4);let b1=ux_u32_put(next+RaySceneMeshRow.mesh,mesh);"
+        "let m0=ux_u32_put(mesh+RayMeshBuffer.positions,positions);let m1=ux_u32_put(mesh+RayMeshBuffer.vertexCount,3);"
+        "let m2=ux_u32_put(mesh+RayMeshBuffer.positionStride,12);let m3=ux_u32_put(mesh+RayMeshBuffer.faceCount,1);"
+        "i=0;while(i<16){let cell0=ux_f64_put(world_far+i*8,(i%5==0)*1.0);"
+        "let cell1=ux_f64_put(world_near+i*8,(i%5==0)*1.0);i=i+1;}"
+        "let z0=ux_f64_put(world_far+112,0.0-5.0);let z1=ux_f64_put(world_near+112,0.0-3.0);"
+        "let x0=ux_f32_put(positions,0.0-1.0);let y0=ux_f32_put(positions+4,0.0-1.0);"
+        "let x1=ux_f32_put(positions+12,1.0);let y1=ux_f32_put(positions+16,0.0-1.0);let y2=ux_f32_put(positions+28,1.0);"
+        "let u1=ux_f32_put(uv+8,1.0);let u2=ux_f32_put(uv+16,0.5);let v2=ux_f32_put(uv+20,1.0);";
+    #define READ "let hit=Raycaster_intersectSceneMeshes(state,query,out,2,work,1024);"
+    const char *cases[]={
+        READ "return 0.0+hit;",
+        READ "return 0.0+ux_u32(out+RaySceneHit.node);",
+        READ "return ux_f64(out+RaySceneHit.distance);",
+        READ "return 0.0+ux_u32(out+RaySceneHit.size+RaySceneHit.node);",
+        READ "return ux_f64(out+RaySceneHit.size+RaySceneHit.u);",
+        READ "return 0.0+ux_u32(out+RaySceneHit.hasUV);",
+        "let clip=ux_f64_put(state+RaycasterState.far,4.0);" READ "return 0.0+hit;",
+        "let mask=ux_u32_put(nr+SceneSnapshotRow.layerMask,2);" READ "return 0.0+ux_u32(out+RaySceneHit.node);",
+        "let shallow=ux_u32_put(query+RaySceneQuery.count,1);" READ "return 0.0+hit;",
+        "let broken=ux_u32_put(next+RaySceneMeshRow.node,3);" READ "return 0.0+hit;",
+        "let keep=ux_f64_put(out,77.0);let bad=ux_u32_put(nr+SceneSnapshotRow.worldMatrix,7);"
+        READ "return ux_f64(out);",
+    };
+    const double gold[]={2,4,3,3,0.625,0,1,3,0,-1,77};
+    return g_wasm_batch("G_RAY scene mesh traversal","raycast-scene",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?1:-1,READ "return 0.0+ux_u32(out+RaySceneHit.size+RaySceneHit.node);");
+}
