@@ -1,0 +1,66 @@
+// Transform records are 136 bytes: an 8-byte header (u32 kind and zero
+// padding), then packed f64 TRS in kind 0, or a column-major matrix
+// in kind 1. Matrix encoding remains intact until the scene consumer.
+native function gltf_node_values(at:i64,end:i64,count:i64,out:i64,write:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0-1; }
+  let cursor=json_space(at+1,end);
+  let i=0;
+  while(i<count) {
+    let value=json_read_number(cursor,end);
+    if(value-value!=0.0) { return 0-1; }
+    if(write) { let saved=ux_f64_put(out+i*8,value); }
+    cursor=json_space(json_value_end(cursor,end),end);
+    if(cursor<0 || cursor>=end) { return 0-1; }
+    if(i+1==count) {
+      if(ux_u8(cursor)!=93) { return 0-1; }
+    } else {
+      if(ux_u8(cursor)!=44) { return 0-1; }
+      cursor=json_space(cursor+1,end);
+    }
+    i=i+1;
+  }
+  return count;
+}
+
+native function GltfLoader_nodeTransform(glb:i64,node:i64,out:i64,key:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || node<0 || node>65535 ||
+     out%8!=0 || !loading_span(out,136) || !loading_span(key,16) ||
+     !file_disjoint(glb,GlbResource.size,out,136) || !file_disjoint(glb,GlbResource.size,key,16) ||
+     !file_disjoint(out,136,key,16)) { return 0-1; }
+  let json=ux_u32(glb+GlbResource.json);
+  let bytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let binBytes=ux_u32(glb+GlbResource.binBytes);
+  if(!loading_span(json,bytes) || !loading_span(bin,binBytes) ||
+     !file_disjoint(json,bytes,out,136) || !file_disjoint(json,bytes,key,16) ||
+     !file_disjoint(bin,binBytes,out,136) || !file_disjoint(bin,binBytes,key,16)) { return 0-1; }
+  let end=json+bytes;
+  let row=LoaderJson_item(LoaderJson_find(json,end,key,1701080942,115,0,5),end,node);
+  if(row<0 || ux_u8(row)!=123) { return 0-2; }
+  let matrix=LoaderJson_find(row,end,key,1920229741,30825,0,6);
+  let translation=LoaderJson_find(row,end,key,1851880052,1952541811,7237481,11);
+  let rotation=LoaderJson_find(row,end,key,1635020658,1852795252,0,8);
+  let scale=LoaderJson_find(row,end,key,1818321779,101,0,5);
+  let first=out+8;
+  if(matrix!=0-2) {
+    if(translation!=0-2 || rotation!=0-2 || scale!=0-2 || gltf_node_values(matrix,end,16,first,0)<0) { return 0-3; }
+    let written=gltf_node_values(matrix,end,16,first,1);
+  } else {
+    if((translation!=0-2 && gltf_node_values(translation,end,3,first,0)<0) ||
+       (rotation!=0-2 && gltf_node_values(rotation,end,4,first+24,0)<0) ||
+       (scale!=0-2 && gltf_node_values(scale,end,3,first+56,0)<0)) { return 0-3; }
+    let i=0;
+    while(i<16) {
+      let value=0.0;
+      if(i>=6 && i<=9) { value=1.0; }
+      let saved=ux_f64_put(first+i*8,value);
+      i=i+1;
+    }
+    if(translation>=0) { let written=gltf_node_values(translation,end,3,first,1); }
+    if(rotation>=0) { let written=gltf_node_values(rotation,end,4,first+24,1); }
+    if(scale>=0) { let written=gltf_node_values(scale,end,3,first+56,1); }
+  }
+  let kind=ux_u32_put(out,matrix!=0-2);
+  let pad=ux_u32_put(out+4,0);
+  return out;
+}
