@@ -1,0 +1,54 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int pmrem_build_compile(const char *dir) {
+    char layout[320],driver[320],wasm[320];
+    tx_snprintf(layout,sizeof layout,"%s/layout.ujs",dir);
+    tx_snprintf(driver,sizeof driver,"%s/driver.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="export uxe_pmrem_build(op:i64,a:i64,b:i64) i64 version 1;\n";
+    const char source[]="if(op==0){return ux_span(0,196608);}\n"
+        "if(op==1){return GpuPmremBuild_fromCubemap(128,65536,b,152000,24832,64,a);}\n"
+        "if(op==2){return GpuPmremBuild_release(128);}\n"
+        "if(op==3){return GpuPmremBuild_hasMip(128,a);}\n"
+        "if(op==4){return GpuPmremBuild_init(128);}\n"
+        "if(op==5){return GpuPmremBuild_fromCubemap(128,65536,86016,65536,24832,64,16);}\n"
+        "return 0-1;\n";
+    if(sy_write_file(layout,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",layout,"ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/gpu-pmrem-generated.ujs","ujs/practice/uxe/base/gpu-pmrem.ujs",
+        "ujs/practice/uxe/base/gpu-pmrem-build.ujs",driver,"-o",wasm,0};
+    char *out=0;
+    size_t bytes=0;
+    int rc=cx_runv_timeout(args,8,&out,&bytes);
+    if(rc) printf("PMREM_BUILD_COMPILER rc=%d output=%.*s\n",rc,(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-pmrem-build-",dir,sizeof dir)) return 2;
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-pmrem-build-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    const double gold[]={1,0,0,255,255,255,0,0,255,0,255,0,255,
+        0,0,255,255,255,0,0,255,0,255,0,255,
+        1,1,1,1,1,1,1,1, 1,1, 1,1,1,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double values[count]={0};
+    int failed=n<0 || n>=sizeof url || pmrem_build_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
+    for(int i=0;!failed && i<count;i++) if(values[i]!=gold[i]) {
+        printf("PMREM_BUILD case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_PIXEL PMREM fromCubemap first blur cases=%d failed=%d\n",count,failed);
+    return failed;
+}

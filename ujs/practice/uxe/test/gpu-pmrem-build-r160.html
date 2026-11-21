@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BufferAttribute, BufferGeometry, Camera, CubeTexture, DataTexture, LinearFilter, Mesh,
+  PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector3, WebGLRenderer,
+  WebGLRenderTarget } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const colors = [[255,0,0], [0,0,255], [0,255,0], [255,255,0], [255,0,255], [0,255,255]];
+const cases = [
+  [[1,0,0],0], [[-1,0,0],0], [[0,1,0],0],
+  [[1,0,0.94],0], [[1,0,0.94],0.305], [[1,0,-0.94],0.305],
+  [[0,1,0.94],0.305], [[0,-1,0.9],0.305],
+];
+const width = 336, height = 64, bytes = width * height * 4;
+
+function r160Atlas(renderer) {
+  const faces = colors.map(color => {
+    const pixels = new Uint8Array(16 * 16 * 4);
+    for (let i = 0; i < pixels.length; i += 4) pixels.set([...color, 255], i);
+    return new DataTexture(pixels, 16, 16);
+  });
+  const cube = new CubeTexture(faces);
+  cube.minFilter = cube.magFilter = LinearFilter;
+  cube.generateMipmaps = false;
+  cube.needsUpdate = true;
+  const gen = new PMREMGenerator(renderer);
+  const target = gen.fromCubemap(cube);
+  return {target, dispose() { target.dispose(); gen.dispose(); cube.dispose(); faces.forEach(face => face.dispose()); }};
+}
+
+async function productAtlas() {
+  const response = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const { instance: { exports: e } } = await WebAssembly.instantiate(await response.arrayBuffer());
+  if (e.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const call = (op, a = 0, b = 0) => Number(e.uxe_pmrem_build(BigInt(op), BigInt(a), BigInt(b)));
+  const mem = new Uint8Array(e.memory.buffer, call(0), 196608);
+  const view = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
+  colors.forEach((color, i) => mem.set([...color, 255], 64 + i * 4));
+  if (call(4) !== 128) throw Error("empty atlas state");
+  mem[65536] = 91;
+  const refused = call(1, 16, bytes-1) === -1 && call(1, 32, bytes) === -1 && call(5) === -1 && mem[65536] === 91;
+  const built = call(1, 16, bytes);
+  if (built !== 128) throw Error("product atlas build " + built);
+  const fields = Array.from({length: 6}, (_, i) => view.getUint32(128 + 4 * i, true));
+  const metadata = fields.join() === [65536,width,height,bytes,2,1].join() && call(3, 3) === 1 && call(3, 4) === 1 &&
+    call(3, 2) === 0 && call(1, 16, bytes) === -1;
+  const pixels = mem.slice(65536, 65536 + bytes);
+  const good = call(2) === 128 && call(3, 4) === 0 && call(2) === -1;
+  const again = call(1, 16, bytes) === 128 && pixels.every((value, i) => value === mem[65536 + i]);
+  call(2);
+  if (query.get("mutate") === "1") {
+    for (let y = 0; y < 32; y++) {
+      const row = y * width * 4;
+      pixels.copyWithin(row + 48 * 4, row, row + 48 * 4);
+    }
+  }
+  const texture = new DataTexture(pixels, width, height);
+  texture.minFilter = texture.magFilter = LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return {texture, flags: [refused, metadata, good, again].map(Number)};
+}
+
+async function test() {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("webgl2", {antialias: false});
+  if (!context) throw Error("WebGL2 unavailable");
+  const renderer = new WebGLRenderer({canvas, context});
+  const ref = r160Atlas(renderer);
+  const actual = await productAtlas();
+  const target = new WebGLRenderTarget(1, 1);
+  const geometry = new BufferGeometry();
+  geometry.setAttribute("position", new BufferAttribute(Float32Array.of(-1,-1,0,3,-1,0,-1,3,0), 3));
+  const mat = new RawShaderMaterial({
+    defines: {ENVMAP_TYPE_CUBE_UV: 1, CUBEUV_MAX_MIP: "4.0", CUBEUV_TEXEL_WIDTH: 1/width, CUBEUV_TEXEL_HEIGHT: 1/height},
+    uniforms: {atlas: {value: null}, direction: {value: new Vector3()}, rough: {value: 0}},
+    vertexShader: "attribute vec3 position;void main(){gl_Position=vec4(position,1.0);}",
+    fragmentShader: "precision highp float;\n#include <cube_uv_reflection_fragment>\nuniform sampler2D atlas;" +
+      "uniform vec3 direction;uniform float rough;void main(){gl_FragColor=textureCubeUV(atlas,direction,rough);}"});
+  const mesh = new Mesh(geometry, mat);
+  mesh.frustumCulled = false;
+  const scene = new Scene(), camera = new Camera();
+  scene.add(mesh);
+  const read = texture => {
+    mat.uniforms.atlas.value = texture;
+    return cases.map(([direction, rough]) => {
+      mat.uniforms.direction.value.set(...direction);
+      mat.uniforms.rough.value = rough;
+      renderer.setRenderTarget(target);
+      renderer.render(scene, camera);
+      const pixel = new Uint8Array(4);
+      renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixel);
+      return [...pixel];
+    });
+  };
+  try {
+    const wanted = read(ref.target.texture), got = read(actual.texture);
+    const matches = wanted.map((rgb, i) => Number(rgb.every((v, ch) => Math.abs(v-got[i][ch]) <= 3)));
+    const difference = matches.indexOf(0);
+    if (difference >= 0 && query.get("mutate") !== "1") {
+      throw Error("sample " + difference + " actual=" + got[difference] + " r160=" + wanted[difference]);
+    }
+    const visibleRef = Number(wanted[4][0] > wanted[3][0] + 12 && wanted[4][0] < 255 && wanted[4][1] === 0 && wanted[4][2] === 255);
+    const visibleActual = Number(got[4][0] > got[3][0] + 12 && got[4][0] < 255 && got[4][1] === 0 && got[4][2] === 255);
+    const size = Number(ref.target.width === width && ref.target.height === height);
+    return [size, ...wanted.slice(0,3).flat(), ...got.slice(0,3).flat(), ...matches, visibleRef, visibleActual, ...actual.flags];
+  } finally {
+    renderer.setRenderTarget(null);
+    ref.dispose(); actual.texture.dispose(); target.dispose(); geometry.dispose(); mat.dispose(); renderer.dispose();
+  }
+}
+
+try { output.textContent = JSON.stringify(await test()); }
+catch (error) { output.textContent = "error:" + error.message; }
+</script>
