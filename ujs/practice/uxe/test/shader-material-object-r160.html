@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import * as THREE from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const vertex="void main(){gl_Position=vec4(0.0);}\n// \"caf\u00e9\" \\gain";
+const fragment="void main(){gl_FragColor=vec4(1.0);}\n// fragment";
+const encoder=new TextEncoder(),decoder=new TextDecoder();
+const labels={15:"ShaderMaterial",16:"RawShaderMaterial"};
+function digest(text) {
+  const bytes=encoder.encode(text);
+  let value=0;
+  for(const byte of bytes) value=(value*131+byte)%16777213;
+  return [bytes.length,value];
+}
+function projection(json,kind) {
+  if(json.type!==labels[kind] || typeof json.lights!=="boolean" || typeof json.clipping!=="boolean" ||
+     typeof json.vertexShader!=="string" || typeof json.fragmentShader!=="string")
+    throw new Error("shader material JSON shape");
+  const vector=json.uniforms.offset;
+  if(vector && (vector.type!=="v3" || vector.value.length!==3)) throw new Error("vector uniform shape");
+  const glsl=json.glslVersion===null?0:json.glslVersion==="100"?1:json.glslVersion==="300 es"?3:-1;
+  return [kind,...digest(json.vertexShader),...digest(json.fragmentShader),glsl,Number(json.lights),
+    Number(json.clipping),Number(json.fog??false),json.opacity??1,json.uniforms.gain?.value??-1,
+    ...(vector?.value??[-1,-1,-1]),json.defines?.GAIN??-1,Number(Object.hasOwn(json,"defines"))];
+}
+function reference(kind) {
+  const Type=THREE[labels[kind]],loader=new THREE.MaterialLoader();
+  const empty=new Type(),profile=new Type({vertexShader:vertex,fragmentShader:fragment,
+    glslVersion:kind===15?THREE.GLSL1:THREE.GLSL3,lights:true,clipping:kind===16,opacity:.5,
+    uniforms:{gain:{value:2.5},offset:{value:new THREE.Vector3(1,2,3)}},defines:{GAIN:7}});
+  const json=profile.toJSON(),copy=loader.parse(JSON.parse(JSON.stringify(json)));
+  if(!copy.isShaderMaterial || Boolean(copy.isRawShaderMaterial)!==(kind===16) ||
+     !copy.uniforms.offset.value.isVector3) throw new Error("r160 shader class");
+  const missing=loader.parse({type:labels[kind]});
+  return {json,results:[...projection(empty.toJSON(),kind),...projection(json,kind),
+    ...projection(copy.toJSON(),kind),...projection(missing.toJSON(),kind)]};
+}
+function product(wasm,kind,input) {
+  const run=(op,arg=0)=>Number(wasm.uxe_shader_json(BigInt(op),BigInt(kind),BigInt(arg),BigInt(query.get("mode"))));
+  const base=run(0),heap=new DataView(wasm.memory.buffer,base,20000);
+  const data=new Uint8Array(wasm.memory.buffer,base,20000);
+  const load=json=>{
+    const bytes=encoder.encode(JSON.stringify(json));
+    data.set(bytes,1024);
+    return run(2,bytes.length);
+  };
+  const write=()=>{
+    const end=run(3);
+    if(end<=15000) throw new Error("shader JSON write "+end);
+    return decoder.decode(data.subarray(15000,end));
+  };
+  if(run(1)!==512) throw new Error("native shader constructor");
+  const result=projection(JSON.parse(write()),kind);
+  if(load(input)!==512) throw new Error("r160 shader JSON import");
+  const encoded=JSON.parse(write()),loaded=new THREE.MaterialLoader().parse(encoded);
+  if(!loaded.uniforms.offset.value.isVector3) throw new Error("reverse vector load");
+  result.push(...projection(encoded,kind),...projection(loaded.toJSON(),kind));
+  const number=heap.getFloat64(run(4),true);
+  if(load({type:labels[kind]})!==512) throw new Error("shader defaults");
+  result.push(...projection(JSON.parse(write()),kind),number);
+  if(load(encoded)!==512) throw new Error("native own JSON re-import");
+  for(const invalid of [
+    {...input,glslVersion:"200",opacity:.25},
+    {...input,vertexShader:8,opacity:.25},
+    {...input,uniforms:{offset:{type:"v3",value:[1,2]}},opacity:.25},
+    {...input,type:labels[kind===15?16:15],opacity:.25},
+  ]) {
+    const before=write();
+    result.push(load(invalid),Number(before===write()));
+  }
+  return result;
+}
+try {
+  if(THREE.REVISION!=="160") throw new Error("three.js revision");
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const result=[];
+  for(const kind of [15,16]) {
+    const ref=reference(kind);
+    result.push(...product(wasm,kind,ref.json),...ref.results);
+  }
+  output.textContent=JSON.stringify(result);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>
