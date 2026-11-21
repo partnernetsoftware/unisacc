@@ -1,0 +1,76 @@
+struct AudioAnalyserWindow {
+  samples: u32;
+  length: u32;
+  cursor: u32;
+}
+
+native function audio_window_size(size:i64) i64 {
+  if(size<32 || size>32768) { return 0; }
+  return u32_and(size,size-1)==0;
+}
+
+native function audio_window_live(state:i64) i64 {
+  if(!audio_play_span(state,AudioAnalyserWindow.size,4)) { return 0; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  return audio_window_size(size) && ux_u32(state+AudioAnalyserWindow.cursor)<size &&
+    audio_play_span(samples,size*4,4) && !audio_play_overlap(state,AudioAnalyserWindow.size,samples,size*4);
+}
+
+native function AudioAnalyser_initWindow(state:i64,samples:i64,size:i64) i64 {
+  if(!audio_window_size(size) || !audio_play_span(state,AudioAnalyserWindow.size,4) ||
+     !audio_play_span(samples,size*4,4) || audio_play_overlap(state,AudioAnalyserWindow.size,samples,size*4)) { return 0-1; }
+  let i=0;
+  while(i<size) {
+    let clear=ux_u32_put(samples+i*4,0);
+    i=i+1;
+  }
+  let a=ux_u32_put(state+AudioAnalyserWindow.samples,samples);
+  let b=ux_u32_put(state+AudioAnalyserWindow.length,size);
+  let c=ux_u32_put(state+AudioAnalyserWindow.cursor,0);
+  return state;
+}
+
+// Push already mixed mono f32 samples. Only the newest window is retained.
+native function AudioAnalyser_pushWindow(state:i64,pcm:i64,count:i64) i64 {
+  if(!audio_window_live(state) || count<0 || count>6291456/4 || !audio_play_span(pcm,count*4,4) ||
+     audio_play_overlap(state,AudioAnalyserWindow.size,pcm,count*4)) { return 0-1; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  if(audio_play_overlap(samples,size*4,pcm,count*4)) { return 0-1; }
+  let cursor=ux_u32(state+AudioAnalyserWindow.cursor);
+  let i=0;
+  if(count>size) { i=count-size; cursor=(cursor+i)%size; }
+  while(i<count) {
+    let sample=ux_u32(pcm+i*4);
+    let a=ux_u32_put(samples+cursor*4,sample);
+    cursor=(cursor+1)%size;
+    i=i+1;
+  }
+  let a=ux_u32_put(state+AudioAnalyserWindow.cursor,cursor);
+  return count;
+}
+
+native function AudioAnalyser_getByteTimeData(state:i64,out:i64,length:i64) i64 {
+  if(!audio_window_live(state) || !audio_play_span(out,length,1) ||
+     audio_play_overlap(state,AudioAnalyserWindow.size,out,length)) { return 0-1; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  if(audio_play_overlap(samples,size*4,out,length)) { return 0-1; }
+  let count=length;
+  if(count>size) { count=size; }
+  let cursor=ux_u32(state+AudioAnalyserWindow.cursor);
+  let i=0;
+  while(i<count) {
+    let sample=ux_f32(samples+(cursor+i)%size*4);
+    let byte=128;
+    if(sample==sample) {
+      if(sample<=0.0-1.0) { byte=0; }
+      else if(sample>=1.0) { byte=255; }
+      else { byte=f64_floor_i64(128.0*(1.0+sample)); }
+    }
+    let a=ux_u8_put(out+i,byte);
+    i=i+1;
+  }
+  return count;
+}

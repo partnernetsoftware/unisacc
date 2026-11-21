@@ -289,7 +289,8 @@
 - ~~Audio 缓冲播放 | G-io 双声道 PCM、同采样率循环、稳态增益与停止 | AudioLoader。~~ Chrome 离线音频与独立金值 11 项通过，取消循环转红。
 - Audio 主机接线 | G-io 上下文输出、增益自动化、暂停与重采样 | AudioContext、缓冲播放。
 - PositionalAudio | G-io 双路声源、距离模型与定位 | Audio、AudioListener。
-- AudioAnalyser | G-io 脉冲窗、频带和停止后的读回 | Audio。
+- ~~AudioAnalyser 时间窗 | G-io 离线脉冲窗、饱和、滚动与读回 | Audio。~~ 九项通过，错读时间窗相位转红。
+- AudioAnalyser 频带 | G-io FFT、平滑、频带和停止后的输出 | 时间窗与 Audio。
 - 音频跨场景生命周期 | G-io 混音、解绑、切换和释放 | Audio、PositionalAudio、AudioAnalyser。
 
 ## M12 整合
