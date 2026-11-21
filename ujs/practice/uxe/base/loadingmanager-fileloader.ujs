@@ -1,0 +1,130 @@
+struct LoadingFileRoute {
+  file: u32;
+  generation: u32;
+  url: u32;
+}
+
+native function lm_file_range(at:i64,size:i64,manager:i64) i64 {
+  let table=ux_u32(manager+LoadingManagerState.table);
+  let bytes=ux_u32(manager+LoadingManagerState.capacity)*LoadingHandler.size;
+  return file_disjoint(at,size,manager,LoadingManagerState.size) &&
+    file_disjoint(at,size,table,bytes);
+}
+
+// Reserve DefaultLoadingManager.size + LoadingManagerState.size per base.
+// The pointer remains compatible with the existing default-selector slot.
+native function LoadingManager_defaultClass(base:i64,table:i64,capacity:i64) i64 {
+  let size=DefaultLoadingManager.size+LoadingManagerState.size;
+  if(!loading_span(base,size) || capacity<1 || capacity>524288 ||
+     !loading_span(table,capacity*LoadingHandler.size) ||
+     !file_disjoint(base,size,table,capacity*LoadingHandler.size)) { return 0-1; }
+  let manager=base+DefaultLoadingManager.size;
+  let ready=ux_u32(base+DefaultLoadingManager.initialized);
+  if(ready==1) {
+    if(ux_u32(base+DefaultLoadingManager.manager)!=manager || !lm_state(manager) ||
+       ux_u32(manager+LoadingManagerState.table)!=table ||
+       ux_u32(manager+LoadingManagerState.capacity)!=capacity) { return 0-1; }
+    return manager;
+  }
+  if(ready!=0) { return 0-1; }
+  let initialized=LoadingManager_new(manager,table,capacity,0,0,0);
+  if(initialized<0) { return initialized; }
+  let saved=ux_u32_put(base+DefaultLoadingManager.manager,manager);
+  let published=ux_u32_put(base+DefaultLoadingManager.initialized,1);
+  return manager;
+}
+
+native function FileLoader_bindManaged(file:i64,route:i64,base:i64,manager:i64,table:i64,capacity:i64) i64 {
+  let baseSize=DefaultLoadingManager.size+LoadingManagerState.size;
+  if(!loading_span(file,FileLoader.size) || !loading_span(route,LoadingFileRoute.size) ||
+     !loading_span(base,baseSize) || !file_disjoint(file,FileLoader.size,route,LoadingFileRoute.size) ||
+     !file_disjoint(file,FileLoader.size,base,baseSize) ||
+     !file_disjoint(route,LoadingFileRoute.size,base,baseSize)) { return 0-1; }
+  let defaultManager=base+DefaultLoadingManager.size;
+  if(manager==0-1 || manager==defaultManager) {
+    if(capacity<1 || capacity>524288 || !loading_span(table,capacity*LoadingHandler.size) ||
+       !file_disjoint(file,FileLoader.size,table,capacity*LoadingHandler.size) ||
+       !file_disjoint(route,LoadingFileRoute.size,table,capacity*LoadingHandler.size)) { return 0-1; }
+    manager=LoadingManager_defaultClass(base,table,capacity);
+  } else if(!lm_state(manager) || !lm_file_range(base,baseSize,manager)) { return 0-1; }
+  if(!lm_state(manager) || !lm_file_range(file,FileLoader.size,manager) ||
+     !lm_file_range(route,LoadingFileRoute.size,manager)) { return 0-1; }
+  let initialized=FileLoader_init(file,manager);
+  if(initialized<0) { return initialized; }
+  let a=ux_u32_put(route+LoadingFileRoute.file,file);
+  let b=ux_u32_put(route+LoadingFileRoute.generation,0);
+  let c=ux_u32_put(route+LoadingFileRoute.url,0);
+  return file;
+}
+
+native function lm_file_manager(file:i64,route:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || !loading_span(route,LoadingFileRoute.size) ||
+     !file_disjoint(file,FileLoader.size,route,LoadingFileRoute.size) ||
+     ux_u32(route+LoadingFileRoute.file)!=file ||
+     ux_u32(route+LoadingFileRoute.generation)!=ux_u32(file+FileLoader.generation)) { return 0-1; }
+  let manager=ux_u32(file+FileLoader.manager);
+  if(!lm_state(manager) || !lm_file_range(file,FileLoader.size,manager) ||
+     !lm_file_range(route,LoadingFileRoute.size,manager)) { return 0-1; }
+  return manager;
+}
+
+// requested is the loader path and URL already joined by the caller.
+// The returned generation owns the resolved URL token until receive/release.
+native function FileLoader_beginManaged(file:i64,route:i64,requested:i64) i64 {
+  let manager=lm_file_manager(file,route);
+  if(manager<0 || ux_u32(file+FileLoader.state)!=0 || !lm_token(requested) || requested==0) { return 0-1; }
+  let prior=ux_u32(file+FileLoader.generation);
+  if(prior==4294967295) { return 0-2; }
+  let url=LoadingManager_resolveURL(manager,requested);
+  if(!lm_token(url) || url==0 || lm_file_manager(file,route)!=manager ||
+     ux_u32(file+FileLoader.state)!=0 || ux_u32(file+FileLoader.generation)!=prior) { return 0-1; }
+  if(ux_u32(manager+LoadingManagerState.total)==4294967295) { return 0-2; }
+  let id=prior+1;
+  let stamp=ux_u32_put(file+FileLoader.generation,id);
+  let active=ux_u32_put(file+FileLoader.state,1);
+  let routeId=ux_u32_put(route+LoadingFileRoute.generation,id);
+  let stored=ux_u32_put(route+LoadingFileRoute.url,url);
+  let started=LoadingManager_itemStart(manager,url);
+  return id;
+}
+
+native function FileLoader_managedURL(file:i64,route:i64,id:i64) i64 {
+  if(lm_file_manager(file,route)<0 || ux_u32(file+FileLoader.state)==0 ||
+     ux_u32(file+FileLoader.generation)!=id) { return 0-1; }
+  return ux_u32(route+LoadingFileRoute.url);
+}
+
+native function FileLoader_receiveManaged(file:i64,route:i64,id:i64,status:i64,bytes:i64,length:i64) i64 {
+  let manager=lm_file_manager(file,route);
+  if(manager<0 || ux_u32(file+FileLoader.state)!=1 || ux_u32(file+FileLoader.generation)!=id ||
+     ux_u32(manager+LoadingManagerState.loaded)>=ux_u32(manager+LoadingManagerState.total)) { return 0-1; }
+  let url=ux_u32(route+LoadingFileRoute.url);
+  if(url==0) { return 0-1; }
+  let ok=status==200 || status==0;
+  if(ok && (length<0 || bytes<0 || bytes>6291456-length ||
+     !file_disjoint(bytes,length,file,FileLoader.size) ||
+     !file_disjoint(bytes,length,route,LoadingFileRoute.size) ||
+     !lm_file_range(bytes,length,manager))) { return 0-1; }
+  let busy=ux_u32_put(file+FileLoader.state,3);
+  let ready=0;
+  if(ok) {
+    let a=ux_u32_put(file+FileLoader.bytes,bytes);
+    let b=ux_u32_put(file+FileLoader.length,length);
+    ready=2;
+  } else {
+    let error=LoadingManager_itemError(manager,url);
+  }
+  let ended=LoadingManager_itemEnd(manager,url);
+  let state=ux_u32_put(file+FileLoader.state,ready);
+  if(ready==0) { let clear=ux_u32_put(route+LoadingFileRoute.url,0); }
+  if(ended<0) { return ended; }
+  return ok;
+}
+
+native function FileLoader_releaseManaged(file:i64,route:i64,id:i64) i64 {
+  if(lm_file_manager(file,route)<0) { return 0-1; }
+  let released=FileLoader_release(file,id);
+  if(released<0) { return released; }
+  let cleared=ux_u32_put(route+LoadingFileRoute.url,0);
+  return file;
+}

@@ -1,0 +1,143 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { DefaultLoadingManager, FileLoader, LoadingManager, REVISION } from "../../web/game/three.module.js";
+import { createLoadingManagerHost, linkLoadingManagerModule } from "../base/loadingmanager-host-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const paths=["","fixture-good","fixture-error","fixture-explicit"];
+  const resolved=["","data:text/plain,LM%0A","data:text/plain;base64,%%%%","data:text/plain,OK%0A"];
+  const resolve=url=>resolved[paths.indexOf(url)]??url;
+  const urlId=url=>resolved.indexOf(url);
+  const actual=[], reference=[];
+  function hook(manager,id,events,done) {
+    manager.onStart=function(url,loaded,total) {
+      events.push(1,id,Number(this===manager),urlId(url),loaded,total);
+    };
+    manager.onProgress=function(url,loaded,total) {
+      events.push(2,id,Number(this===manager),urlId(url),loaded,total);
+    };
+    manager.onError=function(url) {
+      events.push(3,id,Number(this===manager),urlId(url),0,0);
+    };
+    manager.onLoad=function() {
+      events.push(4,id,Number(this===manager),0,0,0);
+      done();
+    };
+  }
+  const explicit=new LoadingManager();
+  const loaders=[new FileLoader(),new FileLoader(DefaultLoadingManager),new FileLoader(explicit)];
+  let settled;
+  hook(DefaultLoadingManager,1,reference,()=>settled());
+  hook(explicit,2,reference,()=>settled());
+  DefaultLoadingManager.setURLModifier(resolve);
+  explicit.setURLModifier(resolve);
+  const refHandler=/^data:/g;
+  DefaultLoadingManager.addHandler(refHandler,loaders[0]);
+  const refResults=[Number(loaders[0].manager===DefaultLoadingManager),
+    Number(loaders[1].manager===loaders[0].manager),
+    Number(loaders[2].manager!==loaders[0].manager),
+    Number(DefaultLoadingManager.getHandler(resolved[1])===loaders[0]),
+    Number(DefaultLoadingManager.getHandler(resolved[1])===loaders[0])];
+  for(let i=0;i<loaders.length;i++) {
+    const done=new Promise(ok=>{ settled=ok; });
+    const value=await new Promise(ok=>loaders[i].load(paths[i+1],ok,undefined,()=>ok(null)));
+    await done;
+    if(value===null) refResults.push(0,0,0,0);
+    else refResults.push(1,...new TextEncoder().encode(value));
+  }
+
+  const bytes=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const module=new WebAssembly.Module(bytes);
+  const host=createLoadingManagerHost();
+  function refuse(link,message) {
+    try { link(); } catch(error) {
+      if(error instanceof WebAssembly.LinkError) return;
+      throw error;
+    }
+    throw new Error("linked disallowed "+message);
+  }
+  refuse(()=>linkLoadingManagerModule(module),"missing provider");
+  refuse(()=>linkLoadingManagerModule(module,{imports:{}}),"missing import");
+  refuse(()=>linkLoadingManagerModule(module,{
+    imports:Object.create(host.imports)
+  }),"inherited capabilities");
+  const changed=new Uint8Array(bytes.slice(0));
+  const name=new TextEncoder().encode("host_lm_cb");
+  const oldIndex=changed.findIndex((_,index)=>name.every((byte,i)=>byte===changed[index+i]));
+  if(oldIndex<0) throw new Error("fixture cannot identify callback import");
+  changed.set(new TextEncoder().encode("host_lm_no"),oldIndex);
+  const unlisted=new WebAssembly.Module(changed);
+  refuse(()=>linkLoadingManagerModule(unlisted,{
+    imports:{...host.imports,host_lm_no:()=>0n}
+  }),"unlisted capability");
+  const wasm=linkLoadingManagerModule(module,host);
+  const run=(op,which=0,x=0,y=0,z=0)=>Number(wasm.uxe_lm_file_probe(
+    BigInt(op),BigInt(which),BigInt(x),BigInt(y),BigInt(z)));
+  if(run(0,0,query.get("mutate")==="split"?1:0)!==1) throw new Error("managed loader binding");
+  const managerAddresses=[run(1,0),run(1,2)];
+  for(const [index,address] of managerAddresses.entries()) {
+    const owner={};
+    host.bindManager(address,owner);
+    hook(owner,index+1,actual,()=>{});
+    for(const [kind,name] of [[1,"onStart"],[2,"onProgress"],[3,"onError"],[4,"onLoad"]]) {
+      if(run(8,index,kind,host.registerCallback(owner[name]))!==address) throw new Error("bind callbacks");
+    }
+    if(run(9,index,host.registerCallback(resolve))!==address) throw new Error("bind URL modifier");
+  }
+  const matcher=host.registerRegExp(/^data:/g);
+  const productLoader={};
+  const token=host.registerLoader(productLoader);
+  if(run(10,0,matcher.token,token,matcher.global)!==managerAddresses[0]) throw new Error("add handler");
+  const registered=host.registerURL(resolved[1]);
+  const results=[Number(managerAddresses[0]===run(7)),
+    Number(run(1,1)===managerAddresses[0]),Number(managerAddresses[1]!==managerAddresses[0]),
+    Number(host.readLoader(run(11,0,registered))===productLoader),
+    Number(host.readLoader(run(11,0,registered))===productLoader)];
+  const base=run(6);
+  const memory=new Uint8Array(wasm.memory.buffer,base,4096);
+  for(let i=0;i<loaders.length;i++) {
+    const request=host.registerURL(paths[i+1]);
+    const generation=run(2,i,request);
+    if(generation!==1) throw new Error("generation "+generation);
+    const url=run(3,i,generation);
+    if(host.readURL(url)!==resolved[i+1]) throw new Error("resolved URL "+host.readURL(url));
+    if(run(4,i,generation+1,500,0)!==-1) throw new Error("stale delivery accepted");
+    let status=500;
+    let data=new Uint8Array();
+    try {
+      const response=await fetch(host.readURL(query.get("mutate")==="url"?request:url));
+      status=response.status;
+      data=new Uint8Array(await response.arrayBuffer());
+    } catch {}
+    const at=2048+i*128;
+    if(data.length>128) throw new Error("fixture bytes");
+    memory.set(data,at);
+    const accepted=run(4,i,generation,status,data.length);
+    if(accepted<0) throw new Error("receive "+accepted);
+    if(accepted===0) results.push(0,0,0,0);
+    else {
+      const span=run(12,i);
+      if(span!==at || run(13,i)!==data.length) throw new Error("registered byte view");
+      results.push(1,...memory.subarray(span,span+data.length));
+      if(run(5,i,generation)<0) throw new Error("release");
+    }
+    if(run(3,i,generation)!==-1) throw new Error("released URL remained visible");
+  }
+
+  function compare(name,got,want) {
+    if(got.length!==want.length) throw new Error(name+" length actual="+got.length+" r160="+want.length);
+    for(let i=0;i<want.length;i++) {
+      if(got[i]!==want[i]) throw new Error(name+" case="+i+" actual="+got[i]+" r160="+want[i]);
+    }
+  }
+  compare("FileLoader result",results,refResults);
+  compare("LoadingManager events",actual,reference);
+  output.textContent=JSON.stringify([...results,...actual]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

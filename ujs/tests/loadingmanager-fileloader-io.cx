@@ -1,0 +1,83 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int split=argc==2 && tx_eqz(argv[1],"--split-default-mutate");
+    const int url_mutation=argc==2 && tx_eqz(argv[1],"--raw-url-mutate");
+    if(argc!=1 && !split && !url_mutation) return 2;
+    char dir[256],cwd[390],abi[300],body[300],wasm[300],url[800];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-lm-file-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(body,sizeof body,"%s/entry.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/loading-file.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/loadingmanager-fileloader-r160.html?wasm=%s%s",
+        cwd,wasm,split?"&mutate=split":url_mutation?"&mutate=url":"");
+    const char signature[]=
+        "import host_lm_url from \"uxe_lm_v1\"(i64,i64) i64;\n"
+        "import host_lm_reset from \"uxe_lm_v1\"(i64) i64;\n"
+        "import host_lm_test from \"uxe_lm_v1\"(i64,i64) i64;\n"
+        "import host_lm_cb from \"uxe_lm_v1\"(i64,i64,i64,i64,i64,i64) i64;\n"
+        "export uxe_lm_file_probe(op:i64,which:i64,x:i64,y:i64,z:i64) i64 version 1;\n";
+    const char entry[]=
+        "let base=32;let normal=40;let separate=256;let table=512;let file=96+which*64;let route=file+32;"
+        "let manager=normal;if(which==1){manager=separate;}"
+        "if(op==0){let source=LoadingManager_defaultClass(base,table,4);"
+        " let explicit=LoadingManager_new(separate,640,4,0,0,0);"
+        " let a=FileLoader_bindManaged(96,128,base,0-1,table,4);"
+        " let next=normal;if(x==1){next=separate;}"
+        " let b=FileLoader_bindManaged(160,192,base,next,table,4);"
+        " let c=FileLoader_bindManaged(224,320,base,explicit,table,4);"
+        " return source==normal && a==96 && b==160 && c==224;}"
+        "if(which==2){route=320;}"
+        "if(op==1){return ux_u32(file+FileLoader.manager);}"
+        "if(op==2){return FileLoader_beginManaged(file,route,x);}"
+        "if(op==3){return FileLoader_managedURL(file,route,x);}"
+        "if(op==4){return FileLoader_receiveManaged(file,route,x,y,2048+which*128,z);}"
+        "if(op==5){return FileLoader_releaseManaged(file,route,x);}"
+        "if(op==6){return ux_span(0,4096);}"
+        "if(op==7){return DefaultLoadingManager_get(base,normal);}"
+        "if(op==8){return LoadingManager_setCallback(manager,x,y);}"
+        "if(op==9){return LoadingManager_setURLModifier(manager,x);}"
+        "if(op==10){return LoadingManager_addHandler(manager,x,y,z);}"
+        "if(op==11){return LoadingManager_getHandler(manager,x);}"
+        "if(op==12){return ux_u32(file+FileLoader.bytes);}"
+        "if(op==13){return ux_u32(file+FileLoader.length);}"
+        "return 0-1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/loadingmanager.ujs","ujs/practice/uxe/base/defaultloadingmanager.ujs",
+        "ujs/practice/uxe/base/fileloader.ujs","ujs/practice/uxe/base/loadingmanager-class.ujs",
+        "ujs/practice/uxe/base/loadingmanager-fileloader.ujs",body,"-o",wasm,0};
+    const double gold[]={1,1,1,1,1, 1,76,77,10, 0,0,0,0, 1,79,75,10,
+        1,1,1,1,0,1, 2,1,1,1,1,1, 4,1,1,0,0,0,
+        1,1,1,2,1,2, 3,1,1,2,0,0, 2,1,1,2,2,2, 4,1,1,0,0,0,
+        1,2,1,3,0,1, 2,2,1,3,1,1, 4,2,1,0,0,0};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0; size_t bytes=0;
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,signature,sizeof signature-1,0600) ||
+        sy_write_file(body,entry,sizeof entry-1,0600);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,12,&output,&bytes);
+        if(rc) { printf("LOADINGMANAGER_FILE compile_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            if(actual[i]!=gold[i]) {
+                printf("LOADINGMANAGER_FILE case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("G_IO LoadingManager FileLoader provider lifecycle cases=%d failed=%d\n",count,failed);
+    return failed;
+}
