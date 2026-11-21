@@ -1,0 +1,101 @@
+/* Linux integration check. A subreaper lets the fixture reap and identify
+ * its own grandchild after a process-group timeout, including on QEMU. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sysx.process
+#pragma unisa use sysx.poll
+#pragma unisa use text.conv
+
+static int ok_count, fail_count;
+
+static void check(int condition, const char *name) {
+    if (condition) ok_count++;
+    else fail_count++;
+    printf("%s\t%s\n", condition ? "PASS" : "FAIL", name);
+}
+
+static int wait_for_pid(int pid, int *signal, long deadline) {
+    while (sy_now_ms() < deadline) {
+        int rc = sy_wait_status(pid, 1, 0, 0, signal);
+        if (rc) return rc;
+        sy_sleep_ms(1);
+    }
+    return 0;
+}
+
+static int announced_pid(int fd) {
+    sy_pollfd_t ready;
+    ready.fd = fd;
+    ready.events = 1;
+    ready.revents = 0;
+    char buf[32];
+    if (sy_poll(&ready, 1, 1200) != 1) return -1;
+    long n = sy_read_once(fd, buf, sizeof buf);
+    int64_t pid = 0;
+    if (n < 2 || buf[n - 1] != '\n' || tx_to_i64(buf, n - 1, 10, &pid) || pid <= 1 || pid > 2147483647) return -1;
+    return (int)pid;
+}
+
+static void timeout_case(int group, const char *group_check, const char *reap_check) {
+    char *argv[] = {"sh", "-c", "sleep 4 & printf '%s\n' \"$!\"; wait", 0};
+    sy_spawn_t options;
+    sy_child_t child;
+    sy_exit_t status;
+    sy_spawn_init(&options);
+    options.argv = argv;
+    options.out_fd = SY_STDIO_PIPE;
+    options.pgroup = group;
+    options.deadline_ms = 800;
+    if (sy_proc_spawn(&options, &child)) {
+        check(0, group_check);
+        check(0, reap_check);
+        return;
+    }
+    int grandchild = announced_pid(child.out_fd);
+    check(grandchild > 0 && sy_getpgid(child.pid) == child.pid &&
+          sy_getpgid(grandchild) == child.pid && child.pid != sy_getpgid(0), group_check);
+    int rc = sy_proc_wait(&child, &status);
+    check(rc == 0 && status.timed_out && sy_exit_code(&status) == 124, "timeout-status-124");
+    sy_proc_close(&child);
+    int signal = 0;
+    if (grandchild > 0) {
+        int reaped = wait_for_pid(grandchild, &signal, sy_now_ms() + 500);
+        check(reaped == grandchild && signal == SIGKILL && sy_signal(grandchild, 0) == -ESRCH, reap_check);
+        if (!reaped) {
+            (void)sy_signal(grandchild, SIGKILL);
+            (void)wait_for_pid(grandchild, &signal, sy_now_ms() + 500);
+        }
+    } else check(0, reap_check);
+}
+
+int main(void) {
+    if (sy_child_subreaper() != 0) return 2;
+    char *argv[] = {"sh", "-c", "read value", 0};
+    sy_spawn_t options;
+    sy_child_t peer, refused;
+    sy_spawn_init(&options);
+    options.argv = argv;
+    options.in_fd = SY_STDIO_PIPE;
+    if (sy_proc_spawn(&options, &peer)) return 2;
+    check(sy_getpgid(peer.pid) == sy_getpgid(0), "unbounded-spawn-inherits-group");
+
+    timeout_case(0, "bounded-default-owns-group", "bounded-default-reaps-grandchild");
+    timeout_case(-1, "explicit-group-owns-group", "explicit-group-reaps-grandchild");
+    check(sy_proc_try_wait(&peer, 0) == 0, "unrelated-peer-survives");
+    options.pgroup = peer.pid;
+    options.deadline_ms = 150;
+    int rc = sy_proc_spawn(&options, &refused);
+    check(rc == -EPERM && refused.pid == 0, "impossible-group-refused-before-exec");
+    if (!rc) {
+        sy_proc_close(&refused);
+        (void)sy_proc_wait(&refused, 0);
+    }
+    (void)sy_signal(peer.pid, SIGKILL);
+    (void)wait_for_pid(peer.pid, 0, sy_now_ms() + 500);
+    sy_proc_close(&peer);
+    check(sy_wait_status(peer.pid, 1, 0, 0, 0) == -ECHILD, "fixture-children-reaped");
+    printf("CHECK_L0_KILLTREE\tok=%d\tfailed=%d\n", ok_count, fail_count);
+    return fail_count != 0;
+}
