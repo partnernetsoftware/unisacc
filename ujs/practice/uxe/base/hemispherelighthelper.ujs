@@ -1,0 +1,142 @@
+struct HemisphereLightHelper {
+  geometry: u32;
+  matrix: u32;
+  colors: u32;
+  colorVersion: u32;
+  vertexColors: u32;
+  active: u32;
+  lookX: f64;
+  lookY: f64;
+  lookZ: f64;
+  targetDistance: f64;
+  red: f64;
+  green: f64;
+  blue: f64;
+}
+
+native function hemi_helper_shades(skyGround:i64,overrideRGB:i64) i64 {
+  if(overrideRGB!=0-1) { return light_helper_rgb_valid(overrideRGB); }
+  return light_helper_span(skyGround,48,8) && light_helper_rgb_valid(skyGround) &&
+    light_helper_rgb_valid(skyGround+24);
+}
+
+native function hemi_helper_look(helper:i64,light:i64) i64 {
+  if(!light_helper_span(light,128,8) ||
+     !light_helper_disjoint(helper,HemisphereLightHelper.size,light,128)) { return 0-1; }
+  return light_helper_direction(helper+HemisphereLightHelper.lookX,
+    0.0-2.0*ux_f64(light+96),0.0-2.0*ux_f64(light+104),0.0-2.0*ux_f64(light+112));
+}
+
+native function hemi_helper_colors(colors:i64,skyGround:i64) i64 {
+  let i=0;
+  while(i<24) {
+    let rgb=skyGround+i/12*24;
+    let dst=colors+i*12;
+    let r=ux_f32_put(dst,ux_f64(rgb));
+    let g=ux_f32_put(dst+4,ux_f64(rgb+8));
+    let b=ux_f32_put(dst+8,ux_f64(rgb+16));
+    i=i+1;
+  }
+  return colors;
+}
+
+// Sky and ground are two consecutive linear RGB triples.
+native function HemisphereLightHelper_update(helper:i64,skyGround:i64,overrideRGB:i64) i64 {
+  if(!light_helper_span(helper,HemisphereLightHelper.size,8) ||
+     ux_u32(helper+HemisphereLightHelper.active)!=1 ||
+     !hemi_helper_shades(skyGround,overrideRGB)) { return 0-1; }
+  let light=ux_u32(helper+HemisphereLightHelper.matrix);
+  let colors=ux_u32(helper+HemisphereLightHelper.colors);
+  let version=ux_u32(helper+HemisphereLightHelper.colorVersion);
+  if(overrideRGB==0-1) {
+    if(!light_helper_span(colors,288,4) ||
+       !light_helper_disjoint(colors,288,skyGround,48) ||
+       !light_helper_disjoint(colors,288,helper,HemisphereLightHelper.size) ||
+       !light_helper_disjoint(colors,288,light,128) ||
+       !light_helper_disjoint(helper,HemisphereLightHelper.size,skyGround,48) ||
+       version==4294967295) { return 0-1; }
+  } else if(!light_helper_disjoint(helper,HemisphereLightHelper.size,overrideRGB,24)) { return 0-1; }
+  let look=hemi_helper_look(helper,light);
+  if(look<0) { return 0-1; }
+  if(overrideRGB==0-1) {
+    let c=hemi_helper_colors(colors,skyGround);
+    let v=ux_u32_put(helper+HemisphereLightHelper.colorVersion,version+1);
+  } else {
+    let c=light_helper_rgb_copy(helper+HemisphereLightHelper.red,overrideRGB);
+  }
+  return helper;
+}
+
+native function hemi_helper_separate(base:i64,bytes:i64,helper:i64,geometry:i64,vertices:i64,
+    colors:i64,work:i64) i64 {
+  return light_helper_disjoint(base,bytes,helper,HemisphereLightHelper.size) &&
+    light_helper_disjoint(base,bytes,geometry,GeometryBuffers.size) &&
+    light_helper_disjoint(base,bytes,vertices,768) && light_helper_disjoint(base,bytes,colors,288) &&
+    light_helper_disjoint(base,bytes,work,344);
+}
+
+// GeometryBuffers is initialized by the caller for at least 24 vertices.
+native function HemisphereLightHelper_init(helper:i64,geometry:i64,colors:i64,work:i64,
+    light:i64,size:f64,skyGround:i64,overrideRGB:i64) i64 {
+  if(!light_helper_span(geometry,GeometryBuffers.size,4) ||
+     !GeometryBuffers_fits(geometry,24,0)) { return 0-1; }
+  let vertices=ux_u32(geometry+GeometryBuffers.vertices);
+  if(!light_helper_span(helper,HemisphereLightHelper.size,8) ||
+     !light_helper_span(vertices,768,4) || !light_helper_span(colors,288,4) ||
+     !light_helper_span(work,344,8) || !light_helper_span(light,128,8) ||
+     !hemi_helper_shades(skyGround,overrideRGB) || size-size!=0.0 ||
+     !hemi_helper_separate(light,128,helper,geometry,vertices,colors,work) ||
+     !light_helper_disjoint(helper,HemisphereLightHelper.size,geometry,GeometryBuffers.size) ||
+     !light_helper_disjoint(helper,HemisphereLightHelper.size,vertices,768) ||
+     !light_helper_disjoint(helper,HemisphereLightHelper.size,colors,288) ||
+     !light_helper_disjoint(helper,HemisphereLightHelper.size,work,344) ||
+     !light_helper_disjoint(geometry,GeometryBuffers.size,vertices,768) ||
+     !light_helper_disjoint(geometry,GeometryBuffers.size,colors,288) ||
+     !light_helper_disjoint(geometry,GeometryBuffers.size,work,344) ||
+     !light_helper_disjoint(vertices,768,colors,288) ||
+     !light_helper_disjoint(vertices,768,work,344) ||
+     !light_helper_disjoint(colors,288,work,344)) { return 0-1; }
+  let rgb=overrideRGB;
+  let bytes=24;
+  if(rgb==0-1) { rgb=skyGround; bytes=48; }
+  if(!hemi_helper_separate(rgb,bytes,helper,geometry,vertices,colors,work)) { return 0-1; }
+  let look=hemi_helper_look(helper,light);
+  if(look<0) { return 0-1; }
+  let m=OctahedronGeometry_generate(geometry,work,size,0);
+  if(m<0) { return 0-1; }
+  let i=0;
+  while(i<24) {
+    let v=vertices+i*32;
+    let x=ux_f32(v);
+    let z=ux_f32(v+8);
+    let nx=ux_f32(v+12);
+    let nz=ux_f32(v+20);
+    let a=ux_f32_put(v,x*0.00000000000000006123233995736766+z);
+    let b=ux_f32_put(v+8,z*0.00000000000000006123233995736766-x);
+    let c=ux_f32_put(v+12,nx*0.00000000000000006123233995736766+nz);
+    let d=ux_f32_put(v+20,nz*0.00000000000000006123233995736766-nx);
+    i=i+1;
+  }
+  i=0;
+  while(i<72) {
+    let c=ux_f32_put(colors+i*4,0.0);
+    i=i+1;
+  }
+  let a=ux_u32_put(helper+HemisphereLightHelper.geometry,geometry);
+  let b=ux_u32_put(helper+HemisphereLightHelper.matrix,light);
+  let c=ux_u32_put(helper+HemisphereLightHelper.colors,colors);
+  let d=ux_u32_put(helper+HemisphereLightHelper.colorVersion,0);
+  let e=ux_u32_put(helper+HemisphereLightHelper.vertexColors,overrideRGB==0-1);
+  let r=ux_f64_put(helper+HemisphereLightHelper.red,1.0);
+  let gg=ux_f64_put(helper+HemisphereLightHelper.green,1.0);
+  let bb=ux_f64_put(helper+HemisphereLightHelper.blue,1.0);
+  let active=ux_u32_put(helper+HemisphereLightHelper.active,1);
+  return HemisphereLightHelper_update(helper,skyGround,overrideRGB);
+}
+
+native function HemisphereLightHelper_dispose(helper:i64) i64 {
+  if(!light_helper_span(helper,HemisphereLightHelper.size,8) ||
+     ux_u32(helper+HemisphereLightHelper.active)!=1) { return 0-1; }
+  let a=ux_u32_put(helper+HemisphereLightHelper.active,0);
+  return 0;
+}
