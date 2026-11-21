@@ -19,6 +19,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.chainargv
 
 static int fails;
 static void ck(int c, const char *name) { printf("%s\t%s\n", c ? "PASS" : "FAIL", name); if (!c) fails++; }
@@ -61,31 +62,61 @@ static char *field(char **cur) {
     return s;
 }
 static char regpath[1024];
+
+/* Match PAT against token range TOKS[lo..hi] using ca_token_text/ca_token_kind (token provenance). */
+static int tok_find(void *toks, int lo, int hi, const char *pat) {
+    int i, k;
+    if (!toks || !pat || !pat[0]) return -1;
+    for (i = lo; i <= hi; i++) {
+        const char *p = pat;
+        for (k = i; k <= hi && *p; k++) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            const char *tt = ca_token_text(toks, k);
+            int tk = ca_token_kind(toks, k);
+            size_t tl = strlen(tt);
+            if (tk == 2) {
+                if (*p != '"' || strncmp(p + 1, tt, tl) != 0 || p[1 + tl] != '"') break;
+                p += tl + 2;
+            } else if (tk == 3) {
+                if (*p != '\'' || strncmp(p + 1, tt, tl) != 0 || p[1 + tl] != '\'') break;
+                p += tl + 2;
+            } else {
+                if (strncmp(p, tt, tl) != 0) break;
+                p += tl;
+            }
+            while (*p == ' ' || *p == '\t') p++;
+        }
+        if (!*p) return i;
+    }
+    return -1;
+}
+
 static int fact_row(char *line) {
     char *cur = line, *name = field(&cur), *kind = field(&cur), *path = field(&cur), *scope = field(&cur), *a1 = field(&cur), *a2 = field(&cur);
-    size_t n = 0; char *b, *s, *e, head[512]; long sn, i1, i2; int ok = 0;
+    size_t n = 0; char *b; void *toks; int lo = 0, hi = -1, i1, i2, ok = 0;
     if (!*name || !*kind || !*path || !*a1) { printf("FAIL\tfact row malformed: %s\n", name); fails++; return 0; }
     if (!regpath[0] && cx_fmt(regpath, sizeof regpath, "%s", path)) return 0;
     b = cx_read(path, &n);
     if (!b) { printf("FAIL\t%s (read %s)\n", name, path); fails++; return 1; }
-    s = b; sn = (long)n;
+    toks = ca_tokens(b);
+    free(b);
+    if (!toks) { printf("FAIL\t%s (tokenize %s)\n", name, path); fails++; return 1; }
+    hi = ca_token_count(toks) - 1;
     if (scope[0] && !(scope[0] == '-' && !scope[1])) {
-        long at;
-        if (cx_fmt(head, sizeof head, "static int %s(", scope)) { free(b); return 0; }
-        at = tx_find(b, (long)n, head, tx_len(head, 512));
-        if (at < 0) { printf("FAIL\t%s (scope %s not found)\n", name, scope); fails++; free(b); return 1; }
-        s = b + at; e = 0;
-        { long nx = tx_find(s + 1, (long)n - at - 1, "\nstatic ", 8); sn = nx < 0 ? (long)n - at : nx + 1; }
-        (void)e;
+        if (!ca_function(toks, scope, &lo, &hi)) {
+            printf("FAIL\t%s (scope %s not found)\n", name, scope);
+            fails++; ca_tokens_free(toks); return 1;
+        }
     }
-    i1 = tx_find(s, sn, a1, tx_len(a1, 1024));
-    i2 = *a2 && !(a2[0] == '-' && !a2[1]) ? tx_find(s, sn, a2, tx_len(a2, 1024)) : -1;
+    i1 = tok_find(toks, lo, hi, a1);
+    i2 = *a2 && !(a2[0] == '-' && !a2[1]) ? tok_find(toks, lo, hi, a2) : -1;
     if (tx_eqz(kind, "has") || tx_eqz(kind, "file")) ok = i1 >= 0;
     else if (tx_eqz(kind, "absent")) ok = i1 < 0;
     else if (tx_eqz(kind, "before")) ok = i1 >= 0 && i2 >= 0 && i1 < i2;
-    else { printf("FAIL\t%s (unknown kind %s)\n", name, kind); fails++; free(b); return 1; }
+    else { printf("FAIL\t%s (unknown kind %s)\n", name, kind); fails++; ca_tokens_free(toks); return 1; }
     ck(ok, name);
-    free(b);
+    ca_tokens_free(toks);
     return 1;
 }
 
