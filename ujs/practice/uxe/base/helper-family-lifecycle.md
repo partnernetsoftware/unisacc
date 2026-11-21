@@ -14,6 +14,8 @@ Arrow 姿态数组只覆盖现有原生姿态字段。完整对象 JSON，包括
 
 r160 实测 CameraHelper、SkeletonHelper 与四种灯光 Helper 的无参克隆抛出 `TypeError`。这些类的已初始化对象之间仍可复制。DirectionalLightHelper、HemisphereLightHelper、SpotLightHelper 和 PlaneHelper 的默认复制会追加子节点，原生固定布局尚未覆盖。其余七类原生复制与克隆仍待补。
 
+`PlaneHelper_setFields`、`PlaneHelper_fieldsToJSON` 和 `PlaneHelper_fieldsFromJSON` 支持活动实例的 `size` 及线框和填充共用的 24 位构造色。JSON 两个字段均须提供，读取失败时原值维持。读取不会替换两组几何缓冲及调用方传入的平面。通过 `sh ./unisacc.com ujs/tests/helper-family-plane-fields.cx --` 验证 JSON 同一字节摘要及实际矩阵更新。追加 `--mutate` 增大源尺寸，预期尺寸、矩阵及摘要差异被拒绝。r160 可独立修改的两种材质颜色、完整平面对象与子树仍待接入。
+
 独立验收入口为 `sh ./unisacc.com ujs/tests/arrowhelper-lifecycle.cx --` 和 `sh ./unisacc.com ujs/tests/helper-family-grid-lifecycle.cx --`。分别追加 `--mutate` 可复现错误释放事件和遗漏源几何修改。
 
 `sh ./unisacc.com ujs/tests/helper-family-lifecycle.cx --` 运行金值和 r160 对照，预期 `cases=12 failed=0`。在同一命令末尾加 `--mutate` 会跳过第一个原生实例的释放，预期第 0 例失败。

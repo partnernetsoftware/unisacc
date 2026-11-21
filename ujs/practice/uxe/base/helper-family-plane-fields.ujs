@@ -1,0 +1,70 @@
+// The native plane record has one tint for the outline and fill.
+native function PlaneHelper_setFields(helper:i64,size:f64,hex:i64) i64 {
+  if(!plane_helper_span(helper,PlaneHelper.size,8) ||
+     ux_u32(helper+PlaneHelper.active)!=1 || size-size!=0.0 ||
+     hex<0 || hex>16777215) { return 0-1; }
+  let written_size=ux_f64_put(helper+PlaneHelper.sizeValue,size);
+  let written_color=ux_u32_put(helper+PlaneHelper.color,hex);
+  return helper;
+}
+
+native function plane_fields_writable(helper:i64,at:i64,bytes:i64) i64 {
+  let outline=ux_u32(helper+PlaneHelper.outline);
+  let fill=ux_u32(helper+PlaneHelper.fill);
+  return plane_helper_span(at,bytes,1) && plane_helper_span(outline,96,4) &&
+    plane_helper_span(fill,72,4) &&
+    plane_helper_disjoint(helper,PlaneHelper.size,at,bytes) &&
+    plane_helper_disjoint(outline,96,at,bytes) &&
+    plane_helper_disjoint(fill,72,at,bytes);
+}
+
+// Public fields represented by this record, independent of plane/resource references.
+native function PlaneHelper_fieldsToJSON(helper:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!plane_helper_span(helper,PlaneHelper.size,8) ||
+     ux_u32(helper+PlaneHelper.active)!=1 || dst<0 || end<dst || end>6291456 ||
+     scratch%8!=0 || !plane_fields_writable(helper,dst,end-dst) ||
+     !plane_fields_writable(helper,scratch,1104) ||
+     !plane_helper_disjoint(dst,end-dst,scratch,1104)) { return 0-1; }
+  let size=ux_f64(helper+PlaneHelper.sizeValue);
+  let color=ux_u32(helper+PlaneHelper.color);
+  if(size-size!=0.0 || color>16777215) { return 0-1; }
+  let first=[123,34,115,105,122,101,34,58];
+  let second=[44,34,99,111,108,111,114,34,58];
+  let cursor=dst;
+  let i=0;
+  while(i<8) {
+    cursor=json_byte(cursor,end,first[i]);
+    i=i+1;
+  }
+  cursor=json_write_f64(cursor,end,size,scratch);
+  i=0;
+  while(i<9) {
+    cursor=json_byte(cursor,end,second[i]);
+    i=i+1;
+  }
+  cursor=json_write_f64(cursor,end,0.0+color,scratch);
+  return json_byte(cursor,end,125);
+}
+
+// Validate both values before updating the existing instance.
+native function PlaneHelper_fieldsFromJSON(helper:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(!plane_helper_span(helper,PlaneHelper.size,8) ||
+     ux_u32(helper+PlaneHelper.active)!=1 || input<0 || input>=end || end>6291456 ||
+     !plane_helper_disjoint(helper,PlaneHelper.size,input,end-input) ||
+     !plane_fields_writable(helper,scratch,9) ||
+     !plane_helper_disjoint(input,end-input,scratch,9)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-1; }
+  let keys=[115,105,122,101,99,111,108,111,114];
+  let i=0;
+  while(i<9) {
+    let key=ux_u8_put(scratch+i,keys[i]);
+    i=i+1;
+  }
+  let size=json_read_number(json_find_key(input,end,scratch,4),end);
+  let color=json_read_number(json_find_key(input,end,scratch+4,5),end);
+  if(size-size!=0.0 || !(color>=0.0 && color<=16777215.0)) { return 0-1; }
+  let hex=f64_floor_i64(color);
+  if(color!=0.0+hex) { return 0-1; }
+  return PlaneHelper_setFields(helper,size,hex);
+}
