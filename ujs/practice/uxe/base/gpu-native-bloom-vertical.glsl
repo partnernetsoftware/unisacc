@@ -1,0 +1,1 @@
+#define UXE_BLOOM_VERTICAL 1

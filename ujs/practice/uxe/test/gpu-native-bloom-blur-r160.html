@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, DataUtils, NearestFilter, REVISION, Vector2, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuNativeSample } from "../base/gpu-native-sample-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const { UnrealBloomPass } = await import("file://" + query.get("package") +
+    "/examples/jsm/postprocessing/UnrealBloomPass.js");
+  const width = 7, height = 5, bytes = width * height * 4, center = (2 * width + 3) * 4;
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const gl = canvas.getContext("webgl2");
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  function diff(a, b) {
+    let count = 0, peak = 0;
+    for (let i = 0; i < bytes; i++) {
+      const difference = Math.abs(a[i] - b[i]);
+      if (difference) count++;
+      peak = Math.max(peak, difference);
+    }
+    return [count, peak];
+  }
+  function word(rgba) {
+    return new DataView(rgba.buffer, rgba.byteOffset, rgba.byteLength).getUint32(center, true);
+  }
+  const { gl } = context();
+  const [binary, ...resources] = await Promise.all([
+    fetch("file://" + query.get("wasm")),
+    fetch("../base/gpu-native-copy.vert"),
+    fetch("../base/gpu-native-bloom-blur.frag"),
+    fetch("../base/gpu-native-bloom-vertical.glsl"),
+    fetch("./gpu-native-bloom-radius5.glsl"),
+  ]);
+  let actual;
+  const native = createGpuNativeSample(gl, () => 1, () => actual.memory);
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, native.targets);
+  let reads = 0, uploads = 0, draws = 0;
+  function track(key, observe) {
+    const prior = gl[key];
+    gl[key] = function (...args) {
+      observe();
+      return prior.apply(gl, args);
+    };
+  }
+  track("readPixels", () => reads++);
+  track("texImage2D", () => uploads++);
+  track("drawArrays", () => draws++);
+  const copy = (...args) => {
+    const beforeRead = reads, beforeUpload = uploads;
+    const status = native.copy(...args);
+    if (beforeRead !== reads || beforeUpload !== uploads) throw new Error("native blur transferred pixels through the CPU");
+    return status;
+  };
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(), {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+    uxe_gpu_target_v1: { host_gpu_native_copy: copy },
+  })).instance.exports;
+  const lengths = [];
+  for (const [i, response] of resources.entries()) {
+    const data = new Uint8Array(await response.arrayBuffer());
+    if (!response.ok || !data.length || data.length > 4096) throw new Error("invalid shader resource");
+    new Uint8Array(actual.memory.buffer, 2097152 + 10000 + 4500 * i, data.length).set(data);
+    lengths.push(BigInt(data.length));
+  }
+  const wasmPixels = at => new Uint8Array(actual.memory.buffer, 2097152 + at, bytes);
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(width, height, false);
+  const bloom = new UnrealBloomPass(new Vector2(width * 2, height * 2), 1, 0, 0);
+  const rgb = new Uint8Array(bytes);
+  rgb.set([240,120,60,17], center);
+  const input = new DataTexture(rgb, width, height);
+  input.needsUpdate = true;
+  const regular = [0,1].map(() => new WebGLRenderTarget(width, height, {
+    minFilter: NearestFilter, magFilter: NearestFilter, depthBuffer: false,
+  }));
+  const half = [bloom.renderTargetsHorizontal[0], bloom.renderTargetsVertical[0]];
+  function reference(mode, targets, useHalf) {
+    const material = bloom.separableBlurMaterials[mode];
+    material.uniforms.invSize.value.set(1 / width, 1 / height);
+    bloom.fsQuad.material = material;
+    let source = input;
+    for (const [axis, target] of targets.entries()) {
+      material.uniforms.colorTexture.value = source;
+      material.uniforms.direction.value.set(axis === 0 ? 1 : 0, axis === 0 ? 0 : 1);
+      renderer.setRenderTarget(target);
+      renderer.clear();
+      bloom.fsQuad.render(renderer);
+      source = target.texture;
+    }
+    return targets.map(target => {
+      const pixels = useHalf ? new Uint16Array(bytes) : new Uint8Array(bytes);
+      renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+      return useHalf ? Uint8Array.from(pixels, value => Math.round(DataUtils.fromHalfFloat(value) * 255)) : pixels;
+    });
+  }
+  const values = [];
+  for (const mode of [0,1]) {
+    const status = actual.uxe_native_bloom_blur(BigInt(mode), BigInt(query.get("mode")), ...lengths);
+    if (status !== 0n) throw new Error("native Bloom blur failed " + status);
+    const [h, v] = [wasmPixels(7000), wasmPixels(7200)];
+    const [refH, refV] = reference(mode, regular, false);
+    const [halfH, halfV] = reference(mode, half, true);
+    values.push(
+      word(h), word(refH), word(v), word(refV), ...diff(h, refH), ...diff(v, refV),
+      ...diff(h, halfH), ...diff(v, halfV),
+    );
+  }
+  for (const target of regular) target.dispose();
+  input.dispose();
+  bloom.materialHighPassFilter.dispose();
+  bloom.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify([...values, draws]);
+} catch (error) {
+  output.textContent = "error:" + error.message;
+}
+</script>

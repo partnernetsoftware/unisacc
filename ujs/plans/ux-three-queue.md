@@ -286,6 +286,7 @@
 - ~~RenderPass 清深度顺序 | G-pixel 双目标深度、绑定次序和容量回滚 | RenderPass。~~ 24 项通过，交换绑定与清除顺序转红。
 - RenderPass 覆盖与复杂材质 | G-pixel 覆盖材质、深度和清屏状态恢复 | 平面场景绘制、共享渲染。
 - ~~UnrealBloomPass 亮部提取 | G-pixel 半尺寸采样、阈值和羽化 | 线性 RGBA8 内核。~~ 真实 r160 中间目标 17 项通过，降低阈值转红。
+- ~~UnrealBloomPass 原生横纵模糊 | G-pixel 半径 3 与 5、交换轴、原生目标 | Composer 路由与亮部提取。~~ 25 项通过，RGBA8 全帧与 r160 一致，换轴转红。
 - UnrealBloomPass 模糊与合成 | G-pixel 多级模糊、混合及目标重用 | 亮部提取、RenderPass 与 EffectComposer。
 - ~~OutlinePass 边缘与遮挡颜色 | G-pixel 真 r160 中间纹理、深度掩模与颜色对照 | RGBA8 内核。~~ 17 项通过，遮挡边错用可见色转红。
 - OutlinePass 场景掩模与合成 | G-pixel 选择、遮挡、模糊、叠加及抹除 | 边缘内核、RenderPass、对象拾取。
