@@ -1,0 +1,518 @@
+/* tools/check-ext-dock.cx -- ext/ files holding `#pragma unisa dock` must be listed transition exceptions.
+ *
+ *   sh ./unisacc.com tools/check-ext-dock.cx [-- ROOT [--version V] [--survey]]
+ *
+ * Policy (prd_cx.md, two-layer section 5a, decided 2026-11-21): extension packages under ext/ may not
+ * dock the host; they build on the core sy_, mm_, tx_ faces.  Files that still hold a dock are transition
+ * exceptions with an expiry version.  The fact table is build/ext-dock-exceptions.tsv:
+ *
+ *   file <TAB> dock <TAB> includes <TAB> libc_calls <TAB> expires <TAB> disposition
+ *
+ * dock is the pragma argument (bare when none); includes counts #include lines; libc_calls counts bare
+ * libc/POSIX call sites (identifier from ed_libc[] followed by an opening parenthesis, outside comments
+ * and string literals, not a member access).  The scan is lexical, not a compile: a name reached through
+ * a macro is not seen, so libc_calls is a lower bound and is not evidence that a file is host-free.
+ *
+ * Rules, each printed as one line:
+ *   UNLISTED  a regular .cx under ROOT/ext holds a dock and has no table row            -> FAIL
+ *   EXPIRED   a row whose file still holds a dock and current version > expires         -> FAIL
+ *   GROWN     a listed file has more includes or libc_calls than its row records        -> FAIL
+ *   KIND      a listed file's dock argument differs from its row                        -> FAIL
+ *   OVERCAP   the table has more than ED_MAX_ROWS rows (the list may only shrink)       -> FAIL
+ *   BADROW    a row that is malformed, duplicated, or not under ext/                    -> FAIL
+ *   STALE     a row whose file no longer holds a dock or no longer exists: delete it    -> hint, not FAIL
+ *   SHRUNK    a listed file has fewer includes or libc_calls than recorded: lower it    -> hint, not FAIL
+ * Symbolic links under ext/ are not followed (a link back into cx/ is the core's file, not an ext one).
+ * The current version is column 4 of ROOT/release/candidate.tsv row 2, or --version V.
+ * --survey prints the table regenerated from the tree (expires and disposition kept from the existing
+ * rows, TODO for new ones) and checks nothing.
+ * Fixtures (fake trees under sy_tmpdir(), removed at the end) prove each rule goes red and a clean tree
+ * is green.  Prints PASS/FAIL per case and CHECK_EXT_DOCK<TAB>failed=N...; exit 0 only when failed is 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define ED_MAX_ROWS 21
+#define ED_MAX_FILES 4096
+#define ED_TABLE "build/ext-dock-exceptions.tsv"
+
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\text-dock.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static const char *ed_libc[] = {
+    "printf", "fprintf", "sprintf", "snprintf", "vsnprintf", "vfprintf", "puts", "fputs", "putchar", "fputc", "perror",
+    "fopen", "fclose", "fread", "fwrite", "fgets", "fflush", "fseek", "ftell", "getline",
+    "malloc", "calloc", "realloc", "free", "alloca",
+    "strlen", "strcmp", "strncmp", "strcpy", "strncpy", "strcat", "strncat", "strchr", "strrchr", "strstr", "strdup",
+    "strerror", "strtol", "strtoul", "strtoll", "strtoull", "strtod", "atoi", "atol", "strspn", "strcspn", "strtok",
+    "memcpy", "memmove", "memset", "memcmp", "memchr", "qsort", "bsearch", "abs",
+    "open", "openat", "close", "read", "write", "pread", "pwrite", "lseek", "fsync", "ftruncate", "dup", "dup2", "pipe", "pipe2",
+    "stat", "fstat", "lstat", "mkdir", "rmdir", "unlink", "rename", "link", "symlink", "readlink", "realpath", "access",
+    "chdir", "getcwd", "chmod", "chown", "opendir", "readdir", "closedir", "fcntl", "ioctl", "isatty", "tcgetattr", "tcsetattr",
+    "fork", "vfork", "execve", "execv", "execvp", "execvpe", "waitpid", "wait", "wait4", "waitid", "kill", "killpg",
+    "getpid", "getppid", "getpgid", "getpgrp", "setpgid", "setsid", "getuid", "geteuid", "getgid", "getegid",
+    "signal", "sigaction", "sigprocmask", "sigemptyset", "sigaddset", "sigfillset", "raise", "alarm", "pause",
+    "exit", "_exit", "abort", "atexit", "getenv", "setenv", "unsetenv",
+    "socket", "socketpair", "connect", "bind", "listen", "accept", "accept4", "send", "recv", "sendto", "recvfrom",
+    "sendmsg", "recvmsg", "shutdown", "setsockopt", "getsockopt", "getsockname", "getpeername", "getaddrinfo",
+    "freeaddrinfo", "gai_strerror", "gethostbyname", "inet_pton", "inet_ntop", "inet_addr", "htons", "ntohs", "htonl", "ntohl",
+    "poll", "ppoll", "select", "epoll_create1", "epoll_ctl", "epoll_wait", "kqueue", "kevent",
+    "time", "clock_gettime", "gettimeofday", "nanosleep", "usleep", "sleep",
+    "mmap", "munmap", "mprotect", "ptrace", "prctl", "unshare", "setns", "mount", "umount2", "chroot", "pivot_root",
+    "clone", "syscall", "__syscall", "__syscall0", "__syscall1", "__syscall2", "__syscall3", "__syscall4", "__syscall5", "__syscall6",
+    "setrlimit", "getrlimit", "getrusage", "sysconf", "uname", "dlopen", "dlsym", "dlclose", 0
+};
+
+static int ed_idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+static int ed_is_libc(const char *b, size_t n) {
+    int i;
+    for (i = 0; ed_libc[i]; i++) if (strlen(ed_libc[i]) == n && !strncmp(ed_libc[i], b, n)) return 1;
+    return 0;
+}
+
+typedef struct {
+    int dock;        /* 1 when a dock pragma line is present */
+    char kind[32];   /* pragma argument, bare when none */
+    int includes;
+    int libc;
+    char names[400];   /* distinct libc names seen, space separated, bounded (evidence only) */
+    char others[3000]; /* distinct other called names not prefixed sy_ mm_ tx_ cx_ (survey evidence only) */
+} EdFacts;
+
+static void ed_note_name(char *buf, size_t cap, const char *b, size_t n) {
+    size_t at = strlen(buf), i = 0;
+    while (i < at) {
+        size_t s = i;
+        while (i < at && buf[i] != ' ') i++;
+        if (i - s == n && !strncmp(buf + s, b, n)) return;
+        i++;
+    }
+    if (at + n + 2 >= cap) return;
+    if (at) buf[at++] = ' ';
+    if (mm_copy(buf + at, (long)(cap - at), b, (long)n)) return;
+    buf[at + n] = 0;
+}
+
+static int ed_core_prefix(const char *b, size_t n) {
+    return n > 3 && b[2] == '_' && (!strncmp(b, "sy", 2) || !strncmp(b, "mm", 2) || !strncmp(b, "tx", 2) || !strncmp(b, "cx", 2));
+}
+
+/* Lexical facts of the text B[0..N): comments and string/char literals are skipped. */
+static void ed_facts(const char *b, size_t n, EdFacts *f) {
+    size_t i = 0;
+    int bol = 1;
+    char prev = 0, prev2 = 0; /* last two non-space code characters */
+    f->dock = 0; f->includes = 0; f->libc = 0; f->names[0] = 0; f->others[0] = 0;
+    (void)cx_fmt(f->kind, sizeof f->kind, "-");
+    while (i < n) {
+        char c = b[i];
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(b[i] == '*' && b[i + 1] == '/')) i++;
+            i += 2;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') {
+            while (i < n && b[i] != '\n') i++;
+            continue;
+        }
+        if (c == '\n') { bol = 1; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r') { i++; continue; }
+        if (bol && c == '#') {
+            size_t s = i, e, k;
+            while (i < n && b[i] != '\n') i++;
+            e = i;
+            k = s + 1;
+            while (k < e && (b[k] == ' ' || b[k] == '\t')) k++;
+            if (e - k >= 7 && !strncmp(b + k, "include", 7) && (e - k == 7 || !ed_idch(b[k + 7]))) f->includes++;
+            else if (e - k >= 17 && !strncmp(b + k, "pragma unisa dock", 17) && (e - k == 17 || !ed_idch(b[k + 17]))) {
+                size_t a = k + 17, z;
+                int m = 0;
+                while (a < e && (b[a] == ' ' || b[a] == '\t')) a++;
+                z = a;
+                while (z < e && ed_idch(b[z])) z++;
+                f->dock = 1;
+                if (z == a) (void)cx_fmt(f->kind, sizeof f->kind, "bare");
+                else {
+                    while (a < z && m < (int)sizeof f->kind - 1) f->kind[m++] = b[a++];
+                    f->kind[m] = 0;
+                }
+            }
+            /* other directives (define and friends) are rescanned as code below */
+            else { i = s + 1; bol = 0; prev2 = prev; prev = '#'; }
+            continue;
+        }
+        bol = 0;
+        if (c == '"' || c == '\'') {
+            i++;
+            while (i < n && b[i] != c && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n) i++; i++; }
+            if (i < n && b[i] == c) i++;
+            prev2 = prev; prev = c;
+            continue;
+        }
+        if (ed_idch(c) && !(c >= '0' && c <= '9')) {
+            size_t s = i, k;
+            while (i < n && ed_idch(b[i])) i++;
+            k = i;
+            while (k < n && (b[k] == ' ' || b[k] == '\t')) k++;
+            if (k < n && b[k] == '(' && prev != '.' && !(prev == '>' && prev2 == '-') && ed_is_libc(b + s, i - s)) {
+                f->libc++;
+                ed_note_name(f->names, sizeof f->names, b + s, i - s);
+            } else if (k < n && b[k] == '(' && !ed_core_prefix(b + s, i - s)) ed_note_name(f->others, sizeof f->others, b + s, i - s);
+            prev2 = prev; prev = 'a';
+            continue;
+        }
+        prev2 = prev; prev = c;
+        i++;
+    }
+}
+
+typedef struct {
+    char file[200];
+    char kind[32];
+    int includes, libc;
+    char expires[24];
+    char disp[400];
+    int seen; /* a docked file matched this row */
+} EdRow;
+
+static EdRow ed_rows[256];
+static int ed_nrows, ed_badrows;
+
+static int ed_ver(const char *s, long v[3]) {
+    int k = 0;
+    v[0] = v[1] = v[2] = 0;
+    if (!*s) return 1;
+    for (; *s; s++) {
+        if (*s == '.') { if (++k > 2) return 1; continue; }
+        if (*s < '0' || *s > '9') return 1;
+        v[k] = v[k] * 10 + (*s - '0');
+        if (v[k] > 1000000) return 1;
+    }
+    return k != 2;
+}
+
+/* >0 when A is newer than B, 0 when equal, <0 when older; callers validate both first. */
+static int ed_vercmp(const char *a, const char *b) {
+    long x[3], y[3];
+    int i;
+    (void)ed_ver(a, x); (void)ed_ver(b, y);
+    for (i = 0; i < 3; i++) if (x[i] != y[i]) return x[i] > y[i] ? 1 : -1;
+    return 0;
+}
+
+static int ed_num(const char *s, int *out) {
+    long v = 0;
+    if (!*s) return 1;
+    for (; *s; s++) { if (*s < '0' || *s > '9') return 1; v = v * 10 + (*s - '0'); if (v > 1000000) return 1; }
+    *out = (int)v;
+    return 0;
+}
+
+/* Loads ROOT/build/ext-dock-exceptions.tsv into ed_rows; 0, or 1 when the table cannot be read. */
+static int ed_load(const char *root, int quiet) {
+    char p[4600];
+    size_t n = 0, i = 0;
+    char *b;
+    int ln = 0;
+    ed_nrows = 0; ed_badrows = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s", root, ED_TABLE)) return 1;
+    b = cx_read(p, &n);
+    if (!b) return 1;
+    while (i < n) {
+        size_t s = i;
+        char line[1024], *f[6], *q;
+        int nf = 1, j, bad = 0;
+        long vv[3];
+        while (i < n && b[i] != '\n') i++;
+        ln++;
+        if (i - s >= sizeof line) { bad = 1; line[0] = 0; }
+        else if (mm_copy(line, sizeof line, b + s, (long)(i - s))) bad = 1;
+        else line[i - s] = 0;
+        i++;
+        if (ln == 1) {
+            if (bad || strcmp(line, "file\tdock\tincludes\tlibc_calls\texpires\tdisposition")) {
+                if (!quiet) sy_printf("BADROW\t%s:1\theader\n", ED_TABLE);
+                ed_badrows++;
+            }
+            continue;
+        }
+        if (!bad && !line[0]) continue;
+        f[0] = line;
+        for (q = line; !bad && *q; q++) if (*q == '\t') { *q = 0; if (nf < 6) f[nf] = q + 1; nf++; }
+        if (!bad && nf != 6) bad = 1;
+        if (!bad && (strncmp(f[0], "ext/", 4) || strstr(f[0], "..") || strlen(f[0]) >= sizeof ed_rows[0].file)) bad = 1;
+        if (!bad && (!f[1][0] || strlen(f[1]) >= sizeof ed_rows[0].kind || !f[5][0] || strlen(f[5]) >= sizeof ed_rows[0].disp)) bad = 1;
+        if (!bad && (strlen(f[4]) >= sizeof ed_rows[0].expires || ed_ver(f[4], vv))) bad = 1;
+        for (j = 0; !bad && j < ed_nrows; j++) if (!strcmp(ed_rows[j].file, f[0])) bad = 1;
+        if (!bad && ed_nrows < 256) {
+            EdRow *r = &ed_rows[ed_nrows];
+            if (ed_num(f[2], &r->includes) || ed_num(f[3], &r->libc) || cx_fmt(r->file, sizeof r->file, "%s", f[0]) ||
+                cx_fmt(r->kind, sizeof r->kind, "%s", f[1]) || cx_fmt(r->expires, sizeof r->expires, "%s", f[4]) ||
+                cx_fmt(r->disp, sizeof r->disp, "%s", f[5])) bad = 1;
+            else { r->seen = 0; ed_nrows++; }
+        } else if (!bad) bad = 1;
+        if (bad) {
+            if (!quiet) sy_printf("BADROW\t%s:%d\n", ED_TABLE, ln);
+            ed_badrows++;
+        }
+    }
+    free(b);
+    return 0;
+}
+
+static char ed_files[ED_MAX_FILES][200];
+static int ed_nfiles, ed_overflow;
+
+static int ed_ends_cx(const char *s) {
+    size_t n = strlen(s);
+    return n > 3 && !strcmp(s + n - 3, ".cx");
+}
+
+/* Collects regular .cx files under ROOT/REL into ed_files (relative paths); links are not followed. */
+static void ed_walk(const char *root, const char *rel, int depth) {
+    char d[4600];
+    static char names[8][512][96];
+    int n = 0, i;
+    sy_dir_t dd;
+    if (depth >= 8) { ed_overflow = 1; return; }
+    if (cx_fmt(d, sizeof d, "%s/%s", root, rel)) { ed_overflow = 1; return; }
+    if (sy_dir_open(&dd, d)) return;
+    for (;;) {
+        int got = sy_dir_next(&dd);
+        if (got <= 0) break;
+        if (!strcmp(dd.name, ".") || !strcmp(dd.name, "..")) continue;
+        if (n == 512 || cx_fmt(names[depth][n], sizeof names[depth][n], "%s", dd.name)) { ed_overflow = 1; continue; }
+        n++;
+    }
+    sy_dir_close(&dd);
+    for (i = 0; i < n; i++) {
+        char p[4800], r[400];
+        sy_stat_t st;
+        if (cx_fmt(r, sizeof r, "%s/%s", rel, names[depth][i]) || cx_fmt(p, sizeof p, "%s/%s", root, r)) { ed_overflow = 1; continue; }
+        if (sy_lstat(p, &st)) continue;
+        if (st.kind == 'd') ed_walk(root, r, depth + 1);
+        else if (st.kind == 'f' && ed_ends_cx(names[depth][i])) {
+            if (ed_nfiles == ED_MAX_FILES || cx_fmt(ed_files[ed_nfiles], sizeof ed_files[0], "%s", r)) { ed_overflow = 1; continue; }
+            ed_nfiles++;
+        }
+    }
+}
+
+static void ed_sort(void) {
+    int i, j;
+    for (i = 1; i < ed_nfiles; i++) {
+        char t[200];
+        if (cx_fmt(t, sizeof t, "%s", ed_files[i])) continue;
+        for (j = i; j > 0 && strcmp(ed_files[j - 1], t) > 0; j--) (void)cx_fmt(ed_files[j], sizeof ed_files[j], "%s", ed_files[j - 1]);
+        (void)cx_fmt(ed_files[j], sizeof ed_files[j], "%s", t);
+    }
+}
+
+static EdRow *ed_row(const char *file) {
+    int j;
+    for (j = 0; j < ed_nrows; j++) if (!strcmp(ed_rows[j].file, file)) return &ed_rows[j];
+    return 0;
+}
+
+typedef struct { int docked, unlisted, expired, grown, kind, stale, shrunk, overcap, badrow, broken; } EdResult;
+
+static int ed_bad(const EdResult *r) {
+    return r->unlisted + r->expired + r->grown + r->kind + r->overcap + r->badrow + r->broken;
+}
+
+/* The check proper over ROOT at version VER; MODE 0 check, 1 quiet check, 2 survey (print the table). */
+static EdResult ed_run(const char *root, const char *ver, int mode) {
+    EdResult r;
+    int i, quiet = mode == 1;
+    long vv[3];
+    (void)mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
+    ed_nfiles = 0; ed_overflow = 0;
+    if (ed_load(root, quiet)) {
+        if (mode != 2) { if (!quiet) sy_printf("BROKEN\t%s unreadable\n", ED_TABLE); r.broken++; }
+        ed_nrows = 0; ed_badrows = 0;
+    }
+    r.badrow = ed_badrows;
+    if (mode != 2 && ed_ver(ver, vv)) { if (!quiet) sy_printf("BROKEN\tcurrent version unreadable: %s\n", ver); r.broken++; }
+    ed_walk(root, "ext", 0);
+    ed_sort();
+    if (ed_overflow) { if (!quiet) sy_printf("BROKEN\text walk exceeded a bound\n"); r.broken++; }
+    if (mode == 2) sy_printf("file\tdock\tincludes\tlibc_calls\texpires\tdisposition\n");
+    for (i = 0; i < ed_nfiles; i++) {
+        char p[4800];
+        size_t n = 0;
+        char *b;
+        EdFacts f;
+        EdRow *row;
+        if (cx_fmt(p, sizeof p, "%s/%s", root, ed_files[i])) { r.broken++; continue; }
+        b = cx_read(p, &n);
+        if (!b) { if (!quiet) sy_printf("BROKEN\t%s unreadable\n", ed_files[i]); r.broken++; continue; }
+        ed_facts(b, n, &f);
+        free(b);
+        if (!f.dock) continue;
+        r.docked++;
+        row = ed_row(ed_files[i]);
+        if (mode == 2) {
+            sy_printf("%s\t%s\t%d\t%d\t%s\t%s\n", ed_files[i], f.kind, f.includes, f.libc, row ? row->expires : "TODO", row ? row->disp : "TODO");
+            sy_eprintf("NAMES\t%s\t%s\n", ed_files[i], f.names[0] ? f.names : "-");
+            sy_eprintf("OTHERS\t%s\t%s\n", ed_files[i], f.others[0] ? f.others : "-");
+            continue;
+        }
+        if (!row) {
+            r.unlisted++;
+            if (!quiet) sy_printf("UNLISTED\t%s\tdock=%s includes=%d libc_calls=%d\text files may not dock the host; build on sy_/mm_/tx_ (prd_cx.md 5a)\n", ed_files[i], f.kind, f.includes, f.libc);
+            continue;
+        }
+        row->seen = 1;
+        if (!ed_ver(ver, vv) && ed_vercmp(ver, row->expires) > 0) {
+            r.expired++;
+            if (!quiet) sy_printf("EXPIRED\t%s\texpires=%s current=%s\t%s\n", ed_files[i], row->expires, ver, row->disp);
+        }
+        if (strcmp(f.kind, row->kind)) {
+            r.kind++;
+            if (!quiet) sy_printf("KIND\t%s\ttable=%s actual=%s\n", ed_files[i], row->kind, f.kind);
+        }
+        if (f.includes > row->includes || f.libc > row->libc) {
+            r.grown++;
+            if (!quiet) sy_printf("GROWN\t%s\tincludes %d -> %d\tlibc_calls %d -> %d\n", ed_files[i], row->includes, f.includes, row->libc, f.libc);
+        } else if (f.includes < row->includes || f.libc < row->libc) {
+            r.shrunk++;
+            if (!quiet) sy_printf("SHRUNK\t%s\tincludes %d -> %d\tlibc_calls %d -> %d\tlower the row\n", ed_files[i], row->includes, f.includes, row->libc, f.libc);
+        }
+    }
+    if (mode == 2) return r;
+    for (i = 0; i < ed_nrows; i++) if (!ed_rows[i].seen) {
+        r.stale++;
+        if (!quiet) sy_printf("STALE\t%s\tno dock in the tree; delete this row from %s\n", ed_rows[i].file, ED_TABLE);
+    }
+    if (ed_nrows > ED_MAX_ROWS) {
+        r.overcap++;
+        if (!quiet) sy_printf("OVERCAP\trows=%d max=%d\tthe exception list may only shrink\n", ed_nrows, ED_MAX_ROWS);
+    }
+    return r;
+}
+
+/* Current version: column 4 of the first data row of ROOT/release/candidate.tsv. */
+static int ed_current(const char *root, char *out, size_t cap) {
+    char p[4600];
+    size_t n = 0, i = 0, s;
+    char *b;
+    int col = 0, rc = 1;
+    if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", root)) return 1;
+    b = cx_read(p, &n);
+    if (!b) return 1;
+    while (i < n && b[i] != '\n') i++;
+    i++;
+    s = i;
+    for (; i <= n; i++) {
+        if (i == n || b[i] == '\t' || b[i] == '\n') {
+            if (col == 3) {
+                if (i - s < cap && !mm_copy(out, (long)cap, b + s, (long)(i - s))) { out[i - s] = 0; rc = 0; }
+                break;
+            }
+            if (i == n || b[i] == '\n') break;
+            col++;
+            s = i + 1;
+        }
+    }
+    free(b);
+    return rc;
+}
+
+static int ed_put(const char *base, const char *rel, const char *text) {
+    char p[4800];
+    if (cx_fmt(p, sizeof p, "%s/%s", base, rel)) return 1;
+    return sy_write_file(p, text, (long)strlen(text), 0600);
+}
+
+#define ED_HDR "file\tdock\tincludes\tlibc_calls\texpires\tdisposition\n"
+#define ED_DOCKED "/* c */\n#pragma unisa module a.x\n#pragma unisa dock\n#include <string.h>\nint f(const char *s) { return (int)strlen(s); }\n"
+
+static int ed_fixtures(void) {
+    char tc[4096], fx[4400], t[4600];
+    EdResult r;
+    EdFacts f;
+    const char *s;
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0 || cx_fmt(fx, sizeof fx, "%s/ext-dock-fx-%ld", tc, sy_now_ms())) return 2;
+    if (sy_mkdir(fx, 0700)) return 2;
+    /* lexical facts */
+    s = ED_DOCKED;
+    ed_facts(s, strlen(s), &f);
+    ck(f.dock && !strcmp(f.kind, "bare") && f.includes == 1 && f.libc == 1, "facts-dock-include-libc");
+    s = "/* #pragma unisa dock\n#include <x.h> strlen(s) */\n// #pragma unisa dock\nconst char *m = \"#pragma unisa dock strlen(\";\nint g(void) { return o.read(1) + p->write(2) + tx_len(m) + mystrlen(m); }\n";
+    ed_facts(s, strlen(s), &f);
+    ck(!f.dock && !f.includes && !f.libc, "facts-comments-strings-members-ignored");
+    s = "  #  pragma unisa dock libc\n#pragma unisa docker\n#define W(x) write(1, x, 1)\n";
+    ed_facts(s, strlen(s), &f);
+    ck(f.dock && !strcmp(f.kind, "libc") && f.libc == 1, "facts-dock-argument-and-define-body");
+    /* versions */
+    ck(ed_vercmp("0.0.91", "0.0.90") > 0 && ed_vercmp("0.0.90", "0.0.90") == 0 && ed_vercmp("0.0.9", "0.0.90") < 0 && ed_vercmp("0.1.0", "0.0.90") > 0, "version-order-numeric");
+    /* tree fixtures */
+    if (cx_fmt(t, sizeof t, "%s/build", fx) || sy_mkdir(t, 0700) || cx_fmt(t, sizeof t, "%s/ext", fx) || sy_mkdir(t, 0700) ||
+        cx_fmt(t, sizeof t, "%s/ext/a", fx) || sy_mkdir(t, 0700)) return 2;
+    if (ed_put(fx, "ext/a/x.cx", ED_DOCKED) || ed_put(fx, "ext/a/pure.cx", "#pragma unisa module a.pure\nint h(void) { return 1; }\n")) return 2;
+    if (ed_put(fx, ED_TABLE, ED_HDR "ext/a/x.cx\tbare\t1\t1\t0.0.90\tmove to core\n")) return 2;
+    r = ed_run(fx, "0.0.90", 1);
+    ck(!ed_bad(&r) && r.docked == 1 && !r.stale && !r.shrunk, "fixture-listed-at-expiry-version-green");
+    r = ed_run(fx, "0.0.91", 1);
+    ck(r.expired == 1 && ed_bad(&r) == 1, "fixture-past-expiry-red");
+    if (ed_put(fx, "ext/a/new.cx", "#pragma unisa module a.new\n#pragma unisa dock\n")) return 2;
+    r = ed_run(fx, "0.0.88", 1);
+    ck(r.unlisted == 1 && ed_bad(&r) == 1, "fixture-unlisted-dock-red");
+    if (ed_put(fx, "ext/a/new.cx", "#pragma unisa module a.new\n")) return 2;
+    if (ed_put(fx, ED_TABLE, ED_HDR "ext/a/x.cx\tbare\t1\t0\t0.0.90\tmove to core\n")) return 2;
+    r = ed_run(fx, "0.0.88", 1);
+    ck(r.grown == 1 && ed_bad(&r) == 1, "fixture-libc-grown-red");
+    if (ed_put(fx, ED_TABLE, ED_HDR "ext/a/x.cx\tbare\t3\t5\t0.0.90\tmove to core\next/a/pure.cx\tbare\t0\t0\t0.0.90\tgone\next/a/none.cx\tbare\t0\t0\t0.0.90\tgone\n")) return 2;
+    r = ed_run(fx, "0.0.88", 1);
+    ck(!ed_bad(&r) && r.stale == 2 && r.shrunk == 1, "fixture-stale-and-shrunk-hint-only");
+    if (ed_put(fx, ED_TABLE, ED_HDR "ext/a/x.cx\tlibc\t1\t1\t0.0.90\tmove to core\n")) return 2;
+    r = ed_run(fx, "0.0.88", 1);
+    ck(r.kind == 1 && ed_bad(&r) == 1, "fixture-kind-mismatch-red");
+    if (ed_put(fx, ED_TABLE, ED_HDR "ext/a/x.cx\tbare\t1\t1\tsoon\tmove to core\ncx/sys/fs.cx\tbare\t1\t1\t0.0.90\tx\next/a/x.cx\tbare\t1\n")) return 2;
+    r = ed_run(fx, "0.0.88", 1);
+    ck(r.badrow == 3 && r.unlisted == 1, "fixture-bad-rows-red");
+    (void)sy_unlink((cx_fmt(t, sizeof t, "%s/%s", fx, ED_TABLE), t));
+    r = ed_run(fx, "0.0.88", 1);
+    ck(r.broken >= 1, "fixture-missing-table-red");
+    (void)cx_rmtree(fx);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], ver[64];
+    const char *rootarg = ".", *verarg = 0;
+    int survey = 0, i;
+    EdResult r;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--survey")) survey = 1;
+        else if (!strcmp(argv[i], "--version") && i + 1 < argc) verarg = argv[++i];
+        else if (argv[i][0] == '-') { sy_eprintf("check-ext-dock: unknown option %s\n", argv[i]); return 2; }
+        else rootarg = argv[i];
+    }
+    if (sy_realpath(rootarg, root, sizeof root) < 0) return 2;
+    if (survey) { (void)ed_run(root, "0.0.0", 2); return 0; }
+    if (verarg) { if (cx_fmt(ver, sizeof ver, "%s", verarg)) return 2; }
+    else if (ed_current(root, ver, sizeof ver)) { ver[0] = '?'; ver[1] = 0; }
+    if (ed_fixtures()) { sy_printf("FAIL\text-dock.fixture-setup\n"); failed++; }
+    r = ed_run(root, ver, 0);
+    ck(!r.broken, "tree-inputs-readable");
+    ck(!r.badrow, "tree-table-rows-wellformed");
+    ck(!r.unlisted, "tree-every-docked-ext-file-listed");
+    ck(!r.expired, "tree-no-expired-exception");
+    ck(!r.kind && !r.grown, "tree-host-use-not-grown");
+    ck(!r.overcap, "tree-row-count-within-cap");
+    sy_printf("CHECK_EXT_DOCK\tfailed=%d\tversion=%s\tdocked=%d\trows=%d\tunlisted=%d\texpired=%d\tgrown=%d\tstale=%d\tshrunk=%d\n",
+              failed, ver, r.docked, ed_nrows, r.unlisted, r.expired, r.grown + r.kind, r.stale, r.shrunk);
+    return failed ? 1 : 0;
+}
