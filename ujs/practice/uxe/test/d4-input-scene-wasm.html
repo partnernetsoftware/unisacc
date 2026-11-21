@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 输入帧验收</title>
+<canvas width="1" height="1" hidden></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { createBrowserHost, linkUxe } from "../base/host-abi.js";
+const status = document.querySelector("#result");
+const query = new URLSearchParams(location.search);
+async function compile(name) {
+  const response = await fetch(query.get(name));
+  if (!response.ok) throw new Error("读取 Wasm 失败");
+  return WebAssembly.compile(await response.arrayBuffer());
+}
+const key = (type, code) => dispatchEvent(new KeyboardEvent(type,{code,cancelable:true}));
+let host;
+try {
+  const [base, product] = await Promise.all([compile("base"),compile("product")]);
+  const controls = query.get("mutate") === "1" ? ["KeyS","KeyW"] : ["KeyW","KeyS"];
+  host = createBrowserHost(document.querySelector("canvas"),controls);
+  const linked = linkUxe(base,product,host);
+  host.attachMemory(linked.base.memory);
+  const packet = new Float64Array(linked.product.memory.buffer,2097152,47);
+  const frame = now => Number(linked.product.uxe_frame(BigInt(now)));
+  const same = before => Number(packet.every((value,index) => Object.is(value,before[index])));
+  const actual = [];
+
+  key("keydown","KeyW");
+  actual.push(frame(-1),frame(1000000),packet[3],packet[4]);
+  actual.push(frame(1050000),packet[3],packet[4],packet[7],packet[17]);
+  key("keyup","KeyW");
+  const moving = [...packet];
+  actual.push(frame(1100000),packet[3],same(moving));
+  key("keydown","KeyW");
+  key("keydown","KeyS");
+  actual.push(frame(1150000),packet[3],same(moving));
+  key("keyup","KeyW");
+  actual.push(frame(1200000),packet[3],frame(1300000),packet[3]);
+  key("keyup","KeyS");
+  key("keydown","KeyW");
+  actual.push(frame(2300000),packet[3]);
+  const bounded = [...packet];
+  actual.push(frame(2200000),same(bounded),frame(2350000),packet[3]);
+
+  let time = 2350000;
+  let failed = 0;
+  for (let n=0; n<130; n++) {
+    time += 240000;
+    failed += Number(frame(time) !== 0);
+  }
+  actual.push(packet[3],packet[4],packet[7]);
+  key("keyup","KeyW");
+  key("keydown","KeyS");
+  for (let n=0; n<200; n++) {
+    time += 240000;
+    failed += Number(frame(time) !== 0);
+  }
+  actual.push(packet[3],packet[4],packet[7],failed);
+  key("keyup","KeyS");
+  key("keydown","KeyW");
+  dispatchEvent(new Event("blur"));
+  time += 240000;
+  actual.push(frame(time),packet[3]);
+  status.textContent = JSON.stringify(actual);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+} finally {
+  host?.destroy();
+}
+</script>
+</html>

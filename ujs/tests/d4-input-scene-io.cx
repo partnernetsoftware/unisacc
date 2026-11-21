@@ -1,0 +1,50 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int build(char **args,const char *name) {
+    char *output=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,16,&output,&size);
+    printf("D4_INPUT %s ms=%ld rc=%d\n",name,sy_now_ms()-start,rc);
+    if(rc && output) printf("%.*s\n",(int)size,output);
+    mm_free(output);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char cwd[390],dir[256],base[300],product[300],url[1200];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","d4-input-gate-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(product,sizeof product,"%s/product.wasm",dir);
+    const int n=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/d4-input-scene-wasm.html?base=file://%s&product=file://%s&mutate=%d",
+        cwd,base,product,mutate);
+    char *baseArgs[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/base/uxe.ujs","-o",base,0};
+    char *productArgs[]={"cx","ujs/practice/uxe/products/d4/d4-input-build.cx","--",product,0};
+    const double gold[]={-1,0,0,10.8,0,0.072,10.872,0.072,-5.904444444444444,
+        0,0.072,1,0,0.072,1,0,0,0,-0.144,0,0.2016,-1,1,0,0.2736,
+        36,46.8,36,-24,-13.2,-24,0,0,-24};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=n<0 || n>=(int)sizeof url || build(productArgs,"product") || build(baseArgs,"base") ||
+        r160_wait_read(url,"#result",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        const double delta=actual[i]-gold[i];
+        if(!(delta>=-1e-9 && delta<=1e-9)) {
+            printf("D4_INPUT field=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+            failed=1;
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("D4_INPUT fields=%d failed=%d\n",count,failed);
+    return failed;
+}

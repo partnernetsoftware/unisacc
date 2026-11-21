@@ -1,0 +1,112 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+#define D4 "ujs/practice/uxe/products/d4/"
+#define BASE "ujs/practice/uxe/base/"
+#define FIXTURE "ujs/practice/uxe/test/"
+
+static int append_source(char *output,int used,int capacity,const char *path,const char *suffix) {
+    unsigned char *bytes=0;
+    int64_t size=0;
+    if(sy_read_file(path,&bytes,&size,capacity-used)) return -1;
+    if(suffix) {
+        const int64_t cut=tx_len(suffix,256);
+        if(size<cut || !tx_same((const char *)bytes+size-cut,cut,suffix,cut)) {
+            mm_free(bytes);
+            return -1;
+        }
+        size-=cut;
+    }
+    const int n=tx_snprintf(output+used,capacity-used,"%.*s\n",(int)size,bytes);
+    mm_free(bytes);
+    return n<0 || n>=capacity-used?-1:used+n;
+}
+
+static int read_facts(const char *path,int rows,int columns,int skip_name,long *values) {
+    unsigned char *bytes=0;
+    int64_t size=0;
+    if(sy_read_file(path,&bytes,&size,4096)) return 1;
+    char *row=(char *)bytes;
+    const char *limit=row+size;
+    while(row<limit && *row!='\n') row++;
+    if(row<limit) row++;
+    int failed=0;
+    for(int r=0;r<rows && !failed;r++) {
+        if(skip_name) {
+            while(row<limit && *row!='\t' && *row!='\n') row++;
+            if(row==limit || *row!='\t') { failed=1; break; }
+            row++;
+        }
+        for(int c=0;c<columns;c++) {
+            if(row>=limit || (*row!='-' && (*row<'0' || *row>'9'))) { failed=1; break; }
+            char *end=0;
+            const long value=tx_strtol(row,&end,10);
+            const char sep=c+1<columns?'\t':'\n';
+            if(end==row || end>=limit || *end!=sep || value< -1000000 || value>1000000) {
+                failed=1;
+                break;
+            }
+            values[r*columns+c]=value;
+            row=end+1;
+        }
+    }
+    if(row!=limit) failed=1;
+    mm_free(bytes);
+    return failed;
+}
+
+static int append_facts(char *output,int used,int capacity) {
+    long legs[36],view[11];
+    if(read_facts(FIXTURE "d4-legs.tsv",4,9,1,legs) ||
+       read_facts(FIXTURE "d4-framing.tsv",1,11,0,view) || view[1]<1 || view[10]<1) return -1;
+    int n=tx_snprintf(output+used,capacity-used,"native function d4_input_facts(rest:i64,framing:i64) i64 {let legs=[");
+    if(n<0 || n>=capacity-used) return -1;
+    used+=n;
+    for(int i=0;i<36;i++) {
+        n=tx_snprintf(output+used,capacity-used,"%s%ld",i?",":"",legs[i]);
+        if(n<0 || n>=capacity-used) return -1;
+        used+=n;
+    }
+    n=tx_snprintf(output+used,capacity-used,
+        "];let i=0;while(i<36){let leg=ux_f64_put(rest+i*8,legs[i]/1000.0);i=i+1;}"
+        "let camera=[%ld,%ld,%ld,0,%ld,0];i=0;"
+        "while(i<6){let coord=ux_f64_put(framing+i*8,camera[i]/1000.0);i=i+1;}"
+        "let h=ux_f64_put(framing+D4Framing.height,%ld.0);"
+        "let f=ux_f64_put(framing+D4Framing.focal,%ld.0);return 0;}\n",
+        view[6],view[7],view[8],view[9],view[1],view[10]);
+    return n<0 || n>=capacity-used?-1:used+n;
+}
+
+int main(int argc,char **argv) {
+    if(argc!=2) return 2;
+    const char *parts[]={D4 "d4-input-api.ujs",BASE "f64-math.ujs",BASE "record-copy.ujs",D4 "d4-frame.ujs",0};
+    const char epilogue[]="return D4_frame(rest,out,work,framing,phase,mode,fixed);\n";
+    char program[24000];
+    int used=0;
+    for(int i=0;parts[i] && used>=0;i++)
+        used=append_source(program,used,sizeof program,parts[i],i==3?epilogue:0);
+    if(used>=0) used=append_facts(program,used,sizeof program);
+    if(used>=0) used=append_source(program,used,sizeof program,D4 "d4-input-scene.ujs",0);
+    if(used<0) {
+        printf("D4_INPUT_BUILD source_or_fact_rejected\n");
+        return 1;
+    }
+    char dir[256],source[300];
+    if(sy_mkdtemp("/tmp","d4-input-source-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/product.ujs",dir);
+    int failed=sy_write_file(source,program,used,0600);
+    if(!failed) {
+        char *args[]={"./ujs/ujs2wasm.com",source,"-o",argv[1],0};
+        char *output=0;
+        size_t count=0;
+        failed=cx_runv_timeout(args,6,&output,&count);
+        if(failed && output) printf("%.*s",(int)count,output);
+        mm_free(output);
+    }
+    if(sy_remove_all(dir)) return 1;
+    return failed;
+}
