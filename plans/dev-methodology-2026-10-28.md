@@ -51,6 +51,7 @@
 - 并行上限 2 路时，两路不得共享同一 `TMPDIR`/CACHE；入口去重后按路分派。
 - 记录墙钟 ms、rc、错误首行；失败复现命令须带同样的私有 `TMPDIR`+CACHE。
 - 对照证据：`$CLAUDE_JOB_DIR/tmp/csr/daily-cold-full.tsv`（0.0.88，未隔离 TMPDIR）vs `daily-cold-full-089-iso.tsv`（0.0.89，双隔离；115/2，仅 `stream-lower-domain`/`cx-host-run` 前向声明失败）。产品侧 `R72`（`ua-cxif` 按年龄清理）仍待 `0.0.90` 开版，本条是测试方法，不替代 R72。
+- 功能测试需要隔离 HOME 时，把缓存目录用 `UNISACC_CACHE_DIR` 指向一个共享的、非污染的预热目录（只隔离会被写的路径），或把被测单元拆出纯层在进程内测；每次入口调用约 10-25 秒冷编译（csr 全量扫中位 11.4s）。
 
 ## 6.2 修好检查器后必须全仓重跑与最近提交回放（2026-11-22，采纳 ccogw 经验）
 
