@@ -258,7 +258,7 @@
 - OutlinePass | G-pixel 选中、遮挡、描边与清理 | RenderPass、对象拾取。
 - FXAA | G-pixel 锯齿阶跃、采样方向及对照 | EffectComposer。
 - 调色 Pass | G-pixel 色域、曝光与目标格式 | M5 色彩输出和 EffectComposer。
-- ArrowHelper | G-struct 方向与长度 | 场景图及线与网格。
+- ArrowHelper 子对象与绘制 | G-struct 颜色、复制和释放，G-pixel 箭头同机位 | 方向与长度已通过 arrowhelper-struct.cx，依赖场景图及线与网格。
 - AxesHelper 渲染与资源回收 | G-pixel 轴线随对象树变换，G-struct 验证释放后不能提交 | 轴顶点及颜色由 axeshelper-struct.cx 验证通过，依赖场景渲染列表。
 - BoxHelper | G-struct 对象世界边界 | Box3 与场景图。
 - Box3Helper 场景接线 | G-struct 世界变换与父对象，G-pixel 外接框线 | 中心、半尺寸和单位线框已通过 box3helper-struct.cx。
