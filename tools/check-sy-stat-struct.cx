@@ -1,0 +1,225 @@
+/* tools/check-sy-stat-struct.cx -- guards all sy_stat/sy_fstat/sy_lstat declarations across the tree.
+ * Rule (post-mortem of 0.0.88 candidate 00cbb826 ExStat stack overflow):
+ *   (1) Every declaration/definition of sy_stat, sy_fstat, or sy_lstat must take `sy_stat_t *` as its
+ *       second parameter; hand-written private mirror structs (e.g. `ExStat *`) are forbidden.
+ *   (2) Only `cx/sys/fs.cx` may define `typedef struct ... sy_stat_t;`.
+ * Runs both a full source-tree scan (default ".", or argv[1]) and 4 built-in self-tests (1 positive + 3
+ * negative mutants). Prints CHECK_SY_STAT_STRUCT<TAB>files=N<TAB>decls=M<TAB>failed=K.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+static int g_files, g_decls, g_failed;
+
+static int is_id(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int is_sp(int c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static int has_ext(const char *name) {
+    size_t n = strlen(name);
+    if (n > 3 && !strcmp(name + n - 3, ".cx")) return 1;
+    if (n > 2 && !strcmp(name + n - 2, ".c")) return 1;
+    if (n > 2 && !strcmp(name + n - 2, ".h")) return 1;
+    return 0;
+}
+
+/* Strip C comments and string/char literals while preserving newlines so line numbers stay exact. */
+static char *strip_code(const char *src, size_t n) {
+    char *out = (char *)mm_alloc((long)(n + 1));
+    if (!out) return 0;
+    size_t i = 0;
+    while (i < n) {
+        char c = src[i];
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+            out[i++] = ' '; out[i++] = ' ';
+            while (i < n && src[i] != '\n') out[i++] = ' ';
+        } else if (c == '/' && i + 1 < n && src[i + 1] == '*') {
+            out[i++] = ' '; out[i++] = ' ';
+            while (i < n) {
+                if (src[i] == '*' && i + 1 < n && src[i + 1] == '/') {
+                    out[i++] = ' '; out[i++] = ' ';
+                    break;
+                }
+                out[i] = (src[i] == '\n') ? '\n' : ' ';
+                i++;
+            }
+        } else if (c == '"' || c == '\'') {
+            char q = c;
+            out[i++] = ' ';
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) {
+                    out[i] = (src[i] == '\n') ? '\n' : ' '; i++;
+                    out[i] = (src[i] == '\n') ? '\n' : ' '; i++;
+                } else if (src[i] == q) {
+                    out[i++] = ' ';
+                    break;
+                } else {
+                    out[i] = (src[i] == '\n') ? '\n' : ' ';
+                    i++;
+                }
+            }
+        } else {
+            out[i] = c;
+            i++;
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
+/* Scan cleaned source buffer. Returns number of violations. */
+static int scan_buf(const char *rel, const char *raw, size_t n, int *decls_out, int quiet) {
+    char *buf = strip_code(raw, n);
+    if (!buf) return 1;
+    int errs = 0, decls = 0, line = 1;
+    int is_fs_owner = (strstr(rel, "cx/sys/fs.cx") != 0);
+
+    size_t i = 0;
+    while (i < n) {
+        if (buf[i] == '\n') { line++; i++; continue; }
+        if (!is_id((unsigned char)buf[i])) { i++; continue; }
+        size_t s = i;
+        while (i < n && is_id((unsigned char)buf[i])) i++;
+        size_t len = i - s;
+
+        /* Check 1: private `typedef struct ... sy_stat_t;` outside cx/sys/fs.cx */
+        if (!is_fs_owner && len == 9 && !strncmp(buf + s, "sy_stat_t", 9)) {
+            size_t k = i;
+            while (k < n && is_sp((unsigned char)buf[k])) k++;
+            if (k < n && buf[k] == ';') {
+                size_t p = s;
+                while (p > 0 && is_sp((unsigned char)buf[p - 1])) p--;
+                if (p > 0 && buf[p - 1] == '}') {
+                    errs++;
+                    if (!quiet) printf("FAIL\t%s:%d\tprivate typedef sy_stat_t outside cx/sys/fs.cx\n", rel, line);
+                }
+            }
+        }
+
+        /* Check 2: declaration/definition `int sy_stat/sy_fstat/sy_lstat(...)` */
+        int is_fn = (len == 7 && !strncmp(buf + s, "sy_stat", 7)) ||
+                    (len == 8 && !strncmp(buf + s, "sy_fstat", 8)) ||
+                    (len == 8 && !strncmp(buf + s, "sy_lstat", 8));
+        if (!is_fn) continue;
+
+        /* Previous identifier before function name must be `int` (declaration/definition, not a call). */
+        size_t p = s;
+        while (p > 0 && is_sp((unsigned char)buf[p - 1])) p--;
+        size_t pe = p;
+        while (p > 0 && is_id((unsigned char)buf[p - 1])) p--;
+        if (!(pe - p == 3 && !strncmp(buf + p, "int", 3))) continue;
+
+        /* Next non-space token must be '(' */
+        size_t k = i;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k >= n || buf[k] != '(') continue;
+        k++;
+
+        /* Find matching ')' and split on first ',' */
+        size_t comma = 0, close = 0;
+        int depth = 1;
+        for (size_t j = k; j < n; j++) {
+            if (buf[j] == '(') depth++;
+            else if (buf[j] == ')') { depth--; if (depth == 0) { close = j; break; } }
+            else if (buf[j] == ',' && depth == 1 && !comma) comma = j;
+        }
+        if (!comma || !close || comma >= close) continue;
+        decls++;
+
+        /* Second parameter must reference `sy_stat_t` */
+        int ok = 0;
+        for (size_t j = comma + 1; j + 9 <= close; j++) {
+            if (!strncmp(buf + j, "sy_stat_t", 9) &&
+                (j == comma + 1 || !is_id((unsigned char)buf[j - 1])) &&
+                (j + 9 == close || !is_id((unsigned char)buf[j + 9]))) {
+                ok = 1;
+                break;
+            }
+        }
+        if (!ok) {
+            errs++;
+            if (!quiet) {
+                char seg[128];
+                size_t sl = close - (comma + 1);
+                if (sl > 100) sl = 100;
+                mm_copy(seg, sizeof seg, buf + comma + 1, (long)sl);
+                seg[sl] = 0;
+                printf("FAIL\t%s:%d\t%.*s param2 must be sy_stat_t *, got:%s\n", rel, line, (int)len, buf + s, seg);
+            }
+        }
+    }
+    mm_free(buf);
+    if (decls_out) *decls_out += decls;
+    return errs;
+}
+
+static void scan_dir(const char *base, const char *sub) {
+    char path[4096];
+    if (sub && *sub) {
+        if (cx_fmt(path, sizeof path, "%s/%s", base, sub)) return;
+    } else {
+        if (cx_fmt(path, sizeof path, "%s", base)) return;
+    }
+    sy_dir_t d;
+    if (sy_dir_open(&d, path)) return;
+    while (sy_dir_next(&d) > 0) {
+        const char *e = d.name;
+        if (!e || e[0] == '.') continue;
+        if (!sub || !*sub) {
+            if (!strcmp(e, "archive") || !strcmp(e, "out") || !strcmp(e, "build") ||
+                !strcmp(e, "weights") || !strcmp(e, "release") || !strcmp(e, "docs")) continue;
+        }
+        char rel[4096], full[4096];
+        if (sub && *sub) cx_fmt(rel, sizeof rel, "%s/%s", sub, e);
+        else cx_fmt(rel, sizeof rel, "%s", e);
+        cx_fmt(full, sizeof full, "%s/%s", base, rel);
+        sy_stat_t st;
+        if (sy_lstat(full, &st)) continue;
+        if (st.kind == 'd') {
+            scan_dir(base, rel);
+        } else if (st.kind == 'f' && has_ext(e)) {
+            unsigned char *b = 0;
+            int64_t bn = 0;
+            if (!sy_read_file(full, &b, &bn, 4 << 20)) {
+                g_files++;
+                int errs = scan_buf(rel, (const char *)b, (size_t)bn, &g_decls, 0);
+                g_failed += errs;
+                free(b);
+            }
+        }
+    }
+    sy_dir_close(&d);
+}
+
+static void run_selftests(void) {
+    int d = 0;
+    const char *ok_case = "int f(void){ int sy_stat(const char *, sy_stat_t *); return 0; }\n";
+    const char *m1 = "typedef struct { long s; } ExStat;\nint f(void){ int sy_fstat(int, ExStat *); return 0; }\n";
+    const char *m2 = "int g(void){ int sy_lstat(const char *, struct my_stat *); return 0; }\n";
+    const char *m3 = "typedef struct { long size; } sy_stat_t;\n";
+
+    int e0 = scan_buf("tests/ok.cx", ok_case, strlen(ok_case), &d, 1);
+    int e1 = scan_buf("cx/runtime/runexec.cx", m1, strlen(m1), &d, 1);
+    int e2 = scan_buf("src/other.cx", m2, strlen(m2), &d, 1);
+    int e3 = scan_buf("src/dup.cx", m3, strlen(m3), &d, 1);
+
+    if (e0 != 0) { g_failed++; printf("FAIL\tselftest.positive\n"); } else printf("PASS\tselftest.positive\n");
+    if (e1 == 0) { g_failed++; printf("FAIL\tselftest.mutant-exstat-fstat\n"); } else printf("PASS\tselftest.mutant-exstat-fstat\n");
+    if (e2 == 0) { g_failed++; printf("FAIL\tselftest.mutant-private-lstat\n"); } else printf("PASS\tselftest.mutant-private-lstat\n");
+    if (e3 == 0) { g_failed++; printf("FAIL\tselftest.mutant-dup-typedef\n"); } else printf("PASS\tselftest.mutant-dup-typedef\n");
+}
+
+int main(int argc, char **argv) {
+    const char *root = (argc >= 2 && argv[1][0]) ? argv[1] : ".";
+    run_selftests();
+    scan_dir(root, "");
+    printf("CHECK_SY_STAT_STRUCT\tfiles=%d\tdecls=%d\tfailed=%d\n", g_files, g_decls, g_failed);
+    return g_failed ? 1 : 0;
+}
