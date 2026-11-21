@@ -1,0 +1,110 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, NearestFilter, NoBlending, REVISION, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuNativeSample } from "../base/gpu-native-sample-abi.js";
+
+const result = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const addon = path => import(`file://${query.get("package")}/examples/jsm/${path}.js`);
+  const [{ EffectComposer }, { ShaderPass }, { CopyShader }] = await Promise.all([
+    addon("postprocessing/EffectComposer"), addon("postprocessing/ShaderPass"), addon("shaders/CopyShader"),
+  ]);
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 4;
+    const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  function sample(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return [0, 15].map(i => view.getUint32(i * 4, true));
+  }
+  function screen(gl) {
+    const bytes = new Uint8Array(64);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, 0, 4, 4, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+    return sample(bytes);
+  }
+  const { gl } = context();
+  let reads = 0, uploads = 0, draws = 0, compiles = 0;
+  const frames = [];
+  function instrument(key, observe) {
+    const before = gl[key];
+    gl[key] = function (...args) {
+      const value = before.apply(gl, args);
+      observe(value);
+      return value;
+    };
+  }
+  instrument("readPixels", () => reads++);
+  instrument("texImage2D", () => uploads++);
+  instrument("drawArrays", () => draws++);
+  instrument("compileShader", () => compiles++);
+  instrument("createFramebuffer", frame => frames.push(frame));
+  let actual;
+  const native = createGpuNativeSample(gl, () => 1, () => actual.memory);
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, native.targets);
+  const wasm = await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer();
+  actual = (await WebAssembly.instantiate(wasm, {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+    uxe_gpu_target_v1: { host_gpu_native_copy: native.copy },
+  })).instance.exports;
+  const status = actual.uxe_native_sample(BigInt(query.get("mode")));
+  if (status !== 0n) throw new Error(`native copy failed ${status}`);
+  const copyEvidence = [
+    reads, uploads, draws, compiles, Number(gl.getParameter(gl.FRAMEBUFFER_BINDING) === frames[0]),
+    Number(gl.isEnabled(gl.SCISSOR_TEST)), ...gl.getParameter(gl.SCISSOR_BOX), ...gl.getParameter(gl.VIEWPORT),
+  ];
+  if (actual.uxe_native_sample(2n) !== 0n) throw new Error("oracle readback failed");
+  const wasmBytes = at => new Uint8Array(actual.memory.buffer, 2097152 + at, 64);
+  const wasmMemory = new DataView(actual.memory.buffer, 2097152);
+  const actualSource = sample(wasmBytes(6000)), actualMiddle = sample(wasmBytes(6100)), actualScreen = screen(gl);
+  const errors = [6200,6204,6208,6212,6216,6220,6224].map(at => wasmMemory.getUint32(at, true) - 100);
+
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(4, 4, false);
+  const target = new WebGLRenderTarget(4, 4, { minFilter: NearestFilter, magFilter: NearestFilter });
+  const composer = new EffectComposer(renderer, target);
+  const original = composer.readBuffer;
+  const data = new Uint8Array(64);
+  const dataView = new DataView(data.buffer);
+  for (let i = 0; i < 16; i++) dataView.setUint32(i * 4, i < 8 ? 1614807104 : 3248529440, true);
+  const texture = new DataTexture(data, 4, 4);
+  texture.needsUpdate = true;
+  const passes = [0,1,2].map(() => {
+    const pass = new ShaderPass(CopyShader);
+    pass.material.blending = NoBlending;
+    return pass;
+  });
+  passes[0].render(renderer, original, { texture });
+  composer.addPass(passes[1]);
+  composer.addPass(passes[2]);
+  composer.render(0);
+  renderer.setRenderTarget(null);
+  const refScreen = screen(ref.gl);
+  function read(target) {
+    const rgba = new Uint8Array(64);
+    renderer.readRenderTargetPixels(target, 0, 0, 4, 4, rgba);
+    return sample(rgba);
+  }
+  const refSource = read(original), refMiddle = read(target);
+  composer.dispose();
+  for (const pass of passes) pass.dispose();
+  texture.dispose();
+  renderer.dispose();
+  result.textContent = JSON.stringify([
+    ...actualSource, ...actualMiddle, ...actualScreen,
+    ...refSource, ...refMiddle, ...refScreen, ...copyEvidence, ...errors,
+  ]);
+} catch (error) {
+  result.textContent = `error:${error.message}`;
+}
+</script>

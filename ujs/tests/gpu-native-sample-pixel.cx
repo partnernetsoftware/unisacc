@@ -1,0 +1,94 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define FRAME 1614807104,3248529440
+
+static int shader_words(char *program,int capacity,int used,const char *file,const char *stage,int address) {
+    unsigned char *input=0;
+    int64_t size=0;
+    if(sy_read_file(file,&input,&size,4096) || size<1 || used<0 || capacity-used<size*5+512) {
+        mm_free(input);
+        return -1;
+    }
+    const int count=(size+3)/4;
+    for(int start=0;start<count;start+=128) {
+        const int end=count<start+128?count:start+128;
+        used+=tx_snprintf(program+used,capacity-used,"let %s%d=[",stage,start);
+        for(int i=start;i<end;i++) {
+            unsigned word=0;
+            for(int byte=0;byte<4;byte++) {
+                const int part=i*4+byte;
+                if(part<size) word|=(unsigned)input[part]<<(byte*8);
+            }
+            used+=tx_snprintf(program+used,capacity-used,"%s%u",i==start?"":",",word);
+        }
+        used+=tx_snprintf(program+used,capacity-used,
+            "];let i=0;while(i<%d){let b=ux_u32_put(%d+4*i,%s%d[i]);i=i+1;}",
+            end-start,address+4*start,stage,start);
+    }
+    used+=tx_snprintf(program+used,capacity-used,
+        "let p=ux_u32_put(shader+GpuShaderSource.%s,%d);"
+        "let n=ux_u32_put(shader+GpuShaderSource.%sBytes,%ld);",stage,address,stage,(long)size);
+    mm_free(input);
+    return used;
+}
+
+static int build_shader_source(const char *file) {
+    char program[45000];
+    int used=tx_snprintf(program,sizeof program,"native function native_copy_fixture_shader(shader:i64) i64 {");
+    used=shader_words(program,sizeof program,used,"ujs/practice/uxe/base/gpu-native-copy.vert","vertex",6500);
+    if(used>=0) used=shader_words(program,sizeof program,used,
+        "ujs/practice/uxe/base/gpu-native-copy.frag","fragment",10700);
+    if(used<0) return 1;
+    used+=tx_snprintf(program+used,sizeof program-used,"return shader;}\n");
+    return sy_write_file(file,program,used,0600)!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    char dir[256],cwd[390],abi[300],shader[300],wasm[300],url[720];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-native-sample-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(shader,sizeof shader,"%s/shader.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/native.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/gpu-native-sample-r160.html?package=%s&wasm=%s&mode=%d",
+        cwd,argv[1],wasm,mutate);
+    const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "import host_gpu_native_copy from \"uxe_gpu_target_v1\"(i64,i64,i64,i64) i64;\n"
+        "export uxe_native_sample(mode:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-target.ujs",
+        "ujs/practice/uxe/base/effectcomposer.ujs","ujs/practice/uxe/base/effectcomposer-gpu-targets.ujs",
+        "ujs/practice/uxe/base/gpu-native-sample.ujs",shader,"ujs/practice/uxe/test/gpu-native-sample-probe.ujs","-o",wasm,0};
+    const double gold[]={
+        FRAME,FRAME,FRAME,FRAME,FRAME,FRAME,
+        0,3,2,6,1,1,3,3,1,1,1,1,2,2,-1,-12,-3,-1,-1,-1,-14,
+    };
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600) ||
+        build_shader_source(shader);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("G_PIXEL native GPU sample compiler_rc=%d %s\n",rc,output?output:""); failed++; }
+        mm_free(output); output=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("G_PIXEL native GPU sample case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed++;
+    mm_free(output);
+    printf("G_PIXEL native GPU sample cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}
