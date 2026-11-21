@@ -1,0 +1,92 @@
+// The topology prefix uses the same layout as Box3Helper.
+struct BoxHelper {
+  box: u32;
+  positions: u32;
+  indices: u32;
+  active: u32;
+  color: u32;
+  positionVersion: u32;
+  centerX: f64;
+  centerY: f64;
+  centerZ: f64;
+  radius: f64;
+}
+
+// Bounds are a caller-owned world-space Box3 refreshed from the source object.
+native function box_helper_bounds(box:i64) i64 {
+  if(!boxh_span(box,48,8)) { return 0-1; }
+  let axis=0;
+  while(axis<24) {
+    if(ux_f64(box+24+axis)<ux_f64(box+axis)) { return 0; }
+    axis=axis+8;
+  }
+  axis=0;
+  while(axis<48) {
+    let component=ux_f64(box+axis);
+    if(!helper_f32_fits(component)) { return 0-1; }
+    axis=axis+8;
+  }
+  return 1;
+}
+
+native function BoxHelper_update(helper:i64) i64 {
+  if(!boxh_span(helper,BoxHelper.size,8) || ux_u32(helper+BoxHelper.active)!=1) { return 0-1; }
+  let box=ux_u32(helper+BoxHelper.box);
+  let state=box_helper_bounds(box);
+  if(state!=1) { return state; }
+  let xyz=ux_u32(helper+BoxHelper.positions);
+  let idx=ux_u32(helper+BoxHelper.indices);
+  let version=ux_u32(helper+BoxHelper.positionVersion);
+  if(!boxh_span(xyz,96,4) || !boxh_span(idx,48,2) || version==4294967295 ||
+     boxh_overlap(helper,BoxHelper.size,xyz,96) || boxh_overlap(xyz,96,box,48) ||
+     boxh_overlap(xyz,96,idx,48)) { return 0-1; }
+  let i=0;
+  while(i<8) {
+    let x=box+24;
+    let y=box+32;
+    let z=box+40;
+    if(i%4==1 || i%4==2) { x=box; }
+    if(i%4>=2) { y=box+8; }
+    if(i>=4) { z=box+16; }
+    let a=ux_f32_put(xyz+i*12,ux_f64(x));
+    let b=ux_f32_put(xyz+i*12+4,ux_f64(y));
+    let c=ux_f32_put(xyz+i*12+8,ux_f64(z));
+    i=i+1;
+  }
+  let lx=ux_f32(xyz+72); let ly=ux_f32(xyz+76); let lz=ux_f32(xyz+80);
+  let hx=ux_f32(xyz); let hy=ux_f32(xyz+4); let hz=ux_f32(xyz+8);
+  let dx=(hx-lx)*0.5; let dy=(hy-ly)*0.5; let dz=(hz-lz)*0.5;
+  let a=ux_f64_put(helper+BoxHelper.centerX,(hx+lx)*0.5);
+  let b=ux_f64_put(helper+BoxHelper.centerY,(hy+ly)*0.5);
+  let c=ux_f64_put(helper+BoxHelper.centerZ,(hz+lz)*0.5);
+  let r=ux_f64_put(helper+BoxHelper.radius,f64_sqrt(dx*dx+dy*dy+dz*dz));
+  let v=ux_u32_put(helper+BoxHelper.positionVersion,version+1);
+  return 1;
+}
+
+native function BoxHelper_init(helper:i64,box:i64,positions:i64,indices:i64,hex:i64) i64 {
+  if(!boxh_span(helper,BoxHelper.size,8) || hex<0 || hex>16777215 ||
+     box_helper_bounds(box)<0 || boxh_overlap(helper,BoxHelper.size,box,48) ||
+     boxh_overlap(helper,BoxHelper.size,positions,96) ||
+     boxh_overlap(helper,BoxHelper.size,indices,48)) { return 0-1; }
+  let ready=Box3Helper_init(helper,box,positions,indices);
+  if(ready<0) { return 0-1; }
+  let i=0;
+  while(i<24) {
+    let p=ux_f32_put(positions+i*4,0.0);
+    i=i+1;
+  }
+  let c=ux_u32_put(helper+BoxHelper.color,hex);
+  let v=ux_u32_put(helper+BoxHelper.positionVersion,0);
+  let x=ux_f64_put(helper+BoxHelper.centerX,0.0);
+  let y=ux_f64_put(helper+BoxHelper.centerY,0.0);
+  let z=ux_f64_put(helper+BoxHelper.centerZ,0.0);
+  let r=ux_f64_put(helper+BoxHelper.radius,0.0-1.0);
+  let updated=BoxHelper_update(helper);
+  return helper;
+}
+
+native function BoxHelper_dispose(helper:i64) i64 {
+  if(!boxh_span(helper,BoxHelper.size,8)) { return 0-1; }
+  return Box3Helper_dispose(helper);
+}
