@@ -1,0 +1,99 @@
+native function json_hex_digit(byte:i64) i64 {
+  if(byte>=48 && byte<=57) { return byte-48; }
+  if(byte>=65 && byte<=70) { return byte-55; }
+  return byte-87;
+}
+
+native function json_hex_word(bytes:i64) i64 {
+  let out=0;
+  let i=0;
+  while(i<4) { out=out*16+json_hex_digit(ux_u8(bytes+i)); i=i+1; }
+  return out;
+}
+
+native function json_escape_width(input:i64,limit:i64) i64 {
+  if(ux_u8(input+1)!=117) { return 2; }
+  let high=json_hex_word(input+2);
+  if(high>=55296 && high<=56319 && input+12<=limit &&
+     ux_u8(input+6)==92 && ux_u8(input+7)==117) {
+    let low=json_hex_word(input+8);
+    if(low>=56320 && low<=57343) { return 12; }
+  }
+  return 6;
+}
+
+native function json_escape_value(input:i64,width:i64) i64 {
+  let value=ux_u8(input+1);
+  if(value==117) {
+    let high=json_hex_word(input+2);
+    if(width==12) { return 65536+(high-55296)*1024+json_hex_word(input+8)-56320; }
+    if(high>=55296 && high<=57343) { return 65533; }
+    return high;
+  }
+  if(value==98) { return 8; }
+  if(value==102) { return 12; }
+  if(value==110) { return 10; }
+  if(value==114) { return 13; }
+  if(value==116) { return 9; }
+  return value;
+}
+
+native function json_utf8_scalar(out:i64,scalar:i64,write:i64) i64 {
+  let size=1;
+  if(scalar>=128) { size=2; }
+  if(scalar>=2048) { size=3; }
+  if(scalar>=65536) { size=4; }
+  if(write==0) { return size; }
+  if(size==1) { let a=ux_u8_put(out,scalar); }
+  else {
+    let i=size-1;
+    while(i>0) {
+      let continuation=ux_u8_put(out+i,128+scalar%64);
+      scalar=scalar/64;
+      i=i-1;
+    }
+    let lead=192;
+    if(size==3) { lead=224; }
+    if(size==4) { lead=240; }
+    let a=ux_u8_put(out,lead+scalar);
+  }
+  return size;
+}
+
+native function json_string_pass(at:i64,close:i64,out:i64,write:i64) i64 {
+  let cursor=at+1;
+  let size=0;
+  while(cursor<close-1) {
+    let width=1;
+    if(ux_u8(cursor)==92) {
+      width=json_escape_width(cursor,close-1);
+      let scalar=json_escape_value(cursor,width);
+      size=size+json_utf8_scalar(out+size,scalar,write);
+    } else {
+      width=loader_utf8_width(cursor,close-1);
+      if(width<0) { return 0-2; }
+      if(write!=0) { let copy=uxe_copy_record(out+size,cursor,width); }
+      size=size+width;
+    }
+    cursor=cursor+width;
+  }
+  return size;
+}
+
+native function Json_stringBytes(at:i64,end:i64) i64 {
+  let close=json_scan_string(at,end);
+  if(close<0) { return 0-1; }
+  return json_string_pass(at,close,0,0);
+}
+
+// Decode one quoted JSON token to a caller-owned UTF-8 span.
+// Matches browser TextEncoder's substitution of lone surrogate code units.
+native function Json_decodeString(at:i64,end:i64,out:i64,capacity:i64) i64 {
+  let close=json_scan_string(at,end);
+  if(close<0 || out<0 || capacity<0 || out>6291456-capacity ||
+     (capacity>0 && out<close && at<out+capacity)) { return 0-1; }
+  let bytes=json_string_pass(at,close,0,0);
+  if(bytes<0) { return bytes; }
+  if(bytes>capacity) { return 0-3; }
+  return json_string_pass(at,close,out,1);
+}

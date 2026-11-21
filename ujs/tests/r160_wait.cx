@@ -1,0 +1,111 @@
+#pragma unisa module r160_wait
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+typedef struct {
+    sy_child_t child;
+    int id,at,size;
+    long deadline;
+    char input[4096],reply[8192],session[100];
+} R160Browser;
+
+static long r160_find(const char *text,const char *field) {
+    long fieldBytes=tx_len(field,50);
+    long textBytes=tx_len(text,8192);
+    for(long i=0;i<=textBytes-fieldBytes;i++) {
+        long j=0;
+        while(j<fieldBytes && text[i+j]==field[j]) j++;
+        if(j==fieldBytes) return i;
+    }
+    return -1;
+}
+
+static int r160_message(R160Browser *browser,long limit) {
+    int n=0;
+    while(n<(int)sizeof browser->reply-1) {
+        if(browser->at==browser->size) {
+            long remaining=limit-sy_now_ms();
+            if(remaining<=0 || sy_readable(browser->child.out_fd,remaining)<=0) return 0;
+            browser->size=sy_read(browser->child.out_fd,browser->input,sizeof browser->input);
+            if(browser->size<=0) return 0;
+            browser->at=0;
+        }
+        browser->reply[n]=browser->input[browser->at++];
+        if(browser->reply[n++]==0) return 1;
+    }
+    return 0;
+}
+
+static int r160_call(R160Browser *browser,const char *method,const char *params) {
+    char session[125]="", payload[1800];
+    if(browser->session[0]) tx_snprintf(session,sizeof session,",\"sessionId\":\"%s\"",browser->session);
+    int id=++browser->id;
+    int n=tx_snprintf(payload,sizeof payload,"{\"id\":%d,\"method\":\"%s\",\"params\":%s%s}",id,method,params,session);
+    if(n<=0 || n>=(int)sizeof payload || sy_write_all(browser->child.in_fd,payload,n+1)) return 0;
+    long limit=sy_now_ms()+2500;
+    if(limit>browser->deadline) limit=browser->deadline;
+    while(r160_message(browser,limit)) {
+        long at=r160_find(browser->reply,"\"id\":");
+        if(at>=0 && tx_strtol(browser->reply+at+5,0,10)==id) return r160_find(browser->reply,"\"error\":")<0;
+    }
+    return 0;
+}
+
+static int r160_id(const char *reply,const char *field,char out[100]) {
+    long offset=r160_find(reply,field);
+    if(offset<0) return 0;
+    const char *at=reply+offset+tx_len(field,50);
+    int i=0;
+    while(i<99 && at[i] && at[i]!='"') { out[i]=at[i]; i++; }
+    out[i]=0;
+    return i>0 && at[i]=='"';
+}
+
+int r160_wait_ref(const char *fixture,double *values,int count,const char *dir) {
+    char cwd[460],profile[390],params[750],target[100];
+    if(sy_cwd(cwd,sizeof cwd) || r160_find(cwd,"\"")>=0 || r160_find(cwd,"\\")>=0) return 1;
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s/chrome",dir);
+    char *argv[]={"sh","-c","exec google-chrome \"$@\" 3<&0 4>&1 1>/dev/null","r160-pipe",
+        "--headless=new","--disable-background-networking","--no-first-run","--allow-file-access-from-files",
+        "--remote-debugging-pipe",profile,"about:blank",0};
+    sy_spawn_t launch;
+    sy_exit_t ended;
+    R160Browser browser={0};
+    sy_spawn_init(&launch);
+    launch.argv=argv; launch.in_fd=SY_STDIO_PIPE; launch.out_fd=SY_STDIO_PIPE;
+    launch.err_fd=SY_STDIO_NULL; launch.pgroup=-1; launch.deadline_ms=13000;
+    if(sy_proc_spawn(&launch,&browser.child)) return 1;
+    browser.deadline=sy_now_ms()+12000;
+    int failed=1;
+    tx_snprintf(params,sizeof params,"{\"url\":\"file://%s/ujs/practice/uxe/test/%s-r160.html\"}",cwd,fixture);
+    if(!r160_call(&browser,"Target.createTarget",params) || !r160_id(browser.reply,"\"targetId\":\"",target)) goto done;
+    tx_snprintf(params,sizeof params,"{\"targetId\":\"%s\",\"flatten\":true}",target);
+    if(!r160_call(&browser,"Target.attachToTarget",params) || !r160_id(browser.reply,"\"sessionId\":\"",browser.session)) goto done;
+    for(int i=0;i<160 && sy_now_ms()<browser.deadline;i++) {
+        if(!r160_call(&browser,"Runtime.evaluate","{\"expression\":\"document.querySelector('#r160')?.textContent\"}")) goto done;
+        long offset=r160_find(browser.reply,"\"value\":\"[");
+        if(offset>=0) {
+            char *p=browser.reply+offset+10;
+            for(int j=0;j<count;j++) {
+                char *end=0;
+                values[j]=tx_strtod(p,&end);
+                if(end==p || *end!=(j+1==count?']':',')) goto done;
+                p=end+1;
+            }
+            failed=0;
+            goto done;
+        }
+        sy_sleep_ms(50);
+    }
+done:
+    sy_close(browser.child.in_fd);
+    sy_close(browser.child.out_fd);
+    sy_proc_kill(&browser.child,9);
+    sy_proc_wait(&browser.child,&ended);
+    return failed;
+}

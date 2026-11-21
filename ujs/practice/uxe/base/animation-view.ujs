@@ -1,0 +1,65 @@
+struct AnimationSamples {
+  times: u32;
+  values: u32;
+  count: u32;
+  stride: u32;
+}
+
+native function animation_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function animation_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return a<b+bn && b<a+an;
+}
+
+// Inputs are sorted Float32 times and row-major Float32 values. They must
+// remain immutable while a sample view references them.
+native function AnimationSamples_init(view:i64,times:i64,values:i64,count:i64,stride:i64) i64 {
+  if(count<1 || count>65536 || stride<1 || stride>64) { return 0-1; }
+  let time_bytes=count*4;
+  let value_bytes=time_bytes*stride;
+  if(!animation_span(view,AnimationSamples.size) || !animation_span(times,time_bytes) ||
+     !animation_span(values,value_bytes) || animation_overlap(view,AnimationSamples.size,times,time_bytes) ||
+     animation_overlap(view,AnimationSamples.size,values,value_bytes)) { return 0-1; }
+  let i=0;
+  let last=ux_f32(times);
+  while(i<count) {
+    let t=ux_f32(times+4*i);
+    if(t-t!=0.0 || t<last) { return 0-2; }
+    last=t;
+    i=i+1;
+  }
+  let time_at=ux_u32_put(view+AnimationSamples.times,times);
+  let value_at=ux_u32_put(view+AnimationSamples.values,values);
+  let n=ux_u32_put(view+AnimationSamples.count,count);
+  let lanes=ux_u32_put(view+AnimationSamples.stride,stride);
+  return view;
+}
+
+native function animation_sample_output(view:i64,out:i64) i64 {
+  if(!animation_span(view,AnimationSamples.size)) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  let stride=ux_u32(view+AnimationSamples.stride);
+  if(count<1 || count>65536 || stride<1 || stride>64) { return 0-1; }
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let bytes=stride*4;
+  if(!animation_span(times,count*4) || !animation_span(values,count*bytes) ||
+     !animation_span(out,bytes) || animation_overlap(out,bytes,view,AnimationSamples.size) ||
+     animation_overlap(out,bytes,times,count*4) || animation_overlap(out,bytes,values,count*bytes)) { return 0-1; }
+  return stride;
+}
+
+// Return the insertion point after equal times (r160 selects the final
+// sample in a run of equal times). Zero and count are clamp sentinels.
+native function animation_sample_upper(times:i64,count:i64,t:f64) i64 {
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    if(t<ux_f32(times+4*mid)) { hi=mid; }
+    else { lo=mid+1; }
+  }
+  return lo;
+}

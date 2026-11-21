@@ -1,0 +1,37 @@
+// Faces follow the cube order +X, -X, +Y, -Y, +Z, -Z. Validate the entire
+// batch before copying any texels or publishing the GPU source descriptor.
+native function CubeTextureLoader_pack(faces:i64,out:i64,capacity:i64,source:i64) i64 {
+  if(!loading_span(faces,24) || !loading_span(source,GpuTextureSource.size) || out<0 || capacity<0 || out>6291456-capacity ||
+     !file_disjoint(faces,24,out,capacity) || !file_disjoint(source,GpuTextureSource.size,out,capacity) ||
+     !file_disjoint(faces,24,source,GpuTextureSource.size)) { return 0-1; }
+  let first=ux_u32(faces);
+  if(!loading_span(first,ImageResource.size)) { return 0-1; }
+  let width=ux_u32(first+ImageResource.width);
+  if(width<1 || width>4096 || width*width*24>capacity) { return 0-2; }
+  let bytes=width*width*4;
+  let i=0;
+  while(i<6) {
+    let face=ux_u32(faces+i*4);
+    if(!loading_span(face,ImageResource.size) || !file_disjoint(face,ImageResource.size,out,capacity) ||
+       !file_disjoint(face,ImageResource.size,source,GpuTextureSource.size) ||
+       ux_u32(face+ImageResource.width)!=width || ux_u32(face+ImageResource.height)!=width ||
+       ux_u32(face+ImageResource.rowBytes)!=4*width) { return 0-2; }
+    let input=ux_u32(face+ImageResource.rgba);
+    if(input>6291456-bytes || !file_disjoint(input,bytes,out,capacity) ||
+       !file_disjoint(input,bytes,source,GpuTextureSource.size)) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<6) {
+    let face=ux_u32(faces+i*4);
+    let copied=uxe_copy_record(out+i*bytes,ux_u32(face+ImageResource.rgba),bytes);
+    i=i+1;
+  }
+  let a=ux_u32_put(source+GpuTextureSource.width,width);
+  let b=ux_u32_put(source+GpuTextureSource.height,width);
+  let c=ux_u32_put(source+GpuTextureSource.filter,2);
+  let d=ux_u32_put(source+GpuTextureSource.wrapS,0);
+  let e=ux_u32_put(source+GpuTextureSource.wrapT,0);
+  let f=ux_u32_put(source+GpuTextureSource.rgba,out);
+  return source;
+}

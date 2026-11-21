@@ -1,0 +1,193 @@
+// Table pointers are borrowed from the input until decoding ends.
+native function jpeg_quant_tables(body:i64,next:i64,meta:i64) i64 {
+  while(body<next) {
+    let id=ux_u8(body);
+    if(id>3 || body>next-65) { return 0-4; }
+    let j=0;
+    while(j<64) { if(ux_u8(body+1+j)==0) { return 0-4; } j=j+1; }
+    let saved=ux_u32_put(meta+4*id,body+1);
+    body=body+65;
+  }
+  return 0;
+}
+
+native function jpeg_huff_tables(body:i64,next:i64,meta:i64) i64 {
+  while(body<next) {
+    let id=ux_u8(body);
+    if(id/16>1 || id%16>3) { return 0-4; }
+    let table=jpeg_dht_end(body+1,next);
+    if(table<0) { return table; }
+    let saved=ux_u32_put(meta+16+(id/16*4+id%16)*4,body+1);
+    body=table;
+  }
+  return 0;
+}
+
+native function jpeg_gray_scan(src:i64,bytes:i64,meta:i64,restart:i64) i64 {
+  let i=0;
+  while(i<12) { let clear=ux_u32_put(meta+4*i,0); i=i+1; }
+  let end=src+bytes;
+  let at=src+2;
+  let component=0-1;
+  let quant=0-1;
+  let interval=ux_u32_put(restart,0);
+  while(at<end) {
+    if(ux_u8(at)!=255) { return 0-2; }
+    while(at<end && ux_u8(at)==255) { at=at+1; }
+    if(at>end-3) { return 0-2; }
+    let marker=ux_u8(at);
+    at=at+1;
+    let width=jpeg_u16be(at);
+    if(width<2 || width>end-at) { return 0-2; }
+    let next=at+width;
+    let body=at+2;
+    if(marker==192) {
+      if(component>=0 || width!=11 || ux_u8(body+7)!=17) { return 0-4; }
+      component=ux_u8(body+6);
+      quant=ux_u8(body+8);
+    } else if(marker==219) {
+      let tables=jpeg_quant_tables(body,next,meta);
+      if(tables<0) { return tables; }
+    } else if(marker==196) {
+      let tables=jpeg_huff_tables(body,next,meta);
+      if(tables<0) { return tables; }
+    } else if(marker==221) {
+      if(width!=4) { return 0-2; }
+      let saved=ux_u32_put(restart,jpeg_u16be(body));
+    } else if(marker==218) {
+      if(width!=8 || component<0 || ux_u8(body)!=1 || ux_u8(body+1)!=component ||
+         ux_u8(body+3)!=0 || ux_u8(body+4)!=63 || ux_u8(body+5)!=0) { return 0-4; }
+      let tables=ux_u8(body+2);
+      if(tables/16>3 || tables%16>3) { return 0-4; }
+      let q=ux_u32(meta+quant*4);
+      let dc=ux_u32(meta+16+tables/16*4);
+      let ac=ux_u32(meta+32+tables%16*4);
+      if(q==0 || dc==0 || ac==0) { return 0-6; }
+      let a=ux_u32_put(meta,q);
+      let b=ux_u32_put(meta+4,dc);
+      let c=ux_u32_put(meta+8,ac);
+      return next;
+    } else if((marker<224 || marker>239) && marker!=254) { return 0-4; }
+    at=next;
+  }
+  return 0-2;
+}
+
+native function jpeg_baseline_block(reader:i64,quant:i64,dc:i64,ac:i64,previous:i64,coeff:i64) i64 {
+  let zigzag=[0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63];
+  let size=jpeg_huffman(reader,dc);
+  if(size<0 || size>11) { return 0-6; }
+  let change=jpeg_magnitude(reader,size);
+  let current=previous+change;
+  if(change==65536 || current< -32768 || current>32767) { return 0-6; }
+  let saved=ux_i32_put(coeff,current*ux_u8(quant));
+  let k=1;
+  while(k<64) { let clear=ux_i32_put(coeff+k*4,0); k=k+1; }
+  k=1;
+  while(k<64) {
+    let code=jpeg_huffman(reader,ac);
+    if(code<0) { return 0-6; }
+    if(code==0) { return current+65536; }
+    if(code==240) {
+      k=k+16;
+      if(k>64) { return 0-6; }
+    } else {
+      let significant=code%16;
+      k=k+code/16;
+      if(significant<1 || significant>10 || k>=64) { return 0-6; }
+      let value=jpeg_magnitude(reader,significant);
+      if(value==65536) { return 0-6; }
+      let a=ux_i32_put(coeff+zigzag[k]*4,value*ux_u8(quant+k));
+      k=k+1;
+    }
+  }
+  return current+65536;
+}
+
+native function jpeg_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
+  return bytes>0 && size>0 && a<b+size && b<a+bytes;
+}
+
+native function jpeg_marker(reader:i64,end:i64,expected:i64) i64 {
+  let next=ux_u32(reader+JpegBits.next);
+  if(next>end-2 || ux_u8(next)!=255) { return 0-6; }
+  while(next<end && ux_u8(next)==255) { next=next+1; }
+  if(next>=end || ux_u8(next)!=expected) { return 0-6; }
+  let remainder=ux_u32(reader+JpegBits.remaining);
+  let pad=u32_shl(1,remainder);
+  if(remainder>0 && ux_u32(reader+JpegBits.byte)%pad!=pad-1) { return 0-6; }
+  let byte=ux_u32_put(reader+JpegBits.next,next+1);
+  let empty=ux_u32_put(reader+JpegBits.remaining,0);
+  return next+1;
+}
+
+native function jpeg_finish_scan(reader:i64,end:i64) i64 {
+  if(jpeg_marker(reader,end,217)!=end) { return 0-6; }
+  return 0;
+}
+
+// Baseline 8-bit, one component with 1x1 sampling.
+// Decode into an exclusive workspace and publish RGBA only after EOI.
+native function JpegDecode_gray(src:i64,bytes:i64,out:i64,cap:i64,scratch:i64,space:i64) i64 {
+  if(src<0 || bytes<4 || bytes>4194304 || src>6291456-bytes || out<0 || cap<0 || out>6291456-cap ||
+     scratch<0 || scratch%8!=0 || space<1480 || scratch>6291456-space ||
+     jpeg_overlap(src,bytes,out,cap) || jpeg_overlap(src,bytes,scratch,space) || jpeg_overlap(out,cap,scratch,space)) { return 0-1; }
+  let header=JpegHeader_probe(src,bytes,scratch);
+  if(header<0) { return header; }
+  if(ux_u32(header+JpegHeader.frame)!=192 || ux_u32(header+JpegHeader.components)!=1) { return 0-4; }
+  let width=ux_u32(header+JpegHeader.width);
+  let height=ux_u32(header+JpegHeader.height);
+  if(height>cap/(width*4) || height>(space-1480)/width) { return 0-1; }
+  let meta=scratch+24;
+  let reader=scratch+72;
+  let start=jpeg_gray_scan(src,bytes,meta,reader+JpegBits.byte);
+  if(start<0) { return start; }
+  let interval=ux_u32(reader+JpegBits.byte);
+  let a=ux_u32_put(reader+JpegBits.next,start);
+  let b=ux_u32_put(reader+JpegBits.end,src+bytes);
+  let c=ux_u32_put(reader+JpegBits.remaining,0);
+  let coeff=scratch+88;
+  let basis=jpeg_idct_basis(scratch+344);
+  let work=scratch+856;
+  let block=scratch+1368;
+  let gray=scratch+1480;
+  let prediction=0;
+  let count=0;
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      if(interval>0 && count>0 && count%interval==0) {
+        let boundary=jpeg_marker(reader,src+bytes,208+(count/interval-1)%8);
+        if(boundary<0) { return boundary; }
+        prediction=0;
+      }
+      let decoded=jpeg_baseline_block(reader,ux_u32(meta),ux_u32(meta+4),ux_u32(meta+8),prediction,coeff);
+      if(decoded<0) { return decoded; }
+      prediction=decoded-65536;
+      let rendered=jpeg_idct_block(coeff,basis,work,block);
+      let j=0;
+      while(j<8 && y+j<height) {
+        let i=0;
+        while(i<8 && x+i<width) {
+          let saved=ux_u8_put(gray+(y+j)*width+x+i,ux_u8(rendered+j*8+i));
+          i=i+1;
+        }
+        j=j+1;
+      }
+      x=x+8;
+      count=count+1;
+    }
+    y=y+8;
+  }
+  let complete=jpeg_finish_scan(reader,src+bytes);
+  if(complete<0) { return complete; }
+  let i=0;
+  while(i<width*height) {
+    let value=ux_u8(gray+i);
+    let rgba=ux_u32_put(out+i*4,4278190080+65793*value);
+    i=i+1;
+  }
+  return width*height*4;
+}

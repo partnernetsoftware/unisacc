@@ -1,0 +1,86 @@
+native function object_load_kind(obj:i64,end:i64,key:i64) i64 {
+  let name=LoaderJson_find(obj,end,key,1701869940,0,0,4);
+  if(name<0 || json_scan_string(name,end)!=name+7) { return 0-1; }
+  let head=ux_u32(name+1);
+  let tail=ux_u8(name+5);
+  if(head==1852138323 && tail==101) { return 3; }
+  if(head==1970238023 && tail==112) { return 2; }
+  return 0-1;
+}
+
+native function object_load_fields(obj:i64,end:i64,key:i64,node:i64) i64 {
+  if(LoaderJson_find(obj,end,key,1920229741,30825,0,6)!=0-2) { return 0-3; }
+  let visible=LoaderJson_find(obj,end,key,1769171318,6646882,0,7);
+  if(visible>=0) {
+    let c=ux_u8(visible);
+    if(c!=102 && c!=116) { return 0-3; }
+    let saved=ux_u32_put(node+Object3D.visible,c==116);
+  }
+  let position=LoaderJson_find(obj,end,key,1769172848,1852795252,0,8);
+  if(position==0-2) { return node; }
+  if(position<0 || ux_u8(position)!=91) { return 0-3; }
+  let p=json_space(position+1,end);
+  let out=ux_u32(node+Object3D.position);
+  let i=0;
+  while(i<3) {
+    let value=json_read_number(p,end);
+    if(value-value!=0.0) { return 0-3; }
+    let saved=ux_f64_put(out+i*8,value);
+    p=json_space(json_value_end(p,end),end);
+    if(p<0 || p>=end) { return 0-3; }
+    if(i<2) {
+      if(ux_u8(p)!=44) { return 0-3; }
+      p=json_space(p+1,end);
+    }
+    i=i+1;
+  }
+  if(ux_u8(p)!=93) { return 0-3; }
+  return node;
+}
+
+native function object_load_children(arena:i64,root:i64,children:i64,end:i64,key:i64) i64 {
+  if(children==0-2) { return root; }
+  if(children<0 || ux_u8(children)!=91) { return 0-3; }
+  let at=json_space(children+1,end);
+  while(at>=0 && at<end) {
+    if(ux_u8(at)==93) { return root; }
+    if(object_load_kind(at,end,key)!=2) { return 0-3; }
+    let nested=LoaderJson_find(at,end,key,1818847331,1852142180,0,8);
+    if(nested>=0) {
+      let after=json_space(nested+1,end);
+      if(ux_u8(nested)!=91 || after<0 || after>=end || ux_u8(after)!=93) { return 0-3; }
+    }
+    let group=Group_create(arena);
+    if(group<0) { return 0-4; }
+    if(object_load_fields(at,end,key,Object3D_address(arena,group))<0 || Object3D_add(arena,root,group)<0) { return 0-3; }
+    at=json_space(json_value_end(at,end),end);
+    if(at<0 || at>=end) { return 0-3; }
+    if(ux_u8(at)==93) { return root; }
+    if(ux_u8(at)!=44) { return 0-3; }
+    at=json_space(at+1,end);
+  }
+  return 0-3;
+}
+
+// Use a private draft arena to prepare a Scene plus its direct Group children.
+native function ObjectLoader_scene(file:i64,arena:i64,capacity:i64,key:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
+     arena<0 || arena%8!=0 || arena>6291448 || capacity<1 || capacity>(6291448-arena)/424 || !loading_span(key,12)) { return 0-1; }
+  let space=8+capacity*424;
+  let src=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(src>6291456-bytes || !file_disjoint(file,FileLoader.size,arena,space) || !file_disjoint(file,FileLoader.size,key,12) ||
+     !file_disjoint(src,bytes,arena,space) || !file_disjoint(src,bytes,key,12) || !file_disjoint(arena,space,key,12)) { return 0-1; }
+  let end=src+bytes;
+  let parsed=json_value_end(src,end);
+  if(parsed<0 || json_space(parsed,end)!=end) { return 0-2; }
+  let obj=LoaderJson_find(src,end,key,1701470831,29795,0,6);
+  if(object_load_kind(obj,end,key)!=3) { return 0-3; }
+  let storage=Object3D_initArena(arena,capacity);
+  let root=Scene_create(storage);
+  let initialized=object_load_fields(obj,end,key,Object3D_address(arena,root));
+  let result=0-3;
+  if(initialized>=0) { result=object_load_children(arena,root,LoaderJson_find(obj,end,key,1818847331,1852142180,0,8),end,key); }
+  if(result<0) { let discarded=Object3D_initArena(arena,capacity); }
+  return result;
+}

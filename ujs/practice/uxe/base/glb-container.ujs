@@ -1,0 +1,51 @@
+struct GlbResource {
+  json: u32;
+  jsonBytes: u32;
+  bin: u32;
+  binBytes: u32;
+}
+
+native function glb_le32(at:i64) i64 {
+  return ux_u8(at)+ux_u8(at+1)*256+ux_u8(at+2)*65536+ux_u8(at+3)*16777216;
+}
+
+// Preserve the container on input and publish views only on full validation.
+native function GlbContainer_probe(src:i64,bytes:i64,out:i64) i64 {
+  if(src<0 || bytes<0 || src>6291456-bytes || !loading_span(out,GlbResource.size) ||
+     !file_disjoint(src,bytes,out,GlbResource.size)) { return 0-1; }
+  if(bytes<24 || glb_le32(src)!=1179937895 || glb_le32(src+4)!=2 || glb_le32(src+8)!=bytes) { return 0-2; }
+  let jsonBytes=glb_le32(src+12);
+  if(jsonBytes<4 || jsonBytes%4!=0 || jsonBytes>bytes-20 || glb_le32(src+16)!=1313821514) { return 0-3; }
+  let at=20+jsonBytes;
+  let bin=0;
+  let binBytes=0;
+  while(at<bytes) {
+    if(at>bytes-8) { return 0-3; }
+    let size=glb_le32(src+at);
+    let kind=glb_le32(src+at+4);
+    if(size%4!=0 || size>bytes-at-8 || kind==1313821514) { return 0-3; }
+    if(kind==5130562) {
+      if(bin!=0 || at!=20+jsonBytes) { return 0-3; }
+      bin=src+at+8;
+      binBytes=size;
+    }
+    at=at+8+size;
+  }
+  let a=ux_u32_put(out+GlbResource.json,src+20);
+  let b=ux_u32_put(out+GlbResource.jsonBytes,jsonBytes);
+  let c=ux_u32_put(out+GlbResource.bin,bin);
+  let d=ux_u32_put(out+GlbResource.binBytes,binBytes);
+  return out;
+}
+
+// Validate an accessor span in the declared binary view. For strided data the
+// component alignment still applies to the first element and every following one.
+native function GlbContainer_access(glb:i64,start:i64,count:i64,stride:i64,element:i64,align:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || start<0 || count<1 || (align!=1 && align!=2 && align!=4) ||
+     element<align || element>64 || element%align!=0 || stride<element || stride>252 ||
+     start%align!=0 || stride%align!=0) { return 0-1; }
+  let bin=ux_u32(glb+GlbResource.bin);
+  let bytes=ux_u32(glb+GlbResource.binBytes);
+  if(bin<1 || bytes>6291456 || bin>6291456-bytes || start>bytes-element || count-1>(bytes-start-element)/stride) { return 0-2; }
+  return bin+start;
+}

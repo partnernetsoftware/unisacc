@@ -1,0 +1,63 @@
+#pragma unisa use g_math
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static void be(unsigned char *p,unsigned x) {
+    p[0]=x>>24; p[1]=x>>16; p[2]=x>>8; p[3]=x;
+}
+
+static unsigned crc(const unsigned char *p,int n) {
+    unsigned c=0xffffffffu;
+    for(int i=0;i<n;i++) {
+        c^=p[i];
+        for(int bit=0;bit<8;bit++) c=(c>>1)^((c&1)?0xedb88320u:0);
+    }
+    return c^0xffffffffu;
+}
+
+static void fixture(unsigned char p[73],int corrupt_adler) {
+    const unsigned char header[]={137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0};
+    for(int i=0;i<29;i++) p[i]=header[i];
+    be(p+29,crc(p+12,17));
+    be(p+33,16);be(p+37,0x49444154u);
+    const unsigned char data[]={120,1,1,5,0,250,255,0,255,0,128,255};
+    for(int i=0;i<12;i++) p[41+i]=data[i];
+    unsigned a=1,b=0;
+    for(int i=7;i<12;i++) { a+=data[i]; b+=a; }
+    be(p+53,(b<<16)+a+(corrupt_adler?1:0));
+    be(p+57,crc(p+37,20));
+    be(p+61,0);be(p+65,0x49454e44u);be(p+69,crc(p+65,4));
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored",0};
+    unsigned char good[73],bad[73];fixture(good,0);fixture(bad,1);
+    char setup[1000];int len=tx_snprintf(setup,sizeof setup,"let good=[");
+    for(int i=0;i<73;i++) len+=tx_snprintf(setup+len,sizeof setup-len,"%s%d",i?",":"",good[i]);
+    len+=tx_snprintf(setup+len,sizeof setup-len,"];let bad=[");
+    for(int i=0;i<73;i++) len+=tx_snprintf(setup+len,sizeof setup-len,"%s%d",i?",":"",bad[i]);
+    tx_snprintf(setup+len,sizeof setup-len,"];let i=0;while(i<73){let a=ux_u8_put(i,good[i]);let b=ux_u8_put(128+i,bad[i]);i=i+1;}"
+        "let rows=[0,10,20,1,15,20,2,5,10,3,30,17,4,5,10];i=0;while(i<15){let a=ux_u8_put(600+i,rows[i]);i=i+1;}");
+    const char *cases[]={
+        "return PngDecode_stored(0,73,512,4,1024,128);",
+        "let n=PngDecode_stored(0,73,512,4,1024,128);return ux_u8(512);",
+        "let n=PngDecode_stored(0,73,512,4,1024,128);return ux_u8(514);",
+        "let n=PngDecode_stored(0,73,512,4,1024,128);return ux_u8(515);",
+        "return PngDecode_stored(0,72,512,4,1024,128);",
+        "let n=ux_u8_put(44,7);return PngDecode_stored(0,73,512,4,1024,128);",
+        "return PngDecode_stored(128,73,512,4,1024,128);",
+        "let guard=ux_u8_put(512,77);let n=PngDecode_stored(128,73,512,4,1024,128);return ux_u8(512);",
+        "return PngDecode_stored(0,73,512,3,1024,128);",
+        "let n=PngScanlines_restore(600,15,2,5,1);return ux_u8(605);",
+        "let n=PngScanlines_restore(600,15,2,5,1);return ux_u8(608);",
+        "let n=PngScanlines_restore(600,15,2,5,1);return ux_u8(611);",
+        "let n=PngScanlines_restore(600,15,2,5,1);return ux_u8(614);",
+        "let m=ux_u8_put(612,5);let n=PngScanlines_restore(600,15,2,5,1);return ux_u8(605);"
+    };
+    const double gold[]={4,255,128,255,-5,-3,-6,77,-1,35,45,59,69,20};
+    return g_math_run("G_IO PngStored","png-stored",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?2:-1,
+        "let n=PngDecode_stored(0,73,512,4,1024,128);return ux_u8(513);");
+}

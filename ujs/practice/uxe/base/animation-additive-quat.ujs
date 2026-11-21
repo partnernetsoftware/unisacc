@@ -1,0 +1,59 @@
+native function animation_quat_load(out:i64,source:i64) i64 {
+  return Quaternion_set(out,ux_f32(source),ux_f32(source+4),ux_f32(source+8),ux_f32(source+12));
+}
+
+native function animation_quat_finite(at:i64) i64 {
+  let i=0;
+  while(i<4) {
+    let value=ux_f32(at+i*4);
+    if(value-value!=0.0 || value>1.000001 || value<0.0-1.000001) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Output is inverse(normalize(reference)) multiplied by each f32 quaternion.
+// The caller reserves three disjoint f64 quaternion work records.
+native function AnimationUtils_quatDelta(view:i64,reference:i64,out:i64,capacity:i64,work:i64) i64 {
+  if(!animation_span(view,AnimationSamples.size) || !animation_span(out,capacity) ||
+     !animation_span(work,96) || work%8!=0 || !animation_span(reference,16)) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  if(count<1 || count>65536 || ux_u32(view+AnimationSamples.stride)!=4) { return 0-1; }
+  let size=count*16;
+  if(capacity<size) { return 0-2; }
+  let values=ux_u32(view+AnimationSamples.values);
+  let times=ux_u32(view+AnimationSamples.times);
+  if(!animation_span(values,size) || !animation_span(times,count*4) ||
+     animation_overlap(out,size,view,AnimationSamples.size) || animation_overlap(out,size,reference,16) ||
+     animation_overlap(out,size,values,size) || animation_overlap(out,size,times,count*4) ||
+     animation_overlap(work,96,out,size) || animation_overlap(work,96,view,AnimationSamples.size) ||
+     animation_overlap(work,96,reference,16) || animation_overlap(work,96,values,size) ||
+     animation_overlap(work,96,times,count*4)) { return 0-1; }
+  if(!animation_quat_finite(reference)) { return 0-3; }
+  let i=0;
+  while(i<count) {
+    if(!animation_quat_finite(values+i*16)) { return 0-3; }
+    i=i+1;
+  }
+  let loaded=animation_quat_load(work,reference);
+  let normal=Quaternion_normalize(loaded);
+  let inverse=Quaternion_conjugate(normal);
+  i=0;
+  while(i<4) {
+    let f32=ux_f32_put(work+64,ux_f64(inverse+i*8));
+    let rounded=ux_f64_put(inverse+i*8,ux_f32(work+64));
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let current=animation_quat_load(work+32,values+i*16);
+    let product=Quaternion_multiplyQuaternions(work+64,inverse,current);
+    let j=0;
+    while(j<4) {
+      let cell=ux_f32_put(out+i*16+j*4,ux_f64(product+j*8));
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return size;
+}

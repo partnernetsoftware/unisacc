@@ -9,10 +9,10 @@
  *
  * 身份:`git rev-parse HEAD:<self> HEAD:<lib0> HEAD:<lib1> HEAD:<lib2> HEAD:<同级模块目录>...`(配置表 tools/devsvc-repo.tsv 的 self 与三行 lib;
  *   同级模块目录是 self 以 `use X.*` 引到、且在 self 所在目录下已提交的 X,例如 tools/net)加模块映射 cxroot.tsv、配置表和产品字节摘要与大小,
- *   取 sha256 前 20 位为键;执行体在 $HOME/<cache_sub>/pinned/<键>/devsvc。HEAD 里这些路径不变就不重建(热调用实测约 0.18 s,冷构造约 22 s)。
+ *   取 sha256 前 20 位为键;默认执行体按 Git 公共目录在 $HOME/<cache_sub>/pinned/repos/ 下分域。HEAD 里这些路径不变就不重建。
  * 构造:`git archive HEAD` 把 cxroot.tsv、self、三个库源目录与同级模块目录解到 /tmp/dv-pin-<pid>,在其中用产品编译(上限 55 s),原子改名入缓存,
- *   清掉临时目录,并把路径记进 pinned/last-good。输入只来自 HEAD,不读工作副本。
- * 构造失败(HEAD 版本自身坏了):有 last-good 就用它并在 stderr 提示;没有就退回工作副本并提示。不在 git 仓里或 HEAD 没有 self 时同样退回工作副本。
+ *   清掉临时目录。只有执行体输入无未提交改动且 HEAD 未移动时才发布回退记录。记录含提交、构造键和产品与配置摘要,每个工作树独立。
+ * 构造失败时,同一工作树中有身份相符且来自当前提交祖先的回退记录才使用旧执行体。其余情形退回工作副本并在 stderr 提示。
  * 所起实例:执行体经环境变量 DEVSVC_SELF_BIN 得知自己的路径,自动拉起的服务也是同一固定版本。
  * 输出与退出码即 devsvc 自己的;本入口成功路径不往 stdout 写任何东西,stderr 只在下述工单时钟条件成立时加行。用法错 rc 2;配置表读不到 rc 3。
  * 工单时钟:子命令为 flow/f/x/doc/git 且 $DEVSVC_OWNER 名下有未完成的 devtask 工单时,命令结束后在 stderr 逐单打
@@ -506,9 +506,53 @@ static int prepare_bin(const char *root, const char *prod, const char *bin, cons
     return warm ? -1 : build(root, prod, bin, logp);
 }
 
+/* An explicit cache remains useful for test fixtures. The default cache is
+ * scoped by Git common directory and the fallback is scoped by worktree. */
+static int pin_base(char *out, int cap, const char *override, const char *scope, int working) {
+    char home[PW], hash[65];
+    if (override && *override) return cx_fmt(out, cap, "%s", override);
+    if (!scope[0] || sy_homedir(home, sizeof home) < 0 || sy_sha256_hex(scope, strlen(scope), hash)) return -1;
+    return cx_fmt(out, cap, "%s/%s/pinned/%s/%s", home, c_cache, working ? "workcopies" : "repos", hash);
+}
+
+static int fallback_path(const char *base, const char *root, char *out, int cap) {
+    char real[PW], hash[65];
+    if (!fg_common[0] || sy_realpath(root, real, sizeof real) < 0 ||
+            sy_sha256_hex(real, strlen(real), hash)) return -1;
+    return cx_fmt(out, cap, "%s/good-%s", base, hash);
+}
+
+static void fallback_publish(const char *root, const char *path, const char *key, const char *context) {
+    char status[8], current[48], row[160];
+    char *dirty[15 + MAXSIB] = {"git", "--no-optional-locks", "--literal-pathspecs",
+        "status", "--porcelain=v1", "--untracked-files=no", "--",
+        c_self, c_lib[0], c_lib[1], c_lib[2], CFG_TABLE, "cxroot.tsv"};
+    char *rev[] = {"git", "rev-parse", "--verify", "HEAD", 0};
+    for (int i = 0; i < nsib; i++) dirty[13 + i] = sib[i];
+    if (runcap(dirty, root, status, sizeof status) || status[0] ||
+            runcap(rev, root, current, sizeof current) || strlen(current) != 41 || strncmp(current, hd, 40)) return;
+    int n = snprintf(row, sizeof row, "dvlast1\t%s\t%s\t%s", hd, key, context);
+    if (n > 0 && n < (int)sizeof row) (void)sy_write_atomic(path, row, n, 0600);
+}
+
+static int fallback_pick(const char *root, const char *base, const char *path, const char *context,
+                         char *bin, int cap) {
+    char row[160], old[41], key[21], exec[PW], seal[PW + 16], quiet[1];
+    if (fg_small(path, row, sizeof row) != 134 || strncmp(row, "dvlast1\t", 8) ||
+            !fg_hex40(row + 8) || row[48] != '\t' || row[69] != '\t' || strcmp(row + 70, context)) return -1;
+    for (int i = 49; i < 69; i++) if (!((row[i] >= '0' && row[i] <= '9') || (row[i] >= 'a' && row[i] <= 'f'))) return -1;
+    if (cx_fmt(old, sizeof old, "%.40s", row + 8) ||
+        cx_fmt(key, sizeof key, "%.20s", row + 49)) return -1;
+    char *ancestry[] = {"git", "merge-base", "--is-ancestor", old, hd, 0};
+    if (runcap(ancestry, root, quiet, sizeof quiet) ||
+            cx_fmt(exec, sizeof exec, "%s/%s/devsvc", base, key) ||
+            cx_fmt(seal, sizeof seal, "%s.sha", exec) || sy_exists(seal) != 1 || !bin_ok(exec)) return -1;
+    return cx_fmt(bin, cap, "%s", exec);
+}
+
 int main(int argc, char **argv) {
     long launch_begin=sy_now_ms();
-    static char root[PW], prod[PW], selfp[PW], real[PW], trees[800], keysrc[2 * PW], base[PW], kd[PW], bin[PW], logp[PW + 16], lg[PW + 16];
+    static char root[PW], prod[PW], selfp[PW], real[PW], trees[800], keysrc[2 * PW], base[PW], kd[PW], bin[PW], logp[PW + 16], lg[PW + 80];
     char hex[65], h[4 + MAXSIB][200], *v[260]; const char *dvdir = getenv("DV_PIN_DIR"), *de = getenv("DEVSVC_DEV"); int a = 1, dev = 0, i, n = 0, rc; int64_t psz = 0;
     if (argc > 1 && !strcmp(argv[1], "--")) a = 2;
     if (argc > a && !strcmp(argv[a], "--dev")) { dev = 1; a++; }
@@ -609,41 +653,41 @@ int main(int argc, char **argv) {
         siblings(root, 1);
         if (sy_realpath(prod, real, sizeof real) >= 0 && !sy_read_file(real, &pb, &pn, 1LL << 30) && pb && !sy_sha256_hex(pb, (long)pn, ph) && !wc_key(root, ph, hex)) {
             hex[20] = 0;
-            if (dvdir && *dvdir) F(base, sizeof base, "%s", dvdir);
-            else { char home[PW]; if (sy_homedir(home, sizeof home) >= 0) F(base, sizeof base, "%s/%s/pinned", home, c_cache); }
-            F(kd, sizeof kd, "%s/wc-%s", base, hex); F(bin, sizeof bin, "%s/devsvc", kd); F(logp, sizeof logp, "%s/build.log", kd);
-            if (!ovf && base[0] && (bin_ok(bin) || (!sy_mkdir_all(kd, 0700) && compile_to(prod, selfp, root, bin, logp) == 0))) { dev = 0; fromhead = 0; }
+            if (!pin_base(base, sizeof base, dvdir, root, 1)) {
+                F(kd, sizeof kd, "%s/wc-%s", base, hex); F(bin, sizeof bin, "%s/devsvc", kd); F(logp, sizeof logp, "%s/build.log", kd);
+                if (!ovf && (bin_ok(bin) || (!sy_mkdir_all(kd, 0700) && compile_to(prod, selfp, root, bin, logp) == 0))) { dev = 0; fromhead = 0; }
+            }
         }
         if (pb) free(pb);
     }
     if (!dev && !wcfb) {
+        char context[65], ph[65], cfg[65], pair[132];
+        int publish = 0, recover = 0;
         {   /* 产品身份按内容哈希(不含仓路径,跨克隆/工作树共享缓存) */
-            char ph[65];
-            if (prod_sha(real, ph)) return 3;
+            if (prod_sha(real, ph) || sy_sha256_hex(headtab, headtab_n, cfg) ||
+                    cx_fmt(pair, sizeof pair, "%s\t%s", ph, cfg) ||
+                    sy_sha256_hex(pair, strlen(pair), context)) return 3;
             F(keysrc, sizeof keysrc, "%s|%s|%ld|%ld", trees, ph, (long)psz, headtab_n); }
 
         if (sy_sha256_hex(keysrc, strlen(keysrc), hex)) return 3;
         hex[20] = 0;
-        if (dvdir && *dvdir) F(base, sizeof base, "%s", dvdir);
-        else { char home[PW]; if (sy_homedir(home, sizeof home) < 0) return 3; F(base, sizeof base, "%s/%s/pinned", home, c_cache); }
-        F(kd, sizeof kd, "%s/%s", base, hex); F(bin, sizeof bin, "%s/devsvc", kd); F(logp, sizeof logp, "%s/build.log", kd); F(lg, sizeof lg, "%s/last-good", base);
+        if (pin_base(base, sizeof base, dvdir, fg_common[0] ? fg_common : root, 0)) return 3;
+        recover = fromhead && fr == 0 && !strcmp(hd, fg_commit) && !fallback_path(base, root, lg, sizeof lg);
+        F(kd, sizeof kd, "%s/%s", base, hex); F(bin, sizeof bin, "%s/devsvc", kd); F(logp, sizeof logp, "%s/build.log", kd);
         if (ovf) { fprintf(stderr, "dv: path too long\n"); return 2; }
         if (!bin_ok(bin)) {
             if (sy_mkdir_all(kd, 0700)) return 3;
             rc = prepare_bin(root, prod, bin, logp, preparing);
             if (preparing && rc) return 1;
-            if (rc == 0) sy_write_atomic(lg, bin, strlen(bin), 0600);
+            if (rc == 0) publish = 1;
             else {
-                unsigned char *b = 0; int64_t bn = 0;
-                if (sy_exists(lg) == 1 && !sy_read_file(lg, &b, &bn, PW - 1) && b && bn > 0 && bn < PW && !mm_copy(bin, sizeof bin, b, bn)) {
-                    bin[bn] = 0;
-                    if (sy_exists(bin) == 1) fprintf(stderr, "dv: HEAD build failed rc=%d (log %s), using last good %s\n", rc, logp, bin);
-                    else dev = 1;
-                } else dev = 1;
-                if (b) free(b);
+                if (recover && !fallback_pick(root, base, lg, context, bin, sizeof bin))
+                    fprintf(stderr, "dv: HEAD build failed rc=%d (log %s), using last good %s\n", rc, logp, bin);
+                else dev = 1;
                 if (dev) fprintf(stderr, "dv: HEAD build failed rc=%d (log %s) and no last good build, using the working copy\n", rc, logp);
             }
         }
+        if (recover && (publish || preparing)) fallback_publish(root, lg, hex, context);
     }
     if (preparing) {
         char receipt[128], path[PW + 16];

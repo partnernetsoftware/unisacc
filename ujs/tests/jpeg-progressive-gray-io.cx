@@ -1,0 +1,68 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int build(unsigned char *image,int restart) {
+    const unsigned char soi[]={255,216,255,219,0,67,0};
+    int size=0;
+    for(int i=0;i<7;i++) image[size++]=soi[i];
+    for(int i=0;i<64;i++) image[size++]=i==1 && !restart?64:8;
+    const unsigned char header[]={255,194,0,11,8,0,1,0,restart?9:1,1,1,17,0,255,196,0,39};
+    for(int i=0;i<17;i++) image[size++]=header[i];
+    image[size++]=0;image[size++]=1;
+    for(int i=0;i<15;i++) image[size++]=0;
+    image[size++]=restart?6:0;
+    image[size++]=16;image[size++]=1;image[size++]=1;
+    for(int i=0;i<14;i++) image[size++]=0;
+    image[size++]=0;image[size++]=restart?1:0;
+    if(!restart) {
+        // AC code 0 inserts coefficient 1. Code 10 ends the block.
+        image[size-2]=1;image[size-1]=0;
+        const unsigned char scans[]={255,218,0,8,1,1,0,0,0,0,127,
+            255,218,0,8,1,1,0,1,63,1,111,
+            255,218,0,8,1,1,0,1,63,16,191,255,217};
+        for(int i=0;i<(int)sizeof scans;i++) image[size++]=scans[i];
+    } else {
+        const unsigned char scans[]={255,221,0,4,0,1,
+            255,218,0,8,1,1,0,0,0,0,65,255,208,63,
+            255,218,0,8,1,1,0,1,63,0,127,255,208,127,255,217};
+        for(int i=0;i<(int)sizeof scans;i++) image[size++]=scans[i];
+    }
+    return size;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","jpeg-header","jpeg-entropy","jpeg-idct","jpeg-gray",
+        "jpeg-progressive","jpeg-progressive-gray",0};
+    unsigned char image[200];
+    char setup[2000];
+    int used=0;
+    for(int v=0;v<2;v++) {
+        int size=build(image,v);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"let n%d=%d;let bytes%d=[",v,size,v);
+        for(int i=0;i<size;i++) used+=tx_snprintf(setup+used,sizeof setup-used,"%s%d",i?",":"",image[i]);
+        used+=tx_snprintf(setup+used,sizeof setup-used,"];let i%d=0;while(i%d<n%d){let a=ux_u8_put(%d+i%d,bytes%d[i%d]);i%d=i%d+1;}",
+            v,v,v,v*256,v,v,v,v,v);
+    }
+    #define AC "let result=JpegDecode_progressiveGray(0,n0,512,4,1024,3072);"
+    #define RST "let result=JpegDecode_progressiveGray(256,n1,512,36,1024,3072);"
+    const char *cases[]={
+        AC "return 0.0+result;",
+        AC "return 0.0+ux_u8(512);",
+        AC "return 0.0+ux_u8(515);",
+        RST "return 0.0+result;",
+        RST "return 0.0+ux_u8(512);",
+        RST "return 0.0+ux_u8(544);",
+        "let bad=ux_u8_put(256+n1-4,209);" RST "return 0.0+result;",
+        "let bad=ux_u8_put(n0-4,0);" AC "return 0.0+result;",
+        "return 0.0+JpegDecode_progressiveGray(0,n0-2,512,4,1024,3072);",
+        "let guard=ux_u8_put(512,79);let bad=ux_u8_put(n0-4,0);" AC "return 0.0+ux_u8(512);",
+        "return 0.0+JpegDecode_progressiveGray(256,n1,512,32,1024,3072);"
+    };
+    const double gold[]={4,161,255,36,160,96,-6,-6,-6,79,-1};
+    return g_wasm_batch("G_IO JpegProgressiveGray","jpeg-progressive-gray",modules,setup,cases,gold,
+        sizeof gold/sizeof gold[0],mutate?1:-1,
+        "let bit=ux_u8_put(n0-3,159);" AC "return 0.0+ux_u8(512);");
+}

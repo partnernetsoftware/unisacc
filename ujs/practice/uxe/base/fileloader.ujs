@@ -1,0 +1,74 @@
+struct FileLoader {
+  manager: u32;
+  generation: u32;
+  state: u32;
+  bytes: u32;
+  length: u32;
+}
+
+native function file_disjoint(a:i64,bytes:i64,b:i64,other:i64) i64 {
+  return bytes==0 || other==0 || a+bytes<=b || b+other<=a;
+}
+
+native function FileLoader_init(file:i64,manager:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || !loading_span(manager,LoadingManager.size) ||
+     !file_disjoint(file,FileLoader.size,manager,LoadingManager.size)) { return 0-1; }
+  let i=0;
+  while(i<FileLoader.size) {
+    let zero=ux_u32_put(file+i,0);
+    i=i+4;
+  }
+  let saved=ux_u32_put(file+FileLoader.manager,manager);
+  return file;
+}
+
+native function FileLoader_begin(file:i64,events:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || !loading_span(events,2*LoadingEvent.size) ||
+     !file_disjoint(events,2*LoadingEvent.size,file,FileLoader.size) || ux_u32(file+FileLoader.state)!=0) { return 0-1; }
+  let generation=ux_u32(file+FileLoader.generation);
+  if(generation==4294967295) { return 0-2; }
+  let id=generation+1;
+  let manager=ux_u32(file+FileLoader.manager);
+  let count=LoadingManager_item(manager,1,id,events);
+  if(count<0) { return count; }
+  if(count==0) { let empty=ux_u32_put(events+LoadingEvent.kind,0); }
+  let stamp=ux_u32_put(file+FileLoader.generation,id);
+  let status=ux_u32_put(file+FileLoader.state,1);
+  return id;
+}
+
+// Byte views borrow host-delivered spans until release. Failure returns the
+// slot to idle and writes error, progress, then optional completion events.
+native function FileLoader_receive(file:i64,id:i64,status:i64,bytes:i64,length:i64,events:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || !loading_span(events,3*LoadingEvent.size) ||
+     !file_disjoint(events,3*LoadingEvent.size,file,FileLoader.size) ||
+     ux_u32(file+FileLoader.state)!=1 || ux_u32(file+FileLoader.generation)!=id) { return 0-1; }
+  let ok=status==200 || status==0;
+  let manager=ux_u32(file+FileLoader.manager);
+  if(!loading_span(manager,LoadingManager.size) || !file_disjoint(events,3*LoadingEvent.size,manager,LoadingManager.size) ||
+     ux_u32(manager+LoadingManager.loaded)>=ux_u32(manager+LoadingManager.total)) { return 0-1; }
+  if(ok && (length<0 || bytes<0 || bytes>6291456-length ||
+     !file_disjoint(bytes,length,file,FileLoader.size) || !file_disjoint(bytes,length,manager,LoadingManager.size) ||
+     !file_disjoint(bytes,length,events,3*LoadingEvent.size))) { return 0-1; }
+  let errors=0;
+  if(!ok) { errors=LoadingManager_item(manager,3,id,events); }
+  let activity=LoadingManager_item(manager,2,id,events+errors*LoadingEvent.size);
+  if(activity<0) { return activity; }
+  let state=0;
+  if(ok) {
+    let a=ux_u32_put(file+FileLoader.bytes,bytes);
+    let b=ux_u32_put(file+FileLoader.length,length);
+    state=2;
+  }
+  let saved=ux_u32_put(file+FileLoader.state,state);
+  return errors+activity;
+}
+
+native function FileLoader_release(file:i64,id:i64) i64 {
+  if(!loading_span(file,FileLoader.size) || ux_u32(file+FileLoader.state)!=2 ||
+     ux_u32(file+FileLoader.generation)!=id) { return 0-1; }
+  let a=ux_u32_put(file+FileLoader.bytes,0);
+  let b=ux_u32_put(file+FileLoader.length,0);
+  let c=ux_u32_put(file+FileLoader.state,0);
+  return file;
+}

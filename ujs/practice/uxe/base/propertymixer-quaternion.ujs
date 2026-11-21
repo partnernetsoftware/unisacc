@@ -1,0 +1,57 @@
+native function property_unit_quaternion(q:i64) i64 {
+  let x=ux_f64(q);
+  let y=ux_f64(q+8);
+  let z=ux_f64(q+16);
+  let w=ux_f64(q+24);
+  let norm=x*x+y*y+z*z+w*w;
+  return norm>=0.999999 && norm<=1.000001;
+}
+
+native function PropertyMixer_quaternionInit(mixer:i64,rows:i64,original:i64) i64 {
+  if(original%8!=0 || !animation_span(original,32) || !property_unit_quaternion(original)) { return 0-1; }
+  return PropertyMixer_init(mixer,rows,original,4);
+}
+
+native function PropertyMixer_quaternionAdd(mixer:i64,incoming:i64,weight:f64,blend:i64,work:i64) i64 {
+  if(property_mixer_lanes(mixer)!=4 || incoming%8!=0 || !animation_span(incoming,32) ||
+     weight-weight!=0.0 || weight<0.0 || (blend!=2500 && blend!=2501) || !property_unit_quaternion(incoming)) { return 0-1; }
+  let rows=ux_u32(mixer+PropertyMixer.rows);
+  if(animation_overlap(incoming,32,rows,128) || animation_overlap(incoming,32,mixer,PropertyMixer.size)) { return 0-1; }
+  if(weight==0.0) { return mixer; }
+  let slot=PropertyMixer.weight;
+  let target=rows+32;
+  if(blend==2501) { slot=PropertyMixer.addWeight; target=rows+64; }
+  let old=ux_f64(mixer+slot);
+  let total=old+weight;
+  if(total-total!=0.0) { return 0-2; }
+  if(blend==2501) {
+    if(work%8!=0 || !animation_span(work,32) || animation_overlap(work,32,rows,128) ||
+       animation_overlap(work,32,mixer,PropertyMixer.size) || animation_overlap(work,32,incoming,32)) { return 0-1; }
+    if(old==0.0) { let identity=Quaternion_identity(target); }
+    let product=Quaternion_multiplyQuaternions(work,target,incoming);
+    let blended=Quaternion_slerpQuaternions(target,target,product,weight);
+  } else if(old==0.0) {
+    let copied=Quaternion_copy(target,incoming);
+  } else {
+    let blended=Quaternion_slerpQuaternions(target,target,incoming,weight/total);
+  }
+  let saved=ux_f64_put(mixer+slot,total);
+  return mixer;
+}
+
+native function PropertyMixer_quaternionApply(mixer:i64) i64 {
+  if(property_mixer_lanes(mixer)!=4) { return 0-1; }
+  let rows=ux_u32(mixer+PropertyMixer.rows);
+  let out=rows+96;
+  let weight=ux_f64(mixer+PropertyMixer.weight);
+  if(weight==0.0) { let original=Quaternion_copy(out,rows); }
+  else if(weight<1.0) {
+    let blended=Quaternion_slerpQuaternions(out,rows+32,rows,1.0-weight);
+  } else { let copied=Quaternion_copy(out,rows+32); }
+  if(ux_f64(mixer+PropertyMixer.addWeight)>0.0) {
+    let add=Quaternion_multiplyQuaternions(out,out,rows+64);
+  }
+  let a=ux_f64_put(mixer+PropertyMixer.weight,0.0);
+  let b=ux_f64_put(mixer+PropertyMixer.addWeight,0.0);
+  return out;
+}

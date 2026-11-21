@@ -1,0 +1,57 @@
+// Values are packed as [in tangent, value, out tangent] for each time.
+native function GltfCubic_evaluate(view:i64,time:f64,out:i64,quaternion:i64) i64 {
+  if(!animation_span(view,AnimationSamples.size) || time!=time || quaternion<0 || quaternion>1) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  let stride=ux_u32(view+AnimationSamples.stride);
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let lanes=stride/3;
+  if(count<1 || count>65536 || stride%3!=0 || lanes<1 || lanes>21 ||
+     (quaternion==1 && lanes!=4) || !animation_span(times,count*4) ||
+     !animation_span(values,count*stride*4) || !animation_span(out,lanes*4) ||
+     animation_overlap(out,lanes*4,view,AnimationSamples.size) ||
+     animation_overlap(out,lanes*4,times,count*4) ||
+     animation_overlap(out,lanes*4,values,count*stride*4)) { return 0-1; }
+  let upper=animation_sample_upper(times,count,time);
+  let lower=upper-1;
+  if(upper==0) { lower=0; }
+  let first=values+lower*stride*4+lanes*4;
+  if(upper==0 || upper==count) { return uxe_copy_record(out,first,lanes*4); }
+  let t0=ux_f32(times+lower*4);
+  let t1=ux_f32(times+upper*4);
+  let dt=t1-t0;
+  if(dt<=0.0) { return 0-2; }
+  let p=(time-t0)/dt;
+  let pp=p*p;
+  let ppp=pp*p;
+  let s0=2.0*ppp-3.0*pp+1.0;
+  let s1=ppp-2.0*pp+p;
+  let s2=0.0-2.0*ppp+3.0*pp;
+  let s3=ppp-pp;
+  let second=values+upper*stride*4+lanes*4;
+  let i=0;
+  while(i<lanes) {
+    let p0=ux_f32(first+i*4);
+    let p1=ux_f32(second+i*4);
+    let m0=ux_f32(first+(lanes+i)*4)*dt;
+    let m1=ux_f32(second+(i-lanes)*4)*dt;
+    let value=ux_f32_put(out+i*4,s0*p0+s1*m0+s2*p1+s3*m1);
+    i=i+1;
+  }
+  if(quaternion==1) {
+    let x=ux_f32(out);
+    let y=ux_f32(out+4);
+    let z=ux_f32(out+8);
+    let w=ux_f32(out+12);
+    let norm=f64_sqrt(x*x+y*y+z*z+w*w);
+    if(norm==0.0) {
+      let reset=ux_f32_put(out+12,1.0);
+    } else {
+      let a=ux_f32_put(out,x/norm);
+      let b=ux_f32_put(out+4,y/norm);
+      let c=ux_f32_put(out+8,z/norm);
+      let d=ux_f32_put(out+12,w/norm);
+    }
+  }
+  return out;
+}

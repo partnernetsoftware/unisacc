@@ -1,0 +1,153 @@
+struct AnimationMixer {
+  binding: u32;
+  property: u32;
+  slots: u32;
+  count: u32;
+  scratch: u32;
+  time: f64;
+}
+
+struct AnimationMixerSlot {
+  action: u32;
+  track: u32;
+  blend: u32;
+  weight: f64;
+}
+
+// Scratch is an exclusive span of 768 bytes plus one snapshot per action and
+// enough space to preserve the property's accumulator rows across a failed frame.
+native function AnimationMixer_init(mixer:i64,binding:i64,property:i64,slots:i64,count:i64,scratch:i64) i64 {
+  let lanes=property_mixer_lanes(property);
+  let scratchBytes=768+count*AnimationAction.size+PropertyMixer.size+lanes*32;
+  if(!animation_span(mixer,AnimationMixer.size) || mixer%8!=0 || count<0 || count>256 ||
+     !animation_span(binding,PropertyBinding.size) || !animation_span(slots,count*AnimationMixerSlot.size) || slots%8!=0 ||
+     !animation_span(scratch,scratchBytes) || scratch%8!=0 || lanes<1 || lanes>4 ||
+     ux_u32(binding+PropertyBinding.lanes)!=lanes ||
+     animation_overlap(mixer,AnimationMixer.size,binding,PropertyBinding.size) ||
+     animation_overlap(mixer,AnimationMixer.size,property,PropertyMixer.size) ||
+     animation_overlap(mixer,AnimationMixer.size,scratch,scratchBytes) ||
+     (count>0 && animation_overlap(mixer,AnimationMixer.size,slots,count*AnimationMixerSlot.size))) { return 0-1; }
+  let a=ux_u32_put(mixer+AnimationMixer.binding,binding);
+  let b=ux_u32_put(mixer+AnimationMixer.property,property);
+  let c=ux_u32_put(mixer+AnimationMixer.slots,slots);
+  let d=ux_u32_put(mixer+AnimationMixer.count,count);
+  let e=ux_u32_put(mixer+AnimationMixer.scratch,scratch);
+  let f=ux_f64_put(mixer+AnimationMixer.time,0.0);
+  return mixer;
+}
+
+native function mixer_step_frame(mixer:i64,dt:f64) i64 {
+  if(!animation_span(mixer,AnimationMixer.size) || mixer%8!=0 || dt-dt!=0.0) { return 0-1; }
+  let property=ux_u32(mixer+AnimationMixer.property);
+  let binding=ux_u32(mixer+AnimationMixer.binding);
+  let slots=ux_u32(mixer+AnimationMixer.slots);
+  let count=ux_u32(mixer+AnimationMixer.count);
+  let scratch=ux_u32(mixer+AnimationMixer.scratch);
+  let lanes=property_mixer_lanes(property);
+  let time=ux_f64(mixer+AnimationMixer.time)+dt;
+  if(lanes<1 || count>256 || time-time!=0.0 || !animation_span(slots,count*AnimationMixerSlot.size) || slots%8!=0 ||
+     !animation_span(scratch,768) || scratch%8!=0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let slot=slots+i*AnimationMixerSlot.size;
+    let action=ux_u32(slot+AnimationMixerSlot.action);
+    if(AnimationAction_step(action,dt)<0) { return 0-1; }
+    let weight=ux_f64(slot+AnimationMixerSlot.weight);
+    if(ux_u32(action+AnimationAction.enabled)!=0 && weight>0.0) {
+      let track=ux_u32(slot+AnimationMixerSlot.track);
+      let sample=KeyframeTrack_evalNumeric(track,ux_f64(action+AnimationAction.sampleTime),scratch,lanes);
+      if(sample<0) { return 0-1; }
+      let j=0;
+      while(j<lanes) {
+        let cell=ux_f64_put(scratch+256+j*8,ux_f32(scratch+j*4));
+        j=j+1;
+      }
+      if(PropertyMixer_accumulate(property,scratch+256,weight,ux_u32(slot+AnimationMixerSlot.blend))<0) { return 0-1; }
+    }
+    i=i+1;
+  }
+  let result=PropertyMixer_apply(property);
+  if(result<0 || PropertyBinding_transfer(binding,result,1)!=lanes) { return 0-1; }
+  let saved=ux_f64_put(mixer+AnimationMixer.time,time);
+  return mixer;
+}
+
+native function AnimationMixer_update(mixer:i64,dt:f64) i64 {
+  if(!animation_span(mixer,AnimationMixer.size) || mixer%8!=0 || dt-dt!=0.0) { return 0-1; }
+  let property=ux_u32(mixer+AnimationMixer.property);
+  let binding=ux_u32(mixer+AnimationMixer.binding);
+  let slots=ux_u32(mixer+AnimationMixer.slots);
+  let count=ux_u32(mixer+AnimationMixer.count);
+  let scratch=ux_u32(mixer+AnimationMixer.scratch);
+  let lanes=property_mixer_lanes(property);
+  let rows=ux_u32(property+PropertyMixer.rows);
+  let bytes=768+count*AnimationAction.size+PropertyMixer.size+lanes*32;
+  if(count>256 || lanes<1 || lanes>4 || !animation_span(binding,PropertyBinding.size) ||
+     !animation_span(slots,count*AnimationMixerSlot.size) || slots%8!=0 || !animation_span(scratch,bytes) || scratch%8!=0 ||
+     animation_overlap(scratch,bytes,slots,count*AnimationMixerSlot.size) ||
+     animation_overlap(scratch,bytes,binding,PropertyBinding.size) ||
+     animation_overlap(scratch,bytes,mixer,AnimationMixer.size) ||
+     animation_overlap(scratch,bytes,property,PropertyMixer.size) || animation_overlap(scratch,bytes,rows,lanes*32)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let state=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+    if(state%8!=0 || !animation_span(state,AnimationAction.size) ||
+       animation_overlap(scratch,bytes,state,AnimationAction.size)) { return 0-1; }
+    i=i+1;
+  }
+  let backup=scratch+768;
+  let mixBackup=backup+count*AnimationAction.size;
+  let rowsBackup=mixBackup+PropertyMixer.size;
+  let copy=uxe_copy_record(mixBackup,property,PropertyMixer.size);
+  let content=uxe_copy_record(rowsBackup,rows,lanes*32);
+  i=0;
+  while(i<count) {
+    let state=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+    let snapshot=uxe_copy_record(backup+i*AnimationAction.size,state,AnimationAction.size);
+    i=i+1;
+  }
+  let result=mixer_step_frame(mixer,dt);
+  if(result<0) {
+    let restore=uxe_copy_record(property,mixBackup,PropertyMixer.size);
+    let weights=uxe_copy_record(rows,rowsBackup,lanes*32);
+    i=0;
+    while(i<count) {
+      let state=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+      let restored=uxe_copy_record(state,backup+i*AnimationAction.size,AnimationAction.size);
+      i=i+1;
+    }
+  }
+  return result;
+}
+
+native function AnimationMixer_stopAllAction(mixer:i64) i64 {
+  if(!animation_span(mixer,AnimationMixer.size) || mixer%8!=0) { return 0-1; }
+  let property=ux_u32(mixer+AnimationMixer.property);
+  let binding=ux_u32(mixer+AnimationMixer.binding);
+  let slots=ux_u32(mixer+AnimationMixer.slots);
+  let count=ux_u32(mixer+AnimationMixer.count);
+  let original=PropertyMixer_original(property);
+  if(original<0 || count>256 || !animation_span(slots,count*AnimationMixerSlot.size) || slots%8!=0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let state=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+    if(state%8!=0 || !animation_span(state,AnimationAction.size)) { return 0-1; }
+    i=i+1;
+  }
+  if(PropertyBinding_transfer(binding,original,1)<0) { return 0-1; }
+  let normal=ux_f64_put(property+PropertyMixer.weight,0.0);
+  let additive=ux_f64_put(property+PropertyMixer.addWeight,0.0);
+  i=0;
+  while(i<count) {
+    let state=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+    let time=ux_f64_put(state+AnimationAction.time,0.0);
+    let sample=ux_f64_put(state+AnimationAction.sampleTime,0.0);
+    let loops=ux_i32_put(state+AnimationAction.loopCount,-1);
+    let enabled=ux_u32_put(state+AnimationAction.enabled,0);
+    let paused=ux_u32_put(state+AnimationAction.paused,0);
+    let event=ux_u32_put(state+AnimationAction.event,0);
+    let value=ux_i32_put(state+AnimationAction.eventValue,0);
+    i=i+1;
+  }
+  return mixer;
+}

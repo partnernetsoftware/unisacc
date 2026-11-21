@@ -138,6 +138,10 @@ export uxe_frame(now:i64) i64 version 1;
 
 ## 5 开发计划(给 cdx2 的逐里程碑任务)
 
+GPU 主门通过 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tests/gpu-packet-struct.cx` 运行。旧合并输入在编译阶段 10203 毫秒退出 124。最小 GPU 包基座探针编译为 678 毫秒，Chrome 新配置打开空页为 504 毫秒。拆分后冷编译的管线与图元、材质与纹理、逐片元光照三个输入分别为 4025、6650、3722 毫秒，Chrome 含像素读回为 5682 毫秒。单片编译仍限 10 秒，Chrome 仍限 20 秒。三个测试模块各自持有 Wasm 线性内存，沿原顺序提交至同一 WebGL 上下文，汇总仍检查 43 个场景的并集和原有 1682 个返回值。用 `-- --scene-omit-mutate` 验证缺少场景 111 时汇总失败。产品基座的单模块合同沿用本节下文。
+
+重复运行可让 devsvc 的子命令通过 `env UXE_GPU_WASM_CACHE=/tmp/自己的已创建目录` 传入私有缓存目录。缓存键包含编译器和入口、声明、着色器生成物及所有源文件的有序内容哈希。命中仍校验载荷 SHA-256，并重新运行 Chrome 与全部断言。显式 `-- --check` 重编三个模块，对比各自缓存包哈希后执行同一门。截断记录会在进入 Chrome 前具名失败。GPU 探针的原生调用共用线性内存，当前的版本化模块 ABI 不支持跨实例传递这些地址，因此缓存三份编译产物，各模块内的场景复用同一实例。
+
 修订(cdx2): 从仓根运行 `sh ./unisacc.com ujs/product/build-ape.cx` 构造未跟踪的 `ujs/ujs.com`。C9 本机五切片构造实测约 39 秒。`ujs/ujs2wasm.com` 用它编译 `.ujs`。CLI/host1、G-math、Wasm 链接、C8 基准及需要重编产品源的验证依赖这个构造。清单生成与 `--check` 只读已跟踪的对标输入，检查冻结发布包的哈希也可独立执行。
 
 修订(cdx2): C9 使用 `native function name(x:i64, y:f64) f64 { ... }` 生成独立 Wasm 函数和 `call`。stage0 原 `MAXL=256` 及 `invocation_slot` 把传统内联调用的临时量计入调用方。host1 的 `h1_exec` 逐帧检查局部声明，`h1_call` 为每帧保留 256 槽。C9 保持每帧 256 槽和原 257 槽拒绝；原有 `function` 仍内联。原生函数参数和返回值使用 i64/f64，最多 8 个参数和 8 层原生调用，只允许调用已声明的原生函数。递归、前向引用和深度超过上限在编译时具名拒绝，host1 操作数栈溢出也具名拒绝。`cli-host.cx -- --native-calls` 检查两份 256 槽帧、独立 Wasm 函数数目及拒绝，`--mutate-native-calls` 验证金值保持。
@@ -252,6 +256,12 @@ G-anim 独立门覆盖七类 Track、离散与线性、三次插值端点、四�
 接口草案为 `LoadingManager_begin/end/error`、`FileLoader_request/receive`、`ImageCodec_probe/decode`、`ObjectLoader_parse` 与 `GLTFLoader_parse`。宿主只交付字节、时钟与请求结果。基座读头、校验偏移、解码与组装；产物通过事务暂存表发布。加载记录包含资源 URI、请求代数、完成状态与引用计数。图像记录包含格式、宽高、行步幅、像素存储范围及色彩元数据。GLB 的 chunk、bufferView 和 accessor 分别校验总长、偏移、分量类型、对齐与元素数量。
 
 G-io 使用小型 PNG、JPEG、嵌入 PNG 的 GLB、带蒙皮动画的 GLB 和 r160 场景 JSON。PNG 查尺寸、滤波还原与 RGBA 精确值；JPEG 单列有损误差口径并按参考像素确认。GLB 对照规范化网格、材质、UV、骨架和动画轨道；失败门包括截断、非法 offset、整数溢出、稀疏索引越界、错误扩展以及失败后无半注册资源。来源和许可证随夹具登记。
+
+PNG 解码切片支持非隔行 RGBA8 与无透明色键的 RGB8，以及存储、固定 Huffman 和动态 Huffman 三种 Deflate 块。Wasm 验证 IHDR、块 CRC、zlib Adler-32，恢复五类扫描行滤波后才写 RGBA 输出。RGB8 解码补齐不透明 alpha。`png-header-io.cx`、`png-stored-io.cx`、`png-fixed-io.cx`、`png-dynamic-io.cx` 与 `png-rgb-io.cx` 使用程序合成的小图和浏览器像素对照。动态树需要额外 3008 字节工作区。调色板、透明色键、其他色型和隔行仍待覆盖。
+
+JPEG 首个像素解码切片支持单分量 8 位基线灰度，包括 DC 和 AC 熵解码、反量化、二维逆变换及边缘裁切。`jpeg-gray-io.cx` 与 r160 ImageLoader 对照同一张合成 JPEG，并验证截断、填充位错误和失败后输出未发布。彩色、渐进与重启间隔仍待覆盖。
+
+GLB 当前支持 2.0 清单与内嵌 BIN、密集访问器、三角形位置与索引、标准材质的颜色与标量、内嵌 RGBA8 PNG、蒙皮关节与逆绑定矩阵，以及平移动画通道。各切片独立检查字节或几何范围，失败时保留旧输出记录。切片门对照 r160 核心类，整景装配和 r160 GLTFLoader 插件端到端门仍待完成。外部 URI、稀疏访问器、网格其他属性、JPEG 纹理接线、骨骼实例化、其他动画通道与统一事务回收仍待覆盖。
 
 预计提交顺序为请求管理，字节视图与加载器基类，PNG 容器与解码，JPEG 头与基线解码，图像及纹理装载，场景 JSON 两阶段链接，GLB 容器与访问器，材质与图像关联，蒙皮动画连接及失败回收。每种编码范围独立记录；渐进 JPEG、压缩扩展等只有实测通过才升格。
 

@@ -1,0 +1,64 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use text.text
+
+static int png_encode_chrome(const char *source,const char *wasm,const char *library,
+        const char *setup,const char *statement,double *value) {
+    char program[100001],html[330],url[350],profile[350],*out=0;
+    size_t length=0;
+    int size=tx_snprintf(program,sizeof program,"%s\n%s\n%s\n",library,setup,statement);
+    if(size<0 || size>=(int)sizeof program || sy_write_file(source,program,size,0600)) return 1;
+    tx_snprintf(html,sizeof html,"%s.html",source);
+    tx_snprintf(url,sizeof url,"file://%s",html);
+    tx_snprintf(profile,sizeof profile,"--user-data-dir=%s.profile",source);
+    if(sy_copy("ujs/practice/uxe/test/png-encode-wasm.html",html,0600)) return 1;
+    char *compile[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)wasm,0};
+    int rc=cx_runv_timeout(compile,6,&out,&length);
+    mm_free(out); out=0; length=0;
+    if(rc) return 1;
+    char *args[]={"google-chrome","--headless=new","--allow-file-access-from-files",
+        "--disable-background-networking","--no-first-run",profile,"--dump-dom",url,0};
+    rc=cx_runv_timeout(args,6,&out,&length);
+    const char marker[]="<pre id=\"value\">[";
+    const long at=!rc && out?tx_find(out,length,marker,sizeof marker-1):-1;
+    int failed=1;
+    if(at>=0) {
+        char *start=out+at+sizeof marker-1,*end=0;
+        *value=tx_strtod(start,&end);
+        failed=start==end || *end!=']';
+    }
+    mm_free(out);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"record-copy","png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored","png-encode",0};
+    const char *setup="let a=ux_u8_put(64,11);let b=ux_u8_put(65,22);let c=ux_u8_put(66,33);"
+        "let d=ux_u8_put(67,255);let e=ux_u8_put(68,44);let f=ux_u8_put(69,55);"
+        "let g=ux_u8_put(70,66);let h=ux_u8_put(71,255);";
+    const char *cases[]={
+        "return PngEncode_rgba8(64,2,1,128,96);",
+        "let n=PngEncode_rgba8(64,2,1,128,96);let h=PngHeader_probe(128,n,256);return ux_u32(h+PngHeader.width);",
+        "let n=PngEncode_rgba8(64,2,1,128,96);let d=PngDecode_rgba8(128,n,320,8,512,4096);"
+        "if(d!=8){return d;}return ux_u8(324);",
+        "let n=PngEncode_rgba8(64,2,1,128,96);let d=PngDecode_rgba8(128,n,320,8,512,4096);"
+        "if(d!=8){return d;}return ux_u8(327);",
+        "let keep=ux_u8_put(128,99);let n=PngEncode_rgba8(64,2,1,128,76);return ux_u8(128);",
+        "return PngEncode_rgba8(64,2,1,64,96);",
+        "let n=PngEncode_rgba8(65536,256,64,262144,100000);"
+        "return PngDecode_rgba8(262144,n,393216,65536,524288,262144);",
+        "return ImageUtils_pngDataURL(64,2,1,128,128,320,96);",
+        "let n=ImageUtils_pngDataURL(64,2,1,128,128,320,96);return ux_u8(150);",
+        "let n=ImageUtils_pngDataURL(64,2,1,128,128,320,96);return ux_u8(128+n-1);",
+        "let keep=ux_u8_put(128,99);let n=ImageUtils_pngDataURL(64,2,1,128,125,320,96);return ux_u8(128);"
+    };
+    const double gold[]={77,2,44,255,99,-1,65536,126,105,61,99};
+    return g_math_run_with_sample("G_IO PngEncode","png-encode",modules,setup,cases,gold,sizeof gold/sizeof gold[0],mutate?2:-1,
+        "let n=PngEncode_rgba8(64,2,1,128,96);let bad=ux_u8_put(180,23);"
+        "return PngDecode_rgba8(128,n,320,8,512,4096);",6,png_encode_chrome);
+}

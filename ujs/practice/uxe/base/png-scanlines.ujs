@@ -1,0 +1,53 @@
+native function png_paeth(left:i64,above:i64,upperLeft:i64) i64 {
+  let estimate=left+above-upperLeft;
+  let a=estimate-left;
+  let b=estimate-above;
+  let c=estimate-upperLeft;
+  if(a<0) { a=0-a; }
+  if(b<0) { b=0-b; }
+  if(c<0) { c=0-c; }
+  if(a<=b && a<=c) { return left; }
+  if(b<=c) { return above; }
+  return upperLeft;
+}
+
+// In-place restoration of PNG scanline filters. Each row retains its filter
+// tag byte. Only modify data after checking all tags and the complete span.
+native function PngScanlines_restore(scan:i64,bytes:i64,rowBytes:i64,rows:i64,bpp:i64) i64 {
+  if(scan<0 || bytes<0 || scan>6291456-bytes || bpp<1 || bpp>8 ||
+     rows<1 || rowBytes<bpp || rowBytes>=6291456 || rows>bytes/(rowBytes+1) ||
+     bytes!=rows*(rowBytes+1)) { return 0-1; }
+  let y=0;
+  while(y<rows) {
+    if(ux_u8(scan+y*(rowBytes+1))>4) { return 0-2; }
+    y=y+1;
+  }
+  y=0;
+  while(y<rows) {
+    let row=scan+y*(rowBytes+1);
+    let filter=ux_u8(row);
+    if(filter!=0) {
+      let x=0;
+      while(x<rowBytes) {
+        let at=row+1+x;
+        let left=0;
+        let above=0;
+        let upper=0;
+        if(x>=bpp) { left=ux_u8(at-bpp); }
+        if(y>0) {
+          above=ux_u8(at-rowBytes-1);
+          if(x>=bpp) { upper=ux_u8(at-rowBytes-1-bpp); }
+        }
+        let prediction=0;
+        if(filter==1) { prediction=left; }
+        if(filter==2) { prediction=above; }
+        if(filter==3) { prediction=(left+above)/2; }
+        if(filter==4) { prediction=png_paeth(left,above,upper); }
+        let saved=ux_u8_put(at,(ux_u8(at)+prediction)%256);
+        x=x+1;
+      }
+    }
+    y=y+1;
+  }
+  return bytes;
+}

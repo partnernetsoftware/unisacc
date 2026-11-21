@@ -1,0 +1,37 @@
+// Each value is a pair of u32 words, byte address and UTF-8 byte length.
+// Borrowed strings must outlive the track and any result views.
+native function StringKeyframeTrack_init(track:i64,name:i64,bytes:i64,view:i64) i64 {
+  if(!animation_span(view,AnimationSamples.size) || ux_u32(view+AnimationSamples.stride)%2!=0) { return 0-1; }
+  let at=KeyframeTrack_init(track,name,bytes,view);
+  if(at<0) { return at; }
+  return KeyframeTrack_setInterpolation(at,2300);
+}
+
+native function StringTrack_setInterpolation(track:i64,mode:i64) i64 {
+  if(!keyframe_track_at(track)) { return 0-1; }
+  if(mode==2300) { return KeyframeTrack_setInterpolation(track,mode); }
+  return track;
+}
+
+native function StringKeyframeTrack_evaluate(track:i64,t:f64,out:i64) i64 {
+  let words=KeyframeTrack_getValueSize(track);
+  if(words<2 || words>64 || words%2!=0 || t!=t || !animation_span(out,words*4) ||
+     animation_overlap(out,words*4,track,KeyframeTrack.size) ||
+     animation_overlap(out,words*4,ux_u32(track+KeyframeTrack.name),ux_u32(track+KeyframeTrack.nameBytes))) { return 0-1; }
+  let view=ux_u32(track+KeyframeTrack.samples);
+  if(animation_sample_output(view,out)!=words) { return 0-1; }
+  let times=ux_u32(view+AnimationSamples.times);
+  let count=ux_u32(view+AnimationSamples.count);
+  let position=animation_sample_upper(times,count,t);
+  if(position>0) { position=position-1; }
+  let row=ux_u32(view+AnimationSamples.values)+position*words*4;
+  let i=0;
+  while(i<words) {
+    let ptr=ux_u32(row+i*4);
+    let bytes=ux_u32(row+i*4+4);
+    if(bytes>6291456 || ptr>6291456-bytes ||
+       (bytes>0 && animation_overlap(out,words*4,ptr,bytes))) { return 0-2; }
+    i=i+2;
+  }
+  return DiscreteInterpolant_evaluate(view,t,out);
+}

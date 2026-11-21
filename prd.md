@@ -65,6 +65,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 
 推送本次提交用 `devsvc git commit --push`，或用 `devsvc git push FULL_SHA...` 显式给出本窗口的提交。快进直接推送，遇远端先行时只重放获授权的单父提交并在私有索引重算派生物。检查入口 `tools/check-push-replay.cx`。
 
+固定执行体按 Git 公共目录隔离缓存。回退按工作树验证提交祖先、产品、配置与执行体摘要，执行体输入有未提交改动时不更新记录。私有试验用 `DV_PIN_DIR` 指定缓存目录。回归入口 `tools/check-devsvc-pin-scope.cx`。
 
 **RI 的固定含义**：本文 RI = **ResourceInput（具名资源输入）**，含名称、字节和长度、存在性/空值及跨流身份绑定，不是 "runtime integrity"。
 
