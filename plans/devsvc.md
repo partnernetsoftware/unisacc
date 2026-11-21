@@ -792,3 +792,10 @@ U0 本节(先行)。U1 工单字段与状态机;U2 租约 pull、ack、done、ha
 ### (9) 数据缺口与未核项
 
 (1) 信封量无计数入口,派工走信封比例 100% 为推断;(2) 窗口等待分钟全部 UNMEASURED(U3 补);(3) 评审回合无正式记录;(4) 列车手敲命令数"约 12 条以上"为推断;(5) cadence 表 0.0.81 到 0.0.85 多列 UNMEASURED,并行度 1.72 未复算;(6) devtask work/ 布局与 freeze_in_lane_a 已在本节 (3) 核对;(7) 各窗口真实能力、额度与宿主钩子(Stop、压缩信号)未核;(8) 0.0.86 工位时间线未成形;(9) 事件文件只留一代轮转,度量生成器须在轮转前跑,否则丢数;(10) candidate-ape 键的完备性未核,须由 S1 六类负控证明;(11) flowexec、candidate-chain、register、commit-own 等正文未读,接法以头注释为据。
+
+## devsvc search(2026-11-21)
+
+- 入口 `devsvc search PATTERN [PATH...] [--fixed] [--ignore-case] [--glob G] [--max-count N] [--context N] [--files-only] [--count] [--limit-bytes N] [--deadline-ms N] [--all]`,库 tools/cxlib/devsearch.cx,检查 tools/check-devsearch.cx,批次 devsearch。
+- 范围 git ls-files(已跟踪加未跟踪未忽略),默认排除 archive/、kernel/ 与二进制;--all 取消(对拍与 rg 文件数、命中数完全一致)。输出 path:line:text,末行 SEARCH files= matches= truncated= ms=;上限 64 KB、500 匹配、20 秒,超出打 TRUNCATED reason=。rc 0 有命中、1 无、2 用法或 I/O 错。
+- 正则只支持 `.`、首 `^`、尾 `$`、反斜杠转义;其余元字符具名拒绝 ERXSYNTAX。内部不调外部 rg 或 grep,只用 sy_* 与 git。事件 search 记模式长度、计数与耗时,不记命中内容。
+- 热调用实测 7271 文件约 0.76 秒(字面串先整缓冲预筛);git ls-files 本身仅 34 毫秒,故文件表缓存无收益,未做。
