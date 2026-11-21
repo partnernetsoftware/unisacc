@@ -1,0 +1,161 @@
+struct LoadingManagerState {
+  total: u32;
+  loaded: u32;
+  table: u32;
+  capacity: u32;
+  count: u32;
+  isLoading: u32;
+  start: u32;
+  load: u32;
+  progress: u32;
+  error: u32;
+  modifier: u32;
+}
+
+struct LoadingHandler {
+  regex: u32;
+  loader: u32;
+  global: u32;
+}
+
+native function lm_token(token:i64) i64 {
+  return token>=0 && token<=4294967295;
+}
+
+native function lm_state(state:i64) i64 {
+  if(!loading_span(state,LoadingManagerState.size)) { return 0; }
+  let table=ux_u32(state+LoadingManagerState.table);
+  let cap=ux_u32(state+LoadingManagerState.capacity);
+  return cap>0 && ux_u32(state+LoadingManagerState.count)<=cap &&
+    loading_span(table,cap*LoadingHandler.size) &&
+    !(table<state+LoadingManagerState.size && state<table+cap*LoadingHandler.size);
+}
+
+// Zero is the absent callback token; regex, URL and loader identities are nonzero.
+native function LoadingManager_new(state:i64,table:i64,cap:i64,load:i64,progress:i64,error:i64) i64 {
+  if(!loading_span(state,LoadingManagerState.size) || cap<=0 || cap>524288 ||
+     !loading_span(table,cap*LoadingHandler.size) ||
+     (table<state+LoadingManagerState.size && state<table+cap*LoadingHandler.size) ||
+     !lm_token(load) || !lm_token(progress) || !lm_token(error)) { return 0-1; }
+  let init=LoadingManager_init(state);
+  let a=ux_u32_put(state+LoadingManagerState.table,table);
+  let b=ux_u32_put(state+LoadingManagerState.capacity,cap);
+  let c=ux_u32_put(state+LoadingManagerState.count,0);
+  let d=ux_u32_put(state+LoadingManagerState.isLoading,0);
+  let e=ux_u32_put(state+LoadingManagerState.start,0);
+  let f=ux_u32_put(state+LoadingManagerState.load,load);
+  let g=ux_u32_put(state+LoadingManagerState.progress,progress);
+  let h=ux_u32_put(state+LoadingManagerState.error,error);
+  let i=ux_u32_put(state+LoadingManagerState.modifier,0);
+  return state;
+}
+
+native function LoadingManager_setCallback(state:i64,kind:i64,token:i64) i64 {
+  if(!lm_state(state) || kind<1 || kind>4 || !lm_token(token)) { return 0-1; }
+  let field=LoadingManagerState.start;
+  if(kind==2) { field=LoadingManagerState.progress; }
+  if(kind==3) { field=LoadingManagerState.error; }
+  if(kind==4) { field=LoadingManagerState.load; }
+  let stored=ux_u32_put(state+field,token);
+  return state;
+}
+
+native function lm_emit(state:i64,token:i64,kind:i64,url:i64) i64 {
+  if(token!=0) {
+    return host_lm_cb(token,kind,state,url,ux_u32(state+LoadingManagerState.loaded),
+      ux_u32(state+LoadingManagerState.total));
+  }
+  return 0;
+}
+
+native function LoadingManager_itemStart(state:i64,url:i64) i64 {
+  if(!lm_state(state) || !lm_token(url) || url==0) { return 0-1; }
+  let total=ux_u32(state+LoadingManagerState.total);
+  if(total==4294967295) { return 0-2; }
+  let n=ux_u32_put(state+LoadingManagerState.total,total+1);
+  if(ux_u32(state+LoadingManagerState.isLoading)==0) {
+    let event=lm_emit(state,ux_u32(state+LoadingManagerState.start),1,url);
+  }
+  let active=ux_u32_put(state+LoadingManagerState.isLoading,1);
+  return 0;
+}
+
+native function LoadingManager_itemEnd(state:i64,url:i64) i64 {
+  if(!lm_state(state) || !lm_token(url) || url==0) { return 0-1; }
+  let loaded=ux_u32(state+LoadingManagerState.loaded);
+  if(loaded==4294967295) { return 0-2; }
+  let n=ux_u32_put(state+LoadingManagerState.loaded,loaded+1);
+  let progress=lm_emit(state,ux_u32(state+LoadingManagerState.progress),2,url);
+  if(ux_u32(state+LoadingManagerState.loaded)==ux_u32(state+LoadingManagerState.total)) {
+    let inactive=ux_u32_put(state+LoadingManagerState.isLoading,0);
+    let done=lm_emit(state,ux_u32(state+LoadingManagerState.load),4,0);
+  }
+  return 0;
+}
+
+native function LoadingManager_itemError(state:i64,url:i64) i64 {
+  if(!lm_state(state) || !lm_token(url) || url==0) { return 0-1; }
+  let error=lm_emit(state,ux_u32(state+LoadingManagerState.error),3,url);
+  return 0;
+}
+
+native function LoadingManager_setURLModifier(state:i64,transform:i64) i64 {
+  if(!lm_state(state) || !lm_token(transform)) { return 0-1; }
+  let stored=ux_u32_put(state+LoadingManagerState.modifier,transform);
+  return state;
+}
+
+native function LoadingManager_resolveURL(state:i64,url:i64) i64 {
+  if(!lm_state(state) || !lm_token(url) || url==0) { return 0-1; }
+  let transform=ux_u32(state+LoadingManagerState.modifier);
+  if(transform==0) { return url; }
+  return host_lm_url(transform,url);
+}
+
+native function LoadingManager_addHandler(state:i64,regex:i64,loader:i64,global:i64) i64 {
+  if(!lm_state(state) || !lm_token(regex) || regex==0 || !lm_token(loader) || loader==0 ||
+     (global!=0 && global!=1)) { return 0-1; }
+  let count=ux_u32(state+LoadingManagerState.count);
+  if(count==ux_u32(state+LoadingManagerState.capacity)) { return 0-2; }
+  let row=ux_u32(state+LoadingManagerState.table)+count*LoadingHandler.size;
+  let r=ux_u32_put(row+LoadingHandler.regex,regex);
+  let l=ux_u32_put(row+LoadingHandler.loader,loader);
+  let g=ux_u32_put(row+LoadingHandler.global,global);
+  let n=ux_u32_put(state+LoadingManagerState.count,count+1);
+  return state;
+}
+
+native function LoadingManager_removeHandler(state:i64,regex:i64) i64 {
+  if(!lm_state(state) || !lm_token(regex) || regex==0) { return 0-1; }
+  let count=ux_u32(state+LoadingManagerState.count);
+  let table=ux_u32(state+LoadingManagerState.table);
+  let i=0;
+  while(i<count) {
+    let row=table+i*LoadingHandler.size;
+    if(ux_u32(row+LoadingHandler.regex)==regex) {
+      let copied=uxe_copy_record(row,row+LoadingHandler.size,(count-i-1)*LoadingHandler.size);
+      let n=ux_u32_put(state+LoadingManagerState.count,count-1);
+      return state;
+    }
+    i=i+1;
+  }
+  return state;
+}
+
+native function LoadingManager_getHandler(state:i64,url:i64) i64 {
+  if(!lm_state(state) || !lm_token(url) || url==0) { return 0-1; }
+  let count=ux_u32(state+LoadingManagerState.count);
+  let table=ux_u32(state+LoadingManagerState.table);
+  let i=0;
+  while(i<count) {
+    let row=table+i*LoadingHandler.size;
+    let regex=ux_u32(row+LoadingHandler.regex);
+    let loader=ux_u32(row+LoadingHandler.loader);
+    if(ux_u32(row+LoadingHandler.global)==1) { let reset=host_lm_reset(regex); }
+    let matched=host_lm_test(regex,url);
+    if(matched==1) { return loader; }
+    if(matched<0) { return matched; }
+    i=i+1;
+  }
+  return 0;
+}

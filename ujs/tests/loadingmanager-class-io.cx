@@ -1,0 +1,75 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int regex=argc==2 && tx_eqz(argv[1],"--regex-mutate");
+    const int identity=argc==2 && tx_eqz(argv[1],"--identity-mutate");
+    if(argc!=1 && !regex && !identity) return 2;
+    char dir[256],cwd[390],abi[300],body[300],wasm[300],url[780];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-lm-class-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(body,sizeof body,"%s/entry.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/loading-manager.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/loadingmanager-class-r160.html?wasm=%s%s",
+        cwd,wasm,regex?"&mutate=regex":identity?"&mutate=identity":"");
+    const char signature[]=
+        "import host_lm_url from \"uxe_lm_v1\"(i64,i64) i64;\n"
+        "import host_lm_reset from \"uxe_lm_v1\"(i64) i64;\n"
+        "import host_lm_test from \"uxe_lm_v1\"(i64,i64) i64;\n"
+        "import host_lm_cb from \"uxe_lm_v1\"(i64,i64,i64,i64,i64,i64) i64;\n"
+        "export uxe_lm_probe(op:i64,x:i64,y:i64,z:i64) i64 version 1;\n";
+    const char entry[]=
+        "let state=32;let other=128;let receiver=32;if(y==1){receiver=other;}"
+        "if(op==0){let first=LoadingManager_new(state,256,5,14,12,13);"
+        "  let next=LoadingManager_new(other,512,1,0,0,0);"
+        "  let start=LoadingManager_setCallback(state,1,11);return first==state && next==other && start==state;}"
+        "if(op==1){return LoadingManager_setURLModifier(state,x);}"
+        "if(op==2){return LoadingManager_resolveURL(receiver,x);}"
+        "if(op==3){return LoadingManager_addHandler(state,x,y,z);}"
+        "if(op==4){return LoadingManager_removeHandler(state,x);}"
+        "if(op==5){return LoadingManager_getHandler(receiver,x);}"
+        "if(op==6){return LoadingManager_setCallback(state,x,y);}"
+        "if(op==7){return LoadingManager_itemStart(state,x);}"
+        "if(op==8){return LoadingManager_itemEnd(state,x);}"
+        "if(op==9){return LoadingManager_itemError(state,x);}"
+        "return 0-1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/loadingmanager.ujs","ujs/practice/uxe/base/loadingmanager-class.ujs",body,"-o",wasm,0};
+    const double gold[]={
+        1,1,2,1,1,3,1,1,
+        1,1,1,101,101,0,1,101,1,102,1,103,1,0,
+        1,104,0,104,0,
+        11,1,1,1,0,1, 13,3,1,4,0,0, 12,2,1,1,1,2, 12,2,1,4,2,2,
+        12,2,1,5,3,3, 14,4,1,0,0,0, 11,1,1,4,3,4, 15,2,1,4,4,4, 14,4,1,0,0,0,
+        32,32,32,32,-2,104,32,102
+    };
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0; size_t bytes=0;
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,signature,sizeof signature-1,0600) ||
+        sy_write_file(body,entry,sizeof entry-1,0600);
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,12,&output,&bytes);
+        if(rc) { printf("LOADINGMANAGER_CLASS compile_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            if(actual[i]!=gold[i]) {
+                printf("LOADINGMANAGER_CLASS case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("G_IO LoadingManager shared-instance lifecycle cases=%d failed=%d\n",count,failed);
+    return failed;
+}

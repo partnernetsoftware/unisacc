@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {LoadingManager, REVISION} from "../../web/game/three.module.js";
+const status=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const args=new URLSearchParams(location.search);
+  const urls=["","asset.bin","v1/asset.bin","v2/asset.bin","notes.txt","followup.bin"];
+  const regexes=()=>[null,/\.bin$/g,/\.bin$/,/asset/y,/\.bin$/g];
+  const loaderIDs=[101,102,103,104];
+  const loaders=new Map(loaderIDs.map(id=>[id,{id}]));
+  const transforms=new Map([[21,link=>"v1/"+link],[22,link=>"v2/"+link]]);
+  const actualRegex=regexes();
+  const actual=[], oracle=[];
+  function transcript(api,out) {
+    out.push(api.resolve(1),api.transform(21),api.resolve(1),api.resolve(1,1),
+      api.transform(22),api.resolve(1),api.transform(0),api.resolve(1));
+    out.push(api.add(1,101),api.add(2,102),api.add(1,103),api.get(1),api.get(1),
+      api.get(1,1),api.remove(4),api.get(1),api.remove(1),api.get(1),
+      api.remove(2),api.get(1),api.remove(1),api.get(1));
+    out.push(api.add(3,104),api.get(1),api.get(1),api.get(1),api.get(4));
+    api.start(1);
+    api.start(4);
+    api.error(4);
+    api.end(1);
+    api.end(4);
+    api.end(5);
+    api.replaceProgress();
+    api.end(4);
+  }
+
+  const refRegex=regexes();
+  const other=new LoadingManager();
+  let refRestart=false;
+  const reference=new LoadingManager(function() {
+    oracle.push(14,4,Number(this===reference),0,0,0);
+    if(!refRestart) { refRestart=true; reference.itemStart(urls[4]); }
+  },function(url,loaded,total) {
+    oracle.push(12,2,Number(this===reference),urls.indexOf(url),loaded,total);
+    if(loaded===2) reference.itemStart(urls[5]);
+  },function(url) {
+    oracle.push(13,3,Number(this===reference),urls.indexOf(url),0,0);
+  });
+  reference.onStart=function(url,loaded,total) {
+    oracle.push(11,1,Number(this===reference),urls.indexOf(url),loaded,total);
+  };
+  const ref={
+    resolve:(url,manager=0)=>urls.indexOf((manager?other:reference).resolveURL(urls[url])),
+    transform:token=>Number(reference.setURLModifier(transforms.get(token))===reference),
+    add:(regex,loader)=>Number(reference.addHandler(refRegex[regex],loaders.get(loader))===reference),
+    remove:regex=>Number(reference.removeHandler(refRegex[regex])===reference),
+    get:(url,manager=0)=>(manager?other:reference).getHandler(urls[url])?.id??0,
+    start:url=>reference.itemStart(urls[url]),
+    end:url=>reference.itemEnd(urls[url]),
+    error:url=>reference.itemError(urls[url]),
+    replaceProgress() {
+      reference.onProgress=function(url,loaded,total) {
+        oracle.push(15,2,Number(this===reference),urls.indexOf(url),loaded,total);
+      };
+    }
+  };
+  transcript(ref,oracle);
+
+  const bytes=await (await fetch("file://"+args.get("wasm"))).arrayBuffer();
+  let wasm, restarted=false;
+  const run=(op,x=0,y=0,z=0)=>Number(wasm.uxe_lm_probe(BigInt(op),BigInt(x),BigInt(y),BigInt(z)));
+  const host={
+    host_lm_url:(transform,url)=>BigInt(urls.indexOf(transforms.get(Number(transform))(urls[Number(url)]))),
+    host_lm_reset(regex) {
+      if(args.get("mutate")!=="regex") actualRegex[Number(regex)].lastIndex=0;
+      return 0n;
+    },
+    host_lm_test:(regex,url)=>BigInt(actualRegex[Number(regex)].test(urls[Number(url)])),
+    host_lm_cb(token,kind,receiver,url,loaded,total) {
+      const progress=kind===1n || kind===2n;
+      actual.push(Number(token),Number(kind),Number(receiver===32n),Number(url),
+        progress?Number(loaded):0,progress?Number(total):0);
+      if(token===12n && loaded===2n) run(7,5);
+      if(token===14n && !restarted) { restarted=true; run(7,4); }
+      return 0n;
+    }
+  };
+  wasm=new WebAssembly.Instance(new WebAssembly.Module(bytes),{uxe_lm_v1:host}).exports;
+  if(run(0)!==1) throw new Error("constructor");
+  const product={
+    resolve:(url,manager=0)=>run(2,url,manager),
+    transform:token=>Number(run(1,token)===32),
+    add:(regex,loader)=>Number(run(3,regex,loader,Number(actualRegex[regex].global))===32),
+    remove:regex=>Number(run(4,args.get("mutate")==="identity" && regex===4?1:regex)===32),
+    get:(url,manager=0)=>run(5,url,manager),
+    start:url=>run(7,url),
+    end:url=>run(8,url),
+    error:url=>run(9,url),
+    replaceProgress:()=>run(6,2,15)
+  };
+  transcript(product,actual);
+  if(actual.length!==oracle.length) throw new Error("transcript length actual="+actual.length+" r160="+oracle.length);
+  for(let i=0;i<oracle.length;i++) {
+    if(actual[i]!==oracle[i]) throw new Error("transcript case="+i+" actual="+actual[i]+" r160="+oracle[i]);
+  }
+  const bounds=[run(3,1,101,1),run(3,2,102,0),run(3,4,103,1),run(3,2,101,0),
+    run(3,3,104,0),run(5,1),run(4,1),run(5,1)];
+  status.textContent=JSON.stringify([...actual,...bounds]);
+} catch(error) {
+  status.textContent="error:"+error.message;
+}
+</script>
