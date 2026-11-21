@@ -1,0 +1,98 @@
+struct Material {
+  id: u32;
+  type: u32;
+  version: u32;
+  dispatcher: u32;
+  side: u32;
+  depthFunc: u32;
+  depthTest: u32;
+  depthWrite: u32;
+  colorWrite: u32;
+  transparent: u32;
+  visible: u32;
+  toneMapped: u32;
+  blending: u32;
+  premultipliedAlpha: u32;
+  opacity: f64;
+  alphaTest: f64;
+}
+
+native function material_span(at:i64) i64 {
+  return at>=0 && at%8==0 && at<=6291456-Material.size;
+}
+
+native function Material_init(at:i64,id:i64,type:i64,dispatcher:i64) i64 {
+  if(!material_span(at) || id<1 || id>4294967295 || type<0 || type>255 ||
+     dispatcher<0 || dispatcher%4!=0 || dispatcher>6291456-EventDispatcher.size ||
+     (at<dispatcher+EventDispatcher.size && dispatcher<at+Material.size)) { return 0-1; }
+  let a=ux_u32_put(at+Material.id,id);
+  let b=ux_u32_put(at+Material.type,type);
+  let c=ux_u32_put(at+Material.version,0);
+  let d=ux_u32_put(at+Material.dispatcher,dispatcher);
+  let e=ux_u32_put(at+Material.side,0);
+  let f=ux_u32_put(at+Material.depthFunc,3);
+  let g=ux_u32_put(at+Material.depthTest,1);
+  let h=ux_u32_put(at+Material.depthWrite,1);
+  let i=ux_u32_put(at+Material.colorWrite,1);
+  let j=ux_u32_put(at+Material.transparent,0);
+  let k=ux_u32_put(at+Material.visible,1);
+  let l=ux_u32_put(at+Material.toneMapped,1);
+  let m=ux_u32_put(at+Material.blending,1);
+  let n=ux_u32_put(at+Material.premultipliedAlpha,0);
+  let o=ux_f64_put(at+Material.opacity,1.0);
+  let p=ux_f64_put(at+Material.alphaTest,0.0);
+  return at;
+}
+
+native function Material_needsUpdate(at:i64,value:i64) i64 {
+  if(!material_span(at) || value<0 || value>1) { return 0-1; }
+  let version=ux_u32(at+Material.version);
+  if(value && version==4294967295) { return 0-2; }
+  return ux_u32_put(at+Material.version,version+value);
+}
+
+native function Material_setAlphaTest(at:i64,value:f64) i64 {
+  if(!material_span(at) || value-value!=0.0) { return 0-1; }
+  let prior=ux_f64(at+Material.alphaTest);
+  let version=Material_needsUpdate(at,(prior>0.0)!=(value>0.0));
+  if(version<0) { return version; }
+  let stored=ux_f64_put(at+Material.alphaTest,value);
+  return at;
+}
+
+native function Material_copy(dst:i64,src:i64) i64 {
+  if(!material_span(dst) || !material_span(src) ||
+     (dst!=src && dst<src+Material.size && src<dst+Material.size)) { return 0-1; }
+  let alpha=Material_setAlphaTest(dst,ux_f64(src+Material.alphaTest));
+  if(alpha<0) { return alpha; }
+  let offset=Material.side;
+  let copied=uxe_copy_record(dst+offset,src+offset,Material.alphaTest-offset);
+  if(copied<0) { return copied; }
+  return dst;
+}
+
+native function Material_clone(dst:i64,src:i64,id:i64,dispatcher:i64) i64 {
+  if(!material_span(src) || !material_span(dst) ||
+     (dst<src+Material.size && src<dst+Material.size) ||
+     (src<dispatcher+EventDispatcher.size && dispatcher<src+Material.size)) { return 0-1; }
+  let out=Material_init(dst,id,ux_u32(src+Material.type),dispatcher);
+  if(out<0) { return out; }
+  return Material_copy(out,src);
+}
+
+native function Material_dispose(at:i64,disposeEvent:i64,out:i64,limit:i64) i64 {
+  if(!material_span(at) || out<0 || out%4!=0 || limit<0 || limit>1024 ||
+     out>6291448-limit*4 ||
+     (out<at+Material.size && at<out+8+limit*4)) { return 0-1; }
+  let dispatcher=ux_u32(at+Material.dispatcher);
+  if(dispatcher%4!=0 || dispatcher>6291456-EventDispatcher.size) { return 0-1; }
+  let listeners=ux_u32(dispatcher+EventDispatcher.listeners);
+  let count=ux_u32(dispatcher+EventDispatcher.listenerCount);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  let end=out+8+limit*4;
+  if(count>capacity || listeners>6291456 || listeners%4!=0 ||
+     capacity>(6291456-listeners)/8 ||
+     (out<dispatcher+EventDispatcher.size && dispatcher<end) ||
+     (count>0 && out<listeners+count*8 && listeners<end)) { return 0-1; }
+  return EventDispatcher_dispatchEvent(dispatcher,disposeEvent,ux_u32(at+Material.id),out,limit);
+}
