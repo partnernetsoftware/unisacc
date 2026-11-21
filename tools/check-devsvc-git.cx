@@ -19,9 +19,11 @@ static int nfail, ovf; static long t_start;
 #define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
 static char root[1024], fx[160], bare[160], pin[160], inst[160], out[1 << 15];
 static char *envv[4];
+static const char *fixture_cli;
 static void ck(int c, const char *name) {
     printf("%s\tdevsvc-git.%s\tt_ms=%ld\n", c ? "PASS" : "FAIL", name, sy_now_ms() - t_start);
     if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+    fflush(stdout);
 }
 static int run(char **v, const char *cwd, char *const *env) {
     np_result r; char why[200]; int rc; long a, b;
@@ -33,10 +35,14 @@ static int run(char **v, const char *cwd, char *const *env) {
     return rc;
 }
 static int has(const char *s) { return strstr(out, s) != 0; }
+static int cli_args(char **v) {
+    if (fixture_cli && *fixture_cli) { v[0] = (char *)fixture_cli; return 1; }
+    v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = "tools/devsvc.cx"; v[3] = "--";
+    return 4;
+}
 /* 在夹具里跑 devsvc(--dev):参数以 0 结尾 */
 static int dv(const char *a1, const char *a2, const char *a3, const char *a4, const char *a5, const char *a6, const char *a7, const char *a8) {
-    char *v[24]; int n = 0; const char *xs[8]; int i;
-    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/devsvc.cx"; v[n++] = "--";
+    char *v[24]; int n = cli_args(v); const char *xs[8]; int i;
     xs[0] = a1; xs[1] = a2; xs[2] = a3; xs[3] = a4; xs[4] = a5; xs[5] = a6; xs[6] = a7; xs[7] = a8;
     for (i = 0; i < 8 && xs[i]; i++) { v[n++] = (char *)xs[i]; if (i == 0 && !strcmp(xs[0], "x")) { v[n++] = "--par"; v[n++] = "1"; } }   /* x 必须显式 --par */
     v[n] = 0;
@@ -71,6 +77,8 @@ int main(int argc, char **argv) {
         F(c0, sizeof c0, "rm -rf %s %s %s %s", fx, bare, pin, inst); if (!ovf) (void)sh(c0, 0); }
     F(e1, sizeof e1, "DV_PIN_DIR=%s", pin); F(e2, sizeof e2, "UNISACC_DEVSVC_DIR=%s", inst);
     envv[0] = e2; envv[1] = 0; (void)e1;
+    fixture_cli = getenv("DVGIT_EXE");   /* 复核可在独立的有界步骤预编执行体。 */
+    if (fixture_cli && (*fixture_cli != '/' || setenv("DEVSVC_SELF_BIN", fixture_cli, 1))) return 2;
     if (ovf) return 2;
     {   char *v[] = {"git", "clone", "-q", "--local", root, fx, 0}; if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-clone\n"); cleanup(); return 1; } }
     /* 夹具起点与本仓所在分支无关:在版本分支(如 v0.0.72)或工作树里跑时克隆体 HEAD 不在 main,后续 checkout main 会从 origin/main 另建分支;
@@ -78,11 +86,12 @@ int main(int argc, char **argv) {
     {   char *v[] = {"git", "-C", fx, "checkout", "-q", "-B", "main", 0}; char *u[] = {"git", "-C", fx, "branch", "-q", "--set-upstream-to=origin/main", "main", 0};
         if (run(v, 0, 0) != 0) { printf("FAIL\tdevsvc-git.fixture-main\n"); cleanup(); return 1; }
         (void)run(u, 0, 0); /* 本仓无 main 分支时无 origin/main 可跟踪,不算夹具失败 */ }
-    {   const char *names[5] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx", "tools/cxlib/flowexec.cx"}; int i;
-        for (i = 0; i < 5; i++) {
+    {   const char *names[] = {"tools/devsvc.cx", "tools/devsvc-core.cx", "tools/devsvc-repo.tsv", "tools/commit-own.cx", "tools/cxlib/flowexec.cx", "tools/push-replay.cx", 0}; int i;
+        for (i = 0; names[i]; i++) {
             char src[1200], dst[400]; unsigned char *b = 0; int64_t n = 0;
             F(src, sizeof src, "%s/%s", root, names[i]); F(dst, sizeof dst, "%s/%s", fx, names[i]);
             if (i == 1 && getenv("DVGIT_CORE_FROM")) F(src, sizeof src, "%s", getenv("DVGIT_CORE_FROM"));   /* 负控:换入旧核心,证明 e 组断言有效 */
+            if (i == 5 && getenv("DVGIT_PUSH_FROM")) F(src, sizeof src, "%s", getenv("DVGIT_PUSH_FROM"));
             if (ovf || sy_read_file(src, &b, &n, 1 << 22) || !b || sy_write_atomic(dst, (char *)b, (size_t)n, 0644)) { printf("FAIL\tdevsvc-git.fixture-copy\t%s\n", names[i]); cleanup(); return 1; }
             free(b);
         }
@@ -93,7 +102,7 @@ int main(int argc, char **argv) {
             b = 0; F(src, sizeof src, "%s/tools/gitsync-run.cx", root); F(dst, sizeof dst, "%s/tools/gitsync-run.cx", fx);   /* git merge/pull 的同步子进程 */
             if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); } } }
     F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     if (A) {
@@ -136,7 +145,9 @@ int main(int argc, char **argv) {
         ck(mh[0] && !strcmp(mh, wh), "wt-commit-main-head-unchanged");
         F(c, sizeof c, "printf 'w2\\n' > .claude/worktrees/dvg-wt/dvg-w.txt");
         (void)sh(c, fx);
-        {   char *v[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "git", "commit", "-m", "W2", "--cwd", ".claude/worktrees/dvg-wt", "--push", "--whole", "dvg-w.txt", 0};
+        {   char *v[16], *args[] = {"git", "commit", "-m", "W2", "--cwd", ".claude/worktrees/dvg-wt", "--push", "--whole", "dvg-w.txt", 0};
+            int n = cli_args(v);
+            for (int i = 0; i < 10; i++) v[n++] = args[i];
             rc = run(v, fx, envv); }
         ck(rc == 0 && has("pushed=1"), "wt-commit-push-rc0");
         F(c, sizeof c, "git -C %s log -1 --format=%%s refs/heads/dvg-wt | grep -qx W2 && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
@@ -165,8 +176,10 @@ int main(int argc, char **argv) {
     if (B) {
     /* (c) 两个并发 commit 串行完成,无残留锁 */
     if (wfile("tests/manifests/dvg-c1.tsv", "c1\n") || wfile("tests/manifests/dvg-c2.tsv", "c2\n")) { printf("FAIL\tdevsvc-git.fixture-write-c\n"); cleanup(); return 1; }
-    F(c, sizeof c, "sh ./unisacc.com tools/devsvc.cx -- git commit -m C1 --whole tests/manifests/dvg-c1.tsv >/tmp/dvgit-%d-c1 2>&1 & "
-                   "sh ./unisacc.com tools/devsvc.cx -- git commit -m C2 --whole tests/manifests/dvg-c2.tsv >/tmp/dvgit-%d-c2 2>&1 & wait; cat /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2; rm -f /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2",
+    F(c, sizeof c, "export DEVSVC_OWNER=dvg-registry; dv_commit() { "
+                   "if test -n \"$DVGIT_EXE\"; then \"$DVGIT_EXE\" git commit \"$@\"; else sh ./unisacc.com tools/devsvc.cx -- git commit \"$@\"; fi; }; "
+                   "dv_commit -m C1 --whole tests/manifests/dvg-c1.tsv >/tmp/dvgit-%d-c1 2>&1 & "
+                   "dv_commit -m C2 --whole tests/manifests/dvg-c2.tsv >/tmp/dvgit-%d-c2 2>&1 & wait; cat /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2; rm -f /tmp/dvgit-%d-c1 /tmp/dvgit-%d-c2",
       sy_pid(), sy_pid(), sy_pid(), sy_pid(), sy_pid(), sy_pid());
     (void)ovf; rc = -1;
     {   char *v[] = {"sh", "-c", c, 0}; rc = run(v, fx, envv); }
@@ -174,6 +187,15 @@ int main(int argc, char **argv) {
     ck(rc == 0 && k == 2, "concurrent-commits-both-rc0");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "concurrent-commits-leave-no-lock");
+    rc = dv("events", "0", 0, 0, 0, 0, 0, 0);
+    {   const char *p = out; int takes = 0, drops = 0;
+        while ((p = strstr(p, "\tregistry\towner=dvg-registry"))) {
+            if (p - out >= 13 && !memcmp(p - 13, "\tlock.acquire", 13)) takes++;
+            if (p - out >= 13 && !memcmp(p - 13, "\tlock.release", 13)) drops++;
+            p++;
+        }
+        ck(rc == 0 && takes == 2 && drops == 2, "concurrent-commits-own-two-leases");
+    }
 
     /* (d) 危险命令具名拒绝 */
     rc = dv("x", "--", "git", "stash", "list", 0, 0, 0);

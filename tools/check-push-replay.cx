@@ -473,6 +473,27 @@ static void merge_push(const char *svc) {
     expect(!rc&&tx_eqz(selected,received)&&!has(&r,"PUSH_REPLAY_PLAN"),"authorized-merge-fast-forward");
     expect(tree_has(origin,"HEAD","side-content"),"merge-second-parent-content-preserved");
     np_free(&r);
+
+    char *unborn[]={"git","symbolic-ref","HEAD","refs/heads/unborn",0};
+    char *first[]={"git","switch","-q","-c","first-publish",0};
+    check_setup(origin,unborn);
+    check_setup(repo,first);
+    file("branch-ancestor","unpublished ancestor\n",0644);commit("branch ancestor");
+    file("branch-owned","requested change\n",0644);commit("requested change");
+    char requested[41],still_main[41];git_oid(repo,"HEAD",requested);
+    file("branch-later","not yet requested\n",0644);commit("later change");
+    rc=push_one(svc,requested,&r);
+    expect(!rc&&has(&r,"GIT_PUSH\trc=0")&&!has(&r,"PUSH_REPLAY_PLAN"),
+           "first-push-with-unborn-remote-head");
+    if(rc&&r.errn)fwrite(r.err,1,r.errn,stderr);
+    np_free(&r);
+    int exact_tip=!rc;
+    if(exact_tip)git_oid(origin,"refs/heads/first-publish",received);
+    git_oid(origin,"refs/heads/main",still_main);
+    expect(exact_tip&&tx_eqz(requested,received)&&tx_eqz(selected,still_main)&&
+           tree_has(origin,"refs/heads/first-publish","branch-ancestor")&&
+           !tree_has(origin,"refs/heads/first-publish","branch-later"),
+           "first-push-publishes-only-the-requested-tip");
 }
 
 static int counted_refs(const char *scope) {

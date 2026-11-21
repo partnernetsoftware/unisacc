@@ -167,11 +167,12 @@ static int resolve_owned(const char *remote,int new_branch,commits *owned,char l
             if(tx_eqz(prior,id))return 2;
             mm_copy(id,sizeof id,prior,41);
         }
-        if(depth==OWN_MAX||(depth&&ancestor(id,local)!=1&&ancestor(id,remote)!=1)) {
+        int reachable=ancestor(id,local)==1||(!new_branch&&ancestor(id,remote)==1);
+        if(depth==OWN_MAX||(depth&&!reachable)) {
             fprintf(stderr,"PUSH_REPLAY_REFUSE\treason=invalid-local-alias\tcommit=%s\n",requested.id[i]);
             return 2;
         }
-        if(!depth&&ancestor(id,local)!=1&&ancestor(id,remote)!=1) {
+        if(!depth&&!reachable) {
             fprintf(stderr,"PUSH_REPLAY_REFUSE\treason=stale-receipt\tcommit=%s\tnext=use-current-commit\n",id);
             return 2;
         }
@@ -554,16 +555,25 @@ static int prune_published_aliases(const char *remote) {
     return rc;
 }
 
-static int send_tip(const char *tip, int *race) {
-    char spec[340];
+static int send_tip(const char *tip, int new_branch, int *race) {
+    char spec[340], lease[340];
     if (cx_fmt(spec, sizeof spec, "%s:%s", tip, branch)) return 2;
-    char *push[] = {"git", "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no", "origin", spec, 0};
+    /* The empty lease permits creation only. If another writer creates the
+       branch, fetch it and run the existing-branch ownership checks. */
+    char *push[] = {"git", "push", "--porcelain", "--no-follow-tags", "--recurse-submodules=no", 0, 0, 0, 0};
+    int n=5;
+    if(new_branch) {
+        if(cx_fmt(lease,sizeof lease,"--force-with-lease=%s:",branch))return 2;
+        push[n++]=lease;
+    }
+    push[n++]="origin";push[n]=spec;
     char *env[] = {"LC_ALL=C", 0};
     np_result r = {0};
     int rc = call(push, env, &r);
     *race = rc && r.out && (strstr(r.out, "\t[rejected] (non-fast-forward)") ||
                             strstr(r.out, "\t[rejected] (fetch first)") ||
-                            strstr(r.out, "\t[remote rejected] (failed to update ref)"));
+                            strstr(r.out, "\t[remote rejected] (failed to update ref)") ||
+                            (new_branch&&strstr(r.out,"\t[rejected] (stale info)")));
     if (r.outn) fwrite(r.out, 1, r.outn, stdout);
     if (rc && !*race && r.errn) fwrite(r.err, 1, r.errn, stderr);
     np_free(&r);
@@ -575,19 +585,17 @@ static int fetch_tip(const char *ref,const char *spec,char remote[64],int *new_b
     char *fetch[]={"git","fetch","--no-tags","--no-write-fetch-head","--no-recurse-submodules","--refmap=","origin",(char *)spec,0};
     int rc=call(fetch,0,&r);
     *new_branch=0;
+    remote[0]=0;
     if(rc) {
         np_result query={0};
-        char *check[]={"git","ls-remote","--exit-code","origin",branch,0};
-        if(call(check,0,&query)==2) {
-            char fallback[300];
-            if(!cx_fmt(fallback,sizeof fallback,"HEAD:%s",ref)) {
-                np_free(&r);
-                fetch[7]=fallback;
-                rc=call(fetch,0,&r);
-                *new_branch=!rc;
-            }
-        }
+        char *check[]={"git","ls-remote","--exit-code","--refs","origin",branch,0};
+        int missing=call(check,0,&query)==2;
         np_free(&query);
+        if(missing) {
+            np_free(&r);
+            *new_branch=1;
+            return 0;
+        }
     }
     if(rc&&r.errn)fwrite(r.err,1,r.errn,stderr);
     np_free(&r);
@@ -629,12 +637,12 @@ static int run_push(void) {
         if(resolve_owned(remote,is_new,&owned,current))break;
         if(!owned.n){status=0;break;}
         mm_copy(original,sizeof original,owned.id[owned.n-1],41);
-        int ff=ancestor(remote,original),present=ancestor(original,remote);
-        if(ff<0||present<0)break;
+        int ff=is_new?1:ancestor(remote,original);
+        if(ff<0)break;
         if(!is_new&&!ff&&refuse_nonfast_merge(&owned))break;
         /* Fast-forward merge ownership is its first-parent range. The merge
            itself authorizes its second-parent content. Replay remains linear. */
-        if(!(is_new&&present)&&!owns(remote,&owned,ff)) {
+        if(!is_new&&!owns(remote,&owned,ff)) {
             puts("PUSH_REPLAY_REFUSE\treason=unowned-pending");
             break;
         }
@@ -649,7 +657,7 @@ static int run_push(void) {
             printf("PUSH_REPLAY_PLAN\tbase=%s\told=%s\tnew=%s\tattempt=%d\n", remote, original, current, attempt + 1);
         } else mm_copy(current,sizeof current,original,41);
         int race=0;
-        int rc=tx_eqz(current,remote)&&!is_new?0:send_tip(current,&race);
+        int rc=tx_eqz(current,remote)&&!is_new?0:send_tip(current,is_new,&race);
         if(!rc) {
             status=journal[0]?reconcile(original,current,journal):0;
             if(status)printf("PUSH_REPLAY_PUBLISHED\tcommit=%s\n",current);
