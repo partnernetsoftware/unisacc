@@ -1,0 +1,50 @@
+native function composer_copy_pass(rows:i64,from:i64,to:i64) i64 {
+  let src=rows+from*ComposerPass.size;
+  let dst=rows+to*ComposerPass.size;
+  let id=ux_u32_put(dst+ComposerPass.id,ux_u32(src+ComposerPass.id));
+  let flags=ux_u32_put(dst+ComposerPass.flags,ux_u32(src+ComposerPass.flags));
+  return dst;
+}
+
+native function EffectComposer_insertPass(composer:i64,index:i64,id:i64,flags:i64) i64 {
+  if(!composer_live(composer) || id<1 || id>4294967295 || flags<0 || flags>7) { return 0-1; }
+  let count=ux_u32(composer+EffectComposer.count);
+  if(count>=ux_u32(composer+EffectComposer.capacity)) { return 0-2; }
+  let at=index;
+  if(at<0) { at=count+at; }
+  if(at<0) { at=0; }
+  if(at>count) { at=count; }
+  if(composer_advance(composer)<0) { return 0-1; }
+  let rows=ux_u32(composer+EffectComposer.passes);
+  let i=count;
+  while(i>at) {
+    let move=composer_copy_pass(rows,i-1,i);
+    i=i-1;
+  }
+  let row=rows+at*ComposerPass.size;
+  let a=ux_u32_put(row+ComposerPass.id,id);
+  let b=ux_u32_put(row+ComposerPass.flags,flags);
+  let c=ux_u32_put(composer+EffectComposer.count,count+1);
+  return at;
+}
+
+// Remove the first matching pass, as r160 does by object identity. The
+// caller's live pass IDs encode that identity. 0 means no change.
+native function EffectComposer_removePass(composer:i64,id:i64) i64 {
+  if(!composer_live(composer) || id<1 || id>4294967295) { return 0-1; }
+  let count=ux_u32(composer+EffectComposer.count);
+  let rows=ux_u32(composer+EffectComposer.passes);
+  let i=0;
+  while(i<count && ux_u32(rows+i*ComposerPass.size+ComposerPass.id)!=id) { i=i+1; }
+  if(i==count) { return 0; }
+  if(composer_advance(composer)<0) { return 0-1; }
+  while(i+1<count) {
+    let move=composer_copy_pass(rows,i+1,i);
+    i=i+1;
+  }
+  let tail=rows+i*ComposerPass.size;
+  let a=ux_u32_put(tail+ComposerPass.id,0);
+  let b=ux_u32_put(tail+ComposerPass.flags,0);
+  let c=ux_u32_put(composer+EffectComposer.count,count-1);
+  return 1;
+}

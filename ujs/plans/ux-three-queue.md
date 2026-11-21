@@ -263,6 +263,7 @@
 ## M11 后处理、辅助与音频
 
 - ~~EffectComposer 开启的 Pass 顺序与双目标计划 | G-struct 实际 r160 调度、交换及最后一步输出 | M4 RenderTarget。~~ 12 项通过，交换读写反例转红。
+- ~~EffectComposer 插入和移除 Pass | G-struct 顺序、负下标、计划失效与容量 | Pass 调度。~~ 九项通过，错取最后一个 Pass 转红。
 - EffectComposer GPU 生命周期 | G-pixel 两目标复用、resize、旁路、遮罩与释放 | 调度计划、M4 RenderTarget。
 - ~~RenderPass 读目标清屏 | G-pixel EffectComposer 计划、WebGL2 实际清屏、双目标读回 | EffectComposer、M4。~~ 16 项通过，篡改目标交换绿蓝像素使四项红。
 - RenderPass 场景及覆盖材质 | G-pixel 共享场景绘制、覆盖材质与自动清屏状态回滚 | 读目标清屏、共享场景消费接口。
