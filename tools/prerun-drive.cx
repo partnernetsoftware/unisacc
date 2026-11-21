@@ -23,7 +23,7 @@
 #define PD_PW 4400
 #define PD_MAX_IDS 2048
 #define PD_PREP_MAXB 1024
-#define PD_MAX_WINS 512
+#define PD_MAX_WINS 2048
 #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
 #define PD_CHILD_SECONDS 58
 /* Outer wrapper/harness overhead was not measured in the historical run.
@@ -74,6 +74,8 @@ static int pd_has_times = 0;
 static int pd_has_priority = 0;
 static int pd_normal_jobs = 2;
 static int pd_keep_going = 0;
+static int pd_max_wins = PD_MAX_WINS;
+static long pd_unmeasured_ms = 0;
 
 static int pd_refuse(const char *why) {
     fprintf(stderr, "PRERUN_DRIVE\tREFUSE\treason=%s\n", why);
@@ -317,7 +319,7 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
     if (nrem <= 0) return;
     if (!pd_has_times) {
         int pos = 0;
-        while (pos < nrem && pd_nwins < PD_MAX_WINS) {
+        while (pos < nrem && pd_nwins < pd_max_wins) {
             int take = nrem - pos;
             if (take > win_size) {
                 if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
@@ -347,14 +349,14 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         rem[j + 1] = v;
     }
     int pos = 0;
-    while (pos < nrem && pd_nwins < PD_MAX_WINS) {
+    while (pos < nrem && pd_nwins < pd_max_wins) {
         PdWin *w = &pd_wins[pd_nwins];
         cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
         w->jobs = pd_normal_jobs;
         cx_fmt(w->phase, sizeof w->phase, "normal");
         w->count = 0;
-        if (pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS || !pd_ids[rem[pos]].measured) {
-            /* An isolated or missing sample cannot establish parallel wall time. */
+        if (pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS || (!pd_ids[rem[pos]].measured && pd_unmeasured_ms <= 0)) {
+            /* An isolated or missing sample cannot establish parallel wall time unless conservative --unmeasured-ms is set. */
             cx_fmt(w->phase, sizeof w->phase, "long");
             w->idxs[w->count++] = rem[pos++];
             w->jobs = 1;
@@ -367,7 +369,7 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
                cost + pd_ids[rem[pos]].time_ms <= PD_TIMED_BUDGET_MS) {
             cost += pd_ids[rem[pos]].time_ms;
             for (int lane = 0; lane < w->jobs && pos < nrem && w->count < win_size &&
-                 pd_ids[rem[pos]].measured; lane++)
+                 (pd_ids[rem[pos]].measured || pd_unmeasured_ms > 0); lane++)
                 w->idxs[w->count++] = rem[pos++];
         }
         if (!w->count) return;
@@ -377,7 +379,7 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
 }
 
 static int pd_warmup_fits(int i, long cost) {
-    return !pd_has_times || (pd_ids[i].measured &&
+    return !pd_has_times || ((pd_ids[i].measured || pd_unmeasured_ms > 0) &&
         cost + pd_ids[i].time_ms <= PD_TIMED_BUDGET_MS);
 }
 
@@ -386,6 +388,8 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     int i, w_warmup = 0, w_heavy = 0, w_normal = 0, has_rc = -1;
     if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
     if (pd_normal_jobs < 1 || pd_normal_jobs > 16) return pd_refuse("normal-jobs-must-be-1-to-16");
+    if (pd_max_wins < 1 || pd_max_wins > PD_MAX_WINS) return pd_refuse("invalid-max-wins");
+    if (pd_unmeasured_ms < 0 || pd_unmeasured_ms > PD_BATCH_WINDOW_MS) return pd_refuse("invalid-unmeasured-ms");
     if (pd_nids <= 0) return pd_refuse("empty-ids-file");
     if (pd_nids >= PD_PREP_MAXB) {
         fprintf(stderr, "PRERUN_MAXB_EXCEEDED\tbatches=%d\tmaxb=%d\n", pd_nids, PD_PREP_MAXB);
@@ -394,7 +398,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     for (i = 0; i < pd_nids; i++) {
         used[i] = 0;
         if (pd_has_times) {
-            if (!pd_ids[i].measured) pd_ids[i].time_ms = PD_TIMED_BUDGET_MS;
+            if (!pd_ids[i].measured) pd_ids[i].time_ms = pd_unmeasured_ms > 0 ? pd_unmeasured_ms : PD_TIMED_BUDGET_MS;
             if (pd_ids[i].time_ms > PD_BATCH_WINDOW_MS) {
                 fprintf(stderr, "PRERUN_SPLIT_REQUIRED\tbatch=%s\testimate_ms=%ld\tlimit_ms=%d\n",
                     pd_ids[i].id, pd_ids[i].time_ms, PD_BATCH_WINDOW_MS);
@@ -488,7 +492,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
                 }
             }
             pd_pack_normal_group(pri_rem, npri, win_size, &w_normal);
-            if (has_rc >= 0 && !used[has_rc] && pd_ids[has_rc].priority == prio && pd_nwins + 2 <= PD_MAX_WINS) {
+            if (has_rc >= 0 && !used[has_rc] && pd_ids[has_rc].priority == prio && pd_nwins + 2 <= pd_max_wins) {
                 PdWin *wp = &pd_wins[pd_nwins++];
                 cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
                 wp->jobs = 1;
@@ -506,7 +510,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
                 w_heavy++;
             }
             for (i = 0; i < pd_nids; i++) {
-                if (!used[i] && pd_ids[i].heavy && pd_ids[i].priority == prio && pd_nwins < PD_MAX_WINS) {
+                if (!used[i] && pd_ids[i].heavy && pd_ids[i].priority == prio && pd_nwins < pd_max_wins) {
                     PdWin *w = &pd_wins[pd_nwins];
                     cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
                     w->jobs = 1;
@@ -522,7 +526,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     }
 
     /* 3. Two-phase real-commit: prebuild-self followed by single-batch jobs=1 window */
-    if (has_rc >= 0 && !used[has_rc] && pd_nwins + 2 <= PD_MAX_WINS) {
+    if (has_rc >= 0 && !used[has_rc] && pd_nwins + 2 <= pd_max_wins) {
         PdWin *wp = &pd_wins[pd_nwins++];
         cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
         wp->jobs = 1;
@@ -542,7 +546,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
 
     /* 4. Other heavy batches: each in its own jobs=1 window */
     for (i = 0; i < pd_nids; i++) {
-        if (!used[i] && pd_ids[i].heavy && pd_nwins < PD_MAX_WINS) {
+        if (!used[i] && pd_ids[i].heavy && pd_nwins < pd_max_wins) {
             PdWin *w = &pd_wins[pd_nwins];
             cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
             w->jobs = 1;
@@ -575,7 +579,11 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         if (wall > max_window) max_window = wall;
         estimated += wall;
     }
-    if (planned != pd_nids) return pd_refuse("window-plan-did-not-cover-every-batch");
+    if (planned != pd_nids) {
+        fprintf(stderr, "PRERUN_MAX_WINS_EXCEEDED\twindows=%d\tmax_wins=%d\tplanned=%d\ttotal=%d\n",
+                pd_nwins, pd_max_wins, planned, pd_nids);
+        return pd_refuse("window-plan-did-not-cover-every-batch");
+    }
     pd_mkdirs(out_dir);
     char wpath[PD_PW];
     if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir)) return pd_refuse("path-bound");
@@ -2214,6 +2222,8 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
             else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--max-wins") && i + 1 < argc) { pd_max_wins = atoi(argv[++i]); if (pd_max_wins <= 0) pd_max_wins = -1; }
+            else if (tx_eqz(argv[i], "--unmeasured-ms") && i + 1 < argc) { pd_unmeasured_ms = atol(argv[++i]); if (pd_unmeasured_ms <= 0) pd_unmeasured_ms = -1; }
             else return pd_refuse("unknown-prepare-arg");
         }
         return pd_cmd_prepare(chain_d, root_d, ver, out_d, ids_f, times_f, prio_f, heavy_f, win_sz, warmup);
@@ -2230,6 +2240,8 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
             else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--max-wins") && i + 1 < argc) { pd_max_wins = atoi(argv[++i]); if (pd_max_wins <= 0) pd_max_wins = -1; }
+            else if (tx_eqz(argv[i], "--unmeasured-ms") && i + 1 < argc) { pd_unmeasured_ms = atol(argv[++i]); if (pd_unmeasured_ms <= 0) pd_unmeasured_ms = -1; }
             else return pd_refuse("unknown-plan-arg");
         }
         if (!ids_f || !ids_f[0] || !out_d || !out_d[0]) return pd_refuse("plan-requires-ids-file-and-out");

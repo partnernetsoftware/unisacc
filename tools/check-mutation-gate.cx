@@ -1,6 +1,7 @@
 /* check-mutation-gate.cx -- tools/mutation-gate.cx tells a strong check from a weak one.
  *
  *   sh ./unisacc.com tools/check-mutation-gate.cx
+ *   sh ./unisacc.com tools/check-mutation-gate.cx -- --quality-fixture [NATIVE_GATE]
  *
  * A private git repo (mkdtemp under $TMPDIR or /tmp) holds tools/fx.cx; the fixture patch adds a small
  * function with comparisons, a condition, constants, a string and a return.  Cases:
@@ -17,11 +18,86 @@
  * Output: CHECK_MUTATION_GATE<TAB>ok=N<TAB>failed=M (the batch marker needs a TAB after the name); rc 1 on any failure.  Only the scratch is written. */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use text.text
+#pragma unisa use mem.heap
 
 static int ok, failed;
 static void ck(int c, const char *n) { if (c) ok++; else { failed++; printf("FAIL %s\n", n); } }
 
 static char T[512];
+
+static void quality_file(const char *relative, const char *body) {
+    char path[1024];
+    if (cx_fmt(path, sizeof path, "%s/%s", T, relative) || cx_write(path, body, strlen(body)))
+        exit(2);
+}
+
+static int quality_fixture(const char *native) {
+    char script[4096], out[4096], data[1024], path[1024];
+    char quoted[1024];
+    if (native && (strchr(native, '\'') || cx_fmt(quoted, sizeof quoted, "'%s'", native))) return 2;
+    const char *entry = native ? quoted : "sh ./unisacc.com tools/mutation-gate.cx --";
+    cx_fmt(script, sizeof script, "mkdir -p '%s'/slot-0 '%s'/m && cp ./unisacc.com '%s'/slot-0/", T, T, T);
+    if (ckk_sh_t("check-mutation-gate", script, out, sizeof out, 10)) return 2;
+    quality_file("slot-0/probe.c", "int main(void) { return 0; }\n");
+    quality_file("slot-0/check.sh",
+                 "#!/bin/sh\n"
+                 "if grep -q 'return 0;' probe.c; then printf 'FAIL deliberate\n'; exit 1; fi\n"
+                 "if grep -q 'return 1;' probe.c; then printf 'FAIL deliberate\n'; exec timeout 0.1 sleep 1; fi\n"
+                 "if grep -q 'return 2;' probe.c; then printf 'FAIL deliberate\n'; exit 127; fi\n"
+                 "if grep -q 'return 3;' probe.c; then printf 'FAIL deliberate\n'; exit 1; fi\n"
+                 "if grep -q 'return 4;' probe.c; then printf 'FAIL deliberate-extra\n'; exit 1; fi\n"
+                 "if grep -q 'return 6;' probe.c; then exit 17; fi\n"
+                 "if grep -q 'return 7;' probe.c; then printf 'REFUSE fixture setup\nFAIL deliberate\n'; exit 2; fi\n"
+                 "if grep -q 'return 8;' probe.c; then kill -SEGV $$; fi\n"
+                 "exit 0\n");
+    quality_file("conf.tsv", "par\t1\nmax\t12\nmin\t0.6\ncov\t1\nquality\t1\n"
+                 "check\tsh check.sh\nexpect-name\tdeliberate\nexpect-rc\t17\n");
+    quality_file("mutants.tsv",
+                 "0\tprobe.c\t1\tint\tsame\n1\tprobe.c\t1\tint\tdeadline\n2\tprobe.c\t1\tint\tnot-found\n"
+                 "3\tprobe.c\t1\tint\tnamed\n4\tprobe.c\t1\tint\tprefix\n5\tprobe.c\t1\tint\tsurvived\n"
+                 "6\tprobe.c\t1\tint\texpected-rc\n7\tprobe.c\t1\tint\trefuse\n8\tprobe.c\t1\tint\tsignal\n"
+                 "9\tprobe.c\t2\tint\toutside\n10\tprobe.c\t1\tint\tcompile-fail\n"
+                 "11\tprobe.c\t2\tcov\tabort at entry of int main(void)\n");
+    for (int i = 0; i < 12; i++) {
+        cx_fmt(path, sizeof path, "m/%d.line", i);
+        if (i == 10) quality_file(path, "@@ deliberately broken @@");
+        else {
+            cx_fmt(data, sizeof data, "int main(void) { return %d; }", i);
+            quality_file(path, data);
+        }
+    }
+    cx_fmt(script, sizeof script, "%s worker --out '%s' --slot 0 2>&1", entry, T);
+    int rc = ckk_sh_t("check-mutation-gate", script, out, sizeof out, 45);
+    ck(rc == 0 && ckk_has(out, sizeof out, "rows=12"), "quality-worker-complete");
+    if (rc) puts(out);
+    cx_fmt(path, sizeof path, "%s/res-0.tsv", T);
+    FILE *receipt = fopen(path, "r");
+    if (receipt) {
+        for (int i = 0; i < 2 && fgets(data, sizeof data, receipt); i++) printf("QUALITY_WORKER_ROW\t%s", data);
+        fclose(receipt);
+    }
+    cx_fmt(script, sizeof script, "%s --report --out '%s' 2>&1", entry, T);
+    ckk_sh_t("check-mutation-gate", script, out, sizeof out, 10);
+    puts(out);
+    ck(ckk_has(out, sizeof out, "named=2 weak=1 unknown=5 invalid=2 survived=1"), "quality-counts");
+    ck(ckk_has(out, sizeof out, "lower=2/9 upper=8/9 min=0.60 status=INCONCLUSIVE"), "quality-interval-keeps-unknown");
+    ck(ckk_has(out, sizeof out, "missing=1") && ckk_has(out, sizeof out, "verdict=FAIL"), "quality-invalid-coverage-blocks");
+    cx_fmt(path, sizeof path, "%s/mutation-quality.tsv", T);
+    size_t n = 0;
+    char *rows = cx_read(path, &n);
+    ck(rows && strstr(rows, "0\tprobe.c\t1\tint\tINVALID\t"), "quality-noop-invalid");
+    ck(rows && strstr(rows, "9\tprobe.c\t2\tint\tINVALID\t"), "quality-out-of-range-invalid");
+    ck(rows && strstr(rows, "1\tprobe.c\t1\tint\tUNKNOWN\t124\t"), "quality-timeout-overrides-name");
+    ck(rows && strstr(rows, "2\tprobe.c\t1\tint\tUNKNOWN\t127\t"), "quality-missing-command-overrides-name");
+    ck(rows && strstr(rows, "3\tprobe.c\t1\tint\tKILL-named\t1\t"), "quality-exact-name");
+    ck(rows && strstr(rows, "4\tprobe.c\t1\tint\tKILL-weak\t1\t"), "quality-unrelated-name-weak");
+    ck(rows && strstr(rows, "6\tprobe.c\t1\tint\tKILL-named\t17\t"), "quality-explicit-exit");
+    ck(rows && strstr(rows, "7\tprobe.c\t1\tint\tUNKNOWN\t2\t"), "quality-setup-refusal");
+    ck(rows && strstr(rows, "8\tprobe.c\t1\tint\tUNKNOWN\t139\t"), "quality-signal");
+    ck(rows && strstr(rows, "10\tprobe.c\t1\tint\tUNKNOWN\t"), "quality-compile-refused");
+    if (rows) free(rows);
+    return 0;
+}
 
 static int gate(const char *name, const char *check, const char *extra, char *out, int cap) {
     char sc[4096];
@@ -30,11 +106,19 @@ static int gate(const char *name, const char *check, const char *extra, char *ou
     return ckk_sh_t("check-mutation-gate", sc, out, cap, 55);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     static char out[65536], sc[8192]; int rc;
+    if (argc >= 2 && (strcmp(argv[1], "--quality-fixture") || argc > 3)) return 2;
     rc = ckk_sh_t("check-mutation-gate", "mktemp -d \"${TMPDIR:-/tmp}/mg-check.XXXXXX\"", T, sizeof T, 10);
     { int n = (int)tx_len(T, sizeof T); while (n > 0 && (T[n - 1] == '\n' || T[n - 1] == ' ')) T[--n] = 0; }
     if (rc != 0 || !T[0]) { printf("CHECK_MUTATION_GATE\tok=0\tfailed=1\n"); return 1; }
+    if (argc >= 2) {
+        rc = quality_fixture(argc == 3 ? argv[2] : 0);
+        cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T);
+        ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
+        printf("CHECK_MUTATION_GATE_QUALITY\tok=%d\tfailed=%d\n", ok, failed);
+        return rc ? rc : failed != 0;
+    }
     cx_fmt(sc, sizeof sc,
         "set -e; cd %s; mkdir -p repo/tools; cd repo; git init -q; git config user.email t@t; git config user.name t;\n"
         "printf '%%s\\n' 'int main(void) {' '    printf(\"start\\n\");' '    return 0;' '}' > tools/fx.cx\n"
@@ -48,8 +132,10 @@ int main(void) {
     ck(rc == 0, "fixture-repo");
     if (rc != 0) { printf("%s\nCHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", out, ok, failed); return 1; }
 
-    rc = gate("strong", "o=$(sh ./unisacc.com tools/fx.cx) && test \"$o\" = \"$(printf \"start\\nR=5 20 -1 10 -2\")\"", "", out, sizeof out);
+    rc = gate("strong", "o=$(sh ./unisacc.com tools/fx.cx) && test \"$o\" = \"$(printf \"start\\nR=5 20 -1 10 -2\")\"", "--report --expect-rc 1", out, sizeof out);
     ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && !ckk_has(out, sizeof out, " mutants=0 "), "strong-high");
+    const char *strong_quality = strstr(out, "MUTATION_QUALITY named=");
+    ck(strong_quality && atoi(strong_quality + sizeof("MUTATION_QUALITY named=") - 1) > 0, "strong-persisted-exit-contract");
     if (!(rc == 0)) printf("%.1500s\n", out);
 
     rc = gate("weak", "echo CHECK ok=1 failed=0", "--coverage-check", out, sizeof out);
@@ -92,6 +178,7 @@ int main(void) {
     rc = gate("red", "echo CHECK ok=0 failed=1", "", out, sizeof out);
     ck(rc == 2 && ckk_has(out, sizeof out, "baseline check not green"), "red-baseline");
 
+    ck(quality_fixture(0) == 0, "quality-fixture-ready");
     cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
     printf("CHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", ok, failed);
     return failed ? 1 : 0;
