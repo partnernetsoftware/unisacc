@@ -1,5 +1,11 @@
 # UXE 对标交接
 
+## 当前续跑
+
+候选 `f2f8a57` 已推送。A 栏已有 43/214，B 栏已有 37/200。回归共 432 项，已通过 334 项，尚有 96 项未跑。BufferGeometryLoader 和另外一项编译超时需分别单路复验，节点为 t95 与 t316。C6 准备与功能 flow 已过 17 项，GPU 并集为 43 场景、1682 个断言。待首链协调解除后先完成候选，再按 [A 与 B 栏缺项计划](ux-three-missing-plan.md) 推进。下文早期各里程碑数字只用于回溯。
+
+C6 准备使用 `cx ujs/tools-ux/linked-wasm-flow.cx -- /tmp/uxe-linked-cache all | cx tools/devsvc.cx -- flow - --par 2`，缓存目录先创建。键包含有序来源、编译入口与载体、词法及解析权重，命中仍核 Wasm 摘要。JPEG 旧冷装配样本 9041 毫秒，拆分后冷基座 6001 毫秒；历史命中探针 81 毫秒，后续实测 31 毫秒。编译吞吐约 5.5 KiB/秒。缺缓存时功能门具名退出 1，准备或摘要校验通过不能代替功能门。
+
 ## 当前状态
 
 合同、分母与里程碑见 [UXE 对标规划](../prd_uxe_three.md)。软件与 GPU 两条渲染路径共用一个基座 Wasm 模块。产品是第二个 Wasm 模块。宿主桥只转发 ABI，GPU 预算 600 行，软件预算 300 行。线上 D1、D2、D3 已使用两模块软件路径。D4 迁移排在 M7 后，D5 等 M12 验收。
@@ -55,7 +61,6 @@ M7 尚未开始。恢复后先继续 40 项收口，本轮剩 33 项。燃尽表
 在仓内 ujs 工作树运行。忽略的 `ujs/ujs.com` 由 `sh ./unisacc.com ujs/product/build-ape.cx` 构造，依赖它的门会重新编译 .ujs。r160 对照使用仓内 `ujs/practice/web/game/three.module.js`，对照和夹具留在 ujs。
 
 ```sh
-uptime
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/build-ape.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/product/cli-host.cx
 sh ./unisacc.com tools/devsvc.cx -- x --par 1 sh ./unisacc.com ujs/tools-ux/gen-three-burndown.cx -- --check

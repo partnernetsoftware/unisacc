@@ -1,0 +1,111 @@
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+typedef struct {
+    const char *group, *route, *basis;
+} Plan;
+
+static int has(const char *name,const char *part) {
+    return tx_contains(name,tx_len(name,128),part,tx_len(part,128));
+}
+
+static Plan b_plan(const char *name) {
+    if(has(name,"_ASTC_") || has(name,"_BPTC_") || has(name,"_ETC") ||
+       has(name,"_PVRTC_") || has(name,"_S3TC_") || has(name,"RGTC")) {
+        return (Plan){"丙","设备压缩纹理","实测扩展、上传与像素；具名拒绝只说明诊断"};
+    }
+    if(tx_eqz(name,"REVISION"))
+        return (Plan){"乙","兼容元数据","验证 r160 版本标识的正向读回；拒绝不计分"};
+    if(has(name,"Wrapping") || has(name,"Filter"))
+        return (Plan){"甲","纹理采样","GpuPacket_drawTexture；用 UV 越界与显式 mip 区分采样，核对别名"};
+    if(has(name,"Stencil") || (has(name,"Depth") && !has(name,"Format") && !has(name,"Packing")) ||
+       has(name,"Equation") || has(name,"Blending") || has(name,"Factor") ||
+       has(name,"CullFace") || tx_eqz(name,"FrontSide") || tx_eqz(name,"BackSide") || tx_eqz(name,"DoubleSide"))
+        return (Plan){"甲","GPU 渲染状态","GpuPacket_setRenderState；正常值须改变目标像素或深度模板值"};
+    if(has(name,"Interpolate") || has(name,"Ending"))
+        return (Plan){"甲","轨道插值","KeyframeTrack 与实例插值入口；相同时间点对照轨道读回"};
+    if(tx_eqz(name,"NoToneMapping") || tx_eqz(name,"NoColorSpace") ||
+       has(name,"Transfer") || has(name,"Primaries") || has(name,"Encoding"))
+        return (Plan){"甲","颜色变换","ColorManagement 与输出门；按具体色域核对线性值及输出，历史标签须核对映射"};
+    if(tx_eqz(name,"UVMapping") || tx_eqz(name,"RGBAFormat") ||
+       tx_eqz(name,"DepthFormat") || tx_eqz(name,"DepthStencilFormat"))
+        return (Plan){"甲","纹理与目标格式","现有 RGBA 或深度目标；核对正常纹素上传、采样或读回"};
+    if(tx_eqz(name,"TrianglesDrawMode") || tx_eqz(name,"WebGLCoordinateSystem"))
+        return (Plan){"甲","三角形与投影","GpuPacket 三角形与场景投影；读回真实图元或裁剪坐标"};
+    return (Plan){"丙","软件语义缺口","先确认正常使用入口；缺投影、格式、材质或状态分支时先实现再验"};
+}
+
+static Plan a_plan(const char *name) {
+    if(has(name,"Compressed"))
+        return (Plan){"丙","设备压缩纹理","需要格式上传与采样的实证，另核维度与 mip 规则"};
+    if(tx_eqz(name,"RenderTarget"))
+        return (Plan){"甲","目标对象","已有目标申请与读回；在公共类接线补 clone、resize、dispose"};
+    if(tx_eqz(name,"Interpolant"))
+        return (Plan){"甲","公共插值对象","已有实例存储和缓存；补公开基类、设置和虚方法约定"};
+    if(tx_eqz(name,"Light") || tx_eqz(name,"Material"))
+        return (Plan){"甲","公共对象","复用已存在的派生行为；补基类字段、复制、事件与序列化"};
+    if(tx_eqz(name,"DepthTexture") || tx_eqz(name,"FramebufferTexture"))
+        return (Plan){"甲","目标与纹理","复用 WebGL 深度目标和读回；补类身份与生命周期"};
+    if(tx_eqz(name,"VideoTexture") || tx_eqz(name,"createCanvasElement"))
+        return (Plan){"丙","浏览器宿主","需要媒体帧或真实 DOM 合同；边界修订前仍计缺"};
+    return (Plan){"丙","软件语义缺口","按 r160 补公开契约与产品 Wasm 可调用入口"};
+}
+
+int main(int argc,char **argv) {
+    if(argc!=3 || (!tx_eqz(argv[1],"A") && !tx_eqz(argv[1],"B")) ||
+       (!tx_eqz(argv[2],"--write") && !tx_eqz(argv[2],"--check"))) return 2;
+    unsigned char *inventory=0,*reference=0;
+    int64_t bytes=0, refBytes=0;
+    int failed=sy_read_file("ujs/practice/uxe/three-inventory.tsv",&inventory,&bytes,400000) ||
+        sy_read_file("ujs/practice/web/game/three.module.js",&reference,&refBytes,4000000);
+    const char marker[]="\nexport { ";
+    const long at=failed?-1:tx_find((const char *)reference,refBytes,marker,sizeof marker-1);
+    if(at<0) failed=1;
+    const char *exports=failed?"":(const char *)reference+at+sizeof marker-1;
+    static char output[65000];
+    int used=tx_snprintf(output,sizeof output,"lane\tname\tgroup\troute\tbasis\n");
+    int count[3]={0};
+    char lane=argv[1][0];
+    for(int64_t row=0;!failed && row<bytes;) {
+        int64_t end=row;
+        while(end<bytes && inventory[end]!='\n') end++;
+        int64_t fields[5]={row};
+        int seen=1;
+        for(int64_t i=row;i<end && seen<5;i++) if(inventory[i]=='\t') fields[seen++]=i+1;
+        if(seen!=5) { failed=1; break; }
+        if(inventory[row]==lane && fields[1]==row+2 &&
+           tx_same((const char *)inventory+fields[3],fields[4]-fields[3]-1,"缺",3)) {
+            char name[128];
+            int nameBytes=tx_snprintf(name,sizeof name,"%.*s",(int)(fields[3]-fields[2]-1),inventory+fields[2]);
+            char key[140];
+            const int keyBytes=tx_snprintf(key,sizeof key," %s",name);
+            const long tail=refBytes-(exports-(const char *)reference);
+            const long hit=keyBytes<=0?-1:tx_find(exports-1,tail+1,key,keyBytes);
+            if(nameBytes<=0 || nameBytes>=sizeof name || hit<0 ||
+               (exports[hit+keyBytes-1]!=',' && exports[hit+keyBytes-1]!=' ')) {
+                failed=1; break;
+            }
+            Plan plan=lane=='B'?b_plan(name):a_plan(name);
+            count[tx_eqz(plan.group,"甲")?0:tx_eqz(plan.group,"乙")?1:2]++;
+            int n=tx_snprintf(output+used,sizeof output-used,"%c\t%s\t%s\t%s\t%s\n",lane,name,plan.group,plan.route,plan.basis);
+            if(n<=0 || n>=sizeof output-used) { failed=1; break; }
+            used+=n;
+        }
+        row=end+1;
+    }
+    char path[80];
+    tx_snprintf(path,sizeof path,"ujs/plans/ux-three-%c-plan.tsv",lane=='A'?'a':'b');
+    if(!failed && tx_eqz(argv[2],"--write")) failed=sy_write_file(path,output,used,0644)!=0;
+    if(!failed && tx_eqz(argv[2],"--check")) {
+        unsigned char *stored=0;
+        int64_t size=0;
+        failed=sy_read_file(path,&stored,&size,sizeof output) || !tx_same((const char *)stored,size,output,used);
+        mm_free(stored);
+    }
+    printf("UX_THREE_MISSING lane=%c A=%d B=%d C=%d total=%d failed=%d\n",lane,count[0],count[1],count[2],count[0]+count[1]+count[2],failed);
+    mm_free(inventory);
+    mm_free(reference);
+    return failed;
+}

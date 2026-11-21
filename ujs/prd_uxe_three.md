@@ -255,13 +255,15 @@ G-anim 独立门覆盖七类 Track、离散与线性、三次插值端点、四�
 
 渐进彩色 JPEG 门运行 `cx ujs/tests/jpeg-progressive-color-io.cx`。原联合编译写入测试数据时为 6230 毫秒、40197 字节，改为在测试实例的 UX 内存装载 JPEG 后为 5842 毫秒、35698 字节。控制变量的规模探针用 `cx ujs/tests/compiler-scale.cx` 复现。5、10、20、40 KiB 源分别含 9、18、37、74 个可达原生函数，单次编译 938、1664、3352、7330 毫秒。相邻倍增为 1.77、2.01、2.19 倍。这组采样整体近线性，暂不据此认定某一解析函数是热点。
 
-JPEG 基座与探针改走 C6 版本化链接。两块 JPEG 由 .cx 构造，Chrome 逐例新建两个实例，经基座接口写入字节并传递标量，内存保持独立。原 14 项同一序号表一次验完。独立准备的空缓存基座实测 6001 毫秒，原冷装配样本为 9041 毫秒。该准备后的消费者编译为 31 毫秒，旧缓存命中样本为 81 毫秒，仍用原来的六秒编译界。先创建私有缓存目录，并设置 `UXE_JPEG_WASM_CACHE` 指向该目录。准备节点运行 `cx ujs/tests/jpeg-progressive-color-io.cx -- --prepare`，总预算 55 秒，编译子进程最多 50 秒。准备成功后启动功能门 `cx ujs/tests/jpeg-progressive-color-io.cx`。命中时核对有序源码、编译入口、编译载体与词法及解析权重构成的键，并核对 Wasm 内容哈希。功能门遇缓存缺失会具名非零退出。每次仍在六秒界内编译消费者，然后启动 Chrome，执行独立 .cx 金值及 r160 对照。`-- --check` 是独立准备校验，强制重编并比对已缓存基座哈希。缓存损坏也会直接拒绝。准备与准备校验均不记为功能验收通过。
+JPEG 基座与探针改走 C6 版本化链接。两块 JPEG 由 .cx 构造，Chrome 逐例新建两个实例，经基座接口写入字节并传递标量，内存保持独立。原 14 项同一序号表一次验完。独立准备的空缓存基座实测 6001 毫秒，原冷装配样本为 9041 毫秒。该准备后的消费者编译为 31 毫秒，旧缓存命中样本为 81 毫秒，仍用原来的六秒编译界。先创建私有缓存目录，并设置 `UXE_JPEG_WASM_CACHE` 指向该目录。准备节点运行 `cx ujs/tests/jpeg-progressive-color-io.cx -- --prepare`，总预算 55 秒，编译子进程最多 50 秒。准备成功后启动功能门 `cx ujs/tests/jpeg-progressive-color-io.cx`。命中时核对有序源码、编译入口、编译载体与词法及解析权重构成的键，并核对 Wasm 内容哈希。功能门遇缓存缺失时以 rc 1 输出「基座缓存缺失：先运行准备步骤」，随后退出。每次仍在六秒界内编译消费者，然后启动 Chrome，执行独立 .cx 金值及 r160 对照。`-- --check` 是独立准备校验，强制重编并比对已缓存基座哈希。缓存损坏也会直接拒绝。准备与准备校验均不记为功能验收通过。
 
 JPEG Color444 门用 `UXE_JPEG_COLOR_WASM_CACHE` 选择缓存，调用 `cx ujs/tests/jpeg-color-io.cx -- --prepare` 后运行无参数功能门。独立准备冷编译 6153 毫秒，节点总耗时 14492 毫秒。缓存命中探针编译为 40 毫秒，十三项真实 Chrome 与 r160 对照通过。`-- --prepare --check` 复验哈希。空缓存及解码和加载器篡改各具名非零。
 
 渐进灰度 JPEG 门设置 `UXE_JPEG_GRAY_WASM_CACHE`，准备与摘要验证参数相同。冷基座编译 6172 毫秒，独立节点耗时 15070 毫秒。缓存命中探针编译 31 毫秒，十三项通过且两个旧篡改分别失败。PNG 编码和存储块门仅隔离复验，两项都通过，沿用原门。
 
 Geometry JSON 门使用同样的准备与功能节点。设置 `UXE_GEOMETRY_WASM_CACHE` 后运行 `cx ujs/tests/geometry-json-load-struct.cx -- --prepare`，再运行无参数功能门。准备冷编译实测 6343 毫秒，消费者编译 41 毫秒，六秒界保留。Chrome 用十套独立实例对照 r160 与原金值。准备校验加 `-- --prepare --check` 重编比对缓存摘要。缺失缓存具名退出。
+
+第 5 节的缺项实施顺序见 [A 与 B 栏缺项计划](plans/ux-three-missing-plan.md)。
 
 已分离的门共用一个 flow 入口。先创建私有缓存目录，选择 `jpeg`、`jpeg-color`、`jpeg-gray`、`geometry`、`gpu-flat`、`gpu-material`、`gpu-light`、`gpu-tail`，或用 `all` 并行准备全部基座。准备节点的总预算为 55 秒，成功后才开始功能门。
 
