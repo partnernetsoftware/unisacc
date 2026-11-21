@@ -25,7 +25,15 @@ native function soft_draw_max(a:f64,b:f64,c:f64) f64 {
   return v;
 }
 
-native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64) i64 {
+native function soft_draw_edge(weight:f64,dx:f64,dy:f64,area:f64) i64 {
+  if(weight!=0.0) { return weight>0.0; }
+  let x=dx;
+  let y=dy;
+  if(area<0.0) { x=0.0-x; y=0.0-y; }
+  return y>0.0 || (y==0.0 && x<0.0);
+}
+
+native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64,blend:i64) i64 {
   let x0=(ux_f32(vertex)+1.0)*0.5*w;
   let x1=(ux_f32(vertex+28)+1.0)*0.5*w;
   let x2=(ux_f32(vertex+56)+1.0)*0.5*w;
@@ -57,12 +65,22 @@ native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64) i6
       let a=((x2-x1)*(py-y1)-(y2-y1)*(px-x1))/area;
       let b=((x0-x2)*(py-y2)-(y0-y2)*(px-x2))/area;
       let c=1.0-a-b;
-      if(a>=0.0 && b>=0.0 && c>=0.0) {
+      let covered=a>=0.0 && b>=0.0 && c>=0.0;
+      if(covered && blend) {
+        covered=soft_draw_edge(a,x2-x1,y2-y1,area) &&
+          soft_draw_edge(b,x0-x2,y0-y2,area) && soft_draw_edge(c,x1-x0,y1-y0,area);
+      }
+      if(covered) {
         let z=0.5+(a*near+b*mid+c*far)*0.5;
         let at=(y*w+x)*4;
         if(z>=0.0 && z<=1.0 && z<ux_f32(depth+at)) {
-          let sample=ux_u32_put(rgba+at,color);
-          let stored=ux_f32_put(depth+at,z);
+          if(blend) {
+            let composed=SceneRaster_sourceOver(ux_u32(rgba+at),color);
+            let sample=ux_u32_put(rgba+at,composed);
+          } else {
+            let sample=ux_u32_put(rgba+at,color);
+            let stored=ux_f32_put(depth+at,z);
+          }
           pixels=pixels+1;
         }
       }
@@ -74,9 +92,9 @@ native function soft_draw_triangle(vertex:i64,rgba:i64,depth:i64,w:i64,h:i64) i6
 }
 
 // Consume the same projected stream as SceneDraw_gpuFlat. Depth starts at
-// 1 and the target is top-down; this first slice draws constant opaque color.
-native function SceneDraw_softwareFlat(target:i64,vertices:i64,count:i64) i64 {
-  if(!scene_render_span(target,SceneRasterTarget.size,4) || count<3 || count>2340 || count%3!=0 ||
+// 1 and the target is top-down. Transparent draws test but preserve depth.
+native function SceneDraw_softwareColor(target:i64,vertices:i64,count:i64,blend:i64) i64 {
+  if(blend<0 || blend>1 || !scene_render_span(target,SceneRasterTarget.size,4) || count<3 || count>2340 || count%3!=0 ||
      !scene_render_span(vertices,count*28,4)) { return 0-1; }
   let rgba=ux_u32(target+SceneRasterTarget.rgba);
   let depth=ux_u32(target+SceneRasterTarget.depth);
@@ -97,18 +115,23 @@ native function SceneDraw_softwareFlat(target:i64,vertices:i64,count:i64) i64 {
       if(v-v!=0.0 || v<0.0-1048576.0 || v>1048576.0) { return 0-2; }
       j=j+1;
     }
-    if(ux_f32(at+24)!=1.0) { return 0-2; }
+    let opacity=ux_f32(at+24);
+    if(opacity<0.0 || opacity>1.0 || (!blend && opacity!=1.0)) { return 0-2; }
     let first=vertices+(i/3)*84;
     if(ux_u32(first+12)!=ux_u32(at+12) || ux_u32(first+16)!=ux_u32(at+16) ||
-       ux_u32(first+20)!=ux_u32(at+20)) { return 0-2; }
+       ux_u32(first+20)!=ux_u32(at+20) || ux_u32(first+24)!=ux_u32(at+24)) { return 0-2; }
     i=i+1;
   }
   let pixels=0;
   i=0;
   while(i<count) {
-    let drawn=soft_draw_triangle(vertices+i*28,rgba,depth,w,h);
+    let drawn=soft_draw_triangle(vertices+i*28,rgba,depth,w,h,blend);
     pixels=pixels+drawn;
     i=i+3;
   }
   return pixels;
+}
+
+native function SceneDraw_softwareFlat(target:i64,vertices:i64,count:i64) i64 {
+  return SceneDraw_softwareColor(target,vertices,count,0);
 }
