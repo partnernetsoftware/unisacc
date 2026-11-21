@@ -1,0 +1,64 @@
+struct AnimationMathKey {
+  time: f64;
+  values: u32;
+  lanes: u32;
+}
+
+// Math values expose the same ordered components as r160's toArray callback.
+// Zero lanes marks a missing value. Existing output rows are appended to.
+native function AnimationUtils_flattenMathKeys(keys:i64,count:i64,out:i64) i64 {
+  if(count<0 || count>65536 || keys%8!=0 || !animation_span(keys,count*AnimationMathKey.size) ||
+     !animation_span(out,AnimationJsonRows.size) ||
+     animation_json_overlap(keys,count*AnimationMathKey.size,out,AnimationJsonRows.size)) { return 0-1; }
+  let times=ux_u32(out+AnimationJsonRows.times);
+  let values=ux_u32(out+AnimationJsonRows.values);
+  let rowCap=ux_u32(out+AnimationJsonRows.rowCapacity);
+  let valueCap=ux_u32(out+AnimationJsonRows.valueCapacity);
+  let rows=ux_u32(out+AnimationJsonRows.rowCount);
+  let entries=ux_u32(out+AnimationJsonRows.valueCount);
+  let keyBytes=count*AnimationMathKey.size;
+  if(rows>rowCap || entries>valueCap || times%8!=0 || values%8!=0 ||
+     !animation_span(times,rowCap*8) || !animation_span(values,valueCap*8) ||
+     animation_json_overlap(times,rowCap*8,values,valueCap*8) ||
+     animation_json_overlap(times,rowCap*8,keys,keyBytes) || animation_json_overlap(values,valueCap*8,keys,keyBytes) ||
+     animation_json_overlap(times,rowCap*8,out,AnimationJsonRows.size) ||
+     animation_json_overlap(values,valueCap*8,out,AnimationJsonRows.size)) { return 0-1; }
+  let i=0;
+  let checkedRows=rows;
+  let checkedValues=entries;
+  while(i<count) {
+    let key=keys+i*AnimationMathKey.size;
+    let lanes=ux_u32(key+AnimationMathKey.lanes);
+    if(lanes!=0) {
+      let data=ux_u32(key+AnimationMathKey.values);
+      let time=ux_f64(key+AnimationMathKey.time);
+      if(lanes<2 || lanes>4 || data%8!=0 || !animation_span(data,lanes*8) || time-time!=0.0 ||
+         animation_json_overlap(data,lanes*8,times,rowCap*8) || animation_json_overlap(data,lanes*8,values,valueCap*8) ||
+         checkedRows>=rowCap || lanes>valueCap-checkedValues) { return 0-2; }
+      checkedRows=checkedRows+1;
+      checkedValues=checkedValues+lanes;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let key=keys+i*AnimationMathKey.size;
+    let lanes=ux_u32(key+AnimationMathKey.lanes);
+    if(lanes!=0) {
+      let savedTime=ux_f64_put(times+rows*8,ux_f64(key+AnimationMathKey.time));
+      let data=ux_u32(key+AnimationMathKey.values);
+      let channel=0;
+      while(channel<lanes) {
+        let stored=ux_f64_put(values+(entries+channel)*8,ux_f64(data+channel*8));
+        channel=channel+1;
+      }
+      rows=rows+1;
+      entries=entries+lanes;
+    }
+    i=i+1;
+  }
+  let savedRows=ux_u32_put(out+AnimationJsonRows.rowCount,rows);
+  let savedEntries=ux_u32_put(out+AnimationJsonRows.valueCount,entries);
+  return out;
+}
+
