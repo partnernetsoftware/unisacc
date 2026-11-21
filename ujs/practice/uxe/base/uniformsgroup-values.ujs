@@ -1,0 +1,109 @@
+native function ug_clone_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function ug_clone_disjoint(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n==0 || m==0 || a+n<=b || b+m<=a;
+}
+
+native function ug_clone_readable(at:i64,bytes:i64,dst:i64,table:i64,tableBytes:i64,arena:i64,space:i64) i64 {
+  return ug_clone_span(at,bytes) && ug_clone_disjoint(at,bytes,dst,UniformsGroup.size) &&
+    ug_clone_disjoint(at,bytes,table,tableBytes) && ug_clone_disjoint(at,bytes,arena,space);
+}
+
+native function ug_clone_listeners(group:i64,table:i64,size:i64,arena:i64,space:i64) i64 {
+  let capacity=ux_u32(group+EventDispatcher.listenerCapacity);
+  let rows=ux_u32(group+EventDispatcher.listeners);
+  let bytes=capacity*8;
+  return ux_u32(group+EventDispatcher.listenerCount)<=capacity && ug_clone_span(rows,bytes) &&
+    ug_clone_disjoint(rows,bytes,table,size) && ug_clone_disjoint(rows,bytes,arena,space);
+}
+
+// Kinds 1..6 reuse UniformField's GPU-compatible payload layout. Kind 7
+// denotes an opaque value without clone(); its identity remains shared.
+native function ug_clone_payload(kind:i64) i64 {
+  if(kind>=1 && kind<=6) { return uniform_std140_source(kind); }
+  if(kind==7) { return 0; }
+  return 0-1;
+}
+
+// Clone into an initialized destination group, preserving its listeners.
+// shape=-1 treats every group entry as a Uniform. Otherwise each u32
+// count is zero for a direct Uniform, UINT32_MAX for an empty list, or a packed list length.
+// r160 flattens one such list level and clones duplicate uniforms separately.
+native function UniformsGroup_copyValues(dst:i64,src:i64,shape:i64,arena:i64,space:i64) i64 {
+  if(!ug_clone_span(dst,UniformsGroup.size) || !ug_clone_span(src,UniformsGroup.size) ||
+     !ug_clone_span(arena,space) || !ug_clone_disjoint(dst,UniformsGroup.size,arena,space)) { return 0-1; }
+  let table=ux_u32(dst+UniformsGroup.uniforms);
+  let from=ux_u32(src+UniformsGroup.uniforms);
+  let count=ux_u32(src+UniformsGroup.count);
+  if(!ug_clone_span(table,4) || !ug_clone_span(from,4)) { return 0-1; }
+  let limit=ux_u32(table);
+  let size=4+limit*4;
+  if(limit>4096 || count>4096 || count>ux_u32(from) ||
+     !ug_clone_span(table,size) || !ug_clone_disjoint(table,size,dst,UniformsGroup.size) ||
+     !ug_clone_disjoint(table,size,arena,space) ||
+     !ug_clone_listeners(dst,table,size,arena,space) ||
+     !ug_clone_listeners(src,table,size,arena,space) ||
+     !ug_clone_readable(src,UniformsGroup.size,dst,table,size,arena,space) ||
+     !ug_clone_readable(from,4+count*4,dst,table,size,arena,space) ||
+     (shape!=0-1 && !ug_clone_readable(shape,count*4,dst,table,size,arena,space))) { return 0-1; }
+
+  let used=0;
+  let written=0;
+  let phase=0;
+  while(phase<2) {
+    let i=0;
+    used=0;
+    written=0;
+    while(i<count) {
+      let entry=from+4+i*4;
+      let nested=0;
+      if(shape!=0-1) { nested=ux_u32(shape+i*4); }
+      let items=entry;
+      let length=1;
+      if(nested==4294967295) {
+        length=0;
+      } else if(nested>0) {
+        items=ux_u32(entry);
+        length=nested;
+        if(length>4096 || !ug_clone_readable(items,length*4,dst,table,size,arena,space)) { return 0-1; }
+      }
+      let j=0;
+      while(j<length) {
+        let uniform=ux_u32(items+j*4);
+        if(!ug_clone_readable(uniform,Uniform.size,dst,table,size,arena,space)) { return 0-1; }
+        let field=ux_u32(uniform+Uniform.value);
+        if(!ug_clone_readable(field,UniformField.size,dst,table,size,arena,space)) { return 0-1; }
+        let kind=ux_u32(field+UniformField.kind);
+        let input=ux_u32(field+UniformField.source);
+        let bytes=ug_clone_payload(kind);
+        if(bytes<0 || (bytes>0 && !ug_clone_readable(input,bytes,dst,table,size,arena,space))) { return 0-1; }
+        let footprint=Uniform.size+UniformField.size+bytes;
+        if(written==limit || footprint>space-used) { return 0-2; }
+        if(phase==1) {
+          let out=arena+used;
+          let value=out+Uniform.size;
+          let location=input;
+          if(bytes>0) {
+            location=value+UniformField.size;
+            let copied=uxe_copy_record(location,input,bytes);
+          }
+          let a=ux_u32_put(value+UniformField.kind,kind);
+          let b=ux_u32_put(value+UniformField.source,location);
+          let c=ux_u32_put(out+Uniform.value,value);
+          let d=ux_u32_put(table+4+written*4,out);
+        }
+        used=used+footprint;
+        written=written+1;
+        j=j+1;
+      }
+      i=i+1;
+    }
+    phase=phase+1;
+  }
+  let a=ux_u32_put(dst+UniformsGroup.count,written);
+  let b=ux_u32_put(dst+UniformsGroup.name,ux_u32(src+UniformsGroup.name));
+  let c=ux_u32_put(dst+UniformsGroup.usage,ux_u32(src+UniformsGroup.usage));
+  return dst;
+}
