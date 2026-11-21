@@ -946,7 +946,7 @@ static char co_manpath[CO_MAX][300];
 static void co_addkey(int t, const char *s, long n) {
     if(t<0||t>=CO_REGT)co_die("registration table index",0);
     long have = tx_len(co_regkeys[t], sizeof co_regkeys[t]);
-    if (n <= 0) return;
+    if (n <= 0 || co_ukey_has(co_regkeys[t], s, n)) return;
     if (have + n + 2 >= (long)sizeof co_regkeys[t]) co_die("too many --registered keys", CO_REG_TABLE[t]);
     if (have) co_regkeys[t][have++] = ',';
     tx_copy(co_regkeys[t] + have, sizeof co_regkeys[t] - have, s, n);
@@ -1412,6 +1412,42 @@ int main(int argc, char **argv) {
             co_addkey(2, path[k], pl); co_addkey(3, path[k], pl);
             if (b > 0) { co_addkey(2, path[k] + b, pl - b); co_addkey(3, path[k] + b, pl - b); }
         }
+        {
+            size_t tn = 0; char *tb = (char *)cx_read("build/table-index.tsv", &tn);
+            if (tb && tn > 0) {
+                for (k = 0; k < np; k++) {
+                    long pl = tx_len(path[k], 4096);
+                    size_t wn = 0, hn = 0; char *wb = 0, *hb = 0, spec[4400];
+                    if (pl <= 9 || !tx_prefix(path[k], pl, "tools/", 6) || !tx_suffix(path[k], pl, ".cx", 3)) continue;
+                    wb = (char *)cx_read(path[k], &wn);
+                    if (!cx_fmt(spec, sizeof spec, "HEAD:%s", path[k])) {
+                        char *hv[] = {"git", "show", spec, 0};
+                        if (cx_runv_timeout(hv, 15, &hb, &hn) != 0 && hb) { mm_free(hb); hb = 0; hn = 0; }
+                    }
+                    if (wb || hb) {
+                        long at = 0;
+                        while (at < (long)tn) {
+                            long e = tx_chr(tb + at, (long)tn - at, '\n'), l = e < 0 ? (long)tn - at : e;
+                            long tab = tx_chr(tb + at, l, '\t');
+                            if (tab > 6 && tb[at] != '#' && !tx_same(tb + at, tab, "table", 5)) {
+                                const char *tp = tb + at; long tpl = tab, b = tpl;
+                                while (b > 0 && tp[b - 1] != '/') b--;
+                                const char *tnm = tp + b; long tnml = tpl - b;
+                                if (tnml > 4 &&
+                                    ((wb && tx_find(wb, (long)wn, tnm, tnml) >= 0) ||
+                                     (hb && tx_find(hb, (long)hn, tnm, tnml) >= 0))) {
+                                    co_addkey(3, tp, tpl);
+                                }
+                            }
+                            at += l + (e >= 0);
+                        }
+                    }
+                    if (wb) mm_free(wb);
+                    if (hb) mm_free(hb);
+                }
+            }
+            if (tb) mm_free(tb);
+        }
         for (t = 0; t < CO_REGT; t++) {
             if (!co_regkeys[t][0] || sy_exists(CO_REG_TABLE[t]) != 1) continue;
             /* a --whole/--keyed of a table this set owns is dropped, not refused (5 of the 20 failed devsvc commits
@@ -1420,6 +1456,7 @@ int main(int argc, char **argv) {
                 int j;
                 if (keys[k] && keys[k][0]) {
                     const char *kp = keys[k];
+                    co_ukey_check(path[k], keys[k]);
                     while (*kp) {
                         const char *ke = kp;
                         while (*ke && *ke != ',') ke++;
