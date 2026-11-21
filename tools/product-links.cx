@@ -1,0 +1,235 @@
+/* tools/product-links.cx -- inventory and classify all symlinks inside the 7 product trees
+   (cx, src, exec, seed, weights, include, kernel) into build/product-links.tsv.
+   Identity-soundness fact source (v0.0.90 source-packages-v3, design v2.9):
+     class 甲: declared under cx/ or src/, real_path outside the 7 product trees, and target is
+               either a .cx file or a directory whose keep()-filtered files are all .cx.
+     class 乙: declared under exec/seed/weights/include/kernel, or real_path inside product trees,
+               or out-of-tree target that is not .cx (e.g. .h/.c/.tsv/non-cx dir).
+   Usage: sh ./unisacc.com tools/product-links.cx -- --write|--check [--root DIR] */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use path.path
+#pragma unisa use mem.bytes
+
+typedef struct {
+    char link[256];
+    char target[256];
+    char realp[256];
+    char cls[8];
+    char reason[48];
+} PlRow;
+
+static PlRow pl_rows[256];
+static int pl_n;
+static char pl_root[512];
+
+static int pl_in_tree(const char *rel) {
+    return strncmp(rel, "cx/", 3) == 0 || strcmp(rel, "cx") == 0 ||
+           strncmp(rel, "src/", 4) == 0 || strcmp(rel, "src") == 0 ||
+           strncmp(rel, "exec/", 5) == 0 || strcmp(rel, "exec") == 0 ||
+           strncmp(rel, "seed/", 5) == 0 || strcmp(rel, "seed") == 0 ||
+           strncmp(rel, "weights/", 8) == 0 || strcmp(rel, "weights") == 0 ||
+           strncmp(rel, "include/", 8) == 0 || strcmp(rel, "include") == 0 ||
+           strncmp(rel, "kernel/", 7) == 0 || strcmp(rel, "kernel") == 0;
+}
+
+static int pl_has_sfx(const char *s, const char *sfx) {
+    long n = (long)strlen(s), m = (long)strlen(sfx);
+    return n >= m && strcmp(s + n - m, sfx) == 0;
+}
+
+static int pl_is_keep_ext(const char *name) {
+    return pl_has_sfx(name, ".py") || pl_has_sfx(name, ".c") || pl_has_sfx(name, ".cx") ||
+           pl_has_sfx(name, ".h") || pl_has_sfx(name, ".inc") || pl_has_sfx(name, ".tsv") ||
+           pl_has_sfx(name, ".json") || pl_has_sfx(name, ".sh");
+}
+
+/* Resolve rel (relative to pl_root) by following symlinks iteratively up to 16 hops. */
+static int pl_resolve(const char *rel, char *out, int cap) {
+    char cur[512], full[1024], lbuf[512], joined[512], norm[512];
+    int hop;
+    cx_fmt(cur, (long)sizeof cur, "%s", rel);
+    for (hop = 0; hop < 16; hop++) {
+        sy_stat_t st;
+        long rn;
+        cx_fmt(full, (long)sizeof full, "%s/%s", pl_root, cur);
+        if (sy_lstat(full, &st) != 0) break;
+        if (st.kind != 'l') break;
+        rn = sy_readlink(full, lbuf, (long)sizeof(lbuf) - 1);
+        if (rn <= 0) break;
+        lbuf[rn] = 0;
+        if (lbuf[0] == '/') {
+            cx_fmt(joined, (long)sizeof joined, "%s", lbuf);
+        } else {
+            char dir[512];
+            long off = 0, len = 0;
+            if (pt_dirname(cur, (long)strlen(cur), &off, &len) == 0 && len > 0 && len < 500) {
+                mm_copy(dir, (long)sizeof dir, cur + off, len);
+                dir[len] = 0;
+                if (strcmp(dir, ".") == 0) cx_fmt(joined, (long)sizeof joined, "%s", lbuf);
+                else cx_fmt(joined, (long)sizeof joined, "%s/%s", dir, lbuf);
+            } else {
+                cx_fmt(joined, (long)sizeof joined, "%s", lbuf);
+            }
+        }
+        if (pt_normalize(norm, (long)sizeof norm, joined, (long)strlen(joined)) < 0) break;
+        cx_fmt(cur, (long)sizeof cur, "%s", norm);
+    }
+    if (cx_fmt(out, (long)cap, "%s", cur) != 0) return -1;
+    return 0;
+}
+
+/* Scan directory full_dir (without following symlinks) to check if all keep()-filtered files are .cx. */
+static void pl_dir_cx_scan(const char *full_dir, int *n_cx, int *n_other) {
+    sy_dir_t it;
+    if (sy_dir_open(&it, full_dir) != 0) return;
+    while (sy_dir_next(&it) == 1) {
+        char sub[1024];
+        if (cx_fmt(sub, (long)sizeof sub, "%s/%s", full_dir, it.name) != 0) continue;
+        if (it.kind == 'd') {
+            pl_dir_cx_scan(sub, n_cx, n_other);
+        } else if (it.kind == 'f') {
+            if (pl_is_keep_ext(it.name)) {
+                if (pl_has_sfx(it.name, ".cx")) (*n_cx)++;
+                else (*n_other)++;
+            }
+        }
+    }
+    sy_dir_close(&it);
+}
+
+static void pl_classify(PlRow *r) {
+    int in_cx_src = (strncmp(r->link, "cx/", 3) == 0 || strncmp(r->link, "src/", 4) == 0);
+    if (!in_cx_src) {
+        cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+        cx_fmt(r->reason, (long)sizeof r->reason, "non-cx-src-tree");
+        return;
+    }
+    if (pl_in_tree(r->realp)) {
+        cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+        cx_fmt(r->reason, (long)sizeof r->reason, "in-product-tree");
+        return;
+    }
+    {
+        char full[1024];
+        sy_stat_t st;
+        cx_fmt(full, (long)sizeof full, "%s/%s", pl_root, r->realp);
+        if (sy_stat(full, &st) != 0) {
+            cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+            cx_fmt(r->reason, (long)sizeof r->reason, "broken-target");
+            return;
+        }
+        if (st.kind == 'f') {
+            if (pl_has_sfx(r->realp, ".cx")) {
+                cx_fmt(r->cls, (long)sizeof r->cls, "甲");
+                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-cx-file");
+            } else {
+                cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-non-cx");
+            }
+        } else if (st.kind == 'd') {
+            int n_cx = 0, n_other = 0;
+            pl_dir_cx_scan(full, &n_cx, &n_other);
+            if (n_cx > 0 && n_other == 0) {
+                cx_fmt(r->cls, (long)sizeof r->cls, "甲");
+                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-cx-dir");
+            } else {
+                cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+                cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-non-cx-dir");
+            }
+        } else {
+            cx_fmt(r->cls, (long)sizeof r->cls, "乙");
+            cx_fmt(r->reason, (long)sizeof r->reason, "out-of-tree-non-cx");
+        }
+    }
+}
+
+static void pl_walk(const char *rel_dir) {
+    char full_dir[1024];
+    sy_dir_t it;
+    if (cx_fmt(full_dir, (long)sizeof full_dir, "%s/%s", pl_root, rel_dir) != 0) return;
+    if (sy_dir_open(&it, full_dir) != 0) return;
+    while (sy_dir_next(&it) == 1) {
+        char sub_rel[512];
+        if (cx_fmt(sub_rel, (long)sizeof sub_rel, "%s/%s", rel_dir, it.name) != 0) continue;
+        if (it.kind == 'd') {
+            pl_walk(sub_rel);
+        } else if (it.kind == 'l' && pl_n < 256) {
+            PlRow *r = &pl_rows[pl_n++];
+            char full_l[1024];
+            long rn;
+            cx_fmt(r->link, (long)sizeof r->link, "%s", sub_rel);
+            cx_fmt(full_l, (long)sizeof full_l, "%s/%s", pl_root, sub_rel);
+            rn = sy_readlink(full_l, r->target, (long)sizeof(r->target) - 1);
+            if (rn < 0) rn = 0;
+            r->target[rn] = 0;
+            pl_resolve(sub_rel, r->realp, (int)sizeof r->realp);
+            pl_classify(r);
+        }
+    }
+    sy_dir_close(&it);
+}
+
+int main(int argc, char **argv) {
+    static const char *trees[7] = {"cx", "src", "exec", "seed", "weights", "include", "kernel"};
+    int mode = 0, i, j, n_a = 0, n_b = 0;
+    static char out[65536];
+    long on = 0;
+    char tbl[1024];
+
+    cx_fmt(pl_root, (long)sizeof pl_root, ".");
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--write") == 0) mode = 1;
+        else if (strcmp(argv[i], "--check") == 0) mode = 2;
+        else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) cx_fmt(pl_root, (long)sizeof pl_root, "%s", argv[++i]);
+        else { printf("usage: product-links-gen --write|--check [--root DIR]\n"); return 2; }
+    }
+    if (!mode) { printf("usage: product-links-gen --write|--check [--root DIR]\n"); return 2; }
+
+    for (i = 0; i < 7; i++) pl_walk(trees[i]);
+    for (i = 0; i < pl_n; i++) {
+        for (j = i + 1; j < pl_n; j++) {
+            if (strcmp(pl_rows[j].link, pl_rows[i].link) < 0) {
+                PlRow tmp = pl_rows[i]; pl_rows[i] = pl_rows[j]; pl_rows[j] = tmp;
+            }
+        }
+    }
+    {
+        const char *hdr = "# link_path\ttarget\treal_path\tclass\treason\n"
+                          "# Generated by tools/product-links.cx --write; v0.0.90 source-packages-v3 symlink classification fact source.\n";
+        long hl = (long)strlen(hdr);
+        mm_copy(out, (long)sizeof out, hdr, hl);
+        on = hl;
+    }
+    for (i = 0; i < pl_n; i++) {
+        char line[1024];
+        if (strcmp(pl_rows[i].cls, "甲") == 0) n_a++; else n_b++;
+        if (cx_fmt(line, (long)sizeof line, "%s\t%s\t%s\t%s\t%s\n",
+                   pl_rows[i].link, pl_rows[i].target, pl_rows[i].realp, pl_rows[i].cls, pl_rows[i].reason) == 0) {
+            long ll = (long)strlen(line);
+            if (on + ll < (long)sizeof out - 1) { mm_copy(out + on, (long)sizeof out - on, line, ll); on += ll; }
+        }
+    }
+    out[on] = 0;
+    cx_fmt(tbl, (long)sizeof tbl, "%s/build/product-links.tsv", pl_root);
+
+    if (mode == 1) {
+        if (sy_write_file(tbl, out, on, 0644) != 0) { printf("PRODUCT_LINKS\tFAIL\twrite\n"); return 1; }
+        printf("PRODUCT_LINKS\tWROTE\ttotal=%d\tclass_a=%d\tclass_b=%d\n", pl_n, n_a, n_b);
+        return 0;
+    } else {
+        unsigned char *cur = 0;
+        int64_t cn = 0;
+        if (sy_read_file(tbl, &cur, &cn, 65535) != 0 || !cur) {
+            printf("PRODUCT_LINKS\tFAIL\tmissing\t%s\n", tbl);
+            return 1;
+        }
+        if ((long)cn != on || memcmp(cur, out, on) != 0) {
+            printf("PRODUCT_LINKS\tDIFF\ttotal=%d\tclass_a=%d\tclass_b=%d\n", pl_n, n_a, n_b);
+            return 1;
+        }
+        printf("PRODUCT_LINKS\tCHECK\ttotal=%d\tclass_a=%d\tclass_b=%d\n", pl_n, n_a, n_b);
+        return 0;
+    }
+}

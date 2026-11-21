@@ -1,0 +1,106 @@
+/* tools/check-product-links.cx -- verify build/product-links.tsv matches repo symlinks,
+   and unit-test class 甲/乙 rules + 3 mutations (unregistered link, class drift, deleted row).
+   Identity-soundness premise (v0.0.90 source-packages-v3, design v2.9): build/product-links.tsv
+   is the fact source for ident-v3 symlink handling. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int pl_pass, pl_fail;
+static void pl_ck(int ok, const char *name) {
+    printf("%s\tproduct-links.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) pl_pass++; else pl_fail++;
+}
+
+static int run_gen(const char *mode, const char *root, char *out, int cap) {
+    char *av_repo[] = { "timeout", "30", "sh", "unisacc.com", "tools/product-links.cx", "--", (char *)mode, 0 };
+    char *av_root[] = { "timeout", "30", "sh", "unisacc.com", "tools/product-links.cx", "--", (char *)mode, "--root", (char *)root, 0 };
+    int cut = 0;
+    return sy_run(root ? av_root : av_repo, out, cap - 1, &cut);
+}
+
+int main(void) {
+    static char out[4096];
+    char dir[128], p[256], tbl[256];
+    int rc;
+
+    /* 1. Repo check */
+    rc = run_gen("--check", 0, out, (int)sizeof out);
+    pl_ck(rc == 0 && strstr(out, "PRODUCT_LINKS\tCHECK\ttotal=38") != 0, "repo-38-links-match");
+
+    /* 2. Private fixture: rule unit tests + 3 mutations */
+    if (sy_mkdtemp("/tmp", "chk-pl-", dir, (int)sizeof dir) != 0) return 2;
+    cx_fmt(p, (long)sizeof p, "%s/cx", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/exec", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/ext", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/tools", dir); sy_mkdir(p, 0755);
+    cx_fmt(p, (long)sizeof p, "%s/build", dir); sy_mkdir(p, 0755);
+
+    cx_fmt(p, (long)sizeof p, "%s/ext/a.cx", dir); sy_write_file(p, "/* cx */\n", 9, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/ext/b.h", dir); sy_write_file(p, "/* hdr */\n", 10, 0644);
+    cx_fmt(p, (long)sizeof p, "%s/tools/c.cx", dir); sy_write_file(p, "/* tool */\n", 11, 0644);
+
+    cx_fmt(p, (long)sizeof p, "%s/cx/a.cx", dir); sy_symlink("../ext/a.cx", p);
+    cx_fmt(p, (long)sizeof p, "%s/cx/b.h", dir); sy_symlink("../ext/b.h", p);
+    cx_fmt(p, (long)sizeof p, "%s/exec/c.cx", dir); sy_symlink("../tools/c.cx", p);
+
+    rc = run_gen("--write", dir, out, (int)sizeof out);
+    cx_fmt(tbl, (long)sizeof tbl, "%s/build/product-links.tsv", dir);
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        int read_ok = (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb != 0);
+        int rules_ok = read_ok &&
+            strstr((char *)tb, "cx/a.cx\t../ext/a.cx\text/a.cx\t甲\tout-of-tree-cx-file") != 0 &&
+            strstr((char *)tb, "cx/b.h\t../ext/b.h\text/b.h\t乙\tout-of-tree-non-cx") != 0 &&
+            strstr((char *)tb, "exec/c.cx\t../tools/c.cx\ttools/c.cx\t乙\tnon-cx-src-tree") != 0;
+        pl_ck(rc == 0 && rules_ok, "fixture-class-a-and-b-rules");
+    }
+    rc = run_gen("--check", dir, out, (int)sizeof out);
+    pl_ck(rc == 0 && strstr(out, "PRODUCT_LINKS\tCHECK\ttotal=3\tclass_a=1\tclass_b=2") != 0, "fixture-green-check");
+
+    /* Mutation 1: add an unregistered symlink -> must FAIL */
+    cx_fmt(p, (long)sizeof p, "%s/cx/new.cx", dir); sy_symlink("../ext/a.cx", p);
+    rc = run_gen("--check", dir, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut1-unregistered-link-fails");
+    sy_unlink(p);
+
+    /* Mutation 2: flip class 甲 -> 乙 in table -> must FAIL */
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        if (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb) {
+            char *hit = strstr((char *)tb, "\t甲\t");
+            if (hit) {
+                char mod[4096];
+                long pre = hit - (char *)tb;
+                const char *rep = "\t乙\t";
+                long rl = (long)strlen(rep);
+                long nl = (long)strlen("\t甲\t");
+                mm_copy(mod, (long)sizeof mod, tb, pre);
+                mm_copy(mod + pre, (long)sizeof mod - pre, rep, rl);
+                mm_copy(mod + pre + rl, (long)sizeof mod - pre - rl, hit + nl, (long)tn - pre - nl);
+                sy_write_file(tbl, mod, pre + rl + ((long)tn - pre - nl), 0644);
+            }
+        }
+    }
+    rc = run_gen("--check", dir, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut2-class-drift-fails");
+
+    /* Mutation 3: delete last row in table -> must FAIL */
+    run_gen("--write", dir, out, (int)sizeof out);
+    {
+        unsigned char *tb = 0; int64_t tn = 0;
+        if (sy_read_file(tbl, &tb, &tn, 65535) == 0 && tb && tn > 20) {
+            long cut_pos = (long)tn - 2;
+            while (cut_pos > 0 && tb[cut_pos] != '\n') cut_pos--;
+            sy_write_file(tbl, tb, cut_pos + 1, 0644);
+        }
+    }
+    rc = run_gen("--check", dir, out, (int)sizeof out);
+    pl_ck(rc != 0 && strstr(out, "PRODUCT_LINKS\tDIFF") != 0, "mut3-deleted-row-fails");
+
+    sy_remove_all(dir);
+    printf("CHECK_PRODUCT_LINKS\tpassed=%d\tfailed=%d\n", pl_pass, pl_fail);
+    return pl_fail ? 1 : 0;
+}
