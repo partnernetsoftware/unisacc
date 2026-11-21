@@ -116,7 +116,7 @@ win 上现为「本版未实现」的 sys 项(`sy_poll`、`sy_pollfd_t`、`sy_re
 | 到期的返回 | 统一 `-ETIMEDOUT`。进程等待例外,见第 6 节 | 第 11 节 |
 | 无 deadline 的阻塞例外 | 名字解析 `sy_resolve`(宿主解析器无法定界)与普通文件读写。例外清单封闭,只此两类 | 从 R2.5(`ToSocketAddrs` 含阻塞式解析) |
 | 日历只做 UTC | `sy_utc_split`/`sy_utc_join`/`sy_utc_fmt`/`sy_utc_parse` 是纯计算。本地时区、时区库、locale 格式不做;`sy_local_fmt` 标 legacy | 拒 R2.6 的「完全没有日历」(构建工具需要写时间戳);拒 P 的 `datetime`/`zoneinfo` 进核心 |
-| 旧取时入口 | `sy_now_ms`、`sy_wall_s` 返回 `long`,在 win 上会溢出,标 legacy | 第 3 节 64 位规则 |
+| 旧取时入口 | `sy_now_ms`、`sy_wall_s` 返回 `long`,在 win 上会溢出,标 legacy;`sy_now_ms` 是单调时钟(任意原点,只能做差值,不得持久化或跨进程比较),持久化时间戳须用 `sy_wall_s` | 第 3 节 64 位规则 |
 | 不做 | 定时器对象、间隔定时器、取消令牌 | 拒 N3.5 的 `AbortSignal`;deadline 即取消的唯一形式 |
 
 ## 9 net
