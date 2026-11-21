@@ -127,14 +127,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 
 `kernel/` 是生成物，禁止手改；改动先改事实或真值，再经生成器写出，并用 `--check` 核对。
 
-**分层**（[plans/cx-layers.md](plans/cx-layers.md)）：
-
-| 层 | 路径 | 可直接调用 libc/POSIX |
-|---|---|---|
-| L0 宿主对接 | `cx/text/`、`cx/mem/`、`cx/sys/`，以及 `tests/cxraw-layers.tsv` 列出的适配器（如 `src/host.cx`、`src/hostnative.cx`、`cx/core/kernel.cx`） | 是 |
-| L1 机制 | `cx/core/`、`cx/runtime/` | 否，经 L0 |
-| L2 驱动与编译器 | `cx/driver/`、`cx/compiler/`、`src/`（除 L0 文件） | 否 |
-| L3 工具、测试、应用 | `tools/`、`tests/`、`apps/` | 否 |
+**分层**：现行模块层（`cx-L0..cx-L3` 与 `EXT`）定义与层向规则以 [prd_cx.md](prd_cx.md) §3、[prd_cx_spec.md](prd_cx_spec.md) 3.4 节及 [plans/cx-layers.md](plans/cx-layers.md) 为准（自动检查：`tools/check-cx-layers.cx`；本处旧 L0-L3 简表已停维护，不再重复列举）。
 
 使用方经 `#pragma unisa use text.text`、`mem.arena`、`sys.fs` 等引用 L0 包；`include/cx-nested.h` 里的 `cx_*` 帮手（`cx_read`、`cx_write`、`cx_run*`、`cx_fmt` 等）原地算 L0 接口。L0 各包的检查是 `tools/check-cx-text.cx`、`tools/check-cx-arena.cx`、`tools/check-cx-sys.cx`。
 

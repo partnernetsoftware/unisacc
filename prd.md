@@ -614,7 +614,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
-| `ext/` | 扩展包：sysx、memx、textx、crypto、tsvx（TSV 读写与 merge3）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
+| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；不进源 SID，memx/textx 经 cx/mem、cx/text 符号链接间接参与 |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
@@ -681,7 +681,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | E3 冻结到公开 | 0.0.57 实测 190.6 分钟;0.0.63 未同口径测(UNMEASURED) | 不超过 120 分钟,人工介入不多于 2 次 | 不超过 60 分钟,人工介入 0 | 不超过 30 分钟,按固定节拍发车 | 发布说明的冻结与公开时间差 |
 | E4 能用清单(真实程序在已装产品上编译、运行、输出与预期一致的个数) | 清单未建(UNMEASURED);`examples/apps` 现有 18 个源未成批验收 | 清单建表并测出首个基线(只读数,不设门) | 30 个里过 25 个,且 s9 daily 档跑通一次 | 50 个里过 45 个,其中至少 5 个是仓外第三方 C 程序、至少 5 个是用 `.cx` 写的常驻工具 | 待建:清单表加一个批次(0.0.65 周期内随工具提交,不占版本槽) |
 
-版本表(一版一类产品输入大改;验收未实跑不记 PASS;预期值为推算的已标出):
+版本表(0.0.65 至 0.0.80 历史记录;现行版本序以 build/version-seq.tsv 为准,各版内容与验收见对应 plans/v0.0.NN.md;一版一类产品输入大改;验收未实跑不记 PASS;预期值为推算的已标出):
 
 | 版本 | 一类大改 | 终点线贡献 | 首个任务 | 验收命令 |
 |---|---|---|---|---|

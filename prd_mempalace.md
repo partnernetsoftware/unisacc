@@ -7,7 +7,7 @@
 - 改图只改节点文字或连线,一个节点一句现状加一个入口;过程不入图。
 - 只记三类:别人必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
 - 子代理不提交本文件;主调度只在里程碑(整链结束、公开、装机完成)改一次。
-- 版本序在 build/version-seq.tsv,版本内容与验收在 prd.md 版本表,未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
+- 版本序在 build/version-seq.tsv,各版内容与验收见对应 plans/v0.0.NN.md(prd.md 9.4 版本表为 0.0.65 至 0.0.80 历史记录),未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 供 tools/observe-agents.cx 读取。
 
 ## 地图

@@ -259,7 +259,7 @@ S4(`tx_snprintf`)对 csih 零破坏的过渡,未实施:
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/`（25 个 .cx 203,081 B） | 14 / 100,918；78 / 397,580 | 是 |
 | cx-L3 工具、测试、应用 | `tools`（733 个 .cx）、`tests`、`apps` | 未逐项计 | 否（tools 仅 10 个支撑文件进 SID） |
 | AMB（未定层） | `cx/cx0`、`cx/workspace` | 7 / 101,017；6 / 49,394 | 是 |
-| EXT 包层 | `ext/sysx`、`memx`、`textx`、`crypto`、`tsvx` | 13 / 56,844；5 / 18,680；5 / 24,403；15 / 157,845；3 / 5,851 | 否；memx、textx 经 `cx/mem`、`cx/text` 里的符号链接间接参与 |
+| EXT 包层 | `ext/`（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录） | 以真源目录实测为准 | 否；memx、textx 经 `cx/mem`、`cx/text` 里的符号链接间接参与 |
 
 规则与入口：
 - `use` 的包根由仓根 `cxroot.tsv`（CXROOT1，13 条 R 行）按最长前缀映射（条款 CX-U-7）。

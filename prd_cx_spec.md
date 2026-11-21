@@ -77,7 +77,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 | cx-L1 机制 | `cx/core`、`cx/runtime` | 不能 |
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/` | 不能 |
 | cx-L3 工具、测试、应用 | `tools`、`tests`、`apps` | 允许 printf/fprintf 给人看(本机跑,不跨目标);其余仍应走 L0 |
-| EXT 包层 | `ext/<包>/`(sysx、crypto、net、tsvx、memx、textx) | 各包自述;产品层不得 `use` 到 ext |
+| EXT 包层 | `ext/<包>/`(包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录) | 各包自述;产品层不得 `use` 到 ext |
 
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
 - 产品代码(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)严格只用 `sy_*`、`mm_*`、`tx_*`,不写平台 `#if`(`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__`)和 `__syscallN`(CX-Y-2、CX-Y-3)。平台差异只放 L0 的 `_os` 静态帮手或表。
