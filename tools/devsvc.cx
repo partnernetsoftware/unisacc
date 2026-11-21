@@ -35,7 +35,7 @@
 
 #define PW 1024
 #define CFG_TABLE "tools/devsvc-repo.tsv"
-static int ovf, preparing;
+static int ovf, preparing, pin_ok;
 #define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
 static char c_product[128], c_self[128], c_lib[3][128], c_cache[128], c_instenv[64];
 #define MAXSIB 8
@@ -84,6 +84,9 @@ static int cfg_load(const char *root, int dev, int *from_head) {
     if (!b) {
         if (ov && *ov) F(table, sizeof table, "%s", ov); else F(table, sizeof table, "%s/%s", root, CFG_TABLE);
         if (ovf || sy_read_file(table, &b, &n, 1 << 16) || !b) return -1;
+        if (pin_ok && n > 0 && n < (int64_t)sizeof headtab && !mm_copy(headtab, sizeof headtab, b, n)) {
+            headtab[n] = 0; headtab_n = (long)n; *from_head = 1;
+        }
     }
     {   int r = cfg_parse((const char *)b, (long)n); free(b); return r; }
 }
@@ -587,10 +590,22 @@ int main(int argc, char **argv) {
             if (!runcap(v, root, rev, sizeof rev) && strlen(rev) == 41 && rev[40] == '\n' && fg_hex40(rev))
                 F(hd, sizeof hd, "%.40s", rev);
         }
-        if (fr == 0 && !dev) {   /* 提交号已知:本次一律钉在该提交上;配置表未被环境覆盖时先查备忘 */
-            F(hd, sizeof hd, "%s", fg_commit);
-            if (!(ovt && *ovt) && memo_load(trees, sizeof trees) == 0) { memo = 1; fromhead = 1; }
-        } }
+        if (fr == 0 && !dev) F(hd, sizeof hd, "%s", fg_commit);
+        {   /* 外层 devsvc 导出的 DEVSVC_REPO_TABLE_PIN=<修订>:<表路径>:与本仓当前 hd 及 DEVSVC_REPO_TABLE 一致且表可读时认作同修订已钉死表
+               (照常加载 memo 与 headtab,不降为 headtab_n=0);不一致(如 HEAD 已移动、跨仓继承或 prebuild-self)则清掉外层钉死表与标记 */
+            const char *pin = getenv("DEVSVC_REPO_TABLE_PIN"), *c = pin ? strchr(pin, ':') : 0;
+            if (pin && *pin) {
+                if (!preparing && !dev && fg_hex40(hd) && c && c - pin == 40 && !strncmp(pin, hd, 40) &&
+                    ovt && *ovt && !strcmp(c + 1, ovt) && sy_exists(ovt) == 1) {
+                    pin_ok = 1;
+                } else {
+                    if (!ovt || (c && !strcmp(c + 1, ovt))) sy_unsetenv("DEVSVC_REPO_TABLE");
+                    sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
+                }
+            }
+            ovt = getenv("DEVSVC_REPO_TABLE");
+        }
+        if (fr == 0 && !dev && (!(ovt && *ovt) || pin_ok) && memo_load(trees, sizeof trees) == 0) { memo = 1; fromhead = 1; } }
 
     if (!memo && cfg_load(root, dev, &fromhead)) { fprintf(stderr, "devsvc: repo table unreadable or missing product/self/cache_sub/lib\n"); return 3; }
     F(prod, sizeof prod, "%s/%s", root, c_product); F(selfp, sizeof selfp, "%s/%s", root, c_self);
