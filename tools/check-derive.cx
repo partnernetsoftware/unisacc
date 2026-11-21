@@ -149,7 +149,76 @@ static int query_only_check(void){
     rm("log");rc=runm("--check");ck(rc==0&&hasl(out,"catalog\tOK")&&file_is("log","catalog\n"),"query-only-check-really-executed");
     sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\n",nok,failed);return failed?1:0;
 }
+static int native_fixture_run(const char *binary, const char *arg) {
+    char cmd[1400]; char *o = 0; size_t n = 0;
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_DERIVE_NATIVE_CACHE='%s/cache' '%s' --check --manifest fixture.tsv %s",
+               dir, dir, binary, arg)) return 2;
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 12, &o, &n);
+    out[0] = 0;
+    if (o && n < sizeof out) { mm_copy(out, sizeof out, o, n); out[n] = 0; }
+    free(o);
+    if (rc && out[0]) sy_eprintf("%s", out);
+    return rc;
+}
+
+static int native_check(const char *given) {
+    char home[700], bound[900], target[500], bin[500];
+    if (sy_cwd(home, sizeof home) < 0 ||
+        cx_fmt(dir, sizeof dir, "%s/derive-native-XXXXXX", sy_tmpdir()) ||
+        strchr(dir, '\'') || !mkdtemp(dir) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound", home) ||
+        cx_fmt(target, sizeof target, "%s/tools", dir) || sy_mkdir(target, 0700) ||
+        cx_fmt(target, sizeof target, "%s/tools/bound", dir) || sy_symlink(bound, target) ||
+        cx_fmt(bound, sizeof bound, "%s/tools/bound.c", home) ||
+        cx_fmt(target, sizeof target, "%s/tools/bound.c", dir) || sy_symlink(bound, target) ||
+        cx_fmt(bound, sizeof bound, "%s/cx", home) ||
+        cx_fmt(target, sizeof target, "%s/cx", dir) || sy_symlink(bound, target) ||
+        cx_fmt(bin, sizeof bin, "%s/derive", dir)) return 2;
+    if (given) {
+        if (*given != '/' || strchr(given, '\'') || cx_fmt(bin, sizeof bin, "%s", given)) return 2;
+    } else {
+        char *v[] = {"sh", "./unisacc.com", "tools/derive.cx", "-o", bin, 0};
+        if (cx_runv_timeout(v, 35, 0, 0)) return 2;
+    }
+    /* Keep the real package footer for the identity reader. Replace the
+       launcher only in this fixture to model a slow interpreted invocation. */
+    static const char launcher[] = "#!/bin/sh\n"
+        "if [ \"$1\" = -cx-plan ]; then printf '0\\t%s\\n' \"$2\"; exit 0; fi\n"
+        "if [ \"$2\" = -o ]; then cp \"$1\" \"$3\" && chmod +x \"$3\"; exit $?; fi\n"
+        "sleep 5\nexit 0\n";
+    size_t ape_n = 0;
+    char *ape = cx_read("./unisacc.com", &ape_n);
+    if (!ape || ape_n <= sizeof launcher + 64 ||
+        mm_copy(ape, ape_n, launcher, sizeof launcher - 1) ||
+        cx_fmt(target, sizeof target, "%s/unisacc.com", dir) || cx_write(target, ape, ape_n)) {
+        free(ape);
+        return 2;
+    }
+    free(ape);
+    put("fixture.tsv", "chain-phases\ttools/chain-phases-gen.cx\t"
+        "sh ./unisacc.com tools/chain-phases-gen.cx -- --check\t-\tresult\t-\t1\t1\n");
+    put("tools/chain-phases-gen.cx", "#!/bin/sh\ntest \"$1\" = --check || exit 2\nprintf 'one\\n' > observed\n");
+    int rc = native_fixture_run(bin, "--prepare-native");
+    ck(rc == 0 && hasl(out, "DERIVE_PREPARE\tprepared=1\tno-test-result") &&
+       !hasl(out, "DERIVE_SUMMARY") && file_is("observed", 0), "native-preparation-does-not-run-generator");
+    rc = native_fixture_run(bin, "");
+    ck(rc == 0 && hasl(out, "DERIVE\tchain-phases\tOK") && file_is("observed", "one\n"),
+       "native-cache-exec-outside-cold-compile-window");
+    put("tools/chain-phases-gen.cx", "#!/bin/sh\nprintf 'two\\n' > observed\n");
+    rc = native_fixture_run(bin, "");
+    ck(rc == 0 && file_is("observed", "two\n"), "native-source-change-invalidates-image");
+    put("tools/chain-phases-gen.cx", "#!/bin/sh\nsleep 5\n");
+    rc = native_fixture_run(bin, "");
+    ck(rc == 2 && hasl(out, "DERIVE\tchain-phases\tTIMEOUT"), "native-execution-retains-manifest-bound");
+    char *clean[] = {"rm", "-rf", "--", dir, 0};
+    (void)cx_runv_timeout(clean, 5, 0, 0);
+    sy_printf("DERIVE_CHECK\tok=%d\tfailed=%d\n", nok, failed);
+    return failed != 0;
+}
+
 int main(int argc,char**argv) {
+    if ((argc == 2 || argc == 3) && !strcmp(argv[1], "--native")) return native_check(argc == 3 ? argv[2] : 0);
     if(argc==2&&!strcmp(argv[1],"--query-only"))return query_only_check();
     if(argc==2&&!strcmp(argv[1],"--incremental"))return incremental_check();
     if(argc!=1)return 2;

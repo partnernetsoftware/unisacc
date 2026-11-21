@@ -117,11 +117,53 @@ static long cl_read(const char *path, char *buf, long cap) {
 static void cl_join(char *dst, long cap, const char *a, const char *b) {
     if (cx_fmt(dst, (size_t)cap, "%s/%s", a, b)) sy_exit(2);
 }
+#define CL_LTAB 64
+static char cl_lpre[CL_LTAB][128];
+static long cl_lplen[CL_LTAB];
+static int cl_lval[CL_LTAB];
+static int cl_nltab;
+static int cl_layer_parse_code(const char *s, long n) {
+    if (n == 2 && s[0] == 'L' && s[1] == '0') return 0;
+    if (n == 2 && s[0] == 'L' && s[1] == '1') return 1;
+    if (n == 2 && s[0] == 'L' && s[1] == '2') return 2;
+    if (n == 2 && s[0] == 'L' && s[1] == '3') return 3;
+    if (n == 3 && s[0] == 'E' && s[1] == 'X' && s[2] == 'T') return 6;
+    return -1;
+}
+static int cl_layer_load(const char *path) {
+    long n, i = 0;
+    cl_nltab = 0;
+    n = cl_read(path, cl_src, CL_CAP);
+    if (n <= 0) return -1;
+    while (i < n) {
+        long a = i, b, t1, t2;
+        while (i < n && cl_src[i] != '\n') i++;
+        b = i; if (i < n) i++;
+        if (a >= b || cl_src[a] == '#') continue;
+        t1 = a; while (t1 < b && cl_src[t1] != '\t') t1++;
+        if (t1 <= a || t1 >= b || t1 - a >= 127) return -1;
+        t2 = t1 + 1; while (t2 < b && cl_src[t2] != '\t') t2++;
+        int lv = cl_layer_parse_code(cl_src + t1 + 1, t2 - (t1 + 1));
+        if (lv < 0 || cl_nltab >= CL_LTAB) return -1;
+        { long j; for (j = 0; j < t1 - a; j++) cl_lpre[cl_nltab][j] = cl_src[a + j]; }
+        cl_lpre[cl_nltab][t1 - a] = 0;
+        cl_lplen[cl_nltab] = t1 - a;
+        cl_lval[cl_nltab] = lv;
+        cl_nltab++;
+    }
+    return cl_nltab > 0 ? 0 : -1;
+}
 static int cl_layer(const char *real) {
-    if (cl_at(real, "cx/sys/") || cl_at(real, "cx/mem/") || cl_at(real, "cx/text/")) return 0;
-    if (cl_at(real, "cx/core/") || cl_at(real, "cx/runtime/")) return 1;
-    if (cl_at(real, "cx/driver/") || cl_at(real, "cx/compiler/") || cl_at(real, "src/")) return 2;
-    if (cl_at(real, "tools/") || cl_at(real, "tests/") || cl_at(real, "apps/")) return 3;
+    long rl = tx_len(real, CL_PATH);
+    long best = -1;
+    int lv = -1, i;
+    for (i = 0; i < cl_nltab; i++) {
+        if (cl_lplen[i] > best && tx_prefix(real, rl, cl_lpre[i], cl_lplen[i])) {
+            best = cl_lplen[i];
+            lv = cl_lval[i];
+        }
+    }
+    if (lv >= 0) return lv;
     if (cl_at(real, "cx/")) return 4;
     if (cl_at(real, "ext/")) return 6;
     return 5;
@@ -137,6 +179,7 @@ static int cl_product(const char *rel) {
         "cx/mem/heap.cx", "cx/mem/bytes.cx", "cx/text/text.cx"};
     int i;
     if (cl_at(rel, "src/") || cl_at(rel, "cx/core/") || cl_at(rel, "cx/runtime/")
+        || cl_at(rel, "cx/stream/")
         || cl_at(rel, "cx/compiler/") || cl_at(rel, "cx/driver/")
         || cl_at(rel, "cx/cx0/") || cl_at(rel, "cx/workspace/")) return 1;
     for (i = 0; i < (int)(sizeof mods / sizeof mods[0]); i++) if (cl_eq(rel, mods[i])) return 1;
@@ -586,6 +629,7 @@ static int cl_audit(void) {
         if (f >= b) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tMANIFEST-PARSE\tmissing-tab\n"); continue; }
         if (f - a >= CL_PATH - 1) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tPATH-TOO-LONG\t%.80s\n", cl_man + a); continue; }
         if (cl_unesc(cl_man + a, f - a, path, CL_PATH)) { cl_und_meta++; cl_und_total++; sy_eprintf("UNDECIDED\tPATH-TOO-LONG\t%.80s\n", cl_man + a); continue; }
+        k = (int)tx_len(path, CL_PATH);
         if (tx_prefix(path, k, "archive/", 8) || tx_prefix(path, k, "out/", 4)) continue;
         e = f + 1;
         while (e < b && cl_man[e] != '\t') e = e + 1;
@@ -713,6 +757,10 @@ static int cl_audit(void) {
     if (cl_und_total != cl_und_lex + cl_und_recon + cl_und_meta + cl_und_io) {
         cl_fail++;
         sy_eprintf("FAIL\tUNDECIDED-SUM\n");
+    }
+    if (cl_amb || cl_out) {
+        cl_fail++;
+        sy_eprintf("FAIL\tLAYER-CLASS\tamb=%d\tout=%d\t(update tests/cx-layers.tsv)\n", cl_amb, cl_out);
     }
     if (cl_fail) return 1;
     if (cl_und_lex + cl_und_recon + cl_und_meta + cl_und_io) return 3;
@@ -1052,6 +1100,9 @@ int main(int argc, char **argv) {
     cl_join(wlp, sizeof wlp, cl_root, "tests/cxlayers-unresolved.tsv");
     rc = cl_wl_load(wlp);
     if (rc < 0) { sy_eprintf("FAIL\tWHITELIST\tparse %s\n", wlp); return 1; }
+    { char ltp[CL_PATH];
+      cl_join(ltp, sizeof ltp, cl_root, "tests/cx-layers.tsv");
+      if (cl_layer_load(ltp) < 0) { sy_eprintf("FAIL\tLAYER-TABLE\tparse %s\n", ltp); return 1; } }
     rc = cl_audit();
     sy_printf("CX_LAYERS_SCOPE\tedges=%d\tsame=%d\tdown=%d\tup=%d\tamb=%d\tout=%d\text=%d\text_bad=%d\tfreeze_new=%d\tfreeze_stale=%d\tunres=%d\tio=%d\tfailed=%d\tcoverage=manifest-only\tsymlinks=UNKNOWN\ttracked_reconciliation=NOT-DONE(B)\tshard_body_verified=0\tundecided_lex=%d\tundecided_recon=%d\tundecided_meta=%d\tundecided_io=%d\tphase=partial\twindow=%s\n",
               cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_ext, cl_ext_bad, cl_frz_new, cl_frz_stale, cl_unres, cl_io, cl_fail,
@@ -1062,7 +1113,8 @@ int main(int argc, char **argv) {
       else cl_man_dig |= 2;
       dhex[16] = 0;
       sy_printf("CX_LAYERS_SCOPE_DETAIL\tdomain=%d\tbytes=%ld\tmanifest_sha16=%s\tmanifest_backend=%s\tdigest_backend=%s\n", cl_domain, cl_bytes, dhex, cl_man_dig == 3 ? "mixed" : cl_man_dig == 1 ? "soft" : cl_man_dig == 2 ? "afalg" : "none", cl_dig == 3 ? "mixed" : cl_dig == 1 ? "soft" : cl_dig == 2 ? "afalg" : "none"); }
-    if (cl_amb || cl_out) sy_printf("UNKNOWN\tamb=%d\tout=%d\tnot-a-pass\n", cl_amb, cl_out);
+    if (rc == 0) sy_printf("PASS\tcx-layers\tscope=manifest-only\tamb=0\tout=0\tfailed=0\n");
+    else sy_printf("FAIL\tcx-layers\tscope=manifest-only\tamb=%d\tout=%d\tfailed=%d\trc=%d\n", cl_amb, cl_out, cl_fail, rc);
     (void)idxdir; (void)v0; (void)shard; (void)real;
     return rc;
 }

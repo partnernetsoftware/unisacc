@@ -18,6 +18,7 @@
 #pragma unisa use sys.dlcall
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
+#pragma unisa use sys.runlaunch
 #pragma unisa use text.text
 static int n_ok, n_bad;
 static void ok(int c, const char *name) { printf("  %s  %s\n", c ? "ok  " : "FAIL", name); if (c) n_ok++; else n_bad++; }
@@ -514,6 +515,30 @@ int main(int argc, char **argv) {
         h = sy_dlopen("libc.so.6", sy_rtld_now());
         ok(h != 0 && sy_dlsym(h, "malloc") != 0 && sy_dlclose(h) == 0, "dl: libc malloc resolves and closes");
         ok(sy_dlopen("cx-sys-no-such-7f3a.so", sy_rtld_now()) == 0, "dl: a missing library is 0");
+    }
+
+    /* mkfifo, fsync, fdatasync, env_vec, rl_run_link */
+    {
+        char fp[512], rdst[512];
+        sy_stat_t fst;
+        int fd, rd;
+        char **ev;
+        if (cx_fmt(fp, sizeof fp, "%s/test-fifo", root)) exit(2);
+        ok(sy_mkfifo(fp, 0600) == 0 && sy_stat(fp, &fst) == 0, "mkfifo: creates fifo");
+        ok(sy_mkfifo(fp, 0600) == -EEXIST && sy_mkfifo("", 0600) == -EINVAL, "mkfifo: exist and empty refused");
+        sy_unlink(fp);
+        if (cx_fmt(fp, sizeof fp, "%s/sync-file", root)) exit(2);
+        fd = sy_open(fp, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        ok(fd >= 0 && sy_write_all(fd, "sync", 4) == 0 && sy_fsync(fd) == 0 && sy_fdatasync(fd) == 0, "fsync/fdatasync: ok on regular fd");
+        ok(sy_fsync(-1) == -EBADF && sy_fdatasync(-1) == -EINVAL, "fsync/fdatasync: bad fd refused");
+        if (fd >= 0) sy_close(fd);
+        sy_unlink(fp);
+        ev = sy_env_vec();
+        ok(ev != 0 && ev[0] != 0, "env_vec: non-empty host environment");
+        rd = rl_run_link("/tmp/check-rl-demo", rdst, (int)sizeof rdst);
+        ok(rd >= 0 && strstr(rdst, "/check-rl-demo") != 0, "rl_run_link: creates link and returns dir fd");
+        if (rd >= 0) sy_close(rd);
+        ok(rl_run_link("/tmp/check-rl-demo", rdst, 4) == -1, "rl_run_link: tiny buffer fails");
     }
 
     ok(cx_rmtree(root) == 0 && sy_exists(root) == 0, "cleanup: scratch removed through the deletion guard");

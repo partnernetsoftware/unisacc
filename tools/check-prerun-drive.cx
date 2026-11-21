@@ -623,6 +623,92 @@ int main(void) {
                sy_exists(cw2) == 0,
                "first-product-qualification-fail-stops-under-keep-going: halts at W0001 product FAIL without dispatching W0002");
         }
+
+        /* (10d) warmup excludes expected-unmeasured (tools-default-regression, cx-booter-ape),
+         *       and run pins frozen-source.rev + frozen-root so a mid-prerun commit to --root
+         *       never changes # source= in subsequent windows (while actual drift fails closed). */
+        {
+            char u_ids[CPD_PW], u_times[CPD_PW], u_plan[CPD_PW], u_win[CPD_PW];
+            char fgit[CPD_PW], fmock[CPD_PW], fdrift[CPD_PW];
+            const char *s_uids =
+                "tools-default-regression\n"
+                "cx-booter-ape\n"
+                "runnable-light\n"
+                "runnable-two\n";
+            const char *s_utimes =
+                "tools-default-regression\t50\n"
+                "cx-booter-ape\t60\n"
+                "runnable-light\t200\n"
+                "runnable-two\t500\n";
+            if (cx_fmt(u_ids, sizeof u_ids, "%s/u-ids.txt", work) ||
+                cx_fmt(u_times, sizeof u_times, "%s/u-times.tsv", work) ||
+                cx_fmt(u_plan, sizeof u_plan, "%s/u-plan", work) ||
+                cx_fmt(u_win, sizeof u_win, "%s/windows.tsv", u_plan) ||
+                cx_fmt(fgit, sizeof fgit, "%s/fgit-repo", work) ||
+                cx_fmt(fmock, sizeof fmock, "%s/fgit-mock.sh", work) ||
+                cx_fmt(fdrift, sizeof fdrift, "%s/fgit-drift.sh", work) ||
+                cx_write(u_ids, s_uids, strlen(s_uids)) ||
+                cx_write(u_times, s_utimes, strlen(s_utimes))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                cwd, cwd, u_ids, u_times, u_plan)) return 2;
+            int rc_up = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            size_t uwn = 0;
+            char *uwb = (char *)cx_read(u_win, &uwn);
+            ck(rc_up == 0 && rows_have(uwb, (long)uwn, "W0000\t1\twarmup\t1\trunnable-light\n"),
+               "warmup-excludes-expected-unmeasured: skips tools-default-regression and cx-booter-ape for runnable-light");
+            free(uwb);
+
+            const char *fmock_s =
+                "#!/bin/sh\n"
+                "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+                "cur_rev=$(git rev-parse HEAD)\n"
+                "printf '# devsvc qualify\\n# source=%s\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' \"$cur_rev\" > \"$out\"\n"
+                "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+                "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+                "done\n"
+                "if [ \"$wid\" = W0000 ] && [ -n \"$FGIT_ORIG_ROOT\" ]; then\n"
+                "  printf 'mid-prerun\\n' >> \"$FGIT_ORIG_ROOT/a.txt\"\n"
+                "  git -C \"$FGIT_ORIG_ROOT\" add a.txt && git -C \"$FGIT_ORIG_ROOT\" commit -q -m 'mid prerun commit'\n"
+                "fi\n"
+                "exit 0\n";
+            const char *fdrift_s =
+                "#!/bin/sh\n"
+                "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+                "printf '# devsvc qualify\\n# source=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+                "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+                "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+                "done\n"
+                "exit 0\n";
+            if (cx_write(fmock, fmock_s, strlen(fmock_s)) ||
+                cx_write(fdrift, fdrift_s, strlen(fdrift_s))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "mkdir -p '%s' && cd '%s' && git init -q && git config user.name ptest && git config user.email ptest@localhost && "
+                "printf 'init\\n' > a.txt && git add a.txt && git commit -q -m init && "
+                "REV_A=$(git rev-parse HEAD) && "
+                "FGIT_ORIG_ROOT='%s' sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-jobs 2 && "
+                "REV_B=$(git -C '%s' rev-parse HEAD) && [ \"$REV_A\" != \"$REV_B\" ] && "
+                "grep -q \"^# source=$REV_A$\" '%s/strict-W0000.tsv' && "
+                "grep -q \"^# source=$REV_A$\" '%s/strict-W0001.tsv' && "
+                "echo FROZEN_SOURCE_STABLE_OK",
+                fgit, fgit, fgit, cwd, cwd, fgit, u_plan, fmock, fgit, u_plan, u_plan)) return 2;
+            int rc_fr = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc_fr == 0 &&
+               ckk_has(out, CPD_OUT, "PRERUN_FROZEN_SOURCE\trev=") &&
+               ckk_has(out, CPD_OUT, "PRERUN_WARMUP_READY\twindow=W0000\tids=runnable-light\tlayout=ready\tkit=ready") &&
+               ckk_has(out, CPD_OUT, "FROZEN_SOURCE_STABLE_OK"),
+               "frozen-source-ignores-mid-prerun-shared-root-commit-and-verifies-warmup-ready");
+
+            if (cx_fmt(cmd, sizeof cmd,
+                "rm -f '%s'/done.W* '%s'/strict-W* && "
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-jobs 2 --keep-going",
+                u_plan, u_plan, cwd, cwd, fgit, u_plan, fdrift)) return 2;
+            int rc_dr = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc_dr == 1 &&
+               ckk_has(out, CPD_OUT, "PRERUN_SOURCE_DRIFT\tstatus=FAIL\twindow=W0000\texpected=") &&
+               ckk_has(out, CPD_OUT, "\tactual=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+               "window-source-drift-fails-closed: rejects window evidence whose source SHA differs from frozen-source.rev");
+        }
     }
 
     {

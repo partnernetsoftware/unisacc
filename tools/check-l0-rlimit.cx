@@ -1,0 +1,62 @@
+/* tools/check-l0-rlimit.cx -- verify sy_getrlimit, sy_setrlimit, and sy_rlimit_as contracts. */
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+
+static int passed, failed;
+static void ck(int ok, const char *name) {
+    printf("%s\tl0-rlimit.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) passed++; else failed++;
+}
+
+int main(void) {
+    sy_rlimit_t orig, mod, back, as_lim;
+    int rc = sy_getrlimit(SY_RLIM_NOFILE, &orig);
+    ck(rc == 0 && orig.cur > 0 && orig.cur <= orig.max, "get-nofile-ok");
+
+    /* Lower soft limit by 1, read back equal, then restore */
+    mod = orig;
+    if (mod.cur > 16) mod.cur = orig.cur - 1;
+    int rc_set = sy_setrlimit(SY_RLIM_NOFILE, &mod);
+    back.cur = 0; back.max = 0;
+    int rc_back = sy_getrlimit(SY_RLIM_NOFILE, &back);
+    int rc_rest = sy_setrlimit(SY_RLIM_NOFILE, &orig);
+    ck(rc_set == 0 && rc_back == 0 && back.cur == mod.cur && back.max == mod.max && rc_rest == 0, "set-soft-readback-and-restore");
+
+    /* Invalid cur > max must return -EINVAL */
+    { sy_rlimit_t bad = orig;
+      if (bad.max < ~0ULL) bad.cur = bad.max + 1;
+      else bad.cur = 0;
+      if (bad.max < ~0ULL) {
+          int rc_inv = sy_setrlimit(SY_RLIM_NOFILE, &bad);
+          ck(rc_inv == -EINVAL, "set-cur-gt-max-einval");
+      } else {
+          ck(1, "set-cur-gt-max-einval");
+      } }
+
+    /* Exceeding hard limit as non-root must return -EPERM */
+    { sy_rlimit_t over = orig;
+      if (sy_uid() != 0 && over.max < ~0ULL) {
+          over.max = orig.max + 1;
+          int rc_perm = sy_setrlimit(SY_RLIM_NOFILE, &over);
+          ck(rc_perm == -EPERM, "set-above-hard-eperm");
+      } else {
+          ck(1, "set-above-hard-eperm");
+      } }
+
+    /* Null pointer & bad resource ID -> -EINVAL */
+    ck(sy_getrlimit(SY_RLIM_NOFILE, 0) == -EINVAL &&
+       sy_setrlimit(SY_RLIM_NOFILE, 0) == -EINVAL &&
+       sy_getrlimit(999, &back) == -EINVAL &&
+       sy_setrlimit(-1, &orig) == -EINVAL, "bad-args-einval");
+
+    /* sy_rlimit_as matches sy_getrlimit(SY_RLIM_AS) */
+    as_lim.cur = 0; as_lim.max = 0;
+    int rc_as = sy_getrlimit(SY_RLIM_AS, &as_lim);
+    long as_val = sy_rlimit_as();
+    int as_match = (rc_as == 0) &&
+        ((as_lim.cur == ~0ULL || as_lim.cur > 0x7FFFFFFFFFFFULL) ? (as_val == -1) : (as_val == (long)as_lim.cur));
+    ck(as_match, "rlimit-as-matches-getrlimit");
+
+    printf("CHECK_L0_RLIMIT\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

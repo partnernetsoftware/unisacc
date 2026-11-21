@@ -12,13 +12,31 @@ typedef struct {
     long ino;
     long mtime;     /* seconds */
     int mode;       /* permission bits, 07777 */
-    int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), 's' socket, 'p' fifo, '?' other */
+    int kind;       /* 'f' regular, 'd' directory, 'l' symlink (sy_lstat only), 's' socket, 'p' fifo, 'c' char device, 'b' block device, '?' other */
     long uid;       /* owner */
     unsigned long dev;   /* device. Linux and macOS: (dev, ino) names one file. Windows leaves both 0. */
     long ctime;     /* status-change time, seconds. POSIX: last inode change, not settable by the
                        owner. Windows: creation time (a rewritten file keeps it only when the
                        bytes are written in place). */
+    long gid;       /* owning group. Windows: 0 */
+    unsigned long rdev;  /* device number of a character or block special file, else 0. Windows: 0 */
+    int64_t mtime_ns; /* modification time in nanoseconds since the epoch. Windows: second precision. */
+    int64_t ctime_ns; /* status-change time in nanoseconds, as mtime_ns. */
 } sy_stat_t;
+
+/* Nanosecond times: the stat layout differs per target; the prelude exposes the fraction
+   as st_*_nsec (Linux) or st_*timespec (macOS). Windows never reaches sy_fill. */
+static int64_t sy_ns_os(const struct stat *s, int which) {
+#ifdef _WIN32
+    return (int64_t)(which ? s->st_ctime : s->st_mtime) * 1000000000LL;
+#elif defined(__APPLE__)
+    return which ? (int64_t)s->st_ctimespec.tv_sec * 1000000000LL + s->st_ctimespec.tv_nsec
+                 : (int64_t)s->st_mtimespec.tv_sec * 1000000000LL + s->st_mtimespec.tv_nsec;
+#else
+    return which ? (int64_t)s->st_ctime * 1000000000LL + s->st_ctime_nsec
+                 : (int64_t)s->st_mtime * 1000000000LL + s->st_mtime_nsec;
+#endif
+}
 
 static int sy_fail(void) { return errno ? -errno : -1; }
 
@@ -28,7 +46,12 @@ static void sy_fill(const struct stat *s, sy_stat_t *out) {
     out->mtime = (long)s->st_mtime;
     out->mode = (int)(s->st_mode & 07777);
     out->kind = S_ISREG(s->st_mode) ? 'f' : S_ISDIR(s->st_mode) ? 'd' : S_ISLNK(s->st_mode) ? 'l'
-              : S_ISSOCK(s->st_mode) ? 's' : S_ISFIFO(s->st_mode) ? 'p' : '?';
+              : S_ISSOCK(s->st_mode) ? 's' : S_ISFIFO(s->st_mode) ? 'p'
+              : S_ISCHR(s->st_mode) ? 'c' : S_ISBLK(s->st_mode) ? 'b' : '?';
+    out->gid = (long)s->st_gid;
+    out->rdev = out->kind == 'c' || out->kind == 'b' ? (unsigned long)s->st_rdev : 0;
+    out->mtime_ns = sy_ns_os(s, 0);
+    out->ctime_ns = sy_ns_os(s, 1);
     out->uid = (long)s->st_uid;
     out->dev = (unsigned long)s->st_dev;
     out->ctime = (long)s->st_ctime;
@@ -347,8 +370,14 @@ static int sy_stat_os(const char *path, sy_stat_t *out) {
     out->uid = 0;
     out->ino = 0;
     out->dev = 0;
+    out->gid = 0;
+    out->rdev = 0;
+    out->mtime_ns = ticks > 116444736000000000LL ?
+        (int64_t)((ticks - 116444736000000000LL) / 10000000LL) * 1000000000LL : 0;
     ticks = ((__u_word)d[4] << 32) | (__u_word)d[3];
     out->ctime = ticks > 116444736000000000LL ? (long)((ticks - 116444736000000000LL) / 10000000LL) : 0;
+    out->ctime_ns = ticks > 116444736000000000LL ?
+        (int64_t)((ticks - 116444736000000000LL) / 10000000LL) * 1000000000LL : 0;
     return 0;
 #else
     struct stat s;

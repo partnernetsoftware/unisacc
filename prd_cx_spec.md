@@ -45,11 +45,11 @@
 #pragma unisa use NAME               导入 NAME 的全部公开符号(CX-U-1)
 #pragma unisa use NAME::sym          只导入 sym(CX-U-2)
 #pragma unisa use NAME::sym as alias 导入并改名(CX-U-3)
-#pragma unisa dock                   本模块对接宿主,允许 #include 与裸 libc;只给 L0 用
+#pragma unisa dock                   本模块对接宿主,允许 #include 与裸 libc;只给核心库包的对接单元(cx-L0)用,见 3.4 与 3.4b
 ```
 
 - 使用方单元(带 `main` 的脚本)可以没有 `module` 行。
-- `NAME` 的点号是子目录:`sys.fs` 即 `<某根>/sys/fs.cx`。先找使用方文件旁边;没有再向上找最近的 `cxroot.tsv`(包根),按其中 `R<TAB>前缀<TAB>目录` 行映射(CX-U-7)。仓根 `cxroot.tsv` 现有前缀:`sys mem text core runtime driver compiler workspace cx0 stream path os sysx crypto cxlib tsvx`。
+- `NAME` 的点号是子目录:`sys.fs` 即 `<某根>/sys/fs.cx`。先找使用方文件旁边;没有再向上找最近的 `cxroot.tsv`(包根),按其中 `R<TAB>前缀<TAB>目录` 行映射(CX-U-7)。仓根 `cxroot.tsv` 现有前缀:`sys mem text core runtime driver compiler workspace cx0 stream path os sysx crypto cxlib tsvx testx`(2026-11-21 核,17 条 R 行)。
 - `net` 不在仓根 `cxroot.tsv` 里:`tools/` 下靠旁边的目录链接 `tools/net -> ../ext/net` 解析;别处使用要在自己的包根加一行(见 3.3)。
 - 不传递:A `use` mid、mid `use` text.fmt,A 不能直接调 `tx_snprintf`;用到哪个模块就直接 `use` 它(CX-U-5)。
 - 模块图必须无环,否则拒绝 `module cycle`(CX-M-3)。
@@ -72,32 +72,35 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 
 ### 3.4 层与层向
 
+本表只留写 `.cx` 必需的规则(谁能 dock、谁能调 libc)。目录对应的包名、四环、文件数与字节见 [prd_cx.md](prd_cx.md) 开头的「cx 核心库包总表」;这里的 cx-L0..cx-L3 是模块层,不等同于结构层 L0-L4、术语层 T1-T5、四环 K/S/X/A,也不等同于打包边界。
+
 | 层 | 目录 | 能否碰 libc/POSIX 与 #include |
 |---|---|---|
 | cx-L0 宿主对接 | `cx/sys`、`cx/mem`、`cx/text` | 能,且只有这里能(模块头写 `dock`) |
 | cx-L1 机制 | `cx/core`、`cx/runtime` | 不能 |
 | cx-L2 驱动与编译器 | `cx/driver`、`cx/compiler`、`src/` | 不能 |
 | cx-L3 工具、测试、应用 | `tools`、`tests`、`apps` | 允许 printf/fprintf 给人看(本机跑,不跨目标);其余仍应走 L0 |
+| 2026-11-21 定案(原未定层) | `cx/stream` 的 `item`、`pipe` 为 cx-L1;`cx/cx0` 为 cx-L2;`cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace` 为扩展应用库包(待迁往 `ext/`,`use` 名不变) | 都不能;`cx/cx0/plan.cx`、`cx/path`、`cx/os` 现有的 dock 与 `cx/workspace` 的裸 libc 是待整改现状,新写代码不得照此写。依据与实施版本见 [prd_cx.md](prd_cx.md)「两层.5a」;`tools/check-cx-layers.cx` 的层表尚未跟上 |
 | EXT 包层 | `ext/<包>/`(包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录) | 各包自述;产品层不得 `use` 到 ext |
 
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
 - 产品代码(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)严格只用 `sy_*`、`mm_*`、`tx_*`,不写平台 `#if`(`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__`)和 `__syscallN`(CX-Y-2、CX-Y-3)。平台差异只放 L0 的 `_os` 静态帮手或表。
 - 错误码只走返回值:L0 失败返回 `-errno`,不靠全局 `errno` 跨模块传递(CX-Y-4)。
-- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build 写 `use text.build`。
+- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build/json 写 `use text.build`/`use text.json`。`use` 写法保持不变;身份上的去别名迁移(使 `ext/textx` 四文件与 `cx/mem/arena.cx` 不再进源 SID,归 B 类轻车道)归身份收窄版(2026-11-21 更正:按 `build/version-seq.tsv` 身份收窄定在 0.0.90,见 [plans/v0.0.90.md](plans/v0.0.90.md),规划,未实现;原文写 v0.0.89)。别名清单与落差说明见 [prd_cx.md](prd_cx.md)「两层设计」节「两层.5」。
 
 ### 3.4a 库包一览(怎么选包)
 
-真源 `build/tlib-packages.tsv`(版本、依赖、包根)与 `build/layer-api/PKG.tsv`(公开接口);本表是给写 `.cx` 的人选包用的摘要,数字为 2026-11-15 main 的接口数,以真源为准。设计取舍、审视结论与路线在 [prd_cx.md](prd_cx.md) 0.2 节。
+真源 `build/tlib-packages.tsv`(版本、依赖、包根)与 `build/layer-api/PKG.tsv`(公开接口);本表是给写 `.cx` 的人选包用的摘要,只留 use 写法、用途与谁可用,包清单与 [prd_cx.md](prd_cx.md) 开头的「cx 核心库包总表」一致,目录、模块层、四环与规模以总表为准。接口数为 2026-11-15 main 的快照,以真源为准。设计取舍、审视结论与路线在 [prd_cx.md](prd_cx.md) 0.2 节。
 
 | 包 | use 写法 | 用途 | 接口数 | 谁可用 |
 |---|---|---|---|---|
 | cx.mem | `mem.heap`、`mem.bytes`、`mem.arena`、`mem.vec`、`mem.map` | 堆、带界字节、arena、vec、map | 61 | 全部 |
 | cx.text | `text.text`、`text.fmt`、`text.num`、`text.utf8`、`text.codec` | 带界文本、格式化、数字、UTF-8、编码 | 44 | 全部 |
-| cx.sys | `sys.io`、`sys.mem`、`sys.sha`、`sys.dl`、`sys.netmsg` 等 | fd 读写、映射、摘要、动态库、网络底层 | 88 | 全部 |
+| cx.sys | `sys.io`、`sys.mem`、`sys.sha`、`sys.dl`、`sys.netmsg`、`sys.syscall` 等 | fd 读写、映射、摘要、动态库、网络底层、薄系统调用(`sy_syscall6` 仅支持 nr 加 5 参数,第六参不支持)与熵源(`sy_random`) | 91 | 全部 |
 | cx.os | `sys.fs`、`sys.proc`、`sys.env`、`sys.time`、`os.utc` | 文件系统、进程、环境、时间与截止 | 135 | 全部 |
 | cx.path | `path.path` | 纯词法路径,posix 与 win | 27 | 全部 |
 | cx.stream | `stream.item`、`stream.pipe`、`stream.rw` | 带回执的有界字节管道与读写句柄 | 32 | 全部 |
-| ext.memx、ext.textx | `mem.arena`、`text.build`、`text.deflate`、`text.num` | arena、字符串构造、deflate | 5、27 | 工具、测试、应用 |
+| ext.memx、ext.textx | `mem.arena`、`text.build`、`text.deflate`、`text.num`、`text.json` | arena、字符串构造、deflate、数字、JSON 解析 | 5、44 | 工具、测试、应用 |
 | ext.sysx | `sysx.process`、`sysx.poll`、`sysx.tty` 等 | 进程树、回收、poll、tty、跟踪 | 32 | 工具、测试、应用 |
 | ext.net | `net.addr`、`net.tcp`、`net.udp`、`net.unix`、`net.resolve`、`net.sock` | 地址、TCP、UDP、Unix 域,带截止收发 | 37 | 工具、测试、应用 |
 | ext.crypto | `crypto.sha256`、`crypto.gcm`、`crypto.x25519` 等 | 纯 cx 密码学与 TLS 1.3 记录层 | 132 | 工具、测试、应用 |
@@ -105,9 +108,29 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 | tools.cxlib | `cxlib.NAME` | 工具侧库:发布、构造、进程运行、身份、测试计划 | 467 | 只给 tools、tests |
 | cx.base、cx.plan、cx.runtime、cx.compile、cx.driver | `core.*`、`cx0.*`、`runtime.*`、`compiler.*`、`driver.*` | 执行器、模块规划、运行库、编译器、驱动(产品内部环) | 93、14、349、524、34 | 产品与其工具;应用不要 use |
 
-- 选包顺序:先 cx 核心六包,不够再 ext;产品层(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)不得 use ext 与 tools.cxlib。
+- 选包顺序:先 cx 核心六包,不够再 ext(两层的写法规则见 3.4b);产品层(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)不得 use ext 与 tools.cxlib。
 - 只导入需要的符号用 `use NAME::sym`,避免整模块带入无关依赖(实例:整模块 use cxlib.runnerprep 曾把 tlibpkg 拖进 s9-native)。
 - 编译器要求直接 use 拥有该符号的模块,不经中间模块转手。
+
+### 3.4b 两层规则(核心库包与扩展应用库包)
+
+cx 按「编不编进 unisacc.com」分两层:核心库包编进去,只承担 cx 语言扩展支持、libc 对接、posix 封装、syscall 与 host ABI 对接;扩展应用库包不编进去,是未来库包市场里的包。为什么这样分、准入判据、依赖方向、现状落差与市场能力清单都在 [prd_cx.md](prd_cx.md)「两层设计」节,这里不重复,只列写 `.cx` 时要守的规则。两层是打包边界,不等同于 3.4 表里的 cx-L 层号。2026-11-21 定案:「编进」以编译闭包(`build/core-closure.tsv`)为准,输入类 A 只作门禁近似;一个单元不在任何目标的闭包里,就属于扩展应用库包,不论它现在放在哪个目录。
+
+| 你在写什么 | 能否 dock(`#include` 与裸 libc) | 可以 use 谁 | 不得 |
+|---|---|---|---|
+| 核心库包的对接单元(`cx/sys`、`cx/mem`、`cx/text` 下的实体文件) | 能,模块头写 `#pragma unisa dock`;平台差异只放这里的 `_os` 静态帮手或表 | 同层与更低处 | use 扩展应用库包;为产品自身不用的便利功能加文件(那属于扩展应用库包) |
+| 产品本体(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`) | 不能(登记在 `tests/cxraw-layers.tsv` 的例外路径除外,如 `src/host.cx`、`src/hostnative.cx`);只用 `sy_*`、`mm_*`、`tx_*` | 核心库包与同层、下层 | use `ext/` 与 `tools/cxlib`(`tools/check-cx-layers.cx` 第 4 条断言,即红) |
+| 扩展应用库包(`ext/<包>/`,以及定案归此的 `cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace`) | 不能(2026-11-21 定案):不得 dock 宿主,须建在核心的 `sy_*`、`mm_*`、`tx_*` 上;缺的系统能力提给核心库包加。现存持 dock 的 ext 文件是过渡例外(20 个,到期 0.0.90,清单在 [prd_cx.md](prd_cx.md)「两层.5a」),新文件不得加入 | 核心库包的公开面、其它扩展应用库包(不得成环) | 被产品本体 use;use 产品内部环(`core.*`、`runtime.*`、`compiler.*`、`driver.*`、`cx0.*`;规划期拒绝未实现,先自觉遵守) |
+| 工具、测试、应用(`tools`、`tests`、`apps`) | 不写 dock;允许 printf/fprintf 给人看 | 核心库包、扩展应用库包、`cxlib.*`(应用不要 use `cxlib` 与产品内部环) | 无 |
+
+扩展应用库包怎么写、怎么被 use:
+
+- 位置与模块名:文件放 `ext/<包>/NAME.cx`,首行 `#pragma unisa module NAME`(NAME 等于文件 stem);不手写 `#include`。
+- 登记:在 `build/tlib-packages.tsv` 加包行(版本、roots、deps),接口清单由 `tools/layer-api.cx -- --write` 生成;带 `check-*.cx` 并登记批次。现状 `argx`、`fsx`、`testx` 尚无包行(2026-11-21 读表)。
+- 被 use 的写法:仓根 `cxroot.tsv` 有前缀的包直接按前缀写,如 `use sysx.poll`、`use crypto.sha256`、`use tsvx.read`;`net` 靠 `tools/net` 目录链接或自己包根加一行(3.2);`ext.memx`、`ext.textx` 目前经 `cx/` 下别名写成 `mem.arena`、`text.json` 等,`use` 名保持不变;仓外脚本见 3.3。2026-11-21 定案(均未实施,实施前写法照旧,实施后写法也不变):arena 实体挪进 `cx/mem`、ext.memx 退役;`cx/sys` 下 fd、poll、tty、net、process、guard 的实体挪进 `cx/sys`;`cx/text` 下 json、build、deflate、num 四条别名删除,改由 `cxroot.tsv` 包根映射保持 `text.json` 等名字;`cx/path`、`cx/os`、`cx/stream` 的 `rw`、`cx/workspace` 迁往 `ext/` 后仍写 `path.path`、`os.utc`、`stream.rw`。
+- 改动成本:经别名进源身份的 20 个文件(`ext/sysx` 15、`ext/memx` 1、`ext/textx` 4)现在改一行仍按产品输入(输入类 A)对待,只能随版本分支;其余 ext 文件是输入类 B。身份收窄(0.0.90,规划,未实现)之后才都不再触发整链,详见 [prd_cx.md](prd_cx.md)「两层.5」「两层.6」。
+- 包的索引、锁定、分发、安装与签名目前都没有(规划,未实现),现状与缺口见 [prd_cx.md](prd_cx.md)「两层.7」;市场的包仓名为「unisa 库包仓」(2026-11-21 定案,规划,未实现),ext 纯包不随产品发行。
+- 包表规矩(2026-11-21 定案):cx.* 包行的 deps 不得出现 ext.*;对应检查未建,现存两处声明(cx.stream、cx.compile 对 ext.memx)待删,见 [prd_cx.md](prd_cx.md)「两层.5a」。
 
 ### 3.5 计划中语法(未实现,不可用)
 
@@ -271,7 +294,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 
 ### 5.2 已知限制(如实)
 
-- 没有 JSON 解析与序列化库:只能手工拼装与手工扫描。
+- 有 JSON 解析(`use text.json`,包 `ext.textx`,接口见 `build/layer-api/ext.textx.tsv`),没有 JSON 序列化(见 `build/pkg-gaps.tsv`,写出暂用 `text.build` 加 `js_esc` 手拼;与 `build/std-surface.tsv` 一致)。
 - 没有 HTTP 客户端与服务端、没有 TLS 高层接口、没有 URL 解析(表头 `out TLS/HTTP/URL`);`ext.crypto` 只有 TLS 1.3 记录层等底层件。
 - 没有正则:只有子串查找、分隔迭代与修剪。
 - 没有线程与事件循环;没有泛型容器,只有 `mm_vec_*` 与字符串键 `mm_map_*`。

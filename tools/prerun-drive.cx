@@ -97,6 +97,10 @@ static int pd_is_early_canary_id(const char *id) {
     return pd_starts(id, "ri-image-") || tx_eqz(id, "ri-route-refuse") || tx_eqz(id, "lane-key-probes");
 }
 
+static int pd_is_expected_unmeasured_id(const char *id) {
+    return tx_eqz(id, "tools-default-regression") || tx_eqz(id, "cx-booter-ape");
+}
+
 static int pd_is_heavy_id(const char *id) {
     static const char *builtin[] = {
         "real-commit", "unit-frontcache-equiv3", "check-split-parents",
@@ -412,8 +416,16 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         if (pd_has_times && warmup_n == 1) {
             int best = -1;
             for (i = 0; i < pd_nids; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) &&
+                    !pd_is_expected_unmeasured_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
                     if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
+                }
+            }
+            if (best < 0) {
+                for (i = 0; i < pd_nids; i++) {
+                    if (!pd_ids[i].heavy && !pd_is_expected_unmeasured_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
+                        if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
+                    }
                 }
             }
             if (best < 0) {
@@ -430,14 +442,15 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
             }
         } else {
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
+                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) &&
+                    !pd_is_expected_unmeasured_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
                     cost += pd_ids[i].time_ms;
                 }
             }
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!used[i] && !pd_ids[i].heavy && pd_warmup_fits(i, cost)) {
+                if (!used[i] && !pd_ids[i].heavy && !pd_is_expected_unmeasured_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
                     cost += pd_ids[i].time_ms;
@@ -946,6 +959,129 @@ static int pd_prebuild_layout(const char *root, const char *cand, char *lay_out,
     return ok ? 0 : -1;
 }
 
+static int pd_freeze_source_root(const char *root, const char *out_dir,
+                                 char *frozen_root, size_t rcap, char *frozen_rev, size_t vcap) {
+    char revf[PD_PW], froot[PD_PW], ghead[PD_PW], why[256];
+    frozen_root[0] = 0;
+    frozen_rev[0] = 0;
+    if (cx_fmt(revf, sizeof revf, "%s/frozen-source.rev", out_dir) ||
+        cx_fmt(froot, sizeof froot, "%s/frozen-root", out_dir) ||
+        cx_fmt(ghead, sizeof ghead, "%s/.git/HEAD", froot)) return -1;
+    unsigned char *rb = 0; int64_t rn = 0;
+    if (sy_read_file(revf, &rb, &rn, 128) == 0 && rb && rn >= 40) {
+        int valid = 1;
+        for (int i = 0; i < 40; i++) {
+            char c = (char)rb[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { valid = 0; break; }
+            if (i + 1 < (int)vcap) frozen_rev[i] = c;
+        }
+        mm_free(rb);
+        if (valid) frozen_rev[40] = 0;
+        else frozen_rev[0] = 0;
+    } else if (rb) {
+        mm_free(rb);
+    }
+    if (!frozen_rev[0]) {
+        np_result gr = {0};
+        char *gv[] = {"git", "-C", (char *)root, "rev-parse", "HEAD", 0};
+        if (np_run(gv, 0, 0, 10, &gr, why, sizeof why) || gr.rc || gr.outn < 40) {
+            np_free(&gr);
+            return -1;
+        }
+        for (int i = 0; i < 40; i++) {
+            char c = gr.out[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { np_free(&gr); return -1; }
+            if (i + 1 < (int)vcap) frozen_rev[i] = c;
+        }
+        frozen_rev[40] = 0;
+        np_free(&gr);
+        char rline[64];
+        cx_fmt(rline, sizeof rline, "%s\n", frozen_rev);
+        sy_write_file(revf, rline, (int64_t)strlen(rline), 0644);
+    }
+    sy_stat_t st;
+    if (sy_lstat(ghead, &st) != 0) {
+        char scmd[8192];
+        if (cx_fmt(scmd, sizeof scmd,
+            "g=$(git -C '%s' rev-parse --path-format=absolute --git-common-dir) && "
+            "rm -rf '%s' && mkdir -p '%s/.git/refs/heads' '%s/.git/refs/tags' && "
+            "git -C '%s' archive --format=tar '%s' | tar -x -C '%s' && "
+            "ln -s \"$g/objects\" '%s/.git/objects' && "
+            "printf '[core]\\n\\trepositoryformatversion = 0\\n\\tfilemode = true\\n\\tbare = false\\n' > '%s/.git/config' && "
+            "printf '%%s\\n' '%s' > '%s/.git/HEAD' && "
+            "{ [ ! -e '%s/unisacc.com' ] || [ -e '%s/unisacc.com' ] || ln -s '%s/unisacc.com' '%s/unisacc.com'; }",
+            root, froot, froot, froot, root, frozen_rev, froot, froot, froot, frozen_rev, froot,
+            root, froot, root, froot)) return -1;
+        char *sv[] = {"sh", "-c", scmd, 0};
+        np_result sr = {0};
+        int tr = np_run(sv, 0, 0, 45, &sr, why, sizeof why);
+        int ok = (!tr && sr.rc == 0);
+        np_free(&sr);
+        if (!ok) return -1;
+    }
+    cx_fmt(frozen_root, rcap, "%s", froot);
+    return 0;
+}
+
+/* Verify or stamp `# source=<rev>` in OUTP against FROZEN_REV ( rooted at EFF_ROOT ).
+ * Returns 0 on match, 1 on source drift (prints PRERUN_SOURCE_DRIFT + PRERUN_STOP). */
+static int pd_verify_window_source(const char *outp, const char *wid, int attempt,
+                                   const char *eff_root, const char *frozen_rev) {
+    if (!frozen_rev || !frozen_rev[0]) return 0;
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(outp, &b, &n, 4 << 20) != 0 || !b || n <= 0) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    long pos = tx_find((const char *)b, (long)n, "source=", 7);
+    if (pos >= 0 && pos + 7 + 40 <= (long)n) {
+        char actual[48];
+        mm_copy(actual, sizeof actual, (const char *)b + pos + 7, 40);
+        actual[40] = 0;
+        mm_free(b);
+        if (!tx_eqz(actual, frozen_rev)) {
+            printf("PRERUN_SOURCE_DRIFT\tstatus=FAIL\twindow=%s\texpected=%s\tactual=%s\n",
+                   wid, frozen_rev, actual);
+            printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=source-drift-expected-%s-got-%s\n",
+                   wid, attempt, wid, frozen_rev, actual);
+            return 1;
+        }
+        return 0;
+    }
+    /* No `# source=` line yet (e.g. mock runner in a git root): resolve eff_root HEAD, stamp `# source=`, and verify. */
+    char why[256], actual[48] = {0};
+    np_result gr = {0};
+    char *gv[] = {"git", "-C", (char *)eff_root, "rev-parse", "HEAD", 0};
+    if (np_run(gv, 0, 0, 10, &gr, why, sizeof why) == 0 && gr.rc == 0 && gr.outn >= 40) {
+        mm_copy(actual, sizeof actual, gr.out, 40);
+        actual[40] = 0;
+    }
+    np_free(&gr);
+    if (actual[0]) {
+        char hdr[128];
+        cx_fmt(hdr, sizeof hdr, "# source=%s\n", actual);
+        size_t hl = strlen(hdr);
+        char *nb = (char *)mm_alloc((size_t)n + hl + 1);
+        if (nb) {
+            mm_copy(nb, (size_t)n + hl + 1, hdr, hl);
+            mm_copy(nb + hl, (size_t)n + 1, b, (size_t)n);
+            sy_write_file(outp, nb, (int64_t)((size_t)n + hl), 0644);
+            mm_free(nb);
+        }
+        mm_free(b);
+        if (!tx_eqz(actual, frozen_rev)) {
+            printf("PRERUN_SOURCE_DRIFT\tstatus=FAIL\twindow=%s\texpected=%s\tactual=%s\n",
+                   wid, frozen_rev, actual);
+            printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=source-drift-expected-%s-got-%s\n",
+                   wid, attempt, wid, frozen_rev, actual);
+            return 1;
+        }
+        return 0;
+    }
+    mm_free(b);
+    return 0;
+}
+
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
     char wpath[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
@@ -955,6 +1091,16 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     if (timed && atoi((char *)wb + sizeof PD_TIMED_HEADER - 1) > max_jobs) {
         mm_free(wb);
         return pd_refuse("timed-plan-exceeds-max-jobs");
+    }
+    char frozen_root[PD_PW], frozen_rev[64];
+    const char *eff_root = root;
+    frozen_root[0] = 0;
+    frozen_rev[0] = 0;
+    if (pd_freeze_source_root(root, out_dir, frozen_root, sizeof frozen_root, frozen_rev, sizeof frozen_rev) == 0 &&
+        frozen_root[0] && frozen_rev[0]) {
+        eff_root = frozen_root;
+        printf("PRERUN_FROZEN_SOURCE\trev=%s\troot=%s\n", frozen_rev, eff_root);
+        fflush(stdout);
     }
     {
         int64_t cpos = 0;
@@ -1030,17 +1176,17 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         (void)load_cap;   /* load gates retired 2026-11-20: --max-jobs is the fixed bound, load1 never lowers it */
         if (tx_eqz(phase, "prebuild-self")) {
             char cmd[8192], why[256], lay_dir[PD_PW];
-            const char *run_cwd = root;
+            const char *run_cwd = eff_root;
             np_result r = {0};
             long started = sy_now_ms();
             if (mock_runner) {
                 cx_fmt(cmd, sizeof cmd, "sh '%s' prebuild-self '%s' '%s'", mock_runner, wid, outp);
-            } else if (pd_prebuild_layout(root, cand, lay_dir, sizeof lay_dir) == 0) {
+            } else if (pd_prebuild_layout(eff_root, cand, lay_dir, sizeof lay_dir) == 0) {
                 run_cwd = lay_dir;
                 cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/devsvc.cx -- prebuild-self", lay_dir);
             } else {
                 const char *use_cand = (cand && cand[0] && !tx_eqz(cand, "-")) ? cand : "./unisacc.com";
-                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/devsvc.cx -- prebuild-self", root, use_cand);
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/devsvc.cx -- prebuild-self", eff_root, use_cand);
             }
             char *av[] = {"sh", "-c", cmd, 0};
             int tr = np_run(av, run_cwd, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
@@ -1110,7 +1256,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         int attempt = 0;
         for (;;) {
             if (serial) {
-                int result = pd_recover_serial(root, cand, out_dir, mock_runner, wid,
+                int result = pd_recover_serial(eff_root, cand, out_dir, mock_runner, wid,
                                                win_ids, passed_flags, nwin, max_retries, resume);
                 if (result < 0) { mm_free(wb); return pd_refuse("serial-recovery-receipt-write"); }
                 if (result == 2) { mm_free(wb); return 1; }
@@ -1129,7 +1275,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             size_t prev_saved_len = saved_len;
             sy_unlink(outp);
             const char *run_ids = rem_ids[0] ? rem_ids : ids;
-            int rc = pd_window_attempt(root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
+            int rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
+            if (pd_verify_window_source(outp, wid, attempt, eff_root, frozen_rev)) {
+                mm_free(wb);
+                return 1;
+            }
 
             if (prev_saved_len > 0) {
                 pd_prepend_saved(outp, saved_hdr, saved_rows, prev_saved_len);
@@ -1151,6 +1301,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             pd_nstates = 0;
             if (sy_read_file(outp, &ob, &on, 4 << 20) == 0 && ob && on > 0) {
                 pd_ingest_strict_buf((const char *)ob, on);
+                if (tx_eqz(phase, "warmup") && tx_find((const char *)ob, (long)on, "kit-window\t", 11) >= 0) {
+                    has_nonpass = 1;
+                    cx_fmt(bad_id, sizeof bad_id, "kit-window");
+                    cx_fmt(bad_raw, sizeof bad_raw, "warmup-kit-window-not-ready");
+                }
                 for (int k = 0; k < pd_nstates; k++) {
                     if (!tx_eqz(pd_states[k].status, "PASS")) {
                         int is_pf = (tx_eqz(pd_states[k].domain, "product-qualification") && tx_eqz(pd_states[k].status, "FAIL"));
@@ -1172,6 +1327,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
 
             if (!has_nonpass && !rem_ids[0] && rc == 0) {
+                if (tx_eqz(phase, "warmup")) {
+                    printf("PRERUN_WARMUP_READY\twindow=%s\tids=%s\tlayout=ready\tkit=ready\n", wid, ids);
+                    fflush(stdout);
+                }
                 char dline[128];
                 cx_fmt(dline, sizeof dline, "QUALIFY_DONE\twindow=%s\tjobs=%d\tattempts=%d\n", wid, jobs, attempt);
                 sy_write_file(donep, dline, (int64_t)strlen(dline), 0644);
@@ -1546,7 +1705,7 @@ static int pd_cmd_g1_dry(const char *root, const char *cand_tsv, const char *str
         np_free(&r);
     }
     if (cx_fmt(cmd, sizeof cmd,
-        "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 sh ./unisacc.com tools/release-exec.cx -- "
+        "cd '%s' && sh ./unisacc.com tools/release-exec.cx -- "
         "--execute '%s/release/candidate.tsv' --layout '%s' --dry --out '%s' --baseline /nonexistent",
         root, lay, lay, g1out)) return pd_refuse("g1-run-fmt");
     {

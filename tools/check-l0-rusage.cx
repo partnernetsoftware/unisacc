@@ -1,0 +1,41 @@
+/* Per-child CPU and high-water RSS, with a live child and a failed wait. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.sysinfo
+#pragma unisa use text.text
+
+static int failed, checked;
+static void rusage_assert(int ok, const char *name) {
+    checked++;
+    failed += !ok;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+int main(void) {
+    sy_rusage_t usage = {101, 102, 103};
+    rusage_assert(sy_wait_rusage(-1, 0, &usage) == -EINVAL, "invalid-pid-rejected");
+    if (tx_eqz(sy_os_name(), "win")) {
+        rusage_assert(sy_wait_rusage(1, 0, &usage) == -ENOSYS, "windows-explicit-refusal");
+    } else {
+        sy_spawn_t opt;
+        sy_child_t child;
+        char *burn[] = {"sh", "-c", "read value; i=0; while [ $i -lt 200000 ]; do i=$((i+1)); done", 0};
+        sy_spawn_init(&opt);
+        opt.argv = burn;
+        opt.in_fd = SY_STDIO_PIPE;
+        if (sy_proc_spawn(&opt, &child)) return 2;
+        rusage_assert(sy_wait_rusage(child.pid, SY_WAIT_NOHANG, &usage) == 0 &&
+              usage.user_ms == 101 && usage.sys_ms == 102 && usage.maxrss_kb == 103,
+              "nohang-keeps-rusage");
+        rusage_assert(sy_wait_rusage(child.pid, 0, 0) == -EINVAL, "null-rusage-does-not-reap");
+        sy_proc_close(&child);
+        rusage_assert(sy_wait_rusage(child.pid, 0, &usage) == child.pid && usage.user_ms >= 0 &&
+              usage.sys_ms >= 0 && usage.user_ms + usage.sys_ms >= 50 && usage.maxrss_kb > 0,
+              "reap-reports-cpu-and-rss");
+        sy_rusage_t unchanged = usage;
+        rusage_assert(sy_wait_rusage(child.pid, 0, &usage) == -ECHILD &&
+              usage.user_ms == unchanged.user_ms && usage.sys_ms == unchanged.sys_ms &&
+              usage.maxrss_kb == unchanged.maxrss_kb, "reaped-child-preserves-rusage");
+    }
+    printf("CHECK_L0_RUSAGE\tok=%d\tfailed=%d\n", checked - failed, failed);
+    return failed != 0;
+}

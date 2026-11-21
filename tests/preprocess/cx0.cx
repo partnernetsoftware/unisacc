@@ -11,7 +11,8 @@ static void fixture(const char *name,const char *text,char out[4400]){
  path(out,4400,work,name);int fd=open(out,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW,0600);if(fd<0)die("exclusive-fixture");
  size_t n=strlen(text),at=0;while(at<n){ssize_t w=write(fd,text+at,n-at);if(w<0&&errno==EINTR)continue;if(w<=0)die("write-fixture");at+=(size_t)w;}if(close(fd))die("close-fixture");
 }
-static int occurrences(const char *s,const char *word){int n=0;size_t len=strlen(word);while((s=strstr(s,word))){n++;s+=len;}return n;}
+static const char *find_sub(const char *s,const char *w){size_t wl=strlen(w);if(!wl)return s;for(;*s;s++){if(!strncmp(s,w,wl))return s;}return 0;}
+static int occurrences(const char *s,const char *word){int n=0;size_t len=strlen(word);while((s=find_sub(s,word))){n++;s+=len;}return n;}
 static int refused(const cx0_result *r,int status,const char *reason){return r->status==status&&!r->bytes&&r->diagnostic&&strstr(r->diagnostic,reason);}
 static void sub(const char *rel){char p[4400];path(p,sizeof p,work,rel);if(mkdir(p,0700))die("fixture-directory");}
 /* plan of one root: status, and whether `want` (a path under work) is one of its compile paths */
@@ -59,13 +60,13 @@ int main(int argc,char **argv){
  check(!r.status&&!r.diagnostic_bytes&&!strcmp(r.text,expected),"cx-exact-prelude-plan");cx0_release(&r);
  sources[0]=entry;r=cx0_plan(0,sources,1,0,0,interfaces);
  check(!r.status&&r.bytes&&!r.diagnostic_bytes&&strstr(r.text,mod)&&occurrences(r.text,"\n")==3,"module-plan-two-units");
- char *header=r.status?0:root_interface(r.text);check(header&&strstr(header,"int shown(int n);")&&!strstr(header,"hidden"),"only-public-interface-visible");free(header);
+ char *header=r.status?0:root_interface(r.text);check(header&&find_sub(header,"int shown(int n);")&&!find_sub(header,"hidden"),"only-public-interface-visible");free(header);
  char *saved=malloc(r.bytes+1);if(!saved)die("retain-plan");{void *cx_kept=memcpy(saved,r.text,r.bytes+1);(void)cx_kept;}cx0_result kept=r;
  sources[0]=missing;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"no file"),"missing-module-rejected");cx0_release(&r);
  check(kept.text&&!strcmp(kept.text,saved),"retained-result-survives-other-call");
  sources[0]=entry;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&!strcmp(r.text,saved),"rejection-recovery-exact");cx0_release(&r);free(saved);cx0_release(&kept);
  sources[0]=nested;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&occurrences(r.text,"\n")==4&&strstr(r.text,leaf)&&strstr(r.text,gate),"nested-dependency-plan");
- header=r.status?0:root_interface(r.text);check(header&&strstr(header,"leaf_value")&&!strstr(header,"leaf_add"),"transitive-interface-is-types-only");free(header);cx0_release(&r);
+ header=r.status?0:root_interface(r.text);check(header&&find_sub(header,"leaf_value")&&!find_sub(header,"leaf_add"),"transitive-interface-is-types-only");free(header);cx0_release(&r);
  sources[0]=cycle;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"cycle"),"cycle-rejected");cx0_release(&r);
  sources[0]=fake;r=cx0_plan(0,sources,1,0,0,interfaces);check(!r.status&&occurrences(r.text,"\n")==2,"fake-pragma-does-not-add-dependency");cx0_release(&r);
  sources[0]=conditional;r=cx0_plan(0,sources,1,0,0,interfaces);check(refused(&r,1,"conditional"),"conditional-dependency-rejected");if(r.status!=1)fprintf(stderr,"conditional actual: %s\n",r.diagnostic);cx0_release(&r);
@@ -97,14 +98,18 @@ int main(int argc,char **argv){
  /* package root (CX-U-7): cxroot.tsv in the nearest ancestor maps a name prefix to a directory */
  char scratch[4400];
  sub("pr");sub("pr/pkg");sub("pr/pkg/lib");sub("pr/pkg/lib/deep");sub("pr/other");sub("pr/app");sub("pr/app2");sub("pr/app2/lib");sub("pr/inner");
- fixture("pr/cxroot.tsv","CXROOT1\n# comment\n\nR\tlib\tpkg/lib\nR\tlib.deep\tother\nR\tgone\tpkg/none\n",scratch);
+ fixture("pr/cxroot.tsv","CXROOT1\n# comment\n\nR\tlib\tpkg/lib\nR\tlib.deep\tother\nR\tlib.exact\tother/ex\nR\tsolo\tother/single\nR\tgone\tpkg/none\n",scratch);
  fixture("pr/pkg/lib/util.cx","#pragma unisa module util\nint util_v(void){return 3;}\n",scratch);
  fixture("pr/pkg/lib/uses.cx","#pragma unisa module uses\n#pragma unisa use lib.util\nint uses_v(void){return util_v();}\n",scratch);
  fixture("pr/pkg/lib/deep/x.cx","#pragma unisa module x\nint x_shadowed(void){return 1;}\n",scratch);
  fixture("pr/other/x.cx","#pragma unisa module x\nint x_v(void){return 4;}\n",scratch);
+ fixture("pr/other/ex.cx","#pragma unisa module ex\nint ex_v(void){return 6;}\n",scratch);
+ fixture("pr/other/single.cx","#pragma unisa module single\nint single_v(void){return 8;}\n",scratch);
  fixture("pr/app/main.cx","#pragma unisa use lib.util\nint main(void){return util_v();}\n",scratch);
  fixture("pr/app/chain.cx","#pragma unisa use lib.uses\nint main(void){return uses_v();}\n",scratch);
  fixture("pr/app/deep.cx","#pragma unisa use lib.deep.x\nint main(void){return x_v();}\n",scratch);
+ fixture("pr/app/exact.cx","#pragma unisa use lib.exact\nint main(void){return ex_v();}\n",scratch);
+ fixture("pr/app/usesolo.cx","#pragma unisa use solo\nint main(void){return single_v();}\n",scratch);
  fixture("pr/app/norow.cx","#pragma unisa use nowhere.util\nint main(void){return 0;}\n",scratch);
  fixture("pr/app/gone.cx","#pragma unisa use gone.util\nint main(void){return 0;}\n",scratch);
  fixture("pr/app2/lib/util.cx","#pragma unisa module util\nint util_v(void){return 5;}\n",scratch);
@@ -114,6 +119,8 @@ int main(int argc,char **argv){
  check(plans_to("pr/app/main.cx","pr/pkg/lib/util.cx"),"root-maps-prefix-to-directory");
  check(plans_to("pr/app/chain.cx","pr/pkg/lib/util.cx"),"root-module-resolves-its-own-use-through-root");
  check(plans_to("pr/app/deep.cx","pr/other/x.cx"),"root-longest-prefix-wins");
+check(plans_to("pr/app/exact.cx","pr/other/ex.cx"),"root-exact-name-wins-over-prefix");
+check(plans_to("pr/app/usesolo.cx","pr/other/single.cx"),"root-exact-single-segment");
  check(plans_to("pr/app2/main.cx","pr/app2/lib/util.cx"),"beside-file-wins-over-root");
  check(refuses("pr/inner/main.cx","no file"),"nearest-root-decides-alone");
  check(refuses("pr/app/norow.cx","no file"),"no-row-keeps-beside-refusal");

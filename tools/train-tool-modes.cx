@@ -1,0 +1,234 @@
+/* tools/train-tool-modes.cx -- generate and check build/train-tool-modes.tsv (I2c in-session freeze audit).
+   Verifies every audited call site still exists in the train orchestrators, emits the canonical table
+   with category, run_root (snapshot vs live-worktree), and basis, and provides --assert-zero-raw [TABLE]:
+   - chain-build: must be pinned (native-pin / src-tree-pin); any worktree-raw-run/unpinned is FAIL.
+   - sid-tool-bytes: byte-modifying tool sources governed by SID support table (not counted as raw-run).
+     Note: ape-pack.cx and release-ape.cx are already in seed/ident.c:258; only version-inject.cx is newly added.
+   - release-orchestration: orchestration/check tools that do not modify product bytes (exempt from raw-run).
+   - supervisor: chain-run --supervise bootstrapper (exempt).
+   - gap: known pin gaps tracked under an explicit expiry-0.0.90 baseline (source-job-wave, chain-watch,
+     candidate-chain); any gap outside the baseline is FAIL.
+   Usage:
+     sh ./unisacc.com tools/train-tool-modes.cx -- --write [--root DIR]
+     sh ./unisacc.com tools/train-tool-modes.cx -- --check [--root DIR]
+     sh ./unisacc.com tools/train-tool-modes.cx -- --assert-zero-raw [FILE] */
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+typedef struct {
+    const char *scope;
+    const char *tool;
+    const char *category;
+    const char *mode;
+    const char *run_root;
+    const char *call_site;
+    const char *pin_site;
+    const char *resume_check;
+    const char *basis;
+    const char *src_file;
+    const char *needle;
+} TmSpec;
+
+static const TmSpec tm_specs[] = {
+    /* chain-build: native-pin (6) */
+    {"chain", "tools/chain-step.cx", "chain-build", "native-pin", "live-worktree", "tools/candidate-chain.cx:567", "tools/candidate-chain.cx:311-343", "yes(per-process-first:native_sha+out)", "step_pin(root) builds pinned native in outdir", "tools/candidate-chain.cx", "step_pin(root, secs);"},
+    {"chain", "tools/whole-front.cx", "chain-build", "native-pin", "live-worktree", "tools/candidate-chain.cx:203", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tool_pinned(root) builds pinned native in outdir", "tools/candidate-chain.cx", "\"whole-front\""},
+    {"chain", "tools/preflight.cx", "chain-build", "native-pin", "live-worktree", "tools/candidate-chain.cx:239", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tool_pinned(root) builds pinned native in outdir", "tools/candidate-chain.cx", "\"preflight\""},
+    {"chain", "tools/release-build.cx", "chain-build", "native-pin", "snapshot", "tools/candidate-chain.cx:2414", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "snap/tools/release-build.cx pinned into outdir", "tools/candidate-chain.cx", "\"release-build\""},
+    {"chain", "tools/release-ape.cx", "chain-build", "native-pin", "live-worktree", "tools/candidate-chain.cx:3539", "tools/candidate-chain.cx:348-390", "yes(per-process-first:native_sha+out)", "tool_pinned(root) in MS_PACK with chdir(snap) at :3548", "tools/candidate-chain.cx", "\"release-ape\""},
+    {"chain", "tools/chain-pace.cx", "chain-build", "native-pin", "live-worktree", "tools/candidate-chain.cx:2644", "tools/candidate-chain.cx:348-390", "yes(soft-fallback:pin_soft=1)", "tool_pinned(root) builds pinned native in outdir", "tools/candidate-chain.cx", "\"chain-pace\""},
+    /* chain-build: src-tree-pin (3) */
+    {"chain", "tools/entry-build.cx", "chain-build", "src-tree-pin", "live-worktree", "tools/candidate-chain.cx:538", "tools/candidate-chain.cx:392-540", "yes(per-process-first:per-file-sha)", "src_pinned(root,outdir) copies full module closure", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"entry-build\""},
+    {"chain", "tools/kernel-route.cx", "chain-build", "src-tree-pin", "live-worktree", "tools/candidate-chain.cx:551", "tools/candidate-chain.cx:542-555", "yes(per-process-first:per-file-sha)", "src_pinned(root,outdir) passed via UNISACC_KERNEL_ROUTE_SRC", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"kernel-route\""},
+    {"chain", "tools/asm-source.cx", "chain-build", "src-tree-pin", "live-worktree", "tools/candidate-chain.cx:551", "tools/candidate-chain.cx:542-555", "yes(per-process-first:per-file-sha)", "src_pinned(root,outdir) passed via UNISACC_ASM_SOURCE_SRC", "tools/candidate-chain.cx", "src_pinned(root, outdir, \"asm-source\""},
+    /* gap: known pin gaps with 0.0.90 expiry baseline (3) */
+    {"chain", "tools/source-job-wave.cx", "gap", "native-unpinned", "snapshot", "tools/candidate-chain.cx:1787", "-", "no(elf-built-in-ctx-no-sha-check)", "known-gap(exp:0.0.90):pr_code_at(s);already-in-33row-support-table", "tools/candidate-chain.cx", "source-job-wave-O2.elf"},
+    {"chain-run", "tools/chain-watch.cx", "gap", "native-pin-opt", "live-worktree", "tools/chain-run.cx:880", "tools/chain-run.cx:658-676", "conditional(only-when-UNISACC_CHAIN_TOOLS_EPOCH)", "known-gap(exp:0.0.90):unpinned-when-no-epoch;cwd=live-worktree", "tools/chain-run.cx", "prepare_once(\"prepare-watch\""},
+    {"chain-run", "tools/candidate-chain.cx", "gap", "native-pin-opt", "live-worktree", "tools/chain-run.cx:893", "tools/chain-run.cx:658-676", "conditional(only-when-UNISACC_CHAIN_TOOLS_EPOCH)", "known-gap(exp:0.0.90):unpinned-when-no-epoch;cwd=live-worktree", "tools/chain-run.cx", "prepare_once(\"prepare-candidate\""},
+    /* supervisor: exempt (1) */
+    {"chain-run", "tools/chain-run.cx", "supervisor", "native-unpinned", "live-worktree", "tools/chain-run.cx:689", "-", "no(supervise-self-build-no-sha-check)", "exempt(supervisor):chain-run.cx:681-693 sets epoch and spawns segments", "tools/chain-run.cx", "\"tools/chain-run.cx\",\"-o\",native"},
+    /* sid-tool-bytes: governed by SID support table, not counted as raw-run (3) */
+    {"chain", "tools/ape-pack.cx", "sid-tool-bytes", "worktree-raw-run", "snapshot/live-worktree", "tools/release-ape.cx:121", "-", "no(sid-support-seed/ident.c:258)", "in-seed/ident.c:258(no-dup);chain:chdir(snap):3548,release:child(root):453", "tools/release-ape.cx", "\"tools/ape-pack.cx\""},
+    {"release", "tools/release-ape.cx", "sid-tool-bytes", "worktree-raw-run", "live-worktree", "tools/release-run.cx:448", "-", "no(sid-support-seed/ident.c:258)", "in-seed/ident.c:258(no-dup);release-run.cx:453 child(v,root)", "tools/release-run.cx", "\"tools/release-ape.cx\""},
+    {"release", "tools/version-inject.cx", "sid-tool-bytes", "worktree-raw-run", "live-worktree", "tools/release-run.cx:464", "-", "no(sid-support-new-in-0.0.90)", "new-sid-support-entry(0.0.90);release-run.cx:466 child(v,root)", "tools/release-run.cx", "\"tools/version-inject.cx\""},
+    /* release-orchestration: orchestration/check only, does not modify product bytes (9) */
+    {"chain", "tools/net-deps.cx", "release-orchestration", "worktree-raw-run", "snapshot", "tools/candidate-chain.cx:1811", "-", "no(read-only-touch-selector)", "net-deps.cx:6 --touch read-only;candidate-chain.cx:1811-1812 s=snap", "tools/candidate-chain.cx", "/tools/net-deps.cx"},
+    {"release", "tools/prerun-drive.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-chain.cx:87", "-", "no(orchestration-no-product-bytes)", "prerun-drive.cx:1-8 test/evidence orchestration;release-chain.cx:92 --root .", "tools/release-chain.cx", "tools/prerun-drive.cx"},
+    {"release", "tools/release-run.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-chain.cx:694", "-", "no(orchestration-no-product-bytes)", "release-run.cx:1-8 state-machine orchestration;release-chain.cx:698 cwd", "tools/release-chain.cx", "\"tools/release-run.cx\""},
+    {"release", "tools/release-layout.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:113", "-", "no(orchestration-no-product-bytes)", "release-layout.cx:1-3 --check verifies layout;release-run.cx:114 child(root)", "tools/release-run.cx", "\"tools/release-layout.cx\""},
+    {"release", "tools/release-dispatch.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:123", "-", "no(orchestration-no-product-bytes)", "release-dispatch.cx:1-2 --dry-run local plan;release-run.cx:124 child(root)", "tools/release-run.cx", "\"tools/release-dispatch.cx\""},
+    {"release", "tools/release-decide.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:130", "-", "no(orchestration-no-product-bytes)", "release-decide.cx:1-7 read-only 8-step verdict;release-run.cx:135 child(root)", "tools/release-run.cx", "\"tools/release-decide.cx\""},
+    {"release", "tools/release-exec.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:751", "-", "no(orchestration-no-product-bytes)", "release-exec.cx:1-8 git/ci/gh orchestration;release-run.cx:754 cwd=here", "tools/release-run.cx", "\"tools/release-exec.cx\""},
+    {"release", "tools/release-prep.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:758", "-", "no(orchestration-no-product-bytes)", "release-prep.cx:1-8 read-only release drafts;release-run.cx:761 cwd=here", "tools/release-run.cx", "\"tools/release-prep.cx\""},
+    {"release", "tools/release-packcheck.cx", "release-orchestration", "worktree-raw-run", "live-worktree", "tools/release-run.cx:810", "-", "no(orchestration-no-product-bytes)", "release-packcheck.cx:1-8 read-only APE cmp;release-run.cx:813 child(root)", "tools/release-run.cx", "\"tools/release-packcheck.cx\""}
+};
+
+/* Explicit expiry-0.0.90 known gap baseline (only these 3 tools may carry category=gap). */
+static int is_known_gap(const char *tool) {
+    return strcmp(tool, "tools/source-job-wave.cx") == 0 ||
+           strcmp(tool, "tools/chain-watch.cx") == 0 ||
+           strcmp(tool, "tools/candidate-chain.cx") == 0;
+}
+
+static int verify_anchors(const char *root) {
+    int i, n = (int)(sizeof(tm_specs) / sizeof(tm_specs[0])), bad = 0;
+    for (i = 0; i < n; i++) {
+        char p[512];
+        unsigned char *b = 0;
+        int64_t bn = 0;
+        cx_fmt(p, (long)sizeof p, "%s/%s", root, tm_specs[i].src_file);
+        if (sy_read_file(p, &b, &bn, 4 << 20) != 0 || !b) {
+            printf("TRAIN_MODES\tANCHOR_MISSING_FILE\t%s\n", p);
+            bad++;
+            continue;
+        }
+        if (strstr((char *)b, tm_specs[i].needle) == 0) {
+            printf("TRAIN_MODES\tANCHOR_STALE\t%s\t%s\n", tm_specs[i].call_site, tm_specs[i].needle);
+            bad++;
+        }
+    }
+    return bad;
+}
+
+static int split_cols(char *line, char **cols, int maxc) {
+    int n = 0;
+    char *p = line;
+    while (n < maxc) {
+        cols[n++] = p;
+        char *t = strchr(p, '\t');
+        if (!t) break;
+        *t = 0;
+        p = t + 1;
+    }
+    return n;
+}
+
+static int assert_zero_raw(const char *tbl_path) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pos = 0;
+    int rows = 0, raw_viol = 0, gap_known = 0, gap_unknown = 0, sid_bytes = 0, orch = 0, sup = 0;
+    if (sy_read_file(tbl_path, &b, &n, 1 << 20) != 0 || !b) {
+        printf("TRAIN_MODES\tFAIL\tmissing\t%s\n", tbl_path);
+        return 1;
+    }
+    while (pos < (long)n) {
+        long ls = pos;
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        long ll = pos - ls;
+        if (pos < (long)n) pos++;
+        if (ll > 0 && b[ls] != '#') {
+            char line[1024], rawline[1024];
+            char *cols[12];
+            long cl = ll < 1023 ? ll : 1023;
+            int nc;
+            mm_copy(line, (long)sizeof line, b + ls, cl);
+            line[cl] = 0;
+            mm_copy(rawline, (long)sizeof rawline, line, cl + 1);
+            nc = split_cols(line, cols, 12);
+            rows++;
+            if (nc < 9) {
+                raw_viol++;
+                printf("RAW_RUN_VIOLATION\tmalformed\t%s\n", rawline);
+                continue;
+            }
+            /* cols: 0=scope 1=tool 2=category 3=mode 4=run_root ... */
+            if (strcmp(cols[2], "sid-tool-bytes") == 0) {
+                sid_bytes++;
+            } else if (strcmp(cols[2], "release-orchestration") == 0) {
+                orch++;
+            } else if (strcmp(cols[2], "supervisor") == 0) {
+                sup++;
+            } else if (strcmp(cols[2], "gap") == 0) {
+                if (is_known_gap(cols[1])) gap_known++;
+                else {
+                    gap_unknown++;
+                    printf("GAP_BASELINE_VIOLATION\t%s\n", rawline);
+                }
+            } else if (strcmp(cols[2], "chain-build") == 0) {
+                if (strcmp(cols[3], "native-pin") != 0 && strcmp(cols[3], "src-tree-pin") != 0) {
+                    raw_viol++;
+                    printf("RAW_RUN_VIOLATION\t%s\n", rawline);
+                }
+            } else {
+                raw_viol++;
+                printf("RAW_RUN_VIOLATION\tunknown-category\t%s\n", rawline);
+            }
+        }
+    }
+    {
+        int bad = raw_viol + gap_unknown;
+        printf("TRAIN_MODES_ZERO_RAW\trows=%d\traw_violations=%d\tknown_gaps=%d\tunknown_gaps=%d\tsid_tool_bytes=%d\torchestration=%d\tsupervisor=%d\tstatus=%s\n",
+               rows, raw_viol, gap_known, gap_unknown, sid_bytes, orch, sup, bad == 0 ? "PASS" : "FAIL");
+        return bad == 0 ? 0 : 1;
+    }
+}
+
+int main(int argc, char **argv) {
+    int mode = 0, i, n = (int)(sizeof(tm_specs) / sizeof(tm_specs[0])), n_raw = 0, n_gap = 0;
+    char root[512], tbl[1024];
+    static char out[65536];
+    long on = 0;
+
+    cx_fmt(root, (long)sizeof root, ".");
+    tbl[0] = 0;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--write") == 0) mode = 1;
+        else if (strcmp(argv[i], "--check") == 0) mode = 2;
+        else if (strcmp(argv[i], "--assert-zero-raw") == 0) {
+            mode = 3;
+            if (i + 1 < argc && argv[i + 1][0] != '-') cx_fmt(tbl, (long)sizeof tbl, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) cx_fmt(root, (long)sizeof root, "%s", argv[++i]);
+        else { printf("usage: train-tool-modes --write|--check [--root DIR] | --assert-zero-raw [FILE]\n"); return 2; }
+    }
+    if (!mode) { printf("usage: train-tool-modes --write|--check [--root DIR] | --assert-zero-raw [FILE]\n"); return 2; }
+    if (mode == 3) {
+        if (!tbl[0]) cx_fmt(tbl, (long)sizeof tbl, "%s/build/train-tool-modes.tsv", root);
+        return assert_zero_raw(tbl);
+    }
+
+    if (verify_anchors(root) != 0) return 1;
+    {
+        const char *hdr = "# scope\ttool\tcategory\tmode\trun_root\tcall_site\tpin_check_site\tresume_recheck\tbasis\n"
+                          "# Generated by tools/train-tool-modes.cx --write; I2c in-session tool freeze audit (v0.0.90 L.13).\n"
+                          "# categories: chain-build | sid-tool-bytes | release-orchestration | gap(exp:0.0.90) | supervisor\n"
+                          "# run_root: snapshot (commit-named source snapshot) | live-worktree | snapshot/live-worktree\n";
+        long hl = (long)strlen(hdr);
+        mm_copy(out, (long)sizeof out, hdr, hl);
+        on = hl;
+    }
+    for (i = 0; i < n; i++) {
+        char line[1024];
+        if (strcmp(tm_specs[i].mode, "worktree-raw-run") == 0) n_raw++;
+        if (strcmp(tm_specs[i].category, "gap") == 0) n_gap++;
+        if (cx_fmt(line, (long)sizeof line, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                   tm_specs[i].scope, tm_specs[i].tool, tm_specs[i].category, tm_specs[i].mode,
+                   tm_specs[i].run_root, tm_specs[i].call_site, tm_specs[i].pin_site,
+                   tm_specs[i].resume_check, tm_specs[i].basis) == 0) {
+            long ll = (long)strlen(line);
+            if (on + ll < (long)sizeof out - 1) { mm_copy(out + on, (long)sizeof out - on, line, ll); on += ll; }
+        }
+    }
+    out[on] = 0;
+    cx_fmt(tbl, (long)sizeof tbl, "%s/build/train-tool-modes.tsv", root);
+    if (mode == 1) {
+        if (sy_write_file(tbl, out, on, 0644) != 0) { printf("TRAIN_MODES\tFAIL\twrite\n"); return 1; }
+        printf("TRAIN_MODES\tWROTE\trows=%d\traw_run=%d\tknown_gaps=%d\n", n, n_raw, n_gap);
+        return 0;
+    } else {
+        unsigned char *cur = 0;
+        int64_t cn = 0;
+        if (sy_read_file(tbl, &cur, &cn, 65535) != 0 || !cur) {
+            printf("TRAIN_MODES\tFAIL\tmissing\t%s\n", tbl);
+            return 1;
+        }
+        if ((long)cn != on || memcmp(cur, out, on) != 0) {
+            printf("TRAIN_MODES\tDIFF\trows=%d\traw_run=%d\tknown_gaps=%d\n", n, n_raw, n_gap);
+            return 1;
+        }
+        printf("TRAIN_MODES\tCHECK\trows=%d\traw_run=%d\tknown_gaps=%d\n", n, n_raw, n_gap);
+        return 0;
+    }
+}

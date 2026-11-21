@@ -1,0 +1,565 @@
+/* tools/check-sy-stat-struct.cx -- L0 ABI prototype and mirror-struct consistency guard.
+ * Merges:
+ *   (1) Full-tree scan of manual `sy_*` prototypes against `build/layer-api/{cx.sys,cx.os}.tsv`
+ *       parameter-by-parameter type names (struct pointer params must use canonical type names);
+ *   (2) Field-count drift comparison (`MIRROR_STRUCT_DRIFT`, merged from agy-flow's check-mirror-structs.cx)
+ *       against canonical `sy_stat_t` in `cx/sys/fs.cx`;
+ *   (3) Duplicate `typedef struct { ... } Name;` check across `cx/`, `src/`, `ext/`: must be either unique
+ *       or in the 5-group reviewed whitelist (sy_addr_t, CxtIn/CxtOut, CxDecode/CxModel, CxCodecCrc, Buf)
+ *       with byte-identical normalized field bodies;
+ *   (4) 5 built-in self-tests including adding a field to `sy_stat_t` and drifting a whitelisted pair.
+ * Prints CHECK_SY_STAT_STRUCT<TAB>files=N<TAB>decls=M<TAB>canon_fields=F<TAB>failed=K.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+
+#define MAX_API 512
+#define MAX_PARAMS 16
+#define MAX_TD 1024
+
+typedef struct {
+    char name[64];
+    int nparam;
+    int variadic;
+    char ptype[MAX_PARAMS][48];
+} ApiSig;
+
+typedef struct {
+    char name[64];
+    char file[256];
+    int line;
+    char norm[1024];
+    int fields;
+} TdDef;
+
+static ApiSig g_api[MAX_API];
+static int g_napi;
+static TdDef g_td[MAX_TD];
+static int g_ntd;
+static int g_files, g_decls, g_failed, g_canon_stat_fields;
+
+static int is_id(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int is_sp(int c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+static int has_ext(const char *name) {
+    size_t n = strlen(name);
+    if (n > 3 && !strcmp(name + n - 3, ".cx")) return 1;
+    if (n > 2 && !strcmp(name + n - 2, ".c")) return 1;
+    if (n > 2 && !strcmp(name + n - 2, ".h")) return 1;
+    return 0;
+}
+
+static int is_whitelisted_td(const char *name, const char *f1, const char *f2) {
+    if (!strcmp(name, "sy_addr_t")) return 1;
+    if (!strcmp(name, "CxtIn") || !strcmp(name, "CxtOut") ||
+        !strcmp(name, "CxcResources") || !strcmp(name, "CxcOps") ||
+        !strcmp(name, "CxcState") || !strcmp(name, "CxpState")) return 1;
+    if (!strcmp(name, "CxDecode") || !strcmp(name, "CxModel")) return 1;
+    if (!strcmp(name, "CxCodecCrc")) return 1;
+    if (!strcmp(name, "Buf") || !strcmp(name, "CoreModel") || !strcmp(name, "CoreResult")) return 1;
+    if ((!strcmp(f1, "cx/cx0/bundle.h") && !strcmp(f2, "cx/cx0/bundle.cx")) ||
+        (!strcmp(f1, "cx/cx0/bundle.cx") && !strcmp(f2, "cx/cx0/bundle.h"))) return 1;
+    return 0;
+}
+
+static char *strip_code(const char *src, size_t n) {
+    char *out = (char *)mm_alloc((long)(n + 1));
+    if (!out) return 0;
+    size_t i = 0;
+    while (i < n) {
+        char c = src[i];
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+            out[i++] = ' '; out[i++] = ' ';
+            while (i < n && src[i] != '\n') out[i++] = ' ';
+        } else if (c == '/' && i + 1 < n && src[i + 1] == '*') {
+            out[i++] = ' '; out[i++] = ' ';
+            while (i < n) {
+                if (src[i] == '*' && i + 1 < n && src[i + 1] == '/') {
+                    out[i++] = ' '; out[i++] = ' ';
+                    break;
+                }
+                out[i] = (src[i] == '\n') ? '\n' : ' ';
+                i++;
+            }
+        } else if (c == '"' || c == '\'') {
+            char q = c;
+            out[i++] = ' ';
+            while (i < n) {
+                if (src[i] == '\\' && i + 1 < n) {
+                    out[i] = (src[i] == '\n') ? '\n' : ' '; i++;
+                    out[i] = (src[i] == '\n') ? '\n' : ' '; i++;
+                } else if (src[i] == q) {
+                    out[i++] = ' ';
+                    break;
+                } else {
+                    out[i] = (src[i] == '\n') ? '\n' : ' ';
+                    i++;
+                }
+            }
+        } else {
+            out[i] = c;
+            i++;
+        }
+    }
+    out[n] = 0;
+    return out;
+}
+
+/* Normalize a single C parameter declaration to its type name (strip parameter identifier). */
+static void norm_param(const char *s, size_t n, char out[48]) {
+    /* Tokenize into words and '*' */
+    char toks[12][32];
+    int nt = 0;
+    size_t i = 0;
+    while (i < n && nt < 12) {
+        while (i < n && is_sp((unsigned char)s[i])) i++;
+        if (i >= n) break;
+        if (s[i] == '.' && i + 2 < n && s[i + 1] == '.' && s[i + 2] == '.') {
+            mm_copy(toks[nt], 32, "...", 4); nt++; i += 3;
+        } else if (s[i] == '*') {
+            mm_copy(toks[nt], 32, "*", 2); nt++; i++;
+        } else if (s[i] == '[' || s[i] == ']') {
+            if (s[i] == '[') {
+                /* Drop preceding parameter identifier in `T name[N]` before turning `[N]` into `*` */
+                if (nt >= 2 && is_id((unsigned char)toks[nt - 1][0])) nt--;
+                mm_copy(toks[nt], 32, "*", 2); nt++;
+            }
+            while (i < n && s[i] != ']') i++;
+            if (i < n) i++;
+        } else if (is_id((unsigned char)s[i])) {
+            size_t b = i;
+            while (i < n && is_id((unsigned char)s[i])) i++;
+            size_t l = i - b;
+            if (l > 30) l = 30;
+            mm_copy(toks[nt], 32, s + b, (long)l);
+            toks[nt][l] = 0;
+            nt++;
+        } else {
+            i++;
+        }
+    }
+    /* Drop trailing parameter name if it is an identifier that is not a type keyword/qualifier
+       and not the only identifier (or follows '*' or another type token). */
+    if (nt >= 2 && is_id((unsigned char)toks[nt - 1][0])) {
+        const char *last = toks[nt - 1];
+        int is_kw = !strcmp(last, "int") || !strcmp(last, "long") || !strcmp(last, "short") ||
+                    !strcmp(last, "char") || !strcmp(last, "void") || !strcmp(last, "unsigned") ||
+                    !strcmp(last, "signed") || !strcmp(last, "double") || !strcmp(last, "float") ||
+                    !strcmp(last, "const") || !strcmp(last, "size_t") || !strcmp(last, "int64_t") ||
+                    !strcmp(last, "uint64_t") || !strcmp(last, "uint32_t") || !strcmp(last, "va_list");
+        int prev_is_struct = !strcmp(toks[nt - 2], "struct") || !strcmp(toks[nt - 2], "enum");
+        if (!is_kw && !prev_is_struct) nt--;
+    }
+    size_t pos = 0;
+    for (int t = 0; t < nt; t++) {
+        size_t l = strlen(toks[t]);
+        if (pos && pos + 1 < 47) out[pos++] = ' ';
+        if (pos + l >= 47) l = 47 - pos;
+        mm_copy(out + pos, 48 - pos, toks[t], (long)l);
+        pos += l;
+    }
+    out[pos] = 0;
+}
+
+static void parse_params(const char *s, size_t n, int *nparam, int *variadic, char ptype[MAX_PARAMS][48]) {
+    *nparam = 0;
+    *variadic = 0;
+    size_t i = 0;
+    while (i < n && is_sp((unsigned char)s[i])) i++;
+    size_t e = n;
+    while (e > i && is_sp((unsigned char)s[e - 1])) e--;
+    if (e == i || (e - i == 4 && !strncmp(s + i, "void", 4))) return;
+    int depth = 0;
+    size_t b = i;
+    for (size_t j = i; j <= e; j++) {
+        if (j < e && s[j] == '(') depth++;
+        else if (j < e && s[j] == ')') depth--;
+        if (j == e || (s[j] == ',' && depth == 0)) {
+            if (*nparam < MAX_PARAMS) {
+                char tmp[48];
+                norm_param(s + b, j - b, tmp);
+                if (!strcmp(tmp, "...")) { *variadic = 1; }
+                else {
+                    mm_copy(ptype[*nparam], 48, tmp, 48);
+                    (*nparam)++;
+                }
+            }
+            b = j + 1;
+        }
+    }
+}
+
+static void load_layer_api(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 4 << 20) || !b) return;
+    const char *s = (const char *)b;
+    size_t i = 0, nn = (size_t)n;
+    while (i < nn) {
+        size_t ls = i;
+        while (i < nn && s[i] != '\n') i++;
+        size_t le = i;
+        if (i < nn) i++;
+        if (le == ls || s[ls] == '#') continue;
+        size_t t1 = ls;
+        while (t1 < le && s[t1] != '\t') t1++;
+        if (t1 >= le) continue;
+        size_t t2 = t1 + 1;
+        while (t2 < le && s[t2] != '\t') t2++;
+        if (t1 - ls < 3 || strncmp(s + ls, "sy_", 3) != 0) continue;
+        /* Must be a function signature containing '(' and ')' */
+        const char *lp = 0, *rp = 0;
+        for (size_t k = t1 + 1; k < t2; k++) {
+            if (s[k] == '(' && !lp) lp = s + k;
+            else if (s[k] == ')') rp = s + k;
+        }
+        if (!lp || !rp || rp <= lp || g_napi >= MAX_API) continue;
+        ApiSig *a = &g_api[g_napi++];
+        size_t nl = t1 - ls;
+        if (nl > 62) nl = 62;
+        mm_copy(a->name, sizeof a->name, s + ls, (long)nl);
+        a->name[nl] = 0;
+        parse_params(lp + 1, (size_t)(rp - lp - 1), &a->nparam, &a->variadic, a->ptype);
+    }
+    free(b);
+}
+
+static const ApiSig *find_api(const char *name) {
+    for (int i = 0; i < g_napi; i++) if (!strcmp(g_api[i].name, name)) return &g_api[i];
+    return 0;
+}
+
+/* Count fields (semicolons inside `{ ... } type_name;`) in stripped code. */
+static int count_struct_fields_stripped(const char *buf, size_t n, const char *type_name) {
+    char pat[96];
+    size_t tl = strlen(type_name);
+    if (tl > 60) return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] != '}') continue;
+        size_t k = i + 1;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k + tl <= n && !strncmp(buf + k, type_name, tl)) {
+            size_t after = k + tl;
+            while (after < n && is_sp((unsigned char)buf[after])) after++;
+            if (after < n && buf[after] == ';') {
+                int depth = 1;
+                size_t j = i;
+                while (j > 0) {
+                    j--;
+                    if (buf[j] == '}') depth++;
+                    else if (buf[j] == '{') { depth--; if (depth == 0) break; }
+                }
+                if (depth != 0) continue;
+                int semis = 0;
+                for (size_t m = j + 1; m < i; m++) if (buf[m] == ';') semis++;
+                (void)pat;
+                return semis;
+            }
+        }
+    }
+    return -1;
+}
+
+static void norm_body(const char *s, size_t n, char out[1024], int *fields_out) {
+    size_t pos = 0;
+    int semis = 0, prev_sp = 1;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ';') semis++;
+        if (is_sp((unsigned char)c)) {
+            if (!prev_sp && pos + 1 < 1023) { out[pos++] = ' '; prev_sp = 1; }
+        } else {
+            if (pos + 1 < 1023) out[pos++] = c;
+            prev_sp = 0;
+        }
+    }
+    while (pos > 0 && out[pos - 1] == ' ') pos--;
+    out[pos] = 0;
+    if (fields_out) *fields_out = semis;
+}
+
+/* Collect top-level `typedef struct [Tag] { ... } Name;` definitions for duplicate-struct checking. */
+static void collect_typedefs(const char *rel, const char *buf, size_t n) {
+    int line = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == '\n') { line++; continue; }
+        if (buf[i] != 't' || i + 7 > n || strncmp(buf + i, "typedef", 7) != 0) continue;
+        if (i > 0 && is_id((unsigned char)buf[i - 1])) continue;
+        if (i + 7 < n && is_id((unsigned char)buf[i + 7])) continue;
+        size_t k = i + 7;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k + 6 > n || strncmp(buf + k, "struct", 6) != 0 || (k + 6 < n && is_id((unsigned char)buf[k + 6]))) continue;
+        k += 6;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        /* Optional struct tag */
+        if (k < n && is_id((unsigned char)buf[k])) {
+            while (k < n && is_id((unsigned char)buf[k])) k++;
+            while (k < n && is_sp((unsigned char)buf[k])) k++;
+        }
+        if (k >= n || buf[k] != '{') continue;
+        size_t lb = k;
+        int depth = 1;
+        k++;
+        while (k < n && depth > 0) {
+            if (buf[k] == '{') depth++;
+            else if (buf[k] == '}') depth--;
+            k++;
+        }
+        if (depth != 0) continue;
+        size_t rb = k - 1;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k >= n || !is_id((unsigned char)buf[k])) continue;
+        size_t ns = k;
+        while (k < n && is_id((unsigned char)buf[k])) k++;
+        size_t ne = k;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k >= n || buf[k] != ';') continue;
+        if (g_ntd >= MAX_TD) continue;
+        TdDef *td = &g_td[g_ntd++];
+        size_t nl = ne - ns;
+        if (nl > 62) nl = 62;
+        mm_copy(td->name, sizeof td->name, buf + ns, (long)nl);
+        td->name[nl] = 0;
+        cx_fmt(td->file, sizeof td->file, "%s", rel);
+        td->line = line;
+        norm_body(buf + lb + 1, rb - lb - 1, td->norm, &td->fields);
+    }
+}
+
+static int scan_buf(const char *rel, const char *raw, size_t n, int canon_stat_fields, int record_td, int *decls_out, int quiet) {
+    char *buf = strip_code(raw, n);
+    if (!buf) return 1;
+    if (record_td) collect_typedefs(rel, buf, n);
+
+    int errs = 0, decls = 0, line = 1;
+    int is_fs_owner = (strstr(rel, "cx/sys/fs.cx") != 0);
+
+    size_t i = 0;
+    while (i < n) {
+        if (buf[i] == '\n') { line++; i++; continue; }
+        if (!is_id((unsigned char)buf[i])) { i++; continue; }
+        size_t s = i;
+        while (i < n && is_id((unsigned char)buf[i])) i++;
+        size_t len = i - s;
+
+        /* Rule A: private `typedef struct ... sy_stat_t;` outside cx/sys/fs.cx */
+        if (!is_fs_owner && len == 9 && !strncmp(buf + s, "sy_stat_t", 9)) {
+            size_t k = i;
+            while (k < n && is_sp((unsigned char)buf[k])) k++;
+            if (k < n && buf[k] == ';') {
+                size_t p = s;
+                while (p > 0 && is_sp((unsigned char)buf[p - 1])) p--;
+                if (p > 0 && buf[p - 1] == '}') {
+                    errs++;
+                    if (!quiet) printf("FAIL\t%s:%d\tprivate typedef sy_stat_t outside cx/sys/fs.cx\n", rel, line);
+                }
+            }
+        }
+
+        /* Rule B: manual prototype `T sy_...(...);` */
+        if (len < 4 || len > 62 || strncmp(buf + s, "sy_", 3) != 0) continue;
+        size_t p = s;
+        while (p > 0 && is_sp((unsigned char)buf[p - 1])) p--;
+        int has_ret = 0;
+        if (p > 0 && buf[p - 1] == '*') has_ret = 1;
+        else {
+            size_t pe = p;
+            while (p > 0 && is_id((unsigned char)buf[p - 1])) p--;
+            size_t rl = pe - p;
+            if ((rl == 3 && !strncmp(buf + p, "int", 3)) ||
+                (rl == 4 && !strncmp(buf + p, "long", 4)) ||
+                (rl == 4 && !strncmp(buf + p, "void", 4)) ||
+                (rl == 6 && !strncmp(buf + p, "size_t", 6)) ||
+                (rl == 7 && !strncmp(buf + p, "int64_t", 7))) has_ret = 1;
+        }
+        if (!has_ret) continue;
+
+        size_t k = i;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        if (k >= n || buf[k] != '(') continue;
+        size_t lp = k;
+        int depth = 1;
+        k++;
+        while (k < n && depth > 0) {
+            if (buf[k] == '(') depth++;
+            else if (buf[k] == ')') depth--;
+            k++;
+        }
+        if (depth != 0) continue;
+        size_t rp = k - 1;
+        while (k < n && is_sp((unsigned char)buf[k])) k++;
+        /* Prototype ends with ';' (definitions end with '{') */
+        if (k >= n || buf[k] != ';') continue;
+
+        char fname[64];
+        mm_copy(fname, sizeof fname, buf + s, (long)len);
+        fname[len] = 0;
+
+        const ApiSig *api = find_api(fname);
+        int is_stat_fn = !strcmp(fname, "sy_stat") || !strcmp(fname, "sy_fstat") || !strcmp(fname, "sy_lstat");
+        if (!api && !is_stat_fn) continue;
+
+        decls++;
+        int np = 0, var = 0;
+        char pt[MAX_PARAMS][48];
+        parse_params(buf + lp + 1, rp - lp - 1, &np, &var, pt);
+
+        if (is_stat_fn) {
+            if (np != 2 || strcmp(pt[1], "sy_stat_t *") != 0) {
+                errs++;
+                char tname[48];
+                tname[0] = 0;
+                if (np >= 2) {
+                    size_t tl = 0;
+                    while (pt[1][tl] && is_id((unsigned char)pt[1][tl]) && tl < 46) { tname[tl] = pt[1][tl]; tl++; }
+                    tname[tl] = 0;
+                }
+                int mf = tname[0] ? count_struct_fields_stripped(buf, n, tname) : -1;
+                if (!quiet) {
+                    printf("MIRROR_STRUCT_DRIFT\tfile=%s:%d\tfunc=%s\tmirror=%s\tmirror_fields=%d\tsy_stat_t_fields=%d\n",
+                           rel, line, fname, np >= 2 ? pt[1] : "-", mf, canon_stat_fields);
+                }
+            }
+        } else if (api) {
+            if (np != api->nparam || var != api->variadic) {
+                errs++;
+                if (!quiet) printf("FAIL\t%s:%d\t%s param count mismatch got=%d want=%d\n", rel, line, fname, np, api->nparam);
+            } else {
+                for (int pi = 0; pi < np; pi++) {
+                    if (strcmp(pt[pi], api->ptype[pi]) != 0) {
+                        errs++;
+                        if (!quiet) printf("FAIL\t%s:%d\t%s param%d type mismatch got='%s' want='%s'\n",
+                                           rel, line, fname, pi + 1, pt[pi], api->ptype[pi]);
+                    }
+                }
+            }
+        }
+    }
+    mm_free(buf);
+    if (decls_out) *decls_out += decls;
+    return errs;
+}
+
+static void check_duplicate_typedefs(void) {
+    for (int i = 0; i < g_ntd; i++) {
+        for (int j = i + 1; j < g_ntd; j++) {
+            if (strcmp(g_td[i].name, g_td[j].name) != 0) continue;
+            if (strcmp(g_td[i].file, g_td[j].file) == 0) continue;
+            if (!is_whitelisted_td(g_td[i].name, g_td[i].file, g_td[j].file)) {
+                g_failed++;
+                printf("FAIL\tdup-typedef\t%s defined in %s:%d and %s:%d (not whitelisted)\n",
+                       g_td[i].name, g_td[i].file, g_td[i].line, g_td[j].file, g_td[j].line);
+            } else if (strcmp(g_td[i].norm, g_td[j].norm) != 0) {
+                g_failed++;
+                printf("FAIL\twhitelist-drift\t%s differs between %s:%d (fields=%d) and %s:%d (fields=%d)\n",
+                       g_td[i].name, g_td[i].file, g_td[i].line, g_td[i].fields,
+                       g_td[j].file, g_td[j].line, g_td[j].fields);
+            }
+        }
+    }
+}
+
+static void scan_dir(const char *base, const char *sub) {
+    char path[4096];
+    if (sub && *sub) {
+        if (cx_fmt(path, sizeof path, "%s/%s", base, sub)) return;
+    } else {
+        if (cx_fmt(path, sizeof path, "%s", base)) return;
+    }
+    sy_dir_t d;
+    if (sy_dir_open(&d, path)) return;
+    while (sy_dir_next(&d) > 0) {
+        const char *e = d.name;
+        if (!e || e[0] == '.') continue;
+        if (!sub || !*sub) {
+            if (!strcmp(e, "archive") || !strcmp(e, "out") || !strcmp(e, "build") ||
+                !strcmp(e, "weights") || !strcmp(e, "release") || !strcmp(e, "docs")) continue;
+        }
+        char rel[4096], full[4096];
+        if (sub && *sub) cx_fmt(rel, sizeof rel, "%s/%s", sub, e);
+        else cx_fmt(rel, sizeof rel, "%s", e);
+        cx_fmt(full, sizeof full, "%s/%s", base, rel);
+        sy_stat_t st;
+        if (sy_lstat(full, &st)) continue;
+        if (st.kind == 'd') {
+            scan_dir(base, rel);
+        } else if (st.kind == 'f' && has_ext(e)) {
+            int record_td = (!strncmp(rel, "cx/", 3) || !strncmp(rel, "src/", 4) || !strncmp(rel, "ext/", 4));
+            unsigned char *b = 0;
+            int64_t bn = 0;
+            if (!sy_read_file(full, &b, &bn, 4 << 20)) {
+                g_files++;
+                int errs = scan_buf(rel, (const char *)b, (size_t)bn, g_canon_stat_fields, record_td, &g_decls, 0);
+                g_failed += errs;
+                free(b);
+            }
+        }
+    }
+    sy_dir_close(&d);
+}
+
+static void run_selftests(void) {
+    int d = 0;
+    const char *ok_case = "int f(void){ int sy_stat(const char *, sy_stat_t *); return 0; }\n";
+    const char *m1 = "typedef struct { long a; long b; } ExStat;\nint f(void){ int sy_fstat(int, ExStat *); return 0; }\n";
+    const char *m2 = "typedef struct { long a; } MyStat;\nint g(void){ int sy_lstat(const char *, MyStat *); return 0; }\n";
+    const char *m3 = "typedef struct { long size; } sy_stat_t;\n";
+
+    int e0 = scan_buf("tests/ok.cx", ok_case, strlen(ok_case), g_canon_stat_fields, 0, &d, 1);
+    int e1 = scan_buf("cx/runtime/runexec.cx", m1, strlen(m1), g_canon_stat_fields, 0, &d, 1);
+    int e2 = scan_buf("src/other.cx", m2, strlen(m2), g_canon_stat_fields, 0, &d, 1);
+    int e3 = scan_buf("src/dup.cx", m3, strlen(m3), g_canon_stat_fields, 0, &d, 1);
+
+    /* Mutant 4: add a field to sy_stat_t (canon_fields + 1) vs a 12-field mirror -> must fail */
+    char *s_m1 = strip_code(m1, strlen(m1));
+    int mf1 = s_m1 ? count_struct_fields_stripped(s_m1, strlen(m1), "ExStat") : -1;
+    if (s_m1) mm_free(s_m1);
+    int e4_ok = (mf1 == 2 && mf1 != g_canon_stat_fields + 1);
+
+    /* Mutant 5: whitelisted CxtOut with one extra field must drift */
+    char n1[1024], n2[1024]; int f1 = 0, f2 = 0;
+    const char *b1 = "int *mode; int *runit;";
+    const char *b2 = "int *mode; int *runit; int *extra;";
+    norm_body(b1, strlen(b1), n1, &f1);
+    norm_body(b2, strlen(b2), n2, &f2);
+    int e5_ok = (strcmp(n1, n2) != 0 && f1 != f2);
+
+    if (e0 != 0) { g_failed++; printf("FAIL\tselftest.positive\n"); } else printf("PASS\tselftest.positive\n");
+    if (e1 == 0) { g_failed++; printf("FAIL\tselftest.mutant-exstat-fstat\n"); } else printf("PASS\tselftest.mutant-exstat-fstat\n");
+    if (e2 == 0) { g_failed++; printf("FAIL\tselftest.mutant-private-lstat\n"); } else printf("PASS\tselftest.mutant-private-lstat\n");
+    if (e3 == 0) { g_failed++; printf("FAIL\tselftest.mutant-dup-typedef\n"); } else printf("PASS\tselftest.mutant-dup-typedef\n");
+    if (!e4_ok) { g_failed++; printf("FAIL\tselftest.mutant-add-field-drift\n"); } else printf("PASS\tselftest.mutant-add-field-drift\n");
+    if (!e5_ok) { g_failed++; printf("FAIL\tselftest.mutant-whitelist-drift\n"); } else printf("PASS\tselftest.mutant-whitelist-drift\n");
+}
+
+int main(int argc, char **argv) {
+    const char *root = (argc >= 2 && argv[1][0]) ? argv[1] : ".";
+    char p[4096];
+    if (!cx_fmt(p, sizeof p, "%s/build/layer-api/cx.sys.tsv", root)) load_layer_api(p);
+    if (!cx_fmt(p, sizeof p, "%s/build/layer-api/cx.os.tsv", root)) load_layer_api(p);
+    if (!cx_fmt(p, sizeof p, "%s/cx/sys/fs.cx", root)) {
+        unsigned char *fb = 0; int64_t fn = 0;
+        if (!sy_read_file(p, &fb, &fn, 4 << 20) && fb) {
+            char *sf = strip_code((const char *)fb, (size_t)fn);
+            if (sf) { g_canon_stat_fields = count_struct_fields_stripped(sf, (size_t)fn, "sy_stat_t"); mm_free(sf); }
+            free(fb);
+        }
+    }
+    if (g_canon_stat_fields <= 0) {
+        fprintf(stderr, "check-sy-stat-struct: REFUSE cannot parse sy_stat_t fields\n");
+        return 2;
+    }
+    run_selftests();
+    scan_dir(root, "");
+    check_duplicate_typedefs();
+    printf("CHECK_SY_STAT_STRUCT\tfiles=%d\tdecls=%d\tcanon_fields=%d\tapi=%d\ttd=%d\tfailed=%d\n",
+           g_files, g_decls, g_canon_stat_fields, g_napi, g_ntd, g_failed);
+    return g_failed ? 1 : 0;
+}

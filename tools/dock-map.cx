@@ -69,20 +69,56 @@ static int dm_module(const char *b, long n, long *modb, long *modn) {
     return 0;
 }
 
-/* Does B declare `#pragma unisa dock` (bare or with an argument)? */
+/* Does B declare `#pragma unisa dock` at line start outside comments and string literals? */
 static int dm_dock(const char *b, long n) {
-    long i;
-    for (i = 0; i + 8 < n; i++) {
-        if (b[i] != '#' || memcmp(b + i + 1, "pragma", 6) != 0) continue;
-        {
-            long j = i + 7;
-            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
-            if (j + 5 > n || memcmp(b + j, "unisa", 5) != 0) continue;
-            j += 5;
-            while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
-            if (j + 4 > n || memcmp(b + j, "dock", 4) != 0) continue;
-            if (j + 4 < n && (b[j + 4] >= 'a' && b[j + 4] <= 'z')) continue;   /* dockx, docker */
-            return 1;
+    long i = 0;
+    int in_blk = 0;
+    while (i < n) {
+        long ls = i, le;
+        while (i < n && b[i] != '\n') i++;
+        le = i;
+        if (i < n) i++;
+        if (!in_blk) {
+            long j = ls;
+            while (j < le && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j < le && b[j] == '#') {
+                j++;
+                while (j < le && (b[j] == ' ' || b[j] == '\t')) j++;
+                if (j + 6 <= le && !memcmp(b + j, "pragma", 6)) {
+                    j += 6;
+                    if (j < le && (b[j] == ' ' || b[j] == '\t')) {
+                        while (j < le && (b[j] == ' ' || b[j] == '\t')) j++;
+                        if (j + 5 <= le && !memcmp(b + j, "unisa", 5)) {
+                            j += 5;
+                            if (j < le && (b[j] == ' ' || b[j] == '\t')) {
+                                while (j < le && (b[j] == ' ' || b[j] == '\t')) j++;
+                                if (j + 4 <= le && !memcmp(b + j, "dock", 4)) {
+                                    if (j + 4 == le || b[j + 4] == ' ' || b[j + 4] == '\t' || b[j + 4] == '\r' || b[j + 4] == '/') return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        /* advance block-comment state across line [ls, le), skipping strings and // comments */
+        {   long k = ls;
+            while (k < le) {
+                if (in_blk) {
+                    if (k + 1 < le && b[k] == '*' && b[k + 1] == '/') { in_blk = 0; k += 2; }
+                    else k++;
+                } else if (b[k] == '"' || b[k] == '\'') {
+                    char q = b[k++];
+                    while (k < le && b[k] != q) { if (b[k] == '\\' && k + 1 < le) k += 2; else k++; }
+                    if (k < le) k++;
+                } else if (k + 1 < le && b[k] == '/' && b[k + 1] == '/') {
+                    break;
+                } else if (k + 1 < le && b[k] == '/' && b[k + 1] == '*') {
+                    in_blk = 1; k += 2;
+                } else {
+                    k++;
+                }
+            }
         }
     }
     return 0;
