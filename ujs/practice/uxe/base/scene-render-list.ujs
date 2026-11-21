@@ -1,0 +1,132 @@
+struct SceneRenderBinding {
+  node: u32;
+  geometry: u32;
+  material: u32;
+  pass: u32;
+  groupOrder: f64;
+  renderOrder: f64;
+  centerX: f64;
+  centerY: f64;
+  centerZ: f64;
+}
+
+struct SceneRenderQuery {
+  snapshot: u32;
+  bindings: u32;
+  count: u32;
+  layerMask: u32;
+  viewProjection: u32;
+}
+
+struct SceneDrawItem {
+  node: u32;
+  geometry: u32;
+  material: u32;
+  worldMatrix: u32;
+  pass: u32;
+}
+
+native function scene_render_span(at:i64,bytes:i64,align:i64) i64 {
+  return at>=0 && at%align==0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function scene_render_overlap(a:i64,bytes:i64,b:i64,size:i64) i64 {
+  return bytes>0 && size>0 && a<b+size && b<a+bytes;
+}
+
+native function scene_render_readable(at:i64,bytes:i64,out:i64,n:i64,work:i64,space:i64) i64 {
+  return !scene_render_overlap(at,bytes,out,n) && !scene_render_overlap(at,bytes,work,space);
+}
+
+native function scene_render_depth(world:i64,projection:i64,bind:i64) f64 {
+  let bx=ux_f64(bind+SceneRenderBinding.centerX);
+  let by=ux_f64(bind+SceneRenderBinding.centerY);
+  let bz=ux_f64(bind+SceneRenderBinding.centerZ);
+  let x=ux_f64(world)*bx+ux_f64(world+32)*by+ux_f64(world+64)*bz+ux_f64(world+96);
+  let y=ux_f64(world+8)*bx+ux_f64(world+40)*by+ux_f64(world+72)*bz+ux_f64(world+104);
+  let z=ux_f64(world+16)*bx+ux_f64(world+48)*by+ux_f64(world+80)*bz+ux_f64(world+112);
+  let cz=ux_f64(projection+16)*x+ux_f64(projection+48)*y+ux_f64(projection+80)*z+ux_f64(projection+112);
+  let cw=ux_f64(projection+24)*x+ux_f64(projection+56)*y+ux_f64(projection+88)*z+ux_f64(projection+120);
+  return cz/cw;
+}
+
+native function scene_render_visible(node:i64,bind:i64,mask:i64) i64 {
+  return ux_u32(bind+SceneRenderBinding.geometry)!=0 && ux_u32(node+SceneSnapshotRow.visible)!=0 &&
+    u32_and(mask,ux_u32(node+SceneSnapshotRow.layerMask))!=0;
+}
+
+// The snapshot comes from visible traversal. Bindings correspond by row
+// with geometry 0 for nodes with no draw. Both backends consume the same
+// order and borrow the same world matrices until the scene is updated.
+native function Scene_renderList(query:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(!scene_render_span(query,SceneRenderQuery.size,4) || capacity<0 || capacity>65536 ||
+     !scene_render_span(out,capacity*SceneDrawItem.size,4) || !scene_render_span(work,space,8) ||
+     !scene_render_readable(query,SceneRenderQuery.size,out,capacity*SceneDrawItem.size,work,space) ||
+     scene_render_overlap(out,capacity*SceneDrawItem.size,work,space)) { return 0-1; }
+  let nodes=ux_u32(query+SceneRenderQuery.snapshot);
+  let binds=ux_u32(query+SceneRenderQuery.bindings);
+  let count=ux_u32(query+SceneRenderQuery.count);
+  let mask=ux_u32(query+SceneRenderQuery.layerMask);
+  let projection=ux_u32(query+SceneRenderQuery.viewProjection);
+  let bytes=capacity*SceneDrawItem.size;
+  if(count>65536 || !scene_render_span(nodes,count*SceneSnapshotRow.size,4) ||
+     !scene_render_span(binds,count*SceneRenderBinding.size,8) || !scene_render_span(projection,128,8) ||
+     !scene_render_readable(nodes,count*SceneSnapshotRow.size,out,bytes,work,space) ||
+     !scene_render_readable(binds,count*SceneRenderBinding.size,out,bytes,work,space) ||
+     !scene_render_readable(projection,128,out,bytes,work,space)) { return 0-1; }
+  let staged=0;
+  let i=0;
+  while(i<count) {
+    let node=nodes+i*SceneSnapshotRow.size;
+    let bind=binds+i*SceneRenderBinding.size;
+    let world=ux_u32(node+SceneSnapshotRow.worldMatrix);
+    if(!scene_render_span(world,128,8) || !scene_render_readable(world,128,out,bytes,work,space)) { return 0-2; }
+    if(scene_render_visible(node,bind,mask)) {
+      let handle=ux_u32(node+SceneSnapshotRow.node);
+      let material=ux_u32(bind+SceneRenderBinding.material);
+      if(handle==0 || ux_u32(bind+SceneRenderBinding.node)!=handle || material==0) { return 0-2; }
+      if(staged>=capacity || (staged+1)>(space/(RenderItem.size+12))) { return 0-3; }
+      staged=staged+1;
+    }
+    i=i+1;
+  }
+  if(staged==0) { return 0; }
+  let map=work+staged*RenderItem.size;
+  let ordering=map+staged*4;
+  let scratch=ordering+staged*4;
+  i=0;
+  let slot=0;
+  while(i<count) {
+    let node=nodes+i*SceneSnapshotRow.size;
+    let bind=binds+i*SceneRenderBinding.size;
+    if(scene_render_visible(node,bind,mask)) {
+      let at=work+slot*RenderItem.size;
+      let world=ux_u32(node+SceneSnapshotRow.worldMatrix);
+      let a=ux_u32_put(at+RenderItem.objectId,ux_u32(node+SceneSnapshotRow.node));
+      let b=ux_u32_put(at+RenderItem.materialId,ux_u32(bind+SceneRenderBinding.material));
+      let c=ux_f64_put(at+RenderItem.groupOrder,ux_f64(bind+SceneRenderBinding.groupOrder));
+      let d=ux_f64_put(at+RenderItem.renderOrder,ux_f64(bind+SceneRenderBinding.renderOrder));
+      let z=ux_f64_put(at+RenderItem.z,scene_render_depth(world,projection,bind));
+      let e=ux_u32_put(at+RenderItem.pass,ux_u32(bind+SceneRenderBinding.pass));
+      let index=ux_u32_put(map+slot*4,i);
+      slot=slot+1;
+    }
+    i=i+1;
+  }
+  let sorted=RenderList_sort(work,staged,ordering,scratch);
+  if(sorted<0) { return 0-2; }
+  i=0;
+  while(i<staged) {
+    let index=ux_u32(map+ux_u32(ordering+i*4)*4);
+    let node=nodes+index*SceneSnapshotRow.size;
+    let bind=binds+index*SceneRenderBinding.size;
+    let dst=out+i*SceneDrawItem.size;
+    let a=ux_u32_put(dst+SceneDrawItem.node,ux_u32(node+SceneSnapshotRow.node));
+    let b=ux_u32_put(dst+SceneDrawItem.geometry,ux_u32(bind+SceneRenderBinding.geometry));
+    let c=ux_u32_put(dst+SceneDrawItem.material,ux_u32(bind+SceneRenderBinding.material));
+    let d=ux_u32_put(dst+SceneDrawItem.worldMatrix,ux_u32(node+SceneSnapshotRow.worldMatrix));
+    let e=ux_u32_put(dst+SceneDrawItem.pass,ux_u32(bind+SceneRenderBinding.pass));
+    i=i+1;
+  }
+  return staged;
+}
