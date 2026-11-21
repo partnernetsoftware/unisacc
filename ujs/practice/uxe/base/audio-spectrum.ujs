@@ -1,0 +1,89 @@
+native function audio_spectrum_reverse(value:i64,size:i64) i64 {
+  let left=size;
+  let source=value;
+  let out=0;
+  while(left>1) {
+    out=out*2+source%2;
+    source=source/2;
+    left=left/2;
+  }
+  return out;
+}
+
+native function audio_spectrum_fft(work:i64,size:i64) i64 {
+  let length=2;
+  while(length<=size) {
+    let half=length/2;
+    let i=0;
+    while(i<half) {
+      let angle=(0.0-6.283185307179586)*(0.0+i)/(0.0+length);
+      let wr=ux_math_cos(angle);
+      let wi=ux_math_sin(angle);
+      let k=i;
+      while(k<size) {
+        let a=work+k*16;
+        let b=a+half*16;
+        let ar=ux_f64(a);
+        let ai=ux_f64(a+8);
+        let br=ux_f64(b);
+        let bi=ux_f64(b+8);
+        let tr=br*wr-bi*wi;
+        let ti=br*wi+bi*wr;
+        let c=ux_f64_put(a,ar+tr);
+        let d=ux_f64_put(a+8,ai+ti);
+        let e=ux_f64_put(b,ar-tr);
+        let f=ux_f64_put(b+8,ai-ti);
+        k=k+length;
+      }
+      i=i+1;
+    }
+    length=length*2;
+  }
+  return work;
+}
+
+// Transform the current analyser window into smoothed magnitudes. History
+// stores fftSize/2 f64 magnitudes, initially zero; work stores fftSize
+// complex f64 pairs. Byte or decibel conversion is a separate read operation.
+native function AudioAnalyser_spectrum(state:i64,history:i64,work:i64,space:i64,smoothing:f64) i64 {
+  if(!audio_window_live(state) || smoothing<0.0 || smoothing>1.0 || smoothing!=smoothing) { return 0-1; }
+  let size=ux_u32(state+AudioAnalyserWindow.length);
+  let samples=ux_u32(state+AudioAnalyserWindow.samples);
+  let historyBytes=size*4;
+  let scratchBytes=size*16;
+  if(space<scratchBytes || !audio_play_span(history,historyBytes,8) || !audio_play_span(work,scratchBytes,8) ||
+     audio_play_overlap(history,historyBytes,work,scratchBytes) ||
+     audio_play_overlap(history,historyBytes,state,AudioAnalyserWindow.size) ||
+     audio_play_overlap(work,scratchBytes,state,AudioAnalyserWindow.size) ||
+     audio_play_overlap(history,historyBytes,samples,size*4) ||
+     audio_play_overlap(work,scratchBytes,samples,size*4)) { return 0-1; }
+  let i=0;
+  while(i<size/2) {
+    let value=ux_f64(history+i*8);
+    if(value-value!=0.0 || value<0.0) { return 0-1; }
+    i=i+1;
+  }
+  let cursor=ux_u32(state+AudioAnalyserWindow.cursor);
+  i=0;
+  while(i<size) {
+    let angle=6.283185307179586*(0.0+i)/(0.0+size);
+    let window=0.42-0.5*ux_math_cos(angle)+0.08*ux_math_cos(2.0*angle);
+    let input=ux_f32(samples+(cursor+i)%size*4);
+    if(input-input!=0.0) { return 0-2; }
+    let dest=work+audio_spectrum_reverse(i,size)*16;
+    let a=ux_f64_put(dest,input*window);
+    let b=ux_f64_put(dest+8,0.0);
+    i=i+1;
+  }
+  let transformed=audio_spectrum_fft(work,size);
+  i=0;
+  while(i<size/2) {
+    let re=ux_f64(work+i*16);
+    let im=ux_f64(work+i*16+8);
+    let magnitude=f64_sqrt(re*re+im*im)/(0.0+size);
+    let value=smoothing*ux_f64(history+i*8)+(1.0-smoothing)*magnitude;
+    let a=ux_f64_put(history+i*8,value);
+    i=i+1;
+  }
+  return size/2;
+}

@@ -290,7 +290,8 @@
 - Audio 主机接线 | G-io 上下文输出、增益自动化、暂停与重采样 | AudioContext、缓冲播放。
 - PositionalAudio | G-io 双路声源、距离模型与定位 | Audio、AudioListener。
 - ~~AudioAnalyser 时间窗 | G-io 离线脉冲窗、饱和、滚动与读回 | Audio。~~ 九项通过，错读时间窗相位转红。
-- AudioAnalyser 频带 | G-io FFT、平滑、频带和停止后的输出 | 时间窗与 Audio。
+- ~~AudioAnalyser FFT 与平滑 | G-io Blackman 窗、频带、平滑及失败保留 | 时间窗与 Audio。~~ Chrome 离线 r160 和独立金值八项通过，交换邻近频带转红。
+- AudioAnalyser 频带输出 | G-io 分贝和字节、分析帧缓存与停止后的输出 | FFT 与平滑。
 - 音频跨场景生命周期 | G-io 混音、解绑、切换和释放 | Audio、PositionalAudio、AudioAnalyser。
 
 ## M12 整合
