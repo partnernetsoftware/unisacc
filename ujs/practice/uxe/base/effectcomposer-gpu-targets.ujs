@@ -1,0 +1,120 @@
+struct EffectComposerGpuTargets {
+  first:u32;
+  second:u32;
+  generation:u32;
+  width:u32;
+  height:u32;
+}
+
+native function composer_gpu_packet(targets:i64,packet:i64,capacity:i64,minimum:i64) i64 {
+  return composer_span(targets,EffectComposerGpuTargets.size) &&
+    capacity>=minimum && capacity<=65536 && composer_span(packet,capacity) &&
+    !composer_alias(targets,EffectComposerGpuTargets.size,packet,capacity);
+}
+
+native function composer_gpu_compatible(composer:i64,packet:i64,capacity:i64,targets:i64) i64 {
+  if(!composer_live(composer) ||
+     composer_alias(composer,EffectComposer.size,targets,EffectComposerGpuTargets.size) ||
+     composer_alias(composer,EffectComposer.size,packet,capacity)) { return 0; }
+  let passes=ux_u32(composer+EffectComposer.passes);
+  let bytes=ux_u32(composer+EffectComposer.capacity)*ComposerPass.size;
+  return !composer_alias(passes,bytes,targets,EffectComposerGpuTargets.size) &&
+    !composer_alias(passes,bytes,packet,capacity);
+}
+
+native function composer_gpu_clear(targets:i64) i64 {
+  let a=ux_u32_put(targets+EffectComposerGpuTargets.first,0);
+  let b=ux_u32_put(targets+EffectComposerGpuTargets.second,0);
+  let c=ux_u32_put(targets+EffectComposerGpuTargets.generation,0);
+  let d=ux_u32_put(targets+EffectComposerGpuTargets.width,0);
+  return ux_u32_put(targets+EffectComposerGpuTargets.height,0);
+}
+
+// Rebinds the caller's framebuffer (zero for the screen) before releasing
+// both owned targets. Uses a dedicated packet and submits synchronously.
+native function EffectComposerGpu_release(targets:i64,packet:i64,capacity:i64,restore:i64) i64 {
+  if(!composer_gpu_packet(targets,packet,capacity,64) || restore<0 || restore>1024) { return 0-1; }
+  let first=ux_u32(targets+EffectComposerGpuTargets.first);
+  let second=ux_u32(targets+EffectComposerGpuTargets.second);
+  let generation=ux_u32(targets+EffectComposerGpuTargets.generation);
+  if(first==0 && second==0) { return 0; }
+  if(first<1 || first>1024 || second>1024 || first==second ||
+     first==restore || (second!=0 && second==restore) || generation==0) { return 0-1; }
+  let begin=GpuPacket_begin(packet,capacity,generation);
+  let rebind=GpuTarget_bind(packet,capacity,restore,0);
+  let releaseFirst=GpuTarget_dispose(packet,capacity,first);
+  if(second!=0) { let releaseSecond=GpuTarget_dispose(packet,capacity,second); }
+  let status=GpuPacket_submit(packet);
+  if(status==0) { let cleared=composer_gpu_clear(targets); }
+  return status;
+}
+
+// Owns an RGBA8 2D pair with depth buffers. The ownership record starts
+// zeroed, and the caller reserves both IDs within the GPU generation.
+// Creation preserves the host binding and rolls back a partial pair.
+native function EffectComposerGpu_create(composer:i64,targets:i64,packet:i64,capacity:i64,descriptor:i64,generation:i64) i64 {
+  if(!composer_gpu_packet(targets,packet,capacity,64) ||
+     !composer_gpu_compatible(composer,packet,capacity,targets) ||
+     !composer_span(descriptor,GpuTarget.size) ||
+     composer_alias(descriptor,GpuTarget.size,packet,capacity) ||
+     composer_alias(descriptor,GpuTarget.size,targets,EffectComposerGpuTargets.size) ||
+     composer_alias(descriptor,GpuTarget.size,composer,EffectComposer.size) ||
+     composer_alias(descriptor,GpuTarget.size,ux_u32(composer+EffectComposer.passes),
+       ux_u32(composer+EffectComposer.capacity)*ComposerPass.size) ||
+     generation<1 || generation>4294967295 ||
+     ux_u32(targets+EffectComposerGpuTargets.first)!=0 ||
+     ux_u32(targets+EffectComposerGpuTargets.second)!=0) { return 0-1; }
+  let read=ux_u32(composer+EffectComposer.read);
+  let write=ux_u32(composer+EffectComposer.write);
+  let width=ux_u32(composer+EffectComposer.width);
+  let height=ux_u32(composer+EffectComposer.height);
+  if(read<1 || read>1024 || write<1 || write>1024 || read==write ||
+     width<1 || width>2048 || height<1 || height>2048) { return 0-1; }
+  let a=ux_u32_put(descriptor+GpuTarget.kind,0);
+  let b=ux_u32_put(descriptor+GpuTarget.id,read);
+  let c=ux_u32_put(descriptor+GpuTarget.width,width);
+  let d=ux_u32_put(descriptor+GpuTarget.height,height);
+  let e=ux_u32_put(descriptor+GpuTarget.layers,1);
+  let f=ux_u32_put(descriptor+GpuTarget.colors,1);
+  let g=ux_u32_put(descriptor+GpuTarget.depth,1);
+  let begin=GpuPacket_begin(packet,capacity,generation);
+  let first=GpuTarget_create(packet,capacity,descriptor);
+  let status=GpuPacket_submit(packet);
+  if(status!=0) { return status; }
+  let savedFirst=ux_u32_put(targets+EffectComposerGpuTargets.first,read);
+  let savedGeneration=ux_u32_put(targets+EffectComposerGpuTargets.generation,generation);
+  let savedWidth=ux_u32_put(targets+EffectComposerGpuTargets.width,width);
+  let savedHeight=ux_u32_put(targets+EffectComposerGpuTargets.height,height);
+  let change=ux_u32_put(descriptor+GpuTarget.id,write);
+  begin=GpuPacket_begin(packet,capacity,generation);
+  let second=GpuTarget_create(packet,capacity,descriptor);
+  status=GpuPacket_submit(packet);
+  if(status!=0) {
+    begin=GpuPacket_begin(packet,capacity,generation);
+    let releaseFirst=GpuTarget_dispose(packet,capacity,read);
+    let rollback=GpuPacket_submit(packet);
+    if(rollback==0) { let cleared=composer_gpu_clear(targets); }
+    return status;
+  }
+  let savedSecond=ux_u32_put(targets+EffectComposerGpuTargets.second,write);
+  return 0;
+}
+
+// Appends a bind for the current composer role to an existing packet. A
+// successful composer swap changes which GPU target the role addresses.
+native function EffectComposerGpu_bindBuffer(composer:i64,targets:i64,packet:i64,capacity:i64,writeRole:i64) i64 {
+  if(!composer_gpu_packet(targets,packet,capacity,40) ||
+     !composer_gpu_compatible(composer,packet,capacity,targets) || writeRole<0 || writeRole>1) { return 0-1; }
+  let generation=ux_u32(targets+EffectComposerGpuTargets.generation);
+  let first=ux_u32(targets+EffectComposerGpuTargets.first);
+  let second=ux_u32(targets+EffectComposerGpuTargets.second);
+  let read=ux_u32(composer+EffectComposer.read);
+  let write=ux_u32(composer+EffectComposer.write);
+  if(first<1 || first>1024 || second<1 || second>1024 || first==second || generation==0 ||
+     generation!=ux_u32(packet+GpuPacket.generation) ||
+     ux_u32(targets+EffectComposerGpuTargets.width)!=ux_u32(composer+EffectComposer.width) ||
+     ux_u32(targets+EffectComposerGpuTargets.height)!=ux_u32(composer+EffectComposer.height) ||
+     !((first==read && second==write) || (first==write && second==read))) { return 0-1; }
+  if(writeRole==1) { return GpuTarget_bind(packet,capacity,write,0); }
+  return GpuTarget_bind(packet,capacity,read,0);
+}

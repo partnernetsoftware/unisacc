@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { REVISION, WebGLRenderer, WebGLRenderTarget } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const { EffectComposer } = await import(`file://${query.get("package")}/examples/jsm/postprocessing/EffectComposer.js`);
+  const source = await fetch(`file://${query.get("wasm")}`);
+  const wasm = await WebAssembly.compile(await source.arrayBuffer());
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 4;
+    const gl = canvas.getContext("webgl2");
+    if (!gl) throw new Error("WebGL2 required");
+    return { canvas, gl };
+  }
+  function engine(gl) {
+    let exports;
+    const submit = createGpuSubmit(gl, () => exports.memory, () => 1, createGpuTargets(gl));
+    exports = new WebAssembly.Instance(wasm, { uxe_gpu_v1: { host_gpu_submit: submit } }).exports;
+    return exports;
+  }
+  function track(gl, operation, failAt = 0) {
+    const previous = gl[operation];
+    const resources = [];
+    let count = 0;
+    gl[operation] = function () {
+      if (++count === failAt) return null;
+      const resource = previous.call(gl);
+      resources.push(resource);
+      return resource;
+    };
+    return { resources, restore() { gl[operation] = previous; } };
+  }
+  const { gl } = context();
+  const frames = track(gl, "createFramebuffer");
+  const textures = track(gl, "createTexture");
+  const depths = track(gl, "createRenderbuffer");
+  const actual = engine(gl);
+  const status = actual.uxe_composer_gpu(query.get("mode") === "1" ? 5n : 0n);
+  if (status !== 0n) throw new Error(`composer probe failed ${status}`);
+  if (frames.resources.length !== 3 || textures.resources.length !== 3 || depths.resources.length !== 3) {
+    throw new Error("wrong GPU resource count");
+  }
+  const actualMemory = new DataView(actual.memory.buffer, 2097152);
+  const actualPixels = [4000,4004,4008].map(at => actualMemory.getUint32(at, true));
+  const actualReleased = [
+    ...frames.resources.slice(1).map(resource => Number(!gl.isFramebuffer(resource))),
+    ...textures.resources.slice(1).map(resource => Number(!gl.isTexture(resource))),
+    ...depths.resources.slice(1).map(resource => Number(!gl.isRenderbuffer(resource))),
+    Number(gl.getParameter(gl.FRAMEBUFFER_BINDING) === frames.resources[0]),
+    Number(gl.isTexture(textures.resources[0])),
+    Number(gl.isRenderbuffer(depths.resources[0])),
+  ];
+  const refused = [1n,2n].map(mode => Number(actual.uxe_composer_gpu(mode)));
+  frames.restore();
+  textures.restore();
+  depths.restore();
+  const rollback = context().gl;
+  const rollbackFrames = track(rollback, "createFramebuffer");
+  const rollbackDepths = track(rollback, "createRenderbuffer");
+  const failSecond = track(rollback, "createTexture", 2);
+  const failing = engine(rollback);
+  const fault = Number(failing.uxe_composer_gpu(3n));
+  failSecond.restore();
+  const rollbackResults = [
+    fault, rollbackFrames.resources.length,
+    ...rollbackFrames.resources.map(frame => Number(!rollback.isFramebuffer(frame))),
+    Number(!rollback.isTexture(failSecond.resources[0])),
+    rollbackDepths.resources.length,
+    Number(!rollback.isRenderbuffer(rollbackDepths.resources[0])),
+    Number(failing.uxe_composer_gpu(4n)),
+  ];
+  rollbackFrames.restore();
+  rollbackDepths.restore();
+
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  const composer = new EffectComposer(renderer, new WebGLRenderTarget(4, 4));
+  const outer = new WebGLRenderTarget(4, 4);
+  function clear(target, color) {
+    renderer.setRenderTarget(target);
+    renderer.setClearColor(color, 1);
+    renderer.clear();
+  }
+  function pixel(target) {
+    const color = new Uint8Array(4);
+    renderer.readRenderTargetPixels(target, 0, 0, 1, 1, color);
+    return new DataView(color.buffer).getUint32(0, true);
+  }
+  clear(composer.readBuffer, 0x00ff00);
+  clear(composer.writeBuffer, 0x0000ff);
+  clear(outer, 0xff00ff);
+  const pair = [composer.readBuffer, composer.writeBuffer];
+  const refFrames = pair.map(target => renderer.properties.get(target).__webglFramebuffer);
+  const refTextures = pair.map(target => renderer.properties.get(target.texture).__webglTexture);
+  const refDepths = pair.map(target => renderer.properties.get(target).__webglDepthbuffer);
+  const outerFrame = renderer.properties.get(outer).__webglFramebuffer;
+  const outerTexture = renderer.properties.get(outer.texture).__webglTexture;
+  const outerDepth = renderer.properties.get(outer).__webglDepthbuffer;
+  composer.renderToScreen = false;
+  composer.addPass({
+    setSize() {}, enabled: true, needsSwap: true,
+    render(_renderer, write) { clear(write, 0xff0000); },
+  });
+  composer.render(0);
+  const refPixels = [composer.readBuffer, composer.writeBuffer, outer].map(pixel);
+  composer.dispose();
+  const refReleased = [
+    ...refFrames.map(resource => Number(!ref.gl.isFramebuffer(resource))),
+    ...refTextures.map(resource => Number(!ref.gl.isTexture(resource))),
+    ...refDepths.map(resource => Number(!ref.gl.isRenderbuffer(resource))),
+    Number(ref.gl.getParameter(ref.gl.FRAMEBUFFER_BINDING) === outerFrame),
+    Number(ref.gl.isTexture(outerTexture)),
+    Number(ref.gl.isRenderbuffer(outerDepth)),
+  ];
+  outer.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify([
+    ...actualPixels, ...actualReleased, ...refPixels, ...refReleased, ...refused, ...rollbackResults,
+  ]);
+} catch (error) {
+  output.textContent = `error:${error.message}`;
+}
+</script>
