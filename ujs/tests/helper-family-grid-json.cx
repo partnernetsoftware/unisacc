@@ -1,0 +1,72 @@
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+static int selected_prefix(const char *source,const char *marker,const char *out) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(source,&raw,&bytes,20000)) return 1;
+    const long end=tx_find((const char *)raw,bytes,marker,tx_len(marker,120));
+    int failed=end<=0 || sy_write_file(out,raw,end,0600);
+    mm_free(raw);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],attribute[300],axes[300],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-helper-geometry-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/helper.wasm",dir);
+    tx_snprintf(attribute,sizeof attribute,"%s/attribute-init.ujs",dir);
+    tx_snprintf(axes,sizeof axes,"%s/axes-copy.ujs",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/" TEST "helper-family-grid-json-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+    const char entry[]="export uxe_helper_grid_json(mode:i64,kind:i64,length:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "geometry-load-layout.ujs",BASE "f64-math.ujs",
+        BASE "datautils.ujs",attribute,BASE "buffergeometry.ujs",
+        BASE "helper-buffers.ujs",BASE "gridhelper.ujs",BASE "polargridhelper.ujs",BASE "axeshelper.ujs",
+        BASE "helper-family-grid-lifecycle.ujs",axes,
+        BASE "object-json-tokens.ujs",BASE "json-read.ujs",BASE "loader-json.ujs",
+        BASE "geometry-json-load.ujs",BASE "json-bytes.ujs",BASE "geometry-json.ujs",
+        BASE "helper-family-grid-json.ujs",TEST "helper-family-grid-json-probe.ujs","-o",wasm,0};
+    const double gold[]={
+        12,-4,.5,0,0,0,0,0,0,17,.5,1,1,1,
+        16,4,.5,0,0,0,0,0,0,17,.5,1,1,1,
+         6,3,1,0,0,0,0,0,0,17,.75,1,1,1,
+    };
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *log=0;
+    size_t size=0;
+    // Retain only the actual attribute constructor and Axes lifecycle used
+    // by this probe so the unchanged production codec fits the source limit.
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600) ||
+        selected_prefix(BASE "bufferattribute.ujs","native function BufferAttribute_index(",attribute) ||
+        selected_prefix(BASE "helper-family-shared-geometry.ujs","// r160 copies the Line resources",axes);
+    if(!failed) {
+        int rc=cx_runv_timeout(compile,25,&log,&size);
+        if(rc) { printf("G_STRUCT Helper geometry JSON compile_rc=%d %s\n",rc,log?log:""); failed=1; }
+        mm_free(log);
+        log=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(!g_math_near(actual[i],gold[i],1e-6)) {
+        printf("G_STRUCT Helper geometry JSON kind=%d case=%d actual=%.17g gold=%.17g\n",
+            i/14+1,i%14,actual[i],gold[i]);
+        failed++;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&log,&size)) failed++;
+    mm_free(log);
+    printf("G_STRUCT Helper geometry JSON cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

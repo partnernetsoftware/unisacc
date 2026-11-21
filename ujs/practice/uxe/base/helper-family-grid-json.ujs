@@ -1,0 +1,152 @@
+// Public JSON is the BufferGeometry child document, not the Object3D graph.
+// Kind 1 is GridHelper, 2 is PolarGridHelper, 3 is AxesHelper.
+native function helper_grid_geometry_size(kind:i64) i64 {
+  if(kind==1) { return GridHelper.size; }
+  if(kind==2) { return PolarGridHelper.size; }
+  if(kind==3) { return AxesHelper.size; }
+  return 0-1;
+}
+
+native function helper_grid_geometry_active(kind:i64) i64 {
+  if(kind==3) { return AxesHelper.active; }
+  return GridHelper.active;
+}
+
+native function helper_grid_geometry_pairs(kind:i64,count:i64) i64 {
+  if(kind==3) { return count==6; }
+  return count%2==0;
+}
+
+// Two geometry semantic rows and their UTF-8 names in 40 caller-owned bytes.
+native function HelperGridGeometry_names(at:i64) i64 {
+  if(!helper_buffer_span(at,40,4)) { return 0-1; }
+  let p=ux_u32_put(at,1);
+  let pk=ux_u32_put(at+4,at+24);
+  let ps=ux_u32_put(at+8,8);
+  let c=ux_u32_put(at+12,8);
+  let ck=ux_u32_put(at+16,at+32);
+  let cs=ux_u32_put(at+20,5);
+  let keys=[112,111,115,105,116,105,111,110,99,111,108,111,114];
+  let i=0;
+  while(i<13) {
+    let byte=ux_u8_put(at+24+i,keys[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+// Geometry must already have an empty attributes table of capacity two
+// and an empty groups table of capacity zero.
+native function helper_grid_geometry_empty(geo:i64) i64 {
+  if(!helper_buffer_span(geo,BufferGeometry.size,4)) { return 0; }
+  let table=ux_u32(geo+BufferGeometry.attributes);
+  let groups=ux_u32(geo+BufferGeometry.groups);
+  return helper_buffer_span(table,24,4) && helper_buffer_span(groups,8,4) &&
+    helper_buffer_disjoint(geo,BufferGeometry.size,table,24) &&
+    helper_buffer_disjoint(geo,BufferGeometry.size,groups,8) &&
+    helper_buffer_disjoint(table,24,groups,8) &&
+    ux_u32(table)==0 && ux_u32(table+4)==2 && ux_u32(groups)==0 && ux_u32(groups+4)==0 &&
+    ux_u32(geo+BufferGeometry.index)==0 && ux_u32(geo+BufferGeometry.boundingSphere)==0;
+}
+
+native function helper_grid_geometry_separate(at:i64,size:i64,geo:i64) i64 {
+  return helper_buffer_disjoint(at,size,geo,BufferGeometry.size) &&
+    helper_buffer_disjoint(at,size,ux_u32(geo+BufferGeometry.attributes),24) &&
+    helper_buffer_disjoint(at,size,ux_u32(geo+BufferGeometry.groups),8);
+}
+
+native function HelperGridGeometry_toJSON(helper:i64,kind:i64,geo:i64,views:i64,dst:i64,end:i64,identity:i64,scratch:i64) i64 {
+  let size=helper_grid_geometry_size(kind);
+  if(size<0 || !helper_buffer_span(helper,size,4) || ux_u32(helper+helper_grid_geometry_active(kind))!=1 ||
+     !helper_grid_geometry_empty(geo) || !helper_grid_geometry_separate(helper,size,geo) ||
+     !helper_buffer_span(identity,GeometryJsonIdentity.size,4) ||
+     !helper_grid_geometry_separate(identity,GeometryJsonIdentity.size,geo) ||
+     !helper_buffer_span(views,2*BufferAttribute.size,4) || dst<0 || end<=dst || end>6291456 ||
+     !helper_buffer_span(scratch,1104,8)) { return 0-1; }
+  let positions=ux_u32(helper+GridHelper.positions);
+  let colors=ux_u32(helper+GridHelper.colors);
+  let count=ux_u32(helper+GridHelper.count);
+  let bytes=count*12;
+  if(!helper_grid_geometry_pairs(kind,count) || !helper_buffer_span(positions,bytes,4) ||
+     !helper_buffer_span(colors,bytes,4) || !helper_grid_geometry_separate(positions,bytes,geo) ||
+     !helper_grid_geometry_separate(colors,bytes,geo) ||
+     !helper_buffer_disjoint(positions,bytes,colors,bytes)) { return 0-1; }
+  let areas=[views,dst,scratch];
+  let spans=[2*BufferAttribute.size,end-dst,1104];
+  let i=0;
+  while(i<3) {
+    let at=areas[i];
+    let span=spans[i];
+    if(!helper_grid_geometry_separate(at,span,geo) ||
+       !helper_buffer_disjoint(at,span,helper,size) || !helper_buffer_disjoint(at,span,positions,bytes) ||
+       !helper_buffer_disjoint(at,span,colors,bytes) ||
+       !helper_buffer_disjoint(at,span,identity,GeometryJsonIdentity.size)) { return 0-1; }
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(at,span,areas[j],spans[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let pv=BufferAttribute_init(views,positions,count,3,9,0);
+  let cv=BufferAttribute_init(views+BufferAttribute.size,colors,count,3,9,0);
+  let p=BufferGeometry_setAttribute(geo,1,pv);
+  let c=BufferGeometry_setAttribute(geo,8,cv);
+  return BufferGeometry_toJSON(geo,dst,end,identity,scratch);
+}
+
+native function helper_grid_geometry_data(view:i64,count:i64) i64 {
+  if(!helper_buffer_span(view,BufferAttribute.size,4) || ux_u32(view+BufferAttribute.count)!=count ||
+     ux_u32(view+BufferAttribute.itemSize)!=3 || ux_u32(view+BufferAttribute.stride)!=12 ||
+     ux_u32(view+BufferAttribute.componentType)!=9 || ux_u32(view+BufferAttribute.normalized)!=0 ||
+     ux_u32(view+BufferAttribute.usage)!=35044) { return 0-1; }
+  let bytes=count*12;
+  let data=ux_u32(view+BufferAttribute.data);
+  if(!helper_buffer_span(data,bytes,4)) { return 0-1; }
+  let i=0;
+  while(i<bytes) {
+    let value=ux_f32(data+i);
+    if(value-value!=0.0) { return 0-1; }
+    i=i+4;
+  }
+  return data;
+}
+
+// The imported Helper borrows the loaded position/color buffers. Keep the
+// caller's loader arena alive while the Helper or any cloned view is live.
+native function HelperGridGeometry_fromJSON(helper:i64,kind:i64,geo:i64,input:i64,end:i64,options:i64) i64 {
+  let size=helper_grid_geometry_size(kind);
+  if(size<0 || !helper_buffer_span(helper,size,4) || ux_u32(helper+helper_grid_geometry_active(kind))!=0 ||
+     !helper_grid_geometry_empty(geo) || !helper_grid_geometry_separate(helper,size,geo) ||
+     !helper_buffer_span(options,GeometryJsonLoad.size,4) || input<0 || end<=input || end>6291456 ||
+     !helper_buffer_disjoint(helper,size,options,GeometryJsonLoad.size) ||
+     !helper_buffer_disjoint(helper,size,input,end-input)) { return 0-1; }
+  let arena=ux_u32(options+GeometryJsonLoad.arena);
+  let limit=ux_u32(options+GeometryJsonLoad.arenaEnd);
+  let scratch=ux_u32(options+GeometryJsonLoad.scratch);
+  if(limit<arena || !helper_buffer_disjoint(helper,size,arena,limit-arena) ||
+     !helper_buffer_disjoint(helper,size,scratch,120)) { return 0-1; }
+  let decoded=BufferGeometry_fromJSON(geo,input,end,options);
+  if(decoded<0) { return decoded; }
+  let table=ux_u32(geo+BufferGeometry.attributes);
+  let groups=ux_u32(geo+BufferGeometry.groups);
+  if(ux_u32(table)!=2 || ux_u32(groups)!=0 || ux_u32(geo+BufferGeometry.index)!=0 ||
+     ux_u32(geo+BufferGeometry.boundingSphere)!=0) { return 0-1; }
+  let pv=BufferGeometry_getAttribute(geo,1);
+  let cv=BufferGeometry_getAttribute(geo,8);
+  if(!helper_buffer_span(pv,BufferAttribute.size,4)) { return 0-1; }
+  let count=ux_u32(pv+BufferAttribute.count);
+  if(!helper_grid_geometry_pairs(kind,count)) { return 0-1; }
+  let positions=helper_grid_geometry_data(pv,count);
+  let colors=helper_grid_geometry_data(cv,count);
+  if(positions<0 || colors<0 || !helper_buffer_disjoint(positions,count*12,colors,count*12)) { return 0-1; }
+  let p=ux_u32_put(helper+GridHelper.positions,positions);
+  let c=ux_u32_put(helper+GridHelper.colors,colors);
+  let n=ux_u32_put(helper+GridHelper.count,count);
+  if(kind==3) {
+    let v=ux_u32_put(helper+AxesHelper.colorVersion,0);
+    let ref=ux_u32_put(helper+AxesHelper.colorVersionRef,helper+AxesHelper.colorVersion);
+  }
+  let active=ux_u32_put(helper+helper_grid_geometry_active(kind),1);
+  return helper;
+}
