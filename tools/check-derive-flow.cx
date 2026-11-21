@@ -55,15 +55,27 @@ int main(void) {
     char *so, *fo, ss[300], fs[300], *sl[64], **r; size_t sn, fn; int src, frc, ns, i, same;
     {   /* 两版并发起跑(各自输出与退出码落临时目录),总时约等于较慢一版 */
         char cmd[2400], p[400], *v[] = {"sh", "-c", cmd, 0}, *o = 0, *t; size_t n = 0, m = 0;
-        /* 副本放固定私有位置 ~/.cache/unisacc/check-derive-flow/<仓根 FNV-1a 64>/,跨次复用产品 -run 编译缓存(缓存按路径取键,
-         * 换路径即冷编,见 build/pkg-gaps.tsv);每次只同步变化文件(cp -pP 全量覆盖,保留 mtime 与符号链接)。flock 防两份同时跑。
-         * 副本内容取工作区已跟踪与未跟踪文件(git ls-files -co);git 身份与共享检出一致:objects 走 alternates,
-         * HEAD 同提交号,index 拷一份(product-map 等把 HEAD 与 ls-files 写进表),免 git add -A。
-         * 两版执行体先各编一次(--plan 与用法错),编译不计入并发段。 */
-        static char d[600], cwd[600]; const char *home = sy_env("HOME"); unsigned long long hh = 1469598103934665603ULL; long q;
-        if (!home || sy_cwd(cwd, sizeof cwd)) { ck(0, "home-cwd"); return 1; }
+        /* 副本根可经 UNISACC_CHECK_DERIVE_FLOW_DIR 覆盖(类比 FLEET_SNAP_PATH):测试指向 scratch;
+         * 未设时默认仍为 ~/.cache/unisacc/check-derive-flow/<仓根 FNV-1a 64>/(跨次复用 -run 缓存)。
+         * 每次只同步变化文件;flock 防两份同时跑。本检查入口会把环境指到私有 scratch,避免测写真实缓存。 */
+        static char d[600], cwd[600], scratch[600]; const char *home = sy_env("HOME"); const char *ovr;
+        unsigned long long hh = 1469598103934665603ULL; long q;
+        if (sy_cwd(cwd, sizeof cwd)) { ck(0, "home-cwd"); return 1; }
         for (q = 0; cwd[q]; q++) { hh ^= (unsigned char)cwd[q]; hh *= 1099511628211ULL; }
-        cx_fmt(d, sizeof d, "%s/.cache/unisacc/check-derive-flow/%016llx", home, hh);
+        /* Resolution (FLEET_SNAP_PATH style): UNISACC_CHECK_DERIVE_FLOW_DIR if set, else
+         * default $HOME/.cache/unisacc/check-derive-flow/<hash>. This check points the env at a
+         * private scratch so the default is not written during the test. */
+        ovr = sy_env("UNISACC_CHECK_DERIVE_FLOW_DIR");
+        if (!ovr || !*ovr) {
+            if (sy_mkdtemp(sy_tmpdir(), "check-derive-flow-", scratch, (int)sizeof scratch) != 0) {
+                ck(0, "scratch-mkdtemp"); return 1;
+            }
+            if (sy_setenv("UNISACC_CHECK_DERIVE_FLOW_DIR", scratch, 1) != 0) { ck(0, "scratch-setenv"); return 1; }
+            ovr = sy_env("UNISACC_CHECK_DERIVE_FLOW_DIR");
+        }
+        if (ovr && *ovr) cx_fmt(d, sizeof d, "%s", ovr);
+        else if (home) cx_fmt(d, sizeof d, "%s/.cache/unisacc/check-derive-flow/%016llx", home, hh);
+        else { ck(0, "home-cwd"); return 1; }
         cx_fmt(cmd, sizeof cmd, "R=$PWD; H=$(git rev-parse HEAD) && G=$(cd \"$(git rev-parse --git-common-dir)\" && pwd) && I=$(cd \"$(git rev-parse --git-dir)\" && pwd)/index && mkdir -p %s/w && exec 9> %s/.lock && { flock -n 9 || { echo LOCKED; exit 3; }; } && "
                "rm -f %s/s.out %s/f.out %s/s.rc %s/f.rc && git ls-files -co --exclude-standard -z | xargs -0 cp -pP --remove-destination --parents -t %s/w 2>/dev/null; "
                "cd %s/w && ln -sfn \"$R/unisacc.com\" unisacc.com && { [ -d .git ] || git init -q; } && echo \"$G/objects\" > .git/objects/info/alternates && "
