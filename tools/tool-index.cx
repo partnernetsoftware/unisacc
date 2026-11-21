@@ -64,12 +64,14 @@ static char *slurp(const char *path, long *n) {
 }
 
 /* 目录下 *.cx 名字加入 names(prefix 为 "" 或 "cxlib/") */
+static int g_tables_only = 0;
 static void scan_tools(const char *dir, const char *prefix) {
     sy_dir_t d;
     if (sy_dir_open(&d, dir)) return;
     while (sy_dir_next(&d) == 1) {
         char nm[300], path[700], relp[340]; long pl = tx_len(prefix, 16);
         if ((d.kind != 'f' && d.kind != 'l') || d.name_n < 4 || !mm_same(d.name + d.name_n - 3, ".cx", 3)) continue;
+        if (g_tables_only && prefix[0] == 0 && d.name_n >= 6 && mm_same(d.name, "check-", 6)) continue;
         if (nf >= MAXF || cx_fmt(nm, sizeof nm, "%s%s", prefix, d.name) || cx_fmt(path, sizeof path, "%s/%s", dir, d.name)) continue;
         if (cx_fmt(relp, sizeof relp, "tools/%s", nm) || !gk_tracked_has(relp)) continue;
         (void)pl;
@@ -352,7 +354,7 @@ static char *build_tables(long *outn) {
             f = order[j];
             if (names[f][0] == 'c' && mm_same(names[f], "check-", 6)) continue;
             if (f == gen) continue;
-            if (find(body[f], blen[f], tnames[t]) < 0 && !(nn > 4 && find(body[f], blen[f], tpaths[t]) >= 0)) continue;
+            if (find(body[f], blen[f], tnames[t]) < 0) continue;
             if (gen < 0 && find(body[f], blen[f], "--write") >= 0) gen = f;
             else readers++;
         }
@@ -406,13 +408,15 @@ int main(int argc, char **argv) {
         else { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
     }
     if (!mode) { sy_printf("usage: tool-index.cx -- --write|--check|--undescribed|--tables [--root DIR]\n"); return 2; }
+    g_tables_only = (mode == 4 || mode == 6);
     (void)gk_tracked_load(root);
     cx_fmt(dir, sizeof dir, "%s/tools", root);
     scan_tools(dir, "");
     cx_fmt(dir, sizeof dir, "%s/tools/cxlib", root);
     scan_tools(dir, "cxlib/");
     sort_files();
-    tb = build_tools(&tn);
+    if (!g_tables_only) tb = build_tools(&tn);
+    else tb = 0;
     if (mode == 3) {
         int i, c = 0, nl_ = 0;
         long ls = 0;
