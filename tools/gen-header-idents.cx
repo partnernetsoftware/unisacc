@@ -1,0 +1,277 @@
+/* tools/gen-header-idents.cx -- 由随带头 include/**.h 生成 build/header-idents.tsv:每个头里出现的全部标识符记号(ident)
+ * 与任一条件分支里被 #define 的名字全集(macro)。供前导预制键的超集 D 与 H1 判定用,不链进产品。
+ *
+ *   sh ./unisacc.com tools/gen-header-idents.cx -- --write [--root DIR]   重算并写 build/header-idents.tsv
+ *   sh ./unisacc.com tools/gen-header-idents.cx -- --check [--root DIR]   重算并逐字节比对,不一致打印 DIFF 并 rc 1
+ *   sh ./unisacc.com tools/gen-header-idents.cx -- --count [--root DIR]   只打印行数
+ *   附加 --mut N(仅供 check-gen-header-idents 变异自证):1 漏条件分支内的 #define;2 漏大括号内(枚举与结构体)的标识符;3 名字乱序(不排序)。
+ *
+ * 列:header name kind(ident|macro)。header 为相对 include/ 的路径(含子目录),按字节序;同头内先 ident 后 macro,名字按字节序,去重。
+ * 注释与字符串字面量先抹成空白;数字记号(含 0x1F、1e5、后缀)不算标识符;预处理指令名(define/ifdef/...)不算,
+ * #include 行整行不扫;关键字照记(超集,不筛)。条件编译分支一律都扫(这是盘点,不是预处理)。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.genkit
+
+#define MAXH 256
+#define MAXN 30000
+#define OUTCAP (8 * 1024 * 1024)
+
+static const char *root = ".";
+static int mut;
+static char *hnames[MAXH];
+static int nh;
+static char *out;
+static long outn, rows;
+
+static int streq(const char *a, const char *b) {
+    long n = tx_len(a, 4096);
+    return n == tx_len(b, 4096) && mm_same(a, b, n);
+}
+static int idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int idstart(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static char *slurp(const char *path, long *n) {
+    size_t m = 0;
+    char *b = cx_read(path, &m), *c;
+    if (!b) return 0;
+    c = mm_alloc((long)m + 1);
+    mm_copy(c, (long)m + 1, b, (long)m);
+    c[m] = 0;
+    mm_free(b);
+    *n = (long)m;
+    return c;
+}
+static char *dupn(const char *s, long n) {
+    char *r = mm_alloc(n + 1);
+    mm_copy(r, n + 1, s, n);
+    r[n] = 0;
+    return r;
+}
+static int word_eq(const char *s, long n, const char *lit) {
+    long ln = tx_len(lit, 64);
+    return n == ln && mm_same(s, lit, ln);
+}
+static int bcmp(const char *a, const char *b) {
+    long i = 0;
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) return (unsigned char)a[i] < (unsigned char)b[i] ? -1 : 1;
+        i++;
+    }
+    if (a[i] == b[i]) return 0;
+    return a[i] ? 1 : -1;
+}
+
+/* 抹掉注释与字符串/字符字面量,保留换行 */
+static void strip(char *s, long n) {
+    long i = 0;
+    while (i < n) {
+        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
+            s[i] = ' '; s[i + 1] = ' '; i += 2;
+            while (i < n && !(s[i] == '*' && i + 1 < n && s[i + 1] == '/')) { if (s[i] != '\n') s[i] = ' '; i++; }
+            if (i < n) { s[i] = ' '; if (i + 1 < n) s[i + 1] = ' '; i += 2; }
+        } else if (s[i] == '/' && i + 1 < n && s[i + 1] == '/') {
+            while (i < n && s[i] != '\n') { s[i] = ' '; i++; }
+        } else if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i]; i++;
+            while (i < n && s[i] != q && s[i] != '\n') { if (s[i] == '\\' && i + 1 < n && s[i + 1] != '\n') { s[i] = ' '; i++; } s[i] = ' '; i++; }
+            if (i < n && s[i] == q) i++;
+        } else i++;
+    }
+}
+
+/* 当前头的名字集 */
+static char *idn[MAXN], *mcn[MAXN];
+static int nid, nmc;
+
+static void addname(char **arr, int *cnt, const char *s, long n) {
+    if (n <= 0 || n > 250 || *cnt >= MAXN) return;
+    arr[(*cnt)++] = dupn(s, n);
+}
+
+/* 希尔排序(字节序);变异 3 不排 */
+static void sortn(char **a, int n) {
+    int gap, i, j;
+    if (mut == 3) return;
+    for (gap = n / 2; gap > 0; gap /= 2)
+        for (i = gap; i < n; i++) {
+            char *t = a[i];
+            for (j = i; j >= gap && bcmp(a[j - gap], t) > 0; j -= gap) a[j] = a[j - gap];
+            a[j] = t;
+        }
+}
+
+static void emit_set(const char *h, char **a, int n, const char *kind) {
+    int i;
+    for (i = 0; i < n; i++) {
+        char row[700];
+        long rn;
+        if (mut != 3) { if (i > 0 && bcmp(a[i - 1], a[i]) == 0) continue; }
+        else { int k, dup = 0; for (k = 0; k < i; k++) if (bcmp(a[k], a[i]) == 0) { dup = 1; break; } if (dup) continue; }
+        if (cx_fmt(row, sizeof row, "%s\t%s\t%s\n", h, a[i], kind)) continue;
+        rn = tx_len(row, 700);
+        if (outn + rn < OUTCAP) { mm_copy(out + outn, OUTCAP - outn, row, rn); outn += rn; rows++; }
+    }
+}
+
+static void scan_header(const char *h, char *s, long n) {
+    long i = 0;
+    int bol = 1, cond = 0, brace = 0;
+    nid = 0; nmc = 0;
+    while (i < n) {
+        char c = s[i];
+        if (c == '\n') { bol = 1; i++; continue; }
+        if (c == ' ' || c == '\t' || c == '\r') { i++; continue; }
+        if (bol && c == '#') {
+            long b = i + 1, ds, de;
+            int isdef = 0, isinc = 0;
+            while (b < n && (s[b] == ' ' || s[b] == '\t')) b++;
+            ds = b;
+            while (b < n && idch(s[b])) b++;
+            de = b;
+            if (word_eq(s + ds, de - ds, "if") || word_eq(s + ds, de - ds, "ifdef") || word_eq(s + ds, de - ds, "ifndef")) cond++;
+            else if (word_eq(s + ds, de - ds, "endif")) { if (cond > 0) cond--; }
+            else if (word_eq(s + ds, de - ds, "define")) isdef = 1;
+            else if (word_eq(s + ds, de - ds, "include") || word_eq(s + ds, de - ds, "include_next")) isinc = 1;
+            /* 头自身的守卫 #ifndef X_H / #define X_H 在 cond 内的 define 也记;守卫宏同样是任一分支里被 define 的名字 */
+            if (isdef) {
+                long ns, ne;
+                while (b < n && (s[b] == ' ' || s[b] == '\t')) b++;
+                ns = b;
+                while (b < n && idch(s[b])) b++;
+                ne = b;
+                if (ne > ns && idstart(s[ns]) && !(mut == 1 && cond > 0)) addname(mcn, &nmc, s + ns, ne - ns);
+            }
+            /* 行内其余记号 */
+            while (i < n && s[i] != '\n') {
+                if (s[i] == '\\' && i + 1 < n && s[i + 1] == '\n') { i += 2; continue; }
+                if (isinc) { i++; continue; }
+                if (i >= de && idstart(s[i]) && !(i > 0 && idch(s[i - 1]))) {
+                    long e = i;
+                    while (e < n && idch(s[e])) e++;
+                    if (!(mut == 2 && brace > 0)) addname(idn, &nid, s + i, e - i);
+                    i = e; continue;
+                }
+                if (s[i] >= '0' && s[i] <= '9') {
+                    while (i < n && (idch(s[i]) || s[i] == '.')) i++;
+                    continue;
+                }
+                i++;
+            }
+            continue;
+        }
+        bol = 0;
+        if (c == '{') brace++;
+        if (c == '}' && brace > 0) brace--;
+        if (c >= '0' && c <= '9') {
+            while (i < n && (idch(s[i]) || s[i] == '.' || ((s[i] == '+' || s[i] == '-') && (s[i - 1] == 'e' || s[i - 1] == 'E' || s[i - 1] == 'p' || s[i - 1] == 'P')))) i++;
+            continue;
+        }
+        if (idstart(c)) {
+            long e = i;
+            while (e < n && idch(s[e])) e++;
+            if (!(mut == 2 && brace > 0)) addname(idn, &nid, s + i, e - i);
+            i = e; continue;
+        }
+        i++;
+    }
+    sortn(idn, nid);
+    sortn(mcn, nmc);
+    emit_set(h, idn, nid, "ident");
+    emit_set(h, mcn, nmc, "macro");
+    {
+        int k;
+        for (k = 0; k < nid; k++) mm_free(idn[k]);
+        for (k = 0; k < nmc; k++) mm_free(mcn[k]);
+    }
+}
+
+/* 递归收集 DIR(相对 include/ 的前缀 PFX)下被跟踪的 .h */
+static void collect(const char *pfx) {
+    sy_dir_t d;
+    char dir[900];
+    char *subs[64];
+    int ns = 0, i;
+    if (pfx[0]) { if (cx_fmt(dir, sizeof dir, "%s/include/%s", root, pfx)) return; }
+    else if (cx_fmt(dir, sizeof dir, "%s/include", root)) return;
+    if (sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        char rel[600], relg[700];
+        if (d.name_n < 1 || d.name[0] == '.') continue;
+        if (pfx[0]) { if (cx_fmt(rel, sizeof rel, "%s/%s", pfx, d.name)) continue; }
+        else if (cx_fmt(rel, sizeof rel, "%s", d.name)) continue;
+        if (d.kind == 'd') { if (ns < 64) subs[ns++] = dupn(rel, tx_len(rel, 600)); continue; }
+        if ((d.kind != 'f' && d.kind != 'l') || d.name_n < 3 || !mm_same(d.name + d.name_n - 2, ".h", 2)) continue;
+        if (cx_fmt(relg, sizeof relg, "include/%s", rel) || !gk_tracked_has(relg)) continue;
+        if (nh < MAXH) hnames[nh++] = dupn(rel, tx_len(rel, 600));
+    }
+    sy_dir_close(&d);
+    for (i = 0; i < ns; i++) collect(subs[i]);
+}
+
+static void scan_all(void) {
+    int i;
+    (void)gk_tracked_load(root);
+    collect("");
+    if (mut != 3) {
+        int gap, j;
+        for (gap = nh / 2; gap > 0; gap /= 2)
+            for (i = gap; i < nh; i++) {
+                char *t = hnames[i];
+                for (j = i; j >= gap && bcmp(hnames[j - gap], t) > 0; j -= gap) hnames[j] = hnames[j - gap];
+                hnames[j] = t;
+            }
+    }
+    for (i = 0; i < nh; i++) {
+        char path[900]; long n = 0; char *b;
+        if (cx_fmt(path, sizeof path, "%s/include/%s", root, hnames[i])) continue;
+        b = slurp(path, &n);
+        if (!b) continue;
+        strip(b, n);
+        scan_header(hnames[i], b, n);
+        mm_free(b);
+    }
+}
+
+static int emit(const char *rel, char *buf, long n, int write_mode) {
+    char path[700]; long on = 0; char *old;
+    if (cx_fmt(path, sizeof path, "%s/%s", root, rel)) return 2;
+    if (write_mode) return cx_write(path, buf, n) ? 2 : 0;
+    old = slurp(path, &on);
+    if (!old || on != n || !mm_same(old, buf, n)) {
+        long k = 0, line = 1;
+        if (old) while (k < on && k < n && old[k] == buf[k]) { if (buf[k] == '\n') line++; k++; }
+        sy_printf("DIFF\t%s\tline=%ld\n", rel, line);
+        return 1;
+    }
+    sy_printf("OK\t%s\n", rel);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a, mode = 0;
+    const char *hdr = "# header\tname\tkind\n";
+    for (a = 1; a < argc; a++) {
+        if (streq(argv[a], "--write")) mode = 1;
+        else if (streq(argv[a], "--check")) mode = 2;
+        else if (streq(argv[a], "--count")) mode = 3;
+        else if (streq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else if (streq(argv[a], "--mut") && a + 1 < argc) mut = argv[++a][0] - '0';
+        else { sy_printf("usage: gen-header-idents.cx -- --write|--check|--count [--root DIR]\n"); return 2; }
+    }
+    if (!mode) { sy_printf("usage: gen-header-idents.cx -- --write|--check|--count [--root DIR]\n"); return 2; }
+    out = mm_alloc(OUTCAP);
+    mm_copy(out, OUTCAP, hdr, tx_len(hdr, 100));
+    outn = tx_len(hdr, 100);
+    scan_all();
+    if (mode == 3) { sy_printf("ROWS\t%ld\theaders=%d\n", rows, nh); return 0; }
+    {
+        int rc = emit("build/header-idents.tsv", out, outn, mode == 1);
+        if (mode == 1 && !rc) sy_printf("WROTE\trows=%ld\theaders=%d\n", rows, nh);
+        return rc;
+    }
+}
