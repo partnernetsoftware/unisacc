@@ -264,7 +264,7 @@
 - Box3Helper | G-struct 外接框中心和尺度 | Box3。
 - CameraHelper | G-struct 视锥与相机变换 | M3 相机。
 - DirectionalLightHelper | G-struct 光方向、颜色与更新 | M6 方向光。
-- GridHelper | G-struct 分格和主轴颜色 | 线族。
+- GridHelper 渲染与资源回收 | G-pixel 分格随对象树变换，G-struct 验证释放后不能提交 | 分格及主轴颜色由 gridhelper-struct.cx 验证通过，依赖场景渲染列表。
 - HemisphereLightHelper | G-struct 天地两色与方向 | M6 半球光。
 - PlaneHelper | G-struct 法线、位置与尺度 | Plane。
 - PointLightHelper | G-struct 光源位置与颜色 | M6 点光。
