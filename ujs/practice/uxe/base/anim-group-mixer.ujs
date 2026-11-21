@@ -1,0 +1,130 @@
+struct GroupMixerRoute {
+  mixer: u32;
+  table: u32;
+  pathID: u32;
+  arena: u32;
+  path: u32;
+  pathBytes: u32;
+  binding: u32;
+  workspace: u32;
+  workspaceBytes: u32;
+}
+
+native function group_mixer_contains(base:i64,size:i64,at:i64,bytes:i64) i64 {
+  return animation_span(at,bytes) && at>=base && at+bytes<=base+size;
+}
+
+native function group_mixer_no_sub_alias(table:i64,base:i64,size:i64) i64 {
+  if(!anim_sub_valid(table) || animation_overlap(base,size,table,AnimGroupSubscriptions.size)) { return 0; }
+  let group=ux_u32(table+AnimGroupSubscriptions.group);
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  let capacity=ux_u32(group+AnimationObjectGroup.capacity);
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  if(animation_overlap(base,size,group,AnimationObjectGroup.size) || animation_overlap(base,size,entries,capacity*8) ||
+     animation_overlap(base,size,views,ux_u32(table+AnimGroupSubscriptions.capacity)*4)) { return 0; }
+  let i=0;
+  while(i<count) {
+    let view=ux_u32(views+i*4);
+    let rows=ux_u32(view+AnimGroupBindingView.rows);
+    if(animation_overlap(base,size,view,AnimGroupBindingView.size) ||
+       animation_overlap(base,size,rows,capacity*AnimGroupBindingCell.size)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// The existing single-binding mixer writes its frame to a staging object
+// in a private workspace. Stop uses the original sampled from the first
+// live binding when the caller constructed its PropertyMixer.
+native function group_mixer_prepare(route:i64,stop:i64) i64 {
+  if(!animation_span(route,GroupMixerRoute.size)) { return 0-1; }
+  let base=ux_u32(route+GroupMixerRoute.workspace);
+  let size=ux_u32(route+GroupMixerRoute.workspaceBytes);
+  let mixer=ux_u32(route+GroupMixerRoute.mixer);
+  let table=ux_u32(route+GroupMixerRoute.table);
+  let arena=ux_u32(route+GroupMixerRoute.arena);
+  let path=ux_u32(route+GroupMixerRoute.path);
+  let pathBytes=ux_u32(route+GroupMixerRoute.pathBytes);
+  let binding=ux_u32(route+GroupMixerRoute.binding);
+  let arenaBytes=bind_arena_bytes(arena);
+  if(!animation_span(base,size) || arenaBytes<0 || !group_mixer_contains(base,size,mixer,AnimationMixer.size) ||
+     animation_overlap(base,size,route,GroupMixerRoute.size) || animation_overlap(base,size,arena,arenaBytes) ||
+     animation_overlap(base,size,path,pathBytes) || animation_overlap(base,size,binding,PropertyBinding.size) ||
+     animation_overlap(route,GroupMixerRoute.size,binding,PropertyBinding.size) ||
+     !group_mixer_no_sub_alias(table,base,size)) { return 0-1; }
+  let property=ux_u32(mixer+AnimationMixer.property);
+  let proxy=ux_u32(mixer+AnimationMixer.binding);
+  let slots=ux_u32(mixer+AnimationMixer.slots);
+  let count=ux_u32(mixer+AnimationMixer.count);
+  let scratch=ux_u32(mixer+AnimationMixer.scratch);
+  if(count>256 || !group_mixer_contains(base,size,property,PropertyMixer.size) ||
+     !group_mixer_contains(base,size,proxy,PropertyBinding.size) ||
+     !group_mixer_contains(base,size,slots,count*AnimationMixerSlot.size)) { return 0-1; }
+  let rows=ux_u32(property+PropertyMixer.rows);
+  let lanes=property_mixer_lanes(property);
+  let proxyArena=ux_u32(proxy+PropertyBinding.arena);
+  let proxySpan=bind_arena_bytes(proxyArena);
+  let proxyObject=ux_u32(proxy+PropertyBinding.handle);
+  let scratchBytes=768+count*AnimationAction.size+PropertyMixer.size+lanes*32;
+  if(lanes<1 || lanes>4 || proxySpan<0 || ux_u32(proxy+PropertyBinding.lanes)!=lanes ||
+     !group_mixer_contains(base,size,rows,lanes*32) ||
+     !group_mixer_contains(base,size,scratch,scratchBytes) ||
+     !group_mixer_contains(base,size,proxyArena,proxySpan) || !anim_write_property(proxy,proxyArena,proxyObject) ||
+     animation_overlap(proxyArena,proxySpan,mixer,AnimationMixer.size) ||
+     animation_overlap(proxyArena,proxySpan,property,PropertyMixer.size) ||
+     animation_overlap(proxyArena,proxySpan,rows,lanes*32) ||
+     animation_overlap(proxyArena,proxySpan,proxy,PropertyBinding.size) ||
+     (count>0 && animation_overlap(proxyArena,proxySpan,slots,count*AnimationMixerSlot.size)) ||
+     animation_overlap(proxyArena,proxySpan,scratch,scratchBytes)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let action=ux_u32(slots+i*AnimationMixerSlot.size+AnimationMixerSlot.action);
+    if(!group_mixer_contains(base,size,action,AnimationAction.size) ||
+       animation_overlap(proxyArena,proxySpan,action,AnimationAction.size)) { return 0-1; }
+    i=i+1;
+  }
+  let output=rows;
+  if(stop==0) { output=rows+lanes*24; }
+  let checked=AnimGroup_checkValue(table,ux_u32(route+GroupMixerRoute.pathID),arena,path,pathBytes,output,lanes,binding);
+  if(checked<0) { return checked; }
+  return output;
+}
+
+native function group_mixer_publish(route:i64,output:i64,lanes:i64) i64 {
+  return AnimGroup_setValue(ux_u32(route+GroupMixerRoute.table),ux_u32(route+GroupMixerRoute.pathID),
+    ux_u32(route+GroupMixerRoute.arena),ux_u32(route+GroupMixerRoute.path),ux_u32(route+GroupMixerRoute.pathBytes),
+    output,lanes,ux_u32(route+GroupMixerRoute.binding));
+}
+
+native function AnimationMixer_groupUpdate(route:i64,dt:f64) i64 {
+  let output=group_mixer_prepare(route,0);
+  if(output<0) { return output; }
+  let mixer=ux_u32(route+GroupMixerRoute.mixer);
+  let lanes=property_mixer_lanes(ux_u32(mixer+AnimationMixer.property));
+  let x=ux_f64(output);
+  let y=0.0; let z=0.0; let w=0.0;
+  if(lanes>=2) { y=ux_f64(output+8); }
+  if(lanes>=3) { z=ux_f64(output+16); }
+  if(lanes==4) { w=ux_f64(output+24); }
+  let frame=AnimationMixer_update(mixer,dt);
+  if(frame<0) { return frame; }
+  let changed=x!=ux_f64(output);
+  if(lanes>=2 && y!=ux_f64(output+8)) { changed=1; }
+  if(lanes>=3 && z!=ux_f64(output+16)) { changed=1; }
+  if(lanes==4 && w!=ux_f64(output+24)) { changed=1; }
+  if(changed && group_mixer_publish(route,output,lanes)<0) { return 0-1; }
+  return frame;
+}
+
+native function AnimationMixer_groupStop(route:i64) i64 {
+  let original=group_mixer_prepare(route,1);
+  if(original<0) { return original; }
+  let mixer=ux_u32(route+GroupMixerRoute.mixer);
+  let lanes=property_mixer_lanes(ux_u32(mixer+AnimationMixer.property));
+  let stopped=AnimationMixer_stopAllAction(mixer);
+  if(stopped<0) { return stopped; }
+  if(group_mixer_publish(route,original,lanes)<0) { return 0-1; }
+  let synced=uxe_copy_record(original+lanes*24,original,lanes*8);
+  return stopped;
+}

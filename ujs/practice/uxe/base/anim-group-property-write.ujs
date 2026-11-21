@@ -15,8 +15,8 @@ native function anim_write_property(binding:i64,arena:i64,object:i64) i64 {
 
 // pathID is the canonical subscription key for the supplied TRS path
 // bytes. A separate PropertyBinding scratch record is reused for each
-// live target. A complete preflight precedes the first Object3D write.
-native function AnimGroup_setValue(table:i64,pathID:i64,arena:i64,path:i64,bytes:i64,values:i64,lanes:i64,binding:i64) i64 {
+// live target. This check writes only the scratch record.
+native function AnimGroup_checkValue(table:i64,pathID:i64,arena:i64,path:i64,bytes:i64,values:i64,lanes:i64,binding:i64) i64 {
   let arenaBytes=bind_arena_bytes(arena);
   if(arenaBytes<0 || pathID<1 || pathID>4294967295 || !anim_sub_valid(table) ||
      path<0 || bytes<6 || bytes>14 || path>6291456-bytes ||
@@ -64,7 +64,18 @@ native function AnimGroup_setValue(table:i64,pathID:i64,arena:i64,path:i64,bytes
     i=i+1;
   }
   if(active!=ux_u32(group+AnimationObjectGroup.active)) { return 0-1; }
-  i=0;
+  return active;
+}
+
+native function AnimGroup_setValue(table:i64,pathID:i64,arena:i64,path:i64,bytes:i64,values:i64,lanes:i64,binding:i64) i64 {
+  let active=AnimGroup_checkValue(table,pathID,arena,path,bytes,values,lanes,binding);
+  if(active<=0) { return active; }
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let index=anim_sub_find(views,ux_u32(table+AnimGroupSubscriptions.count),pathID);
+  let view=ux_u32(views+index*4);
+  let rows=ux_u32(view+AnimGroupBindingView.rows);
+  let total=ux_u32(view+AnimGroupBindingView.count);
+  let i=0;
   while(i<total) {
     let cell=rows+i*AnimGroupBindingCell.size;
     if(ux_u32(cell+AnimGroupBindingCell.active)==1) {

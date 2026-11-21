@@ -1,0 +1,135 @@
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use r160_wait
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int module_lines(char *program,int used,int capacity,const char *name) {
+    unsigned char *body=0;
+    int64_t size=0;
+    char path[256];
+    tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",name);
+    if(sy_read_file(path,&body,&size,100000)) return -1;
+    for(long p=0;p<size;) {
+        long end=p;
+        while(end<size && body[end]!='\n') end++;
+        while(p<end && (body[p]==' ' || body[p]=='\t')) p++;
+        if(p<end && !tx_prefix((const char*)body+p,end-p,"//",2)) {
+            const int n=tx_snprintf(program+used,capacity-used,"%.*s\n",(int)(end-p),body+p);
+            if(n<0 || n>=capacity-used) { mm_free(body); return -1; }
+            used+=n;
+        }
+        p=end+1;
+    }
+    mm_free(body);
+    return used;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object3d-layout","object3d","animation-view",
+        "discreteinterpolant","linearinterpolant","cubicinterpolant","keyframe-track","numberkeyframetrack",
+        "animationaction","propertybinding","propertymixer","record-copy","animationmixer",
+        "animationobjectgroup","anim-group-bindings","anim-group-property-write","anim-group-mixer",0};
+    const char *setup=
+        "let arena=Object3D_initArena(0,4);let a=Object3D_create(arena);let b=Object3D_create(arena);"
+        "let c=Object3D_create(arena);let group=AnimationObjectGroup_init(1800,1856,4);"
+        "let table=AnimGroup_subsInit(1920,group,1952,1);"
+        "let aa=AnimGroup_updateBindings(table,a,0);let bb=AnimGroup_updateBindings(table,b,0);"
+        "let cc=AnimGroup_updateBindings(table,c,0);let remove=AnimGroup_updateBindings(table,b,1);"
+        "let view=AnimGroup_subscribe(table,1,1984,2016);let path=2100;let target=2144;let route=2200;"
+        "let chars=[46,112,111,115,105,116,105,111,110,91,121,93];let i=0;"
+        "while(i<12){let byte=ux_u8_put(path+i,chars[i]);i=i+1;}"
+        "let pa=Object3D_address(arena,a);let pb=Object3D_address(arena,b);let pc=Object3D_address(arena,c);"
+        "let x=ux_u32(pa+Object3D.position)+8;let y=ux_u32(pb+Object3D.position)+8;let z=ux_u32(pc+Object3D.position)+8;"
+        "let ax=ux_f64_put(x,10.0);let by=ux_f64_put(y,2.0);let cz=ux_f64_put(z,30.0);"
+        "let staging=Object3D_initArena(3072,1);let proxy=Object3D_create(staging);"
+        "let binding=PropertyBinding_bind(3584,staging,proxy,path,12);"
+        "let initial=PropertyBinding_bind(target,arena,a,path,12);let original=PropertyBinding_transfer(initial,3760,0);"
+        "let property=PropertyMixer_init(3648,3712,3760,1);"
+        "let action=AnimationAction_init(3904,1.0,2201,-1,0);"
+        "let t=ux_f32_put(4004,1.0);let v=ux_f32_put(4036,40.0);"
+        "let samples=AnimationSamples_init(4096,4000,4032,2,1);let track=KeyframeTrack_init(4160,path,12,samples);"
+        "let u0=ux_u32_put(3840+AnimationMixerSlot.action,action);"
+        "let u1=ux_u32_put(3840+AnimationMixerSlot.track,track);"
+        "let u2=ux_u32_put(3840+AnimationMixerSlot.blend,2500);let u3=ux_f64_put(3840+AnimationMixerSlot.weight,1.0);"
+        "let mix=AnimationMixer_init(4224,binding,property,3840,1,4352);"
+        "let m0=ux_u32_put(route+GroupMixerRoute.mixer,mix);let m1=ux_u32_put(route+GroupMixerRoute.table,table);"
+        "let m2=ux_u32_put(route+GroupMixerRoute.pathID,1);let m3=ux_u32_put(route+GroupMixerRoute.arena,arena);"
+        "let m4=ux_u32_put(route+GroupMixerRoute.path,path);let m5=ux_u32_put(route+GroupMixerRoute.pathBytes,12);"
+        "let m6=ux_u32_put(route+GroupMixerRoute.binding,target);"
+        "let m7=ux_u32_put(route+GroupMixerRoute.workspace,3072);"
+        "let m8=ux_u32_put(route+GroupMixerRoute.workspaceBytes,3072);";
+    #define HALF "let f=AnimationMixer_groupUpdate(route,0.5);"
+    #define NEXT "let g=AnimationMixer_groupUpdate(route,0.25);"
+    #define SWAP "let r0=AnimGroup_updateBindings(table,c,1);let r1=AnimGroup_updateBindings(table,b,0);"
+    #define STOP "let stopped=AnimationMixer_groupStop(route);"
+    #define DEAD "let gone=Object3D_destroy(arena,c);"
+    const char *cases[]={
+        HALF "return ux_f64(x);", HALF "return ux_f64(y);", HALF "return ux_f64(z);",
+        HALF "return ux_f64(mix+AnimationMixer.time);",
+        NEXT "return ux_f64(z);",
+        HALF NEXT "return ux_f64(z);",
+        HALF SWAP NEXT "return ux_f64(y);",
+        HALF SWAP NEXT "return ux_f64(z);",
+        HALF NEXT STOP "return ux_f64(x);",
+        HALF NEXT STOP "return ux_f64(y);",
+        HALF NEXT STOP "return ux_f64(z);",
+        HALF SWAP NEXT STOP "return ux_f64(y);",
+        HALF SWAP NEXT STOP "return ux_f64(z);",
+        HALF STOP "let edit=ux_f64_put(z,99.0);" NEXT "return ux_f64(z);",
+        DEAD HALF "return 0.0+f;",
+        DEAD HALF "return ux_f64(mix+AnimationMixer.time);",
+        DEAD HALF "return ux_f64(x);",
+        HALF DEAD STOP "return 0.0+stopped;",
+        HALF DEAD STOP "return ux_f64(x);",
+        HALF DEAD STOP "return 0.0+ux_u32(action+AnimationAction.enabled);",
+        "let bad=ux_u32_put(3840+AnimationMixerSlot.blend,9);" HALF "return ux_f64(x);",
+    };
+    const double gold[]={20,2,20,0.5,30,30,30,20,10,2,10,10,20,99,-1,0,10,-1,20,1,10};
+    enum { count=sizeof gold/sizeof gold[0] };
+    char dir[256],source[300],wasm[300],html[300],url[390],program[100001],*out=0;
+    size_t bytes=0;
+    if(sy_mkdtemp("/tmp","uxe-group-mixer-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(html,sizeof html,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s?count=%d",html,count);
+    int used=tx_snprintf(program,sizeof program,"export uxe_evaluate_case(test:i64) f64 version 1;\n");
+    for(int i=0;used>=0 && modules[i];i++) used=module_lines(program,used,sizeof program,modules[i]);
+    int n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"%s\n",setup);
+    if(n<0 || n>=(int)sizeof program-used) used=-1;
+    else used+=n;
+    for(int i=0;used>=0 && i<count;i++) {
+        const char *code=mutate && i==8?HALF NEXT "return ux_f64(x);":cases[i];
+        n=tx_snprintf(program+used,sizeof program-used,"if(test==%d){%s}\n",i,code);
+        if(n<0 || n>=(int)sizeof program-used) used=-1;
+        else used+=n;
+    }
+    n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"return 0.0/0.0;\n");
+    int failed=n<0 || n>=(int)sizeof program-used || sy_write_file(source,program,used+n,0600) ||
+        sy_copy("ujs/practice/uxe/test/wasm-batch.html",html,0600);
+    if(failed) printf("GROUP_MIXER source packing failed\n");
+    double reference[count],actual[count];
+    if(!failed) failed=r160_wait_ref("anim-group-mixer",reference,count,dir);
+    if(!failed) {
+        char *compile[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("GROUP_MIXER compile_rc=%d source_bytes=%d\n",rc,used+n); failed=1; }
+        mm_free(out); out=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#wasm-cases",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) {
+        if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(reference[i],gold[i],1e-9)) {
+            printf("G_ANIM group Mixer case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+            failed=1;
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&out,&bytes)) failed=1;
+    mm_free(out);
+    printf("G_ANIM group Mixer frame and stop cases=%d failed=%d\n",count,failed);
+    return failed;
+}
