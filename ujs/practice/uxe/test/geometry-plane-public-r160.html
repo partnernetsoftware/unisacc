@@ -1,0 +1,123 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { PlaneGeometry, REVISION } from "../../web/game/three.module.js";
+
+const output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const dir="file://"+query.get("dir")+"/";
+const bytes=async url=>(await fetch(url)).arrayBuffer();
+const hash=raw=>raw.reduce((sum,byte)=>(sum*131+byte)%16777213,0);
+const text=new TextEncoder();
+const uuid="plane-1", name='deck "A"';
+
+function reference() {
+  const source=new PlaneGeometry(6.25,4,2.5,1.25);
+  source.name=name;
+  const target=new PlaneGeometry();
+  const trace=[];
+  let correctTarget=true;
+  function listener(geometry,token,remove) {
+    return function(event) {
+      correctTarget&&=this===geometry && event.target===geometry;
+      trace.push(token);
+      if(remove) geometry.removeEventListener("dispose",remove);
+    };
+  }
+  const second=listener(source,82);
+  source.addEventListener("dispose",listener(source,41,second));
+  source.addEventListener("dispose",second);
+  source.addEventListener("ignored",listener(source,99));
+  target.addEventListener("dispose",listener(target,61));
+  source.addGroup(0,6,3);
+  source.setDrawRange(1,4);
+  const copied=target.copy(source)===target;
+  const clone=source.clone();
+  const independent=clone instanceof PlaneGeometry && clone!==source && clone.uuid!==source.uuid &&
+    clone.parameters!==source.parameters && clone.index.array!==source.index.array &&
+    clone.getAttribute("position").array!==source.getAttribute("position").array;
+  source.parameters.width=12;
+  source.getAttribute("position").setX(0,9);
+  source.index.setX(0,2);
+  const disposed=typeof source.dispose()==="undefined";
+  const first=trace.splice(0);
+  source.dispose();
+  const next=trace.splice(0);
+  target.dispose();
+  const other=trace.splice(0);
+  clone.dispose();
+  clone.uuid=uuid;
+  const json=clone.toJSON();
+  const round=PlaneGeometry.fromJSON(json);
+  return [Number(copied && independent),target.parameters.width,clone.parameters.widthSegments,
+    target.getAttribute("position").getX(0), clone.index.getX(0),clone.groups[0].materialIndex,
+    clone.drawRange.start,clone.drawRange.count,first[0]*100+first[1],next[0],other[0],trace.length,
+    Number(correctTarget && disposed && source.getAttribute("position").getX(0)===9),
+    hash(text.encode(JSON.stringify(json))),round.getAttribute("position").count,round.index.count,
+    round.getAttribute("position").getX(0)];
+}
+
+async function product() {
+  const [baseModule,probeModule]=await Promise.all([
+    WebAssembly.compile(await bytes(dir+"base.wasm")),WebAssembly.compile(await bytes(dir+"probe.wasm")),
+  ]);
+  const imported=WebAssembly.Module.imports(probeModule);
+  if(imported.length!==1 || imported[0].module!=="uxe_plane_public_v1" || imported[0].name!=="uxe_plane_dispatch") {
+    throw new Error("Plane probe import");
+  }
+  const base=await WebAssembly.instantiate(baseModule);
+  const probe=await WebAssembly.instantiate(probeModule,{
+    uxe_plane_public_v1:{uxe_plane_dispatch:base.exports.uxe_plane_dispatch},
+  });
+  if(base.exports.uxe_abi_version()!==1 || probe.exports.uxe_abi_version()!==1 ||
+    base.exports.memory===probe.exports.memory) throw new Error("Plane linked ABI");
+  const run=(op,a=0,b=0,mutate=0)=>probe.exports.uxe_plane_probe(BigInt(op),BigInt(a),BigInt(b),BigInt(mutate));
+  const memory=new Uint8Array(base.exports.memory.buffer,run(0),16384);
+  const view=new DataView(memory.buffer,memory.byteOffset,memory.byteLength);
+  memory.set(text.encode(uuid),11200);
+  memory.set(text.encode(name),11232);
+  if(run(1)!==1) throw new Error("Plane construction");
+  const copy=run(2,0),clone=run(2,1),limited=run(2,2),badClone=run(2,3);
+  run(4);
+  view.setUint32(1280,77,true);
+  const tooFew=run(5,0,1),unchanged=view.getUint32(1280,true);
+  const alias=run(5,0,9);
+  const mutate=Number(query.get("mutate"));
+  let rightTarget=true;
+  function dispose(which) {
+    const count=run(5,which,3,mutate);
+    if(count<0 || count!==view.getUint32(1284,true)) throw new Error("Plane dispose snapshot");
+    rightTarget&&=view.getUint32(1280,true)===run(3,which,7);
+    const snapshot=[];
+    for(let i=0;i<count;i++) {
+      const listener=view.getUint32(1288+4*i,true);
+      snapshot.push(listener);
+      if(listener===41) run(6,which,82);
+    }
+    return snapshot;
+  }
+  const first=dispose(0),next=dispose(0),other=dispose(1),cloneEvents=dispose(2);
+  const baseEvent=Number(run(5,0,8)===1 && view.getUint32(1280,true)===run(3,0,9) &&
+    view.getUint32(1288,true)===41);
+  const shortJson=run(7,2,8);
+  const length=run(7,2,2048,mutate);
+  if(length<0) throw new Error("Plane parameter JSON");
+  const json=memory.subarray(8192,8192+length);
+  const parsed=JSON.parse(new TextDecoder().decode(json));
+  if(parsed.type!=="PlaneGeometry" || "data" in parsed || parsed.name!==name || parsed.uuid!==uuid) {
+    throw new Error("Plane parameter shape");
+  }
+  return [Number(copy===256 && clone===384),run(3,1,0),run(3,2,1),run(3,1,2),run(3,2,3),
+    run(3,2,4),run(3,2,5),run(3,2,6),first[0]*100+first[1],next[0],other[0],cloneEvents.length,
+    Number(rightTarget && run(3,0,2)===9),hash(json),run(8,0,length),run(8,1,length),run(8,2,length),
+    limited,badClone,tooFew,unchanged,alias,shortJson,baseEvent];
+}
+
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...reference(),...await product()]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

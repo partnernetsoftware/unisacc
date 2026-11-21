@@ -8,4 +8,4 @@
 | Light | 七类构造及公共记录，按类读写颜色、强度、半影、地面色、尺寸、SH 和适用阴影参数，共用 copy、clone 和释放入口。`light-class-public-linked.cx` 以 C6 对象和编解码基座验七类从实际实例写出字节并重建，覆盖目标隔离、释放和句柄失效。 | Object3D 的变换、子树、身份、用户数据和阴影相机的其余属性尚未往返。灯光对象到 GPU 光源仍须接线，矩形灯镜面 LTC 待补。 |
 | Helper | 实例绑定其源对象或几何资源并复制、克隆和释放，适用公共对象字段需能往返。 | 已验六类复制与克隆及 ArrowHelper 释放。Axes、Box、Box3 共用几何的语义由 helper-family-shared-geometry.cx 对照。ArrowHelper 另证根四元数和轴线、锥体的姿态 JSON 往返，根位置、可见性、图层及资源身份待补。Grid 和 PolarGrid 的字段往返与渲染资源释放链尚欠，其余七类仍有复制或对象树布局缺口。 |
 | Loader | r160 未定义复制、克隆与 JSON 往返方法。验收通过真实异步请求验证配置、对应解码、失败和回收。 | Audio 的 WAV、Material 的基础 JSON 和 Image 的 PNG 可异步加载。JPEG 已有独立解码入口，异步分派、其他音频容器和材质专有资源待补。 |
-| Geometry | 可生成的网格复用 BufferGeometry 的复制、克隆、公开属性往返及释放，逐类与 r160 同场景对照。 | 23 个网格生成门已实跑。当前这些门里的通用克隆与变换未覆盖各类 JSON 和释放。通用 JSON 独立门尚未证明 23 类的往返，专有参数保留另列。 |
+| Geometry | 可生成的网格复用 BufferGeometry 的复制、克隆、公开属性往返及释放，逐类与 r160 同场景对照。 | 23 个网格生成门已实跑。PlaneGeometry 另有 C6 公共对象门，覆盖参数 JSON、网格复制克隆和释放目标。其余 22 类仍须逐类证明参数往返和释放。Plane 的任意 userData 尚未写入，UUID 由调用方供给。 |
