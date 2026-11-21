@@ -1,0 +1,118 @@
+// The pose prefix is the ArrowHelperPose layout. The four resource links
+// are dispatcher/target pairs in shaft geometry, shaft material, head
+// geometry, head material order.
+struct ArrowHelper {
+  qx: f64;
+  qy: f64;
+  qz: f64;
+  qw: f64;
+  shaftScaleY: f64;
+  headPositionY: f64;
+  headScaleY: f64;
+  headScaleXZ: f64;
+  active: u32;
+  shaftGeometryDispatcher: u32;
+  shaftGeometryTarget: u32;
+  shaftMaterialDispatcher: u32;
+  shaftMaterialTarget: u32;
+  headGeometryDispatcher: u32;
+  headGeometryTarget: u32;
+  headMaterialDispatcher: u32;
+  headMaterialTarget: u32;
+}
+
+native function arrow_life_span(at:i64,bytes:i64,align:i64) i64 {
+  return at>=0 && at%align==0 && bytes>=0 && bytes<=6291456 && at<=6291456-bytes;
+}
+
+native function arrow_life_overlap(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n>0 && m>0 && a<b+m && b<a+n;
+}
+
+native function arrow_life_listener_count(dispatcher:i64,event:i64,dst:i64,bytes:i64) i64 {
+  if(!arrow_life_span(dispatcher,EventDispatcher.size,4) ||
+     arrow_life_overlap(dispatcher,EventDispatcher.size,dst,bytes)) { return 0-1; }
+  let rows=ux_u32(dispatcher+EventDispatcher.listeners);
+  let count=ux_u32(dispatcher+EventDispatcher.listenerCount);
+  let capacity=ux_u32(dispatcher+EventDispatcher.listenerCapacity);
+  if(count>capacity || !arrow_life_span(rows,capacity*8,4) ||
+     arrow_life_overlap(rows,capacity*8,dst,bytes)) { return 0-1; }
+  if(event<0) { return 0; }
+  let i=0;
+  let matches=0;
+  while(i<count) {
+    if(ux_u32(rows+i*8)==event) { matches=matches+1; }
+    i=i+1;
+  }
+  return matches;
+}
+
+native function ArrowHelper_init(dst:i64,pose:i64,resources:i64) i64 {
+  if(!arrow_life_span(dst,ArrowHelper.size,8) || !arrow_pose_valid(pose) ||
+     !arrow_life_span(resources,32,4) ||
+     arrow_life_overlap(dst,ArrowHelper.size,resources,32) ||
+     (dst!=pose && arrow_life_overlap(dst,ArrowHelper.size,pose,ArrowHelperPose.size))) { return 0-1; }
+  let i=0;
+  while(i<32) {
+    let dispatcher=ux_u32(resources+i);
+    if(arrow_life_listener_count(dispatcher,0-1,dst,ArrowHelper.size)<0) { return 0-1; }
+    i=i+8;
+  }
+  i=0;
+  while(i<ArrowHelperPose.size) {
+    let word=ux_u32_put(dst+i,ux_u32(pose+i));
+    i=i+4;
+  }
+  i=0;
+  while(i<32) {
+    let word=ux_u32_put(dst+ArrowHelper.shaftGeometryDispatcher+i,ux_u32(resources+i));
+    i=i+4;
+  }
+  let ready=ux_u32_put(dst+ArrowHelper.active,1);
+  return dst;
+}
+
+// Copy child transforms but retain the same geometry/material references.
+native function ArrowHelper_copy(dst:i64,src:i64) i64 {
+  if(!arrow_life_span(src,ArrowHelper.size,8) ||
+     ux_u32(src+ArrowHelper.active)!=1) { return 0-1; }
+  if(dst==src) { return src; }
+  return ArrowHelper_init(dst,src,src+ArrowHelper.shaftGeometryDispatcher);
+}
+
+native function ArrowHelper_clone(dst:i64,src:i64) i64 {
+  if(dst==src) { return 0-1; }
+  return ArrowHelper_copy(dst,src);
+}
+
+// Emit all four standard dispatcher snapshots atomically. Consumers resolve
+// and call the listener tokens in order. Return the number of bytes written.
+native function ArrowHelper_dispose(helper:i64,event:i64,output:i64,bytes:i64) i64 {
+  if(!arrow_life_span(helper,ArrowHelper.size,8) ||
+     ux_u32(helper+ArrowHelper.active)!=1 || event<0 || event>4294967295 ||
+     !arrow_life_span(output,bytes,4) ||
+     arrow_life_overlap(helper,ArrowHelper.size,output,bytes)) { return 0-1; }
+  let i=0;
+  let required=0;
+  let counts=[0,0,0,0];
+  while(i<4) {
+    let dispatcher=ux_u32(helper+ArrowHelper.shaftGeometryDispatcher+i*8);
+    let count=arrow_life_listener_count(dispatcher,event,output,bytes);
+    if(count<0) { return 0-1; }
+    counts[i]=count;
+    required=required+8+count*4;
+    i=i+1;
+  }
+  if(required>bytes) { return 0-2; }
+  i=0;
+  let cursor=output;
+  while(i<4) {
+    let link=helper+ArrowHelper.shaftGeometryDispatcher+i*8;
+    let count=EventDispatcher_dispatchEvent(ux_u32(link),event,ux_u32(link+4),
+      cursor,counts[i]);
+    cursor=cursor+8+count*4;
+    i=i+1;
+  }
+  let gone=ux_u32_put(helper+ArrowHelper.active,0);
+  return required;
+}
