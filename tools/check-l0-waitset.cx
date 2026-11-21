@@ -1,0 +1,62 @@
+/* Exercise arbitrary-child reaping without weakening the single-PID API. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+static int failed, checked;
+static void waitset_assert(int ok, const char *name) {
+    checked++;
+    failed += !ok;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int waitset_before(long deadline, int *exited, int *code, int *sig) {
+    while (sy_now_ms() < deadline) {
+        int rc = sy_wait_any(SY_WAIT_NOHANG, exited, code, sig);
+        if (rc) return rc;
+        sy_sleep_ms(1);
+    }
+    return -ETIMEDOUT;
+}
+
+int main(void) {
+    int exited = 9, code = 9, sig = 9;
+    if (tx_eqz(sy_os_name(), "win")) {
+        waitset_assert(sy_wait_any(0, &exited, &code, &sig) == -ENOSYS && exited == 9 && code == 9 && sig == 9,
+              "windows-explicit-refusal");
+    } else {
+        sy_spawn_t opt;
+        sy_child_t blocked;
+        char *hold[] = {"sh", "-c", "read value; exit 5", 0};
+        sy_spawn_init(&opt);
+        opt.argv = hold;
+        opt.in_fd = SY_STDIO_PIPE;
+        if (sy_proc_spawn(&opt, &blocked)) return 2;
+
+        waitset_assert(sy_wait_status(-1, SY_WAIT_NOHANG, 0, 0, 0) == -EINVAL, "single-pid-rejects-wildcard");
+        waitset_assert(sy_wait_any(SY_WAIT_NOHANG, &exited, &code, &sig) == 0 &&
+              exited == 9 && code == 9 && sig == 9, "live-child-nohang-leaves-output");
+        char *one[] = {"sh", "-c", "exit 3", 0};
+        char *two[] = {"sh", "-c", "exit 4", 0};
+        long deadline = sy_now_ms() + 2000;
+        int pids[] = {sy_spawn(one), sy_spawn(two), blocked.pid};
+        sy_proc_close(&blocked);
+        int seen = 0;
+        for (int i = 0; i < 3; i++) {
+            int pid = waitset_before(deadline, &exited, &code, &sig), match = -1;
+            for (int j = 0; j < 3; j++) if (pid > 0 && pid == pids[j]) match = j;
+            int valid = match >= 0 && !(seen & (1 << match)) && exited == 1 && !sig && code == 3 + match;
+            waitset_assert(valid, "wait-any-child-and-exit");
+            if (valid) seen |= 1 << match;
+        }
+        waitset_assert(seen == 7 && sy_wait_any(0, 0, 0, 0) == -ECHILD, "all-children-reaped-once");
+        char *die[] = {"sh", "-c", "kill -TERM $$", 0};
+        deadline = sy_now_ms() + 2000;
+        int pid = sy_spawn(die);
+        waitset_assert(pid > 0 && waitset_before(deadline, &exited, &code, &sig) == pid &&
+              !exited && !code && sig == SIGTERM, "signal-status");
+    }
+    printf("CHECK_L0_WAITSET\tok=%d\tfailed=%d\n", checked - failed, failed);
+    return failed != 0;
+}

@@ -483,23 +483,81 @@ int sy_spawn_pipe(char **argv, const char *cwd, int flags, int *out_fd, int *err
     return c.pid;
 }
 
-/* Wait for PID with the status taken apart: *EXITED 1 and *CODE the exit code, or *EXITED 0 and
-   *SIG the terminating signal (any pointer may be 0).  NOHANG: 0 while it still runs.  PID once
-   reaped, or -errno. */
-int sy_wait_status(int pid, int nohang, int *exited, int *code, int *sig) {
+enum { SY_WAIT_NOHANG = 1 };
+
+static int syp_wait_status_os(int pid, int nohang, int *exited, int *code, int *sig) {
     int st;
     pid_t w;
-    if (pid <= 0) return -EINVAL;
+#if defined(_WIN32)
+    if (pid == -1) return -ENOSYS;
+#endif
     for (;;) {
         w = waitpid((pid_t)pid, &st, nohang ? WNOHANG : 0);
-        if (w == (pid_t)pid) break;
+        if (w > 0) break;
         if (w == 0) return 0;
         if (errno != EINTR) return -errno;
     }
     if (exited) *exited = WIFEXITED(st) ? 1 : 0;
     if (code) *code = WIFEXITED(st) ? WEXITSTATUS(st) : 0;
     if (sig) *sig = WIFSIGNALED(st) ? WTERMSIG(st) : 0;
-    return pid;
+    return (int)w;
+}
+
+/* Wait for PID with the status taken apart: *EXITED 1 and *CODE the exit code, or *EXITED 0 and
+   *SIG the terminating signal (any pointer may be 0). NOHANG: 0 while it still runs. PID once
+   reaped, or -errno. */
+int sy_wait_status(int pid, int nohang, int *exited, int *code, int *sig) {
+    if (pid <= 0) return -EINVAL;
+    return syp_wait_status_os(pid, nohang, exited, code, sig);
+}
+
+/* Reap any direct child and return its PID. In nohang mode, 0 means
+   children exist but none is ready. -ECHILD means there are no children.
+   Only a positive result writes the optional status outputs. */
+int sy_wait_any(int nohang, int *exited, int *code, int *sig) {
+    return syp_wait_status_os(-1, nohang, exited, code, sig);
+}
+
+typedef struct { long user_ms; long sys_ms; long maxrss_kb; } sy_rusage_t;
+
+static int syp_wait_rusage_os(int pid, int nohang, sy_rusage_t *out) {
+#if defined(_WIN32)
+    (void)pid; (void)nohang; (void)out;
+    return -ENOSYS;
+#else
+    /* wait4 uses a native timeval pair followed by fourteen native longs. */
+#if defined(__APPLE__)
+    typedef struct { long sec; int usec; } syp_rusage_timeval;
+#else
+    typedef struct { long sec; long usec; } syp_rusage_timeval;
+#endif
+    struct {
+        syp_rusage_timeval user;
+        syp_rusage_timeval sys;
+        long maxrss;
+        long rest[13];
+    } usage;
+    long w;
+    do {
+        w = __syscall6(_UNISA_SC(_UNISA_NR_wait4), (long)pid, 0, nohang ? WNOHANG : 0, (long)&usage, 0);
+    } while (w == -EINTR);
+    if (w <= 0) return (int)w;
+    out->user_ms = usage.user.sec * 1000 + usage.user.usec / 1000;
+    out->sys_ms = usage.sys.sec * 1000 + usage.sys.usec / 1000;
+#if defined(__APPLE__)
+    out->maxrss_kb = usage.maxrss / 1024;
+#else
+    out->maxrss_kb = usage.maxrss;
+#endif
+    return (int)w;
+#endif
+}
+
+/* Reap a positive PID with its own usage. Times are truncated to milliseconds,
+   high-water RSS is in KiB. Only a positive return writes OUT. */
+int sy_wait_rusage(int pid, int nohang, sy_rusage_t *out) {
+    if (pid <= 0 || !out) return -EINVAL;
+    return syp_wait_rusage_os(pid, nohang, out);
 }
 
 /* Send signal SIG to the one process PID (no group). 0, or -errno. */
