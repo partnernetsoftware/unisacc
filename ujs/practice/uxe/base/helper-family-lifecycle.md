@@ -6,7 +6,9 @@
 
 `GridHelper` 和 `PolarGridHelper` 的 `copy`、`clone` 共享源位置和颜色缓冲，各自维护活动状态。调用方须在引用仍存续时保留底层缓冲的地址和内容。
 
-上述入口覆盖三类 Helper。其他十类的复制与克隆，以及通用 `Object3D` 节点接入和类型专属 JSON 出入仍待补。
+`ArrowHelper_poseToJSON` 与 `ArrowHelper_poseFromJSON` 往返实际活动实例的姿态。格式是两组数组，第一组为根四元数的 `x,y,z,w`，第二组为轴线的 `scale.y`、锥体的 `position.y`、锥体的 `scale.y` 及锥体共用的 `scale.x/z`。输入畸形时保持姿态原状，正常导入保留资源引用。验收入口为 `sh ./unisacc.com ujs/tests/arrowhelper-pose-json.cx --`，用 `--mutate` 检查锥宽与锥高互换的反例。
+
+Arrow 姿态数组只覆盖现有原生姿态字段。完整对象 JSON，包括根位置、名称、可见性、图层、任意子树与资源身份，仍待接入 `Object3D`。网格公共字段往返与渲染释放仍待完成，其余十类的复制与克隆同样未覆盖。
 
 独立验收入口为 `sh ./unisacc.com ujs/tests/arrowhelper-lifecycle.cx --` 和 `sh ./unisacc.com ujs/tests/helper-family-grid-lifecycle.cx --`。分别追加 `--mutate` 可复现错误释放事件和遗漏源几何修改。
 
