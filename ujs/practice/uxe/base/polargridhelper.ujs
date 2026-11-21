@@ -1,0 +1,79 @@
+struct PolarGridHelper {
+  positions: u32;
+  colors: u32;
+  count: u32;
+  active: u32;
+}
+
+native function polar_grid_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && at<=6291456-bytes;
+}
+
+native function polar_grid_disjoint(a:i64,n:i64,b:i64,m:i64) i64 {
+  return n==0 || m==0 || a+n<=b || b+m<=a;
+}
+
+native function polar_grid_vertex(vertex:i64,color:i64,tint:i64,radius:f64,angle:f64) i64 {
+  let x=ux_f32_put(vertex,radius*ux_math_sin(angle));
+  let y=ux_f32_put(vertex+4,0.0);
+  let z=ux_f32_put(vertex+8,radius*ux_math_cos(angle));
+  let r=ux_u32_put(color,ux_u32(tint));
+  let g=ux_u32_put(color+4,ux_u32(tint+4));
+  let b=ux_u32_put(color+8,ux_u32(tint+8));
+  return vertex+12;
+}
+
+// Colors are two consecutive linear RGB triples.
+native function PolarGridHelper_init(helper:i64,positions:i64,colors:i64,rgb:i64,radius:f64,
+    sectors:i64,rings:i64,divisions:i64) i64 {
+  if(radius-radius!=0.0 || sectors<0 || sectors>262144 || rings<0 || rings>262144 ||
+     divisions<0 || divisions>262144 || !polar_grid_span(helper,PolarGridHelper.size) ||
+     !polar_grid_span(rgb,24)) { return 0-1; }
+  if(sectors==1) { sectors=0; }
+  let count=(sectors+rings*divisions)*2;
+  let bytes=count*12;
+  if(!polar_grid_span(positions,bytes) || !polar_grid_span(colors,bytes) ||
+     !polar_grid_disjoint(helper,PolarGridHelper.size,positions,bytes) ||
+     !polar_grid_disjoint(helper,PolarGridHelper.size,colors,bytes) ||
+     !polar_grid_disjoint(helper,PolarGridHelper.size,rgb,24) ||
+     !polar_grid_disjoint(positions,bytes,colors,bytes) ||
+     !polar_grid_disjoint(positions,bytes,rgb,24) ||
+     !polar_grid_disjoint(colors,bytes,rgb,24)) { return 0-1; }
+  let vertex=positions;
+  let color=colors;
+  let i=0;
+  while(i<sectors) {
+    let tint=rgb+(1-i%2)*12;
+    let angle=i*6.283185307179586/sectors;
+    vertex=polar_grid_vertex(vertex,color,tint,0.0,0.0);
+    vertex=polar_grid_vertex(vertex,color+12,tint,radius,angle);
+    color=color+24;
+    i=i+1;
+  }
+  i=0;
+  while(i<rings && divisions>0) {
+    let tint=rgb+(1-i%2)*12;
+    let ringRadius=radius-radius/rings*i;
+    let j=0;
+    while(j<divisions) {
+      let a=j*6.283185307179586/divisions;
+      let b=(j+1)*6.283185307179586/divisions;
+      vertex=polar_grid_vertex(vertex,color,tint,ringRadius,a);
+      vertex=polar_grid_vertex(vertex,color+12,tint,ringRadius,b);
+      color=color+24;
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let p=ux_u32_put(helper+PolarGridHelper.positions,positions);
+  let c=ux_u32_put(helper+PolarGridHelper.colors,colors);
+  let n=ux_u32_put(helper+PolarGridHelper.count,count);
+  let active=ux_u32_put(helper+PolarGridHelper.active,1);
+  return helper;
+}
+
+native function PolarGridHelper_dispose(helper:i64) i64 {
+  if(!polar_grid_span(helper,PolarGridHelper.size) || ux_u32(helper+PolarGridHelper.active)!=1) { return 0-1; }
+  let a=ux_u32_put(helper+PolarGridHelper.active,0);
+  return 0;
+}
