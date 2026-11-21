@@ -105,40 +105,68 @@ static int check_unlocked_fixed_rm(const char *root, const char *rel) {
     return (has_cache_fx || (has_hash_fx && !has_tmp_pid_pub) || (has_tmp && !has_dyn)) ? 1 : 0;
 }
 
-static void scan_line(const char *s, long n, long *p_posix, long *p_proc, long *p_ext) {
-    long i = 0;
-    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
-    if (i >= n || s[i] == '*' || (i + 1 < n && s[i] == '/' && (s[i + 1] == '/' || s[i + 1] == '*'))) return;
-
-    if (tx_find(s + i, n - i, "\"/proc/", 7) >= 0) (*p_proc)++;
-    if (tx_find(s + i, n - i, "\"rm\"", 4) >= 0 ||
-        tx_find(s + i, n - i, "\"mkdir\"", 7) >= 0 ||
-        tx_find(s + i, n - i, "rm -rf ", 7) >= 0 ||
-        tx_find(s + i, n - i, "mkdir -p ", 9) >= 0) (*p_ext)++;
-
-    /* Strip string and char literals before scanning C identifier calls */
-    char code[4096];
-    long cl = 0, k = i;
-    int in_str = 0, in_chr = 0;
-    while (k < n && cl + 2 < (long)sizeof code) {
+static void scan_line(const char *s, long n, int *in_blk, long *p_posix, long *p_proc, long *p_ext) {
+    /* Strip block/line comments (preserving *in_blk across lines and continuing after same-line *\/);
+     * unc keeps string literals for "/proc/" and "rm"/"mkdir", code blanks string/char literals for C identifier calls. */
+    char unc[4096], code[4096];
+    long ul = 0, cl = 0, k = 0;
+    int in_str = 0, in_chr = 0, has_code = 0;
+    while (k < n && ul + 2 < (long)sizeof unc && cl + 2 < (long)sizeof code) {
         char c = s[k];
-        if (!in_str && !in_chr && c == '/' && k + 1 < n && (s[k + 1] == '/' || s[k + 1] == '*')) break;
+        if (*in_blk) {
+            if (c == '*' && k + 1 < n && s[k + 1] == '/') {
+                *in_blk = 0;
+                unc[ul++] = ' ';
+                code[cl++] = ' ';
+                k += 2;
+                continue;
+            }
+            k++;
+            continue;
+        }
+        if (!in_str && !in_chr) {
+            if (c == '/' && k + 1 < n && s[k + 1] == '/') break;
+            if (c == '/' && k + 1 < n && s[k + 1] == '*') {
+                *in_blk = 1;
+                unc[ul++] = ' ';
+                code[cl++] = ' ';
+                k += 2;
+                continue;
+            }
+        }
         if (in_str) {
-            if (c == '\\' && k + 1 < n) { k += 2; continue; }
+            if (c == '\\' && k + 1 < n) {
+                if (ul + 3 < (long)sizeof unc) { unc[ul++] = c; unc[ul++] = s[k + 1]; }
+                k += 2;
+                continue;
+            }
             if (c == '"') in_str = 0;
-            k++; continue;
+            unc[ul++] = c;
+            k++;
+            continue;
         }
         if (in_chr) {
             if (c == '\\' && k + 1 < n) { k += 2; continue; }
             if (c == '\'') in_chr = 0;
-            k++; continue;
+            k++;
+            continue;
         }
-        if (c == '"') { in_str = 1; code[cl++] = ' '; k++; continue; }
-        if (c == '\'') { in_chr = 1; code[cl++] = ' '; k++; continue; }
+        if (c == '"') { in_str = 1; unc[ul++] = '"'; code[cl++] = ' '; has_code = 1; k++; continue; }
+        if (c == '\'') { in_chr = 1; unc[ul++] = ' '; code[cl++] = ' '; has_code = 1; k++; continue; }
+        if (c != ' ' && c != '\t') has_code = 1;
+        unc[ul++] = c;
         code[cl++] = c;
         k++;
     }
+    unc[ul] = 0;
     code[cl] = 0;
+    if (!has_code) return;
+
+    if (tx_find(unc, ul, "\"/proc/", 7) >= 0) (*p_proc)++;
+    if (tx_find(unc, ul, "\"rm\"", 4) >= 0 ||
+        tx_find(unc, ul, "\"mkdir\"", 7) >= 0 ||
+        tx_find(unc, ul, "rm -rf ", 7) >= 0 ||
+        tx_find(unc, ul, "mkdir -p ", 9) >= 0) (*p_ext)++;
 
     for (long p = 0; p < cl; ) {
         if (!id_ch(code[p]) || (code[p] >= '0' && code[p] <= '9')) { p++; continue; }
@@ -184,10 +212,11 @@ static void scan_file(const char *root, const char *rel) {
     b = (char *)cx_read(full, &sz);
     if (!b) return;
     long pos_c = 0, proc_c = 0, ext_c = 0, at = 0, n = (long)sz;
+    int in_blk = 0;
     while (at < n) {
         long e = tx_chr(b + at, n - at, '\n'), l = e < 0 ? n - at : e;
         if (l > 0 && b[at + l - 1] == '\r') l--;
-        scan_line(b + at, l, &pos_c, &proc_c, &ext_c);
+        scan_line(b + at, l, &in_blk, &pos_c, &proc_c, &ext_c);
         at += (e < 0 ? l : e + 1);
     }
     mm_free(b);
