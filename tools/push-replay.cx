@@ -98,7 +98,7 @@ static int audited_merge(const char *id, const char *mark, const np_result *log)
     return 0;
 }
 
-static int owns(const char *up,const commits *owned,int first_parent,char missing[41]) {
+static int owns(const char *up,const commits *owned,int first_parent,char missing[41],int *legacy) {
     commits actual;
     if (!owned->n || git_range(up, owned->id[owned->n - 1], first_parent, &actual)) return 0;
     if (actual.n == owned->n && mm_same(actual.id, owned->id, (size_t)owned->n * 41)) return 1;
@@ -115,6 +115,7 @@ static int owns(const char *up,const commits *owned,int first_parent,char missin
         if (next < owned->n && tx_eqz(actual.id[i], owned->id[next])) next++;
         else if (!(have && audited_merge(actual.id[i], mark, &log))) {
             mm_copy(missing, 41, actual.id[i], 41);
+            *legacy = have && audited_merge(actual.id[i], "devsvc git merge", &log);
             np_free(&log);
             return 0;
         }
@@ -681,9 +682,12 @@ static int run_push(void) {
         /* Fast-forward merge ownership is its first-parent range. The merge
            itself authorizes its second-parent content. Replay remains linear. */
         char missing[41] = "";
-        if(!is_new&&!owns(remote,&owned,ff,missing)) {
+        int legacy_merge = 0;
+        if(!is_new&&!owns(remote,&owned,ff,missing,&legacy_merge)) {
             printf("PUSH_REPLAY_REFUSE\treason=unowned-pending\tcommit=%s\tnext=devsvc-git-merge-or-explicit-push\n",
                    missing[0] ? missing : "-");
+            if (legacy_merge)
+                puts("PUSH_REPLAY_HINT\treason=legacy-merge-no-receipt\t该合并由旧版 devsvc 产生，请显式非强制推送一次或用新版重做合并");
             puts("PUSH_REPLAY_HINT\tcreate audited merges with devsvc git merge; for an existing reviewed range, use devsvc git push FULL_SHA... in first-parent order");
             break;
         }

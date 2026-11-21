@@ -445,6 +445,54 @@ static int tree_has(const char *root_,const char *rev,const char *path) {
     int ok=!run(root_,args,&r)&&r.outn==strlen(path)+1&&!memcmp(r.out,path,r.outn-1);
     np_free(&r);return ok;
 }
+static void legacy_merge_hint(const char *svc) {
+    char linked[4400], product_link[4400], touched[4400], old[41], merged[41], remote[41];
+    if (cx_fmt(linked, sizeof linked, "%s/linked", parent) ||
+        cx_fmt(product_link, sizeof product_link, "%s/unisacc.com", linked) ||
+        cx_fmt(touched, sizeof touched, "%s/after-merge", linked) ||
+        sy_setenv("DEVSVC_OWNER", "fixture-merge-owner", 1)) setup_error("legacy merge fixture");
+    char *wt[] = {"git", "worktree", "add", "-qb", "rollout", linked, 0};
+    check_setup(repo, wt);
+    if (sy_symlink(product, product_link)) setup_error("linked product");
+    if (sy_write_atomic(touched, "linked\n", 7, 0644)) setup_error("linked base");
+    char *add[] = {"git", "add", "after-merge", 0};
+    char *commit_linked[] = {"git", "commit", "-qm", "linked worktree advances", 0};
+    check_setup(linked, add);
+    check_setup(linked, commit_linked);
+    char *seed[] = {"git", "push", "-q", "origin", "HEAD:rollout", 0};
+    check_setup(linked, seed);
+    file("main-only", "released update\n", 0644);
+    commit("shared tree update");
+    /* The optional old executable recreates rollout. Without it the exact old
+       update-ref receipt is generated after making the same two-parent object. */
+    const char *old_svc = sy_env("DEVSVC_TEST_LEGACY_BIN");
+    if (old_svc && *old_svc) {
+        char *merge[] = {(char *)old_svc, "git", "merge", "main", "--cwd", linked, 0};
+        check_setup(repo, merge);
+    } else {
+        char *merge[] = {"git", "merge", "-q", "--no-ff", "--no-edit", "main", 0};
+        git_oid(linked, "HEAD", old);
+        check_setup(linked, merge);
+        git_oid(linked, "HEAD", merged);
+        char *rewind[] = {"git", "update-ref", "HEAD", old, merged, 0};
+        char *record[] = {"git", "update-ref", "-m", "devsvc git merge", "HEAD", merged, old, 0};
+        check_setup(linked, rewind);
+        check_setup(linked, record);
+    }
+    git_oid(origin, "refs/heads/rollout", old);
+    if (sy_write_atomic(touched, "next\n", 5, 0644)) setup_error("linked change");
+    char *push[] = {(char *)svc, "git", "commit", "--cwd", linked, "-m", "after rollout merge",
+                    "--whole", "after-merge", "--push", 0};
+    np_result r = {0};
+    int rc = run(repo, push, &r);
+    if (r.outn) fwrite(r.out, 1, r.outn, stdout);
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    git_oid(origin, "refs/heads/rollout", remote);
+    expect(rc == 1 && tx_eqz(old, remote) && has(&r, "reason=unowned-pending") &&
+           has(&r, "reason=legacy-merge-no-receipt"), "legacy-linked-worktree-merge-names-recovery");
+    np_free(&r);
+}
+
 static void merge_receipts(const char *svc) {
     const char *names[] = {"audited-merge-carries-to-push", "raw-merge-refused-with-recovery",
                            "audited-merge-does-not-cover-foreign-commit", "audited-merge-owner-separated"};
@@ -772,6 +820,7 @@ int main(int argc,char **argv) {
     int receipt_only=which&&tx_eqz(which,"--receipt-only");
     int paired=receipt_only||(which&&tx_eqz(which,"--commit-push"));
     int merge_receipt=which&&tx_eqz(which,"--merge-receipt");
+    int legacy_receipt=which&&tx_eqz(which,"--legacy-merge-receipt");
     int output_guard=which&&tx_eqz(which,"--output-guard");
     int merged=which&&tx_eqz(which,"--merge");
     int tail=which&&tx_eqz(which,"--tail-race");
@@ -781,12 +830,12 @@ int main(int argc,char **argv) {
     int interrupted=which&&tx_eqz(which,"--recover-published");
     int empty=which&&tx_eqz(which,"--empty");
     int gc=which&&tx_eqz(which,"--gc");
-    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!merge_receipt&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
+    if((which&&!cas&&!same&&!concurrent&&!conflict&&!paired&&!merged&&!merge_receipt&&!legacy_receipt&&!tail&&!races&&!orphan&&!deadline_case&&!interrupted&&!empty&&!gc&&!output_guard)||
        ((orphan||deadline_case||interrupted)&&svc)||
        sy_realpath(root,source,sizeof source)<0)return 2;
     if(cx_fmt(product,sizeof product,"%s/unisacc.com",source))return 2;
     prepare();
-    if(paired||concurrent||merge_receipt) {
+    if(paired||concurrent||merge_receipt||legacy_receipt) {
         isolate_cli();
         if(!svc)svc=native_cli();
         /* Background commit jobs must restart the same executable under test. */
@@ -794,6 +843,7 @@ int main(int argc,char **argv) {
     }
     if(paired){commit_and_push(svc,receipt_only);return finish();}
     if(merge_receipt){merge_receipts(svc);return finish();}
+    if(legacy_receipt){legacy_merge_hint(svc);return finish();}
     if(!svc)native_images(cas||same||output_guard);
     if(!svc&&(!which||output_guard))reject_unplanned_output();
     if(output_guard)return finish();
