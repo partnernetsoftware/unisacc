@@ -13,6 +13,12 @@
 | Raycaster | 相机射线和场景网格递归由 raycaster-camera-io.cx 与 raycast-scene-io.cx 验收。场景篡改使子对象命中失败。 | 统一遍历中的混合对象递归分派与通用 intersectObject 和 intersectObjects 入口待补。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
+## 压缩纹理软件范围与设备缺口
+
+BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 只支持线性 LDR 4x4 的常色块和全一范围哨兵，其他足迹、HDR、分区、权重及端点模式均未实现。ETC2 与 EAC 特有模式仍待解码。BC4 与 BC5 的有符号输出为二补码 SNORM。
+
+真实设备对压缩源的原样上传、格式扩展、mip 完整性、数组分层、立方体六面采样及释放仍待取证。r160 对照在这些软件门中只用于枚举与纹理描述，像素期望由独立金值给出。硬件格式的 A/B 计量保持原口径。
+
 ## 几何与材质尚需的类专有验证
 
 (1) EdgesGeometry 与 WireframeGeometry 的参数引用源几何。需验引用解析、缺资源拒绝和生成线段。PolyhedronGeometry 缺顶点数组、索引、半径及细分的参数往返。
