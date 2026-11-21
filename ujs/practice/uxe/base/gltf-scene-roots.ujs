@@ -27,8 +27,7 @@ native function gltf_scene_copy_roots(roots:i64,end:i64,limit:i64,count:i64,out:
   return count;
 }
 
-// Use index -1 for the asset default scene, falling back to scene zero.
-native function GltfLoader_sceneRoots(glb:i64,index:i64,out:i64,capacity:i64,key:i64) i64 {
+native function gltf_scene_indices(glb:i64,index:i64,out:i64,capacity:i64,key:i64,children:i64) i64 {
   if(!loading_span(glb,GlbResource.size) || index<0-1 || index>65535 ||
      capacity<0 || capacity>65536 || out%4!=0 || !loading_span(out,capacity*4) ||
      !loading_span(key,16) || !file_disjoint(glb,GlbResource.size,key,16) ||
@@ -41,16 +40,35 @@ native function GltfLoader_sceneRoots(glb:i64,index:i64,out:i64,capacity:i64,key
      !file_disjoint(json,bytes,out,capacity*4) || !file_disjoint(json,bytes,key,16) ||
      !file_disjoint(bin,binBytes,out,capacity*4) || !file_disjoint(bin,binBytes,key,16)) { return 0-1; }
   let end=json+bytes;
-  let scene=index;
-  if(scene<0) { scene=LoaderJson_uint(LoaderJson_find(json,end,key,1852138355,101,0,5),end,0); }
-  let selected=LoaderJson_item(LoaderJson_find(json,end,key,1852138355,29541,0,6),end,scene);
+  let nodes=LoaderJson_find(json,end,key,1701080942,115,0,5);
+  let selected=0-1;
+  let roots=0-2;
+  if(children) {
+    selected=LoaderJson_item(nodes,end,index);
+    roots=LoaderJson_find(selected,end,key,1818847331,1852142180,0,8);
+  } else {
+    let scene=index;
+    if(scene<0) { scene=LoaderJson_uint(LoaderJson_find(json,end,key,1852138355,101,0,5),end,0); }
+    selected=LoaderJson_item(LoaderJson_find(json,end,key,1852138355,29541,0,6),end,scene);
+    roots=LoaderJson_find(selected,end,key,1701080942,115,0,5);
+  }
   if(selected<0 || ux_u8(selected)!=123) { return 0-2; }
-  let roots=LoaderJson_find(selected,end,key,1701080942,115,0,5);
   if(roots==0-2) { return 0; }
   let count=gltf_scene_array_count(roots,end);
   if(count==0) { return 0; }
   if(count<0 || count>capacity) { return 0-3; }
-  let nodes=gltf_scene_array_count(LoaderJson_find(json,end,key,1701080942,115,0,5),end);
-  if(nodes<1 || gltf_scene_copy_roots(roots,end,nodes,count,out,0)<0) { return 0-3; }
-  return gltf_scene_copy_roots(roots,end,nodes,count,out,1);
+  let limit=gltf_scene_array_count(nodes,end);
+  if(limit<1 || gltf_scene_copy_roots(roots,end,limit,count,out,0)<0) { return 0-3; }
+  return gltf_scene_copy_roots(roots,end,limit,count,out,1);
+}
+
+// Use index -1 for the asset default scene, falling back to scene zero.
+native function GltfLoader_sceneRoots(glb:i64,index:i64,out:i64,capacity:i64,key:i64) i64 {
+  return gltf_scene_indices(glb,index,out,capacity,key,0);
+}
+
+// Preserve authored sibling order. Validate the forest with nodeParents
+// before using these lists to publish live Object3D relations.
+native function GltfLoader_nodeChildren(glb:i64,index:i64,out:i64,capacity:i64,key:i64) i64 {
+  return gltf_scene_indices(glb,index,out,capacity,key,1);
 }
