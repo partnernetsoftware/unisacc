@@ -1258,26 +1258,48 @@ static int co_nt_field_is(const char *l, long ln, int f, const char *v) {
     long o, n, vl = tx_len(v, 4096);
     return !tx_field(l, ln, '\t', f, &o, &n) && n == vl && tx_same(l + o, n, v, vl);
 }
+static int co_nt_shard_min = -1, co_nt_shard_max = -1;
 static int co_nt_shard_row(const char *s, long n) {
-    return co_nnew > 0 && n > 15 && tx_prefix(s, n, "tools-compile-", 14) && co_nt_field_is(s, n, 3, "tests/tools-compile.cx");
+    if (co_nnew <= 0 || n <= 15 || !tx_prefix(s, n, "tools-compile-", 14)) return 0;
+    if (co_nt_shard_min < 0) {
+        static char hst[1 << 18];
+        char *hsv[] = {"git", "show", "HEAD:tests/tools-compile-sources.tsv", 0};
+        long hrows = 0, at = 0, hn = 0;
+        if (run(hsv, hst, sizeof hst) == 0) {
+            hn = tx_len(hst, sizeof hst);
+            while (at < hn) {
+                long e = tx_chr(hst + at, hn - at, '\n'), l = e < 0 ? hn - at : e;
+                if (l > 0) hrows++;
+                at += l + 1;
+            }
+        }
+        co_nt_shard_min = (int)((hrows + 7) / 8);
+        co_nt_shard_max = (int)((hrows + co_nnew + 7) / 8);
+    }
+    for (int j = co_nt_shard_min; j < co_nt_shard_max; j++) {
+        char r1[320], r2[320];
+        if (!cx_fmt(r1, sizeof r1, "tools-compile-%03d\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%d\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily", j, j) &&
+            n == tx_len(r1, sizeof r1) && tx_same(s, n, r1, n)) return 1;
+        if (!cx_fmt(r2, sizeof r2, "tools-compile-%03d\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};%d\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tcommit", j, j) &&
+            n == tx_len(r2, sizeof r2) && tx_same(s, n, r2, n)) return 1;
+    }
+    return 0;
 }
-static int co_nt_has_line(const char *b, long bn, const char *l, long ln) {
-    long at = 0;
-    while (at < bn) { long e = tx_chr(b + at, bn - at, '\n'), n = e < 0 ? bn - at : e;
-        if (n == ln && tx_same(b + at, n, l, ln)) return 1;
-        at += n + 1; }
+static int co_nt_id_seen(char ids[][200], int nid, const char *s, long n) {
+    for (int i = 0; i < nid; i++) {
+        if ((long)strlen(ids[i]) == n && memcmp(ids[i], s, (size_t)n) == 0) return 1;
+    }
     return 0;
 }
 static int co_newtool_gate(void) {
-    static char bt[1 << 21], hb[1 << 21], st[1 << 18], ro[16384], ids[64][200]; char tree[64];
-    char *bv[] = {"git", "show", ":tests/batches.tsv", 0}, *hv[] = {"git", "show", "HEAD:tests/batches.tsv", 0};
+    static char bt[1 << 21], st[1 << 18], ro[16384], ids[64][200]; char tree[64];
+    char *bv[] = {"git", "show", ":tests/batches.tsv", 0};
     char *sv[] = {"git", "show", ":tests/tools-compile-sources.tsv", 0}, *wv[] = {"git", "write-tree", 0};
-    int nid = 0, t, i, bad = 0; long bn, hn, sn, at;
+    int nid = 0, t, i, bad = 0; long bn, sn, at;
     if (run(bv, bt, sizeof bt) != 0 || run(sv, st, sizeof st) != 0 || run(wv, tree, sizeof tree) != 0 || tx_len(tree, sizeof tree) != 40) {
         fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: cannot read tests/batches.tsv, tests/tools-compile-sources.tsv or the tree of the commit's index; nothing committed\n");
         return 1; }
-    if (run(hv, hb, sizeof hb) != 0) hb[0] = 0;
-    bn = tx_len(bt, sizeof bt); hn = tx_len(hb, sizeof hb); sn = tx_len(st, sizeof st);
+    bn = tx_len(bt, sizeof bt); sn = tx_len(st, sizeof st);
     for (t = 0; t < co_nnew; t++) {
         const char *p = co_newtool[t]; int src = 0, own = 0;
         for (at = 0; at < sn; ) { long e = tx_chr(st + at, sn - at, '\n'), l = e < 0 ? sn - at : e;
@@ -1286,7 +1308,7 @@ static int co_newtool_gate(void) {
         for (at = 0; at < bn; ) { long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e, o, n;
             if (l > 0 && bt[at] != '#' && (co_nt_field_is(bt + at, l, 3, p) || co_nt_field_is(bt + at, l, 8, p))) {
                 own++;
-                if (!co_nt_has_line(hb, hn, bt + at, l) && !tx_field(bt + at, l, '\t', 0, &o, &n) && n > 0 && n < 200) {
+                if (!tx_field(bt + at, l, '\t', 0, &o, &n) && n > 0 && n < 200 && !co_nt_id_seen(ids, nid, bt + at + o, n)) {
                     if (nid == 64) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: more than 64 new batch rows; nothing committed\n"); return 1; }
                     tx_copy(ids[nid], sizeof ids[nid], bt + at + o, n); ids[nid][n] = 0; nid++;
                 }
@@ -1298,10 +1320,14 @@ static int co_newtool_gate(void) {
     if (bad) {
         fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: %d registration row(s) missing from the commit's index (register the batch with tools/register.cx ... --no-run and the inventory with tools/register.cx --tool, then pass --registered ID); nothing committed\n", bad);
         return 1; }
+    if (nid > 0) {
+        char *pv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--qualify-tree", "--prepare", 0};
+        g_bound_s = 55; (void)run(pv, ro, sizeof ro); g_bound_s = 30;
+    }
     for (i = 0; i < nid; i++) {
         char *qv[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--qualify-tree", tree, ids[i], 0}; char want[300]; long t0 = sy_now_ms(); int rc;
         if (cx_fmt(want, sizeof want, "REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=PASS\t", ids[i])) return 1;
-        g_bound_s = 150; rc = run(qv, ro, sizeof ro); g_bound_s = 30;
+        g_bound_s = 58; rc = run(qv, ro, sizeof ro); g_bound_s = 30;
         if (rc != 0 || tx_find(ro, tx_len(ro, sizeof ro), want, tx_len(want, sizeof want)) < 0) {
             sy_printf("NEW_TOOL\tbatch=%s\ttree=%s\tqualify=REFUSE\trc=%d\tms=%ld\n", ids[i], tree, rc, sy_now_ms() - t0);
             fprintf(stderr, "COMMIT_OWN_FAIL\tclass=new-tool\ncommit-own: REFUSE --new-tool: batch %s does not pass on the tree being committed; nothing committed\n%s\n", ids[i], ro);
