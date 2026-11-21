@@ -1,0 +1,34 @@
+// LOD's direct raycast tests the LOD object's layers, then delegates to a
+// selected child without testing the child's visibility or layers. The row
+// can go directly to the mesh query without changing the live object tree.
+native function LOD_raycastSceneRow(origin:i64,mask:i64,arena:i64,lod:i64,out:i64) i64 {
+  if(!raycaster_span(origin,24) || mask<0 || mask>4294967295 || !lod_valid(lod) || out<0 || out%4!=0 ||
+     out>6291456-SceneSnapshotRow.size || arena<0 || arena%8!=0 || arena>6291448) { return 0-1; }
+  let slots=ux_u32(arena);
+  let arenaBytes=8+slots*424;
+  let table=ux_u32(lod+LOD.levels);
+  let bytes=ux_u32(lod+LOD.capacity)*LODLevel.size;
+  if(arena>6291456-arenaBytes || table%8!=0 || table>6291456-bytes ||
+     ux_u32(lod+LOD.count)>ux_u32(lod+LOD.capacity) ||
+     raycaster_overlap(out,SceneSnapshotRow.size,origin,24) ||
+     raycaster_overlap(out,SceneSnapshotRow.size,arena,arenaBytes) ||
+     raycaster_overlap(out,SceneSnapshotRow.size,lod,LOD.size) ||
+     raycaster_overlap(out,SceneSnapshotRow.size,table,bytes)) { return 0-1; }
+  let lodNode=ux_u32(lod+LOD.node);
+  let root=Object3D_address(arena,lodNode);
+  if(root<0) { return 0-1; }
+  let layer=ux_u32(root+Object3D.layerMask);
+  if(u32_and(layer,mask)==0) { return 0; }
+  let selected=LOD_raycastTarget(lod,arena,origin);
+  if(selected<=0) { return selected; }
+  let child=Object3D_address(arena,selected);
+  if(child<0) { return 0-1; }
+  let matrix=ux_u32(child+Object3D.worldMatrix);
+  if(!raycaster_span(matrix,128) || raycaster_overlap(out,SceneSnapshotRow.size,matrix,128)) { return 0-1; }
+  let a=ux_u32_put(out+SceneSnapshotRow.node,selected);
+  let b=ux_u32_put(out+SceneSnapshotRow.parent,lodNode);
+  let c=ux_u32_put(out+SceneSnapshotRow.visible,ux_u32(child+Object3D.visible));
+  let d=ux_u32_put(out+SceneSnapshotRow.layerMask,layer);
+  let e=ux_u32_put(out+SceneSnapshotRow.worldMatrix,matrix);
+  return 1;
+}
