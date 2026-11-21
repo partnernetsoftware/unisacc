@@ -1,0 +1,140 @@
+// Caller-owned work holds a contiguous snapshot for the existing raw methods.
+native function linecurve3_record_points(line:i64,work:i64) i64 {
+  if(!lc3_writable(work,48,line)) { return 0-1; }
+  let first=uxe_copy_record(work,ux_u32(line+LineCurve3Record.v1),24);
+  let last=uxe_copy_record(work+24,ux_u32(line+LineCurve3Record.v2),24);
+  return work;
+}
+
+native function LineCurve3_recordPoint(out:i64,line:i64,t:f64,work:i64) i64 {
+  if(!lc3_writable(out,24,line) || lc3_overlap(out,24,work,48)) { return 0-1; }
+  let points=linecurve3_record_points(line,work);
+  if(points<0) { return points; }
+  return LineCurve3_getPoint(out,points,t);
+}
+
+native function LineCurve3_recordPointAt(out:i64,line:i64,u:f64,work:i64) i64 {
+  return LineCurve3_recordPoint(out,line,u,work);
+}
+
+native function LineCurve3_recordTangent(out:i64,line:i64,work:i64) i64 {
+  if(!lc3_writable(out,24,line) || lc3_overlap(out,24,work,48)) { return 0-1; }
+  let points=linecurve3_record_points(line,work);
+  if(points<0) { return points; }
+  return LineCurve3_getTangent(out,points);
+}
+
+native function LineCurve3_recordTangentAt(out:i64,line:i64,work:i64) i64 {
+  return LineCurve3_recordTangent(out,line,work);
+}
+
+native function LineCurve3_recordPoints(out:i64,line:i64,steps:i64,work:i64) i64 {
+  if(steps<0 || steps>=262144 || !lc3_writable(out,24*(steps+1),line) ||
+     lc3_overlap(out,24*(steps+1),work,48)) { return 0-1; }
+  let points=linecurve3_record_points(line,work);
+  if(points<0) { return points; }
+  if(steps==0) {
+    let point=LineCurve3_getPoint(out,points,0.0/0.0);
+    return 1;
+  }
+  return LineCurve3_getPoints(out,points,steps);
+}
+
+native function LineCurve3_recordSpacedPoints(out:i64,line:i64,steps:i64,work:i64) i64 {
+  return LineCurve3_recordPoints(out,line,steps,work);
+}
+
+native function LineCurve3_recordLength(line:i64,table:i64) f64 {
+  if(!lc3_area(line,LineCurve3Record.size)) { return 0.0/0.0; }
+  let divisions=ux_u32(line+LineCurve3Record.arcLengthDivisions);
+  if(divisions>=786432 || !lc3_writable(table,8*(divisions+1),line)) { return 0.0/0.0; }
+  return Curve_getLength(table,divisions);
+}
+
+native function lc3_record_readable(line:i64) i64 {
+  if(!lc3_area(line,LineCurve3Record.size)) { return 0; }
+  return lc3_area(ux_u32(line+LineCurve3Record.v1),24) &&
+    lc3_area(ux_u32(line+LineCurve3Record.v2),24);
+}
+
+// Copy changes the destination vectors in place, including shared endpoints.
+native function LineCurve3_copy(dst:i64,src:i64) i64 {
+  if(!lc3_record_readable(src) || !lc3_record_readable(dst)) { return 0-1; }
+  let first=uxe_copy_record(ux_u32(dst+LineCurve3Record.v1),ux_u32(src+LineCurve3Record.v1),24);
+  let last=uxe_copy_record(ux_u32(dst+LineCurve3Record.v2),ux_u32(src+LineCurve3Record.v2),24);
+  let state=ux_u32_put(dst+LineCurve3Record.arcLengthDivisions,ux_u32(src+LineCurve3Record.arcLengthDivisions));
+  return dst;
+}
+
+native function LineCurve3_clone(dst:i64,src:i64) i64 {
+  if(!lc3_writable(dst,LineCurve3Record.size,src)) { return 0-1; }
+  let initialized=LineCurve3_init(dst,0-1,0-1);
+  if(initialized<0) { return initialized; }
+  return LineCurve3_copy(dst,src);
+}
+
+// Work holds the control record and coordinates, then the numeric writer.
+native function LineCurve3_toJSON(line:i64,dst:i64,end:i64,work:i64) i64 {
+  if(dst<0 || dst>end || end>6291456 || !lc3_writable(work,1168,line) ||
+     lc3_overlap(dst,end-dst,work,1168) || lc3_overlap(dst,end-dst,line,LineCurve3Record.size) ||
+     lc3_overlap(dst,end-dst,ux_u32(line+LineCurve3Record.v1),24) ||
+     lc3_overlap(dst,end-dst,ux_u32(line+LineCurve3Record.v2),24)) { return 0-1; }
+  let points=linecurve3_record_points(line,work+16);
+  let control=CurveControl_init(work,points,1,ux_u32(line+LineCurve3Record.arcLengthDivisions));
+  if(control<0) { return control; }
+  return CurveControl_toJSON(control,dst,end,work+64);
+}
+
+// The shared reader may stage up to twelve coordinates before type validation.
+native function LineCurve3_fromJSON(line:i64,input:i64,end:i64,work:i64) i64 {
+  if(input<0 || input>=end || end>6291456 || !lc3_writable(work,328,line) ||
+     lc3_overlap(input,end-input,work,328)) { return 0-1; }
+  let control=CurveControl_fromJSON(work,work+16,input,end,work+112);
+  if(control<0 || ux_u32(control+CurveControl.kind)!=1) { return 0-1; }
+  let a=uxe_copy_record(ux_u32(line+LineCurve3Record.v1),work+16,24);
+  let b=uxe_copy_record(ux_u32(line+LineCurve3Record.v2),work+40,24);
+  let d=ux_u32_put(line+LineCurve3Record.arcLengthDivisions,ux_u32(control+CurveControl.arcLengthDivisions));
+  return line;
+}
+
+// The native record path uses the same cache record as Curve. It also
+// accepts explicit divisions and keeps a hot table until refresh.
+native function LineCurve3_recordLengths(line:i64,cache:i64,sample:i64,steps:i64,refresh:i64) i64 {
+  if(!lc3_writable(cache,CurveArcCache.size,line) || !lc3_writable(sample,24,line) ||
+     lc3_overlap(cache,CurveArcCache.size,sample,24)) { return 0-1; }
+  let capacity=ux_u32(cache+CurveArcCache.capacity);
+  let table=ux_u32(cache+CurveArcCache.table);
+  if(steps==0-1) { steps=ux_u32(line+LineCurve3Record.arcLengthDivisions); }
+  if(steps<0 || steps>=capacity || capacity>786432 || !lc3_writable(table,capacity*8,line) ||
+     lc3_overlap(table,capacity*8,cache,CurveArcCache.size) ||
+     lc3_overlap(table,capacity*8,sample,24)) { return 0-1; }
+  if(steps>0 && refresh==0 && ux_u32(cache+CurveArcCache.dimensions)==3 &&
+     ux_u32(cache+CurveArcCache.steps)==steps) { return table; }
+  let origin=LineCurve3_sample(sample,line,0.0);
+  let oldx=ux_f64(sample);
+  let oldy=ux_f64(sample+8);
+  let oldz=ux_f64(sample+16);
+  let sum=0.0;
+  let start=ux_f64_put(table,sum);
+  let i=1;
+  while(i<=steps) {
+    let point=LineCurve3_sample(sample,line,i*1.0/steps);
+    let x=ux_f64(sample);
+    let y=ux_f64(sample+8);
+    let z=ux_f64(sample+16);
+    let dx=x-oldx;
+    let dy=y-oldy;
+    let dz=z-oldz;
+    sum=sum+f64_sqrt(dx*dx+dy*dy+dz*dz);
+    let stored=ux_f64_put(table+i*8,sum);
+    oldx=x; oldy=y; oldz=z;
+    i=i+1;
+  }
+  let d=ux_u32_put(cache+CurveArcCache.dimensions,3);
+  let n=ux_u32_put(cache+CurveArcCache.steps,steps);
+  return table;
+}
+
+native function LineCurve3_updateArcLengths(line:i64,cache:i64,sample:i64) i64 {
+  return LineCurve3_recordLengths(line,cache,sample,0-1,1);
+}

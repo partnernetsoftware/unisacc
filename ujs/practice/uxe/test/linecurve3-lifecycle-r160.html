@@ -1,0 +1,104 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {LineCurve3, Vector3, REVISION} from "../../web/game/three.module.js";
+const status=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const file=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const wasm=new WebAssembly.Instance(new WebAssembly.Module(file)).exports;
+  const productBytes=await (await fetch("file://"+query.get("probe"))).arrayBuffer();
+  const product=new WebAssembly.Instance(new WebAssembly.Module(productBytes),{
+    uxe_linecurve3_v1: {uxe_lc3_lifecycle: wasm.uxe_lc3_lifecycle}
+  }).exports;
+  if(wasm.memory===product.memory) throw new Error("independent consumer memory");
+  const scalarCases=new Set([0,6,7]);
+  const command=(op,x=0)=>Number((scalarCases.has(op)?product.uxe_linecurve3_read:wasm.uxe_lc3_lifecycle)(
+    BigInt(op),BigInt(x)));
+  const base=command(20);
+  const data=new DataView(wasm.memory.buffer,base,8192);
+  const read=(at)=>data.getFloat64(at,true);
+  const word=(at)=>data.getUint32(at,true);
+  const mutate=query.get("mutate");
+  const init=command(0);
+  if(init!==1) throw new Error("class initialization");
+  const results=[];
+  const first=new Vector3(1,2,3), last=new Vector3(1,2,11);
+  const source=new LineCurve3(first,last);
+  const destFirst=new Vector3(), destLast=new Vector3(0,0,4);
+  const dest=new LineCurve3(destFirst,destLast);
+  source.arcLengthDivisions=4;
+  dest.arcLengthDivisions=4;
+  function record(a,b,label) {
+    if(a!==b) throw new Error(label+" actual="+a+" r160="+b);
+    results.push(Number(a));
+  }
+  record(command(1)===512 && word(32)===512 && word(36)===536,
+    source.v1===first && source.v2===last,"constructor identity");
+  record(read(command(2)+16),source.getPoint(.25).z,"point");
+  record(read(command(3)+16),source.getPointAt(1).z,"pointAt");
+  record(read(command(4)+16),source.getTangent(.25).z,"tangent");
+  record(read(command(5)+16),source.getTangentAt(.75).z,"tangentAt");
+  record(command(6),source.getPoints(2).length,"points");
+  record(read(1040+16),source.getPoints(2)[1].z,"points middle");
+  record(command(7),source.getSpacedPoints(2).length,"spaced points");
+  record(read(1040+16),source.getSpacedPoints(2)[1].z,"spaced middle");
+  command(8);
+  record(read(command(22)),source.getLength(),"initial length");
+  command(9,19);
+  last.z=19;
+  record(read(command(2)+16),source.getPoint(.25).z,"live endpoint");
+  record(read(command(8)+32),source.getLength(),"cached source length");
+  source.updateArcLengths();
+  record(read(command(10)+32),source.getLength(),"refreshed source length");
+  record(read(command(11)),source.getUtoTmapping(.75,4),"explicit distance");
+
+  record(read(command(12)+32),dest.getLength(),"destination warm cache");
+  const copied=command(13,mutate==="identity"?1:0);
+  record(copied===128 && word(128)===576 && word(132)===600,
+    dest.copy(source)===dest && dest.v1===destFirst && dest.v2===destLast,"copy endpoint identity");
+  record(read(616),dest.v2.z,"copy endpoint value");
+  record(read(command(12)+32),dest.getLength(),"copy preserves hot cache");
+  dest.updateArcLengths();
+  record(read(command(14)+32),dest.getLength(),"copy refreshed length");
+
+  const clone=dest.clone();
+  const cloned=command(15);
+  const mapped=(at)=>word(at);
+  record(cloned===224 && mapped(224)!==mapped(128) && mapped(228)!==mapped(132),
+    clone!==dest && clone.v1!==dest.v1 && clone.v2!==dest.v2,"clone identity");
+  command(16,27);
+  clone.v2.z=27;
+  record(read(616),dest.v2.z,"clone leaves source endpoint");
+  record(read(mapped(228)+16),clone.v2.z,"clone endpoint value");
+  const finish=command(17,mutate==="json"?1:0);
+  const expected=JSON.stringify(clone.toJSON());
+  if(finish<2048) throw new Error("serialize rc="+finish);
+  const actual=new TextDecoder().decode(new Uint8Array(wasm.memory.buffer,base+2048,finish-2048));
+  if(actual!==expected) throw new Error("serialization bytes actual="+actual+" r160="+expected);
+  const hash=(text)=>[...text].reduce((n,c)=>(n*131+c.charCodeAt(0))%16777213,0);
+  record(hash(actual),hash(expected),"serialization hash");
+  const parsed=command(18,finish);
+  record(parsed===128 && word(128)===576 && word(132)===600,
+    dest.fromJSON(JSON.parse(expected))===dest && dest.v1===destFirst && dest.v2===destLast,"fromJSON identity");
+  record(read(616),dest.v2.z,"fromJSON endpoint");
+  record(word(136),dest.arcLengthDivisions,"fromJSON divisions");
+  record(read(command(12)+32),dest.getLength(),"fromJSON preserves hot cache");
+  dest.updateArcLengths();
+  const table=command(14);
+  record(read(table+16),dest.getLengths()[2],"refreshed cumulative length");
+  record(read(command(22,1)),dest.getLength(),"refreshed total length");
+  record(read(command(23)+8),dest.getLengths(2)[1],"explicit cumulative divisions");
+  const frame=command(19);
+  const refFrames=dest.computeFrenetFrames(2,true);
+  record(read(frame+144+16),refFrames.tangents[2].z,"frame tangent");
+  record(read(frame+144+32),refFrames.normals[2].y,"frame normal");
+  record(read(frame+144+48),refFrames.binormals[2].x,"frame binormal");
+  if(command(21,finish)!==-1 || read(616)!==27) throw new Error("malformed JSON changed object");
+  status.textContent=JSON.stringify(results);
+} catch(error) {
+  status.textContent="error:"+error.message;
+}
+</script>

@@ -4,7 +4,7 @@
 
 ## 合入候选阻塞
 
-- BLOCKED 五个现有编译门 | 全套实跑 393 项，补齐 r160 夹具并隔离复验后 388 项通过。剩余 BufferGeometryLoader、BufferGeometry fromJSON、JPEG Color444、渐进灰度和渐进彩色的编译子进程在既有六秒界退出 124。证据目录 `/tmp/devsvc-flow-21665839376-3659026`、`/tmp/devsvc-flow-21665853824-3661983`、`/tmp/devsvc-flow-21665892803-3670401`、`/tmp/devsvc-flow-21665904536-3672361`、`/tmp/devsvc-flow-21665916516-3673815`。独立计时夹具的同一 BufferGeometryLoader 输入输出逐字节相同，Wasm 为 38153 字节，原工具 5422 ms、同源 Linux ELF 5637 ms，见 `/tmp/devsvc-flow-21666146588-3709489`。该测量未记入验收。规模曲线采样 938、1664、3352、7330 毫秒。渐进彩色 JPEG 已拆为 C6 缓存基座和消费者，缓存命中消费者编译 81 毫秒，14 项通过，颜色、加载器、缺例及破坏缓存反例均非零。其它历史超时门仍需同尖端复验，六秒界保持。
+- 合入候选复验 | 既有 393 项保留。Geometry JSON、渐进彩色、Color444 与渐进灰度 JPEG 已分别使用 C6 缓存基座及小消费者，GPU 四片并集查验原 43 场景及 1682 项。独立准备与功能分开执行，缺缓存走具名拒绝。另两项 PNG 和 BufferGeometryLoader 已单路通过，生产时限保持。尖端全量并行复验另记可复现的浏览器或编译问题。
 
 ## A 栏燃尽
 
@@ -108,7 +108,7 @@
 - SplineCurve | G-struct splinecurve-struct.cx 独立金值和 r160 对照。二维控制点和端点。补齐 constructor,copy,toJSON,fromJSON,getPointAt,getPoints,getSpacedPoints,getLength,getLengths,updateArcLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames,clone，运行独立金值及 r160 篡改门 | -
 - CurvePath | G-struct curvepath-struct.cx 独立金值和 r160 对照。按距离定位子曲线，支持 Path 的线段和贝塞尔段。补齐 constructor,add,closePath,updateArcLengths,getSpacedPoints,getPoints,copy,toJSON,fromJSON,getPointAt,getLengths,getUtoTmapping,getTangent,getTangentAt,computeFrenetFrames,clone，运行独立金值及 r160 篡改门 | -
 - LineBasicMaterial | G-pixel gpu-packet-struct.cx；纯色线段、折线和闭合折线，与 r160 对照，其他材质参数待验。补齐 constructor,copy,alphaTest,onBuild,onBeforeRender,onBeforeCompile,customProgramCacheKey,setValues,toJSON,clone,dispose,needsUpdate,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
-- LineCurve3 | G-struct 独立金值和 r160 对照采样、累计长度、切线、复制与 JSON。构造、弧长映射和三维标架的类级四片共 40 项通过，端点、显式距离、双法线篡改转红。仍需统一实例记录与既有采样、复制、JSON 接口的消费路径 | -
+- ~~LineCurve3 | G-struct 类级构造、弧长表、标架和对象生命周期 | 生成的 CurveControl 布局。~~ 独立金值及 r160 对照 40 项加生命周期 33 项，C6 消费者验证，端点身份和序列化等反例转红。
 - MeshBasicMaterial | G-pixel gpu-packet-struct.cx；纯色三角形、线性颜色到 sRGB，与 r160 对照，纹理和材质生命周期待补。补齐 constructor,copy,alphaTest,onBuild,onBeforeRender,onBeforeCompile,customProgramCacheKey,setValues,toJSON,clone,dispose,needsUpdate,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - MeshDepthMaterial | G-pixel gpu-packet-struct.cx；倾斜立方体的正交深度与 r160 对照，RGBA 打包、透明遮罩与透视待验。补齐 constructor,copy,alphaTest,onBuild,onBeforeRender,onBeforeCompile,customProgramCacheKey,setValues,toJSON,clone,dispose,needsUpdate,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
 - MeshDistanceMaterial | G-pixel gpu-packet-struct.cx；点光源距离打包 RGBA 并独立解码，透明遮罩及完整点光阴影管线待验。补齐 constructor,copy,alphaTest,onBuild,onBeforeRender,onBeforeCompile,customProgramCacheKey,setValues,toJSON,clone,dispose,needsUpdate,addEventListener,hasEventListener,removeEventListener,dispatchEvent，运行独立金值及 r160 篡改门 | -
