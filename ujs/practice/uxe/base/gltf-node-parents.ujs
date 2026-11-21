@@ -1,0 +1,82 @@
+native function gltf_parent_children(children:i64,end:i64,parent:i64,count:i64,staged:i64) i64 {
+  if(children==0-2) { return 0; }
+  let size=gltf_scene_array_count(children,end);
+  if(size<0 || size>=count) { return 0-3; }
+  let at=json_space(children+1,end);
+  let i=0;
+  while(i<size) {
+    let child=LoaderJson_uint(at,end,0-1);
+    if(child<0 || child>=count || child==parent || ux_u32(staged+child*4)!=4294967295) { return 0-3; }
+    let put=ux_u32_put(staged+child*4,parent);
+    at=json_space(json_space(json_value_end(at,end),end)+1,end);
+    i=i+1;
+  }
+  return size;
+}
+
+native function gltf_parent_acyclic(staged:i64,marks:i64,count:i64) i64 {
+  let i=0;
+  while(i<count) {
+    let node=i;
+    while(node!=4294967295 && ux_u8(marks+node)==0) {
+      let saved=ux_u8_put(marks+node,1);
+      node=ux_u32(staged+node*4);
+    }
+    if(node!=4294967295 && ux_u8(marks+node)==1) { return 0; }
+    node=i;
+    while(node!=4294967295 && ux_u8(marks+node)==1) {
+      let saved=ux_u8_put(marks+node,2);
+      node=ux_u32(staged+node*4);
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Publish one u32 parent per node, with UINT32_MAX for a root. The five
+// scratch bytes per node are private until the graph passes every check.
+native function GltfLoader_nodeParents(glb:i64,out:i64,capacity:i64,work:i64,space:i64,key:i64) i64 {
+  if(!loading_span(glb,GlbResource.size) || capacity<0 || capacity>65536 ||
+     out%4!=0 || work%4!=0 || !loading_span(out,capacity*4) || !loading_span(work,space) ||
+     !loading_span(key,16) || !file_disjoint(glb,GlbResource.size,out,capacity*4) ||
+     !file_disjoint(glb,GlbResource.size,work,space) || !file_disjoint(glb,GlbResource.size,key,16) ||
+     !file_disjoint(out,capacity*4,work,space) || !file_disjoint(key,16,out,capacity*4) ||
+     !file_disjoint(key,16,work,space)) { return 0-1; }
+  let json=ux_u32(glb+GlbResource.json);
+  let bytes=ux_u32(glb+GlbResource.jsonBytes);
+  let bin=ux_u32(glb+GlbResource.bin);
+  let binBytes=ux_u32(glb+GlbResource.binBytes);
+  if(!loading_span(json,bytes) || !loading_span(bin,binBytes) ||
+     !file_disjoint(json,bytes,out,capacity*4) || !file_disjoint(json,bytes,key,16) ||
+     !file_disjoint(json,bytes,work,space) || !file_disjoint(bin,binBytes,out,capacity*4) ||
+     !file_disjoint(bin,binBytes,key,16) || !file_disjoint(bin,binBytes,work,space)) { return 0-1; }
+  let end=json+bytes;
+  let nodes=LoaderJson_find(json,end,key,1701080942,115,0,5);
+  if(nodes==0-2) { return 0; }
+  let count=gltf_scene_array_count(nodes,end);
+  if(count<0) { return 0-2; }
+  if(count>capacity || count>space/5) { return 0-1; }
+  let marks=work+count*4;
+  let i=0;
+  while(i<count) {
+    let empty=ux_u32_put(work+i*4,4294967295);
+    let clear=ux_u8_put(marks+i,0);
+    i=i+1;
+  }
+  let row=json_space(nodes+1,end);
+  i=0;
+  while(i<count) {
+    if(ux_u8(row)!=123) { return 0-2; }
+    let children=LoaderJson_find(row,end,key,1818847331,1852142180,0,8);
+    if(gltf_parent_children(children,end,i,count,work)<0) { return 0-3; }
+    row=json_space(json_space(json_value_end(row,end),end)+1,end);
+    i=i+1;
+  }
+  if(!gltf_parent_acyclic(work,marks,count)) { return 0-4; }
+  i=0;
+  while(i<count) {
+    let put=ux_u32_put(out+i*4,ux_u32(work+i*4));
+    i=i+1;
+  }
+  return count;
+}
