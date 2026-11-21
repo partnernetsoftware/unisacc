@@ -8,6 +8,7 @@
  *   (3)把夹具工作副本的核心改成语法错后,普通调用仍成功(用的是 HEAD 版本);(4)--dev 走工作副本,在语法错下失败。
  * 分组:--cases a(冷构造、缓存、取消、后台作业)|b(配置表、锁租约、坏工作副本)|c(版本工作树、第二克隆)|d(内容键退回);无参数四组顺序全跑。
  * 输出 PASS/FAIL 行,末行 CHECK_DEVSVC_CORE<TAB>ok=N<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use cxlib.flowexec
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
@@ -80,7 +81,7 @@ static int group(int g) {
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(dbase, sizeof dbase, "%s/.cache/unisacc/check-devsvc-core/%016llx-%c", home, hh, g);
         F(fx, sizeof fx, "%s/fx", dbase);
-        if (g == 'a' || g == 'b' || g == 'c' || g == 'e')
+        if (g == 'a' || g == 'b' || g == 'c')
             F(pin, sizeof pin, "%s/.cache/unisacc/check-devsvc-core/%016llx-pin", home, hh);
         else
             F(pin, sizeof pin, "%s/pin", dbase);
@@ -90,10 +91,13 @@ static int group(int g) {
         {   char *mv[] = {"mkdir", "-p", dbase, pin, 0}; if (run(mv, 0, 0) != 0) return 2; }
         lfd = open(lkp, O_RDWR | O_CREAT, 0600);
         if (lfd < 0 || sy_flock(lfd, 2 | 4)) { printf("REFUSE\tcheck-devsvc-core\tlocked\t%s\n", lkp); return 2; }
-        /* a 组与 d/f 组清空 pin 保证真冷构造; b/c/e 组复用 a 组在共享 pin 中已构造的固定版本执行体 */
-        {   char c[900]; char *sv[] = {"sh", "-c", c, 0};
+        /* a 组与 d/f 组清空 pin 保证真冷构造; b/c 组直接共享 a 组 pin; e 组从共享 pin 拷入私有 pin 以免篡改二进制影响并行的 b/c */
+        {   char c[1200]; char *sv[] = {"sh", "-c", c, 0};
             if (g == 'a' || g == 'd' || g == 'f')
                 F(c, sizeof c, "rm -rf %s %s %s-wt %s-c2; git -C %s worktree prune 2>/dev/null; true", pin, inst, fx, fx, fx);
+            else if (g == 'e')
+                F(c, sizeof c, "rm -rf %s %s %s-wt %s-c2 && mkdir -p %s && cp -a %s/.cache/unisacc/check-devsvc-core/%016llx-pin/. %s/ 2>/dev/null; git -C %s worktree prune 2>/dev/null; true",
+                  pin, inst, fx, fx, pin, home, hh, pin, fx);
             else
                 F(c, sizeof c, "rm -rf %s %s-wt %s-c2; git -C %s worktree prune 2>/dev/null; true", inst, fx, fx, fx);
             if (ovf || run(sv, 0, 0) != 0) return 2; } }
@@ -384,11 +388,75 @@ static int group(int g) {
     {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "--dev", "x", "--par", "1", "--", "echo", "dev-ok", 0}; rc = run(v, fx, envv); }
     ck(rc != 0 && !has("dev-ok"), "dev-flag-uses-working-copy");
     }
-    /* 清理: a/b/c/e 共享 pin 保留供后续组复用; d/f 的私有 pin 与各组 inst 清空 */
+    /* 清理: a/b/c 共享 pin 保留供后续组复用; d/e/f 的私有 pin 与各组 inst 清空 */
     {   char *v2[] = {"rm", "-rf", pin, 0}; char *v3[] = {"rm", "-rf", inst, 0};   /* 夹具 fx 保留供下次复用 */
-        if (g == 'd' || g == 'f') (void)run(v2, 0, 0);
+        if (g == 'd' || g == 'e' || g == 'f') (void)run(v2, 0, 0);
         (void)run(v3, 0, 0); }
     return nfail ? 1 : 0;
+}
+
+static int run_flow_shards(const char *sel) {
+    char rdir[512], ftsv[600], tsv[4096], why[512];
+    fl_flow fl; fl_sum sum;
+    int i, has_a = (strchr(sel, 'a') != 0), tlen = 0, r;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    F(rdir, sizeof rdir, "%s/dvcore-flow-%d-%ld", sy_tmpdir(), (int)sy_pid(), sy_now_ms());
+    F(ftsv, sizeof ftsv, "%s/flow.tsv", rdir);
+    if (ovf || sy_mkdir_all(rdir, 0700) != 0) return 2;
+    tlen = snprintf(tsv, sizeof tsv, "par 4\n");
+    for (i = 0; sel[i]; i++) {
+        char g = sel[i];
+        const char *dep = (has_a && (g == 'b' || g == 'c' || g == 'e')) ? "g-a" : "-";
+        int w = snprintf(tsv + tlen, sizeof tsv - (size_t)tlen,
+                         "g-%c\texec\t%s\tcwd=%s;timeout_ms=60000;a0=sh;a1=./unisacc.com;a2=tools/check-devsvc-core.cx;a3=--;a4=--cases;a5=%c\n",
+                         g, dep, root, g);
+        if (w < 0 || (size_t)(tlen + w) >= sizeof tsv) { (void)sy_remove_all(rdir); return 2; }
+        tlen += w;
+    }
+    if (sy_write_atomic(ftsv, tsv, (size_t)tlen, 0600) != 0 ||
+        fl_load(ftsv, &fl, why, (int)sizeof why) != 0) {
+        (void)sy_remove_all(rdir);
+        return 2;
+    }
+    r = fl_run(&fl, rdir, 4, 150000, 0, &sum);
+    for (i = 0; i < fl.count; i++) {
+        char op[640]; unsigned char *b = 0; int64_t n = 0;
+        int got_sum = 0, ok_i = 0, fail_i = 0;
+        F(op, sizeof op, "%s/%s/%s.out", rdir, "out", fl.n[i].id);
+        if (!sy_read_file(op, &b, &n, 1 << 20) && b) {
+            long at = 0;
+            while (at < n) {
+                long e = at;
+                while (e < n && b[e] != '\n') e++;
+                long l = e - at;
+                if (l >= 18 && !memcmp(b + at, "CHECK_DEVSVC_CORE\t", 18)) {
+                    char ln[128];
+                    long kl = l < 127 ? l : 127, k;
+                    for (k = 0; k < kl; k++) ln[k] = (char)b[at + k];
+                    ln[kl] = 0;
+                    if (sscanf(ln, "CHECK_DEVSVC_CORE\tok=%d\tfailed=%d", &ok_i, &fail_i) == 2) {
+                        got_sum = 1;
+                        nok += ok_i;
+                        nfail += fail_i;
+                    }
+                } else {
+                    fwrite(b + at, 1, (size_t)(e < n ? l + 1 : l), stdout);
+                }
+                at = (e < n) ? e + 1 : n;
+            }
+            free(b);
+        }
+        if (!got_sum || (fl.n[i].state != FL_OK && fail_i == 0)) {
+            printf("FAIL\tdevsvc-core.shard-%s\tstate=%d\trc=%d\n", fl.n[i].id, fl.n[i].state, fl.n[i].rc);
+            nfail++;
+        }
+    }
+    printf("NOTE\tflow_shards\tnodes=%d\tok=%d\tfail=%d\twall_ms=%ld\n",
+           fl.count, sum.ok, sum.fail + sum.timeout + sum.skip, sum.wall_ms);
+    fl_free(&fl);
+    (void)sy_remove_all(rdir);
+    printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);
+    return (nfail || r != 0) ? 1 : 0;
 }
 
 int main(int argc, char **argv) {
@@ -404,11 +472,15 @@ int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "--cases")) {
         if (!strcmp(argv[2], "d1")) sel = "d";
         else if (!strcmp(argv[2], "d2")) sel = "f";
+        else if (!strcmp(argv[2], "all")) sel = "abcdef";
         else sel = argv[2];
     }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f]\n"); return 2; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f|all]\n"); return 2; }
     for (p = sel; *p; p++) {
-        if (*p != 'a' && *p != 'b' && *p != 'c' && *p != 'd' && *p != 'e' && *p != 'f') { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f]\n"); return 2; }
+        if (*p != 'a' && *p != 'b' && *p != 'c' && *p != 'd' && *p != 'e' && *p != 'f') { fprintf(stderr, "usage: check-devsvc-core.cx [--cases a|b|c|d|d1|d2|e|f|all]\n"); return 2; }
+    }
+    if (strlen(sel) > 1) return run_flow_shards(sel);
+    for (p = sel; *p; p++) {
         { int r = group(*p); if (r > rc) rc = r; }
     }
     printf("CHECK_DEVSVC_CORE\tok=%d\tfailed=%d\n", nok, nfail);

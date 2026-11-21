@@ -7,6 +7,7 @@
  * 断言:(a) commit --whole F --push 成功、裸仓收到提交、末行 GIT_COMMIT rc=0;(b) commit 失败后 lock list 无残留;
  *   (c) 两个并发 commit 都完成且无残留锁;(d) x -- git stash list、git -C . stash list、git push --force 均 rc 125 且 stderr 含 REFUSE;
  *   (e) git status 末行 GIT_STATUS 格式;(w) commit --cwd 夹具内版本工作树:落该工作树分支、推 refs/heads/该分支、main HEAD 不变,--cwd 不存在 rc 2。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use cxlib.flowexec
 #pragma unisa use sys.time
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -56,11 +57,133 @@ static void cleanup(void) {
     char c[700]; F(c, sizeof c, "rm -rf %s %s %s %s", fx, bare, pin, inst); if (!ovf) (void)sh(c, 0);
 }
 
+static void ensure_dvgit_exe(const char *rdir) {
+    const char *cur = getenv("DVGIT_EXE");
+    char cmd[2400], key[24];
+    if (cur && cur[0] == '/' && sy_exists(cur) == 1) return;
+    if (!getenv("DVGIT_CORE_FROM") &&
+        sh("git diff --quiet HEAD -- tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/cxlib", root) == 0) {
+        if (sh("sh ./unisacc.com tools/devsvc.cx -- prebuild-self", root) == 0 &&
+            !strncmp(out, "PREPARED\tkey=", 13)) {
+            int i;
+            for (i = 0; i < 20 && ((out[13 + i] >= '0' && out[13 + i] <= '9') || (out[13 + i] >= 'a' && out[13 + i] <= 'f')); i++)
+                key[i] = out[13 + i];
+            key[i] = 0;
+            if (i == 20) {
+                F(cmd, sizeof cmd,
+                  "if [ -n \"${DV_PIN_DIR:-}\" ] && [ -x \"$DV_PIN_DIR/%s/devsvc\" ]; then printf '%%s' \"$DV_PIN_DIR/%s/devsvc\"; "
+                  "else for p in \"$HOME/.cache/unisacc/devsvc/pinned/repos\"/*/%s/devsvc; do [ -x \"$p\" ] && { printf '%%s' \"$p\"; break; }; done; fi",
+                  key, key, key);
+                if (!ovf && sh(cmd, root) == 0 && out[0] == '/' && sy_exists(out) == 1) {
+                    (void)setenv("DVGIT_EXE", out, 1);
+                    return;
+                }
+            }
+        }
+    }
+    if (rdir && rdir[0]) {
+        const char *csrc = getenv("DVGIT_CORE_FROM");
+        char bin[1200];
+        F(bin, sizeof bin, "%s/dvgit-work.bin", rdir);
+        F(cmd, sizeof cmd, "sh '%s/unisacc.com' -o '%s' '%s%s%s'",
+          root, bin, csrc ? "" : root, csrc ? "" : "/", csrc ? csrc : "tools/devsvc-core.cx");
+        if (!ovf && sh(cmd, root) == 0 && sy_exists(bin) == 1)
+            (void)setenv("DVGIT_EXE", bin, 1);
+    }
+}
+
+static int run_flow_shards(const char *sel, long t0) {
+    char rdir[512], ftsv[600], tsv[4096], why[512];
+    fl_flow fl; fl_sum sum;
+    int i, tlen = 0, r, total_fail = 0, nshards = 0;
+    const char *shards[12];
+    F(rdir, sizeof rdir, "%s/dvgit-flow-%d-%ld", sy_tmpdir(), (int)sy_pid(), sy_now_ms());
+    F(ftsv, sizeof ftsv, "%s/flow.tsv", rdir);
+    if (ovf || sy_mkdir_all(rdir, 0700) != 0) return 2;
+    ensure_dvgit_exe(rdir);
+    for (i = 0; sel[i] && nshards < 10; i++) {
+        char g = sel[i];
+        if (g == 'a') shards[nshards++] = "a";
+        else if (g == 'b') shards[nshards++] = "b";
+        else if (g == 'c') shards[nshards++] = "c";
+        else if (g == 'd') shards[nshards++] = "d";
+        else if (g == 'e') shards[nshards++] = "e";
+        else if (g == 'f') { shards[nshards++] = "f1"; shards[nshards++] = "f2"; }
+    }
+    tlen = snprintf(tsv, sizeof tsv, "par %d\n", nshards > 0 && nshards <= 8 ? nshards : 6);
+    for (i = 0; i < nshards; i++) {
+        int w = snprintf(tsv + tlen, sizeof tsv - (size_t)tlen,
+                         "g-%s\texec\t-\tcwd=%s;timeout_ms=55000;a0=sh;a1=./unisacc.com;a2=tools/check-devsvc-git.cx;a3=--;a4=--cases;a5=%s\n",
+                         shards[i], root, shards[i]);
+        if (w < 0 || (size_t)(tlen + w) >= sizeof tsv) { (void)sy_remove_all(rdir); return 2; }
+        tlen += w;
+    }
+    if (sy_write_atomic(ftsv, tsv, (size_t)tlen, 0600) != 0 ||
+        fl_load(ftsv, &fl, why, (int)sizeof why) != 0) {
+        (void)sy_remove_all(rdir);
+        return 2;
+    }
+    r = fl_run(&fl, rdir, nshards > 0 && nshards <= 8 ? nshards : 6, 55000, 0, &sum);
+    for (i = 0; i < fl.count; i++) {
+        char op[640]; unsigned char *b = 0; int64_t n = 0;
+        int got_sum = 0, fail_i = 0;
+        F(op, sizeof op, "%s/%s/%s.out", rdir, "out", fl.n[i].id);
+        if (!sy_read_file(op, &b, &n, 1 << 20) && b) {
+            long at = 0;
+            while (at < n) {
+                long e = at;
+                while (e < n && b[e] != '\n') e++;
+                long l = e - at;
+                if (l >= 17 && !memcmp(b + at, "CHECK_DEVSVC_GIT\t", 17)) {
+                    char ln[128];
+                    long kl = l < 127 ? l : 127, k;
+                    for (k = 0; k < kl; k++) ln[k] = (char)b[at + k];
+                    ln[kl] = 0;
+                    if (sscanf(ln, "CHECK_DEVSVC_GIT\tfailed=%d", &fail_i) == 1) {
+                        got_sum = 1;
+                        total_fail += fail_i;
+                    }
+                } else {
+                    fwrite(b + at, 1, (size_t)(e < n ? l + 1 : l), stdout);
+                }
+                at = (e < n) ? e + 1 : n;
+            }
+            free(b);
+        }
+        if (!got_sum || (fl.n[i].state != FL_OK && fail_i == 0)) {
+            printf("FAIL\tdevsvc-git.shard-%s\tstate=%d\trc=%d\n", fl.n[i].id, fl.n[i].state, fl.n[i].rc);
+            total_fail++;
+        }
+    }
+    printf("NOTE\tflow_shards\tnodes=%d\tok=%d\tfail=%d\twall_ms=%ld\n",
+           fl.count, sum.ok, sum.fail + sum.timeout + sum.skip, sum.wall_ms);
+    fl_free(&fl);
+    (void)sy_remove_all(rdir);
+    printf("NOTE\twall_ms\t%ld\n", sy_now_ms() - t0);
+    printf("CHECK_DEVSVC_GIT\tfailed=%d\n", total_fail);
+    return (total_fail || r != 0) ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    int A = 1, B = 1, C = 0, D = 0, E = 0, FF = 0;   /* f:tlib-packages 派生表冲突按包取两侧较大版本 */   /* e:私有索引合并与 pull 快进(他人暂存与脏文件保留、冲突不动、--cwd、分叉拒绝) */   /* --cases a:commit/push、删除、失败无残留锁;b:并发 commit、危险命令拒绝、status 格式;
-                                 c:commit 回执取回、x --bg 作业 deadline 自退与进程组清理、git merge 无冲突与冲突报告、git add 拒绝路径;缺省跑 a 与 b,各组独立夹具 */
-    if (argc >= 3 && !strcmp(argv[1], "--cases")) { A = strchr(argv[2], 'a') != 0; B = strchr(argv[2], 'b') != 0; C = strchr(argv[2], 'c') != 0; D = strchr(argv[2], 'd') != 0; E = strchr(argv[2], 'e') != 0; FF = strchr(argv[2], 'f') != 0; }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|ab]\n"); return 2; }
+    int A = 0, B = 0, C = 0, D = 0, E = 0, FF = 0, FF2 = 0;
+    const char *sel = "abcdef";
+    int single_f1 = 0, single_f2 = 0;
+    if (argc >= 3 && !strcmp(argv[1], "--cases")) {
+        if (!strcmp(argv[2], "all")) sel = "abcdef";
+        else if (!strcmp(argv[2], "f1")) { sel = "f"; single_f1 = 1; }
+        else if (!strcmp(argv[2], "f2")) { sel = "f"; single_f2 = 1; }
+        else sel = argv[2];
+    }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+    {   const char *p;
+        if (!sel[0]) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+        for (p = sel; *p; p++)
+            if (*p < 'a' || *p > 'f') { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+    }
+    A = strchr(sel, 'a') != 0; B = strchr(sel, 'b') != 0; C = strchr(sel, 'c') != 0;
+    D = strchr(sel, 'd') != 0; E = strchr(sel, 'e') != 0;
+    FF = single_f1 || (!single_f2 && strchr(sel, 'f') != 0);
+    FF2 = single_f2 || (!single_f1 && strchr(sel, 'f') != 0);
     char e1[220], e2[220]; char c[1400]; long t0 = sy_now_ms(); int rc, k; t_start = t0;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     {   /* 剥掉调用方 shell 里的 DEVSVC_* 环境变量(如 DEVSVC_OWNER),夹具子进程不继承 */
@@ -71,8 +194,10 @@ int main(int argc, char **argv) {
                 nm[i] = 0; unsetenv(nm); e = environ;
             } else e++;
         } }
+    if (strlen(sel) > 1 || (!single_f1 && !single_f2 && !strcmp(sel, "f"))) return run_flow_shards(sel, t0);
+    ensure_dvgit_exe(0);
     {   /* 夹具路径按仓根哈希与组固定(不含 pid)并持 .lock 文件锁防并发互删,且共享真仓 $HOME 固定版本缓存目录 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
@@ -117,8 +242,8 @@ int main(int argc, char **argv) {
             if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); }
             b = 0; F(src, sizeof src, "%s/tools/gitsync-run.cx", root); F(dst, sizeof dst, "%s/tools/gitsync-run.cx", fx);   /* git merge/pull 的同步子进程 */
             if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); } } }
-    F(c, sizeof c, "git init -q --bare %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", bare, bare, root);
+    F(c, sizeof c, "git clone -q --bare --local %s %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", root, bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     if (A) {
@@ -609,6 +734,17 @@ int main(int argc, char **argv) {
             envv[1] = 0;
             (void)sh("rm -f chain-supervise.lock", fx);
         }
+    }
+    }
+    if (FF2 && !getenv("DVGIT_CORE_FROM")) {
+        static const char tgen2[] = "int main(void) { return 0; }\n";
+        static const char tman2[] =
+            "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+            "tlx\ttools/tlx-gen.cx\tsh ./unisacc.com tools/tlx-gen.cx -- --check\tsh ./unisacc.com tools/tlx-gen.cx -- --write\tbuild/tlib-packages.tsv\tbuild/tlib-packages.tsv\t1\t30\n";
+        (void)wfile("tools/tlx-gen.cx", tgen2);
+        (void)wfile("exec/facts/derive.tsv", tman2);
+        (void)wfile("build/tlib-packages.tsv", "# pkg\tversion\tapi_sha\tnote\np.a\t0.1.0\tsa0\tA\np.b\t0.2.0\tsb0\tB\np.c\t1.0.0\tsc0\tC\n");
+        (void)sh("git add -f tools/tlx-gen.cx exec/facts/derive.tsv build/tlib-packages.tsv && git commit -q -m TL2_0", fx);
 
         /* (g3) 守卫:共享检出 MERGE_HEAD 超过阈值(缺省 180 秒,DEVSVC_MERGE_WARN_AGE_S=0 测试)在 devsvc status 首行显示 MERGE_HEAD_WARN */
         ck(sh("git rev-parse HEAD > .git/MERGE_HEAD", fx) == 0, "g3-merge-head-warn-fixture");
@@ -680,7 +816,6 @@ int main(int argc, char **argv) {
               "git show HEAD:plans/v0.0.88.md | grep -qx 'wt2-theirs' && "
               "git reflog show --format='%H\t%gs' -n 5 HEAD | grep -q \"^$(git rev-parse HEAD)\tdevsvc merge v1 [0-9a-f]\\{64\\} refs/heads/main$\"", fx) == 0,
            "g5-worktree-continue-lands-back-to-main-and-cleans-worktree");
-    }
     }
     (void)dv("stop", 0, 0, 0, 0, 0, 0, 0);
     cleanup();
