@@ -1,0 +1,43 @@
+// Mode 0 visits the full subtree, 1 prunes hidden subtrees, and 2 visits
+// the root alone. Matrix addresses borrow the current scene arena.
+native function Scene_snapshot(arena:i64,root:i64,out:i64,capacity:i64,mode:i64) i64 {
+  if(arena<0 || arena%8!=0 || arena>6291448 || out<0 || out%4!=0 ||
+     capacity<0 || capacity>65536 || out>6291456-capacity*SceneSnapshotRow.size ||
+     mode<0 || mode>2) { return 0-1; }
+  let slots=ux_u32(arena);
+  let arena_bytes=8+slots*424;
+  let output_bytes=capacity*SceneSnapshotRow.size;
+  if(arena>6291456-arena_bytes || Object3D_address(arena,root)<0 ||
+     (output_bytes>0 && out<arena+arena_bytes && arena<out+output_bytes)) { return 0-1; }
+  let node=root;
+  let count=0;
+  let visited=0;
+  while(node!=0) {
+    let at=Object3D_address(arena,node);
+    if(at<0 || visited>=slots) { return 0-1; }
+    let visible=ux_u32(at+Object3D.visible)!=0;
+    if(mode!=1 || visible) { count=count+1; }
+    if(mode==2) { node=0; }
+    else { node=Object3D_traverseNext(arena,root,node,mode==0 || visible); }
+    visited=visited+1;
+  }
+  if(count>capacity) { return 0-2; }
+  let i=0;
+  node=root;
+  while(node!=0) {
+    let at=Object3D_address(arena,node);
+    let visible=ux_u32(at+Object3D.visible)!=0;
+    if(mode!=1 || visible) {
+      let row=out+i*SceneSnapshotRow.size;
+      let h=ux_u32_put(row+SceneSnapshotRow.node,node);
+      let p=ux_u32_put(row+SceneSnapshotRow.parent,ux_u32(at+Object3D.parent));
+      let v=ux_u32_put(row+SceneSnapshotRow.visible,visible);
+      let l=ux_u32_put(row+SceneSnapshotRow.layerMask,ux_u32(at+Object3D.layerMask));
+      let m=ux_u32_put(row+SceneSnapshotRow.worldMatrix,ux_u32(at+Object3D.worldMatrix));
+      i=i+1;
+    }
+    if(mode==2) { node=0; }
+    else { node=Object3D_traverseNext(arena,root,node,mode==0 || visible); }
+  }
+  return count;
+}
