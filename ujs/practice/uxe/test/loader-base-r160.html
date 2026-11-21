@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { DefaultLoadingManager, FileLoader, Loader, LoadingManager, REVISION } from "../../web/game/three.module.js";
+
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const isolated=await import("../../web/game/three.module.js?loader-base=isolated");
+  const pending=new Map();
+  // Hold only local responses to make overlapping item lifetimes reproducible.
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=request=>new Promise(resolve=>pending.set(request.url,resolve));
+  try {
+    const url=name=>new URL("?file="+name,location.href).href;
+    async function finish(name,promise) {
+      pending.get(url(name))(new Response("A",{status:200}));
+      await promise;
+      await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    function trace(manager) {
+      const events=[];
+      manager.onStart=(_url,loaded,total)=>events.push([1,loaded,total]);
+      manager.onProgress=(_url,loaded,total)=>events.push([2,loaded,total]);
+      manager.onLoad=()=>events.push([4]);
+      return events;
+    }
+    const local=new LoadingManager();
+    const sharedLog=trace(DefaultLoadingManager),localLog=trace(local),isolatedLog=trace(isolated.DefaultLoadingManager);
+    const loader=new Loader(),one=new FileLoader(),two=new FileLoader();
+    const chosen=new Loader(local),independent=new FileLoader(local),remote=new isolated.FileLoader();
+    const a=one.loadAsync(url("a")),b=two.loadAsync(url("b")),c=independent.loadAsync(url("c"));
+    const startTotal=sharedLog[0][2],duplicateStarts=sharedLog.length-1;
+    const late=new Loader(DefaultLoadingManager);
+    await finish("c",c);
+    const localEvents=localLog.length-1,loadedFromLocal=sharedLog.length-1;
+    await finish("a",a);
+    const firstActivity=sharedLog.length-1,first=sharedLog.at(-1);
+    await finish("b",b);
+    const done=sharedLog.at(-1)[0],latest=sharedLog.at(-2);
+    const d=remote.loadAsync(url("elsewhere"));
+    const nextBaseTotal=isolatedLog[0][2];
+    await finish("elsewhere",d);
+    if(remote.manager===DefaultLoadingManager || remote.manager!==isolated.DefaultLoadingManager) {
+      throw new Error("默认管理器未按模块隔离");
+    }
+    output.textContent=JSON.stringify([
+      Number(loader.manager===DefaultLoadingManager && one.manager===loader.manager && two.manager===loader.manager),
+      Number(chosen.manager===local && independent.manager===local && local!==DefaultLoadingManager),
+      startTotal,duplicateStarts,late.manager===DefaultLoadingManager?first[2]:-1,localEvents,loadedFromLocal,
+      firstActivity,first[2],first[0],done,latest[1],nextBaseTotal,latest[2],0,-1,0,-1,-1,-1,
+      Number(new FileLoader(DefaultLoadingManager).manager===DefaultLoadingManager),
+    ]);
+  } finally { globalThis.fetch=originalFetch; }
+} catch(error) { output.textContent="error:"+error.message; }
+</script>
+
