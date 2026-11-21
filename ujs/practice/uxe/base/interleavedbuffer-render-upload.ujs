@@ -1,0 +1,61 @@
+struct InterleavedGpuReplica {
+  state: u32;
+  resource: u32;
+  generation: u32;
+  bytes: u32;
+}
+
+// Each renderer owns a replica and its upload state. All replicas of a
+// logical buffer read the callback from the same authoritative state.
+native function InterleavedBuffer_bindGpu(replica:i64,state:i64,resource:i64,generation:i64) i64 {
+  if(!ib_upload_state(state) || !ib_range(replica,InterleavedGpuReplica.size,4) ||
+     resource<=0 || resource>4294967295 || generation<=0 || generation>4294967295 ||
+     !ib_disjoint(replica,InterleavedGpuReplica.size,state,InterleavedUploadState.size)) { return -1; }
+  let buffer=ux_u32(state+InterleavedUploadState.buffer);
+  let data=ux_u32(buffer+InterleavedBuffer.data);
+  if(!ib_disjoint(replica,InterleavedGpuReplica.size,buffer,InterleavedBuffer.size) ||
+     !ib_disjoint(replica,InterleavedGpuReplica.size,data,ib_bytes(buffer)) ||
+     ux_u32(replica+InterleavedGpuReplica.state)!=0 ||
+     ux_u32(state+InterleavedUploadState.pending)!=0 ||
+     ux_u32(state+InterleavedUploadState.uploaded)!=0) { return -1; }
+  let a=ux_u32_put(replica+InterleavedGpuReplica.resource,resource);
+  let b=ux_u32_put(replica+InterleavedGpuReplica.generation,generation);
+  let c=ux_u32_put(replica+InterleavedGpuReplica.bytes,0);
+  return ux_u32_put(replica+InterleavedGpuReplica.state,state);
+}
+
+native function InterleavedBuffer_renderUpload(replica:i64,authority:i64) i64 {
+  if(!ib_range(replica,InterleavedGpuReplica.size,4) || !ib_upload_state(authority) ||
+     !ib_disjoint(replica,InterleavedGpuReplica.size,authority,InterleavedUploadState.size)) { return -1; }
+  let state=ux_u32(replica+InterleavedGpuReplica.state);
+  if(!ib_upload_state(state)) { return -1; }
+  let buffer=ux_u32(state+InterleavedUploadState.buffer);
+  if(ux_u32(authority+InterleavedUploadState.buffer)!=buffer) { return -1; }
+  let bytes=ib_bytes(buffer);
+  let allocate=ux_u32(state+InterleavedUploadState.uploaded)==0;
+  if(!allocate && bytes!=ux_u32(replica+InterleavedGpuReplica.bytes)) { return -1; }
+  let ticket=InterleavedBuffer_beginUpload(state);
+  if(ticket<=0) { return ticket; }
+  let transferred=host_ib_transfer(ux_u32(replica+InterleavedGpuReplica.resource),
+    ux_u32(replica+InterleavedGpuReplica.generation),ux_span(ux_u32(buffer+InterleavedBuffer.data),bytes),
+    bytes,ux_u32(buffer+InterleavedBuffer.usage),allocate);
+  let completion=InterleavedBuffer_finishUpload(state,ticket,transferred==1);
+  if(completion<0 || transferred!=1) { return -2; }
+  let saved=ux_u32_put(replica+InterleavedGpuReplica.bytes,bytes);
+  let callback=ux_u32(authority+InterleavedUploadState.callback);
+  if(callback!=0) { let delivered=host_ib_callback(callback,buffer); }
+  return 1;
+}
+
+native function InterleavedBuffer_releaseGpu(replica:i64) i64 {
+  if(!ib_range(replica,InterleavedGpuReplica.size,4)) { return -1; }
+  let state=ux_u32(replica+InterleavedGpuReplica.state);
+  if(!ib_upload_state(state) || ux_u32(state+InterleavedUploadState.pending)!=0) { return -1; }
+  let removed=host_ib_delete(ux_u32(replica+InterleavedGpuReplica.resource),
+    ux_u32(replica+InterleavedGpuReplica.generation));
+  if(removed!=1) { return -2; }
+  let a=ux_u32_put(state+InterleavedUploadState.uploaded,0);
+  let b=ux_u32_put(state+InterleavedUploadState.uploadedVersion,0);
+  let c=ux_u32_put(replica+InterleavedGpuReplica.state,0);
+  return 1;
+}
