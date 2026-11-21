@@ -1,0 +1,108 @@
+native function radial_geometry_keys(at:i64) i64 {
+  let labels=[67,121,108,105,110,100,101,114,71,101,111,109,101,116,114,121,
+    67,111,110,101,71,101,111,109,101,116,114,121,
+    114,97,100,105,117,115,84,111,112,114,97,100,105,117,115,66,111,116,116,111,109,
+    114,97,100,105,117,115,104,101,105,103,104,116,
+    114,97,100,105,97,108,83,101,103,109,101,110,116,115,
+    104,101,105,103,104,116,83,101,103,109,101,110,116,115,
+    111,112,101,110,69,110,100,101,100,
+    116,104,101,116,97,83,116,97,114,116,116,104,101,116,97,76,101,110,103,116,104];
+  let i=0;
+  while(i<119) {
+    let byte=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function radial_geometry_json_write(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64,kind:i64) i64 {
+  if(radial_geometry_ready(at,kind)<0 ||
+     !geometry_primitive_json_io(at,dst,end,uuid,uuidBytes,scratch,119) ||
+     !geometry_public_disjoint(radial_geometry_tail(at),RadialGeometryTail.size,dst,end-dst) ||
+     !geometry_public_disjoint(radial_geometry_tail(at),RadialGeometryTail.size,scratch,1223)) { return 0-1; }
+  let tail=radial_geometry_tail(at);
+  let open=ux_u32(tail+RadialGeometryTail.openEnded);
+  if(open>1) { return 0-1; }
+  let keys=radial_geometry_keys(scratch+1104);
+  let p=0-1;
+  if(kind==3) {
+    p=geometry_primitive_json_head(at,dst,end,uuid,uuidBytes,keys,16);
+    p=geometry_parameter_number(p,end,keys+28,9,ux_f64(at+GeometryPrimitiveRecord.first),scratch);
+    p=geometry_parameter_number(p,end,keys+37,12,ux_f64(at+GeometryPrimitiveRecord.second),scratch);
+  } else {
+    p=geometry_primitive_json_head(at,dst,end,uuid,uuidBytes,keys+16,12);
+    p=geometry_parameter_number(p,end,keys+49,6,ux_f64(at+GeometryPrimitiveRecord.second),scratch);
+  }
+  p=geometry_parameter_number(p,end,keys+55,6,ux_f64(at+GeometryPrimitiveRecord.third),scratch);
+  p=geometry_parameter_number(p,end,keys+61,14,ux_f64(at+GeometryPrimitiveRecord.fourth),scratch);
+  p=geometry_parameter_number(p,end,keys+75,14,ux_f64(at+GeometryPrimitiveRecord.fifth),scratch);
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,keys+89,9);
+  p=json_byte(p,end,58);
+  let token=ObjectJsonToken.boolFalse;
+  if(open!=0) { token=ObjectJsonToken.boolTrue; }
+  p=json_write_token(p,end,token);
+  p=geometry_parameter_number(p,end,keys+98,10,ux_f64(at+GeometryPrimitiveRecord.sixth),scratch);
+  p=geometry_parameter_number(p,end,keys+108,11,ux_f64(tail+RadialGeometryTail.thetaLength),scratch);
+  return json_byte(p,end,125);
+}
+
+native function radial_geometry_json_io(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,work:i64) i64 {
+  let size=RadialGeometryParameters.size+119;
+  let workspace=CylinderGeometry.size+36;
+  return scratch%8==0 && work%8==0 && end>input &&
+    radial_geometry_raw(at,raw,arena,bytes,input,end-input) &&
+    radial_geometry_raw(at,raw,arena,bytes,scratch,size) &&
+    radial_geometry_raw(at,raw,arena,bytes,work,workspace) &&
+    geometry_public_disjoint(input,end-input,scratch,size) &&
+    geometry_public_disjoint(input,end-input,work,workspace) &&
+    geometry_public_disjoint(scratch,size,work,workspace) &&
+    geometry_primitive_json_object(input,end);
+}
+
+native function radial_geometry_json_read(input:i64,end:i64,scratch:i64,kind:i64) i64 {
+  let keys=radial_geometry_keys(scratch+RadialGeometryParameters.size);
+  let openToken=json_find_key(input,end,keys+89,9);
+  let open=0;
+  if(openToken!=0-2) {
+    if(openToken<0 || openToken>=end) { return 0-1; }
+    let first=ux_u8(openToken);
+    if(first!=102 && first!=116) { return 0-1; }
+    open=first==116;
+  }
+  let top=0.0;
+  let bottom=geometry_primitive_json_number(input,end,keys+49,6,1.0);
+  if(kind==3) {
+    top=geometry_primitive_json_number(input,end,keys+28,9,1.0);
+    bottom=geometry_primitive_json_number(input,end,keys+37,12,1.0);
+  }
+  let a=ux_f64_put(scratch+RadialGeometryParameters.radiusTop,top);
+  let b=ux_f64_put(scratch+RadialGeometryParameters.radiusBottom,bottom);
+  let c=ux_f64_put(scratch+RadialGeometryParameters.height,geometry_primitive_json_number(input,end,keys+55,6,1.0));
+  let d=ux_f64_put(scratch+RadialGeometryParameters.radialSegments,geometry_primitive_json_number(input,end,keys+61,14,32.0));
+  let e=ux_f64_put(scratch+RadialGeometryParameters.heightSegments,geometry_primitive_json_number(input,end,keys+75,14,1.0));
+  let f=ux_f64_put(scratch+RadialGeometryParameters.thetaStart,geometry_primitive_json_number(input,end,keys+98,10,0.0));
+  let g=ux_f64_put(scratch+RadialGeometryParameters.thetaLength,geometry_primitive_json_number(input,end,keys+108,11,6.283185307179586));
+  let h=ux_u32_put(scratch+RadialGeometryParameters.openEnded,open);
+  return scratch;
+}
+
+native function CylinderGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  return radial_geometry_json_write(at,dst,end,uuid,uuidBytes,scratch,3);
+}
+
+native function ConeGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  return radial_geometry_json_write(at,dst,end,uuid,uuidBytes,scratch,4);
+}
+
+native function CylinderGeometry_fromJSON(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,work:i64) i64 {
+  if(!radial_geometry_json_io(at,raw,arena,bytes,input,end,scratch,work) ||
+     radial_geometry_json_read(input,end,scratch,3)<0) { return 0-1; }
+  return CylinderGeometry_create(at,raw,arena,bytes,scratch,work);
+}
+
+native function ConeGeometry_fromJSON(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,work:i64) i64 {
+  if(!radial_geometry_json_io(at,raw,arena,bytes,input,end,scratch,work) ||
+     radial_geometry_json_read(input,end,scratch,4)<0) { return 0-1; }
+  return ConeGeometry_create(at,raw,arena,bytes,scratch,work);
+}
