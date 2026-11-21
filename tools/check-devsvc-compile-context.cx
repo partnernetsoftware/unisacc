@@ -13,6 +13,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use cxlib.flowfile
 
 static int fails, asserts;
 static void ok(int c, const char *what) { asserts++; if (!c) { fails++; printf("FAIL\t%s\n", what); } else printf("ok\t%s\n", what); }
@@ -44,6 +45,25 @@ static int validate(const char *root, const char *table) {
             if (ns < 256) { seen[ns][0] = f[0]; seen[ns][1] = f[0] + pl; ns++; }
         }
         if (!feq(b, f[1], f[2] - 1, "embedded-in") && !feq(b, f[1], f[2] - 1, "fragment")) { printf("BAD\tunknown-kind\n"); bad++; }
+        if (f[3] - 1 == f[2]) { printf("BAD\tempty-host\n"); bad++; }
+        else if (!feq(b, f[2], f[3] - 1, "-")) {
+            long hs = f[2], he = f[3] - 1;
+            while (hs < he) {
+                long ts = hs, te, colon = -1, hl;
+                sy_stat_t hst;
+                while (hs < he && b[hs] != ',') {
+                    if (b[hs] == ':' && colon < 0) colon = hs;
+                    hs++;
+                }
+                te = colon >= 0 ? colon : hs;
+                hl = te - ts;
+                if (hs < he && b[hs] == ',') hs++;
+                if (hl <= 0 || hl > 1000 || cx_fmt(p, sizeof p, "%s/%.*s", root, (int)hl, (const char *)b + ts) < 0 || sy_stat(p, &hst) != 0) {
+                    printf("BAD\tmissing-host\t%.*s\n", (int)(hl > 0 ? hl : 0), (const char *)b + ts);
+                    bad++;
+                }
+            }
+        }
         if (f[4] - 1 == f[3]) { printf("BAD\tempty-command\n"); bad++; }
         if (f[5] - 1 == f[4] || feq(b, f[4], f[5] - 1, "-")) { printf("BAD\tno-reason\n"); bad++; }
     }
@@ -105,6 +125,17 @@ int main(int argc, char **argv) {
     cx_fmt(g_outer, sizeof g_outer, "%s", root);
     r = validate(root, "build/devsvc-compile-context.tsv");
     ok(r == 0, "repo-table-valid");
+    {
+        char ckind[32], ccmd[1024], creason[400];
+        int lk = ff_ctx_lookup(root, "ujs/seed/stage0/compiler_min.cx", ckind, ccmd, sizeof ccmd, creason, sizeof creason);
+        ok(lk == 1 && tx_eqz(ckind, "embedded-in") &&
+           tx_find(ccmd, tx_len(ccmd, sizeof ccmd), "-DUJS_HOST", 10) >= 0 &&
+           tx_find(ccmd, tx_len(ccmd, sizeof ccmd), "ujs/product/ujs_main.cx", 23) >= 0 &&
+           tx_find(ccmd, tx_len(ccmd, sizeof ccmd), "ujs/product/host1_vm.cx", 23) >= 0 &&
+           tx_find(ccmd, tx_len(ccmd, sizeof ccmd), "ujs/seed/stage0/compiler_min.cx", 31) >= 0 &&
+           tx_find(creason, tx_len(creason, sizeof creason), "ujs/product/build-ape.cx:emit_slice", 35) >= 0,
+           "stage0-compiler-min-registered-in-repo-table");
+    }
     if (argc > 1 && tx_eqz(argv[1], "--check")) { printf("CHECK_DEVSVC_COMPILE_CONTEXT\tfailed=%d\n", fails); return fails ? 1 : 0; }
     if (sy_mkdtemp(sy_tmpdir(), "ctxchk-", d, sizeof d) != 0) return 2;
     {   sy_dir_t dd; int k;
@@ -151,6 +182,37 @@ int main(int argc, char **argv) {
         r = run_dv(d, inst, a4, log);
         ok(r == 0 && has_line(log, "CFG\tcompilectx\tx/frag.cx\tfragment"), "config-shows-table");
         ok(has_line(log, "CFG\tcompilectx_table\tbuild/devsvc-compile-context.tsv\trows=2"), "config-row-count");
+    }
+    {   /* Multi-file compile context gate for file.edit:
+         * (1) co-compiled file without context row is refused on standalone compile;
+         * (2) with multi-file compile context row (-DTEST_CO_HOST + x/host_main.cx + x/co_part.cx), file.edit passes;
+         * (3) when a partner file in host column is missing on disk, table validation and file.edit refuse with named ECTX. */
+        char edit_args[4600];
+        ff_out fo;
+        cx_fmt(p, sizeof p, "%s/x/host_main.cx", d);
+        put(p, "#ifdef TEST_CO_HOST\nint host_helper(int v) { return v + 7; }\n#endif\nint main(void) { return 0; }\n");
+        cx_fmt(p, sizeof p, "%s/x/co_part.cx", d); sy_unlink(p);
+        put(p, "int host_helper(int v);\n#ifndef TEST_CO_HOST\nint broken = missing_host_macro;\n#endif\nint co_entry(int a) { return host_helper(a); }\n");
+        badtable(d, "x/frag.cx\tfragment\t-\t-\tpiece\tme\t2026-11-17\n");
+        cx_fmt(edit_args, sizeof edit_args, "root=%s;path=x/co_part.cx;old=return host_helper(a)%%3B;new=return host_helper(a + 1)%%3B", d);
+        r = ff_run("file.edit", edit_args, &fo);
+        ok(r != 0 && tx_eqz(fo.err, "ECOMPILE"), "unlisted-cocompile-file-edit-refused");
+        ff_out_free(&fo);
+        ok(badtable(d, "x/co_part.cx\tembedded-in\tx/host_main.cx\tsh ./unisacc.com -DTEST_CO_HOST x/host_main.cx x/co_part.cx -o \"$1/co.bin\"\tcocompile\tme\t2026-11-21\n") == 0,
+           "cocompile-table-valid");
+        r = ff_run("file.edit", edit_args, &fo);
+        ok(r == 0 && fo.ccnote == 4 && tx_find(fo.ccmsg, tx_len(fo.ccmsg, sizeof fo.ccmsg), "COMPILE-CONTEXT\tok\tx/co_part.cx\tembedded-in", 43) >= 0,
+           "listed-cocompile-file-edit-passes");
+        ff_out_free(&fo);
+        cx_fmt(p, sizeof p, "%s/x/co_part.cx", d); sy_unlink(p);
+        put(p, "int host_helper(int v);\n#ifndef TEST_CO_HOST\nint broken = missing_host_macro;\n#endif\nint co_entry(int a) { return host_helper(a); }\n");
+        ok(badtable(d, "x/co_part.cx\tembedded-in\tx/host_main.cx,x/missing_partner.cx\tsh ./unisacc.com -DTEST_CO_HOST x/host_main.cx x/co_part.cx -o \"$1/co.bin\"\tcocompile\tme\t2026-11-21\n") > 0,
+           "missing-context-partner-table-refused");
+        r = ff_run("file.edit", edit_args, &fo);
+        ok(r != 0 && tx_eqz(fo.err, "ECTX") &&
+           tx_find(fo.why, tx_len(fo.why, sizeof fo.why), "x/missing_partner.cx", 20) >= 0,
+           "missing-context-partner-file-edit-named-refusal");
+        ff_out_free(&fo);
     }
     {   /* nested-inheritance rule, both directions: marked outer root is dropped in the scratch root; same repo keeps it; unmarked root is kept */
         char t1[4400], t2[4400];
