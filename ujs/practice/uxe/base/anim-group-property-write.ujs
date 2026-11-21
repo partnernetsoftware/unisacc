@@ -1,0 +1,78 @@
+native function anim_write_isolated(at:i64,bytes:i64,arena:i64,arenaBytes:i64,binding:i64) i64 {
+  return !animation_overlap(at,bytes,arena,arenaBytes) &&
+    !animation_overlap(at,bytes,binding,PropertyBinding.size);
+}
+
+native function anim_write_property(binding:i64,arena:i64,object:i64) i64 {
+  let target=Object3D_address(arena,object);
+  if(target<0) { return 0; }
+  let field=ux_u32(binding+PropertyBinding.field);
+  let offset=344;
+  if(field==Object3D.quaternion) { offset=368; }
+  if(field==Object3D.scale) { offset=400; }
+  return ux_u32(target+field)==target+offset;
+}
+
+// pathID is the canonical subscription key for the supplied TRS path
+// bytes. A separate PropertyBinding scratch record is reused for each
+// live target. A complete preflight precedes the first Object3D write.
+native function AnimGroup_setValue(table:i64,pathID:i64,arena:i64,path:i64,bytes:i64,values:i64,lanes:i64,binding:i64) i64 {
+  let arenaBytes=bind_arena_bytes(arena);
+  if(arenaBytes<0 || pathID<1 || pathID>4294967295 || !anim_sub_valid(table) ||
+     path<0 || bytes<6 || bytes>14 || path>6291456-bytes ||
+     lanes<1 || lanes>4 || values%8!=0 || !animation_span(values,lanes*8) ||
+     !animation_span(binding,PropertyBinding.size) || animation_overlap(binding,PropertyBinding.size,arena,arenaBytes) ||
+     !anim_write_isolated(path,bytes,arena,arenaBytes,binding) ||
+     !anim_write_isolated(values,lanes*8,arena,arenaBytes,binding)) { return 0-1; }
+  let group=ux_u32(table+AnimGroupSubscriptions.group);
+  let views=ux_u32(table+AnimGroupSubscriptions.views);
+  let count=ux_u32(table+AnimGroupSubscriptions.count);
+  let max=ux_u32(table+AnimGroupSubscriptions.capacity);
+  let entries=ux_u32(group+AnimationObjectGroup.entries);
+  let capacity=ux_u32(group+AnimationObjectGroup.capacity);
+  let total=ux_u32(group+AnimationObjectGroup.total);
+  if(!anim_write_isolated(table,AnimGroupSubscriptions.size,arena,arenaBytes,binding) ||
+     !anim_write_isolated(group,AnimationObjectGroup.size,arena,arenaBytes,binding) ||
+     !anim_write_isolated(entries,capacity*8,arena,arenaBytes,binding) ||
+     !anim_write_isolated(views,max*4,arena,arenaBytes,binding)) { return 0-1; }
+  let index=anim_sub_find(views,count,pathID);
+  if(index<0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let candidate=ux_u32(views+i*4);
+    let cells=ux_u32(candidate+AnimGroupBindingView.rows);
+    if(!anim_write_isolated(candidate,AnimGroupBindingView.size,arena,arenaBytes,binding) ||
+       !anim_write_isolated(cells,capacity*AnimGroupBindingCell.size,arena,arenaBytes,binding)) { return 0-1; }
+    i=i+1;
+  }
+  let view=ux_u32(views+index*4);
+  let rows=ux_u32(view+AnimGroupBindingView.rows);
+  if(ux_u32(view+AnimGroupBindingView.count)!=total) { return 0-1; }
+  let active=0;
+  i=0;
+  while(i<total) {
+    let cell=rows+i*AnimGroupBindingCell.size;
+    let object=ux_u32(cell+AnimGroupBindingCell.object);
+    let live=ux_u32(cell+AnimGroupBindingCell.active);
+    if(live>1 || object!=ux_u32(entries+i*8) || live!=ux_u32(entries+i*8+4)) { return 0-1; }
+    if(live==1) {
+      if(ux_u32(cell+AnimGroupBindingCell.identity)==0 ||
+         PropertyBinding_bind(binding,arena,object,path,bytes)<0 ||
+         ux_u32(binding+PropertyBinding.lanes)!=lanes || !anim_write_property(binding,arena,object)) { return 0-1; }
+      active=active+1;
+    }
+    i=i+1;
+  }
+  if(active!=ux_u32(group+AnimationObjectGroup.active)) { return 0-1; }
+  i=0;
+  while(i<total) {
+    let cell=rows+i*AnimGroupBindingCell.size;
+    if(ux_u32(cell+AnimGroupBindingCell.active)==1) {
+      let object=ux_u32(cell+AnimGroupBindingCell.object);
+      let selected=ux_u32_put(binding+PropertyBinding.handle,object);
+      let applied=PropertyBinding_transfer(binding,values,1);
+    }
+    i=i+1;
+  }
+  return active;
+}
