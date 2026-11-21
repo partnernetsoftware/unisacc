@@ -1,0 +1,45 @@
+struct PositionalAudioGain {
+  left: f64;
+  right: f64;
+  distance: f64;
+}
+
+// Web Audio DistanceModelType, ordered linear, inverse, exponential.
+// https://www.w3.org/TR/webaudio/#enumdef-distancemodeltype
+native function PositionalAudio_distanceGain(model:i64,distance:f64,ref:f64,max:f64,rolloff:f64) f64 {
+  if(model<0 || model>2 || distance<0.0 || ref<0.0 || max<0.0 || rolloff<0.0 ||
+     distance-distance!=0.0 || ref-ref!=0.0 || max-max!=0.0 || rolloff-rolloff!=0.0) { return 0.0-1.0; }
+  if(model==0) {
+    let low=ref;
+    let high=max;
+    if(ref>max) { low=max; high=ref; }
+    let factor=rolloff;
+    if(factor>1.0) { factor=1.0; }
+    if(low==high) { return 1.0-factor; }
+    if(distance<low) { distance=low; }
+    if(distance>high) { distance=high; }
+    return 1.0-factor*(distance-low)/(high-low);
+  }
+  if(ref==0.0) { return 0.0; }
+  if(distance<ref) { distance=ref; }
+  if(model==1) { return ref/(ref+rolloff*(distance-ref)); }
+  return ux_math_pow(distance/ref,0.0-rolloff);
+}
+
+// Equal-power mono panning. Coordinates are in listener space and forward
+// is negative Z. HRTF and directional cone are separate render modes.
+native function PositionalAudio_panMono(out:i64,model:i64,x:f64,y:f64,z:f64,ref:f64,max:f64,rolloff:f64) i64 {
+  if(!audio_play_span(out,PositionalAudioGain.size,8)) { return 0-1; }
+  let distance=f64_sqrt(x*x+y*y+z*z);
+  let gain=PositionalAudio_distanceGain(model,distance,ref,max,rolloff);
+  if(gain<0.0 || gain-gain!=0.0) { return 0-2; }
+  let azimuth=0.0;
+  if(x!=0.0 || z!=0.0) { azimuth=ux_math_atan2(x,0.0-z); }
+  if(azimuth>1.5707963267948966) { azimuth=3.141592653589793-azimuth; }
+  if(azimuth<0.0-1.5707963267948966) { azimuth=0.0-3.141592653589793-azimuth; }
+  let radians=azimuth*0.5+0.7853981633974483;
+  let a=ux_f64_put(out+PositionalAudioGain.left,gain*ux_math_cos(radians));
+  let b=ux_f64_put(out+PositionalAudioGain.right,gain*ux_math_sin(radians));
+  let c=ux_f64_put(out+PositionalAudioGain.distance,gain);
+  return out;
+}
