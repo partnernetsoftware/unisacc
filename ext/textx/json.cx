@@ -9,6 +9,21 @@
    control chars in strings, lone surrogates, depth over JS_MAXDEPTH. \uXXXX (with
    surrogate pairs) is decoded to UTF-8; strings are NUL-terminated copies (js_str_len
    gives the byte length, which may include embedded NUL from \u0000).
+   Duplicate keys: js_parse folds them like JSON.parse: the later value, the first position
+   ({"z":1,"a":2,"z":9} -> z=9, a=2 in that order), at every nesting level, so a parsed tree never holds a
+   repeated key (the fold scans the members already read: linear per key). js_parse_keepdup takes the same
+   arguments and keeps every repeated member in order, for callers that need a lossless round trip.
+   Editing (object members; js_obj_* are below next to the builders):
+     js_obj_set   DOM construction: always appends, a repeated key is appended, nothing is replaced
+     js_obj_put   JS "o[k] = v": replaces the value of the FIRST member with that key (position kept, old value
+                  freed by the container), else appends
+     js_obj_del   JS "delete o[k]": removes ALL members with that key (a missing key is not an error); a key put
+                  again afterwards goes to the end
+   js_parse / js_parse_keepdup / js_obj_set differ only in how they treat a repeated key (fold / keep / keep);
+   js_obj_put and js_obj_del are the edit pair and assume a tree without repeated keys (js_parse's result).
+   Defence against sharing: nodes carry no parent pointer (parse-dense paths stay lean). Call js_assert_tree(root)
+   at critical points (after hand assembly, before js_free of a tree built from several sources): it returns 0 or
+   -EEXIST (a node reachable twice) / -ELOOP (a cycle, or nesting over JS_MAXDEPTH); js_free itself is unchecked.
    Ownership: the caller owns the root and frees it once with js_free; children belong to
    the root. Accessors take 0 safely and return 0 / JS_NONE on a miss.
    Tree ownership contract: js_free(root) frees every node reachable from ROOT, including any node another tree
@@ -28,7 +43,7 @@ typedef struct js_val {
     char **keys;
     long *klens;
 } js_val;
-typedef struct { const char *p; long n; long i; int depth; char *err; long errcap; int failed; } js_ps;
+typedef struct { const char *p; long n; long i; int depth; char *err; long errcap; int failed; int keepdup; } js_ps;
 
 static void js_seterr(js_ps *ps, long off, const char *msg) {
     char num[24]; int k = 0; long w = 0, v = off; const char *pre = "offset ";
@@ -168,6 +183,15 @@ static js_val *js_number(js_ps *ps) {
     return v;
 }
 static int js_push(js_ps *ps, js_val *c, js_val *x, char *key, long klen) {
+    if (c->kind == JS_OBJ && !ps->keepdup) {
+        /* JSON.parse folding: a repeated key keeps its first position and takes the later value */
+        long q;
+        for (q = 0; q < c->n; q++)
+            if (c->klens[q] == klen && mm_same(c->keys[q], key, klen)) {
+                js_free(c->items[q]); c->items[q] = x; mm_free(key);
+                return 0;
+            }
+    }
     if (c->n == c->cap) {
         long nc = c->cap ? c->cap * 2 : 4;
         js_val **ni = (js_val **)mm_grow(c->items, nc * (long)sizeof(js_val *));
@@ -248,9 +272,9 @@ static js_val *js_value(js_ps *ps) {
     js_seterr(ps, ps->i, "unexpected character");
     return 0;
 }
-js_val *js_parse(const char *text, long len, char *err, long errcap) {
+static js_val *js_parse_run(const char *text, long len, char *err, long errcap, int keepdup) {
     js_ps ps; js_val *v;
-    ps.p = text; ps.n = len; ps.i = 0; ps.depth = 0; ps.err = err; ps.errcap = errcap; ps.failed = 0;
+    ps.p = text; ps.n = len; ps.i = 0; ps.depth = 0; ps.err = err; ps.errcap = errcap; ps.failed = 0; ps.keepdup = keepdup;
     if (err && errcap > 0) err[0] = 0;
     if (!text || len < 0) { js_seterr(&ps, 0, "bad arguments"); return 0; }
     v = js_value(&ps);
@@ -259,6 +283,8 @@ js_val *js_parse(const char *text, long len, char *err, long errcap) {
     if (ps.i != ps.n) { js_seterr(&ps, ps.i, "trailing garbage"); js_free(v); return 0; }
     return v;
 }
+js_val *js_parse(const char *text, long len, char *err, long errcap) { return js_parse_run(text, len, err, errcap, 0); }
+js_val *js_parse_keepdup(const char *text, long len, char *err, long errcap) { return js_parse_run(text, len, err, errcap, 1); }
 int js_kind(const js_val *v) { return v ? v->kind : JS_NONE; }
 long js_len(const js_val *v) {
     if (!v) return 0;
@@ -543,7 +569,8 @@ long js_emit_pretty(const js_val *v, unsigned char *out, long cap) { return js_e
    Ownership: on success the container owns CHILD (free only the root; never free CHILD again, never put it
    in a second container). On failure (-EINVAL: bad container kind, null key or child, child is the container
    itself; -ENOMEM) CHILD stays with the caller and the container is unchanged. Members are kept in insertion
-   order and a repeated key is appended, not replaced, exactly as js_parse and js_emit treat duplicates. */
+   order and a repeated key is appended, not replaced (DOM construction, as js_parse_keepdup and js_emit treat
+   duplicates; use js_obj_put for JS assignment semantics). */
 static js_val *js_mk(int kind) {
     js_val *v = (js_val *)mm_zalloc((long)sizeof(js_val));
     if (v) v->kind = kind;
@@ -634,5 +661,110 @@ js_val *js_clone(const js_val *v) {
         e = v->kind == JS_OBJ ? js_obj_setn(r, v->keys[i], v->klens[i], c) : js_arr_push(r, c);
         if (e) { js_free(c); js_free(r); return 0; }
     }
+    return r;
+}
+/* ---- editing: js_obj_put / js_obj_del, folding parse, tree sanity check ----
+     int js_obj_putn(o, key, kn, child) / js_obj_put(o, key, child)   JS "o[k] = v" (see the header)
+     int js_obj_deln(o, key, kn) / js_obj_del(o, key)                 JS "delete o[k]"
+   put: the key exists -> the FIRST matching member takes CHILD, its old value is freed (key and position
+   kept); no such key -> appended like js_obj_set. Errors as js_obj_set: -EINVAL (bad container kind, null key
+   or child, child is the container itself), -ENOMEM on the append path; on any failure CHILD stays with the
+   caller and the object is unchanged. Putting the very node the first match already holds is a no-op returning 0
+   (nothing is freed). del: removes every member with that key, frees their keys and values, keeps the order of
+   the rest; returns 0 whether or not the key existed, -EINVAL for a bad container kind or null key. */
+static long js_findk(const js_val *o, const char *key, long kn) {
+    long i;
+    for (i = 0; i < o->n; i++)
+        if (o->klens[i] == kn && mm_same(o->keys[i], key, kn)) return i;
+    return -1;
+}
+int js_obj_putn(js_val *o, const char *key, long kn, js_val *child) {
+    long at;
+    if (!o || o->kind != JS_OBJ || !key || kn < 0 || !child || child == o) return -EINVAL;
+    at = js_findk(o, key, kn);
+    if (at < 0) return js_obj_setn(o, key, kn, child);
+    if (o->items[at] == child) return 0;
+    js_free(o->items[at]);
+    o->items[at] = child;
+    return 0;
+}
+int js_obj_put(js_val *o, const char *key, js_val *child) {
+    long kn = 0;
+    if (!key) return -EINVAL;
+    while (key[kn]) kn++;
+    return js_obj_putn(o, key, kn, child);
+}
+int js_obj_deln(js_val *o, const char *key, long kn) {
+    long i, w = 0;
+    if (!o || o->kind != JS_OBJ || !key || kn < 0) return -EINVAL;
+    for (i = 0; i < o->n; i++) {
+        if (o->klens[i] == kn && mm_same(o->keys[i], key, kn)) { js_free(o->items[i]); mm_free(o->keys[i]); continue; }
+        o->items[w] = o->items[i]; o->keys[w] = o->keys[i]; o->klens[w] = o->klens[i];
+        w++;
+    }
+    o->n = w;
+    return 0;
+}
+int js_obj_del(js_val *o, const char *key) {
+    long kn = 0;
+    if (!key) return -EINVAL;
+    while (key[kn]) kn++;
+    return js_obj_deln(o, key, kn);
+}
+/* js_assert_tree(v): debug check of the tree-ownership contract (no allocation inside the tree is touched).
+   Walks every node reachable from V and returns 0, -EEXIST when some node is reachable by two paths (a child
+   attached to two parents, or twice to one), -ELOOP when a node is its own ancestor or the nesting exceeds
+   JS_MAXDEPTH (+1), -ENOMEM when its scratch list cannot grow. V == 0 is fine (0). Cost: O(nodes log nodes) time and
+   one pointer per node of scratch memory; use it where a tree is assembled, not on hot paths. */
+typedef struct { const js_val **a; long n, cap; const js_val *path[JS_MAXDEPTH + 3]; } js_atree;
+static void js_sift(const js_val **a, long i, long n) {
+    for (;;) {
+        long c = 2 * i + 1;
+        const js_val *t;
+        if (c >= n) return;
+        if (c + 1 < n && (unsigned long)a[c + 1] > (unsigned long)a[c]) c++;
+        if ((unsigned long)a[i] >= (unsigned long)a[c]) return;
+        t = a[i]; a[i] = a[c]; a[c] = t;
+        i = c;
+    }
+}
+/* sorts the list in place (it is a set) and reports -EEXIST when two entries are the same node */
+static int js_dupcheck(js_atree *t) {
+    long i;
+    for (i = t->n / 2 - 1; i >= 0; i--) js_sift(t->a, i, t->n);
+    for (i = t->n - 1; i > 0; i--) {
+        const js_val *x = t->a[0]; t->a[0] = t->a[i]; t->a[i] = x;
+        js_sift(t->a, 0, i);
+    }
+    for (i = 1; i < t->n; i++) if (t->a[i] == t->a[i - 1]) return -EEXIST;
+    return 0;
+}
+static int js_awalk(js_atree *t, const js_val *v, int depth) {
+    long i; int k, r;
+    if (!v) return 0;
+    if (depth > JS_MAXDEPTH + 1) return -ELOOP;
+    for (k = 0; k < depth; k++) if (t->path[k] == v) return -ELOOP;
+    t->path[depth] = v;
+    if (t->n == t->cap) {
+        long nc = t->cap ? t->cap * 2 : 64;
+        const js_val **na;
+        if (t->n) { r = js_dupcheck(t); if (r) return r; }   /* sharing is caught while the list grows, so a DAG blow-up stops early */
+        na = (const js_val **)mm_grow(t->a, nc * (long)sizeof(js_val *));
+        if (!na) return -ENOMEM;
+        t->a = na; t->cap = nc;
+    }
+    t->a[t->n++] = v;
+    if (v->kind == JS_ARR || v->kind == JS_OBJ)
+        for (i = 0; i < v->n; i++) { r = js_awalk(t, v->items ? v->items[i] : 0, depth + 1); if (r) return r; }
+    return 0;
+}
+int js_assert_tree(const js_val *v) {
+    js_atree *t; int r;
+    if (!v) return 0;
+    t = (js_atree *)mm_zalloc((long)sizeof(js_atree));
+    if (!t) return -ENOMEM;
+    r = js_awalk(t, v, 0);
+    if (!r && t->n > 1) r = js_dupcheck(t);
+    mm_free(t->a); mm_free(t);
     return r;
 }
