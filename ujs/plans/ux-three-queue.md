@@ -18,7 +18,8 @@
 - ~~ShapeUtils 双孔凹形对照 | G-struct U 形轮廓与双孔的面积、绕向及空洞 | 已有多孔剖分。~~ 4 项通过，漏掉右孔反例 12 对 18。
 - ShapeUtils 通用桥接和共线边界 BLOCKED | G-struct 多种凹形、共线边与多个内孔，对照 r160 面积、索引和空洞。原输入得到 16 个三角，先删共线输入点仍得 14，r160 为 12。日志为 /tmp/devsvc-flow-21619425583-98794/out/x.out 与 /tmp/devsvc-flow-21619474165-107825/out/x.out，复现为 /tmp/cdx2-shape-collinear-rings-struct.cx 与 /tmp/cdx2-shape-collinear-rings-r160.html | 解阻需要剖分阶段处理共线桥与退化边，保留紧凑索引合同。
 - ~~StereoCamera 持久单眼记录刷新 | G-struct 移动后更新矩阵，保留镜头值，拒绝未初始化记录和错眼刷新 | 已有双眼矩阵与眼记录。~~ 新建替代刷新使镜头读回 50，预期为 65。
-- StereoCamera 持久双眼子对象与渲染 | G-struct 左右眼场景对象身份和层，G-pixel 两眼图及资源释放 | 眼记录刷新、M4 渲染器。
+- ~~StereoCamera 持久双眼子对象 | G-struct 左右眼对象身份、层和释放 | 眼记录刷新。~~ r160 对照 25 项通过，复位镜头反例读回 50 对 65。
+- StereoCamera 双眼渲染 | G-pixel 两眼真实像素 | 持久双眼子对象、M4 渲染器。
 - ~~UniformsGroup 统一缓冲布局 | G-struct r160 WebGL2 结构对照，包括 f32 值、矩阵列填充和混合宽度 | 组记录与 GPU 统一缓冲格式。~~ 9 项通过，矩阵列取错偏移反例转红。
 - ~~UniformsGroup 类型化组值复制 | G-struct 向量、矩阵、嵌套值和 std140 | 统一缓冲布局。~~ 17 项通过，强制复用源值转红。
 - UniformsGroup 自定义克隆与 GPU 绑定 | G-struct 复制自定义值，G-pixel 绑定、更新与读回 | 组值复制和 M4 GPU。

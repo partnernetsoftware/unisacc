@@ -1,0 +1,134 @@
+struct StereoEyePair {
+  stereo: u32;
+  arena: u32;
+  records: u32;
+  leftHandle: u32;
+  rightHandle: u32;
+  active: u32;
+}
+
+// Caller-owned storage contains two adjacent 704-byte eye records.
+// The pair owns the handles. Each camera remains unparented and uses an
+// explicit matrix, as r160 does when taking its eye cameras to a renderer.
+native function stereo_pair_arena(arena:i64) i64 {
+  if(arena<0 || arena%8!=0 || arena>6291448) { return 0-1; }
+  let count=ux_u32(arena);
+  if(count<1 || count>(6291448-arena)/424) { return 0-1; }
+  return 8+count*424;
+}
+
+native function stereo_pair_span(pair:i64) i64 {
+  return pair>=0 && pair%4==0 && pair<=6291456-StereoEyePair.size;
+}
+
+native function stereo_pair_ranges(pair:i64,stereo:i64,arena:i64,eyes:i64) i64 {
+  let span=stereo_pair_arena(arena);
+  if(!stereo_pair_span(pair) || span<0 || eyes<0 || eyes%8!=0 || eyes>6291456-1408 ||
+     stereo_eye_check(stereo,0,eyes,704)<0 || stereo_eye_check(stereo,1,eyes+704,704)<0 ||
+     Camera_blocksOverlap(pair,StereoEyePair.size,stereo,StereoCamera.size) ||
+     Camera_blocksOverlap(pair,StereoEyePair.size,eyes,1408) ||
+     Camera_blocksOverlap(pair,StereoEyePair.size,arena,span) ||
+     Camera_blocksOverlap(eyes,1408,arena,span) ||
+     Camera_blocksOverlap(stereo,StereoCamera.size,arena,span)) { return 0-1; }
+  let i=0;
+  while(i<4) {
+    let at=ux_u32(stereo+StereoCamera.leftProjection+i*4);
+    if(Camera_blocksOverlap(at,128,eyes,1408) ||
+       Camera_blocksOverlap(at,128,arena,span) ||
+       Camera_blocksOverlap(at,128,pair,StereoEyePair.size) ||
+       Camera_blocksOverlap(at,128,stereo,StereoCamera.size)) { return 0-1; }
+    let j=0;
+    while(j<i) {
+      let previous=ux_u32(stereo+StereoCamera.leftProjection+j*4);
+      if(Camera_blocksOverlap(at,128,previous,128)) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return span;
+}
+
+native function stereo_pair_publish(node:i64,eye:i64,initial:i64) i64 {
+  let world=ux_u32(eye+StereoEyeRecord.world);
+  let a=Matrix4_copy(ux_u32(node+Object3D.localMatrix),world);
+  let b=Matrix4_copy(ux_u32(node+Object3D.worldMatrix),world);
+  if(initial) { let mask=ux_u32_put(node+Object3D.layerMask,ux_u32(eye+StereoEyeRecord.layerMask)); }
+  else { let mask=ux_u32_put(eye+StereoEyeRecord.layerMask,ux_u32(node+Object3D.layerMask)); }
+  let d=ux_u32_put(node+Object3D.dirty,0);
+  return node;
+}
+
+native function StereoCamera_initPair(pair:i64,stereo:i64,arena:i64,eyes:i64) i64 {
+  if(stereo_pair_ranges(pair,stereo,arena,eyes)<0 || ux_u32(pair+StereoEyePair.active)!=0) { return 0-1; }
+  let left=Object3D_create(arena);
+  if(left<0) { return 0-1; }
+  let right=Object3D_create(arena);
+  if(right<0) {
+    let released=Object3D_destroy(arena,left);
+    return 0-1;
+  }
+  let l=StereoCamera_readEye(stereo,0,eyes,704);
+  let r=StereoCamera_readEye(stereo,1,eyes+704,704);
+  if(l<0 || r<0) {
+    let releasedLeft=Object3D_destroy(arena,left);
+    let releasedRight=Object3D_destroy(arena,right);
+    return 0-1;
+  }
+  let lp=stereo_pair_publish(Object3D_address(arena,left),l,1);
+  let rp=stereo_pair_publish(Object3D_address(arena,right),r,1);
+  let a=ux_u32_put(pair+StereoEyePair.stereo,stereo);
+  let b=ux_u32_put(pair+StereoEyePair.arena,arena);
+  let c=ux_u32_put(pair+StereoEyePair.records,eyes);
+  let d=ux_u32_put(pair+StereoEyePair.leftHandle,left);
+  let e=ux_u32_put(pair+StereoEyePair.rightHandle,right);
+  let on=ux_u32_put(pair+StereoEyePair.active,1);
+  return pair;
+}
+
+native function stereo_pair_node_ready(node:i64) i64 {
+  return ux_u32(node+Object3D.parent)==0 && ux_u32(node+Object3D.firstChild)==0 &&
+    ux_u32(node+Object3D.localMatrix)==node+88 && ux_u32(node+Object3D.worldMatrix)==node+216;
+}
+
+native function StereoCamera_refreshPair(pair:i64) i64 {
+  if(!stereo_pair_span(pair) || ux_u32(pair+StereoEyePair.active)!=1) { return 0-1; }
+  let stereo=ux_u32(pair+StereoEyePair.stereo);
+  let arena=ux_u32(pair+StereoEyePair.arena);
+  let eyes=ux_u32(pair+StereoEyePair.records);
+  if(stereo_pair_ranges(pair,stereo,arena,eyes)<0 ||
+     !stereo_eye_ready(0,eyes) || !stereo_eye_ready(1,eyes+704)) { return 0-1; }
+  let left=Object3D_address(arena,ux_u32(pair+StereoEyePair.leftHandle));
+  let right=Object3D_address(arena,ux_u32(pair+StereoEyePair.rightHandle));
+  if(left<0 || right<0 || left==right ||
+     !stereo_pair_node_ready(left) || !stereo_pair_node_ready(right)) { return 0-1; }
+  let l=StereoCamera_refreshEye(stereo,0,eyes,704);
+  let r=StereoCamera_refreshEye(stereo,1,eyes+704,704);
+  let lp=stereo_pair_publish(left,l,0);
+  let rp=stereo_pair_publish(right,r,0);
+  return pair;
+}
+
+native function StereoCamera_pairNode(pair:i64,eye:i64) i64 {
+  if(!stereo_pair_span(pair) || ux_u32(pair+StereoEyePair.active)!=1 || eye<0 || eye>1) { return 0-1; }
+  let handle=ux_u32(pair+StereoEyePair.leftHandle+eye*4);
+  let arena=ux_u32(pair+StereoEyePair.arena);
+  if(stereo_pair_arena(arena)<0 || Object3D_address(arena,handle)<0) { return 0-1; }
+  return handle;
+}
+
+native function StereoCamera_pairEye(pair:i64,eye:i64) i64 {
+  if(StereoCamera_pairNode(pair,eye)<0) { return 0-1; }
+  let offset=ux_u32(pair+StereoEyePair.records)+eye*704;
+  if(offset%8!=0 || offset>6291456-704 || !stereo_eye_ready(eye,offset)) { return 0-1; }
+  return offset;
+}
+
+native function StereoCamera_disposePair(pair:i64) i64 {
+  if(!stereo_pair_span(pair) || ux_u32(pair+StereoEyePair.active)!=1) { return 0-1; }
+  let arena=ux_u32(pair+StereoEyePair.arena);
+  if(stereo_pair_arena(arena)<0) { return 0-1; }
+  let l=Object3D_destroy(arena,ux_u32(pair+StereoEyePair.leftHandle));
+  let r=Object3D_destroy(arena,ux_u32(pair+StereoEyePair.rightHandle));
+  let clear=ux_u32_put(pair+StereoEyePair.active,0);
+  return 0;
+}
