@@ -1,0 +1,85 @@
+struct BloomMipRGBA8 {
+  pixels:u32;
+  width:u32;
+  height:u32;
+  padding:u32;
+  tintR:f64;
+  tintG:f64;
+  tintB:f64;
+}
+
+native function bloom_composite_index(at:i64,length:i64) i64 {
+  if(at<0) { return 0; }
+  if(at>=length) { return length-1; }
+  return at;
+}
+
+// Composites exactly five linear RGBA8 mip images with the r160 default
+// factors. The result is the bloom image for the later additive pass.
+native function UnrealBloom_compositeRGBA8(mips:i64,dst:i64,capacity:i64,width:i64,height:i64,strength:f64,radius:f64) i64 {
+  if(width<1 || width>1572864 || height<1 || height>1572864 || width*height>1572864 ||
+     !(strength>=0.0 && strength<=16.0) || !(radius>=0.0 && radius<=1.0)) { return 0-1; }
+  let outBytes=width*height*4;
+  let tableBytes=5*BloomMipRGBA8.size;
+  if(mips%8!=0 || capacity<outBytes || !post_span(mips,tableBytes) || !post_span(dst,capacity) ||
+     post_overlap(dst,outBytes,mips,tableBytes)) { return 0-1; }
+  let level=0;
+  while(level<5) {
+    let entry=mips+level*BloomMipRGBA8.size;
+    let sw=ux_u32(entry+BloomMipRGBA8.width);
+    let sh=ux_u32(entry+BloomMipRGBA8.height);
+    let src=ux_u32(entry+BloomMipRGBA8.pixels);
+    if(sw<1 || sw>1572864 || sh<1 || sh>1572864 || sw*sh>1572864 ||
+       !post_span(src,sw*sh*4) || post_overlap(src,sw*sh*4,dst,outBytes)) { return 0-1; }
+    let channel=0;
+    while(channel<3) {
+      let tint=ux_f64(entry+BloomMipRGBA8.tintR+channel*8);
+      if(!(tint>=0.0 && tint<=16.0)) { return 0-1; }
+      channel=channel+1;
+    }
+    level=level+1;
+  }
+  let factors=[1.0,0.8,0.6,0.4,0.2];
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let r=0.0;
+      let g=0.0;
+      let b=0.0;
+      let a=0.0;
+      level=0;
+      while(level<5) {
+        let entry=mips+level*BloomMipRGBA8.size;
+        let sw=ux_u32(entry+BloomMipRGBA8.width);
+        let sh=ux_u32(entry+BloomMipRGBA8.height);
+        let src=ux_u32(entry+BloomMipRGBA8.pixels);
+        let sx=(x+0.5)*sw/width-0.5;
+        let sy=(y+0.5)*sh/height-0.5;
+        let ix=f64_floor_i64(sx);
+        let iy=f64_floor_i64(sy);
+        let x0=bloom_composite_index(ix,sw);
+        let y0=bloom_composite_index(iy,sh);
+        let nx=bloom_composite_index(ix+1,sw)-x0;
+        let ny=bloom_composite_index(iy+1,sh)-y0;
+        let at=4*(y0*sw+x0);
+        let fx=sx-ix;
+        let fy=sy-iy;
+        let w=factors[level]*(1.0-radius)+(1.2-factors[level])*radius;
+        r=r+bloom_sample(src,4*sw,at,nx,ny,fx,fy)*w*ux_f64(entry+BloomMipRGBA8.tintR);
+        g=g+bloom_sample(src,4*sw,at+1,nx,ny,fx,fy)*w*ux_f64(entry+BloomMipRGBA8.tintG);
+        b=b+bloom_sample(src,4*sw,at+2,nx,ny,fx,fy)*w*ux_f64(entry+BloomMipRGBA8.tintB);
+        a=a+bloom_sample(src,4*sw,at+3,nx,ny,fx,fy)*w;
+        level=level+1;
+      }
+      let pixel=dst+4*(y*width+x);
+      let wr=ux_u8_put(pixel,post_rgba8(r*strength));
+      let wg=ux_u8_put(pixel+1,post_rgba8(g*strength));
+      let wb=ux_u8_put(pixel+2,post_rgba8(b*strength));
+      let wa=ux_u8_put(pixel+3,post_rgba8(a*strength));
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return width*height;
+}
