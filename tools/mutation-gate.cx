@@ -10,6 +10,11 @@
  *   mutation-gate.cx -- prep   (same options)  private tree + mutants + baseline check, bounded under 55 s
  *   mutation-gate.cx -- worker --out DIR --slot K   runs mutants with id % par == K in DIR/slot-K
  *   mutation-gate.cx -- report --out DIR [--min-score F] [--allow-uncovered FILE] [--adjudicated FILE]
+ *   mutation-gate.cx -- run|prep ... --report [--expect-fail NAME|--expect-rc N]...
+ *       --report records assertion evidence per mutant without replacing the existing gate verdict.
+ *       An expectation applies to the preceding --check and may be repeated. An assertion name
+ *       matches a whole FAIL record. Infrastructure exits cannot be declared as expected.
+ *       --report --out DIR (or report --report --out DIR) also writes mutation-quality.tsv.
  *       run and report both take --allow-uncovered FILE and --adjudicated FILE:
  *       --allow-uncovered: TSV rows `file<TAB>function<TAB>reason`, one per uncovered function the reviewer
  *         accepts; an uncovered function not listed makes the verdict FAIL.
@@ -52,6 +57,9 @@
 #define MG_LINE 4096
 
 static const char *g_patch, *g_base, *g_out, *g_repo = 0, *g_chk[MG_MAXCHK];
+static int g_quality, g_expect_n;
+static int g_expect_check[64], g_expect_code[64];
+static const char *g_expect_name[64];
 static int g_nchk, g_max = 30, g_par = 0, g_cov, g_mutchecks, g_git, g_slot = -1, g_deadline = 280;
 static double g_min = 0.6;
 static int g_min_set;
@@ -74,11 +82,42 @@ static void spit(const char *p, const char *b, size_t n) { if (cx_write(p, b, n)
 static void cp(void *d, long cap, const void *s, long n) { if (mm_copy(d, cap, s, n) != 0) die2("copy", "out of bound"); }
 
 /* ---------- configuration persisted by prep ---------- */
+static void expect_failure(const char *type, const char *value) {
+    if (!g_nchk || g_expect_n == 64 || !*value || strpbrk(value, "\t\r\n") || strlen(value) > 250)
+        die2("invalid check expectation", value);
+    int n = g_expect_n++;
+    g_expect_check[n] = g_nchk - 1;
+    g_expect_name[n] = 0;
+    g_expect_code[n] = 0;
+    if (!strcmp(type, "name")) g_expect_name[n] = value;
+    else {
+        char *end;
+        long code = strtol(value, &end, 10);
+        if (*end || code < 1 || code > 123) die2("expected assertion rc must be 1..123", value);
+        g_expect_code[n] = (int)code;
+    }
+}
+
 static void save_conf(void) {
     char p[1024], b[16384]; int k = 0, i;
     cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
     k += snprintf(b + k, sizeof b - k, "par\t%d\nmax\t%d\nmin\t%g\ncov\t%d\n", g_par, g_max, g_min, g_cov);
-    for (i = 0; i < g_nchk; i++) k += snprintf(b + k, sizeof b - k, "check\t%s\n", g_chk[i]);
+    if (g_quality) {
+        if (cx_fmt(b + k, sizeof b - k, "quality\t1\n")) die2("conf", "too long");
+        k += (int)strlen(b + k);
+    }
+    for (i = 0; i < g_nchk; i++) {
+        if (cx_fmt(b + k, sizeof b - k, "check\t%s\n", g_chk[i])) die2("conf", "too long");
+        k += (int)strlen(b + k);
+        for (int j = 0; j < g_expect_n; j++) {
+            if (g_expect_check[j] != i) continue;
+            int rc = g_expect_name[j]
+                ? cx_fmt(b + k, sizeof b - k, "expect-name\t%s\n", g_expect_name[j])
+                : cx_fmt(b + k, sizeof b - k, "expect-rc\t%d\n", g_expect_code[j]);
+            if (rc) die2("conf", "too long");
+            k += (int)strlen(b + k);
+        }
+    }
     if (k >= (int)sizeof b) die2("conf", "too long");
     spit(p, b, (size_t)k);
 }
@@ -86,13 +125,17 @@ static void load_conf(void) {
     char p[1024]; size_t n; char *b, *s, *e;
     cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
     b = slurp(p, &n); if (!b) die2("missing", p);
+    g_nchk = g_expect_n = 0;
     for (s = b; s < b + n; s = e + 1) {
         e = s; while (e < b + n && *e != '\n') e++; *e = 0;
         if (!strncmp(s, "par\t", 4)) g_par = atoi(s + 4);
         else if (!strncmp(s, "max\t", 4)) g_max = atoi(s + 4);
         else if (!strncmp(s, "cov\t", 4)) g_cov = atoi(s + 4);
         else if (!strncmp(s, "min\t", 4) && !g_min_set) g_min = atof(s + 4);
+        else if (!strcmp(s, "quality\t1")) g_quality = 1;
         else if (!strncmp(s, "check\t", 6) && g_nchk < MG_MAXCHK) g_chk[g_nchk++] = s + 6;
+        else if (!strncmp(s, "expect-name\t", 12)) expect_failure("name", s + 12);
+        else if (!strncmp(s, "expect-rc\t", 10)) expect_failure("rc", s + 10);
     }
 }
 
@@ -423,6 +466,36 @@ static int killed_by(const char *out, int rc) {
     while ((p = strstr(p, "failed=")) != 0) { if (atoi(p + 7) > 0) return 1; p += 7; }
     return 0;
 }
+
+enum Quality { Q_SURVIVED, Q_WEAK, Q_UNKNOWN, Q_NAMED, Q_INVALID };
+static const char *quality_labels[] = {"SURVIVED", "KILL-weak", "UNKNOWN", "KILL-named", "INVALID"};
+
+static int quality_check(const char *out, int rc, int check) {
+    if (rc < 0 || rc >= 124) return Q_UNKNOWN;
+    int named = 0, infrastructure = 0;
+    for (const char *s = out; *s;) {
+        const char *e = strchr(s, '\n');
+        if (!e) e = s + strlen(s);
+        size_t n = (size_t)(e - s);
+        if (n && s[n - 1] == '\r') n--;
+        if (!strncmp(s, "REFUSE ", 7) || !strncmp(s, "ERR ", 4)) infrastructure = 1;
+        if (*e && (!strncmp(s, "FAIL ", 5) || !strncmp(s, "FAIL\t", 5))) {
+            for (int i = 0; i < g_expect_n; i++) {
+                const char *name = g_expect_name[i];
+                if (g_expect_check[i] == check && name && strlen(name) + 5 == n && !memcmp(s + 5, name, n - 5)) named = 1;
+            }
+        }
+        s = *e ? e + 1 : e;
+    }
+    if (infrastructure) return Q_UNKNOWN;
+    for (int i = 0; i < g_expect_n; i++) {
+        if (g_expect_check[i] == check && g_expect_code[i] && g_expect_code[i] == rc) named = 1;
+    }
+    if (named) return Q_NAMED;
+    if (rc > 1) return Q_UNKNOWN;
+    return killed_by(out, rc) ? Q_WEAK : Q_SURVIVED;
+}
+
 static void worker(void) {
     char p[1024], q3[2048], sd[1024], res[1024]; size_t n; char *tsv, *s, *e; int fd_rows = 0;
     load_conf();
@@ -431,7 +504,10 @@ static void worker(void) {
     cx_fmt(res, sizeof res, "%s/res-%d.tsv", g_out, g_slot);
     { char acc[1 << 15]; int ak = 0;
     for (s = tsv; s < tsv + n; s = e + 1) {
-        char row[2048], file[1024], fp[2048], mp[1024], out[65536], cmd[8192]; int id, line, L, rc, i, verdict = 0; long t0 = sy_now_ms();
+        char row[2048], file[1024], fp[2048], mp[1024], out[65536], cmd[8192];
+        int id, line, L, rc = 0, first_kill_rc = 0, i, verdict = 0;
+        int quality = Q_SURVIVED, quality_rc = 0, check_id = -1;
+        long t0 = sy_now_ms();
         e = s; while (e < tsv + n && *e != '\n') e++;
         L = (int)(e - s); if (L <= 0 || L >= (int)sizeof row) continue;
         cp(row, (long)sizeof row, s, L); row[L] = 0;
@@ -441,13 +517,19 @@ static void worker(void) {
         size_t on, mn; char *orig = slurp(fp, &on), *ml = slurp(mp, &mn);
         if (!orig || !ml) { if (orig) mm_free(orig); if (ml) mm_free(ml); continue; }
         /* build mutated file */
-        { char *nb = mm_alloc((long)(on + mn + 8)); size_t k = 0, ls = 0; int cur = 1; size_t i2;
+        { char *nb = mm_alloc((long)(on + mn + 8)); size_t k = 0, ls = 0; int cur = 1, replaced = 0; size_t i2;
           for (i2 = 0; i2 <= on; i2++) {
+              if (i2 == on && ls == on) break;
               if (i2 == on || orig[i2] == '\n') {
-                  if (cur == line) { cp(nb + k, (long)(on + mn + 8 - k), ml, (long)mn); k += mn; } else { cp(nb + k, (long)(on + mn + 8 - k), orig + ls, (long)(i2 - ls)); k += i2 - ls; }
+                  if (cur == line) { cp(nb + k, (long)(on + mn + 8 - k), ml, (long)mn); k += mn; replaced++; } else { cp(nb + k, (long)(on + mn + 8 - k), orig + ls, (long)(i2 - ls)); k += i2 - ls; }
                   if (i2 < on) nb[k++] = '\n';
                   ls = i2 + 1; cur++;
               }
+          }
+          if (replaced != 1 || (k == on && !memcmp(nb, orig, on))) {
+              quality = Q_INVALID;
+              mm_free(nb);
+              goto save_result;
           }
           spit(fp, nb, k); mm_free(nb); }
         /* compile gate */
@@ -456,17 +538,33 @@ static void worker(void) {
           cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-compile-%d.o >%s 2>&1", q3, qf, id, ql); }
         rc = sh(cmd, out, sizeof out, 55);
         { char tmpo[1024]; cx_fmt(tmpo, sizeof tmpo, "%s/.mg-compile-%d.o", sd, id); sy_unlink(tmpo); }
-        if (rc != 0) verdict = 2;
+        if (rc != 0) { verdict = 2; quality = Q_UNKNOWN; quality_rc = rc; }
         else {
             for (i = 0; i < g_nchk; i++) {
                 char qc[4096]; shq(qc, sizeof qc, g_chk[i]);
                 cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh -c %s 2>&1", q3, qc);
                 out[0] = 0; rc = sh(cmd, out, sizeof out, 55);
-                if (killed_by(out, rc)) { verdict = 1; break; }
+                if (g_quality) {
+                    int observation = quality_check(out, rc, i);
+                    if (observation != Q_SURVIVED) {
+                        cx_fmt(p, sizeof p, "%s/m/%d.check-%d.log", g_out, id, i);
+                        spit(p, out, strlen(out));
+                    }
+                    if (observation > quality) { quality = observation; quality_rc = rc; check_id = i; }
+                }
+                if (!verdict && killed_by(out, rc)) { verdict = 1; first_kill_rc = rc; }
+                if (verdict && (!g_quality || quality == Q_NAMED)) break;
             }
         }
-        spit(fp, orig, on); mm_free(orig); mm_free(ml);
-        ak += snprintf(acc + ak, sizeof acc - ak, "%d\t%s\t%d\t%ld\n", id, verdict == 1 ? "killed" : verdict == 2 ? "compile_fail" : "survived", rc, sy_now_ms() - t0);
+        spit(fp, orig, on);
+        save_result:
+        mm_free(orig); mm_free(ml);
+        const char *legacy = quality == Q_INVALID ? "invalid" : verdict == 1 ? "killed" : verdict == 2 ? "compile_fail" : "survived";
+        if (cx_fmt(acc + ak, sizeof acc - ak, "%d\t%s\t%d\t%ld\t%s\t%d\t%d\n",
+                   id, legacy, verdict == 1 ? first_kill_rc : rc, sy_now_ms() - t0,
+                   g_quality || quality == Q_INVALID ? quality_labels[quality] : "-", quality_rc, check_id))
+            die2("worker results", "too many bytes");
+        ak += (int)strlen(acc + ak);
         spit(res, acc, (size_t)ak); fd_rows++;
     } }
     cx_fmt(p, sizeof p, "%s/done-%d", g_out, g_slot); spit(p, "1\n", 2);
@@ -477,7 +575,11 @@ static void worker(void) {
 /* nth (0-based) TAB field of ROW into D; 0 when absent */
 static int field(const char *row, int nth, char *d, int cap) {
     const char *s = row, *e; int k;
-    for (k = 0; k < nth; k++) { s = strchr(s, '\t'); if (!s) { d[0] = 0; return 0; } s++; }
+    for (k = 0; k < nth; k++) {
+        s += strcspn(s, "\t\n");
+        if (*s != '\t') { d[0] = 0; return 0; }
+        s++;
+    }
     e = s; while (*e && *e != '\t' && *e != '\n') e++;
     k = (int)(e - s); if (k >= cap) k = cap - 1;
     cp(d, cap, s, k); d[k] = 0; return 1;
@@ -524,13 +626,30 @@ static int adjudicated(char **R, int nr, const char *file, int line, const char 
     return 0;
 }
 
+static int result_quality(const char *row) {
+    char label[32];
+    if (!row) return Q_UNKNOWN;
+    if (!strncmp(row, "invalid\t", 8)) return Q_INVALID;
+    if (!field(row, 3, label, sizeof label)) return Q_UNKNOWN;
+    for (int i = 0; i <= Q_INVALID; i++) if (!strcmp(label, quality_labels[i])) return i;
+    return Q_UNKNOWN;
+}
+
 static int report(void) {
     char p[1024], sum[16384], sv[1 << 16], unc[8192]; size_t n; char *tsv, *s, *e; int N = 0, K = 0, S = 0, C = 0, CN = 0, CK = 0, CS = 0, sk = 0, missing = 0, verdict;
     int A = 0, CW = 0, uk = 0; char **AU, **AJ; int nau, naj;
+    FILE *quality_file = 0;
+    int qualities[Q_INVALID + 1] = {0}, qa = 0;
     load_conf();
     nau = load_list(g_allow_unc, &AU); naj = load_list(g_adjud, &AJ);
     unc[0] = 0;
     cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
+    if (g_quality) {
+        cx_fmt(p, sizeof p, "%s/mutation-quality.tsv", g_out);
+        quality_file = fopen(p, "w");
+        if (!quality_file) die2("write", p);
+        fputs("id\tfile\tline\tkind\tclassification\trc\tcheck_index\tadjudicated\n", quality_file);
+    }
     char *res[16]; size_t rn[16]; int i;
     for (i = 0; i < g_par && i < 16; i++) { cx_fmt(p, sizeof p, "%s/res-%d.tsv", g_out, i); res[i] = slurp(p, &rn[i]); if (!res[i]) rn[i] = 0; }
     sk += snprintf(sv + sk, sizeof sv - sk, "id\tfile\tline\tkind\tmutation\tmutated_line\n");
@@ -543,10 +662,24 @@ static int report(void) {
         int iscov = !strncmp(kind, "cov", 3);
         cx_fmt(key, sizeof key, "%d\t", id);
         if (slot < 16 && res[slot]) { const char *q = res[slot]; while (q && q < res[slot] + rn[slot]) { if (!strncmp(q, key, strlen(key))) { r = q + strlen(key); break; } q = memchr(q, '\n', (size_t)(res[slot] + rn[slot] - q)); if (q) q++; } }
-        if (!r) { missing++; continue; }
-        if (!strncmp(r, "compile_fail", 12)) { C++; continue; }
         char fl[1024], kd[32], ds[256], ln[32];
         field(row, 1, fl, sizeof fl); field(row, 2, ln, sizeof ln); field(row, 3, kd, sizeof kd); field(row, 4, ds, sizeof ds);
+        int is_adj = r && !iscov && !strncmp(r, "survived\t", 9) && adjudicated(AJ, naj, fl, atoi(ln), kd, ds);
+        int q = result_quality(r);
+        if (quality_file) {
+            char qr[32], qi[32];
+            int q_adj = q == Q_SURVIVED && is_adj;
+            if (!r || !field(r, 4, qr, sizeof qr)) cx_fmt(qr, sizeof qr, "-");
+            if (!r || !field(r, 5, qi, sizeof qi)) cx_fmt(qi, sizeof qi, "-");
+            if (!iscov) { qualities[q]++; qa += q_adj; }
+            fprintf(quality_file, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", id, fl, ln, kd, quality_labels[q], qr, qi, q_adj);
+        }
+        if (!r) { missing++; continue; }
+        if (q == Q_INVALID) {
+            if (iscov) missing++;
+            continue;
+        }
+        if (!strncmp(r, "compile_fail", 12)) { C++; continue; }
         if (iscov) {
             CN++;
             if (!strncmp(r, "killed", 6)) CK++;
@@ -562,7 +695,7 @@ static int report(void) {
         else {
             N++;
             if (!strncmp(r, "killed", 6)) K++;
-            else { S++; if (adjudicated(AJ, naj, fl, atoi(ln), kd, ds)) A++; }
+            else { S++; A += is_adj; }
         }
         if (!strncmp(r, "survived", 8)) {
             size_t mn; cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id); char *ml = slurp(mp, &mn);
@@ -572,6 +705,16 @@ static int report(void) {
             if (sk > (int)sizeof sv - 600) sk = (int)sizeof sv - 600;
             if (ml) mm_free(ml);
         }
+    }
+    if (quality_file) {
+        int low = qualities[Q_NAMED], high = low + qualities[Q_WEAK] + qualities[Q_UNKNOWN];
+        int qn = high + qualities[Q_SURVIVED] - qa;
+        if (ferror(quality_file) || fclose(quality_file)) die2("write", "mutation-quality.tsv");
+        const char *status = !qn ? "UNMEASURED" : (double)low / qn >= g_min ? "ABOVE" :
+                             (double)high / qn < g_min ? "BELOW" : "INCONCLUSIVE";
+        printf("MUTATION_QUALITY named=%d weak=%d unknown=%d invalid=%d survived=%d adjudicated=%d lower=%d/%d upper=%d/%d min=%.2f status=%s\n",
+               low, qualities[Q_WEAK], qualities[Q_UNKNOWN], qualities[Q_INVALID], qualities[Q_SURVIVED], qa,
+               low, qn, high, qn, g_min, status);
     }
     cx_fmt(p, sizeof p, "%s/survivors.tsv", g_out); spit(p, sv, (size_t)sk);
     double sc = N ? (double)K / N : 0.0;
@@ -616,9 +759,11 @@ int main(int argc, char **argv) {
     const char *mode; int i;
     if (argc < 2) die2("usage", "run|prep|worker|report ...");
     mode = argv[1];
+    if (!strcmp(mode, "--report")) { mode = "report"; g_quality = 1; }
     for (i = 2; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
         if (!strcmp(a, "--coverage-check")) { g_cov = 1; continue; }
+        if (!strcmp(a, "--report")) { g_quality = 1; continue; }
         if (!strcmp(a, "--mutate-checks")) { g_mutchecks = 1; continue; }
         if (!strcmp(a, "--git")) { g_git = 1; continue; }
         if (!v) die2("missing value for", a);
@@ -627,6 +772,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--out")) g_out = v;
         else if (!strcmp(a, "--repo")) g_repo = v;
         else if (!strcmp(a, "--check")) { if (g_nchk >= MG_MAXCHK) die2("too many", "--check"); g_chk[g_nchk++] = v; }
+        else if (!strcmp(a, "--expect-fail")) expect_failure("name", v);
+        else if (!strcmp(a, "--expect-rc")) expect_failure("rc", v);
         else if (!strcmp(a, "--max")) { g_max = atoi(v); if (g_max < 1 || g_max > 500) die2("--max outside 1..500", v); }
         else if (!strcmp(a, "--par")) { g_par = atoi(v); if (g_par < 1 || g_par > 16) die2("--par outside 1..16", v); }
         else if (!strcmp(a, "--min-score")) { g_min = atof(v); g_min_set = 1; if (g_min < 0 || g_min > 1) die2("--min-score outside 0..1", v); }
@@ -638,6 +785,8 @@ int main(int argc, char **argv) {
         i++;
     }
     if (!g_out) die2("usage", "--out required");
+    if (g_expect_n && (!g_quality || (strcmp(mode, "run") && strcmp(mode, "prep"))))
+        die2("usage", "check expectations require run or prep with --report");
     if (!strcmp(mode, "prep")) { prep(); return 0; }
     if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
     if (!strcmp(mode, "report")) return report();
