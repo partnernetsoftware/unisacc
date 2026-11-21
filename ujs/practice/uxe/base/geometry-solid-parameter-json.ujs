@@ -1,0 +1,53 @@
+native function solid_geometry_keys(at:i64,kind:i64) i64 {
+  let names=[84,101,116,114,97,104,101,100,114,111,110,0,
+    79,99,116,97,104,101,100,114,111,110,0,0,
+    73,99,111,115,97,104,101,100,114,111,110,0,
+    68,111,100,101,99,97,104,101,100,114,111,110];
+  let lengths=[11,10,11,12];
+  let suffix=[71,101,111,109,101,116,114,121];
+  let fields=[114,97,100,105,117,115,100,101,116,97,105,108];
+  let index=kind-10;
+  let n=lengths[index];
+  let i=0;
+  while(i<n) {
+    let ch=ux_u8_put(at+i,names[index*12+i]);
+    i=i+1;
+  }
+  i=0;
+  while(i<8) {
+    let ch=ux_u8_put(at+n+i,suffix[i]);
+    i=i+1;
+  }
+  i=0;
+  while(i<12) {
+    let ch=ux_u8_put(at+20+i,fields[i]);
+    i=i+1;
+  }
+  return n+8;
+}
+
+native function SolidGeometry_toJSON(solid:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  let kind=solid_geometry_kind(solid);
+  if(kind<0 || !geometry_primitive_json_io(solid,dst,end,uuid,uuidBytes,scratch,32)) { return 0-1; }
+  let keys=scratch+1104;
+  let name=solid_geometry_keys(keys,kind);
+  let p=geometry_primitive_json_head(solid,dst,end,uuid,uuidBytes,keys,name);
+  p=geometry_parameter_number(p,end,keys+20,6,ux_f64(solid+GeometryPrimitiveRecord.first),scratch);
+  p=geometry_parameter_number(p,end,keys+26,6,ux_f64(solid+GeometryPrimitiveRecord.second),scratch);
+  return json_byte(p,end,125);
+}
+
+// The loader scratch starts with parameters and keys, then the raw workspace.
+native function SolidGeometry_fromJSON(solid:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,kind:i64) i64 {
+  let work=SolidGeometry_workspace(kind);
+  if(work<0 || scratch%8!=0 || end<=input ||
+     !geometry_primitive_raw(solid,raw,arena,bytes,input,end-input) ||
+     !geometry_primitive_raw(solid,raw,arena,bytes,scratch,128+work) ||
+     !geometry_public_disjoint(input,end-input,scratch,128+work) ||
+     !geometry_primitive_json_object(input,end)) { return 0-1; }
+  let keys=scratch+SolidGeometryParameters.size;
+  let name=solid_geometry_keys(keys,kind);
+  let a=ux_f64_put(scratch+SolidGeometryParameters.radius,geometry_primitive_json_number(input,end,keys+20,6,1.0));
+  let b=ux_f64_put(scratch+SolidGeometryParameters.detail,geometry_primitive_json_number(input,end,keys+26,6,0.0));
+  return SolidGeometry_create(solid,raw,arena,bytes,scratch,scratch+128,kind);
+}

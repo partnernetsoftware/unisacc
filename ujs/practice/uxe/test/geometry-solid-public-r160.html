@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { REVISION, TetrahedronGeometry, OctahedronGeometry, IcosahedronGeometry, DodecahedronGeometry }
+  from "../../web/game/three.module.js";
+
+const classes = [TetrahedronGeometry, OctahedronGeometry, IcosahedronGeometry, DodecahedronGeometry];
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const uuid = "solid", name = 'facet "A"';
+const digest = bytes => bytes.reduce((hash, value) => (hash * 131 + value) % 16777213, 0);
+const lengthSquared = attribute => attribute.getX(0) ** 2 + attribute.getY(0) ** 2 + attribute.getZ(0) ** 2;
+function maximumError(actual, expected) {
+  if (actual.length !== expected.length) return 1000 + Math.abs(actual.length - expected.length);
+  return actual.reduce((error, value, i) => Math.max(error, Math.abs(value - expected[i])), 0);
+}
+
+function compare(Class, kind, module, mutate) {
+  const { exports: api } = new WebAssembly.Instance(module);
+  const base = Number(api.uxe_solid_public(0n, BigInt(kind), 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 100000);
+  for (const [address, text] of [[6000, uuid], [6016, name], [5760, '{"detail":0.5}'],
+    [5800, "{}"], [5824, '{"radius":0}']]) memory.set(encoder.encode(text), address);
+  const length = Number(api.uxe_solid_public(1n, BigInt(kind), mutate));
+  if (length <= 0) throw new Error("native solid status " + length + " kind " + kind);
+  const raw = memory.subarray(5000, 5000 + length);
+  const parsed = JSON.parse(decoder.decode(raw));
+  if (parsed.type !== Class.name || parsed.name !== name || parsed.uuid !== uuid || "data" in parsed) {
+    throw new Error("solid parameter envelope " + kind);
+  }
+  const actual = new Float64Array(api.memory.buffer, base + 6160, 20);
+  const [data, normal, uv, count] = new Uint32Array(api.memory.buffer, base + 7000, 4);
+
+  const source = new Class(1.5, 1);
+  source.uuid = uuid;
+  source.name = name;
+  const doc = source.toJSON();
+  const round = Class.fromJSON(doc);
+  const defaults = Class.fromJSON({});
+  const errors = [
+    maximumError(new Float32Array(api.memory.buffer, base + data, 3 * count), round.attributes.position.array),
+    maximumError(new Float32Array(api.memory.buffer, base + normal, 3 * count), round.attributes.normal.array),
+    maximumError(new Float32Array(api.memory.buffer, base + uv, 2 * count), round.attributes.uv.array),
+  ];
+  const fields = [digest(encoder.encode(JSON.stringify(doc))), round.attributes.position.count, round.parameters.radius,
+    round.parameters.detail, lengthSquared(round.attributes.position), lengthSquared(round.attributes.normal),
+    Number(round.index === null), defaults.attributes.position.count];
+
+  const targetTrace = [], trace = [];
+  let correctTarget = true;
+  function listenerB() { trace.push(82); }
+  source.addEventListener("dispose", function(event) {
+    correctTarget &&= event.target === source && this === source;
+    trace.push(41);
+    source.removeEventListener("dispose", listenerB);
+  });
+  source.addEventListener("dispose", listenerB);
+  round.addEventListener("dispose", () => targetTrace.push(61));
+  const copied = round.copy(source);
+  const clone = source.clone();
+  const a = source.attributes.position, b = copied.attributes.position, c = clone.attributes.position;
+  const independent = Number(copied === round && a.array !== b.array && a.array !== c.array &&
+    b.array !== c.array && copied.parameters !== source.parameters && clone.parameters !== source.parameters);
+  source.parameters.radius = 7;
+  source.parameters.detail = 3;
+  a.setX(0, 9);
+  source.dispose();
+  const firstEvents = trace.splice(0);
+  source.dispose();
+  const nextEvent = trace.shift();
+  copied.dispose();
+  clone.dispose();
+  return [digest(raw), ...actual, ...errors, ...fields,
+    independent, copied.parameters.radius, clone.parameters.detail, lengthSquared(c),
+    firstEvents[0] * 100 + firstEvents[1], Number(correctTarget), nextEvent,
+    targetTrace.shift(), trace.length];
+}
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const wasm = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(wasm);
+  const values = classes.flatMap((Class, i) => compare(Class, 10 + i, module, BigInt(query.get("mutate"))));
+  result.textContent = JSON.stringify(values);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
