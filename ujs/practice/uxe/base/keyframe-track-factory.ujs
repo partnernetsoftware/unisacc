@@ -1,0 +1,90 @@
+// Opt-in track factories. Family 0 covers Number, Vector and Color. Family 1
+// selects quaternion interpolation. Boolean/String tracks retain their own
+// discrete token paths. Existing stateless evaluators remain available.
+native function track_factory_kind(family:i64,mode:i64) i64 {
+  if(family<0 || family>1) { return 0-1; }
+  if(mode==2300) { return 1; }
+  if(mode==2301) {
+    if(family==1) { return 3; }
+    return 0;
+  }
+  if(mode==2302 && family==0) { return 2; }
+  return 0-1;
+}
+
+// Unsupported modes leave a configured factory intact. Before a factory
+// has been selected, an unsupported mode falls back to linear.
+native function KeyframeTrack_setFactoryMode(track:i64,family:i64,mode:i64) i64 {
+  if(!keyframe_track_at(track) || family<0 || family>1) { return 0-1; }
+  if(track_factory_kind(family,mode)<0) {
+    if(track_factory_kind(family,ux_u32(track+KeyframeTrack.interpolation))>=0) { return track; }
+    mode=2301;
+  }
+  return KeyframeTrack_setInterpolation(track,mode);
+}
+
+native function KeyframeTrack_initNumeric(track:i64,name:i64,bytes:i64,view:i64,family:i64,mode:i64) i64 {
+  if(!keyframe_track_at(track) || name<0 || bytes<1 || bytes>65535 || name>6291456-bytes ||
+     family<0 || family>1 || !animation_span(view,InterpolantNumericView.size) ||
+     animation_overlap(track,KeyframeTrack.size,name,bytes) ||
+     animation_overlap(track,KeyframeTrack.size,view,InterpolantNumericView.size)) { return 0-1; }
+  let tk=ux_u32(view+InterpolantNumericView.timeKind);
+  let vk=ux_u32(view+InterpolantNumericView.valueKind);
+  let stride=interpolant_numeric_shape(view,tk,vk,InterpolantNumericView.size);
+  if(stride<1 || (family==1 && stride%4!=0)) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  if(animation_overlap(track,KeyframeTrack.size,ux_u32(view+AnimationSamples.times),count*interpolant_width(tk)) ||
+     animation_overlap(track,KeyframeTrack.size,ux_u32(view+AnimationSamples.values),count*stride*interpolant_width(vk))) {
+    return 0-1;
+  }
+  if(track_factory_kind(family,mode)<0) { mode=2301; }
+  let a=ux_u32_put(track+KeyframeTrack.name,name);
+  let b=ux_u32_put(track+KeyframeTrack.nameBytes,bytes);
+  let c=ux_u32_put(track+KeyframeTrack.samples,view);
+  let d=ux_u32_put(track+KeyframeTrack.interpolation,mode);
+  return track;
+}
+
+native function track_factory_check(track:i64,family:i64,state:i64,result:i64,resultKind:i64,typed:i64) i64 {
+  if(!keyframe_track_at(track)) { return 0-1; }
+  let name=ux_u32(track+KeyframeTrack.name);
+  let nameBytes=ux_u32(track+KeyframeTrack.nameBytes);
+  let view=ux_u32(track+KeyframeTrack.samples);
+  let kind=track_factory_kind(family,ux_u32(track+KeyframeTrack.interpolation));
+  if(kind<0 || nameBytes<1 || nameBytes>65535 || name>6291456-nameBytes) { return 0-1; }
+  let inputBytes=AnimationSamples.size;
+  if(typed) { inputBytes=InterpolantNumericView.size; }
+  if(!animation_span(view,inputBytes)) { return 0-1; }
+  let tk=9;
+  let vk=9;
+  if(typed) {
+    tk=ux_u32(view+InterpolantNumericView.timeKind);
+    vk=ux_u32(view+InterpolantNumericView.valueKind);
+  }
+  let stride=interpolant_numeric_shape(view,tk,vk,inputBytes);
+  if(stride<1 || (family==1 && stride%4!=0)) { return 0-1; }
+  let vw=interpolant_width(vk);
+  if(resultKind==0-1) { resultKind=vk; }
+  let rw=interpolant_width(resultKind);
+  let stateBytes=InterpolantState.size+stride*vw;
+  if(rw==0 || !animation_span(state,stateBytes) || state%8!=0 ||
+     animation_overlap(state,stateBytes,track,KeyframeTrack.size) ||
+     animation_overlap(state,stateBytes,name,nameBytes)) { return 0-1; }
+  if(result!=0-1 &&
+     (!interpolant_span(result,stride,rw) || animation_overlap(result,stride*rw,track,KeyframeTrack.size) ||
+      animation_overlap(result,stride*rw,name,nameBytes))) { return 0-1; }
+  return kind;
+}
+
+native function KeyframeTrack_createInterpolant(track:i64,family:i64,state:i64,result:i64) i64 {
+  let kind=track_factory_check(track,family,state,result,9,0);
+  if(kind<0) { return kind; }
+  let view=ux_u32(track+KeyframeTrack.samples);
+  return interpolant_init(state,view,result,kind,9,9,9,AnimationSamples.size);
+}
+
+native function KeyframeTrack_createNumeric(track:i64,family:i64,state:i64,result:i64,resultKind:i64) i64 {
+  let kind=track_factory_check(track,family,state,result,resultKind,1);
+  if(kind<0) { return kind; }
+  return Interpolant_initNumeric(state,ux_u32(track+KeyframeTrack.samples),result,resultKind,kind);
+}
