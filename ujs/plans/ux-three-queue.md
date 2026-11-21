@@ -229,6 +229,7 @@
 - GLTFLoader 图元整体装配 | G-io 从实际 JSON 枚举语义、组合索引和各属性并发布渲染资源 | 三角图元共享视图、稀疏索引。
 - ~~GLTFLoader 采样器及 r160 插件对照入口 | G-io 过滤、环绕、默认值及异常枚举 | 纹理资源与 GLB 容器。~~ 采样器十一项通过，错绑环绕反例转红。Chromium 真实 r160 插件采样器和稀疏访问器对照十二项通过。
 - ~~GLTFLoader 纹理 URI | G-io 相对路径、绝对路径、数据 URI、UTF-8 与资源 ABI | 图像加载与 LoaderUtils。~~ 11 项通过，错读 URL 字节 112 对 97 转红，LoaderUtils 五项与 UTF-8 九项通过。
+- ~~GLTFLoader GPU 纹理源 | G-io 图像行距、采样器与失败保留 | 图像资源和 GPU 纹理。~~ 九项通过，交换像素通道转红。
 - GLTFLoader 材质与纹理 | G-io UV、颜色空间、内嵌与外部资源到 GPU 纹理 | GLTF 网格、图像加载、采样器、URI 与材质。
 - BLOCKED GLTFLoader 内嵌 JPEG | G-io JPEG 字节、颜色、损坏视图及失败保留 | 图像解码与采样器。共享解码重构及复用现有解码器两种写法均在编译段从六秒界限退出，日志 `/tmp/devsvc-flow-21640281622-3224886/out/x.out` 与 `/tmp/devsvc-flow-21640649511-3296065/out/x.out`。草稿在 `/tmp/cdx2-gltf-jpeg-blocked`，保留断言和时限。
 - ~~GLTFLoader 动画通道 | G-io 平移、缩放、旋转、变形权重、插值标记与坏时序 | 密集访问器与 M8。~~ 路径 13 项、平移七项、三次平移五项通过，错读变形权重转红。
