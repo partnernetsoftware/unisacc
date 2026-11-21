@@ -28,6 +28,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.env
+#pragma unisa use sys.time
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
 #pragma unisa use text.text
@@ -188,6 +189,19 @@ static int fake_unisacc(int argc, char **argv) {
     }
     if (tx_eqz(argv[3], "tools/ratchets.cx")) { sy_printf("RATCHETS\tok=15\tfail=0\n"); return 0; }
     if (tx_eqz(argv[3], "tools/devsvc.cx")) {
+        if (argi(argc, argv, "events") > 0 && argi(argc, argv, "emit") > 0) {
+            const char *rt = sy_env("DEVSVC_REPO_TABLE"), *rtp = sy_env("DEVSVC_REPO_TABLE_PIN");
+            if ((rt && rt[0]) || (rtp && rtp[0])) {
+                put(fdir, "pin-env-leaked", "1");
+                return 97;
+            }
+            cx_fmt(q, sizeof q, "%s/events-hang", fdir);
+            if (sy_exists(q) == 1) { sy_sleep_ms(4000); return 0; }
+            cx_fmt(q, sizeof q, "%s/events-fail", fdir);
+            if (sy_exists(q) == 1) return 1;
+            sy_printf("OK\temitted\tseq=1\n");
+            return 0;
+        }
         int mi=argi(argc,argv,"-m");
         if(mi>0 && mi+1<argc && has(argv[mi+1]," X: candidate table")){
             char *add[]={"git","add","--","release/candidate.tsv",0};
@@ -328,6 +342,9 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     cx_fmt(p, sizeof p, "%s/fakecache", td); rmrf(p); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
     cx_fmt(p, sizeof p, "%s/advance-at-ci", td); rmrf(p);
     cx_fmt(p, sizeof p, "%s/advance-at-readback", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/pin-env-leaked", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/events-hang", td); rmrf(p);
+    cx_fmt(p, sizeof p, "%s/events-fail", td); rmrf(p);
     /* wrappers: fake gh in PATH, fake ./unisacc.com in the fixture root */
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake gh \"$@\"\n",selfbin); put(binp, "gh", t);
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake unisacc \"$@\"\n",selfbin); put(fx, leafs[0], t);
@@ -356,9 +373,9 @@ static char out[262144];
 static char *candidate_input="release/candidate.tsv";
 static int rx(const char *a1, const char *a2, const char *a3, const char *tool) {
     char ex[4400], up[4400], tp[4400]; char *v[20]; int k = 0, rc; np_result r = {0}; char why[256];
-    char *env[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
+    char *env[] = {pathenv, fakeenv, "DEVSVC_REPO_TABLE=/bogus/pinned/devsvc-repo.tsv", "DEVSVC_REPO_TABLE_PIN=HEAD:/bogus/pinned/devsvc-repo.tsv", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
     char realenv[4200]; cx_fmt(realenv, sizeof realenv, "CHECK_RX_REAL=%s", root);
-    char *env2[] = {pathenv, fakeenv, "RELEASE_EXEC_NO_EVENTS=1", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
+    char *env2[] = {pathenv, fakeenv, "DEVSVC_REPO_TABLE=/bogus/pinned/devsvc-repo.tsv", "DEVSVC_REPO_TABLE_PIN=HEAD:/bogus/pinned/devsvc-repo.tsv", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
     cx_fmt(up, sizeof up, "%s/%s", root, leafs[0]); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
     cx_fmt(ex, sizeof ex, "%s/xout", td);
     v[k++]=tool?hookbin:execbin;
@@ -652,6 +669,31 @@ static void part_b(void) {
     put(td, "calls.log", "");
     rc = rx("--from-step", "7", 0, "tools/release-run.cx");
     ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "R2.release-run-execute-hook");
+    /* EV1..EV3: phase events emitted without RELEASE_EXEC_NO_EVENTS, inherited DEVSVC_REPO_TABLE_PIN cleaned,
+     * and slow/failing devsvc events emit is bounded with named warnings */
+    c = calls();
+    cx_fmt(p, sizeof p, "%s/pin-env-leaked", td);
+    ck(rc == 0 && sy_exists(p) == 0 && !has(out, "EVENT_NOT_RECORDED") &&
+       c && has(c, "unisacc tools/devsvc -- events emit phase cmd=x\tphase=release.X-commit") &&
+       has(c, "unisacc tools/devsvc -- events emit phase cmd=x\tphase=release.Y2"),
+       "EV1.events-emitted-without-env-and-pin-cleaned");
+    free(c);
+    put(td, "events-hang", "1");
+    { long t0 = sy_now_ms(), dt;
+      rc = rx("--from-step", "7", 0, 0);
+      dt = sy_now_ms() - t0;
+      cx_fmt(p, sizeof p, "%s/events-hang", td); rmrf(p);
+      ck(rc == 0 && dt < 3500 &&
+         has(out, "TIMING\t1\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_TIMEOUT") &&
+         has(out, "TIMING\t7\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_TIMEOUT"),
+         "EV2.events-timeout-bounded-named-warning"); }
+    put(td, "events-fail", "1");
+    rc = rx("--from-step", "7", 0, 0);
+    cx_fmt(p, sizeof p, "%s/events-fail", td); rmrf(p);
+    ck(rc == 0 &&
+       has(out, "TIMING\t1\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_FAILED") &&
+       has(out, "(rc=1 step=X-commit)"),
+       "EV3.events-fail-named-warning");
 }
 /* lines of t equal to s */
 static int count_lines(const char *t, const char *s) {

@@ -385,6 +385,82 @@ int main(void) {
         if(cx_write(ix,many,used)||cx_write(times,"coverage-0\t1000\n",16))return 2;
         rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
         ck(rc==2&&ckk_has(out,CPD_OUT,"window-plan-did-not-cover-every-batch"),"plan-refuses-unrepresented-batches");
+
+        /* S3: missing/empty --ids-file and nb >= release-prep MAXB(1024) refused before start */
+        {
+            char s3dir[CPD_PW], s3w[CPD_PW], s3ids[CPD_PW], out_1023[CPD_OUT], out_1024[CPD_OUT], out_1767[CPD_OUT], out_run[CPD_OUT];
+            if (cx_fmt(s3dir, sizeof s3dir, "%s/s3-missing", work) ||
+                cx_fmt(s3w, sizeof s3w, "%s/windows.tsv", s3dir) ||
+                cx_fmt(s3ids, sizeof s3ids, "%s/s3-ids.txt", work)) return 2;
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --out '%s'", cwd, cwd, s3dir)) return 2;
+            int rc_no_ids = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            int has_no_ids = ckk_has(out, CPD_OUT, "plan-requires-ids-file");
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '' --out '%s'", cwd, cwd, s3dir)) return 2;
+            int rc_empty_arg = ckk_sh("check-prerun-drive", cmd, out_1023, sizeof out_1023);
+            ck(rc_no_ids == 2 && has_no_ids && rc_empty_arg == 2 && ckk_has(out_1023, CPD_OUT, "plan-requires-ids-file") && sy_exists(s3w) == 0,
+               "plan-refuses-missing-or-empty-ids-file");
+
+            char *big = (char *)mm_alloc(32768);
+            if (!big) return 2;
+            size_t bp2 = 0;
+            for (int i = 0; i < 1023; i++) {
+                char row[32]; cx_fmt(row, sizeof row, "b-%04d\n", i);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir, sizeof s3dir, "%s/s3-1023", work) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir)) return 2;
+            int rc_1023 = ckk_sh("check-prerun-drive", cmd, out_1023, sizeof out_1023);
+            ck(rc_1023 == 0 && ckk_has(out_1023, CPD_OUT, "PRERUN_PLAN\ttotal=1023\t"),
+               "plan-allows-1023-below-maxb");
+
+            {
+                char row[32]; cx_fmt(row, sizeof row, "b-1023\n");
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir, sizeof s3dir, "%s/s3-1024", work) ||
+                cx_fmt(s3w, sizeof s3w, "%s/windows.tsv", s3dir) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir)) return 2;
+            int rc_1024 = ckk_sh("check-prerun-drive", cmd, out_1024, sizeof out_1024);
+
+            for (int i = 1024; i < 1767; i++) {
+                char row[32]; cx_fmt(row, sizeof row, "b-%04d\n", i);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            char s3dir1767[CPD_PW], s3w1767[CPD_PW];
+            if (cx_write(s3ids, big, bp2) ||
+                cx_fmt(s3dir1767, sizeof s3dir1767, "%s/s3-1767", work) ||
+                cx_fmt(s3w1767, sizeof s3w1767, "%s/windows.tsv", s3dir1767) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s'", cwd, cwd, s3ids, s3dir1767)) return 2;
+            int rc_1767 = ckk_sh("check-prerun-drive", cmd, out_1767, sizeof out_1767);
+            ck(rc_1024 == 2 && ckk_has(out_1024, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1024\tmaxb=1024") &&
+               ckk_has(out_1024, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(s3w) == 0 &&
+               rc_1767 == 2 && ckk_has(out_1767, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1767\tmaxb=1024") &&
+               ckk_has(out_1767, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(s3w1767) == 0,
+               "plan-refuses-1024-at-maxb-and-1767-before-writing-windows");
+
+            /* Also verify run refuses a pre-existing windows.tsv with >= 1024 batches before starting W0000 */
+            char r1024[CPD_PW], rw1024[CPD_PW], rs0[CPD_PW];
+            if (cx_fmt(r1024, sizeof r1024, "%s/s3-run1024", work) || sy_mkdir_all(r1024, 0700) ||
+                cx_fmt(rw1024, sizeof rw1024, "%s/windows.tsv", r1024) ||
+                cx_fmt(rs0, sizeof rs0, "%s/strict-W0000.tsv", r1024)) return 2;
+            bp2 = 0;
+            const char *wh = "# prerun-drive windows\nwindow\tjobs\tphase\tcount\tids\n";
+            mm_copy(big, 32768, wh, strlen(wh)); bp2 = strlen(wh);
+            for (int w = 0; w < 128; w++) {
+                char row[160];
+                cx_fmt(row, sizeof row, "W%04d\t2\tnormal\t8\tb%d_0,b%d_1,b%d_2,b%d_3,b%d_4,b%d_5,b%d_6,b%d_7\n", w, w, w, w, w, w, w, w, w);
+                mm_copy(big + bp2, 32768 - bp2, row, strlen(row)); bp2 += strlen(row);
+            }
+            if (cx_write(rw1024, big, bp2) ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s'", cwd, cwd, work, r1024, mock)) return 2;
+            int rc_run1024 = ckk_sh("check-prerun-drive", cmd, out_run, sizeof out_run);
+            ck(rc_run1024 == 2 && ckk_has(out_run, CPD_OUT, "PRERUN_MAXB_EXCEEDED\tbatches=1024\tmaxb=1024") &&
+               ckk_has(out_run, CPD_OUT, "reason=batch-count-reaches-release-prep-maxb-1024") && sy_exists(rs0) == 0,
+               "run-refuses-windows-tsv-at-maxb-before-start");
+            mm_free(big);
+        }
     }
 
     {

@@ -40,7 +40,7 @@
  * evidence is DEFERRED, never PASS.
  * Evidence: execute appends exec-N rows (real timestamps) to release/evidence/V/INDEX.tsv;
  * --dry writes the rows to OUT/INDEX.tsv. Execute emits devsvc phase events per step
- * (cmd=x phase=release.NAME), skipped with RELEASE_EXEC_NO_EVENTS=1.
+ * (cmd=x phase=release.NAME) with a 2 s bound and named warnings on timeout/failure.
  * CI polling: RELEASE_EXEC_POLL_MS (default 30000) x RELEASE_EXEC_POLL_MAX (default 50 = 25 min).
  * Check: tools/check-release-exec.cx. */
 #pragma unisa use sys.fs
@@ -153,15 +153,29 @@ static void index_row(const char *item,const char *verdict,const char *ref,const
     char key[128];if(cx_fmt(key,sizeof key,"exec-%d-%s",cur_step,item))die("index item");
     index_named(key,verdict,ref,note);
 }
+#define EVENT_EMIT_SECS 2
+static int event_timed_out;
 static void emit_phase(int rc) {
-    char text[700], o[256]; const char *e = sy_env("RELEASE_EXEC_NO_EVENTS");
+    char text[700]; const char *e = sy_env("RELEASE_EXEC_NO_EVENTS");
     long d = sy_now_ms() - step_t0;
     if (cur_step < 1 || cur_step > 7) return;
     if (cx_fmt(text, sizeof text, "cmd=x\tphase=release.%s\tms=%ld\tinput=%s\trc=%d\tload1=-\tjob=release-exec", step_names[cur_step], d, cand.tag, rc)) return;
     sy_printf("TIMING\t%d\t%s\tms=%ld\trc=%d\n", cur_step, step_names[cur_step], d, rc);
     if (dry || (e && e[0] == '1')) return;
+    if (event_timed_out) {
+        sy_printf("TIMING\t%d\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_TIMEOUT devsvc events emit skipped after prior timeout (bound=%ds step=%s)\n", cur_step, EVENT_EMIT_SECS, step_names[cur_step]);
+        return;
+    }
     { char *v[] = {"sh", checkout_product, "tools/devsvc.cx", "--", "events", "emit", "phase", text, 0};
-      if (run(v, 15, o, sizeof o)) sy_printf("TIMING\t%d\tEVENT_NOT_RECORDED\tdevsvc events emit failed\n", cur_step); }
+      np_result r = {0}; char why[512] = {0};
+      int tr = np_run(v, here, 0, EVENT_EMIT_SECS, &r, why, sizeof why);
+      if (tr || r.timed_out) {
+          event_timed_out = 1;
+          sy_printf("TIMING\t%d\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_TIMEOUT devsvc events emit timed out (bound=%ds step=%s)\n", cur_step, EVENT_EMIT_SECS, step_names[cur_step]);
+      } else if (r.rc) {
+          sy_printf("TIMING\t%d\tEVENT_NOT_RECORDED\tWARN_RELEASE_EXEC_EVENT_FAILED devsvc events emit failed (rc=%d step=%s)\n", cur_step, r.rc, step_names[cur_step]);
+      }
+      np_free(&r); }
 }
 
 /* ---- small readers ---------------------------------------------------------- */
@@ -1632,6 +1646,14 @@ int main(int argc, char **argv) {
     if (argc < 3 || (!warm && !tx_eqz(argv[1], "--execute")))
         die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE] | --warm CANDIDATE_TSV --layout DIR [--out DIR]");
     if (sy_cwd(here, sizeof here)) die("cwd");
+    /* When launched inside devsvc x, the outer devsvc.cx sets DEVSVC_REPO_TABLE and DEVSVC_REPO_TABLE_PIN
+     * for its pinned core binary. Clearing them before spawning nested devsvc.cx prevents cfg_load from
+     * treating the staged table as an override with headtab_n=0 (which would shift the pin key and trigger
+     * a cold devsvc-core compile inside every step). */
+    if (sy_env("DEVSVC_REPO_TABLE_PIN")) {
+        sy_unsetenv("DEVSVC_REPO_TABLE");
+        sy_unsetenv("DEVSVC_REPO_TABLE_PIN");
+    }
     /* 0.0.87 S4: a Root installed from an unpublished chain candidate (tools/install-ape.cx --candidate) is never a
        release baseline; the release runs from a public Root. */
     { char mk[4400]; if (cx_fmt(mk, sizeof mk, "%s/unisacc.com.candidate.tsv", here)) die("cwd path");

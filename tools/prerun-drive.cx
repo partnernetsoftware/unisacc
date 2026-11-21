@@ -21,6 +21,7 @@
 
 #define PD_PW 4400
 #define PD_MAX_IDS 2048
+#define PD_PREP_MAXB 1024
 #define PD_MAX_WINS 512
 #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
 #define PD_CHILD_SECONDS 58
@@ -375,6 +376,10 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
     if (pd_normal_jobs < 1 || pd_normal_jobs > 16) return pd_refuse("normal-jobs-must-be-1-to-16");
     if (pd_nids <= 0) return pd_refuse("empty-ids-file");
+    if (pd_nids >= PD_PREP_MAXB) {
+        fprintf(stderr, "PRERUN_MAXB_EXCEEDED\tbatches=%d\tmaxb=%d\n", pd_nids, PD_PREP_MAXB);
+        return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
+    }
     for (i = 0; i < pd_nids; i++) {
         used[i] = 0;
         if (pd_has_times) {
@@ -820,6 +825,39 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     if (timed && atoi((char *)wb + sizeof PD_TIMED_HEADER - 1) > max_jobs) {
         mm_free(wb);
         return pd_refuse("timed-plan-exceeds-max-jobs");
+    }
+    {
+        int64_t cpos = 0;
+        int planned_batches = 0;
+        while (cpos < wn) {
+            int64_t ls = cpos;
+            while (cpos < wn && wb[cpos] != '\n') cpos++;
+            int64_t le = cpos;
+            if (cpos < wn) cpos++;
+            if (le > ls && wb[le - 1] == '\r') le--;
+            if (le <= ls || wb[ls] == '#' || (le - ls >= 7 && memcmp(wb + ls, "window\t", 7) == 0)) continue;
+            const char *cols[8]; int64_t clens[8]; int nc = 0; int64_t p = ls;
+            while (nc < 8) {
+                int64_t cs = p;
+                while (p < le && wb[p] != '\t') p++;
+                cols[nc] = (const char *)wb + cs; clens[nc] = p - cs; nc++;
+                if (p >= le) break;
+                p++;
+            }
+            if (nc < 5) continue;
+            if (clens[2] == 13 && memcmp(cols[2], "prebuild-self", 13) == 0) continue;
+            char cbuf[16];
+            if (clens[3] > 0 && clens[3] < 15 && !mm_copy(cbuf, sizeof cbuf, cols[3], (size_t)clens[3])) {
+                cbuf[clens[3]] = 0;
+                int cval = atoi(cbuf);
+                if (cval > 0) planned_batches += cval;
+            }
+        }
+        if (planned_batches >= PD_PREP_MAXB) {
+            fprintf(stderr, "PRERUN_MAXB_EXCEEDED\tbatches=%d\tmaxb=%d\n", planned_batches, PD_PREP_MAXB);
+            mm_free(wb);
+            return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
+        }
     }
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
@@ -1360,7 +1398,7 @@ static int pd_cmd_g1_dry(const char *root, const char *cand_tsv, const char *str
         np_free(&r);
     }
     if (cx_fmt(cmd, sizeof cmd,
-        "cd '%s' && RELEASE_EXEC_NO_EVENTS=1 sh ./unisacc.com tools/release-exec.cx -- "
+        "cd '%s' && sh ./unisacc.com tools/release-exec.cx -- "
         "--execute '%s/release/candidate.tsv' --layout '%s' --dry --out '%s' --baseline /nonexistent",
         root, lay, lay, g1out)) return pd_refuse("g1-run-fmt");
     {
@@ -1401,7 +1439,7 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
             else return pd_refuse("unknown-plan-arg");
         }
-        if (!ids_f || !out_d) return pd_refuse("plan-requires-ids-file-and-out");
+        if (!ids_f || !ids_f[0] || !out_d || !out_d[0]) return pd_refuse("plan-requires-ids-file-and-out");
         if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
         if (pd_load_ids(ids_f)) return pd_refuse("read-ids-file");
         if (times_f && pd_load_times_file(times_f)) return pd_refuse("read-times-file");
