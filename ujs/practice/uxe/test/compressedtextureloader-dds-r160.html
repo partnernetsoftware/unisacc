@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { CompressedTextureLoader, LinearFilter, REVISION } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const fixtures = [
+  [9,5,0x31545844,4,72,48,33776],
+  [7,3,0x33545844,3,64,32,33778],
+  [5,5,0x35545844,1,64,64,33779],
+  [4,2,0x31545844,1,8,8,33777],
+];
+function fixture([w,h,code,levels,bytes,first,format]) {
+  const b = new ArrayBuffer(128+bytes), d = new DataView(b);
+  const fields = {
+    0:0x20534444,4:124,8:0x81007 | (levels>1?0x20000:0),12:h,16:w,20:first,
+    28:levels,76:32,80:format===33777?5:4,84:code,108:levels>1?0x401008:0x1000,
+  };
+  for (const [offset,value] of Object.entries(fields)) d.setUint32(Number(offset),value,true);
+  const payload = new Uint8Array(b,128);
+  for (let i=0;i<payload.length;i++) payload[i]=(i*11+3)%251;
+  return b;
+}
+const patch = (buffer, offset, value) => {
+  const copy = buffer.slice();
+  new DataView(copy).setUint32(offset,value,true);
+  return copy;
+};
+
+try {
+  if (REVISION !== "160") throw Error("revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const mutate = BigInt(query.get("mutate"));
+  const read = (buffer,mode=1) => {
+    const api = new WebAssembly.Instance(module).exports;
+    const origin = Number(api.uxe_dds(0n,0n,0n));
+    const mem = new Uint8Array(api.memory.buffer,origin,60000);
+    const view = new DataView(mem.buffer,origin,60000);
+    mem.set(new Uint8Array(buffer),4097);
+    const status = Number(api.uxe_dds(BigInt(mode),BigInt(buffer.byteLength),mutate));
+    const at = offset => view.getUint32(offset,true);
+    if(status<0) return {status,untouched:at(512)};
+    const mipmaps = Array.from({length:status},(_,i)=>{
+      const row = 128+20*i;
+      const [pointer,length,width,height,format] = [0,4,8,12,16].map(n=>at(row+n));
+      return {data:mem.slice(pointer,pointer+length),width,height,format,offset:pointer-4097};
+    });
+    return {mipmaps,width:mipmaps[0].width,height:mipmaps[0].height,format:mipmaps[0].format,
+      mipmapCount:status,isCubemap:false};
+  };
+  class NativeDDS extends CompressedTextureLoader {
+    parse(buffer,loadMipmaps) {
+      const parsed = read(buffer,loadMipmaps?1:2);
+      if(parsed.status<0) throw Error("native DDS parser " + parsed.status);
+      return parsed;
+    }
+  }
+  const loader = new NativeDDS();
+  const fields = [];
+  for (const [i, input] of fixtures.map((row,i)=>[i,fixture(row)])) {
+    const url = URL.createObjectURL(new Blob([input]));
+    let loaded;
+    try {
+      loaded = await new Promise((resolve,reject)=>loader.load(url,resolve,undefined,reject));
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const data = Uint8Array.from(loaded.mipmaps.flatMap(mip=>Array.from(mip.data)));
+    const original = new Uint8Array(input,128);
+    const base = loader.parse(input,false);
+    const mips = loaded.mipmaps;
+    const last = mips.at(-1);
+    fields.push(
+      loaded.image.width,loaded.image.height,loaded.format,mips.length,
+      mips[0].data.length,last.data.length,last.width,last.height,
+      last.offset,last.data[0],Number(data.length===original.length && data.every((v,j)=>v===original[j])),
+      Number(loaded.isCompressedTexture && loaded.version===1 && (loaded.minFilter===LinearFilter)===(mips.length===1)),
+      base.mipmapCount,base.mipmaps[0].data.length,Number(loaded.format===fixtures[i][6]),
+    );
+  }
+  const wide=fixture(fixtures[0]);
+  const reject = (buffer,mode=1) => {
+    const parsed = read(buffer,mode);
+    return [parsed.status,parsed.untouched];
+  };
+  const extra = new Uint8Array(wide.byteLength+1);
+  extra.set(new Uint8Array(wide));
+  fields.push(
+    ...reject(wide.slice(0,127)), ...reject(wide.slice(0,-1)), ...reject(extra.buffer),
+    ...reject(patch(wide,0,0)), ...reject(patch(wide,76,31)), ...reject(patch(wide,112,0x200)),
+    ...reject(patch(wide,84,0x30315844)), ...reject(patch(wide,28,5)), ...reject(wide,3),
+    ...reject(wide,4), ...reject(wide.slice(0,-1),2),
+  );
+  result.textContent = JSON.stringify(fields);
+} catch(error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
