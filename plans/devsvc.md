@@ -799,3 +799,36 @@ U0 本节(先行)。U1 工单字段与状态机;U2 租约 pull、ack、done、ha
 - 范围 git ls-files(已跟踪加未跟踪未忽略),默认排除 archive/、kernel/ 与二进制;--all 取消(对拍与 rg 文件数、命中数完全一致)。输出 path:line:text,末行 SEARCH files= matches= truncated= ms=;上限 64 KB、500 匹配、20 秒,超出打 TRUNCATED reason=。rc 0 有命中、1 无、2 用法或 I/O 错。
 - 正则只支持 `.`、首 `^`、尾 `$`、反斜杠转义;其余元字符具名拒绝 ERXSYNTAX。内部不调外部 rg 或 grep,只用 sy_* 与 git。事件 search 记模式长度、计数与耗时,不记命中内容。
 - 热调用实测 7271 文件约 0.76 秒(字面串先整缓冲预筛);git ls-files 本身仅 34 毫秒,故文件表缓存无收益,未做。
+
+## Windows 路线(2026-11-21 审计定稿)
+
+依据: `~/.claude/jobs/2798e440/tmp/devsvc-win/D/`(fable 审计证据与结论),对应台账 `build/owner-reqs.tsv` `R67`(来源 `S`,所有者要求 `devsvc` 在 Windows 可运行且内部搜索由 `cx` 自己实现)。
+
+### 1. 现状、已跨平台部分与未实测项
+
+- **现状(未跨平台)**: 当前连 macOS 都起不来 -- 常驻服务本地通信硬编码 Unix 域套接字(`AF_UNIX`),进程活性判定读 Linux `/proc`,提交门(`commit-own`/`precommit`/`register`)深度依赖 Linux/POSIX shell 与外部工具(`sh`/`bound`/`env`/`tar`)。
+- **已跨平台部分**:
+  - `devsvc search` 已为纯 `cx` 实现(仅文件集取自 `git ls-files`,不调外部 `rg`/`grep`);
+  - `flow` 节点按 `argv` 直接起子进程,不经 shell;
+  - 上层多数系统调用已统一走 `sy_*`。
+- **未实测项(UNMEASURED)**:
+  - 仓内 145 条符号链接在 Windows `git checkout` 下的行为(`core.symlinks` / 开发者模式 / 降级为文本文件);
+  - APE 在 Windows 上的启动器抽象与句柄继承行为。
+
+### 2. 分阶段路线(阶段 0 至 3)
+
+| 阶段 | 目标与范围 | 类别与排期 |
+|---|---|---|
+| 阶段 0 | 收敛 `tools/` 直调 POSIX:建 `tools/` 只降不升 POSIX 直调普查棘轮,外部 `rm`/`mkdir` 改 `sy_*` | `main` 非 A 类(中值约 2 天),排在 `agy-flow` 提交工具组稳定之后 |
+| 阶段 1 | 核心接口 Windows 能力:进程活性加启动时间、进程树终止、文件锁、可用内存、目录列举与递归删除、回环本地通信、控制台中断 | A 类产品输入(`0.0.93` 不解决 win,建议 `0.0.93` 之后单开一版「核心库面 win 能力」进版本序候选) |
+| 阶段 2 | Windows 最小可用子集:`f read/write/edit`、`search`、`x`、只读 `git` 转发 | `main` 工具线(依赖阶段 1 公开或候选实测) |
+| 阶段 3 | Windows 完整版:`commit-own` 与 `precommit` 的 shell 段改纯 `cx`、`register` 去 `bound`/`env`/`tar`、145 条符号链接改 `cxroot` 映射或复制 | `main` 工具线 + 仓布局同步 |
+
+### 3. 阶段 0 两份待派简报(排在 agy-flow 提交工具稳定之后)
+
+1. **简报 A(`tools/` 直调 POSIX 只降不升普查棘轮)**:
+   - 目标:按 `devsvc-win/D/03-libc-direct-*.txt` 与 `03-dep-posix.txt` 建基线表与检查(优先并入现有棘轮工具),只降不升,拦截 `tools/` 新增直调 POSIX/libc 与 Linux `/proc` 硬编码;带先红后绿与 3 变异。
+   - 前置:`agy-flow` 提交工具组落库并自检绿;写域仅 `tools/` 与 `build/` 对应基线表。
+2. **简报 B(`devsvc` 链外部 `rm`/`mkdir` 改 `sy_*`)**:
+   - 目标:将 `devsvc` 关联工具(`tools/devsvc.cx`、`tools/cxlib/dv*.cx`、`tools/cxlib/flow*.cx`)中经子进程调用外部 `rm -rf`/`mkdir -p` 处统一替换为 `cx/sys` 的 `sy_mkdir_all`/递归删除帮手,实跑对应 `check-*` 与 `affected --run` 全绿,降低普查基线计数。
+   - 前置:`agy-flow` 提交工具组落库并自检绿,写域与 `agy-flow` 错开。

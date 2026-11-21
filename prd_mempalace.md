@@ -227,3 +227,52 @@ flowchart LR
 - 记账(2026-11-21 17:46,0.0.88 新首链起链):原因=修 runexec ExStat(v0.0.88 89debcb544f24fd44abacdf4462ccbc3ba83072b)后重起候选首链;前置=4 个 RI 批次后绿全 PASS(72/72,/tmp/v088-exstat-verify/after-green.log)、lane-key-probes PART1 5/0 与 PART2 4/0(/tmp/v088-lane-probe-prep/after-green.out)、sy-stat-struct 注册 PASS、chain-ready 全项 PASS(READY=yes);真实句柄 PID=2638136 PGID=2638136;截止=5400s(2026-11-21 19:16 CST);输出目录=/tmp/unisacc-session-v088-chain2/89debcb544f24fd44abacdf4462ccbc3ba83072b;终止命令=kill -- -2638136。
 - 决定(cc 2026-11-21,0.0.94 冷跑缓存 S4 实验定案与新研究候选):依据 ~/.claude/jobs/2798e440/tmp/v094-ready/s4/conclusion.md,(1) L1 闭包复用本期不开、S5 不派:e4 原字节同率仅 60%(hello 对 p3 15/25,因 e3 __unisacc_L/R 全局计数平移,重编号后 24/24 全同),且存在 fwm_merge 方向相反丢 main、image 路 e3 拒无定义函数、闭包 e1 非连续切片三项挡路点;(2) 0.0.94 只做 L5(a) 前导预制,N1 路径敏感已定位(e3 .unit 源名帧约 117 步/字节,ELF 不变,与 L5(a) 无关);(3) 新增研究候选「标号函数局部化」(build/owner-reqs.tsv R60,plans/v0.0.94.md 速度候选池):A 类(parse2/lower 表,全量失效),估算与版本归属另评审。回滚:按提交回退 plans/v0.0.94.md、build/owner-reqs.tsv 与本行。
 - 记账(2026-11-21 18:20,0.0.88 新候选 ci-early 六格原生 CI):原因=0.0.88 新首链 DONE(REV 89debcb544,resumes=0/3,ape-receipt/pack-inputs 六片全齐,APE sha256=0e028e7de8dc1c4a5e6a5b3120e137daf8b2d3a8b3068d5af7f971a3c3a46854 8798174 字节),起六格原生 CI(私有草稿自动清理);真实句柄 PID=2946712 PGID=2946712;结果=DONE PASS(run_id=44893924553,pass_cells=6,fail_cells=0,lnx/osx/win x86_64+arm64 全 success,私有草稿 v0.0.88-early-89debcb544 已自动 DELETED,日志 /tmp/unisacc-ci-early-v088-chain2/run.log)。
+
+## 编排交接 2026-11-21 21:10
+
+状态: 编排者 `1:cc` 额度剩约 3%(重置约 64 小时后),随时可能停摆;后续编排者直接按本节接手。
+
+### (1) 版本状态
+- **0.0.88 已公开并置 Latest**: `Y2=4cbf2a5a53`、`6 post-publish=0f219b3c30`,本机仓根 `unisacc.com` 已升级为 0.0.88 公开 APE(`0e028e7d`,8798174B,`--smoke` 16/16 PASS),0.0.87 备份在 `~/.unisacc-root-backups/0.0.87-public/`。公开后首批清扫已将磁盘余量由 20G 升至 40G。
+- **0.0.89 范围与在途**: `plans/v0.0.89.md`(含「开版评审」与「A1a U1 折叠与 b15 裁定」):
+  - 五批内容: A1a U0-U3 加折叠 `b08`(F1 静态初始化 + F2 常量位置分片)与 `b15` 取内建地址具名拒绝(二次候选作废直接砍 U3 非 trap 部分;F2 连续两次失败退回只交 F1、`b08` 标 DEFERRED 0.0.93)、批 A 三元回扫 `sk`、批 B 后缀判据放宽与单段名诊断(帮手改名 `cxu_iscxunit` 见 `batchb-ratchets/plan-ratchets.patch`)、`ds-attr-leak`、`safedel`。
+  - 起链前置三项工具尚未全落: 提交门增量化与新工具入口(已落首笔 `5f67d65ef2`,守门人修项 1-4 在途)、带冲突合并工作流(G3/G4/G5)、R57 `cx-dev` 热换网。三项未全落则时间表回退约 159 分钟;全落后目标承诺约 2.5 小时、争取 2 小时内。
+  - 工作树 `.claude/worktrees/v0.0.89`(基线 `3038dc3e73`)含 9 个未提交在途文件,备份在 `~/.claude/jobs/2798e440/tmp/v089-merge/backup/`。
+
+### (2) 关键路径与排队顺序
+1. **`agy-flow`(1:18) 先行**: 先落提交门微修与守门人修项 1-4 -> 再落 R57(`cx-dev` 支持 `parse2` 热换网) -> 再落带冲突合并工作流。
+2. **库窗口等 `agy-flow` 稳定后逐一落库**:
+   - 正则引擎 `ext/textx/regex.cx`(共享暂存区目前暂存 17 个路径含 `prd.md`,绝勿误卷);
+   - `R61a` `dk_feed`(`ext/textx/chunked.cx` 在工作区待落,落库后将 `R61a` 标 `DONE` 并补提交号;二期 `R61b` `zl_feed` 见 `stream-feed/design.md`);
+   - `textx.json` 已落。
+3. **其后工具项**: `cdx` 的 pin 首块补丁 `~/.claude/jobs/2798e440/tmp/phase-shadow/train-pin-only-main-0f219b3c3.patch`; `dup-census` 抽 `tools/cxlib/{muthelp,cscan}.cx` 帮手; `devsvc` 迁 Windows(`R67`)阶段 0 两份简报(POSIX 直调普查棘轮 + 外部 `rm`/`mkdir` 改 `sy_*`,见 `plans/devsvc.md` Windows 路线); `prd.md:756` 统一口径 1 行待正则窗口落库后补。
+
+### (3) 窗口职责、回信与 ujs 车道合入
+- **回信约定**: 所有窗口回报统一「回复请发给 1:cc」(若 `1:cc` 停摆,由接班主调度在 `mux` 声明新地址)。
+- **窗口分工**: `1:cc` 主调度与裁决; `agy-flow`(1:18) 提交门/R57/合并工作流/预跑工具; `agyneon` 发布列车/文档台账/CI 工具/大扫除/cxpkg 与 dup-census; 库窗口(`ext/textx` 正则与流式 feed); `cdx` 深度分析与 pin 补丁; `ujs` 论文 B 独立车道。
+- **`ujs` 车道合入流程**: 收到 `ujs` 合入请求后在共享 `main` 经 `devsvc git merge origin/ujs` 合入,再用 `devsvc git push <完整40位SHA>` 推送(绝不直接改 `ujs/` 文件)。
+
+### (4) 不变式清单
+- 未实跑不记 PASS,未证实不宣称 QUALIFIED;不删断言、不缩覆盖、不放宽时限。
+- 全部 git 写操作经 `devsvc` 管控;共享暂存区只提交自己的明确路径(`--whole`/`--keyed`),严禁 `git add -A`/`git commit -a` 卷走他人暂存(尤其正则窗口 17 路径)。
+- 发布冻结期间 `main` 冻结(仅发布提交例外);一个候选只含一类大改;推断缩短数字一律对折计入预算。
+
+### (5) 待所有者裁定/告知项
+- `R20` 汇编需求再次拆分(`U4` 拆独立版 `0.0.90`,原 `0.0.90..0.0.105` 顺延至 `0.0.91..0.0.106`)及 `build/owner-reqs.tsv` 现有 16 条 `UNTOLD` 断点台账(`told_owner` 仍空,需统一告知所有者后才可填 `told_owner`)。
+- `sync-company` 等脱敏源码问题归项目所有者裁定。
+- `lz-unisacc` 窗口的 `git add .` 习惯需提醒改用明确路径/devsvc,防污染共享暂存区。
+
+### (6) 研究产物目录索引(`~/.claude/jobs/2798e440/tmp/`)
+- `v089-train/`: 0.0.89 列车时间表(`timetable.tsv`、`notes.txt`)。
+- `merged-build/`: 批 A + A1a 生成器层合并构造等价性实测(`evidence-summary.txt`)。
+- `a1a-fold/` / `a1a-u4/` / `a1a-design/`: A1a U1 折叠(`b08`/`b15`)设计、U4 拆版位置审计与总设计。
+- `batchb-ratchets/`: 批 B `cxu_iscxunit` 改写补丁(`plan-ratchets.patch`)与提交步骤。
+- `v089-merge/backup/`: `v0.0.89` 工作树 9 个未提交在途文件备份。
+- `devsvc-win/D/`: `devsvc` 迁 Windows 全面审计证据与阶段 0-3 结论(`R67`)。
+- `stream-feed/`: `dk_feed`/`zl_feed` 流式管线设计稿(`R61a`/`R61b`)。
+- `pkgmgr/`: `cxpkg` 库包管理工具设计提案(`design.txt`,对应 `plans/cxpkg.md` 与 `R13a/b/c`)。
+- `phase-shadow/`: pin 首块补丁(`train-pin-only-main-0f219b3c3.patch`)与相位影测。
+- `v088-train-fixes/` / `merge-flow/` / `newtool-gate/`: 提交门增量化、合并工作流 G1-G5 与新工具入口补丁。
+- `prerun088-c2/`: 0.0.88 新候选 440/0/2 严格预跑全套证据(`strict-final.tsv`)。
+- `sweep-088/`: 0.0.88 公开后大扫除计划(`plan.txt`)。
+- `v092-ready/` / `v094-ready/` / `label-local/` / `diag-audit/`: 0.0.93 核心库面二期、0.0.94 S4 实验、标号函数局部化(`R60`)与诊断质量审计(`R55`)。
