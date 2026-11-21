@@ -3,6 +3,8 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
 #pragma unisa use mem.heap
 
 static int failed = 0, total = 0;
@@ -29,17 +31,27 @@ static int put(char *dst, long cap, long *at, const char *s) {
 }
 
 /* runs the bench under a 50 s deadline; its output goes to a spool file read back whole */
+/* Spool under private sy_tmpdir path (not fixed /tmp/abab-check.out). */
+static char g_spool[512];
+static int spool_ready(void) {
+    if (g_spool[0]) return 0;
+    if (cx_fmt(g_spool, sizeof g_spool, "%s/abab-check-%d.out", sy_tmpdir(), (int)sy_pid())) return 1;
+    return 0;
+}
 static int run(const char *args, char *out, int cap) {
-    char cmd[1024]; char *av[4]; char *b = 0; long n = 0;
+    char cmd[1200]; char *av[4]; char *b = 0; long n = 0;
     sy_spawn_t o; sy_exit_t st;
-    const char *pre = "sh ./unisacc.com tools/abab-bench.cx -- ", *post = " </dev/null >/tmp/abab-check.out 2>&1";
+    const char *pre = "sh ./unisacc.com tools/abab-bench.cx -- ";
+    char post[600];
     long at = 0;
+    if (spool_ready()) return -1;
+    if (cx_fmt(post, sizeof post, " </dev/null >%s 2>&1", g_spool)) return -1;
     if (put(cmd, sizeof cmd, &at, pre) || put(cmd, sizeof cmd, &at, args) || put(cmd, sizeof cmd, &at, post)) return -1;
     av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
     sy_spawn_init(&o); o.argv = av; o.pgroup = -1; o.deadline_ms = 50000;
     out[0] = 0;
     if (sy_proc_run(&o, &st)) return -1;
-    if (sy_read_file("/tmp/abab-check.out", &b, &n, cap - 1) == 0 && b) { long k; for (k = 0; k < n; k++) out[k] = b[k]; out[n] = 0; mm_free(b); }
+    if (sy_read_file(g_spool, &b, &n, cap - 1) == 0 && b) { long k; for (k = 0; k < n; k++) out[k] = b[k]; out[n] = 0; mm_free(b); }
     return st.timed_out ? -1 : sy_exit_code(&st);
 }
 
