@@ -759,6 +759,118 @@ int main(void) {
         free(m);
     }
 
+    /* (12) R71 M8: prepare --from-chain-dir resolves 5 PRERUN_* inputs, audits 442 vs dvqualify --list (799)
+     *      excluded PLANNED / foreign-platform / stale batches into prerun-env.tsv, refuses unfiltered
+     *      PLANNED/foreign ids or HEAD rev mismatch, and merge --dir enforces run.done. */
+    {
+        char proot[CPD_PW], pchain[CPD_PW], pout[CPD_PW], rawids[CPD_PW], pmock[CPD_PW], penv[CPD_PW];
+        if (cx_fmt(proot, sizeof proot, "%s/m8-root", work) ||
+            cx_fmt(pchain, sizeof pchain, "%s/m8-chain", work) ||
+            cx_fmt(pout, sizeof pout, "%s/m8-prerun", work) ||
+            cx_fmt(rawids, sizeof rawids, "%s/m8-raw799.ids", work) ||
+            cx_fmt(pmock, sizeof pmock, "%s/m8-mock.sh", work) ||
+            cx_fmt(penv, sizeof penv, "%s/prerun-env.tsv", pout)) return 2;
+        const char *m8_setup =
+            "set -e; R=\"$1\"; C=\"$2\"; RAW=\"$3\"; MOCK=\"$4\"; "
+            "mkdir -p \"$R/tests\" \"$R/build\" \"$R/release/evidence\"; "
+            "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\targs\\tcoverage\\texpect\\theaders\\ttier\\n"
+            "b-impl-1\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc1\\trc0:M\\tproduct\\tdaily\\n"
+            "b-impl-2\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc2\\trc0:M\\tproduct\\tcommit\\n"
+            "real-commit\\tIMPLEMENTED\\tinterfaces\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc3\\trc0:M\\tproduct\\tcommit\\n"
+            "b-planned-1\\tPLANNED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc4\\trc0:M\\tproduct\\tdaily\\n"
+            "b-planned-2\\tPLANNED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc5\\trc0:M\\tproduct\\tdaily\\n"
+            "b-osx-arm64\\tIMPLEMENTED\\tplatform\\tt.cx\\tSOURCE\\tosx/arm64\\t55\\t-\\tt.cx\\t-\\tc6\\trc0:M\\tproduct\\tslow\\n"
+            "b-win-x64\\tIMPLEMENTED\\tplatform\\tt.cx\\tSOURCE\\twin/x86_64\\t55\\t-\\tt.cx\\t-\\tc7\\trc0:M\\tproduct\\tslow\\n"
+            "b-stale-1\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc8\\trc0:M\\tproduct\\tdaily\\n"
+            "b-stale-2\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc9\\trc0:M\\tproduct\\tdaily\\n"
+            "b-stale-3\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc10\\trc0:M\\tproduct\\tdaily\\n' > \"$R/tests/batches.tsv\"; "
+            "printf 'id\\tdomain\\n"
+            "b-impl-1\\tproduct-qualification\\n"
+            "b-impl-2\\tproduct-qualification\\n"
+            "b-planned-1\\tproduct-qualification\\n"
+            "b-planned-2\\tproduct-qualification\\n"
+            "b-osx-arm64\\tproduct-qualification\\n"
+            "b-win-x64\\tproduct-qualification\\n"
+            "b-stale-1\\tproduct-qualification\\n"
+            "b-stale-2\\tproduct-qualification\\n"
+            "b-stale-3\\tproduct-qualification\\n"
+            "real-commit\\ttool-selfcheck\\n' > \"$R/tests/batch-domain-index.tsv\"; "
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n"
+            "b-impl-1\\tproduct-qualification\\tPASS\\t0\\taaa\\t1200\\t1.0\\t0\\t-\\n"
+            "b-impl-2\\tproduct-qualification\\tPASS\\t0\\taaa\\t1500\\t1.0\\t0\\t-\\n"
+            "real-commit\\ttool-selfcheck\\tPASS\\t0\\taaa\\t9000\\t1.0\\t0\\t-\\n"
+            "SUMMARY\\tbatches=3\\tPASS=3\\tFAIL=0\\tUNKNOWN=0\\tINVALID=0\\n' > \"$R/release/evidence/v0.0.88-strict-2026-11-21.tsv\"; "
+            "printf 'b-impl-1\\t1200\\nb-impl-2\\t1500\\nreal-commit\\t9000\\n' > \"$R/build/phase-times.tsv\"; "
+            "printf 'b-impl-2\\n' > \"$R/tests/commit-tier-selection.tsv\"; "
+            "printf 'b-impl-1\\nb-planned-1\\nb-osx-arm64\\n' > \"$RAW\"; "
+            "printf '#!/bin/sh\\nmode=$1; wid=$2; jobs=$3; ids=$4; out=$5\\n"
+            "if [ \"$mode\" = prebuild-self ]; then exit 0; fi\\n"
+            "printf \"# devsvc qualify\\\\nbatch\\\\tdomain\\\\tstatus\\\\trc\\\\tcandidate\\\\tms\\\\tload1\\\\tretries\\\\tnote\\\\n\" > \"$out\"\\n"
+            "for id in $(printf \"%%s\" \"$ids\" | tr \",\" \" \"); do printf \"%%s\\\\tproduct-qualification\\\\tPASS\\\\t0\\\\taaa\\\\t50\\\\t1.0\\\\t0\\\\t-\\\\n\" \"$id\" >> \"$out\"; done\\n"
+            "exit 0\\n' > \"$MOCK\" && chmod +x \"$MOCK\"; "
+            "cd \"$R\" && git init -q -b main && git config user.name m8 && git config user.email m8@localhost && "
+            "git add . && git commit -qm init && REV=$(git rev-parse HEAD); "
+            "mkdir -p \"$C/$REV/ape-final\" \"$C/bad/ape-final\"; "
+            "printf '#!/bin/sh\\necho unisacc 0.0.89\\n' > \"$C/$REV/ape-final/unisacc-next.com\" && chmod +x \"$C/$REV/ape-final/unisacc-next.com\"; "
+            "cp \"$C/$REV/ape-final/unisacc-next.com\" \"$C/bad/ape-final/unisacc-next.com\"; "
+            "printf 'rev=%s\\nroot=%s\\n' \"$REV\" \"$R\" > \"$C/$REV/chain-run.identity\"; "
+            "printf 'rev=0000000000000000000000000000000000000000\\nroot=%s\\n' \"$R\" > \"$C/bad/chain-run.identity\"";
+        char *sv[] = {"sh", "-c", (char *)m8_setup, "sh", proot, pchain, rawids, pmock, 0};
+        if (ck_run(sv, out, sizeof out) != 0) return 2;
+
+        /* 12a: HEAD rev mismatch refused */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- prepare --from-chain-dir '%s/bad' --root '%s' --version 0.0.89 --out '%s'",
+            cwd, cwd, pchain, proot, pout)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=candidate-rev-mismatch"),
+           "prepare-refuses-head-rev-mismatch");
+
+        /* 12b: unfiltered ids-file containing PLANNED or foreign-platform batches refused */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- prepare --from-chain-dir '%s' --root '%s' --version 0.0.89 --ids-file '%s' --out '%s'",
+            cwd, cwd, pchain, proot, rawids, pout)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=ids-contains-planned-or-foreign-platform"),
+           "prepare-refuses-unfiltered-planned-or-foreign-ids");
+
+        /* 12c: prepare from outer chain dir resolves 5 inputs, plans windows, and records 442 vs dvqualify diff */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- prepare --from-chain-dir '%s' --root '%s' --version 0.0.89 --out '%s'",
+            cwd, cwd, pchain, proot, pout)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        size_t en = 0; char *eb = (char *)cx_read(penv, &en);
+        ck(rc == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE\tversion=0.0.89\t") &&
+           ckk_has(out, CPD_OUT, "\tids=3\tdvqualify_list=9\texcluded_planned=2\texcluded_foreign_platform=2\texcluded_stale=3\t") &&
+           eb && rows_have(eb, (long)en, "ids_count\t3\n") &&
+           rows_have(eb, (long)en, "dvqualify_list_count\t9\n") &&
+           rows_have(eb, (long)en, "excluded_total\t7\n") &&
+           rows_have(eb, (long)en, "excluded_planned\t2\n") &&
+           rows_have(eb, (long)en, "excluded_foreign_platform\t2\n") &&
+           rows_have(eb, (long)en, "excluded_stale\t3\n") &&
+           rows_have(eb, (long)en, "extra_non_pq\t1\n"),
+           "prepare-resolves-five-inputs-and-audits-diff");
+        free(eb);
+
+        /* 12d: merge --dir refuses before run.done exists, succeeds after run --dir */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- merge --dir '%s'",
+            cwd, cwd, pout)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=run-not-done"),
+           "merge-dir-refuses-before-run-done");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --dir '%s' --mock-runner '%s' && "
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- merge --dir '%s'",
+            cwd, cwd, pout, pmock, cwd, cwd, pout)) return 2;
+        rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_MERGE\twindows=") && ckk_has(out, CPD_OUT, "\tbatches=3\tPASS=3\t"),
+           "run-and-merge-dir-from-prerun-env");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
