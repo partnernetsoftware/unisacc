@@ -134,3 +134,24 @@ export function linkLoadingManagerModule(module, host) {
   }
   return exports;
 }
+
+export function linkLoadingManagerProduct(baseModule, productModule, host) {
+  const base = linkLoadingManagerModule(baseModule, host);
+  if (!(productModule instanceof WebAssembly.Module) || typeof base.uxe_loadingmanager !== "function") {
+    throw new WebAssembly.LinkError("missing LoadingManager product or dispatch");
+  }
+  const namespace = "uxe_loading_manager_v1";
+  const names = WebAssembly.Module.imports(productModule);
+  if (names.length !== 1 || names[0].kind !== "function" ||
+      names[0].module !== namespace || names[0].name !== "uxe_loadingmanager") {
+    throw new WebAssembly.LinkError("unsupported LoadingManager product import");
+  }
+  const { exports: product } = new WebAssembly.Instance(productModule, {
+    [namespace]: { uxe_loadingmanager: base.uxe_loadingmanager }
+  });
+  if (typeof product.uxe_abi_version !== "function" || product.uxe_abi_version() !== 1 ||
+      !(product.memory instanceof WebAssembly.Memory) || product.memory === base.memory) {
+    throw new WebAssembly.LinkError("LoadingManager product ABI version or memory");
+  }
+  return { base, product };
+}

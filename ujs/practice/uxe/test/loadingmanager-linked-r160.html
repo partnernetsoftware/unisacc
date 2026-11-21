@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { DefaultLoadingManager, LoadingManager, REVISION } from "../../web/game/three.module.js";
+import { createLoadingManagerHost, linkLoadingManagerProduct } from "../base/loadingmanager-host-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  async function load(name) {
+    const response=await fetch("file://"+query.get(name));
+    if(!response.ok) throw new Error("missing "+name);
+    return new WebAssembly.Module(await response.arrayBuffer());
+  }
+  const [baseModule,productModule]=await Promise.all(["base","product"].map(load));
+  const host=createLoadingManagerHost();
+  const {base,product}=linkLoadingManagerProduct(baseModule,productModule,host);
+  if(base.memory===product.memory) throw new Error("shared memory");
+  const call=(op,x=0,y=0,z=0)=>Number(product.uxe_loading_product(BigInt(op),BigInt(x),BigInt(y),BigInt(z)));
+  const urls=["","asset.bin","pkg/asset.bin","missing.bin","pkg/missing.bin"];
+  for(const url of urls.slice(1)) host.registerURL(url);
+  const modifier=url=>"pkg/"+url;
+  const rDefault=DefaultLoadingManager;
+  const rSeparate=new LoadingManager();
+  const ref=[], actual=[];
+  function bind(manager,id,events) {
+    manager.onStart=function(url,loaded,total){
+      events.push(1,id,Number(this===manager),urls.indexOf(url),loaded,total);
+    };
+    manager.onProgress=function(url,loaded,total){
+      events.push(2,id,Number(this===manager),urls.indexOf(url),loaded,total);
+    };
+    manager.onError=function(url){
+      events.push(3,id,Number(this===manager),urls.indexOf(url),0,0);
+    };
+    manager.onLoad=function(){
+      events.push(4,id,Number(this===manager),0,0,0);
+    };
+  }
+  bind(rDefault,1,ref);
+  bind(rSeparate,2,ref);
+  const init=call(0);
+  const bindEvents=[[40,0],[128,2]];
+  for(const [address,selection] of bindEvents) {
+    const owner={};
+    const id=selection===0?1:2;
+    host.bindManager(address,owner);
+    bind(owner,id,actual);
+    for(const [kind,name] of [[1,"onStart"],[2,"onProgress"],[3,"onError"],[4,"onLoad"]]) {
+      if(call(1,kind,host.registerCallback(owner[name]),selection)!==address) throw new Error("product callback bind");
+    }
+  }
+  const refRegex=/\.bin$/g;
+  const loader={id:"loader"};
+  const reference=[1,Number(rDefault.setURLModifier(modifier)===rDefault),
+    urls.indexOf(rDefault.resolveURL(urls[1])),urls.indexOf(rSeparate.resolveURL(urls[1])),
+    Number(rDefault.addHandler(refRegex,loader)===rDefault),Number(rDefault.getHandler(urls[2])===loader),
+    Number(rDefault.getHandler(urls[2])===loader),Number(rSeparate.getHandler(urls[2])===null),
+    Number(rDefault.removeHandler(refRegex)===rDefault),Number(rDefault.getHandler(urls[2])===null)];
+  const handle=host.registerRegExp(/\.bin$/g);
+  const loaderToken=host.registerLoader(loader);
+  const results=[init,Number(call(2,host.registerCallback(modifier))===40),call(3,1),call(3,1,0,2),
+    Number(call(6,handle.token,loaderToken,handle.global)===40),
+    Number(host.readLoader(call(7,2))===loader),Number(host.readLoader(call(7,2))===loader),
+    Number(host.readLoader(call(7,2,0,2))===null),Number(call(8,handle.token)===40),
+    Number(host.readLoader(call(7,2))===null)];
+  for(const [raw,fail,selection] of [[1,0,0],[3,1,0],[1,0,2]]) {
+    const manager=selection===0?rDefault:rSeparate;
+    const resolved=manager.resolveURL(urls[raw]);
+    reference.push(urls.indexOf(resolved));
+    manager.itemStart(resolved);
+    if(fail) manager.itemError(resolved);
+    manager.itemEnd(resolved);
+    const x=call(4,raw,Number(query.has("mutate") && raw===1 && selection===0),selection);
+    if(x<1 || call(5,x,fail,selection)!==0) throw new Error("product request lifecycle");
+    results.push(x);
+  }
+  function compare(name,got,want) {
+    if(got.length!==want.length) throw new Error(name+" length actual="+got.length+" r160="+want.length);
+    for(let i=0;i<want.length;i++) {
+      if(got[i]!==want[i]) throw new Error(name+" case="+i+" actual="+got[i]+" r160="+want[i]);
+    }
+  }
+  compare("product public ABI",results,reference);
+  compare("product host events",actual,ref);
+  output.textContent=JSON.stringify([...results,...actual]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

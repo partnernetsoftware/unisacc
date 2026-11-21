@@ -1,0 +1,52 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[390],base[300],product[300],url[1024];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-lm-linked-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(product,sizeof product,"%s/product.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/loadingmanager-linked-r160.html?base=%s&product=%s%s",
+        cwd,base,product,mutate?"&mutate=1":"");
+    char *build_base[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/base/loadingmanager-base-abi.ujs",
+        "ujs/practice/uxe/base/record-copy.ujs","ujs/practice/uxe/base/loadingmanager.ujs",
+        "ujs/practice/uxe/base/defaultloadingmanager.ujs","ujs/practice/uxe/base/fileloader.ujs",
+        "ujs/practice/uxe/base/loadingmanager-class.ujs","ujs/practice/uxe/base/loadingmanager-fileloader.ujs",
+        "ujs/practice/uxe/base/loadingmanager-base-api.ujs","-o",base,0};
+    char *build_product[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/loadingmanager-linked-product.ujs","-o",product,0};
+    const double gold[]={1,1,2,1,1,1,1,1,1,1,2,4,1,
+        1,1,1,2,0,1, 2,1,1,2,1,1, 4,1,1,0,0,0,
+        1,1,1,4,1,2, 3,1,1,4,0,0, 2,1,1,4,2,2, 4,1,1,0,0,0,
+        1,2,1,1,0,1, 2,2,1,1,1,1, 4,2,1,0,0,0};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    char *output=0; size_t bytes=0;
+    int failed=length<=0 || length>=(int)sizeof url;
+    char **builds[]={build_base,build_product};
+    for(int i=0;!failed && i<2;i++) {
+        const int rc=cx_runv_timeout(builds[i],12,&output,&bytes);
+        if(rc) { printf("LOADINGMANAGER_LINK stage=%d compile_rc=%d %s\n",i,rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) {
+        failed=r160_wait_read(url,"#r160",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            if(actual[i]!=gold[i]) {
+                printf("LOADINGMANAGER_LINK case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("G_IO LoadingManager C6 linked product cases=%d failed=%d\n",count,failed);
+    return failed;
+}
