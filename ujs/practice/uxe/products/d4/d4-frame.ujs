@@ -1,0 +1,186 @@
+struct D4Framing {
+  eyeX: f64;
+  eyeY: f64;
+  eyeZ: f64;
+  targetX: f64;
+  targetY: f64;
+  targetZ: f64;
+  height: f64;
+  focal: f64;
+}
+
+struct D4Frame {
+  bodyX: f64;
+  bodyY: f64;
+  bodyZ: f64;
+  travel: f64;
+  eyeX: f64;
+  eyeY: f64;
+  eyeZ: f64;
+  targetX: f64;
+  targetY: f64;
+  targetZ: f64;
+  fovy: f64;
+}
+
+native function d4_range(at:i64,bytes:i64) i64 {
+  return at>=0 && at%8==0 && at<=6291456-bytes;
+}
+
+native function d4_disjoint(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a+n<=b || b+m<=a;
+}
+
+native function d4_norm(x:f64,y:f64,z:f64) f64 {
+  let scale=ux_math_abs(x);
+  let absy=ux_math_abs(y);
+  let absz=ux_math_abs(z);
+  if(absy>scale) { scale=absy; }
+  if(absz>scale) { scale=absz; }
+  if(scale==0.0 || scale-scale!=0.0) { return scale; }
+  let sx=x/scale;
+  let sy=y/scale;
+  let sz=z/scale;
+  return scale*f64_sqrt(sx*sx+sy*sy+sz*sz);
+}
+
+native function d4_smooth(t:f64) f64 {
+  return t*t*(3.0-2.0*t);
+}
+
+native function d4_knee(dst:i64,leg:i64,extend:f64) i64 {
+  let hx=ux_f64(dst); let hy=ux_f64(dst+8); let hz=ux_f64(dst+16);
+  let fx=ux_f64(dst+48); let fy=ux_f64(dst+56); let fz=ux_f64(dst+64);
+  let dx=fx-hx; let dy=fy-hy; let dz=fz-hz;
+  let distance=d4_norm(dx,dy,dz);
+  if(distance<=0.0 || distance-distance!=0.0) { return 0-1; }
+
+  let bx=ux_f64(leg+24)-ux_f64(leg);
+  let by=ux_f64(leg+32)-ux_f64(leg+8);
+  let bz=ux_f64(leg+40)-ux_f64(leg+16);
+  let upper=d4_norm(bx,by,bz)+extend;
+  let lower=d4_norm(ux_f64(leg+24)-ux_f64(leg+48),
+    ux_f64(leg+32)-ux_f64(leg+56),ux_f64(leg+40)-ux_f64(leg+64));
+  if(upper<=0.0 || lower<=0.0 || upper-upper!=0.0 || lower-lower!=0.0) { return 0-1; }
+
+  let ax=dx/distance; let ay=dy/distance; let az=dz/distance;
+  let bend=bx*ax+by*ay+bz*az;
+  let ox=bx-bend*ax; let oy=by-bend*ay; let oz=bz-bend*az;
+  let outward=d4_norm(ox,oy,oz);
+  if(outward<=0.0 || outward-outward!=0.0) { return 0-1; }
+  let along=(upper*upper-lower*lower+distance*distance)/(2.0*distance);
+  let across2=upper*upper-along*along;
+  if(across2<0.0) { across2=0.0; }
+  let across=f64_sqrt(across2);
+  let kx=hx+along*ax+across*(ox/outward);
+  let ky=hy+along*ay+across*(oy/outward);
+  let kz=hz+along*az+across*(oz/outward);
+  if(kx-kx!=0.0 || ky-ky!=0.0 || kz-kz!=0.0) { return 0-1; }
+  let a=ux_f64_put(dst+24,kx);
+  let b=ux_f64_put(dst+32,ky);
+  let c=ux_f64_put(dst+40,kz);
+  return dst;
+}
+
+// Modes follow the existing D4 reference: rest, walk, sliding, frozen,
+// three airborne feet, and extended first leg.
+native function d4_gait(rest:i64,work:i64,phase:f64,mode:i64) i64 {
+  let cycle=f64_floor_i64(phase*0.25);
+  let t=phase-cycle*4.0;
+  let active=f64_floor_i64(t);
+  let progress=t-active;
+  let stride=0.0;
+  let travel=0.0;
+  let bodyY=0.0;
+  if(mode>=1 && mode<=3) {
+    stride=0.48;
+    bodyY=0.0-0.45;
+    if(mode!=3) { travel=phase*stride*0.25; }
+  }
+  let swing=(progress-0.2)/0.6;
+  if(swing<0.0) { swing=0.0; }
+  if(swing>1.0) { swing=1.0; }
+  let envelope=1.0;
+  if(progress<0.2) { envelope=progress/0.2; }
+  if(progress>0.8) { envelope=(1.0-progress)/0.2; }
+  let ease=d4_smooth(envelope);
+  let blend=d4_smooth(swing);
+  let raise=ux_math_sin(3.141592653589793*swing);
+  let sway=ux_math_sin(6.283185307179586*swing);
+  let stanceX=0.0;
+  let stanceZ=0.0;
+  let i=0;
+  while(i<4) {
+    if(i!=active) {
+      stanceX=stanceX+ux_f64(rest+i*72+48);
+      stanceZ=stanceZ+ux_f64(rest+i*72+64);
+    }
+    i=i+1;
+  }
+  let bodyX=ease*0.39*stanceX/3.0+travel;
+  bodyY=bodyY-0.95*ease;
+  let bodyZ=ease*0.39*stanceZ/3.0;
+  i=0;
+  while(i<4) {
+    let leg=rest+i*72;
+    let dst=work+D4Frame.size+i*72;
+    let lift=0.0;
+    if(i==active || (mode==4 && i!=(active+1)%4)) { lift=raise*raise; }
+    let anchor=cycle*1.0;
+    if(i<active) { anchor=anchor+1.0; }
+    if(i==active) { anchor=anchor+blend; }
+    let advance=anchor*stride;
+    if(mode==2) { advance=travel; }
+    let a=ux_f64_put(dst,ux_f64(leg)+bodyX);
+    let b=ux_f64_put(dst+8,ux_f64(leg+8)+bodyY);
+    let c=ux_f64_put(dst+16,ux_f64(leg+16)+bodyZ);
+    let d=ux_f64_put(dst+48,ux_f64(leg+48)+advance);
+    let e=ux_f64_put(dst+56,ux_f64(leg+56)+0.8*lift);
+    let f=ux_f64_put(dst+64,ux_f64(leg+64)+lift*0.28*sway);
+    let extend=0.0;
+    if(mode==5 && i==0) { extend=0.48; }
+    if(d4_knee(dst,leg,extend)<0) { return 0-1; }
+    i=i+1;
+  }
+  let x=ux_f64_put(work+D4Frame.bodyX,bodyX);
+  let y=ux_f64_put(work+D4Frame.bodyY,bodyY);
+  let z=ux_f64_put(work+D4Frame.bodyZ,bodyZ);
+  let distance=ux_f64_put(work+D4Frame.travel,travel);
+  return work;
+}
+
+native function d4_chase(work:i64,framing:i64,fixed:i64) i64 {
+  let height=ux_f64(framing+D4Framing.height);
+  let focal=ux_f64(framing+D4Framing.focal);
+  if(height<=0.0 || focal<=0.0 || height-height!=0.0 || focal-focal!=0.0) { return 0-1; }
+  let fovy=2.0*ux_math_atan(height*0.5/focal);
+  if(fovy<=0.0 || fovy>=3.141592653589793 || fovy-fovy!=0.0) { return 0-1; }
+  let chase=0.0;
+  if(!fixed) { chase=ux_f64(work+D4Frame.travel); }
+  let i=0;
+  while(i<6) {
+    let coordinate=ux_f64(framing+i*8);
+    if(i%3==0) { coordinate=coordinate+chase; }
+    if(coordinate-coordinate!=0.0) { return 0-1; }
+    let saved=ux_f64_put(work+D4Frame.eyeX+i*8,coordinate);
+    i=i+1;
+  }
+  let projection=ux_f64_put(work+D4Frame.fovy,fovy);
+  return work;
+}
+
+native function D4_frame(rest:i64,out:i64,work:i64,framing:i64,phase:f64,mode:i64,fixed:i64) i64 {
+  let bytes=D4Frame.size+288;
+  if(!d4_range(rest,288) || !d4_range(out,bytes) || !d4_range(work,bytes) ||
+     !d4_range(framing,D4Framing.size) || !d4_disjoint(out,bytes,work,bytes) ||
+     !d4_disjoint(out,bytes,rest,288) || !d4_disjoint(work,bytes,rest,288) ||
+     !d4_disjoint(out,bytes,framing,D4Framing.size) ||
+     !d4_disjoint(work,bytes,framing,D4Framing.size) || mode<0 || mode>5 ||
+     fixed<0 || fixed>1 || phase-phase!=0.0 ||
+     phase<0.0-9007199254740991.0 || phase>9007199254740991.0) { return 0-1; }
+  if(d4_gait(rest,work,phase,mode)<0 || d4_chase(work,framing,fixed)<0) { return 0-1; }
+  let copied=uxe_copy_record(out,work,bytes);
+  return 0;
+}
+
+return D4_frame(rest,out,work,framing,phase,mode,fixed);

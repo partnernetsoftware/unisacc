@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>D4 私有步态验收夹具</title>
+<canvas width="720" height="405"></canvas>
+<pre id="result">pending</pre>
+<script type="module">
+import { createWebGLRenderer } from "../renderer-webgl.js";
+import { Scene, PerspectiveCamera } from "../scene.js";
+import { BOX_MESH, MESH_BOX, allMeshes } from "../meshes.js";
+
+const status=document.querySelector("#result");
+const query=new URLSearchParams(location.search);
+const mutate=query.get("mutate")==="1";
+
+async function rows(path) {
+  const request=await fetch(new URL(path,import.meta.url));
+  if(!request.ok) throw new Error("读取 D4 事实失败");
+  return (await request.text()).trim().split("\n").slice(1).map(row=>row.split("\t"));
+}
+
+try {
+  const wasmUrl=query.get("wasm");
+  if(!wasmUrl) throw new Error("验收夹具缺少 Wasm 路径");
+  const [legRows,viewRows,program]=await Promise.all([
+    rows("./d4-legs.tsv"),rows("./d4-framing.tsv"),
+    fetch(wasmUrl).then(async response=>{
+      if(!response.ok) throw new Error("读取 d4.wasm 失败");
+      return response.arrayBuffer();
+    }),
+  ]);
+  if(legRows.length!==4 || legRows.some(row=>row.length!==10) ||
+     viewRows.length!==1 || viewRows[0].length!==11) throw new Error("D4 事实格式错误");
+  const rest=legRows.flatMap(row=>row.slice(1).map(value=>Number(value)/1000));
+  const view=viewRows[0].map(Number);
+  if(![...rest,...view].every(Number.isFinite)) throw new Error("D4 事实含无效数字");
+  const framing=[view[6]/1000,view[7]/1000,view[8]/1000,0,view[9]/1000,0,view[1],view[10]];
+  const {instance}=await WebAssembly.instantiate(program);
+  const {memory,uxe_d4_frame}=instance.exports;
+  const base=2097152, restAt=0, framingAt=320, frameAt=384, workAt=768;
+  const restData=new Float64Array(memory.buffer,base+restAt,36);
+  const framingData=new Float64Array(memory.buffer,base+framingAt,8);
+  const frameData=new Float64Array(memory.buffer,base+frameAt,47);
+  restData.set(rest);
+  framingData.set(framing);
+  const frame=(phase,mode=1,fixed=false)=>{
+    const rc=uxe_d4_frame(BigInt(restAt),BigInt(frameAt),BigInt(workAt),BigInt(framingAt),phase,BigInt(mode),fixed?1n:0n);
+    if(rc!==0n) throw new Error("步态输入无效");
+    return frameData;
+  };
+
+  const canvas=document.querySelector("canvas");
+  const scene=new Scene();
+  const camera=new PerspectiveCamera(1,.1,150);
+  const meshes=allMeshes();
+  const box=meshes[MESH_BOX];
+  const extraMeshes=[];
+  function meshSize(x,y,z) {
+    const dimensions=[x,y,z];
+    const positions=BOX_MESH.map((value,index)=>value*dimensions[index%3]);
+    extraMeshes.push({...box,positions});
+    return meshes.length+extraMeshes.length-1;
+  }
+  function instances(name,count,color,mesh) {
+    const cloud=scene.instances(name,count,color);
+    cloud.meshId=mesh;
+    return cloud;
+  }
+  scene.clearColor=[.27,.37,.42,1];
+  scene.fog.density=0;
+  scene.ambient={color:[1,1,1],intensity:.7};
+  const body=instances("body",1,[.21,.33,.45],meshSize(8.2,1.9,4.2));
+  const joints=instances("joints",12,[.78,.53,.22],MESH_BOX);
+  const bars=instances("links",8,[.42,.48,.52],meshSize(.14,1,.14));
+  const ground=instances("ground",1,[.26,.33,.24],meshSize(48,.24,24));
+  ground.set(0,0,-.12,0,1);
+  const posts=instances("posts",13,[.64,.40,.27],MESH_BOX);
+  for(let i=0;i<13;i++) posts.set(i,(i-6)*2.4,.28,6,.55);
+  const renderer=createWebGLRenderer(canvas,{antialias:false,extraMeshes});
+  const gl=canvas.getContext("webgl");
+
+  function draw(phase,fixed=false) {
+    const values=frame(phase,1,fixed);
+    camera.setEye(values[4],values[5],values[6]);
+    camera.setTarget(values[7],values[8],values[9]);
+    camera.fovy=values[10];
+    body.set(0,values[0],5.1+values[1],values[2],1);
+    for(let leg=0;leg<4;leg++) {
+      const start=11+leg*9;
+      for(let point=0;point<3;point++) {
+        const p=start+point*3;
+        joints.set(leg*3+point,values[p],values[p+1],values[p+2],point===2?.55:.68);
+      }
+      for(let edge=0;edge<2;edge++) {
+        const p=start+edge*3;
+        const [ax,ay,az,bx,by,bz]=values.subarray(p,p+6);
+        const dx=bx-ax,dy=by-ay,dz=bz-az;
+        const length=Math.hypot(dx,dy,dz);
+        bars.set(leg*2+edge,(ax+bx)/2,(ay+by)/2,(az+bz)/2,length,0,
+          Math.asin(dz/length),Math.atan2(-dx,dy));
+      }
+    }
+    renderer.render(scene,camera);
+  }
+
+  {
+    const {gaitPose}=await import("./d4-gait.js");
+    const modes=["stand","walk","sliding-feet","frozen-body","three-air","long-leg"];
+    const legs=Array.from({length:4},(_,leg)=>Array.from({length:3},(_,point)=>
+      rest.slice(leg*9+point*3,leg*9+point*3+3)));
+    const cases=[[0,0],[0,1],[.19,1],[.2,1],[.5,1],[.8,1],[.81,1],[1.5,1],[2.5,1],
+      [3.5,1],[4,1],[4.5,1],[-.5,1],[8.25,1],[2.5,2],[2.5,3],[2.5,4],[.5,5],[4,1,true]];
+    const incorrect=(actual,expected)=>!Number.isFinite(actual) || Math.abs(actual-expected)>1e-9;
+    let badLeg=0,badBody=0,badCamera=0;
+    cases.forEach(([phase,mode,fixed=false],i)=>{
+      const actual=frame(phase,mutate && i===8?2:mode,mutate && i===11?true:fixed);
+      const expected=gaitPose(legs,phase,modes[mode]);
+      const offset=[...expected.offset,expected.travel];
+      const follow=fixed?0:expected.travel;
+      const cameraExpected=[framing[0]+follow,framing[1],framing[2],framing[3]+follow,framing[4],framing[5],
+        2*Math.atan(framing[6]/(2*framing[7]))];
+      expected.legs.flat(2).forEach((value,j)=>{ if(incorrect(actual[11+j],value)) badLeg++; });
+      offset.forEach((value,j)=>{ if(incorrect(actual[j],value)) badBody++; });
+      cameraExpected.forEach((value,j)=>{ if(incorrect(actual[4+j],value)) badCamera++; });
+    });
+    const walked=Array.from(frame(4));
+    const fixedEye=frame(4,1,true)[4];
+    const before=Array.from(frameData);
+    const refused=(...args)=>uxe_d4_frame(...args)===-1n &&
+      before.every((value,i)=>Object.is(frameData[i],value));
+    const raw=[0n,384n,768n,320n,.5,1n,0n];
+    let refusals=0;
+    for(const [index,value] of [[1,385n],[1,6291448n],[2,384n],[4,NaN],[5,6n],[6,2n]]) {
+      const args=raw.slice();
+      args[index]=value;
+      if(refused(...args)) refusals++;
+    }
+    framingData[7]=0;
+    if(refused(...raw)) refusals++;
+    framingData[7]=framing[7];
+    restData.set(restData.slice(33,36),30);
+    if(refused(...raw)) refusals++;
+    restData.set(rest);
+
+    function pixels() {
+      const data=new Uint8Array(canvas.width*canvas.height*4);
+      gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,data);
+      if(gl.getError()!==gl.NO_ERROR) throw new Error("D4 读回失败");
+      return data;
+    }
+    draw(0);
+    const first=pixels();
+    draw(4);
+    const last=pixels();
+    let drawn=false,moved=false;
+    for(let i=0;i<first.length;i+=4) {
+      if(first[i]!==first[0] || first[i+1]!==first[1] || first[i+2]!==first[2]) drawn=true;
+      if(first[i]!==last[i] || first[i+1]!==last[i+1] || first[i+2]!==last[i+2]) moved=true;
+    }
+    status.textContent=JSON.stringify([cases.length,cases.length*36,badLeg,badBody,badCamera,refusals,
+      Number(drawn),Number(moved),walked[3],walked[4],walked[7],fixedEye]);
+  }
+} catch(error) {
+  status.textContent="error:"+error.message;
+}
+</script>
+</html>
