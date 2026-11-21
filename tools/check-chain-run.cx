@@ -69,6 +69,13 @@ static int has(const char *p,const char *s) {
     }
     free(b);return yes;
 }
+static int image_suffix(const char *path, const char *suffix) {
+    size_t n = 0, len = strlen(suffix);
+    char *bytes = cx_read(path, &n);
+    int same = bytes && n >= len && !memcmp(bytes + n - len, suffix, len);
+    free(bytes);
+    return same;
+}
 static int fake(int argc,char **argv) {
     const char *out=0,*phase=0,*mode="ok"; int i;
     for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
@@ -475,6 +482,7 @@ static void tail_cases(const char *plan) {
 }
 /* `--supervise ROOT OUT [RUNNER]` (batch chain-run-supervise): the supervisor, and the full re-check
    attempt the runner places before compare and before pack. */
+static int pin_cases(const char *plan);
 static int supervise_cases(const char *plan) {
     char p[4400],q[4400];int rc;
     widen_cases(plan); /* here, not in the two other batches of this file, to keep each under its 55 s */
@@ -523,38 +531,178 @@ static int supervise_cases(const char *plan) {
     ck(rc==9&&has(p,"BLOCKER\tphase=compare-recheck\treason=recheck-failed")&&!has(q,"compare\n")&&!has(q,"pack\n"),"failed-recheck-blocks-the-phase");
     rc=runv("compareretry","compare-retry","60",0,0,12);file_of(p,"compareretry","chain-run.tsv");file_of(q,"compareretry","memo-env");
     ck(rc==0&&has(p,"RESUME\t")&&count(q,"compare-recheck\t")==2&&count(q,"compare\ton\t")==2&&count(q,"pack-recheck\t")==1,"retried-phase-needs-a-new-recheck");
-    /* Tools of one supervised run (0.0.58): the supervisor hands its segments one epoch; a segment
-       builds chain-watch and candidate-chain from the checkout only when the natives of that epoch
-       are not recorded yet, later segments run the recorded bytes, and changed bytes are a blocker.
-       The fixture checkout's ./unisacc.com "builds" by copying this fake and logging the source. */
+    int pin_rc = pin_cases(plan);
+    sy_printf("CHECK_CHAIN_RUN_SUPERVISE\tfailed=%d\tevidence=%s\n",bad,base);
+    return pin_rc ? pin_rc : bad ? 1 : 0;
+}
+static int pin_cases(const char *plan) {
+    char p[4400], q[4400];
+    int rc;
+    /* The first invocation has no epoch. Changing live build input, then
+       starting a new supervisor epoch, cannot replace the pinned executables. */
     {
-        char com[4400],builds[4400],script[9400],cand[4400];int rc2;
-        if(cx_fmt(com,sizeof com,"%s/../unisacc.com",base)||cx_fmt(builds,sizeof builds,"%s/../builds",base)||
-           cx_fmt(script,sizeof script,"#!/bin/sh\nprintf '%%s\\n' \"$1\" >> '%s'\nexec cp '%s' \"$3\"\n",builds,self))return 2;
-        put(com,script);
+        char com[4400], builds[4400], script[12800], cand[4400], dep[4400], budget[4400];
+        if (cx_fmt(com, sizeof com, "%s/../unisacc.com", base) ||
+            cx_fmt(builds, sizeof builds, "%s/../builds", base) ||
+            cx_fmt(dep, sizeof dep, "%s/../live-tool-dependency", base) ||
+            cx_fmt(script, sizeof script,
+                   "#!/bin/sh\n"
+                   "if [ \"$1\" = tools/chain-run.cx ] && [ -z \"$UNISACC_CHAIN_TOOLS_EPOCH\" ]; then exit 42; fi\n"
+                   "printf '%%s\\n' \"$1\" >> '%s'\ncp '%s' \"$3\" && cat '%s' >> \"$3\"\n",
+                   builds, self, dep)) return 2;
+        put(dep, "first source\n");
+        put(com, script);
         put_plan(plan,"0\tsnap\t-\t4\n1\tpack\t-\t4\n");
-        char dir[4400];join(dir,base,"pin");sy_mkdir(dir,0755);join(cand,dir,"chain-run-candidate");
-        char *e1[]={"env","UNISACC_CHAIN_TOOLS_EPOCH=one",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--deadline-s","60","--","--fixture-case","fail",0};
-        char *e2[]={"env","UNISACC_CHAIN_TOOLS_EPOCH=two",runner,"--rev","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","--out",dir,"--deadline-s","60","--","--fixture-case","fail",0};
-        char **e0=e1+2;
-        rc=cx_runv_timeout(e1,20,0,0);rc2=cx_runv_timeout(e1,20,0,0);
-        ck(rc==7&&rc2==7&&count(builds,"tools/chain-watch.cx\n")==1&&count(builds,"tools/candidate-chain.cx\n")==1,"epoch-tools-built-once-and-reused");
-        size_t cn=0;char *cb=cx_read(cand,&cn),*changed=cb?malloc(cn+1):0;if(!changed)return 2;
-        if(mm_copy(changed,(long)cn+1,cb,(long)cn))return 2;changed[cn]='\n';if(cx_write(cand,changed,cn+1)||sy_chmod(cand,0755))return 2;
-        rc=cx_runv_timeout(e1,20,0,0);file_of(p,"pin","chain-run.tsv");
-        ck(rc==2&&has(p,"BLOCKER\tphase=prepare-candidate\treason=pinned-tool-changed")&&count(builds,"tools/candidate-chain.cx\n")==1,"changed-pinned-tool-is-a-blocker");
-        rc=cx_runv_timeout(e2,20,0,0);
-        ck(rc==7&&count(builds,"tools/chain-watch.cx\n")==2&&count(builds,"tools/candidate-chain.cx\n")==2,"new-epoch-builds-tools-again");
-        rc=cx_runv_timeout(e0,20,0,0);rc2=cx_runv_timeout(e0,20,0,0);
-        ck(rc==7&&rc2==7&&count(builds,"tools/candidate-chain.cx\n")==4,"no-epoch-builds-every-invocation");
-        free(cb);free(changed);
+        char dir[4400]; join(dir, base, "pin"); sy_mkdir(dir, 0755);
+        join(cand, dir, "chain-run-candidate");
+        join(budget, dir, "chain-run.budget");
+        char *rev = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        char *start[] = {"env", "UNISACC_CHAIN_TOOLS_EPOCH=", runner, "--rev", rev, "--out", dir,
+                         "--deadline-s", "60", "--", "--fixture-case", "fail", 0};
+        char *resume[] = {"env", "UNISACC_CHAIN_TOOLS_EPOCH=next", runner, "--rev", rev, "--out", dir,
+                          "--deadline-s", "60", "--", "--fixture-case", "fail", 0};
+        char *repair[] = {runner, "--rev", rev, "--out", dir, "--repin", "candidate-chain",
+                          "--reason", "fixture dependency update", 0};
+        rc = cx_runv_timeout(start, 20, 0, 0);
+        char pin[4400], watch_pin[4400]; join(pin, dir, "chain-run-candidate.pin");
+        join(watch_pin, dir, "chain-run-watch.pin");
+        ck(rc == 7 && sy_exists(pin) == 1 && count(builds, "tools/candidate-chain.cx\n") == 1,
+           "first-no-epoch-creates-pin");
+        size_t first_n = 0;
+        char *first_image = cx_read(cand, &first_n);
+        char first_sha[65], first_row[80];
+        if (!first_image || sy_sha256_hex(first_image, first_n, first_sha) ||
+            cx_fmt(first_row, sizeof first_row, "native_sha=%s\n", first_sha)) return 2;
+        free(first_image);
+        ck(has(pin, first_row) && has(watch_pin, first_row) &&
+           count(builds, "tools/chain-watch.cx\n") == 1, "first-pin-binds-both-native-images");
+        put(dep, "changed source\n");
+        rc = cx_runv_timeout(resume, 20, 0, 0);
+        ck(rc == 7 && image_suffix(cand, "first source\n") &&
+           count(builds, "tools/chain-watch.cx\n") == 1 && count(builds, "tools/candidate-chain.cx\n") == 1,
+           "different-epoch-reuses-original-native-after-live-change");
+        file_of(p, "pin", "chain-run.tsv");
+        size_t pinned_n = 0, image_n = 0;
+        char *pinned = cx_read(pin, &pinned_n), *image = cx_read(cand, &image_n);
+        char image_sha[65], legacy[130], heartbeat[4400], live[320];
+        if (!pinned || !image || sy_sha256_hex(image, image_n, image_sha) ||
+            cx_fmt(legacy, sizeof legacy, "epoch=old\nnative_sha=%s\n", image_sha)) return 2;
+        free(image);
+        put(pin, legacy);
+        rc = cx_runv_timeout(resume, 20, 0, 0);
+        ck(rc == 7 && has(pin, "epoch=old") && count(builds, "tools/candidate-chain.cx\n") == 1,
+           "legacy-pin-reused-across-epochs");
+        put(pin, "native_sha=truncated");
+        rc = cx_runv_timeout(start, 20, 0, 0);
+        ck(rc == 2 && has(p, "reason=pinned-tool-invalid-record") &&
+           count(builds, "tools/candidate-chain.cx\n") == 1, "truncated-pin-refused-before-build");
+        if (sy_unlink(pin)) return 2;
+        rc = cx_runv_timeout(start, 20, 0, 0);
+        ck(rc == 2 && has(p, "reason=pinned-tool-missing-record") &&
+           count(builds, "tools/candidate-chain.cx\n") == 1, "image-without-pin-refused-before-build");
+        if (cx_write(pin, pinned, pinned_n)) return 2;
+
+        size_t pre_n = 0, post_n = 0, current_n = 0;
+        char *before_refuse = cx_read(budget, &pre_n);
+        char *no_reason[] = {runner, "--rev", rev, "--out", dir, "--repin", "candidate-chain", 0};
+        int missing_reason = cx_runv_timeout(no_reason, 20, 0, 0);
+        repair[8] = "";
+        int empty_reason = cx_runv_timeout(repair, 20, 0, 0);
+        repair[8] = "   ";
+        int white_reason = cx_runv_timeout(repair, 20, 0, 0);
+        repair[8] = "fixture dependency update";
+        join(heartbeat, dir, "heartbeat.tsv");
+        if (cx_fmt(live, sizeof live, "%ld\tsnap\t%d\t%ld\tstart\n", sy_wall_s(), sy_pid(), sy_getpgid(0))) return 2;
+        put(heartbeat, live);
+        rc = cx_runv_timeout(repair, 20, 0, 0);
+        if (sy_unlink(heartbeat)) return 2;
+        ck(rc == 2 && has(p, "phase=repin\treason=live-owner"), "live-heartbeat-refuses-repin");
+        char *after_refuse = cx_read(budget, &post_n), *current_pin = cx_read(pin, &current_n);
+        ck(missing_reason == 2 && empty_reason == 2 && white_reason == 2 &&
+           before_refuse && after_refuse && pre_n == post_n && !memcmp(before_refuse, after_refuse, pre_n) &&
+           current_pin && current_n == pinned_n && !memcmp(current_pin, pinned, pinned_n) &&
+           count(p, "TOOL_REPIN\t") == 0, "absent-empty-and-blank-repin-reason-refused");
+        free(before_refuse); free(after_refuse); free(current_pin); free(pinned);
+        repair[2] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        ck(cx_runv_timeout(repair, 20, 0, 0) == 2, "repin-refuses-other-revision");
+        repair[2] = rev;
+        repair[6] = "chain-step";
+        ck(cx_runv_timeout(repair, 20, 0, 0) == 2, "repin-refuses-unmanaged-tool");
+        repair[6] = "candidate-chain";
+        char unprepared[4400], identity_path[4400], identity_row[160];
+        join(unprepared, base, "no-pinned-image");
+        join(identity_path, unprepared, "chain-run.identity");
+        if (sy_mkdir(unprepared, 0755) ||
+            cx_fmt(identity_row, sizeof identity_row, "rev=%s\ncandidate=source\n", rev)) return 2;
+        put(identity_path, identity_row);
+        repair[4] = unprepared;
+        rc = cx_runv_timeout(repair, 20, 0, 0);
+        join(q, unprepared, "chain-run.tsv");
+        ck(rc == 2 && has(q, "reason=no-previous-pin-or-image"), "repin-needs-prior-image-or-pin");
+        char external[4400], external_pin[4400];
+        join(external, base, "external-pin");
+        join(external_pin, external, "chain-run-candidate.pin");
+        char *external_start[] = {runner, "--rev", rev, "--out", external,
+                                  "--candidate", self, "--watch", self, "--deadline-s", "60",
+                                  "--", "--fixture-case", "fail", 0};
+        rc = cx_runv_timeout(external_start, 20, 0, 0);
+        ck(rc == 7 && sy_exists(external_pin) == 1 &&
+           count(builds, "tools/candidate-chain.cx\n") == 1,
+           "first-external-image-is-pinned-without-compilation");
+        repair[4] = external;
+        rc = cx_runv_timeout(repair, 20, 0, 0);
+        join(q, external, "chain-run.tsv");
+        ck(rc == 2 && has(q, "reason=external-tool-session"), "repin-refuses-external-image-session");
+        repair[4] = dir;
+        size_t cn = 0;
+        char *cb = cx_read(cand, &cn), *changed = cb ? malloc(cn + 1) : 0;
+        if (!changed || mm_copy(changed, (long)cn + 1, cb, (long)cn)) return 2;
+        changed[cn] = '\n';
+        if (cx_write(cand, changed, cn + 1) || sy_chmod(cand, 0755)) return 2;
+        rc = cx_runv_timeout(start, 20, 0, 0);
+        file_of(p, "pin", "chain-run.tsv");
+        ck(rc == 2 && has(p, "BLOCKER\tphase=prepare-candidate\treason=pinned-tool-changed"),
+           "tampered-native-refused-without-epoch");
+        size_t bn = 0, an = 0;
+        char *before = cx_read(budget, &bn);
+        rc = cx_runv_timeout(repair, 20, 0, 0);
+        char *after = cx_read(budget, &an);
+        ck(rc == 0 && before && after && bn == an && !memcmp(before, after, bn) &&
+           image_suffix(cand, "changed source\n") && has(p, "TOOL_REPIN\t") && has(p, "reason=fixture dependency update"),
+           "explicit-repin-logs-reason-and-preserves-budget");
+        rc = cx_runv_timeout(resume, 20, 0, 0);
+        ck(rc == 7 && count(builds, "tools/candidate-chain.cx\n") == 2 &&
+           count(builds, "tools/chain-watch.cx\n") == 1, "resume-after-explicit-repin");
+        free(before); free(after); free(cb); free(changed);
+        char supervisor_dir[4400], native[4400], supervisor_pin[4400];
+        join(supervisor_dir, base, "runner-pin");
+        join(native, supervisor_dir, "chain-run-native");
+        join(supervisor_pin, supervisor_dir, "chain-run-native.pin");
+        char *supervised[] = {runner, "--rev", rev, "--out", supervisor_dir, "--supervise",
+                              "--segment-s", "100", "--max-segments", "4", 0};
+        rc = cx_runv_timeout(supervised, 20, 0, 0);
+        ck(rc == 0 && sy_exists(supervisor_pin) == 1 &&
+           count(builds, "tools/chain-run.cx\n") == 1, "supervisor-pins-segment-runner");
+        join(q, supervisor_dir, "chain-supervise.lock");
+        size_t lock_n = 0;
+        char *lock = cx_read(q, &lock_n);
+        long lock_pid = 0, lock_pgid = 0;
+        ck(lock && lock_n && sscanf(lock, "pid=%ld\tpgid=%ld\t", &lock_pid, &lock_pgid) == 2 &&
+           lock_pid > 0 && lock_pgid == lock_pid && has(q, "release_at="),
+           "supervisor-retains-admission-lock-identity");
+        free(lock);
+        put(dep, "new supervisor source\n");
+        rc = cx_runv_timeout(supervised, 20, 0, 0);
+        ck(rc == 0 && image_suffix(native, "changed source\n") &&
+           count(builds, "tools/chain-run.cx\n") == 1, "new-supervisor-keeps-segment-runner");
     }
-    sy_printf("CHECK_CHAIN_RUN_SUPERVISE\tfailed=%d\tevidence=%s\n",bad,base);return bad?1:0;
+    return bad ? 1 : 0;
 }
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--rev")) return fake(argc,argv);
     if(argc==2&&argv[1][0]=='/') return 0; /* fake watch */
-    int segment_mode=argc>1&&!strcmp(argv[1],"--segments")?1:argc>1&&!strcmp(argv[1],"--supervise")?2:0;
+    int segment_mode=argc>1&&!strcmp(argv[1],"--segments")?1:argc>1&&!strcmp(argv[1],"--supervise")?2:
+        argc>1&&!strcmp(argv[1],"--pin-fixture")?3:0;
     if(segment_mode){argv[1]=argv[0];argv++;argc--;}
     if(sy_realpath(".",root,sizeof root)<0||sy_realpath(argv[0],self,sizeof self)<0) return 2;
     char temp[4400];
@@ -569,7 +717,15 @@ int main(int argc,char **argv) {
     char p[4400];join(p,base,"build");sy_mkdir(p,0755);join(p,base,"build/chain-phases.tsv");put_plan(p,"# fake phases\n0\tsnap\t-\t55\n1\tctx\t-\t55\n2\tg2-lnx-x86_64-obj-0\t-\t55\n3\tg2-lnx-x86_64-obj-1\t-\t55\n4\tg2-lnx-x86_64-closure-prepare\t-\t55\n5\tg2-lnx-x86_64-closure\t-\t55\n6\tg2-lnx-x86_64-objects\t-\t55\n7\tg2-lnx-x86_64\t-\t55\n8\tg2-lnx-arm64-obj-0\t-\t55\n9\tg2-lnx-arm64-objects\t-\t55\n10\tpack\t-\t55\n");
     if(sy_chdir(base))return 2;
     join(p,base,"out");sy_mkdir(p,0755);if(sy_realpath(p,base,sizeof base)<0)return 2;
-    if(segment_mode){char plan[4400];join(plan,base,"../build/chain-phases.tsv");return segment_mode==1?segment_cases(plan):supervise_cases(plan);}
+    if(segment_mode) {
+        char plan[4400];join(plan,base,"../build/chain-phases.tsv");
+        if (segment_mode == 3) {
+            int rc = pin_cases(plan);
+            sy_printf("CHECK_CHAIN_RUN_PIN\tfailed=%d\tevidence=%s\n",bad,base);
+            return rc;
+        }
+        return segment_mode==1?segment_cases(plan):supervise_cases(plan);
+    }
     char protocol[4400];join(protocol,base,"protocol-evidence");
     put(protocol,"ATTEMPT\tphase=snapshot\trc=0\n");
     ck(!has(protocol,"phase=snap")&&has(protocol,"phase=snapshot"),"protocol-field-component-boundaries");
