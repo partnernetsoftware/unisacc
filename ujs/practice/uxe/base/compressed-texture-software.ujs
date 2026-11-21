@@ -1,0 +1,95 @@
+// The caller owns and keeps the surface-major mip table and bytes immutable.
+struct CompressedTextureSoftware {
+  kind: u32;
+  surfaces: u32;
+  levels: u32;
+  table: u32;
+  width: u32;
+  height: u32;
+  format: u32;
+  live: u32;
+}
+
+native function compressed_texture_mip(at:i64,width:i64,height:i64,format:i64) i64 {
+  let start=ux_u32(at+CompressedMip.data);
+  let size=ux_u32(at+CompressedMip.bytes);
+  return ux_u32(at+CompressedMip.width)==width && ux_u32(at+CompressedMip.height)==height &&
+    ux_u32(at+CompressedMip.format)==format && size==(width+3)/4*((height+3)/4)*8 &&
+    start<=6291456-size;
+}
+
+native function CompressedTextureSoft_init(at:i64,kind:i64,surfaces:i64,levels:i64,table:i64) i64 {
+  if(!loading_span(at,CompressedTextureSoftware.size) ||
+     kind<1 || kind>3 || surfaces<1 || surfaces>2048 || levels<1 || levels>15 ||
+     (kind==1 && surfaces!=1) || (kind==3 && surfaces!=6)) { return 0-1; }
+  let bytes=surfaces*levels*CompressedMip.size;
+  if(!loading_span(table,bytes) || !file_disjoint(at,CompressedTextureSoftware.size,table,bytes)) { return 0-1; }
+  let width=ux_u32(table+CompressedMip.width);
+  let height=ux_u32(table+CompressedMip.height);
+  let format=ux_u32(table+CompressedMip.format);
+  if(format!=33776 && format!=33777) { return 0-2; }
+  if(width<1 || width>16384 || height<1 || height>16384 || (kind==3 && width!=height)) { return 0-3; }
+  let surface=0;
+  while(surface<surfaces) {
+    let w=width;
+    let h=height;
+    let level=0;
+    while(level<levels) {
+      if(level>0) {
+        if(w==1 && h==1) { return 0-3; }
+        if(w>1) { w=w/2; }
+        if(h>1) { h=h/2; }
+      }
+      let mip=table+(surface*levels+level)*CompressedMip.size;
+      if(!compressed_texture_mip(mip,w,h,format)) { return 0-3; }
+      let data=ux_u32(mip+CompressedMip.data);
+      let size=ux_u32(mip+CompressedMip.bytes);
+      if(!file_disjoint(at,CompressedTextureSoftware.size,data,size) ||
+         !file_disjoint(table,bytes,data,size)) { return 0-1; }
+      level=level+1;
+    }
+    surface=surface+1;
+  }
+  let k=ux_u32_put(at+CompressedTextureSoftware.kind,kind);
+  let s=ux_u32_put(at+CompressedTextureSoftware.surfaces,surfaces);
+  let n=ux_u32_put(at+CompressedTextureSoftware.levels,levels);
+  let t=ux_u32_put(at+CompressedTextureSoftware.table,table);
+  let x=ux_u32_put(at+CompressedTextureSoftware.width,width);
+  let y=ux_u32_put(at+CompressedTextureSoftware.height,height);
+  let f=ux_u32_put(at+CompressedTextureSoftware.format,format);
+  let live=ux_u32_put(at+CompressedTextureSoftware.live,1);
+  return at;
+}
+
+native function CompressedTextureSoft_read(at:i64,surface:i64,level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(at,CompressedTextureSoftware.size) || ux_u32(at+CompressedTextureSoftware.live)!=1) { return 0-1; }
+  let surfaces=ux_u32(at+CompressedTextureSoftware.surfaces);
+  let levels=ux_u32(at+CompressedTextureSoftware.levels);
+  if(surfaces>2048 || levels>15 || surface<0 || surface>=surfaces || level<0 || level>=levels) { return 0-1; }
+  let table=ux_u32(at+CompressedTextureSoftware.table);
+  let bytes=surfaces*levels*CompressedMip.size;
+  if(!loading_span(table,bytes) || !file_disjoint(at,CompressedTextureSoftware.size,table,bytes)) { return 0-1; }
+  let mip=table+(surface*levels+level)*CompressedMip.size;
+  let width=ux_u32(mip+CompressedMip.width);
+  let height=ux_u32(mip+CompressedMip.height);
+  if(width<1 || width>16384 || height<1 || height>16384) { return 0-3; }
+  let output=width*height*4;
+  if(capacity<0 || capacity>6291456 || dst<0 || dst>6291456-capacity || output>capacity ||
+     !file_disjoint(dst,output,at,CompressedTextureSoftware.size) ||
+     !file_disjoint(dst,output,table,bytes)) { return 0-1; }
+  let i=0;
+  while(i<surfaces*levels) {
+    let entry=table+i*CompressedMip.size;
+    let data=ux_u32(entry+CompressedMip.data);
+    let size=ux_u32(entry+CompressedMip.bytes);
+    if(size>6291456 || data>6291456-size || !file_disjoint(dst,output,data,size)) { return 0-1; }
+    i=i+1;
+  }
+  return CompressedTexture_decodeBC1(mip,dst,capacity);
+}
+
+native function CompressedTextureSoft_dispose(at:i64) i64 {
+  if(!loading_span(at,CompressedTextureSoftware.size) || ux_u32(at+CompressedTextureSoftware.live)!=1) { return 0-1; }
+  let live=ux_u32_put(at+CompressedTextureSoftware.live,0);
+  return 0;
+}
