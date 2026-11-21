@@ -1,0 +1,177 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {
+  BufferGeometry, Camera, CustomToneMapping, DataUtils, Float32BufferAttribute, HalfFloatType,
+  LinearSRGBColorSpace, Mesh, NearestFilter, NoBlending, PlaneGeometry, REVISION, Scene,
+  ShaderChunk, ShaderMaterial, WebGLRenderer, WebGLRenderTarget,
+} from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuNativeSample } from "../base/gpu-native-sample-abi.js";
+
+const result = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  function context() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 4;
+    canvas.height = 2;
+    const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: true });
+    if (!gl || !gl.getExtension("EXT_color_buffer_float")) throw new Error("WebGL2 float attachment required");
+    return { gl, canvas };
+  }
+  function screen(gl) {
+    const previous = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    try {
+      const rgba = new Uint8Array(32);
+      gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      return rgba;
+    } finally {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
+    }
+  }
+  function samples(rgba) {
+    const view = new DataView(rgba.buffer);
+    return [0,1,6,7].map(i => view.getUint32(i * 4, true));
+  }
+  const { gl } = context();
+  const [binary, ...resources] = await Promise.all([
+    fetch("file://" + query.get("wasm")),
+    fetch("../base/gpu-native-copy.vert"), fetch("../base/gpu-custom-tonemap.frag"),
+    fetch("./gpu-custom-tonemap-gradient.glsl"), fetch("../base/gpu-flat.vert"), fetch("../base/gpu-flat.frag"),
+    fetch("./gpu-custom-tonemap-hdr-clamp.frag"),
+  ]);
+  let actual;
+  let reads = 0, uploads = 0, draws = 0;
+  function track(key, observe) {
+    const prior = gl[key];
+    gl[key] = function (...args) {
+      observe();
+      return prior.apply(gl, args);
+    };
+  }
+  track("readPixels", () => reads++);
+  track("texImage2D", () => uploads++);
+  track("drawArrays", () => draws++);
+  const native = createGpuNativeSample(gl, () => 1, () => actual.memory);
+  const submit = createGpuSubmit(gl, () => actual.memory, () => 1, native.targets);
+  const copy = (...args) => {
+    const beforeRead = reads, beforeUpload = uploads;
+    const status = native.copy(...args);
+    if (beforeRead !== reads || beforeUpload !== uploads) throw new Error("native tone mapping moved HDR samples through CPU");
+    return status;
+  };
+  actual = (await WebAssembly.instantiate(await binary.arrayBuffer(), {
+    uxe_gpu_v1: { host_gpu_submit: submit },
+    uxe_gpu_target_v1: { host_gpu_native_copy: copy },
+  })).instance.exports;
+  const lengths = [];
+  let hook;
+  for (const [i, response] of resources.entries()) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!response.ok || !bytes.length || bytes.length > 4096) throw new Error("invalid shader fixture");
+    new Uint8Array(actual.memory.buffer, 2097152 + 10000 + 4500 * i, bytes.length).set(bytes);
+    lengths.push(BigInt(bytes.length));
+    if (i === 2) hook = new TextDecoder().decode(bytes);
+  }
+  const run = mode => {
+    const status = actual.uxe_hdr_custom_tone(BigInt(mode), BigInt(query.get("mode")), ...lengths);
+    if (status !== 0n) throw new Error("native HDR tone path failed " + status + " at " + mode);
+  };
+  run(-2);
+  // The current target packet allocates RGBA8. This fixture changes only
+  // attachment storage. The normal packet draw below supplies all pixels.
+  const attachment = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+  if (!attachment) throw new Error("missing native read attachment");
+  const previousTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
+  gl.bindTexture(gl.TEXTURE_2D, attachment);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 4, 2, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.bindTexture(gl.TEXTURE_2D, previousTexture);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error("HDR native target is incomplete");
+  const redBits = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.FRAMEBUFFER_ATTACHMENT_RED_SIZE);
+  const isFloat = gl.getFramebufferAttachmentParameter(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE) === gl.FLOAT;
+  run(-1);
+  const source = new Float32Array(32);
+  gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.FLOAT, source);
+  if (gl.getError() !== gl.NO_ERROR) throw new Error("HDR source float readback failed");
+
+  const ref = context();
+  const renderer = new WebGLRenderer({ canvas: ref.canvas, context: ref.gl });
+  renderer.setSize(4, 2, false);
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  renderer.toneMapping = CustomToneMapping;
+  const hdrTarget = new WebGLRenderTarget(4, 2, {
+    type: HalfFloatType, depthBuffer: false, minFilter: NearestFilter, magFilter: NearestFilter,
+  });
+  const seedGeometry = new BufferGeometry();
+  seedGeometry.setAttribute("position", new Float32BufferAttribute([-1,-1,0, 3,-1,0, -1,3,0], 3));
+  seedGeometry.setAttribute("aHdr", new Float32BufferAttribute([
+    0.25,0.5,0.25,0.125, 4.25,2.5,3.25,0.625, 1.25,4.5,2.25,0.875,
+  ], 4));
+  const seed = new ShaderMaterial({
+    toneMapped: false, depthTest: false, blending: NoBlending,
+    vertexShader: "attribute vec4 aHdr; varying vec4 vHdr; void main() { vHdr = aHdr; gl_Position = vec4(position, 1.0); }",
+    fragmentShader: "varying vec4 vHdr; void main() { gl_FragColor = vHdr; }",
+  });
+  const seedScene = new Scene();
+  const seedMesh = new Mesh(seedGeometry, seed);
+  seedMesh.frustumCulled = false;
+  seedScene.add(seedMesh);
+  const camera = new Camera();
+  renderer.setRenderTarget(hdrTarget);
+  renderer.render(seedScene, camera);
+  const half = new Uint16Array(32);
+  renderer.readRenderTargetPixels(hdrTarget, 0, 0, 4, 2, half);
+  const referenceSource = Float32Array.from(half, DataUtils.fromHalfFloat);
+
+  const identity = "vec3 CustomToneMapping( vec3 color ) { return color; }";
+  const chunk = ShaderChunk.tonemapping_pars_fragment;
+  if (!chunk.includes(identity)) throw new Error("r160 custom tone mapping hook missing");
+  ShaderChunk.tonemapping_pars_fragment = chunk.replace(identity, hook +
+    "vec3 CustomToneMapping( vec3 color ) { return uxeToneMapping(color, toneMappingExposure); }");
+  const material = new ShaderMaterial({
+    toneMapped: true, depthTest: false, blending: NoBlending,
+    uniforms: { source: { value: hdrTarget.texture } },
+    vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }",
+    fragmentShader: "varying vec2 vUv; uniform sampler2D source; void main() {\n" +
+      "gl_FragColor = texture2D(source, vUv);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}",
+  });
+  const screenGeometry = new PlaneGeometry(2, 2);
+  const picture = new Mesh(screenGeometry, material);
+  picture.frustumCulled = false;
+  const scene = new Scene();
+  scene.add(picture);
+  const offsets = [0,1,5,24,28,29,30,31];
+  const rawDiff = source.reduce((count, value, i) => count + Number(value !== referenceSource[i]), 0);
+  const values = [redBits, Number(isFloat), ...offsets.map(i => source[i]), ...offsets.map(i => referenceSource[i]), rawDiff];
+  try {
+    renderer.setRenderTarget(null);
+    for (const [mode, exposure] of [0.375,0.625].entries()) {
+      run(mode);
+      const mapped = screen(gl);
+      renderer.toneMappingExposure = exposure;
+      renderer.render(scene, camera);
+      const expected = screen(ref.gl);
+      const diff = mapped.reduce((count, byte, i) => count + Number(byte !== expected[i]), 0);
+      values.push(...samples(mapped), ...samples(expected), diff);
+    }
+    run(-3);
+  } finally {
+    ShaderChunk.tonemapping_pars_fragment = chunk;
+    material.dispose();
+    screenGeometry.dispose();
+    seed.dispose();
+    seedGeometry.dispose();
+    hdrTarget.dispose();
+    renderer.dispose();
+  }
+  result.textContent = JSON.stringify([...values, draws]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

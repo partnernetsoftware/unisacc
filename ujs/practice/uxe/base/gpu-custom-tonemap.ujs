@@ -1,0 +1,43 @@
+// Composes a base fragment and a uxeToneMapping(vec3,float) GLSL resource.
+// The exposure is encoded as the exact WebGL float32 bit pattern.
+native function GpuCustomTone_compose(base:i64,baseBytes:i64,hook:i64,hookBytes:i64,out:i64,capacity:i64,exposure:f64) i64 {
+  let header=16;
+  let macroBytes=43;
+  if(baseBytes<=header || baseBytes>4096 || hookBytes<1 || hookBytes>4096 ||
+     capacity<1 || capacity>4096 || baseBytes+hookBytes+macroBytes>capacity ||
+     !(exposure>=0.0 && exposure<=(16777215.0 * 4503599627370496.0 * 4503599627370496.0)) ||
+     base<0 || base>6291456-baseBytes || hook<0 || hook>6291456-hookBytes ||
+     out<0 || out%4!=0 || out>6291456-capacity ||
+     composer_alias(out,capacity,base,baseBytes) || composer_alias(out,capacity,hook,hookBytes)) { return 0-1; }
+  let version=[35,118,101,114,115,105,111,110,32,51,48,48,32,101,115,10];
+  let i=0;
+  while(i<header) {
+    if(ux_u8(base+i)!=version[i]) { return 0-1; }
+    i=i+1;
+  }
+  if(ux_u8(base+baseBytes-1)!=10 || ux_u8(hook+hookBytes-1)!=10) { return 0-1; }
+
+  let encoded=ux_f32_put(out,exposure);
+  let bits=ux_u32(out);
+  let copied=uxe_copy_record(out,base,header);
+  let prefix=[35,100,101,102,105,110,101,32,85,88,69,95,84,79,78,69,95,69,88,80,79,83,85,82,69,95,66,73,84,83,32,48,120];
+  i=0;
+  while(i<33) {
+    let byte=ux_u8_put(out+header+i,prefix[i]);
+    i=i+1;
+  }
+  i=7;
+  while(i>=0) {
+    let digit=bits%16;
+    let ch=48+digit;
+    if(digit>=10) { ch=87+digit; }
+    let saved=ux_u8_put(out+header+33+i,ch);
+    bits=bits/16;
+    i=i-1;
+  }
+  let suffix=ux_u8_put(out+header+41,117);
+  let newline=ux_u8_put(out+header+42,10);
+  let body=uxe_copy_record(out+header+macroBytes,base+header,baseBytes-header);
+  let appended=uxe_copy_record(out+baseBytes+macroBytes,hook,hookBytes);
+  return baseBytes+macroBytes+hookBytes;
+}

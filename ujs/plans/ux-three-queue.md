@@ -2,6 +2,10 @@
 
 基线 `cf0b021`。按本页顺序取首个依赖就绪的未完成单元。每行依次记录名称、验收门、依赖。每个能力先跑独立 .cx 金值、r160 对照和篡改反例，再重算清单与燃尽表。完成行用删除线标记，同行记验证结果和对应提交说明。两次同类失败且换角度仍无法推进时，标 BLOCKED 并贴具体失败、日志入口和解阻条件。未完成的依赖不妨碍推进其他行。
 
+## 合入候选阻塞
+
+- BLOCKED 五个现有编译门 | 全套实跑 393 项，补齐 r160 夹具并隔离复验后 388 项通过。剩余 BufferGeometryLoader、BufferGeometry fromJSON、JPEG Color444、渐进灰度和渐进彩色的编译子进程在既有六秒界退出 124。证据目录 `/tmp/devsvc-flow-21665839376-3659026`、`/tmp/devsvc-flow-21665853824-3661983`、`/tmp/devsvc-flow-21665892803-3670401`、`/tmp/devsvc-flow-21665904536-3672361`、`/tmp/devsvc-flow-21665916516-3673815`。独立计时夹具的同一 BufferGeometryLoader 输入输出逐字节相同，Wasm 为 38153 字节，原工具 5422 ms、同源 Linux ELF 5637 ms，见 `/tmp/devsvc-flow-21666146588-3709489`。该测量未记入验收。需缩减编译成本并保留时限与断言。
+
 ## A 栏燃尽
 
 - ~~ImageUtils 解码图像源接线 | G-struct 与 G-io 对照 HTMLImageElement、ImageBitmap 的 URI 与不透明像素转换 | 浏览器资源描述与 Canvas 路径。~~ 线性十项、URI 七项通过，两种篡改转红，旧结构 14 项及编码 10 项通过。
@@ -190,7 +194,8 @@
 
 ## B 栏现有部分项
 
-- CustomToneMapping | G-math ToneModes 验收 UJS 回调的三通道混合及有界输入输出，G-pixel gpu-packet-struct.cx 对照 r160 半增益。通用逐片元着色器接线待补。补齐 -，运行独立金值及 r160 篡改门 | -
+- ~~CustomToneMapping GLSL 逐片元与 HDR~~ | G-pixel 任意非线性 RGB、曝光、Alpha 和真实浮点源；RGBA8 28 项和 HDR 38 项通过，替换曝光和夹紧 HDR 分别转红 | GPU 原生目标采样。
+- CustomToneMapping 标准渲染器与半浮点目标接线 | G-pixel 材质枚举驱动、HDR 目标分配及曝光 | 已验 GLSL 与 HDR 探针。
 - DisplayP3ColorSpace | G-math colormanagement-math.cx 通过色域和传递函数，gpu-packet-struct.cx --p3-readback 可复现参考画布读回差异。补齐 -，运行独立金值及 r160 篡改门 | -
 - BasicShadowMap | G-pixel gpu-packet-struct.cx --shadow-map；固定正交投影的 GPU 深度目标、读回与最近点采样，通用投影和深度格式待补。补齐 -，运行独立金值及 r160 篡改门 | M4
 - PCFShadowMap | G-pixel gpu-packet-struct.cx --shadow-pcf；半径两像素的 17 点边缘与 r160 对照，可配置半径、投影和点光图待补。补齐 -，运行独立金值及 r160 篡改门 | M4
