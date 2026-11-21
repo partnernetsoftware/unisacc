@@ -1,0 +1,97 @@
+struct GpuPmremSample {
+  face: u32;
+  width: u32;
+  height: u32;
+  lowerMip: i32;
+  upperMip: i32;
+  reserved: u32;
+  x0: f64;
+  y0: f64;
+  x1: f64;
+  y1: f64;
+  blend: f64;
+}
+
+native function gpu_pmrem_size(mip:i64) i64 {
+  let span=1;
+  let i=0;
+  while(i<mip) { span=span*2; i=i+1; }
+  return span;
+}
+
+native function gpu_pmrem_mip(roughness:f64,maximum:i64) f64 {
+  if(roughness==0.0) { return 0.0+maximum; }
+  let level=0.0;
+  let i=1;
+  while(i<5 && roughness<gpu_pmrem_threshold(i)/1000.0) { i=i+1; }
+  if(i<5) {
+    let start=gpu_pmrem_threshold(i-1);
+    let end=gpu_pmrem_threshold(i);
+    let first=gpu_pmrem_level(i-1);
+    let last=gpu_pmrem_level(i);
+    level=first+(start-roughness*1000.0)*(last-first)/(start-end);
+  } else {
+    level=(0.0-2.8853900817779268)*ux_math_log(roughness*1.16);
+  }
+  if(level>0.0+maximum) { return 0.0+maximum; }
+  if(level<0.0-2.0) { return 0.0-2.0; }
+  return level;
+}
+
+native function gpu_pmrem_pixel(out:i64,face:i64,mip:i64,base:i64,u:f64,v:f64) i64 {
+  let tile_level=mip;
+  let blur_column=0;
+  if(mip<4) { tile_level=4; blur_column=(4-mip)*48; }
+  let tile=gpu_pmrem_size(tile_level);
+  let x=blur_column+face%3*tile;
+  let y=4*(base-tile)+face/3*tile;
+  let horizontal=ux_f64_put(out,x+1+(tile-2)*u);
+  let vertical=ux_f64_put(out+8,y+1+(tile-2)*v);
+  return out;
+}
+
+// Plan two bilinear reads from an existing CubeUV atlas and their blend.
+// Coordinates are in texels; divide x by width and y by height to sample.
+// The caller supplies the atlas; this does not generate or own a PMREM.
+native function GpuPmrem_plan(out:i64,maximum:i64,direction:i64,roughness:f64) i64 {
+  if(out<0 || out%8!=0 || out>6291456-GpuPmremSample.size || direction<0 || direction%8!=0 ||
+      direction>6291456-24 || maximum<4 || maximum>16 || !(roughness>=0.0 && roughness<=1.0)) { return 0-1; }
+  let x=ux_f64(direction);
+  let y=ux_f64(direction+8);
+  let z=ux_f64(direction+16);
+  if(x-x!=0.0 || y-y!=0.0 || z-z!=0.0 || (x==0.0 && y==0.0 && z==0.0)) { return 0-2; }
+  let ax=ux_math_abs(x);
+  let ay=ux_math_abs(y);
+  let az=ux_math_abs(z);
+  let face=0;
+  let along_u=z;
+  let along_v=y;
+  let dominant=ax;
+  if(ay>=ax && ay>=az) {
+    face=1; along_u=0.0-x; along_v=0.0-z; dominant=ay;
+    if(y<0.0) { face=4; along_v=z; }
+  } else if(az>=ax) {
+    face=2; along_u=0.0-x; along_v=y; dominant=az;
+    if(z<0.0) { face=5; along_u=x; }
+  } else if(x<0.0) { face=3; along_u=0.0-z; }
+  let u=0.5+0.5*along_u/dominant;
+  let v=0.5+0.5*along_v/dominant;
+  let base=gpu_pmrem_size(maximum);
+  let columns=base;
+  if(columns<112) { columns=112; }
+  let mip=gpu_pmrem_mip(roughness,maximum);
+  let lower=f64_floor_i64(mip);
+  let blend=mip-lower;
+  let upper=lower;
+  if(blend>0.0) { upper=lower+1; }
+  let tag=ux_u32_put(out+GpuPmremSample.face,face);
+  let width=ux_u32_put(out+GpuPmremSample.width,3*columns);
+  let height=ux_u32_put(out+GpuPmremSample.height,4*base);
+  let lo=ux_u32_put(out+GpuPmremSample.lowerMip,lower);
+  let hi=ux_u32_put(out+GpuPmremSample.upperMip,upper);
+  let reserved=ux_u32_put(out+GpuPmremSample.reserved,0);
+  let first=gpu_pmrem_pixel(out+GpuPmremSample.x0,face,lower,base,u,v);
+  let second=gpu_pmrem_pixel(out+GpuPmremSample.x1,face,upper,base,u,v);
+  let mix=ux_f64_put(out+GpuPmremSample.blend,blend);
+  return out;
+}
