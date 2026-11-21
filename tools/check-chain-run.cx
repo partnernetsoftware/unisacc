@@ -576,6 +576,13 @@ static int pin_cases(const char *plan) {
         free(first_image);
         ck(has(pin, first_row) && has(watch_pin, first_row) &&
            count(builds, "tools/chain-watch.cx\n") == 1, "first-pin-binds-both-native-images");
+        char watch_event[180], candidate_event[180];
+        if (cx_fmt(watch_event, sizeof watch_event, "TOOL_PIN\tsource=tools/chain-watch.cx\t%s", first_row) ||
+            cx_fmt(candidate_event, sizeof candidate_event, "TOOL_PIN\tsource=tools/candidate-chain.cx\t%s", first_row))
+            return 2;
+        file_of(p, "pin", "chain-run.tsv");
+        ck(count(p, "TOOL_PIN\t") == 2 && has(p, watch_event) && has(p, candidate_event),
+           "first-pin-receipts-name-tool-and-bind-image");
         put(dep, "changed source\n");
         rc = cx_runv_timeout(resume, 20, 0, 0);
         ck(rc == 7 && image_suffix(cand, "first source\n") &&
@@ -649,6 +656,16 @@ static int pin_cases(const char *plan) {
         ck(rc == 7 && sy_exists(external_pin) == 1 &&
            count(builds, "tools/candidate-chain.cx\n") == 1,
            "first-external-image-is-pinned-without-compilation");
+        size_t external_n = 0;
+        char *external_bytes = cx_read(self, &external_n);
+        char external_sha[65], external_event[180];
+        if (!external_bytes || sy_sha256_hex(external_bytes, external_n, external_sha) ||
+            cx_fmt(external_event, sizeof external_event,
+                   "TOOL_PIN\tsource=external\tnative_sha=%s\n", external_sha)) return 2;
+        free(external_bytes);
+        join(q, external, "chain-run.tsv");
+        ck(count(q, external_event) == 2 && count(q, "TOOL_PIN\t") == 2,
+           "external-pin-receipts-bind-both-images");
         repair[4] = external;
         rc = cx_runv_timeout(repair, 20, 0, 0);
         join(q, external, "chain-run.tsv");
@@ -658,7 +675,9 @@ static int pin_cases(const char *plan) {
         char *cb = cx_read(cand, &cn), *changed = cb ? malloc(cn + 1) : 0;
         if (!changed || mm_copy(changed, (long)cn + 1, cb, (long)cn)) return 2;
         changed[cn] = '\n';
-        if (cx_write(cand, changed, cn + 1) || sy_chmod(cand, 0755)) return 2;
+        char observed_sha[65];
+        if (sy_sha256_hex(changed, cn + 1, observed_sha) ||
+            cx_write(cand, changed, cn + 1) || sy_chmod(cand, 0755)) return 2;
         rc = cx_runv_timeout(start, 20, 0, 0);
         file_of(p, "pin", "chain-run.tsv");
         ck(rc == 2 && has(p, "BLOCKER\tphase=prepare-candidate\treason=pinned-tool-changed"),
@@ -670,6 +689,22 @@ static int pin_cases(const char *plan) {
         ck(rc == 0 && before && after && bn == an && !memcmp(before, after, bn) &&
            image_suffix(cand, "changed source\n") && has(p, "TOOL_REPIN\t") && has(p, "reason=fixture dependency update"),
            "explicit-repin-logs-reason-and-preserves-budget");
+        size_t fresh_n = 0;
+        char *fresh = cx_read(cand, &fresh_n);
+        char fresh_sha[65], prepared[360], landed[260], landed_pin[80];
+        if (!fresh || sy_sha256_hex(fresh, fresh_n, fresh_sha) ||
+            cx_fmt(prepared, sizeof prepared,
+                   "tool=candidate-chain\tprior_sha=%s\tobserved_sha=%s\tnew_sha=%s\treason=fixture dependency update\n",
+                   first_sha, observed_sha, fresh_sha) ||
+            cx_fmt(landed, sizeof landed, "tool=candidate-chain\tprior_sha=%s\tnew_sha=%s\treason=fixture dependency update\n",
+                   first_sha, fresh_sha) ||
+            cx_fmt(landed_pin, sizeof landed_pin, "native_sha=%s\n", fresh_sha)) return 2;
+        free(fresh);
+        ck(count(p, "TOOL_REPIN\t") == 2 &&
+           before_in(p, "TOOL_REPIN\tstatus=prepared\t", prepared) &&
+           before_in(p, prepared, "TOOL_REPIN\tstatus=landed\t") &&
+           before_in(p, "TOOL_REPIN\tstatus=landed\t", landed) &&
+           has(pin, landed_pin), "repin-receipts-bind-intent-and-published-image");
         rc = cx_runv_timeout(resume, 20, 0, 0);
         ck(rc == 7 && count(builds, "tools/candidate-chain.cx\n") == 2 &&
            count(builds, "tools/chain-watch.cx\n") == 1, "resume-after-explicit-repin");
