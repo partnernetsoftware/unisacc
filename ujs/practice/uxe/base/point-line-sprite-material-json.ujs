@@ -1,0 +1,89 @@
+native function pls_json_span(obj:i64,at:i64,end:i64,scratch:i64) i64 {
+  return pls_live(obj) && at>=0 && end>at && end<=6291456 &&
+    scratch>=0 && scratch%8==0 && scratch<=6291456-1144 &&
+    pls_split(obj,pls_bytes(),at,end-at) && pls_split(obj,pls_bytes(),scratch,1144) &&
+    pls_split(at,end-at,scratch,1144);
+}
+
+native function pls_json_kind(kind:i64,dst:i64) i64 {
+  let label=[80,111,105,110,116,115];
+  let size=6;
+  if(kind==11) { label=[76,105,110,101,66,97,115,105,99]; size=9; }
+  if(kind==13) { label=[83,112,114,105,116,101]; }
+  let suffix=[77,97,116,101,114,105,97,108];
+  let i=0;
+  while(i<size) { let byte=ux_u8_put(dst+i,label[i]); i=i+1; }
+  i=0;
+  while(i<8) { let byte=ux_u8_put(dst+size+i,suffix[i]); i=i+1; }
+  return size+8;
+}
+
+native function PointLineSprite_writeJSON(obj:i64,at:i64,end:i64,scratch:i64) i64 {
+  if(!pls_json_span(obj,at,end,scratch) || end-at<8) { return 0-1; }
+  let f=obj+Material.size;
+  let kind=ux_u32(obj+Material.type);
+  let color=ux_u32(f+PointLineSpriteFields.color);
+  let fog=ux_u32(f+PointLineSpriteFields.fog);
+  let attenuation=ux_u32(f+PointLineSpriteFields.attenuation);
+  let value=ux_f64(f+PointLineSpriteFields.value);
+  if(!pls_field_values(color,fog,attenuation,value)) { return 0-1; }
+  let past=pls_json_kind(kind,scratch+1104);
+  let prefix=[123,34,116,121,112,101,34,58];
+  let i=0;
+  while(i<8) { let byte=ux_u8_put(at+i,prefix[i]); i=i+1; }
+  let p=json_write_string(at+8,end,scratch+1104,past);
+  p=Material_writeFields(p,end,obj,scratch);
+  p=material_json_field(p,end,491495649123,0,0,10,0.0+color,scratch);
+  if(fog==0) { p=material_json_field(p,end,6778726,0,0,7,0.0,scratch); }
+  if(kind!=11) {
+    p=material_json_field(p,end,7310595919353375091,31084746152965486,0,31,0.0+attenuation,scratch);
+  }
+  if(kind==10) { p=material_json_field(p,end,1702521203,0,0,8,value,scratch); }
+  if(kind==11 && value!=1.0) { p=material_json_field(p,end,8386944367594465644,104,0,18,value,scratch); }
+  if(kind==13 && value!=0.0) { p=material_json_field(p,end,7957695015159099250,0,0,16,value,scratch); }
+  return json_byte(p,end,125);
+}
+
+native function pls_json_type(at:i64,end:i64,obj:i64,scratch:i64) i64 {
+  let key=ux_u32_put(scratch,1701869940);
+  let value=json_find_key(at,end,scratch,4);
+  if(value<0) { return 0; }
+  let size=pls_json_kind(ux_u32(obj+Material.type),scratch+1104);
+  if(Json_decodeString(value,end,scratch+1122,17)!=size) { return 0; }
+  let i=0;
+  while(i<size) {
+    if(ux_u8(scratch+1104+i)!=ux_u8(scratch+1122+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function PointLineSprite_readJSON(obj:i64,at:i64,end:i64,scratch:i64) i64 {
+  if(!pls_json_span(obj,at,end,scratch)) { return 0-1; }
+  let start=json_space(at,end);
+  let finish=json_value_end(start,end);
+  if(finish<0 || json_space(finish,end)!=end || !pls_json_type(start,finish,obj,scratch)) { return 0-1; }
+  let kind=ux_u32(obj+Material.type);
+  let hex=material_json_read(start,finish,scratch,491495649123,0,0,10,16777215.0);
+  let fog=material_json_read(start,finish,scratch,6778726,0,0,7,1.0);
+  let attenuation=1.0;
+  let transparent=0.0;
+  let value=1.0;
+  if(kind!=11) {
+    attenuation=material_json_read(start,finish,scratch,7310595919353375091,31084746152965486,0,31,1.0);
+  }
+  if(kind==10) { value=material_json_read(start,finish,scratch,1702521203,0,0,8,1.0); }
+  if(kind==11) { value=material_json_read(start,finish,scratch,8386944367594465644,104,0,18,1.0); }
+  if(kind==13) {
+    value=material_json_read(start,finish,scratch,7957695015159099250,0,0,16,0.0);
+    transparent=material_json_read(start,finish,scratch,8241992434140148340,7630437,0,23,1.0);
+  }
+  if(!(hex>=0.0 && hex<=16777215.0) || fog!=fog || attenuation!=attenuation ||
+     transparent!=transparent || value-value!=0.0) { return 0-1; }
+  let packed=f64_floor_i64(hex);
+  if(packed!=hex) { return 0-1; }
+  let base=Material_readFields(start,finish,obj,scratch);
+  if(base<0) { return base; }
+  if(kind==13) { let flag=ux_u32_put(obj+Material.transparent,f64_floor_i64(transparent)); }
+  return PointLineSprite_set(obj,packed,f64_floor_i64(fog),f64_floor_i64(attenuation),value);
+}

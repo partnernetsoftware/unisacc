@@ -1,0 +1,90 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+enum { count=420 };
+
+static int event_layout(const char *file) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&bytes,20000)) return 1;
+    const char *text=(const char *)raw;
+    const char anchor[]="struct EventDispatcher {";
+    const long start=tx_find(text,bytes,anchor,sizeof anchor-1);
+    const long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+    const int failed=end<0 || sy_write_file(file,text+start,end+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+static int expected(double *gold) {
+    const int kinds[]={10,11,13};
+    const int colors[]={0x3366cc,0x885022,0x33bb66};
+    const double values[]={7.5,2.5,-.5};
+    int at=0;
+    for(int kind=0;kind<3;kind++) {
+        const int attenuation=kind==1;
+        const double defaults[]={0xffffff,1,1,kind==2?0:1,kind==2,1,0};
+        const double loaded[]={colors[kind],0,attenuation,values[kind],1,.5,2};
+        const double json[]={kinds[kind],colors[kind],values[kind],attenuation,0,1,.5,2,1,kind!=1,1,1};
+        for(int side=0;side<2;side++) {
+            for(int i=0;i<7;i++) gold[at++]=defaults[i];
+            for(int i=0;i<7;i++) gold[at++]=loaded[i];
+            for(int i=0;i<12;i++) gold[at++]=json[i];
+            for(int i=0;i<14;i++) gold[at++]=loaded[i%7];
+            for(int i=0;i<7;i++) gold[at++]=defaults[i];
+            const double default_json[]={kinds[kind],0xffffff,kind==2?0:1,1,1,kind==2,1,0,
+                kind==0,kind!=1,0,kind==2};
+            for(int i=0;i<12;i++) gold[at++]=default_json[i];
+            for(int i=0;i<7;i++) gold[at++]=loaded[i];
+            if(side==0) for(int i=0;i<4;i++) {
+                gold[at++]=-1;
+                gold[at++]=1;
+            }
+        }
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],layout[320],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-pls-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(layout,sizeof layout,"%s/event.ujs",dir);
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/fields.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "point-line-sprite-material-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char signature[]="export uxe_pls_json(op:i64,kind:i64,arg:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,layout,BASE "record-copy.ujs",BASE "eventdispatcher.ujs",
+        BASE "material-class.ujs",BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "loaderutils.ujs",
+        BASE "json-string-decode.ujs",BASE "material-field-json.ujs",BASE "material-field-read.ujs",
+        BASE "material-fields-generated.ujs",BASE "material-set-values.ujs",BASE "point-line-sprite-material.ujs",
+        BASE "point-line-sprite-material-json.ujs",FIX "point-line-sprite-material-probe.ujs","-o",wasm,0};
+    double gold[count],actual[count]={0};
+    int failed=length<=0 || length>=(int)sizeof url || expected(gold)!=count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600) || event_layout(layout);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("PLS_JSON compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("PLS_JSON case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT PointsMaterial/LineBasicMaterial/SpriteMaterial JSON cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}

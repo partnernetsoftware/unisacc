@@ -1,0 +1,79 @@
+// An inherited Material record followed by public fields for the three types.
+struct PointLineSpriteFields {
+  color: u32;
+  fog: u32;
+  attenuation: u32;
+  value: f64;
+}
+
+native function pls_kind(kind:i64) i64 {
+  return kind==10 || kind==11 || kind==13;
+}
+
+native function pls_bytes() i64 {
+  return Material.size+PointLineSpriteFields.size;
+}
+
+native function pls_span(at:i64) i64 {
+  return material_span(at) && at<=6291456-pls_bytes();
+}
+
+native function pls_live(at:i64) i64 {
+  return pls_span(at) && ux_u32(at+Material.id)>0 && pls_kind(ux_u32(at+Material.type));
+}
+
+native function pls_split(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a+n<=b || b+m<=a;
+}
+
+native function pls_field_values(color:i64,fog:i64,attenuation:i64,value:f64) i64 {
+  return color>=0 && color<=16777215 && fog>=0 && fog<=1 &&
+    attenuation>=0 && attenuation<=1 && value-value==0.0;
+}
+
+native function PointLineSprite_set(at:i64,color:i64,fog:i64,attenuation:i64,value:f64) i64 {
+  if(!pls_live(at) || !pls_field_values(color,fog,attenuation,value)) { return 0-1; }
+  let f=at+Material.size;
+  let a=ux_u32_put(f+PointLineSpriteFields.color,color);
+  let b=ux_u32_put(f+PointLineSpriteFields.fog,fog);
+  let c=ux_u32_put(f+PointLineSpriteFields.attenuation,attenuation);
+  let d=ux_f64_put(f+PointLineSpriteFields.value,value);
+  return at;
+}
+
+native function pls_init(at:i64,id:i64,kind:i64,dispatch:i64) i64 {
+  if(!pls_span(at) || !pls_kind(kind) || dispatch<0 || dispatch>6291456-EventDispatcher.size ||
+     !pls_split(at,pls_bytes(),dispatch,EventDispatcher.size)) { return 0-1; }
+  let init=Material_init(at,id,kind,dispatch);
+  if(init<0) { return init; }
+  let value=1.0;
+  if(kind==13) {
+    let transparent=ux_u32_put(at+Material.transparent,1);
+    value=0.0;
+  }
+  return PointLineSprite_set(at,16777215,1,1,value);
+}
+
+native function PointsMaterial_init(at:i64,id:i64,dispatch:i64) i64 {
+  return pls_init(at,id,10,dispatch);
+}
+
+native function LineBasicMaterial_init(at:i64,id:i64,dispatch:i64) i64 {
+  return pls_init(at,id,11,dispatch);
+}
+
+native function SpriteMaterial_init(at:i64,id:i64,dispatch:i64) i64 {
+  return pls_init(at,id,13,dispatch);
+}
+
+native function PointLineSprite_copy(dst:i64,src:i64) i64 {
+  if(!pls_live(dst) || !pls_live(src) || ux_u32(dst+Material.type)!=ux_u32(src+Material.type) ||
+     (dst!=src && !pls_split(dst,pls_bytes(),src,pls_bytes()))) { return 0-1; }
+  let f=src+Material.size;
+  if(!pls_field_values(ux_u32(f+PointLineSpriteFields.color),ux_u32(f+PointLineSpriteFields.fog),
+    ux_u32(f+PointLineSpriteFields.attenuation),ux_f64(f+PointLineSpriteFields.value))) { return 0-1; }
+  let applied=Material_copy(dst,src);
+  if(applied<0) { return applied; }
+  return PointLineSprite_set(dst,ux_u32(f+PointLineSpriteFields.color),ux_u32(f+PointLineSpriteFields.fog),
+    ux_u32(f+PointLineSpriteFields.attenuation),ux_f64(f+PointLineSpriteFields.value));
+}
