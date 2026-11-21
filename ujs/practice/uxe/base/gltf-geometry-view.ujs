@@ -1,0 +1,81 @@
+struct GltfGeometryRequest {
+  mode: u32;
+  position: u32;
+  index: u32;
+  hasIndex: u32;
+  attributes: u32;
+  attributeCount: u32;
+  indicesOut: u32;
+  indexCapacity: u32;
+}
+
+struct GltfGeometryView {
+  position: u32;
+  vertexCount: u32;
+  indices: u32;
+  indexCount: u32;
+  descriptors: u32;
+  attributeCount: u32;
+}
+
+native function gltf_geometry_input(at:i64,bytes:i64,out:i64,index:i64,capacity:i64) i64 {
+  return loading_span(at,bytes) && file_disjoint(at,bytes,out,GltfGeometryView.size) &&
+    file_disjoint(at,bytes,index,capacity*4);
+}
+
+native function gltf_geometry_attribute(attribute:i64,expected:i64,out:i64,index:i64,capacity:i64) i64 {
+  if(attribute%4!=0 || !gltf_geometry_input(attribute,GltfAccessor.size,out,index,capacity) ||
+     ux_u32(attribute+GltfAccessor.count)!=expected) { return 0; }
+  let size=ux_u32(attribute+GltfAccessor.elementBytes);
+  let stride=ux_u32(attribute+GltfAccessor.stride);
+  let start=ux_u32(attribute+GltfAccessor.bytes);
+  let component=ux_u32(attribute+GltfAccessor.component);
+  let lanes=ux_u32(attribute+GltfAccessor.lanes);
+  if(size<1 || stride<size || start>6291456-size || expected-1>(6291456-start-size)/stride ||
+     component<5120 || component>5126 || component==5124 || lanes<1 ||
+     ux_u32(attribute+GltfAccessor.normalized)>1) { return 0; }
+  return gltf_geometry_input(start,(expected-1)*stride+size,out,index,capacity);
+}
+
+// Build an unowned geometry view with a caller-owned packed triangle buffer.
+// Attributes stay borrowed from their resolved dense/sparse descriptors.
+native function GltfLoader_geometryView(request:i64,out:i64) i64 {
+  if(request%4!=0 || out%4!=0 || !loading_span(request,GltfGeometryRequest.size) ||
+     !loading_span(out,GltfGeometryView.size) ||
+     !file_disjoint(request,GltfGeometryRequest.size,out,GltfGeometryView.size)) { return 0-1; }
+  let index=ux_u32(request+GltfGeometryRequest.indicesOut);
+  let capacity=ux_u32(request+GltfGeometryRequest.indexCapacity);
+  let attrs=ux_u32(request+GltfGeometryRequest.attributes);
+  let count=ux_u32(request+GltfGeometryRequest.attributeCount);
+  let position=ux_u32(request+GltfGeometryRequest.position);
+  if(capacity>6291456/4 || count>64 || attrs%4!=0 || position%4!=0 || index%4!=0 ||
+     !loading_span(index,capacity*4) || !file_disjoint(index,capacity*4,out,GltfGeometryView.size) ||
+     !gltf_geometry_input(request,GltfGeometryRequest.size,out,index,capacity) ||
+     !gltf_geometry_input(attrs,count*4,out,index,capacity) ||
+     !gltf_geometry_input(position,GltfAccessor.size,out,index,capacity)) { return 0-1; }
+  let vertices=ux_u32(position+GltfAccessor.count);
+  if(vertices<1 || !gltf_geometry_attribute(position,vertices,out,index,capacity)) { return 0-2; }
+  let hasIndex=ux_u32(request+GltfGeometryRequest.hasIndex);
+  let sourceIndex=ux_u32(request+GltfGeometryRequest.index);
+  if(hasIndex>1) { return 0-2; }
+  if(hasIndex==1) {
+    if(sourceIndex%4!=0 || !gltf_geometry_input(sourceIndex,GltfAccessor.size,out,index,capacity)) { return 0-2; }
+    let elements=ux_u32(sourceIndex+GltfAccessor.count);
+    if(elements<1 || !gltf_geometry_attribute(sourceIndex,elements,out,index,capacity)) { return 0-2; }
+  }
+  let i=0;
+  while(i<count) {
+    if(!gltf_geometry_attribute(ux_u32(attrs+i*4),vertices,out,index,capacity)) { return 0-2; }
+    i=i+1;
+  }
+  let mode=ux_u32(request+GltfGeometryRequest.mode);
+  let triangles=GltfLoader_accessorTriangles(mode,position,sourceIndex,hasIndex,index,capacity);
+  if(triangles<0) { return 0-3; }
+  let a=ux_u32_put(out+GltfGeometryView.position,position);
+  let b=ux_u32_put(out+GltfGeometryView.vertexCount,vertices);
+  let c=ux_u32_put(out+GltfGeometryView.indices,index);
+  let d=ux_u32_put(out+GltfGeometryView.indexCount,triangles);
+  let e=ux_u32_put(out+GltfGeometryView.descriptors,attrs);
+  let f=ux_u32_put(out+GltfGeometryView.attributeCount,count);
+  return out;
+}
