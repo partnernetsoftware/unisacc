@@ -1,0 +1,249 @@
+struct InterpolantState {
+  view: u32;
+  kind: u32;
+  result: u32;
+  settings: u32;
+  defaultStart: u32;
+  defaultEnd: u32;
+  cached: u32;
+  previous: u32;
+  next: u32;
+  weightPrevious: f64;
+  weightNext: f64;
+}
+
+struct InterpolantSettings {
+  endingStart: u32;
+  endingEnd: u32;
+}
+
+// Each instance reserves its record plus stride Float32 cells. Use -1 for
+// the inline result. Other buffers and the validated view are caller-owned.
+native function interpolant_storage(state:i64,view:i64,result:i64) i64 {
+  let stride=animation_sample_output(view,result);
+  if(stride<1 || state%8!=0) { return 0-1; }
+  let total=InterpolantState.size+stride*4;
+  let count=ux_u32(view+AnimationSamples.count);
+  if(!animation_span(state,total) || animation_overlap(state,total,view,AnimationSamples.size) ||
+     animation_overlap(state,total,ux_u32(view+AnimationSamples.times),count*4) ||
+     animation_overlap(state,total,ux_u32(view+AnimationSamples.values),count*stride*4) ||
+     (result!=state+InterpolantState.size && animation_overlap(state,total,result,stride*4))) { return 0-1; }
+  return stride;
+}
+
+native function interpolant_init(state:i64,view:i64,result:i64,kind:i64) i64 {
+  if(result==0-1) { result=state+InterpolantState.size; }
+  let stride=interpolant_storage(state,view,result);
+  if(stride<1 || kind<0 || kind>3 || (kind==3 && stride%4!=0)) { return 0-1; }
+  let v=ux_u32_put(state+InterpolantState.view,view);
+  let k=ux_u32_put(state+InterpolantState.kind,kind+1);
+  let r=ux_u32_put(state+InterpolantState.result,result);
+  let s=ux_u32_put(state+InterpolantState.settings,0);
+  let ds=ux_u32_put(state+InterpolantState.defaultStart,2400);
+  let de=ux_u32_put(state+InterpolantState.defaultEnd,2400);
+  let c=ux_u32_put(state+InterpolantState.cached,0);
+  let p=ux_u32_put(state+InterpolantState.previous,0);
+  let n=ux_u32_put(state+InterpolantState.next,0);
+  let w=ux_f64_put(state+InterpolantState.weightPrevious,0.0);
+  let x=ux_f64_put(state+InterpolantState.weightNext,0.0);
+  let lane=0;
+  while(lane<stride) {
+    let clear=ux_u32_put(state+InterpolantState.size+lane*4,0);
+    lane=lane+1;
+  }
+  return state;
+}
+
+native function LinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,0);
+}
+native function DiscreteInterpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,1);
+}
+native function CubicInterpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,2);
+}
+native function QuatLinearInterpolant_init(state:i64,view:i64,result:i64) i64 {
+  return interpolant_init(state,view,result,3);
+}
+
+native function interpolant_settings_ok(state:i64,view:i64,result:i64,stride:i64,settings:i64) i64 {
+  if(settings==0-1) { return 1; }
+  let bytes=InterpolantSettings.size;
+  let count=ux_u32(view+AnimationSamples.count);
+  return animation_span(settings,bytes) &&
+    !animation_overlap(settings,bytes,state,InterpolantState.size+stride*4) &&
+    !animation_overlap(settings,bytes,result,stride*4) &&
+    !animation_overlap(settings,bytes,view,AnimationSamples.size) &&
+    !animation_overlap(settings,bytes,ux_u32(view+AnimationSamples.times),count*4) &&
+    !animation_overlap(settings,bytes,ux_u32(view+AnimationSamples.values),count*stride*4);
+}
+
+native function interpolant_alive(state:i64) i64 {
+  if(!animation_span(state,InterpolantState.size) || state%8!=0) { return 0; }
+  let kind=ux_u32(state+InterpolantState.kind);
+  return kind>=1 && kind<=4;
+}
+
+native function Interpolant_setSettings(state:i64,settings:i64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  let view=ux_u32(state+InterpolantState.view);
+  let result=ux_u32(state+InterpolantState.result);
+  let stride=interpolant_storage(state,view,result);
+  if(stride<1 || !interpolant_settings_ok(state,view,result,stride,settings)) { return 0-1; }
+  let saved=ux_u32_put(state+InterpolantState.settings,settings+1);
+  return state;
+}
+
+native function Interpolant_getSettings(state:i64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  let settings=ux_u32(state+InterpolantState.settings);
+  if(settings!=0) { return settings-1; }
+  return state+InterpolantState.defaultStart;
+}
+
+native function Interpolant_setResult(state:i64,result:i64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  if(result==0-1) { result=state+InterpolantState.size; }
+  let view=ux_u32(state+InterpolantState.view);
+  let stride=interpolant_storage(state,view,result);
+  let settings=ux_u32(state+InterpolantState.settings)-1;
+  if(stride<1 || !interpolant_settings_ok(state,view,result,stride,settings)) { return 0-1; }
+  let saved=ux_u32_put(state+InterpolantState.result,result);
+  return result;
+}
+
+native function interpolant_cubic_seek(state:i64,times:i64,count:i64,upper:i64,settings:i64) i64 {
+  let start=ux_u32(state+InterpolantState.defaultStart);
+  let end=ux_u32(state+InterpolantState.defaultEnd);
+  if(settings>=0) {
+    start=ux_u32(settings+InterpolantSettings.endingStart);
+    end=ux_u32(settings+InterpolantSettings.endingEnd);
+  }
+  let previous=upper-2; let next=upper+1;
+  let t0=ux_f32(times+(upper-1)*4);
+  let t1=ux_f32(times+upper*4);
+  let past=t1; let future=t0;
+  if(previous>=0) { past=ux_f32(times+previous*4); }
+  else {
+    previous=upper;
+    if(start==2401) { past=2.0*t0-t1; }
+    if(start==2402) {
+      previous=count-2;
+      past=t0+ux_f32(times+previous*4)-ux_f32(times+(previous+1)*4);
+    }
+  }
+  if(next<count) { future=ux_f32(times+next*4); }
+  else {
+    next=upper-1;
+    if(end==2401) { next=upper; future=2.0*t1-t0; }
+    if(end==2402) { next=1; future=t1+ux_f32(times+4)-ux_f32(times); }
+  }
+  let half=(t1-t0)*0.5;
+  let p=ux_u32_put(state+InterpolantState.previous,previous);
+  let n=ux_u32_put(state+InterpolantState.next,next);
+  let wp=ux_f64_put(state+InterpolantState.weightPrevious,half/(t0-past));
+  let wn=ux_f64_put(state+InterpolantState.weightNext,half/(future-t1));
+  return upper;
+}
+
+native function interpolant_cubic_output(state:i64,values:i64,stride:i64,upper:i64,result:i64,p:f64) i64 {
+  let previous=ux_u32(state+InterpolantState.previous)*stride*4;
+  let next=ux_u32(state+InterpolantState.next)*stride*4;
+  let wp=ux_f64(state+InterpolantState.weightPrevious);
+  let wn=ux_f64(state+InterpolantState.weightNext);
+  let pp=p*p; let ppp=pp*p;
+  let sP=0.0-wp*ppp+2.0*wp*pp-wp*p;
+  let s0=(1.0+wp)*ppp+(-1.5-2.0*wp)*pp+(-0.5+wp)*p+1.0;
+  let s1=(-1.0-wn)*ppp+(1.5+wn)*pp+0.5*p;
+  let sN=wn*ppp-wn*pp;
+  let offset=(upper-1)*stride*4;
+  let lane=0;
+  while(lane<stride) {
+    let at=values+lane*4;
+    let cell=ux_f32_put(result+lane*4,sP*ux_f32(at+previous)+s0*ux_f32(at+offset)+
+      s1*ux_f32(at+offset+stride*4)+sN*ux_f32(at+next));
+    lane=lane+1;
+  }
+  return result;
+}
+
+native function interpolant_quaternion_flat(result:i64,lo:i64,hi:i64,t:f64) i64 {
+  if(t==0.0) { return uxe_copy_record(result,lo,16); }
+  if(t==1.0) { return uxe_copy_record(result,hi,16); }
+  let x=ux_f32(lo); let y=ux_f32(lo+4); let z=ux_f32(lo+8); let w=ux_f32(lo+12);
+  let a=ux_f32(hi); let b=ux_f32(hi+4); let c=ux_f32(hi+8); let d=ux_f32(hi+12);
+  if(x!=a || y!=b || z!=c || w!=d) {
+    let s=1.0-t;
+    let cos=x*a+y*b+z*c+w*d;
+    let dir=1.0;
+    if(cos<0.0) { dir=0.0-1.0; }
+    let sqrSin=1.0-cos*cos;
+    if(sqrSin>0.0000000000000002220446049250313) {
+      let sin=f64_sqrt(sqrSin);
+      let angle=ux_math_atan2(sin,cos*dir);
+      s=ux_math_sin(s*angle)/sin;
+      t=ux_math_sin(t*angle)/sin;
+    }
+    let signed=t*dir;
+    x=x*s+a*signed; y=y*s+b*signed; z=z*s+c*signed; w=w*s+d*signed;
+    if(s==1.0-t) {
+      let length=1.0/f64_sqrt(x*x+y*y+z*z+w*w);
+      x=x*length; y=y*length; z=z*length; w=w*length;
+    }
+  }
+  let u=ux_f32_put(result,x);
+  let v=ux_f32_put(result+4,y);
+  let o=ux_f32_put(result+8,z);
+  let p=ux_f32_put(result+12,w);
+  return result;
+}
+
+native function Interpolant_evaluate(state:i64,t:f64) i64 {
+  if(!interpolant_alive(state)) { return 0-1; }
+  let kind=ux_u32(state+InterpolantState.kind)-1;
+  let view=ux_u32(state+InterpolantState.view);
+  let result=ux_u32(state+InterpolantState.result);
+  let settings=ux_u32(state+InterpolantState.settings)-1;
+  let stride=interpolant_storage(state,view,result);
+  if(stride<1 || kind>3 || (kind==3 && stride%4!=0) ||
+     !interpolant_settings_ok(state,view,result,stride,settings)) { return 0-1; }
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  let count=ux_u32(view+AnimationSamples.count);
+  let cached=ux_u32(state+InterpolantState.cached);
+  if(cached>count) { return 0-1; }
+  let upper=cached;
+  let hit=0;
+  if(cached==0) { hit=t<ux_f32(times); }
+  else if(cached==count) { hit=!(t<ux_f32(times+(count-1)*4)); }
+  else { hit=t>=ux_f32(times+(cached-1)*4) && t<ux_f32(times+cached*4); }
+  if(!hit) {
+    upper=animation_sample_upper(times,count,t);
+    if(kind==2 && upper>0 && upper<count) {
+      let changed=interpolant_cubic_seek(state,times,count,upper,settings);
+    }
+    let saved=ux_u32_put(state+InterpolantState.cached,upper);
+  }
+  let lower=upper-1;
+  if(upper==0) { lower=0; }
+  let lo=values+lower*stride*4;
+  if(upper==0 || upper==count || kind==1) { return uxe_copy_record(result,lo,stride*4); }
+  let hi=lo+stride*4;
+  let t0=ux_f32(times+lower*4);
+  let p=(t-t0)/(ux_f32(times+upper*4)-t0);
+  if(kind==2) { return interpolant_cubic_output(state,values,stride,upper,result,p); }
+  let lane=0;
+  while(lane<stride) {
+    let at=lane*4;
+    if(kind==3) {
+      // r160 writes at destination offset zero for every quaternion.
+      let cell=interpolant_quaternion_flat(result,lo+at,hi+at,p);
+      lane=lane+4;
+    } else {
+      let cell=ux_f32_put(result+at,ux_f32(lo+at)*(1.0-p)+ux_f32(hi+at)*p);
+      lane=lane+1;
+    }
+  }
+  return result;
+}
