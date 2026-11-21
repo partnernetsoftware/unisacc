@@ -1,8 +1,8 @@
 /* tools/core-closure.cx -- 44 个构造根的编译闭包生成表 build/core-closure.tsv(身份按闭包取的底座)。
- *   sh ./unisacc.com tools/core-closure.cx -- --write|--check [--table PATH]
- * 取法:build/chain-facts.tsv 的每个 root 事实,用已装产品 `-cx-plan ROOT` 取 use 闭包(与 chain-step 对象编译同一取法)。
- * 只覆盖 use 路径(via=root 或 use);include、kernel、seed 路径不在 -cx-plan 里,不由本表声明。
- * -cx-plan 与目标无关(--target 被忽略,六目标输出相同),故只有 lnx-x86_64 为实测,其余五目标写 UNMEASURED 一行。
+ *   cx tools/core-closure.cx -- --write|--check [--table PATH] [--evidence SESSION SNAP]
+ * 取每个构造根的 -cx-plan use 闭包,再逐目标核对 0.0.87 整链收据。
+ * 默认读仓内归档。--evidence DIR - 使用另一个归档。--evidence SESSION SNAP 读原始会话与快照。
+ * 本表仅覆盖 use 路径(via=root 或 use),不含 include、kernel、seed。
  * 列:target unit real via bytes roots(unit=计划所列仓内路径;real=符号链接真实目标,同则同值;roots=含该单元的根数)。
  * --check 末行 SAME 或 DRIFT(重算与表比对,不写)。--table 指定比对/写入的表路径(检查夹具用)。 */
 #pragma unisa use sys.fs
@@ -54,24 +54,136 @@ static void collect(void){
     while(j>=0&&strcmp(units[j],u)>0){ units[j+1]=units[j]; reals[j+1]=reals[j]; uroot[j+1]=uroot[j]; ucnt[j+1]=ucnt[j]; ubytes[j+1]=ubytes[j]; j--; }
     units[j+1]=u; reals[j+1]=rl; uroot[j+1]=ur; ucnt[j+1]=uc; ubytes[j+1]=ub; }
 }
+static const char *targets[] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+static const char *ev_session = "release/evidence/0.0.87/closure-evidence", *ev_snap;
+static int representative[MAXU], real_count;
+
+static void evidence_unit(const char *target, const char *path, int *seen) {
+  int best = -1;
+  for (int k = 0; k < nu; k++) if (!strcmp(reals[k], path) && (best < 0 || uroot[k])) {
+    best = k;
+    if (uroot[k]) break;
+  }
+  if (best < 0) {
+    fprintf(stderr, "core-closure: %s compiled %s\n", target, path);
+    die("evidence outside use closure");
+  }
+  if (seen[best]) die("evidence duplicate unit");
+  seen[best] = 1;
+}
+
+static void evidence_path(const char *target, const char *snap, const char *unit, int *seen) {
+  char path[1400], canonical[1400];
+  if (cx_fmt(path, sizeof path, "%s%s%s", *unit == '/' ? "" : snap, *unit == '/' ? "" : "/", unit) ||
+      sy_realpath(path, canonical, sizeof canonical) < 0) die("evidence source path");
+  evidence_unit(target, rel(canonical, snap), seen);
+}
+
+static void evidence_linux(const char *target, const char *snap, int *seen) {
+  char facts[1400], object[1400];
+  if (cx_fmt(facts, sizeof facts, "%s/build/chain-facts.tsv", snap)) die("evidence path bound");
+  char *b = cx_read(facts, 0);
+  if (!b) die("evidence root facts missing");
+  for (char *p = b; *p;) {
+    char *end = strchr(p, '\n');
+    if (!end) die("evidence root facts truncated");
+    *end = 0;
+    if (!strncmp(p, "root\t", 5)) {
+      char *tab = strchr(p + 5, '\t');
+      if (!tab) die("evidence root row");
+      *tab = 0;
+      if (cx_fmt(object, sizeof object, "%s/fixedpoint/g3/%s/%s", ev_session, target, p + 5) ||
+          sy_is_reg(object) != 1) die("evidence root object missing");
+      evidence_path(target, snap, tab + 1, seen);
+    }
+    p = end + 1;
+  }
+  free(b);
+}
+
+static void check_evidence(int at) {
+  char path[1400], snap[1100];
+  const char *target = targets[at];
+  int linux_build = at < 2, seen[MAXU], nseen = 0;
+  memset(seen, 0, sizeof seen);
+  if (ev_snap) {
+    if (sy_realpath(ev_snap, snap, sizeof snap) < 0) die("evidence snapshot missing");
+    if (linux_build) evidence_linux(target, snap, seen);
+    if (linux_build ? cx_fmt(path, sizeof path, "%s/fixedpoint/g3/%s.closures.tsv", ev_session, target)
+                    : cx_fmt(path, sizeof path, "%s/out/chain/gen3/%s-front0/part.tsv", snap, target))
+      die("evidence path bound");
+  } else if (cx_fmt(path, sizeof path, "%s/actual-compiled-%s.tsv", ev_session, target))
+    die("evidence path bound");
+  char *b = cx_read(path, 0);
+  if (!b) die("evidence target missing");
+  for (char *p = b; *p;) {
+    char *end = strchr(p, '\n');
+    if (!end) die("evidence truncated");
+    *end = 0;
+    if (ev_snap) {
+      int unit_row = linux_build || (*p >= '0' && *p <= '9');
+      if (unit_row) {
+        char *tab = strchr(p, '\t');
+        if (!tab || !tab[1] || strchr(tab + 1, '\t')) die("evidence unit row");
+        *tab = 0;
+        if (linux_build) {
+          char object[1400];
+          if (cx_fmt(object, sizeof object, "%s/fixedpoint/g3/%s/%s", ev_session, target, p) ||
+              sy_is_reg(object) != 1) die("evidence closure object missing");
+        }
+        evidence_path(target, snap, tab + 1, seen);
+      }
+    } else if (*p != '#') {
+      char *tab = strchr(p, '\t');
+      if (!tab) die("archived evidence row");
+      *tab++ = 0;
+      char *next = strchr(tab, '\t');
+      if (!next || strcmp(p, target)) die("archived evidence target");
+      *next = 0;
+      evidence_unit(target, tab, seen);
+    }
+    p = end + 1;
+  }
+  free(b);
+  for (int k = 0; k < nu; k++) nseen += seen[k];
+  if (!at) {
+    real_count = nseen;
+    for (int k = 0; k < nu; k++) {
+      int found = 0;
+      for (int j = 0; j < nu && !found; j++) found = seen[j] && !strcmp(reals[k], reals[j]);
+      if (!found) die("evidence unit count differs from use closure");
+      representative[k] = seen[k];
+    }
+  } else if (nseen != real_count) die("evidence unit count differs from use closure");
+}
+
 static char *render(size_t *outn){
   size_t cap=1<<20; char *o=malloc(cap); size_t at=0; char line[2048];
 #define PUT(...) do { if (cx_fmt(line, sizeof line, __VA_ARGS__)) die("render bound"); size_t k_ = strlen(line); if (mm_copy(o + at, cap - at, line, k_)) die("render bound"); at += k_; } while (0)
   PUT("# Generated by tools/core-closure.cx --write; do not edit. use-closure of the %d roots in build/chain-facts.tsv via -cx-plan.\n",nroots);
+  PUT("# Scope: use paths only; excludes kernel, seed and include. Target membership from 0.0.87 chain receipts.\n");
   PUT("# target\tunit\treal\tvia\tbytes\troots\n");
   for(int i=0;i<nu;i++) PUT("lnx-x86_64\t%s\t%s\t%s\t%ld\t%d\n",units[i],reals[i],uroot[i]?"root":"use",ubytes[i],ucnt[i]);
-  const char *oth[]={"lnx-arm64","osx-x86_64","osx-arm64","win-x86_64","win-arm64",0};
-  for(int i=0;oth[i];i++) PUT("%s\tUNMEASURED\t-\t-\t-\t-\n",oth[i]);
+  for (int target_index = 1; target_index < 6; target_index++)
+    for (int k = 0; k < nu; k++) if (representative[k])
+      PUT("%s\t%s\t%s\t%s\t%ld\t-\n", targets[target_index], units[k], reals[k], uroot[k] ? "root" : "use", ubytes[k]);
   *outn=at; return o;
 }
 int main(int argc,char **argv){
   int wr=0,ck=0,nt=0; const char *tables[8]; const char *dflt="build/core-closure.tsv";
-  for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"--write")) wr=1; else if(!strcmp(argv[i],"--check")) ck=1; else if(!strcmp(argv[i],"--table")&&i+1<argc&&nt<8) tables[nt++]=argv[++i]; else die("usage --write|--check [--table PATH]..."); }
+  for(int i=1;i<argc;i++){ if(!strcmp(argv[i],"--write")) wr=1; else if(!strcmp(argv[i],"--check")) ck=1; else if(!strcmp(argv[i],"--table")&&i+1<argc&&nt<8) tables[nt++]=argv[++i]; else if (!strcmp(argv[i], "--evidence") && i + 2 < argc) {
+    ev_session = argv[++i];
+    ev_snap = argv[++i];
+    if (!strcmp(ev_snap, "-")) ev_snap = 0;
+  } else die("usage --write|--check [--table PATH]... [--evidence SESSION SNAP]"); }
   if(wr==ck) die("usage --write|--check [--table PATH]...");
   if(!nt) tables[nt++]=dflt;
   if(wr&&nt!=1) die("--write takes one table");
-  collect(); size_t n; char *b=render(&n);
-  printf("CORE_CLOSURE\troots=%d\tlnx-x86_64_units=%d\tother_targets=UNMEASURED(5)\n",nroots,nu);
+  collect();
+  for (int at = 0; at < 6; at++) check_evidence(at);
+  size_t n;
+  char *b = render(&n);
+  printf("CORE_CLOSURE\troots=%d\tlnx-x86_64_plan_rows=%d\ttargets=6\treal_units_each=%d\n", nroots, nu, real_count);
   if(wr){ if(cx_write(tables[0],b,n)) die("write"); printf("WRITE\n"); return 0; }
   int bad=0;
   for(int i=0;i<nt;i++){ size_t z; char *old=cx_read(tables[i],&z); int same=old&&z==n&&!memcmp(old,b,n); free(old);
