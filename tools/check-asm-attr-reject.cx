@@ -1,13 +1,18 @@
-/* tools/check-asm-attr-reject.cx -- regression check for asm and __attribute__ named rejections (0.0.83).
+/* tools/check-asm-attr-reject.cx -- regression check for asm and __attribute__ named rejections (0.0.83 / 0.0.90 U4).
  *   sh ./unisacc.com tools/check-asm-attr-reject.cx
  * Override product under test via ASM_ATTR_CC=/path/to/cx-dev (or UNISACC).
  * Verifies:
- *   - 14 reject cases: __asm__("nop"), asm("nop"), asm label, aligned, packed, cleanup, section,
- *     weak, alias, naked, vector_size, visibility("hidden"), unknown attr, mixed (unused, aligned)
- *     -> rc!=0, stderr contains "not covered:", no object produced.
- *   - 6 accept cases: constructor+destructor actually execute, visibility("default"),
- *     all 13 harmless whitelist attrs + __name__ + multi-attr + format/deprecated/nonnull args,
- *     empty __attribute__(()), plain identifiers asm/__asm__, and unterminated attribute error.
+ *   - Statement-level __asm__("nop") (with line:col 3:5), top-level asm("nop"), and volatile inline asm
+ *     (__asm__ volatile, __asm__ __volatile__, asm volatile; note: 0.0.90 freezes A-class cap at 30/30 without
+ *     editing exec/lex/attr-byte.tsv:1346, so volatile keeps unlocated "reject: not covered: inline asm" and
+ *     location will be added in 0.0.91);
+ *   - Function declaration/definition asm labels (__asm__("myf"), __asm("myg")) accepted and renamed on ELF
+ *     targets (lnx/x86_64, lnx/arm64), and rejected with located "not covered: asm label unsupported for target"
+ *     on non-ELF targets (osx/x86_64, osx/arm64, win/x86_64, win/arm64);
+ *   - Object / local variable / block-scope function asm labels rejected with located "not covered: asm label ...";
+ *   - 11 unsupported __attribute__ cases rejected with "not covered: attribute" and no artifact;
+ *   - 6 accept cases: constructor+destructor execute, visibility("default"), 13+8 harmless whitelist attrs,
+ *     empty __attribute__(()), plain identifier asm without '(', and unterminated attribute error.
  * Last line: CHECK_ASM_ATTR_REJECT<TAB>ok=N<TAB>failed=M<TAB>ms=T (rc 0 only when failed=0). */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -37,12 +42,52 @@ static int caar_compile(const char *name, const char *src, char *out, size_t cap
     return ck_run(av, out, (int)cap);
 }
 
+static int caar_compile_target(const char *name, const char *target, int dash_c, const char *src, char *out, size_t cap, char *art_out, size_t acap) {
+    char cpath[CAAR_PW];
+    if (cx_fmt(cpath, sizeof cpath, "%s/%s.c", caar_work, name)) return -1;
+    if (cx_fmt(art_out, (int)acap, "%s/%s.%s", caar_work, name, dash_c ? "o" : "bin")) return -1;
+    if (cx_write(cpath, src, strlen(src))) return -1;
+    (void)unlink(art_out);
+    if (caar_use_sh) {
+        if (dash_c) {
+            char *av[] = {"sh", (char *)caar_cc, "-b", (char *)target, "-c", cpath, "-o", art_out, 0};
+            return ck_run(av, out, (int)cap);
+        } else {
+            char *av[] = {"sh", (char *)caar_cc, "-b", (char *)target, cpath, "-o", art_out, 0};
+            return ck_run(av, out, (int)cap);
+        }
+    }
+    if (dash_c) {
+        char *av[] = {(char *)caar_cc, "-b", (char *)target, "-c", cpath, "-o", art_out, 0};
+        return ck_run(av, out, (int)cap);
+    } else {
+        char *av[] = {(char *)caar_cc, "-b", (char *)target, cpath, "-o", art_out, 0};
+        return ck_run(av, out, (int)cap);
+    }
+}
+
 static void caar_expect_reject(const char *id, const char *src, const char *want_msg) {
     char out[CAAR_OUT], bin[CAAR_PW];
     int rc = caar_compile(id, src, out, sizeof out, bin, sizeof bin);
     struct stat st;
     int no_bin = (stat(bin, &st) != 0);
     ck(rc != 0 && no_bin && ckk_has(out, CAAR_OUT, want_msg), id);
+}
+
+static void caar_expect_located_reject(const char *id, const char *src, const char *want_loc, const char *want_msg) {
+    char out[CAAR_OUT], bin[CAAR_PW];
+    int rc = caar_compile(id, src, out, sizeof out, bin, sizeof bin);
+    struct stat st;
+    int no_bin = (stat(bin, &st) != 0);
+    ck(rc != 0 && no_bin && ckk_has(out, CAAR_OUT, want_loc) && ckk_has(out, CAAR_OUT, want_msg), id);
+}
+
+static void caar_expect_target_reject(const char *id, const char *target, const char *src, const char *want_loc, const char *want_msg) {
+    char out[CAAR_OUT], art[CAAR_PW];
+    int rc = caar_compile_target(id, target, 1, src, out, sizeof out, art, sizeof art);
+    struct stat st;
+    int no_art = (stat(art, &st) != 0);
+    ck(rc != 0 && no_art && ckk_has(out, CAAR_OUT, want_loc) && ckk_has(out, CAAR_OUT, want_msg), id);
 }
 
 int main(int argc, char **argv) {
@@ -66,13 +111,57 @@ int main(int argc, char **argv) {
     if (cx_fmt(caar_work, sizeof caar_work, "%s/check-asm-attr-%d", base_td, (int)getpid())) return 2;
     if (mkdir(caar_work, 0700) != 0 && errno != EEXIST) return 2;
 
-    /* 17 named rejections */
-    caar_expect_reject("reject-asm-basic", "int main(void){ __asm__(\"nop\"); return 0; }\n", "not covered: inline asm");
+    /* Statement-level and top-level inline asm rejections (statement __asm__ has 3:5 line:col location;
+     * volatile inline asm is rejected in E1 exec/lex/attr-byte.tsv:1346 without location in 0.0.90 to
+     * respect the 30/30 A-class file cap, scheduled for 0.0.91 location promotion). */
+    caar_expect_located_reject("reject-asm-basic", "int main(void){\n    int a = 0;\n    __asm__(\"nop\");\n    return a;\n}\n", ":3:5: error:", "not covered: inline asm");
     caar_expect_reject("reject-asm-toplevel", "asm(\"nop\"); int main(void){ return 0; }\n", "not covered: inline asm");
-    caar_expect_reject("reject-asm-label", "int f(void) __asm__(\"myf\"); int main(void){ return 0; }\n", "not covered: inline asm");
     caar_expect_reject("reject-asm-volatile", "int main(void){ __asm__ volatile(\"nop\"); return 0; }\n", "not covered: inline asm");
     caar_expect_reject("reject-asm-__volatile__", "int main(void){ __asm__ __volatile__(\"nop\"); return 0; }\n", "not covered: inline asm");
     caar_expect_reject("reject-asm-plain-volatile", "int main(void){ asm volatile(\"nop\"); return 0; }\n", "not covered: inline asm");
+
+    /* U4 asm label scope / target rejections and ELF acceptance */
+    caar_expect_located_reject("reject-asm-label-local-var", "int main(void){\n    int x __asm__(\"local_alt\") = 1;\n    return x;\n}\n", ":2:11: error:", "not covered: asm label on a block-scope object declaration");
+    caar_expect_located_reject("reject-asm-label-global-var", "int g __asm__(\"g_alt\") = 1;\nint main(void){ return g; }\n", ":1:7: error:", "not covered: asm label on an object declaration");
+    caar_expect_located_reject("reject-asm-label-block-fn", "int main(void){\n    int f(void) __asm__(\"f_alt\");\n    return 0;\n}\n", ":2:17: error:", "not covered: asm label on a block-scope function declaration");
+    caar_expect_target_reject("reject-asm-label-osx-x86_64", "osx/x86_64", "int f(void) __asm__(\"myf\");\nint f(void){ return 0; }\nint main(void){ return f(); }\n", ":1:13: error:", "not covered: asm label unsupported for target");
+    caar_expect_target_reject("reject-asm-label-osx-arm64", "osx/arm64", "int f(void) __asm__(\"myf\");\nint f(void){ return 0; }\nint main(void){ return f(); }\n", ":1:13: error:", "not covered: asm label unsupported for target");
+    caar_expect_target_reject("reject-asm-label-win-x86_64", "win/x86_64", "int f(void) __asm__(\"myf\");\nint f(void){ return 0; }\nint main(void){ return f(); }\n", ":1:13: error:", "not covered: asm label unsupported for target");
+    caar_expect_target_reject("reject-asm-label-win-arm64", "win/arm64", "int f(void) __asm__(\"myf\");\nint f(void){ return 0; }\nint main(void){ return f(); }\n", ":1:13: error:", "not covered: asm label unsupported for target");
+
+    {
+        const char *fn_label_src =
+            "int f(void) __asm__(\"caar_renamed_f\");\n"
+            "int f(void){ return 42; }\n"
+            "int main(void){ return f() == 42 ? 0 : 1; }\n";
+        char obj[CAAR_PW];
+        int rc_o = caar_compile_target("accept-asm-label-lnx-x86-o", "lnx/x86_64", 1, fn_label_src, out, sizeof out, obj, sizeof obj);
+        int sym_ok = 0;
+        if (rc_o == 0) {
+            char *nmv[] = {"nm", obj, 0};
+            if (ck_run(nmv, out, sizeof out) == 0) {
+                sym_ok = ckk_has(out, CAAR_OUT, " caar_renamed_f\n") && !ckk_has(out, CAAR_OUT, " f\n");
+            }
+        }
+        int rc_b = caar_compile("accept-asm-label-lnx-x86", fn_label_src, out, sizeof out, bin, sizeof bin);
+        int run_ok = 0;
+        if (rc_b == 0) {
+            char *rv[] = {bin, 0};
+            run_ok = (ck_run(rv, out, sizeof out) == 0);
+        }
+        int rc_arm = caar_compile_target("accept-asm-label-lnx-arm64", "lnx/arm64", 1, fn_label_src, out, sizeof out, obj, sizeof obj);
+        int arm_sym_ok = 0;
+        if (rc_arm == 0) {
+            char *nmv[] = {"nm", obj, 0};
+            if (ck_run(nmv, out, sizeof out) == 0) {
+                arm_sym_ok = ckk_has(out, CAAR_OUT, " caar_renamed_f\n") && !ckk_has(out, CAAR_OUT, " f\n");
+            }
+        }
+        ck(rc_o == 0 && sym_ok && rc_b == 0 && run_ok && rc_arm == 0 && arm_sym_ok,
+           "accept-asm-label-elf: function asm label accepted and renames symbol on lnx/x86_64 and lnx/arm64");
+    }
+
+    /* 11 unsupported __attribute__ named rejections */
     caar_expect_reject("reject-attr-aligned", "struct S { int x; } __attribute__((aligned(32))); int main(void){ return 0; }\n", "not covered: attribute");
     caar_expect_reject("reject-attr-packed", "struct P { char a; int b; } __attribute__((packed)); int main(void){ return 0; }\n", "not covered: attribute");
     caar_expect_reject("reject-attr-cleanup", "void cl(int *p){(void)p;} int main(void){ int x __attribute__((cleanup(cl))) = 1; return x; }\n", "not covered: attribute");
@@ -159,14 +248,14 @@ int main(int argc, char **argv) {
         ck(rc == 0, "accept-empty-attr: empty __attribute__(()) accepted");
     }
     {
-        const char *ident_src = "int main(void){ int asm = 1; int __asm__ = 2; return (asm + __asm__) == 3 ? 0 : 1; }\n";
+        const char *ident_src = "int main(void){ int asm = 1; int asm_id = 2; return (asm + asm_id) == 3 ? 0 : 1; }\n";
         int rc = caar_compile("accept-asm-ident", ident_src, out, sizeof out, bin, sizeof bin);
         int run_ok = 0;
         if (rc == 0) {
             char *rv[] = {bin, 0};
             run_ok = (ck_run(rv, out, sizeof out) == 0);
         }
-        ck(rc == 0 && run_ok, "accept-asm-ident: asm and __asm__ without '(' remain plain identifiers");
+        ck(rc == 0 && run_ok, "accept-asm-ident: asm without '(' remains a plain identifier");
     }
     caar_expect_reject("reject-unterminated-attr", "int x __attribute__((unused\n", "unterminated attribute or asm");
 
