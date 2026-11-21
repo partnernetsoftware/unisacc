@@ -1,11 +1,32 @@
 #pragma unisa module syscall
 #pragma unisa dock
-/* L0 sys/syscall: thin wrapper over the compiler's __syscall6 intrinsic
-   (6 operands: syscall number nr + 5 arguments a0..a4).
-   No syscall number constants live here; callers obtain per-target numbers
-   from sys.sysnums (exec/facts/sys-syscalls.tsv).
-   On Linux and macOS, forwards to __syscall6(_UNISA_SC(nr), a0..a4) and
-   returns the kernel result or -errno. On Windows, returns -ENOSYS. */
+#pragma unisa use sys.sysnums
+/* L0 sys/syscall:
+   (1) sy_syscall6: thin wrapper over the compiler's __syscall6 intrinsic
+       (6 operands: syscall number nr + 5 arguments a0..a4; 6th syscall arg
+       is not supported by the intrinsic). No syscall number constants live
+       here; callers obtain per-target numbers from sys.sysnums.
+       Returns kernel result or -errno on Linux/macOS; -ENOSYS on Windows.
+   (2) sy_random: OS CSPRNG entropy bytes into buf[0..n-1].
+       Linux: getrandom(2) via sys.sysnums syp_getrandom (handles short reads
+       and -EINTR). macOS: getentropy(2) via sys.sysnums syp_getentropy in
+       chunks of <= 256 bytes. Windows: -ENOSYS (refused in std-surface.tsv).
+       Returns 0 on success, -EINVAL for bad args, or negative -errno. */
+
+#if defined(__APPLE__) && defined(__aarch64__)
+#define SYSC_NUM(name) (sn_osx_arm64_##name##_hi * 65536L + sn_osx_arm64_##name##_lo)
+#elif defined(__APPLE__) && defined(__x86_64__)
+#define SYSC_NUM(name) (sn_osx_x86_64_##name##_hi * 65536L + sn_osx_x86_64_##name##_lo)
+#elif defined(__linux__) && defined(__aarch64__)
+#define SYSC_NUM(name) (sn_lnx_arm64_##name##_hi * 65536L + sn_lnx_arm64_##name##_lo)
+#elif defined(__linux__) && defined(__x86_64__)
+#define SYSC_NUM(name) (sn_lnx_x86_64_##name##_hi * 65536L + sn_lnx_x86_64_##name##_lo)
+#else
+#define SYSC_NUM(name) (sn_fallback_##name##_hi * 65536L + sn_fallback_##name##_lo)
+#endif
+static const long sysc_getrandom = SYSC_NUM(syp_getrandom);
+static const long sysc_getentropy = SYSC_NUM(syp_getentropy);
+#undef SYSC_NUM
 
 static long sy_syscall6_os(long nr, long a0, long a1, long a2, long a3, long a4) {
 #if defined(_WIN32)
@@ -18,4 +39,43 @@ static long sy_syscall6_os(long nr, long a0, long a1, long a2, long a3, long a4)
 
 long sy_syscall6(long nr, long a0, long a1, long a2, long a3, long a4) {
     return sy_syscall6_os(nr, a0, a1, a2, a3, a4);
+}
+
+static int sy_random_os(void *buf, long n) {
+#if defined(_WIN32)
+    (void)buf; (void)n;
+    return -ENOSYS;
+#else
+    unsigned char *p = (unsigned char *)buf;
+    long off = 0;
+    if (sysc_getrandom) {
+        while (off < n) {
+            long r = __syscall6(_UNISA_SC(sysc_getrandom), (long)(p + off), n - off, 0, 0, 0);
+            if (r == -EINTR) continue;
+            if (r < 0) return (int)r;
+            if (r == 0) return -EIO;
+            off += r;
+        }
+        return 0;
+    }
+    if (sysc_getentropy) {
+        while (off < n) {
+            long chunk = n - off;
+            long r;
+            if (chunk > 256) chunk = 256;
+            r = __syscall6(_UNISA_SC(sysc_getentropy), (long)(p + off), chunk, 0, 0, 0);
+            if (r < 0) return (int)r;
+            off += chunk;
+        }
+        return 0;
+    }
+    return -ENOSYS;
+#endif
+}
+
+int sy_random(void *buf, long n) {
+    if (n < 0) return -EINVAL;
+    if (n == 0) return 0;
+    if (!buf) return -EINVAL;
+    return sy_random_os(buf, n);
 }

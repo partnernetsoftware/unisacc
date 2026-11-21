@@ -92,7 +92,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 |---|---|---|---|---|
 | cx.mem | `mem.heap`、`mem.bytes`、`mem.arena`、`mem.vec`、`mem.map` | 堆、带界字节、arena、vec、map | 61 | 全部 |
 | cx.text | `text.text`、`text.fmt`、`text.num`、`text.utf8`、`text.codec` | 带界文本、格式化、数字、UTF-8、编码 | 44 | 全部 |
-| cx.sys | `sys.io`、`sys.mem`、`sys.sha`、`sys.dl`、`sys.netmsg` 等 | fd 读写、映射、摘要、动态库、网络底层 | 88 | 全部 |
+| cx.sys | `sys.io`、`sys.mem`、`sys.sha`、`sys.dl`、`sys.netmsg`、`sys.syscall` 等 | fd 读写、映射、摘要、动态库、网络底层、薄系统调用(`sy_syscall6` 仅支持 nr 加 5 参数,第六参不支持)与熵源(`sy_random`) | 91 | 全部 |
 | cx.os | `sys.fs`、`sys.proc`、`sys.env`、`sys.time`、`os.utc` | 文件系统、进程、环境、时间与截止 | 135 | 全部 |
 | cx.path | `path.path` | 纯词法路径,posix 与 win | 27 | 全部 |
 | cx.stream | `stream.item`、`stream.pipe`、`stream.rw` | 带回执的有界字节管道与读写句柄 | 32 | 全部 |
