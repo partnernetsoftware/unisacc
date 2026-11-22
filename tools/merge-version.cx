@@ -307,17 +307,50 @@ static int cmd_preview(int argc, char **argv) {
 
 /* ---- gates, each one bounded to 55 s ---- */
 static char *tree_dir(char *buf, size_t cap) { mv_need(!cx_fmt(buf, cap, "%s/tree", g_work), "work path"); return buf; }
+/* git -C DIR ARGS... in a directory that is not the shared repository */
+static int git_in(const char *dir, pr_result *r, int secs, char **args) {
+    char *av[24];
+    int n = 0;
+    av[n++] = "git"; av[n++] = "-C"; av[n++] = (char *)dir; av[n++] = "-c"; av[n++] = "user.name=merge-version"; av[n++] = "-c"; av[n++] = "user.email=merge-version@localhost";
+    for (int i = 0; args[i] && n < 23; i++) av[n++] = args[i];
+    av[n] = 0;
+    if (pr_run("git", av, 0, 0, secs, r) != 0) { r->rc = r->rc ? r->rc : -1; return r->rc; }
+    return r->rc;
+}
+/* the checkout is its own private git repository (objects shared with the repository through alternates, one root
+ * commit holding the resolved tree), so the generators that ask git for the tracked set see a real repository; the
+ * shared repository's index, refs and worktree list are untouched */
 static void ensure_checkout(const char *idx, char *tdir, size_t cap) {
     tree_dir(tdir, cap);
     char mark[1200];
     mv_need(!cx_fmt(mark, sizeof mark, "%s/.checked-out", tdir), "work path");
     if (sy_is_reg(mark) == 1) return;
+    (void)idx;
     pr_result r;
-    char pref[1200];
-    mv_need(!cx_fmt(pref, sizeof pref, "--prefix=%s/", tdir), "work path");
+    char tf[1100], tree[64];
+    mv_need(!cx_fmt(tf, sizeof tf, "%s/resolved.tree", g_work), "work path");
+    size_t tn = 0;
+    char *tt = cx_read(tf, &tn);
+    mv_need(tt != 0 && tn >= 40, "no resolved tree");
+    mv_need(!cx_fmt(tree, sizeof tree, "%.40s", tt), "tree");
     mv_need(sy_mkdir_all(tdir, 0700) == 0, "cannot create the tree dir");
-    char *a[] = {"checkout-index", "-a", "-f", "-q", pref, 0};
-    mv_need(git_run(idx, &r, 55, a) == 0, "checkout-index failed (the tree checkout is its own shard: run the gate again)"); pr_free(&r);
+    char *in[] = {"init", "-q", 0};
+    mv_need(git_in(tdir, &r, 20, in) == 0, "git init failed"); pr_free(&r);
+    char *ad[] = {"rev-parse", "--absolute-git-dir", 0};
+    mv_need(git_run(0, &r, 20, ad) == 0, "git rev-parse --absolute-git-dir failed"); chomp(&r);
+    char alt[1400], altdir[1400], altbody[1400];
+    mv_need(!cx_fmt(altdir, sizeof altdir, "%s/.git/objects/info", tdir) && !cx_fmt(alt, sizeof alt, "%s/alternates", altdir) && !cx_fmt(altbody, sizeof altbody, "%s/objects\n", r.out), "work path");
+    pr_free(&r);
+    mv_need(sy_mkdir_all(altdir, 0700) == 0 && !cx_write(alt, altbody, strlen(altbody)), "cannot write alternates");
+    char *rt[] = {"read-tree", tree, 0};
+    mv_need(git_in(tdir, &r, 30, rt) == 0, "read-tree in the private repository failed"); pr_free(&r);
+    char *co[] = {"checkout-index", "-a", "-f", "-q", 0};
+    mv_need(git_in(tdir, &r, 55, co) == 0, "checkout-index failed (the tree checkout is its own shard: run the gate again)"); pr_free(&r);
+    char *ct[] = {"commit-tree", tree, "-m", "merge-version resolved tree", 0};
+    mv_need(git_in(tdir, &r, 20, ct) == 0, "commit-tree failed"); chomp(&r);
+    char *ur[] = {"update-ref", "HEAD", r.out, 0};
+    pr_result r2;
+    mv_need(git_in(tdir, &r2, 20, ur) == 0, "update-ref failed"); pr_free(&r2); pr_free(&r);
     char lnk[1200], src[1200];
     pr_result top;
     char *tp[] = {"rev-parse", "--show-toplevel", 0};
@@ -369,17 +402,12 @@ static int cmd_gate(int argc, char **argv) {
         rc = gate_result(name, &r, t, "drift=0");
         if (w && rc == 0) {
             pr_result s;
-            char wtree[1200];
-            mv_need(!cx_fmt(wtree, sizeof wtree, "--work-tree=%s", tdir), "work path");
-            /* git --work-tree must precede the subcommand: build the argv by hand */
-            char *av2[] = {"git", "-C", (char *)g_repo, wtree, "add", "-u", 0};
-            char envi[1100]; mv_need(!cx_fmt(envi, sizeof envi, "GIT_INDEX_FILE=%s", idx), "path");
-            char *env[] = {envi, 0};
-            mv_need(pr_run("git add -u", av2, 0, env, 50, &s) == 0 && s.rc == 0, "staging the regenerated tables failed");
+            char *up[] = {"add", "-u", 0};
+            mv_need(git_in(tdir, &s, 50, up) == 0, "staging the regenerated tables failed");
             pr_free(&s);
             char *wt2[] = {"write-tree", 0};
             pr_result w2;
-            mv_need(git_run(idx, &w2, 50, wt2) == 0, "write-tree failed");
+            mv_need(git_in(tdir, &w2, 50, wt2) == 0, "write-tree failed");
             chomp(&w2);
             printf("MERGE_GATE\tderive-write\ttree_after_derive\t%s\n", w2.out);
             pr_free(&w2);
