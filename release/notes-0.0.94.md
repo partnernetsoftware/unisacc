@@ -43,24 +43,25 @@ TBD 批:PASS TBD、FAIL TBD、UNKNOWN TBD、INVALID TBD (待 S2 整链、S3 严�
 - **严格预跑 (`PRERUN_MERGE`)**: `TBD` (`release/evidence/v0.0.94-strict-TBD.tsv`, `strict-final.tsv sha256=TBD`)。
   - `expected-fail`: `TBD` (逐条列出 `release/evidence/0.0.94/expected-fail.tsv` 全部行; 0 项须显式写 0 项)。
   - `expected-unmeasured` (`UNKNOWN`): `TBD` (逐条列出 `release/evidence/0.0.94/expected-unmeasured.tsv` 全部行及 `*-deferred.tsv` 绑定哈希)。
-- **`l0-posix2` 候选产品重建补跑**: `TBD` (`v0.0.94:tests/batches.tsv:1931` 登记为 `IMPLEMENTED`, 与 `plans/v0.0.94.md` 的 `REGISTERED_NORUN` 说明不一致; 须由 S3 候选产品重建后首跑决定: 实跑通过则据 S3 回执记 PASS, 若到冻结时仍未在重建后产品上实跑, 须保持 `REGISTERED_NORUN` 并留作已知缺口, 不得预填 PASS)。
+- **`l0-posix2` 与 `l0-subreaper` 树源首跑与候选重建补跑**: 树源首跑已在 `0.0.93` 编译器 (`candidate=c561e7e0f24d9b82e71b40c86920bc92c12b7035751c8d6e958930bbfe1dd843`, `SOURCE` 型读树源) 上实跑: `l0-posix2` 得 `CHECK_L0_POSIX2 passed=40 failed=0` (`6.3s`, `BATCH_RUN status=PASS`), `l0-subreaper` 得 `checks=4 failed=0` (`4.9s`); 该首跑只证明 `Z2`/`Z1a` 实现在树源上正确, 不证明 `0.0.94` 候选产品能编它, `0.0.94` 候选产品重建后仍须在 S3 补跑一次 (`TBD`, `release/evidence/v0.0.94-strict-TBD.tsv`)。
 
 ## 产品改动
 
 本版按 2026-11-23 fable 裁定 B 收缩范围, 仅含 `cx-L0` 库面四项必做与 `std-surface` 修补(Z3/Z3b/Z5/Z6 撤出由 `v0.0.96` 承接, 前端三项撤出由前端类候选编译覆盖缺口第二期承接):
 
-- **Z1a (`sy_child_subreaper` 下沉核心)**: `exec/facts/sys-syscalls.tsv`、`cx/sys/sysnums.cx`、`cx/sys/posix.cx` 下沉 `prctl(PR_SET_CHILD_SUBREAPER)` 实现; `ext/sysx/reaper.cx` 移除平台分支与裸 `__syscall6`; `tools/check-l0-subreaper.cx` 登记批次 `l0-subreaper`(lnx 候选实跑待 S3 严格预跑出回执); `osx`/`win` 为具名拒绝 `-ENOSYS`(未拿到 CI 样本前仅读码)。
-- **Z1b (停止信号常量生成模块)**: `exec/facts/signal-targets.tsv` 经 `tools/signal-targets-gen.cx` 生成 `include/signal.h` 与 CX 常量(`lnx SIGSTOP=19`, `osx SIGSTOP=17`, `osx` 实机行为未拿到 CI 样本前仅读码), 去掉 `reaper.cx` 停止信号平台 `#if`; `win` 仅保留进程内兼容数值且停止信号/树回收路径具名拒绝 `-ENOSYS`。
-- **Z2 (`chown`/`fchmod`/`umask`/`pipe2` 核心 POSIX 接口补齐)**: 调用号入 `exec/facts/sys-syscalls.tsv` 生成 `cx/sys/sysnums.cx`, 实现落 `cx/sys/posix.cx` 与 `cx/sys/proc.cx` (`sy_pipe2`, `osx` 为 `pipe` 加 `fcntl` 非原子实现, `win` 具名拒绝 `-ENOSYS`); 补齐 `surf-probe` 四项 L0 探针供 S3b `ci-early` / S9 `candidate-native` 采集 `osx` 样本(拿到样本前均为 `UNMEASURED` / 仅读码); `tools/check-l0-posix2.cx` 40 项检查登记批次 `l0-posix2` (待 S3 产品重建后首跑, 当前未验证)。
-- **Z4 (`strtol` 家族回迁 `cx/text` + `sy_now_ms` 注释 + `std-surface` 修补)**: `cx/text/num.cx` 转为实体并持 `dock`, `ext/textx/num.cx` 去 `dock`; `cx/sys/time.cx` 补记 `sy_now_ms` 仅作单调差值时钟注释; `build/std-surface.tsv` 将 `tx_*` 从 `ext.textx` 迁至 `cx.text` 并修正 `sy_syscall6`/`sy_random` 的 `win` 口径为 `refuse:ENOSYS`(候选实跑待 S3 严格预跑出回执)。
+- **Z1a (`sy_child_subreaper` 下沉核心)**: `exec/facts/sys-syscalls.tsv`、`cx/sys/sysnums.cx`、`cx/sys/posix.cx` 下沉 `prctl(PR_SET_CHILD_SUBREAPER)` 实现; `ext/sysx/reaper.cx` 移除平台分支与裸 `__syscall6`; `tools/check-l0-subreaper.cx` 登记批次 `l0-subreaper` (已在 `0.0.93` 编译器 `candidate=c561e7e0...` 加树源上首跑 `checks=4 failed=0`, `4.9s`; `0.0.94` 候选重建后仍须在 S3 补跑); `osx`/`win` 为具名拒绝 `-ENOSYS`(未拿到 CI 样本前仅读码)。
+- **Z1b (停止信号常量生成模块)**: `exec/facts/signal-targets.tsv` 经 `tools/signal-targets-gen.cx` 生成 `include/signal.h` 与 CX 常量(`lnx SIGSTOP=19`, `osx SIGSTOP=17`, `osx` 实机行为未拿到 CI 样本前仅读码), 去掉 `reaper.cx` 停止信号平台 `#if`; `win` 仅保留进程内兼容数值且停止信号/树回收路径具名拒绝 `-ENOSYS`; **在 `0.0.94` 无专属批次(覆盖为 0 个批次, 只有零散引用, 不得声称已覆盖)**。
+- **Z2 (`chown`/`fchmod`/`umask`/`pipe2` 核心 POSIX 接口补齐)**: 调用号入 `exec/facts/sys-syscalls.tsv` 生成 `cx/sys/sysnums.cx`, 实现落 `cx/sys/posix.cx` 与 `cx/sys/proc.cx` (`sy_pipe2`, `osx` 为 `pipe` 加 `fcntl` 非原子实现, `win` 具名拒绝 `-ENOSYS`); 补齐 `surf-probe` 四项 L0 探针供 S3b `ci-early` / S9 `candidate-native` 采集 `osx` 样本(拿到样本前均为 `UNMEASURED` / 仅读码); `tools/check-l0-posix2.cx` 40 项检查登记批次 `l0-posix2` (仅覆盖 Z2: `pipe2` 10、`umask` 8、`fchmod` 8、`chown` 8、表 5、`open` 1, 其中 3 条表断言断的是 `arm64` 与 `osx` 的缺席; 已在 `0.0.93` 编译器 `candidate=c561e7e0...` 加树源上首跑 `CHECK_L0_POSIX2 passed=40 failed=0`, `6.3s`, `BATCH_RUN status=PASS`; `0.0.94` 候选重建后仍须在 S3 补跑)。
+- **Z4 (`strtol` 家族回迁 `cx/text` + `sy_now_ms` 注释 + `std-surface` 修补)**: `cx/text/num.cx` 转为实体并持 `dock`, `ext/textx/num.cx` 去 `dock`; `cx/sys/time.cx` 补记 `sy_now_ms` 仅作单调差值时钟注释; `build/std-surface.tsv` 将 `tx_*` 从 `ext.textx` 迁至 `cx.text` 并修正 `sy_syscall6`/`sy_random` 的 `win` 口径为 `refuse:ENOSYS`; **在 `0.0.94` 无专属批次(覆盖为 0 个批次, 只有零散引用, 不得声称已覆盖)**。
 
 ## 已知缺口
 
 ### 未跑范围(`UNMEASURED`)
 - (1) 全套 `s9` `daily`/`release` 长跑未运行, 整体裁决保持 `NOT_QUALIFIED`, 不声称全批资格;
-- (2) `l0-posix2` 批次口径冲突与未跑状态: `v0.0.94:tests/batches.tsv:1931` 为 `IMPLEMENTED`, 而 `plans/v0.0.94.md` 标为 `REGISTERED_NORUN`(依赖 0.0.94 候选产品重建后才能实跑), 最终状态由 S3 首跑决定; 未实跑前保持 `REGISTERED_NORUN`, 不得记 PASS;
-- (3) 严格预跑中的 `UNKNOWN` 与 `expected-fail` 项: 待 S3 严格预跑完成后逐条列出批次名、原因与 `release/evidence/0.0.94/{expected-unmeasured.tsv,expected-fail.tsv}` 绑定证据(不得省略或合并为总数);
-- (4) `osx` 四项探针(`sy_fchmod`/`sy_chown`/`sy_umask`/`sy_pipe2`)与 `osx`/`win` 调用号、信号常量实机样本: 在 S3b `ci-early` 或 S9 正式 `candidate-native.yml` 拿到真实样本并实测通过前一律为 `UNMEASURED` (仅读码), 不得声称经实机运行验证。
+- (2) `l0-posix2` 与 `l0-subreaper` 候选产品重建补跑: `l0-posix2` 已在 `0.0.93` 编译器 (`candidate=c561e7e0...`, `SOURCE` 型读树源) 上首跑 `CHECK_L0_POSIX2 passed=40 failed=0` (`6.3s`, `BATCH_RUN status=PASS`), `l0-subreaper` 同条件首跑 `checks=4 failed=0` (`4.9s`), 只证明树源实现正确, 不证明 `0.0.94` 候选产品能编它们, `0.0.94` 候选重建后仍须在 S3 补跑; 且 `l0-posix2` 40 项仅覆盖 Z2 (`pipe2` 10、`umask` 8、`fchmod` 8、`chown` 8、表 5、`open` 1, 其中 3 条表断言断的是 `arm64` 与 `osx` 的缺席);
+- (3) `Z1b` (停止信号常量) 与 `Z4` (`strtol` 家族回迁) 专属批次覆盖为 0: 两项在 `0.0.94` 没有专属批次(覆盖为 0 个批次, 只有零散引用), 不得声称已覆盖;
+- (4) 严格预跑中的 `UNKNOWN` 与 `expected-fail` 项: 待 S3 严格预跑完成后逐条列出批次名、原因与 `release/evidence/0.0.94/{expected-unmeasured.tsv,expected-fail.tsv}` 绑定证据(不得省略或合并为总数);
+- (5) `osx` 四项探针(`sy_fchmod`/`sy_chown`/`sy_umask`/`sy_pipe2`)与 `osx`/`win` 调用号、信号常量实机样本: 在 S3b `ci-early` 或 S9 正式 `candidate-native.yml` 拿到真实样本并实测通过前一律为 `UNMEASURED` (仅读码), 不得声称经实机运行验证。
 
 ### 已知产品与工具缺口
 - (1) 未验证项台账去向: `U31`/`U32` (`sy_proc_capture` `osx`/`win`, 见 `v0.0.96:build/state-unverified.tsv:24-25`) 随 Z3/Z3b 迁入 `v0.0.96` 承接; `U33` (`sy_proc_kill` 回收后 pid 复用竞态, 见 `v0.0.94:build/state-unverified.tsv:24`) 随 Z5 撤出改回 `OPEN`, 由 `v0.0.96` 承接;
