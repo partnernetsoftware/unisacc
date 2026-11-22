@@ -277,7 +277,7 @@ flowchart LR
 - R69.6 零断言守卫:第一阶段 `run-batch`/`allsession` 影子计数 `assertions=N` 已落 `22b2c76688`;第二阶段路线定为 0.0.92 十批试点(`cdx` 主刀)、0.0.93 迁移与首轮影子、0.0.94 继续影子、最早 0.0.96 满足总量门 268 加分层数据门槛后对新批强制;豁免须写可核查条件,未报存量只降不升。 依据:守门人评审 入口:`tests/run-batch.cx`、`research/2026-11-22/zero-assert/phase2-design-v2.md`
 - R69.6 计数自保:`assertions=N` 须在共享断言库自增,不许手写常量;变异须覆盖"删总结字段必红""删自增必红";流式计数须对任意切分点不变;区分"只报失败"与"真零断言",存量分阶段迁。 入口:`build/owner-reqs.tsv` R69、`research/2026-11-22/r69-6-shadow/report.md`
 - R78 存活变异分类:分支不可达(`UNREACHABLE_BRANCH`)、夹具无法区分(`EQUIV_OR_DEGENERATE_FIXTURE`)、弱检查(`WEAK_CHECK`)三类分报。 依据:ccogw 经验 入口:`tools/mutation-gate.cx`
-- R79 释放后使用粗检:排 0.0.92 后;先报告模式不进 `chain-ready`,基线只降不升,保守规则与漏报面须写明;工具尚未建(`tools/uaf-census.cx` 不存在)。 入口:`build/owner-reqs.tsv` R79、`plans/memory-safety.md`
+- R79 释放后使用粗检:工具已落(`tools/uaf-census.cx`/`check-uaf-census.cx`,报告模式不进 `chain-ready`);历史回测在范围 5/5、全样本 5/9;漏报面(字段/跨函数/非.cx/OOB/litlen)已写明;基线只降不升。 入口:`research/2026-11-22/uaf-census-retro/report.md`、`build/owner-reqs.tsv` R79、`plans/memory-safety.md`
 - R81 断言质量:阈值断言须能说出哪种可达状态会让它变红;关键门(`release-chain`、`chain-ready`、`precommit`)自测须是行为探针,不是文本存在性。 依据:R81 盘点(27 处疑似永不失败) 入口:`build/owner-reqs.tsv` R81、`research/2026-11-22/r81-census/report.md`
 - 待定项治理:台账与本文件中每个待定条目须有结论,或下一动作加到期版本;缺者列清单,存量只降不升。待核扫描工具是否已落。 入口:`build/owner-reqs.tsv`
 - 体验候选(不排期):块注释被 `*/` 提前关闭且同行紧跟不匹配引号时附一行提示。 入口:无
