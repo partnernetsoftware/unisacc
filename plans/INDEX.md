@@ -9,13 +9,13 @@
 | 类别 | 文件 |
 | --- | --- |
 | 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md、memory-safety.md(2026-11-21,向 Rust 学习内存安全的分期路线与采用门) |
-| 现行版本计划 | v0.0.89.md(2026-11-20 顺延:核心层库面小件包与模块解析登记,原 0.0.88)、v0.0.88.md(2026-11-20 顺延:A1a 内建与符号,原 0.0.87)、v0.0.87.md(2026-11-20 重写:迭代速度专版,整版不排产品特性,证据 reviews/2026-11-20-fast-iteration.md)、v0.0.86.md(2026-11-20 骨架:改一行再跑,路线 A,见 roadmap-0.0.83-0.0.99.md 末节修订注 2026-11-20) |
+| 现行版本计划 | v0.0.90.md 及以后各版(已公开版本的计划随下一轮归档);0.0.86 到 0.0.89 已公开并归档到 archive/plans-pre090/(清单见其 README.tsv) |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
 | 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction、layer-lanes、core-ext-matrix、fast-iteration);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
 | 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md(tools/tests/cx 引用) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
-| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
+| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
 
 说明:`release/notes-*.md` 与 `release/evidence/` 下的历史发布说明及证据正文保持原文不改,其中提及的旧 `plans/<file>` 路径对应下表中的 `archive/plans/<file>`。
 
@@ -40,7 +40,7 @@
 | [plans/dev-methodology-2026-10-28.md](dev-methodology-2026-10-28.md) | 现行 | - | 双车道开发方法学(CLAUDE.md 与 doc-links 保护) |
 | [archive/plans/devsvc-speedup-2026-11-16.md](../archive/plans/devsvc-speedup-2026-11-16.md) | 已归档 | plans/devsvc.md | devsvc 协同提速方案(已合入 devsvc.md) |
 | [plans/devsvc.md](devsvc.md) | 现行 | - | devsvc 仓开发服务设计稿(cc 指定保留);2026-11-20 演进评审(前五项、度量基线、0.0.86 到 0.0.88 工具线节拍)见其"2026-11-20 演进评审"节;分布式演进(产物库、合并队列、状态总线、数据流触发、租约队列、按泳道子门)见其"分布式演进(2026-11-20)"节;产线化(设计原则、line/ 盘上合同、目标与证伪)见其"产线化(2026-11-20 决定)"节 |
-| [plans/line-phase0-units.md](line-phase0-units.md) | 现行 | - | 产线化第 0 阶段派工清单(2026-11-20):U1 到 U10 每单元写域、验收命令(先红后绿)、变异要求、估时、依赖、建议负责人;挂 plans/v0.0.87.md L 线 |
+| [plans/line-phase0-units.md](line-phase0-units.md) | 现行 | - | 产线化第 0 阶段派工清单(2026-11-20):U1 到 U10 每单元写域、验收命令(先红后绿)、变异要求、估时、依赖、建议负责人;挂 archive/plans-pre090/v0.0.87.md L 线 |
 | [archive/plans/goal-10m-unisacc.md](../archive/plans/goal-10m-unisacc.md) | 已归档 | v0.0.80 | 历史定时器提示词(仅 1 处 release 引用) |
 | [archive/plans/goal-oneoff-unisacc.md](../archive/plans/goal-oneoff-unisacc.md) | 已归档 | v0.0.80 | 2026-11-16 一次性 /goal 提示词 |
 | [archive/plans/identity-inventory-2026-11-02.md](../archive/plans/identity-inventory-2026-11-02.md) | 已归档 | plans/root-identity.md | 2026-11-02 身份指纹机制盘点 |
@@ -77,10 +77,10 @@
 | [plans/roadmap-0.0.83-0.0.99.md](roadmap-0.0.83-0.0.99.md) | 现行 | - | 0.0.83 到 0.0.99 容量模型与逐版编排,及 0.0.100 汇编级精修阶段入口准则(估计值,每 3 版重估);汇编支持基本需求见修订注 2026-11-20 |
 | [archive/plans-pre086/v0.0.82.md](../archive/plans-pre086/v0.0.82.md) | 已归档 | v0.0.82 已公开 | 0.0.82 详细计划(前端诊断二期、ref 判据替换、速度专项首批) |
 | [archive/plans-pre086/v0.0.83.md](../archive/plans-pre086/v0.0.83.md) | 已归档 | v0.0.83 已公开 | 0.0.83 Q-P 首次尝试版计划与 CI 对账前置(2026-11-20 已公开;四道表 0/10 完成,12 项计划外,Q-P 报告未做) |
-| [plans/v0.0.86.md](v0.0.86.md) | 现行 | - | 0.0.86 改一行再跑计划骨架(2026-11-20):run 路单元级分别编译并缓存加 RR_TIME 带步数与内层循环实验决策门加 linuxns 白名单入口;planned 未定(开槽前判定门后写);路线依据见 roadmap-0.0.83-0.0.99.md 末节"修订注 2026-11-20(fable 深度反思)";整链预制新路线(工具线 T3 推测链真起加并行确认、发布流程项 P1 周节奏命令)见其工具线节与 roadmap 末节"修订注 2026-11-20(整链与预制)",证据入口 reviews/2026-11-20-chain-incremental.md(原会话目录 chain-incremental.md 已被取代);M2 改为先补度量再三刀分别量,储备 K1 核心层强制第一步 |
-| [plans/v0.0.87.md](v0.0.87.md) | 现行 | - | 0.0.87 骨架(2026-11-20 重写):迭代速度专版,整版不排产品特性,只做结构项 S1 到 S7(发布列车去中心化、预跑并行度恢复、消费者清扫左移、仓根升级与公开脱钩、lane-inputs 与包门、度量补账、内容截止规则);证据 reviews/2026-11-20-fast-iteration.md,见 roadmap 修订注"迭代速度专版" |
-| [plans/v0.0.88.md](v0.0.88.md) | 现行 | - | 0.0.88 骨架(2026-11-20 顺延):A1a 内建与符号(原 0.0.87 第三版内容,开头"原 0.0.87 内容"说明顺延);证据 reviews/2026-11-20-asm-acceleration.md 与 reviews/2026-11-20-core-layer-marking.md |
-| [plans/v0.0.89.md](v0.0.89.md) | 现行 | - | 0.0.89 骨架(2026-11-20 顺延,原 0.0.88):核心层库面小件包(L0 进程一族、sy_syscall6、熵源、mtime 纳秒)与模块解析登记(testx argx fsx 三包、仓外脚本包根);证据 reviews/2026-11-20-core-ext-matrix.md;信号定时器待定 |
+| [archive/plans-pre090/v0.0.86.md](../archive/plans-pre090/v0.0.86.md) | 已归档 | v0.0.86 已公开 | 0.0.86 改一行再跑计划骨架(2026-11-20):run 路单元级分别编译并缓存加 RR_TIME 带步数与内层循环实验决策门加 linuxns 白名单入口;planned 未定(开槽前判定门后写);路线依据见 roadmap-0.0.83-0.0.99.md 末节"修订注 2026-11-20(fable 深度反思)";整链预制新路线(工具线 T3 推测链真起加并行确认、发布流程项 P1 周节奏命令)见其工具线节与 roadmap 末节"修订注 2026-11-20(整链与预制)",证据入口 reviews/2026-11-20-chain-incremental.md(原会话目录 chain-incremental.md 已被取代);M2 改为先补度量再三刀分别量,储备 K1 核心层强制第一步 |
+| [archive/plans-pre090/v0.0.87.md](../archive/plans-pre090/v0.0.87.md) | 已归档 | v0.0.87 已公开 | 0.0.87 骨架(2026-11-20 重写):迭代速度专版,整版不排产品特性,只做结构项 S1 到 S7(发布列车去中心化、预跑并行度恢复、消费者清扫左移、仓根升级与公开脱钩、lane-inputs 与包门、度量补账、内容截止规则);证据 reviews/2026-11-20-fast-iteration.md,见 roadmap 修订注"迭代速度专版" |
+| [archive/plans-pre090/v0.0.88.md](../archive/plans-pre090/v0.0.88.md) | 已归档 | v0.0.88 已公开 | 0.0.88 骨架(2026-11-20 顺延):A1a 内建与符号(原 0.0.87 第三版内容,开头"原 0.0.87 内容"说明顺延);证据 reviews/2026-11-20-asm-acceleration.md 与 reviews/2026-11-20-core-layer-marking.md |
+| [archive/plans-pre090/v0.0.89.md](../archive/plans-pre090/v0.0.89.md) | 已归档 | v0.0.89 已公开 | 0.0.89 骨架(2026-11-20 顺延,原 0.0.88):核心层库面小件包(L0 进程一族、sy_syscall6、熵源、mtime 纳秒)与模块解析登记(testx argx fsx 三包、仓外脚本包根);证据 reviews/2026-11-20-core-ext-matrix.md;信号定时器待定 |
 | [archive/plans-pre086/v0.0.85.md](../archive/plans-pre086/v0.0.85.md) | 已归档 | v0.0.85 已公开 | 0.0.85 前端诊断三期计划(2026-11-20 修订):c-negative 53/9 -> 62/0 不再续期、拒绝带 文件:行:列、-Werror 升级与隐式内建误报;P0 NO-GO,固定前缀预制归档附录 B;planned=11,槽到公开目标 300 分钟 |
 | [archive/plans-pre086/v0.0.84.md](../archive/plans-pre086/v0.0.84.md) | 已归档 | v0.0.84 已公开 | 0.0.84 冷启动第一块计划:模型装载与前端网 E3 与 E2 固定工作量削减,产物字节不变(2026-11-20 已公开;四道表 6/9 完成,6 项计划外,F2 S2 Q2 未做;附录保留 cdx 网级推理剖面与候选项) |
 | [archive/plans-2026-11/changes-rev3.md](../archive/plans-2026-11/changes-rev3.md) | 已归档 | roadmap-0.0.83-0.0.99 | 修订版 3 相对旧版的差异清单与三个最危险假设 |

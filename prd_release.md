@@ -101,7 +101,7 @@
 | 两代不动点并行端到端 | UNMEASURED | phase-times 第 11、12 行 |
 | 冻结 -> 公开 | 十余小时（计算之和约 31 分钟） | 发布说明；计划 §0 |
 
-## 5b. 沿用的流程条目(2026-11-22 自 plans/v0.0.83、v0.0.84、v0.0.85 摘出;原文逐字,三份计划已归档到 archive/plans-pre086/)
+## 5b. 沿用的流程条目(2026-11-22 自 plans/v0.0.83、v0.0.84、v0.0.85、v0.0.86、v0.0.87、v0.0.88 摘出;原文逐字,前三份计划已归档到 archive/plans-pre086/,后三份已归档到 archive/plans-pre090/)
 
 条文为原计划条款原文,一字未改;摘出只为避免随计划归档而失效。方括号内是出处:计划、节、条与原文件行号。现行承接情况另列。
 
@@ -113,8 +113,15 @@
 [0.0.85 (d)(5),plans/v0.0.85.md 行 124] (5) 预跑规程:只经 S2 入库驱动发车,每窗口单独 --out,窗口间并行;不手工 --resume 同一文件;同一批补跑两次即停手定因。目标预跑 1 次。
 [0.0.84 (d)(4),plans/v0.0.84.md 行 113] (4) stream-pipe 55 秒界限:不放宽;靠 S3 拆部件取余量;拆分后每版记各部件 CI 耗时,任一部件超 40 秒即登记整改。
 [0.0.83 (3),plans/v0.0.83.md 行 93] (3) 推测整链复用若身份键漏掉链工具或宿主工具链身份,会复用到不同构造条件下的候选;键必须含链工具哈希与 chain-ready 九条前置的输入身份,首版强制双跑对拍。
+[0.0.86 发布前硬阻塞 (C),plans/v0.0.86.md 行 117] (C) 冻结前须把 v0.0.86-fix、v0.0.86-l1、v0.0.86-w2d、v0.0.86-d2 子分支合入 v0.0.86,并向 1:cdx、1:agyneon、1:agy-flow、1:ccapi、1:cdx2、1:agy-cage 广播冻结停写令,防止 X -> Y1 -> Y2 期间有人推 main 触发 RELEASE_EXEC_GATE_MAIN_ADVANCED。
+[0.0.87 起链前必须为真,plans/v0.0.87.md 行 49] 消费者清扫:候选前端编过全仓 tools 与 include,新增拒绝数为 0。
+[0.0.88 四,plans/v0.0.88.md 行 62-65] 起链命令与 `UNISACC_IDENT_HELPER`:
+  - 默认路径: `~/.cache/unisacc/ident-helper/identity-helper-real5`(来源: 由仓内 `seed/ident.c` 宿主编出, `chain-ready 20-ident-helper` 强制检查已设且可执行)。
+  - 显式 cache-manager: `~/.cache/unisacc/release-v073/cm/x64` 与 `~/.cache/unisacc/release-v073/cm/arm64`。
+  - 启动命令: `UNISACC_IDENT_HELPER=~/.cache/unisacc/ident-helper/identity-helper-real5 setsid sh ./unisacc.com tools/chain-run.cx -- --rev <REV40> --out /tmp/unisacc-session-v088-chain1/<REV40> --deadline-s 5400 --segment-s 270 --max-segments 40 --supervise -- --cache-manager-osx ~/.cache/unisacc/release-v073/cm/x64 ~/.cache/unisacc/release-v073/cm/arm64`。
 
 现行承接核对:0.0.83 (3) 推测整链复用身份键含链工具哈希一条,现行文档与代码里的承接未核;0.0.85 (d)(1) 的单提交布局自测现由 `tools/register.cx` 的 layout 自检执行,但 40 秒拆批界限是否被它覆盖未核。
+现行承接核对(0.0.86 至 0.0.88 三条):冻结停写令只有 `tools/release-exec.cx` 的 RELEASE_EXEC_GATE_MAIN_ADVANCED 门在代码里把关,停写令广播本身现行文档无承接;`UNISACC_IDENT_HELPER` 默认路径由 chain-ready 20-ident-helper 检查已设且可执行,但路径与 cache-manager 路径的文字只在此条;消费者清扫的现行承接未核。
 注(cc 2026-11-22 裁定):0.0.85 (f)(4) 的"不登记指纹"适用于仅改诊断拒绝与告警路径的版本(合法程序 -o 与 netregen 对公开件必须逐字节相同,变化即缺陷),该条仍有效,不放宽;prd_mempalace.md:175 的 netregen 字节栅栏是另一类,适用于有意改镜像的版本,经 G1 expected-fail 登记精确指纹并带到期。两者并存。
 ## 6. 集成操作纪律
 

@@ -1,6 +1,6 @@
 # 0.0.90 U4 汇编标签拆片
 
-依据 `plans/v0.0.89.md:8-27`、`plans/v0.0.90.md:10-22`、`prd_mempalace.md:225`、`plans/a1a-baseline.md` 与现行源码。两份仓外设计原稿 `a1a-design/d-u4-flow.txt`、`a1a-u4/locations.txt` 在约定路径缺失，作业目录和 /tmp 按文件名查找均未命中。以下写域是按现行源码重建的开工提案，计数是手改预算，非原作者已确认的清单。
+依据 `archive/plans-pre090/v0.0.89.md:8-27`、`plans/v0.0.90.md:10-22`、`prd_mempalace.md:225`、`plans/a1a-baseline.md` 与现行源码。两份仓外设计原稿 `a1a-design/d-u4-flow.txt`、`a1a-u4/locations.txt` 在约定路径缺失，作业目录和 /tmp 按文件名查找均未命中。以下写域是按现行源码重建的开工提案，计数是手改预算，非原作者已确认的清单。
 
 ## (1) 验收清单与先红证据
 

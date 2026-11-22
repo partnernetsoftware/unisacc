@@ -1,6 +1,6 @@
 # 产线化第 0 阶段派工清单(2026-11-20,主调度决定,文档写者落库)
 
-上位:plans/devsvc.md "产线化(2026-11-20 决定)"(盘上合同 (2) 是唯一权威,所有单元引用同一列头常量);挂 plans/v0.0.87.md L 线。来源:fable 产线化报告第 9 节(~/.claude/jobs/2798e440/tmp/devsvc-pipeline.md)。
+上位:plans/devsvc.md "产线化(2026-11-20 决定)"(盘上合同 (2) 是唯一权威,所有单元引用同一列头常量);挂 archive/plans-pre090/v0.0.87.md L 线。来源:fable 产线化报告第 9 节(~/.claude/jobs/2798e440/tmp/devsvc-pipeline.md)。
 
 ## 通用要求(每单元都适用)
 
