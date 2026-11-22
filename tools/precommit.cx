@@ -38,7 +38,7 @@
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
-#define SLURP_DEADLINE_MS 58000   /* 每个子进程(主要是 ratchets / cx-lint)最多 58 s:超时杀进程组,按 unavailable 放行 */
+#define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
  * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
@@ -1124,8 +1124,10 @@ static int pc_verify_deferred(int argc, char **argv) {
             sy_eprintf("precommit: BLOCKED verify-deferred: git write-tree failed\n");
             return 1;
         }
+        long v_t0 = sy_now_ms();
+        int g_ran = 0;
         for (g = 0; g < 5; g++) {
-            const char *gn = all_gates[g];
+            const char *gn = all_gates[g], *first_tree = 0, *first_head = 0;
             int g_unv = 0, all_have_only = 1, pass = 0, cleared = 0;
             char only_buf[512], cmd_disp[640], *out = 0;
             long on = 0;
@@ -1134,12 +1136,19 @@ static int pc_verify_deferred(int argc, char **argv) {
             if (only_gate && !tx_eqz(gn, only_gate)) continue;
             for (i = 0; i < nrows; i++) {
                 if (!rows[i].verified && tx_eqz(rows[i].gate, gn)) {
+                    if (!first_tree) { first_tree = rows[i].tree; first_head = rows[i].head; }
                     g_unv++;
                     if (!pc_extract_only_tokens(rows[i].detail, only_buf, sizeof only_buf))
                         all_have_only = 0;
                 }
             }
             if (!g_unv) continue;
+            if (!only_gate && g_ran > 0 && sy_now_ms() - v_t0 >= 45000) {
+                sy_eprintf("precommit: BLOCKED verify-deferred-budget: elapsed %ld ms >= 45000 ms; run remaining gates individually with: sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate %s\n",
+                           sy_now_ms() - v_t0, gn);
+                return 1;
+            }
+            g_ran++;
             slurp_okrc = 2;
             if (tx_eqz(gn, "derive")) {
                 if (all_have_only && only_buf[0]) {
@@ -1178,17 +1187,30 @@ static int pc_verify_deferred(int argc, char **argv) {
                 if (out && tx_find(out, on, "TLIB_FAST\t", 10) >= 0 && tx_find(out, on, "\tMISMATCH", 9) < 0)
                     pass = 1;
             } else if (tx_eqz(gn, "lint")) {
-                char *av[] = {"sh", uc, "tools/cx-lint.cx", "--", "--staged", "--rules", "R2,R3,R4", "--strict", 0};
-                (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/cx-lint.cx -- --staged --rules R2,R3,R4 --strict");
+                const char *lh = (first_head && !tx_eqz(first_head, "unknown")) ? first_head : "HEAD";
+                const char *lt = (first_tree && !tx_eqz(first_tree, "unknown")) ? first_tree : "HEAD";
+                char *av[] = {"/bin/sh", "-c",
+                    "files=$( { git diff --cached --name-only --diff-filter=ACMR -- '*.cx'; "
+                    "git diff --name-only --diff-filter=ACMR \"$1\" \"$2\" -- '*.cx'; "
+                    "git diff-tree --no-commit-id --name-only -r HEAD -- '*.cx'; "
+                    "git ls-tree -r --name-only \"$2\" -- '*.cx'; } 2>/dev/null | sort -u ); "
+                    "ex=''; for f in $files; do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
+                    "if [ -z \"$ex\" ]; then echo LINT_VERIFY_NO_CX_FILES; exit 1; fi; "
+                    "exec sh \"$3\" tools/cx-lint.cx -- --rules R2,R3,R4 --strict $ex",
+                    "verify-lint", (char *)lh, (char *)lt, uc, 0};
+                (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/cx-lint.cx -- --rules R2,R3,R4 --strict <changed.cx:%s..%s>", lh, lt);
                 slurp_okrc = 0;
                 out = slurp_run(av, &on);
-                if (out && slurp_last_rc == 0)
+                if (out && slurp_last_rc == 0 &&
+                    tx_find(out, on, "CX_LINT\t", 8) >= 0 &&
+                    tx_find(out, on, "\tfindings=0\t", 12) >= 0 &&
+                    tx_find(out, on, "files=0\t", 8) < 0)
                     pass = 1;
             } else if (tx_eqz(gn, "ratchets")) {
                 char *av[] = {"sh", uc, "tools/ratchets.cx", 0};
                 (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/ratchets.cx");
                 out = slurp_run(av, &on);
-                if (out && tx_find(out, on, "RATCHETS\t", 9) >= 0 && tx_find(out, on, "\tover=0", 7) >= 0)
+                if (out && tx_find(out, on, "RATCHETS\tok=", 12) >= 0 && tx_find(out, on, "\tfail=0", 7) >= 0)
                     pass = 1;
             }
             slurp_okrc = 0;
