@@ -1,0 +1,90 @@
+// Draco 2.2 sequential mesh slice with direct indices and raw POSITION.
+// The decoded view borrows packed values in the caller's immutable input.
+struct DracoMeshView {
+  indices:u32;
+  indexWidth:u32;
+  faces:u32;
+  vertices:u32;
+  position:u32;
+  attributeId:u32;
+}
+
+native function draco_span(at:i64,bytes:i64) i64 {
+  return at>=0 && bytes>=0 && bytes<=6291456 && at<=6291456-bytes;
+}
+
+// Pack a validated varUI32 and its width in bytes.
+native function draco_var(at:i64,end:i64) i64 {
+  let value=0;
+  let factor=1;
+  let i=0;
+  while(i<5 && at+i<end) {
+    let byte=ux_u8(at+i);
+    let digit=byte%128;
+    if(i==4 && digit>15) { return 0-1; }
+    value=value+factor*digit;
+    i=i+1;
+    if(byte<128) {
+      if(i>1 && digit==0) { return 0-1; }
+      return value*8+i;
+    }
+    factor=factor*128;
+  }
+  return 0-1;
+}
+
+native function DRACOLoader_parseSequential(src:i64,bytes:i64,out:i64) i64 {
+  if(!draco_span(src,bytes) || !draco_span(out,DracoMeshView.size) ||
+     (out<src+bytes && src<out+DracoMeshView.size)) { return 0-1; }
+  if(bytes<14 || ux_u32(src)!=1128354372 || ux_u8(src+4)!=79) { return 0-2; }
+  if(ux_u8(src+5)!=2 || ux_u8(src+6)!=2 || ux_u8(src+7)!=1 || ux_u8(src+8)!=0 ||
+     ux_u8(src+9)!=0 || ux_u8(src+10)!=0) { return 0-3; }
+  let end=src+bytes;
+  let at=src+11;
+  let f=draco_var(at,end);
+  if(f<0) { return 0-2; }
+  at=at+f%8;
+  let p=draco_var(at,end);
+  if(p<0) { return 0-2; }
+  at=at+p%8;
+  let faces=f/8;
+  let points=p/8;
+  if(at>=end || faces<1 || points<1) { return 0-2; }
+  if(points>=65536 || ux_u8(at)!=1) { return 0-3; }
+  let indexWidth=1;
+  if(points>=256) { indexWidth=2; }
+  let indices=at+1;
+  let count=faces*3;
+  at=indices+count*indexWidth;
+  if(at>end-8) { return 0-2; }
+  let i=0;
+  while(i<count) {
+    let cursor=indices+i*indexWidth;
+    let idx=ux_u8(cursor);
+    if(indexWidth==2) { idx=idx+256*ux_u8(cursor+1); }
+    if(idx>=points) { return 0-2; }
+    i=i+1;
+  }
+  if(ux_u8(at)!=1 || ux_u8(at+1)!=1 || ux_u8(at+2)!=0 || ux_u8(at+3)!=9 ||
+     ux_u8(at+4)!=3 || ux_u8(at+5)!=0) { return 0-3; }
+  let id=draco_var(at+6,end);
+  if(id<0) { return 0-2; }
+  at=at+6+id%8;
+  if(at>=end) { return 0-2; }
+  if(ux_u8(at)!=0) { return 0-3; }
+  let position=at+1;
+  if(end-position!=points*12) { return 0-2; }
+  i=position;
+  while(i<end) {
+    let coord=ux_f32(i);
+    if(coord-coord!=0.0) { return 0-2; }
+    i=i+4;
+  }
+  let a=ux_u32_put(out+DracoMeshView.indices,indices);
+  let b=ux_u32_put(out+DracoMeshView.indexWidth,indexWidth);
+  let c=ux_u32_put(out+DracoMeshView.faces,faces);
+  let d=ux_u32_put(out+DracoMeshView.vertices,points);
+  let e=ux_u32_put(out+DracoMeshView.position,position);
+  let g=ux_u32_put(out+DracoMeshView.attributeId,id/8);
+  return out;
+}

@@ -1,0 +1,37 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define PARSE "let result=DRACOLoader_parseSequential(128,76,32);"
+#define FIELD(name) "return 0.0+ux_u32(32+DracoMeshView." #name ");"
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"dracoloader-sequential",0};
+    const char *setup=
+        "let fixture=[68,82,65,67,79,2,2,1,0,0,0,2,4,1,0,1,2,0,2,3,1,1,0,9,3,0,0,0];"
+        "let i=0;while(i<28){let put=ux_u8_put(128+i,fixture[i]);i=i+1;}"
+        "let a=ux_f32_put(168,2.0);let b=ux_f32_put(180,2.0);let c=ux_f32_put(184,3.0);let d=ux_f32_put(196,3.0);";
+    const char *cases[25]={
+        PARSE FIELD(faces),PARSE FIELD(vertices),
+    };
+    char code[18][144];
+    for(int i=0;i<18;i++) {
+        const int n=i<6?tx_snprintf(code[i],sizeof code[i],
+            "%sreturn 0.0+ux_u8(ux_u32(32+DracoMeshView.indices)+%d);",PARSE,i)
+            :tx_snprintf(code[i],sizeof code[i],
+            "%sreturn ux_f32(ux_u32(32+DracoMeshView.position)+%d);",PARSE,(i-6)*4);
+        if(n<0 || n>=(int)sizeof code[i]) return 2;
+        cases[i+2]=code[i];
+    }
+    cases[20]="let bad=ux_u8_put(144,4);" PARSE "return 0.0+result;";
+    cases[21]="let bad=ux_u8_put(155,2);" PARSE "return 0.0+result;";
+    cases[22]="return 0.0+DRACOLoader_parseSequential(128,75,32);";
+    cases[23]="return 0.0+DRACOLoader_parseSequential(128,76,132);";
+    cases[24]="let marker=ux_u32_put(32+DracoMeshView.vertices,77);let bad=ux_u8_put(144,4);" PARSE FIELD(vertices);
+    const double gold[]={2,4,0,1,2,0,2,3,0,0,0,2,0,0,2,3,0,0,3,0,-2,-3,-2,-1,77};
+    return g_wasm_batch_addon("G_IO DRACOLoader sequential mesh","dracoloader-sequential",
+        argv[1],modules,setup,cases,gold,sizeof gold/sizeof gold[0],mutate?4:-1,
+        "let bad=ux_u8_put(144,3);" PARSE "return 0.0+ux_u8(ux_u32(32+DracoMeshView.indices)+2);");
+}
