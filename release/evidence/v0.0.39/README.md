@@ -1,6 +1,6 @@
 # v0.0.39 unsigned custody (publish.sh step 3 deleted assets)
 
-> Custody only. **Not** a re-publish. **Not** a change to `research/r39-release-acceptance.json` `published.*`.
+> Custody only. **Not** a re-publish. **Not** a change to `r39-release-acceptance.json`(已归档) `published.*`.
 
 ## Why
 `publish.sh` step 3 removed draft assets `unisacc-unsigned.zip` and `unsigned-receipt.json` before making `v0.0.39` public. Public release keeps only `unisacc.com`. Optional 机房主任 19:06: re-fetch those two for in-repo safekeeping.
@@ -12,7 +12,7 @@
 | `unisacc-unsigned.zip` | `04cfd258f6e385555fec7df552417fb198f838e48f85d6cb0dac9a842c98d19d` | 1500388 |
 | `unsigned-receipt.json` | `f3e0098bb50077cd5368bec6adaadffe0c6c48e7d4f4dd280eb7cfbc6051b1e8` | 737 |
 
-Want values = `research/r39-release-acceptance.json` → `windows.unsigned_zip_sha256` / `windows.unsigned_receipt_sha256`.
+Want values = `r39-release-acceptance.json`(已归档) → `windows.unsigned_zip_sha256` / `windows.unsigned_receipt_sha256`.
 
 ## Provenance (GHA, read-only download)
 

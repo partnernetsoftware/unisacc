@@ -67,4 +67,4 @@ windows are absent from data fragments. Source/E1 UNITOK/package hashes are
 recorded in fixture comments. The typed projection is a narrow witness, not a
 complete located-input identity or result-reuse authorization.
 
-Construction and readset/RSS evidence: research/c43-e3-data-receipt.md.
+Construction and readset/RSS evidence: c43 e3-data-receipt (archived).
