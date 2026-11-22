@@ -20,6 +20,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.u8cut
 #pragma unisa use text.json
 
 #define MAX_CONSEC 4
@@ -43,7 +44,7 @@ static void log_line(const char *sid, const char *verdict, const char *why) {
     {
         char *nb = (char *)mm_alloc(on + n + 1);
         if (!nb) { if (old) mm_free(old); return; }
-        if (on > 65536) { old += on - 65536; on = 65536; }
+        if (on > 65536) { long c = on - 65536; while (c < on && old[c - 1] != '\n') c++; old += c; on -= c; }   /* keep whole lines */
         if (on > 0) mm_copy(nb, on + n + 1, old, on);
         mm_copy(nb + on, n + 1, line, n);
         sy_write_atomic(path, nb, on + n, 0644);
@@ -55,7 +56,7 @@ static void log_line(const char *sid, const char *verdict, const char *why) {
 static long jstr(const js_val *v, const char *key, char *dst, long cap) {
     const js_val *m = js_get(v, key); long n;
     if (js_kind(m) != JS_STR) return -1;
-    n = js_str_len(m); if (n > cap - 1) n = cap - 1;
+    n = js_str_len(m); if (n > cap - 1) n = u8c_floor(js_str(m), n, cap - 1);
     mm_copy(dst, cap, js_str(m), n); dst[n] = 0;
     return n;
 }
@@ -91,7 +92,7 @@ static long last_text(const char *path, char *dst, long cap) {
                     if (js_kind(ty) == JS_STR && js_str_len(ty) == 4 && mm_same(js_str(ty), "text", 4) && js_kind(tx) == JS_STR) {
                         long m = js_str_len(tx);
                         if (o && m > 0 && o < cap - 1) dst[o++] = '\n';
-                        if (m > cap - 1 - o) m = cap - 1 - o;
+                        if (m > cap - 1 - o) m = u8c_floor(js_str(tx), js_str_len(tx), cap - 1 - o);
                         if (m > 0) { mm_copy(dst + o, cap - o, js_str(tx), m); o += m; }
                     }
                 }
@@ -173,7 +174,9 @@ static int judge(const char *text, char *next, long ncap) {
         if (n - i < 8 || !mm_same(reply + i, "CONTINUE", 8)) return 0;
         i += 8;
         while (i < n && (reply[i] == ' ' || reply[i] == '\n' || reply[i] == '\r')) i++;
-        for (k = 0; i < n && reply[i] != '\n' && k < ncap - 1 && k < 120; i++) next[k++] = reply[i];
+        {   long lim = i + (ncap - 1 < 120 ? ncap - 1 : 120);   /* the 120-byte cap must not end inside a character */
+            if (lim > n) lim = n; else lim = u8c_floor(reply, n, lim);
+            for (k = 0; i < lim && reply[i] != '\n'; i++) next[k++] = reply[i]; }
         while (k > 0 && (next[k - 1] == ' ' || next[k - 1] == '\r')) k--;
         next[k] = 0;
         return k > 0;

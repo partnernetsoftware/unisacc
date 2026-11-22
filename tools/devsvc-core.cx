@@ -89,6 +89,7 @@
 #pragma unisa use cxlib.flowdoc
 #pragma unisa use sys.sigwatch
 #pragma unisa use cxlib.trailer
+#pragma unisa use cxlib.u8cut
 
 #define PW 1024
 #define MAXLOCK 64
@@ -295,7 +296,7 @@ static void ev_add(const char *kind, const char *text) {
     }
     char *e = ring[seq % RING];
     int w = snprintf(e, EVW, "%s\t%s", kind, text);   /* 事件正文超出 EVW 即截断并标记,这是环的定长合同 */
-    if (w >= EVW) { e[EVW - 2] = '~'; e[EVW - 1] = 0; }
+    if (w >= EVW) { long c = u8c_floor(e, EVW - 1, EVW - 2); e[c] = '~'; e[c + 1] = 0; }   /* the mark replaces a whole trailing character */
     ring_wall[seq % RING] = sy_wall_s();
     seq++;
     {   /* 持久化:追加到实例目录 events.tsv(行格式与 tools/devsvc-usage.cx 对齐);超过 EV_ROTATE 字节轮转为 events.tsv.1(只留一份) */
@@ -1113,7 +1114,8 @@ static int cmd_onchange(const char *root, int argc, char **argv) {
         e = strchr(s, '\n'); if (!e) e = s + strlen(s) - 1; else *e = 0;
         if (!strncmp(s, cfg.onchange_tag, tl) && s[tl] == ' ') {
             puts(s);
-            F(req, sizeof req, "emit\ton-change\t%.*s", EVW - 40, s + tl + 1);
+            {   const char *tx_ = s + tl + 1; long tn = (long)strlen(tx_); int tw = (int)(tn > EVW - 40 ? u8c_floor(tx_, tn, EVW - 40) : tn);
+                F(req, sizeof req, "emit\ton-change\t%.*s", tw, tx_); }
             if (request(root, req, 1) == 0) posted++;
         }
         if (!e[1] && e[0]) break;
@@ -4239,7 +4241,8 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "events")) {
         if (argc >= 1 && !strcmp(argv[0], "emit")) {
             if (argc < 3 || !okname(argv[1])) { fprintf(stderr, "devsvc: REFUSE events-args: events emit KIND TEXT needs a KIND name (no spaces, under 64 bytes) and a TEXT argument\n"); return usage(); }
-            F(req, sizeof req, "emit\t%s\t%.*s", argv[1], EVW - 80, argv[2]);
+            {   long tn = (long)strlen(argv[2]); int tw = (int)(tn > EVW - 80 ? u8c_floor(argv[2], tn, EVW - 80) : tn);   /* cut on a character */
+                F(req, sizeof req, "emit\t%s\t%.*s", argv[1], tw, argv[2]); }
             {   char *t = strchr(req + 5, '\t'); if (t) { char *q; for (q = t + 1; *q; q++) if (*q == '\n' || *q == '\r') *q = ' '; } }
             return say(request(root, req, 1));
         }
