@@ -397,6 +397,14 @@ static int test_handler(void *ud, void *req, void *res) {
         (void)hs_res_end_stream(res);
         return HS_HANDLED;
     }
+    if (tx_eqz(path, "/dup-ct")) {
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "text/plain");
+        hs_res_header(res, "content-type", "application/json");
+        hs_res_header(res, "Connection", "keep-alive");
+        hs_res_send(res, "{\"ok\":true}", 11);
+        return HS_HANDLED;
+    }
     if (tx_eqz(path, "/slow")) {
         sy_sleep_ms(300);
         hs_res_status(res, 200, "OK");
@@ -746,7 +754,7 @@ static long pump_until_pattern(hs_server *srv, srv_test_ctx *tctx, int cfd, char
                 {
                     long j;
                     for (j = 0; j + plen <= total; j++) {
-                        if (mm_same(out + j, plen, pat, plen)) return total;
+                        if (mm_same(out + j, pat, plen)) return total;
                     }
                 }
                 continue;
@@ -1161,6 +1169,145 @@ static void test_body_stream_keepalive_timeouts(void) {
     hs_close(srv, 200);
 }
 
+static int count_hdr_ci(const char *hdr, const char *key) {
+    long len = (long)strlen(hdr), klen = (long)strlen(key), i = 0;
+    int cnt = 0;
+    while (i < len) {
+        long e = i;
+        while (e < len && hdr[e] != '\n') e++;
+        if (e - i > klen + 1 && tx_ieq(hdr + i, klen, key, klen) && hdr[i + klen] == ':') cnt++;
+        i = e + 1;
+    }
+    return cnt;
+}
+
+static int reuseport_exchange(hs_server *srv1, hs_server *srv2, srv_test_ctx *tctx, int c, char *buf, long cap) {
+    char rbuf[1024];
+    sy_deadline_t dl = sy_deadline_in(1500);
+    long tot = 0;
+    (void)buf; (void)cap;
+    rbuf[0] = 0;
+    while (sy_deadline_left(&dl) > 0 && tot < (long)sizeof rbuf - 1) {
+        if (sy_sock_poll(c, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+            long r = sy_sock_recv(c, rbuf + tot, (long)sizeof rbuf - 1 - tot);
+            if (r > 0) { tot += r; rbuf[tot] = 0; continue; }
+            if (r == 0) break;
+        }
+        (void)hs_step(srv1, test_handler, tctx, 2);
+        (void)hs_step(srv2, test_handler, tctx, 2);
+    }
+    return (tot > 0 && tx_contains(rbuf, tot, "200 OK", 6) && tx_contains(rbuf, tot, "healthy", 7)) ? 1 : 0;
+}
+
+static void test_reuseport_budget_and_headers(void) {
+    hs_config_t cfg1, cfg2, cfg;
+    hs_server *srv1 = 0, *srv2 = 0, *srv = 0;
+    srv_test_ctx tctx;
+    char hdr[2048], body[4096], reqbuf[512];
+    long blen = 0;
+    int port, i, ok_rp = 0, c1, c2, c3, c4, st;
+
+    tctx.listen_fd = -1;
+    tctx.listen_ino = 0;
+    tctx.parent_base_fds = 0;
+    tctx.parent_base_pipes = 0;
+    tctx.smuggle_sentinel = 0;
+
+    /* 1. Dual hs_server on same port with SO_REUSEPORT */
+    hs_config_init(&cfg1);
+    cfg1.port = 0;
+    cfg1.reuse_port = 1;
+    cfg1.max_children = 8;
+    if (hs_listen_cfg(&srv1, &cfg1) != 0 || !srv1) { ck(0, "reuseport-srv1-listen"); return; }
+    port = hs_port(srv1);
+    hs_config_init(&cfg2);
+    cfg2.port = port;
+    cfg2.reuse_port = 1;
+    cfg2.max_children = 8;
+    ckv(hs_listen_cfg(&srv2, &cfg2), 0, "reuseport-dual-listen-ok");
+    if (srv2) {
+        for (i = 0; i < 8; i++) {
+            int c = sy_tcp_connect(port);
+            if (c >= 0) {
+                send_req(c, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+                ok_rp += reuseport_exchange(srv1, srv2, &tctx, c, body, sizeof body);
+                sy_close(c);
+            }
+        }
+        ckv(ok_rp, 8, "reuseport-8reqs-all-200");
+        ckv(hs_close(srv2, 200), 0, "reuseport-close-srv2");
+    } else {
+        ck(0, "reuseport-8reqs-all-200");
+        ck(0, "reuseport-close-srv2");
+    }
+    ckv(hs_close(srv1, 200), 0, "reuseport-close-srv1");
+
+    /* 2. max_total_body_bytes concurrent budget guard + Content-Type dedup */
+    hs_config_init(&cfg);
+    cfg.max_children = 8;
+    cfg.max_body_bytes = 256;
+    cfg.max_total_body_bytes = 300;
+    if (hs_listen_cfg(&srv, &cfg) != 0 || !srv) { ck(0, "budget-listen"); return; }
+    port = hs_port(srv);
+    tctx.listen_fd = hs_listen_fd(srv);
+
+    c1 = sy_tcp_connect(port);
+    send_req(c1, "GET /slow HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    (void)hs_step(srv, test_handler, &tctx, 50);
+    ckv(hs_active_children(srv), 1, "total-body-budget-1-active");
+
+    /* With active_children=1, slots=2 -> dynamic share = 300/2 = 150 < 256 */
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 200\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c2, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c2);
+    ckv(st, 413, "total-body-budget-413");
+    ck(tx_contains(hdr, (long)strlen(hdr), "Connection: close", 17), "total-body-budget-413-close");
+
+    c3 = sy_tcp_connect(port);
+    {
+        char b100[104];
+        mm_fill(b100, 100, 'Q', 100);
+        b100[100] = 0;
+        cx_fmt(reqbuf, sizeof reqbuf, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 100\r\nConnection: close\r\n\r\n");
+        send_req(c3, reqbuf);
+        sy_send_all(c3, b100, 100);
+    }
+    st = client_read_http_resp(srv, &tctx, c3, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c3);
+    ckv(st, 200, "total-body-budget-within-200");
+    ckv(blen, 100, "total-body-budget-within-len");
+
+    (void)pump_until_client(srv, &tctx, c1, body, sizeof body, 1500);
+    sy_close(c1);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    c4 = sy_tcp_connect(port);
+    {
+        char b200[204];
+        mm_fill(b200, 200, 'R', 200);
+        b200[200] = 0;
+        send_req(c4, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 200\r\nConnection: close\r\n\r\n");
+        sy_send_all(c4, b200, 200);
+    }
+    st = client_read_http_resp(srv, &tctx, c4, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c4);
+    ckv(st, 200, "total-body-budget-recovered-200");
+    ckv(blen, 200, "total-body-budget-recovered-len");
+
+    /* 3. Case-insensitive Content-Type dedup + single Connection header */
+    c4 = sy_tcp_connect(port);
+    send_req(c4, "GET /dup-ct HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c4, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c4);
+    ckv(st, 200, "hdr-dedup-200");
+    ckv(count_hdr_ci(hdr, "Content-Type"), 1, "hdr-dedup-ct-count-1");
+    ck(tx_contains(hdr, (long)strlen(hdr), "application/json", 16), "hdr-dedup-ct-latest");
+    ckv(count_hdr_ci(hdr, "Connection"), 1, "hdr-dedup-conn-count-1");
+
+    hs_close(srv, 200);
+}
+
 static int run_one_mut(const char *tag, const char *old_s, const char *new_s, const char *expect_fail) {
     char root[4096], work[4096], com[4400], cxsrc[4400], cxdst[4400], probe[4400], outp[4400];
     const char *files[8];
@@ -1284,6 +1431,14 @@ static int run_muts(void) {
                      "int effective_ka = (req.keep_alive && (req_idx + 1 < ctx->cfg.keep_alive_max)) ? 1 : 0;",
                      "int effective_ka = req.keep_alive ? 1 : 0;",
                      "FAIL\thttpd.keepalive-5th-conn-close");
+    f += run_one_mut("mut9-reuseport-flag-dropped",
+                     "lflags = SY_LISTEN_REUSEADDR | (c.reuse_port ? SY_LISTEN_REUSEPORT : 0);",
+                     "lflags = SY_LISTEN_REUSEADDR;",
+                     "FAIL\thttpd.reuseport-dual-listen-ok");
+    f += run_one_mut("mut10-total-body-budget-bypassed",
+                     "long share = srv->cfg.max_total_body_bytes / (long)(srv->active_children + 1);",
+                     "long share = srv->cfg.max_total_body_bytes;",
+                     "FAIL\thttpd.total-body-budget-413");
     printf("EXT_NET_HTTPD_MUT\tfailed=%d\n", f);
     return f ? 1 : 0;
 }
@@ -1296,6 +1451,7 @@ int main(int argc, char **argv) {
     test_server_loopback_and_fork_conns();
     test_pipe_and_fd_closure();
     test_body_stream_keepalive_timeouts();
+    test_reuseport_budget_and_headers();
     printf("EXT_NET_HTTPD\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
 }

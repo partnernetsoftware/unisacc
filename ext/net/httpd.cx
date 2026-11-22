@@ -663,13 +663,30 @@ int hs_res_header(void *res_p, const char *name, const char *value) {
         if (tx_ieq(value, vlen, "close", 5)) r->close_after = 1;
         return 0;
     }
-    if (r->nhdrs >= 64) return -ENOSPC;
     ns = hs_dup_span(name, nlen);
     vs = hs_dup_span(value, vlen);
     if (!ns || !vs) {
         if (ns) mm_free(ns);
         if (vs) mm_free(vs);
         return -ENOMEM;
+    }
+    if (!tx_ieq(name, nlen, "Set-Cookie", 10)) {
+        int j;
+        for (j = 0; j < r->nhdrs; j++) {
+            long jlen = tx_len(r->hdrs[j].name, 4096);
+            if (jlen == nlen && tx_ieq(r->hdrs[j].name, jlen, name, nlen)) {
+                mm_free(r->hdrs[j].name);
+                mm_free(r->hdrs[j].value);
+                r->hdrs[j].name = ns;
+                r->hdrs[j].value = vs;
+                return 0;
+            }
+        }
+    }
+    if (r->nhdrs >= 64) {
+        mm_free(ns);
+        mm_free(vs);
+        return -ENOSPC;
     }
     r->hdrs[r->nhdrs].name = ns;
     r->hdrs[r->nhdrs].value = vs;
@@ -849,7 +866,8 @@ static int hs_child_entry(void *ud) {
             if (rem == 0 && rbuf.cap > 65536) mg_free(&rbuf);
         }
 
-        if (req.content_length > ctx->cfg.max_body_bytes) {
+        if (req.content_length > ctx->cfg.max_body_bytes ||
+            (ctx->cfg.max_total_body_bytes > 0 && req.content_length > ctx->cfg.max_total_body_bytes)) {
             hs_send_err_close(ctx->client_fd, 413, &ctx->cfg);
             break;
         }
@@ -1067,13 +1085,22 @@ int hs_step(hs_server *srv, hs_handler fn, void *ud, long timeout_ms) {
         return 1;
     }
 
+    ctx.cfg = srv->cfg;
+    if (srv->cfg.max_total_body_bytes > 0) {
+        long share = srv->cfg.max_total_body_bytes / (long)(srv->active_children + 1);
+        if (share <= 0) {
+            hs_send_503_and_close(cfd);
+            return 1;
+        }
+        if (share < ctx.cfg.max_body_bytes) ctx.cfg.max_body_bytes = share;
+    }
+
     saved_stderr_fd = hs_dup_stderr_safe();
     ctx.listen_fd = srv->listen_fd;
     ctx.client_fd = cfd;
     ctx.saved_stderr_fd = saved_stderr_fd;
     ctx.fn = fn;
     ctx.ud = ud;
-    ctx.cfg = srv->cfg;
     fds[0] = -1;
     fds[1] = -1;
 
@@ -1220,6 +1247,7 @@ int hs_req_body(const void *req_p, char **out, long *outlen, long cap) {
     max_b = cfg && cfg->max_body_bytes > 0 ? cfg->max_body_bytes : HS_DEFAULT_MAX_BODY_BYTES;
     if (cap > 0 && cap < max_b) max_b = cap;
     max_tot = cfg && cfg->max_total_body_bytes > 0 ? cfg->max_total_body_bytes : HS_DEFAULT_MAX_TOTAL_BODY_BYTES;
+    if (max_tot > 0 && max_tot < max_b) max_b = max_tot;
     body_to = cfg && cfg->body_read_timeout_ms > 0 ? cfg->body_read_timeout_ms : HS_DEFAULT_BODY_TIMEOUT_MS;
     now_fn = cfg ? cfg->now_ms_fn : 0;
 
