@@ -136,6 +136,30 @@ int main(int argc, char **argv) {
                 ck(rc == 0 && lines(o) == 4 && has(o, "sy_fchmod") && has(o, "sy_pipe2_sys") && !has(o, "cx/sys/proc.cx"), "coreapi-rows-only-posix");
                 sy_unlink(sf);
             }
+            /* Field/phrase delimiter extraction: paths with spaces + verwriter/outdep exact path (tools/a.cx.bak must not false-block tools/a.cx) */
+            {
+                const char *sp_txt =
+                    "CORE-NEW cx/sys/my posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "cxtrunc: tools/my tool.cx has 2 calls and no baseline row (a new .cx must have 0)\n"
+                    "verwriter: job-v1 has writer tools/a.cx.bak and no baseline row (one writer per record tag)\n"
+                    "outdep: b1 has 1 out/ literals in tools/b.cx.bak, baseline 0\n";
+                char sf[4400];
+                char *r_all[] = {"--rows", sf, 0};
+                char *r_sp[] = {"--rows", sf, "--only", "cx/sys/my posix.cx", 0};
+                char *r_vw[] = {"--rows", sf, "--only", "tools/a.cx.bak", 0};
+                char *r_tag[] = {"--rows", sf, "--only", "job-v1", 0};
+                cx_fmt(sf, sizeof sf, "%s/sp-vw.txt", d);
+                cx_write(sf, sp_txt, tx_len(sp_txt, 4096));
+                rc = run(r_all, o, sizeof o);
+                ck(rc == 0 && lines(o) == 4, "space-and-verwriter-outdep-rows-4");
+                rc = run(r_sp, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "CORE-NEW cx/sys/my posix.cx\tsy_fchmod"), "space-path-only-exact");
+                rc = run(r_vw, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "verwriter: job-v1 has writer tools/a.cx.bak"), "verwriter-only-matches-writer-path");
+                rc = run(r_tag, o, sizeof o);
+                ck(rc == 0 && lines(o) == 0, "verwriter-only-ignores-tag-field");
+                sy_unlink(sf);
+            }
             {
                 const char *z2_out =
                     "CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
@@ -197,6 +221,47 @@ int main(int argc, char **argv) {
                            && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=5")
                            && has(o, "PRECOMMIT_GATE_FAIL\tgate=ratchets\treason=ratchet-over"),
                            "precommit-blocks-z2-coreapi-5-symbols");
+                    }
+                    /* Now verify verwriter/outdep src/drive.cx.bak does NOT false-block staged src/drive.cx, and space path IS blocked */
+                    {
+                        const char *vw_rat =
+                            "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 1 new\n"
+                            "  CORE-NEW apps/my dir/my probe.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                            "RATCHET\tverwriter\tFAIL\tverwriter: FAIL: 1 above\n"
+                            "  verwriter: job-v1 has writer src/drive.cx.bak and no baseline row (one writer per record tag)\n"
+                            "RATCHET\toutdep\tFAIL\toutdep: FAIL: 1 above\n"
+                            "  outdep: b1 has 1 out/ literals in src/host.cx.bak, baseline 0\n"
+                            "RATCHETS\tok=15\tfail=3\telapsed_ms=10\n";
+                        char lt[4400], la[4400], lb[4400], lap[4400], lmd[4400], ls[4400];
+                        cx_write(rout, vw_rat, tx_len(vw_rat, 2048));
+                        cx_fmt(lt, sizeof lt, "%s/src", lintd); sy_mkdir(lt, 0700);
+                        cx_fmt(la, sizeof la, "%s/src/drive.cx", lintd); cx_write(la, "/* a */\n", 8);
+                        cx_fmt(lb, sizeof lb, "%s/src/host.cx", lintd); cx_write(lb, "/* b */\n", 8);
+                        cx_fmt(lap, sizeof lap, "%s/apps", lintd); sy_mkdir(lap, 0700);
+                        cx_fmt(lmd, sizeof lmd, "%s/apps/my dir", lintd); sy_mkdir(lmd, 0700);
+                        cx_fmt(ls, sizeof ls, "%s/apps/my dir/my probe.cx", lintd); cx_write(ls, "/* s */\n", 8);
+                        sy_setenv("GIT_INDEX_FILE", idx, 1);
+                        {
+                            char *rt[] = {"git", "read-tree", "HEAD", 0};
+                            char *ca[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/drive.cx", 0};
+                            char *cb[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/host.cx", 0};
+                            char *cs[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,apps/my dir/my probe.cx", 0};
+                            char *pc_fr[] = {"--from-run", d, 0};
+                            (void)run_argv(rt, o, sizeof o);
+                            (void)run_argv(ca, o, sizeof o);
+                            (void)run_argv(cb, o, sizeof o);
+                            rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                            ck(rc == 0 && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=0") && !has(o, "drive.cx.bak") && !has(o, "host.cx.bak"),
+                               "precommit-verwriter-outdep-bak-does-not-false-block-prefix");
+                            (void)run_argv(cs, o, sizeof o);
+                            rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                            sy_unsetenv("GIT_INDEX_FILE");
+                            ck(rc == 1 && has(o, "precommit: blocked: CORE-NEW apps/my dir/my probe.cx\tsy_fchmod")
+                               && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=1"),
+                               "precommit-blocks-path-with-space");
+                        }
+                        sy_unlink(la); sy_unlink(lb); sy_unlink(ls);
+                        sy_rmdir(lmd); sy_rmdir(lap); sy_rmdir(lt);
                     }
                     sy_unlink(idx); sy_unlink(lp1); sy_unlink(lp2);
                     cx_fmt(lp1, sizeof lp1, "%s/cx/sys", lintd); sy_rmdir(lp1);

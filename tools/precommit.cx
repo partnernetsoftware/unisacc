@@ -401,10 +401,6 @@ static int freeze_gate(void) {
     size_t zn = 0; char *z = (char *)cx_read("build/freeze.tsv", &zn), *f[6]; long fn = 0, now, dl = 0, i;
     char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
     char *names, line[1200], *p; int blocked = 0, nf = 0; const char *who;
-    if (!z && pc_orig_cwd[0]) {
-        char fp[1200];
-        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_orig_cwd)) z = (char *)cx_read(fp, &zn);
-    }
     if (!z) return 0;                                   /* 无标记文件=无冻结(ENOENT) */
     for (p = z; *p; ) {                                  /* 取第一条非注释行 */
         char *e = p; while (*e && *e != '\n') e++;
@@ -1824,30 +1820,49 @@ int main(int argc, char **argv) {
     cur_gate = "ratchets"; slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0; cur_gate = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     { int b0 = blocked; blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets"); if (blocked > b0) pc_mark_block("ratchets", "ratchets-incomplete"); }
-    for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: "  NAME: PATH has ..." or "  CORE-* PATH\t..." */
-        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s, p = -1, q, a2;
+    for (at = 0; at < rn; ) {   /* offending rows are indented by two spaces: extract exact path span [p, q) by field/phrase delimiter */
+        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, s, p = -1, q = -1, a2, t, w, h;
         const char *r = rows + at;
-        int soft = 0, byfile = 0;
+        int soft = 0;
         if (l > 2 && r[0] == ' ' && r[1] == ' ') {
-            if (tx_prefix(r + 2, l - 2, "CORE-NEW ", 9) || tx_prefix(r + 2, l - 2, "CORE-SIG ", 9)) p = 2 + 9;
-            else if (tx_prefix(r + 2, l - 2, "CORE-MISSING ", 13)) p = 2 + 13;
-            else if (tx_prefix(r + 2, l - 2, "CORE-ALIAS-CALLERS ", 19)) p = 2 + 19;
-            else if (tx_prefix(r + 2, l - 2, "FAIL\t", 5)) p = 2 + 5;
-            else if ((s = tx_chr(r, l, ':')) > 0 && s + 2 < l) {
-                p = s + 2;
-                soft = tx_prefix(r + 2, l - 2, "cxlibc:", 7) || tx_prefix(r + 2, l - 2, "cxraw:", 6);   /* printf 类对 tools/tests 仍豁免 */
-                byfile = tx_prefix(r + 2, l - 2, "outdep:", 7) || tx_prefix(r + 2, l - 2, "verwriter:", 10);   /* outdep/verwriter 路径不在首词 */
-                if (tx_prefix(r + p, l - p, "module ", 7)) p += 7;
-                else if (tx_prefix(r + p, l - p, "cx-wildcard-product: ", 21)) p += 21;
-                else if (tx_prefix(r + p, l - p, "move target ", 12)) p += 12;
+            const char *b = r + 2; long bn = l - 2;
+            if (tx_prefix(b, bn, "CORE-NEW ", 9) || tx_prefix(b, bn, "CORE-SIG ", 9)) s = 9;
+            else if (tx_prefix(b, bn, "CORE-MISSING ", 13)) s = 13;
+            else if (tx_prefix(b, bn, "CORE-ALIAS-CALLERS ", 19)) s = 19;
+            else if (tx_prefix(b, bn, "FAIL\t", 5) && tx_find(b, bn, " above ", 7) >= 0) s = 5;
+            else s = -1;
+            if (s >= 0) {
+                t = tx_chr(b + s, bn - s, '\t');
+                if (t > 0) { p = 2 + s; q = p + t; }
+            } else if ((s = tx_chr(b, bn, ':')) > 0 && s + 2 < bn && b[s + 1] == ' ') {
+                s += 2;
+                soft = tx_prefix(b, bn, "cxlibc:", 7) || tx_prefix(b, bn, "cxraw:", 6);   /* printf 类对 tools/tests 仍豁免 */
+                if (tx_prefix(b, bn, "verwriter: ", 11) && (w = tx_find(b + s, bn - s, " has writer ", 12)) >= 0) {
+                    s += w + 12;
+                    h = tx_find(b + s, bn - s, " and no baseline row", 20);
+                    if (h > 0) { p = 2 + s; q = p + h; }
+                } else if (tx_prefix(b, bn, "outdep: ", 8) && (w = tx_find(b + s, bn - s, " out/ literals in ", 18)) >= 0) {
+                    s += w + 18;
+                    h = tx_find(b + s, bn - s, ", baseline ", 11);
+                    if (h > 0) { p = 2 + s; q = p + h; }
+                } else if (tx_prefix(b + s, bn - s, "cx-wildcard-product: ", 21)) {
+                    s += 21;
+                    h = tx_find(b + s, bn - s, " uses a use ", 12);
+                    if (h > 0) { p = 2 + s; q = p + h; }
+                } else {
+                    if (tx_prefix(b + s, bn - s, "module ", 7)) s += 7;
+                    else if (tx_prefix(b + s, bn - s, "move target ", 12)) s += 12;
+                    h = tx_find(b + s, bn - s, " has ", 5);
+                    if (h < 0) h = tx_find(b + s, bn - s, " total lines ", 13);
+                    if (h > 0) { p = 2 + s; q = p + h; }
+                }
             }
         }
-        if (p >= 0 && p < l) {
-            q = p; while (q < l && r[q] != ' ' && r[q] != '\t') q++;
+        if (p >= 0 && q > p && q <= l) {
             for (a2 = 0; a2 < sn; ) {
                 long nl = tx_len(names + a2, sn - a2);
                 if (nl <= 0) break;
-                if (tx_same(names + a2, nl, r + p, q - p) || (byfile && tx_find(r, l, names + a2, nl) >= 0)) {
+                if (tx_same(names + a2, nl, r + p, q - p)) {
                     int toolish = tx_prefix(names + a2, nl, "tools/", 6) || tx_prefix(names + a2, nl, "tests/", 6);
                     if (!toolish || !soft) {
                         sy_eprintf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1); blocked++;
