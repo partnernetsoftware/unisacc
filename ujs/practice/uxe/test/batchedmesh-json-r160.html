@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BatchedMesh, BufferGeometry, Float32BufferAttribute, MeshBasicMaterial, REVISION } from "../../web/game/three.module.js";
+const status = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("revision mismatch");
+  const options = new URLSearchParams(location.search);
+  const response = await fetch("file://" + options.get("wasm"));
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
+  const api = instance.exports;
+  const base = Number(api.uxe_batch_json(0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 16384);
+  const geometry = (vertices, index) => {
+    const source = new BufferGeometry();
+    source.setAttribute("position", new Float32BufferAttribute(new Float32Array(vertices * 3), 3));
+    source.setIndex(index);
+    return source;
+  };
+  const batch = new BatchedMesh(3, 32, 48, new MeshBasicMaterial());
+  const first = batch.addGeometry(geometry(3, [0, 1, 2]));
+  const second = batch.addGeometry(geometry(4, [0, 1, 2, 1, 2, 3]));
+  batch.setVisibleAt(first, false);
+  const source = batch.toJSON().object;
+  const selected = { drawRanges: source.drawRanges, reservedRanges: source.reservedRanges,
+    visibility: source.visibility, active: source.active };
+  const expected = JSON.stringify(selected);
+  const negative = options.get("mutate") === "1";
+  if (negative) selected.drawRanges[second].start = 4;
+  const input = new TextEncoder().encode(JSON.stringify(selected));
+  memory.set(input, 0);
+  const end = Number(api.uxe_batch_json(BigInt(input.length)));
+  const hash = text => [...text].reduce((value, ch) => (value * 131 + ch.charCodeAt(0)) % 16777213, 0);
+  if (negative && end === -1) {
+    status.textContent = JSON.stringify([hash(expected), -1]);
+  } else {
+    if (end < 8192 || end > 16384) throw new Error("batch JSON refused " + end);
+    const result = new TextDecoder().decode(memory.subarray(8192, end));
+    status.textContent = JSON.stringify([hash(expected), hash(result)]);
+  }
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>

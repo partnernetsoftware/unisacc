@@ -1,0 +1,34 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"compressed-texture-pvrtc",0};
+    const char *setup=
+        "native function pvrtc_probe(format:i64,w:i64,h:i64) i64 {"
+        "let result=CompressedTexture_pvrtcInfo(format,w,h);"
+        "if(result<0){return result;}return format*1000000+result;}";
+    const int fixtures[6][2]={{1,1},{16,8},{32,16},{8,32},{3,8},{0,8}};
+    char code[24][96];
+    const char *cases[25];
+    double gold[25];
+    for(int f=0;f<4;f++) {
+        int two=f%2;
+        int minimum=two?16:8;
+        for(int i=0;i<6;i++) {
+            int j=f*6+i,w=fixtures[i][0],h=fixtures[i][1];
+            int n=tx_snprintf(code[j],sizeof code[j],
+                "return 0.0+pvrtc_probe(%d,%d,%d);",35840+f,w,h);
+            if(n<0 || n>=(int)sizeof code[j]) return 2;
+            cases[j]=code[j];
+            int bytes=(w>minimum?w:minimum)*(h>8?h:8)/(two?4:2);
+            gold[j]=i>=4?-2:(35840+f)*1000000.0+bytes*512+f/2*256+64+(two?8:4);
+        }
+    }
+    cases[24]="return 0.0+pvrtc_probe(35844,16,8);";
+    gold[24]=-1;
+    return g_wasm_batch("G_IO PVRTC footprints","compressed-texture-pvrtc",modules,setup,cases,gold,25,
+        mutate?20:-1,"return 0.0+pvrtc_probe(35842,32,16);");
+}

@@ -187,7 +187,7 @@ ext 的 dock 政策(2026-11-21 定案):扩展应用库包今后不得 dock 宿�
 
 ### 两层.6 与 0.0.90「身份按编译闭包取」的关系
 
-0.0.90 设计(`plans/v0.0.90.md`;规划,未实现):源身份 source-packages-v3 的 `.cx` 部分只收 `build/core-closure.tsv` 列出的闭包单元,该表本身强制入身份;车道表 `build/lane-inputs.tsv` 由闭包表派生;加三条守门检查(闭包表新鲜、整链实际编译与读入的文件是身份清单的子集、闭包封闭)。
+0.0.90 设计(`archive/plans-pre094/v0.0.90.md`;规划,未实现):源身份 source-packages-v3 的 `.cx` 部分只收 `build/core-closure.tsv` 列出的闭包单元,该表本身强制入身份;车道表 `build/lane-inputs.tsv` 由闭包表派生;加三条守门检查(闭包表新鲜、整链实际编译与读入的文件是身份清单的子集、闭包封闭)。
 
 对两层的意义:
 

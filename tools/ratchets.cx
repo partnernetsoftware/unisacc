@@ -44,16 +44,83 @@ static void slurp(int fd, char **buf, long *n) {
     *buf = b;
 }
 
+static long rk_rfind(const char *s, long n, const char *needle, long nl) {
+    long pos = -1, at = 0;
+    if (nl <= 0 || n < nl) return -1;
+    while (at <= n - nl) {
+        long f = tx_find(s + at, n - at, needle, nl);
+        if (f < 0) break;
+        pos = at + f;
+        at = pos + 1;
+    }
+    return pos;
+}
+
 /* 1 when LINE (len n) names a failing file or a whole-tree overflow:
- * "<tool>: <path> has ..." or "<tool>: <scope> total lines N, baseline M", without "stale row" */
-static int offending(const char *l, long n, const char *only) {
-    long c = tx_chr(l, n, ':'), s;
+ * extracts the offending path/scope span [*ps, *pe) by format delimiter (TAB or EOL for CORE-*, TAB for FAIL\t,
+ * rightmost phrase boundary for verwriter/outdep/cx-wildcard-product/" has "/" total lines "/" baseline "),
+ * so paths containing spaces or " has " are not truncated and prefix substrings do not false-match. */
+static int offending_span(const char *l, long n, long *ps, long *pe, int *softp) {
+    long c, s = -1, t, w, e;
+    int is_core = 0;
+    if (softp) *softp = 0;
+    if (tx_prefix(l, n, "CORE-NEW ", 9) || tx_prefix(l, n, "CORE-SIG ", 9)) { s = 9; is_core = 1; }
+    else if (tx_prefix(l, n, "CORE-MISSING ", 13)) { s = 13; is_core = 1; }
+    else if (tx_prefix(l, n, "CORE-ALIAS-CALLERS ", 19)) { s = 19; is_core = 1; }
+    else if (tx_prefix(l, n, "FAIL\t", 5) && tx_find(l, n, " above ", 7) >= 0) s = 5;
+    if (s >= 0) {
+        t = tx_chr(l + s, n - s, '\t');
+        if (t < 0 && is_core) t = n - s;
+        if (t <= 0) return 0;
+        *ps = s; *pe = s + t;
+        return 1;
+    }
+    c = tx_chr(l, n, ':');
     if (c < 0 || c + 2 >= n || l[c + 1] != ' ') return 0;
     if (tx_find(l, n, "stale row", 9) >= 0) return 0;
+    if (softp) *softp = tx_prefix(l, n, "cxlibc:", 7) || tx_prefix(l, n, "cxraw:", 6);
     s = c + 2;
+    if (tx_prefix(l, n, "verwriter: ", 11) && (w = tx_find(l + s, n - s, " has writer ", 12)) >= 0) {
+        s += w + 12;
+        e = rk_rfind(l + s, n - s, " and no baseline row", 20);
+        if (e <= 0) return 0;
+        *ps = s; *pe = s + e;
+        return 1;
+    }
+    if (tx_prefix(l, n, "outdep: ", 8) && (w = tx_find(l + s, n - s, " out/ literals in ", 18)) >= 0) {
+        s += w + 18;
+        e = rk_rfind(l + s, n - s, ", baseline ", 11);
+        if (e <= 0) return 0;
+        *ps = s; *pe = s + e;
+        return 1;
+    }
+    if (tx_prefix(l + s, n - s, "cx-wildcard-product: ", 21)) {
+        s += 21;
+        e = rk_rfind(l + s, n - s, " uses a use ", 12);
+        if (e <= 0) return 0;
+        *ps = s; *pe = s + e;
+        return 1;
+    }
     if (tx_prefix(l + s, n - s, "module ", 7)) s += 7;   /* cxinclude: "module PATH has N include lines" */
-    if (tx_find(l + s, n - s, " total lines ", 13) < 0 && tx_find(l, n, " has ", 5) < 0) return 0;
-    if (only && !tx_prefix(l + s, n - s, only, tx_len(only, 4096))) return 0;
+    else if (tx_prefix(l + s, n - s, "move target ", 12)) s += 12;
+    e = rk_rfind(l + s, n - s, " has ", 5);
+    if (e < 0) e = rk_rfind(l + s, n - s, " total lines ", 13);
+    if (e < 0 && tx_find(l + s, n - s, " != move ", 9) >= 0) {
+        e = rk_rfind(l + s, n - s, " baseline ", 10);
+        if (softp) *softp = 0;
+    }
+    if (e <= 0) return 0;
+    *ps = s; *pe = s + e;
+    return 1;
+}
+
+static int offending(const char *l, long n, const char *only) {
+    long ps = 0, pe = 0, ol;
+    if (!offending_span(l, n, &ps, &pe, 0)) return 0;
+    if (only) {
+        ol = tx_len(only, 4096);
+        if (pe - ps < ol || !tx_prefix(l + ps, pe - ps, only, ol)) return 0;
+    }
     return 1;
 }
 
@@ -121,12 +188,102 @@ static char *rk_skip_msg(const char *name, long *out_n) {
     return m;
 }
 
+static int rk_is_global_only(const char *name) {
+    return tx_eqz(name, "net-deps") || tx_eqz(name, "notcovered") ||
+           tx_eqz(name, "tsv-lint") || tx_eqz(name, "dup-census") ||
+           tx_eqz(name, "ref-job-paths");
+}
+
+static int rk_any_hit(const char *name, const char *names, long sn) {
+    const char *env = sy_env("UNISACC_RATCHETS_PATHS");
+    long a2;
+    if (env && env[0]) {
+        long n = tx_len(env, 1 << 20), at = 0;
+        while (at < n) {
+            long e = tx_chr(env + at, n - at, '\n'), l = e < 0 ? n - at : e;
+            if (l > 0 && env[at + l - 1] == '\r') l--;
+            if (l > 0 && rk_path_hits(name, env + at, l, 1)) return 1;
+            at += (e < 0 ? l : e + 1);
+        }
+    }
+    for (a2 = 0; a2 < sn; ) {
+        long nl = tx_len(names + a2, sn - a2);
+        if (nl <= 0) break;
+        if (rk_path_hits(name, names + a2, nl, 1)) return 1;
+        a2 += nl + 1;
+    }
+    return 0;
+}
+
+static int rk_precommit_match(const char *rows_file, const char *paths_file) {
+    size_t rsz = 0, psz = 0;
+    char *rows = cx_read(rows_file, &rsz), *names = cx_read(paths_file, &psz);
+    long rn = (long)rsz, sn = (long)psz, at = 0;
+    char cur_rk_name[64], cur_rk_sum[256];
+    int cur_rk_fail = 0, cur_rk_gblk = 0, blocked = 0;
+    if (!rows || !names) return 2;
+    cur_rk_name[0] = 0; cur_rk_sum[0] = 0;
+    while (at < rn) {
+        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, ps = 0, pe = 0, a2;
+        const char *r = rows + at;
+        int soft = 0;
+        if (l > 8 && tx_prefix(r, l, "RATCHET\t", 8)) {
+            long o1, l1, o2, l2, o3, l3;
+            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0;
+            if (!tx_field(r, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof cur_rk_name &&
+                !tx_field(r, l, '\t', 2, &o2, &l2)) {
+                for (long j = 0; j < l1; j++) cur_rk_name[j] = r[o1 + j];
+                cur_rk_name[l1] = 0;
+                if (!tx_field(r, l, '\t', 3, &o3, &l3) && l3 > 0) {
+                    long cl = l3 < (long)sizeof cur_rk_sum - 1 ? l3 : (long)sizeof cur_rk_sum - 1;
+                    for (long j = 0; j < cl; j++) cur_rk_sum[j] = r[o3 + j];
+                    cur_rk_sum[cl] = 0;
+                }
+                cur_rk_fail = (l2 == 4 && tx_same(r + o2, 4, "FAIL", 4)) || (l2 == 5 && tx_same(r + o2, 5, "ERROR", 5));
+                if (cur_rk_fail && rk_is_global_only(cur_rk_name) && rk_any_hit(cur_rk_name, names, sn)) {
+                    printf("precommit: blocked: RATCHET %s FAIL (%s)\n", cur_rk_name, cur_rk_sum);
+                    blocked++;
+                    cur_rk_gblk = 1;
+                }
+            }
+        } else if (l > 2 && r[0] == ' ' && r[1] == ' ') {
+            const char *b = r + 2; long bn = l - 2;
+            if (cur_rk_fail && !cur_rk_gblk &&
+                (tx_find(b, bn, " total lines ", 13) >= 0 || tx_find(b, bn, "total debt ", 11) >= 0 || tx_find(b, bn, "expired exempt row", 18) >= 0) &&
+                rk_any_hit(cur_rk_name, names, sn)) {
+                printf("precommit: blocked: RATCHET %s FAIL (%s):%.*s\n", cur_rk_name, cur_rk_sum, (int)(l - 1), r + 1);
+                blocked++;
+                cur_rk_gblk = 1;
+            }
+            if (offending_span(b, bn, &ps, &pe, &soft) && ps >= 0 && pe > ps && pe <= bn) {
+                for (a2 = 0; a2 < sn; ) {
+                    long nl = tx_len(names + a2, sn - a2);
+                    if (nl <= 0) break;
+                    if (tx_same(names + a2, nl, b + ps, pe - ps)) {
+                        int toolish = tx_prefix(names + a2, nl, "tools/", 6) || tx_prefix(names + a2, nl, "tests/", 6);
+                        if (!toolish || !soft) {
+                            printf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1);
+                            blocked++;
+                        }
+                        break;
+                    }
+                    a2 += nl + 1;
+                }
+            }
+        }
+        at += l + 1;
+    }
+    printf("RATCHETS_PRECOMMIT\tblocked=%d\n", blocked);
+    return 0;
+}
+
 static int judge(Rk *rk, const char *only, int *okp, int *skipp);
 static void from_run(Rk *rk, const char *dir);
 
 int main(int argc, char **argv) {
     static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}, {"ref-job-paths"}, {"tsv-lint"}};
     const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0, skipped = 0;
+    if (argc == 4 && tx_eqz(argv[1], "--precommit")) return rk_precommit_match(argv[2], argv[3]);
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
         if (!b) { fprintf(stderr, "ratchets: cannot read %s\n", argv[2]); return 2; }

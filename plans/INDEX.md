@@ -8,14 +8,14 @@
 
 | 类别 | 文件 |
 | --- | --- |
-| 现行路线 | roadmap-0.0.83-0.0.99.md、roadmap-rev3.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md、memory-safety.md(2026-11-21,向 Rust 学习内存安全的分期路线与采用门) |
-| 现行版本计划 | v0.0.90.md 及以后各版(已公开版本的计划随下一轮归档);0.0.86 到 0.0.89 已公开并归档到 archive/plans-pre090/(清单见其 README.tsv) |
+| 现行路线 | roadmap-0.0.83-0.0.99.md、speed-first-rev4.md、nn-migration-rev3.md、cx-lib-roadmap-2026-11-16.md、standing-goal.md、memory-safety.md(2026-11-21,向 Rust 学习内存安全的分期路线与采用门);roadmap-rev3.md 已归档到 archive/plans-pre094/ |
+| 现行版本计划 | v0.0.94.md 及以后各版(已公开版本的计划随下一轮归档);0.0.90 到 0.0.93 已公开并归档到 archive/plans-pre094/;0.0.86 到 0.0.89 在 archive/plans-pre090/ |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
-| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction、layer-lanes、core-ext-matrix、fast-iteration);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
+| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、table-construction、layer-lanes、core-ext-matrix、fast-iteration;gate-086-edit-rerun 已归档);分车道条文改写稿 archive/plans-pre094/claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
 | 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md(tools/tests/cx 引用) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
-| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
+| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre094/`(0.0.90 到 0.0.93 与 roadmap-rev3、claude-md-layer-lanes-draft,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
 
 说明:`release/notes-*.md` 与 `release/evidence/` 下的历史发布说明及证据正文保持原文不改,其中提及的旧 `plans/<file>` 路径对应下表中的 `archive/plans/<file>`。
 
@@ -55,7 +55,7 @@
 | [archive/plans/nn-nf-b-prep-2026-11-05.md](../archive/plans/nn-nf-b-prep-2026-11-05.md) | 已归档 | v0.0.48+ | NN-NF-B 开工依据(SBOUT 长序列实测) |
 | [plans/nn-table-review-2026-11-18.md](nn-table-review-2026-11-18.md) | 现行 | - | 2026-11-18 NN TSV 表审阅与体检摘要 |
 | [plans/notcovered-plan.md](notcovered-plan.md) | 现行 | - | notcovered 编译覆盖缺口分期修复计划 |
-| [archive/plans/patches/README.md](../archive/plans/patches/README.md) | 已归档 | v0.0.48+ | 旧补丁提案目录说明(与 archive/plans/README.md 重名) |
+| [archive/plans/patches/README.md](../archive/plans/patches/README.md) | 已归档 | v0.0.48+ | 旧补丁提案目录说明(与 archive/plans 根说明重名) |
 | [archive/plans/patches/driver-diagnostics.diff](../archive/plans/patches/driver-diagnostics.diff) | 已归档 | v0.0.48+ | 10-28 旧诊断补丁提案 |
 | [archive/plans/patches/x1-runcache-key-v2.patch](../archive/plans/patches/x1-runcache-key-v2.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v2(0 活引用) |
 | [archive/plans/patches/x1-runcache-key.patch](../archive/plans/patches/x1-runcache-key.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v1(0 活引用) |
@@ -73,7 +73,7 @@
 | [archive/plans/release-notes-0.0.68.md](../archive/plans/release-notes-0.0.68.md) | 已归档 | release/notes-0.0.68.md | 0.0.68 发布说明草稿 |
 | [archive/plans/release-speedup-plan.md](../archive/plans/release-speedup-plan.md) | 已归档 | plans/v0.0.73-speed-tracker.tsv | 0.0.68-0.0.69 发布提速计划 |
 | [archive/plans-2026-11/roadmap-v0.0.80-v0.0.89.md](../archive/plans-2026-11/roadmap-v0.0.80-v0.0.89.md) | 已归档 | roadmap-rev3 | 0.0.80 到 0.0.89 路线图修订版 2 |
-| [plans/roadmap-rev3.md](roadmap-rev3.md) | 现行 | - | 路线图修订版 3(2026-11-19,fable 加我裁定):0.0.81 实际交付、速度专项 S0 到 S7、发布节奏裁决 |
+| [archive/plans-pre094/roadmap-rev3.md](../archive/plans-pre094/roadmap-rev3.md) | 已归档 | plans/roadmap-0.0.83-0.0.99.md 发布节奏裁决节 | 路线图修订版 3(2026-11-19);有约束力的发布节奏裁决已并入 roadmap-0.0.83-0.0.99.md |
 | [plans/roadmap-0.0.83-0.0.99.md](roadmap-0.0.83-0.0.99.md) | 现行 | - | 0.0.83 到 0.0.99 容量模型与逐版编排,及 0.0.100 汇编级精修阶段入口准则(估计值,每 3 版重估);汇编支持基本需求见修订注 2026-11-20 |
 | [archive/plans-pre086/v0.0.82.md](../archive/plans-pre086/v0.0.82.md) | 已归档 | v0.0.82 已公开 | 0.0.82 详细计划(前端诊断二期、ref 判据替换、速度专项首批) |
 | [archive/plans-pre086/v0.0.83.md](../archive/plans-pre086/v0.0.83.md) | 已归档 | v0.0.83 已公开 | 0.0.83 Q-P 首次尝试版计划与 CI 对账前置(2026-11-20 已公开;四道表 0/10 完成,12 项计划外,Q-P 报告未做) |

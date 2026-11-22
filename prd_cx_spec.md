@@ -86,7 +86,7 @@ cxroot.tsv 内容:首行 CXROOT1,其后每行 R<TAB>sys<TAB>r/cx/sys 这样把�
 - 层向只能向下:编号层向上越层即红,产品层用到 `ext/` 即红,检查是 `tools/check-cx-layers.cx`(本文未重跑,UNVERIFIED 其当前结果)。
 - 产品代码(`src/`、`cx/core`、`cx/runtime`、`cx/compiler`、`cx/driver`)严格只用 `sy_*`、`mm_*`、`tx_*`,不写平台 `#if`(`__linux__`、`_WIN32`、`__APPLE__`、`__x86_64__`)和 `__syscallN`(CX-Y-2、CX-Y-3)。平台差异只放 L0 的 `_os` 静态帮手或表。
 - 错误码只走返回值:L0 失败返回 `-errno`,不靠全局 `errno` 跨模块传递(CX-Y-4)。
-- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build/json 写 `use text.build`/`use text.json`。`use` 写法保持不变;身份上的去别名迁移(使 `ext/textx` 四文件与 `cx/mem/arena.cx` 不再进源 SID,归 B 类轻车道)归身份收窄版(2026-11-21 更正:按 `build/version-seq.tsv` 身份收窄定在 0.0.90,见 [plans/v0.0.90.md](plans/v0.0.90.md),规划,未实现;原文写 v0.0.89)。别名清单与落差说明见 [prd_cx.md](prd_cx.md)「两层设计」节「两层.5」。
+- 包名与目录的对应(表里的 `pkg` 列是目标布局):`cx.sys`/`cx.os` 的函数现都在 `cx/sys`、`cx/os`,`use` 时按文件写,如 `sys.proc`、`os.utc`。`ext.memx` 的 arena 经链接出现在 `cx/mem/arena.cx`,写 `use mem.arena`;`ext.textx` 的 build/json 写 `use text.build`/`use text.json`。`use` 写法保持不变;身份上的去别名迁移(使 `ext/textx` 四文件与 `cx/mem/arena.cx` 不再进源 SID,归 B 类轻车道)归身份收窄版(2026-11-21 更正:按 `build/version-seq.tsv` 身份收窄定在 0.0.90,见 [archive/plans-pre094/v0.0.90.md](archive/plans-pre094/v0.0.90.md),规划,未实现;原文写 v0.0.89)。别名清单与落差说明见 [prd_cx.md](prd_cx.md)「两层设计」节「两层.5」。
 
 ### 3.4a 库包一览(怎么选包)
 

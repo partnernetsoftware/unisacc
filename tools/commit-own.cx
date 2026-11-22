@@ -83,7 +83,7 @@
 static void co_die(const char *a, const char *b) {
     fprintf(stderr, "COMMIT_OWN_FAIL\tclass=%s\n", (tx_eqz(a, "usage") || tx_eqz(a, "no such file") || tx_eqz(a, "no registration manifest")) ? "args" : "setup");
     fprintf(stderr, "commit-own: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
-#define CO_USAGE "-m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--derive|--derive-selected] [--dry-run]"
+#define CO_USAGE "-m MSG [--whole PATH...] [--staged PATH...] [--keyed PATH KEY[,KEY...]]... [--registered ID...] [--derive|--derive-selected] [--dry-run]"
 #define CO_PHASE "COMMIT_OWN_PHASE\tselect_ms=%ld\tpending_ms=%ld\tregm_ms=%ld\tcommit_ms=%ld\tattempts=%d\n"
 /* Live progress: `COMMIT_PHASE<TAB>name=N<TAB>state=begin` when a phase starts and
    `COMMIT_PHASE<TAB>name=N<TAB>state=end<TAB>ms=M` when it ends, flushed at once, so a job tail (devsvc git commit
@@ -611,12 +611,12 @@ static void co_conflict(const char *path, const char *basec) {
 /* the blob of PATH at TREE ("HEAD") or in the shared index (tree 0), and its mode; "" when absent */
 static void entry(const char *tree, const char *path, char *blob, char *mode) {
     char out[8192];
-    blob[0] = 0; mode[0] = 0;
+    blob[0] = 0; if (mode) mode[0] = 0;
     if (tree) { char *v[] = {"git", "ls-tree", (char *)tree, "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
     else { char *v[] = {"git", "ls-files", "-s", "--", (char *)path, 0}; if (run(v, out, sizeof out) != 0) return; }
     /* ls-tree: "MODE blob SHA\tPATH"; ls-files -s: "MODE SHA STAGE\tPATH" */
     if (tx_len(out, sizeof out) < 50) return;
-    tx_copy(mode, 8, out, 6);
+    if (mode) tx_copy(mode, 8, out, 6);
     if (tree) tx_copy(blob, 41, out + 12, 40); else tx_copy(blob, 41, out + 7, 40);
 }
 static int co_entry_same(const char *before, const char *after, const char *path) {
@@ -1377,7 +1377,9 @@ int main(int argc, char **argv) {
     char link[CO_MAX];   /* 1 when --whole PATH is a symlink: commit 120000, blob = the target string */
     char skip[CO_MAX];   /* 1 when a --registered derived table yields no change: left out of the commit */
     char del[CO_MAX];    /* 1 when --whole PATH is in HEAD but gone from the work tree (git rm): commit the deletion */
+    char staged[CO_MAX];  /* 1 when --staged PATH: the blob comes from the index (git ls-files -s), not the work tree */
     for (k = 0; k < CO_MAX; k++) { co_reg_of[k] = -1; skip[k] = 0; del[k] = 0; }
+    for (k = 0; k < CO_MAX; k++) staged[k] = 0;
     while (a < argc) {
         if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) { sy_printf("commit-own: usage: " CO_USAGE "\n"); return 0; }
         else if (tx_eqz(argv[a], "--derive")) { derive = 1; a++; }
@@ -1402,6 +1404,9 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--whole")) {
             a++;
             while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; np++; a++; }
+        } else if (tx_eqz(argv[a], "--staged")) {
+            a++;
+            while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; staged[np] = 1; np++; a++; }
         } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
             int j;   /* at parse time only a --keyed entry has keys: merge a repeated PATH into its first entry */
             for (j = 0; j < np; j++) if (keys[j] && tx_eqz(path[j], argv[a + 1])) break;
@@ -1491,9 +1496,53 @@ int main(int argc, char **argv) {
     if (!msg || !np) co_die("usage", "-m MSG and at least one path");
     if (sy_realpath(".", root, sizeof root) < 0) co_die("cannot resolve the root", 0);
     for (k = 0; k < np; k++) if (keys[k] && co_reg_of[k] < 0) co_ukey_check(path[k], keys[k]);
+    /* --whole 的静默吞并防护:同一文件若索引与 HEAD 不同、工作区又与索引不同,说明别人的段已暂存、
+       我的段还在工作区,或者反过来;整文件取工作区会把两边混成一个提交。这时具名拒绝并给出两段头。 */
+    for (k = 0; k < np; k++) {
+        char hb[48], ib[48], wb[48];
+        if (keys[k] || co_reg_of[k] >= 0 || staged[k]) continue;
+        entry("HEAD", path[k], hb, 0);
+        entry(0, path[k], ib, 0);
+        if (!hb[0] || !ib[0] || tx_eqz(hb, ib)) continue;            /* 索引与 HEAD 同:没有别人的暂存段 */
+        if (sy_exists(path[k]) != 1) continue;                        /* 工作区无文件:走删除路径 */
+        {   char *hv[] = {"git", "hash-object", "--", (char *)path[k], 0};
+            if (run(hv, wb, sizeof wb) != 0) continue; }
+        wb[40] = 0;
+        if (tx_eqz(wb, ib)) continue;                                 /* 工作区就是索引内容:没有未暂存段 */
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=whole-ambiguous\n");
+        fprintf(stderr, "commit-own: REFUSE WHOLE_AMBIGUOUS: %s has staged changes and further unstaged changes; --whole would mix both into one commit. Use --staged to commit only the index, or --keyed with the row keys (nothing committed)\n", path[k]);
+        {   char *dv[] = {"git", "diff", "--no-color", "--unified=0", (char *)hb, (char *)ib, 0};
+            char dh[8192]; if (run(dv, dh, sizeof dh) == 0) {
+                char *p = dh; int shown = 0;
+                while (*p && shown < 6) {
+                    char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+                    if (*p == '@' && p[1] == '@') { fprintf(stderr, "index-vs-HEAD %.*s\n", (int)(e - p), p); shown++; }
+                    p = *e ? e + 1 : e;
+                }
+            } }
+        {   char *dv[] = {"git", "diff", "--no-color", "--unified=0", "--no-renames", "--", (char *)path[k], 0};
+            char dh[8192]; if (run(dv, dh, sizeof dh) == 0) {
+                char *p = dh; int shown = 0;
+                while (*p && shown < 6) {
+                    char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+                    if (*p == '@' && p[1] == '@') { fprintf(stderr, "worktree-vs-index %.*s\n", (int)(e - p), p); shown++; }
+                    p = *e ? e + 1 : e;
+                }
+            } }
+        (void)wb;
+        return 1;
+    }
     co_owndiff(path, keys, np);
     for (k = 0; k < np; k++) {
         char src[4400]; sy_stat_t st;
+        if (staged[k]) {   /* --staged PATH: 索引里的 blob 就是提交内容,不看工作区 */
+            char im[8];
+            entry(0, path[k], blob[k], im);
+            if (!blob[k][0]) co_die("no such file in the index", path[k]);
+            link[k] = 0; del[k] = 0;
+            sy_printf("STAGED\t%s\t%.40s\n", path[k], blob[k]);
+            continue;
+        }
         link[k] = 0;
         if (sy_lstat(path[k], &st) == 0 && st.kind == 'l') link[k] = 1;
         if (!sy_exists(path[k]) && !link[k]) {   /* HEAD has it, the work tree does not: a deletion (whole only) */

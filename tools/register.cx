@@ -268,6 +268,27 @@ static int run(char **argv, char *out, long cap) {
     return code;
 }
 
+static void rg_dup_hint(const char *path) {
+    static char hbuf[16384];
+    long pl, at = 0, n;
+    const char *u;
+    if (!path) return;
+    pl = tx_len(path, 1200);
+    if (pl < 10 || !mm_same(path, "tools/", 6) || !tx_eqz(path + pl - 3, ".cx")) return;
+    u = getenv("UNISACC");
+    if (!u || !*u) u = "./unisacc.com";
+    {
+        char *v[] = {"./tools/bound", "15", "sh", (char *)u, "tools/dup-census.cx", "--", "--hint-file", (char *)path, 0};
+        if (run(v, hbuf, sizeof hbuf) != 0) return;
+    }
+    n = tx_len(hbuf, sizeof hbuf);
+    while (at < n) {
+        long e = tx_chr(hbuf + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 9 && mm_same(hbuf + at, "DUP_HINT\t", 9)) printf("%.*s\n", (int)ln, hbuf + at);
+        at += ln + 1;
+    }
+}
+
 /* ---- --tool mode: one command for the inventory side of "a new tools/NAME.cx" ----
  *
  *   sh ./unisacc.com tools/register.cx -- --tool tools/NAME.cx [--tool tools/OTHER.cx ...] [--pin-owner OWNER]
@@ -1278,7 +1299,10 @@ static int rg_tool_mode(int argc, char **argv) {
     for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "ADDED" : "TRACKED");
     printf("REGISTER_TOOL\tsources_added=%ld\tinventory=%ld\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\tpins_added=%ld\tpins_needed=%ld\n", added_src, rows, shards, added_sh, removed_sh, added_pin, need_pin);
     printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p || did ? "REGISTERED" : "UNCHANGED");
-    if (ch_s || ch_b || ch_p || did) printf("REGISTER_NEXT\tderive --write --only links,batch-domains\n");
+    if (ch_s || ch_b || ch_p || did) {
+        for (i = 0; i < nt; i++) rg_dup_hint(tools[i]);
+        printf("REGISTER_NEXT\tderive --write --only links,batch-domains\n");
+    }
     return 0;
 }
 
@@ -1460,6 +1484,7 @@ int main(int argc, char **argv) {
     if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
     rg_timing_warn(id);
+    rg_dup_hint(check);
     /* For a real registration obtain its canonical manifest row from the current registry. */
     if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
         char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--query","--row",(char*)id,0};

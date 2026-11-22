@@ -1,21 +1,25 @@
 #pragma unisa use g_wasm_batch
 #pragma unisa use text.text
 
-#define READ(surface,level) "let n=CompressedTextureSoft_read(32," #surface "," #level ",1024,64);if(n<0){return 0.0+n;}return 0.0+ux_u32(1024);"
+#define READ(surface,level) "let n=CompressedTextureSoft_read(32," #surface "," #level ",1024,128);if(n<0){return 0.0+n;}return 0.0+ux_u32(1024);"
 
+#define SNAPSHOT "let written=CompressedTex_writeSnapshot(32,4096,1024);if(written<0){return 0.0+written;}"
+#define RESTORE "let restored=CompressedTex_readSnapshot(32,2048,512,4096,written);if(restored<0){return 0.0+restored;}"
 #define DISPATCH(format,bytes) "let a=CompressedTextureLoader_level(128,768," #bytes ",4,4," \
     #format ");let tagged=ux_u32_put(128+CompressedMip.format," #format ");" \
     "let used=ux_u32_put(128+CompressedMip.bytes," #bytes ");let start=ux_u32_put(128+CompressedMip.data,768);" \
     "let shape=ux_u32_put(128+CompressedMip.width,4);let height=ux_u32_put(128+CompressedMip.height,4);" \
-    "let t=CompressedTextureSoft_init(32,1,1,1,128);" READ(0,0)
+    "let t=CompressedTextureSoft_init(32,1,1,1,128);" SNAPSHOT RESTORE READ(0,0)
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int mutate_snapshot=argc==2 && tx_eqz(argv[1],"--mutate-snapshot");
+    if(argc!=1 && !mutate && !mutate_snapshot) return 2;
     const char *modules[]={"loadingmanager","fileloader","compressedtextureloader",
         "compressed-texture-bc1","compressed-texture-bc2","compressed-texture-bc3","compressed-texture-bc4",
         "compressed-texture-bc5","compressed-texture-etc1","compressed-texture-astc-constant",
-        "compressed-texture-eac","compressed-texture-etc2","compressed-texture-software",0};
+        "compressed-texture-eac","compressed-texture-etc2","compressed-texture-bc7","compressed-texture-bc6","compressed-texture-software",
+        "compressed-texture-snapshot",0};
     const char setup[]=
         "let i=0;while(i<12){let side=4;if(i%2){side=2;}"
         "let data=512+i*8;let word=63488;if(i%3==1){word=2016;}if(i%3==2){word=31;}"
@@ -37,10 +41,22 @@ int main(int argc,char **argv) {
         DISPATCH(37492,8),DISPATCH(37494,8),
         "let mark=ux_u32_put(768,4294966780);let tail=ux_u32_put(772,4294967295);"
         "let red=ux_u32_put(776,65535);let alpha=ux_u32_put(780,4294901760);" DISPATCH(37821,16),
+        DISPATCH(37496,16),
+        "let t=CompressedTextureSoft_init(32,1,1,2,128);" SNAPSHOT RESTORE READ(0,1),
+        "let t=CompressedTextureSoft_init(32,2,2,2,128);" SNAPSHOT RESTORE READ(1,0),
+        "let t=CompressedTextureSoft_init(32,3,6,2,128);" SNAPSHOT RESTORE READ(5,1),
+        "let t=CompressedTextureSoft_init(32,3,6,2,128);" SNAPSHOT
+        "let altered=ux_u32_put(4120,33778);return 0.0+CompressedTex_readSnapshot(32,2048,512,4096,written);",
+        "let mode=ux_u8_put(768,64);" DISPATCH(36492,16),
+        "let red=ux_u32_put(768,32739);" DISPATCH(36495,16),
+        "let red=ux_u32_put(768,16419);" DISPATCH(36494,16),
     };
     const double gold[]={32,0xff0000ffu,0xff00ff00u,0xffff0000u,0xffff0000u,-1,-1,-3,-1,-1,
-        0,0,0xff000000u,0x7f000000u,0xff020202u,0xff0000ffu,0xff020202u,0xff000000u,0xff0000ffu};
+        0,0,0xff000000u,0x7f000000u,0xff020202u,0xff0000ffu,0xff020202u,0xff000000u,0xff0000ffu,
+        0x00020202u,0xff00ff00u,0xffff0000u,0xffff0000u,-3,0,31743,64511};
     return g_wasm_batch("G_IO CompressedTexture software surfaces","compressed-texture-software",modules,setup,cases,gold,
-        sizeof gold/sizeof gold[0],mutate?4:-1,
+        sizeof gold/sizeof gold[0],mutate_snapshot?22:mutate?4:-1,
+        mutate_snapshot?
+        "let t=CompressedTextureSoft_init(32,3,6,2,128);" SNAPSHOT RESTORE READ(4,1):
         "let t=CompressedTextureSoft_init(32,3,6,2,128);" READ(4,1));
 }

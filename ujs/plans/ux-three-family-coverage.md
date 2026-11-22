@@ -15,9 +15,23 @@
 | Mesh | C6 门 mesh-object-json-struct.cx 核对根矩阵、可见性、两个 UUID 引用、拒绝未知几何及克隆后的资源共享。释放原节点后克隆仍有效。材质引用调换转红。 | 叶节点记录保留已有几何和材质，由调用方登记 UUID。独立打包资源、多材质数组和子树 JSON 待补。r160 Mesh 使用脱离父节点及垃圾回收，UXE 另有 Mesh_dispose 释放节点槽。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
-## 本批未复现通过的既有门
+## GPU 模板操作主线复验
 
-`gpu-stencil-ops-pixel.cx` 在 ujs 尖端两次到达浏览器读回并失败，输出 `browser_read_failed`、`stencil_values=0`。本批没有改动该门、模板实现、GPU 桥或模板常量清单，也没有新增依赖该门的清单项。此门不作为本批通过证据。主线对照未取得同编译器下的有效读回，成因待定位。GPU 四片并集及其原有断言另行通过。
+从 main `4e6603a` 的 Git 归档新建副本，用 ujs 工作树的 `ujs/ujs.com`，SHA-256 为 `1b9f49c07c103a6854d3748dd6d3e0f196987cacdefe407ff590859128f20f64`。单路执行 `cx -I ujs/tests ujs/tests/gpu-stencil-ops-pixel.cx --`，退出码为 0。
+
+```text
+GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+```
+
+同一归档副本追加三次单路复验，每次间隔约 2 秒，退出码和原始输出如下。
+
+```text
+第 1 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+第 2 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+第 3 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+```
+
+状态为已关闭。先前浏览器读回失败的成因未查明，可能为偶发。
 
 ## A 栏 35 项分组
 
@@ -25,14 +39,14 @@
 
 | 组 | 类与缺口 |
 | --- | --- |
-| 纹理 JSON 与生命周期 | Texture 缺完整公共字段与图像引用往返。FramebufferTexture 缺捕获源引用与参数往返。DepthTexture 缺附件描述往返与独立复制。CompressedTexture、CompressedArrayTexture、CompressedCubeTexture 缺 mip 描述往返和复制，分别覆盖二维、数组层、六面。 |
+| 纹理 JSON 与生命周期 | Texture 缺完整公共字段与图像引用往返。FramebufferTexture 缺捕获源引用与参数往返。DepthTexture 缺附件描述往返与独立复制。压缩纹理仍缺直接设备上传与采样、对象复制及 ASTC 非常色块。VideoTexture 和 createCanvasElement 依赖浏览器宿主，软件路径保持缺。VideoTexture 需真实浏览器播放逐帧标记素材，验证更新、采样像素和释放。createCanvasElement 需验证真实 HTMLCanvasElement、尺寸、绘制与像素读回。软件路径无视频解码与 DOM 元素合同。 |
 | 对象 JSON 与生命周期 | Object3D、Scene 缺递归对象及场景资源往返。LOD 缺阈值、迟滞和子对象引用。InstancedMesh 缺矩阵、颜色与实例数，BatchedMesh 缺实例和几何批次状态。CubeCamera 缺子相机、六面目标引用与复制合同。 |
 | 曲线 JSON 与生命周期 | ArcCurve、EllipseCurve 缺参数往返和克隆。CatmullRomCurve3、SplineCurve 缺控制点复制和往返。CurvePath 缺子曲线递归往返及克隆。 |
 | 缓冲与动画 JSON | InterleavedBufferAttribute 缺共享缓冲身份和克隆往返。InstancedBufferAttribute 缺除数及数组往返。KeyframeTrack 缺基类轨道往返和克隆。 |
 | 音频对象与宿主接线 | AudioListener 缺过滤链、对象复制和往返。Audio 缺播放节点、暂停与对象往返。PositionalAudio 缺锥形衰减、宿主接线和对象往返。 |
 | GPU 目标与渲染接线 | WebGLRenderTarget、WebGL3DRenderTarget、WebGLArrayRenderTarget、WebGLMultipleRenderTargets、WebGLCubeRenderTarget 缺具名构造及尺寸、复制、克隆与资源释放的类级验收。WebGLRenderer 缺完整场景入口及上下文恢复。PMREMGenerator 缺场景和等距柱状入口与完整预滤链。 |
 | 加载器接线 | CubeTextureLoader 缺通用配置和六面图像解码接线。ObjectLoader 缺资源表、材质数组和骨架绑定。 |
-| 着色器与格式映射 | ShaderChunk 缺内建片段库和 GPU 接线。ShaderLib 缺更多程序模板。WebGLUtils 已有非压缩格式门，压缩扩展待设备证据。 |
+| 着色器与格式映射 | ShaderChunk 缺内建片段库和 GPU 接线。ShaderLib 已有五个程序的 r160 uniform 键与换键反例。standard 与 physical 共用本仓基础 GGX 程序，physical 的额外着色语义和 r160 阶段源码等价待验。WebGLUtils 已有非压缩格式门，压缩扩展待设备证据。 |
 
 ## 网格与纹理对象升级核对
 
@@ -54,6 +68,12 @@
 BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 直接软件入口支持 14 种二维足迹的 LDR 常色块和合法有限范围，sRGB 保留编码字节。HDR、非常色块的分区、权重及端点模式仍缺。EAC 的有符号与无符号 R11、RG11 可通过 CompressedTexture_decodeEAC 解码，输出保留 11 位精度的交错 16 位小端样本。ETC2 可通过 CompressedTexture_decodeETC2 解码 RGB、全 Alpha 和单比特透明，包含 T、H 与平面模式。sRGB 保留编码字节。ETC2 与 ASTC 常色块已接通二维、数组及立方体的共用软件 mip 分派。EAC 精确 11 位输出使用独立入口，ETC2、EAC 与 ASTC 的压缩原样 GPU 上传待验。BC4 与 BC5 的有符号输出为二补码 SNORM。
 
 真实设备对压缩源的原样上传、格式扩展、mip 完整性、数组分层、立方体六面采样及释放仍待取证。r160 对照在这些软件门中只用于枚举与纹理描述，像素期望由独立金值给出。硬件格式的 A/B 计量保持原口径。
+
+BC7 软件路径支持模式 6 的 RGBA8 端点、P 位、索引和插值。共用 mip 读取可处理该模式。模式 0 到 5、模式 7 与设备直传待验。
+
+BC6H 软件路径支持有符号和无符号模式 11，其他模式与设备直传待验。共用 mip 读取对这两种格式返回每像素 8 字节的小端 RGBA16F，Alpha 固定为 1。其他已接入格式保持每像素 4 字节。
+
+PVRTC1 四种格式已验 r160 枚举、RGB/RGBA 区分、2/4 bpp 块足迹与最小 mip 字节数。像素软件解码和真实设备压缩上传待验。字节预算按 Khronos WEBGL_compressed_texture_pvrtc 规范计算。
 
 ## 几何与材质尚需的类专有验证
 

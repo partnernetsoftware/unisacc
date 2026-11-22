@@ -25,13 +25,11 @@ static const char *at(const char *h, const char *w) {
     long i = tx_find(h, (long)strlen(h), w, (long)strlen(w));
     return i < 0 ? 0 : h + i;
 }
-/* ck_run (cxlib.ckassert) bounds every child at 55 seconds */
-static int run(char **argv, char *out, int cap) { return ck_run(argv, out, (size_t)cap); }
 static int g(const char *dir, const char *a, const char *b, const char *c, const char *d) {
     static char o[8192];
     char *v[] = {"./tools/bound", "20", "git", "-C", (char *)dir, "-c", "user.name=fx", "-c", "user.email=fx@localhost",
                  (char *)a, (char *)b, (char *)c, (char *)d, 0};
-    return run(v, o, sizeof o);
+    return ck_run(v, o, sizeof o);
 }
 static void put(const char *dir, const char *rel, const char *body) {
     char p[700], d[700]; char *s;
@@ -51,9 +49,9 @@ static void repo(const char *name, char *dir, int cap) {
     ck(g(dir, "add", "-A", 0, 0) == 0, "git-add");
     ck(g(dir, "commit", "-qm", "base", "--no-gpg-sign") == 0, "git-commit");
 }
-#define MAXC 32
+#define MAXC 48
 static const char *cname[MAXC], *cfrag[MAXC], *cnot[MAXC]; static int cwant[MAXC], ncase;
-static char cases[16384]; static long clen;
+static char cases[32768]; static long clen;
 static void hc(const char *name, const char *args, int want, const char *frag, const char *notfrag) {
     if (ncase == MAXC) { ck(0, "case-capacity"); return; }
     cname[ncase] = name; cfrag[ncase] = frag; cnot[ncase] = notfrag; cwant[ncase] = want; ncase++;
@@ -70,44 +68,105 @@ static void segment(const char *out, int i, char *seg, int cap, int *rc) {
     mm_copy(seg, (size_t)cap, s, (size_t)k); seg[k] = 0;
     *rc = e[strlen(mark)] - '0';
 }
+/* 1 when PATH is under a core-path row (prefix match, as handoff-check does) of the profiles text TBL */
+static int covered(const char *tbl, const char *path) {
+    for (const char *p = tbl; p && *p; ) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        if (!strncmp(p, "core-path\t", 10)) {
+            const char *n = p + 10, *t = memchr(n, '\t', (size_t)(e - n));
+            if (t && !strncmp(path, n, (size_t)(t - n))) return 1;
+        }
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+/* every module file listed in tests/cx-module-freeze.tsv must be under a core-path row; the same walk over a table
+ * without the cx/sys/ row must find uncovered files (mutation: dropping a row is seen) */
+static void freeze_coverage(const char *profiles_text) {
+    size_t n; char *fz = cx_read("tests/cx-module-freeze.tsv", &n); int rows = 0, miss = 0, miss_cut = 0;
+    static char cut[65536]; long k = 0;
+    ck(fz != 0, "read-freeze-table");
+    for (const char *p = profiles_text; p && *p; ) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        if (strncmp(p, "core-path\tcx/sys/\t", 18)) k += snprintf(cut + k, sizeof cut - (size_t)k, "%.*s\n", (int)(e - p), p);
+        p = *e ? e + 1 : e;
+    }
+    for (char *p = fz, *e; fz && *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        if (!*p || *p == '#') continue;
+        char *t = strchr(p, '\t'); if (t) *t = 0;
+        rows++;
+        if (!covered(profiles_text, p)) { miss++; printf("#\tfreeze file not under a core-path row: %s\n", p); }
+        if (!covered(cut, p)) miss_cut++;
+    }
+    ck(rows > 30, "freeze-table-has-rows");
+    ck(miss == 0, "every-freeze-file-under-core-path");
+    ck(miss_cut > 0, "tamper-without-cx-sys-row-uncovered");
+    free(fz);
+}
 int main(void) {
-    static char out[131072], seg[8192]; char a[400], b[400], args[2000], f[500], strip[500];
+    static char out[131072], seg[8192]; char a[400], b[400], c[400], args[2000], f[500], strip[500], p2[600];
     if (sy_mkdtemp(sy_tmpdir(), "handoff-check-check-", tmpd, sizeof tmpd)) { puts("FAIL\ttmpdir"); return 1; }
     repo("a", a, sizeof a);
     repo("b", b, sizeof b);
+    repo("c", c, sizeof c);
     /* repo a: a new tool without check or rows, a good tool with all, a batch row added (uncommitted) */
     put(a, "tools/newtool.cx", "int main(void){return 0;}\n");
     put(b, "tools/goodtool.cx", "int main(void){return 0;}\n");
     put(b, "tools/check-goodtool.cx", "int main(void){return 0;}\n");
     put(a, "tests/batches.tsv", "id\tstatus\nold-batch\tIMPLEMENTED\nnew-batch-x\tIMPLEMENTED\n");
     ck(g(b, "config", "core.hooksPath", "/nonexistent-hooks", 0) == 0, "set-hooks-path");
+    /* repo c (vs-base): README deleted (uncommitted), an untracked file and directory, a not-implemented batch row added */
+    if (cx_fmt(p2, sizeof p2, "%s/README", c) || sy_unlink(p2)) ck(0, "delete-readme");
+    put(c, "newfile", "present\n");
+    put(c, "dir1/x", "x\n");
+    put(c, "tests/batches.tsv", "id\tstatus\nold-batch\tIMPLEMENTED\nnorun-x\tREGISTERED_NORUN\n");
     /* profiles table without core-path rows: tamper control */
     { size_t n; char *t = cx_read("tests/accept-profiles.tsv", &n); static char o[65536]; long k = 0;
       ck(t != 0, "read-profiles");
+      if (t) freeze_coverage(t);
       for (char *p = t, *e; t && *p; p = e) { e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p); if (strncmp(p, "core-path\t", 10)) k += snprintf(o + k, sizeof o - (size_t)k, "%s\n", p); }
       if (cx_fmt(strip, sizeof strip, "%s/no-core.tsv", tmpd) || cx_write(strip, o, (size_t)k)) ck(0, "write-stripped");
       free(t); }
 #define A(...) (cx_fmt(args, sizeof args, __VA_ARGS__) ? "" : args)
-    hc("core-path-review-required", A("--root\t%s\t--static\t--files\ttools/precommit.cx,README\t--item\tcore-review", a), 0, "ITEM\tcore-review\tREVIEW_REQUIRED", "core-review\tPASS");
-    hc("core-review-counted", A("--root\t%s\t--static\t--files\ttools/devsvc-core.cx\t--item\tcore-review", a), 0, "review=1", 0);
+    hc("core-path-review-required", A("--root\t%s\t--static\t--files\ttools/precommit.cx,README\t--item\tcore-review", a), 3, "ITEM\tcore-review\tREVIEW_REQUIRED", "core-review\tPASS");
+    hc("core-review-counted", A("--root\t%s\t--static\t--files\ttools/devsvc-core.cx\t--item\tcore-review", a), 3, "review=1", 0);
     hc("no-core-not-applicable", A("--root\t%s\t--static\t--files\tREADME\t--item\tcore-review", a), 0, "core-review\tNOT_APPLICABLE", 0);
     hc("tamper-no-core-rows", A("--root\t%s\t--static\t--profiles\t%s\t--files\ttools/precommit.cx\t--item\tcore-review", a, strip), 0, "core-review\tNOT_APPLICABLE", 0);
+    hc("core-l0-sys-review", A("--root\t%s\t--static\t--files\tcx/sys/proc.cx\t--item\tcore-review", a), 3, "core-review\tREVIEW_REQUIRED\t0\tcx/sys/proc.cx", 0);
+    hc("core-l0-mem-review", A("--root\t%s\t--static\t--files\tcx/mem/heap.cx\t--item\tcore-review", a), 3, "core-review\tREVIEW_REQUIRED\t0\tcx/mem/heap.cx", 0);
+    hc("core-l0-text-review", A("--root\t%s\t--static\t--files\tcx/text/text.cx\t--item\tcore-review", a), 3, "core-review\tREVIEW_REQUIRED\t0\tcx/text/text.cx", 0);
+    hc("core-frozen-table-review", A("--root\t%s\t--static\t--files\tcx/core/alu.cx,cx/cx0/plan.cx,tests/cx-module-freeze.tsv\t--item\tcore-review", a), 3, "cx/core/alu.cx cx/cx0/plan.cx tests/cx-module-freeze.tsv", 0);
     hc("product-no-patch-fail", A("--root\t%s\t--static\t--files\tsrc/x.c\t--item\tpatch-first", a), 1, "patch-first\tFAIL\t0\tPATCH_FIRST src/x.c", 0);
     hc("product-with-patch-pass", A("--root\t%s\t--static\t--files\tsrc/x.c,plans/x.patch\t--item\tpatch-first", a), 0, "patch-first\tPASS\t0\tpatch present", 0);
     hc("product-allowed-recorded", A("--root\t%s\t--static\t--allow-product\t--files\tcx/sys/a.cx\t--item\tpatch-first", a), 0, "ALLOWED --allow-product cx/sys/a.cx", 0);
-    hc("registry-missing-unmeasured", A("--root\t%s\t--static\t--item\tregistry", a), 0, "registry\tUNMEASURED\t0\ttools/newtool.cx no-check", "registry\tPASS");
+    hc("registry-missing-unmeasured", A("--root\t%s\t--static\t--item\tregistry", a), 3, "registry\tUNMEASURED\t0\ttools/newtool.cx no-check", "registry\tPASS");
     hc("registry-missing-strict-fail", A("--root\t%s\t--static\t--strict\t--item\tregistry", a), 1, "no-prd-row", 0);
     hc("registry-complete-pass", A("--root\t%s\t--static\t--strict\t--item\tregistry", b), 0, "registry\tPASS", 0);
-    hc("new-batch-unmeasured", A("--root\t%s\t--skip-batches\t--item\tfresh-cold", a), 0, "fresh-cold\tUNMEASURED", "fresh-cold\tPASS");
+    hc("new-batch-unmeasured", A("--root\t%s\t--skip-batches\t--item\tfresh-cold", a), 3, "fresh-cold\tUNMEASURED", "fresh-cold\tPASS");
     hc("no-new-batch-not-applicable", A("--root\t%s\t--skip-batches\t--item\tfresh-cold", b), 0, "fresh-cold\tNOT_APPLICABLE", 0);
     hc("hookspath-fail", A("--root\t%s\t--static\t--item\tno-bypass", b), 1, "no-bypass\tFAIL\t0\tcore.hooksPath-set", 0);
     hc("no-hookspath-pass", A("--root\t%s\t--static\t--item\tno-bypass", a), 0, "no-bypass\tPASS", 0);
-    hc("static-all-unmeasured", A("--root\t%s\t--static\t--files\ttools/x.cx", a), 0, "unmeasured=3", "HANDOFF\tpassed=0\tfailed=0\tunmeasured=0");
+    hc("static-all-unmeasured", A("--root\t%s\t--static\t--files\ttools/x.cx", a), 3, "unmeasured=3\tdeferred=0\treview=0\tscope=LOCAL", "HANDOFF\tpassed=0\tfailed=0\tunmeasured=0");
     hc("help-lists-items", "--help", 0, "core-review no-bypass patch-first registry", 0);
     hc("bad-option-usage", "--bogus", 2, "", 0);
+    hc("deferred-implemented-row-pass", A("--root\t%s\t--item\tdeferred", a), 0, "deferred\tPASS\t0\tdeferred=0", "DEFERRED");
+    hc("deferred-norun-row-counted", A("--root\t%s\t--item\tdeferred", c), 3, "deferred:batch:norun-x\tDEFERRED\t0\ttests/batches.tsv status=REGISTERED_NORUN", "deferred\tPASS");
+    hc("deferred-declared-counted", A("--root\t%s\t--item\tdeferred\t--defer\tcap-x=not done, needs review", b), 3, "deferred:cap-x\tDEFERRED\t0\tnot done, needs review", "deferred=0");
+    hc("deferred-in-last-line", A("--root\t%s\t--item\tdeferred\t--defer\tone=1\t--defer\ttwo=2", b), 3, "failed=0\tunmeasured=0\tdeferred=2\treview=0\tscope=LOCAL", 0);
+    hc("vs-regression-fail", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat README\t--item\tvs-base", c), 1, "vs-base\tFAIL", "vs-base\tPASS");
+    hc("vs-both-pass", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat prd.md\t--item\tvs-base", c), 0, "vs-base\tPASS\t", "vs-base\tFAIL");
+    hc("vs-fixed-since-rev-pass", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat newfile\t--item\tvs-base", c), 0, "fixed-since-rev cur[rc=0]: present || rev", 0);
+    hc("vs-same-failure-review", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat ghost-file\t--item\tvs-base", c), 3, "vs-base\tREVIEW_REQUIRED\t", "vs-base\tPASS");
+    hc("vs-same-failure-both-lines-pasted", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat ghost-file\t--item\tvs-base", c), 3, "cur[rc=1]: cat: ghost-file: No such file or directory || rev ", 0);
+    hc("vs-different-failure-fail", A("--root\t%s\t--vs\tHEAD\t--cmd\tcat dir1\t--item\tvs-base", c), 1, "different-failure", "REVIEW_REQUIRED");
+    hc("vs-bad-rev-fail", A("--root\t%s\t--vs\tnosuchrev\t--cmd\tcat README\t--item\tvs-base", c), 1, "--vs REV is not a commit", 0);
+    hc("vs-absent-not-applicable", A("--root\t%s\t--item\tvs-base", c), 0, "vs-base\tNOT_APPLICABLE", 0);
+    hc("vs-static-unmeasured", A("--root\t%s\t--static\t--vs\tHEAD\t--cmd\tcat prd.md\t--item\tvs-base", c), 3, "vs-base\tUNMEASURED", "vs-base\tPASS");
+    hc("vs-without-cmd-usage", A("--root\t%s\t--vs\tHEAD\t--item\tvs-base", c), 2, "", 0);
     if (cx_fmt(f, sizeof f, "%s/cases.tsv", tmpd) || cx_write(f, cases, (size_t)clen)) { ck(0, "write-cases"); return 1; }
     char *v[] = {"./tools/bound", "50", "sh", UC, "tools/handoff-check.cx", "--", "batch", f, 0};
-    ck(run(v, out, sizeof out) == 0, "batch-process-rc0");
+    ck(ck_run(v, out, sizeof out) == 0, "batch-process-rc0");
     for (int i = 0; i < ncase; i++) {
         int rc; segment(out, i, seg, sizeof seg, &rc);
         int ok = rc == cwant[i] && at(seg, cfrag[i]) && (!cnot[i] || !at(seg, cnot[i]));

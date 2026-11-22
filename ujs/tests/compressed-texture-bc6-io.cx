@@ -1,0 +1,113 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define PIXEL(n) "return 0.0+bc6_fixture_pixel(" #n ");"
+
+static const unsigned endpoints[2][6]={
+    {0,511,512,1023,768,256},
+    {1023,512,1,0,511,1023},
+};
+static const unsigned selectors[2][16]={
+    {7,15,8,1,14,9,3,6,2,10,4,5,11,12,13,0},
+    {0,1,2,3,15,5,6,7,8,9,10,11,12,13,14,15},
+};
+
+static void pack(unsigned char *block,int *position,unsigned value,int bits) {
+    for(int bit=0;bit<bits;bit++,(*position)++)
+        block[*position/8]|=((value>>bit)&1)<<(*position%8);
+}
+
+static void make_block(unsigned char *block,int fixture) {
+    int position=0;
+    pack(block,&position,3,5);
+    for(int i=0;i<6;i++) pack(block,&position,endpoints[fixture][i],10);
+    for(int i=0;i<16;i++) pack(block,&position,selectors[fixture][i],i?4:3);
+}
+
+// The oracle uses the Khronos Data Format 1.4 BC6H endpoint and weight
+// tables on logical fixtures, independently of the decoder's bit reader.
+static int endpoint(unsigned raw,int is_signed) {
+    if(!is_signed) return raw==1023?65535:raw?64*raw+32:0;
+    int value=raw<512?(int)raw:(int)raw-1024;
+    int magnitude=value<0?-value:value;
+    int expanded=magnitude>=511?32767:magnitude?64*magnitude+32:0;
+    return value<0?-expanded:expanded;
+}
+
+static double rgb(int x,int y,int is_signed) {
+    static const int weights[]={0,4,9,13,17,21,26,30,34,38,43,47,51,55,60,64};
+    const int tile=(x/4)^(y/4);
+    const int weight=weights[selectors[tile][4*(y%4)+x%4]];
+    double color=0;
+    for(int channel=2;channel>=0;channel--) {
+        int a=endpoint(endpoints[tile][channel],is_signed);
+        int b=endpoint(endpoints[tile][channel+3],is_signed);
+        int mixed=(a*(64-weight)+b*weight+32)>>6;
+        int half=mixed<0?(-mixed*31)/32:(mixed*31)/(is_signed?32:64);
+        if(half && mixed<0) half+=32768;
+        color=color*65536+half;
+    }
+    return color;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    const int signed_mutate=argc==2 && tx_eqz(argv[1],"--mutate-signed");
+    if(argc!=1 && !mutate && !signed_mutate) return 2;
+    const char *modules[]={"loadingmanager","fileloader","compressedtextureloader","compressed-texture-bc6",0};
+    const char prefix[]=
+        "native function bc6_fixture_pixel(n:i64) f64 {"
+        "let at=512+8*n;return ux_u32(at)+4294967296.0*ux_u16(at+4);}"
+        "native function bc6_fixture_alpha() i64 {"
+        "let i=0;let mismatches=0;while(i<25){"
+        "if(ux_u16(518+8*i)!=15360){mismatches=mismatches+1;}i=i+1;}return mismatches;}"
+        "let u=CompressedTexture_bc6Level(32,128,64,5,5,36495);"
+        "let s=CompressedTexture_bc6Level(64,128,64,5,5,36494);";
+    char setup[4096];
+    int used=tx_snprintf(setup,sizeof setup,"%s",prefix);
+    if(used<0 || used>=(int)sizeof setup) return 2;
+    for(int tile=0;tile<4;tile++) {
+        unsigned char block[16]={0};
+        make_block(block,(tile%2)^(tile/2));
+        for(int i=0;i<16;i++) {
+            int written=tx_snprintf(setup+used,sizeof setup-used,
+                "let b%d=ux_u8_put(%d,%d);",tile*16+i,128+tile*16+i,block[i]);
+            if(written<0 || written>=(int)sizeof setup-used) return 2;
+            used+=written;
+        }
+    }
+    const char *cases[64]={
+        "return 0.0+u;",
+        "return 0.0+s;",
+        "return 0.0+CompressedTexture_decodeBC6(32,512,200);",
+        "return 0.0+CompressedTexture_decodeBC6(64,512,200);",
+        "let n=CompressedTexture_decodeBC6(32,512,200);return 0.0+bc6_fixture_alpha();",
+        "let n=CompressedTexture_decodeBC6(64,512,200);return 0.0+bc6_fixture_alpha();",
+        "let a=ux_u8_put(512,173);let n=CompressedTexture_decodeBC6(32,512,199);return 0.0+1000*n+ux_u8(512);",
+        "return 0.0+CompressedTexture_decodeBC6(32,130,200);",
+        "return 0.0+CompressedTexture_decodeBC6(32,44,200);",
+        "let a=ux_u32_put(32+CompressedMip.bytes,48);return 0.0+CompressedTexture_decodeBC6(32,512,200);",
+        "let a=ux_u32_put(32+CompressedMip.format,36492);return 0.0+CompressedTexture_decodeBC6(32,512,200);",
+        "let a=ux_u8_put(176,7);let z=ux_u8_put(512,173);let n=CompressedTexture_decodeBC6(32,512,200);return 0.0+1000*n+ux_u8(512);",
+        "let a=ux_u8_put(128,19);return 0.0+CompressedTexture_decodeBC6(32,512,200);",
+        "let a=ux_u8_put(712,173);let n=CompressedTexture_decodeBC6(32,512,200);return 0.0+ux_u8(712);",
+    };
+    double gold[64]={32,64,200,200,0,0,-827,-1,-1,-3,-2,-3827,-4,173};
+    char pixels[50][112];
+    int at=14;
+    for(int mode=0;mode<2;mode++) {
+        for(int i=0;i<25;i++,at++) {
+            int written=tx_snprintf(pixels[at-14],sizeof pixels[0],
+                "let n=CompressedTexture_decodeBC6(%d,512,200);return bc6_fixture_pixel(%d);",
+                mode?64:32,i);
+            if(written<0 || written>=(int)sizeof pixels[0]) return 2;
+            cases[at]=pixels[at-14];
+            gold[at]=rgb(i%5,i/5,mode);
+        }
+    }
+    return g_wasm_batch("G_IO CompressedTexture software BC6H","compressed-texture-bc6",modules,setup,cases,gold,
+        at,signed_mutate?39:mutate?14:-1,
+        signed_mutate?cases[14]:
+        "let changed=ux_u8_put(136,0);let n=CompressedTexture_decodeBC6(32,512,200);" PIXEL(0));
+}

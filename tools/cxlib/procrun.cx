@@ -19,7 +19,9 @@
  * Contract and sites: out/opus-h2-survey.md; check tools/check-procrun.cx. */
 #pragma unisa module procrun
 #pragma unisa use cxlib.netpack
+#pragma unisa use sysx.run
 #pragma unisa use sys.fs
+#pragma unisa use mem.bytes
 #pragma unisa use text.text
 
 #define PR_MAX_SECS 600
@@ -81,4 +83,33 @@ int pr_run(const char *label, char *const argv[], const char *cwd, char *const e
 void pr_echo(const pr_result *r) {
     if (r->out && r->outn) (void)sy_write_all(1, r->out, (long)r->outn);
     if (r->err && r->errn) (void)sy_write_all(2, r->err, (long)r->errn);
+}
+
+/* Merged stdout+stderr bounded run returning the child exit code (124 on timeout, -errno on spawn error).
+   Output past cap-1 bytes is truncated with *cut = 1 (when cut is non-NULL). */
+int pr_run_merged(char **argv, int secs, char *out, int cap, int *cut) {
+    px_opts o = {0};
+    px_result r = {0};
+    int t;
+    if (cut) *cut = 0;
+    if (out && cap > 0) out[0] = 0;
+    if (!argv || !argv[0]) return -EINVAL;
+    if (secs < 1 || secs > PR_MAX_SECS) return -EINVAL;
+    o.argv = argv;
+    o.deadline_ms = (long)secs * 1000;
+    o.out_cap = cap > 0 ? (long)cap - 1 : 0;
+    o.merge_err = 1;
+    o.kill_tree = 1;
+    t = px_run(&o, &r);
+    if (t < 0) { px_result_free(&r); return t; }
+    if (out && cap > 0) {
+        long n = r.outn;
+        if (n > (long)cap - 1) n = (long)cap - 1;
+        if (r.out && n > 0) mm_copy(out, (size_t)cap, r.out, n);
+        out[n] = 0;
+    }
+    if (cut && (r.truncated & PX_TRUNC_OUT)) *cut = 1;
+    t = r.code;
+    px_result_free(&r);
+    return t;
 }

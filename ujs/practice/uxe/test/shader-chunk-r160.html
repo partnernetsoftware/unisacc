@@ -24,10 +24,18 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 function drawFixture() {
   const renderer = new WebGLRenderer({ antialias: false, preserveDrawingBuffer: true });
   renderer.setSize(1, 1, false);
+  const gl = renderer.getContext();
+  const shaders = [];
+  const shaderSource = gl.shaderSource.bind(gl);
+  gl.shaderSource = (shader, text) => {
+    shaders.push(text);
+    shaderSource(shader, text);
+  };
   const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   camera.position.z = 1;
   const plane = new PlaneGeometry(2, 2);
   return {
+    shaders,
     draw(shader) {
       const scene = new Scene();
       const material = new RawShaderMaterial({ vertexShader: vertex, fragmentShader: shader });
@@ -114,8 +122,19 @@ async function test() {
       if (record("d" + i, i === 32 ? "X" : "#include <d" + (i + 1) + ">") !== i) throw Error("depth registration " + i);
     }
     const depthLimit = expand("#include <d0>") === -5 && diagnostic(-5, "d32") && view.getUint32(scratch + 12, true) === 32;
+    const loopBody = "\\nv += weights[ i ] + float(UNROLLED_LOOP_INDEX) / 16.0;\\n".replaceAll("\\n", "\n");
+    const loop = "#pragma unroll_loop_start\nfor ( int i = 1; i < 3; i ++ ) {" + loopBody + "}\n#pragma unroll_loop_end";
+    const loopExpected = "\nv += weights[ 1 ] + float(1) / 16.0;\n\nv += weights[ 2 ] + float(2) / 16.0;\n";
+    const loopPrefix = start + "float weights[3]; weights[1]=0.125; weights[2]=0.125;\n";
+    draw.draw(loopPrefix + loop + finish);
+    const referenceLoop = draw.shaders.some(shader => shader.includes(loopExpected));
+    const wasmLoop = query.get("mutateLoop") === "1" ? loop.replace("i < 3", "i < 2") : loop;
+    const n = call(4, dst, 1400, src, put(src, wasmLoop));
+    const exactLoop = n >= 0 && decoder.decode(mem.slice(dst, dst + n)) === loopExpected;
+    mem[dst] = 91;
+    const shortLoop = call(4, dst, 3, src, put(src, loop)) < 0 && mem[dst] === 91;
     return [...reference, rMissing, rCycle, ...pixel, sameText, clean, absent, cycle, noRoom, unchanged,
-      empty, originalSyntax, replacedKey, capacity, invalid, depthLimit].map(Number);
+      empty, originalSyntax, replacedKey, capacity, invalid, depthLimit, referenceLoop, exactLoop, shortLoop].map(Number);
   } finally {
     draw.dispose();
     for (const [name] of fixtures) delete ShaderChunk[name];

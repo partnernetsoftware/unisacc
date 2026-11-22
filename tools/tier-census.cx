@@ -1,0 +1,403 @@
+/* tools/tier-census.cx -- classify recently added top-level tools/*.cx into 4 tiers by code/reference evidence.
+ *
+ *   sh ./unisacc.com tools/tier-census.cx -- [--since DAYS] [--root DIR] [--list FILE] [--out TSV]
+ *
+ * Tiers:
+ *   tier1_chain   chain/library tools referenced by other tools/, tests/batches.tsv, tests/*.tsv, devsvc, or paired check
+ *   tier2_gen     table generators (genkit or --check+--write) and their companion checks (calls *-gen.cx)
+ *   domain_check  check-*.cx testing non-tools/ targets (ext/, cx/, ujs/, src/, include/, exec/) without calling tools/*.cx
+ *   tier3_oneshot one-shot scripts with no reference in tools/, tests/*.tsv, devsvc, and no paired check-*.cx
+ *
+ * Every classification records confidence=EVIDENCE (code/reference proof) or INFERRED (filename fallback only).
+ * Ends with TIER_CENSUS_SUMMARY. rc 0 ok, 2 usage/IO error. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use cxlib.procrun
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define TC_MAXF 4096
+#define TC_MAXC 2048
+
+static const char *tc_root = ".";
+static char *tc_frel[TC_MAXF];
+static char *tc_fbuf[TC_MAXF];
+static long tc_flen[TC_MAXF];
+static int tc_fdevsvc[TC_MAXF];
+static int tc_nf;
+
+static char tc_cpath[TC_MAXC][256];
+static char tc_cdate[TC_MAXC][32];
+static unsigned char tc_in_batches[TC_MAXC];
+static unsigned char tc_in_othtsv[TC_MAXC];
+static unsigned char tc_in_devsvc[TC_MAXC];
+static unsigned char tc_in_tools[TC_MAXC];
+static int tc_nc;
+static int tc_absent;
+
+static char *tc_batches_buf;
+static long tc_batches_len;
+static char *tc_othtsv_buf;
+static long tc_othtsv_len;
+
+static int tc_has(const char *b, long n, const char *s) {
+    long sn = tx_len(s, 256), i;
+    char s0;
+    if (!b || !s || sn <= 0 || sn > n) return 0;
+    s0 = s[0];
+    for (i = 0; i + sn <= n; i++) if (b[i] == s0 && mm_same(b + i, s, sn)) return 1;
+    return 0;
+}
+
+static int tc_count_lines(const char *b, long n) {
+    long i; int ln = 0;
+    if (!b || n <= 0) return 0;
+    for (i = 0; i < n; i++) if (b[i] == '\n') ln++;
+    if (b[n - 1] != '\n') ln++;
+    return ln;
+}
+
+static void tc_load_dir(const char *rel) {
+    sy_dir_t d; char dir[1200];
+    if (cx_fmt(dir, sizeof dir, "%s/%s", tc_root, rel) || sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        long l = tx_len(d.name, 512); char r[1200], full[1400];
+        size_t m = 0; char *b;
+        if (l < 4 || !tx_eqz(d.name + l - 3, ".cx") || d.name[0] == '.' || tc_nf >= TC_MAXF) continue;
+        if (cx_fmt(r, sizeof r, "%s/%s", rel, d.name)) continue;
+        if (cx_fmt(full, sizeof full, "%s/%s", tc_root, r)) continue;
+        b = cx_read(full, &m);
+        tc_frel[tc_nf] = mm_alloc(tx_len(r, 1200) + 1);
+        if (!tc_frel[tc_nf]) { if (b) mm_free(b); break; }
+        mm_copy(tc_frel[tc_nf], tx_len(r, 1200) + 1, r, tx_len(r, 1200) + 1);
+        tc_fbuf[tc_nf] = b ? b : (char *)"";
+        tc_flen[tc_nf] = b ? (long)m : 0;
+        tc_fdevsvc[tc_nf] = (l >= 9 && mm_same(d.name, "devsvc", 6)) ? 1 : 0;
+        tc_nf++;
+    }
+    sy_dir_close(&d);
+}
+
+static void tc_load_tests_tsv(void) {
+    char p[1400]; size_t m = 0; sy_dir_t d;
+    long cap = 1L << 20, len = 0;
+    if (!cx_fmt(p, sizeof p, "%s/tests/batches.tsv", tc_root)) {
+        tc_batches_buf = cx_read(p, &m);
+        tc_batches_len = tc_batches_buf ? (long)m : 0;
+    }
+    tc_othtsv_buf = mm_alloc(cap);
+    if (!tc_othtsv_buf) return;
+    if (cx_fmt(p, sizeof p, "%s/tests", tc_root) || sy_dir_open(&d, p)) return;
+    while (sy_dir_next(&d) == 1) {
+        long l = tx_len(d.name, 512); char fp[1500]; char *b; size_t sz = 0;
+        if (l < 5 || !tx_eqz(d.name + l - 4, ".tsv") || tx_eqz(d.name, "batches.tsv") ||
+            tx_eqz(d.name, "tools-compile-sources.tsv") || tx_eqz(d.name, "toolsloc.tsv") ||
+            tx_eqz(d.name, "batch-domain-index.tsv") || tx_eqz(d.name, "coverage.tsv")) continue;
+        if (cx_fmt(fp, sizeof fp, "%s/tests/%s", tc_root, d.name)) continue;
+        b = cx_read(fp, &sz);
+        if (!b) continue;
+        if (len + (long)sz + 2 > cap) {
+            long ncap = cap * 2;
+            while (len + (long)sz + 2 > ncap) ncap *= 2;
+            char *nb = mm_alloc(ncap);
+            if (!nb) { mm_free(b); continue; }
+            if (len > 0) mm_copy(nb, ncap, tc_othtsv_buf, len);
+            mm_free(tc_othtsv_buf);
+            tc_othtsv_buf = nb; cap = ncap;
+        }
+        if (sz > 0) { mm_copy(tc_othtsv_buf + len, cap - len, b, (long)sz); len += (long)sz; }
+        tc_othtsv_buf[len++] = '\n';
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    tc_othtsv_len = len;
+}
+
+static void tc_add_cand(const char *path, long pl, const char *date, long dl) {
+    int i; char full[1400];
+    if (pl < 10 || pl >= 256 || !mm_same(path, "tools/", 6) || !mm_same(path + pl - 3, ".cx", 3)) return;
+    for (i = 6; i < (int)pl; i++) if (path[i] == '/') return;   /* top-level tools/*.cx only */
+    for (i = 0; i < tc_nc; i++) {
+        if (tx_len(tc_cpath[i], 256) == pl && mm_same(tc_cpath[i], path, pl)) {
+            /* keep earliest add date when git log walks newest->oldest */
+            if (dl > 0 && dl < 32) { mm_copy(tc_cdate[i], 32, date, dl); tc_cdate[i][dl] = 0; }
+            return;
+        }
+    }
+    if (cx_fmt(full, sizeof full, "%s/%.*s", tc_root, (int)pl, path) || sy_is_reg(full) != 1) {
+        tc_absent++;
+        return;
+    }
+    if (tc_nc >= TC_MAXC) return;
+    mm_copy(tc_cpath[tc_nc], 256, path, pl); tc_cpath[tc_nc][pl] = 0;
+    if (dl > 0 && dl < 32) { mm_copy(tc_cdate[tc_nc], 32, date, dl); tc_cdate[tc_nc][dl] = 0; }
+    else { mm_copy(tc_cdate[tc_nc], 32, "-", 2); }
+    tc_nc++;
+}
+
+static int tc_load_list_file(const char *lpath) {
+    size_t m = 0; char *b = cx_read(lpath, &m); long at = 0;
+    if (!b) return -1;
+    while (at < (long)m) {
+        long e = tx_chr(b + at, (long)m - at, '\n'), ln = e < 0 ? (long)m - at : e;
+        long o0, l0, o1, l1;
+        if (ln > 0 && b[at] != '#' && !tx_field(b + at, ln, '\t', 0, &o0, &l0)) {
+            if (!tx_field(b + at, ln, '\t', 1, &o1, &l1)) tc_add_cand(b + at + o0, l0, b + at + o1, l1);
+            else tc_add_cand(b + at + o0, l0, "-", 1);
+        }
+        at += ln + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int tc_load_git(int days) {
+    char since[64];
+    char *out = mm_alloc(1L << 20);
+    int cut = 0, rc;
+    char *av[12];
+    long at = 0, n;
+    char cur_date[32];
+    if (!out || cx_fmt(since, sizeof since, "--since=%d days ago", days)) return -1;
+    av[0] = "git"; av[1] = "-C"; av[2] = (char *)tc_root; av[3] = "log";
+    av[4] = since; av[5] = "--diff-filter=A"; av[6] = "--format=COMMIT\t%cs";
+    av[7] = "--name-only"; av[8] = "--"; av[9] = "tools/*.cx"; av[10] = 0;
+    rc = pr_run_merged(av, 30, out, 1 << 20, &cut);
+    if (rc != 0) { mm_free(out); return -1; }
+    n = tx_len(out, 1L << 20);
+    mm_copy(cur_date, 32, "-", 2);
+    while (at < n) {
+        long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 7 && mm_same(out + at, "COMMIT\t", 7)) {
+            long dl = ln - 7; if (dl >= 32) dl = 31;
+            mm_copy(cur_date, 32, out + at + 7, dl); cur_date[dl] = 0;
+        } else if (ln > 0) {
+            tc_add_cand(out + at, ln, cur_date, tx_len(cur_date, 32));
+        }
+        at += ln + 1;
+    }
+    mm_free(out);
+    return 0;
+}
+
+static int tc_find_file(const char *rel) {
+    int i;
+    for (i = 0; i < tc_nf; i++) if (tx_eqz(tc_frel[i], rel)) return i;
+    return -1;
+}
+
+static int tc_uses_domain_mod(const char *b, long n) {
+    static const char *mods[] = {
+        "use core.", "use runtime.", "use compiler.", "use driver.", "use stream.", "use path.", "use os.", "use cx0.",
+        "use sysx.", "use crypto.", "use tsvx.", "use testx.", "use textx.", "use sqlite.", "use net.", "use fsx.",
+        "use uxe.", "use ujs.", "use sys.random", "use sys.rlimit", "use sys.rusage", "use sys.waitset",
+        "use sys.syscall", "use sys.ids", "use sys.stat", 0
+    };
+    int k;
+    for (k = 0; mods[k]; k++) if (tc_has(b, n, mods[k])) return 1;
+    return 0;
+}
+
+static int tc_refs_non_tool_path(const char *b, long n) {
+    static const char *paths[] = {"\"ext/", "\"cx/", "\"ujs/", "\"src/", "\"include/", "\"exec/", 0};
+    int k;
+    for (k = 0; paths[k]; k++) if (tc_has(b, n, paths[k])) return 1;
+    return 0;
+}
+
+static int tc_calls_other_tool(const char *b, long n, const char *self_rel) {
+    long i = 0, sl = tx_len(self_rel, 256);
+    while (i + 10 < n) {
+        if (b[i] == '"' && mm_same(b + i + 1, "tools/", 6)) {
+            long s = i + 1, e = s;
+            while (e < n && b[e] != '"' && b[e] != '\n') e++;
+            if (e - s >= 10 && mm_same(b + e - 3, ".cx", 3)) {
+                if (!(e - s == sl && mm_same(b + s, self_rel, sl))) return 1;
+            }
+            i = e + 1;
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
+static int tc_has_domain_prefix(const char *base) {
+    static const char *pre[] = {
+        "check-ext-", "check-l0-", "check-textx-", "check-uxe-", "check-ujs-",
+        "check-crypto-", "check-tsvx-", "check-cx-", "check-sqlite-", "check-net-", "check-fsx-", 0
+    };
+    int k;
+    for (k = 0; pre[k]; k++) {
+        long pl = tx_len(pre[k], 64);
+        if (mm_same(base, pre[k], pl)) return 1;
+    }
+    return 0;
+}
+
+static int tc_find_cand(const char *rel, long rl) {
+    int lo = 0, hi = tc_nc;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int c = tx_cmp(tc_cpath[mid], tx_len(tc_cpath[mid], 256), rel, rl);
+        if (c < 0) lo = mid + 1;
+        else if (c > 0) hi = mid;
+        else return mid;
+    }
+    return -1;
+}
+
+static void tc_scan_refs(const char *b, long n, const char *skip_rel, unsigned char *flags) {
+    long i = 0;
+    if (!b || n < 10) return;
+    while (i + 9 < n) {
+        if (b[i] == 't' && mm_same(b + i, "tools/", 6)) {
+            long e = i + 6;
+            while (e < n && ((b[e] >= 'a' && b[e] <= 'z') || (b[e] >= 'A' && b[e] <= 'Z') ||
+                             (b[e] >= '0' && b[e] <= '9') || b[e] == '_' || b[e] == '-' || b[e] == '.')) e++;
+            if (e - i >= 10 && mm_same(b + e - 3, ".cx", 3)) {
+                int ci = tc_find_cand(b + i, e - i);
+                if (ci >= 0 && (!skip_rel || !tx_eqz(tc_cpath[ci], skip_rel))) flags[ci] = 1;
+            }
+            i = e;
+        } else {
+            i++;
+        }
+    }
+}
+
+static void tc_sort_cands(void) {
+    int i, j;
+    for (i = 1; i < tc_nc; i++) {
+        char tp[256], td[32];
+        mm_copy(tp, 256, tc_cpath[i], 256);
+        mm_copy(td, 32, tc_cdate[i], 32);
+        for (j = i; j > 0 && tx_cmp(tc_cpath[j - 1], tx_len(tc_cpath[j - 1], 256), tp, tx_len(tp, 256)) > 0; j--) {
+            mm_copy(tc_cpath[j], 256, tc_cpath[j - 1], 256);
+            mm_copy(tc_cdate[j], 32, tc_cdate[j - 1], 32);
+        }
+        mm_copy(tc_cpath[j], 256, tp, 256);
+        mm_copy(tc_cdate[j], 32, td, 32);
+    }
+}
+
+int main(int argc, char **argv) {
+    int days = 7, a, i;
+    const char *list_file = 0, *out_path = 0;
+    long t_cnt[4] = {0, 0, 0, 0}, t_lines[4] = {0, 0, 0, 0};
+    long n_inferred = 0, t2_checks = 0, t2_replaceable = 0, t1_standalone_checks = 0, tot_lines = 0;
+    long ocap = 1L << 19, olen = 0;
+    char *obuf = mm_alloc(ocap);
+
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--since") && a + 1 < argc) { days = (int)strtol(argv[++a], 0, 10); }
+        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) tc_root = argv[++a];
+        else if (tx_eqz(argv[a], "--list") && a + 1 < argc) list_file = argv[++a];
+        else if (tx_eqz(argv[a], "--out") && a + 1 < argc) out_path = argv[++a];
+        else { fprintf(stderr, "usage: tools/tier-census.cx [--since DAYS] [--root DIR] [--list FILE] [--out TSV]\n"); return 2; }
+    }
+    if (!obuf || days < 1) return 2;
+    tc_load_dir("tools");
+    tc_load_dir("tools/cxlib");
+    tc_load_tests_tsv();
+    if (list_file) { if (tc_load_list_file(list_file)) { fprintf(stderr, "tier-census: cannot read %s\n", list_file); return 2; } }
+    else { if (tc_load_git(days)) { fprintf(stderr, "tier-census: git log failed\n"); return 2; } }
+    tc_sort_cands();
+    tc_scan_refs(tc_batches_buf, tc_batches_len, 0, tc_in_batches);
+    tc_scan_refs(tc_othtsv_buf, tc_othtsv_len, 0, tc_in_othtsv);
+    for (i = 0; i < tc_nf; i++) {
+        tc_scan_refs(tc_fbuf[i], tc_flen[i], tc_frel[i], tc_fdevsvc[i] ? tc_in_devsvc : tc_in_tools);
+    }
+
+    {
+        const char *hdr = "path\tadd_date\tlines\ttier\tconfidence\tbasis\n";
+        long hl = tx_len(hdr, 128);
+        mm_copy(obuf, ocap, hdr, hl); olen = hl;
+    }
+
+    for (i = 0; i < tc_nc; i++) {
+        const char *rel = tc_cpath[i], *base = rel + 6;
+        long bl = tx_len(base, 256);
+        int fi = tc_find_file(rel);
+        const char *b = fi >= 0 ? tc_fbuf[fi] : "";
+        long bn = fi >= 0 ? tc_flen[fi] : 0;
+        int lines = tc_count_lines(b, bn);
+        int is_check = (bl > 6 && mm_same(base, "check-", 6));
+        int has_gen_name = (bl >= 7 && mm_same(base + bl - 7, "-gen.cx", 7));
+        int uses_genkit = tc_has(b, bn, "cxlib.genkit");
+        int has_cw = tc_has(b, bn, "\"--check\"") && tc_has(b, bn, "\"--write\"");
+        int calls_gen = tc_has(b, bn, "-gen.cx\"");
+        int calls_oth_tool = tc_calls_other_tool(b, bn, rel);
+        int uses_dom_mod = tc_uses_domain_mod(b, bn);
+        int refs_non_tool = tc_refs_non_tool_path(b, bn);
+        int has_dom_pre = is_check && tc_has_domain_prefix(base);
+        int in_batches = tc_in_batches[i];
+        int in_oth_tsv = tc_in_othtsv[i];
+        int in_devsvc = tc_in_devsvc[i];
+        int in_tools = tc_in_tools[i];
+        int has_paired = 0;
+        int tier = 3; /* 0=tier1_chain, 1=tier2_gen, 2=domain_check, 3=tier3_oneshot */
+        const char *conf = "EVIDENCE";
+        const char *basis = "no-ref-no-batch-no-check";
+        char line[512]; long ll;
+
+        if (!is_check) {
+            char cp[300];
+            if (!cx_fmt(cp, sizeof cp, "tools/check-%s", base) && tc_find_file(cp) >= 0) has_paired = 1;
+        }
+
+        if (!is_check && (uses_genkit || has_cw) && (uses_genkit || has_gen_name || refs_non_tool || tc_has(b, bn, "\"build/"))) {
+            tier = 1; conf = "EVIDENCE"; basis = uses_genkit ? "gen:uses-genkit" : "gen:check-write-table";
+        } else if (is_check && calls_gen) {
+            tier = 1; conf = "EVIDENCE"; basis = "gen-check:calls-gen-cx";
+        } else if (has_gen_name) {
+            tier = 1; conf = "INFERRED"; basis = "name:*-gen.cx";
+        } else if (is_check && !calls_oth_tool && (uses_dom_mod || refs_non_tool)) {
+            tier = 2; conf = "EVIDENCE"; basis = uses_dom_mod ? "domain:non-tool-module-no-tool-call" : "domain:non-tool-path-no-tool-call";
+        } else if (is_check && !calls_oth_tool && has_dom_pre) {
+            tier = 2; conf = "INFERRED"; basis = "name:domain-prefix";
+        } else if (in_devsvc || in_tools || in_batches || in_oth_tsv || has_paired) {
+            tier = 0; conf = "EVIDENCE";
+            if (in_devsvc) basis = "ref:devsvc";
+            else if (in_tools) basis = "ref:tools";
+            else if (in_batches) basis = "ref:tests/batches.tsv";
+            else if (in_oth_tsv) basis = "ref:tests/*.tsv";
+            else basis = "ref:paired-check";
+        } else {
+            tier = 3; conf = "EVIDENCE"; basis = "no-ref-no-batch-no-check";
+        }
+
+        if (tier == 0 && is_check && !calls_oth_tool && !in_devsvc && !in_tools && in_batches) t1_standalone_checks++;
+        if (tier == 1 && is_check) {
+            t2_checks++;
+            if (tc_has(b, bn, "\"--check\"") && lines <= 120 && !tc_has(b, bn, "mutant") && !tc_has(b, bn, "sy_spawn") && !tc_has(b, bn, "race")) {
+                t2_replaceable++;
+            }
+        }
+        if (tx_eqz(conf, "INFERRED")) n_inferred++;
+        t_cnt[tier]++; t_lines[tier] += lines; tot_lines += lines;
+
+        {
+            static const char *tnames[4] = {"tier1_chain", "tier2_gen", "domain_check", "tier3_oneshot"};
+            if (!cx_fmt(line, sizeof line, "%s\t%s\t%d\t%s\t%s\t%s\n", rel, tc_cdate[i], lines, tnames[tier], conf, basis)) {
+                ll = tx_len(line, sizeof line);
+                if (olen + ll + 1 <= ocap) { mm_copy(obuf + olen, ocap - olen, line, ll); olen += ll; }
+            }
+        }
+    }
+
+    if (out_path) {
+        if (cx_write(out_path, obuf, olen)) { fprintf(stderr, "tier-census: cannot write %s\n", out_path); return 2; }
+    } else {
+        fwrite(obuf, 1, (size_t)olen, stdout);
+    }
+
+    printf("TIER_CENSUS_SUMMARY\ttotal=%d\tabsent=%d\ttotal_lines=%ld\ttier1=%ld\ttier1_lines=%ld\ttier2=%ld\ttier2_lines=%ld\tdomain=%ld\tdomain_lines=%ld\ttier3=%ld\ttier3_lines=%ld\tinferred=%ld\ttier3_plus_domain=%ld\tt1_standalone_checks=%ld\tt2_checks=%ld\tt2_replaceable=%ld\n",
+           tc_nc, tc_absent, tot_lines,
+           t_cnt[0], t_lines[0], t_cnt[1], t_lines[1], t_cnt[2], t_lines[2], t_cnt[3], t_lines[3],
+           n_inferred, t_cnt[3] + t_cnt[2], t1_standalone_checks, t2_checks, t2_replaceable);
+    return 0;
+}

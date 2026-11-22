@@ -31,6 +31,8 @@
  * during a merge, push replay loop, flock slots, dead index.lock reclaim, gate reads only the committed paths) must
  * be GREEN on C1..C7; `unfixed` (shared index, mkdir lock, merge refused, plain push, register self-test against
  * HEAD, derive gate on the work tree, gate reading the work tree) must be GREEN on C1 and RED on C2..C7.
+ * C8 (a file with someone else's staged hunk plus my unstaged hunk) is GREEN on `fixed` and on `real`; it is a
+ * deliberate `unfixed` miss, which has no notion of staged vs work-tree bytes.
  * CCC_MUT=cas|merge|push|reclaim breaks one property of `fixed` (mutation proof: the matching case turns red).
  * Prints PASS/FAIL per expectation and CHECK_COMMIT_CONCURRENCY<TAB>failed=N; exit 1 when N > 0, 2 on a fixture
  * error. */
@@ -86,11 +88,16 @@ static const char *FIXED =
     "  [ \"${CCC_MUT:-}\" != merge ] || { echo REFUSE merge-in-progress; exit 1; }\n"
     "  m=$(git diff --name-only HEAD MERGE_HEAD; git ls-files -u | cut -f2)\n"
     "  for p; do if printf '%s\\n' \"$m\" | grep -qxF -- \"$p\"; then echo \"REFUSE path-in-merge $p\"; exit 3; fi; done\nfi\n"
+    "if [ -n \"${CCC_WHOLE:-}\" ]; then\n"
+    "  for p; do h=$(git rev-parse -q --verify \"HEAD:$p\" 2>/dev/null || echo none); i=$(git rev-parse -q --verify \":$p\" 2>/dev/null || echo none)\n"
+    "    [ \"$h\" = \"$i\" ] && continue; [ -f \"$p\" ] || continue; w=$(git hash-object -- \"$p\")\n"
+    "    [ \"$w\" = \"$i\" ] && continue; echo \"REFUSE WHOLE_AMBIGUOUS $p\"; exit 4; done; fi\n"
     "I=\"$G/ccc-idx.$$\"; n=0\n"
     "while :; do n=$((n+1)); [ $n -le 200 ] || { echo REFUSE cas-retries; exit 1; }\n"
     "  old=$(git rev-parse -q --verify HEAD) || exit 2\n"
     "  rm -f \"$I\"; GIT_INDEX_FILE=\"$I\" git read-tree \"$old\" || exit 2\n"
-    "  GIT_INDEX_FILE=\"$I\" git update-index --add -- \"$@\" || exit 2\n"
+    "  if [ -n \"${CCC_STAGED:-}\" ]; then for p; do b=$(git rev-parse -q --verify \":$p\") || { echo \"REFUSE not-staged $p\"; exit 1; }; GIT_INDEX_FILE=\"$I\" git update-index --add --cacheinfo \"100644,$b,$p\" || exit 2; done\n"
+    "  else GIT_INDEX_FILE=\"$I\" git update-index --add -- \"$@\" || exit 2; fi\n"
     "  if [ -n \"${CCC_KEYED:-}\" ]; then f=${CCC_KEYED%%:*}; k=${CCC_KEYED#*:}\n"
     "    { git show \"$old:$f\"; grep \"^$k\t\" \"$f\"; } > \"$I.k\"; b=$(git hash-object -w \"$I.k\")\n"
     "    GIT_INDEX_FILE=\"$I\" git update-index --add --cacheinfo \"100644,$b,$f\"; fi\n"
@@ -130,7 +137,7 @@ static const char *UNFIXED =
 static const char *REAL =
     "set -u\nop=$1; shift\nbr=$(git rev-parse --abbrev-ref HEAD)\n"
     "if [ \"$op\" = push ]; then git push -q origin \"HEAD:$br\" 2>/dev/null || { echo REFUSE non-fast-forward; exit 1; }; exit 0; fi\n"
-    "msg=$1; shift; a=\nfor p; do a=\"$a --whole $p\"; done\n"
+    "msg=$1; shift; a=--whole; [ -z \"${CCC_STAGED:-}\" ] || a=--staged\nfor p; do a=\"$a $p\"; done\n"
     "[ -z \"${CCC_KEYED:-}\" ] || a=\"$a --keyed ${CCC_KEYED%%:*} ${CCC_KEYED#*:}\"\n"
     "[ -z \"${CCC_DERIVED:-}\" ] || a=\"$a --derive\"\n"
     "exec sh ./unisacc.com tools/devsvc.cx -- run --local tools/commit-own.cx -- -m \"$msg\" $a\n";
@@ -189,6 +196,17 @@ static const char *CASES =
     "  inv foreign-not-in-head '[ -z \"$(git ls-tree HEAD zz-ccc-fs.txt)\" ]'\n"
     "  inv unstaged-bytes '[ \"$(cat zz-ccc-u.txt)\" = u2 ] && [ \"$(git diff --name-only)\" = zz-ccc-u.txt ]'\n"
     "  inv untracked-kept '[ \"$(cat zz-ccc-un.txt)\" = un ] && [ \"$(cat tools/zz-ccc-bad.cx)\" = \"BROKEN(\" ] && ! git ls-files --error-unmatch zz-ccc-un.txt && ! git ls-files --error-unmatch tools/zz-ccc-bad.cx';;\n"
+    "C8) printf 'a1\\nb2\\nc3\\nd4\\n' > zz-ccc-shared.txt; git add zz-ccc-shared.txt; git commit -q --no-verify -m c8base -- zz-ccc-shared.txt\n"
+    "  printf 'a1\\nB-OTHER\\nc3\\nd4\\n' > zz-ccc-shared.txt; git add zz-ccc-shared.txt\n"
+    "  printf 'a1\\nB-OTHER\\nc3\\nD-MINE\\n' > zz-ccc-shared.txt; B8=$(git rev-parse HEAD)\n"
+    "  CCC_WHOLE=1 $IM commit c8-whole zz-ccc-shared.txt > \"$W/whole\" 2>&1; wr=$?\n"
+    "  inv whole-refused '[ $wr -ne 0 ] && grep -q WHOLE_AMBIGUOUS \"$W/whole\"'\n"
+    "  inv whole-nothing-committed '[ \"$(git rev-parse HEAD)\" = \"$B8\" ]'\n"
+    "  inv other-seg-still-staged '[ \"$(git show :zz-ccc-shared.txt | sed -n 2p)\" = B-OTHER ]'\n"
+    "  job(){ CCC_STAGED=1 $IM commit c8-staged zz-ccc-shared.txt; }; launch 1\n"
+    "  inv committed-index-segment '[ \"$(git show HEAD:zz-ccc-shared.txt | sed -n 2p)\" = B-OTHER ]'\n"
+    "  inv my-segment-not-committed '[ \"$(git show HEAD:zz-ccc-shared.txt | sed -n 4p)\" = d4 ]'\n"
+    "  inv worktree-bytes-kept '[ \"$(sed -n 4p zz-ccc-shared.txt)\" = D-MINE ] && [ \"$(git diff --name-only)\" = zz-ccc-shared.txt ]';;\n"
     "*) exit 2;;\nesac\nexit 0\n";
 
 static void put(const char *name, const char *text) {
@@ -242,7 +260,7 @@ static int run_case(const char *impl, const char *c, int bound) {
         return green; }
 }
 
-static const char *ALL[] = {"C1", "C2", "C3", "C4", "C5", "C6", "C7", 0};
+static const char *ALL[] = {"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", 0};
 static int want(const char *cases, const char *c) {
     long L, at = 0, k = tx_len(c, 8);
     if (!cases) return 1;

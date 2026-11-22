@@ -92,6 +92,92 @@ int main(void) {
         rc = run_lane(FAR_LANE, "exec/a.tsv A sid\\n", "exec/a.tsv", "", out, sizeof out);
         ck(rc == 1 && has(out, "malformed"), "lane-a-bad-columns-refused");
     }
+    /* (1) 入库过期加工作区有效(不暂存 freeze.tsv,暂存冻结路径):默认隔离、NO_ISOLATE、子目录、.claude/worktrees/v0.0.99 均须拦 */
+    {
+        char cmd[3600];
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git rm -rf -q --cached . >/dev/null 2>&1; rm -rf exec tools ext build .claude && "
+            "mkdir -p exec build && echo x > exec/a.tsv && printf '%s' > build/freeze.tsv && "
+            "git add -A && git commit -qm committed-expired && "
+            "printf '%s' > build/freeze.tsv && echo y > exec/a.tsv && git add exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, PAST, FAR, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "committed-expired-worktree-active-isolated-refused");
+        } else ck(0, "committed-expired-worktree-active-isolated-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && UNISACC_PRECOMMIT_NO_ISOLATE=1 sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "committed-expired-worktree-active-noisolate-refused");
+        } else ck(0, "committed-expired-worktree-active-noisolate-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s/exec' && sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "committed-expired-worktree-active-subdir-refused");
+        } else ck(0, "committed-expired-worktree-active-subdir-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git worktree add -q .claude/worktrees/v0.0.99 -b v0.0.99 && "
+            "cd .claude/worktrees/v0.0.99 && echo z > exec/a.tsv && git add exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "committed-expired-shared-worktree-active-linked-wt-refused");
+        } else ck(0, "committed-expired-shared-worktree-active-linked-wt-refused");
+    }
+    /* (2) 同一提交里暂存改 freeze.tsv 把截止改成过期不能自我解冻(暂存版与工作区/HEAD 以更严者为准) */
+    {
+        char cmd[3600];
+        /* 2a: 工作区有效(FAR), 索引暂存过期(PAST) + 暂存冻结路径 exec/a.tsv -> 必须拦 */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf '%s' > build/freeze.tsv && echo s1 > exec/a.tsv && "
+            "git add build/freeze.tsv exec/a.tsv && printf '%s' > build/freeze.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, PAST, FAR, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "staged-expired-worktree-active-self-unfreeze-refused");
+        } else ck(0, "staged-expired-worktree-active-self-unfreeze-refused");
+        /* 2b: HEAD 入库有效(FAR), 同一提交把工作区和暂存区 freeze.tsv 均改为过期(PAST)并同批暂存 exec/a.tsv -> 必须拦 */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && printf '%s' > build/freeze.tsv && git add build/freeze.tsv && git commit -qm head-active && "
+            "printf '%s' > build/freeze.tsv && echo s2 > exec/a.tsv && git add build/freeze.tsv exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, FAR, PAST, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "head-active-staged-expired-same-commit-self-unfreeze-refused");
+        } else ck(0, "head-active-staged-expired-same-commit-self-unfreeze-refused");
+        /* 2c: HEAD 入库有效(FAR), 同一提交 git rm build/freeze.tsv 并同批暂存 exec/a.tsv -> 默认隔离与 NO_ISOLATE 均必须拦 */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- build/freeze.tsv && "
+            "git rm -qf build/freeze.tsv && echo s3 > exec/a.tsv && git add exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "staged-delete-freeze-tsv-isolated-refused");
+        } else ck(0, "staged-delete-freeze-tsv-isolated-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && UNISACC_PRECOMMIT_NO_ISOLATE=1 sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "staged-delete-freeze-tsv-noisolate-refused");
+        } else ck(0, "staged-delete-freeze-tsv-noisolate-refused");
+        /* 2d: HEAD 入库有效(FAR), 同一提交 git mv build/freeze.tsv build/freeze.tsv.bak 并同批暂存 exec/a.tsv -> 默认隔离与 NO_ISOLATE 均必须拦 */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- build/freeze.tsv && "
+            "git mv build/freeze.tsv build/freeze.tsv.bak && echo s4 > exec/a.tsv && git add exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "staged-rename-freeze-tsv-isolated-refused");
+        } else ck(0, "staged-rename-freeze-tsv-isolated-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && UNISACC_PRECOMMIT_NO_ISOLATE=1 sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中"), "staged-rename-freeze-tsv-noisolate-refused");
+        } else ck(0, "staged-rename-freeze-tsv-noisolate-refused");
+    }
     {   char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
     sy_printf("CHECK_PRECOMMIT_FREEZE\tfailed=%d\n", failed);
     return failed ? 1 : 0;

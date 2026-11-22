@@ -1,0 +1,615 @@
+/* tools/premerge-union.cx -- 冻结前并集树只读预合并检查:归档 base(main) 到私有目录,叠加版本分支独有文件,按并集/分支侧/三方合并处理两侧共改文件,实跑生成器 --check、derive --check 与 check-derive。
+ *
+ *   sh ./unisacc.com tools/premerge-union.cx -- [--repo DIR] [--base REF] [--branch REF] [--dir DIR] [--keep] [--shard all|prep|derive-a|derive-b|check-derive] [--mutate-drift RELPATH]
+ *
+ * 输出:
+ *   PREMERGE_UNION_TREE<TAB>base=...<TAB>branch=...<TAB>merge_base=...<TAB>branch_only=N<TAB>both=M<TAB>ms=T
+ *   PREMERGE_FILE<TAB>path<TAB>OK|CONFLICT<TAB>rule=identical|branch-side|tsv-union|auto-3way
+ *   PREMERGE_GEN<TAB>name<TAB>OK|DRIFT|REFUSED<TAB>ms<TAB>detail
+ *   DERIVE<TAB>name<TAB>OK|DRIFT|REFUSED|TIMEOUT<TAB>ms...
+ *   PREMERGE_CHECK_DERIVE<TAB>OK|FAIL<TAB>ms<TAB>detail
+ *   PREMERGE_UNION_SUMMARY<TAB>verdict=PASS|FAIL<TAB>conflict=C<TAB>gen_fail=G<TAB>derive_drift=D<TAB>derive_refused=R<TAB>check_derive_fail=K<TAB>ms=T
+ * 退出码: 0 全绿; 1 合并冲突、生成器漂移或 check-derive 失败; 2 参数或环境错误。
+ * Check: tools/check-premerge-union.cx. */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.sessionroot
+
+#define MAX_CHG 1024
+#define MAX_LINES 16384
+
+static char base_files[MAX_CHG][320];
+static int n_base_files;
+static char br_files[MAX_CHG][320];
+static int n_br_files;
+
+static int streq(const char *a, const char *b) {
+    return a && b && tx_eqz(a, b);
+}
+
+static int starts_with(const char *s, const char *pre) {
+    long sl = (long)tx_len(s, 4096), pl = (long)tx_len(pre, 512);
+    return sl >= pl && mm_same(s, pre, (size_t)pl);
+}
+
+static void trim_nl(char *s) {
+    long n = (long)tx_len(s, 4096);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        s[--n] = 0;
+    }
+}
+
+static void last_nonempty_line(const char *out, long n, char *dst, size_t cap) {
+    long e = n, s;
+    dst[0] = 0;
+    if (!out || n <= 0) return;
+    while (e > 0 && (out[e - 1] == '\n' || out[e - 1] == '\r' || out[e - 1] == ' ')) e--;
+    s = e;
+    while (s > 0 && out[s - 1] != '\n') s--;
+    long len = e - s;
+    if (len >= (long)cap) len = (long)cap - 1;
+    if (len > 0) {
+        mm_copy(dst, cap, out + s, (size_t)len);
+        for (long i = 0; i < len; i++) if (dst[i] == '\t') dst[i] = ' ';
+    }
+    dst[len > 0 ? len : 0] = 0;
+}
+
+static int run_sh(const char *cmd, int timeout_s, char **out_p, size_t *n_p) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    return cx_runv_timeout(v, timeout_s, out_p, n_p);
+}
+
+static int detect_active_branch(const char *repo, char *br, size_t cap) {
+    char p[1024]; size_t n = 0;
+    if (cx_fmt(p, sizeof p, "%s/build/version-seq.tsv", repo)) return 1;
+    char *b = (char *)cx_read(p, &n);
+    if (!b) return 1;
+    long at = 0;
+    int found = 0;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        long ln = e < 0 ? (long)n - at : e;
+        const char *l = b + at;
+        if (ln > 0 && l[0] != '#') {
+            /* slot<TAB>version<TAB>class<TAB>state<TAB>note */
+            long t1 = tx_chr(l, ln, '\t');
+            if (t1 > 0 && t1 + 1 < ln) {
+                const char *v = l + t1 + 1;
+                long rem = ln - t1 - 1;
+                long t2 = tx_chr(v, rem, '\t');
+                if (t2 > 0 && starts_with(v, "0.0.")) {
+                    /* check if state is NOT 已公开 (\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80) */
+                    if (tx_find(l, ln, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9) < 0) {
+                        char cand[64], cmd[1024], *o = 0; size_t on = 0;
+                        if (!cx_fmt(cand, sizeof cand, "v%.*s", (int)t2, v) &&
+                            !cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --verify '%s^{commit}' >/dev/null 2>&1", repo, cand) &&
+                            run_sh(cmd, 10, &o, &on) == 0) {
+                            cx_fmt(br, cap, "%s", cand);
+                            found = 1;
+                            if (o) mm_free(o);
+                            break;
+                        }
+                        if (o) mm_free(o);
+                    }
+                }
+            }
+        }
+        at += (e < 0 ? (long)n - at : e + 1);
+    }
+    mm_free(b);
+    return found ? 0 : 1;
+}
+
+static int load_diff_list(const char *repo, const char *a, const char *b, char arr[MAX_CHG][320], int *cnt) {
+    char cmd[1024], *out = 0; size_t n = 0;
+    *cnt = 0;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' diff --name-only '%s' '%s'", repo, a, b)) return 1;
+    if (run_sh(cmd, 20, &out, &n) != 0 || !out) { if (out) mm_free(out); return 1; }
+    long at = 0;
+    while (at < (long)n && *cnt < MAX_CHG) {
+        long e = tx_chr(out + at, (long)n - at, '\n');
+        long ln = e < 0 ? (long)n - at : e;
+        if (ln > 0 && ln < 319) {
+            mm_copy(arr[*cnt], 320, out + at, (size_t)ln);
+            arr[*cnt][ln] = 0;
+            (*cnt)++;
+        }
+        at += (e < 0 ? (long)n - at : e + 1);
+    }
+    mm_free(out);
+    return 0;
+}
+
+static int in_list(const char *path, char arr[MAX_CHG][320], int cnt) {
+    for (int i = 0; i < cnt; i++) if (streq(path, arr[i])) return 1;
+    return 0;
+}
+
+/* Deduplicate identical lines (or by col-1 key when dedup_key==1) while keeping order;
+ * when a key appears more than once (e.g. updated coverage row), the LAST occurrence's text
+ * replaces the FIRST occurrence in place so in-place updates from branch win without duplicating keys. */
+static int dedup_tsv_file(const char *path, int dedup_key) {
+    size_t n = 0;
+    char *b = (char *)cx_read(path, &n);
+    if (!b) return 1;
+    static char *lines[MAX_LINES];
+    static long lens[MAX_LINES];
+    static int dead[MAX_LINES];
+    int nl = 0;
+    long at = 0;
+    while (at < (long)n && nl < MAX_LINES) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        long ln = e < 0 ? (long)n - at : e;
+        lines[nl] = b + at;
+        lens[nl] = ln;
+        dead[nl] = 0;
+        nl++;
+        at += (e < 0 ? (long)n - at : e + 1);
+    }
+    for (int i = 0; i < nl; i++) {
+        if (dead[i] || lens[i] == 0) continue;
+        const char *li = lines[i]; long lni = lens[i];
+        long ki = dedup_key ? tx_chr(li, lni, '\t') : -1;
+        if (li[0] == '#') ki = -1;
+        for (int j = i + 1; j < nl; j++) {
+            if (dead[j] || lens[j] == 0) continue;
+            const char *lj = lines[j]; long lnj = lens[j];
+            if (lni == lnj && mm_same(li, lj, (size_t)lni)) {
+                dead[j] = 1;
+            } else if (ki > 0 && lj[0] != '#') {
+                long kj = tx_chr(lj, lnj, '\t');
+                if (kj == ki && mm_same(li, lj, (size_t)ki)) {
+                    /* Replace first occurrence with updated line, mark second dead */
+                    lines[i] = lines[j];
+                    lens[i] = lens[j];
+                    li = lines[i]; lni = lens[i];
+                    dead[j] = 1;
+                }
+            }
+        }
+    }
+    char *out = (char *)mm_alloc(n + 16);
+    if (!out) { mm_free(b); return 1; }
+    long pos = 0;
+    for (int i = 0; i < nl; i++) {
+        if (dead[i]) continue;
+        mm_copy(out + pos, n + 16 - (size_t)pos, lines[i], (size_t)lens[i]);
+        pos += lens[i];
+        out[pos++] = '\n';
+    }
+    int rc = sy_write_atomic(path, out, (int64_t)pos, 0644);
+    mm_free(out);
+    mm_free(b);
+    return rc;
+}
+
+static int merge_one_both(const char *repo, const char *dir, const char *base_sha, const char *mb_sha, const char *br_sha, const char *rel, char *rule_out, size_t rcap) {
+    char cmd[2048], dst[1024], tmp_anc[1024], tmp_br[1024], *o = 0; size_t on = 0;
+    if (cx_fmt(dst, sizeof dst, "%s/%s", dir, rel) ||
+        cx_fmt(tmp_anc, sizeof tmp_anc, "%s/.merge-anc", dir) ||
+        cx_fmt(tmp_br, sizeof tmp_br, "%s/.merge-br", dir)) return 1;
+
+    /* 1. Identical between base and branch? */
+    if (!cx_fmt(cmd, sizeof cmd, "git -C '%s' diff --quiet '%s' '%s' -- '%s'", repo, base_sha, br_sha, rel) &&
+        run_sh(cmd, 15, &o, &on) == 0) {
+        if (o) mm_free(o);
+        cx_fmt(rule_out, rcap, "identical");
+        return 0;
+    }
+    if (o) { mm_free(o); o = 0; }
+
+    /* 2. plans/v0.0.*.md -> take branch side */
+    if (starts_with(rel, "plans/v0.0.")) {
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' show '%s:%s' > '%s'", repo, br_sha, rel, dst)) return 1;
+        if (run_sh(cmd, 15, &o, &on) != 0) { if (o) mm_free(o); return 1; }
+        if (o) mm_free(o);
+        cx_fmt(rule_out, rcap, "branch-side");
+        return 0;
+    }
+
+    /* Extract ancestor (or empty if file was added after merge-base) and branch version */
+    if (cx_fmt(cmd, sizeof cmd,
+               "git -C '%s' show '%s:%s' > '%s' 2>/dev/null || : > '%s'; "
+               "git -C '%s' show '%s:%s' > '%s'",
+               repo, mb_sha, rel, tmp_anc, tmp_anc,
+               repo, br_sha, rel, tmp_br)) return 1;
+    if (run_sh(cmd, 15, &o, &on) != 0) { if (o) mm_free(o); return 1; }
+    if (o) { mm_free(o); o = 0; }
+
+    /* 3. TSV union tables: tests/batches.tsv, tests/coverage.tsv, build/links.tsv, exec/facts/derive-weights.tsv */
+    int is_union_tsv = streq(rel, "tests/batches.tsv") || streq(rel, "tests/coverage.tsv") ||
+                       streq(rel, "build/links.tsv") || streq(rel, "exec/facts/derive-weights.tsv");
+    if (is_union_tsv) {
+        int dedup_key = streq(rel, "tests/batches.tsv") || streq(rel, "tests/coverage.tsv") ||
+                        streq(rel, "exec/facts/derive-weights.tsv");
+        /* When anc is empty (both sides added the file, e.g. derive-weights.tsv), put branch first so branch order leads */
+        sy_stat_t st;
+        if (sy_stat(tmp_anc, &st) == 0 && st.size == 0 && streq(rel, "exec/facts/derive-weights.tsv")) {
+            if (cx_fmt(cmd, sizeof cmd, "git merge-file -q --union '%s' '%s' '%s' && cp '%s' '%s'",
+                       tmp_br, tmp_anc, dst, tmp_br, dst)) return 1;
+        } else {
+            if (cx_fmt(cmd, sizeof cmd, "git merge-file -q --union '%s' '%s' '%s'", dst, tmp_anc, tmp_br)) return 1;
+        }
+        int mrc = run_sh(cmd, 15, &o, &on);
+        if (o) { mm_free(o); o = 0; }
+        (void)sy_unlink(tmp_anc); (void)sy_unlink(tmp_br);
+        if (mrc != 0) return 1;
+        if (dedup_tsv_file(dst, dedup_key) != 0) return 1;
+        cx_fmt(rule_out, rcap, "tsv-union");
+        return 0;
+    }
+
+    /* 4. Remaining files: automatic 3-way merge (fails on conflict) */
+    if (cx_fmt(cmd, sizeof cmd, "git merge-file -q '%s' '%s' '%s'", dst, tmp_anc, tmp_br)) return 1;
+    int mrc = run_sh(cmd, 15, &o, &on);
+    if (o) { mm_free(o); o = 0; }
+    (void)sy_unlink(tmp_anc); (void)sy_unlink(tmp_br);
+    cx_fmt(rule_out, rcap, "auto-3way");
+    return mrc == 0 ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    const char *repo_arg = ".", *base_ref = "main", *br_ref = 0, *dir_arg = 0, *shard = "all", *mutate = 0;
+    int keep = 0;
+    long T0 = sy_now_ms();
+    for (int i = 1; i < argc; i++) {
+        if (streq(argv[i], "--repo") && i + 1 < argc) repo_arg = argv[++i];
+        else if (streq(argv[i], "--base") && i + 1 < argc) base_ref = argv[++i];
+        else if (streq(argv[i], "--branch") && i + 1 < argc) br_ref = argv[++i];
+        else if (streq(argv[i], "--dir") && i + 1 < argc) dir_arg = argv[++i];
+        else if (streq(argv[i], "--keep")) keep = 1;
+        else if (streq(argv[i], "--shard") && i + 1 < argc) shard = argv[++i];
+        else if (streq(argv[i], "--mutate-drift") && i + 1 < argc) mutate = argv[++i];
+        else {
+            sy_eprintf("usage: premerge-union.cx -- [--repo DIR] [--base REF] [--branch REF] [--dir DIR] [--keep] [--shard all|derive|check-derive|prep|derive-a|derive-b|derive-c] [--mutate-drift RELPATH]\n");
+            return 2;
+        }
+    }
+    if (!streq(shard, "all") && !streq(shard, "derive") && !streq(shard, "check-derive") &&
+        !streq(shard, "prep") && !streq(shard, "derive-a") && !streq(shard, "derive-b") && !streq(shard, "derive-c")) {
+        sy_eprintf("premerge-union: invalid --shard %s\n", shard);
+        return 2;
+    }
+
+    char repo[1024], auto_br[64];
+    if (sy_realpath(repo_arg, repo, sizeof repo) < 0) {
+        sy_eprintf("premerge-union: bad --repo %s\n", repo_arg);
+        return 2;
+    }
+    if (!br_ref || !br_ref[0]) {
+        if (detect_active_branch(repo, auto_br, sizeof auto_br) == 0) br_ref = auto_br;
+        else br_ref = "HEAD";
+    }
+
+    char cmd[2048], base_sha[80], br_sha[80], mb_sha[80], *o = 0; size_t on = 0;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --verify '%s^{commit}'", repo, base_ref) ||
+        run_sh(cmd, 10, &o, &on) != 0 || !o) {
+        if (o) mm_free(o);
+        sy_eprintf("premerge-union: cannot resolve base %s\n", base_ref);
+        return 2;
+    }
+    mm_copy(base_sha, sizeof base_sha, o, on < 79 ? on : 79); base_sha[on < 79 ? on : 79] = 0; trim_nl(base_sha);
+    mm_free(o); o = 0;
+
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --verify '%s^{commit}'", repo, br_ref) ||
+        run_sh(cmd, 10, &o, &on) != 0 || !o) {
+        if (o) mm_free(o);
+        sy_eprintf("premerge-union: cannot resolve branch %s\n", br_ref);
+        return 2;
+    }
+    mm_copy(br_sha, sizeof br_sha, o, on < 79 ? on : 79); br_sha[on < 79 ? on : 79] = 0; trim_nl(br_sha);
+    mm_free(o); o = 0;
+
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' merge-base '%s' '%s'", repo, base_sha, br_sha) ||
+        run_sh(cmd, 10, &o, &on) != 0 || !o) {
+        if (o) mm_free(o);
+        sy_eprintf("premerge-union: no merge-base between %s and %s\n", base_ref, br_ref);
+        return 2;
+    }
+    mm_copy(mb_sha, sizeof mb_sha, o, on < 79 ? on : 79); mb_sha[on < 79 ? on : 79] = 0; trim_nl(mb_sha);
+    mm_free(o); o = 0;
+
+    char dir[1024], lockdir[1100]; int own_dir = 0;
+    if (dir_arg && dir_arg[0]) {
+        if (sy_mkdir_all(dir_arg, 0700) < 0 || sy_realpath(dir_arg, dir, sizeof dir) < 0) {
+            sy_eprintf("premerge-union: cannot create --dir %s\n", dir_arg);
+            return 2;
+        }
+    } else {
+        char def_dir[1024];
+        if (cx_fmt(def_dir, sizeof def_dir, "%s/unisacc-premerge-union", sy_tmpdir()) ||
+            sy_mkdir_all(def_dir, 0700) < 0 ||
+            sy_realpath(def_dir, dir, sizeof dir) < 0) {
+            sy_eprintf("premerge-union: cannot create default union dir\n");
+            return 2;
+        }
+    }
+    (void)own_dir;
+    if (cx_fmt(lockdir, sizeof lockdir, "%s.lock", dir)) return 2;
+    /* Acquire directory lock so concurrent shards build the union tree once */
+    int have_lock = 0;
+    for (int w = 0; w < 400; w++) {
+        if (sy_mkdir(lockdir, 0700) == 0) { have_lock = 1; break; }
+        sy_sleep_ms(50);
+    }
+
+    char marker[1100], want_stamp[256];
+    cx_fmt(marker, sizeof marker, "%s/.premerge-union-ready", dir);
+    cx_fmt(want_stamp, sizeof want_stamp, "%s\t%s\t%s\n", base_sha, br_sha, (mutate && mutate[0]) ? mutate : "-");
+    int conflict = 0, gen_fail = 0, derive_drift = 0, derive_refused = 0, check_derive_fail = 0;
+
+    size_t st_n = 0;
+    char *cur_stamp = (char *)cx_read(marker, &st_n);
+    int stamp_match = (cur_stamp && (long)st_n == (long)tx_len(want_stamp, sizeof want_stamp) &&
+                       mm_same(cur_stamp, want_stamp, st_n));
+    if (cur_stamp) mm_free(cur_stamp);
+
+    if (!stamp_match) {
+        long t_tree = sy_now_ms();
+        /* Clean existing dir contents before rebuilding */
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s' && mkdir -p '%s'", dir, dir)) {
+            (void)run_sh(cmd, 15, &o, &on);
+            if (o) { mm_free(o); o = 0; }
+        }
+        if (load_diff_list(repo, mb_sha, base_sha, base_files, &n_base_files) ||
+            load_diff_list(repo, mb_sha, br_sha, br_files, &n_br_files)) {
+            if (have_lock) (void)sy_rmdir(lockdir);
+            sy_eprintf("premerge-union: git diff --name-only failed\n");
+            return 2;
+        }
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' archive '%s' | tar -x -C '%s'", repo, base_sha, dir) ||
+            run_sh(cmd, 30, &o, &on) != 0) {
+            if (o) mm_free(o);
+            if (have_lock) (void)sy_rmdir(lockdir);
+            sy_eprintf("premerge-union: git archive base failed\n");
+            return 2;
+        }
+        if (o) { mm_free(o); o = 0; }
+
+        int br_only = 0, both = 0;
+        for (int i = 0; i < n_br_files; i++) {
+            const char *f = br_files[i];
+            if (!in_list(f, base_files, n_base_files)) {
+                br_only++;
+                /* overlay or delete branch-only file */
+                if (cx_fmt(cmd, sizeof cmd,
+                           "if git -C '%s' cat-file -e '%s:%s' 2>/dev/null; then "
+                           "mkdir -p \"$(dirname '%s/%s')\" && git -C '%s' show '%s:%s' > '%s/%s'; "
+                           "else rm -f '%s/%s'; fi",
+                           repo, br_sha, f, dir, f, repo, br_sha, f, dir, f, dir, f) ||
+                    run_sh(cmd, 15, &o, &on) != 0) {
+                    if (o) mm_free(o);
+                    if (have_lock) (void)sy_rmdir(lockdir);
+                    sy_eprintf("premerge-union: overlay %s failed\n", f);
+                    return 2;
+                }
+                if (o) { mm_free(o); o = 0; }
+            } else {
+                both++;
+                char rule[32]; rule[0] = 0;
+                int mrc = merge_one_both(repo, dir, base_sha, mb_sha, br_sha, f, rule, sizeof rule);
+                if (mrc != 0) {
+                    conflict++;
+                    sy_printf("PREMERGE_FILE\t%s\tCONFLICT\trule=%s\n", f, rule[0] ? rule : "auto-3way");
+                } else {
+                    sy_printf("PREMERGE_FILE\t%s\tOK\trule=%s\n", f, rule);
+                }
+            }
+        }
+        /* Initialize git index BEFORE symlinking unisacc.com so git ls-files matches tracked set */
+        char uc_real[1024], uc_src[1100], uc_dst[1100];
+        if (cx_fmt(uc_src, sizeof uc_src, "%s/unisacc.com", repo) ||
+            sy_realpath(uc_src, uc_real, sizeof uc_real) < 0 ||
+            cx_fmt(uc_dst, sizeof uc_dst, "%s/unisacc.com", dir)) {
+            if (have_lock) (void)sy_rmdir(lockdir);
+            sy_eprintf("premerge-union: cannot resolve unisacc.com\n");
+            return 2;
+        }
+        if (cx_fmt(cmd, sizeof cmd,
+                   "cd '%s' && git init -q && git config user.email premerge@local && git config user.name premerge && git add -f -A",
+                   dir) ||
+            run_sh(cmd, 25, &o, &on) != 0) {
+            if (o) mm_free(o);
+            if (have_lock) (void)sy_rmdir(lockdir);
+            sy_eprintf("premerge-union: git init/add in union tree failed\n");
+            return 2;
+        }
+        if (o) { mm_free(o); o = 0; }
+        (void)sy_unlink(uc_dst);
+        if (sy_symlink(uc_real, uc_dst) < 0) {
+            if (have_lock) (void)sy_rmdir(lockdir);
+            sy_eprintf("premerge-union: symlink unisacc.com failed\n");
+            return 2;
+        }
+        if (mutate && mutate[0]) {
+            char mp[1100];
+            if (cx_fmt(mp, sizeof mp, "%s/%s", dir, mutate)) {
+                if (have_lock) (void)sy_rmdir(lockdir);
+                return 2;
+            }
+            size_t mn = 0; char *mb = (char *)cx_read(mp, &mn);
+            if (!mb) {
+                if (have_lock) (void)sy_rmdir(lockdir);
+                sy_eprintf("premerge-union: cannot read --mutate-drift %s\n", mutate);
+                return 2;
+            }
+            const char *tag = "\n# premerge-union-synthetic-drift\n";
+            long tl = (long)tx_len(tag, 128);
+            char *nb = (char *)mm_alloc(mn + (size_t)tl + 1);
+            mm_copy(nb, mn + (size_t)tl + 1, mb, mn);
+            mm_copy(nb + mn, (size_t)tl + 1, tag, (size_t)tl);
+            (void)sy_write_atomic(mp, nb, (int64_t)(mn + (size_t)tl), 0644);
+            mm_free(nb); mm_free(mb);
+            sy_printf("PREMERGE_MUTATE\t%s\tinjected=1\n", mutate);
+        }
+        if (conflict == 0) (void)cx_write(marker, want_stamp, tx_len(want_stamp, sizeof want_stamp));
+        sy_printf("PREMERGE_UNION_TREE\tbase=%.10s\tbranch=%.10s\tmerge_base=%.10s\tbranch_only=%d\tboth=%d\tconflict=%d\tms=%ld\n",
+                  base_sha, br_sha, mb_sha, br_only, both, conflict, sy_now_ms() - t_tree);
+    } else {
+        sy_printf("PREMERGE_UNION_TREE\tbase=%.10s\tbranch=%.10s\tmerge_base=%.10s\treused=1\tdir=%s\n",
+                  base_sha, br_sha, mb_sha, dir);
+    }
+    if (have_lock) (void)sy_rmdir(lockdir);
+
+    if (conflict > 0) {
+        sy_printf("PREMERGE_UNION_SUMMARY\tverdict=FAIL\tconflict=%d\tgen_fail=0\tderive_drift=0\tderive_refused=0\tcheck_derive_fail=0\tms=%ld\n",
+                  conflict, sy_now_ms() - T0);
+        if (own_dir && !keep) (void)sy_remove_all(dir);
+        return 1;
+    }
+
+    /* Phase 1 (prep, derive, or all): run individual generator --check on union tree */
+    if (streq(shard, "all") || streq(shard, "derive") || streq(shard, "prep")) {
+        static const char *g_names[] = {
+            "tables-gen",
+            "signal-targets-gen",
+            "cx-flatten",
+            "iface-hash",
+            "st-gap-gen",
+            "libc-decl-scan",
+            "verseq-gen"
+        };
+        static const char *g_cmds[] = {
+            "sh ./unisacc.com tools/tables-gen.cx -- --check",
+            "sh ./unisacc.com tools/signal-targets-gen.cx -- --check",
+            "sh ./unisacc.com tools/cx-flatten.cx -- --check .",
+            "sh ./unisacc.com tools/iface-hash.cx -- --check",
+            "sh ./unisacc.com tools/st-gap-gen.cx -- --check",
+            "sh ./unisacc.com tools/libc-decl-scan.cx -- --check",
+            "sh ./unisacc.com tools/verseq-gen.cx -- --check"
+        };
+        for (int g = 0; g < 7; g++) {
+            long tg = sy_now_ms();
+            char tail[240];
+            if (cx_fmt(cmd, sizeof cmd, "cd '%s' && %s 2>&1", dir, g_cmds[g])) return 2;
+            int grc = run_sh(cmd, 45, &o, &on);
+            last_nonempty_line(o, (long)on, tail, sizeof tail);
+            if (o) { mm_free(o); o = 0; }
+            const char *st = grc == 0 ? "OK" : grc == 1 ? "DRIFT" : "REFUSED";
+            if (grc != 0) gen_fail++;
+            sy_printf("PREMERGE_GEN\t%s\t%s\t%ld\trc=%d\t%s\n", g_names[g], st, sy_now_ms() - tg, grc, tail);
+        }
+    }
+
+    /* When shard=="all", run Phase 2 (derive --check) and Phase 3 (check-derive) concurrently in parallel */
+    if (streq(shard, "all")) {
+        char cmd_d[1200], cmd_c[1200], out_d[1200], out_c[1200];
+        if (cx_fmt(out_d, sizeof out_d, "%s/.out-derive", dir) ||
+            cx_fmt(out_c, sizeof out_c, "%s/.out-check-derive", dir) ||
+            cx_fmt(cmd_d, sizeof cmd_d,
+                   "cd '%s' && ./tools/bound 50 sh ./unisacc.com tools/derive.cx -- --check > '%s' 2>&1; r=$?; "
+                   "cd '%s' && ./tools/bound 50 sh ./unisacc.com tools/check-derive.cx > '%s' 2>&1 & pid_c=$!; "
+                   "exit 0",
+                   dir, out_d, dir, out_c)) return 2;
+        (void)cmd_c;
+        long tc = sy_now_ms();
+        if (cx_fmt(cmd, sizeof cmd,
+                   "(cd '%s' && ./tools/bound 50 sh ./unisacc.com tools/derive.cx -- --check > '%s' 2>&1; printf '%%d\\n' $? > '%s.rc') & p1=$!; "
+                   "(cd '%s' && ./tools/bound 50 sh ./unisacc.com tools/check-derive.cx > '%s' 2>&1; printf '%%d\\n' $? > '%s.rc') & p2=$!; "
+                   "wait $p1; wait $p2",
+                   dir, out_d, out_d, dir, out_c, out_c)) return 2;
+        (void)run_sh(cmd, 54, &o, &on);
+        if (o) { mm_free(o); o = 0; }
+        long elapsed_par = sy_now_ms() - tc;
+        size_t dn = 0, rcn = 0;
+        char *db = (char *)cx_read(out_d, &dn);
+        char rcp[1220]; cx_fmt(rcp, sizeof rcp, "%s.rc", out_d);
+        char *rcb = (char *)cx_read(rcp, &rcn);
+        int drc = rcb ? atoi(rcb) : 2;
+        if (rcb) mm_free(rcb);
+        if (db && dn > 0) {
+            long at = 0;
+            while (at < (long)dn) {
+                long e = tx_chr(db + at, (long)dn - at, '\n');
+                long ln = e < 0 ? (long)dn - at : e;
+                const char *l = db + at;
+                if (tx_prefix(l, ln, "DERIVE\t", 7) || tx_prefix(l, ln, "DERIVE_SUMMARY\t", 15) || tx_prefix(l, ln, "REFUSE\t", 7)) {
+                    sy_printf("%.*s\n", (int)ln, l);
+                    if (tx_prefix(l, ln, "DERIVE\t", 7)) {
+                        if (tx_find(l, ln, "\tDRIFT\t", 7) >= 0) derive_drift++;
+                        else if (tx_find(l, ln, "\tREFUSED\t", 9) >= 0 || tx_find(l, ln, "\tTIMEOUT\t", 9) >= 0) derive_refused++;
+                    }
+                }
+                at += (e < 0 ? (long)dn - at : e + 1);
+            }
+        }
+        if (drc != 0 && derive_drift == 0 && derive_refused == 0) derive_refused++;
+        if (db) mm_free(db);
+        (void)sy_unlink(out_d); (void)sy_unlink(rcp);
+
+        size_t cn = 0;
+        char *cb = (char *)cx_read(out_c, &cn);
+        cx_fmt(rcp, sizeof rcp, "%s.rc", out_c);
+        rcb = (char *)cx_read(rcp, &rcn);
+        int crc = rcb ? atoi(rcb) : 2;
+        if (rcb) mm_free(rcb);
+        char tail[240];
+        last_nonempty_line(cb, (long)cn, tail, sizeof tail);
+        int ok = (crc == 0 && cb && tx_find(cb, (long)cn, "DERIVE_CHECK\t", 13) >= 0 && tx_find(cb, (long)cn, "\tfailed=0", 9) >= 0);
+        if (cb) mm_free(cb);
+        (void)sy_unlink(out_c); (void)sy_unlink(rcp);
+        if (!ok) check_derive_fail++;
+        sy_printf("PREMERGE_CHECK_DERIVE\t%s\t%ld\trc=%d\t%s\n", ok ? "OK" : "FAIL", elapsed_par, crc, tail);
+    }
+
+    /* Phase 2 (derive, derive-a, derive-b, derive-c): run derive.cx -- --check on union tree */
+    if (streq(shard, "derive") || streq(shard, "derive-a") || streq(shard, "derive-b") || streq(shard, "derive-c")) {
+        const char *only_arg = "";
+        if (streq(shard, "derive-a")) {
+            only_arg = " --only tables-gen,signal-targets,cx-flatten,layer-api,iface-hash,st-gap,libc-decls,cx0-three-source,verseq-gen,tool-index,table-index";
+        } else if (streq(shard, "derive-b")) {
+            only_arg = " --only batch-packages-gen,chain-phases,batch-domains,links,doc-links";
+        } else if (streq(shard, "derive-c")) {
+            only_arg = " --only product-map";
+        }
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/derive.cx -- --check%s 2>&1", dir, only_arg)) return 2;
+        int drc = run_sh(cmd, 52, &o, &on);
+        if (o && on > 0) {
+            long at = 0;
+            while (at < (long)on) {
+                long e = tx_chr(o + at, (long)on - at, '\n');
+                long ln = e < 0 ? (long)on - at : e;
+                const char *l = o + at;
+                if (tx_prefix(l, ln, "DERIVE\t", 7) || tx_prefix(l, ln, "DERIVE_SUMMARY\t", 15) || tx_prefix(l, ln, "REFUSE\t", 7)) {
+                    sy_printf("%.*s\n", (int)ln, l);
+                    if (tx_prefix(l, ln, "DERIVE\t", 7)) {
+                        if (tx_find(l, ln, "\tDRIFT\t", 7) >= 0) derive_drift++;
+                        else if (tx_find(l, ln, "\tREFUSED\t", 9) >= 0 || tx_find(l, ln, "\tTIMEOUT\t", 9) >= 0) derive_refused++;
+                    }
+                }
+                at += (e < 0 ? (long)on - at : e + 1);
+            }
+        }
+        if (drc != 0 && derive_drift == 0 && derive_refused == 0) derive_refused++;
+        if (o) { mm_free(o); o = 0; }
+    }
+
+    /* Phase 3 (check-derive): run tools/check-derive.cx on union tree */
+    if (streq(shard, "check-derive")) {
+        long tc = sy_now_ms();
+        char tail[240];
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/check-derive.cx 2>&1", dir)) return 2;
+        int crc = run_sh(cmd, 50, &o, &on);
+        last_nonempty_line(o, (long)on, tail, sizeof tail);
+        int ok = (crc == 0 && o && tx_find(o, (long)on, "DERIVE_CHECK\t", 13) >= 0 && tx_find(o, (long)on, "\tfailed=0", 9) >= 0);
+        if (o) { mm_free(o); o = 0; }
+        if (!ok) check_derive_fail++;
+        sy_printf("PREMERGE_CHECK_DERIVE\t%s\t%ld\trc=%d\t%s\n", ok ? "OK" : "FAIL", sy_now_ms() - tc, crc, tail);
+    }
+
+    int fail = (conflict > 0 || gen_fail > 0 || derive_drift > 0 || derive_refused > 0 || check_derive_fail > 0);
+    sy_printf("PREMERGE_UNION_SUMMARY\tverdict=%s\tshard=%s\tconflict=%d\tgen_fail=%d\tderive_drift=%d\tderive_refused=%d\tcheck_derive_fail=%d\tms=%ld\n",
+              fail ? "FAIL" : "PASS", shard, conflict, gen_fail, derive_drift, derive_refused, check_derive_fail, sy_now_ms() - T0);
+
+    if (own_dir && !keep) (void)sy_remove_all(dir);
+    return fail ? 1 : 0;
+}
