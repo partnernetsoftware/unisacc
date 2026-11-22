@@ -70,6 +70,42 @@ static void segment(const char *out, int i, char *seg, int cap, int *rc) {
     mm_copy(seg, (size_t)cap, s, (size_t)k); seg[k] = 0;
     *rc = e[strlen(mark)] - '0';
 }
+/* 1 when PATH is under a core-path row (prefix match, as handoff-check does) of the profiles text TBL */
+static int covered(const char *tbl, const char *path) {
+    for (const char *p = tbl; p && *p; ) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        if (!strncmp(p, "core-path\t", 10)) {
+            const char *n = p + 10, *t = memchr(n, '\t', (size_t)(e - n));
+            if (t && !strncmp(path, n, (size_t)(t - n))) return 1;
+        }
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+/* every module file listed in tests/cx-module-freeze.tsv must be under a core-path row; the same walk over a table
+ * without the cx/sys/ row must find uncovered files (mutation: dropping a row is seen) */
+static void freeze_coverage(const char *profiles_text) {
+    size_t n; char *fz = cx_read("tests/cx-module-freeze.tsv", &n); int rows = 0, miss = 0, miss_cut = 0;
+    static char cut[65536]; long k = 0;
+    ck(fz != 0, "read-freeze-table");
+    for (const char *p = profiles_text; p && *p; ) {
+        const char *e = strchr(p, '\n'); if (!e) e = p + strlen(p);
+        if (strncmp(p, "core-path\tcx/sys/\t", 18)) k += snprintf(cut + k, sizeof cut - (size_t)k, "%.*s\n", (int)(e - p), p);
+        p = *e ? e + 1 : e;
+    }
+    for (char *p = fz, *e; fz && *p; p = e) {
+        e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+        if (!*p || *p == '#') continue;
+        char *t = strchr(p, '\t'); if (t) *t = 0;
+        rows++;
+        if (!covered(profiles_text, p)) { miss++; printf("#\tfreeze file not under a core-path row: %s\n", p); }
+        if (!covered(cut, p)) miss_cut++;
+    }
+    ck(rows > 30, "freeze-table-has-rows");
+    ck(miss == 0, "every-freeze-file-under-core-path");
+    ck(miss_cut > 0, "tamper-without-cx-sys-row-uncovered");
+    free(fz);
+}
 int main(void) {
     static char out[131072], seg[8192]; char a[400], b[400], args[2000], f[500], strip[500];
     if (sy_mkdtemp(sy_tmpdir(), "handoff-check-check-", tmpd, sizeof tmpd)) { puts("FAIL\ttmpdir"); return 1; }
@@ -84,6 +120,7 @@ int main(void) {
     /* profiles table without core-path rows: tamper control */
     { size_t n; char *t = cx_read("tests/accept-profiles.tsv", &n); static char o[65536]; long k = 0;
       ck(t != 0, "read-profiles");
+      if (t) freeze_coverage(t);
       for (char *p = t, *e; t && *p; p = e) { e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p); if (strncmp(p, "core-path\t", 10)) k += snprintf(o + k, sizeof o - (size_t)k, "%s\n", p); }
       if (cx_fmt(strip, sizeof strip, "%s/no-core.tsv", tmpd) || cx_write(strip, o, (size_t)k)) ck(0, "write-stripped");
       free(t); }
@@ -92,6 +129,10 @@ int main(void) {
     hc("core-review-counted", A("--root\t%s\t--static\t--files\ttools/devsvc-core.cx\t--item\tcore-review", a), 0, "review=1", 0);
     hc("no-core-not-applicable", A("--root\t%s\t--static\t--files\tREADME\t--item\tcore-review", a), 0, "core-review\tNOT_APPLICABLE", 0);
     hc("tamper-no-core-rows", A("--root\t%s\t--static\t--profiles\t%s\t--files\ttools/precommit.cx\t--item\tcore-review", a, strip), 0, "core-review\tNOT_APPLICABLE", 0);
+    hc("core-l0-sys-review", A("--root\t%s\t--static\t--files\tcx/sys/proc.cx\t--item\tcore-review", a), 0, "core-review\tREVIEW_REQUIRED\t0\tcx/sys/proc.cx", 0);
+    hc("core-l0-mem-review", A("--root\t%s\t--static\t--files\tcx/mem/heap.cx\t--item\tcore-review", a), 0, "core-review\tREVIEW_REQUIRED\t0\tcx/mem/heap.cx", 0);
+    hc("core-l0-text-review", A("--root\t%s\t--static\t--files\tcx/text/text.cx\t--item\tcore-review", a), 0, "core-review\tREVIEW_REQUIRED\t0\tcx/text/text.cx", 0);
+    hc("core-frozen-table-review", A("--root\t%s\t--static\t--files\tcx/core/alu.cx,cx/cx0/plan.cx,tests/cx-module-freeze.tsv\t--item\tcore-review", a), 0, "cx/core/alu.cx cx/cx0/plan.cx tests/cx-module-freeze.tsv", 0);
     hc("product-no-patch-fail", A("--root\t%s\t--static\t--files\tsrc/x.c\t--item\tpatch-first", a), 1, "patch-first\tFAIL\t0\tPATCH_FIRST src/x.c", 0);
     hc("product-with-patch-pass", A("--root\t%s\t--static\t--files\tsrc/x.c,plans/x.patch\t--item\tpatch-first", a), 0, "patch-first\tPASS\t0\tpatch present", 0);
     hc("product-allowed-recorded", A("--root\t%s\t--static\t--allow-product\t--files\tcx/sys/a.cx\t--item\tpatch-first", a), 0, "ALLOWED --allow-product cx/sys/a.cx", 0);
