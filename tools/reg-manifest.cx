@@ -25,56 +25,127 @@ static const char *RM_KIND[3] = {"batch", "coverage", "packages"};
 static const char *RM_TABLE[3] = {"tests/batches.tsv", "tests/coverage.tsv", "build/batch-packages.tsv"};
 static const int RM_COLS[3] = {14, 5, 9};
 
-static int rm_index;   /* --index: read manifests and tables from the git index (git show :PATH), not the work tree */
+static int rm_index;   /* --index: read manifests and tables from the git index, not the work tree */
 static char *package_view;
 static size_t package_n;
+static char *rm_tb[2];
+static size_t rm_tbn[2];
+static int rm_tbok[2];
 
-/* read ROOT/REL from the work tree, or REL from the index; caller frees; 0 when unreadable */
+typedef struct {
+    size_t off;
+    size_t len;
+    size_t klen;
+    unsigned int hash;
+} rm_slot_t;
+
+typedef struct {
+    const char *buf;
+    size_t n;
+    rm_slot_t *slots;
+    size_t cap;
+} rm_tidx_t;
+
+static rm_tidx_t rm_tidx[3];
+
+static unsigned int rm_hash(const char *s, size_t n) {
+    unsigned int h = 2166136261u; size_t i;
+    for (i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+    return h ? h : 1u;
+}
+
+static void rm_tidx_clear(int k) {
+    if (k >= 0 && k < 3) { mm_free(rm_tidx[k].slots); rm_tidx[k].slots = 0; rm_tidx[k].buf = 0; rm_tidx[k].n = 0; rm_tidx[k].cap = 0; }
+}
+
+static int rm_tidx_build(int k, const char *buf, size_t n) {
+    size_t i = 0, lines = 0, cap = 64, mask; int tabs = (k == 2) ? 2 : 1;
+    rm_slot_t *sl;
+    if (rm_tidx[k].slots && rm_tidx[k].buf == buf && rm_tidx[k].n == n) return 1;
+    rm_tidx_clear(k);
+    while (i < n) { while (i < n && buf[i] != '\n') i++; lines++; i++; }
+    while (cap < lines * 2 + 16) cap <<= 1;
+    sl = (rm_slot_t *)mm_alloc(cap * sizeof(rm_slot_t));
+    if (!sl) return 0;
+    memset(sl, 0, cap * sizeof(rm_slot_t));
+    mask = cap - 1; i = 0;
+    while (i < n) {
+        size_t e = i, p = i; int t = 0;
+        while (e < n && buf[e] != '\n') e++;
+        while (p < e) {
+            if (buf[p] == '\t') { t++; if (t == tabs) break; }
+            p++;
+        }
+        if (t == tabs && p < e) {
+            size_t kl = p - i;
+            unsigned int h = rm_hash(buf + i, kl);
+            size_t pos = h & mask;
+            while (sl[pos].hash) pos = (pos + 1) & mask;
+            sl[pos].off = i; sl[pos].len = e - i; sl[pos].klen = kl; sl[pos].hash = h;
+        }
+        i = e + 1;
+    }
+    rm_tidx[k].buf = buf; rm_tidx[k].n = n; rm_tidx[k].slots = sl; rm_tidx[k].cap = cap;
+    return 1;
+}
+
+static int rm_table_idx(const char *rel) {
+    if (!strcmp(rel, RM_TABLE[0])) return 0;
+    if (!strcmp(rel, RM_TABLE[1])) return 1;
+    return -1;
+}
+
+static void rm_table_invalidate(int k) {
+    rm_tidx_clear(k);
+    if (k >= 0 && k < 2) { mm_free(rm_tb[k]); rm_tb[k] = 0; rm_tbn[k] = 0; rm_tbok[k] = 0; }
+}
+
+/* read ROOT/REL from the work tree, or REL from the index; table buffers are cached read-only, non-table caller frees */
 static char *rm_read(const char *root, const char *rel, size_t *n) {
-    char p[4400];
+    char p[4400]; int k = rm_table_idx(rel);
     *n = 0;
-    if (!strcmp(rel,RM_TABLE[2])) {
+    if (!strcmp(rel, RM_TABLE[2])) {
         if (!package_view) {
-            if(cx_fmt(p,sizeof p,"%s/tests/batches.tsv",root))return 0;
-            char *q[]={"sh","./unisacc.com","tools/batch-packages-gen.cx","--","--query",
-                       rm_index?"--index":"--registry",rm_index?0:p,0};
-            if(cx_runv_timeout(q,30,&package_view,&package_n)) {
-                free(package_view);package_view=0;return 0;
+            if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root)) return 0;
+            char *q[] = {"sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--query",
+                         rm_index ? "--index" : "--registry", rm_index ? 0 : p, 0};
+            if (cx_runv_timeout(q, 30, &package_view, &package_n)) {
+                free(package_view); package_view = 0; return 0;
             }
         }
-        *n=package_n;return package_view;
+        *n = package_n; return package_view;
     }
+    if (k >= 0 && rm_tbok[k]) { *n = rm_tbn[k]; return rm_tb[k]; }
     if (rm_index) {
-        /* one git show per table per run, not per manifest: the index is read-only for the whole check, so the three
-           table blobs are fetched once and every manifest gets its own copy of the same bytes (150 manifests were
-           600 git processes and 10 s; they are 153 now).  Manifests are still read one by one. */
-        static char *tb[3]; static size_t tbn[3]; static int tbok[3];
-        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0}; int t, k = -1;
-        for (t = 0; t < 3; t++) if (!strcmp(rel, RM_TABLE[t])) k = t;
-        if (k >= 0 && tbok[k]) {
-            char *c = (char *)mm_alloc(tbn[k] + 1);
-            if (!c) return 0;
-            if (tbn[k]) mm_copy(c, tbn[k] + 1, tb[k], tbn[k]);
-            c[tbn[k]] = 0; *n = tbn[k];
-            return c;
-        }
+        char spec[600], *o = 0; char *v[] = {"git", "show", spec, 0};
         if (cx_fmt(spec, sizeof spec, ":%s", rel)) return 0;
         if (cx_runv_timeout(v, 20, &o, n) != 0) { mm_free(o); *n = 0; return 0; }
-        if (k >= 0 && o) {
-            tb[k] = (char *)mm_alloc(*n + 1);
-            if (tb[k]) { if (*n) mm_copy(tb[k], *n + 1, o, *n); tbn[k] = *n; tbok[k] = 1; }
-        }
+        if (k >= 0 && o) { rm_tb[k] = o; rm_tbn[k] = *n; rm_tbok[k] = 1; }
         return o;
     }
     if (cx_fmt(p, sizeof p, "%s/%s", root, rel)) return 0;
-    return (char *)cx_read(p, n);
+    { char *o = (char *)cx_read(p, n);
+      if (k >= 0 && o) { rm_tb[k] = o; rm_tbn[k] = *n; rm_tbok[k] = 1; }
+      return o; }
 }
 
 static int rm_cols(const char *s) { int n = 1; for (; *s; s++) if (*s == '\t') n++; return n; }
 
 /* find a line starting with KEY<TAB>; returns 0 absent, 1 equal to full ROW, 2 present but different */
-static int rm_find(const char *buf, size_t n, const char *key, const char *row) {
+static int rm_find(int k, const char *buf, size_t n, const char *key, const char *row) {
     size_t kl = strlen(key), rl = strlen(row), i = 0;
+    if (k >= 0 && k < 3 && rm_tidx_build(k, buf, n)) {
+        size_t mask = rm_tidx[k].cap - 1;
+        unsigned int h = rm_hash(key, kl);
+        size_t pos = h & mask;
+        rm_slot_t *sl = rm_tidx[k].slots;
+        while (sl[pos].hash) {
+            if (sl[pos].hash == h && sl[pos].klen == kl && !memcmp(buf + sl[pos].off, key, kl) && buf[sl[pos].off + kl] == '\t')
+                return (sl[pos].len == rl && !memcmp(buf + sl[pos].off, row, rl)) ? 1 : 2;
+            pos = (pos + 1) & mask;
+        }
+        return 0;
+    }
     while (i < n) {
         size_t e = i; while (e < n && buf[e] != '\n') e++;
         if (e - i > kl && !memcmp(buf + i, key, kl) && buf[i + kl] == '\t') return (e - i == rl && !memcmp(buf + i, row, rl)) ? 1 : 2;
@@ -83,24 +154,28 @@ static int rm_find(const char *buf, size_t n, const char *key, const char *row) 
     return 0;
 }
 
-static int rm_one(const char *root, const char *file, const char *stem, int write, int *bad) {
-    char path[4400], rows[3][8192], key[3][600]; int got[3] = {0, 0, 0}; size_t sz = 0; char *m; size_t i = 0; int k, rc = 0;
-    if (cx_fmt(path, sizeof path, "tests/manifests/%s", file)) return 2;
-    m = rm_read(root, path, &sz);
+static int rm_one(const char *root, const char *file, const char *stem, int write, int *bad, const char *m_in, size_t sz_in) {
+    char path[4400], rows[3][8192], key[3][600]; int got[3] = {0, 0, 0}; size_t sz = sz_in; const char *m = m_in; char *m_own = 0; size_t i = 0; int k, rc = 0;
+    if (!m) {
+        if (cx_fmt(path, sizeof path, "tests/manifests/%s", file)) return 2;
+        m_own = rm_read(root, path, &sz);
+        m = m_own;
+    }
     if (!m) { sy_printf("MALFORMED\t%s\tunreadable\n", file); return 2; }
     while (i < sz) {
         size_t e = i, t; char ln[8300]; int found = -1;
         while (e < sz && m[e] != '\n') e++;
         if (e == i) { i = e + 1; continue; }
-        if (e - i >= sizeof ln) { sy_printf("MALFORMED\t%s\tline too long\n", file); return 2; }
+        if (e - i >= sizeof ln) { sy_printf("MALFORMED\t%s\tline too long\n", file); mm_free(m_own); return 2; }
         mm_copy(ln, sizeof ln, m + i, e - i); ln[e - i] = 0; i = e + 1;
         for (t = 0; ln[t] && ln[t] != '\t'; t++) {}
         if (t == 7 && !memcmp(ln, "compile", 7) && ln[t]) continue;   /* optional compile rows belong to tools/tables-gen.cx */
         for (k = 0; k < 3; k++) if (strlen(RM_KIND[k]) == t && !memcmp(ln, RM_KIND[k], t)) found = k;
-        if (found < 0 || !ln[t] || got[found]) { sy_printf("MALFORMED\t%s\tbad or duplicate kind line\n", file); return 2; }
-        if (rm_cols(ln + t + 1) != RM_COLS[found]) { sy_printf("MALFORMED\t%s\t%s needs %d columns\n", file, RM_KIND[found], RM_COLS[found]); return 2; }
+        if (found < 0 || !ln[t] || got[found]) { sy_printf("MALFORMED\t%s\tbad or duplicate kind line\n", file); mm_free(m_own); return 2; }
+        if (rm_cols(ln + t + 1) != RM_COLS[found]) { sy_printf("MALFORMED\t%s\t%s needs %d columns\n", file, RM_KIND[found], RM_COLS[found]); mm_free(m_own); return 2; }
         mm_copy(rows[found], sizeof rows[found], ln + t + 1, strlen(ln + t + 1) + 1); got[found] = 1;
     }
+    mm_free(m_own); m_own = 0;
     if (!(got[0] && got[1] && got[2])) { sy_printf("MALFORMED\t%s\tneed batch, coverage and packages lines\n", file); return 2; }
     { size_t sl = strlen(stem);
       if (strncmp(rows[0], stem, sl) || rows[0][sl] != '\t') { sy_printf("MALFORMED\t%s\tbatch id is not the file stem\n", file); return 2; }
@@ -118,7 +193,7 @@ static int rm_one(const char *root, const char *file, const char *stem, int writ
         if (cx_fmt(tp, sizeof tp, "%s/%s", root, RM_TABLE[k])) return 2;
         tb = rm_read(root, RM_TABLE[k], &tn);
         if (!tb) { sy_printf("MALFORMED\t%s\ttable %s unreadable\n", file, RM_TABLE[k]); return 2; }
-        r = rm_find(tb, tn, key[k], rows[k]);
+        r = rm_find(k, tb, tn, key[k], rows[k]);
         if (r == 2) { sy_printf("MISMATCH\t%s\t%s\n", RM_TABLE[k], stem); (*bad)++; }
         else if (r == 0) {
             sy_printf("MISSING\t%s\t%s\n", RM_TABLE[k], stem);
@@ -129,11 +204,111 @@ static int rm_one(const char *root, const char *file, const char *stem, int writ
                 mm_copy(nb + tn + nl, rl + 2, rows[k], rl); nb[tn + nl + rl] = '\n';
                 if (cx_write(tp, nb, tn + nl + rl + 1)) { mm_free(nb); return 2; }
                 mm_free(nb); sy_printf("WROTE\t%s\t%s\n", RM_TABLE[k], stem);
-                if (k==0) { free(package_view); package_view=0; }
+                rm_table_invalidate(k);
+                if (k==0) { free(package_view); package_view=0; rm_tidx_clear(2); }
             } else (*bad)++;
         }
     }
     return rc;
+}
+
+typedef struct {
+    char file[300];
+    char stem[300];
+    char oid[68];
+} rm_item_t;
+
+static int rm_parse_ls_line(const char *s, size_t len, rm_item_t *it) {
+    const char *pre = "tests/manifests/"; size_t pl = 16;
+    size_t sp1 = 0, sp2, tab, ol, l;
+    while (sp1 < len && s[sp1] != ' ') sp1++;
+    if (sp1 >= len) return 0;
+    sp2 = sp1 + 1;
+    while (sp2 < len && s[sp2] != ' ') sp2++;
+    if (sp2 >= len) return 0;
+    ol = sp2 - (sp1 + 1);
+    if (ol < 40 || ol >= sizeof it->oid) return 0;
+    tab = sp2 + 1;
+    while (tab < len && s[tab] != '\t') tab++;
+    if (tab >= len) return 0;
+    tab++;
+    if (len - tab <= pl + 4 || memcmp(s + tab, pre, pl) || memcmp(s + len - 4, ".tsv", 4)) return 0;
+    l = len - tab - pl;
+    if (l >= 290) return 0;
+    if (it) {
+        mm_copy(it->file, sizeof it->file, s + tab + pl, l); it->file[l] = 0;
+        mm_copy(it->stem, sizeof it->stem, it->file, l - 4); it->stem[l - 4] = 0;
+        mm_copy(it->oid, sizeof it->oid, s + sp1 + 1, ol); it->oid[ol] = 0;
+    }
+    return 1;
+}
+
+static int rm_run_index(const char *root, int *bad, int *n_out, int *hard_out) {
+    char *lv[] = {"git", "ls-files", "-s", "--", "tests/manifests", 0}, *o = 0;
+    size_t on = 0, i = 0, cnt = 0, idx = 0, oid_pos = 0, bn = 0, pos = 0;
+    rm_item_t *items = 0; char *oid_buf = 0, *bo = 0; char oid_path[600];
+    if (cx_runv_timeout(lv, 20, &o, &on) != 0) { mm_free(o); return -1; }
+    while (i < on) {
+        size_t e = i; while (e < on && o[e] != '\n') e++;
+        if (rm_parse_ls_line(o + i, e - i, 0)) cnt++;
+        i = e + 1;
+    }
+    if (cnt == 0) { mm_free(o); return 0; }
+    items = (rm_item_t *)mm_alloc(cnt * sizeof(rm_item_t));
+    oid_buf = (char *)mm_alloc(cnt * 66 + 1);
+    if (!items || !oid_buf) { mm_free(items); mm_free(oid_buf); mm_free(o); return -1; }
+    i = 0;
+    while (i < on && idx < cnt) {
+        size_t e = i; while (e < on && o[e] != '\n') e++;
+        if (rm_parse_ls_line(o + i, e - i, &items[idx])) {
+            size_t ol = strlen(items[idx].oid);
+            mm_copy(oid_buf + oid_pos, cnt * 66 + 1 - oid_pos, items[idx].oid, ol);
+            oid_pos += ol; oid_buf[oid_pos++] = '\n';
+            idx++;
+        }
+        i = e + 1;
+    }
+    mm_free(o); o = 0;
+    if (cx_fmt(oid_path, sizeof oid_path, "%s/rm-oids-%d.txt", sy_tmpdir(), sy_pid()) || cx_write(oid_path, oid_buf, oid_pos)) {
+        mm_free(items); mm_free(oid_buf); return -1;
+    }
+    mm_free(oid_buf); oid_buf = 0;
+    { char *bv[] = {"sh", "-c", "exec git cat-file --batch < \"$1\"", "sh", oid_path, 0};
+      int brc = cx_runv_timeout(bv, 30, &bo, &bn);
+      sy_unlink(oid_path);
+      if (brc != 0 || !bo) { mm_free(bo); mm_free(items); return -1; } }
+    for (i = 0; i < idx; i++) {
+        size_t h = pos, sp1, sp2, bsz = 0, p;
+        if (pos >= bn) { sy_printf("MALFORMED\t%s\tunreadable\n", items[i].file); *hard_out = 1; (*n_out)++; continue; }
+        while (h < bn && bo[h] != '\n') h++;
+        sp1 = pos; while (sp1 < h && bo[sp1] != ' ') sp1++;
+        sp2 = (sp1 < h) ? sp1 + 1 : h;
+        while (sp2 < h && bo[sp2] != ' ') sp2++;
+        if (sp1 >= h || sp2 >= h || sp2 - (sp1 + 1) != 4 || memcmp(bo + sp1 + 1, "blob", 4) != 0) {
+            sy_printf("MALFORMED\t%s\tunreadable\n", items[i].file);
+            *hard_out = 1; (*n_out)++;
+            pos = (h < bn) ? h + 1 : bn;
+            continue;
+        }
+        for (p = sp2 + 1; p < h; p++) {
+            if (bo[p] < '0' || bo[p] > '9') { bsz = bn + 1; break; }
+            bsz = bsz * 10 + (size_t)(bo[p] - '0');
+        }
+        pos = (h < bn) ? h + 1 : bn;
+        if (bsz > bn - pos) {
+            sy_printf("MALFORMED\t%s\tunreadable\n", items[i].file);
+            *hard_out = 1; (*n_out)++;
+            pos = bn;
+            continue;
+        }
+        if (rm_one(root, items[i].file, items[i].stem, 0, bad, bo + pos, bsz)) *hard_out = 1;
+        (*n_out)++;
+        pos += bsz;
+        if (pos < bn && bo[pos] == '\n') pos++;
+    }
+    mm_free(bo);
+    mm_free(items);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -146,20 +321,8 @@ int main(int argc, char **argv) {
         else { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
     }
     if (check == write) { sy_printf("usage: reg-manifest.cx -- --check|--write [--root DIR]\n"); return 2; }
-    if (rm_index) {   /* index mode (read-only): names from git ls-files, rows from index blobs */
-        char *lv[] = {"git", "ls-files", "--", "tests/manifests", 0}, *o = 0; size_t on = 0, i = 0;
-        if (write || cx_runv_timeout(lv, 20, &o, &on) != 0) { sy_printf("REG_MANIFEST\tindex listing failed\n"); return 2; }
-        while (i < on) {
-            size_t e = i, l, b = 0; char stem[300], file[300];
-            while (e < on && o[e] != '\n') e++;
-            { const char *pre = "tests/manifests/"; size_t pl = strlen(pre);
-              if (e - i > pl + 4 && !memcmp(o + i, pre, pl) && !memcmp(o + e - 4, ".tsv", 4) && e - i - pl < 290) {
-                  l = e - i - pl; mm_copy(file, sizeof file, o + i + pl, l); file[l] = 0; mm_copy(stem, sizeof stem, file, l - 4); stem[l - 4] = 0;
-                  if (rm_one(root, file, stem, 0, &bad)) hard = 1;
-                  n++; (void)b; } }
-            i = e + 1;
-        }
-        mm_free(o);
+    if (rm_index) {   /* index mode (read-only): names and oids from git ls-files -s, blobs via single git cat-file --batch */
+        if (write || rm_run_index(root, &bad, &n, &hard) != 0) { sy_printf("REG_MANIFEST\tindex listing failed\n"); return 2; }
         sy_printf("REG_MANIFEST\tmanifests=%d\tbad=%d\thard=%d\n", n, bad, hard);
         return hard ? 2 : (bad ? 1 : 0);
     }
@@ -168,7 +331,7 @@ int main(int argc, char **argv) {
         size_t l = strlen(d.name); char stem[300];
         if (l < 5 || l > 290 || strcmp(d.name + l - 4, ".tsv")) continue;
         mm_copy(stem, sizeof stem, d.name, l - 4); stem[l - 4] = 0;
-        if (rm_one(root, d.name, stem, write, &bad)) hard = 1;
+        if (rm_one(root, d.name, stem, write, &bad, 0, 0)) hard = 1;
         n++;
     }
     sy_dir_close(&d);
