@@ -1,9 +1,16 @@
 #pragma unisa use g_math
 #pragma unisa use text.text
 
+static int alias_gold(const char *fixture,double *values,int count,const char *dir) {
+    if(count!=1) return 1;
+    values[0]=19;
+    return 0;
+}
+
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int verify=argc==2 && tx_eqz(argv[1],"--verify-negative");
+    if(argc!=1 && !mutate && !verify) return 2;
     const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d","group","scene",
         "object3d-lifecycle",0};
     const char *setup="let src=Object3D_initArena(0,10);let dst=Object3D_initArena(5000,12);"
@@ -16,6 +23,7 @@ int main(int argc,char **argv) {
         "let bits=ux_u32_put(br+Object3D.layerMask,16);let show=Object3D_setVisible(src,b,0);"
         "let aux=Scene_setResources(src,root,42,0,0,0);"
         "let da=Object3D_add(src,root,a);let db=Object3D_add(src,root,b);let dc=Object3D_add(src,b,c);"
+        "let synchronized=Object3D_updateMatrixWorld(src,root,1);"
         "let clone=Object3D_clone(dst,src,root,1);let cloned=Object3D_address(dst,clone);"
         "let ca=ux_u32(cloned+Object3D.firstChild);let car=Object3D_address(dst,ca);"
         "let cb=ux_u32(car+Object3D.nextSibling);let cbr=Object3D_address(dst,cb);"
@@ -36,9 +44,21 @@ int main(int argc,char **argv) {
         "let copy=Object3D_copy(dst,parent,src,root,1);return Object3D_traverse(dst,parent,11500,8);",
         "let parent=Object3D_create(dst);let pt=Object3D_address(dst,parent);"
         "let px=ux_f64_put(ux_u32(pt+Object3D.position),11.0);let enter=Object3D_add(dst,parent,clone);"
-        "let updated=Object3D_updateMatrixWorld(dst,parent,1);return ux_f64(ux_u32(ccr+Object3D.worldMatrix)+96);"
+        "let updated=Object3D_updateMatrixWorld(dst,parent,1);return ux_f64(ux_u32(ccr+Object3D.worldMatrix)+96);",
+        "let cm=ux_u32(cbr+Object3D.localMatrix);let original=ux_u32(br+Object3D.localMatrix);"
+        "let moved=ux_f64_put(cm+96,19.0);return ux_f64(original+96);",
+        "let mask=ux_u32_put(cbr+Object3D.layerMask,32);return ux_u32(br+Object3D.layerMask);"
     };
-    const double gold[]={1,1,53,7,16,42,0,3,8,-1,5,23};
+    const double gold[]={1,1,53,7,16,42,0,3,8,-1,5,23,5,16};
+    if(verify) {
+        const char *aliases[]={"let mat=ux_u32(br+Object3D.localMatrix);let changed=ux_f64_put(mat+96,19.0);return ux_f64(mat+96);"};
+        const double leaked[]={19};
+        const int rc=g_math_run_oracle("G_STRUCT Object3D alias observed","",modules,setup,aliases,leaked,1,-1,"",alias_gold);
+        const int observed=rc==0 && leaked[0]!=gold[12];
+        printf("OBJECT3D alias_expected=1 observed=%d\n",observed);
+        return !observed;
+    }
     return g_math_run("G_STRUCT Object3D lifecycle","object3d-lifecycle",modules,setup,cases,gold,
-        sizeof gold/sizeof gold[0],mutate?3:-1,"return ux_f64(ux_u32(cbr+Object3D.position));");
+        sizeof gold/sizeof gold[0],mutate?12:-1,
+        "let mat=ux_u32(br+Object3D.localMatrix);let changed=ux_f64_put(mat+96,19.0);return ux_f64(mat+96);");
 }
