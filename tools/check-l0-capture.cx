@@ -39,6 +39,17 @@ static int open_fd_count(void) {
     sy_dir_close(&d);
     return n;
 }
+/* 1 when PID still has a /proc entry (live or zombie), 0 when it is gone. */
+static int proc_alive(int pid) {
+    char p[64];
+    unsigned char *d = 0;
+    int64_t n = 0;
+    if (pid <= 0) return 0;
+    if (snprintf(p, sizeof p, "/proc/%d/stat", pid) <= 0) return 0;
+    return sy_read_file(p, &d, &n, 4096) == 0 && n > 0;
+}
+
+
 /* No live or zombie child left: /proc/PID/task/PID/children is empty. */
 static int nochild(void) {
     char p[64], dg[16];
@@ -202,6 +213,90 @@ int main(int argc, char **argv) {
         int f1 = open_fd_count();
         if (f0 < 0 || f1 < 0) printf("NOTE\tcapture.c5\tfds-unknown\tf0=%d\tf1=%d\n", f0, f1);
         else ckv(f1, f0, "c5-fd-count");
+    }
+
+    /* C10 (Z3 复核 1): a leader that exits while a same-group descendant holds the pipes.
+       At the deadline the descendant must be gone -- the group kill uses the saved pgid, and
+       the leader is not reaped before the group work is done. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r, pid = 0; long i;
+        r = run1("sleep 43 & echo $!", 1 << 20, 500, 1, &cap, &st);
+        for (i = 0; i < cap.out.len; i++) { unsigned char ch = cap.out.data[i]; if (ch >= '0' && ch <= '9') pid = pid * 10 + (ch - '0'); }
+        ckv(r, -ETIMEDOUT, "c10-rc");
+        ck(pid > 0, "c10-descendant-pid-read");
+        sy_sleep_ms(300);
+        ck(pid > 0 && !proc_alive(pid), "c10-descendant-killed");
+        mg_free(&cap.out); mg_free(&cap.err);
+    }
+    /* C11 (Z3 复核 2): stderr alone at 4 MiB must not be rate-limited by a silent stdout.
+       The bound is generous for slow hosts but far below the 12.7 s the sequential loop took. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("head -c 4194304 /dev/zero >&2", 8 << 20, 0, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, 0, "c11-rc");
+        ckv(cap.err.len, 4194304, "c11-err-len");
+        ck(ms < 2000, "c11-under-2s");
+        mg_free(&cap.out); mg_free(&cap.err);
+    }
+    /* C12 (Z3 复核 3): the child must not inherit the capture pipe ends.  Proved from inside
+       the child: it lists its own /proc/self/fd and the output must show no descriptor above 2
+       pointing at a pipe besides the listing's own /proc fd.  A cursor leak would appear here
+       as extra pipe fds. */
+    {
+        sy_capture_t cap; sy_exit_t st, st2;
+        int r = run1("ls -l /proc/self/fd", 1 << 20, 0, 1, &cap, &st);
+        long i, pipes = 0;
+        ckv(r, 0, "c12-rc");
+        /* count "-> pipe:[" occurrences beyond the expected 1 and 2 */
+        for (i = 0; i + 6 < cap.out.len; i++)
+            if (!memcmp(cap.out.data + i, "-> pipe:", 8)) pipes++;
+        ckv(pipes, 2, "c12-only-stdout-and-stderr-are-pipes");
+        mg_free(&cap.out); mg_free(&cap.err);
+        (void)st2;
+    }
+    /* C13 (Z3 复核 4): streams closed early must not busy-wait nor lose the deadline: the
+       call returns at the deadline, not after the child's own long sleep. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("exec 1>&- 2>&-; sleep 5", 1 << 20, 300, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, -ETIMEDOUT, "c13-rc");
+        ck(st.timed_out == 1, "c13-timed-out-flag");
+        ck(ms >= 250 && ms < 1500, "c13-deadline-kept-on-closed-streams");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c13-no-child");
+    }
+
+    /* C14 (Z5 blocking item, cc review 2026-11-22): the leader exits at once while a same-group
+       descendant holds the pipes, and the deadline expires.  A REAPED leader must not make the
+       group kill a no-op: the descendant has to be gone.  Pre-fix the tree gave desc_alive=1. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r, pid = 0; long i;
+        r = run1("sleep 43 & echo $!; exit 0", 1 << 20, 400, 1, &cap, &st);
+        for (i = 0; i < cap.out.len; i++) { unsigned char dg2 = cap.out.data[i]; if (dg2 >= 48 && dg2 <= 57) pid = pid * 10 + (dg2 - 48); }
+        ckv(r, -ETIMEDOUT, "c14-rc");
+        ck(pid > 0, "c14-descendant-pid-read");
+        sy_sleep_ms(300);
+        ck(pid > 0 && !proc_alive(pid), "c14-descendant-killed-after-leader-reaped");
+        if (pid > 0 && proc_alive(pid)) sy_kill(pid);
+        mg_free(&cap.out); mg_free(&cap.err);
+    }
+    /* C15 (Z5 timeout flag): a timed-out wait must keep timed_out in the handle, so a second
+       wait (which answers from the kept status) reports it too. */
+    {
+        char *v[4]; sy_spawn_t o; sy_child_t c; sy_exit_t st1, st2;
+        v[0] = "sh"; v[1] = "-c"; v[2] = "sleep 5"; v[3] = 0;
+        sy_spawn_init(&o); o.argv = v; o.deadline_ms = 200;
+        ck(sy_proc_spawn(&o, &c) == 0, "c15-spawn");
+        ck(sy_proc_wait(&c, &st1) == 0 && st1.timed_out == 1, "c15-first-timed-out");
+        st2 = st1; st2.timed_out = 0;
+        ck(sy_proc_wait(&c, &st2) == 0 && st2.timed_out == 1, "c15-second-keeps-timed-out");
+        sy_proc_close(&c);
     }
 
     printf("CHECK_L0_CAPTURE\tok=%d\tfailed=%d\n", nok, nfail);
