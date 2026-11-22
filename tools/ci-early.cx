@@ -656,12 +656,27 @@ static int extract_table_version(const char *text, long n, char *ver_out, long c
 }
 
 static void preflight_version_and_rev(const char *root, const char *rev, const char *version,
-                                      const char *stage_dir, const char *ape_sha, int dry) {
-    char ape_path[CE_PATH], ape_out[128], want_ape[64], spec[128], table_buf[16384], rev_ver[32], detail[512];
+                                      const char *stage_dir, const char *ape_sha, int dry, int preflight_only) {
+    char ape_path[CE_PATH], ape_out[128], want_ape[64], spec[128], table_buf[16384], rev_ver[32], detail[512], wf_path[CE_PATH];
+    int check_ext = (!dry || preflight_only);
     if (cx_fmt(ape_path, sizeof ape_path, "%s/unisacc.com", stage_dir) ||
-        cx_fmt(want_ape, sizeof want_ape, "unisacc %s", version))
+        cx_fmt(want_ape, sizeof want_ape, "unisacc %s", version) ||
+        cx_fmt(wf_path, sizeof wf_path, "%s/.github/workflows/candidate-native.yml", root))
         refuse("CI_EARLY_PATH", "ape_path");
 
+    if (sy_exists(wf_path) != 1) {
+        cx_fmt(detail, sizeof detail, "missing %s; fix: ensure .github/workflows/candidate-native.yml exists at root", wf_path);
+        refuse("CI_EARLY_WORKFLOW_MISSING", detail);
+    }
+    if (check_ext) {
+        const char *gh = sy_env("CI_EARLY_GH");
+        if (!gh || !gh[0]) gh = "gh";
+        char *gv[] = {(char *)gh, "auth", "status", 0};
+        char gout[256];
+        if (run_trimmed(gv, root, 15, gout, sizeof gout) != 0) {
+            refuse("CI_EARLY_GH_AUTH", "gh auth status failed; fix: run gh auth login before triggering ci-early");
+        }
+    }
     {
         char *v[] = {"sh", ape_path, "--version", 0};
         if (run_trimmed(v, root, 20, ape_out, sizeof ape_out) || (!mut_skip_version_gate && !tx_eqz(ape_out, want_ape))) {
@@ -681,16 +696,16 @@ static void preflight_version_and_rev(const char *root, const char *rev, const c
             refuse("CI_EARLY_VERSION_MISMATCH", detail);
         }
     }
-    if (!dry) {
+    if (check_ext) {
         char *v[] = {"git", "branch", "-r", "--contains", (char *)rev, 0};
         char rbuf[1024];
         if (run_trimmed(v, root, 15, rbuf, sizeof rbuf) || !rbuf[0]) {
-            cx_fmt(detail, sizeof detail, "rev=%s not found on any remote branch; push before dispatching CI", rev);
+            cx_fmt(detail, sizeof detail, "rev=%s not found on any remote branch; fix: git push origin <branch> before dispatching CI", rev);
             refuse("CI_EARLY_REV_NOT_PUSHED", detail);
         }
     }
-    sy_printf("CI_EARLY_PREFLIGHT\trev=%s\tversion=%s\tape_sha=%s\trev_table_version=%s\tstatus=PASS\n",
-              rev, version, ape_sha, rev_ver);
+    sy_printf("CI_EARLY_PREFLIGHT\trev=%s\tversion=%s\tape_sha=%s\trev_table_version=%s\torigin=%s\tworkflow=OK\tgh_auth=%s\tstatus=PASS\n",
+              rev, version, ape_sha, rev_ver, check_ext ? "OK" : "SKIPPED_DRY", check_ext ? "OK" : "SKIPPED_DRY");
 }
 
 static int wf_is_ident(char c) {
@@ -929,7 +944,7 @@ int main(int argc, char **argv) {
     const char *out_arg = 0, *root_arg = ".", *ci_json = 0, *ci_log = 0, *ape_sha_arg = 0;
     const char *lint_wf_arg = 0;
     long poll_ms = 30000;
-    int poll_max = 50, parse_only = 0, scrub_log = 0, lint_wf = 0, dry = 0, keep_draft = 0, i;
+    int poll_max = 50, parse_only = 0, scrub_log = 0, lint_wf = 0, dry = 0, preflight_only = 0, keep_draft = 0, i;
     char root[CE_PATH], out_dir[CE_PATH], stage_dir[CE_PATH], cdir_buf[CE_PATH];
     char version[32], tag[128], ape_sha[65], rb_file[CE_PATH], rb_text[1024];
 
@@ -944,6 +959,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (tx_eqz(a, "--dry")) { dry = 1; continue; }
+        if (tx_eqz(a, "--preflight")) { preflight_only = 1; continue; }
         if (tx_eqz(a, "--keep-draft")) { keep_draft = 1; continue; }
         if (tx_eqz(a, "--mutate-ignore-cell-fail")) { mut_ignore_cell_fail = 1; continue; }
         if (tx_eqz(a, "--mutate-skip-version-gate")) { mut_skip_version_gate = 1; continue; }
@@ -1028,7 +1044,8 @@ int main(int argc, char **argv) {
         verify_layout_dir(stage_dir, ape_sha);
     }
 
-    preflight_version_and_rev(root, rev, version, stage_dir, ape_sha, dry);
+    preflight_version_and_rev(root, rev, version, stage_dir, ape_sha, dry, preflight_only);
+    if (preflight_only) return 0;
 
     /* Write rollback / cleanup plan before any external command */
     if (cx_fmt(rb_file, sizeof rb_file, "%s/rollback-early.txt", out_dir) ||
