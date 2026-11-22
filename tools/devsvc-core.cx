@@ -373,6 +373,38 @@ static void locks_expire(void) {
 }
 static int lock_find(const char *name) { int i; for (i = 0; i < nlock; i++) if (!strcmp(locks[i].name, name)) return i; return -1; }
 static int okname(const char *s) { long n = s ? (long)strlen(s) : 0; return n > 0 && n < 64 && !strchr(s, ' '); }
+static int norm_owner(const char *raw, char *out, size_t cap) {
+    const char *s, *e; size_t n = 0;
+    if (!raw || !out || cap < 2) return 0;
+    s = raw;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if (e <= s || (size_t)(e - s) >= 64 || (size_t)(e - s) >= cap) return 0;
+    for (const char *p = s; p < e; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) return 0;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+static int resolve_owner_raw(int argc, char **argv, char *out, size_t cap, int lower) {
+    const char *raw = 0;
+    for (int i = 0; i + 1 < argc; i++) {
+        if (!strcmp(argv[i], "--owner")) { raw = argv[i + 1]; break; }
+    }
+    if (!raw || !*raw) raw = getenv("DEVSVC_OWNER");
+    if (!raw || !*raw) { if (out && cap > 0) out[0] = 0; return 0; }
+    if (lower) return norm_owner(raw, out, cap);
+    if (!okname(raw) || strlen(raw) >= cap) { if (out && cap > 0) out[0] = 0; return 0; }
+    mm_copy(out, cap, raw, strlen(raw) + 1);
+    return 1;
+}
+static int resolve_owner(int argc, char **argv, char *out, size_t cap) {
+    return resolve_owner_raw(argc, argv, out, cap, 1);
+}
 
 /* ---- 原生执行体缓存(服务端与 --local 共用) ---- */
 static char nlog[PW + 32];   /* 最近一次构造失败的完整日志路径;空串即没有 */
@@ -570,17 +602,21 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     if (!strcmp(f[0], "ping")) { radd("OK\tpong\tpid=%d\tseq=%ld\tlocks=%d\n", sy_pid(), seq, nlock); return 0; }
     if (!strcmp(f[0], "stop")) { radd("OK\tstopping\tpid=%d\n", sy_pid()); return 1; }
     if (!strcmp(f[0], "lock-acquire")) {
-        long ttl = atol(f[3]); char t[256]; pi_id_t rid;
+        long ttl = atol(f[3]); char t[256], owbuf[64]; const char *ow = f[2]; pi_id_t rid;
         int automatic = !strcmp(f[5], "auto");
         memset(&rid, 0, sizeof rid);
-        if (!okname(f[1]) || !okname(f[2]) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+        if (!strcmp(f[1], "freeze")) {
+            if (!norm_owner(f[2], owbuf, sizeof owbuf)) { radd("ERR\tusage\tlock-acquire freeze OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+            ow = owbuf;
+        }
+        if (!okname(f[1]) || !okname(ow) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
         if (f[4][0] && pi_parse_tag_ex(f[4], &rid) != 0) memset(&rid, 0, sizeof rid);
         if (automatic && rid.pid <= 0) { radd("ERR\tusage\tauto-lock-requires-process\n"); return 0; }
         i = lock_find(f[1]);
         /* A window owner can be shared by simultaneous Git commands. Only
          * the process that holds an automatic lease may renew it. A manual
          * lease still allows its owner to run a wrapped command under it. */
-        if (i >= 0 && (strcmp(locks[i].owner, f[2]) ||
+        if (i >= 0 && (strcmp(locks[i].owner, ow) ||
                        (locks[i].automatic && (!automatic || locks[i].holder.pid != rid.pid ||
                          locks[i].holder.ticks != rid.ticks || locks[i].holder.btime != rid.btime ||
                          locks[i].holder.ns_ino != rid.ns_ino)))) {
@@ -588,24 +624,25 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
         }
         if (i < 0) {
             if (nlock >= MAXLOCK) { radd("ERR\tfull\tmax=%d\n", MAXLOCK); return 0; }
-            i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", f[2]);
-            radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
-            if (rid.pid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], f[2], ttl, rid.pid);
-            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl);
+            i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", ow);
+            radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], ow, ttl);
+            if (rid.pid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], ow, ttl, rid.pid);
+            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], ow, ttl);
             ev_add("lock.acquire", t);
             locks[i].exp = now + ttl; locks[i].holder = rid; locks[i].automatic = automatic;
         } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短; 且仅同 PID 或原持有者已确认死亡才改绑(P1) */
             if (locks[i].exp < now + ttl) locks[i].exp = now + ttl;
             if (rid.pid > 0 && locks[i].holder.pid > 0 && (rid.pid == locks[i].holder.pid || !pi_alive_ex(&locks[i].holder, 0, 0))) locks[i].holder = rid;
-            radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], locks[i].exp - now);
+            radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], ow, locks[i].exp - now);
         }
         locks_save(); return 0;
     }
     if (!strcmp(f[0], "lock-release")) {
-        char t[200];
+        char t[200], owbuf[64]; const char *ow = f[2];
+        if (!strcmp(f[1], "freeze") && norm_owner(f[2], owbuf, sizeof owbuf)) ow = owbuf;
         i = lock_find(f[1]);
-        if (i < 0) { if (expd_find(f[1], f[2]) >= 0) radd("ERR\texpired\t%s\towner=%s\n", f[1], f[2]); else radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
-        if (strcmp(locks[i].owner, f[2])) { radd("ERR\tnot-owner\t%s\towner=%s\n", f[1], locks[i].owner); return 0; }
+        if (i < 0) { if (expd_find(f[1], ow) >= 0) radd("ERR\texpired\t%s\towner=%s\n", f[1], ow); else radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
+        if (strcmp(locks[i].owner, ow)) { radd("ERR\tnot-owner\t%s\towner=%s\n", f[1], locks[i].owner); return 0; }
         if (f[3][0]) {
             pi_id_t rid;
             if (pi_parse_tag_ex(f[3], &rid) != 0 || rid.pid != locks[i].holder.pid ||
@@ -614,7 +651,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
                 radd("ERR\tnot-holder\t%s\n", f[1]); return 0;
             }
         }
-        F(t, sizeof t, "%s\towner=%s", f[1], f[2]); ev_add("lock.release", t);
+        F(t, sizeof t, "%s\towner=%s", f[1], ow); ev_add("lock.release", t);
         locks[i] = locks[--nlock]; locks_save(); radd("OK\treleased\t%s\n", f[1]); return 0;
     }
     if (!strcmp(f[0], "lock-list")) {
@@ -1067,6 +1104,7 @@ static int report_tool(const char *p) {
     const char *base=strrchr(p,'/');base=base?base+1:p;
     return !strcmp(base,"candidate-chain.cx") || !strcmp(base,"release-run.cx");
 }
+static int freeze_refuse_if_held(const char *root, int argc, char **argv);
 static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOOL 或 --local */
     char bin[PW], req[2 * PW]; const char *cache = "?"; long prep = 0, t0, t1; int local = 0, rc, i; char *v[64];
     sy_spawn_t o; sy_exit_t ex;
@@ -1079,6 +1117,7 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
     }
     if (argc > 3 && !strcmp(argv[1], "--par") && !strcmp(argv[3], "--")) { argv[2] = argv[0]; argc -= 2; argv += 2; }   /* TOOL --par N -- ARGS */
     if (argc < 1 || argc > 60) return 2;
+    for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--write")) { if (freeze_refuse_if_held(root, argc, argv)) return 1; break; }
     t0 = sy_now_ms(); bin[0] = 0;
     if (!local) {
         F(req, sizeof req, "native\t%s\t%s", root, argv[0]);
@@ -1403,6 +1442,7 @@ static int flow_txn;   /* flow --txn:事务化(同节点表首行 txn 1),引擎�
 static const char *lock_for(const char *p);
 static int freeze_in_domain(const char *root, const char *p);
 static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap);
+static int freeze_refuse_if_held(const char *root, int argc, char **argv);
 static const char *auto_owner(void);
 
 static int chain_proc_find_holder(const char *dir_path) {
@@ -1732,8 +1772,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
 }
 static long numarg(const char *s) { long n = 0; if (!s || !*s) return -1; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 100000000L) return -1; } return *s ? -1 : n; }
 static void set_owner(int argc, char **argv) {
-    const char *o = opt(argc, argv, "--owner", getenv("DEVSVC_OWNER"));
-    if (okname(o)) F(fl_owner, sizeof fl_owner, "%s", o); else F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
+    if (!resolve_owner_raw(argc, argv, fl_owner, sizeof fl_owner, 0)) F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
 }
 
 static int x_ran;   /* cmd_x/cmd_flow 已把命令交给 flow 执行(子命令或节点非零 rc 不是参数错) */
@@ -2086,6 +2125,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
     if (ovf || !b.p) return 2;
     set_owner(argc, argv);
     if ((svc_on = wr_svc(root, wr)) < 0) return 1;
+    if (wr && freeze_in_domain(root, path) && freeze_refuse_if_held(root, argc, argv)) return 1;
     if (wr && svc_on) {
         F(nm, sizeof nm, "doc:%s", path);
         r = lk_take(root, nm, 60, 30000);
@@ -2210,18 +2250,76 @@ static const char *lock_for(const char *p) {   /* 路径 -> 自动互斥锁名(�
     }
     return 0;
 }
-static int freeze_in_domain(const char *root, const char *p) {   /* 路径是否落入配置表 lock freeze 写域 */
-    int i; const char *rp = p; long rpn; char rbuf[PW];
-    if (!p || !*p) return 0;
-    if (rp[0] == '/' && root && root[0]) {
-        long rl = (long)strlen(root);
-        if (!strncmp(rp, root, rl) && rp[rl] == '/') rp += rl + 1;
-        else if (sy_realpath(root, rbuf, sizeof rbuf) >= 0) {
-            long rrl = (long)strlen(rbuf);
-            if (!strncmp(rp, rbuf, rrl) && rp[rrl] == '/') rp += rrl + 1;
-        }
+static int norm_lex_path(const char *in, char *out, size_t cap) {
+    const char *segs[128]; size_t lens[128]; int ns = 0;
+    const char *p = in; size_t k = 0;
+    if (!in || !in[0] || in[0] != '/' || cap < 2) return 0;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *s = p;
+        while (*p && *p != '/') p++;
+        size_t l = (size_t)(p - s);
+        if (l == 1 && s[0] == '.') continue;
+        if (l == 2 && s[0] == '.' && s[1] == '.') { if (ns > 0) ns--; continue; }
+        if (ns >= 128) return 0;
+        segs[ns] = s; lens[ns] = l; ns++;
     }
-    while (rp[0] == '.' && rp[1] == '/') rp += 2;
+    if (ns == 0) { out[0] = '/'; out[1] = 0; return 1; }
+    for (int i = 0; i < ns; i++) {
+        if (k + 1 + lens[i] >= cap) return 0;
+        out[k++] = '/';
+        mm_copy(out + k, cap - k, segs[i], lens[i]);
+        k += lens[i];
+    }
+    out[k] = 0;
+    return 1;
+}
+static int freeze_in_domain(const char *root, const char *p) {   /* 路径经 realpath/祖先realpath/..折叠归一后再判 freeze 写域前缀 */
+    int i; char abs[PW * 2], rreal[PW], preal[PW * 2], norm[PW * 2]; const char *rp = 0; long rpn;
+    if (!p || !*p) return 0;
+    if (p[0] == '/') {
+        if (snprintf(abs, sizeof abs, "%s", p) >= (int)sizeof abs) return 1;
+    } else if (root && root[0]) {
+        if (snprintf(abs, sizeof abs, "%s/%s", root, p) >= (int)sizeof abs) return 1;
+    } else {
+        return 0;
+    }
+    if (!root || !root[0]) return 0;
+    if (sy_realpath(root, rreal, sizeof rreal) < 0) {
+        if (!norm_lex_path(root, rreal, sizeof rreal)) return 1;
+    }
+    if (sy_realpath(abs, preal, sizeof preal) >= 0) {
+        if (!norm_lex_path(preal, norm, sizeof norm)) return 1;
+    } else {
+        /* Resolve longest existing ancestor (handles symlinks like lnk/new-file.txt) then fold .. lexically */
+        char anc[PW * 2], areal[PW], comb[PW * 2]; int resolved = 0;
+        if (!norm_lex_path(abs, anc, sizeof anc)) return 1;
+        size_t al = strlen(anc);
+        while (al > 1) {
+            while (al > 1 && anc[al - 1] != '/') al--;
+            if (al <= 1) break;
+            anc[al - 1] = 0;
+            if (sy_realpath(anc, areal, sizeof areal) >= 0) {
+                const char *tail = abs;
+                /* Re-apply lexical normalization on abs first to match anc split point */
+                char lex_abs[PW * 2];
+                if (!norm_lex_path(abs, lex_abs, sizeof lex_abs)) return 1;
+                tail = lex_abs + (al - 1);
+                if (snprintf(comb, sizeof comb, "%s%s", areal, tail) >= (int)sizeof comb) return 1;
+                if (!norm_lex_path(comb, norm, sizeof norm)) return 1;
+                resolved = 1;
+                break;
+            }
+            al--;
+        }
+        if (!resolved && !norm_lex_path(abs, norm, sizeof norm)) return 1;
+    }
+    {
+        long rrl = (long)strlen(rreal);
+        if (!strncmp(norm, rreal, (size_t)rrl) && norm[rrl] == '/') rp = norm + rrl + 1;
+        else return 0;
+    }
     rpn = (long)strlen(rp);
     for (i = 0; i < cfg.nlockname; i++) {
         const char *s;
@@ -2229,14 +2327,15 @@ static int freeze_in_domain(const char *root, const char *p) {   /* 路径是否
         s = cfg.lockpfx[i];
         while (*s) {
             const char *c = strchr(s, ','); long l = c ? c - s : (long)strlen(s);
-            if (l > 0 && (s[l - 1] == '/' ? !strncmp(rp, s, l) : (rpn == l && !strncmp(rp, s, l)))) return 1;
+            if (l > 0 && (s[l - 1] == '/' ? !strncmp(rp, s, (size_t)l) : (rpn == l && !strncmp(rp, s, (size_t)l)))) return 1;
             s += l; if (*s) s++;
         }
     }
     return 0;
 }
 static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有; 0 放行 */
-    int rc; const char *s, *e;
+    int rc; const char *s, *e; char nown[64], nhold[64];
+    int has_own = norm_owner(owner, nown, sizeof nown);
     if (holder && hcap > 0) holder[0] = 0;
     rc = request(root, "lock-list", 0);
     if (rc == 3 && dir[0]) {
@@ -2247,17 +2346,31 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
     for (s = resp; s && *s; s = e ? e + 1 : 0) {
         e = strchr(s, '\n');
         if (!strncmp(s, "LOCK\tfreeze\towner=", 18)) {
-            const char *os = s + 18, *oe = os;
+            const char *os = s + 18, *oe = os; char rawh[64];
             while (*oe && *oe != '\t' && *oe != '\n' && *oe != '\r') oe++;
             size_t ol = (size_t)(oe - os);
+            if (ol >= sizeof rawh) ol = sizeof rawh - 1;
+            if (ol > 0) mm_copy(rawh, sizeof rawh, os, ol);
+            rawh[ol] = 0;
+            if (!norm_owner(rawh, nhold, sizeof nhold)) mm_copy(nhold, sizeof nhold, rawh, ol + 1);
             if (holder && hcap > 0) {
-                if (ol >= hcap) ol = hcap - 1;
-                if (ol > 0) mm_copy(holder, hcap, os, ol);
-                holder[ol] = 0;
+                size_t hl = strlen(nhold);
+                if (hl >= hcap) hl = hcap - 1;
+                if (hl > 0) mm_copy(holder, hcap, nhold, hl);
+                holder[hl] = 0;
             }
-            if (owner && holder && !strcmp(holder, owner)) return 0;
+            if (has_own && !strcmp(nhold, nown)) return 0;
             return 1;
         }
+    }
+    return 0;
+}
+static int freeze_refuse_if_held(const char *root, int argc, char **argv) {
+    char ow[64], fh[64];
+    const char *who = resolve_owner(argc, argv, ow, sizeof ow) ? ow : auto_owner();
+    if (freeze_check(root, who, fh, sizeof fh)) {
+        fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
+        return 1;
     }
     return 0;
 }
@@ -2299,6 +2412,7 @@ static int cmd_derive(const char *root, int argc, char **argv) {
     if (!ft || !ft[0]) ft = "tools/derive-flow.cx";
     if (flag(argc, argv, "--write")) {
         if (dry && dry[0] == '1') { printf("DEVSVC_DERIVE\tplan=tools/derive.cx\tlock=derive\n"); return 0; }
+        if (freeze_refuse_if_held(root, argc, argv)) return 1;
         printf("DEVSVC_DERIVE\tvia=serial\n"); fflush(stdout);
         return tool_locked(root, "derive", "tools/derive.cx", argc, argv);
     }
@@ -2345,6 +2459,7 @@ static int git_commit_check(int argc, char **argv) {
             continue; }
         if (!strcmp(a, "--push") || !strcmp(a, "--dry-run") || !strcmp(a, "--bg") || !strcmp(a, "--derive") || !strcmp(a, "--derive-selected")) continue;   /* --derive/--derive-selected: commit-own recomputes the derived tables the commit feeds */
         if (!strcmp(a, "--cwd")) { if (i + 1 >= argc || !argv[i + 1][0]) { fprintf(stderr, "devsvc: git commit: --cwd needs a work tree directory\n"); return 2; } i++; continue; }
+        if (!strcmp(a, "--owner")) { if (i + 1 >= argc || !okname(argv[i + 1])) { fprintf(stderr, "devsvc: git commit: --owner needs a valid owner name\n"); return 2; } i++; continue; }
         if (!strcmp(a, "--keyed") && i+3 < argc && argv[i+1][0]!='-' && argv[i+2][0]!='-' && argv[i+3][0]!='-') {
             fprintf(stderr,"devsvc: REFUSE keys-need-comma-separated: use --keyed TABLE KEY1,KEY2\n");
             return 2;
@@ -3149,6 +3264,7 @@ static int git_merge(const char *root, int argc, char **argv) {
     mg_root = root;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else if (!strcmp(argv[i], "--owner") && i + 1 < argc) i++;
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) { msg = argv[++i]; tr_strip(argv[i]); }
         else if (!strcmp(argv[i], "--continue")) cont = 1;
         else if (!strcmp(argv[i], "--worktree")) use_wt = 1;
@@ -3157,6 +3273,7 @@ static int git_merge(const char *root, int argc, char **argv) {
     }
     if (cont && (br || use_wt)) { fprintf(stderr, "devsvc: git merge --continue: takes no BRANCH or --worktree\n"); git_argerr = 1; return 2; }
     if (!cont && !br) { fprintf(stderr, "devsvc: git merge BRANCH [-m MSG] [--cwd WORKTREE] [--worktree]: missing BRANCH\n"); git_argerr = 1; return 2; }
+    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_MERGE\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (msg) { const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
         if (!*s || *s == '\n' || git_ci_prefix(s, "co-authored-by:") || git_ci_prefix(s, "signed-off-by:")) {
             fprintf(stderr, "devsvc: git merge -m: first line must be body text (not empty, not a trailer)\n"); git_argerr = 1; return 2; } }
@@ -3312,8 +3429,10 @@ static int git_pull(const char *root, int argc, char **argv) {
     mg_root = root;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else if (!strcmp(argv[i], "--owner") && i + 1 < argc) i++;
         else { fprintf(stderr, "devsvc: git pull [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
     }
+    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PULL\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git pull --cwd %s: no such directory\n", d); return 2; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
@@ -3380,19 +3499,27 @@ static int git_fetch(const char *root, int argc, char **argv) {
 /* git add PATH...:把这些路径的 index 同步到工作树内容(清残留暂存用)。拒绝(rc 2,什么都不加):
    绝对路径、含 ..、以 - 开头、out/ 下、被 .gitignore 忽略的路径。成功 GIT_ADD rc=0 n=N。 */
 static int git_add(const char *root, int argc, char **argv) {
-    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc;
+    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc, npath = 0, fhit = 0;
     if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
     for (i = 1; i < argc; i++) {
         const char *p = argv[i];
+        if (!strcmp(p, "--owner") && i + 1 < argc) { i++; continue; }
         if (!*p || p[0] == '/' || p[0] == '-' || strstr(p, "..") || !strncmp(p, "out/", 4) || !strcmp(p, "out")) { fprintf(stderr, "devsvc: REFUSE git add %s: absolute, .., option-like or out/ path (nothing added)\n", p); return 2; }
+        if (freeze_in_domain(root, p)) fhit = 1;
         {   char *cv[] = {"git", "-C", (char *)root, "check-ignore", "-q", "--", (char *)p, 0};
             if (runcap(cv, buf, sizeof buf) == 0) { fprintf(stderr, "devsvc: REFUSE git add %s: ignored path (nothing added)\n", p); return 2; } }
+        npath++;
     }
+    if (!npath) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
+    if (fhit && freeze_refuse_if_held(root, argc, argv)) { printf("GIT_ADD\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     v[n++] = "git"; v[n++] = "-C"; v[n++] = (char *)root; v[n++] = "add"; v[n++] = "--";
-    for (i = 1; i < argc; i++) v[n++] = argv[i];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--owner") && i + 1 < argc) { i++; continue; }
+        v[n++] = argv[i];
+    }
     v[n] = 0;
     rc = runcap(v, buf, sizeof buf);
-    printf("GIT_ADD\trc=%d\tn=%d\n", rc, argc - 1);
+    printf("GIT_ADD\trc=%d\tn=%d\n", rc, npath);
     return rc ? 1 : 0;
 }
 static int git_full_oid(const char *id) {
@@ -3616,6 +3743,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         const char *cwd = 0, *work;
         int count = 0, overflow = 0, nranges = 0, max_c = FL_MAX_ARGV - 20;
         for (int j = 1; j < argc; j++) {
+            if (!strcmp(argv[j], "--owner") && j + 1 < argc) { j++; continue; }
             if (!strcmp(argv[j], "--cwd")) {
                 if (cwd || j + 1 >= argc || !argv[j + 1][0]) { git_argerr = 1; return 2; }
                 const char *d = argv[++j];
@@ -3624,6 +3752,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
                 cwd = cwd_buf;
             }
         }
+        if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PUSH_REFUSE\treason=lock-held\tlock=freeze\n"); return 1; }
         work = cwd ? cwd : root;
         {   char *bv[] = {"git", "-C", (char *)work, "symbolic-ref", "--short", "-q", "HEAD", 0};
             if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "GIT_PUSH_REFUSE\treason=detached-head\tcwd=%s\n", work); return 2; }
@@ -3631,7 +3760,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             F(bfull, sizeof bfull, "refs/heads/%s", cur); }
         for (int j = 1; j < argc; j++) {
             const char *a = argv[j];
-            if (!strcmp(a, "--cwd")) { j++; continue; }
+            if (!strcmp(a, "--cwd") || !strcmp(a, "--owner")) { j++; continue; }
             int is_range = 0;
             if (!strcmp(a, "--range")) {
                 if (j + 1 >= argc || !argv[j + 1][0]) { git_argerr = 1; return 2; }
@@ -3737,30 +3866,48 @@ static int cmd_git(const char *root, int argc, char **argv) {
         if (access(pp, R_OK) != 0) { fprintf(stderr, "devsvc: REFUSE git commit --cwd %s: no unisacc.com at the work tree top (ln -s %s/unisacc.com there; nothing committed)\n", d, root); return 2; }
         F(wcwd, sizeof wcwd, "%s", rd); cwd = wcwd;
     }
-    int freeze_hit = 0;
+    int freeze_hit = 0, pmode = 0;
     static char msg_tr[16384];
-    const char *win_own = devsvc_owner_env();
+    char ci_own[64];
+    int has_ci_own = resolve_owner(argc, argv, ci_own, sizeof ci_own);
     const char *froot = cwd ? cwd : root;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--push")) { push = 1; continue; }
-        if (!strcmp(argv[i], "--cwd")) { i++; continue; }
+        if (!strcmp(argv[i], "--push")) { push = 1; pmode = 0; continue; }
+        if (!strcmp(argv[i], "--cwd") || !strcmp(argv[i], "--owner")) { i++; pmode = 0; continue; }
         if (!strcmp(argv[i], "-m") && i + 1 < argc) {
             if (n + 1 >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
             v[n++] = argv[i++];
-            v[n++] = msg_with_window_trailer(argv[i], win_own, msg_tr, sizeof msg_tr);
+            v[n++] = msg_with_window_trailer(argv[i], has_ci_own ? ci_own : 0, msg_tr, sizeof msg_tr);
+            pmode = 0;
             continue;
         }
-        if (!strcmp(argv[i], "--registered")) { need = "registry"; freeze_hit = 1; }
-        else if ((lf = lock_for(argv[i]))) need = lf;
-        if ((!strcmp(argv[i], "--whole") || !strcmp(argv[i], "--staged") || !strcmp(argv[i], "--keyed")) && i + 1 < argc) {
-            if (freeze_in_domain(froot, argv[i + 1])) freeze_hit = 1;
+        if (!strcmp(argv[i], "--registered") || !strcmp(argv[i], "--new-tool") || !strcmp(argv[i], "--batch") || !strcmp(argv[i], "--merge-continue")) {
+            if (!strcmp(argv[i], "--registered")) need = "registry";
+            freeze_hit = 1; pmode = 0;
+        } else if (!strcmp(argv[i], "--whole") || !strcmp(argv[i], "--staged")) {
+            pmode = 1;
+        } else if (!strcmp(argv[i], "--keyed")) {
+            pmode = 2;
+        } else if (argv[i][0] == '-') {
+            pmode = 0;
+        } else {
+            if ((lf = lock_for(argv[i]))) need = lf;
+            if (pmode == 1) {
+                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
+            } else if (pmode == 2) {
+                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
+                pmode = 3;
+            } else if (pmode == 3) {
+                pmode = 0;
+            }
         }
         if (n >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
         v[n++] = argv[i];
     }
     if (freeze_hit) {
         char fh[64];
-        if (freeze_check(root, auto_owner(), fh, sizeof fh)) {
+        const char *who = has_ci_own ? ci_own : auto_owner();
+        if (freeze_check(root, who, fh, sizeof fh)) {
             fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
             printf("GIT_COMMIT\trc=1\treason=lock-held\tlock=freeze\towner=%s\n", fh);
             return 1;
@@ -4381,12 +4528,16 @@ static int main2(int argc, char **argv) {
         return r;
     }
     if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 && git_argerr ? usage() : r; }   /* 只有参数解析错才贴 usage;已启动的 git 动作保留真实 rc 与诊断 */
-    if (!strcmp(cmd, "register")) return tool_locked(root, "registry", "tools/register.cx", argc, argv);
+    if (!strcmp(cmd, "register")) { if (freeze_refuse_if_held(root, argc, argv)) return 1; return tool_locked(root, "registry", "tools/register.cx", argc, argv); }
     if (!strcmp(cmd, "derive")) return cmd_derive(root, argc, argv);
     if (!strcmp(cmd, "lock") && argc >= 1) {
-        const char *ow = opt(argc, argv, "--owner", "");
+        char ow[64];
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
-        if (argc < 2 || !okname(argv[1]) || !okname(ow)) { fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME --owner O (NAME and O non-empty, under 64 bytes, no spaces)\n"); return usage(); }
+        int is_freeze = argc >= 2 && !strcmp(argv[1], "freeze");
+        if (argc < 2 || !okname(argv[1]) || !resolve_owner_raw(argc, argv, ow, sizeof ow, is_freeze)) {
+            fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME [--owner O] (NAME and O/DEVSVC_OWNER non-empty, under 64 bytes, no spaces)\n");
+            return usage();
+        }
         if (!strcmp(argv[0], "acquire")) {
             const char *lp = opt(argc, argv, "--pid", getenv("DEVSVC_LOCK_PID"));
             int bp = (lp && lp[0]) ? atoi(lp) : 0;

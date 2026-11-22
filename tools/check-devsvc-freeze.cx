@@ -1,8 +1,10 @@
 /* Tool self-check for the devsvc freeze write-window lock (tools/devsvc-repo.tsv + tools/devsvc-core.cx).
- * Verifies: config lock/lockdomain rows, ttl=7200 acquire, non-owner refusal (LOCK_HELD freeze owner=X) on
- * f write/edit and git commit across freeze domain paths (including build/freeze.tsv), owner pass-through
- * without releasing freeze, outside-domain unaffected, worktree sharing the same freeze lock, release
- * recovery, and ttl expiry recovery.
+ * Uses a clean git-archive checkout (real commit-own.cx, no stub) and isolated devsvc instance.
+ * Covers: config lock/lockdomain rows, ttl=7200 acquire & DEVSVC_OWNER acquire, path normalization
+ * (docs/../src/a.txt and symlink lnk -> src), multi-path --whole, git add/merge/register/derive --write,
+ * unified owner resolution (--owner > DEVSVC_OWNER, CLAUDE_JOB_ID no self-lock), case-insensitive owner,
+ * mid-segment negative examples (docs/src/x, tests2/x, release-x/y for M1), worktree shared freeze lock,
+ * release and ttl expiry recovery, real commit-own X-Unisacc-Window trailer and no forged trailer.
  * Check: CHECK_DEVSVC_FREEZE. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -53,10 +55,10 @@ static int runv(char **v, const char *cwd, char **env, int secs, int *rc) {
     return 1;
 }
 
-static int run_dv(const char *cwd, const char *owner, char **args, int *rc) {
+static int run_dv_ex(const char *cwd, const char *owner, const char *job_id, char **args, int *rc) {
     char *v[32]; int n = 0;
-    char e_inst[4300], e_tab[4300], e_own[128], e_tmp[4300], e_home[4300], e_path[4300];
-    char *env[8]; int ne = 0;
+    char e_inst[4300], e_tab[4300], e_own[128], e_job[128], e_tmp[4300], e_home[4300], e_path[4300];
+    char *env[10]; int ne = 0;
     const char *hv = sy_env("HOME"), *pv = sy_env("PATH");
     v[n++] = bin;
     for (int i = 0; args[i] && n < 30; i++) v[n++] = args[i];
@@ -73,8 +75,16 @@ static int run_dv(const char *cwd, const char *owner, char **args, int *rc) {
         if (cx_fmt(e_own, sizeof e_own, "DEVSVC_OWNER=%s", owner)) return 0;
         env[ne++] = e_own;
     }
+    if (job_id && *job_id) {
+        if (cx_fmt(e_job, sizeof e_job, "CLAUDE_JOB_ID=%s", job_id)) return 0;
+        env[ne++] = e_job;
+    }
     env[ne] = 0;
     return runv(v, cwd, env, 55, rc);
+}
+
+static int run_dv(const char *cwd, const char *owner, char **args, int *rc) {
+    return run_dv_ex(cwd, owner, 0, args, rc);
 }
 
 static int wr(const char *dir, const char *rel, const char *txt) {
@@ -85,7 +95,7 @@ static int wr(const char *dir, const char *rel, const char *txt) {
 
 static int sh_in(const char *cwd, const char *cmd) {
     char *v[] = {"sh", "-c", (char *)cmd, 0}; int rc = -1;
-    return runv(v, cwd, 0, 30, &rc) && rc == 0;
+    return runv(v, cwd, 0, 40, &rc) && rc == 0;
 }
 
 int main(int argc, char **argv) {
@@ -111,50 +121,30 @@ int main(int argc, char **argv) {
     if (sy_mkdir_all(repo, 0700) || sy_mkdir_all(inst, 0700)) return 2;
     if (wr(tmp, "new.txt", "updated\n") || wr(tmp, "old.txt", "initial\n") || wr(tmp, "rep.txt", "edited\n")) return 2;
 
-    /* Prepare fixture git repo with real devsvc-repo.tsv and a fast commit-own stub */
+    /* Clean git-archive checkout (real commit-own.cx, cx/, ext/, tools/) + worktree table copy */
     if (cx_fmt(cmd, sizeof cmd,
-               "git init -q && mkdir -p src docs build tools && "
-               "ln -s '%s/unisacc.com' unisacc.com && "
-               "ln -s '%s/tools/devsvc-core.cx' tools/devsvc-core.cx && "
-               "ln -s '%s/cx' cx && ln -s '%s/ext' ext && ln -s '%s/tools/cxlib' tools/cxlib && "
-               "cp '%s/tools/devsvc-repo.tsv' tools/devsvc-repo.tsv",
-               root, root, root, root, root, root) || !sh_in(repo, cmd)) {
-        fprintf(stderr, "setup repo failed: %s\n", out);
+               "git -C '%s' archive HEAD | tar -x -C '%s' && "
+               "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+               "cp '%s/tools/devsvc-repo.tsv' '%s/tools/devsvc-repo.tsv' && "
+               "mkdir -p '%s/docs/src' '%s/tests2' '%s/release-x' && "
+               "ln -s src '%s/lnk'",
+               root, repo, root, repo, root, repo, repo, repo, repo, repo) || !sh_in(root, cmd)) {
+        fprintf(stderr, "setup archive repo failed: %s\n", out);
         return 2;
     }
-    {
-        const char *stub =
-            "#pragma unisa use sys.proc\n"
-            "#pragma unisa use sys.io\n"
-            "#pragma unisa use cxlib.netpack\n"
-            "int main(int argc, char **argv) {\n"
-            "  const char *msg = \"stub\", *path = 0;\n"
-            "  for (int i = 1; i + 1 < argc; i++) {\n"
-            "    if (!strcmp(argv[i], \"-m\")) msg = argv[++i];\n"
-            "    else if (!strcmp(argv[i], \"--whole\")) path = argv[++i];\n"
-            "  }\n"
-            "  if (!path) return 2;\n"
-            "  np_result r = {0}; char why[128];\n"
-            "  char *a[] = {\"git\", \"add\", \"--\", (char *)path, 0};\n"
-            "  if (np_run(a, 0, 0, 20, &r, why, sizeof why) || r.rc) return 1;\n"
-            "  np_free(&r);\n"
-            "  char *c[] = {\"git\", \"-c\", \"user.name=fx\", \"-c\", \"user.email=fx@localhost\", \"-c\", \"commit.gpgsign=false\", \"commit\", \"-qm\", (char *)msg, \"--\", (char *)path, 0};\n"
-            "  if (np_run(c, 0, 0, 20, &r, why, sizeof why) || r.rc) return 1;\n"
-            "  np_free(&r);\n"
-            "  char *h[] = {\"git\", \"rev-parse\", \"HEAD\", 0};\n"
-            "  if (np_run(h, 0, 0, 20, &r, why, sizeof why) || r.rc || r.outn < 40) return 1;\n"
-            "  r.out[40] = 0;\n"
-            "  printf(\"COMMIT_LANDED\\tfull=%s\\n\", r.out);\n"
-            "  np_free(&r);\n"
-            "  return 0;\n"
-            "}\n";
-        if (wr(repo, "tools/commit-own.cx", stub) ||
-            wr(repo, "src/a.txt", "initial\n") ||
-            wr(repo, "docs/note.txt", "initial\n") ||
-            wr(repo, "build/freeze.tsv", "# empty\n")) return 2;
-    }
-    if (!sh_in(repo, "git add src docs build tools/devsvc-repo.tsv tools/commit-own.cx && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm init")) {
+    if (wr(repo, "src/a.txt", "initial\n") ||
+        wr(repo, "docs/note.txt", "initial\n") ||
+        wr(repo, "docs/src/x.txt", "initial\n") ||
+        wr(repo, "tests2/x.txt", "initial\n") ||
+        wr(repo, "release-x/y.txt", "initial\n") ||
+        wr(repo, "build/freeze.tsv", "# empty\n")) return 2;
+    if (!sh_in(repo, "git init -q -b main && git add -A && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm init")) {
         fprintf(stderr, "setup init commit failed: %s\n", out);
+        return 2;
+    }
+    /* Create a side branch for git merge refusal test */
+    if (!sh_in(repo, "git checkout -q -b side-br && printf 'side\\n' > docs/side.txt && git add docs/side.txt && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm side && git checkout -q main")) {
+        fprintf(stderr, "setup side branch failed: %s\n", out);
         return 2;
     }
     if (cx_fmt(cmd, sizeof cmd, "git worktree add -q -b wt-branch '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com'", wt, root, wt) ||
@@ -163,13 +153,13 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* (1) config includes freeze lock and domain (also warms run-cache for src_core) */
+    /* (1) config includes freeze lock and domain */
     { char *a[] = {"config", 0};
       ck("config-has-freeze", run_dv(repo, "integ", a, &rc) && rc == 0 &&
          has(out, "CFG\tlock\tfreeze\n") &&
          has(out, "CFG\tlockdomain\tfreeze\tsrc/,cx/,ext/,include/,seed/,exec/,kernel/,weights/,tests/,release/,build/freeze.tsv\n")); }
 
-    /* Start isolated devsvc instance via prepared native binary (milliseconds) */
+    /* Start isolated devsvc instance via prepared native binary */
     {
         char scmd[4800];
         if (cx_fmt(scmd, sizeof scmd,
@@ -183,70 +173,105 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* (2) acquire freeze with ttl=7200 */
-    { char *a[] = {"lock", "acquire", "freeze", "--owner", "integ", "--ttl", "7200", 0};
-      ck("acquire-ttl-7200", run_dv(repo, "integ", a, &rc) && rc == 0 && has(out, "OK\tacquired\tfreeze\towner=integ")); }
+    /* (2) acquire freeze via DEVSVC_OWNER (no --owner flag) with ttl=7200 and uppercase normalization */
+    { char *a[] = {"lock", "acquire", "freeze", "--ttl", "7200", 0};
+      ck("acquire-via-env-ttl-7200", run_dv(repo, "Integ", a, &rc) && rc == 0 && has(out, "OK\tacquired\tfreeze\towner=integ")); }
 
     /* (3) non-owner f write in freeze domain refused */
     { char *a[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
-      size_t n = 0; char *cur;
+      size_t n = 0; char *cur; char p[4500];
       int ok = run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
-      char p[4500]; cx_fmt(p, sizeof p, "%s/src/a.txt", repo);
+      cx_fmt(p, sizeof p, "%s/src/a.txt", repo);
       cur = cx_read(p, &n);
       ok = ok && cur && n == 8 && mm_same(cur, "initial\n", 8);
       free(cur);
       ck("non-owner-f-write-refused", ok); }
 
-    /* (4) non-owner f edit in freeze domain refused */
-    { char *a[] = {"f", "edit", "src/a.txt", "--old-file", f_old, "--new-file", f_rep, 0};
-      ck("non-owner-f-edit-refused", run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ")); }
+    /* (4) CONFIRMED (1): path traversal docs/../src/a.txt refused */
+    { char *a[] = {"f", "write", "docs/../src/a.txt", "--from", f_new, 0};
+      ck("non-owner-dotdot-traversal-refused", run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ")); }
 
-    /* (5) non-owner git commit in freeze domain refused and produces no commit */
-    { char h0[64], h1[64]; char *a[] = {"git", "commit", "-m", "blocked commit", "--whole", "src/a.txt", 0};
+    /* (5) CONFIRMED (2): symlink bypass lnk/a.txt and non-existent lnk/new-file.txt refused */
+    { char *a1[] = {"f", "write", "lnk/a.txt", "--from", f_new, 0};
+      char *a2[] = {"f", "write", "lnk/new-file.txt", "--from", f_new, 0};
+      int ok1 = run_dv(repo, "worker1", a1, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok2 = ok1 && run_dv(repo, "worker1", a2, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("non-owner-symlink-bypass-refused", ok2); }
+
+    /* (6) non-owner f edit & build/freeze.tsv refused */
+    { char *a1[] = {"f", "edit", "src/a.txt", "--old-file", f_old, "--new-file", f_rep, 0};
+      char *a2[] = {"f", "write", "build/freeze.tsv", "--from", f_new, 0};
+      int ok1 = run_dv(repo, "worker1", a1, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok2 = ok1 && run_dv(repo, "worker1", a2, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("non-owner-edit-and-freeze-tsv-refused", ok2); }
+
+    /* (7) CONFIRMED (3): git commit --whole multi-path (outside + inside) refused and HEAD unchanged */
+    { char h0[64], h1[64];
+      char *a[] = {"git", "commit", "-m", "multi blocked", "--whole", "docs/note.txt", "src/a.txt", 0};
       int ok0 = sh_in(repo, "git rev-parse HEAD");
       mm_copy(h0, sizeof h0, out, 40); h0[40] = 0;
       int ok1 = ok0 && run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok2 = ok1 && sh_in(repo, "git rev-parse HEAD");
       mm_copy(h1, sizeof h1, out, 40); h1[40] = 0;
-      ck("non-owner-git-commit-refused", ok2 && mm_same(h0, h1, 40)); }
+      ck("non-owner-commit-multi-whole-refused", ok2 && mm_same(h0, h1, 40)); }
 
-    /* (6) non-owner f write build/freeze.tsv refused */
-    { char *a[] = {"f", "write", "build/freeze.tsv", "--from", f_new, 0};
-      ck("non-owner-build-freeze-refused", run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ")); }
+    /* (8) CONFIRMED (4): other write channels (git add, git merge, register, derive --write) refused for non-owner */
+    { char *aa[] = {"git", "add", "src/a.txt", 0};
+      char *am[] = {"git", "merge", "side-br", "-m", "blocked merge", 0};
+      char *ar[] = {"register", "dummy", "tools/check-dummy.cx", "DUMMY", "desc", "tools/dummy.cx", 0};
+      char *ad[] = {"derive", "--write", "--only", "table-index", 0};
+      int ok1 = run_dv(repo, "worker1", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok2 = ok1 && run_dv(repo, "worker1", am, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok3 = ok2 && run_dv(repo, "worker1", ar, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok4 = ok3 && run_dv(repo, "worker1", ad, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("non-owner-other-write-channels-refused", ok4); }
 
-    /* (7) non-owner outside domain unaffected (f write + git commit) */
-    { char *aw[] = {"f", "write", "docs/note.txt", "--from", f_new, 0};
-      char *ac[] = {"git", "commit", "-m", "outside domain ok", "--whole", "docs/note.txt", 0};
-      int ok1 = run_dv(repo, "worker1", aw, &rc) && rc == 0;
-      int ok2 = ok1 && run_dv(repo, "worker1", ac, &rc) && rc == 0;
-      ck("non-owner-outside-domain-allowed", ok2); }
+    /* (9) CONFIRMED (9) M1 killer: outside-domain & mid-segment paths (docs/src/x.txt, tests2/x.txt, release-x/y.txt) allowed */
+    { char *a1[] = {"f", "write", "docs/src/x.txt", "--from", f_new, 0};
+      char *a2[] = {"f", "write", "tests2/x.txt", "--from", f_new, 0};
+      char *a3[] = {"f", "write", "release-x/y.txt", "--from", f_new, 0};
+      char *aw[] = {"f", "write", "docs/note.txt", "--from", f_new, 0};
+      char *ac[] = {"git", "commit", "-m", "outside domain real commit", "--whole", "docs/note.txt", 0};
+      int ok1 = run_dv(repo, "worker1", a1, &rc) && rc == 0;
+      int ok2 = ok1 && run_dv(repo, "worker1", a2, &rc) && rc == 0;
+      int ok3 = ok2 && run_dv(repo, "worker1", a3, &rc) && rc == 0;
+      int ok4 = ok3 && run_dv(repo, "worker1", aw, &rc) && rc == 0;
+      int ok5 = ok4 && run_dv(repo, "worker1", ac, &rc) && rc == 0;
+      ck("non-owner-outside-and-mid-segment-allowed", ok5); }
 
-    /* (8) holder owner allowed (f write + git commit), trailer X-Unisacc-Window recorded, and freeze lock stays held */
-    { char *aw[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
-      char *ac[] = {"git", "commit", "-m", "owner commit ok", "--whole", "src/a.txt", 0};
+    /* (10) CONFIRMED (5): CLAUDE_JOB_ID set without DEVSVC_OWNER, integrator passes --owner integ on f write & git commit without self-lock */
+    { char *aw[] = {"f", "write", "src/a.txt", "--from", f_new, "--owner", "integ", 0};
+      char *ac[] = {"git", "commit", "--owner", "integ", "-m", "owner flag real commit", "--whole", "src/a.txt", 0};
+      int ok1 = run_dv_ex(repo, 0, "job123", aw, &rc) && rc == 0;
+      int ok2 = ok1 && run_dv_ex(repo, 0, "job123", ac, &rc) && rc == 0;
+      int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && has(out, "X-Unisacc-Window: integ");
+      ck("integrator-owner-flag-no-self-lock", ok3); }
+
+    /* (11) CONFIRMED (6): case-insensitive owner (DEVSVC_OWNER=Integ) allowed, normalized lowercase trailer, lock stays held */
+    { char *aw[] = {"f", "write", "src/a.txt", "--from", f_rep, 0};
+      char *ac[] = {"git", "commit", "-m", "case norm real commit", "--whole", "src/a.txt", 0};
       char *al[] = {"lock", "list", 0};
-      int ok1 = run_dv(repo, "integ", aw, &rc) && rc == 0;
-      int ok2 = ok1 && run_dv(repo, "integ", ac, &rc) && rc == 0;
+      int ok1 = run_dv(repo, "Integ", aw, &rc) && rc == 0;
+      int ok2 = ok1 && run_dv(repo, "Integ", ac, &rc) && rc == 0;
       int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && has(out, "X-Unisacc-Window: integ");
       int ok4 = ok3 && run_dv(repo, "integ", al, &rc) && rc == 0 && has(out, "LOCK\tfreeze\towner=integ\t");
-      ck("owner-allowed-trailer-and-lock-kept", ok4); }
+      ck("owner-case-insensitive-trailer-and-lock-kept", ok4); }
 
-    /* (9) worktree shares the same freeze lock: non-owner f write refused */
-    { char *a[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
-      ck("worktree-non-owner-f-write-refused", run_dv(wt, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ")); }
+    /* (12) worktree shares the same freeze lock: non-owner f write & git commit --cwd refused */
+    { char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
+      char *ac[] = {"git", "commit", "--cwd", wt, "-m", "wt blocked", "--whole", "src/a.txt", 0};
+      int ok1 = run_dv(wt, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok2 = ok1 && run_dv(repo, "worker1", ac, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("worktree-shared-lock-refuses-non-owner", ok2); }
 
-    /* (10) worktree shares the same freeze lock: non-owner git commit --cwd refused */
-    { char *a[] = {"git", "commit", "--cwd", wt, "-m", "wt blocked", "--whole", "src/a.txt", 0};
-      ck("worktree-non-owner-git-commit-refused", run_dv(repo, "worker1", a, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ")); }
-
-    /* (11) release freeze recovers both worktree and main */
-    { char *ar[] = {"lock", "release", "freeze", "--owner", "integ", 0};
+    /* (13) release freeze recovers worktree & main */
+    { char *ar[] = {"lock", "release", "freeze", "--owner", "INTEG", 0};
       char *aw[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
       int ok1 = run_dv(repo, "integ", ar, &rc) && rc == 0 && has(out, "OK\treleased\tfreeze");
       int ok2 = ok1 && run_dv(wt, "worker1", aw, &rc) && rc == 0;
       ck("release-recovers-worktree", ok2); }
 
-    /* (12) ttl expiry automatically recovers */
+    /* (14) ttl expiry automatically recovers */
     { char *aq[] = {"lock", "acquire", "freeze", "--owner", "integ", "--ttl", "1", 0};
       char *aw[] = {"f", "write", "src/a.txt", "--from", f_old, 0};
       int ok1 = run_dv(repo, "integ", aq, &rc) && rc == 0;
@@ -255,9 +280,9 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && run_dv(repo, "worker1", aw, &rc) && rc == 0;
       ck("ttl-expiry-recovers", ok3); }
 
-    /* (13) missing DEVSVC_OWNER does not forge X-Unisacc-Window trailer */
+    /* (15) CONFIRMED (11): real commit-own without DEVSVC_OWNER or --owner does not forge X-Unisacc-Window trailer */
     { char *aw[] = {"f", "write", "docs/note.txt", "--from", f_rep, 0};
-      char *ac[] = {"git", "commit", "-m", "no owner trailer", "--whole", "docs/note.txt", 0};
+      char *ac[] = {"git", "commit", "-m", "no owner real commit", "--whole", "docs/note.txt", 0};
       int ok1 = run_dv(repo, 0, aw, &rc) && rc == 0;
       int ok2 = ok1 && run_dv(repo, 0, ac, &rc) && rc == 0;
       int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && !has(out, "X-Unisacc-Window:");
