@@ -1,0 +1,272 @@
+/* tools/session-mirror.cx -- mirror Claude Code project transcripts for wipe recovery.
+ *
+ *   sh ./unisacc.com tools/session-mirror.cx -- [--src DIR] [--mirror DIR] run|status|restore DEST
+ *
+ * Defaults: SRC=$HOME/.claude/projects/-home-devali-repos-unisacc
+ *           MIRROR=$HOME/.local/state/unisacc/claude-project-mirror
+ * Marker SRC/.mirror-gen = generation N; trees at MIRROR/gen-N/.
+ *
+ * run: missing marker -> MIRROR_RESET and gen=max+1 (write marker); else use N.
+ *   Hard-link non-memory files (sy_link; same inode skip; cross-device REFUSE).
+ *   memory/ byte-copied. Prune MIRROR/gen-* older than 3 days. Write last-run.txt.
+ * status: gen=,gens=,files=,bytes=,last_run=,marker_ok=
+ * restore DEST (must not exist): latest gen; per file:
+ *   no SRC -> copy mirror; SRC size>=mir -> copy SRC; SRC size<mir -> mirror||SRC (old+tail).
+ * --mutant-skip-marker: test hook, skip reset on missing marker.
+ * Check: tools/check-session-mirror.cx (batch session-mirror). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define SM_KEEP (3 * 86400)
+#define SM_PATH 1024
+#define SM_MARK ".mirror-gen"
+
+static char g_src[SM_PATH], g_mir[SM_PATH];
+static int g_mutant;
+static long g_files, g_bytes;
+
+static int die(const char *m) { fprintf(stderr, "session-mirror: %s\n", m); return 2; }
+
+static int defaults(void) {
+    const char *h = sy_env("HOME");
+    if (!h || !h[0]) return -1;
+    if (!g_src[0] && cx_fmt(g_src, sizeof g_src, "%s/.claude/projects/-home-devali-repos-unisacc", h)) return -1;
+    if (!g_mir[0] && cx_fmt(g_mir, sizeof g_mir, "%s/.local/state/unisacc/claude-project-mirror", h)) return -1;
+    return 0;
+}
+
+static int read_gen(const char *path, int *out) {
+    unsigned char *b; int64_t n; int v = 0, i = 0;
+    if (sy_read_file(path, &b, &n, 64) < 0 || !b || n <= 0) return -1;
+    while (i < (int)n && b[i] >= '0' && b[i] <= '9') { v = v * 10 + (b[i] - '0'); i++; }
+    mm_free(b);
+    if (!i || v < 1) return -1;
+    *out = v; return 0;
+}
+static int write_gen(const char *path, int n) {
+    char buf[32];
+    if (cx_fmt(buf, sizeof buf, "%d\n", n)) return -1;
+    return sy_write_file(path, buf, tx_len(buf, sizeof buf), 0644);
+}
+static int is_mem(const char *rel) {
+    return tx_prefix(rel, tx_len(rel, SM_PATH), "memory/", 7) || tx_eqz(rel, "memory");
+}
+static int ensure_parent(const char *path) {
+    char dir[SM_PATH]; long n = tx_len(path, SM_PATH), i;
+    if (n <= 0 || n >= SM_PATH) return -1;
+    for (i = 0; i < n; i++) dir[i] = path[i];
+    while (n > 1 && dir[n - 1] != '/') n--;
+    if (n <= 1) return 0;
+    dir[n] = 0;
+    return sy_mkdir_all(dir, 0700);
+}
+static int link_skip(const char *from, const char *to) {
+    sy_stat_t a, b; int rc;
+    if (sy_lstat(from, &a)) return -1;
+    if (sy_lstat(to, &b) == 0) {
+        if (b.kind == 'f' && a.dev == b.dev && a.ino == b.ino) return 0;
+        if (sy_unlink(to)) return -1;
+    }
+    if (ensure_parent(to)) return -1;
+    rc = sy_link(from, to);
+    if (rc == -EEXIST && sy_lstat(to, &b) == 0 && a.dev == b.dev && a.ino == b.ino) return 0;
+    return rc;
+}
+static int sync_one(const char *sroot, const char *groot, const char *rel) {
+    char from[SM_PATH], to[SM_PATH]; sy_stat_t st;
+    if (cx_fmt(from, sizeof from, "%s/%s", sroot, rel) || cx_fmt(to, sizeof to, "%s/%s", groot, rel)) return -1;
+    if (sy_lstat(from, &st) || st.kind != 'f') return 0;
+    if (is_mem(rel)) {
+        if (ensure_parent(to) || sy_copy(from, to, 0644)) return -1;
+    } else if (link_skip(from, to)) {
+        fprintf(stderr, "session-mirror: REFUSE hardlink %s\n", from); return -1;
+    }
+    g_files++; g_bytes += st.size > 0 ? st.size : 0; return 0;
+}
+static int walk(const char *sroot, const char *groot, const char *rel, int depth) {
+    char dir[SM_PATH]; sy_dir_t d; int n, rc;
+    if (depth > 64) return -ELOOP;
+    if (rel[0]) { if (cx_fmt(dir, sizeof dir, "%s/%s", sroot, rel)) return -1; }
+    else if (cx_fmt(dir, sizeof dir, "%s", sroot)) return -1;
+    if ((rc = sy_dir_open(&d, dir))) return rc;
+    for (;;) {
+        char crel[SM_PATH], cabs[SM_PATH]; sy_stat_t st;
+        n = sy_dir_next(&d);
+        if (n < 0) { rc = n; break; }
+        if (n == 0) { rc = 0; break; }
+        if (tx_eqz(d.name, SM_MARK)) continue;
+        if (rel[0]) { if (cx_fmt(crel, sizeof crel, "%s/%s", rel, d.name)) { rc = -ENAMETOOLONG; break; } }
+        else if (cx_fmt(crel, sizeof crel, "%s", d.name)) { rc = -ENAMETOOLONG; break; }
+        if (cx_fmt(cabs, sizeof cabs, "%s/%s", sroot, crel)) { rc = -ENAMETOOLONG; break; }
+        if (sy_lstat(cabs, &st)) continue;
+        if (st.kind == 'd') { if ((rc = walk(sroot, groot, crel, depth + 1))) break; }
+        else if (st.kind == 'f') { if ((rc = sync_one(sroot, groot, crel))) break; }
+    }
+    sy_dir_close(&d); return rc;
+}
+static int max_gen(void) {
+    sy_dir_t d; int max = 0, n;
+    if (sy_dir_open(&d, g_mir)) return 0;
+    for (;;) {
+        n = sy_dir_next(&d); if (n <= 0) break;
+        if (tx_prefix(d.name, d.name_n, "gen-", 4)) {
+            int v = 0, i = 4;
+            while (i < d.name_n && d.name[i] >= '0' && d.name[i] <= '9') { v = v * 10 + (d.name[i] - '0'); i++; }
+            if (i == d.name_n && v > max) max = v;
+        }
+    }
+    sy_dir_close(&d); return max;
+}
+static void prune(void) {
+    sy_dir_t d; int n; long now = sy_now_ms() / 1000;
+    if (sy_dir_open(&d, g_mir)) return;
+    for (;;) {
+        char path[SM_PATH]; sy_stat_t st;
+        n = sy_dir_next(&d); if (n <= 0) break;
+        if (!tx_prefix(d.name, d.name_n, "gen-", 4)) continue;
+        if (cx_fmt(path, sizeof path, "%s/%s", g_mir, d.name)) continue;
+        if (sy_lstat(path, &st) || st.kind != 'd') continue;
+        if (st.mtime > 0 && now - st.mtime > SM_KEEP) { printf("MIRROR_PRUNE\t%s\n", path); sy_remove_all(path); }
+    }
+    sy_dir_close(&d);
+}
+static int cmd_run(void) {
+    char mark[SM_PATH], groot[SM_PATH], last[SM_PATH], stamp[64];
+    int gen = 0, reset = 0;
+    if (sy_mkdir_all(g_mir, 0700)) return die("mkdir mirror");
+    if (cx_fmt(mark, sizeof mark, "%s/%s", g_src, SM_MARK)) return die("mark");
+    if (read_gen(mark, &gen)) {
+        if (g_mutant) { gen = max_gen(); if (gen < 1) gen = 1; }
+        else {
+            reset = 1; gen = max_gen() + 1; if (gen < 1) gen = 1;
+            if (write_gen(mark, gen)) return die("write marker");
+            printf("MIRROR_RESET\tgen=%d\n", gen);
+        }
+    }
+    if (cx_fmt(groot, sizeof groot, "%s/gen-%d", g_mir, gen)) return die("gen");
+    if (sy_mkdir_all(groot, 0700)) return die("mkdir gen");
+    g_files = g_bytes = 0;
+    if (walk(g_src, groot, "", 0)) return die("sync");
+    prune();
+    if (cx_fmt(stamp, sizeof stamp, "%ld\n", sy_now_ms() / 1000) || cx_fmt(last, sizeof last, "%s/last-run.txt", g_mir)) return die("stamp");
+    if (sy_write_file(last, stamp, tx_len(stamp, sizeof stamp), 0644)) return die("last-run");
+    printf("MIRROR_RUN\tgen=%d\tfiles=%ld\tbytes=%ld\treset=%d\n", gen, g_files, g_bytes, reset);
+    return 0;
+}
+static long count_tree(const char *root, int depth) {
+    sy_dir_t d; int n; long files = 0;
+    if (depth > 64 || sy_dir_open(&d, root)) return 0;
+    for (;;) {
+        char p[SM_PATH]; sy_stat_t st;
+        n = sy_dir_next(&d); if (n <= 0) break;
+        if (cx_fmt(p, sizeof p, "%s/%s", root, d.name)) continue;
+        if (sy_lstat(p, &st)) continue;
+        if (st.kind == 'f') { files++; g_bytes += st.size > 0 ? st.size : 0; }
+        else if (st.kind == 'd') files += count_tree(p, depth + 1);
+    }
+    sy_dir_close(&d); return files;
+}
+static int cmd_status(void) {
+    char mark[SM_PATH]; int gen = 0, mok = 0, gens = 0; long files = 0, last = 0;
+    sy_dir_t d; int n;
+    if (cx_fmt(mark, sizeof mark, "%s/%s", g_src, SM_MARK) == 0 && read_gen(mark, &gen) == 0) mok = 1;
+    g_bytes = 0;
+    if (sy_dir_open(&d, g_mir) == 0) {
+        for (;;) {
+            char gp[SM_PATH];
+            n = sy_dir_next(&d); if (n <= 0) break;
+            if (!tx_prefix(d.name, d.name_n, "gen-", 4)) continue;
+            gens++;
+            if (cx_fmt(gp, sizeof gp, "%s/%s", g_mir, d.name) == 0) files += count_tree(gp, 0);
+        }
+        sy_dir_close(&d);
+    }
+    {
+        char lastp[SM_PATH]; unsigned char *b; int64_t bn;
+        if (cx_fmt(lastp, sizeof lastp, "%s/last-run.txt", g_mir) == 0 && sy_read_file(lastp, &b, &bn, 64) >= 0 && b) {
+            int i = 0; while (i < (int)bn && b[i] >= '0' && b[i] <= '9') { last = last * 10 + (b[i] - '0'); i++; }
+            mm_free(b);
+        }
+    }
+    printf("MIRROR_STATUS\tgen=%d\tgens=%d\tfiles=%ld\tbytes=%ld\tlast_run=%ld\tmarker_ok=%s\n",
+           gen, gens, files, g_bytes, last, mok ? "yes" : "no");
+    return 0;
+}
+static int merge_write(const char *mir, const char *src, const char *dst) {
+    unsigned char *mb = 0, *sb = 0; int64_t mn = 0, sn = 0; char *out; long on; int rc;
+    sy_stat_t ms, ss;
+    if (sy_lstat(mir, &ms)) return -1;
+    if (sy_lstat(src, &ss) == 0 && ss.kind == 'f' && ss.size >= ms.size) {
+        if (ensure_parent(dst)) return -1;
+        return sy_copy(src, dst, 0644);
+    }
+    if (sy_read_file(mir, &mb, &mn, 1 << 26) < 0) return -1;
+    if (sy_lstat(src, &ss) == 0 && ss.kind == 'f' && sy_read_file(src, &sb, &sn, 1 << 26) < 0) { mm_free(mb); return -1; }
+    on = (long)mn + (long)sn;
+    out = (char *)mm_alloc(on > 0 ? on : 1);
+    if (!out) { mm_free(mb); if (sb) mm_free(sb); return -1; }
+    if (mn) mm_copy(out, on, (char *)mb, (long)mn);
+    if (sn) mm_copy(out + mn, on - (long)mn, (char *)sb, (long)sn);
+    if (ensure_parent(dst)) { rc = -1; }
+    else rc = sy_write_file(dst, out, on, 0644);
+    mm_free(out); mm_free(mb); if (sb) mm_free(sb); return rc;
+}
+static int restore_walk(const char *groot, const char *dest, const char *rel, int depth) {
+    char dir[SM_PATH]; sy_dir_t d; int n, rc;
+    if (depth > 64) return -ELOOP;
+    if (rel[0]) { if (cx_fmt(dir, sizeof dir, "%s/%s", groot, rel)) return -1; }
+    else if (cx_fmt(dir, sizeof dir, "%s", groot)) return -1;
+    if ((rc = sy_dir_open(&d, dir))) return rc;
+    for (;;) {
+        char crel[SM_PATH], mf[SM_PATH], sf[SM_PATH], df[SM_PATH]; sy_stat_t st;
+        n = sy_dir_next(&d);
+        if (n < 0) { rc = n; break; }
+        if (n == 0) { rc = 0; break; }
+        if (rel[0]) { if (cx_fmt(crel, sizeof crel, "%s/%s", rel, d.name)) { rc = -ENAMETOOLONG; break; } }
+        else if (cx_fmt(crel, sizeof crel, "%s", d.name)) { rc = -ENAMETOOLONG; break; }
+        if (cx_fmt(mf, sizeof mf, "%s/%s", groot, crel) || cx_fmt(sf, sizeof sf, "%s/%s", g_src, crel) ||
+            cx_fmt(df, sizeof df, "%s/%s", dest, crel)) { rc = -ENAMETOOLONG; break; }
+        if (sy_lstat(mf, &st)) continue;
+        if (st.kind == 'd') {
+            if (sy_mkdir_all(df, 0700) || (rc = restore_walk(groot, dest, crel, depth + 1))) break;
+        } else if (st.kind == 'f') {
+            if ((rc = merge_write(mf, sf, df))) break;
+            g_files++;
+        }
+    }
+    sy_dir_close(&d); return rc;
+}
+static int cmd_restore(const char *dest) {
+    char groot[SM_PATH]; sy_stat_t st; int gen;
+    if (!dest || !dest[0]) return die("restore DEST");
+    if (sy_lstat(dest, &st) == 0) return die("REFUSE restore: DEST exists");
+    gen = max_gen(); if (gen < 1) return die("no generation");
+    if (cx_fmt(groot, sizeof groot, "%s/gen-%d", g_mir, gen)) return die("gen");
+    if (sy_mkdir_all(dest, 0700)) return die("mkdir DEST");
+    g_files = 0;
+    if (restore_walk(groot, dest, "", 0)) return die("restore");
+    printf("MIRROR_RESTORE\tgen=%d\tfiles=%ld\tdest=%s\n", gen, g_files, dest);
+    return 0;
+}
+int main(int argc, char **argv) {
+    const char *cmd = 0, *dest = 0; int i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--src") && i + 1 < argc) { if (cx_fmt(g_src, sizeof g_src, "%s", argv[++i])) return die("src"); }
+        else if (tx_eqz(argv[i], "--mirror") && i + 1 < argc) { if (cx_fmt(g_mir, sizeof g_mir, "%s", argv[++i])) return die("mirror"); }
+        else if (tx_eqz(argv[i], "--mutant-skip-marker")) g_mutant = 1;
+        else if (tx_eqz(argv[i], "run") || tx_eqz(argv[i], "status") || tx_eqz(argv[i], "restore")) {
+            cmd = argv[i];
+            if (tx_eqz(cmd, "restore")) { if (i + 1 >= argc) return die("restore DEST"); dest = argv[++i]; }
+        } else return die("usage: [--src DIR] [--mirror DIR] run|status|restore DEST");
+    }
+    if (!cmd) return die("usage: [--src DIR] [--mirror DIR] run|status|restore DEST");
+    if (defaults()) return die("HOME");
+    if (tx_eqz(cmd, "run")) return cmd_run();
+    if (tx_eqz(cmd, "status")) return cmd_status();
+    return cmd_restore(dest);
+}

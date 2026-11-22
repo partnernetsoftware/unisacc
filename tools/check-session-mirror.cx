@@ -1,0 +1,141 @@
+/* tools/check-session-mirror.cx -- fixture tests for tools/session-mirror.cx (never touches ~/.claude).
+ *
+ *   sh ./unisacc.com tools/check-session-mirror.cx
+ *
+ * Builds SRC/MIRROR under $TMPDIR, asserts hardlink inode match, memory copy,
+ * wipe+short-tail restore merge (old||tail), and mutant-skip-marker must not
+ * emit MIRROR_RESET (detection required). Ends with CHECK_SESSION_MIRROR. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char out[1 << 16];
+static int pass_n, fail_n;
+
+static int sh(const char *cmd) {
+    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};
+    return sy_run(a, out, sizeof out, 0);
+}
+static void ok(const char *name, int cond) {
+    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
+    if (cond) pass_n++; else fail_n++;
+}
+static int has(const char *s) {
+    return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 200)) >= 0;
+}
+
+int main(void) {
+    char root[1024], cwd[1024], cmd[4096], src[1100], mir[1100], dest[1100];
+    sy_stat_t a, b; int rc;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (sh("pwd") != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+
+    cx_fmt(cmd, sizeof cmd, "mktemp -d %s/session-mirror-check-XXXXXX", td);
+    if (sh(cmd) != 0) return 2;
+    cx_fmt(root, sizeof root, "%s", out);
+    { long n = tx_len(root, sizeof root); while (n > 0 && root[n - 1] == '\n') root[--n] = 0; }
+    if (cx_fmt(src, sizeof src, "%s/src", root) || cx_fmt(mir, sizeof mir, "%s/mir", root) ||
+        cx_fmt(dest, sizeof dest, "%s/dest", root)) return 2;
+
+    /* seed SRC */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/memory' '%s/sess1'; "
+        "printf 'OLDSEG\\n' > '%s/chat.jsonl'; "
+        "printf 'MEM1\\n' > '%s/memory/notes.txt'; "
+        "printf 'S1\\n' > '%s/sess1/a.jsonl'",
+        src, src, src, src, src);
+    ok("fixture-seed", sh(cmd) == 0);
+
+    /* first run -> reset gen=1 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("run-reset", rc == 0 && has("MIRROR_RESET") && has("gen=1"));
+
+    /* hardlink same inode */
+    cx_fmt(cmd, sizeof cmd, "%s/chat.jsonl", src);
+    ok("stat-src-chat", sy_lstat(cmd, &a) == 0);
+    cx_fmt(cmd, sizeof cmd, "%s/gen-1/chat.jsonl", mir);
+    ok("stat-mir-chat", sy_lstat(cmd, &b) == 0);
+    ok("hardlink-inode", a.dev == b.dev && a.ino == b.ino);
+
+    /* memory is a distinct inode (copy) */
+    cx_fmt(cmd, sizeof cmd, "%s/memory/notes.txt", src);
+    ok("stat-src-mem", sy_lstat(cmd, &a) == 0);
+    cx_fmt(cmd, sizeof cmd, "%s/gen-1/memory/notes.txt", mir);
+    ok("stat-mir-mem", sy_lstat(cmd, &b) == 0);
+    ok("memory-copied", !(a.dev == b.dev && a.ino == b.ino) && a.size == b.size);
+
+    /* idempotent second run */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("run-idempotent", rc == 0 && !has("MIRROR_RESET") && has("reset=0"));
+
+    /* wipe SRC, rebuild with short tail only */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; rm -rf '%s'; mkdir -p '%s'; printf 'NEWTAIL\\n' > '%s/chat.jsonl'",
+        src, src, src);
+    ok("wipe-rebuild-tail", sh(cmd) == 0);
+
+    /* mutant: skip marker detect -> no MIRROR_RESET (wrong) */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' --mutant-skip-marker run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("mutant-skip-marker-no-reset", rc == 0 && !has("MIRROR_RESET"));
+
+    /* real run after wipe -> must RESET to gen=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("wipe-detect-reset", rc == 0 && has("MIRROR_RESET") && has("gen=2"));
+
+    /* restore merge: need latest gen with OLDSEG still in gen-1; restore uses max gen.
+       Put OLDSEG back into gen-2 chat via linking from a rebuilt long file for merge test:
+       recreate SRC short, ensure gen-2 has short only; copy OLD into gen-1 already.
+       For merge we need mirror file longer than SRC: use gen-1 as latest by removing gen-2? 
+       Simpler: write long content into current max gen chat, keep SRC short. */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'OLDSEGMENT\n' > '%s/gen-2/chat.jsonl'; printf 'TAIL\n' > '%s/chat.jsonl'",
+        mir, mir, src);
+    ok("prep-restore", sh(cmd) == 0);
+
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' restore '%s'",
+        cwd, cwd, src, mir, dest);
+    rc = sh(cmd);
+    ok("restore-rc", rc == 0 && has("MIRROR_RESTORE"));
+    {
+        unsigned char *b; int64_t n;
+        char path[1200];
+        cx_fmt(path, sizeof path, "%s/chat.jsonl", dest);
+        ok("restore-read", sy_read_file(path, &b, &n, 4096) >= 0 && b);
+        if (b) {
+            ok("restore-old-plus-tail", n == 16 && b[0] == 'O' && b[10] == '\n' && b[11] == 'T');
+            /* OLDSEGMENT\n (11) + TAIL\n (5) = 16 */
+            mm_free(b);
+        } else ok("restore-old-plus-tail", 0);
+    }
+
+    /* status */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' status",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("status-line", rc == 0 && has("MIRROR_STATUS"));
+
+    sy_remove_all(root);
+    printf("SESSION_MIRROR_SUMMARY\tfailed=%d\tpassed=%d\n", fail_n, pass_n);
+    if (!fail_n) printf("CHECK_SESSION_MIRROR\n");
+    return fail_n ? 1 : 0;
+}
