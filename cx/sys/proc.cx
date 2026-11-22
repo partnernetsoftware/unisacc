@@ -265,14 +265,23 @@ typedef struct {
     long deadline_ms;     /* 0: none; otherwise kill the process group on expiry */
 } sy_spawn_t;
 
+typedef struct { int exited; int code; int sig; int timed_out; int raw; } sy_exit_t;
+
+/* Handle state (plans/v0.0.94.md 八).  LIVE is 0 so a memset handle is LIVE.  REAPED means the
+   child was waited for here: the pid is no longer ours, and no call below signals or waits on
+   it again.  This is a runtime check, not compile-time ownership: it cannot stop another path
+   (sy_wait_any on a bare pid) from reaping the child first, nor does it cover the bare-pid
+   entry points sy_kill/sy_signal/sy_wait. */
+enum { SY_CHILD_LIVE = 0, SY_CHILD_REAPED = 1 };
+
 typedef struct {
     int pid;
     int in_fd, out_fd, err_fd;   /* parent ends of PIPE stdio, else -1 */
     long deadline_at_ms;         /* sy_now_ms() at expiry, 0 none */
     int h;                       /* process group to signal (0: the pid alone) */
+    int state;                   /* SY_CHILD_LIVE (0, a memset handle) or SY_CHILD_REAPED */
+    sy_exit_t exit;              /* the status kept once REAPED; see sy_proc_wait */
 } sy_child_t;
-
-typedef struct { int exited; int code; int sig; int timed_out; int raw; } sy_exit_t;
 
 /* Both capture streams of one call (plans/v0.0.94.md 七).  The caller mg_init's the two
    buffers before the call and mg_free's them after; SPLIT 1 sends stderr to ERR, 0 merges
@@ -371,6 +380,8 @@ static void syp_child_exec_os(const sy_spawn_t *o, int group, int *pi, int *po, 
 static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     if (!o || !c || !o->argv || !o->argv[0]) return -EINVAL;
     c->pid = 0; c->in_fd = c->out_fd = c->err_fd = -1; c->deadline_at_ms = 0; c->h = 0;
+    c->state = SY_CHILD_LIVE;
+    c->exit.exited = 0; c->exit.code = 0; c->exit.sig = 0; c->exit.timed_out = 0; c->exit.raw = 0;
 #if defined(_WIN32)
     return -ENOSYS;
 #else
@@ -426,25 +437,38 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
 }
 int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) { return syp_proc_spawn_os(o, c); }
 
-/* Signal the child (its whole group when it has one). 0, or -errno (-ESRCH once gone). */
+/* Signal the child (its whole group when it has one). 0, or -errno.  A REAPED handle makes no
+   system call at all: the pid may already belong to another process, so this is -ESRCH. */
 int sy_proc_kill(sy_child_t *c, int sig) {
     if (!c || c->pid <= 0) return -EINVAL;
+    if (c->state == SY_CHILD_REAPED) return -ESRCH;
     errno = 0;
     if (c->h > 0) { if (kill(-(pid_t)c->h, sig) == 0) return 0; if (errno != ESRCH) return -errno; }
     errno = 0;
     return kill((pid_t)c->pid, sig) == 0 ? 0 : (errno ? -errno : -EIO);
 }
 
+/* Wait once for the child.  1 reaped (the status is kept in C->exit), 0 still running, -errno.
+   A REAPED handle answers from the kept status and never calls waitpid on the old pid. */
 static int syp_reap(sy_child_t *c, int nohang, sy_exit_t *st) {
     int raw;
     pid_t w;
+    if (c->state == SY_CHILD_REAPED) {
+        if (st) *st = c->exit;
+        return 1;
+    }
     for (;;) {
         w = waitpid((pid_t)c->pid, &raw, nohang ? WNOHANG : 0);
         if (w == (pid_t)c->pid) break;
         if (w == 0) return 0;
         if (errno != EINTR) return -errno;
     }
-    if (st) sy_exit_decode(raw, st);
+    if (sy_exit_decode(raw, &c->exit) != 0) {
+        c->exit.exited = 0; c->exit.code = 0; c->exit.sig = 0;
+        c->exit.timed_out = 0; c->exit.raw = raw;
+    }
+    c->state = SY_CHILD_REAPED;
+    if (st) *st = c->exit;
     return 1;
 }
 

@@ -156,7 +156,7 @@ int main(void) {
             sy_close(c.in_fd); c.in_fd = -1;
             slurp(c.out_fd, got, sizeof got); c.out_fd = -1;
             ck(tx_eq(got, "ping", 8) && sy_proc_wait(&c, &st) == 0 && st.exited && st.code == 0, "stdin-pipe-echo-wait");
-            ck(sy_proc_wait(&c, &st) < 0, "wait-twice-errno");
+            ck(sy_proc_wait(&c, &st) == 0 && st.exited && st.code == 0, "wait-twice-kept-status");
         }
         {   char *v[] = {"sh", "-c", "sleep 30", 0}; long t0 = sy_now_ms(), dt;
             sy_spawn_init(&o); o.argv = v; o.pgroup = -1; o.deadline_ms = 200;
@@ -171,6 +171,33 @@ int main(void) {
             r = sy_proc_spawn(&o, &c);
             ck(r == 0 && sy_proc_kill(&c, SIGTERM) == 0 && sy_proc_wait(&c, &st) == 0 && st.exited == 0 && st.sig == 15 && sy_exit_code(&st) == 143 && st.timed_out == 0, "kill-term-group-128-plus-sig");
             ck(sy_proc_kill(&c, SIGTERM) == -ESRCH, "kill-after-reap-esrch");
+        }
+        {   /* Z5: the same, 200 times -- the pre-fix race (a reaped pid reused by another
+               process made the kill return 0 or -EPERM) fired 2 in 200 here. */
+            int t, bad = 0;
+            for (t = 0; t < 200; t++) {
+                char *v2[] = {"sh", "-c", "sleep 30", 0};
+                sy_spawn_init(&o); o.argv = v2; o.pgroup = -1;
+                if (sy_proc_spawn(&o, &c) != 0) { bad += 1000; continue; }
+                sy_proc_kill(&c, SIGTERM);
+                sy_proc_wait(&c, &st);
+                if (sy_proc_kill(&c, SIGTERM) != -ESRCH) bad++;
+            }
+            ck(bad == 0, "kill-after-reap-esrch-repeat");
+            if (bad != 0) printf("NOTE\tspawn.kill-after-reap-esrch-repeat\tbad=%d\n", bad);
+        }
+        {   /* Z5: a REAPED handle answers wait/try_wait from the kept status, not waitpid. */
+            char *v3[] = {"sh", "-c", "exit 9", 0};
+            sy_exit_t st2; int k;
+            sy_spawn_init(&o); o.argv = v3; o.out_fd = SY_STDIO_NULL;
+            r = sy_proc_spawn(&o, &c);
+            for (k = 0; r == 0 && sy_proc_try_wait(&c, &st) == 0 && k < 500; k++) sy_sleep_ms(5);
+            ck(r == 0 && st.exited && st.code == 9, "status-after-try-wait");
+            st2.exited = 0; st2.code = -1; st2.sig = 0; st2.timed_out = 0; st2.raw = 0;
+            ck(sy_proc_try_wait(&c, &st2) == 1 && st2.exited && st2.code == 9, "try-wait-again-from-handle");
+            sy_proc_close(&c);
+            st2.exited = 0; st2.code = -1; st2.sig = 0; st2.timed_out = 0; st2.raw = 0;
+            ck(sy_proc_wait(&c, &st2) == 0 && st2.exited && st2.code == 9, "wait-again-from-handle");
         }
         {   char *v[] = {"sh", "-c", "exit 7", 0}; int k = 0;
             sy_spawn_init(&o); o.argv = v; o.out_fd = SY_STDIO_NULL;
