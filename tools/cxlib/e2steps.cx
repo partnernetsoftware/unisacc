@@ -1,0 +1,65 @@
+/* e2steps -- the e2 step-count side channel shared by tools/unit-e2-compare.cx and tools/pp-equiv.cx.
+ * Use it with `#pragma unisa use cxlib.e2steps` from a tool in tools/.  Every name starts with e2s_.
+ *   e2s_steps_of(ERR, N)            the e2 step count printed by `stream e2` on stderr when UNISACC_RR_TIME=1 (the
+ *                                   RR_TIME line with stage=e2 and steps=N; the last one wins); -1 when absent
+ *   e2s_err_norm(S, N, OUT, CAP)    stderr without its RR_TIME lines, every other byte kept (they carry nanoseconds and never match between
+ *                                   two runs), NUL ended in OUT; returns the byte count kept
+ *   e2s_ledger_sum(TEXT, N, S)      S is long[5]: folds every ledger row of the form "... steps=A/B ..." into S[0..4]:
+ *                                   rows, moved (A != B), grew (B > A), sum_a, sum_b (in that order)
+ * A step count is a signal about one e2 run, not a verdict: callers compare the output frames for SAME/DIFF and only
+ * report the counts.  No exported objects or macros (CXIF v0). */
+#pragma unisa module e2steps
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+long e2s_steps_of(const char *err, size_t errn) {
+    const char *hit = 0;
+    for (const char *p = err; p < err + errn; ) {
+        const char *e = memchr(p, '\n', (size_t)(err + errn - p));
+        long l = e ? (long)(e - p) : (long)(err + errn - p);
+        if (tx_find(p, l, "stage=e2", 8) >= 0 && tx_find(p, l, "steps=", 6) >= 0) hit = p;
+        p += l + (e ? 1 : 0);
+    }
+    if (!hit) return -1;
+    const char *s = strstr(hit, "steps=");
+    if (!s) return -1;
+    s += 6;
+    if (*s < '0' || *s > '9') return -1;
+    long v = 0;
+    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+    return v;
+}
+
+size_t e2s_err_norm(const char *s, size_t n, char *out, size_t cap) {
+    size_t at = 0;
+    for (size_t i = 0; i < n; ) {
+        size_t j = i;
+        while (j < n && s[j] != '\n') j++;
+        int rr = j - i >= 7 && !memcmp(s + i, "RR_TIME", 7) && (j - i == 7 || s[i + 7] == '\t' || s[i + 7] == ' ');
+        size_t e = j + (j < n ? 1 : 0);
+        if (!rr) for (size_t k = i; k < e && at + 1 < cap; k++) out[at++] = s[k];
+        i = e;
+    }
+    if (at < cap) out[at] = 0;
+    return at;
+}
+
+void e2s_ledger_sum(const char *text, size_t n, long *sum) {
+    for (const char *p = text; p < text + n; ) {
+        const char *e = memchr(p, '\n', (size_t)(text + n - p));
+        long l = e ? (long)(e - p) : (long)(text + n - p);
+        long at = tx_find(p, l, " steps=", 7);
+        if (at >= 0) {
+            long a = 0, b = 0;
+            const char *q = p + at + 7;
+            while (q < p + l && *q >= '0' && *q <= '9') a = a * 10 + (*q++ - '0');
+            if (q < p + l && *q == '/') q++;
+            while (q < p + l && *q >= '0' && *q <= '9') b = b * 10 + (*q++ - '0');
+            sum[0]++;
+            sum[3] += a;
+            sum[4] += b;
+            if (a != b) { sum[1]++; if (b > a) sum[2]++; }
+        }
+        p += l + (e ? 1 : 0);
+    }
+}

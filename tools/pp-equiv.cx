@@ -4,6 +4,7 @@
  *   sh ./unisacc.com tools/pp-equiv.cx -- manifest [--root DIR] [--strata S,..] [--modes M,..] [--out FILE]
  *   sh ./unisacc.com tools/pp-equiv.cx -- run --ape APE --models-a A --models-b B --manifest M --ledger DIR
  *                                           [--root DIR] [--budget-ms 45000] [--jobs N] [--side-secs 4]
+ *                                           [--steps 1]   (e2 rows also record each side's step count, steps=A/B in the detail; E rows: n/a)
  *   sh ./unisacc.com tools/pp-equiv.cx -- status --manifest M --ledger DIR --models-a A --models-b B
  *                                           [--waivers FILE] [--today YYYY-MM-DD]
  *
@@ -46,6 +47,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.e2steps
 
 #define MAXROWS 16384
 #define MAXPATH 480
@@ -292,11 +294,13 @@ static void pack_id(const char *pack, char out[65]) {
 
 /* ---- one item ---- */
 typedef struct { int started; pr_result r; } Side;
+static int g_rr;   /* --steps 1: ask each e2 side for its step count (RR_TIME on stderr); E mode has no steps */
 static void side_run(const char *ape, const char *pack, const char *mode, const char *file, const char *root, int secs, Side *s) {
     char *av[40], src[1100];
     int n = 0;
     FMT(src, "PPEQ_SRC=%s", file);
-    char *env[] = {"UNISACC_RUN_CACHE=0", src, 0};
+    char *env[] = {"UNISACC_RUN_CACHE=0", src, "UNISACC_RR_TIME=1", 0};
+    if (!(g_rr && !strcmp(mode, "e2"))) env[2] = 0;   /* the variable must be absent, not empty, when steps are not asked for */
     if (!strcmp(mode, "e2")) {
         av[n++] = "/bin/sh"; av[n++] = "-c"; av[n++] = "exec \"$@\" < \"$PPEQ_SRC\""; av[n++] = "sh";
         av[n++] = "/bin/sh"; av[n++] = (char *)ape; av[n++] = "stream"; av[n++] = "e2"; av[n++] = "--level"; av[n++] = "1";
@@ -314,7 +318,8 @@ static int same_bytes(const char *a, size_t an, const char *b, size_t bn) { retu
 
 static void item(const Row *r, const char *ape, const char *pa, const char *pb, const char *ida, const char *idb,
                  const char *root, const char *ledger, int secs, const char *tmpd) {
-    char file[1100], key[1500], line[3000], detail[300];
+    char file[1100], key[1500], line[3000], detail[400];
+    static char e1[1 << 20], e2[1 << 20];
     const char *status = "SAME", *reason = "-";
     Side x = {0}, y = {0};
     if (starts(r->path, "hdr:")) {
@@ -334,11 +339,19 @@ static void item(const Row *r, const char *ape, const char *pa, const char *pb, 
     } else {
         int rc_same = x.r.rc == y.r.rc;
         int out_same = same_bytes(x.r.out, x.r.outn, y.r.out, y.r.outn);
-        int err_same = same_bytes(x.r.err, x.r.errn, y.r.err, y.r.errn);
+        int use_rr = g_rr && !strcmp(r->mode, "e2");
+        long sa = -1, sb = -1;
+        int err_same;
+        if (use_rr) {   /* the step lines carry ns and must not decide the verdict */
+            size_t n1 = e2s_err_norm(x.r.err, x.r.errn, e1, sizeof e1), n2 = e2s_err_norm(y.r.err, y.r.errn, e2, sizeof e2);
+            err_same = same_bytes(e1, n1, e2, n2);
+            sa = e2s_steps_of(x.r.err, x.r.errn); sb = e2s_steps_of(y.r.err, y.r.errn);
+        } else err_same = same_bytes(x.r.err, x.r.errn, y.r.err, y.r.errn);
         char hx[65], hy[65];
         sha_of(x.r.out, x.r.outn, hx);
         sha_of(y.r.out, y.r.outn, hy);
         FMT(detail, "rc=%d/%d out=%zu/%zu err=%zu/%zu sha=%.12s/%.12s", x.r.rc, y.r.rc, x.r.outn, y.r.outn, x.r.errn, y.r.errn, hx, hy);
+        if (use_rr && sa >= 0 && sb >= 0) { size_t dl = strlen(detail); FMTC(detail + dl, sizeof detail - dl, " steps=%ld/%ld", sa, sb); }
         if (!rc_same || !out_same || !err_same) {
             status = "DIFF";
             reason = !rc_same ? "rc" : !out_same ? "stdout" : "stderr";
@@ -365,6 +378,7 @@ static int cmd_run(int argc, char **argv) {
     const char *xroot = opt(argc, argv, "--exec-root", ".");
     long budget = atol(opt(argc, argv, "--budget-ms", "45000")), jobs = atol(opt(argc, argv, "--jobs", "1"));
     int secs = atoi(opt(argc, argv, "--side-secs", "4")), shard = atoi(opt(argc, argv, "--shard", "0")), shards = atoi(opt(argc, argv, "--shards", "1"));
+    g_rr = atoi(opt(argc, argv, "--steps", "0"));
     need(ape && pa && pb && mf && ledger, "run needs --ape --models-a --models-b --manifest --ledger");
     need(jobs >= 1 && jobs <= 32 && secs >= 1 && shards >= 1 && shard >= 0 && shard < shards, "bad numeric option");
     if (jobs > 1) {
@@ -381,7 +395,7 @@ static int cmd_run(int argc, char **argv) {
             FMT(bud, "%ld", budget);
             FMT(ss, "%d", secs);
             char *v[] = {"sh", rt, self, "--", "run", "--ape", (char *)ape, "--models-a", (char *)pa, "--models-b", (char *)pb, "--manifest", (char *)mf,
-                         "--ledger", (char *)ledger, "--root", (char *)root, "--exec-root", (char *)xroot, "--budget-ms", bud, "--side-secs", ss, "--shard", sh[i], "--shards", js, 0};
+                         "--ledger", (char *)ledger, "--root", (char *)root, "--exec-root", (char *)xroot, "--budget-ms", bud, "--side-secs", ss, "--shard", sh[i], "--shards", js, "--steps", g_rr ? "1" : "0", 0};
             sy_spawn_init(&o);
             o.argv = v; o.cwd = xroot; o.pgroup = -1; o.deadline_ms = budget + 2L * secs * 1000 + 8000;
             need(sy_proc_spawn(&o, &ch[i]) == 0, "spawn worker");
@@ -501,6 +515,23 @@ static int cmd_status(int argc, char **argv) {
         else unmeasured++;
     }
     int complete = pending == 0 && diff == 0 && unmeasured == 0;
+    if (atoi(opt(argc, argv, "--steps", "0"))) {   /* e2 rows only; E rows carry no step count */
+        long acc[5] = {0, 0, 0, 0, 0};
+        for (int i = 0; i < nrows; i++) {
+            int dup = 0;
+            for (int j = 0; j < i && !dup; j++) dup = !strcmp(rows[j].stratum, rows[i].stratum);
+            if (dup) continue;
+            char path[1024];
+            FMT(path, "%s/%s.tsv", ledger, rows[i].stratum);
+            if (sy_is_reg(path) != 1) continue;
+            size_t n = 0;
+            char *text = cx_read(path, &n);
+            if (!text) continue;
+            e2s_ledger_sum(text, n, acc);
+            mm_free(text);
+        }
+        printf("STEPS_SUM\trows=%ld\tstep_moved=%ld\tstep_grew=%ld\tsteps_a=%ld\tsteps_b=%ld\n", acc[0], acc[1], acc[2], acc[3], acc[4]);
+    }
     printf("PP_EQUIV\tmanifest=%s\ttotal=%d\tsame=%d\trefuse_pp=%d\tdiff=%d\tunmeasured=%d\twaived=%d\tpending=%d\tCOMPLETE=%s\n",
            msha, nrows, same, refuse_pp, diff, unmeasured, waived, pending, complete ? "yes" : "no");
     return complete ? 0 : 1;
