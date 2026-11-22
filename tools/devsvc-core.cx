@@ -2368,15 +2368,49 @@ static int parse_pos_long(const char *s, size_t len, long *out) {
     if (out) *out = v;
     return 1;
 }
-static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
-    int rc; const char *s, *e; char nown[64], nhold[64], lp[PW], fzp[PW];
-    int has_own = norm_owner(owner, nown, sizeof nown);
-    int fz_active = 0;
-    if (holder && hcap > 0) holder[0] = 0;
-    if (root && root[0] && snprintf(fzp, sizeof fzp, "%s/build/freeze.tsv", root) < (int)sizeof fzp) {
-        int fx = sy_exists(fzp);
-        if (fx != 0) fz_active = 1;
+/* 0: absent or only expired/comment rows; 1: at least one unexpired freeze row; -1: unreadable or malformed. */
+static int freeze_tsv_state(const char *root) {
+    char fzp[PW];
+    if (!root || !root[0] || cx_fmt(fzp, sizeof fzp, "%s/build/freeze.tsv", root)) return 0;
+    int fx = sy_exists(fzp);
+    if (fx == 0) return 0;
+    if (fx < 0) return -1;
+    unsigned char *b = 0; int64_t bn = 0;
+    if (sy_read_file(fzp, &b, &bn, 1 << 16) || !b) return -1;
+    long now = sy_wall_s();
+    int active = 0;
+    for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll > 0 && p[0] != '#') {
+            /* columns: 0=sid, 1=base, 2=owner, 3=deadline_epoch_s, 4=paths */
+            const char *q = p, *le = p + ll;
+            int col = 0;
+            const char *ds = 0; size_t dl = 0;
+            while (q <= le) {
+                const char *tab = memchr(q, '\t', (size_t)(le - q));
+                const char *ce = tab ? tab : le;
+                if (col == 3) { ds = q; dl = (size_t)(ce - q); break; }
+                col++;
+                if (!tab) break;
+                q = tab + 1;
+            }
+            long dl_s = 0;
+            if (!ds || !parse_pos_long(ds, dl, &dl_s)) { free(b); return -1; }
+            if (dl_s > now) active = 1;
+        }
+        p = nl ? nl + 1 : end;
     }
+    free(b);
+    return active;
+}
+
+static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
+    int rc; const char *s, *e; char nown[64], nhold[64], lp[PW];
+    int has_own = norm_owner(owner, nown, sizeof nown);
+    int fz_state = freeze_tsv_state(root);
+    if (holder && hcap > 0) holder[0] = 0;
     char fhold[64]; int have_fhold = 0;
     fhold[0] = 0;
     /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;
@@ -2444,6 +2478,10 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         }
     }
     rc = request(root, "lock-list", 0);
+    if (rc != 0 && fz_state != 0) {
+        const char *no_as = getenv("DEVSVC_NO_AUTOSTART");
+        if (!no_as || !no_as[0]) rc = request(root, "lock-list", 1);
+    }
     if (rc == 0) {
         for (s = resp; s && *s; s = e ? e + 1 : 0) {
             e = strchr(s, '\n');
@@ -2470,7 +2508,7 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         if (has_own && !strcmp(fhold, nown)) return 0;
         return 1;
     }
-    if (rc != 0 && fz_active) {
+    if (rc != 0 && fz_state != 0) {
         if (holder && hcap > 0) snprintf(holder, hcap, "freeze-svc-unreachable");
         return 1;
     }
@@ -2480,7 +2518,10 @@ static int freeze_refuse_if_held(const char *root, int argc, char **argv) {
     char ow[64], fh[64];
     const char *who = resolve_owner(argc, argv, ow, sizeof ow) ? ow : auto_owner();
     if (freeze_check(root, who, fh, sizeof fh)) {
-        fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
+        if (!strcmp(fh, "freeze-svc-unreachable"))
+            fprintf(stderr, "LOCK_HELD freeze owner=%s reason=autostart-failed recover=\"sh ./unisacc.com tools/devsvc.cx -- start\"\n", fh);
+        else
+            fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
         return 1;
     }
     return 0;

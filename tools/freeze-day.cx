@@ -27,7 +27,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 
-enum { FD_MAX_FR = 32, FD_STEPS = 23 };
+enum { FD_MAX_FR = 32, FD_STEPS = 24 };
 
 typedef struct {
     char id[64];
@@ -43,9 +43,10 @@ typedef struct {
 } step_spec_t;
 
 static const step_spec_t g_specs[FD_STEPS] = {
-    { "S0-preview",     "integrator",  60,   "MERGE_VERSION\tverdict=READY" },
-    { "S0-gates",       "integrator",  300,  "MERGE_GATE\tratchets-total" },
-    { "S0-lock",        "integrator",  60,   "FREEZE_BROADCAST" },
+    { "S0-preview",      "integrator",  60,   "MERGE_VERSION\tverdict=READY" },
+    { "S0-gates",        "integrator",  300,  "MERGE_GATE\tratchets-total" },
+    { "S0-devsvc-alive", "integrator",  30,   "OK\tpong" },
+    { "S0-lock",         "integrator",  60,   "FREEZE_BROADCAST" },
     { "S0-merge",       "integrator",  300,  "GIT_COMMIT\trc=0" },
     { "S0-verify-tree", "integrator",  15,   "MERGE_TREE_MATCH" },
     { "S0-freeze-slot", "integrator",  120,  "11-version-slot\tPASS" },
@@ -361,14 +362,17 @@ static int cmd_plan(int argc, char **argv) {
                 branch, chain_dir, branch, chain_dir, branch, chain_dir, branch, chain_dir, branch, chain_dir);
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
             if (fr_is_bad("merge-s0-tree")) { is_blk = 1; add_reason(why, sizeof why, "merge-s0-tree"); }
-        } else if (i == 2) { /* S0-lock */
+        } else if (i == 2) { /* S0-devsvc-alive */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/devsvc.cx -- ping || (sh ./unisacc.com tools/devsvc.cx -- start && sh ./unisacc.com tools/devsvc.cx -- ping)");
+        } else if (i == 3) { /* S0-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 && "
                 "sh ./unisacc.com tools/freeze-broadcast.cx -- start --lock freeze --from %s",
                 owner, owner, owner);
             if (fr_is_bad("devsvc-freeze")) { is_blk = 1; add_reason(why, sizeof why, "devsvc-freeze"); }
             if (fr_is_bad("hardlink-trees")) { is_blk = 1; add_reason(why, sizeof why, "hardlink-trees"); }
-        } else if (i == 3) { /* S0-merge */
+        } else if (i == 4) { /* S0-merge */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git merge --no-ff %s # branch_sha=%s merge_tree=%s && "
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git push",
@@ -380,7 +384,7 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("merge-s0-tree")) { is_blk = 1; add_reason(why, sizeof why, "merge-s0-tree"); }
             if (fr_is_bad("ahead-origin")) { is_blk = 1; add_reason(why, sizeof why, "ahead-origin"); }
             if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
-        } else if (i == 4) { /* S0-verify-tree */
+        } else if (i == 5) { /* S0-verify-tree */
             cx_fmt(cmd, sizeof cmd,
                 "t=$(git rev-parse HEAD^{tree}); case \"$t\" in %s*) echo \"MERGE_TREE_MATCH $t\" ;; *) echo \"MERGE_TREE_MISMATCH head=$t expect=%s\"; exit 1 ;; esac",
                 merge_tree, merge_tree);
@@ -388,7 +392,7 @@ static int cmd_plan(int argc, char **argv) {
                 is_blk = 1;
                 add_reason(why, sizeof why, "head-tree-mismatch");
             }
-        } else if (i == 5) { /* S0-freeze-slot */
+        } else if (i == 6) { /* S0-freeze-slot */
             cx_fmt(cmd, sizeof cmd,
                 "# write build/freeze.tsv %s row (col3==DEVSVC_OWNER==UNISACC_INTEGRATOR==%s lowercase); "
                 "update release/candidate.tsv (%s -> %s); fill freeze_at in plans/v%s.md; "
@@ -398,42 +402,42 @@ static int cmd_plan(int argc, char **argv) {
             if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
             if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
-        } else if (i == 6) { /* S1-light */
+        } else if (i == 7) { /* S1-light */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 1-rev,2-worktree,6-installed,7-recipe,8-smoke-env,9-ledger,10-envhygiene,11-version-slot,12-freeze-tsv,13-deferred-gates,14-hardlink-trees,21-verseq-gen",
                 ver);
             if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
             if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
-        } else if (i == 7) { /* S1-mid */
+        } else if (i == 8) { /* S1-mid */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 3-ratchets,4-derive,15-premerge,16-release-prep,17-prerun-inputs,18-batch-domains,19-tables-gen,20-layer-api,22-premerge-union",
                 ver);
             if (fr_is_bad("ratchets")) { is_blk = 1; add_reason(why, sizeof why, "ratchets"); }
-        } else if (i == 8) { /* S1-chain */
+        } else if (i == 9) { /* S1-chain */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 5-candidate-chain # solo <=55s (baseline 53.5s)",
                 ver);
-        } else if (i == 9) { /* S2 */
+        } else if (i == 10) { /* S2 */
             cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bg-candidate.cx -- start --version %s --dir %s", ver, chain_dir);
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
-        } else if (i == 10) { /* S3-inputs */
+        } else if (i == 11) { /* S3-inputs */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/prerun-inputs.cx -- --rev %s --version %s --prev %s --prev-rev %s --ape %s --dir %s",
                 branch_sha, ver, prev_ver, prev_sha, ape_path, prerun_dir);
             if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
-        } else if (i == 11) { /* S3-run */
+        } else if (i == 12) { /* S3-run */
             cx_fmt(cmd, sizeof cmd,
                 "# precheck uptime load1<8 (if load1>12 downgrade to --window-lanes 2 --max-jobs 6); "
                 "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s/ids.txt --times-file %s/times.tsv --priority-file %s/priority.tsv --out %s --normal-jobs 8 --window-lanes 3 && "
                 "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate %s --out %s --resume --max-jobs 8 --window-lanes 3 --keep-going "
                 "# judge: PRERUN_SUMMARY 0 FAIL, UNKNOWN only in expected-unmeasured.tsv, verify l0-posix2 first-run result",
                 prerun_dir, prerun_dir, prerun_dir, prerun_dir, ape_path, prerun_dir);
-        } else if (i == 12) { /* S3b */
+        } else if (i == 13) { /* S3b */
             cx_fmt(cmd, sizeof cmd, "gh workflow run candidate-native.yml --ref %s", branch);
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
-        } else if (i == 13) { /* S3c */
+        } else if (i == 14) { /* S3c */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/check-release-prep.cx -- --part notes --notes release/notes-%s.md && "
                 "sh ./unisacc.com tools/check-release-prep.cx -- --part rollback --rollback release/rollback.txt",
@@ -442,25 +446,25 @@ static int cmd_plan(int argc, char **argv) {
             if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
             if (fr_is_bad("release-prep-notes")) { is_blk = 1; add_reason(why, sizeof why, "release-prep-notes"); }
             if (fr_is_bad("release-prep-rollback")) { is_blk = 1; add_reason(why, sizeof why, "release-prep-rollback"); }
-        } else if (i == 14) { /* S4 */
+        } else if (i == 15) { /* S4 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/prerun-drive.cx -- merge --in %s --out %s --version %s && "
                 "sh ./unisacc.com tools/prerun-drive.cx -- archive --in %s --version %s",
                 prerun_dir, prerun_dir, ver, prerun_dir, ver);
-        } else if (i == 15) { /* S4b-renew-lock */
+        } else if (i == 16) { /* S4b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 # renew before S5 (<90m)",
                 owner, owner);
-        } else if (i == 16) { /* S5 */
+        } else if (i == 17) { /* S5 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-run.cx -- --pack --version %s && "
                 "sh ./unisacc.com tools/release-exec.cx -- --warm --version %s",
                 ver, ver);
-        } else if (i == 17) { /* S6 */
+        } else if (i == 18) { /* S6 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 1 --step 2 --inputs %s --state %s/state.tsv --layout %s",
                 ver, prerun_dir, chain_dir, chain_dir);
-        } else if (i == 18) { /* S7 */
+        } else if (i == 19) { /* S7 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 3 --inputs %s --state %s/state.tsv --layout %s "
                 "# stage release/notes-%s.md release/rollback.txt release/decision.txt",
@@ -468,19 +472,19 @@ static int cmd_plan(int argc, char **argv) {
             if (!has_notes) { is_blk = 1; add_reason(why, sizeof why, "missing-notes-template"); }
             if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
             if (!has_dec) { is_blk = 1; add_reason(why, sizeof why, "missing-decision-template"); }
-        } else if (i == 19) { /* S8 */
+        } else if (i == 20) { /* S8 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 4 --inputs %s --state %s/state.tsv --layout %s",
                 ver, prerun_dir, chain_dir, chain_dir);
-        } else if (i == 20) { /* S8b-renew-lock */
+        } else if (i == 21) { /* S8b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 # renew before S9 execute",
                 owner, owner);
-        } else if (i == 21) { /* S9 */
+        } else if (i == 22) { /* S9 */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg sh ./unisacc.com tools/release-exec.cx -- --execute --version %s",
                 owner, ver);
-        } else if (i == 22) { /* S10 */
+        } else if (i == 23) { /* S10 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-post.cx -- run --version %s --dry && "
                 "sh ./unisacc.com tools/freeze-broadcast.cx -- end --dry --from %s",
