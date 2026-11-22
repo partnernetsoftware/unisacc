@@ -66,7 +66,7 @@ CX2a = 共享 `src/cxmod.c` + 两端前端接线 + 两旗标 + `tests/flownetw0.
 
 `-run` 在编译路线上发布 `\0cli/run-forward`（1 字节，值 1），`st_span` 停在 e3，然后弹出这一条。侧车魔数是 `USLFW1`。没有记录时从 `prune` 接着跑（`level` 大于 0 时从 `e4`）。有记录时生成桩，调用 `fwd_incremental` 一次。桩自己的磁带路线会再走 e1 和 e3。主程序不调用第二次 `main`。`fwd_incremental` 返回 0 时写 `forwarding increment refused` 并停，不重跑整程序 e3。回调参数直接拒绝。入口 `use` 了 `compiler.fwdsig`、`compiler.fwdstub`、`compiler.fwdmerge`、`compiler.fwdincrement`。
 
-`cx/compiler/fwdmerge.cx` 的类型名从 `Buf` 改成 `FwmBuf`。布局没变：两个指针，然后两个 int。原来的名字和 `core.execute` 的 `Buf` 撞车，入口闭包编不过。`tools/check-compiler-units.cx` 只改了这个类型名。这份检查这次没重跑。
+`cx/compiler/fwdmerge.cx` 的类型名从 `Buf` 改成 `FwmBuf`。布局没变：两个指针，然后两个 int。原来的名字和 `core.execute` 的 `Buf` 撞车，入口闭包编不过。`archive/reference-c/tools/check-compiler-units.cx` 只改了这个类型名。这份检查这次没重跑。
 
 `sh ./tools/bound 55 sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx` 退出 0，stdout 和 stderr 都是 0。产物 985206 字节。冷耗时 37485744965 纳秒。没设 `UNISACC_RR_TIME`。
 
