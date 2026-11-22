@@ -17,10 +17,11 @@ static int shader_chunk_compile(const char *dir) {
         "if(op==1){return ShaderChunk_init(0,a);}\n"
         "if(op==2){return ShaderChunk_register(0,a,b,c,d);}\n"
         "if(op==3){return ShaderChunk_expand(a,b,0,c,d,6000);}\n"
+        "if(op==4){return ShaderChunk_unrollLoops(a,b,c,d,6000);}\n"
         "return 0-1;\n";
     if(sy_write_file(header,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
-    char *args[]={"./ujs/ujs2wasm.com",header,"ujs/practice/uxe/base/record-copy.ujs",
-        "ujs/practice/uxe/base/shader-chunk.ujs",driver,"-o",wasm,0};
+    char *args[]={"/bin/sh","./ujs/ujs2wasm.com",header,"ujs/practice/uxe/base/record-copy.ujs",
+        "ujs/practice/uxe/base/shader-chunk.ujs","ujs/practice/uxe/base/shader-chunk-unroll.ujs",driver,"-o",wasm,0};
     char *out=0;
     size_t bytes=0;
     int rc=cx_runv_timeout(args,8,&out,&bytes);
@@ -31,18 +32,20 @@ static int shader_chunk_compile(const char *dir) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int verify=argc==2 && tx_eqz(argv[1],"--verify-unroll-negative");
+    if(argc!=1 && !mutate && !verify) return 2;
     char dir[256],cwd[460],url[840];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-shader-chunk-",dir,sizeof dir)) return 2;
     int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/shader-chunk-r160.html?dir=%s%s",
-        cwd,dir,mutate?"&mutate=1":"");
-    const double gold[]={128,64,191,255,1,1,128,64,191,255,1,1,1,1,1,1,1,1,1,1,1,1};
+        cwd,dir,mutate?"&mutate=1":verify?"&mutateLoop=1":"");
+    const double gold[]={128,64,191,255,1,1,128,64,191,255,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
     enum { count=sizeof gold/sizeof gold[0] };
     double values[count]={0};
     int failed=n<0 || n>=sizeof url || shader_chunk_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
     for(int i=0;!failed && i<count;i++) {
-        if(values[i]!=gold[i]) {
-            printf("SHADER_CHUNK case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
+        const double expected=verify && i==count-2?0:gold[i];
+        if(values[i]!=expected) {
+            printf("SHADER_CHUNK case=%d actual=%.17g gold=%.17g\n",i,values[i],expected);
             failed=1;
         }
     }

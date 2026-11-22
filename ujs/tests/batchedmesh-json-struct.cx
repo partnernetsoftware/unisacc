@@ -1,0 +1,48 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+int main(int argc,char **argv) {
+    const int negative=argc==2 && tx_eqz(argv[1],"--verify-negative");
+    if(argc!=1 && !negative) return 2;
+    const char *expected="{\"drawRanges\":[{\"start\":0,\"count\":3},{\"start\":3,\"count\":6}],"
+        "\"reservedRanges\":[{\"vertexStart\":0,\"vertexCount\":3,\"indexStart\":0,\"indexCount\":3},"
+        "{\"vertexStart\":3,\"vertexCount\":4,\"indexStart\":3,\"indexCount\":6}],"
+        "\"visibility\":[false,true],\"active\":[true,true]}";
+    uint64_t gold=0;
+    for(int i=0;expected[i];i++) gold=(gold*131+(unsigned char)expected[i])%16777213;
+    char dir[240],wasm[300],cwd[380],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-batch-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" TEST "batchedmesh-json-r160.html?wasm=%s&mutate=%d",cwd,wasm,negative);
+    char *compile[]={"/bin/sh","./ujs/ujs2wasm.com",TEST "batchedmesh-json-abi.ujs",
+        BASE "batchedmesh.ujs",BASE "json-read.ujs",BASE "json-bytes.ujs",BASE "object-json-tokens.ujs",
+        BASE "batchedmesh-json-ranges.ujs",BASE "batchedmesh-json-read.ujs",TEST "batchedmesh-json-probe.ujs",
+        "-o",wasm,0};
+    int failed=length<0 || length>=(int)sizeof url;
+    if(!failed) {
+        char *log=0;
+        size_t size=0;
+        const int rc=cx_runv_timeout(compile,6,&log,&size);
+        if(rc) printf("BATCH_JSON compile_rc=%d %s\n",rc,log?log:"");
+        failed=rc!=0;
+        mm_free(log);
+    }
+    double actual[2]={0};
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,2,dir);
+    const double want=negative?-1:(double)gold;
+    if(!failed && (actual[0]!=(double)gold || actual[1]!=want)) {
+        printf("BATCH_JSON r160=%g actual=%g gold=%g expected=%g\n",actual[0],actual[1],(double)gold,want);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT BatchedMesh range JSON negative_expected=%d failed=%d\n",negative,failed);
+    return failed!=0;
+}

@@ -84,7 +84,7 @@ async function product() {
   ({ instance: { exports } } = await WebAssembly.instantiate(await response.arrayBuffer(), { uxe_gpu_v1: { host_gpu_submit: submit } }));
   if (exports.uxe_abi_version() !== 1) throw Error("Wasm ABI");
   const run = (op, a = 0, b = 0, c = 0) => Number(exports.uxe_shader_lib(BigInt(op), BigInt(a), BigInt(b), BigInt(c)));
-  const memory = new Uint8Array(exports.memory.buffer, run(0), 8192);
+  const memory = new Uint8Array(exports.memory.buffer, run(0), 12288);
   const view = new DataView(memory.buffer, memory.byteOffset, memory.byteLength);
   const get = offset => view.getUint32(offset, true);
   const lookup = name => { const bytes = encoder.encode(name); memory.set(bytes, 64); return run(1, bytes.length); };
@@ -140,7 +140,67 @@ async function product() {
     if (run(8, id, Number(query.get("mutate") === "1")) < 0) throw Error("packet drawing " + entry.name);
     pixels.push(...sample(gl));
   }
-  return [...pixels, matched, Number(refused)];
+  const programs = [
+    ["basic", "gpu-texture.vert", "gpu-texture.frag"],
+    ["lambert", "gpu-lit.vert", "gpu-lambert.frag"],
+    ["phong", "gpu-phong.vert", "gpu-phong.frag"],
+    ["standard", "gpu-phong.vert", "gpu-standard.frag"],
+    ["physical", "gpu-phong.vert", "gpu-standard.frag"],
+  ];
+  const checks = [];
+  let stage = "lookup";
+  try {
+  for (const [name, vertexAsset, fragmentAsset] of programs) {
+    stage = name + " lookup and source";
+    const id = lookup(name);
+    if (id < 0 || run(2, id) !== 128 || run(7, id, 6000) <= 0) throw Error("program " + name);
+    const expectedKeys = Object.keys(ShaderLib[name].uniforms);
+    const keys = new Set();
+    for (let group = 0; group < get(140); group++) {
+      for (let row = 0; row < run(4, id, group); row++) keys.add(outName(run(5, id, group, row)));
+    }
+    for (let index = 0; index < 64; index++) {
+      const size = run(9, id, index);
+      if (size < 0) break;
+      keys.add(outName(size));
+    }
+    stage = name + " source compare";
+    const names = [...keys];
+    if (query.get("mutateKeys") === "1") names[0] += "Mutated";
+    if (query.get("mutateKeys") !== "1" && names.join() !== expectedKeys.join()) {
+      throw Error("uniform keys " + name + ": missing " + expectedKeys.filter(key => !names.includes(key)) +
+        "; extra " + names.filter(key => !expectedKeys.includes(key)));
+    }
+    checks.push(Number(names.join() === expectedKeys.join()));
+    const sources = [];
+    for (const [stage, asset] of [vertexAsset, fragmentAsset].entries()) {
+      const offset = get(160 + stage * 8);
+      const bytes = get(164 + stage * 8);
+      const source = decoder.decode(memory.subarray(offset, offset + bytes));
+      const tracked = await (await fetch("../base/" + asset)).text();
+      const expected = stage === 0 ? ShaderLib[name].vertexShader : ShaderLib[name].fragmentShader;
+      const marker = stage === 0 ? "#include <project_vertex>" : "#include <opaque_fragment>";
+      if (source !== tracked || !expected.includes(marker)) throw Error("source " + name + ":" + stage);
+      sources.push(source);
+    }
+    const shaders = sources.map((source, index) => {
+      const shader = gl.createShader(index === 0 ? gl.VERTEX_SHADER : gl.FRAGMENT_SHADER);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(shader));
+      return shader;
+    });
+    const linked = gl.createProgram();
+    shaders.forEach(shader => gl.attachShader(linked, shader));
+    gl.linkProgram(linked);
+    checks.push(Number(gl.getProgramParameter(linked, gl.LINK_STATUS)));
+    gl.deleteProgram(linked);
+    shaders.forEach(shader => gl.deleteShader(shader));
+  }
+  } catch (error) {
+    throw Error(stage + ": " + error.message);
+  }
+  return [...pixels, matched, Number(refused), ...checks];
 }
 
 try {
