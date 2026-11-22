@@ -1,0 +1,89 @@
+// KTX2 raw RGBA8 two-dimensional, non-array texture view.
+// The source bytes remain owned by the caller. The published view is borrowed.
+struct KTX2TextureView {
+  data: u32;
+  bytes: u32;
+  width: u32;
+  height: u32;
+  levels: u32;
+  srgb: u32;
+}
+
+native function ktx2_span(start:i64,bytes:i64) i64 {
+  return start>=0 && bytes>=0 && bytes<=6291456 && start<=6291456-bytes;
+}
+
+native function KTX2Loader_parse(src:i64,bytes:i64,out:i64) i64 {
+  if(!ktx2_span(src,bytes) || !ktx2_span(out,KTX2TextureView.size) ||
+     (out<src+bytes && src<out+KTX2TextureView.size)) { return 0-1; }
+  if(bytes<104 || ux_u32(src)!=1481919403 || ux_u32(src+4)!=3140497952 ||
+     ux_u32(src+8)!=169478669) { return 0-2; }
+  let format=ux_u32(src+12);
+  let width=ux_u32(src+20);
+  let height=ux_u32(src+24);
+  if((format!=37 && format!=43) || ux_u32(src+16)!=1 ||
+     ux_u32(src+28)!=0 || ux_u32(src+32)!=0 || ux_u32(src+36)!=1 ||
+     ux_u32(src+44)!=0 || ux_u32(src+56)!=0 || ux_u32(src+60)!=0 ||
+     ux_u32(src+64)!=0 || ux_u32(src+68)!=0 || ux_u32(src+72)!=0 || ux_u32(src+76)!=0) { return 0-3; }
+  if(width<1 || width>16384 || height<1 || height>16384) { return 0-3; }
+  let levels=ux_u32(src+40);
+  if(levels==0) { levels=1; }
+  if(levels>15) { return 0-4; }
+  let dfd=ux_u32(src+48);
+  let dfdBytes=ux_u32(src+52);
+  let tableEnd=80+24*levels;
+  if(dfd<tableEnd || dfd%4!=0 || dfdBytes!=92 || dfd>bytes-dfdBytes ||
+     ux_u32(src+dfd)!=dfdBytes || ux_u32(src+dfd+4)!=0 ||
+     ux_u32(src+dfd+8)!=5767170 || ux_u8(src+dfd+12)!=1 ||
+     ux_u8(src+dfd+13)!=1 || ux_u32(src+dfd+16)!=0 ||
+     ux_u32(src+dfd+20)!=4 || ux_u32(src+dfd+24)!=0) { return 0-4; }
+  let transfer=1;
+  if(format==43) { transfer=2; }
+  if(ux_u8(src+dfd+14)!=transfer || ux_u8(src+dfd+15)!=0) { return 0-4; }
+  let sample=0;
+  while(sample<4) {
+    let at=src+dfd+28+16*sample;
+    let channel=sample;
+    if(sample==3) { channel=15; if(format==43) { channel=31; } }
+    if(ux_u32(at)!=channel*16777216+458752+sample*8 ||
+       ux_u32(at+4)!=0 || ux_u32(at+8)!=0 || ux_u32(at+12)!=255) { return 0-4; }
+    sample=sample+1;
+  }
+  let i=0;
+  let w=width;
+  let h=height;
+  let limit=bytes;
+  while(i<levels) {
+    let index=src+80+24*i;
+    let offset=ux_u32(index);
+    let length=ux_u32(index+8);
+    if(ux_u32(index+4)!=0 || ux_u32(index+12)!=0 || ux_u32(index+20)!=0 ||
+       length!=4*w*h || ux_u32(index+16)!=length ||
+       offset<dfd+dfdBytes || offset%4!=0 || offset!=limit-length) { return 0-4; }
+    limit=offset;
+    i=i+1;
+    if(i<levels && w==1 && h==1) { return 0-4; }
+    if(w>1) { w=w/2; }
+    if(h>1) { h=h/2; }
+  }
+  let a=ux_u32_put(out+KTX2TextureView.data,src);
+  let b=ux_u32_put(out+KTX2TextureView.bytes,bytes);
+  let c=ux_u32_put(out+KTX2TextureView.width,width);
+  let d=ux_u32_put(out+KTX2TextureView.height,height);
+  let e=ux_u32_put(out+KTX2TextureView.levels,levels);
+  let f=ux_u32_put(out+KTX2TextureView.srgb,transfer-1);
+  return out;
+}
+
+native function KTX2Loader_level(view:i64,index:i64) i64 {
+  if(!ktx2_span(view,KTX2TextureView.size) || index<0 ||
+     index>=ux_u32(view+KTX2TextureView.levels) || index>=15) { return 0-1; }
+  let src=ux_u32(view+KTX2TextureView.data);
+  let bytes=ux_u32(view+KTX2TextureView.bytes);
+  let entry=80+24*index;
+  if(!ktx2_span(src,bytes) || entry+24>bytes) { return 0-1; }
+  let offset=ux_u32(src+entry);
+  let length=ux_u32(src+entry+8);
+  if(length==0 || offset>bytes-length) { return 0-1; }
+  return src+offset;
+}
