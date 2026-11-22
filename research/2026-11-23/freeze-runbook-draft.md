@@ -20,7 +20,7 @@ T0 定义:版本分支合入 main 的合并提交推送完成的时刻。总预�
 | S7 | K | 3 stage-commit(X 提交,含 rollback/decision/notes) | 集成者 | 3 分(0.0.93 实测 X 后等文档 11 分) |
 | S8 | K | 4 stage-dry | 集成者 | 3 分 |
 | S9 | K | 5 execute(X 核验、草稿、CI、Y1、公开、读回、Y2) | 集成者,devsvc x --bg | 12 分(0.0.93 实测 8 分,CI 7 分) |
-| S10 | K | 公开后记账与 Root 升级 | 集成者 | 8 分(0.0.93 实测 6 分) |
+| S10 | K | 公开后记账与 Root 升级(`tools/release-post.cx`) | 集成者 | 8 分(0.0.93 实测 6 分) |
 
 合计 111 分(T0 到 S9 公开 103 分 <= 120 分红线,余量 17 分; S10 公开后 8 分)。各步命令、预期行、门、失败处置的细节见下;完整原文由 fable 输出,关键点如下。
 
@@ -66,6 +66,8 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 - 安全边界如实声明:(1) 双锚点哈希链为无密钥公开 SHA-256 链,仅防误操作、单点误删与意外损坏,不防有意改写(若同时删除两处锚点或按公开算法伪造 `VERIFIED` 行,`chain-ready` 实测会判 `READY yes`;同理 `--verify-deferred` 执行的是当前工作树内的工具脚本,工具被换桩即可通过,同属不防有意改写);(2) `owner` 取自 `UNISACC_INTEGRATOR` 环境变量,任何窗口在进程环境里均可设置,多源(`worktree`/`index`/`HEAD`) `build/freeze.tsv` 的 owner 不一致时 `freeze_window_status` 返回 2,任何人均不能 waive(S0 前置要求 `freeze.tsv` 第 3 列、`DEVSVC_OWNER`、`UNISACC_INTEGRATOR` 三处一致,不在 S0 当天改);(3) `UNISACC_GATE_WAIVE` 不是一次性令牌,同一环境变量若保留在 shell 中,下一笔提交仍会放行并各自追加一行 `DEFERRED` 记录(用完应在当前命令前缀传参或立即 `unset UNISACC_GATE_WAIVE`);waive 原因须包含至少一个非空白可打印字符且不含换行/控制字符(拒绝全空白原因与控制字符,原因内的 TAB 统一清洗为 `_`)。
 
 ## 四、公开后动作
+
+编排入口(2026-11-23):`sh ./unisacc.com tools/release-post.cx -- run --version V --dry` 先只读全步,确认后再 `--execute`(Root 升级另加 `--root-upgrade`;默认不 push)。`release-exec` Y2 收尾只打印`下一步:release-post run --version V --dry`,不自动执行。分步细节仍见下列 1..11。
 
 1. INDEX 封尾 `exec-7-Y2-done` 行随下一个提交带上(0.0.93 已实测验证在 `release/evidence/0.0.93/INDEX.tsv`)。
 2. `release-chain mark-version-seq --version 0.0.94 --dry`(先只读预演,核将改行与 `verseq-gen --check`),确认无误后再跑 `release-chain mark-version-seq --version 0.0.94 --commit --push`。
@@ -141,6 +143,15 @@ FREEZE_BROADCAST_TARGET	agy-flow
 ```
 
 (S3/S9 同形,仅相位名替换。)
+
+### PHASE S10(--dry --lock cc)
+
+```
+冻结广播 PHASE S10
+请按手册该阶段动作推进;禁写域与静默规则仍有效;持锁/集成者:cc。
+S10 编排: sh ./unisacc.com tools/release-post.cx -- run --version V --dry
+(先 dry 全绿再 --execute; Root 升级另加 --root-upgrade;不自动执行)。
+```
 
 ### END(--dry)
 
