@@ -164,6 +164,20 @@ int main(int argc, char **argv) {
                 ck(rc == 0 && lines(o) == 0, "verwriter-only-ignores-tag-field");
                 rc = run(r_mv, o, sizeof o);
                 ck(rc == 0 && lines(o) == 1 && has(o, "cxraw: move target src/drive.cx baseline 3 != move 2"), "move-target-mismatch-only-matches-target-path");
+                {
+                    const char *has_txt =
+                        "cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1\n"
+                        "CORE-NEW cx/sys/no_tab_posix.cx\n";
+                    char *r_has[] = {"--rows", sf, "--only", "apps/my has dir/my has probe.cx", 0};
+                    char *r_nt[] = {"--rows", sf, "--only", "cx/sys/no_tab_posix.cx", 0};
+                    int ok_has, ok_nt;
+                    cx_write(sf, has_txt, tx_len(has_txt, 1024));
+                    rc = run(r_has, o, sizeof o);
+                    ok_has = (rc == 0 && lines(o) == 1 && has(o, "cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1"));
+                    rc = run(r_nt, o, sizeof o);
+                    ok_nt = (rc == 0 && lines(o) == 1 && has(o, "CORE-NEW cx/sys/no_tab_posix.cx"));
+                    ck(ok_has && ok_nt, "has-in-path-and-core-no-tab-only-exact");
+                }
                 sy_unlink(sf);
             }
             {
@@ -297,9 +311,28 @@ int main(int argc, char **argv) {
                                 (void)run_argv(rt, o, sizeof o);
                                 (void)run_argv(cs, o, sizeof o);
                                 rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
-                                sy_unsetenv("GIT_INDEX_FILE");
                                 ck(rc == 0 && has(o, "PRECOMMIT\tstaged_cx=1\tblocked=0"),
                                    "precommit-global-ceiling-ignores-unaffected-readset");
+                                {
+                                    const char *hn_rat =
+                                        "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 above\n"
+                                        "  cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1\n"
+                                        "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 1 new\n"
+                                        "  CORE-NEW cx/sys/no_tab_posix.cx\n"
+                                        "RATCHETS\tok=16\tfail=2\telapsed_ms=10\n";
+                                    char *ch1[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,apps/my has dir/my has probe.cx", 0};
+                                    char *ch2[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/no_tab_posix.cx", 0};
+                                    cx_write(rout, hn_rat, tx_len(hn_rat, 1024));
+                                    (void)run_argv(rt, o, sizeof o);
+                                    (void)run_argv(ch1, o, sizeof o);
+                                    (void)run_argv(ch2, o, sizeof o);
+                                    rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                    sy_unsetenv("GIT_INDEX_FILE");
+                                    ck(rc == 1 && has(o, "precommit: blocked: cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1")
+                                       && has(o, "precommit: blocked: CORE-NEW cx/sys/no_tab_posix.cx")
+                                       && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=2"),
+                                       "precommit-blocks-path-with-has-and-core-no-tab");
+                                }
                             }
                         }
                         sy_unlink(la); sy_unlink(lb); sy_unlink(ls);
