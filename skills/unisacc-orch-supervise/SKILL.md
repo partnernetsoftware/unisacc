@@ -54,4 +54,6 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 - 派工:`mux envelope --body-file 文件 -- 1:窗口名 "标题"`(用窗口名不用索引,不带 --from);回执无 `submitted` 标记的,下一轮读回窗口末几行确认。注意 (4) 的频率约束:一轮内对同一窗口合并成一封,本次长会话多次违反,造成打断。
 - 同文件多窗口同改会首尾相接阻塞(proc.cx、sysnums.cx、NSYS 计数):破死锁办法是在途半成品方把改动撤出共享路径并保留补丁,先落先到者再重放;提交取索引,不用整文件工作区取内容吞他人半成品。
 - 复测别人报的数字再采纳;rc=124 与 refused 是具名结果,读发码源码行再定性;行为变更(如双 fd poll 改顺序等待)必须补最坏用例与变异自证。
+- 版本分支只放产品输入类改动;tools/、devsvc 与 plans/devsvc.md 等开发基础设施一律在 main 上改(0.0.94 合入诊断:唯一的源码双改文件 tools/derive.cx 来自版本分支上的 derive 池提交,合并时语义未证)。
+- 冻结前做一次"并集树只读预合并检查"(归档 main 加分支独有文件,逐个跑生成器 --check 与 derive --check、check-derive),把语义冲突提前暴露。
 - 工具:devsvc f write/edit 在版本工作目录下相对路径会落到主检出,一律用绝对路径;改文件不用 sed -i;主调度自己的提交也走 devsvc 或 commit-own,原生 git commit 会使 devsvc 因 unowned-pending 拒绝推送。
