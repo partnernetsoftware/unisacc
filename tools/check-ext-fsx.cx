@@ -311,6 +311,73 @@ int main(void) {
         ck(got && fsx_exists(scdir) == 0 && fsx_exists(D) == 1 && fsx_exists(at("f")) == 1, "scratch-fork-owner-pid");
     }
 
+    /* (B1) Directory name contract: PREFIXp<my_pid>-<[0-9a-z]{8}> */
+    {
+        const char *bn = strrchr(D, '/');
+        bn = bn ? bn + 1 : D;
+        char want_pre[64];
+        cx_fmt(want_pre, sizeof want_pre, "fsx-check-p%d-", sy_pid());
+        size_t wpl = strlen(want_pre), bnl = strlen(bn);
+        int ok_nm = (bnl == wpl + 8 && !strncmp(bn, want_pre, wpl));
+        for (size_t k = wpl; ok_nm && k < bnl; k++) {
+            char c = bn[k];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) ok_nm = 0;
+        }
+        ck(ok_nm, "scratch-name-contract");
+    }
+
+    /* (B2..B7) Startup stale reap: wall-clock age, live other pid, substring prefix, bad pid/suffix, fresh child mtime */
+    {
+        int dead_pid = fork();
+        if (dead_pid == 0) sy_exit(0);
+        if (dead_pid > 0) sy_wait_status(dead_pid, 0, 0, 0, 0);
+
+        int live_pid = fork();
+        if (live_pid == 0) { sy_sleep_ms(10000); sy_exit(0); }
+
+        long wall = sy_wall_s();
+        char pfx[64], d_stale[4096], d_fresh[4096], d_live_other[4096], d_substr[4096];
+        char d_lead0[4096], d_ovf[4096], d_badsuf[4096], d_shortsuf[4096], d_child[4096], d_child_f[4096];
+        cx_fmt(pfx, sizeof pfx, "fsx-reap-%d-", sy_pid());
+        cx_fmt(d_stale, sizeof d_stale, "%s/%sp%d-abcd1234", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_fresh, sizeof d_fresh, "%s/%sp%d-bcde2345", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_live_other, sizeof d_live_other, "%s/%sp%d-cdef3456", sy_tmpdir(), pfx, live_pid);
+        cx_fmt(d_substr, sizeof d_substr, "%s/other-%sp%d-defg4567", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_lead0, sizeof d_lead0, "%s/%sp0%d-efgh5678", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_ovf, sizeof d_ovf, "%s/%sp99999999999999999999-fghi6789", sy_tmpdir(), pfx);
+        cx_fmt(d_badsuf, sizeof d_badsuf, "%s/%sp%d-OVERFLOW", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_shortsuf, sizeof d_shortsuf, "%s/%sp%d-short", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_child, sizeof d_child, "%s/%sp%d-ghij7890", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_child_f, sizeof d_child_f, "%s/active.tmp", d_child);
+
+        sy_mkdir(d_stale, 0700); sy_utimes(d_stale, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_fresh, 0700); sy_utimes(d_fresh, wall - 60, 0, wall - 60, 0);
+        sy_mkdir(d_live_other, 0700); sy_utimes(d_live_other, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_substr, 0700); sy_utimes(d_substr, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_lead0, 0700); sy_utimes(d_lead0, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_ovf, 0700); sy_utimes(d_ovf, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_badsuf, 0700); sy_utimes(d_badsuf, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_shortsuf, 0700); sy_utimes(d_shortsuf, wall - 7200, 0, wall - 7200, 0);
+        sy_mkdir(d_child, 0700); sy_write_file(d_child_f, "alive\n", 6, 0600);
+        sy_utimes(d_child, wall - 7200, 0, wall - 7200, 0);
+
+        int hs = 0;
+        int src = fsx_scratch(&hs, pfx);
+        ck(src == 0 && fsx_exists(d_stale) == 0, "scratch-reap-stale-dead");
+        ck(fsx_exists(d_fresh) == 1, "scratch-reap-fresh-dead-kept");
+        ck(fsx_exists(d_live_other) == 1, "scratch-reap-live-other-pid-kept");
+        ck(fsx_exists(d_substr) == 1, "scratch-reap-substring-prefix-kept");
+        ck(fsx_exists(d_lead0) == 1 && fsx_exists(d_ovf) == 1 && fsx_exists(d_badsuf) == 1 && fsx_exists(d_shortsuf) == 1,
+           "scratch-reap-bad-pid-and-suffix-kept");
+        ck(fsx_exists(d_child) == 1 && fsx_exists(d_child_f) == 1, "scratch-reap-fresh-child-mtime-kept");
+        printf("NOTE\tUNMEASURED\tscratch-reap-foreign-uid\tnon-root-cannot-chown\n");
+
+        if (live_pid > 0) { sy_signal(live_pid, 9); sy_wait_status(live_pid, 0, 0, 0, 0); }
+        if (src == 0) fsx_scratch_drop(hs);
+        fsx_rmtree(d_stale); fsx_rmtree(d_fresh); fsx_rmtree(d_live_other); fsx_rmtree(d_substr);
+        fsx_rmtree(d_lead0); fsx_rmtree(d_ovf); fsx_rmtree(d_badsuf); fsx_rmtree(d_shortsuf); fsx_rmtree(d_child);
+    }
+
     /* scratch drop: refused when swapped, then removed */
     ck(fsx_scratch(&h2, "fsx-check2-") == 0, "scratch-second");
     if (cx_fmt(buf, sizeof buf, "%s", fsx_scratch_dir(h2))) buf[0] = 0;
