@@ -4,6 +4,7 @@
  * changed material -> REFUSE. prepare: old version equal to the candidate version and models outside
  * the candidate directory are refused before any download. Ends CHECK_OLD_PRODUCT_MATERIAL. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.sig
 #pragma unisa use fsx.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
@@ -16,8 +17,27 @@
 static int pass,fail;
 static char root[4096];
 static const char *dir;
+static int g_scratch;
+static void on_term_sig(int sig){
+    if(g_scratch>0){ fsx_scratch_drop(g_scratch); g_scratch=0; }
+    sy_exit(128+(sig>0?sig:15));
+}
+static int check_no_hardlink(const char *orig_path, const char *copy_path){
+    sy_stat_t a,b;
+    if(sy_lstat(orig_path,&a)!=0 || sy_lstat(copy_path,&b)!=0) return 0;
+    if(a.dev==b.dev && a.ino==b.ino) return 0;
+    char *sv[]={"stat","-c","%h",(char *)copy_path,0};
+    char why[256]; np_result sr={0};
+    if(np_run(sv,0,0,5,&sr,why,sizeof why)||sr.rc||!sr.out||sr.outn<1){ np_free(&sr); return 0; }
+    int is_one=(sr.out[0]=='1' && (sr.outn==1 || sr.out[1]=='\n' || sr.out[1]=='\r'));
+    np_free(&sr);
+    return is_one;
+}
 static void ck(int ok,const char *what){if(ok)pass++;else{fail++;printf("FAIL\t%s\n",what);}}
-static void die(const char *s){printf("CHECK_OLD_PRODUCT_MATERIAL\tREFUSE\t%s\n",s);exit(2);}
+static void die(const char *s){
+    if(g_scratch>0){ fsx_scratch_drop(g_scratch); g_scratch=0; }
+    printf("CHECK_OLD_PRODUCT_MATERIAL\tREFUSE\t%s\n",s);exit(2);
+}
 static void put(const char *leaf,const char *s,char out[4096]){if(cx_path_join(out,4096,dir,leaf))die("path");sy_unlink(out);if(sy_write_file(out,s,tx_len(s,1<<20),0600))die("fixture write");}
 static void sha(const char *p,char h[65]){unsigned char *b;int64_t n;if(sy_read_file(p,&b,&n,1<<20)||sy_sha256_any_hex(b,n,h))die("fixture sha");mm_free(b);}
 static int run(char **args,np_result *r){
@@ -32,6 +52,9 @@ int main(void){
     if(sy_realpath(".",root,sizeof root)<0)die("root");
     int scratch;
     if(fsx_scratch(&scratch,"check-opm") || !(dir=fsx_scratch_dir(scratch)))die("private dir");
+    g_scratch=scratch;
+    sy_sig_handle(15,on_term_sig);
+    sy_sig_handle(2,on_term_sig);
     put("old.bin","old product bytes\n",a);put("new.bin","candidate bytes\n",b);put("other.bin","another candidate\n",c);
     sha(a,ha);sha(b,hb);sha(c,hc);
     /* (1) all three present */
@@ -89,14 +112,19 @@ int main(void){
             if(cx_path_join(td,sizeof td,ld,"tools")||cx_path_join(ap,sizeof ap,td,"old-product-assets.tsv")||cx_path_join(up,sizeof up,ld,"unisacc.com"))die("ld path");
             sy_mkdir(ld,0700);
             if(cx_fmt(shcmd,sizeof shcmd,
-                "for d in cx cxroot.tsv ext include tests exec build src apps seed weights iterate ujs tools; do "
-                "[ -e '%s/'\"$d\" ] && (cp -al '%s/'\"$d\" '%s/'\"$d\" 2>/dev/null || cp -a '%s/'\"$d\" '%s/'\"$d\"); done && "
+                "for d in cx cxroot.tsv ext include tests exec build src apps seed weights iterate tools; do "
+                "[ -e '%s/'\"$d\" ] && cp -a '%s/'\"$d\" '%s/'\"$d\"; done && "
                 "rm -f '%s/tools/old-product-assets.tsv'",
-                root,root,ld,root,ld,ld))die("mk layout fmt");
+                root,root,ld,ld))die("mk layout fmt");
             { char *sv[]={"sh","-c",shcmd,0}; char why[256]; np_result sr={0};
               if(np_run(sv,root,0,15,&sr,why,sizeof why)||sr.rc||sr.residue)die("mk layout"); np_free(&sr); }
             if(sy_write_file(ap,assets,tx_len(assets,sizeof assets),0600))die("assets write");
             if(sy_copy(cand,up,0755))die("cand copy");
+            {
+                char ocx[4096],ccx[4096];
+                if(cx_path_join(ocx,sizeof ocx,root,"cx/sys/fs.cx")||cx_path_join(ccx,sizeof ccx,ld,"cx/sys/fs.cx"))die("cx check path");
+                ck(check_no_hardlink(ocx,ccx),k==0?"layout-a-no-hardlink-to-checkout":"layout-b-no-hardlink-to-checkout");
+            }
         }
         if(cx_fmt(shcmd,sizeof shcmd,
             "UNISACC_PREP_CACHE='%s' UNISACC_OLD_PRODUCT_MIRROR='%s' UNISACC_OLD_PRODUCT_VERSION=0.0.1 "
@@ -121,6 +149,15 @@ int main(void){
           if(!ok_b)fprintf(stderr,"lb rc=%d out=%.*s err=%.*s\n",sr.rc,(int)(sr.outn<300?sr.outn:300),sr.out?sr.out:"",(int)(sr.errn<300?sr.errn:300),sr.err?sr.err:"");
           ck(ok_b,"layout-b-switch-no-material-absent");
           np_free(&sr); }
+        { char *rmv[]={"rm","-rf",lb,0}; char why[256]; np_result sr={0};
+          if(np_run(rmv,root,0,15,&sr,why,sizeof why)||sr.rc)die("rm layout-b"); np_free(&sr); }
+    }
+    {
+        char saved_dir[4096];
+        if(tx_copy(saved_dir,sizeof saved_dir,dir,tx_len(dir,sizeof saved_dir)))die("save dir");
+        int drc=fsx_scratch_drop(g_scratch);
+        g_scratch=0;
+        ck(drc==0 && sy_exists(saved_dir)==0,"scratch-dir-cleaned");
     }
     printf("CHECK_OLD_PRODUCT_MATERIAL\tpass=%d\tfail=%d\n",pass,fail);
     return fail?1:0;
