@@ -180,7 +180,7 @@ cx.stream 句柄与所有权合同(事实来源 `prd_cx.md` 10.6、`tools/check-
 - 已知风险 KNOWN-RISK-DOUBLE-FREE-ON-ERROR:`xs_item_set` 参数非法返回 4 时仍释放调用方的 data;若调用方把 4 当「所有权未转移」再释放,即双重释放。检查中按现行为固定,未修。
 - 10.6 的整体重构设计未实现,不得记 PASS。
 
-封网新增接口索引(只引用,签名与文案见生成页,不手改):`sy_snm_sendto`、`sy_snm_recvfrom`(netmsg)、`sy_snb_get`、`sy_snb_set_nonblock`(netnb)、`sy_sig_watch`、`sy_sig_taken`(sigwatch),见 [docs/cx/api/cx.sys.md](docs/cx/api/cx.sys.md);`sy_resolve`、`sy_tcp_connect_to`、`sy_tcp_accept_from`、`sy_tcp_dial`、`sy_udp_*`、`sy_unix_listen`/`sy_unix_connect`、`sy_recv_until`、`sy_send_all_until`(带 `sy_deadline_t` 截止时间),见 [docs/cx/api/ext.net.md](docs/cx/api/ext.net.md)。osx/win 行为未验证,看各行的 lnx/osx/win 列。
+封网新增接口索引(只引用,签名与文案见生成页,不手改):`sy_snm_sendto`、`sy_snm_recvfrom`(netmsg)、`sy_snb_get`、`sy_snb_set_nonblock`(netnb)、`sy_sig_watch`、`sy_sig_taken`(sigwatch),见 [docs/cx/api/cx.sys.md](docs/cx/api/cx.sys.md);`sy_resolve`、`sy_tcp_connect_deadline`、`sy_tcp_accept_from`、`sy_tcp_dial`、`sy_udp_*`、`sy_unix_listen`/`sy_unix_connect`、`sy_recv_until`、`sy_send_all_until`(带 `sy_deadline_t` 截止时间),见 [docs/cx/api/ext.net.md](docs/cx/api/ext.net.md)。osx/win 行为未验证,看各行的 lnx/osx/win 列。
 
 ## 4 标准库速查
 

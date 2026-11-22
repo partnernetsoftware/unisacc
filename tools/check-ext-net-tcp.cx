@@ -245,14 +245,21 @@ int main(int argc, char **argv) {
     ckv(sy_recv_until(as, buf, sizeof buf, sy_deadline_in(1000)), 0, "recv-until-eof");
     sy_close(as); sy_close(ls);
 
-    /* deadline connect_to / dial */
+    /* deadline connect_deadline / dial + regression check that ext/net/tcp.cx no longer defines sy_tcp_connect_to */
     {
         sy_addr_t t;
         int c1, dead;
+        unsigned char *tsrc = 0;
+        int64_t tlen = 0;
+        ck(sy_read_file("ext/net/tcp.cx", &tsrc, &tlen, 1 << 20) == 0 && tsrc &&
+           tx_contains((const char *)tsrc, (long)tlen, "int sy_tcp_connect_deadline(const sy_addr_t *a, sy_deadline_t d)", 64) &&
+           !tx_contains((const char *)tsrc, (long)tlen, "sy_tcp_connect_to(", 18),
+           "connect-deadline-no-sys-net-symbol-clash");
+        if (tsrc) mm_free(tsrc);
         sy_addr_loopback(&t, SY_AF_INET4, port);
         ls2 = sy_tcp_listen(0, 8);
         sy_addr_loopback(&t, SY_AF_INET4, sy_tcp_port(ls2));
-        c1 = sy_tcp_connect_to(&t, sy_deadline_in(1000));
+        c1 = sy_tcp_connect_deadline(&t, sy_deadline_in(1000));
         ck(c1 >= 0, "connect-to-loopback");
         ckv(sy_snb_get(c1), 0, "connect-to-fd-blocking-again");
         as = sy_sock_accept(ls2, 0, 0);
@@ -269,17 +276,17 @@ int main(int argc, char **argv) {
         dead = sy_tcp_port(ls2);
         sy_close(ls2);
         sy_addr_loopback(&t, SY_AF_INET4, dead);
-        ckv(sy_tcp_connect_to(&t, sy_deadline_in(1000)), -ECONNREFUSED, "connect-to-refused");
+        ckv(sy_tcp_connect_deadline(&t, sy_deadline_in(1000)), -ECONNREFUSED, "connect-to-refused");
         ckv(sy_tcp_dial("127.0.0.1", dead, sy_deadline_in(1000)), -ECONNREFUSED, "dial-refused");
-        ckv(sy_tcp_connect_to(0, sy_deadline_in(1000)), -EINVAL, "connect-to-null");
+        ckv(sy_tcp_connect_deadline(0, sy_deadline_in(1000)), -EINVAL, "connect-to-null");
         ckv(sy_tcp_dial(0, 80, sy_deadline_in(1000)), -EINVAL, "dial-null");
         ck(sy_tcp_dial("no.such.name.invalid", 80, sy_deadline_in(1000)) < 0, "dial-dns-refused");
         /* unroutable address with a short deadline: ETIMEDOUT, or ENETUNREACH when the sandbox has no route */
         sy_addr_parse(&t, "10.255.255.1", 81);
-        r = sy_tcp_connect_to(&t, sy_deadline_in(100));
+        r = sy_tcp_connect_deadline(&t, sy_deadline_in(100));
         ck(r == -ETIMEDOUT || r == -ENETUNREACH || r == -EHOSTUNREACH, "connect-to-unroutable");
         /* a deadline already passed on an unroutable address cannot be waited for */
-        r = sy_tcp_connect_to(&t, sy_deadline_in(0));
+        r = sy_tcp_connect_deadline(&t, sy_deadline_in(0));
         ck(r == -ETIMEDOUT || r == -ENETUNREACH || r == -EHOSTUNREACH, "connect-to-deadline-passed");
     }
     {   /* accept_from with a peer on a unix listener keeps the connection (was -EAFNOSUPPORT and closed it) */

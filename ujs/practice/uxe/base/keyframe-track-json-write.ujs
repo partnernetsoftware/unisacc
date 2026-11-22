@@ -1,0 +1,81 @@
+native function track_json_range(at:i64,size:i64,dst:i64,end:i64,scratch:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456-size &&
+    !animation_json_overlap(at,size,dst,end-dst) && !animation_json_overlap(at,size,scratch,1120);
+}
+
+native function track_json_value(p:i64,end:i64,at:i64,kind:i64,scratch:i64) i64 {
+  if(kind==6) { return json_write_string(p,end,ux_u32(at),ux_u32(at+4)); }
+  if(kind==5) {
+    let size=track_json_token(scratch,12+ux_u32(at));
+    let i=0;
+    while(i<size) { p=json_byte(p,end,ux_u8(scratch+i)); i=i+1; }
+    return p;
+  }
+  return json_write_f64(p,end,ux_f32(at),scratch+16);
+}
+
+native function track_json_array(p:i64,end:i64,at:i64,count:i64,kind:i64,scratch:i64) i64 {
+  let step=4;
+  if(kind==6) { step=8; }
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count && p>=0) {
+    let item=at+i*step;
+    if(kind==5 && ux_u32(item)>1) { return 0-2; }
+    if(kind==6 && !track_json_range(ux_u32(item),ux_u32(item+4),p,end,scratch)) { return 0-2; }
+    if(i>0) { p=json_byte(p,end,44); }
+    p=track_json_value(p,end,item,kind,scratch);
+    i=i+1;
+  }
+  return json_byte(p,end,93);
+}
+
+// The concrete track class supplies the type tag. Sample buffers use the
+// standard AnimationSamples layout, with two u32 words for each string.
+native function KeyframeTrack_toJSON(track:i64,kind:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(kind<1 || kind>6 || dst<0 || end<=dst || end>6291456 || scratch%8!=0 ||
+     !animation_span(scratch,1120) || animation_json_overlap(scratch,1120,dst,end-dst) ||
+     !keyframe_track_at(track) || !track_json_range(track,KeyframeTrack.size,dst,end,scratch)) { return 0-1; }
+  let view=ux_u32(track+KeyframeTrack.samples);
+  let name=ux_u32(track+KeyframeTrack.name);
+  let size=ux_u32(track+KeyframeTrack.nameBytes);
+  if(size<1 || !track_json_range(name,size,dst,end,scratch) ||
+     !track_json_range(view,AnimationSamples.size,dst,end,scratch)) { return 0-1; }
+  let count=ux_u32(view+AnimationSamples.count);
+  let stride=ux_u32(view+AnimationSamples.stride);
+  let times=ux_u32(view+AnimationSamples.times);
+  let values=ux_u32(view+AnimationSamples.values);
+  if(count<1 || count>65536 || stride<1 || stride>64 || (kind==6 && stride%2!=0) ||
+     !track_json_range(times,count*4,dst,end,scratch) ||
+     !track_json_range(values,count*stride*4,dst,end,scratch)) { return 0-1; }
+  let entries=count*stride;
+  if(kind==6) {
+    entries=entries/2;
+    let i=0;
+    while(i<entries) {
+      let at=values+i*8;
+      if(!track_json_range(ux_u32(at),ux_u32(at+4),dst,end,scratch)) { return 0-2; }
+      i=i+1;
+    }
+  }
+  let p=json_byte(dst,end,123);
+  p=track_json_key(p,end,scratch,7);
+  p=json_write_string(p,end,name,size);
+  p=json_byte(p,end,44);
+  p=track_json_key(p,end,scratch,8);
+  p=track_json_array(p,end,times,count,1,scratch);
+  p=json_byte(p,end,44);
+  p=track_json_key(p,end,scratch,9);
+  p=track_json_array(p,end,values,entries,kind,scratch);
+  let mode=ux_u32(track+KeyframeTrack.interpolation);
+  if(kind<5 && mode!=2301) {
+    p=json_byte(p,end,44);
+    p=track_json_key(p,end,scratch,10);
+    p=json_write_f64(p,end,0.0+mode,scratch+16);
+  }
+  p=json_byte(p,end,44);
+  p=track_json_key(p,end,scratch,11);
+  let label=track_json_token(scratch,kind);
+  p=json_write_string(p,end,scratch,label);
+  return json_byte(p,end,125);
+}

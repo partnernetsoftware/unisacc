@@ -1,4 +1,8 @@
 #pragma unisa use g_math
+#pragma unisa use wasm_test_cache
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
 #pragma unisa use mem.heap
 #pragma unisa use r160_wait
 #pragma unisa use sys.fs
@@ -28,7 +32,8 @@ static int module_lines(char *program,int used,int capacity,const char *name) {
 
 int main(int argc,char **argv) {
     const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    const int prepare=argc==2 && tx_eqz(argv[1],"--prepare");
+    if(argc!=1 && !mutate && !prepare) return 2;
     const char *modules[]={"f64-math","views","matrix4","object3d-layout","object3d","animation-view",
         "discreteinterpolant","linearinterpolant","cubicinterpolant","keyframe-track","numberkeyframetrack",
         "animationaction","propertybinding","propertymixer","record-copy","animationmixer",
@@ -90,46 +95,85 @@ int main(int argc,char **argv) {
     };
     const double gold[]={20,2,20,0.5,30,30,30,20,10,2,10,10,20,99,-1,0,10,-1,20,1,10};
     enum { count=sizeof gold/sizeof gold[0] };
-    char dir[256],source[300],wasm[300],html[300],url[390],program[100001],*out=0;
+    const char *cache=sy_env("UXE_GROUP_MIXER_SINGLE_CACHE");
+    if(!cache || !cache[0]) {
+        printf("GROUP_MIXER 基座缓存缺失，先运行 --prepare\n");
+        return 1;
+    }
+    char paths[24][180],record[600],key[65],sha[65];
+    const char *inputs[28];
+    int modules_count=0;
+    while(modules[modules_count]) {
+        tx_snprintf(paths[modules_count],sizeof paths[modules_count],"ujs/practice/uxe/base/%s.ujs",modules[modules_count]);
+        inputs[modules_count]=paths[modules_count];
+        modules_count++;
+    }
+    inputs[modules_count]="ujs/tests/anim-group-mixer-anim.cx";
+    inputs[modules_count+1]=0;
+    if(wasm_test_cache_key(inputs,key)) return 1;
+    const int size=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(size<0 || size>=(int)sizeof record) return 1;
+
+    char dir[256],source[320],wasm[320],probe[320],html[320],url[410],*out=0;
     size_t bytes=0;
     if(sy_mkdtemp("/tmp","uxe-group-mixer-",dir,sizeof dir)) return 2;
-    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
-    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(source,sizeof source,"%s/base.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
     tx_snprintf(html,sizeof html,"%s/probe.html",dir);
-    tx_snprintf(url,sizeof url,"file://%s?count=%d",html,count);
-    int used=tx_snprintf(program,sizeof program,"export uxe_evaluate_case(test:i64) f64 version 1;\n");
-    for(int i=0;used>=0 && modules[i];i++) used=module_lines(program,used,sizeof program,modules[i]);
-    int n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"%s\n",setup);
-    if(n<0 || n>=(int)sizeof program-used) used=-1;
-    else used+=n;
-    for(int i=0;used>=0 && i<count;i++) {
-        const char *code=mutate && i==8?HALF NEXT "return ux_f64(x);":cases[i];
-        n=tx_snprintf(program+used,sizeof program-used,"if(test==%d){%s}\n",i,code);
+    tx_snprintf(url,sizeof url,"file://%s?count=%d%s",html,count,mutate?"&mutateAt=8&mutateCase=21":"");
+    const int cached=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    int failed=0;
+    if(cached==-ENOENT && prepare) {
+        char program[100001];
+        int used=tx_snprintf(program,sizeof program,"export uxe_mesh_object_case(test:i64) f64 version 1;\n");
+        for(int i=0;used>=0 && modules[i];i++) used=module_lines(program,used,sizeof program,modules[i]);
+        int n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"%s\n",setup);
         if(n<0 || n>=(int)sizeof program-used) used=-1;
         else used+=n;
+        for(int i=0;used>=0 && i<=count;i++) {
+            const char *code=i==count?HALF NEXT "return ux_f64(x);":cases[i];
+            n=tx_snprintf(program+used,sizeof program-used,"if(test==%d){%s}\n",i,code);
+            if(n<0 || n>=(int)sizeof program-used) used=-1;
+            else used+=n;
+        }
+        n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"return 0.0/0.0;\n");
+        failed=n<0 || n>=(int)sizeof program-used || sy_write_file(source,program,used+n,0600);
+        if(!failed) {
+            char *command[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
+            const long start=sy_now_ms();
+            const int rc=cx_runv_timeout(command,50,&out,&bytes);
+            printf("GROUP_MIXER prepare_ms=%ld rc=%d source_bytes=%d\n",sy_now_ms()-start,rc,used+n);
+            if(rc && out) printf("%.*s",(int)bytes,out);
+            mm_free(out); out=0;
+            failed=rc || wasm_test_cache_write(cache,record,key,wasm);
+        }
+    } else if(cached) {
+        printf("GROUP_MIXER cache_rc=%d，先运行 --prepare\n",cached);
+        failed=1;
+    } else {
+        printf("GROUP_MIXER cache=hit key=%s sha=%s\n",key,sha);
     }
-    n=used<0?-1:tx_snprintf(program+used,sizeof program-used,"return 0.0/0.0;\n");
-    int failed=n<0 || n>=(int)sizeof program-used || sy_write_file(source,program,used+n,0600) ||
-        sy_copy("ujs/practice/uxe/test/wasm-batch.html",html,0600);
-    if(failed) printf("GROUP_MIXER source packing failed\n");
-    double reference[count],actual[count];
-    if(!failed) failed=r160_wait_ref("anim-group-mixer",reference,count,dir);
-    if(!failed) {
-        char *compile[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
-        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
-        if(rc) { printf("GROUP_MIXER compile_rc=%d source_bytes=%d\n",rc,used+n); failed=1; }
+
+    if(!failed && !prepare) {
+        char *command[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/mesh-object-json-probe.ujs","-o",probe,0};
+        double reference[count],actual[count];
+        const long start=sy_now_ms();
+        const int rc=cx_runv_timeout(command,6,&out,&bytes);
+        printf("GROUP_MIXER probe_ms=%ld rc=%d\n",sy_now_ms()-start,rc);
+        if(rc && out) printf("%.*s",(int)bytes,out);
         mm_free(out); out=0;
-    }
-    if(!failed) failed=r160_wait_read(url,"#wasm-cases",actual,count,dir);
-    for(int i=0;!failed && i<count;i++) {
-        if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(reference[i],gold[i],1e-9)) {
-            printf("G_ANIM group Mixer case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
-            failed=1;
+        failed=rc || sy_copy("ujs/practice/uxe/test/mesh-object-json-wasm.html",html,0600) ||
+            r160_wait_ref("anim-group-mixer",reference,count,dir) ||
+            r160_wait_read(url,"#wasm-cases",actual,count,dir);
+        for(int i=0;!failed && i<count;i++) {
+            if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(reference[i],gold[i],1e-9)) {
+                printf("G_ANIM group Mixer case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+                failed=1;
+            }
         }
     }
-    char *clean[]={"rm","-rf","--",dir,0};
-    if(cx_runv_timeout(clean,4,&out,&bytes)) failed=1;
-    mm_free(out);
-    printf("G_ANIM group Mixer frame and stop cases=%d failed=%d\n",count,failed);
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_ANIM group Mixer frame and stop prepare=%d cases=%d failed=%d\n",prepare,prepare?0:count,failed);
     return failed;
 }

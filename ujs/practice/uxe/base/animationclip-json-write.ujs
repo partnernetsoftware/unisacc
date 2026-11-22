@@ -1,0 +1,66 @@
+native function clip_json_key(dst:i64,end:i64,scratch:i64,id:i64) i64 {
+  let size=4;
+  if(id==1) {
+    let a=ux_u32_put(scratch,1634891108);
+    let b=ux_u32_put(scratch+4,1852795252);
+    size=8;
+  } else if(id==2) {
+    let a=ux_u32_put(scratch,1667330676);
+    let b=ux_u32_put(scratch+4,29547);
+    size=6;
+  } else if(id==3) {
+    let a=ux_u32_put(scratch,1684632949);
+  } else {
+    let a=ux_u32_put(scratch,1852140642);
+    let b=ux_u32_put(scratch+4,1685015908);
+    let c=ux_u32_put(scratch+8,101);
+    size=9;
+  }
+  let key=json_write_string(dst,end,scratch,size);
+  return json_byte(key,end,58);
+}
+
+// The metadata points into the same arena as the clip's parsed tracks.
+// Serialization borrows that intact arena and writes to a disjoint span.
+native function AnimationClip_toJSON(clip:i64,meta:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(dst<0 || end<=dst || end>6291456 || scratch%8!=0 || !animation_span(scratch,1120) ||
+     animation_json_overlap(scratch,1120,dst,end-dst) ||
+     !animation_span(clip,AnimationClip.size) || clip%8!=0 || !animation_span(meta,AnimationClipJson.size) ||
+     !track_json_range(clip,AnimationClip.size,dst,end,scratch) ||
+     !track_json_range(meta,AnimationClipJson.size,dst,end,scratch)) { return 0-1; }
+  let kinds=ux_u32(meta+AnimationClipJson.kinds);
+  let arena=kinds-416;
+  let count=ux_u32(clip+AnimationClip.trackCount);
+  let tracks=ux_u32(clip+AnimationClip.tracks);
+  let name=ux_u32(clip+AnimationClip.name);
+  let uuid=ux_u32(meta+AnimationClipJson.uuid);
+  if(count>8 || !track_json_range(arena,33792,dst,end,scratch) ||
+     tracks!=arena+384 || name!=arena+64 || uuid!=arena+192 ||
+     ux_u32(clip+AnimationClip.nameBytes)>127 || ux_u32(meta+AnimationClipJson.uuidBytes)>127) { return 0-1; }
+  let p=json_byte(dst,end,123);
+  p=track_json_key(p,end,scratch,7);
+  p=json_write_string(p,end,name,ux_u32(clip+AnimationClip.nameBytes));
+  p=json_byte(p,end,44);
+  p=clip_json_key(p,end,scratch,1);
+  p=json_write_f64(p,end,ux_f64(clip+AnimationClip.duration),scratch+16);
+  p=json_byte(p,end,44);
+  p=clip_json_key(p,end,scratch,2);
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    let track=ux_u32(tracks+i*4);
+    let kind=ux_u32(kinds+i*4);
+    if(track!=arena+512+i*KeyframeTrack.size) { return 0-1; }
+    p=KeyframeTrack_toJSON(track,kind,p,end,scratch);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  p=json_byte(p,end,44);
+  p=clip_json_key(p,end,scratch,3);
+  p=json_write_string(p,end,uuid,ux_u32(meta+AnimationClipJson.uuidBytes));
+  p=json_byte(p,end,44);
+  p=clip_json_key(p,end,scratch,4);
+  p=json_write_f64(p,end,0.0+ux_u32(clip+AnimationClip.blendMode),scratch+16);
+  return json_byte(p,end,125);
+}

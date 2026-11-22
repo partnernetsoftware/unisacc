@@ -1,0 +1,150 @@
+// Khronos Data Format 1.4, section 22. sRGB output retains encoded bytes.
+native function etc2_clamp(value:i64) i64 {
+  if(value<0) { return 0; }
+  if(value>255) { return 255; }
+  return value;
+}
+
+native function etc2_mode(block:i64,diff:i64) i64 {
+  if(!diff) { return 0; }
+  let channel=0;
+  while(channel<3) {
+    let byte=ux_u8(block+channel);
+    let second=byte/8+etc1_delta(byte);
+    if(second<0 || second>31) { return channel+2; }
+    channel=channel+1;
+  }
+  return 1;
+}
+
+native function etc2_distance(index:i64) i64 {
+  if(index<4) { return u32_shr(269157891,index*8)%256; }
+  return u32_shr(1076437015,(index-4)*8)%256;
+}
+
+native function etc2_palette(block:i64,mode:i64,index:i64) i64 {
+  let a=ux_u8(block);
+  let b=ux_u8(block+1);
+  let c=ux_u8(block+2);
+  let d=ux_u8(block+3);
+  let first=(a/8%4*4+a%4)*256+b/16*16+b%16;
+  let second=c/16*256+c%16*16+d/16;
+  let offset=etc2_distance(d/4%4*2+d%2);
+  let color=second;
+  if(mode==2) {
+    if(index==0) { color=first; offset=0; }
+    if(index==2) { offset=0; }
+    if(index==3) { offset=0-offset; }
+  } else {
+    first=a/8%16*256+(a%8*2+b/16%2)*16+b/8%2*8+b%4*2+c/128;
+    second=c/8%16*256+(c%8*2+d/128)*16+d/8%16;
+    let order=0;
+    if(first>=second) { order=1; }
+    offset=etc2_distance(d/4%2*4+d%2*2+order);
+    if(index<2) { color=first; } else { color=second; }
+    if(index%2) { offset=0-offset; }
+  }
+  let r=etc2_clamp(color/256*17+offset);
+  let g=etc2_clamp(color/16%16*17+offset);
+  let b2=etc2_clamp(color%16*17+offset);
+  return r+256*g+65536*b2;
+}
+
+native function etc2_interpolate(origin:i64,horizontal:i64,vertical:i64,x:i64,y:i64,green:i64) i64 {
+  let o=origin*4+origin/16;
+  let h=horizontal*4+horizontal/16;
+  let v=vertical*4+vertical/16;
+  if(green) {
+    o=origin*2+origin/64;
+    h=horizontal*2+horizontal/64;
+    v=vertical*2+vertical/64;
+  }
+  return etc2_clamp((4*o+x*(h-o)+y*(v-o)+2)/4);
+}
+
+native function etc2_planar(block:i64,x:i64,y:i64) i64 {
+  let a=ux_u8(block);
+  let b=ux_u8(block+1);
+  let c=ux_u8(block+2);
+  let d=ux_u8(block+3);
+  let e=ux_u8(block+4);
+  let f=ux_u8(block+5);
+  let g=ux_u8(block+6);
+  let h=ux_u8(block+7);
+  let red=etc2_interpolate(a/2%64,d/4%32*2+d%2,f%8*8+g/32,x,y,0);
+  let green=etc2_interpolate(a%2*64+b/2%64,e/2,g%32*4+h/64,x,y,1);
+  let blue=etc2_interpolate(b%2*32+c/8%4*8+c%4*2+d/128,e%2*32+f/8,h%64,x,y,0);
+  return red+256*green+65536*blue;
+}
+
+native function etc2_alpha(block:i64,position:i64) i64 {
+  let bit=position*3;
+  let address=block+2+bit/8;
+  let bits=ux_u8(address)*256;
+  if(address<block+7) { bits=bits+ux_u8(address+1); }
+  let selector=u32_shr(bits,13-bit%8)%8;
+  let flags=ux_u8(block+1);
+  let delta=eac_modifier(flags%16,selector);
+  return etc2_clamp(ux_u8(block)+delta*(flags/16));
+}
+
+native function etc2_rgb(block:i64,x:i64,y:i64,punch:i64) i64 {
+  let flags=ux_u8(block+3);
+  let opaque=flags/2%2;
+  let mode=etc2_mode(block,opaque || punch);
+  if(mode==4) { return etc2_planar(block,x,y)+4278190080; }
+  let position=x*4+y;
+  let low=ux_u8(block+7-position/8);
+  let high=ux_u8(block+5-position/8);
+  let index=u32_shr(low,position%8)%2+2*(u32_shr(high,position%8)%2);
+  if(punch && !opaque && index==2) { return 0; }
+  if(mode>=2) { return etc2_palette(block,mode,index)+4278190080; }
+  let second=x/2;
+  if(flags%2) { second=y/2; }
+  let table=flags/32;
+  if(second) { table=flags/4%8; }
+  let modifier=etc1_modifier(table,index);
+  if(punch && !opaque && index==0) { modifier=0; }
+  let r=etc1_channel(ux_u8(block),second,mode,modifier);
+  let g=etc1_channel(ux_u8(block+1),second,mode,modifier);
+  let b=etc1_channel(ux_u8(block+2),second,mode,modifier);
+  return r+256*g+65536*b+4278190080;
+}
+
+native function CompressedTexture_decodeETC2(level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  let format=ux_u32(level+CompressedMip.format);
+  if(format<37492 || format>37497) { return 0-2; }
+  let punch=format==37494 || format==37495;
+  let alpha=format>=37496;
+  let blockBytes=8;
+  if(alpha) { blockBytes=16; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  let columns=(width+3)/4;
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     size!=columns*((height+3)/4)*blockBytes || data>6291456-size) { return 0-3; }
+  let output=width*height*4;
+  if(dst<0 || dst>6291456-output || capacity<output ||
+     !file_disjoint(level,CompressedMip.size,data,size) ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size)) { return 0-1; }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let block=data+(y/4*columns+x/4)*blockBytes;
+      let color=etc2_rgb(block+alpha*8,x%4,y%4,punch);
+      if(alpha) {
+        let opacity=etc2_alpha(block,x%4*4+y%4);
+        color=color%16777216+opacity*16777216;
+      }
+      let written=ux_u32_put(dst+(y*width+x)*4,color);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return output;
+}

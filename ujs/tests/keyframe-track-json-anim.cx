@@ -1,0 +1,54 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char *const facts[]={
+    "{\"name\":\".x\",\"times\":[0,1],\"values\":[2,4],\"interpolation\":2300,\"type\":\"number\"}",
+    "{\"name\":\".v\",\"times\":[0,1],\"values\":[1,2,3,4],\"type\":\"vector\"}",
+    "{\"name\":\".c\",\"times\":[0,1],\"values\":[0,1,0,1,0,1],\"type\":\"color\"}",
+    "{\"name\":\".q\",\"times\":[0,1],\"values\":[0,0,0,1,0,1,0,0],\"type\":\"quaternion\"}",
+    "{\"name\":\".b\",\"times\":[0,1],\"values\":[true,false],\"type\":\"bool\"}",
+    "{\"name\":\".s\",\"times\":[0,1],\"values\":[\"\",\"a\\\"b\"],\"type\":\"string\"}",
+};
+
+static int emit(char *out,size_t cap,const char *json,int replacement) {
+    size_t used=0;
+    const size_t size=tx_len(json,512);
+    for(size_t i=0;i<size;i+=4) {
+        unsigned word=0;
+        for(size_t j=0;j<4 && i+j<size;j++) word|=(unsigned)(unsigned char)json[i+j]<<(j*8);
+        const int n=tx_snprintf(out+used,cap-used,"let b%zu=ux_u32_put(%zu,%u);",i,(size_t)256+i,word);
+        if(n<0 || (size_t)n>=cap-used) return 1;
+        used+=n;
+    }
+    const int n=tx_snprintf(out+used,cap-used,
+        "let kind=KeyframeTrack_fromJSON(32,256,%zu,4096);if(kind<0){return 0.0+kind;}"
+        "let writeKind=kind;if(%d){writeKind=%d;}"
+        "let last=KeyframeTrack_toJSON(32,writeKind,1024,2048,8192);"
+        "if(last!=1024+%zu){return 0.0-3.0;}"
+        "let i=0;while(i<%zu){if(ux_u8(256+i)!=ux_u8(1024+i)){return 0.0-4.0;}i=i+1;}"
+        "let again=KeyframeTrack_fromJSON(64,1024,last,10000);return 0.0+again;",
+        256+size,replacement,replacement,size,size);
+    return n<0 || (size_t)n>=cap-used;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","animation-view","keyframe-track","json-read",
+        "record-copy","loaderutils","json-string-decode","json-bytes","animation-json-flatten",
+        "loadingmanager","fileloader","loader-json","animationclip","animationloader",
+        "keyframe-track-json-tokens","keyframe-track-json-read","keyframe-track-json-write",0};
+    char code[6][1600],changed[1600],invalid[1600];
+    const char *cases[7];
+    for(int i=0;i<6;i++) {
+        if(emit(code[i],sizeof code[i],facts[i],0)) return 2;
+        cases[i]=code[i];
+    }
+    if(emit(changed,sizeof changed,facts[1],3) ||
+       emit(invalid,sizeof invalid,"{\"name\":\".x\",\"times\":[0,1],\"values\":[2],\"type\":\"number\"}",0)) return 2;
+    cases[6]=invalid;
+    const double gold[]={1,2,3,4,5,6,-2};
+    return g_wasm_batch("G_ANIM track JSON family","keyframe-track-json",modules,"",cases,gold,7,
+        mutate?1:-1,changed);
+}

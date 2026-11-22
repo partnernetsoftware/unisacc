@@ -1,0 +1,59 @@
+native function perspective_json_scalar(lens:i64,id:i64) f64 {
+  if(id==7) { return ux_f64(lens+PerspectiveCamera.focus); }
+  return ux_f64(lens+id*8);
+}
+
+native function PerspectiveCamera_toJSON(node:i64,lens:i64,uuid:i64,bytes:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(lens%8!=0 || !camera_json_disjoint(lens,PerspectiveCamera.size,dst,end) ||
+     !camera_json_disjoint(lens,PerspectiveCamera.size,scratch,scratch+1104)) { return 0-1; }
+  let p=camera_json_begin(node,uuid,bytes,dst,end,scratch,7);
+  let i=0;
+  while(i<8 && p>=0) {
+    p=json_byte(p,end,44);
+    let value=perspective_json_scalar(lens,i);
+    p=camera_lens_number(p,end,scratch,i,value);
+    i=i+1;
+  }
+  if(ux_u32(lens+PerspectiveCamera.viewEnabled)) {
+    p=camera_lens_view_write(p,end,scratch,lens+PerspectiveCamera.viewFullWidth);
+  }
+  p=json_byte(p,end,125);
+  return json_byte(p,end,125);
+}
+
+native function PerspectiveCamera_fromJSON(node:i64,lens:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(input<0 || end<=input || end>6291456 || lens%8!=0 || scratch%8!=0 ||
+     !camera_json_disjoint(scratch,320,input,end) ||
+     !camera_json_disjoint(lens,PerspectiveCamera.size,input,end) ||
+     !camera_json_disjoint(lens,PerspectiveCamera.size,scratch,scratch+320) ||
+     !camera_json_disjoint(node,Object3D.size,scratch,scratch+320) ||
+     !camera_json_disjoint(lens,PerspectiveCamera.size,node,node+Object3D.size)) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  if(!camera_json_disjoint(matrix,128,scratch,scratch+320) ||
+     !camera_json_disjoint(lens,PerspectiveCamera.size,matrix,matrix+128)) { return 0-1; }
+  let object=LoaderJson_find(json_space(input,end),end,scratch,1701470831,29795,0,6);
+  let limit=json_value_end(object,end);
+  if(object<0 || limit<0) { return 0-2; }
+  let staged=scratch+160;
+  let i=0;
+  while(i<8) {
+    let at=camera_lens_field(object,limit,scratch,i);
+    let value=json_read_number(at,limit);
+    if(value-value!=0.0) { return 0-2; }
+    let offset=i*8;
+    if(i==7) { offset=PerspectiveCamera.focus; }
+    let field=ux_f64_put(staged+offset,value);
+    i=i+1;
+  }
+  let zoom=ux_f64(staged+PerspectiveCamera.zoom);
+  let near=ux_f64(staged+PerspectiveCamera.near);
+  let fov=ux_f64(staged+PerspectiveCamera.fov);
+  if(zoom<=0.0 || near<=0.0 || ux_f64(staged+PerspectiveCamera.far)<=near ||
+     ux_f64(staged+PerspectiveCamera.aspect)<=0.0 || fov<=0.0 || fov>=180.0 ||
+     ux_f64(staged+PerspectiveCamera.filmGauge)<=0.0) { return 0-2; }
+  let enabled=camera_lens_view_read(object,limit,scratch,staged+PerspectiveCamera.viewFullWidth);
+  if(enabled<0) { return 0-2; }
+  let flag=ux_u32_put(staged+PerspectiveCamera.viewEnabled,enabled);
+  if(camera_json_restore(node,input,end,scratch,7)<0) { return 0-2; }
+  return uxe_copy_record(lens,staged,PerspectiveCamera.size);
+}
