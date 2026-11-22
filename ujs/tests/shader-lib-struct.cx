@@ -13,7 +13,7 @@ static int shader_lib_compile(const char *dir) {
     const char abi[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_shader_lib(op:i64,a:i64,b:i64,c:i64) i64 version 1;\n";
     if(sy_write_file(layout,abi,sizeof abi-1,0600)) return 1;
-    char *args[]={"./ujs/ujs2wasm.com",layout,
+    char *args[]={"/bin/sh","./ujs/ujs2wasm.com",layout,
         "ujs/practice/uxe/base/record-copy.ujs","ujs/practice/uxe/base/gpu-packet.ujs",
         "ujs/practice/uxe/base/uniforms-lib-generated.ujs","ujs/practice/uxe/base/uniforms-lib.ujs",
         "ujs/practice/uxe/base/shader-lib-generated.ujs","ujs/practice/uxe/base/shader-lib.ujs",
@@ -28,18 +28,22 @@ static int shader_lib_compile(const char *dir) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int verify=argc==2 && tx_eqz(argv[1],"--verify-key-negative");
+    if(argc!=1 && !mutate && !verify) return 2;
     char dir[256],cwd[460],url[840];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-shader-lib-",dir,sizeof dir)) return 2;
     int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/shader-lib-r160.html?dir=%s%s",
-        cwd,dir,mutate?"&mutate=1":"");
-    const double gold[]={32,96,160,255,81,64,128,191,255,9, 32,96,160,255,81,64,128,191,255,9,2,1};
+        cwd,dir,mutate?"&mutate=1":verify?"&mutateKeys=1":"");
+    const double gold[]={32,96,160,255,81,64,128,191,255,9, 32,96,160,255,81,64,128,191,255,9,2,1,1,1,1,1,1,1};
     enum { count=sizeof gold/sizeof gold[0] };
     double values[count]={0};
     int failed=n<0 || n>=sizeof url || shader_lib_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
-    for(int i=0;!failed && i<count;i++) if(values[i]!=gold[i]) {
-        printf("SHADER_LIB case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
-        failed=1;
+    for(int i=0;!failed && i<count;i++) {
+        const double expected=verify && i>=count-6 && i%2==0?0:gold[i];
+        if(values[i]!=expected) {
+            printf("SHADER_LIB case=%d actual=%.17g gold=%.17g\n",i,values[i],expected);
+            failed=1;
+        }
     }
     if(sy_remove_all(dir)) failed=1;
     printf("G_PIXEL ShaderLib basic and points cases=%d failed=%d\n",count,failed);
