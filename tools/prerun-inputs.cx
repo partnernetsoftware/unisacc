@@ -2,7 +2,7 @@
  *
  *   sh ./unisacc.com tools/prerun-inputs.cx -- --rev REV --version V --prev PV --ape ABS_APE --dir ABS_DIR
  *        [--repo DIR] [--prev-windows FILE] [--priority-src FILE] [--add-ids FILE]
- *        [--times-cache FILE] [--evidence-out DIR | --no-templates] [--prev-rev PREVREV]
+ *        [--times-cache FILE] [--evidence-out DIR | --no-templates] [--prev-rev PREVREV] [--exclude FILE]
  *        [--lanes N] [--jobs N]
  *   (also reachable as: sh ./unisacc.com tools/release-chain.cx -- prerun-inputs ...)
  *
@@ -12,9 +12,14 @@
  *                    window ids of the PREVIOUS version's release/evidence/PV/prerun-windows.tsv plus --add-ids,
  *                    filtered to rows of REV:tests/batches.tsv whose implementation is IMPLEMENTED. It is NOT
  *                    "every batch of REV": 0.0.92 -> 0.0.93 added 5 batches (ckreceipt core-abi-gen rcident-upi1
- *                    tools-compile-181 uaf-census) and none of them entered the 0.0.93 prerun. So a batch that is new
- *                    in REV is reported (give --prev-rev PREVREV, the previous version's frozen rev) as
- *                    WARN new-since-prev-rev and joins the set only through --add-ids.
+ *                    tools-compile-181 uaf-census) and none of them entered the 0.0.93 prerun, so those batches never
+ *                    ran in a strict prerun. Policy (owner cc, 2026-11-23): a prerun does not shrink coverage, so with
+ *                    --prev-rev PREVREV (the previous version's frozen rev) every batch that is IMPLEMENTED in REV and
+ *                    absent from PREVREV:tests/batches.tsv joins the set by default (PRERUN_INPUTS_ADDED lines with
+ *                    est_ms from the times copy, headers product|tree and tier; PRERUN_INPUTS_ADDED_TOTAL). Leaving
+ *                    one out needs a reason: --exclude FILE with lines ID<TAB>reason (empty reason, unknown id or no
+ *                    --prev-rev: refused rc 2); each is listed as PRERUN_INPUTS_EXCLUDED and counted. --add-ids still
+ *                    adds any other IMPLEMENTED id explicitly. Without --prev-rev nothing is added automatically.
  *                    Ids of PV that REV no longer lists are dropped and reported as WARN dropped.
  *   PRERUN_TIMES     DIR/times.tsv: a read-only (0444) copy of --times-cache (default
  *                    ~/.cache/unisacc/batch-times.tsv) with its sha256. --times-file is refused: the cache is a live
@@ -40,7 +45,7 @@
  *   REV:tests/batches.tsv lists IMPLEMENTED; this tool only lists it, the first run decides.
  *
  * Output lines: PRERUN_INPUTS_* detail lines, then PRERUN_CMD (the full recommended run), then the last line
- *   PRERUN_INPUTS ape=... ids_sha=... times_sha=... priority=... dir=... status=READY|MISSING:ITEM[,ITEM]
+ *   PRERUN_INPUTS ape=... ids_sha=... times_sha=... priority=... dir=... added=N excluded=M status=READY|MISSING:ITEM[,ITEM]
  * Exit 0 READY, 1 MISSING, 2 refused (bad or direct input). Check: tools/check-prerun-inputs.cx. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
@@ -58,6 +63,9 @@ static int g_nids;
 static char g_in[MAXIDS];           /* 1 when the id is in the prerun set */
 static char g_prev[MAXIDS][IDLEN];
 static int g_nprev;
+static char g_hdr[MAXIDS][12], g_tier[MAXIDS][12];
+static char g_new[MAXIDS];          /* 1 when added automatically as new since --prev-rev */
+static char g_excl[MAXIDS][160];    /* exclusion reason, empty when not excluded */
 
 static int refuse(const char *why) { printf("PRERUN_INPUTS_REFUSE\t%s\n", why); return 2; }
 
@@ -94,10 +102,13 @@ static void load_batches(char *t, size_t n) {
         if (first) { first = 0; continue; }
         char *t1 = strchr(line, '\t'); if (!t1) continue;
         *t1++ = 0;
-        char *t2 = strchr(t1, '\t'); if (t2) *t2 = 0;
-        if (strcmp(t1, "IMPLEMENTED") || strlen(line) >= IDLEN || g_nids >= MAXIDS) continue;
+        char *fl[16]; int nf = 0; char *q = t1;
+        while (nf < 14) { fl[nf++] = q; char *tb = strchr(q, '\t'); if (!tb) break; *tb = 0; q = tb + 1; }
+        if (strcmp(fl[0], "IMPLEMENTED") || strlen(line) >= IDLEN || g_nids >= MAXIDS) continue;
         if (find_id(line) >= 0) continue;
         cx_fmt(g_ids[g_nids], IDLEN, "%s", line);
+        cx_fmt(g_hdr[g_nids], sizeof g_hdr[0], "%s", nf > 11 ? fl[11] : "?");
+        cx_fmt(g_tier[g_nids], sizeof g_tier[0], "%s", nf > 12 ? fl[12] : "?");
         g_nids++;
     }
 }
@@ -164,7 +175,7 @@ static int write_template(const char *from_dir, const char *to_dir, const char *
 
 int main(int argc, char **argv) {
     const char *rev = 0, *ver = 0, *prev = 0, *ape = 0, *dir = 0, *repo = ".", *pwin = 0, *prio = 0, *addf = 0;
-    const char *tcache = 0, *evout = 0, *prevrev = 0; int notpl = 0, lanes = 3, jobs = 8;
+    const char *tcache = 0, *evout = 0, *prevrev = 0, *exclf = 0; int notpl = 0, lanes = 3, jobs = 8;
     for (int i = 1; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
         if (!strcmp(k, "--no-templates")) { notpl = 1; continue; }
@@ -175,7 +186,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(k, "--ape")) ape = v; else if (!strcmp(k, "--dir")) dir = v; else if (!strcmp(k, "--repo")) repo = v;
         else if (!strcmp(k, "--prev-windows")) pwin = v; else if (!strcmp(k, "--priority-src")) prio = v;
         else if (!strcmp(k, "--add-ids")) addf = v; else if (!strcmp(k, "--times-cache")) tcache = v;
-        else if (!strcmp(k, "--evidence-out")) evout = v; else if (!strcmp(k, "--prev-rev")) prevrev = v;
+        else if (!strcmp(k, "--evidence-out")) evout = v; else if (!strcmp(k, "--prev-rev")) prevrev = v; else if (!strcmp(k, "--exclude")) exclf = v;
         else if (!strcmp(k, "--lanes")) lanes = atoi(v); else if (!strcmp(k, "--jobs")) jobs = atoi(v);
         else return refuse("unknown-option");
         i++;
@@ -244,6 +255,37 @@ int main(int argc, char **argv) {
         }
         mm_free(at);
     }
+    int nadded = 0, nexcl = 0;
+    if (exclf) {
+        size_t xn = 0; char *xt = read_all(exclf, &xn);
+        if (!xt) return refuse("exclude-unreadable");
+        char *p = xt, *end = xt + xn;
+        while (p < end) {
+            char *nl = memchr(p, '\n', (size_t)(end - p)); size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+            char line[512]; size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+            mm_copy(line, sizeof line, p, cp); line[cp] = 0; p += ll + (nl ? 1 : 0);
+            if (!line[0] || line[0] == '#') continue;
+            char *tb = strchr(line, '\t');
+            if (!tb || !tb[1]) { mm_free(xt); printf("PRERUN_INPUTS_REFUSE\texclude-needs-reason\t%s\n", line); return 2; }
+            *tb++ = 0;
+            int ix = find_id(line);
+            if (ix < 0) { mm_free(xt); printf("PRERUN_INPUTS_REFUSE\texclude-id-not-implemented\t%s\n", line); return 2; }
+            cx_fmt(g_excl[ix], sizeof g_excl[0], "%s", tb);
+        }
+        mm_free(xt);
+    }
+    if (prevrev) {
+        char pspec[256]; if (cx_fmt(pspec, sizeof pspec, "%s:tests/batches.tsv", prevrev)) return refuse("prev-rev");
+        char *pv2[] = {"git", "show", pspec, 0}; np_result r2 = {0};
+        if (np_run(pv2, repo, 0, 30, &r2, why, sizeof why) || r2.rc || !r2.out) return refuse("git-show-prev-batches-failed");
+        for (int i = 0; i < g_nids; i++) {
+            char key[IDLEN + 3]; cx_fmt(key, sizeof key, "\n%s\t", g_ids[i]);
+            if (g_in[i] || strstr(r2.out, key)) { g_excl[i][0] = 0; continue; }
+            if (g_excl[i][0]) { nexcl++; continue; }
+            g_in[i] = 1; g_new[i] = 1; nadded++;
+        }
+        np_free(&r2);
+    } else if (exclf) return refuse("exclude-needs-prev-rev");
     int nin = 0, nnew = 0;
     for (int i = 0; i < g_nids; i++) if (g_in[i]) nin++;
     for (int i = 0; i < g_nids; i++) if (!g_in[i]) nnew++;
@@ -259,28 +301,41 @@ int main(int argc, char **argv) {
         mm_free(o);
         if (bad) return refuse("ids-write-failed");
     }
-    printf("PRERUN_INPUTS_IDS\tbatches_implemented=%d\tin_set=%d\tprev_ids=%d\tdropped=%d\toutside_set=%d\n", g_nids, nin, g_nprev, dropped, nnew);
-    if (prevrev) {
-        char pspec[256]; if (cx_fmt(pspec, sizeof pspec, "%s:tests/batches.tsv", prevrev)) return refuse("prev-rev");
-        char *pv2[] = {"git", "show", pspec, 0}; np_result r2 = {0};
-        if (np_run(pv2, repo, 0, 30, &r2, why, sizeof why) || r2.rc || !r2.out) return refuse("git-show-prev-batches-failed");
-        int nn = 0, shown = 0;
-        for (int i = 0; i < g_nids; i++) {
-            char key[IDLEN + 3]; cx_fmt(key, sizeof key, "\n%s\t", g_ids[i]);
-            if (!g_in[i] && !strstr(r2.out, key)) {
-                if (!nn++) printf("PRERUN_INPUTS_WARN\tnew-since-prev-rev\tids=");
-                if (shown++ < 40) printf("%s%s", shown > 1 ? "," : "", g_ids[i]);
-            }
-        }
-        if (nn) printf("\tcount=%d\tnot in the set: join it with --add-ids (0.0.92 -> 0.0.93 left 5 new batches out)\n", nn);
-        np_free(&r2);
-    }
+    printf("PRERUN_INPUTS_IDS\tbatches_implemented=%d\tin_set=%d\tprev_ids=%d\tdropped=%d\toutside_set=%d\tadded=%d\texcluded=%d\n", g_nids, nin, g_nprev, dropped, nnew, nadded, nexcl);
     /* times */
     char tdst[4400], tsha[65] = ""; size_t tl = 0;
     if (cx_fmt(tdst, sizeof tdst, "%s/times.tsv", dir)) return refuse("path");
     int tc = copy_ro(tcache, tdst, tsha, &tl);
     if (tc == -2) return refuse("times-frozen-differs: DIR/times.tsv exists read-only with other content; use a new --dir");
     if (tc) MISS("times");
+    if (nadded + nexcl > 0) {
+        size_t tn = 0; char *tt = tc ? 0 : read_all(tdst, &tn);
+        long sum = 0;
+        for (int i = 0; i < g_nids; i++) {
+            if (!g_new[i] && !g_excl[i][0]) continue;
+            long ms = !strncmp(g_ids[i], "daily-compile-smoke", 19) ? 15000 : 5000; int meas = 0;
+            if (tt) {
+                char *p = tt, *end = tt + tn;
+                while (p < end) {
+                    char *nl = memchr(p, '\n', (size_t)(end - p)); size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+                    char line[512]; size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
+                    mm_copy(line, sizeof line, p, cp); line[cp] = 0; p += ll + (nl ? 1 : 0);
+                    char *c1 = strchr(line, '\t'); if (!c1) continue;
+                    char *c2 = strchr(c1 + 1, '\t'); if (!c2) continue;
+                    *c2 = 0;
+                    if (strcmp(c1 + 1, g_ids[i])) continue;
+                    char *c3 = strchr(c2 + 1, '\t'); if (!c3) continue;
+                    char *c4 = strchr(c3 + 1, '\t'); if (c4) *c4 = 0;
+                    if (strncmp(c2 + 1, "PASS", 4)) continue;
+                    long v = atol(c3 + 1); if (v > 0) { ms = v; meas = 1; }
+                }
+            }
+            if (g_new[i]) { sum += ms; printf("PRERUN_INPUTS_ADDED\t%s\test_ms=%ld\tmeasured=%s\theaders=%s\ttier=%s\n", g_ids[i], ms, meas ? "yes" : "no", g_hdr[i], g_tier[i]); }
+            else printf("PRERUN_INPUTS_EXCLUDED\t%s\treason=%s\n", g_ids[i], g_excl[i]);
+        }
+        if (tt) mm_free(tt);
+        printf("PRERUN_INPUTS_ADDED_TOTAL\tcount=%d\tsum_ms=%ld\test_wall_ms=%ld\t(sum divided by lanes x jobs = %d x %d)\n", nadded, sum, sum / (lanes * jobs), lanes, jobs);
+    }
     /* priority */
     char pdst[4400], psha[65] = "";
     if (cx_fmt(pdst, sizeof pdst, "%s/priority.tsv", dir)) return refuse("path");
@@ -317,10 +372,12 @@ int main(int argc, char **argv) {
         for (int i = 0; names[i]; i++) if (write_template(prevev, evout, names[i], prev, &wrote)) printf("PRERUN_INPUTS_TEMPLATE\t%s\tunreadable-in-%s\n", names[i], prev);
     }
     /* recommended command */
-    printf("PRERUN_CMD\tsh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file \"%s\" --times-file \"%s\" --priority-file \"%s\" --out \"%s\" --normal-jobs %d --window-lanes %d && sh ./unisacc.com tools/prerun-drive.cx -- run --root \"$PWD\" --candidate \"%s\" --out \"%s\" --window-lanes %d\n",
-           idsfile, tdst, pdst, dir, jobs, lanes, ape ? ape : "ABS_APE", dir, lanes);
-    printf("PRERUN_INPUTS ape=%s ids_sha=%s times_sha=%s priority=%s dir=%s status=%s%s\n",
+    printf("PRERUN_CMD\tplan\tsh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file \"%s\" --times-file \"%s\" --priority-file \"%s\" --out \"%s\" --normal-jobs %d --window-lanes %d\n",
+           idsfile, tdst, pdst, dir, jobs, lanes);
+    printf("PRERUN_CMD\trun\tnohup timeout -k 10s 3600s sh -c 'for attempt in 1 2; do sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate \"$1\" --out \"$2\" --window-lanes %d --resume --max-jobs 4 --keep-going && exit 0; done; exit 1' sh \"%s\" \"%s\" >> \"%s/supervise.log\" 2>&1 &\n",
+           lanes, ape ? ape : "ABS_APE", dir, dir);
+    printf("PRERUN_INPUTS ape=%s ids_sha=%s times_sha=%s priority=%s dir=%s added=%d excluded=%d status=%s%s\n",
            ape ? apesha : "MISSING", idssha[0] ? idssha : "MISSING", tsha[0] ? tsha : "MISSING",
-           psha[0] ? psha : "MISSING", dir, nmiss ? "MISSING:" : "READY", nmiss ? missing : "");
+           psha[0] ? psha : "MISSING", dir, nadded, nexcl, nmiss ? "MISSING:" : "READY", nmiss ? missing : "");
     return nmiss ? 1 : 0;
 }

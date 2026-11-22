@@ -78,6 +78,31 @@ int main(int argc, char **argv) {
     r = run(addv, 0);
     ck(r.rc == 0 && has(&r, "in_set=3"), "add-ids-joins-set");
     np_free(&r);
+    /* 2b. new batches since --prev-rev join by default; excluding one needs a reason */
+    sh("printf 'newa\\tIMPLEMENTED\\tx\\nnewb\\tIMPLEMENTED\\tx\\nnewp\\tPLANNED\\tx\\n' >> tests/batches.tsv; printf '2\\tnewa\\tPASS\\t7000\\n' >> times.tsv; "
+       "printf 'newb\\tonly CI can run it\\n' > excl.txt; printf 'newb\\t\\n' > excl-noreason.txt; printf 'alpha\\twhy\\n' > excl-old.txt; "
+       "git add -A && git -c user.name=t -c user.email=t@t commit -q -m two", fx);
+    char excl[4500], exclno[4500], exclold[4500], dg[4600], dh[4600], di[4600], dj[4600];
+    cx_fmt(excl, sizeof excl, "%s/excl.txt", fx); cx_fmt(exclno, sizeof exclno, "%s/excl-noreason.txt", fx); cx_fmt(exclold, sizeof exclold, "%s/excl-old.txt", fx);
+    cx_fmt(dg, sizeof dg, "%s/g", persist); cx_fmt(dh, sizeof dh, "%s/h", persist); cx_fmt(di, sizeof di, "%s/i", persist); cx_fmt(dj, sizeof dj, "%s/j", persist);
+    char *autoadd[] = {bin, "--rev", "HEAD", "--prev-rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dg,
+                       "--times-cache", times, "--priority-src", strict, "--no-templates", 0};
+    r = run(autoadd, 0);
+    ck(has(&r, "in_set=4") && has(&r, "added=2 excluded=0") && has(&r, "ADDED\tnewa\test_ms=7000\tmeasured=yes") && has(&r, "ADDED\tnewb\test_ms=5000\tmeasured=no"),
+       "new-batches-added-by-default-with-estimates");
+    ck(!has(&r, "newp") && has(&r, "ADDED_TOTAL\tcount=2\tsum_ms=12000"), "planned-not-added-and-total-sums");
+    np_free(&r);
+    char *exok[] = {bin, "--rev", "HEAD", "--prev-rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dh,
+                    "--times-cache", times, "--priority-src", strict, "--no-templates", "--exclude", excl, 0};
+    r = run(exok, 0);
+    ck(has(&r, "in_set=3") && has(&r, "added=1 excluded=1") && has(&r, "EXCLUDED\tnewb\treason=only CI can run it"), "excluded-batch-needs-and-shows-reason");
+    np_free(&r);
+    char *exno[] = {bin, "--rev", "HEAD", "--prev-rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", di,
+                    "--times-cache", times, "--priority-src", strict, "--no-templates", "--exclude", exclno, 0};
+    r = run(exno, 0); ck(r.rc == 2 && has(&r, "exclude-needs-reason"), "exclude-without-reason-refused"); np_free(&r);
+    char *exold[] = {bin, "--rev", "HEAD", "--prev-rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dj,
+                     "--times-cache", times, "--priority-src", strict, "--no-templates", "--exclude", exclold, 0};
+    r = run(exold, 0); ck(r.rc == 0 && has(&r, "excluded=0"), "exclude-of-already-run-batch-is-ignored"); np_free(&r);
     /* 3. every missing item is named */
     char nope[4500]; cx_fmt(nope, sizeof nope, "%s/absent", fx);
     char dir3[4600]; cx_fmt(dir3, sizeof dir3, "%s/c", persist);
