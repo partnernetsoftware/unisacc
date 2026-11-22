@@ -2,7 +2,9 @@
  *
  * Synthetic evidence dir + fake chain/metrics/day/install bins.
  * Covers: plan lines, dry zero-write, step OK/FAIL, resume skip DONE,
- * root-upgrade gate, mutant-dry-write red. Ends CHECK_RELEASE_POST. */
+ * root-upgrade gate, mutant-dry-write red;
+ * real-repo 0.0.93 dry must DONE (UNMEASURED if env missing); 0.0.94 dry BLOCKED:index-seal.
+ * Ends CHECK_RELEASE_POST. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
@@ -136,6 +138,58 @@ int main(void) {
     sy_unlink(stf);
     rc = run_rp("run --version 9.9.9 --execute --root-upgrade --step 5");
     ck(rc == 0 && has("POST_ROOT_BACKUP_GATE\tPASS") && has("POST_STEP\t5\troot-upgrade\tOK"), "root-upgrade-ok");
+
+
+    /* real-repo: 0.0.93 dry permanent regression (UNMEASURED when env incomplete) */
+    {
+        char idx93[1100], man93[1100], cmd93[2400];
+        int have = 0;
+        if (!cx_fmt(idx93, sizeof idx93, "%s/release/evidence/0.0.93/INDEX.tsv", cwd) &&
+            !cx_fmt(man93, sizeof man93, "%s/release/evidence/0.0.93/backup-evidence.tsv", cwd) &&
+            sy_exists(idx93) == 1 && sy_exists(man93) == 1) have = 1;
+        if (!have) {
+            printf("UNMEASURED\treal-093-dry\tmissing-0.0.93-INDEX-or-backup-manifest\n");
+            ck(1, "real-093-dry-unmeasured");
+        } else {
+            if (cx_fmt(cmd93, sizeof cmd93,
+                "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- run --version 0.0.93 --dry --repo '%s'",
+                cwd, cwd, cwd)) return 2;
+            rc = ckk_sh_t("check-release-post", cmd93, out, (int)sizeof out, 55);
+            ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") &&
+               has("POST_STEP\t1\tindex-seal\tOK") &&
+               has("POST_STEP\t3\tbackup-evidence\tOK") &&
+               !has("BLOCKED:"), "real-093-dry-done");
+        }
+    }
+    /* real-repo: 0.0.94 dry expects BLOCKED:index-seal when no Y2-done */
+    {
+        char idx94[1100], cmd94[2400]; int has_y2 = 0;
+        if (cx_fmt(idx94, sizeof idx94, "%s/release/evidence/0.0.94/INDEX.tsv", cwd)) return 2;
+        if (sy_exists(idx94) == 1) {
+            {
+                unsigned char *bb; int64_t bn = 0;
+                if (sy_read_file(idx94, &bb, &bn, 1 << 20) == 0 && bb) {
+                    long at = 0, nn = (long)bn; const char *pref = "exec-7-Y2-done"; long pl = 15;
+                    while (at < nn) {
+                        long e = at; while (e < nn && bb[e] != '\n') e++;
+                        if (e - at >= pl && tx_same((char *)bb + at, pl, pref, pl)) has_y2 = 1;
+                        at = e + (e < nn ? 1 : 0);
+                    }
+                    mm_free(bb);
+                }
+            }
+        }
+        if (has_y2) {
+            printf("UNMEASURED\treal-094-dry\t0.0.94-already-has-Y2-done\n");
+            ck(1, "real-094-dry-unmeasured");
+        } else {
+            if (cx_fmt(cmd94, sizeof cmd94,
+                "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- run --version 0.0.94 --dry --repo '%s'",
+                cwd, cwd, cwd)) return 2;
+            rc = ckk_sh_t("check-release-post", cmd94, out, (int)sizeof out, 55);
+            ck(rc != 0 && has("BLOCKED:index-seal"), "real-094-dry-blocked-index-seal");
+        }
+    }
 
     /* mutant: dry-write hook must not be used to claim dry wrote metrics OK via fail path */
     rc = run_rp("run --version 9.9.9 --dry --mutant-dry-write --step 4");

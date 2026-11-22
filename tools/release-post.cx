@@ -9,6 +9,7 @@
  *       [--install-root DIR] [--ape PATH] [--ape-sha SHA] [--mutant-dry-write]
  *
  * Orchestrates only: mark-version-seq / backup-evidence live in release-chain.cx;
+ * backup --verify uses release/evidence/V/backup-evidence.tsv unless --backup-dir set;
  * version-metrics-gen, day-metrics, install-ape are existing tools. Never --push.
  * Writes require --execute. --dry is read-only (state file untouched). Each child
  * under tools/bound 55. Re-run skips DONE steps in the state file (--execute).
@@ -138,9 +139,17 @@ static int step_mark_version_seq(void) {
 
 static int step_backup(void) {
     char cmd[2400], out[1 << 15]; int rc;
-    if (cx_fmt(cmd, sizeof cmd,
-               "%s backup-evidence --version %s --repo %s --chain-dir %s --prerun-dir %s --backup-dir %s --verify",
-               g_chain_bin, g_ver, g_repo, g_chain_dir, g_prerun_dir, g_backup_dir)) return -1;
+    /* --verify reads release/evidence/V/backup-evidence.tsv (or --backup-dir/manifest).
+     * Do not invent evidence/V/backup/: that path is not the available form. */
+    if (g_backup_dir[0]) {
+        if (cx_fmt(cmd, sizeof cmd,
+                   "%s backup-evidence --version %s --repo %s --backup-dir %s --verify",
+                   g_chain_bin, g_ver, g_repo, g_backup_dir)) return -1;
+    } else {
+        if (cx_fmt(cmd, sizeof cmd,
+                   "%s backup-evidence --version %s --repo %s --verify",
+                   g_chain_bin, g_ver, g_repo)) return -1;
+    }
     rc = run_bound("rp-backup", cmd, out, (int)sizeof out);
     if (rc != 0 || !has_line_prefix(out, "BACKUP_VERIFY\tPASS")) {
         post_step(3, "FAIL", "backup-evidence-verify"); return 1;
@@ -233,9 +242,7 @@ static int cmd_run(void) {
     if (!g_repo[0] && cx_fmt(g_repo, sizeof g_repo, ".")) return 2;
     if (!g_evdir[0] && cx_fmt(g_evdir, sizeof g_evdir, "%s/release/evidence/%s", g_repo, g_ver)) return 2;
     if (!g_state[0] && cx_fmt(g_state, sizeof g_state, "%s/release-post-state.tsv", g_evdir)) return 2;
-    if (!g_chain_dir[0] && cx_fmt(g_chain_dir, sizeof g_chain_dir, "%s/chain", g_evdir)) return 2;
-    if (!g_prerun_dir[0] && cx_fmt(g_prerun_dir, sizeof g_prerun_dir, "%s/prerun", g_evdir)) return 2;
-    if (!g_backup_dir[0] && cx_fmt(g_backup_dir, sizeof g_backup_dir, "%s/backup", g_evdir)) return 2;
+    /* chain/prerun/backup dirs only when caller sets them; --verify needs none by default */
     if (!g_chain_bin[0] && cx_fmt(g_chain_bin, sizeof g_chain_bin, "sh ./unisacc.com tools/release-chain.cx --")) return 2;
     if (!g_metrics_bin[0] && cx_fmt(g_metrics_bin, sizeof g_metrics_bin, "sh ./unisacc.com tools/version-metrics-gen.cx")) return 2;
     if (!g_day_bin[0] && cx_fmt(g_day_bin, sizeof g_day_bin, "sh ./unisacc.com tools/day-metrics.cx")) return 2;
