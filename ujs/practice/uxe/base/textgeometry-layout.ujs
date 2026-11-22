@@ -1,0 +1,93 @@
+struct TextGlyphMetric {
+  code:u32;
+  outline:u32;
+  advance:f64;
+}
+
+struct TextGlyphPlacement {
+  code:u32;
+  outline:u32;
+  x:f64;
+  y:f64;
+}
+
+native function text_layout_span(at:i64,bytes:i64,alignment:i64) i64 {
+  return at>=0 && at%alignment==0 && bytes>=0 && bytes<=6291456 && at<=6291456-bytes;
+}
+
+native function text_layout_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+native function text_metric_find(metrics:i64,count:i64,code:i64) i64 {
+  let from=0;
+  let to=count;
+  while(from<to) {
+    let index=(from+to)/2;
+    let mark=metrics+index*TextGlyphMetric.size;
+    let key=ux_u32(mark+TextGlyphMetric.code);
+    if(key==code) { return mark; }
+    if(key<code) { from=index+1; } else { to=index; }
+  }
+  return 0-1;
+}
+
+// Input text is a u32 codepoint stream. The caller supplies a sorted metric
+// table and resolves its nonzero outline handles through the font asset.
+native function TextGeometry_layout(text:i64,chars:i64,metrics:i64,metricCount:i64,out:i64,capacity:i64,
+                                    scale:f64,lineHeight:f64) i64 {
+  if(chars<0 || chars>4096 || metricCount<1 || metricCount>8192 || capacity<0 || capacity>4096 ||
+     scale<=0.0 || scale-scale!=0.0 || lineHeight<=0.0 || lineHeight-lineHeight!=0.0 ||
+     !text_layout_span(text,chars*4,4) || !text_layout_span(metrics,metricCount*TextGlyphMetric.size,8) ||
+     !text_layout_span(out,capacity*TextGlyphPlacement.size,8) ||
+     text_layout_overlap(out,capacity*TextGlyphPlacement.size,text,chars*4) ||
+     text_layout_overlap(out,capacity*TextGlyphPlacement.size,metrics,metricCount*TextGlyphMetric.size)) { return 0-1; }
+  let previous=0-1;
+  let i=0;
+  while(i<metricCount) {
+    let row=metrics+i*TextGlyphMetric.size;
+    let key=ux_u32(row+TextGlyphMetric.code);
+    let advance=ux_f64(row+TextGlyphMetric.advance);
+    if(key<=previous || key>1114111 || advance*scale-advance*scale!=0.0) { return 0-1; }
+    previous=key;
+    i=i+1;
+  }
+  let missing=text_metric_find(metrics,metricCount,63);
+  let phase=0;
+  let written=0;
+  while(phase<2) {
+    let x=0.0;
+    let y=0.0;
+    written=0;
+    i=0;
+    while(i<chars) {
+      let code=ux_u32(text+i*4);
+      if(code==10) {
+        x=0.0;
+        y=y-lineHeight*scale;
+        if(y-y!=0.0) { return 0-1; }
+      } else {
+        let mark=text_metric_find(metrics,metricCount,code);
+        if(mark<0) { mark=missing; }
+        if(mark<0 || code>1114111 || (code>=55296 && code<=57343)) { return 0-2; }
+        let outline=ux_u32(mark+TextGlyphMetric.outline);
+        if(outline) {
+          if(written>=capacity) { return 0-3; }
+          if(phase==1) {
+            let row=out+written*TextGlyphPlacement.size;
+            let a=ux_u32_put(row+TextGlyphPlacement.code,ux_u32(mark+TextGlyphMetric.code));
+            let b=ux_u32_put(row+TextGlyphPlacement.outline,outline);
+            let c=ux_f64_put(row+TextGlyphPlacement.x,x);
+            let d=ux_f64_put(row+TextGlyphPlacement.y,y);
+          }
+          written=written+1;
+        }
+        x=x+ux_f64(mark+TextGlyphMetric.advance)*scale;
+        if(x-x!=0.0) { return 0-1; }
+      }
+      i=i+1;
+    }
+    phase=phase+1;
+  }
+  return written;
+}
