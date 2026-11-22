@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <pre id="r160">pending</pre>
 <script type="module">
-import { ImageLoader, REVISION } from "../../web/game/three.module.js";
+import { ImageLoader, TextureLoader, REVISION, ClampToEdgeWrapping, LinearMipmapLinearFilter } from "../../web/game/three.module.js";
 
 const output=document.querySelector("#r160");
 const query=new URLSearchParams(location.search);
@@ -22,7 +22,7 @@ async function reference() {
   return [image.width,image.height,...pixel,rejected];
 }
 
-async function product() {
+async function product(texture=false) {
   const [baseModule,probeModule]=await Promise.all([
     WebAssembly.compile(await binary(dir+"base.wasm")),
     WebAssembly.compile(await binary(dir+"probe.wasm")),
@@ -30,14 +30,19 @@ async function product() {
   const imports=WebAssembly.Module.imports(probeModule);
   if(imports.length!==1 || imports[0].module!=="uxe_png_loader_v1" ||
     imports[0].name!=="uxe_png_dispatch" || imports[0].kind!=="function") throw new Error("probe import");
-  const base=await WebAssembly.instantiate(baseModule);
+  const baseImports=WebAssembly.Module.imports(baseModule);
+  if(baseImports.length!==1 || baseImports[0].module!=="env" ||
+    baseImports[0].name!=="host_gpu_submit" || baseImports[0].kind!=="function") throw new Error("base imports");
+  const base=await WebAssembly.instantiate(baseModule,{env:{host_gpu_submit(){
+    throw new Error("PNG loading must not submit GPU work");
+  }}});
   const dispatch=base.exports.uxe_png_dispatch;
   const probe=await WebAssembly.instantiate(probeModule,{
     uxe_png_loader_v1:{uxe_png_dispatch:dispatch},
   });
   const call=(op,a=0,b=0,c=0)=>Number(probe.exports.uxe_png_probe(BigInt(op),BigInt(a),BigInt(b),BigInt(c)));
   if(base.exports.uxe_abi_version()!==1 || probe.exports.uxe_abi_version()!==1 ||
-    base.exports.memory===probe.exports.memory || call(0)!==128) throw new Error("linked loader ABI");
+    base.exports.memory===probe.exports.memory || call(0,texture?5:0)!==128) throw new Error("linked loader ABI");
   const memory=new Uint8Array(base.exports.memory.buffer,Number(dispatch(0n,1n,0n,0n)),16384);
   const view=new DataView(memory.buffer,memory.byteOffset,memory.byteLength);
   const encoder=new TextEncoder(),decoder=new TextDecoder();
@@ -64,6 +69,33 @@ async function product() {
     };
   }
 
+  if(texture) {
+    const referenceLoader=new TextureLoader().setPath(dir);
+    const expected=await referenceLoader.loadAsync("image.png");
+    const rejected=await referenceLoader.loadAsync("bad.png").then(()=>0,()=>1);
+    const defaults=[expected.image.width,expected.image.height,
+      Number(expected.minFilter===LinearMipmapLinearFilter),
+      Number(expected.wrapS===ClampToEdgeWrapping && expected.wrapT===ClampToEdgeWrapping)];
+    expected.dispose();
+    const first=begin("image.png");
+    const early=call(6,first.id);
+    const received=await first.receive();
+    const alias=call(6,first.id,1);
+    const loaded=call(6,first.id);
+    const fields=Array.from({length:6},(_,i)=>call(7,i));
+    const mutate=query.get("mutate")==="1";
+    const pixel=memory.slice(fields[5],fields[5]+4);
+    if(mutate) pixel[2]^=1;
+    const bad=begin("bad.png");
+    await bad.receive();
+    const badResult=call(6,bad.id);
+    const retained=call(7,0);
+    const retry=begin("image.png");
+    await retry.receive();
+    return [...defaults,rejected,early,received,alias,loaded,...fields,...pixel,
+      badResult,retained,retry.id,call(6,retry.id)];
+  }
+
   const first=begin("image.png"), early=call(3,first.id);
   const received=await first.receive();
   const alias=call(3,first.id,1), decoded=call(3,first.id);
@@ -84,7 +116,7 @@ async function product() {
 
 try {
   if(REVISION!=="160") throw new Error("three.js revision mismatch");
-  output.textContent=JSON.stringify([...await reference(),...await product()]);
+  output.textContent=JSON.stringify([...await reference(),...await product(),...await product(true)]);
 } catch(error) {
   output.textContent="error:"+error.message;
 }
