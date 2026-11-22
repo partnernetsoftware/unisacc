@@ -12,6 +12,7 @@
 | Geometry | 可生成的网格复用 BufferGeometry 的复制、克隆、公开属性往返及释放，逐类与 r160 同场景对照。 | 23 个网格生成门已实跑。Plane、Box、Circle、Cylinder 与 Cone 的 C6 门覆盖参数 JSON、网格复制克隆和释放目标。Box 另验六面材质组，Cylinder 与 Cone 对照端盖及开口。其余 18 类待补参数往返和释放。任意 userData 尚未写入，UUID 由调用方供给。Circle 保留半径为零与大于 3 的非整数分段拒绝。 |
 | BufferAttribute | 11 类 JSON 写出经 r160 和独立金值对照，11 个篡改转红。 | 读回草稿复用几何属性解析器。字符串解码依赖须先声明 loader_utf8_width 和 uxe_copy_record。依赖补齐后，`cx ujs/tests/bufferattribute-family-struct.cx -- --round 1` 在 6 秒编译界内返回 124，单路复验同样超时。现由 `linked-wasm-flow.cx` 的 `attribute-json` 入口分别准备基座、检查内容哈希并链接热探针。11 种读回对照通过，错配类型逐项转红。完整对象复制、统一上传接线及超出单记录有界名字空间的输入另列缺口。编译器诊断复现为 `./ujs/ujs2wasm.com ujs/practice/uxe/test/native-undefined-local-repro.ujs -o /tmp/ujs-native-repro.wasm`，实测 rc=1，报 `ujs.com: native function requires an explicit local`，其中调用结果已经用 let 绑定。编译器任务是为未解析的 native 调用点报告符号和位置，并保留局部变量拒绝的原合同。 |
 | Raycaster | 相机射线和场景网格递归由 raycaster-camera-io.cx 与 raycast-scene-io.cx 验收。场景篡改使子对象命中失败。 | 统一遍历中的混合对象递归分派与通用 intersectObject 和 intersectObjects 入口待补。 |
+| Mesh | C6 门 mesh-object-json-struct.cx 核对根矩阵、可见性、两个 UUID 引用、拒绝未知几何及克隆后的资源共享。释放原节点后克隆仍有效。材质引用调换转红。 | 叶节点记录保留已有几何和材质，由调用方登记 UUID。独立打包资源、多材质数组和子树 JSON 待补。r160 Mesh 使用脱离父节点及垃圾回收，UXE 另有 Mesh_dispose 释放节点槽。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
 ## 压缩纹理软件范围与设备缺口

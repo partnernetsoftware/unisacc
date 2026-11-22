@@ -1,0 +1,133 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use r160_wait
+#pragma unisa use g_math
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+static const char *sources[]={
+    TEST "mesh-object-json-base-layout.ujs",
+    BASE "f64-math.ujs",BASE "views.ujs",BASE "matrix4.ujs",BASE "object-layouts.ujs",
+    BASE "object3d.ujs",BASE "object3d-lifecycle.ujs",BASE "mesh-layout.ujs",BASE "datautils.ujs",
+    BASE "bufferattribute.ujs",BASE "buffergeometry.ujs",BASE "mesh.ujs",BASE "json-read.ujs",
+    BASE "json-bytes.ujs",BASE "loader-json.ujs",BASE "record-copy.ujs",
+    BASE "camera-object-json.ujs",BASE "mesh-object-json.ujs",
+    TEST "mesh-object-json-base.ujs",0
+};
+
+static int module_lines(char *program,int used,int capacity,const char *path) {
+    unsigned char *body=0;
+    int64_t size=0;
+    if(sy_read_file(path,&body,&size,100000)) return -1;
+    for(long p=0;p<size;) {
+        long end=p;
+        while(end<size && body[end]!='\n') end++;
+        while(p<end && (body[p]==' ' || body[p]=='\t')) p++;
+        if(p<end && !tx_prefix((const char*)body+p,end-p,"//",2)) {
+            int quote=0;
+            for(long i=p;i<end;i++) {
+                int ch=body[i];
+                if(!quote && ch=='/' && i+1<end && body[i+1]=='/') break;
+                if(ch=='"' && (i==p || body[i-1]!='\\')) quote=!quote;
+                if(!quote && (ch==' ' || ch=='\t') && i>p && i+1<end) {
+                    int before=body[i-1],after=body[i+1];
+                    int afterLogical=i+2<end && (after=='&' || after=='|') && body[i+2]==after;
+                    int beforeLogical=i>=p+2 && (before=='&' || before=='|') && body[i-2]==before;
+                    if(before=='(' || before==',' || before=='[' || before=='{' ||
+                       after==')' || after==',' || after==';' || after=='{' || after=='}' ||
+                       afterLogical || beforeLogical || before==':' || after==':' ||
+                       before=='=' || after=='=' || before=='+' || after=='+' ||
+                       before=='*' || after=='*' || before=='%' || after=='%' ||
+                       before=='>' || after=='>' || before=='<' || after=='<' ||
+                       after=='(' || after=='[' || before==';' || before=='}') continue;
+                }
+                if(used>=capacity-1) { mm_free(body); return -1; }
+                program[used++]=ch;
+            }
+            if(used>=capacity) { mm_free(body); return -1; }
+            if(program[used-1]!=';' && program[used-1]!='{' && program[used-1]!='}') program[used++]='\n';
+        }
+        p=end+1;
+    }
+    mm_free(body);
+    return used;
+}
+
+static int compile(char **command,int seconds) {
+    char *out=0;
+    size_t bytes=0;
+    const long start=sy_now_ms();
+    int rc=cx_runv_timeout(command,seconds,&out,&bytes);
+    printf("MESH_OBJECT compile_ms=%ld rc=%d\n",sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+static int base_ready(const char *base,int prepare) {
+    const char *cache=sy_env("UXE_MESH_OBJECT_CACHE");
+    char key[65],sha[65],record[512];
+    if(!cache || !cache[0]) {
+        printf("MESH_OBJECT 基座缓存缺失，先运行 --prepare\n");
+        return 1;
+    }
+    if(wasm_test_cache_key(sources,key)) return 1;
+    int size=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(size<0 || size>=(int)sizeof record) return 1;
+    int rc=wasm_test_cache_read(record,key,prepare?0:base,sha);
+    if(!rc) {
+        printf("MESH_OBJECT cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc!=-ENOENT || !prepare) {
+        printf("MESH_OBJECT cache_rc=%d，先运行 --prepare\n",rc);
+        return 1;
+    }
+    char input[380],program[100000];
+    if(tx_snprintf(input,sizeof input,"%s.ujs",base)>=(int)sizeof input) return 1;
+    int used=0;
+    for(int n=0;sources[n];n++) {
+        used=module_lines(program,used,sizeof program,sources[n]);
+        if(used<0) return 1;
+    }
+    if(sy_write_file(input,program,used,0600)) return 1;
+    char *command[]={"./ujs/ujs2wasm.com",input,"-o",(char *)base,0};
+    return compile(command,50) || wasm_test_cache_write(cache,record,key,base);
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc==2 && tx_eqz(argv[1],"--prepare");
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !prepare && !mutate) return 2;
+    char dir[256],base[320],probe[320],page[320],url[360];
+    if(sy_mkdtemp("/tmp","uxe-mesh-object-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":"");
+    int failed=base_ready(base,prepare);
+    if(!failed && !prepare) {
+        char *command[]={"./ujs/ujs2wasm.com",TEST "mesh-object-json-probe.ujs","-o",probe,0};
+        const double gold[]={2,0,7000,19,-2,1};
+        double actual[6],reference[6];
+        failed=compile(command,6) || sy_copy(TEST "mesh-object-json-wasm.html",page,0600) ||
+            r160_wait_ref("mesh-object-json",reference,6,dir) ||
+            r160_wait_read(url,"#wasm-cases",actual,6,dir);
+        for(int i=0;!failed && i<6;i++) {
+            if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(reference[i],gold[i],1e-9)) {
+                printf("MESH_OBJECT case=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+                failed=1;
+            }
+        }
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT Mesh object JSON prepare=%d cases=%d failed=%d\n",prepare,prepare?0:6,failed);
+    return failed;
+}

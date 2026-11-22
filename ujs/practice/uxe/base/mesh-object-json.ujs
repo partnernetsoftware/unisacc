@@ -1,0 +1,96 @@
+// The caller initializes a destination with its own node and morph storage.
+native function Mesh_clone(dst:i64,dstArena:i64,src:i64,srcArena:i64,recursive:i64) i64 {
+  if(dst==src || !mesh_valid(dst) || !mesh_valid(src)) { return 0-1; }
+  let srcNode=ux_u32(src+Mesh.node);
+  if(dstArena==srcArena && ux_u32(dst+Mesh.node)==srcNode) { return 0-1; }
+  return Mesh_copy(dst,dstArena,src,srcArena,recursive);
+}
+
+// Release only the node. Material and geometry are shared caller resources.
+native function Mesh_dispose(mesh:i64,arena:i64) i64 {
+  if(!mesh_valid(mesh)) { return 0-1; }
+  let disposed=Object3D_destroy(arena,ux_u32(mesh+Mesh.node));
+  if(disposed<0) { return disposed; }
+  let node=ux_u32_put(mesh+Mesh.node,0);
+  let morph=ux_u32_put(mesh+Mesh.morphCount,0);
+  return disposed;
+}
+
+struct MeshJsonBindings {
+  geometries: u32;
+  geometryCount: u32;
+  materials: u32;
+  materialCount: u32;
+}
+
+// A leaf descriptor carries UUID references to caller-owned resources.
+// Material and geometry payloads are loaded separately through their resource loaders.
+native function Mesh_toJSON(mesh:i64,arena:i64,ids:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!mesh_valid(mesh) || !camera_json_disjoint(mesh,Mesh.size,dst,end) ||
+     !camera_json_disjoint(mesh,Mesh.size,scratch,scratch+1104) ||
+     !camera_json_disjoint(ids,24,dst,end) ||
+     !camera_json_disjoint(ids,24,scratch,scratch+1104) || ids%4!=0) { return 0-1; }
+  let node=Object3D_address(arena,ux_u32(mesh+Mesh.node));
+  if(node<0) { return 0-1; }
+  let geometry=ux_u32(ids+8);
+  let geometryLength=ux_u32(ids+12);
+  let material=ux_u32(ids+16);
+  let materialLength=ux_u32(ids+20);
+  if(geometryLength<1 || materialLength<1 ||
+     !camera_json_disjoint(geometry,geometryLength,dst,end) ||
+     !camera_json_disjoint(material,materialLength,dst,end) ||
+     !camera_json_disjoint(geometry,geometryLength,scratch,scratch+1104) ||
+     !camera_json_disjoint(material,materialLength,scratch,scratch+1104)) { return 0-1; }
+  let p=camera_json_begin(node,ux_u32(ids),ux_u32(ids+4),dst,end,scratch,12);
+  p=camera_json_word(p,end,1701257772,4);
+  p=camera_json_word(p,end,1952804207,4);
+  p=camera_json_word(p,end,975337842,4);
+  p=json_write_string(p,end,geometry,geometryLength);
+  p=camera_json_word(p,end,1634542124,4);
+  p=camera_json_word(p,end,1769104756,4);
+  p=camera_json_word(p,end,975334497,4);
+  p=json_write_string(p,end,material,materialLength);
+  p=json_byte(p,end,125);
+  return json_byte(p,end,125);
+}
+
+native function Mesh_fromJSON(mesh:i64,arena:i64,input:i64,end:i64,scratch:i64,bindings:i64) i64 {
+  if(!mesh_valid(mesh) || input<0 || end<=input || end>6291456 ||
+     !camera_json_disjoint(scratch,160,input,end) || scratch%8!=0 ||
+     !camera_json_disjoint(mesh,Mesh.size,input,end) ||
+     !camera_json_disjoint(mesh,Mesh.size,scratch,scratch+160) ||
+     !camera_json_disjoint(bindings,MeshJsonBindings.size,scratch,scratch+160) ||
+     bindings%4!=0) { return 0-1; }
+  let node=Object3D_address(arena,ux_u32(mesh+Mesh.node));
+  if(node<0 || !camera_json_disjoint(node,Object3D.size,scratch,scratch+160)) { return 0-1; }
+  let which=0;
+  while(which<2) {
+    let table=ux_u32(bindings+which*8);
+    let count=ux_u32(bindings+which*8+4);
+    if(table%4!=0 || count>65535 ||
+       !camera_json_disjoint(table,count*12,scratch,scratch+160)) { return 0-1; }
+    let row=0;
+    while(row<count) {
+      let entry=table+row*12;
+      if(!camera_json_disjoint(ux_u32(entry),ux_u32(entry+4),scratch,scratch+160)) { return 0-1; }
+      row=row+1;
+    }
+    which=which+1;
+  }
+  let root=json_space(input,end);
+  let object=LoaderJson_find(root,end,scratch,1701470831,29795,0,6);
+  let limit=json_value_end(object,end);
+  if(object<0 || limit<0) { return 0-2; }
+  let geoToken=LoaderJson_find(object,limit,scratch,1836016999,2037544037,0,8);
+  let matToken=LoaderJson_find(object,limit,scratch,1702125933,1818323314,0,8);
+  let geometry=object_load_reference(geoToken,limit,ux_u32(bindings+MeshJsonBindings.geometries),
+      ux_u32(bindings+MeshJsonBindings.geometryCount));
+  let material=object_load_reference(matToken,limit,ux_u32(bindings+MeshJsonBindings.materials),
+      ux_u32(bindings+MeshJsonBindings.materialCount));
+  if(geometry<0 || geometry>6291456-BufferGeometry.size || geometry%4!=0 || material<0) { return 0-2; }
+  let restored=camera_json_restore(node,input,end,scratch,12);
+  if(restored<0) { return restored; }
+  let g=ux_u32_put(mesh+Mesh.geometry,geometry);
+  let m=ux_u32_put(mesh+Mesh.material,material);
+  return mesh;
+}
