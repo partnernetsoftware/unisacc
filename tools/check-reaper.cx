@@ -46,6 +46,22 @@ static int alive(int pid) {
     return pid > 0 && sy_signal(pid, 0) == 0;
 }
 
+/* alive and not a zombie: a killed process that its parent has not waited for yet is gone as a
+   running thing (sy_signal(pid, 0) still succeeds on it).  Reaping a root belongs to the handle
+   owner, never to the sweep (plans/proc-lifecycle.md rule 5), so "gone" means "not running". */
+static int running(int pid) {
+    char p[64], buf[256];
+    FILE *f;
+    char *rp;
+    if (!alive(pid)) return 0;
+    tx_snprintf(p, sizeof p, "/proc/%d/stat", pid);
+    f = fopen(p, "r");
+    if (!f) return 0;
+    rp = fgets(buf, sizeof buf, f) ? strrchr(buf, ')') : 0;
+    fclose(f);
+    return rp && rp[1] == ' ' && rp[2] != 'Z' && rp[2] != 'X';
+}
+
 /* "<fxdir>/<name>.pid" into B; its length, or -1. */
 static int pid_path(char *b, int cap, const char *name) {
     int n = tx_snprintf(b, cap, "%s/%s.pid", fxdir, name);
@@ -123,13 +139,35 @@ static int nest_root(void *ud) {
     return 0;
 }
 
-/* The middle of the escape chain: starts the detached sleeper and returns at
-   once, so the sleeper loses its parent while it is still running. */
+/* Orphan shape: the middle returns at once, so the sleeper loses its parent while running. */
+static int orphan_mid(void *ud) {
+    int fds[2];
+    (void)ud;
+    if (sy_fork_session(late_sleeper, "o", fds) <= 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    return 0;
+}
+
+static int orphan_root(void *ud) {
+    int fds[2];
+    (void)ud;
+    if (sy_fork_session(orphan_mid, 0, fds) <= 0) return 1;
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (write_pid("oroot") != 0) return 2;
+    sy_sleep_ms(3000);
+    return 0;
+}
+
+/* The middle of the escape chain: starts the sleeper in its own session (it left the process
+   group) and stays alive, so the sleeper is a provable descendant by its parent chain.  Before
+   2026-11-23 the middle returned at once: that orphan shape (parent gone before the kill) cannot
+   be told from an unrelated sibling and is now a negative answer, asserted in its own fixture. */
 static int escape_mid(void *ud) {
     int fds[2];
     (void)ud;
     if (sy_fork_session(late_sleeper, "d", fds) <= 0) return 1;
     sy_close(fds[0]); sy_close(fds[1]);
+    sy_sleep_ms(3000);
     return 0;
 }
 
@@ -300,6 +338,7 @@ static int check_reaped_root(int exact) {
     if (root < 0) return 2;
     if (root == 0) {
         close(fds[0]);
+        if (!exact) sy_setpgid(0, 0);   /* the orphan stays in this group: provably the root's */
         int child = fork();
         if (child == 0) {
             sy_sleep_ms(3000);
@@ -309,6 +348,7 @@ static int check_reaped_root(int exact) {
         _exit(wrote == sizeof child && child > 0 ? 0 : 1);
     }
     close(fds[1]);
+    if (!exact) sy_setpgid(root, root);
     long long root_start = rp_root_start(root);
     long got = read(fds[0], &orphan, sizeof orphan);
     if (waitpid(root, &st, 0) != root || st || got != sizeof orphan || orphan <= 1) return 2;
@@ -330,7 +370,10 @@ static int check_reaped_root(int exact) {
     }
     sy_setpgid(sentinel, sentinel);
     if (exact) ok(sentinel == root, "reaped-root: replacement owns the reused pid");
-    res = rp_kill_tree_pid_after_wait(sentinel, 1, root_start, 1000, 0, 0, report, sizeof report);
+    {   int keep_s[1];
+        keep_s[0] = sentinel;   /* an unrelated live child the caller declares is not the job's */
+        res = rp_kill_tree_pid_after_wait(root, 1, root_start, 1000, keep_s, 1, report, sizeof report);
+    }
     w = waitpid(sentinel, &st, WNOHANG | WUNTRACED);
     ok(w == 0, "reaped-root: replacement neither stopped nor killed");
     if (w == 0 || (w == sentinel && WIFSTOPPED(st))) {
@@ -338,8 +381,10 @@ static int check_reaped_root(int exact) {
         (void)waitpid(sentinel, &st, 0);
     }
     w = waitpid(orphan, &st, WNOHANG);
-    ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)),
-       "reaped-root: orphan holding the output pipe is gone");
+    if (exact)
+        ok(res < 0 && w == 0, "reaped-root: an orphan outside any provable group is neither signalled nor reported clean");
+    else
+        ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)), "reaped-root: orphan holding the output pipe is gone");
     if (w == 0) {
         sy_kill(orphan);
         (void)waitpid(orphan, &st, 0);
@@ -409,11 +454,11 @@ static int check_identity_mismatch(void) {
     if (real_start < 0) { sy_kill(Y); (void)waitpid(Y, &st, 0); return 2; }
     e[0].pid = Y;
     e[0].start = real_start + 1000;              /* reused-pid shape: wrong baseline */
-    packed = rp_dispose_list(e, 1, rep, sizeof rep);
+    packed = rp_dispose_list(e, 1, rep, sizeof rep, 0);
     ok((packed & 0xffff) == 0, "identity-mismatch: a reused-pid shape is not a survivor");
     ok((packed >> 16) == 1, "identity-mismatch: counted as a mismatch");
     e[0].start = real_start;                     /* control: the true baseline sees a survivor */
-    packed = rp_dispose_list(e, 1, rep, sizeof rep);
+    packed = rp_dispose_list(e, 1, rep, sizeof rep, 0);
     ok((packed & 0xffff) == 1, "identity-mismatch: the true starttime counts as a survivor (control)");
     /* The packed seam (survivors low 16 bits, mismatches above) must compose: two entries, one a
        real live process with its true starttime (a survivor) and one with a wrong baseline (a
@@ -431,7 +476,7 @@ static int check_identity_mismatch(void) {
         sa = rp_root_start(A2); sb = rp_root_start(B2);
         pair[0].pid = A2; pair[0].start = sa;          /* survivor */
         pair[1].pid = B2; pair[1].start = sb + 1000;   /* mismatch */
-        packed2 = rp_dispose_list(pair, 2, rep2, sizeof rep2);
+        packed2 = rp_dispose_list(pair, 2, rep2, sizeof rep2, 0);
         ok((packed2 & 0xffff) == 1, "pack-seam: low axis counts the one survivor");
         ok((packed2 >> 16) == 1, "pack-seam: high axis counts the one mismatch");
         w2 = waitpid(A2, &st2, WNOHANG);
@@ -489,7 +534,10 @@ int main(int argc, char **argv) {
             sy_sleep_ms(20);
         }
     }
-    ok(dead > 0 && sy_kill_tree(dead, 500, 0, 0, rep, sizeof rep) == 0, "kill_tree: a reaped root is 0 residue");
+    /* B (was: == 0).  A bare pid entry (C) that is already reaped carries no pre-reap starttime, so it
+       cannot tell this root's orphans from anything else: the answer is -EIO, never a clean 0.  The old
+       0 was a false clean (gatekeeper fixture f1: orphan alive, answer 0). */
+    ok(dead > 0 && sy_kill_tree(dead, 500, 0, 0, rep, sizeof rep) == -EIO, "kill_tree: a reaped root without a baseline is -EIO, never clean");
 
     /* tree: root, two grandchildren, plus an unrelated child the caller keeps */
     root = sy_fork_session(nest_root, 0, fds);
@@ -515,7 +563,7 @@ int main(int argc, char **argv) {
     rep[0] = 0;
     res = sy_kill_tree(root, 1500, &keep_pid, 1, rep, sizeof rep);
     ok(res == 0 && rep[0] == 0, "tree: kill_tree reports no residue");
-    ok(!alive(root) && !alive(g1) && !alive(g2), "tree: root and both grandchildren are gone");
+    ok(!running(root) && !running(g1) && !running(g2), "tree: root and both grandchildren are gone");
     ok(alive(keep_pid), "tree: the kept child survived the kill");
 
     /* escape: a sleeper that lost its parent before the kill */
@@ -530,9 +578,26 @@ int main(int argc, char **argv) {
     ok(eroot > 0 && d > 0 && alive(eroot) && alive(d), "escape: root and the detached sleeper are running");
     rep[0] = 0;
     res = sy_kill_tree(eroot, 1500, 0, 0, rep, sizeof rep);
-    ok(!alive(eroot), "escape: the root is gone");
-    ok(!alive(d), "escape: the detached sleeper is gone");
+    ok(!running(eroot), "escape: the root is gone");
+    ok(!running(d), "escape: the detached sleeper is gone");
     ok(res == 0 && rep[0] == 0, "escape: kill_tree reports no residue");
+    /* C (new): the orphan shape -- the sleeper's parent exits before the kill.  The sleeper is a child
+       of ours that started after the root, exactly like an unrelated sibling forked later, so it is not
+       provably the root's: it is never signalled and the answer is negative, not 0 (gkfx f3/f3b). */
+    {   int oroot, o, ores, ofds[2];
+        oroot = sy_fork_session(orphan_root, 0, ofds);
+        remember(oroot);
+        if (oroot > 0) { sy_close(ofds[0]); sy_close(ofds[1]); }
+        { int rr = await_pid("oroot"); if (oroot <= 0) oroot = rr; }
+        o = await_pid("o");
+        remember(o);
+        ok(oroot > 0 && o > 0 && running(oroot) && running(o), "orphan: root and the orphaned sleeper are running");
+        rep[0] = 0;
+        ores = sy_kill_tree(oroot, 1500, 0, 0, rep, sizeof rep);
+        ok(!running(oroot), "orphan: the root is gone");
+        ok(ores < 0, "orphan: an orphan that is not provably the root's makes the answer negative, never 0");
+        ok(running(o), "orphan: the unprovable sleeper was not signalled");
+    }
     /* Three-state answers (plans/proc-lifecycle.md rule 7), one assertion per negative class that
        is reachable on Linux without root:
        - EIO: entry B with REAPED=1 and no pre-reap starttime baseline (-1) cannot tell a reused

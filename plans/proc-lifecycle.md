@@ -99,3 +99,64 @@
 - 非 Linux 无 `/proc` 时 rp_kill_tree 返回 `-ENOSYS`(组内已杀、逃逸后代无法证实),该分支
   在 Linux 验收机上不可达,记 UNMEASURED。
 - 裸 pid 入口 `sy_signal`/`sy_killpg`/`sy_wait`/`sy_kill` 无身份保护;Windows 全部 `-ENOSYS`。
+
+## 五、整改进度(gatekeeper 第二轮,封顶两轮;写于 2026-11-23)
+
+被退回的三个提交:`a5718fab8f`(D1)、`358c2d239c`(变异 b)、`f7e9069324`(D2)。
+前序 (b)(c) 提交保留:`6ab81e577d`、`19514fecdf`、`2ad0f656aa`、`aae7fdc7b6`、`8a98b7dce2`。
+
+夹具:`~/.claude/jobs/7f46e032/tmp/gk96-gkfx.cx`,复制到 `tools/gkfx.cx`(用完不入库),
+`sh ./unisacc.com tools/gkfx.cx -- f1|f2|f3|f3b|f4`。修前复现原行:
+- f1 `entryC_on_reaped_root_ret=0 orphan_alive=1 FALSE_CLEAN` -> 整改 (a)
+- f2 `ret=0 waitpid_after=-1 errno=10 ROOT_REAPED_BY_SWEEP` -> 整改 (b)
+- f3 `root_start_passed=0 ret=0 bystander_after_root_killed=1` -> 整改 (c)
+- f3b `bystander_after_root_killed=1` -> 整改 (c) 兄弟误杀
+- f4 `no_subreaper ret=0 escaped_alive=1 FALSE_CLEAN` -> 整改 (d)
+
+五点整改映射(每条改完贴 gkfx 修后原行):
+- (a) `reaper.cx` 212 区域:`kt_stat` 只在 ENOENT 时判干净 0,其余失败返回 `-EIO`;
+  `check-reaper.cx` 的 "a reaped root is 0 residue" 断言随之改写。
+- (b) `rp_dispose_list` 增 `root` 参数,僵尸根不 `sy_wait_status`(回收归 `sy_proc_end`);
+  入口 A 与 C 差别体现在调用是否传 root。
+- (c) `rst <= 0` 一律 `-EIO`;孤儿判据加强为"根的后代"(`pp == sy_pid()` 且 `st >= rst`),
+  不再杀所有非 keep 子进程。
+- (d) subreaper 自查前移到两条路径之前,改为**查询** `sy_child_subreaper_get()`
+  (posix.cx 新增,PR_GET_CHILD_SUBREAPER=37);未设时 `-ENOSYS` 而非 0。
+- (e) 补三夹具各配变异必红:删 `st < rst`、入口 A 不回收根、subreaper 未设逃逸返回非 0;
+  另 D3:batches 登记 `check-reaper-pidns`;processcore/releaseprepare/run.cx 写
+  "cleanup unconfirmed";修 s9-shards.cx:714 与三个丢弃返回值的调用点。
+
+三次提交顺序:
+1. 整改 (a)-(d) 代码 + 对应 check-reaper 断言改写;
+2. 三个新夹具 + 三个变异必红;
+3. D3(批次登记 + 四家 cleanup unconfirmed 文案 + s9-shards/丢弃返回值调用点)。
+
+提交 1 记录(2026-11-23,接手者 omp-sonnet):
+- 代码:posix.cx 加 sy_child_subreaper_get;reaper.cx 的 rp_sweep 按 (a)-(d) 重写。接手后补三处:
+  (1) 删 ccogweco 留下的重复 `rst <= 0` 行;
+  (2) SIGKILL 异步落地,处置改为有界轮询(每 2 ms 一步,至多 deadline/2 步,上限 500),旧循环里的延时被删后
+      曾使 tree 夹具读到刚发信号尚未退出的后代(res=1);
+  (3) 已回收根的孤儿判据由"一律 -EPERM"改为"可证实才杀":与根同进程组、starttime 不早于根、且根 pid 当前
+      无活进程(未被复用)者逐个按身份杀;其余"本进程的子进程且不早于根"者(逃逸孤儿或之后派生的兄弟)永不发信号,
+      存在即 -EPERM。根仍活着的路径同样在处置后探测此类子进程,有则 -EPERM,不返回 0。
+  subreaper 查询对已回收入口也执行(原只在未回收时)。
+- gkfx 修后原行:f1 -5;f2 ret=0 根仍可 waitpid;f3 -5;f3b -1 无兄弟被杀;f4 -38(-ENOSYS)escaped_alive=1。
+- tree/escape 的 res 实测:修前补轮询时 tree res=1(rep 一个后代)、escape res=1,同一竞态;补轮询后均为 0。
+- check-reaper 旧期望到新期望(修前 10 项 FAIL,现 31 项全 PASS,断言总数只增不减):
+  A 夹具改成可证实场景,保持被杀且返回 0:
+  - reaped-root(非 exact):根先 setpgid 成组长,孤儿留在组内;调用传真实根 pid,哨兵兄弟放进 keep。
+    旧:孤儿被杀且 0。新:同。理由:旧夹具的孤儿与哨兵都只靠"本进程子进程"识别,不可证实。
+  - escape:中间进程不再立即退出(睡 3 s),守护者是可由父链证实的后代。旧:中间退出后孤儿被杀且 0。新:
+    父链完整时被杀且 0。孤儿形态另立 C 夹具。
+  - np_run 三项(timeout、real root PID、orphan holding stdout)与 check-netpack 三项:无需改写,代码修好后原样通过。
+  B 旧期望是假干净,改负值:
+  - "kill_tree: a reaped root is 0 residue" 改为 == -EIO(裸 pid 已回收,无起始时间基准)。反例:gkfx f1
+    (逃逸孤儿存活,旧返回 0)。
+  - reaped-root(exact,pidns):旧 res==0 且孤儿被杀;新 res<0 且孤儿未被发信号。理由:根 pid 被哨兵复用,
+    孤儿不在任何可证实的组内,杀它只能靠猜。
+  - tree/escape 的"根与后代已消失"改用 running()(僵尸不算运行):僵尸根的回收归句柄所有者,不归扫描。
+  C 新增(4 项):orphan 夹具,父进程先退出的睡眠者:根与孤儿在跑、根被清掉、返回值为负、孤儿未被发信号。
+- 已知先存问题:`--pid-reuse` 的 "the reused pid has a different starttime" 在 v0.0.96 的 HEAD(f7e9069324)
+  上同样 FAIL,与本次改动无关(未查根因)。
+- 其余检查:check-netpack 17/0、check-process-deadline 0 失败、check-l0-killtree 10/0、check-l0-capture 63/0。
+- 下一步:提交 2(三个新夹具与变异必红,含孤儿不核 starttime 的白盒夹具),提交 3(D3)。

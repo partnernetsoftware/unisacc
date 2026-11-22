@@ -186,104 +186,18 @@ static void kt_pass(int *n, sy_kt_ent *e, int rg, int root, const int *keep, int
    proven gone.  With REAPED set nothing is signalled (REAPED forbids any signal) and -ENOSYS is
    returned at once. */
 int rp_subreaper(void);   /* defined below; rp_sweep checks it for the orphan sweep */
+int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap, int root);   /* exported; ROOT never reaped here */
 
-int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap);   /* exported for the identity-mismatch fixture */
-
-static int rp_sweep(int root, int root_reaped, long long root_start,
-                    int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
-    sy_kt_ent e[SY_KT_MAX];
-    int n = 0, rg = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds;
-    long long rst = root_start;
-    if (root <= 1) return -EINVAL;
-    if (rep && cap > 0) rep[0] = 0;
-    if (!tx_eqz(sy_os_name(), "linux")) {
-        /* not Linux: kill what the group covers, then admit the escaped ones are unproven */
-        if (!root_reaped && root > 1) { sy_killpg(root, SIGKILL); sy_signal(root, SIGKILL); }
-        return -ENOSYS;
-    }
-    if (deadline_ms <= 0) deadline_ms = 2000;
-    sweep_rounds = deadline_ms / 8;
-    if (sweep_rounds < 4) sweep_rounds = 4;
-    if (sweep_rounds > SY_KT_SWEEP_ROUNDS) sweep_rounds = SY_KT_SWEEP_ROUNDS;
-    if (!root_reaped) {
-        /* The root is gone before we ever stopped it: there is no tree to sweep and no orphan
-           it could have left as a child of ours, so this is a proven-clean 0 (not the -EIO
-           "reaped without a baseline" case, which is REAPED=1 plus an unknown starttime). */
-        if (kt_stat(root, 0, &rg, &rst, 0) != 0) return 0;
-        freeze_rounds = deadline_ms / 4;
-        if (freeze_rounds < 8) freeze_rounds = 8;
-        if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
-        sy_signal(root, sn_lnx_SIGSTOP);
-        e[n].pid = root; e[n].start = rst; n++;
-        for (round = 0; round < freeze_rounds; round++) {
-            kt_pass(&n, e, rg, root, keep, nkeep, &added);
-            if (!added) break;
-            sy_sleep_ms(2);
-        }
-        for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
-        if (rg == root && rg > 1) sy_killpg(rg, SIGKILL); /* root's own group */
-    } else {
-        /* REAPED: the group work is done and nothing may be signalled; only the orphan sweep
-           may run, identified by the pre-reap starttime.  No baseline is -EIO. */
-        if (rst < 0) return -EIO;
-        rg = 0;
-    }
-    if (rst < 0) return -EIO; /* no pre-reap cutoff: cannot identify the orphans */
-    /* Orphans stop being descendants when their parent dies: with the subreaper set they are
-       children of this process and carry a starttime not before the root's.  Without the
-       subreaper they are reparented to init and cannot be proven gone: -EPERM, never 0. */
-    if (root_reaped && rp_subreaper() != 0) return -EPERM;
-    for (round = 0; round < sweep_rounds; round++) {
-        int pid = 0;
-        int first = n;
-        {
-            sy_dir_t d;
-            if (sy_dir_open(&d, "/proc") != 0) return -EIO;
-            while (sy_dir_next(&d) == 1) {
-                int pp = 0, pg = 0;
-                int64_t entry_pid = 0;
-                long long st = 0;
-                char stt = 0;
-                if (tx_to_i64(d.name, d.name_n, 10, &entry_pid) != 0 || entry_pid <= 1 || entry_pid > INT_MAX) continue;
-                pid = (int)entry_pid;
-                if (pid == root || pid == sy_pid()) continue;
-                if (kt_held(e, n, pid) || kt_kept(keep, nkeep, pid)) continue;
-                if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
-                if (stt == 'Z' || stt == 'X') continue;
-                if (pp != sy_pid() || st < rst) continue;
-                if (n >= SY_KT_MAX) break;
-                sy_signal(pid, sn_lnx_SIGSTOP);
-                e[n].pid = pid; e[n].start = st; n++;
-            }
-            sy_dir_close(&d);
-        }
-        if (n == first) break;
-        for (i = first; i < n; i++) sy_signal(e[i].pid, SIGKILL);
-        sy_sleep_ms(2);
-    }
-    { int packed = rp_dispose_list(e, n, rep, cap);
-      /* The internal seam packs survivors low / mismatches high so one int carries both.  The
-         OUTWARD three-state answer must never collide with a negative errno: a mismatch means
-         some pids could not be proven to be ours, so it is "cannot prove" and comes out as a
-         negative -EPERM (never a positive survivor count that a caller would read as alive).
-         survivor-only stays positive; clean stays 0. */
-      residue = packed & 0xffff;
-      if ((packed >> 16) != 0 && residue == 0) return -EPERM;
-    }
-    return residue;
-}
-/* Entry A: a handle.  The pid and pgid come from the handle.  Call it BEFORE sy_proc_end, so the
-   handle is LIVE by contract; the state is not read here (a REAPED handle must not be swept, and
-   that check is the caller's, which is exactly why this runs before the reap).  Anchoring holds:
-   the root is reaped by sy_proc_end, never here. */
 /* Disposal half of the sweep, split from collection so a fixture can hand it real, live pids with
    a deliberately wrong starttime baseline -- the "pid was reused after the root was reaped" shape,
    with no mock: every signal here is a real signal to a real process.  An entry whose current
    starttime no longer equals its recorded one is not the process we saw (a reused pid), so it is
    skipped and counted, never signalled and never reported as a survivor.  The return packs
-   survivors in the low 16 bits and the mismatch count above them; a caller reads
-   (ret >> 16) to tell "cannot prove" from a clean 0.  Shared by rp_sweep: not a test hook. */
-int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap) {
+   survivors in the low 16 bits and the mismatch count above them.
+   ROOT is never reaped here: reaping the root is sy_proc_end's job (contract rules 2,5), so an
+   entry whose pid is ROOT only has its liveness checked, never waited for -- the sweep may kill
+   it but must leave the reap to the handle owner.  Pass ROOT=0 when there is no root in the list. */
+int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap, int root) {
     int i, residue = 0, mism = 0;
     for (i = 0; i < n; i++) {
         int pp = 0, pg = 0;
@@ -295,7 +209,7 @@ int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap) {
             continue;
         }
         if (stt == 'Z' || stt == 'X') {
-            (void)sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0);
+            if (e[i].pid != root) (void)sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0);
             continue;
         }
         residue++;
@@ -315,6 +229,169 @@ int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap) {
     }
     return residue | (mism << 16);
 }
+
+/* 1 when a child of this process that started at or after the root is alive, is not on the held
+   list and not on the caller's keep list: it may be an orphan of the root (reparented to this
+   subreaper) or an unrelated sibling forked later, and nothing here can tell them apart.  It is
+   never signalled; the caller must answer "cannot prove", not a clean 0. */
+static int rp_unproven(const sy_kt_ent *e, int n, int root, long long rst, const int *keep, int nkeep) {
+    sy_dir_t d;
+    int found = 0;
+    if (sy_dir_open(&d, "/proc") != 0) return 1;
+    while (!found && sy_dir_next(&d) == 1) {
+        int pp = 0, pg = 0, pid;
+        int64_t entry_pid = 0;
+        long long st = 0;
+        char stt = 0;
+        if (tx_to_i64(d.name, d.name_n, 10, &entry_pid) != 0 || entry_pid <= 1 || entry_pid > INT_MAX) continue;
+        pid = (int)entry_pid;
+        if (pid == root || pid == sy_pid()) continue;
+        if (kt_held(e, n, pid) || kt_kept(keep, nkeep, pid)) continue;
+        if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
+        if (stt == 'Z' || stt == 'X') continue;
+        if (pp == sy_pid() && st >= rst) found = 1;
+    }
+    sy_dir_close(&d);
+    return found;
+}
+
+static int rp_sweep(int root, int root_reaped, long long root_start,
+                    int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+    sy_kt_ent e[SY_KT_MAX];
+    int n = 0, rg = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds, sub_ok = 1;
+    long long rst = root_start;
+    if (root <= 1) return -EINVAL;
+    if (rep && cap > 0) rep[0] = 0;
+    if (!tx_eqz(sy_os_name(), "linux")) {
+        /* not Linux: kill what the group covers, then admit the escaped ones are unproven */
+        if (!root_reaped && root > 1) { sy_killpg(root, SIGKILL); sy_signal(root, SIGKILL); }
+        return -ENOSYS;
+    }
+    if (deadline_ms <= 0) deadline_ms = 2000;
+    sweep_rounds = deadline_ms / 8;
+    if (sweep_rounds < 4) sweep_rounds = 4;
+    if (sweep_rounds > SY_KT_SWEEP_ROUNDS) sweep_rounds = SY_KT_SWEEP_ROUNDS;
+    /* (d) The subreaper is queried, not set.  Without it an already-double-forked orphan is
+       reparented to init and this process cannot see it, so a zero would be a lie.  A missing
+       subreaper must NOT skip the work: the group kill and kt_pass below still reach every
+       descendant in the root's group or whose parent is visible, exactly as before.  Only the
+       ANSWER changes -- without the subreaper a "no visible survivor" result becomes -ENOSYS
+       (cannot prove) instead of a false clean; visible survivors still count and are killed.
+       Callers that need the clean 0 set the subreaper first (affected.cx does). */
+    { int sub = sy_child_subreaper_get(); sub_ok = (sub == 1); }
+    if (!root_reaped) {
+        /* (a) Identity of the root: ENOENT means the caller's "not reaped" claim is stale AND the
+           root is gone (nothing of its group can remain), which is the one case that is clean 0.
+           ANY OTHER kt_stat failure (permission, malformed stat, ...) is "cannot tell" -> negative,
+           never a false clean. */
+        int kres = kt_stat(root, 0, &rg, &rst, 0);
+        if (kres != 0) {
+            /* The root is already gone.  If the caller supplied a pre-reap starttime we can still
+               prove the escaped set is empty by sweeping it (the REAPED path below); without one
+               there is no way to tell a root orphan from a sibling, so this is -EIO, never a
+               false clean -- and a missing subreaper makes even the swept answer -ENOSYS. */
+            if (errno != ENOENT) return -EIO;
+            if (rst <= 0 || !sub_ok) return -EIO;
+            root_reaped = 1;   /* fall into the orphan pass with the supplied baseline */
+        }
+        freeze_rounds = deadline_ms / 4;
+        if (freeze_rounds < 8) freeze_rounds = 8;
+        if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
+        sy_signal(root, sn_lnx_SIGSTOP);
+        e[n].pid = root; e[n].start = rst; n++;
+        for (round = 0; round < freeze_rounds; round++) {
+            kt_pass(&n, e, rg, root, keep, nkeep, &added);
+            if (!added) break;
+            sy_sleep_ms(2);
+        }
+        for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+        if (rg == root && rg > 1) sy_killpg(rg, SIGKILL); /* root's own group */
+    } else {
+        /* REAPED: the group work is done and nothing may be signalled; only the orphan sweep
+           may run, identified by the pre-reap starttime.  A missing/zero baseline is -EIO. */
+        rg = 0;
+    }
+    /* (c) A starttime of 0 (or negative) is a missing baseline, not "everything is newer": with
+       rst == 0 the `st < rst` test is always false and every sibling of this process would look
+       like an orphan.  Require a positive baseline. */
+    if (rst <= 0) return -EIO;
+    /* While the root is still alive, kt_pass above already walks the TRUE descendant set (a pid
+       whose parent is in e[], or that sits in the root's group).
+       REAPED: the root's children were reparented to this subreaper and nothing about the root or
+       its group number may be signalled.  A process is PROVABLY the root's orphan only when it
+       sits in the root's process group (the kernel never hands out a pid that still names a live
+       group, so the group number is the root's) and started at or after the root; that is killed,
+       one pid at a time, by identity.  The group proof is void when a live process holds the
+       root's own pid (the pid was reused): then nothing is killed.  A child of ours that started
+       after the root but is NOT in its group (an escaped orphan, or an unrelated sibling forked
+       later) cannot be told apart without a pre-reap snapshot: it is never signalled, and while
+       one remains the answer is -EPERM ("cannot prove"), never a clean 0.  A caller that needs
+       escaped orphans reaped passes entry A or C BEFORE the reap, when kt_pass sees the tree. */
+    int unprovable = 0;
+    if (root_reaped) {
+        int probe = 0, reused = (kt_stat(root, 0, 0, 0, 0) == 0);
+        for (round = 0; round < sweep_rounds; round++) {
+            sy_dir_t d;
+            int first = n;
+            probe = 0;
+            if (sy_dir_open(&d, "/proc") != 0) return -EIO;
+            while (sy_dir_next(&d) == 1) {
+                int pp = 0, pg = 0, pid;
+                int64_t entry_pid = 0;
+                long long st = 0;
+                char stt = 0;
+                if (tx_to_i64(d.name, d.name_n, 10, &entry_pid) != 0 || entry_pid <= 1 || entry_pid > INT_MAX) continue;
+                pid = (int)entry_pid;
+                if (pid == root || pid == sy_pid()) continue;
+                if (kt_held(e, n, pid) || kt_kept(keep, nkeep, pid)) continue;
+                if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
+                if (stt == 'Z' || stt == 'X') continue;
+                if (st < rst) continue;
+                if (!reused && pg == root && n < SY_KT_MAX) {
+                    sy_signal(pid, sn_lnx_SIGSTOP);   /* before the record: a stopped pid cannot fork */
+                    e[n].pid = pid; e[n].start = st; n++;
+                } else if (pp == sy_pid()) {
+                    probe = 1;
+                }
+            }
+            sy_dir_close(&d);
+            if (n == first) break;
+            for (i = first; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+            sy_sleep_ms(2);
+        }
+        unprovable = probe;
+    }
+    /* A SIGKILL lands asynchronously: poll the list until every recorded pid is gone or the
+       deadline's worth of 2 ms steps ran out, and report only what is still alive then. */
+    {   int polls = deadline_ms / 2, packed = 0;
+        if (polls < 8) polls = 8;
+        if (polls > 500) polls = 500;
+        for (round = 0; round < polls; round++) {
+            if (rep && cap > 0) rep[0] = 0;
+            packed = rp_dispose_list(e, n, rep, cap, root_reaped ? 0 : root);
+            if ((packed & 0xffff) == 0) break;
+            sy_sleep_ms(2);
+        }
+        if (!root_reaped) unprovable = rp_unproven(e, n, root, rst, keep, nkeep);
+      /* The internal seam packs survivors low / mismatches high so one int carries both.  The
+         OUTWARD three-state answer must never collide with a negative errno: a mismatch means
+         some pids could not be proven to be ours, so it is "cannot prove" and comes out as a
+         negative -EPERM (never a positive survivor count that a caller would read as alive).
+         survivor-only stays positive; clean stays 0. */
+      residue = packed & 0xffff;
+      if ((packed >> 16) != 0 && residue == 0) return -EPERM;
+      /* no visible survivor but the subreaper was missing: the escaped set cannot be proven
+         empty, so this is -ENOSYS, never a false clean (rule 6). */
+      if (residue == 0 && unprovable) return -EPERM;   /* a child we could not prove is the root's still lives */
+      if (residue == 0 && !sub_ok) return -ENOSYS;
+    }
+    return residue;
+}
+
+/* Entry A: a handle.  The pid and pgid come from the handle.  Call it BEFORE sy_proc_end, so the
+   handle is LIVE by contract; the state is not read here (a REAPED handle must not be swept, and
+   that check is the caller's, which is exactly why this runs before the reap).  Anchoring holds:
+   the root is reaped by sy_proc_end, never here. */
 int rp_kill_tree(sy_child_t *c, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     if (!c || c->pid <= 1) return -EINVAL;
     return rp_sweep(c->pid, 0, 0, deadline_ms, keep, nkeep, rep, cap);
