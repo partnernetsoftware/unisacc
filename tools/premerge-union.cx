@@ -279,6 +279,18 @@ static int mt_waiver_find(const char *wb, long wn, const char *path, char *reaso
     return 0;
 }
 
+/* the trap files are the v0.0.96 line's (reaper, exec, layer-api rows): a version branch older than that has the older content on purpose, and the base
+ * side's newer one is the right merge, so for a branch named v0.0.NN with NN below this the traps do not apply */
+#define TRAP_SINCE_PATCH 96
+static int trap_applies(const char *branch) {
+    const char *p = branch;
+    if (p[0] != 'v' || p[1] != '0' || p[2] != '.' || p[3] != '0' || p[4] != '.') return 1;
+    int v = 0, d = 0;
+    for (p += 5; *p >= '0' && *p <= '9'; p++) { v = v * 10 + (*p - '0'); d++; }
+    if (d == 0 || *p) return 1;
+    return v >= TRAP_SINCE_PATCH;
+}
+
 static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *base_ref, const char *waiver_path) {
     static const char *const traps[8] = {
         "tests/manifests/l0-capture.tsv",
@@ -301,6 +313,11 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
     char tmpf[4400];
     if (cx_fmt(tmpf, sizeof tmpf, "/tmp/premerge-trap-%d.bin", sy_pid())) { if (wb) mm_free(wb); return 2; }
     int ok = 0, waived = 0, fail = 0, na = 0;
+    if (!trap_applies(branch)) {
+        for (int i = 0; i < 8; i++) sy_printf("MERGE_TRAP\tNA\t%s\treason=branch-older-than-the-trap-line\n", traps[i]);
+        sy_printf("MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=%s\tok=0\twaived=0\tfail=0\tna=8\ttotal=8\n", branch);
+        return 0;
+    }
     for (int i = 0; i < 8; i++) {
         const char *rel = traps[i];
         char reason[256];
