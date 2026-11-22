@@ -257,8 +257,100 @@ static int merge_one_both(const char *repo, const char *dir, const char *base_sh
     return mrc == 0 ? 0 : 1;
 }
 
+static int mt_waiver_find(const char *wb, long wn, const char *path, char *reason, size_t rcap) {
+    if (!wb || wn <= 0) return 0;
+    long pl = tx_len(path, 512), pos = 0;
+    while (pos < wn) {
+        long e = pos; while (e < wn && wb[e] != '\n') e++;
+        long ln = e - pos;
+        if (ln > 0 && wb[pos] != '#') {
+            long tb = tx_chr(wb + pos, ln, '\t');
+            if (tb == pl && mm_same(wb + pos, path, pl)) {
+                long rl = ln - tb - 1;
+                if (rl > 0 && wb[pos + ln - 1] == '\r') rl--;
+                if (rl >= (long)rcap) rl = (long)rcap - 1;
+                if (rl > 0) mm_copy(reason, (long)rcap, wb + pos + tb + 1, rl);
+                reason[rl > 0 ? rl : 0] = 0;
+                return 1;
+            }
+        }
+        pos = e + 1;
+    }
+    return 0;
+}
+
+static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *waiver_path) {
+    static const char *const traps[8] = {
+        "tests/manifests/l0-capture.tsv",
+        "ext/sysx/exec.cx",
+        "ext/sysx/processcore.cx",
+        "ext/sysx/reaper.cx",
+        "tools/check-reaper.cx",
+        "build/layer-api/ext.sysx.tsv",
+        "tools/cxlib/releaseexec.cx",
+        "tools/cxlib/releaseprepare.cx"
+    };
+    if (!br_ref || !br_ref[0]) { sy_eprintf("premerge-union: --shard merge-traps requires --branch REF\n"); return 2; }
+    const char *branch = br_ref;
+    const char *tree = (tree_arg && tree_arg[0]) ? tree_arg : ".";
+    char *wb = 0; size_t wn = 0;
+    if (waiver_path && waiver_path[0]) {
+        wb = (char *)cx_read(waiver_path, &wn);
+        if (!wb) { sy_eprintf("premerge-union: unreadable waiver %s\n", waiver_path); return 2; }
+    }
+    char tmpf[4400];
+    if (cx_fmt(tmpf, sizeof tmpf, "/tmp/premerge-trap-%d.bin", sy_pid())) { if (wb) mm_free(wb); return 2; }
+    int ok = 0, waived = 0, fail = 0;
+    for (int i = 0; i < 8; i++) {
+        const char *rel = traps[i];
+        char reason[256];
+        if (mt_waiver_find(wb, (long)wn, rel, reason, sizeof reason)) {
+            sy_printf("MERGE_TRAP\tWAIVED\t%s\treason=%s\n", rel, reason[0] ? reason : "waived");
+            waived++;
+            continue;
+        }
+        char cmd[5200], tpath[4400], bsha[65], tsha[65];
+        char *o = 0; size_t on = 0;
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' show '%s:%s' > '%s' 2>/dev/null", repo_arg, branch, rel, tmpf)) { fail++; continue; }
+        int grc = run_sh(cmd, 15, &o, &on);
+        if (o) mm_free(o);
+        if (grc != 0) {
+            (void)sy_unlink(tmpf);
+            sy_printf("MERGE_TRAP\tFAIL\t%s\treason=missing-in-branch\n", rel);
+            fail++;
+            continue;
+        }
+        size_t bn = 0, tn = 0;
+        char *bb = (char *)cx_read(tmpf, &bn);
+        (void)sy_unlink(tmpf);
+        if (!bb) { sy_printf("MERGE_TRAP\tFAIL\t%s\treason=branch-read-failed\n", rel); fail++; continue; }
+        cx_sha256_hex(bb, bn, bsha);
+        if (cx_fmt(tpath, sizeof tpath, "%s/%s", tree, rel)) { mm_free(bb); fail++; continue; }
+        char *tb = (char *)cx_read(tpath, &tn);
+        if (!tb) {
+            sy_printf("MERGE_TRAP\tFAIL\t%s\treason=missing-in-tree\tbranch_sha=%s\n", rel, bsha);
+            mm_free(bb);
+            fail++;
+            continue;
+        }
+        if (tn != bn || (bn > 0 && !mm_same(tb, bb, (long)bn))) {
+            cx_sha256_hex(tb, tn, tsha);
+            sy_printf("MERGE_TRAP\tFAIL\t%s\treason=differs-from-branch\tbranch_sha=%s\ttree_sha=%s\n", rel, bsha, tsha);
+            fail++;
+        } else {
+            sy_printf("MERGE_TRAP\tOK\t%s\tsha=%s\n", rel, bsha);
+            ok++;
+        }
+        mm_free(tb); mm_free(bb);
+    }
+    if (wb) mm_free(wb);
+    sy_printf("MERGE_TRAPS_SUMMARY\tverdict=%s\tbranch=%s\tok=%d\twaived=%d\tfail=%d\ttotal=8\n",
+              fail ? "FAIL" : "PASS", branch, ok, waived, fail);
+    return fail ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    const char *repo_arg = ".", *base_ref = "main", *br_ref = 0, *dir_arg = 0, *shard = "all", *mutate = 0;
+    const char *repo_arg = ".", *base_ref = "main", *br_ref = 0, *dir_arg = 0, *shard = "all", *mutate = 0, *tree_arg = 0, *waiver_arg = 0;
     int keep = 0;
     long T0 = sy_now_ms();
     for (int i = 1; i < argc; i++) {
@@ -266,14 +358,17 @@ int main(int argc, char **argv) {
         else if (streq(argv[i], "--base") && i + 1 < argc) base_ref = argv[++i];
         else if (streq(argv[i], "--branch") && i + 1 < argc) br_ref = argv[++i];
         else if (streq(argv[i], "--dir") && i + 1 < argc) dir_arg = argv[++i];
+        else if (streq(argv[i], "--tree") && i + 1 < argc) tree_arg = argv[++i];
+        else if (streq(argv[i], "--waiver") && i + 1 < argc) waiver_arg = argv[++i];
         else if (streq(argv[i], "--keep")) keep = 1;
         else if (streq(argv[i], "--shard") && i + 1 < argc) shard = argv[++i];
         else if (streq(argv[i], "--mutate-drift") && i + 1 < argc) mutate = argv[++i];
         else {
-            sy_eprintf("usage: premerge-union.cx -- [--repo DIR] [--base REF] [--branch REF] [--dir DIR] [--keep] [--shard all|derive|check-derive|prep|derive-a|derive-b|derive-c] [--mutate-drift RELPATH]\n");
+            sy_eprintf("usage: premerge-union.cx -- [--repo DIR] [--base REF] [--branch REF] [--dir DIR] [--tree DIR] [--waiver FILE] [--keep] [--shard all|derive|check-derive|prep|derive-a|derive-b|derive-c|merge-traps] [--mutate-drift RELPATH]\n");
             return 2;
         }
     }
+    if (streq(shard, "merge-traps")) return run_merge_traps(repo_arg, tree_arg, br_ref, waiver_arg);
     if (!streq(shard, "all") && !streq(shard, "derive") && !streq(shard, "check-derive") &&
         !streq(shard, "prep") && !streq(shard, "derive-a") && !streq(shard, "derive-b") && !streq(shard, "derive-c")) {
         sy_eprintf("premerge-union: invalid --shard %s\n", shard);

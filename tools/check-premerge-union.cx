@@ -273,6 +273,55 @@ int main(void) {
     rc = run_sh(cmd, 20, out, sizeof out);
     ck(rc == 0 && has(out, "FAIL\t") && has(out, "iface-hash") && has(out, "DRIFT"), "chain-ready-judge-premerge-drift-fail");
 
+    /* Merge-traps shard: synthetic git merge reproducing 3970fc6d5a silent delete & silent revert */
+    {
+        char mdir[600], wfile[640], mcmd[4096];
+        cx_fmt(mdir, sizeof mdir, "%s/mt-repo", tmpd);
+        cx_fmt(wfile, sizeof wfile, "%s/mt-waiver.tsv", tmpd);
+        cx_fmt(mcmd, sizeof mcmd,
+            "mkdir -p '%s'/tests/manifests '%s'/ext/sysx '%s'/tools/cxlib '%s'/build/layer-api && "
+            "cd '%s' && git init -q -b main && "
+            "git config user.name test && git config user.email test@local && "
+            "for f in tests/manifests/l0-capture.tsv ext/sysx/exec.cx ext/sysx/processcore.cx ext/sysx/reaper.cx "
+            "tools/check-reaper.cx build/layer-api/ext.sysx.tsv tools/cxlib/releaseexec.cx tools/cxlib/releaseprepare.cx; "
+            "do printf 'v96-body %%s\\n' \"$f\" > \"$f\"; done && "
+            "git add -A && git commit -qm base-d5ed6f6869 && "
+            "git branch v0.0.96 && "
+            "rm -f tests/manifests/l0-capture.tsv && "
+            "printf 'reverted-by-3970\\n' > ext/sysx/reaper.cx && "
+            "git add -A && git commit -qm shrink-3970fc6d5a && "
+            "git checkout -q -b merged v0.0.96 && "
+            "git merge -q --no-edit main",
+            mdir, mdir, mdir, mdir, mdir);
+        rc = run_sh(mcmd, 30, out, sizeof out);
+        ck(rc == 0, "merge-traps-fixture-setup");
+        /* 1. Silent delete + silent revert accepted by 3-way merge -> MUST FAIL rc=1 */
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96", mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 1 &&
+           has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-tree") &&
+           has(out, "MERGE_TRAP\tFAIL\text/sysx/reaper.cx\treason=differs-from-branch") &&
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=FAIL\tbranch=v0.0.96\tok=6\twaived=0\tfail=2\ttotal=8"),
+           "merge-traps-catches-silent-delete-and-revert");
+        /* 2. Named waiver allows the 2 differences -> PASS rc=0 */
+        const char *wv = "# relpath\treason\ntests/manifests/l0-capture.tsv\ttest-waiver-del\next/sysx/reaper.cx\ttest-waiver-rev\n";
+        (void)sy_write_atomic(wfile, wv, (int64_t)tx_len(wv, 512), 0644);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96 --waiver '%s'", mdir, mdir, wfile);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 &&
+           has(out, "MERGE_TRAP\tWAIVED\ttests/manifests/l0-capture.tsv\treason=test-waiver-del") &&
+           has(out, "MERGE_TRAP\tWAIVED\text/sysx/reaper.cx\treason=test-waiver-rev") &&
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=6\twaived=2\tfail=0\ttotal=8"),
+           "merge-traps-named-waiver-passes");
+        /* 3. Explicitly restoring v0.0.96 side for all 8 files -> PASS rc=0 ok=8 */
+        cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- tests/manifests/l0-capture.tsv ext/sysx/reaper.cx", mdir);
+        (void)run_sh(mcmd, 15, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96", mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=8\twaived=0\tfail=0\ttotal=8"),
+           "merge-traps-restored-branch-side-passes");
+    }
+
     (void)sy_remove_all(tmpd);
     sy_printf("CHECK_PREMERGE_UNION\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
