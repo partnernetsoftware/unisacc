@@ -78,3 +78,45 @@ package (P4)                          2904461   32.2%  P 4; 40 models, 1823 stag
 
 - **差异解释**: `osx/arm64` `__TEXT,__text` (`4,106,384 B`) 为 `0.0.87` `lnx/x86_64` 99 单元 `.text` 总和 (`2,441,257 B`) 的 **`1.682x` (`+1,665,127 B`)**, 主要源于 ARM64 定长 4 字节指令密度(x86_64 变长短指令更紧凑)以及 `0.0.87 -> 0.0.93` 期间新增/扩展单元。
 - **逐单元 `UNMEASURED` 原因**: 整链缓存 `fixedpoint/g2/osx-arm64/` 仅保留链接产物 `slice-osx-arm64` 且已 strip (`nsyms=0`), 未保留 99 个中间 Mach-O `.o`; 按本轮不跑重负载约束未重编 99 单元, 如实标 `UNMEASURED`。后续若需 `osx/arm64` 逐单元分解, 在独立构建目录编出 99 个 `osx/arm64` `.o` 后直接用 `tools/slice-audit.cx --macho <unit.o>` 即可逐一读取 `__TEXT,__text` 精确尺寸。
+
+## 四、U6 核实: APE 内嵌 `win/arm64` 第 5 切片依赖审计
+
+**判定: `可去重` (无需改启动器; 去重前须同步改造 4 组非运行期打包/导出/测试消费者)**。
+
+以下所有条目均区分「已读证据」与「推断」, 均未修改产品输入、启动器或 `release/`。
+
+### 1. APE 启动器在 Windows arm64 上是否从 APE 自身解出第 5 切片
+- **结论: 否, 运行期完全不解出(纯死字节)**。
+- **已读证据**:
+  - `tools/ape-pack.cx:92-97`: 源码注释明文说明 Windows 直接由 OS PE 加载器执行外层 `win/x86_64` PE, 忽略 DOS stub shell 脚本; 第 5 个 payload 切片(`win/arm64`)虽被打包进文件但没有任何 `case` 分支(`NAME[4]` 仅含 `Linux|x86_64`、`Linux|aarch64`、`Darwin|x86_64`、`Darwin|arm64`)。
+  - `tools/ape-pack.cx:188-197` (`managed_script`) 与 `tools/ape-pack.cx:231-242` (`script`): 两条 shell 启动器生成路径均只循环 `i = 0..3`, `off[4]`、`len[4]`、`key[4]` 从未写入 DOS stub 脚本; 未知 `$u` 落入 `*) exit 1;;`。
+  - `tools/ape-pack.cx:540,548`: 仅在打包落盘时按 `nposix = 5` 把 `img[4]` (`win/arm64` gzip, 546,584 B) 写入 APE, 并在 `tools/ape-pack.cx:526` 将 `payload_sha[4]` 计入 `UPI1 pid`。
+  - `tools/cache-retain.cx:1-68`: 仅由 macOS (`Darwinx86_64`/`Darwinarm64`) 启动器调用的 POSIX 缓存保留管理器(`tools/ape-pack.cx:194,207-224`), 不涉及 Windows, 不解包 APE。
+  - `seed/ape.c:3,14,105-117,268`: 仅接受 5 个位置输入(`WIN_X86_64` + 4 POSIX 切片, `argc != 7` 直接拒绝), 根本不支持第 5 payload。
+  - `.github/workflows/candidate-native.yml:77,198-199,389`: 明确注明 APE 外层 PE 是 x86_64, 在 Windows arm64 上直接跑只会走 x86_64 仿真, 而非解出内嵌 `win/arm64`。
+
+### 2. Release 独立资产 `slice-win-arm64` 的消费者是否已可替代
+- **结论: 是, 所有 Windows arm64 运行路径与原生 CI 本来就只消费独立资产 `slice-win-arm64` + `pkg.bin`, 已完全替代**。
+- **已读证据**:
+  - `README.md:111`: Windows arm64 行明文写明 `yes (via slice-win-arm64 and pkg.bin, see the release notes)`。
+  - `tools/release-run.cx:16,460-468`: 发布链步 5 (`step_inject`) 直接对裸切片 `win-arm64` 调用 `tools/version-inject.cx` 生成独立资产 `slice-win-arm64`, 不从 APE 抽取。
+  - `tools/release-layout.cx:15-16`: Windows arm64 启动脚本 `run.cmd` 直接设 `UNISA_CONTAINER=%~dp0pkg.bin` 并运行 `%~dp0slice-win-arm64.exe`。
+  - `.github/workflows/candidate-native.yml:77-94,227,340-352,632-634`: `win/arm64` 原生 CI 直接下载独立资产 `slice-win-arm64` 拷贝为 `out/slice-win-arm64.exe` 执行全部原生测试。
+  - `tools/install-ape.cx:1-250`: 仅把 `unisacc.com` 安装到 POSIX 根并以 `sh APE --version` 验活(`install-ape.cx:113-124`), 不消费 `slice-win-arm64`, 也不解析 APE 第 5 切片。
+  - `release/README.md:34`、`release/SHA256SUMS.template:5`、`release/candidate.tsv:2`、`tools/release-prep.cx:331`、`tools/release-decide.cx:6,79`: 六资产发布契约已将 `slice-win-arm64` 与 `pkg.bin` 作为独立一等资产发布与核验。
+
+### 3. 若去掉内嵌 `win/arm64`, 会失效的检查、工具与证据(全部已读核实)
+1. **高影响 -- `releaseoneshotpack` 独立 6 导出链路(强依赖 APE 内嵌第 5 gzip 切片)**:
+   - `tools/cxlib/releaseoneshotpack.cx:48-59`: `rop_load()` 在 4 个 POSIX 切片后强制扫描并解压 `win/arm64` gzip 成员, 缺失即报 `rc=2` (`missing win/arm64 slice` / `invalid win/arm64 slice`)。
+   - 受连带影响的消费者: `tools/release-oneshot.cx:66-67` (`--pack`/`--check-pack`)、`tools/cxlib/releaseprepare.cx:186,211`、`tools/cxlib/releaseexec.cx:390,479` (`assetguard` 与 `public` 读回校验会直接红)、`tools/check-releaseoneshotpack.cx:22-31,47-48` (`missing APE win-arm slice rejected`)、`tools/check-releaseexec.cx:90`。
+2. **中影响 -- 整链与发布打包参数及 `ape-receipt.txt` `win/arm64` 行**:
+   - `tools/candidate-chain.cx:962-963,3541,3555-3558`、`tools/release-run.cx:436-453`、`.github/workflows/macos-sign.yml:216-226`: 三处调用 `release-ape.cx pack` 时均显式传入第 6 切片 `win-arm64`(`tools/ape-pack.cx:488-489` 与 `tools/release-ape.cx:88,123` 原本即已支持 5 切片模式)。
+   - `tools/pack-srcdir.cx:10-11,65-72` 与 `tools/check-pack-srcdir.cx:20-32`: 强制要求 `ape-receipt.txt` 含 `win/arm64` 路径行以装配 `SRC_DIR/win-arm64`(供 `release-run` 步 5 `version-inject` 生成独立 `slice-win-arm64`)。若 `release-ape pack` 改为 5 切片且不写 `win/arm64` 收据行, `pack-srcdir` 将 `REFUSE missing 1: win-arm64`。
+   - `tools/check-release-ape.cx:28,41-42`: 断言 `six-slice replacement remains supported` 与 `legacy six positional inputs remain supported`。
+3. **中影响 -- 审计自测与身份变化**:
+   - `tools/check-slice-audit.cx:45,67-80`: 断言已装 `./unisacc.com` 含 `AUDIT_SEG\thidden_slice_win_arm64\t` (`inflates=4575744`) 并在偏移 `5460320` 做篡改负控; 去重版安装为本机 Root 时须同步更新。
+   - `tools/ape-pack.cx:526`: `UPI1 pid` 与 APE `sha256` 会因少计 `payload_sha[4]` 而改变(仅影响新版本, 属预期; `tools/release-packcheck.cx:75-86` 只要整链与 `release-run` 两端同步去重仍恒等)。
+4. **无影响(已读确认)**:
+   - `tests/formats-elf-ape.cx:151-190`(仅检 0.0.43 5 切片 APE)、`tools/check-ape-pack.cx:16,34`(仅测 macOS 缓存)、`tests/runcache-roots.cx:181-195`(仅读前 8 KiB `UPI1 pid=`)、历史 `release/evidence/0.0.71..0.0.93/`(历史版本不可变证据)。
+5. **推断(未实跑验证)**:
+   - 去掉内嵌 `win/arm64` 后, 新版 `unisacc.com` 预计立省 `546,592 B` (`546,584 B` gzip + `8 B` 16B 对齐零填充, 约 `6.08%`), 且对 Windows/Linux/macOS 运行期零影响; 若将 `releaseoneshotpack` 改为从 `slice-win-arm64` 独立资产读取 `win/arm64`(或接受显式 `--win-arm64 PATH`)并保持 `pack-srcdir` 可取到 `fixedpoint/g2/win-arm64/slice-win-arm64`, 即可安全落地 U6。
