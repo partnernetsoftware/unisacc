@@ -1,0 +1,77 @@
+native function track_json_discrete(at:i64,end:i64,work:i64,kind:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0-1; }
+  let p=json_space(at+1,end);
+  let count=0;
+  let nextText=work+1024;
+  while(p>=0 && p<end && ux_u8(p)!=93) {
+    if(count>=64) { return 0-1; }
+    if(kind==5) {
+      let char=ux_u8(p);
+      if(char!=102 && char!=116) { return 0-1; }
+      let value=ux_u32_put(work+512+count*4,char==116);
+    } else {
+      let size=Json_stringBytes(p,end);
+      if(size<0 || size>work+4096-nextText) { return 0-1; }
+      let decoded=Json_decodeString(p,end,nextText,size);
+      if(decoded!=size) { return 0-1; }
+      let address=ux_u32_put(work+512+count*8,nextText);
+      let length=ux_u32_put(work+516+count*8,size);
+      nextText=nextText+size;
+    }
+    count=count+1;
+    p=json_space(json_value_end(p,end),end);
+    if(p<0 || p>=end) { return 0-1; }
+    if(ux_u8(p)==44) { p=json_space(p+1,end); }
+    else if(ux_u8(p)!=93) { return 0-1; }
+  }
+  if(p<0 || p>=end) { return 0-1; }
+  return count;
+}
+
+// All data retained by the parsed track is owned by the caller's 4096-byte
+// arena. On failure the output record is unchanged; arena bytes are scratch.
+native function KeyframeTrack_fromJSON(track:i64,input:i64,end:i64,work:i64) i64 {
+  if(!keyframe_track_at(track) || input<0 || end<=input || end>6291456 ||
+     !animation_span(work,4096) || work%8!=0 ||
+     animation_json_overlap(input,end-input,work,4096) ||
+     animation_json_overlap(track,KeyframeTrack.size,work,4096) ||
+     animation_json_overlap(track,KeyframeTrack.size,input,end-input)) { return 0-1; }
+  let obj=json_space(input,end);
+  let last=json_value_end(obj,end);
+  if(last<0 || ux_u8(obj)!=123 || json_space(last,end)!=end) { return 0-2; }
+  let typ=track_json_field(obj,last,work,11);
+  let kind=track_json_type(typ,last,work);
+  if(kind<1) { return 0-2; }
+  let name=track_json_field(obj,last,work,7);
+  let size=Json_stringBytes(name,last);
+  if(size<1 || size>127 || Json_decodeString(name,last,work+64,size)!=size) { return 0-2; }
+  let times=track_json_field(obj,last,work,8);
+  let count=animation_json_array(times,last,work+256);
+  if(count<1) { return 0-2; }
+  let values=track_json_field(obj,last,work,9);
+  let entries=0;
+  if(kind<5) { entries=animation_json_array(values,last,work+512); }
+  else { entries=track_json_discrete(values,last,work,kind); }
+  if(entries<1 || entries%count!=0) { return 0-2; }
+  let stride=entries/count;
+  if(kind==1 && stride!=1) { return 0-2; }
+  if(kind==3 && stride!=3) { return 0-2; }
+  if(kind==4 && stride%4!=0) { return 0-2; }
+  if(kind==6) { stride=stride*2; }
+  let interpolation=track_json_field(obj,last,work,10);
+  let mode=2301;
+  if(kind>=5) { mode=2300; }
+  if(interpolation!=0-2) {
+    let explicitMode=json_read_number(interpolation,last);
+    if(explicitMode==2300.0) { mode=2300; }
+    else if(explicitMode==2301.0 && kind<5) { mode=2301; }
+    else if(explicitMode==2302.0 && kind<4) { mode=2302; }
+    else { return 0-2; }
+  }
+  let view=AnimationSamples_init(work+192,work+256,work+512,count,stride);
+  if(view<0) { return 0-2; }
+  let result=KeyframeTrack_init(track,work+64,size,view);
+  if(result<0) { return result; }
+  let selected=KeyframeTrack_setInterpolation(track,mode);
+  return kind;
+}
