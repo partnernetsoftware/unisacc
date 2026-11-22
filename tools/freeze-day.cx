@@ -1,0 +1,466 @@
+/* tools/freeze-day.cx -- read-only S0..S10 ordered command checklist with live repo values and readiness gates.
+ *
+ *   sh ./unisacc.com tools/freeze-day.cx -- plan --version V [--branch REF] [--repo DIR] [--owner NAME]
+ *       [--prerun-dir ABS_DIR] [--chain-dir ABS_DIR] [--ape ABS_APE]
+ *       [--readiness-bin CMD] [--merge-tree HASH] [--no-readiness]
+ *   sh ./unisacc.com tools/freeze-day.cx -- check --step STEP_ID --log FILE
+ *
+ * Read-only checklist generator: never merges, commits, pushes, or publishes.
+ * Plan reads current values from --repo (release/candidate.tsv, git HEAD & branch SHA, release/ templates,
+ * optional freeze-readiness --skip-slow) and prints copyable S0..S10 commands with gate READY/BLOCKED.
+ * Check reads a step log file and verifies the step's expected completion marker without executing anything.
+ * Final lines:
+ *   FREEZE_DAY<TAB>plan<TAB>steps=N<TAB>blocked=M
+ *   FREEZE_DAY<TAB>check<TAB>step=ID<TAB>status=PASS|FAIL<TAB>expect=...<TAB>log=...
+ * Check: tools/check-freeze-day.cx (batch freeze-day).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+enum { FD_MAX_FR = 32, FD_STEPS = 15 };
+
+typedef struct {
+    char id[64];
+    char verdict[32];
+    char detail[256];
+} fr_row_t;
+
+typedef struct {
+    const char *id;
+    const char *who;
+    int budget_s;
+    const char *expect;
+} step_spec_t;
+
+static const step_spec_t g_specs[FD_STEPS] = {
+    { "S0-lock",   "integrator",  60,  "FREEZE_BROADCAST" },
+    { "S0-merge",  "integrator",  300, "GIT_COMMIT\trc=0" },
+    { "S1",        "integrator",  180, "READY\tyes" },
+    { "S2",        "integrator",  1800, "CHAIN_DONE" },
+    { "S3-inputs", "prerun",      60,  "PRERUN_INPUTS_SUMMARY" },
+    { "S3-run",    "prerun",      2280, "PRERUN_SUMMARY" },
+    { "S3b",       "ci",          600, "conclusion=success" },
+    { "S3c",       "docs",        600, "CHECK_RELEASE_PREP" },
+    { "S4",        "prerun",      180, "PRERUN_ARCHIVE" },
+    { "S5",        "integrator",  300, "RELEASE_EXEC_WARM" },
+    { "S6",        "integrator",  180, "RELEASE_CHAIN" },
+    { "S7",        "integrator",  180, "RELEASE_CHAIN" },
+    { "S8",        "integrator",  180, "RELEASE_CHAIN" },
+    { "S9",        "integrator",  720, "exec-7-Y2-done" },
+    { "S10",       "integrator",  480, "RELEASE_POST\tstatus=DONE" }
+};
+
+static fr_row_t g_fr[FD_MAX_FR];
+static int g_nfr;
+static int g_fr_ran;
+static int g_fr_blockers;
+static char g_fr_ready[16];
+
+static int die_usage(const char *msg) {
+    sy_eprintf("freeze-day: REFUSE %s\n", msg);
+    return 2;
+}
+
+static void trim_eol(char *s) {
+    long n = tx_len(s, 4096);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) {
+        s[--n] = 0;
+    }
+}
+
+static int run_cap(char **av, const char *cwd, int timeout_s, char *out, long cap) {
+    char why[256];
+    np_result r;
+    mm_fill(&r, sizeof r, 0, sizeof r);
+    out[0] = 0;
+    if (np_run(av, cwd, 0, timeout_s, &r, why, sizeof why) != 0) {
+        np_free(&r);
+        return -1;
+    }
+    if (r.out && r.outn > 0 && cap > 1) {
+        long cp = (long)r.outn;
+        if (cp >= cap) cp = cap - 1;
+        mm_copy(out, cap, r.out, cp);
+        out[cp] = 0;
+    }
+    int rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static int git_rev(const char *repo, const char *ref, int short_flag, char *out, long cap) {
+    char *av[7];
+    int n = 0;
+    av[n++] = "git"; av[n++] = "-C"; av[n++] = (char *)repo;
+    av[n++] = "rev-parse";
+    if (short_flag) av[n++] = "--short";
+    av[n++] = (char *)ref;
+    av[n] = 0;
+    int rc = run_cap(av, 0, 10, out, cap);
+    if (rc != 0) { out[0] = 0; return -1; }
+    trim_eol(out);
+    return out[0] ? 0 : -1;
+}
+
+static int get_field(const char *line, long ln, int col, char *out, long cap) {
+    long at = 0;
+    int c = 0;
+    out[0] = 0;
+    while (at <= ln) {
+        long s = at;
+        while (at < ln && line[at] != '\t') at++;
+        if (c == col) {
+            long fl = at - s;
+            if (fl >= cap) fl = cap - 1;
+            if (fl > 0) mm_copy(out, cap, line + s, fl);
+            out[fl] = 0;
+            return 0;
+        }
+        c++;
+        at++;
+    }
+    return -1;
+}
+
+static int load_candidate_tsv(const char *repo, char *prev_ver, long vcap, char *prev_sha, long scap, char *ape_name, long acap) {
+    char path[1024];
+    unsigned char *raw = 0;
+    int64_t sz = 0;
+    prev_ver[0] = 0; prev_sha[0] = 0; ape_name[0] = 0;
+    if (cx_fmt(path, sizeof path, "%s/release/candidate.tsv", repo)) return -1;
+    if (sy_read_file(path, &raw, &sz, 1 << 20) != 0 || !raw || sz <= 0) { mm_free(raw); return -1; }
+    const char *b = (const char *)raw;
+    long n = (long)sz, at = 0, last_s = -1, last_l = 0;
+    int row_idx = 0;
+    while (at < n) {
+        long e = tx_chr(b + at, n - at, '\n');
+        long ln = e < 0 ? n - at : e;
+        if (ln > 0 && b[at + ln - 1] == '\r') ln--;
+        if (ln > 0 && b[at] != '#') {
+            if (row_idx > 0) { last_s = at; last_l = ln; }
+            row_idx++;
+        }
+        at += (e < 0 ? n - at : e + 1);
+    }
+    int ok = 0;
+    if (last_s >= 0) {
+        if (get_field(b + last_s, last_l, 3, prev_ver, vcap) == 0 &&
+            get_field(b + last_s, last_l, 2, prev_sha, scap) == 0 &&
+            get_field(b + last_s, last_l, 7, ape_name, acap) == 0) {
+            ok = 1;
+        }
+    }
+    mm_free(raw);
+    return ok ? 0 : -1;
+}
+
+static void run_readiness(const char *repo, const char *ver, const char *rd_bin) {
+    char *av[12];
+    char cmd_buf[2048];
+    char out[65536];
+    int n = 0;
+    g_nfr = 0; g_fr_ran = 1; g_fr_blockers = 0;
+    cx_fmt(g_fr_ready, sizeof g_fr_ready, "unknown");
+    if (rd_bin && rd_bin[0]) {
+        if (cx_fmt(cmd_buf, sizeof cmd_buf, "%s --repo '%s' --version '%s' --skip-slow", rd_bin, repo, ver)) return;
+        av[n++] = "sh"; av[n++] = "-c"; av[n++] = cmd_buf; av[n] = 0;
+    } else {
+        const char *u = sy_env("UNISACC");
+        if (!u || !u[0]) u = "./unisacc.com";
+        av[n++] = "sh"; av[n++] = (char *)u; av[n++] = "tools/freeze-readiness.cx"; av[n++] = "--";
+        av[n++] = "--repo"; av[n++] = (char *)repo;
+        av[n++] = "--version"; av[n++] = (char *)ver;
+        av[n++] = "--skip-slow"; av[n] = 0;
+    }
+    (void)run_cap(av, 0, 50, out, sizeof out);
+    long len = tx_len(out, sizeof out), at = 0;
+    while (at < len) {
+        long e = tx_chr(out + at, len - at, '\n');
+        long ln = e < 0 ? len - at : e;
+        if (ln > 0 && out[at + ln - 1] == '\r') ln--;
+        const char *l = out + at;
+        if (ln > 8 && tx_prefix(l, ln, "FR_ITEM\t", 8) && g_nfr < FD_MAX_FR) {
+            fr_row_t *r = &g_fr[g_nfr];
+            mm_fill(r, sizeof *r, 0, sizeof *r);
+            if (get_field(l, ln, 1, r->id, sizeof r->id) == 0 &&
+                get_field(l, ln, 3, r->detail, sizeof r->detail) == 0 &&
+                get_field(l, ln, 8, r->verdict, sizeof r->verdict) == 0) {
+                g_nfr++;
+            }
+        } else if (ln > 17 && tx_prefix(l, ln, "FREEZE_READINESS\t", 17)) {
+            char rf[32], bf[32];
+            if (get_field(l, ln, 1, rf, sizeof rf) == 0 && tx_prefix(rf, tx_len(rf, 32), "ready=", 6)) {
+                cx_fmt(g_fr_ready, sizeof g_fr_ready, "%s", rf + 6);
+            }
+            if (get_field(l, ln, 2, bf, sizeof bf) == 0 && tx_prefix(bf, tx_len(bf, 32), "blockers=", 9)) {
+                int v = 0;
+                for (const char *p = bf + 9; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+                g_fr_blockers = v;
+            }
+        }
+        at += (e < 0 ? len - at : e + 1);
+    }
+}
+
+static const fr_row_t *find_fr(const char *id) {
+    for (int i = 0; i < g_nfr; i++) {
+        if (tx_eqz(g_fr[i].id, id)) return &g_fr[i];
+    }
+    return 0;
+}
+
+static int fr_is_bad(const char *id) {
+    const fr_row_t *r = find_fr(id);
+    if (!r) return 0;
+    return tx_eqz(r->verdict, "FAIL") || tx_eqz(r->verdict, "CONFLICT");
+}
+
+static void add_reason(char *buf, long cap, const char *tok) {
+    long n = tx_len(buf, cap), tl = tx_len(tok, 128);
+    if (n == 0 || (n == 1 && buf[0] == '-')) {
+        if (tl >= cap) tl = cap - 1;
+        mm_copy(buf, cap, tok, tl);
+        buf[tl] = 0;
+        return;
+    }
+    if (n + 1 + tl < cap) {
+        buf[n] = ',';
+        mm_copy(buf + n + 1, cap - n - 1, tok, tl);
+        buf[n + 1 + tl] = 0;
+    }
+}
+
+static void extract_tree_hash(const char *detail, char *out, long cap) {
+    long dl = tx_len(detail, 256);
+    long pos = tx_find(detail, dl, "tree=", 5);
+    out[0] = 0;
+    if (pos < 0) return;
+    long i = pos + 5, o = 0;
+    while (i < dl && o + 1 < cap && detail[i] != ' ' && detail[i] != '\t' && detail[i] != ',' && detail[i] != ';') {
+        out[o++] = detail[i++];
+    }
+    out[o] = 0;
+}
+
+static int cmd_plan(int argc, char **argv) {
+    char ver[64], branch[96], repo[512], owner[64];
+    char prerun_dir[512], chain_dir[512], ape_path[512], rd_bin[512], merge_tree[64];
+    int no_rd = 0;
+    ver[0] = branch[0] = repo[0] = owner[0] = 0;
+    prerun_dir[0] = chain_dir[0] = ape_path[0] = rd_bin[0] = merge_tree[0] = 0;
+
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--version") && i + 1 < argc) { if (cx_fmt(ver, sizeof ver, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--branch") && i + 1 < argc) { if (cx_fmt(branch, sizeof branch, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) { if (cx_fmt(repo, sizeof repo, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--owner") && i + 1 < argc) { if (cx_fmt(owner, sizeof owner, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--prerun-dir") && i + 1 < argc) { if (cx_fmt(prerun_dir, sizeof prerun_dir, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) { if (cx_fmt(chain_dir, sizeof chain_dir, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--ape") && i + 1 < argc) { if (cx_fmt(ape_path, sizeof ape_path, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--readiness-bin") && i + 1 < argc) { if (cx_fmt(rd_bin, sizeof rd_bin, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--merge-tree") && i + 1 < argc) { if (cx_fmt(merge_tree, sizeof merge_tree, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--no-readiness")) no_rd = 1;
+        else return die_usage("unknown-plan-arg");
+    }
+    if (!ver[0]) return die_usage("missing --version");
+    if (!branch[0]) cx_fmt(branch, sizeof branch, "v%s", ver);
+    if (!repo[0]) cx_fmt(repo, sizeof repo, ".");
+    if (!owner[0]) cx_fmt(owner, sizeof owner, "cc");
+
+    const char *home = sy_env("HOME");
+    if (!home || !home[0]) home = "/tmp";
+    if (!prerun_dir[0]) cx_fmt(prerun_dir, sizeof prerun_dir, "%s/.cache/unisacc/prerun-%s", home, ver);
+    if (!chain_dir[0]) cx_fmt(chain_dir, sizeof chain_dir, "%s/.cache/unisacc/chains/%s", home, ver);
+
+    char prev_ver[64], prev_sha[64], cand_ape[128], main_sha[64], branch_sha[64];
+    int has_cand = (load_candidate_tsv(repo, prev_ver, sizeof prev_ver, prev_sha, sizeof prev_sha, cand_ape, sizeof cand_ape) == 0);
+    if (!has_cand) {
+        cx_fmt(prev_ver, sizeof prev_ver, "MISSING");
+        cx_fmt(prev_sha, sizeof prev_sha, "MISSING");
+        cx_fmt(cand_ape, sizeof cand_ape, "unisacc.com");
+    }
+    if (!ape_path[0]) cx_fmt(ape_path, sizeof ape_path, "%s/%s", chain_dir, cand_ape);
+
+    if (git_rev(repo, "HEAD", 1, main_sha, sizeof main_sha) != 0) cx_fmt(main_sha, sizeof main_sha, "MISSING");
+    int has_branch = (git_rev(repo, branch, 1, branch_sha, sizeof branch_sha) == 0);
+    if (!has_branch) cx_fmt(branch_sha, sizeof branch_sha, "MISSING");
+
+    if (!no_rd) {
+        run_readiness(repo, ver, rd_bin);
+    } else {
+        g_fr_ran = 0; g_nfr = 0; g_fr_blockers = 0;
+        cx_fmt(g_fr_ready, sizeof g_fr_ready, "skipped");
+    }
+    if (!merge_tree[0]) {
+        const fr_row_t *mr = find_fr("merge-s0-tree");
+        if (mr) extract_tree_hash(mr->detail, merge_tree, sizeof merge_tree);
+    }
+    if (!merge_tree[0]) cx_fmt(merge_tree, sizeof merge_tree, "UNMEASURED");
+
+    char notes_p[640], rb_p[640], dec_p[640], ev_p[640];
+    cx_fmt(notes_p, sizeof notes_p, "%s/release/notes-%s.md", repo, ver);
+    cx_fmt(rb_p, sizeof rb_p, "%s/release/rollback.txt", repo);
+    cx_fmt(dec_p, sizeof dec_p, "%s/release/decision.txt", repo);
+    cx_fmt(ev_p, sizeof ev_p, "%s/release/evidence/%s", repo, ver);
+    int has_notes = (sy_exists(notes_p) == 1);
+    int has_rb = (sy_exists(rb_p) == 1);
+    int has_dec = (sy_exists(dec_p) == 1);
+    (void)ev_p;
+
+    printf("FREEZE_DAY_CTX\tversion=%s\tbranch=%s\tbranch_sha=%s\tmain_sha=%s\tprev_version=%s\tprev_commit=%s\tmerge_tree=%s\towner=%s\treadiness_ready=%s\treadiness_blockers=%d\n",
+        ver, branch, branch_sha, main_sha, prev_ver, prev_sha, merge_tree, owner, g_fr_ready, g_fr_blockers);
+
+    int blocked = 0;
+    for (int i = 0; i < FD_STEPS; i++) {
+        char cmd[2048], why[512];
+        cmd[0] = 0;
+        cx_fmt(why, sizeof why, "-");
+        int is_blk = 0;
+
+        if (i == 0) { /* S0-lock */
+            cx_fmt(cmd, sizeof cmd,
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 && "
+                "sh ./unisacc.com tools/freeze-broadcast.cx -- start --lock freeze --from %s",
+                owner, owner, owner);
+            if (fr_is_bad("devsvc-freeze")) { is_blk = 1; add_reason(why, sizeof why, "devsvc-freeze"); }
+            if (fr_is_bad("hardlink-trees")) { is_blk = 1; add_reason(why, sizeof why, "hardlink-trees"); }
+        } else if (i == 1) { /* S0-merge */
+            cx_fmt(cmd, sizeof cmd,
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git merge --no-ff %s # branch_sha=%s merge_tree=%s; "
+                "update release/candidate.tsv (%s -> %s); "
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git commit --derive -m \"freeze: merge %s (%s) and set candidate %s\" --whole release/candidate.tsv && "
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git push",
+                owner, branch, branch_sha, merge_tree, prev_ver, ver, owner, branch, branch_sha, ver, owner);
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+            if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
+            if (fr_is_bad("dirty-freeze-domain")) { is_blk = 1; add_reason(why, sizeof why, "dirty-freeze-domain"); }
+            if (fr_is_bad("cx-mode-drift")) { is_blk = 1; add_reason(why, sizeof why, "cx-mode-drift"); }
+            if (fr_is_bad("merge-s0-tree")) { is_blk = 1; add_reason(why, sizeof why, "merge-s0-tree"); }
+            if (fr_is_bad("ahead-origin")) { is_blk = 1; add_reason(why, sizeof why, "ahead-origin"); }
+            if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
+        } else if (i == 2) { /* S1 */
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-ready.cx -- --version %s", ver);
+            if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
+            if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
+            if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
+        } else if (i == 3) { /* S2 */
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bg-candidate.cx -- start --version %s --dir %s", ver, chain_dir);
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 4) { /* S3-inputs */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/prerun-inputs.cx -- --rev %s --version %s --prev %s --prev-rev %s --ape %s --dir %s",
+                branch_sha, ver, prev_ver, prev_sha, ape_path, prerun_dir);
+            if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 5) { /* S3-run */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s/ids.txt --times-file %s/times.tsv --priority-file %s/priority.tsv --out %s --normal-jobs 8 --window-lanes 3 && "
+                "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate %s --out %s --resume --max-jobs 8 --window-lanes 3 --keep-going",
+                prerun_dir, prerun_dir, prerun_dir, prerun_dir, ape_path, prerun_dir);
+        } else if (i == 6) { /* S3b */
+            cx_fmt(cmd, sizeof cmd, "gh workflow run candidate-native.yml --ref %s", branch);
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 7) { /* S3c */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/check-release-prep.cx -- --part notes --notes release/notes-%s.md && "
+                "sh ./unisacc.com tools/check-release-prep.cx -- --part rollback --rollback release/rollback.txt",
+                ver);
+            if (!has_notes) { is_blk = 1; add_reason(why, sizeof why, "missing-notes-template"); }
+            if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
+            if (fr_is_bad("release-prep-notes")) { is_blk = 1; add_reason(why, sizeof why, "release-prep-notes"); }
+            if (fr_is_bad("release-prep-rollback")) { is_blk = 1; add_reason(why, sizeof why, "release-prep-rollback"); }
+        } else if (i == 8) { /* S4 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/prerun-drive.cx -- merge --in %s --out %s --version %s && "
+                "sh ./unisacc.com tools/prerun-drive.cx -- archive --in %s --version %s",
+                prerun_dir, prerun_dir, ver, prerun_dir, ver);
+        } else if (i == 9) { /* S5 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/release-run.cx -- --pack --version %s && "
+                "sh ./unisacc.com tools/release-exec.cx -- --warm --version %s",
+                ver, ver);
+        } else if (i == 10) { /* S6 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 1 --step 2 --inputs %s --state %s/state.tsv --layout %s",
+                ver, prerun_dir, chain_dir, chain_dir);
+        } else if (i == 11) { /* S7 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 3 --inputs %s --state %s/state.tsv --layout %s "
+                "# stage release/notes-%s.md release/rollback.txt release/decision.txt",
+                ver, prerun_dir, chain_dir, chain_dir, ver);
+            if (!has_notes) { is_blk = 1; add_reason(why, sizeof why, "missing-notes-template"); }
+            if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
+            if (!has_dec) { is_blk = 1; add_reason(why, sizeof why, "missing-decision-template"); }
+        } else if (i == 12) { /* S8 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 4 --inputs %s --state %s/state.tsv --layout %s",
+                ver, prerun_dir, chain_dir, chain_dir);
+        } else if (i == 13) { /* S9 */
+            cx_fmt(cmd, sizeof cmd,
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg sh ./unisacc.com tools/release-exec.cx -- --execute --version %s",
+                owner, ver);
+        } else if (i == 14) { /* S10 */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/release-post.cx -- run --version %s --dry && "
+                "sh ./unisacc.com tools/freeze-broadcast.cx -- end --dry --from %s",
+                ver, owner);
+        }
+
+        if (is_blk) blocked++;
+        char exp_disp[128];
+        long el = tx_len(g_specs[i].expect, sizeof exp_disp - 1);
+        for (long k = 0; k < el; k++) exp_disp[k] = g_specs[i].expect[k] == '\t' ? ' ' : g_specs[i].expect[k];
+        exp_disp[el] = 0;
+        printf("FREEZE_STEP\tid=%s\twho=%s\tbudget_s=%d\tgate=%s\treason=%s\texpect=%s\tcmd=%s\n",
+            g_specs[i].id, g_specs[i].who, g_specs[i].budget_s,
+            is_blk ? "BLOCKED" : "READY", why, exp_disp, cmd);
+    }
+
+    printf("FREEZE_DAY\tplan\tsteps=%d\tblocked=%d\n", FD_STEPS, blocked);
+    return 0;
+}
+
+static int cmd_check(int argc, char **argv) {
+    char step[64], logf[1024];
+    step[0] = logf[0] = 0;
+    for (int i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--step") && i + 1 < argc) { if (cx_fmt(step, sizeof step, "%s", argv[++i])) return 2; }
+        else if (tx_eqz(argv[i], "--log") && i + 1 < argc) { if (cx_fmt(logf, sizeof logf, "%s", argv[++i])) return 2; }
+        else return die_usage("unknown-check-arg");
+    }
+    if (!step[0] || !logf[0]) return die_usage("check requires --step and --log");
+
+    const step_spec_t *sp = 0;
+    for (int i = 0; i < FD_STEPS; i++) {
+        if (tx_eqz(g_specs[i].id, step)) { sp = &g_specs[i]; break; }
+    }
+    if (!sp) return die_usage("unknown-step-id");
+
+    unsigned char *raw = 0;
+    int64_t sz = 0;
+    if (sy_read_file(logf, &raw, &sz, 16 << 20) != 0 || !raw) {
+        mm_free(raw);
+        return die_usage("log-unreadable");
+    }
+    long el = tx_len(sp->expect, 128);
+    int found = (sz > 0 && tx_find((const char *)raw, (long)sz, sp->expect, el) >= 0);
+    mm_free(raw);
+    printf("FREEZE_DAY\tcheck\tstep=%s\tstatus=%s\texpect=%s\tlog=%s\n",
+        sp->id, found ? "PASS" : "FAIL", sp->expect, logf);
+    return found ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return die_usage("subcommand plan|check required");
+    if (tx_eqz(argv[1], "plan")) return cmd_plan(argc, argv);
+    if (tx_eqz(argv[1], "check")) return cmd_check(argc, argv);
+    return die_usage("unknown subcommand");
+}
