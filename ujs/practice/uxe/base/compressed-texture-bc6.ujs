@@ -1,0 +1,111 @@
+// BC6H mode 11 has six explicit 10-bit endpoints and a single subset.
+native function bc6_bits(block:i64,offset:i64,width:i64) i64 {
+  let at=block+offset/8;
+  let shift=offset%8;
+  let word=ux_u8(at);
+  if(shift+width>8) { word=word+256*ux_u8(at+1); }
+  if(shift+width>16) { word=word+65536*ux_u8(at+2); }
+  return u32_and(u32_shr(word,shift),u32_shl(1,width)-1);
+}
+
+native function bc6_endpoint(raw:i64,signedMode:i64) i64 {
+  if(raw==0) { return 0; }
+  if(!signedMode) {
+    if(raw==1023) { return 65535; }
+    return raw*64+32;
+  }
+  let sign=1;
+  let magnitude=raw;
+  if(raw>=512) { sign=0-1; magnitude=1024-raw; }
+  if(magnitude>=511) { return sign*32767; }
+  return sign*(magnitude*64+32);
+}
+
+native function bc6_half(first:i64,second:i64,weight:i64,signedMode:i64) i64 {
+  // The bias preserves arithmetic-shift rounding with truncating division.
+  let value=(2097152+first*(64-weight)+second*weight+32)/64-32768;
+  if(!signedMode) { return value*31/64; }
+  if(value<0) {
+    let magnitude=(0-value)*31/32;
+    if(magnitude) { return 32768+magnitude; }
+    return 0;
+  }
+  return value*31/32;
+}
+
+native function CompressedTexture_bc6Level(level:i64,data:i64,bytes:i64,width:i64,height:i64,format:i64) i64 {
+  if(format!=36494 && format!=36495) { return 0-2; }
+  if(!loading_span(level,CompressedMip.size) || data<0 || bytes<0 || data>6291456-bytes ||
+     !file_disjoint(level,CompressedMip.size,data,bytes)) { return 0-1; }
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     bytes!=((width+3)/4)*((height+3)/4)*16) { return 0-3; }
+  let a=ux_u32_put(level+CompressedMip.data,data);
+  let b=ux_u32_put(level+CompressedMip.bytes,bytes);
+  let c=ux_u32_put(level+CompressedMip.width,width);
+  let d=ux_u32_put(level+CompressedMip.height,height);
+  let e=ux_u32_put(level+CompressedMip.format,format);
+  return level;
+}
+
+// Output is little-endian RGBA16F with opaque alpha, preserving HDR and sign.
+native function CompressedTexture_decodeBC6(level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  let format=ux_u32(level+CompressedMip.format);
+  if(format!=36494 && format!=36495) { return 0-2; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  if(width<1 || width>16384 || height<1 || height>16384) { return 0-3; }
+  let columns=(width+3)/4;
+  let rows=(height+3)/4;
+  let count=columns*rows;
+  let output=width*height*8;
+  if(size!=count*16 || data>6291456-size) { return 0-3; }
+  if(capacity<output || dst<0 || dst>6291456-output ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size) ||
+     !file_disjoint(data,size,level,CompressedMip.size)) { return 0-1; }
+  // Validate every block before touching the output.
+  let check=0;
+  while(check<count) {
+    if(ux_u8(data+16*check)%32!=3) { return 0-4; }
+    check=check+1;
+  }
+  let signedMode=format==36494;
+  let by=0;
+  while(by<rows) {
+    let bx=0;
+    while(bx<columns) {
+      let block=data+16*(by*columns+bx);
+      let r0=bc6_endpoint(bc6_bits(block,5,10),signedMode);
+      let g0=bc6_endpoint(bc6_bits(block,15,10),signedMode);
+      let b0=bc6_endpoint(bc6_bits(block,25,10),signedMode);
+      let r1=bc6_endpoint(bc6_bits(block,35,10),signedMode);
+      let g1=bc6_endpoint(bc6_bits(block,45,10),signedMode);
+      let b1=bc6_endpoint(bc6_bits(block,55,10),signedMode);
+      let y=0;
+      while(y<4 && by*4+y<height) {
+        let x=0;
+        while(x<4 && bx*4+x<width) {
+          let index=4*y+x;
+          let selector=0;
+          if(index==0) { selector=bc6_bits(block,65,3); }
+          else { selector=bc6_bits(block,64+index*4,4); }
+          // The 16 weights are nearest integers to 64*selector/15.
+          let weight=(64*selector+7)/15;
+          let pixel=dst+((by*4+y)*width+bx*4+x)*8;
+          let r=ux_u16_put(pixel,bc6_half(r0,r1,weight,signedMode));
+          let g=ux_u16_put(pixel+2,bc6_half(g0,g1,weight,signedMode));
+          let b=ux_u16_put(pixel+4,bc6_half(b0,b1,weight,signedMode));
+          let a=ux_u16_put(pixel+6,15360);
+          x=x+1;
+        }
+        y=y+1;
+      }
+      bx=bx+1;
+    }
+    by=by+1;
+  }
+  return output;
+}
