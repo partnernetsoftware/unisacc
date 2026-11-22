@@ -1,0 +1,116 @@
+/* Contract: checks tools/prerun-inputs.cx offline on a throw-away git fixture.
+ * READY run prints the full PRERUN_INPUTS line and the recommended run command (window-lanes 3, normal-jobs 8);
+ * the ids are the previous windows filtered by the batches table of REV; a missing priority source, missing
+ * ape, missing times cache or missing previous windows each give status=MISSING:<item> and rc 1; a
+ * PRERUN_DIR under /tmp, a relative PRERUN_DIR, --times-file / --ids-file / --priority-file (direct inputs,
+ * including the live cache path) are refused rc 2; a frozen read-only times.tsv with different content is refused;
+ * dropped ids, new batches since the previous rev and a notes REGISTERED_NORUN mismatch are listed as WARN only.
+ * Layer: interfaces. Output: CHECK_PRERUN_INPUTS. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+static char tmp[4096], fx[4400], persist[4400], bin[4400], driver[4096];
+static np_result run(char **v, const char *cwd) {
+    np_result r = {0}; char why[512];
+    if (np_run(v, cwd, 0, 50, &r, why, sizeof why)) { fprintf(stderr, "check-prerun-inputs: %s\n", why); exit(2); }
+    return r;
+}
+static int has(np_result *r, const char *s) { return r->out && strstr(r->out, s); }
+static void sh(const char *cmd, const char *cwd) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0}; np_result r = run(v, cwd);
+    if (r.rc) { fprintf(stderr, "check-prerun-inputs: fixture step failed: %s\n%s", cmd, r.err ? r.err : ""); exit(2); }
+    np_free(&r);
+}
+int main(int argc, char **argv) {
+    char base[4096]; sy_stat_t st;
+    if (ck_receipt_begin(&argc, argv) < 0) return 2;
+    if (sr_default("prerun-inputs", base, sizeof base) || (sy_mkdir(base, 0700) && (sy_lstat(base, &st) || st.kind != 'd')) ||
+        sy_mkdtemp(base, "check", tmp, sizeof tmp) || cx_fmt(fx, sizeof fx, "%s/repo", tmp) || cx_fmt(bin, sizeof bin, "%s/tool", tmp)) return 2;
+    if (sy_realpath("./unisacc.com", driver, sizeof driver) < 0) return 2;
+    const char *home = sy_env("HOME");
+    if (!home || cx_fmt(persist, sizeof persist, "%s/.cache/unisacc/prerun-inputs-check-%ld", home, (long)sy_pid())) return 2;
+    char *build[] = {"sh", driver, "tools/prerun-inputs.cx", "-o", bin, 0};
+    if (argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
+    else { np_result b = run(build, 0); if (b.rc) { fprintf(stderr, "%s", b.err ? b.err : ""); return 2; } np_free(&b); }
+    char cmd[9000];
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p release/evidence/0.0.8 tests; "
+        "printf 'id\\timplementation\\tlayer\\nalpha\\tIMPLEMENTED\\tx\\nbeta\\tIMPLEMENTED\\tx\\nl0-new\\tIMPLEMENTED\\tx\\nplanned\\tPLANNED\\tx\\n' > tests/batches.tsv; "
+        "printf '# prerun-drive windows\\nwindow\\tjobs\\tphase\\tcount\\tids\\nW0000\\t1\\twarmup\\t1\\talpha\\nW0001\\t1\\tnormal\\t2\\tbeta,gone\\n' > release/evidence/0.0.8/prerun-windows.tsv; "
+        "printf 'batch\\treason\\tevidence\\ncx-booter-ape\\tno-producer\\tcx-booter-ape-deferred.tsv\\n' > release/evidence/0.0.8/expected-unmeasured.tsv; "
+        "printf 'SELECTED\\tcx-booter-ape\\n' > release/evidence/0.0.8/cx-booter-ape-deferred.tsv; "
+        "printf 'SELECTED\\ttools-default-regression\\n' > release/evidence/0.0.8/tools-default-regression-deferred.tsv; "
+        "mkdir -p release; printf 'x `l0-new` REGISTERED_NORUN y\\n' > release/notes-0.0.9.md; "
+        "printf 'batch\\tdomain\\tstatus\\nalpha\\tp\\tPASS\\nbeta\\tp\\tFAIL\\n' > strict.tsv; "
+        "printf '1\\talpha\\tPASS\\t100\\n' > times.tsv; printf 'ape\\n' > ape.bin; printf 'l0-new\\n' > add.txt; "
+        "git init -q . && git add -A && git -c user.name=t -c user.email=t@t commit -q -m one && git rev-parse HEAD > rev.txt");
+    if (sy_mkdir(fx, 0700)) return 2;
+    sh(cmd, fx);
+    char rev[64] = {0}; { char p[4500]; cx_fmt(p, sizeof p, "%s/rev.txt", fx); unsigned char *b = 0; int64_t n = 0; if (sy_read_file(p, &b, &n, 100) || n < 40 || mm_copy(rev, sizeof rev, b, 40)) return 2; }
+    char ape[4500], times[4500], strict[4500], add[4500], dir[4600], dir2[4600], evo[4600];
+    cx_fmt(ape, sizeof ape, "%s/ape.bin", fx); cx_fmt(times, sizeof times, "%s/times.tsv", fx);
+    cx_fmt(strict, sizeof strict, "%s/strict.tsv", fx); cx_fmt(add, sizeof add, "%s/add.txt", fx);
+    cx_fmt(dir, sizeof dir, "%s/a", persist); cx_fmt(dir2, sizeof dir2, "%s/b", persist); cx_fmt(evo, sizeof evo, "%s/ev", tmp);
+    /* cx_fmt of the persistent parent: make it */
+    sy_mkdir_all(persist, 0700);
+    /* 1. READY */
+    char *ok[] = {bin, "--rev", rev, "--prev-rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir,
+                  "--times-cache", times, "--priority-src", strict, "--evidence-out", evo, 0};
+    np_result r = run(ok, 0);
+    ck(r.rc == 0 && has(&r, "status=READY"), "ready-status");
+    ck(has(&r, "PRERUN_CMD") && has(&r, "--window-lanes 3") && has(&r, "--normal-jobs 8"), "recommended-cmd-knobs");
+    ck(has(&r, "WARN\tdropped\tgone"), "dropped-id-listed");
+    ck(has(&r, "WARN\tstatus-mismatch\tl0-new"), "notes-mismatch-warn-only");
+    ck(has(&r, "outside_set=1"), "outside-set-count-excludes-planned");
+    ck(has(&r, "TEMPLATE\texpected-unmeasured.tsv\twritten"), "template-written");
+    { char p[4700]; cx_fmt(p, sizeof p, "%s/ids.txt", dir); unsigned char *b = 0; int64_t n = 0;
+      ck(!sy_read_file(p, &b, &n, 1000) && n == 11 && !memcmp(b, "alpha\nbeta\n", 11), "ids-are-prev-windows-filtered-by-rev");
+      cx_fmt(p, sizeof p, "%s/times.tsv", dir); sy_stat_t s2; ck(!sy_stat(p, &s2) && (s2.mode & 0222) == 0, "times-frozen-readonly"); }
+    np_free(&r);
+    /* 2. add-ids joins the new batch */
+    char *addv[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir2,
+                    "--times-cache", times, "--priority-src", strict, "--no-templates", "--add-ids", add, 0};
+    r = run(addv, 0);
+    ck(r.rc == 0 && has(&r, "in_set=3"), "add-ids-joins-set");
+    np_free(&r);
+    /* 3. every missing item is named */
+    char nope[4500]; cx_fmt(nope, sizeof nope, "%s/absent", fx);
+    char dir3[4600]; cx_fmt(dir3, sizeof dir3, "%s/c", persist);
+    char *noprio[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir3, "--times-cache", times, "--no-templates", 0};
+    r = run(noprio, 0); ck(r.rc == 1 && has(&r, "status=MISSING:priority"), "missing-priority-named"); np_free(&r);
+    char dir4[4600]; cx_fmt(dir4, sizeof dir4, "%s/d", persist);
+    char *noape[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--dir", dir4, "--times-cache", times, "--priority-src", strict, "--no-templates", 0};
+    r = run(noape, 0); ck(r.rc == 1 && has(&r, "status=MISSING:ape"), "missing-ape-named"); np_free(&r);
+    char dir5[4600]; cx_fmt(dir5, sizeof dir5, "%s/e", persist);
+    char *notimes[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir5, "--times-cache", nope, "--priority-src", strict, "--no-templates", 0};
+    r = run(notimes, 0); ck(r.rc == 1 && has(&r, "MISSING:times"), "missing-times-named"); np_free(&r);
+    char dir6[4600]; cx_fmt(dir6, sizeof dir6, "%s/f", persist);
+    char *nowin[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir6, "--times-cache", times, "--priority-src", strict, "--prev-windows", nope, "--no-templates", 0};
+    r = run(nowin, 0); ck(r.rc == 1 && has(&r, "MISSING:ids"), "missing-ids-named"); np_free(&r);
+    /* 4. refusals */
+    char tdir[4600]; cx_fmt(tdir, sizeof tdir, "/tmp/prerun-inputs-refuse-%ld", (long)sy_pid());
+    char *intmp[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", tdir, "--times-cache", times, "--priority-src", strict, "--no-templates", 0};
+    r = run(intmp, 0); ck(r.rc == 2 && has(&r, "dir-in-tmp") && sy_exists(tdir) != 1, "tmp-dir-refused-and-not-created"); np_free(&r);
+    char *rel[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--dir", "rel/dir", 0};
+    r = run(rel, 0); ck(r.rc == 2 && has(&r, "dir-not-absolute"), "relative-dir-refused"); np_free(&r);
+    char *direct[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--dir", dir, "--times-file", times, 0};
+    r = run(direct, 0); ck(r.rc == 2 && has(&r, "direct-input-refused"), "times-file-direct-refused"); np_free(&r);
+    char *idsd[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--dir", dir, "--ids-file", add, 0};
+    r = run(idsd, 0); ck(r.rc == 2 && has(&r, "direct-input-refused"), "ids-file-direct-refused"); np_free(&r);
+    /* 5. frozen times differ */
+    char other[4500]; cx_fmt(other, sizeof other, "%s/times2.tsv", fx);
+    sh("printf '1\\tbeta\\tPASS\\t200\\n' > times2.tsv", fx);
+    char *frozen[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir, "--times-cache", other, "--priority-src", strict, "--no-templates", 0};
+    r = run(frozen, 0); ck(r.rc == 2 && has(&r, "times-frozen-differs"), "frozen-times-content-change-refused"); np_free(&r);
+    /* cleanup */
+    char rm[4700]; cx_fmt(rm, sizeof rm, "chmod -R u+w '%s' '%s' 2>/dev/null; rm -rf '%s' '%s'", persist, tmp, persist, tmp);
+    char *rmv[] = {"sh", "-c", rm, 0}; np_result rr = run(rmv, 0); np_free(&rr);
+    ck_receipt_finish();
+    printf("CHECK_PRERUN_INPUTS\tpass=%d fail=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}
