@@ -1,0 +1,63 @@
+// Each placement outline points to a pair of u32 values: the contour address
+// and corner count. Contour coordinates are in font units; positions are in
+// world units. Scratch holds transformed contours and the extrusion workspace.
+native function TextGeometry_generatePlaced(mesh:i64,placements:i64,count:i64,scale:f64,
+                                            depth:f64,work:i64,capacity:i64) i64 {
+  if(count<1 || count>256 || !(scale>0.0 && scale-scale==0.0) ||
+     !(depth>0.0 && depth-depth==0.0) ||
+     !text_layout_span(mesh,GeometryBuffers.size,4) ||
+     !text_layout_span(placements,count*TextGlyphPlacement.size,8) ||
+     !text_layout_span(work,capacity,8) || capacity<count*8+24) { return 0-1; }
+  let output=ux_u32(mesh+GeometryBuffers.vertices);
+  let available=32*ux_u32(mesh+GeometryBuffers.vertexCapacity);
+  if(!text_layout_span(output,available,4) ||
+     text_layout_overlap(work,capacity,mesh,GeometryBuffers.size) ||
+     text_layout_overlap(work,capacity,placements,count*TextGlyphPlacement.size) ||
+     text_layout_overlap(work,capacity,output,available) ||
+     text_layout_overlap(output,available,mesh,GeometryBuffers.size) ||
+     text_layout_overlap(output,available,placements,count*TextGlyphPlacement.size)) { return 0-1; }
+  let need=count*8;
+  let largest=0;
+  let i=0;
+  while(i<count) {
+    let placement=placements+i*TextGlyphPlacement.size;
+    let outline=ux_u32(placement+TextGlyphPlacement.outline);
+    if(outline==0 || !text_layout_span(outline,8,4) ||
+       text_layout_overlap(work,capacity,outline,8)) { return 0-1; }
+    let contour=ux_u32(outline);
+    let corners=ux_u32(outline+4);
+    if(corners<3 || corners>4096 ||
+       !text_layout_span(contour,16*corners,8) ||
+       text_layout_overlap(work,capacity,contour,16*corners)) { return 0-1; }
+    need=need+16*corners;
+    if(corners>largest) { largest=corners; }
+    i=i+1;
+  }
+  if(need+24+36*largest>capacity) { return 0-1; }
+  let at=work+count*8;
+  i=0;
+  while(i<count) {
+    let placement=placements+i*TextGlyphPlacement.size;
+    let outline=ux_u32(placement+TextGlyphPlacement.outline);
+    let contour=ux_u32(outline);
+    let corners=ux_u32(outline+4);
+    let x=ux_f64(placement+TextGlyphPlacement.x);
+    let y=ux_f64(placement+TextGlyphPlacement.y);
+    let offset=ux_u32_put(work+i*8,at);
+    let size=ux_u32_put(work+i*8+4,corners);
+    let corner=0;
+    while(corner<corners) {
+      let px=x+scale*ux_f64(contour+corner*16);
+      let py=y+scale*ux_f64(contour+corner*16+8);
+      if(!(px>=0.0-1000000000.0 && px<=1000000000.0 &&
+           py>=0.0-1000000000.0 && py<=1000000000.0)) { return 0-1; }
+      let putX=ux_f64_put(at,px);
+      let putY=ux_f64_put(at+8,py);
+      at=at+16;
+      corner=corner+1;
+    }
+    i=i+1;
+  }
+  return TextGeometry_generate(mesh,work,count,depth,1,at,capacity-need);
+}
+
