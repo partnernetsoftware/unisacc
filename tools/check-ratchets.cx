@@ -142,22 +142,28 @@ int main(int argc, char **argv) {
                     "CORE-NEW cx/sys/my posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
                     "cxtrunc: tools/my tool.cx has 2 calls and no baseline row (a new .cx must have 0)\n"
                     "verwriter: job-v1 has writer tools/a.cx.bak and no baseline row (one writer per record tag)\n"
-                    "outdep: b1 has 1 out/ literals in tools/b.cx.bak, baseline 0\n";
+                    "outdep: b1 has 1 out/ literals in tools/b.cx.bak, baseline 0\n"
+                    "cxraw: move target src/drive.cx baseline 3 != move 2\n"
+                    "cxlibc: move target cx/sys/posix.cx baseline 5 != move 4\n";
                 char sf[4400];
                 char *r_all[] = {"--rows", sf, 0};
                 char *r_sp[] = {"--rows", sf, "--only", "cx/sys/my posix.cx", 0};
                 char *r_vw[] = {"--rows", sf, "--only", "tools/a.cx.bak", 0};
                 char *r_tag[] = {"--rows", sf, "--only", "job-v1", 0};
+                char *r_mv[] = {"--rows", sf, "--only", "src/drive.cx", 0};
                 cx_fmt(sf, sizeof sf, "%s/sp-vw.txt", d);
                 cx_write(sf, sp_txt, tx_len(sp_txt, 4096));
                 rc = run(r_all, o, sizeof o);
-                ck(rc == 0 && lines(o) == 4, "space-and-verwriter-outdep-rows-4");
+                ck(rc == 0 && lines(o) == 6 && has(o, "cxraw: move target src/drive.cx baseline 3 != move 2")
+                   && has(o, "cxlibc: move target cx/sys/posix.cx baseline 5 != move 4"), "space-and-verwriter-outdep-move-rows-6");
                 rc = run(r_sp, o, sizeof o);
                 ck(rc == 0 && lines(o) == 1 && has(o, "CORE-NEW cx/sys/my posix.cx\tsy_fchmod"), "space-path-only-exact");
                 rc = run(r_vw, o, sizeof o);
                 ck(rc == 0 && lines(o) == 1 && has(o, "verwriter: job-v1 has writer tools/a.cx.bak"), "verwriter-only-matches-writer-path");
                 rc = run(r_tag, o, sizeof o);
                 ck(rc == 0 && lines(o) == 0, "verwriter-only-ignores-tag-field");
+                rc = run(r_mv, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "cxraw: move target src/drive.cx baseline 3 != move 2"), "move-target-mismatch-only-matches-target-path");
                 sy_unlink(sf);
             }
             {
@@ -255,10 +261,24 @@ int main(int argc, char **argv) {
                                "precommit-verwriter-outdep-bak-does-not-false-block-prefix");
                             (void)run_argv(cs, o, sizeof o);
                             rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
-                            sy_unsetenv("GIT_INDEX_FILE");
                             ck(rc == 1 && has(o, "precommit: blocked: CORE-NEW apps/my dir/my probe.cx\tsy_fchmod")
                                && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=1"),
                                "precommit-blocks-path-with-space");
+                            {
+                                const char *mv_rat =
+                                    "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 move mismatch\n"
+                                    "  cxraw: move target src/drive.cx baseline 3 != move 2\n"
+                                    "RATCHET\tcxlibc\tFAIL\tcxlibc: FAIL: 1 move mismatch\n"
+                                    "  cxlibc: move target src/host.cx baseline 5 != move 4\n"
+                                    "RATCHETS\tok=16\tfail=2\telapsed_ms=10\n";
+                                cx_write(rout, mv_rat, tx_len(mv_rat, 1024));
+                                rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                sy_unsetenv("GIT_INDEX_FILE");
+                                ck(rc == 1 && has(o, "precommit: blocked: cxraw: move target src/drive.cx baseline 3 != move 2")
+                                   && has(o, "precommit: blocked: cxlibc: move target src/host.cx baseline 5 != move 4")
+                                   && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=2"),
+                                   "precommit-blocks-cxraw-cxlibc-move-target-baseline-mismatch");
+                            }
                         }
                         sy_unlink(la); sy_unlink(lb); sy_unlink(ls);
                         sy_rmdir(lmd); sy_rmdir(lap); sy_rmdir(lt);
