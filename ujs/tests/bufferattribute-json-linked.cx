@@ -38,6 +38,7 @@ static int attribute_base(const char *wasm,int prepare,int check) {
         "ujs/practice/uxe/base/loader-json.ujs",
         "ujs/practice/uxe/base/geometry-json-load.ujs",
         "ujs/practice/uxe/base/bufferattribute-family-json-read.ujs",
+        "ujs/practice/uxe/base/instancedbufferattribute-json.ujs",
         "ujs/practice/uxe/test/bufferattribute-json-linked-base.ujs",
         0
     };
@@ -110,19 +111,22 @@ int main(int argc,char **argv) {
         return 2;
     }
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    int mutate_instanced=argc==2 && tx_eqz(argv[1],"--mutate-instanced");
+    int verify=argc==2 && tx_eqz(argv[1],"--verify-instanced-negative");
+    if(argc!=1 && !mutate && !mutate_instanced && !verify) return 2;
     char dir[256],base[320],probe[320],page[320],url[360];
     if(sy_mkdtemp("/tmp","uxe-attribute-json-",dir,sizeof dir)) return 2;
     tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
     tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
     tx_snprintf(page,sizeof page,"%s/probe.html",dir);
-    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":"");
+    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":(mutate_instanced || verify)?"?mutate-instanced":"");
     const char *fixture="ujs/practice/uxe/test/bufferattribute-json-linked-wasm.html";
     char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/bufferattribute-json-linked-probe.ujs","-o",probe,0};
-    double ref[16],actual[11];
+    double ref[16],actual[12],instanced[1];
     int failed=attribute_base(base,0,0) || attribute_compile(args,"probe",6) ||
         sy_copy(fixture,page,0600) || r160_wait_ref("bufferattribute-family",ref,16,dir) ||
-        r160_wait_read(url,"#wasm-cases",actual,11,dir);
+        r160_wait_ref("instancedbufferattribute-json",instanced,1,dir) ||
+        r160_wait_read(url,"#wasm-cases",actual,12,dir);
     if(!failed) for(int i=0;i<11;i++) {
         double gold=json_gold(i);
         if(actual[i]!=gold || ref[i+5]!=gold) {
@@ -130,7 +134,22 @@ int main(int argc,char **argv) {
             failed++;
         }
     }
+    const char *example="{\"itemSize\":2,\"type\":\"Float32Array\",\"array\":[1,2,3,4],\"normalized\":false,\"meshPerAttribute\":3,\"isInstancedBufferAttribute\":true}";
+    uint64_t hash=0;
+    for(int i=0;example[i];i++) hash=(hash*131+(unsigned char)example[i])%16777213;
+    if(verify) {
+        const int rejected=!failed && instanced[0]==(double)hash &&
+            actual[11]>=0 && actual[11]!=(double)hash;
+        const int cleaned=sy_remove_all(dir)==0;
+        printf("ATTRIBUTE_JSON_LINK negative_expected=1 negative_observed=%d checks_ok=%d\n",
+            rejected,!failed && cleaned);
+        return !(rejected && cleaned);
+    }
+    if(!failed && (instanced[0]!=(double)hash || actual[11]!=(double)hash)) {
+        printf("ATTRIBUTE_JSON_LINK instanced actual=%g r160=%g gold=%g\n",actual[11],instanced[0],(double)hash);
+        failed++;
+    }
     if(sy_remove_all(dir)) failed++;
-    printf("G_STRUCT BufferAttribute class JSON linked cases=11 failed=%d\n",failed);
+    printf("G_STRUCT BufferAttribute class JSON linked cases=12 failed=%d\n",failed);
     return failed!=0;
 }
