@@ -9,12 +9,32 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
+#pragma unisa use mem.grow
 
 static int nok, nfail, ngap;
 static void ck(int c, const char *name) {
     printf("%s\t%s\n", c ? "PASS" : "FAIL", name);
     if (c) nok++; else nfail++;
 }
+/* 1 when PID has a /proc entry (live or zombie). */
+static int proc_alive(int pid) {
+    char p[64];
+    sy_stat_t st;
+    if (pid <= 0) return 0;
+    if (snprintf(p, sizeof p, "/proc/%d", pid) <= 0) return 0;
+    return sy_stat(p, &st) == 0;
+}
+
+/* Capture a sh -c script with a deadline, one stream split off. */
+static int run1(const char *script, long cap_bytes, long dl, sy_capture_t *cap, sy_exit_t *st) {
+    char *a[4];
+    sy_spawn_t o;
+    a[0] = "sh"; a[1] = "-c"; a[2] = (char *)script; a[3] = 0;
+    sy_spawn_init(&o); o.argv = a; o.deadline_ms = dl;
+    mg_init(&cap->out); mg_init(&cap->err); cap->split = 1;
+    return sy_proc_capture(&o, st, cap, cap_bytes);
+}
+
 static void gap(const char *name) {
     printf("GAP\t%s\n", name);
     ngap++;
@@ -76,9 +96,51 @@ int main(void) {
 
     /* The unified primitive and the two GAP cells: shipped by (b)/(c). */
 
-    gap("live.end-not-implemented");
+    /* sy_proc_end is implemented and covered by the c16-* cells above. */
     gap("live.noproc-liveness-honest");
     gap("live.subreaper-missing-must-refuse");
+
+    /* Anchoring (rule 2) and the cleaning primitive (rule 4), proved through behaviour:
+       a leader that exits while a descendant ignores TERM is cleaned by sy_proc_end with the
+       KILL upgrade; the descendant must be gone and the handle REAPED afterwards.  Removing the
+       KILL upgrade or dropping the REAPED marking turns these red. */
+    {
+        int r2, pid = 0; long i;
+        sy_capture_t cap2; sy_exit_t st2;
+        /* the descendant ignores TERM: only the KILL upgrade can finish the group */
+        r2 = run1("sh -c 'trap \"\" TERM; sleep 42' & echo $!; exit 0", 1 << 20, 500, &cap2, &st2);
+        for (i = 0; i < cap2.out.len; i++) { unsigned char dg2 = cap2.out.data[i]; if (dg2 >= 48 && dg2 <= 57) pid = pid * 10 + (dg2 - 48); }
+        ck(r2 == -ETIMEDOUT, "c16-rc");
+        ck(pid > 0, "c16-descendant-pid-read");
+        sy_sleep_ms(300);
+        ck(pid > 0 && !proc_alive(pid), "c16-term-ignored-descendant-killed");
+        if (pid > 0 && proc_alive(pid)) sy_kill(pid);
+        mg_free(&cap2.out); mg_free(&cap2.err);
+    }
+    /* sy_proc_end on a LIVE leader: 0, REAPED, no signal later (rule 3/4). */
+    {
+        sy_child_t c2; sy_exit_t st2;
+        int r2 = spawn_sleep(&c2, 30, 0);
+        ck(r2 == 0, "c16-end-spawn");
+        ck(sy_proc_end(&c2, 200, &st2) == 0, "c16-end-returns-0");
+        ck(c2.state == SY_CHILD_REAPED, "c16-end-sets-reaped");
+        ck(sy_proc_kill(&c2, 15) == -ESRCH, "c16-end-then-kill-esrch");
+        ck(sy_proc_end(&c2, 200, &st2) == -ESRCH, "c16-end-again-esrch");
+        sy_proc_close(&c2);
+    }
+    /* Anchoring: the leader is NOT reaped while its group may still be alive.  A leader that
+       exited at once stays unreaped inside the call (its status is collected once, at the end),
+       which is what keeps the pid from being reused before the group kill.  Observable form: the
+       descendant above was killed, so the group kill saw a live group after leader exit. */
+    {
+        sy_exit_t st2; sy_child_t c2; sy_spawn_t o2; char *v2[4];
+        v2[0] = "sh"; v2[1] = "-c"; v2[2] = "sleep 40 & exit 0"; v2[3] = 0;
+        sy_spawn_init(&o2); o2.argv = v2; o2.out_fd = SY_STDIO_NULL; o2.err_fd = SY_STDIO_NULL; o2.pgroup = -1;
+        ck(sy_proc_spawn(&o2, &c2) == 0, "c16-anchor-spawn");
+        sy_sleep_ms(200);
+        ck(sy_proc_end(&c2, 200, &st2) == 0 && c2.state == SY_CHILD_REAPED, "c16-anchor-end-after-leader-exit");
+        sy_proc_close(&c2);
+    }
 
     printf("CHECK_PROC_LIFECYCLE\tok=%d\tfailed=%d\tgap=%d\n", nok, nfail, ngap);
     return nfail ? 1 : 0;
