@@ -5,7 +5,6 @@
  * theirs first appearance. Identical repeated rows are idempotent.
  */
 #pragma unisa module merge3
-#pragma unisa dock
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
@@ -13,11 +12,11 @@ typedef struct {char *p;size_t n,cap;int failed;} tsm_buf;
 void tsm_put(tsm_buf *b,const char *s,size_t n){
  if(b->failed)return;
  if(n>(size_t)-1-b->n-1){b->failed=1;return;}
- if(b->n+n+1>b->cap){size_t c=b->cap?b->cap:256;while(c<b->n+n+1){if(c>(size_t)-1/2){c=b->n+n+1;break;}c*=2;}char *p=realloc(b->p,c);if(!p){b->failed=1;return;}b->p=p;b->cap=c;}
+ if(b->n+n+1>b->cap){size_t c=b->cap?b->cap:256;while(c<b->n+n+1){if(c>(size_t)-1/2){c=b->n+n+1;break;}c*=2;}char *p=(char *)mm_grow(b->p,(long)c);if(!p){b->failed=1;return;}b->p=p;b->cap=c;}
  if(mm_copy(b->p+b->n,(long)(b->cap-b->n),s,(long)n)){b->failed=1;return;}
  b->n+=n;b->p[b->n]=0;
 }
-void tsm_puts(tsm_buf *b,const char *s){tsm_put(b,s,strlen(s));}
+void tsm_puts(tsm_buf *b,const char *s){tsm_put(b,s,(size_t)tx_len(s,16777217));}
 typedef struct {const char *p;size_t n;} tsm_span;
 /* Optional inherited-width schema: zero is strict. A positive minimum admits
  * base rows at least that wide and only exact same-key base bytes on each side.
@@ -25,12 +24,12 @@ typedef struct {const char *p;size_t n;} tsm_span;
  * Wire and empty-key checks remain unconditional. */
 typedef struct {tsm_span key,row[3];int used;} tsm_slot;
 static unsigned long tsm_hash(tsm_span s){unsigned long h=5381;for(size_t i=0;i<s.n;i++)h=((h<<5)+h)^(unsigned char)s.p[i];return h;}
-static int tsm_equal(tsm_span a,tsm_span b){return a.n==b.n&&(!a.n||!memcmp(a.p,b.p,a.n));}
+static int tsm_equal(tsm_span a,tsm_span b){return a.n==b.n&&(!a.n||mm_same(a.p,b.p,(long)a.n));}
 static void tsm_label(tsm_buf *b,const char *name,tsm_span s){tsm_puts(b,name);tsm_puts(b,"\t");if(s.p)tsm_put(b,s.p,s.n);else tsm_puts(b,"<ABSENT>");tsm_puts(b,"\n");}
 static int tsm_parse(int keymode,const char *s,size_t n,int side,tsm_slot *slots,size_t cap,size_t *order,size_t *count,tsm_buf *why,const char *header,int columns,int inherited_min_columns){
- size_t hn=strlen(header);
- if(!s||n<hn||n>16777216||memcmp(s,header,hn)||s[n-1]!='\n'||memchr(s,0,n)||memchr(s,'\r',n)){tsm_puts(why,"SCHEMA\theader/wire\n");return 2;}
- for(size_t at=hn;at<n;){const char *end=memchr(s+at,'\n',n-at);size_t len=(size_t)(end-(s+at)),kn=0;int cols=1;
+ size_t hn=(size_t)tx_len(header,16777217);
+ if(!s||n<hn||n>16777216||!mm_same(s,header,(long)hn)||s[n-1]!='\n'||tx_chr(s,(long)n,0)>=0||tx_chr(s,(long)n,'\r')>=0){tsm_puts(why,"SCHEMA\theader/wire\n");return 2;}
+ for(size_t at=hn;at<n;){long nl=tx_chr(s+at,(long)(n-at),'\n');const char *end=nl>=0?s+at+nl:0;size_t len=(size_t)(end-(s+at)),kn=0;int cols=1;
   for(size_t j=0;j<len;j++)if(s[at+j]=='\t'){if(cols==1)kn=j;cols++;}
   if(cols==1)kn=len;
   tsm_span row={s+at,len},key={s+at,keymode?kn:len};size_t pos=tsm_hash(key)&(cap-1);
@@ -46,15 +45,15 @@ static int tsm_parse(int keymode,const char *s,size_t n,int side,tsm_slot *slots
 /* out is published only on success. conflicts contains all competing keys and
  * their exact base/ours/theirs rows, including explicit absence. */
 int tsm_merge_schema(const char *header,int columns,int keymode,const char *base,size_t bn,const char *ours,size_t on,const char *theirs,size_t tn,tsm_buf *out,tsm_buf *conflicts,int inherited_min_columns){
- size_t hn=header?strlen(header):0;
+ size_t hn=header?(size_t)tx_len(header,16777217):0;
  if(!hn||header[hn-1]!='\n'||columns<1||(keymode!=0&&keymode!=1)||inherited_min_columns<0){tsm_puts(conflicts,"SCHEMA\tconfiguration\n");return 2;}
  int hc=1;for(size_t j=0;j+1<hn;j++){if(header[j]=='\t')hc++;if(header[j]=='\n'||header[j]=='\r'){tsm_puts(conflicts,"SCHEMA\theader\n");return 2;}}if(hc!=columns){tsm_puts(conflicts,"SCHEMA\theader-columns\n");return 2;}
  size_t rows=0;const char *all[]={base,ours,theirs};size_t ns[]={bn,on,tn};
  for(int s=0;s<3;s++){if(!all[s]||ns[s]>16777216){tsm_puts(conflicts,"SCHEMA\tinput-limit\n");return 2;}for(size_t i=0;i<ns[s];i++)rows+=all[s][i]=='\n';}
  if(rows>262144){tsm_puts(conflicts,"SCHEMA\trow-limit\n");return 2;}
  size_t cap=16;while(cap<rows*2)cap*=2;
- tsm_slot *slots=calloc(cap,sizeof *slots);size_t *order=malloc((rows+1)*sizeof *order),count=0;int rc=0;
- if(!slots||!order){free(slots);free(order);tsm_puts(conflicts,"SCHEMA\tallocation\n");return 2;}
+ tsm_slot *slots=(tsm_slot *)mm_zalloc((long)(cap*sizeof *slots));size_t *order=(size_t *)mm_alloc((long)((rows+1)*sizeof *order)),count=0;int rc=0;
+ if(!slots||!order){mm_free(slots);mm_free(order);tsm_puts(conflicts,"SCHEMA\tallocation\n");return 2;}
  for(int s=0;s<3;s++)if((rc=tsm_parse(keymode,all[s],ns[s],s,slots,cap,order,&count,conflicts,header,columns,inherited_min_columns)))goto done;
  tsm_buf merged={0};tsm_puts(&merged,header);
  for(size_t i=0;i<count;i++){tsm_slot *slot=&slots[order[i]];tsm_span b=slot->row[0],o=slot->row[1],t=slot->row[2],chosen={0};
@@ -63,8 +62,8 @@ int tsm_merge_schema(const char *header,int columns,int keymode,const char *base
   if(chosen.p){tsm_put(&merged,chosen.p,chosen.n);tsm_puts(&merged,"\n");}
  }
  if(merged.failed||conflicts->failed)rc=2;
- if(!rc){free(out->p);*out=merged;merged=(tsm_buf){0};}free(merged.p);
- done:free(slots);free(order);return rc;
+ if(!rc){mm_free(out->p);*out=merged;merged=(tsm_buf){0};}mm_free(merged.p);
+ done:mm_free(slots);mm_free(order);return rc;
 }
 /* Strict public entry; schema-aware callers use the same merge engine. */
 int tsm_merge(const char *header,int columns,int keymode,const char *base,size_t bn,const char *ours,size_t on,const char *theirs,size_t tn,tsm_buf *out,tsm_buf *conflicts){
