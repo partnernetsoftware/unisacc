@@ -261,6 +261,8 @@ JPEG 基座与探针改走 C6 版本化链接。两块 JPEG 由 .cx 构造，Chr
 
 ArrayCamera 有序数组门由 C6 分为基座准备与功能门。运行 `cx ujs/tools-ux/linked-wasm-flow.cx -- /tmp/uxe-linked-cache array-camera` 生成节点，先创建缓存目录。合并构造超过原六秒界后，仅将基座构造移到有界准备节点，探针仍限六秒。缓存键包含打包器源码及有序基座输入。保持原五个独立金值和顺序篡改反例。
 
+AnimationObjectGroup 单组帧推进和停止门使用同样的 C6 准备节点，选择 `anim-group-single`。原 21 项独立数值、停止与回滚反例均由独立线性内存的浏览器功能门逐项比较。探针仍限六秒，准备缓存键包含验收源码与有序基座输入。
+
 JPEG Color444 门用 `UXE_JPEG_COLOR_WASM_CACHE` 选择缓存，调用 `cx ujs/tests/jpeg-color-io.cx -- --prepare` 后运行无参数功能门。独立准备冷编译 6153 毫秒，节点总耗时 14492 毫秒。缓存命中探针编译为 40 毫秒，十三项真实 Chrome 与 r160 对照通过。`-- --prepare --check` 复验哈希。空缓存及解码和加载器篡改各具名非零。
 
 渐进灰度 JPEG 门设置 `UXE_JPEG_GRAY_WASM_CACHE`，准备与摘要验证参数相同。冷基座编译 6172 毫秒，独立节点耗时 15070 毫秒。缓存命中探针编译 31 毫秒，十三项通过且两个旧篡改分别失败。PNG 编码和存储块门仅隔离复验，两项都通过，沿用原门。

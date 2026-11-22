@@ -15,6 +15,10 @@
 | Mesh | C6 门 mesh-object-json-struct.cx 核对根矩阵、可见性、两个 UUID 引用、拒绝未知几何及克隆后的资源共享。释放原节点后克隆仍有效。材质引用调换转红。 | 叶节点记录保留已有几何和材质，由调用方登记 UUID。独立打包资源、多材质数组和子树 JSON 待补。r160 Mesh 使用脱离父节点及垃圾回收，UXE 另有 Mesh_dispose 释放节点槽。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
+## 本批未复现通过的既有门
+
+`gpu-stencil-ops-pixel.cx` 在 ujs 尖端两次到达浏览器读回并失败，输出 `browser_read_failed`、`stencil_values=0`。本批没有改动该门、模板实现、GPU 桥或模板常量清单，也没有新增依赖该门的清单项。此门不作为本批通过证据。主线对照未取得同编译器下的有效读回，成因待定位。GPU 四片并集及其原有断言另行通过。
+
 ## 压缩纹理软件范围与设备缺口
 
 BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 直接软件入口支持 14 种二维足迹的 LDR 常色块和合法有限范围，sRGB 保留编码字节。HDR、非常色块的分区、权重及端点模式仍缺。EAC 的有符号与无符号 R11、RG11 可通过 CompressedTexture_decodeEAC 解码，输出保留 11 位精度的交错 16 位小端样本。ETC2 可通过 CompressedTexture_decodeETC2 解码 RGB、全 Alpha 和单比特透明，包含 T、H 与平面模式。sRGB 保留编码字节。ETC2 与 ASTC 常色块已接通二维、数组及立方体的共用软件 mip 分派。EAC 精确 11 位输出使用独立入口，ETC2、EAC 与 ASTC 的压缩原样 GPU 上传待验。BC4 与 BC5 的有符号输出为二补码 SNORM。
