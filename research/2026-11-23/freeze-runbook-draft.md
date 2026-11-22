@@ -57,7 +57,17 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 
 ## 四、公开后动作
 
-1. INDEX 封尾 exec-7-Y2-done 行随下一个提交带上。2. release-chain mark-version-seq --version 0.0.94 --commit --push。3. backup-evidence 再 --verify。4. version-metrics-gen --write、day-metrics --write。5. Root 升级:先确认 0.0.93 只读备份在 .unisacc-root-backups/<sha256>/ 带 manifest.tsv,再装已验 APE。6. release/state.tsv 现停在 0.0.86,是否现行待核。7. 扫除:删 .claude/worktrees/v0.0.94,分支保留到 0.0.95 公开。8. prd_mempalace.md 原位更新。9. 版本序顺延(csr 演练清单):改 version-seq.tsv 后跑 verseq-gen --check,四处口径 fail=0 才算完成。10. 合并顺序:先合 94 入 main;再把 main 合进 v0.0.96,重跑 check-proc-lifecycle;0.0.95 同理先合 main 再验(version-seq 的 0.0.96 行主题与"进程生命周期承接版"不一致,先定号再合)。11. 解冻在 Root 升级之后。
+1. INDEX 封尾 `exec-7-Y2-done` 行随下一个提交带上(0.0.93 已实测验证在 `release/evidence/0.0.93/INDEX.tsv`)。
+2. `release-chain mark-version-seq --version 0.0.94 --dry`(先只读预演,核将改行与 `verseq-gen --check`),确认无误后再跑 `release-chain mark-version-seq --version 0.0.94 --commit --push`。
+3. `release-chain backup-evidence --version 0.0.94 ...` 再 `--verify`(校验时展开行首 `~/` 为 `$HOME`,0.0.93 实测 `BACKUP_VERIFY PASS files=7`)。
+4. 先 `tools/version-metrics-gen.cx -- --write-history`,再 `tools/version-metrics-gen.cx -- --write`,最后 `tools/day-metrics.cx -- --write`(不可漏 `--write-history`,见 `tools/release-chain.cx:1475`)。
+5. **Root 升级(S10 强前置)**: 升级本机 Root 前必须先有合规的 0.0.93 备份槽(`.unisacc-root-backups/<sha256>/` 带 `manifest.tsv` 且登记在 `.unisacc-root-backups/index.tsv`),并通过 `sh ./unisacc.com tools/install-ape.cx -- . --rollback` 干跑输出 `INSTALL_APE ROLLBACK_DRYRUN <0.0.93-sha256>`(现状 0.0.93 缺合规槽,历史 `0.0.86-public..0.0.92-public` 仅为手工目录、不在 `index.tsv`,需先建合规槽再升 0.0.94); 确认后装已验 0.0.94 APE。
+6. `release/state.tsv`: 已退役(仅 `tools/release-state.cx` 读写,停在 0.0.86,`release-chain`/`release-exec`/`chain-ready` 均不读取,不纳入公开后动作)。
+7. 扫除: S10 用 `git worktree remove` 删 `.claude/worktrees/v0.0.94`(分支 `v0.0.94` 保留到 0.0.95 公开); 现存已公开旧工作树 `v0.0.93`、`v0.0.88`、`v0.0.89-old` 一并在 S10 盘点清理,其中 `v0.0.88` 与 `v0.0.89-old` 有未提交改动,清理前必须先问各自所有者。
+8. `prd_mempalace.md` 原位更新(手工动作,写明已公开版本、F/APE/CI/Y1/Y2 与本机 Root 版本)。
+9. 版本序顺延(csr 演练清单): 改 `build/version-seq.tsv` 后跑 `sh ./unisacc.com tools/verseq-gen.cx -- --check`,四处口径 `fail=0` 才算完成。
+10. 合并顺序与顺延前置: 先合 0.0.94 入 `main`; 顺延前须先解决 `build/version-seq.tsv` 槽 31(0.0.96)主题("执行核每步成本")与 `v0.0.96` 分支(进程生命周期承接版)不一致的问题,定号后再把 `main` 合进 `v0.0.96`(重跑 `check-proc-lifecycle`)与 `v0.0.95`。
+11. 解冻(在 Root 升级之后): 提交冻结闸由 `tools/precommit.cx` 读取 `build/freeze.tsv` 控制,无独立解冻 CLI,解冻即删除或提交移除 `build/freeze.tsv`(注意不要混淆: `release/freeze.tsv` 是 0.0.43 历史表,`tools/freeze-gate.cx` 是阶段门而非提交冻结开关)。
 
 ## 五、发布说明如实口径
 
