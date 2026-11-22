@@ -921,19 +921,30 @@ static void dg_today_ymd(char out[12]) {
     (void)cx_fmt(out, 12, "%04lld-%02lld-%02lld", y, m, d);
 }
 
-static int dg_waived(const char *wt, const char *name) {
-    char wp[1200], today[12];
-    size_t wn = 0;
-    char *wb;
+static int pc_core_file_deleted(const char *path) {
+    static char *del_z;
+    static long del_n;
+    static int del_init;
+    long at = 0, pl = tx_len(path, 256);
+    if (!del_init) {
+        char *dv[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=D", "-z", 0};
+        del_z = slurp_run(dv, &del_n);
+        del_init = 1;
+    }
+    while (del_z && at < del_n) {
+        long nl = tx_len(del_z + at, del_n - at);
+        if (nl <= 0) break;
+        if (nl == pl && tx_same(del_z + at, nl, path, pl)) return 1;
+        at += nl + 1;
+    }
+    return 0;
+}
+
+static int dg_blob_waived(const char *wb, long wn, const char *name, const char *today) {
     long at = 0, nl = tx_len(name, 64);
-    int hit = 0;
-    if (cx_fmt(wp, sizeof wp, "%s%stests/derive-gate-waivers.tsv", wt ? wt : "", wt ? "/" : "")) return 0;
-    if (sy_exists(wp) != 1) return 0;
-    wb = (char *)cx_read(wp, &wn);
-    if (!wb) return 0;
-    dg_today_ymd(today);
-    while (at < (long)wn) {
-        long e = tx_chr(wb + at, (long)wn - at, '\n'), l = e < 0 ? (long)wn - at : e;
+    if (!wb || wn <= 0) return 0;
+    while (at < wn) {
+        long e = tx_chr(wb + at, wn - at, '\n'), l = e < 0 ? wn - at : e;
         long o0, l0, o1, l1;
         if (l > 0 && wb[at] != '#' &&
             !tx_field(wb + at, l, '\t', 0, &o0, &l0) && l0 == nl && tx_same(wb + at + o0, l0, name, nl) &&
@@ -941,11 +952,27 @@ static int dg_waived(const char *wt, const char *name) {
             char exp[12];
             mm_copy(exp, sizeof exp, wb + at + o1, 10);
             exp[10] = 0;
-            if (strcmp(today, exp) <= 0) { hit = 1; break; }
+            if (strcmp(today, exp) <= 0) return 1;
         }
         at += l + 1;
     }
-    mm_free(wb);
+    return 0;
+}
+
+static int dg_waived(const char *wt, const char *name) {
+    char today[12], *hb = 0, *sb = 0;
+    long hn = 0, sn = 0;
+    int hit = 0;
+    (void)wt;
+    dg_today_ymd(today);
+    if (!cov_blob("HEAD", "tests/derive-gate-waivers.tsv", &hb, &hn) &&
+        dg_blob_waived(hb, hn, name, today) &&
+        !cov_blob("", "tests/derive-gate-waivers.tsv", &sb, &sn) &&
+        dg_blob_waived(sb, sn, name, today)) {
+        hit = 1;
+    }
+    if (hb) mm_free(hb);
+    if (sb) mm_free(sb);
     return hit;
 }
 
@@ -1040,6 +1067,10 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
     long pa = 0, gon = 0;
     int hit = 0, tool_only = 1, blocked = 0;
     char *gout = 0;
+    if (pc_core_file_deleted("tools/gen-all-check.cx")) {
+        sy_eprintf("precommit: BLOCKED genall-gate-deleted path=tools/gen-all-check.cx (core gen-all gate tool cannot be deleted)\n");
+        return 1;
+    }
     if (cx_fmt(gp, sizeof gp, "%s%stools/gen-all-check.cx", wt ? wt : "", wt ? "/" : "")) return 0;
     if (sy_exists(gp) != 1 || dg_waived(wt, "gen-all")) return 0;
     only_list[0] = 0;
@@ -1177,6 +1208,14 @@ static int derive_gate(void) {
     char names[16][64], outs[16][512], only[1024];
     int nsel = 0, blocked = 0;
 
+    if (pc_core_file_deleted("exec/facts/derive.tsv")) {
+        sy_eprintf("precommit: BLOCKED derive-gate-deleted path=exec/facts/derive.tsv (core derive table cannot be deleted)\n");
+        return 1;
+    }
+    if (pc_core_file_deleted("tools/derive.cx")) {
+        sy_eprintf("precommit: BLOCKED derive-gate-deleted path=tools/derive.cx (core derive gate tool cannot be deleted)\n");
+        return 1;
+    }
     if (cx_fmt(dp, sizeof dp, "%s%sexec/facts/derive.tsv", wt ? wt : "", wt ? "/" : "") ||
         cx_fmt(tp, sizeof tp, "%s%stools/derive.cx", wt ? wt : "", wt ? "/" : "")) return 0;
     if (sy_exists(dp) != 1 || sy_exists(tp) != 1) return 0;
@@ -1367,6 +1406,10 @@ static int derive_gate(void) {
 
 static int ledger_gate(void) {
     char *names,*baseline=0;long dn,bn=0,at=0;int blocked=0;
+    if (pc_core_file_deleted("tools/ledger-add.cx")) {
+        sy_eprintf("precommit: BLOCKED ledger-gate-deleted path=tools/ledger-add.cx (core ledger gate tool cannot be deleted)\n");
+        return 1;
+    }
     names=gate_diff("ledger",&dn);if(!names){sy_eprintf("precommit: git diff --cached (ledger) failed\n");return 1;}
     if(dn<=0||sy_exists("./unisacc.com")!=1||sy_exists("tools/ledger-add.cx")!=1){mm_free(names);return 0;}
     if(cov_blob("HEAD","build/ledger-format-baseline.tsv",&baseline,&bn)){mm_free(names);return 0;}
@@ -1506,11 +1549,16 @@ static int precheck(int argc, char **argv) {
     "fi; " \
     "rm -f \"$si\"; " \
     "[ -e \"$d/.git\" ] || [ -L \"$d/.git\" ] || ln -s \"$g\" \"$d/.git\"; " \
-    "for _f in unisacc.com unisacc.com.build.json .devsvc cx ext cxroot.tsv tools tests/derive-gate-waivers.tsv; do " \
-    "  [ ! -e \"$_f\" ] && [ ! -L \"$_f\" ] || [ -e \"$d/$_f\" ] || [ -L \"$d/$_f\" ] || ln -s \"$PWD/$_f\" \"$d/$_f\"; " \
+    "wt_top=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' \"$PWD\"); " \
+    "w=\"${UNISACC_PRECOMMIT_WORK_TOP:-$wt_top}\"; " \
+    "for _f in unisacc.com unisacc.com.build.json .devsvc cx ext cxroot.tsv tools; do " \
+    "  if [ ! -e \"$d/$_f\" ] && [ ! -L \"$d/$_f\" ]; then " \
+    "    if [ -e \"$w/$_f\" ] || [ -L \"$w/$_f\" ]; then ln -s \"$w/$_f\" \"$d/$_f\"; " \
+    "    elif [ -e \"$wt_top/$_f\" ] || [ -L \"$wt_top/$_f\" ]; then ln -s \"$wt_top/$_f\" \"$d/$_f\"; fi; " \
+    "  fi; " \
     "done; " \
-    "if [ -d tools ] && [ ! -L tools ] && [ -d \"$d/tools\" ] && [ ! -L \"$d/tools\" ]; then " \
-    "  for _tf in tools/*; do _bn=${_tf#tools/}; [ ! -L \"$_tf\" ] || [ -e \"$d/tools/$_bn\" ] || [ -L \"$d/tools/$_bn\" ] || ln -s \"$PWD/$_tf\" \"$d/tools/$_bn\"; done; " \
+    "if [ -d \"$w/tools\" ] && [ ! -L \"$w/tools\" ] && [ -d \"$d/tools\" ] && [ ! -L \"$d/tools\" ]; then " \
+    "  for _tf in \"$w\"/tools/*; do _bn=${_tf#\"$w\"/tools/}; [ ! -L \"$_tf\" ] || [ -e \"$d/tools/$_bn\" ] || [ -L \"$d/tools/$_bn\" ] || ln -s \"$_tf\" \"$d/tools/$_bn\"; done; " \
     "fi; " \
     "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
 
@@ -1614,13 +1662,10 @@ static int pc_capture_work_top(void) {
         sy_eprintf("precommit: getcwd failed\n");
         return -1;
     }
-    if (env_top && env_top[0] == '/') {
-        if (tx_copy(pc_work_top, sizeof pc_work_top, env_top, tx_len(env_top, sizeof pc_work_top - 1))) return -1;
-        return 0;
-    }
     {
         char *tv[] = { "/bin/sh", "-c",
-            "wt=$(git rev-parse --show-toplevel 2>/dev/null || env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null || true); "
+            "lwt=$(git rev-parse --show-toplevel 2>/dev/null || env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null || true); "
+            "wt=\"$lwt\"; "
             "case \"$wt\" in "
             "  */.claude/worktrees/*) "
             "    cd=$(git rev-parse --git-common-dir 2>/dev/null || env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --git-common-dir 2>/dev/null || true); "
@@ -1629,18 +1674,26 @@ static int pc_capture_work_top(void) {
             "      if [ -n \"$st\" ]; then wt=\"$st\"; fi; "
             "    fi ;; "
             "esac; "
-            "printf '%s\\n' \"$wt\"", 0 };
-        long tn = 0;
+            "printf '%s\\t%s\\n' \"$wt\" \"$lwt\"", 0 };
+        long tn = 0, o0, l0, o1, l1;
         char *to = slurp_run(tv, &tn);
         if (to && tn > 0) {
             while (tn > 0 && (to[tn - 1] == '\n' || to[tn - 1] == '\r')) to[--tn] = 0;
-            if (tn > 0 && tn < (long)sizeof pc_work_top) {
-                mm_copy(pc_work_top, sizeof pc_work_top, to, (size_t)tn);
-                pc_work_top[tn] = 0;
-                sy_setenv("UNISACC_PRECOMMIT_WORK_TOP", pc_work_top, 1);
+            if (!tx_field(to, tn, '\t', 0, &o0, &l0) && l0 > 0 && l0 < (long)sizeof pc_work_top) {
+                mm_copy(pc_work_top, sizeof pc_work_top, to + o0, (size_t)l0);
+                pc_work_top[l0] = 0;
+            }
+            if (!tx_field(to, tn, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof pc_orig_cwd) {
+                mm_copy(pc_orig_cwd, sizeof pc_orig_cwd, to + o1, (size_t)l1);
+                pc_orig_cwd[l1] = 0;
             }
         }
         if (to) mm_free(to);
+    }
+    if (env_top && env_top[0] == '/') {
+        if (tx_copy(pc_work_top, sizeof pc_work_top, env_top, tx_len(env_top, sizeof pc_work_top - 1))) return -1;
+    } else if (pc_work_top[0]) {
+        sy_setenv("UNISACC_PRECOMMIT_WORK_TOP", pc_work_top, 1);
     }
     return 0;
 }
@@ -1649,6 +1702,7 @@ static int isolate_staged_tree(void) {
     const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
     const char *no_iso  = sy_env("UNISACC_PRECOMMIT_NO_ISOLATE");
     const char *devmeta = sy_env("UNISACC_DEVMETA_DIR");
+    char cwd_chk[1024];
     if ((in_tree && in_tree[0] == '1') || (no_iso && no_iso[0] == '1') || (devmeta && devmeta[0])) return 0;
     char *iv[] = { "/bin/sh", "-c", PC_ISOLATE_SETUP_SH, 0 };
     long on = 0;
@@ -1674,7 +1728,7 @@ static int isolate_staged_tree(void) {
         mm_copy(idxp, sizeof idxp, o + o2, (size_t)l2); idxp[l2] = 0;
     }
     mm_free(o);
-    if (!getcwd(pc_orig_cwd, sizeof pc_orig_cwd)) {
+    if (!getcwd(cwd_chk, sizeof cwd_chk)) {
         sy_eprintf("precommit: isolate_staged_tree getcwd failed\n");
         pc_iso_cleanup();
         return -1;
@@ -1819,6 +1873,10 @@ int main(int argc, char **argv) {
     }
     { /* 清单闸(DSG-REG1):暂存区动了 tests/manifests、三表之一时,按索引核对每份清单的三行俱在(reg-manifest --index) */
       long qn; char *qn_names = gate_diff("manifest", &qn);
+      if (pc_core_file_deleted("tools/reg-manifest.cx")) {
+          sy_eprintf("precommit: BLOCKED manifest-gate-deleted path=tools/reg-manifest.cx (core manifest gate tool cannot be deleted)\n");
+          blocked++;
+      }
       if (!qn_names) { sy_eprintf("precommit: BLOCKED git diff --cached (manifest read set) failed\n"); blocked++; }
       if (qn_names && qn > 0 && sy_exists("tools/reg-manifest.cx") == 1) {
           const char *tool = sy_env("UNISACC_REGM_TOOL"); char *rm[] = {"sh", "./unisacc.com", 0, "--", "--check", "--index", 0}; long rn2; char *ro;
@@ -1840,6 +1898,10 @@ int main(int argc, char **argv) {
     { /* 生成闸(S7):暂存区动了 tests/manifests 或三张登记表之一时,按索引核对清单行与表逐字一致(tables-gen --check --index) */
       int b0_tab = blocked;
       long gn; char *gn_names = gate_diff("tables", &gn);
+      if (pc_core_file_deleted("tools/tables-gen.cx")) {
+          sy_eprintf("precommit: BLOCKED tables-gate-deleted path=tools/tables-gen.cx (core tables gate tool cannot be deleted)\n");
+          blocked++;
+      }
       if (!gn_names) { sy_eprintf("precommit: BLOCKED git diff --cached (tables read set) failed\n"); blocked++; }
       if (gn_names && gn > 0 && sy_exists("tools/tables-gen.cx") == 1) {
           char *tg[] = {"sh", "./unisacc.com", "tools/tables-gen.cx", "--", "--check", "--index", 0}; long tn2; char *to;

@@ -122,7 +122,7 @@ int main(void) {
             "recomputed-and-staged-passes: recomputed links staged with batches.tsv -> rc=0 blocked=0");
     }
 
-    /* 5. Active waiver allows; expired waiver blocks */
+    /* 5. Active waiver in HEAD allows; staged self-waiver in same commit blocks; expired waiver blocks */
     {
         const char *bat3 = "# id\timplementation\tlayer\tsource\tmode\tplatform\tbudget\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
                            "b1\tIMPLEMENTED\tcontract\ttools/b1.cx\tSOURCE\tlnx/x86_64\t30\t-\ttools/b1.cx\t-\tcontract.b1\trc0:B1\tproduct\tcommit\n"
@@ -132,14 +132,33 @@ int main(void) {
         if (cx_write(p, bat3, strlen(bat3))) cpd_abort("wb3");
         if (cx_fmt(p, sizeof p, "%s/tests/derive-gate-waivers.tsv", repo)) cpd_abort("wp");
         if (cx_write(p, "links\t2099-12-31\ttemporary-test-waiver\n", 39)) cpd_abort("ww1");
-        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git checkout -q -- build/links.tsv && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5a");
+        /* 5a: HEAD has no waiver -> staging derive-gate-waivers.tsv in same commit as drifted batches.tsv must NOT self-waive */
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git reset -q && git checkout -q -- build/links.tsv && git add tests/derive-gate-waivers.tsv tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5self");
+        int rc_self = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc_self == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links"),
+            "staged-self-waiver-in-same-commit-blocked: staging new waiver in same commit does not self-waive");
+
+        /* 5b: Commit active waiver to HEAD first -> staging drifted batches.tsv is allowed (rc 0); expiring waiver in staged index blocks (rc 1) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && git add tests/derive-gate-waivers.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m add-head-waiver", repo)) cpd_abort("c5hw");
+        cpd_sh(cmd, out);
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cpd_abort("b3p2");
+        if (cx_write(p, bat3, strlen(bat3))) cpd_abort("wb32");
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5a");
         int rc_act = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
 
+        if (cx_fmt(p, sizeof p, "%s/tests/derive-gate-waivers.tsv", repo)) cpd_abort("wp2");
         if (cx_write(p, "links\t2020-01-01\texpired-test-waiver\n", 37)) cpd_abort("ww2");
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/derive-gate-waivers.tsv tests/batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5b");
         int rc_exp = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
-        (void)sy_unlink(p);
-        ck(rc_act == 0 && rc_exp == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links"),
-            "waiver-active-and-expired: active waiver rc=0; expired waiver rc=1 BLOCKED");
+        int exp_blk = (rc_exp == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links"));
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git rm -qf tests/derive-gate-waivers.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m rm-head-waiver && git add tests/batches.tsv", repo)) cpd_abort("c5rm");
+        cpd_sh(cmd, out);
+        ck(rc_act == 0 && exp_blk,
+            "waiver-active-and-expired: HEAD active waiver rc=0; expired waiver rc=1 BLOCKED");
     }
 
     /* 6, 7 & 8. Real git commit through .git/hooks/pre-commit (precommit-flow.cx: --plan + flowexec + --from-run) */
@@ -309,6 +328,94 @@ int main(void) {
 
         ck(mod_blk_ok && rc_mod_ok == 0,
             "table-index-modified-tool-real-commit: modifying existing tool table references blocks until table-index recomputed");
+    }
+
+    /* 11. (a) Invoking precommit from a subdirectory and real git commit hook from a version worktree subdirectory (.claude/worktrees/v0.0.99/tests);
+     *     (b) Staged deletion of derive.tsv / derive.cx / reg-manifest.cx / tables-gen.cx refused with named error instead of silent skip. */
+    {
+        char hp[CPD_PW], repo4[CPD_PW];
+        const char *wthook = "#!/bin/sh\nroot=$(cd \"$(git rev-parse --git-common-dir)/..\" && pwd -P)\nUNISACC_PRECOMMIT_SERIAL=1 exec sh \"$root/unisacc.com\" \"$root/tools/precommit.cx\"\n";
+        if (cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", repo)) cpd_abort("hp11");
+        if (cx_write(hp, wthook, strlen(wthook))) cpd_abort("whp11");
+        (void)chmod(hp, 0755);
+
+        /* 11a-1: Direct invocation from repo/tests subdirectory with drifted tests/batches.tsv */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s/tests' && printf 'b4\\tIMPLEMENTED\\tcontract\\ttools/b4.cx\\tSOURCE\\tlnx/x86_64\\t30\\t-\\ttools/b4.cx\\t-\\tcontract.b4\\trc0:B4\\tproduct\\tcommit\\n' >> batches.tsv && "
+            "git add batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh '%s/unisacc.com' '%s/tools/precommit.cx'",
+            repo, repo, repo)) cpd_abort("c11a1");
+        int rc_sub = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int sub_ok = (rc_sub == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links") &&
+                      !ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE"));
+        ck(sub_ok, "subdir-direct-precommit-blocks-drift: invoking precommit from repo/tests subdirectory finds unisacc.com and blocks drift");
+
+        /* 11a-2: Real git commit triggering .git/hooks/pre-commit from version worktree subdirectory (.claude/worktrees/v0.0.99/tests) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && "
+            "git worktree add -q -b v0.0.99 .claude/worktrees/v0.0.99 && "
+            "cd .claude/worktrees/v0.0.99/tests && "
+            "printf 'b5\\tIMPLEMENTED\\tcontract\\ttools/b5.cx\\tSOURCE\\tlnx/x86_64\\t30\\t-\\ttools/b5.cx\\t-\\tcontract.b5\\trc0:B5\\tproduct\\tcommit\\n' >> batches.tsv && "
+            "git add batches.tsv && git -c user.name=t -c user.email=t@t commit -q -m wt-subdir-should-fail",
+            repo)) cpd_abort("c11a2");
+        int rc_wt_blk = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int wt_blk_ok = (rc_wt_blk != 0 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links") &&
+                         !ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s/.claude/worktrees/v0.0.99/tests' && cp batches.tsv ../build/links.tsv && git add ../build/links.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m wt-subdir-recomputed-ok",
+            repo)) cpd_abort("c11a3");
+        int rc_wt_ok = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(wt_blk_ok && rc_wt_ok == 0,
+            "version-worktree-subdir-hook-blocks-and-passes: real git commit in .claude/worktrees/v0.0.99/tests blocks drift and passes after recompute");
+
+        /* 11b: Staged deletion of derive.tsv, derive.cx, reg-manifest.cx, tables-gen.cx refused with named error */
+        if (cx_fmt(repo4, sizeof repo4, "%s/repo-del", work)) cpd_abort("r4");
+        cpd_mk(repo4);
+        if (cx_fmt(p, sizeof p, "%s/exec", repo4)) cpd_abort("r4p1"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/exec/facts", repo4)) cpd_abort("r4p2"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/tests", repo4)) cpd_abort("r4p3"); cpd_mk(p);
+        if (cx_fmt(p, sizeof p, "%s/tools", repo4)) cpd_abort("r4p4"); cpd_mk(p);
+        if (cx_fmt(cmd, sizeof cmd,
+            "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -sn '%s/cx' '%s/cx' && ln -sn '%s/ext' '%s/ext' && "
+            "ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -sn '%s/tools/cxlib' '%s/tools/cxlib' && "
+            "ln -s '%s/tools/precommit.cx' '%s/tools/precommit.cx' && "
+            "printf '# derive\\n' > '%s/exec/facts/derive.tsv' && "
+            "printf 'int main(void){return 0;}\\n' > '%s/tools/derive.cx' && "
+            "printf 'int main(void){return 0;}\\n' > '%s/tools/reg-manifest.cx' && "
+            "printf 'int main(void){return 0;}\\n' > '%s/tools/tables-gen.cx' && "
+            "printf '# batches\\n' > '%s/tests/batches.tsv' && "
+            "cd '%s' && git init -q && git add exec/facts/derive.tsv tools/derive.cx tools/reg-manifest.cx tools/tables-gen.cx tests/batches.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q -m init",
+            cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4,
+            repo4, repo4, repo4, repo4, repo4, repo4)) cpd_abort("r4init");
+        cpd_sh(cmd, out);
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git rm -qf exec/facts/derive.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d1");
+        int rc_d1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d1 = (rc_d1 == 1 && ckk_has(out, CPD_OUT, "BLOCKED derive-gate-deleted path=exec/facts/derive.tsv"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- exec/facts/derive.tsv && "
+            "git rm -qf tools/derive.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d2");
+        int rc_d2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d2 = (rc_d2 == 1 && ckk_has(out, CPD_OUT, "BLOCKED derive-gate-deleted path=tools/derive.cx"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tools/derive.cx && "
+            "git rm -qf tools/reg-manifest.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d3");
+        int rc_d3 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d3 = (rc_d3 == 1 && ckk_has(out, CPD_OUT, "BLOCKED manifest-gate-deleted path=tools/reg-manifest.cx"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tools/reg-manifest.cx && "
+            "git rm -qf tools/tables-gen.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d4");
+        int rc_d4 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d4 = (rc_d4 == 1 && ckk_has(out, CPD_OUT, "BLOCKED tables-gate-deleted path=tools/tables-gen.cx"));
+
+        ck(ok_d1 && ok_d2 && ok_d3 && ok_d4,
+            "staged-delete-core-gate-files-blocked: staging deletion of derive.tsv/derive.cx/reg-manifest.cx/tables-gen.cx is refused");
     }
 
     {
