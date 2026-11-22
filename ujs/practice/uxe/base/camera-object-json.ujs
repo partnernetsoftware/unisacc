@@ -1,0 +1,183 @@
+native function camera_json_disjoint(a:i64,bytes:i64,b:i64,end:i64) i64 {
+  return a>=0 && bytes>=0 && a<=6291456-bytes && (a>=end || a+bytes<=b);
+}
+
+// The camera and its Object3D leaf live in separate caller-owned records.
+native function camera_object_world(cam:i64,arena:i64,handle:i64) i64 {
+  let node=Object3D_address(arena,handle);
+  if(node<0 || cam<0 || cam%4!=0 || cam>6291456-Camera.size) { return 0-1; }
+  let arenaEnd=arena+8+ux_u32(arena)*424;
+  let inverse=ux_u32(cam+Camera.matrixWorldInverse);
+  if(inverse%8!=0 || !camera_json_disjoint(cam,Camera.size,arena,arenaEnd) ||
+     !camera_json_disjoint(inverse,128,arena,arenaEnd) ||
+     !camera_json_disjoint(inverse,128,cam,cam+Camera.size)) { return 0-1; }
+  let root=handle;
+  let at=node;
+  let visited=0;
+  while(ux_u32(at+Object3D.parent)!=0) {
+    root=ux_u32(at+Object3D.parent);
+    at=Object3D_address(arena,root);
+    visited=visited+1;
+    if(at<0 || visited>=ux_u32(arena)) { return 0-1; }
+  }
+  if(Object3D_updateMatrixWorld(arena,root,0)<0) { return 0-1; }
+  return ux_u32(node+Object3D.worldMatrix);
+}
+
+function Camera_syncObject(cam_sync,...sync_args) {
+  let sync_world=camera_object_world(cam_sync,sync_args[0],sync_args[1]);
+  if(sync_world<0) { return sync_world; }
+  let sync_view=Camera_updateMatrixWorld(cam_sync,sync_world);
+  return cam_sync;
+}
+
+native function camera_json_word(at:i64,end:i64,word:i64,bytes:i64) i64 {
+  if(at<0 || end>6291456 || bytes>end-at) { return 0-1; }
+  let i=0;
+  while(i<bytes) {
+    let saved=ux_u8_put(at+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return at+bytes;
+}
+
+native function camera_object_token(at:i64,end:i64,token:i64) i64 {
+  if(token==0) { // {"object":{"type":
+    at=camera_json_word(at,end,1651450491,4);
+    at=camera_json_word(at,end,1952671082,4);
+    at=camera_json_word(at,end,578501154,4);
+    at=camera_json_word(at,end,1701869940,4);
+    at=camera_json_word(at,end,14882,2);
+    return at;
+  }
+  if(token==1) { // "Camera"
+    at=camera_json_word(at,end,1835090722,4);
+    at=camera_json_word(at,end,576811621,4);
+    return at;
+  }
+  if(token==2) { // ,"uuid":
+    at=camera_json_word(at,end,1970610732,4);
+    at=camera_json_word(at,end,975332457,4);
+    return at;
+  }
+  if(token==3) { // ,"layers":
+    at=camera_json_word(at,end,1634476588,4);
+    at=camera_json_word(at,end,1936876921,4);
+    at=camera_json_word(at,end,14882,2);
+    return at;
+  }
+  if(token==4) { // ,"matrix":[
+    at=camera_json_word(at,end,1634542124,4);
+    at=camera_json_word(at,end,2020176500,4);
+    at=camera_json_word(at,end,5978658,3);
+    return at;
+  }
+  if(token==5) { // ,"visible":false
+    at=camera_json_word(at,end,1769349676,4);
+    at=camera_json_word(at,end,1818388851,4);
+    at=camera_json_word(at,end,1715085925,4);
+    at=camera_json_word(at,end,1702063201,4);
+    return at;
+  }
+  if(token==6) { // ]}}
+    at=camera_json_word(at,end,8224093,3);
+    return at;
+  }
+  return 0-1;
+}
+
+native function Camera_toJSON(node:i64,uuid:i64,uuidBytes:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(dst<0 || end<=dst || end>6291456 || scratch%8!=0 ||
+     !camera_json_disjoint(scratch,1104,dst,end) ||
+     !camera_json_disjoint(node,Object3D.size,dst,end) ||
+     !camera_json_disjoint(node,Object3D.size,scratch,scratch+1104) ||
+     uuidBytes<1 || !camera_json_disjoint(uuid,uuidBytes,dst,end) ||
+     !camera_json_disjoint(uuid,uuidBytes,scratch,scratch+1104) ||
+     ux_u32(node+Object3D.firstChild)!=0) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  if(!camera_json_disjoint(matrix,128,dst,end) ||
+     !camera_json_disjoint(matrix,128,scratch,scratch+1104)) { return 0-1; }
+  let p=camera_object_token(dst,end,0);
+  p=camera_object_token(p,end,1);
+  p=camera_object_token(p,end,2);
+  p=json_write_string(p,end,uuid,uuidBytes);
+  if(!ux_u32(node+Object3D.visible)) { p=camera_object_token(p,end,5); }
+  p=camera_object_token(p,end,3);
+  let mask=ux_u32(node+Object3D.layerMask);
+  if(mask>2147483647) { mask=mask-4294967296; }
+  p=json_write_f64(p,end,0.0+mask,scratch);
+  p=camera_object_token(p,end,4);
+  let i=0;
+  while(i<16 && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,ux_f64(matrix+i*8),scratch);
+    i=i+1;
+  }
+  return camera_object_token(p,end,6);
+}
+
+native function camera_json_matrix(at:i64,end:i64,scratch:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0-1; }
+  at=json_space(at+1,end);
+  let i=0;
+  while(i<16) {
+    let value=json_read_number(at,end);
+    if(value-value!=0.0) { return 0-1; }
+    let saved=ux_f64_put(scratch+i*8,value);
+    at=json_space(json_value_end(at,end),end);
+    if(at<0 || at>=end) { return 0-1; }
+    if(i<15) {
+      if(ux_u8(at)!=44) { return 0-1; }
+      at=json_space(at+1,end);
+    }
+    i=i+1;
+  }
+  if(ux_u8(at)!=93) { return 0-1; }
+  return scratch;
+}
+
+native function Camera_fromJSON(node:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(input<0 || input>=end || end>6291456 || scratch%8!=0 ||
+     !camera_json_disjoint(scratch,160,input,end) ||
+     !camera_json_disjoint(node,Object3D.size,scratch,scratch+160) ||
+     !camera_json_disjoint(node,Object3D.size,input,end) ||
+     ux_u32(node+Object3D.firstChild)!=0) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  if(!camera_json_disjoint(matrix,128,input,end) ||
+     !camera_json_disjoint(matrix,128,scratch,scratch+160) ||
+     !camera_json_disjoint(matrix,128,node,node+Object3D.size)) { return 0-1; }
+  let root=json_space(input,end);
+  let last=json_value_end(root,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-2; }
+  let object=LoaderJson_find(root,last,scratch,1701470831,29795,0,6);
+  let limit=json_value_end(object,last);
+  if(object<0 || limit<0 || ux_u8(object)!=123) { return 0-2; }
+  let type=LoaderJson_find(object,limit,scratch,1701869940,0,0,4);
+  let label=camera_object_token(scratch,scratch+24,1);
+  if(type<0 || json_scan_string(type,limit)-type!=label-scratch) { return 0-2; }
+  let i=0;
+  while(i<label-scratch) {
+    if(ux_u8(type+i)!=ux_u8(scratch+i)) { return 0-2; }
+    i=i+1;
+  }
+  let layers=LoaderJson_find(object,limit,scratch,1702453612,29554,0,6);
+  let value=json_read_number(layers,limit);
+  if(!(value>=0.0-2147483648.0 && value<=2147483647.0)) { return 0-2; }
+  let mask=f64_floor_i64(value);
+  if(value!=0.0+mask) { return 0-2; }
+  let visibility=LoaderJson_find(object,limit,scratch,1769171318,6646882,0,7);
+  let visible=1;
+  if(visibility>=0) {
+    let first=ux_u8(visibility);
+    if(first==102) { visible=0; }
+    else if(first!=116) { return 0-2; }
+  } else if(visibility!=0-2) { return 0-2; }
+  let at=LoaderJson_find(object,limit,scratch,1920229741,30825,0,6);
+  if(camera_json_matrix(at,limit,scratch+32)<0) { return 0-2; }
+  let saved=uxe_copy_record(matrix,scratch+32,128);
+  let shown=ux_u32_put(node+Object3D.visible,visible);
+  let layer=ux_u32_put(node+Object3D.layerMask,u32_and(mask,4294967295));
+  let dirty=ux_u32_put(node+Object3D.dirty,2);
+  return node;
+}
