@@ -504,6 +504,48 @@ int main(int argc, char **argv) {
            "backup-evidence-default-dir-under-home");
         np_free(&rdef);
 
+        /* 4b. Scrubbed manifest with leading ~/ expands HOME in --verify (positive, cache-refuse, empty-HOME refuse) */
+        {
+            char mpath[4500], tcmd[9200];
+            char *tv0[] = {"sh", "-c", tcmd, 0};
+            if (cx_fmt(mpath, sizeof mpath, "%s/release/evidence/0.0.99/backup-evidence.tsv", brepo)) return 2;
+            size_t mn = 0; char *mb = cx_read(mpath, &mn);
+            if (!mb) return 2;
+            size_t hlen = strlen(bhome);
+            char scrubbed[32768]; size_t sn = 0;
+            for (size_t i = 0; i < mn && sn + 2 < sizeof scrubbed; ) {
+                if (i + hlen < mn && !memcmp(mb + i, bhome, hlen) && mb[i + hlen] == '/') {
+                    scrubbed[sn++] = '~';
+                    i += hlen;
+                } else {
+                    scrubbed[sn++] = mb[i++];
+                }
+            }
+            scrubbed[sn] = 0;
+            free(mb);
+            if (cx_write(mpath, scrubbed, sn)) return 2;
+            if (cx_fmt(tcmd, sizeof tcmd, "HOME=\"%s\" \"%s\" backup-evidence --verify --version 0.0.99 --repo \"%s\"",
+                bhome, bin, brepo)) return 2;
+            np_result rt = actual(tv0);
+            ck(rt.rc == 0 && has(&rt, "BACKUP_VERIFY\tPASS\tversion=0.0.99\tfiles=7\t"),
+               "backup-verify-tilde-home-pass");
+            np_free(&rt);
+            if (cx_fmt(tcmd, sizeof tcmd, "HOME=\"\" \"%s\" backup-evidence --verify --version 0.0.99 --repo \"%s\"",
+                bin, brepo)) return 2;
+            rt = actual(tv0);
+            ck(rt.rc == 2 && rt.err && strstr(rt.err, "unexpandable-home-path") != 0,
+               "backup-verify-tilde-empty-home-refused");
+            np_free(&rt);
+            const char *tilde_cache = "chain/heartbeat.tsv\t~/.cache/hb\t0000000000000000000000000000000000000000000000000000000000000000\t3\n";
+            if (cx_write(mpath, tilde_cache, strlen(tilde_cache))) return 2;
+            if (cx_fmt(tcmd, sizeof tcmd, "HOME=\"%s\" \"%s\" backup-evidence --verify --version 0.0.99 --repo \"%s\"",
+                bhome, bin, brepo)) return 2;
+            rt = actual(tv0);
+            ck(rt.rc == 2 && rt.err && strstr(rt.err, "backup-inside-cache") != 0,
+               "backup-verify-tilde-cache-refused");
+            np_free(&rt);
+        }
+
         r = actual(bk_miss);
         char *bk_ver[] = {bin, "backup-evidence", "--verify", "--version", "0.0.99", "--repo", brepo, 0};
         np_result rv = actual(bk_ver);
