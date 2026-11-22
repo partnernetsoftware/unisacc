@@ -16,8 +16,13 @@
  * Claude ctx used are converted). STALLED only for kind=commit IDLE overdue;
  * analysis IDLE overdue -> IDLE_LONG.
  *
+ * Running shell/bash frames (● + duration, Running command, braille+Running) => WORKING
+ * even when footer is only auto·model. Last ask-cc ("回报发 cc"/ReplyCmd 1:cc) + IDLE
+ * + age>=wait-cc-min (default 10) => status WAITING_CC; footer lists them.
+ *
  * Output: PULSE<TAB>window<TAB>status<TAB>ctx_pct<TAB>commit<TAB>age_min<TAB>flags
- * then TEAM_PULSE<TAB>windows=W<TAB>stalled=S<TAB>idle_long=L<TAB>ctx_low=C<TAB>filtered=F */
+ * then TEAM_PULSE<TAB>windows=W<TAB>stalled=S<TAB>idle_long=L<TAB>ctx_low=C<TAB>filtered=F<TAB>waiting_cc=N
+ * then optional WAITING_CC<TAB>w1,w2,... */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use cxlib.procrun
 #pragma unisa use sys.fs
@@ -37,10 +42,12 @@ typedef struct {
     char window[64], model[64], lane[32], prefix[1024], kind[16], git_ref[64];
 } Win;
 static Win g_w[TP_MAXW];
-static int g_nw, g_stall_min = 45, g_tail = 80, g_mutant;
+static int g_nw, g_stall_min = 45, g_wait_cc_min = 10, g_tail = 80, g_mutant, g_mutant_run, g_mutant_wcc;
 static char g_table[1100], g_fix[1100];
 static long g_now;
-static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered;
+static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc;
+static char g_waiting[TP_MAXW][64];
+static int g_n_wait_list;
 
 static int die(const char *m) { fprintf(stderr, "team-pulse: %s\n", m); return 2; }
 
@@ -209,6 +216,65 @@ static int has_omp_spinner(const char *t, long tn) {
     return 0;
 }
 
+/* ● (U+25CF) line with duration Nd+[smh], or Running command / hollow Running. */
+static int has_running_shell(const char *t, long tn) {
+    long i, at;
+    if (g_mutant_run) return 0;
+    if (has_ci(t, tn, "running command")) return 1;
+    if (has_ci(t, tn, "esc to cancel")) return 1;
+    /* hollow ○ Running (e2 97 8b) */
+    for (i = 0; i + 10 < tn; i++) {
+        if ((unsigned char)t[i] == 0xE2 && (unsigned char)t[i+1] == 0x97 && (unsigned char)t[i+2] == 0x8B) {
+            if (has_ci(t + i, tn - i > 24 ? 24 : tn - i, "running")) return 1;
+        }
+    }
+    /* braille spinner near Running */
+    if (has_omp_spinner(t, tn) && has_ci(t, tn, "running")) return 1;
+    /* filled ● with duration or bash/shell */
+    at = 0;
+    while (at < tn) {
+        long s = at, e, k, has_dot = 0, has_dur = 0, j;
+        while (at < tn && t[at] != '\n') at++;
+        e = at; if (at < tn) at++;
+        k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
+        if (k + 2 >= e) continue;
+        if (!((unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x97 && (unsigned char)t[k+2] == 0x8F))
+            continue;
+        has_dot = 1;
+        for (j = k + 3; j + 1 < e; j++) {
+            if (t[j] < '0' || t[j] > '9') continue;
+            {
+                long d = j;
+                while (d < e && t[d] >= '0' && t[d] <= '9') d++;
+                if (d < e && (t[d] == 's' || t[d] == 'm' || t[d] == 'h')) { has_dur = 1; break; }
+            }
+        }
+        if (has_dot && (has_dur || has_ci(t + k, e - k, "bash") || has_ci(t + k, e - k, "shell")))
+            return 1;
+    }
+    /* shell count line: shells: N with N>0 */
+    for (i = 0; i + 8 < tn; i++) {
+        if (!has_ci(t + i, tn - i > 10 ? 10 : tn - i, "shells:")) continue;
+        {
+            long j = i;
+            while (j < tn && t[j] != ':') j++;
+            if (j >= tn) continue;
+            j++; while (j < tn && (t[j] == ' ' || t[j] == '\t')) j++;
+            if (j < tn && t[j] >= '1' && t[j] <= '9') return 1;
+        }
+    }
+    return 0;
+}
+
+static int asks_cc(const char *t, long tn) {
+    if (has_ci(t, tn, "\xe6\x8a\xa5\xe5\x91\x8a\xe5\x8f\x91 cc")) return 1; /* 回报发 cc */
+    if (has_ci(t, tn, "replycmd") && has_ci(t, tn, "1:cc")) return 1;
+    if (has_ci(t, tn, "bin/mux envelope") && has_ci(t, tn, "1:cc")) return 1;
+    if (has_ci(t, tn, "\xe5\x90\x91 cc \xe8\xaf\xb7\xe7\xa4\xba") /* 向 cc 请示 */) return 1;
+    if (has_ci(t, tn, "\xe8\xaf\xb7\xe7\xa4\xba cc")) return 1; /* 请示 cc */
+    return 0;
+}
+
 static const char *classify(const char *text, long n, const char *model, int *ctx_pct, char *ctx_note, long ncap) {
     char t[TP_CAP]; long tn;
     *ctx_pct = -1; ctx_note[0] = 0;
@@ -216,6 +282,8 @@ static const char *classify(const char *text, long n, const char *model, int *ct
     parse_ctx(t, tn, model, ctx_pct, ctx_note, ncap);
     if (is_filtered(t, tn)) return "FILTERED";
     if (has_ci(t, tn, "waiting for input") || has_ci(t, tn, "do you want to")) return "WAITING_INPUT";
+    /* running shell/bash frame beats idle auto·model footer */
+    if (has_running_shell(t, tn)) return "WORKING";
 
     /* Codex family */
     if (fam_codex(model)) {
@@ -393,6 +461,17 @@ static void pulse_one(Win *w) {
     st = classify(capbuf, n, w->model, &ctx, note, sizeof note);
     latest_commit(w->prefix, w->git_ref, hash, sizeof hash, &age);
     flags[0] = 0;
+    /* ask-cc + idle + no progress => WAITING_CC (takes priority over STALLED) */
+    if (!g_mutant_wcc && tx_eqz(st, "IDLE") && asks_cc(capbuf, n) &&
+        age >= 0 && age >= g_wait_cc_min) {
+        st = "WAITING_CC";
+        flags_add(flags, sizeof flags, &nflag, "WAITING_CC");
+        g_n_waiting_cc++;
+        if (g_n_wait_list < TP_MAXW) {
+            if (cx_fmt(g_waiting[g_n_wait_list], sizeof g_waiting[0], "%s", w->window) == 0)
+                g_n_wait_list++;
+        }
+    }
     if (!g_mutant && tx_eqz(st, "IDLE") && age >= 0 && age >= g_stall_min) {
         if (tx_eqz(w->kind, "commit")) { flags_add(flags, sizeof flags, &nflag, "STALLED"); g_n_stalled++; }
         else if (tx_eqz(w->kind, "analysis")) { flags_add(flags, sizeof flags, &nflag, "IDLE_LONG"); g_n_idle_long++; }
@@ -424,8 +503,12 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(argv[a], "--tail-lines") && a + 1 < argc) {
             g_tail = (int)tx_strtol(argv[++a], 0, 10); if (g_tail < 5 || g_tail > 500) return die("tail-lines");
         } else if (tx_eqz(argv[a], "--mutant-no-stall")) g_mutant = 1;
-        else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
-        else return die("usage: [--windows-table P] [--stall-min N] [--fixture F] [--tail-lines K] [--mutant-no-stall]");
+        else if (tx_eqz(argv[a], "--mutant-no-running-shell")) g_mutant_run = 1;
+        else if (tx_eqz(argv[a], "--mutant-no-wait-cc")) g_mutant_wcc = 1;
+        else if (tx_eqz(argv[a], "--wait-cc-min") && a + 1 < argc) {
+            g_wait_cc_min = (int)tx_strtol(argv[++a], 0, 10); if (g_wait_cc_min < 1) return die("wait-cc-min");
+        } else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
+        else return die("usage: [--windows-table P] [--stall-min N] [--wait-cc-min N] [--fixture F] [--tail-lines K] [--mutant-no-stall|--mutant-no-running-shell|--mutant-no-wait-cc]");
         a++;
     }
     if (!g_table[0]) {
@@ -433,7 +516,15 @@ int main(int argc, char **argv) {
     }
     if (load_table(g_table)) return 2;
     for (i = 0; i < g_nw; i++) pulse_one(&g_w[i]);
-    printf("TEAM_PULSE\twindows=%d\tstalled=%d\tidle_long=%d\tctx_low=%d\tfiltered=%d\n",
-           g_nw, g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered);
+    printf("TEAM_PULSE\twindows=%d\tstalled=%d\tidle_long=%d\tctx_low=%d\tfiltered=%d\twaiting_cc=%d\n",
+           g_nw, g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc);
+    if (g_n_wait_list > 0) {
+        printf("WAITING_CC\t");
+        for (i = 0; i < g_n_wait_list; i++) {
+            if (i) printf(",");
+            printf("%s", g_waiting[i]);
+        }
+        printf("\n");
+    }
     return 0;
 }
