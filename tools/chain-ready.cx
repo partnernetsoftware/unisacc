@@ -24,6 +24,7 @@
  *                  UNISACC_CACHE_DIR forces the build the chain reads, and an UNISACC_BOUND_DEADLINE_MONO that is
  *                  past or not a number is the residue of an earlier bounded command.  Either is a FAIL naming
  *                  the variable; a usable future instant is a normal chain inside a bound window and passes.
+ *  21-verseq-gen   tools/verseq-gen.cx -- --check: VERSEQ_SUMMARY fail=0 (plans 标题/主题/宫殿/工作树版本序四处口径)。
  *  11-version-slot tools/release-packcheck.cx -- slot REPO [--version V]: release/candidate.tsv has exactly one
  *                  data row whose version equals the target (--version V, else branch vX.Y.Z; on main --version
  *                  is required), so the chain APE self-reports that version and release-run --pack reproduces its
@@ -82,7 +83,6 @@ typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long
 static const char *newmsg[NEWMSG_N] = {"bad symbol name", "does not export", "undeclared function"};
 
 static int has(const char *h, long n, const char *w) { return tx_find(h, n, w, (long)tx_len(w, 4096)) >= 0; }
-
 /* the first line of H (len n) holding W, copied into DST (sanitised), or "" */
 static void line_with(const char *h, long n, const char *w, char *dst, int cap) {
     long at = 0; dst[0] = 0;
@@ -97,6 +97,17 @@ static void line_with(const char *h, long n, const char *w, char *dst, int cap) 
     }
 }
 static void put_ev(char *ev, int cap, const char *s) { cx_fmt(ev, (size_t)cap, "%s", s); }
+static int j_versq(const char *o, long n, int rc, char *ev, int cap) {
+    char l[200];
+    line_with(o, n, "VERSEQ_SUMMARY", l, sizeof l);
+    if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "fail=0")) { put_ev(ev, cap, l); return 1; }
+    {   char f[200];
+        line_with(o, n, "FAIL\t", f, sizeof f);
+        cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %s", rc, l[0] ? l : "no VERSEQ_SUMMARY", f[0] ? f : "none");
+    }
+    return 0;
+}
+
 
 /* ---- pure judges: 1 PASS, 0 FAIL; ev gets the evidence sentence ---- */
 static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
@@ -373,6 +384,7 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
     if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
     if (tx_eqz(kind, "genall")) return j_genall(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "versq")) return j_versq(o, n, rc, ev, cap);
     if (tx_eqz(kind, "p1file")) { put_ev(ev, cap, "p1file"); return j_p1file(o, n); }
     put_ev(ev, cap, "unknown judge kind"); return -1;
 }
@@ -1105,19 +1117,20 @@ int main(int argc, char **argv) {
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
     static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
+    static char *g_versq[] = {"./tools/bound", "45", "sh", UC, "tools/verseq-gen.cx", "--", "--check", 0};
     static char **tab[] = {
         g_status, g_branch,
         g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6,
         g_rat, g_tri, g_ext,
         g_chain1, g_chain2, g_chain3, g_chain4, g_chain5,
-        g_pg, g_slot, g_genall
+        g_pg, g_slot, g_genall, g_versq
     };
     static const char *nm[] = {
         "1-rev", "1-branch",
         "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6",
         "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract",
         "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
-        "8-inflight", "11-version-slot", "15-gen-all"
+        "8-inflight", "11-version-slot", "15-gen-all", "21-verseq-gen"
     };
     static const char *kd[] = {
         "rev", "branch",
@@ -1129,14 +1142,14 @@ int main(int argc, char **argv) {
         "derive:doc-links,tool-index,table-index",
         "ratchets", "tri", "extract",
         "chain:core-a", "chain:core-b", "chain:core-c", "chain:objects", "chain:watch",
-        "inflight", "slot", "genall"
+        "inflight", "slot", "genall", "versq"
     };
     static const int pr[] = {
         9, 9,
         2, 1, 2, 1, 0, 2,
         5, 4, 6,
         3, 3, 3, 3, 2,
-        8, 7, 4
+        8, 7, 4, 6
     };
     g_status[5] = (char *)repo; g_branch[5] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain1[6] = outd[0]; g_chain1[7] = cached;
@@ -1148,7 +1161,7 @@ int main(int argc, char **argv) {
     if (!tver && seq_next_version(repo, auto_ver)) tver = auto_ver;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
-    for (k = 0; k < 19; k++) {
+    for (k = 0; k < 20; k++) {
         int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15);
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain"))) continue;
         if (is_ch && !have_tmp) continue;
