@@ -26,6 +26,7 @@ static int nok, nfail, ovf;
 #define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
 static char root[1024], table[1100], prod[1200], self[1200], inst[128], sock[160], fx[160], out[1 << 16], out2[1 << 16];
 static char c_product[128], c_self[128], c_env[64], c_lib[3][128];
+static const char *prepared_core;
 static void ck(int c, const char *name) {
     printf("%s\tdevsvc.%s\n", c ? "PASS" : "FAIL", name);
     if (!c) printf("NOTE\tlast-output\t%.300s\n", out);
@@ -60,7 +61,8 @@ static int cap2(char **v, const char *cwd, char *buf, int cap) {
 static int dvat(const char *cwd, char *buf, int cap, char **args) {
     char *v[28]; int n = 0, i, given = 0, isx = args[0] && !strcmp(args[0], "x"), isf = args[0] && !strcmp(args[0], "flow");
     for (i = 0; args[i]; i++) if (!strcmp(args[i], "--par") || !strcmp(args[i], "--jobs")) given = 1;
-    v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--";
+    if (prepared_core) v[n++] = (char *)prepared_core;
+    else { v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--"; }
     for (i = 0; args[i] && n < 25; i++) { v[n++] = args[i]; if (i == 0 && isx && !given) { v[n++] = "--par"; v[n++] = "8"; } }
     if (isf && !given) { v[n++] = "--par"; v[n++] = "8"; }
     v[n] = 0;
@@ -122,10 +124,25 @@ int main(int argc, char **argv) {
         A1 = ha && (!dg || strstr(cs, "a1")); A2 = ha && (!dg || strstr(cs, "a2")); A3 = ha && (!dg || strstr(cs, "a3")); A4 = ha && (!dg || strstr(cs, "a4"));
         B1 = hb && (!db || strstr(cs, "b1")); B2 = hb && (!db || strstr(cs, "b2")); B3 = hb && (!db || strstr(cs, "b3")); }
     else if (argc > 1) { fprintf(stderr, "usage: check-devsvc.cx [--cases a|a1|a2|a3|a4|b|b1|b2|b3|ab]\n"); return 2; } int r, r2; sy_child_t c1, c2; sy_exit_t e1, e2; long t0;
+    const char *mode = argc >= 3 ? argv[2] : "";
+    int b1_git = !strcmp(mode, "b1-git"), b1_k6 = !strcmp(mode, "b1-k6");
+    int b1_rotation = !strcmp(mode, "b1-rotation");
+    int split_b1 = b1_git || b1_k6 || b1_rotation;
+    /* The registration supplies an identity-checked devsvc-core-tool material. */
+    if (split_b1 || (argc == 4 && !strcmp(mode, "b1"))) {
+        if (argc != 4 || argv[3][0] != '/' || sy_is_reg(argv[3]) != 1) {
+            fprintf(stderr, "REFUSE\tdevsvc-run\tprepared-core-required\n");
+            return 2;
+        }
+        A1 = A2 = A3 = A4 = B2 = B3 = 0;
+        B1 = 1;
+        prepared_core = argv[3];
+    }
     static const char *src = "int main(int argc, char **argv) { int i; for (i = 1; i < argc; i++) printf(\"arg%d=%s\\n\", i, argv[i]); return 7; }\n";
     A = A1 || A2 || A3 || A4;
     if (sy_cwd(root, sizeof root) < 0) return 2;
     (void)unsetenv("DEVSVC_SELF_BIN");   /* 在 devsvc x 内跑时不继承固定版本执行体:本检查测的是 self 所指的工作副本 */
+    if (prepared_core && setenv("DEVSVC_SELF_BIN", prepared_core, 1)) return 2;
     (void)unsetenv("UNISACC_FLOW_ROOT"); /* 同理不继承 devsvc x 注入的写根:否则夹具仓里的 f write 会按该写根落到真实检出 */
     F(table, sizeof table, "%s/%s", root, CFG_TABLE);
     {   unsigned char *b = 0; int64_t n = 0; int okc;
@@ -416,11 +433,14 @@ int main(int argc, char **argv) {
     }
     if (B1 || B2 || B3) {
         if (setenv("DEVSVC_EV_ROTATE", "1500", 1) || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
-        ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "run-group-start"); }
+        int started = dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted");
+        if (!split_b1 || b1_git) ck(started, "run-group-start");
+        else if (!started) { fprintf(stderr, "REFUSE\tdevsvc-run\tfixture-start\n"); return 2; } }
     if (B1) {
     /* 事件落盘(实例目录 events.tsv,带 owner,超阈值轮转)与只读 git 透传(不取锁)(b 组) */
     {   char ep[200], ep1[200]; unsigned char *b = 0; int64_t n = 0, sz = 0; int i, got;
         F(ep, sizeof ep, "%s/events.tsv", inst); F(ep1, sizeof ep1, "%s/events.tsv.1", inst);
+        if (!split_b1 || b1_git) {
         ck(dv1("git", "log", "-1", "--oneline", 0, 0) == 0 && strlen(out) > 8 && !has("REFUSE"), "git-log-readonly");
         ck(dv1("git", "diff", "--stat", "HEAD", 0, 0) == 0 && !has("REFUSE"), "git-diff-stat-readonly");
         ck(dv1("lock", "list", 0, 0, 0, 0) == 0 && has("OK\tlocks") && !has("owner=chk-owner"), "git-readonly-takes-no-lock");
@@ -428,8 +448,9 @@ int main(int argc, char **argv) {
         got = 0; if (sy_read_file(ep, &b, &n, 1 << 22) == 0 && b) { F(out, sizeof out, "%.*s", (int)n, (char *)b); got = has("\tgit.log\towner=chk-owner\t") && has("\trc=0\tms="); }
         if (b) { free(b); b = 0; }
         ck(got, "events-persisted-with-owner");
+        }
         /* K6:x.git/x.gh 带 sub=,缺省属主顺序,git.commit 带 class=;事件文件按 1500 字节轮转,两份拼起来读 */
-        {   char ev[8192]; int ok1;
+        if (!split_b1 || b1_k6) {   char ev[8192]; int ok1;
 #define K6EV() do { unsigned char *kb = 0; int64_t kn = 0; int kl = 0; ev[0] = 0; \
                 if (sy_read_file(ep1, &kb, &kn, 1 << 22) == 0 && kb) { kl = snprintf(ev, sizeof ev, "%.*s", (int)(kn < 4000 ? kn : 4000), (char *)kb + (kn < 4000 ? 0 : kn - 4000)); free(kb); kb = 0; } \
                 if (kl < 0) kl = 0; \
@@ -457,9 +478,11 @@ int main(int argc, char **argv) {
             if (unsetenv("CLAUDE_JOB_ID") || setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
 #undef K6EV
         }
+        if (!split_b1 || b1_rotation) {
         for (i = 0; i < 40; i++) dv1("events", "emit", "fill", "0123456789012345678901234567890123456789", 0, 0);
         if (sy_read_file(ep, &b, &sz, 1 << 22) == 0 && b) free(b); else sz = -1;
         ck(sy_exists(ep1) == 1 && sz >= 0 && sz <= 1500 + 200, "events-file-rotates");
+        }
     }
     }
     if (B3) {
@@ -559,7 +582,11 @@ int main(int argc, char **argv) {
             ck(sy_unlink(bad) == 0, "run-bad-fixture-removed"); }
         ck(fx1("run", "../etc/x.cx", 0, 0, 0, 0) == 1, "run-path-escape-refused"); }
     }
-    if (B1 || B2 || B3) ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "run-group-stop");
+    if (B1 || B2 || B3) {
+        int stopped = dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping");
+        if (!split_b1 || b1_rotation) ck(stopped, "run-group-stop");
+        else if (!stopped) { fprintf(stderr, "REFUSE\tdevsvc-run\tfixture-stop\n"); return 2; }
+    }
     if (A3 || A4) {
     ck(dv1("start", "--ttl", "120", "--idle", "100", 0) == 0 && has("OK\tstarted"), "a3-start");
 
@@ -595,8 +622,15 @@ int main(int argc, char **argv) {
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "a3-stop");
     }
 
-    {   char *rm[] = {"rm", "-rf", inst, fx, 0}; ck(cap2(rm, 0, out2, sizeof out2) == 0, "fixture-cleanup"); }
-    ck(ovf == 0, "no-path-overflow");
+    {   char *rm[] = {"rm", "-rf", inst, fx, 0};
+        int cleaned = cap2(rm, 0, out2, sizeof out2) == 0;
+        if (!split_b1 || b1_rotation) {
+            ck(cleaned, "fixture-cleanup");
+            ck(ovf == 0, "no-path-overflow");
+        } else if (!cleaned || ovf) {
+            fprintf(stderr, "REFUSE\tdevsvc-run\tfixture-cleanup-or-overflow\n");
+            return 2;
+        } }
     printf("CHECK_DEVSVC\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
 }

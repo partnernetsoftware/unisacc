@@ -102,10 +102,14 @@ static int owner_paths(const char *owner) {
     }
     np_free(&r); return 0;
 }
+static const char *prepared_affected;
+
 static int select_batches(const char *tier) {
     char af[4400], why[256] = ""; np_result r = {0}; char **v = malloc(sizeof(char *) * (size_t)(npaths + 12)); int n = 0, rc;
     if (!v || cx_fmt(af, sizeof af, "%s/tools/affected.cx", home)) return bad("path too long", 0);
-    v[n++] = "sh"; v[n++] = prod; v[n++] = af; v[n++] = "--"; v[n++] = "--files";
+    if (prepared_affected) v[n++] = (char *)prepared_affected;
+    else { v[n++] = "sh"; v[n++] = prod; v[n++] = af; v[n++] = "--"; }
+    v[n++] = "--files";
     for (int i = 0; i < npaths; i++) v[n++] = paths[i];
     v[n++] = "--tier"; v[n++] = (char *)tier; v[n++] = "--list-only"; v[n] = 0;
     rc = np_run(v, root, 0, 50, &r, why, sizeof why); free(v);
@@ -244,6 +248,7 @@ static char *slurp(const char *run, const char *id, const char *ext, long *n) {
 }
 
 int main(int argc, char **argv) {
+    const char *prepared_self = 0, *prepared_devsvc = 0;
     const char *tier = "commit", *owner = 0, *runner = 0, *rootarg = ".", *homearg = 0, *outfile = 0, *fromfile = 0; int par = 0, bg = 0, plan = 0, onlyset = 0, selonly = 0, changed = 0, tierset = 0;
     long node_ms = DC_NODE_MS, t_start = sy_now_ms(), select_ms, left;
     int pass = 0, fail = 0, deferred = 0, notrun = 0; long wall = 0, serial = 0, peak = 0;
@@ -261,6 +266,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(s, "--runner") && more) runner = argv[++a];
         else if (!strcmp(s, "--root") && more) rootarg = argv[++a];
         else if (!strcmp(s, "--home") && more) homearg = argv[++a];
+        else if (!strcmp(s, "--prepared-tools") && a + 3 < argc && !prepared_self) {
+            prepared_self = argv[++a]; prepared_affected = argv[++a]; prepared_devsvc = argv[++a];
+            if (prepared_self[0] != '/' || prepared_affected[0] != '/' || prepared_devsvc[0] != '/' ||
+                sy_is_reg(prepared_self) != 1 || sy_is_reg(prepared_affected) != 1 ||
+                sy_is_reg(prepared_devsvc) != 1)
+                return bad("--prepared-tools needs three absolute files", 0);
+            if (setenv("DEVSVC_SELF_BIN", prepared_devsvc, 1)) return bad("cannot pin prepared devsvc", 0);
+        }
         else if (!strcmp(s, "--par") && more) { par = atoi(argv[++a]); if (par < 1 || par > 32) return bad("--par wants 1..32", 0); }
         else if (!strcmp(s, "--node-timeout-ms") && more) { node_ms = atol(argv[++a]); if (node_ms < 1 || node_ms > DC_NODE_MS) return bad("--node-timeout-ms wants 1..55000 (the bound is never widened)", 0); }
         else if (!strcmp(s, "--only") && more) {
@@ -282,8 +295,12 @@ int main(int argc, char **argv) {
     if (bg) {   /* the same command without --bg, as one devsvc background job */
         char self[4400]; char **v = malloc(sizeof(char *) * (size_t)(argc + 20)); int n = 0, rc;
         if (!v || cx_fmt(self, sizeof self, "%s/tools/dcheck.cx", home)) return bad("path too long", 0);
-        v[n++] = "sh"; v[n++] = prod; v[n++] = dv; v[n++] = "--"; v[n++] = "x"; v[n++] = DC_PAR_FLAG; v[n++] = "1"; v[n++] = "--bg"; v[n++] = "--timeout-ms"; v[n++] = "59000"; v[n++] = "--";
-        v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--"; v[n++] = "--root"; v[n++] = root; v[n++] = "--home"; v[n++] = home;
+        if (prepared_devsvc) v[n++] = (char *)prepared_devsvc;
+        else { v[n++] = "sh"; v[n++] = prod; v[n++] = dv; v[n++] = "--"; }
+        v[n++] = "x"; v[n++] = DC_PAR_FLAG; v[n++] = "1"; v[n++] = "--bg"; v[n++] = "--timeout-ms"; v[n++] = "59000"; v[n++] = "--";
+        if (prepared_self) v[n++] = (char *)prepared_self;
+        else { v[n++] = "sh"; v[n++] = prod; v[n++] = self; v[n++] = "--"; }
+        v[n++] = "--root"; v[n++] = root; v[n++] = "--home"; v[n++] = home;
         for (int a = 1; a < argc; a++) {
             if (!strcmp(argv[a], "--bg")) continue;
             if ((!strcmp(argv[a], "--out") || !strcmp(argv[a], "--from")) && a + 1 < argc && argv[a + 1][0] != '/') {   /* the job runs in another cwd */
@@ -358,7 +375,8 @@ int main(int argc, char **argv) {
         if (cx_fmt(fp, sizeof fp, "%s/dcheck-%d.nodes.tsv", sy_tmpdir(), sy_pid()) || sy_write_atomic(fp, sb_cstr(o), sb_len(o), 0600)) return bad("cannot write the node table", fp);
         (void)cx_fmt(pn, sizeof pn, "%d", par); (void)cx_fmt(dl, sizeof dl, "%ld", left);
         {   char *v[] = {"sh", prod, dv, "--", "flow", "run", fp, DC_PAR_FLAG, pn, "--deadline-ms", dl, 0};
-            rc = np_run(v, home, 0, (int)(left / 1000) + 3, &r, why, sizeof why);
+            char *native[] = {(char *)prepared_devsvc, "flow", "run", fp, DC_PAR_FLAG, pn, "--deadline-ms", dl, 0};
+            rc = np_run(prepared_devsvc ? native : v, home, 0, (int)(left / 1000) + 3, &r, why, sizeof why);
             if (rc && !r.out) fprintf(stderr, "dcheck: flow runner: %s\n", why);
         }
         (void)sy_unlink(fp);
