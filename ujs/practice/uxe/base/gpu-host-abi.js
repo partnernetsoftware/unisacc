@@ -168,6 +168,7 @@ function runCommands(gl, commands, targets, packet) {
         gl.scissor(b, c, d, command[5]);
       }
       if (opcode === 8) {
+        const previous = a & 8 ? gl.getParameter(gl.COLOR_CLEAR_VALUE) : null;
         let bits = 0;
         if (a & 1) {
           gl.clearColor((b & 255) / 255, (b >>> 8 & 255) / 255, (b >>> 16 & 255) / 255, (b >>> 24) / 255);
@@ -176,6 +177,7 @@ function runCommands(gl, commands, targets, packet) {
         if (a & 2) { gl.clearDepth(c); bits |= gl.DEPTH_BUFFER_BIT; }
         if (a & 4) { gl.clearStencil(d); bits |= gl.STENCIL_BUFFER_BIT; }
         gl.clear(bits);
+        if (previous) gl.clearColor(...previous);
       }
       if (opcode >= 9 && opcode <= 12) {
         const result = targets.execute(opcode, a, packet);
@@ -259,7 +261,8 @@ export function createGpuSubmit(gl, memory, generation, targets = null) {
       } else if (opcode === 8) {
         if (span !== 24) return -4n;
         const mask = word(at + 8), depth = packet.getFloat32(at + 16, true), stencil = word(at + 20);
-        if (mask < 1 || mask > 7 || !Number.isFinite(depth) || depth < 0 || depth > 1 || stencil > 255) return -4n;
+        if (mask < 1 || mask > 15 || !(mask & 7) || ((mask & 8) && !(mask & 1)) ||
+            !Number.isFinite(depth) || depth < 0 || depth > 1 || stencil > 255) return -4n;
         commands.push([opcode, mask, word(at + 12), depth, stencil]);
       } else if (opcode >= 9 && opcode <= 12) {
         if (!targetPlan) return -13n;
