@@ -82,3 +82,7 @@
 - (1) 证据边界与已知缺口: `T=a206d09fa1` 到 `F2=78346c972b` 仅含两次 C 类测试提交(`F=288e3d80b4` 与 `F2=78346c972b`, 非产品代码, 同 `SID` 同 `APE`), 未在 `F`/`F2` 上整链重编与全量 153 窗重跑, 仅分别在 `F`/`F2` 重跑 `W0008`、`W0121`、`W0123` (`4/4 PASS`, 含 `runcache-roots` 17/17)、`W0124` 并入;
 - (2) K4 同步缺口留痕: K4 合入时未同步 `tests/runcache-roots.cx`, 根因为 `tests/batch-product-inputs.tsv:49/57/59` 未声明 `cx/runtime/rcident.cx`、`tools/ape-pack.cx`、`src/runcache.cx`, 导致 `tools/affected.cx` 未命中 `runcache-roots`; 该依赖表缺口排入 `0.0.93` 公开后首刀修复;
 - (3) E3 机器复用明确不进 `0.0.93`, 留后续版本槽。
+
+## 回滚方案
+
+公开前已备好回滚方案, 详见 `release/rollback.txt` (草稿撤回 `v0.0.93`、Latest 移回 `v0.0.92`、前向撤销 `Y2`/`Y1`/`X` 与本机 Root 回退至 `0.0.92` `de8d48f5...`)。
