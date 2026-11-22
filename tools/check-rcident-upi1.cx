@@ -1,0 +1,153 @@
+/* tools/check-rcident-upi1.cx -- behavioral + mutation check for 0.0.93 K4 (rcident UPI1).
+ * Verifies:
+ *   (1) upi1-head-offset-under-8k: ape-pack writes "# UPI1 pid=<64hex>\n" within first 8192 bytes
+ *   (2) upi1-copy-same-pid: copying APE to new path/ino/mtime preserves rk_pid and rk_prod
+ *   (3) upi1-append-cache-ns-same-pid: adding cache/* resource to payload keeps identical pid
+ *   (4) upi1-modify-non-cache-changes-pid: changing non-cache resource or slice changes pid
+ *   (5) legacy-no-pid-fallback-stat: file without UPI1 pid makes rk_pid fail and rk_prod/ri_cont_id fall back to stat
+ *   (6) malformed-pid-rejected: 63-char or non-hex pid in head is ignored (falls back to stat)
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use runtime.rcident
+#pragma unisa use cxlib.netpack
+
+static int passed, failed;
+static void ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run_pack(const char *pack_exe, const char *pkg, const char *out_ape, const char *win, const char *s1, const char *s2, const char *s3, const char *s4) {
+    char *v[12]; int k = 0;
+    v[k++] = (char *)pack_exe;
+    if (pkg) { v[k++] = "--payload"; v[k++] = (char *)pkg; }
+    v[k++] = (char *)out_ape;
+    v[k++] = (char *)win; v[k++] = (char *)s1; v[k++] = (char *)s2; v[k++] = (char *)s3; v[k++] = (char *)s4;
+    v[k] = 0;
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static int compile_win_pe(const char *src_path, const char *exe_path, const char *code) {
+    cx_write(src_path, code, tx_len(code, 4096));
+    char *v[] = {"sh", "./unisacc.com", "-b", "win/x86_64", "-o", (char *)exe_path, (char *)src_path, 0};
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+/* Minimal valid P 3 package with 1 model + configurable resources */
+static void write_pkg(const char *path, int with_cache, int alt_res) {
+    char buf[2048];
+    const char *r1_body = alt_res ? "ALT_DATA" : "STD_DATA";
+    if (!with_cache) {
+        cx_fmt(buf, sizeof buf,
+               "P 3 1 1 1\n"
+               "D r/a s0 in out 0\n"
+               "M 4 4 1 0\nABCD"
+               "F 9 8\nres/a.bin%s",
+               r1_body);
+    } else {
+        cx_fmt(buf, sizeof buf,
+               "P 3 1 1 2\n"
+               "D r/a s0 in out 0\n"
+               "M 4 4 1 0\nABCD"
+               "F 9 8\nres/a.bin%s"
+               "F 13 6\ncache/pre.bin123456",
+               r1_body);
+    }
+    cx_write(path, buf, tx_len(buf, sizeof buf));
+}
+
+int main(void) {
+    char base[512], pack_exe[600], win1[600], win2[600], s1[600], pkg1[600], pkg_c[600], pkg_a[600];
+    char ape1[600], ape1_cp[600], ape_c[600], ape_a[600], ape_s[600], leg[600], badp[600];
+    cx_fmt(base, sizeof base, "%s/check-upi1-%d", sy_tmpdir(), (int)sy_pid());
+    sy_mkdir(base, 0700);
+    cx_fmt(pack_exe, sizeof pack_exe, "%s/ape-pack", base);
+    {
+        char *cv[] = {"sh", "./unisacc.com", "tools/ape-pack.cx", "-o", pack_exe, 0};
+        np_result r = {0}; char why[256] = {0};
+        int tr = np_run(cv, 0, 0, 45, &r, why, sizeof why);
+        int ok = (!tr && !r.residue && r.rc == 0);
+        np_free(&r);
+        if (!ok) { printf("FAIL\tcompile-ape-pack\n"); cx_rmtree(base); return 2; }
+    }
+
+    char c1[600], c2[600];
+    cx_fmt(c1, sizeof c1, "%s/w1.c", base); cx_fmt(win1, sizeof win1, "%s/win1.exe", base);
+    cx_fmt(c2, sizeof c2, "%s/w2.c", base); cx_fmt(win2, sizeof win2, "%s/win2.exe", base);
+    if (compile_win_pe(c1, win1, "int main(void){return 1;}\n") != 0 ||
+        compile_win_pe(c2, win2, "int main(void){return 2;}\n") != 0) {
+        printf("FAIL\tcompile-win-pe\n"); cx_rmtree(base); return 2;
+    }
+    cx_fmt(s1, sizeof s1, "%s/s1.bin", base); cx_write(s1, "SLICE_BODY_1", 12);
+    cx_fmt(pkg1, sizeof pkg1, "%s/p1.pkg", base); write_pkg(pkg1, 0, 0);
+    cx_fmt(pkg_c, sizeof pkg_c, "%s/pc.pkg", base); write_pkg(pkg_c, 1, 0);
+    cx_fmt(pkg_a, sizeof pkg_a, "%s/pa.pkg", base); write_pkg(pkg_a, 0, 1);
+
+    cx_fmt(ape1, sizeof ape1, "%s/a1.com", base);
+    cx_fmt(ape1_cp, sizeof ape1_cp, "%s/a1_copy.com", base);
+    cx_fmt(ape_c, sizeof ape_c, "%s/ac.com", base);
+    cx_fmt(ape_a, sizeof ape_a, "%s/aa.com", base);
+    cx_fmt(ape_s, sizeof ape_s, "%s/as.com", base);
+    cx_fmt(leg, sizeof leg, "%s/legacy.com", base);
+    cx_fmt(badp, sizeof badp, "%s/badpid.com", base);
+
+    int r1 = run_pack(pack_exe, pkg1, ape1, win1, s1, s1, s1, s1);
+    int rc_c = run_pack(pack_exe, pkg_c, ape_c, win1, s1, s1, s1, s1);
+    int rc_a = run_pack(pack_exe, pkg_a, ape_a, win1, s1, s1, s1, s1);
+    int rc_s = run_pack(pack_exe, pkg1, ape_s, win2, s1, s1, s1, s1);
+
+    /* (1) head offset < 8192: truncating APE to first 8192 bytes still yields identical rk_pid */
+    {
+        size_t n = 0; char *b = cx_read(ape1, &n);
+        char ape1_8k[600], p_full[65] = {0}, p_8k[65] = {0};
+        cx_fmt(ape1_8k, sizeof ape1_8k, "%s/a1_8k.com", base);
+        if (b && n > 0) {
+            cx_write(ape1_cp, b, (long)n);
+            cx_write(ape1_8k, b, (long)(n < 8192 ? n : 8192));
+            mm_free(b);
+        }
+        ck(r1 == 0 && rk_pid(ape1, p_full) == 0 && rk_pid(ape1_8k, p_8k) == 0 && tx_eqz(p_full, p_8k), "upi1-head-offset-under-8k");
+    }
+
+    /* (2) copy to new path/ino/mtime -> same rk_pid and rk_prod */
+    char p1[65] = {0}, p1cp[65] = {0}, prod1[65] = {0}, prod1cp[65] = {0};
+    int k1 = rk_pid(ape1, p1), k1cp = rk_pid(ape1_cp, p1cp);
+    int pr1 = rk_prod(ape1, prod1), pr1cp = rk_prod(ape1_cp, prod1cp);
+    ck(k1 == 0 && k1cp == 0 && tx_eqz(p1, p1cp) && pr1 == 0 && pr1cp == 0 && tx_eqz(prod1, prod1cp), "upi1-copy-same-pid");
+
+    /* (3) append cache/ resource -> same pid */
+    char pc[65] = {0};
+    int kc = rk_pid(ape_c, pc);
+    ck(rc_c == 0 && kc == 0 && tx_eqz(p1, pc), "upi1-append-cache-ns-same-pid");
+
+    /* (4) modify non-cache resource or slice -> pid changes */
+    char pa[65] = {0}, ps[65] = {0};
+    int ka = rk_pid(ape_a, pa), ks = rk_pid(ape_s, ps);
+    ck(rc_a == 0 && rc_s == 0 && ka == 0 && ks == 0 && !tx_eqz(p1, pa) && !tx_eqz(p1, ps), "upi1-modify-non-cache-changes-pid");
+
+    /* (5) legacy file without UPI1 pid -> rk_pid fails, ri_cont_id falls back to rc_hex_ident */
+    cx_write(leg, "LEGACY_APE_WITHOUT_UPI1_HEADER\n", 31);
+    char pleg[65] = {0}, cid[65] = {0}, stid[65] = {0};
+    ck(rk_pid(leg, pleg) != 0 && ri_cont_id(leg, cid) == 0 && rc_hex_ident(leg, stid) == 0 && tx_eqz(cid, stid), "legacy-no-pid-fallback-stat");
+
+    /* (6) malformed pid (63 chars or non-hex) -> rejected, falls back to stat */
+    cx_write(badp, "# UPI1 pid=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n", 75);
+    char pbad[65] = {0}, cidb[65] = {0}, stidb[65] = {0};
+    ck(rk_pid(badp, pbad) != 0 && ri_cont_id(badp, cidb) == 0 && rc_hex_ident(badp, stidb) == 0 && tx_eqz(cidb, stidb), "malformed-pid-rejected");
+
+    cx_rmtree(base);
+    printf("CHECK_RCIDENT_UPI1\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
