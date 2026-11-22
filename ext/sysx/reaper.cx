@@ -187,6 +187,8 @@ static void kt_pass(int *n, sy_kt_ent *e, int rg, int root, const int *keep, int
    returned at once. */
 int rp_subreaper(void);   /* defined below; rp_sweep checks it for the orphan sweep */
 
+int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap);   /* exported for the identity-mismatch fixture */
+
 static int rp_sweep(int root, int root_reaped, long long root_start,
                     int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     sy_kt_ent e[SY_KT_MAX];
@@ -259,12 +261,34 @@ static int rp_sweep(int root, int root_reaped, long long root_start,
         for (i = first; i < n; i++) sy_signal(e[i].pid, SIGKILL);
         sy_sleep_ms(2);
     }
+    { int packed = rp_dispose_list(e, n, rep, cap);
+      residue = packed & 0xffff;
+      if ((packed >> 16) != 0) residue = residue | 0x40000000;   /* mark "cannot prove" for the caller */
+    }
+    return residue;
+}
+/* Entry A: a handle.  The pid and pgid come from the handle.  Call it BEFORE sy_proc_end, so the
+   handle is LIVE by contract; the state is not read here (a REAPED handle must not be swept, and
+   that check is the caller's, which is exactly why this runs before the reap).  Anchoring holds:
+   the root is reaped by sy_proc_end, never here. */
+/* Disposal half of the sweep, split from collection so a fixture can hand it real, live pids with
+   a deliberately wrong starttime baseline -- the "pid was reused after the root was reaped" shape,
+   with no mock: every signal here is a real signal to a real process.  An entry whose current
+   starttime no longer equals its recorded one is not the process we saw (a reused pid), so it is
+   skipped and counted, never signalled and never reported as a survivor.  The return packs
+   survivors in the low 16 bits and the mismatch count above them; a caller reads
+   (ret >> 16) to tell "cannot prove" from a clean 0.  Shared by rp_sweep: not a test hook. */
+int rp_dispose_list(const sy_kt_ent *e, int n, char *rep, int cap) {
+    int i, residue = 0, mism = 0;
     for (i = 0; i < n; i++) {
         int pp = 0, pg = 0;
         long long st = 0;
         char stt = 0;
         if (kt_stat(e[i].pid, &pp, &pg, &st, &stt) != 0) continue;
-        if (st != e[i].start) continue;
+        if (st != e[i].start) {
+            mism++;
+            continue;
+        }
         if (stt == 'Z' || stt == 'X') {
             (void)sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0);
             continue;
@@ -284,12 +308,8 @@ static int rp_sweep(int root, int root_reaped, long long root_start,
             }
         }
     }
-    return residue;
+    return residue | (mism << 16);
 }
-/* Entry A: a handle.  The pid and pgid come from the handle.  Call it BEFORE sy_proc_end, so the
-   handle is LIVE by contract; the state is not read here (a REAPED handle must not be swept, and
-   that check is the caller's, which is exactly why this runs before the reap).  Anchoring holds:
-   the root is reaped by sy_proc_end, never here. */
 int rp_kill_tree(sy_child_t *c, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     if (!c || c->pid <= 1) return -EINVAL;
     return rp_sweep(c->pid, 0, 0, deadline_ms, keep, nkeep, rep, cap);

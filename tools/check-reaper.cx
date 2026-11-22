@@ -348,9 +348,91 @@ static int check_reaped_root(int exact) {
     return 0;
 }
 
+/* Mutation (b) fixture: an orphan whose pid is reused by an unrelated process with a DIFFERENT
+   starttime must not be signalled.  In a private PID namespace (unshare -U -r -p -f) the pid is
+   reused deterministically via ns_last_pid.  Steps: fork orphan X (record baseline starttime),
+   let it exit and reap it, point ns_last_pid at X-1, fork Y (same pid, later starttime), then call
+   entry B with X's baseline: Y must stay alive (positive answer, never a clean 0).  With the
+   starttime check removed (mutation b) Y is killed and this assertion turns red. */
+static int check_pid_reuse_starttime(void) {
+    int X, Y, st, w, res;
+    long long base;
+    char report[256], pid_text[32];
+    int fd, n;
+    if (sy_pid() != 1) return 2;
+    if (rp_subreaper()) return 2;
+    X = fork();
+    if (X < 0) return 2;
+    if (X == 0) { sy_setpgid(0, 0); _exit(0); }
+    base = rp_root_start(X);
+    if (waitpid(X, &st, 0) != X) return 2;
+    if (base < 0) return 2;
+    sy_sleep_ms(30);   /* past a jiffy so the reused pid gets a different starttime */
+    n = tx_snprintf(pid_text, sizeof pid_text, "%d\n", X - 1);
+    fd = sy_open("/proc/sys/kernel/ns_last_pid", O_WRONLY, 0);
+    if (fd < 0) return 2;
+    if (sy_write_all(fd, pid_text, n) != 0) { sy_close(fd); return 2; }
+    sy_close(fd);
+    Y = fork();
+    if (Y < 0) return 2;
+    if (Y == 0) { sy_setpgid(0, 0); sy_sleep_ms(3000); _exit(0); }
+    sy_setpgid(Y, Y);
+    ok(Y == X, "pid-reuse: the unrelated process reused the orphan's pid");
+    ok(rp_root_start(Y) != base, "pid-reuse: the reused pid has a different starttime");
+    /* entry B with the OLD baseline: the reused pid must not match and must not be signalled */
+    res = rp_kill_tree_pid_after_wait(Y, 1, base, 500, 0, 0, report, sizeof report);
+    w = waitpid(Y, &st, WNOHANG | WUNTRACED);
+    ok(w == 0, "pid-reuse: the reused pid is neither stopped nor killed");
+    if (w == 0 || (w == Y && WIFSTOPPED(st))) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
+    return 0;
+}
+
+/* Mutation (b) fixture: pid reuse at the identity check.  A real, live process Y is handed to the
+   disposal half (rp_dispose_list is product code) with a starttime that is NOT Y's -- exactly the
+   shape of a pid reused after the root was reaped.  Disposal counts survivors and mismatches:
+   - wrong baseline: Y must be counted as a MISMATCH (packed >> 16 == 1) and NOT a survivor
+     (packed & 0xffff == 0), because a pid whose starttime changed is not the process we saw;
+   - correct baseline (control): the same Y with its OWN starttime must be counted as a SURVIVOR
+     (packed & 0xffff == 1), proving the check looks at the real starttime.
+   Mutation (b) deletes the starttime comparison: the wrong-baseline case then counts Y as a
+   survivor and the first assertion turns red.  No mock: the only artificial part is the baseline. */
+static int check_identity_mismatch(void) {
+    int Y, st, w, packed;
+    sy_kt_ent e[1];
+    char rep[256];
+    long long real_start;
+    Y = fork();
+    if (Y < 0) return 2;
+    if (Y == 0) { sy_setpgid(0, 0); sy_sleep_ms(2500); _exit(0); }
+    sy_setpgid(Y, Y);
+    real_start = rp_root_start(Y);
+    if (real_start < 0) { sy_kill(Y); (void)waitpid(Y, &st, 0); return 2; }
+    e[0].pid = Y;
+    e[0].start = real_start + 1000;              /* reused-pid shape: wrong baseline */
+    packed = rp_dispose_list(e, 1, rep, sizeof rep);
+    ok((packed & 0xffff) == 0, "identity-mismatch: a reused-pid shape is not a survivor");
+    ok((packed >> 16) == 1, "identity-mismatch: counted as a mismatch");
+    e[0].start = real_start;                     /* control: the true baseline sees a survivor */
+    packed = rp_dispose_list(e, 1, rep, sizeof rep);
+    ok((packed & 0xffff) == 1, "identity-mismatch: the true starttime counts as a survivor (control)");
+    w = waitpid(Y, &st, WNOHANG);
+    ok(w == 0, "identity-mismatch: disposal never signals the process");
+    if (w == 0 || w == Y) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
+    return 0;
+}
 int main(int argc, char **argv) {
     char rep[256];
     int root, g1, g2, keep_pid, eroot, d, res, dead, fds[2];
+    if (argc == 2 && !strcmp(argv[1], "--identity-mismatch")) {
+        int rc = check_identity_mismatch();
+        printf("CX_REAPER_IDMISMATCH\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);
+        return rc ? rc : nfail != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--pid-reuse")) {
+        int rc = check_pid_reuse_starttime();
+        printf("CX_REAPER_PIDREUSE\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);
+        return rc ? rc : nfail != 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--reaped-root-pidns")) {
         int rc = check_reaped_root(1);
         printf("CX_REAPER_PIDNS\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);

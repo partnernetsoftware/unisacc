@@ -83,4 +83,19 @@
 | REAPED | -ESRCH,零系统调用 | 同左 | 1,返回已存状态,不 waitpid | 0,返回已存状态 | 只关 fd | -ESRCH | 用回收前 starttime |
 
 矩阵里每一格都是 `tools/check-proc-lifecycle.cx` 的一条断言;尚未实现的格在矩阵表里写
+矩阵里每一格都是 `tools/check-proc-lifecycle.cx` 的一条断言;尚未实现的格在矩阵表里写
 `GAP`,检查里写 `FAIL`(先红),实现后改 `PASS`。
+
+## 四、已知限制
+
+- **pid namespace 内造不出"同 pid 不同 starttime"**:用 `unshare -U -r -p -f` 加
+  `ns_last_pid` 让 Y 复用已回收 X 的 pid(实测 X=6 Y=6 成立),但两条的
+  `/proc/PID/stat` field 22(starttime)读到**相同值**(26 对 26,间隔加到 1.2 秒仍相同)。
+  namespace 内的 starttime 以 namespace 启动点为基准且 pid 复用时不改变,所以"复用后基准
+  对不上"的夹具**不能用 namespace 路线造**。变异 (b) 的夹具因此改成白盒:直接对
+  `rp_dispose_list` 传入一个真实存活进程与一个故意错误的 starttime 基准,这是产品的真实
+  代码路径、对真实进程施加真实错误基准,不是 mock。`tools/check-reaper.cx --identity-mismatch`
+  覆盖,删身份检查即红。
+- 非 Linux 无 `/proc` 时 rp_kill_tree 返回 `-ENOSYS`(组内已杀、逃逸后代无法证实),该分支
+  在 Linux 验收机上不可达,记 UNMEASURED。
+- 裸 pid 入口 `sy_signal`/`sy_killpg`/`sy_wait`/`sy_kill` 无身份保护;Windows 全部 `-ENOSYS`。
