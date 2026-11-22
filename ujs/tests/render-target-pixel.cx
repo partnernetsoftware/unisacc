@@ -24,20 +24,30 @@ int main(int argc,char **argv) {
     int mutate=0;
     if(argc==2 && tx_eqz(argv[1],"--mutate")) mutate=1;
     if(argc==2 && tx_eqz(argv[1],"--mutate-copy")) mutate=2;
-    if(argc!=1 && !mutate) return 2;
+    int kind=0;
+    if(argc>=2 && tx_eqz(argv[1],"--cube")) kind=1;
+    if(argc>=2 && tx_eqz(argv[1],"--array")) kind=2;
+    if(argc>=2 && tx_eqz(argv[1],"--3d")) kind=3;
+    if(argc>=2 && tx_eqz(argv[1],"--multiple")) kind=4;
+    if(kind && argc==3 && tx_eqz(argv[2],"--mutate")) mutate=1;
+    else if(argc!=1 && !(argc==2 && (kind || mutate))) return 2;
     char dir[256],cwd[390],abi[300],wasm[300],layout[300],url[850];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-render-target-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/target.wasm",dir);
     tx_snprintf(layout,sizeof layout,"%s/dispatcher-layout.ujs",dir);
     const int length=tx_snprintf(url,sizeof url,
-        "file://%s/ujs/practice/uxe/test/render-target-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+        "file://%s/ujs/practice/uxe/test/%s?wasm=%s&mutate=%d&kind=%d",
+        cwd,kind?"render-target-family-r160.html":"render-target-r160.html",wasm,mutate,kind);
     const char entry[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
         "export uxe_render_target(mutate:i64) i64 version 1;\n";
+    const char family[]="import host_gpu_submit from \"uxe_gpu_v1\"(i64,i64) i64;\n"
+        "export uxe_render_target(mutate:i64,kind:i64) i64 version 1;\n";
     char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/record-copy.ujs",
         "ujs/practice/uxe/base/gpu-packet.ujs","ujs/practice/uxe/base/gpu-target.ujs",
         layout,"ujs/practice/uxe/base/eventdispatcher.ujs",
-        "ujs/practice/uxe/base/render-target.ujs","ujs/practice/uxe/test/render-target-probe.ujs","-o",wasm,0};
+        "ujs/practice/uxe/base/render-target.ujs",kind?"ujs/practice/uxe/test/render-target-family-probe.ujs":
+        "ujs/practice/uxe/test/render-target-probe.ujs","-o",wasm,0};
     const double red=4278190335.0,green=4278255360.0,blue=4294901760.0;
     const double gold[]={
         0,red,0,0,2,3,1,green,6,4,0,blue,blue,
@@ -46,11 +56,15 @@ int main(int argc,char **argv) {
         red,0,0,2,3,1,green,6,4,0,blue,blue,4,1,1,2,0,1,
         6,6,1,1,1,0,
     };
-    enum { count=sizeof gold/sizeof gold[0] };
-    double actual[count]={0};
+    const int layers=kind==1?6:kind==4?1:3;
+    const int colors=kind==4?2:1;
+    const double familyGold[]={0,2,4,kind,layers,colors,4,1,layers,0,2,4,kind,layers,colors,4,1,layers,0};
+    const int count=kind?19:65;
+    const double *expected=kind?familyGold:gold;
+    double actual[65]={0};
     char *output=0;
     size_t bytes=0;
-    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600) ||
+    int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,kind?family:entry,kind?sizeof family-1:sizeof entry-1,0600) ||
         dispatcher_layout(layout);
     if(!failed) {
         const int rc=cx_runv_timeout(compile,6,&output,&bytes);
@@ -59,8 +73,8 @@ int main(int argc,char **argv) {
         output=0;
     }
     if(!failed) failed=r160_wait_read(url,"#render-target",actual,count,dir);
-    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
-        printf("G_PIXEL RenderTarget case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=expected[i]) {
+        printf("G_PIXEL RenderTarget case=%d actual=%.17g gold=%.17g\n",i,actual[i],expected[i]);
         failed++;
     }
     char *clean[]={"rm","-rf","--",dir,0};

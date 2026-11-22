@@ -15,6 +15,9 @@ struct RenderTarget {
   scissorHeight: u32;
   scissorTest: u32;
   disposeObserver: u32;
+  kind: u32;
+  layers: u32;
+  colors: u32;
 }
 
 native function render_target_span(at:i64,bytes:i64) i64 {
@@ -29,6 +32,14 @@ native function render_target_size(width:i64,height:i64) i64 {
   return width>=1 && width<=2048 && height>=1 && height<=2048;
 }
 
+native function render_target_shape(kind:i64,width:i64,height:i64,layers:i64,colors:i64) i64 {
+  if(!render_target_size(width,height) || kind<0 || kind>4) { return 0; }
+  if(kind==1) { return width==height && layers==6 && colors==1; }
+  if(kind==2 || kind==3) { return layers>=1 && layers<=64 && colors==1; }
+  if(kind==4) { return layers==1 && colors>=2 && colors<=4; }
+  return layers==1 && colors==1;
+}
+
 native function render_target_id(id:i64) i64 {
   return id>=1 && id<=1024;
 }
@@ -37,7 +48,8 @@ native function render_target_live(target:i64) i64 {
   return render_target_span(target,RenderTarget.size) &&
     render_target_id(ux_u32(target+RenderTarget.id)) &&
     ux_u32(target+RenderTarget.generation)!=0 && ux_u32(target+RenderTarget.depthBuffer)<=1 &&
-    render_target_size(ux_u32(target+RenderTarget.width),ux_u32(target+RenderTarget.height));
+    render_target_shape(ux_u32(target+RenderTarget.kind),ux_u32(target+RenderTarget.width),
+      ux_u32(target+RenderTarget.height),ux_u32(target+RenderTarget.layers),ux_u32(target+RenderTarget.colors));
 }
 
 native function render_target_packet(target:i64,packet:i64,capacity:i64,need:i64) i64 {
@@ -62,6 +74,26 @@ native function RenderTarget_prepareDescriptor(descriptor:i64,id:i64,width:i64,h
   let c=ux_u32_put(descriptor+GpuTarget.colors,1);
   let d=ux_u32_put(descriptor+GpuTarget.depth,depth);
   return descriptor;
+}
+
+native function RenderTarget_configure(descriptor:i64,kind:i64,layers:i64,colors:i64) i64 {
+  if(!render_target_span(descriptor,GpuTarget.size) ||
+     !render_target_shape(kind,ux_u32(descriptor+GpuTarget.width),ux_u32(descriptor+GpuTarget.height),layers,colors)) { return 0-1; }
+  let a=ux_u32_put(descriptor+GpuTarget.kind,kind);
+  let b=ux_u32_put(descriptor+GpuTarget.layers,layers);
+  let c=ux_u32_put(descriptor+GpuTarget.colors,colors);
+  return descriptor;
+}
+
+native function render_target_saveShape(target:i64,descriptor:i64) i64 {
+  let kind=ux_u32_put(target+RenderTarget.kind,ux_u32(descriptor+GpuTarget.kind));
+  let layers=ux_u32_put(target+RenderTarget.layers,ux_u32(descriptor+GpuTarget.layers));
+  return ux_u32_put(target+RenderTarget.colors,ux_u32(descriptor+GpuTarget.colors));
+}
+
+native function render_target_inheritShape(descriptor:i64,target:i64) i64 {
+  return RenderTarget_configure(descriptor,ux_u32(target+RenderTarget.kind),
+    ux_u32(target+RenderTarget.layers),ux_u32(target+RenderTarget.colors));
 }
 
 native function render_target_rectangle(at:i64,x:i64,y:i64,width:i64,height:i64) i64 {
@@ -175,12 +207,12 @@ native function render_target_emit_dispose(observer:i64,count:i64) i64 {
 native function RenderTarget_create(target:i64,packet:i64,capacity:i64,descriptor:i64,generation:i64) i64 {
   if(!render_target_packet(target,packet,capacity,60) || !render_target_descriptor_span(target,packet,capacity,descriptor) ||
      generation<1 || generation>4294967295 || ux_u32(target+RenderTarget.id)!=0 ||
-     ux_u32(descriptor+GpuTarget.kind)!=0 || ux_u32(descriptor+GpuTarget.layers)!=1 ||
-     ux_u32(descriptor+GpuTarget.colors)!=1 || ux_u32(descriptor+GpuTarget.depth)>1) { return 0-1; }
+     ux_u32(descriptor+GpuTarget.depth)>1) { return 0-1; }
   let id=ux_u32(descriptor+GpuTarget.id);
   let width=ux_u32(descriptor+GpuTarget.width);
   let height=ux_u32(descriptor+GpuTarget.height);
-  if(!render_target_id(id) || !render_target_size(width,height)) { return 0-1; }
+  if(!render_target_id(id) || !render_target_shape(ux_u32(descriptor+GpuTarget.kind),width,height,
+     ux_u32(descriptor+GpuTarget.layers),ux_u32(descriptor+GpuTarget.colors))) { return 0-1; }
   let begin=GpuPacket_begin(packet,capacity,generation);
   let created=GpuTarget_create(packet,capacity,descriptor);
   let status=GpuPacket_submit(packet);
@@ -189,6 +221,7 @@ native function RenderTarget_create(target:i64,packet:i64,capacity:i64,descripto
   let w=ux_u32_put(target+RenderTarget.width,width);
   let h=ux_u32_put(target+RenderTarget.height,height);
   let d=ux_u32_put(target+RenderTarget.depthBuffer,ux_u32(descriptor+GpuTarget.depth));
+  let shape=render_target_saveShape(target,descriptor);
   let s=ux_u32_put(target+RenderTarget.scissorTest,0);
   let full=render_target_reset_rects(target,width,height);
   let watch=ux_u32_put(target+RenderTarget.disposeObserver,0);
@@ -210,6 +243,8 @@ native function RenderTarget_clone(dst:i64,src:i64,packet:i64,capacity:i64,descr
      !render_target_event_space(observer,dst,RenderTarget.size)) { return 0-1; }
   let prepared=RenderTarget_prepareDescriptor(descriptor,id,ux_u32(src+RenderTarget.width),
     ux_u32(src+RenderTarget.height),ux_u32(src+RenderTarget.depthBuffer));
+  let shape=render_target_inheritShape(descriptor,src);
+  if(shape<0) { return shape; }
   let status=RenderTarget_create(dst,packet,capacity,descriptor,ux_u32(src+RenderTarget.generation));
   if(status!=0) { return status; }
   let copied=uxe_copy_record(dst+RenderTarget.viewportX,src+RenderTarget.viewportX,
@@ -230,6 +265,7 @@ native function render_target_replace(target:i64,packet:i64,capacity:i64,descrip
   let w=ux_u32_put(target+RenderTarget.width,ux_u32(descriptor+GpuTarget.width));
   let h=ux_u32_put(target+RenderTarget.height,ux_u32(descriptor+GpuTarget.height));
   let d=ux_u32_put(target+RenderTarget.depthBuffer,ux_u32(descriptor+GpuTarget.depth));
+  let shape=render_target_saveShape(target,descriptor);
   return 0;
 }
 
@@ -262,6 +298,8 @@ native function RenderTarget_copy(dst:i64,src:i64,packet:i64,capacity:i64,descri
      !render_target_event_space(src_observer,dst,RenderTarget.size)) { return 0-1; }
   let prepared=RenderTarget_prepareDescriptor(descriptor,replacement,ux_u32(src+RenderTarget.width),
     ux_u32(src+RenderTarget.height),ux_u32(src+RenderTarget.depthBuffer));
+  let shape=render_target_inheritShape(descriptor,src);
+  if(shape<0) { return shape; }
   let status=render_target_replace(dst,packet,capacity,descriptor,restore);
   if(status!=0) { return status; }
   let copied=uxe_copy_record(dst+RenderTarget.viewportX,src+RenderTarget.viewportX,
@@ -284,6 +322,8 @@ native function RenderTarget_setSize(target:i64,packet:i64,capacity:i64,descript
   let count=render_target_event_count(observer);
   if(count<0) { return count; }
   let prepared=RenderTarget_prepareDescriptor(descriptor,replacement,width,height,ux_u32(target+RenderTarget.depthBuffer));
+  let shape=render_target_inheritShape(descriptor,target);
+  if(shape<0) { return shape; }
   let status=render_target_replace(target,packet,capacity,descriptor,restore);
   if(status!=0) { return status; }
   let full=render_target_reset_rects(target,width,height);
