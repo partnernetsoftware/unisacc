@@ -1,0 +1,76 @@
+// r160 depth-specific JSON fields. Comparison zero means absent.
+struct DepthTextureJson {
+  format: u32;
+  type: u32;
+  compareFunction: u32;
+}
+
+native function depth_json_compare_valid(value:i64) i64 {
+  return value==0 || (value>=512 && value<=519);
+}
+
+native function depth_json_key(out:i64,index:i64) i64 {
+  let names=[102,111,114,109,97,116,116,121,112,101,99,111,109,112,97,114,101,70,117,110,99,116,105,111,110];
+  let starts=[0,6,10];
+  let sizes=[6,4,15];
+  let start=starts[index];
+  let size=sizes[index];
+  let i=0;
+  while(i<size) { let saved=ux_u8_put(out+i,names[start+i]); i=i+1; }
+  return size;
+}
+
+native function DepthTexture_writeJSON(at:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,12,4) || end<=dst ||
+     !helper_buffer_span(dst,end-dst,1) || !helper_buffer_span(scratch,1120,8) ||
+     !helper_buffer_disjoint(at,12,dst,end-dst) ||
+     !helper_buffer_disjoint(at,12,scratch,1120) ||
+     !helper_buffer_disjoint(dst,end-dst,scratch,1120)) { return 0-1; }
+  let format=ux_u32(at);
+  let kind=ux_u32(at+4);
+  let compare=ux_u32(at+8);
+  if(!depth_texture_pair(format,kind) || !depth_json_compare_valid(compare)) { return 0-1; }
+  let p=json_byte(dst,end,123);
+  let values=[format,kind,compare];
+  let count=2+(compare!=0);
+  let i=0;
+  while(i<count) {
+    if(i>0) { p=json_byte(p,end,44); }
+    let size=depth_json_key(scratch,i);
+    p=json_write_string(p,end,scratch,size);
+    p=json_byte(p,end,58);
+    p=json_write_f64(p,end,0.0+values[i],scratch+16);
+    if(p<0) { return 0-1; }
+    i=i+1;
+  }
+  return json_byte(p,end,125);
+}
+
+native function DepthTexture_readJSON(at:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,12,4) || end<=input ||
+     !helper_buffer_span(input,end-input,1) || !helper_buffer_span(scratch,16,4) ||
+     !helper_buffer_disjoint(at,12,input,end-input) ||
+     !helper_buffer_disjoint(at,12,scratch,16) ||
+     !helper_buffer_disjoint(input,end-input,scratch,16)) { return 0-1; }
+  let root=json_space(input,end);
+  let stop=json_value_end(root,end);
+  if(root<0 || stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let values=[0,0,0];
+  let i=0;
+  while(i<3) {
+    let size=depth_json_key(scratch,i);
+    let valueAt=json_find_key(root,stop,scratch,size);
+    if(valueAt>=0) {
+      let number=json_read_number(valueAt,stop);
+      if(!(number>=0.0 && number<=4294967295.0)) { return 0-1; }
+      let value=f64_floor_i64(number);
+      if(number!=0.0+value || (i==2 && value==0)) { return 0-1; }
+      values[i]=value;
+    } else if(i<2) { return 0-1; }
+    i=i+1;
+  }
+  if(!depth_texture_pair(values[0],values[1]) || !depth_json_compare_valid(values[2])) { return 0-1; }
+  i=0;
+  while(i<3) { let saved=ux_u32_put(at+i*4,values[i]); i=i+1; }
+  return at;
+}
