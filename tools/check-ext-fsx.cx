@@ -7,7 +7,11 @@
 #pragma unisa use fsx.fs
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.posix
 #pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 static int checks, failed;
 static void ck(int ok, const char *name) { checks++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
@@ -20,7 +24,10 @@ static int walk_list(const char *root, int flags, const char *glob, char *out, l
     const char *rel;
     out[0] = 0;
     if (rc < 0) return rc;
-    while ((r = fsx_walk_next(w, &rel, &kind)) == 1) { long n = (long)strlen(out); snprintf(out + n, (size_t)(cap - n), "%c:%s;", kind, rel); }
+    while ((r = fsx_walk_next(w, &rel, &kind)) == 1) {
+        long n = (long)strlen(out);
+        if (cx_fmt(out + n, (size_t)(cap - n), "%c:%s;", kind, rel)) { fsx_walk_close(w); return -ERANGE; }
+    }
     fsx_walk_close(w);
     return r;
 }
@@ -156,6 +163,65 @@ int main(void) {
         put("L", body);
         ck(fsx_lock(&lk2, at("L"), 50, 0) == -ETIMEDOUT, "lock-live-owner-not-reclaimed");
         ck(fsx_lock(&lk2, at("L"), 50, 1000) == 0 && fsx_unlock(lk2) == 0, "lock-expired-reclaimed");
+    }
+
+    /* scratch SIGTERM cleanup: child registers fsx_scratch and gets SIGTERM; dir must be removed */
+    {
+        char pf[4096], scdir[4096];
+        fsx_join(pf, sizeof pf, D, "sig-child-path");
+        sy_unlink(pf);
+        int pid = fork();
+        if (pid == 0) {
+            int ch = 0;
+            if (fsx_scratch(&ch, "fsx-sig-") == 0) {
+                const char *sd = fsx_scratch_dir(ch);
+                if (sd) sy_write_file(pf, sd, (long)strlen(sd), 0600);
+            }
+            sy_sleep_ms(10000);
+            sy_exit(0);
+        }
+        long end = sy_now_ms() + 3000;
+        while (fsx_exists(pf) != 1 && sy_now_ms() < end) sy_sleep_ms(10);
+        scdir[0] = 0;
+        if (fsx_exists(pf) == 1) {
+            char *sp = 0; long sn = 0;
+            if (fsx_read(pf, &sp, &sn, 4096) == 0 && sp && sn > 0) {
+                if (sn >= (long)sizeof scdir) sn = (long)sizeof scdir - 1;
+                mm_copy(scdir, sizeof scdir, sp, (size_t)sn); scdir[sn] = 0;
+            }
+            mm_free(sp);
+        }
+        int existed_before = (scdir[0] && fsx_exists(scdir) == 1);
+        if (pid > 0) {
+            sy_signal(pid, 15);
+            sy_wait_status(pid, 0, 0, 0, 0);
+        }
+        int gone_after = (scdir[0] && fsx_exists(scdir) == 0);
+        if (!gone_after && scdir[0]) fsx_rmtree(scdir);
+        ck(existed_before && gone_after, "scratch-sigterm-cleanup");
+    }
+
+    /* scratch startup stale reap: >30min + dead pid reaped; <30min or live pid preserved */
+    {
+        int dead_pid = fork();
+        if (dead_pid == 0) sy_exit(0);
+        if (dead_pid > 0) sy_wait_status(dead_pid, 0, 0, 0, 0);
+        long now_s = sy_now_ms() / 1000L;
+        char pfx[64], d_stale[4096], d_fresh[4096], d_live[4096];
+        cx_fmt(pfx, sizeof pfx, "fsx-reap-%d-", sy_pid());
+        cx_fmt(d_stale, sizeof d_stale, "%s/%sp%d-aaa111", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_fresh, sizeof d_fresh, "%s/%sp%d-bbb222", sy_tmpdir(), pfx, dead_pid);
+        cx_fmt(d_live, sizeof d_live, "%s/%sp%d-ccc333", sy_tmpdir(), pfx, sy_pid());
+        sy_mkdir(d_stale, 0700); sy_utimes(d_stale, now_s - 1900, 0, now_s - 1900, 0);
+        sy_mkdir(d_fresh, 0700); sy_utimes(d_fresh, now_s - 60, 0, now_s - 60, 0);
+        sy_mkdir(d_live, 0700); sy_utimes(d_live, now_s - 1900, 0, now_s - 1900, 0);
+        int hs = 0;
+        int src = fsx_scratch(&hs, pfx);
+        ck(src == 0 && fsx_exists(d_stale) == 0, "scratch-stale-dead-reaped");
+        ck(fsx_exists(d_fresh) == 1, "scratch-fresh-dead-kept");
+        ck(fsx_exists(d_live) == 1, "scratch-stale-live-kept");
+        if (src == 0) fsx_scratch_drop(hs);
+        fsx_rmtree(d_stale); fsx_rmtree(d_fresh); fsx_rmtree(d_live);
     }
 
     /* scratch drop: refused when swapped, then removed */

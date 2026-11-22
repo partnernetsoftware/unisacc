@@ -2,9 +2,9 @@
 
 ## 1. 背景与 `system-cleanup.sh` 白名单核对
 
-2026-11-23 05:00:07 共享检出 `cx/` 下 276 个 `.cx` 文件权限位批量从 `100644` 变为 `100755`, 根因已确认为 `/home/devali/repos/moltbaby/systemd/scripts/system-cleanup.sh` 第 50 行对 `/tmp` 下超时 (>120min 未访问/未修改) 泄漏目录执行 `chmod -R u+rwx "$entry"` 时, 经硬链接树改写了共享检出文件的 inode 权限位。
+2026-11-23 05:00:07 共享检出 `cx/` 下 276 个 `.cx` 文件权限位批量从 `100644` 变为 `100755`, 根因已确认为 `~/repos/moltbaby/systemd/scripts/system-cleanup.sh` 第 50 行对 `/tmp` 下超时 (>120min 未访问/未修改) 泄漏目录执行 `chmod -R u+rwx "$entry"` 时, 经硬链接树改写了共享检出文件的 inode 权限位。
 
-核对 `/home/devali/repos/moltbaby/systemd/scripts/system-cleanup.sh` (L32-L56) 的 `/tmp` 顶层白名单:
+核对 `~/repos/moltbaby/systemd/scripts/system-cleanup.sh` (L32-L56) 的 `/tmp` 顶层白名单:
 - 受保护模式仅包含: `.*`、`tmux-*`、`rmux-*`、`ssh-*`、`systemd-*`、`*.sock`、`*.lock`、`omp-workflow-sup-*`、`unisacc-e3cache-*`、`unisacc-bound-*`、`unisacc-cxbin-*`、`cand-ident-retire-final.patch`、`cand-ident-retire-gate.txt`。
 - **结论: `sessionroot` (`unisacc-session-*`、`unisacc-affected-*`, 定义于 `tools/cxlib/sessionroot.cx`) 不在 `system-cleanup.sh` 白名单内, 不受保护。**
 - 因此, 凡在 `/tmp` (含 `sessionroot`) 下创建指向仓内文件的硬链接树, 只要异常退出泄漏并超过 120 分钟, 就会触发 `chmod -R u+rwx` 污染仓内 inode 权限位。改路径到 `sessionroot` 无法消除风险, 根治办法是**彻底禁止在 `/tmp` 下对仓内文件建硬链接树 (一律改为拷贝或 `git archive`)**, 同时系统侧 `system-cleanup.sh` 的 `chmod -R u+rwx` 应改为仅针对目录 (`find "$entry" -type d -exec chmod u+rwx {} +`)。
