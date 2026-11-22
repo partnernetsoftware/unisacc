@@ -39,7 +39,7 @@ GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
 
 | 组 | 类与缺口 |
 | --- | --- |
-| 纹理 JSON 与生命周期 | Texture 缺完整公共字段与图像引用往返。FramebufferTexture 缺捕获源引用与参数往返。DepthTexture 缺附件描述往返与独立复制。CompressedTexture、CompressedArrayTexture、CompressedCubeTexture 缺 mip 描述往返和复制，分别覆盖二维、数组层、六面。 |
+| 纹理 JSON 与生命周期 | Texture 缺完整公共字段与图像引用往返。FramebufferTexture 缺捕获源引用与参数往返。DepthTexture 缺附件描述往返与独立复制。压缩纹理仍缺直接设备上传与采样、对象复制及 ASTC 非常色块。VideoTexture 和 createCanvasElement 依赖浏览器宿主，软件路径保持缺。VideoTexture 需真实浏览器播放逐帧标记素材，验证更新、采样像素和释放。createCanvasElement 需验证真实 HTMLCanvasElement、尺寸、绘制与像素读回。软件路径无视频解码与 DOM 元素合同。 |
 | 对象 JSON 与生命周期 | Object3D、Scene 缺递归对象及场景资源往返。LOD 缺阈值、迟滞和子对象引用。InstancedMesh 缺矩阵、颜色与实例数，BatchedMesh 缺实例和几何批次状态。CubeCamera 缺子相机、六面目标引用与复制合同。 |
 | 曲线 JSON 与生命周期 | ArcCurve、EllipseCurve 缺参数往返和克隆。CatmullRomCurve3、SplineCurve 缺控制点复制和往返。CurvePath 缺子曲线递归往返及克隆。 |
 | 缓冲与动画 JSON | InterleavedBufferAttribute 缺共享缓冲身份和克隆往返。InstancedBufferAttribute 缺除数及数组往返。KeyframeTrack 缺基类轨道往返和克隆。 |

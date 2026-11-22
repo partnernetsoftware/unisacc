@@ -10,6 +10,40 @@ if (texture.mipmaps[0] !== mip || texture.flipY || texture.generateMipmaps) thro
 // DXT3 uses four interpolated RGB565 colors independently of endpoint order.
 const expected = [[0,0,255,0],[255,0,0,17],[85,0,170,136],[170,0,85,255],[0,0,255,187]];
 const rgba = bytes => bytes.reduce((value, byte, i) => value + byte * 256 ** i, 0);
-document.querySelector("#r160").textContent = JSON.stringify([32,...expected.map(rgba),-1,-1,-3,-2]);
+const canvas = document.createElement("canvas");
+canvas.width = 4;
+canvas.height = 2;
+const gl = canvas.getContext("webgl2", { alpha: true, premultipliedAlpha: false });
+const ext = gl?.getExtension("WEBGL_compressed_texture_s3tc");
+if (!ext || ext.COMPRESSED_RGBA_S3TC_DXT3_EXT !== texture.format) throw Error("r160 DXT3 GPU format unavailable");
+const gpu = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, gpu);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+gl.compressedTexImage2D(gl.TEXTURE_2D, 0, texture.format, 4, 4, 0, mip.data);
+if (gl.getError() !== gl.NO_ERROR) throw Error("r160 DXT3 upload failed");
+const program = gl.createProgram();
+for (const [stage, source] of [
+  [gl.VERTEX_SHADER, "#version 300 es\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0.0,1.0);}"],
+  [gl.FRAGMENT_SHADER, "#version 300 es\nprecision highp float;uniform sampler2D image;out vec4 rgba;void main(){rgba=texelFetch(image,ivec2(gl_FragCoord.xy),0);}"]
+]) {
+  const shader = gl.createShader(stage);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(shader));
+  gl.attachShader(program, shader);
+  gl.deleteShader(shader);
+}
+gl.linkProgram(program);
+if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+gl.drawArrays(gl.TRIANGLES, 0, 3);
+const pixels = new Uint8Array(32);
+gl.readPixels(0, 0, 4, 2, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+if (gl.getError() !== gl.NO_ERROR) throw Error("r160 DXT3 readback failed");
+const endpoint = rgba(pixels.subarray(4, 8));
+gl.deleteProgram(program);
+gl.deleteTexture(gpu);
+document.querySelector("#r160").textContent = JSON.stringify([32,...expected.map(rgba),-1,-1,-3,-2,texture.format,endpoint]);
 texture.dispose();
 </script>
