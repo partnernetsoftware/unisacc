@@ -521,14 +521,23 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
     line[0] = 0;
     for (p = (char *)z; *p; ) {                          /* 取第一条非注释行 */
         char *e = p; while (*e && *e != '\n') e++;
-        if (*p != '#' && e > p) {
-            if ((size_t)(e - p) >= sizeof line) {
+        long llen = (long)(e - p);
+        if (llen > 0 && p[llen - 1] == '\r') llen--;
+        if (*p != '#' && llen > 0) {
+            if ((size_t)llen >= sizeof line) {
                 sy_eprintf("precommit: BLOCKED freeze.tsv line too long (%ld >= %ld bytes; fail-closed as active freeze)\n",
-                           (long)(e - p), (long)sizeof line);
+                           llen, (long)sizeof line);
                 return 1;
             }
-            mm_copy(line, sizeof line, p, (size_t)(e - p));
-            line[e - p] = 0;
+            mm_copy(line, sizeof line, p, (size_t)llen);
+            line[llen] = 0;
+            for (i = 0; i < llen; i++) {
+                unsigned char uc = (unsigned char)line[i];
+                if ((uc < 32 && uc != '\t') || uc == 127) {
+                    sy_eprintf("precommit: freeze.tsv malformed (embedded CR or control character)\n");
+                    return 1;
+                }
+            }
             break;
         }
         p = *e ? e + 1 : e; line[0] = 0;
@@ -540,9 +549,11 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
         sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
         return 1;
     }
-    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
-    if (i == 0 || (f[3][i] != 0 && f[3][i] != '\r')) {
-        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be pure digits)\n", f[3]);
+    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {
+        if (i < 18) dl = dl * 10 + (f[3][i] - '0');
+    }
+    if (i < 1 || i > 18 || f[3][i] != 0) {
+        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be 1..18 pure digits)\n", f[3]);
         return 1;
     }
     now = sy_wall_s();   /* 墙钟秒;sy_now_ms 是单调钟,不能与 epoch 截止时间比 */
@@ -641,14 +652,23 @@ static int freeze_buf_active(const char *z, char *owner_out, size_t ocap) {
     line[0] = 0;
     for (p = (char *)z; *p; ) {
         char *e = p; while (*e && *e != '\n') e++;
-        if (*p != '#' && e > p) {
-            if ((size_t)(e - p) >= sizeof line) {
+        long llen = (long)(e - p);
+        if (llen > 0 && p[llen - 1] == '\r') llen--;
+        if (*p != '#' && llen > 0) {
+            if ((size_t)llen >= sizeof line) {
                 sy_eprintf("precommit: BLOCKED freeze.tsv line too long (%ld >= %ld bytes; fail-closed as active freeze)\n",
-                           (long)(e - p), (long)sizeof line);
+                           llen, (long)sizeof line);
                 return 2;
             }
-            mm_copy(line, sizeof line, p, (size_t)(e - p));
-            line[e - p] = 0;
+            mm_copy(line, sizeof line, p, (size_t)llen);
+            line[llen] = 0;
+            for (i = 0; i < llen; i++) {
+                unsigned char uc = (unsigned char)line[i];
+                if ((uc < 32 && uc != '\t') || uc == 127) {
+                    sy_eprintf("precommit: freeze.tsv malformed (embedded CR or control character)\n");
+                    return 2;
+                }
+            }
             break;
         }
         p = *e ? e + 1 : e;
@@ -661,9 +681,11 @@ static int freeze_buf_active(const char *z, char *owner_out, size_t ocap) {
         sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
         return 2;
     }
-    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
-    if (i == 0 || (f[3][i] != 0 && f[3][i] != '\r')) {
-        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be pure digits)\n", f[3]);
+    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {
+        if (i < 18) dl = dl * 10 + (f[3][i] - '0');
+    }
+    if (i < 1 || i > 18 || f[3][i] != 0) {
+        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be 1..18 pure digits)\n", f[3]);
         return 2;
     }
     now = sy_wall_s();
@@ -1280,9 +1302,38 @@ static int pc_verify_deferred(int argc, char **argv) {
             } else if (tx_eqz(gn, "ratchets")) {
                 char *av[] = {"sh", uc, "tools/ratchets.cx", 0};
                 (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/ratchets.cx");
+                slurp_okrc = 0;
                 out = slurp_run(av, &on);
-                if (out && tx_find(out, on, "RATCHETS\tok=", 12) >= 0 && tx_find(out, on, "\tfail=0", 7) >= 0)
-                    pass = 1;
+                if (out && slurp_last_rc == 0) {
+                    long pos = 0;
+                    while (pos < on) {
+                        long nl = tx_chr(out + pos, on - pos, '\n');
+                        long ln = nl < 0 ? on - pos : nl;
+                        const char *l = out + pos;
+                        if (ln > 0 && l[ln - 1] == '\r') ln--;
+                        if (ln > 9 && tx_prefix(l, ln, "RATCHETS\t", 9)) {
+                            long ok_at = tx_find(l, ln, "\tok=", 4);
+                            long fl_at = tx_find(l, ln, "\tfail=", 6);
+                            if (ok_at >= 0 && fl_at >= 0 && tx_find(l, ln, "skipped", 7) < 0) {
+                                const char *ok_p = l + ok_at + 4, *fl_p = l + fl_at + 6;
+                                long ok_rem = ln - (ok_at + 4), fl_rem = ln - (fl_at + 6);
+                                long ok_d = 0, fl_d = 0, ok_v = 0;
+                                while (ok_d < ok_rem && ok_p[ok_d] >= '0' && ok_p[ok_d] <= '9') {
+                                    if (ok_d < 9) ok_v = ok_v * 10 + (ok_p[ok_d] - '0');
+                                    ok_d++;
+                                }
+                                while (fl_d < fl_rem && fl_p[fl_d] >= '0' && fl_p[fl_d] <= '9') fl_d++;
+                                if (ok_d >= 1 && ok_d <= 9 && ok_v > 0 &&
+                                    (ok_d == ok_rem || ok_p[ok_d] == '\t') &&
+                                    fl_d == 1 && fl_p[0] == '0' &&
+                                    (fl_d == fl_rem || fl_p[fl_d] == '\t')) {
+                                    pass = 1;
+                                }
+                            }
+                        }
+                        pos += (nl < 0 ? on - pos : nl + 1);
+                    }
+                }
             }
             slurp_okrc = 0;
             if (!pass) {
