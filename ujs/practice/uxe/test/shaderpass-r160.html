@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, NoBlending, REVISION, WebGLRenderTarget, WebGLRenderer } from "three";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuNativeSample } from "../base/gpu-native-sample-abi.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw Error("three.js revision mismatch");
+  const query=new URLSearchParams(location.search);
+  const root=query.get("package");
+  const {ShaderPass}=await import(`file://${root}/examples/jsm/postprocessing/ShaderPass.js`);
+  function context() {
+    const canvas=document.createElement("canvas");
+    canvas.width=canvas.height=2;
+    const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true});
+    if(!gl) throw Error("WebGL2 required");
+    return {canvas,gl};
+  }
+  const {gl}=context();
+  const [binary,vertex,fragment]=await Promise.all([
+    fetch(`file://${query.get("wasm")}`),fetch("../base/gpu-native-copy.vert"),fetch("../base/gpu-native-scalar.frag")
+  ]);
+  let ux;
+  const native=createGpuNativeSample(gl,()=>1,()=>ux.memory);
+  const submit=createGpuSubmit(gl,()=>ux.memory,()=>1,native.targets);
+  ux=(await WebAssembly.instantiate(await binary.arrayBuffer(),{
+    uxe_gpu_v1:{host_gpu_submit:submit},
+    uxe_gpu_target_v1:{host_gpu_native_copy:native.copy,host_gpu_native_filter:native.filter},
+  })).instance.exports;
+  const lengths=[];
+  for(const [i,response] of [vertex,fragment].entries()) {
+    const source=new Uint8Array(await response.arrayBuffer());
+    if(!response.ok || !source.length || source.length>4096) throw Error("invalid shader bytes");
+    new Uint8Array(ux.memory.buffer,2097152+10000+4500*i,source.length).set(source);
+    lengths.push(BigInt(source.length));
+  }
+  const ref=context();
+  const renderer=new WebGLRenderer({canvas:ref.canvas,context:ref.gl});
+  renderer.setSize(2,2,false);
+  const target=new WebGLRenderTarget(2,2);
+  const source=new DataTexture(Uint8Array.from(Array(4).fill([128,64,32,255]).flat()),2,2);
+  source.needsUpdate=true;
+  const pass=new ShaderPass({
+    uniforms:{tDiffuse:{value:null},u_amount:{value:0.5}},
+    vertexShader:"varying vec2 vUv; void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}",
+    fragmentShader:"uniform sampler2D tDiffuse;uniform float u_amount;varying vec2 vUv;void main(){vec4 t=texture2D(tDiffuse,vUv);gl_FragColor=vec4(t.rgb*u_amount,t.a);}"
+  });
+  pass.material.blending=NoBlending;
+  const read=(context,dst)=>context.readPixels(0,0,2,2,context.RGBA,context.UNSIGNED_BYTE,dst);
+  const results=[];
+  for(const mode of [0,1]) {
+    const status=ux.uxe_shaderpass(BigInt(mode),BigInt(query.get("mode")),...lengths);
+    if(status!==0n) throw Error("shaderpass rejected "+status);
+    const expected=new Uint8Array(16),actual=new Uint8Array(16);
+    pass.renderToScreen=!!mode;
+    pass.render(renderer,target,{texture:source});
+    if(mode) {
+      read(ref.gl,expected);
+      read(gl,actual);
+    } else {
+      renderer.readRenderTargetPixels(target,0,0,2,2,expected);
+      actual.set(new Uint8Array(ux.memory.buffer,2097152+7000,16));
+    }
+    results.push(...actual,...expected);
+  }
+  output.textContent=JSON.stringify(results);
+  target.dispose();
+  source.dispose();
+  pass.dispose();
+  renderer.dispose();
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

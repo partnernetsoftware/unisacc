@@ -89,7 +89,8 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
     },
   };
 
-  function render(stamp, read, write, shader, additive) {
+  function render(stamp, read, write, shader, additive, amount = null) {
+    if (amount !== null && (!Number.isFinite(amount) || Math.abs(amount) > 65536)) return -1n;
     if (gl.isContextLost()) return -6n;
     if (stamp !== BigInt(currentGeneration())) return -3n;
     if (read < 1n || read > 1024n || write < 0n || write > 1024n || read === write) return -1n;
@@ -106,7 +107,8 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
     const program = copyProgram(gl, ...sources);
     if (!program) return gl.isContextLost() ? -6n : -14n;
     const sampler = gl.getUniformLocation(program, "source");
-    if (sampler === null) {
+    const scalar = amount === null ? null : gl.getUniformLocation(program, "u_amount");
+    if (sampler === null || (amount !== null && scalar === null)) {
       gl.deleteProgram(program);
       return -14n;
     }
@@ -139,6 +141,7 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.bindSampler(0, null);
       gl.uniform1i(sampler, 0);
+      if (scalar !== null) gl.uniform1f(scalar, amount);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       return gl.isContextLost() ? -6n : gl.getError() === gl.NO_ERROR ? 0n : -14n;
     } finally {
@@ -164,5 +167,6 @@ export function createGpuNativeSample(gl, currentGeneration, memory) {
     targets,
     copy: (stamp, read, write, shader) => render(stamp, read, write, shader, false),
     add: (stamp, read, write, shader) => render(stamp, read, write, shader, true),
+    filter: (stamp, read, write, shader, amount) => render(stamp, read, write, shader, false, amount),
   };
 }
