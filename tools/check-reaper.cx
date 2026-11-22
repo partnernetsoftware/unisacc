@@ -158,16 +158,17 @@ static int orphan_root(void *ud) {
     return 0;
 }
 
-/* The middle of the escape chain: starts the sleeper in its own session (it left the process
-   group) and stays alive, so the sleeper is a provable descendant by its parent chain.  Before
-   2026-11-23 the middle returned at once: that orphan shape (parent gone before the kill) cannot
-   be told from an unrelated sibling and is now a negative answer, asserted in its own fixture. */
+/* The middle of the escape chain: starts the sleeper in its own session (it left the process group),
+   announces itself, and exits 150 ms later, so the sleeper loses its parent while it is still running.
+   The fixture snapshots the tree while the middle is still alive; the sleeper writes its pid file only
+   after the middle is gone (late_sleeper waits 300 ms). */
 static int escape_mid(void *ud) {
     int fds[2];
     (void)ud;
     if (sy_fork_session(late_sleeper, "d", fds) <= 0) return 1;
     sy_close(fds[0]); sy_close(fds[1]);
-    sy_sleep_ms(3000);
+    if (write_pid("mid") != 0) return 2;
+    sy_sleep_ms(150);
     return 0;
 }
 
@@ -326,32 +327,35 @@ static void check_capture(void) {
     np_free(&r);
 }
 
-/* The orphan holds the output pipe after its root exits. In a private PID
-   namespace, make the next child reuse the exact pid of the reaped root.
+/* The orphan holds the output pipe after its root exits. The tree is snapshotted while the root is
+   still unreaped (the root lives 100 ms after it forked the orphan), then the root is reaped and
+   the sweep runs on the snapshot only.  In a private PID namespace, make the next child reuse the
+   exact pid of the reaped root: the sentinel is not in the snapshot, so it is never touched.
    The ordinary batch supplies the sentinel's live pid at the same boundary. */
 static int check_reaped_root(int exact) {
     int fds[2], root, orphan = 0, sentinel, st, w, res;
     char report[256];
+    rp_snap_t snap;
     if (exact && sy_pid() != 1) return 2;
     if (rp_subreaper() || pipe(fds)) return 2;
     root = fork();
     if (root < 0) return 2;
     if (root == 0) {
         close(fds[0]);
-        if (!exact) sy_setpgid(0, 0);   /* the orphan stays in this group: provably the root's */
         int child = fork();
         if (child == 0) {
             sy_sleep_ms(3000);
             _exit(0);
         }
         long wrote = write(fds[1], &child, sizeof child);
+        sy_sleep_ms(100);
         _exit(wrote == sizeof child && child > 0 ? 0 : 1);
     }
     close(fds[1]);
-    if (!exact) sy_setpgid(root, root);
-    long long root_start = rp_root_start(root);
     long got = read(fds[0], &orphan, sizeof orphan);
-    if (waitpid(root, &st, 0) != root || st || got != sizeof orphan || orphan <= 1) return 2;
+    if (got != sizeof orphan || orphan <= 1 || rp_snapshot(root, 0, 0, &snap) != 0) return 2;
+    ok(snap.n == 1 && snap.e[0].pid == orphan, "reaped-root: the snapshot taken before the reap holds the orphan");
+    if (waitpid(root, &st, 0) != root || st) return 2;
     if (exact) {
         char pid_text[32];
         int n = tx_snprintf(pid_text, sizeof pid_text, "%d\n", root - 1);
@@ -370,10 +374,8 @@ static int check_reaped_root(int exact) {
     }
     sy_setpgid(sentinel, sentinel);
     if (exact) ok(sentinel == root, "reaped-root: replacement owns the reused pid");
-    {   int keep_s[1];
-        keep_s[0] = sentinel;   /* an unrelated live child the caller declares is not the job's */
-        res = rp_kill_tree_pid_after_wait(root, 1, root_start, 1000, keep_s, 1, report, sizeof report);
-    }
+    res = rp_kill_tree_snap(root, 1, &snap, 1000, 0, 0, report, sizeof report);
+    sy_sleep_ms(100);   /* signals land asynchronously: observe after they would have */
     w = waitpid(sentinel, &st, WNOHANG | WUNTRACED);
     ok(w == 0, "reaped-root: replacement neither stopped nor killed");
     if (w == 0 || (w == sentinel && WIFSTOPPED(st))) {
@@ -381,15 +383,100 @@ static int check_reaped_root(int exact) {
         (void)waitpid(sentinel, &st, 0);
     }
     w = waitpid(orphan, &st, WNOHANG);
-    if (exact)
-        ok(res < 0 && w == 0, "reaped-root: an orphan outside any provable group is neither signalled nor reported clean");
-    else
-        ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)), "reaped-root: orphan holding the output pipe is gone");
+    ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)),
+       "reaped-root: orphan holding the output pipe is gone");
     if (w == 0) {
         sy_kill(orphan);
         (void)waitpid(orphan, &st, 0);
     }
     sy_close(fds[0]);
+    return 0;
+}
+
+/* Snapshot identity, no pid namespace needed.  A member whose starttime no longer matches (the shape
+   of a reused pid; here the recorded value is shifted, the processes are real) is never signalled and
+   the answer is negative; the same snapshot with the true starttime kills the member and answers 0. */
+static int check_snapshot_identity(void) {
+    int round;
+    for (round = 0; round < 2; round++) {
+        int fds[2], root, member = 0, st, res, w;
+        char report[256];
+        rp_snap_t snap;
+        if (pipe(fds)) return 2;
+        root = fork();
+        if (root < 0) return 2;
+        if (root == 0) {
+            close(fds[0]);
+            sy_setpgid(0, 0);
+            int c = fork();
+            if (c == 0) { sy_sleep_ms(3000); _exit(0); }
+            long wrote = write(fds[1], &c, sizeof c);
+            sy_sleep_ms(100);
+            _exit(wrote == sizeof c ? 0 : 1);
+        }
+        close(fds[1]);
+        sy_setpgid(root, root);
+        if (read(fds[0], &member, sizeof member) != sizeof member) return 2;
+        close(fds[0]);
+        if (rp_snapshot(root, 0, 0, &snap) != 0 || snap.n != 1) return 2;
+        if (round == 0) snap.e[0].start += 1000;   /* the recorded identity is no longer the member's */
+        if (waitpid(root, &st, 0) != root) return 2;
+        res = rp_kill_tree_snap(root, 1, &snap, 1000, 0, 0, report, sizeof report);
+        sy_sleep_ms(100);
+        w = waitpid(member, &st, WNOHANG | WUNTRACED);
+        if (round == 0)
+            ok(w == 0 && res < 0, "snapshot-identity: a member whose starttime changed is not signalled and the answer is negative");
+        else
+            ok(res == 0 && (w == member || (w < 0 && errno == ECHILD)), "snapshot-identity: a member with its true starttime is killed and the answer is 0");
+        if (w == 0) { sy_kill(member); (void)waitpid(member, &st, 0); }
+    }
+    return 0;
+}
+
+/* Gatekeeper a1, in a private PID namespace.  Root R (group leader) is snapshotted, exits and is
+   reaped; its pid is then reused by an unrelated sibling X, which makes group R and forks a
+   bystander Y into it, and exits.  The group number R names a live group again, but Y is not in the
+   snapshot: it must be neither stopped nor killed, by the snapshot entry and by entry B alike. */
+static int check_reaped_group_reuse(void) {
+    int pf[2], Y = 0, X, R, st, w, res;
+    char report[256], pid_text[32];
+    rp_snap_t snap;
+    int fd, n;
+    if (sy_pid() != 1) return 2;
+    if (rp_subreaper() || pipe(pf)) return 2;
+    R = fork();
+    if (R < 0) return 2;
+    if (R == 0) { sy_setpgid(0, 0); sy_sleep_ms(100); _exit(0); }
+    sy_setpgid(R, R);
+    if (rp_snapshot(R, 0, 0, &snap) != 0) return 2;
+    if (waitpid(R, &st, 0) != R) return 2;
+    sy_sleep_ms(30);
+    n = tx_snprintf(pid_text, sizeof pid_text, "%d\n", R - 1);
+    fd = sy_open("/proc/sys/kernel/ns_last_pid", O_WRONLY, 0);
+    if (fd < 0) return 2;
+    if (sy_write_all(fd, pid_text, n) != 0) { sy_close(fd); return 2; }
+    sy_close(fd);
+    X = fork();
+    if (X < 0) return 2;
+    if (X == 0) {
+        sy_setpgid(0, 0);
+        int y = fork();
+        if (y == 0) { close(pf[0]); close(pf[1]); sy_sleep_ms(3000); _exit(0); }
+        write(pf[1], &y, sizeof y);
+        _exit(0);
+    }
+    close(pf[1]);
+    if (read(pf[0], &Y, sizeof Y) != sizeof Y) return 2;
+    close(pf[0]);
+    if (waitpid(X, &st, 0) != X) return 2;
+    sy_sleep_ms(30);
+    ok(X == R && Y > 1, "reaped-group-reuse: an unrelated sibling took the root pid and put a bystander into group R");
+    res = rp_kill_tree_snap(R, 1, &snap, 1000, 0, 0, report, sizeof report);
+    sy_sleep_ms(100);
+    w = waitpid(Y, &st, WNOHANG | WUNTRACED);
+    ok(w == 0, "reaped-group-reuse: snapshot entry leaves the bystander neither stopped nor killed");
+    if (w == 0 || (w == Y && WIFSTOPPED(st))) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
+    (void)res;
     return 0;
 }
 
@@ -424,8 +511,10 @@ static int check_pid_reuse_starttime(void) {
     sy_setpgid(Y, Y);
     ok(Y == X, "pid-reuse: the unrelated process reused the orphan's pid");
     ok(rp_root_start(Y) != base, "pid-reuse: the reused pid has a different starttime");
-    /* entry B with the OLD baseline: the reused pid must not match and must not be signalled */
+    /* entry B without a snapshot never signals anything once the root is reaped (the old baseline-only
+       sweep matched any later child of ours, this one included) */
     res = rp_kill_tree_pid_after_wait(Y, 1, base, 500, 0, 0, report, sizeof report);
+    sy_sleep_ms(100);
     w = waitpid(Y, &st, WNOHANG | WUNTRACED);
     ok(w == 0, "pid-reuse: the reused pid is neither stopped nor killed");
     if (w == 0 || (w == Y && WIFSTOPPED(st))) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
@@ -504,8 +593,13 @@ int main(int argc, char **argv) {
         printf("CX_REAPER_PIDREUSE\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);
         return rc ? rc : nfail != 0;
     }
+    /* Not redundant: this mode needs a private PID namespace (unshare -U -r -p -f --mount-proc) so the
+       replacement child gets the EXACT pid of the reaped root. It guards the "no signal by pid number"
+       property. It does NOT guard the starttime recheck: with that recheck removed it stays green; that
+       property is held by the snapshot-identity fixture in the ordinary batch. */
     if (argc == 2 && !strcmp(argv[1], "--reaped-root-pidns")) {
         int rc = check_reaped_root(1);
+        if (!rc) rc = check_reaped_group_reuse();
         printf("CX_REAPER_PIDNS\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);
         return rc ? rc : nfail != 0;
     }
@@ -521,6 +615,7 @@ int main(int argc, char **argv) {
     cap_nproc();
     ok(sy_child_subreaper() == 0, "child_subreaper: this process adopts the orphans of a job");
     ok(check_reaped_root(0) == 0, "reaped-root: fixture completed");
+    ok(check_snapshot_identity() == 0, "snapshot-identity: fixture completed");
     ok(sy_kill_tree(1, 500, 0, 0, rep, sizeof rep) == -EINVAL, "kill_tree: pid 1 is not a job root");
 
     /* A pid that already exited has no tree and nothing to prove. */
@@ -566,7 +661,7 @@ int main(int argc, char **argv) {
     ok(!running(root) && !running(g1) && !running(g2), "tree: root and both grandchildren are gone");
     ok(alive(keep_pid), "tree: the kept child survived the kill");
 
-    /* escape: a sleeper that lost its parent before the kill */
+    /* escape: a sleeper that lost its parent before the kill (snapshot taken while its parent lived) */
     eroot = sy_fork_session(escape_root, 0, fds);
     remember(eroot);
     if (eroot > 0) { sy_close(fds[0]); sy_close(fds[1]); }
@@ -574,10 +669,15 @@ int main(int argc, char **argv) {
         int rr = await_pid("eroot");
         if (eroot <= 0) eroot = rr;
     }
-    d = await_pid("d");
-    ok(eroot > 0 && d > 0 && alive(eroot) && alive(d), "escape: root and the detached sleeper are running");
-    rep[0] = 0;
-    res = sy_kill_tree(eroot, 1500, 0, 0, rep, sizeof rep);
+    {
+        rp_snap_t esnap;
+        int mid = await_pid("mid");
+        ok(mid > 0 && rp_snapshot(eroot, 0, 0, &esnap) == 0 && esnap.n >= 2, "escape: the snapshot, taken while the middle lives, holds the middle and the sleeper");
+        d = await_pid("d");
+        ok(eroot > 0 && d > 0 && alive(eroot) && alive(d), "escape: root and the detached sleeper are running");
+        rep[0] = 0;
+        res = rp_kill_tree_snap(eroot, 0, &esnap, 1500, 0, 0, rep, sizeof rep);
+    }
     ok(!running(eroot), "escape: the root is gone");
     ok(!running(d), "escape: the detached sleeper is gone");
     ok(res == 0 && rep[0] == 0, "escape: kill_tree reports no residue");
