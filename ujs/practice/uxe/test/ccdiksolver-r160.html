@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CCDIKSolver r160 reference</title>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<pre id="r160">pending</pre>
+<script type="module">
+import { Bone, REVISION, Skeleton, SkinnedMesh, Vector3 } from 'three';
+
+const report = document.querySelector('#r160');
+try {
+  if (REVISION !== '160') throw new Error('expected Three.js r160');
+  const packagePath = new URLSearchParams(location.search).get('package');
+  const { CCDIKSolver } = await import(`file://${packagePath}/examples/jsm/animation/CCDIKSolver.js`);
+  function solve({ goal, count = 2, iterations = 1, min, max, disabled = -1, tilt = false }) {
+    const mesh = new SkinnedMesh();
+    const bones = Array.from({ length: count + 2 }, () => new Bone());
+    mesh.add(bones[0], bones[count + 1]);
+    if (tilt) bones[0].quaternion.setFromAxisAngle(new Vector3(1, 0, 0), Math.PI / 2);
+    for (let i = 1; i <= count; ++i) {
+      bones[i - 1].add(bones[i]);
+      bones[i].position.x = 1;
+    }
+    bones[count + 1].position.set(...goal);
+    mesh.updateMatrixWorld(true);
+    mesh.bind(new Skeleton(bones));
+    const ik = {
+      target: count + 1, effector: count, iteration: iterations, minAngle: min, maxAngle: max,
+      links: Array.from({ length: count }, (_, i) => {
+        const index = count - 1 - i;
+        return { index, enabled: index !== disabled };
+      })
+    };
+    new CCDIKSolver(mesh, [ik]).update();
+    return { tip: new Vector3().setFromMatrixPosition(bones[count].matrixWorld), bones };
+  }
+
+  const arc = Math.PI / 6;
+  const square = solve({ goal: [1, 1, 0] });
+  const maximum = solve({ goal: [1, 1, 0], max: arc });
+  const minimum = solve({ goal: [2, 0.1, 0], min: arc });
+  const repeat = solve({ goal: [-1, 1, 0], iterations: 2, max: arc });
+  const disabled = solve({ goal: [0, 2, 0], max: arc, disabled: 0 });
+  const tilted = solve({ goal: [1, 0, 1], tilt: true });
+  const longer = solve({ goal: [0, 3, 0], count: 3, max: arc });
+  const aligned = solve({ goal: [2, 0, 0], min: arc, iterations: 5 });
+  const zero = solve({ goal: [0, 3, 0], iterations: 0 });
+  report.textContent = JSON.stringify([
+    square.tip.x, square.tip.y, square.bones[0].quaternion.z, square.bones[1].quaternion.z,
+    maximum.tip.y, minimum.tip.x, minimum.tip.y, repeat.tip.x, repeat.tip.y,
+    disabled.tip.y, disabled.bones[0].quaternion.z, tilted.tip.y, tilted.tip.z,
+    longer.tip.x, longer.tip.y, aligned.tip.x, aligned.bones[1].quaternion.z, zero.tip.x
+  ]);
+} catch (error) {
+  report.textContent = String(error);
+}
+</script>

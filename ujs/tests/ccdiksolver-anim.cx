@@ -1,0 +1,57 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+#define NO_LIMIT "3.141592653589793"
+#define ARC "0.5235987755982988"
+#define SQUARE "2,1,1.0,1.0,0.0,0,0.0,"
+#define MINIMUM "2,1,2.0,0.1,0.0,0," ARC "," NO_LIMIT
+#define REPEAT "2,2,(0.0-1.0),1.0,0.0,0,0.0," ARC
+#define DISABLED "2,1,0.0,2.0,0.0,1,0.0," ARC
+#define TILTED "2,1,1.0,0.0,1.0,2,0.0," NO_LIMIT
+#define LONGER "3,1,0.0,3.0,0.0,0,0.0," ARC
+#define ALIGNED "2,5,2.0,0.0,0.0,0," ARC "," NO_LIMIT
+#define ZERO "2,0,0.0,3.0,0.0,0,0.0," NO_LIMIT
+#define CHECK(input,component) "let solved=ik_probe(" input ");return ux_f64(" component ");"
+
+static const char setup[] =
+    "native function ik_probe(probe_n:i64,probe_i:i64,probe_x:f64,probe_y:f64,probe_z:f64,"
+    "probe_mode:i64,probe_min:f64,probe_max:f64) i64 {"
+      "let probe_root=CCDIKSolver_setVector(0,0.0,0.0,0.0);"
+      "let probe_j=0;"
+      "while(probe_j<=probe_n){"
+        "let probe_slot=probe_j*CCDIKLink.size;"
+        "if(probe_j>0){let probe_offset=CCDIKSolver_setVector(probe_slot,1.0,0.0,0.0);}"
+        "let probe_q=CCDIKSolver_setRotation(probe_slot+CCDIKLink.rotation,0.0,0.0,0.0,1.0);"
+        "let probe_enable=ux_u32_put(probe_slot+CCDIKLink.enabled,probe_mode!=1 || probe_j!=0);"
+        "probe_j=probe_j+1;"
+      "}"
+      "if(probe_mode==2){let probe_qx=CCDIKSolver_setRotation(CCDIKLink.rotation,0.7071067811865475,0.0,0.0,0.7071067811865476);}"
+      "let probe_goal=CCDIKSolver_setVector(1024,probe_x,probe_y,probe_z);"
+      "return CCDIKSolver_updateOne(0,probe_n,1024,2048,probe_i,probe_min,probe_max);"
+    "}";
+
+int main(int argc,char **argv) {
+    int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"f64-math","ccdiksolver",0};
+    const char *cases[]={
+        CHECK(SQUARE NO_LIMIT,"solved"), CHECK(SQUARE NO_LIMIT,"solved+8"),
+        CHECK(SQUARE NO_LIMIT,"CCDIKLink.qz"), CHECK(SQUARE NO_LIMIT,"CCDIKLink.size+CCDIKLink.qz"),
+        CHECK(SQUARE ARC,"solved+8"), CHECK(MINIMUM,"solved"), CHECK(MINIMUM,"solved+8"),
+        CHECK(REPEAT,"solved"), CHECK(REPEAT,"solved+8"), CHECK(DISABLED,"solved+8"),
+        CHECK(DISABLED,"CCDIKLink.qz"), CHECK(TILTED,"solved+8"), CHECK(TILTED,"solved+16"),
+        CHECK(LONGER,"solved"), CHECK(LONGER,"solved+8"), CHECK(ALIGNED,"solved"),
+        CHECK(ALIGNED,"CCDIKLink.size+CCDIKLink.qz"), CHECK(ZERO,"solved")
+    };
+    // Analytic unit-segment poses: square (0,90), maximum (30,60),
+    // minimum (-30,0), repeat (60,120), and three links (30,60,90).
+    // The angles are absolute segment headings in degrees.
+    const double half_root3=0.86602540378443864676;
+    const double gold[]={
+        1,1,0,0.70710678118654752440,
+        0.5+half_root3,1+half_root3,-0.5,0,2*half_root3,
+        0.5,0,0,1,0.5+half_root3,1.5+half_root3,2,0,2
+    };
+    return g_wasm_batch_addon("G_ANIM CCDIKSolver rigid chain","ccdiksolver",argv[1],modules,setup,cases,gold,
+        sizeof cases/sizeof cases[0],mutate?4:-1,CHECK(SQUARE NO_LIMIT,"solved+8"));
+}

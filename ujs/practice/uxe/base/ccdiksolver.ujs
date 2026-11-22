@@ -1,0 +1,159 @@
+// Rigid chain ordered root to tip. Position is the parent-local offset,
+// rotation is a unit local quaternion, and enabled=0 stops the reverse sweep.
+// The effector record needs only position. One chain is solved per call.
+struct CCDIKLink { position: f64; py: f64; pz: f64; rotation: f64; qy: f64; qz: f64; qw: f64; enabled: u32; }
+
+native function CCDIKSolver_setVector(dst:i64, x:f64, y:f64, z:f64) i64 {
+  let write_x = ux_f64_put(dst, x);
+  let write_y = ux_f64_put(dst + 8, y);
+  let write_z = ux_f64_put(dst + 16, z);
+  return dst;
+}
+
+native function CCDIKSolver_setRotation(dst:i64, x:f64, y:f64, z:f64, w:f64) i64 {
+  let write_xyz = CCDIKSolver_setVector(dst, x, y, z);
+  let write_w = ux_f64_put(dst + 24, w);
+  return dst;
+}
+
+native function CCDIKSolver_multiply(dst:i64, a:i64, b:i64) i64 {
+  let ax = ux_f64(a); let ay = ux_f64(a + 8); let az = ux_f64(a + 16); let aw = ux_f64(a + 24);
+  let bx = ux_f64(b); let by = ux_f64(b + 8); let bz = ux_f64(b + 16); let bw = ux_f64(b + 24);
+  return CCDIKSolver_setRotation(dst,
+      ax*bw + aw*bx + ay*bz - az*by,
+      ay*bw + aw*by + az*bx - ax*bz,
+      az*bw + aw*bz + ax*by - ay*bx,
+      aw*bw - ax*bx - ay*by - az*bz);
+}
+
+native function CCDIKSolver_apply(v:i64, q:i64, sign:f64) i64 {
+  let x = ux_f64(v); let y = ux_f64(v + 8); let z = ux_f64(v + 16);
+  let qx = ux_f64(q) * sign; let qy = ux_f64(q + 8) * sign;
+  let qz = ux_f64(q + 16) * sign; let qw = ux_f64(q + 24);
+  let tx = 2.0 * (qy*z - qz*y);
+  let ty = 2.0 * (qz*x - qx*z);
+  let tz = 2.0 * (qx*y - qy*x);
+  return CCDIKSolver_setVector(v, x + qw*tx + (qy*tz - qz*ty),
+      y + qw*ty + (qz*tx - qx*tz), z + qw*tz + (qx*ty - qy*tx));
+}
+
+native function CCDIKSolver_addScaled(dst:i64, a:i64, b:i64, sign:f64) i64 {
+  return CCDIKSolver_setVector(dst, ux_f64(a) + sign*ux_f64(b),
+      ux_f64(a + 8) + sign*ux_f64(b + 8), ux_f64(a + 16) + sign*ux_f64(b + 16));
+}
+
+native function CCDIKSolver_dot(a:i64, b:i64) f64 {
+  return ux_f64(a)*ux_f64(b) + ux_f64(a + 8)*ux_f64(b + 8) + ux_f64(a + 16)*ux_f64(b + 16);
+}
+
+native function CCDIKSolver_normalize(v:i64) i64 {
+  let length = f64_sqrt(CCDIKSolver_dot(v, v));
+  if (length == 0.0) { return 0; }
+  let inverse_length = 1.0 / length;
+  let write_normal = CCDIKSolver_setVector(v, ux_f64(v)*inverse_length,
+      ux_f64(v + 8)*inverse_length, ux_f64(v + 16)*inverse_length);
+  return 1;
+}
+
+native function CCDIKSolver_cross(dst:i64, a:i64, b:i64) i64 {
+  let ax = ux_f64(a); let ay = ux_f64(a + 8); let az = ux_f64(a + 16);
+  let bx = ux_f64(b); let by = ux_f64(b + 8); let bz = ux_f64(b + 16);
+  return CCDIKSolver_setVector(dst, ay*bz - az*by, az*bx - ax*bz, ax*by - ay*bx);
+}
+
+native function CCDIKSolver_world(ik_world:i64, ik_links:i64, ik_count:i64) i64 {
+  let ik_result = CCDIKSolver_setVector(ik_world, ux_f64(ik_links), ux_f64(ik_links + 8), ux_f64(ik_links + 16));
+  let ik_root_rotation = CCDIKSolver_setRotation(ik_world + CCDIKLink.rotation,
+      ux_f64(ik_links + CCDIKLink.rotation), ux_f64(ik_links + CCDIKLink.qy),
+      ux_f64(ik_links + CCDIKLink.qz), ux_f64(ik_links + CCDIKLink.qw));
+  let ik_child_index = 1;
+  while (ik_child_index <= ik_count) {
+    let ik_local = ik_links + ik_child_index * CCDIKLink.size;
+    let ik_child = ik_world + ik_child_index * CCDIKLink.size;
+    let ik_parent = ik_child - CCDIKLink.size;
+    let ik_parent_q = ik_parent + CCDIKLink.rotation;
+    let ik_offset = CCDIKSolver_setVector(ik_child, ux_f64(ik_local), ux_f64(ik_local + 8), ux_f64(ik_local + 16));
+    let ik_rotated_offset = CCDIKSolver_apply(ik_child, ik_parent_q, 1.0);
+    let ik_position = CCDIKSolver_addScaled(ik_child, ik_child, ik_parent, 1.0);
+    if (ik_child_index < ik_count) {
+      let ik_rotation = CCDIKSolver_multiply(ik_child + CCDIKLink.rotation,
+          ik_parent_q, ik_local + CCDIKLink.rotation);
+    }
+    ik_child_index = ik_child_index + 1;
+  }
+  return ik_world + ik_count * CCDIKLink.size;
+}
+
+native function CCDIKSolver_rotate(ik_joint:i64, ik_pose:i64, ik_tip:i64, ik_goal:i64,
+    ik_workspace:i64, ik_min:f64, ik_max:f64) i64 {
+  let ik_from = ik_workspace;
+  let ik_to = ik_from + 24;
+  let ik_axis = ik_to + 24;
+  let ik_q = ik_axis + 24;
+  let ik_pose_rotation = ik_pose + CCDIKLink.rotation;
+  let ik_diff_from = CCDIKSolver_addScaled(ik_from, ik_tip, ik_pose, 0.0 - 1.0);
+  let ik_diff_to = CCDIKSolver_addScaled(ik_to, ik_goal, ik_pose, 0.0 - 1.0);
+  let ik_rotate_from = CCDIKSolver_apply(ik_from, ik_pose_rotation, 0.0 - 1.0);
+  let ik_rotate_to = CCDIKSolver_apply(ik_to, ik_pose_rotation, 0.0 - 1.0);
+  let ik_unit_from = CCDIKSolver_normalize(ik_from);
+  let ik_unit_to = CCDIKSolver_normalize(ik_to);
+  if (ik_unit_from == 0 || ik_unit_to == 0) { return 0; }
+  let ik_cosine = CCDIKSolver_dot(ik_from, ik_to);
+  if (ik_cosine > 1.0) { ik_cosine = 1.0; }
+  if (ik_cosine < 0.0 - 1.0) { ik_cosine = 0.0 - 1.0; }
+  let ik_angle = ux_math_acos(ik_cosine);
+  if (ik_angle < 0.00001) { return 0; }
+  if (ik_angle < ik_min) { ik_angle = ik_min; }
+  if (ik_angle > ik_max) { ik_angle = ik_max; }
+  let ik_cross = CCDIKSolver_cross(ik_axis, ik_from, ik_to);
+  let ik_unit_axis = CCDIKSolver_normalize(ik_axis);
+  if (ik_unit_axis == 0) { return 0; }
+  let ik_half_angle = ik_angle * 0.5;
+  let ik_sine = ux_math_sin(ik_half_angle);
+  let ik_delta = CCDIKSolver_setRotation(ik_q, ux_f64(ik_axis)*ik_sine,
+      ux_f64(ik_axis + 8)*ik_sine, ux_f64(ik_axis + 16)*ik_sine, ux_math_cos(ik_half_angle));
+  let ik_modified = CCDIKSolver_multiply(ik_joint, ik_joint, ik_delta);
+  return 1;
+}
+
+// Scratch uses (count+1)*CCDIKLink.size + 104 bytes. Returns the effector
+// world position pointer inside scratch, or -1 for invalid bounds.
+// A zero direction or cross product leaves the current joint unchanged.
+native function CCDIKSolver_updateOne(ik_chain:i64, ik_length:i64, ik_target:i64,
+    ik_scratch:i64, ik_iterations:i64, ik_min_angle:f64, ik_max_angle:f64) i64 {
+  if (ik_length < 1 || ik_length > 16 || ik_iterations < 0 || ik_iterations > 64) { return 0 - 1; }
+  if (!(ik_min_angle >= 0.0 && ik_max_angle >= ik_min_angle && ik_max_angle <= 3.141592653589793)) { return 0 - 1; }
+  let ik_chain_size = (ik_length + 1) * CCDIKLink.size;
+  let ik_end_memory = 6291456;
+  if (ik_chain < 0 || ik_chain > ik_end_memory - ik_chain_size ||
+      ik_target < 0 || ik_target > ik_end_memory - 24 ||
+      ik_scratch < 0 || ik_scratch > ik_end_memory - ik_chain_size - 104) { return 0 - 1; }
+  if (ik_chain < ik_scratch + ik_chain_size + 104 && ik_scratch < ik_chain + ik_chain_size) { return 0 - 1; }
+  if (ik_target < ik_chain + ik_chain_size && ik_chain < ik_target + 24) { return 0 - 1; }
+  if (ik_target < ik_scratch + ik_chain_size + 104 && ik_scratch < ik_target + 24) { return 0 - 1; }
+
+  let ik_effector = CCDIKSolver_world(ik_scratch, ik_chain, ik_length);
+  let ik_pass = 0;
+  while (ik_pass < ik_iterations) {
+    let ik_index = ik_length;
+    let ik_changed = 0;
+    while (ik_index > 0) {
+      ik_index = ik_index - 1;
+      let ik_bone = ik_chain + ik_index * CCDIKLink.size;
+      if (ux_u32(ik_bone + CCDIKLink.enabled) == 0) {
+        ik_index = 0;
+      } else {
+        let ik_bone_world = ik_scratch + ik_index * CCDIKLink.size;
+        let ik_moved = CCDIKSolver_rotate(ik_bone + CCDIKLink.rotation, ik_bone_world, ik_effector,
+            ik_target, ik_scratch + ik_chain_size, ik_min_angle, ik_max_angle);
+        if (ik_moved != 0) {
+          ik_changed = 1;
+          ik_effector = CCDIKSolver_world(ik_scratch, ik_chain, ik_length);
+        }
+      }
+    }
+    if (ik_changed == 0) { return ik_effector; }
+    ik_pass = ik_pass + 1;
+  }
+  return ik_effector;
+}
