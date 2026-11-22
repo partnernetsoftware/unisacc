@@ -32,6 +32,7 @@
  * stale or doubled close is -EBADF.  Only L0 sy_/tx_/mm_/pt_ calls and the implicit runtime. */
 #pragma unisa module fs
 #pragma unisa use sys.fs
+#pragma unisa use sys.io
 #pragma unisa use sys.env
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
@@ -158,11 +159,13 @@ int fsx_rmtree(const char *path) {
 }
 
 /* ---- scratch directories ---- */
-enum { FSX_STALE_SEC = 1800 };   /* 30 min wall-clock age for dead-pid same-prefix reap */
+enum { FSX_STALE_SEC = 1800, FSX_REAP_SLOTS = 8 };   /* 30 min wall-clock age; per-process prefix throttle table */
 static struct { int used, gen, owner_pid; unsigned long dev; long ino; char path[FSX_PATH]; } fsx_sc[FSX_SLOTS];
 static int fsx_sc_hooked_pid;
 static int fsx_sc_reaped_pid;
-static char fsx_sc_reaped_pfx[256];
+static int fsx_sc_reaped_n;
+static char fsx_sc_reaped_pfxs[FSX_REAP_SLOTS][256];
+static int fsx_sc_warned_pid;
 static volatile int fsx_sc_in_sig;
 
 static int fsx_sc_get(int h) {
@@ -293,13 +296,18 @@ static int fsx_sc_parse_name(const char *nm, long nl, const char *pfx, long pl, 
 static void fsx_sc_reap_stale(const char *tdir, const char *pfx) {
     sy_dir_t d;
     long pl = tx_len(pfx, 255), now_s = sy_wall_s(), uid = sy_euid();
-    int me = sy_pid();
+    int me = sy_pid(), k;
     if (pl <= 0 || now_s <= 0) return;
     if (sy_exists("/proc/self") != 1) return;   /* conservative when /proc is absent */
-    if (fsx_sc_reaped_pid == me && tx_eqz(fsx_sc_reaped_pfx, pfx)) return;
-    fsx_sc_reaped_pid = me;
-    mm_copy(fsx_sc_reaped_pfx, sizeof fsx_sc_reaped_pfx, pfx, pl);
-    fsx_sc_reaped_pfx[pl] = 0;
+    if (fsx_sc_reaped_pid != me) { fsx_sc_reaped_pid = me; fsx_sc_reaped_n = 0; }
+    for (k = 0; k < fsx_sc_reaped_n; k++) {
+        if (tx_eqz(fsx_sc_reaped_pfxs[k], pfx)) return;
+    }
+    if (fsx_sc_reaped_n < FSX_REAP_SLOTS) {
+        mm_copy(fsx_sc_reaped_pfxs[fsx_sc_reaped_n], sizeof fsx_sc_reaped_pfxs[0], pfx, pl);
+        fsx_sc_reaped_pfxs[fsx_sc_reaped_n][pl] = 0;
+        fsx_sc_reaped_n++;
+    }
     if (sy_dir_open(&d, tdir) != 0) return;
     while (sy_dir_next(&d) == 1) {
         const char *nm = d.name;
@@ -317,7 +325,13 @@ static void fsx_sc_reap_stale(const char *tdir, const char *pfx) {
         for (j = 0; j < FSX_SLOTS; j++) {
             if (fsx_sc[j].used && fsx_sc[j].dev == st.dev && fsx_sc[j].ino == st.ino) { active = 1; break; }
         }
-        if (!active) (void)fsx_rmtree(full);
+        if (!active) {
+            int rrc = fsx_rmtree(full);
+            if (rrc != 0 && fsx_sc_warned_pid != me) {
+                fsx_sc_warned_pid = me;
+                sy_eprintf("fsx_scratch: reap-failed path=%s rc=%d\n", full, rrc);
+            }
+        }
     }
     sy_dir_close(&d);
 }
