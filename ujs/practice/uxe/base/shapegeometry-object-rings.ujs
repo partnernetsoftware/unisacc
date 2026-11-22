@@ -1,0 +1,102 @@
+// One polygon Shape with up to four holes and 32 points, concatenated
+// outer first. Rings omit their repeated closing point.
+struct ShapeGeometryJson {
+  points: u32;
+  capacity: u32;
+  ringCounts: u32;
+  rings: u32;
+  geometryId: u32;
+  shapeId: u32;
+  curveSegments: u32;
+}
+
+native function sg_json_span(at:i64,size:i64,align:i64) i64 {
+  return at>=0 && size>=0 && at%align==0 && at<=6291456-size;
+}
+
+native function sg_json_pair(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an==0 || bn==0 || a+an<=b || b+bn<=a;
+}
+
+native function sg_json_storage(record:i64,input:i64,bytes:i64,work:i64,space:i64) i64 {
+  if(!sg_json_span(record,ShapeGeometryJson.size,4) || !sg_json_span(input,bytes,1) ||
+     !sg_json_span(work,space,8)) { return 0; }
+  let capacity=ux_u32(record+ShapeGeometryJson.capacity);
+  let points=ux_u32(record+ShapeGeometryJson.points);
+  let counts=ux_u32(record+ShapeGeometryJson.ringCounts);
+  if(capacity<3 || capacity>32 || points%8!=0 || counts%4!=0) { return 0; }
+  let at=[record,input,work,points,counts,ux_u32(record+ShapeGeometryJson.geometryId),ux_u32(record+ShapeGeometryJson.shapeId)];
+  let sizes=[ShapeGeometryJson.size,bytes,space,capacity*16,20,36,36];
+  let i=0;
+  while(i<7) {
+    if(!sg_json_span(at[i],sizes[i],1)) { return 0; }
+    let j=0;
+    while(j<i) {
+      if(!sg_json_pair(at[i],sizes[i],at[j],sizes[j])) { return 0; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function sg_json_count(record:i64) i64 {
+  let rings=ux_u32(record+ShapeGeometryJson.rings);
+  let counts=ux_u32(record+ShapeGeometryJson.ringCounts);
+  let capacity=ux_u32(record+ShapeGeometryJson.capacity);
+  let total=0;
+  let i=0;
+  while(i<rings) {
+    let count=ux_u32(counts+i*4);
+    if(count<3 || count>capacity-total) { return 0-1; }
+    total=total+count;
+    i=i+1;
+  }
+  return total;
+}
+
+native function sg_json_coord_valid(value:f64) i64 {
+  let bound=3402823466385288.0*1000000000000.0*100000000000.0;
+  return value>=0.0-bound && value<=bound;
+}
+
+native function ShapeGeometry_fromRings(mesh:i64,record:i64,work:i64,space:i64) i64 {
+  if(!sg_json_storage(record,0,0,work,space) || !sg_json_span(mesh,GeometryBuffers.size,4)) { return 0-1; }
+  let rings=ux_u32(record+ShapeGeometryJson.rings);
+  if(rings<1 || rings>5) { return 0-1; }
+  let points=ux_u32(record+ShapeGeometryJson.points);
+  let counts=ux_u32(record+ShapeGeometryJson.ringCounts);
+  let n=sg_json_count(record);
+  if(n<3) { return 0-1; }
+  let faces=3*(n+2*(rings-1)-2);
+  let vertices=ux_u32(mesh+GeometryBuffers.vertices);
+  let indices=ux_u32(mesh+GeometryBuffers.indices);
+  if(!GeometryBuffers_fits(mesh,n,faces) ||
+     !sg_json_span(vertices,n*32,4) || !sg_json_span(indices,faces*4,4) ||
+     !sg_json_pair(vertices,n*32,indices,faces*4) ||
+     !sg_json_pair(mesh,GeometryBuffers.size,vertices,n*32) ||
+     !sg_json_pair(mesh,GeometryBuffers.size,indices,faces*4) ||
+     !sg_json_storage(record,vertices,n*32,work,space) ||
+     !sg_json_storage(record,indices,faces*4,work,space) ||
+     !sg_json_storage(record,mesh,GeometryBuffers.size,work,space)) { return 0-1; }
+  let i=0;
+  while(i<n*2) {
+    let value=ux_f64(points+i*8);
+    if(!sg_json_coord_valid(value)) { return 0-1; }
+    i=i+1;
+  }
+  if(rings==1) {
+    if(space<n*24 || !shape_ring_pair(points,n,points,n)) { return 0-1; }
+    return ShapeGeometry_generate(mesh,points,n,work);
+  }
+  let measured=ShapeUtils_triangulateHoles(points,ux_u32(counts),counts+4,rings-1,indices,faces,work,space);
+  if(measured<0) { return measured; }
+  i=0;
+  while(i<n) {
+    let x=ux_f64(points+i*16);
+    let y=ux_f64(points+i*16+8);
+    vertices=GeometryBuffers_vertex(vertices,x,y,0.0,0.0,0.0,1.0,x,y);
+    i=i+1;
+  }
+  return GeometryBuffers_commit(mesh,n,measured);
+}

@@ -1,0 +1,121 @@
+// RGTC stores a 48-bit stream of 3-bit selectors in little-endian order.
+native function bc_rgtc_codes(block:i64) i64 {
+  let codes=0;
+  let i=7;
+  while(i>=2) {
+    codes=256*codes+ux_u8(block+i);
+    i=i-1;
+  }
+  return codes;
+}
+
+native function bc_rgtc_endpoint(value:i64,signedMode:i64) i64 {
+  if(signedMode && value>=128) { return value-256; }
+  return value;
+}
+
+// Quantize the ideal interpolants to the selected byte representation.
+// Keep raw endpoint ordering including the deterministic -127/-128 case.
+native function bc_rgtc_channel(first:i64,second:i64,selector:i64,signedMode:i64) i64 {
+  let a=first;
+  let b=second;
+  if(a==0-128) { a=0-127; }
+  if(b==0-128) { b=0-127; }
+  let value=0;
+  if(selector==0) { value=a; }
+  else if(selector==1) { value=b; }
+  else if(first>second) { value=((8-selector)*a+(selector-1)*b)/7; }
+  else if(selector<=5) { value=((6-selector)*a+(selector-1)*b)/5; }
+  else if(signedMode) {
+    value=127;
+    if(selector==6) { value=0-127; }
+  } else if(selector==7) { value=255; }
+  if(value<0) { return value+256; }
+  return value;
+}
+
+native function bc_rgtc_level(level:i64,data:i64,bytes:i64,width:i64,height:i64,format:i64,blockBytes:i64) i64 {
+  if(!loading_span(level,CompressedMip.size) || data<0 || bytes<0 || data>6291456-bytes ||
+     !file_disjoint(level,CompressedMip.size,data,bytes)) { return 0-1; }
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     bytes!=((width+3)/4)*((height+3)/4)*blockBytes) { return 0-3; }
+  let a=ux_u32_put(level+CompressedMip.data,data);
+  let b=ux_u32_put(level+CompressedMip.bytes,bytes);
+  let c=ux_u32_put(level+CompressedMip.width,width);
+  let d=ux_u32_put(level+CompressedMip.height,height);
+  let e=ux_u32_put(level+CompressedMip.format,format);
+  return level;
+}
+
+native function bc_rgtc_decode(level:i64,dst:i64,capacity:i64,formatBase:i64,blockBytes:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  let format=ux_u32(level+CompressedMip.format);
+  if(format!=formatBase && format!=formatBase+1) { return 0-2; }
+  let signedMode=format==formatBase+1;
+  let alpha=255;
+  if(signedMode) { alpha=127; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  if(width<1 || width>16384 || height<1 || height>16384) { return 0-3; }
+  let columns=(width+3)/4;
+  let rows=(height+3)/4;
+  let output=width*height*4;
+  if(size!=columns*rows*blockBytes || data>6291456-size) { return 0-3; }
+  if(capacity<output || dst<0 || dst>6291456-output ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size) ||
+     !file_disjoint(data,size,level,CompressedMip.size)) { return 0-1; }
+  let by=0;
+  while(by<rows) {
+    let bx=0;
+    while(bx<columns) {
+      let red=data+(by*columns+bx)*blockBytes;
+      let r0=bc_rgtc_endpoint(ux_u8(red),signedMode);
+      let r1=bc_rgtc_endpoint(ux_u8(red+1),signedMode);
+      let rCodes=bc_rgtc_codes(red);
+      let g0=0;
+      let g1=0;
+      let gCodes=0;
+      if(blockBytes==16) {
+        let green=red+8;
+        g0=bc_rgtc_endpoint(ux_u8(green),signedMode);
+        g1=bc_rgtc_endpoint(ux_u8(green+1),signedMode);
+        gCodes=bc_rgtc_codes(green);
+      }
+      let y=0;
+      while(y<4 && by*4+y<height) {
+        let rRow=rCodes%4096;
+        let gRow=gCodes%4096;
+        let x=0;
+        while(x<4 && bx*4+x<width) {
+          let pixel=dst+((by*4+y)*width+bx*4+x)*4;
+          let r=ux_u8_put(pixel,bc_rgtc_channel(r0,r1,rRow%8,signedMode));
+          let g=ux_u8_put(pixel+1,bc_rgtc_channel(g0,g1,gRow%8,signedMode));
+          let b=ux_u8_put(pixel+2,0);
+          let a=ux_u8_put(pixel+3,alpha);
+          rRow=rRow/8;
+          gRow=gRow/8;
+          x=x+1;
+        }
+        rCodes=rCodes/4096;
+        gCodes=gCodes/4096;
+        y=y+1;
+      }
+      bx=bx+1;
+    }
+    by=by+1;
+  }
+  return output;
+}
+
+native function CompressedTexture_bc4Level(level:i64,data:i64,bytes:i64,width:i64,height:i64,format:i64) i64 {
+  if(format!=36283 && format!=36284) { return 0-2; }
+  return bc_rgtc_level(level,data,bytes,width,height,format,8);
+}
+
+// Unsigned input produces RGBA8 UNORM. Signed input produces RGBA8 SNORM.
+native function CompressedTexture_decodeBC4(level:i64,dst:i64,capacity:i64) i64 {
+  return bc_rgtc_decode(level,dst,capacity,36283,8);
+}

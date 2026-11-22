@@ -1,0 +1,116 @@
+// The f64 extension follows the existing Material record. Its field order
+// is shared by the JSON descriptor, indexed access and the shader bridge.
+struct PhysicalObjectFields {
+  color: f64;
+  roughness: f64;
+  metalness: f64;
+  emissive: f64;
+  emissiveIntensity: f64;
+  envMapIntensity: f64;
+  anisotropy: f64;
+  anisotropyRotation: f64;
+  clearcoat: f64;
+  clearcoatRoughness: f64;
+  reflectivity: f64;
+  iridescence: f64;
+  iridescenceIOR: f64;
+  sheen: f64;
+  sheenColor: f64;
+  sheenRoughness: f64;
+}
+
+struct PhysicalObjectVolume {
+  transmission: f64;
+  thickness: f64;
+  attenuationDistance: f64;
+  attenuationColor: f64;
+  specularIntensity: f64;
+  specularColor: f64;
+  wireframe: f64;
+  flatShading: f64;
+  fog: f64;
+  iridescenceMin: f64;
+  iridescenceMax: f64;
+}
+
+native function PhysicalObject_size() i64 {
+  return Material.size+PhysicalObjectFields.size+PhysicalObjectVolume.size;
+}
+
+native function phys_obj_default(field:i64) f64 {
+  if(field==0 || field==19 || field==21) { return 16777215.0; }
+  if(field==1 || field==4 || field==5 || field==15 || field==20 || field==24) { return 1.0; }
+  if(field==10) { return 0.5; }
+  if(field==12) { return 1.3; }
+  if(field==18) { return 1.0/0.0; }
+  if(field==25) { return 100.0; }
+  if(field==26) { return 400.0; }
+  return 0.0;
+}
+
+// 1 feature toggle, 2 boolean, 3 packed color, 4 optional distance,
+// 5 emissive intensity omitted by the wire format at zero and one.
+native function phys_obj_role(field:i64) i64 {
+  if(field==6 || field==8 || field==11 || field==13 || field==16) { return 1; }
+  if(field==22 || field==23 || field==24) { return 2; }
+  if(field==0 || field==3 || field==14 || field==19 || field==21) { return 3; }
+  if(field==18) { return 4; }
+  if(field==4) { return 5; }
+  return 0;
+}
+
+native function phys_obj_disjoint(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an==0 || bn==0 || a+an<=b || b+bn<=a;
+}
+
+native function phys_obj_valid(obj:i64) i64 {
+  return obj>=0 && obj%8==0 && obj<=6291456-PhysicalObject_size() &&
+    ux_u32(obj+Material.id)>0 && ux_u32(obj+Material.type)==17;
+}
+
+native function phys_obj_value_valid(field:i64,value:f64) i64 {
+  let role=phys_obj_role(field);
+  if(role==2) { return value==0.0 || value==1.0; }
+  if(role==3) {
+    return value>=0.0 && value<=16777215.0 && value==f64_floor_i64(value);
+  }
+  if(role==4 && value==1.0/0.0) { return 1; }
+  return value-value==0.0;
+}
+
+native function PhysicalObject_init(obj:i64,id:i64,dispatcher:i64) i64 {
+  if(obj<0 || obj%8!=0 || obj>6291456-PhysicalObject_size() ||
+     !phys_obj_disjoint(obj,PhysicalObject_size(),dispatcher,EventDispatcher.size)) { return 0-1; }
+  let init=Material_init(obj,id,17,dispatcher);
+  if(init<0) { return init; }
+  let i=0;
+  while(i<27) {
+    let value=ux_f64_put(obj+Material.size+i*8,phys_obj_default(i));
+    i=i+1;
+  }
+  return obj;
+}
+
+native function PhysicalObject_set(obj:i64,field:i64,value:f64) i64 {
+  if(!phys_obj_valid(obj) || field<0 || field>=27 || !phys_obj_value_valid(field,value)) { return 0-1; }
+  let at=obj+Material.size+field*8;
+  if(phys_obj_role(field)==1 && (ux_f64(at)>0.0)!=(value>0.0)) {
+    let next=Material_needsUpdate(obj,1);
+    if(next<0) { return next; }
+  }
+  let saved=ux_f64_put(at,value);
+  return obj;
+}
+
+native function PhysicalObject_get(obj:i64,field:i64) f64 {
+  if(!phys_obj_valid(obj) || field<0 || field>=27) { return 0.0/0.0; }
+  return ux_f64(obj+Material.size+field*8);
+}
+
+// Pack only the values consumed by the existing coat lighting kernel.
+native function PhysicalObject_coatParams(obj:i64,out:i64) i64 {
+  if(!phys_obj_valid(obj) || !phys_obj_disjoint(obj,PhysicalObject_size(),out,MeshPhysicalMaterial.size)) { return 0-1; }
+  let fields=obj+Material.size;
+  return MeshPhysicalMaterial_coat(out,ux_f64(fields+PhysicalObjectFields.clearcoat),
+    ux_f64(fields+PhysicalObjectFields.clearcoatRoughness));
+}

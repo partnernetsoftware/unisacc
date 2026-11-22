@@ -1,0 +1,154 @@
+// The source bundle remains immutable while this record borrows from it.
+struct ExtrudeShapeJson {
+  active: u32;
+  shape: u32;
+  shapeEnd: u32;
+  reference: u32;
+  referenceEnd: u32;
+  options: u32;
+  optionsEnd: u32;
+}
+
+native function extrude_json_keys(at:i64) i64 {
+  let labels=[69,120,116,114,117,100,101,71,101,111,109,101,116,114,121,103,101,111,109,101,116,114,105,101,115,115,104,97,112,101,115,116,121,112,101,117,117,105,100,111,112,116,105,111,110,115,104,111,108,101,115,98,101,118,101,108,69,110,97,98,108,101,100,100,101,112,116,104,115,116,101,112,115,101,120,116,114,117,100,101,80,97,116,104,85,86,71,101,110,101,114,97,116,111,114,99,117,114,118,101,83,101,103,109,101,110,116,115];
+  let i=0;
+  while(i<108) {
+    let key=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function extrude_json_storage(at:i64,raw:i64,input:i64,bytes:i64,work:i64) i64 {
+  if(!sg_json_span(at,ExtrudeShapeJson.size,4) || !sg_json_span(raw,GeometryBuffers.size,4) ||
+     !sg_json_span(input,bytes,1) || !sg_json_span(work,2768,8)) { return 0; }
+  let vertices=ux_u32(raw+GeometryBuffers.vertices);
+  let vb=32*ux_u32(raw+GeometryBuffers.vertexCapacity);
+  let indices=ux_u32(raw+GeometryBuffers.indices);
+  let ib=4*ux_u32(raw+GeometryBuffers.indexCapacity);
+  if(!sg_json_span(vertices,vb,4) || !sg_json_span(indices,ib,4)) { return 0; }
+  let regions=[at,ExtrudeShapeJson.size,raw,GeometryBuffers.size,input,bytes,work,2768,vertices,vb,indices,ib];
+  let i=0;
+  while(i<12) {
+    let j=i+2;
+    while(j<12) {
+      if(!sg_json_pair(regions[i],regions[i+1],regions[j],regions[j+1])) { return 0; }
+      j=j+2;
+    }
+    i=i+2;
+  }
+  return 1;
+}
+
+native function extrude_json_number(field:i64,end:i64,fallback:f64) f64 {
+  if(field==0-2) { return fallback; }
+  return json_read_number(field,end);
+}
+
+// A single simple line contour and axial extrusion with bevel disabled.
+native function ExtrudeGeometry_fromJSON(at:i64,raw:i64,input:i64,end:i64,work:i64) i64 {
+  if(end<=input || end-input>16384 || !extrude_json_storage(at,raw,input,end-input,work)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end) { return 0-1; }
+  let keys=extrude_json_keys(work+800);
+  let geometry=sg_only_item(json_find_key(input,last,keys+15,10),last);
+  let shape=sg_only_item(json_find_key(input,last,keys+25,6),last);
+  if(geometry<0 || shape<0) { return 0-1; }
+  let geometryEnd=sg_value_end(geometry,last);
+  let shapeEnd=sg_value_end(shape,last);
+  let shapeType=json_find_key(shape,shapeEnd,keys+31,4);
+  let geometryType=json_find_key(geometry,geometryEnd,keys+31,4);
+  if(geometryType<0 || shapeType<0 || json_scan_string(geometryType,geometryEnd)!=geometryType+17 ||
+     !sg_same_bytes(geometryType+1,keys,15) || json_scan_string(shapeType,shapeEnd)!=shapeType+7 ||
+     !sg_type(shape,shapeEnd,work,435677128787,0,5)) { return 0-1; }
+  let reference=sg_only_item(json_find_key(geometry,geometryEnd,keys+25,6),geometryEnd);
+  let id=json_find_key(shape,shapeEnd,keys+35,4);
+  if(reference<0 || id<0) { return 0-1; }
+  let referenceEnd=json_scan_string(reference,geometryEnd);
+  let idEnd=json_scan_string(id,shapeEnd);
+  if(referenceEnd<=reference+2 || referenceEnd-reference!=idEnd-id ||
+     !sg_same_bytes(reference,id,referenceEnd-reference)) { return 0-1; }
+  let holes=json_find_key(shape,shapeEnd,keys+46,5);
+  if(holes<0 || ux_u8(holes)!=91 || ux_u8(json_space(holes+1,shapeEnd))!=93) { return 0-1; }
+  let options=json_find_key(geometry,geometryEnd,keys+39,7);
+  if(options<0 || ux_u8(options)!=123) { return 0-1; }
+  let optionsEnd=sg_value_end(options,geometryEnd);
+  let bevel=json_find_key(options,optionsEnd,keys+51,12);
+  if(bevel<0 || ux_u8(bevel)!=102 ||
+     json_find_key(options,optionsEnd,keys+73,11)!=0-2 ||
+     json_find_key(options,optionsEnd,keys+84,11)!=0-2) { return 0-1; }
+  let depth=extrude_json_number(json_find_key(options,optionsEnd,keys+63,5),optionsEnd,1.0);
+  let steps=extrude_json_number(json_find_key(options,optionsEnd,keys+68,5),optionsEnd,1.0);
+  let segments=extrude_json_number(json_find_key(options,optionsEnd,keys+95,13),optionsEnd,12.0);
+  let word=4294967296.0;
+  let maxFloat=word*word*word*word*(1.0-1.0/16777216.0);
+  if(!(depth>0.0 && depth<=maxFloat) || !(steps>=1.0 && steps<=4096.0) ||
+     !(segments>=1.0 && segments<=4096.0)) { return 0-1; }
+  let stepCount=f64_floor_i64(steps);
+  if(steps!=0.0+stepCount || segments!=0.0+f64_floor_i64(segments)) { return 0-1; }
+  let contour=work+1104;
+  let count=sg_read_ring(shape,shapeEnd,contour,32,work);
+  if(count<0) { return count; }
+  let built=ExtrudeGeometry_generate(raw,contour,count,depth,stepCount,work+1616);
+  if(built<0) { return built; }
+  let active=ux_u32_put(at+ExtrudeShapeJson.active,1);
+  let s=ux_u32_put(at+ExtrudeShapeJson.shape,shape);
+  let se=ux_u32_put(at+ExtrudeShapeJson.shapeEnd,shapeEnd);
+  let g=ux_u32_put(at+ExtrudeShapeJson.reference,reference);
+  let ge=ux_u32_put(at+ExtrudeShapeJson.referenceEnd,referenceEnd);
+  let o=ux_u32_put(at+ExtrudeShapeJson.options,options);
+  let oe=ux_u32_put(at+ExtrudeShapeJson.optionsEnd,optionsEnd);
+  return at;
+}
+
+native function extrude_json_copy(at:i64,end:i64,source:i64,last:i64) i64 {
+  if(at<0 || last<=source || last-source>end-at) { return 0-1; }
+  let i=0;
+  while(source+i<last) {
+    let byte=ux_u8_put(at+i,ux_u8(source+i));
+    i=i+1;
+  }
+  return at+i;
+}
+
+native function ExtrudeGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,name:i64,nameBytes:i64,scratch:i64) i64 {
+  if(!sg_json_span(at,ExtrudeShapeJson.size,4) || ux_u32(at+ExtrudeShapeJson.active)!=1 ||
+     !sg_json_span(dst,end-dst,1) || end<=dst || !sg_json_span(scratch,108,1) ||
+     !sg_json_span(uuid,uuidBytes,1) || uuidBytes<1 || !sg_json_span(name,nameBytes,1) ||
+     !sg_json_pair(dst,end-dst,scratch,108)) { return 0-1; }
+  let shape=ux_u32(at+ExtrudeShapeJson.shape);
+  let shapeEnd=ux_u32(at+ExtrudeShapeJson.shapeEnd);
+  let ref=ux_u32(at+ExtrudeShapeJson.reference);
+  let refEnd=ux_u32(at+ExtrudeShapeJson.referenceEnd);
+  let options=ux_u32(at+ExtrudeShapeJson.options);
+  let optionsEnd=ux_u32(at+ExtrudeShapeJson.optionsEnd);
+  let readers=[at,ExtrudeShapeJson.size,shape,shapeEnd-shape,ref,refEnd-ref,options,optionsEnd-options,uuid,uuidBytes,name,nameBytes];
+  let i=0;
+  while(i<12) {
+    let source=readers[i];
+    let bytes=readers[i+1];
+    if(!sg_json_span(source,bytes,1) || !sg_json_pair(dst,end-dst,source,bytes) ||
+       !sg_json_pair(scratch,108,source,bytes)) { return 0-1; }
+    i=i+2;
+  }
+  let keys=extrude_json_keys(scratch);
+  let p=dst;
+  // {"geometries":[
+  p=sg_word(p,end,8387230206257472123,8);
+  p=sg_word(p,end,25678142519994738,7);
+  p=geometry_parameter_header(p,end,uuid,uuidBytes,keys,15,name,nameBytes);
+  // ,"shapes":[
+  p=sg_word(p,end,8315175850676003372,8);
+  p=sg_word(p,end,5978658,3);
+  p=extrude_json_copy(p,end,ref,refEnd);
+  // ],"options":
+  p=sg_word(p,end,8028075837014289501,8);
+  p=sg_word(p,end,975336302,4);
+  p=extrude_json_copy(p,end,options,optionsEnd);
+  // }],"shapes":[
+  p=sg_word(p,end,8097868448692723069,8);
+  p=sg_word(p,end,391817360229,5);
+  p=extrude_json_copy(p,end,shape,shapeEnd);
+  p=json_byte(p,end,93);
+  return json_byte(p,end,125);
+}

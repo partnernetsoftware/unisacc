@@ -13,10 +13,16 @@
 | Raycaster | 相机射线和场景网格递归由 raycaster-camera-io.cx 与 raycast-scene-io.cx 验收。场景篡改使子对象命中失败。 | 统一遍历中的混合对象递归分派与通用 intersectObject 和 intersectObjects 入口待补。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
+## 压缩纹理软件范围与设备缺口
+
+BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 只支持线性 LDR 4x4 的常色块和全一范围哨兵，其他足迹、HDR、分区、权重及端点模式均未实现。ETC2 与 EAC 特有模式仍待解码。BC4 与 BC5 的有符号输出为二补码 SNORM。
+
+真实设备对压缩源的原样上传、格式扩展、mip 完整性、数组分层、立方体六面采样及释放仍待取证。r160 对照在这些软件门中只用于枚举与纹理描述，像素期望由独立金值给出。硬件格式的 A/B 计量保持原口径。
+
 ## 几何与材质尚需的类专有验证
 
-(1) EdgesGeometry 与 WireframeGeometry 的参数引用源几何。需验引用解析、缺资源拒绝和生成线段。PolyhedronGeometry 缺顶点数组、索引、半径及细分的参数往返。
+(1) EdgesGeometry 与 WireframeGeometry 的嵌套 PlaneGeometry 源已验，其他源类型和通用资源图仍待接。PolyhedronGeometry 的数组、半径和细分已验，专有复制与释放仍待补。
 
-(2) ShapeGeometry 与 ExtrudeGeometry 缺形状引用及孔洞恢复。ExtrudeGeometry 还需验倒角与曲线挤出。TubeGeometry 缺 Curve 类型和标架的重建。
+(2) ShapeGeometry 已验单 Shape 的直线外环和洞。ExtrudeGeometry 已验单轮廓、无倒角的轴向挤出，孔洞、倒角和路径挤出待补。TubeGeometry 已验 LineCurve3 的开闭管道，其他曲线及其标架待补。
 
-(3) MeshPhysicalMaterial 缺从实例导入导出专有字段，包括清漆、透射及法线参数。ShaderMaterial 与 RawShaderMaterial 缺着色器文本、uniform 类型及资源引用的 JSON 往返。
+(3) MeshPhysicalMaterial 的无贴图字段已验，贴图接线、GPU 透射、独立法线和间接光仍待补。ShaderMaterial 与 RawShaderMaterial 已验源码、GLSL 版本、标量和三维向量 uniform，其他 uniform、extensions 及运行时对象接线待补。

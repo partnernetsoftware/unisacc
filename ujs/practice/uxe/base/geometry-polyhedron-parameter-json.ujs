@@ -1,0 +1,198 @@
+// The source arrays are borrowed immutable for the lifetime of the public object.
+struct PolyhedronParameters {
+  radius: f64;
+  detail: f64;
+}
+
+native function polyhedron_readable(at:i64,raw:i64,arena:i64,bytes:i64,source:i64,values:i64) i64 {
+  if(source%4!=0 || values%8!=0 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,source,PolyhedronGeometry.size) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,values,PolyhedronParameters.size) ||
+     !geometry_public_disjoint(source,PolyhedronGeometry.size,values,PolyhedronParameters.size)) { return 0; }
+  let pos=ux_u32(source+PolyhedronGeometry.sourcePositions);
+  let count=ux_u32(source+PolyhedronGeometry.sourceCount);
+  let ix=ux_u32(source+PolyhedronGeometry.sourceIndices);
+  let corners=ux_u32(source+PolyhedronGeometry.cornerCount);
+  let work=ux_u32(source+PolyhedronGeometry.scratch);
+  return pos%8==0 && ix%4==0 && work%8==0 && corners%3==0 &&
+    geometry_primitive_raw(at,raw,arena,bytes,pos,count*24) &&
+    geometry_primitive_raw(at,raw,arena,bytes,ix,corners*4) &&
+    geometry_primitive_raw(at,raw,arena,bytes,work,72) &&
+    geometry_public_disjoint(pos,count*24,ix,corners*4) &&
+    geometry_public_disjoint(work,72,pos,count*24) &&
+    geometry_public_disjoint(work,72,ix,corners*4) &&
+    geometry_public_disjoint(work,72,source,PolyhedronGeometry.size) &&
+    geometry_public_disjoint(work,72,values,PolyhedronParameters.size);
+}
+
+native function PolyhedronGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,source:i64,values:i64) i64 {
+  if(!polyhedron_readable(at,raw,arena,bytes,source,values)) { return 0-1; }
+  let pos=ux_u32(source+PolyhedronGeometry.sourcePositions);
+  let count=ux_u32(source+PolyhedronGeometry.sourceCount);
+  let ix=ux_u32(source+PolyhedronGeometry.sourceIndices);
+  let corners=ux_u32(source+PolyhedronGeometry.cornerCount);
+  let radius=ux_f64(values+PolyhedronParameters.radius);
+  let detail=ux_f64(values+PolyhedronParameters.detail);
+  let word=4294967296.0;
+  let maxFloat=word*word*word*word*(1.0-1.0/16777216.0);
+  if(!(detail>=0.0 && detail<=255.0) || !(radius>=0.0-maxFloat && radius<=maxFloat) || radius==0.0) { return 0-1; }
+  let subdivisions=f64_floor_i64(detail);
+  if(detail!=0.0+subdivisions) { return 0-1; }
+  let i=0;
+  while(i<count*3) {
+    let coordinate=ux_f64(pos+i*8);
+    if(!(coordinate>=0.0-maxFloat && coordinate<=maxFloat)) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<corners) {
+    if(ux_u32(ix+i*4)>=count) { return 0-1; }
+    i=i+1;
+  }
+  let made=PolyhedronGeometry_generate(raw,source,radius,subdivisions);
+  if(made<0) { return made; }
+  let installed=GeometryBuffers_asGeometry(raw,GeometryPrimitive_geometry(at),arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  return geometry_primitive_store(at,15,radius,detail,0.0+pos,0.0+count,0.0+ix,0.0+corners);
+}
+
+struct PolyhedronJsonStorage {
+  vertices: u32;
+  vertexCapacity: u32;
+  indices: u32;
+  indexCapacity: u32;
+  work: u32;
+}
+
+native function polyhedron_json_keys(at:i64) i64 {
+  let labels=[80,111,108,121,104,101,100,114,111,110,71,101,111,109,101,116,114,121,118,101,114,116,105,99,101,115,105,110,100,105,99,101,115,114,97,100,105,117,115,100,101,116,97,105,108,100,101,116,97,105,108,115];
+  let i=0;
+  while(i<52) {
+    let byte=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function polyhedron_json_array(p:i64,end:i64,key:i64,keyBytes:i64,data:i64,count:i64,index:i64,scratch:i64) i64 {
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,key,keyBytes);
+  p=json_byte(p,end,58);
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    if(p<0) { return p; }
+    let value=0.0;
+    if(index) { value=0.0+ux_u32(data+i*4); }
+    else { value=ux_f64(data+i*8); }
+    p=json_write_f64(p,end,value,scratch);
+    i=i+1;
+  }
+  return json_byte(p,end,93);
+}
+
+// Compatible output also emits "details", the key read by stock r160.
+native function PolyhedronGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64,compatible:i64) i64 {
+  if(geometry_primitive_ready(at,15)<0 || (compatible!=0 && compatible!=1) ||
+     !geometry_primitive_json_io(at,dst,end,uuid,uuidBytes,scratch,52)) { return 0-1; }
+  let pos=f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.third));
+  let posBytes=24*f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.fourth));
+  let ix=f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.fifth));
+  let ixBytes=4*f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.sixth));
+  if(!geometry_public_span(pos,posBytes) || !geometry_public_span(ix,ixBytes) ||
+     !geometry_public_disjoint(pos,posBytes,dst,end-dst) || !geometry_public_disjoint(ix,ixBytes,dst,end-dst) ||
+     !geometry_public_disjoint(pos,posBytes,scratch,1156) || !geometry_public_disjoint(ix,ixBytes,scratch,1156)) { return 0-1; }
+  let keys=polyhedron_json_keys(scratch+1104);
+  let p=geometry_primitive_json_head(at,dst,end,uuid,uuidBytes,keys,18);
+  p=polyhedron_json_array(p,end,keys+18,8,pos,posBytes/8,0,scratch);
+  p=polyhedron_json_array(p,end,keys+26,7,ix,ixBytes/4,1,scratch);
+  p=geometry_parameter_number(p,end,keys+33,6,ux_f64(at+GeometryPrimitiveRecord.first),scratch);
+  let detail=ux_f64(at+GeometryPrimitiveRecord.second);
+  p=geometry_parameter_number(p,end,keys+39,6,detail,scratch);
+  if(compatible) { p=geometry_parameter_number(p,end,keys+45,7,detail,scratch); }
+  return json_byte(p,end,125);
+}
+
+native function polyhedron_load_array(array:i64,end:i64,dst:i64,capacity:i64,index:i64) i64 {
+  if(array==0-2) { return 0; }
+  if(array<0 || ux_u8(array)!=91) { return 0-1; }
+  let p=json_space(array+1,end);
+  let i=0;
+  while(p>=0 && p<end && ux_u8(p)!=93) {
+    if(i>=capacity) { return 0-1; }
+    if(index) {
+      let indexValue=LoaderJson_uint(p,end,0);
+      if(indexValue<0) { return 0-1; }
+      let a=ux_u32_put(dst+i*4,indexValue);
+    } else {
+      let value=json_read_number(p,end);
+      if(value-value!=0.0) { return 0-1; }
+      let b=ux_f64_put(dst+i*8,value);
+    }
+    i=i+1;
+    p=json_space(json_scalar_end(p,end),end);
+    if(p<0 || p>=end) { return 0-1; }
+    if(ux_u8(p)==44) { p=json_space(p+1,end); }
+    else if(ux_u8(p)!=93) { return 0-1; }
+  }
+  if(p<0 || p>=end) { return 0-1; }
+  return i;
+}
+
+native function polyhedron_load_config(input:i64,end:i64,pos:i64,pc:i64,ix:i64,ic:i64,work:i64,scratch:i64) i64 {
+  let keys=polyhedron_json_keys(scratch+48);
+  let first=json_find_key(input,end,keys+18,8);
+  let next=json_find_key(input,end,keys+26,7);
+  let pn=polyhedron_load_array(first,end,pos,pc*3,0);
+  let indexCount=polyhedron_load_array(next,end,ix,ic,1);
+  if(pn<0 || indexCount<0 || pn%3!=0 || indexCount%3!=0) { return 0-1; }
+  let a=ux_u32_put(scratch+PolyhedronGeometry.sourcePositions,pos);
+  let b=ux_u32_put(scratch+PolyhedronGeometry.sourceCount,pn/3);
+  let c=ux_u32_put(scratch+PolyhedronGeometry.sourceIndices,ix);
+  let d=ux_u32_put(scratch+PolyhedronGeometry.cornerCount,indexCount);
+  let e=ux_u32_put(scratch+PolyhedronGeometry.scratch,work);
+  let radius=geometry_primitive_json_number(input,end,keys+33,6,1.0);
+  let compatibility=json_find_key(input,end,keys+45,7);
+  let detail=0.0;
+  if(compatibility!=0-2) { detail=json_read_number(compatibility,end); }
+  let canonical=geometry_primitive_json_number(input,end,keys+39,6,detail);
+  if(compatibility!=0-2 && canonical!=detail) { return 0-1; }
+  let r=ux_f64_put(scratch+24+PolyhedronParameters.radius,radius);
+  let v=ux_f64_put(scratch+24+PolyhedronParameters.detail,canonical);
+  return scratch;
+}
+
+native function PolyhedronGeometry_fromJSON(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,storage:i64) i64 {
+  if(scratch%8!=0 || storage%4!=0 || end<=input ||
+     !geometry_primitive_raw(at,raw,arena,bytes,input,end-input) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,scratch,100) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,storage,PolyhedronJsonStorage.size) ||
+     !geometry_public_disjoint(input,end-input,scratch,100) ||
+     !geometry_public_disjoint(storage,PolyhedronJsonStorage.size,scratch,100) ||
+     !geometry_primitive_json_object(input,end)) { return 0-1; }
+  let pos=ux_u32(storage+PolyhedronJsonStorage.vertices);
+  let pc=ux_u32(storage+PolyhedronJsonStorage.vertexCapacity);
+  let ix=ux_u32(storage+PolyhedronJsonStorage.indices);
+  let ic=ux_u32(storage+PolyhedronJsonStorage.indexCapacity);
+  let work=ux_u32(storage+PolyhedronJsonStorage.work);
+  if(pos%8!=0 || ix%4!=0 || work%8!=0 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,pos,pc*24) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,ix,ic*4) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,work,72) ||
+     !geometry_public_disjoint(pos,pc*24,ix,ic*4) ||
+     !geometry_public_disjoint(pos,pc*24,input,end-input) ||
+     !geometry_public_disjoint(ix,ic*4,input,end-input) ||
+     !geometry_public_disjoint(work,72,input,end-input) ||
+     !geometry_public_disjoint(pos,pc*24,scratch,100) ||
+     !geometry_public_disjoint(ix,ic*4,scratch,100) ||
+     !geometry_public_disjoint(work,72,scratch,100) ||
+     !geometry_public_disjoint(work,72,pos,pc*24) ||
+     !geometry_public_disjoint(work,72,ix,ic*4) ||
+     !geometry_public_disjoint(pos,pc*24,storage,PolyhedronJsonStorage.size) ||
+     !geometry_public_disjoint(ix,ic*4,storage,PolyhedronJsonStorage.size) ||
+     !geometry_public_disjoint(work,72,storage,PolyhedronJsonStorage.size)) { return 0-1; }
+  let source=polyhedron_load_config(input,end,pos,pc,ix,ic,work,scratch);
+  if(source<0) { return source; }
+  return PolyhedronGeometry_create(at,raw,arena,bytes,source,scratch+24);
+}

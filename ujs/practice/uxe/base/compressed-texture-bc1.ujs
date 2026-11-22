@@ -1,0 +1,73 @@
+// Decode a validated BC1 mip into tightly packed RGBA8 for the software path.
+// The RGB variant keeps the fourth selector opaque when endpoint order is low to high.
+native function bc1_endpoint(color:i64,channel:i64) i64 {
+  if(channel==1) {
+    let g=(color/32)%64;
+    return g*4+g/16;
+  }
+  let c=color%32;
+  if(channel==0) { c=color/2048; }
+  return c*8+c/4;
+}
+
+native function bc1_channel(first:i64,second:i64,index:i64,channel:i64) i64 {
+  let a=bc1_endpoint(first,channel);
+  let b=bc1_endpoint(second,channel);
+  if(index==0) { return a; }
+  if(index==1) { return b; }
+  if(first>second) {
+    if(index==2) { return (2*a+b)/3; }
+    return (a+2*b)/3;
+  }
+  if(index==2) { return (a+b)/2; }
+  return 0;
+}
+
+native function CompressedTexture_decodeBC1(level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  let format=ux_u32(level+CompressedMip.format);
+  if(format!=33776 && format!=33777) { return 0-2; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  if(width<1 || width>16384 || height<1 || height>16384) { return 0-3; }
+  let columns=(width+3)/4;
+  let rows=(height+3)/4;
+  let output=width*height*4;
+  if(size!=columns*rows*8 || data>6291456-size) { return 0-3; }
+  if(capacity<output || dst<0 || dst>6291456-output ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size) ||
+     !file_disjoint(data,size,level,CompressedMip.size)) { return 0-1; }
+  let by=0;
+  while(by<rows) {
+    let bx=0;
+    while(bx<columns) {
+      let block=data+(by*columns+bx)*8;
+      let first=ux_u8(block)+256*ux_u8(block+1);
+      let second=ux_u8(block+2)+256*ux_u8(block+3);
+      let y=0;
+      while(y<4 && by*4+y<height) {
+        let selectors=ux_u8(block+4+y);
+        let x=0;
+        while(x<4 && bx*4+x<width) {
+          let index=selectors%4;
+          let pixel=dst+((by*4+y)*width+bx*4+x)*4;
+          let r=ux_u8_put(pixel,bc1_channel(first,second,index,0));
+          let g=ux_u8_put(pixel+1,bc1_channel(first,second,index,1));
+          let b=ux_u8_put(pixel+2,bc1_channel(first,second,index,2));
+          let alpha=255;
+          if(format==33777 && first<=second && index==3) { alpha=0; }
+          let a=ux_u8_put(pixel+3,alpha);
+          selectors=selectors/4;
+          x=x+1;
+        }
+        y=y+1;
+      }
+      bx=bx+1;
+    }
+    by=by+1;
+  }
+  return output;
+}

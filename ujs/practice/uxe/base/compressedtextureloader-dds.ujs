@@ -1,0 +1,73 @@
+// Legacy DDS stores its 2D mip payload immediately after the 128-byte header.
+// The result contains borrowed CompressedMip views and returns the row count.
+native function dds_legacy_format(code:i64,flags:i64) i64 {
+  if(code==827611204) { // DXT1
+    if(u32_and(flags,1)) { return 33777; }
+    return 33776;
+  }
+  if(code==861165636) { return 33778; } // DXT3
+  if(code==894720068) { return 33779; } // DXT5
+  return 0-2;
+}
+
+native function dds_mip_next(side:i64) i64 {
+  if(side>1) { return side/2; }
+  return 1;
+}
+
+native function dds_mip_bytes(width:i64,height:i64,block:i64) i64 {
+  return ((width+3)/4)*((height+3)/4)*block;
+}
+
+native function CompressedTextureLoader_dds(table:i64,capacity:i64,input:i64,bytes:i64,loadMips:i64) i64 {
+  if(input<0 || bytes<128 || input>6291456-bytes || capacity<1 ||
+     capacity>6291456/CompressedMip.size || (loadMips!=0 && loadMips!=1) ||
+     !loading_span(table,capacity*CompressedMip.size) ||
+     !file_disjoint(table,capacity*CompressedMip.size,input,bytes)) { return 0-1; }
+  if(ux_u32(input)!=542327876 || ux_u32(input+4)!=124 || ux_u32(input+76)!=32) { return 0-1; }
+  let flags=ux_u32(input+8);
+  let pixel=ux_u32(input+80);
+  let caps=ux_u32(input+108);
+  if(u32_and(flags,4103)!=4103 || !u32_and(pixel,4) || !u32_and(caps,4096)) { return 0-1; }
+  if(ux_u32(input+112)!=0 || u32_and(flags,8388608) || ux_u32(input+24)>1) { return 0-2; }
+  let format=dds_legacy_format(ux_u32(input+84),pixel);
+  if(format<0) { return format; }
+  let width=ux_u32(input+16);
+  let height=ux_u32(input+12);
+  let count=1;
+  if(u32_and(flags,131072)) { count=ux_u32(input+28); }
+  if(width==0 || width>16384 || height==0 || height>16384 || count<1 || count>15) { return 0-1; }
+  let rows=count;
+  if(!loadMips) { rows=1; }
+  if(rows>capacity) { return 0-3; }
+  let block=16;
+  if(format<=33777) { block=8; }
+  let w=width;
+  let h=height;
+  let cursor=128;
+  let level=0;
+  // Validate the complete payload before writing any output records.
+  while(level<count) {
+    let size=dds_mip_bytes(w,h,block);
+    if(size>bytes-cursor || (w==1 && h==1 && level+1<count)) { return 0-1; }
+    cursor=cursor+size;
+    w=dds_mip_next(w);
+    h=dds_mip_next(h);
+    level=level+1;
+  }
+  if(cursor!=bytes) { return 0-1; }
+  w=width;
+  h=height;
+  cursor=input+128;
+  level=0;
+  while(level<rows) {
+    let size=dds_mip_bytes(w,h,block);
+    let row=CompressedTextureLoader_level(table+level*CompressedMip.size,cursor,size,w,h,format);
+    if(row<0) { return row; }
+    cursor=cursor+size;
+    w=dds_mip_next(w);
+    h=dds_mip_next(h);
+    level=level+1;
+  }
+  return rows;
+}

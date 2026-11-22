@@ -1,0 +1,61 @@
+// BC2 and BC3 share the 16-byte layout with an always four-color RGB565 block.
+native function bc_rgba_output(level:i64,dst:i64,capacity:i64,format:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  if(ux_u32(level+CompressedMip.format)!=format) { return 0-2; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     size!=(width+3)/4*((height+3)/4)*16 || data>6291456-size) { return 0-3; }
+  let count=width*height*4;
+  if(dst<0 || dst>6291456-count || capacity<count ||
+     !file_disjoint(data,size,level,CompressedMip.size) ||
+     !file_disjoint(dst,count,level,CompressedMip.size) ||
+     !file_disjoint(dst,count,data,size)) { return 0-1; }
+  return count;
+}
+
+native function bc_rgba_channel(first:i64,second:i64,index:i64,channel:i64) i64 {
+  let a=bc1_endpoint(first,channel);
+  let b=bc1_endpoint(second,channel);
+  if(index==0) { return a; }
+  if(index==1) { return b; }
+  if(index==2) { return (2*a+b)/3; }
+  return (a+2*b)/3;
+}
+
+native function bc_rgba_pixel(block:i64,row:i64,column:i64,dst:i64,alpha:i64) i64 {
+  let first=ux_u8(block)+256*ux_u8(block+1);
+  let second=ux_u8(block+2)+256*ux_u8(block+3);
+  let selectors=ux_u8(block+4+row);
+  let index=u32_shr(selectors,2*column)%4;
+  let r=ux_u8_put(dst,bc_rgba_channel(first,second,index,0));
+  let g=ux_u8_put(dst+1,bc_rgba_channel(first,second,index,1));
+  let b=ux_u8_put(dst+2,bc_rgba_channel(first,second,index,2));
+  return ux_u8_put(dst+3,alpha);
+}
+
+native function CompressedTexture_decodeBC2(level:i64,dst:i64,capacity:i64) i64 {
+  let count=bc_rgba_output(level,dst,capacity,33778);
+  if(count<0) { return count; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let columns=(width+3)/4;
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let block=data+(y/4*columns+x/4)*16;
+      let local=x%4;
+      let row=y%4;
+      let pair=ux_u8(block+row*2+local/2);
+      let alpha=u32_shr(pair,4*(local%2))%16*17;
+      let pixel=bc_rgba_pixel(block+8,row,local,dst+(y*width+x)*4,alpha);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return count;
+}

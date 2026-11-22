@@ -1,0 +1,53 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+static int shape_object_build(const char *dir) {
+    char layout[320],wasm[320];
+    tx_snprintf(layout,sizeof layout,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="export uxe_shapegeometry_object(op:i64,arg:i64) i64 version 1;\n";
+    if(sy_write_file(layout,abi,sizeof abi-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",layout,BASE "record-copy.ujs",BASE "geometry-buffers.ujs",
+        BASE "shapeutils.ujs",BASE "shape-hole.ujs",BASE "shape-holes.ujs",BASE "shapegeometry.ujs",
+        BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "shapegeometry-object-rings.ujs",
+        BASE "shapegeometry-object-json.ujs",TEST "shapegeometry-object-probe.ujs","-o",wasm,0};
+    char *log=0;
+    size_t bytes=0;
+    const int rc=cx_runv_timeout(args,8,&log,&bytes);
+    if(rc) printf("SHAPE_OBJECT_BUILD rc=%d %.*s\n",rc,(int)bytes,log);
+    mm_free(log);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-shape-object-",dir,sizeof dir)) return 2;
+    const int n=tx_snprintf(url,sizeof url,"file://%s/" TEST "shapegeometry-object-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    // Outer shoelace area is 8. The second square has area 100 minus
+    // two holes of area 4. Compare coverage without requiring one triangulation.
+    #define EXTERIOR 5,3,8,0,5,1
+    #define HOLES 12,14,92,0,25,1
+    const double gold[]={EXTERIOR,EXTERIOR,EXTERIOR,1,1,1,0,1,1,1,1,1,
+        HOLES,HOLES,HOLES,1,1,1,2,1,1,1,1,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double values[count]={0};
+    int failed=n<0 || n>=sizeof url || shape_object_build(dir) || r160_wait_read(url,"#r160",values,count,dir);
+    for(int i=0;!failed && i<count;i++) if(values[i]!=gold[i]) {
+        printf("SHAPE_OBJECT case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT ShapeGeometry shape library JSON cases=%d failed=%d\n",count,failed);
+    return failed;
+}

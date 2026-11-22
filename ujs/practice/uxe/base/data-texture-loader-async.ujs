@@ -1,0 +1,84 @@
+struct DataTextureAsyncImage {
+  data: u32;
+  bytes: u32;
+  width: u32;
+  height: u32;
+}
+
+// Callback scratch follows the header. Published RGBA bytes live separately.
+struct DataTextureAsyncWork {
+  texture: GpuTextureSource;
+  image: DataTextureAsyncImage;
+  error: LoadingEvent;
+  reservedEvent: LoadingEvent;
+}
+
+native function dt_async_file(instance:i64,id:i64,work:i64,space:i64,dst:i64,capacity:i64) i64 {
+  if(loader_family_kind(instance)!=6 || space<DataTextureAsyncWork.size ||
+     !loading_span(work,space) || !loader_family_decode_range(instance,work,space) ||
+     !loader_family_decode_range(instance,dst,capacity) ||
+     !file_disjoint(work,space,dst,capacity)) { return 0-1; }
+  let file=loader_family_ready(instance,id);
+  if(file<0) { return file; }
+  let bytes=ux_u32(file+FileLoader.length);
+  let data=ux_u32(file+FileLoader.bytes);
+  if(data>6291456-bytes || !file_disjoint(data,bytes,work,space) ||
+     !file_disjoint(data,bytes,dst,capacity)) { return 0-1; }
+  return file;
+}
+
+native function dt_async_contains(base:i64,space:i64,data:i64,bytes:i64) i64 {
+  return data>=base && data<=base+space && bytes<=base+space-data;
+}
+
+native function dt_async_finish(instance:i64,id:i64,work:i64,space:i64,dst:i64,capacity:i64,result:i64) i64 {
+  let file=dt_async_file(instance,id,work,space,dst,capacity);
+  if(file<0) { return file; }
+  let status=result;
+  if(result>0) { status=0-3; }
+  if(status==0) {
+    let image=work+DataTextureAsyncWork.image;
+    let data=ux_u32(image+DataTextureAsyncImage.data);
+    let bytes=ux_u32(image+DataTextureAsyncImage.bytes);
+    let width=ux_u32(image+DataTextureAsyncImage.width);
+    let height=ux_u32(image+DataTextureAsyncImage.height);
+    let stage=work+DataTextureAsyncWork.size;
+    if(width<1 || width>4096 || height<1 || height>4096 || bytes!=width*height*4 || bytes>capacity ||
+       !(dt_async_contains(ux_u32(file+FileLoader.bytes),ux_u32(file+FileLoader.length),data,bytes) ||
+         dt_async_contains(stage,space-DataTextureAsyncWork.size,data,bytes))) { status=0-3; }
+    else {
+      let copied=uxe_copy_record(dst,data,bytes);
+      status=DataTextureLoader_rgba8(dst,bytes,width,height,work+DataTextureAsyncWork.texture);
+    }
+  }
+  let released=FileLoader_release(file,id);
+  if(released<0) { return released; }
+  let errors=work+DataTextureAsyncWork.error;
+  let clear=ux_u32_put(errors+LoadingEvent.kind,0);
+  if(status<0) { let event=LoadingManager_item(LoaderFamily_manager(instance),3,id,errors); }
+  return status;
+}
+
+// parser is a synchronous UJS closure. It receives the fetched bytes, a
+// result record and caller-owned scratch. Return zero with RGBA metadata.
+function DataTextureLoader_decodeAsync(parser,...args) {
+  let instance=args[0];
+  let id=args[1];
+  let work=args[2];
+  let space=args[3];
+  let dst=args[4];
+  let capacity=args[5];
+  let file=dt_async_file(instance,id,work,space,dst,capacity);
+  let result=file;
+  if(file>=0) {
+    let image=work+DataTextureAsyncWork.image;
+    let a=ux_u32_put(image+DataTextureAsyncImage.data,0);
+    let b=ux_u32_put(image+DataTextureAsyncImage.bytes,0);
+    let c=ux_u32_put(image+DataTextureAsyncImage.width,0);
+    let d=ux_u32_put(image+DataTextureAsyncImage.height,0);
+    let stage=work+DataTextureAsyncWork.size;
+    let parsed=parser(ux_u32(file+FileLoader.bytes),ux_u32(file+FileLoader.length),image,stage,space-DataTextureAsyncWork.size);
+    result=dt_async_finish(instance,id,work,space,dst,capacity,parsed);
+  }
+  return result;
+}

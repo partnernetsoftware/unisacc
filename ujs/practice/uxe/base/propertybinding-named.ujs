@@ -1,0 +1,142 @@
+// Per-slot keys are borrowed immutable UTF-8 slices. A row records the
+// entire generation handle, so destroying or reusing a slot invalidates it.
+struct PropertyBindingNames {
+  arena: u32;
+  rows: u32;
+  slots: u32;
+}
+
+struct PropertyBindingNodeKey {
+  handle: u32;
+  name: u32;
+  nameBytes: u32;
+  uuid: u32;
+  uuidBytes: u32;
+}
+
+native function bind_names_span(at:i64,bytes:i64) i64 {
+  return at>=0 && bytes>=0 && at<=6291456-bytes;
+}
+
+native function bind_names_disjoint(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an==0 || bn==0 || a+an<=b || b+bn<=a;
+}
+
+native function bind_names_layout(names:i64,arena:i64,rows:i64,span:i64,slots:i64) i64 {
+  let table=slots*PropertyBindingNodeKey.size;
+  return slots>=1 && slots<=4096 && animation_span(names,PropertyBindingNames.size) &&
+    animation_span(rows,table) && bind_names_disjoint(names,PropertyBindingNames.size,arena,span) &&
+    bind_names_disjoint(rows,table,arena,span) &&
+    bind_names_disjoint(names,PropertyBindingNames.size,rows,table);
+}
+
+native function PropertyBinding_initNames(names:i64,arena:i64,rows:i64) i64 {
+  let span=bind_arena_bytes(arena);
+  if(span<0) { return 0-1; }
+  let slots=ux_u32(arena);
+  if(!bind_names_layout(names,arena,rows,span,slots)) { return 0-1; }
+  let i=0;
+  while(i<slots) {
+    let cleared=ux_u32_put(rows+i*PropertyBindingNodeKey.size+PropertyBindingNodeKey.handle,0);
+    i=i+1;
+  }
+  let a=ux_u32_put(names+PropertyBindingNames.arena,arena);
+  let r=ux_u32_put(names+PropertyBindingNames.rows,rows);
+  let s=ux_u32_put(names+PropertyBindingNames.slots,slots);
+  return names;
+}
+
+native function bind_names_valid(names:i64) i64 {
+  if(!animation_span(names,PropertyBindingNames.size)) { return 0; }
+  let arena=ux_u32(names+PropertyBindingNames.arena);
+  let rows=ux_u32(names+PropertyBindingNames.rows);
+  let slots=ux_u32(names+PropertyBindingNames.slots);
+  let span=bind_arena_bytes(arena);
+  return span>=0 && ux_u32(arena)==slots && bind_names_layout(names,arena,rows,span,slots);
+}
+
+native function bind_names_selectable(at:i64,bytes:i64) i64 {
+  if(bytes<0 || bytes>255 || !bind_names_span(at,bytes)) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    let c=ux_u8(at+i);
+    if(c<32 || c==47 || c==58 || c==91 || c==93) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function bind_names_keyspan(names:i64,at:i64,bytes:i64) i64 {
+  let arena=ux_u32(names+PropertyBindingNames.arena);
+  let rows=ux_u32(names+PropertyBindingNames.rows);
+  let table=ux_u32(names+PropertyBindingNames.slots)*PropertyBindingNodeKey.size;
+  return bind_names_selectable(at,bytes) &&
+    bind_names_disjoint(at,bytes,names,PropertyBindingNames.size) &&
+    bind_names_disjoint(at,bytes,rows,table) &&
+    bind_names_disjoint(at,bytes,arena,bind_arena_bytes(arena));
+}
+
+native function PropertyBinding_setNodeKeys(names:i64,handle:i64,nameAt:i64,nameBytes:i64,uuidAt:i64,uuidBytes:i64) i64 {
+  if(!bind_names_valid(names) || !bind_names_keyspan(names,nameAt,nameBytes) ||
+     !bind_names_keyspan(names,uuidAt,uuidBytes)) { return 0-1; }
+  let arena=ux_u32(names+PropertyBindingNames.arena);
+  if(Object3D_address(arena,handle)<0) { return 0-1; }
+  let row=ux_u32(names+PropertyBindingNames.rows)+(handle%65536-1)*PropertyBindingNodeKey.size;
+  let h=ux_u32_put(row+PropertyBindingNodeKey.handle,handle);
+  let n=ux_u32_put(row+PropertyBindingNodeKey.name,nameAt);
+  let nb=ux_u32_put(row+PropertyBindingNodeKey.nameBytes,nameBytes);
+  let u=ux_u32_put(row+PropertyBindingNodeKey.uuid,uuidAt);
+  let ub=ux_u32_put(row+PropertyBindingNodeKey.uuidBytes,uuidBytes);
+  return handle;
+}
+
+native function bind_names_match(key:i64,bytes:i64,other:i64,otherBytes:i64) i64 {
+  if(bytes!=otherBytes || !bind_names_span(other,otherBytes)) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(key+i)!=ux_u8(other+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function PropertyBinding_findNamed(names:i64,root:i64,key:i64,bytes:i64) i64 {
+  if(!bind_names_valid(names) || !bind_names_selectable(key,bytes)) { return 0-1; }
+  let arena=ux_u32(names+PropertyBindingNames.arena);
+  if(Object3D_address(arena,root)<0) { return 0-1; }
+  if(bytes==0 || (bytes==1 && ux_u8(key)==46)) { return root; }
+  let rows=ux_u32(names+PropertyBindingNames.rows);
+  let slots=ux_u32(names+PropertyBindingNames.slots);
+  let handle=root;
+  let i=0;
+  while(handle>0 && i<slots) {
+    if(Object3D_address(arena,handle)<0) { return 0-1; }
+    let row=rows+(handle%65536-1)*PropertyBindingNodeKey.size;
+    if(ux_u32(row+PropertyBindingNodeKey.handle)==handle &&
+       (bind_names_match(key,bytes,ux_u32(row+PropertyBindingNodeKey.name),ux_u32(row+PropertyBindingNodeKey.nameBytes)) ||
+        bind_names_match(key,bytes,ux_u32(row+PropertyBindingNodeKey.uuid),ux_u32(row+PropertyBindingNodeKey.uuidBytes)))) {
+      return handle;
+    }
+    handle=Object3D_traverseNext(arena,root,handle,1);
+    i=i+1;
+  }
+  return 0-1;
+}
+
+// Resolve the final dot as the separator. The existing PropertyBinding
+// implementation owns TRS suffix parsing, lane checks and matrix dirtiness.
+native function PropertyBinding_bindNamed(binding:i64,names:i64,root:i64,path:i64,bytes:i64) i64 {
+  if(!bind_names_valid(names) || bytes<6 || bytes>269 || !bind_names_span(path,bytes) ||
+     !animation_span(binding,PropertyBinding.size) ||
+     !bind_names_disjoint(binding,PropertyBinding.size,names,PropertyBindingNames.size) ||
+     !bind_names_disjoint(binding,PropertyBinding.size,path,bytes)) { return 0-1; }
+  let rows=ux_u32(names+PropertyBindingNames.rows);
+  let table=ux_u32(names+PropertyBindingNames.slots)*PropertyBindingNodeKey.size;
+  if(!bind_names_disjoint(binding,PropertyBinding.size,rows,table)) { return 0-1; }
+  let split=bytes-1;
+  while(split>=0 && ux_u8(path+split)!=46) { split=split-1; }
+  if(split<0) { return 0-1; }
+  let target=PropertyBinding_findNamed(names,root,path,split);
+  if(target<0) { return 0-1; }
+  return PropertyBinding_bind(binding,ux_u32(names+PropertyBindingNames.arena),target,path+split,bytes-split);
+}

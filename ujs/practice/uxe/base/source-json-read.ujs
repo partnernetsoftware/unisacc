@@ -1,0 +1,105 @@
+// Restore one Source using caller-owned data and an image descriptor.
+struct SourceRead {
+  image: u32;
+  data: u32;
+  capacity: u32;
+  scratch: u32;
+}
+
+native function source_read_key(at:i64,end:i64,scratch:i64,word:i64,bytes:i64) i64 {
+  let i=0;
+  while(i<bytes) {
+    let b=ux_u8_put(scratch+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return json_find_key(at,end,scratch,bytes);
+}
+
+native function source_read_values(at:i64,end:i64,dst:i64,capacity:i64,write:i64) i64 {
+  if(at<0 || ux_u8(at)!=91) { return 0-1; }
+  let pos=json_space(at+1,end);
+  let i=0;
+  while(pos>=0 && pos<end && ux_u8(pos)!=93) {
+    let number=json_read_number(pos,end);
+    if(!(number>=0.0 && number<=255.0) || i>=capacity) { return 0-1; }
+    let byte=f64_floor_i64(number);
+    if(number!=0.0+byte) { return 0-1; }
+    if(write) { let stored=ux_u8_put(dst+i,byte); }
+    i=i+1;
+    let tail=json_scalar_end(pos,end);
+    if(tail<0) { return 0-1; }
+    pos=json_space(tail,end);
+    if(pos<0 || pos>=end) { return 0-1; }
+    if(ux_u8(pos)==93) { return i; }
+    if(ux_u8(pos)!=44) { return 0-1; }
+    pos=json_space(pos+1,end);
+    if(pos<0 || pos>=end || ux_u8(pos)==93) { return 0-1; }
+  }
+  if(pos<0 || pos>=end) { return 0-1; }
+  return i;
+}
+
+native function Source_fromJSON(source:i64,input:i64,end:i64,options:i64) i64 {
+  if(!helper_buffer_span(source,Source.size,4) || !helper_buffer_span(options,SourceRead.size,4) ||
+     end<=input || !helper_buffer_span(input,end-input,1)) { return 0-1; }
+  let image=ux_u32(options+SourceRead.image);
+  let data=ux_u32(options+SourceRead.data);
+  let capacity=ux_u32(options+SourceRead.capacity);
+  let scratch=ux_u32(options+SourceRead.scratch);
+  if(image==0 || !helper_buffer_span(image,SourceImage.size,4) ||
+     !helper_buffer_span(data,capacity,1) || !helper_buffer_span(scratch,16,1)) { return 0-1; }
+  let addr=[source,input,options,image,data,scratch];
+  let sizes=[Source.size,end-input,SourceRead.size,SourceImage.size,capacity,16];
+  let i=0;
+  while(i<6) {
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(addr[i],sizes[i],addr[j],sizes[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let root=json_space(input,end);
+  if(root>=end || ux_u8(root)!=123) { return 0-1; }
+  let stop=json_value_end(root,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let value=source_read_key(root,stop,scratch,7107189,3);
+  if(value<0) { return 0-1; }
+  let kind=0;
+  let count=0;
+  let width=0;
+  let height=0;
+  if(ux_u8(value)==34) {
+    count=Json_decodeString(value,stop,data,capacity);
+    if(count<0) { return count; }
+    if(count==0) { return Source_init(source,0); }
+    kind=11;
+  } else if(ux_u8(value)==123) {
+    let last=json_value_end(value,stop);
+    let type=source_read_key(value,last,scratch,1701869940,4);
+    if(type<0 || json_scan_string(type,last)!=type+12) { return 0-2; }
+    // String token is "Uint8Array".
+    let tag=ux_u32(type+1);
+    if(tag!=1953392981 || ux_u32(type+5)!=1920090424 || ux_u8(type+9)!=97 || ux_u8(type+10)!=121) { return 0-2; }
+    let w=source_read_key(value,last,scratch,448629336439,5);
+    let h=source_read_key(value,last,scratch,127991760381288,6);
+    let wf=json_read_number(w,last);
+    let hf=json_read_number(h,last);
+    if(!(wf>=1.0 && wf<=16384.0 && hf>=1.0 && hf<=16384.0)) { return 0-1; }
+    width=f64_floor_i64(wf);
+    height=f64_floor_i64(hf);
+    if(wf!=0.0+width || hf!=0.0+height) { return 0-1; }
+    let pixels=source_read_key(value,last,scratch,1635017060,4);
+    count=source_read_values(pixels,last,data,capacity,0);
+    if(count<0) { return 0-1; }
+    let written=source_read_values(pixels,last,data,capacity,1);
+    kind=1;
+  } else { return 0-2; }
+  let tag=ux_u32_put(image+SourceImage.kind,kind);
+  let payload=ux_u32_put(image+SourceImage.data,data);
+  let used=ux_u32_put(image+SourceImage.count,count);
+  let x=ux_u32_put(image+SourceImage.width,width);
+  let y=ux_u32_put(image+SourceImage.height,height);
+  return Source_init(source,image);
+}

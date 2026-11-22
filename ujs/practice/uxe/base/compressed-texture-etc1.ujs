@@ -1,0 +1,91 @@
+// ETC1 individual and differential RGB with opaque alpha.
+native function etc1_delta(byte:i64) i64 {
+  let delta=byte%8;
+  if(delta>=4) { delta=delta-8; }
+  return delta;
+}
+
+native function etc1_base(byte:i64,second:i64,diff:i64) i64 {
+  if(diff) {
+    let high=byte/8;
+    if(second) { high=high+etc1_delta(byte); }
+    return high*8+high/4;
+  }
+  if(second) { return byte%16*17; }
+  return byte/16*17;
+}
+
+native function etc1_modifier(table:i64,index:i64) i64 {
+  let packed=218694914;
+  if(table>=4) { packed=790698002; }
+  if(index%2) {
+    packed=706547976;
+    if(table>=4) { packed=3077197884; }
+  }
+  let magnitude=u32_shr(packed,8*(table%4))%256;
+  if(index>=2) { return 0-magnitude; }
+  return magnitude;
+}
+
+native function etc1_channel(byte:i64,second:i64,diff:i64,modifier:i64) i64 {
+  let value=etc1_base(byte,second,diff)+modifier;
+  if(value<0) { return 0; }
+  if(value>255) { return 255; }
+  return value;
+}
+
+native function CompressedTexture_decodeETC1(level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  if(ux_u32(level+CompressedMip.format)!=36196) { return 0-2; }
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     size!=(width+3)/4*((height+3)/4)*8 || data>6291456-size) { return 0-3; }
+  let output=width*height*4;
+  if(dst<0 || dst>6291456-output || capacity<output ||
+     !file_disjoint(level,CompressedMip.size,data,size) ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size)) { return 0-1; }
+  let at=data;
+  while(at<data+size) {
+    if(ux_u8(at+3)/2%2) {
+      let channel=0;
+      while(channel<3) {
+        let byte=ux_u8(at+channel);
+        let base=byte/8+etc1_delta(byte);
+        if(base<0 || base>31) { return 0-4; }
+        channel=channel+1;
+      }
+    }
+    at=at+8;
+  }
+  let columns=(width+3)/4;
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let block=data+(y/4*columns+x/4)*8;
+      let flags=ux_u8(block+3);
+      let diff=flags/2%2;
+      let second=x%4/2;
+      if(flags%2) { second=y%4/2; }
+      let table=flags/32;
+      if(second) { table=flags/4%8; }
+      let position=x%4*4+y%4;
+      let low=ux_u8(block+7-position/8);
+      let high=ux_u8(block+5-position/8);
+      let index=u32_shr(low,position%8)%2+2*(u32_shr(high,position%8)%2);
+      let modifier=etc1_modifier(table,index);
+      let pixel=dst+(y*width+x)*4;
+      let r=ux_u8_put(pixel,etc1_channel(ux_u8(block),second,diff,modifier));
+      let g=ux_u8_put(pixel+1,etc1_channel(ux_u8(block+1),second,diff,modifier));
+      let b=ux_u8_put(pixel+2,etc1_channel(ux_u8(block+2),second,diff,modifier));
+      let alpha=ux_u8_put(pixel+3,255);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return output;
+}

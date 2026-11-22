@@ -1,0 +1,84 @@
+// Four 1024-byte segments store decoded UTF-8 sources and JSON value objects.
+struct ShaderMaterialFields {
+  payload: u32;
+  vertex: u32;
+  fragment: u32;
+  uniforms: u32;
+  defines: u32;
+  glsl: u32;
+  lights: u32;
+  clipping: u32;
+  fog: u32;
+}
+
+native function shader_mat_size() i64 { return Material.size+ShaderMaterialFields.size; }
+
+native function shader_mat_split(a:i64,n:i64,b:i64,m:i64) i64 {
+  return a+n<=b || b+m<=a;
+}
+
+native function shader_mat_span(at:i64) i64 {
+  return material_span(at) && at<=6291456-shader_mat_size();
+}
+
+native function shader_mat_live(at:i64) i64 {
+  if(!shader_mat_span(at) || ux_u32(at+Material.id)==0) { return 0; }
+  let kind=ux_u32(at+Material.type);
+  let f=at+Material.size;
+  let payload=ux_u32(f+ShaderMaterialFields.payload);
+  return (kind==15 || kind==16) && payload<=6287360 &&
+    shader_mat_split(at,shader_mat_size(),payload,4096) &&
+    ux_u32(f+ShaderMaterialFields.vertex)<=1024 && ux_u32(f+ShaderMaterialFields.fragment)<=1024 &&
+    ux_u32(f+ShaderMaterialFields.uniforms)<=1024 && ux_u32(f+ShaderMaterialFields.defines)<=1024;
+}
+
+native function shader_mat_default(out:i64,stage:i64) i64 {
+  let bytes=[118,111,105,100,32,109,97,105,110,40,41,32,123,10,9,103,108,95,80,111,115,105,116,105,111,110,
+    32,61,32,112,114,111,106,101,99,116,105,111,110,77,97,116,114,105,120,32,42,32,
+    109,111,100,101,108,86,105,101,119,77,97,116,114,105,120,32,42,32,118,101,99,52,40,32,
+    112,111,115,105,116,105,111,110,44,32,49,46,48,32,41,59,10,125];
+  let n=90;
+  if(stage==1) {
+    bytes=[118,111,105,100,32,109,97,105,110,40,41,32,123,10,9,103,108,95,70,114,97,103,67,111,108,111,114,
+      32,61,32,118,101,99,52,40,32,49,46,48,44,32,48,46,48,44,32,48,46,48,44,32,49,46,48,32,41,59,10,125];
+    n=59;
+  }
+  let i=0;
+  while(i<n) { let byte=ux_u8_put(out+i,bytes[i]); i=i+1; }
+  return n;
+}
+
+native function shader_mat_init(at:i64,id:i64,dispatch:i64,payload:i64,kind:i64) i64 {
+  if(!shader_mat_span(at) || payload<0 || payload>6287360 ||
+     dispatch<0 || dispatch>6291456-EventDispatcher.size ||
+     !shader_mat_split(at,shader_mat_size(),payload,4096) ||
+     !shader_mat_split(dispatch,EventDispatcher.size,at,shader_mat_size()) ||
+     !shader_mat_split(dispatch,EventDispatcher.size,payload,4096)) { return 0-1; }
+  let base=Material_init(at,id,kind,dispatch);
+  if(base<0) { return base; }
+  let f=at+Material.size;
+  let vertex=shader_mat_default(payload,0);
+  let fragment=shader_mat_default(payload+1024,1);
+  let u0=ux_u8_put(payload+2048,123);
+  let u1=ux_u8_put(payload+2049,125);
+  let d0=ux_u8_put(payload+3072,123);
+  let d1=ux_u8_put(payload+3073,125);
+  let a=ux_u32_put(f+ShaderMaterialFields.payload,payload);
+  let b=ux_u32_put(f+ShaderMaterialFields.vertex,vertex);
+  let c=ux_u32_put(f+ShaderMaterialFields.fragment,fragment);
+  let d=ux_u32_put(f+ShaderMaterialFields.uniforms,2);
+  let e=ux_u32_put(f+ShaderMaterialFields.defines,2);
+  let g=ux_u32_put(f+ShaderMaterialFields.glsl,0);
+  let h=ux_u32_put(f+ShaderMaterialFields.lights,0);
+  let i=ux_u32_put(f+ShaderMaterialFields.clipping,0);
+  let j=ux_u32_put(f+ShaderMaterialFields.fog,0);
+  return at;
+}
+
+native function ShaderMaterial_init(at:i64,id:i64,dispatch:i64,payload:i64) i64 {
+  return shader_mat_init(at,id,dispatch,payload,15);
+}
+
+native function RawShaderMaterial_init(at:i64,id:i64,dispatch:i64,payload:i64) i64 {
+  return shader_mat_init(at,id,dispatch,payload,16);
+}

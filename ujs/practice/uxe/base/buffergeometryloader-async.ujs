@@ -1,0 +1,53 @@
+native function geometry_async_range(instance:i64,at:i64,bytes:i64,errors:i64) i64 {
+  return loader_family_decode_range(instance,at,bytes) &&
+    file_disjoint(at,bytes,errors,2*LoadingEvent.size);
+}
+
+native function geometry_async_storage(instance:i64,geo:i64,options:i64,errors:i64) i64 {
+  if(!loading_span(geo,BufferGeometry.size) || !loading_span(options,GeometryJsonLoad.size) ||
+     !geometry_async_range(instance,geo,BufferGeometry.size,errors) ||
+     !geometry_async_range(instance,options,GeometryJsonLoad.size,errors)) { return 0; }
+  let table=ux_u32(geo+BufferGeometry.attributes);
+  let groups=ux_u32(geo+BufferGeometry.groups);
+  if(!loading_span(table,8) || !loading_span(groups,8)) { return 0; }
+  let arena=ux_u32(options+GeometryJsonLoad.arena);
+  let end=ux_u32(options+GeometryJsonLoad.arenaEnd);
+  let names=ux_u32(options+GeometryJsonLoad.names);
+  let n=ux_u32(options+GeometryJsonLoad.nameCount);
+  if(!geometry_async_range(instance,table,8+8*ux_u32(table+4),errors) ||
+     !geometry_async_range(instance,groups,8+12*ux_u32(groups+4),errors) ||
+     !geometry_async_range(instance,arena,end-arena,errors) ||
+     !geometry_async_range(instance,ux_u32(options+GeometryJsonLoad.scratch),120,errors) ||
+     !loading_span(names,n*12) || !file_disjoint(names,n*12,errors,2*LoadingEvent.size)) { return 0; }
+  let i=0;
+  while(i<n) {
+    let row=names+12*i;
+    let key=ux_u32(row+4);
+    let bytes=ux_u32(row+8);
+    if(key>6291456-bytes || !file_disjoint(key,bytes,errors,2*LoadingEvent.size)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Existing parser publishes the geometry after it validates all fields.
+// The owned working arena survives release of the borrowed file response.
+native function BufferGeomLoader_decodeAsync(instance:i64,id:i64,geo:i64,options:i64,errors:i64) i64 {
+  let eventBytes=2*LoadingEvent.size;
+  if(loader_family_kind(instance)!=13 || !loading_span(errors,eventBytes) ||
+     !loader_family_decode_range(instance,errors,eventBytes) ||
+     !geometry_async_storage(instance,geo,options,errors)) { return 0-1; }
+  let file=loader_family_ready(instance,id);
+  if(file<0) { return file; }
+  let response=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(response>6291456-bytes || !file_disjoint(errors,eventBytes,response,bytes)) { return 0-1; }
+  let parsed=BufferGeometryLoader_parse(file,geo,options);
+  let released=FileLoader_release(file,id);
+  if(released<0) { return released; }
+  let clear=ux_u32_put(errors+LoadingEvent.kind,0);
+  if(parsed<0) {
+    let event=LoadingManager_item(LoaderFamily_manager(instance),3,id,errors);
+  }
+  return parsed;
+}

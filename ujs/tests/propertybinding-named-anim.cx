@@ -1,0 +1,50 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+static int named_compile(const char *dir) {
+    char layout[320],wasm[320];
+    tx_snprintf(layout,sizeof layout,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const char abi[]="export uxe_propertybinding_named(op:i64,a:i64,b:i64) f64 version 1;\n";
+    if(sy_write_file(layout,abi,sizeof abi-1,0600)) return 1;
+    char *args[]={"./ujs/ujs2wasm.com",layout,BASE "f64-math.ujs",BASE "views.ujs",BASE "matrix4.ujs",
+        BASE "object3d-layout.ujs",BASE "object3d.ujs",BASE "animation-view.ujs",BASE "propertybinding.ujs",
+        BASE "propertybinding-named.ujs",TEST "propertybinding-named-probe.ujs","-o",wasm,0};
+    char *log=0;
+    size_t bytes=0;
+    const int rc=cx_runv_timeout(args,8,&log,&bytes);
+    if(rc) printf("NAMED_BINDING_BUILD rc=%d %.*s\n",rc,(int)bytes,log);
+    mm_free(log);
+    return rc;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[460],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-binding-named-",dir,sizeof dir)) return 2;
+    const int n=tx_snprintf(url,sizeof url,"file://%s/" TEST "propertybinding-named-r160.html?dir=%s%s",
+        cwd,dir,mutate?"&mutate=1":"");
+    // First duplicate has parent translation 10 under root translation 2.
+    // The second stays at 4 until the detached first binding is resolved again.
+    #define SCENE 3,4,10,2,2,3,-300,1,2,19,4,11,4,10,11
+    const double gold[]={SCENE,SCENE,1,1,1,1};
+    enum { count=sizeof gold/sizeof gold[0] };
+    double actual[count]={0};
+    int failed=n<0 || n>=sizeof url || named_compile(dir) || r160_wait_read(url,"#r160",actual,count,dir);
+    for(int i=0;!failed && i<count;i++) if(actual[i]!=gold[i]) {
+        printf("NAMED_BINDING case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed=1;
+    }
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_ANIM PropertyBinding named Object3D targets cases=%d failed=%d\n",count,failed);
+    return failed;
+}

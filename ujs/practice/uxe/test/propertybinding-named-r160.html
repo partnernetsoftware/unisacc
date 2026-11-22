@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Object3D, PropertyBinding, REVISION } from "../../web/game/three.module.js";
+const output=document.querySelector("#r160");
+const query=new URLSearchParams(location.search);
+const encode=new TextEncoder();
+const nodeNames=["root","arm.part","joint","joint","foreign"];
+const uuid=i=>"00000000-0000-4000-8000-"+String(i+1).padStart(12,"0");
+function reference() {
+  const nodes=nodeNames.map((name,i)=>{
+    const node=new Object3D();
+    node.name=name; node.uuid=uuid(i);
+    node.position.y=[2,10,3,4,12][i];
+    return node;
+  });
+  const [root,branch,first,second]=nodes;
+  root.add(branch,second); branch.add(first);
+  const ctor=(path,target=root)=>new PropertyBinding(target,path);
+  const get=binding=>{
+    const ary=[-300];
+    binding.getValue(ary,0);
+    return ary[0];
+  };
+  const world=node=>{root.updateMatrixWorld();return node.matrixWorld.elements[13];};
+  const target=ctor("joint.position[y]");
+  const duplicate=get(target);
+  const byUuid=get(ctor(uuid(3)+".position[y]"));
+  const dotted=get(ctor("arm.part.position[y]"));
+  const rootName=get(ctor("root.position[y]"));
+  const rootUuid=get(ctor(uuid(0)+".position[y]"));
+  const scoped=get(ctor("joint.position[y]",branch));
+  const outside=get(ctor("foreign.position[y]"));
+  const q=get(ctor("joint.quaternion[w]"));
+  const implicit=get(ctor(".position[y]"));
+  target.setValue([7],0);
+  const worldFirst=world(first);
+  const secondBefore=second.position.y;
+  branch.remove(first);
+  target.setValue([11],0);
+  const detached=first.position.y;
+  target.unbind();
+  const rebound=get(target);
+  target.setValue([8],0);
+  const secondAfter=world(second);
+  const oldFirst=first.position.y;
+  return [duplicate,byUuid,dotted,rootName,rootUuid,scoped,outside,q,implicit,
+    worldFirst,secondBefore,detached,rebound,secondAfter,oldFirst];
+}
+async function product() {
+  const res=await fetch("file://"+query.get("dir")+"/probe.wasm");
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(await res.arrayBuffer());
+  if(wasm.uxe_abi_version()!==1) throw Error("Wasm ABI");
+  const run=(op,a=0,b=0)=>{
+    wasm.host_reset_globals();
+    return wasm.uxe_propertybinding_named(BigInt(op),BigInt(a),BigInt(b));
+  };
+  const memory=new Uint8Array(wasm.memory.buffer,run(0),8192);
+  const view=new DataView(memory.buffer,memory.byteOffset,memory.byteLength);
+  const [root,branch,first,second,foreign]=[65537,65538,65539,65540,65541];
+  if(run(1)!==3500) throw Error("native names init");
+  nodeNames.forEach((name,i)=>{
+    const n=encode.encode(query.has("mutate") && i===2?"other":name), u=encode.encode(uuid(i));
+    const offset=5000+i*160;
+    memory.set(n,offset); memory.set(u,offset+64);
+    [offset,n.length,offset+64,u.length].forEach((value,j)=>view.setUint32(4000+4*j,value,true));
+    if(run(2,root+i)!==root+i) throw Error("native name registration " + i);
+  });
+  function findOrBind(op,path,target) {
+    const bytes=encode.encode(path); memory.set(bytes,4100);
+    return run(op,target,bytes.length);
+  }
+  const bind=(path,target=root)=>findOrBind(3,path,target);
+  const find=(key,target=root)=>findOrBind(10,key,target);
+  const transferValue=()=>view.getFloat64(4504,true);
+  const set=value=>{view.setFloat64(4504,value,true);return run(5);};
+  const getBound=()=>{
+    view.setFloat64(4504,-300,true);
+    if(run(4)!==1) throw Error("bound native read");
+    return transferValue();
+  };
+  const get=(path,target=root)=>bind(path,target)<0?-300:getBound();
+  const duplicate=get("joint.position[y]");
+  const byUuid=get(uuid(3)+".position[y]");
+  const dotted=get("arm.part.position[y]");
+  const rootName=get("root.position[y]");
+  const rootUuid=get(uuid(0)+".position[y]");
+  const scoped=get("joint.position[y]",branch);
+  const outside=get("foreign.position[y]");
+  const q=get("joint.quaternion[w]");
+  const implicit=get(".position[y]");
+  if(bind("joint.position[y]")<0 || set(7)!==1) throw Error("native duplicate set");
+  const worldFirst=run(8,first);
+  const secondBefore=run(6,second);
+  run(7,branch,first);
+  set(11);
+  const detached=run(6,first);
+  const rebound=get("joint.position[y]");
+  set(8);
+  const secondAfter=run(8,second);
+  const oldFirst=run(6,first);
+  const failedBind=bind("absent.position[y]")===-1 && getBound()===8;
+  const badSuffix=bind("joint.position[w]")===-1 && getBound()===8;
+  if(bind(uuid(3)+".position[y]")!==3800) throw Error("native stale setup");
+  run(9,second);
+  const reused=run(11);
+  const stale=run(4)===-1 && reused%65536===second%65536 && reused!==second;
+  const staleKeys=find(uuid(3))===-1 && find("foreign")===-1 && find("foreign",foreign)===foreign;
+  return [duplicate,byUuid,dotted,rootName,rootUuid,scoped,outside,q,implicit,
+    worldFirst,secondBefore,detached,rebound,secondAfter,oldFirst,failedBind,badSuffix,stale,staleKeys].map(Number);
+}
+try {
+  if(REVISION!=="160") throw Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...reference(),...await product()]);
+} catch(error) { output.textContent="error:"+error.message; }
+</script>

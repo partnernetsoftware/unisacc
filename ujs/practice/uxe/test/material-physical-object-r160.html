@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { MaterialLoader, MeshPhysicalMaterial, REVISION } from "../../web/game/three.module.js";
+
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const encode = new TextEncoder();
+const decode = new TextDecoder();
+const fields = ["color","roughness","metalness","emissive","emissiveIntensity","envMapIntensity",
+  "anisotropy","anisotropyRotation","clearcoat","clearcoatRoughness","reflectivity",
+  "iridescence","iridescenceIOR","sheen","sheenColor","sheenRoughness","transmission","thickness",
+  "attenuationDistance","attenuationColor","specularIntensity","specularColor","wireframe",
+  "flatShading","fog","opacity","alphaTest","side","depthWrite","toneMapped"];
+const colors = new Set(["color","emissive","sheenColor","attenuationColor","specularColor"]);
+const options = {
+  color:0x3366cc, roughness:.625, metalness:.125, emissive:0x112233, emissiveIntensity:2,
+  envMapIntensity:.75, anisotropy:.5, anisotropyRotation:.25, clearcoat:.625, clearcoatRoughness:.375,
+  ior:1.5, iridescence:.25, iridescenceIOR:1.25, iridescenceThicknessRange:[120,420], sheen:.5,
+  sheenColor:0x224466, sheenRoughness:.375, transmission:.75, thickness:.5, attenuationDistance:8,
+  attenuationColor:0x6699cc, specularIntensity:.625, specularColor:0xf0d080, wireframe:true,
+  flatShading:true, fog:false, opacity:.75, alphaTest:.25, side:2, depthWrite:false, toneMapped:false
+};
+const picked = (value, key) => {
+  if (value?.isColor && colors.has(key)) return value.getHex();
+  if (value === Infinity) return -1;
+  return Number(value);
+};
+const values = object => [...fields.map(key => picked(object[key],key)), ...object.iridescenceThicknessRange];
+
+function fieldsAgree(a, b) {
+  for (const key of ["type", ...fields, "iridescenceThicknessRange"]) {
+    if ((key in a) !== (key in b)) return false;
+    const x = a[key], y = b[key];
+    if (Array.isArray(x) && Array.isArray(y)) {
+      if (x.length !== y.length || x.some((v,i) => Math.abs(v-y[i]) > 1e-10)) return false;
+    } else if (typeof x === "number" && typeof y === "number") {
+      if (Math.abs(x-y) > 1e-10) return false;
+    } else if (x !== y) return false;
+  }
+  return true;
+}
+
+try {
+  if (REVISION !== "160") throw Error("three.js revision mismatch");
+  const res = await fetch("file://" + query.get("dir") + "/probe.wasm");
+  const {instance:{exports:wasm}} = await WebAssembly.instantiate(await res.arrayBuffer());
+  if (wasm.uxe_abi_version() !== 1) throw Error("Wasm ABI");
+  const run = (op, pick = 0, arg = 0) => {
+    // Release parser handles between independent typed ABI calls. The
+    // material and input/output arenas are outside the legacy handle heap.
+    wasm.host_reset_globals();
+    try { return wasm.uxe_material_physical(BigInt(op),BigInt(pick),BigInt(arg)); }
+    catch (error) { throw Error("native op " + op + " pick " + pick + " arg " + arg + " " + (error.stack ?? error.message).slice(0,260)); }
+  };
+  const memory = new Uint8Array(wasm.memory.buffer,run(0),12000);
+  const write = pick => {
+    const end = run(2,pick,3808);
+    if (end<=8192) throw Error("native JSON write " + end);
+    return [JSON.parse(decode.decode(memory.subarray(8192,end))),end-8192];
+  };
+  const load = (pick, doc, op = 3) => {
+    const input = encode.encode(JSON.stringify(doc));
+    memory.set(input,2048);
+    return run(op,pick,input.length);
+  };
+  const loader = new MaterialLoader();
+  const rDefault = new MeshPhysicalMaterial();
+  const rSource = new MeshPhysicalMaterial(options);
+  const rDoc = rSource.toJSON();
+  const rLoaded = loader.parse(rDoc);
+  if (run(1,0)!==0 || run(1,1)!==512) throw Error("native material init");
+  const [uDefault] = write(0);
+  if (load(0,rDoc,query.has("mutate")?8:3)!==0) throw Error("native r160 JSON read");
+  const [uDoc, length] = write(0);
+  if (!query.has("mutate") && !fieldsAgree(rDoc,uDoc)) {
+    const diff = fields.find(key => !fieldsAgree({[key]:rDoc[key]},{[key]:uDoc[key]}));
+    throw Error("first JSON mismatch " + diff + " " + rDoc[diff] + " vs " + uDoc[diff]);
+  }
+  if (load(1,uDoc)!==512) throw Error("native JSON roundtrip");
+  const [uRound] = write(1);
+  const uLoadedByR160 = loader.parse(uRound);
+  const changed = {...rDoc,clearcoat:".75",opacity:.5};
+  const unchanged = load(0,changed)===-1 && fieldsAgree(write(0)[0],uDoc);
+  const badRange = {...rDoc,iridescenceThicknessRange:[120,420,500],opacity:.5};
+  const rangeRejected = load(0,badRange)===-1 && fieldsAgree(write(0)[0],uDoc);
+  const zeroed = {...rDoc,clearcoat:0,transmission:0};
+  run(7,0,4294967294);
+  const overflow = load(0,zeroed)===-2 && run(4)===4294967294 && fieldsAgree(write(0)[0],uDoc);
+  const expectedVersions = [rSource.version,rLoaded.version,run(4,1)];
+  output.textContent = JSON.stringify([
+    ...values(rDefault),...values(loader.parse(uDefault)),
+    ...values(rLoaded),...values(uLoadedByR160),
+    ...expectedVersions, run(6,1,0),run(6,1,1),
+    Number(fieldsAgree(rDefault.toJSON(),uDefault)), Number(fieldsAgree(rDoc,uDoc)),
+    Number(fieldsAgree(uDoc,uRound)), Number(uLoadedByR160.isMeshPhysicalMaterial),
+    Number(!("attenuationDistance" in uDefault)), Number(unchanged),Number(rangeRejected),Number(overflow),
+    Number(run(2,0,length-1)===-1)
+  ]);
+} catch (error) { output.textContent = "error:" + error.message; }
+</script>

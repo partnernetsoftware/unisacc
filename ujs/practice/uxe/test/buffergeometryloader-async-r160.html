@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {BufferGeometryLoader,LoadingManager,REVISION} from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const path="data:application/json,",broken="%7B";
+const encoder=new TextEncoder(),decoder=new TextDecoder();
+function shape(x,type="Float32Array") {
+  return {type:"BufferGeometry",data:{
+    attributes:{position:{itemSize:3,type,array:[x,2,3,4,5,6,7,8,9],normalized:false}},
+    index:{type:"Uint16Array",array:[0,1,2]},groups:[{start:0,count:3,materialIndex:2}],
+    boundingSphere:{center:[1,2,3],radius:4},
+  }};
+}
+const encode=json=>encodeURIComponent(JSON.stringify(json));
+async function reference() {
+  const manager=new LoadingManager(),loader=new BufferGeometryLoader(manager).setPath(path);
+  let errors=0,progress=0,total=0,loaded=0;
+  manager.onError=()=>errors++;
+  manager.onProgress=(_,n,max)=>{progress++;loaded=n;total=max;};
+  const geometry=await loader.loadAsync(encode(shape(1.25)));
+  const reject=promise=>promise.then(()=>0,()=>1);
+  const badSyntax=await reject(loader.loadAsync(broken));
+  const badType=await reject(loader.loadAsync(encode(shape(1.25,"InvalidArray"))));
+  const idle=new Promise(resolve=>{manager.onLoad=resolve;});
+  const next=await loader.loadAsync(encode(shape(.5)));
+  await idle;
+  const pos=geometry.getAttribute("position"),index=geometry.getIndex(),sphere=geometry.boundingSphere;
+  const values=[pos.count,pos.getX(0),pos.getY(0),pos.getZ(0),index.count,index.getX(2),
+    geometry.groups.length,geometry.groups[0].materialIndex,sphere.center.x,sphere.radius,
+    next.getAttribute("position").getX(0),badSyntax,badType,errors,progress,total,loaded];
+  geometry.dispose();
+  next.dispose();
+  return values;
+}
+async function product() {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,which=0,a=0,b=0,c=0,d=0,slot=0)=>Number(wasm.uxe_geom_loader_async(
+    BigInt(op),BigInt(which),BigInt(a),BigInt(b),BigInt(c),BigInt(d),BigInt(slot)));
+  const base=run(0),bytes=new Uint8Array(wasm.memory.buffer,base,32768);
+  const memory=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const u=at=>memory.getUint32(at,true),f=at=>memory.getFloat32(at,true),d=at=>memory.getFloat64(at,true);
+  const put=(at,text)=>{const raw=encoder.encode(text);bytes.set(raw,at);return raw.length;};
+  if(run(1)!==1 || run(2,0,512,put(512,path))!==128) throw new Error("geometry family setup");
+  for(let slot=0;slot<4;slot++) if(run(5,0,0,0,0,0,slot)!==4096+slot*2048)
+    throw new Error("geometry storage");
+  let progress=0;
+  function request(source) {
+    const id=run(3,0,18000,put(18000,source));
+    if(id<=0) throw new Error("geometry async begin "+id);
+    const url=decoder.decode(bytes.subarray(u(3072),u(3072)+u(3076)));
+    if(url!==path+source) throw new Error("resolved geometry URL");
+    return {id,async receive(mutate=false) {
+      const response=await fetch(url),raw=new Uint8Array(await response.arrayBuffer());
+      if(mutate) {
+        const at=decoder.decode(raw).indexOf("[1.25");
+        if(at<0) throw new Error("mutation marker");
+        raw[at+1]=57;
+      }
+      bytes.set(raw,20000);
+      const events=run(4,0,id,response.status,20000,raw.length);
+      if(events>0 && u(3200)===2) progress++;
+      return events;
+    }};
+  }
+  function decode(id,slot,which=0) {return run(6,which,id,0,0,0,slot);}
+  function values(slot) {
+    const geo=4096+slot*2048,view=u(u(geo+16)+12),at=u(view),index=u(geo+12)-1;
+    const group=u(geo+20),sphere=u(geo+28)-1;
+    return [u(view+4),f(at),f(at+4),f(at+8),u(index+4),memory.getUint16(u(index)+4,true),
+      u(group),u(group+16),d(sphere),d(sphere+24)];
+  }
+  const main=request(encode(shape(1.25)));
+  const pre=decode(main.id,0),duplicate=run(3,0,18000,1);
+  const mainEvents=await main.receive(query.get("mode")==="1");
+  const wrong=decode(main.id,0,1),overlap=run(7,0,main.id);
+  const loaded=decode(main.id,0);
+  if(loaded<0) throw new Error("geometry parse "+loaded);
+  bytes.fill(0,20000,20500);
+  const primary=values(0),repeat=decode(main.id,0),release=run(8,0,main.id);
+  const syntax=request(broken),stale=run(4,0,main.id,200,20000,1);
+  await syntax.receive();
+  const badSyntax=decode(syntax.id,1),syntaxKind=u(3500),syntaxId=u(3504);
+  const type=request(encode(shape(1.25,"InvalidArray")));
+  await type.receive();
+  const badType=decode(type.id,2),typeKind=u(3500),typeId=u(3504);
+  const unchanged=Number(u(6272)===0 && u(8320)===0 && values(0).every((value,i)=>value===primary[i]));
+  const next=request(encode(shape(.5)));
+  await next.receive();
+  if(decode(next.id,3)<0) throw new Error("geometry recovery");
+  return [...primary,values(3)[1],Number(badSyntax<0),Number(badType<0),
+    Number(syntaxKind===3)+Number(typeKind===3),progress,u(64),u(68),
+    pre,duplicate,wrong,overlap,stale,repeat,release,mainEvents,badSyntax,badType,syntaxId,typeId,unchanged,next.id];
+}
+try {
+  if(REVISION!=="160") throw new Error("three.js revision");
+  output.textContent=JSON.stringify([...await reference(),...await product()]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

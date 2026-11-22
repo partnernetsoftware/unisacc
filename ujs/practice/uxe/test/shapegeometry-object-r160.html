@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Mesh, MeshBasicMaterial, ObjectLoader, Path, REVISION, Shape, ShapeGeometry } from "../../web/game/three.module.js";
+const output = document.querySelector("#r160");
+const query = new URLSearchParams(location.search);
+const encode = new TextEncoder();
+const decode = new TextDecoder();
+const cases = [
+  [[[0,0],[4,0],[4,3],[2,1],[0,3]]],
+  [[[0,0],[10,0],[10,10],[0,10]],[[2,2],[2,4],[4,4],[4,2]],[[6,6],[8,6],[8,8],[6,8]]]
+];
+function ring(path,points) {
+  path.moveTo(...points[0]);
+  for (const xy of [...points.slice(1),points[0]]) path.lineTo(...xy);
+  return path;
+}
+function source(kind) {
+  const [outer,...holes] = cases[kind];
+  const shape = ring(new Shape(),outer);
+  shape.uuid = "00000000-0000-4000-8000-000000000011";
+  for (const points of holes) shape.holes.push(ring(new Path(),points));
+  const geometry = new ShapeGeometry(shape, 7 + kind);
+  geometry.uuid = "00000000-0000-4000-8000-000000000022";
+  const mesh = new Mesh(geometry,new MeshBasicMaterial());
+  try { return JSON.parse(JSON.stringify(mesh)); }
+  finally { geometry.dispose(); mesh.material.dispose(); }
+}
+function signature(vertices,indices,samples) {
+  let area=0, bad=0, coverage=0;
+  const cross = (a,b,c) => (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
+  const attributes = vertices.every(v => v[2]===0 && v[3]===0 && v[4]===0 && v[5]===1 && v[0]===v[6] && v[1]===v[7]);
+  for (let i=0; i<indices.length; i+=3) {
+    const [a,b,c] = indices.slice(i,i+3).map(j=>vertices[j]);
+    const t=cross(a,b,c);
+    if(t<=0) bad++;
+    area+=t/2;
+    samples.forEach((p,j)=>{if(cross(a,b,p)>=-1e-9 && cross(b,c,p)>=-1e-9 && cross(c,a,p)>=-1e-9) coverage |= 1<<j;});
+  }
+  return [vertices.length,indices.length/3,area,bad,coverage,Number(attributes)];
+}
+function stock(geometry,samples) {
+  const p=geometry.getAttribute("position"), n=geometry.getAttribute("normal"), uv=geometry.getAttribute("uv");
+  const vertices=Array.from({length:p.count},(_,i)=>[
+    p.getX(i),p.getY(i),p.getZ(i),n.getX(i),n.getY(i),n.getZ(i),uv.getX(i),uv.getY(i)
+  ]);
+  return signature(vertices,[...geometry.index.array],samples);
+}
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])]));
+  return value;
+}
+function exercise(wasm,kind) {
+  const run=(op,arg=0)=>{
+    wasm.host_reset_globals();
+    return Number(wasm.uxe_shapegeometry_object(BigInt(op),BigInt(arg)));
+  };
+  const memory=new Uint8Array(wasm.memory.buffer,run(0),48000);
+  const view=new DataView(memory.buffer,memory.byteOffset,memory.byteLength);
+  const input=doc=>{
+    const bytes=encode.encode(JSON.stringify(doc));
+    memory.set(bytes,4096);
+    return run(2,bytes.length);
+  };
+  const emitted=()=>{
+    const end=run(3,18000);
+    if(end<=24576) throw Error("native ShapeGeometry JSON writer " + end);
+    return [JSON.parse(decode.decode(memory.subarray(24576,end))),end-24576];
+  };
+  const ref=source(kind);
+  const samples=kind===0?[[1,.5],[2,2],[3,2],[4.5,1]]:[[1,1],[2.5,2.5],[7,7],[5,5],[9,9],[11,5]];
+  const reference=new ObjectLoader().parse(ref).geometry;
+  const expected=stock(reference,samples);
+  if(run(1,32)!==832 || input(ref)!==0) throw Error("native ShapeGeometry import " + kind);
+  if(kind===1 && query.has("mutate")) run(5);
+  const status=run(4,4096);
+  if(status!==832) throw Error("native ShapeGeometry triangulate " + status);
+  const n=view.getUint32(832+16,true), ni=view.getUint32(832+20,true);
+  const verts=Array.from({length:n},(_,i)=>Array.from({length:8},(_,j)=>view.getFloat32(1024+32*i+4*j,true)));
+  const ids=Array.from({length:ni},(_,i)=>view.getUint32(2304+4*i,true));
+  const product=signature(verts,ids,samples);
+  const [doc,bytes]=emitted();
+  const stableSame = JSON.stringify(stable(doc))===JSON.stringify(stable({geometries:ref.geometries,shapes:ref.shapes}));
+  const parsed=new ObjectLoader().parse({...ref,...doc}).geometry;
+  const loaded=stock(parsed,samples);
+  const division=parsed.parameters.curveSegments===7+kind && view.getUint32(24,true)===7+kind;
+  const linked=parsed.uuid===doc.geometries[0].uuid && parsed.parameters.shapes[0].uuid===doc.shapes[0].uuid;
+  const holeCount=parsed.parameters.shapes[0].holes.length;
+  const bounds=run(3,bytes-1)===-1;
+  const badUuid=structuredClone(ref);
+  badUuid.geometries[0].shapes[0]="00000000-0000-4000-8000-000000000099";
+  const guard=memory.slice(128,128+16*n);
+  const wrongId=input(badUuid)===-1 && guard.every((v,i)=>memory[128+i]===v);
+  const badCurve=structuredClone(ref);
+  badCurve.shapes[0].curves[0].type="QuadraticBezierCurve";
+  const wrongCurve=input(badCurve)===-1 && guard.every((v,i)=>memory[128+i]===v);
+  const restored=input(doc)===0 && run(4,4096)===832;
+  const [again]=emitted();
+  const repeat=JSON.stringify(stable(again))===JSON.stringify(stable(doc));
+  return [...expected,...product,...loaded,Number(stableSame),Number(division),Number(linked),
+    holeCount,Number(bounds),Number(wrongId),Number(wrongCurve),Number(restored),Number(repeat)];
+}
+
+try {
+  if(REVISION!=="160") throw Error("three.js revision mismatch");
+  const res=await fetch("file://"+query.get("dir")+"/probe.wasm");
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(await res.arrayBuffer());
+  if(wasm.uxe_abi_version()!==1) throw Error("Wasm ABI");
+  output.textContent=JSON.stringify([0,1].flatMap(kind=>exercise(wasm,kind)));
+} catch(error) { output.textContent="error:"+error.message; }
+</script>

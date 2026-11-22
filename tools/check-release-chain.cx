@@ -455,12 +455,20 @@ int main(int argc, char **argv) {
         np_free(&r);
 
         /* Create exit.tsv; 2. Backup directory inside repo -> refused rc=2 */
-        char exitf[4500];
-        if (cx_fmt(exitf, sizeof exitf, "%s/exit.tsv", bchain) || cx_write(exitf, "rc=0\n", 5)) return 2;
+        char exitf[4500], bcache[4500];
+        if (cx_fmt(exitf, sizeof exitf, "%s/exit.tsv", bchain) || cx_write(exitf, "rc=0\n", 5) ||
+            cx_fmt(bcache, sizeof bcache, "%s/bktest/.cache/unisacc/release-backups/0.0.99", tmp)) return 2;
         char *bk_in[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", binrepo, "--repo", brepo, 0};
         r = actual(bk_in);
         ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE BACKUP_EVIDENCE") != 0 && strstr(r.err, "backup-inside-repo") != 0,
            "backup-evidence-inside-repo-refused");
+        np_free(&r);
+
+        /* 2b. Backup directory under /.cache/ -> refused rc=2 (prevents cache cleanup from wiping evidence backups) */
+        char *bk_ca[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", bcache, "--repo", brepo, 0};
+        r = actual(bk_ca);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE BACKUP_EVIDENCE") != 0 && strstr(r.err, "backup-inside-cache") != 0,
+           "backup-evidence-inside-cache-refused");
         np_free(&r);
 
         /* 3. release-chain run --from 5 before backup-evidence -> refused before READY_TO_EXECUTE */
@@ -471,7 +479,18 @@ int main(int argc, char **argv) {
            "run-from-5-refuses-missing-backup");
         np_free(&r);
 
-        /* 4. Valid backup-evidence copies all 7 artifacts, writes sha256 manifest, and --verify passes */
+        /* 4. Valid backup-evidence (including default ~/.unisacc-release-evidence-backups/<ver> when --backup-dir is omitted) copies all 7 artifacts, writes sha256 manifest, and --verify passes */
+        char bhome[4400], bdef[4400];
+        if (cx_fmt(bhome, sizeof bhome, "%s/bktest/home", tmp) ||
+            cx_fmt(bdef, sizeof bdef, "%s/bktest/home/.unisacc-release-evidence-backups/0.0.99", tmp) ||
+            sy_mkdir_all(bhome, 0700)) return 2;
+        if (cx_fmt(bcmd, sizeof bcmd, "HOME=\"%s\" \"%s\" backup-evidence --version 0.0.99 --chain-dir \"%s\" --prerun-dir \"%s\" --repo \"%s\"",
+            bhome, bin, bchain, bpre, brepo)) return 2;
+        np_result rdef = actual(bv0);
+        ck(rdef.rc == 0 && has(&rdef, "BACKUP_EVIDENCE\tOK\tversion=0.0.99\tfiles=7\t") && has(&rdef, ".unisacc-release-evidence-backups/0.0.99"),
+           "backup-evidence-default-dir-under-home");
+        np_free(&rdef);
+
         r = actual(bk_miss);
         char *bk_ver[] = {bin, "backup-evidence", "--verify", "--version", "0.0.99", "--repo", brepo, 0};
         np_result rv = actual(bk_ver);
@@ -481,6 +500,8 @@ int main(int argc, char **argv) {
         np_free(&r); np_free(&rv);
 
         /* 5. release-chain run --from 5 now passes backup gate and reaches READY_TO_EXECUTE */
+        if (cx_fmt(bcmd, sizeof bcmd, "cd \"%s\" && \"%s\" run --inputs \"%s\" --state \"%s\" --layout /nonexistent-layout --from 5",
+            brepo, bin, inputs, bst)) return 2;
         r = actual(bv0);
         ck(r.rc == 0 && has(&r, "CHAIN\tPASS\t5\tbackup-evidence\t") && has(&r, "CHAIN\tRESULT\tREADY_TO_EXECUTE\tversion=0.0.99"),
            "run-from-5-passes-with-valid-backup");

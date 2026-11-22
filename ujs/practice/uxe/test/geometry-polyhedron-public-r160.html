@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { ObjectLoader, PolyhedronGeometry, REVISION } from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const maxError = (a, b) => a.length === b.length
+  ? a.reduce((error, value, i) => Math.max(error, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+const meshErrors = (mesh, geometry) => ["position", "normal", "uv"]
+  .map((name, i) => maxError(mesh[i], geometry.attributes[name].array));
+const count = geo => geo.attributes.position.count;
+const radiusSquared = geo => ["X", "Y", "Z"].reduce((total, axis) => total + geo.attributes.position["get" + axis](0) ** 2, 0);
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const mutate = Number(query.get("mutate"));
+  const run = (mode, input) => {
+    const api = new WebAssembly.Instance(module).exports;
+    const base = Number(api.uxe_polyhedron_public(0n, 0n));
+    const memory = new Uint8Array(api.memory.buffer, base, 60000);
+    memory.set(encoder.encode("poly-"), 6000);
+    memory.set(encoder.encode('poly "A"'), 6016);
+    const payload = encoder.encode(JSON.stringify(input));
+    memory.set(payload, 48000);
+    const status = Number(api.uxe_polyhedron_public(BigInt(mode), BigInt(payload.length)));
+    if (mode >= 5) return status;
+    if (status <= 0) throw new Error("native JSON status " + status + " mode " + mode);
+    const doc = JSON.parse(decoder.decode(memory.subarray(4096, 4096 + status)));
+    const tape = new Uint32Array(api.memory.buffer, base + 7000, 4);
+    const mesh = [3,3,2].map((size, i) => new Float32Array(api.memory.buffer, base + tape[i], size * tape[3]).slice());
+    return { doc, mesh };
+  };
+  const vertices = [1,1,1,-1,-1,1,-1,1,-1,1,-1,-1];
+  const indices = [2,1,0,0,3,2,1,3,0,2,3,1];
+  const original = new PolyhedronGeometry(vertices, indices, 1.5, 1);
+  original.uuid = "poly-";
+  original.name = 'poly "A"';
+  const source = original.toJSON();
+  const standard = run(1, mutate ? {...source, radius: 2.5} : source);
+  const compatible = run(2, source);
+  const { detail, ...rest } = source;
+  const legacy = run(3, {...rest, details: detail});
+  const defaults = run(4, {});
+  const loader = new ObjectLoader();
+  const read = data => loader.parseGeometries([data])["poly-"];
+  const rawResult = read(source), standardResult = read(standard.doc), compatResult = read(compatible.doc),
+    legacyResult = read(legacy.doc), defaultResult = read(defaults.doc);
+  const params = (a, b) => Number(a.detail === b.detail && a.radius === b.radius && a.name === b.name &&
+    a.uuid === b.uuid && a.type === b.type &&
+    maxError(a.vertices, b.vertices) === 0 && maxError(a.indices, b.indices) === 0);
+  const view = geometry => ["position","normal","uv"].map(name => geometry.attributes[name].array);
+  result.textContent = JSON.stringify([
+    params(standard.doc, source), params(compatible.doc, source), params(legacy.doc, source),
+    Number(!("details" in standard.doc) && !("details" in source) && compatible.doc.details === detail),
+    standard.doc.radius, standard.doc.detail, standard.doc.vertices.length, standard.doc.indices.length,
+    count(rawResult), count(standardResult), count(compatResult), count(legacyResult), count(defaultResult),
+    Number(rawResult.parameters.detail === 0 && standardResult.parameters.detail === 0 &&
+      compatResult.parameters.detail === 1 && compatResult instanceof PolyhedronGeometry && compatResult.index === null),
+    radiusSquared(standardResult), radiusSquared(compatResult),
+    ...meshErrors(standard.mesh, original), ...meshErrors(compatible.mesh, original),
+    ...meshErrors(legacy.mesh, original), ...meshErrors(view(compatResult), original), ...meshErrors(view(legacyResult), original),
+    run(5, {...source, details: 2}),
+    run(6, {...source, indices: [0,1,8]}),
+    run(7, {...source, vertices: [1,2,3,4]}),
+  ]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

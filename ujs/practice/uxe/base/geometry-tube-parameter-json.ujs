@@ -1,0 +1,188 @@
+struct TubeLineParameters {
+  tubularSegments: f64;
+  radius: f64;
+  radialSegments: f64;
+  closed: u32;
+}
+
+// CurveControl and its points stay alive and immutable while the Tube uses them.
+// The frame workspace is transient and reserves 48 bytes after its last frame.
+struct TubeLineWorkspace {
+  curve: u32;
+  points: u32;
+  frames: u32;
+}
+
+native function tube_line_spaces(at:i64,raw:i64,arena:i64,bytes:i64,aux:i64,auxBytes:i64,options:i64,tubular:i64) i64 {
+  if(tubular<1 || tubular>87380 || options%4!=0 ||
+     !geometry_primitive_raw(at,raw,arena,bytes,options,TubeLineWorkspace.size)) { return 0; }
+  let curve=ux_u32(options+TubeLineWorkspace.curve);
+  let points=ux_u32(options+TubeLineWorkspace.points);
+  let frames=ux_u32(options+TubeLineWorkspace.frames);
+  if(curve%4!=0 || points%8!=0 || frames%8!=0) { return 0; }
+  // CurveControl_fromJSON can stage any supported CurveControl kind.
+  let regions=[options,TubeLineWorkspace.size,aux,auxBytes,curve,CurveControl.size,points,96,frames,72*(tubular+1)+48];
+  let i=0;
+  while(i<10) {
+    let a=regions[i];
+    let ab=regions[i+1];
+    if(!geometry_primitive_raw(at,raw,arena,bytes,a,ab)) { return 0; }
+    let j=i+2;
+    while(j<10) {
+      if(!geometry_public_disjoint(a,ab,regions[j],regions[j+1])) { return 0; }
+      j=j+2;
+    }
+    i=i+2;
+  }
+  return 1;
+}
+
+native function tube_line_axis(x:f64) f64 {
+  if(x<0.0) { return 0.0-x; }
+  return x;
+}
+
+native function tube_line_frames(points:i64,frames:i64,tubular:i64,radius:f64) i64 {
+  let word=4294967296.0;
+  let maxFloat=word*word*word*word*(1.0-1.0/16777216.0);
+  let absolute=tube_line_axis(radius);
+  if(!(absolute<=maxFloat)) { return 0-1; }
+  let j=0;
+  while(j<6) {
+    let coordinate=tube_line_axis(ux_f64(points+8*j));
+    if(!(coordinate<=maxFloat-absolute)) { return 0-1; }
+    j=j+1;
+  }
+  let length=LineCurve3_getLength(points);
+  if(!(length>0.0)) { return 0-1; }
+  let tangent=frames+72*(tubular+1);
+  let axis=tangent+24;
+  let t=LineCurve3_getTangent(tangent,points);
+  let x=tube_line_axis(ux_f64(tangent));
+  let y=tube_line_axis(ux_f64(tangent+8));
+  let z=tube_line_axis(ux_f64(tangent+16));
+  // The last axis wins ties, matching r160's initial Frenet-frame selection.
+  let selected=frame_put(axis,1.0,0.0,0.0);
+  if(y<=x && y<z) { selected=frame_put(axis,0.0,1.0,0.0); }
+  if(z<=x && z<=y) { selected=frame_put(axis,0.0,0.0,1.0); }
+  let perpendicular=frame_cross(axis,tangent,axis);
+  let unit=frame_normalize(axis);
+  let normal=frame_cross(frames+24,tangent,axis);
+  let binormal=frame_cross(frames+48,tangent,normal);
+  let row=0;
+  while(row<=tubular) {
+    let dst=frames+row*72;
+    let center=LineCurve3_getPointAt(dst,points,row*1.0/tubular);
+    if(row>0) {
+      let n=uxe_copy_record(dst+24,normal,48);
+    }
+    row=row+1;
+  }
+  return frames;
+}
+
+native function TubeGeometry_create(at:i64,raw:i64,arena:i64,bytes:i64,params:i64,options:i64) i64 {
+  if(params%8!=0 || !geometry_primitive_raw(at,raw,arena,bytes,params,TubeLineParameters.size)) { return 0-1; }
+  let t=ux_f64(params+TubeLineParameters.tubularSegments);
+  let r=ux_f64(params+TubeLineParameters.radius);
+  let n=ux_f64(params+TubeLineParameters.radialSegments);
+  let closed=ux_u32(params+TubeLineParameters.closed);
+  if(!(t>=1.0 && t<=87380.0) || !(n>=1.0 && n<=262144.0) || closed>1) { return 0-1; }
+  let tubular=f64_floor_i64(t);
+  let radial=f64_floor_i64(n);
+  if(t!=0.0+tubular || n!=0.0+radial ||
+     !tube_line_spaces(at,raw,arena,bytes,params,TubeLineParameters.size,options,tubular)) { return 0-1; }
+  let curve=ux_u32(options+TubeLineWorkspace.curve);
+  let points=ux_u32(options+TubeLineWorkspace.points);
+  if(ux_u32(curve+CurveControl.kind)!=1 || ux_u32(curve+CurveControl.points)!=points ||
+     ux_u32(curve+CurveControl.arcLengthDivisions)==0) { return 0-1; }
+  let frames=tube_line_frames(points,ux_u32(options+TubeLineWorkspace.frames),tubular,r);
+  if(frames<0) { return frames; }
+  let result=TubeGeometry_generate(raw,frames,tubular,radial,r,closed);
+  if(result<0) { return result; }
+  let installed=GeometryBuffers_asGeometry(raw,GeometryPrimitive_geometry(at),arena,bytes,7,0,0);
+  if(installed<0) { return installed; }
+  return geometry_primitive_store(at,16,t,r,n,0.0+closed,0.0+curve,0.0);
+}
+
+native function tube_line_keys(at:i64) i64 {
+  let labels=[84,117,98,101,71,101,111,109,101,116,114,121,112,97,116,104,116,117,98,117,108,97,114,83,101,103,109,101,110,116,115,114,97,100,105,117,115,114,97,100,105,97,108,83,101,103,109,101,110,116,115,99,108,111,115,101,100];
+  let i=0;
+  while(i<57) {
+    let key=ux_u8_put(at+i,labels[i]);
+    i=i+1;
+  }
+  return at;
+}
+
+native function TubeGeometry_toJSON(at:i64,dst:i64,end:i64,uuid:i64,uuidBytes:i64,scratch:i64) i64 {
+  if(geometry_primitive_ready(at,16)<0 ||
+     !geometry_primitive_json_io(at,dst,end,uuid,uuidBytes,scratch,57)) { return 0-1; }
+  let curve=f64_floor_i64(ux_f64(at+GeometryPrimitiveRecord.fifth));
+  if(curve%4!=0 || !geometry_public_span(curve,CurveControl.size) ||
+     !geometry_public_disjoint(curve,CurveControl.size,dst,end-dst) ||
+     !geometry_public_disjoint(curve,CurveControl.size,scratch,1161)) { return 0-1; }
+  let points=ux_u32(curve+CurveControl.points);
+  if(ux_u32(curve+CurveControl.kind)!=1 || !geometry_public_span(points,48) ||
+     !geometry_public_disjoint(points,48,dst,end-dst) ||
+     !geometry_public_disjoint(points,48,scratch,1161)) { return 0-1; }
+  let keys=tube_line_keys(scratch+1104);
+  let p=geometry_primitive_json_head(at,dst,end,uuid,uuidBytes,keys,12);
+  p=geometry_parameter_number(p,end,keys+16,15,ux_f64(at+GeometryPrimitiveRecord.first),scratch);
+  p=geometry_parameter_number(p,end,keys+31,6,ux_f64(at+GeometryPrimitiveRecord.second),scratch);
+  p=geometry_parameter_number(p,end,keys+37,14,ux_f64(at+GeometryPrimitiveRecord.third),scratch);
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,keys+51,6);
+  p=json_byte(p,end,58);
+  let token=ObjectJsonToken.boolFalse;
+  if(ux_f64(at+GeometryPrimitiveRecord.fourth)!=0.0) { token=ObjectJsonToken.boolTrue; }
+  p=json_write_token(p,end,token);
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,keys+12,4);
+  p=json_byte(p,end,58);
+  if(p<0) { return p; }
+  p=CurveControl_toJSON(curve,p,end,scratch);
+  return json_byte(p,end,125);
+}
+
+native function TubeGeometry_fromJSON(at:i64,raw:i64,arena:i64,bytes:i64,input:i64,end:i64,scratch:i64,options:i64) i64 {
+  if(scratch%8!=0 || end<=input ||
+     !geometry_primitive_raw(at,raw,arena,bytes,input,end-input) ||
+     !geometry_primitive_raw(at,raw,arena,bytes,scratch,305) ||
+     !geometry_public_disjoint(input,end-input,scratch,305) ||
+     !geometry_primitive_json_object(input,end)) { return 0-1; }
+  // The outer labels are staged only after proving disjoint writable regions.
+  if(options%4!=0 || !geometry_primitive_raw(at,raw,arena,bytes,options,TubeLineWorkspace.size) ||
+     !geometry_public_disjoint(options,TubeLineWorkspace.size,scratch,305)) { return 0-1; }
+  let curve=ux_u32(options+TubeLineWorkspace.curve);
+  let points=ux_u32(options+TubeLineWorkspace.points);
+  if(!geometry_public_disjoint(curve,CurveControl.size,scratch,305) ||
+     !geometry_public_disjoint(points,96,scratch,305)) { return 0-1; }
+  let keys=tube_line_keys(scratch+248);
+  let t=geometry_primitive_json_number(input,end,keys+16,15,64.0);
+  if(!(t>=1.0 && t<=87380.0)) { return 0-1; }
+  let tubular=f64_floor_i64(t);
+  let frames=ux_u32(options+TubeLineWorkspace.frames);
+  if(t!=0.0+tubular || !tube_line_spaces(at,raw,arena,bytes,scratch,305,options,tubular) ||
+     !geometry_public_disjoint(input,end-input,curve,CurveControl.size) ||
+     !geometry_public_disjoint(input,end-input,points,96) ||
+     !geometry_public_disjoint(input,end-input,frames,72*(tubular+1)+48)) { return 0-1; }
+  let r=geometry_primitive_json_number(input,end,keys+31,6,1.0);
+  let n=geometry_primitive_json_number(input,end,keys+37,14,8.0);
+  let flag=json_find_key(input,end,keys+51,6);
+  let closed=0;
+  if(flag>=0) {
+    if(ux_u8(flag)==116) { closed=1; }
+    else if(ux_u8(flag)!=102) { return 0-1; }
+  } else if(flag!=0-2) { return 0-1; }
+  let path=json_find_key(input,end,keys+12,4);
+  if(path<0 || ux_u8(path)!=123) { return 0-1; }
+  let last=json_value_end(path,end);
+  let loaded=CurveControl_fromJSON(curve,points,path,last,scratch+32);
+  if(loaded<0) { return loaded; }
+  let a=ux_f64_put(scratch+TubeLineParameters.tubularSegments,t);
+  let b=ux_f64_put(scratch+TubeLineParameters.radius,r);
+  let c=ux_f64_put(scratch+TubeLineParameters.radialSegments,n);
+  let d=ux_u32_put(scratch+TubeLineParameters.closed,closed);
+  return TubeGeometry_create(at,raw,arena,bytes,scratch,options);
+}

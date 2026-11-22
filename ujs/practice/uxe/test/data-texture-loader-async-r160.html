@@ -1,0 +1,115 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {ClampToEdgeWrapping,DataTextureLoader,LinearFilter,LoadingManager,REVISION} from "../../web/game/three.module.js";
+const output=document.querySelector("#r160"),query=new URLSearchParams(location.search);
+const encoder=new TextEncoder(),decoder=new TextDecoder();
+const path="data:application/octet-stream;base64,";
+const initial=[82,52,2,1,1,93,77,33,165,83,95,114,218];
+const next=[82,52,1,2,0,11,12,13,255,6,7,8,128];
+const truncated=initial.slice(0,-1),invalid=[...initial];
+invalid[4]=2;
+const body=bytes=>btoa(String.fromCharCode(...bytes));
+const pack=(bytes,from)=>bytes[from]+256*bytes[from+1]+65536*bytes[from+2]+16777216*bytes[from+3];
+
+class R4Loader extends DataTextureLoader {
+  parse(buffer) {
+    this.calls++;
+    const header=new DataView(buffer),width=header.getUint8(2),height=header.getUint8(3),mode=header.getUint8(4);
+    if(header.getUint16(0)!==0x5234 || !width || !height || mode>1 || buffer.byteLength!==5+4*width*height)
+      throw new SyntaxError("invalid R4 image");
+    const samples=new Uint8Array(buffer,5);
+    const data=mode===0?samples:Uint8Array.from(samples,byte=>byte^0x5a);
+    return {data,width,height};
+  }
+}
+async function reference() {
+  const manager=new LoadingManager(),loader=new R4Loader(manager).setPath(path);
+  loader.calls=0;
+  let progress=0,errors=0,total=0,loaded=0;
+  manager.onProgress=(_,n,max)=>{progress++;loaded=n;total=max;};
+  manager.onError=()=>errors++;
+  // r160 calls onError then falls through to access texData.image.
+  // FileLoader reports this to the manager before its internal promise rejects.
+  const suppress=event=>{
+    if(event.reason instanceof TypeError && String(event.reason).includes("reading 'image'")) event.preventDefault();
+  };
+  window.addEventListener("unhandledrejection",suppress);
+  const load=bytes=>new Promise((resolve,reject)=>{
+    const pending=loader.load(body(bytes),(texture,decoded)=>{
+      if(texture!==pending || !texture.isDataTexture || decoded.data!==texture.image.data || texture.version!==1)
+        return reject(new Error("r160 decoded callback identity"));
+      resolve(texture);
+    },undefined,reject);
+  });
+  const first=await load(initial),reject=promise=>promise.then(()=>0,error=>Number(error instanceof SyntaxError));
+  const bad=await reject(load(truncated)),forged=await reject(load(invalid));
+  const idle=new Promise(resolve=>{manager.onLoad=resolve;});
+  const last=await load(next);
+  await idle;
+  const textureValues=texture=>[texture.image.width,texture.image.height,
+    Number(texture.minFilter===LinearFilter && texture.magFilter===LinearFilter),
+    Number(texture.wrapS!==ClampToEdgeWrapping),Number(texture.wrapT!==ClampToEdgeWrapping),
+    pack(texture.image.data,0),pack(texture.image.data,4)];
+  const result=[...textureValues(first),...textureValues(last),bad,forged,loader.calls,progress,errors,total,loaded];
+  first.dispose();
+  last.dispose();
+  return result;
+}
+async function product() {
+  const binary=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance:{exports:wasm}}=await WebAssembly.instantiate(binary);
+  const run=(op,which=0,a=0,b=0,c=0,d=0)=>Number(wasm.uxe_data_async(
+    BigInt(op),BigInt(which),BigInt(a),BigInt(b),BigInt(c),BigInt(d)));
+  const base=run(0),bytes=new Uint8Array(wasm.memory.buffer,base,16384);
+  const memory=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const u=at=>memory.getUint32(at,true),put=(at,text)=>{const raw=encoder.encode(text);bytes.set(raw,at);return raw.length;};
+  if(run(1)!==1 || run(2,0,512,put(512,path))!==128) throw new Error("native family setup");
+  let progress=0;
+  function request(bodyBytes) {
+    const encoded=body(bodyBytes),id=run(3,0,5000,put(5000,encoded));
+    if(id<=0) throw new Error("native async begin "+id);
+    const url=decoder.decode(bytes.subarray(u(3072),u(3072)+u(3076)));
+    if(url!==path+encoded) throw new Error("native request URL");
+    return {id,async receive(mutate=false) {
+      const received=await fetch(url),raw=new Uint8Array(await received.arrayBuffer());
+      if(mutate) raw[5]^=1;
+      bytes.set(raw,6000);
+      const events=run(4,0,id,received.status,6000,raw.length);
+      if(events>0 && u(3200)===2) progress++;
+      return events;
+    }};
+  }
+  const decode=(id,which=0)=>run(5,which,id,32);
+  const values=()=>[u(4096),u(4100),u(4104),u(4108),u(4112),u(u(4116)),u(u(4116)+4)];
+  const main=request(initial);
+  const pre=decode(main.id),duplicate=run(3,0,5000,1);
+  const completed=await main.receive(query.get("mode")==="1");
+  const wrong=decode(main.id,1),overlap=run(6,0,main.id,6000);
+  if(decode(main.id)!==4096) throw new Error("native decoded result");
+  bytes.fill(0,6000,6020);
+  const first=values(),repeat=decode(main.id),release=run(7,0,main.id);
+  const bad=request(truncated),stale=run(4,0,main.id,200,6000,1);
+  await bad.receive();
+  const badResult=decode(bad.id),badKind=u(4136),badId=u(4140);
+  const invalidReq=request(invalid);
+  await invalidReq.receive();
+  const invalidResult=decode(invalidReq.id),invalidKind=u(4136),invalidId=u(4140);
+  const unchanged=Number(first.every((value,i)=>value===values()[i]));
+  const last=request(next);
+  await last.receive();
+  if(decode(last.id)!==4096) throw new Error("native recovery");
+  bytes.fill(0,6000,6020);
+  return [...first,...values(),Number(badResult<0),Number(invalidResult<0),u(3800),progress,
+    Number(badKind===3)+Number(invalidKind===3),u(64),u(68),
+    pre,duplicate,wrong,overlap,repeat,release,stale,completed,badResult,invalidResult,badId,invalidId,
+    unchanged,last.id,u(4136)];
+}
+try {
+  if(REVISION!=="160") throw new Error("three.js revision mismatch");
+  output.textContent=JSON.stringify([...await reference(),...await product()]);
+} catch(error) {
+  output.textContent="error:"+error.message;
+}
+</script>

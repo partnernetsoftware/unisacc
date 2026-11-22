@@ -1,0 +1,91 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { ExtrudeGeometry, Mesh, MeshBasicMaterial, ObjectLoader, Path, REVISION, Shape, Vector2 }
+  from "../../web/game/three.module.js";
+
+const result = document.querySelector("#r160");
+const encoder = new TextEncoder(), decoder = new TextDecoder();
+const contour = [[0,0], [2,0], [0,1]];
+const toVectors = points => points.map(([x,y]) => new Vector2(x,y));
+const maxError = (a, b) => a.length === b.length
+  ? a.reduce((error, value, i) => Math.max(error, Math.abs(value - b[i])), 0)
+  : 1000 + Math.abs(a.length - b.length);
+const points = geometry => {
+  const {position, normal, uv} = geometry.attributes;
+  return Array.from({length: position.count}, (_, i) => [
+    position.getX(i), position.getY(i), position.getZ(i),
+    normal.getX(i), normal.getY(i), normal.getZ(i),
+    uv.getX(i), uv.getY(i),
+  ]).flat();
+};
+
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const binary = await (await fetch("file://" + query.get("wasm"))).arrayBuffer();
+  const module = await WebAssembly.compile(binary);
+  const mutate = Boolean(Number(query.get("mutate")));
+  const shape = new Shape(toVectors(contour));
+  shape.uuid = "aaaa0000-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const params = {depth: 2, steps: 2, bevelEnabled: false, curveSegments: 5};
+  const original = new ExtrudeGeometry(shape, params);
+  original.uuid = "ext-01";
+  original.name = 'ext "A"';
+  const doc = JSON.parse(JSON.stringify(new Mesh(original, new MeshBasicMaterial()).toJSON()));
+  const edit = geometry => ({...doc, geometries: [geometry]});
+  const stock = doc.geometries[0];
+
+  const run = (mode, input) => {
+    const api = new WebAssembly.Instance(module).exports;
+    const base = Number(api.uxe_extrude_public(0n, 0n));
+    const memory = new Uint8Array(api.memory.buffer, base, 60000);
+    const desc = new DataView(api.memory.buffer, base + 6080, 8);
+    memory.set(encoder.encode("ext-01"), 6000);
+    memory.set(encoder.encode('ext "A"'), 6016);
+    const payload = encoder.encode(JSON.stringify(input));
+    memory.set(payload, 40000);
+    const status = Number(api.uxe_extrude_public(BigInt(mode), BigInt(payload.length)));
+    if (mode !== 1) return status;
+    if (status <= 0) throw new Error("native JSON status " + status);
+    const count = desc.getUint32(0, true);
+    const indexCount = desc.getUint32(4, true);
+    const cells = new Float32Array(api.memory.buffer, base + 8192, 8 * count).slice();
+    return { json: JSON.parse(decoder.decode(memory.subarray(12000, 12000 + status))), cells, count, indexCount };
+  };
+
+  const actual = run(1, mutate ? edit({...stock, options: {...params, depth: 3}}) : doc);
+  const reimport = run(1, actual.json);
+  const loader = new ObjectLoader();
+  const reconstructed = loader.parseGeometries(actual.json.geometries, loader.parseShapes(actual.json.shapes))["ext-01"];
+  const native = actual.json.geometries[0];
+  const withHole = {...doc, shapes: [{...doc.shapes[0], holes: [
+    new Path(toVectors([[.1,.1],[.3,.1],[.1,.3]])).toJSON(),
+  ]}]};
+  const defaults = run(1, edit({...stock, options: {bevelEnabled: false}}));
+  const defReference = new ExtrudeGeometry(shape, {bevelEnabled: false});
+  const z = actual.cells.filter((_, i) => i % 8 === 2);
+  result.textContent = JSON.stringify([
+    Number(reconstructed instanceof ExtrudeGeometry && reconstructed.parameters.shapes[0] instanceof Shape),
+    Number(native.type === stock.type && native.uuid === stock.uuid && native.name === stock.name),
+    Number(native.shapes[0] === stock.shapes[0] && actual.json.shapes[0].uuid === native.shapes[0] &&
+      JSON.stringify(actual.json.shapes[0]) === JSON.stringify(doc.shapes[0])),
+    Number(JSON.stringify(native.options) === JSON.stringify(stock.options)),
+    native.options.depth, native.options.steps, native.options.curveSegments, Number(native.options.bevelEnabled === false),
+    actual.count, actual.indexCount, reconstructed.attributes.position.count,
+    Math.min(...z), Math.max(...z),
+    maxError(actual.cells, points(original)), maxError(reimport.cells, actual.cells),
+    maxError(points(reconstructed), points(original)),
+    reconstructed.groups[0].count, reconstructed.groups[1].count, reconstructed.groups[1].materialIndex,
+    defaults.count, maxError(defaults.cells, points(defReference)),
+    run(2, edit({...stock, shapes: ["missing"]})), run(2, withHole),
+    run(2, edit({...stock, options: {...params, bevelEnabled: true}})),
+    run(2, edit({...stock, options: {...params, steps: 1.5}})),
+    run(2, edit({...stock, options: {...params, extrudePath: {type: "LineCurve3"}}})),
+    run(3, doc), run(4, doc),
+  ]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

@@ -1,0 +1,51 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {CompressedTexture,RED_GREEN_RGTC2_Format,SIGNED_RED_GREEN_RGTC2_Format,REVISION} from "../../web/game/three.module.js";
+if(REVISION!=="160" || RED_GREEN_RGTC2_Format!==36285 || SIGNED_RED_GREEN_RGTC2_Format!==36286) throw Error("r160 BC5 tokens");
+const selectors=Uint8Array.of(0x88,0xc6,0xfa,0x88,0xc6,0xfa);
+const inverse=selectors.map(byte=>255-byte);
+const block=(a,b,indices)=>[a,b,...indices];
+const unsigned=[
+  block(210,0,selectors),block(20,220,inverse),
+  block(0,255,[182,109,219,182,109,219]),block(100,100,new Uint8Array(6).fill(255)),
+];
+const signed=[
+  block(63,193,selectors),block(128,63,inverse),
+  block(129,128,new Uint8Array(6).fill(255)),block(128,127,new Uint8Array(6).fill(255)),
+];
+function texture(blocks,format) {
+  const mip={data:Uint8Array.from(blocks.flat()),width:5,height:3};
+  const object=new CompressedTexture([mip],5,3,format);
+  if(object.mipmaps[0]!==mip || object.format!==format || object.generateMipmaps) throw Error("r160 BC5 descriptor");
+  return object;
+}
+// Use the independent packed-selector and normalized-channel formulas of
+// Khronos Data Format 1.4 section 19 for both component blocks.
+function component(block,index,snorm) {
+  const packed=block.slice(2).reduceRight((word,byte)=>word*256n+BigInt(byte),0n);
+  const code=Number((packed>>BigInt(3*index))&7n);
+  const decode=byte=>snorm&&byte>=128?byte-256:byte;
+  const a=decode(block[0]),b=decode(block[1]),first=Math.max(-127,a),second=Math.max(-127,b);
+  if(code<2) return code===0?first:second;
+  const den=a>b?7:5;
+  if(den===5 && code>=6) return code===6?(snorm?-127:0):(snorm?127:255);
+  return Math.trunc(((den-code+1)*first+(code-1)*second)/den);
+}
+function pixel(blocks,at,snorm) {
+  const x=at%5,y=Math.floor(at/5),part=Math.floor(x/4)*2;
+  const index=4*y+x%4;
+  return (component(blocks[part],index,snorm)&255)+256*(component(blocks[part+1],index,snorm)&255)
+    +(snorm?127:255)*16777216;
+}
+const rgb=texture(unsigned,RED_GREEN_RGTC2_Format),snorm=texture(signed,SIGNED_RED_GREEN_RGTC2_Format);
+const ordinals=[0,1,2,3,4,5,6,7,8,9,14];
+document.querySelector("#r160").textContent=JSON.stringify([
+  32,64,rgb.image.width*rgb.image.height*4,
+  ...ordinals.map(i=>pixel(unsigned,i,false)),...ordinals.map(i=>pixel(signed,i,true)),
+  173,-827,-1,-1,-1,-3,-3,-2,-3,-3,-2,
+]);
+rgb.dispose();
+snorm.dispose();
+</script>

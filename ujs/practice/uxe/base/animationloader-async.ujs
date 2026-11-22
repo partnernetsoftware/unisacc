@@ -1,0 +1,26 @@
+// Consume one ready loader-family response. Clip storage belongs to work;
+// FileLoader's borrowed response can be released even on a parse error.
+native function AnimationLoader_decodeAsync(instance:i64,id:i64,out:i64,limit:i64,work:i64,space:i64,errors:i64) i64 {
+  let eventBytes=2*LoadingEvent.size;
+  if(loader_family_kind(instance)!=11 || limit<0 || limit>32 || space<64 ||
+     !loading_span(out,limit*4) || !loading_span(work,space) || work%8!=0 ||
+     !loading_span(errors,eventBytes) ||
+     !loader_family_decode_range(instance,out,limit*4) || !loader_family_decode_range(instance,work,space) ||
+     !loader_family_decode_range(instance,errors,eventBytes) ||
+     !file_disjoint(out,limit*4,work,space) || !file_disjoint(errors,eventBytes,out,limit*4) ||
+     !file_disjoint(errors,eventBytes,work,space)) { return 0-1; }
+  let file=loader_family_ready(instance,id);
+  if(file<0) { return file; }
+  let response=ux_u32(file+FileLoader.bytes);
+  let bytes=ux_u32(file+FileLoader.length);
+  if(response>6291456-bytes || !file_disjoint(out,limit*4,response,bytes) ||
+     !file_disjoint(work,space,response,bytes) || !file_disjoint(errors,eventBytes,response,bytes)) { return 0-1; }
+  let parsed=AnimationLoader_parse(file,out,limit,work,space,6);
+  let released=FileLoader_release(file,id);
+  if(released<0) { return released; }
+  let clear=ux_u32_put(errors+LoadingEvent.kind,0);
+  if(parsed<0) {
+    let event=LoadingManager_item(LoaderFamily_manager(instance),3,id,errors);
+  }
+  return parsed;
+}

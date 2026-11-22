@@ -1,0 +1,220 @@
+native function shader_json_word(out:i64,first:i64,tail:i64,bytes:i64) i64 {
+  let i=0;
+  while(i<bytes) {
+    if(i==8) { first=tail; }
+    let saved=ux_u8_put(out+i,first%256);
+    first=first/256;
+    i=i+1;
+  }
+  return out;
+}
+
+native function shader_json_find(at:i64,end:i64,key:i64,first:i64,tail:i64,bytes:i64) i64 {
+  let p=shader_json_word(key,first,tail,bytes);
+  return json_find_key(at,end,p,bytes);
+}
+
+native function shader_json_source(value:i64,end:i64,out:i64,stage:i64) i64 {
+  if(value==0-2) { return shader_mat_default(out,stage); }
+  if(value<0) { return 0-1; }
+  return Json_decodeString(value,end,out,1024);
+}
+
+native function shader_json_object(value:i64,end:i64,out:i64) i64 {
+  let stop=0;
+  if(value!=0-2) {
+    if(value<0 || ux_u8(value)!=123) { return 0-1; }
+    stop=json_value_end(value,end);
+    if(stop<0 || stop-value>1024) { return 0-1; }
+    if(json_space(value+1,stop)==stop-1) { value=0-2; }
+  }
+  if(value==0-2) {
+    let a=ux_u8_put(out,123);
+    let b=ux_u8_put(out+1,125);
+    return 2;
+  }
+  let copy=uxe_copy_record(out,value,stop-value);
+  return stop-value;
+}
+
+native function shader_json_vector(at:i64,end:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0; }
+  let p=at+1;
+  let i=0;
+  while(i<3) {
+    p=json_space(p,end);
+    if(p>=end) { return 0; }
+    let value=json_read_number(p,end);
+    if(value-value!=0.0) { return 0; }
+    p=json_space(json_scalar_end(p,end),end);
+    if(p<0 || p>=end) { return 0; }
+    if(i<2 && ux_u8(p)!=44) { return 0; }
+    i=i+1;
+    p=p+1;
+  }
+  return ux_u8(p-1)==93;
+}
+
+native function shader_json_uniforms(at:i64,end:i64,key:i64) i64 {
+  let p=json_space(at+1,end);
+  while(p<end && ux_u8(p)!=125) {
+    let name=json_scan_string(p,end);
+    if(name<0) { return 0; }
+    let colon=json_space(name,end);
+    let entry=json_space(colon+1,end);
+    let stop=json_value_end(entry,end);
+    if(stop<0 || ux_u8(entry)!=123) { return 0; }
+    let value=shader_json_find(entry,stop,key,435761734006,0,5);
+    let kind=shader_json_find(entry,stop,key,1701869940,0,4);
+    if(value<0) { return 0; }
+    if(kind==0-2) {
+      let number=json_read_number(value,stop);
+      if(number-number!=0.0) { return 0; }
+    } else {
+      if(kind<0 || Json_decodeString(kind,stop,key,2)!=2 ||
+         ux_u8(key)!=118 || ux_u8(key+1)!=51 || !shader_json_vector(value,stop)) { return 0; }
+    }
+    p=json_space(stop,end);
+    if(ux_u8(p)!=44) { return ux_u8(p)==125; }
+    p=json_space(p+1,end);
+  }
+  return p<end;
+}
+
+native function shader_json_type(kind:i64,key:i64) i64 {
+  let label=[83,104,97,100,101,114,77,97,116,101,114,105,97,108];
+  let shift=0;
+  if(kind==16) {
+    let a=ux_u8_put(key,82);
+    let b=ux_u8_put(key+1,97);
+    let c=ux_u8_put(key+2,119);
+    shift=3;
+  }
+  let i=0;
+  while(i<14) { let byte=ux_u8_put(key+shift+i,label[i]); i=i+1; }
+  return 14+shift;
+}
+
+native function shader_json_glsl(value:i64,end:i64,key:i64) i64 {
+  if(value==0-2 || (value>=0 && ux_u8(value)==110)) { return 0; }
+  if(value<0) { return 0-1; }
+  let size=Json_decodeString(value,end,key,6);
+  if(size==3 && ux_u8(key)==49 && ux_u8(key+1)==48 && ux_u8(key+2)==48) { return 1; }
+  if(size==6 && ux_u8(key)==51 && ux_u8(key+1)==48 && ux_u8(key+2)==48 &&
+     ux_u8(key+3)==32 && ux_u8(key+4)==101 && ux_u8(key+5)==115) { return 3; }
+  return 0-1;
+}
+
+native function ShaderMaterial_readJSON(obj:i64,at:i64,end:i64,scratch:i64) i64 {
+  if(!shader_mat_live(obj) || at<0 || end<=at || end>6291456 ||
+     scratch<0 || scratch%8!=0 || scratch>6286256 ||
+     !shader_mat_split(obj,shader_mat_size(),at,end-at) ||
+     !shader_mat_split(obj,shader_mat_size(),scratch,5200) ||
+     !shader_mat_split(at,end-at,scratch,5200)) { return 0-1; }
+  let f=obj+Material.size;
+  let payload=ux_u32(f+ShaderMaterialFields.payload);
+  if(!shader_mat_split(payload,4096,scratch,5200) ||
+     !shader_mat_split(payload,4096,at,end-at)) { return 0-1; }
+  let start=json_space(at,end);
+  let stop=json_value_end(start,end);
+  if(stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let kind=shader_json_find(start,stop,scratch,1701869940,0,4);
+  let bytes=shader_json_type(ux_u32(obj+Material.type),scratch+48);
+  if(kind<0 || Json_decodeString(kind,stop,scratch,17)!=bytes) { return 0-1; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(scratch+i)!=ux_u8(scratch+48+i)) { return 0-1; }
+    i=i+1;
+  }
+  let stage=scratch+1104;
+  let vertex=shader_json_source(shader_json_find(start,stop,scratch,7517484580152173942,1919247457,12),stop,stage,0);
+  let fragment=shader_json_source(shader_json_find(start,stop,scratch,8389754676398092902,125779801368659,14),stop,stage+1024,1);
+  let uniforms=shader_json_object(shader_json_find(start,stop,scratch,8317429909608296053,0,8),stop,stage+2048);
+  let defines=shader_json_object(shader_json_find(start,stop,scratch,32481147210851684,0,7),stop,stage+3072);
+  let glsl=shader_json_glsl(shader_json_find(start,stop,scratch,8318822883567823975,7237481,11),stop,scratch);
+  let lights=material_json_read(start,stop,scratch,126943805008236,0,0,13,0.0);
+  let clipping=material_json_read(start,stop,scratch,7453010364987960419,0,0,17,0.0);
+  let fog=material_json_read(start,stop,scratch,6778726,0,0,7,0.0);
+  if(vertex<0 || fragment<0 || uniforms<0 || defines<0 || glsl<0 || lights!=lights ||
+     clipping!=clipping || fog!=fog || !shader_json_uniforms(stage+2048,stage+2048+uniforms,scratch)) { return 0-1; }
+  let base=Material_readFields(start,stop,obj,scratch);
+  if(base<0) { return base; }
+  let a=uxe_copy_record(payload,stage,vertex);
+  let b=uxe_copy_record(payload+1024,stage+1024,fragment);
+  let c=uxe_copy_record(payload+2048,stage+2048,uniforms);
+  let d=uxe_copy_record(payload+3072,stage+3072,defines);
+  let e=ux_u32_put(f+ShaderMaterialFields.vertex,vertex);
+  let h=ux_u32_put(f+ShaderMaterialFields.fragment,fragment);
+  let i=ux_u32_put(f+ShaderMaterialFields.uniforms,uniforms);
+  let j=ux_u32_put(f+ShaderMaterialFields.defines,defines);
+  let k=ux_u32_put(f+ShaderMaterialFields.glsl,glsl);
+  let l=ux_u32_put(f+ShaderMaterialFields.lights,f64_floor_i64(lights));
+  let m=ux_u32_put(f+ShaderMaterialFields.clipping,f64_floor_i64(clipping));
+  let n=ux_u32_put(f+ShaderMaterialFields.fog,f64_floor_i64(fog));
+  return obj;
+}
+
+native function shader_json_emit(at:i64,end:i64,a:i64,b:i64,format:i64,scratch:i64,src:i64,size:i64) i64 {
+  let bytes=format/2;
+  let quoted=format%2;
+  let key=shader_json_word(scratch,a,b,bytes);
+  let cursor=json_byte(at,end,44);
+  cursor=json_write_string(cursor,end,key,bytes);
+  cursor=json_byte(cursor,end,58);
+  if(cursor<0) { return 0-1; }
+  if(quoted!=0) { return json_write_string(cursor,end,src,size); }
+  if(size>end-cursor) { return 0-1; }
+  let copy=uxe_copy_record(cursor,src,size);
+  return cursor+size;
+}
+
+native function ShaderMaterial_writeJSON(obj:i64,at:i64,end:i64,scratch:i64) i64 {
+  if(!shader_mat_live(obj) || at<0 || end>6291456 || end-at<8 ||
+     scratch<0 || scratch%8!=0 || scratch>6290352 ||
+     !shader_mat_split(obj,shader_mat_size(),at,end-at) ||
+     !shader_mat_split(obj,shader_mat_size(),scratch,1104) ||
+     !shader_mat_split(at,end-at,scratch,1104)) { return 0-1; }
+  let f=obj+Material.size;
+  let payload=ux_u32(f+ShaderMaterialFields.payload);
+  if(!shader_mat_split(payload,4096,scratch,1104) ||
+     !shader_mat_split(payload,4096,at,end-at)) { return 0-1; }
+  let type=shader_json_type(ux_u32(obj+Material.type),scratch+48);
+  let prefix=[123,34,116,121,112,101,34,58];
+  let i=0;
+  while(i<8) { let byte=ux_u8_put(at+i,prefix[i]); i=i+1; }
+  let p=json_write_string(at+8,end,scratch+48,type);
+  p=Material_writeFields(p,end,obj,scratch);
+  if(p<0) { return p; }
+  let glsl=ux_u32(f+ShaderMaterialFields.glsl);
+  let token=[110,117,108,108];
+  let size=4;
+  if(glsl==1) { token=[34,49,48,48,34]; size=5; }
+  if(glsl==3) { token=[34,51,48,48,32,101,115,34]; size=8; }
+  i=0;
+  while(i<size) { let byte=ux_u8_put(scratch+48+i,token[i]); i=i+1; }
+  p=shader_json_emit(p,end,8318822883567823975,7237481,22,scratch,scratch+48,size);
+  p=shader_json_emit(p,end,8317429909608296053,0,16,scratch,payload+2048,ux_u32(f+ShaderMaterialFields.uniforms));
+  let defines=ux_u32(f+ShaderMaterialFields.defines);
+  if(defines>2) { p=shader_json_emit(p,end,32481147210851684,0,14,scratch,payload+3072,defines); }
+  p=shader_json_emit(p,end,7517484580152173942,1919247457,25,scratch,payload,ux_u32(f+ShaderMaterialFields.vertex));
+  p=shader_json_emit(p,end,8389754676398092902,125779801368659,29,scratch,payload+1024,ux_u32(f+ShaderMaterialFields.fragment));
+  p=material_json_field(p,end,126943805008236,0,0,13,0.0+ux_u32(f+ShaderMaterialFields.lights),scratch);
+  p=material_json_field(p,end,7453010364987960419,0,0,17,0.0+ux_u32(f+ShaderMaterialFields.clipping),scratch);
+  if(ux_u32(f+ShaderMaterialFields.fog)==0) { p=material_json_field(p,end,6778726,0,0,7,0.0,scratch); }
+  return json_byte(p,end,125);
+}
+
+native function ShaderMaterial_uniformNumber(obj:i64,name:i64,bytes:i64,key:i64) f64 {
+  if(!shader_mat_live(obj) || name<0 || bytes<=0 || name>6291456-bytes || key<0 || key>6291451 ||
+     !shader_mat_split(key,5,name,bytes) || !shader_mat_split(key,5,obj,shader_mat_size())) { return 0.0/0.0; }
+  let f=obj+Material.size;
+  let payload=ux_u32(f+ShaderMaterialFields.payload);
+  if(!shader_mat_split(key,5,payload,4096)) { return 0.0/0.0; }
+  let at=payload+2048;
+  let end=at+ux_u32(f+ShaderMaterialFields.uniforms);
+  let entry=json_find_key(at,end,name,bytes);
+  if(entry<0) { return 0.0/0.0; }
+  let value=shader_json_find(entry,end,key,435761734006,0,5);
+  if(value<0) { return 0.0/0.0; }
+  return json_read_number(value,end);
+}

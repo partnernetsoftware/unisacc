@@ -1,0 +1,96 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIX "ujs/practice/uxe/test/"
+
+enum { count=274 };
+
+static int event_layout(const char *file) {
+    unsigned char *raw=0;
+    int64_t bytes=0;
+    if(sy_read_file(BASE "object-layouts.ujs",&raw,&bytes,20000)) return 1;
+    const char *text=(const char *)raw;
+    const char anchor[]="struct EventDispatcher {";
+    const long start=tx_find(text,bytes,anchor,sizeof anchor-1);
+    const long end=start<0?-1:tx_find(text+start,bytes-start,"\n}\n",3);
+    const int failed=end<0 || sy_write_file(file,text+start,end+3,0600);
+    mm_free(raw);
+    return failed;
+}
+
+static unsigned digest(const char *src,int bytes) {
+    unsigned value=0;
+    for(int i=0;i<bytes;i++) value=(value*131+(unsigned char)src[i])%16777213;
+    return value;
+}
+
+static int expected(double *gold) {
+    const char vertex_default[]="void main() {\n\tgl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );\n}";
+    const char fragment_default[]="void main() {\n\tgl_FragColor = vec4( 1.0, 0.0, 0.0, 1.0 );\n}";
+    const char vertex_source[]="void main(){gl_Position=vec4(0.0);}\n// \"caf\303\251\" \\gain";
+    const char fragment_source[]="void main(){gl_FragColor=vec4(1.0);}\n// fragment";
+    int at=0;
+    for(int kind=15;kind<=16;kind++) {
+        const double empty[]={kind,sizeof vertex_default-1,digest(vertex_default,sizeof vertex_default-1),
+            sizeof fragment_default-1,digest(fragment_default,sizeof fragment_default-1),0,0,0,0,1,-1,-1,-1,-1,-1,0};
+        const double custom[]={kind,sizeof vertex_source-1,digest(vertex_source,sizeof vertex_source-1),
+            sizeof fragment_source-1,digest(fragment_source,sizeof fragment_source-1),kind==15?1:3,
+            1,kind==16,0,.5,2.5,1,2,3,7,1};
+        for(int side=0;side<2;side++) {
+            for(int record=0;record<4;record++) {
+                const double *values=record==0 || record==3?empty:custom;
+                for(int i=0;i<16;i++) gold[at++]=values[i];
+            }
+            if(side==0) {
+                gold[at++]=2.5;
+                for(int i=0;i<4;i++) {
+                    gold[at++]=-1;
+                    gold[at++]=1;
+                }
+            }
+        }
+    }
+    return at;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    char dir[256],cwd[420],layout[320],abi[320],wasm[320],url[850];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-shader-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(layout,sizeof layout,"%s/event.ujs",dir);
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/shader.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" FIX "shader-material-object-r160.html?wasm=%s&mode=%d",
+        cwd,wasm,mutate);
+    const char signature[]="export uxe_shader_json(op:i64,kind:i64,arg:i64,mutate:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,layout,BASE "record-copy.ujs",BASE "eventdispatcher.ujs",
+        BASE "material-class.ujs",BASE "json-bytes.ujs",BASE "json-read.ujs",BASE "loaderutils.ujs",
+        BASE "json-string-decode.ujs",BASE "material-field-json.ujs",BASE "material-field-read.ujs",
+        BASE "material-fields-generated.ujs",BASE "material-set-values.ujs",BASE "shader-material-object.ujs",
+        BASE "shader-material-object-json.ujs",FIX "shader-material-object-probe.ujs","-o",wasm,0};
+    double actual[count]={0},gold[count];
+    int failed=length<=0 || length>=(int)sizeof url || expected(gold)!=count ||
+        sy_write_file(abi,signature,sizeof signature-1,0600) || event_layout(layout);
+    if(!failed) {
+        char *out=0;
+        size_t bytes=0;
+        const int rc=cx_runv_timeout(compile,6,&out,&bytes);
+        if(rc) { printf("SHADER_JSON compile_rc=%d %.*s\n",rc,(int)bytes,out?out:""); failed=1; }
+        mm_free(out);
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) for(int i=0;i<count;i++) if(actual[i]!=gold[i]) {
+        printf("SHADER_JSON case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+        failed++;
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT ShaderMaterial/RawShaderMaterial JSON cases=%d failed=%d\n",count,failed);
+    return failed!=0;
+}
