@@ -1036,22 +1036,24 @@ static int verify_version_seq_readback(const char *table, const char *ver, char 
 
 static int cmd_mark_version_seq(int argc, char **argv) {
     const char *ver = 0, *table = 0, *repo = ".", *index_arg = 0;
-    int do_commit = 0, do_push = 0, has_y2_done = 0, has_post_pub = 0;
+    int do_commit = 0, do_push = 0, do_dry = 0, has_y2_done = 0, has_post_pub = 0;
     char table_buf[4400], index_buf[4400], tag_spec[128], why[256], last_pub[64], y2_sha[64];
     for (int i = 0; i < argc; i++) {
         const char *k = argv[i];
         if (!strcmp(k, "--commit")) { do_commit = 1; continue; }
         if (!strcmp(k, "--push")) { do_push = 1; continue; }
+        if (!strcmp(k, "--dry")) { do_dry = 1; continue; }
         const char *v = i + 1 < argc ? argv[i + 1] : 0;
-        if (!v) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
+        if (!v) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--dry | --commit [--push]]");
         if (!strcmp(k, "--version")) ver = v;
         else if (!strcmp(k, "--repo")) repo = v;
         else if (!strcmp(k, "--table")) table = v;
         else if (!strcmp(k, "--index")) index_arg = v;
-        else usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
+        else usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--dry | --commit [--push]]");
         i++;
     }
-    if (!ver || !ver[0]) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--commit] [--push]");
+    if (do_dry && (do_commit || do_push)) usage("mark-version-seq --dry cannot be combined with --commit or --push");
+    if (!ver || !ver[0]) usage("mark-version-seq --version V [--repo DIR] [--table PATH] [--index PATH] [--dry | --commit [--push]]");
     if (!table) {
         if (!strcmp(repo, ".")) table = "build/version-seq.tsv";
         else {
@@ -1113,6 +1115,8 @@ static int cmd_mark_version_seq(int argc, char **argv) {
     if (!out) { free(buf); return 2; }
     size_t pos = 0, opos = 0;
     int hits = 0, changed = 0;
+    char before_line[2048], after_line[2048];
+    before_line[0] = 0; after_line[0] = 0;
     while (pos < n) {
         size_t ls = pos;
         while (pos < n && buf[pos] != '\n') pos++;
@@ -1130,6 +1134,9 @@ static int cmd_mark_version_seq(int argc, char **argv) {
         }
         if (nc >= 4 && ce[1] - cs[1] == vn && !memcmp(buf + cs[1], ver, vn)) {
             hits++;
+            size_t bl = (le - ls < sizeof before_line - 1) ? (le - ls) : (sizeof before_line - 1);
+            mm_copy(before_line, sizeof before_line, buf + ls, bl); before_line[bl] = 0;
+            size_t astart = opos;
             if (ce[3] - cs[3] == pubn && !memcmp(buf + cs[3], pub, pubn)) {
                 size_t ll = le - ls;
                 mm_copy(out + opos, n + 64 - opos, buf + ls, ll);
@@ -1141,6 +1148,8 @@ static int cmd_mark_version_seq(int argc, char **argv) {
                 mm_copy(out + opos, n + 64 - opos, pub, pubn); opos += pubn;
                 mm_copy(out + opos, n + 64 - opos, buf + ce[3], p2); opos += p2;
             }
+            size_t al = (opos - astart < sizeof after_line - 1) ? (opos - astart) : (sizeof after_line - 1);
+            mm_copy(after_line, sizeof after_line, out + astart, al); after_line[al] = 0;
         } else {
             size_t ll = le - ls;
             mm_copy(out + opos, n + 64 - opos, buf + ls, ll);
@@ -1153,6 +1162,33 @@ static int cmd_mark_version_seq(int argc, char **argv) {
         free(out);
         fprintf(stderr, "REFUSE VERSION_SEQ_MARK version=%s hits=%d table=%s\n", ver, hits, table);
         return 2;
+    }
+    if (do_dry) {
+        free(out);
+        sy_printf("VERSION_SEQ_DRY\tBEFORE\t%s\n", before_line);
+        sy_printf("VERSION_SEQ_DRY\tAFTER\t%s\n", after_line);
+        char vgt[4400], apep[4400];
+        if (!cx_fmt(vgt, sizeof vgt, "%s/tools/verseq-gen.cx", repo) &&
+            !cx_fmt(apep, sizeof apep, "%s/unisacc.com", repo) &&
+            sy_exists(vgt) == 1 && sy_exists(apep) == 1) {
+            char *vv[] = {"sh", apep, vgt, "--", "--check", "--root", (char *)repo, 0};
+            np_result vr = {0};
+            int vbad = np_run(vv, 0, 0, 20, &vr, why, sizeof why);
+            if (!vbad && vr.out && vr.outn > 0) {
+                char sum[256]; size_t sl = vr.outn < sizeof sum - 1 ? vr.outn : sizeof sum - 1;
+                mm_copy(sum, sizeof sum, vr.out, sl); sum[sl] = 0;
+                char *nl = strchr(sum, '\n'); if (nl) *nl = 0;
+                sy_printf("VERSION_SEQ_DRY\tVERSEQ_CHECK\trc=%d\t%s\n", vr.rc, sum);
+            } else {
+                sy_printf("VERSION_SEQ_DRY\tVERSEQ_CHECK\trc=%d\tstatus=UNMEASURED\n", vbad ? -1 : vr.rc);
+            }
+            np_free(&vr);
+        } else {
+            sy_printf("VERSION_SEQ_DRY\tVERSEQ_CHECK\tstatus=UNMEASURED\treason=no-verseq-tool\n");
+        }
+        sy_printf("VERSION_SEQ_MARK\tDRYRUN\tversion=%s\tchange=%s\ttable=%s\n",
+                  ver, changed ? "WOULD_UPDATE" : "ALREADY_PUBLIC", table);
+        return 0;
     }
     if (changed && sy_write_atomic(table, out, opos, 0644) != 0) {
         free(out);
