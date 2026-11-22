@@ -8,6 +8,8 @@
 |---|---|
 | 冻结提交 | 5d1e492d7e41f142947e977c5cbec2f41e3d2ab1 |
 | 候选提交 | 91094736413630d9f0e70e1a60ed1bdd5863bc22 |
+| 阶段 A 提交(X) | 6d7f11d22c0ea46568a52359d96b005753a79648 (首轮 X1=4a742ba2c2d0569bc2401e47b4a65c5958e82615) |
+| 阶段 B 提交(Y1 / Y2) | Y1=c438b6d6283976329a4ed16f4634a01555152c11 / Y2=13a48bb87004fc5c294d8a5aeaf09c43e928e28b |
 | 发布 APE SHA256(unisacc.com) | 46fd3db95f97df7fa4729026bd6e1aa7b7ddde834e5887aa87470020da0391e1 |
 | 源快照 SID | a2971c5a4255d00495c6d2e9a79416faab94a5fcc3a88e7b4e925480eff9d1d8 |
 | pkg.bin | b717fff8f266d4c3c924186657be94cdbbc1c470bdcbe1a6af7ef97bb1cb8eaa |
@@ -19,7 +21,7 @@
 459 批:PASS 457、FAIL 0、UNKNOWN 2、INVALID 0
 
 - 严格预跑分母口径(`PRERUN_PREPARE`): `dvqualify_list=817` 批, 排除计划中未实现 `excluded_planned=12`、异构平台专用 `excluded_foreign_platform=15`、陈旧退役 `excluded_stale=358`(合共排除 `385` 批, 得 `432` 个 `product-qualification` 批, 加上 `extra_non_pq=27` 含 15 片 `R77` `daily-compile-smoke-01..15` 与金丝雀共 `459` 批, 规划为 `158` 个窗口); 实跑 `457 PASS / 0 FAIL / 2 UNKNOWN / 0 INVALID`(2 个已知无生产者批 `cx-booter-ape`、`tools-default-regression`)。
-- 六目标原生 CI(`ci-early`): `run_id=44964711763`, `lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 六格一次性 `6/6 PASS`(`fail_cells=0`), 私有草稿 `v0.0.90-early-9109473641` 已自动删除。
+- 六目标原生 CI: 正式发布 CI `run_id=44973535033`(及 `ci-early` `run_id=44964711763`), `lnx/x86_64`、`lnx/arm64`、`osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 六格一次性 `6/6 PASS`(`verdict=QUALIFIED fail=0 invalid=0`)。
 
 ## 产品改动
 
@@ -43,7 +45,7 @@
 
 - 全套 `s9` `daily`/`release` 长跑尚未运行, 整体裁决保持 `NOT_QUALIFIED`;
 - `tools/tsv-lint.cx` 未解析引用已知红(`R75`): 全树按条未解析引用数 `11277 > 内置上限 11050`(按唯一 `file:line:state` 为 `10055`), 自 `v0.0.83` 起存在且不在现行棘轮与预跑门内; 已验证 `exec/modelsignature` 清单补静态绑定(`NAME=@str:NAME`)后可降至 `10704 < 11050`, 因 `exec/` 属 A 类输入且 `0.0.90` 冻结范围已封顶, 排 `0.0.91` 修表并并入 `chain-ready`/棘轮只降不升, `0.0.90` 带已知红发布;
-- 变异门真实杀伤率 `INCONCLUSIVE`(`R78`): 上一版 `0.0.89` 报告的 `149/212 = 70.28%` 将同字节无改动变异与 `124` 超时/`127`/编译失败均计入 `killed`, 属上限估计; 本版 `mutation-gate.cx --report` 在 33 项固定样本上实测 `17` 具名杀(`KILL-named`)、`3` 弱杀(`KILL-weak`)、`13` 存活(含 `1` 已裁等价), 真实杀伤率区间 `17/32..20/32 = 53.13%..62.50%`, 跨 `60%` 门线判 `INCONCLUSIVE`, 全量 212 项分片重放排在 `0.0.90` 发布后完成;
+- 变异门真实杀伤率 `INCONCLUSIVE`(`R78`): 上一版 `0.0.89` 报告的 `149/212 = 70.28%` 将同字节无改动变异与 `124` 超时/`127`/编译失败均计入 `killed` 且缺逐变异原件, 属上限估计; 本版 `mutation-gate.cx --report` 在 33 项固定样本上实测 `17` 具名杀(`KILL-named`)、`3` 弱杀(`KILL-weak`)、`13` 存活(含 `1` 已裁等价), 真实杀伤率区间 `17/32..20/32 = 53.13%..62.50%`, 跨 `60%` 门线判 `INCONCLUSIVE`, 在 `0.0.90` 关键补丁集上按补丁重跑 `--report` 建立有证据分母的基线排在 `0.0.90` 发布后完成;
 - `asm volatile(...)` / `__asm__ __volatile__(...)` 行内汇编拒绝位置缺口: 在 `E1`(`exec/lex/attr-byte.tsv:1346`)直接 `HALT REJECT` 输出 `reject: not covered: inline asm`(拒绝本身正确、无产物, 缺 `file:line:col` 行列号; 为守 `0.0.90` A 类预算不扩文件, 排 `0.0.91` 补齐);
 - `tier=daily` 批冷编与运行态范围(`R77`): 818 个 `daily` 批中 490 个自 `v0.0.86` 起未冷编, 117 个唯一 `tests/*.cx` 入口全量冷编扫出的 2 个缺前向声明失败已修复, R77 新增的 15 片 `daily-compile-smoke-01..15`(117/117 入口)已并入本版严格预跑首波(`W0001..W0004`)并全部通过; `daily` 批完整运行态执行仍属 `s9` 长跑范围;
 - 2 个无生产者批(`cx-booter-ape`、`tools-default-regression`)在严格预跑中保持 `UNKNOWN(no-producer)`, 独立参考/原生 watchdog 仍有宿主 C 引导依赖;
