@@ -1,0 +1,100 @@
+native function skeletonutils_retarget_storage(skeleton:i64,scratch:i64) i64 {
+  if(!skeleton_valid(skeleton) || ux_u32(skeleton+Skeleton.count)!=2) { return 0; }
+  let bones=ux_u32(skeleton+Skeleton.bones);
+  let inverses=ux_u32(skeleton+Skeleton.inverses);
+  let palette=ux_u32(skeleton+Skeleton.palette);
+  return bones<=6291456-8 && bones%4==0 &&
+     !skeleton_overlap(scratch,208,skeleton,Skeleton.size) &&
+     !skeleton_overlap(scratch,208,bones,8) &&
+     !skeleton_overlap(scratch,208,inverses,256) &&
+     !skeleton_overlap(scratch,208,palette,128);
+}
+
+native function skeletonutils_retarget_scale(node:i64) i64 {
+  let at=ux_u32(node+Object3D.scale);
+  let scale=ux_f64(at);
+  return scale>0.0 && scale-scale==0.0 && scale==ux_f64(at+8) && scale==ux_f64(at+16);
+}
+
+native function skeletonutils_retarget_world(matrix:i64,source:i64) i64 {
+  let position=matrix+128;
+  let rotation=position+24;
+  let scale=rotation+32;
+  let decomposed=Matrix4_decompose(source,position,rotation,scale);
+  let x=ux_f64_put(scale,1.0);
+  let y=ux_f64_put(scale+8,1.0);
+  let z=ux_f64_put(scale+16,1.0);
+  return Matrix4_compose(matrix,position,rotation,scale);
+}
+
+native function skeletonutils_retarget_pose(node:i64,matrix:i64) i64 {
+  let decomposed=Matrix4_decompose(matrix,ux_u32(node+Object3D.position),
+      ux_u32(node+Object3D.quaternion),ux_u32(node+Object3D.scale));
+  return ux_u32_put(node+Object3D.dirty,3);
+}
+
+// Bare Skeleton retargeting for two matched, standalone bones in root-child
+// order. The root is the hip. PreservePosition keeps the child translation.
+// PreserveHipPosition restores the hip height and clears hip X/Z motion.
+// Source scales must be positive and uniform. Scratch is 208 bytes aligned to 8.
+native function SkeletonUtils_retarget(dst:i64,dstArena:i64,src:i64,srcArena:i64,scratch:i64,
+    preservePosition:i64,preserveHipPosition:i64) i64 {
+  if(scratch<0 || scratch>6291456-208 || scratch%8!=0 ||
+     (preservePosition!=0 && preservePosition!=1) ||
+     (preserveHipPosition!=0 && preserveHipPosition!=1) ||
+     !skeletonutils_retarget_storage(dst,scratch) || !skeletonutils_retarget_storage(src,scratch)) {
+    return 0-1;
+  }
+  let sourceBones=ux_u32(src+Skeleton.bones);
+  let targetBones=ux_u32(dst+Skeleton.bones);
+  let sourceHip=ux_u32(sourceBones);
+  let sourceChild=ux_u32(sourceBones+4);
+  let targetHip=ux_u32(targetBones);
+  let targetChild=ux_u32(targetBones+4);
+  let fromHip=Object3D_address(srcArena,sourceHip);
+  let fromChild=Object3D_address(srcArena,sourceChild);
+  let toHip=Object3D_address(dstArena,targetHip);
+  let toChild=Object3D_address(dstArena,targetChild);
+  if(fromHip<0 || fromChild<0 || toHip<0 || toChild<0 ||
+     fromHip==toHip || fromHip==toChild || fromChild==toHip || fromChild==toChild ||
+     ux_u32(fromHip+Object3D.parent)!=0 || ux_u32(fromChild+Object3D.parent)!=sourceHip ||
+     ux_u32(toHip+Object3D.parent)!=0 || ux_u32(toChild+Object3D.parent)!=targetHip ||
+     skeleton_overlap(scratch,208,srcArena,8+424*ux_u32(srcArena)) ||
+     skeleton_overlap(scratch,208,dstArena,8+424*ux_u32(dstArena)) ||
+     !skeletonutils_retarget_scale(fromHip) || !skeletonutils_retarget_scale(fromChild)) {
+    return 0-1;
+  }
+
+  let hipPosition=ux_u32(toHip+Object3D.position);
+  let childPosition=ux_u32(toChild+Object3D.position);
+  let savedHipY=ux_f64(hipPosition+8);
+  let savedChildX=ux_f64(childPosition);
+  let savedChildY=ux_f64(childPosition+8);
+  let savedChildZ=ux_f64(childPosition+16);
+  let sourceHipWorld=Object3D_updateOne(srcArena,sourceHip,1);
+  let sourceChildWorld=Object3D_updateOne(srcArena,sourceChild,1);
+
+  let hipWorld=skeletonutils_retarget_world(scratch,sourceHipWorld);
+  if(preserveHipPosition!=0) {
+    let x=ux_f64_put(hipWorld+96,0.0);
+    let y=ux_f64_put(hipWorld+104,savedHipY);
+    let z=ux_f64_put(hipWorld+112,0.0);
+  }
+  let hipPose=skeletonutils_retarget_pose(toHip,hipWorld);
+  let targetHipWorld=Object3D_updateOne(dstArena,targetHip,1);
+
+  let childWorld=skeletonutils_retarget_world(scratch,sourceChildWorld);
+  let childLocal=ux_u32(toChild+Object3D.localMatrix);
+  let parentMatrix=Matrix4_copy(childLocal,targetHipWorld);
+  let parentInverse=Matrix4_invert(parentMatrix);
+  let local=Matrix4_multiplyMatrices(childLocal,parentInverse,childWorld);
+  let childPose=skeletonutils_retarget_pose(toChild,local);
+  let targetChildWorld=Object3D_updateOne(dstArena,targetChild,1);
+  if(preservePosition!=0) {
+    let x=ux_f64_put(childPosition,savedChildX);
+    let y=ux_f64_put(childPosition+8,savedChildY);
+    let z=ux_f64_put(childPosition+16,savedChildZ);
+    let dirty=ux_u32_put(toChild+Object3D.dirty,3);
+  }
+  return dst;
+}
