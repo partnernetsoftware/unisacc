@@ -30,7 +30,7 @@
 | BatchedMesh | batchedmesh-copy-struct.cx 独立验预留表与副本隔离 | 批次几何及实例状态。r160 直接克隆触发 image.slice TypeError，当前复制门使用独立金值 |
 | LOD | lod-lifecycle-struct.cx 对照层表、迟滞和子树克隆 | 自动更新标志、层级阈值及绑定子对象 |
 | Skeleton | skeleton-clone-struct.cx 对照骨表、逆矩阵与清零调色板。skeleton-json-struct.cx 对照 r160 完整 JSON 往返，矩阵篡改转红 | 已验收骨架 UUID、骨 UUID 列表及逆绑定矩阵。缺失骨具名为拒绝状态，调用方需提供骨绑定 |
-| DataTexture | data-texture-object-struct.cx 对照 RGBA8 采样及源共享 | 公共纹理参数及源 UUID、图像尺寸、数组类型和像素字节 |
+| DataTexture | data-texture-object-struct.cx 对照 RGBA8 采样及源共享。data-texture-image-json.cx 读回 Source 和十项公共参数，像素及环绕篡改转红 | 已验收 RGBA8 图像和十项参数的往返。完整 Texture 元数据与其他数据格式待补 |
 | CubeTexture | cube-texture-object-struct.cx 对照面分派及容量拒绝 | 公共纹理参数、源 UUID 和顺序固定的六面图像引用 |
 | CanvasTexture | canvas-texture-object-struct.cx 对照真实画布、刷新和克隆 | 公共纹理参数、源 UUID 和画布图像快照引用 |
 
