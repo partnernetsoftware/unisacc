@@ -409,6 +409,8 @@ product-map --root 选择被分析的数据,分析子程序由当前已装编译
 
 登记与执行分相:现有 register --no-run 仅保存合同并返回 REGISTERED_NORUN,只算准备;之后经标准 affected 入口逐批实跑才记 PASS。登记尾段仍有缺口:批次耗时接近 55 秒时,试跑已经通过,60 秒外层仍可能在 packages 与 manifest 收尾前杀掉进程,且当前提前打印 REGISTERED。应拆成独立收尾阶段并在完整收尾后打印终态;不得延长时限。本轮缺失 manifest 按三张真实表逐字节投影补齐,不另造登记逻辑,并由 reg-manifest 检查闭合。
 
+运营约定(2026-11-22,derive --check 池化后):整套 derive --check 报 product-map REFUSED 且末行为 PRODUCT_MAP_QUERY REFUSE readset-changed-before-output 时,发码行是 tools/product-map-query.cx 输出前对读集文件重算内容哈希与首次不一致;共享检出被他人同时写读集内文件可触发,重跑一次即可,连续两次才按缺陷处理并读该行。2026-11-22 实测:顺序整套 5 次均无拒绝;两路并发整套同时复现过一次(两路均拒,同一窗口);加日志副本在五路并发下未复现,具体变动的是读集中哪个文件尚未定位。已排除:主检出 unisacc.com 在该窗口内未变(修改时间早于窗口)。该守卫只核读集,声明的仓内文件改动走另一条 source-changed-before-output。未定位文件前不写确定性夹具;下一步是让该拒绝文案点出第一个变动路径(改动在 product-map-query.cx,不在本轮写域,待授权)。--check 本身只读:整套 strace 76367 行除 /dev/null 外无写打开,缓存写为临时文件加 rename,4 路并行无写冲突域。
+
 ### R1 停写与验收边界
 
 tool-index 与 product-map 已标 query-only:自动 --derive 不物化,显式 --check 走查询与独立现算逐字节对拍,显式 --write --only 保留本地导出。两个 build/ 导出均停跟踪并忽略,本地字节保留。当前产品全景经 devsvc product-map 获取,文档生成块只作显式快照。日常形状检查读查询,四个离线快照场景用归档输入显式准备后保留原断言。显式 --write --package 同步七条 flow-model 测量事实,默认生成与检查不写事实。
