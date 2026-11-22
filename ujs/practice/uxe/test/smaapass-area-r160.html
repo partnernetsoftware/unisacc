@@ -1,0 +1,64 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { ShaderMaterial, WebGLRenderer, WebGLRenderTarget, REVISION, Vector4 } from "three";
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw Error("three revision");
+  const query = new URLSearchParams(location.search);
+  const base = "file://" + query.get("package") + "/examples/jsm/";
+  const { SMAAPass } = await import(base + "postprocessing/SMAAPass.js");
+  const { FullScreenQuad } = await import(base + "postprocessing/Pass.js");
+  const { SMAAWeightsShader } = await import(base + "shaders/SMAAShader.js");
+  const pass = new SMAAPass(1, 1);
+  await Promise.all([pass.areaTexture.image.decode(), pass.searchTexture.image.decode()]);
+  pass.areaTexture.needsUpdate = true;
+  const response = await fetch("file://" + query.get("wasm"));
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
+  const native = instance.exports;
+  const image = pass.areaTexture.image;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, 0, 0);
+  const bytes = ctx.getImageData(0, 0, image.width, image.height).data;
+  new Uint8Array(native.memory.buffer, 2097152 + 4096, bytes.length).set(bytes);
+  const renderer = new WebGLRenderer();
+  const target = new WebGLRenderTarget(1, 1);
+  const shader = SMAAWeightsShader.fragmentShader;
+  const start = shader.indexOf("vec2 SMAAArea(");
+  const end = shader.indexOf("vec4 SMAABlendingWeightCalculationPS", start);
+  const material = new ShaderMaterial({
+    defines: SMAAWeightsShader.defines,
+    uniforms: { area: {value:pass.areaTexture}, coords: {value:new Vector4()} },
+    vertexShader: "void main(){gl_Position=vec4(position.xy,0.0,1.0);}",
+    fragmentShader: "uniform sampler2D area;uniform vec4 coords;\n" +
+      "#line 1\n" + shader.slice(start, end) +
+      "void main(){gl_FragColor=vec4(SMAAArea(area,coords.xy,coords.z,coords.w,0.0),0.0,1.0);}"
+  });
+  const quad = new FullScreenQuad(material);
+  const pixel = new Uint8Array(4);
+  const results = [image.width,image.height,pass.searchTexture.image.width,pass.searchTexture.image.height];
+  for (const [x,y,ex,ey] of [[0,0,0,0],[2,4,1,3],[7,5,3,2],[11,9,4,1],[0,0,4,4]]) {
+    material.uniforms.coords.value.set(x,y,ex/4,ey/4);
+    renderer.setRenderTarget(target);
+    quad.render(renderer);
+    renderer.readRenderTargetPixels(target,0,0,1,1,pixel);
+    const actual = Number(native.uxe_smaa_area(x,y,BigInt(ex),BigInt(ey)));
+    const index = 4*((16*ey+y)*160+16*ex+x);
+    const invalid = Number(native.uxe_smaa_area(x,y,BigInt((ex+1)%5),BigInt(ey)));
+    results.push(actual,pixel[0]+256*pixel[1],bytes[index]+256*bytes[index+1],invalid);
+  }
+  target.dispose();
+  quad.dispose();
+  material.dispose();
+  pass.dispose();
+  renderer.dispose();
+  output.textContent=JSON.stringify(results);
+} catch (error) {
+  output.textContent="error:"+error.message;
+}
+</script>

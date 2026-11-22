@@ -1,0 +1,49 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+
+int main(int argc,char **argv) {
+    if(argc!=2 || argv[1][0]!='/') return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],url[1100];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-smaa-area-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/area.wasm",dir);
+    const char entry[]="export uxe_smaa_area(dx:f64,dy:f64,ex:i64,ey:i64) i64 version 1;\n";
+    int failed=sy_write_file(abi,entry,sizeof entry-1,0600);
+    char *output=0;
+    size_t bytes=0;
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/smaapass-area.ujs",
+        "ujs/practice/uxe/test/smaapass-area-probe.ujs","-o",wasm,0};
+    if(!failed && cx_runv_timeout(compile,6,&output,&bytes)) {
+        printf("SMAA_AREA compiler: %s\n",output?output:"");
+        failed=1;
+    }
+    mm_free(output); output=0;
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/smaapass-area-r160.html?package=%s&wasm=%s",
+        cwd,argv[1],wasm);
+    enum { values=24 };
+    double actual[values]={0};
+    if(!failed) failed=length<0 || length>=(int)sizeof url ||
+        r160_wait_read(url,"#r160",actual,values,dir);
+    int mutationDifferences=0;
+    if(!failed) {
+        if(actual[0]!=160 || actual[1]!=560 || actual[2]!=66 || actual[3]!=33) failed++;
+        for(int i=4;i<values;i+=4) {
+            if(actual[i+3]!=actual[i+2]) mutationDifferences++;
+            if(actual[i]!=actual[i+2] || actual[i+1]!=actual[i+2]) {
+                printf("SMAA_AREA entry=%d ujs=%.0f r160=%.0f expected=%.0f\n",
+                    (i-4)/4,actual[i],actual[i+1],actual[i+2]);
+                failed++;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed++;
+    mm_free(output);
+    if(!mutationDifferences) failed++;
+    printf("SMAA_AREA entries=5 mutation_differences=%d failed=%d\n",mutationDifferences,failed);
+    return failed!=0;
+}
