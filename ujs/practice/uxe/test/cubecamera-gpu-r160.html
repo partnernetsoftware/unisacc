@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Color, CubeCamera, WebGLCubeRenderTarget, WebGLRenderer, Scene, REVISION } from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+function context() {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=4;
+  const gl=canvas.getContext("webgl2");
+  if(!gl) throw Error("WebGL2 required");
+  return {canvas,gl};
+}
+try {
+  if(REVISION!=="160") throw Error("revision");
+  const query=new URLSearchParams(location.search);
+  const {gl}=context();
+  const module=await WebAssembly.compile(await (await fetch(`file://${query.get("wasm")}`)).arrayBuffer());
+  let engine;
+  const submit=createGpuSubmit(gl,()=>engine.memory,()=>1,createGpuTargets(gl));
+  engine=(await WebAssembly.instantiate(module,{uxe_gpu_v1:{host_gpu_submit:submit}})).exports;
+  const status=Number(engine.uxe_cube_probe(BigInt(query.get("mutate"))));
+  const result=Array.from(new Uint32Array(engine.memory.buffer,2097152+8192,6));
+  const rollback=Number(engine.uxe_cube_probe(2n));
+  const restored=Number(gl.getParameter(gl.FRAMEBUFFER_BINDING)===null);
+  const ref=context();
+  const renderer=new WebGLRenderer({canvas:ref.canvas,context:ref.gl});
+  const target=new WebGLCubeRenderTarget(4,{generateMipmaps:false});
+  const cube=new CubeCamera(0.5,21,target);
+  const scene=new Scene();
+  const colors=[0xff0000,0x00ff00,0x0000ff,0xffff00,0x00ffff,0xff00ff].map(value=>new Color(value));
+  scene.onBeforeRender=(_renderer,node,camera)=>{node.background=colors[cube.children.indexOf(camera)];};
+  cube.update(renderer,scene);
+  const samples=[];
+  for(let i=0;i<6;i++) {
+    renderer.setRenderTarget(target,i);
+    const rgba=new Uint8Array(4);
+    ref.gl.readPixels(0,0,1,1,ref.gl.RGBA,ref.gl.UNSIGNED_BYTE,rgba);
+    samples.push(new DataView(rgba.buffer).getUint32(0,true));
+  }
+  renderer.setRenderTarget(null);
+  target.dispose();
+  renderer.dispose();
+  document.querySelector("#r160").textContent=JSON.stringify([status,rollback,restored,...result,...samples]);
+} catch(error) {
+  document.querySelector("#r160").textContent=String(error);
+}
+</script>
