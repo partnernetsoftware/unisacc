@@ -1,0 +1,381 @@
+/* tools/unit-e2-compare.cx -- unit-level UNIPP2 stream oracle: one installed APE, two model packs
+ * (--models A / --models B), every unit's e2 frame must come out byte-identical.
+ *
+ *   sh ./unisacc.com tools/unit-e2-compare.cx -- manifest [--root DIR] [--strata S,..] [--sample N] [--out FILE]
+ *   sh ./unisacc.com tools/unit-e2-compare.cx -- run --ape APE --models-a A --models-b B --manifest M --ledger DIR
+ *                                               [--root DIR] [--budget-ms 45000] [--jobs N<=4] [--shard K/N] [--side-secs 8]
+ *   sh ./unisacc.com tools/unit-e2-compare.cx -- status --manifest M --ledger DIR --models-a A --models-b B
+ *
+ * Division of labour with tools/pp-equiv.cx: pp-equiv compares include/ headers, tests/*.c and
+ * tests/pp-equiv-corners/*.c through -E and stream e2; unit-e2-compare compares real compiler units
+ * (tools/, cx/, ext/, examples/) and the corner corpus as units through stream e2 only. Both take the
+ * same pack identity convention (UNISACC_PPEQ_PKG_ORIGINAL / UNISACC_PPEQ_PKG_PATCHED) and the same
+ * SAME/DIFF/REFUSE_SAME/UNMEASURED vocabulary; neither rebuilds a pack.
+ *
+ * strata: tools=tools 顶层 .cx, cx=cx 递归 .cx, ext=ext 递归 .cx, examples=examples 顶层 .c,
+ *   corners=tests/pp-equiv-corners 顶层 .c.  --sample N keeps every N-th row of each stratum (deterministic,
+ *   so a frozen manifest is reproducible).  The manifest sha256 is part of every ledger row: a frozen
+ *   manifest cannot be re-sampled.
+ *
+ * verdict: SAME        rc 0 both sides, stdout and stderr byte-equal, e2 frame at least 31 bytes
+ *          REFUSE_SAME  both sides same non-zero rc with byte-equal stdout and stderr
+ *          DIFF         anything else that ran on both sides
+ *          UNMEASURED   a side timed out, failed to start, or produced a malformed e2 frame
+ * Negative controls belong to the caller: --models-a X --models-b X must be all SAME, and a byte-tampered
+ * copy of one pack must produce at least one DIFF (tools/check-unit-e2-compare.cx).
+ *
+ * One ledger row per finished item: UEC TAB manifest TAB stratum TAB path TAB id-a TAB id-b TAB status TAB reason TAB detail
+ * A row already in the ledger for the same manifest and pack pair is skipped, so a run resumes.
+ * Check: tools/check-unit-e2-compare.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.die
+
+#define MAXROWS 8192
+#define MAXPATH 480
+#define MAXJOBS 4
+
+static const char *UEC_TOOL = "unit-e2-compare";
+static void uec_need(int ok, const char *why) { if (!ok) tool_die(UEC_TOOL, why, 0, 2); }
+#define FMT(buf, ...) uec_need(!cx_fmt((buf), sizeof(buf), __VA_ARGS__), "format overflow")
+#define FMTC(buf, cap, ...) uec_need(!cx_fmt((buf), (cap), __VA_ARGS__), "format overflow")
+
+static int g_sample;
+static char g_root[MAXPATH];
+
+typedef struct { char stratum[12], path[MAXPATH], sha[65]; } Row;
+static Row rows[MAXROWS];
+static int nrows;
+static char msha[65];
+
+typedef struct { char stratum[12], path[MAXPATH], status[16]; } Done;
+static Done done[MAXROWS];
+static int ndone;
+
+/* ---- small helpers (kept local: pp-equiv's copies are static, no cxlib equivalent exists yet) ---- */
+static const char *uec_opt(int argc, char **argv, const char *name, const char *dflt) {
+    const char *hit = dflt;
+    for (int i = 0; i + 1 < argc; i++) if (tx_eqz(argv[i], name)) hit = argv[i + 1];
+    return hit;
+}
+static int uec_word(const char *list, const char *item) {
+    long il = tx_len(item, 256);
+    for (const char *p = list; *p; ) {
+        const char *e = p;
+        while (*e && *e != ',') e++;
+        if (e - p == il && mm_same(p, item, il)) return 1;
+        p = *e ? e + 1 : e;
+    }
+    return 0;
+}
+static int uec_ends(const char *p, const char *suf) {
+    long pl = tx_len(p, MAXPATH), sl = tx_len(suf, 8);
+    return pl >= sl && mm_same(p + pl - sl, suf, sl);
+}
+static void uec_digest(const void *p, size_t n, char out[65]) {
+    if (!n) p = "";
+    uec_need(!sy_sha256_hex(p, n, out), "sha256");
+}
+
+/* ---- manifest ---- */
+static void uec_add(const char *stratum, const char *path, const char *sha) {
+    uec_need(nrows < MAXROWS && tx_len(path, MAXPATH) < MAXPATH, "manifest capacity");
+    Row *r = &rows[nrows++];
+    FMT(r->stratum, "%s", stratum);
+    FMT(r->path, "%s", path);
+    FMT(r->sha, "%s", sha);
+}
+static void uec_stratum(const char *stratum, const char *spec) {
+    char *av[6];
+    int k = 0;
+    av[k++] = "git"; av[k++] = "-C"; av[k++] = (char *)g_root; av[k++] = "ls-files"; av[k++] = (char *)spec; av[k] = 0;
+    pr_result r;
+    if (pr_run("git ls-files", av, 0, 0, 30, &r) || r.rc) tool_die(UEC_TOOL, "git ls-files failed", spec, 2);
+    int seen = 0, kept = 0, match = 0;
+    for (char *p = r.out; p && p < r.out + r.outn; ) {
+        char *e = memchr(p, '\n', (size_t)(r.out + r.outn - p));
+        if (!e) e = r.out + r.outn;
+        *e = 0;
+        if (*p) {
+            int ok;
+            if (tx_eqz(stratum, "corners")) ok = tx_prefix(p, tx_len(p, MAXPATH), "tests/pp-equiv-corners/", 23) && !strchr(p + 23, '/') && uec_ends(p, ".c");
+            else if (tx_eqz(stratum, "examples")) ok = tx_prefix(p, tx_len(p, MAXPATH), "examples/", 9) && uec_ends(p, ".c");
+            else ok = uec_ends(p, ".cx") && !strstr(p, "/.claude/");
+            if (ok) {
+                int take = !(g_sample > 0 && match % g_sample);
+                match++;
+                if (!take) { seen++; p = e + 1; continue; }
+                char full[MAXPATH + 600], sha[65];
+                size_t fn;
+                FMT(full, "%s/%s", g_root, p);
+                char *body = cx_read(full, &fn);
+                uec_need(body != 0, "read unit source");
+                uec_digest(body, fn, sha);
+                mm_free(body);
+                uec_add(stratum, p, sha);
+                kept++;
+            }
+            seen++;
+        }
+        p = e + 1;
+    }
+    pr_result rr = {0}; rr.out = r.out; pr_free(&rr);
+    fprintf(stderr, "UEC_STRATUM\t%s\tfiles=%d\tkept=%d\n", stratum, seen, kept);
+}
+static int uec_rowcmp(const void *x, const void *y) {
+    const Row *a = x, *b = y;
+    int c = strcmp(a->stratum, b->stratum);
+    return c ? c : strcmp(a->path, b->path);
+}
+static int cmd_manifest(int argc, char **argv) {
+    const char *strata = uec_opt(argc, argv, "--strata", "tools,cx,ext,examples,corners");
+    const char *sample = uec_opt(argc, argv, "--sample", 0);
+    const char *outp = uec_opt(argc, argv, "--out", 0);
+    const char *root = uec_opt(argc, argv, "--root", ".");
+    static char text[MAXROWS * 640];
+    size_t at = 0;
+    nrows = 0;
+    g_sample = sample ? atoi(sample) : 0;
+    FMT(g_root, "%s", root);
+    if (uec_word(strata, "tools")) uec_stratum("tools", "tools");
+    if (uec_word(strata, "cx")) uec_stratum("cx", "cx");
+    if (uec_word(strata, "ext")) uec_stratum("ext", "ext");
+    if (uec_word(strata, "examples")) uec_stratum("examples", "examples");
+    if (uec_word(strata, "corners")) uec_stratum("corners", "tests/pp-equiv-corners");
+    qsort(rows, (size_t)nrows, sizeof rows[0], uec_rowcmp);
+    for (int i = 0; i < nrows; i++) {
+        int k = snprintf(text + at, sizeof text - at, "%s\t%s\t%s\n", rows[i].stratum, rows[i].path, rows[i].sha);
+        uec_need(k > 0 && at + (size_t)k < sizeof text, "manifest too large");
+        at += (size_t)k;
+    }
+    uec_digest(text, at, msha);
+    if (outp) uec_need(!cx_write(outp, text, at), "write manifest");
+    else fwrite(text, 1, at, stdout);
+    fprintf(stderr, "UEC_MANIFEST\tsha=%s\trows=%d\n", msha, nrows);
+    return 0;
+}
+
+/* ---- manifest load ---- */
+static void load_manifest(const char *file) {
+    size_t n;
+    char *text = cx_read(file, &n);
+    uec_need(text != 0, "read manifest");
+    uec_digest(text, n, msha);
+    nrows = 0;
+    for (char *p = text; p < text + n; ) {
+        char *e = memchr(p, '\n', (size_t)(text + n - p)), *f[3];
+        int k = 0;
+        if (!e) e = text + n;
+        *e = 0;
+        for (char *q = p; k < 3; k++) {
+            f[k] = q;
+            char *t = strchr(q, '\t');
+            if (!t) break;
+            *t = 0;
+            q = t + 1;
+        }
+        uec_need(k == 2 && tx_len(f[0], 12) < 12, "manifest row");
+        uec_add(f[0], f[1], f[2]);
+        p = e + 1;
+    }
+}
+
+/* ---- ledger: one row per finished (stratum, path); a row for another manifest or pack pair is ignored ---- */
+static void load_done(const char *dir, const char *ida, const char *idb) {
+    ndone = 0;
+    for (int i = 0; i < nrows; i++) {
+        int seen = 0;
+        for (int j = 0; j < i && !seen; j++) seen = tx_eqz(rows[j].stratum, rows[i].stratum);
+        if (seen) continue;
+        char path[1024];
+        FMT(path, "%s/%s.tsv", dir, rows[i].stratum);
+        if (sy_is_reg(path) != 1) continue;
+        size_t n;
+        char *text = cx_read(path, &n);
+        uec_need(text != 0, "read ledger");
+        for (char *p = text; p < text + n; ) {
+            char *e = memchr(p, '\n', (size_t)(text + n - p));
+            if (!e) e = text + n;
+            *e = 0;
+            if (tx_prefix(p, tx_len(p, 4096), "UEC\t", 4)) {
+                char *k = p + 4, *t1 = strchr(k, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0;
+                char *t3 = t2 ? strchr(t2 + 1, '\t') : 0, *t4 = t3 ? strchr(t3 + 1, '\t') : 0;
+                char *t5 = t4 ? strchr(t4 + 1, '\t') : 0;
+                char *t6 = t5 ? strchr(t5 + 1, '\t') : 0;
+                if (t6) {
+                    *t1 = 0; *t2 = 0; *t3 = 0; *t4 = 0; *t5 = 0; *t6 = 0;
+                    if (tx_eqz(k, msha) && tx_eqz(t3 + 1, ida) && tx_eqz(t4 + 1, idb)) {
+                        uec_need(ndone < MAXROWS && tx_len(t2 + 1, MAXPATH) < MAXPATH, "ledger capacity");
+                        Done *d = &done[ndone++];
+                        FMT(d->stratum, "%s", t1 + 1);
+                        FMT(d->path, "%s", t2 + 1);
+                        FMT(d->status, "%s", t5 + 1);
+                    }
+                }
+            }
+            p = e + 1;
+        }
+        mm_free(text);
+    }
+}
+static Done *done_find(const char *stratum, const char *path) {
+    for (int i = 0; i < ndone; i++)
+        if (tx_eqz(done[i].stratum, stratum) && tx_eqz(done[i].path, path)) return &done[i];
+    return 0;
+}
+static void pack_id(const char *pack, char out[65]) {
+    size_t n;
+    char *b = cx_read(pack, &n);
+    uec_need(b != 0, "read model pack");
+    uec_digest(b, n, out);
+    mm_free(b);
+}
+
+/* ---- one unit ---- */
+typedef struct { int started; pr_result r; } Side;
+static void side_run(const char *ape, const char *pack, const char *file, const char *root, int secs, Side *s) {
+    char *av[24], src[1200];
+    int n = 0;
+    FMT(src, "UEC_SRC=%s", file);
+    char *env[] = {"UNISACC_RUN_CACHE=0", src, 0};
+    av[n++] = "/bin/sh"; av[n++] = "-c"; av[n++] = "exec \"$@\" < \"$UEC_SRC\""; av[n++] = "sh";
+    av[n++] = "/bin/sh"; av[n++] = (char *)ape; av[n++] = "stream"; av[n++] = "e2"; av[n++] = "--level"; av[n++] = "1";
+    av[n++] = "--models"; av[n++] = (char *)pack;
+    av[n++] = "--target"; av[n++] = "lnx/x86_64"; av[n++] = "--source"; av[n++] = (char *)file;
+    av[n] = 0;
+    s->started = pr_run("unit-e2 side", av, root, env, secs, &s->r) == 0;
+}
+static int uec_equal(const char *a, size_t an, const char *b, size_t bn) { return an == bn && (!an || mm_same(a, b, (long)an)); }
+
+static void item(const Row *r, const char *ape, const char *pa, const char *pb, const char *ida, const char *idb,
+                 const char *root, const char *ledger, int secs) {
+    char key[1200], line[2600], detail[400];
+    const char *status = "SAME", *reason = "-";
+    Side x = {0}, y = {0};
+    side_run(ape, pa, r->path, root, secs, &x);
+    side_run(ape, pb, r->path, root, secs, &y);
+    detail[0] = 0;
+    if (!x.started || !y.started || x.r.timed_out || y.r.timed_out) {
+        status = "UNMEASURED";
+        reason = (x.r.timed_out || y.r.timed_out) ? "timeout" : "spawn";
+        FMT(detail, "%s", x.started ? y.r.why : x.r.why);
+    } else {
+        int rc_same = x.r.rc == y.r.rc;
+        int out_same = uec_equal(x.r.out, x.r.outn, y.r.out, y.r.outn);
+        int err_same = uec_equal(x.r.err, x.r.errn, y.r.err, y.r.errn);
+        char hx[65], hy[65];
+        uec_digest(x.r.out, x.r.outn, hx);
+        uec_digest(y.r.out, y.r.outn, hy);
+        FMT(detail, "rc=%d/%d out=%zu/%zu err=%zu/%zu sha=%.16s/%.16s", x.r.rc, y.r.rc, x.r.outn, y.r.outn, x.r.errn, y.r.errn, hx, hy);
+        if (!rc_same || !out_same || !err_same) {
+            status = "DIFF";
+            reason = !rc_same ? "rc" : !out_same ? "stdout" : "stderr";
+        } else if (x.r.rc != 0) {
+            status = "REFUSE_SAME";
+        } else if (x.r.outn < 31 || memcmp(x.r.out, "UNIPP2", 7)) {
+            status = "UNMEASURED"; reason = "bad-e2-frame";
+        }
+    }
+    for (char *c = detail; *c; c++) if (*c == '\t' || *c == '\n') *c = ' ';
+    FMT(key, "%s\t%s\t%s\t%s\t%s", msha, r->stratum, r->path, ida, idb);
+    int k = snprintf(line, sizeof line, "UEC\t%s\t%s\t%s\t%s\n", key, status, reason, detail);
+    uec_need(k > 0 && k < (int)sizeof line, "ledger line");
+    char path[1024];
+    FMT(path, "%s/%s.tsv", ledger, r->stratum);
+    uec_need(!sy_append_file(path, line, k, 0644), "append ledger");
+    pr_free(&x.r);
+    pr_free(&y.r);
+}
+
+static int cmd_run(int argc, char **argv) {
+    const char *ape = uec_opt(argc, argv, "--ape", 0), *pa = uec_opt(argc, argv, "--models-a", 0), *pb = uec_opt(argc, argv, "--models-b", 0);
+    const char *mf = uec_opt(argc, argv, "--manifest", 0), *ledger = uec_opt(argc, argv, "--ledger", 0), *root = uec_opt(argc, argv, "--root", ".");
+    const char *xroot = uec_opt(argc, argv, "--exec-root", ".");
+    long budget = atol(uec_opt(argc, argv, "--budget-ms", "45000")), jobs = atol(uec_opt(argc, argv, "--jobs", "1"));
+    int secs = atoi(uec_opt(argc, argv, "--side-secs", "8")), shard = atoi(uec_opt(argc, argv, "--shard", "0")), shards = atoi(uec_opt(argc, argv, "--shards", "1"));
+    uec_need(ape && pa && pb && mf && ledger, "run needs --ape --models-a --models-b --manifest --ledger");
+    uec_need(jobs >= 1 && jobs <= MAXJOBS && secs >= 1 && shards >= 1 && shard >= 0 && shard < shards, "bad numeric option");
+    if (jobs > 1) {
+        sy_child_t ch[MAXJOBS];
+        char self[1200], rt[1200], js[16], bud[32], ss[16], sh[MAXJOBS][16];
+        int rc = 0;
+        FMT(self, "%s/tools/unit-e2-compare.cx", xroot);
+        FMT(rt, "%s/unisacc.com", xroot);
+        FMT(js, "%ld", jobs);
+        FMT(bud, "%ld", budget);
+        FMT(ss, "%d", secs);
+        for (int i = 0; i < jobs; i++) {
+            sy_spawn_t o;
+            FMTC(sh[i], 16, "%d", i);
+            char *v[] = {"sh", rt, self, "--", "run", "--ape", (char *)ape, "--models-a", (char *)pa, "--models-b", (char *)pb, "--manifest", (char *)mf,
+                         "--ledger", (char *)ledger, "--root", (char *)root, "--exec-root", (char *)xroot, "--budget-ms", bud, "--side-secs", ss, "--shard", sh[i], "--shards", js, 0};
+            sy_spawn_init(&o);
+            o.argv = v; o.cwd = xroot; o.pgroup = -1; o.deadline_ms = budget + 2L * secs * 1000 + 8000;
+            uec_need(sy_proc_spawn(&o, &ch[i]) == 0, "spawn worker");
+        }
+        for (int i = 0; i < jobs; i++) {
+            sy_exit_t st;
+            uec_need(sy_proc_wait(&ch[i], &st) == 0, "wait worker");
+            if (sy_exit_code(&st) != 0) rc = 1;
+        }
+        printf("UEC_RUN\tworkers=%ld\trc=%d\n", jobs, rc);
+        return rc;
+    }
+    long t0 = sy_now_ms();
+    char ida[65], idb[65];
+    int did = 0, skipped = 0, stopped = 0;
+    load_manifest(mf);
+    uec_need(sy_mkdir_all(ledger, 0755) == 0, "ledger dir");
+    pack_id(pa, ida);
+    pack_id(pb, idb);
+    load_done(ledger, ida, idb);
+    for (int i = 0; i < nrows; i++) {
+        if (i % shards != shard) continue;
+        if (done_find(rows[i].stratum, rows[i].path)) { skipped++; continue; }
+        if (sy_now_ms() - t0 >= budget) { stopped = 1; break; }
+        item(&rows[i], ape, pa, pb, ida, idb, root, ledger, secs);
+        did++;
+    }
+    printf("UEC_RUN\tmanifest=%s\tshard=%d/%d\tdone=%d\tskipped=%d\tbudget_stop=%d\tms=%ld\n", msha, shard, shards, did, skipped, stopped, sy_now_ms() - t0);
+    return 0;
+}
+
+static int cmd_status(int argc, char **argv) {
+    const char *mf = uec_opt(argc, argv, "--manifest", 0), *ledger = uec_opt(argc, argv, "--ledger", 0);
+    const char *pa = uec_opt(argc, argv, "--models-a", 0), *pb = uec_opt(argc, argv, "--models-b", 0);
+    char ida[65], idb[65];
+    int same = 0, diff = 0, refuse = 0, unmeasured = 0, pending = 0;
+    uec_need(mf && ledger && pa && pb, "status needs --manifest --ledger --models-a --models-b");
+    load_manifest(mf);
+    pack_id(pa, ida);
+    pack_id(pb, idb);
+    load_done(ledger, ida, idb);
+    for (int i = 0; i < nrows; i++) {
+        const Done *d = done_find(rows[i].stratum, rows[i].path);
+        if (!d) pending++;
+        else if (tx_eqz(d->status, "SAME")) same++;
+        else if (tx_eqz(d->status, "DIFF")) diff++;
+        else if (tx_eqz(d->status, "REFUSE_SAME")) refuse++;
+        else unmeasured++;
+    }
+    printf("UEC_STATUS\tmanifest=%s\ttotal=%d\tsame=%d\trefuse_same=%d\tdiff=%d\tunmeasured=%d\tpending=%d\tCOMPLETE=%s\n",
+           msha, nrows, same, refuse, diff, unmeasured, pending,
+           (pending == 0 && diff == 0 && unmeasured == 0) ? "yes" : "no");
+    return diff ? 1 : (pending || unmeasured) ? 2 : 0;
+}
+
+int main(int argc, char **argv) {
+    uec_need(argc >= 2, "usage: unit-e2-compare.cx manifest|run|status ...");
+    if (tx_eqz(argv[1], "manifest")) return cmd_manifest(argc - 2, argv + 2);
+    if (tx_eqz(argv[1], "run")) return cmd_run(argc - 2, argv + 2);
+    if (tx_eqz(argv[1], "status")) return cmd_status(argc - 2, argv + 2);
+    tool_die(UEC_TOOL, "unknown subcommand", argv[1], 2);
+    return 2;
+}
