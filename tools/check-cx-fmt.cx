@@ -16,27 +16,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sysx.run
 
-/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
-   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
-static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
-    char *w[64], *b = 0;
-    size_t n = 0, j;
-    int k = 0, i, rc;
-    if (cut) *cut = 0;
-    if (!argv) return -EINVAL;
-    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
-    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
-    if (argv[i]) return -E2BIG;
-    w[k] = 0;
-    rc = cx_runv_timeout(w, secs, &b, &n);
-    if (cap > 0) {
-        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
-        for (j = 0; b && j < n; j++) out[j] = b[j];
-        out[b ? n : 0] = 0;
-    }
-    free(b);
-    return rc;
-}
+#pragma unisa use cxlib.procrun
 
 static int bad, nok, nfail;
 static void ok(int c, const char *name) {
@@ -311,7 +291,7 @@ static void check_streams(void) {
     char *av[] = { "sh", (char *)u, "-run", (char *)self, "--", "child", "out", 0 };
     char out[512], err[512];
     int cut = 0, rc, pid, ofd = -1, efd = -1, n;
-    rc = bounded_run(av, 50, out, sizeof out, &cut);
+    rc = pr_run_merged(av, 50, out, sizeof out, &cut);
     ok(rc == 0, "printf child: every sy_printf/sy_eprintf/sy_vprintf/sy_veprintf/sy_puts return equals printf's");
     ok(tx_eqz(out, "a1\nb2\nc3\nd4\ne5\nf6\ng7h8\ni9\nj10\n"),
        "printf child: stdout and stderr merged keep the call order of sy_* and printf/puts/fprintf");
@@ -329,7 +309,7 @@ static void check_tty(void) {
     char *probe[] = { "sh", "-c", "script -qec true /dev/null >/dev/null 2>&1", 0 };
     char out[256], cmd[1024];
     int cut = 0;
-    if (bounded_run(probe, 50, out, sizeof out, &cut) != 0) {
+    if (pr_run_merged(probe, 50, out, sizeof out, &cut) != 0) {
         printf("UNMEASURED\tisatty on a terminal: no util-linux script(1) here\n");
         return;
     }
@@ -337,7 +317,7 @@ static void check_tty(void) {
                sy_env_or("UNISACC", "./unisacc.com"), self) != 0) { ok(0, "isatty pty: command fits"); return; }
     {
         char *av[] = { "sh", "-c", cmd, 0 };
-        ok(bounded_run(av, 50, out, sizeof out, &cut) == 0, "isatty: stdin and stdout on a script(1) pty are 1, as isatty");
+        ok(pr_run_merged(av, 50, out, sizeof out, &cut) == 0, "isatty: stdin and stdout on a script(1) pty are 1, as isatty");
     }
 }
 
