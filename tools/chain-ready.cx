@@ -199,7 +199,7 @@ static int parse_ratchet_below(const char *o, long n, const char *tag) {
 }
 static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
     char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
-    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) {
+    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=17") || has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) {
         int raw_b = parse_ratchet_below(o, n, "cxraw: ok:");
         int libc_b = parse_ratchet_below(o, n, "cxlibc: ok:");
         if (raw_b > 5 || libc_b > 5)
@@ -516,6 +516,49 @@ static int parse2_release_tag(const char *repo, char tag[64]) {
         }
     }
     return ok && tag[0];
+}
+
+/* On main (where git rev-parse --abbrev-ref HEAD is not vX.Y.Z), resolve the next unpublished
+ * version after the last published slot in build/version-seq.tsv when --version is not given. */
+static int seq_next_version(const char *repo, char ver[32]) {
+    char p[4400], tag[64] = "", why[160], *b, *s;
+    char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
+    np_result r = {0};
+    size_t n = 0;
+    int got = 0;
+    ver[0] = 0;
+    if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out && r.outn > 5 &&
+        tx_prefix(r.out, (long)r.outn, "v0.0.", 5)) {
+        np_free(&r);
+        return 0;
+    }
+    np_free(&r);
+    if (cx_fmt(p, sizeof p, "%s/build/version-seq.tsv", repo)) return 0;
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    for (s = b; s && *s;) {
+        char *end = strchr(s, '\n');
+        if (!end) break;
+        *end++ = 0;
+        char *version = strchr(s, '\t');
+        char *class_name = version ? strchr(version + 1, '\t') : 0;
+        char *state = class_name ? strchr(class_name + 1, '\t') : 0;
+        char *note = state ? strchr(state + 1, '\t') : 0;
+        if (note) {
+            *class_name = 0;
+            *note = 0;
+            if (!strcmp(state + 1, "已公开")) {
+                if (rv_valid(version + 1)) cx_fmt(tag, sizeof tag, "%s", version + 1);
+                ver[0] = 0;
+                got = 0;
+            } else if (tag[0] && !got && rv_valid(version + 1)) {
+                if (!cx_fmt(ver, 32, "%s", version + 1)) got = 1;
+            }
+        }
+        s = end;
+    }
+    mm_free(b);
+    return got;
 }
 
 static int parse2_preflight(const char *repo, const char *rev, const char *tmp, char ev[640]) {
@@ -1101,6 +1144,8 @@ int main(int argc, char **argv) {
     g_chain3[6] = outd[2]; g_chain3[7] = cached;
     g_chain4[6] = outd[3]; g_chain4[7] = cached;
     g_chain5[6] = outd[4]; g_chain5[7] = cached;
+    static char auto_ver[32];
+    if (!tver && seq_next_version(repo, auto_ver)) tver = auto_ver;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
     for (k = 0; k < 19; k++) {

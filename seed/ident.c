@@ -1,4 +1,4 @@
-/* seed/ident.c -- canonical source-packages-v2 identity, C99 + POSIX.
+/* seed/ident.c -- canonical source-packages-v3 identity, C99 + POSIX.
  * Default: one combined SHA256 line. ROOT packages emits its canonical table;
  * ROOT changes OLD_TABLE compares it; list-current lists physical inputs;
  * list-aliases and package-inputs expose topology and ownership respectively.
@@ -134,7 +134,8 @@ static void historical_identity(char hex[65]) {
     for (i = 0; i < 32; i++) sprintf(hex + 2 * i, "%02x", out[i]);
 }
 
-/* Canonical source-packages-v2: physical bytes and alias topology are separate. */
+/* Canonical source-packages-v3: physical bytes and alias topology are separate;
+   symlinks under cx/ or src/ do not pull out-of-product-tree targets into inputs. */
 static const char *const packages[] = {"cx/sys", "cx/mem", "cx/text", "cx/core", "cx/driver", "cx/runtime", "cx/compiler", "src", "exec", "seed", "weights", "include"};
 typedef struct { char *path; int owner, support; char digest[65]; } Input;
 typedef struct { char *logical, *target; int owner; } Alias;
@@ -148,6 +149,10 @@ static char *copy_string(const char *s) {
 }
 static void *grow(void *p, size_t n) { p = realloc(p, n); if (!p) die("out of memory", "source packages"); return p; }
 static int under(const char *p, const char *base) { size_t n = strlen(base); return !strncmp(p, base, n) && (!p[n] || p[n] == '/'); }
+static int in_product_tree(const char *p) {
+    return under(p, "cx") || under(p, "src") || under(p, "exec") || under(p, "seed")
+        || under(p, "weights") || under(p, "include") || under(p, "kernel");
+}
 static int owner_of(const char *p) {
     int i;
     if (!strcmp(p, "iterate/kernel/typekw.tsv")) return 8;
@@ -199,43 +204,59 @@ static int conservative_excluded(const char *p) {
     return !strcmp(base, "README.md") || !strcmp(base, ".DS_Store");
 }
 static void collect(const char *logical, int force) {
-    char physical[4096]; struct stat st; size_t i;
+    char physical[4096]; struct stat st, lst; size_t i;
     int conservative = under(logical, "seed") || under(logical, "include");
-    if (!force && conservative && conservative_excluded(logical)) return;
-    canonical(logical, physical);
-    conservative = conservative || under(physical, "seed") || under(physical, "include");
-    if (stat(physical, &st)) die("cannot stat source", logical);
-    if (force && !S_ISREG(st.st_mode)) die("mandatory support is not a regular file", logical);
-    if ((S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) && !(st.st_mode & 0444)) die("source has no read permission", logical);
-    if (S_ISDIR(st.st_mode) && !(st.st_mode & 0111)) die("source directory has no search permission", logical);
-    if (S_ISDIR(st.st_mode)) {
-        DIR *d; struct dirent *e; char **children = NULL; size_t nc = 0;
-        remember_alias(logical, physical);
-        for (i = 0; i < nv; i++) if (!strcmp(visited[i], physical)) return;
-        visited = grow(visited, (nv + 1) * sizeof *visited); visited[nv++] = copy_string(physical);
-        d = opendir(physical); if (!d) die("cannot open source directory", logical);
-        for (;;) {
-            errno = 0; e = readdir(d);
-            if (!e) { if (errno) die("cannot read source directory", logical); break; }
-            if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            children = grow(children, (nc + 1) * sizeof *children); children[nc++] = copy_string(e->d_name);
+    int done = (!force && conservative && conservative_excluded(logical));
+    if (!done) {
+        canonical(logical, physical);
+        conservative = conservative || under(physical, "seed") || under(physical, "include");
+        if (stat(physical, &st)) die("cannot stat source", logical);
+        if (force && !S_ISREG(st.st_mode)) die("mandatory support is not a regular file", logical);
+        if ((S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) && !(st.st_mode & 0444)) die("source has no read permission", logical);
+        if (S_ISDIR(st.st_mode) && !(st.st_mode & 0111)) die("source directory has no search permission", logical);
+        /* v3 Rule (L.1): symlinks declared under cx/ or src/ pointing outside the 7 product trees
+           record their alias topology but do not pull external targets into source inputs. */
+        if (!force && (under(logical, "cx") || under(logical, "src")) && !in_product_tree(physical)
+            && !lstat(logical, &lst) && S_ISLNK(lst.st_mode)) {
+            remember_alias(logical, physical);
+            done = 1;
         }
-        if (closedir(d)) die("cannot close source directory", logical);
-        qsort(children, nc, sizeof *children, string_cmp);
-        for (i = 0; i < nc; i++) {
-            char *p = malloc(strlen(logical) + strlen(children[i]) + 2); if (!p) die("out of memory", logical);
-            sprintf(p, "%s/%s", logical, children[i]); collect(p, force); free(p); free(children[i]);
-        }
-        free(children);
-        return;
     }
-    if (!S_ISREG(st.st_mode)) return;
-    if (!force && !conservative && !keep(logical) && !assembly(logical)) return;
-    remember_alias(logical, physical);
-    for (i = 0; i < ni; i++) if (!strcmp(inputs[i].path, physical)) return;
-    inputs = grow(inputs, (ni + 1) * sizeof *inputs);
-    inputs[ni].path = copy_string(physical); inputs[ni].owner = owner_of(physical);
-    inputs[ni].support = !under(physical, packages[inputs[ni].owner]); ni++;
+    if (!done && S_ISDIR(st.st_mode)) {
+        int seen = 0;
+        remember_alias(logical, physical);
+        for (i = 0; i < nv; i++) if (!strcmp(visited[i], physical)) { seen = 1; break; }
+        if (!seen) {
+            DIR *d; struct dirent *e; char **children = NULL; size_t nc = 0;
+            visited = grow(visited, (nv + 1) * sizeof *visited); visited[nv++] = copy_string(physical);
+            d = opendir(physical); if (!d) die("cannot open source directory", logical);
+            for (;;) {
+                errno = 0; e = readdir(d);
+                if (!e) { if (errno) die("cannot read source directory", logical); break; }
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                children = grow(children, (nc + 1) * sizeof *children); children[nc++] = copy_string(e->d_name);
+            }
+            if (closedir(d)) die("cannot close source directory", logical);
+            qsort(children, nc, sizeof *children, string_cmp);
+            for (i = 0; i < nc; i++) {
+                char *p = malloc(strlen(logical) + strlen(children[i]) + 2); if (!p) die("out of memory", logical);
+                sprintf(p, "%s/%s", logical, children[i]); collect(p, force); free(p); free(children[i]);
+            }
+            free(children);
+        }
+        done = 1;
+    }
+    if (!done && S_ISREG(st.st_mode) && (force || conservative || keep(logical) || assembly(logical))) {
+        int seen = 0;
+        remember_alias(logical, physical);
+        for (i = 0; i < ni; i++) if (!strcmp(inputs[i].path, physical)) { seen = 1; break; }
+        if (!seen) {
+            inputs = grow(inputs, (ni + 1) * sizeof *inputs);
+            inputs[ni].path = copy_string(physical); inputs[ni].owner = owner_of(physical);
+            inputs[ni].support = !under(physical, packages[inputs[ni].owner]); ni++;
+        }
+    }
+    return;
 }
 static int input_cmp(const void *a, const void *b) {
     const Input *x = a, *y = b; return x->owner != y->owner ? x->owner - y->owner : strcmp(x->path, y->path);
@@ -249,13 +270,14 @@ static void finish_hex(Sha *h, char hex[65]) {
     unsigned char dg[32]; int j; sha_end(h, dg); for (j = 0; j < 32; j++) sprintf(hex + 2*j, "%02x", dg[j]);
 }
 static void combined(char rows[12][65], char hex[65]) {
-    Sha h; int j; sha_init(&h); sha_put(&h, "source-packages-v2\n", 19);
+    Sha h; int j; sha_init(&h); sha_put(&h, "source-packages-v3\n", 19);
     for (j = 0; j < 12; j++) { sha_put(&h, packages[j], strlen(packages[j])); sha_put(&h, "\t", 1); sha_put(&h, rows[j], 64); sha_put(&h, "\n", 1); }
     finish_hex(&h, hex);
 }
 static long file_digest(const char *path, char hex[65]);
 static void identity(char hex[65]) {
     static const char *const support[] = {"bound", "bound.c", "cxbin", "safedel.cx", "lib.sh", "build_ref.sh", "export_ref.sh", "refshim.h", "reffoot.h", "sourceflat.cx", "ape-pack.cx", "release-ape.cx", "cxlib/releaseversion.cx"};
+    static const char *const extra_support[] = {"build/core-closure.tsv", "cxroot.tsv", "ext/textx/deflate.cx"};
     size_t i; int j; char p[256];
     if (legacy_projection) { historical_identity(hex); return; }
     if (!realpath(".", root_real)) die("cannot resolve ROOT", ".");
@@ -266,6 +288,7 @@ static void identity(char hex[65]) {
     for (j = 0; j < 12; j++) if (j != 9 && j != 11) collect(packages[j], 0);
     collect("cx", 0); collect("kernel", 0); collect("iterate/kernel/typekw.tsv", 1);
     for (i = 0; i < sizeof support / sizeof *support; i++) { snprintf(p, sizeof p, "tools/%s", support[i]); collect(p, 1); }
+    for (i = 0; i < sizeof extra_support / sizeof *extra_support; i++) collect(extra_support[i], 1);
     qsort(inputs, ni, sizeof *inputs, input_cmp); qsort(aliases, na, sizeof *aliases, alias_cmp);
     for (i = 0; i < ni; i++) file_digest(inputs[i].path, inputs[i].digest);
     for (j = 0; j < 12; j++) {
@@ -281,7 +304,7 @@ static void identity(char hex[65]) {
     }
     combined(package_hex, hex);
     if (output_mode == 1) {
-        puts("source-packages-v2"); for (j = 0; j < 12; j++) printf("%s\t%s\n", packages[j], package_hex[j]);
+        puts("source-packages-v3"); for (j = 0; j < 12; j++) printf("%s\t%s\n", packages[j], package_hex[j]);
     } else if (output_mode == 2) {
         for (i = 0; i < na; i++) printf("%s\t%s\t%s\n", packages[aliases[i].owner], aliases[i].logical, aliases[i].target);
     } else if (output_mode == 3) {
@@ -291,7 +314,7 @@ static void identity(char hex[65]) {
 static void changes(const char *path) {
     char old[12][65], line[256], before[65], after[65]; int j, k; FILE *f = fopen(path, "rb");
     if (!f) die("cannot open old package table", path);
-    if (!fgets(line, sizeof line, f) || strcmp(line, "source-packages-v2\n")) die("invalid package table header", path);
+    if (!fgets(line, sizeof line, f) || strcmp(line, "source-packages-v3\n")) die("invalid package table header", path);
     for (j = 0; j < 12; j++) {
         size_t n = strlen(packages[j]);
         if (!fgets(line, sizeof line, f) || strlen(line) != n + 66 || strncmp(line, packages[j], n) || line[n] != '\t' || line[n+65] != '\n') die("invalid package table row", path);

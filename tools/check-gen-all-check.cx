@@ -61,7 +61,7 @@ static void cgac_prep_minirepo(const char *cwd, const char *rep, char *out) {
     char cmd[8192];
     cgac_mk(rep);
     if (cx_fmt(cmd, sizeof cmd,
-        "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate tools cxroot.tsv | tar -x -C '%s' && "
+        "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate kernel tools cxroot.tsv | tar -x -C '%s' && "
         "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' && "
         "printf '# derive v1\\n' > '%s/exec/facts/derive.tsv' && "
         "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
         static const char *bargs[9] = {
             "-", "--part2", "--synth", "--drift", "--unstaged", "--pass-gates", "--chain-ready-live", "--chain-ready-precommit", "--hang"
         };
-        static const int bexp[9] = { 2, 1, 5, 2, 1, 1, 1, 1, 2 };
+        static const int bexp[9] = { 2, 1, 5, 3, 1, 1, 1, 1, 2 };
         int bfound[9] = { 0 };
         char bpath[CGAC_PW];
         size_t bn = 0;
@@ -180,7 +180,7 @@ int main(int argc, char **argv) {
             ck(bfound[i] == 1, msg);
             total_assertions += bexp[i];
         }
-        ck(total_assertions == 16, "split-assertion-partition-total: 16 assertions (14 core + 2 history, 22+22=44 gens)");
+        ck(total_assertions == 17, "split-assertion-partition-total: 17 assertions (15 core + 2 history, 22+22=44 gens)");
         printf("CHECK_GEN_ALL_SPLIT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
         return ck_failures() ? 1 : 0;
     }
@@ -216,6 +216,30 @@ int main(int argc, char **argv) {
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
         ck(rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") && !ckk_has(out, CGAC_OUT, "cannot open"),
            "precommit-derive-gate-blocks-drift: staging product input without recompute blocked by real DIFF without unisacc.com false DIFF");
+
+        /* Step 3: staging a newly added ext/ file without updating build/lane-inputs.tsv is blocked by lane-inputs-gen DIFF, and passes once recomputed+staged */
+        if (cx_fmt(cmd, sizeof cmd,
+            "unset UNISA_CONTAINER && cd '%s' && git reset -q HEAD -- tools/arity-gen.cx tools/win-argv-gen.cx && "
+            "git checkout -- tools/arity-gen.cx tools/win-argv-gen.cx && "
+            "printf '#pragma unisa module cgac_dummy\\nstatic int cgac_d(void) { return 0; }\\n' > ext/net/cgac_dummy.cx && "
+            "git add ext/net/cgac_dummy.cx && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("d1c");
+        rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+        {
+            int blocked_ok = (rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") &&
+                              ckk_has(out, CGAC_OUT, "GEN_CHECK\tlane-inputs-gen\tDIFF"));
+            int pass_ok = 0;
+            if (blocked_ok) {
+                if (cx_fmt(cmd, sizeof cmd,
+                    "unset UNISA_CONTAINER && cd '%s' && sh ./unisacc.com tools/lane-inputs-gen.cx -- --write . >/dev/null && "
+                    "git add build/lane-inputs.tsv && "
+                    "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("d1d");
+                rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
+                pass_ok = (rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"));
+            }
+            ck(blocked_ok && pass_ok,
+               "precommit-lane-inputs-add-ext-blocked-and-synced: staging new ext/ file blocks on lane-inputs-gen DIFF until build/lane-inputs.tsv is staged");
+        }
 
         { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
         printf("CHECK_GEN_ALL_DRIFT\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);

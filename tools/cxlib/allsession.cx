@@ -395,6 +395,16 @@ static int as_last_line(const char *s,size_t n,const char **line,size_t *len){if
    still leaves BATCH_RUN not last. */
 static size_t as_strip_timing(const char *s,size_t n,const char *id){static const char k[]="BATCH_TIMING\tid=";size_t kn=sizeof k-1,i,j;if(!n||s[n-1]!='\n')return n;size_t at=n-1;while(at>0&&s[at-1]!='\n')at--;size_t ln=n-1-at;
  for(i=0;i<kn;i++)if(i>=ln||s[at+i]!=k[i])return n;for(j=0;id[j];j++)if(kn+j>=ln||s[at+kn+j]!=id[j])return n;return kn+j<ln&&s[at+kn+j]=='\t'?at:n;}
+/* Recount the forwarded stdout before the runner's footer. If the child ended
+   without LF, BATCH_HEADERS follows that partial record on the same line. */
+static int as_observed_passes(const as_facts *f,const char *last){
+ const char *head;size_t hn;
+ char tag[192];
+ if(cx_fmt(tag,sizeof tag,"BATCH_HEADERS\t%s\t%s",f->id,f->headers?f->headers:"product"))return -1;
+ size_t tn=strlen(tag);
+ if(as_last_line(f->out,(size_t)(last-f->out),&head,&hn)||hn<tn||memcmp(head+hn-tn,tag,tn))return -1;
+ return as_line_count(f->out,(size_t)(head-f->out),"PASS\t");
+}
 const char *as_verdict(const as_facts *f,const char **reason){
  if(!f->identity_stable){*reason="identity-changed-during-wave";return "UNKNOWN";}
  if(!f->candidate_stable){*reason="candidate-changed-or-foreign";return "UNKNOWN";}
@@ -423,7 +433,14 @@ const char *as_verdict(const as_facts *f,const char **reason){
    if(got[0])cand=got;
   }
   int z=snprintf(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\trc=0\ttransport=0\tmarker=%s\tcandidate=%s\theaders=%s\tscope=actual-one-batch-no-cached-result",f->id,f->marker,cand,f->headers?f->headers:"product");
-  if(z<0||(size_t)z>=sizeof want||ln!=(size_t)z||memcmp(last,want,ln)){*reason="pass-line-mismatch";return "FAIL";}*reason="batch-pass";return "PASS";}
+  if(z<0||(size_t)z>=sizeof want){*reason="pass-line-mismatch";return "FAIL";}
+  /* Pre-telemetry receipts (including sessions with candidate_kind) keep their
+     exact old wire form. During shadow mode the measurement is optional. */
+  if(ln!=(size_t)z){
+   int observed=as_observed_passes(f,last);
+   if(observed<0||cx_fmt(want+z,sizeof want-z,"\tassertions=%d",observed)){*reason="pass-line-mismatch";return "FAIL";}
+  }
+  if(ln!=strlen(want)||memcmp(last,want,ln)){*reason="pass-line-mismatch";return "FAIL";}*reason="batch-pass";return "PASS";}
  char copy[600];if(ln>=sizeof copy){*reason=e==3?"unclassified-exit":"batch-fail";return e==3?"UNKNOWN":"FAIL";}{unsigned char *cxb_d=(unsigned char *)(copy);const unsigned char *cxb_s=(const unsigned char *)(last);size_t cxb_n=(size_t)(ln),cxb_i;for(cxb_i=0;cxb_i<cxb_n;cxb_i++)cxb_d[cxb_i]=cxb_s[cxb_i];};copy[ln]=0;
  /* run-batch rc3 status=UNKNOWN: the batch's own bound expired (process group killed); never PASS, rerun required */
  if(e==3){*reason=strstr(copy,"\tstatus=UNKNOWN\t")?"run-batch-batch-timeout":"unclassified-exit";return "UNKNOWN";}

@@ -259,6 +259,41 @@ static int registered(const char *b, long n, const char *check) {
     return 0;
 }
 
+static int new_tool_compile_ok(const char *p) {
+    const char *wt = sy_env("GIT_WORK_TREE");
+    char srcp[4600], tmpo[1200], *out = 0;
+    size_t on = 0;
+    int rc;
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (plan_dir) return 1;
+    if (sy_exists("./unisacc.com") != 1 || sy_exists("cxroot.tsv") != 1) return 1;
+    if (sy_exists(p) == 1) {
+        if (cx_fmt(srcp, sizeof srcp, "%s", p)) return 1;
+    } else if (wt && wt[0] && !cx_fmt(srcp, sizeof srcp, "%s/%s", wt, p) && sy_exists(srcp) == 1) {
+    } else {
+        return 1;
+    }
+    if (cx_fmt(tmpo, sizeof tmpo, "%s/precommit-newtool-%d.o", base_td, (int)sy_pid())) return 1;
+    (void)sy_unlink(tmpo);
+    if (sy_exists("./tools/bound") == 1 && sy_exists("./tools/bound.c") == 1) {
+        char *cv[] = {"./tools/bound", "25", "sh", "./unisacc.com", "-c", "-funit", "-b", "lnx/x86_64", srcp, "-o", tmpo, 0}; /* lint:allow R1-product precommit compiles newly added tools/*.cx with installed product */
+        rc = cx_runv_timeout(cv, 25, &out, &on);
+    } else {
+        char *cv[] = {"sh", "./unisacc.com", "-c", "-funit", "-b", "lnx/x86_64", srcp, "-o", tmpo, 0}; /* lint:allow R1-product precommit compiles newly added tools/*.cx with installed product */
+        rc = cx_runv_timeout(cv, 25, &out, &on);
+    }
+    (void)sy_unlink(tmpo);
+    if (rc != 0) {
+        sy_eprintf("precommit: BLOCKED new-tool-compile-failed path=%s (newly added tools/*.cx must compile cleanly with installed ./unisacc.com -c -funit)\n", p);
+        if (out && on > 0) sy_eprintf("%.*s\n", (int)(on > 600 ? 600 : on), out);
+        if (out) mm_free(out);
+        return 0;
+    }
+    if (out) mm_free(out);
+    return 1;
+}
+
 /* Gate actual support for newly indexed tools. Check tools are leaves;
  * modules can use a root tools/check-NAME.cx or adjacent check. */
 static int new_tools(void) {
@@ -273,7 +308,15 @@ static int new_tools(void) {
         at += l + 1;
         if (!tx_suffix(p, l, ".cx", 3)) continue;
         for (j = 0; j < l; j++) if (p[j] == '/') slash = j + 1;
-        if (tx_prefix(p + slash, l - slash, "check-", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID)\n",p,p);blocked++;} continue; }
+        if (tx_prefix(p + slash, l - slash, "check-", 6)) {
+            if (!registered(batches, bn, p)) {
+                sy_eprintf("precommit: new check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID)\n", p, p);
+                blocked++;
+            } else if (!new_tool_compile_ok(p)) {
+                blocked++;
+            }
+            continue;
+        }
         { char *lv[] = {"git", "ls-files", "-s", "--", (char *)p, 0}; long ln; char *ls = slurp(lv, &ln);
           if (ls && tx_prefix(ls, ln, "120000", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new symlink alias requires batch registration: %s\n",p);blocked++;} mm_free(ls); continue; } mm_free(ls); }
         if (cx_fmt(check, sizeof check, "tools/check-%s", p + slash) || cx_fmt(spec, sizeof spec, ":%s", check)) return 1;
@@ -286,6 +329,8 @@ static int new_tools(void) {
         if (!blob || cn == 0) { sy_eprintf("precommit: new tool %s missing check-*.cx\n", p); blocked++; }
         else if (!registered(batches, bn, check)) {
             sy_eprintf("precommit: new tool %s check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID --whole %s)\n", p, check, check, p); blocked++;
+        } else if (!new_tool_compile_ok(p)) {
+            blocked++;
         }
         mm_free(blob);
     }
@@ -919,7 +964,38 @@ static int dg_is_prodgen_input(const char *p, long pl) {
     return 0;
 }
 
-static int dg_genall_gate(const char *wt, const char *allz, long alln) {
+static int dg_is_lane_inputs_trigger(const char *p, long pl, int is_ad) {
+    if (pl <= 0) return 0;
+    if (pl == 22 && tx_same(p, 22, "build/core-closure.tsv", 22)) return 1;
+    if (pl == 10 && tx_same(p, 10, "cxroot.tsv", 10)) return 1;
+    if (pl == 34 && tx_same(p, 34, "tools/candidate-trigger-inputs.tsv", 34)) return 1;
+    if (is_ad) {
+        if (tx_prefix(p, pl, "ext/", 4) || tx_prefix(p, pl, "cx/", 3) || tx_prefix(p, pl, "src/", 4) ||
+            tx_prefix(p, pl, "kernel/", 7) || tx_prefix(p, pl, "seed/", 5) || tx_prefix(p, pl, "include/", 8) ||
+            tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "weights/", 8)) return 1;
+    }
+    return 0;
+}
+
+static void dg_append_only(char *only_list, long cap, const char *name, int *tool_only) {
+    long nl = tx_len(name, 128), cur = tx_len(only_list, cap), a = 0;
+    if (nl <= 0) return;
+    while (a < cur) {
+        long s = a;
+        while (a < cur && only_list[a] != ',') a++;
+        if (a - s == nl && tx_same(only_list + s, nl, name, nl)) return;
+        if (a < cur) a++;
+    }
+    if (cur + nl + 2 < cap) {
+        if (cur) only_list[cur++] = ',';
+        mm_copy(only_list + cur, (size_t)(cap - cur), name, (size_t)nl);
+        only_list[cur + nl] = 0;
+    } else {
+        *tool_only = 0;
+    }
+}
+
+static int dg_genall_gate(const char *wt, const char *allz, long alln, const char *adz, long adn) {
     char gp[1200], only_list[512], scmd[2048];
     long pa = 0, gon = 0;
     int hit = 0, tool_only = 1, blocked = 0;
@@ -934,18 +1010,31 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln) {
             hit = 1;
             if (dg_is_prodgen_tool(allz + pa, pl)) {
                 /* strip "tools/" (6) and ".cx" (3) */
+                char gname[128];
                 long nl = pl - 9;
-                long cur = tx_len(only_list, sizeof only_list);
-                if (nl > 0 && cur + nl + 2 < (long)sizeof only_list) {
-                    if (cur) only_list[cur++] = ',';
-                    mm_copy(only_list + cur, sizeof only_list - (size_t)cur, allz + pa + 6, (size_t)nl);
-                    only_list[cur + nl] = 0;
+                if (nl > 0 && nl < (long)sizeof gname) {
+                    mm_copy(gname, sizeof gname, allz + pa + 6, (size_t)nl);
+                    gname[nl] = 0;
+                    dg_append_only(only_list, (long)sizeof only_list, gname, &tool_only);
                 } else {
                     tool_only = 0;
                 }
             } else {
                 tool_only = 0;
             }
+        } else if (dg_is_lane_inputs_trigger(allz + pa, pl, 0)) {
+            hit = 1;
+            dg_append_only(only_list, (long)sizeof only_list, "lane-inputs-gen", &tool_only);
+        }
+        pa += pl + 1;
+    }
+    pa = 0;
+    while (adz && pa < adn) {
+        long pl = tx_len(adz + pa, adn - pa);
+        if (pl <= 0) break;
+        if (dg_is_lane_inputs_trigger(adz + pa, pl, 1)) {
+            hit = 1;
+            dg_append_only(only_list, (long)sizeof only_list, "lane-inputs-gen", &tool_only);
         }
         pa += pl + 1;
     }
@@ -1105,9 +1194,9 @@ static int derive_gate(void) {
         at += l + 1;
     }
     mm_free(db);
-    if (adz) mm_free(adz);
     if (nsel == 0) {
-        blocked += dg_genall_gate(wt, allz, alln);
+        blocked += dg_genall_gate(wt, allz, alln, adz, adn);
+        if (adz) mm_free(adz);
         mm_free(allz);
         return blocked;
     }
@@ -1133,12 +1222,14 @@ static int derive_gate(void) {
     }
     if (plan_dir) {
         if (dout) mm_free(dout);
+        if (adz) mm_free(adz);
         mm_free(allz);
         return 0;
     }
     if (!dout || tx_find(dout, don, "DERIVE_SUMMARY\t", 15) < 0) {
         sy_eprintf("precommit: DERIVE_GATE_UNAVAILABLE only=%s (tools/derive.cx did not run; allowing commit)\n", only);
         if (dout) mm_free(dout);
+        if (adz) mm_free(adz);
         mm_free(allz);
         return 0;
     }
@@ -1228,7 +1319,8 @@ static int derive_gate(void) {
         }
     }
     mm_free(dout);
-    blocked += dg_genall_gate(wt, allz, alln);
+    blocked += dg_genall_gate(wt, allz, alln, adz, adn);
+    if (adz) mm_free(adz);
     mm_free(allz);
     return blocked;
 }

@@ -84,14 +84,6 @@ static void sv_sort_uniq(StrVec *s) {
     s->n = w;
 }
 
-static int is_ext_src(const char *rel) {
-    long n = tx_len(rel, 4096);
-    if (n < 3) return 0;
-    if (rel[n - 3] == '.' && rel[n - 2] == 'c' && rel[n - 1] == 'x') return 1;
-    if (rel[n - 2] == '.' && (rel[n - 1] == 'c' || rel[n - 1] == 'h')) return 1;
-    return 0;
-}
-
 static void walk_ext(const char *root, const char *rel, int depth, StrVec *out) {
     if (depth > 32) die("ext-depth");
     char full[4400];
@@ -101,7 +93,7 @@ static void walk_ext(const char *root, const char *rel, int depth, StrVec *out) 
     if (rc == -ENOENT) return;
     if (rc) die("ext-lstat");
     if (st.kind == 'f') {
-        if (is_ext_src(rel)) sv_push(out, rel, strlen(rel));
+        sv_push(out, rel, strlen(rel));
         return;
     }
     if (st.kind != 'd') return;
@@ -228,6 +220,41 @@ static void generate_tsv(const char *root, np_buf *out) {
     np_free(&r);
     sv_sort_uniq(&lane_a_sid);
     if (lane_a_sid.n == 0) die("empty-sid-list");
+
+    /* 1b. Verify every real unit in build/core-closure.tsv is covered by lane_a_sid (I2) */
+    {
+        char cp[4400];
+        if (cx_fmt(cp, sizeof cp, "%s/build/core-closure.tsv", root)) die("closure-path");
+        size_t cn = 0;
+        char *cb = cx_read(cp, &cn);
+        if (!cb || !cn) die("core-closure-missing");
+        char *p = cb, *ce = cb + cn;
+        while (p < ce) {
+            char *nl = (char *)memchr(p, '\n', (size_t)(ce - p));
+            size_t ll = nl ? (size_t)(nl - p) : (size_t)(ce - p);
+            if (ll > 0 && p[0] != '#') {
+                char *t1 = (char *)memchr(p, '\t', ll);
+                char *t2 = t1 ? (char *)memchr(t1 + 1, '\t', (size_t)(p + ll - (t1 + 1))) : 0;
+                if (t2) {
+                    char *r0 = t2 + 1;
+                    char *t3 = (char *)memchr(r0, '\t', (size_t)(p + ll - r0));
+                    size_t rl = t3 ? (size_t)(t3 - r0) : (size_t)(p + ll - r0);
+                    if (rl > 0 && rl < 300) {
+                        char rp[304];
+                        mm_copy(rp, sizeof rp, r0, (long)rl);
+                        rp[rl] = 0;
+                        if (strcmp(rp, "UNMEASURED") && !sv_has_sorted(&lane_a_sid, rp)) {
+                            fprintf(stderr, "lane-inputs-gen: missing closure unit in SID: %s\n", rp);
+                            free(cb);
+                            die("closure-unit-missing-from-sid");
+                        }
+                    }
+                }
+            }
+            p = nl ? nl + 1 : ce;
+        }
+        free(cb);
+    }
 
     /* 2. Pure-B extension library sources: ext/ files not in SID */
     StrVec ext_all = {0};
