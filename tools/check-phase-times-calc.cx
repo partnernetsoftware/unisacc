@@ -184,8 +184,9 @@ int main(void) {
                  "zz owner-pid=5 pgid=5 start=5100 cleanup=0 residue=0 bound=90\nATTEMPT_TIME\tphase=zz\twall_ms=3000\n");
     rc = calc("c.tsv", "t.tsv", "--sim 4", out, sizeof out);
     ck(rc == 0 && has(out, "CONCURRENCY\ttimed_attempts=5\tbusy_s=43.0\tc1_s=38.0\tc2_s=5.0\tc3_s=0.0\tc4_s=0.0\tc5plus_s=0.0\tpeak=2\tmean=1.11"), "concurrency-by-overlap");
-    ck(has(out, "BYWIDTH\twidth_rows=2\tw4_s=38.0\tw3_s=10.0\tw2_s=0.0\tw1_s=0.0"), "attempt-time-by-width-in-effect");
+    ck(has(out, "BYWIDTH\twidth_rows=2\tw16_s=0.0\tw8_s=0.0\tw4_s=38.0\tw3_s=10.0\tw2_s=0.0\tw1_s=0.0"), "attempt-time-by-width-in-effect");
     ck(has(out, "SIM\twidth=4\twall_s=48.0\tunplaced_s=3.0\tpeak=1"), "sim-width-one-phases-stay-serial");
+    ck(has(out, "PATH_END\t"), "critical-path-rows-emitted");
     rc = calc("r.tsv", "t.tsv", "", out, sizeof out);
     ck(rc == 0 && has(out, "CONCURRENCY\ttimed_attempts=0\tbusy_s=UNMEASURED") && !has(out, "SIM\t"), "no-owner-rows-concurrency-unmeasured");
     /* 同一记录换成带 lane 的表:b 与 c 各占一条 lane(宽度 4),a 与 d 独占。宽度 4 时 a 10 -> b、c 并行 20 -> d 10,加未入表 3 = 43;
@@ -200,11 +201,32 @@ int main(void) {
     put("s.tsv", "0\ta\touter\t90\t-\t-\t1\n1\tb\tb\t90\ta\tb\t4\n2\tc\tc\t90\ta\tb\t4\n3\td\touter\t90\tb,c\t-\t1\n");
     rc = calc("c.tsv", "s.tsv", "--sim 4", out, sizeof out);
     ck(rc == 0 && has(out, "SIM\twidth=4\twall_s=48.0\tunplaced_s=3.0\tpeak=1"), "sim-same-lane-never-overlaps");
-    rc = calc("c.tsv", "l.tsv", "--sim 5", out, sizeof out);
-    ck(rc == 2 && has(out, "--sim width must be 1..4"), "refuse-sim-width-out-of-range");
-    put("w5.tsv", "0\ta\touter\t90\t-\t-\t5\n");
+    rc = calc("c.tsv", "l.tsv", "--sim 8", out, sizeof out);
+    ck(rc == 0 && has(out, "SIM\twidth=8\t"), "sim-width-eight-accepted");
+    rc = calc("c.tsv", "l.tsv", "--sim 17", out, sizeof out);
+    ck(rc == 2 && has(out, "--sim width must be 1..16"), "refuse-sim-width-out-of-range");
+    put("w5.tsv", "0\ta\touter\t90\t-\t-\t8\n");
     rc = calc("c.tsv", "w5.tsv", "", out, sizeof out);
-    ck(rc == 2 && has(out, "parallelism must be 1..4"), "refuse-table-width-out-of-range");
+    ck(rc == 0 && has(out, "PHASE_TIMES_CALC\trc=0"), "table-parallelism-eight-accepted");
+    put("w17.tsv", "0\ta\touter\t90\t-\t-\t17\n");
+    rc = calc("c.tsv", "w17.tsv", "", out, sizeof out);
+    ck(rc == 2 && has(out, "parallelism must be 1..16"), "refuse-table-width-out-of-range");
+    /* gen2-/gen3- 别名:尝试名 gen2-osx-arm64-stub 归计划 id g2-osx-arm64;--no-gen-alias 必红(unplaced>0)。 */
+    put("galias-plan.tsv",
+        "0\tsnap\touter\t90\t-\t-\t1\n"
+        "1\tg2-osx-arm64\tg2-osx-arm64\t90\tsnap\tg2-osx-arm64\t4\n");
+    put("galias-run.tsv",
+        "SEGMENT\t100\tn=1\tstart\n"
+        "ATTEMPT_TIME\tphase=prepare-watch\twall_ms=1000\n"
+        "ATTEMPT_TIME\tphase=snap\twall_ms=2000\n"
+        "ATTEMPT_TIME\tphase=gen2-osx-arm64-stub\twall_ms=5000\n"
+        "SUPERVISE\t160\titeration=1\trc=0\tresidue=0\n");
+    rc = calc("galias-run.tsv", "galias-plan.tsv", "--sim 4", out, sizeof out);
+    ck(rc == 0 && has(out, "unplaced_s=0.0\tunplaced_attempts=0") && has(out, "SIM\twidth=4\t")
+       && !has(out, "UNPLACED\tphase=gen2-osx-arm64-stub"), "gen2-alias-places-stub-under-g2");
+    rc = calc("galias-run.tsv", "galias-plan.tsv", "--sim 4 --no-gen-alias", out, sizeof out);
+    ck(rc == 0 && has(out, "UNPLACED\tphase=gen2-osx-arm64-stub") && has(out, "UNPLACED\tphase=prepare-watch")
+       && has(out, "unplaced_attempts=2"), "mutation-no-gen-alias-leaves-gen2-unplaced");
     /* 缩减记录:每相一行合计;再喂回去,合计与关键路径不变。 */
     {   char ex2[600], path[400]; size_t n = 0;
         cx_fmt(ex2, sizeof ex2, "--emit-durations '%s/e.tsv'", dir);
