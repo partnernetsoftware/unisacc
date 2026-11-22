@@ -1,6 +1,6 @@
 # 速度项前置重排(rev4 草稿,2026-11-19,未入仓,未评审)
 
-读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、plans/v0.0.82.md、plans/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
+读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
 
 ## A 一句结论
 
@@ -102,7 +102,7 @@
 (1) R0 两条缺口修复(1 单位):都是 0.0.80 与 0.0.81 阶段 A 实测撞到的,0.0.82 的阶段 A 会原样再撞一次;修了本版就回本。须带 check 与先红后绿,独立复核。
 (2) 速度账必产一行(0.5 单位):0.0.82 公开时把 speed-ledger 行写进 release/evidence/0.0.82/,并顺手核 0.0.78 那行 921.8 的来源。v0.0.82.md 的版本级验收 (3) 本来就要求这一行。
 (3) 不建议在 0.0.82 发布前再加别的:expected-fail 与严格拼接的自动化属 R1,要动证据目录的写入口,放进正在收口的版本会自己制造一次链后返工。
-(4) 需要主调度核实的两件事:S3、S4、S0 原型在 v0.0.82.md 里排了,但简报列出的"0.0.82 已含速度项"里没有它们;如果确实没做,应在发布说明里写明顺延,并按本文并入 R2。
+(4) 需要主调度核实的两件事:S3、S4、S0 原型在 archive/plans-pre086/v0.0.82.md 里排了,但简报列出的"0.0.82 已含速度项"里没有它们;如果确实没做,应在发布说明里写明顺延,并按本文并入 R2。
 
 ## F 一条不愿听的话
 
