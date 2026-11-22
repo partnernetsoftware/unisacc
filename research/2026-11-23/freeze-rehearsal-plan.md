@@ -88,4 +88,8 @@
     - 离线装箱(0.0.93 实测窗, 下界 `max_window_ms=58075`): `lanes=1` 60.0m/67.3m、`lanes=2` 48.6m/55.9m、`lanes=3` 44.4m/51.8m、`lanes=4` 41.7m/49.1m。
     - `prerun-drive plan` 干跑(459 批, `v0.0.93-strict`): `lanes=2,j=4` `groups=118 wall_ms=2127589`; `lanes=3,j=4` `groups=101 wall_ms=1834765`; **`lanes=3,j=8` `windows=154 groups=83 wall_ms=1475909(24.6m 无争用, 实际含开销约 36-41m)`**; `lanes=4,j=8` `groups=74 wall_ms=1330704(22.2m 无争用, 实际约 33-38m)`。
     - 16 核推荐与护栏: 共享波次内均为 `jobs=1`(3-4 核), `normal` 串行独占运行(`normal-jobs=8` 占 8/16 核), 两者不叠加; 推荐 `load < 8` 静默下用 **`--window-lanes 3 --normal-jobs 8`**(兼顾提速与防边缘 58s 窗 `rc=124`), S0..S10 总预算 **111 分钟**(T0..S9 公开 **103 分钟 <= 120 分钟红线**)。
+- **`--normal-jobs 8` 小规模试点实测(`PARTIAL`, 2026-11-23, 定稿依据)**:
+  - 样本: 0.0.93 最慢 20 个 `normal` 窗共 136 批(基线 `sum_wall_ms=765545`, `max_win_ms=63216`, `rc124=1`), 重排为 13 个 `normal` `jobs=8` 窗(`W0018..W0030`) + 17 `long` + 1 `warmup`。
+  - 已测最重 7/13 窗(`W0018..W0024`, 58 批, `load 7.70..9.49` + `omp-go --jobs 2`): `sum_wall_ms=161421(2.69m)`, `sum_batch_ms=823661`(5.10x 并发加速), `max_win_ms=48671`(<58s 留 9.3s 余量), **`rc=124` = 0** (7/7 全 `rc=0`)。
+  - 第 5 段前 `uptime load average: 18.86 > 10` 按护栏停手; 剩余 `W0025..W0030` 6 窗断点保存在 `~/.cache/unisacc/prerun-pilot-j8`(仅在 `load < 8` 空窗可选补跑,不阻塞冻结)。
 
