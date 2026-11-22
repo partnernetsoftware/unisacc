@@ -38,6 +38,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.die
+#pragma unisa use sys.time
 
 #define TOOL "merge-version"
 #define MAXRULE 256
@@ -411,7 +412,18 @@ static int cmd_gate(int argc, char **argv) {
         ensure_checkout(idx, tdir, sizeof tdir);
         int w = !strcmp(name, "derive-write");
         char *av[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", w ? "--write" : "--check", 0};
-        t = run_in(tdir, name, 55, av, &r);
+        long t_gate0 = sy_now_ms();
+        if (!w) {
+            /* warm the two heavy nodes alone first: in the full parallel check a cold batch-packages-gen (about 14 s alone) shares the CPU with fifteen
+             * other nodes and passes derive's own 30 s bound; product-map's e3cache plan is written by its own run, not under a parallel one */
+            pr_result rw;
+            char *avw[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", "--check", "--only", "batch-packages-gen,product-map", 0};
+            int tw = run_in(tdir, "derive-check-warm", 55, avw, &rw);
+            printf("MERGE_GATE\tderive-check-warm\t%s\trc=%d\tms=%ld\n", tw != 0 ? "UNMEASURED" : "DONE", tw == 0 ? rw.rc : -1, sy_now_ms() - t_gate0);   /* a warm-up, not a verdict */
+            if (tw == 0) pr_free(&rw);
+        }
+        long left = 55 - (sy_now_ms() - t_gate0) / 1000;
+        t = run_in(tdir, name, left < 12 ? 12 : (int)left, av, &r);
         rc = gate_result(name, &r, t, "drift=0");
         char bad[400]; bad[0] = 0;
         if (t == 0 && r.out) {   /* name every node that is not OK, so a refusal is not just a count */
@@ -443,6 +455,13 @@ static int cmd_gate(int argc, char **argv) {
             if (ok2 && strstr(r.out, "drift=0")) { rc = 0; printf("MERGE_GATE\tderive-check\tOK-after-retry\tnodes=%s\n", bad); }
         }
         if (w && rc == 0) {
+            /* ref-job-paths is not a derive node: its per-file baseline (rule derived-ref-job-paths-baseline, action regen) is shrunk here, so a plan file
+             * that lost its job-path reference on the branch does not leave a STALE row in the merged tree (never raises a count) */
+            pr_result rb;
+            char *avb[] = {"sh", "./unisacc.com", "tools/ref-job-paths.cx", "--", "--write-baseline", 0};
+            int tb = run_in(tdir, "ref-job-paths", 40, avb, &rb);
+            printf("MERGE_GATE\tderive-write\tref-job-paths-baseline\t%s\n", tb == 0 && rb.rc == 0 ? "written" : "UNMEASURED");
+            if (tb == 0) pr_free(&rb);
             pr_result s;
             char *up[] = {"add", "-u", 0};
             mv_need(git_in(tdir, &s, 50, up) == 0, "staging the regenerated tables failed");
