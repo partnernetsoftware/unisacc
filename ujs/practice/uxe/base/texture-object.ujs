@@ -1,0 +1,68 @@
+struct Texture {
+  table: u32;
+  handle: u32;
+  source: u32;
+}
+
+native function texture_object_valid(at:i64) i64 {
+  return at>=0 && at%4==0 && at<=6291456-Texture.size;
+}
+
+native function texture_object_disjoint(at:i64,size:i64,other:i64,bytes:i64) i64 {
+  return size==0 || bytes==0 || at+size<=other || other+bytes<=at;
+}
+
+native function texture_object_output(at:i64,table:i64,descriptor:i64) i64 {
+  if(!texture_object_valid(at) || !gpu_texture_source_valid(descriptor)) { return 0; }
+  let capacity=gpu_texture_capacity(table);
+  if(capacity<1 ||
+     !texture_object_disjoint(at,Texture.size,table,GpuTextureTable.size+capacity*GpuTextureSlot.size) ||
+     !texture_object_disjoint(at,Texture.size,descriptor,GpuTextureSource.size)) { return 0; }
+  let pixels=ux_u32(descriptor+GpuTextureSource.rgba);
+  let bytes=ux_u32(descriptor+GpuTextureSource.width)*ux_u32(descriptor+GpuTextureSource.height)*4;
+  return texture_object_disjoint(at,Texture.size,pixels,bytes);
+}
+
+// Initialize an unused caller-owned record. The pixel source stays borrowed.
+native function Texture_init(at:i64,table:i64,descriptor:i64) i64 {
+  if(!texture_object_output(at,table,descriptor) || ux_u32(at+Texture.handle)!=0) { return 0-1; }
+  let handle=GpuTextureTable_create(table,descriptor);
+  if(handle<0) { return handle; }
+  let owner=ux_u32_put(at+Texture.table,table);
+  let key=ux_u32_put(at+Texture.handle,handle);
+  let source=ux_u32_put(at+Texture.source,descriptor);
+  return at;
+}
+
+native function Texture_clone(dst:i64,src:i64) i64 {
+  if(!texture_object_valid(src) ||
+     !texture_object_disjoint(dst,Texture.size,src,Texture.size)) { return 0-1; }
+  let table=ux_u32(src+Texture.table);
+  let snapshot=gpu_texture_source(table,ux_u32(src+Texture.handle));
+  if(snapshot<0) { return snapshot; }
+  let borrowed=ux_u32(src+Texture.source);
+  if(!texture_object_output(dst,table,borrowed)) { return 0-1; }
+  let clone=Texture_init(dst,table,snapshot);
+  if(clone<0) { return clone; }
+  let source=ux_u32_put(dst+Texture.source,borrowed);
+  return clone;
+}
+
+native function Texture_needsUpdate(at:i64) i64 {
+  if(!texture_object_valid(at)) { return 0-1; }
+  let table=ux_u32(at+Texture.table);
+  let handle=ux_u32(at+Texture.handle);
+  let version=GpuTextureTable_version(table,handle);
+  if(version<0) { return version; }
+  let descriptor=ux_u32(at+Texture.source);
+  if(!texture_object_output(at,table,descriptor)) { return 0-1; }
+  return GpuTextureTable_update(table,handle,version,descriptor);
+}
+
+native function Texture_dispose(at:i64) i64 {
+  if(!texture_object_valid(at)) { return 0-1; }
+  let released=GpuTextureTable_dispose(ux_u32(at+Texture.table),ux_u32(at+Texture.handle));
+  if(released<0) { return released; }
+  let empty=ux_u32_put(at+Texture.handle,0);
+  return released;
+}
