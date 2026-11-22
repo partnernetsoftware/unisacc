@@ -518,6 +518,8 @@ static char *freeze_read_head(long *hdn_out, int *err_out) {
     return ho;
 }
 
+/* 既有设计合同(6): build/freeze.tsv 只评估第一条非 '#' 注释且非空的行(首行过期、次行有效时按首行过期放行);
+ * 冻结日 build/freeze.tsv 只写唯一一行活动冻结记录(历史过期行须替换或加 '#' 注释, 不得在过期行后追加新行). */
 static int freeze_eval_buf(const char *z, const char *names, long fn) {
     char *f[6], line[1200], *p;
     long now, dl = 0, i;
@@ -555,13 +557,12 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
         sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
         return 1;
     }
-    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {
-        if (i < 18) dl = dl * 10 + (f[3][i] - '0');
-    }
+    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {}
     if (i < 1 || i > 18 || f[3][i] != 0) {
         sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be 1..18 pure digits)\n", f[3]);
         return 1;
     }
+    for (i = 0; f[3][i]; i++) dl = dl * 10 + (f[3][i] - '0');
     now = sy_wall_s();   /* 墙钟秒;sy_now_ms 是单调钟,不能与 epoch 截止时间比 */
     if (now >= dl) return 0;                             /* 过期即失效,不死锁 */
     who = sy_env("UNISACC_INTEGRATOR");
@@ -687,13 +688,12 @@ static int freeze_buf_active(const char *z, char *owner_out, size_t ocap) {
         sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
         return 2;
     }
-    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {
-        if (i < 18) dl = dl * 10 + (f[3][i] - '0');
-    }
+    for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) {}
     if (i < 1 || i > 18 || f[3][i] != 0) {
         sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be 1..18 pure digits)\n", f[3]);
         return 2;
     }
+    for (i = 0; f[3][i]; i++) dl = dl * 10 + (f[3][i] - '0');
     now = sy_wall_s();
     if (now < dl) {
         if (owner_out && ocap > 0) (void)cx_fmt(owner_out, ocap, "%s", f[2]);
@@ -758,6 +758,10 @@ static int pc_gate_waive_reason(const char *gate, char *why_out, size_t wcap) {
             const char * raw = w + at + gl + 1;
             long rl = e - (at + gl + 1), k;
             int non_ws = 0;
+            if (rl >= (long)wcap) {
+                sy_eprintf("precommit: REFUSE waive-reason-too-long gate=%s len=%ld max=%ld\n", gate, rl, (long)wcap - 1);
+                return 0;
+            }
             if (rl > 0 && rl < (long)wcap) {
                 for (k = 0; k < rl; k++) {
                     unsigned char uc = (unsigned char)raw[k];
@@ -1292,7 +1296,7 @@ static int pc_verify_deferred(int argc, char **argv) {
                     "git diff-tree --no-commit-id --name-only -r HEAD; } 2>/dev/null | grep '\\.cx$' | sort -u ); "
                     "ex=''; for f in $files; do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
                     "if [ -z \"$ex\" ]; then "
-                    "  for f in $(git ls-tree -r --name-only \"$2\" 2>/dev/null | grep '\\.cx$'); do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
+                    "  for f in $(git ls-tree -r --name-only \"$2\" 2>/dev/null | grep '\\.cx$' | head -n 8); do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
                     "fi; "
                     "if [ -z \"$ex\" ]; then echo LINT_VERIFY_NO_CX_FILES; exit 1; fi; "
                     "exec sh \"$3\" tools/cx-lint.cx -- --rules R2,R3,R4 --strict $ex",
@@ -1311,34 +1315,45 @@ static int pc_verify_deferred(int argc, char **argv) {
                 slurp_okrc = 0;
                 out = slurp_run(av, &on);
                 if (out && slurp_last_rc == 0) {
-                    long pos = 0;
+                    long pos = 0, last_ln = 0;
+                    const char *last_l = 0;
+                    int r_cnt = 0, r_ok = 0;
                     while (pos < on) {
                         long nl = tx_chr(out + pos, on - pos, '\n');
                         long ln = nl < 0 ? on - pos : nl;
                         const char *l = out + pos;
                         if (ln > 0 && l[ln - 1] == '\r') ln--;
+                        if (ln > 0) {
+                            last_l = l;
+                            last_ln = ln;
+                        }
                         if (ln > 9 && tx_prefix(l, ln, "RATCHETS\t", 9)) {
                             long ok_at = tx_find(l, ln, "\tok=", 4);
                             long fl_at = tx_find(l, ln, "\tfail=", 6);
+                            r_cnt++;
                             if (ok_at >= 0 && fl_at >= 0 && tx_find(l, ln, "skipped", 7) < 0) {
                                 const char *ok_p = l + ok_at + 4, *fl_p = l + fl_at + 6;
                                 long ok_rem = ln - (ok_at + 4), fl_rem = ln - (fl_at + 6);
                                 long ok_d = 0, fl_d = 0, ok_v = 0;
-                                while (ok_d < ok_rem && ok_p[ok_d] >= '0' && ok_p[ok_d] <= '9') {
-                                    if (ok_d < 9) ok_v = ok_v * 10 + (ok_p[ok_d] - '0');
-                                    ok_d++;
+                                if (ok_rem > 0 && ok_p[0] >= '1' && ok_p[0] <= '9') {
+                                    while (ok_d < ok_rem && ok_p[ok_d] >= '0' && ok_p[ok_d] <= '9') {
+                                        if (ok_d < 9) ok_v = ok_v * 10 + (ok_p[ok_d] - '0');
+                                        ok_d++;
+                                    }
                                 }
                                 while (fl_d < fl_rem && fl_p[fl_d] >= '0' && fl_p[fl_d] <= '9') fl_d++;
                                 if (ok_d >= 1 && ok_d <= 9 && ok_v > 0 &&
                                     (ok_d == ok_rem || ok_p[ok_d] == '\t') &&
                                     fl_d == 1 && fl_p[0] == '0' &&
                                     (fl_d == fl_rem || fl_p[fl_d] == '\t')) {
-                                    pass = 1;
+                                    r_ok = 1;
                                 }
                             }
                         }
                         pos += (nl < 0 ? on - pos : nl + 1);
                     }
+                    if (r_cnt == 1 && r_ok && last_l && last_ln > 9 && tx_prefix(last_l, last_ln, "RATCHETS\t", 9))
+                        pass = 1;
                 }
             }
             slurp_okrc = 0;
@@ -3000,6 +3015,9 @@ static void pc_register_cleanup_hooks(void) {
     }
 }
 
+/* 子树最新 mtime 扫描(5): 有界递归至 depth <= 3(顶层加 3 层子目录, 共 4 层);
+ * 残余风险说明(同 ext.fsx fsx_scratch): 若死进程(-ESRCH)遗留超 30 分钟的陈旧目录仅在第 5 层及更深处有新鲜文件
+ * 而上 4 层目录 mtime 均未更新, 自扫仍会将其作为超龄陈旧目录清理. */
 static long pc_latest_mtime(const char *path, int depth, long best) {
     sy_dir_t d;
     if (depth > 3 || sy_dir_open(&d, path) != 0) return best;

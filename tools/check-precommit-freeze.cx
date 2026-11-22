@@ -30,7 +30,7 @@ static int run2(const char *freeze, const char *stage, const char *env, char *ou
     if (cx_fmt(cmd, sizeof cmd,
         "cd '%s' && rm -rf exec/a.tsv tools/a.tsv ext build/freeze.tsv build/lane-inputs.tsv && mkdir -p exec/facts tools build && "
         "echo run2_mod > '%s' && %s"
-        "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+        "git add -A >/dev/null 2>&1 && UNISACC_PRECOMMIT_NO_ISOLATE=1 %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
         td, stage, w, env, root, root)) return 99;
     return sh(cmd, out, cap);
 }
@@ -42,7 +42,7 @@ static int run_lane(const char *freeze, const char *lane_tsv, const char *stage,
         "cd '%s' && git reset -q HEAD >/dev/null 2>&1; rm -rf exec/a.tsv tools/a.tsv ext build/freeze.tsv build/lane-inputs.tsv && "
         "mkdir -p exec/facts tools ext/crypto build && "
         "printf 'int x;\\n' > '%s' && %s%s"
-        "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+        "git add -A >/dev/null 2>&1 && UNISACC_PRECOMMIT_NO_ISOLATE=1 %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
         td, stage, wf, wl, env, root, root)) return 99;
     return sh(cmd, out, cap);
 }
@@ -220,15 +220,15 @@ int main(void) {
             rc = sh(cmd, out, sizeof out);
             ck(rc == 1 && has(out, "BLOCKED freeze-unreadable"), "directory-freeze-tsv-refused");
         } else ck(0, "directory-freeze-tsv-refused");
-        /* 2g (10): freeze.tsv deadline column with leading space, trailing non-digit, 19-digit overflow, embedded CR, or CRLF active line */
-        rc = run2("sid1\\tbase1\\tcdx\\t 4102444800\\texec src seed\\n", "tools/a.tsv", "", out, sizeof out);
-        ck(rc == 1 && has(out, "malformed"), "non-digit-leading-space-deadline-refused");
-        rc = run2("sid1\\tbase1\\tcdx\\t4102444800x\\texec src seed\\n", "tools/a.tsv", "", out, sizeof out);
-        ck(rc == 1 && has(out, "malformed"), "non-digit-trailing-char-deadline-refused");
-        rc = run2("sid1\\tbase1\\tcdx\\t9223372036854775808\\texec src seed\\n", "exec/a.tsv", "", out, sizeof out);
-        ck(rc == 1 && has(out, "malformed"), "overflow-19digit-deadline-refused");
-        rc = run2("sid1\\tbase1\\tcdx\\t1000\\r9\\texec src seed\\n", "exec/a.tsv", "", out, sizeof out);
-        ck(rc == 1 && has(out, "malformed"), "embedded-cr-in-deadline-refused");
+        /* 2g (10): freeze.tsv deadline column with leading space, trailing non-digit, 19/20-digit overflow (even with owner UNISACC_INTEGRATOR=cdx), embedded CR, or CRLF active line */
+        rc = run2("sid1\\tbase1\\tcdx\\t 4102444800\\texec src seed\\n", "tools/a.tsv", "UNISACC_INTEGRATOR=cdx", out, sizeof out);
+        ck(rc == 1 && has(out, "must be 1..18 pure digits"), "non-digit-leading-space-deadline-refused");
+        rc = run2("sid1\\tbase1\\tcdx\\t4102444800x\\texec src seed\\n", "tools/a.tsv", "UNISACC_INTEGRATOR=cdx", out, sizeof out);
+        ck(rc == 1 && has(out, "must be 1..18 pure digits"), "non-digit-trailing-char-deadline-refused");
+        rc = run2("sid1\\tbase1\\tcdx\\t9223372036854775808\\texec src seed\\n", "exec/a.tsv", "UNISACC_INTEGRATOR=cdx", out, sizeof out);
+        ck(rc == 1 && has(out, "must be 1..18 pure digits"), "overflow-19digit-deadline-refused");
+        rc = run2("sid1\\tbase1\\tcdx\\t1000\\r9\\texec src seed\\n", "exec/a.tsv", "UNISACC_INTEGRATOR=cdx", out, sizeof out);
+        ck(rc == 1 && has(out, "embedded CR or control character"), "embedded-cr-in-deadline-refused");
         rc = run2("sid1\\tbase1\\tcdx\\t4102444800\\texec\\r\\n", "exec/a.tsv", "", out, sizeof out);
         ck(rc == 1 && has(out, "冻结中"), "crlf-freeze-line-blocks-frozen-path");
         /* 2h (9): active freeze.tsv with missing cxroot.tsv must fail-closed even for unfrozen path */

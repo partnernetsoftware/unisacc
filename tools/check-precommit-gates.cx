@@ -354,6 +354,7 @@ static void group_tree_isolate(void) {
         "printf(\"  cxraw: a.cx hardlink-detected\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}\n"
         "if(mf&&*mf){FILE*fp=fopen(mf,\"a\");if(fp){fprintf(fp,\"ISO_NLINK_OK=1\\n\");fclose(fp);}}\n"
         "if(getenv(\"SLEEP_FOR_SIGTERM\")){const char *rf=getenv(\"SLEEP_READY_FILE\");if(rf&&*rf){FILE*fp=fopen(rf,\"w\");if(fp){fprintf(fp,\"1\\n\");fclose(fp);}}fflush(stdout);system(\"sleep 5\");}\n"
+        "if(getenv(\"SLEEP_FOR_SIG_SHORT\")){const char *rf=getenv(\"SLEEP_READY_FILE\");if(rf&&*rf){FILE*fp=fopen(rf,\"w\");if(fp){fprintf(fp,\"1\\n\");fclose(fp);}}fflush(stdout);system(\"sleep 1\");}\n"
         "FILE*fa=fopen(\"archive/old.md\",\"r\");if(!fa){printf(\"  cxraw: a.cx archive-missing\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}fclose(fa);\n"
         "FILE*f=fopen(\"other.cx\",\"r\");char b[256]={0};if(f){fread(b,1,255,f);fclose(f);}\n"
         "if(strstr(b,\"DIRTY_FOREIGN\")){printf(\"  cxraw: a.cx has dirty worktree bleed\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}\n"
@@ -432,7 +433,8 @@ static void group_tree_isolate(void) {
     if (cx_fmt(cmd, sizeof cmd,
         "R='%s'; T='%s'; "
         "SHM_BASE=/dev/shm; [ -d /dev/shm ] && [ -w /dev/shm ] || SHM_BASE=/tmp; "
-        "SHM_DIR=\"$SHM_BASE/precommit-tree.99999981.gkfix\"; "
+        "SHM_SUF=$(head -c 3 /dev/urandom | od -An -tx1 | tr -d ' \\n'); [ -n \"$SHM_SUF\" ] || SHM_SUF=gkfix1; "
+        "SHM_DIR=\"$SHM_BASE/precommit-tree.99999981.$SHM_SUF\"; "
         "rm -rf \"$SHM_DIR\" && mkdir -p \"$SHM_DIR\" && touch -d '@1000000000' \"$SHM_DIR\" && "
         "(cd \"$T/repo\" && TMPDIR=\"$SHM_BASE\" \"$T/pc.bin\" --gates >/dev/null 2>&1); "
         "{ test ! -e \"$SHM_DIR\" && echo SHM_STALE_SWEPT=1 || { echo SHM_STALE_SWEPT=0; rm -rf \"$SHM_DIR\"; }; }; "
@@ -447,7 +449,10 @@ static void group_tree_isolate(void) {
         "for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do ls \"$T/isotmp\"/precommit-flow-* >/dev/null 2>&1 && break; sleep 0.05; done; "
         "kill -PIPE $PPID2 2>/dev/null || true; wait $PPID2 2>/dev/null || true; "
         "PIPE_PCF_RES=$(find \"$T/isotmp\" -mindepth 1 -maxdepth 1 -name 'precommit-*' 2>/dev/null | wc -l); echo PIPE_PCF_RES=$PIPE_PCF_RES; rm -rf \"$T/isotmp\"/*; "
-        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 sh -c 'trap \"\" TERM; \"$1\" &' _ \"$T/pc.bin\" > \"$T/ign.out\" 2>&1); "
+        "rm -f \"$T/rdy.ign\"; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" SLEEP_FOR_SIG_SHORT=1 SLEEP_READY_FILE=\"$T/rdy.ign\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 sh -c 'trap \"\" TERM; exec \"$1\"' _ \"$T/pc.bin\" > \"$T/ign.out\" 2>&1) & PPID_IGN=$!; "
+        "for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -f \"$T/rdy.ign\" ] && break; sleep 0.05; done; "
+        "kill -TERM $PPID_IGN 2>/dev/null || true; wait $PPID_IGN; echo IGN_TERM_RC=$?; "
         "(cd \"$T/repo\" && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 ORIG_A_INO=0 ORIG_T1_INO=0 \"$T/pc.bin\" > \"$T/n1.out\" 2>&1; echo N1RC=$?; grep 'dirty worktree bleed' \"$T/n1.out\" || true); "
         "(cd \"$T/nogit\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/ng.out\" 2>&1; echo NGRC=$?; cat \"$T/ng.out\"); "
         "mkdir -p \"$T/repo/cx\" && printf 'int x;\\n' > \"$T/repo/cx/unreadable.cx\" && chmod 000 \"$T/repo/cx/unreadable.cx\" && "
@@ -463,8 +468,8 @@ static void group_tree_isolate(void) {
     }
     sh(cmd, out, sizeof out, 0);
     ck(has(out, "SHM_STALE_SWEPT=1\n"), "tree-isolate.root-owned-tmpdir-swept-by-sy-euid");
-    ck(has(out, "LEAK_CNT=0\n") && has(out, "PIPE_PC_RES=0\n") && has(out, "PIPE_PCF_RES=0\n") && has(out, "CPFAIL_RC=1\n"),
-       "tree-isolate.temp-dir-cleaned-all-exits-sigpipe-flow-and-copy-fail-closed");
+    ck(has(out, "LEAK_CNT=0\n") && has(out, "PIPE_PC_RES=0\n") && has(out, "PIPE_PCF_RES=0\n") && has(out, "IGN_TERM_RC=0\n") && has(out, "CPFAIL_RC=1\n"),
+       "tree-isolate.temp-dir-cleaned-all-exits-sigpipe-sigign-preserved-flow-and-copy-fail-closed");
     ck(has(out, "N1RC=1\n") && has(out, "dirty worktree bleed"), "tree-isolate.no-isolate-control-fails");
     ck(has(out, "NGRC=1\n") && has(out, "PRECOMMIT_GATE_FAIL\tgate=isolate\treason=staged-tree-setup\n"), "tree-isolate.non-git-fails-closed-with-gate");
     ck(has(out, "S1RC=1\n") && has(out, "PRECOMMIT\tstaged_cx=2\tblocked=1\n") &&

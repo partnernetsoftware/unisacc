@@ -136,6 +136,7 @@ static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
 #define DEFERRED_GENESIS_SHA "0000000000000000000000000000000000000000000000000000000000000000"
 
 static int cr_deferred_audit_one(const char *path, const char *top, int only_this_top,
+                                 const char *head_tree, char *stale_vtree_out, size_t svcap,
                                  int *present_out, long *top_rows_out, char *chain_tip_out,
                                  long *unv_cnt_out, char *first_unv_out, size_t fcap,
                                  char *why_out, size_t wcap) {
@@ -148,6 +149,7 @@ static int cr_deferred_audit_one(const char *path, const char *top, int only_thi
     *present_out = 0;
     *top_rows_out = 0;
     *unv_cnt_out = 0;
+    if (stale_vtree_out && svcap > 0) stale_vtree_out[0] = 0;
     if (first_unv_out && fcap > 0) first_unv_out[0] = 0;
     if (why_out && wcap > 0) why_out[0] = 0;
     mm_copy(chain_tip_out, 65, DEFERRED_GENESIS_SHA, 65);
@@ -278,14 +280,10 @@ static int cr_deferred_audit_one(const char *path, const char *top, int only_thi
                 }
                 ts = col_o[7] + tag + 23;
                 while (ts + tl2 < col_o[7] + col_l[7] && row[ts + tl2] != ' ') tl2++;
-                char open_vtree[128][64];
                 for (j = 0; j < nopen; j++) {
                     if (!open_cleared[j] &&
                         (long)tx_len(open_gate[j], 32) == col_l[3] && tx_same(open_gate[j], col_l[3], row + col_o[3], col_l[3]) &&
                         (long)tx_len(open_tree[j], 64) == tl2 && tx_same(open_tree[j], tl2, row + ts, tl2)) {
-                        long vtl = col_l[5] < 63 ? col_l[5] : 63;
-                        mm_copy(open_vtree[j], 64, row + col_o[5], (size_t)vtl);
-                        open_vtree[j][vtl] = 0;
                         open_cleared[j] = 1;
                         hit = 1;
                         break;
@@ -296,9 +294,12 @@ static int cr_deferred_audit_one(const char *path, const char *top, int only_thi
                     cx_fmt(why_out, wcap, "deferred-gates-tampered: orphan VERIFIED row at line %ld in %s", lno, path);
                     return -1;
                 }
-                if (only_this_top && first_unv_out && fcap > 0) {
-                    long vtl = col_l[5] < 63 ? col_l[5] : 63;
-                    cx_fmt(first_unv_out, fcap, "gate=%.*s verified_tree=%.*s", (int)col_l[3], row + col_o[3], (int)vtl, row + col_o[5]);
+                if (only_this_top && head_tree && head_tree[0] && stale_vtree_out && svcap > 0 && !stale_vtree_out[0]) {
+                    long htl = (long)tx_len(head_tree, 64);
+                    if (col_l[5] != htl || !tx_same(row + col_o[5], col_l[5], head_tree, htl)) {
+                        long vtl = col_l[5] < 63 ? col_l[5] : 63;
+                        cx_fmt(stale_vtree_out, svcap, "gate=%.*s verified_tree=%.*s", (int)col_l[3], row + col_o[3], (int)vtl, row + col_o[5]);
+                    }
                 }
             }
         }
@@ -351,43 +352,40 @@ static int cr_deferred_verify(const char *repo, char *why_out, size_t wcap) {
         }
         if (gb) mm_free(gb);
     }
-    if (cr_deferred_audit_one(dfp, top, 1, &ex1, &tr1, tip1, &unv1, first1, sizeof first1, why_out, wcap) < 0)
-        return -1;
-    if (cr_deferred_audit_one(afp, top, 0, &ex2, &tr2, tip2, &unv2, first2, sizeof first2, why_out, wcap) < 0)
-        return -1;
-    if (ex1 == 0 && tr2 > 0) {
-        cx_fmt(why_out, wcap, "deferred-gates-tampered: %s deleted while git-common-dir anchor %s has %ld records", dfp, afp, tr2);
-        return -1;
-    }
-    if (ex1 == 1 && (ex2 == 0 || tr2 == 0)) {
-        cx_fmt(why_out, wcap, "deferred-gates-tampered: git-common-dir anchor %s missing records present in %s", afp, dfp);
-        return -1;
-    }
-    if (tr1 != tr2 || !tx_same(tip1, 64, tip2, 64)) {
-        cx_fmt(why_out, wcap, "deferred-gates-tampered: anchor divergence between %s (rows=%ld) and %s (rows=%ld)", dfp, tr1, afp, tr2);
-        return -1;
-    }
-    if (unv1 > 0) {
-        cx_fmt(why_out, wcap, "deferred-gates-unverified count=%ld in %s (first: %s; run: sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate <G>)", unv1, dfp, first1);
-        return 1;
-    }
-    if (tr1 > 0 && first1[0] && why_out && wcap > 0) {
-        long vo = tx_find(first1, (long)tx_len(first1, sizeof first1), "verified_tree=", 14);
-        if (vo >= 0) {
-            const char *vt = first1 + vo + 14;
-            char *tv[] = {"git", "-C", top, "rev-parse", "HEAD^{tree}", 0};
-            char htree[64], nwhy[160];
-            np_result nr = {0};
-            htree[0] = 0;
-            if (!np_run(tv, top, 0, 4, &nr, nwhy, sizeof nwhy) && !nr.rc && nr.out && nr.outn >= 7) {
-                long hl = (long)nr.outn;
-                while (hl > 0 && (nr.out[hl - 1] == '\n' || nr.out[hl - 1] == '\r')) hl--;
-                if (hl > 0 && hl < 60) { mm_copy(htree, sizeof htree, nr.out, (size_t)hl); htree[hl] = 0; }
-            }
-            np_free(&nr);
-            if (htree[0] && !tx_eqz(vt, htree)) {
-                cx_fmt(why_out, wcap, "WARN deferred-verified-tree-not-head (%s head_tree=%s; 核销只证明被延迟那棵树的门通过,S8核销须在最终树上做)", first1, htree);
-            }
+    {
+        char *tv[] = {"git", "-C", top, "rev-parse", "HEAD^{tree}", 0};
+        char htree[64], nwhy[160], stale_vtree[200];
+        np_result nr = {0};
+        htree[0] = 0;
+        stale_vtree[0] = 0;
+        if (!np_run(tv, top, 0, 4, &nr, nwhy, sizeof nwhy) && !nr.rc && nr.out && nr.outn >= 7) {
+            long hl = (long)nr.outn;
+            while (hl > 0 && (nr.out[hl - 1] == '\n' || nr.out[hl - 1] == '\r')) hl--;
+            if (hl > 0 && hl < 60) { mm_copy(htree, sizeof htree, nr.out, (size_t)hl); htree[hl] = 0; }
+        }
+        np_free(&nr);
+        if (cr_deferred_audit_one(dfp, top, 1, htree, stale_vtree, sizeof stale_vtree, &ex1, &tr1, tip1, &unv1, first1, sizeof first1, why_out, wcap) < 0)
+            return -1;
+        if (cr_deferred_audit_one(afp, top, 0, 0, 0, 0, &ex2, &tr2, tip2, &unv2, first2, sizeof first2, why_out, wcap) < 0)
+            return -1;
+        if (ex1 == 0 && tr2 > 0) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: %s deleted while git-common-dir anchor %s has %ld records", dfp, afp, tr2);
+            return -1;
+        }
+        if (ex1 == 1 && (ex2 == 0 || tr2 == 0)) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: git-common-dir anchor %s missing records present in %s", afp, dfp);
+            return -1;
+        }
+        if (tr1 != tr2 || !tx_same(tip1, 64, tip2, 64)) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: anchor divergence between %s (rows=%ld) and %s (rows=%ld)", dfp, tr1, afp, tr2);
+            return -1;
+        }
+        if (unv1 > 0) {
+            cx_fmt(why_out, wcap, "deferred-gates-unverified count=%ld in %s (first: %s; run: sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate <G>)", unv1, dfp, first1);
+            return 1;
+        }
+        if (tr1 > 0 && stale_vtree[0] && htree[0] && why_out && wcap > 0) {
+            cx_fmt(why_out, wcap, "WARN deferred-verified-tree-not-head (%s head_tree=%s; 核销只证明被延迟那棵树的门通过,S8核销须在最终树上做)", stale_vtree, htree);
         }
     }
     return 0;
