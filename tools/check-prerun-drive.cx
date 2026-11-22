@@ -1193,6 +1193,63 @@ int main(void) {
            "opt-frame4-warmup-excluded-and-prerun-prepared: W0000 skips opt-frame4-*, lists/cleans stale session opt-frame4 dir without materials.tsv, and prewarms opt-frame4-material");
     }
 
+    /* (17) slow-split and unit-frontcache-equiv0..4 are heavy 1-batch windows; heavy PASS <=55000ms clamps to 54000ms */
+    {
+        char f17[CPD_PW], ids17[CPD_PW], tf17[CPD_PW], o17[CPD_PW];
+        const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
+        char pd_path[CPD_PW];
+        if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
+        else cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd);
+        if (cx_fmt(f17, sizeof f17, "%s/f17", work) || sy_mkdir_all(f17, 0700) ||
+            cx_fmt(ids17, sizeof ids17, "%s/ids.txt", f17) ||
+            cx_fmt(tf17, sizeof tf17, "%s/times.tsv", f17) ||
+            cx_fmt(o17, sizeof o17, "%s/out", f17)) return 2;
+        const char *s_ids17 =
+            "win-argv-facts\n"
+            "slow-split\n"
+            "unit-frontcache-equiv0\n"
+            "unit-frontcache-equiv1\n"
+            "unit-frontcache-equiv2\n"
+            "unit-frontcache-equiv3b\n"
+            "unit-frontcache-equiv4\n"
+            "check-gen-all-hang\n"
+            "n1\nn2\nn3\nn4\n";
+        const char *s_tf17 =
+            "1795330001\twin-argv-facts\tPASS\t1800\t1700\tfallback\t1.0\trun-batch\n"
+            "1795330002\tslow-split\tPASS\t14000\t13800\tfallback\t1.0\trun-batch\n"
+            "1795330003\tunit-frontcache-equiv0\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
+            "1795330004\tunit-frontcache-equiv1\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
+            "1795330005\tunit-frontcache-equiv2\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
+            "1795330006\tunit-frontcache-equiv3b\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
+            "1795330007\tunit-frontcache-equiv4\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
+            "1795330008\tcheck-gen-all-hang\tPASS\t54221\t54100\tfallback\t1.0\trun-batch\n"
+            "1795330009\tn1\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
+            "1795330010\tn2\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
+            "1795330011\tn3\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
+            "1795330012\tn4\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n";
+        if (cx_write(ids17, s_ids17, strlen(s_ids17)) ||
+            cx_write(tf17, s_tf17, strlen(s_tf17))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; "
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 4 --warmup 1 && "
+            "grep -q '\t1\theavy\t1\tslow-split$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv0$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv1$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv2$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv3b$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv4$' '%s/windows.tsv' && "
+            "grep -q '\t1\theavy\t1\tcheck-gen-all-hang$' '%s/windows.tsv' && "
+            "grep -q '\t4\tnormal\t4\tn1,n2,n3,n4$' '%s/windows.tsv' && "
+            "echo HEAVY_SLOW_SPLIT_AND_EQUIV_OK",
+            cwd, pd_path, ids17, tf17, o17,
+            o17, o17, o17, o17, o17, o17, o17, o17)) return 2;
+        int rc17 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc17 == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=12\twindows=9\twarmup=1\theavy=7\tnormal=1\t") &&
+           ckk_has(out, CPD_OUT, "HEAVY_SLOW_SPLIT_AND_EQUIV_OK"),
+           "slow-split-and-unit-frontcache-equiv-heavy-windows: isolates slow-split and unit-frontcache-equiv0..4 into 1-batch heavy windows");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
