@@ -1,0 +1,51 @@
+native function film_fresnel(from:f64,to:f64,cosine:f64) f64 {
+  let ratio=(to-from)/(to+from);
+  let f0=ratio*ratio;
+  return f0+(1.0-f0)*ux_math_pow(2.0,(-5.55473*cosine-6.98316)*cosine);
+}
+
+native function film_fourier(amplitude:f64,frequency:f64,variance:f64,phase:f64,shift:f64) f64 {
+  let width=f64_sqrt(6.283185307179586*variance);
+  let wave=ux_math_cos(frequency*phase+shift);
+  let decay=ux_math_exp(0.0-variance*phase*phase);
+  return amplitude*width*wave*decay;
+}
+
+native function film_rgb(channel:i64,path:f64,shift:f64) f64 {
+  let phase=6.283185307179586*path/1000000000.0;
+  let x=film_fourier(0.54856,1681000.0,4327800000.0,phase,shift);
+  let extra=film_fourier(0.097470,2239900.0,4528200000.0,phase,shift);
+  let y=film_fourier(0.44201,1795300.0,9304600000.0,phase,shift);
+  let z=film_fourier(0.52481,2208400.0,6612100000.0,phase,shift);
+  if(channel==0) { return (3.2404542*(x+extra)-1.5371385*y-0.4985314*z)/106850.0; }
+  if(channel==1) { return (0.0-0.9692660*(x+extra)+1.8760108*y+0.0415560*z)/106850.0; }
+  return (0.0556434*(x+extra)-0.2040259*y+1.0572252*z)/106850.0;
+}
+
+// Linear reflectance of one RGB channel for a dielectric substrate.
+native function MeshPhysicalMaterial_film(channel:i64,amount:f64,eta:f64,thickness:f64,cosine:f64) f64 {
+  if(channel<0 || channel>2 || !mesh_phys_unit(amount) || !mesh_phys_unit(cosine) ||
+     !(eta>=1.0 && eta<=3.0 && thickness>=0.0 && thickness<=65536.0)) { return 0.0-1.0; }
+  let ordinary=film_fresnel(1.0,1.5,cosine);
+  if(amount==0.0 || thickness==0.0) { return ordinary; }
+  if(thickness<0.03) {
+    let t=thickness/0.03;
+    eta=1.0+(eta-1.0)*t*t*(3.0-2.0*t);
+  }
+  let transmitted=f64_sqrt(1.0-(1.0-cosine*cosine)/(eta*eta));
+  let top=film_fresnel(1.0,eta,cosine);
+  let lower=film_fresnel(eta,1.5,transmitted);
+  let product=top*lower;
+  if(product<0.00001) { product=0.00001; }
+  let pass=1.0-top;
+  let compound=pass*pass*lower/(1.0-product);
+  let first=0.0;
+  if(eta<=1.5) { first=3.141592653589793; }
+  let path=2.0*eta*thickness*transmitted;
+  let harmonic1=film_rgb(channel,path,first);
+  let harmonic2=film_rgb(channel,2.0*path,2.0*first);
+  let root=f64_sqrt(product);
+  let film=top+compound+2.0*(compound-pass)*(root*harmonic1+product*harmonic2);
+  if(film<0.0) { film=0.0; }
+  return ordinary+amount*(film-ordinary);
+}
