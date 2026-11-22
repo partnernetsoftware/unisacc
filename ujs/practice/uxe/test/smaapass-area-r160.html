@@ -52,6 +52,35 @@ try {
     const invalid = Number(native.uxe_smaa_area(x,y,BigInt((ex+1)%5),BigInt(ey)));
     results.push(actual,pixel[0]+256*pixel[1],bytes[index]+256*bytes[index+1],invalid);
   }
+  const searchImage = pass.searchTexture.image;
+  canvas.width = searchImage.width;
+  canvas.height = searchImage.height;
+  ctx.drawImage(searchImage,0,0);
+  const searchBytes = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+  const searchResponse = await fetch("file://"+query.get("search"));
+  const search = (await WebAssembly.instantiate(await searchResponse.arrayBuffer())).instance.exports;
+  const searchMemory = new Uint8Array(search.memory.buffer,2097152);
+  searchMemory.set(searchBytes,4096);
+  const count = Number(search.uxe_smaa_search(4096n,16384n));
+  pass.searchTexture.needsUpdate = true;
+  const searchMaterial = new ShaderMaterial({
+    uniforms: { table: { value:pass.searchTexture } },
+    vertexShader: "varying vec2 sampleUV;void main(){sampleUV=uv;gl_Position=vec4(position.xy,0.0,1.0);}",
+    fragmentShader: "uniform sampler2D table;varying vec2 sampleUV;void main(){gl_FragColor=texture2D(table,sampleUV);}"
+  });
+  const searchTarget = new WebGLRenderTarget(canvas.width,canvas.height);
+  quad.material = searchMaterial;
+  renderer.setRenderTarget(searchTarget);
+  quad.render(renderer);
+  const gpuBytes = new Uint8Array(searchBytes.length);
+  renderer.readRenderTargetPixels(searchTarget,0,0,canvas.width,canvas.height,gpuBytes);
+  let differences = 0;
+  for (let i=0;i<count;i++) {
+    if (searchMemory[16384+i]!==searchBytes[i*4] || gpuBytes[i*4]!==searchBytes[i*4]) differences++;
+  }
+  results.push(count,differences);
+  searchTarget.dispose();
+  searchMaterial.dispose();
   target.dispose();
   quad.dispose();
   material.dispose();
