@@ -1,0 +1,106 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { BufferGeometry, DoubleSide, Float32BufferAttribute, Mesh, MeshBasicMaterial,
+  OrthographicCamera, REVISION, Scene } from "three";
+
+const report = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const path = `file://${query.get("package")}/examples/jsm/renderers/SVGRenderer.js`;
+  const [{ SVGRenderer }, binary, fixture] = await Promise.all([
+    import(path), fetch(`file://${query.get("wasm")}`), fetch(`file://${query.get("fixtures")}`),
+  ]);
+  const { uxe_svg_renderer_face: face, memory } =
+    (await WebAssembly.instantiate(await binary.arrayBuffer())).instance.exports;
+  const cases = new Float64Array(await fixture.arrayBuffer());
+  const renderer = new SVGRenderer();
+  renderer.overdraw = 0;
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0, 2);
+  camera.position.z = 1;
+  camera.updateMatrixWorld();
+  const material = new MeshBasicMaterial({ color: 0xff0000, side: DoubleSide });
+  const src = 6000, dst = 8000, heap = 2097152;
+  const source = new Float64Array(memory.buffer, heap + src, 9);
+  const guarded = new Float64Array(memory.buffer, heap + dst - 8, 8);
+  const sentinel = 237;
+  const results = [];
+  const serialize = ([x1, y1, x2, y2, x3, y3]) => `M${x1},${y1}L${x2},${y2}L${x3},${y3}z`;
+  const svgPath = /^M([^,]+),([^L]+)L([^,]+),([^L]+)L([^,]+),([^z]+)z$/;
+
+  for (let i = 0; i < cases.length; i += 11) {
+    const [width, height, ...vertices] = cases.subarray(i, i + 11);
+    source.set(vertices);
+    guarded.fill(sentinel);
+    const status = Number(face(BigInt(src), BigInt(dst), BigInt(width), BigInt(height)));
+    const coords = guarded.subarray(1, 7);
+    if (status < 0 || guarded[0] !== sentinel || guarded[7] !== sentinel ||
+        source.some((value, index) => value !== vertices[index]) ||
+        (status === 0 && coords.some(value => value !== sentinel))) {
+      throw new Error(`native memory contract at face ${i / 11}`);
+    }
+    results.push(status, ...coords);
+
+    const scene = new Scene();
+    const world = vertices.map((value, index) => index % 3 === 2 ? -value : value);
+    const geometry = new BufferGeometry();
+    geometry.setAttribute("position", new Float32BufferAttribute(world, 3));
+    const mesh = new Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    renderer.setSize(width, height);
+    renderer.render(scene, camera);
+    const svg = renderer.domElement;
+    if (svg.getAttribute("viewBox") !== `${-width / 2} ${-height / 2} ${width} ${height}` ||
+        renderer.info.render.faces !== svg.children.length || svg.children.length > 1) {
+      throw new Error(`r160 SVG frame contract at face ${i / 11}`);
+    }
+    let pathMatches = status === 0 && svg.children.length === 0;
+    if (svg.children.length === 0) {
+      results.push(0, sentinel, sentinel, sentinel, sentinel, sentinel, sentinel);
+    } else {
+      const node = svg.firstElementChild;
+      const data = node.getAttribute("d");
+      const parsed = svgPath.exec(data);
+      if (node.localName !== "path" || !parsed ||
+          node.getAttribute("style") !== "fill:rgb(255,0,0);fill-opacity:1") {
+        throw new Error(`r160 SVG path contract at face ${i / 11}`);
+      }
+      results.push(1, ...parsed.slice(1).map(Number));
+      pathMatches = status === 1 && data === serialize(coords);
+    }
+    results.push(+pathMatches);
+    geometry.dispose();
+  }
+
+  for (const args of [
+    [-1, dst, 101, 61], [src, -1, 101, 61], [src, dst, 0, 61], [src, dst, 101, 0],
+    [src, dst, 2147483648, 61], [6291385, dst, 101, 61], [src, 6291409, 101, 61],
+    [src, src + 1, 101, 61], [src, src - 1, 101, 61],
+  ]) {
+    guarded.fill(sentinel);
+    source.set(cases.subarray(2, 11));
+    if (face(...args.map(BigInt)) !== -1n || guarded.some(value => value !== sentinel) ||
+        source.some((value, index) => value !== cases[2 + index])) {
+      throw new Error("invalid native face changed memory");
+    }
+  }
+  for (const [index, bad] of [[0, Infinity], [4, -Infinity], [8, NaN]]) {
+    guarded.fill(sentinel);
+    source.set(cases.subarray(2, 11));
+    source[index] = bad;
+    if (face(BigInt(src), BigInt(dst), 101n, 61n) !== -1n ||
+        guarded.some(value => value !== sentinel)) {
+      throw new Error("nonfinite native face changed output");
+    }
+  }
+  material.dispose();
+  results.push(12);
+  report.textContent = JSON.stringify(results);
+} catch (error) {
+  report.textContent = `error:${error.message}`;
+}
+</script>

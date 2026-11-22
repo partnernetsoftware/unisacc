@@ -1,0 +1,46 @@
+struct SvgFaceOrder {
+  renderOrder:f64;
+  depth:f64;
+  object:u32;
+}
+
+native function svg_face_before(a:i64,b:i64) i64 {
+  let ar=ux_f64(a+SvgFaceOrder.renderOrder);
+  let br=ux_f64(b+SvgFaceOrder.renderOrder);
+  if(ar!=br) { return ar<br; }
+  let az=ux_f64(a+SvgFaceOrder.depth);
+  let bz=ux_f64(b+SvgFaceOrder.depth);
+  if(az!=bz) { return az>bz; }
+  return ux_u32(a+SvgFaceOrder.object)<ux_u32(b+SvgFaceOrder.object);
+}
+
+// Emits source indices in painter order. Caller supplies mean NDC depth.
+native function SVGRenderer_sortFaces(faces:i64,count:i64,out:i64,capacity:i64) i64 {
+  if(count<0 || count>256 || capacity<count || faces<0 || faces%8!=0 ||
+     out<0 || out%4!=0 || faces>6291456-count*SvgFaceOrder.size ||
+     out>6291456-count*4 || (count>0 && out<faces+count*SvgFaceOrder.size && faces<out+count*4)) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let row=faces+i*SvgFaceOrder.size;
+    let order=ux_f64(row+SvgFaceOrder.renderOrder);
+    let depth=ux_f64(row+SvgFaceOrder.depth);
+    if(order-order!=0.0 || depth-depth!=0.0) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let current=faces+i*SvgFaceOrder.size;
+    let at=i;
+    let searching=1;
+    while(at>0 && searching) {
+      let before=ux_u32(out+4*(at-1));
+      if(svg_face_before(current,faces+before*SvgFaceOrder.size)) {
+        let shifted=ux_u32_put(out+4*at,before);
+        at=at-1;
+      } else { searching=0; }
+    }
+    let placed=ux_u32_put(out+4*at,i);
+    i=i+1;
+  }
+  return count;
+}

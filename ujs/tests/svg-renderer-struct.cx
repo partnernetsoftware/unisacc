@@ -1,0 +1,108 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+enum { fields=7, record=2*fields+1, faces=11, observations=faces*record+1 };
+
+static const char module[]="ujs/practice/uxe/base/svg-renderer.ujs";
+static const double fixtures[faces][11]={
+    {101,61, -.5,.75,0, .25,-.5,0, .75,.25,0},
+    {80,110, .5,.75,-1, -.5,.75,1, -.25,-.25,0},
+    {100,60, -1.5,-.5,0, -.5,-.75,0, -1.25,.25,0},
+    {100,60, -1.5,-.5,0, -1,-.75,0, -1.25,.25,0},
+    {100,60, -1.5,-.5,0, -1.25,-.75,0, -1.25,.25,0},
+    {100,60,  1.5,-.5,0, 1.25,-.75,0, 1.25,.25,0},
+    {100,60, -.5,1.5,0, .25,1.25,0, .75,1.25,0},
+    {100,60, -.5,-1.5,0, .25,-1.25,0, .75,-1.25,0},
+    {100,60, -.5,.75,1.25, .25,-.5,0, .75,.25,0},
+    {100,60, -.5,.75,0, .25,-.5,0, .75,.25,-1.25},
+    {80,100, -1.5,0,0, 1.5,.5,0, 1.25,-.25,0},
+};
+static const double gold[faces][fields]={
+    {1, -25.25,-22.875,12.625,15.25,37.875,-7.625},
+    {1, 20,-41.25,-20,-41.25,-10,13.75},
+    {1, -75,15,-25,22.5,-62.5,-7.5},
+    {1, -75,15,-50,22.5,-62.5,-7.5},
+    {0,237,237,237,237,237,237},
+    {0,237,237,237,237,237,237},
+    {0,237,237,237,237,237,237},
+    {0,237,237,237,237,237,237},
+    {0,237,237,237,237,237,237},
+    {0,237,237,237,237,237,237},
+    {1, -60,0,60,-25,50,12.5},
+};
+
+static int mutate_axis(const char *path) {
+    const char original[]="ux_f64(src+8)*(0.0-halfHeight)";
+    const char mutant[]  ="ux_f64(src+8)*(0.0+halfHeight)";
+    unsigned char *source=0;
+    int64_t count=0;
+    if(sy_read_file(module,&source,&count,8192)) return 1;
+    int matches=0;
+    for(int64_t at=0;at+(int64_t)sizeof original-1<=count;at++) {
+        int i=0;
+        while(i<(int)sizeof original-1 && source[at+i]==original[i]) i++;
+        if(i!=(int)sizeof original-1) continue;
+        matches++;
+        for(i=0;i<(int)sizeof mutant-1;i++) source[at+i]=mutant[i];
+    }
+    int failed=matches!=1 || sy_write_file(path,source,count,0600);
+    mm_free(source);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==3 && tx_eqz(argv[2],"--mutate-y");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],fixture[300],modified[300],url[1100];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-svg-face-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/face.wasm",dir);
+    tx_snprintf(fixture,sizeof fixture,"%s/face.bin",dir);
+    tx_snprintf(modified,sizeof modified,"%s/mutant.ujs",dir);
+    int size=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/svg-renderer-r160.html?package=%s&wasm=%s&fixtures=%s",
+        cwd,argv[1],wasm,fixture);
+    const char entry[]="export uxe_svg_renderer_face(src:i64,dst:i64,width:i64,height:i64) i64 version 1;\n";
+    int failed=size<0 || size>=(int)sizeof url ||
+        sy_write_file(abi,entry,sizeof entry-1,0600) ||
+        sy_write_file(fixture,fixtures,sizeof fixtures,0600) ||
+        (mutate && mutate_axis(modified));
+    char *output=0;
+    size_t bytes=0;
+    if(!failed) {
+        char *compile[]={"./ujs/ujs2wasm.com",abi,mutate?modified:(char *)module,
+            "ujs/practice/uxe/test/svg-renderer-probe.ujs","-o",wasm,0};
+        int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("SVG_RENDERER compiler_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output);
+        output=0;
+    }
+    double actual[observations]={0};
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,observations,dir);
+    int nativeDiff=0,r160Diff=0,pathDiff=0;
+    if(!failed) {
+        for(int face=0;face<faces;face++) {
+            const double *row=actual+face*record;
+            for(int field=0;field<fields;field++) {
+                if(row[field]!=gold[face][field]) {
+                    printf("SVG_RENDERER face=%d native_field=%d actual=%g expected=%g\n",
+                        face,field,row[field],gold[face][field]);
+                    nativeDiff++;
+                }
+                if(row[fields+field]!=gold[face][field]) r160Diff++;
+            }
+            if(row[2*fields]!=1) pathDiff++;
+        }
+        failed=nativeDiff || r160Diff || pathDiff || actual[observations-1]!=12;
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("SVG_RENDERER faces=%d native_diff=%d r160_diff=%d path_diff=%d failed=%d\n",
+        faces,nativeDiff,r160Diff,pathDiff,failed);
+    return failed!=0;
+}
