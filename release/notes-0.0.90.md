@@ -23,13 +23,13 @@
 
 ## 产品改动
 
-- U4(Linux ELF 函数声明汇编标签 `__asm__("label")` / `__asm("label")`): 在前端词法(`E1` 新增第 69 号记号类, plain/typed/locations 三路同码, 旧 68 项码位不变)与解析/生成表(`E3` `token-prefixes`、`parse-constants`、`tokenread-byte`、`control-result`、`callcontrol-result`、`update-result`、`errors-template`)实现 `lnx/x86_64` 与 `lnx/arm64` 函数声明与定义的汇编标签改名(覆盖定义直带标签、先声明带标签后定义不带标签 `a01`、同标签重复声明、外部 libc 引用重定向 `a02`、`static` 内部链接函数改名 `a04`、函数取址与函数指针调用 `address.c` 及尾遍字符串池 `SKIPS[tpos]=1` 跳过标签字面量); 验收 `A1A_U4 pass=27 fail=0`、`A1A_U4_SELFTEST mutations=3 killed=3`、`CHECK_ASM_ATTR_REJECT ok=31 failed=0`、`c10`(`tests/diag/u_asm.cx:3:5`)升为 `PASS`(诊断合同缺口 `15 -> 14`)、GCC 11.4 独立 10 程序对照 `10/10 PASS`、26 个非标签示例 `-o` 逐字节对拍 `26/26 SAME`。
+- U4(Linux ELF 函数声明汇编标签 `__asm__("label")` / `__asm("label")`): 在前端词法(`E1` 新增第 69 号记号类, plain/typed/locations 三路同码, 旧 68 项码位不变)与解析/生成表(`E3` `token-prefixes`、`parse-constants`、`tokenread-byte`、`control-result`、`callcontrol-result`、`update-result`、`errors-template`)实现 `lnx/x86_64` 与 `lnx/arm64` 函数声明与定义的汇编标签改名(覆盖定义直带标签、先声明带标签后定义不带标签 `a01`、同标签重复声明、外部 libc 引用重定向 `a02`、`static` 内部链接函数改名 `a04`、函数取址与函数指针调用 `address.c` 及尾遍字符串池 `SKIPS[tpos]=1` 跳过标签字面量); 验收 `A1A_U4 pass=27 fail=0`、`A1A_U4_SELFTEST mutations=3 killed=3`、`CHECK_ASM_ATTR_REJECT ok=31 failed=0`、`c10`(`tests/diagfx/u_asm.cx:3:5`)升为 `PASS`(诊断合同缺口 `15 -> 14`)、GCC 11.4 独立 10 程序对照 `10/10 PASS`、26 个非标签示例 `-o` 逐字节对拍 `26/26 SAME`。
 - R72(`cx/compiler` 临时编译缓存按年龄与目录租约清理): 新增 `cx/compiler/cxscratch.cx` 并接入 `cx/cx0/plan.cx` 与 `src/host.cx`; 宿主与 CX0 在临时缓存目录入口持有共享租约, 仅在启动时非阻塞取得独占租约才执行扫描, 回收超过 86400 秒(1 天)的本用户普通缓存文件(`ua-cxif-*.h`、`ua-bodysrc-*` 等)与遗留暂存文件, 缓存命中按需续龄并跳过符号链接(先红 `6/2` -> 后绿 `8/0`, 阈值 `0` 变异被杀, 4 输入 `-c`/`-o` 字节等价 `8/8 SAME`, 6 目标交叉编译 `12/12`, `srcshape` `lines=521<=525 ifs=89<=91`)。
 - `rt-shared-gen` 单元级大块分配状态补登记(R69): 在 `exec/facts/rt-shared.tsv` 的 `exempt_symbols` 补登记 `_unisa_lbin`、`_unisa_lheld`、`_unisa_lev`, `rt-shared-gen.cx -- --check` 输出 `RT_SHARED_GEN SAME groups=2 bytes=3191 unlisted=0`(`unlisted` 由 `9` 清零为 `0`, 3 变异全杀)。
 - 快车道质量门与产线加固(R71 / R74 / R77 / R78 / R80 / R69.5):
   - R71 产生后立即备份门: `tools/release-chain.cx` 新增 `backup-evidence` 子命令与 step 5 `execute` 前置校验, 强制将整链 5 件与预跑 2 件关键产物备份至 `~/.unisacc-release-evidence-backups/<ver>`(拒绝含 `/.cache/` 或仓内路径)并核验 SHA256 清单(`CHECK_RELEASE_CHAIN pass=53 fail=0`);
   - R74 预跑窗口规划扩容: `tools/prerun-drive.cx` 将 `PD_MAX_WINS` 由 `512` 扩至 `2048` 并新增 `--max-wins` 与 `--unmeasured-ms` 保守默认耗时(`CHECK_PRERUN_DRIVE ok=39 failed=0`);
-  - R77 `tier=daily` 117 入口双隔离编译冒烟: `tier=daily` 批 818 个中 490 个自 `v0.0.86` 起未被冷编, 全量冷编扫 117 个唯一 `tests/*.cx` 入口在 `0.0.89` 下 115 通过、2 失败(`tests/stream-lower-domain.cx` 缺 `rt_tail` 前向声明、`tests/cx-host-run.cx` 缺 `runsh` 前向声明, 均已修复); 新增 `tests/daily-compile-smoke.cx` 与 `daily-compile-smoke-01..15` 将 117 个入口按 LPT 拆为 15 片双隔离(`TMPDIR` + `UNISACC_CACHE_DIR`) `-c -funit` 编译冒烟(`117/117 PASS`, 已并入严格预跑首波 `W0001..W0004` 并全部 `15/15 PASS`);
+  - R77 `tier=daily` 117 入口双隔离编译冒烟: `tier=daily` 批 818 个中 490 个自 `v0.0.86` 起未被冷编, 全量冷编扫 117 个唯一 `tests/*.cx` 入口在 `0.0.89` 下 115 通过、2 失败(`tests/stream-lower-domain.cx` 缺 `rt_tail` 前向声明、`tests/cx-host-run.cx` 缺 `runsh` 前向声明, 均已修复); 新增 `tests/daily-compile-smoke.cx` 与 `daily-compile-smoke-01..15` 将 117 个入口按 LPT 拆为 15 片双隔离(`TMPDIR` + `UNISACC_CACHE_DIR`) `-c -funit` 编译冒烟(`117/117 PASS`, 已并入严格预跑首波 `W0001`:`lane-key-probes,daily-compile-smoke-01..03`、`W0002`:`daily-compile-smoke-04..07`、`W0003`:`daily-compile-smoke-08..11`、`W0004`:`daily-compile-smoke-12..15` 并全部 `15/15 PASS`);
   - R78 变异门证据分类: `tools/mutation-gate.cx` 新增 `--report` 分类(`KILL-named` / `KILL-weak` / `INVALID` / `UNKNOWN`)与同字节无改动变异拦截(`CHECK_MUTATION_GATE ok=29 failed=0`, `CHECK_MUTATION_GATE_QUALITY ok=14 failed=0`);
   - R80 起链前置版本槽硬门: `tools/bg-candidate.cx` `start` 前置强制核验 `chain-ready` `11-version-slot`, 拒绝版本槽与分支不符时起链(`CHECK_BG_CANDIDATE failed=0`);
   - R69.5 字面量长度修正: 修复 28 个 `tools/*.cx` 中的 `strncmp`/`memcmp`/`tx_prefix` 字面量长度不符与越界读。
@@ -52,8 +52,15 @@
 ## U4 与 GCC 11.4 的语言行为差异
 
 - 裸 `asm` 拼写不支持: 严格 C 下 `asm` 非关键字(GCC 默认 gnu 模式接受裸 `asm`, 但吃掉用户标识符 `int asm = 1;` 属回归); `cx` 声明标签仅支持 `__asm__` 与 `__asm`, 声明位置写裸 `asm("label")` 具名拒绝(`error: not covered: bare asm label; use __asm__ or __asm`), 普通变量名 `asm` 正常可用;
-- 对象/变量声明与块作用域声明贴标签拒绝: 对全局变量(`a03`)、`static` 变量、块作用域局部变量及块作用域 `extern` 函数声明贴 `__asm__` 标签, 按本版范围裁定具名拒绝(`error: not covered: asm label on an object declaration` / `error: not covered: asm label on a block-scope ...`);
-- 4 处比 GCC 11.4 更严的语法/重声明拒绝: 空串 `__asm__("")`(`a05`)、相邻字符串拼接 `__asm__("a" "b")`(`a06`)、括号包裹 `__asm__(("x"))`(`a07`)、同一函数重声明给出不同标签或定义后才补标签, 均具名拒绝(`rc=1`, 无产物);
+- 对象/变量声明贴标签拒绝: 对文件作用域全局变量(`a03`)与 `static` 变量贴 `__asm__` 标签, 按本版范围裁定具名拒绝(`error: not covered: asm label on an object declaration`);
+- 4 处比 GCC 11.4 更严的具名拒绝(GCC 11.4 严格 C 模式下 `rc=0` 接受或仅告警, U4 均具名拒绝 `rc=1` 且无产物):
+  - (1) `a05`(同一函数两次声明给出冲突汇编标签, 如 `__asm__("a1")` 后再声明 `__asm__("a2")`): U4 拒绝(`error: not covered: conflicting asm label on redeclaration`), GCC 11.4 `rc=0` 保留第一个标签并告警;
+  - (2) `a06`(函数定义之后才补汇编标签, 如 `int f(void){...}` 后再声明 `int f(void) __asm__("late");`): U4 拒绝(`error: not covered: asm label after function definition`), GCC 11.4 `rc=0` 忽略改名并告警;
+  - (3) `a07`(块作用域局部非 `static` 变量带汇编标签, 如 `int x __asm__("rax_reg") = 1;`): U4 拒绝(`error: not covered: asm label on a block-scope declaration`), GCC 11.4 `rc=0` 忽略标签并告警;
+  - (4) 块作用域 `extern` 函数声明加汇编标签(如块内 `extern int g(void) __asm__("g2");`): U4 拒绝(`error: not covered: asm label on a block-scope declaration`), GCC 11.4 `rc=0` 并生成改名后的外部符号引用(`UND`);
+- 与 GCC 11.4 一致同拒及 `p08` 语法边界子例:
+  - `a08`(非字符串字面量标签 `__asm__(sym)`): U4 与 GCC 11.4 一致同拒(`rc=1`);
+  - `p08` 独立验证语法子例: 空串 `__asm__("")`、相邻字符串拼接 `__asm__("a" "b")`、括号包裹 `__asm__(("x"))` 均具名拒绝(`rc=1`, 无产物);
 - 非 ELF 四目标具名拒绝: `osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 上对函数贴汇编标签执行 `-c` 或 `-o` 均具名拒绝(`error: not covered: asm label unsupported for target`), 无残留产物;
 - `-c` 单单元对象符号类别: `unisacc -c`(非 `-funit`)单单元对象将非 `main`/`_start` 函数发为本地文本符号 `t`(既有单单元封装行为, 与 GCC `-c` 的全局 `T` 不同, 非 U4 引入)。
 
