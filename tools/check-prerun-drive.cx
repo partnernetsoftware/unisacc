@@ -65,7 +65,34 @@ int main(void) {
            tx_find(wb, (long)wn, "\twarmup\t4\t", 10) >= 0 &&
            tx_find(wb, (long)wn, "\theavy\t1\treal-commit\n", 21) >= 0,
            "plan-421-windows: covers 421 ids with warmup, prebuild-self, heavy jobs=1, and 8..12 normal windows");
+        ck(rc == 0 && rows_have(wb, wn, "# window-lanes=4\n") &&
+           rows_have(wb, wn, "\t8\tnormal\t"), "plan-defaults-to-four-lanes-and-eight-normal-jobs");
         free(wb);
+    }
+
+    {
+        char plan[CPD_PW], windows[CPD_PW], runner[CPD_PW];
+        const char *table = "# prerun-drive windows\n# window-lanes=2\nwindow\tjobs\tphase\tcount\tids\n"
+            "W0000\t1\tlong\t1\talpha\nW0001\t1\tlong\t1\tbeta\n";
+        const char *script =
+            "dir=${5%/*}; witness=\"$dir/started.W0001\"\n"
+            "if [ \"$2\" = W0001 ]; then : > \"$witness\"; else\n"
+            "  for i in 1 2 3 4 5 6 7 8 9 10; do [ -f \"$witness\" ] && break; sleep 0.1; done\n"
+            "  [ -f \"$witness\" ] || exit 2\n"
+            "fi\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$5\"\n"
+            "printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$4\" >> \"$5\"\n";
+        if (cx_fmt(plan, sizeof plan, "%s/lane-plan", work) ||
+            cx_fmt(windows, sizeof windows, "%s/windows.tsv", plan) ||
+            cx_fmt(runner, sizeof runner, "%s/lane-runner.sh", work) ||
+            sy_mkdir(plan, 0700) || cx_write(windows, table, strlen(table)) ||
+            cx_write(runner, script, strlen(script)) ||
+            cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1",
+                   cwd, cwd, work, plan, runner)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_LANES\tfirst=W0000\twindows=2") &&
+           ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=2\t"),
+           "singleton-window-lanes-start-before-the-first-receipt");
     }
 
     /* (2) run with mock runner: prebuild-self + --resume + stop after 2 retries with raw line */
@@ -208,7 +235,7 @@ int main(void) {
         if (pd_src5 && pd_src5[0]) cx_fmt(pd_p5, sizeof pd_p5, "%s", pd_src5);
         else cx_fmt(pd_p5, sizeof pd_p5, "%s/tools/prerun-drive.cx", cwd);
         if (cx_fmt(cmd, sizeof cmd,
-            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2",
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2 --normal-jobs 2",
             cwd, pd_p5, tids, tfile, pfile, tpdir)) return 2;
         int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
         char wp[CPD_PW]; size_t wn = 0;
@@ -340,7 +367,7 @@ int main(void) {
             cx_fmt(windows,sizeof windows,"%s/windows.tsv",plan) ||
             cx_fmt(archived,sizeof archived,"%s/release/evidence/0.0.87/prerun-supervise.log",work))return 2;
         if (cx_write(ix,fixture_ids,strlen(fixture_ids)) || cx_write(times,fixture_times,strlen(fixture_times)))return 2;
-        if (cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --warmup 2",cwd,cwd,ix,times,plan))return 2;
+        if (cx_fmt(cmd,sizeof cmd,"sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --warmup 2 --normal-jobs 2",cwd,cwd,ix,times,plan))return 2;
         int rc=ckk_sh("check-prerun-drive",cmd,out,sizeof out);
         size_t n=0;
         char *w=(char *)cx_read(windows,&n);
@@ -600,7 +627,7 @@ int main(void) {
                 cx_write(cids, f_cids, strlen(f_cids)) ||
                 cx_write(ctimes, f_ctimes, strlen(f_ctimes))) return 2;
             if (cx_fmt(cmd, sizeof cmd,
-                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 2",
                 cwd, cwd, cids, ctimes, cplan)) return 2;
             int rc_cp = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
             size_t cwn = 0;
@@ -664,7 +691,7 @@ int main(void) {
                 cx_write(u_ids, s_uids, strlen(s_uids)) ||
                 cx_write(u_times, s_utimes, strlen(s_utimes))) return 2;
             if (cx_fmt(cmd, sizeof cmd,
-                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s'",
+                "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 2",
                 cwd, cwd, u_ids, u_times, u_plan)) return 2;
             int rc_up = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
             size_t uwn = 0;
@@ -913,7 +940,7 @@ int main(void) {
 
         /* 13b: with --unmeasured-ms 5500, 355 unmeasured batches are packed into normal windows (4 waves * 5500ms = 22000ms, 8 batches/window at jobs=2) instead of 355 1-batch long windows */
         if (cx_fmt(cmd, sizeof cmd,
-            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --unmeasured-ms 5500 --out '%s'",
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --unmeasured-ms 5500 --out '%s' --normal-jobs 2",
             cwd, cwd, ids799, times444, p799b)) return 2;
         rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
         size_t wn = 0; char *wb = (char *)cx_read(w799b, &wn);

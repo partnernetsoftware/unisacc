@@ -22,6 +22,7 @@
  * compile children are reaped, within the same per-source 40-second deadline.
  */
 #pragma unisa use sysx.process
+#pragma unisa use cxlib.ckassert
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
@@ -508,9 +509,9 @@ int main(int argc,char **argv) {
         FILE *r=fopen(p,"rb");
         if(!r){
             fprintf(f,"FAIL\t%s\tmissing-result\n",sources[i]);
-            printf("FAIL\t%s\tmissing-result\n",sources[i]);failed++;continue;
+            {char label[4500];tx_snprintf(label,sizeof label,"%s\tmissing-result",sources[i]);ck(0,label);}failed++;continue;
         }
-        size_t k;
+        size_t k,skip=0;
         if(fgets(buf,sizeof buf,r)) {
             if(!strncmp(buf,"PASS\t",5))compile_pass++;
             if(!strncmp(buf,"XFAIL\t",6))known_failures++;
@@ -519,11 +520,13 @@ int main(int argc,char **argv) {
             if(!strncmp(buf,"INPUT-",6))scanner_inputs++;
             if(!strncmp(buf,"INPUT-REJECTED\t",15))scanner_failures++;
             if(strstr(buf,"\traw_compile_failure=1\t"))raw_failures++;
+            if(!strncmp(buf,"PASS\t",5)){size_t bl=strlen(buf);if(bl>5&&buf[bl-1]==10&&strchr(buf+5,10)==buf+bl-1){buf[bl-1]=0;ck(1,buf+5);skip=bl;}}
             if(fseek(r,0,SEEK_SET))die("aggregate rewind");
         }
         while((k=fread(buf,1,sizeof buf,r))){
             if(fwrite(buf,1,k,f)!=k)die("aggregate write");
-            fwrite(buf,1,k,stdout);
+            if(skip>=k){skip-=k;continue;}
+            fwrite(buf+skip,1,k-skip,stdout);skip=0;
         }
         if(ferror(r))die("aggregate read");fclose(r);
     }

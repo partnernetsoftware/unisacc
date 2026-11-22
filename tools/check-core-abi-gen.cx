@@ -1,0 +1,103 @@
+/* tools/check-core-abi-gen.cx -- self-test + mutation gate for tools/core-abi-gen.cx.
+ * Verifies:
+ *   (1) positive exact sync
+ *   (2) layout.h and actions.h drift rejection
+ *   (3) single-file CoreModel desync rejection across core.h / kernel.cx / execute.cx
+ *   (4) 3 mutations disabling each CoreModel check must escape on its desync fixture
+ *   (5) real repo --check passes
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.ckassert
+
+static int run_v(char **argv, char *out, long cap) {
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < n; i++) out[i] = r.out[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static void mk_fixture(const char *dir, int bad_lay, int bad_act, int bad_sync) {
+    char p[4096];
+    cx_fmt(p, sizeof p, "%s/exec", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/exec/facts", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/exec/c", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/exec/c/asm", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/cx", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/cx/sys", dir); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/cx/core", dir); sy_mkdir(p, 0700);
+
+    const char *facts = "layout\tCM_NS\t0\nlayout\tCM_PACKED\t152\nlayout\tCM_SIZE\t160\naction\tADV\t0\t0\naction\tMARK\t1\t1\n";
+    cx_fmt(p, sizeof p, "%s/exec/facts/core-abi.tsv", dir); cx_write(p, facts, tx_len(facts, 4096));
+
+    const char *lay = bad_lay
+        ? "/* 64-bit pointer / 32-bit int CoreModel ABI. Generated from exec/facts/core-abi.tsv;\n   layoutcheck.c asserts every field used by assembly. */\n#define CM_NS 0\n#define CM_PACKED 152\n#define CM_SIZE 152\n"
+        : "/* 64-bit pointer / 32-bit int CoreModel ABI. Generated from exec/facts/core-abi.tsv;\n   layoutcheck.c asserts every field used by assembly. */\n#define CM_NS 0\n#define CM_PACKED 152\n#define CM_SIZE 160\n";
+    cx_fmt(p, sizeof p, "%s/exec/c/asm/layout.h", dir); cx_write(p, lay, tx_len(lay, 4096));
+
+    const char *act = bad_act
+        ? "/* Numeric ABI for decoded actions. Generated from exec/facts/core-abi.tsv;\n   checked against core.h. */\n#define OP_ADV 0\n#define OP_MARK 1\n#define OP_COUNT 1\n"
+        : "/* Numeric ABI for decoded actions. Generated from exec/facts/core-abi.tsv;\n   checked against core.h. */\n#define OP_ADV 0\n#define OP_MARK 1\n#define OP_COUNT 2\n";
+    cx_fmt(p, sizeof p, "%s/exec/c/asm/actions.h", dir); cx_write(p, act, tx_len(act, 4096));
+
+    const char *cm_ok = "typedef struct {\n    int ns;\n    const void *packed;\n} CoreModel;\n";
+    const char *cm_bad = "typedef struct {\n    int ns;\n} CoreModel;\n";
+    const char *files[3] = {"exec/c/core.h", "cx/sys/kernel.cx", "cx/core/execute.cx"};
+    for (int i = 0; i < 3; i++) {
+        const char *s = (bad_sync == i + 1) ? cm_bad : cm_ok;
+        cx_fmt(p, sizeof p, "%s/%s", dir, files[i]);
+        cx_write(p, s, tx_len(s, 4096));
+    }
+}
+
+int main(void) {
+    char base[512], exe[600], fx[600], out[8192];
+    cx_fmt(base, sizeof base, "%s/check-core-abi-%d", sy_tmpdir(), (int)sy_pid());
+    sy_mkdir(base, 0700);
+    cx_fmt(exe, sizeof exe, "%s/gen", base);
+    { char *v[] = {"sh", "./unisacc.com", "tools/core-abi-gen.cx", "-o", exe, 0}; if (run_v(v, out, sizeof out) != 0) { printf("COMPILE_FAIL %s\n", out); cx_rmtree(base); return 2; } }
+
+    const char *names[6] = {"positive-sync-and-exact", "red-layout-drift", "red-actions-drift", "red-sync-core-h-only", "red-sync-kernel-cx-only", "red-sync-execute-cx-only"};
+    const char *want[6] = {"CORE_ABI_GEN\tOK", "CORE_ABI_DRIFT\texec/c/asm/layout.h", "CORE_ABI_DRIFT\texec/c/asm/actions.h", "CORE_ABI_SYNC_MISMATCH\texec/c/core.h", "CORE_ABI_SYNC_MISMATCH\tcx/sys/kernel.cx", "CORE_ABI_SYNC_MISMATCH\tcx/core/execute.cx"};
+    for (int i = 0; i < 6; i++) {
+        cx_fmt(fx, sizeof fx, "%s/fx-%d", base, i); sy_mkdir(fx, 0700);
+        mk_fixture(fx, i == 1, i == 2, i >= 3 ? i - 2 : 0);
+        char *v[] = {exe, "--check", "--root", fx, 0};
+        int rc = run_v(v, out, sizeof out);
+        int exp_rc = (i == 0) ? 0 : 1;
+        ck(rc == exp_rc && tx_find(out, tx_len(out, sizeof out), want[i], tx_len(want[i], 256)) >= 0, names[i]);
+    }
+
+    const char *mflags[3] = {"-DMUT_SKIP_CORE_H=1", "-DMUT_SKIP_KERNEL_CX=1", "-DMUT_SKIP_EXECUTE_CX=1"};
+    const char *mnames[3] = {"mut-kill-skip-core-h", "mut-kill-skip-kernel-cx", "mut-kill-skip-execute-cx"};
+    for (int m = 0; m < 3; m++) {
+        char mexe[600];
+        cx_fmt(mexe, sizeof mexe, "%s/gen-mut-%d", base, m);
+        char *cv[] = {"sh", "./unisacc.com", (char *)mflags[m], "tools/core-abi-gen.cx", "-o", mexe, 0};
+        int crc = run_v(cv, out, sizeof out);
+        cx_fmt(fx, sizeof fx, "%s/fx-%d", base, m + 3);
+        char *rv[] = {mexe, "--check", "--root", fx, 0};
+        int rrc = (crc == 0) ? run_v(rv, out, sizeof out) : -1;
+        ck(crc == 0 && rrc == 0, mnames[m]);
+    }
+
+    {
+        char *rv[] = {exe, "--check", "--root", ".", 0};
+        int rrc = run_v(rv, out, sizeof out);
+        ck(rrc == 0 && tx_find(out, tx_len(out, sizeof out), "CORE_ABI_GEN\tOK", 15) >= 0, "repo-root-core-abi-exact-and-synced");
+    }
+
+    cx_rmtree(base);
+    printf("CHECK_CORE_ABI_GEN\tpassed=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

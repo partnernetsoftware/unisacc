@@ -105,6 +105,7 @@ Lisnext:
     add x24,x24,#1
     b Lisrehash
 Lisfree:
+    cbz x22,Lislookup
     mov x0,x22
     bl CSYM(free)
 Lislookup:

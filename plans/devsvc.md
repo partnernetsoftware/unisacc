@@ -295,7 +295,7 @@ sysx.processcore 是 np_buf、np_result 与捕获执行逻辑的唯一来源;sys
 ### 收缩清单
 
 - 删 react 冻结(影子从未满足 24 小时条件,running=0)与 rel 常驻图(端到端实测无收益)。
-  - 补注(主调度 2026-11-20):react 冻结改为按 plans/v0.0.86.md T3(推测链真起加并行确认)重做准入与采纳键后复用,不是删除。原因是失效四因:触发键按内容而采纳键按提交;准入 load1 小于 6 而本机常 9 到 15;放行要求影子满 24 小时而常驻上限 7200 秒无人重拉;正规链不经 devsvc 起,事件流无链事件。见 prd_mempalace.md 决定"整链预制路线"。
+  - 补注(主调度 2026-11-20):react 冻结改为按 archive/plans-pre090/v0.0.86.md T3(推测链真起加并行确认)重做准入与采纳键后复用,不是删除。原因是失效四因:触发键按内容而采纳键按提交;准入 load1 小于 6 而本机常 9 到 15;放行要求影子满 24 小时而常驻上限 7200 秒无人重拉;正规链不经 devsvc 起,事件流无链事件。见 prd_mempalace.md 决定"整链预制路线"。
 - 合并队列、S2 第二期单元二三、S7、S0 推测不排。
 - 两个检查夹具缓存(check-devsvc-core 2.6G、check-precommit-gates 2.4G)合计 5G 加容量上限。
 - 第 6 节按已做、未做、作废重写(已做,见第 6 节)。
@@ -579,7 +579,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 三条设计约束:产物复用必须核身份,只复用构造产物,不复用测试结论(引用同一次真实执行的证据须核身份);常驻服务有截止与自退;写共享状态持锁。
 
-环节分割表(总纲)见 plans/v0.0.87.md"总纲:按环节分割"。
+环节分割表(总纲)见 archive/plans-pre090/v0.0.87.md"总纲:按环节分割"。
 
 起链前置教训(2026-11-20):0.0.86 首次起链因工作树 unisacc.com 符号链接被换成真实文件而缺 unisacc.com.build.json,在 preflight entry 被拒,损失约 5 分钟;chain-ready 应直接核 preflight entry 的 PASS,列入 0.0.87 S4/S6。
 
@@ -609,7 +609,7 @@ derive.cx -- --touched FILE [--plan]:按合并读集(derive.tsv inputs_glob + de
 
 (8) 未核:agy 宿主是否有 Stop 类钩子、能否暴露压缩信号;agy-flow 的 route.sh 是否有现成状态出口;decision-model.ts 与 flow-graph.ts 正文、devsvc-core.cx 子命令全表未读。
 
-(9) 挂接:plans/v0.0.87.md S6(win state 先行,作为切片前置);plans/v0.0.88.md (C)(5)(本切片为第一刀)。
+(9) 挂接:archive/plans-pre090/v0.0.87.md S6(win state 先行,作为切片前置);archive/plans-pre090/v0.0.88.md (C)(5)(本切片为第一刀)。
 
 ## T2 垃圾清理清单 2026-11-20(清洁执行者实测,只列不删;实现归 agy-flow)
 
