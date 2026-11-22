@@ -1,8 +1,9 @@
-/* tools/check-doc-pair.cx -- two documentation lints (DEBT-README-PAIR, DEBT-TERM-CHECK).
+/* tools/check-doc-pair.cx -- documentation lints (DEBT-README-PAIR, DEBT-TERM-CHECK, UTF8-DOC-GUARD).
  *
- *   sh ./unisacc.com tools/check-doc-pair.cx                 -- both checks on this checkout + fixtures
+ *   sh ./unisacc.com tools/check-doc-pair.cx                 -- all checks on this checkout + fixtures
  *   sh ./unisacc.com tools/check-doc-pair.cx -- pair [ROOT]  -- README.md vs README_zh.md only
  *   sh ./unisacc.com tools/check-doc-pair.cx -- term [ROOT]  -- retired-term scan only
+ *   sh ./unisacc.com tools/check-doc-pair.cx -- utf8 [ROOT]  -- UTF-8 validity scan on .md files only
  *
  * pair: the set of <a id="..."> anchors of README.md and README_zh.md must be equal, and every relative
  *   link target (file part of ](...)) in either must exist next to the README.
@@ -13,13 +14,16 @@
  *   Real violations outside those are held by an expiring baseline (BASELINE below, due DOC-1 sweep,
  *   2026-12-01): a file not in the baseline fails, an expired baseline fails, a baseline file that
  *   became clean is reported STALE and fails (shrink the list).
- * Fixtures run in a temp dir: an inconsistent README pair and a file with the term must be reported;
- *   planted term under .claude/worktrees/ and .claude/jobs-local-* dirs must not be reported. */
+ * utf8: every non-archived .md under ROOT must be valid UTF-8 (via text.utf8::tx_utf8_valid).
+ * Fixtures run in a temp dir: an inconsistent README pair, a file with the term, and planted truncated
+ *   multi-byte UTF-8 sequences must be reported; planted term under .claude/worktrees/ and
+ *   .claude/jobs-local-* dirs must not be reported. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use text.utf8
 #pragma unisa use cxlib.procrun
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -117,15 +121,10 @@ static int check_pair(const char *root) {
 
 static int in_baseline(const char *rel) { int i; for (i = 0; BASELINE[i]; i++) if (!strcmp(BASELINE[i], rel)) return 1; return 0; }
 
-/* returns number of failures; use_baseline=0 for fixtures */
-static int check_term(const char *root, int use_baseline) {
-    static char out[1 << 20];
-    static const char *seen[MAXF];
+static int list_md_files(const char *root, char *out, long out_cap) {
     char pr[2048], pa[2048], pb[2048], pc[2048], pd[2048], pe[2048], pf[2048];
     char *av2[40];
-    int bad = 0, i, nseen = 0, ai = 0;
-    char *line;
-    size_t rl = strlen(root);
+    int ai = 0;
     pr_result r;
     cx_fmt(pr, sizeof pr, "%s", root);
     cx_fmt(pa, sizeof pa, "%s/.git", root);
@@ -134,7 +133,6 @@ static int check_term(const char *root, int use_baseline) {
     cx_fmt(pd, sizeof pd, "%s/.trash", root);
     cx_fmt(pe, sizeof pe, "%s/.claude/worktrees", root);
     cx_fmt(pf, sizeof pf, "%s/.claude/jobs-local-*", root);
-    /* find ROOT ( paths... ) -prune -o -name *.md -type f -print */
     av2[ai++] = "find"; av2[ai++] = pr;
     av2[ai++] = "(";
     av2[ai++] = "-path"; av2[ai++] = pa;
@@ -150,9 +148,20 @@ static int check_term(const char *root, int use_baseline) {
     av2[ai++] = "-type"; av2[ai++] = "f";
     av2[ai++] = "-print";
     av2[ai] = 0;
-    if (pr_run("doc-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= (long)sizeof out) { printf("TERM_FIND_FAILED\n"); return 1; }
-    mm_copy(out, sizeof out, r.out, r.outn); out[r.outn] = 0;
+    if (pr_run("doc-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= out_cap) return -1;
+    mm_copy(out, out_cap, r.out, r.outn); out[r.outn] = 0;
     pr_free(&r);
+    return 0;
+}
+
+/* returns number of failures; use_baseline=0 for fixtures */
+static int check_term(const char *root, int use_baseline) {
+    static char out[1 << 20];
+    static const char *seen[MAXF];
+    int bad = 0, i, nseen = 0;
+    char *line;
+    size_t rl = strlen(root);
+    if (list_md_files(root, out, (long)sizeof out) < 0) { printf("TERM_FIND_FAILED\n"); return 1; }
     for (line = strtok(out, "\n"); line; line = strtok(0, "\n")) {
         const char *rel = line + rl + 1;
         long n;
@@ -178,16 +187,110 @@ static int check_term(const char *root, int use_baseline) {
     return bad;
 }
 
-static int wr(const char *dir, const char *name, const char *txt) {
+typedef struct { const char *path; const char *reason; } utf8_wl_entry;
+static const utf8_wl_entry UTF8_WHITELIST[] = {
+    { "release/evidence/react-trigger-key-2026-11-18.tsv",
+      "2026-11-18 历史证据表列尾固定字节截断(107处),证据不可变" },
+    { "archive/work/ledger-202611.tsv",
+      "2026-11 冻结归档账本第1行历史半截汉字(1处),证据不可变" },
+    { 0, 0 }
+};
+
+static const char *utf8_whitelist_reason(const char *rel) {
+    int i;
+    for (i = 0; UTF8_WHITELIST[i].path; i++) {
+        if (!strcmp(UTF8_WHITELIST[i].path, rel)) return UTF8_WHITELIST[i].reason;
+    }
+    return 0;
+}
+
+static int list_utf8_files(const char *root, char *out, long out_cap) {
+    char pr[2048], pa[2048], pb[2048], pd[2048], pe[2048], pf[2048];
+    char *av2[44];
+    int ai = 0;
+    pr_result r;
+    cx_fmt(pr, sizeof pr, "%s", root);
+    cx_fmt(pa, sizeof pa, "%s/.git", root);
+    cx_fmt(pb, sizeof pb, "%s/out", root);   /* out-ok: scan exclusion, read only */
+    cx_fmt(pd, sizeof pd, "%s/.trash", root);
+    cx_fmt(pe, sizeof pe, "%s/.claude/worktrees", root);
+    cx_fmt(pf, sizeof pf, "%s/.claude/jobs-local-*", root);
+    av2[ai++] = "find"; av2[ai++] = pr;
+    av2[ai++] = "(";
+    av2[ai++] = "-path"; av2[ai++] = pa;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pb;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pd;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pe;
+    av2[ai++] = "-o"; av2[ai++] = "-path"; av2[ai++] = pf;
+    av2[ai++] = ")";
+    av2[ai++] = "-prune";
+    av2[ai++] = "-o";
+    av2[ai++] = "(";
+    av2[ai++] = "-name"; av2[ai++] = "*.md";
+    av2[ai++] = "-o"; av2[ai++] = "-name"; av2[ai++] = "*.tsv";
+    av2[ai++] = ")";
+    av2[ai++] = "-type"; av2[ai++] = "f";
+    av2[ai++] = "-print";
+    av2[ai] = 0;
+    if (pr_run("doc-utf8-find", av2, 0, 0, 40, &r) < 0 || r.rc != 0 || r.outn >= out_cap) return -1;
+    mm_copy(out, out_cap, r.out, r.outn); out[r.outn] = 0;
+    pr_free(&r);
+    return 0;
+}
+
+static int check_utf8(const char *root) {
+    static char out[1 << 20];
+    int bad = 0, i, wl_hits = 0;
+    char *line;
+    size_t rl = strlen(root);
+    for (i = 0; UTF8_WHITELIST[i].path; i++) {
+        const char *rs = UTF8_WHITELIST[i].reason;
+        if (!rs || !rs[0] || dp_sub(rs, (long)strlen(rs), "不可变", 9) < 0) {
+            printf("UTF8_WHITELIST_BAD_REASON\t%s\n", UTF8_WHITELIST[i].path);
+            bad++;
+        }
+    }
+    if (list_utf8_files(root, out, (long)sizeof out) < 0) { printf("UTF8_FIND_FAILED\n"); return 1; }
+    for (line = strtok(out, "\n"); line; line = strtok(0, "\n")) {
+        const char *rel = line + rl + 1;
+        long n = 0, bad_off = -1;
+        char *s;
+        if (strncmp(line, root, rl)) continue;
+        s = slurp(line, &n);
+        if (!s) continue;
+        if (tx_utf8_valid(s, n, &bad_off) != 1) {
+            const char *rs = utf8_whitelist_reason(rel);
+            if (rs) {
+                wl_hits++;
+            } else {
+                printf("UTF8_INVALID\t%s\toffset=%ld\tbyte=0x%02x\n",
+                       rel, bad_off, bad_off >= 0 && bad_off < n ? (unsigned char)s[bad_off] : 0);
+                bad++;
+            }
+        }
+        mm_free(s);
+    }
+    return bad;
+}
+
+static int wr_bytes(const char *dir, const char *name, const char *buf, long n) {
     char p[2048];
     cx_fmt(p, sizeof p, "%s/%s", dir, name);
-    return sy_write_file(p, txt, (long)strlen(txt), 0644);
+    return sy_write_file(p, buf, n, 0644);
+}
+
+static int wr(const char *dir, const char *name, const char *txt) {
+    return wr_bytes(dir, name, txt, (long)strlen(txt));
 }
 
 static int selftest(void) {
-    char d[2048], d2[2048], t[4096];
+    char d[2048], d2[2048], d3[2048], t[4096];
     int fails = 0;
-    if (sy_mkdtemp("/tmp", "docpair-", d, sizeof d) || sy_mkdtemp("/tmp", "docterm-", d2, sizeof d2)) { printf("FIXTURE_MKDIR_FAILED\n"); return 1; }
+    if (sy_mkdtemp("/tmp", "docpair-", d, sizeof d) ||
+        sy_mkdtemp("/tmp", "docterm-", d2, sizeof d2) ||
+        sy_mkdtemp("/tmp", "docutf8-", d3, sizeof d3)) {
+        printf("FIXTURE_MKDIR_FAILED\n"); return 1;
+    }
     wr(d, "README.md", "<a id=\"a\"></a>\n<a id=\"b\"></a>\n[x](README_zh.md)\n");
     wr(d, "README_zh.md", "<a id=\"a\"></a>\n[x](README.md)\n");
     if (check_pair(d) < 1) { printf("FIXTURE_FAIL\tmismatch-not-reported\n"); fails++; }
@@ -216,8 +319,37 @@ static int selftest(void) {
             if (check_term(d2, 0) != 1) { printf("FIXTURE_FAIL\tignored-paths-leaked\n"); fails++; }
         }
     }
+    /* UTF-8 guard self-test + truncated Chinese character mutation check */
     {
-        char *rm[] = { "rm", "-rf", d, d2, 0 };
+        static const char clean_doc[] = "合法汉字文档\n";
+        /* Truncate U+5B57 (0xE5 0xAD 0x97) after 2 bytes -> 0xE5 0xAD followed by newline */
+        static const char trunc_hanzi[] = "合法汉\xe5\xad\n";
+        /* Stray 0xDE byte before "vsvc" (reproducing prd.md 750e63b581 corruption) */
+        static const char stray_de[] = "现算查询 \xdevsvc product-map\n";
+        wr_bytes(d3, "doc.md", clean_doc, (long)sizeof(clean_doc) - 1);
+        if (check_utf8(d3) != 0) {
+            printf("FIXTURE_FAIL\tclean-utf8-rejected\n");
+            fails++;
+        }
+        printf("MUTATION_DIFF\tutf8-trunc-hanzi\tdoc.md\told=\"\\xe5\\xad\\x97\"\tnew=\"\\xe5\\xad\"\n");
+        wr_bytes(d3, "doc.md", trunc_hanzi, (long)sizeof(trunc_hanzi) - 1);
+        if (check_utf8(d3) == 1) {
+            printf("MUTATION_KILLED\tutf8-trunc-hanzi\tdoc.md\thit=\"UTF8_INVALID\"\trc=1\n");
+        } else {
+            printf("FIXTURE_FAIL\tutf8-trunc-hanzi-not-killed\n");
+            fails++;
+        }
+        printf("MUTATION_DIFF\tutf8-stray-0xde\tdoc.md\told=\"`devsvc\"\tnew=\"\\xdevsvc\"\n");
+        wr_bytes(d3, "doc.md", stray_de, (long)sizeof(stray_de) - 1);
+        if (check_utf8(d3) == 1) {
+            printf("MUTATION_KILLED\tutf8-stray-0xde\tdoc.md\thit=\"UTF8_INVALID\"\trc=1\n");
+        } else {
+            printf("FIXTURE_FAIL\tutf8-stray-0xde-not-killed\n");
+            fails++;
+        }
+    }
+    {
+        char *rm[] = { "rm", "-rf", d, d2, d3, 0 };
         pr_result r;
         if (pr_run("doc-rm", rm, 0, 0, 20, &r) == 0) pr_free(&r);
     }
@@ -230,8 +362,9 @@ int main(int argc, char **argv) {
     int bad = 0;
     if (!strcmp(mode, "pair")) bad = check_pair(root);
     else if (!strcmp(mode, "term")) bad = check_term(root, 1);
-    else if (!strcmp(mode, "all")) { bad = check_pair(root) + check_term(root, 1) + selftest(); }
-    else { fprintf(stderr, "usage: check-doc-pair [pair|term|all] [ROOT]\n"); return 2; }
+    else if (!strcmp(mode, "utf8")) bad = check_utf8(root);
+    else if (!strcmp(mode, "all")) { bad = check_pair(root) + check_term(root, 1) + check_utf8(root) + selftest(); }
+    else { fprintf(stderr, "usage: check-doc-pair [pair|term|utf8|all] [ROOT]\n"); return 2; }
     if (bad) { printf("DOC_PAIR_FAIL\t%d\n", bad); return 1; }
     printf("DOC_PAIR_OK\n");
     return 0;

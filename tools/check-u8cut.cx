@@ -1,0 +1,30 @@
+/* tools/check-u8cut.cx -- behaviour of tools/cxlib/u8cut.cx: cuts move to character starts; ASCII and lead bytes stay;
+ * the end is always a boundary; malformed runs and bad arguments are left alone.  Prints PASS/FAIL rows and
+ * CHECK_U8CUT<TAB>failed=N; rc 1 on a failure. */
+#pragma unisa use text.text
+#pragma unisa use text.utf8
+#pragma unisa use cxlib.u8cut
+static int failed;
+static void ck(int yes, const char *name) { printf("%s\t%s\n", yes ? "PASS" : "FAIL", name); if (!yes) failed++; }
+int main(void) {
+    const char *s = "a\xe4\xb8\xad\xc3\xa9\xf0\x9f\x98\x80z";   /* a, U+4E2D (3), U+E9 (2), U+1F600 (4), z : 11 bytes */
+    long n = 11, p, f, ok = 1;
+    ck(u8c_floor(s, n, 0) == 0 && u8c_floor(s, n, 1) == 1 && u8c_floor(s, n, 4) == 4 && u8c_floor(s, n, 6) == 6, "floor-boundaries-stay");
+    ck(u8c_floor(s, n, 2) == 1 && u8c_floor(s, n, 3) == 1, "floor-inside-3byte");
+    ck(u8c_floor(s, n, 5) == 4, "floor-inside-2byte");
+    ck(u8c_floor(s, n, 7) == 6 && u8c_floor(s, n, 8) == 6 && u8c_floor(s, n, 9) == 6, "floor-inside-4byte");
+    ck(u8c_floor(s, n, n) == n, "floor-end-is-boundary");
+    ck(u8c_ceil(s, n, 2) == 4 && u8c_ceil(s, n, 3) == 4 && u8c_ceil(s, n, 5) == 6 && u8c_ceil(s, n, 7) == 10 && u8c_ceil(s, n, 4) == 4, "ceil-moves-forward");
+    ck(u8c_ceil(s, n, n) == n, "ceil-end");
+    for (p = 0; p <= n; p++) {   /* every floor result is a valid cut: the prefix is valid UTF-8 */
+        f = u8c_floor(s, n, p);
+        if (f > p || tx_utf8_valid(s, f, 0) != 1) ok = 0;
+        f = u8c_ceil(s, n, p);
+        if (f < p || tx_utf8_valid(s + f, n - f, 0) != 1) ok = 0;
+    }
+    ck(ok, "floor-prefix-and-ceil-tail-valid-for-every-position");
+    ck(u8c_floor("\x80\x80\x80\x80\x80", 5, 4) == 4 && u8c_ceil("\x80\x80\x80\x80\x80", 5, 0) == 0, "malformed-run-left-alone");
+    ck(u8c_floor(s, n, -1) < 0 && u8c_floor(s, n, n + 1) < 0 && u8c_floor(0, 1, 0) < 0 && u8c_ceil(s, -1, 0) < 0, "bad-arguments");
+    printf("CHECK_U8CUT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

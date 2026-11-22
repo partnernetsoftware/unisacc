@@ -471,6 +471,18 @@ int main(int argc, char **argv) {
            "backup-evidence-inside-cache-refused");
         np_free(&r);
 
+        char *bk_ca7[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", "/.cache", "--repo", brepo, 0};
+        r = actual(bk_ca7);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE BACKUP_EVIDENCE") != 0 && strstr(r.err, "backup-inside-cache") != 0,
+           "backup-evidence-exact-cache-suffix-refused");
+        np_free(&r);
+
+        char *bk_nopre[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--backup-dir", bdir, "--repo", brepo, 0};
+        r = actual(bk_nopre);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE CHAIN_USAGE") != 0,
+           "backup-evidence-missing-prerun-dir-usage-refused");
+        np_free(&r);
+
         /* 3. release-chain run --from 5 before backup-evidence -> refused before READY_TO_EXECUTE */
         if (cx_fmt(bcmd, sizeof bcmd, "cd \"%s\" && \"%s\" run --inputs \"%s\" --state \"%s\" --layout /nonexistent-layout --from 5",
             brepo, bin, inputs, bst)) return 2;
@@ -509,13 +521,63 @@ int main(int argc, char **argv) {
 
         /* 6. Tampering with backed-up file causes --verify and run --from 5 to refuse */
         char tamp[4500];
-        if (cx_fmt(tamp, sizeof tamp, "%s/chain/chain-run.tsv", bdir) || cx_write(tamp, "tampered\n", 9)) return 2;
+        if (cx_fmt(tamp, sizeof tamp, "%s/chain/chain-run.tsv", bdir)) return 2;
+        (void)cx_write(tamp, "tampered\n", 9);
         rv = actual(bk_ver);
         r = actual(bv0);
         ck(rv.rc == 2 && rv.err && strstr(rv.err, "sha256-mismatch") != 0 &&
            r.rc == 1 && has(&r, "CHAIN\tFAIL\t5\tbackup-evidence\t"),
            "backup-verify-tampered-file-refused");
         np_free(&rv); np_free(&r);
+
+        char mcache[4500];
+        const char *bad_cache_row = "chain/heartbeat.tsv\t/.cache/hb\t0000000000000000000000000000000000000000000000000000000000000000\t3\n";
+        if (cx_fmt(mcache, sizeof mcache, "%s/release/evidence/0.0.99/backup-evidence.tsv", brepo) ||
+            cx_write(mcache, bad_cache_row, strlen(bad_cache_row))) return 2;
+        rv = actual(bk_ver);
+        ck(rv.rc == 2 && rv.err && strstr(rv.err, "backup-inside-cache") != 0,
+           "backup-verify-inside-cache-manifest-refused");
+        np_free(&rv);
+
+        char crepo[4500], bfresh[4500];
+        if (cx_fmt(crepo, sizeof crepo, "%s/bktest/.cache/repo-in-cache", tmp) ||
+            cx_fmt(bfresh, sizeof bfresh, "%s/bktest/fresh-out-of-cache-backup", tmp) ||
+            sy_mkdir_all(crepo, 0700)) return 2;
+        char *bk_fresh[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", bfresh, "--repo", crepo, 0};
+        r = actual(bk_fresh);
+        ck(r.rc == 0 && has(&r, "BACKUP_EVIDENCE\tOK\tversion=0.0.99\tfiles=7\t"),
+           "backup-evidence-nonexistent-dir-ignores-stale-cache-stack");
+        np_free(&r);
+
+        char croot[4500], csub[4500], clnk1[4500], clnk2[4500], rlnk[4500], rsub[4500], symrow[4800];
+        if (cx_fmt(croot, sizeof croot, "%s/bktest/.cache", tmp) ||
+            cx_fmt(csub, sizeof csub, "%s/bktest/.cache/sub", tmp) ||
+            cx_fmt(clnk1, sizeof clnk1, "%s/bktest/lnk-cache-sub", tmp) ||
+            cx_fmt(clnk2, sizeof clnk2, "%s/bktest/lnk-cache-root", tmp) ||
+            cx_fmt(rlnk, sizeof rlnk, "%s/bktest/lnk-repo", tmp) ||
+            cx_fmt(rsub, sizeof rsub, "%s/bktest/lnk-repo/sub", tmp) ||
+            sy_mkdir_all(csub, 0700) ||
+            sy_symlink(csub, clnk1) ||
+            sy_symlink(croot, clnk2) ||
+            sy_symlink(brepo, rlnk)) return 2;
+        char *bk_sl1[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", clnk1, "--repo", brepo, 0};
+        char *bk_sl2[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", clnk2, "--repo", brepo, 0};
+        np_result rsl1 = actual(bk_sl1);
+        np_result rsl2 = actual(bk_sl2);
+        if (cx_fmt(symrow, sizeof symrow, "chain/heartbeat.tsv\t%s\t0000000000000000000000000000000000000000000000000000000000000000\t3\n", clnk1) ||
+            cx_write(mcache, symrow, strlen(symrow))) return 2;
+        np_result rslv = actual(bk_ver);
+        ck(rsl1.rc == 2 && rsl1.err && strstr(rsl1.err, "backup-inside-cache") != 0 &&
+           rsl2.rc == 2 && rsl2.err && strstr(rsl2.err, "backup-inside-cache") != 0 &&
+           rslv.rc == 2 && rslv.err && strstr(rslv.err, "backup-inside-cache") != 0,
+           "backup-evidence-symlink-to-cache-refused");
+        np_free(&rsl1); np_free(&rsl2); np_free(&rslv);
+
+        char *bk_rl[] = {bin, "backup-evidence", "--version", "0.0.99", "--chain-dir", bchain, "--prerun-dir", bpre, "--backup-dir", rsub, "--repo", brepo, 0};
+        np_result rrl = actual(bk_rl);
+        ck(rrl.rc == 2 && rrl.err && strstr(rrl.err, "backup-inside-repo") != 0,
+           "backup-evidence-symlink-to-repo-refused");
+        np_free(&rrl);
         if (sy_remove_all(btest)) return 2;
     }
     /* (5) usage */

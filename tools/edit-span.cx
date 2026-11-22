@@ -14,6 +14,7 @@
  * This is single-file atomic visibility, not concurrent CAS or a transaction. */
 #pragma unisa use sys.fs
 #pragma unisa use text.text
+#pragma unisa use text.utf8
 #pragma unisa use mem.arena
 #define ES_CAP 1048576
 
@@ -30,6 +31,16 @@ static void es_publish(const char *path, const char *out, long n, int mode) {
     if (sy_close(fd)) bad = 1;
     if (!bad && sy_rename(tmp, path)) bad = 1;
     if (bad) { sy_unlink(tmp); es_die("cannot publish", path); }
+}
+
+/* A file that is valid UTF-8 stays valid: OLD/NEW/REPLACEMENT bytes are copied verbatim, so a stray lead byte in an
+   argument would otherwise be written without a word.  Files that are not UTF-8 to begin with are not judged. */
+static void es_u8gate(const char *orig, long on, const char *out, long n) {
+    long bad = 0;
+    if (tx_utf8_valid(orig, on, 0) == 1 && tx_utf8_valid(out, n, &bad) != 1) {
+        char at[32]; cx_fmt(at, sizeof at, "%ld", bad);
+        es_die("REFUSE output would not be valid UTF-8, first bad byte offset", at);
+    }
 }
 
 typedef struct { long at, oldn, newn; const char *newtext; } EsMatch;
@@ -74,6 +85,7 @@ static int es_text(int argc, char **argv, int ar, int mode) {
         at += m[k].oldn;
     }
     while (at < n) out[o++] = b[at++];
+    es_u8gate(b, n, out, o);
     es_publish(argv[1], out, o, mode);
     printf("REPLACED\t%s\ttext %ld\t%ld bytes -> %ld bytes\n", argv[1], count, n, total);
     return 0;
@@ -119,6 +131,7 @@ int main(int argc, char **argv) {
     for (i = 0; i < s0; i++) out[o++] = b[i];
     for (i = 0; i < (long)rn; i++) out[o++] = r[i];
     for (i = s1; i < (long)n; i++) out[o++] = b[i];
+    es_u8gate(b, (long)n, out, o);
     es_publish(argv[1], out, o, st.mode);
     printf("REPLACED\t%s\tlines %ld..%ld\t%ld bytes -> %ld bytes\n", argv[1], first, last, s1 - s0, (long)rn);
     return 0;

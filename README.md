@@ -19,7 +19,7 @@ A C99 compiler for six targets, {Linux, macOS, Windows} x {x86-64, arm64}: its o
 <a id="builtin"></a>
 ## Built-in capabilities
 
-Measured on the 0.0.84 public build (`unisacc 0.0.84`, APE 8417722 bytes, Linux x86-64 host; the POSIX and asm figures are 0.0.82 measurements not re-measured on 0.0.83 or 0.0.84, for the 0.0.83 fixes see [release/notes-0.0.83.md](release/notes-0.0.83.md), for 0.0.84 see [release/notes-0.0.84.md](release/notes-0.0.84.md)). Details: [prd.md 1](prd.md#1-unisacccom-是什么), [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制).
+Measured on the 0.0.90 public build (`unisacc 0.0.90`, APE 8991222 bytes, Linux x86-64 host; the POSIX and asm figures are 0.0.82 measurements not re-measured on 0.0.83 through 0.0.90, for the 0.0.83 fixes see [release/notes-0.0.83.md](release/notes-0.0.83.md), for 0.0.90 see [release/notes-0.0.90.md](release/notes-0.0.90.md)). Details: [prd.md 1](prd.md#1-unisacccom-是什么), [docs/readme-detail.md 二](docs/readme-detail.md#二使用手册命令选项头文件限制).
 
 | Capability | What it is | Measured state and limits |
 |---|---|---|
@@ -30,11 +30,11 @@ Measured on the 0.0.84 public build (`unisacc 0.0.84`, APE 8417722 bytes, Linux 
 
 Also: one APE file runs on Linux and macOS (x86-64, arm64); it writes ELF, Mach-O and PE for six targets; `-c` and `-S` give objects and assembly.
 
-Real runs (0.0.84):
+Real runs (0.0.90):
 
 ```text
 $ sh ./unisacc.com --version
-unisacc 0.0.84
+unisacc 0.0.90
 $ sh ./unisacc.com h.c a b          # h.c prints argc
 hello c argc=3
 $ sh ./unisacc.com hello.cx -- a b  # #pragma unisa use text.text::tx_len
