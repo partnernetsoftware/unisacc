@@ -242,6 +242,95 @@ static int others(const char *out) {
     return c;
 }
 
+static int src_has_str_literal(const char *b, long n, const char *lit, long ln) {
+    long i = 0;
+    while (i < n) {
+        if (b[i] == '"') {
+            long s = ++i;
+            while (i < n && b[i] != '"' && b[i] != '\n') { if (b[i] == '\\' && i + 1 < n) i++; i++; }
+            if (i - s == ln && tx_same(b + s, ln, lit, ln)) return 1;
+            if (i < n) i++;
+        } else {
+            i++;
+        }
+    }
+    return 0;
+}
+
+static int csv_has_exact(const char *s, long n, const char *want, long wn) {
+    long i = 0;
+    while (i <= n) {
+        long e = i;
+        while (e < n && s[e] != ',') e++;
+        if (e - i == wn && tx_same(s + i, wn, want, wn)) return 1;
+        if (e >= n) break;
+        i = e + 1;
+    }
+    return 0;
+}
+
+/* Derive expected non-own affected batch count for tools/tape-gap.cx directly from registry tables
+   (tests/batches.tsv + tests/batch-product-inputs.tsv) so new batches referencing it do not break a fixed literal. */
+static int expected_tape_gap_others(void) {
+    char decl[32][64], last_src[256];
+    int ndecl = 0, last_hit = 0, want = 0;
+    size_t dn = 0, bn = 0;
+    char *db = cx_read("tests/batch-product-inputs.tsv", &dn);
+    char *bb = cx_read("tests/batches.tsv", &bn);
+    long at = 0;
+    last_src[0] = 0;
+    if (db) {
+        while (at < (long)dn) {
+            long e = tx_chr(db + at, (long)dn - at, '\n'), ln = e < 0 ? (long)dn - at : e;
+            long o0, l0, o1, l1, o2, l2;
+            if (ln > 3 && db[at] != '#' &&
+                !tx_field(db + at, ln, '\t', 0, &o0, &l0) && l0 == 2 && tx_same(db + at + o0, 2, "id", 2) &&
+                !tx_field(db + at, ln, '\t', 1, &o1, &l1) && l1 > 0 && l1 < 64 &&
+                !tx_field(db + at, ln, '\t', 2, &o2, &l2) &&
+                csv_has_exact(db + at + o2, l2, "tools/tape-gap.cx", 17)) {
+                if (ndecl < 32) { mm_copy(decl[ndecl], 64, db + at + o1, l1); decl[ndecl][l1] = 0; ndecl++; }
+            }
+            at += ln + 1;
+        }
+        free(db);
+    }
+    if (!bb) return -1;
+    at = 0;
+    while (at < (long)bn) {
+        long e = tx_chr(bb + at, (long)bn - at, '\n'), ln = e < 0 ? (long)bn - at : e;
+        long o0, l0, o1, l1, o3, l3, o5, l5;
+        if (ln > 0 && bb[at] != '#' &&
+            !tx_field(bb + at, ln, '\t', 0, &o0, &l0) && l0 > 0 && l0 < 128 &&
+            !tx_field(bb + at, ln, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bb + at + o1, 11, "IMPLEMENTED", 11) &&
+            !tx_field(bb + at, ln, '\t', 3, &o3, &l3) && l3 > 0 && l3 < 256 &&
+            !tx_field(bb + at, ln, '\t', 5, &o5, &l5) &&
+            ((l5 == 10 && tx_same(bb + at + o5, 10, "lnx/x86_64", 10)) || (l5 == 1 && bb[at + o5] == '-'))) {
+            char probe[160], src[256];
+            int is_decl = 0, i;
+            if (!cx_fmt(probe, sizeof probe, "AFFECTED\t%.*s\t", (int)l0, bb + at + o0) && !own(probe, tx_len(probe, sizeof probe))) {
+                for (i = 0; i < ndecl; i++) {
+                    if (tx_len(decl[i], 64) == l0 && tx_same(decl[i], l0, bb + at + o0, l0)) { is_decl = 1; break; }
+                }
+                if (is_decl) {
+                    want++;
+                } else {
+                    mm_copy(src, sizeof src, bb + at + o3, l3); src[l3] = 0;
+                    if (!tx_eqz(src, last_src)) {
+                        size_t sn = 0; char *sb = cx_read(src, &sn);
+                        last_hit = (sb && src_has_str_literal(sb, (long)sn, "tools/tape-gap.cx", 17)) ? 1 : 0;
+                        free(sb);
+                        mm_copy(last_src, sizeof last_src, src, l3 + 1);
+                    }
+                    if (last_hit) want++;
+                }
+            }
+        }
+        at += ln + 1;
+    }
+    free(bb);
+    return want;
+}
+
 
 /* Index the independent full-dump oracle once. Each family keeps row offsets in original order;
    queries copy those exact bytes, while the actual CLI --family output is still tested for every key. */
@@ -691,9 +780,10 @@ int main(int argc, char **argv) {
         ck(has(o, "AFFECTED\tbatch-split\twhy=cx/sys/time.cx\tvia=literal-use\n") && !has(o, "\tcxroot-check\t"), "time-literal-use-only-where-reached");
     }
     {   char *a[] = {"--files", "tools/tape-gap.cx", "--list-only", 0};
+        int want_tg = expected_tape_gap_others();
         rc = tool(a, o, OUTCAP);
-        ck(rc == 0 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n")
-           && has(o, "AFFECTED\tunit-frontcache-equiv0\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == 12, "tape-gap-literal");
+        ck(rc == 0 && want_tg >= 2 && has(o, "AFFECTED\ttape-gap-tool\twhy=tools/tape-gap.cx\tvia=literal\n")
+           && has(o, "AFFECTED\tunit-frontcache-equiv0\twhy=tools/tape-gap.cx\tvia=literal\n") && others(o) == want_tg, "tape-gap-literal");
     }
     {   char *a[] = {"--files", "tools/refactor/strcmp-truth.tsv", 0};
         rc = tool(a, o, OUTCAP);
