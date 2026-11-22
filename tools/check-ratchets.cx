@@ -19,7 +19,7 @@ static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tratche
 
 static int run_argv(char **argv, char *out, long cap) {
     int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    pid = px_spawn_spool(argv, 0, 0, &ofd, 0);
+    pid = px_spawn_spool(argv, 0, SY_SPAWN_ERR_TO_OUT, &ofd, 0);
     if (pid < 0) return -1;
     while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
     out[n] = 0;
@@ -109,6 +109,104 @@ int main(int argc, char **argv) {
             rc = run(fr, o, sizeof o);
             ck(rc == 1 && has(o, "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 file above baseline\n") && has(o, "  cxraw: apps/x.cx has 3 raw lines, baseline 1\n")
                && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=17\tfail=1\t") && lines(o) == 20, "from-run-over-baseline-fixture");
+            /* Z2 coreapi 5-symbol replay: ratchets --rows, ratchets --from-run, and precommit --from-run must block all 5 CORE-NEW rows */
+            {
+                const char *z2_core =
+                    "CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_umask\tint (int mask)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_chown\tint (const char*path,int uid,int gid)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_pipe2_sys\tint (int fds[2],int flags)\n"
+                    "CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n"
+                    "CORE-SIG cx/mem/heap.cx\tmm_alloc\tbaseline void *(long n)\tnow void *(size_t n)\n"
+                    "CORE-MISSING cx/text/text.cx\ttx_old\t(no non-static definition in any frozen module)\n"
+                    "CORE-ALIAS-CALLERS cx/sys/fs.cx\tcx_read\tcaller files 12 > baseline 10\n"
+                    "cxinclude: cx-wildcard-product: src/drive.cx uses a use X::* wildcard (product layer must name imports)\n"
+                    "FAIL\texec/pp/start-result.tsv\t4 above 2\n"
+                    "coreapi: FAIL: 37 modules, 256 exported symbols (baseline 251); new 5, missing 0, signature 0, alias callers 0 (--write ratchets down)\n"
+                    "CORE_INTERFACE\tok=0\tnew=5\tmissing=0\tsignature=0\talias=0\n";
+                char sf[4400], *ra[] = {"--rows", sf, 0}, *rp[] = {"--rows", sf, "--only", "cx/sys/posix.cx", 0};
+                cx_fmt(sf, sizeof sf, "%s/z2-core.txt", d);
+                cx_write(sf, z2_core, tx_len(z2_core, 4096));
+                rc = run(ra, o, sizeof o);
+                ck(rc == 0 && lines(o) == 10 && has(o, "CORE-NEW cx/sys/posix.cx\tsy_fchmod") && has(o, "CORE-NEW cx/sys/proc.cx\tsy_pipe2")
+                   && has(o, "CORE-SIG cx/mem/heap.cx\tmm_alloc") && has(o, "CORE-MISSING cx/text/text.cx\ttx_old")
+                   && has(o, "CORE-ALIAS-CALLERS cx/sys/fs.cx\tcx_read") && has(o, "cx-wildcard-product: src/drive.cx")
+                   && has(o, "FAIL\texec/pp/start-result.tsv\t4 above 2") && !has(o, "coreapi: FAIL:"), "coreapi-and-extended-rows-kept");
+                rc = run(rp, o, sizeof o);
+                ck(rc == 0 && lines(o) == 4 && has(o, "sy_fchmod") && has(o, "sy_pipe2_sys") && !has(o, "cx/sys/proc.cx"), "coreapi-rows-only-posix");
+                sy_unlink(sf);
+            }
+            {
+                const char *z2_out =
+                    "CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_umask\tint (int mask)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_chown\tint (const char*path,int uid,int gid)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_pipe2_sys\tint (int fds[2],int flags)\n"
+                    "CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n"
+                    "coreapi: FAIL: 37 modules, 256 exported symbols (baseline 251); new 5, missing 0, signature 0, alias callers 0 (--write ratchets down)\n";
+                en = 0;
+                for (k = 0; k < 18; k++) {
+                    const char *body = (k == 7) ? z2_out : "r: ok: fine\n";
+                    int bad = (k == 7);
+                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); cx_write(p, body, tx_len(body, 1024));
+                    cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n",
+                           2 * k + 1, nm[k], 2 * k + 2, nm[k], bad ? "fail" : "ok", bad ? 1 : 0);
+                    if (en + tx_len(line, 256) < (long)sizeof ev) { long l = tx_len(line, 256); for (long j = 0; j < l; j++) ev[en + j] = line[j]; en += l; }
+                }
+                cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
+                rc = run(fr, o, sizeof o);
+                ck(rc == 1 && has(o, "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 37 modules, 256 exported symbols")
+                   && has(o, "  CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n")
+                   && has(o, "  CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n")
+                   && lines(o) == 24, "coreapi-z2-from-run-emits-5-indented-offenders");
+                /* Save ratchets output as DIR/out/ratchets.out and judge via precommit.cx -- --from-run DIR with staged posix.cx & proc.cx */
+                cx_fmt(p, sizeof p, "%s/rk-ratchets-save.out", od);
+                {
+                    char rout[4400], idx[4400], lintd[4400], lp1[4400], lp2[4400];
+                    const char *ev_pc =
+                        "EVT\t1\tlint\tstart\t0\t0\texec\nEVT\t2\tlint\tok\t5\t0\tout=1\n"
+                        "EVT\t3\tlintr1\tstart\t0\t0\texec\nEVT\t4\tlintr1\tok\t5\t0\tout=1\n"
+                        "EVT\t5\ttlibfrozen\tstart\t0\t0\texec\nEVT\t6\ttlibfrozen\tok\t5\t0\tout=1\n"
+                        "EVT\t99999\tratchets\tfail\t5\t1\tfrom-run\n";
+                    const char *lint_ok = "CX_LINT\tfiles=2\tfindings=0\telapsed_ms=1\n";
+                    const char *tlib_ok = "TLIB_FAST\tchecked=1\tmismatch=0\n";
+                    cx_fmt(rout, sizeof rout, "%s/ratchets.out", od); cx_write(rout, o, tx_len(o, sizeof o));
+                    cx_fmt(p, sizeof p, "%s/lint.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/lintr1.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/tlibfrozen.out", od); cx_write(p, tlib_ok, tx_len(tlib_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev_pc, tx_len(ev_pc, 1024));
+                    cx_fmt(lintd, sizeof lintd, "%s/lintdir", d); sy_mkdir(lintd, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx", lintd); sy_mkdir(lp1, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys", lintd); sy_mkdir(lp1, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys/posix.cx", lintd); cx_write(lp1, "/* x */\n", 8);
+                    cx_fmt(lp2, sizeof lp2, "%s/cx/sys/proc.cx", lintd); cx_write(lp2, "/* x */\n", 8);
+                    cx_fmt(idx, sizeof idx, "%s/test.idx", d);
+                    sy_setenv("GIT_INDEX_FILE", idx, 1);
+                    {
+                        char *rt[] = {"git", "read-tree", "HEAD", 0};
+                        char *ci1[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/posix.cx", 0};
+                        char *ci2[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/proc.cx", 0};
+                        char *pc_fr[] = {"--from-run", d, 0};
+                        (void)run_argv(rt, o, sizeof o);
+                        (void)run_argv(ci1, o, sizeof o);
+                        (void)run_argv(ci2, o, sizeof o);
+                        rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                        sy_unsetenv("GIT_INDEX_FILE");
+                        ck(rc == 1 && has(o, "precommit: blocked: CORE-NEW cx/sys/posix.cx\tsy_fchmod")
+                           && has(o, "precommit: blocked: CORE-NEW cx/sys/proc.cx\tsy_pipe2")
+                           && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=5")
+                           && has(o, "PRECOMMIT_GATE_FAIL\tgate=ratchets\treason=ratchet-over"),
+                           "precommit-blocks-z2-coreapi-5-symbols");
+                    }
+                    sy_unlink(idx); sy_unlink(lp1); sy_unlink(lp2);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys", lintd); sy_rmdir(lp1);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx", lintd); sy_rmdir(lp1);
+                    sy_rmdir(lintd); sy_unlink(rout);
+                    cx_fmt(p, sizeof p, "%s/lint.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/lintr1.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/tlibfrozen.out", od); sy_unlink(p);
+                }
+            }
             for (k = 0; k < 18; k++) { cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); sy_unlink(p); }
             cx_fmt(p, sizeof p, "%s/events.tsv", d); sy_unlink(p); sy_rmdir(od); sy_rmdir(d);
         }
