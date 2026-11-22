@@ -19,6 +19,21 @@
 
 `gpu-stencil-ops-pixel.cx` 在 ujs 尖端两次到达浏览器读回并失败，输出 `browser_read_failed`、`stencil_values=0`。本批没有改动该门、模板实现、GPU 桥或模板常量清单，也没有新增依赖该门的清单项。此门不作为本批通过证据。主线对照未取得同编译器下的有效读回，成因待定位。GPU 四片并集及其原有断言另行通过。
 
+## A 栏 35 项分组
+
+以 b07f6b9 的燃尽表为基线。每组记录晋级首先要补的合同，表中其余方法缺口继续由燃尽表逐项追踪。
+
+| 组 | 类与缺口 |
+| --- | --- |
+| 纹理 JSON 与生命周期 | Texture 缺完整公共字段与图像引用往返。FramebufferTexture 缺捕获源引用与参数往返。DepthTexture 缺附件描述往返与独立复制。CompressedTexture、CompressedArrayTexture、CompressedCubeTexture 缺 mip 描述往返和复制，分别覆盖二维、数组层、六面。 |
+| 对象 JSON 与生命周期 | Object3D、Scene 缺递归对象及场景资源往返。LOD 缺阈值、迟滞和子对象引用。InstancedMesh 缺矩阵、颜色与实例数，BatchedMesh 缺实例和几何批次状态。CubeCamera 缺子相机、六面目标引用与复制合同。 |
+| 曲线 JSON 与生命周期 | ArcCurve、EllipseCurve 缺参数往返和克隆。CatmullRomCurve3、SplineCurve 缺控制点复制和往返。CurvePath 缺子曲线递归往返及克隆。 |
+| 缓冲与动画 JSON | InterleavedBufferAttribute 缺共享缓冲身份和克隆往返。InstancedBufferAttribute 缺除数及数组往返。KeyframeTrack 缺基类轨道往返和克隆。 |
+| 音频对象与宿主接线 | AudioListener 缺过滤链、对象复制和往返。Audio 缺播放节点、暂停与对象往返。PositionalAudio 缺锥形衰减、宿主接线和对象往返。 |
+| GPU 目标与渲染接线 | WebGLRenderTarget、WebGL3DRenderTarget、WebGLArrayRenderTarget、WebGLMultipleRenderTargets、WebGLCubeRenderTarget 缺具名构造及尺寸、复制、克隆与资源释放的类级验收。WebGLRenderer 缺完整场景入口及上下文恢复。PMREMGenerator 缺场景和等距柱状入口与完整预滤链。 |
+| 加载器接线 | CubeTextureLoader 缺通用配置和六面图像解码接线。ObjectLoader 缺资源表、材质数组和骨架绑定。 |
+| 着色器与格式映射 | ShaderChunk 缺内建片段库和 GPU 接线。ShaderLib 缺更多程序模板。WebGLUtils 已有非压缩格式门，压缩扩展待设备证据。 |
+
 ## 网格与纹理对象升级核对
 
 这批类的复制、克隆或资源分派已有独立验收及反例。r160 的网格类继承 Object3D.toJSON，纹理类继承 Texture.toJSON，Skeleton 自有 toJSON。表中记录各类 JSON 往返的证据或缺口。
