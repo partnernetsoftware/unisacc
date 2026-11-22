@@ -79,15 +79,17 @@ CSYM(core_memory_set):
     ldr x25,[x19,#MEM_USED]
     lsl x0,x22,#1
     cbnz x0,Lmscap
-    mov x0,#65536
+    mov x0,#256
 Lmscap:
     str x0,[x19,#MEM_CAP]
-    mov x1,#8
-    bl CSYM(calloc)
+    lsl x1,x0,#3
+    mov x0,#0
+    bl CSYM(realloc)
     str x0,[x19,#MEM_KEYS]
-    ldr x0,[x19,#MEM_CAP]
-    mov x1,#8
-    bl CSYM(calloc)
+    ldr x1,[x19,#MEM_CAP]
+    lsl x1,x1,#3
+    mov x0,#0
+    bl CSYM(realloc)
     str x0,[x19,#MEM_VALUES]
     ldr x0,[x19,#MEM_CAP]
     mov x1,#1

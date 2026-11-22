@@ -12,10 +12,20 @@ void core_memory_set(CoreMemory *,I,I);
 static int calls,fail_at,expected;
 static size_t allocation_cap;
 static CoreMemory fault;
+void *memory_realloc(void *ptr,size_t bytes) {
+    assert(ptr==NULL);
+    int which=calls%3;calls++;
+    assert(which==0 || which==1);
+    if(!which)allocation_cap=bytes/8;
+    assert(bytes==allocation_cap*8);
+    if(calls==fail_at)return NULL;
+    void *p=malloc(bytes);assert(p);
+    /* Dirty-memory poison bytes (0xA5): keys/values are NOT zero-cleared. */
+    memset(p,0xa5,bytes);return p;
+}
 void *memory_calloc(size_t n,size_t size) {
     int which=calls%3;calls++;
-    if(!which)allocation_cap=n;
-    assert(n==allocation_cap && size==(which==2?1:8));
+    assert(which==2 && n==allocation_cap && size==1);
     if(calls==fail_at)return NULL;
     assert(n<=SIZE_MAX/size);void *p=malloc(n*size);assert(p);
     memset(p,0,n*size);return p;
@@ -29,7 +39,7 @@ void core_host_panic(const char *s) {
         assert(!strcmp(s,"memory capacity overflow") && calls==0);
         assert(fault.cap==((size_t)1<<60) && fault.n==fault.cap/2);
     } else {
-        assert(!strcmp(s,"out of memory") && calls==3 && fault.cap==65536 && fault.n==0);
+        assert(!strcmp(s,"out of memory") && calls==3 && fault.cap==256 && fault.n==0);
         assert((fault.keys==NULL)==(expected==1));
         assert((fault.values==NULL)==(expected==2));
         assert((fault.used==NULL)==(expected==3));
@@ -42,9 +52,10 @@ static void clear(CoreMemory *m) {
 static void compare(const CoreMemory *a,const CoreMemory *b) {
     assert(a->cap==b->cap && a->n==b->n);
     if(a->cap) {
-        assert(!memcmp(a->keys,b->keys,a->cap*sizeof(I)));
-        assert(!memcmp(a->values,b->values,a->cap*sizeof(I)));
         assert(!memcmp(a->used,b->used,a->cap));
+        for(size_t j=0;j<a->cap;j++) if(a->used[j]) {
+            assert(a->keys[j]==b->keys[j] && a->values[j]==b->values[j]);
+        }
     }
 }
 static I key(int i) { return (I)((uint64_t)i*UINT64_C(0x9e3779b97f4a7c15)); }
@@ -70,9 +81,9 @@ int main(int argc,char **argv) {
     for(int i=0;i<6;i++)inv*=2-factor*inv;
     assert(factor*inv==1);
     for(int i=0;i<64;i++) {
-        I k=(I)((((uint64_t)i<<36)|((uint64_t)65535<<20))*inv);
+        I k=(I)((((uint64_t)i<<36)|((uint64_t)255<<20))*inv);
         core_mset_c(&a,k,i+100);core_memory_set(&b,k,i+100);
-        size_t slot=(65535+i)&65535;
+        size_t slot=(255+i)&255;
         assert(b.used[slot] && b.keys[slot]==k && b.values[slot]==i+100);
         assert(core_memory_get(&b,k)==i+100);
     }
