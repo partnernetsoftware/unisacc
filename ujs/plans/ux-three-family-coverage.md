@@ -69,6 +69,8 @@ BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 直接软件入口支
 
 真实设备对压缩源的原样上传、格式扩展、mip 完整性、数组分层、立方体六面采样及释放仍待取证。r160 对照在这些软件门中只用于枚举与纹理描述，像素期望由独立金值给出。硬件格式的 A/B 计量保持原口径。
 
+PVRTC1 四种格式已验 r160 枚举、RGB/RGBA 区分、2/4 bpp 块足迹与最小 mip 字节数。像素软件解码和真实设备压缩上传待验。字节预算按 Khronos WEBGL_compressed_texture_pvrtc 规范计算。
+
 ## 几何与材质尚需的类专有验证
 
 (1) EdgesGeometry 与 WireframeGeometry 的嵌套 PlaneGeometry 源已验，其他源类型和通用资源图仍待接。PolyhedronGeometry 的数组、半径和细分已验，专有复制与释放仍待补。
