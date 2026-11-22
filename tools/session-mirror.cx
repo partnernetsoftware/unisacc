@@ -12,7 +12,11 @@
  * status: gen=,gens=,files=,bytes=,last_run=,marker_ok=
  * restore DEST (must not exist): latest gen; per file:
  *   no SRC -> copy mirror; SRC size>=mir -> copy SRC; SRC size<mir -> mirror||SRC (old+tail).
+ * Walk uses sy_lstat only (never follows symlinks); skips .mirror-gen; skips kind 'l'.
+ * Hardlink EXDEV/other failure: REFUSE with from and to paths; never silent copy.
+ * Prune: only under MIRROR, only gen-* with gen/.gen-stamp older than 3 days (not src).
  * --mutant-skip-marker: test hook, skip reset on missing marker.
+ * --mutant-prune-src: test hook, prune walks SRC instead of MIRROR (fixture must go red via canary).
  * Check: tools/check-session-mirror.cx (batch session-mirror). */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -28,6 +32,7 @@
 
 static char g_src[SM_PATH], g_mir[SM_PATH];
 static int g_mutant;
+static int g_mutant_prune_src;
 static long g_files, g_bytes;
 
 static int die(const char *m) { fprintf(stderr, "session-mirror: %s\n", m); return 2; }
@@ -84,7 +89,7 @@ static int sync_one(const char *sroot, const char *groot, const char *rel) {
     if (is_mem(rel)) {
         if (ensure_parent(to) || sy_copy(from, to, 0644)) return -1;
     } else if (link_skip(from, to)) {
-        fprintf(stderr, "session-mirror: REFUSE hardlink %s\n", from); return -1;
+        fprintf(stderr, "session-mirror: REFUSE hardlink from=%s to=%s\n", from, to); return -1;
     }
     g_files++; g_bytes += st.size > 0 ? st.size : 0; return 0;
 }
@@ -104,6 +109,7 @@ static int walk(const char *sroot, const char *groot, const char *rel, int depth
         else if (cx_fmt(crel, sizeof crel, "%s", d.name)) { rc = -ENAMETOOLONG; break; }
         if (cx_fmt(cabs, sizeof cabs, "%s/%s", sroot, crel)) { rc = -ENAMETOOLONG; break; }
         if (sy_lstat(cabs, &st)) continue;
+        if (st.kind == 'l') continue; /* never follow symlinks */
         if (st.kind == 'd') { if ((rc = walk(sroot, groot, crel, depth + 1))) break; }
         else if (st.kind == 'f') { if ((rc = sync_one(sroot, groot, crel))) break; }
     }
@@ -122,18 +128,30 @@ static int max_gen(void) {
     }
     sy_dir_close(&d); return max;
 }
-static void prune(void) {
+static int gen_stamp_old(const char *gen_dir, long now) {
+    char sp[SM_PATH]; unsigned char *b; int64_t n; long ts = 0; int i = 0;
+    if (cx_fmt(sp, sizeof sp, "%s/.gen-stamp", gen_dir)) return 0;
+    if (sy_read_file(sp, &b, &n, 64) < 0 || !b || n <= 0) return 0;
+    while (i < (int)n && b[i] >= '0' && b[i] <= '9') { ts = ts * 10 + (b[i] - '0'); i++; }
+    mm_free(b);
+    return ts > 0 && now - ts > SM_KEEP;
+}
+/* Prune only under root (must be MIRROR unless mutant). Never recurse into SRC. */
+static void prune_at(const char *root) {
     sy_dir_t d; int n; long now = sy_now_ms() / 1000;
-    if (sy_dir_open(&d, g_mir)) return;
+    if (!root || !root[0] || sy_dir_open(&d, root)) return;
     for (;;) {
         char path[SM_PATH]; sy_stat_t st;
         n = sy_dir_next(&d); if (n <= 0) break;
         if (!tx_prefix(d.name, d.name_n, "gen-", 4)) continue;
-        if (cx_fmt(path, sizeof path, "%s/%s", g_mir, d.name)) continue;
+        if (cx_fmt(path, sizeof path, "%s/%s", root, d.name)) continue;
         if (sy_lstat(path, &st) || st.kind != 'd') continue;
-        if (st.mtime > 0 && now - st.mtime > SM_KEEP) { printf("MIRROR_PRUNE\t%s\n", path); sy_remove_all(path); }
+        if (gen_stamp_old(path, now)) { printf("MIRROR_PRUNE\t%s\n", path); sy_remove_all(path); }
     }
     sy_dir_close(&d);
+}
+static void prune(void) {
+    prune_at(g_mutant_prune_src ? g_src : g_mir);
 }
 static int cmd_run(void) {
     char mark[SM_PATH], groot[SM_PATH], last[SM_PATH], stamp[64];
@@ -152,6 +170,11 @@ static int cmd_run(void) {
     if (sy_mkdir_all(groot, 0700)) return die("mkdir gen");
     g_files = g_bytes = 0;
     if (walk(g_src, groot, "", 0)) return die("sync");
+    {
+        char sp[SM_PATH], sb[64]; long now = sy_now_ms() / 1000;
+        if (cx_fmt(sp, sizeof sp, "%s/.gen-stamp", groot) || cx_fmt(sb, sizeof sb, "%ld\n", now)) return die("gen-stamp");
+        if (sy_write_file(sp, sb, tx_len(sb, sizeof sb), 0644)) return die("gen-stamp write");
+    }
     prune();
     if (cx_fmt(stamp, sizeof stamp, "%ld\n", sy_now_ms() / 1000) || cx_fmt(last, sizeof last, "%s/last-run.txt", g_mir)) return die("stamp");
     if (sy_write_file(last, stamp, tx_len(stamp, sizeof stamp), 0644)) return die("last-run");
@@ -259,6 +282,7 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--src") && i + 1 < argc) { if (cx_fmt(g_src, sizeof g_src, "%s", argv[++i])) return die("src"); }
         else if (tx_eqz(argv[i], "--mirror") && i + 1 < argc) { if (cx_fmt(g_mir, sizeof g_mir, "%s", argv[++i])) return die("mirror"); }
         else if (tx_eqz(argv[i], "--mutant-skip-marker")) g_mutant = 1;
+        else if (tx_eqz(argv[i], "--mutant-prune-src")) g_mutant_prune_src = 1;
         else if (tx_eqz(argv[i], "run") || tx_eqz(argv[i], "status") || tx_eqz(argv[i], "restore")) {
             cmd = argv[i];
             if (tx_eqz(cmd, "restore")) { if (i + 1 >= argc) return die("restore DEST"); dest = argv[++i]; }

@@ -2,9 +2,10 @@
  *
  *   sh ./unisacc.com tools/check-session-mirror.cx
  *
- * Builds SRC/MIRROR under $TMPDIR, asserts hardlink inode match, memory copy,
- * wipe+short-tail restore merge (old||tail), and mutant-skip-marker must not
- * emit MIRROR_RESET (detection required). Ends with CHECK_SESSION_MIRROR. */
+ * Builds SRC/MIRROR under $TMPDIR. Asserts hardlink, memory copy, no symlink mirror,
+ * wipe+short-tail (inode != mirror) restore old+tail, longer-src restore whole,
+ * prune spares src/gen-trap canary, mutant-skip-marker, mutant-prune-src red-under-mutation.
+ * Ends with CHECK_SESSION_MIRROR. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -45,11 +46,14 @@ int main(void) {
 
     /* seed SRC */
     cx_fmt(cmd, sizeof cmd,
-        "set -e; mkdir -p '%s/memory' '%s/sess1'; "
+        "set -e; mkdir -p '%s/memory' '%s/sess1' '%s/gen-trap'; "
         "printf 'OLDSEG\\n' > '%s/chat.jsonl'; "
         "printf 'MEM1\\n' > '%s/memory/notes.txt'; "
-        "printf 'S1\\n' > '%s/sess1/a.jsonl'",
-        src, src, src, src, src);
+        "printf 'S1\\n' > '%s/sess1/a.jsonl'; "
+        "printf 'CANARY\\n' > '%s/gen-trap/canary.txt'; "
+        "printf '1\\n' > '%s/gen-trap/.gen-stamp'; "
+        "ln -s chat.jsonl '%s/link-chat.jsonl'",
+        src, src, src, src, src, src, src, src, src);
     ok("fixture-seed", sh(cmd) == 0);
 
     /* first run -> reset gen=1 */
@@ -65,6 +69,11 @@ int main(void) {
     cx_fmt(cmd, sizeof cmd, "%s/gen-1/chat.jsonl", mir);
     ok("stat-mir-chat", sy_lstat(cmd, &b) == 0);
     ok("hardlink-inode", a.dev == b.dev && a.ino == b.ino);
+    {
+        char lp[1200]; sy_stat_t ls;
+        cx_fmt(lp, sizeof lp, "%s/gen-1/link-chat.jsonl", mir);
+        ok("symlink-not-mirrored", sy_lstat(lp, &ls) != 0);
+    }
 
     /* memory is a distinct inode (copy) */
     cx_fmt(cmd, sizeof cmd, "%s/memory/notes.txt", src);
@@ -82,9 +91,16 @@ int main(void) {
 
     /* wipe SRC, rebuild with short tail only */
     cx_fmt(cmd, sizeof cmd,
-        "set -e; rm -rf '%s'; mkdir -p '%s'; printf 'NEWTAIL\\n' > '%s/chat.jsonl'",
+        "set -e; rm -rf '%s'; mkdir -p '%s'; printf 'T\\n' > '%s/chat.jsonl'",
         src, src, src);
     ok("wipe-rebuild-tail", sh(cmd) == 0);
+    {
+        char sp[1200], mp[1200]; sy_stat_t ss, ms;
+        cx_fmt(sp, sizeof sp, "%s/chat.jsonl", src);
+        cx_fmt(mp, sizeof mp, "%s/gen-1/chat.jsonl", mir);
+        ok("wipe-inode-differs", sy_lstat(sp, &ss) == 0 && sy_lstat(mp, &ms) == 0 &&
+           !(ss.dev == ms.dev && ss.ino == ms.ino) && ss.size < ms.size);
+    }
 
     /* mutant: skip marker detect -> no MIRROR_RESET (wrong) */
     cx_fmt(cmd, sizeof cmd,
@@ -100,13 +116,10 @@ int main(void) {
     rc = sh(cmd);
     ok("wipe-detect-reset", rc == 0 && has("MIRROR_RESET") && has("gen=2"));
 
-    /* restore merge: need latest gen with OLDSEG still in gen-1; restore uses max gen.
-       Put OLDSEG back into gen-2 chat via linking from a rebuilt long file for merge test:
-       recreate SRC short, ensure gen-2 has short only; copy OLD into gen-1 already.
-       For merge we need mirror file longer than SRC: use gen-1 as latest by removing gen-2? 
-       Simpler: write long content into current max gen chat, keep SRC short. */
+    /* restore merge: mirror longer than short SRC -> old||tail */
     cx_fmt(cmd, sizeof cmd,
-        "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'OLDSEGMENT\n' > '%s/gen-2/chat.jsonl'; printf 'TAIL\n' > '%s/chat.jsonl'",
+        "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'OLDSEGMENT\\n' > '%s/gen-2/chat.jsonl'; "
+        "printf 'TAIL\\n' > '%s/chat.jsonl'",
         mir, mir, src);
     ok("prep-restore", sh(cmd) == 0);
 
@@ -125,6 +138,56 @@ int main(void) {
             /* OLDSEGMENT\n (11) + TAIL\n (5) = 16 */
             mm_free(b);
         } else ok("restore-old-plus-tail", 0);
+    }
+
+    /* reverse: SRC longer than mirror -> restore takes SRC whole */
+    {
+        char dest2[1100]; unsigned char *b; int64_t n; char path[1200];
+        cx_fmt(dest2, sizeof dest2, "%s/dest2", root);
+        cx_fmt(cmd, sizeof cmd,
+            "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'SHORT\\n' > '%s/gen-2/chat.jsonl'; "
+            "printf 'LONGER_SOURCE_BODY\\n' > '%s/chat.jsonl'",
+            mir, mir, src);
+        ok("prep-longer-src", sh(cmd) == 0);
+        cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' restore '%s'",
+            cwd, cwd, src, mir, dest2);
+        rc = sh(cmd);
+        ok("restore-longer-rc", rc == 0 && has("MIRROR_RESTORE"));
+        cx_fmt(path, sizeof path, "%s/chat.jsonl", dest2);
+        ok("restore-longer-read", sy_read_file(path, &b, &n, 4096) >= 0 && b);
+        if (b) {
+            ok("restore-longer-whole-src", n == 19 && b[0] == 'L');
+            mm_free(b);
+        } else ok("restore-longer-whole-src", 0);
+    }
+
+    /* re-seed SRC gen-trap after wipe; normal prune must spare canary */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/gen-trap'; printf 'CANARY\\n' > '%s/gen-trap/canary.txt'; "
+        "printf '1\\n' > '%s/gen-trap/.gen-stamp'",
+        src, src, src);
+    ok("reseed-gen-trap", sh(cmd) == 0);
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    ok("run-after-trap", rc == 0);
+    {
+        char can[1200];
+        cx_fmt(can, sizeof can, "%s/gen-trap/canary.txt", src);
+        ok("prune-spares-src-canary", sy_exists(can) == 1);
+    }
+
+    /* mutant prune-src deletes trap; prune-spares goes red if mutant is default */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' --mutant-prune-src run",
+        cwd, cwd, src, mir);
+    rc = sh(cmd);
+    {
+        char can[1200];
+        cx_fmt(can, sizeof can, "%s/gen-trap/canary.txt", src);
+        ok("mutant-prune-src-deletes-trap", rc == 0 && sy_exists(can) != 1);
     }
 
     /* status */
