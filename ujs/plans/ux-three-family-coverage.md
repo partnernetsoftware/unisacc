@@ -19,6 +19,21 @@
 
 `gpu-stencil-ops-pixel.cx` 在 ujs 尖端两次到达浏览器读回并失败，输出 `browser_read_failed`、`stencil_values=0`。本批没有改动该门、模板实现、GPU 桥或模板常量清单，也没有新增依赖该门的清单项。此门不作为本批通过证据。主线对照未取得同编译器下的有效读回，成因待定位。GPU 四片并集及其原有断言另行通过。
 
+## 网格与纹理对象升级核对
+
+这八类的复制、克隆或资源分派已有独立验收及反例。r160 的网格类继承 Object3D.toJSON，纹理类继承 Texture.toJSON，Skeleton 自有 toJSON。以下各类仍记部分，待公开字段完成往返并验收后再升级。
+
+| 类 | 已通过的验收 | 升级所缺的 JSON 往返 |
+| --- | --- | --- |
+| SkinnedMesh | skinnedmesh-clone-struct.cx 验共享骨架、绑定模式与独立绑定矩阵 | 骨架引用、绑定模式与绑定矩阵 |
+| InstancedMesh | instancedmesh-clone-struct.cx 验活跃数量、矩阵和颜色副本 | 实例数量、矩阵与可选实例颜色 |
+| BatchedMesh | batchedmesh-copy-struct.cx 独立验预留表与副本隔离 | 批次几何及实例状态。r160 直接克隆触发 image.slice TypeError，当前复制门使用独立金值 |
+| LOD | lod-lifecycle-struct.cx 对照层表、迟滞和子树克隆 | 自动更新标志、层级阈值及绑定子对象 |
+| Skeleton | skeleton-clone-struct.cx 对照骨表、逆矩阵与清零调色板 | 骨架 UUID、骨 UUID 列表及逆绑定矩阵 |
+| DataTexture | data-texture-object-struct.cx 对照 RGBA8 采样及源共享 | 公共纹理参数及源 UUID、图像尺寸、数组类型和像素字节 |
+| CubeTexture | cube-texture-object-struct.cx 对照面分派及容量拒绝 | 公共纹理参数、源 UUID 和顺序固定的六面图像引用 |
+| CanvasTexture | canvas-texture-object-struct.cx 对照真实画布、刷新和克隆 | 公共纹理参数、源 UUID 和画布图像快照引用 |
+
 ## 压缩纹理软件范围与设备缺口
 
 BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 直接软件入口支持 14 种二维足迹的 LDR 常色块和合法有限范围，sRGB 保留编码字节。HDR、非常色块的分区、权重及端点模式仍缺。EAC 的有符号与无符号 R11、RG11 可通过 CompressedTexture_decodeEAC 解码，输出保留 11 位精度的交错 16 位小端样本。ETC2 可通过 CompressedTexture_decodeETC2 解码 RGB、全 Alpha 和单比特透明，包含 T、H 与平面模式。sRGB 保留编码字节。ETC2 与 ASTC 常色块已接通二维、数组及立方体的共用软件 mip 分派。EAC 精确 11 位输出使用独立入口，ETC2、EAC 与 ASTC 的压缩原样 GPU 上传待验。BC4 与 BC5 的有符号输出为二补码 SNORM。
