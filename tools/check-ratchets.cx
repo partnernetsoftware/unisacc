@@ -373,12 +373,118 @@ int main(int argc, char **argv) {
                                     (void)run_argv(ch2, o, sizeof o);
                                     (void)run_argv(ch3, o, sizeof o);
                                     rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
-                                    sy_unsetenv("GIT_INDEX_FILE");
                                     ck(rc == 1 && has(o, "precommit: blocked: cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1")
                                        && has(o, "precommit: blocked: cxraw: move target src/a has b.cx baseline 3 != move 2")
                                        && has(o, "precommit: blocked: CORE-NEW cx/sys/no_tab_posix.cx")
                                        && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=3"),
                                        "precommit-blocks-path-with-has-and-core-no-tab");
+                                    /* Test 27: dup-census anti-collateral: when dup-census names specific offending function(s),
+                                     * staging an unrelated tools/*.cx without that function passes (blocked=0), while staging
+                                     * a tools/*.cx containing that function (or matching the named file) blocks (blocked=1). */
+                                    {
+                                        const char *dup_rat =
+                                            "RATCHET\tdup-census\tFAIL\tdup-census: FAIL: 1 offending functions, redundant 500/400\n"
+                                            "  dup-census: my_offending_dup_fn has 3 verbatim copies across 3 tools/*.cx files (15 redundant lines; see tools/other_offender.cx)\n"
+                                            "  dup-census: tools total lines verbatim_redundant 500, baseline 400\n"
+                                            "RATCHETS\tok=17\tfail=1\telapsed_ms=10\n";
+                                        char f_clean[4400], f_dirty[4400], sha_clean[64], sha_dirty[64], ci_clean[200], ci_dirty[200];
+                                        char *ho_c[] = {"git", "hash-object", "-w", f_clean, 0};
+                                        char *ho_d[] = {"git", "hash-object", "-w", f_dirty, 0};
+                                        long sl;
+                                        cx_fmt(f_clean, sizeof f_clean, "%s/dup-clean.cx", d);
+                                        cx_fmt(f_dirty, sizeof f_dirty, "%s/dup-dirty.cx", d);
+                                        cx_write(f_clean, "/* clean tool */\nint main(void){return 0;}\n", 43);
+                                        cx_write(f_dirty, "static void my_offending_dup_fn(void){}\nint main(void){return 0;}\n", 66);
+                                        (void)run_argv(ho_c, sha_clean, sizeof sha_clean);
+                                        sl = tx_len(sha_clean, sizeof sha_clean);
+                                        while (sl > 0 && (sha_clean[sl - 1] == '\n' || sha_clean[sl - 1] == '\r')) sha_clean[--sl] = 0;
+                                        (void)run_argv(ho_d, sha_dirty, sizeof sha_dirty);
+                                        sl = tx_len(sha_dirty, sizeof sha_dirty);
+                                        while (sl > 0 && (sha_dirty[sl - 1] == '\n' || sha_dirty[sl - 1] == '\r')) sha_dirty[--sl] = 0;
+                                        cx_fmt(ci_clean, sizeof ci_clean, "100644,%s,tools/check-tsv-lint.cx", sha_clean);
+                                        cx_fmt(ci_dirty, sizeof ci_dirty, "100644,%s,tools/check-tsv-lint.cx", sha_dirty);
+                                        cx_write(rout, dup_rat, tx_len(dup_rat, 1024));
+                                        {
+                                            char *u_clean[] = {"git", "update-index", "--cacheinfo", ci_clean, 0};
+                                            char *u_dirty[] = {"git", "update-index", "--cacheinfo", ci_dirty, 0};
+                                            int rc_clean, rc_dirty, ok_clean, ok_dirty;
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_clean, o, sizeof o);
+                                            rc_clean = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_clean = (rc_clean == 0 && has(o, "PRECOMMIT\tstaged_cx=1\tblocked=0"));
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_dirty, o, sizeof o);
+                                            rc_dirty = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_dirty = (rc_dirty == 1 && has(o, "precommit: blocked: RATCHET dup-census FAIL") &&
+                                                        has(o, "my_offending_dup_fn") &&
+                                                        has(o, "PRECOMMIT\tstaged_cx=1\tblocked=1"));
+                                            ck(ok_clean && ok_dirty,
+                                               "precommit-dup-census-anti-collateral-blocks-only-offender");
+                                        }
+                                        sy_unlink(f_clean); sy_unlink(f_dirty);
+                                    }
+                                    /* Test 28: ratchet_baseline_gate: raising existing keys in tests/*.tsv or build/*-baseline.tsv
+                                     * is refused with BLOCKED ratchet-baseline-raised, while lowering existing keys or adding new keys passes. */
+                                    {
+                                        const char *ok_rat = "RATCHETS\tok=18\tfail=0\telapsed_ms=10\n";
+                                        char f_ss_up[4400], f_tl_up[4400], f_dc_up[4400], f_ss_dn[4400], f_tl_dn[4400];
+                                        char s_ss_up[64], s_tl_up[64], s_dc_up[64], s_ss_dn[64], s_tl_dn[64];
+                                        char c_ss_up[200], c_tl_up[200], c_dc_up[200], c_ss_dn[200], c_tl_dn[200];
+                                        char *h1[] = {"git", "hash-object", "-w", f_ss_up, 0};
+                                        char *h2[] = {"git", "hash-object", "-w", f_tl_up, 0};
+                                        char *h3[] = {"git", "hash-object", "-w", f_dc_up, 0};
+                                        char *h4[] = {"git", "hash-object", "-w", f_ss_dn, 0};
+                                        char *h5[] = {"git", "hash-object", "-w", f_tl_dn, 0};
+                                        long sl;
+                                        cx_fmt(f_ss_up, sizeof f_ss_up, "%s/ss-up.tsv", d);
+                                        cx_fmt(f_tl_up, sizeof f_tl_up, "%s/tl-up.tsv", d);
+                                        cx_fmt(f_dc_up, sizeof f_dc_up, "%s/dc-up.tsv", d);
+                                        cx_fmt(f_ss_dn, sizeof f_ss_dn, "%s/ss-dn.tsv", d);
+                                        cx_fmt(f_tl_dn, sizeof f_tl_dn, "%s/tl-dn.tsv", d);
+                                        cx_write(f_ss_up, "src/bind.cx\t999\t3\t0\n", 20);
+                                        cx_write(f_tl_up, "unresolved\t99999\n", 17);
+                                        cx_write(f_dc_up, "total\tverbatim_groups\t99999\n", 28);
+                                        cx_write(f_ss_dn, "src/bind.cx\t1\t1\t0\nsrc/brand_new_unit.cx\t50\t20\t5\n", 48);
+                                        cx_write(f_tl_dn, "unresolved\t100\nbrand_new_metric\t50\n", 35);
+                                        (void)run_argv(h1, s_ss_up, sizeof s_ss_up); sl = tx_len(s_ss_up, 64); while (sl > 0 && (s_ss_up[sl - 1] == '\n' || s_ss_up[sl - 1] == '\r')) s_ss_up[--sl] = 0;
+                                        (void)run_argv(h2, s_tl_up, sizeof s_tl_up); sl = tx_len(s_tl_up, 64); while (sl > 0 && (s_tl_up[sl - 1] == '\n' || s_tl_up[sl - 1] == '\r')) s_tl_up[--sl] = 0;
+                                        (void)run_argv(h3, s_dc_up, sizeof s_dc_up); sl = tx_len(s_dc_up, 64); while (sl > 0 && (s_dc_up[sl - 1] == '\n' || s_dc_up[sl - 1] == '\r')) s_dc_up[--sl] = 0;
+                                        (void)run_argv(h4, s_ss_dn, sizeof s_ss_dn); sl = tx_len(s_ss_dn, 64); while (sl > 0 && (s_ss_dn[sl - 1] == '\n' || s_ss_dn[sl - 1] == '\r')) s_ss_dn[--sl] = 0;
+                                        (void)run_argv(h5, s_tl_dn, sizeof s_tl_dn); sl = tx_len(s_tl_dn, 64); while (sl > 0 && (s_tl_dn[sl - 1] == '\n' || s_tl_dn[sl - 1] == '\r')) s_tl_dn[--sl] = 0;
+                                        cx_fmt(c_ss_up, sizeof c_ss_up, "100644,%s,tests/srcshape.tsv", s_ss_up);
+                                        cx_fmt(c_tl_up, sizeof c_tl_up, "100644,%s,build/tsv-lint-baseline.tsv", s_tl_up);
+                                        cx_fmt(c_dc_up, sizeof c_dc_up, "100644,%s,build/dup-census-baseline.tsv", s_dc_up);
+                                        cx_fmt(c_ss_dn, sizeof c_ss_dn, "100644,%s,tests/srcshape.tsv", s_ss_dn);
+                                        cx_fmt(c_tl_dn, sizeof c_tl_dn, "100644,%s,build/tsv-lint-baseline.tsv", s_tl_dn);
+                                        cx_write(rout, ok_rat, tx_len(ok_rat, 256));
+                                        {
+                                            char *u1[] = {"git", "update-index", "--cacheinfo", c_ss_up, 0};
+                                            char *u2[] = {"git", "update-index", "--cacheinfo", c_tl_up, 0};
+                                            char *u3[] = {"git", "update-index", "--cacheinfo", c_dc_up, 0};
+                                            char *u4[] = {"git", "update-index", "--cacheinfo", c_ss_dn, 0};
+                                            char *u5[] = {"git", "update-index", "--cacheinfo", c_tl_dn, 0};
+                                            int rc_up, rc_dn, ok_up, ok_dn;
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u1, o, sizeof o);
+                                            (void)run_argv(u2, o, sizeof o);
+                                            (void)run_argv(u3, o, sizeof o);
+                                            rc_up = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_up = (rc_up == 1 &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=tests/srcshape.tsv key=src/bind.cx") &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=build/tsv-lint-baseline.tsv key=unresolved") &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=build/dup-census-baseline.tsv key=total/verbatim_groups"));
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u4, o, sizeof o);
+                                            (void)run_argv(u5, o, sizeof o);
+                                            rc_dn = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_dn = (rc_dn == 0 && has(o, "blocked=0"));
+                                            ck(ok_up && ok_dn,
+                                               "precommit-ratchet-baseline-only-goes-down-blocks-raise-allows-lower-and-new");
+                                        }
+                                        sy_unlink(f_ss_up); sy_unlink(f_tl_up); sy_unlink(f_dc_up);
+                                        sy_unlink(f_ss_dn); sy_unlink(f_tl_dn);
+                                    }
+                                    sy_unsetenv("GIT_INDEX_FILE");
                                 }
                             }
                         }

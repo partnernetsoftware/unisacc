@@ -204,8 +204,88 @@ static char *rk_skip_msg(const char *name, long *out_n) {
 
 static int rk_is_global_only(const char *name) {
     return tx_eqz(name, "net-deps") || tx_eqz(name, "notcovered") ||
-           tx_eqz(name, "tsv-lint") || tx_eqz(name, "dup-census") ||
-           tx_eqz(name, "ref-job-paths");
+           tx_eqz(name, "tsv-lint") || tx_eqz(name, "ref-job-paths");
+}
+
+static int rk_is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int rk_buf_has_ident(const char *b, long bn, const char *fn, long fl) {
+    long pos = 0;
+    if (!b || bn < fl || fl <= 0) return 0;
+    while (pos + fl <= bn) {
+        long hit = tx_find(b + pos, bn - pos, fn, fl);
+        if (hit < 0) break;
+        hit += pos;
+        if ((hit == 0 || !rk_is_ident_char(b[hit - 1])) &&
+            (hit + fl == bn || !rk_is_ident_char(b[hit + fl]))) {
+            return 1;
+        }
+        pos = hit + 1;
+    }
+    return 0;
+}
+
+static int rk_staged_has_ident(const char *path, long pl, const char *fn, long fl) {
+    char spec[1100], pbuf[1100];
+    char *sv[] = {"./tools/bound", "10", "git", "show", spec, 0};
+    char *sv_nb[] = {"git", "show", spec, 0};
+    int ofd = -1, pid, ex = 0, code = 0, sig = 0, found = 0;
+    long deadline = sy_now_ms() + 10000;
+    if (pl <= 0 || pl >= 1024 || fl <= 0) return 0;
+    spec[0] = ':';
+    for (long i = 0; i < pl; i++) spec[i + 1] = path[i];
+    spec[pl + 1] = 0;
+    pid = sy_spawn_pipe(sy_exists("./tools/bound") == 1 ? sv : sv_nb, 0, 0, &ofd, 0);
+    if (pid > 0 && ofd >= 0) {
+        long cap = 1 << 16, n = 0, r;
+        char *b = mm_alloc(cap);
+        while (b && sy_now_ms() < deadline && (r = sy_read(ofd, b + n, cap - 1 - n)) > 0) {
+            n += r;
+            if (n + 1 >= cap) {
+                char *g = mm_grow(b, cap * 2);
+                if (!g) break;
+                b = g;
+                cap *= 2;
+            }
+        }
+        sy_close(ofd);
+        if (sy_now_ms() >= deadline) sy_kill(pid);
+        if (sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex && code == 0 && b && n > 0) {
+            found = rk_buf_has_ident(b, n, fn, fl);
+            mm_free(b);
+            return found;
+        }
+        if (b) mm_free(b);
+    }
+    for (long i = 0; i < pl; i++) pbuf[i] = path[i];
+    pbuf[pl] = 0;
+    {
+        size_t fsz = 0;
+        char *fb = cx_read(pbuf, &fsz);
+        if (fb) {
+            found = rk_buf_has_ident(fb, (long)fsz, fn, fl);
+            mm_free(fb);
+        }
+    }
+    return found;
+}
+
+static int rk_dup_fn_hits_staged(const char *fn, long fl, const char *see_p, long see_l, const char *names, long sn) {
+    long a2;
+    for (a2 = 0; a2 < sn; ) {
+        long nl = tx_len(names + a2, sn - a2);
+        const char *p = names + a2;
+        if (nl <= 0) break;
+        if (rk_own_tool_or_table("dup-census", p, nl)) return 1;
+        if (see_l > 0 && nl == see_l && tx_same(p, nl, see_p, see_l)) return 1;
+        if (tx_prefix(p, nl, "tools/", 6) && nl > 3 && tx_same(p + nl - 3, 3, ".cx", 3)) {
+            if (rk_staged_has_ident(p, nl, fn, fl)) return 1;
+        }
+        a2 += nl + 1;
+    }
+    return 0;
 }
 
 static int rk_any_hit(const char *name, const char *names, long sn) {
@@ -234,7 +314,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
     char *rows = cx_read(rows_file, &rsz), *names = cx_read(paths_file, &psz);
     long rn = (long)rsz, sn = (long)psz, at = 0;
     char cur_rk_name[64], cur_rk_sum[256];
-    int cur_rk_fail = 0, cur_rk_gblk = 0, blocked = 0;
+    int cur_rk_fail = 0, cur_rk_gblk = 0, cur_dup_has_fn = 0, blocked = 0;
     if (!rows || !names) return 2;
     cur_rk_name[0] = 0; cur_rk_sum[0] = 0;
     while (at < rn) {
@@ -244,7 +324,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
         if (l > 0 && r[l - 1] == '\r') l--;
         if (l > 8 && tx_prefix(r, l, "RATCHET\t", 8)) {
             long o1, l1, o2, l2, o3, l3;
-            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0;
+            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0; cur_dup_has_fn = 0;
             if (!tx_field(r, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof cur_rk_name &&
                 !tx_field(r, l, '\t', 2, &o2, &l2)) {
                 for (long j = 0; j < l1; j++) cur_rk_name[j] = r[o1 + j];
@@ -263,7 +343,23 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
             }
         } else if (l > 2 && r[0] == ' ' && r[1] == ' ') {
             const char *b = r + 2; long bn = l - 2;
-            if (cur_rk_fail && !cur_rk_gblk &&
+            if (cur_rk_fail && tx_eqz(cur_rk_name, "dup-census") &&
+                tx_prefix(b, bn, "dup-census: ", 12) &&
+                tx_find(b + 12, bn - 12, " verbatim copies across ", 24) >= 0) {
+                long h = tx_find(b + 12, bn - 12, " has ", 5);
+                long see = tx_find(b, bn, "; see ", 6);
+                const char *see_p = (see >= 0 && bn > see + 7 && b[bn - 1] == ')') ? (b + see + 6) : 0;
+                long see_l = see_p ? (bn - (see + 6) - 1) : 0;
+                cur_dup_has_fn = 1;
+                if (h > 0 && rk_dup_fn_hits_staged(b + 12, h, see_p, see_l, names, sn)) {
+                    printf("precommit: blocked: RATCHET dup-census FAIL (%s):%.*s\n", cur_rk_sum, (int)(l - 1), r + 1);
+                    blocked++;
+                    cur_rk_gblk = 1;
+                }
+                at += raw_l + 1;
+                continue;
+            }
+            if (cur_rk_fail && !cur_rk_gblk && !(tx_eqz(cur_rk_name, "dup-census") && cur_dup_has_fn) &&
                 (tx_find(b, bn, " total lines ", 13) >= 0 || tx_find(b, bn, "total debt ", 11) >= 0 || tx_find(b, bn, "expired exempt row", 18) >= 0) &&
                 rk_any_hit(cur_rk_name, names, sn)) {
                 printf("precommit: blocked: RATCHET %s FAIL (%s):%.*s\n", cur_rk_name, cur_rk_sum, (int)(l - 1), r + 1);

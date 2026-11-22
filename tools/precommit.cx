@@ -1798,6 +1798,135 @@ static int is_table_or_source_path(const char *p, long n) {
     return 0;
 }
 
+static int is_ratchet_baseline_table(const char *p, long n) {
+    static const char *t_tbl[] = {
+        "tests/cxraw.tsv", "tests/cxinclude.tsv", "tests/cxapis.tsv", "tests/cxtrunc.tsv",
+        "tests/cxlibc.tsv", "tests/cxplatform.tsv", "tests/srcshape.tsv", "tests/aluiwidth.tsv",
+        "tests/outdep.tsv", "tests/net-deps.tsv", "tests/notcovered.tsv", 0
+    };
+    int i;
+    if (n <= 0) return 0;
+    for (i = 0; t_tbl[i]; i++) {
+        long tl = tx_len(t_tbl[i], 64);
+        if (n == tl && tx_same(p, n, t_tbl[i], tl)) return 1;
+    }
+    if (n > 19 && tx_prefix(p, n, "build/", 6) && tx_same(p + n - 13, 13, "-baseline.tsv", 13)) {
+        if (tx_prefix(p, n, "build/route-", 12) || tx_prefix(p, n, "build/speed-", 12)) return 0;
+        return 1;
+    }
+    if (n > 19 && tx_prefix(p, n, "tests/", 6) && tx_same(p + n - 13, 13, "-baseline.tsv", 13)) return 1;
+    return 0;
+}
+
+static int rb_parse_u64(const char *s, long sl, long long *out) {
+    long long v = 0;
+    long i;
+    if (sl <= 0 || sl > 18) return 0;
+    for (i = 0; i < sl; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
+    return 1;
+}
+
+static int rb_parse_row(const char *table, const char *ln, long l, char *key, size_t kcap, long long *vals, int *nvals) {
+    long nf, o0, l0, o1, l1, o3, l3;
+    int nv = 0, c;
+    if (l > 0 && ln[l - 1] == '\r') l--;
+    if (l <= 0 || ln[0] == '#') return 0;
+    nf = tx_fields(ln, l, '\t');
+    if (nf < 2 || tx_field(ln, l, '\t', 0, &o0, &l0) || l0 <= 0) return 0;
+    if (tx_eqz(table, "tests/notcovered.tsv")) {
+        if (nf < 4 || tx_field(ln, l, '\t', 3, &o3, &l3) || !rb_parse_u64(ln + o3, l3, &vals[0])) return 0;
+        if (cx_fmt(key, kcap, "%.*s", (int)l0, ln + o0)) return 0;
+        *nvals = 1;
+        return 1;
+    }
+    if (tx_eqz(table, "tests/net-deps.tsv")) {
+        if (tx_field(ln, l, '\t', 1, &o1, &l1) || !rb_parse_u64(ln + o1, l1, &vals[0])) return 0;
+        if (cx_fmt(key, kcap, "%.*s", (int)l0, ln + o0)) return 0;
+        *nvals = 1;
+        return 1;
+    }
+    if (nf >= 3 && l0 == 5 && (tx_same(ln + o0, 5, "total", 5) || tx_same(ln + o0, 5, "group", 5))) {
+        if (tx_field(ln, l, '\t', 1, &o1, &l1) || l1 <= 0) return 0;
+        for (c = 2; c < nf && nv < 8; c++) {
+            long oc, lc;
+            if (tx_field(ln, l, '\t', c, &oc, &lc) || !rb_parse_u64(ln + oc, lc, &vals[nv])) return 0;
+            nv++;
+        }
+        if (nv <= 0 || cx_fmt(key, kcap, "%.*s/%.*s", (int)l0, ln + o0, (int)l1, ln + o1)) return 0;
+        *nvals = nv;
+        return 1;
+    }
+    for (c = 1; c < nf && nv < 8; c++) {
+        long oc, lc;
+        if (tx_field(ln, l, '\t', c, &oc, &lc) || !rb_parse_u64(ln + oc, lc, &vals[nv])) return 0;
+        nv++;
+    }
+    if (nv <= 0 || cx_fmt(key, kcap, "%.*s", (int)l0, ln + o0)) return 0;
+    *nvals = nv;
+    return 1;
+}
+
+static int ratchet_baseline_gate(void) {
+    char *av[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=M", "-z", 0};
+    long sn = 0, at = 0;
+    int blocked = 0;
+    char *names;
+    if (plan_dir) return 0;
+    names = slurp_run(av, &sn);
+    if (!names) return 0;
+    while (at < sn) {
+        long nl = tx_len(names + at, sn - at);
+        if (nl <= 0) break;
+        if (nl < 250 && is_ratchet_baseline_table(names + at, nl)) {
+            char tbl[256], *hb = 0, *sb = 0;
+            long hn = 0, sn2 = 0, sa = 0;
+            mm_copy(tbl, sizeof tbl, names + at, (size_t)nl);
+            tbl[nl] = 0;
+            if (!cov_blob("HEAD", tbl, &hb, &hn) && !cov_blob("", tbl, &sb, &sn2) && hb && sb) {
+                while (sa < sn2) {
+                    long se = tx_chr(sb + sa, sn2 - sa, '\n'), sl = se < 0 ? sn2 - sa : se;
+                    char skey[256];
+                    long long svals[8];
+                    int snv = 0;
+                    if (rb_parse_row(tbl, sb + sa, sl, skey, sizeof skey, svals, &snv)) {
+                        long ha = 0, skl = tx_len(skey, sizeof skey);
+                        while (ha < hn) {
+                            long he = tx_chr(hb + ha, hn - ha, '\n'), hl = he < 0 ? hn - ha : he;
+                            char hkey[256];
+                            long long hvals[8];
+                            int hnv = 0;
+                            if (rb_parse_row(tbl, hb + ha, hl, hkey, sizeof hkey, hvals, &hnv) &&
+                                tx_len(hkey, sizeof hkey) == skl && tx_same(hkey, skl, skey, skl)) {
+                                int c;
+                                for (c = 0; c < snv && c < hnv; c++) {
+                                    if (svals[c] > hvals[c]) {
+                                        sy_eprintf("precommit: BLOCKED ratchet-baseline-raised table=%s key=%s col=%d head=%lld staged=%lld (ratchet baselines only go down)\n",
+                                                   tbl, skey, c + 1, hvals[c], svals[c]);
+                                        blocked++;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            ha += hl + 1;
+                        }
+                    }
+                    sa += sl + 1;
+                }
+            }
+            if (hb) mm_free(hb);
+            if (sb) mm_free(sb);
+        }
+        at += nl + 1;
+    }
+    mm_free(names);
+    return blocked;
+}
+
 static int conflict_marker_gate(void) {
     char *av[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z", 0};
     long sn = 0, at = 0; int bad = 0;
@@ -2159,6 +2288,7 @@ int main(int argc, char **argv) {
       }
     }
     { int b0 = blocked; blocked += conflict_marker_gate(); if (blocked > b0) pc_mark_block("conflict-markers", "merge-conflict-markers"); }
+    { int b0 = blocked; blocked += ratchet_baseline_gate(); if (blocked > b0) pc_mark_block("ratchets", "ratchet-baseline-raised"); }
     { int b0 = blocked; blocked += freeze_gate(); if (blocked > b0) pc_mark_block("freeze", "freeze-window"); }
     { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
     { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
