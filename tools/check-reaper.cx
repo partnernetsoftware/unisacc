@@ -415,6 +415,32 @@ static int check_identity_mismatch(void) {
     e[0].start = real_start;                     /* control: the true baseline sees a survivor */
     packed = rp_dispose_list(e, 1, rep, sizeof rep);
     ok((packed & 0xffff) == 1, "identity-mismatch: the true starttime counts as a survivor (control)");
+    /* The packed seam (survivors low 16 bits, mismatches above) must compose: two entries, one a
+       real live process with its true starttime (a survivor) and one with a wrong baseline (a
+       mismatch), give BOTH axes non-zero at once.  This is what proves the packing does not
+       confuse the two, before the outward three-state folds mismatches to a negative. */
+    {
+        int A2, B2, st2, w2, packed2;
+        sy_kt_ent pair[2];
+        char rep2[256];
+        long long sa, sb;
+        A2 = fork(); if (A2 == 0) { sy_setpgid(0, 0); sy_sleep_ms(2000); _exit(0); }
+        B2 = fork(); if (B2 == 0) { sy_setpgid(0, 0); sy_sleep_ms(2000); _exit(0); }
+        if (A2 > 0) sy_setpgid(A2, A2);
+        if (B2 > 0) sy_setpgid(B2, B2);
+        sa = rp_root_start(A2); sb = rp_root_start(B2);
+        pair[0].pid = A2; pair[0].start = sa;          /* survivor */
+        pair[1].pid = B2; pair[1].start = sb + 1000;   /* mismatch */
+        packed2 = rp_dispose_list(pair, 2, rep2, sizeof rep2);
+        ok((packed2 & 0xffff) == 1, "pack-seam: low axis counts the one survivor");
+        ok((packed2 >> 16) == 1, "pack-seam: high axis counts the one mismatch");
+        w2 = waitpid(A2, &st2, WNOHANG);
+        ok(w2 == 0, "pack-seam: the survivor is still alive");
+        if (w2 == 0) { sy_kill(A2); (void)waitpid(A2, &st2, 0); }
+        w2 = waitpid(B2, &st2, WNOHANG);
+        ok(w2 == 0, "pack-seam: the mismatch is not signalled either");
+        if (w2 == 0) { sy_kill(B2); (void)waitpid(B2, &st2, 0); }
+    }
     w = waitpid(Y, &st, WNOHANG);
     ok(w == 0, "identity-mismatch: disposal never signals the process");
     if (w == 0 || w == Y) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
