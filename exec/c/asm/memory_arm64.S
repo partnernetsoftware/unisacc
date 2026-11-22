@@ -115,6 +115,7 @@ Lmsnext:
     add x26,x26,#1
     b Lmsrehash
 Lmsfree:
+    cbz x23,Lmsinsert
     mov x0,x23
     bl CSYM(free)
     mov x0,x24

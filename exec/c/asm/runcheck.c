@@ -8,8 +8,15 @@
 #include <assert.h>
 #undef free
 void free(void *);
+#ifdef RUNCHECK_ASM_ONLY
+static int core_run_c(const CoreModel *m,unsigned char *in,int n,const char *src,I steps,CoreResult *r) {
+    (void)m;(void)in;(void)n;(void)src;(void)steps;(void)r;abort();
+}
+#else
 int core_run_c(const CoreModel *,unsigned char *,int,const char *,I,CoreResult *);
+#endif
 static void *ptr[128];static size_t sizes[128];static int live,calloc_calls,fail_at,fetches,cases;
+static int null_free_calls,memset_calls,asm_null_free,asm_memset;
 void *run_realloc(void *p,size_t n) {
     int k=0;if(p)while(k<128 && ptr[k]!=p)k++;else while(k<128 && ptr[k])k++;
     assert(k<128 && n);void *q=malloc(n);assert(q);memset(q,0xa5,n);
@@ -21,8 +28,12 @@ void *run_calloc(size_t n,size_t width) {
     assert(width && n<=SIZE_MAX/width);void *p=run_realloc(NULL,n*width);memset(p,0,n*width);return p;
 }
 void run_free(void *p) {
-    if(!p)return;int k=0;while(k<128 && ptr[k]!=p)k++;assert(k<128);
+    if(!p) { null_free_calls++;return; }
+    int k=0;while(k<128 && ptr[k]!=p)k++;assert(k<128);
     free(p);ptr[k]=NULL;sizes[k]=0;live--;
+}
+void *run_memset(void *p,int v,size_t n) {
+    memset_calls++;return memset(p,v,n);
 }
 void core_host_panic(const char *reason) {
     assert(fail_at && calloc_calls==fail_at && !strcmp(reason,"out of memory"));
@@ -51,7 +62,9 @@ static void setup(int net) {
 }
 static int call(int c,unsigned char *input,int n,I steps,CoreResult *r) {
     assert(live==0);memset(r,0xa5,sizeof *r);
+    int nf0=null_free_calls,ms0=memset_calls;
     int rc=c?core_run_c(&m,input,n,"source",steps,r):core_run(&m,input,n,"source",steps,r);
+    if(!c) { asm_null_free+=null_free_calls-nf0;asm_memset+=memset_calls-ms0; }
     assert(r->out.at==NULL && r->err.at==NULL && r->out.cap==0 && r->err.cap==0);
     assert(live==(r->out.b!=NULL)+(r->err.b!=NULL));
     return rc;
@@ -59,7 +72,11 @@ static int call(int c,unsigned char *input,int n,I steps,CoreResult *r) {
 static void release(CoreResult *r) { run_free(r->out.b);run_free(r->err.b);assert(live==0); }
 static void check(const char *input,I steps,int want,const char *out,const char *err,const char *reason) {
     CoreResult r;unsigned char bytes[32];size_t n=strlen(input);assert(n<sizeof bytes);memcpy(bytes,input,n+1);
+#ifdef RUNCHECK_ASM_ONLY
+    for(int c=0;c<1;c++) {
+#else
     for(int c=0;c<2;c++) {
+#endif
         assert(call(c,bytes,(int)n,steps,&r)==want);
         assert(r.out.n==(int)strlen(out) && r.err.n==(int)strlen(err));
         if(r.out.n)assert(!memcmp(r.out.b,out,r.out.n));if(r.err.n)assert(!memcmp(r.err.b,err,r.err.n));
@@ -100,9 +117,16 @@ int main(int argc,char **argv) {
     m.ns=1;m.nq=1;m.mode=owner_mode;m.next=on;m.seq=os;m.qoff=off;m.qlen=len;m.qa=owned;
     /* Count decoded actions independently from the expected output. */
     int words=sizeof owned/sizeof *owned,nact=0;for(int p=0;p<words;p+=1+ARITY[owned[p]])nact++;len[0]=nact;
+#ifdef RUNCHECK_ASM_ONLY
+    int oldfetch=fetches;check("a",1,0,"Z","E",NULL);assert(fetches==oldfetch+1);
+#else
     int oldfetch=fetches;check("a",1,0,"Z","E",NULL);assert(fetches==oldfetch+2);
+#endif
     owned[words-1]=REJECT;I rejected[64];memcpy(rejected,owned,sizeof owned);rejected[words]=0;m.qa=rejected;
     check("a",1,1,"","E","denied");
     for(int i=0;i<128;i++)assert(ptr[i]==NULL);
+    printf("RUNCHECK_K2\tcases=%d\tasm_null_free=%d\tasm_memset=%d\tstatus=%s\n",
+           cases,asm_null_free,asm_memset,(asm_null_free==0 && asm_memset==0)?"PASS":"FAIL");
+    if(asm_null_free!=0 || asm_memset!=0) return 1;
     printf("run C/ASM: %d exits, all observation modes, limits/stops, owners released and results transferred\n",cases);return 0;
 }

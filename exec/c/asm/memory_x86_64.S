@@ -118,6 +118,8 @@ Lxmsnext:
     incq %rbx
     jmp Lxmsrehash
 Lxmsfree:
+    testq %rbp,%rbp
+    je Lxmsinsert
     movq %rbp,%rdi
     call CSYM(free)
     movq 0(%rsp),%rdi

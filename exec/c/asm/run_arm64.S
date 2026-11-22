@@ -11,11 +11,27 @@
 #else
 #define CSYM(x) x
 #endif
+#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0
+#error MACHINE_SIZE_and_RESULT_SIZE_must_be_multiples_of_8
+#endif
 .text
+.p2align 2
+Lrfree_if:
+    cbz x0,Lrfree_skip
+    b CSYM(free)
+Lrfree_skip:
+    ret
+.p2align 2
+Lrzero:
+    str xzr,[x0]
+    add x0,x0,#8
+    subs w1,w1,#8
+    b.ne Lrzero
+    ret
 .p2align 2
 .macro FREE_MEMBER off
     ldr x0,[x19,#\off]
-    bl CSYM(free)
+    bl Lrfree_if
 .endm
 .globl CSYM(core_run)
 CSYM(core_run):
@@ -36,13 +52,11 @@ CSYM(core_run):
     mov w24,w2
     mov x25,x3
     mov x0,x19
-    mov w1,#0
-    mov x2,#MACHINE_SIZE
-    bl CSYM(memset)
+    mov w1,#MACHINE_SIZE
+    bl Lrzero
     mov x0,x21
-    mov w1,#0
-    mov x2,#RESULT_SIZE
-    bl CSYM(memset)
+    mov w1,#RESULT_SIZE
+    bl Lrzero
     stp x20,x21,[x19,#M_MODEL]
     str x23,[x19,#M_INPUT]
     str x23,[x19,#M_X]
@@ -202,7 +216,7 @@ Lrerrorout:
     ldr x8,[x19,#M_INPUT]
     cmp x0,x8
     b.eq Lrkeepinput
-    bl CSYM(free)
+    bl Lrfree_if
 Lrkeepinput:
     FREE_MEMBER M_XATTR
     FREE_MEMBER M_REGS
@@ -214,7 +228,7 @@ Lrkeepinput:
     cbz w24,Lrblobsdone
 Lrblobs:
     ldr x0,[x26,#BLOB_BYTES]
-    bl CSYM(free)
+    bl Lrfree_if
     add x26,x26,#BLOB_SIZE
     subs w24,w24,#1
     b.ne Lrblobs
@@ -238,7 +252,7 @@ Lrstringsdone:
     cbz w24,Lrresourcesdone
 Lrresources:
     ldr x0,[x26,#RES_KEY]
-    bl CSYM(free)
+    bl Lrfree_if
     add x26,x26,#RES_ENTRY_SIZE
     subs w24,w24,#1
     b.ne Lrresources

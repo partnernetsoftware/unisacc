@@ -106,6 +106,8 @@ Lxisnext:
     incq %rbx
     jmp Lxisrehash
 Lxisfree:
+    testq %r15,%r15
+    je Lxislookup
     movq %r15,%rdi
     call CSYM(free)
 Lxislookup:
