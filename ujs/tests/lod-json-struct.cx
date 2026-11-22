@@ -1,0 +1,71 @@
+#pragma unisa use r160_wait
+#pragma unisa use wasm_test_cache
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+int main(int argc,char **argv) {
+    const int negative=argc==2 && tx_eqz(argv[1],"--verify-negative");
+    const int prepare=argc==2 && tx_eqz(argv[1],"--prepare");
+    if(argc!=1 && !negative && !prepare) return 2;
+    const char *cache=sy_env("UXE_LOD_JSON_CACHE");
+    if(!cache || !cache[0]) {
+        printf("LOD_JSON cache=missing 基座缓存缺失：先运行准备步骤 --prepare\n");
+        return 1;
+    }
+    char dir[240],wasm[300],cwd[380],url[840];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-lod-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,"file://%s/" TEST "lod-json-r160.html?wasm=%s&mutate=%d",cwd,wasm,negative);
+    char *compile[]={"/bin/sh","./ujs/ujs2wasm.com",TEST "lod-json-abi.ujs",BASE "f64-math.ujs",
+        BASE "views.ujs",BASE "matrix4.ujs",BASE "object-layouts.ujs",BASE "object3d.ujs",BASE "lod.ujs",
+        BASE "json-read.ujs",BASE "json-bytes.ujs",BASE "lod-json.ujs",BASE "lod-json-read.ujs",
+        TEST "lod-json-probe.ujs","-o",wasm,0};
+    const char *sources[13]={0};
+    for(int i=0;i<12;i++) sources[i]=compile[i+2];
+    char key[65],sha[65],record[640];
+    int failed=length<0 || length>=(int)sizeof url || wasm_test_cache_key(sources,key);
+    if(!failed) {
+        const int count=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+        failed=count<0 || count>=(int)sizeof record;
+    }
+    if(!failed) {
+        const int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+        if(rc==-ENOENT && prepare) {
+            char *log=0;
+            size_t size=0;
+            const int built=cx_runv_timeout(compile,50,&log,&size);
+            if(built) printf("LOD_JSON compile_rc=%d %s\n",built,log?log:"");
+            mm_free(log);
+            failed=built || wasm_test_cache_write(cache,record,key,wasm);
+        } else {
+            if(rc==-ENOENT) printf("LOD_JSON cache=missing 基座缓存缺失：先运行准备步骤 --prepare\n");
+            failed=rc!=0;
+        }
+    }
+    if(prepare) {
+        if(sy_remove_all(dir)) failed=1;
+        printf("LOD_JSON prepare failed=%d\n",failed);
+        return failed!=0;
+    }
+    double values[16]={0};
+    const double gold[]={1,2,1,1,0,16,0,0.125};
+    if(!failed) failed=r160_wait_read(url,"#r160",values,16,dir);
+    if(!failed) for(int i=0;i<16;i++) {
+        const double want=negative && i==13?20:gold[i%8];
+        const double difference=values[i]-want;
+        if(!(difference>=-1e-12 && difference<=1e-12)) {
+            printf("LOD_JSON case=%d actual=%g expected=%g\n",i,values[i],want);
+            failed++;
+        }
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT LOD JSON cases=16 negative_expected=%d failed=%d\n",negative,failed);
+    return failed!=0;
+}
