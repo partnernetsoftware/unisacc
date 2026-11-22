@@ -106,6 +106,9 @@ static const char *FAKE =
     "body=$(cat)\n"
     "case \"$body\" in *REFUSE*) echo 'refused: fixture' >&2; exit 1;; esac\n"
     "if [ -n \"$pack\" ] && grep -q SLEEPY \"$pack\" 2>/dev/null; then sleep 10; fi\n"
+    "if [ -n \"$UNISACC_RR_TIME\" ]; then\n"
+    "  if grep -q MUTANT \"$pack\" 2>/dev/null; then echo 'RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=200' >&2; else echo 'RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=100' >&2; fi\n"
+    "fi\n"
     "if [ -n \"$pack\" ] && grep -q MUTANT \"$pack\" 2>/dev/null; then printf 'UNIPP2\\000MUTANT-PAYLOAD-0123456789abcdef0123'; exit 0; fi\n"
     "printf 'UNIPP2\\000PAYLOAD-0123456789abcdef0123456789';\n";
 
@@ -160,6 +163,36 @@ int main(void) {
         uec_ck(rc == 0 && has("done=2"), "mutant-pack run does both items");
         int sr = status_case(pa, mut, man, led2);
         uec_ck(sr == 1 && has("diff=2") && has("COMPLETE=no"), "mutant pack is caught: diff=2 rc 1");
+    }
+    /* --steps: the step column is recorded, and the ns-bearing RR_TIME lines never decide the verdict */
+    {
+        char led7[1200];
+        if (cx_fmt(led7, sizeof led7, "%s/led7", W)) tool_die(CK, "path", 0, 2);
+        const char *a[] = {"run", "--ape", "./fake.sh", "--models-a", pa, "--models-b", mut, "--manifest", man,
+                           "--ledger", led7, "--root", W, "--exec-root", ".", "--side-secs", "5", "--steps", "1"};
+        int rc = run_uec(a, 19);
+        char lf[1300];
+        if (cx_fmt(lf, sizeof lf, "%s/corners.tsv", led7)) tool_die(CK, "path", 0, 2);
+        size_t ln = 0;
+        char *lb = cx_read(lf, &ln);
+        int has_steps = lb && ckk_has(lb, (int)ln + 1, "steps=100/200");
+        mm_free(lb);
+        uec_ck(rc == 0 && has("steps=1") && has("step_moved=2") && has_steps,
+               "--steps records both counts and notices the move");
+    }
+    /* run-all: the whole batch driver in one call -- one SHARD line per shard, then the verdict */
+    {
+        char led5[1200], led6[1200];
+        if (cx_fmt(led5, sizeof led5, "%s/led5", W) || cx_fmt(led6, sizeof led6, "%s/led6", W)) tool_die(CK, "path", 0, 2);
+        const char *a[] = {"run-all", "--ape", "./fake.sh", "--models-a", pa, "--models-b", pa, "--manifest", man,
+                           "--ledger", led5, "--root", W, "--exec-root", ".", "--side-secs", "5", "--shards", "2"};
+        int rc = run_uec(a, 19);
+        uec_ck(rc == 0 && has("SHARD\t0/2") && has("SHARD\t1/2") && has("same=2") && has("COMPLETE=yes"),
+               "run-all: two SHARD lines and a complete verdict");
+        const char *b[] = {"run-all", "--ape", "./fake.sh", "--models-a", pa, "--models-b", mut, "--manifest", man,
+                           "--ledger", led6, "--root", W, "--exec-root", ".", "--side-secs", "5", "--shards", "2"};
+        rc = run_uec(b, 19);
+        uec_ck(rc == 1 && has("diff=2") && has("FIRST_DIFF\t"), "run-all: a DIFF is rc 1 and names the first row");
     }
     /* a side that never answers is UNMEASURED, never SAME */
     {
