@@ -1,0 +1,68 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define GET(row, field) "return ux_f64(out+" #row "*stride+MTLMaterial." #field ");"
+#define INT(row, field) "return 0.0+ux_u32(out+" #row "*stride+MTLMaterial." #field ");"
+#define NAME(row) "return 0.0+mtl_probe_hash(MTLLoader_name(out+" #row "*stride),ux_u32(out+" #row "*stride+MTLMaterial.nameBytes));"
+#define URL(row) "return 0.0+mtl_probe_hash(MTLLoader_url(out+" #row "*stride),ux_u32(out+" #row "*stride+MTLMaterial.urlBytes));"
+
+static int fixture_setup(char *setup,int capacity) {
+    const char *path="ujs/practice/uxe/test/mtl-loader-fixture.mtl";
+    unsigned char *data=0;
+    int64_t size=0;
+    if(sy_read_file(path,&data,&size,1024)) return 1;
+    const char probe[]=
+        "native function mtl_probe_hash(p:i64,n:i64) i64 {"
+        "let hash=0;let i=0;while(i<n){hash=(hash*31+ux_u8(p+i))%2147483647;i=i+1;}return hash;}\n";
+    int used=tx_snprintf(setup,capacity,"%slet src=1024;let base=256;let out=4096;let stride=MTLLoader_stride();"
+        "let baseA=ux_u32_put(base,1685024047);let baseB=ux_u32_put(base+4,796093541);",probe);
+    for(int i=0;i<size && used>0 && used<capacity;i+=4) {
+        unsigned long word=0;
+        for(int j=3;j>=0;j--) word=word*256+(i+j<size?data[i+j]:0);
+        int added=tx_snprintf(setup+used,capacity-used,"let v%d=ux_u32_put(src+%d,%lu);",i,i,word);
+        if(added<=0 || added>=capacity-used) { used=-1; break; }
+        used+=added;
+    }
+    mm_free(data);
+    if(used<=0 || used>=capacity) return 1;
+    int added=tx_snprintf(setup+used,capacity-used,
+        "let bytes=%d;let parsed=MTLLoader_parse(src,bytes,base,8,out,4);",(int)size);
+    return added<=0 || added>=capacity-used;
+}
+
+int main(int argc,char **argv) {
+    int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    char setup[8500];
+    if(fixture_setup(setup,sizeof setup)) return 2;
+    const char *modules[]={"f64-math","vector-scalar","color","mtlloader",0};
+    const char *cases[]={
+        "return 0.0+parsed;",
+        NAME(0),URL(0),GET(0,red),GET(0,green),GET(0,blue),GET(0,opacity),
+        INT(0,transparent),GET(0,repeatX),GET(0,repeatY),GET(0,offsetX),GET(0,offsetY),INT(0,srgbMap),
+        NAME(1),URL(1),GET(1,red),GET(1,green),GET(1,blue),GET(1,opacity),
+        INT(1,transparent),GET(1,repeatX),GET(1,repeatY),GET(1,offsetX),GET(1,offsetY),INT(1,srgbMap),
+        NAME(2),URL(2),GET(2,red),GET(2,green),GET(2,blue),GET(2,opacity),
+        INT(2,transparent),GET(2,repeatX),GET(2,repeatY),GET(2,offsetX),GET(2,offsetY),INT(2,srgbMap),
+        NAME(3),URL(3),GET(3,red),GET(3,green),GET(3,blue),GET(3,opacity),
+        INT(3,transparent),GET(3,repeatX),GET(3,repeatY),GET(3,offsetX),GET(3,offsetY),INT(3,srgbMap),
+        "return 0.0+MTLLoader_parse(src,bytes,base,8,out,3);",
+        "return 0.0+MTLLoader_parse(src,bytes,base,8,src,4);",
+        "return 0.0+MTLLoader_parse(src,bytes,base,8,6291456-100,1);",
+        "return 0.0+MTLLoader_parse(src,0,base,8,out,0);",
+    };
+    const double gold[]={
+        4,
+        1174374893,50480868,0.2140411404715882,0.05087608815907816,0.001547987616,0.75,1,2,3,-0.25,0.5,1,
+        68884316,614369117,1,0,0,0.875,1,1,1,0,0,1,
+        106748362,0,1,1,1,1,0,1,1,0,0,0,
+        95459245,1348681600,0.05087608815907816,0.2140411404715882,1,1,0,1,1,0,0,1,
+        -3,-1,-1,0,
+    };
+    return g_wasm_batch_addon("G_IO MTLLoader diffuse material records","mtlloader",argv[1],modules,setup,
+        cases,gold,sizeof gold/sizeof gold[0],mutate?6:-1,
+        "let wrong=ux_f64_put(out+MTLMaterial.opacity,0.25);" GET(0,opacity));
+}

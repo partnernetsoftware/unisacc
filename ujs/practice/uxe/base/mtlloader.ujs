@@ -1,0 +1,262 @@
+// Each 720-byte caller-owned row includes 128 name bytes and 512 URL bytes.
+// Text and base spans must not overlap the output. Return the row count, or
+// -1 for invalid spans, -2 for invalid material values, -3 for capacity.
+// On error discard rows already written. No image I/O is performed.
+struct MTLMaterial {
+  nameBytes: u32;
+  urlBytes: u32;
+  transparent: u32;
+  srgbMap: u32;
+  red: f64;
+  green: f64;
+  blue: f64;
+  opacity: f64;
+  repeatX: f64;
+  repeatY: f64;
+  offsetX: f64;
+  offsetY: f64;
+}
+
+native function mtl_white(c:i64) i64 { return c==32 || (c>=9 && c<=13); }
+native function mtl_lower(c:i64) i64 { if(c>=65 && c<=90) { return c+32; } return c; }
+native function mtl_skip(p:i64,end:i64) i64 {
+  while(p<end && mtl_white(ux_u8(p))) { p=p+1; }
+  return p;
+}
+native function mtl_word(p:i64,end:i64) i64 {
+  while(p<end && !mtl_white(ux_u8(p))) { p=p+1; }
+  return p;
+}
+native function mtl_key(p:i64,end:i64) i64 {
+  let key=0;
+  while(p<end) { key=key*256+mtl_lower(ux_u8(p)); p=p+1; }
+  return key;
+}
+native function mtl_copy(to:i64,from:i64,n:i64) i64 {
+  let i=0;
+  while(i<n) { let stored=ux_u8_put(to+i,ux_u8(from+i)); i=i+1; }
+  return n;
+}
+native function mtl_equal(a:i64,b:i64,n:i64) i64 {
+  let i=0;
+  while(i<n && ux_u8(a+i)==ux_u8(b+i)) { i=i+1; }
+  return i==n;
+}
+native function mtl_digit(c:i64) i64 { return c>=48 && c<=57; }
+
+// A bounded decimal prefix, including exponent and leading decimal point.
+native function mtl_number(p:i64,end:i64) f64 {
+  let minus=0;
+  if(p<end && (ux_u8(p)==43 || ux_u8(p)==45)) { minus=ux_u8(p)==45; p=p+1; }
+  let value=0.0;
+  let digits=0;
+  let retained=0;
+  let scale=0;
+  let dot=0;
+  while(p<end && (mtl_digit(ux_u8(p)) || (!dot && ux_u8(p)==46))) {
+    let c=ux_u8(p);
+    if(c==46) { dot=1; }
+    else {
+      digits=digits+1;
+      if(retained<17 && (retained || c!=48)) {
+        value=value*10.0+(c-48);
+        retained=retained+1;
+        if(dot) { scale=scale-1; }
+      } else if(!dot && retained==17) { scale=scale+1; }
+      else if(dot && !retained) { scale=scale-1; }
+    }
+    p=p+1;
+  }
+  if(!digits) { return 0.0/0.0; }
+  if(p<end && mtl_lower(ux_u8(p))==101) {
+    p=p+1;
+    let negative=0;
+    if(p<end && (ux_u8(p)==43 || ux_u8(p)==45)) { negative=ux_u8(p)==45; p=p+1; }
+    let exponent=0;
+    while(p<end && mtl_digit(ux_u8(p))) {
+      if(exponent<10000000) { exponent=exponent*10+ux_u8(p)-48; }
+      p=p+1;
+    }
+    if(negative) { scale=scale-exponent; } else { scale=scale+exponent; }
+  }
+  if(value==0.0 || scale<0-400) { return 0.0; }
+  if(scale>308) { return 0.0/0.0; }
+  while(scale<0-300) { value=value*0.00000000000000000001; scale=scale+20; }
+  let factor=10.0;
+  if(scale<0) { factor=0.1; scale=0-scale; }
+  while(scale>0) {
+    if(scale%2) { value=value*factor; }
+    scale=scale/2;
+    if(scale>0) { factor=factor*factor; }
+  }
+  if(minus) { value=0.0-value; }
+  return value;
+}
+
+native function mtl_finite(x:f64) i64 { return (x-x)==0.0; }
+
+native function mtl_color(row:i64,p:i64,end:i64) i64 {
+  let index=0;
+  while(index<3) {
+    p=mtl_skip(p,end);
+    let next=mtl_word(p,end);
+    let value=Color_srgbToLinear(mtl_number(p,next));
+    if(!mtl_finite(value)) { return 0; }
+    let set=ux_f64_put(row+MTLMaterial.red+8*index,value);
+    p=next;
+    index=index+1;
+  }
+  return 1;
+}
+
+native function mtl_map(row:i64,p:i64,end:i64,base:i64,baseBytes:i64) i64 {
+  let url=row+MTLMaterial.size+128;
+  let used=0;
+  let options=0;
+  while(p<end) {
+    p=mtl_skip(p,end);
+    let next=mtl_word(p,end);
+    let tokenBytes=next-p;
+    let key=0;
+    if(tokenBytes==2 || tokenBytes==3) { key=mtl_key(p,next); }
+    let option=0;
+    if(key==2974317 && options%2==0) { option=1; }
+    if(key==11635 && options/2%2==0) { option=2; }
+    if(key==11631 && options/4%2==0) { option=4; }
+    if(option) {
+      options=options+option;
+      p=mtl_skip(next,end);
+      next=mtl_word(p,end);
+      if(next==p) { return 0-2; }
+      if(option!=1) {
+        let x=mtl_number(p,next);
+        p=mtl_skip(next,end);
+        next=mtl_word(p,end);
+        let y=mtl_number(p,next);
+        p=mtl_skip(next,end);
+        next=mtl_word(p,end);
+        if(next==p || !mtl_finite(x) || !mtl_finite(y)) { return 0-2; }
+        let field=MTLMaterial.repeatX;
+        if(option==4) { field=MTLMaterial.offsetX; }
+        let a=ux_f64_put(row+field,x);
+        let b=ux_f64_put(row+field+8,y);
+      }
+    } else {
+      if(!used) {
+        let absolute=(tokenBytes>=7 && mtl_key(p,p+7)==29401441025797935) ||
+          (tokenBytes>=8 && mtl_key(p,p+8)==7526768903561293615);
+        if(!absolute) {
+          if(baseBytes>=512) { return 0-3; }
+          used=mtl_copy(url,base,baseBytes);
+        }
+      } else {
+        if(used>=511) { return 0-3; }
+        let space=ux_u8_put(url+used,32);
+        used=used+1;
+      }
+      if(tokenBytes>=512-used) { return 0-3; }
+      let copied=mtl_copy(url+used,p,tokenBytes);
+      used=used+copied;
+    }
+    p=mtl_skip(next,end);
+  }
+  let terminator=ux_u8_put(url+used,0);
+  let urlBytes=ux_u32_put(row+MTLMaterial.urlBytes,used);
+  let srgbMap=ux_u32_put(row+MTLMaterial.srgbMap,used>0);
+  return 0;
+}
+
+native function MTLLoader_stride() i64 { return MTLMaterial.size+640; }
+native function MTLLoader_name(row:i64) i64 { return row+MTLMaterial.size; }
+native function MTLLoader_url(row:i64) i64 { return row+MTLMaterial.size+128; }
+
+native function mtl_span(p:i64,n:i64) i64 { return p>=0 && n>=0 && n<=6291456 && p<=6291456-n; }
+
+native function MTLLoader_parse(src:i64,bytes:i64,base:i64,baseBytes:i64,out:i64,capacity:i64) i64 {
+  let stride=MTLLoader_stride();
+  if(capacity<0 || capacity>6291456/stride) { return 0-1; }
+  let outBytes=capacity*stride;
+  if(!mtl_span(src,bytes) || !mtl_span(base,baseBytes) || !mtl_span(out,outBytes) ||
+    (outBytes>0 && bytes>0 && out<src+bytes && src<out+outBytes) ||
+    (outBytes>0 && baseBytes>0 && out<base+baseBytes && base<out+outBytes)) { return 0-1; }
+  let row=0-1;
+  let count=0;
+  let end=src+bytes;
+  let position=src;
+  let dfirst=0;
+  let trfirst=0;
+  let dissolve=1.0;
+  let transparency=0.0;
+  while(position<end) {
+    let line=position;
+    while(position<end && ux_u8(position)!=10) {
+      if(ux_u8(position)==0) { return 0-2; }
+      position=position+1;
+    }
+    let limit=position;
+    if(position<end) { position=position+1; }
+    line=mtl_skip(line,limit);
+    while(limit>line && mtl_white(ux_u8(limit-1))) { limit=limit-1; }
+    if(line<limit && ux_u8(line)!=35) {
+      let stop=line;
+      while(stop<limit && ux_u8(stop)!=32) { stop=stop+1; }
+      let key=0;
+      if(stop-line<=6) { key=mtl_key(line,stop); }
+      let val=mtl_skip(stop,limit);
+      if(key==121382074414188) {
+        let n=limit-val;
+        if(n==0) { return 0-2; }
+        if(n>=128) { return 0-3; }
+        let slot=0;
+        while(slot<count && !(n==ux_u32(out+stride*slot+MTLMaterial.nameBytes) &&
+           mtl_equal(val,MTLLoader_name(out+stride*slot),n))) { slot=slot+1; }
+        if(slot==count) {
+          if(count==capacity) { return 0-3; }
+          count=count+1;
+        }
+        row=out+stride*slot;
+        let copied=mtl_copy(MTLLoader_name(row),val,n);
+        let nameEnd=ux_u8_put(MTLLoader_name(row)+n,0);
+        let urlEnd=ux_u8_put(MTLLoader_url(row),0);
+        let nameBytes=ux_u32_put(row+MTLMaterial.nameBytes,n);
+        let urlBytes=ux_u32_put(row+MTLMaterial.urlBytes,0);
+        let srgbMap=ux_u32_put(row+MTLMaterial.srgbMap,0);
+        let transparent=ux_u32_put(row+MTLMaterial.transparent,0);
+        let red=ux_f64_put(row+MTLMaterial.red,1.0);
+        let green=ux_f64_put(row+MTLMaterial.green,1.0);
+        let blue=ux_f64_put(row+MTLMaterial.blue,1.0);
+        let initialOpacity=ux_f64_put(row+MTLMaterial.opacity,1.0);
+        let repeatX=ux_f64_put(row+MTLMaterial.repeatX,1.0);
+        let repeatY=ux_f64_put(row+MTLMaterial.repeatY,1.0);
+        let offsetX=ux_f64_put(row+MTLMaterial.offsetX,0.0);
+        let offsetY=ux_f64_put(row+MTLMaterial.offsetY,0.0);
+        dfirst=0; trfirst=0; dissolve=1.0; transparency=0.0;
+      } else if(row>=0) {
+        if(key==27492 && !mtl_color(row,val,limit)) { return 0-2; }
+        if(key==100 || key==29810) {
+          let amount=0.0;
+          if(val<limit) {
+            amount=mtl_number(val,mtl_word(val,limit));
+            if(!mtl_finite(amount)) { return 0-2; }
+          } else if(key==100) { amount=1.0; }
+          if(key==100) { if(!dfirst) { dfirst=position; } dissolve=amount; }
+          else { if(!trfirst) { trfirst=position; } transparency=amount; }
+          let opacity=1.0;
+          if(dissolve<1.0) { opacity=dissolve; }
+          if(transparency>0.0 && (dissolve>=1.0 || trfirst>dfirst)) { opacity=1.0-transparency; }
+          let a=ux_f64_put(row+MTLMaterial.opacity,opacity);
+          let b=ux_u32_put(row+MTLMaterial.transparent,dissolve<1.0 || transparency>0.0);
+        }
+        if(key==120265264556900) {
+          let r=ux_f64_put(row+MTLMaterial.repeatX,1.0);
+          let s=ux_f64_put(row+MTLMaterial.repeatY,1.0);
+          let x=ux_f64_put(row+MTLMaterial.offsetX,0.0);
+          let y=ux_f64_put(row+MTLMaterial.offsetY,0.0);
+          let parsed=mtl_map(row,val,limit,base,baseBytes);
+          if(parsed<0) { return parsed; }
+        }
+      }
+    }
+  }
+  return count;
+}
