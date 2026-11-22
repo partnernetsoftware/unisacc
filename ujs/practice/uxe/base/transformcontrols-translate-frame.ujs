@@ -14,12 +14,22 @@ native function transform_q_axis(q:i64,x:f64,y:f64,z:f64,component:i64,inverse:i
 }
 
 // Local axes project the world hit delta into object space. Parent
-// rotation and uniform scale convert the result to parent-local position.
+// rotation and per-axis scale convert the result to parent-local position.
 // Supply a one- or two-axis mask (X=1, Y=2, Z=4).
-native function TransformControls_transLocal(out:i64,position:i64,start:i64,parent:i64,delta:i64,axes:i64,scale:f64,snap:f64) i64 {
+// The low three options bits are the axis mask. The remaining bits
+// select a scale vector address plus one, with zero denoting scalar scale.
+native function transform_transFrame(out:i64,position:i64,start:i64,parent:i64,delta:i64,options:i64,scale:f64,snap:f64) i64 {
+  let axes=options%8;
+  let scaleX=scale; let scaleY=scale; let scaleZ=scale;
+  if(options>=8) {
+    let address=options/8-1;
+    if(!transform_vec3_valid(address)) { return 0-1; }
+    scaleX=ux_f64(address); scaleY=ux_f64(address+8); scaleZ=ux_f64(address+16);
+  }
   if(!transform_vec3_valid(out) || !transform_vec3_valid(position) || !transform_vec3_valid(delta) ||
      !transform_q_span(start) || !transform_q_span(parent) || axes<1 || axes>6 ||
-     scale<=0.0 || scale-scale!=0.0 || snap<0.0 || snap-snap!=0.0) { return 0-1; }
+     scaleX<=0.0 || scaleX-scaleX!=0.0 || scaleY<=0.0 || scaleY-scaleY!=0.0 ||
+     scaleZ<=0.0 || scaleZ-scaleZ!=0.0 || snap<0.0 || snap-snap!=0.0) { return 0-1; }
   let dx=ux_f64(delta); let dy=ux_f64(delta+8); let dz=ux_f64(delta+16);
   let px=transform_q_axis(parent,dx,dy,dz,0,1);
   let py=transform_q_axis(parent,dx,dy,dz,1,1);
@@ -29,9 +39,9 @@ native function TransformControls_transLocal(out:i64,position:i64,start:i64,pare
   if(useX) { lx=transform_q_axis(start,px,py,pz,0,1); }
   if(useY) { ly=transform_q_axis(start,px,py,pz,1,1); }
   if(useZ) { lz=transform_q_axis(start,px,py,pz,2,1); }
-  let x=ux_f64(position)+transform_q_axis(start,lx,ly,lz,0,0)/scale;
-  let y=ux_f64(position+8)+transform_q_axis(start,lx,ly,lz,1,0)/scale;
-  let z=ux_f64(position+16)+transform_q_axis(start,lx,ly,lz,2,0)/scale;
+  let x=ux_f64(position)+transform_q_axis(start,lx,ly,lz,0,0)/scaleX;
+  let y=ux_f64(position+8)+transform_q_axis(start,lx,ly,lz,1,0)/scaleY;
+  let z=ux_f64(position+16)+transform_q_axis(start,lx,ly,lz,2,0)/scaleZ;
   if(snap>0.0) {
     let sx=transform_q_axis(start,x,y,z,0,1);
     let sy=transform_q_axis(start,x,y,z,1,1);
@@ -48,4 +58,14 @@ native function TransformControls_transLocal(out:i64,position:i64,start:i64,pare
   let b=ux_f64_put(out+8,y);
   let c=ux_f64_put(out+16,z);
   return out;
+}
+
+native function TransformControls_transLocal(out:i64,position:i64,start:i64,parent:i64,delta:i64,axes:i64,scale:f64,snap:f64) i64 {
+  if(axes<1 || axes>6) { return 0-1; }
+  return transform_transFrame(out,position,start,parent,delta,axes,scale,snap);
+}
+
+native function TransformControls_transScale(out:i64,position:i64,start:i64,parent:i64,delta:i64,axes:i64,scale:i64,snap:f64) i64 {
+  if(axes<1 || axes>6 || !transform_vec3_valid(scale)) { return 0-1; }
+  return transform_transFrame(out,position,start,parent,delta,axes+8*(scale+1),0.0,snap);
 }
