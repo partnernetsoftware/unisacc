@@ -1,0 +1,260 @@
+/* tools/ref-job-paths.cx -- keep references to private job scratch files out of plans/ and prd_mempalace.md.
+ *
+ *   sh ./unisacc.com tools/ref-job-paths.cx -- --check [--root DIR] [--today YYYY-MM-DD]    the ratchet
+ *   sh ./unisacc.com tools/ref-job-paths.cx -- --report [--root DIR]                         per-file counts, no verdict
+ *   sh ./unisacc.com tools/ref-job-paths.cx -- --write-baseline [--root DIR] [--today D]     rewrite the baseline (never raises it)
+ *   sh ./unisacc.com tools/ref-job-paths.cx -- --staged-from DIFF [--root DIR] [--today D]   the pre-commit guard on added lines
+ *
+ * A hit is one occurrence of  .claude/jobs/JOB/tmp/FILE  (JOB = [A-Za-z0-9._-]+, FILE = at least one of [A-Za-z0-9._/-],
+ * trailing '.' and ',' dropped), with or without a leading "~/" or "$HOME/": a reference to a private scratch file that
+ * is cleaned up while the plan still points at it.  Not hits: the bare directory ".../tmp/", "$CLAUDE_JOB_DIR/tmp",
+ * "~/.claude/jobs/ ..." prose, and placeholders such as ".../jobs/<id>/tmp/NAME".  Every occurrence counts, so two on
+ * one line are two.  Scope: git ls-files under plans/ and prd_mempalace.md of ROOT (default ".").
+ * Baseline build/ref-job-paths-baseline.tsv (FILE<TAB>HITS): --check fails when a file has more effective hits than its
+ * row (a file with no row has 0), and fails STALE when a row is larger than the effective hits (shrink it).
+ * Exempt rows build/ref-job-paths-exempt.tsv (file, path, reason, owner, expires YYYY-MM-DD): every hit in `file` whose
+ * text ends the row's path is not counted until its expires date; an expired row fails.  Move a file into research/
+ * (YYYY-MM-DD/) instead of exempting it where you can.  /tmp references are only counted (--report), never blocked.
+ * Output: "ref-job-paths: ok|FAIL: files=N hits=H exempt=X over=O stale=S expired=E". */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define BASE "build/ref-job-paths-baseline.tsv"
+#define EXEMPT "build/ref-job-paths-exempt.tsv"
+#define MAXF 4096
+#define MAXR 1024
+#define MAXH 16384
+
+static const char *root = ".";
+static char today[16];
+
+static char *fcopy(const char *s, long n) { char *p = (char *)mm_alloc(n + 1); mm_copy(p, n + 1, s, n); p[n] = 0; return p; }
+static int ident(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'; }
+static int tokch(char c) { return ident(c) || c == '/'; }
+
+/* hits in s[0..n): start offset of ".claude/jobs/..." and length through the trimmed FILE token */
+static long scan(const char *s, long n, long *hs, long *hl, long cap) {
+    long i, c = 0; const char P[] = ".claude/jobs/";
+    for (i = 0; i + 13 < n; i++) {
+        long j, k, m, e;
+        if (s[i] != '.' || !tx_same(s + i, 13, P, 13)) continue;
+        j = i + 13; k = j; while (k < n && ident(s[k])) k++;
+        if (k == j || k + 5 > n || !tx_same(s + k, 5, "/tmp/", 5)) continue;
+        m = k + 5; e = m; while (e < n && tokch(s[e])) e++;
+        while (e > m && (s[e - 1] == '.' || s[e - 1] == ',')) e--;
+        if (e == m) continue;
+        if (c < cap) { hs[c] = i; hl[c] = e - i; }
+        c++; i = e - 1;
+    }
+    return c < cap ? c : cap;
+}
+
+/* ---- exempt rows ---- */
+static char *ex_file[MAXR], *ex_path[MAXR], *ex_exp[MAXR]; static int nex;
+static void load_exempt(void) {
+    char p[4400]; size_t n = 0; char *b; long at = 0;
+    cx_fmt(p, sizeof p, "%s/%s", root, EXEMPT);
+    b = (char *)cx_read(p, &n);
+    if (!b) return;
+    while (at < (long)n && nex < MAXR) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? (long)n - at : e, f[5], k = 0, t;
+        if (ln > 0 && b[at] != '#') {
+            f[0] = 0;
+            for (t = 0; t < ln && k < 4; t++) if (b[at + t] == '\t') f[++k] = t + 1;
+            if (k == 4 && !(ln >= 4 && tx_same(b + at, 4, "file", 4) && b[at + 4] == '\t')) {
+                ex_file[nex] = fcopy(b + at, f[1] - 1);
+                ex_path[nex] = fcopy(b + at + f[1], f[2] - 1 - f[1]);
+                ex_exp[nex] = fcopy(b + at + f[4], ln - f[4]);
+                nex++;
+            }
+        }
+        at += ln + 1;
+    }
+}
+static int cmpd(const char *a, const char *b) { int k; for (k = 0; k < 10; k++) if (a[k] != b[k]) return a[k] < b[k] ? -1 : 1; return 0; }   /* YYYY-MM-DD compares bytewise */
+static int live(int i) { return tx_len(ex_exp[i], 32) >= 10 && tx_len(today, 16) == 10 && cmpd(ex_exp[i], today) >= 0; }
+/* 1 when hit text H (len HN) in FILE is covered by a live exempt row */
+static int exempt_of(const char *file, const char *h, long hn) {
+    int i;
+    for (i = 0; i < nex; i++) {
+        long pl;
+        if (!tx_eqz(ex_file[i], file) || !live(i)) continue;
+        pl = tx_len(ex_path[i], 4096);
+        if (pl >= hn && mm_same(ex_path[i] + pl - hn, h, hn)) return 1;
+    }
+    return 0;
+}
+
+/* ---- scanned files ---- */
+static char *sf_name[MAXF]; static long sf_hits[MAXF], sf_ex[MAXF], sf_tmp[MAXF]; static int nsf;
+static long count_tmp(const char *s, long n) {
+    long i, c = 0;
+    for (i = 0; i + 5 <= n; i++) if (s[i] == '/' && tx_same(s + i, 5, "/tmp/", 5) && (i == 0 || !ident(s[i - 1]))) c++;
+    return c;
+}
+static int scan_tree(void) {
+    char cmd[4600], *out; static char buf[1 << 20]; int cut = 0, rc; long at = 0, n;
+    char *gv[] = {"timeout", "30", "git", "-C", (char *)root, "ls-files", "--", "plans", "prd_mempalace.md", 0};
+    (void)cmd; (void)out;
+    rc = sy_run(gv, buf, sizeof buf - 1, &cut);
+    if (rc != 0 || cut) { fprintf(stderr, "ref-job-paths: git ls-files failed rc=%d\n", rc); return 2; }
+    n = tx_len(buf, sizeof buf);
+    while (at < n && nsf < MAXF) {
+        long e = tx_chr(buf + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 0) {
+            char path[4400], *name = fcopy(buf + at, ln); size_t fn = 0; char *fb;
+            static long hs[MAXH], hl[MAXH]; long h, k;
+            cx_fmt(path, sizeof path, "%s/%s", root, name);
+            fb = (char *)cx_read(path, &fn);
+            if (fb) {
+                h = scan(fb, (long)fn, hs, hl, MAXH);
+                sf_name[nsf] = name; sf_hits[nsf] = h; sf_ex[nsf] = 0; sf_tmp[nsf] = count_tmp(fb, (long)fn);
+                for (k = 0; k < h; k++) if (exempt_of(name, fb + hs[k], hl[k])) sf_ex[nsf]++;
+                nsf++;
+                mm_free(fb);
+            }
+        }
+        at += ln + 1;
+    }
+    return 0;
+}
+
+/* ---- baseline ---- */
+static char *bs_name[MAXF]; static long bs_val[MAXF]; static int nbs, have_base;
+static void load_base(void) {
+    char p[4400]; size_t n = 0; char *b; long at = 0;
+    cx_fmt(p, sizeof p, "%s/%s", root, BASE);
+    b = (char *)cx_read(p, &n);
+    if (!b) return;
+    have_base = 1;
+    while (at < (long)n && nbs < MAXF) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? (long)n - at : e, t = tx_chr(b + at, ln, '\t'), v = 0, j;
+        if (ln > 0 && b[at] != '#' && t > 0) {
+            for (j = t + 1; j < ln && b[at + j] >= '0' && b[at + j] <= '9'; j++) v = v * 10 + (b[at + j] - '0');
+            bs_name[nbs] = fcopy(b + at, t); bs_val[nbs] = v; nbs++;
+        }
+        at += ln + 1;
+    }
+}
+static long base_of(const char *f) { int i; for (i = 0; i < nbs; i++) if (tx_eqz(bs_name[i], f)) return bs_val[i]; return 0; }
+static long eff_of(const char *f) { int i; for (i = 0; i < nsf; i++) if (tx_eqz(sf_name[i], f)) return sf_hits[i] - sf_ex[i]; return 0; }
+
+static int expired_rows(void) {
+    int i, c = 0;
+    for (i = 0; i < nex; i++) if (!live(i)) { c++; printf("ref-job-paths: expired exempt row %s %s (expires %s, today %s)\n", ex_file[i], ex_path[i], ex_exp[i], today); }
+    return c;
+}
+
+static int do_check(void) {
+    long hits = 0, exm = 0, over = 0, stale = 0; int i, expd;
+    for (i = 0; i < nsf; i++) {
+        long eff = sf_hits[i] - sf_ex[i], b = base_of(sf_name[i]);
+        hits += sf_hits[i]; exm += sf_ex[i];
+        if (eff > b) { over++; printf("ref-job-paths: %s has %ld refs to job scratch files, baseline %ld\n", sf_name[i], eff, b); }
+    }
+    for (i = 0; i < nbs; i++) {
+        long eff = eff_of(bs_name[i]);
+        if (bs_val[i] > eff) { stale++; printf("ref-job-paths: %s baseline %ld exceeds %ld refs, shrink it (STALE; --write-baseline)\n", bs_name[i], bs_val[i], eff); }
+    }
+    expd = expired_rows();
+    printf("ref-job-paths: %s: files=%d hits=%ld exempt=%ld over=%ld stale=%ld expired=%d (fix: move the file into research/YYYY-MM-DD/ and point the plan there)\n",
+           over || stale || expd ? "FAIL" : "ok", nsf, hits, exm, over, stale, expd);
+    return over || stale || expd ? 1 : 0;
+}
+
+static int do_write(void) {
+    char p[4400], *o; long on = 0, i, raised = 0; int expd;
+    for (i = 0; i < nsf; i++) {
+        long eff = sf_hits[i] - sf_ex[i];
+        if (have_base && eff > base_of(sf_name[i])) { raised++; printf("ref-job-paths: REFUSE to raise %s from %ld to %ld\n", sf_name[i], base_of(sf_name[i]), eff); }
+    }
+    if (raised) return 1;
+    expd = expired_rows();
+    if (expd) return 1;
+    o = (char *)mm_alloc(1 << 20);
+    on += cx_fmt(o + on, 400, "# ref-job-paths baseline: FILE<TAB>HITS (references to job scratch files), kept history only goes down (tools/ref-job-paths.cx)\n") ? 0 : tx_len(o + on, 400);
+    for (i = 0; i < nsf; i++) {
+        long eff = sf_hits[i] - sf_ex[i];
+        if (eff > 0) { int w = cx_fmt(o + on, 4500, "%s\t%ld\n", sf_name[i], eff); if (w) return 2; on += tx_len(o + on, 4500); }
+    }
+    cx_fmt(p, sizeof p, "%s/%s", root, BASE);
+    if (sy_write_file(p, o, on, 0644) != 0) { fprintf(stderr, "ref-job-paths: cannot write %s\n", p); return 2; }
+    printf("ref-job-paths: wrote %s\n", p);
+    return 0;
+}
+
+static int do_staged(const char *diff) {
+    size_t dn = 0; char *d = (char *)cx_read(diff, &dn), file[1024]; long at = 0, added = 0, blocked = 0, n = (long)dn;
+    if (!d) { fprintf(stderr, "ref-job-paths: cannot read %s\n", diff); return 2; }
+    file[0] = 0;
+    while (at < n) {
+        long e = tx_chr(d + at, n - at, '\n'), ln = e < 0 ? n - at : e; const char *l = d + at;
+        if (ln >= 6 && tx_same(l, 6, "+++ b/", 6)) { long fl = ln - 6 < 1023 ? ln - 6 : 1023; mm_copy(file, sizeof file, l + 6, fl); file[fl] = 0; }
+        else if (ln >= 1 && l[0] == '+' && !(ln >= 4 && tx_same(l, 4, "+++ ", 4))) {
+            int in_scope = tx_eqz(file, "prd_mempalace.md") || (tx_len(file, 1024) > 6 && mm_same(file, "plans/", 6));
+            added++;
+            if (in_scope) {
+                static long hs[256], hl[256]; long h = scan(l + 1, ln - 1, hs, hl, 256), k;
+                for (k = 0; k < h; k++) if (!exempt_of(file, l + 1 + hs[k], hl[k])) { blocked++; printf("BLOCKED\t%s\t%.*s\n", file, (int)hl[k], l + 1 + hs[k]); }
+            }
+        }
+        at += ln + 1;
+    }
+    if (blocked) {
+        fprintf(stderr, "ref-job-paths: %ld added reference(s) to job scratch files; move the file into research/YYYY-MM-DD/ and cite that, or add a row with expires to %s\n", blocked, EXEMPT);
+        return 1;
+    }
+    printf("REF-JOB-PATHS\tok\tadded=%ld\n", added);
+    return 0;
+}
+
+static int do_report(void) {
+    long hits = 0, tmp = 0; int i;
+    for (i = 0; i < nsf; i++) {
+        hits += sf_hits[i]; tmp += sf_tmp[i];
+        if (sf_hits[i] || sf_tmp[i]) printf("REF\t%s\tjob_hits=%ld\texempt=%ld\ttmp_refs=%ld\n", sf_name[i], sf_hits[i], sf_ex[i], sf_tmp[i]);
+    }
+    printf("REF_SUMMARY\tfiles=%d\tjob_hits=%ld\ttmp_refs=%ld\n", nsf, hits, tmp);
+    return 0;
+}
+
+static void set_today(void) {
+    long long z, era, doe, yoe, y, doy, mp, d, m;
+    if (today[0]) return;
+    z = (long long)(sy_wall_s() / 86400) + 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = z - era * 146097;
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    y = yoe + era * 400;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp + (mp < 10 ? 3 : -9);
+    if (m <= 2) y++;
+    (void)cx_fmt(today, sizeof today, "%04lld-%02lld-%02lld", y, m, d);
+}
+
+int main(int argc, char **argv) {
+    const char *mode = 0, *diff = 0; int i, rc;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--today") && i + 1 < argc) { i++; if (tx_len(argv[i], 16) != 10) { fprintf(stderr, "ref-job-paths: bad --today\n"); return 2; } mm_copy(today, sizeof today, argv[i], 10); today[10] = 0; }
+        else if (tx_eqz(argv[i], "--staged-from") && i + 1 < argc) { mode = "staged"; diff = argv[++i]; }
+        else if (tx_eqz(argv[i], "--check") || tx_eqz(argv[i], "--report") || tx_eqz(argv[i], "--write-baseline")) mode = argv[i] + 2;
+        else { fprintf(stderr, "usage: tools/ref-job-paths.cx --check | --report | --write-baseline | --staged-from DIFF [--root DIR] [--today YYYY-MM-DD]\n"); return 2; }
+    }
+    if (!mode) { fprintf(stderr, "usage: tools/ref-job-paths.cx --check | --report | --write-baseline | --staged-from DIFF [--root DIR] [--today YYYY-MM-DD]\n"); return 2; }
+    set_today();
+    load_exempt();
+    if (tx_eqz(mode, "staged")) return do_staged(diff);
+    rc = scan_tree(); if (rc) return rc;
+    load_base();
+    if (tx_eqz(mode, "report")) return do_report();
+    if (tx_eqz(mode, "write-baseline")) return do_write();
+    if (!have_base) { printf("ref-job-paths: FAIL: cannot read %s\n", BASE); return 1; }
+    return do_check();
+}

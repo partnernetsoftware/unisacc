@@ -1,0 +1,184 @@
+/* tools/check-ref-job-paths.cx -- check tools/ref-job-paths.cx (ratchet: references to job scratch files in plans/).
+ *
+ *   sh ./unisacc.com tools/check-ref-job-paths.cx
+ *
+ * M1..M11 run the tool on small git fixtures (plans/, prd_mempalace.md, build/ tables) and assert the verdict named in the
+ * row; M12 runs four one-line mutants of the tool (check compare, expiry, baseline raise, staged guard) on those fixtures and
+ * requires each mutant to give a different answer than the tool, so every guard is proven by a red run.
+ *   M1 new ref over a zero baseline -> FAIL    M2 live exempt row -> ok          M3 expired exempt row -> FAIL
+ *   M4 baseline above the hits -> STALE FAIL, --write-baseline shrinks it         M5 --write-baseline refuses to raise
+ *   M6 prose, bare tmp dir, placeholder -> 0 hits                                  M7 --staged-from blocks an added ref
+ *   M8 removed and context lines are not added lines                               M9 trailing punctuation is not part of a path
+ *   M10 two refs on one line count 2                                               M11 sub-directories of plans/ count, research/ does not
+ * Fixture strings split the job-path marker so this file adds no reference to the tree.
+ * Last line: CHECK_REF_JOB_PATHS<TAB>failed=N, or CHECK_REF_JOB_PATHS_MUT<TAB>failed=N for "-- --cases mut" (M12 only; "--cases main" is
+ * M1..M11 and the report row; no argument runs both).  Registered as two batches so each stays under the 30 s cold budget. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.muthelp
+
+#define JP ".claude/" "jobs/"
+#define REF "~/" JP "2798e440/tmp/foo/bar.md"
+#define HITTXT JP "2798e440/tmp/foo/bar.md"
+#define TOOL "tools/ref-job-paths.cx"
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\tref-job-paths.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
+#define has(o, s) ckk_has((o), 1 << 20, (s))
+static int run(char **v, char *o, int cap) {
+    char *out = 0; size_t n = 0; int rc = cx_runv_timeout(v, 50, &out, &n);
+    if (n >= (size_t)cap) n = (size_t)cap - 1;
+    if (out) mm_copy(o, (size_t)cap, out, n);
+    o[out ? n : 0] = 0; mm_free(out);
+    return rc;
+}
+
+static char base[4096], tmpl[4300]; static int seq;
+static void put(const char *d, const char *rel, const char *body) { char p[4500]; cx_fmt(p, sizeof p, "%s/%s", d, rel); cx_write(p, body, tx_len(body, 100000)); }
+static void mkfix(char *d, int cap, const char *plans_x, const char *baseline, const char *exempt) {
+    char o[4096], sub[4500], *gi[] = {"git", "-C", d, "init", "-q", 0}, *ga[] = {"git", "-C", d, "add", "-A", 0};
+    cx_fmt(d, cap, "%s/f%d", base, ++seq);
+    sy_mkdir(d, 0700);
+    cx_fmt(sub, sizeof sub, "%s/plans", d); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/plans/sub", d); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/build", d); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/research", d); sy_mkdir(sub, 0700);
+    put(d, "plans/x.md", plans_x);
+    put(d, "prd_mempalace.md", "# ledger\n");
+    if (baseline) put(d, "build/ref-job-paths-baseline.tsv", baseline);
+    if (exempt) put(d, "build/ref-job-paths-exempt.tsv", exempt);
+    run(gi, o, sizeof o);
+    run(ga, o, sizeof o);
+}
+static int tool(const char *tool_rel, char *o, int cap, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
+    char *v[16]; int n = 0;
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = (char *)tool_rel; v[n++] = "--";
+    if (a1) v[n++] = (char *)a1; if (a2) v[n++] = (char *)a2; if (a3) v[n++] = (char *)a3; if (a4) v[n++] = (char *)a4; if (a5) v[n++] = (char *)a5;
+    v[n] = 0;
+    return run(v, o, cap);
+}
+static int check_in(const char *tool_rel, const char *d, char *o, int cap, const char *today) {
+    return today ? tool(tool_rel, o, cap, "--check", "--root", d, "--today", today) : tool(tool_rel, o, cap, "--check", "--root", d, 0, 0);
+}
+
+int main(int argc, char **argv) {
+    static char o[1 << 16], o2[1 << 16], d[4300], df[4400];
+    int rc, do_main = 1, do_mut = 1;
+    const char *line1 = "see " REF ".\n";
+    if (cx_fmt(base, sizeof base, "%s/ref-job-paths-%d", sy_tmpdir(), (int)sy_pid()) || sy_mkdir(base, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    if (argc >= 3 && tx_eqz(argv[1], "--cases")) {
+        do_main = tx_eqz(argv[2], "main") || tx_eqz(argv[2], "all"); do_mut = tx_eqz(argv[2], "mut") || tx_eqz(argv[2], "all");
+        if (!do_main && !do_mut) { fprintf(stderr, "usage: check-ref-job-paths.cx [-- --cases main|mut|all]\n"); return 2; }
+    }
+    if (do_main) {   /* M1..M11 and the report row (--cases main) */
+    mkfix(d, sizeof d, line1, "# baseline\n", 0);
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 1 && has(o, "plans/x.md has 1 refs") && has(o, "baseline 0") && has(o, "ref-job-paths: FAIL"), "M1-new-ref-over-zero-baseline");
+    /* M2 live exempt row (same fixture content, row added in a new fixture) */
+    mkfix(d, sizeof d, line1, "# baseline\n", "file\tpath\treason\towner\texpires\nplans/x.md\t" REF "\treview draft pending\tomp\t2999-01-01\n");
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 0 && has(o, "ref-job-paths: ok") && has(o, "exempt=1"), "M2-live-exempt-row-passes");
+    /* M3 expired */
+    mkfix(d, sizeof d, line1, "# baseline\n", "plans/x.md\t" REF "\treview draft pending\tomp\t2000-01-01\n");
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 1 && has(o, "expired exempt row plans/x.md"), "M3-expired-exempt-row-fails");
+    /* M4 stale baseline, then shrink */
+    mkfix(d, sizeof d, line1, "plans/x.md\t3\n", 0);
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 1 && has(o, "STALE") && has(o, "baseline 3 exceeds 1"), "M4-stale-baseline-fails");
+    rc = tool(TOOL, o, sizeof o, "--write-baseline", "--root", d, "--today", "2026-11-22");
+    { int rc2 = check_in(TOOL, d, o2, sizeof o2, "2026-11-22");
+      ck(rc == 0 && rc2 == 0 && has(o2, "ref-job-paths: ok"), "M4-write-baseline-shrinks-then-ok"); }
+    /* M5 write refuses to raise */
+    mkfix(d, sizeof d, "a " REF " b " REF "\n", "plans/x.md\t1\n", 0);
+    rc = tool(TOOL, o, sizeof o, "--write-baseline", "--root", d, "--today", "2026-11-22");
+    cx_fmt(df, sizeof df, "%s/build/ref-job-paths-baseline.tsv", d);
+    { size_t n = 0; char *b = (char *)cx_read(df, &n);
+      ck(rc == 1 && has(o, "REFUSE to raise plans/x.md from 1 to 2") && b && n == tx_len("plans/x.md\t1\n", 64) && mm_same(b, "plans/x.md\t1\n", (long)n), "M5-write-baseline-refuses-to-raise"); }
+    /* M6 prose, bare tmp dir, placeholder */
+    mkfix(d, sizeof d, "env $CLAUDE_JOB_DIR/tmp; prose ~/" JP " own tmp; slot ~/" JP "<id>/tmp/NAME; bare ~/" JP "2798e440/tmp/ ok\n", "# baseline\n", 0);
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 0 && has(o, "hits=0"), "M6-prose-bare-dir-placeholder-not-hits");
+    /* M7 / M8 staged */
+    mkfix(d, sizeof d, "x\n", "# baseline\n", 0);
+    cx_fmt(df, sizeof df, "%s/s.diff", d);
+    {   const char *red = "diff --git a/plans/x.md b/plans/x.md\n+++ b/plans/x.md\n@@ -0,0 +1,2 @@\n+draft " REF ".\n+clean\n";
+        cx_write(df, red, tx_len(red, 4096));
+        rc = tool(TOOL, o, sizeof o, "--staged-from", df, "--root", d, 0);
+        ck(rc == 1 && has(o, "BLOCKED\tplans/x.md\t" HITTXT "\n") && !has(o, "clean"), "M7-staged-blocks-added-ref");
+        /* M9 in passing: the printed path has no trailing period and no full-width mark */
+        ck(!has(o, HITTXT ".\n"), "M9-trailing-period-not-in-path");
+    }
+    {   const char *green = "+++ b/plans/x.md\n-old " REF "\n context " REF "\n+clean line\n";
+        cx_write(df, green, tx_len(green, 4096));
+        rc = tool(TOOL, o, sizeof o, "--staged-from", df, "--root", d, 0);
+        ck(rc == 0 && has(o, "REF-JOB-PATHS\tok\tadded=1"), "M8-removed-and-context-lines-ignored");
+    }
+    /* M9 punctuation: three hits with period, comma and a full-width mark, baseline 3 */
+    mkfix(d, sizeof d, "(" REF ".) and " REF ", and " REF "\xe3\x80\x82\xe5\x90\x8e\n", "plans/x.md\t3\n", 0);
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 0 && has(o, "hits=3"), "M9-punctuation-boundaries-count-3");
+    /* M10 two on one line */
+    mkfix(d, sizeof d, "a " REF " b " REF "\n", "plans/x.md\t1\n", 0);
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 1 && has(o, "plans/x.md has 2 refs"), "M10-two-refs-on-one-line-count-two");
+    /* M11 sub-directory counts, research does not */
+    mkfix(d, sizeof d, "x\n", "# baseline\n", 0);
+    put(d, "plans/sub/y.md", line1);
+    put(d, "research/z.md", line1);
+    { char *ga[] = {"git", "-C", d, "add", "-A", 0}; run(ga, o, sizeof o); }
+    rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
+    ck(rc == 1 && has(o, "plans/sub/y.md has 1 refs") && !has(o, "research/z.md"), "M11-subdir-counts-research-not-scanned");
+    /* real tree: report works, check passes against the committed baseline when one exists */
+    rc = tool(TOOL, o, sizeof o, "--report", 0, 0, 0, 0);
+    ck(rc == 0 && has(o, "REF_SUMMARY\tfiles="), "report-runs-on-tree");
+    }
+    /* M12: four mutants, each must answer differently from the tool on its fixture (--cases mut) */
+    if (do_mut)
+    {   struct { const char *tag, *old, *nw; int fx; } m[4] = {
+            {"check-compare", "if (eff > b) { over++;", "if (0 && eff > b) { over++;", 1},
+            {"expiry", "cmpd(ex_exp[i], today) >= 0", "1", 3},
+            {"raise-refusal", "if (have_base && eff > base_of(sf_name[i]))", "if (0 && have_base && eff > base_of(sf_name[i]))", 5},
+            {"staged-guard", "if (!exempt_of(file, l + 1 + hs[k], hl[k])) { blocked++;", "if (0 && !exempt_of(file, l + 1 + hs[k], hl[k])) { blocked++;", 7} };
+        int i;
+        for (i = 0; i < 4; i++) {
+            char work[4300], wtool[4500], root[4096], cxs[4500], cxd[4500]; int rcm, rco;
+            cx_fmt(work, sizeof work, "%s/mut%d", base, i);
+            sy_mkdir(work, 0700);
+            { char tdir[4500]; cx_fmt(tdir, sizeof tdir, "%s/tools", work); sy_mkdir(tdir, 0700); }
+            if (!getcwd(root, sizeof root)) { ck(0, "getcwd"); continue; }
+            cx_fmt(cxs, sizeof cxs, "%s/cx", root); cx_fmt(cxd, sizeof cxd, "%s/cx", work); sy_symlink(cxs, cxd);
+            mh_put_mut(root, work, "cxroot.tsv", "", "");
+            if (!mh_put_mut(root, work, TOOL, m[i].old, m[i].nw)) { ck(0, m[i].tag); continue; }
+            cx_fmt(wtool, sizeof wtool, "%s/%s", work, TOOL);
+            if (m[i].fx == 1) {
+                mkfix(d, sizeof d, line1, "# baseline\n", 0);
+                rco = check_in(TOOL, d, o, sizeof o, "2026-11-22"); rcm = check_in(wtool, d, o2, sizeof o2, "2026-11-22");
+            } else if (m[i].fx == 3) {
+                mkfix(d, sizeof d, line1, "# baseline\n", "plans/x.md\t" REF "\treview draft pending\tomp\t2000-01-01\n");
+                rco = check_in(TOOL, d, o, sizeof o, "2026-11-22"); rcm = check_in(wtool, d, o2, sizeof o2, "2026-11-22");
+            } else if (m[i].fx == 5) {
+                mkfix(d, sizeof d, "a " REF " b " REF "\n", "plans/x.md\t1\n", 0);
+                rco = tool(TOOL, o, sizeof o, "--write-baseline", "--root", d, "--today", "2026-11-22");
+                rcm = tool(wtool, o2, sizeof o2, "--write-baseline", "--root", d, "--today", "2026-11-22");
+            } else {
+                mkfix(d, sizeof d, "x\n", "# baseline\n", 0);
+                cx_fmt(df, sizeof df, "%s/s.diff", d);
+                { const char *red = "+++ b/plans/x.md\n+draft " REF "\n"; cx_write(df, red, tx_len(red, 4096)); }
+                rco = tool(TOOL, o, sizeof o, "--staged-from", df, "--root", d, 0); rcm = tool(wtool, o2, sizeof o2, "--staged-from", df, "--root", d, 0);
+            }
+            ck(rco == 1 && rcm == 0, m[i].tag);
+        }
+    }
+    sy_remove_all(base);
+    printf("%s\tfailed=%d\n", !do_main && do_mut ? "CHECK_REF_JOB_PATHS_MUT" : "CHECK_REF_JOB_PATHS", failed);
+    return failed ? 1 : 0;
+}
