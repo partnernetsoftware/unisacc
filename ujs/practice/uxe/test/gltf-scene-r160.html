@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import * as three from "three";
+const status = document.querySelector("#r160");
+try {
+  if (three.REVISION !== "160") throw new Error("three.js revision mismatch");
+  const path = new URLSearchParams(location.search).get("package");
+  const { GLTFLoader } = await import(`file://${path}/examples/jsm/loaders/GLTFLoader.js`);
+  const [json, hex] = await Promise.all(["json", "hex"].map(async extension => {
+    const response = await fetch(`gltf-scene-fixture.${extension}`);
+    if (!response.ok) throw new Error(`fixture ${extension}`);
+    return response.text();
+  }));
+  const bin = Uint8Array.from(hex.match(/[0-9a-f]{2}/g), byte => parseInt(byte, 16));
+  function glb(manifest) {
+    const jsonBytes = new TextEncoder().encode(manifest);
+    const paddedJson = (jsonBytes.length + 3) & ~3;
+    const paddedBin = (bin.length + 3) & ~3;
+    const result = new Uint8Array(28 + paddedJson + paddedBin);
+    const view = new DataView(result.buffer);
+    [0x46546c67, 2, result.length, paddedJson, 0x4e4f534a].forEach((word, i) => view.setUint32(i * 4, word, true));
+    result.fill(32, 20, 20 + paddedJson);
+    result.set(jsonBytes, 20);
+    view.setUint32(20 + paddedJson, paddedBin, true);
+    view.setUint32(24 + paddedJson, 0x004e4942, true);
+    result.set(bin, 28 + paddedJson);
+    return result.buffer;
+  }
+  const loader = new GLTFLoader();
+  const { scene } = await loader.parseAsync(glb(json), "");
+  scene.updateMatrixWorld(true);
+  const root = scene.getObjectByName("root");
+  const leaf = scene.getObjectByName("leaf");
+  const ids = ["root", "matrix", "sibling", "other", "leaf"];
+  const before = leaf.matrixWorld.elements.slice();
+  let rejected = false;
+  try {
+    await loader.parseAsync(glb(json.replace('"2.0"', '"1.0"')), "");
+  } catch (error) {
+    if (!error.message.includes("Unsupported asset")) throw error;
+    rejected = true;
+  }
+  const preserved = Number(rejected && leaf.matrixWorld.elements.every((value, i) => value === before[i]) &&
+    scene.children[1] === root && root.children[1] === leaf.parent);
+  const graph = [...scene.children, ...root.children, leaf.parent].map(node => ids.indexOf(node.name));
+  const world = leaf.matrixWorld.elements.slice(12, 15);
+  const { index, attributes } = leaf.geometry;
+  const { map } = leaf.material;
+  const enums = new Map([[three.NearestFilter, 9728], [three.NearestMipmapNearestFilter, 9984],
+    [three.ClampToEdgeWrapping, 33071], [three.MirroredRepeatWrapping, 33648]]);
+  const mesh = [attributes.position.count, attributes.position.getX(3), attributes.uv.getY(1),
+    attributes.uv.getX(0), index.count, ...index.array, map.image.width,
+    ...[map.magFilter, map.minFilter, map.wrapS, map.wrapT].map(value => enums.get(value)), preserved];
+  status.textContent = JSON.stringify(location.hash === "#geometry" ? mesh : [...graph, ...world, preserved]);
+} catch (error) {
+  status.textContent = `error:${error.message}`;
+}
+</script>

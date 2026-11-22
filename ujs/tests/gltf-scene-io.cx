@@ -1,0 +1,284 @@
+#pragma unisa use r160_wait
+#pragma unisa use wasm_test_cache
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int nibble(unsigned char c) {
+    if(c>='0' && c<='9') return c-'0';
+    if(c>='a' && c<='f') return c-'a'+10;
+    return -1;
+}
+
+static int build_setup(char *setup,int capacity) {
+    const char *jsonPath="ujs/practice/uxe/test/gltf-scene-fixture.json";
+    const char *hexPath="ujs/practice/uxe/test/gltf-scene-fixture.hex";
+    unsigned char *json=0,*hex=0;
+    int64_t jsonBytes=0,hexBytes=0;
+    if(sy_read_file(jsonPath,&json,&jsonBytes,2048) || sy_read_file(hexPath,&hex,&hexBytes,1024)) {
+        mm_free(json);
+        mm_free(hex);
+        return 1;
+    }
+    unsigned char bin[256];
+    int nbin=0,high=-1,failed=0;
+    for(int i=0;i<hexBytes;i++) {
+        if(hex[i]=='\n') continue;
+        int value=nibble(hex[i]);
+        if(value<0 || nbin==(int)sizeof bin) { failed=1; break; }
+        if(high<0) high=value;
+        else { bin[nbin++]=16*high+value; high=-1; }
+    }
+    mm_free(hex);
+    long version=tx_find((char *)json,jsonBytes,"\"2.0\"",5);
+    if(failed || high>=0 || !nbin || version<0) { mm_free(json); return 1; }
+    const int jsonPadded=(jsonBytes+3)/4*4;
+    const int binPadded=(nbin+3)/4*4;
+    int used=tx_snprintf(setup,capacity,
+        "let source=4096;let glb=3072;let scratch=3104;let key=3168;"
+        "let versionAt=source+%ld;let binAt=source+%d;let length=%d;"
+        "let a=ux_u32_put(source,1179937895);let b=ux_u32_put(source+4,2);"
+        "let c=ux_u32_put(source+8,length);let d=ux_u32_put(source+12,%d);let e=ux_u32_put(source+16,1313821514);"
+        "let f=ux_u32_put(binAt-8,%d);let g=ux_u32_put(binAt-4,5130562);",
+        version+21,28+jsonPadded,28+jsonPadded+binPadded,jsonPadded,binPadded);
+    for(int chunk=0;chunk<2 && used>0 && used<capacity;chunk++) {
+        const unsigned char *bytes=chunk?bin:json;
+        const int count=chunk?binPadded:jsonPadded;
+        for(int offset=0;offset<count && used>0 && used<capacity;offset+=256) {
+            int size=(count-offset)/4;
+            if(size>64) size=64;
+            used+=tx_snprintf(setup+used,capacity-used,"if(1){let raw=[");
+            for(int i=0;i<size && used<capacity;i++) {
+                unsigned value=0;
+                for(int lane=0;lane<4;lane++) {
+                    int at=offset+i*4+lane;
+                    unsigned byte=chunk?(at<nbin?bytes[at]:0):(at<jsonBytes?bytes[at]:32);
+                    value|=byte<<(8*lane);
+                }
+                used+=tx_snprintf(setup+used,capacity-used,"%s%u",i?",":"",value);
+            }
+            if(used<capacity) used+=tx_snprintf(setup+used,capacity-used,
+                "];let i=0;while(i<%d){let put=ux_u32_put(%s+%d+i*4,raw[i]);i=i+1;}}",
+                size,chunk?"binAt":"source+20",offset);
+        }
+    }
+    mm_free(json);
+    if(used<=0 || used>=capacity) return 1;
+    used+=tx_snprintf(setup+used,capacity-used,
+        "let manager=LoadingManager_init(3200);let file=FileLoader_init(3232,manager);"
+        "let id=FileLoader_begin(file,3300);let got=FileLoader_receive(file,id,200,source,length,3300);"
+        "let parsed=GltfLoader_readGlb(file,glb,scratch);if(parsed!=glb){return 0.0+parsed;}");
+    return used>=capacity;
+}
+
+#define CHECK_OLD_GLB \
+    "let jsonBefore=ux_u32(glb+GlbResource.json);let jsonBytesBefore=ux_u32(glb+GlbResource.jsonBytes);" \
+    "let binBefore=ux_u32(glb+GlbResource.bin);let binBytesBefore=ux_u32(glb+GlbResource.binBytes);" \
+    "let changed=ux_u8_put(versionAt,49);let rejected=GltfLoader_readGlb(file,glb,scratch);" \
+    "let glbKept=rejected==0-4 && ux_u32(glb+GlbResource.json)==jsonBefore && ux_u32(glb+GlbResource.jsonBytes)==jsonBytesBefore &&" \
+    "ux_u32(glb+GlbResource.bin)==binBefore && ux_u32(glb+GlbResource.binBytes)==binBytesBefore;"
+
+#define FIX "ujs/practice/uxe/test/"
+
+static int compile(const char *source,const char *target,int seconds) {
+    char *output=0;
+    size_t bytes=0;
+    char *args[]={"./ujs/ujs2wasm.com",(char *)source,"-o",(char *)target,0};
+    const long start=sy_now_ms();
+    int rc=cx_runv_timeout(args,seconds,&output,&bytes);
+    printf("GLTF_LINK compile seconds=%d ms=%ld rc=%d\n",seconds,sy_now_ms()-start,rc);
+    if(rc && output) printf("%.*s",(int)bytes,output);
+    mm_free(output);
+    return rc;
+}
+
+static int base_source(const char *target,const char *const *paths,int count,const char *setup,
+        const char *const *cases,int size,const char *mutation) {
+    char program[112000];
+    int used=tx_snprintf(program,sizeof program,
+        "export uxe_gltf_scene_case(selected_case:i64) f64 version 1;\n");
+    for(int i=0;i<count;i++) {
+        unsigned char *body=0;
+        int64_t bytes=0;
+        if(sy_read_file(paths[i],&body,&bytes,sizeof program-used-2)) return 1;
+        int written=tx_snprintf(program+used,sizeof program-used,"%s\n",body);
+        mm_free(body);
+        if(written<0 || written>=(int)sizeof program-used) return 1;
+        used+=written;
+    }
+    int written=tx_snprintf(program+used,sizeof program-used,"\n%s\n",setup);
+    if(written<0 || written>=(int)sizeof program-used) return 1;
+    used+=written;
+    for(int i=0;i<=size;i++) {
+        written=tx_snprintf(program+used,sizeof program-used,"if(selected_case==%d){%s}\n",i,i==size?mutation:cases[i]);
+        if(written<0 || written>=(int)sizeof program-used) return 1;
+        used+=written;
+    }
+    written=tx_snprintf(program+used,sizeof program-used,"return 0.0/0.0;\n");
+    if(written<0 || written>=(int)sizeof program-used) return 1;
+    return sy_write_file(target,program,used+written,0600)!=0;
+}
+
+static int run(const char *package,const char *fixture,const char *const *modules,const char *setup,
+        const char *const *cases,const double *gold,int size,int mutationCase,const char *mutation,int prepare,int mutate) {
+    const char *cache=sy_env("UXE_GLTF_SCENE_WASM_CACHE");
+    if(!cache || !cache[0]) { printf("GLTF_LINK 缺少 UXE_GLTF_SCENE_WASM_CACHE\n"); return 2; }
+    char modulePaths[32][160];
+    const char *paths[36];
+    int count=0;
+    while(modules[count]) {
+        tx_snprintf(modulePaths[count],sizeof modulePaths[count],"ujs/practice/uxe/base/%s.ujs",modules[count]);
+        paths[count]=modulePaths[count];
+        count++;
+    }
+    paths[count]="ujs/tests/gltf-scene-io.cx";
+    paths[count+1]=FIX "gltf-scene-fixture.json";
+    paths[count+2]=FIX "gltf-scene-fixture.hex";
+    paths[count+3]=0;
+    char key[65],sha[65],record[600],dir[256],source[300],base[300],probe[300],page[300],url[410];
+    if(wasm_test_cache_key(paths,key)) return 1;
+    int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<0 || n>=(int)sizeof record || sy_mkdtemp("/tmp","uxe-gltf-scene-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/base.ujs",dir);
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+    tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s?count=%d&mutation=%d",page,size,mutate?mutationCase:-1);
+    int rc=wasm_test_cache_read(record,key,prepare?0:base,sha);
+    int failed=0;
+    if(prepare && rc==-ENOENT) {
+        failed=base_source(source,paths,count,setup,cases,size,mutation) || compile(source,base,50) ||
+            wasm_test_cache_write(cache,record,key,base);
+        printf("GLTF_LINK %s prepared key=%s failed=%d\n",fixture,key,failed);
+    } else if(rc) {
+        printf("GLTF_LINK %s cache rc=%d key=%s\n",fixture,rc,key);
+        failed=1;
+    } else if(!prepare) {
+        double actual[32]={0},reference[32]={0};
+        printf("GLTF_LINK %s cache=hit key=%s sha=%s\n",fixture,key,sha);
+        failed=compile(FIX "gltf-scene-linked-probe.ujs",probe,6) ||
+            sy_copy(FIX "gltf-scene-linked-wasm.html",page,0600) ||
+            r160_wait_addon(fixture,package,reference,size,dir) ||
+            r160_wait_read(url,"#wasm-cases",actual,size,dir);
+        for(int i=0;!failed && i<size;i++) if(actual[i]!=gold[i] || reference[i]!=gold[i]) {
+            printf("G_IO %s case=%d actual=%.17g r160=%.17g gold=%.17g\n",fixture,i,actual[i],reference[i],gold[i]);
+            failed=1;
+        }
+        printf("G_IO %s cases=%d failed=%d\n",fixture,size,failed);
+    } else {
+        printf("GLTF_LINK %s prepared cache=hit key=%s sha=%s\n",fixture,key,sha);
+    }
+    if(sy_remove_all(dir)) failed=1;
+    return failed;
+}
+
+static int graph(const char *package,const char *common,int prepare,int mutate) {
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d",
+        "loadingmanager","fileloader","glb-container","record-copy","json-read","loader-json","gltfloader",
+        "gltf-scene-roots","gltf-node-parents","gltf-attach-forest","gltf-node-transform",
+        "gltf-transform-matrix","gltf-pose-forest",0};
+    char setup[12000];
+    int used=tx_snprintf(setup,sizeof setup,"%s%s",common,
+        "let arena=0;let roots=2180;let handles=2200;let records=2304;let work=6400;"
+        "let initialized=Object3D_initArena(arena,5);if(initialized<0){return 0.0+initialized;}"
+        "let selected=GltfLoader_sceneRoots(glb,0,roots,5,key);if(selected!=2){return 0.0+selected;}"
+        "let i=0;while(i<5){let handle=Object3D_create(arena);let stored=ux_u32_put(handles+i*4,handle);"
+        "let pose=GltfLoader_nodeTransform(glb,i,records+i*136,key);if(pose<0){return 0.0+pose;}i=i+1;}"
+        "let edges=GltfLoader_attachForest(glb,arena,handles,5,key,work,120);if(edges!=3){return 0.0+edges;}"
+        "let posed=GltfLoader_poseForest(arena,handles,records,5,work,640);if(posed!=5){return 0.0+posed;}"
+        "i=0;while(i<selected){let updated=Object3D_updateMatrixWorld(arena,ux_u32(handles+ux_u32(roots+i*4)*4),1);"
+        "if(updated<0){return 0.0+updated;}i=i+1;}"
+        "let root=Object3D_address(arena,ux_u32(handles));let leaf=Object3D_address(arena,ux_u32(handles+16));"
+        "let world=ux_u32(leaf+Object3D.worldMatrix);");
+    if(used<0 || used>=(int)sizeof setup) return 2;
+    const char *cases[]={
+        "return 0.0+ux_u32(roots);",
+        "return 0.0+ux_u32(roots+4);",
+        "return 0.0+(ux_u32(root+Object3D.firstChild)%65536-1);",
+        "return 0.0+(ux_u32(root+Object3D.lastChild)%65536-1);",
+        "return 0.0+(ux_u32(leaf+Object3D.parent)%65536-1);",
+        "return ux_f64(world+96);",
+        "return ux_f64(world+104);",
+        "return ux_f64(world+112);",
+        CHECK_OLD_GLB "return 0.0+(glbKept && ux_u32(roots+4)==0 && ux_u32(root+Object3D.lastChild)==ux_u32(leaf+Object3D.parent) &&"
+        "ux_f64(world+96)==2.0 && ux_f64(world+104)==3.0 && ux_f64(world+112)==4.0);"
+    };
+    const double gold[]={3,0,2,1,1,2,3,4,1};
+    return run(package,"gltf-scene",modules,setup,cases,gold,sizeof gold/sizeof gold[0],6,
+        "return ux_f64(world+112);",prepare,mutate);
+}
+
+static int geometry(const char *package,const char *common,int prepare,int mutate) {
+    const char *modules[]={"loadingmanager","fileloader","glb-container","record-copy","json-read","loader-json","gltfloader",
+        "gltf-accessor","gltf-sparse-accessor","gltf-primitive-attribute","gltf-primitive-index",
+        "gltf-triangle-topology","gltf-topology-accessors","gltf-geometry-view","gltf-texture","gltf-sampler",
+        "png-header","png-scanlines","png-bits","png-huffman","png-fixed","png-stored","image-layout","gltf-texture-png",0};
+    char setup[12000];
+    int used=tx_snprintf(setup,sizeof setup,"%s%s",common,
+        "let attr=0;let pos=32;let uv=64;let index=96;let req=128;let view=160;let attrs=192;let packed=224;"
+        "let tex=256;let sampler=288;let image=320;let pixels=352;"
+        "let semantic=[80,79,83,73,84,73,79,78,84,69,88,67,79,79,82,68,95,48];"
+        "let i=0;while(i<18){let a=ux_u8_put(384+i,semantic[i]);i=i+1;}"
+        "let a=ux_u32_put(attr+GltfPrimitiveAttributeRequest.semantic,384);"
+        "let b=ux_u32_put(attr+GltfPrimitiveAttributeRequest.semanticBytes,8);"
+        "let position=GltfLoader_primitiveAttribute(glb,attr,pos,512,32,key);"
+        "let c=ux_u32_put(attr+GltfPrimitiveAttributeRequest.semantic,392);"
+        "let d=ux_u32_put(attr+GltfPrimitiveAttributeRequest.semanticBytes,10);"
+        "let texcoord=GltfLoader_primitiveAttribute(glb,attr,uv,512,32,key);"
+        "let sourceIndex=GltfLoader_primitiveIndex(glb,0,0,index,544,32,key);"
+        "if(position<0 || texcoord<0 || sourceIndex<0){return 0.0-99.0;}"
+        "let json=ux_u32(glb+GlbResource.json);let end=json+ux_u32(glb+GlbResource.jsonBytes);"
+        "let mesh=LoaderJson_item(LoaderJson_find(json,end,key,1752393069,29541,0,6),end,0);"
+        "let primitive=LoaderJson_item(LoaderJson_find(mesh,end,key,1835627120,1986622569,29541,10),end,0);"
+        "let mode=LoaderJson_uint(LoaderJson_find(primitive,end,key,1701080941,0,0,4),end,4);"
+        "let p0=ux_u32_put(req+GltfGeometryRequest.mode,mode);let p1=ux_u32_put(req+GltfGeometryRequest.position,pos);"
+        "let p2=ux_u32_put(req+GltfGeometryRequest.index,index);let p3=ux_u32_put(req+GltfGeometryRequest.hasIndex,1);"
+        "let p4=ux_u32_put(req+GltfGeometryRequest.attributes,attrs);let p5=ux_u32_put(req+GltfGeometryRequest.attributeCount,1);"
+        "let p6=ux_u32_put(req+GltfGeometryRequest.indicesOut,packed);let p7=ux_u32_put(req+GltfGeometryRequest.indexCapacity,6);"
+        "let p8=ux_u32_put(attrs,uv);let built=GltfLoader_geometryView(req,view);if(built!=view){return 0.0+built;}"
+        "let texture=GltfLoader_textureSource(glb,0,tex,key);if(texture!=tex){return 0.0+texture;}"
+        "let sample=GltfLoader_sampler(glb,ux_u32(tex+GltfTextureSource.sampler),sampler,key);if(sample!=sampler){return 0.0+sample;}"
+        "let decoded=GltfLoader_decodeTexturePng(tex,image,pixels,4,6400,4096);if(decoded!=image){return 0.0+decoded;}"
+        "let xyz=ux_u32(pos+GltfAccessor.bytes);let xy=ux_u32(uv+GltfAccessor.bytes);");
+    if(used<0 || used>=(int)sizeof setup) return 2;
+    const char *cases[]={
+        "return 0.0+ux_u32(view+GltfGeometryView.vertexCount);",
+        "return ux_f32(xyz+36);",
+        "return ux_f32(xy+12);",
+        "return ux_f32(xy);",
+        "return 0.0+ux_u32(view+GltfGeometryView.indexCount);",
+        "return 0.0+ux_u32(packed);",
+        "return 0.0+ux_u32(packed+4);",
+        "return 0.0+ux_u32(packed+8);",
+        "return 0.0+ux_u32(packed+12);",
+        "return 0.0+ux_u32(packed+16);",
+        "return 0.0+ux_u32(packed+20);",
+        "return 0.0+ux_u32(image+ImageResource.width);",
+        "return 0.0+ux_u32(sample+GltfSampler.magFilter);",
+        "return 0.0+ux_u32(sample+GltfSampler.minFilter);",
+        "return 0.0+ux_u32(sample+GltfSampler.wrapS);",
+        "return 0.0+ux_u32(sample+GltfSampler.wrapT);",
+        CHECK_OLD_GLB "let cap=ux_u32_put(req+GltfGeometryRequest.indexCapacity,5);let failed=GltfLoader_geometryView(req,view);"
+        "return 0.0+(glbKept && failed==0-3 && ux_u32(view+GltfGeometryView.indexCount)==6 &&"
+        "ux_u32(packed)==0 && ux_u32(packed+4)==1 && ux_u32(packed+8)==2 &&"
+        "ux_u32(packed+12)==3 && ux_u32(packed+16)==2 && ux_u32(packed+20)==1);"
+    };
+    const double gold[]={4,1,0.75,0,6,0,1,2,3,2,1,1,9728,9984,33071,33648,1};
+    return run(package,"gltf-scene-geometry",modules,setup,cases,gold,sizeof gold/sizeof gold[0],2,
+        "return ux_f32(xy+8);",prepare,mutate);
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==4 && tx_eqz(argv[3],"--mutate");
+    const int prepare=argc==4 && tx_eqz(argv[3],"--prepare");
+    if(argc!=3 && !mutate && !prepare) return 2;
+    const int scene=tx_eqz(argv[2],"graph");
+    if(!scene && !tx_eqz(argv[2],"geometry")) return 2;
+    char common[9600];
+    if(build_setup(common,sizeof common)) return 2;
+    return scene?graph(argv[1],common,prepare,mutate):geometry(argv[1],common,prepare,mutate);
+}
