@@ -32,7 +32,7 @@
 | Skeleton | skeleton-clone-struct.cx 对照骨表、逆矩阵与清零调色板。skeleton-json-struct.cx 对照 r160 完整 JSON 往返，矩阵篡改转红 | 已验收骨架 UUID、骨 UUID 列表及逆绑定矩阵。缺失骨具名为拒绝状态，调用方需提供骨绑定 |
 | DataTexture | data-texture-object-struct.cx 对照 RGBA8 采样及源共享。data-texture-image-json.cx 读回 Source 和十项公共参数，像素及环绕篡改转红 | 已验收 RGBA8 图像和十项参数的往返。完整 Texture 元数据与其他数据格式待补 |
 | CubeTexture | cube-texture-object-struct.cx 对照面分派及容量拒绝。共用 C6 纹理门验 Source URL 六面顺序，交换两面转红 | 支持由调用方提供已解码面句柄。图像解码与 GPU 跨面过滤另走独立入口 |
-| CanvasTexture | canvas-texture-object-struct.cx 对照真实画布、刷新和克隆 | 公共纹理参数、源 UUID 和画布图像快照引用 |
+| CanvasTexture | canvas-texture-object-struct.cx 对照真实画布、刷新和克隆。共用 C6 门验 Source UUID、快照 URI 字节与刷新版本，省略刷新转红 | 画布编码和 URI 图像解码由调用方提供 |
 
 ## 压缩纹理软件范围与设备缺口
 

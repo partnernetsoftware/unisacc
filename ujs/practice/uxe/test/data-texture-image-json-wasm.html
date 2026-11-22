@@ -7,8 +7,14 @@ try {
   const load = async path => WebAssembly.compile(await (await fetch(path)).arrayBuffer());
   const [baseModule, probeModule] = await Promise.all([load("base.wasm"), load("probe.wasm")]);
   const mutate = new URLSearchParams(location.search).has("mutate");
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "rgb(49,0,0)";
+  context.fillRect(0,0,1,1);
+  const uri = new TextEncoder().encode(canvas.toDataURL());
   const actual = [];
-  for (let index = 0; index < 21; index++) {
+  for (let index = 0; index < 24; index++) {
     const base = await WebAssembly.instantiate(baseModule, {env: {host_gpu_submit() {
       throw new Error("Unexpected GPU submission");
     }}});
@@ -17,8 +23,15 @@ try {
     });
     if (base.exports.uxe_abi_version() !== 1 || probe.exports.uxe_abi_version() !== 1 ||
         base.exports.memory === probe.exports.memory) throw new Error("Texture image ABI mismatch");
-    const selected = index < 5 ? index : index < 15 ? index + 1 : index + 2;
-    const changed = mutate && index === 2 ? 5 : mutate && index === 5 ? 16 : mutate && index === 15 ? 24 : selected;
+    const memory = base.exports.memory.buffer;
+    const uxMemory = 2097152;
+    new Uint8Array(memory, uxMemory + 23168, uri.length).set(uri);
+    const input = new DataView(memory, uxMemory);
+    input.setUint32(23000, 23168, true);
+    input.setUint32(23004, uri.length, true);
+    const selected = index < 5 ? index : index < 15 ? index + 1 : index < 21 ? index + 2 : index + 4;
+    const changed = mutate && index === 2 ? 5 : mutate && index === 5 ? 16 :
+      mutate && index === 15 ? 24 : mutate && index === 21 ? 28 : selected;
     actual.push(probe.exports.uxe_evaluate_texture_image(BigInt(changed)));
   }
   status.textContent = JSON.stringify(actual);

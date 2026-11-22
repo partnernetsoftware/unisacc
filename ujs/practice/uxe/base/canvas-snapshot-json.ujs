@@ -1,0 +1,43 @@
+// The host encodes the canvas. Publish an image reference only for the
+// currently accepted GPU snapshot version.
+struct CanvasSnapshotJson {
+  source: u32;
+  uuid: u32;
+  uuidBytes: u32;
+  version: u32;
+}
+
+native function CanvasTexture_writeSnapshotJSON(texture:i64,snapshot:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!texture_object_valid(texture) || !helper_buffer_span(snapshot,CanvasSnapshotJson.size,4) ||
+     !source_input_ok(texture,Texture.size,dst,end,scratch) ||
+     !source_input_ok(snapshot,CanvasSnapshotJson.size,dst,end,scratch)) { return 0-1; }
+  let version=GpuTextureTable_version(ux_u32(texture+Texture.table),ux_u32(texture+Texture.handle));
+  let source=ux_u32(snapshot+CanvasSnapshotJson.source);
+  if(version<1 || version!=ux_u32(snapshot+CanvasSnapshotJson.version) ||
+     !helper_buffer_span(source,Source.size,4)) { return 0-1; }
+  let image=ux_u32(source+Source.data);
+  if(image==0 || !helper_buffer_span(image,SourceImage.size,4) ||
+     ux_u32(image+SourceImage.kind)!=11 || ux_u32(image+SourceImage.count)==0) { return 0-1; }
+  return Source_toJSON(source,dst,end,ux_u32(snapshot+CanvasSnapshotJson.uuid),
+      ux_u32(snapshot+CanvasSnapshotJson.uuidBytes),scratch);
+}
+
+native function CanvasTexture_readSnapshotJSON(source:i64,input:i64,end:i64,uuid:i64,bytes:i64,options:i64) i64 {
+  if(!helper_buffer_span(options,SourceRead.size,4)) { return 0-1; }
+  let uuidScratch=ux_u32(options+SourceRead.scratch);
+  let data=ux_u32(options+SourceRead.data);
+  let capacity=ux_u32(options+SourceRead.capacity);
+  let image=ux_u32(options+SourceRead.image);
+  if(!helper_buffer_span(source,Source.size,4) || !helper_buffer_span(image,SourceImage.size,4) ||
+     !helper_buffer_span(data,capacity,1) ||
+     !helper_buffer_disjoint(source,Source.size,uuidScratch,255) ||
+     !helper_buffer_disjoint(options,SourceRead.size,uuidScratch,255) ||
+     !helper_buffer_disjoint(image,SourceImage.size,uuidScratch,255) ||
+     !helper_buffer_disjoint(data,capacity,uuidScratch,255)) { return 0-1; }
+  let matches=Source_matchJSONReference(input,end,uuid,bytes,uuidScratch);
+  if(matches!=1) { return 0-1; }
+  let root=json_space(input,end);
+  let url=source_read_key(root,end,uuidScratch,7107189,3);
+  if(url<0 || ux_u8(url)!=34 || json_scan_string(url,end)<=url+2) { return 0-1; }
+  return Source_fromJSON(source,input,end,options);
+}
