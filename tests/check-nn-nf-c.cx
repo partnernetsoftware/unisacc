@@ -6,7 +6,7 @@
  *   (sy_tmpdir)下新建 unisacc-nn-nf-c-XXXXXX,不写仓库 out/。
  *   批次登记为 materials=nnc-nets,args={root};{nnc-nets};{out}。
  *
- * 三组断言:
+ * 先用 --verify 校验材料收据，再运行三组断言:
  *   cmp     -- net-<name>/result.net 与 models/<name>.net 逐字节比较,必须全部 EQUAL(diff=0、missing=0)。
  *   report  -- 报告工具必须给出 runs_ge16/actions/bytes 三个非负测量值,且彼此相容。
  *   refusal -- 把一张网改一个字节后比较必须变 DIFF 且退出码非 0,证明"等价"不是恒真。
@@ -18,9 +18,22 @@
 #pragma unisa use text.text
 
 static int nc_assertions, nc_failed;
-static char nc_root[4096], nc_out[4400], nc_rep[4400];
+static char nc_root[4096], nc_out[4400], nc_rep[4400], nc_product[4400];
 static void nc_ck(int ok, const char *name) { nc_assertions++; if (!ok) nc_failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); }
 static void nc_die(const char *s) { fprintf(stderr, "check-nn-nf-c: %s errno=%d\n", s, errno); exit(2); }
+static int nc_verify(const char *material) {
+    char *av[] = {"sh", nc_product, "tests/nnc-nets-material.cx", "--",
+                  "--verify", nc_root, (char *)material, 0};
+    np_result r = {0};
+    char why[1024];
+    int tr = np_run(av, nc_root, 0, 15, &r, why, sizeof why);
+    if (tr) fprintf(stderr, "check-nn-nf-c: material verify transport: %s\n", why);
+    int ok = !tr && !r.rc;
+    if (!ok && r.outn) fwrite(r.out, 1, r.outn, stderr);
+    if (r.errn) fwrite(r.err, 1, r.errn, stderr);
+    np_free(&r);
+    return ok;
+}
 /* run the report tool and hand back its stdout */
 static char *nc_run(const char *jobs, const char *models, int *rc) {
     char *av[8];
@@ -28,7 +41,7 @@ static char *nc_run(const char *jobs, const char *models, int *rc) {
     char why[1024];
     int tr;
     av[0] = "sh";
-    av[1] = "./unisacc.com";
+    av[1] = nc_product;
     av[2] = "tests/nn-nf-c-report.cx";
     av[3] = "--";
     av[4] = nc_root;
@@ -42,13 +55,31 @@ static char *nc_run(const char *jobs, const char *models, int *rc) {
     return r.outn ? r.out : 0;
 }
 static long nc_field(const char *s, const char *key) {
-    const char *p = strstr(s, key);
-    if (!p) return -1;
-    p += strlen(key);
-    {   long v = 0; int any = 0;
-        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; any = 1; }
-        return any ? v : -1;
+    const char *marker = "NN_NF_C_REPORT";
+    size_t marker_len = strlen(marker), key_len = strlen(key);
+    for (const char *line = s; *line;) {
+        const char *end = strchr(line, '\n');
+        if (!end) end = line + strlen(line);
+        if ((size_t)(end - line) > marker_len &&
+            !memcmp(line, marker, marker_len) && line[marker_len] == '\t') {
+            for (const char *field = line + marker_len + 1; field < end;) {
+                const char *sep = memchr(field, '\t', end - field);
+                if (!sep) sep = end;
+                if ((size_t)(sep - field) > key_len && !memcmp(field, key, key_len)) {
+                    const char *digits = field + key_len;
+                    char *rest = 0;
+                    if (*digits < '0' || *digits > '9') return -1;
+                    errno = 0;
+                    long value = strtol(digits, &rest, 10);
+                    return rest == sep && errno == 0 ? value : -1;
+                }
+                field = sep == end ? end : sep + 1;
+            }
+            return -1;
+        }
+        line = *end ? end + 1 : end;
     }
+    return -1;
 }
 int main(int argc, char **argv) {
     char *av[8];
@@ -62,11 +93,24 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (argc < 2 && !realpath(".", nc_root)) return 2;
+    if (cx_fmt(nc_product, sizeof nc_product, "%s/unisacc.com", nc_root)) return 2;
     if (argc >= 3) {
         if (!realpath(argv[2], matbuf)) return 2;
     } else if (cx_fmt(matbuf, sizeof matbuf, "%s/nn-nf-c-material", nc_root)) return 2;
-    if (argc >= 4) { if (!realpath(argv[3], work)) return 2; }
+    if (argc >= 4) {
+        int resolved = sy_realpath(argv[3], work, sizeof work);
+        if (resolved == -ENOENT) {
+            if (argv[3][0] != '/' || sy_mkdir(argv[3], 0700)) return 2;
+            resolved = sy_realpath(argv[3], work, sizeof work);
+        }
+        if (resolved < 0) return 2;
+    }
     else if (sy_mkdtemp(sy_tmpdir(), "unisacc-nn-nf-c-", work, (int)sizeof work)) return 2;
+    nc_ck(nc_verify(matbuf), "material.receipt-verified");
+    if (nc_failed) {
+        printf("NN_NF_C\tassertions=%d\tfailed=%d\n", nc_assertions, nc_failed);
+        return 1;
+    }
     if (cx_fmt(jobs, sizeof jobs, "%s/jobs", matbuf) || cx_fmt(models, sizeof models, "%s/models", matbuf)) return 2;
     /* 1. 同 rev 网字节等价 */
     {
