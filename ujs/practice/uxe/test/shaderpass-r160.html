@@ -11,7 +11,9 @@ try {
   if(REVISION!=="160") throw Error("three.js revision mismatch");
   const query=new URLSearchParams(location.search);
   const root=query.get("package");
+  const texture=query.get("texture")==="1";
   const {ShaderPass}=await import(`file://${root}/examples/jsm/postprocessing/ShaderPass.js`);
+  const {TexturePass}=await import(`file://${root}/examples/jsm/postprocessing/TexturePass.js`);
   function context() {
     const canvas=document.createElement("canvas");
     canvas.width=canvas.height=2;
@@ -21,14 +23,15 @@ try {
   }
   const {gl}=context();
   const [binary,vertex,fragment]=await Promise.all([
-    fetch(`file://${query.get("wasm")}`),fetch("../base/gpu-native-copy.vert"),fetch("../base/gpu-native-scalar.frag")
+    fetch(`file://${query.get("wasm")}`),fetch("../base/gpu-native-copy.vert"),fetch(texture?"../base/gpu-native-overlay.frag":"../base/gpu-native-scalar.frag")
   ]);
   let ux;
   const native=createGpuNativeSample(gl,()=>1,()=>ux.memory);
   const submit=createGpuSubmit(gl,()=>ux.memory,()=>1,native.targets);
   ux=(await WebAssembly.instantiate(await binary.arrayBuffer(),{
     uxe_gpu_v1:{host_gpu_submit:submit},
-    uxe_gpu_target_v1:{host_gpu_native_copy:native.copy,host_gpu_native_filter:native.filter},
+    uxe_gpu_target_v1:{host_gpu_native_copy:native.copy,host_gpu_native_filter:native.filter,
+      host_gpu_native_overlay:native.overlay},
   })).instance.exports;
   const lengths=[];
   for(const [i,response] of [vertex,fragment].entries()) {
@@ -41,14 +44,17 @@ try {
   const renderer=new WebGLRenderer({canvas:ref.canvas,context:ref.gl});
   renderer.setSize(2,2,false);
   const target=new WebGLRenderTarget(2,2);
-  const source=new DataTexture(Uint8Array.from(Array(4).fill([128,64,32,255]).flat()),2,2);
+  const pixels=texture
+    ? [[128,64,32,255],[128,64,32,255],[32,128,64,255],[32,128,64,255]]
+    : Array(4).fill([128,64,32,255]);
+  const source=new DataTexture(Uint8Array.from(pixels.flat()),2,2);
   source.needsUpdate=true;
-  const pass=new ShaderPass({
+  const pass=texture?new TexturePass(source,0.5):new ShaderPass({
     uniforms:{tDiffuse:{value:null},u_amount:{value:0.5}},
     vertexShader:"varying vec2 vUv; void main(){vUv=uv;gl_Position=vec4(position.xy,0.,1.);}",
     fragmentShader:"uniform sampler2D tDiffuse;uniform float u_amount;varying vec2 vUv;void main(){vec4 t=texture2D(tDiffuse,vUv);gl_FragColor=vec4(t.rgb*u_amount,t.a);}"
   });
-  pass.material.blending=NoBlending;
+  if(!texture) pass.material.blending=NoBlending;
   const read=(context,dst)=>context.readPixels(0,0,2,2,context.RGBA,context.UNSIGNED_BYTE,dst);
   const results=[];
   for(const mode of [0,1]) {
@@ -56,7 +62,14 @@ try {
     if(status!==0n) throw Error("shaderpass rejected "+status);
     const expected=new Uint8Array(16),actual=new Uint8Array(16);
     pass.renderToScreen=!!mode;
-    pass.render(renderer,target,{texture:source});
+    if(texture) {
+      renderer.setRenderTarget(mode?null:target);
+      ref.gl.clearColor(0,0,64/255,1);
+      ref.gl.clear(ref.gl.COLOR_BUFFER_BIT);
+      pass.render(renderer,null,target);
+    } else {
+      pass.render(renderer,target,{texture:source});
+    }
     if(mode) {
       read(ref.gl,expected);
       read(gl,actual);
