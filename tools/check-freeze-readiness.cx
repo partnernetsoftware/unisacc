@@ -1,10 +1,11 @@
 /* tools/check-freeze-readiness.cx -- fixtures for freeze-readiness.cx.
- * Synth repo: all-green, per-item red, CONFLICT (manual done + computed fail),
- * missing manual row. Marker CHECK_FREEZE_READINESS.
+ * Synth: all-green, dirty CONFLICT, missing manual; --fast wall <55s (hot);
+ * parallel vs --mutant-serial (sleep stubs): serial hits bound, parallel passes.
+ * Marker CHECK_FREEZE_READINESS.
  */
 #pragma unisa use cxlib.ckassert
-#pragma unisa use testx.check
 #pragma unisa use cxlib.ckrun
+#pragma unisa use testx.check
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.time
@@ -37,7 +38,10 @@ static int seed_repo(const char *repo, const char *ver) {
         "printf '#!/bin/sh\\necho \"1-rev\\tPASS\\tok\\t1\"\\necho \"READY\\tyes\\tfailed=\\t1\"\\n' > bins/chain.sh && "
         "printf '#!/bin/sh\\necho \"RATCHETS\\tok=18\\tfail=0\\telapsed_ms=1\"\\n' > bins/rat.sh && "
         "printf '#!/bin/sh\\necho \"CHECK_RELEASE_PREP\\tpass=1\\tfail=0\"\\n' > bins/prep.sh && "
-        "chmod 700 bins/chain.sh bins/rat.sh bins/prep.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"1-rev\\tPASS\\tok\\t1\"\\n' > bins/slow-chain.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"RATCHETS\\tok=18\\tfail=0\"\\n' > bins/slow-rat.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"CHECK_RELEASE_PREP\\tpass=1\\tfail=0\"\\n' > bins/slow-prep.sh && "
+        "chmod 700 bins/*.sh && "
         "printf '1000\\tdevsvc-freeze\\tPASS\\t1\\t1\\tfallback\\t1\\trun-batch\\n' > bins/btimes.tsv && "
         "printf 'MERGE_VERSION\\tverdict=READY\\tconflicts_left=0\\tforced=0\\tregen=0\\ttree=abc12345\\n' > sess/preview.log",
         repo, repo, repo, repo, repo, repo, repo, repo, ver, ver)) return 2;
@@ -85,8 +89,26 @@ static int write_items_miss(const char *path) {
     return ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 10) == 0 ? 0 : 2;
 }
 
+static long parse_elapsed(void) {
+    long i = 0, n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e, p;
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s < 20 || !tx_same(out + s, 16, "FREEZE_READINESS\t", 16)) continue;
+        p = tx_find(out + s, e - s, "elapsed_ms=", 11);
+        if (p < 0) return -1;
+        {
+            long v = 0, k = s + p + 11;
+            while (k < e && out[k] >= '0' && out[k] <= '9') { v = v * 10 + (out[k] - '0'); k++; }
+            return v;
+        }
+    }
+    return -1;
+}
+
 int main(void) {
-    char repo[900], items[900], extra[2200], cmd[2400]; int rc;
+    char repo[900], items[900], extra[2400], cmd[2400]; int rc; long el;
     if (sy_cwd(cwd, sizeof cwd) < 0) return 2;
     if (sy_mkdtemp("/tmp", "fr-ck", root, sizeof root)) return 2;
     if (cx_fmt(repo, sizeof repo, "%s/repo", root)) return 2;
@@ -109,6 +131,7 @@ int main(void) {
     ck(tk_has(out, "FR_ITEM\tplan-freeze-at\tok\t"), "all-green-plan");
     ck(tk_has(out, "FR_ITEM\tmerge-s0-tree\tok\t"), "all-green-merge");
     ck(tk_has(out, "FR_ITEM\tdevsvc-freeze\tok\t"), "all-green-devsvc");
+    ck(tk_has(out, "\tms="), "all-green-has-ms");
     ck(rc == 0, "all-green-rc");
 
     if (cx_fmt(cmd, sizeof cmd, "printf 'x\\n' > '%s/src/leak.c'", repo)) return 2;
@@ -129,6 +152,43 @@ int main(void) {
         repo, items, repo, repo, repo, repo, repo, repo)) return 2;
     rc = run_fr(extra);
     ck(rc != 0 && tk_has(out, "MISSING_MANUAL") && tk_has(out, "FR_ITEM\tverseq\t"), "missing-manual-verseq");
+
+    /* --fast wall under 55s (hot, synth stubs) */
+    ck(write_items_green(items) == 0, "rewrite-items-green");
+    if (cx_fmt(extra, sizeof extra,
+        "--fast --repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl'",
+        repo, items, repo)) return 2;
+    rc = run_fr(extra);
+    el = parse_elapsed();
+    if (el < 0) {
+        printf("UNMEASURED\tfast-wall\tno-elapsed_ms\n");
+        ck(1, "fast-wall-unmeasured");
+    } else {
+        ck(rc == 0 && el < 55000 && tk_has(out, "elapsed_ms="), "fast-wall-under-55s");
+    }
+
+    /* parallel vs mutant-serial with 12s sleep stubs (3 heavies) */
+    if (cx_fmt(extra, sizeof extra,
+        "--heavy --only chain-1rev,ratchets,release-prep-notes "
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/slow-chain.sh' --ratchets-bin '%s/bins/slow-rat.sh' "
+        "--release-prep-bin '%s/bins/slow-prep.sh'",
+        repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = run_fr(extra);
+    el = parse_elapsed();
+    ck(rc == 0 && el > 0 && el < 55000 && el < 30000, "parallel-heavy-under-30s");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/tools/bound' 35 sh '%s/unisacc.com' '%s/tools/freeze-readiness.cx' -- "
+        "--mutant-serial --heavy --only chain-1rev,ratchets,release-prep-notes "
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/slow-chain.sh' --ratchets-bin '%s/bins/slow-rat.sh' "
+        "--release-prep-bin '%s/bins/slow-prep.sh'",
+        cwd, cwd, cwd, repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 55);
+    ck(rc != 0, "mutant-serial-timeout-or-red");
 
     sy_remove_all(root);
     {
