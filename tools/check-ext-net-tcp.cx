@@ -10,6 +10,13 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
 #pragma unisa use sys.netnb
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.muthelp
 static int nok, nfail;
 static void ck(int c, const char *name) {
     printf("%s\tnettcp.%s\n", c ? "PASS" : "FAIL", name);
@@ -22,11 +29,110 @@ static void ckv(long got, long want, const char *name) {
 enum { BIG = 200000 };
 static unsigned char big[BIG], back[BIG];
 
-int main(void) {
+static int run_mut_reuseport(void) {
+    char root[4096], work[4096], com[4400], cxsrc[4400], cxdst[4400], probe[4400], outp[4400];
+    const char *old_s = "if (flags & SY_LISTEN_REUSEPORT)";
+    const char *new_s = "if (0 && (flags & SY_LISTEN_REUSEPORT))";
+    const char *files[7];
+    const char *syms[2];
+    int i, ofd, rc, killed = 0;
+    unsigned char *outbuf = 0;
+    int64_t outn = 0;
+    sy_spawn_t sp;
+    sy_exit_t st;
+    files[0] = "cxroot.tsv";
+    files[1] = "ext/net/addr.cx";
+    files[2] = "ext/net/resolve.cx";
+    files[3] = "ext/net/sock.cx";
+    files[4] = "ext/net/udp.cx";
+    files[5] = "ext/net/unix.cx";
+    files[6] = "tools/check-ext-net-tcp.cx";
+    syms[0] = "ext/textx";
+    syms[1] = "tools/cxlib";
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "tcp-mut-", work, sizeof work) < 0) {
+        printf("FAIL\tmut.reuseport-mkdtemp\n");
+        return 1;
+    }
+    if (cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) || cx_fmt(cxdst, sizeof cxdst, "%s/cx", work) ||
+        sy_symlink(cxsrc, cxdst) < 0) {
+        sy_remove_all(work);
+        printf("FAIL\tmut.reuseport-symlink-cx\n");
+        return 1;
+    }
+    if (cx_fmt(cxsrc, sizeof cxsrc, "%s/ext", work) || sy_mkdir(cxsrc, 0755) < 0 ||
+        cx_fmt(cxsrc, sizeof cxsrc, "%s/tools", work) || sy_mkdir(cxsrc, 0755) < 0) {
+        sy_remove_all(work);
+        return 2;
+    }
+    for (i = 0; i < 2; i++) {
+        if (cx_fmt(cxsrc, sizeof cxsrc, "%s/%s", root, syms[i]) ||
+            cx_fmt(cxdst, sizeof cxdst, "%s/%s", work, syms[i]) ||
+            sy_symlink(cxsrc, cxdst) < 0) {
+            sy_remove_all(work);
+            printf("FAIL\tmut.reuseport-symlink-deps\n");
+            return 1;
+        }
+    }
+    for (i = 0; i < 7; i++) {
+        if (!mh_put_mut(root, work, files[i], "", "")) {
+            sy_remove_all(work);
+            printf("FAIL\tmut.reuseport-copy\n");
+            return 1;
+        }
+    }
+    if (!mh_put_mut(root, work, "ext/net/tcp.cx", old_s, new_s)) {
+        sy_remove_all(work);
+        printf("FAIL\tmut.reuseport-anchor\n");
+        return 1;
+    }
+    printf("MUTATION_DIFF\text/net/tcp.cx\told=\"%s\"\tnew=\"%s\"\n", old_s, new_s);
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-ext-net-tcp.cx", work) ||
+        cx_fmt(outp, sizeof outp, "%s/mut.out", work)) {
+        sy_remove_all(work);
+        return 2;
+    }
+    ofd = sy_open(outp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (ofd < 0) { sy_remove_all(work); return 2; }
+    {
+        char *av[4];
+        av[0] = "sh"; av[1] = com; av[2] = probe; av[3] = 0;
+        sy_spawn_init(&sp);
+        sp.argv = av;
+        sp.cwd = work;
+        sp.in_fd = SY_STDIO_NULL;
+        sp.out_fd = ofd;
+        sp.flags = SY_SPAWN_ERR_TO_OUT;
+        sp.deadline_ms = 50000;
+        rc = sy_proc_run(&sp, &st);
+    }
+    sy_close(ofd);
+    if (rc == 0 && sy_read_file(outp, &outbuf, &outn, 1 << 20) == 0 && outbuf) {
+        int code = sy_exit_code(&st);
+        const char *needle = "FAIL\tnettcp.reuseport-second-listen";
+        killed = code != 0 && tx_contains((const char *)outbuf, (long)outn, needle, (long)strlen(needle));
+        if (killed) {
+            printf("PASS\tmut.reuseport-mutation-killed\n");
+            printf("MUTATION_KILLED\text/net/tcp.cx\treuseport\trc=%d\n", code);
+        } else {
+            printf("FAIL\tmut.reuseport-mutation-killed\trc=%d\n%s\n", code, (const char *)outbuf);
+        }
+        mm_free(outbuf);
+    } else {
+        printf("FAIL\tmut.reuseport-spawn\trc=%d\n", rc);
+    }
+    sy_remove_all(work);
+    printf("EXT_NET_TCP_MUT\tfailed=%d\n", killed ? 0 : 1);
+    return killed ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
     char buf[64];
     int ls, ls2, cs, as, port, i, bad;
     long n, got, r;
     sy_addr_t a;
+    if (argc > 1 && tx_eqz(argv[1], "--mut")) return run_mut_reuseport();
 
     ls = sy_tcp_listen(0, 8);
     ck(ls >= 0, "listen-fd");
@@ -190,6 +296,52 @@ int main(void) {
         ck(uk >= 0 && up.family == SY_AF_UNIX, "accept-from-unix-family");
         ck(sy_recv_until(uc, up2, 4, sy_deadline_in(200)) == -ETIMEDOUT, "accept-from-unix-conn-open");
         sy_close(uk); sy_close(uc); sy_close(ul); sy_unlink(p);
+    }
+    {   /* SY_LISTEN_REUSEPORT positive & negative controls */
+        int rp1, rp2, rp_neg, rp_mix, rc_c, rc_a = -1, tries;
+        sy_addr_t ra;
+        char rbuf[8];
+        sy_addr_loopback(&ra, SY_AF_INET4, 0);
+        rp1 = sy_tcp_listen_at(&ra, 8, SY_LISTEN_REUSEADDR | SY_LISTEN_REUSEPORT);
+        ck(rp1 >= 0, "reuseport-first-listen");
+        port = sy_tcp_port(rp1);
+        ck(port > 0, "reuseport-first-port");
+        sy_addr_loopback(&ra, SY_AF_INET4, port);
+        rp2 = sy_tcp_listen_at(&ra, 8, SY_LISTEN_REUSEADDR | SY_LISTEN_REUSEPORT);
+        ck(rp2 >= 0, "reuseport-second-listen");
+        rc_c = sy_tcp_connect(port);
+        ck(rc_c >= 0, "reuseport-connect");
+        for (tries = 0; tries < 20 && rc_a < 0 && rp1 >= 0 && rp2 >= 0; tries++) {
+            rc_a = sy_tcp_accept_from(rp1, sy_deadline_in(20), 0);
+            if (rc_a < 0) rc_a = sy_tcp_accept_from(rp2, sy_deadline_in(20), 0);
+        }
+        ck(rc_a >= 0, "reuseport-accept");
+        if (rc_c >= 0 && rc_a >= 0) {
+            ckv(sy_send_all(rc_c, "rp", 2), 0, "reuseport-send");
+            ckv(sy_recv_until(rc_a, rbuf, sizeof rbuf, sy_deadline_in(500)), 2, "reuseport-recv");
+            ck(rbuf[0] == 'r' && rbuf[1] == 'p', "reuseport-bytes");
+        } else {
+            ck(0, "reuseport-send");
+            ck(0, "reuseport-recv");
+            ck(0, "reuseport-bytes");
+        }
+        if (rc_a >= 0) sy_close(rc_a);
+        if (rc_c >= 0) sy_close(rc_c);
+        if (rp2 >= 0) sy_close(rp2);
+        if (rp1 >= 0) sy_close(rp1);
+
+        sy_addr_loopback(&ra, SY_AF_INET4, 0);
+        rp1 = sy_tcp_listen_at(&ra, 8, SY_LISTEN_REUSEADDR);
+        ck(rp1 >= 0, "reuseport-neg-base-listen");
+        port = sy_tcp_port(rp1);
+        sy_addr_loopback(&ra, SY_AF_INET4, port);
+        rp_neg = sy_tcp_listen_at(&ra, 8, SY_LISTEN_REUSEADDR);
+        ckv(rp_neg, -EADDRINUSE, "reuseport-neg-without-flag-eaddrinuse");
+        rp_mix = sy_tcp_listen_at(&ra, 8, SY_LISTEN_REUSEADDR | SY_LISTEN_REUSEPORT);
+        ckv(rp_mix, -EADDRINUSE, "reuseport-neg-first-without-flag");
+        if (rp_neg >= 0) sy_close(rp_neg);
+        if (rp_mix >= 0) sy_close(rp_mix);
+        if (rp1 >= 0) sy_close(rp1);
     }
     printf("EXT_NET_TCP\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;

@@ -1,5 +1,6 @@
 #pragma unisa module plan
 #pragma unisa use mem.bytes
+#pragma unisa use compiler.cxscratch
 /* Authoritative, directly compiled CX0 implementation. Maintain the parser in
  * this module; tools/cx0-extract.cx projects its marked private body into the
  * generated classic compatibility file src/cxmod.c. Never edit that projection.
@@ -10,6 +11,7 @@
  * complete immutable compilation-unit bundle or a new model stream. */
 typedef struct {int status;char *text;size_t bytes;char *diagnostic;size_t diagnostic_bytes;} cx0_result;
 static char *cx0_directory;
+static int cx0_lease = -1;
 static char *cx0_text,*cx0_diagnostic;
 static size_t cx0_textn,cx0_diagnosticn;
 static int cx0_io_failed;
@@ -42,7 +44,9 @@ static int cxm_rd(char *path,char *buf,int cap){
  if(st.st_size>=cap){close(fd);return -2;}
  size_t want=(size_t)st.st_size,at=0;while(at<want){ssize_t n=read(fd,buf+at,want-at);if(n<0&&errno==EINTR)continue;if(n<=0){close(fd);cx0_error("source-read",path);return -3;}at+=(size_t)n;}
  char extra;ssize_t tail;do{tail=read(fd,&extra,1);}while(tail<0&&errno==EINTR);
- struct stat after;int changed=fstat(fd,&after)||st.st_size!=after.st_size;int closed=close(fd);
+ struct stat after;int changed=fstat(fd,&after)||st.st_size!=after.st_size;
+ if(!tail&&!changed)cxscratch_hit(cx0_lease,fd,path);
+ int closed=close(fd);
  if(tail||changed||closed){cx0_error("source-changed-or-close",path);return -3;}
  if(cap>1&&cx0_observe(path,buf,at))return -3;return (int)at;
 }
@@ -2322,7 +2326,9 @@ static cx0_result cx0_execute(int interface_only,char **sources,int count,char *
  int channel[2];if(pipe(channel))return cx0_invalid("cx0: pipe-failed\n");
  pid_t child=fork();if(child<0){close(channel[0]);close(channel[1]);return cx0_invalid("cx0: fork-failed\n");}
  if(!child){
-  close(channel[0]);cx0_directory=(char *)directory;cx0_observing=interface_only==2;int rc=0;
+  close(channel[0]);cx0_directory=(char *)directory;cx0_lease=cxscratch_begin(directory);
+  cx0_observing=interface_only==2;int rc=0;
+  if(cx0_lease==-EAGAIN){errno=EAGAIN;cx0_error("scratch-lease-busy",directory);rc=2;}
   for(int i=0;i<count&&!rc;i++){
    char byte;int probe=cxm_rd(sources[i],&byte,1);
    if(probe==-1){char b[700];int z=snprintf(b,sizeof b,"cx0: source-absent path=%s\n",sources[i]);if(z>0&&(size_t)z<sizeof b)cxm_say(2,b,z);rc=1;}

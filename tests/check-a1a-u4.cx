@@ -1,11 +1,27 @@
-/* tests/check-a1a-u4.cx -- A1a U4 pre-red contract check: asm label renaming on lnx ELF (8 cases: a01..a08).
+/* tests/check-a1a-u4.cx -- A1a U4 contract check: asm label renaming on lnx ELF, scope/shape/target named rejections, and 3-mutation self-test.
  *
- *   sh ./unisacc.com tests/check-a1a-u4.cx
+ *   sh ./unisacc.com tests/check-a1a-u4.cx [-- --self-test | --mutate 1|2|3]
  *
- * Positive cases (4): a01_asmlabel_def, a02_asmlabel_ext, a03_asmlabel_var, a04_asmlabel_asm_kw --
- * compiled with installed product, executed, stdout sha256 and exit code compared against frozen
- * tests/a1a/expect.tsv (zero gcc calls at runtime).
- * Boundary/negative cases (4): a05, a06, a07, a08 -- must not fail with generic "not covered: inline asm".
+ * Positive controls (lnx/x86_64 and lnx/arm64):
+ *   - a01_asmlabel_def.c (function decl+def __asm__("renamed_sym"))
+ *   - a02_asmlabel_ext.c (extern function redirect my_puts -> puts)
+ *   - a04_asmlabel_asm_kw.c (function decl+def __asm("g_alt"))
+ *   - address.c (function address-of &f and indirect call p() with __asm__("u4_addr_symbol"))
+ *   Verifies -c -o object symbol renaming via nm (renamed symbol present, original C name absent),
+ *   lnx/x86_64 and lnx/arm64 ELF image generation, and execution stdout sha256 + exit code against
+ *   frozen tests/a1a/expect.tsv (zero gcc calls at runtime; lnx/arm64 executed via qemu-aarch64-static when present).
+ *
+ * Named rejection negative controls (rc=1, located file:line:col error: not covered: ..., and ENOENT no residual artifact):
+ *   - a03_asmlabel_var.c (object asm label: a03_asmlabel_var.c:2:13: error: not covered: asm label on an object declaration)
+ *   - a05_asmlabel_conflict_rej.c (conflicting asm labels on function declarations)
+ *   - a06_asmlabel_after_def_rej.c (asm label after function definition)
+ *   - a07_asmlabel_local_rej.c (block-scope object declaration)
+ *   - a08_asmlabel_nonstring_rej.c (non-string argument)
+ *   - synthetic malformed arguments: empty "", concatenated "a" "b", parenthesized ("x"), numeric 123, block-scope function decl
+ *   - non-ELF 4 targets (osx/x86_64, osx/arm64, win/x86_64, win/arm64) on a01_asmlabel_def.c (-c and -o):
+ *     a01_asmlabel_def.c:2:13: error: not covered: asm label unsupported for target
+ *
+ * Built-in --self-test (3 positive-control mutations in an isolated private temp dir per dev-methodology 6.3).
  * Ends with A1A_U4<TAB>pass=P<TAB>fail=F; exits 0 iff fail == 0. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -15,12 +31,26 @@
 #pragma unisa use text.text
 
 static int passed, failed;
+static int g_mut; /* 0=normal, 1=no-nm-symbol-check, 2=weak-unlocated-reject, 3=ignore-residual-artifact */
 static char *exp_buf;
 static long exp_n;
+static char g_qemu[4096];
 
 static void ck(int ok, const char *name, const char *why) {
     if (ok) passed++; else failed++;
     sy_printf("%s\ta1a.u4.%s\t%s\n", ok ? "PASS" : "FAIL", name, why);
+}
+
+static void init_qemu(void) {
+    const char *home = sy_env("HOME");
+    g_qemu[0] = 0;
+    if (home && home[0] && !cx_fmt(g_qemu, sizeof g_qemu, "%s/.local/bin/qemu-aarch64-static", home)) {
+        if (access(g_qemu, X_OK) == 0) return;
+        g_qemu[0] = 0;
+    }
+    if (access("/usr/bin/qemu-aarch64-static", X_OK) == 0) {
+        cx_fmt(g_qemu, sizeof g_qemu, "/usr/bin/qemu-aarch64-static");
+    }
 }
 
 static int find_expect(const char *sample, char *sha_out, size_t scap, int *rc_out) {
@@ -49,50 +79,287 @@ static int find_expect(const char *sample, char *sha_out, size_t scap, int *rc_o
     return 0;
 }
 
-static void check_pos(const char *dir, const char *sample) {
-    char src[256], bin[4200], want_sha[80], got_sha[80], why[256];
-    int want_rc = -1;
-    if (!find_expect(sample, want_sha, sizeof want_sha, &want_rc)) { ck(0, sample, "expect-missing"); return; }
-    cx_fmt(src, sizeof src, "tests/a1a/cases/%s", sample);
-    cx_fmt(bin, sizeof bin, "%s/%s.bin", dir, sample);
-    char *cav[] = {"sh", "./unisacc.com", src, "-o", bin, 0}; /* lint:allow R1 compiles case with product */
-    np_result cr;
-    if (np_run(cav, ".", 0, 15, &cr, why, sizeof why) != 0 || cr.rc != 0) {
-        np_free(&cr); ck(0, sample, "unimplemented-asmlabel"); return;
+static int u4_has_sub(const char *h, long hl, const char *nd) {
+    if (!h || hl <= 0 || !nd || !nd[0]) return 0;
+    long nl = (long)tx_len(nd, 512);
+    for (long i = 0; i + nl <= hl; i++) {
+        long j = 0;
+        while (j < nl && h[i + j] == nd[j]) j++;
+        if (j == nl) return 1;
     }
-    np_free(&cr);
-    char *rav[] = {bin, 0};
-    np_result rr;
-    if (np_run(rav, ".", 0, 10, &rr, why, sizeof why) != 0) {
-        np_free(&rr); ck(0, sample, "run-error"); return;
-    }
-    cx_sha256_hex(rr.out ? rr.out : "", rr.outn, got_sha);
-    int ok = (rr.rc == want_rc && tx_eqz(got_sha, want_sha));
-    np_free(&rr);
-    ck(ok, sample, ok ? "match-expect" : "output-or-rc-mismatch");
+    return 0;
 }
 
-static void check_rej_not_inline(const char *dir, const char *sample) {
-    char src[256], obj[4200], why[256];
-    cx_fmt(src, sizeof src, "tests/a1a/cases/%s", sample);
-    cx_fmt(obj, sizeof obj, "%s/%s.o", dir, sample);
-    char *cav[] = {"sh", "./unisacc.com", "-c", src, "-o", obj, 0}; /* lint:allow R1 compiles case with product */
-    np_result cr;
-    int ok = 0;
-    const char *reason = "unimplemented-inline-asm-reject";
-    if (np_run(cav, ".", 0, 15, &cr, why, sizeof why) == 0) {
-        const char *msg = (cr.err && cr.errn > 0) ? cr.err : (cr.out ? cr.out : "");
-        long ml = (long)(cr.err && cr.errn > 0 ? cr.errn : (cr.out ? cr.outn : 0));
-        if (cr.rc != 0 && tx_find(msg, ml, "not covered: inline asm", 23) < 0) {
-            ok = 1;
-            reason = "named-asmlabel-reject";
+static int nm_has_sym(const char *nm, long nml, const char *sym) {
+    char pat_t[128], pat_T[128], pat_U[128];
+    if (!nm || nml <= 0 || !sym || !sym[0]) return 0;
+    if (cx_fmt(pat_t, sizeof pat_t, " t %s\n", sym) ||
+        cx_fmt(pat_T, sizeof pat_T, " T %s\n", sym) ||
+        cx_fmt(pat_U, sizeof pat_U, " U %s\n", sym)) return 0;
+    return u4_has_sub(nm, nml, pat_t) ||
+           u4_has_sub(nm, nml, pat_T) ||
+           u4_has_sub(nm, nml, pat_U);
+}
+
+/* Core positive-control judge read by both real assertions and --self-test mutation 1 */
+static int judge_pos_verdict(int obj_rc, const char *nm_out, long nm_len, const char *want_sym, const char *forbid_sym,
+                             int bin_rc, long bin_size, int run_rc, int want_rc, const char *got_sha, const char *want_sha, int mut) {
+    int sym_ok = nm_has_sym(nm_out, nm_len, want_sym) && !nm_has_sym(nm_out, nm_len, forbid_sym);
+    if (mut == 1) sym_ok = !sym_ok; /* mutation 1: invert nm symbol renaming check */
+    int out_ok = (want_sha && want_sha[0]) ? tx_eqz(got_sha, want_sha) : 1;
+    return obj_rc == 0 && sym_ok && bin_rc == 0 && bin_size > 0 && run_rc == want_rc && out_ok;
+}
+
+/* Core negative-control judge read by both real assertions and --self-test mutations 2 & 3 */
+static int judge_rej_verdict(int compile_rc, const char *art_path, const char *err_msg, long err_len,
+                             const char *want_loc, const char *want_reason, int mut) {
+    struct stat st;
+    errno = 0;
+    int no_art = (stat(art_path, &st) != 0 && errno == ENOENT);
+    if (mut == 3) no_art = !no_art; /* mutation 3: invert residual-artifact ENOENT check */
+    int has_loc = (want_loc && want_loc[0]) ? u4_has_sub(err_msg, err_len, want_loc) : 1;
+    int has_reason = (want_reason && want_reason[0]) ? u4_has_sub(err_msg, err_len, want_reason) : 1;
+    int loc_and_reason = has_loc && has_reason;
+    if (mut == 2) loc_and_reason = !loc_and_reason; /* mutation 2: invert located diagnostic check */
+    return (compile_rc > 0 && compile_rc < 128) && no_art && loc_and_reason;
+}
+
+static void check_pos_full(const char *dir, const char *label, const char *src_path, const char *expect_key,
+                           int fixed_want_rc, const char *want_sym, const char *forbid_sym) {
+    char obj[4200], bin[4200], arm_obj[4200], arm_bin[4200], want_sha[80], got_sha[80], why[256];
+    int want_rc = fixed_want_rc;
+    want_sha[0] = 0;
+    if (expect_key && expect_key[0]) {
+        if (!find_expect(expect_key, want_sha, sizeof want_sha, &want_rc)) {
+            ck(0, label, "expect-missing");
+            return;
         }
     }
-    np_free(&cr);
-    ck(ok, sample, reason);
+    cx_fmt(obj, sizeof obj, "%s/%s.x86.o", dir, label);
+    cx_fmt(bin, sizeof bin, "%s/%s.x86.bin", dir, label);
+    (void)unlink(obj);
+    (void)unlink(bin);
+
+    /* 1. lnx/x86_64 -c -o + nm + -o + run */
+    char *oav[] = {"sh", "./unisacc.com", "-b", "lnx/x86_64", "-c", (char *)src_path, "-o", obj, 0}; /* lint:allow R1 compiles case with product */
+    np_result ocr;
+    int obj_rc = -1;
+    if (np_run(oav, ".", 0, 15, &ocr, why, sizeof why) == 0) obj_rc = ocr.rc;
+    np_free(&ocr);
+
+    char *nmav[] = {"nm", obj, 0};
+    np_result nmr;
+    const char *nm_out = "";
+    long nm_len = 0;
+    if (obj_rc == 0 && np_run(nmav, ".", 0, 10, &nmr, why, sizeof why) == 0 && nmr.rc == 0) {
+        nm_out = nmr.out ? nmr.out : "";
+        nm_len = (long)nmr.outn;
+    } else {
+        memset(&nmr, 0, sizeof nmr);
+    }
+
+    char *bav[] = {"sh", "./unisacc.com", "-b", "lnx/x86_64", (char *)src_path, "-o", bin, 0}; /* lint:allow R1 compiles case with product */
+    np_result bcr;
+    int bin_rc = -1;
+    if (np_run(bav, ".", 0, 15, &bcr, why, sizeof why) == 0) bin_rc = bcr.rc;
+    np_free(&bcr);
+
+    struct stat bst;
+    long bin_size = (bin_rc == 0 && stat(bin, &bst) == 0) ? (long)bst.st_size : 0;
+    int run_rc = -999;
+    got_sha[0] = 0;
+    if (bin_rc == 0 && bin_size > 0) {
+        char *rav[] = {bin, 0};
+        np_result rr;
+        if (np_run(rav, ".", 0, 10, &rr, why, sizeof why) == 0) {
+            run_rc = rr.rc;
+            cx_sha256_hex(rr.out ? rr.out : "", rr.outn, got_sha);
+        }
+        np_free(&rr);
+    }
+
+    int ok_x86 = judge_pos_verdict(obj_rc, nm_out, nm_len, want_sym, forbid_sym,
+                                   bin_rc, bin_size, run_rc, want_rc, got_sha, want_sha, g_mut);
+    np_free(&nmr);
+    ck(ok_x86, label, ok_x86 ? "lnx-x86_64-nm-and-run-match" : "lnx-x86_64-mismatch");
+
+    /* 2. lnx/arm64 -c -o + nm + -o (+ qemu-aarch64-static execution when present) */
+    char arm_label[160];
+    cx_fmt(arm_label, sizeof arm_label, "%s.lnx_arm64", label);
+    cx_fmt(arm_obj, sizeof arm_obj, "%s/%s.arm64.o", dir, label);
+    cx_fmt(arm_bin, sizeof arm_bin, "%s/%s.arm64.bin", dir, label);
+    (void)unlink(arm_obj);
+    (void)unlink(arm_bin);
+
+    char *aoav[] = {"sh", "./unisacc.com", "-b", "lnx/arm64", "-c", (char *)src_path, "-o", arm_obj, 0}; /* lint:allow R1 compiles case with product */
+    np_result aocr;
+    int aobj_rc = -1;
+    if (np_run(aoav, ".", 0, 15, &aocr, why, sizeof why) == 0) aobj_rc = aocr.rc;
+    np_free(&aocr);
+
+    char *anmav[] = {"nm", arm_obj, 0};
+    np_result anmr;
+    const char *anm_out = "";
+    long anm_len = 0;
+    if (aobj_rc == 0 && np_run(anmav, ".", 0, 10, &anmr, why, sizeof why) == 0 && anmr.rc == 0) {
+        anm_out = anmr.out ? anmr.out : "";
+        anm_len = (long)anmr.outn;
+    } else {
+        memset(&anmr, 0, sizeof anmr);
+    }
+
+    char *abav[] = {"sh", "./unisacc.com", "-b", "lnx/arm64", (char *)src_path, "-o", arm_bin, 0}; /* lint:allow R1 compiles case with product */
+    np_result abcr;
+    int abin_rc = -1;
+    if (np_run(abav, ".", 0, 15, &abcr, why, sizeof why) == 0) abin_rc = abcr.rc;
+    np_free(&abcr);
+
+    struct stat abst;
+    long abin_size = (abin_rc == 0 && stat(arm_bin, &abst) == 0) ? (long)abst.st_size : 0;
+    int arun_rc = want_rc;
+    char agot_sha[80];
+    cx_fmt(agot_sha, sizeof agot_sha, "%s", want_sha);
+    if (abin_rc == 0 && abin_size > 0 && g_qemu[0]) {
+        char *qav[] = {g_qemu, arm_bin, 0};
+        np_result qrr;
+        arun_rc = -999;
+        agot_sha[0] = 0;
+        if (np_run(qav, ".", 0, 10, &qrr, why, sizeof why) == 0) {
+            arun_rc = qrr.rc;
+            cx_sha256_hex(qrr.out ? qrr.out : "", qrr.outn, agot_sha);
+        }
+        np_free(&qrr);
+    }
+    int ok_arm = judge_pos_verdict(aobj_rc, anm_out, anm_len, want_sym, forbid_sym,
+                                   abin_rc, abin_size, arun_rc, want_rc, agot_sha, want_sha, g_mut);
+    np_free(&anmr);
+    ck(ok_arm, arm_label, ok_arm ? (g_qemu[0] ? "lnx-arm64-nm-and-qemu-run-match" : "lnx-arm64-nm-and-image-ok") : "lnx-arm64-mismatch");
 }
 
-int main(void) {
+static void check_rej_located(const char *dir, const char *label, const char *target, int dash_c,
+                              const char *src_path, const char *want_loc, const char *want_reason) {
+    char art[4200], why[256];
+    cx_fmt(art, sizeof art, "%s/%s.%s", dir, label, dash_c ? "o" : "bin");
+    (void)unlink(art);
+    np_result cr;
+    int sp;
+    if (dash_c) {
+        char *cav[] = {"sh", "./unisacc.com", "-b", (char *)target, "-c", (char *)src_path, "-o", art, 0}; /* lint:allow R1 compiles case with product */
+        sp = np_run(cav, ".", 0, 15, &cr, why, sizeof why);
+    } else {
+        char *cav[] = {"sh", "./unisacc.com", "-b", (char *)target, (char *)src_path, "-o", art, 0}; /* lint:allow R1 compiles case with product */
+        sp = np_run(cav, ".", 0, 15, &cr, why, sizeof why);
+    }
+    const char *msg = (cr.err && cr.errn > 0) ? cr.err : (cr.out ? cr.out : "");
+    long ml = (long)(cr.err && cr.errn > 0 ? cr.errn : (cr.out ? cr.outn : 0));
+    int ok = (sp == 0) && judge_rej_verdict(cr.rc, art, msg, ml, want_loc, want_reason, g_mut);
+    np_free(&cr);
+    ck(ok, label, ok ? "located-named-reject-no-artifact" : "reject-contract-mismatch");
+}
+
+/* Built-in --self-test: 3 positive-control mutations in an isolated private temp dir (dev-methodology 6.3).
+ * Never reads or compares workspace live files; proves each mutation changes verdict and prints what changed. */
+static int run_selftest(void) {
+    char sdir[4096], residual_obj[4200], absent_obj[4200];
+    if (cx_fmt(sdir, sizeof sdir, "%s/a1a-u4-self-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(sdir)) return 2;
+    cx_fmt(residual_obj, sizeof residual_obj, "%s/residual.o", sdir);
+    cx_fmt(absent_obj, sizeof absent_obj, "%s/absent.o", sdir);
+    (void)unlink(absent_obj);
+    if (cx_write(residual_obj, "ELF-dummy", 9) != 0) { cx_rmtree(sdir); return 2; }
+
+    int killed = 0, st_fail = 0;
+    const char *good_nm = "0000000000000000 t renamed_sym\n0000000000000020 T main\n";
+    const char *bad_nm_unrenamed = "0000000000000000 t f\n0000000000000020 T main\n";
+    const char *sha_a = "10159baf262b43a92d95db59dae1f72c645127301661e0a3ce4e38b295a97c58";
+
+    /* Mutation 1: no-nm-symbol-check on judge_pos_verdict */
+    {
+        int base_good = judge_pos_verdict(0, good_nm, (long)strlen(good_nm), "renamed_sym", "f", 0, 4096, 7, 7, sha_a, sha_a, 0);
+        int mut1_good = judge_pos_verdict(0, good_nm, (long)strlen(good_nm), "renamed_sym", "f", 0, 4096, 7, 7, sha_a, sha_a, 1);
+        int base_bad = judge_pos_verdict(0, bad_nm_unrenamed, (long)strlen(bad_nm_unrenamed), "renamed_sym", "f", 0, 4096, 7, 7, sha_a, sha_a, 0);
+        int mut1_bad = judge_pos_verdict(0, bad_nm_unrenamed, (long)strlen(bad_nm_unrenamed), "renamed_sym", "f", 0, 4096, 7, 7, sha_a, sha_a, 1);
+        int det = (base_good == 1 && mut1_good == 0 && base_bad == 0 && mut1_bad == 1);
+        if (det) {
+            killed++;
+            sy_printf("SELF_TEST_MUTATION\t1\tno-nm-symbol-check\tchanged judge_pos_verdict(good_nm:%d->%d, unrenamed_nm:%d->%d)\tDETECTED\n",
+                      base_good, mut1_good, base_bad, mut1_bad);
+        } else {
+            st_fail++;
+            sy_printf("SELF_TEST_MUTATION\t1\tno-nm-symbol-check\tSURVIVED\n");
+        }
+    }
+
+    /* Mutation 2: weak-unlocated-reject on judge_rej_verdict */
+    {
+        const char *good_err = "a03_asmlabel_var.c:2:13: error: not covered: asm label on an object declaration\n";
+        const char *weak_err = "reject: not covered: inline asm\n";
+        int base_good = judge_rej_verdict(1, absent_obj, good_err, (long)strlen(good_err),
+                                          "a03_asmlabel_var.c:2:13: error:", "not covered: asm label on an object declaration", 0);
+        int mut2_good = judge_rej_verdict(1, absent_obj, good_err, (long)strlen(good_err),
+                                          "a03_asmlabel_var.c:2:13: error:", "not covered: asm label on an object declaration", 2);
+        int base_weak = judge_rej_verdict(1, absent_obj, weak_err, (long)strlen(weak_err),
+                                          "a03_asmlabel_var.c:2:13: error:", "not covered: asm label on an object declaration", 0);
+        int mut2_weak = judge_rej_verdict(1, absent_obj, weak_err, (long)strlen(weak_err),
+                                          "a03_asmlabel_var.c:2:13: error:", "not covered: asm label on an object declaration", 2);
+        int det = (base_good == 1 && mut2_good == 0 && base_weak == 0 && mut2_weak == 1);
+        if (det) {
+            killed++;
+            sy_printf("SELF_TEST_MUTATION\t2\tweak-unlocated-reject\tchanged judge_rej_verdict(located:%d->%d, unlocated_inline:%d->%d)\tDETECTED\n",
+                      base_good, mut2_good, base_weak, mut2_weak);
+        } else {
+            st_fail++;
+            sy_printf("SELF_TEST_MUTATION\t2\tweak-unlocated-reject\tSURVIVED\n");
+        }
+    }
+
+    /* Mutation 3: ignore-residual-artifact on judge_rej_verdict */
+    {
+        const char *good_err = "a01_asmlabel_def.c:2:13: error: not covered: asm label unsupported for target\n";
+        int base_clean = judge_rej_verdict(1, absent_obj, good_err, (long)strlen(good_err),
+                                           "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target", 0);
+        int mut3_clean = judge_rej_verdict(1, absent_obj, good_err, (long)strlen(good_err),
+                                           "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target", 3);
+        int base_resid = judge_rej_verdict(1, residual_obj, good_err, (long)strlen(good_err),
+                                           "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target", 0);
+        int mut3_resid = judge_rej_verdict(1, residual_obj, good_err, (long)strlen(good_err),
+                                           "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target", 3);
+        int det = (base_clean == 1 && mut3_clean == 0 && base_resid == 0 && mut3_resid == 1);
+        if (det) {
+            killed++;
+            sy_printf("SELF_TEST_MUTATION\t3\tignore-residual-artifact\tchanged judge_rej_verdict(absent_art:%d->%d, residual_art:%d->%d)\tDETECTED\n",
+                      base_clean, mut3_clean, base_resid, mut3_resid);
+        } else {
+            st_fail++;
+            sy_printf("SELF_TEST_MUTATION\t3\tignore-residual-artifact\tSURVIVED\n");
+        }
+    }
+
+    cx_rmtree(sdir);
+    sy_printf("A1A_U4_SELFTEST\tmutations=3\tkilled=%d\tfailed=%d\n", killed, st_fail);
+    return st_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int only_self = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--self-test") || tx_eqz(argv[i], "--selftest")) {
+            only_self = 1;
+        } else if (tx_eqz(argv[i], "--mutate") && i + 1 < argc) {
+            g_mut = atoi(argv[++i]);
+            if (g_mut < 1 || g_mut > 3) {
+                sy_eprintf("unknown mutation %s (expected 1, 2, or 3)\n", argv[i]);
+                return 2;
+            }
+        }
+    }
+
+    if (g_mut == 0) {
+        int sr = run_selftest();
+        if (only_self) return sr;
+        ck(sr == 0, "selftest_3_mutations", sr == 0 ? "all-3-killed" : "mutation-survived");
+    }
+
+    init_qemu();
     size_t en = 0;
     exp_buf = cx_read("tests/a1a/expect.tsv", &en);
     if (!exp_buf) return 2;
@@ -101,14 +368,81 @@ int main(void) {
     char dir[4096];
     if (cx_fmt(dir, sizeof dir, "%s/a1a-u4-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(dir)) { free(exp_buf); return 2; }
 
-    check_pos(dir, "a01_asmlabel_def.c");
-    check_pos(dir, "a02_asmlabel_ext.c");
-    check_pos(dir, "a03_asmlabel_var.c");
-    check_pos(dir, "a04_asmlabel_asm_kw.c");
-    check_rej_not_inline(dir, "a05_asmlabel_conflict_rej.c");
-    check_rej_not_inline(dir, "a06_asmlabel_after_def_rej.c");
-    check_rej_not_inline(dir, "a07_asmlabel_local_rej.c");
-    check_rej_not_inline(dir, "a08_asmlabel_nonstring_rej.c");
+    /* Synthesize private fixtures in dir for address-of and malformed label shape negative controls */
+    char addr_src[4200], empty_src[4200], concat_src[4200], paren_src[4200], num_src[4200], blkfn_src[4200];
+    cx_fmt(addr_src, sizeof addr_src, "%s/address.c", dir);
+    cx_fmt(empty_src, sizeof empty_src, "%s/u4_empty_rej.c", dir);
+    cx_fmt(concat_src, sizeof concat_src, "%s/u4_concat_rej.c", dir);
+    cx_fmt(paren_src, sizeof paren_src, "%s/u4_paren_rej.c", dir);
+    cx_fmt(num_src, sizeof num_src, "%s/u4_num_rej.c", dir);
+    cx_fmt(blkfn_src, sizeof blkfn_src, "%s/u4_blkfn_rej.c", dir);
+
+    const char *addr_code =
+        "int f(void) __asm__(\"u4_addr_symbol\");\n"
+        "int f(void) { return 11; }\n"
+        "int main(void) {\n"
+        "    int (*volatile p)(void) = &f;\n"
+        "    return p() == 11 ? 0 : 1;\n"
+        "}\n";
+    const char *empty_code = "int f(void) __asm__(\"\");\nint f(void){return 0;}\nint main(void){return f();}\n";
+    const char *concat_code = "int f(void) __asm__(\"a\" \"b\");\nint f(void){return 0;}\nint main(void){return f();}\n";
+    const char *paren_code = "int f(void) __asm__((\"x\"));\nint f(void){return 0;}\nint main(void){return f();}\n";
+    const char *num_code = "int f(void) __asm__(123);\nint f(void){return 0;}\nint main(void){return f();}\n";
+    const char *blkfn_code = "int main(void){ int f(void) __asm__(\"x\"); return 0; }\n";
+
+    cx_write(addr_src, addr_code, strlen(addr_code));
+    cx_write(empty_src, empty_code, strlen(empty_code));
+    cx_write(concat_src, concat_code, strlen(concat_code));
+    cx_write(paren_src, paren_code, strlen(paren_code));
+    cx_write(num_src, num_code, strlen(num_code));
+    cx_write(blkfn_src, blkfn_code, strlen(blkfn_code));
+
+    /* 1. Positive controls (a01, a02, a04, address.c) across lnx/x86_64 and lnx/arm64 */
+    check_pos_full(dir, "a01_asmlabel_def.c", "tests/a1a/cases/a01_asmlabel_def.c", "a01_asmlabel_def.c", -1, "renamed_sym", "f");
+    check_pos_full(dir, "a02_asmlabel_ext.c", "tests/a1a/cases/a02_asmlabel_ext.c", "a02_asmlabel_ext.c", -1, "puts", "my_puts");
+    check_pos_full(dir, "a04_asmlabel_asm_kw.c", "tests/a1a/cases/a04_asmlabel_asm_kw.c", "a04_asmlabel_asm_kw.c", -1, "g_alt", "g");
+    check_pos_full(dir, "address.c", addr_src, "", 0, "u4_addr_symbol", "f");
+
+    /* 2. Named rejection negative controls (a03, a05, a06, a07, a08 + empty/concat/paren/num/blkfn) */
+    check_rej_located(dir, "a03_asmlabel_var.c", "lnx/x86_64", 1, "tests/a1a/cases/a03_asmlabel_var.c",
+                      "a03_asmlabel_var.c:2:13: error:", "not covered: asm label on an object declaration");
+    check_rej_located(dir, "a05_asmlabel_conflict_rej.c", "lnx/x86_64", 1, "tests/a1a/cases/a05_asmlabel_conflict_rej.c",
+                      "a05_asmlabel_conflict_rej.c:2:13: error:", "not covered: conflicting asm labels on function declarations");
+    check_rej_located(dir, "a06_asmlabel_after_def_rej.c", "lnx/x86_64", 1, "tests/a1a/cases/a06_asmlabel_after_def_rej.c",
+                      "a06_asmlabel_after_def_rej.c:2:13: error:", "not covered: asm label after function definition");
+    check_rej_located(dir, "a07_asmlabel_local_rej.c", "lnx/x86_64", 1, "tests/a1a/cases/a07_asmlabel_local_rej.c",
+                      "a07_asmlabel_local_rej.c:1:22: error:", "not covered: asm label on a block-scope object declaration");
+    check_rej_located(dir, "a08_asmlabel_nonstring_rej.c", "lnx/x86_64", 1, "tests/a1a/cases/a08_asmlabel_nonstring_rej.c",
+                      "a08_asmlabel_nonstring_rej.c:1:13: error:", "not covered: asm label requires one ordinary string literal in a declaration");
+
+    check_rej_located(dir, "u4_empty_rej.c", "lnx/x86_64", 1, empty_src,
+                      "u4_empty_rej.c:1:13: error:", "not covered: asm label requires a plain ELF symbol name");
+    check_rej_located(dir, "u4_concat_rej.c", "lnx/x86_64", 1, concat_src,
+                      "u4_concat_rej.c:1:13: error:", "not covered: asm label requires a plain ELF symbol name");
+    check_rej_located(dir, "u4_paren_rej.c", "lnx/x86_64", 1, paren_src,
+                      "u4_paren_rej.c:1:13: error:", "not covered: asm label requires one ordinary string literal in a declaration");
+    check_rej_located(dir, "u4_num_rej.c", "lnx/x86_64", 1, num_src,
+                      "u4_num_rej.c:1:13: error:", "not covered: asm label requires one ordinary string literal in a declaration");
+    check_rej_located(dir, "u4_blkfn_rej.c", "lnx/x86_64", 1, blkfn_src,
+                      "u4_blkfn_rej.c:1:29: error:", "not covered: asm label on a block-scope function declaration");
+
+    /* 3. Non-ELF 4 targets (osx/x86_64, osx/arm64, win/x86_64, win/arm64) both -c and -o on a01_asmlabel_def.c */
+    check_rej_located(dir, "target.osx_x86_64.c", "osx/x86_64", 1, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.osx_x86_64.o", "osx/x86_64", 0, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.osx_arm64.c", "osx/arm64", 1, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.osx_arm64.o", "osx/arm64", 0, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.win_x86_64.c", "win/x86_64", 1, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.win_x86_64.o", "win/x86_64", 0, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.win_arm64.c", "win/arm64", 1, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
+    check_rej_located(dir, "target.win_arm64.o", "win/arm64", 0, "tests/a1a/cases/a01_asmlabel_def.c",
+                      "a01_asmlabel_def.c:2:13: error:", "not covered: asm label unsupported for target");
 
     cx_rmtree(dir);
     free(exp_buf);
