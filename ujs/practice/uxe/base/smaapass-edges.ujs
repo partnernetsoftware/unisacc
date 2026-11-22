@@ -1,0 +1,68 @@
+native function smaa_edge_sample(src:i64,width:i64,height:i64,x:i64,y:i64) i64 {
+  if(x<0) { x=0; }
+  if(y<0) { y=0; }
+  if(x>=width) { x=width-1; }
+  if(y>=height) { y=height-1; }
+  return src+4*(y*width+x);
+}
+
+native function smaa_edge_delta(a:i64,b:i64) i64 {
+  let maximum=0;
+  let channel=0;
+  while(channel<3) {
+    let delta=ux_u8(a+channel)-ux_u8(b+channel);
+    if(delta<0) { delta=0-delta; }
+    if(delta>maximum) { maximum=delta; }
+    channel=channel+1;
+  }
+  return maximum;
+}
+
+native function smaa_edge_mask(src:i64,width:i64,height:i64,x:i64,y:i64) i64 {
+  let center=smaa_edge_sample(src,width,height,x,y);
+  let left=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x-1,y));
+  let top=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x,y+1));
+  // ceil(0.1 * 255) is 26 for integer RGBA8 channel differences.
+  if(left<26 && top<26) { return 0; }
+  let maximum=left;
+  if(top>maximum) { maximum=top; }
+  let right=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x+1,y));
+  let bottom=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x,y-1));
+  let leftLeft=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x-2,y));
+  let topTop=smaa_edge_delta(center,smaa_edge_sample(src,width,height,x,y+2));
+  if(right>maximum) { maximum=right; }
+  if(bottom>maximum) { maximum=bottom; }
+  if(leftLeft>maximum) { maximum=leftLeft; }
+  if(topTop>maximum) { maximum=topTop; }
+  let mask=0;
+  if(left>=26 && 2*left>=maximum) { mask=1; }
+  if(top>=26 && 2*top>=maximum) { mask=mask+2; }
+  return mask;
+}
+
+// r160 SMAA 1x Medium color-edge stage on a zero-cleared RGBA8 target.
+// Rows start at the bottom as in WebGL readback. R marks edges to the left,
+// G marks edges above. B and A are zero. Source alpha is ignored.
+// Source and output must be disjoint. Invalid input returns -1 before writing.
+native function SMAAPass_edgesRGBA8(src:i64,dst:i64,width:i64,height:i64) i64 {
+  if(width<1 || height<1 || width>1572864 || height>1572864 ||
+     width*height>1572864) { return 0-1; }
+  let bytes=4*width*height;
+  if(src<0 || dst<0 || src>6291456-bytes || dst>6291456-bytes ||
+     (src<dst+bytes && dst<src+bytes)) { return 0-1; }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let out=dst+4*(y*width+x);
+      let mask=smaa_edge_mask(src,width,height,x,y);
+      let r=ux_u8_put(out,(mask%2)*255);
+      let g=ux_u8_put(out+1,(mask/2)*255);
+      let b=ux_u8_put(out+2,0);
+      let a=ux_u8_put(out+3,0);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return width*height;
+}

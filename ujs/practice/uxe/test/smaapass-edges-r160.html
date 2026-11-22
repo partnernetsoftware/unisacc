@@ -1,0 +1,90 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, NoBlending, REVISION, WebGLRenderer, WebGLRenderTarget } from "three";
+
+const report = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const base = `file://${query.get("package")}/examples/jsm`;
+  const [{ ShaderPass }, { SMAAEdgesShader }, binary, fixtures] = await Promise.all([
+    import(`${base}/postprocessing/ShaderPass.js`),
+    import(`${base}/shaders/SMAAShader.js`),
+    fetch(`file://${query.get("wasm")}`),
+    fetch(`file://${query.get("fixtures")}`),
+  ]);
+  const input = new Uint8Array(await fixtures.arrayBuffer());
+  const { uxe_smaapass_edges: edges, memory } =
+    (await WebAssembly.instantiate(await binary.arrayBuffer())).instance.exports;
+  const renderer = new WebGLRenderer();
+  renderer.setClearColor(0, 0);
+  const pass = new ShaderPass(SMAAEdgesShader);
+  pass.material.blending = NoBlending;
+  pass.clear = true;
+
+  const sourceAddress = 6000, outputAddress = 8000;
+  const view = (address, length) => new Uint8Array(memory.buffer, 2097152 + address, length);
+  const results = [];
+  function masks(rgba) {
+    for (let i = 0; i < rgba.length; i += 4) {
+      const [r, g, b, a] = rgba.subarray(i, i + 4);
+      results.push((r !== 0 && r !== 255) || (g !== 0 && g !== 255) || b || a ?
+        4 : +(r === 255) + 2 * +(g === 255));
+    }
+  }
+
+  for (let offset = 0; offset < input.length;) {
+    const width = input[offset++], height = input[offset++];
+    const pixels = width * height, bytes = 4 * pixels;
+    const data = input.subarray(offset, offset + bytes);
+    if (!pixels || data.length !== bytes) throw new Error("fixture truncated");
+    offset += bytes;
+    const source = view(sourceAddress, bytes);
+    const guarded = view(outputAddress - 1, bytes + 2);
+    source.set(data);
+    guarded.fill(237);
+    if (edges(BigInt(sourceAddress), BigInt(outputAddress), BigInt(width), BigInt(height)) !== BigInt(pixels) ||
+        guarded[0] !== 237 || guarded[bytes + 1] !== 237 ||
+        source.some((value, index) => value !== data[index])) {
+      throw new Error("native edge frame contract");
+    }
+    masks(view(outputAddress, bytes));
+
+    const texture = new DataTexture(data, width, height);
+    texture.needsUpdate = true;
+    const target = new WebGLRenderTarget(width, height, { depthBuffer: false });
+    pass.uniforms.resolution.value.set(1 / width, 1 / height);
+    pass.render(renderer, target, { texture });
+    const gpu = new Uint8Array(bytes);
+    renderer.readRenderTargetPixels(target, 0, 0, width, height, gpu);
+    masks(gpu);
+    texture.dispose();
+    target.dispose();
+  }
+
+  const guarded = view(outputAddress - 8, 16);
+  guarded.fill(237);
+  const invalid = [
+    [-1, outputAddress, 1, 1], [sourceAddress, -1, 1, 1],
+    [sourceAddress, outputAddress, 0, 1], [sourceAddress, outputAddress, 1, 0],
+    [sourceAddress, outputAddress, 1572864, 2], [sourceAddress, outputAddress, 2, 1572864],
+    [6291453, outputAddress, 1, 1], [sourceAddress, 6291453, 1, 1],
+    [outputAddress, outputAddress, 1, 1], [outputAddress - 1, outputAddress, 1, 1],
+    [outputAddress + 1, outputAddress, 1, 1],
+  ];
+  for (const args of invalid) {
+    if (edges(...args.map(BigInt)) !== -1n || guarded.some(value => value !== 237))
+      throw new Error("invalid edge frame modified memory");
+  }
+  results.push(invalid.length);
+  renderer.setRenderTarget(null);
+  pass.dispose();
+  renderer.dispose();
+  report.textContent = JSON.stringify(results);
+} catch (error) {
+  report.textContent = `error:${error.message}`;
+}
+</script>

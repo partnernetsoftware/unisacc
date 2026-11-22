@@ -1,0 +1,142 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+enum { frames=12, pixelCount=10*7*5+5+7, fixtureBytes=frames*2+pixelCount*4 };
+static const char module[]="ujs/practice/uxe/base/smaapass-edges.ujs";
+
+static void make_frame(unsigned char *data,int width,int height,int frame) {
+    for(int y=0;y<height;y++) for(int x=0;x<width;x++) {
+        unsigned char *pixel=data+4*(y*width+x);
+        pixel[3]=(x*29+y*113)%256;
+        if(frame==1 && x>=3) pixel[0]=25;
+        if(frame==2 && x>=3) pixel[0]=26;
+        if(frame==3 && y>=2) pixel[1]=26;
+        if(frame==4 && x<3) pixel[0]=40;
+        if(frame==4 && y>2) pixel[1]=52;
+        if(frame==5 && x==2) pixel[0]=26;
+        if(frame==5 && x==4) pixel[0]=52;
+        if(frame==6 && x==2) pixel[0]=26;
+        if(frame==6 && x==4) pixel[0]=53;
+        if(frame==7 && x==2) pixel[0]=30;
+        if(frame==7 && x==1) pixel[0]=90;
+        if(frame==8 && y==3) pixel[2]=40;
+        if(frame==8 && y==4) pixel[2]=110;
+        if(frame==9 && x<=y) pixel[2]=180;
+        if(frame==10 && y>=3) pixel[1]=97;
+        if(frame==11 && x>=2 && x<=4) pixel[0]=41;
+    }
+}
+
+static int gold_mask(const unsigned char *data,int width,int height,int x,int y) {
+    static const int dx[]={-1,0,1,0,-2,0};
+    static const int dy[]={0,1,0,-1,0,2};
+    const unsigned char *center=data+4*(y*width+x);
+    unsigned distance[6]={0};
+    for(int k=0;k<6;k++) {
+        int u=x+dx[k], v=y+dy[k];
+        u=u<0?0:u>=width?width-1:u;
+        v=v<0?0:v>=height?height-1:v;
+        const unsigned char *neighbor=data+4*(v*width+u);
+        for(int channel=0;channel<3;channel++) {
+            int signedDelta=(int)center[channel]-(int)neighbor[channel];
+            unsigned delta=signedDelta<0?-signedDelta:signedDelta;
+            if(delta>distance[k]) distance[k]=delta;
+        }
+    }
+    unsigned threshold=26;
+    for(int k=0;k<6;k++) {
+        unsigned local=(distance[k]+1)/2;
+        if(local>threshold) threshold=local;
+    }
+    return (distance[0]>=threshold)+2*(distance[1]>=threshold);
+}
+
+static int write_mutation(const char *path) {
+    unsigned char *source=0;
+    int64_t bytes=0;
+    if(sy_read_file(module,&source,&bytes,32768)) return 1;
+    const char original[]="width,height,x,y+1";
+    const char mutant[]="width,height,x,y-1";
+    int hits=0;
+    for(int64_t i=0;i+(int64_t)sizeof original-1<=bytes;i++) {
+        unsigned at=0;
+        while(at<sizeof original-1 && source[i+at]==original[at]) at++;
+        if(at!=sizeof original-1) continue;
+        hits++;
+        for(at=0;at<sizeof mutant-1;at++) source[i+at]=mutant[at];
+    }
+    int failed=hits!=1 || sy_write_file(path,source,bytes,0600);
+    mm_free(source);
+    return failed;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate-top");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    char dir[256],cwd[390],abi[300],wasm[300],fixture[300],modified[300],url[1100];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-smaa-edges-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/edges.wasm",dir);
+    tx_snprintf(fixture,sizeof fixture,"%s/fixture.rgba",dir);
+    tx_snprintf(modified,sizeof modified,"%s/mutant.ujs",dir);
+    int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/smaapass-edges-r160.html?package=%s&wasm=%s&fixtures=%s",
+        cwd,argv[1],wasm,fixture);
+    const char entry[]="export uxe_smaapass_edges(src:i64,dst:i64,width:i64,height:i64) i64 version 1;\n";
+    unsigned char data[fixtureBytes]={0};
+    int gold[2*pixelCount+1]={0};
+    int cursor=0, expected=0;
+    for(int frame=0;frame<frames;frame++) {
+        int width=frame==10?1:7, height=frame==11?1:5;
+        data[cursor++]=width;
+        data[cursor++]=height;
+        make_frame(data+cursor,width,height,frame);
+        for(int pass=0;pass<2;pass++) {
+            for(int y=0;y<height;y++) for(int x=0;x<width;x++) {
+                gold[expected++]=gold_mask(data+cursor,width,height,x,y);
+            }
+        }
+        cursor+=width*height*4;
+    }
+    gold[expected++]=11;
+    double actual[2*pixelCount+1]={0};
+    char *output=0;
+    size_t bytes=0;
+    int failed=length<0 || length>=(int)sizeof url || cursor!=fixtureBytes ||
+        expected!=2*pixelCount+1 || sy_write_file(abi,entry,sizeof entry-1,0600) ||
+        sy_write_file(fixture,data,sizeof data,0600) || (mutate && write_mutation(modified));
+    if(!failed) {
+        char *compile[]={"./ujs/ujs2wasm.com",abi,mutate?modified:(char *)module,
+            "ujs/practice/uxe/test/smaapass-edges-probe.ujs","-o",wasm,0};
+        const int rc=cx_runv_timeout(compile,6,&output,&bytes);
+        if(rc) { printf("SMAA_EDGES compiler_rc=%d %s\n",rc,output?output:""); failed=1; }
+        mm_free(output); output=0;
+    }
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,expected,dir);
+    int nativeDiff=0, r160Diff=0;
+    if(!failed) {
+        int at=0;
+        for(int frame=0;frame<frames;frame++) {
+            int count=frame==10?5:frame==11?7:35;
+            for(int path=0;path<2;path++) for(int pixel=0;pixel<count;pixel++,at++) {
+                if(actual[at]==gold[at]) continue;
+                if(path==0) nativeDiff++; else r160Diff++;
+                if(nativeDiff+r160Diff<=8) {
+                    printf("SMAA_EDGES frame=%d path=%s pixel=%d observed=%.0f expected=%d\n",
+                        frame,path==0?"native":"r160",pixel,actual[at],gold[at]);
+                }
+            }
+        }
+        failed=nativeDiff || r160Diff || actual[at]!=gold[at];
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,5,&output,&bytes)) failed=1;
+    mm_free(output);
+    printf("SMAA_EDGES frames=%d pixels=%d native_diff=%d r160_diff=%d failed=%d\n",
+        frames,pixelCount,nativeDiff,r160Diff,failed);
+    return failed!=0;
+}
