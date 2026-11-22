@@ -169,11 +169,24 @@ static int group(int g) {
         ck(okm, "memo-written-for-head-commit");
         ck(okp, "product-sha-memo-written"); }
     /* (2b0) 格式坏的身份备忘不被采信:写入垃圾后调用仍成功,备忘按 git 重算并重写为合法格式 */
-    {   char hp[900]; char *hv[] = {"git", "rev-parse", "HEAD", 0}; unsigned char *b = 0; int64_t n = 0; int okw = 0;
-        if (run(hv, fx, 0) == 0 && strlen(out) >= 40) { out[40] = 0; F(hp, sizeof hp, "%s/memo/head-%s", pin, out); okw = !ovf && !sy_write_atomic(hp, "garbage\n", 8, 0600); }
+    {   char hp[900],hdr[80]; char *hv[] = {"git", "rev-parse", "HEAD", 0};
+        unsigned char *b = 0, *before = 0; int64_t n = 0, bn = 0; int okw = 0, prior_ok = 0;
+        if (run(hv, fx, 0) == 0 && strlen(out) >= 40) {
+            out[40] = 0;
+            F(hp, sizeof hp, "%s/memo/head-%s", pin, out);
+            F(hdr, sizeof hdr, "dvmemo1\t%s\n", out);
+            if (!ovf) {
+                size_t hn = strlen(hdr);
+                prior_ok = !sy_read_file(hp,&before,&bn,1 << 20) && before &&
+                           bn > (int64_t)hn && !memcmp(before,hdr,hn);
+                okw = !sy_write_atomic(hp, "garbage\n", 8, 0600);
+            }
+        }
         {   char *v[] = {"sh", rel_product, "tools/devsvc.cx", "--", "x", "--par", "1", "--", "echo", "memo-bad-ok", 0}; rc = run(v, fx, envv); }
         ck(okw && rc == 0 && has("memo-bad-ok") && !has("using the working copy"), "bad-memo-ignored");
-        ck(okw && !sy_read_file(hp, &b, &n, 1 << 20) && b && n > 8 && !memcmp(b, "dvmemo1\t", 8), "bad-memo-rewritten");
+        ck(okw && prior_ok && !sy_read_file(hp, &b, &n, 1 << 20) && b && n == bn &&
+           !memcmp(b,before,(size_t)n), "bad-memo-rewritten");
+        if (before) free(before);
         if (b) free(b); }
     /* (2b) 客户端被 INT:1 s 后杀客户端,2 s 内节点进程组清空,事件含 x.cancelled */
     {   const char *sc = "sh ./unisacc.com tools/devsvc.cx -- start >/dev/null 2>&1; sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- sleep 47 2>cancel.err & C=$!; i=0; K=; S=;"

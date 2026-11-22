@@ -1,0 +1,92 @@
+/* tools/check-dup-signature.cx -- checks tools/dup-signature.cx (report mode, interface consistency).
+ *
+ *   sh ./unisacc.com tools/check-dup-signature.cx          (run from the repo root; ./unisacc.com and ./tools/bound needed)
+ *
+ * red:    fixture with sy_conn defined in a/x.cx and b/y.cx with different parameter types, sy_dial with a different
+ *         parameter count, sy_ret with a different return type; the tool must name each (kind type, count, ret) and
+ *         count sy_=3.
+ * green:  fixture where tx_same appears twice with the same types but different parameter names, a static helper
+ *         repeated with different signatures, and the same name twice in one file; the tool must report names=0.
+ * mutant: two source mutations of the tool must be killed: (1) signature comparison disabled -> red fixture reports
+ *         names=0; (2) parameter-name stripping disabled -> green fixture reports a false mismatch.
+ * Ends with CHECK_DUP_SIGNATURE<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int ds_failed;
+static char ds_out[1 << 16];
+static char ds_root[600];
+static void ds_ck(int ok, const char *name) { if (!ok) ds_failed++; printf("%s\tdup-signature.%s\n", ok ? "PASS" : "FAIL", name); }
+static int ds_has(const char *s) { long n = tx_len(ds_out, sizeof ds_out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(ds_out + i, s, sn)) return 1; return 0; }
+static int ds_exec(char **v) {
+    int fd, pid, ex = 0, code = 0, sig = 0, bound = 50; long n = 0, r; (void)bound;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(fd, ds_out + n, (long)sizeof ds_out - 1 - n)) > 0) n += r;
+    ds_out[n] = 0; sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int ds_tool(const char *tool, const char *root) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", (char *)tool, "--", "--root", (char *)root, 0};
+    return ds_exec(v);
+}
+static void ds_put(const char *root, const char *rel, const char *s) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", root, rel)) cx_write(p, s, tx_len(s, 1 << 16)); }
+static void ds_dir(const char *root, const char *rel) { char p[700]; cx_fmt(p, sizeof p, "%s/%s", root, rel); sy_mkdir(p, 0700); }
+static void ds_git(const char *root) {
+    char *i[] = {"git", "-C", (char *)root, "init", "-q", 0}; char *a[] = {"git", "-C", (char *)root, "add", "-A", 0};
+    ds_exec(i); ds_exec(a);
+}
+static void ds_mkroot(char *dst, const char *tag) {
+    cx_fmt(dst, 600, "%s/dupsig-%s-%d", sy_tmpdir(), tag, (int)sy_pid());
+    sy_mkdir(dst, 0700); ds_dir(dst, "cx"); ds_dir(dst, "ext");
+}
+static int ds_mutant(const char *dst, const char *from, const char *to) {
+    size_t n = 0, i, fl = tx_len(from, 400), tl = tx_len(to, 400); char *b = (char *)cx_read("tools/dup-signature.cx", &n), *m; long at = -1;
+    if (!b) return -1;
+    for (i = 0; i + fl <= n; i++) if (mm_same(b + i, from, fl)) { at = (long)i; break; }
+    if (at < 0) { mm_free(b); return -1; }
+    m = (char *)mm_alloc(n - fl + tl + 1);
+    mm_copy(m, at + 1, b, at); mm_copy(m + at, tl + 1, to, tl); mm_copy(m + at + tl, n - at - fl + 1, b + at + fl, n - at - fl);
+    { int r = cx_write(dst, m, n - fl + tl); mm_free(m); mm_free(b); return r; }
+}
+
+int main(void) {
+    char red[600], green[600], mp[700];
+    ds_mkroot(red, "red"); ds_mkroot(green, "green");
+    ds_dir(red, "cx/a"); ds_dir(red, "ext/b");
+    ds_put(red, "cx/a/x.cx", "int sy_conn(const char *host, int port) { return 0; }\nint sy_dial(int fd, long ms);\nlong sy_ret(int fd) { return 0; }\n");
+    ds_put(red, "ext/b/y.cx", "int sy_conn(const char *host, long deadline) { return 1; }\nint sy_dial(int fd, long ms, long extra);\nint sy_ret(int fd) { return 0; }\n");
+    ds_git(red);
+    ds_dir(green, "cx/a"); ds_dir(green, "ext/b");
+    ds_put(green, "cx/a/x.cx", "int tx_same(const char *s, long n) { return 0; }\nstatic int h(int a) { return a; }\nint twice(int);\nint twice(int x) { return x; }\n");
+    ds_put(green, "ext/b/y.cx", "int tx_same(const char *text, long len);\nstatic long h(char c) { return c; }\n/* int tx_same(void); */\n");
+    ds_git(green);
+
+    ds_tool("tools/dup-signature.cx", red);
+    ds_ck(ds_has("DUPSIG\tsy_conn\ttype\t") && ds_has("DUPSIG\tsy_dial\tcount\t") && ds_has("DUPSIG\tsy_ret\tret\t"), "red-names-kinds");
+    ds_ck(ds_has("DUPSIG\tsy_conn\ttype\tcx/a/x.cx:1\t") && ds_has("ext/b/y.cx:1\t"), "red-file-line");
+    ds_ck(ds_has("names=3\tmismatched=6\tsy_=3"), "red-summary");
+    ds_tool("tools/dup-signature.cx", green);
+    ds_ck(ds_has("names=0\tmismatched=0") && !ds_has("DUPSIG\t"), "green-silent");
+
+    cx_fmt(mp, sizeof mp, "tools/dup-signature-mut1.cx");
+    ds_ck(ds_mutant(mp, "if (!tx_eqz(pl[k].sig, pl[i].sig)) { diff = 1;", "if (0) { diff = 1;") == 0, "mut1-built");
+    ds_tool(mp, red);
+    ds_ck(ds_has("names=0"), "mut1-killed-by-red");
+    sy_unlink(mp);
+    cx_fmt(mp, sizeof mp, "tools/dup-signature-mut2.cx");
+    ds_ck(ds_mutant(mp, "if (isid) nt--;", "(void)isid;") == 0, "mut2-built");
+    ds_tool(mp, green);
+    ds_ck(!ds_has("names=0"), "mut2-killed-by-green");
+    sy_unlink(mp);
+    printf("CHECK_DUP_SIGNATURE\tfailed=%d\n", ds_failed);
+    return ds_failed ? 1 : 0;
+}

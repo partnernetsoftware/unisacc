@@ -1123,7 +1123,7 @@ sh ./unisacc.com tools/forecast-tier-runtime.cx -- "$ROOT"
 
 ## 0.0.48 T5.3：有限事实证明与未解析单调门
 
-`tsv-lint` 默认对真实根启用未解析棘轮，`--max-unresolved N` 只能收紧；最终上限按父实测固化为11050，不能回调旧11281。fixture默认不继承整仓额度，显式传上限时同样受门约束。
+`tsv-lint` 默认对真实根启用未解析棘轮，`--max-unresolved N` 只能收紧；原 0.0.48 上限固化为11050，2026-11-22 经所有者决定放宽 20% 至硬上限 13260，并新增 `build/tsv-lint-baseline.tsv` 固化当前实测基线只降不升、接入 `tools/ratchets.cx` 第 18 项执行门(`--check`)。fixture默认不继承整仓额度，显式传上限时同样受门约束。
 
 | 输入及工具视图 | 未解析数 | 结果 |
 |---|---:|---|

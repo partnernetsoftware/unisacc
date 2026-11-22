@@ -90,7 +90,7 @@ static void root_domain_sample(void){
   path(p,pp,"shared-manifest.tsv");put(p,"table\ta-byte.tsv\t-\t-\tdomain\t-\t-\t-\t{\"mode\":\"b\",\"domain_keys\":\"keys\"}\n");
   path(p,pp,"a-byte.tsv");put(p,i==1||i==7?"S\t0\tHALT\t[]\n":"S\t0\tHALT\t[]\nS\t256\tHALT\t[]\n");
   path(d,base,"facts");path(p,d,"domain.tsv");put(p,i==2||i==5?"=keys\tjson\t[257]\n":i==4?"=keys\tjson\t[\"0\"]\n":"=keys\tjson\t[0,256]\n");
-  char *v[]={exe,"--root",dir,"--limit","100","--max-unresolved",i==5?"0":i==6?"11051":"11050",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);int yes=!tr&&r.rc==rc[i]&&!r.residue;
+  char *v[]={exe,"--root",dir,"--limit","100","--max-unresolved",i==5?"0":i==6?"13261":"13260",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);int yes=!tr&&r.rc==rc[i]&&!r.residue;
   if(i==0)yes=yes&&r.out&&strstr(r.out,"unresolved=0")&&strstr(r.out,"status=STATIC_OK");
   if(i==1||i==3||i==7)yes=yes&&r.out&&strstr(r.out,"missing-fallback");
   if(i==2||i==4||i==8)yes=yes&&r.out&&strstr(r.out,"status=PARTIAL");
@@ -137,6 +137,38 @@ static void root_selection_sample(void){
   np_free(&r);
  }
 }
+static void root_baseline_sample(void){
+ char dir[4400],base[4400],pp[4400],bdir[4400],d[4400],p[4400],bp[4400];
+ path(dir,scratch,"root-baseline");if(mkdir(dir,0700))die("baseline fixture mkdir");
+ path(base,dir,"exec");if(mkdir(base,0700))die("baseline exec mkdir");
+ path(bdir,dir,"build");if(mkdir(bdir,0700))die("baseline build mkdir");
+ const char *parts[]={"pp","parse2"};
+ for(int i=0;i<2;i++){path(d,base,parts[i]);if(mkdir(d,0700))die("baseline stage mkdir");}
+ path(pp,base,"pp");path(d,base,"parse2");
+ path(p,d,"gen-manifest.tsv");put(p,"table\tq-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\n");
+ path(p,d,"q-byte.tsv");put(p,"Q\t*\tHALT\t[]\n");
+ path(p,pp,"gen-manifest.tsv");put(p,"rows\ta\tchosen\t-\t-\t-\t-\t-\t-\nrows\ta\t@str:{choice}\t-\t-\t-\t-\t-\t-\n");
+ path(p,pp,"a-byte.tsv");put(p,"chosen\tS\t*\tHALT\t[]\nunused\tHIDDEN\t0\tABSENT\t[]\n");
+ path(bp,bdir,"tsv-lint-baseline.tsv");
+ const char *labels[]={"check-mode-missing-baseline-refused","baseline-above-hard-ceiling-refused","baseline-ratchet-allows-at-or-below","baseline-ratchet-rejects-growth","baseline-ratchet-default-mode-rejects-growth"};
+ const int expected[]={2,2,0,1,1};
+ for(int i=0;i<5;i++){
+  if(i==1)put(bp,"unresolved\t13261\n");
+  if(i==2)put(bp,"unresolved\t1\n");
+  if(i==3)put(bp,"unresolved\t0\n");
+  char *v_chk[]={exe,"--root",dir,"--check",0};
+  char *v_def[]={exe,"--root",dir,"--limit","10",0};
+  np_result r={0};char why[512]={0};
+  int tr=np_run(i==4?v_def:v_chk,root,0,15,&r,why,sizeof why);
+  int yes=!tr&&r.rc==expected[i]&&!r.residue;
+  if(i==2)yes=yes&&r.out&&strstr(r.out,"tsv-lint: ok:")&&strstr(r.out,"unresolved=1 baseline=1 ceiling=13260");
+  if(i==3)yes=yes&&r.out&&strstr(r.out,"tsv-lint: <summary> has 1 unresolved, baseline 0")&&strstr(r.out,"tsv-lint: FAIL:");
+  if(i==4)yes=yes&&r.out&&strstr(r.out,"unresolved-ratchet")&&strstr(r.out,"status=ERROR");
+  ck(yes,labels[i]);
+  if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}
+  np_free(&r);
+ }
+}
 int main(void){
  char tmp[]="/tmp/tsv-lint-check-XXXXXX",p[4400],com[4400],tool[4400];
  if(!realpath(".",root)||!mkdtemp(tmp))die("temporary root");
@@ -161,6 +193,8 @@ int main(void){
  root_environment_sample();
  root_domain_sample();
  root_selection_sample();
+ root_baseline_sample();
  {char *v[]={exe,"--root",root,"--limit","10",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,20,&r,why,sizeof why);ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0"),"current-pp-parse2-negative");if(tr||r.rc||r.residue)fprintf(stderr,"tsv-lint-root: transport=%d rc=%d residue=%d %s\n",tr,r.rc,r.residue,why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);}
+ {char *v[]={exe,"--root",root,"--check",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,20,&r,why,sizeof why);ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"tsv-lint: ok:"),"current-pp-parse2-check-mode");if(tr||r.rc||r.residue)fprintf(stderr,"tsv-lint-check: transport=%d rc=%d residue=%d %s\n",tr,r.rc,r.residue,why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);}
  if(cx_rmtree(scratch))die("cleanup");printf("CHECK_TSV_LINT\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;
 }
