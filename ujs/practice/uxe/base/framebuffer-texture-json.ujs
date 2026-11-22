@@ -1,0 +1,77 @@
+// RGBA8 capture descriptor. Width and height are runtime image dimensions;
+// r160 serializes format/type but does not persist framebuffer image dimensions.
+struct FramebufferTextureJson {
+  width: u32;
+  height: u32;
+  format: u32;
+  type: u32;
+}
+
+native function framebuffer_json_key(out:i64,index:i64) i64 {
+  let names=[119,105,100,116,104,104,101,105,103,104,116,102,111,114,109,97,116,116,121,112,101];
+  let starts=[0,5,11,17];
+  let sizes=[5,6,6,4];
+  let start=starts[index];
+  let size=sizes[index];
+  let i=0;
+  while(i<size) { let byte=ux_u8_put(out+i,names[start+i]); i=i+1; }
+  return size;
+}
+
+native function framebuffer_json_valid(w:i64,h:i64,format:i64,kind:i64) i64 {
+  return fb_texture_span(0,w,h) && format==1023 && kind==1009;
+}
+
+native function FramebufferTexture_writeJSON(at:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,16,4) || end<=dst ||
+     !helper_buffer_span(dst,end-dst,1) || !helper_buffer_span(scratch,1120,8) ||
+     !helper_buffer_disjoint(at,16,dst,end-dst) ||
+     !helper_buffer_disjoint(at,16,scratch,1120) ||
+     !helper_buffer_disjoint(dst,end-dst,scratch,1120)) { return 0-1; }
+  let w=ux_u32(at);
+  let h=ux_u32(at+4);
+  let format=ux_u32(at+8);
+  let kind=ux_u32(at+12);
+  if(!framebuffer_json_valid(w,h,format,kind)) { return 0-1; }
+  let cursor=json_byte(dst,end,123);
+  let i=0;
+  while(i<4) {
+    if(i>0) { cursor=json_byte(cursor,end,44); }
+    let size=framebuffer_json_key(scratch,i);
+    cursor=json_write_string(cursor,end,scratch,size);
+    cursor=json_byte(cursor,end,58);
+    let field=ux_u32(at+4*i);
+    cursor=json_write_f64(cursor,end,0.0+field,scratch+16);
+    if(cursor<0) { return 0-1; }
+    i=i+1;
+  }
+  return json_byte(cursor,end,125);
+}
+
+native function FramebufferTexture_readJSON(at:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,16,4) || end<=input ||
+     !helper_buffer_span(input,end-input,1) || !helper_buffer_span(scratch,16,4) ||
+     !helper_buffer_disjoint(at,16,input,end-input) ||
+     !helper_buffer_disjoint(at,16,scratch,16) ||
+     !helper_buffer_disjoint(input,end-input,scratch,16)) { return 0-1; }
+  let root=json_space(input,end);
+  let stop=json_value_end(root,end);
+  if(root<0 || stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let values=[0,0,0,0];
+  let i=0;
+  while(i<4) {
+    let size=framebuffer_json_key(scratch,i);
+    let valueAt=json_find_key(root,stop,scratch,size);
+    if(valueAt<0) { return 0-1; }
+    let number=json_read_number(valueAt,stop);
+    if(!(number>=0.0 && number<=4096.0)) { return 0-1; }
+    let value=f64_floor_i64(number);
+    if(number!=0.0+value) { return 0-1; }
+    values[i]=value;
+    i=i+1;
+  }
+  if(!framebuffer_json_valid(values[0],values[1],values[2],values[3])) { return 0-1; }
+  i=0;
+  while(i<4) { let saved=ux_u32_put(at+i*4,values[i]); i=i+1; }
+  return at;
+}
