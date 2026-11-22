@@ -193,8 +193,9 @@ int main(void) {
             "1700000006\tb6\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
             "1700000007\tb7\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
             "1700000008\tb8\tPASS\t3000\t2900\tfallback\t1.0\trun-batch\n"
-            "1700000009\tb9\tFAIL\t15000\t14500\tfallback\t1.0\trun-batch\n"
-            "1700000010\tb10\tFAIL\t18000\t17500\tfallback\t1.0\trun-batch\n";
+            "1700000009\tb9\tPASS\t15000\t14500\tfallback\t1.0\trun-batch\n"
+            "1700000010\tb10\tPASS\t18000\t17500\tfallback\t1.0\trun-batch\n"
+            "1700000011\tb9\tFAIL\t53106\t53029\tfallback\t1.0\trun-batch\n";
         const char *s_pfile =
             "b1\tdom\tPASS\t0\taaa\t20000\t1.0\t0\t-\n"
             "b9\tdom\tFAIL\t1\taaa\t15000\t1.0\t0\terr\n"
@@ -202,9 +203,13 @@ int main(void) {
         if (cx_write(tids, s_tids, strlen(s_tids)) ||
             cx_write(tfile, s_tfile, strlen(s_tfile)) ||
             cx_write(pfile, s_pfile, strlen(s_pfile))) return 2;
+        const char *pd_src5 = getenv("CHECK_PRERUN_DRIVE_SRC");
+        char pd_p5[CPD_PW];
+        if (pd_src5 && pd_src5[0]) cx_fmt(pd_p5, sizeof pd_p5, "%s", pd_src5);
+        else cx_fmt(pd_p5, sizeof pd_p5, "%s/tools/prerun-drive.cx", cwd);
         if (cx_fmt(cmd, sizeof cmd,
-            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2",
-            cwd, cwd, tids, tfile, pfile, tpdir)) return 2;
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --priority-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, pd_p5, tids, tfile, pfile, tpdir)) return 2;
         int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
         char wp[CPD_PW]; size_t wn = 0;
         cx_fmt(wp, sizeof wp, "%s/windows.tsv", tpdir);
@@ -1064,6 +1069,47 @@ int main(void) {
            ckk_has(out, CPD_OUT, "PRERUN_PRODUCT_RED_STOP\tbatch=cx-booter-ape\tdomain=product-qualification\tstatus=FAIL\t") &&
            ckk_has(out, CPD_OUT, "DEFAULT_KEEP_GOING_UNKNOWN_OK"),
            "r74f-default-keep-going-unknown-and-hard-stop-product-red");
+    }
+
+    /* (15) times-file estimate uses only PASS rows (ignores FAIL/KILLED/UNKNOWN timeout rows) + mutation gate */
+    {
+        char f15[CPD_PW], ids15[CPD_PW], tf15[CPD_PW], o15[CPD_PW], o15m[CPD_PW];
+        const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
+        char pd_path[CPD_PW];
+        if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
+        else cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd);
+        if (cx_fmt(f15, sizeof f15, "%s/f15", work) || sy_mkdir_all(f15, 0700) ||
+            cx_fmt(ids15, sizeof ids15, "%s/ids.txt", f15) ||
+            cx_fmt(tf15, sizeof tf15, "%s/times.tsv", f15) ||
+            cx_fmt(o15, sizeof o15, "%s/out", f15) ||
+            cx_fmt(o15m, sizeof o15m, "%s/out-mut", f15)) return 2;
+        const char *s_ids15 = "w-fast\nmodule-units\n";
+        const char *s_tf15 =
+            "1795307628\tw-fast\tPASS\t1200\t1100\tfallback\t1.0\trun-batch\n"
+            "1795307628\tmodule-units\tFAIL\t53106\t53026\tfallback\t6.48\trun-batch\n"
+            "1795326253\tmodule-units\tFAIL\t54090\t53029\tfallback\t2.65\trun-batch\n"
+            "1795326295\tmodule-units\tPASS\t40515\t40400\tfallback\t2.39\trun-batch\n"
+            "1795334548\tmodule-units\tKILLED\t54090\t-1\t-\t-\taffected-kill\n";
+        if (cx_write(ids15, s_ids15, strlen(s_ids15)) ||
+            cx_write(tf15, s_tf15, strlen(s_tf15))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 4 --warmup 1",
+            cwd, pd_path, ids15, tf15, o15)) return 2;
+        int rc15 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc15 == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=2\twindows=2\t") &&
+           ckk_has(out, CPD_OUT, "max_window_ms=40515\t") &&
+           !ckk_has(out, CPD_OUT, "PRERUN_SPLIT_REQUIRED"),
+           "times-file-pass-only-estimate: ignores 53s/54s FAIL/KILLED rows and uses 40515ms PASS estimate");
+
+        /* Mutation gate: --mutate-times-use-nonpass must fail (triggers PRERUN_SPLIT_REQUIRED / non-PASS estimate) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 4 --warmup 1 --mutate-times-use-nonpass",
+            cwd, pd_path, ids15, tf15, o15m)) return 2;
+        int rc15m = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc15m != 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_SPLIT_REQUIRED\tbatch=module-units\testimate_ms=54090\tlimit_ms=54000"),
+           "mutant-killed-times-use-nonpass: including FAIL/KILLED rows in estimate triggers PRERUN_SPLIT_REQUIRED");
     }
 
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
