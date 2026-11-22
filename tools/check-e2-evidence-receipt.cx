@@ -1,0 +1,163 @@
+/* tools/check-e2-evidence-receipt.cx -- tools/e2-evidence-receipt.cx on small synthetic evidence directories.
+ *
+ *   sh ./unisacc.com tools/check-e2-evidence-receipt.cx   (from the repo root)
+ *
+ * One spec with one source per case, one run of the tool.  Positive controls: a clean pp-equiv source (4 rows, steps
+ * 100/40 and 100/60 give 500 permille), a clean unit-e2-compare source, a complete -o source: COMPLETE with exact counts.
+ * Rejections, each named in the reason: a ledger row turned DIFF, a REFUSE_PRE row (unmeasured), a claim whose total
+ * is wrong, a missing ledger row (pending), a missing ledger file, a row of another manifest sha (foreign), a row
+ * outside the manifest (extra), a repeated row (dup), a model pack whose sha is not the rows' id (foreign), a partial
+ * -o source (pending).  The whole receipt is INCOMPLETE and rc 1 because of them.  A second run with only the clean
+ * sources is COMPLETE, rc 0, and writes --out.  Prints PASS/FAIL lines and CHECK_E2_EVIDENCE_RECEIPT TAB failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.die
+
+static char T[600], out[1 << 16], spec[1 << 14];
+static void put(const char *rel, const char *body) {
+    char p[1100];
+    cx_fmt(p, sizeof p, "%s/%s", T, rel);
+    if (cx_write(p, body, strlen(body))) { printf("FAIL\twrite %s\n", rel); exit(1); }
+}
+static void sha(const char *s, char o[65]) { sy_sha256_hex(s, (long)strlen(s), o); }
+static int tool(const char *extra, int outrel) {
+    char cmd[2400];
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/e2-evidence-receipt.cx -- --root %s --spec %s/spec.tsv %s 2>&1", T, T, extra);
+    (void)outrel;
+    return ckk_sh_t("check-e2-evidence-receipt", cmd, out, sizeof out, 50);
+}
+static int row_has(const char *name, const char *w) {
+    char key[200];
+    cx_fmt(key, sizeof key, "E2_EVIDENCE_ROW\t%s\t", name);
+    const char *p = strstr(out, key);
+    if (!p) return 0;
+    const char *e = strchr(p, '\n');
+    char buf[1400];
+    size_t n = e ? (size_t)(e - p) : strlen(p);
+    if (n >= sizeof buf) n = sizeof buf - 1;
+    mm_copy(buf, sizeof buf, p, n); buf[n] = 0;
+    return strstr(buf, w) != 0;
+}
+static int final_has(const char *w) {
+    const char *p = strstr(out, "E2_EVIDENCE\tstatus=");
+    return p && strstr(p, w);
+}
+static void ck_(int ok, const char *what) { printf("%s\tcheck-e2-evidence-receipt.%s\n", ok ? "PASS" : "FAIL", what); }
+static int failed;
+#define CK(c, w) do { int ok_ = (c); ck_(ok_, w); if (!ok_) failed++; } while (0)
+
+static char led[8192];
+static void led_reset(void) { led[0] = 0; }
+static void app(char *dst, size_t cap, const char *s) { size_t at = strlen(dst); mm_copy(dst + at, (long)(cap - at), s, (long)strlen(s) + 1); }
+static void led_ppeq(const char *msha, const char *ida, const char *idb, const char *stratum, const char *mode, const char *path, const char *st, const char *detail) {
+    char l[800];
+    cx_fmt(l, sizeof l, "PPEQ\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t-\t%s\n", msha, stratum, mode, path, ida, idb, st, detail);
+    app(led, sizeof led, l);
+}
+static void led_uec(const char *msha, const char *ida, const char *idb, const char *stratum, const char *path, const char *st) {
+    char l[800];
+    cx_fmt(l, sizeof l, "UEC\t%s\t%s\t%s\t%s\t%s\t%s\t-\trc=0/0\n", msha, stratum, path, ida, idb, st);
+    app(led, sizeof led, l);
+}
+static char ma[65], ida[65], idb[65], idb2[65], mu[65];
+/* the four-row pp-equiv ledger with per-row overrides: bad = row index turned into status st (or -1) */
+static void ppeq_ledger(int rows, int bad, const char *st, const char *msha_for_bad, const char *idb_use) {
+    led_reset();
+    static const char *stratum[4] = {"corners", "corners", "headers", "headers"};
+    static const char *mode[4] = {"e2", "E", "e2", "E"};
+    static const char *path[4] = {"a.c", "a.c", "hdr:x.h", "hdr:x.h"};
+    static const char *base[4] = {"SAME", "SAME", "REFUSE_PP", "SAME"};
+    static const char *det[4] = {"rc=0/0 steps=100/40", "rc=0/0", "rc=1/1 steps=100/60", "rc=0/0"};
+    for (int i = 0; i < rows; i++)
+        led_ppeq(i == bad && msha_for_bad ? msha_for_bad : ma, ida, idb_use ? idb_use : idb, stratum[i], mode[i], path[i], i == bad && st ? st : base[i], det[i]);
+}
+
+int main(void) {
+    if (sy_mkdtemp(sy_tmpdir(), "check-e2-evid-", T, sizeof T)) { printf("FAIL\tmkdtemp\n"); return 1; }
+    put("pack-a", "PACK-A"); put("pack-b", "PACK-B"); put("pack-b2", "PACK-B-OTHER");
+    sha("PACK-A", ida); sha("PACK-B", idb); sha("PACK-B-OTHER", idb2);
+    const char *man = "corners\ta.c\t0\te2\ncorners\ta.c\t0\tE\nheaders\thdr:x.h\t0\te2\nheaders\thdr:x.h\t0\tE\n";
+    put("man", man); sha(man, ma);
+    const char *uman = "tools\tt1.cx\t0\ntools\tt2.cx\t0\ncorners\tc.c\t0\n";
+    put("uman", uman); sha(uman, mu);
+    char fake[65]; sha("another manifest", fake);
+
+    ppeq_ledger(4, -1, 0, 0, 0);               put("l-good", led);
+    ppeq_ledger(4, 3, "DIFF", 0, 0);           put("l-diff", led);
+    ppeq_ledger(4, 3, "REFUSE_PRE", 0, 0);     put("l-pre", led);
+    ppeq_ledger(3, -1, 0, 0, 0);               put("l-pending", led);
+    ppeq_ledger(4, 1, 0, fake, 0);             put("l-foreign", led);
+    ppeq_ledger(4, -1, 0, 0, idb2);            put("l-packid", led);
+    ppeq_ledger(4, -1, 0, 0, 0);
+    led_ppeq(ma, ida, idb, "headers", "e2", "hdr:stranger.h", "SAME", "rc=0/0");         put("l-extra", led);
+    ppeq_ledger(4, -1, 0, 0, 0);
+    led_ppeq(ma, ida, idb, "corners", "e2", "a.c", "SAME", "rc=0/0");                    put("l-dup", led);
+    led_reset();
+    led_uec(mu, ida, idb, "tools", "t1.cx", "SAME"); led_uec(mu, ida, idb, "tools", "t2.cx", "REFUSE_SAME"); led_uec(mu, ida, idb, "corners", "c.c", "SAME");
+    put("l-uec", led);
+    put("l-o3", "# header\nORACLE\tSAME\tO\tt1.cx\trc=0/0\nORACLE\tREFUSE_SAME\tO\tt2.cx\trc=1/1\nORACLE\tSAME\tO\tt3.cx\trc=0/0\n");
+    put("l-orerun", "ORACLE\tUNMEASURED\tO\tt1.cx\trc=124/124\nORACLE\tSAME\tO\tt2.cx\trc=0/0\nORACLE\tSAME\tO\tt1.cx\trc=0/0\nORACLE\tSAME\tO\tt2.cx\trc=0/0\nORACLE\tUNMEASURED\tO\tt2.cx\trc=124/124\n");
+    put("l-oconf", "ORACLE\tSAME\tO\tt1.cx\trc=0/0\nORACLE\tREFUSE_SAME\tO\tt1.cx\trc=1/1\n");
+    put("l-empty", "# nothing\n");
+    put("l-o2", "ORACLE\tSAME\tO\tt1.cx\trc=0/0\nORACLE\tSAME\tO\tt2.cx\trc=0/0\n");
+
+    const char *good = "good-ppeq\tppeq\tman\tl-good\tpack-a\tpack-b\ttotal=4,same=3,refuse=1,diff=0,unmeasured=0,pending=0\n"
+                       "good-uec\tuec\tuman\tl-uec\tpack-a\tpack-b\ttotal=3,same=2,refuse=1,diff=0,unmeasured=0,pending=0\n"
+                       "good-oracle\toracle\t-\tl-o3\t-\t-\ttotal=3,same=2,refuse=1\n"
+                       "good-oracle-many-files\toracle\t-\tl-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-empty,l-o3\t-\t-\ttotal=3,same=2,refuse=1,pending=0\n"
+                       "good-oracle-rerun\toracle\t-\tl-orerun\t-\t-\ttotal=2,same=2,unmeasured=0,pending=0\n";
+    const char *bad = "bad-diff\tppeq\tman\tl-diff\tpack-a\tpack-b\t-\n"
+                      "bad-unmeasured\tppeq\tman\tl-pre\tpack-a\tpack-b\t-\n"
+                      "bad-claim\tppeq\tman\tl-good\tpack-a\tpack-b\ttotal=5\n"
+                      "bad-pending\tppeq\tman\tl-pending\tpack-a\tpack-b\t-\n"
+                      "bad-missing-file\tppeq\tman\tl-nonexistent\tpack-a\tpack-b\t-\n"
+                      "bad-foreign\tppeq\tman\tl-foreign\tpack-a\tpack-b\t-\n"
+                      "bad-extra\tppeq\tman\tl-extra\tpack-a\tpack-b\t-\n"
+                      "bad-dup\tppeq\tman\tl-dup\tpack-a\tpack-b\t-\n"
+                      "bad-pack\tppeq\tman\tl-good\tpack-a\tpack-b2\t-\n"
+                      "bad-oracle-conflict\toracle\t-\tl-oconf\t-\t-\ttotal=1\n"
+                      "bad-oracle\toracle\t-\tl-o2\t-\t-\ttotal=3\n";
+    cx_fmt(spec, sizeof spec, "# name\tkind\tmanifest\tledgers\tpack-a\tpack-b\tclaim\n%s%s", good, bad);
+    put("spec.tsv", spec);
+    int rc = tool("", 0);
+    if (rc != 1) printf("DIAG rc=%d out=%.300s\n", rc, out);
+    CK(rc == 1 && final_has("status=INCOMPLETE:") && final_has("sources=16"), "mixed-spec-incomplete-rc1");
+    CK(row_has("good-ppeq", "\t4\t3\t1\t0\t0\t0\t2\t200\t100\t500\t") && row_has("good-ppeq", ma) && row_has("good-ppeq", ida) && row_has("good-ppeq", "\tCOMPLETE"), "clean-ppeq-recomputed-counts-steps-shas");
+    CK(row_has("good-uec", "\t3\t2\t1\t0\t0\t0\t") && row_has("good-uec", mu) && row_has("good-uec", "\tCOMPLETE"), "clean-uec-complete");
+    CK(row_has("good-oracle", "\t3\t2\t1\t0\t0\t0\t") && row_has("good-oracle", "\tCOMPLETE"), "clean-oracle-complete");
+    CK(row_has("good-oracle-rerun", "\t2\t2\t0\t0\t0\t0\t") && row_has("good-oracle-rerun", "\tCOMPLETE"), "oracle-rerun-replaces-unmeasured-and-ignores-repeats");
+    CK(row_has("good-oracle-many-files", "\t3\t2\t1\t0\t0\t0\t") && row_has("good-oracle-many-files", "\tCOMPLETE"), "twenty-ledger-files-none-dropped");
+    CK(final_has("bad-oracle-conflict=dup=1"), "oracle-conflicting-verdicts-rejected");
+    CK(row_has("bad-diff", "\tINCOMPLETE") && final_has("bad-diff=diff=1"), "tampered-row-to-diff-rejected");
+    CK(final_has("bad-unmeasured=unmeasured=1"), "refuse-pre-counts-unmeasured-rejected");
+    CK(final_has("bad-claim=claim-total=4"), "wrong-claim-total-rejected-with-recomputed-value");
+    CK(final_has("bad-pending=pending=1"), "missing-row-is-pending-rejected");
+    CK(final_has("bad-missing-file=missing-file:l-nonexistent"), "missing-ledger-file-rejected");
+    CK(final_has("bad-foreign=foreign=1"), "foreign-manifest-sha-row-rejected");
+    CK(final_has("bad-extra=extra=1"), "row-outside-manifest-rejected");
+    CK(final_has("bad-dup=dup=1"), "repeated-row-rejected");
+    CK(final_has("bad-pack=foreign=4"), "pack-sha-not-the-row-id-rejected");
+    CK(final_has("bad-oracle=pending=1"), "partial-oracle-rejected");
+    /* only the clean sources: COMPLETE, rc 0, receipt file written */
+    cx_fmt(spec, sizeof spec, "%s", "# clean only\n");
+    app(spec, sizeof spec, good);
+    put("spec.tsv", spec);
+    char o[700], ex[800];
+    cx_fmt(o, sizeof o, "%s/receipt.tsv", T);
+    cx_fmt(ex, sizeof ex, "--out %s", o);
+    rc = tool(ex, 0);
+    size_t n = 0;
+    char *f = cx_read(o, &n);
+    CK(rc == 0 && final_has("status=COMPLETE\tsources=5"), "clean-spec-complete-rc0");
+    CK(f && strstr(f, "E2_EVIDENCE_COLS") && strstr(f, "E2_EVIDENCE\tstatus=COMPLETE"), "receipt-file-written");
+    printf("CHECK_E2_EVIDENCE_RECEIPT\tfailed=%d\n", failed);
+    sy_remove_all(T);
+    return failed ? 1 : 0;
+}
