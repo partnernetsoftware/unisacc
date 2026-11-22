@@ -391,16 +391,25 @@ static int norm_owner(const char *raw, char *out, size_t cap) {
     return n > 0;
 }
 static int resolve_owner_raw(int argc, char **argv, char *out, size_t cap, int lower) {
-    const char *raw = 0;
+    const char *raw = 0, *s, *e; size_t n = 0;
     for (int i = 0; i + 1 < argc; i++) {
         if (!strcmp(argv[i], "--owner")) { raw = argv[i + 1]; break; }
     }
     if (!raw || !*raw) raw = getenv("DEVSVC_OWNER");
     if (!raw || !*raw) { if (out && cap > 0) out[0] = 0; return 0; }
     if (lower) return norm_owner(raw, out, cap);
-    if (!okname(raw) || strlen(raw) >= cap) { if (out && cap > 0) out[0] = 0; return 0; }
-    mm_copy(out, cap, raw, strlen(raw) + 1);
-    return 1;
+    s = raw;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if (e <= s || (size_t)(e - s) >= 64 || (size_t)(e - s) >= cap) { if (out && cap > 0) out[0] = 0; return 0; }
+    for (const char *p = s; p < e; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) { if (out && cap > 0) out[0] = 0; return 0; }
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
 }
 static int resolve_owner(int argc, char **argv, char *out, size_t cap) {
     return resolve_owner_raw(argc, argv, out, cap, 1);
@@ -2167,7 +2176,7 @@ static int owner_tok(const char *s, int dash) {
 }
 static const char *auto_owner(void) {
     static char o[64]; const char *e = getenv("DEVSVC_OWNER"), *j = getenv("CLAUDE_JOB_ID"), *t = getenv("TMUX"), *p = getenv("TMUX_PANE");
-    if (e && okname(e)) F(o, sizeof o, "%s", e);
+    if (e && norm_owner(e, o, sizeof o)) return o;
     else if (owner_tok(j, 1)) F(o, sizeof o, "%s", j);
     else if (t && *t && p && p[0] == '%' && owner_tok(p + 1, 0)) F(o, sizeof o, "pane-%s", p + 1);
     else F(o, sizeof o, "auto-%d", sy_pid());
@@ -2341,7 +2350,18 @@ static int freeze_in_domain(const char *root, const char *p) {   /* 路径经 re
     }
     return 0;
 }
-static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或不可读闭锁; 0 放行 */
+static int parse_pos_long(const char *s, size_t len, long *out) {
+    long v = 0;
+    if (!s || len == 0 || len > 18) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    if (v <= 0) return 0;
+    if (out) *out = v;
+    return 1;
+}
+static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
     int rc; const char *s, *e; char nown[64], nhold[64], lp[PW], fzp[PW];
     int has_own = norm_owner(owner, nown, sizeof nown);
     int fz_active = 0;
@@ -2350,7 +2370,8 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         int fx = sy_exists(fzp);
         if (fx != 0) fz_active = 1;
     }
-    /* Direct read of persisted locks.tsv avoids fail-open when daemon is stopped or busy */
+    /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;
+       empty or no active freeze row falls through to query live daemon memory before allowing. */
     if (dir[0] && snprintf(lp, sizeof lp, "%s/locks.tsv", dir) < (int)sizeof lp) {
         int ex = sy_exists(lp);
         if (ex < 0) {
@@ -2363,32 +2384,53 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
                 if (holder && hcap > 0) snprintf(holder, hcap, "locks-unreadable");
                 return 1;
             }
-            long now = sy_wall_s();
-            for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
-                const char *nl = memchr(p, '\n', (size_t)(end - p));
-                size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
-                if (ll > 7 && !strncmp(p, "freeze\t", 7)) {
-                    char rawh[64]; long exp = 0;
-                    const char *os = p + 7, *oe = memchr(os, '\t', ll - 7);
-                    if (oe) {
+            if (bn > 0) {
+                if (b[bn - 1] != '\n') {
+                    free(b);
+                    if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                    return 1;
+                }
+                long now = sy_wall_s();
+                for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
+                    const char *nl = memchr(p, '\n', (size_t)(end - p));
+                    size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+                    if ((ll == 6 && !strncmp(p, "freeze", 6)) || (ll > 6 && !strncmp(p, "freeze\t", 7))) {
+                        char rawh[64]; long exp = 0;
+                        const char *os = (ll > 7) ? p + 7 : 0;
+                        const char *oe = os ? memchr(os, '\t', ll - 7) : 0;
+                        if (!os || !oe || oe == os) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
+                        const char *es = oe + 1;
+                        const char *ee = memchr(es, '\t', (size_t)((p + ll) - es));
+                        size_t el = ee ? (size_t)(ee - es) : (size_t)((p + ll) - es);
+                        if (!parse_pos_long(es, el, &exp)) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
                         size_t ol = (size_t)(oe - os);
                         if (ol >= sizeof rawh) ol = sizeof rawh - 1;
-                        if (ol > 0) mm_copy(rawh, sizeof rawh, os, ol);
+                        mm_copy(rawh, sizeof rawh, os, ol);
                         rawh[ol] = 0;
-                        exp = atol(oe + 1);
+                        if (!norm_owner(rawh, nhold, sizeof nhold)) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
                         if (exp > now) {
-                            if (!norm_owner(rawh, nhold, sizeof nhold)) mm_copy(nhold, sizeof nhold, rawh, ol + 1);
                             if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
                             free(b);
                             if (has_own && !strcmp(nhold, nown)) return 0;
                             return 1;
                         }
                     }
+                    p = nl ? nl + 1 : end;
                 }
-                p = nl ? nl + 1 : end;
             }
             free(b);
-            return 0;
         }
     }
     rc = request(root, "lock-list", 0);
@@ -3925,13 +3967,12 @@ static int cmd_git(const char *root, int argc, char **argv) {
     int has_ci_own = resolve_owner(argc, argv, ci_own, sizeof ci_own);
     const char *froot = cwd ? cwd : root;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--push")) { push = 1; pmode = 0; continue; }
-        if (!strcmp(argv[i], "--cwd") || !strcmp(argv[i], "--owner")) { i++; pmode = 0; continue; }
+        if (!strcmp(argv[i], "--push")) { push = 1; freeze_hit = 1; continue; }
+        if (!strcmp(argv[i], "--cwd") || !strcmp(argv[i], "--owner")) { i++; continue; }
         if (!strcmp(argv[i], "-m") && i + 1 < argc) {
             if (n + 1 >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
             v[n++] = argv[i++];
             v[n++] = msg_with_window_trailer(argv[i], has_ci_own ? ci_own : 0, msg_tr, sizeof msg_tr);
-            pmode = 0;
             continue;
         }
         if (!strcmp(argv[i], "--registered") || !strcmp(argv[i], "--new-tool") || !strcmp(argv[i], "--batch") || !strcmp(argv[i], "--merge-continue")) {
@@ -3942,16 +3983,17 @@ static int cmd_git(const char *root, int argc, char **argv) {
         } else if (!strcmp(argv[i], "--keyed")) {
             pmode = 2;
         } else if (argv[i][0] == '-') {
-            pmode = 0;
+            /* Non-path switches (--derive, --dry-run, --bg, --derive-selected, etc.) do NOT reset pmode */
         } else {
             if ((lf = lock_for(argv[i]))) need = lf;
-            if (pmode == 1) {
-                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
-            } else if (pmode == 2) {
+            if (pmode == 2) {
                 if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
                 pmode = 3;
             } else if (pmode == 3) {
                 pmode = 0;
+            } else {
+                /* Check every non-option positional argument forwarded to commit-own */
+                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
             }
         }
         if (n >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }

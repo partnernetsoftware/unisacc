@@ -215,6 +215,17 @@ int main(int argc, char **argv) {
       mm_copy(h1, sizeof h1, out, 40); h1[40] = 0;
       ck("non-owner-commit-multi-whole-refused", ok2 && mm_same(h0, h1, 40)); }
 
+    /* (7b) CONFIRMED (A): switches (--push/--derive/--dry-run) between --whole paths must NOT reset path mode, and --push checks freeze */
+    { char *a1[] = {"git", "commit", "--whole", "docs/note.txt", "--push", "src/a.txt", "-m", "push mid", 0};
+      char *a2[] = {"git", "commit", "--whole", "docs/note.txt", "--derive", "src/a.txt", "-m", "derive mid", 0};
+      char *a3[] = {"git", "commit", "--whole", "docs/note.txt", "--dry-run", "src/a.txt", "-m", "dry mid", 0};
+      char *a4[] = {"git", "commit", "--whole", "docs/note.txt", "--push", "-m", "push outside", 0};
+      int ok1 = run_dv(repo, "worker1", a1, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok2 = ok1 && run_dv(repo, "worker1", a2, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok3 = ok2 && run_dv(repo, "worker1", a3, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok4 = ok3 && run_dv(repo, "worker1", a4, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("non-owner-commit-switch-between-paths-refused", ok4); }
+
     /* (8) CONFIRMED (4) + --no-ff: other write channels (git add, git merge --no-ff, register, derive --write) refused for non-owner */
     { char *aa[] = {"git", "add", "src/a.txt", 0};
       char *am[] = {"git", "merge", "--no-ff", "side-br", "-m", "blocked merge", 0};
@@ -262,6 +273,27 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && has(out, "X-Unisacc-Window: integ");
       int ok4 = ok3 && run_dv(repo, "integ", al, &rc) && rc == 0 && has(out, "LOCK\tfreeze\towner=integ\t");
       ck("owner-case-insensitive-trailer-and-lock-kept", ok4); }
+
+    /* (11b) CONFIRMED (D): leading/trailing whitespace in DEVSVC_OWNER=" integ " works across f write and git commit */
+    { char *aw[] = {"f", "write", "src/a.txt", "--from", f_old, 0};
+      char *ac[] = {"git", "commit", "-m", "trimmed owner commit", "--whole", "src/a.txt", 0};
+      int ok1 = run_dv(repo, " integ ", aw, &rc) && rc == 0;
+      int ok2 = ok1 && run_dv(repo, " integ ", ac, &rc) && rc == 0;
+      int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && has(out, "X-Unisacc-Window: integ");
+      ck("owner-whitespace-trimmed-all-channels", ok3); }
+
+    /* (11c) CONFIRMED (B): four locks.tsv corruptions while daemon holds freeze all fail closed */
+    { char lp[4500]; char *bak = 0; size_t bn = 0;
+      char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
+      if (cx_fmt(lp, sizeof lp, "%s/locks.tsv", inst)) return 2;
+      bak = cx_read(lp, &bn);
+      int ok = (bak != 0 && bn > 0);
+      ok = ok && !sy_write_file(lp, "freeze\tinteg\n", 13, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-corrupt");
+      ok = ok && !sy_write_file(lp, "freeze\tinteg\tabc\t0\n", 19, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-corrupt");
+      ok = ok && !sy_write_file(lp, "", 0, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ok = ok && !sy_write_file(lp, "freeze\tinteg\t9999999999", 23, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-corrupt");
+      if (bak) { (void)sy_write_file(lp, bak, bn, 0600); free(bak); }
+      ck("locks-tsv-four-corruptions-fail-closed", ok); }
 
     /* (12) worktree shares the same freeze lock: non-owner f write & git commit --cwd refused */
     { char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
@@ -314,9 +346,9 @@ int main(int argc, char **argv) {
       (void)sh_in(repo, lcmd);
       ck("freeze-fail-closed-stopped-and-unreadable", ok5); }
 
-    /* (18) PLAUSIBLE: trailer叠加 real commit-own (tr_strip + tr_window_put) produces exactly one X-Unisacc-Window line */
-    { int ok = sh_in(repo, "git log -n 5 --format='%(trailers)' | grep -c '^X-Unisacc-Window: integ$'") &&
-               (out[0] == '2' && (out[1] == '\n' || out[1] == 0));
+    /* (18) PLAUSIBLE: trailer叠加 real commit-own (tr_strip + tr_window_put) produces exactly one X-Unisacc-Window line per commit */
+    { int ok = sh_in(repo, "git log -n 6 --format='%(trailers)' | grep -c '^X-Unisacc-Window: integ$'") &&
+               (out[0] == '3' && (out[1] == '\n' || out[1] == 0));
       ck("trailer-single-line-with-commit-own", ok); }
 
 done:
