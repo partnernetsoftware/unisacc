@@ -141,6 +141,8 @@ flowchart LR
 
 ### 仍未验证或未关闭
 
+- 会话与记忆被 moltbaby 清理脚本整目录删除(2026-11-23 编排者查明,待所有者裁定清理策略):~/repos/moltbaby/systemd/scripts/system-cleanup.sh 第 147 到 154 行,每小时(system-cleanup.timer)对 ~/.claude/projects/* 超 100M 即整目录 rm -rf,含全部会话转录与 memory/;近 7 天 16 次(日志 journalctl --user -u system-cleanup.service,00:00:12 一行为证)。unisacc 侧不改他车道:已建镜像兜底(硬链接转录加拷贝 memory,见 tools 下镜像工具)并把记分表权威副本进仓;修正补丁 $CLAUDE_JOB_DIR/tmp/system-cleanup.patch 存在两处已知缺陷(会话子目录 mtime 不随深层追加刷新、管道缺 || true 在 pipefail 下会中止后续清理),不可直接应用。入口:所有者裁定后经 moltbaby 车道维护者落。
+
 - 分车道未核项:APE 字节对 ext 改动不变只是推断;14 个链接目标文件是否进隐式运行库前缀;四个 sysx 别名是否有非 use 形式使用者(去别名前必须先查)。入口:plans/reviews/2026-11-20-layer-lanes.md。
 - 缺口 OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL(arm64 -funit 单元 x7 栈在 sp 之下,异步信号可覆盖):build/pkg-gaps.tsv 仍记 OPEN。待核:0.0.82 版本行写有 x7 修复,是否可关。
 
@@ -231,6 +233,14 @@ flowchart LR
 #### 清理留痕
 
 - 归档找回:archive/plans-2026-11g/README.tsv 记原路径与原因,git mv 回去或 git log --follow。清理候选(仓根 .o、tools 疑似无用清单、未逐份审的 plans)只列不动。待核(旧版本工作树 v0.0.67 至 v0.0.70 是否仍在)。
+
+#### pp-equiv 对拍证据包(2026-11-23)
+
+- 身份:`oracle-original.pkg` sha256 `50bf450063e8bd1acc186957c11de23b6a0174dd776e5afce558fc1d553667f8`(2904461 字节),`oracle-patched.pkg` sha256 `4ac1180a9fb9cd204222382947e24e510b4ef4cf5b24c289b08699b5295a4b82`(2904810 字节);0.0.95 重扫修复补丁 sha256 `25ab7a4f9e9ff82841952ae291752a2246c97e38351a12b03265b7ef2a4f19b0` 前后各一包,由 cdx 在私有副本里用 `CXDEV_RELOAD`(nets=3 built=3)实造。
+- 位置:原件在 `/tmp/unisacc-v095-oracle.cNgFT6T6/`(易失),已复制到 `~/.local/share/unisacc/research/v095-rescan-review/` 同名(仓外,不入库)。构造日志 `reload.log`、`rebuild.log`、`inc-sub-reload.log` 在同目录。
+- 用法:`tools/check-pp-equiv.cx` 靠环境变量 `UNISACC_PPEQ_PKG_ORIGINAL` 与 `UNISACC_PPEQ_PKG_PATCHED` 指向两包才跑 0.0.95 对拍;未设置或文件不在时该例打印 UNMEASURED 并具名,不算 PASS。重建办法:包不由 pp-equiv 重建,须 cdx 在 0.0.93 基线的私有副本上重做 `CXDEV_RELOAD`(改前包为未打补丁树,改后包为打补丁树),重建后 sha256 须在本条更新;包身份对不上不得当同一次证据。
+- 全量对拍(5128 项:headers 2415 与 c-tests 136 各 e2/E,加 corners 13 各 e2/E)尚未用这两包跑完,当前只对 corners 13 例 E 模式对拍得 diff=0。
+- 全量对拍结果(2026-11-23,0.0.95 e2 重扫修复,四片串行 --jobs 6 --budget-ms 45000 --side-secs 4):清单 sha256 `1ea9694a22111a7f63c36c44792d9de7aea4eea8706ace9a50d7c4d51224f922`,末行 `PP_EQUIV total=5128 same=5078 refuse_pp=50 diff=0 unmeasured=0 waived=0 pending=0 COMPLETE=yes`;分层 headers e2 与 E 各 SAME 2415,c-tests 各 SAME 116 REFUSE_PP 20,corners 各 SAME 8 REFUSE_PP 5,与 cdx 对得上。证据 ledger 在 `~/.local/share/unisacc/research/v095-rescan-review/pp-equiv-full/`(不入仓);复跑 `sh ./unisacc.com tools/pp-equiv.cx -- run --ape ./unisacc.com --models-a oracle-original.pkg --models-b oracle-patched.pkg --manifest pp-equiv-full/full.manifest --ledger 新目录 --jobs 6 --budget-ms 45000` 重复到 COMPLETE=yes;清单重建 `manifest --out FILE` 须同 sha,依赖 include/、tests/*.c、tests/pp-equiv-corners 未变。`-o` 模式不在此清单,由 csr 复核(1154 项,账本 o-replay.tsv)。
 
 ## 编排稳定约定与近两版发布事实(原"编排交接 2026-11-21 21:10")
 
