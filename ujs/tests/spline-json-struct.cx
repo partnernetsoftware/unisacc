@@ -1,0 +1,92 @@
+#pragma unisa use wasm_test_cache
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define FIXTURE "ujs/practice/uxe/test/spline-linked-"
+
+static int compile(char **args,const char *phase,int seconds) {
+    char *out=0;
+    size_t bytes=0;
+    const long start=sy_now_ms();
+    const int rc=cx_runv_timeout(args,seconds,&out,&bytes);
+    printf("SPLINE_JSON %s ms=%ld rc=%d\n",phase,sy_now_ms()-start,rc);
+    if(rc && out) printf("%.*s",(int)bytes,out);
+    mm_free(out);
+    return rc;
+}
+
+static int cached_base(const char *wasm,int prepare,int check) {
+    const char *sources[]={FIXTURE "abi.ujs",BASE "f64-math.ujs",BASE "views.ujs",BASE "helper-buffers.ujs",
+        BASE "record-copy.ujs",BASE "loaderutils.ujs",BASE "json-read.ujs",BASE "json-string-decode.ujs",
+        BASE "json-bytes.ujs",BASE "curve-hermite.ujs",BASE "splinecurve.ujs",BASE "catmullromcurve3.ujs",
+        BASE "spline-json.ujs",FIXTURE "base.ujs",0};
+    const char *cache=sy_env("UXE_SPLINE_JSON_CACHE");
+    if(!cache || !cache[0]) {
+        printf("SPLINE_JSON cache=missing env=UXE_SPLINE_JSON_CACHE 基座缓存缺失：先运行准备步骤 --prepare\n");
+        return 1;
+    }
+    char record[640],key[65],sha[65];
+    if(wasm_test_cache_key(sources,key)) return 1;
+    int len=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(len<0 || len>=(int)sizeof record) return 2;
+    int rc=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(!rc && !check) {
+        printf("SPLINE_JSON cache=hit key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(rc==-ENOENT && (!prepare || check)) {
+        printf("SPLINE_JSON cache=missing key=%s 基座缓存缺失：先运行准备步骤 --prepare\n",key);
+        return 1;
+    }
+    if(rc && rc!=-ENOENT) return 1;
+    char *args[32]={"./ujs/ujs2wasm.com"};
+    int n=0;
+    while(sources[n]) { args[n+1]=(char *)sources[n]; n++; }
+    args[n+1]="-o";
+    args[n+2]=(char *)wasm;
+    if(compile(args,"base_prepare",50)) return 1;
+    return check?wasm_test_cache_verify(wasm,sha):wasm_test_cache_write(cache,record,key,wasm);
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc>=2 && tx_eqz(argv[1],"--prepare");
+    const int check=prepare && argc==3 && tx_eqz(argv[2],"--check");
+    const int cat=argc>=2 && tx_eqz(argv[1],"--catmull");
+    const int spline=argc>=2 && tx_eqz(argv[1],"--spline");
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(!(prepare && (argc==2 || check)) && !((cat || spline) && (argc==2 || mutate))) return 2;
+    char dir[256],base[320],probe[320],page[320],url[360];
+    if(sy_mkdtemp("/tmp","uxe-spline-json-",dir,sizeof dir)) return 2;
+    tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
+    int failed=cached_base(base,prepare,check);
+    if(!failed && !prepare) {
+        tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
+        tx_snprintf(page,sizeof page,"%s/probe.html",dir);
+        tx_snprintf(url,sizeof url,"file://%s?%s%s",page,cat?"cat":"",mutate?"&mutate":"");
+        char *args[]={"./ujs/ujs2wasm.com",FIXTURE "probe.ujs","-o",probe,0};
+        double actual[3],ref[3];
+        failed=compile(args,"probe",6) || sy_copy(FIXTURE "wasm.html",page,0600) ||
+            r160_wait_ref(cat?"catmull-spline-json":"spline-curve-json",ref,3,dir) ||
+            r160_wait_read(url,"#wasm-cases",actual,3,dir);
+        const double catGold[]={6,16,26};
+        const double splineGold[]={1,5,200};
+        const double *expected=cat?catGold:splineGold;
+        if(!failed) for(int i=0;i<3;i++) {
+            if(!g_math_near(actual[i],expected[i],1e-9) || !g_math_near(ref[i],expected[i],1e-9)) {
+                printf("SPLINE_JSON case=%d actual=%g r160=%g gold=%g\n",i,actual[i],ref[i],expected[i]);
+                failed++;
+            }
+        }
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_STRUCT Spline JSON linked prepare=%d cases=%d failed=%d\n",prepare,prepare?0:3,failed);
+    return failed!=0;
+}
