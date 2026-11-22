@@ -2,6 +2,8 @@
  *
  *   sh ./unisacc.com tools/merge-version.cx -- preview --branch REF [--base main] [--repo DIR] [--rules FILE] [--work DIR]
  *   sh ./unisacc.com tools/merge-version.cx -- gate NAME --branch REF [--repo DIR] [--work DIR]    NAME: traps | derive-write | derive-check | ratchets | tests
+ *       gate ratchets [--shard K/N | --shards N]: one slice of the ratchets per call (--shard, each under 55 s), or all N slices
+ *       one after the other (--shards, each bounded 55 s) with a total line `MERGE_GATE ratchets-total ok=A fail=B shards=N`
  *   sh ./unisacc.com tools/merge-version.cx -- rules [--rules FILE] [--branch REF]                   the rows that apply to REF
  *
  * preview: merge-base BASE..BRANCH, `git read-tree -i -m --aggressive BASE-MB BASE BRANCH` into a private index
@@ -425,8 +427,30 @@ static int cmd_gate(int argc, char **argv) {
         }
     } else if (!strcmp(name, "ratchets")) {
         ensure_checkout(idx, tdir, sizeof tdir);
-        char *av[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
-        t = run_in(tdir, "ratchets", 55, av, &r);
+        const char *one = opt(argc, argv, "--shard", 0), *all = opt(argc, argv, "--shards", 0);
+        if (all) {
+            int nsh = atoi(all), sok = 0, sfail = 0, unm = 0;
+            mv_need(nsh >= 1 && nsh <= 18, "--shards N needs 1 <= N <= 18");
+            for (int k = 1; k <= nsh; k++) {
+                char kn[32];
+                mv_need(!cx_fmt(kn, sizeof kn, "%d/%d", k, nsh), "shard");
+                char *avs[] = {"sh", "./unisacc.com", "tools/ratchets.cx", "--", "--shard", kn, 0};
+                pr_result rs;
+                int ts = run_in(tdir, "ratchets", 55, avs, &rs);
+                if (ts != 0) { printf("MERGE_GATE\tratchets\tUNMEASURED\tshard=%s %s\n", kn, rs.why[0] ? rs.why : "did not finish"); unm++; continue; }
+                const char *rl = rs.out ? strstr(rs.out, "RATCHETS\tok=") : 0;
+                int a = 0, b = 0;
+                const char *fp = rl ? strstr(rl, "\tfail=") : 0;
+                if (rl && fp) { a = atoi(rl + 12); b = atoi(fp + 6); sok += a; sfail += b; } else unm++;
+                printf("MERGE_GATE\tratchets\tshard=%s\tok=%d\tfail=%d\n", kn, a, b);
+                pr_free(&rs);
+            }
+            printf("MERGE_GATE\tratchets-total\t%s\tok=%d\tfail=%d\tunmeasured=%d\tshards=%d\n", (sfail == 0 && unm == 0) ? "OK" : sfail ? "FAIL" : "UNMEASURED", sok, sfail, unm, nsh);
+            return (sfail == 0 && unm == 0) ? 0 : 1;
+        }
+        char *av1[] = {"sh", "./unisacc.com", "tools/ratchets.cx", "--", "--shard", (char *)one, 0};
+        char *av0[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
+        t = run_in(tdir, "ratchets", 55, one ? av1 : av0, &r);
         rc = gate_result("ratchets", &r, t, "fail=0");
     } else if (!strcmp(name, "tests")) {
         ensure_checkout(idx, tdir, sizeof tdir);
