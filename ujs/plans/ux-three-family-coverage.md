@@ -15,9 +15,15 @@
 | Mesh | C6 门 mesh-object-json-struct.cx 核对根矩阵、可见性、两个 UUID 引用、拒绝未知几何及克隆后的资源共享。释放原节点后克隆仍有效。材质引用调换转红。 | 叶节点记录保留已有几何和材质，由调用方登记 UUID。独立打包资源、多材质数组和子树 JSON 待补。r160 Mesh 使用脱离父节点及垃圾回收，UXE 另有 Mesh_dispose 释放节点槽。 |
 | BufferGeometry | geometry-json-load-struct.cx 经 C6 读写连续属性、索引、组和球界。修改解析字段能改变独立金值和 r160 对照结果。 | 参数化类专有字段、共享视图身份、任意元数据和变形属性的通用链路待补。 |
 
-## 本批未复现通过的既有门
+## GPU 模板操作主线复验
 
-`gpu-stencil-ops-pixel.cx` 在 ujs 尖端两次到达浏览器读回并失败，输出 `browser_read_failed`、`stencil_values=0`。本批没有改动该门、模板实现、GPU 桥或模板常量清单，也没有新增依赖该门的清单项。此门不作为本批通过证据。主线对照未取得同编译器下的有效读回，成因待定位。GPU 四片并集及其原有断言另行通过。
+从 main `4e6603a` 的 Git 归档新建副本，用 ujs 工作树的 `ujs/ujs.com`，SHA-256 为 `1b9f49c07c103a6854d3748dd6d3e0f196987cacdefe407ff590859128f20f64`。单路执行 `cx -I ujs/tests ujs/tests/gpu-stencil-ops-pixel.cx --`，退出码为 0。
+
+```text
+GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+```
+
+先前浏览器读回失败的成因仍未知。本次主线复验覆盖全部 24 组模板值。
 
 ## A 栏 35 项分组
 
