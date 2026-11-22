@@ -133,25 +133,63 @@ static int refuse(const char *mf, int line, const char *why) { sy_printf("REFUSE
 
 static int start(Row *r, const char *argv_s);
 static int pump(Row *r);
+static int native_generator(Row *r);
+static const char *g_mf = "exec/facts/derive.tsv";
+/* A native generator row (chain-phases-gen, batch-packages-gen) needs its compiled binary before it can run; with no
+   prebuilt kit that is a cold full compile of tens of seconds.  Compiling it inside start() blocked the whole scheduling
+   loop, so each distinct generator is prepared by a child (this tool's own --prepare-native, bounded, running beside the
+   pool) and rows that need it are held back until it ends.  The child only warms the cache: start() still prepares the
+   generator itself afterwards (a cache hit), so a failed or timed-out child changes nothing about the verdicts. */
+typedef struct { const char *gen; int pid, fd, done; } Prep;
+static int prep_pending(Prep *pp, int np, Row *r) {
+    if (!native_generator(r)) return 0;
+    for (int i = 0; i < np; i++) if (!pp[i].done && tx_eqz(pp[i].gen, r->gen)) return 1;
+    return 0;
+}
+static void prep_spawn(Prep *pp, int *np, Row *r) {
+    char *v[16]; int c = 0;
+    for (int i = 0; i < *np; i++) if (tx_eqz(pp[i].gen, r->gen)) return;
+    v[c++] = "./tools/bound"; v[c++] = "58"; v[c++] = "sh"; v[c++] = "./unisacc.com"; v[c++] = "tools/derive.cx"; v[c++] = "--";
+    v[c++] = "--check"; v[c++] = "--prepare-native"; v[c++] = "--only"; v[c++] = r->name; v[c++] = "--manifest"; v[c++] = (char *)g_mf; v[c] = 0;
+    pp[*np].gen = r->gen; pp[*np].done = 0; pp[*np].fd = -1;
+    pp[*np].pid = sy_spawn_pipe(v, 0, 0, &pp[*np].fd, 0);
+    if (pp[*np].pid < 0) pp[*np].done = 1;
+    (*np)++;
+}
+static void prep_pump(Prep *p) {
+    char junk[512]; long g = sy_read_once(p->fd, junk, sizeof junk);
+    if (g > 0) return;
+    { int ex = 0, code = 0, sig = 0; sy_close(p->fd); sy_wait_status(p->pid, 0, &ex, &code, &sig); p->done = 1; }
+}
 /* Selected rows, started longest weight first, at most 4 alive at once; a finished row frees its slot at once. */
 static void run_pool(void) {
-    Row *q[MAXR], *live[4]; int nq = 0, nl = 0, i, j;
+    Row *q[MAXR], *live[4]; Prep pp[4]; int taken[MAXR]; int nq = 0, nl = 0, np = 0, i, j, started = 0;
     for (i = 0; i < nr; i++) if (rows[ord[i]].sel) q[nq++] = &rows[ord[i]];
     for (i = 1; i < nq; i++) {   /* stable: equal weights keep manifest order */
         Row *k = q[i];
         for (j = i - 1; j >= 0 && q[j]->weight < k->weight; j--) q[j + 1] = q[j];
         q[j + 1] = k;
     }
-    i = 0;
-    while (i < nq || nl > 0) {
-        while (nl < 4 && i < nq) { Row *r = q[i++]; if (!start(r, r->chk)) live[nl++] = r; }
-        if (nl == 0) continue;
+    for (i = 0; i < nq; i++) { taken[i] = 0; if (native_generator(q[i]) && np < 4) prep_spawn(pp, &np, q[i]); }
+    for (;;) {
+        int pl = 0;
+        for (i = 0; i < nq && nl < 4; i++) {
+            if (taken[i] || prep_pending(pp, np, q[i])) continue;
+            taken[i] = 1; started++;
+            if (!start(q[i], q[i]->chk)) live[nl++] = q[i];
+        }
+        for (i = 0; i < np; i++) if (!pp[i].done) pl++;
+        if (nl == 0 && pl == 0 && started == nq) break;
         {
-            sy_pollfd_t pf[4]; int w;
-            for (w = 0; w < nl; w++) { pf[w].fd = live[w]->fd; pf[w].events = 1; pf[w].revents = 0; }
-            if (sy_poll(pf, nl, 1000) < 0) { for (w = 0; w < nl; w++) pf[w].revents = 1; }
-            for (w = nl - 1; w >= 0; w--) {
-                if (pf[w].revents && pump(live[w])) { live[w] = live[nl - 1]; nl--; }
+            sy_pollfd_t pf[8]; int w, map[8], n = 0;
+            for (w = 0; w < nl; w++) { pf[n].fd = live[w]->fd; pf[n].events = 1; pf[n].revents = 0; map[n++] = w; }
+            for (w = 0; w < np; w++) if (!pp[w].done) { pf[n].fd = pp[w].fd; pf[n].events = 1; pf[n].revents = 0; map[n++] = 100 + w; }
+            if (n == 0) continue;
+            if (sy_poll(pf, n, 1000) < 0) { for (w = 0; w < n; w++) pf[w].revents = 1; }
+            for (w = n - 1; w >= 0; w--) {
+                if (!pf[w].revents) continue;
+                if (map[w] >= 100) prep_pump(&pp[map[w] - 100]);
+                else if (pump(live[map[w]])) { live[map[w]] = live[nl - 1]; nl--; }
             }
         }
     }
@@ -669,6 +707,7 @@ int main(int argc, char **argv) {
            so the old order barrier is gone and one 4-way pool runs every selected row, longest declared weight
            first (exec/facts/derive-weights.tsv; a static hint, never a previous run's result).  Rows are
            reported in manifest order afterwards, so the output is unchanged. */
+        g_mf = mf;
         run_pool();
         for (a = 0; a < nr; a++) {
             Row *r = &rows[ord[a]];
