@@ -5,7 +5,9 @@
  * Builds SRC/MIRROR under $TMPDIR. Asserts hardlink, memory copy, no symlink mirror,
  * wipe+short-tail (inode != mirror) restore old+tail, longer-src restore whole,
  * prune spares src/gen-trap canary, mutant-skip-marker, mutant-prune-src red-under-mutation.
- * Ends with CHECK_SESSION_MIRROR. */
+ * Ends with CHECK_SESSION_MIRROR. Uses cxlib.ckassert (ck) and cxlib.ckrun (ckk_sh_t/ckk_has). */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -14,31 +16,18 @@
 #pragma unisa use mem.heap
 
 static char out[1 << 16];
-static int pass_n, fail_n;
-
-static int sh(const char *cmd) {
-    char *a[] = {"timeout", "55", "sh", "-c", (char *)cmd, 0};
-    return sy_run(a, out, sizeof out, 0);
-}
-static void ok(const char *name, int cond) {
-    printf("%s\t%s\n", cond ? "PASS" : "FAIL", name);
-    if (cond) pass_n++; else fail_n++;
-}
-static int has(const char *s) {
-    return tx_find(out, tx_len(out, sizeof out), s, tx_len(s, 200)) >= 0;
-}
 
 int main(void) {
     char root[1024], cwd[1024], cmd[4096], src[1100], mir[1100], dest[1100];
     sy_stat_t a, b; int rc;
     const char *td = sy_env("TMPDIR");
     if (!td || !td[0]) td = "/tmp";
-    if (sh("pwd") != 0) return 2;
+    if (ckk_sh_t("check-session-mirror", "pwd", out, (int)sizeof out, 55) != 0) return 2;
     cx_fmt(cwd, sizeof cwd, "%s", out);
     { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
 
     cx_fmt(cmd, sizeof cmd, "mktemp -d %s/session-mirror-check-XXXXXX", td);
-    if (sh(cmd) != 0) return 2;
+    if (ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) != 0) return 2;
     cx_fmt(root, sizeof root, "%s", out);
     { long n = tx_len(root, sizeof root); while (n > 0 && root[n - 1] == '\n') root[--n] = 0; }
     if (cx_fmt(src, sizeof src, "%s/src", root) || cx_fmt(mir, sizeof mir, "%s/mir", root) ||
@@ -54,90 +43,90 @@ int main(void) {
         "printf '1\\n' > '%s/gen-trap/.gen-stamp'; "
         "ln -s chat.jsonl '%s/link-chat.jsonl'",
         src, src, src, src, src, src, src, src, src);
-    ok("fixture-seed", sh(cmd) == 0);
+    ck(ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) == 0, "fixture-seed");
 
     /* first run -> reset gen=1 */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("run-reset", rc == 0 && has("MIRROR_RESET") && has("gen=1"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "MIRROR_RESET") && ckk_has(out, (int)sizeof out, "gen=1"), "run-reset");
 
     /* hardlink same inode */
     cx_fmt(cmd, sizeof cmd, "%s/chat.jsonl", src);
-    ok("stat-src-chat", sy_lstat(cmd, &a) == 0);
+    ck(sy_lstat(cmd, &a) == 0, "stat-src-chat");
     cx_fmt(cmd, sizeof cmd, "%s/gen-1/chat.jsonl", mir);
-    ok("stat-mir-chat", sy_lstat(cmd, &b) == 0);
-    ok("hardlink-inode", a.dev == b.dev && a.ino == b.ino);
+    ck(sy_lstat(cmd, &b) == 0, "stat-mir-chat");
+    ck(a.dev == b.dev && a.ino == b.ino, "hardlink-inode");
     {
         char lp[1200]; sy_stat_t ls;
         cx_fmt(lp, sizeof lp, "%s/gen-1/link-chat.jsonl", mir);
-        ok("symlink-not-mirrored", sy_lstat(lp, &ls) != 0);
+        ck(sy_lstat(lp, &ls) != 0, "symlink-not-mirrored");
     }
 
     /* memory is a distinct inode (copy) */
     cx_fmt(cmd, sizeof cmd, "%s/memory/notes.txt", src);
-    ok("stat-src-mem", sy_lstat(cmd, &a) == 0);
+    ck(sy_lstat(cmd, &a) == 0, "stat-src-mem");
     cx_fmt(cmd, sizeof cmd, "%s/gen-1/memory/notes.txt", mir);
-    ok("stat-mir-mem", sy_lstat(cmd, &b) == 0);
-    ok("memory-copied", !(a.dev == b.dev && a.ino == b.ino) && a.size == b.size);
+    ck(sy_lstat(cmd, &b) == 0, "stat-mir-mem");
+    ck(!(a.dev == b.dev && a.ino == b.ino) && a.size == b.size, "memory-copied");
 
     /* idempotent second run */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("run-idempotent", rc == 0 && !has("MIRROR_RESET") && has("reset=0"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && !ckk_has(out, (int)sizeof out, "MIRROR_RESET") && ckk_has(out, (int)sizeof out, "reset=0"), "run-idempotent");
 
     /* wipe SRC, rebuild with short tail only */
     cx_fmt(cmd, sizeof cmd,
         "set -e; rm -rf '%s'; mkdir -p '%s'; printf 'T\\n' > '%s/chat.jsonl'",
         src, src, src);
-    ok("wipe-rebuild-tail", sh(cmd) == 0);
+    ck(ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) == 0, "wipe-rebuild-tail");
     {
         char sp[1200], mp[1200]; sy_stat_t ss, ms;
         cx_fmt(sp, sizeof sp, "%s/chat.jsonl", src);
         cx_fmt(mp, sizeof mp, "%s/gen-1/chat.jsonl", mir);
-        ok("wipe-inode-differs", sy_lstat(sp, &ss) == 0 && sy_lstat(mp, &ms) == 0 &&
-           !(ss.dev == ms.dev && ss.ino == ms.ino) && ss.size < ms.size);
+        ck(sy_lstat(sp, &ss) == 0 && sy_lstat(mp, &ms) == 0 &&
+           !(ss.dev == ms.dev && ss.ino == ms.ino) && ss.size < ms.size, "wipe-inode-differs");
     }
 
     /* mutant: skip marker detect -> no MIRROR_RESET (wrong) */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' --mutant-skip-marker run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("mutant-skip-marker-no-reset", rc == 0 && !has("MIRROR_RESET"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && !ckk_has(out, (int)sizeof out, "MIRROR_RESET"), "mutant-skip-marker-no-reset");
 
     /* real run after wipe -> must RESET to gen=2 */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("wipe-detect-reset", rc == 0 && has("MIRROR_RESET") && has("gen=2"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "MIRROR_RESET") && ckk_has(out, (int)sizeof out, "gen=2"), "wipe-detect-reset");
 
     /* restore merge: mirror longer than short SRC -> old||tail */
     cx_fmt(cmd, sizeof cmd,
         "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'OLDSEGMENT\\n' > '%s/gen-2/chat.jsonl'; "
         "printf 'TAIL\\n' > '%s/chat.jsonl'",
         mir, mir, src);
-    ok("prep-restore", sh(cmd) == 0);
+    ck(ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) == 0, "prep-restore");
 
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' restore '%s'",
         cwd, cwd, src, mir, dest);
-    rc = sh(cmd);
-    ok("restore-rc", rc == 0 && has("MIRROR_RESTORE"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "MIRROR_RESTORE"), "restore-rc");
     {
         unsigned char *b; int64_t n;
         char path[1200];
         cx_fmt(path, sizeof path, "%s/chat.jsonl", dest);
-        ok("restore-read", sy_read_file(path, &b, &n, 4096) >= 0 && b);
+        ck(sy_read_file(path, &b, &n, 4096) >= 0 && b, "restore-read");
         if (b) {
-            ok("restore-old-plus-tail", n == 16 && b[0] == 'O' && b[10] == '\n' && b[11] == 'T');
+            ck(n == 16 && b[0] == 'O' && b[10] == '\n' && b[11] == 'T', "restore-old-plus-tail");
             /* OLDSEGMENT\n (11) + TAIL\n (5) = 16 */
             mm_free(b);
-        } else ok("restore-old-plus-tail", 0);
+        } else ck(0, "restore-old-plus-tail");
     }
 
     /* reverse: SRC longer than mirror -> restore takes SRC whole */
@@ -148,18 +137,18 @@ int main(void) {
             "set -e; rm -f '%s/gen-2/chat.jsonl'; printf 'SHORT\\n' > '%s/gen-2/chat.jsonl'; "
             "printf 'LONGER_SOURCE_BODY\\n' > '%s/chat.jsonl'",
             mir, mir, src);
-        ok("prep-longer-src", sh(cmd) == 0);
+        ck(ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) == 0, "prep-longer-src");
         cx_fmt(cmd, sizeof cmd,
             "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' restore '%s'",
             cwd, cwd, src, mir, dest2);
-        rc = sh(cmd);
-        ok("restore-longer-rc", rc == 0 && has("MIRROR_RESTORE"));
+        rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "MIRROR_RESTORE"), "restore-longer-rc");
         cx_fmt(path, sizeof path, "%s/chat.jsonl", dest2);
-        ok("restore-longer-read", sy_read_file(path, &b, &n, 4096) >= 0 && b);
+        ck(sy_read_file(path, &b, &n, 4096) >= 0 && b, "restore-longer-read");
         if (b) {
-            ok("restore-longer-whole-src", n == 19 && b[0] == 'L');
+            ck(n == 19 && b[0] == 'L', "restore-longer-whole-src");
             mm_free(b);
-        } else ok("restore-longer-whole-src", 0);
+        } else ck(0, "restore-longer-whole-src");
     }
 
     /* re-seed SRC gen-trap after wipe; normal prune must spare canary */
@@ -167,38 +156,42 @@ int main(void) {
         "set -e; mkdir -p '%s/gen-trap'; printf 'CANARY\\n' > '%s/gen-trap/canary.txt'; "
         "printf '1\\n' > '%s/gen-trap/.gen-stamp'",
         src, src, src);
-    ok("reseed-gen-trap", sh(cmd) == 0);
+    ck(ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55) == 0, "reseed-gen-trap");
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("run-after-trap", rc == 0);
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0, "run-after-trap");
     {
         char can[1200];
         cx_fmt(can, sizeof can, "%s/gen-trap/canary.txt", src);
-        ok("prune-spares-src-canary", sy_exists(can) == 1);
+        ck(sy_exists(can) == 1, "prune-spares-src-canary");
     }
 
     /* mutant prune-src deletes trap; prune-spares goes red if mutant is default */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' --mutant-prune-src run",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
     {
         char can[1200];
         cx_fmt(can, sizeof can, "%s/gen-trap/canary.txt", src);
-        ok("mutant-prune-src-deletes-trap", rc == 0 && sy_exists(can) != 1);
+        ck(rc == 0 && sy_exists(can) != 1, "mutant-prune-src-deletes-trap");
     }
 
     /* status */
     cx_fmt(cmd, sizeof cmd,
         "sh '%s/unisacc.com' '%s/tools/session-mirror.cx' -- --src '%s' --mirror '%s' status",
         cwd, cwd, src, mir);
-    rc = sh(cmd);
-    ok("status-line", rc == 0 && has("MIRROR_STATUS"));
+    rc = ckk_sh_t("check-session-mirror", cmd, out, (int)sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "MIRROR_STATUS"), "status-line");
 
     sy_remove_all(root);
-    printf("SESSION_MIRROR_SUMMARY\tfailed=%d\tpassed=%d\n", fail_n, pass_n);
-    if (!fail_n) printf("CHECK_SESSION_MIRROR\n");
-    return fail_n ? 1 : 0;
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("SESSION_MIRROR_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_SESSION_MIRROR\n");
+        return failed ? 1 : 0;
+    }
 }
