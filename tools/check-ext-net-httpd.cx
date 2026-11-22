@@ -1,0 +1,335 @@
+/* Checks ext/net/httpd.cx (Slice 2: config, incremental header parser, smuggling protection,
+ * request accessors, and 3 behavioral mutations).
+ *   sh ./unisacc.com tools/check-ext-net-httpd.cx [-- --mut] */
+#pragma unisa use net.httpd
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.muthelp
+
+static int nok, nfail;
+
+static void ck(int c, const char *name) {
+    printf("%s\thttpd.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\thttpd.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+
+static void cks(const char *got, const char *want, const char *name) {
+    int ok = got && want && tx_eqz(got, want);
+    if (!ok) printf("NOTE\thttpd.%s\tgot=\"%s\"\twant=\"%s\"\n", name, got ? got : "(null)", want ? want : "(null)");
+    ck(ok, name);
+}
+
+static long fake_clock(void) { return 123456L; }
+
+static void test_config(void) {
+    hs_config_t cfg;
+    hs_config_init(&cfg);
+    cks(cfg.bind_addr, "127.0.0.1", "cfg-bind");
+    ckv(cfg.port, 0, "cfg-port");
+    ckv(cfg.reuse_port, 1, "cfg-reuseport");
+    ckv(cfg.backlog, 128, "cfg-backlog");
+    ckv(cfg.max_children, 63, "cfg-max-children");
+    ckv(cfg.max_header_bytes, 65536, "cfg-max-hdr");
+    ckv(cfg.max_body_bytes, 16777216, "cfg-max-body");
+    ckv(cfg.max_total_body_bytes, 67108864, "cfg-max-total-body");
+    ckv(cfg.header_timeout_ms, 10000, "cfg-hdr-timeout");
+    ckv(cfg.body_read_timeout_ms, 30000, "cfg-body-timeout");
+    ckv(cfg.write_timeout_ms, 30000, "cfg-write-timeout");
+    ckv(cfg.chunk_write_timeout_ms, 5000, "cfg-chunk-write-timeout");
+    ckv(cfg.idle_timeout_ms, 255000, "cfg-idle-timeout-255s");
+    ckv(cfg.allow_non_loopback, 0, "cfg-allow-non-loopback");
+    ck(cfg.now_ms_fn == 0, "cfg-now-ms-null");
+    cfg.now_ms_fn = fake_clock;
+    ckv(cfg.now_ms_fn(), 123456L, "cfg-now-ms-hook");
+}
+
+static void test_framing_and_view(void) {
+    hs_request r;
+    long hend = 0;
+    char vbuf[128];
+    const char *s1 = "GET /v1/messages?beta=true HTTP/1.1\r\nHost: 127.0.0.1:18900\r\nX-Api-Key: sk-test-1\r\n\r\nTAIL";
+    const char *s_part1 = "GET /ok HTTP/1.1\r\nHost: a\r\n\r";
+    const char *s_part2 = "GET /ok HTTP/1.1\r\nHost: a\r\n\r\n";
+    const char *s_lf = "GET /lf HTTP/1.0\nConnection: keep-alive\n\n";
+    const char *s_opt = "OPTIONS * HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *s_nul = "GET /a HTTP/1.1\r\nHost: a\r\n\r\n";
+    char nulbuf[32];
+
+    hs_req_init(&r);
+    /* incomplete framing + trailing \r split boundary */
+    ckv(hs_parse_request(&r, s_part1, (long)strlen(s_part1), 4096, &hend), HS_PARSE_NEED_MORE, "frame-split-cr-need-more");
+    ckv(hs_parse_request(&r, s_part2, (long)strlen(s_part2), 4096, &hend), HS_PARSE_OK, "frame-split-complete-ok");
+    cks(hs_req_path(&r), "/ok", "frame-split-path");
+
+    /* full HTTP/1.1 request with query, header lookup, pipeline tail */
+    ckv(hs_parse_request(&r, s1, (long)strlen(s1), 4096, &hend), HS_PARSE_OK, "req1-ok");
+    ckv(hend, (long)strlen(s1) - 4, "req1-hdr-end-before-tail");
+    cks(hs_req_method(&r), "GET", "req1-method");
+    cks(hs_req_target(&r), "/v1/messages?beta=true", "req1-target");
+    cks(hs_req_path(&r), "/v1/messages", "req1-path");
+    cks(hs_req_query(&r), "?beta=true", "req1-query");
+    ckv(hs_req_version(&r), 11, "req1-ver-11");
+    ckv(hs_req_content_length(&r), -1, "req1-cl-none");
+    ckv(hs_req_is_chunked(&r), 0, "req1-not-chunked");
+    ckv(hs_req_keep_alive(&r), 1, "req1-keepalive-11");
+    ckv(hs_req_expect_continue(&r), 0, "req1-no-expect");
+    ckv(hs_req_header(&r, "x-api-key", vbuf, sizeof vbuf), 9, "req1-hdr-ci-len");
+    cks(vbuf, "sk-test-1", "req1-hdr-ci-val");
+    ckv(hs_req_header(&r, "X-Missing", vbuf, sizeof vbuf), -ENOENT, "req1-hdr-missing");
+    ckv(hs_req_header(&r, "x-api-key", vbuf, 5), -ERANGE, "req1-hdr-erange");
+
+    /* bare \n\n + HTTP/1.0 + Connection: keep-alive + no Host allowed in 1.0 */
+    ckv(hs_parse_request(&r, s_lf, (long)strlen(s_lf), 4096, &hend), HS_PARSE_OK, "lf-10-ok");
+    ckv(hs_req_version(&r), 10, "lf-10-ver");
+    ckv(hs_req_keep_alive(&r), 1, "lf-10-keepalive");
+
+    /* OPTIONS * */
+    ckv(hs_parse_request(&r, s_opt, (long)strlen(s_opt), 4096, &hend), HS_PARSE_OK, "options-star-ok");
+    cks(hs_req_target(&r), "*", "options-star-target");
+    cks(hs_req_path(&r), "*", "options-star-path");
+    cks(hs_req_query(&r), "", "options-star-query");
+
+    /* embedded NUL and bare CR rejected 400 */
+    mm_copy(nulbuf, sizeof nulbuf, s_nul, (long)strlen(s_nul) + 1);
+    nulbuf[16] = 0;
+    ckv(hs_parse_request(&r, nulbuf, (long)strlen(s_nul), 4096, &hend), -EINVAL, "nul-in-hdr-rc");
+    ckv(hs_req_err_status(&r), 400, "nul-in-hdr-400");
+    {
+        const char *s_barecr = "GET / HTTP/1.1\rHost: a\r\n\r\n";
+        ckv(hs_parse_request(&r, s_barecr, (long)strlen(s_barecr), 4096, &hend), -EINVAL, "bare-cr-rc");
+        ckv(hs_req_err_status(&r), 400, "bare-cr-400");
+    }
+
+    /* max_header_bytes 431 and >128 headers 431 */
+    ckv(hs_parse_request(&r, s_part1, (long)strlen(s_part1), 16, &hend), -ENOSPC, "max-hdr-bytes-rc");
+    ckv(hs_req_err_status(&r), 431, "max-hdr-bytes-431");
+    {
+        char big[4096];
+        long off = 0, k;
+        const char *pre = "GET / HTTP/1.1\r\nHost: a\r\n";
+        mm_copy(big, sizeof big, pre, (long)strlen(pre));
+        off = (long)strlen(pre);
+        for (k = 0; k < 129; k++) {
+            const char *h = "X-H: 1\r\n";
+            mm_copy(big + off, (long)sizeof big - off, h, 8);
+            off += 8;
+        }
+        big[off++] = '\r'; big[off++] = '\n'; big[off] = 0;
+        ckv(hs_parse_request(&r, big, off, 65536, &hend), -ENOSPC, "too-many-hdrs-rc");
+        ckv(hs_req_err_status(&r), 431, "too-many-hdrs-431");
+    }
+    hs_req_free(&r);
+}
+
+static void test_request_line_and_smuggling(void) {
+    hs_request r;
+    long hend = 0;
+    const char *s;
+
+    hs_req_init(&r);
+
+    /* bad targets / methods / versions */
+    s = "GET * HTTP/1.1\r\nHost: a\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "get-star-rc");
+    ckv(hs_req_err_status(&r), 400, "get-star-400");
+
+    s = "GET http://example.com/a HTTP/1.1\r\nHost: a\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "abs-uri-rc");
+    ckv(hs_req_err_status(&r), 400, "abs-uri-400");
+
+    s = "GET /a HTTP/2.0\r\nHost: a\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EPROTONOSUPPORT, "http2-rc");
+    ckv(hs_req_err_status(&r), 505, "http2-505");
+
+    s = "GET /a FOO/1.1\r\nHost: a\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "non-http-proto-rc");
+    ckv(hs_req_err_status(&r), 400, "non-http-proto-400");
+
+    s = "G@T /a HTTP/1.1\r\nHost: a\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "bad-method-tchar-rc");
+    ckv(hs_req_err_status(&r), 400, "bad-method-tchar-400");
+
+    /* obs-fold & whitespace in header name */
+    s = "GET / HTTP/1.1\r\nHost: a\r\n continued: 1\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "obs-fold-sp-rc");
+    ckv(hs_req_err_status(&r), 400, "obs-fold-sp-400");
+
+    s = "GET / HTTP/1.1\r\nHost: a\r\n\tcontinued: 1\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "obs-fold-tab-rc");
+    ckv(hs_req_err_status(&r), 400, "obs-fold-tab-400");
+
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length : 5\r\n\r\nhello";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "hdr-name-sp-rc");
+    ckv(hs_req_err_status(&r), 400, "hdr-name-sp-400");
+
+    /* CL + TE smuggling */
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "smuggle-cl-te-rc");
+    ckv(hs_req_err_status(&r), 400, "smuggle-cl-te-400");
+
+    /* Transfer-Encoding case-insensitive chunked vs non-chunked */
+    s = "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: CHUNKED\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), HS_PARSE_OK, "te-upper-chunked-ok");
+    ckv(hs_req_is_chunked(&r), 1, "te-upper-chunked-flag");
+    ckv(hs_req_content_length(&r), -1, "te-upper-cl-neg1");
+
+    s = "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip, chunked\r\n\r\n";
+    ck(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend) < 0, "te-gzip-chunked-rc");
+    ck(hs_req_err_status(&r) == 501 || hs_req_err_status(&r) == 400, "te-gzip-chunked-501");
+
+    /* Content-Length checks */
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: +5\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "cl-plus-400");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: -1\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "cl-neg-400");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "cl-overflow-400");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "cl-conflict-400");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), HS_PARSE_OK, "cl-dup-equal-ok");
+    ckv(hs_req_content_length(&r), 5, "cl-dup-equal-val");
+
+    /* Host checks & Expect & Connection: close */
+    s = "GET / HTTP/1.1\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "missing-host-11-400");
+    s = "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "dup-host-11-400");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nExpect: 100-Continue\r\nConnection: close\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), HS_PARSE_OK, "expect-close-ok");
+    ckv(hs_req_expect_continue(&r), 1, "expect-100-set");
+    ckv(hs_req_keep_alive(&r), 0, "conn-close-11");
+    s = "POST / HTTP/1.1\r\nHost: a\r\nExpect: something-else\r\n\r\n";
+    ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "expect-unknown-rc");
+    ckv(hs_req_err_status(&r), 417, "expect-unknown-417");
+
+    hs_req_free(&r);
+}
+
+static int run_one_mut(const char *tag, const char *old_s, const char *new_s, const char *expect_fail) {
+    char root[4096], work[4096], com[4400], cxsrc[4400], cxdst[4400], probe[4400], outp[4400];
+    const char *files[8];
+    const char *syms[2];
+    int i, ofd, rc, killed = 0;
+    unsigned char *outbuf = 0;
+    int64_t outn = 0;
+    sy_spawn_t sp;
+    sy_exit_t st;
+    files[0] = "cxroot.tsv";
+    files[1] = "ext/net/addr.cx";
+    files[2] = "ext/net/resolve.cx";
+    files[3] = "ext/net/sock.cx";
+    files[4] = "ext/net/tcp.cx";
+    files[5] = "ext/net/udp.cx";
+    files[6] = "ext/net/unix.cx";
+    files[7] = "tools/check-ext-net-httpd.cx";
+    syms[0] = "ext/textx";
+    syms[1] = "tools/cxlib";
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "httpd-mut-", work, sizeof work) < 0) return 2;
+    if (cx_fmt(cxsrc, sizeof cxsrc, "%s/cx", root) || cx_fmt(cxdst, sizeof cxdst, "%s/cx", work) ||
+        sy_symlink(cxsrc, cxdst) < 0) {
+        sy_remove_all(work);
+        return 2;
+    }
+    if (cx_fmt(cxsrc, sizeof cxsrc, "%s/ext", work) || sy_mkdir(cxsrc, 0755) < 0 ||
+        cx_fmt(cxsrc, sizeof cxsrc, "%s/tools", work) || sy_mkdir(cxsrc, 0755) < 0) {
+        sy_remove_all(work);
+        return 2;
+    }
+    for (i = 0; i < 2; i++) {
+        if (cx_fmt(cxsrc, sizeof cxsrc, "%s/%s", root, syms[i]) ||
+            cx_fmt(cxdst, sizeof cxdst, "%s/%s", work, syms[i]) ||
+            sy_symlink(cxsrc, cxdst) < 0) {
+            sy_remove_all(work);
+            return 2;
+        }
+    }
+    for (i = 0; i < 8; i++) {
+        if (!mh_put_mut(root, work, files[i], "", "")) {
+            sy_remove_all(work);
+            return 2;
+        }
+    }
+    if (!mh_put_mut(root, work, "ext/net/httpd.cx", old_s, new_s)) {
+        sy_remove_all(work);
+        printf("FAIL\tmut.%s-anchor\n", tag);
+        return 1;
+    }
+    printf("MUTATION_DIFF\t%s\text/net/httpd.cx\told=\"%s\"\tnew=\"%s\"\n", tag, old_s, new_s);
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-ext-net-httpd.cx", work) ||
+        cx_fmt(outp, sizeof outp, "%s/mut.out", work)) {
+        sy_remove_all(work);
+        return 2;
+    }
+    ofd = sy_open(outp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (ofd < 0) { sy_remove_all(work); return 2; }
+    {
+        char *av[4];
+        av[0] = "sh"; av[1] = com; av[2] = probe; av[3] = 0;
+        sy_spawn_init(&sp);
+        sp.argv = av;
+        sp.cwd = work;
+        sp.in_fd = SY_STDIO_NULL;
+        sp.out_fd = ofd;
+        sp.flags = SY_SPAWN_ERR_TO_OUT;
+        sp.deadline_ms = 50000;
+        rc = sy_proc_run(&sp, &st);
+    }
+    sy_close(ofd);
+    if (rc == 0 && sy_read_file(outp, &outbuf, &outn, 1 << 20) == 0 && outbuf) {
+        int code = sy_exit_code(&st);
+        killed = code != 0 && tx_contains((const char *)outbuf, (long)outn, expect_fail, (long)strlen(expect_fail));
+        if (killed) {
+            printf("PASS\tmut.%s-killed\n", tag);
+            printf("MUTATION_KILLED\t%s\text/net/httpd.cx\thit=\"%s\"\trc=%d\n", tag, expect_fail, code);
+        } else {
+            printf("FAIL\tmut.%s-killed\trc=%d\n%s\n", tag, code, (const char *)outbuf);
+        }
+        mm_free(outbuf);
+    } else {
+        printf("FAIL\tmut.%s-spawn\trc=%d\n", tag, rc);
+    }
+    sy_remove_all(work);
+    return killed ? 0 : 1;
+}
+
+static int run_muts(void) {
+    int f = 0;
+    f += run_one_mut("mut1-cl-te",
+                     "if (seen_te && seen_cl) { req->err_status = 400; return -EINVAL; }",
+                     "if (0 && seen_te && seen_cl) { req->err_status = 400; return -EINVAL; }",
+                     "FAIL\thttpd.smuggle-cl-te-rc");
+    f += run_one_mut("mut2-hdr-name-space",
+                     "if (!hs_is_tchar((unsigned char)line[i])) { req->err_status = 400; return -EINVAL; }",
+                     "if (!hs_is_tchar((unsigned char)line[i]) && line[i] != ' ') { req->err_status = 400; return -EINVAL; }",
+                     "FAIL\thttpd.hdr-name-sp-rc");
+    f += run_one_mut("mut3-te-case-and-multi",
+                     "if (tx_ieq(vptr, vlen, \"chunked\", 7) && seen_te == 0)",
+                     "if (tx_same(vptr, vlen, \"chunked\", 7) && seen_te == 0)",
+                     "FAIL\thttpd.te-upper-chunked-ok");
+    printf("EXT_NET_HTTPD_MUT\tfailed=%d\n", f);
+    return f ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && tx_eqz(argv[1], "--mut")) return run_muts();
+    test_config();
+    test_framing_and_view();
+    test_request_line_and_smuggling();
+    printf("EXT_NET_HTTPD\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}

@@ -1,0 +1,438 @@
+#pragma unisa module httpd
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use mem.grow
+#pragma unisa use text.text
+#pragma unisa use text.edit
+#pragma unisa use text.conv
+/* ext.net HTTP/1.1 plaintext server core (pure cx: no #include, no #if, no dock, no libc).
+ * Slice 2: config, incremental header framing, request line/header parser, smuggling guards,
+ * and hs_req_* accessors. */
+
+enum {
+    HS_OK = 0,
+    HS_HANDLED = 1,
+    HS_DEFAULT_404 = 0
+};
+
+enum {
+    HS_PARSE_NEED_MORE = 0,
+    HS_PARSE_OK = 1
+};
+
+enum {
+    HS_DEFAULT_BACKLOG = 128,
+    HS_DEFAULT_MAX_CHILDREN = 63,
+    HS_DEFAULT_MAX_HEADER_BYTES = 65536,
+    HS_DEFAULT_MAX_HEADERS = 128,
+    HS_DEFAULT_MAX_BODY_BYTES = 16777216,
+    HS_DEFAULT_MAX_TOTAL_BODY_BYTES = 67108864,
+    HS_DEFAULT_HEADER_TIMEOUT_MS = 10000,
+    HS_DEFAULT_BODY_TIMEOUT_MS = 30000,
+    HS_DEFAULT_WRITE_TIMEOUT_MS = 30000,
+    HS_DEFAULT_CHUNK_WRITE_TIMEOUT_MS = 5000,
+    HS_DEFAULT_IDLE_TIMEOUT_MS = 255000
+};
+
+typedef struct hs_config {
+    const char *bind_addr;
+    int port;
+    int reuse_port;
+    int backlog;
+    int max_children;
+    long max_header_bytes;
+    long max_body_bytes;
+    long max_total_body_bytes;
+    long header_timeout_ms;
+    long body_read_timeout_ms;
+    long write_timeout_ms;
+    long chunk_write_timeout_ms;
+    long idle_timeout_ms;
+    int allow_non_loopback;
+    long (*now_ms_fn)(void);
+} hs_config_t;
+
+typedef struct hs_header {
+    long name_off;
+    long name_len;
+    long val_off;
+    long val_len;
+} hs_header_t;
+
+typedef struct hs_request {
+    mg_buf raw;
+    char *method;
+    char *target;
+    char *path;
+    char *query;
+    int version;
+    long content_length;
+    int is_chunked;
+    int keep_alive;
+    int expect_continue;
+    int err_status;
+    long hdr_end;
+    int nheaders;
+    hs_header_t headers[HS_DEFAULT_MAX_HEADERS];
+} hs_request;
+
+void hs_config_init(hs_config_t *cfg) {
+    if (!cfg) return;
+    cfg->bind_addr = "127.0.0.1";
+    cfg->port = 0;
+    cfg->reuse_port = 1;
+    cfg->backlog = HS_DEFAULT_BACKLOG;
+    cfg->max_children = HS_DEFAULT_MAX_CHILDREN;
+    cfg->max_header_bytes = HS_DEFAULT_MAX_HEADER_BYTES;
+    cfg->max_body_bytes = HS_DEFAULT_MAX_BODY_BYTES;
+    cfg->max_total_body_bytes = HS_DEFAULT_MAX_TOTAL_BODY_BYTES;
+    cfg->header_timeout_ms = HS_DEFAULT_HEADER_TIMEOUT_MS;
+    cfg->body_read_timeout_ms = HS_DEFAULT_BODY_TIMEOUT_MS;
+    cfg->write_timeout_ms = HS_DEFAULT_WRITE_TIMEOUT_MS;
+    cfg->chunk_write_timeout_ms = HS_DEFAULT_CHUNK_WRITE_TIMEOUT_MS;
+    cfg->idle_timeout_ms = HS_DEFAULT_IDLE_TIMEOUT_MS;
+    cfg->allow_non_loopback = 0;
+    cfg->now_ms_fn = 0;
+}
+
+void hs_req_init(hs_request *req) {
+    if (!req) return;
+    mg_init(&req->raw);
+    req->method = 0;
+    req->target = 0;
+    req->path = 0;
+    req->query = 0;
+    req->version = 0;
+    req->content_length = -1;
+    req->is_chunked = 0;
+    req->keep_alive = 0;
+    req->expect_continue = 0;
+    req->err_status = 0;
+    req->hdr_end = 0;
+    req->nheaders = 0;
+}
+
+void hs_req_free(hs_request *req) {
+    if (!req) return;
+    mg_free(&req->raw);
+    if (req->method) { mm_free(req->method); req->method = 0; }
+    if (req->target) { mm_free(req->target); req->target = 0; }
+    if (req->path) { mm_free(req->path); req->path = 0; }
+    if (req->query) { mm_free(req->query); req->query = 0; }
+    req->version = 0;
+    req->content_length = -1;
+    req->is_chunked = 0;
+    req->keep_alive = 0;
+    req->expect_continue = 0;
+    req->err_status = 0;
+    req->hdr_end = 0;
+    req->nheaders = 0;
+}
+
+void hs_req_reset(hs_request *req) {
+    hs_req_free(req);
+}
+
+static int hs_is_tchar(unsigned char c) {
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) return 1;
+    switch (c) {
+    case '!': case '#': case '$': case '%': case '&': case '\'': case '*':
+    case '+': case '-': case '.': case '^': case '_': case '`': case '|': case '~':
+        return 1;
+    }
+    return 0;
+}
+
+static int hs_is_digits(const char *s, long n) {
+    long i;
+    if (!s || n <= 0) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
+}
+
+static char *hs_dup_span(const char *s, long n) {
+    char *p;
+    if (n < 0) return 0;
+    p = (char *)mm_alloc(n + 1);
+    if (!p) return 0;
+    if (n > 0 && mm_copy(p, n + 1, s, n) != 0) { mm_free(p); return 0; }
+    p[n] = 0;
+    return p;
+}
+
+static int hs_parse_version(const char *v, long n, int *ver_out) {
+    long dot = -1, i;
+    if (n < 5 || !tx_same(v, 5, "HTTP/", 5)) return -EINVAL;
+    if (n == 8 && v[5] == '1' && v[6] == '.' && v[7] == '1') { *ver_out = 11; return 0; }
+    if (n == 8 && v[5] == '1' && v[6] == '.' && v[7] == '0') { *ver_out = 10; return 0; }
+    for (i = 5; i < n; i++) {
+        if (v[i] == '.') { if (dot >= 0) return -EINVAL; dot = i; }
+    }
+    if (dot > 5 && dot + 1 < n && hs_is_digits(v + 5, dot - 5) && hs_is_digits(v + dot + 1, n - dot - 1)) {
+        return -EPROTONOSUPPORT;
+    }
+    return -EINVAL;
+}
+
+static void hs_scan_connection(const char *v, long n, int *close_out, int *ka_out) {
+    long i = 0;
+    while (i < n) {
+        long j, s, e;
+        while (i < n && (v[i] == ',' || v[i] == ' ' || v[i] == '\t')) i++;
+        if (i >= n) break;
+        j = i;
+        while (j < n && v[j] != ',') j++;
+        s = i; e = j;
+        while (e > s && (v[e - 1] == ' ' || v[e - 1] == '\t')) e--;
+        if (tx_ieq(v + s, e - s, "close", 5)) *close_out = 1;
+        else if (tx_ieq(v + s, e - s, "keep-alive", 10)) *ka_out = 1;
+        i = j + 1;
+    }
+}
+
+int hs_parse_request(hs_request *req, const char *buf, long len, long max_header_bytes, long *hdr_end_out) {
+    long max_hdr = max_header_bytes > 0 ? max_header_bytes : HS_DEFAULT_MAX_HEADER_BYTES;
+    long i, hdr_end = -1, pos = 0, l1_end = -1;
+    const char *raw;
+    int host_count = 0, seen_cl = 0, seen_te = 0, cl_count = 0;
+    int conn_close = 0, conn_ka = 0;
+    uint64_t prev_cl = 0;
+
+    if (!req || (!buf && len > 0) || len < 0) return -EINVAL;
+    hs_req_reset(req);
+    if (hdr_end_out) *hdr_end_out = 0;
+
+    for (i = 0; i < len; i++) {
+        if (i >= max_hdr) { req->err_status = 431; return -ENOSPC; }
+        if (buf[i] == 0) { req->err_status = 400; return -EINVAL; }
+        if (buf[i] == '\r' && i + 1 < len && buf[i + 1] != '\n') { req->err_status = 400; return -EINVAL; }
+        if (i + 3 < len && buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+            if (i + 4 > max_hdr) { req->err_status = 431; return -ENOSPC; }
+            hdr_end = i + 4;
+            break;
+        }
+        if (i + 1 < len && buf[i] == '\n' && buf[i + 1] == '\n') {
+            if (i + 2 > max_hdr) { req->err_status = 431; return -ENOSPC; }
+            hdr_end = i + 2;
+            break;
+        }
+    }
+    if (hdr_end < 0) {
+        if (len >= max_hdr) { req->err_status = 431; return -ENOSPC; }
+        return HS_PARSE_NEED_MORE;
+    }
+
+    if (mg_append(&req->raw, buf, hdr_end) != 0) { req->err_status = 500; return -ENOMEM; }
+    raw = (const char *)req->raw.data;
+
+    for (i = 0; i < hdr_end; i++) {
+        if (raw[i] == '\n') {
+            l1_end = (i > 0 && raw[i - 1] == '\r') ? i - 1 : i;
+            pos = i + 1;
+            break;
+        }
+    }
+    if (l1_end <= 0) { req->err_status = 400; return -EINVAL; }
+
+    /* Request-line: METHOD SP request-target SP HTTP-version */
+    {
+        long sp1 = -1, sp2 = -1, qpos = -1, tlen, vr;
+        const char *tgt;
+        for (i = 0; i < l1_end; i++) {
+            unsigned char ch = (unsigned char)raw[i];
+            if (ch == ' ') {
+                if (sp1 < 0) sp1 = i;
+                else if (sp2 < 0) sp2 = i;
+                else { req->err_status = 400; return -EINVAL; }
+            } else if (ch < 0x20 || ch >= 0x7f) {
+                req->err_status = 400;
+                return -EINVAL;
+            }
+        }
+        if (sp1 <= 0 || sp2 <= sp1 + 1 || sp2 >= l1_end - 1) { req->err_status = 400; return -EINVAL; }
+        for (i = 0; i < sp1; i++) {
+            if (!hs_is_tchar((unsigned char)raw[i])) { req->err_status = 400; return -EINVAL; }
+        }
+        tgt = raw + sp1 + 1;
+        tlen = sp2 - sp1 - 1;
+        if (tlen == 1 && tgt[0] == '*') {
+            if (!tx_same(raw, sp1, "OPTIONS", 7)) { req->err_status = 400; return -EINVAL; }
+        } else if (tgt[0] != '/') {
+            req->err_status = 400;
+            return -EINVAL;
+        }
+        vr = hs_parse_version(raw + sp2 + 1, l1_end - sp2 - 1, &req->version);
+        if (vr < 0) {
+            req->err_status = (vr == -EPROTONOSUPPORT) ? 505 : 400;
+            return (int)vr;
+        }
+        req->method = hs_dup_span(raw, sp1);
+        req->target = hs_dup_span(tgt, tlen);
+        for (i = 0; i < tlen; i++) { if (tgt[i] == '?') { qpos = i; break; } }
+        if (qpos >= 0) {
+            req->path = hs_dup_span(tgt, qpos);
+            req->query = hs_dup_span(tgt + qpos, tlen - qpos);
+        } else {
+            req->path = hs_dup_span(tgt, tlen);
+            req->query = hs_dup_span("", 0);
+        }
+        if (!req->method || !req->target || !req->path || !req->query) {
+            req->err_status = 500;
+            return -ENOMEM;
+        }
+    }
+
+    /* Header fields */
+    while (pos < hdr_end) {
+        long lend = -1, llen, colon = -1, vs, ve, vlen;
+        const char *line, *nptr, *vptr;
+        for (i = pos; i < hdr_end; i++) {
+            if (raw[i] == '\n') { lend = (i > pos && raw[i - 1] == '\r') ? i - 1 : i; break; }
+        }
+        if (lend < 0) { req->err_status = 400; return -EINVAL; }
+        line = raw + pos;
+        llen = lend - pos;
+        pos = (lend < hdr_end && raw[lend] == '\r') ? lend + 2 : lend + 1;
+        if (llen == 0) break;
+
+        if (line[0] == ' ' || line[0] == '\t') { req->err_status = 400; return -EINVAL; }
+        if (req->nheaders >= HS_DEFAULT_MAX_HEADERS) { req->err_status = 431; return -ENOSPC; }
+
+        for (i = 0; i < llen; i++) {
+            if (line[i] == ':') { colon = i; break; }
+        }
+        if (colon <= 0) { req->err_status = 400; return -EINVAL; }
+        for (i = 0; i < colon; i++) {
+            if (!hs_is_tchar((unsigned char)line[i])) { req->err_status = 400; return -EINVAL; }
+        }
+        vs = colon + 1;
+        ve = llen;
+        while (vs < ve && (line[vs] == ' ' || line[vs] == '\t')) vs++;
+        while (ve > vs && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) ve--;
+        for (i = vs; i < ve; i++) {
+            unsigned char vc = (unsigned char)line[i];
+            if ((vc < 0x20 && vc != '\t') || vc == 0x7f) { req->err_status = 400; return -EINVAL; }
+        }
+
+        nptr = line;
+        vptr = line + vs;
+        vlen = ve - vs;
+        {
+            hs_header_t *h = &req->headers[req->nheaders++];
+            h->name_off = (long)(nptr - raw);
+            h->name_len = colon;
+            h->val_off = (long)(vptr - raw);
+            h->val_len = vlen;
+        }
+
+        if (tx_ieq(nptr, colon, "Host", 4)) {
+            host_count++;
+        } else if (tx_ieq(nptr, colon, "Content-Length", 14)) {
+            uint64_t uv = 0;
+            seen_cl = 1;
+            if (!hs_is_digits(vptr, vlen) || tx_to_u64(vptr, vlen, 10, &uv) != 0 || uv > 0x7fffffffffffffffUL) {
+                req->err_status = 400;
+                return -EINVAL;
+            }
+            if (cl_count > 0 && uv != prev_cl) { req->err_status = 400; return -EINVAL; }
+            prev_cl = uv;
+            cl_count++;
+        } else if (tx_ieq(nptr, colon, "Transfer-Encoding", 17)) {
+            if (tx_ieq(vptr, vlen, "chunked", 7) && seen_te == 0) {
+                seen_te = 1;
+            } else if (vlen == 0) {
+                req->err_status = 400;
+                return -EINVAL;
+            } else {
+                req->err_status = 501;
+                return -EOPNOTSUPP;
+            }
+        } else if (tx_ieq(nptr, colon, "Connection", 10)) {
+            hs_scan_connection(vptr, vlen, &conn_close, &conn_ka);
+        } else if (tx_ieq(nptr, colon, "Expect", 6)) {
+            if (tx_ieq(vptr, vlen, "100-continue", 12)) {
+                req->expect_continue = 1;
+            } else {
+                req->err_status = 417;
+                return -EINVAL;
+            }
+        }
+    }
+
+    if (seen_te && seen_cl) { req->err_status = 400; return -EINVAL; }
+    if (req->version == 11 && host_count != 1) { req->err_status = 400; return -EINVAL; }
+
+    req->content_length = seen_cl ? (long)prev_cl : -1;
+    req->is_chunked = seen_te;
+    req->keep_alive = (req->version == 11) ? (conn_close ? 0 : 1) : ((conn_ka && !conn_close) ? 1 : 0);
+    req->err_status = 0;
+    req->hdr_end = hdr_end;
+    if (hdr_end_out) *hdr_end_out = hdr_end;
+    return HS_PARSE_OK;
+}
+
+const char *hs_req_method(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return (r && r->method) ? r->method : "";
+}
+const char *hs_req_path(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return (r && r->path) ? r->path : "";
+}
+const char *hs_req_query(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return (r && r->query) ? r->query : "";
+}
+const char *hs_req_target(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return (r && r->target) ? r->target : "";
+}
+int hs_req_version(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->version : 0;
+}
+int hs_req_header(const void *req_p, const char *name, char *out, long cap) {
+    const hs_request *r = (const hs_request *)req_p;
+    long nlen;
+    int i;
+    const char *raw;
+    if (!r || !name || !name[0] || (!out && cap > 0) || cap < 0) return -EINVAL;
+    nlen = tx_len(name, 65536);
+    raw = (const char *)r->raw.data;
+    for (i = 0; i < r->nheaders; i++) {
+        if (r->headers[i].name_len == nlen &&
+            tx_ieq(raw + r->headers[i].name_off, nlen, name, nlen)) {
+            long vlen = r->headers[i].val_len;
+            if (!out || cap < vlen + 1) {
+                if (out && cap > 0) out[0] = 0;
+                return -ERANGE;
+            }
+            if (vlen > 0 && mm_copy(out, cap, raw + r->headers[i].val_off, vlen) != 0) return -ERANGE;
+            out[vlen] = 0;
+            return (int)vlen;
+        }
+    }
+    return -ENOENT;
+}
+long hs_req_content_length(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->content_length : -1;
+}
+int hs_req_is_chunked(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->is_chunked : 0;
+}
+int hs_req_keep_alive(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->keep_alive : 0;
+}
+int hs_req_expect_continue(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->expect_continue : 0;
+}
+int hs_req_err_status(const void *req_p) {
+    const hs_request *r = (const hs_request *)req_p;
+    return r ? r->err_status : 0;
+}
