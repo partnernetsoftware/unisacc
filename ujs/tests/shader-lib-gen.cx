@@ -12,6 +12,8 @@ typedef struct {
     char name[9];
     int topology,textured,point_size,groups_n;
     int groups[16];
+    int keys_n;
+    char keys[64][48];
     unsigned char *text[2];
     int64_t size[2];
 } ShaderProgram;
@@ -53,14 +55,14 @@ static int shader_asset(ShaderProgram *program,int stage,const char *name) {
 }
 
 static int shader_row(ShaderProgram *program,char *line,int bytes,char groups[24][25],int count) {
-    char *fields[7]={line};
+    char *fields[8]={line};
     int columns=1;
     for(int i=0;i<bytes;i++) if(line[i]=='\t') {
-        if(columns>=7) return 1;
+        if(columns>=8) return 1;
         line[i]=0;
         fields[columns++]=line+i+1;
     }
-    if(columns!=7) return 1;
+    if(columns!=8) return 1;
     int name=tx_len(fields[0],9);
     if(name<=0 || name>=9) return 1;
     for(int i=0;i<name;i++) if(fields[0][i]<'a' || fields[0][i]>'z') return 1;
@@ -87,11 +89,27 @@ static int shader_row(ShaderProgram *program,char *line,int bytes,char groups[24
         if(!*end) break;
         start=end+1;
     }
+    for(char *start=fields[7];*start;) {
+        char *end=start;
+        while(*end && *end!=',') {
+            if((*end<'A' || *end>'Z') && (*end<'a' || *end>'z')) return 1;
+            end++;
+        }
+        int length=end-start;
+        if(!length || length>=48 || program->keys_n>=64) return 1;
+        for(int i=0;i<program->keys_n;i++) {
+            if(tx_same(program->keys[i],tx_len(program->keys[i],48),start,length)) return 1;
+        }
+        tx_snprintf(program->keys[program->keys_n++],48,"%.*s",length,start);
+        if(!*end) break;
+        start=end+1;
+        if(!*start) return 1;
+    }
     return shader_asset(program,0,fields[1]) || shader_asset(program,1,fields[2]);
 }
 
 static int shader_read(ShaderProgram programs[SHADER_PROGRAM_LIMIT]) {
-    const char header[]="name\tvertex\tfragment\ttopology\ttextured\tpoint_size\tuniform_groups\n";
+    const char header[]="name\tvertex\tfragment\ttopology\ttextured\tpoint_size\tuniform_groups\tuniform_extras\n";
     char groups[24][25];
     unsigned char *data=0;
     int64_t bytes=0;
@@ -153,6 +171,31 @@ static int shader_generate(const ShaderProgram programs[2],char *out,int capacit
                 "if(i%%8==0) { word=words[i/8]; } "
                 "let saved=ux_u8_put(out+i,word%%256); word=word/256; i=i+1; } return out+i; }\n",stop-start);
         }
+    }
+    EMIT("  return 0-1;\n}\nnative function shader_lib_extra(dst:i64,end:i64,program:i64,index:i64) i64 {\n");
+    for(int i=0;i<count;i++) if(programs[i].keys_n) {
+        int keys_count=programs[i].keys_n;
+        int stride=1;
+        for(int j=0;j<keys_count;j++) {
+            int parts=(tx_len(programs[i].keys[j],48)+7)/8;
+            if(parts>stride) stride=parts;
+        }
+        if(keys_count*stride>256) return -1;
+        EMIT("  if(program==%d && index<%d) { let lengths=[",i,keys_count);
+        for(int j=0;j<keys_count;j++) EMIT("%s%d",j?",":"",(int)tx_len(programs[i].keys[j],48));
+        EMIT("]; let size=lengths[index]; if(end-dst<size) { return 0-1; } let words=[");
+        for(int j=0;j<keys_count;j++) {
+            const char *name=programs[i].keys[j];
+            int key_bytes=tx_len(name,48);
+            for(int k=0;k<stride;k++) {
+                int remaining=key_bytes-k*8;
+                int64_t part=remaining<=0?0:shader_word((const unsigned char *)name+k*8,remaining>8?8:remaining);
+                EMIT("%s%lld",j || k?",":"",(long long)part);
+            }
+        }
+        EMIT("]; let i=0; let word=0; while(i<size) { "
+             "if(i%%8==0) { word=words[index*%d+i/8]; } "
+             "let saved=ux_u8_put(dst+i,word%%256); word=word/256; i=i+1; } return i; }\n",stride);
     }
     EMIT("  return 0-1;\n}\n");
 #undef EMIT

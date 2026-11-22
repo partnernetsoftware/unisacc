@@ -46,7 +46,7 @@ GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
 | 音频对象与宿主接线 | AudioListener 缺过滤链、对象复制和往返。Audio 缺播放节点、暂停与对象往返。PositionalAudio 缺锥形衰减、宿主接线和对象往返。 |
 | GPU 目标与渲染接线 | WebGLRenderTarget、WebGL3DRenderTarget、WebGLArrayRenderTarget、WebGLMultipleRenderTargets、WebGLCubeRenderTarget 缺具名构造及尺寸、复制、克隆与资源释放的类级验收。WebGLRenderer 缺完整场景入口及上下文恢复。PMREMGenerator 缺场景和等距柱状入口与完整预滤链。 |
 | 加载器接线 | CubeTextureLoader 缺通用配置和六面图像解码接线。ObjectLoader 缺资源表、材质数组和骨架绑定。 |
-| 着色器与格式映射 | ShaderChunk 缺内建片段库和 GPU 接线。ShaderLib 缺更多程序模板。WebGLUtils 已有非压缩格式门，压缩扩展待设备证据。 |
+| 着色器与格式映射 | ShaderChunk 缺内建片段库和 GPU 接线。ShaderLib 已有五个程序的 r160 uniform 键与换键反例。standard 与 physical 共用本仓基础 GGX 程序，physical 的额外着色语义和 r160 阶段源码等价待验。WebGLUtils 已有非压缩格式门，压缩扩展待设备证据。 |
 
 ## 网格与纹理对象升级核对
 
