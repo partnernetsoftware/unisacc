@@ -1,0 +1,267 @@
+/* tools/verseq-gen.cx -- 版本口径漂移检查(只读):计划文件名号与标题号、标题主题与版本序表、宫殿版本与计划引用、版本工作树版本序已公开行。
+ *
+ *   sh ./unisacc.com tools/verseq-gen.cx -- --check [--root DIR]
+ *
+ * 四条规则,每条红行打印 FAIL<TAB>规则<TAB>文件<TAB>行号<TAB>原行(截断 400 字节):
+ *   R1 filename-title  plans/v0.0.NN*.md 文件名号 == 首行出现的第一个 0.0.MM
+ *   R2 title-topic     首行 "计划:" 后主题的首个片段(到 + ( 、 , ; 或行尾)== build/version-seq.tsv 同号行 class 列的子串
+ *   R3 palace-pair     prd_mempalace.md 每个 "plans/v0.0.MM.md" 之前最近的独立 0.0.NN 必须等于 MM
+ *   R4 worktree-seq    .claude/worktrees/<name>/build/version-seq.tsv 与 main 同版本行的 class 一致
+ * 末行 VERSEQ_SUMMARY<TAB>checks=N<TAB>fail=F。rc 0 全清,1 有红,2 用法或读文件错。
+ * Check: tools/check-verseq-gen.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define MAXV 128
+#define LINEBUF 400
+static int failed, checks;
+static const char *root = ".";
+static char linebuf[LINEBUF];
+
+static int tminor[MAXV];
+static char *tcls[MAXV];
+static char *tstate[MAXV];
+static int nt;
+static int seq(const char *a, const char *b) { long n = tx_len(a, 4096); return n == tx_len(b, 4096) && mm_same(a, b, n); }
+/* 3 字节序列命中(memcmp 不做宽字符常量,避开多字符常量) */
+static int at3(const char *s, long i, long e, const char *p) {
+    return i + 3 <= e && s[i] == p[0] && s[i + 1] == p[1] && s[i + 2] == p[2];
+}
+
+static char *slurp(const char *p, long *n) {
+    unsigned char *b; int64_t m;
+    if (sy_read_file(p, &b, &m, 1 << 22) < 0) return 0;
+    *n = (long)m;
+    return (char *)b;
+}
+
+static long find_at(const char *h, long hn, const char *lit, long ln, long from) {
+    for (long i = from; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return i;
+    return -1;
+}
+static int has(const char *h, long hn, const char *s, long sn) {
+    return find_at(h, hn, s, sn, 0) >= 0;
+}
+static int digits(const char *s, long n, long at, int *out) {
+    int v = 0; long i = at; int k = 0;
+    while (i < n && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; k++; }
+    if (!k) return 0;
+    *out = v;
+    return 1;
+}
+/* 找 at 起的第一个 "0.0." 并把号读到 out;返回号后位置或 -1 */
+static long minor_after(const char *s, long n, long at, int *out) {
+    long q = find_at(s, n, "0.0.", 4, at);
+    if (q < 0) return -1;
+    if (!digits(s, n, q + 4, out)) return -1;
+    long e = q + 4;
+    while (e < n && s[e] >= '0' && s[e] <= '9') e++;
+    return e;
+}
+static long line_end(const char *s, long n, long at) {
+    long e = at;
+    while (e < n && s[e] != '\n') e++;
+    return e;
+}
+static int line_no(const char *s, long at) {
+    int k = 1;
+    for (long i = 0; i < at && i < 4000000; i++) if (s[i] == '\n') k++;
+    return k;
+}
+static void red(const char *rule, const char *path, int ln, const char *text, long tn) {
+    long k = tn < LINEBUF - 1 ? tn : LINEBUF - 1;
+    while (k > 0 && ((unsigned char)text[k] & 0xC0) == 0x80) k--;
+    for (long i = 0; i < k; i++) linebuf[i] = (text[i] == '\t') ? ' ' : text[i];
+    linebuf[k] = 0;
+    failed++;
+    sy_printf("FAIL\t%s\t%s\t%d\t%s\n", rule, path, ln, linebuf);
+}
+static char *tclass(int minor) {
+    for (int i = 0; i < nt; i++) if (tminor[i] == minor) return tcls[i];
+    return 0;
+}
+static int tpub(int minor) {
+    for (int i = 0; i < nt; i++) if (tminor[i] == minor) return has(tstate[i], tx_len(tstate[i], 64), "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9);
+    return 0;
+}
+
+/* build/version-seq.tsv: slot version class state note */
+static int load_seq(const char *p) {
+    long n; char *b = slurp(p, &n);
+    if (!b) return -1;
+    long at = 0;
+    while (at < n) {
+        long e = line_end(b, n, at);
+        char *l = b + at; long ln = e - at;
+        if (ln > 0 && l[0] != '#') {
+            long t1 = find_at(l, ln, "\t", 1, 0);
+            if (t1 > 0) {
+                long t2 = find_at(l, ln, "\t", 1, t1 + 1);
+                int mi;
+                if (t2 > t1 && minor_after(l, t2, t1 + 1, &mi) >= 0) {
+                    long t3 = find_at(l, ln, "\t", 1, t2 + 1);
+                    long t4 = t3 > 0 ? find_at(l, ln, "\t", 1, t3 + 1) : -1;
+                    if (t4 > t3 && nt < MAXV) {
+                        long cl = t3 - (t2 + 1), sl = t4 - (t3 + 1);
+                        tminor[nt] = mi;
+                        tcls[nt] = mm_alloc(cl + 1);
+                        mm_copy(tcls[nt], cl + 1, l + t2 + 1, cl);
+                        tcls[nt][cl] = 0;
+                        tstate[nt] = mm_alloc(sl + 1);
+                        mm_copy(tstate[nt], sl + 1, l + t3 + 1, sl);
+                        tstate[nt][sl] = 0;
+                        nt++;
+                    }
+                }
+            }
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+static void check_plan(const char *dir, const char *name) {
+    char path[900];
+    if (cx_fmt(path, sizeof path, "%s/%s", dir, name)) return;
+    long n; char *b = slurp(path, &n);
+    if (!b) return;
+    long e = line_end(b, n, 0);
+    int fno, tno;
+    long nl = tx_len(name, 300);
+    if (nl < 8 || !mm_same(name + nl - 3, ".md", 3)) return;
+    if (!digits(name, nl, find_at(name, nl, "v0.0.", 5, 0) + 5, &fno)) return;
+    checks++;
+    long te = minor_after(b, e, 0, &tno);
+    if (te < 0) { red("R1", path, 1, b, e); return; }
+    if (fno != tno) red("R1", path, 1, b, e);
+    /* R2: "计划:" 后主题首个片段须是表 class 的子串 */
+    long pa = find_at(b, e, "\xe8\xae\xa1\xe5\x88\x92:", 7, 0);
+    if (pa < 0) return;
+    long s = pa + 7;
+    while (s < e && (b[s] == ' ' || b[s] == '\t')) s++;
+    long t = s;
+    while (t < e && b[t] != '+' && b[t] != '(' && b[t] != ',' && b[t] != ';' && !at3(b, t, e, "\xef\xbc\x88") && !at3(b, t, e, "\xe3\x80\x81")) t++;
+    while (t > s && (b[t - 1] == ' ' || b[t - 1] == '\t')) t--;
+    if (t == s) return;
+    checks++;
+    char *cls = tclass(fno);
+    if (!cls) { red("R2", path, 1, b, e); return; }
+    if (!has(cls, tx_len(cls, 8192), b + s, t - s)) red("R2", path, 1, b, e);
+}
+
+static void scan_plans(void) {
+    char dir[900];
+    if (cx_fmt(dir, sizeof dir, "%s/plans", root)) return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir)) return;
+    while (sy_dir_next(&d) == 1) {
+        if (d.kind != 'f' && d.kind != 'l') continue;
+        if (d.name_n < 10 || !mm_same(d.name, "v0.0.", 5)) continue;
+        char nm[400];
+        long k = d.name_n < 399 ? d.name_n : 399;
+        mm_copy(nm, 400, d.name, k); nm[k] = 0;
+        check_plan(dir, nm);
+    }
+}
+
+static void scan_palace(void) {
+    char path[900];
+    if (cx_fmt(path, sizeof path, "%s/prd_mempalace.md", root)) return;
+    long n; char *b = slurp(path, &n);
+    if (!b) return;
+    long at = 0;
+    while (at < n) {
+        long e = line_end(b, n, at);
+        long pos = at;
+        while (pos < e) {
+            long q = find_at(b, e, "plans/v0.0.", 11, pos);
+            if (q < 0) break;
+            int mm;
+            if (digits(b, e, q + 11, &mm)) {
+                /* 本行第一个独立 0.0.NN 必须等于 MM */
+                int bv = 0; long best = -1;
+                for (long i = at; i + 4 <= q && best < 0; i++) {
+                    if (b[i] != '0' || b[i + 1] != '.' || b[i + 2] != '0' || b[i + 3] != '.') continue;
+                    if (i > at && (b[i - 1] == '/' || b[i - 1] == '.' || (b[i - 1] >= '0' && b[i - 1] <= '9'))) continue;
+                    if (digits(b, q, i + 4, &bv)) best = i;
+                }
+                if (best >= 0) {
+                    checks++;
+                    if (bv != mm) red("R3", path, line_no(b, q), b + at, e - at);
+                }
+            }
+            pos = q + 11;
+        }
+        at = e + 1;
+    }
+}
+
+static void scan_worktrees(void) {
+    char base[900];
+    if (cx_fmt(base, sizeof base, "%s/.claude/worktrees", root)) return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, base)) return;
+    while (sy_dir_next(&d) == 1) {
+        if (d.kind != 'd') continue;
+        int wn;
+        /* 只认版本工作树 v0.0.NN */
+        if (d.name_n < 7 || d.name[0] != 'v' || d.name[1] != '0' || d.name[2] != '.' || d.name[3] != '0' || d.name[4] != '.') continue;
+        if (!digits(d.name, d.name_n, 5, &wn)) continue;
+        char nm[300];
+        long k = d.name_n < 299 ? d.name_n : 299;
+        mm_copy(nm, 300, d.name, k); nm[k] = 0;
+        char p[900];
+        if (cx_fmt(p, sizeof p, "%s/%s/build/version-seq.tsv", base, nm)) continue;
+        sy_stat_t st;
+        if (sy_stat(p, &st) != 0 || st.kind != 'f') continue;
+        long n; char *b = slurp(p, &n);
+        if (!b) continue;
+        long at = 0;
+        while (at < n) {
+            long e = line_end(b, n, at);
+            char *l = b + at; long ln = e - at;
+            if (ln > 0 && l[0] != '#') {
+                long t1 = find_at(l, ln, "\t", 1, 0);
+                long t2 = t1 > 0 ? find_at(l, ln, "\t", 1, t1 + 1) : -1;
+                long t3 = t2 > 0 ? find_at(l, ln, "\t", 1, t2 + 1) : -1;
+                long t4 = t3 > 0 ? find_at(l, ln, "\t", 1, t3 + 1) : -1;
+                int mi;
+                if (t4 > t3 && minor_after(l, t3, t1 + 1, &mi) >= 0 && has(l + t3 + 1, t4 - (t3 + 1), "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9)) {
+                    char *cls = tclass(mi);
+                    checks++;
+                    long cl = t3 - (t2 + 1);
+                    if (!cls || tx_len(cls, 8192) != cl || !mm_same(cls, l + t2 + 1, cl)) red("R4", p, line_no(b, at), l, ln);
+                }
+            }
+            at = e + 1;
+        }
+    }
+}
+
+static int usage(void) {
+    sy_printf("usage: verseq-gen.cx -- --check [--root DIR]\n");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    int mode = 0;
+    for (int a = 1; a < argc; a++) {
+        if (seq(argv[a], "--check")) mode = 1;
+        else if (seq(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else return usage();
+    }
+    if (!mode) return usage();
+    char sp[900];
+    if (cx_fmt(sp, sizeof sp, "%s/build/version-seq.tsv", root)) return 2;
+    if (load_seq(sp) < 0) { sy_printf("VERSEQ\tREFUSE\tmissing %s\n", sp); return 2; }
+    scan_plans();
+    scan_palace();
+    scan_worktrees();
+    sy_printf("VERSEQ_SUMMARY\tchecks=%d\tfail=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,108 @@
+/* tools/check-verseq-gen.cx -- tools/verseq-gen.cx 的检查:夹具目录里逐条验证 R1/R2/R3/R4 的绿与红(负控)。
+ *
+ *   sh ./unisacc.com tools/check-verseq-gen.cx
+ *
+ * 夹具在系统临时目录,不碰仓库。每条红都必须点名规则且给原行;改动一处只红一处。
+ * 末行 CHECK_VERSEQ_GEN<TAB>checks=N<TAB>failed=F,rc 0 全绿。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed, checks;
+static char dir[400];
+
+static void ck(int ok, const char *name) {
+    checks++;
+    if (ok) sy_printf("PASS\tcheck-verseq-gen.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-verseq-gen.%s\n", name); }
+}
+static int seq(const char *a, const char *b) { long n = tx_len(a, 4096); return n == tx_len(b, 4096) && mm_same(a, b, n); }
+static int has(const char *h, long hn, const char *lit) {
+    long ln = tx_len(lit, 4096);
+    for (long i = 0; i + ln <= hn; i++) if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return 1;
+    return 0;
+}
+static void put(const char *rel, const char *body) {
+    char p[700];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return;
+    cx_write(p, body, tx_len(body, 20000));
+}
+/* 跑一次 --check,输出复制到 out;返回 rc */
+static int run(char *out, long cap) {
+    char cmd[900]; char *o = 0; size_t n = 0; int rc;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/verseq-gen.cx -- --check --root %s", dir)) return -1;
+    char *v[] = {"sh", "-c", cmd, 0};
+    rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0;
+    if (o && (long)n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+
+#define SEQ "slot\tversion\tclass\tstate\tnote\n" \
+    "1\t0.0.92\t事实表整理\t已公开\t冻结 F aaa\n" \
+    "2\t0.0.93\t执行器内核产品化\t已公开\t冻结 F bbb\n" \
+    "3\t0.0.94\t冷跑缓存类\t建议\t计划 plans/v0.0.94.md\n"
+
+/* 干净夹具:四类全对 */
+static void fixture(int r1, int r2, int r3, int r4) {
+    put("build/version-seq.tsv", SEQ);
+    /* R1 红:文件名 0.0.93 但标题写 0.0.94 */
+    put("plans/v0.0.93.md", r1 ? "# 0.0.94 计划:执行器内核产品化(执行器内核)\n" : "# 0.0.93 计划:执行器内核产品化(执行器内核)\n");
+    /* R2 红:标题主题与表 class 不交叉 */
+    put("plans/v0.0.94.md", r2 ? "# 0.0.94 计划:前端诊断三期(前端)\n" : "# 0.0.94 计划:冷跑缓存类(驱动)\n");
+    /* R3 红:同行版本 0.0.92 指向 plans/v0.0.94.md */
+    put("prd_mempalace.md", r3 ? "- 当前 0.0.92 已公开,下一版入口 plans/v0.0.94.md\n" : "- 当前 0.0.94 为下一版,入口 plans/v0.0.94.md\n");
+    put(".claude/worktrees/v0.0.93/build/version-seq.tsv",
+        r4 ? "slot\tversion\tclass\tstate\tnote\n2\t0.0.93\t别的主题\t已公开\t冻结\n"
+           : "slot\tversion\tclass\tstate\tnote\n2\t0.0.93\t执行器内核产品化\t已公开\t冻结\n");
+}
+
+static char out[200000];
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    char tmpl[400];
+    if (sy_mkdtemp(sy_tmpdir(), "check-verseq-", dir, sizeof dir) != 0) return 2;
+    (void)tmpl;
+    {   char p[700];
+        if (!cx_fmt(p, sizeof p, "%s/plans", dir)) sy_mkdir_all(p, 0700);
+        if (!cx_fmt(p, sizeof p, "%s/build", dir)) sy_mkdir_all(p, 0700);
+        if (!cx_fmt(p, sizeof p, "%s/.claude/worktrees/v0.0.93/build", dir)) sy_mkdir_all(p, 0700);
+    }
+    int rc;
+    fixture(0, 0, 0, 0);
+    rc = run(out, sizeof out);
+    ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL"), "clean-all-four-green");
+    ck(has(out, tx_len(out, 200000), "VERSEQ_SUMMARY"), "summary-line-present");
+    fixture(1, 0, 0, 0);
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR1\t") && has(out, tx_len(out, 200000), "plans/v0.0.93.md"), "neg-r1-filename-vs-title");
+    ck(!has(out, tx_len(out, 200000), "FAIL\tR2\t") && !has(out, tx_len(out, 200000), "FAIL\tR3\t") && !has(out, tx_len(out, 200000), "FAIL\tR4\t"), "neg-r1-only-r1");
+
+    fixture(0, 1, 0, 0);
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR2\t") && has(out, tx_len(out, 200000), "plans/v0.0.94.md"), "neg-r2-title-topic");
+
+    fixture(0, 0, 1, 0);
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR3\t") && has(out, tx_len(out, 200000), "prd_mempalace.md"), "neg-r3-palace-pair");
+
+    fixture(0, 0, 0, 1);
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR4\t") && has(out, tx_len(out, 200000), "version-seq.tsv"), "neg-r4-worktree-seq");
+
+    /* 未公开行不参与 R4:工作树里 0.0.94 建议行不同不算红 */
+    put(".claude/worktrees/v0.0.93/build/version-seq.tsv",
+        "slot\tversion\tclass\tstate\tnote\n2\t0.0.93\t执行器内核产品化\t已公开\t冻结\n3\t0.0.94\t别的主题\t建议\t未公开\n");
+    rc = run(out, sizeof out);
+    ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL\tR4\t"), "unpublished-row-not-checked");
+
+    sy_printf("CHECK_VERSEQ_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

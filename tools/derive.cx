@@ -29,6 +29,8 @@
  * precommit 对接(设计说明,本工具不改 tools/precommit.cx):提交前由 precommit 以暂存路径调用
  *   derive.cx -- --check --changed <暂存路径...>,只跑输入被改到的生成器;rc 1 提示先 derive --write --only NAME 再提交,rc 2 直接拦下;
  *   新增或删除 tools/ 下文件时加 --index。全量 --check 留给慢车道与 CI。
+ * verseq-gen 门(清单外):--check 且未被 --only/--changed/--touched 排除时跑 tools/verseq-gen.cx -- --check,
+ *   以 DERIVE<TAB>verseq-gen<TAB>status 行并入 summary 与退出码(rc 1 记 drift);--only verseq-gen 只跑它。
  * Check: tools/check-derive.cx. */
 #pragma unisa use cxlib.globspan
 #pragma unisa use cxlib.runnerprep
@@ -45,6 +47,7 @@
 #pragma unisa use sys.sha
 #pragma unisa use sys.env
 
+#define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/chain-ready.cx */
 #define MAXR 64
 #define MAXTOK 40
 #define MAXSNAP 512
@@ -332,6 +335,8 @@ static void restore(void) {
     }
 }
 
+/* verseq-gen 门的状态:summary 在文件前部,声明必须在其之前 */
+static int vsq_run, vsq_status = ST_SKIPPED; static long vsq_ms = 0;
 /* 汇总(串行与 --from-run 共用这一份) */
 static int summary(long t0) {
     int i, ok = 0, drift = 0, refused = 0, skipped = 0;
@@ -342,8 +347,37 @@ static int summary(long t0) {
         else if (s == ST_REFUSED || s == ST_TIMEOUT) refused++;
         else skipped++;
     }
+    if (vsq_run) { if (vsq_status == ST_OK) ok++; else if (vsq_status == ST_DRIFT) drift++; else refused++; }
     sy_printf("DERIVE_SUMMARY\tok=%d\tdrift=%d\trefused=%d\tskipped=%d\telapsed_ms=%ld\n", ok, drift, refused, skipped, sy_now_ms() - t0);
     return refused ? 2 : drift ? 1 : 0;
+}
+static int name_is(const char *s, long n, const char *lit) { long m = tx_len(lit, 64); return n == m && mm_same(s, lit, n); }
+static int verseq_selected(const char *only) {
+    long k = 0, n = tx_len(only, 4096);
+    while (k <= n) {
+        long s = k;
+        while (k < n && only[k] != ',') k++;
+        if (name_is(only + s, k - s, "verseq-gen")) return 1;
+        k++;
+    }
+    return 0;
+}
+static void verseq_gate(void) {
+    char *v[] = {"sh", UC, "tools/verseq-gen.cx", "--", "--check", 0};
+    char *o = 0; size_t n = 0; int rc; long t0 = sy_now_ms();
+    rc = cx_runv_timeout(v, 45, &o, &n);
+    vsq_ms = sy_now_ms() - t0;
+    vsq_status = rc == 0 ? ST_OK : rc == 1 ? ST_DRIFT : ST_REFUSED;
+    vsq_run = 1;
+    if (vsq_status == ST_OK) sy_printf("DERIVE\tverseq-gen\tOK\t%ld\n", vsq_ms);
+    else {
+        long e = (long)n, s = e;
+        while (e > 0 && (o[e - 1] == '\n' || o[e - 1] == ' ')) e--;
+        s = e; while (s > 0 && o[s - 1] != '\n') s--;
+        if (o) for (long k = s; k < e; k++) if (o[k] == '\t') o[k] = ' ';
+        if (e - s > 300) e = s + 300;
+        sy_printf("DERIVE\tverseq-gen\t%s\t%ld\trc=%d\t%.*s\n", stname[vsq_status], vsq_ms, rc, (int)(e - s), o ? o + s : "");
+    }
 }
 /* 词表 A 中某词与词表 B 中某词相交:任一方作 glob 匹配另一方(目录型 outputs 以 / 结尾,glob 的 * 可覆盖) */
 static int word_hit(const char *a, const char *b) {
@@ -525,6 +559,7 @@ int main(int argc, char **argv) {
             long s = k; int hit = 0;
             while (k < n && only[k] != ',') k++;
             for (i = 0; i < nr; i++) if (tx_len(rows[i].name, 64) == k - s && mm_same(rows[i].name, only + s, k - s)) hit = 1;
+            if (!hit && name_is(only + s, k - s, "verseq-gen")) hit = 1;
             if (!hit) { sy_printf("REFUSE\tonly\tunknown-name\t%.*s\n", (int)(k - s), only + s); return 2; }
             k++;
         }
@@ -552,6 +587,8 @@ int main(int argc, char **argv) {
         if (mode == 2 && !only && query_only(r)) sel = 0;
         r->sel = sel; r->status = ST_SKIPPED;
     }
+    /* 仓内默认清单才跑 verseq 门:夹具清单(--manifest)不碰仓库口径。 */
+    if (mode == 1 && seq(mf, "exec/facts/derive.tsv") && !has_changed && !touched && (!only || verseq_selected(only))) verseq_gate();
     if (touched) {   /* opt-in selection by real read sets plus closure; --changed keeps its own behaviour */
         if (has_changed || only || index) { sy_printf("REFUSE\ttouched\texclusive-with-changed-only-index\n"); return 2; }
         if (touched_load(touched)) { sy_printf("REFUSE\ttouched\tunreadable-or-bad-line\t%s\n", touched); return 2; }
