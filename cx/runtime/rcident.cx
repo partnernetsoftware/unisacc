@@ -36,15 +36,55 @@ int rc_hex_ident(const char *path, char hex[65]) {
     return 0;
 }
 
+/* K4 (UPI1): read "# UPI1 pid=<64 lowercase hex>" from the first 8 KiB of PATH.
+   Returns 0 on a valid 64-hex pid, 1 otherwise (never hashes size/ino/mtime). */
+static int ri_hex_lo(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+}
+
+int rk_pid(const char *path, char hex[65]) {
+    unsigned char buf[8192];
+    int fd;
+    long n, i;
+    if (!path || !path[0] || !hex) return 1;
+    fd = sy_open_read(path);
+    if (fd < 0) return 1;
+    n = 0;
+    while (n < 8192) {
+        long r = sy_read(fd, buf + n, 8192 - n);
+        if (r <= 0) break;
+        n = n + r;
+    }
+    sy_close(fd);
+    if (n < 76) return 1;
+    i = tx_find((const char *)buf, n, "# UPI1 pid=", 11);
+    if (i < 0 || i + 11 + 64 > n) return 1;
+    if (i + 75 < n && buf[i + 75] != '\n' && buf[i + 75] != '\r' && buf[i + 75] != 0) return 1;
+    {
+        int k = 0;
+        while (k < 64) {
+            char c = (char)buf[i + 11 + k];
+            if (!ri_hex_lo(c)) return 1;
+            hex[k] = c;
+            k = k + 1;
+        }
+        hex[64] = 0;
+    }
+    return 0;
+}
+
+int ri_cont_id(const char *path, char hex[65]) {
+    if (!rk_pid(path, hex)) return 0;
+    return rc_hex_ident(path, hex);
+}
+
 /* Product identity for the cache keys: the container PATH and the running
-   compiler image. A single-file product is both at once; with a separate
-   container (UNISA_CONTAINER or -p, the dev-product launcher) the image is a
-   second file, and a key made of the container alone would let a changed
-   compiler reuse the entries of the old one. Non-zero when either cannot be
-   identified; the caller then leaves its cache off. */
+   compiler image. Uses UPI1 content pid from the first 8 KiB when present
+   (so copying an APE or appending cache/ entries keeps the same identity),
+   falling back to stat identity otherwise. */
 int rk_prod(const char *path, char hex[65]) {
     char two[130];
-    if (rc_hex_ident(path, two) || rc_hex_ident("/proc/self/exe", two + 65)) return 1;
+    if (ri_cont_id(path, two) || ri_cont_id("/proc/self/exe", two + 65)) return 1;
     two[64] = '\n';
     two[129] = '\n';
     cx_sha256_hex(two, 130, hex);

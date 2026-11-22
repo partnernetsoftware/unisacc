@@ -100,7 +100,88 @@ static long ape_need;  /* --need KB: only then the launcher checks ulimit -v */
 static const char *ape_tool = "ujs"; /* --tool NAME; default keeps the ujs.com shell text */
 static const char *manager_path[2];
 static Buf manager_img[2];
-static char manager_key[2][17],payload_sha[5][65];
+static char manager_key[2][17],payload_sha[5][65],manager_full_sha[2][65],upi1_pid[65];
+static long pk_scan_int(const unsigned char *p, long n, long *at, long *val) {
+    long i = *at, v = 0;
+    while (i < n && (p[i] == ' ' || p[i] == '\t' || p[i] == '\r' || p[i] == '\n')) i++;
+    if (i >= n || p[i] < '0' || p[i] > '9') return -1;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { v = v * 10 + (p[i++] - '0'); if (v > 2147483647L) return -1; }
+    *at = i; *val = v; return 0;
+}
+static int pk_is_cache_ns(const unsigned char *name, long n) {
+    if (n >= 6 && !memcmp(name, "cache/", 6)) return 1;
+    if (n >= 7 && name[0] == 0 && !memcmp(name + 1, "cache/", 6)) return 1;
+    return 0;
+}
+/* Hash package identity domain: all P/D/M records plus all F resources except reserved cache/ namespace. */
+static void pkg_identity_sha(const unsigned char *p, long n, char out64[65]) {
+    long at = 0, ver = 0, pm = 0, ps = 0, nr = 0;
+    char tmp16[17];
+    if (n < 4 || p[0] != 'P' || p[1] != ' ') goto fallback;
+    at = 1;
+    if (pk_scan_int(p, n, &at, &ver) || ver < 1 || ver > 4) goto fallback;
+    if (pk_scan_int(p, n, &at, &pm) || pk_scan_int(p, n, &at, &ps)) goto fallback;
+    if (ver >= 2 && pk_scan_int(p, n, &at, &nr)) goto fallback;
+    while (at < n && p[at] != '\n') at++;
+    if (at >= n) goto fallback;
+    at++; /* start of D records */
+    long dm_start = at;
+    for (long i = 0; i < ps; i++) {
+        while (at < n && p[at] != '\n') at++;
+        if (at >= n) goto fallback;
+        at++;
+    }
+    for (long i = 0; i < pm; i++) {
+        long mlen = 0, dummy = 0;
+        while (at < n && (p[at] == ' ' || p[at] == '\r' || p[at] == '\n')) at++;
+        if (at >= n || p[at] != 'M') goto fallback;
+        at++;
+        if (pk_scan_int(p, n, &at, &mlen)) goto fallback;
+        if (ver >= 3) {
+            if (pk_scan_int(p, n, &at, &dummy) || pk_scan_int(p, n, &at, &dummy) || pk_scan_int(p, n, &at, &dummy)) goto fallback;
+        }
+        while (at < n && p[at] != '\n') at++;
+        if (at >= n) goto fallback;
+        at++;
+        if (mlen < 0 || at + mlen > n) goto fallback;
+        at += mlen;
+    }
+    long dm_end = at;
+    Buf non_cache = {0, 0, 0};
+    long nr_keep = 0;
+    for (long i = 0; i < nr; i++) {
+        while (at < n && (p[at] == ' ' || p[at] == '\r' || p[at] == '\n')) at++;
+        long f_start = at, nlen = 0, dlen = 0, dummy = 0;
+        if (at >= n || p[at] != 'F') { free(non_cache.p); goto fallback; }
+        at++;
+        if (pk_scan_int(p, n, &at, &nlen) || pk_scan_int(p, n, &at, &dlen)) { free(non_cache.p); goto fallback; }
+        if (ver >= 4) {
+            if (pk_scan_int(p, n, &at, &dummy) || pk_scan_int(p, n, &at, &dummy) || pk_scan_int(p, n, &at, &dummy)) { free(non_cache.p); goto fallback; }
+        }
+        while (at < n && p[at] != '\n') at++;
+        if (at >= n) { free(non_cache.p); goto fallback; }
+        at++;
+        if (nlen <= 0 || dlen < 0 || at + nlen + dlen > n) { free(non_cache.p); goto fallback; }
+        if (!pk_is_cache_ns(p + at, nlen)) {
+            put(&non_cache, p + f_start, (at + nlen + dlen) - f_start);
+            nr_keep++;
+        }
+        at += nlen + dlen;
+    }
+    Buf idb = {0, 0, 0};
+    char hdr[128];
+    cx_fmt_chk(hdr, sizeof hdr, "P %ld %ld %ld %ld\n", ver, pm, ps, nr_keep);
+    put(&idb, hdr, (long)strlen(hdr));
+    put(&idb, p + dm_start, dm_end - dm_start);
+    if (non_cache.n > 0) put(&idb, non_cache.p, non_cache.n);
+    sha256hex(idb.p, idb.n, tmp16);
+    cx_fmt_chk(out64, 65, "%s", last_full_sha);
+    free(non_cache.p); free(idb.p);
+    return;
+fallback:
+    sha256hex(p, n, tmp16);
+    cx_fmt_chk(out64, 65, "%s", last_full_sha);
+}
 static long manager_off[2]={1073741824,1073741824};
 static long cache_keep=4;
 /* Opt-in native policy. The shell only extracts/dispatches; retention is CX. */
@@ -362,6 +443,9 @@ static Buf add_version_info(Buf src, const char *name, const char *ver) {
 static void mkstub(Buf *st, Buf *sc, long want) {
     static const char dots[] = "...................................................";  /* 51 */
     st->n = 0; put(st, "qFpD='\n", 7); put(st, dots, 51); put(st, "....'\n", 6);
+    if (upi1_pid[0]) {
+        put(st, "# UPI1 pid=", 11); put(st, upi1_pid, 64); putc1(st, '\n');
+    }
     put(st, sc->p, sc->n);
     if (want) {   /* pad the script back to a fixed length with a comment */
         long room = want - sc->n; if (room < 2) { fprintf(stderr, "ape: script grew\n"); exit(1); }
@@ -415,7 +499,9 @@ int main(int argc, char **argv) {
     }
     win = slurp(argv[2]);
     if (compiler_product(pname)) stamp_version(win, pver);
-    if(manager_path[0])for(i=0;i<2;i++){Buf raw=slurp(manager_path[i]);sha256hex(raw.p,raw.n,manager_key[i]);manager_img[i]=deflate_on?gz_deflate(raw):gz(raw);free(raw.p);}
+    char win_full_sha[65], tmp16[17];
+    sha256hex(win.p, win.n, tmp16); cx_fmt_chk(win_full_sha, 65, "%s", last_full_sha);
+    if(manager_path[0])for(i=0;i<2;i++){Buf raw=slurp(manager_path[i]);sha256hex(raw.p,raw.n,manager_key[i]);cx_fmt_chk(manager_full_sha[i],65,"%s",last_full_sha);manager_img[i]=deflate_on?gz_deflate(raw):gz(raw);free(raw.p);}
     for (i = 0; i < nposix; i++) {
         Buf raw = slurp(argv[3 + i]);
         /* The APE carries one package at its end; a slice must be the bare base
@@ -427,11 +513,26 @@ int main(int argc, char **argv) {
         }
         if (compiler_product(pname)) { stamp_version(raw, pver); resign_macho(raw); }
         if (pname && i == 4) { Buf v = add_version_info(raw, pname, pver); free(raw.p); raw = v; }
-        img[i] = deflate_on ? gz_deflate(raw) : gz(raw);if(manager_path[0]){sha256hex(raw.p,raw.n,key[i]);cx_fmt_chk(payload_sha[i],65,"%s",last_full_sha);}else cx_fmt_chk(key[i],17,"%s","0000000000000000");free(raw.p); len[i] = img[i].n; off[i] = 1L << 30;
+        img[i] = deflate_on ? gz_deflate(raw) : gz(raw);
+        sha256hex(raw.p, raw.n, manager_path[0] ? key[i] : tmp16);
+        cx_fmt_chk(payload_sha[i], 65, "%s", last_full_sha);
+        if (!manager_path[0]) cx_fmt_chk(key[i], 17, "%s", "0000000000000000");
+        free(raw.p); len[i] = img[i].n; off[i] = 1L << 30;
+    }
+    {
+        Buf pidb = {0, 0, 0};
+        put(&pidb, "UPI1\n", 5);
+        put(&pidb, win_full_sha, 64); putc1(&pidb, '\n');
+        for (i = 0; i < nposix; i++) { put(&pidb, payload_sha[i], 64); putc1(&pidb, '\n'); }
+        if (manager_path[0]) for (i = 0; i < 2; i++) { put(&pidb, manager_full_sha[i], 64); putc1(&pidb, '\n'); }
+        if (payload) { char pksha[65]; pkg_identity_sha(pkg.p, pkg.n, pksha); put(&pidb, pksha, 64); putc1(&pidb, '\n'); }
+        sha256hex(pidb.p, pidb.n, tmp16);
+        cx_fmt_chk(upi1_pid, 65, "%s", last_full_sha);
+        free(pidb.p);
     }
     script(&sc, off, len, key);
     want = sc.n + 40;
-    { long n0 = 2 + 64; want += (8 - (n0 + want) % 8) % 8; }   /* PE signature 8-aligned */
+    { long n0 = 2 + 64 + (upi1_pid[0] ? 76 : 0); want += (8 - (n0 + want) % 8) % 8; }   /* PE signature 8-aligned */
     mkstub(&st, &sc, want);
     head = pe_with_stub(win, st);
     if (pname) { Buf v = add_version_info(head, pname, pver); free(head.p); head = v; }

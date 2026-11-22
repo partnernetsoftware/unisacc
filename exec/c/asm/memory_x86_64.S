@@ -78,15 +78,18 @@ CSYM(core_memory_set):
     leaq (%r15,%r15),%rdi
     testq %rdi,%rdi
     jne Lxmscap
-    movl $65536,%edi
+    movl $256,%edi
 Lxmscap:
     movq %rdi,MEM_CAP(%r12)
-    movl $8,%esi
-    call CSYM(calloc)
+    movq %rdi,%rsi
+    shlq $3,%rsi
+    xorl %edi,%edi
+    call CSYM(realloc)
     movq %rax,MEM_KEYS(%r12)
-    movq MEM_CAP(%r12),%rdi
-    movl $8,%esi
-    call CSYM(calloc)
+    movq MEM_CAP(%r12),%rsi
+    shlq $3,%rsi
+    xorl %edi,%edi
+    call CSYM(realloc)
     movq %rax,MEM_VALUES(%r12)
     movq MEM_CAP(%r12),%rdi
     movl $1,%esi
@@ -115,6 +118,8 @@ Lxmsnext:
     incq %rbx
     jmp Lxmsrehash
 Lxmsfree:
+    testq %rbp,%rbp
+    je Lxmsinsert
     movq %rbp,%rdi
     call CSYM(free)
     movq 0(%rsp),%rdi

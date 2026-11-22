@@ -1,10 +1,25 @@
-/* tools/check-core-sparse.cx -- core.sparse 稀疏内存的检查。 */
+/* tools/check-core-sparse.cx -- core.sparse 稀疏内存的检查(K1: 256 初容、倍增、零值占槽、只清 used 段)。 */
 #pragma unisa use core.sparse
+#pragma unisa use sys.time
 void core_host_panic(const char *s){fprintf(stderr,"unexpected panic: %s\n",s);exit(2);}
 int main(void){
- CxSparse m={0};int failed=0;if(core_memory_get(&m,7)!=0)failed++;
- core_memory_set(&m,7,0);if(m.n!=1||m.cap!=65536||core_memory_get(&m,7)!=0)failed++;
+ CxSparse m={0};int failed=0;
+ if(core_memory_get(&m,7)!=0)failed++;
+ long t0=sy_mono_ns();
+ core_memory_set(&m,7,0);
+ long first_ns=sy_mono_ns()-t0;
+ if(m.n!=1||m.cap!=256||core_memory_get(&m,7)!=0)failed++;
  core_memory_set(&m,7,12);if(m.n!=1||core_memory_get(&m,7)!=12)failed++;
  core_memory_set(&m,-1,-9);if(m.n!=2||core_memory_get(&m,-1)!=-9)failed++;
- free(m.keys);free(m.values);free(m.used);printf("CXCORE_SPARSE\tfailed=%d\n",failed);return failed?1:0;
+ /* Verify uninitialized keys still read as 0 even though keys/values are not zero-cleared */
+ for(int64_t k=1000;k<1200;k++)if(core_memory_get(&m,k)!=0)failed++;
+ /* Trigger doubling 256 -> 512 (load > 50% at n=128 -> 129th insert) */
+ for(int64_t k=10;k<145;k++)core_memory_set(&m,k,k*7+3);
+ if(m.cap!=512||m.n!=137)failed++;
+ for(int64_t k=10;k<145;k++)if(core_memory_get(&m,k)!=k*7+3)failed++;
+ if(core_memory_get(&m,7)!=12||core_memory_get(&m,-1)!=-9)failed++;
+ for(int64_t k=2000;k<2200;k++)if(core_memory_get(&m,k)!=0)failed++;
+ free(m.keys);free(m.values);free(m.used);
+ printf("CXCORE_SPARSE\tfailed=%d\tfirst_touch_us=%ld\n",failed,first_ns/1000);
+ return failed?1:0;
 }

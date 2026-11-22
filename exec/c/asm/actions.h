@@ -1,4 +1,5 @@
-/* Numeric ABI for decoded actions; checked against core.h. */
+/* Numeric ABI for decoded actions. Generated from exec/facts/core-abi.tsv;
+   checked against core.h. */
 #define OP_ADV 0
 #define OP_MARK 1
 #define OP_JUMP 2

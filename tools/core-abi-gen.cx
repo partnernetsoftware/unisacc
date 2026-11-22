@@ -1,0 +1,165 @@
+/* tools/core-abi-gen.cx -- generate and check exec/c/asm/layout.h and exec/c/asm/actions.h
+ * from exec/facts/core-abi.tsv, and verify 3-way CoreModel struct synchronization across
+ * exec/c/core.h, cx/sys/kernel.cx, and cx/core/execute.cx.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/core-abi-gen.cx -- --check [--root DIR]
+ *   sh ./unisacc.com tools/core-abi-gen.cx -- --write [--root DIR]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#ifndef MUT_SKIP_CORE_H
+#define MUT_SKIP_CORE_H 0
+#endif
+#ifndef MUT_SKIP_KERNEL_CX
+#define MUT_SKIP_KERNEL_CX 0
+#endif
+#ifndef MUT_SKIP_EXECUTE_CX
+#define MUT_SKIP_EXECUTE_CX 0
+#endif
+
+static int extract_core_model(const char *path, char *out, long cap) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b || n == 0) { if (b) mm_free(b); return -1; }
+    long tag = tx_find(b, (long)n, "} CoreModel;", 12);
+    if (tag < 0) { mm_free(b); return -1; }
+    long start = tag;
+    while (start > 0 && !(start + 14 <= tag && tx_same(b + start, 14, "typedef struct", 14))) start--;
+    if (start + 14 > tag || !tx_same(b + start, 14, "typedef struct", 14)) { mm_free(b); return -1; }
+    long ob = start;
+    while (ob < tag && b[ob] != '{') ob++;
+    if (ob >= tag) { mm_free(b); return -1; }
+    long op = 0, i = ob + 1;
+    int in_ws = 1;
+    while (i < tag) {
+        if (i + 1 < tag && b[i] == '/' && b[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < tag && !(b[i] == '*' && b[i + 1] == '/')) i++;
+            i += 2;
+            continue;
+        }
+        if (i + 1 < tag && b[i] == '/' && b[i + 1] == '/') {
+            while (i < tag && b[i] != '\n') i++;
+            continue;
+        }
+        char c = b[i++];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if (!in_ws && op + 1 < cap) { out[op++] = ' '; in_ws = 1; }
+        } else {
+            if (op + 1 < cap) out[op++] = c;
+            in_ws = 0;
+        }
+    }
+    while (op > 0 && out[op - 1] == ' ') op--;
+    out[op] = 0;
+    mm_free(b);
+    return 0;
+}
+
+static int gen_headers(const char *root, char *lay, long lay_cap, char *act, long act_cap) {
+    char fp[4096];
+    if (cx_fmt(fp, sizeof fp, "%s/exec/facts/core-abi.tsv", root)) return -1;
+    size_t n = 0;
+    char *b = cx_read(fp, &n);
+    if (!b) return -1;
+    long lp = 0, ap = 0, at = 0;
+    int op_count = 0;
+    if (cx_fmt(lay, (size_t)lay_cap,
+               "/* 64-bit pointer / 32-bit int CoreModel ABI. Generated from exec/facts/core-abi.tsv;\n"
+               "   layoutcheck.c asserts every field used by assembly. */\n")) { mm_free(b); return -1; }
+    lp = tx_len(lay, lay_cap);
+    if (cx_fmt(act, (size_t)act_cap,
+               "/* Numeric ABI for decoded actions. Generated from exec/facts/core-abi.tsv;\n"
+               "   checked against core.h. */\n")) { mm_free(b); return -1; }
+    ap = tx_len(act, act_cap);
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        long ln = e < 0 ? (long)n - at : e;
+        if (ln > 0 && b[at + ln - 1] == '\r') ln--;
+        if (ln > 0 && b[at] != '#') {
+            long o0, l0, o1, l1, o2, l2;
+            if (!tx_field(b + at, ln, '\t', 0, &o0, &l0) &&
+                !tx_field(b + at, ln, '\t', 1, &o1, &l1) &&
+                !tx_field(b + at, ln, '\t', 2, &o2, &l2)) {
+                if (l0 == 6 && tx_same(b + at + o0, 6, "layout", 6)) {
+                    if (cx_fmt(lay + lp, (size_t)(lay_cap - lp), "#define %.*s %.*s\n", (int)l1, b + at + o1, (int)l2, b + at + o2)) { mm_free(b); return -1; }
+                    lp += tx_len(lay + lp, lay_cap - lp);
+                } else if (l0 == 6 && tx_same(b + at + o0, 6, "action", 6)) {
+                    if (cx_fmt(act + ap, (size_t)(act_cap - ap), "#define OP_%.*s %.*s\n", (int)l1, b + at + o1, (int)l2, b + at + o2)) { mm_free(b); return -1; }
+                    ap += tx_len(act + ap, act_cap - ap);
+                    op_count++;
+                } else {
+                    mm_free(b); return -1;
+                }
+            } else {
+                mm_free(b); return -1;
+            }
+        }
+        at += (e < 0 ? ln : e + 1);
+    }
+    if (cx_fmt(act + ap, (size_t)(act_cap - ap), "#define OP_COUNT %d\n", op_count)) { mm_free(b); return -1; }
+    mm_free(b);
+    return 0;
+}
+
+static int check_file_exact(const char *path, const char *want) {
+    size_t n = 0;
+    char *got = cx_read(path, &n);
+    long wn = tx_len(want, 1 << 16);
+    int ok = (got && (long)n == wn && tx_same(got, (long)n, want, wn));
+    if (got) mm_free(got);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    int mode_write = 0, mode_check = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) mode_check = 1;
+        else if (tx_eqz(argv[i], "--write")) mode_write = 1;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else { fprintf(stderr, "usage: core-abi-gen --check|--write [--root DIR]\n"); return 2; }
+    }
+    if (mode_check == mode_write) { fprintf(stderr, "usage: core-abi-gen --check|--write [--root DIR]\n"); return 2; }
+    static char lay[65536], act[65536];
+    if (gen_headers(root, lay, sizeof lay, act, sizeof act)) { fprintf(stderr, "CORE_ABI_ERR\tcannot parse exec/facts/core-abi.tsv\n"); return 2; }
+    char pl[4096], pa[4096];
+    if (cx_fmt(pl, sizeof pl, "%s/exec/c/asm/layout.h", root) || cx_fmt(pa, sizeof pa, "%s/exec/c/asm/actions.h", root)) return 2;
+    if (mode_write) {
+        if (cx_write(pl, lay, tx_len(lay, sizeof lay)) || cx_write(pa, act, tx_len(act, sizeof act))) return 2;
+        printf("CORE_ABI_GEN\tWROTE\tlayout=%ld\tactions=%ld\n", tx_len(lay, sizeof lay), tx_len(act, sizeof act));
+        return 0;
+    }
+    int fail = 0;
+    if (!check_file_exact(pl, lay)) { printf("CORE_ABI_DRIFT\texec/c/asm/layout.h\n"); fail++; }
+    if (!check_file_exact(pa, act)) { printf("CORE_ABI_DRIFT\texec/c/asm/actions.h\n"); fail++; }
+
+    const char *sync_paths[3] = {"exec/c/core.h", "cx/sys/kernel.cx", "cx/core/execute.cx"};
+    int skip[3] = {MUT_SKIP_CORE_H, MUT_SKIP_KERNEL_CX, MUT_SKIP_EXECUTE_CX};
+    static char defs[3][4096];
+    int ref = -1;
+    for (int i = 0; i < 3; i++) {
+        if (skip[i]) continue;
+        char fp[4096];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", root, sync_paths[i])) return 2;
+        if (extract_core_model(fp, defs[i], sizeof defs[i])) {
+            printf("CORE_ABI_SYNC_MISMATCH\t%s\tmissing-CoreModel\n", sync_paths[i]);
+            fail++;
+            continue;
+        }
+        if (tx_find(defs[i], tx_len(defs[i], sizeof defs[i]), "packed", 6) < 0) {
+            printf("CORE_ABI_SYNC_MISMATCH\t%s\tmissing-packed\n", sync_paths[i]);
+            fail++;
+        }
+        if (ref < 0) ref = i;
+        else if (!tx_eqz(defs[i], defs[ref])) {
+            printf("CORE_ABI_SYNC_MISMATCH\t%s\tdiffers-from-%s\n", sync_paths[i], sync_paths[ref]);
+            fail++;
+        }
+    }
+    printf("CORE_ABI_GEN\t%s\tfailed=%d\n", fail ? "FAIL" : "OK", fail);
+    return fail ? 1 : 0;
+}

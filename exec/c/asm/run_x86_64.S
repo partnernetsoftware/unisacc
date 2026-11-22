@@ -10,11 +10,28 @@
 #else
 #define CSYM(x) x
 #endif
+#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0
+#error MACHINE_SIZE_and_RESULT_SIZE_must_be_multiples_of_8
+#endif
 .text
+.p2align 2
+Lxrfree_if:
+    testq %rdi,%rdi
+    je Lxrfree_skip
+    jmp CSYM(free)
+Lxrfree_skip:
+    ret
+.p2align 2
+Lxrzero:
+    movq $0,(%rdi)
+    addq $8,%rdi
+    subl $8,%ecx
+    jne Lxrzero
+    ret
 .p2align 2
 .macro FREE_MEMBER off
     movq \off(%r12),%rdi
-    call CSYM(free)
+    call Lxrfree_if
 .endm
 .globl CSYM(core_run)
 CSYM(core_run):
@@ -33,13 +50,11 @@ CSYM(core_run):
     movq %rcx,320(%rsp)
     movl %edx,328(%rsp)
     movq %r12,%rdi
-    xorl %esi,%esi
-    movl $MACHINE_SIZE,%edx
-    call CSYM(memset)
+    movl $MACHINE_SIZE,%ecx
+    call Lxrzero
     movq %rbp,%rdi
-    xorl %esi,%esi
-    movl $RESULT_SIZE,%edx
-    call CSYM(memset)
+    movl $RESULT_SIZE,%ecx
+    call Lxrzero
     movq %rbx,M_MODEL(%r12)
     movq %rbp,M_RESULT(%r12)
     movq %r14,M_INPUT(%r12)
@@ -193,7 +208,7 @@ Lxrerrorout:
     movq M_X(%r12),%rdi
     cmpq M_INPUT(%r12),%rdi
     je Lxrkeepinput
-    call CSYM(free)
+    call Lxrfree_if
 Lxrkeepinput:
     FREE_MEMBER M_XATTR
     FREE_MEMBER M_REGS
@@ -206,7 +221,7 @@ Lxrkeepinput:
     je Lxrblobsdone
 Lxrblobs:
     movq BLOB_BYTES(%r14),%rdi
-    call CSYM(free)
+    call Lxrfree_if
     addq $BLOB_SIZE,%r14
     decl %r15d
     jne Lxrblobs
@@ -233,7 +248,7 @@ Lxrstringsdone:
     je Lxrresourcesdone
 Lxrresources:
     movq RES_KEY(%r14),%rdi
-    call CSYM(free)
+    call Lxrfree_if
     addq $RES_ENTRY_SIZE,%r14
     decl %r15d
     jne Lxrresources
