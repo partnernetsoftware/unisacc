@@ -59,6 +59,10 @@ CUMULATIVE	total=1154	done_same_refuse=1154	pending=0	same=1146	refuse_same=8	di
 - `pair-o.sh` 曾因 `set -e` 在 timeout 非零时未写 rc 导致整路中断;已修(子壳 `set +e` 必写 rc)
 - shell 批跑为临时做法,缺口已记 `build/pkg-gaps.tsv` 行 `V095-O-REPLAY-PARALLEL`,后续造 `tools/pair-o.cx`
 
+## 持久账本
+
+路径: `~/.local/share/unisacc/research/v095-rescan-review/o-replay/` (含 `par/ledgers/*.tsv`、`ledger/o-replay.tsv`、`ledger/progress.tsv`、`oracle-pkgs.sha256`、`SHA256SUMS`; 源会话 `~/.claude/jobs/2798e440/tmp/csr-v095-replay`)。
+
 ## 结论
 
 补丁包相对原版包在本清单 `-o` 对拍中 **DIFF=0**。首轮 1 项 UNMEASURED 为 51s 窗下的 `rc=124/124`;空闲单跑同窗得 SAME。8 项 REFUSE_SAME 为两侧同文案拒绝。不据此宣称发布资格;本页为独立复核 `-o` 分片收尾证据。

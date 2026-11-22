@@ -4,8 +4,13 @@
  * Claude ❯ idle, FILTERED curly+care, exclusive write_prefix "-", analysis IDLE_LONG,
  * Gemini agy ● Bash duration WORKING, 回报发 cc WAITING_CC footer,
  * --freeze-watch synth repo: trailer match CLEAN / wrong or missing VIOLATION /
-*   outside-domain no trailer quiet / dirty / INACTIVE; mutants must red.
-*   Forged trailer is not git-prevented (documented); fixtures cover mismatch.
+ *   outside-domain no trailer quiet / dirty / INACTIVE; mutants must red.
+ *   Forged trailer is not git-prevented (documented); fixtures cover mismatch.
+ * Fixture root: mktemp -d only; empty path refused. Before/after fixture,
+ * real-repo git status --porcelain and git diff --summary must match
+ * (ck fixture-real-repo-status-unchanged = 不移动非自己路径).
+ * Ratchet hygiene: never mv/cp/rsync/stash/clean foreign untracked; use
+ * git archive HEAD into a private dir or path-limited private tree.
  * Ends with CHECK_TEAM_PULSE. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -91,18 +96,42 @@ static int write_fixture(void) {
     return sy_write_file(fx, body, (int64_t)(sizeof body - 1), 0600);
 }
 
+static int snap_repo(const char *label, char *buf, int cap) {
+    char cmd[900];
+    if (!cwd[0]) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "git -C '%s' status --porcelain; echo '---'; git -C '%s' diff --summary",
+        cwd, cwd)) return -1;
+    buf[0] = 0;
+    if (ckk_sh_t(label, cmd, buf, cap, 30) != 0) return -1;
+    return 0;
+}
+
 int main(void) {
-    char cmd[5200]; int rc; long now;
-    const char *td = sy_env("TMPDIR");
-    if (!td || !td[0]) td = "/tmp";
+    char cmd[5200], before[1 << 16], after[1 << 16]; int rc; long now;
     if (ckk_sh_t("check-team-pulse", "pwd", out, (int)sizeof out, 20) != 0) return 2;
     cx_fmt(cwd, sizeof cwd, "%s", out);
     { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    if (!cwd[0]) { fprintf(stderr, "check-team-pulse: empty cwd refused\n"); return 2; }
+    /* Real checkout must not be the fixture root; snap before any write. */
+    if (snap_repo("fw-snap-before", before, (int)sizeof before) != 0) return 2;
     now = sy_wall_s();
-    if (cx_fmt(root, sizeof root, "%s/tp-check-%ld", td, now % 1000000000)) return 2;
+    /* mktemp -d under TMPDIR or /tmp; refuse empty path */
+    {
+        char mk[200]; const char *td = sy_env("TMPDIR");
+        if (td && !td[0]) { fprintf(stderr, "check-team-pulse: empty TMPDIR refused\n"); return 2; }
+        if (cx_fmt(mk, sizeof mk, "mktemp -d '%s/tp-check-XXXXXX'", (td && td[0]) ? td : "/tmp")) return 2;
+        out[0] = 0;
+        if (ckk_sh_t("check-team-pulse", mk, out, (int)sizeof out, 10) != 0 || !out[0]) {
+            fprintf(stderr, "check-team-pulse: mktemp failed\n"); return 2;
+        }
+        { long n = tx_len(out, sizeof out); while (n > 0 && out[n - 1] == '\n') out[--n] = 0; }
+        if (!out[0] || out[0] != '/') { fprintf(stderr, "check-team-pulse: fixture root not absolute\n"); return 2; }
+        if (cx_fmt(root, sizeof root, "%s", out)) return 2;
+    }
+    if (!root[0]) { fprintf(stderr, "check-team-pulse: empty fixture root refused\n"); return 2; }
     if (cx_fmt(fx, sizeof fx, "%s/fixture.txt", root) || cx_fmt(tab, sizeof tab, "%s/wins.tsv", root)) return 2;
-    sy_remove_all(root);
-    if (sy_mkdir_all(root, 0700)) return 2;
+    if (!fx[0] || !tab[0]) { fprintf(stderr, "check-team-pulse: empty fixture path refused\n"); return 2; }
 
     if (cx_fmt(cmd, sizeof cmd,
         "printf 'window\\tmodel\\tlane\\twrite_prefix\\tkind\\tgit_ref\\n"
@@ -180,7 +209,9 @@ int main(void) {
     /* ---- freeze-watch synthetic repo (trailer X-Unisacc-Window; author always wanjo) ---- */
     {
         char repo[900], cmd[5200], extra[400]; long dl;
+        if (!root[0]) { fprintf(stderr, "check-team-pulse: empty root before fw-repo\n"); return 2; }
         if (cx_fmt(repo, sizeof repo, "%s/fw-repo", root)) return 2;
+        if (!repo[0]) { fprintf(stderr, "check-team-pulse: empty fw-repo path refused\n"); return 2; }
         dl = now + 86400; /* active freeze */
         /* base: wanjo author, freeze owner=cc; domain=src cx; tools/ outside */
         if (cx_fmt(cmd, sizeof cmd,
@@ -275,6 +306,8 @@ int main(void) {
     }
 
     sy_remove_all(root);
+    if (snap_repo("fw-snap-after", after, (int)sizeof after) != 0) return 2;
+    ck(tx_eqz(before, after), "fixture-real-repo-status-unchanged");
     {
         int failed = ck_failures();
         int total = ck_assertions();
