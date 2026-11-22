@@ -177,6 +177,31 @@ int main(void) {
             rc = sh(cmd, out, sizeof out);
             ck(rc == 1 && has(out, "冻结中"), "staged-rename-freeze-tsv-noisolate-refused");
         } else ck(0, "staged-rename-freeze-tsv-noisolate-refused");
+        /* 2e (C1): freeze.tsv line >= 1200 bytes must be refused as active freeze instead of skipped */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && rm -f build/freeze.tsv.bak && "
+            "dd if=/dev/zero bs=1300 count=1 2>/dev/null | tr '\\0' 'a' > build/freeze.tsv && printf '\\n' >> build/freeze.tsv && "
+            "echo s5 > exec/a.tsv && git add exec/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "freeze.tsv line too long"), "overlong-freeze-line-refused");
+        } else ck(0, "overlong-freeze-line-refused");
+        /* 2f (C2): freeze.tsv unreadable (chmod 000 EACCES or directory) must be refused instead of treated as absent */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf '%s' > build/freeze.tsv && chmod 000 build/freeze.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1; r=$?; chmod 600 build/freeze.tsv; exit $r",
+            td, PAST, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "BLOCKED freeze-unreadable"), "unreadable-freeze-eacces-refused");
+        } else ck(0, "unreadable-freeze-eacces-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f build/freeze.tsv && mkdir build/freeze.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1; r=$?; rmdir build/freeze.tsv; exit $r",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "BLOCKED freeze-unreadable"), "directory-freeze-tsv-refused");
+        } else ck(0, "directory-freeze-tsv-refused");
     }
     {   char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
     sy_printf("CHECK_PRECOMMIT_FREEZE\tfailed=%d\n", failed);

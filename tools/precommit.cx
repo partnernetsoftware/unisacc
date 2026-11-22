@@ -28,7 +28,7 @@
 #pragma unisa use sys.posix
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
-static int slurp_last_timeout = 0, slurp_last_rc = 0;
+static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
 #define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
@@ -37,8 +37,9 @@ static int slurp_last_timeout = 0, slurp_last_rc = 0;
  * is missing, timed out or skipped counts as "did not run".  The judgement code stays only here. */
 static const char *cur_gate = 0, *plan_dir = 0, *from_run = 0;
 static char *gate_slurp(char **argv, long *n) {
-    char p[1200], *ev, *b; size_t en = 0, bn = 0; long i = 0; int rc = -1, k; long il = tx_len(cur_gate, 64);
+    char p[1200], *ev, *b; size_t en = 0, bn = 0; long i = 0; int rc = -1, k, seen = 0; long il = tx_len(cur_gate, 64);
     *n = 0;
+    slurp_from_run_unplanned = 0;
     if (plan_dir) {
         sy_printf("PLAN\t%s", cur_gate);
         for (k = 0; argv[k]; k++) sy_printf("\t%s", argv[k]);
@@ -52,6 +53,7 @@ static char *gate_slurp(char **argv, long *n) {
         long e = i, so, sl, io, ilen, ro, rl; while (e < (long)en && ev[e] != '\n') e++;
         if (!tx_field(ev + i, e - i, '\t', 2, &io, &ilen) && ilen == il && tx_same(ev + i + io, ilen, cur_gate, il) &&
             !tx_field(ev + i, e - i, '\t', 3, &so, &sl) && !tx_field(ev + i, e - i, '\t', 5, &ro, &rl)) {
+            seen = 1;
             if ((sl == 2 && tx_same(ev + i + so, 2, "ok", 2)) || (sl == 4 && tx_same(ev + i + so, 4, "fail", 4))) {
                 long v = 0, j; int neg = 0;
                 for (j = 0; j < rl; j++) { if (ev[i + ro + j] == '-') neg = 1; else v = v * 10 + (ev[i + ro + j] - '0'); }
@@ -61,6 +63,7 @@ static char *gate_slurp(char **argv, long *n) {
         i = e + 1;
     }
     mm_free(ev);
+    slurp_from_run_unplanned = !seen;
     slurp_last_rc = rc;
     slurp_last_timeout = (rc == 124 || rc == 137 || rc == 142);
     if (rc < 0 || rc > slurp_okrc) { sy_eprintf("precommit: from-run node %s rc=%d\n", cur_gate, rc); return 0; }
@@ -409,7 +412,95 @@ static int freeze_in_lane_a(const char *path, long nl) {
     return 0;
 }
 
-static char pc_orig_cwd[1024], pc_work_top[1024];
+static char pc_orig_cwd[1024], pc_work_top[1024], pc_outer_idx[1024];
+static int pc_is_temp_idx = 0;
+
+static int freeze_read_path(const char *path, char **out, size_t *outn, int *err_out) {
+    int ex;
+    sy_stat_t st;
+    *out = 0;
+    *outn = 0;
+    if (!path || !path[0]) return 0;
+    ex = sy_exists(path);
+    if (ex < 0) {
+        sy_eprintf("precommit: BLOCKED freeze-unreadable path=%s err=%d (only ENOENT is treated as absent)\n", path, ex);
+        *err_out = 1;
+        return 0;
+    }
+    if (ex == 0) return 0;
+    if (sy_stat(path, &st) != 0 || st.kind != 'f') {
+        sy_eprintf("precommit: BLOCKED freeze-unreadable path=%s (not a regular file)\n", path);
+        *err_out = 1;
+        return 0;
+    }
+    *out = (char *)cx_read(path, outn);
+    if (!*out) {
+        sy_eprintf("precommit: BLOCKED freeze-unreadable path=%s (open/read failed, EACCES)\n", path);
+        *err_out = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static char *freeze_read_index(long *idn_out, int *err_out) {
+    char *lv[] = {"git", "ls-files", "--stage", "--", "build/freeze.tsv", 0};
+    long ln = 0;
+    char *lo = slurp_run(lv, &ln), *io = 0;
+    *idn_out = 0;
+    if (!lo) {
+        sy_eprintf("precommit: BLOCKED freeze-unreadable :build/freeze.tsv (git ls-files --stage failed)\n");
+        *err_out = 1;
+        return 0;
+    }
+    if (ln <= 0) {
+        mm_free(lo);
+        return 0;
+    }
+    mm_free(lo);
+    {
+        char *iv[] = {"git", "show", ":build/freeze.tsv", 0};
+        io = slurp_run(iv, idn_out);
+        if (!io) {
+            sy_eprintf("precommit: BLOCKED freeze-unreadable :build/freeze.tsv (git show failed)\n");
+            *err_out = 1;
+            return 0;
+        }
+    }
+    return io;
+}
+
+static char *freeze_read_head(long *hdn_out, int *err_out) {
+    char *rv[] = {"git", "rev-parse", "--verify", "-q", "HEAD", 0};
+    long rn = 0, ln = 0;
+    char *ro = slurp_run(rv, &rn), *lo = 0, *ho = 0;
+    *hdn_out = 0;
+    if (!ro) return 0;
+    mm_free(ro);
+    {
+        char *lv[] = {"git", "ls-tree", "--full-tree", "HEAD", "--", "build/freeze.tsv", 0};
+        lo = slurp_run(lv, &ln);
+        if (!lo) {
+            sy_eprintf("precommit: BLOCKED freeze-unreadable HEAD:build/freeze.tsv (git ls-tree failed)\n");
+            *err_out = 1;
+            return 0;
+        }
+        if (ln <= 0) {
+            mm_free(lo);
+            return 0;
+        }
+        mm_free(lo);
+    }
+    {
+        char *hv[] = {"git", "show", "HEAD:build/freeze.tsv", 0};
+        ho = slurp_run(hv, hdn_out);
+        if (!ho) {
+            sy_eprintf("precommit: BLOCKED freeze-unreadable HEAD:build/freeze.tsv (git show failed)\n");
+            *err_out = 1;
+            return 0;
+        }
+    }
+    return ho;
+}
 
 static int freeze_eval_buf(const char *z, const char *names, long fn) {
     char *f[6], line[1200], *p;
@@ -420,7 +511,16 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
     line[0] = 0;
     for (p = (char *)z; *p; ) {                          /* 取第一条非注释行 */
         char *e = p; while (*e && *e != '\n') e++;
-        if (*p != '#' && e > p && (size_t)(e - p) < sizeof line) { mm_copy(line, sizeof line, p, (size_t)(e - p)); line[e - p] = 0; break; }
+        if (*p != '#' && e > p) {
+            if ((size_t)(e - p) >= sizeof line) {
+                sy_eprintf("precommit: BLOCKED freeze.tsv line too long (%ld >= %ld bytes; fail-closed as active freeze)\n",
+                           (long)(e - p), (long)sizeof line);
+                return 1;
+            }
+            mm_copy(line, sizeof line, p, (size_t)(e - p));
+            line[e - p] = 0;
+            break;
+        }
         p = *e ? e + 1 : e; line[0] = 0;
     }
     if (!line[0]) return 0;
@@ -475,53 +575,61 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
 }
 
 static int freeze_gate(void) {
-    size_t wtn = 0, idxn = 0;
-    char *z_wt = 0, *z_idx = 0, *z_head = 0, *names = 0;
-    long fn = 0, hdn = 0;
+    size_t wtn = 0, cwdn = 0;
+    char *z_wt = 0, *z_cwd = 0, *z_idx = 0, *z_head = 0, *names = 0;
+    long fn = 0, idxn = 0, hdn = 0;
     char *dv[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD", "-z", 0};
-    int blocked = 0, freeze_staged = 0;
+    int blocked = 0, err = 0;
     if (pc_work_top[0]) {
         char fp[1200];
-        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top)) z_wt = (char *)cx_read(fp, &wtn);
+        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top))
+            (void)freeze_read_path(fp, &z_wt, &wtn, &err);
     }
-    z_idx = (char *)cx_read("build/freeze.tsv", &idxn);
-    names = slurp(dv, &fn);
-    for (long at = 0; names && at < fn; ) {
-        long nl = tx_len(names + at, fn - at);
-        if (nl <= 0) break;
-        if (nl == 16 && tx_same(names + at, 16, "build/freeze.tsv", 16)) { freeze_staged = 1; break; }
-        at += nl + 1;
-    }
-    if (freeze_staged || !z_wt || !z_idx) {
-        char *hv[] = {"git", "show", "HEAD:build/freeze.tsv", 0};
-        z_head = slurp(hv, &hdn);
-    }
-    if (!z_wt && !z_idx && (!z_head || hdn <= 0)) {
+    (void)freeze_read_path("build/freeze.tsv", &z_cwd, &cwdn, &err);
+    z_idx = freeze_read_index(&idxn, &err);
+    z_head = freeze_read_head(&hdn, &err);
+    if (err) {
+        if (z_wt) mm_free(z_wt);
+        if (z_cwd) mm_free(z_cwd);
+        if (z_idx) mm_free(z_idx);
         if (z_head) mm_free(z_head);
-        if (names) mm_free(names);
+        return 1;
+    }
+    if (!z_wt && !z_cwd && (!z_idx || idxn <= 0) && (!z_head || hdn <= 0)) {
+        if (z_idx) mm_free(z_idx);
+        if (z_head) mm_free(z_head);
         return 0;                       /* 无标记文件=无冻结(ENOENT) */
     }
+    names = slurp(dv, &fn);
     /* 合同: 冻结标记是协调锁,以工作区文件为准(优先读),缺失时回退暂存版/HEAD版;
      * 暂存版或HEAD版比工作区更严,或同一提交里暂存改/删/移名 freeze.tsv 试图自我解冻时,以更严者为准. */
     if (z_wt) blocked = freeze_eval_buf(z_wt, names, fn);
-    if (!blocked && z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
+    if (!blocked && z_cwd) blocked = freeze_eval_buf(z_cwd, names, fn);
+    if (!blocked && z_idx && idxn > 0) blocked = freeze_eval_buf(z_idx, names, fn);
     if (!blocked && z_head && hdn > 0) blocked = freeze_eval_buf(z_head, names, fn);
     if (z_wt) mm_free(z_wt);
+    if (z_cwd) mm_free(z_cwd);
     if (z_idx) mm_free(z_idx);
     if (z_head) mm_free(z_head);
     if (names) mm_free(names);
     return blocked;
 }
 
-static int freeze_buf_active(const char *z) {
+static int freeze_buf_active(const char *z, char *owner_out, size_t ocap) {
     char *f[6], line[1200], *p;
     long now, dl = 0, i;
     int nf = 0;
+    if (owner_out && ocap > 0) owner_out[0] = 0;
     if (!z) return 0;
     line[0] = 0;
     for (p = (char *)z; *p; ) {
         char *e = p; while (*e && *e != '\n') e++;
-        if (*p != '#' && e > p && (size_t)(e - p) < sizeof line) {
+        if (*p != '#' && e > p) {
+            if ((size_t)(e - p) >= sizeof line) {
+                sy_eprintf("precommit: BLOCKED freeze.tsv line too long (%ld >= %ld bytes; fail-closed as active freeze)\n",
+                           (long)(e - p), (long)sizeof line);
+                return 2;
+            }
             mm_copy(line, sizeof line, p, (size_t)(e - p));
             line[e - p] = 0;
             break;
@@ -532,38 +640,90 @@ static int freeze_buf_active(const char *z) {
     if (!line[0]) return 0;
     f[nf++] = line;
     for (p = line; *p && nf < 6; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
-    if (nf != 5) return 1;
+    if (nf != 5) {
+        sy_eprintf("precommit: freeze.tsv malformed (need 5 columns)\n");
+        return 2;
+    }
     for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
     now = sy_wall_s();
-    return (i > 0 && now < dl) ? 1 : 0;
+    if (i > 0 && now < dl) {
+        if (owner_out && ocap > 0) (void)cx_fmt(owner_out, ocap, "%s", f[2]);
+        return 1;
+    }
+    return 0;
+}
+
+static int freeze_window_status(char *owner_out, size_t ocap) {
+    size_t wtn = 0, cwdn = 0;
+    char *z_wt = 0, *z_cwd = 0, *z_idx = 0, *z_head = 0;
+    long idxn = 0, hdn = 0;
+    int err = 0, s_wt = 0, s_cwd = 0, s_idx = 0, s_hd = 0;
+    char o_wt[64], o_cwd[64], o_idx[64], o_hd[64];
+    if (owner_out && ocap > 0) owner_out[0] = 0;
+    o_wt[0] = o_cwd[0] = o_idx[0] = o_hd[0] = 0;
+    if (pc_work_top[0]) {
+        char fp[1200];
+        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top))
+            (void)freeze_read_path(fp, &z_wt, &wtn, &err);
+    }
+    (void)freeze_read_path("build/freeze.tsv", &z_cwd, &cwdn, &err);
+    z_idx = freeze_read_index(&idxn, &err);
+    z_head = freeze_read_head(&hdn, &err);
+    if (z_wt) s_wt = freeze_buf_active(z_wt, o_wt, sizeof o_wt);
+    if (z_cwd) s_cwd = freeze_buf_active(z_cwd, o_cwd, sizeof o_cwd);
+    if (z_idx && idxn > 0) s_idx = freeze_buf_active(z_idx, o_idx, sizeof o_idx);
+    if (z_head && hdn > 0) s_hd = freeze_buf_active(z_head, o_hd, sizeof o_hd);
+    if (z_wt) mm_free(z_wt);
+    if (z_cwd) mm_free(z_cwd);
+    if (z_idx) mm_free(z_idx);
+    if (z_head) mm_free(z_head);
+    if (err || s_wt == 2 || s_cwd == 2 || s_idx == 2 || s_hd == 2) return 2;
+    if (s_wt == 1 || s_cwd == 1 || s_idx == 1 || s_hd == 1) {
+        const char *ow = s_wt == 1 ? o_wt : (s_cwd == 1 ? o_cwd : (s_idx == 1 ? o_idx : o_hd));
+        if ((s_wt == 1 && !tx_eqz(ow, o_wt)) ||
+            (s_cwd == 1 && !tx_eqz(ow, o_cwd)) ||
+            (s_idx == 1 && !tx_eqz(ow, o_idx)) ||
+            (s_hd == 1 && !tx_eqz(ow, o_hd))) {
+            return 2;
+        }
+        if (owner_out && ocap > 0) (void)cx_fmt(owner_out, ocap, "%s", ow);
+        return 1;
+    }
+    return 0;
 }
 
 static int freeze_window_active(void) {
-    size_t wtn = 0, idxn = 0;
-    char *z_wt = 0, *z_idx = 0, *z_head = 0;
-    long hdn = 0;
-    int active = 0;
-    if (pc_work_top[0]) {
-        char fp[1200];
-        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top)) z_wt = (char *)cx_read(fp, &wtn);
+    return freeze_window_status(0, 0) != 0;
+}
+
+static int pc_gate_waive_reason(const char *gate, char *why_out, size_t wcap) {
+    const char *w = sy_env("UNISACC_GATE_WAIVE");
+    long gl = tx_len(gate, 64), wl, at = 0;
+    if (why_out && wcap > 0) why_out[0] = 0;
+    if (!w || !w[0] || gl <= 0) return 0;
+    wl = tx_len(w, 1024);
+    while (at < wl) {
+        long e = at;
+        while (e < wl && w[e] != ',' && w[e] != ';') e++;
+        if (e - at > gl + 1 && tx_same(w + at, gl, gate, gl) && w[at + gl] == ':') {
+            long rl = e - (at + gl + 1);
+            if (rl > 0 && rl < (long)wcap) {
+                mm_copy(why_out, wcap, w + at + gl + 1, (size_t)rl);
+                why_out[rl] = 0;
+                return 1;
+            }
+        }
+        at = e + 1;
     }
-    z_idx = (char *)cx_read("build/freeze.tsv", &idxn);
-    {
-        char *hv[] = {"git", "show", "HEAD:build/freeze.tsv", 0};
-        z_head = slurp_run(hv, &hdn);
-    }
-    if (z_wt && freeze_buf_active(z_wt)) active = 1;
-    if (!active && z_idx && freeze_buf_active(z_idx)) active = 1;
-    if (!active && z_head && hdn > 0 && freeze_buf_active(z_head)) active = 1;
-    if (z_wt) mm_free(z_wt);
-    if (z_idx) mm_free(z_idx);
-    if (z_head) mm_free(z_head);
-    return active;
+    return 0;
 }
 
 static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag, int is_timeout,
                                       int bound_s, int staged_files, const char *detail, const char *rerun_cmd) {
     const char *reason = is_timeout ? "GATE_TIMEOUT" : unavail_tag;
+    char fz_owner[64], waive_why[128], eff_reason[256];
+    int fz_st;
+    if (from_run && slurp_from_run_unplanned) return 0;
     if (is_timeout) {
         sy_eprintf("precommit: GATE_TIMEOUT gate=%s bound_s=%d staged_files=%d %s (rerun: %s)\n",
                    gate, bound_s, staged_files, detail ? detail : "", rerun_cmd);
@@ -571,10 +731,20 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
         sy_eprintf("precommit: %s %s (rerun: %s)\n",
                    unavail_tag, detail ? detail : "", rerun_cmd);
     }
-    if (freeze_window_active()) {
-        sy_eprintf("precommit: BLOCKED freeze-gate-unavailable gate=%s reason=%s (active build/freeze.tsv window requires fail-closed verification; rerun: %s)\n",
-                   gate, reason, rerun_cmd);
-        return 1;
+    fz_st = freeze_window_status(fz_owner, sizeof fz_owner);
+    if (fz_st != 0) {
+        const char *who = sy_env("UNISACC_INTEGRATOR");
+        if (fz_st == 1 && who && fz_owner[0] && tx_eqz(who, fz_owner) &&
+            pc_gate_waive_reason(gate, waive_why, sizeof waive_why)) {
+            sy_eprintf("precommit: WARN FREEZE_GATE_WAIVED gate=%s owner=%s why=%s (recorded in deferred-gates ledger; must verify before chain-ready)\n",
+                       gate, who, waive_why);
+            (void)cx_fmt(eff_reason, sizeof eff_reason, "%s:WAIVED(%s:%s)", reason, who, waive_why);
+            reason = eff_reason;
+        } else {
+            sy_eprintf("precommit: BLOCKED freeze-gate-unavailable gate=%s reason=%s (active build/freeze.tsv window requires fail-closed verification; rerun: %s)\n",
+                       gate, reason, rerun_cmd);
+            return 1;
+        }
     }
     {
         char *wv[] = {"git", "write-tree", 0};
@@ -583,6 +753,9 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
         char *wo = slurp_run(wv, &wn), *ho = slurp_run(hv, &hn);
         char tree_sha[64], head_sha[64], bdir[1100], dfp[1200], rec[2048];
         const char *top = pc_work_top[0] ? pc_work_top : (pc_orig_cwd[0] ? pc_orig_cwd : ".");
+        const char *env_dfp = sy_env("UNISACC_DEFERRED_GATES_FILE");
+        const char *env_commit = sy_env("UNISACC_DEFERRED_GATES_COMMIT");
+        int have_dfp = 0;
         mm_copy(tree_sha, sizeof tree_sha, "unknown", 8);
         mm_copy(head_sha, sizeof head_sha, "unknown", 8);
         if (wo && wn >= 7) {
@@ -595,18 +768,27 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
         }
         if (wo) mm_free(wo);
         if (ho) mm_free(ho);
-        if (!cx_fmt(bdir, sizeof bdir, "%s/build", top) &&
-            !cx_fmt(dfp, sizeof dfp, "%s/build/deferred-gates.tsv", top)) {
+        if (env_dfp && env_dfp[0]) {
+            if (!cx_fmt(dfp, sizeof dfp, "%s", env_dfp)) have_dfp = 1;
+        } else if (from_run && from_run[0] && (!sy_env("UNISACC_FLOW_FROM_PRECOMMIT") || pc_is_temp_idx)) {
+            if (!cx_fmt(dfp, sizeof dfp, "%s/deferred-gates.tsv", from_run)) have_dfp = 1;
+        } else if (pc_is_temp_idx && pc_outer_idx[0] && (!env_commit || env_commit[0] != '1')) {
+            if (!cx_fmt(dfp, sizeof dfp, "%s.deferred.tsv", pc_outer_idx)) have_dfp = 1;
+        } else if (!cx_fmt(bdir, sizeof bdir, "%s/build", top) &&
+                   !cx_fmt(dfp, sizeof dfp, "%s/build/deferred-gates.tsv", top)) {
             (void)sy_mkdir(bdir, 0700);
-            if (!cx_fmt(rec, sizeof rec, "%ld\t%s\t%s\t%s\t%s\t%s\n",
-                        sy_wall_s(), gate, reason, tree_sha, head_sha, rerun_cmd)) {
-                (void)sy_append_file(dfp, rec, tx_len(rec, sizeof rec), 0600);
-            }
+            have_dfp = 1;
+        }
+        if (have_dfp &&
+            !cx_fmt(rec, sizeof rec, "%ld\t%s\t%s\t%s\t%s\t%s\n",
+                    sy_wall_s(), gate, reason, tree_sha, head_sha, rerun_cmd) &&
+            sy_append_file(dfp, rec, tx_len(rec, sizeof rec), 0600) == 0) {
             sy_eprintf("precommit: WARN DEFERRED_GATE gate=%s reason=%s tree=%s head=%s ledger=%s rerun='%s'\n",
                        gate, reason, tree_sha, head_sha, dfp, rerun_cmd);
         } else {
-            sy_eprintf("precommit: WARN DEFERRED_GATE gate=%s reason=%s tree=%s head=%s rerun='%s'\n",
+            sy_eprintf("precommit: WARN DEFERRED_GATE gate=%s reason=%s tree=%s head=%s ledger_write_failed=1 rerun='%s'\n",
                        gate, reason, tree_sha, head_sha, rerun_cmd);
+            if (fz_st != 0) return 1;
         }
     }
     return 0;
@@ -1209,24 +1391,7 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         sy_eprintf("precommit: BLOCKED genall-gate-deleted path=tools/gen-all-check.cx (core gen-all gate tool cannot be deleted)\n");
         return 1;
     }
-    if (cx_fmt(gp, sizeof gp, "%s%stools/gen-all-check.cx", wt ? wt : "", wt ? "/" : "")) return 0;
-    {
-        int gex = pc_exists_checked("genall", gp);
-        if (gex < 0) return 1;
-        if (gex == 0) {
-            if (freeze_window_active()) {
-                char dp_chk[1200];
-                if (!cx_fmt(dp_chk, sizeof dp_chk, "%s%sexec/facts/derive.tsv", wt ? wt : "", wt ? "/" : "") &&
-                    sy_exists(dp_chk) == 1) {
-                    return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, 20, 0,
-                                                      "(tools/gen-all-check.cx missing while exec/facts/derive.tsv exists)",
-                                                      "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
-                }
-            }
-            return 0;
-        }
-        if (dg_waived(wt, "gen-all")) return 0;
-    }
+    if (cx_fmt(gp, sizeof gp, "%s%stools/gen-all-check.cx", wt ? wt : "", wt ? "/" : "")) return 1;
     only_list[0] = 0;
     while (allz && pa < alln) {
         long pl = tx_len(allz + pa, alln - pa);
@@ -1265,6 +1430,19 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         pa += pl + 1;
     }
     if (!hit) return 0;
+    {
+        int gex = pc_exists_checked("genall", gp);
+        if (gex < 0) return 1;
+        if (gex == 0) {
+            if (freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+                return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, 20, staged_total,
+                                                  "(tools/gen-all-check.cx missing while prodgen inputs staged)",
+                                                  "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
+            }
+            return 0;
+        }
+        if (dg_waived(wt, "gen-all")) return 0;
+    }
     if (staged_total >= 50) {
         bound_s = 20 + staged_total / 40;
         if (bound_s > 40) bound_s = 40;
@@ -1381,30 +1559,56 @@ static int derive_gate(void) {
         return 1;
     }
     if (cx_fmt(dp, sizeof dp, "%s%sexec/facts/derive.tsv", wt ? wt : "", wt ? "/" : "") ||
-        cx_fmt(tp, sizeof tp, "%s%stools/derive.cx", wt ? wt : "", wt ? "/" : "")) return 0;
-    {
-        int dex = pc_exists_checked("derive", dp), tex = pc_exists_checked("derive", tp);
-        if (dex < 0 || tex < 0) return 1;
-        if (dex == 0) return 0;
-        if (tex == 0) {
-            if (freeze_window_active())
-                return pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 58, 0,
-                                                  "(tools/derive.cx missing while exec/facts/derive.tsv exists)",
-                                                  "sh ./unisacc.com tools/derive.cx -- --check");
-            return 0;
-        }
-    }
-
+        cx_fmt(tp, sizeof tp, "%s%stools/derive.cx", wt ? wt : "", wt ? "/" : "")) return 1;
     {
         char *av1[] = {"git", "diff", "--cached", "--name-only", "-z", 0};
         char *av2[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=AD", "-z", 0};
         allz = slurp(av1, &alln);
-        if (!allz || alln <= 0) { if (allz) mm_free(allz); return 0; }
+        if (!allz) {
+            sy_eprintf("precommit: BLOCKED git diff --cached (derive) failed\n");
+            return 1;
+        }
+        if (alln <= 0) { mm_free(allz); return 0; }
         adz = slurp(av2, &adn);
+    }
+    {
+        int dex = pc_exists_checked("derive", dp), tex = pc_exists_checked("derive", tp);
+        if (dex < 0 || tex < 0) {
+            mm_free(allz);
+            if (adz) mm_free(adz);
+            return 1;
+        }
+        if (dex == 0) {
+            if (tex == 1 && freeze_window_active()) {
+                blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 58, 0,
+                                                      "(exec/facts/derive.tsv missing while tools/derive.cx exists)",
+                                                      "sh ./unisacc.com tools/derive.cx -- --check");
+            }
+            blocked += dg_genall_gate(wt, allz, alln, adz, adn);
+            if (adz) mm_free(adz);
+            mm_free(allz);
+            return blocked;
+        }
+        if (tex == 0) {
+            if (freeze_window_active()) {
+                blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 58, 0,
+                                                      "(tools/derive.cx missing while exec/facts/derive.tsv exists)",
+                                                      "sh ./unisacc.com tools/derive.cx -- --check");
+            }
+            blocked += dg_genall_gate(wt, allz, alln, adz, adn);
+            if (adz) mm_free(adz);
+            mm_free(allz);
+            return blocked;
+        }
     }
 
     db = (char *)cx_read(dp, &dn);
-    if (!db) { mm_free(allz); if (adz) mm_free(adz); return 0; }
+    if (!db) {
+        sy_eprintf("precommit: BLOCKED derive-unreadable path=%s (cannot read exec/facts/derive.tsv)\n", dp);
+        mm_free(allz);
+        if (adz) mm_free(adz);
+        return 1;
+    }
 
     while (at < (long)dn && nsel < 16) {
         long e = tx_chr(db + at, (long)dn - at, '\n'), l = e < 0 ? (long)dn - at : e;
@@ -1750,9 +1954,11 @@ static int precheck(int argc, char **argv) {
     "    elif [ -e \"$wt_top/$_f\" ] || [ -L \"$wt_top/$_f\" ]; then ln -s \"$wt_top/$_f\" \"$d/$_f\"; fi; " \
     "  fi; " \
     "done; " \
-    "if [ -d \"$w/tools\" ] && [ ! -L \"$w/tools\" ] && [ -d \"$d/tools\" ] && [ ! -L \"$d/tools\" ]; then " \
-    "  for _tf in \"$w\"/tools/*; do _bn=${_tf#\"$w\"/tools/}; [ ! -L \"$_tf\" ] || [ -e \"$d/tools/$_bn\" ] || [ -L \"$d/tools/$_bn\" ] || ln -s \"$_tf\" \"$d/tools/$_bn\"; done; " \
-    "fi; " \
+    "for _sd in tools tests; do " \
+    "  if [ -d \"$w/$_sd\" ] && [ ! -L \"$w/$_sd\" ] && [ -d \"$d/$_sd\" ] && [ ! -L \"$d/$_sd\" ]; then " \
+    "    for _tf in \"$w/$_sd\"/*; do _bn=${_tf#\"$w/$_sd\"/}; [ ! -L \"$_tf\" ] || [ -e \"$d/$_sd/$_bn\" ] || [ -L \"$d/$_sd/$_bn\" ] || ln -s \"$_tf\" \"$d/$_sd/$_bn\"; done; " \
+    "  fi; " \
+    "done; " \
     "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
 
 static char pc_iso_dir[1024];
@@ -1811,7 +2017,8 @@ static int is_ratchet_baseline_table(const char *p, long n) {
         if (n == tl && tx_same(p, n, t_tbl[i], tl)) return 1;
     }
     if (n > 19 && tx_prefix(p, n, "build/", 6) && tx_same(p + n - 13, 13, "-baseline.tsv", 13)) {
-        if (tx_prefix(p, n, "build/route-", 12) || tx_prefix(p, n, "build/speed-", 12)) return 0;
+        if (n == 24 && tx_same(p, 24, "build/route-baseline.tsv", 24)) return 0;
+        if (n == 24 && tx_same(p, 24, "build/speed-baseline.tsv", 24)) return 0;
         return 1;
     }
     if (n > 19 && tx_prefix(p, n, "tests/", 6) && tx_same(p + n - 13, 13, "-baseline.tsv", 13)) return 1;
@@ -2020,7 +2227,23 @@ static int pc_capture_work_top(void) {
     }
     {
         const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
+        const char *t_env = sy_env("UNISACC_PRECOMMIT_TEMP_IDX");
+        const char *o_env = sy_env("UNISACC_PRECOMMIT_OUTER_IDX");
+        const char *g_idx = sy_env("GIT_INDEX_FILE");
         char gchk[1100];
+        if (t_env && t_env[0] == '1') pc_is_temp_idx = 1;
+        if (o_env && o_env[0]) {
+            (void)tx_copy(pc_outer_idx, sizeof pc_outer_idx, o_env, tx_len(o_env, sizeof pc_outer_idx - 1));
+        } else if ((!in_tree || in_tree[0] != '1') && g_idx && g_idx[0]) {
+            long gil = tx_len(g_idx, sizeof pc_outer_idx - 1);
+            (void)tx_copy(pc_outer_idx, sizeof pc_outer_idx, g_idx, gil);
+            sy_setenv("UNISACC_PRECOMMIT_OUTER_IDX", pc_outer_idx, 1);
+            if (!tx_same(g_idx, gil, ".git/index", 10) &&
+                !(gil > 11 && tx_same(g_idx + gil - 11, 11, "/.git/index", 11))) {
+                pc_is_temp_idx = 1;
+                sy_setenv("UNISACC_PRECOMMIT_TEMP_IDX", "1", 1);
+            }
+        }
         if (in_tree && in_tree[0] == '1' && env_top && env_top[0] == '/' &&
             !cx_fmt(gchk, sizeof gchk, "%s/.git", env_top) && sy_exists(gchk) == 1) {
             if (tx_copy(pc_work_top, sizeof pc_work_top, env_top, tx_len(env_top, sizeof pc_work_top - 1))) return -1;
@@ -2094,6 +2317,8 @@ int main(int argc, char **argv) {
             sy_unsetenv("UNISACC_LAYER_API_PATHS");
             sy_unsetenv("UNISACC_LAYER_API_PRECOMMIT");
             sy_unsetenv("UNISACC_PRECOMMIT_WORK_TOP");
+            sy_unsetenv("UNISACC_PRECOMMIT_TEMP_IDX");
+            sy_unsetenv("UNISACC_PRECOMMIT_OUTER_IDX");
         }
     }
     if (pc_capture_work_top() != 0) { pc_mark_block("isolate", "getcwd-failed"); pc_emit_gate_fail(); return 1; }
@@ -2257,9 +2482,11 @@ int main(int argc, char **argv) {
           if (!plan_dir) sy_eprintf("precommit: RUNLIST skipped=1 reason=no-tests/run.cx at work tree root (fixture repo)\n");
       } else if (msn > 0) {
           char *lout; long ln;
-          blocked += cov_gate();
-          cur_gate = "runlist"; lout = slurp(lv, &ln); cur_gate = 0;          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
-          if (tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
+          int cov_blk = cov_gate();
+          blocked += cov_blk;
+          cur_gate = "runlist"; slurp_okrc = 2; lout = slurp(lv, &ln); slurp_okrc = 0; cur_gate = 0;
+          if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
+          if (!cov_blk && tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
               long at2 = 0;
               sy_eprintf("precommit: tests/run.cx --list metadata_valid!=1\n");
               while (at2 < ln) {
