@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { DataTexture, FloatType, OrthographicCamera, RedFormat, REVISION, Scene,
+  Vector3, WebGLRenderer, WebGLRenderTarget } from "three";
+
+const output = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const { SSAOPass } = await import("file://" + query.get("package") +
+    "/examples/jsm/postprocessing/SSAOPass.js");
+  const response = await fetch("file://" + query.get("wasm"));
+  if (!response.ok) throw new Error("cannot load SSAO wasm");
+  const actual = (await WebAssembly.instantiate(await response.arrayBuffer())).instance.exports;
+  const status = actual.uxe_ssao_orthographic(BigInt(query.get("mode")));
+  if (status !== 0n) throw new Error("SSAO probe failed " + status);
+  const actualPixels = new DataView(actual.memory.buffer, 2097152 + 320, 32);
+
+  const width = 4, height = 2;
+  const canvas = document.createElement("canvas");
+  const gl = canvas.getContext("webgl2");
+  if (!gl) throw new Error("WebGL2 required");
+  const renderer = new WebGLRenderer({ canvas, context: gl });
+  renderer.setSize(width, height, false);
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 1, 9);
+  const pass = new SSAOPass(new Scene(), camera, width, height, 8);
+  const depth = new DataTexture(Float32Array.from([128,112,88,256,144,112,120,96], x => x / 256),
+    width, height, RedFormat, FloatType);
+  const normal = new DataTexture(Float32Array.of(0.5, 0.5, 1, 1), 1, 1, undefined, FloatType);
+  const noise = new DataTexture(Float32Array.of(0.5), 1, 1, RedFormat, FloatType);
+  for (const texture of [depth, normal, noise]) texture.needsUpdate = true;
+  const uniform = pass.ssaoMaterial.uniforms;
+  uniform.tNormal.value = normal;
+  uniform.tDepth.value = depth;
+  uniform.tNoise.value = noise;
+  pass.ssaoMaterial.defines.PERSPECTIVE_CAMERA = 0;
+  // The normal and noise above give tangent (+X,+Y) and bitangent (-X,+Y).
+  uniform.kernel.value = [[1,0,0],[1,0,8],[0,0,8],[-1,0,0],[0,1,4],[0,-1,4],[0,0,0],[1,1,4]]
+    .map(([x,y,z]) => new Vector3((x / width + y / height) * Math.SQRT2,
+      (y / height - x / width) * Math.SQRT2, z * (camera.far - camera.near) / 256));
+  pass.kernelRadius = 1;
+  pass.minDistance = 4 / 256;
+  pass.maxDistance = 16 / 256;
+  pass.output = SSAOPass.OUTPUT.SSAO;
+  // The fixture supplies depth and normal textures in place of scene rasterization.
+  pass.renderOverride = () => {};
+  const write = new WebGLRenderTarget(width, height);
+  pass.render(renderer, write, null);
+  const rgba = new Uint8Array(width * height * 4);
+  renderer.readRenderTargetPixels(write, 0, 0, width, height, rgba);
+  const expected = new DataView(rgba.buffer);
+  const read = pixels => Array.from({ length: width * height }, (_, i) => pixels.getUint32(i * 4, true));
+  const result = [...read(actualPixels), ...read(expected)];
+  for (const texture of [depth, normal, noise, pass.noiseTexture]) texture.dispose();
+  pass.ssaoMaterial.dispose();
+  write.dispose();
+  pass.dispose();
+  renderer.dispose();
+  output.textContent = JSON.stringify(result);
+} catch (error) {
+  output.textContent = "error:" + error.message;
+}
+</script>

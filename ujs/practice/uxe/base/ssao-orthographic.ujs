@@ -1,0 +1,89 @@
+struct SSAOOrthographicInput {
+  width:u32;
+  height:u32;
+  depth:u32;
+  samples:u32;
+  count:u32;
+  minDistance:u32;
+  maxDistance:u32;
+}
+
+struct SSAOProjectedSample {
+  xBiased:u32;
+  yBiased:u32;
+  towardCamera:u32;
+}
+
+native function ssao_range(at:i64, size:i64) i64 {
+  return at>=0 && at<=6291456-size;
+}
+
+native function ssao_overlap(a:i64, aBytes:i64, b:i64, bBytes:i64) i64 {
+  return a<b+bBytes && b<a+aBytes;
+}
+
+native function ssao_clamp_index(value:i64, size:i64) i64 {
+  if(value<0) { return 0; }
+  if(value>=size) { return size-1; }
+  return value;
+}
+
+// Orthographic, constant-normal raw SSAO with nearest depth sampling.
+// Depth and distance use units of 1/256 of camera range. Sample XY shifts
+// are preprojected whole texels encoded with bias 8. The Z shift is toward the camera.
+// A power-of-two sample count keeps the raw value exact in an RGBA16F target.
+native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
+  if(!ssao_range(input,SSAOOrthographicInput.size)) { return 0-1; }
+  let width=ux_u32(input+SSAOOrthographicInput.width);
+  let height=ux_u32(input+SSAOOrthographicInput.height);
+  let depth=ux_u32(input+SSAOOrthographicInput.depth);
+  let samples=ux_u32(input+SSAOOrthographicInput.samples);
+  let count=ux_u32(input+SSAOOrthographicInput.count);
+  let minimum=ux_u32(input+SSAOOrthographicInput.minDistance);
+  let maximum=ux_u32(input+SSAOOrthographicInput.maxDistance);
+  if(width<1 || width>64 || height<1 || height>64 ||
+     (count!=1 && count!=2 && count!=4 && count!=8 && count!=16 && count!=32) ||
+     maximum<=minimum || maximum>256) { return 0-1; }
+  let area=width*height;
+  let sampleBytes=count*SSAOProjectedSample.size;
+  if(!ssao_range(depth,area*4) || !ssao_range(samples,sampleBytes) || !ssao_range(out,area*4) ||
+     ssao_overlap(out,area*4,depth,area*4) || ssao_overlap(out,area*4,samples,sampleBytes) ||
+     ssao_overlap(out,area*4,input,SSAOOrthographicInput.size)) { return 0-1; }
+  let i=0;
+  while(i<area) {
+    if(ux_u32(depth+i*4)>256) { return 0-1; }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let s=samples+i*SSAOProjectedSample.size;
+    if(ux_u32(s+SSAOProjectedSample.xBiased)>16 || ux_u32(s+SSAOProjectedSample.yBiased)>16 ||
+       ux_u32(s+SSAOProjectedSample.towardCamera)>256) { return 0-1; }
+    i=i+1;
+  }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let at=(y*width+x)*4;
+      let center=ux_u32(depth+at);
+      let covered=0;
+      if(center!=256) {
+        i=0;
+        while(i<count) {
+          let s=samples+i*SSAOProjectedSample.size;
+          let sx=ssao_clamp_index(x+ux_u32(s+SSAOProjectedSample.xBiased)-8,width);
+          let sy=ssao_clamp_index(y+ux_u32(s+SSAOProjectedSample.yBiased)-8,height);
+          let delta=center-ux_u32(s+SSAOProjectedSample.towardCamera)-ux_u32(depth+(sy*width+sx)*4);
+          if(delta>minimum && delta<maximum) { covered=covered+1; }
+          i=i+1;
+        }
+      }
+      let brightness=((count-covered)*255*2+count)/(count*2);
+      let rgba=ux_u32_put(out+at,4278190080+65793*brightness);
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return 0;
+}
