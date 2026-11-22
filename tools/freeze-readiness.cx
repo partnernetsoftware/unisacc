@@ -1,0 +1,513 @@
+/* tools/freeze-readiness.cx -- freeze-ready board: command-computed columns + manual TSV side by side.
+ *
+ *   sh ./unisacc.com tools/freeze-readiness.cx -- [--repo DIR] [--items PATH] [--version V]
+ *       [--hardlink-tmp DIR] [--session-dir DIR] [--batch-times PATH]
+ *       [--chain-bin CMD] [--ratchets-bin CMD] [--release-prep-bin CMD]
+ *       [--only ID] [--skip-slow]
+ *
+ * Computed ids: ahead-origin, chain-1rev, ratchets, dirty-freeze-domain, cx-mode-drift,
+ * hardlink-trees, devsvc-freeze, merge-s0-tree, release-prep-notes, release-prep-rollback,
+ * verseq, plan-freeze-at.
+ * Manual table tests/freeze-readiness-items.tsv:
+ *   id\tdescription\towner\tmanual_status\tevidence\tupdated
+ * manual_status: done|open|blocked|na
+ * Rows: FR_ITEM\tid\tcomputed\tdetail\tmanual\towner\tevidence\tupdated\tverdict
+ * verdict: PASS|FAIL|UNMEASURED|CONFLICT|MISSING_MANUAL|NA
+ * CONFLICT = manual done + computed fail. Final:
+ *   FREEZE_READINESS\tready=yes|no\tblockers=N
+ * Each child under tools/bound 55. Check: tools/check-freeze-readiness.cx.
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define FR_MAX 32
+#define FR_BOUND 55
+
+typedef struct {
+    char id[64], desc[200], owner[64], manual[32], evidence[80], updated[64];
+    int present;
+} Man;
+typedef struct {
+    char id[64], computed[24], detail[400], verdict[24];
+    int is_computed;
+} Comp;
+
+static char g_repo[1100], g_items[1100], g_ver[32], g_hl[1100], g_sess[1100], g_btimes[1100];
+static char g_chain_bin[900], g_rat_bin[900], g_prep_bin[900], g_only[64];
+static int g_skip_slow, g_blockers;
+static Man g_man[FR_MAX]; static int g_nman;
+static Comp g_out[FR_MAX]; static int g_nout;
+
+static int die(const char *m) { fprintf(stderr, "freeze-readiness: %s\n", m); return 2; }
+
+static Man *man_find(const char *id) {
+    int i;
+    for (i = 0; i < g_nman; i++) if (tx_eqz(g_man[i].id, id)) return &g_man[i];
+    return 0;
+}
+
+static int load_items(const char *path) {
+    unsigned char *b; int64_t n; long i = 0; int row = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read items");
+    while (i < n && g_nman < FR_MAX) {
+        long s = i, e, j, nf = 0; char line[900]; char *f[8];
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        row++;
+        if (e - s >= (long)sizeof line) { mm_free(b); return die("items line"); }
+        mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
+        if (row == 1 && tx_find(line, e - s, "id\t", 3) == 0) continue;
+        f[nf++] = line;
+        for (j = 0; line[j] && nf < 6; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
+        if (nf < 6) continue;
+        if (cx_fmt(g_man[g_nman].id, sizeof g_man[0].id, "%s", f[0])) { mm_free(b); return 2; }
+        if (cx_fmt(g_man[g_nman].desc, sizeof g_man[0].desc, "%s", f[1])) { mm_free(b); return 2; }
+        if (cx_fmt(g_man[g_nman].owner, sizeof g_man[0].owner, "%s", f[2])) { mm_free(b); return 2; }
+        if (cx_fmt(g_man[g_nman].manual, sizeof g_man[0].manual, "%s", f[3])) { mm_free(b); return 2; }
+        if (cx_fmt(g_man[g_nman].evidence, sizeof g_man[0].evidence, "%s", f[4])) { mm_free(b); return 2; }
+        if (cx_fmt(g_man[g_nman].updated, sizeof g_man[0].updated, "%s", f[5])) { mm_free(b); return 2; }
+        g_man[g_nman].present = 1;
+        g_nman++;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int run_bound(const char *tag, const char *cmd, char *out, int cap) {
+    char full[2400];
+    out[0] = 0;
+    if (cx_fmt(full, sizeof full, "tools/bound %d sh -c %s", FR_BOUND, cmd)) return -1;
+    /* Use ckk_sh_t with quoted cmd via sh -c '...' built by caller already. */
+    (void)tag;
+    return ckk_sh_t("freeze-readiness", cmd, out, cap, FR_BOUND);
+}
+
+static void emit(const char *id, const char *computed, const char *detail, int is_comp) {
+    Man *m = man_find(id);
+    const char *manual = m ? m->manual : "-";
+    const char *owner = m ? m->owner : "-";
+    const char *ev = m ? m->evidence : "-";
+    const char *upd = m ? m->updated : "-";
+    char verdict[24];
+    int conflict = 0, fail = 0;
+    if (!m && is_comp) {
+        cx_fmt(verdict, sizeof verdict, "MISSING_MANUAL");
+        g_blockers++;
+    } else if (tx_eqz(manual, "done") && tx_eqz(computed, "fail")) {
+        cx_fmt(verdict, sizeof verdict, "CONFLICT"); conflict = 1;
+    } else if (tx_eqz(computed, "fail")) {
+        cx_fmt(verdict, sizeof verdict, "FAIL"); fail = 1;
+    } else if (tx_eqz(computed, "ok")) {
+        cx_fmt(verdict, sizeof verdict, "PASS");
+    } else if (tx_eqz(computed, "unmeasured")) {
+        cx_fmt(verdict, sizeof verdict, "UNMEASURED");
+    } else if (tx_eqz(computed, "na")) {
+        cx_fmt(verdict, sizeof verdict, "NA");
+    } else {
+        cx_fmt(verdict, sizeof verdict, "FAIL"); fail = 1;
+    }
+    if (conflict || fail) g_blockers++;
+    if (m && (tx_eqz(manual, "open") || tx_eqz(manual, "blocked"))) g_blockers++;
+    printf("FR_ITEM\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+           id, computed, detail && detail[0] ? detail : "-",
+           manual, owner, ev, upd, verdict);
+    (void)g_out; (void)g_nout;
+}
+
+static int want(const char *id) {
+    if (!g_only[0]) return 1;
+    return tx_eqz(g_only, id);
+}
+
+static void probe_ahead(void) {
+    char cmd[1200], out[4096]; int rc; long n = 0, i;
+    if (!want("ahead-origin")) return;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-list --count origin/main..HEAD 2>/dev/null", g_repo)) return;
+    rc = run_bound("ahead", cmd, out, (int)sizeof out);
+    for (i = 0; out[i] >= '0' && out[i] <= '9'; i++) n = n * 10 + (out[i] - '0');
+    if (rc != 0) { emit("ahead-origin", "unmeasured", "rev-list-failed", 1); return; }
+    {
+        char d[80];
+        cx_fmt(d, sizeof d, "ahead=%ld", n);
+        emit("ahead-origin", n == 0 ? "ok" : "fail", d, 1);
+    }
+}
+
+static void probe_chain_1rev(void) {
+    char cmd[1600], out[1 << 15]; int rc;
+    if (!want("chain-1rev")) return;
+    if (g_skip_slow) { emit("chain-1rev", "unmeasured", "skip-slow", 1); return; }
+    if (g_chain_bin[0]) {
+        if (cx_fmt(cmd, sizeof cmd, "%s 2>/dev/null", g_chain_bin)) return;
+    } else if (cx_fmt(cmd, sizeof cmd,
+               "sh ./unisacc.com tools/chain-ready.cx -- --only 1-rev --repo '%s' 2>/dev/null", g_repo)) return;
+    rc = run_bound("1rev", cmd, out, (int)sizeof out);
+    if (rc != 0 && !tx_find(out, (long)sizeof out, "1-rev", 5)) {
+        emit("chain-1rev", "fail", "chain-ready-rc", 1); return;
+    }
+    if (tx_find(out, (long)tx_len(out, sizeof out), "1-rev\tPASS", 10) >= 0 ||
+        tx_find(out, (long)tx_len(out, sizeof out), "ITEM\t1-rev\tPASS", 15) >= 0)
+        emit("chain-1rev", "ok", "1-rev-PASS", 1);
+    else if (tx_find(out, (long)tx_len(out, sizeof out), "PASS", 4) >= 0 &&
+             tx_find(out, (long)tx_len(out, sizeof out), "1-rev", 5) >= 0)
+        emit("chain-1rev", "ok", "1-rev-PASS", 1);
+    else
+        emit("chain-1rev", "fail", "1-rev-not-PASS", 1);
+}
+
+static void probe_ratchets(void) {
+    char cmd[1200], out[1 << 14]; int rc;
+    if (!want("ratchets")) return;
+    if (g_skip_slow) { emit("ratchets", "unmeasured", "skip-slow", 1); return; }
+    if (g_rat_bin[0]) {
+        if (cx_fmt(cmd, sizeof cmd, "%s 2>/dev/null", g_rat_bin)) return;
+    } else if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/ratchets.cx -- 2>/dev/null")) return;
+    rc = run_bound("rat", cmd, out, (int)sizeof out);
+    if (tx_find(out, (long)tx_len(out, sizeof out), "fail=0", 6) >= 0 &&
+        tx_find(out, (long)tx_len(out, sizeof out), "RATCHETS", 8) >= 0)
+        emit("ratchets", "ok", "fail=0", 1);
+    else
+        emit("ratchets", rc == 0 ? "fail" : "fail", "ratchets-not-green", 1);
+}
+
+static void probe_dirty(void) {
+    char cmd[1400], out[1 << 15]; int rc; long i = 0, n, cnt = 0;
+    if (!want("dirty-freeze-domain")) return;
+    if (cx_fmt(cmd, sizeof cmd,
+        "git -C '%s' status --porcelain -uall -- src cx ext exec include seed kernel tests/batches.tsv tests/coverage.tsv 2>/dev/null",
+        g_repo)) return;
+    rc = run_bound("dirty", cmd, out, (int)sizeof out);
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i;
+        while (i < n && out[i] != '\n') i++;
+        if (i > s) cnt++;
+        if (i < n) i++;
+    }
+    {
+        char d[80];
+        cx_fmt(d, sizeof d, "dirty=%ld", cnt);
+        emit("dirty-freeze-domain", cnt == 0 ? "ok" : "fail", d, 1);
+    }
+    (void)rc;
+}
+
+static void probe_cx_mode(void) {
+    char cmd[1200], out[1 << 16]; int rc; long i = 0, n, cnt = 0;
+    if (!want("cx-mode-drift")) return;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' ls-files -s -- cx 2>/dev/null", g_repo)) return;
+    rc = run_bound("mode", cmd, out, (int)sizeof out);
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e;
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s >= 6 && tx_same(out + s, 6, "100755", 6)) {
+            /* only count .cx */
+            long k;
+            for (k = e - 1; k > s && out[k] != '.'; k--) {}
+            if (k + 3 < e && out[k] == '.' && out[k + 1] == 'c' && out[k + 2] == 'x') cnt++;
+        }
+    }
+    {
+        char d[80];
+        cx_fmt(d, sizeof d, "mode755_cx=%ld", cnt);
+        emit("cx-mode-drift", cnt == 0 ? "ok" : "fail", d, 1);
+    }
+    (void)rc;
+}
+
+static int fr_cx_suffix(const char *name, long n) {
+    return n >= 3 && name[n - 3] == '.' && name[n - 2] == 'c' && name[n - 1] == 'x';
+}
+static int fr_hl_walk(const char *path, int depth) {
+    sy_dir_t d; int c = 0;
+    if (depth > 8) return 0;
+    if (sy_dir_open(&d, path) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        char child[1024]; struct stat sb; long nl;
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (cx_fmt(child, sizeof child, "%s/%s", path, d.name)) continue;
+        if (lstat(child, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) c += fr_hl_walk(child, depth + 1);
+        else if (S_ISREG(sb.st_mode)) {
+            nl = tx_len(d.name, 256);
+            if (fr_cx_suffix(d.name, nl) && (long)sb.st_nlink > 1) c++;
+        }
+    }
+    sy_dir_close(&d);
+    return c;
+}
+static void probe_hardlink(void) {
+    const char *tmp; sy_dir_t d; int n_dirs = 0;
+    if (!want("hardlink-trees")) return;
+    tmp = g_hl[0] ? g_hl : "/tmp";
+    if (sy_dir_open(&d, tmp) != 0) { emit("hardlink-trees", "unmeasured", "tmp-open-fail", 1); return; }
+    while (sy_dir_next(&d) == 1) {
+        char top[1024]; struct stat st;
+        if (d.name[0] == '.') continue;
+        if (cx_fmt(top, sizeof top, "%s/%s", tmp, d.name)) continue;
+        if (lstat(top, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (fr_hl_walk(top, 0) > 0) n_dirs++;
+    }
+    sy_dir_close(&d);
+    {
+        char det[80];
+        cx_fmt(det, sizeof det, "n=%d", n_dirs);
+        emit("hardlink-trees", n_dirs == 0 ? "ok" : "fail", det, 1);
+    }
+}
+
+static void probe_devsvc_freeze(void) {
+    unsigned char *b; int64_t n; long i; char path[1100];
+    char last_st[32]; last_st[0] = 0;
+    if (!want("devsvc-freeze")) return;
+    if (g_btimes[0]) cx_fmt(path, sizeof path, "%s", g_btimes);
+    else {
+        const char *home = sy_env_or("HOME", "");
+        if (!home[0] || cx_fmt(path, sizeof path, "%s/.cache/unisacc/batch-times.tsv", home)) {
+            emit("devsvc-freeze", "unmeasured", "no-batch-times", 1); return;
+        }
+    }
+    if (sy_read_file(path, &b, &n, 1 << 22) < 0 || !b) {
+        emit("devsvc-freeze", "unmeasured", "batch-times-missing", 1); return;
+    }
+    i = 0;
+    while (i < n) {
+        long s = i, e, j, nf = 0; char line[400]; char *f[8];
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || e - s >= (long)sizeof line) continue;
+        mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
+        f[nf++] = line;
+        for (j = 0; line[j] && nf < 4; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
+        if (nf < 3) continue;
+        if (tx_eqz(f[1], "devsvc-freeze")) {
+            if (cx_fmt(last_st, sizeof last_st, "%s", f[2])) { /* keep */ }
+        }
+    }
+    mm_free(b);
+    if (!last_st[0]) emit("devsvc-freeze", "unmeasured", "no-devsvc-freeze-row", 1);
+    else if (tx_eqz(last_st, "PASS")) emit("devsvc-freeze", "ok", "last=PASS", 1);
+    else emit("devsvc-freeze", "fail", last_st, 1);
+}
+
+static int scan_ready_tree(const char *dir, char *tree, long tcap) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir) != 0) return 0;
+    while (sy_dir_next(&d) == 1) {
+        char child[1200]; struct stat st; unsigned char *b; int64_t n;
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (cx_fmt(child, sizeof child, "%s/%s", dir, d.name)) continue;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (scan_ready_tree(child, tree, tcap)) { sy_dir_close(&d); return 1; }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode) || st.st_size > (1 << 20)) continue;
+        if (sy_read_file(child, &b, &n, 1 << 20) < 0 || !b) continue;
+        {
+            long at = 0;
+            while (at < n) {
+                long s = at, e, p;
+                while (at < n && b[at] != '\n') at++;
+                e = at; if (at < n) at++;
+                if (e - s < 30) continue;
+                if (tx_find((char *)b + s, e - s, "MERGE_VERSION\tverdict=READY", 28) < 0 &&
+                    tx_find((char *)b + s, e - s, "verdict=READY", 13) < 0) continue;
+                p = tx_find((char *)b + s, e - s, "tree=", 5);
+                if (p < 0) continue;
+                {
+                    long ts = s + p + 5, te = ts, k = 0;
+                    while (te < e && b[te] != '\t' && b[te] != ' ' && b[te] != '\r') te++;
+                    if (te > ts && te - ts < tcap) {
+                        for (k = 0; k < te - ts; k++) tree[k] = (char)b[ts + k];
+                        tree[k] = 0;
+                        mm_free(b); sy_dir_close(&d); return 1;
+                    }
+                }
+            }
+        }
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static void probe_merge_s0(void) {
+    char tree[80], sess[1100], job[1100];
+    tree[0] = 0;
+    if (!want("merge-s0-tree")) return;
+    if (g_sess[0]) {
+        if (scan_ready_tree(g_sess, tree, sizeof tree)) {
+            char d[120]; cx_fmt(d, sizeof d, "tree=%s", tree);
+            emit("merge-s0-tree", "ok", d, 1); return;
+        }
+    } else {
+        const char *jobdir = sy_env_or("CLAUDE_JOB_DIR", "");
+        if (jobdir[0] && scan_ready_tree(jobdir, tree, sizeof tree)) {
+            char d[120]; cx_fmt(d, sizeof d, "tree=%s", tree);
+            emit("merge-s0-tree", "ok", d, 1); return;
+        }
+        if (sr_default("merge-version", sess, sizeof sess) == 0 &&
+            scan_ready_tree(sess, tree, sizeof tree)) {
+            char d[120]; cx_fmt(d, sizeof d, "tree=%s", tree);
+            emit("merge-s0-tree", "ok", d, 1); return;
+        }
+        if (!cx_fmt(job, sizeof job, "/tmp") && scan_ready_tree("/tmp/unisacc-session-merge-version", tree, sizeof tree)) {
+            char d[120]; cx_fmt(d, sizeof d, "tree=%s", tree);
+            emit("merge-s0-tree", "ok", d, 1); return;
+        }
+    }
+    emit("merge-s0-tree", "unmeasured", "no-READY-record", 1);
+}
+
+static void probe_release_part(const char *id, const char *part) {
+    char cmd[1600], out[1 << 14]; int rc;
+    if (!want(id)) return;
+    if (g_skip_slow) { emit(id, "unmeasured", "skip-slow", 1); return; }
+    if (g_prep_bin[0]) {
+        if (cx_fmt(cmd, sizeof cmd, "%s %s %s 2>/dev/null", g_prep_bin, part, g_ver)) return;
+    } else if (tx_eqz(part, "notes")) {
+        if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/check-release-prep.cx -- --part notes 2>/dev/null")) return;
+    } else {
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh ./unisacc.com tools/check-release-prep.cx -- --part rollback --ver %s 2>/dev/null", g_ver)) return;
+    }
+    rc = run_bound(id, cmd, out, (int)sizeof out);
+    if (tx_find(out, (long)tx_len(out, sizeof out), "fail=0", 6) >= 0)
+        emit(id, "ok", "fail=0", 1);
+    else
+        emit(id, "fail", rc == 0 ? "prep-fail" : "prep-rc", 1);
+}
+
+static void probe_verseq(void) {
+    char path[1200]; unsigned char *b; int64_t n; long i = 0;
+    if (!want("verseq")) return;
+    if (cx_fmt(path, sizeof path, "%s/build/version-seq.tsv", g_repo)) return;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) {
+        emit("verseq", "fail", "missing-version-seq", 1); return;
+    }
+    while (i < n) {
+        long s = i, e, j, nf = 0; char line[600]; char *f[6];
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        if (e - s >= (long)sizeof line) continue;
+        mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
+        f[nf++] = line;
+        for (j = 0; line[j] && nf < 4; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
+        if (nf < 4) continue;
+        if (tx_eqz(f[1], g_ver)) {
+            char d[200];
+            cx_fmt(d, sizeof d, "status=%s", f[3]);
+            emit("verseq", "ok", d, 1);
+            mm_free(b); return;
+        }
+    }
+    mm_free(b);
+    emit("verseq", "fail", "version-row-missing", 1);
+}
+
+static void probe_plan(void) {
+    char path[1200]; unsigned char *b; int64_t n; long i;
+    char freeze_at[80], done_units[80];
+    freeze_at[0] = 0; done_units[0] = 0;
+    if (!want("plan-freeze-at")) return;
+    if (cx_fmt(path, sizeof path, "%s/plans/v%s.md", g_repo, g_ver)) return;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) {
+        emit("plan-freeze-at", "fail", "missing-plan", 1); return;
+    }
+    i = 0;
+    while (i < n) {
+        long s = i, e;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s > 10 && tx_same((char *)b + s, 10, "freeze_at=", 10)) {
+            long L = e - (s + 10); if (L >= (long)sizeof freeze_at) L = sizeof freeze_at - 1;
+            mm_copy(freeze_at, sizeof freeze_at, b + s + 10, L); freeze_at[L] = 0;
+        }
+        if (e - s > 11 && tx_same((char *)b + s, 11, "done_units=", 11)) {
+            long L = e - (s + 11); if (L >= (long)sizeof done_units) L = sizeof done_units - 1;
+            mm_copy(done_units, sizeof done_units, b + s + 11, L); done_units[L] = 0;
+        }
+    }
+    mm_free(b);
+    {
+        char d[200];
+        cx_fmt(d, sizeof d, "freeze_at=%s;done_units=%s",
+               freeze_at[0] ? freeze_at : "?", done_units[0] ? done_units : "?");
+        if (!freeze_at[0] || tx_eqz(freeze_at, "TBD") || tx_eqz(freeze_at, "?"))
+            emit("plan-freeze-at", "fail", d, 1);
+        else
+            emit("plan-freeze-at", "ok", d, 1);
+    }
+}
+
+static void emit_manual_only(void) {
+    int i;
+    for (i = 0; i < g_nman; i++) {
+        /* skip if already emitted as computed id */
+        if (tx_eqz(g_man[i].id, "ahead-origin") || tx_eqz(g_man[i].id, "chain-1rev") ||
+            tx_eqz(g_man[i].id, "ratchets") || tx_eqz(g_man[i].id, "dirty-freeze-domain") ||
+            tx_eqz(g_man[i].id, "cx-mode-drift") || tx_eqz(g_man[i].id, "hardlink-trees") ||
+            tx_eqz(g_man[i].id, "devsvc-freeze") || tx_eqz(g_man[i].id, "merge-s0-tree") ||
+            tx_eqz(g_man[i].id, "release-prep-notes") || tx_eqz(g_man[i].id, "release-prep-rollback") ||
+            tx_eqz(g_man[i].id, "verseq") || tx_eqz(g_man[i].id, "plan-freeze-at"))
+            continue;
+        if (g_only[0] && !tx_eqz(g_only, g_man[i].id)) continue;
+        emit(g_man[i].id, "na", g_man[i].desc, 0);
+    }
+}
+
+int main(int argc, char **argv) {
+    int a = 1;
+    g_repo[0] = g_items[0] = g_ver[0] = g_hl[0] = g_sess[0] = g_btimes[0] = 0;
+    g_chain_bin[0] = g_rat_bin[0] = g_prep_bin[0] = g_only[0] = 0;
+    g_skip_slow = 0; g_blockers = 0; g_nman = 0; g_nout = 0;
+    for (; a < argc; a++) {
+        if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { if (cx_fmt(g_repo, sizeof g_repo, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--items") && a + 1 < argc) { if (cx_fmt(g_items, sizeof g_items, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--version") && a + 1 < argc) { if (cx_fmt(g_ver, sizeof g_ver, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--hardlink-tmp") && a + 1 < argc) { if (cx_fmt(g_hl, sizeof g_hl, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--session-dir") && a + 1 < argc) { if (cx_fmt(g_sess, sizeof g_sess, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--batch-times") && a + 1 < argc) { if (cx_fmt(g_btimes, sizeof g_btimes, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--chain-bin") && a + 1 < argc) { if (cx_fmt(g_chain_bin, sizeof g_chain_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--ratchets-bin") && a + 1 < argc) { if (cx_fmt(g_rat_bin, sizeof g_rat_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--release-prep-bin") && a + 1 < argc) { if (cx_fmt(g_prep_bin, sizeof g_prep_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--only") && a + 1 < argc) { if (cx_fmt(g_only, sizeof g_only, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--skip-slow")) g_skip_slow = 1;
+        else return die("usage");
+    }
+    if (!g_repo[0] && cx_fmt(g_repo, sizeof g_repo, ".")) return 2;
+    if (!g_ver[0] && cx_fmt(g_ver, sizeof g_ver, "0.0.94")) return 2;
+    if (!g_items[0] && cx_fmt(g_items, sizeof g_items, "%s/tests/freeze-readiness-items.tsv", g_repo)) return 2;
+    if (load_items(g_items)) return 2;
+
+    probe_ahead();
+    probe_chain_1rev();
+    probe_ratchets();
+    probe_dirty();
+    probe_cx_mode();
+    probe_hardlink();
+    probe_devsvc_freeze();
+    probe_merge_s0();
+    probe_release_part("release-prep-notes", "notes");
+    probe_release_part("release-prep-rollback", "rollback");
+    probe_verseq();
+    probe_plan();
+    emit_manual_only();
+
+    printf("FREEZE_READINESS\tready=%s\tblockers=%d\n", g_blockers ? "no" : "yes", g_blockers);
+    return g_blockers ? 1 : 0;
+}
