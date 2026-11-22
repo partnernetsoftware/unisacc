@@ -12,9 +12,9 @@ struct ShapeJsonIdentity {
 }
 
 native function path_json_keys(at:i64) i64 {
-  let b=[109,101,116,97,100,97,116,97,97,114,99,76,101,110,103,116,104,68,105,118,105,115,105,111,110,115,97,117,116,111,67,108,111,115,101,99,117,114,118,101,115,99,117,114,114,101,110,116,80,111,105,110,116,116,121,112,101,117,117,105,100,104,111,108,101,115,80,97,116,104,83,104,97,112,101];
+  let b=[109,101,116,97,100,97,116,97,97,114,99,76,101,110,103,116,104,68,105,118,105,115,105,111,110,115,97,117,116,111,67,108,111,115,101,99,117,114,118,101,115,99,117,114,114,101,110,116,80,111,105,110,116,116,121,112,101,117,117,105,100,104,111,108,101,115,80,97,116,104,83,104,97,112,101,67,117,114,118,101,80,97,116,104];
   let i=0;
-  while(i<75) {
+  while(i<84) {
     let byte=ux_u8_put(at+i,b[i]);
     i=i+1;
   }
@@ -45,7 +45,8 @@ native function path_json_type(at:i64,end:i64,keys:i64,shape:i64) i64 {
   if(type<0) { return 0; }
   let label=keys+66;
   let bytes=4;
-  if(shape) { label=keys+70; bytes=5; }
+  if(shape==1) { label=keys+70; bytes=5; }
+  if(shape==2) { label=keys+75; bytes=9; }
   return json_scan_string(type,end)==type+bytes+2 && sg_same_bytes(type+1,label,bytes);
 }
 
@@ -57,7 +58,12 @@ native function path_json_read(path:i64,meta:i64,at:i64,end:i64,scratch:i64,shap
   let current=json_find_key(at,end,keys+41,12);
   let curves=json_find_key(at,end,keys+35,6);
   if(divisions<1 || flag<0 || (ux_u8(flag)!=116 && ux_u8(flag)!=102) ||
-     curves<0 || ux_u8(curves)!=91 || !sg_read_xy(current,end,scratch+1248)) { return 0-1; }
+     curves<0 || ux_u8(curves)!=91) { return 0-1; }
+  if(shape!=2 && !sg_read_xy(current,end,scratch+1248)) { return 0-1; }
+  if(shape==2) {
+    let resetX=ux_f64_put(scratch+1248,0.0);
+    let resetY=ux_f64_put(scratch+1256,0.0);
+  }
   let c=json_space(curves+1,end);
   let n=0;
   let x=ux_f64(scratch+1248);
@@ -126,7 +132,8 @@ native function path_json_write(path:i64,meta:i64,p:i64,end:i64,scratch:i64,shap
   let keys=path_json_keys(scratch+1104);
   let label=keys+66;
   let bytes=4;
-  if(shape) { label=keys+70; bytes=5; }
+  if(shape==1) { label=keys+70; bytes=5; }
+  if(shape==2) { label=keys+75; bytes=9; }
   p=json_write_string(p,end,label,bytes);
   // ,"autoClose":
   p=sg_word(p,end,7801201525512020524,8);
@@ -149,6 +156,7 @@ native function path_json_write(path:i64,meta:i64,p:i64,end:i64,scratch:i64,shap
     p=CurveControl_toJSON(control,p,end,scratch);
     i=i+1;
   }
+  if(shape==2) { return json_byte(p,end,93); }
   // ],"currentPoint":
   p=sg_word(p,end,7310030993675660381,8);
   p=sg_word(p,end,2482730693706151022,8);
@@ -159,6 +167,19 @@ native function path_json_write(path:i64,meta:i64,p:i64,end:i64,scratch:i64,shap
 native function Path_toJSON(path:i64,meta:i64,dst:i64,end:i64,scratch:i64) i64 {
   if(end<=dst || !path_json_path_space(path,meta,scratch,dst,end-dst)) { return 0-1; }
   let p=path_json_write(path,meta,dst,end,scratch,0);
+  return json_byte(p,end,125);
+}
+
+native function CurvePath_fromJSON(path:i64,meta:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(end<=input || !path_json_path_space(path,meta,scratch,input,end-input)) { return 0-1; }
+  let last=json_value_end(input,end);
+  if(last<0 || json_space(last,end)!=end || path_json_read(path,meta,input,last,scratch,2,0)<0) { return 0-1; }
+  return path_json_read(path,meta,input,last,scratch,2,1);
+}
+
+native function CurvePath_toJSON(path:i64,meta:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(end<=dst || !path_json_path_space(path,meta,scratch,dst,end-dst)) { return 0-1; }
+  let p=path_json_write(path,meta,dst,end,scratch,2);
   return json_byte(p,end,125);
 }
 

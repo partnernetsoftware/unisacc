@@ -10,14 +10,16 @@
 #define TEST "ujs/practice/uxe/test/"
 
 int main(int argc,char **argv) {
-    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    const int curve=argc>=2 && tx_eqz(argv[1],"--curve-path");
+    const int mutate=(argc==2 && tx_eqz(argv[1],"--mutate")) ||
+        (curve && argc==3 && tx_eqz(argv[2],"--mutate"));
+    if(argc!=1 && !(argc==2 && (curve || mutate)) && !(curve && mutate && argc==3)) return 2;
     char dir[256],cwd[390],abi[300],wasm[300],url[850];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-path-shape-json-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
     tx_snprintf(wasm,sizeof wasm,"%s/paths.wasm",dir);
     const int length=tx_snprintf(url,sizeof url,
-        "file://%s/" TEST "path-shape-json-r160.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+        "file://%s/" TEST "path-shape-json-r160.html?wasm=%s&mutate=%d%s",cwd,wasm,mutate,curve?"&curvePath":"");
     const char entry[]="export uxe_path_shape_json(mode:i64,kind:i64,length:i64) i64 version 1;\n";
     char *compile[]={"./ujs/ujs2wasm.com",abi,BASE "record-copy.ujs",BASE "geometry-buffers.ujs",
         BASE "shapeutils.ujs",BASE "shape-hole.ujs",BASE "shape-holes.ujs",BASE "shapegeometry.ujs",
@@ -25,10 +27,20 @@ int main(int argc,char **argv) {
         BASE "shapegeometry-object-rings.ujs",BASE "shapegeometry-object-json.ujs",
         BASE "curve-line.ujs",BASE "curve-bezier.ujs",BASE "path.ujs",BASE "shape.ujs",
         BASE "curve-control-layout.ujs",BASE "curve-control.ujs",BASE "loader-json.ujs",
-        BASE "path-shape-json.ujs",TEST "path-shape-json-probe.ujs","-o",wasm,0};
+        BASE "path-shape-json.ujs",TEST "path-shape-json-probe.ujs","-o",wasm,0,0};
+    if(curve) {
+        int i=0;
+        while(compile[i] && !tx_eqz(compile[i],"-o")) i++;
+        compile[i-1]=BASE "curvepath.ujs";
+        compile[i]=TEST "curvepath-json-probe.ujs";
+        compile[i+1]="-o";
+        compile[i+2]=wasm;
+    }
     const double gold[]={1,1,23,3,2,3,1,0,0,0,1,1,1,1,23,3,2,3,1,0,0,0,1,1};
-    enum { count=sizeof gold/sizeof gold[0] };
-    double actual[count]={0};
+    const double curve_gold[]={6,2,1,6,2,1,2,1};
+    const double *expected=curve?curve_gold:gold;
+    const int count=curve?8:24;
+    double actual[24]={0};
     char *log=0;
     size_t size=0;
     int failed=length<0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600);
@@ -39,8 +51,8 @@ int main(int argc,char **argv) {
         log=0;
     }
     if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
-    if(!failed) for(int i=0;i<count;i++) if(!g_math_near(actual[i],gold[i],1e-6)) {
-        printf("G_GEOMETRY Path and Shape case=%d actual=%.17g gold=%.17g\n",i,actual[i],gold[i]);
+    if(!failed) for(int i=0;i<count;i++) if(!g_math_near(actual[i],expected[i],1e-6)) {
+        printf("G_GEOMETRY Path and Shape case=%d actual=%.17g gold=%.17g\n",i,actual[i],expected[i]);
         failed++;
     }
     char *clean[]={"rm","-rf","--",dir,0};

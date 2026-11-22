@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <pre id="r160">pending</pre>
 <script type="module">
-import { Path, Shape, SplineCurve, Vector2, REVISION } from "../../web/game/three.module.js";
+import { CurvePath, LineCurve, Path, Shape, SplineCurve, Vector2, REVISION } from "../../web/game/three.module.js";
 const result = document.querySelector("#r160");
 const enc = new TextEncoder(), dec = new TextDecoder();
 const flatten = path => path.getPoints(3).flatMap(p => [p.x,p.y]);
@@ -57,7 +57,29 @@ try {
       inspect(2,alternate),
     ];
   };
-  result.textContent = JSON.stringify([1,2].flatMap(check));
+  if (query.has("curvePath")) {
+    const original = new CurvePath();
+    original.add(new LineCurve(new Vector2(0, 0), new Vector2(2, 0)));
+    original.add(new LineCurve(new Vector2(2, 0), new Vector2(2, 4)));
+    original.autoClose = true;
+    const api = new WebAssembly.Instance(module).exports;
+    const base = Number(api.uxe_path_shape_json(0n, 0n, 0n));
+    const mem = new Uint8Array(api.memory.buffer, base, 60000);
+    const bytes = enc.encode(JSON.stringify(original.toJSON()));
+    mem.set(bytes, 40000);
+    const size = Number(api.uxe_path_shape_json(mutate ? 2n : 1n, 3n, BigInt(bytes.length)));
+    if (size < 1) throw Error("CurvePath status " + size);
+    const json = JSON.parse(dec.decode(mem.subarray(16000, 16000 + size)));
+    const rebuilt = new CurvePath().fromJSON(json);
+    const point = rebuilt.getPoint(0.5);
+    const native = Array.from(new Float64Array(mem.buffer, base + 7168, 3));
+    result.textContent = JSON.stringify([
+      ...native, rebuilt.getLength(), point.x, point.y, rebuilt.curves.length,
+      Number(rebuilt.autoClose && json.type === "CurvePath" && !("currentPoint" in json))
+    ]);
+  } else {
+    result.textContent = JSON.stringify([1,2].flatMap(check));
+  }
 } catch (error) {
   result.textContent = "error:" + error.message;
 }
