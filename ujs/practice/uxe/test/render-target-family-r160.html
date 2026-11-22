@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="render-target">pending</pre>
+<script type="module">
+import {
+  REVISION, WebGL3DRenderTarget, WebGLArrayRenderTarget,
+  WebGLCubeRenderTarget, WebGLMultipleRenderTargets
+} from "../../web/game/three.module.js";
+import { createGpuSubmit } from "../base/gpu-host-abi.js";
+import { createGpuTargets } from "../base/gpu-target-abi.js";
+
+const result = document.querySelector("#render-target");
+try {
+  if (REVISION !== "160") throw new Error("three.js revision mismatch");
+  const query = new URLSearchParams(location.search);
+  const kind = Number(query.get("kind"));
+  const wasm = await (await fetch(query.get("wasm"))).arrayBuffer();
+  const gl = document.createElement("canvas").getContext("webgl2");
+  if (!gl) throw new Error("WebGL2 unavailable");
+  let instance;
+  const submit = createGpuSubmit(gl, () => instance.exports.memory, () => 1, createGpuTargets(gl));
+  instance = await WebAssembly.instantiate(await WebAssembly.compile(wasm), { uxe_gpu_v1: { host_gpu_submit: submit } });
+  const status = Number(instance.exports.uxe_render_target(BigInt(query.get("mutate")), BigInt(kind)));
+  const actual = new Uint32Array(instance.exports.memory.buffer, 2097152 + 4096, 9);
+
+  const factory = [
+    null,
+    () => new WebGLCubeRenderTarget(2, { depthBuffer: false }),
+    () => new WebGLArrayRenderTarget(2, 2, 3, { depthBuffer: false }),
+    () => new WebGL3DRenderTarget(2, 2, 3, { depthBuffer: false }),
+    () => new WebGLMultipleRenderTargets(2, 2, 2, { depthBuffer: false })
+  ];
+  const source = factory[kind]();
+  const clone = source.clone();
+  source.setSize(4, 4, source.depth);
+  const layers = target => target.isWebGLCubeRenderTarget ? Array.from({ length: 6 }, (_, index) => target.texture.image[index]).filter(Boolean).length : target.depth;
+  const colors = target => Array.isArray(target.texture) ? target.texture.length : 1;
+  const targetKind = target => target.isWebGLCubeRenderTarget ? 1 : target.isWebGLArrayRenderTarget ? 2 :
+    target.isWebGL3DRenderTarget ? 3 : target.isWebGLMultipleRenderTargets ? 4 : 0;
+  const expected = [clone.width, source.width, targetKind(clone), layers(clone), colors(clone)];
+  clone.copy(source);
+  expected.push(clone.width, Number(clone.texture !== source.texture), layers(clone));
+  let disposals = 0;
+  source.addEventListener("dispose", () => disposals++);
+  clone.addEventListener("dispose", () => disposals++);
+  clone.dispose();
+  source.dispose();
+  expected.push(2 - disposals);
+  result.textContent = JSON.stringify([status, ...actual, ...expected]);
+} catch (error) {
+  result.textContent = "error:" + String(error);
+}
+</script>

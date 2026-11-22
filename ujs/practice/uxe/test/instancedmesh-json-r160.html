@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { BoxGeometry, Color, InstancedMesh, Matrix4, MeshBasicMaterial, REVISION } from "../../web/game/three.module.js";
+const status = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("revision mismatch");
+  const options = new URLSearchParams(location.search);
+  const response = await fetch("file://" + options.get("wasm"));
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
+  const api = instance.exports;
+  const base = Number(api.uxe_instance_json(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 12288);
+  const mesh = new InstancedMesh(new BoxGeometry(), new MeshBasicMaterial(), 2);
+  mesh.setMatrixAt(0, new Matrix4().makeTranslation(5, 0, 0));
+  mesh.setColorAt(0, new Color().setRGB(1, 0, 0));
+  mesh.setColorAt(1, new Color().setRGB(0, 1, 0));
+  mesh.count = 1;
+  const source = mesh.toJSON().object;
+  const expected = { count: source.count, instanceMatrix: source.instanceMatrix, instanceColor: source.instanceColor };
+  const input = new TextEncoder().encode(JSON.stringify(source));
+  memory.set(input, 0);
+  const end = Number(api.uxe_instance_json(BigInt(input.length), BigInt(options.get("mutate"))));
+  if (end < 8192 || end > 12288) throw new Error("instance JSON refused " + end);
+  const decoded = JSON.parse(new TextDecoder().decode(memory.subarray(8192, end)));
+  const wanted = structuredClone(expected);
+  if (options.get("mutate") === "1") wanted.instanceMatrix.array[12] = 7;
+  if (JSON.stringify(decoded) !== JSON.stringify(wanted)) throw new Error(JSON.stringify(decoded));
+  const sample = value => [value.count, value.instanceMatrix.array.length, value.instanceMatrix.array[12],
+    value.instanceColor.array.length, value.instanceColor.array[0], value.instanceColor.array[4]];
+  status.textContent = JSON.stringify([...sample(expected), ...sample(decoded)]);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>

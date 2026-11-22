@@ -1,0 +1,121 @@
+// Bindings are caller-owned rows of child handle, UUID address and UUID length.
+native function lod_json_token(p:i64,end:i64,kind:i64) i64 {
+  if(p<0 || end<p || end>6291456) { return 0-1; }
+  if(kind==0) {
+    if(end-p<11) { return 0-1; }
+    let bytes=[123,34,108,101,118,101,108,115,34,58,91];
+    let i=0;
+    while(i<11) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+11;
+  }
+  if(kind==1) {
+    if(end-p<30) { return 0-1; }
+    let bytes=[123,34,97,117,116,111,85,112,100,97,116,101,34,58,102,97,108,115,101,44,34,108,101,118,101,108,115,34,58,91];
+    let i=0;
+    while(i<30) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+30;
+  }
+  if(kind==2) {
+    if(end-p<10) { return 0-1; }
+    let bytes=[123,34,111,98,106,101,99,116,34,58];
+    let i=0;
+    while(i<10) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+10;
+  }
+  if(kind==3) {
+    if(end-p<12) { return 0-1; }
+    let bytes=[44,34,100,105,115,116,97,110,99,101,34,58];
+    let i=0;
+    while(i<12) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+12;
+  }
+  if(kind==4) {
+    if(end-p<14) { return 0-1; }
+    let bytes=[44,34,104,121,115,116,101,114,101,115,105,115,34,58];
+    let i=0;
+    while(i<14) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+14;
+  }
+  if(kind==5) {
+    if(end-p<10) { return 0-1; }
+    let bytes=[97,117,116,111,85,112,100,97,116,101];
+    let i=0;
+    while(i<10) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+10;
+  }
+  if(kind==6) {
+    if(end-p<6) { return 0-1; }
+    let bytes=[108,101,118,101,108,115];
+    let i=0;
+    while(i<6) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+6;
+  }
+  if(kind==7) {
+    if(end-p<6) { return 0-1; }
+    let bytes=[111,98,106,101,99,116];
+    let i=0;
+    while(i<6) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+6;
+  }
+  if(kind==8) {
+    if(end-p<8) { return 0-1; }
+    let bytes=[100,105,115,116,97,110,99,101];
+    let i=0;
+    while(i<8) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+8;
+  }
+  if(kind==9) {
+    if(end-p<10) { return 0-1; }
+    let bytes=[104,121,115,116,101,114,101,115,105,115];
+    let i=0;
+    while(i<10) { let put=ux_u8_put(p+i,bytes[i]); i=i+1; }
+    return p+10;
+  }
+  return 0-1;
+}
+
+native function lod_json_binding(table:i64,n:i64,node:i64) i64 {
+  let i=0;
+  while(i<n) {
+    let row=table+i*12;
+    if(ux_u32(row)==node) { return row; }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+native function lod_json_span(at:i64,size:i64,begin:i64,end:i64,scratch:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456-size &&
+    (at>=end || at+size<=begin) && (at>=scratch+1104 || at+size<=scratch);
+}
+
+native function LOD_toJSON(lod:i64,table:i64,n:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!lod_valid(lod) || n<0 || n>524288 || dst<0 || end<=dst || end>6291456 ||
+     scratch%8!=0 || !lod_json_span(scratch,1104,dst,end,6291456) ||
+     !lod_json_span(lod,LOD.size,dst,end,scratch) ||
+     !lod_json_span(table,n*12,dst,end,scratch)) { return 0-1; }
+  let rows=ux_u32(lod+LOD.levels);
+  let count=ux_u32(lod+LOD.count);
+  if(count>ux_u32(lod+LOD.capacity) || !lod_json_span(rows,count*LODLevel.size,dst,end,scratch)) { return 0-1; }
+  let p=lod_json_token(dst,end,ux_u32(lod+LOD.autoUpdate)==0);
+  let i=0;
+  while(i<count && p>=0) {
+    let row=rows+i*LODLevel.size;
+    let binding=lod_json_binding(table,n,ux_u32(row+LODLevel.node));
+    if(binding<0) { return 0-1; }
+    let uuid=ux_u32(binding+4);
+    let length=ux_u32(binding+8);
+    if(length<1 || !lod_json_span(uuid,length,dst,end,scratch)) { return 0-1; }
+    if(i>0) { p=json_byte(p,end,44); }
+    p=lod_json_token(p,end,2);
+    p=json_write_string(p,end,uuid,length);
+    p=lod_json_token(p,end,3);
+    p=json_write_f64(p,end,ux_f64(row+LODLevel.distance),scratch);
+    p=lod_json_token(p,end,4);
+    p=json_write_f64(p,end,ux_f64(row+LODLevel.hysteresis),scratch);
+    p=json_byte(p,end,125);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  return json_byte(p,end,125);
+}

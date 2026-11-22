@@ -1,0 +1,106 @@
+// The enclosing object owns the mesh fields. These functions handle the
+// binding properties that r160 stores alongside them.
+native function skinned_json_valid(skin:i64,start:i64,end:i64,scratch:i64,bytes:i64) i64 {
+  if(!skinned_valid(skin) || end<=start || !helper_buffer_span(start,end-start,1) ||
+     !helper_buffer_span(scratch,bytes,8)) { return 0; }
+  let bind=ux_u32(skin+SkinnedMesh.bindMatrix);
+  let inverse=ux_u32(skin+SkinnedMesh.bindInverse);
+  let areas=[skin,bind,inverse,start,scratch];
+  let sizes=[SkinnedMesh.size,128,128,end-start,bytes];
+  if(!helper_buffer_span(bind,128,8) || !helper_buffer_span(inverse,128,8)) { return 0; }
+  let i=0;
+  while(i<5) {
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(areas[i],sizes[i],areas[j],sizes[j])) { return 0; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return 1;
+}
+
+native function SkinnedMesh_writeBindingJSON(skin:i64,dst:i64,end:i64,uuid:i64,bytes:i64,scratch:i64) i64 {
+  if(!skinned_json_valid(skin,dst,end,scratch,1104) ||
+     !source_input_ok(uuid,bytes,dst,end,scratch) || bytes<1 || bytes>255) { return 0-1; }
+  let mode=ux_u32(skin+SkinnedMesh.bindMode);
+  let skeleton=ux_u32(skin+SkinnedMesh.skeleton);
+  if((mode!=1 && mode!=2) || skeleton==0 || !skeleton_valid(skeleton)) { return 0-1; }
+  let matrix=ux_u32(skin+SkinnedMesh.bindMatrix);
+  let header=[44,34,98,105,110,100,77,111,100,101,34,58,34];
+  let attached=[97,116,116,97,99,104,101,100];
+  let detached=[100,101,116,97,99,104,101,100];
+  let matrixKey=[34,44,34,98,105,110,100,77,97,116,114,105,120,34,58,91];
+  let referenceKey=[93,44,34,115,107,101,108,101,116,111,110,34,58];
+  let p=dst;
+  let i=0;
+  while(i<13) { p=json_byte(p,end,header[i]); i=i+1; }
+  i=0;
+  while(i<8) {
+    let ch=attached[i];
+    if(mode==2) { ch=detached[i]; }
+    p=json_byte(p,end,ch);
+    i=i+1;
+  }
+  i=0;
+  while(i<16) { p=json_byte(p,end,matrixKey[i]); i=i+1; }
+  i=0;
+  while(i<16) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,ux_f64(matrix+i*8),scratch);
+    i=i+1;
+  }
+  i=0;
+  while(i<13) { p=json_byte(p,end,referenceKey[i]); i=i+1; }
+  return json_write_string(p,end,uuid,bytes);
+}
+
+native function SkinnedMesh_readBindingJSON(skin:i64,input:i64,end:i64,skeleton:i64,uuid:i64,bytes:i64,scratch:i64) i64 {
+  if(!skinned_json_valid(skin,input,end,scratch,384) || !skeleton_valid(skeleton) || skeleton==0 ||
+     !helper_buffer_disjoint(skeleton,Skeleton.size,scratch,384) ||
+     !helper_buffer_span(uuid,bytes,1) || !helper_buffer_disjoint(uuid,bytes,scratch,384)) { return 0-1; }
+  let root=json_space(input,end);
+  let stop=json_value_end(root,end);
+  if(root<0 || stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let modeKey=[98,105,110,100,77,111,100,101];
+  let matrixKey=[98,105,110,100,77,97,116,114,105,120];
+  let refKey=[115,107,101,108,101,116,111,110];
+  let i=0;
+  while(i<10) {
+    let m=ux_u8_put(scratch+16+i,matrixKey[i]);
+    if(i<8) {
+      let a=ux_u8_put(scratch+i,modeKey[i]);
+      let b=ux_u8_put(scratch+32+i,refKey[i]);
+    }
+    i=i+1;
+  }
+  let modeToken=json_find_key(root,stop,scratch,8);
+  let matrixToken=json_find_key(root,stop,scratch+16,10);
+  let reference=json_find_key(root,stop,scratch+32,8);
+  if(modeToken<0 || matrixToken<0 || reference<0 || ux_u8(matrixToken)!=91) { return 0-1; }
+  let modeLength=Json_decodeString(modeToken,stop,scratch,255);
+  if(modeLength!=8) { return 0-1; }
+  let mode=1;
+  let prefix=ux_u32(scratch);
+  if(prefix==1635018084) { mode=2; }
+  else if(prefix!=1635021921) { return 0-1; }
+  if(ux_u32(scratch+4)!=1684367459) { return 0-1; }
+  if(!skeleton_json_match(reference,stop,uuid,bytes,scratch)) { return 0-1; }
+  let p=json_space(matrixToken+1,stop);
+  i=0;
+  while(i<16) {
+    if(p<0 || p>=stop) { return 0-1; }
+    let value=json_read_number(p,stop);
+    if(!(value-value==0.0)) { return 0-1; }
+    let saved=ux_f64_put(scratch+256+i*8,value);
+    p=json_space(json_scalar_end(p,stop),stop);
+    if(p<0 || p>=stop || ux_u8(p)!=44+49*(i==15)) { return 0-1; }
+    p=json_space(p+1,stop);
+    i=i+1;
+  }
+  // r160 serializes bindMatrix and derives bindMatrixInverse on bind.
+  let bound=SkinnedMesh_bind(skin,skeleton,scratch+256);
+  if(bound<0) { return bound; }
+  let savedMode=ux_u32_put(skin+SkinnedMesh.bindMode,mode);
+  return skin;
+}

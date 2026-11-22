@@ -1,0 +1,66 @@
+native function iba_json_key(dst:i64,kind:i64) i64 {
+  let i=0;
+  if(kind==0) {
+    let bytes=[109,101,115,104,80,101,114,65,116,116,114,105,98,117,116,101];
+    while(i<16) {
+      let written=ux_u8_put(dst+i,bytes[i]);
+      i=i+1;
+    }
+  } else {
+    let bytes=[105,115,73,110,115,116,97,110,99,101,100,66,117,102,102,101,114,65,116,116,114,105,98,117,116,101];
+    while(i<26) {
+      let written=ux_u8_put(dst+i,bytes[i]);
+      i=i+1;
+    }
+  }
+  return i;
+}
+
+// The storage view has an InstancedBufferAttribute record prefix.
+native function IBA_toJSON(state:i64,dst:i64,end:i64,scratch:i64) i64 {
+  let attr=baf_state(state);
+  let recordBytes=BufferAttribute.size+4;
+  if(attr<0 || !baf_span(attr,recordBytes) ||
+     !baf_disjoint(attr,recordBytes,dst,end-dst) ||
+     !baf_disjoint(attr,recordBytes,scratch,1104)) { return 0-1; }
+  let repeat=ux_u32(attr+BufferAttribute.size);
+  if(repeat==0) { return 0-1; }
+  let p=Attribute_toJSON(state,dst,end,scratch);
+  if(p<0) { return p; }
+  let length=iba_json_key(scratch,0);
+  p=json_byte(p-1,end,44);
+  p=json_write_string(p,end,scratch,length);
+  p=json_byte(p,end,58);
+  p=json_write_f64(p,end,0.0+repeat,scratch);
+  length=iba_json_key(scratch,1);
+  p=json_byte(p,end,44);
+  p=json_write_string(p,end,scratch,length);
+  p=json_byte(p,end,58);
+  p=json_write_token(p,end,ObjectJsonToken.boolTrue);
+  return json_byte(p,end,125);
+}
+
+// The caller supplies a separate record for the extended storage view.
+native function IBA_fromJSON(input:i64,end:i64,arena:i64,limit:i64,scratch:i64,kind:i64,record:i64) i64 {
+  let recordBytes=BufferAttribute.size+4;
+  if(end<=input || !baf_span(input,end-input) || !baf_span(scratch,120) ||
+     record%4!=0 || !baf_span(record,recordBytes) ||
+     !baf_disjoint(input,end-input,scratch,120) ||
+     !baf_disjoint(arena,limit-arena,scratch,120) ||
+     !baf_disjoint(record,recordBytes,input,end-input) ||
+     !baf_disjoint(record,recordBytes,scratch,120) ||
+     !baf_disjoint(record,recordBytes,arena,limit-arena)) { return 0-1; }
+  let length=iba_json_key(scratch,0);
+  let value=json_find_key(input,end,scratch,length);
+  let repeat=LoaderJson_uint(value,end,0);
+  length=iba_json_key(scratch,1);
+  let flag=json_find_key(input,end,scratch,length);
+  if(repeat<=0 || repeat>4294967295 || flag<0 || ux_u8(flag)!=116) { return 0-1; }
+  let state=Attribute_fromJSON(input,end,arena,limit,scratch,kind);
+  if(state<0) { return state; }
+  let view=baf_state(state);
+  let copied=uxe_copy_record(record,view,BufferAttribute.size);
+  let repeated=ux_u32_put(record+BufferAttribute.size,repeat);
+  let linked=ux_u32_put(state+BufferAttributeFamilyState.attribute,record);
+  return state;
+}

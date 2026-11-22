@@ -1,0 +1,144 @@
+// Canonical r160 wire values. The GPU sampler can map these independently.
+struct TextureJsonParameters {
+  wrapS: u32;
+  wrapT: u32;
+  magFilter: u32;
+  minFilter: u32;
+  format: u32;
+  type: u32;
+  colorSpace: u32;
+  flipY: u32;
+  generateMipmaps: u32;
+  anisotropy: u32;
+}
+
+native function texture_json_key(scratch:i64,field:i64) i64 {
+  let names=[119,114,97,112,0,
+    109,97,103,70,105,108,116,101,114,0,
+    109,105,110,70,105,108,116,101,114,0,
+    102,111,114,109,97,116,0,
+    116,121,112,101,0,
+    99,111,108,111,114,83,112,97,99,101,0,
+    102,108,105,112,89,0,
+    103,101,110,101,114,97,116,101,77,105,112,109,97,112,115,0,
+    97,110,105,115,111,116,114,111,112,121,0];
+  let offsets=[0,0,5,15,25,32,37,48,54,70];
+  let start=offsets[field];
+  let size=0;
+  while(names[start+size]!=0) {
+    let byte=ux_u8_put(scratch+size,names[start+size]);
+    size=size+1;
+  }
+  return size;
+}
+
+native function texture_json_value_valid(field:i64,value:i64) i64 {
+  if(field==6) { return value>=0 && value<=2; }
+  if(field==7 || field==8) { return value>=0 && value<=1; }
+  if(field==9) { return value>=1 && value<=4294967295; }
+  return value>=0 && value<=4294967295;
+}
+
+native function Texture_writeParametersJSON(at:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,TextureJsonParameters.size,4) || end<=dst ||
+     !helper_buffer_span(dst,end-dst,1) || !helper_buffer_span(scratch,1120,8) ||
+     !helper_buffer_disjoint(at,TextureJsonParameters.size,dst,end-dst) ||
+     !helper_buffer_disjoint(at,TextureJsonParameters.size,scratch,1120) ||
+     !helper_buffer_disjoint(scratch,1120,dst,end-dst)) { return 0-1; }
+  let p=json_byte(dst,end,123);
+  let i=0;
+  while(i<10) {
+    let value=ux_u32(at+i*4);
+    if(!texture_json_value_valid(i,value)) { return 0-1; }
+    if(i!=0) { p=json_byte(p,end,44); }
+    if(i!=1) {
+      let size=texture_json_key(scratch,i);
+      p=json_write_string(p,end,scratch,size);
+      p=json_byte(p,end,58);
+    }
+    if(i==0) { p=json_byte(p,end,91); }
+    if(i==6) {
+      let colors=[115,114,103,98,45,108,105,110,101,97,114];
+      let j=0;
+      while(j<11) { let byte=ux_u8_put(scratch+j,colors[j]); j=j+1; }
+      let length=0;
+      if(value==1) { length=4; }
+      if(value==2) { length=11; }
+      p=json_write_string(p,end,scratch,length);
+    } else if(i==7 || i==8) {
+      let flag=[102,97,108,115,101];
+      let length=5;
+      if(value==1) { flag=[116,114,117,101,0]; length=4; }
+      let j=0;
+      while(j<length) { p=json_byte(p,end,flag[j]); j=j+1; }
+    } else {
+      p=json_write_f64(p,end,0.0+value,scratch+16);
+      if(i==1) { p=json_byte(p,end,93); }
+    }
+    i=i+1;
+  }
+  return json_byte(p,end,125);
+}
+
+native function texture_json_value(at:i64,end:i64,scratch:i64,field:i64) i64 {
+  if(field==6) {
+    let length=Json_decodeString(at,end,scratch,16);
+    if(length==0) { return 0; }
+    if(length!=4 && length!=11) { return 0-1; }
+    let colors=[115,114,103,98,45,108,105,110,101,97,114];
+    let j=0;
+    while(j<length) {
+      if(ux_u8(scratch+j)!=colors[j]) { return 0-1; }
+      j=j+1;
+    }
+    if(length==4) { return 1; }
+    return 2;
+  }
+  if(field==7 || field==8) {
+    let tail=json_scalar_end(at,end);
+    if(tail-at==4 && ux_u8(at)==116) { return 1; }
+    if(tail-at==5 && ux_u8(at)==102) { return 0; }
+    return 0-1;
+  }
+  let number=json_read_number(at,end);
+  if(!(number>=0.0 && number<=4294967295.0)) { return 0-1; }
+  let integer=f64_floor_i64(number);
+  if(number!=0.0+integer) { return 0-1; }
+  return integer;
+}
+
+native function Texture_readParametersJSON(at:i64,input:i64,end:i64,scratch:i64) i64 {
+  if(!helper_buffer_span(at,TextureJsonParameters.size,4) || end<=input ||
+     !helper_buffer_span(input,end-input,1) || !helper_buffer_span(scratch,16,4) ||
+     !helper_buffer_disjoint(at,TextureJsonParameters.size,input,end-input) ||
+     !helper_buffer_disjoint(at,TextureJsonParameters.size,scratch,16) ||
+     !helper_buffer_disjoint(input,end-input,scratch,16)) { return 0-1; }
+  let root=json_space(input,end);
+  let stop=json_value_end(root,end);
+  if(root<0 || stop<0 || json_space(stop,end)!=end) { return 0-1; }
+  let values=[0,0,0,0,0,0,0,0,0,0];
+  let i=0;
+  while(i<10) {
+    let length=texture_json_key(scratch,i);
+    let start=json_find_key(root,stop,scratch,length);
+    if(start<0) { return 0-1; }
+    if(i<2) {
+      if(ux_u8(start)!=91) { return 0-1; }
+      let first=json_space(start+1,stop);
+      let comma=json_space(json_scalar_end(first,stop),stop);
+      if(comma<0 || comma>=stop || ux_u8(comma)!=44) { return 0-1; }
+      let second=json_space(comma+1,stop);
+      let close=json_space(json_scalar_end(second,stop),stop);
+      if(close<0 || close>=stop || ux_u8(close)!=93) { return 0-1; }
+      start=first;
+      if(i==1) { start=second; }
+    }
+    let value=texture_json_value(start,stop,scratch,i);
+    if(!texture_json_value_valid(i,value)) { return 0-1; }
+    values[i]=value;
+    i=i+1;
+  }
+  i=0;
+  while(i<10) { let stored=ux_u32_put(at+i*4,values[i]); i=i+1; }
+  return at;
+}

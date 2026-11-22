@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { LOD, Object3D, ObjectLoader, REVISION } from "../../web/game/three.module.js";
+const status = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("revision mismatch");
+  const options = new URLSearchParams(location.search);
+  const response = await fetch("file://" + options.get("wasm"));
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
+  const api = instance.exports;
+  const base = Number(api.uxe_lod_json(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 16384);
+  const source = new LOD();
+  const near = new Object3D();
+  const far = new Object3D();
+  near.uuid = "near";
+  far.uuid = "far";
+  source.addLevel(far, 16, 0.125);
+  source.addLevel(near, 0, 0);
+  source.autoUpdate = false;
+  const object = source.toJSON().object;
+  const input = new TextEncoder().encode(JSON.stringify(object));
+  memory.set(input, 0);
+  const end = Number(api.uxe_lod_json(BigInt(input.length), BigInt(options.get("mutate"))));
+  if (end < 12288 || end > 16384) throw new Error("LOD JSON refused " + end);
+  const actual = JSON.parse(new TextDecoder().decode(memory.subarray(12288, end)));
+  const reconstructed = new ObjectLoader().parse(source.toJSON());
+  const reference = reconstructed.toJSON().object;
+  const sample = value => [
+    Number(value.autoUpdate === false), value.levels.length, Number(value.levels[0].object === "near"),
+    Number(value.levels[1].object === "far"), value.levels[0].distance,
+    value.levels[1].distance, value.levels[0].hysteresis, value.levels[1].hysteresis
+  ];
+  status.textContent = JSON.stringify([...sample(reference), ...sample(actual)]);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>

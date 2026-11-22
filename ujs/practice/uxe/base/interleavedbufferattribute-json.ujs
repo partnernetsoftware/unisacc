@@ -1,0 +1,101 @@
+native function iattr_json_token(dst:i64,end:i64,kind:i64) i64 {
+  if(kind==0) {
+    let bytes=[123,34,105,115,73,110,116,101,114,108,101,97,118,101,100,66,117,102,102,101,114,65,116,116,114,105,98,117,116,101,34,58,116,114,117,101,44,34,105,116,101,109,83,105,122,101,34,58];
+    if(dst<0 || end-dst<48) { return 0-1; }
+    let i=0;
+    while(i<48) { let written=ux_u8_put(dst+i,bytes[i]); i=i+1; }
+    return dst+48;
+  }
+  if(kind==1) {
+    let bytes=[44,34,100,97,116,97,34,58];
+    if(dst<0 || end-dst<8) { return 0-1; }
+    let i=0;
+    while(i<8) { let written=ux_u8_put(dst+i,bytes[i]); i=i+1; }
+    return dst+8;
+  }
+  if(kind==2) {
+    let bytes=[44,34,111,102,102,115,101,116,34,58];
+    if(dst<0 || end-dst<10) { return 0-1; }
+    let i=0;
+    while(i<10) { let written=ux_u8_put(dst+i,bytes[i]); i=i+1; }
+    return dst+10;
+  }
+  if(kind==3) {
+    let bytes=[44,34,110,111,114,109,97,108,105,122,101,100,34,58];
+    if(dst<0 || end-dst<14) { return 0-1; }
+    let i=0;
+    while(i<14) { let written=ux_u8_put(dst+i,bytes[i]); i=i+1; }
+    return dst+14;
+  }
+  return 0-1;
+}
+
+// The UUID belongs to the backing record in the caller's InterleavedBuffer table.
+native function IAttr_toJSON(view:i64,uuid:i64,bytes:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!baf_span(view,InterleavedBufferAttribute.size) || !baf_span(uuid,bytes) ||
+     bytes<=0 || end<=dst || !baf_span(dst,end-dst) || !baf_span(scratch,1104) ||
+     !baf_disjoint(dst,end-dst,scratch,1104) ||
+     !baf_disjoint(dst,end-dst,uuid,bytes) ||
+     !baf_disjoint(dst,end-dst,view,InterleavedBufferAttribute.size) ||
+     !baf_disjoint(scratch,1104,view,InterleavedBufferAttribute.size) ||
+     !baf_disjoint(scratch,1104,uuid,bytes)) { return 0-1; }
+  let size=ux_u32(view+InterleavedBufferAttribute.itemSize);
+  let offset=ux_u32(view+InterleavedBufferAttribute.offset);
+  let normalized=ux_u32(view+InterleavedBufferAttribute.normalized);
+  if(size==0 || normalized>1) { return 0-1; }
+  let p=iattr_json_token(dst,end,0);
+  p=json_write_f64(p,end,0.0+size,scratch);
+  p=iattr_json_token(p,end,1);
+  p=json_write_string(p,end,uuid,bytes);
+  p=iattr_json_token(p,end,2);
+  p=json_write_f64(p,end,0.0+offset,scratch);
+  p=iattr_json_token(p,end,3);
+  let truth=ObjectJsonToken.boolFalse;
+  if(normalized!=0) { truth=ObjectJsonToken.boolTrue; }
+  p=json_write_token(p,end,truth);
+  return json_byte(p,end,125);
+}
+
+native function IAttr_readFields(input:i64,end:i64,uuid:i64,bytes:i64,out:i64,scratch:i64) i64 {
+  if(end<=input || !baf_span(input,end-input) || !baf_span(scratch,120) ||
+     bytes<=0 || !baf_span(uuid,bytes) || !baf_span(out,12) ||
+     !baf_disjoint(scratch,120,input,end-input) ||
+     !baf_disjoint(scratch,120,uuid,bytes) ||
+     !baf_disjoint(scratch,120,out,12) ||
+     !baf_disjoint(out,12,input,end-input) ||
+     !baf_disjoint(out,12,uuid,bytes)) { return 0-1; }
+  let tag=geometry_json_interleaved_key(input,end,scratch,1);
+  if(tag<0 || ux_u8(tag)!=116) { return 0-1; }
+  let ref=geometry_json_field(input,end,scratch,ObjectJsonToken.data,2,4);
+  if(ref<0 || ux_u8(ref)!=34) { return 0-1; }
+  let close=json_value_end(ref,end);
+  if(close<0 || close-ref!=bytes+2) { return 0-1; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(ref+1+i)!=ux_u8(uuid+i)) { return 0-1; }
+    i=i+1;
+  }
+  let sizeAt=geometry_json_field(input,end,scratch,ObjectJsonToken.itemSize,2,8);
+  let offsetAt=LoaderJson_find(input,end,scratch,1936090735,29797,0,6);
+  let flag=geometry_json_field(input,end,scratch,ObjectJsonToken.normalized,2,10);
+  let size=LoaderJson_uint(sizeAt,end,0);
+  let offset=LoaderJson_uint(offsetAt,end,0);
+  if(size<=0 || size>4294967295 || offsetAt<0 || offset<0 || offset>4294967295 ||
+     flag<0 || (ux_u8(flag)!=116 && ux_u8(flag)!=102)) { return 0-1; }
+  let a=ux_u32_put(out,size);
+  let b=ux_u32_put(out+4,offset);
+  let c=ux_u32_put(out+8,ux_u8(flag)==116);
+  return out;
+}
+
+function IAttr_fromJSON(dst,...args) {
+  let fields=IAttr_readFields(args[0],args[1],args[2],args[3],args[5],args[6]);
+  let result=0-1;
+  if(fields>=0) {
+    let size=ux_u32(fields);
+    let offset=ux_u32(fields+4);
+    let normalized=ux_u32(fields+8);
+    result=InterleavedBufferAttribute_init(dst,args[4],size,offset,normalized);
+  }
+  return result;
+}

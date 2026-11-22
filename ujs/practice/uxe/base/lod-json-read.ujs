@@ -1,0 +1,103 @@
+native function lod_json_find(obj:i64,end:i64,scratch:i64,key:i64) i64 {
+  let after=lod_json_token(scratch,scratch+16,key);
+  if(after<0) { return 0-1; }
+  return json_find_key(obj,end,scratch,after-scratch);
+}
+
+native function lod_json_resolve(at:i64,end:i64,table:i64,n:i64) i64 {
+  if(at<0 || ux_u8(at)!=34) { return 0-1; }
+  let close=json_value_end(at,end);
+  if(close<=at+2) { return 0-1; }
+  let i=0;
+  let found=0-1;
+  while(i<n) {
+    let row=table+i*12;
+    let length=ux_u32(row+8);
+    let uuid=ux_u32(row+4);
+    let same=length==close-at-2 && uuid<=6291456-length;
+    let j=0;
+    while(same && j<length) {
+      same=ux_u8(uuid+j)==ux_u8(at+1+j);
+      j=j+1;
+    }
+    if(same) {
+      if(found>=0) { return 0-1; }
+      found=ux_u32(row);
+    }
+    i=i+1;
+  }
+  return found;
+}
+
+native function lod_json_levels(lod:i64,arena:i64,levels:i64,end:i64,table:i64,n:i64,scratch:i64,commit:i64) i64 {
+  if(levels<0 || ux_u8(levels)!=91) { return 0-1; }
+  let p=json_space(levels+1,end);
+  let rows=ux_u32(lod+LOD.levels);
+  let parent=ux_u32(lod+LOD.node);
+  let capacity=ux_u32(lod+LOD.capacity);
+  let count=0;
+  let previous=0.0;
+  while(p>=0 && p<end && ux_u8(p)!=93) {
+    if(ux_u8(p)!=123 || count>=capacity) { return 0-1; }
+    let close=json_value_end(p,end);
+    if(close<0) { return 0-1; }
+    let object=lod_json_find(p,close,scratch,7);
+    let distanceAt=lod_json_find(p,close,scratch,8);
+    let hysteresisAt=lod_json_find(p,close,scratch,9);
+    let node=lod_json_resolve(object,close,table,n);
+    if(node<=0) { return 0-1; }
+    let address=Object3D_address(arena,node);
+    if(address<0 || ux_u32(address+Object3D.parent)!=parent) { return 0-1; }
+    let distance=json_read_number(distanceAt,close);
+    let hysteresis=0.0;
+    if(hysteresisAt>=0) { hysteresis=json_read_number(hysteresisAt,close); }
+    else if(hysteresisAt!=0-2) { return 0-1; }
+    if(!(distance>=previous && distance-distance==0.0 && hysteresis-hysteresis==0.0)) { return 0-1; }
+    previous=distance;
+    if(commit!=0) {
+      let row=rows+count*LODLevel.size;
+      let a=ux_u32_put(row+LODLevel.node,node);
+      let b=ux_f64_put(row+LODLevel.distance,distance);
+      let c=ux_f64_put(row+LODLevel.hysteresis,hysteresis);
+    }
+    count=count+1;
+    p=json_space(close,end);
+    if(p<0 || p>=end) { return 0-1; }
+    if(ux_u8(p)!=93) {
+      if(ux_u8(p)!=44) { return 0-1; }
+      p=json_space(p+1,end);
+      if(p<0 || p>=end || ux_u8(p)==93) { return 0-1; }
+    }
+  }
+  if(p<0 || p>=end || ux_u8(p)!=93) { return 0-1; }
+  return count;
+}
+
+// Children have already been restored by the common Object3D loader.
+native function LOD_fromJSON(lod:i64,arena:i64,input:i64,end:i64,table:i64,n:i64,scratch:i64) i64 {
+  if(!lod_valid(lod) || n<0 || n>524288 || input<0 || end<=input || end>6291456 ||
+     !lod_json_span(lod,LOD.size,input,end,scratch) ||
+     !lod_json_span(table,n*12,input,end,scratch) ||
+     !lod_json_span(scratch,1104,input,end,6291456)) { return 0-1; }
+  let rows=ux_u32(lod+LOD.levels);
+  let capacity=ux_u32(lod+LOD.capacity);
+  if(!lod_json_span(rows,capacity*LODLevel.size,input,end,scratch) ||
+     !lod_json_span(rows,capacity*LODLevel.size,table,table+n*12,scratch)) { return 0-1; }
+  let close=json_value_end(input,end);
+  if(close<0 || json_space(close,end)!=end) { return 0-1; }
+  let levels=lod_json_find(input,close,scratch,6);
+  let mode=lod_json_find(input,close,scratch,5);
+  let automatic=1;
+  if(mode>=0) {
+    if(ux_u8(mode)==102) { automatic=0; }
+    else if(ux_u8(mode)!=116) { return 0-1; }
+  } else if(mode!=0-2) { return 0-1; }
+  let valid=lod_json_levels(lod,arena,levels,close,table,n,scratch,0);
+  if(valid<0) { return valid; }
+  let count=lod_json_levels(lod,arena,levels,close,table,n,scratch,1);
+  if(count<0) { return count; }
+  let published=ux_u32_put(lod+LOD.count,count);
+  let selected=ux_u32_put(lod+LOD.current,0);
+  let autoUpdate=ux_u32_put(lod+LOD.autoUpdate,automatic);
+  return lod;
+}
