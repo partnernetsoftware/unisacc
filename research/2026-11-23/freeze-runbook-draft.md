@@ -80,7 +80,7 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 
 ## 五、发布说明如实口径
 
-不得声称:osx/win 调用号与信号常量经实机运行验证(没有 CI 样本的项写"仅读码");全批资格 QUALIFIED(s9 UNKNOWN 时只能写 NOT_QUALIFIED);Z3/Z3b/Z5/Z6 与前端三项在本版交付(已撤出 3970fc6d5a);pipe2 在 osx 上原子(是 pipe 加 fcntl 非原子实现)。须写明已知缺口:U31/U32 已迁 v0.0.96,U33 改回 OPEN(本次未在 build/*.tsv 搜到这三个编号,引用位置待核);l0-posix2 若到冻结仍未实跑写 REGISTERED_NORUN;win 停止信号表达法待裁,osx/win 的 sy_child_subreaper 为具名拒绝 -ENOSYS;严格预跑中的 UNKNOWN 与 expected-fail 逐条列出;0.0.95 若同期冻结,其未判定项不并入本版说明。
+不得声称:osx/win 调用号与信号常量经实机运行验证(没有 CI 样本的项一律写"仅读码"或 `UNMEASURED`, osx 四项探针直到 S3b `ci-early` 实跑前均为 `UNMEASURED`);全批资格 QUALIFIED(s9 UNKNOWN 时只能写 NOT_QUALIFIED);Z3/Z3b/Z5/Z6 与前端三项在本版交付(已撤出 3970fc6d5a, 分别归 `v0.0.96` 与前端类候选);pipe2 在 osx 上原子(是 `cx/sys/proc.cx:225-240` 的 pipe 加 fcntl 非原子实现, win 为具名拒绝 `-ENOSYS`)。须写明已知缺口:U31/U32 已迁 `v0.0.96:build/state-unverified.tsv:24-25`, U33 改回 `OPEN` 记于 `v0.0.94:build/state-unverified.tsv:24`; `l0-posix2` 批次在 `v0.0.94:tests/batches.tsv:1931` 为 `IMPLEMENTED`, 与 `plans/v0.0.94.md` 的 `REGISTERED_NORUN` 说明不一致, 由 S3 候选产品重建后首跑决定, 未实跑前保持 `REGISTERED_NORUN`; `win` 无原生停止信号投递(`exec/facts/signal-targets.tsv` 仅进程内兼容值, `ext/sysx/reaper.cx` 与 `sy_child_subreaper` 在 win/osx 为具名拒绝 `-ENOSYS`);严格预跑中的 UNKNOWN 与 expected-fail 逐条列出;0.0.95 若同期冻结, 其改动、证据、未判定项与回滚材料均不并入 0.0.94 发布说明, 两版各自独立绑定 F/APE/evidence 目录。自动门: `sh ./unisacc.com tools/check-release-prep.cx -- --part notes` 核对每条「已验证」声称必须带真实证据引用(且非 `TBD` 占位行), 否则 FAIL。
 
 ## 六、风险与本手册最可能错在哪里
 
