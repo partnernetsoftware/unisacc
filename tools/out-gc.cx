@@ -1,47 +1,80 @@
 /* tools/out-gc.cx -- report what is in out/ and, only when told twice, remove the old parts of it.
  *
- *   sh ./unisacc.com tools/out-gc.cx                 report: one line per top-level entry, then age buckets
- *   sh ./unisacc.com tools/out-gc.cx -- --older-than 30 --delete
- *   sh ./unisacc.com tools/out-gc.cx -- --root out/x ...   the same over another root (tools/check-out-gc.cx)
+ *   sh ./unisacc.com tools/out-gc.cx -- --root /abs/path
+ *   sh ./unisacc.com tools/out-gc.cx -- --root /abs/path --older-than 30 --delete
  *
- * out/ is the ignored scratch root: build products, register runs, logs.  Nothing in it is a source of truth,
- * but it is also where another agent's in-flight reconstruction writes, so the default is read-only and even
- * --delete needs --older-than as a second key.  The age is the newest mtime found anywhere under the entry,
- * not the directory's own: a directory whose last child changed yesterday is in flight whatever its own date
- * says.
- *
- * The report is the input to the decision; the tool never guesses.  A path that cannot be stat'ed is listed
- * with ERR and never deleted.  Deleting goes through cx_rmtree, the deletion guard. */
+ * A(安全子集): --root 必须是绝对路径, realpath 后拒绝 /、$HOME、$HOME/.cache、$HOME/.cache/unisacc、
+ * .../chains 本身(父路径). 年龄用目录内最新文件 mtime(newest), 不用目录自身 mtime.
+ * --delete 时: 在途链(owner.tsv 的 pid 存活)与账本(prd_mempalace.md)引用路径不删; cx_rmtree 失败或保护
+ * 拒绝时打 REFUSED 且进程 rc=1. 列目录堆上倍增, 硬顶具名拒绝. CANDIDATE 行与旧版同形(不加 protected=).
+ * --dir-names-cap / --no-protect 仅夹具与变异. */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use text.num
 #pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 
 #define GC_MAX_ENTRY 512
 #define GC_MAX_PATH 4096
+#define GC_DIR_START 4096
+#define GC_DIR_HARD_DEFAULT (16 * 1024 * 1024)
+#define GC_MAX_PROT 512
 
-static long buckets[5];        /* bytes: <3d, 3-7d, 7-30d, >30d, unknown */
+static long buckets[5];
 static long counts[5];
 static long total_bytes, total_entries, doomed_bytes, doomed_entries, deleted;
+static long g_dir_hard = GC_DIR_HARD_DEFAULT;
+static int g_hard_overflow;
+static int g_protect = 1;
+static char g_prot[GC_MAX_PROT][GC_MAX_PATH];
+static int g_nprot;
+static int g_refused;
 
-/* Newest mtime under PATH (PATH itself included); *bytes gets the recursive size.  -errno on a stat failure. */
+static int list_names(const char *path, char **out, int *ncount, const char **why) {
+    long cap = GC_DIR_START;
+    char *b = 0;
+    int fd, r;
+    *out = 0; *ncount = 0; *why = 0;
+    fd = sy_open(path, O_RDONLY, 0);
+    if (fd < 0) { *why = "cannot open"; return fd; }
+    for (;;) {
+        b = mm_alloc(cap);
+        if (!b) { sy_close(fd); *why = "out of memory"; return -ENOMEM; }
+        r = sy_dir_names(fd, b, (int)cap);
+        if (r != -ENOSPC) break;
+        mm_free(b); b = 0;
+        if (cap >= g_dir_hard) {
+            sy_close(fd); *why = "directory listing exceeds cap"; g_hard_overflow = 1; return -ENOSPC;
+        }
+        cap *= 2;
+        if (cap > g_dir_hard) cap = g_dir_hard;
+    }
+    sy_close(fd);
+    if (r < 0) { mm_free(b); *why = "cannot list"; return r; }
+    *out = b; *ncount = r;
+    return 0;
+}
+
+/* Age uses newest mtime under PATH (children), not the directory's own mtime alone. */
 static int newest(const char *path, long *bytes, long *mtime, int depth) {
     sy_stat_t st;
-    int fd, n, i, off;
+    char *names = 0;
+    const char *why = 0;
+    int n = 0, i, off;
     long b = 0, m = 0;
-    char names[1 << 16];        /* on the stack: a static one would be clobbered by the recursion below */
     char child[GC_MAX_PATH];
     if (sy_lstat(path, &st) != 0) return -EIO;
     if (st.mtime > m) m = st.mtime;
     if (st.kind != 'd' || depth > 6) { *bytes = st.size; *mtime = m; return 0; }
-    fd = sy_open(path, O_RDONLY, 0);
-    if (fd < 0) return fd;
-    n = sy_dir_names(fd, names, sizeof names);
-    sy_close(fd);
-    if (n < 0) return n;
+    if (list_names(path, &names, &n, &why) != 0) {
+        if (g_hard_overflow) return -ENOSPC;
+        return -EIO;
+    }
     off = 0;
     for (i = 0; i < n; i++) {
         long cb = 0, cm = 0;
@@ -49,10 +82,14 @@ static int newest(const char *path, long *bytes, long *mtime, int depth) {
         if (plen + nlen + 2 > GC_MAX_PATH) { off += nlen + 1; continue; }
         tx_snprintf(child, sizeof child, "%s/%s", path, names + off);
         off += nlen + 1;
-        if (newest(child, &cb, &cm, depth + 1) != 0) continue;      /* a racing removal is not a failure */
+        if (newest(child, &cb, &cm, depth + 1) != 0) {
+            if (g_hard_overflow) { mm_free(names); return -ENOSPC; }
+            continue;
+        }
         b += cb;
         if (cm > m) m = cm;
     }
+    mm_free(names);
     *bytes = b;
     *mtime = m;
     return 0;
@@ -66,52 +103,193 @@ static int bucket_of(long age_days) {
     return 3;
 }
 
+static int path_eq(const char *a, const char *b) { return tx_eqz(a, b); }
+
+static int is_forbidden_root(const char *abs) {
+    char home[GC_MAX_PATH], p[GC_MAX_PATH];
+    const char *h = sy_env("HOME");
+    if (path_eq(abs, "/")) return 1;
+    if (!h || !h[0]) return 0;
+    if (sy_realpath(h, home, sizeof home) < 0) {
+        tx_snprintf(home, sizeof home, "%s", h);
+    }
+    if (path_eq(abs, home)) return 1;
+    tx_snprintf(p, sizeof p, "%s/.cache", home);
+    if (path_eq(abs, p)) return 1;
+    tx_snprintf(p, sizeof p, "%s/.cache/unisacc", home);
+    if (path_eq(abs, p)) return 1;
+    tx_snprintf(p, sizeof p, "%s/.cache/unisacc/chains", home);
+    if (path_eq(abs, p)) return 1;
+    return 0;
+}
+
+static void prot_add(const char *abs) {
+    int i;
+    if (!abs || !abs[0] || g_nprot >= GC_MAX_PROT) return;
+    for (i = 0; i < g_nprot; i++) if (path_eq(g_prot[i], abs)) return;
+    tx_snprintf(g_prot[g_nprot], sizeof g_prot[0], "%s", abs);
+    g_nprot++;
+}
+
+static int pid_alive(long pid) {
+    if (pid <= 1) return 0;
+    return kill((pid_t)pid, 0) == 0;
+}
+
+/* Load live chain dirs (owner.tsv pid alive) and paths mentioned in prd_mempalace.md. */
+static void load_protect(void) {
+    char home[GC_MAX_PATH], chains[GC_MAX_PATH], *names = 0;
+    const char *why = 0, *h = sy_env("HOME");
+    int n = 0, i, off;
+    size_t sz = 0;
+    char *mem;
+    if (!g_protect) return;
+    if (h && h[0] && sy_realpath(h, home, sizeof home) >= 0) {
+        tx_snprintf(chains, sizeof chains, "%s/.cache/unisacc/chains", home);
+        if (list_names(chains, &names, &n, &why) == 0) {
+            off = 0;
+            for (i = 0; i < n; i++) {
+                char entry[GC_MAX_PATH], owner[GC_MAX_PATH], abs[GC_MAX_PATH];
+                int nlen = tx_len(names + off, GC_MAX_ENTRY);
+                size_t on = 0; char *ob;
+                tx_snprintf(entry, sizeof entry, "%s/%s", chains, names + off);
+                off += nlen + 1;
+                tx_snprintf(owner, sizeof owner, "%s/owner.tsv", entry);
+                ob = cx_read(owner, &on);
+                if (!ob) continue;
+                /* owner.tsv: first line often pid=<n> or a pid field; scan for digits after pid= */
+                {
+                    long pid = 0; size_t j;
+                    for (j = 0; j + 4 < on; j++) {
+                        if (ob[j] == 'p' && ob[j + 1] == 'i' && ob[j + 2] == 'd' && ob[j + 3] == '=') {
+                            j += 4;
+                            while (j < on && ob[j] >= '0' && ob[j] <= '9') {
+                                pid = pid * 10 + (ob[j] - '0'); j++;
+                            }
+                            break;
+                        }
+                    }
+                    if (pid_alive(pid) && sy_realpath(entry, abs, sizeof abs) >= 0) prot_add(abs);
+                }
+                mm_free(ob);
+            }
+            mm_free(names);
+        }
+    }
+    mem = cx_read("prd_mempalace.md", &sz);
+    if (mem && sz > 0) {
+        /* collect /home/... or absolute paths that look like cache evidence */
+        size_t j = 0;
+        while (j < sz) {
+            if (mem[j] == '/' && j + 5 < sz) {
+                size_t a = j, b = j;
+                char cand[GC_MAX_PATH], abs[GC_MAX_PATH];
+                while (b < sz && mem[b] > 32 && mem[b] != ';' && mem[b] != ',' && mem[b] != '.' && mem[b] != ')' && mem[b] != '"' && mem[b] != '\'') b++;
+                if (b > a && b - a < GC_MAX_PATH - 1) {
+                    long k; for (k = 0; k < (long)(b - a); k++) cand[k] = mem[a + k];
+                    cand[b - a] = 0;
+                    if (sy_realpath(cand, abs, sizeof abs) >= 0) prot_add(abs);
+                }
+                j = b ? b : j + 1;
+            } else j++;
+        }
+        mm_free(mem);
+    }
+}
+
+static int is_protected(const char *path) {
+    char abs[GC_MAX_PATH];
+    int i;
+    long pn, qn;
+    if (!g_protect || g_nprot == 0) return 0;
+    if (sy_realpath(path, abs, sizeof abs) < 0) tx_snprintf(abs, sizeof abs, "%s", path);
+    qn = tx_len(abs, GC_MAX_PATH);
+    for (i = 0; i < g_nprot; i++) {
+        pn = tx_len(g_prot[i], GC_MAX_PATH);
+        if (pn <= 0) continue;
+        if (qn == pn && path_eq(abs, g_prot[i])) return 1;
+        /* prefix: protected is under entry, or entry under protected */
+        if (qn >= pn && mm_same(abs, g_prot[i], pn) && (qn == pn || abs[pn] == '/')) return 1;
+        if (pn >= qn && mm_same(g_prot[i], abs, qn) && (pn == qn || g_prot[i][qn] == '/')) return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     sy_stat_t dir, st;
     long older = -1, now, bytes, mtime, age, i;
-    int del = 0, fd, n, off, k;
-    const char *root = "out";
-    static char names[1 << 18];
-    char path[GC_MAX_PATH];
+    int del = 0, n, off, k;
+    const char *root_arg = "out";
+    const char *why = 0;
+    char *names = 0;
+    char root_abs[GC_MAX_PATH], path[GC_MAX_PATH];
     static const char *label[5] = { "<3d", "3-7d", "7-30d", ">30d", "unknown" };
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--older-than") && i + 1 < argc) older = tx_atol(argv[++i]);
-        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_arg = argv[++i];
         else if (tx_eqz(argv[i], "--delete")) del = 1;
-        else { sy_eprintf("usage: out-gc [--root DIR] [--older-than DAYS --delete]\n"); return 2; }
+        else if (tx_eqz(argv[i], "--dir-names-cap") && i + 1 < argc) g_dir_hard = tx_atol(argv[++i]);
+        else if (tx_eqz(argv[i], "--no-protect")) g_protect = 0;
+        else { sy_eprintf("usage: out-gc --root ABSDIR [--older-than DAYS --delete]\n"); return 2; }
     }
     if (del && older <= 0) { sy_eprintf("out-gc: --delete needs --older-than DAYS>0 as a second key\n"); return 2; }
-    if (sy_stat(root, &dir) != 0 || dir.kind != 'd') { sy_eprintf("out-gc: no %s directory\n", root); return 1; }
-    fd = sy_open(root, O_RDONLY, 0);
-    if (fd < 0) { sy_eprintf("out-gc: cannot open %s\n", root); return 1; }
-    n = sy_dir_names(fd, names, sizeof names);
-    sy_close(fd);
-    if (n < 0) { sy_eprintf("out-gc: cannot list %s\n", root); return 1; }
+    if (g_dir_hard < 64) { sy_eprintf("out-gc: --dir-names-cap too small\n"); return 2; }
+    /* Root must be absolute (no relative / parent-form input). */
+    if (!root_arg[0] || root_arg[0] != '/') {
+        sy_eprintf("out-gc: --root must be an absolute path\n");
+        return 2;
+    }
+    if (sy_realpath(root_arg, root_abs, sizeof root_abs) < 0) {
+        sy_eprintf("out-gc: no %s directory\n", root_arg);
+        return 1;
+    }
+    if (is_forbidden_root(root_abs)) {
+        sy_eprintf("out-gc: refused root %s (parent/system path)\n", root_abs);
+        return 2;
+    }
+    if (sy_stat(root_abs, &dir) != 0 || dir.kind != 'd') { sy_eprintf("out-gc: no %s directory\n", root_abs); return 1; }
+    if (del) load_protect();
+    if (list_names(root_abs, &names, &n, &why) != 0) {
+        if (why && tx_eqz(why, "cannot open")) sy_eprintf("out-gc: cannot open %s\n", root_abs);
+        else if (why && tx_eqz(why, "directory listing exceeds cap"))
+            sy_eprintf("out-gc: directory listing exceeds cap: %s\n", root_abs);
+        else sy_eprintf("out-gc: cannot list %s\n", root_abs);
+        return 1;
+    }
     now = sy_wall_s();
     sy_printf("%-8s %-10s %s\n", "AGE", "BYTES", "ENTRY");
     off = 0;
     for (i = 0; i < n; i++) {
         int nlen = tx_len(names + off, GC_MAX_ENTRY);
         int b;
-        tx_snprintf(path, sizeof path, "%s/%s", root, names + off);
+        tx_snprintf(path, sizeof path, "%s/%s", root_abs, names + off);
         off += nlen + 1;
         mtime = 0;
         if (newest(path, &bytes, &mtime, 0) != 0) {
+            if (g_hard_overflow) {
+                sy_eprintf("out-gc: directory listing exceeds cap: %s\n", path);
+                mm_free(names);
+                return 1;
+            }
             sy_eprintf("ERR\t%s\n", path);
             buckets[4]++; counts[4]++;
             continue;
         }
-        age = (now - mtime) / 86400;
+        age = (now - mtime) / 86400; /* newest under entry, not dir mtime alone */
         b = bucket_of(age);
         buckets[b] += bytes; counts[b]++;
         total_bytes += bytes; total_entries++;
         sy_printf("%-8ld %-10ld %s\n", age, bytes, path);
         if (older > 0 && age >= older) {
             doomed_bytes += bytes; doomed_entries++;
-            if (del && cx_rmtree(path) == 0) { deleted++; sy_printf("DELETED\t%s\n", path); }
-            else if (del) sy_eprintf("REFUSED\t%s\n", path);
+            if (del) {
+                if (is_protected(path)) { g_refused++; sy_eprintf("REFUSED\t%s\n", path); }
+                else if (cx_rmtree(path) == 0) { deleted++; sy_printf("DELETED\t%s\n", path); }
+                else { g_refused++; sy_eprintf("REFUSED\t%s\n", path); }
+            }
         }
     }
+    mm_free(names);
     for (k = 0; k < 5; k++)
         sy_printf("BUCKET\t%s\tentries=%ld\tbytes=%ld\n", label[k], counts[k], buckets[k]);
     sy_printf("TOTAL\tentries=%ld\tbytes=%ld\n", total_entries, total_bytes);
@@ -119,5 +297,5 @@ int main(int argc, char **argv) {
                              older, doomed_entries, doomed_bytes, deleted);
     else sy_printf("CANDIDATE\tnone\tpass --older-than DAYS [--delete]\n");
     (void)st;
-    return 0;
+    return g_refused ? 1 : 0;
 }
