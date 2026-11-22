@@ -1139,6 +1139,60 @@ int main(void) {
            "mutant-killed-times-use-nonpass: including FAIL/KILLED rows in estimate triggers PRERUN_SPLIT_REQUIRED");
     }
 
+    /* (16) opt-frame4-material warmup exclusion + pre-run prepare & stale incomplete dir cleanup in session root */
+    {
+        char f16[CPD_PW], ids16[CPD_PW], tf16[CPD_PW], o16[CPD_PW], m16[CPD_PW];
+        const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
+        char pd_path[CPD_PW];
+        if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
+        else cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd);
+        if (cx_fmt(f16, sizeof f16, "%s/f16", work) || sy_mkdir_all(f16, 0700) ||
+            cx_fmt(ids16, sizeof ids16, "%s/ids.txt", f16) ||
+            cx_fmt(tf16, sizeof tf16, "%s/times.tsv", f16) ||
+            cx_fmt(o16, sizeof o16, "%s/out", f16) ||
+            cx_fmt(m16, sizeof m16, "%s/mock.sh", f16)) return 2;
+        const char *s_ids16 = "opt-frame4-o2-negative-label\nwin-argv-facts\n";
+        const char *s_tf16 =
+            "opt-frame4-o2-negative-label\t1500\n"
+            "win-argv-facts\t2200\n";
+        const char *s_m16 =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2\n"
+            "if [ \"$mode\" = prepare-opt-frame4 ]; then echo OPT_FRAME4_PREPARED > \"$3\"; exit 0; fi\n"
+            "jobs=$3; ids=$4; out=$5\n"
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
+        if (cx_write(ids16, s_ids16, strlen(s_ids16)) ||
+            cx_write(tf16, s_tf16, strlen(s_tf16)) ||
+            cx_write(m16, s_m16, strlen(s_m16))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; "
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 2 --warmup 1 && "
+            "grep -q '^W0000\t1\twarmup\t1\twin-argv-facts$' '%s/windows.tsv' && "
+            "mkdir -p '%s/prep-cache/opt-frame4-material-stale1234.dir' '%s/prep-cache/opt-frame4-material-good5678.dir' && "
+            "printf 'opt-frame4-material-v1\\n' > '%s/prep-cache/opt-frame4-material-good5678.dir/materials.tsv' && "
+            "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 && "
+            "[ ! -d '%s/prep-cache/opt-frame4-material-stale1234.dir' ] && "
+            "[ -f '%s/prep-cache/opt-frame4-material-good5678.dir/materials.tsv' ] && "
+            "[ -f '%s/done.prepare-opt-frame4' ] && "
+            "echo OPT_FRAME4_PREWARM_OK",
+            cwd, pd_path, ids16, tf16, o16, o16,
+            o16, o16, o16,
+            cwd, pd_path, work, o16, m16,
+            o16, o16, o16)) return 2;
+        int rc16 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc16 == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_STALE_OPT_FRAME4\taction=LIST\t") &&
+           ckk_has(out, CPD_OUT, "opt-frame4-material-stale1234.dir\treason=missing-materials-tsv") &&
+           ckk_has(out, CPD_OUT, "PRERUN_STALE_OPT_FRAME4\taction=REMOVED\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE_MATERIAL\tmaterial=opt-frame4-material\trc=0\t") &&
+           ckk_has(out, CPD_OUT, "OPT_FRAME4_PREWARM_OK"),
+           "opt-frame4-warmup-excluded-and-prerun-prepared: W0000 skips opt-frame4-*, lists/cleans stale session opt-frame4 dir without materials.tsv, and prewarms opt-frame4-material");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;

@@ -129,7 +129,7 @@ static int pd_is_expected_unmeasured_id(const char *id) {
 }
 
 static int pd_is_warmup_excluded_id(const char *id) {
-    return pd_is_expected_unmeasured_id(id) || pd_starts(id, "unit-frontcache-");
+    return pd_is_expected_unmeasured_id(id) || pd_starts(id, "unit-frontcache-") || pd_starts(id, "opt-frame4-");
 }
 
 static int pd_is_heavy_id(const char *id) {
@@ -1516,6 +1516,73 @@ static int pd_first_attempts(PdLane *group, int count, const char *dir,
     return bad ? -1 : 0;
 }
 
+static void pd_clean_stale_opt_frame4_in(const char *base_dir) {
+    sy_dir_t d;
+    char stale[32][PD_PW];
+    int nstale = 0, next;
+    if (!base_dir || !base_dir[0] || sy_dir_open(&d, base_dir)) return;
+    while ((next = sy_dir_next(&d)) == 1 && nstale < 32) {
+        size_t nl = strlen(d.name);
+        if (!pd_starts(d.name, "opt-frame4-material-") || nl < 25 || strcmp(d.name + nl - 4, ".dir") != 0)
+            continue;
+        char dirp[PD_PW], recp[PD_PW];
+        sy_stat_t dst, mst;
+        if (cx_fmt(dirp, sizeof dirp, "%s/%s", base_dir, d.name) ||
+            cx_fmt(recp, sizeof recp, "%s/materials.tsv", dirp)) continue;
+        if (sy_lstat(dirp, &dst) != 0 || dst.kind != 'd') continue;
+        if (sy_lstat(recp, &mst) == 0 && mst.kind == 'f') continue;
+        cx_fmt(stale[nstale], sizeof stale[nstale], "%s", dirp);
+        printf("PRERUN_STALE_OPT_FRAME4\taction=LIST\tpath=%s\treason=missing-materials-tsv\n", dirp);
+        nstale++;
+    }
+    sy_dir_close(&d);
+    if (nstale > 0) fflush(stdout);
+    for (int i = 0; i < nstale; i++) {
+        char why[256];
+        char *rmv[] = {"rm", "-rf", stale[i], 0};
+        np_result r = {0};
+        int tr = np_run(rmv, 0, 0, 10, &r, why, sizeof why);
+        int ok = (!tr && r.rc == 0 && sy_exists(stale[i]) == 0);
+        np_free(&r);
+        printf("PRERUN_STALE_OPT_FRAME4\taction=%s\tpath=%s\n", ok ? "REMOVED" : "FAILED", stale[i]);
+    }
+    if (nstale > 0) fflush(stdout);
+}
+
+static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const char *out_dir,
+                                  const char *mock_runner, int resume, const unsigned char *wb, int64_t wn) {
+    char pcache[PD_PW], donep[PD_PW], outp[PD_PW], cmd[8192], why[256], lay_dir[PD_PW];
+    pd_clean_stale_opt_frame4_in(out_dir);
+    if (!cx_fmt(pcache, sizeof pcache, "%s/prep-cache", out_dir))
+        pd_clean_stale_opt_frame4_in(pcache);
+    if (!wb || wn <= 0 || tx_find((const char *)wb, (long)wn, "opt-frame4-", 11) < 0) return;
+    if (cx_fmt(donep, sizeof donep, "%s/done.prepare-opt-frame4", out_dir) ||
+        cx_fmt(outp, sizeof outp, "%s/prepare-opt-frame4.tsv", out_dir)) return;
+    if (resume && sy_exists(donep) == 1) return;
+    const char *run_cwd = eff_root;
+    long started = sy_now_ms();
+    if (mock_runner) {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' prepare-opt-frame4 'opt-frame4-material' '%s'", mock_runner, outp)) return;
+    } else if (pd_prebuild_layout(eff_root, cand, lay_dir, sizeof lay_dir) == 0) {
+        run_cwd = lay_dir;
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --materials-dump --prepare-materials --ids opt-frame4-o2-negative-label", lay_dir)) return;
+    } else {
+        const char *use_cand = (cand && cand[0] && !tx_eqz(cand, "-")) ? cand : "./unisacc.com";
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/affected.cx -- --materials-dump --prepare-materials --ids opt-frame4-o2-negative-label", eff_root, use_cand)) return;
+    }
+    char *av[] = {"sh", "-c", cmd, 0};
+    np_result r = {0};
+    int tr = np_run(av, run_cwd, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
+    int rc = tr ? 124 : r.rc;
+    if (rc == 0 && !mock_runner && r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "REFUSED=", 8) >= 0)
+        rc = 1;
+    np_free(&r);
+    printf("PRERUN_PREPARE_MATERIAL\tmaterial=opt-frame4-material\trc=%d\twall_ms=%ld\n", rc, sy_now_ms() - started);
+    fflush(stdout);
+    if (rc == 0)
+        (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
+}
+
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner) {
     char wpath[PD_PW], real_root[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
@@ -1591,6 +1658,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
         }
     }
+    pd_prepare_opt_frame4(eff_root, cand, out_dir, mock_runner, resume, wb, wn);
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
     int retry_counts[PD_MAX_IDS];
