@@ -1,0 +1,93 @@
+// Each entry maps a data URL to a caller-owned decoded face handle.
+struct CubeFaceJsonBinding {
+  url: u32;
+  bytes: u32;
+  face: u32;
+}
+
+native function cube_face_reference(token:i64,end:i64,table:i64,count:i64,scratch:i64,scratchBytes:i64) i64 {
+  let length=Json_decodeString(token,end,scratch,scratchBytes);
+  if(length<=0) { return 0-1; }
+  let i=0;
+  while(i<count) {
+    let row=table+i*CubeFaceJsonBinding.size;
+    let size=ux_u32(row+CubeFaceJsonBinding.bytes);
+    let url=ux_u32(row+CubeFaceJsonBinding.url);
+    if(size==length) {
+      let j=0;
+      while(j<length && ux_u8(url+j)==ux_u8(scratch+j)) { j=j+1; }
+      if(j==length) {
+        let face=ux_u32(row+CubeFaceJsonBinding.face);
+        if(face==0) { return 0-1; }
+        return face;
+      }
+    }
+    i=i+1;
+  }
+  return 0-1;
+}
+
+struct CubeFaceJsonRead {
+  table: u32;
+  count: u32;
+  scratch: u32;
+  scratchBytes: u32;
+}
+
+// The Source writer already emits the six URL strings in face order.
+// Resolve them against supplied image resources and publish all six together.
+native function CubeTexture_readFaceReferences(out:i64,input:i64,end:i64,uuid:i64,uuidBytes:i64,
+                                               options:i64) i64 {
+  if(!helper_buffer_span(options,CubeFaceJsonRead.size,4)) { return 0-1; }
+  let table=ux_u32(options+CubeFaceJsonRead.table);
+  let count=ux_u32(options+CubeFaceJsonRead.count);
+  let scratch=ux_u32(options+CubeFaceJsonRead.scratch);
+  let scratchBytes=ux_u32(options+CubeFaceJsonRead.scratchBytes);
+  if(end<=input || count<1 || count>65535 || scratchBytes<255 ||
+     !helper_buffer_span(out,24,4) || !helper_buffer_span(input,end-input,1) ||
+     !helper_buffer_span(scratch,scratchBytes,1) ||
+     !helper_buffer_span(table,count*CubeFaceJsonBinding.size,4)) { return 0-1; }
+  let addresses=[out,input,table,scratch];
+  let sizes=[24,end-input,count*CubeFaceJsonBinding.size,scratchBytes];
+  let i=0;
+  while(i<4) {
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(addresses[i],sizes[i],addresses[j],sizes[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<count) {
+    let row=table+i*CubeFaceJsonBinding.size;
+    let url=ux_u32(row+CubeFaceJsonBinding.url);
+    let bytes=ux_u32(row+CubeFaceJsonBinding.bytes);
+    if(!helper_buffer_span(url,bytes,1) || !helper_buffer_disjoint(url,bytes,scratch,scratchBytes) ||
+       !helper_buffer_disjoint(url,bytes,out,24)) { return 0-1; }
+    i=i+1;
+  }
+  let identity=Source_matchJSONReference(input,end,uuid,uuidBytes,scratch);
+  if(identity!=1) { return 0-1; }
+  let root=json_space(input,end);
+  let array=source_read_key(root,end,scratch,7107189,3);
+  if(array<0 || ux_u8(array)!=91) { return 0-1; }
+  let faces=[0,0,0,0,0,0];
+  let p=json_space(array+1,end);
+  i=0;
+  while(i<6) {
+    if(p<0 || p>=end || ux_u8(p)!=34) { return 0-1; }
+    let face=cube_face_reference(p,end,table,count,scratch,scratchBytes);
+    if(face<0) { return face; }
+    faces[i]=face;
+    let tail=json_scan_string(p,end);
+    if(tail<0) { return 0-1; }
+    p=json_space(tail,end);
+    if(p<0 || p>=end || ux_u8(p)!=44+49*(i==5)) { return 0-1; }
+    p=json_space(p+1,end);
+    i=i+1;
+  }
+  i=0;
+  while(i<6) { let saved=ux_u32_put(out+i*4,faces[i]); i=i+1; }
+  return out;
+}
