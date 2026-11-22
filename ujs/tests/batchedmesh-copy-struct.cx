@@ -1,0 +1,86 @@
+#pragma unisa use g_math
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *parts[]={"views","record-copy","batchedmesh","batchedmesh-lifecycle",0};
+    const char setup[]=
+        "let source=BatchedMesh_init(0,128,3,9,12);"
+        "let target=BatchedMesh_init(32,256,3,9,12);"
+        "let first=BatchedMesh_addGeometry(source,1,5,5);"
+        "let second=BatchedMesh_addGeometry(source,2,3,3);"
+        "let removed=BatchedMesh_deleteGeometry(source,first);"
+        "let hidden=BatchedMesh_setVisibleAt(source,second,0);"
+        "let cloned=BatchedMesh_clone(target,source);if(cloned<0){return 0.0+cloned;}";
+    const char *cases[]={
+        "return 0.0+ux_u32(target+BatchedMesh.count);",
+        "let row=BatchedMesh_getRange(target,second);return 0.0+ux_u32(row+BatchGeometry.vertexStart);",
+        "return 0.0+BatchedMesh_getVisibleAt(target,first);",
+        "let shown=BatchedMesh_setVisibleAt(target,second,1);return 0.0+BatchedMesh_getVisibleAt(source,second);",
+        "return 0.0+BatchedMesh_addGeometry(target,3,1,1);",
+    };
+    const double expected[]={2,5,0,0,2};
+    char dir[256],source[320],wasm[320],html[320],url[370],program[14000],*log=0;
+    size_t length=0;
+    if(sy_mkdtemp("/tmp","uxe-batch-ledger-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/probe.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/probe.wasm",dir);
+    tx_snprintf(html,sizeof html,"%s/probe.html",dir);
+    tx_snprintf(url,sizeof url,"file://%s?count=5",html);
+    int used=tx_snprintf(program,sizeof program,"export uxe_evaluate_case(selected:i64) f64 version 1;\n");
+    int failed=0;
+    for(int i=0;parts[i] && !failed;i++) {
+        char path[160];
+        unsigned char *body=0;
+        int64_t bytes=0;
+        tx_snprintf(path,sizeof path,"ujs/practice/uxe/base/%s.ujs",parts[i]);
+        failed=sy_read_file(path,&body,&bytes,sizeof program-used-2)!=0;
+        if(!failed) {
+            int written=tx_snprintf(program+used,sizeof program-used,"%.*s\n",(int)bytes,body);
+            if(written<0 || written>=(int)sizeof program-used) failed=1;
+            else used+=written;
+        }
+        mm_free(body);
+    }
+    if(!failed) {
+        int written=tx_snprintf(program+used,sizeof program-used,"%s\n",setup);
+        if(written<0 || written>=(int)sizeof program-used) failed=1;
+        else used+=written;
+    }
+    for(int i=0;!failed && i<5;i++) {
+        const char *statement=mutate && i==3?
+            "let shown=BatchedMesh_setVisibleAt(target,second,1);return 0.0+BatchedMesh_getVisibleAt(target,second);":cases[i];
+        int written=tx_snprintf(program+used,sizeof program-used,"if(selected==%d){%s}\n",i,statement);
+        if(written<0 || written>=(int)sizeof program-used) failed=1;
+        else used+=written;
+    }
+    const char tail[]="return 0.0/0.0;\n";
+    if(!failed && used+(int)sizeof tail<=(int)sizeof program) {
+        for(int i=0;i<(int)sizeof tail-1;i++) program[used++]=tail[i];
+        failed=sy_write_file(source,program,used,0600)!=0;
+    } else failed=1;
+    double actual[5];
+    char *compile[]={"./ujs/ujs2wasm.com",source,"-o",wasm,0};
+    if(!failed) {
+        const int rc=cx_runv_timeout(compile,6,&log,&length);
+        if(rc && log) printf("%.*s",(int)length,log);
+        failed=rc || sy_copy("ujs/practice/uxe/test/wasm-batch.html",html,0600) ||
+            r160_wait_read(url,"#wasm-cases",actual,5,dir);
+    }
+    for(int i=0;!failed && i<5;i++) {
+        if(!g_math_near(actual[i],expected[i],0.0)) {
+            printf("BATCH_LEDGER case=%d actual=%.17g gold=%.17g\n",i,actual[i],expected[i]);
+            failed=1;
+        }
+    }
+    mm_free(log);
+    if(sy_remove_all(dir)) failed=1;
+    printf("G_STRUCT BatchedMesh ledger independent cases=5 failed=%d\n",failed);
+    return failed;
+}
