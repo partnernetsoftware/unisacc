@@ -1,6 +1,6 @@
 # plans/prep/l0-checks:L0 小件包先红检查草稿(0.0.89 预备)
 
-状态:只作草稿参考,不登记批次,不是现行检查。文件后缀为 .cx.draft:devsvc 写入 .cx 时试编,编不过即拒绝写入,而这些草稿按设计在 0.0.85 上编不过,故加 .draft 后缀入库,搬正时去掉。8 个草稿在已装 0.0.85 上因缺接口先红(编译期 unknown identifier、undefined function 或参数不符),红证据摘要见下。0.0.89 开槽后由实现者搬到 tests/ 或 tools/ 下,改名为正式 check 并按 tools/register.cx 登记,登记前先过 dvqualify 单提交资格布局自测。计划见 archive/plans-pre090/v0.0.89.md。
+状态:只作草稿参考,不登记批次,不是现行检查。其中 6 个已被正式 tools/check-l0-*.cx 取代并归档(killtree/mtime-ns/random/rusage/syscall6/waitset);仍留 capture 与 pdeathsig(尚无同名正式夹具)。文件后缀为 .cx.draft。原 8 个草稿在已装 0.0.85 上因缺接口先红。计划见 archive/plans-pre090/v0.0.89.md。
 
 | 草稿 | 对应项 | 0.0.85 红原因 |
 |---|---|---|

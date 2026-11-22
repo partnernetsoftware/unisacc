@@ -41,8 +41,9 @@
  *  14-root-record  build.json product_digest and bytes match the APE (else root-record-digest-mismatch); the
  *                  commit equals the release/candidate.tsv row of the APE's --version (else
  *                  root-record-commit-mismatch); no row, or sources_sha256: WARN root-record-stale-fields, PASS.
- *  15-gen-all      tools/gen-all-check.cx -- --root REPO: GEN_ALL_SUMMARY diff=0 error=0 (rc 0); any product
- *                  table generator DIFF or ERROR blocks the chain with its --write fix.
+ *  15-gen-all      tools/gen-all-check.cx -- --root REPO: GEN_ALL_SUMMARY diff=0 error=0 (rc 0), uncovered<=2
+ *                  (two 0.0.86 waivers expiring at 0.0.87: rt-shared-gen, ucn-pp-gen), and total=N synchronized
+ *                  with CGAC_GENERATORS in tools/check-gen-all-check.cx; any DIFF/ERROR/drift blocks the chain.
  *  17-root-public  ROOT has no unisacc.com.candidate.tsv (tools/install-ape.cx --candidate).  With one the row is
  *                  PASS with WARN root-candidate ... RELEASE_BLOCKED: the chain may start, release-exec and
  *                  release-run --pack refuse that Root as a baseline.
@@ -348,10 +349,62 @@ static int j_slot(const char *o, long n, int rc, char *ev, int cap) {
     line_with(o, n, "CHAIN_READY_VERSION_SLOT", l, sizeof l);
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "REFUSE CHAIN_READY_VERSION_SLOT no verdict line"); return 0;
 }
+static const char *cr_repo = ".";
+static long j_genall_field(const char *l, long ln, const char *key) {
+    long kl = (long)tx_len(key, 64), at = tx_find(l, ln, key, kl);
+    int64_t v = -1;
+    if (at < 0) return -1;
+    {
+        const char *p = l + at + kl;
+        long d = 0;
+        while (at + kl + d < ln && p[d] >= '0' && p[d] <= '9') d++;
+        if (d <= 0 || tx_to_i64(p, d, 10, &v) != 0) return -1;
+    }
+    return (long)v;
+}
+static long j_cgac_generators(const char *repo) {
+    char p[512]; size_t n = 0; char *b; long v = -1;
+    const char *needle = "#define CGAC_GENERATORS ";
+    long nl = (long)tx_len(needle, 64), at;
+    if (cx_fmt(p, sizeof p, "%s/tools/check-gen-all-check.cx", (repo && repo[0]) ? repo : ".")) return -1;
+    b = (char *)cx_read(p, &n);
+    if (!b) return -1;
+    at = tx_find(b, (long)n, needle, nl);
+    if (at >= 0) {
+        const char *s = b + at + nl;
+        long d = 0; int64_t iv = -1;
+        while (at + nl + d < (long)n && s[d] >= '0' && s[d] <= '9') d++;
+        if (d > 0 && tx_to_i64(s, d, 10, &iv) == 0) v = (long)iv;
+    }
+    free(b);
+    return v;
+}
+/* Hard pin on uncovered<=2: tools/gen-all-check.cx:225-232 and tools/check-gen-all-check.cx:426-438
+ * declare exactly two 0.0.86 waivers (tools/rt-shared-gen.cx known-gap:unlisted-stdlib-state;expires=0.0.87
+ * and tools/ucn-pp-gen.cx needs-pristine-root;expires=0.0.87). Any new tools/*-gen.cx without --check
+ * raises uncovered>2 (or emits an unwaived GEN_UNCOVERED line) and must fail 15-gen-all before freeze. */
 static int j_genall(const char *o, long n, int rc, char *ev, int cap) {
     char l[200];
     line_with(o, n, "GEN_ALL_SUMMARY\t", l, sizeof l);
     if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "diff=0") && has(l, (long)tx_len(l, 200), "error=0")) {
+        long ln = (long)tx_len(l, 200);
+        long tot = j_genall_field(l, ln, "total=");
+        long unc = j_genall_field(l, ln, "uncovered=");
+        if (unc > 2) {
+            char u[200];
+            line_with(o, n, "GEN_UNCOVERED\t", u, sizeof u);
+            cx_fmt(ev, (size_t)cap, "rc=%d %s; uncovered-generator: uncovered=%ld > 2 (waivers: rt-shared-gen,ucn-pp-gen expires=0.0.87); first: %s",
+                   rc, l, unc, u[0] ? u : "none");
+            return 0;
+        }
+        if (tot > 1) {
+            long cgac = j_cgac_generators(cr_repo);
+            if (cgac > 0 && tot != cgac) {
+                cx_fmt(ev, (size_t)cap, "rc=%d %s; cgac-generator-count-drift: gen-all total=%ld != check-gen-all-check CGAC_GENERATORS=%ld; fix: sync CGAC_GENERATORS in tools/check-gen-all-check.cx and run check-gen-all-check/part2/split",
+                       rc, l, tot, cgac);
+                return 0;
+            }
+        }
         put_ev(ev, cap, l); return 1;
     }
     {
@@ -1071,7 +1124,7 @@ int main(int argc, char **argv) {
     }
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--fast")) fast = 1;
-        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) repo = argv[++a];
+        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { repo = argv[++a]; cr_repo = repo; }
         else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
         else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
         else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];

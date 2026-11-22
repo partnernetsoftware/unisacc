@@ -1859,6 +1859,16 @@ static int cmd_f(const char *root, int argc, char **argv) {
     tmpf[0] = 0;
     if (strcmp(op, "read") && strcmp(op, "write") && strcmp(op, "edit") && strcmp(op, "edits")) return 2;
     wr = strcmp(op, "read") != 0;
+    /* 相对路径必须落在调用者自己的工作树根:继承来的 UNISACC_FLOW_ROOT 指向别的检出时具名拒绝,
+       否则 f write cx/x.cx 会静默写进他人工作树(2026-11-22 复现:worktree 内调用落到主检出)。 */
+    if (wr && path[0] != '/') {
+        const char *fr = getenv("UNISACC_FLOW_ROOT");
+        char rr[PW], frr[PW];
+        if (fr && *fr && sy_realpath(fr, frr, sizeof frr) >= 0 && sy_realpath(root, rr, sizeof rr) >= 0 && strcmp(rr, frr)) {
+            fprintf(stderr, "F\t%s\trefused\tREFUSE flow-root-other-worktree: UNISACC_FLOW_ROOT=%s but this worktree is %s; give an absolute path or unset it (nothing written)\n", op, frr, rr);
+            return 1;
+        }
+    }
     F(fop, sizeof fop, "file.%s", !strcmp(op, "edits") ? "write" : op);
     ab_kv(&b, "path", path, strlen(path));
     xs = opt(argc, argv, "--expect-sha", "");

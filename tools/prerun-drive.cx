@@ -129,7 +129,16 @@ static int pd_is_expected_unmeasured_id(const char *id) {
 }
 
 static int pd_is_warmup_excluded_id(const char *id) {
-    return pd_is_expected_unmeasured_id(id) || pd_starts(id, "unit-frontcache-");
+    return pd_is_expected_unmeasured_id(id) || pd_starts(id, "unit-frontcache-") || pd_starts(id, "opt-frame4-");
+}
+
+static int pd_is_isolated_long_id(const char *id) {
+    static const char *builtin[] = {
+        "slow-split", "unit-frontcache-equiv0", "unit-frontcache-equiv1",
+        "unit-frontcache-equiv2", "unit-frontcache-equiv3b", "unit-frontcache-equiv4", 0
+    };
+    for (int i = 0; builtin[i]; i++) if (tx_eqz(id, builtin[i])) return 1;
+    return 0;
 }
 
 static int pd_is_heavy_id(const char *id) {
@@ -148,7 +157,8 @@ static int pd_is_heavy_id(const char *id) {
  * Each netregen uses its own out/material paths. Early canaries keep their barriers. */
 static int pd_can_share_window(const char *phase, const char *ids, int jobs) {
     if (jobs != 1 || !ids[0] || strchr(ids, ',') || pd_is_early_canary_id(ids)) return 0;
-    return tx_eqz(phase, "long") || (tx_eqz(phase, "heavy") && pd_starts(ids, "netregen-"));
+    return tx_eqz(phase, "long") ||
+           (tx_eqz(phase, "heavy") && (pd_starts(ids, "netregen-") || tx_eqz(ids, "unit-frontcache-equiv3") || pd_is_isolated_long_id(ids)));
 }
 
 static int pd_width(const char *s, int max) {
@@ -409,6 +419,8 @@ static int pd_load_times_file(const char *path) {
                     v = atol(nbuf);
                 }
                 if (v < 500) v = 500;
+                if (pd_ids[idx].heavy && !pd_mut_times_use_nonpass && v > PD_BATCH_WINDOW_MS && v <= 55000)
+                    v = PD_BATCH_WINDOW_MS;
                 if (!pd_ids[idx].measured || v > pd_ids[idx].time_ms)
                     pd_ids[idx].time_ms = v;
                 pd_ids[idx].measured = 1;
@@ -510,11 +522,25 @@ static int pd_load_priority_file(const char *path) {
 static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal) {
     if (nrem <= 0) return;
     if (!pd_has_times) {
+        int norm_rem[PD_MAX_IDS];
+        int nnorm = 0;
+        for (int i = 0; i < nrem; i++) {
+            if (pd_is_isolated_long_id(pd_ids[rem[i]].id) && pd_nwins < pd_max_wins) {
+                PdWin *w = &pd_wins[pd_nwins++];
+                cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins - 1);
+                w->jobs = 1;
+                cx_fmt(w->phase, sizeof w->phase, "long");
+                w->count = 1;
+                w->idxs[0] = rem[i];
+            } else {
+                norm_rem[nnorm++] = rem[i];
+            }
+        }
         int pos = 0;
-        while (pos < nrem && pd_nwins < pd_max_wins) {
-            int take = nrem - pos;
+        while (pos < nnorm && pd_nwins < pd_max_wins) {
+            int take = nnorm - pos;
             if (take > win_size) {
-                if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
+                if (nnorm - pos < win_size + 8 && nnorm - pos >= 16) take = (nnorm - pos) / 2;
                 else take = win_size;
             }
             PdWin *w = &pd_wins[pd_nwins];
@@ -522,21 +548,31 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
             w->jobs = pd_normal_jobs;
             cx_fmt(w->phase, sizeof w->phase, "normal");
             w->count = take;
-            for (int k = 0; k < take; k++) w->idxs[k] = rem[pos + k];
+            for (int k = 0; k < take; k++) w->idxs[k] = norm_rem[pos + k];
             pos += take;
             pd_nwins++;
             (*w_normal)++;
         }
         return;
     }
-    /* Sort descending by historical time_ms, breaking ties by original position */
+    /* Sort descending by historical time_ms, breaking ties by original position.
+     * Isolated-long batches sort ahead of normal batches so all long windows group
+     * together into contiguous window_lanes=4 waves without fragmenting normal packing. */
     for (int i = 1; i < nrem; i++) {
         int v = rem[i];
         long t = pd_ids[v].time_ms;
+        int iso_v = pd_is_isolated_long_id(pd_ids[v].id) || t > PD_TIMED_BUDGET_MS ||
+                    (!pd_ids[v].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[v].id)));
         int j = i - 1;
-        while (j >= 0 && pd_ids[rem[j]].time_ms < t) {
-            rem[j + 1] = rem[j];
-            j--;
+        while (j >= 0) {
+            int u = rem[j];
+            long tu = pd_ids[u].time_ms;
+            int iso_u = pd_is_isolated_long_id(pd_ids[u].id) || tu > PD_TIMED_BUDGET_MS ||
+                        (!pd_ids[u].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[u].id)));
+            if (iso_u < iso_v || (iso_u == iso_v && tu < t)) {
+                rem[j + 1] = rem[j];
+                j--;
+            } else break;
         }
         rem[j + 1] = v;
     }
@@ -548,7 +584,8 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         cx_fmt(w->phase, sizeof w->phase, "normal");
         w->count = 0;
         int can_pack_unmeasured = (pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id));
-        if (pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS || (!pd_ids[rem[pos]].measured && !can_pack_unmeasured)) {
+        if (pd_is_isolated_long_id(pd_ids[rem[pos]].id) || pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS ||
+            (!pd_ids[rem[pos]].measured && !can_pack_unmeasured)) {
             /* An isolated or missing sample cannot establish parallel wall time unless conservative --unmeasured-ms is set. */
             cx_fmt(w->phase, sizeof w->phase, "long");
             w->idxs[w->count++] = rem[pos++];
@@ -559,9 +596,11 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         long cost = 0;
         /* dvqualify preserves --ids order and barriers every --segment-batches jobs. */
         while (pos < nrem && w->count < win_size &&
+               !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
                cost + pd_ids[rem[pos]].time_ms <= PD_TIMED_BUDGET_MS) {
             cost += pd_ids[rem[pos]].time_ms;
             for (int lane = 0; lane < w->jobs && pos < nrem && w->count < win_size &&
+                 !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
                  (pd_ids[rem[pos]].measured || pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id)); lane++)
                 w->idxs[w->count++] = rem[pos++];
         }
@@ -1516,6 +1555,73 @@ static int pd_first_attempts(PdLane *group, int count, const char *dir,
     return bad ? -1 : 0;
 }
 
+static void pd_clean_stale_opt_frame4_in(const char *base_dir) {
+    sy_dir_t d;
+    char stale[32][PD_PW];
+    int nstale = 0, next;
+    if (!base_dir || !base_dir[0] || sy_dir_open(&d, base_dir)) return;
+    while ((next = sy_dir_next(&d)) == 1 && nstale < 32) {
+        size_t nl = strlen(d.name);
+        if (!pd_starts(d.name, "opt-frame4-material-") || nl < 25 || strcmp(d.name + nl - 4, ".dir") != 0)
+            continue;
+        char dirp[PD_PW], recp[PD_PW];
+        sy_stat_t dst, mst;
+        if (cx_fmt(dirp, sizeof dirp, "%s/%s", base_dir, d.name) ||
+            cx_fmt(recp, sizeof recp, "%s/materials.tsv", dirp)) continue;
+        if (sy_lstat(dirp, &dst) != 0 || dst.kind != 'd') continue;
+        if (sy_lstat(recp, &mst) == 0 && mst.kind == 'f') continue;
+        cx_fmt(stale[nstale], sizeof stale[nstale], "%s", dirp);
+        printf("PRERUN_STALE_OPT_FRAME4\taction=LIST\tpath=%s\treason=missing-materials-tsv\n", dirp);
+        nstale++;
+    }
+    sy_dir_close(&d);
+    if (nstale > 0) fflush(stdout);
+    for (int i = 0; i < nstale; i++) {
+        char why[256];
+        char *rmv[] = {"rm", "-rf", stale[i], 0};
+        np_result r = {0};
+        int tr = np_run(rmv, 0, 0, 10, &r, why, sizeof why);
+        int ok = (!tr && r.rc == 0 && sy_exists(stale[i]) == 0);
+        np_free(&r);
+        printf("PRERUN_STALE_OPT_FRAME4\taction=%s\tpath=%s\n", ok ? "REMOVED" : "FAILED", stale[i]);
+    }
+    if (nstale > 0) fflush(stdout);
+}
+
+static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const char *out_dir,
+                                  const char *mock_runner, int resume, const unsigned char *wb, int64_t wn) {
+    char pcache[PD_PW], donep[PD_PW], outp[PD_PW], cmd[8192], why[256], lay_dir[PD_PW];
+    pd_clean_stale_opt_frame4_in(out_dir);
+    if (!cx_fmt(pcache, sizeof pcache, "%s/prep-cache", out_dir))
+        pd_clean_stale_opt_frame4_in(pcache);
+    if (!wb || wn <= 0 || tx_find((const char *)wb, (long)wn, "opt-frame4-", 11) < 0) return;
+    if (cx_fmt(donep, sizeof donep, "%s/done.prepare-opt-frame4", out_dir) ||
+        cx_fmt(outp, sizeof outp, "%s/prepare-opt-frame4.tsv", out_dir)) return;
+    if (resume && sy_exists(donep) == 1) return;
+    const char *run_cwd = eff_root;
+    long started = sy_now_ms();
+    if (mock_runner) {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' prepare-opt-frame4 'opt-frame4-material' '%s'", mock_runner, outp)) return;
+    } else if (pd_prebuild_layout(eff_root, cand, lay_dir, sizeof lay_dir) == 0) {
+        run_cwd = lay_dir;
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --materials-dump --prepare-materials --ids opt-frame4-o2-negative-label", lay_dir)) return;
+    } else {
+        const char *use_cand = (cand && cand[0] && !tx_eqz(cand, "-")) ? cand : "./unisacc.com";
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/affected.cx -- --materials-dump --prepare-materials --ids opt-frame4-o2-negative-label", eff_root, use_cand)) return;
+    }
+    char *av[] = {"sh", "-c", cmd, 0};
+    np_result r = {0};
+    int tr = np_run(av, run_cwd, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
+    int rc = tr ? 124 : r.rc;
+    if (rc == 0 && !mock_runner && r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "REFUSED=", 8) >= 0)
+        rc = 1;
+    np_free(&r);
+    printf("PRERUN_PREPARE_MATERIAL\tmaterial=opt-frame4-material\trc=%d\twall_ms=%ld\n", rc, sy_now_ms() - started);
+    fflush(stdout);
+    if (rc == 0)
+        (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
+}
+
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner) {
     char wpath[PD_PW], real_root[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
@@ -1591,6 +1697,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             return pd_refuse("batch-count-reaches-release-prep-maxb-1024");
         }
     }
+    pd_prepare_opt_frame4(eff_root, cand, out_dir, mock_runner, resume, wb, wn);
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
     int retry_counts[PD_MAX_IDS];
