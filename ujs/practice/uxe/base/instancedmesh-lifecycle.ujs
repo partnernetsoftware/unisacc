@@ -1,0 +1,40 @@
+native function instance_arrays_valid(object:i64) i64 {
+  let count=ux_u32(object+InstancedMesh.count);
+  let cap=ux_u32(object+InstancedMesh.capacity);
+  let matrices=ux_u32(object+InstancedMesh.matrices);
+  let colors=ux_u32(object+InstancedMesh.colors);
+  return count<=cap && matrices%4==0 && colors%4==0 &&
+      matrices<=6291456-cap*64 && colors<=6291456-cap*12;
+}
+
+native function InstancedMesh_copy(dst:i64,dstArena:i64,src:i64,srcArena:i64,recursive:i64) i64 {
+  if(!instance_valid(dst) || !instance_valid(src) ||
+     instance_overlaps(dst,InstancedMesh.size,src,InstancedMesh.size) ||
+     !instance_arrays_valid(dst) || !instance_arrays_valid(src)) { return 0-1; }
+  let cap=ux_u32(src+InstancedMesh.capacity);
+  if(cap>ux_u32(dst+InstancedMesh.capacity)) { return 0-2; }
+  let from=ux_u32(src+InstancedMesh.mesh);
+  let to=ux_u32(dst+InstancedMesh.mesh);
+  let m0=ux_u32(src+InstancedMesh.matrices);
+  let c0=ux_u32(src+InstancedMesh.colors);
+  let m1=ux_u32(dst+InstancedMesh.matrices);
+  let c1=ux_u32(dst+InstancedMesh.colors);
+  if(!mesh_valid(from) || !mesh_valid(to) || instance_overlaps(from,Mesh.size,to,Mesh.size) ||
+     (dstArena==srcArena && ux_u32(from+Mesh.node)==ux_u32(to+Mesh.node)) ||
+     instance_overlaps(m1,cap*64,m0,cap*64) || instance_overlaps(m1,cap*64,c0,cap*12) ||
+     instance_overlaps(c1,cap*12,m0,cap*64) || instance_overlaps(c1,cap*12,c0,cap*12) ||
+     instance_overlaps(m1,cap*64,src,InstancedMesh.size) || instance_overlaps(c1,cap*12,src,InstancedMesh.size) ||
+     instance_overlaps(m1,cap*64,from,Mesh.size) || instance_overlaps(c1,cap*12,from,Mesh.size)) { return 0-1; }
+  let mesh=Mesh_copy(to,dstArena,from,srcArena,recursive);
+  if(mesh<0) { return mesh; }
+  let n=uxe_copy_record(m1,m0,cap*64);
+  let colors=ux_u32(src+InstancedMesh.hasColors);
+  if(colors!=0) { let copied=uxe_copy_record(c1,c0,cap*12); }
+  let active=ux_u32_put(dst+InstancedMesh.count,ux_u32(src+InstancedMesh.count));
+  let hasColors=ux_u32_put(dst+InstancedMesh.hasColors,colors);
+  return dst;
+}
+
+function InstancedMesh_clone(instance_destination,...instance_clone_args) {
+  return InstancedMesh_copy(instance_destination,instance_clone_args[0],instance_clone_args[1],instance_clone_args[2],instance_clone_args[3]);
+}
