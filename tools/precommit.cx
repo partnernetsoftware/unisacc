@@ -395,14 +395,16 @@ static int freeze_in_lane_a(const char *path, long nl) {
     return 0;
 }
 
-static char pc_orig_cwd[1024];
+static char pc_orig_cwd[1024], pc_work_top[1024];
 
-static int freeze_gate(void) {
-    size_t zn = 0; char *z = (char *)cx_read("build/freeze.tsv", &zn), *f[6]; long fn = 0, now, dl = 0, i;
-    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
-    char *names, line[1200], *p; int blocked = 0, nf = 0; const char *who;
-    if (!z) return 0;                                   /* 无标记文件=无冻结(ENOENT) */
-    for (p = z; *p; ) {                                  /* 取第一条非注释行 */
+static int freeze_eval_buf(const char *z, const char *names, long fn) {
+    char *f[6], line[1200], *p;
+    long now, dl = 0, i;
+    int blocked = 0, nf = 0;
+    const char *who;
+    if (!z) return 0;
+    line[0] = 0;
+    for (p = (char *)z; *p; ) {                          /* 取第一条非注释行 */
         char *e = p; while (*e && *e != '\n') e++;
         if (*p != '#' && e > p && (size_t)(e - p) < sizeof line) { mm_copy(line, sizeof line, p, (size_t)(e - p)); line[e - p] = 0; break; }
         p = *e ? e + 1 : e; line[0] = 0;
@@ -429,14 +431,14 @@ static int freeze_gate(void) {
         }
         while (*q == ' ') q++;
     }
-    names = slurp(dv, &fn); if (!names) return 0;
+    if (!names) return 0;
     for (long at = 0; at < fn; ) {
         long nl = tx_len(names + at, fn - at); char *q;
         if (nl <= 0) break;
         for (q = f[4]; *q; ) {
-            char *s = q, *t; long pl;
+            char *s = q; long pl;
             while (*q && *q != ' ') q++;
-            pl = q - s; t = s; (void)t;
+            pl = q - s;
             if (pl == 7 && tx_same(s, pl, "@lane:A", 7)) {
                 int hit = freeze_in_lane_a(names + at, nl);
                 if (hit < 0) {
@@ -455,7 +457,42 @@ static int freeze_gate(void) {
         }
         at += nl + 1;
     }
-    mm_free(names);
+    return blocked;
+}
+
+static int freeze_gate(void) {
+    size_t wtn = 0, idxn = 0;
+    char *z_wt = 0, *z_idx = 0, *z_head = 0, *names = 0;
+    long fn = 0, hdn = 0;
+    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
+    int blocked = 0, freeze_staged = 0;
+    if (pc_work_top[0]) {
+        char fp[1200];
+        if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top)) z_wt = (char *)cx_read(fp, &wtn);
+    }
+    z_idx = (char *)cx_read("build/freeze.tsv", &idxn);
+    if (!z_wt && !z_idx) return 0;                       /* 无标记文件=无冻结(ENOENT) */
+    names = slurp(dv, &fn);
+    for (long at = 0; names && at < fn; ) {
+        long nl = tx_len(names + at, fn - at);
+        if (nl <= 0) break;
+        if (nl == 16 && tx_same(names + at, 16, "build/freeze.tsv", 16)) { freeze_staged = 1; break; }
+        at += nl + 1;
+    }
+    /* 合同: 冻结标记是协调锁,以工作区文件为准(优先读),缺失时才用暂存版;
+     * 暂存版比工作区更严或同一提交里暂存改 freeze.tsv 把截止改成过期试图自我解冻时,以更严者为准. */
+    if (z_wt) blocked = freeze_eval_buf(z_wt, names, fn);
+    else if (z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
+    if (!blocked && z_wt && z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
+    if (!blocked && freeze_staged) {
+        char *hv[] = {"git", "show", "HEAD:build/freeze.tsv", 0};
+        z_head = slurp(hv, &hdn);
+        if (z_head && hdn > 0) blocked = freeze_eval_buf(z_head, names, fn);
+        if (z_head) mm_free(z_head);
+    }
+    if (z_wt) mm_free(z_wt);
+    if (z_idx) mm_free(z_idx);
+    if (names) mm_free(names);
     return blocked;
 }
 
@@ -1568,6 +1605,43 @@ static void pc_iso_cleanup(void) {
     pc_iso_dir[0] = 0;
 }
 
+static int pc_capture_work_top(void) {
+    const char *env_top = sy_env("UNISACC_PRECOMMIT_WORK_TOP");
+    if (!getcwd(pc_orig_cwd, sizeof pc_orig_cwd)) {
+        sy_eprintf("precommit: getcwd failed\n");
+        return -1;
+    }
+    if (env_top && env_top[0] == '/') {
+        if (tx_copy(pc_work_top, sizeof pc_work_top, env_top, tx_len(env_top, sizeof pc_work_top - 1))) return -1;
+        return 0;
+    }
+    {
+        char *tv[] = { "/bin/sh", "-c",
+            "wt=$(git rev-parse --show-toplevel 2>/dev/null || env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --show-toplevel 2>/dev/null || true); "
+            "case \"$wt\" in "
+            "  */.claude/worktrees/*) "
+            "    cd=$(git rev-parse --git-common-dir 2>/dev/null || env -u GIT_DIR -u GIT_WORK_TREE git rev-parse --git-common-dir 2>/dev/null || true); "
+            "    if [ -n \"$cd\" ]; then "
+            "      st=$(env -u GIT_DIR -u GIT_WORK_TREE git -C \"$cd/..\" rev-parse --show-toplevel 2>/dev/null || true); "
+            "      if [ -n \"$st\" ]; then wt=\"$st\"; fi; "
+            "    fi ;; "
+            "esac; "
+            "printf '%s\\n' \"$wt\"", 0 };
+        long tn = 0;
+        char *to = slurp_run(tv, &tn);
+        if (to && tn > 0) {
+            while (tn > 0 && (to[tn - 1] == '\n' || to[tn - 1] == '\r')) to[--tn] = 0;
+            if (tn > 0 && tn < (long)sizeof pc_work_top) {
+                mm_copy(pc_work_top, sizeof pc_work_top, to, (size_t)tn);
+                pc_work_top[tn] = 0;
+                sy_setenv("UNISACC_PRECOMMIT_WORK_TOP", pc_work_top, 1);
+            }
+        }
+        if (to) mm_free(to);
+    }
+    return 0;
+}
+
 static int isolate_staged_tree(void) {
     const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
     const char *no_iso  = sy_env("UNISACC_PRECOMMIT_NO_ISOLATE");
@@ -1597,7 +1671,11 @@ static int isolate_staged_tree(void) {
         mm_copy(idxp, sizeof idxp, o + o2, (size_t)l2); idxp[l2] = 0;
     }
     mm_free(o);
-    (void)getcwd(pc_orig_cwd, sizeof pc_orig_cwd);
+    if (!getcwd(pc_orig_cwd, sizeof pc_orig_cwd)) {
+        sy_eprintf("precommit: isolate_staged_tree getcwd failed\n");
+        pc_iso_cleanup();
+        return -1;
+    }
     if (chdir(pc_iso_dir) != 0) {
         sy_eprintf("precommit: isolate_staged_tree chdir failed\n");
         pc_iso_cleanup();
@@ -1625,8 +1703,10 @@ int main(int argc, char **argv) {
             sy_unsetenv("UNISACC_RATCHETS_PRECOMMIT");
             sy_unsetenv("UNISACC_LAYER_API_PATHS");
             sy_unsetenv("UNISACC_LAYER_API_PRECOMMIT");
+            sy_unsetenv("UNISACC_PRECOMMIT_WORK_TOP");
         }
     }
+    if (pc_capture_work_top() != 0) { pc_mark_block("isolate", "getcwd-failed"); pc_emit_gate_fail(); return 1; }
     if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
     {
         long csn = 0, ca = 0;
