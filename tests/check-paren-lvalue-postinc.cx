@@ -1,0 +1,285 @@
+/* Private red-first fixture for v0.0.94 frontend phase 1: D0 (deref of parenthesized lvalue post-inc/dec).
+ * Dual-oracle: compares strict C99 GCC and tested unisacc product on exit code, stdout, and fixed values.
+ * Usage: sh ./unisacc.com check-v094-d0-draft.cx -- [PRODUCT_APE] */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char prod[4096];
+static char tdir[4096];
+static int use_sh, passed, failed;
+
+static void write_src(const char *name, const char *body, char *outp, size_t cap) {
+    cx_fmt(outp, cap, "%s/%s", tdir, name);
+    if (cx_write(outp, body, strlen(body)) != 0) {
+        sy_eprintf("d0-check: write failed %s\n", outp);
+        exit(2);
+    }
+}
+
+static int run_v(char **argv, char *out, long cap, int merge_err) {
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long j = 0; j < m; j++) out[n++] = r.out[j];
+    }
+    if (merge_err && r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long j = 0; j < m; j++) out[n++] = r.err[j];
+    }
+    out[n] = 0;
+    int code = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return code;
+}
+
+static void first_line(const char *s, char *dst, size_t cap) {
+    size_t j = 0;
+    for (; s[j] && s[j] != '\n' && s[j] != '\r' && j + 1 < cap; j++)
+        dst[j] = (s[j] == '\t') ? ' ' : s[j];
+    dst[j] = 0;
+    if (j == 0) { dst[0] = '-'; dst[1] = 0; }
+}
+
+static void check_oracle(const char *id, const char *src, const char *want_out) {
+    char sp[4200], gbin[4200], ubin[4200], gbuf[4096], ubuf[4096], fl[180];
+    write_src(id, src, sp, sizeof sp);
+    cx_fmt(gbin, sizeof gbin, "%s/%s.gcc.bin", tdir, id);
+    cx_fmt(ubin, sizeof ubin, "%s/%s.uni.bin", tdir, id);
+
+    char *vg[] = {"gcc", "-std=c99", "-pedantic-errors", sp, "-o", gbin, 0};
+    char *vgr[] = {gbin, 0};
+    int gcr = run_v(vg, gbuf, sizeof gbuf, 1);
+    int grr = (gcr == 0) ? run_v(vgr, gbuf, sizeof gbuf, 0) : -1;
+    int gok = (gcr == 0 && grr == 0 && strcmp(gbuf, want_out) == 0);
+
+    char *vu_sh[] = {"sh", prod, sp, "-o", ubin, 0};
+    char *vu_bin[] = {prod, sp, "-o", ubin, 0};
+    char *vur[] = {ubin, 0};
+    int ucr = run_v(use_sh ? vu_sh : vu_bin, ubuf, sizeof ubuf, 1);
+    first_line(ubuf, fl, sizeof fl);
+    int urr = (ucr == 0) ? run_v(vur, ubuf, sizeof ubuf, 0) : -1;
+    int uok = (ucr == 0 && urr == 0 && strcmp(ubuf, want_out) == 0);
+
+    int ok = gok && uok;
+    if (ok) passed++; else failed++;
+    sy_printf("D0_CASE\t%s\t%s\tgcc=%d/%d\tuni=%d/%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", gcr, grr, ucr, urr, (ucr == 0) ? "-" : fl);
+}
+
+static void check_reject(const char *id, const char *src) {
+    char sp[4200], gobj[4200], uobj[4200], gbuf[4096], ubuf[4096], fl[180];
+    write_src(id, src, sp, sizeof sp);
+    cx_fmt(gobj, sizeof gobj, "%s/%s.gcc.o", tdir, id);
+    cx_fmt(uobj, sizeof uobj, "%s/%s.uni.o", tdir, id);
+    char *vg[] = {"gcc", "-std=c99", "-pedantic-errors", "-c", sp, "-o", gobj, 0};
+    char *vu_sh[] = {"sh", prod, "-c", sp, "-o", uobj, 0};
+    char *vu_bin[] = {prod, "-c", sp, "-o", uobj, 0};
+    int grc = run_v(vg, gbuf, sizeof gbuf, 1);
+    int urc = run_v(use_sh ? vu_sh : vu_bin, ubuf, sizeof ubuf, 1);
+    first_line(ubuf, fl, sizeof fl);
+    int ok = (grc != 0 && urc != 0);
+    if (ok) passed++; else failed++;
+    sy_printf("D0_NEG\t%s\t%s\tgcc_rc=%d\tuni_rc=%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", grc, urc, fl);
+}
+
+int main(int argc, char **argv) {
+    const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
+    if (sy_realpath(p, prod, sizeof prod) < 0) {
+        sy_eprintf("d0-draft: product not found: %s\n", p);
+        return 2;
+    }
+    size_t pl = strlen(prod);
+    use_sh = (pl >= 4 && strcmp(prod + pl - 4, ".com") == 0);
+    cx_fmt(tdir, sizeof tdir, "/tmp/v094-d0-%d", sy_pid());
+    if (sy_mkdir_all(tdir, 0700) != 0) {
+        sy_eprintf("d0-draft: mkdir failed %s\n", tdir);
+        return 2;
+    }
+
+    check_oracle("D1-paren-inc-dec.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  int a[3] = {11, 22, 33};\n"
+        "  int *n = a + 1;\n"
+        "  int v1 = *(n)++;\n"
+        "  long d1 = (long)(n - a);\n"
+        "  n = a + 1;\n"
+        "  int v2 = *(n)--;\n"
+        "  long d2 = (long)(n - a);\n"
+        "  printf(\"%d %ld %d %ld\\n\", v1, d1, v2, d2);\n"
+        "  return 0;\n"
+        "}\n",
+        "22 2 22 0\n");
+
+    check_oracle("D2-member-paren-inc.c",
+        "#include <stdio.h>\n"
+        "struct inner { int *n; int keep; };\n"
+        "struct outer { struct inner x; int guard; };\n"
+        "int main(void) {\n"
+        "  int a[3] = {41, 42, 43};\n"
+        "  struct outer o = { { a, 99 }, 77 };\n"
+        "  struct outer *p = &o;\n"
+        "  int v = *(p->x.n)++;\n"
+        "  long d = (long)(p->x.n - a);\n"
+        "  printf(\"%d %ld %d %d\\n\", v, d, p->x.keep, p->guard);\n"
+        "  return 0;\n"
+        "}\n",
+        "41 1 99 77\n");
+
+    check_oracle("D3-indirect-paren-inc.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  int buf[3] = {5, 6, 7};\n"
+        "  int *cur = buf;\n"
+        "  int **table = &cur;\n"
+        "  int v = *(*table)++;\n"
+        "  long d = (long)(cur - buf);\n"
+        "  int same_tbl = (table == &cur);\n"
+        "  printf(\"%d %ld %d\\n\", v, d, same_tbl);\n"
+        "  return 0;\n"
+        "}\n",
+        "5 1 1\n");
+
+    check_oracle("D4-side-effect-once.c",
+        "#include <stdio.h>\n"
+        "static int calls = 0;\n"
+        "static int *gslot = 0;\n"
+        "static int **pick(void) { calls++; return &gslot; }\n"
+        "int main(void) {\n"
+        "  int a[2] = {10, 20}, b[2] = {30, 40};\n"
+        "  int *slots[2] = { a, b };\n"
+        "  int i = 0;\n"
+        "  int v1 = *(slots[i++])++;\n"
+        "  long d0 = (long)(slots[0] - a);\n"
+        "  long d1 = (long)(slots[1] - b);\n"
+        "  gslot = b;\n"
+        "  int v2 = *(*pick())++;\n"
+        "  long dg = (long)(gslot - b);\n"
+        "  printf(\"%d %d %ld %ld %d %ld %d\\n\", v1, i, d0, d1, v2, dg, calls);\n"
+        "  return 0;\n"
+        "}\n",
+        "10 1 1 0 30 1 1\n");
+
+    check_oracle("D5-elem-vs-ptr.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  int a[2] = {100, 200};\n"
+        "  int *p = a;\n"
+        "  int v1 = (*p)++;\n"
+        "  long d1 = (long)(p - a);\n"
+        "  int e1 = a[0];\n"
+        "  int v2 = *(p)++;\n"
+        "  long d2 = (long)(p - a);\n"
+        "  int e2 = a[0];\n"
+        "  printf(\"%d %ld %d %d %ld %d\\n\", v1, d1, e1, v2, d2, e2);\n"
+        "  return 0;\n"
+        "}\n",
+        "100 0 101 101 1 101\n");
+
+    check_oracle("D6-stride-matrix.c",
+        "#include <stdio.h>\n"
+        "struct pad { char c; long long x; };\n"
+        "int main(void) {\n"
+        "  char ca[2] = {1, 2}; char *cp = ca;\n"
+        "  short sa[2] = {3, 4}; short *sp = sa;\n"
+        "  int ia[2] = {5, 6}; int *ip = ia;\n"
+        "  long long la[2] = {7, 8}; long long *lp = la;\n"
+        "  struct pad pa[2] = { {9, 10}, {11, 12} }; struct pad *pp = pa;\n"
+        "  char cv = *(cp)++;\n"
+        "  short sv = *(sp)++;\n"
+        "  int iv = *(ip)++;\n"
+        "  long long lv = *(lp)++;\n"
+        "  struct pad pv = *(pp)++;\n"
+        "  long dc = (long)((unsigned char *)cp - (unsigned char *)ca);\n"
+        "  long ds = (long)((unsigned char *)sp - (unsigned char *)sa);\n"
+        "  long di = (long)((unsigned char *)ip - (unsigned char *)ia);\n"
+        "  long dl = (long)((unsigned char *)lp - (unsigned char *)la);\n"
+        "  long dp = (long)((unsigned char *)pp - (unsigned char *)pa);\n"
+        "  int ok = (dc == (long)sizeof *cp) && (ds == (long)sizeof *sp) && (di == (long)sizeof *ip) && (dl == (long)sizeof *lp) && (dp == (long)sizeof *pp);\n"
+        "  printf(\"%d %d %d %lld %d %lld %d\\n\", (int)cv, (int)sv, iv, lv, (int)pv.c, pv.x, ok);\n"
+        "  return 0;\n"
+        "}\n",
+        "1 3 5 7 9 10 1\n");
+
+    check_oracle("D0-old-controls.c",
+        "#include <stdio.h>\n"
+        "static int add1(int x) { return x + 1; }\n"
+        "int main(void) {\n"
+        "  int a[3] = {10, 20, 30};\n"
+        "  int *p = a;\n"
+        "  int v1 = *p++;\n"
+        "  int v2 = *((p)++);\n"
+        "  int v3 = (a)[2];\n"
+        "  int (*fp)(int) = add1;\n"
+        "  int v4 = (fp)(4);\n"
+        "  printf(\"%d %d %d %d %ld\\n\", v1, v2, v3, v4, (long)(p - a));\n"
+        "  return 0;\n"
+        "}\n",
+        "10 20 30 5 2\n");
+
+    /* Gatekeeper added coverage: (a[i])++, (p->m)--, ((x))++, sizeof((x)++), register lval, const obj */
+    check_oracle("D7-arr-elem-and-member-dec.c",
+        "#include <stdio.h>\n"
+        "struct S { int m; };\n"
+        "int main(void) {\n"
+        "  int a[3] = {10, 20, 30};\n"
+        "  int i = 1;\n"
+        "  int v1 = (a[i])++;\n"
+        "  struct S s = { 50 };\n"
+        "  struct S *p = &s;\n"
+        "  int v2 = (p->m)--;\n"
+        "  printf(\"%d %d %d %d\\n\", v1, a[1], v2, s.m);\n"
+        "  return 0;\n"
+        "}\n",
+        "20 21 50 49\n");
+
+    check_oracle("D8-double-paren.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  int x = 7;\n"
+        "  int v1 = ((x))++;\n"
+        "  int a[2] = {3, 4};\n"
+        "  int *p = a;\n"
+        "  int v2 = *((p))++;\n"
+        "  long d = (long)(p - a);\n"
+        "  printf(\"%d %d %d %ld\\n\", v1, x, v2, d);\n"
+        "  return 0;\n"
+        "}\n",
+        "7 8 3 1\n");
+
+    check_oracle("D9-sizeof-uneval.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  int x = 5;\n"
+        "  int sz = (int)sizeof((x)++);\n"
+        "  printf(\"%d %d\\n\", sz == (int)sizeof(int), x);\n"
+        "  return 0;\n"
+        "}\n",
+        "1 5\n");
+
+    check_oracle("D10-register-lval.c",
+        "#include <stdio.h>\n"
+        "int main(void) {\n"
+        "  register int r = 9;\n"
+        "  int v = (r)++;\n"
+        "  printf(\"%d %d\\n\", v, r);\n"
+        "  return 0;\n"
+        "}\n",
+        "9 10\n");
+
+    check_reject("DN1-rvalue-add.c", "int f(int *a) { return *(a + 1)--; }\n");
+    check_reject("DN2-const-ptr.c", "int f(int * const p) { return *(p)++; }\n");
+    check_reject("DN3-array-name.c", "int f(void) { int a[2] = {1, 2}; return *(a)++; }\n");
+    check_reject("DN4-void-deref.c", "void f(void *p) { (void)*(p)++; }\n");
+    check_reject("DN5-missing-semi.c", "int f(int x) { return x }\n");
+    check_reject("DN6-const-obj.c", "int f(void) { const int c = 1; return (c)++; }\n");
+
+    sy_printf("D0_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
+    return failed ? 1 : 0;
+}
