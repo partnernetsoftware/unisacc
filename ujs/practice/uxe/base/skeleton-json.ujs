@@ -1,0 +1,168 @@
+// Bind serialized UUIDs to caller-owned, already resolved bone handles.
+struct SkeletonJsonBone {
+  uuid: u32;
+  bytes: u32;
+  handle: u32;
+}
+
+native function skeleton_json_key(dst:i64,end:i64,key:i64,size:i64) i64 {
+  let p=json_byte(dst,end,34);
+  let i=0;
+  while(i<size) {
+    p=json_byte(p,end,key%256);
+    key=key/256;
+    i=i+1;
+  }
+  p=json_byte(p,end,34);
+  return json_byte(p,end,58);
+}
+
+native function Skeleton_toJSON(at:i64,dst:i64,end:i64,uuid:i64,bytes:i64,bindings:i64,scratch:i64) i64 {
+  if(!skeleton_valid(at) || bytes<1 || bytes>255 || !helper_buffer_span(dst,end-dst,1) ||
+     !helper_buffer_span(scratch,1104,8) || !helper_buffer_disjoint(dst,end-dst,scratch,1104) ||
+     !source_input_ok(at,Skeleton.size,dst,end,scratch) ||
+     !source_input_ok(uuid,bytes,dst,end,scratch)) { return 0-1; }
+  let count=ux_u32(at+Skeleton.count);
+  let bones=ux_u32(at+Skeleton.bones);
+  let matrices=ux_u32(at+Skeleton.inverses);
+  if(!source_input_ok(bindings,count*SkeletonJsonBone.size,dst,end,scratch) ||
+     !source_input_ok(bones,count*4,dst,end,scratch) ||
+     !source_input_ok(matrices,count*128,dst,end,scratch)) { return 0-1; }
+  // r160 writes metadata before the arrays and appends uuid last.
+  let header=[123,34,109,101,116,97,100,97,116,97,34,58,123,34,118,101,114,115,105,111,110,34,58,52,46,54,44,34,116,121,112,101,34,58,34,83,107,101,108,101,116,111,110,34,44,34,103,101,110,101,114,97,116,111,114,34,58,34,83,107,101,108,101,116,111,110,46,116,111,74,83,79,78,34,125,44];
+  let p=dst;
+  let offset=0;
+  while(offset<76) { p=json_byte(p,end,header[offset]); offset=offset+1; }
+  p=skeleton_json_key(p,end,495622975330,5);
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count) {
+    let row=bindings+i*SkeletonJsonBone.size;
+    let id=ux_u32(row+SkeletonJsonBone.uuid);
+    let length=ux_u32(row+SkeletonJsonBone.bytes);
+    if(length<1 || length>255 || !source_input_ok(id,length,dst,end,scratch) ||
+       ux_u32(row+SkeletonJsonBone.handle)!=ux_u32(bones+i*4)) { return 0-1; }
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_write_string(p,end,id,length);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  p=json_byte(p,end,44);
+  // boneInverses is longer than the packed-key width.
+  p=json_byte(p,end,34);
+  let name=[98,111,110,101,73,110,118,101,114,115,101,115,34,58,91];
+  i=0;
+  while(i<15) { p=json_byte(p,end,name[i]); i=i+1; }
+  i=0;
+  while(i<count) {
+    if(i!=0) { p=json_byte(p,end,44); }
+    p=json_byte(p,end,91);
+    let j=0;
+    while(j<16) {
+      if(j!=0) { p=json_byte(p,end,44); }
+      p=json_write_f64(p,end,ux_f64(matrices+128*i+8*j),scratch);
+      j=j+1;
+    }
+    p=json_byte(p,end,93);
+    i=i+1;
+  }
+  p=json_byte(p,end,93);
+  p=json_byte(p,end,44);
+  p=skeleton_json_key(p,end,1684632949,4);
+  p=json_write_string(p,end,uuid,bytes);
+  return json_byte(p,end,125);
+}
+
+native function skeleton_json_match(input:i64,end:i64,id:i64,bytes:i64,scratch:i64) i64 {
+  if(bytes<1 || bytes>255 || !helper_buffer_span(id,bytes,1) ||
+     !helper_buffer_disjoint(id,bytes,scratch,255)) { return 0; }
+  let length=Json_decodeString(input,end,scratch,255);
+  if(length!=bytes) { return 0; }
+  let i=0;
+  while(i<bytes) {
+    if(ux_u8(id+i)!=ux_u8(scratch+i)) { return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// Restore into a caller-initialized record of the exact serialized size.
+native function Skeleton_fromJSON(at:i64,input:i64,end:i64,uuid:i64,bytes:i64,bindings:i64,scratch:i64) i64 {
+  if(!skeleton_valid(at) || end<=input || !helper_buffer_span(input,end-input,1) ||
+     !helper_buffer_span(scratch,255,1)) { return 0-1; }
+  let count=ux_u32(at+Skeleton.count);
+  let bones=ux_u32(at+Skeleton.bones);
+  let matrices=ux_u32(at+Skeleton.inverses);
+  let palette=ux_u32(at+Skeleton.palette);
+  if(!helper_buffer_span(bindings,count*SkeletonJsonBone.size,4) ||
+     !helper_buffer_span(bones,count*4,4) || !helper_buffer_span(matrices,count*128,8) ||
+     !helper_buffer_span(palette,count*64,4)) { return 0-1; }
+  let addresses=[at,bones,matrices,palette,bindings,scratch,input];
+  let sizes=[Skeleton.size,count*4,count*128,count*64,count*SkeletonJsonBone.size,255,end-input];
+  let i=0;
+  while(i<7) {
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(addresses[i],sizes[i],addresses[j],sizes[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let matches=Source_matchJSONReference(input,end,uuid,bytes,scratch);
+  if(matches!=1) { return 0-1; }
+  let root=json_space(input,end);
+  let boneList=source_read_key(root,end,scratch,495622975330,5);
+  let key=[98,111,110,101,73,110,118,101,114,115,101,115];
+  i=0;
+  while(i<12) { let saved=ux_u8_put(scratch+i,key[i]); i=i+1; }
+  let inverseList=json_find_key(root,end,scratch,12);
+  if(boneList<0 || inverseList<0 || ux_u8(boneList)!=91 || ux_u8(inverseList)!=91) { return 0-1; }
+  let b=json_space(boneList+1,end);
+  let m=json_space(inverseList+1,end);
+  i=0;
+  while(i<count) {
+    if(b<0 || m<0 || b>=end || m>=end || ux_u8(m)!=91) { return 0-1; }
+    let row=bindings+i*SkeletonJsonBone.size;
+    if(!skeleton_json_match(b,end,ux_u32(row+SkeletonJsonBone.uuid),ux_u32(row+SkeletonJsonBone.bytes),scratch)) { return 0-1; }
+    b=json_space(json_value_end(b,end),end);
+    let p=json_space(m+1,end);
+    let j=0;
+    while(j<16) {
+      if(p<0 || p>=end) { return 0-1; }
+      let value=json_read_number(p,end);
+      if(!(value-value==0.0)) { return 0-1; }
+      p=json_space(json_scalar_end(p,end),end);
+      if(p<0 || p>=end || ux_u8(p)!=44+49*(j==15)) { return 0-1; }
+      p=json_space(p+1,end);
+      j=j+1;
+    }
+    m=p;
+    if(b<0 || m<0 || b>=end || m>=end) { return 0-1; }
+    if(i+1<count) {
+      if(ux_u8(b)!=44 || ux_u8(m)!=44) { return 0-1; }
+      b=json_space(b+1,end);
+      m=json_space(m+1,end);
+    }
+    i=i+1;
+  }
+  if(b<0 || m<0 || b>=end || m>=end || ux_u8(b)!=93 || ux_u8(m)!=93) { return 0-1; }
+  m=json_space(inverseList+1,end);
+  i=0;
+  while(i<count) {
+    let row=bindings+i*SkeletonJsonBone.size;
+    let handle=ux_u32_put(bones+i*4,ux_u32(row+SkeletonJsonBone.handle));
+    let p=json_space(m+1,end);
+    let j=0;
+    while(j<16) {
+      let value=json_read_number(p,end);
+      let saved=ux_f64_put(matrices+128*i+8*j,value);
+      let zero=ux_u32_put(palette+64*i+4*j,0);
+      p=json_space(json_scalar_end(p,end),end);
+      p=json_space(p+1,end);
+      j=j+1;
+    }
+    m=json_space(p+1,end);
+    i=i+1;
+  }
+  return at;
+}
