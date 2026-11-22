@@ -1,0 +1,69 @@
+// Expose the current RGBA8 descriptor as a SourceImage borrowed by Source.
+native function DataTexture_writeImageJSON(texture:i64,image:i64,source:i64,dst:i64,end:i64,uuid:i64,bytes:i64,scratch:i64) i64 {
+  if(!texture_object_valid(texture) || !helper_buffer_span(image,SourceImage.size,4) ||
+     !helper_buffer_span(source,Source.size,4) || !helper_buffer_disjoint(image,SourceImage.size,source,Source.size) ||
+     !source_input_ok(texture,Texture.size,dst,end,scratch) ||
+     !source_input_ok(image,SourceImage.size,dst,end,scratch) ||
+     !source_input_ok(source,Source.size,dst,end,scratch) ||
+     !helper_buffer_disjoint(texture,Texture.size,image,SourceImage.size) ||
+     !helper_buffer_disjoint(texture,Texture.size,source,Source.size)) { return 0-1; }
+  let table=ux_u32(texture+Texture.table);
+  let descriptor=gpu_texture_source(table,ux_u32(texture+Texture.handle));
+  if(descriptor<0) { return descriptor; }
+  let width=ux_u32(descriptor+GpuTextureSource.width);
+  let height=ux_u32(descriptor+GpuTextureSource.height);
+  let data=ux_u32(descriptor+GpuTextureSource.rgba);
+  let count=width*height*4;
+  let capacity=gpu_texture_capacity(table);
+  let tableBytes=GpuTextureTable.size+capacity*GpuTextureSlot.size;
+  if(!source_input_ok(table,tableBytes,dst,end,scratch) ||
+     !source_input_ok(data,count,dst,end,scratch) ||
+     !source_input_ok(uuid,bytes,dst,end,scratch) ||
+     !helper_buffer_disjoint(image,SourceImage.size,table,tableBytes) ||
+     !helper_buffer_disjoint(source,Source.size,table,tableBytes) ||
+     !helper_buffer_disjoint(image,SourceImage.size,data,count) ||
+     !helper_buffer_disjoint(source,Source.size,data,count) ||
+     !helper_buffer_disjoint(image,SourceImage.size,uuid,bytes) ||
+     !helper_buffer_disjoint(source,Source.size,uuid,bytes)) { return 0-1; }
+  let kind=ux_u32_put(image+SourceImage.kind,1);
+  let pointer=ux_u32_put(image+SourceImage.data,data);
+  let length=ux_u32_put(image+SourceImage.count,count);
+  let w=ux_u32_put(image+SourceImage.width,width);
+  let h=ux_u32_put(image+SourceImage.height,height);
+  let initialized=Source_init(source,image);
+  if(initialized<0) { return initialized; }
+  return Source_toJSON(source,dst,end,uuid,bytes,scratch);
+}
+
+// Bind a deserialized Uint8Array image. Source_fromJSON owns parsing and
+// capacity checks. The caller keeps the accepted pixel buffer alive.
+native function DataTexture_bindJSONSource(texture:i64,table:i64,descriptor:i64,source:i64) i64 {
+  if(!helper_buffer_span(source,Source.size,4) || !texture_object_valid(texture) ||
+     ux_u32(texture+Texture.handle)!=0 || !helper_buffer_span(descriptor,GpuTextureSource.size,4)) { return 0-1; }
+  let image=ux_u32(source+Source.data);
+  if(image==0 || !helper_buffer_span(image,SourceImage.size,4) ||
+     ux_u32(image+SourceImage.kind)!=1) { return 0-1; }
+  let width=ux_u32(image+SourceImage.width);
+  let height=ux_u32(image+SourceImage.height);
+  let data=ux_u32(image+SourceImage.data);
+  if(width<1 || width>4096 || height<1 || height>4096 ||
+     ux_u32(image+SourceImage.count)!=width*height*4 ||
+     !helper_buffer_disjoint(texture,Texture.size,descriptor,GpuTextureSource.size)) { return 0-1; }
+  let capacity=gpu_texture_capacity(table);
+  if(capacity<1) { return 0-1; }
+  let spans=[texture,descriptor,source,image,table,data];
+  let sizes=[Texture.size,GpuTextureSource.size,Source.size,SourceImage.size,
+             GpuTextureTable.size+capacity*GpuTextureSlot.size,width*height*4];
+  let i=0;
+  while(i<6) {
+    let j=0;
+    while(j<i) {
+      if(!helper_buffer_disjoint(spans[i],sizes[i],spans[j],sizes[j])) { return 0-1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let ready=DataTexture_rgba8Source(descriptor,data,width,height);
+  if(ready<0) { return ready; }
+  return Texture_init(texture,table,descriptor);
+}
