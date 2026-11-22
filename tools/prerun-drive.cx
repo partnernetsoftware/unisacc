@@ -132,11 +132,18 @@ static int pd_is_warmup_excluded_id(const char *id) {
     return pd_is_expected_unmeasured_id(id) || pd_starts(id, "unit-frontcache-") || pd_starts(id, "opt-frame4-");
 }
 
+static int pd_is_isolated_long_id(const char *id) {
+    static const char *builtin[] = {
+        "slow-split", "unit-frontcache-equiv0", "unit-frontcache-equiv1",
+        "unit-frontcache-equiv2", "unit-frontcache-equiv3b", "unit-frontcache-equiv4", 0
+    };
+    for (int i = 0; builtin[i]; i++) if (tx_eqz(id, builtin[i])) return 1;
+    return 0;
+}
+
 static int pd_is_heavy_id(const char *id) {
     static const char *builtin[] = {
-        "real-commit", "unit-frontcache-equiv0", "unit-frontcache-equiv1",
-        "unit-frontcache-equiv2", "unit-frontcache-equiv3", "unit-frontcache-equiv3b",
-        "unit-frontcache-equiv4", "check-split-parents", "slow-split",
+        "real-commit", "unit-frontcache-equiv3", "check-split-parents",
         "check-gen-all-check", "check-gen-all-pass", "check-gen-all-hang",
         "c-negative", "stream-pipe-parts", 0
     };
@@ -150,7 +157,8 @@ static int pd_is_heavy_id(const char *id) {
  * Each netregen uses its own out/material paths. Early canaries keep their barriers. */
 static int pd_can_share_window(const char *phase, const char *ids, int jobs) {
     if (jobs != 1 || !ids[0] || strchr(ids, ',') || pd_is_early_canary_id(ids)) return 0;
-    return tx_eqz(phase, "long") || (tx_eqz(phase, "heavy") && pd_starts(ids, "netregen-"));
+    return tx_eqz(phase, "long") ||
+           (tx_eqz(phase, "heavy") && (pd_starts(ids, "netregen-") || tx_eqz(ids, "unit-frontcache-equiv3") || pd_is_isolated_long_id(ids)));
 }
 
 static int pd_width(const char *s, int max) {
@@ -514,11 +522,25 @@ static int pd_load_priority_file(const char *path) {
 static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal) {
     if (nrem <= 0) return;
     if (!pd_has_times) {
+        int norm_rem[PD_MAX_IDS];
+        int nnorm = 0;
+        for (int i = 0; i < nrem; i++) {
+            if (pd_is_isolated_long_id(pd_ids[rem[i]].id) && pd_nwins < pd_max_wins) {
+                PdWin *w = &pd_wins[pd_nwins++];
+                cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins - 1);
+                w->jobs = 1;
+                cx_fmt(w->phase, sizeof w->phase, "long");
+                w->count = 1;
+                w->idxs[0] = rem[i];
+            } else {
+                norm_rem[nnorm++] = rem[i];
+            }
+        }
         int pos = 0;
-        while (pos < nrem && pd_nwins < pd_max_wins) {
-            int take = nrem - pos;
+        while (pos < nnorm && pd_nwins < pd_max_wins) {
+            int take = nnorm - pos;
             if (take > win_size) {
-                if (nrem - pos < win_size + 8 && nrem - pos >= 16) take = (nrem - pos) / 2;
+                if (nnorm - pos < win_size + 8 && nnorm - pos >= 16) take = (nnorm - pos) / 2;
                 else take = win_size;
             }
             PdWin *w = &pd_wins[pd_nwins];
@@ -526,21 +548,31 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
             w->jobs = pd_normal_jobs;
             cx_fmt(w->phase, sizeof w->phase, "normal");
             w->count = take;
-            for (int k = 0; k < take; k++) w->idxs[k] = rem[pos + k];
+            for (int k = 0; k < take; k++) w->idxs[k] = norm_rem[pos + k];
             pos += take;
             pd_nwins++;
             (*w_normal)++;
         }
         return;
     }
-    /* Sort descending by historical time_ms, breaking ties by original position */
+    /* Sort descending by historical time_ms, breaking ties by original position.
+     * Isolated-long batches sort ahead of normal batches so all long windows group
+     * together into contiguous window_lanes=4 waves without fragmenting normal packing. */
     for (int i = 1; i < nrem; i++) {
         int v = rem[i];
         long t = pd_ids[v].time_ms;
+        int iso_v = pd_is_isolated_long_id(pd_ids[v].id) || t > PD_TIMED_BUDGET_MS ||
+                    (!pd_ids[v].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[v].id)));
         int j = i - 1;
-        while (j >= 0 && pd_ids[rem[j]].time_ms < t) {
-            rem[j + 1] = rem[j];
-            j--;
+        while (j >= 0) {
+            int u = rem[j];
+            long tu = pd_ids[u].time_ms;
+            int iso_u = pd_is_isolated_long_id(pd_ids[u].id) || tu > PD_TIMED_BUDGET_MS ||
+                        (!pd_ids[u].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[u].id)));
+            if (iso_u < iso_v || (iso_u == iso_v && tu < t)) {
+                rem[j + 1] = rem[j];
+                j--;
+            } else break;
         }
         rem[j + 1] = v;
     }
@@ -552,7 +584,8 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         cx_fmt(w->phase, sizeof w->phase, "normal");
         w->count = 0;
         int can_pack_unmeasured = (pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id));
-        if (pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS || (!pd_ids[rem[pos]].measured && !can_pack_unmeasured)) {
+        if (pd_is_isolated_long_id(pd_ids[rem[pos]].id) || pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS ||
+            (!pd_ids[rem[pos]].measured && !can_pack_unmeasured)) {
             /* An isolated or missing sample cannot establish parallel wall time unless conservative --unmeasured-ms is set. */
             cx_fmt(w->phase, sizeof w->phase, "long");
             w->idxs[w->count++] = rem[pos++];
@@ -563,9 +596,11 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
         long cost = 0;
         /* dvqualify preserves --ids order and barriers every --segment-batches jobs. */
         while (pos < nrem && w->count < win_size &&
+               !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
                cost + pd_ids[rem[pos]].time_ms <= PD_TIMED_BUDGET_MS) {
             cost += pd_ids[rem[pos]].time_ms;
             for (int lane = 0; lane < w->jobs && pos < nrem && w->count < win_size &&
+                 !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
                  (pd_ids[rem[pos]].measured || pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id)); lane++)
                 w->idxs[w->count++] = rem[pos++];
         }

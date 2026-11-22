@@ -1193,9 +1193,9 @@ int main(void) {
            "opt-frame4-warmup-excluded-and-prerun-prepared: W0000 skips opt-frame4-*, lists/cleans stale session opt-frame4 dir without materials.tsv, and prewarms opt-frame4-material");
     }
 
-    /* (17) slow-split and unit-frontcache-equiv0..4 are heavy 1-batch windows; heavy PASS <=55000ms clamps to 54000ms */
+    /* (17) slow-split and unit-frontcache-equiv0..4 are isolated 1-batch long windows (sharing window_lanes=4); heavy PASS <=55000ms clamps to 54000ms */
     {
-        char f17[CPD_PW], ids17[CPD_PW], tf17[CPD_PW], o17[CPD_PW];
+        char f17[CPD_PW], ids17[CPD_PW], tf17[CPD_PW], o17[CPD_PW], m17[CPD_PW];
         const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
         char pd_path[CPD_PW];
         if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
@@ -1203,7 +1203,8 @@ int main(void) {
         if (cx_fmt(f17, sizeof f17, "%s/f17", work) || sy_mkdir_all(f17, 0700) ||
             cx_fmt(ids17, sizeof ids17, "%s/ids.txt", f17) ||
             cx_fmt(tf17, sizeof tf17, "%s/times.tsv", f17) ||
-            cx_fmt(o17, sizeof o17, "%s/out", f17)) return 2;
+            cx_fmt(o17, sizeof o17, "%s/out", f17) ||
+            cx_fmt(m17, sizeof m17, "%s/mock.sh", f17)) return 2;
         const char *s_ids17 =
             "win-argv-facts\n"
             "slow-split\n"
@@ -1227,27 +1228,39 @@ int main(void) {
             "1795330010\tn2\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
             "1795330011\tn3\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
             "1795330012\tn4\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n";
+        const char *s_m17 =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
         if (cx_write(ids17, s_ids17, strlen(s_ids17)) ||
-            cx_write(tf17, s_tf17, strlen(s_tf17))) return 2;
+            cx_write(tf17, s_tf17, strlen(s_tf17)) ||
+            cx_write(m17, s_m17, strlen(s_m17))) return 2;
         if (cx_fmt(cmd, sizeof cmd,
             "set -e; "
             "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 4 --warmup 1 && "
-            "grep -q '\t1\theavy\t1\tslow-split$' '%s/windows.tsv' && "
-            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv0$' '%s/windows.tsv' && "
-            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv1$' '%s/windows.tsv' && "
-            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv2$' '%s/windows.tsv' && "
-            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv3b$' '%s/windows.tsv' && "
-            "grep -q '\t1\theavy\t1\tunit-frontcache-equiv4$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tslow-split$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv0$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv1$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv2$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv3b$' '%s/windows.tsv' && "
+            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv4$' '%s/windows.tsv' && "
             "grep -q '\t1\theavy\t1\tcheck-gen-all-hang$' '%s/windows.tsv' && "
             "grep -q '\t4\tnormal\t4\tn1,n2,n3,n4$' '%s/windows.tsv' && "
-            "echo HEAVY_SLOW_SPLIT_AND_EQUIV_OK",
+            "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 && "
+            "echo ISOLATED_LONG_LANES_OK",
             cwd, pd_path, ids17, tf17, o17,
-            o17, o17, o17, o17, o17, o17, o17, o17)) return 2;
+            o17, o17, o17, o17, o17, o17, o17, o17,
+            cwd, pd_path, work, o17, m17)) return 2;
         int rc17 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
         ck(rc17 == 0 &&
-           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=12\twindows=9\twarmup=1\theavy=7\tnormal=1\t") &&
-           ckk_has(out, CPD_OUT, "HEAVY_SLOW_SPLIT_AND_EQUIV_OK"),
-           "slow-split-and-unit-frontcache-equiv-heavy-windows: isolates slow-split and unit-frontcache-equiv0..4 into 1-batch heavy windows");
+           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=12\twindows=9\twarmup=1\theavy=1\tnormal=1\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_LANES\tfirst=W0002\twindows=4") &&
+           ckk_has(out, CPD_OUT, "ISOLATED_LONG_LANES_OK"),
+           "slow-split-and-unit-frontcache-equiv-isolated-parallel-lanes: isolates slow-split and unit-frontcache-equiv0..4 into 1-batch long windows running on 4 parallel window lanes");
     }
 
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
