@@ -318,7 +318,7 @@ flowchart LR
     - (e) `R77` 15 片 `daily-compile-smoke-01..15`(117/117 入口)已并入预跑首波 `W0001..W0004` 全过, `daily` 批完整运行态仍属 `s9`;
     - (f) 首链 `chain1`(`a4caf61410`)因版本槽未切自报 `0.0.89` 已整体作废并落地 `R80`(`188e45e558`)。
   - (4) **`0.0.91..0.0.94` 版本编排拍板与并行车道(cc 2026-11-22)**:
-    - `0.0.91` 只收「身份与构建边界」(`L.1 + Z5 + B3`, `a_files_cap=20`, 见 `plans/v0.0.91.md`); `0.0.92`「事实表整理」(`R75` `tsv-lint` 补绑定 + `volatile` 行列号); `0.0.93`「运行时缓存」(`R70`, 评审 `~/.claude/jobs/2798e440/tmp/r70-review/review.md`); `0.0.94`「冷跑缓存」(`R60` 函数级缓存);
+    - `0.0.91` 只收「身份与构建边界」(`L.1 + Z5 + B3`, `a_files_cap=20`, 见 `plans/v0.0.91.md`; 遗留补丁重放 `~/.claude/jobs/2798e440/tmp/replay/replay-report.tsv` 中 `litlen` 的 `annotations.patch` 含 `source_frame.cx`/`sha.cx`/`drive.cx` 3 个 A 类文件 `apply --check rc=0`, 若 `L.1+Z5+B3 <= 17` 文件则并入 `0.0.91`, `litlen-gate.patch` 紧随其后落 `main`); `0.0.92`「事实表整理」(`R75` `tsv-lint` 补绑定: 3 个 `atstr` 分片 `rc=0`、`libraryimports` 动态项丢弃、`callcontrol-result.tsv` `@240/@283` 两 hunk 在 `0.0.92` 开版时手工重做、`ucn-pp-gen` 列为 `R75` 待确认修法项; 加 `volatile` 行列号); `0.0.93`「运行时缓存」(`R70`, 评审 `~/.claude/jobs/2798e440/tmp/r70-review/review.md`); `0.0.94`「冷跑缓存」(`R60` 函数级缓存);
     - `0.0.91` 起链前非 A 类先落:`R74` 后续(`prepare` 默认 `--keep-going`、`--times-file` 默认读 `latest_strict`、窗口预算 `<=45s` + 实测 `outer_overhead`、`--root` `sy_realpath`) + 预热窗口选最轻单批;
     - 并行非 A 类车道:`R76`(`ext/net/httpd.cx` B 类库:基于 `ccogw` 同端口 main+haiku 并发需求与 4 profile 共用端口的结构性证据, 一期定为"主进程 `accept` + 每连接 `sy_fork_session` 同镜像子进程", 否决单线程同步回调, 重修 `~/.claude/jobs/2798e440/tmp/r76-design/design.md` 并二审)、`R78` `0.0.90` 关键补丁集 `--report` 重跑、`R69.6` 零断言守卫影子阶段、`R79`/`R81` 检查工具质量盘点、`R71` `M3/M4/M6`、`dup-census` 白名单、台账待定项扫描。
 - 候选池与评审要点登记(cc 2026-11-22,排 `0.0.90` 后/`0.0.91` 后评估):
