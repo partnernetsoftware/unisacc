@@ -80,13 +80,36 @@ int main(void) {
     F(ppin, sizeof ppin, "%s/ppin", fx);
     F(dvcore, sizeof dvcore, "/tmp/dvrck-core-%s", chash);
     F(dvlaunch, sizeof dvlaunch, "/tmp/dvrck-launch-%s", lhash);
+    /* 仅当工作副本 devsvc 核心与全部依赖源码与 HEAD 逐字节一致且无未跟踪新增文件时, 复用 prebuild-self 的 pinned 执行体; 脏或 pinned 缺失均回退自编 */
+    if (sy_exists(dvcore) != 1) {
+        F(c, sizeof c, "cd %s && git diff --quiet HEAD -- tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/cxlib tools/dv tools/net cx ext cxroot.tsv && [ -z \"$(git ls-files --others --exclude-standard -- tools/cxlib tools/dv tools/net cx ext)\" ]", root);
+        if (sh(c) == 0) {
+            F(c, sizeof c, "cd %s && sh ./unisacc.com tools/devsvc.cx -- prebuild-self", root);
+            if (sh(c) == 0 && !strncmp(out, "PREPARED\tkey=", 13)) {
+                char key[24]; int ki;
+                for (ki = 0; ki < 20 && ((out[13 + ki] >= '0' && out[13 + ki] <= '9') || (out[13 + ki] >= 'a' && out[13 + ki] <= 'f')); ki++) key[ki] = out[13 + ki];
+                key[ki] = 0;
+                if (ki == 20) {
+                    F(c, sizeof c,
+                      "if [ -n \"${DV_PIN_DIR:-}\" ] && [ -x \"$DV_PIN_DIR/%s/devsvc\" ]; then printf '%%s' \"$DV_PIN_DIR/%s/devsvc\"; "
+                      "else for p in \"$HOME/.cache/unisacc/devsvc/pinned/repos\"/*/%s/devsvc; do [ -x \"$p\" ] && { printf '%%s' \"$p\"; break; }; done; fi",
+                      key, key, key);
+                    if (sh(c) == 0 && out[0] == '/' && strlen(out) < sizeof dvcore && sy_exists(out) == 1)
+                        F(dvcore, sizeof dvcore, "%s", out);
+                }
+            }
+        }
+    }
     F(c, sizeof c,
       "mkdir -p %s/work %s/tools %s/in %s %s %s && cd %s && git init -q -b main && "
       "printf 'a\\n' > in/a.txt && cp %s/tools/devsvc-repo.tsv tools/devsvc-repo.tsv && "
       "printf '#!/bin/sh\\ncase \"$1\" in\\n  *tools/commit-own.cx)\\n    printf \"COMMIT_OWN_FAIL\\\\tclass=precommit\\\\nXCOMMIT_OWN_FAIL\\\\tclass=wrong\\\\nPRECOMMIT_GATE_FAIL\\\\tgate=precommit\\\\treason=blocked\\\\n\" >&2\\n    exit 1;;\\n  *tools/devsvc-core.cx)\\n    shift; [ \"$1\" = \"--\" ] && shift; exec %s \"$@\";;\\nesac\\nexec sh %s/unisacc.com \"$@\"\\n' > unisacc.com && "
       "chmod +x unisacc.com && git add . && git -c user.name=t -c user.email=t@t commit -qm init && "
-      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc-core.cx && mv -f %s.%d %s; }; } && "
-      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc.cx && mv -f %s.%d %s; }; }",
+      "p1=''; p2=''; "
+      "if [ ! -x %s ]; then (sh %s/unisacc.com -o %s.%d %s/tools/devsvc-core.cx && mv -f %s.%d %s) & p1=$!; fi; "
+      "if [ ! -x %s ]; then (sh %s/unisacc.com -o %s.%d %s/tools/devsvc.cx && mv -f %s.%d %s) & p2=$!; fi; "
+      "r1=0; r2=0; [ -n \"$p1\" ] && { wait \"$p1\"; r1=$?; }; [ -n \"$p2\" ] && { wait \"$p2\"; r2=$?; }; "
+      "[ \"$r1\" -eq 0 ] && [ \"$r2\" -eq 0 ]",
       fx, repo, repo, fhome, phome, ppin, repo, root, dvcore, root,
       dvcore, root, dvcore, sy_pid(), root, dvcore, sy_pid(), dvcore,
       dvlaunch, root, dvlaunch, sy_pid(), root, dvlaunch, sy_pid(), dvlaunch);
