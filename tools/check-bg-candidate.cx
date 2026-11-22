@@ -29,6 +29,7 @@
  * Both images are built once (tq_native, PREPARED lines, not results). The work directory is
  * left in place: this check removes nothing either. */
 #pragma unisa use cxlib.toolprep
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
@@ -129,7 +130,15 @@ static int fake(int argc, char **argv) {
         if (cx_fmt(t + at, (long)sizeof t - at, "ARG\t%s\n", argv[i])) return 2;
         at = tx_len(t, sizeof t);
     }
-    if (!out || !rev || put(out, "fake-argv.tsv", t)) return 2;
+    if (!out || !rev) return 2;
+    {
+        char cw[P], why[64];
+        if (sy_realpath(".", cw, sizeof cw) < 0 || sr_ok(cw, out, why, sizeof why)) {
+            sy_eprintf("chain-run: --out must be strictly under repository out or a tmpdir session root (cleanup safety)\n");
+            return 2;
+        }
+    }
+    if (put(out, "fake-argv.tsv", t)) return 2;
     if (cx_fmt(t, sizeof t, "FAKE\tpid=%d\tpgid=%ld\n", sy_pid(), sy_getpgid(0)) || put(out, "fake.tsv", t)) return 2;
     if (tx_eqz(mode, "fail-snap")) return 2;
     if (tx_eqz(mode, "fail")) {
@@ -302,13 +311,11 @@ int main(int argc, char **argv) {
     if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
     if (argc >= 3 && argv[2][0]) {
         (void)sy_mkdir(argv[2], 0755);
-        if (cx_fmt(work, sizeof work, "%s/bgc-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+        if (cx_fmt(work, sizeof work, "%s/bgc-%d-%ld", argv[2], sy_pid(), sy_now_ms()) || sy_mkdir(work, 0755)) return 2;
     } else {
-        char b[P];
-        if (cx_fmt(b, sizeof b, "%s/unisacc-bg-b1-%d", sy_tmpdir(), sy_uid()) || cx_fmt(work, sizeof work, "%s/check-%d-%ld", b, sy_pid(), sy_now_ms())) return 2;
-        (void)sy_mkdir(b, 0755);
+        if (sr_scratch("check-bgc-", work, sizeof work)) return 2;
     }
-    if (sy_mkdir(work, 0755) || sy_realpath(work, work, sizeof work) < 0) return 2;
+    if (sy_realpath(work, work, sizeof work) < 0) return 2;
     if (join(bin, work, "bg-candidate.native") || join(self, work, "fake-chain.native") || join(fxroot, work, "root") || join(b1, work, "b1") ||
         join(bh, work, "bh") || join(b2, work, "b2") || join(b3, work, "b3") || join(b4, work, "b4") || join(trash, work, "trash") ||
         join(none, work, "no-such-trash")) return 2;
@@ -576,6 +583,21 @@ int main(int argc, char **argv) {
     rc = tool(b2, "prune", "--keep", "x", 0, 0, 0);
     rc2 = tool(b2, "prune", "--trash", "relative", 0, 0, 0);
     ck(rc == 2 && rc2 == 2 && present(b2, REV_C), "prune-usage-rc2");
+    {
+        char *v[] = {bin, "status", "--root", fxroot, 0};
+        char dbase[P], dout[P], bad_out[P], swhy[64];
+        dbase[0] = 0; dout[0] = 0; bad_out[0] = 0; swhy[0] = 0;
+        mm_free(last); last = 0; lastn = 0;
+        rc = cx_runv_timeout(v, 20, &last, &lastn);
+        if (last) (void)value(last, (long)lastn, "base=", dbase, sizeof dbase);
+        if (dbase[0]) (void)join(dout, dbase, REV_A);
+        (void)cx_fmt(bad_out, sizeof bad_out, "%s/unisacc-bg-b1-%d/%s", sy_tmpdir(), sy_uid(), REV_A);
+        ck(rc == 0 && dbase[0] == '/' && dout[0] == '/' &&
+           sr_ok(fxroot, dout, swhy, sizeof swhy) == 0 &&
+           sr_chain_ok(fxroot, dout, swhy, sizeof swhy) == 0 &&
+           sr_ok(fxroot, bad_out, swhy, sizeof swhy) == 1,
+           "default-base-accepted-by-sessionroot-sr-ok");
+    }
 
     mm_free(last);
     last = 0;
