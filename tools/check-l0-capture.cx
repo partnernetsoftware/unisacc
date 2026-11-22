@@ -1,0 +1,209 @@
+/* tools/check-l0-capture.cx -- cx/sys/proc.cx sy_proc_capture (plans/v0.0.94.md 七、八).
+     sh ./unisacc.com tools/check-l0-capture.cx
+   Linux with real children and /proc.  C1 both streams complete; C2 over cap gives
+   -EMSGSIZE with exactly CAP bytes kept and no child left; C2b exactly CAP succeeds and
+   CAP+1 is -EMSGSIZE (the boundary a `>` -> `>=` mutation moves); C3 a deadline gives
+   -ETIMEDOUT with st.timed_out and no child left; C4 a stream far past the 64 KiB pipe
+   capacity does not deadlock; C5 no descriptor leaks (before/after /proc/self/fd count).
+   C6-C8 the read order (wait on stdout, then zero-wait stderr) under one-sided and
+   alternating writes past the pipe capacity; C9 the deadline stays accurate while one
+   stream is silent (allowed window 250..2000 ms for a 300 ms deadline).
+   Prints PASS/FAIL lines and CHECK_L0_CAPTURE<TAB>ok=N<TAB>failed=M; exit 1 on any FAIL.
+   Mutation self-proof (measured, one edit each to cx/sys/proc.cx, rerun): deleting the cap
+   clamp -> c2-rc, c2-err-exact-cap, c2b-over-by-one-rc, c2b-over-by-one-len red; `>` -> `>=`
+   -> c2b-exact-cap-rc red; removing the deadline branch -> c3-rc, c3-timed-out-flag,
+   c3-wall-under-2s red; commenting out the stderr zero-wait read -> the whole run hangs and
+   the 20 s outer bound fires (rc 124), i.e. C6 never finishes.  Unmodified: all 45 pass. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use mem.grow
+#pragma unisa use text.text
+
+static int nok, nfail;
+static void ck(int c, const char *name) {
+    printf("%s\tcapture.%s\n", c ? "PASS" : "FAIL", name);
+    if (c) nok++; else nfail++;
+}
+static void ckv(long got, long want, const char *name) {
+    if (got != want) printf("NOTE\tcapture.%s\tgot=%ld\twant=%ld\n", name, got, want);
+    ck(got == want, name);
+}
+
+/* Open descriptors of this process; -1 when /proc is not there. */
+static int nfds(void) {
+    sy_dir_t d; int n = 0;
+    if (sy_dir_open(&d, "/proc/self/fd") != 0) return -1;
+    while (sy_dir_next(&d) == 1) n++;
+    sy_dir_close(&d);
+    return n;
+}
+/* No live or zombie child left: /proc/PID/task/PID/children is empty. */
+static int nochild(void) {
+    char p[64], dg[16];
+    unsigned char *d = 0;
+    int64_t n = 0;
+    int pid = sy_pid(), k = 0, i, nd = 0;
+    const char *a = "/proc/", *b = "/task/", *c = "/children";
+    while (pid > 0) { dg[nd++] = (char)('0' + pid % 10); pid /= 10; }
+    for (i = 0; a[i]; i++) p[k++] = a[i];
+    for (i = nd; i > 0; i--) p[k++] = dg[i - 1];
+    for (i = 0; b[i]; i++) p[k++] = b[i];
+    for (i = nd; i > 0; i--) p[k++] = dg[i - 1];
+    for (i = 0; c[i]; i++) p[k++] = c[i];
+    p[k] = 0;
+    if (sy_read_file(p, &d, &n, 4096) != 0) return 0;
+    return n == 0 || (n == 1 && d[0] == ' ');
+}
+
+static int run1(const char *script, long cap_bytes, long dl, int split,
+                sy_capture_t *cap, sy_exit_t *st) {
+    char *a[4];
+    sy_spawn_t o;
+    a[0] = "sh"; a[1] = "-c"; a[2] = (char *)script; a[3] = 0;
+    sy_spawn_init(&o);
+    o.argv = a;
+    o.deadline_ms = dl;
+    mg_init(&cap->out); mg_init(&cap->err); cap->split = split;
+    return sy_proc_capture(&o, st, cap, cap_bytes);
+}
+
+int main(int argc, char **argv) {
+    int f0 = nfds();
+    (void)argc; (void)argv;
+
+    /* C1: 256 KiB on stderr, "out\n" on stdout, both complete and byte-correct. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r = run1("head -c 262144 /dev/zero >&2; printf 'out\\n'", 1 << 20, 0, 1, &cap, &st);
+        long j, nz = 0;
+        for (j = 0; j < cap.err.len; j++) if (cap.err.data[j]) nz++;
+        ckv(r, 0, "c1-rc");
+        ck(st.exited && st.code == 0 && !st.timed_out, "c1-status");
+        ckv(cap.out.len, 4, "c1-out-len");
+        ck(cap.out.len == 4 && !memcmp(cap.out.data, "out\n", 4), "c1-out-bytes");
+        ckv(cap.err.len, 262144, "c1-err-len");
+        ckv(nz, 0, "c1-err-all-zero");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c1-no-child");
+    }
+
+    /* C2b: exactly CAP bytes succeeds; one byte over is -EMSGSIZE.  This is the boundary a
+       `>` -> `>=` mutation moves, which the far-over-cap case above cannot see. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r = run1("head -c 4096 /dev/zero >&2", 4096, 0, 1, &cap, &st);
+        ckv(r, 0, "c2b-exact-cap-rc");
+        ckv(cap.err.len, 4096, "c2b-exact-cap-len");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c2b-no-child");
+    }
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r = run1("head -c 4097 /dev/zero >&2", 4096, 0, 1, &cap, &st);
+        ckv(r, -EMSGSIZE, "c2b-over-by-one-rc");
+        ckv(cap.err.len, 4096, "c2b-over-by-one-len");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c2b-over-no-child");
+    }
+
+
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r = run1("head -c 100000 /dev/zero >&2; printf 'xxxxxxxxxx'", 1000, 0, 1, &cap, &st);
+        ckv(r, -EMSGSIZE, "c2-rc");
+        ckv(cap.err.len, 1000, "c2-err-exact-cap");
+        ck(cap.out.len <= 10, "c2-out-under-cap");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c2-no-child");
+    }
+
+    /* C3: a deadline gives -ETIMEDOUT with the flag, soon after the deadline. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("sleep 5", 1 << 20, 300, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, -ETIMEDOUT, "c3-rc");
+        ckv(st.timed_out, 1, "c3-timed-out-flag");
+        ck(ms < 2000, "c3-wall-under-2s");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c3-no-child");
+    }
+
+    /* C4: 200 KiB on one stream with no deadline -- far past a 64 KiB pipe -- must not hang. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        int r = run1("head -c 200000 /dev/zero >&2; printf 'ok'", 1 << 20, 0, 1, &cap, &st);
+        ckv(r, 0, "c4-rc");
+        ckv(cap.out.len, 2, "c4-out-len");
+        ckv(cap.err.len, 200000, "c4-err-len");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c4-no-child");
+    }
+
+    /* C6: only stderr writes, 256 KiB, stdout silent.  The read loop waits on stdout first
+       and only then zero-waits stderr, so this is the case that would deadlock if the
+       stderr read were dropped or made blocking. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("head -c 262144 /dev/zero >&2", 1 << 20, 5000, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, 0, "c6-rc");
+        ckv(cap.out.len, 0, "c6-out-len");
+        ckv(cap.err.len, 262144, "c6-err-len");
+        ck(ms < 4000, "c6-no-deadlock");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c6-no-child");
+    }
+    /* C7: the reverse -- only stdout writes 256 KiB, stderr silent. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("head -c 262144 /dev/zero", 1 << 20, 5000, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, 0, "c7-rc");
+        ckv(cap.out.len, 262144, "c7-out-len");
+        ckv(cap.err.len, 0, "c7-err-len");
+        ck(ms < 4000, "c7-no-deadlock");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c7-no-child");
+    }
+    /* C8: both streams alternate and each writes past the 64 KiB pipe capacity. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("i=0; while [ $i -lt 64 ]; do head -c 4096 /dev/zero; head -c 4096 /dev/zero >&2; i=$((i+1)); done", 1 << 20, 5000, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, 0, "c8-rc");
+        ckv(cap.out.len, 262144, "c8-out-len");
+        ckv(cap.err.len, 262144, "c8-err-len");
+        ck(ms < 4000, "c8-no-deadlock");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c8-no-child");
+    }
+    /* C9: the deadline stays accurate while one stream is silent: stderr-only writer with a
+       deadline it outlives returns -ETIMEDOUT close to the deadline, not later. */
+    {
+        sy_capture_t cap; sy_exit_t st;
+        long t0 = sy_now_ms();
+        int r = run1("head -c 4096 /dev/zero >&2; sleep 5", 1 << 20, 300, 1, &cap, &st);
+        long ms = sy_now_ms() - t0;
+        ckv(r, -ETIMEDOUT, "c9-rc");
+        ckv(st.timed_out, 1, "c9-timed-out-flag");
+        ck(ms >= 250 && ms < 2000, "c9-deadline-on-time");
+        mg_free(&cap.out); mg_free(&cap.err);
+        ck(nochild(), "c9-no-child");
+    }
+
+    {
+        int f1 = nfds();
+        if (f0 < 0 || f1 < 0) printf("NOTE\tcapture.c5\tfds-unknown\tf0=%d\tf1=%d\n", f0, f1);
+        else ckv(f1, f0, "c5-fd-count");
+    }
+
+    printf("CHECK_L0_CAPTURE\tok=%d\tfailed=%d\n", nok, nfail);
+    return nfail ? 1 : 0;
+}
