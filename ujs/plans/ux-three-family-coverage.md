@@ -15,7 +15,7 @@
 
 ## 压缩纹理软件范围与设备缺口
 
-BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 只支持线性 LDR 4x4 的常色块和全一范围哨兵，其他足迹、HDR、分区、权重及端点模式均未实现。EAC 的有符号与无符号 R11、RG11 可通过 CompressedTexture_decodeEAC 解码，输出保留 11 位精度的交错 16 位小端样本。ETC2 可通过 CompressedTexture_decodeETC2 解码 RGB、全 Alpha 和单比特透明，包含 T、H 与平面模式。sRGB 保留编码字节。ETC2 的通用 mip 分派及 ETC2、EAC 自动上传仍待接线。BC4 与 BC5 的有符号输出为二补码 SNORM。
+BC1 到 BC5 及 ETC1 已有独立软件像素验收。ASTC 直接软件入口支持 14 种二维足迹的 LDR 常色块和合法有限范围，sRGB 保留编码字节。HDR、非常色块的分区、权重及端点模式仍缺。EAC 的有符号与无符号 R11、RG11 可通过 CompressedTexture_decodeEAC 解码，输出保留 11 位精度的交错 16 位小端样本。ETC2 可通过 CompressedTexture_decodeETC2 解码 RGB、全 Alpha 和单比特透明，包含 T、H 与平面模式。sRGB 保留编码字节。ETC2 的通用 mip 分派及 ETC2、EAC 自动上传仍待接线。BC4 与 BC5 的有符号输出为二补码 SNORM。
 
 真实设备对压缩源的原样上传、格式扩展、mip 完整性、数组分层、立方体六面采样及释放仍待取证。r160 对照在这些软件门中只用于枚举与纹理描述，像素期望由独立金值给出。硬件格式的 A/B 计量保持原口径。
 
