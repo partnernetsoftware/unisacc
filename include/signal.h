@@ -40,6 +40,27 @@ typedef int sig_atomic_t;
 #endif
 #define SIGPIPE 13
 #define SIGTERM 15
+#if defined(__APPLE__)
+#define SIGCHLD 20
+#elif defined(_WIN32)
+#define SIGCHLD 17
+#else
+#define SIGCHLD 17
+#endif
+#if defined(__APPLE__)
+#define SIGCONT 19
+#elif defined(_WIN32)
+#define SIGCONT 18
+#else
+#define SIGCONT 18
+#endif
+#if defined(__APPLE__)
+#define SIGSTOP 17
+#elif defined(_WIN32)
+#define SIGSTOP 19
+#else
+#define SIGSTOP 19
+#endif
 #define SIGWINCH 28
 /* END generated signal targets */
 #define _UNISA_NSIG 32
