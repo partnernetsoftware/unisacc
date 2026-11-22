@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import {CompressedTexture,RGB_BPTC_SIGNED_Format,RGB_BPTC_UNSIGNED_Format,REVISION} from "../../web/game/three.module.js";
+if(REVISION!=="160" || RGB_BPTC_SIGNED_Format!==36494 || RGB_BPTC_UNSIGNED_Format!==36495) throw Error("r160 BC6H tokens");
+
+const fixtures=[
+  [[0,511,512,1023,768,256],[7,15,8,1,14,9,3,6,2,10,4,5,11,12,13,0]],
+  [[1023,512,1,0,511,1023],[0,1,2,3,15,5,6,7,8,9,10,11,12,13,14,15]],
+];
+function block([endpoints,selectors]) {
+  let word=3n;
+  endpoints.forEach((value,i)=>{ word|=BigInt(value)<<BigInt(5+10*i); });
+  selectors.forEach((value,i)=>{ word|=BigInt(value)<<BigInt(i===0?65:64+4*i); });
+  return Array.from({length:16},(_,i)=>Number((word>>BigInt(8*i))&255n));
+}
+const bytes=Uint8Array.from([0,1,1,0].flatMap(i=>block(fixtures[i])));
+function texture(format) {
+  const mip={data:bytes,width:5,height:5};
+  const result=new CompressedTexture([mip],5,5,format);
+  if(result.mipmaps[0]!==mip || result.format!==format || result.generateMipmaps ||
+     result.image.width!==5 || result.image.height!==5) throw Error("r160 BC6H descriptor");
+  return result;
+}
+function unquantize(value,signed) {
+  if(!signed) return value===1023?65535:value===0?0:64*value+32;
+  const integer=(value<<22)>>22, magnitude=Math.abs(integer);
+  return Math.sign(integer)*(magnitude>=511?32767:magnitude===0?0:64*magnitude+32);
+}
+function rgb(object,pixel,signed) {
+  const x=pixel%5,y=Math.floor(pixel/5);
+  const at=16*(2*Math.floor(y/4)+Math.floor(x/4));
+  const word=object.mipmaps[0].data.slice(at,at+16).reduceRight((sum,byte)=>256n*sum+BigInt(byte),0n);
+  if((word&31n)!==3n) throw Error("BC6H mode 11 fixture");
+  const index=4*(y%4)+x%4;
+  const selector=index===0?Number((word>>65n)&7n):Number((word>>BigInt(64+4*index))&15n);
+  const weight=[0,4,9,13,17,21,26,30,34,38,43,47,51,55,60,64][selector]/64;
+  return [0,1,2].reduce((sum,c)=>{
+    const a=unquantize(Number((word>>BigInt(5+10*c))&1023n),signed);
+    const b=unquantize(Number((word>>BigInt(35+10*c))&1023n),signed);
+    const value=Math.floor(a+(b-a)*weight+0.5);
+    const magnitude=Math.floor(Math.abs(value)*31/(signed?32:64));
+    return sum+(magnitude+(value<0&&magnitude?32768:0))*65536**c;
+  },0);
+}
+const unsigned=texture(RGB_BPTC_UNSIGNED_Format),signed=texture(RGB_BPTC_SIGNED_Format);
+const output=object=>object.image.width*object.image.height*8;
+const pixels=(object,isSigned)=>Array.from({length:25},(_,pixel)=>rgb(object,pixel,isSigned));
+// The software ABI rejection cases are asserted by the cx gate.
+document.querySelector("#r160").textContent=JSON.stringify([
+  32,64,output(unsigned),output(signed),0,0,-827,-1,-1,-3,-2,-3827,-4,173,
+  ...pixels(unsigned,false),...pixels(signed,true),
+]);
+unsigned.dispose();
+signed.dispose();
+</script>
