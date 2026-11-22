@@ -1,0 +1,55 @@
+native function outline_blur_sample(src:i64,index:i64,channel:i64,line:i64,extent:i64,step:i64,at:f64) f64 {
+  if(at<0.0) { at=0.0; }
+  let last=(extent-1)*1.0;
+  if(at>last) { at=last; }
+  let lo=f64_floor_i64(at);
+  let hi=lo+1;
+  if(hi>=extent) { hi=lo; }
+  let f=at-lo;
+  let a=ux_u8(src+index+4*(lo-line)*step+channel);
+  let b=ux_u8(src+index+4*(hi-line)*step+channel);
+  return a+(b-a)*f;
+}
+
+// Linear sampling and clamp-to-edge match the r160 mask blur.
+native function OutlinePass_blurRGBA8(src:i64,dst:i64,width:i64,height:i64,axis:i64,radius:f64) i64 {
+  if(width<1 || width>2048 || height<1 || height>2048 ||
+     (axis!=0 && axis!=1) || !(radius>0.0 && radius<=4.0)) { return 0-1; }
+  let count=width*height;
+  let bytes=4*count;
+  if(!post_span(src,bytes) || !post_span(dst,bytes) || post_overlap(src,bytes,dst,bytes)) { return 0-1; }
+  let extent=width;
+  let step=1;
+  if(axis==1) { extent=height; step=width; }
+  let w1=0.8824969025845955;
+  let w2=0.6065306597126334;
+  let w3=0.32465246735834974;
+  let w4=0.1353352832366127;
+  let denom=1.0+2.0*(w1+w2+w3+w4);
+  let pixel=0;
+  while(pixel<count) {
+    let line=(pixel/step)%extent;
+    let channel=0;
+    while(channel<4) {
+      let index=4*pixel;
+      let sum=ux_u8(src+index+channel)*1.0;
+      let tap=1;
+      while(tap<=4) {
+        let weight=w1;
+        if(tap==2) { weight=w2; }
+        else if(tap==3) { weight=w3; }
+        else if(tap==4) { weight=w4; }
+        let delta=tap*radius/4.0;
+        let left=outline_blur_sample(src,index,channel,line,extent,step,line-delta);
+        let right=outline_blur_sample(src,index,channel,line,extent,step,line+delta);
+        sum=sum+weight*(left+right);
+        tap=tap+1;
+      }
+      let stored=ux_u8_put(dst+index+channel,post_rgba8(sum/denom));
+      channel=channel+1;
+    }
+    pixel=pixel+1;
+  }
+  return count;
+}
+

@@ -1,0 +1,73 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int channel(int pixel,int c) {
+    int i=4*pixel+c;
+    return 4*((29*i+13*pixel)%61);
+}
+
+static double sample(int row,int c,int axis,double x) {
+    int length=axis?3:5;
+    if(x<0) x=0;
+    if(x>length-1) x=length-1;
+    int a=(int)x,b=a+(a<length-1);
+    double left=channel(axis?a*5+row:row*5+a,c);
+    double right=channel(axis?b*5+row:row*5+b,c);
+    return left+(right-left)*(x-a);
+}
+
+static double gaussian(int tap) {
+    double x = -(tap*tap)/8.0;
+    double term=1.0,sum=1.0;
+    for(int n=1;n<=24;n++) {
+        term*=x/n;
+        sum+=term;
+    }
+    return sum;
+}
+
+static double golden(int axis,int pixel) {
+    double result=0,place=1;
+    int coordinate=axis?pixel/5:pixel%5,row=axis?pixel%5:pixel/5;
+    double radius=axis?1:4;
+    for(int c=0;c<4;c++) {
+        double total=0,weight=0;
+        for(int tap=-4;tap<=4;tap++) {
+            double w=gaussian(tap);
+            weight+=w;
+            total+=w*sample(row,c,axis,coordinate+radius*tap/4);
+        }
+        result+=place*(int)(total/weight+0.5);
+        place*=256;
+    }
+    return result;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"f64-math","postprocess-rgba8","outlinepass-blur",0};
+    const char *setup="let i=0;while(i<60){let w=ux_u8_put(i,4*((29*i+13*(i/4))%61));i=i+1;}";
+    char generated[30][140];
+    const char *cases[34];
+    double gold[34];
+    for(int axis=0;axis<2;axis++) for(int pixel=0;pixel<15;pixel++) {
+        int i=15*axis+pixel;
+        tx_snprintf(generated[i],sizeof generated[i],
+            "let n=OutlinePass_blurRGBA8(0,64,5,3,%d,%d.0);return 0.0+ux_u32(%d);",
+            axis,axis?1:4,64+4*pixel);
+        cases[i]=generated[i];
+        gold[i]=golden(axis,pixel);
+    }
+    cases[30]="return 0.0+OutlinePass_blurRGBA8(0,4,5,3,0,4.0);";
+    cases[31]="return 0.0+OutlinePass_blurRGBA8(0,64,5,3,0,0.0);";
+    cases[32]="return 0.0+OutlinePass_blurRGBA8(0,64,5,3,2,1.0);";
+    cases[33]="return 0.0+OutlinePass_blurRGBA8(6291400,64,5,3,1,1.0);";
+    for(int i=30;i<34;i++) gold[i]=-1;
+    return g_wasm_batch_addon("G_PIXEL OutlinePass blur","outlinepass-blur",argv[1],modules,
+        setup,cases,gold,34,mutate?20:-1,
+        "let n=OutlinePass_blurRGBA8(0,64,5,3,0,1.0);return 0.0+ux_u32(84);");
+}
+
+
