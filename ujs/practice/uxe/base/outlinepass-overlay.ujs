@@ -1,0 +1,46 @@
+struct OutlineOverlaySettings {
+  strength:f64;
+  glow:f64;
+}
+
+// Evaluates the r160 overlay fragment on pre-sampled linear RGBA8 texels.
+// Pattern samples already include the shader's 6x UV transform and wrapping.
+// Pass -1 as the pattern address to disable the pattern.
+// The output is the fragment color before framebuffer blending.
+// Returns the pixel count, or -1 before writing when an argument is invalid.
+native function OutlinePass_overlayRGBA8(mask:i64,edge1:i64,edge2:i64,pattern:i64,dst:i64,capacity:i64,pixels:i64,settings:i64) i64 {
+  if(pixels<1 || pixels>1572864 || settings%8!=0 ||
+     !post_span(settings,OutlineOverlaySettings.size) || pattern<0-1) { return 0-1; }
+  let strength=ux_f64(settings+OutlineOverlaySettings.strength);
+  let glow=ux_f64(settings+OutlineOverlaySettings.glow);
+  if(!(strength>=0.0 && strength<=16.0) || !(glow>=0.0 && glow<=16.0)) { return 0-1; }
+  let usePattern=pattern>=0;
+  let bytes=pixels*4;
+  if(capacity<bytes || !post_span(dst,capacity) || !post_span(mask,bytes) ||
+     !post_span(edge1,bytes) || !post_span(edge2,bytes) ||
+     post_overlap(mask,bytes,dst,bytes) || post_overlap(edge1,bytes,dst,bytes) ||
+     post_overlap(edge2,bytes,dst,bytes) ||
+     post_overlap(settings,OutlineOverlaySettings.size,dst,bytes) ||
+     (usePattern!=0 && (!post_span(pattern,bytes) || post_overlap(pattern,bytes,dst,bytes)))) {
+    return 0-1;
+  }
+  let at=0;
+  while(at<bytes) {
+    let red=ux_u8(mask+at)/255.0;
+    let scale=strength*red;
+    let patternValue=0.0;
+    if(usePattern!=0) {
+      let visibility=0.5;
+      if(ux_u8(mask+at+1)<255) { visibility=1.0; }
+      patternValue=visibility*(1.0-red)*(255-ux_u8(pattern+at));
+    }
+    let channel=0;
+    while(channel<4) {
+      let value=scale*(ux_u8(edge1+at+channel)+glow*ux_u8(edge2+at+channel))+patternValue;
+      let stored=ux_u8_put(dst+at+channel,post_rgba8(value));
+      channel=channel+1;
+    }
+    at=at+4;
+  }
+  return pixels;
+}
