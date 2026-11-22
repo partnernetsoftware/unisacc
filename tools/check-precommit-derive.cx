@@ -45,6 +45,7 @@ int main(void) {
     char out[CPD_OUT], cwd[CPD_PW], work[CPD_PW], repo[CPD_PW], repo2[CPD_PW], cmd[8192], p[CPD_PW];
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    setvbuf(stdout, 0, _IONBF, 0);
 
     if (!getcwd(cwd, sizeof cwd)) cpd_abort("cwd");
     if (cx_fmt(work, sizeof work, "%s/check-precommit-derive-%d", base_td, (int)getpid())) cpd_abort("work");
@@ -220,13 +221,21 @@ int main(void) {
         if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo2)) cpd_abort("r2f2");
         if (cx_write(p, "b1\n", 3)) cpd_abort("r2w2");
         if (cx_fmt(p, sizeof p, "%s/tools/derive.cx", repo2)) cpd_abort("r2f3");
-        if (cx_write(p, "int main(void){return 99;}\n", 27)) cpd_abort("r2w3");
+        {
+            const char *d_stub =
+                "#pragma unisa use sys.io\n#pragma unisa use sys.env\n"
+                "int main(void){const char *m=sy_env(\"FAKE_GATE_RC\");"
+                "if(m&&m[0]=='9')return 99;if(m&&m[0]=='1')return 142;"
+                "sy_printf(\"DERIVE\\tlinks\\tOK\\t1\\nDERIVE_SUMMARY\\tok=1\\tdrift=0\\trefused=0\\tskipped=0\\telapsed_ms=1\\n\");"
+                "return 0;}\n";
+            if (cx_write(p, d_stub, strlen(d_stub))) cpd_abort("r2w3");
+        }
     }
     if (cx_fmt(cmd, sizeof cmd,
         "cd '%s' && git init -q && git add exec/facts/derive.tsv tests/batches.tsv && "
         "git -c user.name=t -c user.email=t@t commit -q -m init && "
         "printf 'b2\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
-        "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo2)) cpd_abort("c9");
+        "FAKE_GATE_RC=9 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo2)) cpd_abort("c9");
     {
         int rc = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         ck(rc == 0 && ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE") && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"),
@@ -338,8 +347,10 @@ int main(void) {
     /* 11. (a) Invoking precommit from a subdirectory and real git commit hook from a version worktree subdirectory (.claude/worktrees/v0.0.99/tests);
      *     (b) Staged deletion of derive.tsv / derive.cx / reg-manifest.cx / tables-gen.cx refused with named error instead of silent skip. */
     {
-        char hp[CPD_PW], repo4[CPD_PW];
-        const char *wthook = "#!/bin/sh\nroot=$(cd \"$(git rev-parse --git-common-dir)/..\" && pwd -P)\nUNISACC_PRECOMMIT_SERIAL=1 exec sh \"$root/unisacc.com\" \"$root/tools/precommit.cx\"\n";
+        char hp[CPD_PW], repo4[CPD_PW], wthook[1024];
+        if (cx_fmt(wthook, sizeof wthook,
+            "#!/bin/sh\nUNISACC_PRECOMMIT_SERIAL=1 exec sh '%s/unisacc.com' '%s/tools/precommit.cx'\n",
+            cwd, cwd)) cpd_abort("wthook");
         if (cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", repo)) cpd_abort("hp11");
         if (cx_write(hp, wthook, strlen(wthook))) cpd_abort("whp11");
         (void)chmod(hp, 0755);
@@ -348,7 +359,7 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s/tests' && printf 'b4\\tIMPLEMENTED\\tcontract\\ttools/b4.cx\\tSOURCE\\tlnx/x86_64\\t30\\t-\\ttools/b4.cx\\t-\\tcontract.b4\\trc0:B4\\tproduct\\tcommit\\n' >> batches.tsv && "
             "git add batches.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh '%s/unisacc.com' '%s/tools/precommit.cx'",
-            repo, repo, repo)) cpd_abort("c11a1");
+            repo, cwd, cwd)) cpd_abort("c11a1");
         int rc_sub = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int sub_ok = (rc_sub == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links") &&
                       !ckk_has(out, CPD_OUT, "DERIVE_GATE_UNAVAILABLE"));
@@ -399,37 +410,37 @@ int main(void) {
         cpd_sh(cmd, out);
 
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && git rm -qf exec/facts/derive.tsv && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d1");
+            "cd '%s' && git rm -qf exec/facts/derive.tsv && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d1");
         int rc_d1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d1 = (rc_d1 == 1 && ckk_has(out, CPD_OUT, "BLOCKED derive-gate-deleted path=exec/facts/derive.tsv"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- exec/facts/derive.tsv && "
-            "git rm -qf tools/derive.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d2");
+            "git rm -qf tools/derive.cx && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d2");
         int rc_d2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d2 = (rc_d2 == 1 && ckk_has(out, CPD_OUT, "BLOCKED derive-gate-deleted path=tools/derive.cx"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tools/derive.cx && "
-            "git rm -qf tools/reg-manifest.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d3");
+            "git rm -qf tools/reg-manifest.cx && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d3");
         int rc_d3 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d3 = (rc_d3 == 1 && ckk_has(out, CPD_OUT, "BLOCKED manifest-gate-deleted path=tools/reg-manifest.cx"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tools/reg-manifest.cx && "
-            "git rm -qf tools/tables-gen.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d4");
+            "git rm -qf tools/tables-gen.cx && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d4");
         int rc_d4 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d4 = (rc_d4 == 1 && ckk_has(out, CPD_OUT, "BLOCKED tables-gate-deleted path=tools/tables-gen.cx"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tools/tables-gen.cx && "
-            "git rm -qf tools/gen-all-check.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d5");
+            "git rm -qf tools/gen-all-check.cx && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d5");
         int rc_d5 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d5 = (rc_d5 == 1 && ckk_has(out, CPD_OUT, "BLOCKED genall-gate-deleted path=tools/gen-all-check.cx"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tools/gen-all-check.cx && "
-            "git rm -qf tools/ledger-add.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d6");
+            "git rm -qf tools/ledger-add.cx && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d6");
         int rc_d6 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d6 = (rc_d6 == 1 && ckk_has(out, CPD_OUT, "BLOCKED ledger-gate-deleted path=tools/ledger-add.cx"));
 
@@ -441,7 +452,7 @@ int main(void) {
             "cd '%s' && git reset -q && git checkout -q -- tools/ledger-add.cx && "
             "mkdir -p archive/agentwork-retire-2026-11 && printf 'a\\tb\\n' > archive/agentwork-retire-2026-11/ledger.tsv && "
             "git add archive/agentwork-retire-2026-11/ledger.tsv && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4l1");
+            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4l1");
         int rc_l1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_l1 = (rc_l1 == 1 && ckk_has(out, CPD_OUT, "BLOCKED ledger: cannot read HEAD:build/ledger-format-baseline.tsv"));
 
@@ -461,12 +472,14 @@ int main(void) {
             "git checkout -q -- exec/facts/derive.tsv tests/batches.tsv && "
             "printf 'pkg\\tver\\tlayer\\troots\\tdeps\\towner\\tstatus\\tnote\\tapi_sha\\n' > build/tlib-packages.tsv && "
             "printf 'pkgdemo\\t0.1.0\\tL2\\tpkgdemo\\t-\\tcore\\tfrozen\\t-\\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\n' >> build/tlib-packages.tsv && "
-            "printf 'int main(void){return 2;}\\n' > tools/check-tlib-frozen.cx && "
+            "printf '#pragma unisa use sys.io\\n#pragma unisa use sys.env\\nint main(void){if(sy_env(\"FAKE_GATE_RC\"))return 2;sy_printf(\"TLIB_FAST\\\\tok=1\\\\tmismatch=0\\\\n\");return 0;}\\n' > '%s/tlib-stub.cx' && "
+            "cp '%s/tlib-stub.cx' tools/check-tlib-frozen.cx && "
             "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"API_SHA\\\\tpkgdemo\\\\tdiffers\\\\told\\\\tnew\\\\n\");return 1;}\\n' > tools/layer-api.cx && "
             "git add build/tlib-packages.tsv tools/check-tlib-frozen.cx tools/layer-api.cx && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m setup-tlib && "
             "printf 'int x;\\n' > pkgdemo/foo.cx && git add pkgdemo/foo.cx && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4tlib");
+            "FAKE_GATE_RC=2 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            repo4, work, work)) cpd_abort("r4tlib");
         int rc_tlib = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_tlib = (rc_tlib == 1 && ckk_has(out, CPD_OUT, "TLIB_API_STALE") &&
                        ckk_has(out, CPD_OUT, "TLIB_FROZEN_GATE_UNAVAILABLE"));
@@ -475,18 +488,20 @@ int main(void) {
 
         /* 11e: Audit items 1 & 3 -- GATE_TIMEOUT vs UNAVAILABLE, non-freeze WARN DEFERRED_GATE + build/deferred-gates.tsv ledger, and chain-ready refusal */
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && git reset -q && rm -rf pkgdemo build/deferred-gates.tsv && "
+            "cd '%s' && git reset -q && rm -rf pkgdemo build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "git rm -qf build/tlib-packages.tsv tools/check-tlib-frozen.cx tools/layer-api.cx && "
             "printf '# name\\tgenerator\\tcheck_argv\\twrite_argv\\toutputs\\tinputs_glob\\torder\\tbound_s\\n' > exec/facts/derive.tsv && "
             "printf 'links\\ttools/links.cx\\ttrue\\ttrue\\tbuild/links.tsv\\ttests/batches.tsv\\t1\\t10\\n' >> exec/facts/derive.tsv && "
-            "printf 'int main(void){return 142;}\\n' > tools/derive.cx && "
+            "cp '%s/tools/derive.cx' tools/derive.cx && "
             "mkdir -p include && printf '/* h */\\n' > include/a.h && "
-            "printf 'int main(void){return 142;}\\n' > tools/gen-all-check.cx && "
+            "printf '#pragma unisa use sys.io\\n#pragma unisa use sys.env\\nint main(void){const char *m=sy_env(\"FAKE_GATE_RC\");if(m&&m[0]==49)return 142;if(m&&m[0]==50){sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tERROR\\\\t5\\\\tboom\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=0\\\\tdiff=0\\\\terror=1\\\\tuncovered=0\\\\tms=5\\\\n\");return 2;}sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tPASS\\\\t1\\\\t-\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=1\\\\tdiff=0\\\\terror=0\\\\tuncovered=0\\\\tms=1\\\\n\");return 0;}\\n' > '%s/genall-stub.cx' && "
+            "cp '%s/genall-stub.cx' tools/gen-all-check.cx && "
             "git add exec/facts/derive.tsv tools/derive.cx tools/gen-all-check.cx include/a.h && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m setup-timeout && "
             "printf '# b-to\\n' >> tests/batches.tsv && printf '/* h2 */\\n' >> include/a.h && "
             "git add tests/batches.tsv include/a.h && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4to");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            repo4, repo2, work, work)) cpd_abort("r4to");
         int rc_to = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_to = (rc_to == 0 &&
                      ckk_has(out, CPD_OUT, "GATE_TIMEOUT gate=derive") &&
@@ -496,8 +511,8 @@ int main(void) {
 
         if (cx_fmt(cmd, sizeof cmd,
             "test -s '%s/build/deferred-gates.tsv' && "
-            "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --repo '%s' --only 1-rev",
-            repo4, cwd, cwd, repo4)) cpd_abort("r4cr1");
+            "sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev",
+            repo4, repo4)) cpd_abort("r4cr1");
         int rc_cr1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_cr1 = (rc_cr1 != 0 && ckk_has(out, CPD_OUT, "deferred-gates-unverified"));
 
@@ -506,9 +521,9 @@ int main(void) {
 
         /* 11f: Audit items 1, 2, 3, 6 -- active build/freeze.tsv makes GATE_TIMEOUT, *_GATE_UNAVAILABLE, gen-all ERROR-without-DIFF, and missing core tool fail-closed */
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && rm -f build/deferred-gates.tsv && "
+            "cd '%s' && rm -f build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "printf 'c0\\tdeadbeef\\tother\\t4102444800\\tsrc\\n' > build/freeze.tsv && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz1");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz1");
         int rc_fz1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_fz1 = (rc_fz1 == 1 &&
                       ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive") &&
@@ -519,10 +534,9 @@ int main(void) {
         /* Item 2: gen-all generator ERROR without DIFF: outside freeze allows (H1 contract), inside freeze refuses */
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && "
-            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tERROR\\\\t5\\\\tboom\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=0\\\\tdiff=0\\\\terror=1\\\\tuncovered=0\\\\tms=5\\\\n\");return 2;}\\n' > tools/gen-all-check.cx && "
-            "git add tools/gen-all-check.cx && git -c user.name=t -c user.email=t@t commit -q --no-verify -m genall-err && "
             "printf '/* h3 */\\n' >> include/a.h && git add include/a.h && "
-            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz2");
+            "FAKE_GATE_RC=2 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            repo4)) cpd_abort("r4fz2");
         int rc_fz2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_fz2 = (rc_fz2 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=genall"));
 
@@ -553,13 +567,14 @@ int main(void) {
          * - P2: integrator owner with explicit UNISACC_GATE_WAIVE=derive:reason waives once and records ledger */
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && git checkout -q -- tools/gen-all-check.cx exec/facts/derive.tsv include/a.h tests/batches.tsv && "
-            "printf 'int main(void){return 142;}\\n' > tools/derive.cx && "
+            "cp '%s/tools/derive.cx' tools/derive.cx && "
             "printf 'c0\\tdeadbeef\\tcdx\\t1000000000\\tsrc\\n' > build/freeze.tsv && "
             "git add tools/derive.cx build/freeze.tsv && git -c user.name=t -c user.email=t@t commit -q --no-verify -m m5-base && "
             "printf 'c0\\tdeadbeef\\tcdx\\t4102444800\\tsrc\\n' > build/freeze.tsv && git add build/freeze.tsv && "
             "printf 'c0\\tdeadbeef\\tcdx\\t1000000000\\tsrc\\n' > build/freeze.tsv && "
             "printf '# m5a\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
-            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4m5a");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            repo4, repo2)) cpd_abort("r4m5a");
         int rc_m5a = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_m5a = (rc_m5a == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive"));
 
@@ -569,7 +584,7 @@ int main(void) {
             "git add build/freeze.tsv && git -c user.name=t -c user.email=t@t commit -q --no-verify -m m5-head-active && "
             "printf 'c0\\tdeadbeef\\tcdx\\t1000000000\\tsrc\\n' > build/freeze.tsv && git add build/freeze.tsv && "
             "printf '# m5b\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
-            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4m5b");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4m5b");
         int rc_m5b = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_m5b = (rc_m5b == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive"));
 
@@ -578,13 +593,13 @@ int main(void) {
             "printf 'c0\\tmalformed\\n' > build/freeze.tsv && git add build/freeze.tsv && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m m6-malformed && "
             "printf '# m6\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
-            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4m6");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4m6");
         int rc_m6 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_m6 = (rc_m6 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && dd if=/dev/zero bs=1300 count=1 2>/dev/null | tr '\\0' 'a' > build/freeze.tsv && printf '\\n' >> build/freeze.tsv && "
-            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4c1");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4c1");
         int rc_c1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_c1 = (rc_c1 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive") &&
                      ckk_has(out, CPD_OUT, "freeze.tsv line too long"));
@@ -593,7 +608,7 @@ int main(void) {
             "cd '%s' && git reset -q && printf 'c0\\tdeadbeef\\tcdx\\t1000000000\\tsrc\\n' > build/freeze.tsv && "
             "git add build/freeze.tsv && git -c user.name=t -c user.email=t@t commit -q --no-verify -m c2-exp && "
             "printf '# c2\\n' >> tests/batches.tsv && git add tests/batches.tsv && chmod 000 build/freeze.tsv && "
-            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx; r=$?; chmod 600 build/freeze.tsv; exit $r", repo4)) cpd_abort("r4c2");
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx; r=$?; chmod 600 build/freeze.tsv; exit $r", repo4)) cpd_abort("r4c2");
         int rc_c2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_c2 = (rc_c2 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive") &&
                      ckk_has(out, CPD_OUT, "BLOCKED freeze-unreadable"));
@@ -605,7 +620,7 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && rm -f build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "cp .git/index '%s/temp-c6.idx' && "
-            "GIT_INDEX_FILE='%s/temp-c6.idx' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "FAKE_GATE_RC=1 GIT_INDEX_FILE='%s/temp-c6.idx' UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
             "test ! -e build/deferred-gates.tsv && test -s '%s/temp-c6.idx.deferred.tsv' && "
             "mkdir -p '%s/fr-c6' && printf 'NODE\\trk-cxraw\\tEND\\trc=0\\tms=1\\n' > '%s/fr-c6/events.tsv' && "
             "sh ./unisacc.com tools/precommit.cx -- --from-run '%s/fr-c6' >/dev/null 2>&1; "
@@ -619,19 +634,71 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && rm -f build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "printf 'c0\\tdeadbeef\\tcdx\\t4102444800\\tsrc\\n' > build/freeze.tsv && "
-            "UNISACC_INTEGRATOR=other UNISACC_GATE_WAIVE=derive:s0-merge UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=other UNISACC_GATE_WAIVE=derive:s0-merge UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
             repo4)) cpd_abort("r4p2a");
         int rc_p2_other = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
 
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=derive:s0-merge UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
-            "test -s build/deferred-gates.tsv",
+            "cd '%s' && FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=derive:s0-merge UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "test -s build/deferred-gates.tsv && test -s .git/unisacc-deferred-gates.tsv",
             repo4)) cpd_abort("r4p2b");
         int rc_p2_owner = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_p2 = (rc_p2_other == 1 && rc_p2_owner == 0 &&
                      ckk_has(out, CPD_OUT, "WARN FREEZE_GATE_WAIVED gate=derive owner=cdx why=s0-merge"));
         ck(ok_p2,
             "p2-freeze-integrator-owner-explicit-waive-records-ledger: only freeze owner with UNISACC_GATE_WAIVE=gate:reason can waive once and records ledger");
+
+        /* 11h (C3): All 7 ledger corruption/deletion modes + hash chain tampering must make chain-ready 1-rev FAIL */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q -B main && git reset -q && "
+            "git checkout -q -- exec/facts/derive.tsv include/a.h tests/batches.tsv && "
+            "printf '/cx\\n/ext\\n' > .gitignore && git add .gitignore && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m c3-main-clean && "
+            "rm -f build/freeze.tsv && "
+            "cp build/deferred-gates.tsv '%s/df-bak.tsv' && "
+            "cp .git/unisacc-deferred-gates.tsv '%s/af-bak.tsv' && "
+            "cr_c() { out=$(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev 2>&1) && return 1; printf '%%s\\n' \"$out\" | grep -q 'deferred-gates-corrupt'; }; "
+            "cr_t() { out=$(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev 2>&1) && return 1; printf '%%s\\n' \"$out\" | grep -q 'deferred-gates-tampered'; }; "
+            "printf '#' > build/deferred-gates.tsv && cat '%s/df-bak.tsv' >> build/deferred-gates.tsv && cr_c && "
+            ": > build/deferred-gates.tsv && cr_c && "
+            "printf '\\n' > build/deferred-gates.tsv && cr_c && "
+            "cp '%s/df-bak.tsv' build/deferred-gates.tsv && chmod 000 build/deferred-gates.tsv && cr_c && chmod 600 build/deferred-gates.tsv && "
+            "rm -f build/deferred-gates.tsv && mkdir build/deferred-gates.tsv && cr_c && rmdir build/deferred-gates.tsv && "
+            "ln -sf '%s/no-such-target' build/deferred-gates.tsv && cr_c && rm -f build/deferred-gates.tsv && "
+            "cr_t && "
+            "cp '%s/df-bak.tsv' build/deferred-gates.tsv && "
+            "dtree=$(head -n 1 build/deferred-gates.tsv | cut -f6) && "
+            "printf 'VERIFIED\\t1700000000\\t%s\\tderive\\tVERIFY_DEFERRED_PASS\\t%%s\\t%%s\\tverified_deferred_tree=%%s\\t0000000000000000000000000000000000000000000000000000000000000000\\n' \"$dtree\" \"$dtree\" \"$dtree\" >> build/deferred-gates.tsv && "
+            "printf 'VERIFIED\\t1700000000\\t%s\\tderive\\tVERIFY_DEFERRED_PASS\\t%%s\\t%%s\\tverified_deferred_tree=%%s\\t0000000000000000000000000000000000000000000000000000000000000000\\n' \"$dtree\" \"$dtree\" \"$dtree\" >> .git/unisacc-deferred-gates.tsv && "
+            "cr_t && "
+            "cp '%s/df-bak.tsv' build/deferred-gates.tsv && cp '%s/af-bak.tsv' .git/unisacc-deferred-gates.tsv",
+            repo4, work, work, cwd, repo4, cwd, repo4, work, work, work, work, repo4, repo4, work, work)) cpd_abort("r4c3");
+        int rc_c3 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        ck(rc_c3 == 0,
+            "c3-seven-ledger-corruptions-and-tampering-all-refused-by-chain-ready: comment, empty-file, empty-line, chmod-000, dir, dangling-symlink, rm-f, and forged-sha256 all FAIL 1-rev");
+
+        /* 11i (C4): Ledger write failure blocks in active freeze window and warns prominently without ledger= outside freeze */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && mkdir build/deferred-gates.tsv && "
+            "printf 'c0\\tdeadbeef\\tcdx\\t4102444800\\tsrc\\n' > build/freeze.tsv && "
+            "printf '# c4\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=derive:c4 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
+            repo4)) cpd_abort("r4c4a");
+        int rc_c4_fz = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_c4_fz = (rc_c4_fz == 1 && ckk_has(out, CPD_OUT, "BLOCKED deferred-ledger-write-failed"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'c0\\tdeadbeef\\tcdx\\t1000000000\\tsrc\\n' > build/freeze.tsv && "
+            "git add build/freeze.tsv && git -c user.name=t -c user.email=t@t commit -q --no-verify -m c4-unfreeze && "
+            "printf '# c4b\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx; r=$?; rmdir build/deferred-gates.tsv; exit $r",
+            repo4)) cpd_abort("r4c4b");
+        int rc_c4_nfz = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_c4_nfz = (rc_c4_nfz == 0 &&
+                         ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE_LEDGER_WRITE_FAILED") &&
+                         !ckk_has(out, CPD_OUT, "ledger="));
+        ck(ok_c4_fz && ok_c4_nfz,
+            "c4-ledger-write-failure-blocks-in-freeze-and-warns-without-ledger-path-outside-freeze: write error refuses in freeze and emits WARN without ledger= outside freeze");
     }
 
     {

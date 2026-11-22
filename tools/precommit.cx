@@ -13,12 +13,21 @@
  * -- --plan DIR / -- --from-run DIR: used by tools/precommit-flow.cx to run the gate subprocesses as one
  * concurrent flow (see gate_slurp).  With no argument (the hook's call) a commit that stages a registry table is
  * handed to tools/precommit-flow.cx, everything else is judged serially here (see flow_route);
- * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict. */
+ * UNISACC_PRECOMMIT_SERIAL=1 forces the serial path.  Both paths run the same gates and print the same verdict.
+ *
+ * Deferred-gates dual-anchor 9-column SHA-256 hash-chained ledger (C3/C4/C6/C7):
+ *   Anchor 1: <top>/build/deferred-gates.tsv
+ *   Anchor 2: <git-common-dir>/unisacc-deferred-gates.tsv (or <dfp>.anchor for isolated temp index / --from-run)
+ *   Genesis : DEFERRED_GENESIS_SHA = "0000000000000000000000000000000000000000000000000000000000000000"
+ *   Columns : rec_type\ttimestamp_s\ttop\tgate\treason\ttree_sha\thead_sha\tdetail\tchain_sha256
+ *   Chaining: per-top SHA-256("<prev_chain_sha256_for_top>\t<col0..col7>").
+ *   Verify  : sh ./unisacc.com tools/precommit.cx -- --verify-deferred [--gate derive|genall|tlibfrozen|lint|ratchets] */
 #pragma unisa use cxlib.globspan
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -29,7 +38,7 @@
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
-#define SLURP_DEADLINE_MS 58000   /* 每个子进程(含 ratchets/cx-lint)最多 58 s:超时杀进程组,按「没跑」处理 */
+#define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
  * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
@@ -108,7 +117,8 @@ static char *slurp_run(char **argv, long *n) {
         sy_pollfd_t pf; long left = deadline - sy_now_ms();
         pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
         if (left <= 0 || sy_poll(&pf, 1, left) <= 0) {
-            sy_eprintf("precommit: %s timed out after %d ms\n", argv[0], SLURP_DEADLINE_MS);
+            sy_eprintf("precommit: GATE_TIMEOUT gate=%s cmd=%s bound_s=%d\n",
+                       cur_gate ? cur_gate : "subproc", argv[0], SLURP_DEADLINE_MS / 1000);
             slurp_last_timeout = 1;
             slurp_last_rc = 124;
             sy_close(ofd); sy_kill(pid); mm_free(b); return 0;
@@ -412,7 +422,7 @@ static int freeze_in_lane_a(const char *path, long nl) {
     return 0;
 }
 
-static char pc_orig_cwd[1024], pc_work_top[1024], pc_outer_idx[1024];
+static char pc_orig_cwd[1024], pc_work_top[1024], pc_local_top[1024], pc_outer_idx[1024];
 static int pc_is_temp_idx = 0;
 
 static int freeze_read_path(const char *path, char **out, size_t *outn, int *err_out) {
@@ -718,6 +728,321 @@ static int pc_gate_waive_reason(const char *gate, char *why_out, size_t wcap) {
     return 0;
 }
 
+#define DEFERRED_GENESIS_SHA "0000000000000000000000000000000000000000000000000000000000000000"
+
+typedef struct {
+    char gate[32];
+    char reason[128];
+    char tree[64];
+    char head[64];
+    char detail[384];
+    int verified;
+} PcDefRow;
+
+static int pc_git_common_anchor(const char *top, char *afp, size_t acap) {
+    char gitp[1200], gd[1200];
+    sy_stat_t st;
+    size_t gn = 0;
+    char *gb;
+    if (cx_fmt(gitp, sizeof gitp, "%s/.git", top)) return -1;
+    if (sy_lstat(gitp, &st) == 0 && st.kind == 'f') {
+        gb = (char *)cx_read(gitp, &gn);
+        if (gb && gn > 8 && tx_prefix(gb, (long)gn, "gitdir: ", 8)) {
+            long s = 8, e = 8, wo = -1, i;
+            while (e < (long)gn && gb[e] != '\n' && gb[e] != '\r') e++;
+            if (e > s && e - s < 1000) {
+                if (gb[s] == '/') {
+                    mm_copy(gd, sizeof gd, gb + s, (size_t)(e - s));
+                    gd[e - s] = 0;
+                } else {
+                    if (cx_fmt(gd, sizeof gd, "%s/%.*s", top, (int)(e - s), gb + s)) { mm_free(gb); return -1; }
+                }
+                for (i = 0; gd[i]; i++) {
+                    if (tx_prefix(gd + i, tx_len(gd + i, 1000), "/worktrees/", 11)) wo = i;
+                }
+                if (wo > 0) gd[wo] = 0;
+                mm_free(gb);
+                return cx_fmt(afp, acap, "%s/unisacc-deferred-gates.tsv", gd);
+            }
+        }
+        if (gb) mm_free(gb);
+    }
+    return cx_fmt(afp, acap, "%s/.git/unisacc-deferred-gates.tsv", top);
+}
+
+static int pc_deferred_anchors(char *top_out, size_t tcap, char *dfp_out, size_t dcap, char *afp_out, size_t acap, int make_bdir) {
+    const char *raw_top = pc_local_top[0] ? pc_local_top : (pc_work_top[0] ? pc_work_top : (pc_orig_cwd[0] ? pc_orig_cwd : "."));
+    const char *env_dfp = sy_env("UNISACC_DEFERRED_GATES_FILE");
+    const char *env_commit = sy_env("UNISACC_DEFERRED_GATES_COMMIT");
+    long tl;
+    if (!raw_top || !raw_top[0] || (raw_top[0] == '.' && !raw_top[1])) {
+        if (!getcwd(top_out, tcap)) return -1;
+    } else if (raw_top[0] == '/') {
+        if (cx_fmt(top_out, tcap, "%s", raw_top)) return -1;
+    } else {
+        char cwd[1024];
+        if (!getcwd(cwd, sizeof cwd) || cx_fmt(top_out, tcap, "%s/%s", cwd, raw_top)) return -1;
+    }
+    tl = tx_len(top_out, (long)tcap);
+    while (tl > 1 && top_out[tl - 1] == '/') top_out[--tl] = 0;
+    if (env_dfp && env_dfp[0]) {
+        if (cx_fmt(dfp_out, dcap, "%s", env_dfp) || cx_fmt(afp_out, acap, "%s.anchor", env_dfp)) return -1;
+        return 0;
+    }
+    if (from_run && from_run[0] && (!sy_env("UNISACC_FLOW_FROM_PRECOMMIT") || pc_is_temp_idx)) {
+        if (cx_fmt(dfp_out, dcap, "%s/deferred-gates.tsv", from_run) ||
+            cx_fmt(afp_out, acap, "%s/deferred-gates.tsv.anchor", from_run)) return -1;
+        return 0;
+    }
+    if (pc_is_temp_idx && pc_outer_idx[0] && (!env_commit || env_commit[0] != '1')) {
+        if (cx_fmt(dfp_out, dcap, "%s.deferred.tsv", pc_outer_idx) ||
+            cx_fmt(afp_out, acap, "%s.deferred.tsv.anchor", pc_outer_idx)) return -1;
+        return 0;
+    }
+    if (make_bdir) {
+        char bdir[1100];
+        if (cx_fmt(bdir, sizeof bdir, "%s/build", top_out)) return -1;
+        (void)sy_mkdir(bdir, 0700);
+    }
+    if (cx_fmt(dfp_out, dcap, "%s/build/deferred-gates.tsv", top_out)) return -1;
+    if (pc_git_common_anchor(top_out, afp_out, acap)) return -1;
+    return 0;
+}
+
+static int pc_deferred_scan_file(const char *path, const char *top, int require_all_top,
+                                 int *exists_out, long *top_rows_out, char *last_sha_out,
+                                 PcDefRow *rows, int max_rows, int *nrows_out,
+                                 char *err_out, size_t ecap) {
+    sy_stat_t st;
+    size_t bn = 0;
+    char *buf;
+    long at = 0, lno = 0, tl = tx_len(top, 1024);
+    *exists_out = 0;
+    *top_rows_out = 0;
+    if (nrows_out) *nrows_out = 0;
+    mm_copy(last_sha_out, 65, DEFERRED_GENESIS_SHA, 65);
+    if (err_out && ecap > 0) err_out[0] = 0;
+    if (sy_lstat(path, &st) != 0) {
+        int ex = sy_exists(path);
+        if (ex == 0) return 0;
+        if (err_out) (void)cx_fmt(err_out, ecap, "cannot lstat %s (ex=%d)", path, ex);
+        return -1;
+    }
+    *exists_out = 1;
+    if (st.kind == 'l') {
+        if (err_out) (void)cx_fmt(err_out, ecap, "symlink not allowed at %s", path);
+        return -1;
+    }
+    if (st.kind != 'f') {
+        if (err_out) (void)cx_fmt(err_out, ecap, "not a regular file at %s", path);
+        return -1;
+    }
+    if (st.size <= 0) {
+        if (err_out) (void)cx_fmt(err_out, ecap, "empty 0-byte file at %s", path);
+        return -1;
+    }
+    buf = (char *)cx_read(path, &bn);
+    if (!buf || (long)bn != (long)st.size) {
+        if (buf) mm_free(buf);
+        if (err_out) (void)cx_fmt(err_out, ecap, "unreadable file %s", path);
+        return -1;
+    }
+    if (buf[bn - 1] != '\n') {
+        mm_free(buf);
+        if (err_out) (void)cx_fmt(err_out, ecap, "missing trailing newline in %s", path);
+        return -1;
+    }
+    while (at < (long)bn) {
+        long e = tx_chr(buf + at, (long)bn - at, '\n');
+        long fo[9], fl[9], i;
+        int c, is_def, is_ver, is_top;
+        const char *ln = buf + at;
+        if (e < 0) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "truncated line in %s", path);
+            return -1;
+        }
+        lno++;
+        if (e == 0) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "empty line %ld in %s", lno, path);
+            return -1;
+        }
+        if (ln[0] == '#') {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "comment line %ld not allowed in %s", lno, path);
+            return -1;
+        }
+        if (tx_fields(ln, e, '\t') != 9) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "line %ld in %s has %ld columns (need 9)", lno, path, tx_fields(ln, e, '\t'));
+            return -1;
+        }
+        for (c = 0; c < 9; c++) {
+            if (tx_field(ln, e, '\t', c, &fo[c], &fl[c]) || fl[c] <= 0) {
+                mm_free(buf);
+                if (err_out) (void)cx_fmt(err_out, ecap, "empty column %d at line %ld in %s", c + 1, lno, path);
+                return -1;
+            }
+        }
+        is_def = (fl[0] == 8 && tx_same(ln + fo[0], 8, "DEFERRED", 8));
+        is_ver = (fl[0] == 8 && tx_same(ln + fo[0], 8, "VERIFIED", 8));
+        if (!is_def && !is_ver) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "bad rec_type at line %ld in %s", lno, path);
+            return -1;
+        }
+        for (i = 0; i < fl[1]; i++) {
+            if (ln[fo[1] + i] < '0' || ln[fo[1] + i] > '9') {
+                mm_free(buf);
+                if (err_out) (void)cx_fmt(err_out, ecap, "bad timestamp at line %ld in %s", lno, path);
+                return -1;
+            }
+        }
+        if (fl[8] != 64) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "bad sha256 length at line %ld in %s", lno, path);
+            return -1;
+        }
+        for (i = 0; i < 64; i++) {
+            char ch = ln[fo[8] + i];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+                mm_free(buf);
+                if (err_out) (void)cx_fmt(err_out, ecap, "non-hex sha256 at line %ld in %s", lno, path);
+                return -1;
+            }
+        }
+        is_top = (fl[2] == tl && tx_same(ln + fo[2], fl[2], top, tl));
+        if (require_all_top && !is_top) {
+            mm_free(buf);
+            if (err_out) (void)cx_fmt(err_out, ecap, "foreign top at line %ld in %s", lno, path);
+            return -1;
+        }
+        if (is_top) {
+            char hin[2400], exp_sha[65];
+            if (fo[8] <= 1 || cx_fmt(hin, sizeof hin, "%s\t%.*s", last_sha_out, (int)(fo[8] - 1), ln) ||
+                sy_sha256_hex(hin, tx_len(hin, sizeof hin), exp_sha) ||
+                !tx_same(exp_sha, 64, ln + fo[8], 64)) {
+                mm_free(buf);
+                if (err_out) (void)cx_fmt(err_out, ecap, "sha256 chain mismatch at line %ld in %s", lno, path);
+                return -1;
+            }
+            mm_copy(last_sha_out, 65, exp_sha, 65);
+            (*top_rows_out)++;
+            if (is_def) {
+                if (rows && nrows_out) {
+                    if (*nrows_out >= max_rows) {
+                        mm_free(buf);
+                        if (err_out) (void)cx_fmt(err_out, ecap, "too many deferred rows in %s", path);
+                        return -1;
+                    }
+                    PcDefRow *r = &rows[(*nrows_out)++];
+                    long gl = fl[3] < 31 ? fl[3] : 31, rl = fl[4] < 127 ? fl[4] : 127;
+                    long trl = fl[5] < 63 ? fl[5] : 63, hdl = fl[6] < 63 ? fl[6] : 63, dtl = fl[7] < 383 ? fl[7] : 383;
+                    mm_copy(r->gate, sizeof r->gate, ln + fo[3], (size_t)gl); r->gate[gl] = 0;
+                    mm_copy(r->reason, sizeof r->reason, ln + fo[4], (size_t)rl); r->reason[rl] = 0;
+                    mm_copy(r->tree, sizeof r->tree, ln + fo[5], (size_t)trl); r->tree[trl] = 0;
+                    mm_copy(r->head, sizeof r->head, ln + fo[6], (size_t)hdl); r->head[hdl] = 0;
+                    mm_copy(r->detail, sizeof r->detail, ln + fo[7], (size_t)dtl); r->detail[dtl] = 0;
+                    r->verified = 0;
+                }
+            } else {
+                long vo = tx_find(ln + fo[7], fl[7], "verified_deferred_tree=", 23);
+                long dt_off, dt_len = 0;
+                int matched = 0, j;
+                if (vo < 0) {
+                    mm_free(buf);
+                    if (err_out) (void)cx_fmt(err_out, ecap, "VERIFIED row at line %ld missing verified_deferred_tree in %s", lno, path);
+                    return -1;
+                }
+                dt_off = fo[7] + vo + 23;
+                while (dt_off + dt_len < fo[7] + fl[7] && ln[dt_off + dt_len] != ' ') dt_len++;
+                if (dt_len <= 0) {
+                    mm_free(buf);
+                    if (err_out) (void)cx_fmt(err_out, ecap, "empty verified_deferred_tree at line %ld in %s", lno, path);
+                    return -1;
+                }
+                if (rows && nrows_out) {
+                    for (j = 0; j < *nrows_out; j++) {
+                        if (!rows[j].verified &&
+                            tx_len(rows[j].gate, 32) == fl[3] && tx_same(rows[j].gate, fl[3], ln + fo[3], fl[3]) &&
+                            tx_len(rows[j].tree, 64) == dt_len && tx_same(rows[j].tree, dt_len, ln + dt_off, dt_len)) {
+                            rows[j].verified = 1;
+                            matched = 1;
+                            break;
+                        }
+                    }
+                    if (!matched) {
+                        mm_free(buf);
+                        if (err_out) (void)cx_fmt(err_out, ecap, "orphan VERIFIED row at line %ld in %s", lno, path);
+                        return -1;
+                    }
+                }
+            }
+        }
+        at += e + 1;
+    }
+    mm_free(buf);
+    return 0;
+}
+
+static int pc_deferred_scan_dual(const char *top, const char *dfp, const char *afp,
+                                 char *last_sha_out, PcDefRow *rows, int max_rows, int *nrows_out,
+                                 char *err_out, size_t ecap) {
+    int ex1 = 0, ex2 = 0, anrows = 0;
+    long tr1 = 0, tr2 = 0;
+    char sha1[65], sha2[65];
+    static PcDefRow arows[128];
+    if (pc_deferred_scan_file(dfp, top, 1, &ex1, &tr1, sha1, rows, max_rows, nrows_out, err_out, ecap) < 0)
+        return -1;
+    if (pc_deferred_scan_file(afp, top, 0, &ex2, &tr2, sha2, arows, 128, &anrows, err_out, ecap) < 0)
+        return -1;
+    if (ex1 == 0 && tr2 > 0) {
+        if (err_out) (void)cx_fmt(err_out, ecap, "primary ledger %s deleted while anchor %s has %ld records for %s", dfp, afp, tr2, top);
+        return -1;
+    }
+    if (ex1 == 1 && (ex2 == 0 || tr2 == 0)) {
+        if (err_out) (void)cx_fmt(err_out, ecap, "git-common-dir anchor %s missing records present in %s", afp, dfp);
+        return -1;
+    }
+    if (tr1 != tr2 || !tx_same(sha1, 64, sha2, 64)) {
+        if (err_out) (void)cx_fmt(err_out, ecap, "anchor divergence between %s (rows=%ld) and %s (rows=%ld)", dfp, tr1, afp, tr2);
+        return -1;
+    }
+    mm_copy(last_sha_out, 65, sha1, 65);
+    return 0;
+}
+
+static int pc_append_deferred_record(const char *rec_type, const char *gate, const char *reason,
+                                     const char *tree_sha, const char *head_sha, const char *detail,
+                                     char *dfp_used, size_t dcap) {
+    char top[1024], dfp[1200], afp[1200], prev_sha[65], csha[65], clean_dtl[384], body[1800], hin[2000], rec[2048], err[256];
+    static PcDefRow rows[128];
+    int nrows = 0;
+    long i, dl = detail ? tx_len(detail, sizeof clean_dtl - 1) : 0;
+    if (dfp_used && dcap > 0) dfp_used[0] = 0;
+    if (pc_deferred_anchors(top, sizeof top, dfp, sizeof dfp, afp, sizeof afp, 1) != 0) return -1;
+    if (pc_deferred_scan_dual(top, dfp, afp, prev_sha, rows, 128, &nrows, err, sizeof err) < 0) return -1;
+    if (dl <= 0) {
+        mm_copy(clean_dtl, sizeof clean_dtl, "-", 2);
+    } else {
+        for (i = 0; i < dl; i++) {
+            char c = detail[i];
+            clean_dtl[i] = (c == '\t' || c == '\n' || c == '\r') ? ' ' : c;
+        }
+        clean_dtl[dl] = 0;
+    }
+    if (cx_fmt(body, sizeof body, "%s\t%ld\t%s\t%s\t%s\t%s\t%s\t%s",
+               rec_type, sy_wall_s(), top, gate, reason, tree_sha, head_sha, clean_dtl)) return -1;
+    if (cx_fmt(hin, sizeof hin, "%s\t%s", prev_sha, body) ||
+        sy_sha256_hex(hin, tx_len(hin, sizeof hin), csha) ||
+        cx_fmt(rec, sizeof rec, "%s\t%s\n", body, csha)) return -1;
+    if (sy_append_file(dfp, rec, tx_len(rec, sizeof rec), 0600) != 0) return -1;
+    if (sy_append_file(afp, rec, tx_len(rec, sizeof rec), 0600) != 0) return -1;
+    if (dfp_used && dcap > 0) (void)cx_fmt(dfp_used, dcap, "%s", dfp);
+    return 0;
+}
+
 static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag, int is_timeout,
                                       int bound_s, int staged_files, const char *detail, const char *rerun_cmd) {
     const char *reason = is_timeout ? "GATE_TIMEOUT" : unavail_tag;
@@ -751,11 +1076,7 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
         char *hv[] = {"git", "rev-parse", "HEAD", 0};
         long wn = 0, hn = 0;
         char *wo = slurp_run(wv, &wn), *ho = slurp_run(hv, &hn);
-        char tree_sha[64], head_sha[64], bdir[1100], dfp[1200], rec[2048];
-        const char *top = pc_work_top[0] ? pc_work_top : (pc_orig_cwd[0] ? pc_orig_cwd : ".");
-        const char *env_dfp = sy_env("UNISACC_DEFERRED_GATES_FILE");
-        const char *env_commit = sy_env("UNISACC_DEFERRED_GATES_COMMIT");
-        int have_dfp = 0;
+        char tree_sha[64], head_sha[64], dfp[1200];
         mm_copy(tree_sha, sizeof tree_sha, "unknown", 8);
         mm_copy(head_sha, sizeof head_sha, "unknown", 8);
         if (wo && wn >= 7) {
@@ -768,27 +1089,17 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
         }
         if (wo) mm_free(wo);
         if (ho) mm_free(ho);
-        if (env_dfp && env_dfp[0]) {
-            if (!cx_fmt(dfp, sizeof dfp, "%s", env_dfp)) have_dfp = 1;
-        } else if (from_run && from_run[0] && (!sy_env("UNISACC_FLOW_FROM_PRECOMMIT") || pc_is_temp_idx)) {
-            if (!cx_fmt(dfp, sizeof dfp, "%s/deferred-gates.tsv", from_run)) have_dfp = 1;
-        } else if (pc_is_temp_idx && pc_outer_idx[0] && (!env_commit || env_commit[0] != '1')) {
-            if (!cx_fmt(dfp, sizeof dfp, "%s.deferred.tsv", pc_outer_idx)) have_dfp = 1;
-        } else if (!cx_fmt(bdir, sizeof bdir, "%s/build", top) &&
-                   !cx_fmt(dfp, sizeof dfp, "%s/build/deferred-gates.tsv", top)) {
-            (void)sy_mkdir(bdir, 0700);
-            have_dfp = 1;
-        }
-        if (have_dfp &&
-            !cx_fmt(rec, sizeof rec, "%ld\t%s\t%s\t%s\t%s\t%s\n",
-                    sy_wall_s(), gate, reason, tree_sha, head_sha, rerun_cmd) &&
-            sy_append_file(dfp, rec, tx_len(rec, sizeof rec), 0600) == 0) {
+        if (pc_append_deferred_record("DEFERRED", gate, reason, tree_sha, head_sha, rerun_cmd, dfp, sizeof dfp) == 0) {
             sy_eprintf("precommit: WARN DEFERRED_GATE gate=%s reason=%s tree=%s head=%s ledger=%s rerun='%s'\n",
                        gate, reason, tree_sha, head_sha, dfp, rerun_cmd);
         } else {
-            sy_eprintf("precommit: WARN DEFERRED_GATE gate=%s reason=%s tree=%s head=%s ledger_write_failed=1 rerun='%s'\n",
+            if (fz_st != 0) {
+                sy_eprintf("precommit: BLOCKED deferred-ledger-write-failed gate=%s reason=%s tree=%s head=%s (cannot write dual-anchor deferred-gates ledger during freeze window; rerun='%s')\n",
+                           gate, reason, tree_sha, head_sha, rerun_cmd);
+                return 1;
+            }
+            sy_eprintf("precommit: WARN DEFERRED_GATE_LEDGER_WRITE_FAILED gate=%s reason=%s tree=%s head=%s rerun='%s'\n",
                        gate, reason, tree_sha, head_sha, rerun_cmd);
-            if (fz_st != 0) return 1;
         }
     }
     return 0;
@@ -897,26 +1208,30 @@ static void tlib_reserve_hint(const char *root, const char *cp, char pkgs[][64],
     }
 }
 
+static int pc_exists_checked(const char *gate, const char *path);
+
 static int tlib_frozen_gate(const char *names, long sn) {
     const char *wt = sy_env("GIT_WORK_TREE"), *root = (wt && wt[0]) ? wt : ".";
     char tp[1200], fp[1200], cp[1200], pkgs[32][64], *av[40], *t, *rows;
-    size_t tn = 0; long i = 0, e, at, rn = 0; int npkg = 0, k, blocked = 0;
+    size_t tn = 0; long i = 0, e, at, rn = 0; int npkg = 0, k, blocked = 0, tp_ex, fp_ex = 0, cp_ex = 0;
     if (cx_fmt(tp, sizeof tp, "%s/build/tlib-packages.tsv", root) ||
         cx_fmt(fp, sizeof fp, "%s/tools/check-tlib-frozen.cx", root) ||
-        cx_fmt(cp, sizeof cp, "%s/unisacc.com", root)) return 0;
-    if (sy_exists(tp) != 1) return 0;
-    if (sy_exists(fp) != 1) {
-        if (pc_orig_cwd[0] && !cx_fmt(fp, sizeof fp, "%s/tools/check-tlib-frozen.cx", pc_orig_cwd) && sy_exists(fp) == 1) { }
-        else if (sy_exists("./tools/check-tlib-frozen.cx") == 1) tx_copy(fp, sizeof fp, "tools/check-tlib-frozen.cx", 26);
-        else return 0;
-    }
-    if (sy_exists(cp) != 1) {
-        if (pc_orig_cwd[0] && !cx_fmt(cp, sizeof cp, "%s/unisacc.com", pc_orig_cwd) && sy_exists(cp) == 1) { }
-        else if (sy_exists("./unisacc.com") == 1) tx_copy(cp, sizeof cp, "./unisacc.com", 13);
-        else return 0;
+        cx_fmt(cp, sizeof cp, "%s/unisacc.com", root)) return 1; /* lint:allow R1-product precommit resolves checkout product for tlib_frozen_gate */
+    tp_ex = pc_exists_checked("tlib-frozen", tp);
+    if (tp_ex < 0) return 1;
+    if (tp_ex == 0) {
+        if (freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+            return pc_handle_gate_unavailable("tlibfrozen", "TLIB_FROZEN_GATE_UNAVAILABLE", 0, 55, 0,
+                                              "(build/tlib-packages.tsv missing during active freeze)",
+                                              "sh ./unisacc.com tools/check-tlib-frozen.cx -- --fast .");
+        }
+        return 0;
     }
     t = (char *)cx_read(tp, &tn);
-    if (!t) return 0;
+    if (!t) {
+        sy_eprintf("precommit: BLOCKED tlib-frozen: cannot read %s\n", tp);
+        return 1;
+    }
     while (i < (long)tn && npkg < 32) {
         long po, pl, ro, rl, z_o, zl;
         e = i; while (e < (long)tn && t[e] != '\n') e++;
@@ -942,6 +1257,43 @@ static int tlib_frozen_gate(const char *names, long sn) {
     }
     mm_free(t);
     if (!npkg) return 0;
+    fp_ex = pc_exists_checked("tlib-frozen", fp);
+    if (fp_ex < 0) return 1;
+    if (fp_ex == 0) {
+        if (pc_orig_cwd[0] && !cx_fmt(fp, sizeof fp, "%s/tools/check-tlib-frozen.cx", pc_orig_cwd)) {
+            fp_ex = pc_exists_checked("tlib-frozen", fp);
+            if (fp_ex < 0) return 1;
+        }
+        if (fp_ex == 0) {
+            fp_ex = pc_exists_checked("tlib-frozen", "./tools/check-tlib-frozen.cx");
+            if (fp_ex < 0) return 1;
+            if (fp_ex == 1) tx_copy(fp, sizeof fp, "tools/check-tlib-frozen.cx", 26);
+        }
+    }
+    cp_ex = pc_exists_checked("tlib-frozen", cp);
+    if (cp_ex < 0) return 1;
+    if (cp_ex == 0) {
+        if (pc_orig_cwd[0] && !cx_fmt(cp, sizeof cp, "%s/unisacc.com", pc_orig_cwd)) { /* lint:allow R1-product precommit resolves checkout product for tlib_frozen_gate */
+            cp_ex = pc_exists_checked("tlib-frozen", cp);
+            if (cp_ex < 0) return 1;
+        }
+        if (cp_ex == 0) {
+            cp_ex = pc_exists_checked("tlib-frozen", "./unisacc.com");
+            if (cp_ex < 0) return 1;
+            if (cp_ex == 1) tx_copy(cp, sizeof cp, "./unisacc.com", 13);
+        }
+    }
+    if (fp_ex != 1 || cp_ex != 1) {
+        if (!plan_dir)
+            blocked += pc_handle_gate_unavailable("tlibfrozen", "TLIB_FROZEN_GATE_UNAVAILABLE", 0,
+                                                  58, npkg, "(missing tools/check-tlib-frozen.cx or ./unisacc.com)",
+                                                  "sh ./unisacc.com tools/check-tlib-frozen.cx -- --fast .");
+        if (cp_ex == 1) {
+            tlib_reserve_hint(root, cp, pkgs, npkg);
+            blocked += tlib_api_gate(root, cp, pkgs, npkg);
+        }
+        return blocked;
+    }
     {
         int is_to = 0;
         k = 0;
@@ -985,8 +1337,10 @@ static int mkdirs(char *path) {   /* 逐级建目录;已存在视为成功 */
 static int lint_gate(const char *names, long sn, int *absent) {
     char dir[1200], **paths; long at, np = 0, i; int blocked = 0;
     int private_lint = !plan_dir && !from_run;
+    int uex = pc_exists_checked("lint", "./unisacc.com"), lex = pc_exists_checked("lint", "tools/cx-lint.cx");
     *absent = 0;
-    if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/cx-lint.cx") != 1) { *absent = 1; return 0; }
+    if (uex < 0 || lex < 0) return 1;
+    if (uex != 1 || lex != 1) { *absent = 1; return 0; }
     if (plan_dir || from_run) {   /* plan stages the blobs into DIR/lintdir; from-run reuses the same paths */
         if (cx_fmt(dir, sizeof dir, "%s/lintdir", plan_dir ? plan_dir : from_run) || (sy_mkdir(dir, 0700) && sy_exists(dir) != 1)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
     } else if (sr_scratch("precommit-lint-", dir, sizeof dir)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
@@ -1443,10 +1797,6 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         }
         if (dg_waived(wt, "gen-all")) return 0;
     }
-    if (staged_total >= 50) {
-        bound_s = 20 + staged_total / 40;
-        if (bound_s > 40) bound_s = 40;
-    }
     {
         const char *td = sy_tmpdir();
         const char *base_td = (td && td[0] == '/') ? td : "/tmp";
@@ -1456,18 +1806,25 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
                 "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
                 "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
                 "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
-                "if [ -x ./tools/bound ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
+                "if [ -x ./tools/bound ] && [ -f ./tools/bound.c ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
                 "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; fi",
-                base_td, bound_s, only_list, only_list)) return 0;
-        } else {
+                base_td, bound_s, only_list, only_list)) {
+                tool_only = 0;
+            }
+        }
+        if (!tool_only || !only_list[0]) {
             if (cx_fmt(scmd, sizeof scmd,
                 "top=$(git rev-parse --show-toplevel) || exit 2; [ -e \"$top/unisacc.com\" ] || exit 2; "
                 "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
                 "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
                 "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
-                "if [ -x ./tools/bound ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
+                "if [ -x ./tools/bound ] && [ -f ./tools/bound.c ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
                 "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; fi",
-                base_td, bound_s)) return 0;
+                base_td, bound_s)) {
+                return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, bound_s, staged_total,
+                                                  "(genall command buffer overflow)",
+                                                  "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
+            }
         }
     }
     {
@@ -1579,9 +1936,9 @@ static int derive_gate(void) {
             return 1;
         }
         if (dex == 0) {
-            if (tex == 1 && freeze_window_active()) {
-                blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 58, 0,
-                                                      "(exec/facts/derive.tsv missing while tools/derive.cx exists)",
+            if ((tex == 1 || sy_exists("cxroot.tsv") == 1) && freeze_window_active()) {
+                blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 55, 0,
+                                                      "(exec/facts/derive.tsv missing during active freeze)",
                                                       "sh ./unisacc.com tools/derive.cx -- --check");
             }
             blocked += dg_genall_gate(wt, allz, alln, adz, adn);
@@ -2221,12 +2578,15 @@ static int pc_capture_work_top(void) {
             if (!tx_field(to, tn, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof pc_orig_cwd) {
                 mm_copy(pc_orig_cwd, sizeof pc_orig_cwd, to + o1, (size_t)l1);
                 pc_orig_cwd[l1] = 0;
+                mm_copy(pc_local_top, sizeof pc_local_top, to + o1, (size_t)l1);
+                pc_local_top[l1] = 0;
             }
         }
         if (to) mm_free(to);
     }
     {
         const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
+        const char *env_ltop = sy_env("UNISACC_PRECOMMIT_LOCAL_TOP");
         const char *t_env = sy_env("UNISACC_PRECOMMIT_TEMP_IDX");
         const char *o_env = sy_env("UNISACC_PRECOMMIT_OUTER_IDX");
         const char *g_idx = sy_env("GIT_INDEX_FILE");
@@ -2249,6 +2609,15 @@ static int pc_capture_work_top(void) {
             if (tx_copy(pc_work_top, sizeof pc_work_top, env_top, tx_len(env_top, sizeof pc_work_top - 1))) return -1;
         } else if (pc_work_top[0]) {
             sy_setenv("UNISACC_PRECOMMIT_WORK_TOP", pc_work_top, 1);
+        }
+        if (in_tree && in_tree[0] == '1') {
+            if (env_ltop && env_ltop[0] == '/' && !cx_fmt(gchk, sizeof gchk, "%s/.git", env_ltop) && sy_exists(gchk) == 1) {
+                (void)tx_copy(pc_local_top, sizeof pc_local_top, env_ltop, tx_len(env_ltop, sizeof pc_local_top - 1));
+            } else if (pc_work_top[0]) {
+                (void)tx_copy(pc_local_top, sizeof pc_local_top, pc_work_top, tx_len(pc_work_top, sizeof pc_local_top - 1));
+            }
+        } else if (pc_local_top[0]) {
+            sy_setenv("UNISACC_PRECOMMIT_LOCAL_TOP", pc_local_top, 1);
         }
     }
     return 0;
@@ -2317,6 +2686,7 @@ int main(int argc, char **argv) {
             sy_unsetenv("UNISACC_LAYER_API_PATHS");
             sy_unsetenv("UNISACC_LAYER_API_PRECOMMIT");
             sy_unsetenv("UNISACC_PRECOMMIT_WORK_TOP");
+            sy_unsetenv("UNISACC_PRECOMMIT_LOCAL_TOP");
             sy_unsetenv("UNISACC_PRECOMMIT_TEMP_IDX");
             sy_unsetenv("UNISACC_PRECOMMIT_OUTER_IDX");
         }
@@ -2524,13 +2894,33 @@ int main(int argc, char **argv) {
     { int b0 = blocked; blocked += new_tools(); if (blocked > b0) pc_mark_block("new-tools", "missing-check"); }
     { int b0 = blocked; blocked += tlib_frozen_gate(names, sn); if (blocked > b0) pc_mark_block("tlib-frozen", "tlib-bump"); }
     { int b0 = blocked; blocked += lint_gate(names, sn, &lint_absent); if (blocked > b0) pc_mark_block("lint", "cx-lint"); }
-    if (lint_absent) sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
+    if (lint_absent) {
+        sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
+        if (!plan_dir && freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+            int b0 = blocked;
+            blocked += pc_handle_gate_unavailable("lint", "LINT_GATE_UNAVAILABLE", 0, 55, staged,
+                                                  "(no ./unisacc.com or tools/cx-lint.cx in cwd)",
+                                                  "sh ./unisacc.com tools/cx-lint.cx -- --staged");
+            if (blocked > b0) pc_mark_block("lint", "lint-unavailable");
+        }
+    }
     /* 不再因「只改 tools/tests」而短路:cxtrunc/cxapis/outdep 本来就面向 tools/tests(fable 咨询 2026-11-08)。 */
     { char rp[1200]; const char *wt = sy_env("GIT_WORK_TREE"); int ex;   /* 工作树里有没有棘轮:夹具仓(GIT_WORK_TREE)无则跳过 */
       if (cx_fmt(rp, sizeof rp, "%s%stools/ratchets.cx", wt ? wt : "", wt ? "/" : "")) { sy_eprintf("precommit: path too long\n"); return 1; }
       ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
       if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
-      if (ex == 0) { sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; } }
+      if (ex == 0) {
+          if (!plan_dir && freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+              int b0 = blocked;
+              blocked += pc_handle_gate_unavailable("ratchets", "RATCHETS_GATE_UNAVAILABLE", 0, 55, staged,
+                                                    "(no tools/ratchets.cx in worktree)",
+                                                    "sh ./unisacc.com tools/ratchets.cx");
+              if (blocked > b0) pc_mark_block("ratchets", "ratchets-unavailable");
+          }
+          sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked);
+          if (blocked) pc_emit_gate_fail();
+          return blocked ? 1 : 0;
+      } }
     cur_gate = "ratchets"; slurp_okrc = 1; rows = slurp(rv, &rn); slurp_okrc = 0; cur_gate = 0;   /* ratchets 退出码 1=有红行(输出仍要读),>=2 或信号=没跑 */
     if (!rows) { sy_eprintf("precommit: tools/ratchets.cx did not run\n"); return 1; }
     { int b0 = blocked; blocked += incomplete(rows, rn, "RATCHETS\tok=", "ratchets"); if (blocked > b0) pc_mark_block("ratchets", "ratchets-incomplete"); }
