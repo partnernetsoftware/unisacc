@@ -12,8 +12,7 @@
 
 ## 地图
 
-当前:0.0.90 已公开(冻结 F 5d1e492d7e,源构造 T2 9109473641,APE 46fd3db9,CI 44973535033,Root 已升级),下一版 0.0.91(plans/v0.0.91.md,身份与构建边界)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
-- 在途整链(0.0.91):REV=7be3cc5d4b03e1b3b281a372ac26b9da19c18b44,guard=638584,PID/PGID=638585/638585,deadline_s=9000(hard_s=9600,截止 2026-11-22 15:08),out=~/.cache/unisacc/chains/bg-b1/7be3cc5d4b03e1b3b281a372ac26b9da19c18b44。
+当前:0.0.91 已公开(冻结 F a7b8ffe328,源构造 T 7be3cc5d4b,APE eb18eb43,CI 44997990448,Y2 6a270c9ae7,Root 已升级),下一版 0.0.92(plans/v0.0.92.md,产品与工具 cx 迁移收尾)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
 
 ```mermaid
 flowchart LR
