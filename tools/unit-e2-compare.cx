@@ -45,6 +45,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.e2steps
 #pragma unisa use cxlib.die
 
 #define MAXROWS 8192
@@ -254,47 +255,17 @@ static void side_run(const char *ape, const char *pack, const char *file, const 
     char *av[24], src[1200];
     int n = 0;
     FMT(src, "UEC_SRC=%s", file);
-    char *env[] = {"UNISACC_RUN_CACHE=0", src, g_rr ? "UNISACC_RR_TIME=1" : "UNISACC_RR_TIME=", 0};
+    /* an empty RR_TIME value still reads as set (getenv returns ""), which would make stderr differ */
+    char *env_rr[] = {"UNISACC_RUN_CACHE=0", "UNISACC_RR_TIME=1", src, 0};
+    char *env_no[] = {"UNISACC_RUN_CACHE=0", src, 0};
     av[n++] = "/bin/sh"; av[n++] = "-c"; av[n++] = "exec \"$@\" < \"$UEC_SRC\""; av[n++] = "sh";
     av[n++] = "/bin/sh"; av[n++] = (char *)ape; av[n++] = "stream"; av[n++] = "e2"; av[n++] = "--level"; av[n++] = "1";
     av[n++] = "--models"; av[n++] = (char *)pack;
     av[n++] = "--target"; av[n++] = "lnx/x86_64"; av[n++] = "--source"; av[n++] = (char *)file;
     av[n] = 0;
-    s->started = pr_run("unit-e2 side", av, root, env, secs, &s->r) == 0;
-}
-
-/* the e2 step count of one side, read from its RR_TIME line (-1 when the line is absent) */
-static long steps_of(const pr_result *r) {
-    const char *hit = 0;
-    for (const char *p = r->err; p < r->err + r->errn; ) {
-        const char *e = memchr(p, '\n', (size_t)(r->err + r->errn - p));
-        long l = e ? (long)(e - p) : (long)(r->err + r->errn - p);
-        if (tx_find(p, l, "stage=e2", 8) >= 0 && tx_find(p, l, "steps=", 6) >= 0) hit = p;
-        p += l + (e ? 1 : 0);
-    }
-    if (!hit) return -1;
-    const char *s = strstr(hit, "steps=");
-    if (!s) return -1;
-    s += 6;
-    if (*s < '0' || *s > '9') return -1;
-    long v = 0;
-    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
-    return v;
+    s->started = pr_run("unit-e2 side", av, root, g_rr ? env_rr : env_no, secs, &s->r) == 0;
 }
 static int uec_equal(const char *a, size_t an, const char *b, size_t bn) { return an == bn && (!an || mm_same(a, b, (long)an)); }
-/* stderr without its RR_TIME lines: the step-count lines carry nanoseconds, which never match */
-static size_t err_norm(const char *s, size_t n, char *out, size_t cap) {
-    size_t at = 0;
-    for (size_t i = 0; i < n; ) {
-        size_t j = i;
-        while (j < n && s[j] != '\n') j++;
-        int rr = j - i >= 7 && !memcmp(s + i, "RR_TIME", 7);
-        if (!rr) for (size_t k = i; k < j && at + 1 < cap; k++) out[at++] = s[k];
-        i = j + (j < n ? 1 : 0);
-    }
-    if (at < cap) out[at] = 0;
-    return at;
-}
 static long g_step_moved, g_step_grew;
 
 static void item(const Row *r, const char *ape, const char *pa, const char *pb, const char *ida, const char *idb,
@@ -316,9 +287,9 @@ static void item(const Row *r, const char *ape, const char *pa, const char *pb, 
         int err_same;
         long sa = -1, sb = -1;
         if (g_rr) {   /* the step lines carry ns and must not decide the verdict */
-            size_t n1 = err_norm(x.r.err, x.r.errn, e1, sizeof e1), n2 = err_norm(y.r.err, y.r.errn, e2, sizeof e2);
+            size_t n1 = e2s_err_norm(x.r.err, x.r.errn, e1, sizeof e1), n2 = e2s_err_norm(y.r.err, y.r.errn, e2, sizeof e2);
             err_same = uec_equal(e1, n1, e2, n2);
-            sa = steps_of(&x.r); sb = steps_of(&y.r);
+            sa = e2s_steps_of(x.r.err, x.r.errn); sb = e2s_steps_of(y.r.err, y.r.errn);
         } else err_same = uec_equal(x.r.err, x.r.errn, y.r.err, y.r.errn);
         char hx[65], hy[65];
         uec_digest(x.r.out, x.r.outn, hx);
@@ -530,7 +501,7 @@ static int cmd_run_all(int argc, char **argv) {
     }
     int rc = uec_status(mf, ledger, pa, pb);
     if (steps) {   /* the rescan fix's own signal: how many units changed step count */
-        long moved = 0, grew = 0, seen_rows = 0;
+        long acc[5] = {0, 0, 0, 0, 0};
         for (int i = 0; i < nrows; i++) {
             int dup = 0;
             for (int j = 0; j < i && !dup; j++) dup = tx_eqz(rows[j].stratum, rows[i].stratum);
@@ -541,24 +512,10 @@ static int cmd_run_all(int argc, char **argv) {
             size_t n = 0;
             char *text = cx_read(path, &n);
             if (!text) continue;
-            for (char *p = text; p < text + n; ) {
-                char *e = memchr(p, '\n', (size_t)(text + n - p));
-                long l = e ? (long)(e - p) : (long)(text + n - p);
-                const char *st = strstr(p, " steps=");
-                if (st) {
-                    long a = 0, b = 0;
-                    const char *q = st + 7;
-                    while (*q >= '0' && *q <= '9') a = a * 10 + (*q++ - '0');
-                    if (*q == '/') q++;
-                    while (*q >= '0' && *q <= '9') b = b * 10 + (*q++ - '0');
-                    seen_rows++;
-                    if (a != b) { moved++; if (b > a) grew++; }
-                }
-                p += l + (e ? 1 : 0);
-            }
+            e2s_ledger_sum(text, n, acc);
             mm_free(text);
         }
-        printf("STEPS_SUM\trows=%ld\tstep_moved=%ld\tstep_grew=%ld\n", seen_rows, moved, grew);
+        printf("STEPS_SUM\trows=%ld\tstep_moved=%ld\tstep_grew=%ld\tsteps_a=%ld\tsteps_b=%ld\n", acc[0], acc[1], acc[2], acc[3], acc[4]);
     }
     if (rc == 1 && first_diff(ledger, line, sizeof line)) printf("FIRST_DIFF\t%s\n", line);
     if (stopped) printf("RUN_ALL\tstopped_early=1\tlast_shard_failed\n");

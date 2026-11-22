@@ -98,6 +98,18 @@ static int status_case(const char *pa, const char *pb, const char *man, const ch
     const char *a[] = {"status", "--manifest", man, "--ledger", led, "--models-a", pa, "--models-b", pb};
     return run_uec(a, 9);
 }
+/* a one-row manifest for a real repo file: stratum, path, and the file's own sha */
+static void file_put_manifest(const char *out, const char *rel) {
+    size_t n = 0;
+    char *body = cx_read(rel, &n);
+    if (!body) tool_die(CK, "read unit", rel, 2);
+    char h[65];
+    if (sy_sha256_hex(body, n, h)) tool_die(CK, "sha256", rel, 2);
+    mm_free(body);
+    char text[1024];
+    if (cx_fmt(text, sizeof text, "corners\t%s\t%s\n", rel, h)) tool_die(CK, "manifest row", rel, 2);
+    if (cx_write(out, text, strlen(text))) tool_die(CK, "write manifest", out, 2);
+}
 
 static const char *FAKE =
     "#!/bin/sh\n"
@@ -210,6 +222,45 @@ int main(void) {
     {
         const char *a[] = {"bogus"};
         uec_ck(run_uec(a, 1) == 2, "unknown subcommand rc 2");
+    }
+    /* 0.0.95 rescan fixture: the fix must save steps on #include and only cost a constant on plain units.
+     * Assertions are relations, not absolute counts: plain within [0,+2], inc1/inc2 strictly smaller,
+     * inc2 saving more than inc1.  No packs -> UNMEASURED, named. */
+    {
+        const char *orig = sy_env("UNISACC_PPEQ_PKG_ORIGINAL"), *pat = sy_env("UNISACC_PPEQ_PKG_PATCHED");
+        if (!orig || !pat || sy_is_reg(orig) != 1 || sy_is_reg(pat) != 1)
+            printf("UNMEASURED\trescan-fixture\tUNISACC_PPEQ_PKG_ORIGINAL/PATCHED not both set\n");
+        else {
+            static const char *files[] = {"tests/unit-e2-rescan/plain.c", "tests/unit-e2-rescan/inc1.c", "tests/unit-e2-rescan/inc2.c"};
+            long st[3] = {-1, -1, -1};
+            for (int i = 0; i < 3; i++) {
+                char fman[1200], fled[1200];
+                if (cx_fmt(fman, sizeof fman, "%s/rescan-%d.tsv", W, i) || cx_fmt(fled, sizeof fled, "%s/rescan-led-%d", W, i))
+                    tool_die(CK, "path", 0, 2);
+                file_put_manifest(fman, files[i]);
+                const char *a[] = {"run", "--ape", "./unisacc.com", "--models-a", orig, "--models-b", pat, "--manifest", fman,
+                                   "--ledger", fled, "--side-secs", "20", "--steps", "1"};
+                int rc = run_uec(a, 15);
+                char lf[1300];
+                if (cx_fmt(lf, sizeof lf, "%s/corners.tsv", fled)) tool_die(CK, "path", 0, 2);
+                size_t ln = 0;
+                char *lb = cx_read(lf, &ln);
+                const char *sp = lb ? strstr(lb, " steps=") : 0;
+                if (rc == 0 && sp) {   /* steps=A/B, A = original pack */
+                    long x = 0, y = 0;
+                    const char *q = sp + 7;
+                    while (*q >= '0' && *q <= '9') x = x * 10 + (*q++ - '0');
+                    if (*q == '/') q++;
+                    while (*q >= '0' && *q <= '9') y = y * 10 + (*q++ - '0');
+                    st[i] = x - y;   /* steps saved */
+                }
+                mm_free(lb);
+            }
+            uec_ck(st[0] >= -2 && st[0] <= 0, "rescan fixture: plain unit costs at most 2 steps");
+            uec_ck(st[1] >= 1, "rescan fixture: one #include saves steps");
+            uec_ck(st[2] >= 1 && st[2] > st[1], "rescan fixture: two levels save more than one");
+            printf("INFO\trescan-fixture\tsaved plain=%ld inc1=%ld inc2=%ld\n", -st[0], st[1], st[2]);
+        }
     }
     /* real engine: the same pack on both sides over the corner corpus must be all SAME */
     {
