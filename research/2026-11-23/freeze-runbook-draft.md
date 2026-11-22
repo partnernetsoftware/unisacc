@@ -9,9 +9,9 @@ T0 定义:版本分支合入 main 的合并提交推送完成的时刻。总预�
 | 编号 | 泳道 | 动作 | 负责 | 预算 |
 |---|---|---|---|---|
 | S0 | K | 合并 v0.0.94 入 main,切版本槽,推送 | 集成者(唯一写 main) | 5 分 |
-| S1 | K | chain-ready 全量 | 集成者 | 3 分(UNMEASURED) |
-| S2 | K | 整链 bg-candidate | 集成者起,Monitor 订终态 | 30 分(推断) |
-| S3 | K | 预跑 P0 计划加 P1 运行 | 预跑窗口 | 30 分(wall_ms 1689560 约 28 分) |
+| S1 | K | chain-ready 分批(`--only`) | 集成者 | 3 分(空闲 `load<8` 分批实测 2-3.4 分; 单命令全量必超 55s) |
+| S2 | K | 整链 bg-candidate | 集成者起,Monitor 订终态 | 30 分(0.0.91..0.0.93 三版实测 27.1-29.3 分) |
+| S3 | K | 预跑 P0 计划加 P1 运行(`--window-lanes 3 --normal-jobs 8`) | 预跑窗口 | 38 分(`load<8` 静默下预估 36-41 分; 0.0.93 `lanes=4,j=4` 去重实测 49.1 分) |
 | S3b | P | ci-early 取 candidate-native 样本 | CI 窗口,与 S3 并行 | 10 分 |
 | S3c | P | rollback.txt 与 notes-0.0.94.md 填身份 | 文档窗口,与 S3 并行 | 10 分 |
 | S4 | K | P2 merge 加 P3 archive | 预跑窗口 | 3 分 |
@@ -22,15 +22,15 @@ T0 定义:版本分支合入 main 的合并提交推送完成的时刻。总预�
 | S9 | K | 5 execute(X 核验、草稿、CI、Y1、公开、读回、Y2) | 集成者,devsvc x --bg | 12 分(0.0.93 实测 8 分,CI 7 分) |
 | S10 | K | 公开后记账与 Root 升级 | 集成者 | 8 分(0.0.93 实测 6 分) |
 
-合计 105 分。各步命令、预期行、门、失败处置的细节见下;完整原文由 fable 输出,关键点如下。
+合计 111 分(T0 到 S9 公开 103 分 <= 120 分红线,余量 17 分; S10 公开后 8 分)。各步命令、预期行、门、失败处置的细节见下;完整原文由 fable 输出,关键点如下。
 
-- S0:git merge --no-ff v0.0.94;改 release/candidate.tsv 为 0.0.94 行;git commit 明确路径;推送。门:chain-ready --only 11-version-slot --version 0.0.94 为 PASS。失败:冲突说明 T-1 的冻结合并预演没做,中止回 T-1,不在 T0 之后解冲突。
+- S0:git merge --no-ff v0.0.94;改 release/candidate.tsv 为 0.0.94 行;git commit 明确路径;推送。门:chain-ready --only 11-version-slot --version 0.0.94 为 PASS。失败:冲突说明 T-1 的冻结合并预演没做,中止回 T-1,不在 T0 之后解冲突。大合并(1000+ 文件)在冻结窗口内触及 genall(20s 上限)或 derive 的 GATE_TIMEOUT 时,集成者(须匹配 build/freeze.tsv 第 3 列 owner)显式带 `UNISACC_INTEGRATOR=<owner> UNISACC_GATE_WAIVE="derive:s0-merge-0.0.94,genall:s0-merge-0.0.94"` 放行一次并双写记账,落提交后立即在 S1 前分门执行核销(每门单次 <=55 秒):`sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive` 与 `sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate genall`,追加绑定合并后 `git write-tree` 输入身份的 `VERIFIED` 哈希链行,确保 S1 `chain-ready` 的 `1-rev` 通过。
 - S1:sh ./unisacc.com tools/chain-ready.cx -- --version 0.0.94,预期末行 READY yes failed=none;除 7-recipe、9-ledger 两项手工 UNMEASURED 外全部 PASS;--fast 的 SKIPPED 不算。全量超过 55 秒就按 --only 分项并行跑。
 - S2:tools/bg-candidate.cx start;Monitor 订终态事件不轮询;门:链 DONE,APE sha256 与 build.json product_digest 一致;失败先读发码行,同一失败两次即停手。
-- S3:prerun-drive plan 与 run(PRERUN_APE、PRERUN_IDS、PRERUN_TIMES、PRERUN_PRIORITY、PRERUN_DIR 用绝对路径);门:strict 表 0 FAIL,UNKNOWN 只允许出现在 expected-unmeasured.tsv 已列项;W0000 再现 rc=124 按确定性缺陷停手。
+- S3:推荐配置 `--window-lanes 3 --normal-jobs 8`(全静默 `load < 4` 时可用 `--window-lanes 4 --normal-jobs 8`): `sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file "${PRERUN_IDS:?}" --times-file "${PRERUN_TIMES:?}" --priority-file "${PRERUN_PRIORITY:?}" --out "${PRERUN_DIR:?}" --normal-jobs 8 --window-lanes 3` 后跑 `sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate "${PRERUN_APE:?}" --out "${PRERUN_DIR:?}" --resume --max-jobs 8 --window-lanes 3 --keep-going`(全部路径绝对路径)。护栏: 起跑前实测 `uptime` 1 分钟负载 `< 8`; 运行中若负载超过 12,重跑/续跑立即降为 `--window-lanes 2 --max-jobs 6`(防把边缘 58s 窗口推成 `rc=124`)。门: strict 表 0 FAIL,UNKNOWN 只允许出现在 expected-unmeasured.tsv 已列项; W0000 再现 rc=124 按确定性缺陷停手。
 - S3b:让 osx/win 的调用号与信号常量在冻结 CI 前拿到一次真实样本(surf-probe 四项),红灯在这里比在 S9 便宜约 40 分钟。
 - S5:release-run --pack 与 release-exec --warm 分开跑(合在 prep 里有 55 秒超时风险)。
-- S6 至 S8:release-chain run --inputs --state 绝对路径 --layout;X 由操作者提交推送,S8 必须在已提交的树上重跑。
+- S6 至 S8:release-chain run --inputs --state 绝对路径 --layout;X 由操作者提交推送,若 S7 提交曾用 `UNISACC_GATE_WAIVE`,须先在已提交树上跑 `sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate <gate>` 核销并确认 `chain-ready --only 1-rev` 为 PASS,再在已提交的树上重跑 S8 `stage-dry`。
 - S9:devsvc x --bg 起 release-exec --execute;公开前失败草稿保持私有;CI 红重做要清 ci_run_id、改名旧证据、删陈旧草稿;MAIN_ADVANCED 自己合并 origin/main 再 --from-step N;公开后门失败自动执行 rollback.txt 第 (1) 条;Y1 到 Y2 之间不得改 evidence.tsv 与 decision.txt;CI 轮询上限 25 分钟。
 - 超限规则:任一步超过预算的 1.5 倍,先核真实 PID/PGID,再决定拆分或中止;累计 100 分钟仍未进 S9,本次冻结作废。
 
@@ -56,6 +56,13 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 红灯:判瞬态之前先读发码行,rc 2 与 REFUSE 默认确定性;同一失败连续两次即停手;需要改产品输入才能修的红灯使 T0 作废回 T-1;只需改测试或 harness 的红灯(C 类)允许一次,记为 F 提交并写入 rollback.txt,第二次即作废重排;终止进程只按真实 PID/PGID,先在账本记一行。
 
 负载静默(2026-11-23 负载实测新增):从 S1 到 S9 全程,除集成者外其余所有窗口暂停重检查(derive、ratchets、批量 tests、构造、全量 premerge-union),仅保留只读查阅与轻编辑;启动 S2(整链)与 S3(严格预跑)前须实测 `uptime` 1 分钟负载 `< 8`(load >= 8 时先等或请相关窗口收尾,禁止在高负载下硬起 S2/S3 撞 30s/55s 超时线)。静默开始(S1 前)与静默结束(S9 公开读回完成或本次冻结中止后)均由集成者统一经 `mux` 广播宣布,未收到结束广播前不得恢复重检查。
+
+延迟门双锚点哈希链账本规范(C3/P2 合同):
+- 双锚点路径:工作树可见锚点 A 为 `<top>/build/deferred-gates.tsv`,Git 内部锚点 B 为 `<git-common-dir>/unisacc-deferred-gates.tsv`;两处按工作树根 `top` 互锁,单删、截断、改为 0 字节、加 `#` 注释、插入空行、`chmod 000`、换成目录或软链/悬空链接均由 `chain-ready` (`1-rev`) 直接判 FAIL。
+- 9 列固定格式(TAB 分隔,禁止注释与空行):
+  `rec_type<TAB>timestamp_s<TAB>top<TAB>gate<TAB>reason<TAB>tree_sha<TAB>head_sha<TAB>detail<TAB>chain_sha256`
+  其中 `rec_type` 仅限 `DEFERRED` 或 `VERIFIED`;按同一 `top` 独立串联哈希链,创世值 `DEFERRED_GENESIS_SHA` 为 64 个 `'0'` (`0000000000000000000000000000000000000000000000000000000000000000`),每行 `chain_sha256 = sha256_hex("<prev_chain_sha256_for_top>\t" + 前8列原文)`。
+- 核销命令:`sh ./unisacc.com tools/precommit.cx -- --verify-deferred [--gate derive|genall|tlibfrozen|lint|ratchets]`(每门单次 `<= 55` 秒),实跑对应门通过后取当前 `git write-tree` 写入 `VERIFIED` 行(`detail` 绑定 `verified_deferred_tree=<orig_tree>`);`chain-ready` 仅按当前 `--repo` 的 `top` 校验全部 `DEFERRED` 均已被后续同 `top`、同 `gate` 且 `tree_sha` 匹配当前树的 `VERIFIED` 行核销。
 
 ## 四、公开后动作
 
