@@ -59,6 +59,22 @@ static int spawn_sleep(sy_child_t *c, int secs, long dl) {
    pid a reaped leader had to a sentinel that makes its own group, then prove sy_proc_end sends it
    nothing.  A REAPED handle that still fell through to kill(-pgid)/kill(pid) -- the "early reap"
    mutation -- would signal this sentinel and turn the assertion red. */
+/* Anchoring, observed in a private PID namespace (plans/proc-lifecycle.md rule 2).  The check is
+/* Observe whether PID is signalled, polling waitpid(WNOHANG|WUNTRACED) for up to 300 ms
+   (10 ms steps).  A signal's delivery and the death becoming waitable are asynchronous, so a
+   single immediate WNOHANG can read 0 while the kill has in fact landed -- the race that made
+   "sentinel not signalled" pass under a mutation.  Returns 1 and fills *ST when PID is seen
+   signalled, 0 when the whole window shows it alive/untouched.  Both the negative assertion and
+   the positive control use this one function, so they cannot disagree about how to look. */
+static int observed_signalled(int pid, int *st) {
+    int i, w;
+    for (i = 0; i < 30; i++) {
+        w = waitpid(pid, st, WNOHANG | WUNTRACED);
+        if (w == pid) return 1;
+        sy_sleep_ms(10);
+    }
+    return 0;
+}
 static int anchor_pidns(void) {
     int root, sentinel, st, w, fd, n, res;
     char pid_text[32];
@@ -88,19 +104,20 @@ static int anchor_pidns(void) {
     /* the handle is REAPED: a no-op that must reach the sentinel with nothing */
     ck(sy_proc_end(&c, 100, &e) == -ESRCH, "anchor.reaped-handle-returns-esrch");
     ck(sy_proc_kill(&c, 15) == -ESRCH, "anchor.reaped-handle-kill-esrch");
-    w = waitpid(sentinel, &st, WNOHANG | WUNTRACED);
-    ck(w == 0, "anchor.sentinel-not-signalled");
+    ck(!observed_signalled(sentinel, &st), "anchor.sentinel-not-signalled");
     /* POSITIVE CONTROL: this fixture CAN observe "the sentinel was signalled".  The test now
        signals -sentinel itself (no sy_proc_* involved) and must see the death.  Without this,
        "sentinel not signalled" proves nothing -- a blind fixture passes it either way. */
     kill(-sentinel, 9);
-    w = waitpid(sentinel, &st, 0);
-    ck(w == sentinel && WIFSIGNALED(st) && WTERMSIG(st) == 9, "anchor.positive-control-observes-kill");
+    ck(observed_signalled(sentinel, &st) && WIFSIGNALED(st) && WTERMSIG(st) == 9, "anchor.positive-control-observes-kill");
     sy_proc_close(&c);
     return 0;
 }
-int main(void) {
+int main(int argc, char **argv) {
+    int anchor_only = argc > 1 && !strcmp(argv[1], "--anchor-only");
     sy_child_t c; sy_exit_t st;
+
+    if (anchor_only) { if (anchor_pidns() == 2) gap("anchor.needs-pid-namespace"); printf("CHECK_PROC_LIFECYCLE\tok=%d\tfailed=%d\tgap=%d\n", nok, nfail, ngap); return nfail ? 1 : 0; }
 
     /* LIVE: kill reaches the group; try_wait says running; wait reaps it. */
     {

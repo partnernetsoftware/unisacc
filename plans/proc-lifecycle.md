@@ -15,18 +15,18 @@
    放 `_os` 静态帮手;不读 `/proc`。Linux 先实跑验证(live 时 si_pid=0,退出后 si_pid=pid,
    两次探测都不消费,之后 waitpid 仍取到 code=7);osx 标 UNMEASURED 并写明风险
    (osx 的 waitid 存在但 WNOWAIT 语义需核;不能确认时探测返回 -1,调用方不再等截止)。
-   **可观测性(部分闭合,变异未闭合)**:锚定的存在理由是"组长提前回收后组号被复用,再对
-   -pgid 发信号会误伤"。夹具已可观测:`tools/check-proc-lifecycle.cx` 的 `anchor_pidns` 在
-   `unshare -U -r -p -f`(user+pid,无需 root,与 cdx 的 check-reaper --reaped-root-pidns
-   同法)下让哨兵复用被回收组长的同号并自建同号组,五条断言全 PASS
-   (`sentinel-reuses-leader-pid`、`reaped-handle-returns-esrch`、`reaped-handle-kill-esrch`、
-   `sentinel-not-signalled`、`positive-control-observes-kill`)。阳性对照证明该夹具能观察
-   "哨兵被信号"(`kill(-sentinel,9)` 后 waitpid 得 WIFSIGNALED sig=9),不是盲夹具。
-   **未闭合**:变异"REAPED 分支仍对组发信号"经三版验证——标记文件证明分支可达(mark=YES)、
-   诊断写 h=19/PID/组号一致、kill 返回 0——但 `anchor.sentinel-not-signalled` 仍 PASS,
-   `kill` 成功却未杀死哨兵的机制未明。按"同一失败连续两次即停手"停测,变异闭合登记为
-   UNVERIFIED,待独立复核。锚定本身由代码结构(组长只在 sy_proc_end 末尾回收、探测不消费)
-   保证。
+   **可观测性(已闭合)**:锚定的存在理由是"组长提前回收后组号被复用,再对 -pgid 发信号
+   会误伤"。夹具在 `unshare -U -r -p -f`(user+pid,无需 root,与 cdx 的
+   check-reaper --reaped-root-pidns 同法)下让哨兵复用被回收组长的同号并自建同号组,
+   五条断言全 PASS(`sentinel-reuses-leader-pid`、`reaped-handle-returns-esrch`、
+   `reaped-handle-kill-esrch`、`sentinel-not-signalled`、`positive-control-observes-kill`)。
+   阳性对照证明该夹具能观察"哨兵被信号"。
+   **变异已闭合**:关键在观察方式——信号的投递与"可被 waitpid 看见"是异步的,单次
+   `waitpid(WNOHANG)` 立刻读会把已投递的信号漏看(2026-11-23 首次三版不红的根因)。
+   改为在调用后轮询 `waitpid(WNOHANG|WUNTRACED)` 最多 300 ms(10 ms 一步),负断言与
+   阳性对照共用同一 `observed_signalled`。此后:"REAPED 分支仍对组发信号"的变异版
+   `anchor.sentinel-not-signalled` 转红(正常版 5/0,变异版该条 FAIL)。
+   `--anchor-only` 参数只跑该组,namespace 内 5/0、55 秒内完成。
 3. **REAPED 精确含义**:禁止一切以该 pid 或以该 pgid 为目标的信号与等待;
    `sy_proc_try_wait`/`sy_proc_wait` 返回已存状态;`sy_proc_kill` 返回 `-ESRCH`。
    前提是规则 2 保证清理先于回收。**不得**为了清后代而绕开句柄直发 `kill(-pgid)`。
