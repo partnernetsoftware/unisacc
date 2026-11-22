@@ -1,0 +1,59 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script>
+const packageURL = "file://" + new URLSearchParams(location.search).get("package");
+const imports = document.createElement("script");
+imports.type = "importmap";
+imports.textContent = JSON.stringify({imports:{three:packageURL + "/build/three.module.js"}});
+document.head.append(imports);
+</script>
+<script type="module">
+const result = document.querySelector("#r160");
+try {
+  const {Bone, BufferGeometry, DetachedBindMode, Group, Matrix4, MeshBasicMaterial,
+    REVISION, Skeleton, SkinnedMesh} = await import("three");
+  const {clone} = await import(packageURL + "/examples/jsm/utils/SkeletonUtils.js");
+  if (REVISION !== "160") throw Error("revision mismatch");
+  const root = new Group();
+  const hip = new Bone();
+  const knee = new Bone();
+  const skin = new SkinnedMesh(new BufferGeometry(), new MeshBasicMaterial());
+  const other = new SkinnedMesh(skin.geometry, skin.material);
+  root.add(skin, hip, other);
+  hip.add(knee);
+  hip.name = knee.name = "joint";
+  hip.position.x = 4;
+  knee.position.x = 3;
+  const inverses = [new Matrix4().makeTranslation(-7,0,0), new Matrix4().makeTranslation(-4,0,0)];
+  const skeleton = new Skeleton([knee, hip], inverses);
+  const bind = new Matrix4().makeScale(2,1,1);
+  skin.bind(skeleton,bind);
+  skin.bindMode = DetachedBindMode;
+  other.bind(skeleton,bind);
+  const duplicate = clone(root);
+  const [copy, copyHip, copyOther] = duplicate.children;
+  const [copyKnee] = copyHip.children;
+  const initialInverse = copy.skeleton.boneInverses[0].elements[12];
+  const sharesInverses = Number(copy.skeleton.boneInverses === skeleton.boneInverses);
+  copy.skeleton.bones[0].position.x = 9;
+  root.updateMatrixWorld();
+  duplicate.updateMatrixWorld();
+  copy.skeleton.update();
+  result.textContent = JSON.stringify([
+    Number(copy.geometry === skin.geometry && copy.material === skin.material),
+    Number(copy.skeleton !== skeleton && copy.skeleton.bones !== skeleton.bones),
+    Number(copy.skeleton.bones[0] === copyKnee && copyKnee !== knee),
+    Number(copy.skeleton.bones[1] === copyHip && copyHip !== hip),
+    Number(copyOther.skeleton !== copy.skeleton &&
+      copyOther.skeleton.bones[0] === copyKnee && copyOther.skeleton.bones[1] === copyHip),
+    copy.bindMatrix.elements[0], copy.bindMatrixInverse.elements[0],
+    Number(copy.bindMode === DetachedBindMode),
+    initialInverse, copy.skeleton.boneMatrices[12], knee.position.x,
+    // The native contract separately requires independent inverse storage.
+    sharesInverses,
+  ]);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>

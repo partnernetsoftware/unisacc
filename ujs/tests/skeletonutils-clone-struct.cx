@@ -1,0 +1,108 @@
+#pragma unisa use g_math
+#pragma unisa use object_gate_pack
+#pragma unisa use r160_wait
+#pragma unisa use wasm_test_cache
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+#define BASE "ujs/practice/uxe/base/"
+#define TEST "ujs/practice/uxe/test/"
+
+static const char *sources[]={
+    BASE "f64-math.ujs",BASE "views.ujs",BASE "matrix4.ujs",BASE "object-layouts.ujs",
+    BASE "object3d.ujs",BASE "object3d-lifecycle.ujs",BASE "datautils.ujs",BASE "bufferattribute.ujs",
+    BASE "buffergeometry.ujs",BASE "mesh-layout.ujs",BASE "mesh.ujs",BASE "skeleton-layout.ujs",
+    BASE "skeleton.ujs",BASE "skinnedmesh-deform.ujs",BASE "skinnedmesh.ujs",BASE "skin-bind-mode.ujs",
+    BASE "skinnedmesh-lifecycle.ujs",BASE "skeletonutils.ujs",TEST "skeletonutils-probe.ujs",0};
+
+static int artifact(const char *cache,char *wasm,const char *source,int prepare) {
+    char key[65],sha[65],record[512];
+    const char *inputs[32];
+    int count=0;
+    while(sources[count]) { inputs[count]=sources[count]; count++; }
+    inputs[count]="ujs/tests/skeletonutils-clone-struct.cx";
+    inputs[count+1]="ujs/tests/object_gate_pack.cx";
+    inputs[count+2]=0;
+    if(wasm_test_cache_key(inputs,key)) return 1;
+    int n=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(n<=0 || n>=(int)sizeof record) return 1;
+    int cached=wasm_test_cache_read(record,key,prepare?0:wasm,sha);
+    if(cached==0) {
+        printf("SKELETONUTILS artifact key=%s sha=%s\n",key,sha);
+        return 0;
+    }
+    if(cached!=-ENOENT || !prepare) {
+        printf("SKELETONUTILS artifact rc=%d，先运行 --prepare CACHE\n",cached);
+        return 1;
+    }
+
+    char program[100000]="export uxe_evaluate_case(selected_case:i64) f64 version 1;\n";
+    int used=tx_len(program,sizeof program);
+    for(int i=0;i<count;i++) {
+        used=object_gate_pack_lines(program,used,sizeof program,sources[i]);
+        if(used<0) {
+            printf("SKELETONUTILS source preparation failed at %s\n",sources[i]);
+            return 1;
+        }
+    }
+    if(sy_write_file(source,program,used,0600)) return 1;
+    char *compile[]={"./ujs/ujs2wasm.com",(char *)source,"-o",wasm,0};
+    char *log=0;
+    size_t size=0;
+    const long start=sy_now_ms();
+    int rc=cx_runv_timeout(compile,50,&log,&size);
+    printf("SKELETONUTILS compile_ms=%ld rc=%d key=%s\n",sy_now_ms()-start,rc,key);
+    if(rc && log) printf("%.*s",(int)size,log);
+    mm_free(log);
+    return rc || wasm_test_cache_write(cache,record,key,wasm);
+}
+
+int main(int argc,char **argv) {
+    const int prepare=argc==3 && tx_eqz(argv[1],"--prepare");
+    const int mutate=argc==4 && tx_eqz(argv[3],"--mutate");
+    if((argc!=3 && !mutate) || argv[2][0]!='/') return 2;
+    const char *cache=prepare?argv[2]:argv[1];
+    if(cache[0]!='/') return 2;
+    char dir[256],cwd[390],source[300],wasm[300],url[720];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-skeletonutils-",dir,sizeof dir)) return 2;
+    tx_snprintf(source,sizeof source,"%s/clone.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/clone.wasm",dir);
+    const int n=tx_snprintf(url,sizeof url,
+        "file://%s/" TEST "skeletonutils-native.html?wasm=%s&mutate=%d",cwd,wasm,mutate);
+
+    // Both fixtures independently match the literal declaration below.
+    const double gold[]={1,1,1,1,1,2,0.5,1,-7,6,3};
+    enum { common=sizeof gold/sizeof gold[0], upstream=common+1, native=common+3 };
+    double reference[upstream]={0},actual[native]={0};
+    int failed=n<0 || n>=(int)sizeof url || artifact(cache,wasm,source,prepare);
+
+    if(!failed && !prepare && r160_wait_addon("skeletonutils",argv[2],reference,upstream,dir)) {
+        printf("SKELETONUTILS r160 fixture failed\n");
+        failed=1;
+    }
+    if(!failed && !prepare && r160_wait_read(url,"#r160",actual,native,dir)) {
+        printf("SKELETONUTILS native fixture failed\n");
+        failed=1;
+    }
+    if(!failed && !prepare) {
+        for(int i=0;i<common;i++) {
+            if(!g_math_near(actual[i],gold[i],1e-9) || !g_math_near(reference[i],gold[i],1e-9)) {
+                printf("SKELETONUTILS field=%d actual=%.17g r160=%.17g gold=%.17g\n",i,actual[i],reference[i],gold[i]);
+                failed++;
+            }
+        }
+        if(reference[common]!=1) { printf("SKELETONUTILS r160 inverse alias check failed\n"); failed++; }
+        if(actual[common]!=1) { printf("SKELETONUTILS native inverse independence check failed\n"); failed++; }
+        if(actual[common+1]!=1) { printf("SKELETONUTILS external bone refusal failed\n"); failed++; }
+        if(actual[common+2]!=1) { printf("SKELETONUTILS storage alias refusal failed\n"); failed++; }
+    }
+    if(sy_remove_all(dir)) failed++;
+    if(prepare) printf("SKELETONUTILS prepare=%s\n",failed?"FAILED":"PREPARED");
+    else printf("G_STRUCT SkeletonUtils rebind common=%d native=%d r160=%d failed=%d\n",common,native-common,upstream-common,failed);
+    return failed!=0;
+}

@@ -1,0 +1,92 @@
+// Object3D_clone preserves child order. Walk the two subtrees in that
+// order so identity is preserved even for unnamed bones or duplicate names.
+native function skeletonutils_lookup(dstArena:i64,dstRoot:i64,srcArena:i64,srcRoot:i64,source:i64) i64 {
+  let from=srcRoot;
+  let to=dstRoot;
+  while(from>0 && to>0) {
+    if(from==source) {
+      if(Object3D_address(srcArena,from)==Object3D_address(dstArena,to)) { return 0-1; }
+      return to;
+    }
+    from=Object3D_traverseNext(srcArena,srcRoot,from,1);
+    to=Object3D_traverseNext(dstArena,dstRoot,to,1);
+  }
+  return 0-1;
+}
+
+// The caller clones the Object3D hierarchy and initializes a destination
+// SkinnedMesh for each source mesh. Call once per mesh with the same roots.
+// Storage is a separate 8-byte-aligned span of 16+196*boneCount bytes.
+// In contrast to r160's shared boneInverses, the inverse values are copied.
+native function SkeletonUtils_rebindClone(dst:i64,dstArena:i64,dstRoot:i64,storage:i64,src:i64,srcArena:i64,srcRoot:i64) i64 {
+  if(!skinned_valid(dst) || !skinned_valid(src) ||
+     Object3D_address(dstArena,dstRoot)<0 || Object3D_address(srcArena,srcRoot)<0 ||
+     storage<=0 || storage%8!=0 || storage>6291456-Skeleton.size) { return 0-1; }
+  let srcMesh=ux_u32(src+SkinnedMesh.mesh);
+  let dstMesh=ux_u32(dst+SkinnedMesh.mesh);
+  let srcSkeleton=ux_u32(src+SkinnedMesh.skeleton);
+  if(!mesh_valid(srcMesh) || !mesh_valid(dstMesh) || srcSkeleton==0 || !skeleton_valid(srcSkeleton)) {
+    return 0-1;
+  }
+  let srcNode=ux_u32(srcMesh+Mesh.node);
+  let dstNode=ux_u32(dstMesh+Mesh.node);
+  if(skeletonutils_lookup(dstArena,dstRoot,srcArena,srcRoot,srcNode)!=dstNode || dstNode==0) {
+    return 0-1;
+  }
+  let count=ux_u32(srcSkeleton+Skeleton.count);
+  let srcBones=ux_u32(srcSkeleton+Skeleton.bones);
+  let srcInverses=ux_u32(srcSkeleton+Skeleton.inverses);
+  let srcPalette=ux_u32(srcSkeleton+Skeleton.palette);
+  if(count>(6291456-storage-Skeleton.size)/196 ||
+     count>(6291456-srcBones)/4 || count>(6291456-srcInverses)/128 ||
+     count>(6291456-srcPalette)/64 || srcBones%4!=0 || srcInverses%8!=0) { return 0-1; }
+
+  let bytes=Skeleton.size+196*count;
+  if(skeleton_overlap(storage,bytes,srcSkeleton,Skeleton.size) ||
+     skeleton_overlap(storage,bytes,srcBones,4*count) ||
+     skeleton_overlap(storage,bytes,srcInverses,128*count) ||
+     skeleton_overlap(storage,bytes,srcPalette,64*count) ||
+     skeleton_overlap(storage,bytes,srcArena,8+424*ux_u32(srcArena)) ||
+     skeleton_overlap(storage,bytes,dstArena,8+424*ux_u32(dstArena)) ||
+     skeleton_overlap(storage,bytes,src,SkinnedMesh.size) ||
+     skeleton_overlap(storage,bytes,dst,SkinnedMesh.size) ||
+     skeleton_overlap(storage,bytes,srcMesh,Mesh.size) ||
+     skeleton_overlap(storage,bytes,dstMesh,Mesh.size) ||
+     skeleton_overlap(storage,bytes,ux_u32(src+SkinnedMesh.bindMatrix),128) ||
+     skeleton_overlap(storage,bytes,ux_u32(src+SkinnedMesh.bindInverse),128) ||
+     skeleton_overlap(storage,bytes,ux_u32(dst+SkinnedMesh.bindMatrix),128) ||
+     skeleton_overlap(storage,bytes,ux_u32(dst+SkinnedMesh.bindInverse),128) ||
+     skeleton_overlap(storage,bytes,ux_u32(srcMesh+Mesh.morphRows),16*ux_u32(srcMesh+Mesh.morphCount)) ||
+     skeleton_overlap(storage,bytes,ux_u32(dstMesh+Mesh.morphRows),16*ux_u32(srcMesh+Mesh.morphCount))) {
+    return 0-1;
+  }
+
+  let i=0;
+  while(i<count) {
+    let bone=ux_u32(srcBones+4*i);
+    if(bone!=0 && skeletonutils_lookup(dstArena,dstRoot,srcArena,srcRoot,bone)<0) { return 0-1; }
+    i=i+1;
+  }
+  let copied=SkinnedMesh_copy(dst,dstArena,src,srcArena,0);
+  if(copied<0) { return copied; }
+  let inverses=storage+Skeleton.size;
+  let palette=inverses+128*count;
+  let bones=palette+64*count;
+  let initialized=Skeleton_init(storage,bones,inverses,palette,count);
+  if(initialized<0) { return initialized; }
+  i=0;
+  while(i<count) {
+    let bone=ux_u32(srcBones+4*i);
+    let target=0;
+    if(bone!=0) { target=skeletonutils_lookup(dstArena,dstRoot,srcArena,srcRoot,bone); }
+    let reference=ux_u32_put(bones+4*i,target);
+    let inverse=Matrix4_copy(inverses+128*i,srcInverses+128*i);
+    let j=0;
+    while(j<16) {
+      let zero=ux_u32_put(palette+64*i+4*j,0);
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return SkinnedMesh_bind(dst,storage,ux_u32(dst+SkinnedMesh.bindMatrix));
+}
