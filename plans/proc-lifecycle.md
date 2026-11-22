@@ -34,8 +34,22 @@
    TERM 组 -> 有界宽限 -> KILL 组 -> 有界回收组长 -> 置 REAPED。全程有截止,
    **不依赖管道是否关闭**。`sy_proc_capture`、`sy_proc_wait` 的到期分支、`px_run`、
    `fl_kill_wait` 都调它,不各写一套。
-5. **rp_kill_tree 只管逃逸后代**(setsid、二次 fork 离开组者)。入参改为句柄,
-   必须在回收前调用,自己不回收根。
+5. **rp_kill_tree 只管逃逸后代**(setsid、二次 fork 离开组者),三入口共用一份实现:
+   - A `rp_kill_tree(sy_child_t *c, ...)`(句柄):回收前调用,自己不回收根;
+   - B `rp_kill_tree_pid_after_wait(pid, reaped, root_start, ...)`(调用方已自行判定回收);
+   - C `rp_kill_tree_pid(pid, ...)`(裸 pid,头注释标"无身份保护,仅限未被 wait_any 或其它路径
+     回收的子进程")。
+   **已回收(root_reaped=1)的最终合同**(cc 2026-11-23 采纳 ccogweco 读法,替换先前"reaped=1 一律
+   -ENOSYS 零信号"的字面表述):
+   - Linux:不对根 pid、不对根的进程组发任何信号(pgid 可能已复用);只扫孤儿,且**每个孤儿
+     发信号前必须核对其 starttime 与回收前基准一致**;`root_start` 缺失则不扫并返回 `-EIO`;
+     全部清完且无同 starttime 存活者才返回 0,有存活返回正数。
+   - 非 Linux:`reaped=1` 时零信号,`-ENOSYS`。
+   - **为什么改**:先前字面"一律 -ENOSYS"与 cdx 的 check-reaper 合同冲突——该夹具要求根回收后
+     孤儿(持输出管道者)仍被清掉,否则 `np_run` 的 residue 无法证实为 0。所以已回收不等于
+     "什么都不做",而是"不碰根与组,只在身份核对下清逃逸后代"。
+   - 变异必红(各一个夹具):(a) reaped 时对根或组发信号;(b) 孤儿不核 starttime 就发信号;
+     (c) `root_start` 缺失仍返回 0。
 6. **subreaper 归进程入口设置**:kill_tree 先自查;未设置时孤儿清扫返回具名拒绝,
    **不得返回 0**。`residue=0` 只在可证实时才允许。
 7. **返回三态**:0 = 已证实干净;正数 = 存活数;负数 = 无法证实(-errno 或具名类)。

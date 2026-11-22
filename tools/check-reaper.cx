@@ -330,7 +330,7 @@ static int check_reaped_root(int exact) {
     }
     sy_setpgid(sentinel, sentinel);
     if (exact) ok(sentinel == root, "reaped-root: replacement owns the reused pid");
-    res = rp_kill_tree_after_wait(sentinel, 1, root_start, 1000, 0, 0, report, sizeof report);
+    res = rp_kill_tree_pid_after_wait(sentinel, 1, root_start, 1000, 0, 0, report, sizeof report);
     w = waitpid(sentinel, &st, WNOHANG | WUNTRACED);
     ok(w == 0, "reaped-root: replacement neither stopped nor killed");
     if (w == 0 || (w == sentinel && WIFSTOPPED(st))) {
@@ -425,6 +425,22 @@ int main(int argc, char **argv) {
     ok(!alive(eroot), "escape: the root is gone");
     ok(!alive(d), "escape: the detached sleeper is gone");
     ok(res == 0 && rep[0] == 0, "escape: kill_tree reports no residue");
+    /* Three-state answers (plans/proc-lifecycle.md rule 7), one assertion per negative class that
+       is reachable on Linux without root:
+       - EIO: entry B with REAPED=1 and no pre-reap starttime baseline (-1) cannot tell a reused
+         pid from the real orphan, so it must be a negative, never 0;
+       - EINVAL: pid 1 is not a job root (already asserted above for sy_kill_tree; repeated for
+         the two new entries so each is covered);
+       the -ENOSYS (off Linux / no /proc) branch is not reachable on this host and stays
+       UNMEASURED here, named in the tool's header notes. */
+    {
+        int r1 = rp_kill_tree_pid_after_wait(sy_pid(), 1, -1, 200, 0, 0, rep, sizeof rep);
+        ok(r1 == -EIO, "three-state: entry B without a starttime baseline is -EIO, not 0");
+        ok(rp_kill_tree_pid_after_wait(1, 1, 0, 200, 0, 0, rep, sizeof rep) == -EINVAL,
+           "three-state: entry B rejects pid 1");
+        ok(rp_kill_tree_pid(1, 200, 0, 0, rep, sizeof rep) == -EINVAL,
+           "three-state: entry C rejects pid 1");
+    }
     check_capture();
     cleanup();
     printf("CX_REAPER\tok=%d\tfailed=%d\n", nok, nfail);
