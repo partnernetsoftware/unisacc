@@ -815,6 +815,54 @@ int main(void) {
             ck(ok_gkl,
                 "gk-tab-sanitization-unknown-gate-partial-waive-and-verify-fail-closed: TAB in waive reason keeps 9 cols, --gate bogus rc=2, partial waive blocks unwaived gate, failed verify does not append VERIFIED");
         }
+
+        /* 11m (Gatekeeper items 8, 10, 9, 7 + PLAUSIBLE ratchets fail=2 vs fail=0 and lint empty-staging changed-.cx scan):
+         * - (8) --verify-deferred without --gate refuses with rc=2 and prints VERIFY_DEFERRED_PENDING
+         * - (7) committing after --verify-deferred emits WARN deferred-verified-tree-not-head on chain-ready 1-rev while staying PASS
+         * - (10) freeze.tsv deadline with leading space (" 4102444800") refuses fail-closed
+         * - (9) missing cxroot.tsv during active freeze refuses fail-closed even with staged_cx=1
+         * - PLAUSIBLE-1: ratchets stub printing "RATCHETS\tok=16\tfail=2\tover=0" fails verify-deferred --gate ratchets (rc=1), "fail=0" passes
+         * - PLAUSIBLE-2: lint deferred on a commit with an R2 violation in tests/bad_r2.cx (staging area now empty!) fails verify-deferred --gate lint (rc=1), and passes after fix commit */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "printf 'c0\\tdeadbeef\\tcdx\\t 4102444800\\tsrc\\n' > build/freeze.tsv && "
+            "printf '# m10\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_10_SPACE_DL; exit 1; fi; "
+            "printf 'c0\\tdeadbeef\\tcdx\\t4102444800\\tsrc\\n' > build/freeze.tsv && git add build/freeze.tsv && "
+            "rm -f cxroot.tsv && "
+            "if UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_9_NO_CXROOT; exit 1; fi; "
+            "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "ln -s '%s/cxroot.tsv' cxroot.tsv && printf '# pkg\\n' > build/tlib-packages.tsv && "
+            "rm -f tools/ratchets.cx tools/cx-lint.cx && "
+            "printf '#pragma unisa use sys.proc\\nint main(void){char *v[]={\"sh\",\"./unisacc.com\",\"tools/x.cx\",0};int fd=0;return sy_spawn_pipe(v,0,0,&fd,0);}\\n' > tests/bad_r2.cx && "
+            "git add build/freeze.tsv build/tlib-packages.tsv tests/batches.tsv tests/bad_r2.cx && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:m8,lint:m8,ratchets:m8' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m m8-waived && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred >/dev/null 2>&1; "
+            "if [ $? -ne 2 ]; then echo FAIL_8_NO_GATE; exit 1; fi; "
+            "ln -sf '%s/tools/cx-lint.cx' tools/cx-lint.cx && "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"RATCHETS\\\\tok=16\\\\tfail=2\\\\tover=0\\\\n\");return 0;}\\n' > tools/ratchets.cx && "
+            "if sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate ratchets >/dev/null 2>&1; then echo FAIL_P1_RATCHETS_FAIL2; exit 1; fi; "
+            "if sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate lint >/dev/null 2>&1; then echo FAIL_P2_LINT_R2_EMPTY_STAGE; exit 1; fi; "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"RATCHETS\\\\tok=18\\\\tfail=0\\\\n\");return 0;}\\n' > tools/ratchets.cx && "
+            "printf 'int bad_r2_fixed;\\n' > tests/bad_r2.cx && "
+            "git add tools/ratchets.cx tests/bad_r2.cx && git -c user.name=t -c user.email=t@t commit -q --no-verify -m m8-fix-lint-ratchets && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate lint && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate ratchets && "
+            "printf '# after-verify\\n' >> tests/batches.tsv && git add tests/batches.tsv && git -c user.name=t -c user.email=t@t commit -q --no-verify -m m7-after-verify && "
+            "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev)",
+            repo4, cwd, cwd, cwd, repo4)) cpd_abort("r4gkm");
+        {
+            int rc_gkm = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+            int ok_gkm = (rc_gkm == 0 &&
+                          ckk_has(out, CPD_OUT, "1-rev\tPASS") &&
+                          ckk_has(out, CPD_OUT, "WARN deferred-verified-tree-not-head") &&
+                          ckk_has(out, CPD_OUT, "READY\tyes"));
+            if (!ok_gkm) fprintf(stderr, "11m FAIL rc=%d out:\n%s\n", rc_gkm, out);
+            ck(ok_gkm,
+                "gk-require-gate-malformed-deadline-missing-cxroot-ratchets-fail2-lint-changed-cx-and-tree-warn: (8)(10)(9)(7) and PLAUSIBLE ratchets/lint fixtures all verified");
+        }
     }
 
     {

@@ -536,10 +536,17 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
     if (!line[0]) return 0;
     f[nf++] = line;
     for (p = line; *p && nf < 6; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
-    if (nf != 5) { sy_eprintf("precommit: freeze.tsv malformed (need 5 columns)\n"); return 1; }
+    if (nf != 5 || !f[0][0] || !f[1][0] || !f[2][0] || !f[3][0] || !f[4][0]) {
+        sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
+        return 1;
+    }
     for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
+    if (i == 0 || (f[3][i] != 0 && f[3][i] != '\r')) {
+        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be pure digits)\n", f[3]);
+        return 1;
+    }
     now = sy_wall_s();   /* 墙钟秒;sy_now_ms 是单调钟,不能与 epoch 截止时间比 */
-    if (i == 0 || now >= dl) return 0;                   /* 过期即失效,不死锁 */
+    if (now >= dl) return 0;                             /* 过期即失效,不死锁 */
     who = sy_env("UNISACC_INTEGRATOR");
     if (who && tx_eqz(who, f[2])) return 0;
     /* Fail-closed: if @lane:A appears in paths, validate staged build/lane-inputs.tsv up front. */
@@ -650,13 +657,17 @@ static int freeze_buf_active(const char *z, char *owner_out, size_t ocap) {
     if (!line[0]) return 0;
     f[nf++] = line;
     for (p = line; *p && nf < 6; p++) if (*p == '\t') { *p = 0; f[nf++] = p + 1; }
-    if (nf != 5) {
-        sy_eprintf("precommit: freeze.tsv malformed (need 5 columns)\n");
+    if (nf != 5 || !f[0][0] || !f[1][0] || !f[2][0] || !f[3][0] || !f[4][0]) {
+        sy_eprintf("precommit: freeze.tsv malformed (need 5 non-empty columns)\n");
         return 2;
     }
     for (i = 0; f[3][i] >= '0' && f[3][i] <= '9'; i++) dl = dl * 10 + (f[3][i] - '0');
+    if (i == 0 || (f[3][i] != 0 && f[3][i] != '\r')) {
+        sy_eprintf("precommit: freeze.tsv malformed (deadline '%s' must be pure digits)\n", f[3]);
+        return 2;
+    }
     now = sy_wall_s();
-    if (i > 0 && now < dl) {
+    if (now < dl) {
         if (owner_out && ocap > 0) (void)cx_fmt(owner_out, ocap, "%s", f[2]);
         return 1;
     }
@@ -1099,6 +1110,9 @@ static int pc_extract_only_tokens(const char *detail, char *only_buf, size_t oca
     return 1;
 }
 
+/* Semantic contract (7): each VERIFIED row proves the deferred gate passed for verified_deferred_tree=<orig_tree>.
+ * Verification must be run per-gate with --gate <G> (<=55s per gate); omitting --gate when unverified rows exist
+ * lists pending gates and exits rc=2 instead of running multiple gates serially beyond 55s. */
 static int pc_verify_deferred(int argc, char **argv) {
     const char *only_gate = 0;
     char top[1024], dfp[1200], afp[1200], prev_sha[65], err[320], uc[1200];
@@ -1135,6 +1149,20 @@ static int pc_verify_deferred(int argc, char **argv) {
     if (unv_total == 0) {
         sy_printf("VERIFY_DEFERRED\tgate=%s\tstatus=CLEAN\tunverified=0\n", only_gate ? only_gate : "all");
         return 0;
+    }
+    if (!only_gate) {
+        for (g = 0; g < 5; g++) {
+            int g_unv = 0;
+            for (i = 0; i < nrows; i++) {
+                if (!rows[i].verified && tx_eqz(rows[i].gate, all_gates[g])) g_unv++;
+            }
+            if (g_unv > 0) {
+                sy_printf("VERIFY_DEFERRED_PENDING\tgate=%s\tunverified=%d\tcmd=sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate %s\n",
+                          all_gates[g], g_unv, all_gates[g]);
+            }
+        }
+        sy_eprintf("precommit: REFUSE verify-deferred-requires-gate: %d unverified record(s); run each pending gate individually with --gate <G> (<=55s per gate)\n", unv_total);
+        return 2;
     }
     if (top[0]) (void)chdir(top);
     if (sy_exists("./unisacc.com") == 1) {
@@ -1231,11 +1259,13 @@ static int pc_verify_deferred(int argc, char **argv) {
                 const char *lh = (first_head && !tx_eqz(first_head, "unknown")) ? first_head : "HEAD";
                 const char *lt = (first_tree && !tx_eqz(first_tree, "unknown")) ? first_tree : "HEAD";
                 char *av[] = {"/bin/sh", "-c",
-                    "files=$( { git diff --cached --name-only --diff-filter=ACMR -- '*.cx'; "
-                    "git diff --name-only --diff-filter=ACMR \"$1\" \"$2\" -- '*.cx'; "
-                    "git diff-tree --no-commit-id --name-only -r HEAD -- '*.cx'; "
-                    "git ls-tree -r --name-only \"$2\" -- '*.cx'; } 2>/dev/null | sort -u ); "
+                    "files=$( { git diff --cached --name-only --diff-filter=ACMR; "
+                    "git diff --name-only --diff-filter=ACMR \"$1\" \"$2\"; "
+                    "git diff-tree --no-commit-id --name-only -r HEAD; } 2>/dev/null | grep '\\.cx$' | sort -u ); "
                     "ex=''; for f in $files; do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
+                    "if [ -z \"$ex\" ]; then "
+                    "  for f in $(git ls-tree -r --name-only \"$2\" 2>/dev/null | grep '\\.cx$'); do [ -f \"$f\" ] && ex=\"$ex $f\"; done; "
+                    "fi; "
                     "if [ -z \"$ex\" ]; then echo LINT_VERIFY_NO_CX_FILES; exit 1; fi; "
                     "exec sh \"$3\" tools/cx-lint.cx -- --rules R2,R3,R4 --strict $ex",
                     "verify-lint", (char *)lh, (char *)lt, uc, 0};
@@ -1457,7 +1487,7 @@ static int tlib_frozen_gate(const char *names, long sn) {
     tp_ex = pc_exists_checked("tlib-frozen", tp);
     if (tp_ex < 0) return 1;
     if (tp_ex == 0) {
-        if (freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+        if (freeze_window_active()) {
             return pc_handle_gate_unavailable("tlibfrozen", "TLIB_FROZEN_GATE_UNAVAILABLE", 0, 55, 0,
                                               "(build/tlib-packages.tsv missing during active freeze)",
                                               "sh ./unisacc.com tools/check-tlib-frozen.cx -- --fast .");
@@ -2025,7 +2055,7 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         int gex = pc_exists_checked("genall", gp);
         if (gex < 0) return 1;
         if (gex == 0) {
-            if (freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+            if (freeze_window_active()) {
                 return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, 20, staged_total,
                                                   "(tools/gen-all-check.cx missing while prodgen inputs staged)",
                                                   "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
@@ -2172,8 +2202,13 @@ static int derive_gate(void) {
             if (adz) mm_free(adz);
             return 1;
         }
+        if (!plan_dir && freeze_window_active() && sy_exists("cxroot.tsv") != 1) {
+            blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 55, 0,
+                                                  "(cxroot.tsv missing during active freeze)",
+                                                  "sh ./unisacc.com tools/derive.cx -- --check");
+        }
         if (dex == 0) {
-            if ((tex == 1 || sy_exists("cxroot.tsv") == 1) && freeze_window_active()) {
+            if (freeze_window_active()) {
                 blocked += pc_handle_gate_unavailable("derive", "DERIVE_GATE_UNAVAILABLE", 0, 55, 0,
                                                       "(exec/facts/derive.tsv missing during active freeze)",
                                                       "sh ./unisacc.com tools/derive.cx -- --check");
@@ -3137,7 +3172,7 @@ int main(int argc, char **argv) {
     { int b0 = blocked; blocked += lint_gate(names, sn, &lint_absent); if (blocked > b0) pc_mark_block("lint", "cx-lint"); }
     if (lint_absent) {
         sy_eprintf("precommit: lint=absent (no ./unisacc.com or tools/cx-lint.cx in cwd)\n");
-        if (!plan_dir && freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+        if (!plan_dir && freeze_window_active()) {
             int b0 = blocked;
             blocked += pc_handle_gate_unavailable("lint", "LINT_GATE_UNAVAILABLE", 0, 55, staged,
                                                   "(no ./unisacc.com or tools/cx-lint.cx in cwd)",
@@ -3151,7 +3186,7 @@ int main(int argc, char **argv) {
       ex = sy_exists(rp);   /* 1 存在;0 仅 ENOENT;负数=其他错误,必须报告 */
       if (ex < 0) { sy_eprintf("precommit: tools/ratchets.cx unreadable (%d)\n", ex); return 1; }
       if (ex == 0) {
-          if (!plan_dir && freeze_window_active() && sy_exists("cxroot.tsv") == 1) {
+          if (!plan_dir && freeze_window_active()) {
               int b0 = blocked;
               blocked += pc_handle_gate_unavailable("ratchets", "RATCHETS_GATE_UNAVAILABLE", 0, 55, staged,
                                                     "(no tools/ratchets.cx in worktree)",

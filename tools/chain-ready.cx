@@ -13,6 +13,9 @@
  *                  genesis DEFERRED_GENESIS_SHA = "0000000000000000000000000000000000000000000000000000000000000000",
  *                  columns: rec_type\ttimestamp_s\ttop\tgate\treason\ttree_sha\thead_sha\tdetail\tchain_sha256)
  *                  is intact and has 0 unverified DEFERRED rows for <top>.
+ *                  Semantic contract (7): a VERIFIED row proves the deferred gate passed on verified_deferred_tree=<orig_tree>;
+ *                  if the VERIFIED row's tree_sha differs from current HEAD^{tree} (a commit landed after verify-deferred),
+ *                  1-rev stays PASS and emits WARN deferred-verified-tree-not-head (runbook S8 requires verify-deferred on the final tree).
  *   2a-derive      tools/derive.cx -- --check: DERIVE_SUMMARY drift=0 refused=0
  *   2b-ratchets    tools/ratchets.cx last line ok=13 fail=0
  *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
@@ -275,10 +278,14 @@ static int cr_deferred_audit_one(const char *path, const char *top, int only_thi
                 }
                 ts = col_o[7] + tag + 23;
                 while (ts + tl2 < col_o[7] + col_l[7] && row[ts + tl2] != ' ') tl2++;
+                char open_vtree[128][64];
                 for (j = 0; j < nopen; j++) {
                     if (!open_cleared[j] &&
                         (long)tx_len(open_gate[j], 32) == col_l[3] && tx_same(open_gate[j], col_l[3], row + col_o[3], col_l[3]) &&
                         (long)tx_len(open_tree[j], 64) == tl2 && tx_same(open_tree[j], tl2, row + ts, tl2)) {
+                        long vtl = col_l[5] < 63 ? col_l[5] : 63;
+                        mm_copy(open_vtree[j], 64, row + col_o[5], (size_t)vtl);
+                        open_vtree[j][vtl] = 0;
                         open_cleared[j] = 1;
                         hit = 1;
                         break;
@@ -288,6 +295,10 @@ static int cr_deferred_audit_one(const char *path, const char *top, int only_thi
                     mm_free(b);
                     cx_fmt(why_out, wcap, "deferred-gates-tampered: orphan VERIFIED row at line %ld in %s", lno, path);
                     return -1;
+                }
+                if (only_this_top && first_unv_out && fcap > 0) {
+                    long vtl = col_l[5] < 63 ? col_l[5] : 63;
+                    cx_fmt(first_unv_out, fcap, "gate=%.*s verified_tree=%.*s", (int)col_l[3], row + col_o[3], (int)vtl, row + col_o[5]);
                 }
             }
         }
@@ -357,8 +368,27 @@ static int cr_deferred_verify(const char *repo, char *why_out, size_t wcap) {
         return -1;
     }
     if (unv1 > 0) {
-        cx_fmt(why_out, wcap, "deferred-gates-unverified count=%ld in %s (first: %s; run: sh ./unisacc.com tools/precommit.cx -- --verify-deferred)", unv1, dfp, first1);
+        cx_fmt(why_out, wcap, "deferred-gates-unverified count=%ld in %s (first: %s; run: sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate <G>)", unv1, dfp, first1);
         return 1;
+    }
+    if (tr1 > 0 && first1[0] && why_out && wcap > 0) {
+        long vo = tx_find(first1, (long)tx_len(first1, sizeof first1), "verified_tree=", 14);
+        if (vo >= 0) {
+            const char *vt = first1 + vo + 14;
+            char *tv[] = {"git", "-C", top, "rev-parse", "HEAD^{tree}", 0};
+            char htree[64], nwhy[160];
+            np_result nr = {0};
+            htree[0] = 0;
+            if (!np_run(tv, top, 0, 4, &nr, nwhy, sizeof nwhy) && !nr.rc && nr.out && nr.outn >= 7) {
+                long hl = (long)nr.outn;
+                while (hl > 0 && (nr.out[hl - 1] == '\n' || nr.out[hl - 1] == '\r')) hl--;
+                if (hl > 0 && hl < 60) { mm_copy(htree, sizeof htree, nr.out, (size_t)hl); htree[hl] = 0; }
+            }
+            np_free(&nr);
+            if (htree[0] && !tx_eqz(vt, htree)) {
+                cx_fmt(why_out, wcap, "WARN deferred-verified-tree-not-head (%s head_tree=%s; 核销只证明被延迟那棵树的门通过,S8核销须在最终树上做)", first1, htree);
+            }
+        }
     }
     return 0;
 }
@@ -1701,6 +1731,10 @@ int main(int argc, char **argv) {
                     if (cr_deferred_verify(repo, dwhy, sizeof dwhy) != 0) {
                         rev_ok = 0;
                         cx_fmt(rev_ev, sizeof rev_ev, "%s", dwhy);
+                    } else if (dwhy[0]) {
+                        char rev_warn[680];
+                        cx_fmt(rev_warn, sizeof rev_warn, "%s; %s", rev_ev, dwhy);
+                        put_ev(rev_ev, sizeof rev_ev, rev_warn);
                     }
                     cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev);
                     row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms);

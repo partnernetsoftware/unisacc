@@ -25,10 +25,11 @@ static int sh(const char *cmd, char *out, size_t cap) {
     return rc;
 }
 static int run2(const char *freeze, const char *stage, const char *env, char *out, size_t cap) {
-    char cmd[2800], w[1200];
+    char cmd[3200], w[1200];
     if (freeze[0]) { if (cx_fmt(w, sizeof w, "printf '%s' > build/freeze.tsv && ", freeze)) return 99; } else w[0] = 0;
     if (cx_fmt(cmd, sizeof cmd,
-        "cd '%s' && rm -rf exec tools build && mkdir -p exec tools build && echo x > '%s' && %s"
+        "cd '%s' && rm -rf exec/a.tsv tools/a.tsv ext build/freeze.tsv build/lane-inputs.tsv && mkdir -p exec/facts tools build && "
+        "echo x > '%s' && %s"
         "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
         td, stage, w, env, root, root)) return 99;
     return sh(cmd, out, cap);
@@ -38,7 +39,9 @@ static int run_lane(const char *freeze, const char *lane_tsv, const char *stage,
     if (freeze[0]) { if (cx_fmt(wf, sizeof wf, "printf '%s' > build/freeze.tsv && ", freeze)) return 99; } else wf[0] = 0;
     if (lane_tsv) { if (cx_fmt(wl, sizeof wl, "printf '%s' > build/lane-inputs.tsv && ", lane_tsv)) return 99; } else wl[0] = 0;
     if (cx_fmt(cmd, sizeof cmd,
-        "cd '%s' && git rm -rf -q --cached . >/dev/null 2>&1; rm -rf exec tools ext build && mkdir -p exec tools ext/crypto build && echo x > '%s' && %s%s"
+        "cd '%s' && git reset -q HEAD >/dev/null 2>&1; rm -rf exec/a.tsv tools/a.tsv ext build/freeze.tsv build/lane-inputs.tsv && "
+        "mkdir -p exec/facts tools ext/crypto build && "
+        "printf 'int x;\\n' > '%s' && %s%s"
         "git add -A >/dev/null 2>&1 && %s sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
         td, stage, wf, wl, env, root, root)) return 99;
     return sh(cmd, out, cap);
@@ -59,7 +62,21 @@ int main(void) {
         mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
         mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
     if (cx_fmt(td, sizeof td, "%s/precommit-freeze-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
-    {   char cmd[700]; if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t", td) || sh(cmd, 0, 0)) { ck(0, "git-init"); return 1; } }
+    {   char cmd[2400];
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && "
+            "mkdir -p exec/facts tools build && "
+            "printf '/unisacc.com\\n/cx\\n/tools/cxlib\\n/tools/cx-lint.cx\\n/tools/check-tlib-frozen.cx\\n' > .gitignore && "
+            "printf 'CXROOT1\\nR\\tsys\\tcx/sys\\nR\\ttext\\tcx/text\\nR\\tmem\\tcx/mem\\nR\\tcxlib\\ttools/cxlib\\n' > cxroot.tsv && "
+            "printf '# derive\\n' > exec/facts/derive.tsv && printf 'int main(void){return 0;}\\n' > tools/derive.cx && "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"GEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=1\\\\tdiff=0\\\\terror=0\\\\tuncovered=0\\\\tms=1\\\\n\");return 0;}\\n' > tools/gen-all-check.cx && "
+            "printf '# pkg\\n' > build/tlib-packages.tsv && "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"RATCHETS\\\\tok=18\\\\tfail=0\\\\nRATCHETS_PRECOMMIT\\\\tblocked=0\\\\n\");return 0;}\\n' > tools/ratchets.cx && "
+            "ln -sf '%s/unisacc.com' unisacc.com && ln -sfn '%s/cx' cx && ln -sfn '%s/tools/cxlib' tools/cxlib && "
+            "ln -sf '%s/tools/cx-lint.cx' tools/cx-lint.cx && ln -sf '%s/tools/check-tlib-frozen.cx' tools/check-tlib-frozen.cx && "
+            "git add .gitignore cxroot.tsv exec/facts/derive.tsv tools/derive.cx tools/gen-all-check.cx build/tlib-packages.tsv tools/ratchets.cx && "
+            "git commit -qm base-init",
+            td, root, root, root, root, root) || sh(cmd, 0, 0)) { ck(0, "git-init"); return 1; } }
     const char *FAR = "sid1\\tbase1\\tcdx\\t4102444800\\texec src seed\\n";
     const char *PAST = "sid1\\tbase1\\tcdx\\t1000000000\\texec src seed\\n";
     int rc;
@@ -96,8 +113,8 @@ int main(void) {
     {
         char cmd[3600];
         if (!cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && git rm -rf -q --cached . >/dev/null 2>&1; rm -rf exec tools ext build .claude && "
-            "mkdir -p exec build && echo x > exec/a.tsv && printf '%s' > build/freeze.tsv && "
+            "cd '%s' && git reset -q HEAD >/dev/null 2>&1; rm -rf exec/a.tsv tools/a.tsv ext build/freeze.tsv build/lane-inputs.tsv .claude && "
+            "mkdir -p exec/facts build && echo x > exec/a.tsv && printf '%s' > build/freeze.tsv && "
             "git add -A && git commit -qm committed-expired && "
             "printf '%s' > build/freeze.tsv && echo y > exec/a.tsv && git add exec/a.tsv && "
             "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
@@ -203,6 +220,20 @@ int main(void) {
             rc = sh(cmd, out, sizeof out);
             ck(rc == 1 && has(out, "BLOCKED freeze-unreadable"), "directory-freeze-tsv-refused");
         } else ck(0, "directory-freeze-tsv-refused");
+        /* 2g (10): freeze.tsv deadline column with leading space or trailing non-digit must be refused as malformed */
+        rc = run2("sid1\\tbase1\\tcdx\\t 4102444800\\texec src seed\\n", "tools/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "malformed"), "non-digit-leading-space-deadline-refused");
+        rc = run2("sid1\\tbase1\\tcdx\\t4102444800x\\texec src seed\\n", "tools/a.tsv", "", out, sizeof out);
+        ck(rc == 1 && has(out, "malformed"), "non-digit-trailing-char-deadline-refused");
+        /* 2h (9): active freeze.tsv with missing cxroot.tsv must fail-closed even for unfrozen path */
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f cxroot.tsv && git rm -qf --cached cxroot.tsv >/dev/null 2>&1; "
+            "printf '%s' > build/freeze.tsv && echo x > tools/a.tsv && git add build/freeze.tsv tools/a.tsv && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
+            td, FAR, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "BLOCKED freeze-gate-unavailable"), "missing-cxroot-during-freeze-refused");
+        } else ck(0, "missing-cxroot-during-freeze-refused");
     }
     {   char cmd[600]; if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td)) sh(cmd, 0, 0); }
     sy_printf("CHECK_PRECOMMIT_FREEZE\tfailed=%d\n", failed);
