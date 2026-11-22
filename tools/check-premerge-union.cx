@@ -301,7 +301,7 @@ int main(void) {
         ck(rc == 1 &&
            has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-tree") &&
            has(out, "MERGE_TRAP\tFAIL\text/sysx/reaper.cx\treason=differs-from-branch") &&
-           has(out, "MERGE_TRAPS_SUMMARY\tverdict=FAIL\tbranch=v0.0.96\tok=6\twaived=0\tfail=2\ttotal=8"),
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=FAIL\tbranch=v0.0.96\tok=6\twaived=0\tfail=2\tna=0\ttotal=8"),
            "merge-traps-catches-silent-delete-and-revert");
         /* 2. Named waiver allows the 2 differences -> PASS rc=0 */
         const char *wv = "# relpath\treason\ntests/manifests/l0-capture.tsv\ttest-waiver-del\next/sysx/reaper.cx\ttest-waiver-rev\n";
@@ -311,15 +311,27 @@ int main(void) {
         ck(rc == 0 &&
            has(out, "MERGE_TRAP\tWAIVED\ttests/manifests/l0-capture.tsv\treason=test-waiver-del") &&
            has(out, "MERGE_TRAP\tWAIVED\text/sysx/reaper.cx\treason=test-waiver-rev") &&
-           has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=6\twaived=2\tfail=0\ttotal=8"),
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=6\twaived=2\tfail=0\tna=0\ttotal=8"),
            "merge-traps-named-waiver-passes");
         /* 3. Explicitly restoring v0.0.96 side for all 8 files -> PASS rc=0 ok=8 */
         cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- tests/manifests/l0-capture.tsv ext/sysx/reaper.cx", mdir);
         (void)run_sh(mcmd, 15, out, sizeof out);
         cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96", mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
-        ck(rc == 0 && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=8\twaived=0\tfail=0\ttotal=8"),
+        ck(rc == 0 && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=8\twaived=0\tfail=0\tna=0\ttotal=8"),
            "merge-traps-restored-branch-side-passes");
+        /* 4. A trap path that neither the base nor the branch has (a later version's file) is NA, not a failure; if the base has it, the branch lacking it is still a failure */
+        cx_fmt(mcmd, sizeof mcmd, "cd '%s' && git checkout -q -b nabranch v0.0.96 && git rm -q tests/manifests/l0-capture.tsv && git commit -qm na-branch && git branch nabase", mdir);
+        rc = run_sh(mcmd, 15, out, sizeof out);
+        ck(rc == 0, "merge-traps-na-fixture-setup");
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch nabranch --base nabase", mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 && has(out, "MERGE_TRAP\tNA\ttests/manifests/l0-capture.tsv") && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=nabranch\tok=7\twaived=0\tfail=0\tna=1\ttotal=8"),
+           "merge-traps-path-absent-in-base-and-branch-is-na");
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch nabranch --base v0.0.96", mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 1 && has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-branch") && has(out, "fail=1\tna=0\ttotal=8"),
+           "mutation-base-has-the-path-then-missing-in-branch-fails");
     }
 
     (void)sy_remove_all(tmpd);

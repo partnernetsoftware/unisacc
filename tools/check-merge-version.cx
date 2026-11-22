@@ -103,6 +103,33 @@ int main(void) {
     sh(cmd2);
     CK(!strcmp(out, before), "shared-index-and-refs-untouched");
 
+    /* gate checkout: a private git repository of the resolved tree; the shared repository keeps refs, index, worktrees */
+    char gcmd[3500], refs0[3000];
+    cx_fmt(gcmd, sizeof gcmd, "git -C %s/repo for-each-ref | md5sum && git -C %s/repo worktree list | wc -l && ls %s/repo/.git | tr '\\n' ' '", T, T, T);
+    sh(gcmd);
+    cx_fmt(refs0, sizeof refs0, "%s", out);
+    cx_fmt(gcmd, sizeof gcmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- gate traps --repo %s/repo --branch feat2 --work %s/w2 2>&1", root, T, T);
+    rc = sh(gcmd);
+    CK(rc == 0 && tk_has(out, "MERGE_GATE\ttraps\tOK"), "gate-traps-runs-in-the-private-checkout");
+    cx_fmt(gcmd, sizeof gcmd, "test -d %s/w2/tree/.git && echo GITDIR; cat %s/w2/tree/.git/objects/info/alternates; echo ALT=%s/repo/.git/objects; git -C %s/w2/tree rev-parse 'HEAD^{tree}'; cat %s/w2/resolved.tree; echo; git -C %s/w2/tree ls-files | wc -l", T, T, T, T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "GITDIR") && tk_has(out, "derive.cx") == 0, "gate-tree-has-a-git-dir");
+    {
+        char alt[1200], want[1200];
+        cx_fmt(gcmd, sizeof gcmd, "cat %s/w2/tree/.git/objects/info/alternates", T);
+        sh(gcmd);
+        cx_fmt(alt, sizeof alt, "%s", out);
+        cx_fmt(want, sizeof want, "%s/repo/.git/objects", T);
+        CK(tk_has(alt, want), "gate-tree-alternates-point-at-the-shared-object-store");
+    }
+    cx_fmt(gcmd, sizeof gcmd, "a=$(git -C %s/w2/tree rev-parse 'HEAD^{tree}'); b=$(cat %s/w2/resolved.tree); test \"$a\" = \"$b\" && echo TREE-SAME; git -C %s/repo for-each-ref | md5sum && git -C %s/repo worktree list | wc -l && ls %s/repo/.git | tr '\\n' ' '", T, T, T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "TREE-SAME"), "gate-tree-head-tree-is-the-resolved-tree");
+    CK(tk_has(out, refs0), "gate-leaves-shared-refs-worktrees-and-gitdir-entries-as-before");
+    cx_fmt(gcmd, sizeof gcmd, "rm -rf %s/w2 && git -C %s/repo fsck --no-dangling 2>&1 | wc -l; ls %s/repo/.git | tr '\\n' ' '", T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "0\n") && !tk_has(out, "worktrees"), "removing-the-work-dir-leaves-the-shared-repo-clean");
+
     /* mutations */
     cx_fmt(rules, sizeof rules, "%sr-derive\tfeat*\tderive.cx\tconflict\ttake-ours\tfixture\nr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
     put("rules-no-trap.tsv", rules);

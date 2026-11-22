@@ -307,6 +307,15 @@ static int cmd_preview(int argc, char **argv) {
 
 /* ---- gates, each one bounded to 55 s ---- */
 static char *tree_dir(char *buf, size_t cap) { mv_need(!cx_fmt(buf, cap, "%s/tree", g_work), "work path"); return buf; }
+/* top of the checkout this tool runs from (not --repo): where unisacc.com and tools/ live */
+static void self_top(char *buf, size_t cap) {
+    pr_result top;
+    char *tp[] = {"git", "rev-parse", "--show-toplevel", 0};
+    mv_need(pr_run("git", tp, 0, 0, 20, &top) == 0 && top.rc == 0 && top.out != 0, "git rev-parse --show-toplevel failed (run from inside the checkout)");
+    chomp(&top);
+    mv_need(!cx_fmt(buf, cap, "%s", top.out), "work path");
+    pr_free(&top);
+}
 /* git -C DIR ARGS... in a directory that is not the shared repository */
 static int git_in(const char *dir, pr_result *r, int secs, char **args) {
     char *av[24];
@@ -352,12 +361,9 @@ static void ensure_checkout(const char *idx, char *tdir, size_t cap) {
     pr_result r2;
     mv_need(git_in(tdir, &r2, 20, ur) == 0, "update-ref failed"); pr_free(&r2); pr_free(&r);
     char lnk[1200], src[1200];
-    pr_result top;
-    char *tp[] = {"rev-parse", "--show-toplevel", 0};
-    mv_need(git_run(0, &top, 50, tp) == 0, "git rev-parse --show-toplevel failed");
-    chomp(&top);
-    mv_need(!cx_fmt(lnk, sizeof lnk, "%s/unisacc.com", tdir) && !cx_fmt(src, sizeof src, "%s/unisacc.com", top.out), "work path");
-    pr_free(&top);
+    char top[1100];
+    self_top(top, sizeof top);
+    mv_need(!cx_fmt(lnk, sizeof lnk, "%s/unisacc.com", tdir) && !cx_fmt(src, sizeof src, "%s/unisacc.com", top), "work path");
     char *ln[] = {"ln", "-sf", src, lnk, 0};
     pr_result l;
     if (pr_run("ln", ln, 0, 0, 10, &l) != 0) tool_die(TOOL, "cannot link unisacc.com", 0, 2);
@@ -370,6 +376,7 @@ static int gate_result(const char *name, pr_result *r, int t, const char *okneed
     int ok = r->rc == 0 && (!okneedle || (r->out && strstr(r->out, okneedle)));
     char tail[240]; tail[0] = 0;
     const char *last = r->out ? r->out : "";
+    if (!*last && r->err) last = r->err;   /* a child that died before printing: its stderr is the reason */
     for (const char *p = last; *p; p++) if (*p == '\n' && p[1]) last = p + 1;
     size_t ll = strlen(last); if (ll && last[ll - 1] == '\n') ll--;
     if (ll >= sizeof tail) ll = sizeof tail - 1;
@@ -391,7 +398,11 @@ static int cmd_gate(int argc, char **argv) {
     int t, rc;
     if (!strcmp(name, "traps")) {
         ensure_checkout(idx, tdir, sizeof tdir);
-        char *av[] = {"sh", "./unisacc.com", "tools/premerge-union.cx", "--", "--shard", "merge-traps", "--branch", (char *)branch, "--tree", tdir, "--repo", (char *)g_repo, 0};
+        /* the tool and the compiler come from the checkout this runs in; --repo is only where git looks up the branch */
+        char top[1100], com[1200], src[1200];
+        self_top(top, sizeof top);
+        mv_need(!cx_fmt(com, sizeof com, "%s/unisacc.com", top) && !cx_fmt(src, sizeof src, "%s/tools/premerge-union.cx", top), "work path");
+        char *av[] = {"sh", com, src, "--", "--shard", "merge-traps", "--branch", (char *)branch, "--tree", tdir, "--repo", (char *)g_repo, 0};
         t = pr_run("merge-traps", av, g_repo, 0, 55, &r);
         rc = gate_result("traps", &r, t, "verdict=PASS");
     } else if (!strcmp(name, "derive-write") || !strcmp(name, "derive-check")) {

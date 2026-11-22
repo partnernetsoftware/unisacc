@@ -279,7 +279,7 @@ static int mt_waiver_find(const char *wb, long wn, const char *path, char *reaso
     return 0;
 }
 
-static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *waiver_path) {
+static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *base_ref, const char *waiver_path) {
     static const char *const traps[8] = {
         "tests/manifests/l0-capture.tsv",
         "ext/sysx/exec.cx",
@@ -300,7 +300,7 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
     }
     char tmpf[4400];
     if (cx_fmt(tmpf, sizeof tmpf, "/tmp/premerge-trap-%d.bin", sy_pid())) { if (wb) mm_free(wb); return 2; }
-    int ok = 0, waived = 0, fail = 0;
+    int ok = 0, waived = 0, fail = 0, na = 0;
     for (int i = 0; i < 8; i++) {
         const char *rel = traps[i];
         char reason[256];
@@ -316,6 +316,15 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
         if (o) mm_free(o);
         if (grc != 0) {
             (void)sy_unlink(tmpf);
+            /* a trap path that the base does not have either belongs to a later version: not applicable here */
+            char bcmd[5200];
+            if (!cx_fmt(bcmd, sizeof bcmd, "git -C '%s' cat-file -e '%s:%s' 2>/dev/null", repo_arg, base_ref, rel) && run_sh(bcmd, 15, &o, &on) != 0) {
+                if (o) mm_free(o);
+                sy_printf("MERGE_TRAP\tNA\t%s\treason=absent-in-base-and-branch\n", rel);
+                na++;
+                continue;
+            }
+            if (o) mm_free(o);
             sy_printf("MERGE_TRAP\tFAIL\t%s\treason=missing-in-branch\n", rel);
             fail++;
             continue;
@@ -344,8 +353,8 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
         mm_free(tb); mm_free(bb);
     }
     if (wb) mm_free(wb);
-    sy_printf("MERGE_TRAPS_SUMMARY\tverdict=%s\tbranch=%s\tok=%d\twaived=%d\tfail=%d\ttotal=8\n",
-              fail ? "FAIL" : "PASS", branch, ok, waived, fail);
+    sy_printf("MERGE_TRAPS_SUMMARY\tverdict=%s\tbranch=%s\tok=%d\twaived=%d\tfail=%d\tna=%d\ttotal=8\n",
+              fail ? "FAIL" : "PASS", branch, ok, waived, fail, na);
     return fail ? 1 : 0;
 }
 
@@ -368,7 +377,7 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (streq(shard, "merge-traps")) return run_merge_traps(repo_arg, tree_arg, br_ref, waiver_arg);
+    if (streq(shard, "merge-traps")) return run_merge_traps(repo_arg, tree_arg, br_ref, base_ref, waiver_arg);
     if (!streq(shard, "all") && !streq(shard, "derive") && !streq(shard, "check-derive") &&
         !streq(shard, "prep") && !streq(shard, "derive-a") && !streq(shard, "derive-b") && !streq(shard, "derive-c")) {
         sy_eprintf("premerge-union: invalid --shard %s\n", shard);
