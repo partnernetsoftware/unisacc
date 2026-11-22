@@ -1,0 +1,86 @@
+/* Red-before-green fixture for G-redecl (global object redeclaration type/size conflict).
+ * Covers 6 positive controls (must PASS rc=0) + 6 conflict negatives (must FAIL rc=1 with conflicting types).
+ * Usage: sh ./unisacc.com check-g-redecl.cx -- [COMPILER_PATH] (default ./unisacc.com; if not .com, invokes directly) */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char prod[4096], tdir[4096];
+static int use_sh, passed, failed;
+
+static int gr_exec(char **argv, char *out, long cap) {
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < k; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long k = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < k; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static void gr_head(const char *s, char *dst, size_t cap) {
+    size_t i = 0;
+    for (; s[i] && s[i] != '\n' && s[i] != '\r' && i + 1 < cap; i++)
+        dst[i] = (s[i] == '\t') ? ' ' : s[i];
+    dst[i] = 0;
+    if (!i) { dst[0] = '-'; dst[1] = 0; }
+}
+
+static void check_case(const char *id, const char *src, int expect_rc0, const char *want_err) {
+    char sp[4200], op[4200], buf[4096], fl[180];
+    cx_fmt(sp, sizeof sp, "%s/%s.c", tdir, id);
+    cx_fmt(op, sizeof op, "%s/%s.o", tdir, id);
+    cx_write(sp, src, strlen(src));
+    char *v_sh[] = {"sh", prod, "-c", sp, "-o", op, 0};
+    char *v_bin[] = {prod, "-c", sp, "-o", op, 0};
+    int rc = gr_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
+    gr_head(buf, fl, sizeof fl);
+    int ok = expect_rc0 ? (rc == 0) : (rc != 0 && (!want_err || strstr(buf, want_err) != 0));
+    if (ok) passed++; else failed++;
+    sy_printf("GREDECL_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
+}
+
+int main(int argc, char **argv) {
+    const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
+    if (sy_realpath(p, prod, sizeof prod) < 0) return 2;
+    size_t pl = strlen(prod);
+    use_sh = (pl >= 4 && strcmp(prod + pl - 4, ".com") == 0);
+    cx_fmt(tdir, sizeof tdir, "/tmp/v094-gr-%d", sy_pid());
+    if (sy_mkdir_all(tdir, 0700) != 0) return 2;
+
+    /* Positive controls: must remain ACCEPTED (rc=0) */
+    check_case("P1-ext-incomp-complete", "extern int a[];\nint a[3];\n", 1, 0);
+    check_case("P2-ext-same-arr", "extern int a[3];\nint a[3];\n", 1, 0);
+    check_case("P3-ext-same-scalar", "extern int x;\nint x;\n", 1, 0);
+    check_case("P4-def-then-ext-incomp", "int a[3];\nextern int a[];\n", 1, 0);
+    check_case("P5-tentative-same", "int x;\nint x;\n", 1, 0);
+    check_case("P6-ext-same-ptr", "extern int *p;\nint *p;\n", 1, 0);
+    check_case("P7-tentative-arr", "int a[3];\nint a[3];\n", 1, 0);
+    check_case("P8-typedef-arr-same", "typedef int A3[3];\nextern A3 a;\nint a[3];\n", 1, 0);
+
+    /* Conflicting redeclarations: RED on 0.0.91 (rc=0) -> GREEN after G-redecl fix (rc=1) */
+    check_case("C1-ext-arr-size", "extern int a[3];\nint a[4];\n", 0, "conflicting types");
+    check_case("C2-ext-arr-double", "extern int a[3];\ndouble a;\n", 0, "conflicting types");
+    check_case("C3-ext-scalar-double", "extern int x;\ndouble x;\n", 0, "conflicting types");
+    check_case("C4-def-arr-size", "int a[3];\nint a[4];\n", 0, "conflicting types");
+    check_case("C5-ext-arr-elemtype", "extern int a[3];\nlong a[3];\n", 0, "conflicting types");
+    check_case("C6-ext-ptr-vs-int", "extern int *p;\nint p;\n", 0, "conflicting types");
+    check_case("C7-ext-then-static", "extern int x;\nstatic int x;\n", 0, "static");
+    check_case("C8-fn-obj-same-name", "int f(void);\nint f;\n", 0, "redeclared as different kind");
+    check_case("C9-typedef-arr-conflict", "typedef int A3[3];\nextern A3 a;\nint a[4];\n", 0, "conflicting types");
+    check_case("C10-obj-then-fn", "int g;\nint g(void);\n", 0, "redeclared as different kind");
+
+    sy_printf("GREDECL_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
+    return failed ? 1 : 0;
+}
