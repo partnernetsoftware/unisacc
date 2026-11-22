@@ -1,0 +1,310 @@
+/* tools/slice-audit.cx -- byte-exact APE padding/slice attribution, win/x86_64 gzip -9 probe,
+ * and Mach-O 64-bit __TEXT,__text / LC_SYMTAB audit.
+ *
+ *   sh ./unisacc.com tools/slice-audit.cx -- [--ape FILE] [--macho FILE] [--unit-tsv FILE] [--no-gz]
+ *
+ * Defaults: --ape ./unisacc.com.  Exit 0 on full byte accounting, exit 2 on invalid APE/Mach-O. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+typedef struct {
+    char label[48];
+    long off, len;
+    long hoff, hlen;
+} SliceRec;
+
+static unsigned int rd32le(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static unsigned long long rd64le(const unsigned char *p) {
+    return (unsigned long long)rd32le(p) | ((unsigned long long)rd32le(p + 4) << 32);
+}
+
+static int parse_slices(const unsigned char *d, long n, SliceRec *s, int max) {
+    long lim = n < 16384 ? n : 16384;
+    int k = 0;
+    for (long i = 0; i + 4 < lim && k < max; i++) {
+        if (!(d[i] == ')' && d[i + 1] == ' ' && d[i + 2] == 'o' && d[i + 3] == '=')) continue;
+        long ls = i;
+        while (ls > 0 && d[ls - 1] != '\n') ls--;
+        while (ls < i && (d[ls] == ' ' || d[ls] == '\t')) ls++;
+        long le = i;
+        if (le <= ls || le - ls >= 48) continue;
+        if (tx_copy(s[k].label, sizeof s[k].label, (const char *)d + ls, le - ls)) continue;
+        s[k].off = 0; s[k].len = 0; s[k].hoff = 0; s[k].hlen = 0;
+        long p = i + 4, q = p;
+        while (q < lim && d[q] >= '0' && d[q] <= '9') q++;
+        char t[24];
+        if (q <= p || q - p > 20 || tx_copy(t, sizeof t, (const char *)d + p, q - p)) continue;
+        s[k].off = tx_strtol(t, 0, 10) - 1;
+        long eol = q;
+        while (eol < lim && d[eol] != '\n') eol++;
+        for (long j = q; j + 2 < eol; j++) {
+            if (d[j] == ' ' && d[j + 1] == 'n' && d[j + 2] == '=') {
+                long a = j + 3, b = a;
+                while (b < eol && d[b] >= '0' && d[b] <= '9') b++;
+                if (b > a && b - a <= 20 && !tx_copy(t, sizeof t, (const char *)d + a, b - a))
+                    s[k].len = tx_strtol(t, 0, 10);
+            } else if (d[j] == ' ' && d[j + 1] == 'h' && d[j + 2] == '=') {
+                long a = j + 3, b = a;
+                while (b < eol && d[b] >= '0' && d[b] <= '9') b++;
+                if (b > a && b - a <= 20 && !tx_copy(t, sizeof t, (const char *)d + a, b - a))
+                    s[k].hoff = tx_strtol(t, 0, 10) - 1;
+            } else if (d[j] == ' ' && d[j + 1] == 'z' && d[j + 2] == '=') {
+                long a = j + 3, b = a;
+                while (b < eol && d[b] >= '0' && d[b] <= '9') b++;
+                if (b > a && b - a <= 20 && !tx_copy(t, sizeof t, (const char *)d + a, b - a))
+                    s[k].hlen = tx_strtol(t, 0, 10);
+            }
+        }
+        k++;
+    }
+    return k;
+}
+
+static long gz_isize(const unsigned char *d, long off, long len, long total) {
+    if (off < 0 || len < 18 || off + len > total) return -1;
+    if (d[off] != 0x1f || d[off + 1] != 0x8b) return -1;
+    return (long)rd32le(d + off + len - 4);
+}
+
+static int all_zero(const unsigned char *d, long off, long len) {
+    for (long i = 0; i < len; i++) if (d[off + i] != 0) return 0;
+    return 1;
+}
+
+static long measure_gz9_file(const char *path, long limit_bytes) {
+    char cmd[4600];
+    if (limit_bytes > 0) cx_fmt(cmd, sizeof cmd, "head -c %ld '%s' | gzip -9 -c | wc -c", limit_bytes, path);
+    else cx_fmt(cmd, sizeof cmd, "gzip -9 -c '%s' | wc -c", path);
+    char *v[] = {"sh", "-c", cmd, 0};
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    long out = -1;
+    if (!tr && !r.residue && r.rc == 0 && r.out && r.outn > 0) {
+        long p = 0;
+        while (p < (long)r.outn && (r.out[p] == ' ' || r.out[p] == '\t')) p++;
+        long q = p;
+        while (q < (long)r.outn && r.out[q] >= '0' && r.out[q] <= '9') q++;
+        char t[24];
+        if (q > p && q - p <= 20 && !tx_copy(t, sizeof t, r.out + p, q - p)) out = tx_strtol(t, 0, 10);
+    }
+    np_free(&r);
+    return out;
+}
+
+static int audit_macho(const char *path) {
+    size_t sz = 0;
+    unsigned char *d = (unsigned char *)cx_read(path, &sz);
+    if (!d || sz < 32) { sy_eprintf("slice-audit: bad macho: %s\n", path); return 2; }
+    unsigned int magic = rd32le(d);
+    if (magic != 0xfeedfacfu) { sy_eprintf("slice-audit: not Mach-O 64-bit: %s (magic=0x%x)\n", path, magic); mm_free(d); return 2; }
+    unsigned int cputype = rd32le(d + 4);
+    unsigned int ncmds = rd32le(d + 16);
+    unsigned long long text_sz = 0, text_seg_sz = 0, data_seg_sz = 0, linkedit_sz = 0;
+    unsigned int nsyms = 0;
+    long pos = 32;
+    for (unsigned int i = 0; i < ncmds && pos + 8 <= (long)sz; i++) {
+        unsigned int cmd = rd32le(d + pos);
+        unsigned int cmdsize = rd32le(d + pos + 4);
+        if (cmdsize < 8 || pos + (long)cmdsize > (long)sz) break;
+        if (cmd == 0x19u && cmdsize >= 72) {
+            /* LC_SEGMENT_64 */
+            char segname[17];
+            for (int k = 0; k < 16; k++) segname[k] = (char)d[pos + 8 + k];
+            segname[16] = 0;
+            unsigned long long filesz = rd64le(d + pos + 48);
+            unsigned int nsects = rd32le(d + pos + 64);
+            if (tx_eqz(segname, "__TEXT")) text_seg_sz = filesz;
+            else if (tx_eqz(segname, "__DATA")) data_seg_sz = filesz;
+            else if (tx_eqz(segname, "__LINKEDIT")) linkedit_sz = filesz;
+            long sp = pos + 72;
+            for (unsigned int s = 0; s < nsects && sp + 80 <= pos + (long)cmdsize; s++, sp += 80) {
+                char sect[17];
+                for (int k = 0; k < 16; k++) sect[k] = (char)d[sp + k];
+                sect[16] = 0;
+                unsigned long long ssz = rd64le(d + sp + 40);
+                if (tx_eqz(segname, "__TEXT") && tx_eqz(sect, "__text")) text_sz = ssz;
+            }
+        } else if (cmd == 0x02u && cmdsize >= 24) {
+            nsyms = rd32le(d + pos + 12);
+        }
+        pos += (long)cmdsize;
+    }
+    sy_printf("MACHO_AUDIT\tfile=%s\tbytes=%lu\tcputype=0x%x\ttext=%llu\tseg_text=%llu\tseg_data=%llu\tseg_linkedit=%llu\tnsyms=%u\n",
+              path, (unsigned long)sz, cputype, text_sz, text_seg_sz, data_seg_sz, linkedit_sz, nsyms);
+    mm_free(d);
+    return 0;
+}
+
+static void sum_unit_tsv(const char *path) {
+    size_t sz = 0;
+    char *b = cx_read(path, &sz);
+    if (!b) return;
+    long at = 0, units = 0, text_sum = 0, obj_sum = 0, def_yes = 0, def_yes_text = 0;
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n'), ln = e < 0 ? (long)sz - at : e;
+        if (ln > 0 && b[at] != '#') {
+            /* cols: key text obj kind default_path ... */
+            long p = at, end = at + ln, col = 0, tv = 0, ov = 0, is_yes = 0;
+            while (p < end) {
+                long q = p;
+                while (q < end && b[q] != '\t') q++;
+                char tmp[32];
+                long w = q - p;
+                if (col == 1 && w > 0 && w < 24 && !tx_copy(tmp, sizeof tmp, b + p, w)) tv = tx_strtol(tmp, 0, 10);
+                else if (col == 2 && w > 0 && w < 24 && !tx_copy(tmp, sizeof tmp, b + p, w)) ov = tx_strtol(tmp, 0, 10);
+                else if (col == 4 && w == 3 && !tx_copy(tmp, sizeof tmp, b + p, w) && tx_eqz(tmp, "YES")) is_yes = 1;
+                col++;
+                p = q + 1;
+            }
+            if (col >= 5) {
+                units++; text_sum += tv; obj_sum += ov;
+                if (is_yes) { def_yes++; def_yes_text += tv; }
+            }
+        }
+        at += (e < 0 ? (long)sz - at : e + 1);
+    }
+    sy_printf("UNIT_TEXT_REF\tfile=%s\tunits=%ld\ttext_total=%ld\tobj_total=%ld\tdefault_yes=%ld\tdefault_yes_text=%ld\n",
+              path, units, text_sum, obj_sum, def_yes, def_yes_text);
+    mm_free(b);
+}
+
+int main(int argc, char **argv) {
+    const char *ape_path = "./unisacc.com";
+    const char *macho_path = 0;
+    const char *unit_path = 0;
+    int do_gz = 1;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--ape") && i + 1 < argc) ape_path = argv[++i];
+        else if (tx_eqz(argv[i], "--macho") && i + 1 < argc) macho_path = argv[++i];
+        else if (tx_eqz(argv[i], "--unit-tsv") && i + 1 < argc) unit_path = argv[++i];
+        else if (tx_eqz(argv[i], "--no-gz")) do_gz = 0;
+        else { sy_eprintf("usage: slice-audit.cx [--ape FILE] [--macho FILE] [--unit-tsv FILE] [--no-gz]\n"); return 2; }
+    }
+
+    size_t sz = 0;
+    unsigned char *d = (unsigned char *)cx_read(ape_path, &sz);
+    if (!d || sz < 64) { sy_eprintf("slice-audit: cannot read APE: %s\n", ape_path); return 2; }
+    long total = (long)sz;
+    PackageFooter foot;
+    if (!packagefooter_locate_bytes(d, total, &foot)) {
+        sy_eprintf("slice-audit: no UNIPKG1 footer in %s\n", ape_path);
+        mm_free(d);
+        return 2;
+    }
+    long pkg = foot.package_offset;
+    long pkglen = foot.package_length;
+    SliceRec sl[8];
+    int nsl = parse_slices(d, total, sl, 8);
+    if (nsl < 1) { sy_eprintf("slice-audit: no slice launcher entries in %s\n", ape_path); mm_free(d); return 2; }
+
+    long headend = sl[0].off;
+    long accounted = headend;
+    long real_pad = 0, hidden_win_arm64_gz = 0, hidden_win_arm64_raw = 0, cm_gz_total = 0;
+    sy_printf("AUDIT_SEG\thead_pe_launcher\toff=0\tlen=%ld\tnote=win_x86_64_raw_pe_plus_dos_stub_sh\n", headend);
+
+    long prev = headend;
+    for (int i = 0; i < nsl; i++) {
+        if (sl[i].off > prev) {
+            long pad = sl[i].off - prev;
+            int z = all_zero(d, prev, pad);
+            sy_printf("AUDIT_SEG\talign_pad_before_%s\toff=%ld\tlen=%ld\tzero=%d\n", sl[i].label, prev, pad, z);
+            real_pad += pad; accounted += pad;
+        }
+        long isz = gz_isize(d, sl[i].off, sl[i].len, total);
+        if (isz < 0) { sy_eprintf("slice-audit: bad gzip slice %s\n", sl[i].label); mm_free(d); return 2; }
+        sy_printf("AUDIT_SEG\tslice_%s\toff=%ld\tlen=%ld\tinflates=%ld\n", sl[i].label, sl[i].off, sl[i].len, isz);
+        accounted += sl[i].len;
+        prev = sl[i].off + sl[i].len;
+    }
+
+    /* Inspect the region between last Unix slice and package: com-tree lumps this as (padding). */
+    long first_cm = pkg;
+    for (int i = 0; i < nsl; i++) {
+        if (sl[i].hoff > 0 && sl[i].hoff < first_cm) first_cm = sl[i].hoff;
+    }
+    if (first_cm > prev) {
+        long pad0 = (16 - (prev % 16)) % 16;
+        if (pad0 > 0 && prev + pad0 <= first_cm) {
+            sy_printf("AUDIT_SEG\talign_pad_after_last_unix\toff=%ld\tlen=%ld\tzero=%d\n", prev, pad0, all_zero(d, prev, pad0));
+            real_pad += pad0; accounted += pad0; prev += pad0;
+        }
+        if (first_cm > prev) {
+            long span = first_cm - prev;
+            /* Find exact end of embedded win/arm64 gzip member before 16B alignment zeros */
+            long gz_end = first_cm;
+            long best_end = -1, best_isz = -1;
+            for (long pad = 0; pad < 16 && first_cm - pad > prev + 18; pad++) {
+                long e = first_cm - pad;
+                if (!all_zero(d, e, pad)) break;
+                long cand_isz = gz_isize(d, prev, e - prev, total);
+                if (cand_isz >= (e - prev) && cand_isz < 33554432L) { best_end = e; best_isz = cand_isz; break; }
+            }
+            if (best_end > prev) gz_end = best_end;
+            long wlen = gz_end - prev;
+            long wpad = first_cm - gz_end;
+            long wisz = best_isz > 0 ? best_isz : gz_isize(d, prev, wlen, total);
+            if (wisz > 0) {
+                sy_printf("AUDIT_SEG\thidden_slice_win_arm64\toff=%ld\tlen=%ld\tinflates=%ld\tnote=5th_slice_gzip_unlisted_in_unix_sh\n", prev, wlen, wisz);
+                hidden_win_arm64_gz = wlen; hidden_win_arm64_raw = wisz; accounted += wlen;
+                if (wpad > 0) {
+                    sy_printf("AUDIT_SEG\talign_pad_after_win_arm64\toff=%ld\tlen=%ld\tzero=%d\n", gz_end, wpad, all_zero(d, gz_end, wpad));
+                    real_pad += wpad; accounted += wpad;
+                }
+            } else {
+                sy_printf("AUDIT_SEG\tgap_unclassified\toff=%ld\tlen=%ld\tzero=%d\n", prev, span, all_zero(d, prev, span));
+                real_pad += span; accounted += span;
+            }
+            prev = first_cm;
+        }
+    }
+
+    for (int i = 0; i < nsl; i++) {
+        if (sl[i].hoff <= 0 || sl[i].hlen <= 0) continue;
+        if (sl[i].hoff > prev) {
+            long pad = sl[i].hoff - prev;
+            sy_printf("AUDIT_SEG\talign_pad_before_cm_%s\toff=%ld\tlen=%ld\tzero=%d\n", sl[i].label, prev, pad, all_zero(d, prev, pad));
+            real_pad += pad; accounted += pad;
+        }
+        long cisz = gz_isize(d, sl[i].hoff, sl[i].hlen, total);
+        if (cisz < 0) { sy_eprintf("slice-audit: bad cache-manager gzip %s\n", sl[i].label); mm_free(d); return 2; }
+        sy_printf("AUDIT_SEG\tcache_manager_%s\toff=%ld\tlen=%ld\tinflates=%ld\n", sl[i].label, sl[i].hoff, sl[i].hlen, cisz);
+        cm_gz_total += sl[i].hlen; accounted += sl[i].hlen;
+        prev = sl[i].hoff + sl[i].hlen;
+    }
+
+    if (pkg > prev) {
+        long pad = pkg - prev;
+        sy_printf("AUDIT_SEG\talign_pad_before_pkg\toff=%ld\tlen=%ld\tzero=%d\n", prev, pad, all_zero(d, prev, pad));
+        real_pad += pad; accounted += pad;
+        prev = pkg;
+    }
+
+    long pkg_total = total - pkg;
+    sy_printf("AUDIT_SEG\tpackage_p4_plus_footer\toff=%ld\tlen=%ld\tbody=%ld\tfooter=16\n", pkg, pkg_total, pkglen);
+    accounted += pkg_total;
+
+    long head_gz9 = do_gz ? measure_gz9_file(ape_path, headend) : -1;
+    if (do_gz) {
+        sy_printf("HEAD_GZ9\traw=%ld\tgz9=%ld\tsave=%ld\tpct=%ld\n",
+                  headend, head_gz9, head_gz9 > 0 ? headend - head_gz9 : -1,
+                  (head_gz9 > 0 && headend > 0) ? head_gz9 * 100 / headend : -1);
+    }
+
+    if (macho_path && audit_macho(macho_path) != 0) { mm_free(d); return 2; }
+    if (unit_path) sum_unit_tsv(unit_path);
+
+    int ok = (accounted == total);
+    sy_printf("SLICE_AUDIT\tok=%d\taccounted=%ld\ttotal=%ld\treal_pad=%ld\twin_arm64_gz=%ld\twin_arm64_raw=%ld\tcm_gz=%ld\n",
+              ok, accounted, total, real_pad, hidden_win_arm64_gz, hidden_win_arm64_raw, cm_gz_total);
+    mm_free(d);
+    return ok ? 0 : 1;
+}
