@@ -1,0 +1,150 @@
+struct RayObjectBinding {
+  node:u32;
+  kind:u32;
+  query:u32;
+  aux:u32;
+  count:u32;
+}
+
+struct RayObjectHit {
+  x:f64;
+  y:f64;
+  z:f64;
+  distance:f64;
+  node:u32;
+  face:u32;
+  instanceId:u32;
+  kind:u32;
+}
+
+native function ray_object_find(rows:i64,count:i64,node:i64) i64 {
+  let lo=0;
+  let hi=count;
+  while(lo<hi) {
+    let mid=(lo+hi)/2;
+    if(ux_u32(rows+mid*RayObjectBinding.size+RayObjectBinding.node)<node) { lo=mid+1; }
+    else { hi=mid; }
+  }
+  let row=rows+lo*RayObjectBinding.size;
+  if(lo==count || ux_u32(row+RayObjectBinding.node)!=node) { return 0-1; }
+  return row;
+}
+
+struct RayObjectQuery {
+  snapshot:u32;
+  nodes:u32;
+  bindings:u32;
+  count:u32;
+}
+
+// The snapshot is the subtree in preorder. The binding table is sorted by
+// node handle. Each geometry query already carries its world transform.
+native function Raycaster_intersectObject(state:i64,query:i64,recursive:i64,out:i64,capacity:i64,work:i64,space:i64) i64 {
+  if(query%4!=0 || !raycaster_span(query,RayObjectQuery.size)) { return 0-1; }
+  let snapshot=ux_u32(query+RayObjectQuery.snapshot);
+  let nodes=ux_u32(query+RayObjectQuery.nodes);
+  let bindings=ux_u32(query+RayObjectQuery.bindings);
+  let count=ux_u32(query+RayObjectQuery.count);
+  if(nodes<1 || nodes>65536 || count<0 || count>65536 || capacity<0 || capacity>65536 ||
+     recursive<0 || recursive>1 || work%8!=0 || out%8!=0 || snapshot%4!=0 || bindings%4!=0 ||
+     !raycaster_span(work,space)) { return 0-1; }
+  let rowBytes=capacity*RayObjectHit.size;
+  let rawBytes=capacity*RaySpriteHit.size;
+  let kernel=work+2*rowBytes+rawBytes;
+  let kernelSpace=space-2*rowBytes-rawBytes;
+  if(kernelSpace<SceneSnapshotRow.size || !raycaster_span(out,rowBytes) ||
+     raycaster_overlap(out,rowBytes,work,space) ||
+     !ray_instance_readonly(snapshot,nodes*SceneSnapshotRow.size,out,rowBytes,work,space) ||
+     !ray_instance_readonly(bindings,count*RayObjectBinding.size,out,rowBytes,work,space) ||
+     !ray_instance_readonly(state,RaycasterState.size,out,rowBytes,work,space)) { return 0-1; }
+
+  let previous=0;
+  let i=0;
+  while(i<count) {
+    let row=bindings+i*RayObjectBinding.size;
+    let id=ux_u32(row+RayObjectBinding.node);
+    let kind=ux_u32(row+RayObjectBinding.kind);
+    if(id<=previous || kind<1 || kind>7) { return 0-1; }
+    previous=id;
+    i=i+1;
+  }
+  let raw=work+2*rowBytes;
+  let total=0;
+  let limit=1+(nodes-1)*recursive;
+  let mask=ux_u32(state+RaycasterState.layerMask);
+  i=0;
+  while(i<limit) {
+    let scene=snapshot+i*SceneSnapshotRow.size;
+    let node=ux_u32(scene+SceneSnapshotRow.node);
+    let row=ray_object_find(bindings,count,node);
+    if(row>=0 && u32_and(mask,ux_u32(scene+SceneSnapshotRow.layerMask))!=0) {
+      let kind=ux_u32(row+RayObjectBinding.kind);
+      let query=ux_u32(row+RayObjectBinding.query);
+      let aux=ux_u32(row+RayObjectBinding.aux);
+      let argument=ux_u32(row+RayObjectBinding.count);
+      let hits=0;
+      let stride=RayMeshHit.size;
+      if(kind==1) {
+        hits=Raycaster_intersectMeshBuffer(state,query,raw,capacity,kernel,kernelSpace);
+      }
+      if(kind==2) {
+        stride=RayLineHit.size;
+        hits=Raycaster_intersectLinesBuffer(state,query,raw,capacity,kernel,kernelSpace,0);
+      }
+      if(kind==3) {
+        stride=RayPointsHit.size;
+        hits=Raycaster_intersectPointsBuffer(state,query,raw,capacity,kernel,kernelSpace);
+      }
+      if(kind==4) {
+        stride=RaySpriteHit.size;
+        if(capacity==0) { return 0-2; }
+        hits=Raycaster_intersectSprite(state,query,raw);
+      }
+      if(kind==5) {
+        stride=RayInstanceHit.size;
+        hits=Raycaster_intersectInstances(state,query,aux,argument,raw,capacity,kernel,kernelSpace);
+      }
+      if(kind==6) {
+        // The scene producer resolves LOD before serializing the snapshot.
+        if(!ray_instance_readonly(query,SceneSnapshotRow.size,out,rowBytes,work,space)) { return 0-1; }
+        let child=ux_u32(query+SceneSnapshotRow.node);
+        if(child!=0) {
+          node=child;
+          let selected=ray_object_find(bindings,count,node);
+          if(selected<0 || ux_u32(selected+RayObjectBinding.kind)!=1) { return 0-1; }
+          let mesh=ux_u32(selected+RayObjectBinding.query);
+          let header=(RayMeshBuffer.size+7)/8*8;
+          if(!ray_instance_readonly(mesh,RayMeshBuffer.size,out,rowBytes,work,space) || kernelSpace<header) { return 0-1; }
+          let copied=uxe_copy_record(kernel,mesh,RayMeshBuffer.size);
+          let layer=ux_u32_put(kernel+RayMeshBuffer.layerMask,mask);
+          hits=Raycaster_intersectMeshBuffer(state,kernel,raw,capacity,kernel+header,kernelSpace-header);
+        }
+      }
+      if(kind==7) {
+        hits=Raycaster_intersectSkinned(state,query,aux,argument,raw,capacity,kernel,kernelSpace);
+      }
+      if(hits<0) { return 0-10*kind+hits; }
+      if(hits>capacity-total) { return 0-2; }
+      let j=0;
+      while(j<hits) {
+        let from=raw+j*stride;
+        let dst=work+(total+j)*RayObjectHit.size;
+        let face=4294967295;
+        let instance=4294967295;
+        if(kind==1 || kind>=5) { face=ux_u32(from+RayMeshHit.face); }
+        if(kind==5) { instance=ux_u32(from+RayInstanceHit.instanceId); }
+        let copied=uxe_copy_record(dst,from,32);
+        let a=ux_u32_put(dst+RayObjectHit.node,node);
+        let b=ux_u32_put(dst+RayObjectHit.face,face);
+        let c=ux_u32_put(dst+RayObjectHit.instanceId,instance);
+        let d=ux_u32_put(dst+RayObjectHit.kind,kind);
+        j=j+1;
+      }
+      total=total+hits;
+    }
+    i=i+1;
+  }
+  let sorted=ray_sort_hits(work,work+rowBytes,total,RayObjectHit.size,RayObjectHit.distance);
+  let published=uxe_copy_record(out,work,total*RayObjectHit.size);
+  return sorted;
+}

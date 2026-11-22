@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Bone, BufferGeometry, Float32BufferAttribute, InstancedMesh, Line, LineBasicMaterial,
+  LOD, Matrix4, Mesh, MeshBasicMaterial, PerspectiveCamera, Points, PointsMaterial, Raycaster,
+  REVISION, Scene, Skeleton, SkinnedMesh, Sprite, SpriteMaterial, Uint16BufferAttribute, Vector3
+} from "../../web/game/three.module.js";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw Error("three revision");
+  const query=new URLSearchParams(location.search);
+  const {instance}=await WebAssembly.instantiate(await (await fetch("file://"+query.get("wasm"))).arrayBuffer());
+  const wasm=instance.exports;
+  const span=Number(wasm.uxe_pick(9n));
+  const prepared=await WebAssembly.instantiate(await (await fetch("file://"+query.get("scene"))).arrayBuffer());
+  const sceneBase=prepared.instance.exports;
+  const sceneSpan=Number(sceneBase.uxe_scene_prepare(9n));
+  if(sceneBase.uxe_abi_version()!==1 || wasm.uxe_abi_version()!==1 ||
+     sceneBase.memory===wasm.memory || sceneBase.uxe_scene_prepare(0n)!==9n) throw Error("scene preparation");
+  new Uint8Array(wasm.memory.buffer,span,16384).set(new Uint8Array(sceneBase.memory.buffer,sceneSpan,16384));
+  const count=Number(wasm.uxe_pick(query.has("mutate")?1n:0n));
+  if(count!==8) throw Error("native recursive hit count "+count);
+  const memory=new DataView(wasm.memory.buffer,span+5504,48*8);
+  const native=[];
+  for(let i=0;i<count;i++) {
+    const at=i*48;
+    const optional=value=>value===0xffffffff?-1:value;
+    native.push(memory.getUint32(at+32,true)%65536,memory.getFloat64(at+24,true),
+      memory.getFloat64(at,true),memory.getFloat64(at+8,true),memory.getFloat64(at+16,true),
+      optional(memory.getUint32(at+36,true)),optional(memory.getUint32(at+40,true)));
+  }
+  const geometry=(values)=>new BufferGeometry().setAttribute("position",new Float32BufferAttribute(values,3));
+  const triangle=geometry([-1,-1,0,1,-1,0,0,1,0]);
+  const material=new MeshBasicMaterial();
+  const instanced=new InstancedMesh(triangle,material,1);
+  instanced.setMatrixAt(0,new Matrix4());
+  const lod=new LOD();
+  const level=new Mesh(triangle,material);
+  lod.addLevel(level,0);
+  const skinGeometry=triangle.clone();
+  skinGeometry.setAttribute("skinIndex",new Uint16BufferAttribute(new Uint16Array(12),4));
+  skinGeometry.setAttribute("skinWeight",new Float32BufferAttribute([1,0,0,0,1,0,0,0,1,0,0,0],4));
+  const skin=new SkinnedMesh(skinGeometry,material);
+  const bone=new Bone();
+  skin.add(bone);
+  const scene=new Scene();
+  const objects=[new Mesh(triangle,material),new Line(geometry([-1,0,0,1,0,0]),new LineBasicMaterial()),
+    new Points(geometry([0,0,0]),new PointsMaterial()),new Sprite(new SpriteMaterial()),instanced,lod,level,skin];
+  objects.forEach((obj,i)=>{
+    obj.userData.pick=i+2;
+    if(obj!==level) {
+      obj.position.z=-1-i;
+      scene.add(obj);
+    }
+  });
+  scene.updateMatrixWorld(true);
+  skin.bind(new Skeleton([bone]));
+  const ray=new Raycaster(new Vector3(),new Vector3(0,0,-1));
+  ray.camera=new PerspectiveCamera();
+  const hits=ray.intersectObject(scene,true);
+  if(hits.length!==count || ray.intersectObject(scene,false).length!==0) throw Error("r160 recursive hit count "+hits.length);
+  const reference=hits.flatMap(h=>[h.object.userData.pick,h.distance,h.point.x,h.point.y,h.point.z,h.faceIndex??-1,h.instanceId??-1]);
+  output.textContent=JSON.stringify([...native,...reference]);
+} catch (error) { output.textContent="error:"+error.message; }
+</script>

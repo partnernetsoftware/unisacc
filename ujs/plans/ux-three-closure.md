@@ -8,14 +8,14 @@
 | B 常量与枚举 | 200 | 0 | 0 | 1 | 200 | 100.00% |
 | C 扩展能力 | 24 | 2 | 4 | 0 | 30 | 80.00% |
 | C 栏其中保留重大缺口 5 项 | 19 | | | | 30 | 全量口径 19/30（63.3%） |
-| A 栏其中至少保留重大缺口 9 项 | 至多 203 | | | | 214 | 全量口径至多 203/214（94.9%） |
+| A 栏其中至少保留重大缺口 8 项 | 至多 204 | | | | 214 | 全量口径至多 204/214（95.3%） |
 | B 栏其中至少保留重大缺口 25 项 | 至多 175 | | | | 200 | 全量口径至多 175/200（87.5%） |
 
 清单口径以同名实现、独立金值或 r160 对照及篡改反例为准，全量口径只计无已知重大缺口的条目。
 
 (1) C 栏扣除 DRACOLoader、KTX2Loader、GLTFExporter、OutlinePass 和 SSAOPass，具体缺口见下表。
 
-(2) A 栏扣除三类 CompressedTexture（设备直传及 ASTC 非常色块）、WebGLRenderer（上下文恢复）、MeshPhysicalMaterial（GPU 透射等）、RectAreaLight（镜面 LTC）、PMREMGenerator（完整预滤链）、Raycaster（混合对象递归分派）和 ShaderLib（额外物理着色语义）。
+(2) A 栏扣除三类 CompressedTexture（设备直传及 ASTC 非常色块）、WebGLRenderer（上下文恢复）、MeshPhysicalMaterial（GPU 透射等）、RectAreaLight（镜面 LTC）、PMREMGenerator（完整预滤链）和 ShaderLib（额外物理着色语义）。
 
 (3) B 栏扣除 BC7 与 BC6H 三项、PVRTC1 四项、ASTC 十四项、ETC 三项及 DisplayP3ColorSpace 一项，涉及未覆盖的解码模式、设备上传或浏览器画布读回。
 
@@ -24,6 +24,8 @@
 (5) ETC1、ETC2 RGB、ETC2 EAC RGBA 用软件像素门验收。PVRTC1 四项对照 r160 描述符以及 Khronos 的有效尺寸、块几何与字节预算。
 
 (6) BC7 模式 6 的 RGBA8 解码通过 43 项，选择器和 P 位变异各使一项失败。BC6H 有符号与无符号模式 11 的 RGBA16F 解码通过 64 项，索引和符号格式变异各使一项失败。共用软件 mip 与快照门共 27 项通过。
+
+Raycaster 混合对象递归门由场景准备与拾取两个模块组成，按源码与 ABI 的内容缓存，命中校验产物哈希。先创建缓存目录，设置 `UXE_RAY_DISPATCH_CACHE` 后执行 `cx ujs/tests/raycast-scene-dispatch-io.cx -- --prepare`，再运行同一命令去掉 `--prepare`。加 `--mutate` 关闭递归，期望八次命中变成零，门返回 1。
 
 ## 已知缺口与未证实项
 

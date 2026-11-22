@@ -1,0 +1,105 @@
+#pragma unisa use r160_wait
+#pragma unisa use wasm_test_cache
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int stage(char **compile,const char *cache,const char *target,int prepare) {
+    const char *paths[40];
+    int count=0;
+    for(int i=2;compile[i] && !tx_eqz(compile[i],"-o");i++) paths[count++]=compile[i];
+    paths[count++]=compile[1];
+    paths[count]=0;
+    char key[65],sha[65],record[600];
+    if(wasm_test_cache_key(paths,key)) return 1;
+    const int length=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
+    if(length<0 || length>=(int)sizeof record) return 1;
+    int rc=wasm_test_cache_read(record,key,prepare?0:target,sha);
+    if(prepare && rc==-ENOENT) {
+        char *log=0;
+        size_t bytes=0;
+        rc=cx_runv_timeout(compile,50,&log,&bytes);
+        if(rc) printf("RAY_DISPATCH prepare rc=%d %s\n",rc,log?log:"");
+        mm_free(log);
+        if(rc) return 1;
+        return wasm_test_cache_write(cache,record,key,target);
+    }
+    if(rc) printf("RAY_DISPATCH cache rc=%d, run --prepare first\n",rc);
+    else printf("RAY_DISPATCH cache hit sha=%s\n",sha);
+    return rc!=0;
+}
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    const int prepare=argc==2 && tx_eqz(argv[1],"--prepare");
+    const char *cache=sy_env("UXE_RAY_DISPATCH_CACHE");
+    if((argc!=1 && !mutate && !prepare) || !cache || !cache[0]) return 2;
+    char dir[256],cwd[390],abi[300],sceneAbi[300],wasm[300],sceneWasm[300],url[1100];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-ray-dispatch-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/ray.wasm",dir);
+    tx_snprintf(sceneAbi,sizeof sceneAbi,"%s/scene.ujs",dir);
+    tx_snprintf(sceneWasm,sizeof sceneWasm,"%s/scene.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/raycast-scene-dispatch-r160.html?wasm=%s&scene=%s%s",
+        cwd,wasm,sceneWasm,mutate?"&mutate=1":"");
+    const char entry[]="export uxe_pick(mode:i64) i64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,
+        "ujs/practice/uxe/base/record-copy.ujs","ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/vector-scalar.ujs",
+        "ujs/practice/uxe/base/vector3.ujs","ujs/practice/uxe/base/ray.ujs",
+        "ujs/practice/uxe/base/triangle.ujs",
+        "ujs/practice/uxe/base/raycast-memory.ujs","ujs/practice/uxe/base/raycaster-state.ujs",
+        "ujs/practice/uxe/base/raycast-affine.ujs","ujs/practice/uxe/base/raycast-hit-sort.ujs",
+        "ujs/practice/uxe/base/raycast-vertices.ujs","ujs/practice/uxe/base/raycast-points.ujs",
+        "ujs/practice/uxe/base/raycast-lines.ujs","ujs/practice/uxe/base/raycast-mesh.ujs",
+        "ujs/practice/uxe/base/raycast-buffer.ujs","ujs/practice/uxe/base/raycast-instances.ujs",
+        "ujs/practice/uxe/base/raycast-sprite.ujs","ujs/practice/uxe/base/skeleton-layout.ujs",
+        "ujs/practice/uxe/base/skinnedmesh-deform.ujs","ujs/practice/uxe/base/raycast-skinned.ujs",
+        "ujs/practice/uxe/base/scene-snapshot-layout.ujs","ujs/practice/uxe/base/raycast-scene-dispatch.ujs",
+        "ujs/practice/uxe/test/raycast-scene-dispatch-probe.ujs","-o",wasm,0};
+    const char sceneEntry[]="export uxe_scene_prepare(mode:i64) i64 version 1;\n";
+    char *sceneCompile[]={"./ujs/ujs2wasm.com",sceneAbi,
+        "ujs/practice/uxe/base/record-copy.ujs","ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/views.ujs","ujs/practice/uxe/base/matrix4.ujs",
+        "ujs/practice/uxe/base/object-layouts.ujs","ujs/practice/uxe/base/object3d.ujs",
+        "ujs/practice/uxe/base/lod.ujs","ujs/practice/uxe/base/raycast-memory.ujs",
+        "ujs/practice/uxe/base/scene-snapshot-layout.ujs","ujs/practice/uxe/base/scene-snapshot.ujs",
+        "ujs/practice/uxe/base/raycast-lod.ujs","ujs/practice/uxe/test/raycast-scene-dispatch-scene.ujs",
+        "-o",sceneWasm,0};
+    int failed=length<=0 || length>=(int)sizeof url ||
+        sy_write_file(abi,entry,sizeof entry-1,0600) || sy_write_file(sceneAbi,sceneEntry,sizeof sceneEntry-1,0600) ||
+        stage(sceneCompile,cache,sceneWasm,prepare) || stage(compile,cache,wasm,prepare);
+    if(prepare) {
+        if(sy_remove_all(dir)) failed=1;
+        printf("RAY_DISPATCH prepare failed=%d\n",failed);
+        return failed!=0;
+    }
+    char *log=0;
+    size_t logBytes=0;
+    enum { hits=8, fields=7 };
+    double actual[2*hits*fields]={0};
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,2*hits*fields,dir);
+    if(!failed) {
+        const int ids[]={2,3,4,5,6,8,8,9};
+        const int depth[]={1,2,3,4,5,6,6,8};
+        for(int i=0;i<hits;i++) {
+            const int face=i==0 || i>=4?0:-1;
+            const double gold[]={ids[i],depth[i],0,0,-depth[i],face,i==4?0:-1};
+            for(int j=0;j<fields;j++) for(int path=0;path<2;path++) {
+                double value=actual[(path*hits+i)*fields+j];
+                if(value>=gold[j]-1e-9 && value<=gold[j]+1e-9) continue;
+                printf("RAY_DISPATCH path=%d hit=%d field=%d actual=%.9g expected=%.9g\n",path,i,j,value,gold[j]);
+                failed++;
+            }
+        }
+    }
+    char *clean[]={"rm","-rf","--",dir,0};
+    if(cx_runv_timeout(clean,4,&log,&logBytes)) failed++;
+    mm_free(log);
+    printf("G_RAY recursive dispatch hits=%d failed=%d\n",hits,failed);
+    return failed!=0;
+}
