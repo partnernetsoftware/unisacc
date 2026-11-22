@@ -57,18 +57,20 @@ static int runv(char **v, const char *cwd, char **env, int secs, int *rc) {
 
 static int run_dv_ex(const char *cwd, const char *owner, const char *job_id, char **args, int *rc) {
     char *v[32]; int n = 0;
-    char e_inst[4300], e_tab[4300], e_own[128], e_job[128], e_tmp[4300], e_home[4300], e_path[4300];
-    char *env[10]; int ne = 0;
+    char e_inst[4300], e_tab[4300], e_own[128], e_job[128], e_tmp[4300], e_pin[4300], e_home[4300], e_path[4300];
+    char *env[12]; int ne = 0;
     const char *hv = sy_env("HOME"), *pv = sy_env("PATH");
     v[n++] = bin;
     for (int i = 0; args[i] && n < 30; i++) v[n++] = args[i];
     v[n] = 0;
     if (cx_fmt(e_inst, sizeof e_inst, "UNISACC_DEVSVC_DIR=%s", inst) ||
         cx_fmt(e_tab, sizeof e_tab, "DEVSVC_REPO_TABLE=%s/tools/devsvc-repo.tsv", repo) ||
-        cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", tmp)) return 0;
+        cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", tmp) ||
+        cx_fmt(e_pin, sizeof e_pin, "DV_PIN_DIR=%s/pin", tmp)) return 0;
     env[ne++] = e_inst;
     env[ne++] = e_tab;
     env[ne++] = e_tmp;
+    env[ne++] = e_pin;
     if (hv && *hv && !cx_fmt(e_home, sizeof e_home, "HOME=%s", hv)) env[ne++] = e_home;
     if (pv && *pv && !cx_fmt(e_path, sizeof e_path, "PATH=%s", pv)) env[ne++] = e_path;
     if (owner && *owner) {
@@ -235,11 +237,13 @@ int main(int argc, char **argv) {
       char *a2[] = {"git", "commit", "--whole", "docs/note.txt", "--derive", "src/a.txt", "-m", "derive mid", 0};
       char *a3[] = {"git", "commit", "--whole", "docs/note.txt", "--dry-run", "src/a.txt", "-m", "dry mid", 0};
       char *a4[] = {"git", "commit", "--whole", "docs/note.txt", "--push", "-m", "push outside", 0};
+      char *a5[] = {"git", "commit", "--keyed", "docs/note.txt", "--derive", "src/a.txt", "-m", "keyed path key", 0};
       int ok1 = run_dv(repo, "worker1", a1, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok2 = ok1 && run_dv(repo, "worker1", a2, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok3 = ok2 && run_dv(repo, "worker1", a3, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok4 = ok3 && run_dv(repo, "worker1", a4, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
-      ck("non-owner-commit-switch-between-paths-refused", ok4); }
+      int ok5 = ok4 && run_dv(repo, "worker1", a5, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      ck("non-owner-commit-switch-between-paths-refused", ok5); }
 
     /* (8) CONFIRMED (4) + --no-ff: other write channels (git add, git merge --no-ff, register, derive --write) refused for non-owner */
     { char *aa[] = {"git", "add", "src/a.txt", 0};
@@ -307,8 +311,9 @@ int main(int argc, char **argv) {
       ok = ok && !sy_write_file(lp, "freeze\tinteg\tabc\t0\n", 19, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-corrupt");
       ok = ok && !sy_write_file(lp, "", 0, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       ok = ok && !sy_write_file(lp, "freeze\tinteg\t9999999999", 23, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-corrupt");
+      ok = ok && !sy_write_file(lp, "freeze\tworker1\t9999999999\n", 26, 0600) && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-mismatch");
       if (bak) { (void)sy_write_file(lp, bak, bn, 0600); free(bak); }
-      ck("locks-tsv-four-corruptions-fail-closed", ok); }
+      ck("locks-tsv-corruptions-and-mismatch-fail-closed", ok); }
 
     /* (12) worktree shares the same freeze lock: non-owner f write & git commit --cwd refused */
     { char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
@@ -383,7 +388,10 @@ done:
     { char kcmd[4600];
       if (!cx_fmt(kcmd, sizeof kcmd, "P=$(cat '%s/serve.pid' 2>/dev/null || true); [ -n \"$P\" ] && kill -9 \"$P\" 2>/dev/null || true", tmp))
           (void)sh_in(root, kcmd); }
+    sy_sleep_ms(100);
     { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
+    if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
+    ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0);
     printf("CHECK_DEVSVC_FREEZE\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
 }

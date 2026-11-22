@@ -2377,8 +2377,10 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         int fx = sy_exists(fzp);
         if (fx != 0) fz_active = 1;
     }
+    char fhold[64]; int have_fhold = 0;
+    fhold[0] = 0;
     /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;
-       empty or no active freeze row falls through to query live daemon memory before allowing. */
+       valid freeze row is cross-checked against live daemon memory when reachable (locks-mismatch fails closed). */
     if (dir[0] && snprintf(lp, sizeof lp, "%s/locks.tsv", dir) < (int)sizeof lp) {
         int ex = sy_exists(lp);
         if (ex < 0) {
@@ -2428,10 +2430,11 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
                             return 1;
                         }
                         if (exp > now) {
-                            if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
-                            free(b);
-                            if (has_own && !strcmp(nhold, nown)) return 0;
-                            return 1;
+                            size_t fl = strlen(nhold);
+                            if (fl >= sizeof fhold) fl = sizeof fhold - 1;
+                            if (fl > 0) mm_copy(fhold, sizeof fhold, nhold, fl);
+                            fhold[fl] = 0;
+                            have_fhold = 1;
                         }
                     }
                     p = nl ? nl + 1 : end;
@@ -2441,27 +2444,35 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         }
     }
     rc = request(root, "lock-list", 0);
-    if (rc != 0) {
-        if (fz_active) {
-            if (holder && hcap > 0) snprintf(holder, hcap, "freeze-svc-unreachable");
-            return 1;
+    if (rc == 0) {
+        for (s = resp; s && *s; s = e ? e + 1 : 0) {
+            e = strchr(s, '\n');
+            if (!strncmp(s, "LOCK\tfreeze\towner=", 18)) {
+                const char *os = s + 18, *oe = os; char rawh[64];
+                while (*oe && *oe != '\t' && *oe != '\n' && *oe != '\r') oe++;
+                size_t ol = (size_t)(oe - os);
+                if (ol >= sizeof rawh) ol = sizeof rawh - 1;
+                if (ol > 0) mm_copy(rawh, sizeof rawh, os, ol);
+                rawh[ol] = 0;
+                if (!norm_owner(rawh, nhold, sizeof nhold)) mm_copy(nhold, sizeof nhold, rawh, ol + 1);
+                if (have_fhold && strcmp(fhold, nhold)) {
+                    if (holder && hcap > 0) snprintf(holder, hcap, "locks-mismatch");
+                    return 1;
+                }
+                if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
+                if (has_own && !strcmp(nhold, nown)) return 0;
+                return 1;
+            }
         }
-        return 0;
     }
-    for (s = resp; s && *s; s = e ? e + 1 : 0) {
-        e = strchr(s, '\n');
-        if (!strncmp(s, "LOCK\tfreeze\towner=", 18)) {
-            const char *os = s + 18, *oe = os; char rawh[64];
-            while (*oe && *oe != '\t' && *oe != '\n' && *oe != '\r') oe++;
-            size_t ol = (size_t)(oe - os);
-            if (ol >= sizeof rawh) ol = sizeof rawh - 1;
-            if (ol > 0) mm_copy(rawh, sizeof rawh, os, ol);
-            rawh[ol] = 0;
-            if (!norm_owner(rawh, nhold, sizeof nhold)) mm_copy(nhold, sizeof nhold, rawh, ol + 1);
-            if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
-            if (has_own && !strcmp(nhold, nown)) return 0;
-            return 1;
-        }
+    if (have_fhold) {
+        if (holder && hcap > 0) snprintf(holder, hcap, "%s", fhold);
+        if (has_own && !strcmp(fhold, nown)) return 0;
+        return 1;
+    }
+    if (rc != 0 && fz_active) {
+        if (holder && hcap > 0) snprintf(holder, hcap, "freeze-svc-unreachable");
+        return 1;
     }
     return 0;
 }
@@ -3997,6 +4008,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
                 if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
                 pmode = 3;
             } else if (pmode == 3) {
+                if (strchr(argv[i], '/') && freeze_in_domain(froot, argv[i])) freeze_hit = 1;
                 pmode = 0;
             } else {
                 /* Check every non-option positional argument forwarded to commit-own */
