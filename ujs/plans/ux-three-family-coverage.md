@@ -25,7 +25,7 @@
 
 | 类 | 已通过的验收 | 升级所缺的 JSON 往返 |
 | --- | --- | --- |
-| SkinnedMesh | skinnedmesh-clone-struct.cx 验共享骨架、绑定模式与独立绑定矩阵。skinnedmesh-bind-json-struct.cx 对照 r160 的骨架 UUID、绑定模式、矩阵与重算的逆矩阵，篡改模式转红 | 绑定字段已往返。仍需接到完整网格对象和骨架资源表的读写入口 |
+| SkinnedMesh | skinnedmesh-clone-struct.cx 验共享骨架、绑定模式与独立绑定矩阵。skinnedmesh-bind-json-struct.cx 对照 r160 的骨架 UUID、绑定模式、矩阵与重算的逆矩阵，篡改模式转红 | 绑定字段已往返。完整网格对象、骨架资源表和通用渲染接线仍待补 |
 | InstancedMesh | instancedmesh-clone-struct.cx 验活跃数量、矩阵和颜色副本 | 实例数量、矩阵与可选实例颜色 |
 | BatchedMesh | batchedmesh-copy-struct.cx 独立验预留表与副本隔离 | 批次几何及实例状态。r160 直接克隆触发 image.slice TypeError，当前复制门使用独立金值 |
 | LOD | lod-lifecycle-struct.cx 对照层表、迟滞和子树克隆 | 自动更新标志、层级阈值及绑定子对象 |
