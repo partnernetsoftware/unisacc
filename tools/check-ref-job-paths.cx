@@ -33,18 +33,11 @@
 static int failed;
 static void ck(int c, const char *name) { printf("%s\tref-job-paths.%s\n", c ? "PASS" : "FAIL", name); if (!c) failed++; }
 #define has(o, s) ckk_has((o), 1 << 20, (s))
-static int run(char **v, char *o, int cap) {
-    char *out = 0; size_t n = 0; int rc = cx_runv_timeout(v, 50, &out, &n);
-    if (n >= (size_t)cap) n = (size_t)cap - 1;
-    if (out) mm_copy(o, (size_t)cap, out, n);
-    o[out ? n : 0] = 0; mm_free(out);
-    return rc;
-}
-
 static char base[4096], tmpl[4300]; static int seq;
 static void put(const char *d, const char *rel, const char *body) { char p[4500]; cx_fmt(p, sizeof p, "%s/%s", d, rel); cx_write(p, body, tx_len(body, 100000)); }
 static void mkfix(char *d, int cap, const char *plans_x, const char *baseline, const char *exempt) {
-    char o[4096], sub[4500], *gi[] = {"git", "-C", d, "init", "-q", 0}, *ga[] = {"git", "-C", d, "add", "-A", 0};
+    char sub[4500], *gi[] = {"git", "-C", d, "init", "-q", 0}, *ga[] = {"git", "-C", d, "add", "-A", 0}, *out = 0;
+    size_t n = 0;
     cx_fmt(d, cap, "%s/f%d", base, ++seq);
     sy_mkdir(d, 0700);
     cx_fmt(sub, sizeof sub, "%s/plans", d); sy_mkdir(sub, 0700);
@@ -55,15 +48,19 @@ static void mkfix(char *d, int cap, const char *plans_x, const char *baseline, c
     put(d, "prd_mempalace.md", "# ledger\n");
     if (baseline) put(d, "build/ref-job-paths-baseline.tsv", baseline);
     if (exempt) put(d, "build/ref-job-paths-exempt.tsv", exempt);
-    run(gi, o, sizeof o);
-    run(ga, o, sizeof o);
+    (void)cx_runv_timeout(gi, 50, &out, &n); mm_free(out); out = 0; n = 0;
+    (void)cx_runv_timeout(ga, 50, &out, &n); mm_free(out);
 }
 static int tool(const char *tool_rel, char *o, int cap, const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
-    char *v[16]; int n = 0;
+    char *v[16], *out = 0; size_t len = 0; int n = 0, rc;
     v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = (char *)tool_rel; v[n++] = "--";
     if (a1) v[n++] = (char *)a1; if (a2) v[n++] = (char *)a2; if (a3) v[n++] = (char *)a3; if (a4) v[n++] = (char *)a4; if (a5) v[n++] = (char *)a5;
     v[n] = 0;
-    return run(v, o, cap);
+    rc = cx_runv_timeout(v, 50, &out, &len);
+    if (len >= (size_t)cap) len = (size_t)cap - 1;
+    if (out) mm_copy(o, (size_t)cap, out, len);
+    o[out ? len : 0] = 0; mm_free(out);
+    return rc;
 }
 static int check_in(const char *tool_rel, const char *d, char *o, int cap, const char *today) {
     return today ? tool(tool_rel, o, cap, "--check", "--root", d, "--today", today) : tool(tool_rel, o, cap, "--check", "--root", d, 0, 0);
@@ -134,7 +131,7 @@ int main(int argc, char **argv) {
     mkfix(d, sizeof d, "x\n", "# baseline\n", 0);
     put(d, "plans/sub/y.md", line1);
     put(d, "research/z.md", line1);
-    { char *ga[] = {"git", "-C", d, "add", "-A", 0}; run(ga, o, sizeof o); }
+    { char *ga[] = {"git", "-C", d, "add", "-A", 0}, *out = 0; size_t gn = 0; (void)cx_runv_timeout(ga, 50, &out, &gn); mm_free(out); }
     rc = check_in(TOOL, d, o, sizeof o, "2026-11-22");
     ck(rc == 1 && has(o, "plans/sub/y.md has 1 refs") && !has(o, "research/z.md"), "M11-subdir-counts-research-not-scanned");
     /* real tree: report works, check passes against the committed baseline when one exists */
