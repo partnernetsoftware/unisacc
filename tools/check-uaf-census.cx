@@ -1,0 +1,251 @@
+/* tools/check-uaf-census.cx -- fixtures + mutations for tools/uaf-census.cx (R79 report mode).
+ *
+ *   sh ./unisacc.com tools/check-uaf-census.cx -- [--tool PATH]
+ *
+ * Bad (must report): post-free read/write/arg/value (p? / p&&) / if-block free then value.
+ * Good (must silence): null-realloc, branch-free, free-before-return, comment-blind,
+ *   handle-api (mg_free then *dst=), goto-label after free+return, outparam &p, shadow decl,
+ *   null-cmp after free.
+ * Mutations: --no-uaf-read / --no-strip-comments / --no-x-handle / --no-x-label must go red.
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define CU_PW 4400
+#define CU_OUT 65536
+
+static char cu_dir[CU_PW], cu_fx[CU_PW];
+static const char *cu_tool = "tools/uaf-census.cx";
+static int cu_failed, cu_ok;
+
+static void die(const char *s) { fprintf(stderr, "check-uaf-census: REFUSE %s\n", s); exit(2); }
+
+static void ck(int cond, const char *name) {
+    if (cond) { printf("PASS\tcheck-uaf-census.%s\n", name); cu_ok++; }
+    else { printf("FAIL\tcheck-uaf-census.%s\n", name); cu_failed++; }
+}
+
+static void wf(const char *rel, const char *body) {
+    char p[CU_PW];
+    if (cx_fmt(p, sizeof p, "%s/%s", cu_fx, rel)) die("path");
+    if (cx_write(p, body, strlen(body))) die("write");
+}
+
+static int run_tool(const char *extra, char *out, int cap) {
+    char script[CU_PW * 2];
+    const char *com = sy_env_or("UNISACC", "./unisacc.com");
+    if (extra && extra[0]) {
+        if (cx_fmt(script, sizeof script,
+                   "sh %s %s -- --root %s --dirs . %s", com, cu_tool, cu_fx, extra)) die("script");
+    } else {
+        if (cx_fmt(script, sizeof script,
+                   "sh %s %s -- --root %s --dirs .", com, cu_tool, cu_fx)) die("script");
+    }
+    return ckk_sh_t("check-uaf-census", script, out, cap, 55);
+}
+
+static int count_kind(const char *out, long n, const char *kind) {
+    char needle[64];
+    long i, c = 0, kn;
+    if (cx_fmt(needle, sizeof needle, "kind=%s", kind)) return -1;
+    kn = tx_len(needle, 64);
+    for (i = 0; i + kn <= n; i++) if (mm_same(out + i, needle, kn)) c++;
+    return (int)c;
+}
+
+static int has_uaf(const char *out, long n, const char *frag) {
+    char needle[160];
+    long kn, i;
+    if (cx_fmt(needle, sizeof needle, "UAF\t%s", frag)) return 0;
+    kn = tx_len(needle, 160);
+    for (i = 0; i + kn <= n; i++) if (mm_same(out + i, needle, kn)) return 1;
+    return 0;
+}
+
+static void build_fixtures(void) {
+    if (mkdir(cu_dir, 0700) && errno != EEXIST) die("mkdir-root");
+    if (cx_fmt(cu_fx, sizeof cu_fx, "%s/fx", cu_dir)) die("fx-path");
+    if (mkdir(cu_fx, 0700) && errno != EEXIST) die("mkdir-fx");
+
+    wf("bad-read.cx",
+       "void bad_read(void) {\n"
+       "    char *p = mm_alloc(8);\n"
+       "    mm_free(p);\n"
+       "    (void)p[0];\n"
+       "}\n");
+    wf("bad-write.cx",
+       "void bad_write(void) {\n"
+       "    char *p = mm_alloc(8);\n"
+       "    free(p);\n"
+       "    p[0] = 'x';\n"
+       "}\n");
+    wf("bad-arg.cx",
+       "void sink(char *q);\n"
+       "void bad_arg(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    mm_free(p);\n"
+       "    sink(p);\n"
+       "}\n");
+    /* S1 shape: free then ternary / && value use (fcf9398dd8 parent) */
+    wf("bad-value.cx",
+       "void bad_value(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    free(p);\n"
+       "    (void)(p ? 1 : 0);\n"
+       "    if (p && p[0]) return;\n"
+       "}\n");
+    wf("bad-if-value.cx",
+       "void bad_if_value(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    if (p) { free(p); }\n"
+       "    (void)(p ? 1 : 0);\n"
+       "}\n");
+    wf("ok-null-realloc.cx",
+       "void ok_null(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    mm_free(p);\n"
+       "    p = 0;\n"
+       "    p = mm_alloc(8);\n"
+       "    p[0] = 1;\n"
+       "    mm_free(p);\n"
+       "}\n");
+    wf("ok-branch-free.cx",
+       "void ok_branch(int c) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    if (c) { mm_free(p); return; }\n"
+       "    mm_free(p);\n"
+       "}\n");
+    wf("ok-free-return.cx",
+       "int ok_ret(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    p[0] = 0;\n"
+       "    mm_free(p);\n"
+       "    return 0;\n"
+       "}\n");
+    wf("comment-blind.cx",
+       "void comment_blind(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    /* mm_free(p); */\n"
+       "    p[0] = 1;\n"
+       "    mm_free(p);\n"
+       "}\n");
+    /* FP class: handle API */
+    wf("fp-handle.cx",
+       "typedef struct { char *data; } mg_buf;\n"
+       "void mg_free(mg_buf *b);\n"
+       "void mg_init(mg_buf *b);\n"
+       "int mg_move(mg_buf *dst, mg_buf *src) {\n"
+       "    mg_free(dst);\n"
+       "    *dst = *src;\n"
+       "    mg_init(src);\n"
+       "    return 0;\n"
+       "}\n");
+    /* FP class: goto label after free (hostout shape: free, side effect, return, then labels) */
+    wf("fp-label.cx",
+       "void fp_label(char *tmp) {\n"
+       "    free(tmp);\n"
+       "    puts(\"ok\");\n"
+       "    return;\n"
+       "fail:\n"
+       "    unlink(tmp);\n"
+       "    free(tmp);\n"
+       "}\n");
+    /* FP class: out-param reassign */
+    wf("fp-outparam.cx",
+       "int load(char **pp);\n"
+       "void fp_out(void) {\n"
+       "    char *b = mm_alloc(4);\n"
+       "    mm_free(b);\n"
+       "    if (load(&b)) return;\n"
+       "    b[0] = 1;\n"
+       "    mm_free(b);\n"
+       "}\n");
+    /* FP class: shadowing decl */
+    wf("fp-shadow.cx",
+       "void fp_shadow(void) {\n"
+       "    char *b = mm_alloc(8);\n"
+       "    free(b);\n"
+       "    { char b[128]; b[0] = 0; (void)b; }\n"
+       "}\n");
+    /* FP class: null compare after free */
+    wf("fp-nullcmp.cx",
+       "void fp_nullcmp(void) {\n"
+       "    char *p = mm_alloc(4);\n"
+       "    mm_free(p);\n"
+       "    if (p == 0) return;\n"
+       "    if (!p) return;\n"
+       "}\n");
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    char out[CU_OUT];
+    long on;
+    int rc, a;
+    const char *td = sy_tmpdir();
+
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--tool") && a + 1 < argc) cu_tool = argv[++a];
+        else { fprintf(stderr, "check-uaf-census: REFUSE unknown %s\n", argv[a]); return 2; }
+    }
+
+    if (cx_fmt(cu_dir, sizeof cu_dir, "%s/check-uaf-census-%d",
+               td && td[0] == '/' ? td : "/tmp", (int)getpid())) die("dir");
+    build_fixtures();
+
+    rc = run_tool(0, out, sizeof out);
+    on = tx_len(out, sizeof out);
+    ck(rc == 0, "report-rc0");
+    ck(has_uaf(out, on, "bad-read.cx") && count_kind(out, on, "read") >= 1, "bad-read");
+    ck(has_uaf(out, on, "bad-write.cx") && count_kind(out, on, "write") >= 1, "bad-write");
+    ck(has_uaf(out, on, "bad-arg.cx") && count_kind(out, on, "arg") >= 1, "bad-arg");
+    ck(has_uaf(out, on, "bad-value.cx") && count_kind(out, on, "value") >= 1, "bad-value");
+    ck(has_uaf(out, on, "bad-if-value.cx") && count_kind(out, on, "value") >= 1, "bad-if-value");
+    ck(!has_uaf(out, on, "ok-null-realloc.cx"), "ok-null-silent");
+    ck(!has_uaf(out, on, "ok-branch-free.cx"), "ok-branch-silent");
+    ck(!has_uaf(out, on, "ok-free-return.cx"), "ok-return-silent");
+    ck(!has_uaf(out, on, "comment-blind.cx"), "comment-blind-silent");
+    ck(!has_uaf(out, on, "fp-handle.cx"), "fp-handle-silent");
+    ck(!has_uaf(out, on, "fp-label.cx"), "fp-label-silent");
+    ck(!has_uaf(out, on, "fp-outparam.cx"), "fp-outparam-silent");
+    ck(!has_uaf(out, on, "fp-shadow.cx"), "fp-shadow-silent");
+    ck(!has_uaf(out, on, "fp-nullcmp.cx"), "fp-nullcmp-silent");
+
+    {
+        char mut[CU_OUT];
+        long mn;
+        int mrc = run_tool("--no-uaf-read", mut, sizeof mut);
+        mn = tx_len(mut, sizeof mut);
+        ck(mrc == 0 && !has_uaf(mut, mn, "bad-read.cx"), "mutation-no-uaf-read-misses-bad");
+    }
+    {
+        char mut[CU_OUT];
+        long mn;
+        int mrc = run_tool("--no-strip-comments", mut, sizeof mut);
+        mn = tx_len(mut, sizeof mut);
+        ck(mrc == 0 && has_uaf(mut, mn, "comment-blind.cx"), "mutation-no-strip-flags-comment");
+    }
+    {
+        char mut[CU_OUT];
+        long mn;
+        int mrc = run_tool("--no-x-handle", mut, sizeof mut);
+        mn = tx_len(mut, sizeof mut);
+        ck(mrc == 0 && has_uaf(mut, mn, "fp-handle.cx"), "mutation-no-x-handle-flags-fp");
+    }
+    {
+        char mut[CU_OUT];
+        long mn;
+        int mrc = run_tool("--no-x-label", mut, sizeof mut);
+        mn = tx_len(mut, sizeof mut);
+        ck(mrc == 0 && has_uaf(mut, mn, "fp-label.cx"), "mutation-no-x-label-flags-fp");
+    }
+
+    printf("CHECK_UAF_CENSUS\tok=%d\tfailed=%d\tms=%ld\n", cu_ok, cu_failed, sy_now_ms() - t0);
+    return cu_failed ? 1 : 0;
+}
